@@ -201,7 +201,7 @@ final class MeetingMinutesJobRecoveryTests: XCTestCase {
 
         let kept = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
         _ = try await claim(store, sessionID)
-        try await store.finishMinutes(minutesID: kept.id, body: "# 旧版纪要", model: nil)
+        try await store.finishMinutesForTestOnly(minutesID: kept.id, body: "# 旧版纪要", model: nil)
         let running = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 9)
         let claimed = try await claim(store, sessionID)
         let otherQueued = try await store.enqueueMinutes(sessionID: other.id, model: nil, promptChars: 9)
@@ -263,7 +263,7 @@ final class MeetingMinutesJobRecoveryTests: XCTestCase {
         let sessionID = try requireSessionID()
         let queued = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
         _ = try await claim(store, sessionID)
-        try await store.finishMinutes(minutesID: queued.id, body: "# 已完成", model: nil)
+        try await store.finishMinutesForTestOnly(minutesID: queued.id, body: "# 已完成", model: nil)
 
         let requested = try await store.requestCancelMinutes(minutesID: queued.id)
         XCTAssertFalse(requested)

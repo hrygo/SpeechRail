@@ -567,6 +567,14 @@ public enum KnowledgeArchiveFileIO {
             throw KnowledgeArchiveError.malformedPackage("schema 不认识：\(manifest.schema)")
         }
         guard payload.schema == KnowledgeArchivePayload.schemaID else {
+            // v2 包缺正文出处（body_origin）与改稿血缘（parent_minutes_id），
+            // 按默认导入会把用户写的正文标成 AI 整理——所以宁可拒掉，也不猜。
+            // 用户侧动作只有一句话：用新版重新导出一次。
+            if payload.schema == "speechrail.meeting.knowledge-archive.payload/2" {
+                throw KnowledgeArchiveError.malformedPackage(
+                    "这个包是旧格式（payload/2），缺正文出处与改稿血缘，直接导入会把你写过的正文标成 AI 整理。请用新版重新导出一次再导入"
+                )
+            }
             throw KnowledgeArchiveError.malformedPackage("载荷 schema 不认识：\(payload.schema)")
         }
 

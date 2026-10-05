@@ -834,10 +834,6 @@ public final class SessionCoordinator {
         try await store.claimMinutes(sessionID: sessionID, lease: lease)
     }
 
-    public func finishMinutes(minutesID: String, body: String, model: String?) async throws {
-        try await store.finishMinutes(minutesID: minutesID, body: body, model: model)
-    }
-
     public func failMinutes(minutesID: String, reason: String) async throws {
         try await store.failMinutes(minutesID: minutesID, reason: reason)
     }

@@ -871,6 +871,41 @@ final class MeetingKnowledgeArchiveTests: XCTestCase {
     /// 包格式版本。**升版不是形式主义**：v2 缺 `body_origin` 与 `parent_minutes_id`，
     /// 旧包读不了正是刻意的——带着缺列的包导入，会把用户写的正文标成「AI 整理」，
     /// 而那是不能猜的信息。宁可让用户重导一次，也不要静默归错出处。
+    /// v2 包被拒时，用户看到的是"为什么"和"怎么做"，不是一句 schema 对不上。
+    /// v2 缺 `body_origin` 与 `parent_minutes_id`，直接导入会把用户写过的正文
+    /// 标成 AI 整理——拒掉是对的，但要把原因和动作说清楚。
+    func testV2PackageRejectionTellsUserWhyAndWhatToDo() async throws {
+        let store = try requireStore()
+        let version = try await prepareMeetingWithCitations()
+        let documentID = try await requireDocumentID()
+        // 先导一个真包：它的 structured.json 结构是齐的，只把版本号改旧，
+        // 这样即使拒错了方向（放行），后续校验也不会顺带把它拦下。
+        let package = try await store.exportKnowledgeArchive(
+            selection: KnowledgeArchiveSelection(
+                documentID: documentID, minutesID: version.id, scope: .fullArchive
+            ),
+            to: try exportDestination()
+        )
+        let structuredURL = package.appendingPathComponent("structured.json")
+        let data = try Data(contentsOf: structuredURL)
+        var obj = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        obj["schema"] = "speechrail.meeting.knowledge-archive.payload/2"
+        try JSONSerialization.data(withJSONObject: obj).write(to: structuredURL)
+        do {
+            _ = try await store.previewKnowledgeArchive(at: package)
+            XCTFail("v2 包应当被拒绝")
+        } catch let error as KnowledgeArchiveError {
+            guard case .malformedPackage(let detail) = error else {
+                XCTFail("v2 包应当报 malformedPackage，实际：\(error)")
+                return
+            }
+            XCTAssertTrue(detail.contains("重新导出"), "拒因必须告诉用户重新导出，实际：\(detail)")
+            XCTAssertTrue(detail.contains("AI"), "拒因必须点名出处会被标错，实际：\(detail)")
+        }
+    }
+
     func testPayloadSchemaIsV3() async throws {
         let store = try requireStore()
         let version = try await prepareMeetingWithCitations()

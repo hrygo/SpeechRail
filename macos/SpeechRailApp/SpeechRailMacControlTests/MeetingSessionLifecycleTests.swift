@@ -368,7 +368,7 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         )
         let minutes = try await h.store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
         _ = try await h.store.claimMinutes(sessionID: sessionID, lease: 600)
-        try await h.store.finishMinutes(minutesID: minutes.id, body: "# 纪要", model: nil)
+        try await h.store.finishMinutesForTestOnly(minutesID: minutes.id, body: "# 纪要", model: nil)
 
         await h.session.split(lineIDs: ["\(sessionID)-line"], to: "B")
 
@@ -407,7 +407,7 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         )
         let minutes = try await h.store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
         _ = try await h.store.claimMinutes(sessionID: sessionID, lease: 600)
-        try await h.store.finishMinutes(minutesID: minutes.id, body: "# 纪要", model: nil)
+        try await h.store.finishMinutesForTestOnly(minutesID: minutes.id, body: "# 纪要", model: nil)
 
         // 对齐证据迟到：只写归属，不写修订事件。
         try await h.store.attachSpeakerLabel(lineID: lineID, label: "A")
@@ -429,7 +429,7 @@ final class MeetingSessionLifecycleTests: XCTestCase {
             sessionID: sessionID, model: nil, promptChars: 8
         )
         _ = try await h.store.claimMinutes(sessionID: sessionID, lease: 600)
-        try await h.store.finishMinutes(minutesID: minutes.id, body: "# 纪要", model: nil)
+        try await h.store.finishMinutesForTestOnly(minutesID: minutes.id, body: "# 纪要", model: nil)
         return (h, sessionID, minutes.id)
     }
 }

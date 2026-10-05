@@ -337,7 +337,7 @@ final class MeetingEvidenceAnchorTests: XCTestCase {
         let sessionID = try requireSessionID()
         let legacy = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
-        try await store.finishMinutes(minutesID: legacy.id, body: "# 旧版 Markdown 纪要", model: nil)
+        try await store.finishMinutesForTestOnly(minutesID: legacy.id, body: "# 旧版 Markdown 纪要", model: nil)
 
         let items = try await store.minutesItems(minutesID: legacy.id)
         XCTAssertTrue(items.isEmpty)

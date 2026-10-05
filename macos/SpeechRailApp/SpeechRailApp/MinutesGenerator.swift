@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import OSLog
 
 // 纪要生成（`SESSIONS-SPEC` §6.2 / §16.8，`TECHNICAL-DESIGN` §5.8）。
 //
@@ -20,6 +21,7 @@ import Observation
 @MainActor
 @Observable
 public final class MinutesGenerator {
+    private static let logger = Logger(subsystem: "com.speechrail.desktop", category: "minutes.generate")
     public enum State: Equatable, Sendable {
         case idle
         case queued
@@ -178,10 +180,16 @@ public final class MinutesGenerator {
                 return
             }
             // 没配大模型：文字记录已经封存好了，这一版如实失败（§9 第 18 行）。
-            try? await coordinator.failMinutes(
-                minutesID: version.id,
-                reason: "还没有配置对话模型（设置 → 会话）。文字记录已经存好，配好之后可以重新生成。"
-            )
+            // `failMinutes` 自身失败不能吞：行停在 running，下次恢复会认领，
+            // 但用户这一轮看到的必须是"原因"，不能是"一直转圈"。
+            do {
+                try await coordinator.failMinutes(
+                    minutesID: version.id,
+                    reason: "还没有配置对话模型（设置 → 会话）。文字记录已经存好，配好之后可以重新生成。"
+                )
+            } catch {
+                Self.logger.error("failMinutes 写不进去（\(version.id)）：\(error.localizedDescription)")
+            }
             failedOnSetup = true
             state = .failed("还没有配置对话模型。文字记录已经存好，配好之后可以重新生成。")
         } catch {
@@ -247,10 +255,14 @@ public final class MinutesGenerator {
             jobConfigDiffersFromCurrent = jobConfig != currentConfig
             guard jobConfig.configuration.isConfigured else {
                 // 没配大模型：不断原 job，只如实记失败；行仍可被下次恢复认领。
-                _ = try? await coordinator.failMinutes(
-                    minutesID: row.id,
-                    reason: "还没有配置对话模型（设置 → 会话）。文字记录已经存好，配好之后可以重新生成。"
-                )
+                do {
+                    try await coordinator.failMinutes(
+                        minutesID: row.id,
+                        reason: "还没有配置对话模型（设置 → 会话）。文字记录已经存好，配好之后可以重新生成。"
+                    )
+                } catch {
+                    Self.logger.error("failMinutes 写不进去（\(row.id)）：\(error.localizedDescription)")
+                }
                 failedOnSetup = true
                 state = .failed("还没有配置对话模型。文字记录已经存好，配好之后可以重新生成。")
                 versions = (try? await coordinator.minutesVersions(sessionID: row.sessionID)) ?? versions

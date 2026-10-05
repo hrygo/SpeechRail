@@ -52,7 +52,7 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         let store = try requireStore()
         let sessionID = try requireSessionID()
         let first = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
-        try await store.finishMinutes(minutesID: first.id, body: "# 采用版", model: nil)
+        try await store.finishMinutesForTestOnly(minutesID: first.id, body: "# 采用版", model: nil)
 
         do {
             _ = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 9, id: first.id)
@@ -73,7 +73,7 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         let sessionID = try requireSessionID()
         let first = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
-        try await store.finishMinutes(minutesID: first.id, body: "# 采用版", model: nil)
+        try await store.finishMinutesForTestOnly(minutesID: first.id, body: "# 采用版", model: nil)
         let failed = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 9)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
         try await store.failMinutes(minutesID: failed.id, reason: "模型没有给结果")
@@ -93,7 +93,7 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertNil(empty)
         let first = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
-        try await store.finishMinutes(minutesID: first.id, body: "# 采用版", model: nil)
+        try await store.finishMinutesForTestOnly(minutesID: first.id, body: "# 采用版", model: nil)
         let failed = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 9)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
         try await store.failMinutes(minutesID: failed.id, reason: "模型没有给结果")
@@ -208,7 +208,7 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         )
         let minutes = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
-        try await store.finishMinutes(minutesID: minutes.id, body: "# 纪要\n\n预算 35 万元", model: nil)
+        try await store.finishMinutesForTestOnly(minutesID: minutes.id, body: "# 纪要\n\n预算 35 万元", model: nil)
         _ = try await store.saveInnerOSExchange(
             InnerOSExchange(id: "inner-1", sessionID: sessionID, askedAt: Date(), question: "预算 35 万元怎么看？", answerText: "私密分析", status: .ready)
         )
@@ -247,7 +247,7 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         let sessionID = try requireSessionID()
         let first = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
-        try await store.finishMinutes(minutesID: first.id, body: "# 第一版", model: nil)
+        try await store.finishMinutesForTestOnly(minutesID: first.id, body: "# 第一版", model: nil)
         try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "张三")
         let pinned = try await store.minutesVersion(id: first.id)
         XCTAssertEqual(pinned?.body, "# 第一版", "改名不得改写旧纪要正文，原版必须可查")
@@ -327,7 +327,7 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         let sessionID = try requireSessionID()
         let first = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
-        try await store.finishMinutes(minutesID: first.id, body: "# 第一版", model: nil)
+        try await store.finishMinutesForTestOnly(minutesID: first.id, body: "# 第一版", model: nil)
         // 纪要创建之后再改名：旧版应标需复核。
         try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "张三")
         let needsReview = try await store.minutesNeedsReview(minutesID: first.id)
@@ -355,7 +355,7 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         let sessionID = try requireSessionID()
         let first = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
-        try await store.finishMinutes(minutesID: first.id, body: "# 第一版", model: nil)
+        try await store.finishMinutesForTestOnly(minutesID: first.id, body: "# 第一版", model: nil)
 
         // 先改名：这一版的依据已经是改名前的来源，该标复核。
         try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "张三")
@@ -385,7 +385,7 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         )
         let minutes = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
-        try await store.finishMinutes(minutesID: minutes.id, body: "# 纪要\n\n预算 35 万元", model: nil)
+        try await store.finishMinutesForTestOnly(minutesID: minutes.id, body: "# 纪要\n\n预算 35 万元", model: nil)
         let backupURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("meeting-backup-\(UUID().uuidString).sqlite3")
         try await store.backup(to: backupURL)
@@ -463,7 +463,7 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         let minutes = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
         let actionBody = "# 纪要\n\n## 待办\n\n- 张三：交付预算表（下周三前）\n"
-        try await store.finishMinutes(minutesID: minutes.id, body: actionBody, model: nil)
+        try await store.finishMinutesForTestOnly(minutesID: minutes.id, body: actionBody, model: nil)
         let backupURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("meeting-actions-\(UUID().uuidString).sqlite3")
         try await store.backup(to: backupURL)
@@ -497,7 +497,7 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         )
         let minutes = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
-        try await store.finishMinutes(minutesID: minutes.id, body: "# 待删除纪要", model: nil)
+        try await store.finishMinutesForTestOnly(minutesID: minutes.id, body: "# 待删除纪要", model: nil)
         var hits = try await store.searchKnowledge(query: "待删除")
         XCTAssertFalse(hits.isEmpty)
         // 先埋一条私密问答及其引文：完整删除不得暗留引文全文（MA-18）。
@@ -536,7 +536,7 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         )
         let minutes = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
-        try await store.finishMinutes(minutesID: minutes.id, body: "# 迁移前纪要", model: nil)
+        try await store.finishMinutesForTestOnly(minutesID: minutes.id, body: "# 迁移前纪要", model: nil)
         // 当前 schema 已到 v12（v12 = meeting_document 补删除档位）。
         // 这里钉的是"新库直建到当前形状"——版本号是刻意写死的：
         // 每次迁移都必须有人看一眼、把这个数字往上抬，而不是悄悄跟着走。
@@ -611,7 +611,7 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         let sessionID = try requireSessionID()
         let first = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
-        try await store.finishMinutes(minutesID: first.id, body: "# 第一版", model: nil)
+        try await store.finishMinutesForTestOnly(minutesID: first.id, body: "# 第一版", model: nil)
         let beforeAdopt = try await store.acceptedMinutes(sessionID: sessionID)
         XCTAssertNil(beforeAdopt, "未采用前没有采用版")
         let adopted = try await store.adoptMinutes(sessionID: sessionID, minutesID: first.id, expectedCurrentID: nil)
@@ -631,7 +631,7 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         let sessionID = try requireSessionID()
         let first = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
-        try await store.finishMinutes(minutesID: first.id, body: "# 第一版", model: nil)
+        try await store.finishMinutesForTestOnly(minutesID: first.id, body: "# 第一版", model: nil)
         // 未采用：退回最新可用候选，不返回 nil 也不返回失败尝试。
         let unadopted = try await store.currentMinutes(sessionID: sessionID)
         XCTAssertEqual(unadopted?.id, first.id)
@@ -639,7 +639,7 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         // 新一版成功也不自动提升：重新生成不是采用动作（§7.7 不变量 3）。
         let second = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 9)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
-        try await store.finishMinutes(minutesID: second.id, body: "# 第二版", model: nil)
+        try await store.finishMinutesForTestOnly(minutesID: second.id, body: "# 第二版", model: nil)
         let current = try await store.currentMinutes(sessionID: sessionID)
         XCTAssertEqual(current?.id, first.id, "重新生成成功也不得自动替换用户采用版")
         XCTAssertEqual(current?.body, "# 第一版")
@@ -656,10 +656,10 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         let sessionID = try requireSessionID()
         let first = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
-        try await store.finishMinutes(minutesID: first.id, body: "# 第一版", model: nil)
+        try await store.finishMinutesForTestOnly(minutesID: first.id, body: "# 第一版", model: nil)
         let second = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 9)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
-        try await store.finishMinutes(minutesID: second.id, body: "# 第二版", model: nil)
+        try await store.finishMinutesForTestOnly(minutesID: second.id, body: "# 第二版", model: nil)
         // 两次采用都看到“无采用版”：先提交的赢，后提交的必须拒绝。
         let firstWins = try await store.adoptMinutes(sessionID: sessionID, minutesID: first.id, expectedCurrentID: nil)
         XCTAssertTrue(firstWins)
@@ -871,7 +871,7 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         let sessionID = try requireSessionID()
         let first = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
-        try await store.finishMinutes(minutesID: first.id, body: "# 第一版", model: nil)
+        try await store.finishMinutesForTestOnly(minutesID: first.id, body: "# 第一版", model: nil)
         let pinned = try await store.minutesVersion(id: first.id)
         XCTAssertEqual(pinned?.body, "# 第一版")
         XCTAssertEqual(pinned?.version, 1)
@@ -885,10 +885,10 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         let sessionID = try requireSessionID()
         let first = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
-        try await store.finishMinutes(minutesID: first.id, body: "# 第一版", model: nil)
+        try await store.finishMinutesForTestOnly(minutesID: first.id, body: "# 第一版", model: nil)
         let second = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 9)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
-        try await store.finishMinutes(minutesID: second.id, body: "# 第二版", model: nil)
+        try await store.finishMinutesForTestOnly(minutesID: second.id, body: "# 第二版", model: nil)
 
         let versions = try await store.minutesVersions(sessionID: sessionID)
         let selected = versions.first { $0.id == first.id }
@@ -962,7 +962,7 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         )
         let minutes = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
-        try await store.finishMinutes(minutesID: minutes.id, body: "# 重启前纪要", model: nil)
+        try await store.finishMinutesForTestOnly(minutesID: minutes.id, body: "# 重启前纪要", model: nil)
         _ = try await store.saveInnerOSExchange(
             InnerOSExchange(id: "inner-reopen-1", sessionID: sessionID, askedAt: Date(), question: "重启前问过？", answerText: "重启前答过", status: .ready)
         )

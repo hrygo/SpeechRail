@@ -321,6 +321,27 @@ final class MeetingPrivacyDeletionTests: XCTestCase {
         )
     }
 
+    /// 测试夹具走的 `finishMinutesForTestOnly` 同样过归档守卫。
+    /// 它复刻旧 `finishMinutes` 的"直接写"形态（不限代际），
+    /// 区别是多了一道删除/归档检查——少了这道，归档后的完成会悄悄写回来。
+    func testTestOnlyFinishIsRejectedAfterArchive() async throws {
+        let store = try requireStore()
+        let prepared = try await prepareMeetingWithCitations()
+        _ = try await store.enqueueMinutes(sessionID: try requireSessionID(), model: nil, promptChars: 20)
+        let queued = try await store.minutesVersions(sessionID: try requireSessionID())
+        let target = try XCTUnwrap(queued.first(where: { $0.status == .queued }))
+
+        _ = try await store.deleteMeetingKnowledge(documentID: prepared.documentID, mode: .archive)
+        let committed = try await store.finishMinutesForTestOnly(
+            minutesID: target.id, body: "# 迟到的正文", model: nil
+        )
+        XCTAssertFalse(committed, "已经归档的会议不能被迟到的结果写回来")
+
+        let row = try await store.minutesVersion(id: target.id)
+        XCTAssertEqual(row?.status, .cancelled, "这一版要标成用户停止，而不是整理好了")
+        XCTAssertNil(row?.body, "正文不能落库")
+    }
+
     // MARK: - MC-43：只有用户勾选的那一句进快照
 
     func testOnlySelectedPrivateAnswerEntersSnapshotAsSupplement() async throws {

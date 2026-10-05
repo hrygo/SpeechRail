@@ -870,14 +870,24 @@ public actor SessionStore {
         return claimed
     }
 
-    public func finishMinutes(minutesID: String, body: String, model: String?) throws {
-        let sql = "UPDATE minutes SET status = 'ready', body = ?, model = COALESCE(?, model), lease_until = NULL, failure_reason = NULL WHERE id = ? AND status = 'running';"
+    /// 测试专用完成：只给测试夹具用。生产代码走 `finishMinutesIfOwner`。
+    ///
+    /// 它不等同于一次真实认领：真实认领只认领最新行并设租约，而测试经常
+    /// 直接给某一版写正文。同时它**同样过删除/归档守卫**
+    /// （`rejectLateMinutesIfMeetingDeleted`），归档后的完成会被拒掉——
+    /// 测试里走这条路，不会绕开验收 4 的守卫。
+    @discardableResult
+    public func finishMinutesForTestOnly(minutesID: String, body: String, model: String?) throws -> Bool {
+        // 迟到的结果不许把已经归档/删除的会议写回来（MA-18 / MC-63）。
+        if try rejectLateMinutesIfMeetingDeleted(minutesID: minutesID) { return false }
+        let sql = "UPDATE minutes SET status = 'ready', body = ?, model = COALESCE(?, model), lease_until = NULL, failure_reason = NULL WHERE id = ? AND status IN ('queued', 'running');"
         try withStatement(sql) { statement in
             bind(statement, 1, body)
             bind(statement, 2, model)
             bind(statement, 3, minutesID)
             try step(statement)
         }
+        return sqlite3_changes(try requireHandle()) > 0
     }
 
     /// 带 fencing 代际的完成：只有 `expectedAttempts` 与当前行一致时才提交，
@@ -2897,9 +2907,12 @@ public actor SessionStore {
 
     /// 引用完整性（MC-70）：外键 + 四条跨表引用。
     ///
-    /// `PRAGMA foreign_key_check` 只覆盖声明了外键的列；这里额外查"证据锚点指向的
-    /// 修订/行是否还在"，因为那是本项目最要紧的一条引用，而它允许 `ON DELETE SET NULL`
-    /// ——被删的引用是**合法的**（明确表示"来源已不可读"），不算断裂。
+    /// `PRAGMA foreign_key_check` 只覆盖声明了外键的列；下面四条额外查
+    /// item→minutes、window→minutes、evidence→item、snapshot→document。
+    /// 注意这里**不查**"证据锚点指向的修订/行是否还在"：`minutes_evidence.line_id` /
+    /// `revision_id` 是 `ON DELETE SET NULL`，来源被删是**合法状态**
+    /// （明确表示"来源已不可读"，由 `markAnchorsWithoutSourceForReview` 降级），
+    /// 不是引用断裂，所以不算问题。
     public func verifyReferences() throws -> ReferenceVerification {
         var problems: [String] = []
         let foreignKeyIssues = try scalarInt("SELECT COUNT(*) FROM pragma_foreign_key_check;") ?? 0
