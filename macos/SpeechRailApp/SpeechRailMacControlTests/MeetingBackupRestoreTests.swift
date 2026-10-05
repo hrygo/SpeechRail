@@ -183,6 +183,79 @@ final class MeetingBackupRestoreTests: XCTestCase {
         _ = row
     }
 
+    /// **清单里的每一个计数都要被逐项核对**（验收 5「核对文档、版本、引用和行动项关联」）。
+    ///
+    /// 清单记了 9 项计数，恢复预演此前只比对了 3 项（纪要版本、结论条目、知识文档）。
+    /// 另外 6 项——会话、转录行、**来源修订**、**来源快照**、**证据锚点**、窗口进度——
+    /// 收集了却不看。于是丢掉全部来源的备份仍然被判为 `isRestorable == true`：
+    /// 版本、条目、文档都还在，只有「这句话依据哪几句」整个没了，而预演说它可恢复。
+    func testRestorePreviewRejectsABackupThatLostItsSources() async throws {
+        _ = try await prepareMeetingWithCitations()
+        let bundle = try await exportBundle()
+
+        let manifestURL = bundle.appendingPathComponent(SessionStore.backupManifestName)
+        let before = try JSONDecoder().decode(
+            SessionStore.BackupManifest.self, from: Data(contentsOf: manifestURL)
+        )
+        XCTAssertGreaterThan(before.counts.transcriptRevisions, 0, "夹具应当有来源修订")
+        XCTAssertGreaterThan(before.counts.sourceSnapshots, 0, "夹具应当有来源快照")
+        XCTAssertGreaterThan(before.counts.minutesEvidence, 0, "夹具应当有证据锚点")
+        XCTAssertGreaterThan(before.counts.lines, 0, "夹具应当有转录行")
+
+        // 直接改备份副本、清单不动——模拟一份"恢复之后来源全没了"的备份。
+        try stripRows(in: bundle, [
+            "DELETE FROM transcript_revision;",
+            "DELETE FROM source_snapshot;",
+            "DELETE FROM minutes_evidence;",
+            "DELETE FROM line;",
+        ])
+
+        let preview = try await SessionStore.restorePreview(of: bundle, into: try XCTUnwrap(scratch))
+        XCTAssertFalse(
+            preview.isRestorable,
+            "来源修订、来源快照与证据锚点全丢的备份被判为可恢复："
+                + "清单记了 \(before.counts.transcriptRevisions)/\(before.counts.sourceSnapshots)/"
+                + "\(before.counts.minutesEvidence)，恢复后只剩 "
+                + "\(preview.restoredCounts.transcriptRevisions)/"
+                + "\(preview.restoredCounts.sourceSnapshots)/"
+                + "\(preview.restoredCounts.minutesEvidence)，却没人比对"
+        )
+
+        // **逐项点名**，不能只断言 `isRestorable == false`。
+        // 写成后者的话，三张表里只要有任意一张被比对，这条用例就绿——
+        // 它证明的是「至少有一项在被核对」，不是「每一项都在被核对」。
+        // 第一版正是这么写的，变异检验时从 9 行里删掉「来源修订」它照样全绿。
+        for label in ["来源修订", "来源快照", "证据锚点", "转录行"] {
+            XCTAssertTrue(
+                preview.problems.contains { $0.contains(label) },
+                "「\(label)数对不上」没有出现在问题清单里——这一项根本没被比对："
+                    + "\(preview.problems)"
+            )
+        }
+    }
+
+    /// 在**备份副本**上直接删行。`foreign_keys=OFF` 是刻意的：真实世界里
+    /// `ON DELETE SET NULL` 会把锚点降级成「来源已不可读」，那是个**合法**状态，
+    /// 不该被当成引用断裂。本条要验的是**计数对不上**，不是引用断裂。
+    private func stripRows(in bundle: URL, _ statements: [String]) throws {
+        let url = bundle.appendingPathComponent(SessionStore.backupFileName)
+        var pointer: OpaquePointer?
+        guard sqlite3_open_v2(url.path, &pointer, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK,
+              let db = pointer else {
+            if let pointer { sqlite3_close_v2(pointer) }
+            throw SessionStoreError.openFailed("备份副本打不开")
+        }
+        defer { sqlite3_close_v2(db) }
+        for sql in ["PRAGMA foreign_keys=OFF;"] + statements {
+            var message: UnsafeMutablePointer<CChar>?
+            guard sqlite3_exec(db, sql, nil, nil, &message) == SQLITE_OK else {
+                let detail = message.map { String(cString: $0) } ?? "未知错误"
+                sqlite3_free(message)
+                throw SessionStoreError.statementFailed("改备份副本失败：\(detail)")
+            }
+        }
+    }
+
     /// 备份不含私密问答：清单与恢复预演都不该把它带出来。
     func testBackupCountsExcludePrivateQA() async throws {
         _ = try await prepareMeetingWithCitations()

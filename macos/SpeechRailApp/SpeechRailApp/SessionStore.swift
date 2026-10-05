@@ -2728,6 +2728,32 @@ public actor SessionStore {
             sessions: 0, lines: 0, meetingDocuments: 0, transcriptRevisions: 0,
             sourceSnapshots: 0, minutes: 0, minutesItems: 0, minutesEvidence: 0, minutesWindows: 0
         )
+
+        /// 清单与恢复后的库**逐项**比对，返回对不上的那些。
+        ///
+        /// 清单记了几项就得比几项。此前恢复预演只比对了其中 3 项（纪要版本、
+        /// 结论条目、知识文档），另外 6 项收集了却不看——于是丢掉全部来源修订、
+        /// 来源快照与证据锚点的备份仍然被判为可恢复：版本和条目都还在，
+        /// 只有「这句话依据哪几句」整个没了，而预演说它可以恢复。
+        ///
+        /// 标签集中写在这里而不是散在调用点：加一个计数字段时，
+        /// 要么记得来这里加一行，要么编译器因为漏传而报错——不会悄悄少比一项。
+        static func differences(expected: BackupCounts, actual: BackupCounts) -> [(label: String, expected: Int, actual: Int)] {
+            let pairs: [(String, Int, Int)] = [
+                ("会话", expected.sessions, actual.sessions),
+                ("转录行", expected.lines, actual.lines),
+                ("知识文档", expected.meetingDocuments, actual.meetingDocuments),
+                ("来源修订", expected.transcriptRevisions, actual.transcriptRevisions),
+                ("来源快照", expected.sourceSnapshots, actual.sourceSnapshots),
+                ("纪要版本", expected.minutes, actual.minutes),
+                ("结论条目", expected.minutesItems, actual.minutesItems),
+                ("证据锚点", expected.minutesEvidence, actual.minutesEvidence),
+                ("窗口进度", expected.minutesWindows, actual.minutesWindows),
+            ]
+            return pairs.compactMap { label, expected, actual in
+                expected == actual ? nil : (label: label, expected: expected, actual: actual)
+            }
+        }
     }
 
     /// 备份文件与清单的固定名字。清单缺了就当没有备份——
@@ -2843,14 +2869,9 @@ public actor SessionStore {
             if !verification.isClean {
                 problems.append(contentsOf: verification.problems)
             }
-            if counts.minutes != manifest.counts.minutes {
-                problems.append("纪要版本数对不上：清单 \(manifest.counts.minutes)，新库读到 \(counts.minutes)")
-            }
-            if counts.minutesItems != manifest.counts.minutesItems {
-                problems.append("结论条目数对不上：清单 \(manifest.counts.minutesItems)，新库读到 \(counts.minutesItems)")
-            }
-            if counts.meetingDocuments != manifest.counts.meetingDocuments {
-                problems.append("知识文档数对不上：清单 \(manifest.counts.meetingDocuments)，新库读到 \(counts.meetingDocuments)")
+            // 清单记了 9 项就逐项比 9 项。少比一项，那一项的丢失就永远没人看见。
+            for diff in BackupCounts.differences(expected: manifest.counts, actual: counts) {
+                problems.append("\(diff.label)数对不上：清单 \(diff.expected)，新库读到 \(diff.actual)")
             }
             problems.append(contentsOf: readable.problems)
 
