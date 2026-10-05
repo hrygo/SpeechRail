@@ -21,6 +21,26 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         var outcomes: [(generation: Int, outcome: AssistantTTSStreamCoordinator.Outcome)] = []
     }
 
+    @MainActor
+    private final class DeadlineSleeper {
+        var durations: [Duration] = []
+        var continuations: [CheckedContinuation<Void, Never>?] = []
+
+        func sleep(for duration: Duration) async {
+            durations.append(duration)
+            await withCheckedContinuation { continuations.append($0) }
+        }
+
+        func fire(_ index: Int) {
+            continuations[index]?.resume()
+            continuations[index] = nil
+        }
+
+        func finish() {
+            for index in continuations.indices { fire(index) }
+        }
+    }
+
     private func makeHarness(
         configuration: AssistantTTSStreamCoordinator.Configuration = .default,
         acknowledgeStart: Bool = true,
@@ -90,6 +110,164 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
             try? await Task.sleep(for: .milliseconds(10))
         }
         XCTAssertTrue(condition(), message)
+    }
+
+    func testHealthyBurstReturnsCreditsOnlyAfterPlaybackConsumption() async throws {
+        var configuration = AssistantTTSStreamCoordinator.Configuration.default
+        configuration.maximumPendingAudioBytes = 48_000
+        let (coordinator, recorder) = makeHarness(configuration: configuration)
+        var credits: [(String, Int)] = []
+        coordinator.sendAudioAcknowledgement = { requestID, sampleOffset in
+            credits.append((requestID, sampleOffset))
+        }
+        try await coordinator.begin(generation: 101, requestID: "burst-13")
+        XCTAssertEqual(coordinator.audioWindowBytes, 48_000)
+        let pcm = Data(repeating: 0, count: 3_840)
+        // The real server stops at 12 chunks: another would exceed the declared
+        // sent-but-unconsumed window, even before the consumer is scheduled.
+        for _ in 0..<12 {
+            XCTAssertEqual(coordinator.admitAudio(requestID: "burst-13", pcm: pcm), .accepted)
+        }
+        XCTAssertEqual(coordinator.unconsumedAudioBytes, 46_080)
+        XCTAssertTrue(credits.isEmpty, "reception and scheduling must not grant playback credits")
+        await waitUntil({ recorder.played.count == 12 })
+        XCTAssertTrue(credits.isEmpty)
+
+        let epoch = try XCTUnwrap(recorder.epochs.first)
+        coordinator.notePlaybackCompleted(samples: 1_920, epoch: epoch)
+        await waitUntil({ credits.count == 1 })
+        XCTAssertEqual(credits.first?.0, "burst-13")
+        XCTAssertEqual(credits.first?.1, 1_920)
+        XCTAssertEqual(coordinator.unconsumedAudioBytes, 42_240)
+        XCTAssertEqual(coordinator.admitAudio(requestID: "burst-13", pcm: pcm), .accepted)
+        await coordinator.handleTerminal(requestID: "burst-13", status: "completed")
+        await waitUntil({ recorder.played.count == 13 })
+        XCTAssertTrue(recorder.outcomes.isEmpty, "generation completion must still wait for playback")
+        for _ in 0..<12 {
+            coordinator.notePlaybackCompleted(samples: 1_920, epoch: epoch)
+        }
+        XCTAssertEqual(coordinator.unconsumedAudioBytes, 0)
+        XCTAssertEqual(recorder.outcomes.map(\.outcome), [.completed])
+        XCTAssertNil(coordinator.lastFailure)
+    }
+
+    func testProductionCompletesWhilePrefetchedAudioContinuesPlaying() async throws {
+        let (coordinator, recorder) = makeHarness()
+        try await coordinator.begin(generation: 102, requestID: "prefetch")
+        XCTAssertEqual(coordinator.audioWindowBytes, 1_440_000)
+        let pcm = Data(repeating: 0, count: 3_840)
+        for _ in 0..<60 {
+            XCTAssertEqual(coordinator.admitAudio(requestID: "prefetch", pcm: pcm), .accepted)
+        }
+        await waitUntil({ recorder.played.count == 12 })
+        XCTAssertEqual(coordinator.unconsumedAudioBytes, 230_400)
+        await coordinator.handleTerminal(requestID: "prefetch", status: "completed")
+        XCTAssertNil(coordinator.outcome, "production completion must keep playback alive")
+        let epoch = try XCTUnwrap(recorder.epochs.first)
+        for index in 0..<60 {
+            await waitUntil({ recorder.played.count > index })
+            coordinator.notePlaybackCompleted(samples: 1_920, epoch: epoch)
+        }
+        await waitUntil({ coordinator.outcome == .completed })
+        XCTAssertEqual(recorder.played.count, 60)
+        XCTAssertEqual(coordinator.unconsumedAudioBytes, 0)
+    }
+
+    func testConsumptionWindowCountsPlaybackAsWellAsPendingFIFO() async throws {
+        var configuration = AssistantTTSStreamCoordinator.Configuration.default
+        configuration.maximumPendingAudioBytes = 8
+        let (coordinator, recorder) = makeHarness(configuration: configuration)
+        try await coordinator.begin(generation: 102, requestID: "aggregate")
+        let pcm = Data([0, 0, 0, 0])
+        XCTAssertEqual(coordinator.admitAudio(requestID: "aggregate", pcm: pcm), .accepted)
+        await waitUntil({ recorder.played.count == 1 })
+        XCTAssertEqual(coordinator.queuedAudioBytes, 0)
+        XCTAssertEqual(coordinator.unconsumedAudioBytes, 4)
+        XCTAssertEqual(coordinator.admitAudio(requestID: "aggregate", pcm: pcm), .accepted)
+        XCTAssertEqual(
+            coordinator.admitAudio(requestID: "aggregate", pcm: Data([0, 0])),
+            .rejected,
+            "moving PCM into the player does not free the consumption window"
+        )
+    }
+
+    func testStalePlaybackCannotCreditNewRequest() async throws {
+        let (coordinator, recorder) = makeHarness()
+        var credits: [(String, Int)] = []
+        coordinator.sendAudioAcknowledgement = { requestID, offset in credits.append((requestID, offset)) }
+        try await coordinator.begin(generation: 103, requestID: "old-credit")
+        XCTAssertEqual(
+            coordinator.admitAudio(requestID: "old-credit", pcm: Data([0, 0, 0, 0])),
+            .accepted
+        )
+        await waitUntil({ recorder.played.count == 1 })
+        let oldEpoch = try XCTUnwrap(recorder.epochs.first)
+        coordinator.invalidate()
+        try await coordinator.begin(generation: 104, requestID: "new-credit")
+        coordinator.notePlaybackCompleted(samples: 2, epoch: oldEpoch)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertTrue(credits.isEmpty)
+        XCTAssertEqual(coordinator.unconsumedAudioBytes, 0)
+        coordinator.invalidate()
+    }
+
+    func testHealthyPlaybackRenewsTextAckInactivityDeadlineWithoutAcknowledgingText() async throws {
+        var configuration = AssistantTTSStreamCoordinator.Configuration.default
+        configuration.acknowledgementTimeout = .milliseconds(40)
+        let (coordinator, recorder) = makeHarness(
+            configuration: configuration, acknowledgeAppend: false
+        )
+        let deadlines = DeadlineSleeper()
+        coordinator.timeoutSleep = { await deadlines.sleep(for: $0) }
+        defer { deadlines.finish() }
+        try await coordinator.begin(generation: 105, requestID: "long-ack")
+        coordinator.offer("正在生成。")
+        let finish = Task { @MainActor in await coordinator.finishInput() }
+        await waitUntilEventually(
+            { recorder.appends.count == 1 && deadlines.durations.count == 1 },
+            message: "the append must be waiting for its text ACK"
+        )
+        for i in 1...8 {
+            _ = coordinator.admitAudio(requestID: "long-ack", pcm: Data([0, 0]))
+            await waitUntilEventually(
+                { recorder.played.count == i }, message: "audio must reach playback"
+            )
+            let epoch = try XCTUnwrap(recorder.epochs.last)
+            coordinator.notePlaybackCompleted(samples: 1, epoch: epoch)
+            await waitUntilEventually(
+                { deadlines.durations.count == i + 1 }, message: "progress must renew the deadline"
+            )
+            // Deliver the cancelled timeout late, after the replacement exists.
+            deadlines.fire(i - 1)
+            await Task.yield()
+        }
+        XCTAssertEqual(deadlines.durations, Array(repeating: .milliseconds(40), count: 9))
+        XCTAssertTrue(coordinator.isActive, "healthy audio progress must not become an ACK timeout")
+        XCTAssertEqual(coordinator.acceptedSequence, -1, "audio progress is not a text ACK")
+        XCTAssertTrue(recorder.finishes.isEmpty, "finish cannot overtake the real text ACK")
+        _ = coordinator.handleTextAccepted(requestID: "long-ack", appendSequence: 0, totalCodepoints: 6)
+        await finish.value
+        XCTAssertEqual(recorder.finishes, [0])
+        coordinator.invalidate()
+    }
+
+    func testTextAcknowledgementStillTimesOutWithoutPlaybackProgress() async throws {
+        let (coordinator, recorder) = makeHarness(acknowledgeAppend: false)
+        let deadlines = DeadlineSleeper()
+        coordinator.timeoutSleep = { await deadlines.sleep(for: $0) }
+        defer { deadlines.finish() }
+        try await coordinator.begin(generation: 106, requestID: "stalled-ack")
+        coordinator.offer("正在生成。")
+        let finish = Task { @MainActor in await coordinator.finishInput() }
+        await waitUntilEventually(
+            { deadlines.durations.count == 1 }, message: "text ACK deadline must be registered"
+        )
+        deadlines.fire(0)
+        await finish.value
+        XCTAssertFalse(coordinator.isActive)
+        XCTAssertNotNil(coordinator.lastFailure)
+        XCTAssertTrue(recorder.finishes.isEmpty)
+        coordinator.invalidate()
     }
 
     /// 匹配终态到达后，取消 effect 仍可能在 MainActor 上收尾旧 outbound。

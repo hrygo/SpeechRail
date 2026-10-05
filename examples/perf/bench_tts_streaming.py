@@ -65,10 +65,23 @@ from openai import OpenAI
 
 from speechrail.config.auth import resolve_api_key
 from speechrail.domain.tts import DEFAULT_VOICE_ID as DEFAULT_VOICE
+from speechrail.domain.tts_stream import MAX_TTS_AUDIO_WINDOW_BYTES
 
 DEFAULT_SAMPLE_RATE = 24_000
 _BYTES_PER_SAMPLE = 2
 _DEFAULT_ASR_MODEL = "whisper-1"
+
+
+def tts_start_event(request_id: str, voice: str | None) -> dict[str, Any]:
+    """Use the current bounded-consumption contract for every benchmark turn."""
+
+    return {
+        "type": "speechrail.tts.start",
+        "request_id": request_id,
+        "task": "conversation",
+        "voice": voice or DEFAULT_VOICE,
+        "audio_window_bytes": MAX_TTS_AUDIO_WINDOW_BYTES,
+    }
 
 
 def session_update_event(model: str = _DEFAULT_ASR_MODEL) -> dict[str, Any]:
@@ -606,12 +619,7 @@ def run_incremental_turn(
         _recv_until_reader(reader, deadline, frozenset({"session.updated"}))
 
         request_id = f"bench_stream_{int(clock() * 1000)}"
-        start: dict[str, Any] = {
-            "type": "speechrail.tts.start",
-            "request_id": request_id,
-            "task": "conversation",
-            "voice": voice or DEFAULT_VOICE,
-        }
+        start = tts_start_event(request_id, voice)
         submitted_at = clock()
         connection.send(start)
 
@@ -705,10 +713,20 @@ def run_incremental_turn(
             elif kind == "speechrail.tts.audio.delta":
                 chunk = _decode_audio(event.get("delta"))
                 if chunk:
+                    if len(chunk) % _BYTES_PER_SAMPLE:
+                        raise ValueError("incremental TTS benchmark received truncated PCM16 audio")
                     if first_audio_at is None:
                         first_audio_at = now
                     audio_bytes += len(chunk)
                     arrivals.append((now, audio_bytes))
+                    # Benchmarks consume by counting and discarding, without playback.
+                    connection.send(
+                        {
+                            "type": "speechrail.tts.audio_ack",
+                            "request_id": request_id,
+                            "sample_offset": audio_bytes // _BYTES_PER_SAMPLE,
+                        }
+                    )
             elif kind == "error":
                 code = _error_code(event)
                 if not created:

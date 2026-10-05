@@ -20,6 +20,9 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Final, Protocol
 
+# Caller prefetch is independent of the worker's much smaller PCM budget.
+MAX_TTS_AUDIO_WINDOW_BYTES: Final[int] = 1_440_000  # 30s, 24 kHz mono PCM16
+
 TTS_STREAM_ERROR_CODES: Final[frozenset[str]] = frozenset(
     {
         "tts_streaming_unsupported",

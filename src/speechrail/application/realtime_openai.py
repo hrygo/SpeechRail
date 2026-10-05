@@ -23,6 +23,7 @@ from speechrail.application.diarization import (
     StatusChanged,
 )
 from speechrail.application.services import AppServices
+from speechrail.application.tts_audio_window import TtsAudioWindow
 from speechrail.application.tts_stream import (
     StreamController,
     TtsStreamAdmissionError,
@@ -47,6 +48,7 @@ from speechrail.compatibility.openai_realtime import (
     parse_commit_request,
     parse_finish_request,
     parse_tts_append_text,
+    parse_tts_audio_ack,
     parse_tts_cancel,
     parse_tts_finish_text,
     parse_tts_start,
@@ -225,6 +227,7 @@ class OpenAIRealtimeSession:
         self._tts_stream_pending: dict[int, str] = {}
         self._tts_stream_accepted = 0
         self._tts_stream_limits: TtsStreamLimits | None = None
+        self._tts_audio_window: TtsAudioWindow | None = None
         self._tts_generated_samples = 0
         self._tts_failure_code: str | None = None
         self._closing = False
@@ -296,7 +299,6 @@ class OpenAIRealtimeSession:
             "model": self._initial_model,
             "language": None,
             "prompt": "",
-            "expected_model_revision": None,
             "tts_enabled": False,
             "task": "conversation",
             "transcription_partial_mode": "delta",
@@ -486,6 +488,8 @@ class OpenAIRealtimeSession:
             await self._finish_tts_stream(event)
         elif parsed.kind == "tts_cancel":
             await self._cancel_response(event)
+        elif parsed.kind == "tts_audio_ack":
+            self._acknowledge_tts_audio(event)
         else:
             raise RealtimeAdapterError(
                 "unsupported_operation", "unsupported SpeechRail event"
@@ -522,7 +526,6 @@ class OpenAIRealtimeSession:
 
         endpointing = self._config.get("turn_detection")
         expected_asr = self._config.get("expected_asr_revision")
-        expected_tts = self._config.get("expected_model_revision")
         return {
             "model": str(self._config.get("model") or self._display_model),
             "language": (
@@ -544,9 +547,6 @@ class OpenAIRealtimeSession:
             "endpointing": endpointing if isinstance(endpointing, dict) else None,
             "expected_asr_revision": (
                 expected_asr if isinstance(expected_asr, str) else None
-            ),
-            "expected_tts_revision": (
-                expected_tts if isinstance(expected_tts, str) else None
             ),
         }
 
@@ -626,19 +626,6 @@ class OpenAIRealtimeSession:
                         str(self._services.diarization_status["message"]),
                     )
 
-        configured_voice = candidate.get("voice")
-        if isinstance(configured_voice, str):
-            self._require_voice_available(configured_voice)
-        expected_model_revision = candidate.get("expected_model_revision")
-        if expected_model_revision is not None:
-            artifact = self._tts_artifact_for_voice(
-                configured_voice if isinstance(configured_voice, str) else DEFAULT_VOICE_ID
-            )
-            if artifact is None or artifact.revision != expected_model_revision:
-                raise RealtimeAdapterError(
-                    "model_revision_conflict",
-                    "Requested model revision is not the active TTS artifact",
-                )
         expected_asr_revision = candidate.get("expected_asr_revision")
         if isinstance(expected_asr_revision, str):
             asr_artifact = self._active_model_catalog.asr
@@ -1327,21 +1314,8 @@ class OpenAIRealtimeSession:
                 "voice_not_found", f"unknown voice: {selected_voice[:200]}"
             ) from None
 
-    def _expected_model_revision(self) -> str | None:
-        value = self._config.get("expected_model_revision")
-        return value if isinstance(value, str) else None
-
     def _tts_artifact_for_mode(self, voice_mode: str) -> ModelArtifact | None:
         return self._active_model_catalog.artifact_for_voice_mode(voice_mode)
-
-    def _tts_artifact_for_voice(self, voice: str) -> ModelArtifact | None:
-        from speechrail.domain.tts import get_voice_profile
-
-        try:
-            profile = get_voice_profile(voice)
-        except (ValueError, VoiceStoreUnavailableError):
-            return None
-        return self._tts_artifact_for_mode(profile.mode)
 
     def _require_voice_available(self, voice: str) -> None:
         from speechrail.domain.tts import get_voice_profile
@@ -1427,9 +1401,9 @@ class OpenAIRealtimeSession:
             raise RealtimeAdapterError("backend_not_ready", "TTS backend is not ready")
         self._claim_tts_request(request.request_id)
 
-        selected_voice = resolve_voice(
-            request.voice or str(self._config.get("voice") or DEFAULT_VOICE_ID)
-        )
+        # Utterance identity is complete on the start event. A transcription
+        # session has no voice/model pin to inherit or reinterpret.
+        selected_voice = resolve_voice(request.voice)
         selected_profile = self._resolve_voice_profile(selected_voice)
         if selected_profile.revoked:
             raise RealtimeAdapterError(
@@ -1443,9 +1417,7 @@ class OpenAIRealtimeSession:
             raise RealtimeAdapterError(
                 "voice_revision_conflict", "Requested voice revision is not active"
             )
-        expected_model_revision = (
-            request.expected_model_revision or self._expected_model_revision()
-        )
+        expected_model_revision = request.expected_model_revision
         artifact = self._tts_artifact_for_mode(selected_profile.mode)
         if expected_model_revision is not None and (
             artifact is None or artifact.revision != expected_model_revision
@@ -1494,6 +1466,10 @@ class OpenAIRealtimeSession:
         self._tts_stream_pending.clear()
         self._tts_stream_accepted = 0
         self._tts_stream_limits = request.limits
+        audio_window = TtsAudioWindow(
+            request.audio_window_bytes, inactivity_seconds=request.limits.slow_consumer_seconds
+        )
+        self._tts_audio_window = audio_window
         self._tts_generated_samples = 0
         self._tts_failure_code = None
         self._plan_id = plan_fingerprint(
@@ -1511,6 +1487,7 @@ class OpenAIRealtimeSession:
                 limits=request.limits,
                 voice_mode=selected_profile.mode,
                 voice_variant=artifact.variant if artifact is not None else None,
+                audio_window=audio_window,
             )
         )
 
@@ -1545,6 +1522,7 @@ class OpenAIRealtimeSession:
         # Remember the bounded packet before awaiting the model, so an
         # acceptance that lands first still finds its transcript text.
         self._tts_stream_pending[request.sequence] = request.text
+        response_id = self._tts_response_id
         try:
             await controller.append_text(request.sequence, request.text)
         except BaseException as exc:
@@ -1552,6 +1530,33 @@ class OpenAIRealtimeSession:
             if isinstance(exc, TtsStreamError):
                 raise RealtimeAdapterError(exc.code, str(exc)) from None
             raise
+        # append_text returns only after backend acceptance. Publish the control
+        # ACK here so it cannot sit behind an audio event waiting for credits.
+        if self._tts_response_id != response_id or self._tts_owner_retired:
+            return
+        self._tts_stream_pending.pop(request.sequence, None)
+        self._tts_stream_accepted += len(request.text)
+        await self._send(
+            tts_text_accepted(
+                task_id=self._task_id,
+                request_id=request.request_id,
+                append_sequence=request.sequence,
+                accepted_codepoints=len(request.text),
+                total_codepoints=self._tts_stream_accepted,
+            )
+        )
+
+    def _acknowledge_tts_audio(self, event: dict[str, Any]) -> None:
+        request = parse_tts_audio_ack(event)
+        window = self._tts_audio_window
+        if request.request_id != self._tts_request_id or window is None or window.closed:
+            if request.request_id in self._tts_request_ids:
+                return  # A terminal may arrive before the final playback callback.
+            raise RealtimeAdapterError("tts_not_active", "the audio request is not active")
+        try:
+            window.acknowledge(request.sample_offset)
+        except ValueError as exc:
+            raise RealtimeAdapterError("tts_audio_ack_invalid", str(exc)) from None
 
     async def _finish_tts_stream(self, event: dict[str, Any]) -> None:
         request = parse_tts_finish_text(event)
@@ -1604,6 +1609,7 @@ class OpenAIRealtimeSession:
         limits: TtsStreamLimits,
         voice_mode: str,
         voice_variant: str | None,
+        audio_window: TtsAudioWindow,
     ) -> None:
         service = self._services.tts_streams
         try:
@@ -1614,9 +1620,10 @@ class OpenAIRealtimeSession:
                 )
             controller = await service.open(
                 options=options,
-                sink=self._on_stream_event,
+                sink=lambda event: self._on_stream_event(event, audio_window=audio_window),
                 receipt=receipt,
                 limits=limits,
+                audio_admission=audio_window.reserve,
             )
         except asyncio.CancelledError:
             self._release_stream_state(response_id=options.response_id)
@@ -1652,6 +1659,7 @@ class OpenAIRealtimeSession:
                     voice_revision=self._tts_voice_revision,
                     output_format=tts_output_format(),
                     limits=controller.limits,
+                    audio_window_bytes=audio_window.maximum_bytes,
                 )
             )
             if self._tts_stream_ready is not None:
@@ -1666,10 +1674,15 @@ class OpenAIRealtimeSession:
             finally:
                 self._release_stream_state(response_id=options.response_id)
 
-    async def _on_stream_event(self, event: TtsStreamEvent) -> None:
+    async def _on_stream_event(
+        self, event: TtsStreamEvent, *, audio_window: TtsAudioWindow
+    ) -> None:
         """Translate one controller event onto the SpeechRail TTS namespace."""
 
+        if event.response_id != self._tts_response_id:
+            return
         if event.terminal is not None:
+            audio_window.close()
             await self._settle_stream_terminal(event)
             return
         if event.kind is TtsStreamEventKind.AUDIO:
@@ -1684,22 +1697,8 @@ class OpenAIRealtimeSession:
                 )
             )
             return
-        if event.kind is not TtsStreamEventKind.TEXT_ACCEPTED:
-            return
-        sequence = event.sequence
-        if sequence is None:
-            return
-        self._tts_stream_pending.pop(sequence, None)
-        self._tts_stream_accepted += event.accepted_codepoints
-        await self._send(
-            tts_text_accepted(
-                task_id=self._task_id,
-                request_id=self._tts_request_id or "",
-                append_sequence=sequence,
-                accepted_codepoints=event.accepted_codepoints,
-                total_codepoints=self._tts_stream_accepted,
-            )
-        )
+        # TEXT_ACCEPTED is projected by _append_tts_stream's accepted operation,
+        # independently of this serial audio delivery path.
 
     async def _settle_stream_terminal(self, event: TtsStreamEvent) -> None:
         """Project the controller's single terminal onto one SpeechRail terminal."""
@@ -1750,6 +1749,8 @@ class OpenAIRealtimeSession:
     async def _cancel_tts_stream(self) -> None:
         """Cancel the active incremental utterance; the controller owns the terminal."""
 
+        if self._tts_audio_window is not None:
+            self._tts_audio_window.close()
         controller = self._tts_stream
         if controller is not None:
             await controller.cancel()
@@ -1767,6 +1768,8 @@ class OpenAIRealtimeSession:
         await self._finalize_tts(status="cancelled", receipt_id=None, request_id=request_id)
 
     async def _close_tts_stream(self) -> None:
+        if self._tts_audio_window is not None:
+            self._tts_audio_window.close()
         controller = self._tts_stream
         if controller is None:
             return
@@ -1797,6 +1800,9 @@ class OpenAIRealtimeSession:
 
         if response_id is not None and self._tts_response_id != response_id:
             return
+        if self._tts_audio_window is not None:
+            self._tts_audio_window.close()
+        self._tts_audio_window = None
         self._tts_task = None
         self._tts_request_id = None
         self._tts_response_id = None

@@ -230,6 +230,28 @@
       "name": "server_commit_receipt",
       "file": "server/commit-receipt.json",
       "valid": true
+    },
+    {
+      "name": "client_assistant_session_update",
+      "file": "client/assistant-session-update.json",
+      "valid": true
+    },
+    {
+      "name": "legacy_session_tts_revision",
+      "file": "invalid/legacy-session-tts-revision.json",
+      "valid": false,
+      "rejection": "TTS model identity belongs to speechrail.tts.start alongside its voice; session TTS pin is removed"
+    },
+    {
+      "name": "client_tts_audio_ack",
+      "file": "client/tts-audio-ack.json",
+      "valid": true
+    },
+    {
+      "name": "missing_tts_audio_window",
+      "file": "invalid/missing-tts-audio-window.json",
+      "valid": false,
+      "rejection": "TTS requires an explicit bounded PCM consumption window"
     }
   ]
 }

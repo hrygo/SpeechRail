@@ -90,6 +90,7 @@ class Qwen3TtsIncrementalBackend:
         self._generated_codes: list[Any] = []
         self._frames = 0
         self._started = False
+        self._terminal = False
         self._closed = False
         self._prefill_target = 0
         self._sample_rate = int(getattr(model, "sample_rate", 24_000))
@@ -158,6 +159,7 @@ class Qwen3TtsIncrementalBackend:
         self._generated_tokens = []
         self._generated_codes = []
         self._frames = 0
+        self._terminal = False
         self._sample_rate = int(getattr(model, "sample_rate", self._sample_rate))
 
         if self._variant == "custom_voice":
@@ -207,6 +209,8 @@ class Qwen3TtsIncrementalBackend:
             raise RuntimeError("generation_not_started")
         if self._closed:
             raise RuntimeError("generation_closed")
+        if self._terminal:
+            return FrameOutcome(terminal=True)
         model = self._model
 
         if self._input_embeds is not None:
@@ -234,6 +238,12 @@ class Qwen3TtsIncrementalBackend:
             suppress_tokens=self._suppress_tokens,
         )
         is_eos = next_token[0, 0] == self._eos_token_id
+        mx.eval(next_token, is_eos)
+        if bool(is_eos.item()):
+            # EOS is not an acoustic code: stop before the code predictor,
+            # codec embedding and vocoder can consume it.
+            self._terminal = True
+            return FrameOutcome(terminal=True)
 
         code_tokens = [next_token]
         code_hidden = hidden[:, -1:, :]
@@ -270,9 +280,7 @@ class Qwen3TtsIncrementalBackend:
             codec_embed = codec_embed + model.talker.code_predictor.codec_embedding[index](code)
         self._pending_codec_embed = codec_embed
 
-        mx.eval(codec_embed, is_eos)
-        if bool(is_eos.item()):
-            return FrameOutcome(terminal=True)
+        mx.eval(codec_embed)
 
         self._generated_tokens.append(int(next_token[0, 0]))
         self._generated_codes.append(all_codes)

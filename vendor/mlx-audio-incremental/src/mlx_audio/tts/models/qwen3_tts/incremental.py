@@ -332,6 +332,10 @@ class IncrementalSessionDriver:
                 self._pending_pcm.append(outcome.pcm16)
             if outcome.terminal:
                 self._terminal = True
+                # Codec EOS is an absorbing boundary, even when this call
+                # still has frame budget. Preserve a final PCM chunk, but
+                # never ask the backend to generate audio after its EOS.
+                break
         if self._pending_pcm:
             return IncrementalEvent(kind="pcm", pcm16=self._pending_pcm.pop(0))
         if self._terminal:

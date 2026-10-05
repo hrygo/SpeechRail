@@ -1027,6 +1027,8 @@ public actor RealtimeASRClient {
     /// 下一次 caller-owned TTS request 使用的音色。
     private var voice: String?
     private var activeTTSRequestID: String?
+    private var activeTTSAudioWindowBytes = SpeechRailTTSStart.maximumAudioWindowBytes
+    private var activeTTSAcknowledgedSampleOffset = 0
     private var activeTTSTaskID: String?
     private var activeTTSAudioSuppressed = false
     /// 当前 request 是否已经进入增量模式（收到过 `speechrail.tts.started`）。
@@ -1248,8 +1250,17 @@ public actor RealtimeASRClient {
     ///
     /// 返回只表示 `speechrail.tts.start` 已发出；必须等到 `.ttsStarted` 才能 append。
     /// 文本、序列号、ACK 等待和打断都归调用方（`AssistantTTSStreamCoordinator`）。
-    public func startTTSStream(requestID: String, speed: Double? = nil) async throws {
+    public func startTTSStream(
+        requestID: String, speed: Double? = nil,
+        audioWindowBytes: Int = SpeechRailTTSStart.maximumAudioWindowBytes
+    ) async throws {
+        guard (2...SpeechRailTTSStart.maximumAudioWindowBytes).contains(audioWindowBytes),
+              audioWindowBytes.isMultiple(of: 2) else {
+            throw Failure.transport("朗读缓冲容量无效")
+        }
         activeTTSRequestID = requestID
+        activeTTSAudioWindowBytes = audioWindowBytes
+        activeTTSAcknowledgedSampleOffset = 0
         activeTTSTaskID = nil
         activeTTSAudioSuppressed = false
         activeTTSStreaming = false
@@ -1268,7 +1279,8 @@ public actor RealtimeASRClient {
                     voice: voice,
                     speed: speed,
                     voiceRevision: expectedVoiceRevision,
-                    expectedModelRevision: expectedTTSRevision
+                    expectedModelRevision: expectedTTSRevision,
+                    audioWindowBytes: audioWindowBytes
                 ).jsonObject
             )
         } catch {
@@ -1312,6 +1324,17 @@ public actor RealtimeASRClient {
         try await send(
             SpeechRailTTSCancel(requestID: requestID).jsonObject
         )
+    }
+
+    /// Return consumption credits for exactly this request. Final callbacks after
+    /// a terminal and stale callbacks cannot grant credits to the next request.
+    public func acknowledgeTTSAudio(requestID: String, sampleOffset: Int) async throws {
+        guard requestID == activeTTSRequestID, !activeTTSAudioSuppressed else { return }
+        guard sampleOffset > activeTTSAcknowledgedSampleOffset,
+              sampleOffset <= expectedAudioSampleOffset
+        else { return }
+        activeTTSAcknowledgedSampleOffset = sampleOffset
+        try await send(SpeechRailTTSAudioAck(requestID: requestID, sampleOffset: sampleOffset).jsonObject)
     }
 
     /// 推流结束时的分人 EOF 屏障：等水位对齐再封存，末段不丢（§14.3）。
@@ -1364,8 +1387,7 @@ public actor RealtimeASRClient {
                 granularity: diarizationEnabled ? "segment" : nil
             ),
             diarizationEnabled: diarizationEnabled,
-            expectedASRRevision: expectedASRRevision,
-            expectedTTSRevision: expectedTTSRevision
+            expectedASRRevision: expectedASRRevision
         ).jsonObject
     }
 
@@ -1796,6 +1818,17 @@ public actor RealtimeASRClient {
                 let started = TTSSessionStarted(object: object),
                 started.requestID == activeTTSRequestID
             else { break }
+            guard started.audioWindowBytes == activeTTSAudioWindowBytes else {
+                await emit(
+                    .ttsEnded(
+                        requestID: started.requestID, taskID: started.taskID, status: "failed",
+                        code: "tts_audio_window_mismatch",
+                        message: "语音服务确认的朗读缓冲容量与请求不一致。"
+                    )
+                )
+                clearActiveTTS()
+                break
+            }
             // 播放层只认 canonical 24 kHz / mono PCM16。服务端协商出别的格式时明确失败，
             // 不把未协商的字节当 24k 喂给播放器（§6 第 3 条）。
             guard started.sampleRate == TTSAudioPosition.canonicalSampleRate,

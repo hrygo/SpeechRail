@@ -18,11 +18,12 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from realtime_wire import session_update, tts_cancel, tts_start
 from speechrail.app import create_app
 from speechrail.config import Settings
 from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.domain.tts import VoiceRegistry
-from test_realtime_tts_incremental import FakeIncrementalSynthesizer
+from test_realtime_tts_incremental import FakeIncrementalSynthesizer, _until
 
 _TIERS = ("fast", "quality", "reference")
 _CLONE_ID = "w10_clone_fixture"
@@ -83,6 +84,96 @@ def _tier_kwargs(tier: str, tmp_path: Path) -> dict[str, Any]:
         "tts_base_artifact_key": base_key,
         "voice_design_artifact_key": design_key,
     }
+
+
+@pytest.mark.parametrize("tier", _TIERS)
+def test_each_utterance_binds_its_own_voice_and_model_revision(
+    tier: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", _register_voices(tmp_path)
+    )
+    synthesizer = FakeIncrementalSynthesizer()
+    client = TestClient(
+        create_app(
+            Settings(**_tier_kwargs(tier, tmp_path)), tts_synthesizer=synthesizer
+        )
+    )
+    snapshot = client.get("/v1/speechrail/capabilities").json()
+    voices = {voice["id"]: voice for voice in snapshot["voices"]}
+    system_revision = voices["serena"]["model"]["catalog_revision"]
+    clone_revision = voices[_CLONE_ID]["model"]["catalog_revision"]
+    assert system_revision != clone_revision
+
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.send_json(
+            session_update(
+                tts={"enabled": True},
+                expected_asr_revision=snapshot["models"]["asr"]["catalog_revision"],
+            )
+        )
+        assert socket.receive_json()["type"] == "session.updated"
+
+        for request_id, voice, revision in (
+            ("system-first", "serena", system_revision),
+            ("clone-next", _CLONE_ID, clone_revision),
+            ("system-again", "serena", system_revision),
+            ("clone-unpinned", _CLONE_ID, None),
+        ):
+            socket.send_json(
+                tts_start(
+                    request_id=request_id,
+                    voice=voice,
+                    voice_revision=voices[voice]["voice_revision"],
+                    expected_model_revision=revision,
+                )
+            )
+            started = _until(socket, "speechrail.tts.started")[-1]
+            assert started["request_id"] == request_id
+            assert started.get("voice_revision") == voices[voice]["voice_revision"]
+            options = synthesizer.sessions[-1].options
+            assert options.voice == voice
+            assert options.expected_voice_revision == voices[voice]["voice_revision"]
+            assert options.expected_model_revision == revision
+            socket.send_json(tts_cancel(request_id=request_id))
+            assert _until(socket, "speechrail.tts.cancelled")[-1]["request_id"] == request_id
+
+        for request_id, model_revision, voice_revision, expected_code in (
+            ("wrong-role", system_revision, voices[_CLONE_ID]["voice_revision"],
+             "model_revision_conflict"),
+            ("stale-model", "0" * 40, voices[_CLONE_ID]["voice_revision"],
+             "model_revision_conflict"),
+            ("stale-voice", clone_revision, "vr_" + "0" * 32,
+             "voice_revision_conflict"),
+        ):
+            open_calls = synthesizer.open_calls
+            socket.send_json(
+                tts_start(
+                    request_id=request_id,
+                    voice=_CLONE_ID,
+                    voice_revision=voice_revision,
+                    expected_model_revision=model_revision,
+                )
+            )
+            error = socket.receive_json()
+            assert error["type"] == "error"
+            assert error["error"]["code"] == expected_code
+            assert synthesizer.open_calls == open_calls
+
+        socket.send_json(
+            tts_start(
+                request_id="clone-recovered",
+                voice=_CLONE_ID,
+                voice_revision=voices[_CLONE_ID]["voice_revision"],
+                expected_model_revision=clone_revision,
+            )
+        )
+        assert _until(socket, "speechrail.tts.started")[-1]["request_id"] == "clone-recovered"
+        socket.send_json(tts_cancel(request_id="clone-recovered"))
+        _until(socket, "speechrail.tts.cancelled")
+    assert synthesizer.open_calls == 5
+    assert all(session.closed for session in synthesizer.sessions)
 
 
 @pytest.mark.parametrize("tier", _TIERS)
