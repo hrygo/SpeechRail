@@ -23,10 +23,11 @@ public struct TeleprompterView: View {
     @State private var isReadingAliasPresented = false
     @State private var targetMinutesInput = "20"
     @State private var pendingAIAction: AIPendingAction = .prepare
-    @State private var localPreparedText = ""
-    @State private var preparedTextSyncTask: Task<Void, Never>?
     @State private var quickDraftTitle = "未命名稿件"
     @State private var quickDraftText = ""
+    /// E1/TP-01：即启编辑的所有权在 Session。本地 @State 只在 Session 尚无内存
+    /// 稿件时作一次性兜底；首字进入 Session 后即启编辑区只读 Session 内存稿件，
+    /// 因此 `documents` 列表读盘失败为空也不会切回另一个空编辑区丢弃首字。
 
     /// 送模型之前要先说清楚这次发出去的是哪类内容，用户才认得同意按钮在同意什么。
     private enum AIPendingAction {
@@ -361,7 +362,7 @@ public struct TeleprompterView: View {
     // MARK: - 即启工作台顶部栏
 
     private var instantDraftHeader: some View {
-        let titleInput = TextField("稿件名称", text: $quickDraftTitle)
+        let titleInput = TextField("稿件名称", text: quickDraftTitleBinding)
             .textFieldStyle(.plain)
             .font(SpeechRailDesignTokens.Typography.bodyMedium)
             .speechRailSingleLineInput(.regular)
@@ -370,7 +371,7 @@ public struct TeleprompterView: View {
                 maxWidth: .infinity
             )
 
-        let documentCount = Text("\(quickDraftText.count) 字")
+        let documentCount = Text("\(quickDraftBodyText.count) 字")
             .font(SpeechRailDesignTokens.Typography.technicalValue)
             .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.compact)
@@ -430,7 +431,7 @@ public struct TeleprompterView: View {
             .padding(.top, SpeechRailDesignTokens.Spacing.sm)
 
             ZStack(alignment: .topLeading) {
-                TextEditor(text: $quickDraftText)
+                TextEditor(text: quickDraftBodyBinding)
                     .font(SpeechRailDesignTokens.Typography.body)
                     .scrollContentBackground(.hidden)
                     .padding(SpeechRailDesignTokens.Spacing.sm)
@@ -441,7 +442,7 @@ public struct TeleprompterView: View {
                     )
                     .accessibilityLabel("原稿正文输入")
 
-                if quickDraftText.isEmpty {
+                if quickDraftBodyText.isEmpty {
                     Text("输入你的演讲、口播或汇报稿件；也可以从下方一键载入开箱场景范例…")
                         .font(SpeechRailDesignTokens.Typography.body)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary.opacity(0.8))
@@ -498,25 +499,29 @@ public struct TeleprompterView: View {
 
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
 
-                // 核心启停操作
+                // 核心启停操作：E5/TP-05 原稿开台是主路径（primary/唯一 ⌘⏎），
+                // AI 整理是可选次动作。原稿动作只走持久化边界与手动入口，
+                // 由现有确定性版本生成朗读稿，不调用 LLM/麦克风/ASR。
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     Button {
-                        submitInstantDraft(openDirectly: false)
+                        submitInstantDraft(openDirectly: true)
                     } label: {
                         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                            Label("新建并整理", systemImage: "sparkles")
+                            Label("打开提词器", systemImage: "play.rectangle.fill")
                             ButtonShortcutHint("⌘⏎")
                         }
                     }
                     .keyboardShortcut(.return, modifiers: .command)
                     .speechRailButton(.primary)
-                    .disabled(quickDraftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(quickDraftBodyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
-                    Button("直接使用原稿") {
-                        submitInstantDraft(openDirectly: true)
+                    Button {
+                        submitInstantDraft(openDirectly: false)
+                    } label: {
+                        Label("整理朗读稿", systemImage: "sparkles")
                     }
                     .speechRailButton(.secondary)
-                    .disabled(quickDraftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(quickDraftBodyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
@@ -530,14 +535,64 @@ public struct TeleprompterView: View {
         reloadDocuments()
     }
 
+    /// E1/TP-01 即启编辑统一绑定：Session 有内存稿件时读写 Session，
+    /// 尚无时读写本地一次性兜底。每一次按键都经同一份文档身份落盘防抖，
+    /// 不再“提交按钮之前没有进入 Session/Store”。
+    private var quickDraftTitleBinding: Binding<String> {
+        Binding(
+            get: { session.document?.title ?? quickDraftTitle },
+            set: {
+                if session.document != nil {
+                    session.updateTitle($0)
+                } else {
+                    quickDraftTitle = $0
+                }
+            }
+        )
+    }
+
+    private var quickDraftBodyBinding: Binding<String> {
+        Binding(
+            get: { session.document?.sourceText ?? quickDraftText },
+            set: {
+                if session.document != nil {
+                    session.updateSourceText($0)
+                } else {
+                    quickDraftText = $0
+                    if !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        _ = try? session.updateQuickDraft(title: quickDraftTitleText, sourceText: $0)
+                    }
+                }
+            }
+        )
+    }
+
+    private var quickDraftTitleText: String {
+        session.document?.title ?? quickDraftTitle
+    }
+
+    private var quickDraftBodyText: String {
+        session.document?.sourceText ?? quickDraftText
+    }
+
+    /// E1/TP-01 即启提交：正文以 Session 内存稿件为准；若尚无内存稿件则把
+    /// 本地兜底一次性交给 Session 建稿。E1 只统一所有权，不改变提交语义：
+    /// 校验仍走严格导入器，失败保留内存与复制入口，不 trim 伪造。
     private func submitInstantDraft(openDirectly: Bool) {
-        let trimmedTitle = quickDraftTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedTitle = quickDraftTitleText.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedTitle = trimmedTitle.isEmpty ? "未命名稿件" : trimmedTitle
-        let content = quickDraftText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let content = quickDraftBodyText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty else { return }
 
         do {
-            try session.createDocumentValidated(title: resolvedTitle, sourceText: content)
+            if session.document == nil {
+                _ = try session.updateQuickDraft(title: resolvedTitle, sourceText: content)
+                quickDraftTitle = "未命名稿件"
+                quickDraftText = ""
+            }
+            // 同一份即启稿不再重建身份：校验/提交只确认当前内存稿件的内容，
+            // 不另建第二份文档。阶段推进仍走原有确定性版本路径。
+            _ = try session.updateQuickDraft(title: resolvedTitle, sourceText: content)
             reloadDocuments()
             if openDirectly {
                 try session.useDeterministicFallback()
@@ -1258,13 +1313,13 @@ public struct TeleprompterView: View {
                         .speechRailButton(.primary)
 
                         Button("打开提词器") {
-                            showStage()
+                            openManuscriptDirectly()
                         }
                         .speechRailButton(.secondary)
 
                     case .inputDeviceUnavailable, .serviceNotReady, .serviceBusy, .streamFailed:
                         Button("打开提词器") {
-                            showStage()
+                            openManuscriptDirectly()
                         }
                         .speechRailButton(.primary)
 
@@ -1293,19 +1348,14 @@ public struct TeleprompterView: View {
                         .speechRailButton(.secondary)
 
                     case .noActiveVersion:
-                        Button("直接使用原稿") {
-                            do {
-                                try session.useDeterministicFallback()
-                                operationMessage = nil
-                            } catch {
-                                operationMessage = error.localizedDescription
-                            }
+                        Button("打开提词器") {
+                            openManuscriptDirectly()
                         }
                         .speechRailButton(.primary)
 
                     case .occupiedBy:
                         Button("打开提词器") {
-                            showStage()
+                            openManuscriptDirectly()
                         }
                         .speechRailButton(.primary)
 
@@ -1505,7 +1555,7 @@ public struct TeleprompterView: View {
                                 .font(SpeechRailDesignTokens.Typography.sectionTitle)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
 
-                            Text("AI 已将原稿转为自然口述语序。通读核对，可直接修改，满意后直接开讲。")
+                            Text(preparedSubtitleText)
                                 .font(SpeechRailDesignTokens.Typography.caption)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         }
@@ -1523,39 +1573,121 @@ public struct TeleprompterView: View {
 
                     SessionHairline()
 
-                    TextEditor(text: $localPreparedText)
-                        .disabled(!session.canEdit)
-                        .font(SpeechRailDesignTokens.Typography.body)
-                        .scrollContentBackground(.hidden)
-                        .padding(SpeechRailDesignTokens.Spacing.sm)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(
-                            SpeechRailDesignTokens.Color.recessedField,
-                            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                        )
-                        .accessibilityLabel("口述字符稿正文")
-                        .onAppear {
-                            localPreparedText = session.preparedText
-                        }
-                        .onChange(of: session.phase) { _, newPhase in
-                            if newPhase == .prepared {
-                                localPreparedText = session.preparedText
-                            }
-                        }
-                        .onChange(of: localPreparedText) { _, newText in
-                            preparedTextSyncTask?.cancel()
-                            preparedTextSyncTask = Task { @MainActor in
-                                try? await Task.sleep(for: .milliseconds(350))
-                                guard !Task.isCancelled else { return }
-                                session.updatePreparedDraftText(newText)
-                            }
-                        }
+                    // E6/TP-06：连续段落编辑——每段正文可改、用途小菜单，
+                    // 高级结构动作复用现有显式方法。整份稿看起来仍是一份稿，
+                    // 块 ID/来源/用途稳定保留，不再全文重建。
+                    preparedBlockList
                 }
                 .padding(SpeechRailDesignTokens.Spacing.md)
             }
         }
     }
 
+
+    // MARK: - E6 候选段落编辑（连续段落 + 用途菜单）
+
+    /// 连续段落编辑器：speak 段展示/编辑 text；cue/skip 段展示 rawSourceText
+    /// 只读正文（用途仍可改）。全段正文与来源身份始终保留；编辑直接汇入
+    /// Session 保存时序（500ms 防抖），无双层全文防抖与 UI 缓存。
+    @ViewBuilder
+    private var preparedBlockList: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                ForEach(session.readingBlocks) { block in
+                    preparedBlockRow(block)
+                }
+            }
+            .padding(SpeechRailDesignTokens.Spacing.sm)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(
+            SpeechRailDesignTokens.Color.recessedField,
+            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+        )
+        .accessibilityLabel("口述字符稿分段")
+    }
+
+    @ViewBuilder
+    private func preparedBlockRow(_ block: TeleprompterReadingBlock) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Text(block.preparedOrdinalLabel)
+                    .font(SpeechRailDesignTokens.Typography.technicalValue)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    .frame(width: 32, alignment: .leading)
+                Spacer(minLength: 0)
+                // 当前用途可见；显式菜单“照念／只作提示／跳过”。
+                Menu {
+                    Button("照念") { session.setBlockDisposition(id: block.id, disposition: .speak) }
+                    Button("只作提示") { session.setBlockDisposition(id: block.id, disposition: .cue) }
+                    Button("跳过") { session.setBlockDisposition(id: block.id, disposition: .skip) }
+                } label: {
+                    HStack(spacing: 2) {
+                        Text(block.disposition.preparedTitle)
+                            .font(SpeechRailDesignTokens.Typography.captionMedium)
+                        Image(systemName: "chevron.down")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                    }
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                }
+                .menuStyle(.borderlessButton)
+                .disabled(!session.canEdit)
+                .help("这段的跟读方式：照念／只作提示／跳过")
+            }
+
+            if block.disposition == .speak {
+                TextEditor(text: preparedTextBinding(for: block.id, current: block.text))
+                    .disabled(!session.canEdit)
+                    .font(SpeechRailDesignTokens.Typography.body)
+                    .scrollContentBackground(.hidden)
+                    .frame(minHeight: SpeechRailDesignTokens.Teleprompter.preparedBlockEditorMinHeight)
+                    .accessibilityLabel("第 \(block.ordinal + 1) 段正文")
+            } else {
+                Text(block.rawSourceText.isEmpty ? block.text : block.rawSourceText)
+                    .font(SpeechRailDesignTokens.Typography.body)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityLabel("第 \(block.ordinal + 1) 段原稿")
+            }
+
+            if session.canUndoPreparedEdit {
+                Button("撤销上次段落修改") { session.undoLastPreparedEdit() }
+                    .buttonStyle(.plain)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    .help("恢复切换前的段落正文、用途与来源")
+            }
+        }
+        .padding(SpeechRailDesignTokens.Spacing.sm)
+        .background(
+            SpeechRailDesignTokens.Color.inputField,
+            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+        )
+    }
+
+    /// 段落正文绑定：直写 Session，无 UI 缓存。E6 只保留单层防抖（Session 侧
+    /// 500ms），删除本路径的双层全文防抖与 `localPreparedText` 缓存。
+    private func preparedTextBinding(for blockID: String, current: String) -> Binding<String> {
+        Binding(
+            get: { current },
+            set: { session.updateBlockText(id: blockID, text: $0) }
+        )
+    }
+
+    /// E7a：候选说明按证据区分——局部 fallback 称“部分内容保留原稿”，
+    /// 边界 unchecked 称未完成检查，不标整稿 AI 成功。
+    private var preparedSubtitleText: String {
+        if session.isFullyLocalPreparationFallback {
+            return "原稿可直接使用，未经 AI 整理。通读核对，满意后直接开讲。"
+        }
+        if session.hasUncheckedPreparationBoundaries {
+            return "AI 已整理原稿，但相邻段落的衔接未完成检查。通读核对，可直接修改，满意后直接开讲。"
+        }
+        if session.hasLocalPreparationFallback {
+            return "AI 已整理原稿，其中部分内容保留原稿。通读核对，可直接修改，满意后直接开讲。"
+        }
+        return "AI 已将原稿转为自然口述语序。通读核对，可直接修改，满意后直接开讲。"
+    }
 
     // MARK: - 3.4 提词就绪内容视图 (Hero View)
 
@@ -1772,15 +1904,21 @@ public struct TeleprompterView: View {
             switch session.phase {
             case .draft:
                 Button {
-                    requestAIAnalysis()
+                    openManuscriptDirectly()
                 } label: {
                     HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        Label("整理朗读稿", systemImage: "sparkles")
+                        Label("打开提词器", systemImage: "play.rectangle.fill")
                         ButtonShortcutHint("⌘⏎")
                     }
                 }
                 .keyboardShortcut(.return, modifiers: .command)
                 .speechRailButton(.primary)
+                .disabled(sourceIsEmpty || session.sourceValidationError != nil || !session.canEdit)
+
+                Button("整理朗读稿", systemImage: "sparkles") {
+                    requestAIAnalysis()
+                }
+                .speechRailButton(.secondary)
                 .disabled(
                     sourceIsEmpty
                         || session.sourceValidationError != nil
@@ -1788,17 +1926,6 @@ public struct TeleprompterView: View {
                         || session.isPreparingDraft
                         || !isTargetMinutesValid
                 )
-
-                Button("直接使用原稿") {
-                    do {
-                        try session.useDeterministicFallback()
-                        operationMessage = nil
-                    } catch {
-                        operationMessage = error.localizedDescription
-                    }
-                }
-                .speechRailButton(.secondary)
-                .disabled(sourceIsEmpty || session.sourceValidationError != nil || !session.canEdit)
 
             case .analyzing, .preparing:
                 Button("取消整理") {
@@ -1809,8 +1936,8 @@ public struct TeleprompterView: View {
             case .prepared:
                 Button {
                     do {
-                        preparedTextSyncTask?.cancel()
-                        session.updatePreparedDraftText(localPreparedText)
+                        // E6/N01：不再无条件全文回写——段落编辑已直接汇入
+                        // Session，未经编辑的候选原样采用，块身份完整保留。
                         try session.acceptPendingVersion()
                         operationMessage = nil
                         reloadDocuments()
@@ -1820,8 +1947,8 @@ public struct TeleprompterView: View {
                     }
                 } label: {
                     HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        Image(systemName: "play.rectangle.fill")
-                        Text("打开提词器")
+                        Image(systemName: "checkmark.circle.fill")
+                        Text("用这份稿")
                         ButtonShortcutHint("⌘⏎")
                     }
                 }
@@ -1844,8 +1971,12 @@ public struct TeleprompterView: View {
                 Button {
                     showStage()
                 } label: {
-                    SpeechRailButtonLabel("打开提词器", icon: .stage)
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        SpeechRailButtonLabel("打开提词器", icon: .stage)
+                        ButtonShortcutHint("⌘⏎")
+                    }
                 }
+                .keyboardShortcut(.return, modifiers: .command)
                 .speechRailButton(.primary)
 
                 Button {
@@ -2199,8 +2330,23 @@ public struct TeleprompterView: View {
 
     private var aiDataFlowAcknowledgementKey: String {
         TeleprompterAIDataFlowDisclosure.acknowledgementDefaultsKey(
-            for: preferences.llmConfiguration(for: .teleprompter)
+            for: preferences.llmConfiguration(for: .teleprompter),
+            purpose: pendingAIAction == .prepare ? .prepare : .annotate
         )
+    }
+
+    /// E5/TP-05 原稿开台统一入口：blocked 横幅与常驻底座共享。先 flush 待保存
+    /// 修订（失败保留内容与重试，不伪装成功），再走现有手动入口生成确定性版本。
+    /// 不调用 LLM/麦克风/ASR；目标时长无效不阻塞原稿手动阅读。
+    private func openManuscriptDirectly() {
+        do {
+            try session.flushPendingDraftSave()
+            try session.openForManualReading()
+            operationMessage = nil
+            showStage()
+        } catch {
+            operationMessage = error.localizedDescription
+        }
     }
 
     private func startAIAnalysis() {

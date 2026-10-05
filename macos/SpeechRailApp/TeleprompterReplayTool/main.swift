@@ -40,7 +40,10 @@ private let usage = """
       「本报告的数字不能作为质量结论」——**报告信的是这个后缀，不是你有没有
       真的看过**。
 
-    输出（schema teleprompter.eval.v1）：仅聚合计数与版本信息，不含音频、完整正文或转写。
+    输出（schema teleprompter.eval.v2）：仅聚合计数与版本信息，不含音频、完整正文或转写。
+    新增聚合 unconfirmed_final_count（有假设后的空 final）、
+    stable_prefix_contract_anomaly_count（稳定前缀契约异常）；输入仍为
+    teleprompter.replay.v1。
     未运行的状态是 not_run，不会用 0 冒充没有错误。
     """
 

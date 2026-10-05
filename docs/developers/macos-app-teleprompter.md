@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail macOS App AI 提词器"
 status: active
-version: "0.7.0"
-date: 2026-10-01
+version: "0.7.1"
+date: 2026-10-05
 ---
 
 # SpeechRail macOS App AI 提词器
@@ -127,7 +127,9 @@ v2 仅改变内部 AI wire schema；本机 `TeleprompterVersion`/稿件 JSON 结
 
 `TeleprompterAligner` 使用有界半全局编辑距离：输入最多保留 72 个 canonical unit，默认搜索锚点前 80、后 320 个 unit，允许插入、删除和替换；候选位置不再要求 ASR 最后一个 token 与稿件尾 token 完全相等。少于三单位也会尝试对齐；一至二单位只在锚点附近具备唯一证据或明显胜过竞争位置时推进，重复短语保持原位。多处相似位置差距不足也保持原位。该分数是启发式匹配值，不是校准概率。
 
-Realtime 的 delta 按 `itemID` 累积，revisioned snapshot 按全文替换；`eventID` 用于有界重复抑制，已终结 item 或较旧 item 的迟到 final 不得覆盖较新的确认位置。高置信 partial 可以暂定推进，final 才确认；一次 final 未匹配时保留最后确认位置并进入“追赶”状态，连续两次未匹配转为自由发挥。之后读回唯一、向前或锚点附近的稿件片段即可重新锚定。短片段若位置含糊则暂存有限上下文，不会因重复短语随机跳转。阈值是可注入策略的初始值，不是实音频质量结论；转写正文、item/event ID 和 PCM 都不落日志或持久化。 舞台状态胶囊区分“等待声音请开讲…”“听见你了，正在跟上稿件…”“跟读咬合”“正在跟上稿件”和“自由发挥中”，暂停与手动浏览时也显示对应状态；主舞台不展示识别原文、置信度或协议事件名。
+Realtime 的 delta 按 `itemID` 累积，revisioned snapshot 按全文替换；`eventID` 用于有界重复抑制，已终结 item 或较旧 item 的迟到 final 不得覆盖较新的确认位置。高置信 partial 可以暂定推进，final 才确认；一次 final 未匹配时保留最后确认位置并进入“追赶”状态，连续两次未匹配转为自由发挥。之后读回唯一、向前或锚点附近的稿件片段即可重新锚定。短片段若位置含糊则暂存有限上下文，不会因重复短语随机跳转。阈值是可注入策略的初始值，不是实音频质量结论；转写正文、item/event ID 和 PCM 都不落日志或持久化。 舞台状态胶囊按 §6.4 统一文案：无有效识别时“麦克风使用中，请开始朗读”，已识别但未定位时“正在定位，位置已保持”，有有效位置证据时“语音跟随中”，有假设的空 final 显示“本句未确认，位置已保持”，人工接管后“已切到手动”，暂停与手动时显示对应状态；主舞台不展示识别原文、置信度或协议事件名。
+
+回放报告输出 `teleprompter.eval.v2`：在原聚合之外新增 `unconfirmed_final_count`（有假设后的空 final）与 `stable_prefix_contract_anomaly_count`（稳定前缀契约异常）；输入仍为 `teleprompter.replay.v1`。素材与标注写法见[`提词器时延基线朗读稿与标注模板`](teleprompter-benchmark-script.md)。
 
 正常阅读舞台按当前字号与可用宽度展示 1／2／3 条实际排版行，当前原文位置以段落索引与 UTF-16 偏移定位；三行时上行为已读上下文、中行为当前行、下行为下一行。行列表是派生展示缓存，不进入稿件持久化。显式「查阅全稿」仍按完整语义段落滚动并允许原生文本选择；字词对齐切片只服务跟读控制器，不作为独立视觉行。语音跟读仍依据既有段落与 UTF-16 位置推进。手动定位、全稿滚动接管或关闭会同步撤销语音推进权，退休已知 item；会话层 drain/clear 排除尚未收到的旧事件，generation token 排除已关闭连接的迟到结果。手动接管后 final 不得把 UI 改回跟读态，也不得自动恢复采集。末行不触发完稿页或自动关闭；舞台计时按一次打开到关闭连续计算，不随语音启停重置。
 
@@ -252,3 +254,5 @@ scripts/macos_app_build.sh --configuration Debug
 ③ **眼动节奏与平滑滚动动效**：将滚动动画优化为符合眼球自然追踪的眼动缓动曲线 `.timingCurve(0.2, 0.0, 0.1, 1.0, duration: 0.28)`，在开启 Reduce Motion 时仍维持稳定降级为 `nil`。
 
 验证：`swift test --package-path macos/SpeechRailApp --filter Teleprompter` 375 项 / 16 套件全部通过（新增 `stageMirrorPreferencePersists` 单测覆盖镜像默认值与持久化往返）。**未执行 UI 自动化与界面走查**（严格遵守 AGENTS.md 约束）。
+
+2026-10-05（用户旅程 E1–E8 实现核验）：按[`提词器用户旅程执行方案`](../../implementation/2026-10-03-teleprompter-user-journey-luna-guide.md) §3 / §5 / §8 完成实现与定向回归。内容侧：首次输入经 `updateQuickDraft` 取得文档身份并同步落盘，切稿前 `flushPendingDraftSave`，失败保留身份与重试；候选采用保留段落身份与来源用途，撤销恢复修改前内容，全跳过时以 `noReadableBlocks` 拒绝采用。控制侧：稳定前缀按丢弃数换算到保留坐标，同位短 final 可确认且不重复移动视口，有假设的空 final 保位并报“本句未确认，位置已保持”；人工接管同步撤销旧 generation，停止失败保持可重试状态；手动开台不调用 LLM/麦克风/ASR，重开恢复位置且保持手动态。回放报告为 `teleprompter.eval.v2`，输入仍为 `teleprompter.replay.v1`。验证：`swift test --package-path macos/SpeechRailApp` 419 项 / 17 套件通过，`scripts/macos_app_build.sh --configuration Debug` BUILD SUCCEEDED，`git diff --check` 通过；`teleprompter-replay --help` 可用，实际回放缺授权素材记 `not_run`。**未执行前台 UI 走查、VoiceOver、Reduce Motion 实测与真人音频验收；E9 条件增强记 `deferred`**。

@@ -76,15 +76,18 @@ public enum TeleprompterFollowState: Equatable, Sendable {
 }
 
 public enum TeleprompterFollowPresentation {
+    /// E7c/§6.4：reducer 决策表示当前位置证据。tracking 仅在有有效位置证据时
+    /// 呈现“语音跟随中”；listening/catchingUp 无定位证据时统一“正在定位，
+    /// 位置已保持”，不伪装已定位。内部实现术语不得作为用户文案。
     public static func statusText(for state: TeleprompterFollowState) -> String {
         switch state {
-        case .waitingForSpeech: "等待声音请开讲…"
-        case .listening: "听见你了，正在跟上稿件…"
-        case .tracking: "跟读咬合"
-        case .catchingUp: "正在跟上稿件"
+        case .waitingForSpeech: "麦克风使用中，请开始朗读"
+        case .listening: "正在定位，位置已保持"
+        case .tracking: "语音跟随中"
+        case .catchingUp: "正在定位，位置已保持"
         case .freePlaying: "自由发挥中"
         case .paused: "已暂停"
-        case .manual: "手动浏览中"
+        case .manual: "手动提词"
         }
     }
 }
@@ -130,6 +133,9 @@ public struct TeleprompterFollowController: Sendable {
     public private(set) var followState: TeleprompterFollowState
     public private(set) var lastMatchConfidence: Double?
     public private(set) var lastMatchedCount = 0
+    /// 最近一次 snapshot 实际用于稳定对齐的 Unicode scalar 数（测试可见）。
+    /// `nil` 表示最近一次 snapshot 未使用稳定前缀路径。
+    public private(set) var lastStableAlignedScalarCount: Int?
     /// F-15 要求稳定前缀的契约异常**可见**。修复前越界被折成 nil，异常从外面
     /// 完全看不出来——报告、回放与界面都以为那只是一段没有稳定前缀的话。
     public private(set) var stablePrefixContractAnomalies = 0
@@ -141,6 +147,9 @@ public struct TeleprompterFollowController: Sendable {
         var snapshotRevision = 0
         var stablePrefixCodepoints: Int?
         var sampleSpan: RealtimeASRClient.RealtimeSampleSpan?
+        /// 最近一次有效试探位置（E3 同位确认用）。只在 snapshot 实际推进
+        /// 视口或确认同位时更新；final 消费后由调用方清理。
+        var lastPreviewedPosition: TeleprompterAligner.Position?
     }
     private var items: [String: Item] = [:]
     private var retired: [String] = []
@@ -195,7 +204,17 @@ public struct TeleprompterFollowController: Sendable {
         partialPreview = item.text
         if followState == .waitingForSpeech { followState = .listening }
         let match = locate(TeleprompterCanonicalizer.values(item.text), script: script, anchor: position)
+        let viewportBeforePreview = viewportAnchor
         applyPreviewMatch(match, itemID: itemID)
+        // 试探推进（前进或同位确认）记到即将写回的 item 上，供 final 同位
+        // 确认核对“同 item 且试探位置仍有效”。apply 内部不碰 items。
+        // 条件用“试探后视口位置有有效候选”：前进时 viewport 已变；
+        // 同位试探时 viewport 不变但 candidate 落在当前位置。
+        if viewportAnchor != viewportBeforePreview
+            || (candidatePosition == viewportAnchor
+                && match.position == viewportAnchor) {
+            item.lastPreviewedPosition = viewportAnchor
+        }
         items[itemID] = item
         if items.count > 8, let oldest = items.min(by: { $0.value.sequence < $1.value.sequence })?.key {
             retire(oldest)
@@ -243,9 +262,16 @@ public struct TeleprompterFollowController: Sendable {
                 items[itemID] = item
                 return
             }
-            // 越过契约校验之后仍要夹一次——夹的是**我们自己的 2048 截断**，不是
-            // 契约。存下来的是原文的后缀，原前缀落在它里面的部分就是两者的较小值。
-            item.stablePrefixCodepoints = min(stablePrefixCodepoints, item.text.unicodeScalars.count)
+            // 越过契约校验之后做截断坐标换算：存下来的是原文的后缀，
+            // 原前缀落在它里面的部分 = 原前缀 − 丢弃数，再夹到保留区范围内。
+            // 旧公式 min(stable, retainedCount) 漏减丢弃数（E2/F03）。
+            let rawScalarCountForMapping = rawScalarCount
+            let retainedScalarCount = item.text.unicodeScalars.count
+            let droppedScalarCount = rawScalarCountForMapping - retainedScalarCount
+            item.stablePrefixCodepoints = min(
+                max(0, stablePrefixCodepoints - droppedScalarCount),
+                retainedScalarCount
+            )
         } else {
             item.stablePrefixCodepoints = nil
         }
@@ -253,6 +279,7 @@ public struct TeleprompterFollowController: Sendable {
         let match: TeleprompterAligner.Match
         if let stablePrefixCodepoints = item.stablePrefixCodepoints,
            stablePrefixCodepoints > 0 {
+            lastStableAlignedScalarCount = stablePrefixCodepoints
             let stableScalars = item.text.unicodeScalars.prefix(stablePrefixCodepoints)
             let stableText = String(stableScalars)
             match = locate(
@@ -261,13 +288,23 @@ public struct TeleprompterFollowController: Sendable {
                 anchor: position
             )
         } else {
+            lastStableAlignedScalarCount = nil
             match = locate(
                 TeleprompterCanonicalizer.values(item.text),
                 script: script,
                 anchor: position
             )
         }
+        let viewportBeforePreview = viewportAnchor
         applyPreviewMatch(match, itemID: itemID)
+        // 与 receivePartial 同规则：试探推进（前进或同位）记到即将写回的
+        // item 上，供 final 同位确认核对“同 item 且试探位置仍有效”。
+        // apply 内部不碰 items，试探位置由调用方在写回前记录。
+        if viewportAnchor != viewportBeforePreview
+            || (candidatePosition == viewportAnchor
+                && match.position == viewportAnchor) {
+            item.lastPreviewedPosition = viewportAnchor
+        }
         items[itemID] = item
         if items.count > 8, let oldest = items.min(by: { $0.value.sequence < $1.value.sequence })?.key {
             retire(oldest)
@@ -294,8 +331,16 @@ public struct TeleprompterFollowController: Sendable {
         if followState == .waitingForSpeech { followState = .listening }
 
         guard !tokens.isEmpty else {
+            // E3/F05 空 final：保位、不提交。若该 item 此前有非空假设
+            // （snapshot 文本或试探位置），给出可观察的未确认状态，
+            // 不再沿用 tracking；无先前内容则不虚构“用户说过话”。
+            let hadPriorEvidence = !item.text.isEmpty || item.lastPreviewedPosition != nil
             provisionalItemID = nil
             candidatePosition = nil
+            if hadPriorEvidence {
+                uncertainty = 1
+                if followState != .freePlaying { followState = .catchingUp }
+            }
             retire(itemID)
             return
         }
@@ -309,7 +354,8 @@ public struct TeleprompterFollowController: Sendable {
         lastMatchConfidence = match.confidence
         lastMatchedCount = match.matchedCount
 
-        if let candidate = match.position, mayConfirm(match, candidate: candidate) {
+        if let candidate = match.position,
+           mayConfirm(match, candidate: candidate, finalItemID: itemID, previewed: item.lastPreviewedPosition) {
             let movesViewportForward = isForward(candidate, from: viewportAnchor)
             let isControlledReread = !movesViewportForward
             committedPosition = candidate
@@ -372,6 +418,8 @@ public struct TeleprompterFollowController: Sendable {
         if isForward(candidate, from: position) {
             viewportAnchor = candidate
             provisionalItemID = itemID
+            // 注意：snapshot 调用方在 apply 之后才写回 items，此处直接读写
+            // items 会拿到旧拷贝。试探位置由调用方在写回前记到局部 item 上。
             if followState != .freePlaying { followState = .tracking }
         } else if candidate == position {
             if followState != .freePlaying { followState = .tracking }
@@ -393,9 +441,19 @@ public struct TeleprompterFollowController: Sendable {
 
     private func mayConfirm(
         _ match: TeleprompterAligner.Match,
-        candidate: TeleprompterAligner.Position
+        candidate: TeleprompterAligner.Position,
+        finalItemID: String? = nil,
+        previewed: TeleprompterAligner.Position? = nil
     ) -> Bool {
         if isForward(candidate, from: viewportAnchor) {
+            return mayAdvance(match)
+        }
+        // E3/F04 同位确认：final 落在当前视口同一位置，且同 item 此前已有
+        // 有效试探推进到该位置——这是确认，不是重读。fresh final 自身仍需
+        // 满足有界试探门槛（mayAdvance），不把弱匹配无条件提交。
+        if candidate == viewportAnchor,
+           let finalItemID, let previewed, previewed == viewportAnchor,
+           provisionalItemID == finalItemID {
             return mayAdvance(match)
         }
         return match.confidence >= 0.95
@@ -459,6 +517,7 @@ public struct TeleprompterFollowController: Sendable {
         committedPosition = viewportAnchor
         lastMatchConfidence = nil
         lastMatchedCount = 0
+        lastStableAlignedScalarCount = nil
         lowConfidenceStreak = 0
     }
 
@@ -538,6 +597,12 @@ public struct TeleprompterFollowController: Sendable {
 public enum TeleprompterRealtimeFollowOutcome: Equatable, Sendable {
     case aligned
     case previewed
+    /// 同位确认：committed 已提交但视口未移动。调用方不得再用
+    /// “视口动了”推导定位成功，必须消费实际决策结果。
+    case confirmed
+    /// 空 final 未确认：保位、不提交，且此前有非空假设。
+    /// 无先前证据的空 final（ignored）与此不同，不虚构“用户说过话”。
+    case unconfirmed
     case ignored
     case terminalFailure
 }
@@ -585,6 +650,7 @@ public struct TeleprompterRealtimeFollowAdapter: Sendable {
                 ? .previewed : .ignored
 
         case .completed(let itemID, let transcript):
+            let committedBefore = controller.committedPosition
             let previousPosition = controller.position
             let previousState = controller.followState
             let previousConfidence = controller.lastMatchConfidence
@@ -595,6 +661,21 @@ public struct TeleprompterRealtimeFollowAdapter: Sendable {
                 segments: segments,
                 eventID: metadata.eventID
             )
+            // 同位确认不移动视口：committed 推进即实际确认，不能再用
+            // “视口/状态/分数变化”推导，否则 committed 同位确认会被判 ignored。
+            // 前进确认仍走 .aligned（视口移动即对齐）；只有“视口未动但
+            // committed 已提交”才走 .confirmed，避免改变既有前进语义。
+            if controller.committedPosition != committedBefore,
+               controller.position == previousPosition {
+                return .confirmed
+            }
+            // 有假设后的空 final：保位、不提交，但给出可观察未确认。
+            // 用状态变化表达，不展示或落盘全文 ASR。
+            if transcript.isEmpty,
+               controller.followState == .catchingUp,
+               previousState != .catchingUp {
+                return .unconfirmed
+            }
             let didAlign = controller.position != previousPosition
                 || (controller.followState == .tracking
                     && (previousState != .tracking
