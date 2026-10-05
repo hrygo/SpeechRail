@@ -2793,6 +2793,14 @@ public final class AssistantSession {
                 streamingReply = nil
             }
             return
+        } catch let error as LLMError where error == .cancelled {
+            // V07:provider 侧取消（`URLSession` 取消映射的 `.cancelled`）同样不是失败，
+            // 与原生 `CancellationError` 同一语义：只收界面文本，不记失败、不走失败收尾。
+            // 若落到下面的通用失败分支，"用户按了取消"会被记成一次回答失败。
+            if generation == replyGeneration {
+                streamingReply = nil
+            }
+            return
         } catch {
             guard generation == replyGeneration else { return }
             let message = "这一次没有回答出来：\(error.localizedDescription)"

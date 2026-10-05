@@ -754,11 +754,206 @@ struct LLMResponseStreamState {
 /// 为什么不用 `URLSession.AsyncBytes.lines`：它会丢掉空行，于是拿不到 SSE 的事件边界，
 /// 一个由多行 `data:` 拼成的事件会被读成几个坏事件。
 /// V07:流预算上限（方案 §6.3 首版候选，按 fake 边界复核后集中定义）。
-/// SSE 单行/单事件 256 KiB；错误 body 8 KiB。超限显式失败，不静默丢 token。
+/// SSE 单行/单事件 256 KiB；错误 body 8 KiB；首正文与正文停滞 deadline；
+/// 累计正文 16,384 scalar。超限显式失败，不静默丢 token。
+/// 仅助手 `stream()` 施加；`complete`/`completeJSON` 等一次性调用保持各自显式超时，
+/// 不套入语音短响应 deadline。
 enum AssistantLLMStreamBudget {
     static let maxSSELineBytes = 256 * 1024
     static let maxSSEEventBytes = 256 * 1024
     static let maxErrorBodyBytes = 8 * 1024
+    /// 首个有效正文到达前的等待上限。传 `nil` 表示不设限（测试/按需注入）。
+    static let firstTextTimeout: Duration = .seconds(30)
+    /// 有效正文之间的无进展上限——仅有效正文重置它，心跳/注释/重复事件不延长。
+    /// 总轮次 deadline 由调用方 Task 语义承载，此处不另设不断重置的计时器。
+    static let textStallTimeout: Duration = .seconds(15)
+    /// 整轮累计正文上限（Unicode scalar）。语音回答极少触及；超限显式失败，
+    /// 已收前缀由调用方保留，不强制完成/朗读。
+    static let maxTotalTextScalars = 16_384
+}
+
+/// V07:流读取与 deadline 计时的赛跑（非隔离 helper，供 actor 内调用）。
+///
+/// 读取保持原同步 consume 循环；计时器只读进度。任一 deadline 到达即抛
+/// `streamBudgetExceeded`，已收正文由调用方保留。`onDelta` 经 @Sendable
+/// 参数跨隔离域传递，不在 actor 上下文内联闭包。
+private enum StreamRace {
+    fileprivate static func run(
+        bytes: URLSession.AsyncBytes,
+        decoder: inout ResponsesEventStreamDecoder,
+        onDelta: @Sendable @escaping (String) -> Void,
+        timer: StreamTimer
+    ) async throws {
+        // decoder 是值类型：赛跑期间所有权移交读取任务，结束时交还。
+        // inout 跨任务传递被禁止，故用返回盒（终态/用量由调用方从返回的
+        // decoder 读取，与原顺序循环语义一致）。
+        // 结算语义与 `RealtimeASRClient.withStageTimeout` 同构：`group.next()`
+        // 按完成顺序返回，只取一次——先完成者胜出；defer 取消另一方。
+        // 计时器任务永不正常返回（deadline 到达即抛；读取已失败时可取消地停放，
+        // 让读取任务的错误获胜），因此不存在"哨兵被误认为成功"的路径。
+        final class DecoderBox: @unchecked Sendable {
+            var value: ResponsesEventStreamDecoder
+            init(_ v: ResponsesEventStreamDecoder) { value = v }
+        }
+        /// 赛跑结果：只有读取任务返回值；计时器任务只抛错（deadline 到达）
+        /// 或被取消（读取已获胜），永不返回值——因此无需 seed 同一性比较。
+        enum RaceResult: Sendable {
+            case finished(DecoderBox)
+            case timerFired
+            /// 计时器认输：无 deadline 可等，或读取已失败。
+            /// 永不抛错——调用方继续等读取任务的结果，绝不伪造超限。
+            case timerConceded
+        }
+        let finishedDecoder = try await withThrowingTaskGroup(of: RaceResult.self) { group in
+            let seed = DecoderBox(decoder)
+            group.addTask {
+                var local = seed.value
+                do {
+                    for try await byte in bytes {
+                        if await timer.expired {
+                            throw LLMError.streamBudgetExceeded(await timer.expiryReason)
+                        }
+                        if try local.consume(byte, onDelta: { text in
+                            onDelta(text)
+                            if !text.isEmpty {
+                                Task { await timer.noteText() }
+                            }
+                        }) { break }
+                    }
+                    try local.finish(onDelta: { text in
+                        onDelta(text)
+                        if !text.isEmpty {
+                            Task { await timer.noteText() }
+                        }
+                    })
+                    if await timer.expired {
+                        throw LLMError.streamBudgetExceeded(await timer.expiryReason)
+                    }
+                    return .finished(DecoderBox(local))
+                } catch {
+                    // 读取任务先立失败旗：计时器随后退出等待，不再覆盖失败原因。
+                    await timer.noteFailure()
+                    // V07:读取中途的取消同样单独成类，不记成传输失败。
+                    if error is CancellationError || (error as? URLError)?.code == .cancelled {
+                        throw LLMError.cancelled
+                    }
+                    throw error
+                }
+            }
+            group.addTask {
+                do {
+                    try await timer.waitForExpiry()
+                } catch {
+                    // deadline 到达：expired 旗已立，抛超限错误获胜；
+                    // 非超限错误（理论上不应发生）直接透出。
+                    if await timer.expired {
+                        return .timerFired
+                    }
+                    throw error
+                }
+                // waitForExpiry 正常返回只发生在两种情形：
+                // 无 deadline 可等，或读取已失败（failed 旗）。
+                // 两种情形下本任务都认输：返回永不抛错的 conceded，
+                // 调用方继续等读取任务的结果，绝不伪造超限。
+                // 注意：认输后若直接返回，`group.next()` 会先取到 conceded
+                // 而不是读取任务的结果——因此此处可取消地停放，等 defer 取消
+                // 或外层取消；停放被取消时抛 CancellationError 也不覆盖
+                // 读取任务的错误（见下方的 next 循环）。
+                do {
+                    try await Task.sleep(for: .seconds(3_600))
+                } catch {
+                    return .timerConceded
+                }
+                return .timerConceded
+            }
+            defer { group.cancelAll() }
+            // 循环结算：`.timerConceded`（计时器认输）不是终态，继续等
+            // 读取任务的结果；`.timerFired`/`.finished`/任务抛错才是终态。
+            // 认输任务已返回，不再占用 group；读取任务仍在运行（或已结束），
+            // 下一次 next 必为其结果——不会无界等待。
+            while true {
+                guard let winner = try await group.next() else {
+                    throw LLMError.transport("请求没有完成")
+                }
+                switch winner {
+                case .finished(let box):
+                    return box.value
+                case .timerFired:
+                    throw LLMError.streamBudgetExceeded(await timer.expiryReason)
+                case .timerConceded:
+                    continue
+                }
+            }
+        }
+        decoder = finishedDecoder
+    }
+}
+
+/// V07:流进度与 deadline 计时（actor 隔离，供赛跑双方共享）。
+/// internal 以便定向回归验证 deadline 状态机（首正文/停滞/心跳语义）；
+/// 不进入公共 API，仅同模块测试可见。
+actor StreamTimer {
+    private let firstDeadline: ContinuousClock.Instant?
+    private let stallTimeout: Duration?
+    private var stallDeadline: ContinuousClock.Instant?
+    private(set) var expired = false
+    private(set) var expiryReason = ""
+    private(set) var firstTextSeen = false
+    private var failed = false
+
+    init(
+        firstDeadline: ContinuousClock.Instant?,
+        stallTimeout: Duration?,
+        initialStall: ContinuousClock.Instant?
+    ) {
+        self.firstDeadline = firstDeadline
+        self.stallTimeout = stallTimeout
+        self.stallDeadline = initialStall
+    }
+
+    func noteText() {
+        firstTextSeen = true
+        if let stallTimeout {
+            stallDeadline = ContinuousClock.now.advanced(by: stallTimeout)
+        }
+    }
+
+    /// 读取任务失败时立旗：计时器随后退出等待，不再覆盖失败原因。
+    func noteFailure() {
+        failed = true
+    }
+
+    /// 计时器任务主体：任一 deadline 到达即立旗并抛错。
+    /// 无 deadline 可等时直接返回（由调用方结算读取任务）。
+    /// 读取任务已失败时直接返回，不覆盖其错误。
+    func waitForExpiry() async throws {
+        while true {
+            if failed { return }
+            let now = ContinuousClock.now
+            if let firstDeadline, !firstTextSeen, now >= firstDeadline {
+                expired = true
+                expiryReason = "首个有效正文超时未到达"
+                throw LLMError.streamBudgetExceeded(expiryReason)
+            }
+            if firstTextSeen, let stall = stallDeadline, now >= stall {
+                expired = true
+                expiryReason = "正文停滞超时未推进"
+                throw LLMError.streamBudgetExceeded(expiryReason)
+            }
+            let nextWake: ContinuousClock.Instant?
+            if !firstTextSeen {
+                nextWake = firstDeadline
+            } else {
+                nextWake = stallDeadline
+            }
+            guard let wake = nextWake else {
+                return  // 无 deadline 可等：计时器退出，等读取任务收尾。
+            }
+            let delay = max(.milliseconds(50), wake - now)
+            try? await Task.sleep(for: delay)
+            if Task.isCancelled || failed { return }
+        }
+    }
 }
 
 struct ResponsesEventStreamDecoder {
@@ -768,6 +963,9 @@ struct ResponsesEventStreamDecoder {
     private(set) var state = LLMResponseStreamState()
     private(set) var usage: [String: Any]?
     private(set) var byteCount = 0
+    /// 整轮累计正文 scalar（含 delta 与 refusal delta）。V07d 有界计数，
+    /// 超限由调用方显式失败，已收前缀保留。
+    private(set) var totalTextScalars = 0
 
     /// 收到一个字节。返回 `true` 表示本轮已收束，调用方应停止读取。
     mutating func consume(
@@ -835,9 +1033,17 @@ struct ResponsesEventStreamDecoder {
     ) throws -> Bool {
         var state = self.state
         var usage = self.usage
-        let finished = try Self.handle(object, state: &state, usage: &usage, onDelta: onDelta)
+        var total = self.totalTextScalars
+        let finished = try Self.countedHandle(
+            object,
+            state: &state,
+            usage: &usage,
+            totalTextScalars: &total,
+            onDelta: onDelta
+        )
         self.state = state
         self.usage = usage
+        self.totalTextScalars = total
         return finished
     }
 
@@ -866,6 +1072,31 @@ struct ResponsesEventStreamDecoder {
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
         return object
+    }
+
+    /// 处理一个事件（带整轮正文计数）。返回 `true` 表示本轮已收束，调用方应停止读取。
+    ///
+    /// V07d:累计正文超限显式失败，不静默丢 token，已收前缀由调用方保留。
+    static func countedHandle(
+        _ object: [String: Any],
+        state: inout LLMResponseStreamState,
+        usage: inout [String: Any]?,
+        totalTextScalars: inout Int,
+        onDelta: @Sendable (String) -> Void
+    ) throws -> Bool {
+        final class Counter: @unchecked Sendable { var value = 0 }
+        let counter = Counter()
+        let finished = try handle(object, state: &state, usage: &usage, onDelta: {
+            counter.value += $0.unicodeScalars.count
+            onDelta($0)
+        })
+        totalTextScalars += counter.value
+        guard totalTextScalars <= AssistantLLMStreamBudget.maxTotalTextScalars else {
+            throw LLMError.streamBudgetExceeded(
+                "累计正文超过 \(AssistantLLMStreamBudget.maxTotalTextScalars) scalars"
+            )
+        }
+        return finished
     }
 
     /// 处理一个事件。返回 `true` 表示本轮已收束，调用方应停止读取。
@@ -953,12 +1184,17 @@ public actor LLMProvider {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
+                    // V07:首正文 deadline——只有心跳/注释而无有效正文时显式失败，
+                    // 不无限延长回答；合法推理阶段的首个 delta 到达即解除。
+                    // 停滞 deadline 由 runStream 内有效正文推进重置。
                     try await self.runStream(
                         configuration: configuration,
                         messages: messages,
                         apiKey: apiKey,
                         maxOutputTokens: maxOutputTokens,
                         instructions: instructions,
+                        firstTextTimeout: AssistantLLMStreamBudget.firstTextTimeout,
+                        stallTimeout: AssistantLLMStreamBudget.textStallTimeout,
                         onDelta: { continuation.yield($0) }
                     )
                     continuation.finish()
@@ -1529,7 +1765,9 @@ public actor LLMProvider {
         apiKey: String?,
         maxOutputTokens: Int?,
         instructions: String?,
-        onDelta: @Sendable (String) -> Void
+        firstTextTimeout: Duration? = nil,
+        stallTimeout: Duration? = nil,
+        onDelta: @Sendable @escaping (String) -> Void
     ) async throws {
         let controlKey = thinkingKey(configuration, operation: .responses)
         var includeThinkingControl = !thinkingControlRejected.contains(controlKey)
@@ -1588,7 +1826,15 @@ public actor LLMProvider {
             do {
                 result = try await session.bytes(for: request)
             } catch {
-                let failure = LLMError.transport(error.localizedDescription)
+                // V07:取消单独成类——`URLSession` 取消抛 `URLError.cancelled`，
+                // 混进 transport 会把"用户按了取消"记成一次传输失败。
+                // 与 `perform(_:timeout:)` 同一区分规则。
+                let failure: LLMError
+                if error is CancellationError || (error as? URLError)?.code == .cancelled {
+                    failure = .cancelled
+                } else {
+                    failure = LLMError.transport(error.localizedDescription)
+                }
                 emitProviderObservation(
                     kind: .providerFailed,
                     context: nil,
@@ -1704,11 +1950,22 @@ public actor LLMProvider {
             throw failure
         }
         do {
+            // V07:读取与计时器赛跑。读取保持原同步 consume 循环；计时器
+            // 只读 actor 进度，到达即立旗并抛错；读取在下一字节/收尾处抛同错。
+            // 关键：先结算读取任务（它的错误优先），计时器无 deadline 时直接
+            // 返回哨兵，随后仍等读取收尾——不把"无 deadline"当成功。
             var decoder = ResponsesEventStreamDecoder()
-            for try await byte in bytes {
-                if try decoder.consume(byte, onDelta: onDelta) { break }
-            }
-            try decoder.finish(onDelta: onDelta)
+            let timer = StreamTimer(
+                firstDeadline: firstTextTimeout.map { ContinuousClock.now.advanced(by: $0) },
+                stallTimeout: stallTimeout,
+                initialStall: stallTimeout.map { ContinuousClock.now.advanced(by: $0) }
+            )
+            try await StreamRace.run(
+                bytes: bytes,
+                decoder: &decoder,
+                onDelta: onDelta,
+                timer: timer
+            )
             // `[DONE]` 与 EOF 都只是传输结束，不是模型的成功终态。
             guard decoder.state.isFinished else { throw LLMError.streamEndedEarly }
             streamResponseBytes = decoder.byteCount
