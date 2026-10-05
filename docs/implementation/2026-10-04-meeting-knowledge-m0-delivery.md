@@ -378,3 +378,95 @@ base: "origin/main @ d72535c7"
   显式“引用指旧 revision id”的字段级溯源仍需来源 revision 的 schema 迁移，未启动。
 - 会前准备（MC-04）仅静态核验：来源默认麦克风、偏好恢复已选 App，
   检查失败重试不重置用户已选来源；输入检查 UI 行为未做自动化走查，另行授权。
+
+## M1 增量（MA-09 长会议分窗、覆盖账本与局部重试，2026-10-05）
+
+### 做了什么
+
+- **分窗器**（`MinutesWindowPlanner`，Domain 纯逻辑）：按保守 token 估计把来源单元切成有界窗口。
+  - 没有 tokenizer，所以刻意不做"字符数当 token 数"的等价换算：CJK 按 1 字 ≈ 1 token、
+    其余按 4 字符 ≈ 1 token，值明显偏大。偏大只会让窗口更碎，偏小会让请求超限、把尾部悄悄丢掉。
+  - **每个来源单元恰好 owned 一次**；相邻窗口的重叠单元只进 `context`，只读、不可引用。
+  - 超长单句按字符边界切成多段（id 形如 `u7#2`），`lineID` 仍指向原句——锚点照样落回不可变修订。
+  - 切点优先落在说话人变化处，避免把一个话题腰斩；没有轮次边界才按 token 硬切。
+  - `MinutesWindowBudget.fit(contextTokens:requestedOutputTokens:)` 按模型上下文反推预算；
+    拿不到模型上下文时返回 nil，用保守默认值——**不**因为"不知道"就假装整场塞得进一窗。
+- **拥有区只读规则进了验证器**：`MinutesEvidenceValidator.validate` 新增 `citableUnitIDs`。
+  分窗核对时传 `window.citableUnitIDs`，引用重叠区会被判 `rejected` 并说明原因。
+  这是程序侧约束，不依赖提示词自觉。
+- **归并（reduce）**（`MinutesCandidateMerger`，Domain 纯逻辑，确定性）：
+  以来源身份去重——待办按「任务文本相同 **或** 来源完全相同」合并，负责人/期限取并集，
+  同一条待办不会因为落在重叠区而出现两遍（MC-39）。
+  跨窗撤回按**结论正文**归组（不是按来源单元——提出在第 3 句、撤回在第 80 句是常态）：
+  同一件事既有 `decided` 又有 `retracted` 时两个事件都保留，并标 `存在分歧/未确认`。
+  归并后按**全量**来源单元重新核对，引用仍必须落在真实快照里。
+- **覆盖账本**（`MinutesCoverageLedger` + schema v7）：
+  `minutes.coverage_json` 记整版覆盖，`minutes_window` 逐窗记拥有区间与处理结果
+  （processed / failed / truncated、失败原因、该窗候选 JSON、远端响应 id）。
+  `isComplete` 要求「单元全覆盖 **且** 无失败/无截断」，缺口不给原文只报数量。
+- **生成器接线**：`MinutesGenerator.run` 从「单请求」改为「切窗 → 逐窗 map → 归并 → 复核 → 落库」。
+  - 短会得到单窗，走**同一条**验证与落库路径（回退口径：不截取全文前 N 字符）。
+  - 每跑完一窗落一行（`recordMinutesWindow`，带父行 fencing）。崩溃恢复时已完成的窗口直接复用，
+    不把整场重新发一遍（MC-28/MC-27）。
+  - 一个窗口都没成功 → 整场如实失败，不发布半成品。部分成功 → 候选可用但正文带覆盖说明，
+    `coverage` 暴露给界面，**不标整场完整**（MC-40）。
+  - 取消时逐个取消在飞的远端任务并逐个如实汇报，不再只取消最后一个。
+- **局部重试**（`MinutesGenerator.retryFailedWindows`）：只重跑失败窗口，成功窗口的候选直接复用；
+  重新归并时以来源身份去重，同一条待办不会因为重跑多出一条。
+  边界：**已采用的版本拒绝重开**（用户核对过的东西不能被一次重试换掉）；
+  没有失败窗口时不做任何事，不新建版本、不发请求。
+
+### 回归证据（2026-10-05 核验）
+
+- 新增 `MeetingWindowCoverageTests` 14 项：拥有区唯一/重叠只读、短会单窗、首中尾均 owned、
+  超长单句切分与范围映射、token 估计保守性、重叠区同一条待办归并后只有一条、
+  跨窗撤回保留两个事件并标未确认、中间窗失败报缺口、截断窗不算完整、
+  账本随版本落库重开可读、局部重试只重跑失败窗 + 旧代际迟到写入被 fencing 挡住、
+  已采用版本拒绝重试、v6 → v7 迁移不补造覆盖账本。
+- 会议相关套件 103 项全绿：`MeetingWindowCoverageTests` 14、`MeetingMinutesEvidenceTests` 17、
+  `MeetingMinutesVersioningTests` 35、`MeetingMinutesJobRecoveryTests` 10、`MeetingSourceSealTests` 5、
+  `MeetingEvidenceAnchorTests` 7、`AssistantPersistenceTests` 15。
+- 全量 `swift test --package-path macos/SpeechRailApp`：**744 项全绿**。
+- `./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**（SPM 不编译 `MinutesGenerator.swift`，
+  只有这个脚本真正类型检查生成器接线）。
+
+### M1 增量（MA-09）迁移说明
+
+- schema v6 → v7：`minutes` 追加 `coverage_json`；新增 `minutes_window`
+  （`minutes_id` 外键级联、窗口序号、拥有/重叠单元 JSON、结果、失败原因、该窗候选、远端响应 id）。
+- **不回填** `coverage_json`：v6 之前是单窗生成的，从来没有分窗账本。
+  补一份"全部覆盖"等于替用户断言"当时整场都整理到了"，是伪造。
+  读回时 `coverage` 为 nil 就明确是"没有账本"，不会退化成"全覆盖"。
+- 老库升上来后行为不变：仍是单窗纪要，只是 `coverage` 为 nil。
+
+### M1 增量（MA-09）回退说明
+
+- 代码回退：revert 本次提交即可。库文件不回退也不需要回退——
+  v7 只新增表与列，老版本读库时 `sqlite3_column_count` 兼容、不读新列。
+- 数据回退：`minutes_window` 行与 `coverage_json` 列是纯增量，删除它们不改变既有纪要正文、
+  条目与锚点。**不建议**手工删列；确需回到 v6 形状时按 §"迁移说明"的逆操作。
+- 失败口径回退：窗口失败不影响转录，转录早已封存；用户随时可以重新生成。
+
+### M1 增量（MA-09）未验证事项与已知边界
+
+- **窗口预算是实验起点，不是能力承诺**：`windowTokens = 3000`（计划给的 2,500～4,000 区间中点）。
+  当前 `LLMConfiguration` 里**没有** provider/model 的上下文能力字段，所以没有按模型校准。
+  接真实模型前必须实测并调整 `MinutesGenerator.windowBudget` 或改用
+  `MinutesWindowBudget.fit` 传入真实上下文能力。这是本轮最需要后续校准的一处。
+- **归并是程序侧确定性合并，不是模型 reduce**。好处：不新增一次 provider 调用与失败面、
+  可完整单测。代价：语义层面的"两件事其实是一件"只能靠文本/来源去重识别，
+  同义改写（"李雷跟进" vs "李雷负责跟进"）在 task 文本完全不同时不会被合并。
+  计划 §6.3 要求"全局合并必须能访问候选对应原文"——本实现通过「归并后按全量单元重新核对 +
+  锚点读自修订」满足，但没有让模型重读原文做语义归并。
+- **跨窗分歧判定按结论正文归组**，正文不同但实为同一件事的两条结论不会被标未确认。
+  验证器是词法级，不做语义蕴含判断（MA-08 已记录的同一边界）。
+- **未接真实模型**：没有跑过任何真实 provider 的多窗请求，因此
+  「逐窗请求真的被 provider 接受」「远端 id 真的能按窗恢复」只有代码层保证，
+  没有实测证据。真实质量基准按目标另行授权。
+- **窗口是串行处理的**。长会窗口多时总时长线性增长；没有做并发，也就没有验证过
+  并发下的资源准入与租约表现。
+- **超长单句切分按字符边界**，切点优先落在标点/空白。它保证不丢字、不改字，
+  但不保证语义完整——一句跨窗口的话可能被切成两段分别归纳。
+- 界面未消费覆盖账本：`coverage` / `retryableWindowCount` 已有，但"覆盖缺口"面板与
+  「只重试失败的部分」按钮属 MA-11，本轮没有 UI 改动。
+- 真实采集、UI 自动化、发布另行授权，本轮均未做。

@@ -66,7 +66,10 @@ public actor SessionStore {
     /// v6（MA-08）：`minutes_item` / `minutes_evidence` 两张表。
     /// 结论与来源的对应关系从"候选 JSON 里的字符串"变成**可查的行**——
     /// 否则"这条结论依据哪几句"只能靠解析 JSON 回答，问不了、也删不掉。
-    public static let schemaVersion: Int32 = 6
+    /// v7（MA-09）：`minutes` 追加 `coverage_json`，新增 `minutes_window`。
+    /// 覆盖账本单独成表而不是塞进候选 JSON：局部重试要能只重跑失败的那一窗，
+    /// 也要能回答"哪几句转录没被整理到"——这两个问题都要求按窗口查行。
+    public static let schemaVersion: Int32 = 7
 
     private let directory: URL
     private let fileManager: FileManager
@@ -172,6 +175,9 @@ public actor SessionStore {
             }
             if version < 6 {
                 try migrateV5ToV6()
+            }
+            if version < 7 {
+                try migrateV6ToV7()
             }
             try execute("PRAGMA user_version=\(Self.schemaVersion);")
             try execute("COMMIT;")
@@ -634,7 +640,7 @@ public actor SessionStore {
     id, session_id, version, status, body, model, prompt_chars, is_latest, is_accepted, \
     attempts, failure_reason, lease_until, created_at, is_legacy_import, \
     remote_response_id, config_snapshot, snapshot_id, cancel_requested_at, \
-    candidate_json, review_json
+    candidate_json, review_json, coverage_json
     """
 
     @discardableResult
@@ -912,12 +918,15 @@ public actor SessionStore {
         candidate: String?,
         review: String?,
         items: [MinutesItemDraft] = [],
-        snapshotID: String? = nil
+        snapshotID: String? = nil,
+        coverage: String? = nil,
+        windows: [MinutesWindowRecord] = []
     ) throws -> Bool {
         let sql = """
         UPDATE minutes
         SET status = 'ready', body = ?, model = COALESCE(?, model), lease_until = NULL,
-            failure_reason = NULL, candidate_json = ?, review_json = ?
+            failure_reason = NULL, candidate_json = ?, review_json = ?,
+            coverage_json = COALESCE(?, coverage_json)
         WHERE id = ? AND status = 'running' AND attempts = ?;
         """
         var committed = false
@@ -930,8 +939,9 @@ public actor SessionStore {
                 bind(statement, 2, model)
                 bind(statement, 3, candidate)
                 bind(statement, 4, review)
-                bind(statement, 5, minutesID)
-                bind(statement, 6, expectedAttempts)
+                bind(statement, 5, coverage)
+                bind(statement, 6, minutesID)
+                bind(statement, 7, expectedAttempts)
                 try step(statement)
                 committed = sqlite3_changes(try requireHandle()) > 0
             }
@@ -945,6 +955,9 @@ public actor SessionStore {
                 bind(statement, 1, minutesID)
                 try step(statement)
             }
+            // 窗口进度与正文同生共死：写一半会让"局部重试"重跑已经成功的窗口，
+            // 也会让覆盖账本说的和正文对不上（§6.3）。
+            try replaceWindowsLocked(windows, minutesID: minutesID)
             for (order, draft) in items.enumerated() {
                 let itemID = "mi-\(minutesID)-\(draft.localID)"
                 try withStatement("""
@@ -985,6 +998,175 @@ public actor SessionStore {
             throw error
         }
         return committed
+    }
+
+    // MARK: - 窗口进度（MA-09 / §6.3）
+
+    /// 覆盖账本里每个窗口的当前状态（按窗口序号）。
+    public func minutesWindows(minutesID: String) throws -> [MinutesWindowRecord] {
+        try withStatement("""
+        SELECT window_index, owned_unit_ids, context_unit_ids, outcome,
+               failure_reason, candidate_json, remote_response_id, updated_at
+        FROM minutes_window WHERE minutes_id = ? ORDER BY window_index ASC;
+        """) { statement in
+            bind(statement, 1, minutesID)
+            var rows: [MinutesWindowRecord] = []
+            while try step(statement) == SQLITE_ROW {
+                rows.append(MinutesWindowRecord(
+                    index: Int(columnInt(statement, 0)),
+                    ownedUnitIDs: Self.stringArray(columnText(statement, 1)),
+                    contextUnitIDs: Self.stringArray(columnText(statement, 2)),
+                    outcome: columnText(statement, 3)
+                        .flatMap(MinutesWindowOutcome.init(rawValue:)) ?? .failed,
+                    failureReason: columnText(statement, 4),
+                    candidateJSON: columnText(statement, 5),
+                    remoteResponseID: columnText(statement, 6),
+                    updatedAt: Date(timeIntervalSince1970: columnDouble(statement, 7))
+                ))
+            }
+            return rows
+        }
+    }
+
+    /// 需要重试的窗口（失败或被截断的）。
+    ///
+    /// 局部重试只认这一份清单：成功窗口带着已拿到的候选，
+    /// 重跑它们等于重复计费，也可能把用户已经核对过的结果换掉（MC-40）。
+    public func retryableMinutesWindows(minutesID: String) throws -> [MinutesWindowRecord] {
+        try minutesWindows(minutesID: minutesID)
+            .filter { $0.outcome != .processed }
+            .sorted { $0.index < $1.index }
+    }
+
+    /// 记一个窗口的进度（MA-09 / §7.6：窗口进度要能落库）。
+    ///
+    /// 整场整理要跑很久，中途崩掉时下一次启动要从**已完成的窗口**继续，
+    /// 而不是把整场重新发一遍。所以每跑完一窗就写一行，带远端响应 id：
+    /// 重启后能查原请求（MC-28），也能只重跑没拿到结果的那几窗。
+    ///
+    /// 凭父行的 `status = running` + `attempts` 提交：行已被新 owner 接管时
+    /// 返回 false，迟到的窗口结果不写。
+    @discardableResult
+    public func recordMinutesWindow(
+        minutesID: String,
+        expectedAttempts: Int,
+        record: MinutesWindowRecord
+    ) throws -> Bool {
+        let owned = try withStatement("""
+        SELECT 1 FROM minutes WHERE id = ? AND status = 'running' AND attempts = ?;
+        """) { statement -> Bool in
+            bind(statement, 1, minutesID)
+            bind(statement, 2, expectedAttempts)
+            return try step(statement) == SQLITE_ROW
+        }
+        guard owned else { return false }
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            try withStatement("""
+            DELETE FROM minutes_window WHERE minutes_id = ? AND window_index = ?;
+            """) { statement in
+                bind(statement, 1, minutesID)
+                bind(statement, 2, record.index)
+                try step(statement)
+            }
+            try insertWindow(record, minutesID: minutesID)
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+        return true
+    }
+
+    /// 把已落终态的一版重新开成 `running`，只重跑失败窗口（MC-40 局部重试）。
+    ///
+    /// 带 fencing：凭 `expectedAttempts` 提交，旧执行者迟到改不动。
+    /// **已采用的版本拒绝重开**——用户核对过的东西不能被一次重试换掉。
+    public func reopenMinutesForWindowRetry(
+        minutesID: String,
+        expectedAttempts: Int,
+        lease: TimeInterval
+    ) throws -> Bool {
+        var reopened = false
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            try withStatement("""
+            UPDATE minutes
+            SET status = 'running', attempts = attempts + 1, lease_until = ?,
+                failure_reason = NULL
+            WHERE id = ? AND status IN ('ready', 'failed') AND attempts = ?
+              AND is_accepted = 0;
+            """) { statement in
+                bind(statement, 1, Date().addingTimeInterval(lease).timeIntervalSince1970)
+                bind(statement, 2, minutesID)
+                bind(statement, 3, expectedAttempts)
+                try step(statement)
+                reopened = sqlite3_changes(try requireHandle()) > 0
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+        return reopened
+    }
+
+    /// 在已提交的事务里重写这一版的窗口行（幂等：先删后插）。
+    private func replaceWindowsLocked(
+        _ windows: [MinutesWindowRecord],
+        minutesID: String
+    ) throws {
+        try withStatement("DELETE FROM minutes_window WHERE minutes_id = ?;") { statement in
+            bind(statement, 1, minutesID)
+            try step(statement)
+        }
+        for window in windows {
+            try insertWindow(window, minutesID: minutesID)
+        }
+    }
+
+    private func insertWindow(
+        _ window: MinutesWindowRecord,
+        minutesID: String
+    ) throws {
+        try withStatement("""
+        INSERT INTO minutes_window (
+            id, minutes_id, window_index, owned_unit_ids, context_unit_ids,
+            outcome, failure_reason, candidate_json, remote_response_id, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """) { statement in
+            bind(statement, 1, window.id)
+            bind(statement, 2, minutesID)
+            bind(statement, 3, window.index)
+            bind(
+                statement,
+                4,
+                Self.jsonStringArray(window.ownedUnitIDs)
+            )
+            bind(
+                statement,
+                5,
+                Self.jsonStringArray(window.contextUnitIDs)
+            )
+            bind(statement, 6, window.outcome.rawValue)
+            bind(statement, 7, window.failureReason)
+            bind(statement, 8, window.candidateJSON)
+            bind(statement, 9, window.remoteResponseID)
+            bind(statement, 10, window.updatedAt.timeIntervalSince1970)
+            try step(statement)
+        }
+    }
+
+    private static func jsonStringArray(_ values: [String]) -> String {
+        guard let data = try? JSONEncoder().encode(values),
+              let text = String(data: data, encoding: .utf8)
+        else { return "[]" }
+        return text
+    }
+
+    private static func stringArray(_ raw: String?) -> [String] {
+        guard let raw, let data = raw.data(using: .utf8) else { return [] }
+        return (try? JSONDecoder().decode([String].self, from: data)) ?? []
     }
 
     /// 这一版的结论条目与其证据锚点（按落库顺序）。
@@ -2263,6 +2445,7 @@ public actor SessionStore {
         // cancel_requested_at）。
         // 老库读不到后面的列时按"没有过"处理，不猜：v1 没有 is_legacy_import（按 legacy，
         // MC-68）、v2 没有 is_accepted（按未采用）、v3 没有任务身份（按没有远端响应）。
+        // v7 追加 coverage_json：读不到就是没有分窗账本，**不**当成"全部覆盖"。
         let count = Int(sqlite3_column_count(statement))
         let accepted: Bool = {
             guard count > 8 else { return false }
@@ -2296,7 +2479,8 @@ public actor SessionStore {
             snapshotID: count > 16 ? columnText(statement, 16) : nil,
             cancelRequestedAt: optionalDate(17),
             candidateJSON: count > 18 ? columnText(statement, 18) : nil,
-            reviewJSON: count > 19 ? columnText(statement, 19) : nil
+            reviewJSON: count > 19 ? columnText(statement, 19) : nil,
+            coverageJSON: count > 20 ? columnText(statement, 20) : nil
         )
     }
 
@@ -2718,5 +2902,48 @@ extension SessionStore {
 
     private func migrateV5ToV6() throws {
         try execute(Self.schemaV6Delta)
+    }
+
+    /// v6 → v7 的 DDL（调用方已在同一事务内）：覆盖账本（MA-09 / §6.3）。
+    ///
+    /// 两样东西：`minutes.coverage_json` 记这一版**整体**覆盖到哪，
+    /// `minutes_window` 记**每个窗口**的拥有区间与处理结果。
+    ///
+    /// 分开存的原因：局部重试只重跑失败的那一窗，重跑后要把成功窗口的
+    /// 候选重新合并——所以每窗的候选与远端响应 id 都得按行留着。
+    /// 合成一列 JSON 的话，重试就得先解出全部窗口再改写，写一半崩了
+    /// 就分不清哪一窗真的处理过。
+    static let schemaV7Delta = """
+    CREATE TABLE IF NOT EXISTS minutes_window (
+      id                TEXT PRIMARY KEY,
+      minutes_id        TEXT NOT NULL REFERENCES minutes(id) ON DELETE CASCADE,
+      window_index      INTEGER NOT NULL,
+      owned_unit_ids    TEXT NOT NULL,
+      context_unit_ids  TEXT NOT NULL,
+      outcome           TEXT NOT NULL,
+      failure_reason    TEXT,
+      candidate_json    TEXT,
+      remote_response_id TEXT,
+      updated_at        REAL NOT NULL,
+      UNIQUE (minutes_id, window_index)
+    );
+    CREATE INDEX IF NOT EXISTS minutes_window_by_minutes
+      ON minutes_window(minutes_id, window_index);
+    """
+
+    private func migrateV6ToV7() throws {
+        try execute(Self.schemaV7Delta)
+        let columns = try withStatement("PRAGMA table_info(minutes);") { statement in
+            var names: [String] = []
+            while try step(statement) == SQLITE_ROW {
+                if let name = columnText(statement, 1) { names.append(name) }
+            }
+            return names
+        }
+        // 不回填：v6 之前的纪要是单窗生成的，没有分窗账本可还原。
+        // 补一份"全部覆盖"等于伪造一份从未发生过的窗口划分。
+        if !columns.contains("coverage_json") {
+            try execute("ALTER TABLE minutes ADD COLUMN coverage_json TEXT;")
+        }
     }
 }

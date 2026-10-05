@@ -55,6 +55,15 @@ public final class MinutesGenerator {
     /// 有 `needsReview` 的条目**仍然留在正文里**，但不升可信：界面据此说明
     /// 哪里要核对，而"有引用"本身不算核对通过。
     public private(set) var candidateReview: MinutesEvidenceValidator.Report?
+    /// 刚整理出来的这一版的覆盖账本（MA-09）。
+    ///
+    /// 为 nil 表示这一版没有分窗账本（单窗或旧版本）。**不**把 nil 当成
+    /// "全部覆盖"：那正好是计划禁止的那种"100% 完成"。
+    public private(set) var coverage: MinutesCoverageLedger?
+    /// 还能局部重试的窗口个数（MC-40）。0 表示没有缺口可补。
+    public var retryableWindowCount: Int {
+        coverage?.failedWindowIndexes.count ?? 0
+    }
     /// 最近一次整理用的服务端响应 id（诊断用；它不是用户内容）。
     public private(set) var lastResponseID: String?
     /// 停止之后关于**远端**的那半句话（MC-30）。本地停下是确定的，
@@ -120,6 +129,8 @@ public final class MinutesGenerator {
         failedOnSetup = false
         remoteCancellationNote = nil
         jobConfigDiffersFromCurrent = false
+        // 新一次整理开始：上一版的覆盖账本不能继续挂在新版本上。
+        coverage = nil
         let configuration = resolvedConfiguration.configuration
 
         let version: MinutesVersion
@@ -210,6 +221,7 @@ public final class MinutesGenerator {
         defer { inFlight = nil }
         state = .queued
         failedOnSetup = false
+        coverage = nil
         do {
             let lines = try await coordinator.lines(sessionID: row.sessionID)
             let names = (try? await coordinator.speakerNames(sessionID: row.sessionID)) ?? [:]
@@ -290,6 +302,99 @@ public final class MinutesGenerator {
         }
     }
 
+    /// 局部重试（MC-40）：**只**重跑失败的窗口，成功窗口的候选直接复用。
+    ///
+    /// 三条边界，都是为了不覆盖用户已经核对过的东西：
+    /// 1. 已采用的版本拒绝重开——那正是用户核对过的一版；
+    /// 2. 没有失败窗口时不做任何事，不新建版本、不发请求；
+    /// 3. 重跑完重新归并时以来源身份去重，同一条待办不会因为重跑多出一条。
+    public func retryFailedWindows(
+        sessionID: String,
+        configuration: LLMConfiguration
+    ) async {
+        await retryFailedWindows(
+            sessionID: sessionID,
+            resolvedConfiguration: ResolvedLLMConfiguration(
+                configuration: configuration,
+                apiKey: LLMKeychain.load(),
+                origin: .global
+            )
+        )
+    }
+
+    public func retryFailedWindows(
+        sessionID: String,
+        resolvedConfiguration: ResolvedLLMConfiguration
+    ) async {
+        guard inFlight == nil else { return }
+        guard let target = try? await coordinator.latestMinutes(sessionID: sessionID) else { return }
+        let windows = (try? await coordinator.minutesWindows(minutesID: target.id)) ?? []
+        let failed = windows.filter { $0.outcome != .processed }
+        guard !failed.isEmpty else {
+            state = .failed("这一版没有整理失败的窗口，不需要重试。")
+            return
+        }
+        inFlight = sessionID
+        defer { inFlight = nil }
+        state = .queued
+        failedOnSetup = false
+        do {
+            let lines = try await coordinator.lines(sessionID: sessionID)
+            let names = (try? await coordinator.speakerNames(sessionID: sessionID)) ?? [:]
+            let units = Self.sourceUnits(lines: lines, names: names)
+            guard !units.isEmpty else {
+                state = .failed("这一场没有可整理的正文。")
+                return
+            }
+            let supplements = Self.userSupplements(
+                exchanges: (try? await coordinator.innerOSExchanges(sessionID: sessionID)) ?? [],
+                verifiedExchangeIDs: await Self.verifiedSupplementIDs(
+                    coordinator: coordinator,
+                    sessionID: sessionID
+                )
+            )
+            // 重试认的是**原来那次任务**冻结的配置：换了端点的结果
+            // 不能混进同一版里（MC-32）。
+            let currentConfig = MinutesJobConfig(resolvedConfiguration.configuration)
+            let jobConfig = MinutesJobConfig.parse(target.configSnapshot) ?? currentConfig
+            jobConfigDiffersFromCurrent = jobConfig != currentConfig
+            guard jobConfig.configuration.isConfigured else {
+                failedOnSetup = true
+                state = .failed("还没有配置对话模型。文字记录已经存好，配好之后可以重新生成。")
+                return
+            }
+            // 重新开成 `running` 才能续跑；带 fencing，已采用的版本会被拒绝。
+            let reopened = try await coordinator.reopenMinutesForWindowRetry(
+                minutesID: target.id,
+                expectedAttempts: target.attempts,
+                lease: Self.lease
+            )
+            guard reopened else {
+                state = .failed("这一版已经采用，或者已经被别的整理任务接管，没有重试。")
+                return
+            }
+            var claimed = target
+            claimed.status = .running
+            claimed.attempts = target.attempts + 1
+            let task = Task { [weak self] in
+                _ = try? await self?.run(
+                    claimed: claimed,
+                    units: units,
+                    supplements: supplements,
+                    jobConfig: jobConfig,
+                    resolvedConfiguration: resolvedConfiguration
+                )
+            }
+            runTask = task
+            await task.value
+            runTask = nil
+        } catch {
+            state = .failed(error.localizedDescription)
+        }
+        versions = (try? await coordinator.minutesVersions(sessionID: sessionID)) ?? versions
+        versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: sessionID)
+    }
+
     /// 读库刷新（界面切换版本、重新打开这一场时调）。
     public func reload(sessionID: String) async {
         versions = (try? await coordinator.minutesVersions(sessionID: sessionID)) ?? []
@@ -298,6 +403,8 @@ public final class MinutesGenerator {
         // 核对报告随版本一起存，所以重开这一场仍然知道"哪里要核对"。
         let fallback = try? await coordinator.currentMinutes(sessionID: sessionID)
         candidateReview = (latest ?? fallback)?.review
+        // 覆盖账本随版本一起存，所以重开这一场仍然知道"哪里没整理到"。
+        coverage = (latest ?? fallback)?.coverage
         switch latest?.status {
         case .ready:
             latestBody = latest?.body
@@ -367,6 +474,16 @@ public final class MinutesGenerator {
         return verified
     }
 
+    /// 窗口预算（MA-09）。
+    ///
+    /// 当前配置里**没有** provider/model 的上下文能力，所以这里用保守的
+    /// 实验起点，而不是"provider 接受了就说明装得下"。真实取值要按目标模型
+    /// 校准后改这里（§6.3）。
+    static let windowBudget = MinutesWindowBudget()
+
+    /// 在飞任务拿到的远端响应 id。取消时逐个去问远端停没停（MC-30）。
+    private var inFlightResponseIDs: [String] = []
+
     private func run(
         version: MinutesVersion,
         units: [MinutesSourceUnit],
@@ -376,6 +493,24 @@ public final class MinutesGenerator {
     ) async throws {
         let claimed = try await coordinator.claimMinutes(sessionID: version.sessionID, lease: Self.lease)
         guard let claimed else { return }
+        try await run(
+            claimed: claimed,
+            units: units,
+            supplements: supplements,
+            jobConfig: jobConfig,
+            resolvedConfiguration: resolvedConfiguration
+        )
+    }
+
+    /// 整理一个**已认领**的任务。认领在门外：正常生成走 `claimMinutes`，
+    /// 局部重试走 `reopenMinutesForWindowRetry`（同一代际规则，不同入口）。
+    private func run(
+        claimed: MinutesVersion,
+        units: [MinutesSourceUnit],
+        supplements: String,
+        jobConfig: MinutesJobConfig,
+        resolvedConfiguration: ResolvedLLMConfiguration
+    ) async throws {
         state = .running
         inFlightMinutesID = claimed.id
         defer { inFlightMinutesID = nil }
@@ -400,70 +535,150 @@ public final class MinutesGenerator {
         }
         defer { heartbeat.cancel() }
         do {
-            let responseID = try await responseIDFor(
-                claimed: claimed,
-                units: units,
-                supplements: supplements,
-                configuration: configuration,
-                key: key
-            )
-            let text = try await provider.pollBackground(
-                configuration: configuration,
-                apiKey: key,
-                responseID: responseID
-            )
-            switch MinutesCandidateCodec.prepare(text: text, units: units) {
-            case .prepared(let prepared):
-                // MC-29：凭认领代际提交；行已被新 owner 接管时不改写、不谎报成功。
-                // 候选与核对报告一起落库：正文能看，核对结论也要跟着版本一起留存。
-                // 条目与锚点也一起落：来源单元带的是 lineID，锚点要的是**不可变修订**——
-                // 这一步映射不做，"依据哪几句"就永远指着会变的那一行（MC-46）。
-                let revisionIDs = (try? await coordinator.latestRevisionIDsByLine(sessionID: version.sessionID)) ?? [:]
-                let unitsByID = Dictionary(units.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-                let drafts = MinutesCandidateCodec.itemDrafts(
-                    for: prepared.candidate,
-                    report: prepared.report,
-                    unitsByID: unitsByID,
-                    revisionIDsByLine: revisionIDs
+            // §6.3：按 token 预算分窗，每个来源单元恰好 owned 一次。
+            // 短会得到单窗，走的是**同一条**验证与落库路径。
+            let windows = MinutesWindowPlanner.plan(units: units, budget: Self.windowBudget)
+            // 已经跑过的窗口（崩溃恢复、局部重试）：直接复用，不重发请求。
+            let previous = (try? await coordinator.minutesWindows(minutesID: claimed.id)) ?? []
+            var records: [MinutesWindowRecord] = []
+            var candidates: [MinutesCandidateV2] = []
+
+            for window in windows {
+                if Task.isCancelled { throw LLMError.cancelled }
+                let stored = previous.first { $0.index == window.index }
+                // 这一窗已经有候选：复用。整场重发可能重复计费，
+                // 也可能覆盖用户已经核对过的结果（MC-28/MC-40）。
+                if let ready = stored, ready.outcome == .processed, ready.candidate != nil {
+                    records.append(ready)
+                    if let candidate = ready.candidate { candidates.append(candidate) }
+                    continue
+                }
+                let responseID = try await responseIDFor(
+                    claimed: claimed,
+                    window: window,
+                    stored: stored,
+                    units: units,
+                    supplements: supplements,
+                    configuration: configuration,
+                    key: key,
+                    isOnlyWindow: windows.count == 1
                 )
-                let committed = (try? await coordinator.saveMinutesCandidate(
+                lastResponseID = responseID
+                inFlightResponseIDs.append(responseID)
+                let text = try await provider.pollBackground(
+                    configuration: configuration,
+                    apiKey: key,
+                    responseID: responseID
+                )
+                let record: MinutesWindowRecord
+                switch MinutesCandidateCodec.prepareWindow(text: text, window: window) {
+                case .prepared(let prepared):
+                    candidates.append(prepared.candidate)
+                    record = MinutesWindowRecord(
+                        index: window.index,
+                        ownedUnitIDs: window.owned.map(\.id),
+                        contextUnitIDs: (window.contextBefore + window.contextAfter).map(\.id),
+                        outcome: .processed,
+                        candidateJSON: Self.encode(prepared.candidate),
+                        remoteResponseID: responseID
+                    )
+                case .failed(let kind, let reason):
+                    // 截断与失败分开记：截断的尾部没拿全，不能当成"整理好了"（§6.3）。
+                    record = MinutesWindowRecord(
+                        index: window.index,
+                        ownedUnitIDs: window.owned.map(\.id),
+                        contextUnitIDs: (window.contextBefore + window.contextAfter).map(\.id),
+                        outcome: kind == .incomplete ? .truncated : .failed,
+                        failureReason: reason,
+                        remoteResponseID: responseID
+                    )
+                }
+                // 每跑完一窗就落一行（§7.6）：崩了以后从已完成的窗口继续，
+                // 不把整场重新发一遍。父行已被新 owner 接管时不写。
+                let recorded = (try? await coordinator.recordMinutesWindow(
                     minutesID: claimed.id,
                     expectedAttempts: claimed.attempts,
-                    body: prepared.body,
-                    model: configuration.model.isEmpty ? nil : configuration.model,
-                    candidate: try? String(
-                        data: JSONEncoder().encode(prepared.candidate),
-                        encoding: .utf8
-                    ),
-                    review: try? String(
-                        data: JSONEncoder().encode(prepared.report),
-                        encoding: .utf8
-                    ),
-                    items: drafts,
-                    snapshotID: claimed.snapshotID
+                    record: record
                 )) ?? false
-                guard committed else {
-                    versions = (try? await coordinator.minutesVersions(sessionID: version.sessionID)) ?? versions
-                    versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: version.sessionID)
-                    state = .failed("这一版已被新的整理任务接管，旧结果没有覆盖。")
-                    return
+                guard recorded else {
+                    throw LLMError.transport("这一版已被新的整理任务接管，这次的结果没有写回。")
                 }
-                latestBody = prepared.body
-                failedOnSetup = false
-                remoteCancellationNote = nil
-                candidateReview = prepared.report
-                state = .ready
-            case .failed(let kind, let reason):
-                // MC-33/MC-34：空输出、结构错误、拒答、截断各自记成失败，
-                // 原文保留在 reason 里当候选，但**不发布成功**。
+                records.append(record)
+            }
+
+            // 覆盖账本：哪些来源单元整理到了、哪些没有（§6.3）。
+            let ledger = MinutesCoverageLedger(
+                eligibleUnitIDs: units.map(\.id),
+                windows: records.map {
+                    MinutesCoverageLedger.WindowRecord(
+                        index: $0.index,
+                        ownedUnitIDs: $0.ownedUnitIDs,
+                        outcome: $0.outcome,
+                        failureReason: $0.failureReason
+                    )
+                }
+            )
+            let coverageText = try? Self.encode(ledger)
+
+            guard !candidates.isEmpty else {
+                // 一个窗口都没成功：整场如实失败，不发布半成品。
+                let reason = records.compactMap(\.failureReason).first
+                    ?? "没有整理出可用的内容。"
                 _ = try? await coordinator.failMinutesIfOwner(
                     minutesID: claimed.id,
                     expectedAttempts: claimed.attempts,
-                    reason: "\(kind.title)：\(reason)"
+                    reason: reason
                 )
                 failedOnSetup = false
                 state = .failed(reason)
+                return
             }
+
+            // §6.3 reduce：以来源身份去重，跨窗撤回保留两个事件并标未确认。
+            let merged = MinutesCandidateMerger.merge(
+                windowCandidates: candidates,
+                units: units,
+                coverageNote: ledger.isComplete ? nil : ledger.summary()
+            )
+            let body = MinutesCandidateCodec.markdown(
+                for: merged.candidate,
+                report: merged.report
+            )
+            // MC-29：凭认领代际提交；行已被新 owner 接管时不改写、不谎报成功。
+            // 候选、核对报告、覆盖账本、条目、锚点与窗口进度一起落库：
+            // 少任何一样都会让"这一版覆盖到哪"和正文对不上（§6.3）。
+            let revisionIDs = (try? await coordinator.latestRevisionIDsByLine(sessionID: claimed.sessionID)) ?? [:]
+            let unitsByID = Dictionary(units.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            let drafts = MinutesCandidateCodec.itemDrafts(
+                for: merged.candidate,
+                report: merged.report,
+                unitsByID: unitsByID,
+                revisionIDsByLine: revisionIDs
+            )
+            let committed = (try? await coordinator.saveMinutesCandidate(
+                minutesID: claimed.id,
+                expectedAttempts: claimed.attempts,
+                body: body,
+                model: configuration.model.isEmpty ? nil : configuration.model,
+                candidate: try? Self.encode(merged.candidate),
+                review: try? Self.encode(merged.report),
+                items: drafts,
+                snapshotID: claimed.snapshotID,
+                coverage: coverageText,
+                windows: records.sorted { $0.index < $1.index }
+            )) ?? false
+            guard committed else {
+                versions = (try? await coordinator.minutesVersions(sessionID: claimed.sessionID)) ?? versions
+                versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: claimed.sessionID)
+                state = .failed("这一版已被新的整理任务接管，旧结果没有覆盖。")
+                return
+            }
+            latestBody = body
+            failedOnSetup = false
+            remoteCancellationNote = nil
+            candidateReview = merged.report
+            coverage = ledger
+            state = .ready
         } catch {
             // 取消与失败要分开说：用户按的「停止整理」不该在记录里留下一条"整理失败"。
             let cancelled = Task.isCancelled || (error as? LLMError) == .cancelled
@@ -478,8 +693,8 @@ public final class MinutesGenerator {
                 )
                 failedOnSetup = false
                 state = .submissionUnknown
-                versions = (try? await coordinator.minutesVersions(sessionID: version.sessionID)) ?? versions
-                versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: version.sessionID)
+                versions = (try? await coordinator.minutesVersions(sessionID: claimed.sessionID)) ?? versions
+                versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: claimed.sessionID)
                 return
             }
             let reason = Self.readableReason(for: error)
@@ -500,20 +715,28 @@ public final class MinutesGenerator {
         }
     }
 
-    /// 拿这一次要轮询的远端响应 id。
+    /// 拿这一窗要轮询的远端响应 id。
     ///
-    /// 有存过的就直接查原请求（MC-28）：App 退出再打开，**不把整场重新发一遍**——
-    /// 重发可能重复计费，也可能覆盖用户已经采用的版本。
-    /// 新发的一次在拿到 id 的**那一刻**就落库，中途崩溃也算数。
+    /// 三条来源，按可靠性排序（MC-28/MC-40）：
+    /// 1. 这一窗上次已经拿到的 id —— 崩溃恢复查**原请求**，不重发；
+    /// 2. 单窗时 `minutes` 行上的旧字段（MA-07 既有行为，短会不受影响）；
+    /// 3. 新发一次，拿到 id 立刻随窗口行落库。
     @discardableResult
     private func responseIDFor(
         claimed: MinutesVersion,
+        window: MinutesWindow,
+        stored: MinutesWindowRecord?,
         units: [MinutesSourceUnit],
         supplements: String,
         configuration: LLMConfiguration,
-        key: String?
+        key: String?,
+        isOnlyWindow: Bool
     ) async throws -> String {
-        if let existing = claimed.remoteResponseID, claimed.hasRemoteResponse {
+        if let existing = stored?.remoteResponseID, !existing.isEmpty {
+            lastResponseID = existing
+            return existing
+        }
+        if isOnlyWindow, let existing = claimed.remoteResponseID, claimed.hasRemoteResponse {
             lastResponseID = existing
             return existing
         }
@@ -523,23 +746,36 @@ public final class MinutesGenerator {
         }
         let responseID = try await provider.startBackground(
             configuration: configuration,
-            messages: Self.prompt(transcript: Self.transcript(units: units), supplements: supplements),
+            messages: Self.prompt(
+                transcript: Self.windowTranscript(window),
+                supplements: supplements
+            ),
             apiKey: key,
             maxOutputTokens: 4_000,
             textFormat: MinutesCandidateCodec.jsonSchema
         )
         lastResponseID = responseID
-        let recorded = (try? await coordinator.recordMinutesRemoteResponse(
-            minutesID: claimed.id,
-            expectedAttempts: claimed.attempts,
-            responseID: responseID
-        )) ?? false
-        guard recorded else {
-            // 记不进去说明行已被新 owner 接管。请求已经发出去了，但结果不再往这行写，
-            // 也不谎报成功——远端那一侧的事实不由这里替用户断言。
-            throw LLMError.transport("这一版已被新的整理任务接管，这次的结果没有写回。")
+        if isOnlyWindow {
+            // 单窗沿用行上的字段：MA-07 的恢复路径对短会保持原样。
+            let recorded = (try? await coordinator.recordMinutesRemoteResponse(
+                minutesID: claimed.id,
+                expectedAttempts: claimed.attempts,
+                responseID: responseID
+            )) ?? false
+            guard recorded else {
+                // 记不进去说明行已被新 owner 接管。请求已经发出去了，但结果不再往这行写，
+                // 也不谎报成功——远端那一侧的事实不由这里替用户断言。
+                throw LLMError.transport("这一版已被新的整理任务接管，这次的结果没有写回。")
+            }
         }
         return responseID
+    }
+
+    /// 编码落库用的 JSON 文本。编不出来返回 nil：那一列就空着，
+    /// 读回时按"没有"处理，不塞占位文本冒充内容。
+    static func encode<T: Encodable>(_ value: T) -> String? {
+        guard let data = try? JSONEncoder().encode(value) else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     /// 取消落定：本地停、状态说"已停止"，远端给一句**如实的**结论（MC-30）。
@@ -553,23 +789,37 @@ public final class MinutesGenerator {
     ) async {
         _ = try? await coordinator.requestCancelMinutes(minutesID: claimed.id)
         let note: String
-        if let responseID = claimed.remoteResponseID ?? lastResponseID {
-            let outcome = await provider.cancelBackground(
-                configuration: configuration,
-                apiKey: key,
-                responseID: responseID
-            )
-            note = switch outcome {
-            case .confirmed:
-                "远端的任务也已经停下。"
-            case .unsupported:
-                "这个服务没有取消这次后台任务的接口，远端是不是还在跑无法确认。"
-            case .unconfirmed:
-                "没能确认远端是不是还在跑；文字记录和已经整理出的旧版本都还在。"
-            }
-        } else {
-            note = "这一次还没拿到远端受理凭据，没法去确认它有没有开始跑。"
+        // MA-09：分窗之后可能同时有多个远端任务在跑，挨个问、挨个如实说。
+        // 只取消最后一个、其余默默留在远端跑着，是"停掉了"最常见的假话。
+        var responseIDs = inFlightResponseIDs
+        if let legacy = claimed.remoteResponseID ?? lastResponseID,
+           !responseIDs.contains(legacy) {
+            responseIDs.append(legacy)
         }
+        if responseIDs.isEmpty {
+            note = "这一次还没拿到远端受理凭据，没法去确认它有没有开始跑。"
+        } else {
+            var confirmed = 0
+            var unsupported = 0
+            var unconfirmed = 0
+            for responseID in responseIDs {
+                switch await provider.cancelBackground(
+                    configuration: configuration,
+                    apiKey: key,
+                    responseID: responseID
+                ) {
+                case .confirmed: confirmed += 1
+                case .unsupported: unsupported += 1
+                case .unconfirmed: unconfirmed += 1
+                }
+            }
+            var parts: [String] = []
+            if confirmed > 0 { parts.append("\(confirmed) 个远端任务已确认停下") }
+            if unsupported > 0 { parts.append("\(unsupported) 个远端任务停没停无法确认") }
+            if unconfirmed > 0 { parts.append("\(unconfirmed) 个没能确认远端是否还在跑") }
+            note = parts.joined(separator: "，") + "；文字记录和已经整理出的旧版本都还在。"
+        }
+        inFlightResponseIDs = []
         _ = try? await coordinator.cancelMinutesIfOwner(
             minutesID: claimed.id, expectedAttempts: claimed.attempts
         )
@@ -623,6 +873,9 @@ public final class MinutesGenerator {
                     + "不要根据日历或今天的日期推算，也不要为了填满而编一个。"
                     + "原文只是提议、没人认领的待办，commitment 填 proposed。"
                     + "数字、单位、否定词照抄原文，不要改写。"
+                    + "标着「上下文·不可引用」的行只用来理解前后文，"
+                    + "任何一条的 source_unit_ids 都不能填它们的编号——"
+                    + "它们由相邻窗口负责，重复登记会让同一条待办出现两遍。"
                     + "confidence_notes 写这份纪要里最不确定的一两处；如果没什么不确定的就留空。",
                 cacheBreakpoint: true
             ),
@@ -669,6 +922,31 @@ public final class MinutesGenerator {
         units.map { unit in
             "[\(unit.id)] [\(Self.timecode(unit.startSeconds ?? 0))] \(unit.speaker)：\(unit.text)"
         }.joined(separator: "\n")
+    }
+
+    /// 一个窗口 → prompt 里的文本（MA-09）。
+    ///
+    /// 拥有区与重叠区**分开标注**：重叠行前面加「上下文」标记，
+    /// 并且明确说它不能进 `source_unit_ids`。只靠"少写一句提示"是不够的——
+    /// 模型看到前一句待办时很容易顺手又写一遍，去重就成了兜底而不是设计。
+    static func windowTranscript(_ window: MinutesWindow) -> String {
+        func line(_ unit: MinutesSourceUnit, owned: Bool) -> String {
+            let marker = owned ? "" : "[上下文·不可引用] "
+            return "\(marker)[\(unit.id)] [\(Self.timecode(unit.startSeconds ?? 0))] "
+                + "\(unit.speaker)：\(unit.text)"
+        }
+        var lines: [String] = []
+        if !window.contextBefore.isEmpty {
+            lines.append("—— 以下是上一窗的结尾，只用来理解前后文 ——")
+            lines.append(contentsOf: window.contextBefore.map { line($0, owned: false) })
+        }
+        lines.append("—— 以下是这一窗负责的内容 ——")
+        lines.append(contentsOf: window.owned.map { line($0, owned: true) })
+        if !window.contextAfter.isEmpty {
+            lines.append("—— 以下是下一窗的开头，只用来理解前后文 ——")
+            lines.append(contentsOf: window.contextAfter.map { line($0, owned: false) })
+        }
+        return lines.joined(separator: "\n")
     }
 
     private static func timecode(_ seconds: TimeInterval) -> String {

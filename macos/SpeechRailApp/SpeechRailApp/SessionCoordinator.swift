@@ -845,7 +845,9 @@ public final class SessionCoordinator {
         candidate: String?,
         review: String?,
         items: [MinutesItemDraft] = [],
-        snapshotID: String? = nil
+        snapshotID: String? = nil,
+        coverage: String? = nil,
+        windows: [MinutesWindowRecord] = []
     ) async throws -> Bool {
         try await store.saveMinutesCandidate(
             minutesID: minutesID,
@@ -855,7 +857,41 @@ public final class SessionCoordinator {
             candidate: candidate,
             review: review,
             items: items,
-            snapshotID: snapshotID
+            snapshotID: snapshotID,
+            coverage: coverage,
+            windows: windows
+        )
+    }
+
+    /// 覆盖账本里的窗口进度（MA-09）。局部重试从它读出"只重跑哪几窗"。
+    public func minutesWindows(minutesID: String) async throws -> [MinutesWindowRecord] {
+        try await store.minutesWindows(minutesID: minutesID)
+    }
+
+    /// 把已落终态的一版重新开成 `running` 以便只重跑失败窗口（MC-40）。
+    public func reopenMinutesForWindowRetry(
+        minutesID: String,
+        expectedAttempts: Int,
+        lease: TimeInterval
+    ) async throws -> Bool {
+        try await store.reopenMinutesForWindowRetry(
+            minutesID: minutesID,
+            expectedAttempts: expectedAttempts,
+            lease: lease
+        )
+    }
+
+    /// 记一个窗口的进度（MA-09）。带 fencing：父行已被新 owner 接管时返回 false。
+    @discardableResult
+    public func recordMinutesWindow(
+        minutesID: String,
+        expectedAttempts: Int,
+        record: MinutesWindowRecord
+    ) async throws -> Bool {
+        try await store.recordMinutesWindow(
+            minutesID: minutesID,
+            expectedAttempts: expectedAttempts,
+            record: record
         )
     }
 

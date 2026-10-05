@@ -220,6 +220,15 @@ public struct MinutesSourceUnit: Hashable, Sendable, Identifiable {
     public var speaker: String
     public var text: String
     public var startSeconds: Double?
+    /// 超长单句被切分后的段序号（0 起）。未切分时为 nil。
+    ///
+    /// 切分只影响送进 prompt 的粒度：`lineID` 仍指向原句，
+    /// 锚点因此照样落回不可变修订（MA-09/MC-46）。
+    public var segmentIndex: Int?
+    /// 该来源单元被切成了几段。未切分时为 nil。
+    public var segmentCount: Int?
+    /// 本段在原句正文里的字符范围。未切分时为 nil。
+    public var segmentRange: Range<Int>?
 
     public init(
         id: String,
@@ -227,7 +236,10 @@ public struct MinutesSourceUnit: Hashable, Sendable, Identifiable {
         ordinal: Int,
         speaker: String,
         text: String,
-        startSeconds: Double?
+        startSeconds: Double?,
+        segmentIndex: Int? = nil,
+        segmentCount: Int? = nil,
+        segmentRange: Range<Int>? = nil
     ) {
         self.id = id
         self.lineID = lineID
@@ -235,6 +247,21 @@ public struct MinutesSourceUnit: Hashable, Sendable, Identifiable {
         self.speaker = speaker
         self.text = text
         self.startSeconds = startSeconds
+        self.segmentIndex = segmentIndex
+        self.segmentCount = segmentCount
+        self.segmentRange = segmentRange
+    }
+
+    /// 这段是否来自被切分的超长发言（`u7#2` 这种形态）。
+    public var isSegment: Bool { segmentCount != nil }
+
+    /// 该段所属的**原始**来源单元 id（切分前）。
+    ///
+    /// 校验与锚点用这个 id：几段合起来指向同一句原文，
+    /// 引用其中任一段都应落到同一句上。
+    public var rootUnitID: String {
+        guard let count = segmentCount, count > 0 else { return id }
+        return id.split(separator: "#").first.map(String.init) ?? id
     }
 }
 
@@ -465,9 +492,14 @@ public enum MinutesEvidenceValidator {
     ///
     /// `units` 是**本次封存的来源单元全集**——只有在这里面的 id 才算"存在"。
     /// 引用不在集合里的 id 一律 `rejected`，绝不按序号去别的会议里猜一个（MC-35）。
+    /// - Parameter citableUnitIDs: 本次允许当依据的单元 id（MA-09 的**拥有区**）。
+    ///   为 nil 表示不额外限制（短会单窗、归并后的全量复核走这条）。
+    ///   分窗核对时必须传 `window.citableUnitIDs`：重叠区只供理解前后文，
+    ///   拿它当依据等于让邻窗的重复内容混进这一窗的结论。
     public static func validate(
         candidate: MinutesCandidateV2,
-        units: [MinutesSourceUnit]
+        units: [MinutesSourceUnit],
+        citableUnitIDs: Set<String>? = nil
     ) -> Report {
         let byID = Dictionary(units.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var findings: [Finding] = []
@@ -478,7 +510,8 @@ public enum MinutesEvidenceValidator {
                 kind: "overview",
                 text: item.text,
                 sourceUnitIDs: item.sourceUnitIDs,
-                units: byID
+                units: byID,
+                citableUnitIDs: citableUnitIDs
             ))
         }
         for item in candidate.decisions {
@@ -489,7 +522,8 @@ public enum MinutesEvidenceValidator {
                 sourceUnitIDs: item.sourceUnitIDs,
                 units: byID,
                 modality: item.modality,
-                conditions: item.conditions
+                conditions: item.conditions,
+                citableUnitIDs: citableUnitIDs
             ))
         }
         for item in candidate.openQuestions {
@@ -498,7 +532,8 @@ public enum MinutesEvidenceValidator {
                 kind: "open_question",
                 text: item.text,
                 sourceUnitIDs: item.sourceUnitIDs,
-                units: byID
+                units: byID,
+                citableUnitIDs: citableUnitIDs
             ))
         }
         for item in candidate.actions {
@@ -510,7 +545,8 @@ public enum MinutesEvidenceValidator {
                 units: byID,
                 ownerText: item.ownerText,
                 dueExpression: item.dueExpression,
-                commitment: item.commitment
+                commitment: item.commitment,
+                citableUnitIDs: citableUnitIDs
             ))
         }
         return Report(findings: findings)
@@ -528,7 +564,8 @@ public enum MinutesEvidenceValidator {
         conditions: [String] = [],
         ownerText: String? = nil,
         dueExpression: String? = nil,
-        commitment: MinutesCommitment? = nil
+        commitment: MinutesCommitment? = nil,
+        citableUnitIDs: Set<String>? = nil
     ) -> [Finding] {
         var findings: [Finding] = []
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -545,6 +582,16 @@ public enum MinutesEvidenceValidator {
         var resolved: [MinutesSourceUnit] = []
         for unitID in sourceUnitIDs {
             if let unit = units[unitID] {
+                // 单元存在但不属于本窗口的拥有区：重叠区只供读，不能当依据。
+                if let citableUnitIDs, !citableUnitIDs.contains(unitID) {
+                    findings.append(Finding(
+                        localID: localID,
+                        kind: kind,
+                        verdict: .rejected,
+                        reason: "引用了 \(unitID)，它只是相邻窗口的重叠上下文，不能作为这一条的依据"
+                    ))
+                    continue
+                }
                 resolved.append(unit)
             } else {
                 findings.append(Finding(
@@ -709,6 +756,49 @@ public enum MinutesCandidateCodec {
             )
         }
         let report = MinutesEvidenceValidator.validate(candidate: candidate, units: units)
+        return .prepared(Prepared(
+            candidate: candidate,
+            report: report,
+            body: markdown(for: candidate, report: report)
+        ))
+    }
+
+    /// 分窗解码 + 核对（MA-09）。
+    ///
+    /// 与单窗 `prepare` 的唯一区别是核对时按**本窗拥有区**限制可引用单元：
+    /// 重叠区只供读懂前后文，拿它当依据就是让邻窗内容重复进结论。
+    /// 渲染出来的正文在这里不用——归并之后才渲染一次。
+    public static func prepareWindow(
+        text: String,
+        window: MinutesWindow
+    ) -> Outcome {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return .failed(
+                kind: .empty,
+                reason: "第 \(window.index + 1) 个窗口没有拿到内容。"
+            )
+        }
+        guard let data = trimmed.data(using: .utf8),
+              let candidate = try? JSONDecoder().decode(MinutesCandidateV2.self, from: data)
+        else {
+            return .failed(
+                kind: .unstructured,
+                reason: "第 \(window.index + 1) 个窗口没有按结构返回。"
+            )
+        }
+        guard candidate.schemaVersion == MinutesCandidateV2.schemaVersion else {
+            return .failed(
+                kind: .schemaInvalid,
+                reason: "第 \(window.index + 1) 个窗口用的是 \(candidate.schemaVersion)，"
+                    + "这个版本只认 \(MinutesCandidateV2.schemaVersion)。"
+            )
+        }
+        let report = MinutesEvidenceValidator.validate(
+            candidate: candidate,
+            units: window.owned,
+            citableUnitIDs: window.citableUnitIDs
+        )
         return .prepared(Prepared(
             candidate: candidate,
             report: report,
@@ -1100,6 +1190,628 @@ public enum MinutesSupplements: Sendable {
             return block
         }
         return blocks.joined(separator: "\n\n")
+    }
+}
+// MARK: - 长会议分窗（MA-09 / §6.3）
+
+/// token 预算的**保守估计**（§6.3）。
+///
+/// 这里没有 tokenizer，所以刻意不做“字符数当 token 数”的等价换算：
+/// 中日韩表意文字按 1 字 ≈ 1 token，其余按 4 字符 ≈ 1 token 估，
+/// 同一段文本得到的值明显偏大。偏大只会让窗口切得更碎（多几次请求），
+/// 偏小会让请求超限、把尾部悄悄丢掉——后者正是计划禁止的行为。
+public enum MinutesTokenEstimate: Sendable {
+    /// 保守估计一段文本的 token 数。
+    ///
+    /// 这是**上界近似**，不是精确 tokenize。调用方在超限时继续拆窗，不截断。
+    public static func tokens(in text: String) -> Int {
+        var wide = 0
+        var narrow = 0
+        for scalar in text.unicodeScalars {
+            switch scalar.value {
+            case 0x3040...0x30FF, 0x3400...0x4DBF, 0x4E00...0x9FFF,
+                 0xF900...0xFAFF, 0xAC00...0xD7AF, 0x20000...0x2FA1F:
+                wide += 1
+            default:
+                narrow += 1
+            }
+        }
+        let narrowTokens = (narrow + 3) / 4
+        return max(1, wide + narrowTokens)
+    }
+}
+
+/// 一次会议整理的窗口预算（§6.3）。
+///
+/// `windowTokens` 是**每窗拥有区的实验起点**，不是模型能力承诺：
+/// 真实取值要按目标模型的上下文窗口校准。
+public struct MinutesWindowBudget: Hashable, Sendable {
+    /// 每个窗口拥有区的 token 预算（实验起点 2,500～4,000）。
+    public var windowTokens: Int
+    /// 提示 + 输出 + 安全余量。超预算时先缩窗口，不动余量。
+    public var reserveTokens: Int
+    /// 相邻窗口的重叠单元数（只读上下文，不产生重复条目）。
+    public var overlapUnits: Int
+    /// 超长单句切分后的每段目标 token。
+    public var segmentTokens: Int
+
+    public init(
+        windowTokens: Int = 3_000,
+        reserveTokens: Int = 2_000,
+        overlapUnits: Int = 2,
+        segmentTokens: Int = 600
+    ) {
+        self.windowTokens = max(200, windowTokens)
+        self.reserveTokens = max(0, reserveTokens)
+        self.overlapUnits = max(0, overlapUnits)
+        self.segmentTokens = max(100, segmentTokens)
+    }
+
+    /// 由 provider/model 的上下文能力反推窗口预算。
+    ///
+    /// 拿不到模型上下文（当前配置里没有这一项）时返回 nil，
+    /// 让调用方用保守的默认预算——**不**因为“不知道”就假装整场塞得进一个窗口。
+    public static func fit(
+        contextTokens: Int?,
+        requestedOutputTokens: Int,
+        overlapUnits: Int = 2
+    ) -> MinutesWindowBudget? {
+        guard let contextTokens, contextTokens > 0 else { return nil }
+        let usable = contextTokens - requestedOutputTokens
+        guard usable > 200 else { return nil }
+        let reserve = usable / 4
+        let body = usable - reserve
+        // 夹进 2,500～4,000 的实验区间；区间本身也要被上下文能力允许。
+        let window = min(4_000, max(200, body))
+        return MinutesWindowBudget(
+            windowTokens: window,
+            reserveTokens: reserve,
+            overlapUnits: overlapUnits
+        )
+    }
+}
+
+/// 一个窗口的来源范围（§6.3）。
+///
+/// `owned` 是**这个窗口负责出结论的区间**，每个来源单元在全场只 owned 一次；
+/// `context` 是邻窗重叠的只读上下文——模型可以读来理解前后文，
+/// 但**不能**拿它当依据，也不能因它产生重复条目。
+public struct MinutesWindow: Hashable, Sendable, Identifiable {
+    public var index: Int
+    public var owned: [MinutesSourceUnit]
+    public var contextBefore: [MinutesSourceUnit]
+    public var contextAfter: [MinutesSourceUnit]
+    public var estimatedTokens: Int
+
+    public var id: String { "w\(index)" }
+
+    /// 可被引用（当依据）的单元 id 集合。重叠区不在其中。
+    public var citableUnitIDs: Set<String> {
+        Set(owned.map(\.id))
+    }
+
+    public init(
+        index: Int,
+        owned: [MinutesSourceUnit],
+        contextBefore: [MinutesSourceUnit],
+        contextAfter: [MinutesSourceUnit],
+        estimatedTokens: Int
+    ) {
+        self.index = index
+        self.owned = owned
+        self.contextBefore = contextBefore
+        self.contextAfter = contextAfter
+        self.estimatedTokens = estimatedTokens
+    }
+}
+
+/// 长会议分窗器（MA-09 / §6.3）。
+///
+/// 三条口径，逐条对应计划：
+///
+/// 1. **每个来源单元恰好 owned 一次**。覆盖账本靠这条算完整覆盖；
+///    重叠只进 `context`，不重复产生依据。
+/// 2. **超长单句明确切分**。一句话本身超预算时按字符边界切成多段，
+///    每段有自己的来源单元 id（`u7#2`），`lineID` 仍指向原句——
+///    锚点因此仍能落回不可变修订（MC-46）。
+/// 3. **按发言轮次优先成窗**。切点尽量落在说话人变化处，避免腰斩话题；
+///    实在没有轮次边界才按 token 硬切。
+public enum MinutesWindowPlanner {
+    /// 把来源单元切成有界窗口。短会返回单窗（回退口径：短会仍走同一验证器）。
+    public static func plan(
+        units: [MinutesSourceUnit],
+        budget: MinutesWindowBudget = MinutesWindowBudget()
+    ) -> [MinutesWindow] {
+        guard !units.isEmpty else { return [] }
+        let segments = units.flatMap { segment(unit: $0, budget: budget) }
+        guard !segments.isEmpty else { return [] }
+
+        var windows: [MinutesWindow] = []
+        var current: [MinutesSourceUnit] = []
+        var currentTokens = 0
+
+        func cost(_ unit: MinutesSourceUnit) -> Int {
+            MinutesTokenEstimate.tokens(in: unit.text)
+        }
+        func flush() {
+            guard !current.isEmpty else { return }
+            windows.append(MinutesWindow(
+                index: windows.count,
+                owned: current,
+                contextBefore: [],
+                contextAfter: [],
+                estimatedTokens: currentTokens
+            ))
+            current = []
+            currentTokens = 0
+        }
+
+        for unit in segments {
+            let unitCost = cost(unit)
+            if !current.isEmpty, currentTokens + unitCost > budget.windowTokens {
+                // 切点优先落在说话人变化处：把同一个人连着说的话放进同一窗。
+                if let boundary = lastSpeakerBoundary(in: current, before: unit.speaker),
+                   boundary > 0 {
+                    let tail = Array(current[boundary...])
+                    current = Array(current[..<boundary])
+                    flush()
+                    current = tail
+                    currentTokens = tail.reduce(0) { $0 + cost($1) }
+                } else {
+                    flush()
+                }
+            }
+            current.append(unit)
+            currentTokens += unitCost
+        }
+        flush()
+
+        return withOverlap(windows, overlapUnits: budget.overlapUnits)
+    }
+
+    /// 超长单句切分。返回的段各自是独立的来源单元，id 带 `#序号`，
+    /// `lineID` 仍指向原句。不截断原文，也不让一段超长发言吃光整窗预算。
+    static func segment(unit: MinutesSourceUnit, budget: MinutesWindowBudget) -> [MinutesSourceUnit] {
+        let cost = MinutesTokenEstimate.tokens(in: unit.text)
+        guard cost > budget.windowTokens, unit.text.count > budget.segmentTokens else {
+            return [unit]
+        }
+        let characters = Array(unit.text)
+        var slices: [Range<Int>] = []
+        var start = 0
+        while start < characters.count {
+            var end = min(start + budget.segmentTokens, characters.count)
+            if end < characters.count {
+                // 在后半段里找标点或空白做切点，读起来更自然。
+                let searchStart = max(start + budget.segmentTokens / 2, start + 1)
+                if let found = (searchStart..<end).last(where: { isBoundary(characters[$0]) }) {
+                    end = found + 1
+                }
+            }
+            slices.append(start..<end)
+            start = end
+        }
+        guard slices.count > 1 else { return [unit] }
+        let total = slices.count
+        return slices.enumerated().map { offset, range in
+            var piece = unit
+            piece.id = "\(unit.id)#\(offset + 1)"
+            piece.text = String(characters[range])
+            piece.segmentIndex = offset
+            piece.segmentCount = total
+            piece.segmentRange = range
+            return piece
+        }
+    }
+
+    private static func isBoundary(_ character: Character) -> Bool {
+        "，。；！？、,.!?; \n\t".contains(character)
+    }
+
+    /// 找“下一条说话人不同”的位置；没有轮次变化返回 nil。
+    private static func lastSpeakerBoundary(
+        in units: [MinutesSourceUnit],
+        before nextSpeaker: String
+    ) -> Int? {
+        guard let last = units.last else { return nil }
+        guard last.speaker != nextSpeaker else { return nil }
+        var index = units.count - 1
+        while index > 0 {
+            if units[index].speaker != units[index - 1].speaker { return index }
+            index -= 1
+        }
+        return nil
+    }
+
+    /// 给每个窗口补上只读重叠：前窗尾部若干单元 + 后窗头部若干单元。
+    /// 重叠不增加拥有单元，也不改变覆盖账本。
+    private static func withOverlap(
+        _ windows: [MinutesWindow],
+        overlapUnits: Int
+    ) -> [MinutesWindow] {
+        guard overlapUnits > 0, windows.count > 1 else { return windows }
+        return windows.enumerated().map { index, window in
+            var updated = window
+            if index > 0 {
+                updated.contextBefore = Array(windows[index - 1].owned.suffix(overlapUnits))
+            }
+            if index < windows.count - 1 {
+                updated.contextAfter = Array(windows[index + 1].owned.prefix(overlapUnits))
+            }
+            return updated
+        }
+    }
+}
+
+/// 一个窗口的处理结果（覆盖账本的一行）。
+public enum MinutesWindowOutcome: String, Codable, Hashable, Sendable {
+    /// 已处理并产出候选。
+    case processed
+    /// 该窗口失败（网络、结构不合法、拒答等）。**可单独重试。**
+    case failed
+    /// 输出被截断，尾部没拿全。
+    case truncated
+}
+
+/// 覆盖账本（§6.3 / MC-40）。
+///
+/// 回答一个问题：**这一版的结论覆盖了整场会议的哪些部分，漏了哪些。**
+/// 没有被处理的窗口不允许消失在“100% 完成”里。
+public struct MinutesCoverageLedger: Codable, Hashable, Sendable {
+    public struct WindowRecord: Codable, Hashable, Sendable {
+        public var index: Int
+        /// 该窗口 owned 的来源单元 id（全场不重叠）。
+        public var ownedUnitIDs: [String]
+        public var outcome: MinutesWindowOutcome
+        public var failureReason: String?
+
+        public init(
+            index: Int,
+            ownedUnitIDs: [String],
+            outcome: MinutesWindowOutcome,
+            failureReason: String? = nil
+        ) {
+            self.index = index
+            self.ownedUnitIDs = ownedUnitIDs
+            self.outcome = outcome
+            self.failureReason = failureReason
+        }
+    }
+
+    /// 全场 eligible 的来源单元 id（按顺序）。
+    public var eligibleUnitIDs: [String]
+    public var windows: [WindowRecord]
+
+    public init(eligibleUnitIDs: [String], windows: [WindowRecord]) {
+        self.eligibleUnitIDs = eligibleUnitIDs
+        self.windows = windows
+    }
+
+    /// 从窗口计划生成一份账本。
+    ///
+    /// `pendingOutcomes` 给出每个窗口的初始结果（重试时保留成功窗口、
+    /// 把失败窗口重新标成待处理）。缺省按计划假定全部成功。
+    public static func planned(
+        units: [MinutesSourceUnit],
+        windows: [MinutesWindow],
+        outcomes: [Int: MinutesWindowOutcome] = [:],
+        failureReasons: [Int: String] = [:]
+    ) -> MinutesCoverageLedger {
+        MinutesCoverageLedger(
+            eligibleUnitIDs: units.map(\.id),
+            windows: windows.map { window in
+                WindowRecord(
+                    index: window.index,
+                    ownedUnitIDs: window.owned.map(\.id),
+                    outcome: outcomes[window.index] ?? .processed,
+                    failureReason: failureReasons[window.index]
+                )
+            }
+        )
+    }
+
+    /// 已成功处理的窗口下标。
+    public var processedWindowIndexes: [Int] {
+        windows.filter { $0.outcome == .processed }.map(\.index).sorted()
+    }
+
+    /// 失败的窗口下标（可局部重试）。
+    public var failedWindowIndexes: [Int] {
+        windows.filter { $0.outcome == .failed }.map(\.index).sorted()
+    }
+
+    /// 被截断的窗口下标。
+    public var truncatedWindowIndexes: [Int] {
+        windows.filter { $0.outcome == .truncated }.map(\.index).sorted()
+    }
+
+    /// 已覆盖（被某个成功窗口拥有）的来源单元 id，保持原顺序。
+    public var coveredUnitIDs: [String] {
+        let covered = Set(
+            windows.filter { $0.outcome == .processed }.flatMap(\.ownedUnitIDs)
+        )
+        return eligibleUnitIDs.filter { covered.contains($0) }
+    }
+
+    /// **缺口**：eligible 但没有被任何成功窗口覆盖的来源单元 id。
+    ///
+    /// 有缺口就**不许**声称整场完整——候选可以部分可用，但必须说清漏了什么。
+    public var gapUnitIDs: [String] {
+        let covered = Set(coveredUnitIDs)
+        return eligibleUnitIDs.filter { !covered.contains($0) }
+    }
+
+    /// 单元层面是否全覆盖。
+    public var coversAllUnits: Bool {
+        gapUnitIDs.isEmpty
+    }
+
+    /// 这一版是否可以宣称“整场完整”。
+    ///
+    /// 单元全覆盖**且**没有失败/截断窗口才算。单元都覆盖了但中间某窗
+    /// 结构不合法，照样不能报 100%。
+    public var isComplete: Bool {
+        coversAllUnits && failedWindowIndexes.isEmpty && truncatedWindowIndexes.isEmpty
+    }
+
+    /// 覆盖情况的一句话说明，进正文与失败原因。
+    ///
+    /// 缺口不给具体文字（可能是私人内容），只报数量：用户要的是
+    /// “哪里没整理到”，不是把没整理的原文再抄一遍。
+    public func summary() -> String {
+        if isComplete {
+            return "已覆盖全部 \(eligibleUnitIDs.count) 条来源。"
+        }
+        var parts: [String] = []
+        if !gapUnitIDs.isEmpty {
+            parts.append("有 \(gapUnitIDs.count) 条转录没有整理到")
+        }
+        if !failedWindowIndexes.isEmpty {
+            parts.append("有 \(failedWindowIndexes.count) 个窗口整理失败")
+        }
+        if !truncatedWindowIndexes.isEmpty {
+            parts.append("有 \(truncatedWindowIndexes.count) 个窗口输出被截断")
+        }
+        return parts.joined(separator: "，") + "；这一版是部分结果，不能当作整场完整纪要。"
+    }
+}
+
+/// 库里的一行窗口进度（MA-09）。
+///
+/// 局部重试要靠它：成功的窗口带着已拿到的候选与远端响应 id，
+/// 重试时**只**重跑失败的那些，再把全部候选重新归并。
+public struct MinutesWindowRecord: Hashable, Sendable, Identifiable {
+    public var index: Int
+    public var ownedUnitIDs: [String]
+    public var contextUnitIDs: [String]
+    public var outcome: MinutesWindowOutcome
+    public var failureReason: String?
+    /// 这一窗产出的候选原文。归并与局部重试都从它读，不重新请求模型。
+    public var candidateJSON: String?
+    public var remoteResponseID: String?
+    public var updatedAt: Date
+
+    public var id: String { "w\(index)" }
+
+    /// 读回这一窗的候选。解不开当没有候选，不猜内容。
+    public var candidate: MinutesCandidateV2? {
+        guard let candidateJSON, let data = candidateJSON.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(MinutesCandidateV2.self, from: data)
+    }
+
+    public init(
+        index: Int,
+        ownedUnitIDs: [String],
+        contextUnitIDs: [String] = [],
+        outcome: MinutesWindowOutcome,
+        failureReason: String? = nil,
+        candidateJSON: String? = nil,
+        remoteResponseID: String? = nil,
+        updatedAt: Date = Date()
+    ) {
+        self.index = index
+        self.ownedUnitIDs = ownedUnitIDs
+        self.contextUnitIDs = contextUnitIDs
+        self.outcome = outcome
+        self.failureReason = failureReason
+        self.candidateJSON = candidateJSON
+        self.remoteResponseID = remoteResponseID
+        self.updatedAt = updatedAt
+    }
+}
+
+/// 多窗口候选的全局归并（§6.3 reduce）。
+///
+/// 归并必须**能访问候选对应的原文**，所以这里接收完整的 `units`，
+/// 以来源身份去重：同一件事在重叠区被两个窗口各写一次时只留一条，
+/// 引用取并集，条数不翻倍（MC-39）。
+public enum MinutesCandidateMerger {
+    public struct Merged: Sendable {
+        public var candidate: MinutesCandidateV2
+        public var report: MinutesEvidenceValidator.Report
+    }
+
+    /// 把各窗口候选归并成一份，并按全量来源单元重新核对。
+    ///
+    /// 跨窗撤回/修订的口径（§6.3）：`decided` 与 `retracted` 指向同一
+    /// 来源单元时**两个事件都保留**，但标成“存在分歧/未确认”——既不因为
+    /// 撤回那句出现在后面就自动认定前面那句作废，也不悄悄只留最新的那句。
+    public static func merge(
+        windowCandidates: [MinutesCandidateV2],
+        units: [MinutesSourceUnit],
+        title: String? = nil,
+        coverageNote: String? = nil
+    ) -> Merged {
+        var overview: [MinutesCandidateV2.OverviewItem] = []
+        var decisions: [MinutesCandidateV2.DecisionItem] = []
+        var actions: [MinutesCandidateV2.ActionItem] = []
+        var openQuestions: [MinutesCandidateV2.OpenQuestionItem] = []
+        var notes: [String] = []
+
+        for candidate in windowCandidates {
+            for item in candidate.overview { mergeOverview(item, into: &overview) }
+            for item in candidate.decisions { mergeDecision(item, into: &decisions) }
+            for item in candidate.actions { mergeAction(item, into: &actions) }
+            for item in candidate.openQuestions { mergeOpenQuestion(item, into: &openQuestions) }
+            let note = candidate.confidenceNotes.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !note.isEmpty, !notes.contains(note) { notes.append(note) }
+        }
+
+        // 跨窗分歧：同一件事既被定了又被撤回时，把这两条结论都标成未确认，
+        // 两个事件都留在正文里。判定按**结论说的是同一件事**，不是按引用了
+        // 同一句——提出在第 3 句、撤回在第 80 句是常态，两者没有共同来源。
+        let disputedTexts = disputedDecisionTexts(decisions: decisions)
+        if !disputedTexts.isEmpty {
+            let marker = "存在分歧/未确认"
+            for index in decisions.indices {
+                guard disputedTexts.contains(decisions[index].text) else { continue }
+                if !decisions[index].conditions.contains(marker) {
+                    decisions[index].conditions.append(marker)
+                }
+            }
+            notes.append(
+                "有结论在会议不同阶段被提出又撤回，已保留两个事件并标为未确认，请对照原文核对。"
+            )
+        }
+        if let coverageNote, !coverageNote.isEmpty {
+            notes.append(coverageNote)
+        }
+
+        let merged = MinutesCandidateV2(
+            title: title ?? windowCandidates.first?.title ?? "会议纪要",
+            overview: overview,
+            decisions: decisions,
+            actions: actions,
+            openQuestions: openQuestions,
+            confidenceNotes: notes.joined(separator: "\n")
+        )
+        // 归并后按**全量**来源单元重新核对：引用仍必须落在真实快照里。
+        let report = MinutesEvidenceValidator.validate(candidate: merged, units: units)
+        return Merged(candidate: merged, report: report)
+    }
+
+    /// 概述按（文本 + 来源集合）去重：重叠区被两个窗口各写一次时合成一条。
+    private static func mergeOverview(
+        _ item: MinutesCandidateV2.OverviewItem,
+        into items: inout [MinutesCandidateV2.OverviewItem]
+    ) {
+        if let existing = items.firstIndex(where: {
+            $0.text == item.text && sameSourceSet($0.sourceUnitIDs, item.sourceUnitIDs)
+        }) {
+            items[existing].sourceUnitIDs = union(items[existing].sourceUnitIDs, item.sourceUnitIDs)
+            return
+        }
+        var fresh = item
+        if items.contains(where: { $0.localID == item.localID }) {
+            fresh.localID = "\(item.localID)-\(items.count + 1)"
+        }
+        items.append(fresh)
+    }
+
+    /// 结论去重：同文本、同语气、同来源集合才算重复。
+    /// `decided` 与 `retracted` 语气不同，**永不**互相吞掉（§6.3）。
+    private static func mergeDecision(
+        _ item: MinutesCandidateV2.DecisionItem,
+        into items: inout [MinutesCandidateV2.DecisionItem]
+    ) {
+        if let existing = items.firstIndex(where: {
+            $0.text == item.text
+                && $0.modality == item.modality
+                && sameSourceSet($0.sourceUnitIDs, item.sourceUnitIDs)
+        }) {
+            items[existing].sourceUnitIDs = union(items[existing].sourceUnitIDs, item.sourceUnitIDs)
+            items[existing].conditions = mergeConditions(items[existing].conditions, item.conditions)
+            return
+        }
+        var fresh = item
+        if items.contains(where: { $0.localID == item.localID }) {
+            fresh.localID = "\(item.localID)-\(items.count + 1)"
+        }
+        items.append(fresh)
+    }
+
+    /// 待办去重（MC-39）：重叠窗口看到同一条待办时只留一条。
+    ///
+    /// 判定用「任务文本相同 **或** 来源完全相同」，并合并负责人/期限。
+    /// 两窗分别写“李雷跟进”和“李雷（owner）跟进”是同一件事的两种写法，
+    /// 拆成两条待办就是重复劳动的源头。
+    private static func mergeAction(
+        _ item: MinutesCandidateV2.ActionItem,
+        into items: inout [MinutesCandidateV2.ActionItem]
+    ) {
+        if let existing = items.firstIndex(where: {
+            $0.task == item.task || sameSourceSet($0.sourceUnitIDs, item.sourceUnitIDs)
+        }) {
+            items[existing].sourceUnitIDs = union(items[existing].sourceUnitIDs, item.sourceUnitIDs)
+            if items[existing].ownerText?.isEmpty ?? true {
+                items[existing].ownerText = item.ownerText
+            }
+            if items[existing].dueExpression?.isEmpty ?? true {
+                items[existing].dueExpression = item.dueExpression
+            }
+            // 承诺程度不一致时不替用户判断哪个对：保留“被认领”的一侧，
+            // 差异由验证器与核对界面去暴露（§6.4）。
+            if items[existing].commitment != item.commitment {
+                items[existing].commitment = .committed
+            }
+            return
+        }
+        var fresh = item
+        if items.contains(where: { $0.localID == item.localID }) {
+            fresh.localID = "\(item.localID)-\(items.count + 1)"
+        }
+        items.append(fresh)
+    }
+
+    private static func mergeOpenQuestion(
+        _ item: MinutesCandidateV2.OpenQuestionItem,
+        into items: inout [MinutesCandidateV2.OpenQuestionItem]
+    ) {
+        if let existing = items.firstIndex(where: {
+            $0.text == item.text && sameSourceSet($0.sourceUnitIDs, item.sourceUnitIDs)
+        }) {
+            items[existing].sourceUnitIDs = union(items[existing].sourceUnitIDs, item.sourceUnitIDs)
+            return
+        }
+        var fresh = item
+        if items.contains(where: { $0.localID == item.localID }) {
+            fresh.localID = "\(item.localID)-\(items.count + 1)"
+        }
+        items.append(fresh)
+    }
+
+    /// 同一件事既有 `decided` 又有 `retracted` 时，返回这些结论的正文。
+    ///
+    /// 按正文归组而不是按来源单元：跨窗的提出与撤回本来就不引用同一句，
+    /// 按单元判定会把真正的分歧漏掉。
+    private static func disputedDecisionTexts(
+        decisions: [MinutesCandidateV2.DecisionItem]
+    ) -> Set<String> {
+        let decided = Set(decisions.filter { $0.modality == .decided }.map(\.text))
+        let retracted = Set(decisions.filter { $0.modality == .retracted }.map(\.text))
+        return decided.intersection(retracted)
+    }
+
+    private static func sameSourceSet(_ lhs: [String], _ rhs: [String]) -> Bool {
+        Set(lhs) == Set(rhs)
+    }
+
+    private static func union(_ lhs: [String], _ rhs: [String]) -> [String] {
+        var seen = Set(lhs)
+        var result = lhs
+        for id in rhs where !seen.contains(id) {
+            seen.insert(id)
+            result.append(id)
+        }
+        return result
+    }
+
+    private static func mergeConditions(_ lhs: [String], _ rhs: [String]) -> [String] {
+        var result = lhs
+        for condition in rhs where !result.contains(condition) {
+            result.append(condition)
+        }
+        return result
     }
 }
 
@@ -1548,12 +2260,22 @@ public struct MinutesVersion: Identifiable, Hashable, Sendable {
     /// 这一版的核对报告。**它和正文一起存**，因为"哪里需要核对"是这一版的一部分，
     /// 脱离正文单独保存的话，改了正文就没人知道原来核对的是哪一版。
     public var reviewJSON: String?
+    /// 这一版的覆盖账本 JSON（MA-09/§6.3）。记录哪些来源单元被整理到、
+    /// 哪些窗口失败或被截断。为 nil 表示这是单窗或旧版本，没有分窗账本。
+    public var coverageJSON: String?
 
     /// 读回核对报告。存的是 JSON 文本，这里解一次；解不开就当没有报告，
     /// 不假装"核对通过"——那正好是验证器最不该犯的错。
     public var review: MinutesEvidenceValidator.Report? {
         guard let reviewJSON, let data = reviewJSON.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(MinutesEvidenceValidator.Report.self, from: data)
+    }
+
+    /// 读回覆盖账本。解不开当没有账本，**不**默认成"全部覆盖"——
+    /// 缺账本和账本说全覆盖是两件事，只有后者才允许说整场完整。
+    public var coverage: MinutesCoverageLedger? {
+        guard let coverageJSON, let data = coverageJSON.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(MinutesCoverageLedger.self, from: data)
     }
 
     public init(
@@ -1576,7 +2298,8 @@ public struct MinutesVersion: Identifiable, Hashable, Sendable {
         snapshotID: String? = nil,
         cancelRequestedAt: Date? = nil,
         candidateJSON: String? = nil,
-        reviewJSON: String? = nil
+        reviewJSON: String? = nil,
+        coverageJSON: String? = nil
     ) {
         self.id = id
         self.sessionID = sessionID
@@ -1598,6 +2321,7 @@ public struct MinutesVersion: Identifiable, Hashable, Sendable {
         self.cancelRequestedAt = cancelRequestedAt
         self.candidateJSON = candidateJSON
         self.reviewJSON = reviewJSON
+        self.coverageJSON = coverageJSON
     }
 
     /// 这次任务是否可以复用已持久化的远端响应（MC-28）：有远端 id，
