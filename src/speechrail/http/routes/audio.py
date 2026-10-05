@@ -9,13 +9,14 @@ import logging
 import shutil
 import struct
 import time as _time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Literal, cast
 
 from fastapi import APIRouter, File, Form, Header, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
+from starlette.types import Receive, Scope, Send
 
 from speechrail.application.alignment import (
     TranscriptAlignmentError,
@@ -91,6 +92,7 @@ from speechrail.runtime.admission import QueueFullError
 from speechrail.runtime.alignment_admission import AlignmentAdmissionFullError
 from speechrail.runtime.asr_mode import AsrModeBusy
 from speechrail.runtime.busy import BusyReason, busy_retry_policy, infer_backend_busy_reason
+from speechrail.runtime.cleanup import join_cleanup
 from speechrail.runtime.diarization_admission import DiarizationAdmissionFullError
 from speechrail.runtime.executable import resolve_configured_executable
 from speechrail.runtime.registry import engine_variant_for_role
@@ -704,19 +706,36 @@ async def _stream_encode_container(
         if process.returncode != 0 or not emitted or counter.total_bytes == 0:
             raise ValueError("audio_encode_failed")
     finally:
-        await cleanup_ffmpeg_process(process, tasks)
-        close = getattr(pcm_source, "aclose", None)
-        if close is not None:
-            with contextlib.suppress(BaseException):
-                await close()
+        try:
+            await cleanup_ffmpeg_process(process, tasks)
+        finally:
+            await _close_audio_stream(pcm_source)
 
 
 async def _close_audio_stream(source: AsyncIterator[bytes]) -> None:
     """Close an async byte stream when the response stops consuming it."""
     close = getattr(source, "aclose", None)
     if close is not None:
-        with contextlib.suppress(BaseException):
-            await close()
+        await join_cleanup(asyncio.create_task(close(), name="http-audio-stream-close"))
+
+
+def _streaming_audio_response(
+    body: AsyncIterator[bytes], *, media_type: str, close: Callable[[], Awaitable[None]],
+) -> StreamingResponse:
+    """Own the prefetched stream even when ASGI send fails outside its iterator."""
+    class OwnedResponse(StreamingResponse):
+        async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+            try:
+                await super().__call__(scope, receive, send)
+            finally:
+                async def close_owned() -> None:
+                    await close()
+
+                await join_cleanup(asyncio.create_task(
+                    close_owned(), name="http-audio-response-close",
+                ))
+
+    return OwnedResponse(body, media_type=media_type)
 
 
 async def _encode_container(
@@ -2040,6 +2059,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
             else None
         )
 
+        reclamation_failed = False
+        resource_key = tts_resource_key(synthesizer, synthesis.voice)
+
+        def quarantine_backend() -> None:
+            nonlocal reclamation_failed
+            reclamation_failed = True
+            services.governor.quarantine_tts_lane(resource_key)
+
         async def audio_stream(
             *, counter: PcmOutputCounter | None = None
         ) -> AsyncIterator[bytes]:
@@ -2051,7 +2078,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 async with services.governor.reserve(
                     work_class,
                     expires_at=expires_at,
-                    resource_key=tts_resource_key(synthesizer, synthesis.voice),
+                    resource_key=resource_key,
                     purpose=work_purpose,
                 ):
                     admitted_synthesis = await prepare_validated_speech(
@@ -2061,37 +2088,42 @@ def create_audio_router(services: AppServices) -> APIRouter:
                         capability_key=render_capability_key,
                         registry=get_voice_registry(),
                     )
-                    async for chunk in iter_until(
+                    # Closing the response must join the backend iterator before
+                    # leaving its Governor reservation, including at a yield.
+                    validated = iter_until(
                         iter_validated_audio(
-                            synthesizer.synthesize(admitted_synthesis)
+                            synthesizer.synthesize(admitted_synthesis),
+                            on_close_failure=quarantine_backend,
                         ),
                         expires_at,
-                    ):
-                        if backend_response_id is None:
-                            backend_response_id = chunk.response_id
-                        emitted_samples += len(chunk.audio) // 2
-                        if counter is not None:
-                            counter.accept(len(chunk.audio))
-                        if receipt_id is not None:
-                            if not runtime_revision_checked:
-                                runtime_revision_checked = True
-                                if admitted_synthesis.expected_runtime_revision is not None:
-                                    services.render_receipts.bind_model_runtime_revision(
-                                        receipt_id,
-                                        admitted_synthesis.expected_runtime_revision,
-                                    )
-                                else:
-                                    bind_observed_runtime_revision(
-                                        services.render_receipts,
-                                        receipt_id,
-                                        synthesizer=synthesizer,
-                                        voice=synthesis.voice,
-                                    )
-                            services.render_receipts.accept_pcm(
-                                receipt_id,
-                                chunk.audio,
-                            )
-                        yield chunk.audio
+                    )
+                    async with contextlib.aclosing(validated) as chunks:
+                        async for chunk in chunks:
+                            if backend_response_id is None:
+                                backend_response_id = chunk.response_id
+                            emitted_samples += len(chunk.audio) // 2
+                            if counter is not None:
+                                counter.accept(len(chunk.audio))
+                            if receipt_id is not None and not reclamation_failed:
+                                if not runtime_revision_checked:
+                                    runtime_revision_checked = True
+                                    if admitted_synthesis.expected_runtime_revision is not None:
+                                        services.render_receipts.bind_model_runtime_revision(
+                                            receipt_id,
+                                            admitted_synthesis.expected_runtime_revision,
+                                        )
+                                    else:
+                                        bind_observed_runtime_revision(
+                                            services.render_receipts,
+                                            receipt_id,
+                                            synthesizer=synthesizer,
+                                            voice=synthesis.voice,
+                                        )
+                                services.render_receipts.accept_pcm(
+                                    receipt_id,
+                                    chunk.audio,
+                                )
+                            yield chunk.audio
                 if (
                     receipt_id is not None
                     and backend_response_id is not None
@@ -2105,7 +2137,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                         synthesizer=synthesizer,
                         response_id=backend_response_id,
                     )
-                if timing_id is not None:
+                if timing_id is not None and not reclamation_failed:
                     if emitted_samples <= 0 or backend_response_id is None:
                         services.tts_timings.fail(timing_id, "empty_audio")
                     else:
@@ -2131,67 +2163,67 @@ def create_audio_router(services: AppServices) -> APIRouter:
                                 actual_samples=emitted_samples,
                             )
             except asyncio.CancelledError:
-                if receipt_id is not None:
+                if receipt_id is not None and not reclamation_failed:
                     services.render_receipts.cancel(receipt_id)
-                if timing_id is not None:
+                if timing_id is not None and not reclamation_failed:
                     services.tts_timings.cancel(timing_id)
                 raise
             except TTSDeliveryError as exc:
-                if receipt_id is not None:
+                if receipt_id is not None and not reclamation_failed:
                     services.render_receipts.fail(receipt_id, exc.code)
-                if timing_id is not None:
+                if timing_id is not None and not reclamation_failed:
                     services.tts_timings.fail(timing_id, exc.code)
                 raise
             except VoiceRevisionConflictError:
-                if receipt_id is not None:
+                if receipt_id is not None and not reclamation_failed:
                     services.render_receipts.fail(
                         receipt_id,
                         "voice_revision_conflict",
                     )
-                if timing_id is not None:
+                if timing_id is not None and not reclamation_failed:
                     services.tts_timings.fail(timing_id, "voice_revision_conflict")
                 raise
             except VoiceRevokedError:
-                if receipt_id is not None:
+                if receipt_id is not None and not reclamation_failed:
                     services.render_receipts.fail(receipt_id, "voice_revoked")
-                if timing_id is not None:
+                if timing_id is not None and not reclamation_failed:
                     services.tts_timings.fail(timing_id, "voice_revoked")
                 raise
             except VoiceStoreUnavailableError:
-                if receipt_id is not None:
+                if receipt_id is not None and not reclamation_failed:
                     services.render_receipts.fail(
                         receipt_id,
                         "voice_store_unavailable",
                     )
-                if timing_id is not None:
+                if timing_id is not None and not reclamation_failed:
                     services.tts_timings.fail(timing_id, "voice_store_unavailable")
                 raise
             except GovernorQueueFullError:
-                if receipt_id is not None:
+                if receipt_id is not None and not reclamation_failed:
                     services.render_receipts.fail(receipt_id, "queue_full")
-                if timing_id is not None:
+                if timing_id is not None and not reclamation_failed:
                     services.tts_timings.fail(timing_id, "queue_full")
                 raise
             except TimeoutError:
-                if receipt_id is not None:
+                if receipt_id is not None and not reclamation_failed:
                     services.render_receipts.fail(receipt_id, "backend_timeout")
-                if timing_id is not None:
+                if timing_id is not None and not reclamation_failed:
                     services.tts_timings.fail(timing_id, "backend_timeout")
                 raise
             except OverflowError:
-                if receipt_id is not None:
+                if receipt_id is not None and not reclamation_failed:
                     services.render_receipts.fail(
                         receipt_id,
                         "audio_encode_failed",
                     )
-                if timing_id is not None:
+                if timing_id is not None and not reclamation_failed:
                     services.tts_timings.fail(timing_id, "audio_encode_failed")
                 raise
             except RuntimeError as exc:
                 failure_code = _tts_backend_failure_code(exc)
-                if receipt_id is not None:
+                if receipt_id is not None and not reclamation_failed:
                     services.render_receipts.fail(receipt_id, failure_code)
-                if timing_id is not None:
+                if timing_id is not None and not reclamation_failed:
                     services.tts_timings.fail(timing_id, failure_code)
                 raise
 
@@ -2299,6 +2331,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
                         inference_duration_sec=_time.monotonic() - _tts_t0,
                     )
 
+                delivery_cancelled = False
+                delivery_failed = False
                 try:
                     yield first
                     _emitted_bytes += len(first)
@@ -2309,22 +2343,43 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     if receipt_id is not None:
                         services.render_receipts.complete(receipt_id)
                 except asyncio.CancelledError:
-                    if receipt_id is not None:
-                        services.render_receipts.cancel(receipt_id)
+                    delivery_cancelled = True
+                    raise
+                except GeneratorExit:
+                    delivery_cancelled = True
                     raise
                 except BaseException:
-                    if receipt_id is not None:
-                        services.render_receipts.fail(
-                            receipt_id,
-                            "stream_delivery_error",
-                        )
+                    delivery_failed = True
                     raise
                 finally:
-                    await _close_audio_stream(pcm_stream)
+                    async def finish_delivery() -> None:
+                        await _close_audio_stream(pcm_stream)
+                        if receipt_id is not None and not reclamation_failed:
+                            if delivery_cancelled:
+                                services.render_receipts.cancel(receipt_id)
+                            elif delivery_failed:
+                                services.render_receipts.fail(receipt_id, "stream_delivery_error")
 
-            response = StreamingResponse(
-                streamed_pcm(),
-                media_type="audio/x-pcm",
+                    await join_cleanup(asyncio.create_task(
+                        finish_delivery(), name="http-audio-delivery-close",
+                    ))
+
+            response_body = streamed_pcm()
+
+            async def close_pcm_response() -> None:
+                try:
+                    await _close_audio_stream(response_body)
+                finally:
+                    await _close_audio_stream(pcm_stream)
+                if receipt_id is not None and not reclamation_failed:
+                    # Idempotent for completed/error receipts; catches disconnect
+                    # before the body ever starts or while ASGI send is awaiting.
+                    services.render_receipts.cancel(receipt_id)
+                if timing_id is not None and not reclamation_failed:
+                    services.tts_timings.cancel(timing_id)
+
+            response = _streaming_audio_response(
+                response_body, media_type="audio/x-pcm", close=close_pcm_response,
             )
             if receipt_id is not None:
                 response.headers["SpeechRail-Receipt-Id"] = receipt_id
@@ -2436,6 +2491,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 )
 
             async def streamed_encoded() -> AsyncIterator[bytes]:
+                delivery_cancelled = False
+                delivery_failed = False
                 try:
                     yield first
                     async for chunk in iter_until(encoded_stream, expires_at):
@@ -2451,22 +2508,43 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     if receipt_id is not None:
                         services.render_receipts.complete(receipt_id)
                 except asyncio.CancelledError:
-                    if receipt_id is not None:
-                        services.render_receipts.cancel(receipt_id)
+                    delivery_cancelled = True
+                    raise
+                except GeneratorExit:
+                    delivery_cancelled = True
                     raise
                 except BaseException:
-                    if receipt_id is not None:
-                        services.render_receipts.fail(
-                            receipt_id,
-                            "stream_delivery_error",
-                        )
+                    delivery_failed = True
                     raise
                 finally:
-                    await _close_audio_stream(encoded_stream)
+                    async def finish_delivery() -> None:
+                        await _close_audio_stream(encoded_stream)
+                        if receipt_id is not None and not reclamation_failed:
+                            if delivery_cancelled:
+                                services.render_receipts.cancel(receipt_id)
+                            elif delivery_failed:
+                                services.render_receipts.fail(receipt_id, "stream_delivery_error")
 
-            response = StreamingResponse(
-                streamed_encoded(),
-                media_type=media_type,
+                    await join_cleanup(asyncio.create_task(
+                        finish_delivery(), name="http-audio-delivery-close",
+                    ))
+
+            response_body = streamed_encoded()
+
+            async def close_encoded_response() -> None:
+                try:
+                    await _close_audio_stream(response_body)
+                finally:
+                    await _close_audio_stream(encoded_stream)
+                if receipt_id is not None and not reclamation_failed:
+                    # Idempotent for completed/error receipts; catches disconnect
+                    # before the body ever starts or while ASGI send is awaiting.
+                    services.render_receipts.cancel(receipt_id)
+                if timing_id is not None and not reclamation_failed:
+                    services.tts_timings.cancel(timing_id)
+
+            response = _streaming_audio_response(
+                response_body, media_type=media_type, close=close_encoded_response,
             )
             if receipt_id is not None:
                 response.headers["SpeechRail-Receipt-Id"] = receipt_id

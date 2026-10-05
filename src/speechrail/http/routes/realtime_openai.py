@@ -22,6 +22,7 @@ from speechrail.compatibility.openai_realtime import (
 )
 from speechrail.domain.diarization import DiarizationError
 from speechrail.http.auth import websocket_is_authorized
+from speechrail.runtime.cleanup import join_cleanup
 
 logger = logging.getLogger(__name__)
 
@@ -306,23 +307,34 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                 {recv_task, handle_task, control_task}, return_when=asyncio.FIRST_COMPLETED
             )
         finally:
-            tasks = (recv_task, handle_task, control_task)
-            for task in tasks:
-                task.cancel()
-            for task in tasks:
+            async def close_owned_session() -> None:
+                tasks = (recv_task, handle_task, control_task)
+                for task in tasks:
+                    task.cancel()
+                for task in tasks:
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception as task_error:
+                        logger.warning(
+                            "realtime loop ended with an error: type=%s",
+                            type(task_error).__name__,
+                        )
                 try:
-                    await task
-                except asyncio.CancelledError:
-                    continue
-                except Exception as task_error:
-                    logger.warning(
-                        "realtime loop ended with an error: type=%s",
-                        type(task_error).__name__,
-                    )
+                    await session.close()
+                finally:
+                    services.metrics.record_realtime_session_end()
+
+            cleanup = asyncio.create_task(close_owned_session(), name="realtime-session-close")
             try:
-                await session.close()
-            finally:
-                services.metrics.record_realtime_session_end()
+                await join_cleanup(cleanup)
+            except asyncio.CancelledError:
+                # Disconnect cancellation during the final join is already
+                # fulfilled by confirmed cleanup. Internal cleanup failure must
+                # still propagate; the owned task is never abandoned.
+                if cleanup.cancelled() or cleanup.exception() is not None:
+                    raise
 
     return router
 

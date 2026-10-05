@@ -829,3 +829,32 @@ def test_concurrent_close_joins_the_abort_already_started_by_cancel() -> None:
         assert transport.aborts == 1
         assert not transport.alive
     _run(scenario)
+
+
+def test_leased_session_does_not_release_worker_slot_when_reaping_fails() -> None:
+    from contextlib import ExitStack
+
+    from speechrail.backends.qwen3_tts import _LeasedTtsStreamSession
+
+    async def scenario() -> None:
+        released = []
+
+        class Worker:
+            def _release_incremental_slot(self):
+                released.append("worker-slot")
+
+        class Inner:
+            used_abort_fallback = False
+
+            async def close(self):
+                raise RuntimeError("worker reaping failed")
+
+        lease = ExitStack()
+        lease.callback(lambda: released.append("voice-lease"))
+        session = _LeasedTtsStreamSession(Worker(), Inner(), lease, epoch=1)
+        for _ in range(2):
+            with pytest.raises(RuntimeError, match="worker reaping failed"):
+                await session.close()
+            assert not released
+
+    _run(scenario)

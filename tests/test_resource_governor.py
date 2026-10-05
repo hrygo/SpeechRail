@@ -938,3 +938,90 @@ def test_declared_infeasible_budget_rejects_heavy_compute() -> None:
 
 def test_budget_rejection_error_is_a_queue_full_error() -> None:
     assert issubclass(GovernorBudgetError, GovernorQueueFullError)
+
+
+def test_cancel_during_release_cannot_leak_the_reservation() -> None:
+    async def run() -> None:
+        governor = ResourceGovernor(
+            GovernorLimits(total_capacity=2, realtime_reserved_capacity=1, max_pending_per_class=4)
+        )
+        admitted = asyncio.Event()
+        finish = asyncio.Event()
+
+        async def operation() -> None:
+            async with governor.reserve(WorkClass.REALTIME_TTS, resource_key="tts"):
+                admitted.set()
+                await finish.wait()
+
+        task = asyncio.create_task(operation())
+        await admitted.wait()
+        async with governor._condition:
+            finish.set()
+            await asyncio.sleep(0)
+            assert governor.snapshot().active_tts == 1
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+            await asyncio.sleep(0)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert governor.snapshot().active_tts == 0
+        assert governor.lane_available(WorkClass.REALTIME_TTS, "tts")
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("allow_overlap", [True, False])
+def test_quarantined_lane_rejects_new_owners_and_preserves_overlap_policy(allow_overlap) -> None:
+    async def run() -> None:
+        governor = ResourceGovernor(
+            GovernorLimits(total_capacity=3, realtime_reserved_capacity=1, max_pending_per_class=4),
+            allow_heavy_overlap=allow_overlap,
+        )
+        governor.quarantine_tts_lane("tts_base")
+        for key in ("tts_base", None):
+            assert not governor.lane_available(WorkClass.REALTIME_TTS, key)
+            with pytest.raises(GovernorQueueFullError, match="unconfirmed"):
+                async with governor.reserve(WorkClass.REALTIME_TTS, resource_key=key):
+                    pytest.fail("unconfirmed lane admitted a new owner")
+        assert governor.snapshot().pending_realtime == 0
+        if allow_overlap:
+            async with governor.reserve(WorkClass.REALTIME_TTS, resource_key="tts_custom_voice"):
+                assert governor.snapshot().active_tts == 1
+            async with governor.reserve(WorkClass.REALTIME_ASR):
+                assert governor.snapshot().active_asr == 1
+        else:
+            with pytest.raises(GovernorQueueFullError):
+                async with governor.reserve(WorkClass.REALTIME_ASR):
+                    pytest.fail("serial policy admitted work beside an unknown owner")
+        governor.quarantine_tts_lane(None)
+        assert not governor.lane_available(WorkClass.REALTIME_TTS, "tts_custom_voice")
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("work_class", [WorkClass.REALTIME_TTS, WorkClass.BATCH_ASR])
+def test_quarantine_rejects_already_queued_work_without_releasing_owner(work_class) -> None:
+    async def run() -> None:
+        governor = ResourceGovernor(
+            GovernorLimits(total_capacity=2, realtime_reserved_capacity=1, max_pending_per_class=4),
+            allow_heavy_overlap=False,
+        )
+        async with governor.reserve(WorkClass.REALTIME_TTS, resource_key="tts_base"):
+            async def queued() -> None:
+                async with governor.reserve(
+                    work_class,
+                    resource_key="tts_base" if work_class == WorkClass.REALTIME_TTS else None,
+                ):
+                    pytest.fail("quarantined owner admitted queued work")
+
+            task = asyncio.create_task(queued())
+            await asyncio.sleep(0)
+            assert governor.snapshot().pending_realtime + governor.snapshot().pending_batch == 1
+            governor.quarantine_tts_lane("tts_base")
+            with pytest.raises(GovernorQueueFullError, match="unconfirmed"):
+                await asyncio.wait_for(task, timeout=1)
+            assert governor.snapshot().active_tts == 1
+            assert governor.snapshot().pending_realtime + governor.snapshot().pending_batch == 0
+
+    asyncio.run(run())

@@ -573,3 +573,149 @@ class _EvictableWorker:
     async def close(self) -> None:
         self.closed = True
         self.alive = False
+
+
+def test_failed_session_close_keeps_lane_and_receipt_unconfirmed() -> None:
+    async def run() -> None:
+        synth = _FakeSynthesizer()
+        governor = _governor()
+        receipts = RenderReceiptRegistry()
+        sink = _Sink()
+        controller = await _service(synth, governor=governor, receipts=receipts).open(
+            options=_options(), sink=sink, receipt=TtsStreamReceipt()
+        )
+        session = synth.sessions[0]
+
+        async def failed_close() -> None:
+            raise RuntimeError("reclamation not confirmed")
+
+        session.close = failed_close
+        session.push(_terminal_event(TtsStreamTerminal.COMPLETED))
+        try:
+            with pytest.raises(RuntimeError, match="reclamation not confirmed"):
+                await asyncio.wait_for(controller.wait_closed(), timeout=1)
+            assert not controller.closed
+            assert governor.snapshot().active_tts == 1
+            assert not sink.terminals
+            assert receipts.get(controller.receipt_id)["status"] == "pending"
+            assert not governor.lane_available(WorkClass.REALTIME_TTS, "tts_custom_voice")
+            with pytest.raises(TtsStreamAdmissionError):
+                await _service(synth, governor=governor).open(options=_options(), sink=_Sink())
+            assert len(synth.sessions) == 1
+        finally:
+            # Test-only release of a known fake owner; production must keep it blocked.
+            await controller._admission.aclose()
+
+    asyncio.run(run())
+
+
+def test_closed_remains_false_while_session_cleanup_is_running() -> None:
+    async def run() -> None:
+        synth = _FakeSynthesizer()
+        governor = _governor()
+        receipts = RenderReceiptRegistry()
+        sink = _Sink()
+        controller = await _service(synth, governor=governor, receipts=receipts).open(
+            options=_options(), sink=sink, receipt=TtsStreamReceipt()
+        )
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original_close = synth.sessions[0].close
+
+        async def gated_close() -> None:
+            entered.set()
+            await release.wait()
+            await original_close()
+
+        synth.sessions[0].close = gated_close
+        synth.sessions[0].push(_terminal_event(TtsStreamTerminal.COMPLETED))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        try:
+            assert not controller.closed
+            assert governor.snapshot().active_tts == 1
+            assert not sink.terminals
+            assert receipts.get(controller.receipt_id)["status"] == "pending"
+        finally:
+            release.set()
+            await asyncio.wait_for(controller.wait_closed(), timeout=1)
+        assert controller.closed
+        assert governor.snapshot().active_tts == 0
+        assert len(sink.terminals) == 1
+
+    asyncio.run(run())
+
+
+def test_cancelled_waiter_cannot_abandon_backend_cancel() -> None:
+    async def run() -> None:
+        synth = _FakeSynthesizer()
+        governor = _governor()
+        sink = _Sink()
+        controller = await _service(synth, governor=governor).open(options=_options(), sink=sink)
+        session = synth.sessions[0]
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original_cancel = session.cancel
+
+        async def gated_cancel() -> None:
+            entered.set()
+            await release.wait()
+            await original_cancel()
+
+        session.cancel = gated_cancel
+        waiter = asyncio.create_task(controller.cancel())
+        await entered.wait()
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert governor.snapshot().active_tts == 1
+        release.set()
+        try:
+            await asyncio.wait_for(controller.wait_closed(), timeout=0.1)
+            assert governor.snapshot().active_tts == 0
+            assert len(sink.terminals) == 1
+        finally:
+            session.queued.put_nowait(None)
+            await controller.wait_closed()
+
+    asyncio.run(run())
+
+
+def test_repeated_cancel_during_failed_open_joins_session_cleanup() -> None:
+    async def run() -> None:
+        synth = _FakeSynthesizer()
+        governor = _governor()
+        service = _service(synth, governor=governor)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        def fail_receipt(*args) -> str:
+            session = synth.sessions[0]
+            original_close = session.close
+
+            async def gated_close() -> None:
+                entered.set()
+                await release.wait()
+                await original_close()
+
+            session.close = gated_close
+            raise RuntimeError("receipt store full")
+
+        service._begin_receipt = fail_receipt
+        task = asyncio.create_task(service.open(
+            options=_options(), sink=_Sink(), receipt=TtsStreamReceipt()
+        ))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        for _ in range(2):
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+            assert synth.sessions[0].closes == 0
+            assert governor.snapshot().active_tts == 1
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+        assert synth.sessions[0].closes == 1
+        assert governor.snapshot().active_tts == 0
+        assert governor.lane_available(WorkClass.REALTIME_TTS, "tts_custom_voice")
+
+    asyncio.run(run())

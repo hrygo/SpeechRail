@@ -42,6 +42,7 @@ from speechrail.domain.tts_stream import (
 )
 from speechrail.domain.tts_timing import TtsTimingSidecar
 from speechrail.runtime.busy import BusyReason
+from speechrail.runtime.cleanup import join_cleanup
 from speechrail.runtime.registry import (
     TTS_RUNTIME_ROLES,
     VOICE_DESIGN_ROLE,
@@ -908,7 +909,7 @@ class _LeasedTtsStreamSession:
         self._inner = inner
         self._lease = lease
         self._epoch = epoch
-        self._released = False
+        self._release_task: asyncio.Task[None] | None = None
 
     @property
     def options(self) -> TtsStreamOptions:
@@ -944,18 +945,20 @@ class _LeasedTtsStreamSession:
         await self._release()
 
     async def _release(self) -> None:
-        if self._released:
-            return
-        self._released = True
-        try:
-            await self._inner.close()
-        finally:
-            try:
-                if self._inner.used_abort_fallback:
-                    await self._worker._invalidate_after_abort(self._epoch)
-            finally:
-                self._worker._release_incremental_slot()
-                self._lease.__exit__(None, None, None)
+        if self._release_task is None:
+            self._release_task = asyncio.create_task(
+                self._release_owned(), name="tts-stream-lease-release",
+            )
+        await join_cleanup(self._release_task)
+
+    async def _release_owned(self) -> None:
+        # Unknown worker reclamation must keep its physical slot and voice lease.
+        # All callers join the same result, including a failed close.
+        await self._inner.close()
+        if self._inner.used_abort_fallback:
+            await self._worker._invalidate_after_abort(self._epoch)
+        self._worker._release_incremental_slot()
+        self._lease.__exit__(None, None, None)
 
 
 class Qwen3TtsCapabilityRouter:
