@@ -23,6 +23,8 @@ struct SettingsAssistantPane: View {
     private let onClearModuleKey: (LLMModule) -> Void
     private let onOpenDataDirectory: () -> Void
     private let onBackupLibrary: () -> Void
+    /// 恢复预演：核对一份备份，不切换当前库。
+    private let onCheckBackup: () -> Void
 
     init(
         llmKeyDraft: Binding<String>,
@@ -38,7 +40,8 @@ struct SettingsAssistantPane: View {
         onClearGlobalKey: @escaping () -> Void,
         onClearModuleKey: @escaping (LLMModule) -> Void,
         onOpenDataDirectory: @escaping () -> Void,
-        onBackupLibrary: @escaping () -> Void
+        onBackupLibrary: @escaping () -> Void,
+        onCheckBackup: @escaping () -> Void
     ) {
         self._llmKeyDraft = llmKeyDraft
         self._llmKeySaved = llmKeySaved
@@ -54,6 +57,7 @@ struct SettingsAssistantPane: View {
         self.onClearModuleKey = onClearModuleKey
         self.onOpenDataDirectory = onOpenDataDirectory
         self.onBackupLibrary = onBackupLibrary
+        self.onCheckBackup = onCheckBackup
     }
 
     var body: some View {
@@ -278,6 +282,11 @@ struct SettingsAssistantPane: View {
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
                                 .speechRailPointerCursor()
+                            Button("检查备份能否恢复", action: onCheckBackup)
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .speechRailPointerCursor()
+                                .help("把一份备份复制到临时目录当新库打开，核对文档、版本、引用与行动项。当前库不会被改动。")
                         }
                     }
                 }

@@ -2699,8 +2699,11 @@ public actor SessionStore {
     /// 导出一份备份：库快照 + 清单，**原子发布**（§12.3）。
     ///
     /// 先写临时名再改名：中途崩了不会留下"半个备份"被当成可用的那一份。
-    /// 目标目录已存在同名备份时直接失败——覆盖一份用户可能正在保留的旧备份，
-    /// 比备份失败更糟。
+    /// 目标目录已存在同名备份时**原子替换**而不是先删后写：先删再失败的话，
+    /// 旧备份没了新备份也没写成，两头落空。
+    ///
+    /// 调用方若不想覆盖用户可能还留着的那一份，应当像设置页那样
+    /// **每次备份开一个新目录**，而不是指望这里替它拒绝。
     @discardableResult
     public func exportBackup(to directory: URL) throws -> URL {
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)

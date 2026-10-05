@@ -249,6 +249,56 @@ final class MeetingBackupRestoreTests: XCTestCase {
         }
     }
 
+    /// **App 能做出的备份，App 自己要能恢复。**
+    ///
+    /// 这条钉的是一次真实踩空：设置页的「备份记录库」调的是 `backup(to:)`——
+    /// `VACUUM INTO` 出来的**单个 .sqlite3**，没有 `manifest.json`。
+    /// 而恢复只认「目录 + 库文件 + 清单」这一种形状。于是用户照着 App 的按钮
+    /// 做完备份，**恢复不了自己刚做的那份**。
+    ///
+    /// 用例从生产路径出发（`backup(to:)`，不是手工拼一个目录），
+    /// 这样"两条路径对不上"才是被证明的，不是被假定的。
+    /// 修复在界面侧：备份按钮改走 `exportBackup(to:)`，产出带清单的目录包。
+    func testTheBackupPathTheSettingsButtonUsedToCallIsNotRestorable() async throws {
+        let store = try requireStore()
+        _ = try await prepareMeetingWithCitations()
+        let base = try XCTUnwrap(directory)
+
+        // 旧按钮那条路：VACUUM INTO 一个裸文件。
+        let bare = base.appendingPathComponent("legacy-\(UUID().uuidString).sqlite3")
+        try await store.backup(to: bare)
+
+        // 摆成恢复认得的目录形状——可它没有清单。
+        let bundle = base.appendingPathComponent(
+            "legacy-bundle-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            at: bare, to: bundle.appendingPathComponent(SessionStore.backupFileName)
+        )
+
+        let scratch = try XCTUnwrap(self.scratch)
+            .appendingPathComponent("legacy-scratch", isDirectory: true)
+        var rejected = false
+        do {
+            let preview = try await SessionStore.restorePreview(of: bundle, into: scratch)
+            rejected = !preview.isRestorable
+        } catch {
+            rejected = true
+        }
+        XCTAssertTrue(
+            rejected,
+            "没有清单的备份必须被拒绝——正是这一点说明备份按钮不能走 backup(to:)"
+        )
+
+        // 对照：带清单的目录包装着同一套内容就能恢复。
+        let good = try await exportBundle()
+        let goodPreview = try await SessionStore.restorePreview(
+            of: good, into: scratch.appendingPathComponent("good")
+        )
+        XCTAssertTrue(goodPreview.isRestorable, "带清单的备份才该判为可恢复")
+    }
+
     /// MC-69：schema 比当前 App 新的备份**拒绝**，不尝试破坏性降级。
     func testNewerSchemaBackupIsRejected() async throws {
         _ = try await prepareMeetingWithCitations()
