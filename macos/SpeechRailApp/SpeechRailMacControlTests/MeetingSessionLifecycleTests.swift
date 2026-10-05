@@ -241,6 +241,55 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         bytes = await client.appendedByteCount
         XCTAssertGreaterThan(bytes, atPause, "恢复后要能接着上行")
     }
+
+    // MARK: - MC-02：没配置对话模型时，会议本身不算失败
+
+    /// 没填对话模型时，**文字记录照旧可用**，只有纪要那一步标成"待配置"。
+    ///
+    /// 这一条此前没有任何回归：它是"AI 不可用不许连累会议记录"的分界线。
+    /// 判错的方向很具体——把整场会议显示成失败，用户会以为这半小时白开了，
+    /// 于是重开一次；其实文字都在。
+    ///
+    /// `LLMConfiguration()` 是空的，`LLMProvider` 在本地就抛 `notConfigured`
+    /// （`guard configuration.isConfigured`），不碰网络，所以这条是确定性的。
+    func testUnconfiguredModelKeepsTheTranscriptAndOnlyMarksMinutes() async throws {
+        let h = try await makeHarness()
+        let record = try await h.coordinator.createSession(
+            SessionDraft(kind: .meeting, engineProfile: "test", audioSource: .microphone)
+        )
+        _ = try await h.store.appendLine(
+            LineDraft(
+                sessionID: record.id,
+                role: .speaker,
+                text: "预算按 35 万元报。",
+                source: .microphone,
+                status: .final
+            )
+        )
+
+        let generator = MinutesGenerator(coordinator: h.coordinator)
+        await generator.generate(sessionID: record.id, configuration: LLMConfiguration())
+        try await h.settleBriefly()
+
+        // 失败的是纪要，不是会议。
+        guard case .failed = generator.state else {
+            return XCTFail("没配置模型时纪要必须落失败，实际是 \(generator.state)")
+        }
+        XCTAssertTrue(
+            generator.failureNeedsSetup,
+            "没填模型要给「去设置里填」，不能给「重新生成」——后者只会原样再失败一次"
+        )
+
+        // 文字记录完好：关掉重开（这里用同一个库重读一次）仍能取回。
+        let lines = try await h.store.lines(sessionID: record.id)
+        XCTAssertEqual(lines.map(\.text), ["预算按 35 万元报。"], "文字记录必须完好")
+        let record_ = try await h.store.session(id: record.id)
+        XCTAssertNotNil(record_, "会议记录必须还在")
+
+        // 不得有任何一版纪要自称整理好了。
+        let usable = try await h.store.latestUsableMinutes(sessionID: record.id)
+        XCTAssertNil(usable, "没有模型就不该有可用版本；空正文或失败任务不得显示成功")
+    }
 }
 
 // MARK: - 夹具
