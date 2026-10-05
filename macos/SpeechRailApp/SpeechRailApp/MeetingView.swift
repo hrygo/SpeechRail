@@ -49,6 +49,10 @@ public struct MeetingView: View {
     /// 空态里「想连电脑里的声音一起记」那一行可选项的展开态。
     @State private var showsSourceOptions = false
 
+    /// 当前纪要各条结论的核对结论（MA-21 审阅轴）。
+    /// 没有依据可核的条目**不计入**——"没核过"不是"核过了"。
+    @State private var reviewVerdicts: [MinutesEvidenceValidator.Verdict] = []
+
     /// 空 final 留下的恢复材料（MA-02 / MC-11）。默认读库口径不返回它们，
     /// 所以要单独按 `includePartial: true` 取——用户提示里说了"已保留"，
     /// 就必须真能取回来。
@@ -348,7 +352,8 @@ public struct MeetingView: View {
             persistence: meeting.storedLineCount > 0 ? .ready : (live ? .active : .idle),
             // 保存与索引分开报（§6.5）：存下了不等于搜得到。
             index: meeting.gapCount > 0 ? .degraded("补过 \(meeting.gapCount) 处静音") : .ready,
-            review: meeting.phase == .archived ? .idle : .idle
+            // 审阅轴之前恒为 .idle，等于界面明明有待复核的结论却什么都不说。
+            review: MeetingAxisProjection.reviewState(verdicts: reviewVerdicts)
         )
     }
 
@@ -1182,6 +1187,24 @@ public struct MeetingView: View {
             .filter { $0.status == .partial } ?? []
         reviewSpeakerNames = (try? await session.speakerNames(sessionID: id)) ?? [:]
         await meeting.minutes.reload(sessionID: id)
+        await reloadReviewVerdicts(sessionID: id)
+    }
+
+    /// 采用版里每条结论的核对结论。取的是**采用指针指向的那一版**，
+    /// 不是"最新一版"——界面此刻显示什么，审阅轴就该说什么。
+    private func reloadReviewVerdicts(sessionID: String) async {
+        // `??` 的右操作数是自动闭包，装不下 `await`，所以分步取。
+        var adopted = try? await session.acceptedMinutes(sessionID: sessionID)
+        if adopted == nil {
+            adopted = try? await session.currentMinutes(sessionID: sessionID)
+        }
+        guard let adopted,
+              let items = try? await session.minutesItems(minutesID: adopted.id)
+        else {
+            reviewVerdicts = []
+            return
+        }
+        reviewVerdicts = items.compactMap(\.verdict)
     }
 
     private func regenerateMinutes() async {

@@ -66,6 +66,28 @@ public struct MeetingAxisProjection: Hashable, Sendable {
         self.review = review
     }
 
+    /// 审阅轴（MA-21）。这一轴之前恒为 `.idle`，等于界面明明有
+    /// 待复核的结论却什么都不说。
+    ///
+    /// 三档分开报，因为它们要用户做的事不一样：
+    /// - `rejected`：**正文不成立**，不能当成结论看；
+    /// - `needsReview`：引用合法但语义可疑，要人看一眼；
+    /// - 全部 `supported` 才算审阅通过。
+    public static func reviewState(
+        verdicts: [MinutesEvidenceValidator.Verdict]
+    ) -> State {
+        let rejected = verdicts.filter { $0 == .rejected }.count
+        if rejected > 0 {
+            return .failed("有 \(rejected) 条结论的引用不成立，不能当结论看")
+        }
+        let needsReview = verdicts.filter { $0 == .needsReview }.count
+        if needsReview > 0 {
+            return .degraded("有 \(needsReview) 条结论待复核")
+        }
+        // 一条都没有就是"还没开始核对"，不是"核对通过"。
+        return verdicts.isEmpty ? .idle : .ready
+    }
+
     /// 六个轴的稳定顺序。**顺序固定**，界面上的行才不会每次刷新都换位置。
     public var axes: [(name: String, state: State)] {
         [

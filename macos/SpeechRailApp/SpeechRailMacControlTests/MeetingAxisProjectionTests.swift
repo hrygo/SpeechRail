@@ -140,4 +140,72 @@ final class MeetingAxisProjectionTests: XCTestCase {
             "状态全绿不等于实机验收通过，这条话不能由状态投影说出口"
         )
     }
+
+    // MARK: - 审阅轴（MA-21）
+
+    func testReviewIsIdleWhenNothingHasBeenChecked() {
+        // 一条结论都没有 = 还没开始核对，不是"核对通过"。
+        XCTAssertEqual(MeetingAxisProjection.reviewState(verdicts: []), .idle)
+    }
+
+    func testReviewIsReadyOnlyWhenEverythingIsSupported() {
+        XCTAssertEqual(
+            MeetingAxisProjection.reviewState(
+                verdicts: [.supported, .supported]
+            ),
+            .ready
+        )
+    }
+
+    func testPendingReviewIsDegradedNotFailed() {
+        // 待复核要人去看一眼，但它没有失败——两者的下一步动作不同。
+        let state = MeetingAxisProjection.reviewState(
+            verdicts: [.supported, .needsReview]
+        )
+        guard case .degraded(let reason) = state else {
+            return XCTFail("待复核应当是降级，实际是 \(state)")
+        }
+        XCTAssertTrue(reason.contains("待复核"), reason)
+    }
+
+    func testRejectedConclusionFailsTheAxis() {
+        // 引用不成立的条目留在正文里让人看得见，但整版不能显示成"整理好了"。
+        let state = MeetingAxisProjection.reviewState(
+            verdicts: [.supported, .rejected]
+        )
+        guard case .failed(let reason) = state else {
+            return XCTFail("引用不成立应当报失败，实际是 \(state)")
+        }
+        XCTAssertTrue(reason.contains("1"), reason)
+    }
+
+    func testRejectedOutranksNeedsReview() {
+        // 两者同时存在时报更严重的那个，不能被"待复核"稀释掉。
+        let state = MeetingAxisProjection.reviewState(
+            verdicts: [.needsReview, .rejected]
+        )
+        guard case .failed = state else {
+            return XCTFail("存在被拒条目时必须报失败，实际是 \(state)")
+        }
+    }
+
+    func testReviewProblemIsCountedAsAProblem() {
+        let projection = MeetingAxisProjection(
+            readiness: .ready, capture: .ready, recognition: .ready,
+            persistence: .ready, index: .ready,
+            review: MeetingAxisProjection.reviewState(verdicts: [.needsReview])
+        )
+        XCTAssertTrue(projection.needsAttention)
+        XCTAssertEqual(projection.problems.map(\.name), ["审阅"])
+    }
+
+    func testReviewReadyDoesNotRaiseAttention() {
+        let projection = MeetingAxisProjection(
+            readiness: .ready, capture: .ready, recognition: .ready,
+            persistence: .ready, index: .ready,
+            review: MeetingAxisProjection.reviewState(verdicts: [.supported])
+        )
+        XCTAssertFalse(projection.needsAttention)
+    }
+
 }
