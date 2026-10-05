@@ -2,10 +2,10 @@
 title: "语音助手 STT → LLM → TTS 闭环：代码审查与优化方案"
 status: proposed
 audience: "macOS 助手与 Speech Plane 维护者、方案评审者"
-version: "0.2.0"
+version: "0.2.1"
 date: 2026-10-05
 baseline: "d72535c7533855fa113018f3dddb78bb61e37fb4"
-scope: "方案评审；不实施业务代码、公共协议、数据库或运行态变更"
+scope: "设计评审及 Python 实施记录；Swift/App、公共 wire、数据库与运行态未变更"
 ---
 
 # 语音助手 STT → LLM → TTS 闭环：代码审查与优化方案
@@ -37,7 +37,7 @@ LLM、播放器和应用级插话策略仍归 App，Python 保持 Speech Plane �
 - **风险推断**：由等待关系或生命周期推导的故障场景，必须通过后续 gate 测试复现。
 - **外部语义**：本轮读取 Apple 官方 completion 文档，核实 rendered 与 played 的区别；没有测试设备。
 
-本 PR 只新增方案与目录入口。没有执行模型加载、服务操作、App 构建、UI 自动化、真实音频、
+原方案 PR 只新增方案与目录入口；后续 Python 实施记录见 §12.1。原审查没有执行模型加载、服务操作、App 构建、UI 自动化、真实音频、
 性能或长稳测试；不声称已降低延迟或提高识别质量。
 
 ### 1.1 准确性的可执行边界
@@ -530,6 +530,32 @@ LLM 成功/失败终态与 reasoning 策略。仓库 `ci_changed_scope.py` 将�
 评审先决定：完整回答默认和完整文本输出 adapter 的闭环、保义转换规则、任务/模型的生成预算与 reasoning 策略、
 质量对照样本/门槛，再决定可选提前开口或端点缩短。默认沿用现有协议与资源边界，
 不因方案列出候选数值就把它们写成已批准的产品默认或硬 SLA。
+
+### 12.1 Python Speech Plane 实施记录（2026-10-05）
+
+本节记录后续限定为 Python 的实施；前文固定基线、`proposed` 状态和 M0–M4 的 App 设计仍保留。
+不能将此部分完成视为 Swift/App 内容门禁、保义朗读、设备 played 或整个方案已验收。
+本轮不新增 wire 事件、receipt 字段、数据库格式、LLM 编排或播放职责。
+
+| Python 范围 | 当前实现与确定性证据 |
+|---|---|
+| HTTP 音频迭代器 ownership | 显式关闭嵌套 iterator 后才退出 Governor；response 本身拥有预取流，响应头/正文发送失败也 join 清理。`test_pcm_response_cancel_closes_backend_before_releasing_lane_or_receipt` 覆盖挂起清理及重复取消。 |
+| HTTP receipt 与资源收尾 | 取消回执在清理确认后结束；清理失败保持 pending 并隔离 lane。`test_pcm_send_failure_joins_prefetched_backend_and_isolates_failed_cleanup` 覆盖响应头失败、首块失败、Task 取消及 close 失败，包括 200 但截断正文。 |
+| Realtime 控制器 | closed 只在后端及 admission 都结束后置真；close 异常不再被吞掉，不提前发 terminal/结束 receipt。`test_closed_remains_false_while_session_cleanup_is_running`、`test_failed_session_close_keeps_lane_and_receipt_unconfirmed` 验证屏障。 |
+| 取消 effect 与连接结束 | 控制器保留并 shield 后端 cancel task，等待者退出不会丢失取消；WebSocket 收尾由独立 task join 接收/控制/处理任务及 session 清理。`test_cancelled_waiter_cannot_abandon_backend_cancel`、`test_repeated_disconnect_cancellation_joins_owned_session_close` 与现有 control-lane/断连回归覆盖对应行为。打开失败也 join 独立清理 task，`test_repeated_cancel_during_failed_open_joins_session_cleanup` 覆盖重复取消。 |
+| Worker slot / voice lease | 共享一次 release task；worker 回收失败不释放 slot/lease，重复 close 得到同一失败。`test_leased_session_does_not_release_worker_slot_when_reaping_fails` 覆盖物理归属。 |
+| Governor | 重复取消不能中止 reservation 的 release；未知后端 owner 隔离对应 lane，未声明独立 lane 时保守隔离，串行策略禁止与未知 owner 重叠。`test_cancel_during_release_cannot_leak_the_reservation`、`test_quarantined_lane_rejects_new_owners_and_preserves_overlap_policy` 覆盖释放及准入。隔离同时唤醒并拒绝受影响的排队请求，`test_quarantine_rejects_already_queued_work_without_releasing_owner` 覆盖已有等待者。 |
+| 完整性与容量边界 | 沿用 PCM 偶数字节、response ID、chunk 顺序、总音频容量、绝对 deadline、Realtime audio window 和有界独立控制队列；相关现存回归纳入本轮验证。 |
+
+验证使用 Python 3.14.7 的 Linux 云环境、fake backend 与合成 fixture；371 项定向回归通过，
+覆盖 TTS application/client/delivery、HTTP receipt、Governor、Realtime、助手共享 fixture、
+Qwen3 TTS/路由生命周期、音频错误/子进程、App 契约和 timing 路径。
+其中新增关键回归先证明基线行为失败，再验证修复；没有加载模型、操作服务或执行 Swift/UI 测试。
+合成数据子进程回归不作为 macOS 设备、模型质量、性能或长稳证据。
+
+隔离是 fail-closed：cleanup 失败不会自动释放未知 owner 或重试合成。需确认旧 worker 回收后
+按受控服务流程恢复；完整性回执仍只代表其声明的服务边界，不能替代调用方的播放确认。
+回退仅撤回本轮 Python 实现、测试与说明；无需用户数据迁移。回退会恢复上述收尾风险。
 
 ### 固定基线源码索引
 

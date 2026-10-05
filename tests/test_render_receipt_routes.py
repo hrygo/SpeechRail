@@ -6,6 +6,7 @@ import re
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from speechrail.app import create_app
@@ -588,3 +589,195 @@ def test_openai_custom_voice_object_is_accepted_on_v1_speech(
     assert len(synth.requests) == 1
     assert synth.requests[0].voice == "narrator"
     assert "SpeechRail-Receipt-Id" not in response.headers
+
+
+def test_pcm_response_cancel_closes_backend_before_releasing_lane_or_receipt(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import asyncio
+
+    import pytest
+    from starlette.responses import Response, StreamingResponse
+
+    import speechrail.app as app_module
+
+    captured = []
+    original_build = app_module.build_app_services
+
+    def capture_services(*args, **kwargs):
+        services = original_build(*args, **kwargs)
+        captured.append(services)
+        return services
+
+    monkeypatch.setattr(app_module, "build_app_services", capture_services)
+    client, synth, _, _ = _client(tmp_path, monkeypatch)
+
+    class Source:
+        def __init__(self):
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+            self.closed = False
+            self.index = 0
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            chunk = AudioChunk(
+                response_id="backend-response", chunk_index=self.index, audio=_PCM,
+            )
+            self.index += 1
+            return chunk
+
+        async def aclose(self):
+            self.entered.set()
+            await self.release.wait()
+            self.closed = True
+
+    sources = []
+
+    def synthesize(request):
+        synth.requests.append(request)
+        source = Source()
+        sources.append(source)
+        return source
+
+    monkeypatch.setattr(synth, "synthesize", synthesize)
+
+    class CancelResponse(StreamingResponse):
+        async def __call__(self, scope, receive, send):
+            iterator = self.body_iterator
+            assert await anext(iterator) == _PCM
+            cleanup = asyncio.create_task(iterator.athrow(asyncio.CancelledError()))
+            try:
+                for _ in range(10):
+                    await asyncio.sleep(0)
+                services = captured[0]
+                receipt_id = self.headers["SpeechRail-Receipt-Id"]
+                assert sources[0].entered.is_set(), "backend must be closed explicitly"
+                assert services.governor.snapshot().active_tts == 1
+                assert services.render_receipts.get(receipt_id)["status"] == "pending"
+                cleanup.cancel()
+                await asyncio.sleep(0)
+                cleanup.cancel()
+                await asyncio.sleep(0)
+                assert not cleanup.done()
+                assert services.governor.snapshot().active_tts == 1
+            finally:
+                sources[0].release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await cleanup
+            assert sources[0].closed
+            assert services.governor.snapshot().active_tts == 0
+            assert services.render_receipts.get(receipt_id)["status"] == "cancelled"
+            await Response(content=b"cancelled")(scope, receive, send)
+
+    monkeypatch.setattr("speechrail.http.routes.audio.StreamingResponse", CancelResponse)
+    payload = _payload()
+    payload["response_format"] = "pcm"
+    response = client.post(
+        "/v1/audio/speech", json=payload,
+        headers={"SpeechRail-Receipt-Mode": "integrity", "SpeechRail-Purpose": "interactive"},
+    )
+    assert response.content == b"cancelled"
+
+
+@pytest.mark.parametrize("mode", ["start", "body", "cancel", "close-failed"])
+def test_pcm_send_failure_joins_prefetched_backend_and_isolates_failed_cleanup(
+    tmp_path: Path, monkeypatch, mode: str,
+) -> None:
+    import asyncio
+
+    import pytest
+    from starlette.requests import ClientDisconnect
+    from starlette.responses import StreamingResponse
+
+    import speechrail.app as app_module
+    from speechrail.runtime.resource_governor import WorkClass
+
+    captured = []
+    original_build = app_module.build_app_services
+
+    def capture_services(*args, **kwargs):
+        services = original_build(*args, **kwargs)
+        captured.append(services)
+        return services
+
+    monkeypatch.setattr(app_module, "build_app_services", capture_services)
+    original_response = StreamingResponse
+
+    client, synth, _, _ = _client(tmp_path / mode, monkeypatch)
+    sources = []
+    receipt_ids = []
+
+    class Source:
+        closed = False
+        index = 0
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            chunk = AudioChunk(
+                response_id="backend-response", chunk_index=self.index, audio=_PCM,
+            )
+            self.index += 1
+            return chunk
+
+        async def aclose(self):
+            await asyncio.sleep(0)
+            if mode == "close-failed":
+                raise RuntimeError("cleanup unconfirmed")
+            self.closed = True
+
+    def synthesize(request):
+        synth.requests.append(request)
+        source = Source()
+        sources.append(source)
+        return source
+
+    monkeypatch.setattr(synth, "synthesize", synthesize)
+
+    class SendFailureResponse(original_response):
+        async def __call__(self, scope, receive, send):
+            receipt_ids.append(self.headers["SpeechRail-Receipt-Id"])
+            scope = dict(scope, asgi={"spec_version": "2.4"})
+
+            async def failed_send(message):
+                if mode in ("start", "close-failed") or message["type"] == "http.response.body":
+                    if mode == "cancel":
+                        raise asyncio.CancelledError
+                    raise OSError("client disconnected")
+                await send(message)
+
+            await super().__call__(scope, receive, failed_send)
+
+    monkeypatch.setattr("speechrail.http.routes.audio.StreamingResponse", SendFailureResponse)
+    payload = _payload()
+    payload["response_format"] = "pcm"
+    def request():
+        return client.post(
+            "/v1/audio/speech", json=payload,
+            headers={"SpeechRail-Receipt-Mode": "integrity", "SpeechRail-Purpose": "interactive"},
+        )
+
+    if mode == "cancel":
+        # Headers were already sent: middleware can return 200 with a truncated
+        # body. The receipt, not HTTP status alone, must reject completion.
+        response = request()
+        assert response.status_code == 200
+        assert not response.content
+    else:
+        with pytest.raises((ClientDisconnect, RuntimeError)):
+            request()
+    services = captured[-1]
+    receipt = services.render_receipts.get(receipt_ids[0])
+    assert services.governor.snapshot().active_tts == 0
+    if mode == "close-failed":
+        assert not sources[0].closed
+        assert receipt["status"] == "pending"
+        assert not services.governor.lane_available(WorkClass.REALTIME_TTS)
+    else:
+        assert sources[0].closed
+        assert receipt["status"] == "cancelled"
+        assert services.governor.lane_available(WorkClass.REALTIME_TTS)

@@ -38,6 +38,7 @@ from speechrail.domain.tts_stream import (
     TtsStreamTerminal,
 )
 from speechrail.runtime.busy import BusyReason
+from speechrail.runtime.cleanup import join_cleanup
 from speechrail.runtime.resource_governor import (
     GovernorQueueFullError,
     ResourceGovernor,
@@ -107,7 +108,9 @@ class StreamController:
         receipts: RenderReceiptRegistry | None = None,
         receipt_id: str | None = None,
         clock: Callable[[], float] | None = None,
+        on_reclamation_failure: Callable[[], None] | None = None,
     ) -> None:
+        self._on_reclamation_failure = on_reclamation_failure
         self._session = session
         self._options = options
         self._limits = limits
@@ -122,6 +125,7 @@ class StreamController:
         self._delivered_samples = 0
         self._input_open = True
         self._closed = False
+        self._settling = False
         self._failure: BaseException | None = None
         self._send_lock = asyncio.Lock()
         self._activity = asyncio.Event()
@@ -129,6 +133,7 @@ class StreamController:
         self._last_activity = self._opened_at
         self._watchdog: asyncio.Task[None] | None = None
         self._task: asyncio.Task[None] | None = None
+        self._cancel_task: asyncio.Task[None] | None = None
 
     @property
     def options(self) -> TtsStreamOptions:
@@ -204,17 +209,35 @@ class StreamController:
         """Stop generation cooperatively and settle the utterance as cancelled."""
 
         if self._claim(TtsStreamTerminal.CANCELLED, reason):
+            self._request_backend_cancel()
+        if self._cancel_task is not None:
+            await asyncio.shield(self._cancel_task)
+        await self.wait_closed()
+
+    def _request_backend_cancel(self) -> asyncio.Task[None]:
+        if self._cancel_task is None:
+            self._cancel_task = asyncio.create_task(
+                self._cancel_backend(), name="tts-stream-cancel",
+            )
+        return self._cancel_task
+
+    async def _cancel_backend(self) -> None:
+        try:
             with contextlib.suppress(Exception):
                 await self._session.cancel()
-        await self.wait_closed()
+        finally:
+            # A backend need not wake its event iterator after cancel. The run
+            # task still owns settlement and must not be abandoned by a waiter.
+            if self._task is not None and not self._task.done() and not self._settling:
+                self._task.cancel()
 
     async def aclose(self, *, reason: str = _CANCELLED_CODE) -> None:
         """Release every resource; an active utterance is cancelled first."""
 
         if self._task is None:
             self._claim(TtsStreamTerminal.CANCELLED, reason)
-            self._finish_receipt(TtsStreamTerminal.CANCELLED, self._terminal_detail)
             await self._shutdown()
+            self._finish_receipt(TtsStreamTerminal.CANCELLED, self._terminal_detail)
             return
         if self._terminal is None:
             await self.cancel(reason=reason)
@@ -259,6 +282,8 @@ class StreamController:
             if self._terminal is None:
                 # A vendor stream must end with exactly one terminal event.
                 self._claim(TtsStreamTerminal.FAILED, _BACKEND_FAILURE_CODE)
+        except asyncio.CancelledError:
+            self._claim(TtsStreamTerminal.CANCELLED, _CANCELLED_CODE)
         except TtsStreamError as exc:
             self._failure = exc
             logger.warning("incremental TTS stream failed: code=%s", exc.code)
@@ -268,6 +293,7 @@ class StreamController:
             logger.warning("incremental TTS stream failed: code=%s", _BACKEND_FAILURE_CODE)
             self._claim(TtsStreamTerminal.FAILED, _BACKEND_FAILURE_CODE)
         finally:
+            self._settling = True
             await self._settle()
 
     async def _deliver(self, event: TtsStreamEvent) -> None:
@@ -330,8 +356,7 @@ class StreamController:
             remaining = self._deadline() - now
             if remaining <= 0:
                 self._claim(TtsStreamTerminal.FAILED, self._expiry_code())
-                with contextlib.suppress(Exception):
-                    await self._session.cancel()
+                await asyncio.shield(self._request_backend_cancel())
                 return
             self._activity.clear()
             with contextlib.suppress(TimeoutError):
@@ -397,20 +422,30 @@ class StreamController:
 
         if self._closed:
             return
-        self._closed = True
         watchdog = self._watchdog
         self._watchdog = None
         if watchdog is not None and watchdog is not asyncio.current_task():
             watchdog.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await watchdog
-        with contextlib.suppress(Exception):
+        if self._cancel_task is not None:
+            await asyncio.shield(self._cancel_task)
+        # A close failure leaves ownership unknown: retain admission and do not
+        # publish a terminal or a finished receipt. Callers must fail closed.
+        try:
             await self._session.close()
-        await self._admission.aclose()
+            await self._admission.aclose()
+        except BaseException as exc:
+            self._failure = exc
+            if self._on_reclamation_failure is not None:
+                self._on_reclamation_failure()
+            raise
+        self._closed = True
 
     def _log_unexpected_task_failure(self, task: asyncio.Task[None]) -> None:
-        with contextlib.suppress(asyncio.CancelledError):
-            error = task.exception()
+        if task.cancelled():
+            return
+        error = task.exception()
         if error is None:
             return
         logger.warning(
@@ -488,21 +523,21 @@ class TtsStreamService:
                         "render receipt store has no safe capacity",
                     ) from exc
         except GovernorQueueFullError as exc:
-            await self._abort_open(session, admission)
+            await self._abort_open(session, admission, resource_key)
             raise TtsStreamAdmissionError(
                 "queue_full",
                 "TTS stream admission queue is full",
                 busy_reason=BusyReason.GOVERNOR_QUEUE_FULL,
             ) from exc
         except TimeoutError as exc:
-            await self._abort_open(session, admission)
+            await self._abort_open(session, admission, resource_key)
             raise TtsStreamAdmissionError(
                 "backend_timeout",
                 "TTS stream admission timed out",
                 busy_reason=BusyReason.BACKEND_TRANSITION,
             ) from exc
         except BaseException:
-            await self._abort_open(session, admission)
+            await self._abort_open(session, admission, resource_key)
             raise
         assert session is not None  # a controller is only built after the session opened
         controller = StreamController(
@@ -515,6 +550,7 @@ class TtsStreamService:
             receipts=self.receipts,
             receipt_id=receipt_id,
             clock=self._clock,
+            on_reclamation_failure=lambda: self.governor.quarantine_tts_lane(resource_key),
         )
         controller.start()
         return controller
@@ -554,16 +590,22 @@ class TtsStreamService:
         )
         return receipt_id
 
-    @staticmethod
     async def _abort_open(
+        self,
         session: IncrementalSpeechSession | None,
         admission: AsyncExitStack,
+        resource_key: str | None,
     ) -> None:
-        if session is not None:
-            with contextlib.suppress(Exception):
-                await session.close()
-        with contextlib.suppress(Exception):
-            await admission.aclose()
+        async def abort_owned() -> None:
+            try:
+                if session is not None:
+                    await session.close()
+                await admission.aclose()
+            except BaseException:
+                self.governor.quarantine_tts_lane(resource_key)
+                raise
+
+        await join_cleanup(asyncio.create_task(abort_owned(), name="tts-abort-open"))
 
 
 __all__ = [

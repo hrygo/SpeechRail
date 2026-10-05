@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import asyncio
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 
 from speechrail.application.deadline import await_until
 from speechrail.domain.ports import AudioChunk
+from speechrail.runtime.cleanup import join_cleanup
 
 
 class TTSDeliveryError(RuntimeError):
@@ -42,7 +44,9 @@ class PcmOutputCounter:
 
 async def iter_validated_audio(
     source: AsyncIterator[AudioChunk],
-) -> AsyncIterator[AudioChunk]:
+    *,
+    on_close_failure: Callable[[], None] | None = None,
+) -> AsyncGenerator[AudioChunk]:
     """Validate one SpeechSynthesizer stream: response boundary, order and PCM16.
 
     The backend response ID is only checked for internal stream consistency; it
@@ -66,10 +70,16 @@ async def iter_validated_audio(
     finally:
         close = getattr(source, "aclose", None)
         if close is not None:
-            await close()
+            cleanup = asyncio.create_task(close(), name="tts-audio-source-close")
+            try:
+                await join_cleanup(cleanup)
+            except BaseException:
+                if (cleanup.cancelled() or cleanup.exception() is not None) and on_close_failure:
+                    on_close_failure()
+                raise
 
 
-async def iter_until[T](source: AsyncIterator[T], expires_at: float) -> AsyncIterator[T]:
+async def iter_until[T](source: AsyncIterator[T], expires_at: float) -> AsyncGenerator[T]:
     """Consume an async iterator with one shared absolute deadline."""
     try:
         while True:

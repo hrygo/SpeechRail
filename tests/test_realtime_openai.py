@@ -3701,3 +3701,52 @@ def test_unretired_input_never_gets_a_receipt_on_first_or_repeated_commit(failur
         finally:
             await session.close()
     asyncio.run(scenario())
+
+
+def test_repeated_disconnect_cancellation_joins_owned_session_close(monkeypatch) -> None:
+    from starlette.websockets import WebSocket
+
+    async def scenario() -> None:
+        services = build_app_services(
+            Settings(qwen3_model_dir=None, qwen3_python=None, _env_file=None),
+            AppOverrides(realtime_asr_factory=FakeStreamingFactory()),
+        )
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        closed = []
+        original_close = OpenAIRealtimeSession.close
+
+        async def gated_close(self):
+            entered.set()
+            await release.wait()
+            await original_close(self)
+            closed.append(self._session_id)
+
+        monkeypatch.setattr(OpenAIRealtimeSession, "close", gated_close)
+        messages = asyncio.Queue()
+        messages.put_nowait({"type": "websocket.connect"})
+        messages.put_nowait({"type": "websocket.disconnect", "code": 1000})
+
+        async def send(message):
+            pass
+
+        websocket = WebSocket(
+            {"type": "websocket", "path": "/v1/realtime", "headers": [], "query_string": b""},
+            messages.get, send,
+        )
+        endpoint = create_openai_realtime_router(services).routes[0].endpoint
+        task = asyncio.create_task(endpoint(websocket))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        try:
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+            assert not closed
+        finally:
+            release.set()
+            await asyncio.wait_for(task, timeout=1)
+        assert len(closed) == 1
+
+    asyncio.run(scenario())

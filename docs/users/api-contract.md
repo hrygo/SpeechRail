@@ -2,7 +2,7 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.16.0"
+version: "3.16.1"
 date: 2026-10-05
 ---
 
@@ -114,6 +114,17 @@ SpeechRail 保存独立的 ASR 与 TTS 规格，默认 `quality/quality`。三�
 handshake 提供完整可验证身份后才会填充 `rt_...`；否则保持 `null`。该值是当前加载 worker
 的低披露结构身份摘要，不是本地路径，也不把 `shape:` 元数据误称为权重内容哈希；只读能力快照
 仍保持 `configured_catalog` / `null`，不会为发现请求启动模型。
+
+完整文本 HTTP TTS 的取消/断连会等待后端音频迭代器清理，再结束对应回执。
+响应头已经发送后仍可能发生截断，因此 **HTTP 2xx 或连接 EOF 不证明完整合成成功**；
+调用方应核对本轮 receipt 的状态、PCM 样本数/哈希和固定 revision。
+回执的 `completed` 描述服务交付边界，不证明设备播放完成或每个字都读对。
+
+后端清理失败时，回执保持 `pending`，对应 Governor lane 被隔离，不自动重试新合成；
+缺少独立 capability key 时隔离所有 TTS lane，禁止重计算重叠的配置同时拒绝 ASR。
+已有终态回执的 `cancelled` 只陈述该请求的终止事实，不是全服务空闲证明；
+客户端自身的 HTTP Task 退出或超时也不能代替服务端收尾证据。
+隔离状态须在确认旧 worker 已回收后通过受控服务重启恢复，不由请求路径自行清除。
 
 ### 制作身份与配方 (plan / recipe)
 

@@ -12,6 +12,7 @@ from enum import StrEnum
 from typing import TypeVar
 
 from speechrail.domain.resource_limits import GovernorLimits
+from speechrail.runtime.cleanup import join_cleanup
 
 T = TypeVar("T")
 
@@ -116,6 +117,8 @@ class ResourceGovernor:
         self._active_asr = 0
         self._active_tts = 0
         self._active_tts_lanes: dict[str | None, int] = {}
+        self._quarantined_tts_lanes: set[str | None] = set()
+        self._quarantine_notify_task: asyncio.Task[None] | None = None
         self._realtime_waiters: deque[_Waiter] = deque()
         self._batch_waiters: deque[_Waiter] = deque()
 
@@ -187,13 +190,14 @@ class ResourceGovernor:
             raise
         finally:
             service_seconds = max(0.0, self._clock() - admitted_at)
-            await self._release(work_class, normalized_key)
-            self._emit_release(
-                work_class,
-                normalized_purpose,
-                service_seconds,
-                outcome,
-            )
+
+            async def release() -> None:
+                await self._release(work_class, normalized_key)
+                self._emit_release(
+                    work_class, normalized_purpose, service_seconds, outcome,
+                )
+
+            await join_cleanup(asyncio.create_task(release(), name="governor-release"))
 
     def snapshot(self) -> GovernorSnapshot:
         """Return a point-in-time metric view suitable for readiness/metrics."""
@@ -210,6 +214,39 @@ class ResourceGovernor:
             budget_reason=self._budget_reason,
         )
 
+    def quarantine_tts_lane(self, resource_key: str | None) -> None:
+        """Block an unconfirmed backend owner until the service is restarted.
+
+        This is synchronous so failure cannot race with new admission. A missing
+        capability key blocks all TTS lanes; independent declared lanes remain
+        usable only when heavy overlap is explicitly allowed.
+        """
+        key = self._normalize_resource_key(WorkClass.REALTIME_TTS, resource_key)
+        self._quarantined_tts_lanes.add(key)
+        if (self._realtime_waiters or self._batch_waiters) and (
+            self._quarantine_notify_task is None or self._quarantine_notify_task.done()
+        ):
+            self._quarantine_notify_task = asyncio.create_task(
+                self._notify_quarantine(), name="governor-quarantine-notify"
+            )
+
+    async def _notify_quarantine(self) -> None:
+        async with self._condition:
+            self._condition.notify_all()
+
+    def _quarantine_blocks(self, work_class: WorkClass, resource_key: str | None) -> bool:
+        if not self._quarantined_tts_lanes:
+            return False
+        if not self._allow_heavy_overlap:
+            return True
+        if not self._is_tts(work_class):
+            return False
+        return (
+            resource_key is None
+            or None in self._quarantined_tts_lanes
+            or resource_key in self._quarantined_tts_lanes
+        )
+
     def lane_available(
         self, work_class: WorkClass, resource_key: str | None = None
     ) -> bool:
@@ -220,7 +257,7 @@ class ResourceGovernor:
         still queue behind work that arrives first.
         """
 
-        if self._reject_heavy_compute:
+        if self._reject_heavy_compute or self._quarantine_blocks(work_class, resource_key):
             return False
         if self._active_realtime + self._active_batch >= self._limits.total_capacity:
             return False
@@ -240,6 +277,8 @@ class ResourceGovernor:
                     self._budget_reason
                     or "declared footprints exceed the memory budget; refusing heavy compute"
                 )
+            if self._quarantine_blocks(work_class, resource_key):
+                raise GovernorQueueFullError("backend reclamation is unconfirmed; lane is isolated")
             waiters = self._waiters_for(work_class)
             if len(waiters) >= self._limits.max_pending_per_class:
                 if self._on_reject is not None:
@@ -256,6 +295,10 @@ class ResourceGovernor:
             waiters.append(waiter)
             try:
                 while not self._can_admit(waiter):
+                    if self._quarantine_blocks(work_class, resource_key):
+                        raise GovernorQueueFullError(
+                            "backend reclamation is unconfirmed; lane is isolated"
+                        )
                     timeout = self._batch_aging_wait_timeout(waiter)
                     if timeout is None:
                         await self._condition.wait()
@@ -300,6 +343,8 @@ class ResourceGovernor:
             self._condition.notify_all()
 
     def _can_admit(self, waiter: _Waiter) -> bool:
+        if self._quarantine_blocks(waiter.work_class, waiter.resource_key):
+            return False
         if self._active_realtime + self._active_batch >= self._limits.total_capacity:
             return False
         if self._is_tts(waiter.work_class) and self._tts_lane_busy(waiter.resource_key):
@@ -332,6 +377,8 @@ class ResourceGovernor:
         return work_class in (WorkClass.BATCH_TTS, WorkClass.REALTIME_TTS)
 
     def _tts_lane_busy(self, resource_key: str | None) -> bool:
+        if self._quarantine_blocks(WorkClass.REALTIME_TTS, resource_key):
+            return True
         if self._active_tts == 0:
             return False
         if resource_key is None:
