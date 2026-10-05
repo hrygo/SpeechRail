@@ -78,6 +78,7 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 | 7 | 删除不做物理安全擦除：SQLite 删行后文件里可能仍有残留页 | 沿用 | 验收 4 的**索引级**已证（`removeSession` 漏清索引那处已修，见该节）；物理残留未做，也无法在常规测试里证明 |
 | 8 | 分享包（`scope == .share`）不是完整往返格式：只装被引用的那几行原句 | 沿用 | 导入新库后这场会议不完整，是有意取舍而非缺陷 |
 | 9 | 检索排序是会话时间倒序，无相关性打分（BM25 之类） | 沿用 | 多命中时顺序可能不是最优；不阻塞验收 |
+| 10 | 库页列表**行内不展示检索证据片段**：`excerpt` 已由检索层算出但无消费者，命中后要打开该场看纪要/转录才知道为什么命中 | 实测（`rg` 全仓确认 `excerpt` 只在 `SessionStore` 内被构造） | 验收 4 说"检索能够返回对应会议与证据"；本轮把"会议"接通了（见第三节），"证据"目前靠点进去看。MC-49/54/75 未要求行内摘要，故不阻塞验收，但这是剩下的一半 |
 
 ### 三、本轮查证后判定为**已关闭**（此前记为未做，实为误判或过时）
 
@@ -91,6 +92,7 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 | （此前未被发现） | **本分支自己造的缺陷**：`meeting_document` 只存 `deleted_at`，三档删除压成同一状态，`MeetingLibraryStatus.archived` 从未被产出，「撤销归档」按钮从来没出现过。已用 schema v12 的 `deletion_mode` 分开 | 实测（读代码发现 + 回归测试红/绿反证 + 真实 v11→v12 升级测试） |
 | （此前未被发现） | **验收 3 的触发路径是断的**：改来源有四条路径（改名/合并/标记「我」/拆出），写完 `speaker_revision` 都不重算复核状态，"需复核"要等下一次整理或重开才出现。已加 `SpeakerLabeling.onSourceRevision` 接上 `minutes.reload` | 实测（沿界面消费点回查生产者发现 + 回归测试红/绿反证） |
 | （同上，第四节补记） | **拆出改了归属却不提示复核**。已在 `SpeakerLabeling.split` 这一层单独记归属修订，并加测试守住「实时对齐写归属不得被当成用户改来源」 | 实测（回归测试红/绿反证） |
+| （此前未被发现） | **全文检索做完了，搜索框却够不着**：MA-15 交付了 `knowledge_fts` + `searchKnowledgeFullText`（14 项测试全绿），但库页谓词只 LIKE 标题与项目名，`excerpt` 无任何消费者，生产代码里唯一调用者是 `SessionCoordinator` 透传——**整条 MA-15 通路没有界面入口**。已把正文检索接进 `libraryPredicate` | 实测（沿 `excerpt` 消费者回查发现 + 回归测试红/绿反证；方案 §10.1 / MC-54 / MC-75 / 第 118 行均要求检索入口） |
 
 ### 四、已充分证据、无需再记的验收项
 
@@ -2530,3 +2532,82 @@ try withStatement("DELETE FROM session WHERE id = ?;") { ... }
   这是总账里另一条（删除不做物理安全擦除），本轮没动，也没法在常规测试里证明。
 - `reindex` 重建会顺带清掉陈旧行这一点，是从 `testIndexIsDerivedAndCanBeRebuilt`
   的既有覆盖推断的，**没有单独为"修复前遗留的脏行会被重建清掉"加用例**。
+
+## M1 增量：全文检索做完了，搜索框却够不着（验收 4 / MA-15）
+
+### 做了什么
+
+这是本分支第六处同一种缺陷：**能力做在数据层，界面没有入口**。
+前五处（归档状态从未产出、复核状态从不重算、拆出不提示复核、
+交付说明 frontmatter 写错、`removeSession` 漏清索引）都是这一类，
+这一处是同一形态的最后一处，也是用户最直接会撞上的一个。
+
+方案对搜索的要求一直写在明处：
+
+- §10.1「第一期搜索范围含标题、项目、采用/待核对纪要、**转录**、决策与行动项」；
+- M1 里程碑「关键词查找」；
+- MC-54「查询『预算』『回滚』等两个汉字 → 使用全文索引检索」；
+- MC-75「AI 和语音服务均离线 → 读库、**关键词搜索**、编辑和导出」；
+- 正文第 118 行把「**检索入口**」列为本次最高 ROI 的缺口之一。
+
+而交付的实现是：MA-15 交付了 `knowledge_fts` + `searchKnowledgeFullText`
+（`MeetingSearchIndexTests` 14 项全绿），但知识库的搜索框走的是
+`meetingLibraryPage(query:)`，它的谓词**只 LIKE 标题与项目名**——
+`libraryPredicate` 里当时明写着「转录正文不进这一层——那是 MA-15 全文检索的活」。
+
+两句都没说谎，合在一起就是用户永远用不到全文检索：
+在库里打一个会上真说过的词，得到「没有匹配的会议」。
+`excerpt` 字段除 `SessionStore` 自身外**没有任何消费者**，
+`searchKnowledgeFullText` 在生产代码里唯一的调用者是 `SessionCoordinator` 的透传——
+**整条 MA-15 通路没有任何界面入口**。
+
+改法：把正文检索接进 `libraryPredicate`，而不是新开一条互不相干的通路。
+
+- 正文走 `knowledge_fts`，查询与索引用同一套 `KnowledgeSearchTokenizer`
+  （两字词因此仍能命中，MC-54）；
+- 命中后**回权威表核对**，与 `searchKnowledgeFullText` 同一口径：
+  非终稿行、未就绪纪要、已删会话都不能把会议带出来（MC-62）；
+- **谓词仍然只有这一份**，所以翻页、计数、筛选不会各说各话（MC-52）；
+- 归档件走权威表的有界 `LIKE` 回退：归档时索引行已被物理清除，
+  「显式包含归档」要能搜回来只能靠它——与既有
+  `testArchivedMeetingDisappearsFromBothSearchPaths` 的口径一致；
+- 平时不挂那条 `LIKE`：`LIKE '%…%'` 用不上索引，扫全库换一个用不上的分支不划算。
+
+搜索框文案同步改成「搜索标题、项目或会议里说过的话」——
+原来写「搜索会议标题或项目」，那是实话，但不是方案要的实话。
+
+### 回归证据（2026-10-06）
+
+`MeetingKnowledgeLibraryTests` 新增两条，红/绿反证已核对：
+
+- `testSearchMatchesTranscriptContentNotJustTitle`：关键词**只出现在转录里**，
+  标题与项目名都没有。修复前 `counts.total` 为 0（红的正是
+  「搜不到就是正文检索没接上」）；修复后命中，且 `counts.total == rows.count`。
+  刻意不让它出现在标题里——否则一个只搜标题的实现也能蒙混过关。
+- `testContentSearchRespectsDeletion`：归档后正文检索为 0，
+  `includesArchived: true` 时搜得回来，撤销归档后恢复。
+
+四个相关套件合计 **49 项全绿**
+（`MeetingKnowledgeLibraryTests` / `MeetingSearchIndexTests` /
+`MeetingPrivacyDeletionTests` / `MeetingLibraryDeletionTests`）。
+全量 `swift test --package-path macos/SpeechRailApp`：XCTest **1037 项**
+（上一节 1035 +2）+ Swift Testing **419 项**，零失败。
+`./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+`python3 scripts/check_macos_test_target_coverage.py`：**OK**。
+
+### 迁移与回退
+
+- **无 schema 变更**。改的是 `libraryPredicate` 的谓词构造。
+- 回退：把该函数的查询分支还原成只 LIKE 标题与项目名。一个函数的局部改动。
+- 正文检索走的是已存在的 `knowledge_fts`，索引坏了 `reindex` 重建即可，
+  内容永远在权威表里（MA-15「索引是派生数据」）。
+
+### 未验证事项与已知边界
+
+- **列表只回答"哪一场会命中"，不在行内展示证据片段**。`excerpt` 仍无消费者；
+  证据要看该场的纪要/转录页签。MC-49/54/75 要求的是"搜得到"，
+  没要求列表行内带摘要，所以本轮没扩到那一步——但这是"证据呈现"剩下的部分，
+  不是已完成项。
+- 相关性排序仍不存在（总账第二条已记）：列表按会议时间倒序，
+  BM25 排序只在 `searchKnowledgeFullText` 的结果里有。
+- 未在真机界面走查（无 UI 自动化授权）。

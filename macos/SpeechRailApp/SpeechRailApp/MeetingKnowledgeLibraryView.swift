@@ -152,10 +152,10 @@ struct MeetingKnowledgeLibraryView: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
-            TextField("搜索会议标题或项目", text: $searchText)
+            TextField("搜索标题、项目或会议里说过的话", text: $searchText)
                 .textFieldStyle(.plain)
                 .onSubmit { Task { await model.search(searchText) } }
-                .accessibilityLabel("搜索会议标题或项目")
+                .accessibilityLabel("搜索标题、项目或会议里说过的话")
             if !searchText.isEmpty {
                 Button {
                     searchText = ""

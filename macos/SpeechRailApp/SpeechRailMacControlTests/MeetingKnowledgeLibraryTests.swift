@@ -48,6 +48,7 @@ final class MeetingKnowledgeLibraryTests: XCTestCase {
         projectID: String? = nil,
         at occurredAt: Date,
         actions: [String] = ["整理发布清单"],
+        lineText: String = "先确认这几点。",
         withMinutes: Bool = true
     ) async throws -> String {
         let store = try requireStore()
@@ -56,7 +57,7 @@ final class MeetingKnowledgeLibraryTests: XCTestCase {
         )
         _ = try await store.appendLine(
             LineDraft(
-                sessionID: record.id, role: .speaker, text: "先确认这几点。",
+                sessionID: record.id, role: .speaker, text: lineText,
                 source: .microphone, tStart: 0, status: .final
             ),
             id: "\(record.id)-line"
@@ -72,7 +73,7 @@ final class MeetingKnowledgeLibraryTests: XCTestCase {
         guard withMinutes else { return document }
         let units = [MinutesSourceUnit(
             id: "u1", lineID: "\(record.id)-line", ordinal: 1,
-            speaker: "张三", text: "先确认这几点。", startSeconds: 0
+            speaker: "张三", text: lineText, startSeconds: 0
         )]
         var candidate = MinutesCandidateV2(
             title: title, overview: [], decisions: [], actions: [], openQuestions: [], confidenceNotes: ""
@@ -198,6 +199,62 @@ final class MeetingKnowledgeLibraryTests: XCTestCase {
         XCTAssertEqual(page.counts.total, 1, "「%」是普通字符，不是通配符")
         let underscore = try await store.meetingLibraryPage(query: "_")
         XCTAssertEqual(underscore.counts.total, 0)
+    }
+
+    /// 搜索框必须能搜到**正文**。
+    ///
+    /// 这一条曾经长期是红的：全文检索只在 `SessionStore` 上存在，
+    /// 列表谓词只认标题与项目名，用户在库里打一个会上真说过的词，
+    /// 得到的却是"没有匹配的会议"。能力交付了，界面够不着。
+    ///
+    /// 钉住的是「标题里没有这个词」——否则一个只搜标题的实现也能蒙混过关。
+    func testSearchMatchesTranscriptContentNotJustTitle() async throws {
+        let store = try requireStore()
+        _ = try await makeMeeting(
+            title: "第一场会", at: Date(timeIntervalSince1970: 1_700_000_000),
+            lineText: "灰度发布要等到周五才能开。"
+        )
+        _ = try await makeMeeting(
+            title: "第二场会", at: Date(timeIntervalSince1970: 1_700_086_400),
+            lineText: "这一场跟发布无关。"
+        )
+        try await store.drainSearchIndex()
+
+        let page = try await store.meetingLibraryPage(query: "灰度")
+        XCTAssertEqual(
+            page.counts.total, 1,
+            "「灰度」只在转录里出现，标题和项目名都没有——搜不到就是正文检索没接上"
+        )
+        XCTAssertEqual(page.rows.first?.title, "第一场会")
+        XCTAssertEqual(
+            page.counts.total, page.rows.count,
+            "计数与列表走同一段谓词，正文分支不能让两者对不上"
+        )
+    }
+
+    /// 正文检索同样要守删除口径（MC-62 / 验收 4「删除内容不得被索引」）：
+    /// 归档之后搜索看不见它，打开"连归档的一起列"才回来。
+    func testContentSearchRespectsDeletion() async throws {
+        let store = try requireStore()
+        let documentID = try await makeMeeting(
+            title: "要归档的一场", at: Date(timeIntervalSince1970: 1_700_000_000),
+            lineText: "紫罗兰色的告警还没查清。"
+        )
+        try await store.drainSearchIndex()
+        let before = try await store.meetingLibraryPage(query: "紫罗兰")
+        XCTAssertEqual(before.counts.total, 1)
+
+        try await store.deleteMeetingKnowledge(documentID: documentID, mode: .archive)
+
+        let hidden = try await store.meetingLibraryPage(query: "紫罗兰")
+        XCTAssertEqual(hidden.counts.total, 0, "归档之后搜索就该看不见它")
+        let shown = try await store.meetingLibraryPage(query: "紫罗兰", includesArchived: true)
+        XCTAssertEqual(shown.counts.total, 1, "撤得回，就一定找得回来")
+
+        try await store.restoreMeetingKnowledge(documentID: documentID)
+        try await store.drainSearchIndex()
+        let restored = try await store.meetingLibraryPage(query: "紫罗兰")
+        XCTAssertEqual(restored.counts.total, 1, "撤销归档后正文检索要恢复")
     }
 
     func testProjectFilterNarrowsTheList() async throws {

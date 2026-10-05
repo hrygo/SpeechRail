@@ -6178,12 +6178,74 @@ extension SessionStore {
         }
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
-            // 标题与项目名参与搜索；转录正文不进这一层——那是 MA-15 全文检索的活，
-            // 两条路径的代价和口径都不一样，混在一起就没法分别归因。
-            sql += " AND (d.title LIKE ? ESCAPE '\\' OR COALESCE(p.name, '') LIKE ? ESCAPE '\\')"
+            // 标题、项目名**和正文**都参与搜索（MA-15 / MC-54 / MC-75）。
+            //
+            // 这里曾经只搜标题与项目名，注释写着"转录正文不进这一层，那是
+            // MA-15 全文检索的活"。可 MA-15 的能力只落在 store 上，搜索框
+            // 够不到它——用户在库里打一个正文里出现过的词，得到"没有匹配的会议"。
+            // 交付了却用不上，等于没交付（MC-75 要求离线关键词搜索真的可用）。
+            //
+            // 两条路径的代价仍然分开：LIKE 认标题/项目名且是有界回退，
+            // FTS5 认正文并按 `KnowledgeSearchTokenizer` 同一套分词走。
+            // 但**谓词只有这一份**，所以翻页、计数、筛选不会各说各话（MC-52）。
+            var branches = [
+                "d.title LIKE ? ESCAPE '\\'",
+                "COALESCE(p.name, '') LIKE ? ESCAPE '\\'"
+            ]
             let pattern = "%" + Self.likeEscape(trimmed) + "%"
             bindings.append(.text(pattern))
             bindings.append(.text(pattern))
+            // 正文走全文索引。索引不可用、或查询没有有效词项时不加这一支，
+            // 由下面的权威表 LIKE 兜底，而不是拿"零结果"冒充"库里确实没有"。
+            let match = Self.fts5Available
+                ? KnowledgeSearchTokenizer.matchExpression(for: trimmed)
+                : nil
+            if let match {
+                // 命中之后仍要回权威表核对，与 `searchKnowledgeFullText` 同一口径：
+                // 索引里残留的已删行、非终稿行、未就绪纪要都不能把会议带出来
+                // （MC-62：索引迟到不复活旧来源）。
+                branches.append("""
+                EXISTS (
+                  SELECT 1 FROM knowledge_fts
+                  JOIN session ks ON ks.id = knowledge_fts.session_id
+                  LEFT JOIN line kl ON knowledge_fts.source_kind = 'line'
+                                    AND kl.id = knowledge_fts.source_id
+                  LEFT JOIN minutes km ON knowledge_fts.source_kind = 'minutes'
+                                       AND km.id = knowledge_fts.source_id
+                  WHERE knowledge_fts.session_id = d.source_session_id
+                    AND knowledge_fts MATCH ?
+                    AND (knowledge_fts.source_kind <> 'line'
+                         OR (kl.id IS NOT NULL AND kl.status = 'final'))
+                    AND (knowledge_fts.source_kind <> 'minutes'
+                         OR (km.id IS NOT NULL AND km.status = 'ready'))
+                )
+                """)
+                bindings.append(.text(match))
+            }
+            // 权威表的有界 LIKE 回退，**只在两种情况下需要**：
+            // 归档件的索引行在归档时就清掉了，"显式包含归档"要能搜回来只能靠它；
+            // 没有 FTS5 或查询无有效词项时，全文那一支根本不存在。
+            // 平时不挂这一支：`LIKE '%…%'` 用不上索引，扫全库换取一个用不上的分支不划算。
+            if includesArchived || match == nil {
+                branches.append("""
+                EXISTS (
+                  SELECT 1 FROM line bl
+                  WHERE bl.session_id = d.source_session_id
+                    AND bl.status = 'final' AND bl.text LIKE ? ESCAPE '\\'
+                )
+                """)
+                bindings.append(.text(pattern))
+                branches.append("""
+                EXISTS (
+                  SELECT 1 FROM minutes bm
+                  WHERE bm.session_id = d.source_session_id
+                    AND bm.status = 'ready' AND bm.body IS NOT NULL
+                    AND bm.body LIKE ? ESCAPE '\\'
+                )
+                """)
+                bindings.append(.text(pattern))
+            }
+            sql += " AND (" + branches.joined(separator: " OR ") + ")"
         }
         return (sql, bindings)
     }
