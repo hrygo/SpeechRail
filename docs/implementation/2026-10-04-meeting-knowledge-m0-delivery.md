@@ -1,7 +1,7 @@
 ---
 title: "会议知识闭环 M0/M1 交付说明：保存、版本、来源、检索、导出、备份恢复与删除"
 status: active
-version: "5.0"
+version: "5.1"
 date: 2026-10-06
 branch: "codex/meeting-knowledge-milestones"
 base: "origin/main @ dab047b2"
@@ -11,7 +11,7 @@ base: "origin/main @ dab047b2"
 
 ## 范围
 
-分支共 67 个提交（本轮九个增量 + 一条交付说明更正 + MC-09～MC-13 端到端）。
+分支共 68 个提交（本轮九个增量 + 一条交付说明更正 + MC-09～MC-14 端到端）。
 
 > **下面这段范围描述只涵盖最早的 M0**，当时确实"只动纪要版本链、结束封存上报与
 > 知识检索语义，不做 schema 迁移、不改表结构、不碰采集链路"。
@@ -111,6 +111,7 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 
 | （同上，第十六处，**更正本分支自己写错的一条**） | **「MC-05～MC-08 未端到端、`MeetingSession` 是 App-only、测试调用生产 `MeetingSession` 尚未达成」——这条是错的。** 当时写的理由是 `MeetingSession` 依赖 AppKit/CoreAudio/`NSWorkspace`、不在 SPM 目标内；实测 `MeetingSession.swift` 在 `Package.swift:167` 目标内，只 import Foundation/Observation/SpeechRailControlKit。`MeetingSessionLifecycleTests` **直接构造并驱动生产 `MeetingSession`**，19 项全过：MC-05 `testStartSuspendedAtConnectCannotResurrectAfterTheSessionEnded`、MC-06 `testLateStartOfSessionACannotStealSessionBsIdentity`、MC-07 `testOnlyTheNewestConnectionKeepsUpstreaming`、MC-08 `testConnectFailureReleasesEverythingAndLeavesNoBlankRecord` + `testCaptureFailureDoesNotPretendItStarted`；MC-04 的「输入原样保留、来源不被重置」由 `testTitleAndSelectionSurviveAFailedStart` / `testRepeatedFailuresKeepTheTitle` 钉住 | 实测（2026-10-06 跑 `swift test --filter MeetingSessionLifecycleTests`，19/19 通过 + 逐个读测试体确认驱动的是生产类型）。**残留的真实细节**：MC-05 原文的闸门是"麦克风授权/能力检查"，测试用的可暂停闸门是 **ASR 建连**——麦克风权限在本架构里以采集失败（`MeetingAudioBlocked(reason: .microphoneDenied)`）呈现，由 MC-08 那条覆盖。断的是同一个后果，不是同一个闸门位置。同一批复查还推翻了 `MinutesGenerator` / `SpeakerLabeling` 的 App-only 说法（两者均已进目标）；`AudioSourceCoordinator` 与 `MeetingView.swift` 仍是 App-only，这条复核后仍成立 |
 | （同上，第十七处） | **MC-09～MC-13 端不到端**。此前挂在"MA-01 的 App-only 限制"下面；限制上一节已推翻，但欠账是真的——断言只落在 `TranscriptItemLedger` 自己身上，"事件到达 → 落库"这条链路一次没走过。真正原因是**没人接线**：假连接的 `events()` 每次现造一条空流，测试没有任何办法往里投事件。现改为持有存下来的那一条流并加 `emit`，补 MC-09/10/11/12/13 五条场景级回归，全部断言真实落库结果。MC-13 顺带把早先修掉的"重连复用 item_id 被吞"第一次锁进端到端回归 | 实测（回归测试红/绿反证：`MeetingSessionLifecycleTests` 19 → 24 项；接缝未接上时 `settle` 会超时 XCTFail，故非空跑） |
+| （同上，第十八处） | **MC-14（连接 A 失效后发 late failed/closed/attribution）已补**，同时更正上一节自己写的"补不了"的理由——每条 client 实例本就各持一条流，缺的只是往指定第几代投递的入口。**但更要记的是变异检验的结果**：把事件循环里的 `isCurrent` 代次守卫拆掉，这条用例**照样全绿**；真正挡住旧连接的是 `pump?.cancel()`（`RealtimeEventChannel.next()` 先查 `Task.isCancelled` 再取缓冲）。所以用例的定位被改成它真正能证明的东西——可观察后果，而非那个守卫 | 实测（变异检验：删守卫后重跑仍通过；据此更正注释与本节，生产代码已恢复，`git diff` 干净） |
 | （同上，第十四处，本轮关闭总账第 14 条） | **MA-14 这一整块此前全部没有入口**：`recordExecutionEvent` / `executionState` / `conflictingDecisions` / `confirmSupersession` / `knowledgeChangeProposals` / `executionEvents` 六个 API 在生产代码里**零消费方**。用户标过的"已完成"、跨会议的两处矛盾、重新生成换掉了哪条结论、一条承诺是怎么变成今天这样的——全部只存在于库里 | 实测（沿六个 API 逐个回查消费方） | 四个提交分四轮接进库页：行动生命周期读写两侧、跨会议结论冲突、详情里的「这一版可能变了什么」、未完成事项里的「变更历史」。每轮都修了同一处的自相矛盾（详见各节）。**总账第 14 条到此关闭** |
 | （同上，第十三处） | **MC-56「列出全部未完成事项」没有入口**。`SessionStore.knowledgeItems(filter:scope:limit:offset:)` 早已能算结构化投影并给出分页计数，但 `KnowledgeItemFilter` 里**没有"未完成"这个条件**，`SessionCoordinator` 没有透传，库页没有入口——`knowledgeItems` 在生产代码里零消费方。用户只能一场一场点开，凭记忆拼自己那份待办清单。已补 `openOnly`、协调器透传、库页「未完成事项」面板与全量计数 | 实测（沿 `knowledgeItems` 回查消费方发现 + 红/绿反证） | 顺带修掉一个**同源的旧缺陷**：`counts.total` 取的是过滤**前**的行数，于是 `needsReview`/`byKind` 会随条件变、总计不会——正是验收里"只返回 top10 却称全部"最可能的成因。现在计数与列表取自同一批行 |
 
@@ -3810,11 +3811,78 @@ else { return }`——那句话就此消失，界面上什么都不说，用户�
 
 ### 未验证事项与已知边界
 
-- **MC-14（连接 A 失效后发 late failed/closed/attribution）没有一起补**。
-  它与 MC-13 共用重连路径，但断言需要 A 在被换下之后**继续发事件**，
-  而当前假连接只有一条共享流，表达不了"A 已经不被消费但仍在发"。
-  要覆盖它得给每条连接各自独立的流并显式关闭旧连接的消费——不是把断言
-  加在现有接缝上就能得到的，故留待下一轮，不假装已做。
+- ~~**MC-14 没有一起补**，理由是"当前假连接只有一条共享流"~~ **这条理由不成立**，
+  已在本轮下一节补上：每条 `ControllableRealtimeClient` 实例本来就各自持有一条流，
+  缺的只是"往指定第几代连接投递"的入口。
 - 事件注入只覆盖 `RealtimeASRClient.Event` 的**会议侧分支**；
   `.ttsAudio` 等助手侧事件在会议 session 里本就 `break`，未在此断言。
 - 仍无 UI 自动化授权，以上全部是库层与状态层证据，**不是真机走查**。计入总账第 1 条。
+
+
+## M1 增量（MC-14）｜旧连接的迟到副作用，以及一次变异检验，2026-10-06
+
+### 先更正上一节自己写的理由
+
+上一节说 MC-14 补不了，理由是「断言需要 A 在被换下之后**继续发事件**，
+而当前假连接只有一条共享流，表达不了"A 已经不被消费但仍在发"」。
+
+**这个理由不成立。** 每条 `ControllableRealtimeClient` **实例**本来就各自持有
+一条自己的 `RealtimeEventStream`——`ClientRegistry.make` 每建一次连接就 new 一个
+client，各自的流互不相干。缺的只是一个"往**指定第几代**连接投递"的入口，
+`emit` 此前固定投最后一条。补上 `emit(_:toGeneration:)` 与 `finishEvents()` 即可。
+
+### 做了什么
+
+`testStaleConnectionCannotTouchTheLiveRecording`：A 被 B 顶替之后，A 迟到地发来
+一串**指向 B 的 item** 的副作用——`.failed(itemID: "Z")`（清 B 的 partial 槽）、
+`.attribution(itemID: "Y", …, isFinal: true)`（给 B 已落库的行安一个说话人）、
+随后事件流收尾（迟到的 closed）。三条都要成立：B 的 partial 还在、B 没被停、
+B 的行上没有多出说话人。
+
+### 这一节真正想记的是变异检验的结果
+
+写完顺手做了变异检验：**把生产代码里事件循环的 `isCurrent` 代次守卫拆掉，
+这条用例照样全绿。**
+
+也就是说，真正挡住旧连接的不是那个守卫，而是 `startPump` 里的 `pump?.cancel()`：
+`RealtimeEventChannel.next()` **先查 `Task.isCancelled` 再取缓冲**，
+所以取消之后连已经缓冲好的事件都不会被取出，旧流的迭代直接结束。
+守卫在此是双保险，且当前**无法被这条用例区分**。
+
+如实记下这件事，而不是把它写成"代次守卫已端到端验证"——那正是本分支反复在修的
+那种毛病：**断言全绿，验的却不是它**。上一轮刚把总账第 15 条、第十六处两条
+同类错误记错，本轮自己写下的注释里就出现了第三个几乎同形的版本
+（注释原文写"用例要证明的正是这个结构守卫在真实时序下成立"）。
+
+因此这条用例的定位被改成它真正能证明的东西：
+- **能证明**：可观察后果——旧连接的迟到事件不碰当前这一代。值得留，
+  将来谁动了取消语义（`pump?.cancel()` 的时机、流通道的取消检查）它会红。
+- **不能证明**：事件循环里那个 `isCurrent` 守卫。它的逻辑另有
+  `MeetingConnectionGeneration` 的单测覆盖，那部分证据是实的。
+
+### 回归证据（2026-10-06 实测）
+
+- `MeetingSessionLifecycleTests` 24 → **25 项**，零失败。
+- **变异检验**：删掉 `MeetingSession.startPump` 事件循环里的
+  `guard await self.isCurrent(token) else { return }`，重跑该用例 → **仍通过**。
+  据此写下上面的定位更正。检验后已恢复生产代码，`git diff` 干净，
+  25 项重跑仍全绿。
+- 全量 `swift test --package-path macos/SpeechRailApp`：XCTest **1118 项**
+  （上一节 1117 +1）+ Swift Testing **419 项**，零失败。
+- `./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+- `python3 scripts/check_macos_test_target_coverage.py`：**OK**。
+- 无生产代码变更，无 schema 变更，`SessionStore.schemaVersion` 仍是 13。
+
+### 迁移与回退
+
+无生产代码变更。回退即 revert 本次提交；新增的两个注入口
+（`emit(_:toGeneration:)`、`finishEvents()`）只被这一条用例使用，删掉不影响其他。
+
+### 未验证事项与已知边界
+
+- **事件循环里的 `isCurrent` 守卫无法用端到端用例验证**，原因见上
+  （取消语义已经先一步生效）。要给守卫本身做端到端证据，需要在
+  `pump?.cancel()` 与旧流取事件之间的那个窗口里精确注入——现有接缝表达不了
+  这个时序，而为了造它去改生产代码的取消顺序，是拿实现迁就测试，不做。
+  该守卫目前由 `MeetingConnectionGeneration` 的单测承担。
+- 本轮**没有真机走查**，全部是库层与状态层证据。计入总账第 1 条。

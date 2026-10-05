@@ -536,6 +536,17 @@ extension MeetingSessionLifecycleTests {
             let client = try XCTUnwrap(clients.all.last, "还没有连接：先把会议开起来再投事件")
             await client.emit(payload)
         }
+
+        /// 往**指定第几代**连接投事件。MC-14 需要往**已被换下的旧连接**上投，
+        /// 那种情况下"最后一条"恰恰是投错的——要投的正是不能被消费的那条。
+        func emit(_ payload: RealtimeASRClient.Event, toGeneration index: Int) async throws {
+            let all = clients.all
+            let client = try XCTUnwrap(
+                all.indices.contains(index) ? all[index] : nil,
+                "第 \(index) 代连接还不存在"
+            )
+            await client.emit(payload)
+        }
     }
     // MARK: - 会前轻量标题（MA-10 / 方案 §4.1 / MC-04）
     //
@@ -812,6 +823,86 @@ extension MeetingSessionLifecycleTests {
         )
     }
 
+    /// MC-14：连接 A 已失效、B 正在记录，A 随后才发 `failed` / `closed` /
+    /// `attribution`。三件事都不许发生：**不清 B 的 partial**、**不停 B**、
+    /// **不把归属写给 B 的行**。
+    ///
+    /// 上一条 MC-13 钉的是"新服务的 final 不被丢弃"，这一条钉的是反方向：
+    /// 旧连接**迟到的副作用**同样不能算数。
+    ///
+    /// **这条用例证明的是什么、不证明什么，说清楚**：
+    /// 做它的时候以为挡住旧连接的是事件循环里的 `isCurrent` 代次守卫，
+    /// 做完做了变异检验——把那个 `guard` 拆掉，本用例**照样全绿**。
+    /// 真正挡住的是 `startPump` 里的 `pump?.cancel()`：`RealtimeEventChannel.next()`
+    /// 先查 `Task.isCancelled` 再取缓冲，所以取消之后**连已缓冲的事件都不会被取出**，
+    /// 旧流的迭代直接结束。
+    ///
+    /// 所以：它锁的是**可观察后果**（旧连接的迟到事件不碰当前这一代），
+    /// 这条值得留——将来谁动了取消语义，它会红。但它**不证明**那个代次守卫；
+    /// 守卫的逻辑另有 `MeetingConnectionGeneration` 的单测覆盖。
+    /// 把它记成"代次守卫已端到端验证"就是本分支反复在修的那种毛病：
+    /// 断言全绿，验的却不是它。
+    func testStaleConnectionCannotTouchTheLiveRecording() async throws {
+        let h = try await makeHarness()
+        let sessionID = try await startRecording(h)
+
+        // B 接管：走生产重连路径。
+        h.power.fireSleep()
+        try await h.settle { $0.phase == .interrupted }
+        await h.session.continueAfterInterruption()
+        try await h.settle { $0.phase == .recording }
+        try await h.settle { await $0.clients.all.count >= 2 }
+        let live = await h.clients.all.count - 1
+        XCTAssertGreaterThanOrEqual(live, 1)
+
+        // B 正常提交一句，并留着一个未完成的 partial。
+        try await h.emit(.completed(itemID: "Y", transcript: "B 这一场的第一句"))
+        try await h.emit(.partial(itemID: "Z", delta: "B 还没说完的半句"))
+        try await h.settle { $0.session.lines.count == 1 }
+        try await h.settleBriefly()
+        let beforeStale = h.session.partialText ?? ""
+        XCTAssertTrue(beforeStale.contains("B 还没说完"), "先确认 B 的 partial 确实在")
+
+        // A 迟到地来了一串副作用，全部指向 **B 的 item**——
+        // 这是最坏的一种：A 不只是报自己的账，它在动当前这一代的账。
+        try await h.emit(.failed(itemID: "Z", code: "server_error", message: "迟到的失败"), toGeneration: 0)
+        try await h.emit(
+            .attribution(
+                itemID: "Y",
+                units: [
+                    RealtimeASRClient.AttributionUnit(
+                        segmentUID: "seg-1", speaker: "说话人 1",
+                        textStart: 0, textEnd: 6
+                    )
+                ],
+                isFinal: true
+            ),
+            toGeneration: 0
+        )
+        await h.clients.all[0].finishEvents()
+        try await h.settleBriefly()
+
+        // ① 不清 B 的 partial。
+        let afterStale = h.session.partialText ?? ""
+        XCTAssertTrue(
+            afterStale.contains("B 还没说完"),
+            "A 迟到的 failed 不得清掉 B 当前的 partial：\(afterStale)"
+        )
+        // ② 不停 B。
+        XCTAssertEqual(h.phase, .recording, "A 迟到不得把 B 停掉")
+        let liveClient = await h.clients.all.last
+        let liveClosed = await liveClient?.closeCount ?? -1
+        XCTAssertEqual(liveClosed, 0, "当前这一代连接不得被旧连接的收尾带着一起关掉")
+        // ③ 不把归属写给 B 的行。
+        let lines = try await h.store.lines(sessionID: sessionID)
+        XCTAssertEqual(lines.count, 1)
+        XCTAssertEqual(lines.first?.text, "B 这一场的第一句")
+        XCTAssertNil(
+            lines.first?.speakerLabel,
+            "A 迟到的归属不得写到 B 的行上——那等于给这句话安了一个没人说过的话"
+        )
+    }
+
 }
 /// 这是"启动到一半用户结束了"能被造出来的唯一办法。
 actor ConnectGate {
@@ -873,6 +964,14 @@ actor ControllableRealtimeClient: MeetingRealtimeClient {
         await stream.yield(
             RealtimeEventEnvelope(metadata: RealtimeEventMetadata(), payload: payload)
         )
+    }
+
+    /// 模拟这条连接**迟到地**断开：事件流收尾。
+    ///
+    /// MC-14 要验的正是"已被换下的连接随后才报 closed"——不结束这条流，
+    /// 就没法在测试里造出那个时序。
+    func finishEvents() async {
+        await stream.finish()
     }
 
     func connect() async throws {
