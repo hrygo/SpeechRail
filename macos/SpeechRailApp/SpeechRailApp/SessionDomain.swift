@@ -2709,6 +2709,16 @@ public struct InnerOSExchange: Identifiable, Hashable, Sendable {
     public var status: InnerOSStatus
     /// 「写进纪要」是显式动作，默认 0（§14.2）。
     public var inMinutes: Bool
+    /// 用户从答案里**挑出来写进纪要的那几句**（MC-43）。
+    ///
+    /// 验收要的是"只选择其中一句 → 只该句进入 source snapshot"，而
+    /// `inMinutes` 只是一个整条问答的布尔旗标——靠它收进快照的是整段 `answerText`。
+    /// 用户想只留半句，留不下；不想让另一半进纪要，也拦不住。
+    ///
+    /// `nil` = 整条。这是**迁移前那些行的原样语义**，不是"没选"：
+    /// 当时用户点的是"写进纪要"，没有句子粒度可挑。读成空等于擅自
+    /// 把他当时的选择改成"什么都没进"，那比多收半句更危险。
+    public var minutesExcerpt: String?
 
     public init(
         id: String,
@@ -2723,7 +2733,8 @@ public struct InnerOSExchange: Identifiable, Hashable, Sendable {
         limitsNote: String? = nil,
         model: String? = nil,
         status: InnerOSStatus = .generating,
-        inMinutes: Bool = false
+        inMinutes: Bool = false,
+        minutesExcerpt: String? = nil
     ) {
         self.id = id
         self.sessionID = sessionID
@@ -2738,6 +2749,7 @@ public struct InnerOSExchange: Identifiable, Hashable, Sendable {
         self.model = model
         self.status = status
         self.inMinutes = inMinutes
+        self.minutesExcerpt = minutesExcerpt
     }
 }
 

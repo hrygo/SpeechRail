@@ -73,7 +73,7 @@ public actor SessionStore {
     /// 索引是**派生数据**：内容永远在权威表里，索引坏了重建即可。
     /// v10（MA-14）：`knowledge_execution_event` 双时间事件日志 + `knowledge_supersession`。
     /// v11（MA-11）：`minutes.body_origin` + `parent_minutes_id`——用户改纪要产生**新版本**。
-    public static let schemaVersion: Int32 = 12
+    public static let schemaVersion: Int32 = 13
 
     private let directory: URL
     private let fileManager: FileManager
@@ -201,6 +201,7 @@ public actor SessionStore {
             }
             if version < 12 {
                 try migrateV11ToV12()
+            try migrateV12ToV13()
             }
             try execute("PRAGMA user_version=\(Self.schemaVersion);")
             try execute("COMMIT;")
@@ -1609,9 +1610,32 @@ public actor SessionStore {
     /// 所以这里必须把 0 行当失败报出去。
     @discardableResult
     public func setInnerOSInMinutes(exchangeID: String, included: Bool) throws -> Bool {
-        try withStatement("UPDATE inner_os_exchange SET in_minutes = ? WHERE id = ?;") { statement in
+        try setInnerOSInMinutes(exchangeID: exchangeID, included: included, excerpt: nil)
+    }
+
+    /// 勾选／取消「写进纪要」，并记下用户挑的是**哪几句**（MC-43）。
+    ///
+    /// `excerpt` 是用户在答案里勾中的那几句；`nil` 表示"整条都要"。
+    /// 撤回时（`included: false`）**一并清掉 excerpt**：留着的话，用户撤回之后
+    /// 重新勾上，上次选过的那半句会自己回来——他明明已经说过"这句不要"。
+    @discardableResult
+    public func setInnerOSInMinutes(
+        exchangeID: String,
+        included: Bool,
+        excerpt: String?
+    ) throws -> Bool {
+        // 空白等同于没挑。写一个空字符串进库，快照会收下一条空补充，
+        // 而界面上用户看到的是"勾了一句"。
+        let trimmed = excerpt?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let stored = (trimmed?.isEmpty ?? true) ? nil : trimmed
+        return try withStatement("""
+        UPDATE inner_os_exchange
+        SET in_minutes = ?, minutes_excerpt = ?
+        WHERE id = ?;
+        """) { statement in
             bind(statement, 1, included ? 1 : 0)
-            bind(statement, 2, exchangeID)
+            bind(statement, 2, included ? stored : nil)
+            bind(statement, 3, exchangeID)
             try step(statement)
             return sqlite3_changes(try requireHandle()) > 0
         }
@@ -2302,8 +2326,11 @@ public actor SessionStore {
     /// 用户勾选要写进纪要的私密问答（MC-43）。**只取勾选过、且已经有答案的那些**：
     /// 勾了但还没生成出内容的不能进快照——快照里写一个空指针没有意义。
     private func selectedSupplements(sessionID: String) throws -> [MeetingSupplement] {
+        // `COALESCE(minutes_excerpt, answer_text)`：用户挑了哪几句就只收哪几句，
+        // 没挑（迁移前的行、或用户显式选整条）才收整段。筛选条件仍看 `answer_text`
+        // 非空——勾选时答案必须已经存在，否则挑不出句子来。
         try withStatement("""
-        SELECT id, question, answer_text FROM inner_os_exchange
+        SELECT id, question, COALESCE(minutes_excerpt, answer_text) FROM inner_os_exchange
         WHERE session_id = ? AND in_minutes = 1 AND status = 'ready'
           AND answer_text IS NOT NULL AND TRIM(answer_text) <> ''
         ORDER BY asked_at ASC;
@@ -2311,11 +2338,13 @@ public actor SessionStore {
             bind(statement, 1, sessionID)
             var rows: [MeetingSupplement] = []
             while try step(statement) == SQLITE_ROW {
+                let text = columnText(statement, 2) ?? ""
+                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
                 rows.append(MeetingSupplement(
                     id: columnText(statement, 0) ?? "",
                     exchangeID: columnText(statement, 0) ?? "",
                     question: columnText(statement, 1) ?? "",
-                    answerText: columnText(statement, 2) ?? ""
+                    answerText: text
                 ))
             }
             return rows
@@ -2330,7 +2359,8 @@ public actor SessionStore {
         var rows: [MeetingSupplement] = []
         for id in ids {
             let row = try withStatement("""
-            SELECT id, question, answer_text FROM inner_os_exchange WHERE id = ? LIMIT 1;
+            SELECT id, question, COALESCE(minutes_excerpt, answer_text)
+            FROM inner_os_exchange WHERE id = ? LIMIT 1;
             """) { statement -> MeetingSupplement? in
                 bind(statement, 1, id)
                 guard try step(statement) == SQLITE_ROW else { return nil }
@@ -2503,7 +2533,7 @@ public actor SessionStore {
     public func innerOSExchanges(sessionID: String) throws -> [InnerOSExchange] {
         let sql = """
         SELECT id, session_id, asked_at, at_ordinal, question, intent, answer_text, draft_text,
-               confidence, limits_note, model, status, in_minutes
+               confidence, limits_note, model, status, in_minutes, minutes_excerpt
         FROM inner_os_exchange WHERE session_id = ? ORDER BY asked_at ASC;
         """
         return try withStatement(sql) { statement in
@@ -2524,7 +2554,8 @@ public actor SessionStore {
                         limitsNote: columnText(statement, 9),
                         model: columnText(statement, 10),
                         status: columnText(statement, 11).flatMap(InnerOSStatus.init(rawValue:)) ?? .generating,
-                        inMinutes: columnInt(statement, 12) != 0
+                        inMinutes: columnInt(statement, 12) != 0,
+                        minutesExcerpt: columnText(statement, 13)
                     )
                 )
             }
@@ -3642,7 +3673,11 @@ extension SessionStore {
       limits_note TEXT,
       model       TEXT,
       status      TEXT NOT NULL,
-      in_minutes  INTEGER NOT NULL DEFAULT 0
+      in_minutes  INTEGER NOT NULL DEFAULT 0,
+      -- MC-43 粒度：用户挑出来写进纪要的那几句。NULL = 整条（迁移前行与
+      -- 用户显式选「整条」都是这个值），刻意不回填——迁移前没有句子粒度，
+      -- 凭空截断等于替用户改了他当时的选择。
+      minutes_excerpt TEXT
     );
     CREATE INDEX inner_os_by_session ON inner_os_exchange(session_id, asked_at);
 
@@ -3995,6 +4030,20 @@ extension SessionStore {
         let columns = try tableColumnNames("meeting_document")
         if !columns.contains("deletion_mode") {
             try execute("ALTER TABLE meeting_document ADD COLUMN deletion_mode TEXT;")
+        }
+    }
+
+    /// v12 → v13：给 `inner_os_exchange` 补一列"用户挑了哪几句"。
+    ///
+    /// MC-43 的验收是"只选择其中一句 → 只该句进入 source snapshot"，
+    /// 而此前只有整条问答的布尔旗标，快照里收的是整段答案。
+    ///
+    /// **刻意不回填**：老行一律留 `NULL`，按整条读。那正是它们当时的语义，
+    /// 而且是唯一能证实的语义——迁移无从知道用户当时想留哪半句。
+    private func migrateV12ToV13() throws {
+        let columns = try tableColumnNames("inner_os_exchange")
+        if !columns.contains("minutes_excerpt") {
+            try execute("ALTER TABLE inner_os_exchange ADD COLUMN minutes_excerpt TEXT;")
         }
     }
 

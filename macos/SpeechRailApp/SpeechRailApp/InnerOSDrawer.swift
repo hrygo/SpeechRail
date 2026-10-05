@@ -21,6 +21,10 @@ public struct InnerOSDrawer: View {
 
     @State private var question = ""
     @State private var selectedExchangeID: String?
+    /// 正在挑句子的那条问答（MC-43）。挑句界面是**一层**而不是常驻控件——
+    /// 多数答案用户就是想整条写进，逐句勾选属于高级操作。
+    @State private var pickingSentencesFor: InnerOSExchange?
+    @State private var pickedSentences: Set<Int> = []
 
     public init(session: InnerOSSession, sessionID: String?) {
         self.session = session
@@ -51,6 +55,9 @@ public struct InnerOSDrawer: View {
             reduceMotion ? nil : .smooth(duration: 0.18),
             value: session.isExpanded
         )
+        .sheet(item: $pickingSentencesFor) { exchange in
+            sentencePicker(for: exchange)
+        }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("内心 OS。会议中随时私下问它一句，只有你看得到：这里的提问与回答不会进入会议录音、文字记录或纪要。")
         .onChange(of: session.exchanges.count) { _, _ in
@@ -187,7 +194,11 @@ public struct InnerOSDrawer: View {
             let count = session.evidence[exchange.id]?.count ?? 0
             parts.append(count > 0 ? "已答 · \(count) 处证据" : "已答 · 没有证据")
         }
-        if exchange.inMinutes { parts.append("已写进纪要") }
+        if exchange.inMinutes {
+            // 说了"已写进纪要"就得让人知道**哪些**进去了。整条与只挑了几句
+            // 是两种不同的东西，混成同一枚标签等于让用户回头重读自己的答案。
+            parts.append(exchange.minutesExcerpt == nil ? "已写进纪要" : "已写进纪要（只一部分）")
+        }
         return parts.joined(separator: " · ")
     }
 
@@ -217,6 +228,12 @@ public struct InnerOSDrawer: View {
                         }
                         if let limits = exchange.limitsNote, !limits.isEmpty {
                             labelled("限制", limits)
+                        }
+                        // 用户挑句之后，这里必须回显**真正写进去的是哪几句**。
+                        // 只在答案卡里标一枚"已写进纪要"是不够的：整段答案还
+                        // 留在上面，用户无从知道另外那半句已经没进去。
+                        if let excerpt = exchange.minutesExcerpt, !excerpt.isEmpty {
+                            labelled("已写进纪要的句子", excerpt)
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -261,13 +278,15 @@ public struct InnerOSDrawer: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .help("这一句不写进纪要")
+                Button("改选句子") { beginPickingSentences(for: exchange) }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("换一批句子写进纪要")
             } else {
-                Button("写进纪要") {
-                    Task { await session.includeInMinutes(exchangeID: exchange.id) }
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .help("把这句作为补充写进纪要；它不是会上说的话，会标成「AI 补充」")
+                Button("写进纪要") { beginPickingSentences(for: exchange) }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .help("把这句作为补充写进纪要；只选需要的句子，它不是会上说的话，会标成「AI 补充」")
             }
             Spacer(minLength: 0)
         }
@@ -299,6 +318,76 @@ public struct InnerOSDrawer: View {
                 }
             }
         }
+    }
+
+    // MARK: - 挑句子（MC-43）
+
+    /// 打开挑句界面。**默认全选**：绝大多数答案用户就是想整条写进，
+    /// 一进来就摆一堆空勾选框等于逼他先做一遍没必要的判断。
+    private func beginPickingSentences(for exchange: InnerOSExchange) {
+        pickedSentences = Set(InnerOSSession.selectableSentences(in: exchange.answerText ?? "").indices)
+        pickingSentencesFor = exchange
+    }
+
+    /// 全选时按"整条"写（`excerpt = nil`），只有真的选了子集才记下是哪几句。
+    /// 写库那侧把 `nil` 读成整段，与迁移前的行是同一条路径。
+    private func confirmSentenceSelection(for exchange: InnerOSExchange) {
+        let sentences = InnerOSSession.selectableSentences(in: exchange.answerText ?? "")
+        let all = Set(sentences.indices)
+        let excerpt: String? = (pickedSentences == all)
+            ? nil
+            : sentences.indices.filter { pickedSentences.contains($0) }
+                .map { sentences[$0] }
+                .joined(separator: "\n")
+        pickingSentencesFor = nil
+        Task { await session.includeInMinutes(exchangeID: exchange.id, excerpt: excerpt) }
+    }
+
+    private func sentencePicker(for exchange: InnerOSExchange) -> some View {
+        let sentences = InnerOSSession.selectableSentences(in: exchange.answerText ?? "")
+        return VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Text("写进纪要哪几句")
+                .font(.headline)
+            Text("只勾你想要的句子。没勾的不会进纪要，也不会写进这次会议的存档。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            ScrollView {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                    ForEach(Array(sentences.enumerated()), id: \.offset) { index, sentence in
+                        Toggle(isOn: Binding(
+                            get: { pickedSentences.contains(index) },
+                            set: { on in
+                                if on { pickedSentences.insert(index) } else { pickedSentences.remove(index) }
+                            }
+                        )) {
+                            Text(sentence)
+                                .font(.body)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .toggleStyle(.checkbox)
+                    }
+                }
+            }
+            .frame(maxHeight: 260)
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Button(pickedSentences.count == sentences.count ? "取消全选" : "全选") {
+                    pickedSentences = pickedSentences.count == sentences.count
+                        ? []
+                        : Set(sentences.indices)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                Spacer()
+                Button("取消", role: .cancel) { pickingSentencesFor = nil }
+                Button("写进纪要") { confirmSentenceSelection(for: exchange) }
+                    .disabled(pickedSentences.isEmpty)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(SpeechRailDesignTokens.Layout.contentPadding)
+        .frame(minWidth: 420, minHeight: 320, alignment: .leading)
     }
 
     private func labelled(_ title: String, _ body: String) -> some View {

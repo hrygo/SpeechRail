@@ -833,13 +833,24 @@ public final class MinutesGenerator {
     /// 快照输入里的用户补充（MC-43）：组装走 Domain 层纯逻辑，
     /// 只含 `in_minutes = 1` 且全部引文已校验的问答（MC-35/MC-36），
     /// 逐条标“用户选择的 AI 补充”，不升级成会议事实。
+    /// 送进 prompt 的补充正文是**用户挑过的那几句**，不是整段答案（MC-43）。
+    ///
+    /// 这一处和快照必须同时改：纪要是从 prompt 生成的，快照收窄了而 prompt
+    /// 仍拿整段，等于用户没选的那半句被偷偷用了一次，"只该句进入"在最终产物上
+    /// 根本不成立。`minutesExcerpt` 为 `nil`（迁移前的行、或用户显式选整条）
+    /// 时才用整段答案。
     static func userSupplements(
         exchanges: [InnerOSExchange],
         verifiedExchangeIDs: Set<String>
     ) -> String {
         MinutesSupplements.render(
             questions: exchanges.map {
-                (id: $0.id, question: $0.question, answer: $0.answerText, inMinutes: $0.inMinutes)
+                (
+                    id: $0.id,
+                    question: $0.question,
+                    answer: $0.minutesExcerpt ?? $0.answerText,
+                    inMinutes: $0.inMinutes
+                )
             },
             verifiedIDs: verifiedExchangeIDs
         )

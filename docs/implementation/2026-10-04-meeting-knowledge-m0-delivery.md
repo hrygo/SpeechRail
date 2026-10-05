@@ -1,7 +1,7 @@
 ---
 title: "会议知识闭环 M0/M1 交付说明：保存、版本、来源、检索、导出、备份恢复与删除"
 status: active
-version: "4.8"
+version: "4.9"
 date: 2026-10-06
 branch: "codex/meeting-knowledge-milestones"
 base: "origin/main @ dab047b2"
@@ -11,7 +11,7 @@ base: "origin/main @ dab047b2"
 
 ## 范围
 
-分支共 64 个提交（本轮八个增量）。
+分支共 65 个提交（本轮九个增量）。
 
 > **下面这段范围描述只涵盖最早的 M0**，当时确实"只动纪要版本链、结束封存上报与
 > 知识检索语义，不做 schema 迁移、不改表结构、不碰采集链路"。
@@ -22,7 +22,8 @@ base: "origin/main @ dab047b2"
 >   `minutes_evidence`、v7 `minutes_window`、v8 `knowledge_fts` 与
 >   `search_index_outbox`、v9 项目与标签、v10 `knowledge_execution_event`、
 >   v11 `minutes.body_origin` 与 `parent_minutes_id`、
->   **v12 `meeting_document.deletion_mode`**）。
+>   **v12 `meeting_document.deletion_mode`**、
+>   **v13 `inner_os_exchange.minutes_excerpt`**）。
 >   每一步的迁移与回退写在对应小节里。
 > - **采集与生命周期动过**：`MeetingPowerMonitor` 接缝、启动票守卫、
 >   `flushPendingUtterance` 断句、按 id 合停记区间、`togglePause` 转 async。
@@ -106,6 +107,7 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 | （同上，第十处） | **归档包往返（MA-19）没有入口**：`exportKnowledgeArchive` / `previewKnowledgeArchive` / `importKnowledgeArchive` 生产代码零消费方。store 层 22 项测试（往返、冲突、幂等、路径穿越、执行状态）全绿，却没有一条路通向用户 | 实测（同上 + 读 `MeetingKnowledgeArchiveTests` 确认覆盖的是 store 层） | 已接进库页：导出归档包（完整归档／分享包分开）与导入（先预检、有真冲突不给导入按钮）。**新补的是 model 层测试**——store 那 22 项全都自己构造 `KnowledgeArchiveSelection`，"谁来填 minutesID"替换掉不会有一条变红 |
 | （同上，第九处，并更正第 12 条） | **App 能做出的备份，App 自己恢复不了**。设置页「备份记录库」调的是 `backup(to:)`——`VACUUM INTO` 出来的**单个 .sqlite3**，没有 `manifest.json`；而恢复只认「目录 + 库文件 + 清单」，缺清单明确拒绝。用户照着 App 的按钮做完备份，恢复不了自己刚做的那份。上一版总账把它误记成"备份没有入口"，是错的：按钮一直在，坏的是它产出的东西。已改走 `exportBackup(to:)`，并新增恢复预演入口 | 实测（沿 `backup(to:)` 与 `restorePreview` 两条生产路径对读发现；新用例从生产路径出发做红/绿证明，不是手工拼目录） |
 | （同上，第七处） | **检索只给会议名，不给证据**。验收 4 是"返回对应会议**与证据**"，上一条把"会议"接通了，`excerpt` 却仍无消费者——搜出一场会，用户还是不知道命中在哪句话上。已接上：行内显示命中的原话，转录原话优先于纪要正文，标题命中不硬凑 | 实测（回归测试红/绿反证；两条"不过度生成"护栏用例全程绿） |
+| （同上，第十五处，紧接上一节的粒度） | **MC-43 的粒度是错的**：验收要"只选择其中**一句** → 只**该句**进入 source snapshot"，而 `in_minutes` 是整条问答的布尔旗标，快照收的是整段 `answer_text`。用户想只留半句留不下，不想让另一半进纪要也拦不住。已升 schema v13 加 `minutes_excerpt`，读侧与 **prompt 侧同时**改（只改快照不够——纪要从 prompt 生成，prompt 仍拿整段就等于没选的那半句被偷偷用了一次），抽屉加一层逐句勾选（默认全选） | 实测（回归测试红/绿反证，7 项；方案缺陷表 F06 记的就是这件事） |
 
 | （同上，第十四处，本轮关闭总账第 14 条） | **MA-14 这一整块此前全部没有入口**：`recordExecutionEvent` / `executionState` / `conflictingDecisions` / `confirmSupersession` / `knowledgeChangeProposals` / `executionEvents` 六个 API 在生产代码里**零消费方**。用户标过的"已完成"、跨会议的两处矛盾、重新生成换掉了哪条结论、一条承诺是怎么变成今天这样的——全部只存在于库里 | 实测（沿六个 API 逐个回查消费方） | 四个提交分四轮接进库页：行动生命周期读写两侧、跨会议结论冲突、详情里的「这一版可能变了什么」、未完成事项里的「变更历史」。每轮都修了同一处的自相矛盾（详见各节）。**总账第 14 条到此关闭** |
 | （同上，第十三处） | **MC-56「列出全部未完成事项」没有入口**。`SessionStore.knowledgeItems(filter:scope:limit:offset:)` 早已能算结构化投影并给出分页计数，但 `KnowledgeItemFilter` 里**没有"未完成"这个条件**，`SessionCoordinator` 没有透传，库页没有入口——`knowledgeItems` 在生产代码里零消费方。用户只能一场一场点开，凭记忆拼自己那份待办清单。已补 `openOnly`、协调器透传、库页「未完成事项」面板与全量计数 | 实测（沿 `knowledgeItems` 回查消费方发现 + 红/绿反证） | 顺带修掉一个**同源的旧缺陷**：`counts.total` 取的是过滤**前**的行数，于是 `needsReview`/`byKind` 会随条件变、总计不会——正是验收里"只返回 top10 却称全部"最可能的成因。现在计数与列表取自同一批行 |
@@ -3333,8 +3335,9 @@ store 那 22 项测试全都**自己构造** `KnowledgeArchiveSelection`。
 - **撤回只影响下一次封存**。已经封进快照的补充仍留在那份快照的 `note_refs` 里，
   旧纪要照旧能看到它——这是对的：已经生成的纪要不因为后来的撤回而变样，
   要改就重新生成一版。
-- 「加入纪要」目前只能选**整条回答**，不能从回答里截取某一句。
-  方案 §583 写的是"选一句"，当前粒度是"选一条问答"。
+- 「加入纪要」此前只能选**整条回答**，不能从回答里截取某一句。
+  方案 §583 写的是"选一句"，当时的粒度是"选一条问答"。
+  **已在下面「MC-43 粒度」一节修掉**，本条不再成立。
 
 
 ## M1 增量（MC-54）｜这一版可能变了什么，2026-10-06
@@ -3570,3 +3573,88 @@ store 那 22 项测试全都**自己构造** `KnowledgeArchiveSelection`。
 - 会话自己那份 `selection` 在启动失败时会被 `resetKeepingLines()` 清掉，
   **这是有意的**：它由 `MeetingView` 持有的来源重新喂进来。会前那一屏用户
   看到、也保得住的是视图那一份。会话这一层只负责记住标题。
+
+
+## M1 增量（MC-43 粒度）｜用户选的是**一句**，不是整条问答，2026-10-06
+
+### 做了什么
+
+上一节把「写进纪要」的**写侧**接通了，但粒度仍然是错的。MC-43 的验收原话是
+「用户只选择私密问答中**一句**加入补充 → 只**该句**进入 source snapshot」，
+而当时能做的只有整条问答的全有或全无：`in_minutes` 是一个布尔旗标，
+`selectedSupplements` 把整段 `answer_text` 收进快照。用户想只留半句，留不下；
+不想让另一半进纪要，也拦不住。方案自己的缺陷表 F06 记的就是这件事
+（"「写进纪要」只改旗标"）。
+
+现在粒度到句：
+
+- **库**：schema **v12 → v13**，`inner_os_exchange` 增列 `minutes_excerpt TEXT`。
+  `setInnerOSInMinutes(exchangeID:included:excerpt:)` 把用户挑的句子记进去；
+  **撤回时一并清空**。空白串按"没挑"处理，不写空补充进库。
+- **读**：`selectedSupplements` 与 `meetingSupplements` 都改成
+  `COALESCE(minutes_excerpt, answer_text)`。
+- **送进模型的 prompt**：`MinutesGenerator.userSupplements` 同样只取
+  `minutesExcerpt`。
+- **界面**：抽屉里「写进纪要」不再直接写库，而是先弹一层**挑句子**——
+  逐句勾选，**默认全选**（多数答案用户就是想整条写进，一进来摆一堆空勾选框
+  等于逼他先做一遍没必要的判断）。全选时按"整条"写，只有真选了子集才记句子。
+  已写进的条目多一个「改选句子」入口；答案卡里**回显真正写进去的是哪几句**，
+  列表里区分「已写进纪要」与「已写进纪要（只一部分）」。
+- **切句规则**：`InnerOSSession.selectableSentences` 只认句末标点，
+  小数点与版本号不断句（`0.5%`、`v3.5.6`）。刻意不与
+  `TeleprompterSegmenter` 合并成一处：那边切的是朗读单元，这边切的是
+  "用户勾了哪几句"，边界处的坑相同但后果不同，合成一处会让其中一个
+  被另一个的假设绑住。
+
+### 为什么 prompt 那一处也要改
+
+只改快照是不够的。纪要是从 **prompt** 生成的，`MinutesGenerator` 走的是
+`innerOSExchanges` 实时读，跟快照是两条路。快照收窄了而 prompt 仍拿整段，
+等于用户没选的那半句被偷偷用了一次——**"只该句进入"在最终产物上并不成立**。
+测试因此从两侧钉：快照侧断言 `meetingSupplements` 的 `answerText`，
+prompt 侧断言 `MinutesGenerator.userSupplements` 的渲染结果。
+
+### 回归证据（2026-10-06 实测）
+
+- `InnerOSSupplementTests` 从 6 项增到 **13 项**，先红后绿。红的那次是编译不过
+  （缺 `minutesExcerpt` / `excerpt:` 参数 / `selectableSentences`）。
+  新增 7 项覆盖：只选一句则快照里只有那一句且**没选的不跟着沾光**；
+  没有 `minutes_excerpt` 的行按整条读（**不擅自截断**）；改选是**覆盖**不是追加；
+  撤回会清掉 excerpt 且重新勾选回到整条；**prompt 侧同样只有那一句**；
+  切句不切开小数；空答案切不出句子。
+- 全量 `swift test --package-path macos/SpeechRailApp`：XCTest **1112 项**
+  （上一节 1105 +7）+ Swift Testing **419 项**，零失败。
+- `./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+  （抽屉的挑句界面在 App target 里，SPM 不编译它，只有这条命令会编到。）
+- `python3 scripts/check_macos_test_target_coverage.py`：**OK**。
+- 已把 `MeetingMinutesVersioningTests` 里写死的
+  `XCTAssertEqual(SessionStore.schemaVersion, 12)` 更新为 13。
+
+### 迁移与回退
+
+- **v12 → v13 只加一列，不回填**：
+  `ALTER TABLE inner_os_exchange ADD COLUMN minutes_excerpt TEXT;`，
+  用 `tableColumnNames("inner_os_exchange")` 做幂等守卫。
+- **老行一律按整条读，这是有意的**：迁移前没有句子粒度，
+  用户当时点的是"写进纪要"，语义就是整条。凭空截断等于替用户改了他
+  当时的选择——那比多收半句危险得多（对内容已不在的东西谎称已收）。
+- 新备份 manifest 的 `schemaVersion` 随之变成 13；旧备份（12 及以下）仍按既有
+  规则被拒。
+- 回退：`schemaVersion` 改回 12、删掉 `migrateV12ToV13` 与建表里的那一列、
+  三个 `setInnerOSInMinutes` 重载合并回两个、读侧换回 `answer_text`、
+  抽屉里换回直接写库的按钮。已经写进 `minutes_excerpt` 的内容留在库里不被读，
+  按整条语义复活。
+
+### 未验证事项与已知边界
+
+- **挑句子那一层没有在真机走过**（无 UI 自动化授权）：勾选框换行、
+  「改选句子」按钮与「撤回」并排时的排版，都只是读代码与编译推断。
+  计入总账第 1 条。
+- **切句是字面规则，不是理解**。一段答案如果中间用分号连接了三个并列事实，
+  用户会看到三个可以分别勾选的句子——它们在语义上是一件事。界面上把
+  这层不确定性藏起来不如摊开：句子是字面单位，勾选框旁边就是原句，
+  用户看得见自己在选什么。
+- **`verifiedSupplementIDs` 仍是整条问答粒度**（MC-35/36 的引文校验）。
+  一条问答里挑了一句进纪要时，引文校验仍按整条问答的证据判定通过与否。
+  本轮没有改它：校验的对象是"这条问答的引文说不说得上话"，
+  与"用户挑了哪几句进纪要"是两个维度，混在一起会让引文校验失去意义。
