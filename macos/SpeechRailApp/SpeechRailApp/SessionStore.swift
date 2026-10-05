@@ -480,6 +480,24 @@ public actor SessionStore {
         }
     }
 
+    /// 按 id 合上**某一条**中断区间（MC-16 暂停用）。
+    ///
+    /// 为什么不用上面那个按会话合的：那条会把该会话**所有**未闭合区间一起合上。
+    /// 用户暂停着、又出了故障时，两条区间叠在一起，恢复那一刻会把暂停的那段
+    /// 也算成"录到了"，停记区间就不再等于用户实际按下的那段时间。
+    /// 暂停必须自己能指出是哪一条。
+    public func closeInterruption(id: String, resumedAt: Date = Date()) throws {
+        let sql = """
+        UPDATE session_interruption SET resumed_at = ?
+        WHERE id = ? AND resumed_at IS NULL;
+        """
+        try withStatement(sql) { statement in
+            bind(statement, 1, resumedAt.timeIntervalSince1970)
+            bind(statement, 2, id)
+            try step(statement)
+        }
+    }
+
     public func setSessionState(id: String, state: SessionRecordState) throws {
         try withStatement("UPDATE session SET state = ? WHERE id = ?;") { statement in
             bind(statement, 1, state.rawValue)

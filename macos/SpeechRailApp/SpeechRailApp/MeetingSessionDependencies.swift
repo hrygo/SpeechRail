@@ -66,6 +66,14 @@ public protocol MeetingRealtimeClient: Sendable {
     func events() async -> RealtimeEventStream<RealtimeASRClient.Event>
     func connect() async throws
     func append(_ pcm: Data) async throws
+    /// 把缓冲区里**在途的那一句**结算成独立 item。
+    ///
+    /// 与 `drainAndClear` 的分工必须说清：那个是**收尾**——顺带结束分人、清空缓冲、
+    /// 同一连接上并发调用直接抛错，连接随后不可再用。这个只切一刀，不清也不收，
+    /// 用来在暂停/继续之间划边界（MC-16）：服务端静音判定（`server_vad` 900ms）之前
+    /// 按下的暂停，等不到静音边界，前后的两段会被并成同一句。切完这一刀，
+    /// 之后 append 的音频自然落进新 buffer，不会和暂停前那句黏在一起。
+    func flushPendingUtterance() async throws
     func drainAndClear(timeout: Duration) async throws
     func close() async
 }

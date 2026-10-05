@@ -285,7 +285,7 @@ public struct MeetingView: View {
         ) {
             if meeting.phase.isLive {
                 Button(meeting.isPaused ? "继续录" : "暂停一下") {
-                    meeting.togglePause()
+                    Task { await meeting.togglePause() }
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -1501,6 +1501,13 @@ public struct MeetingView: View {
             meeting.interruptionNote ?? "音频来源停下来了。已经定稿的文字记录都在。"
         case .unexpectedExit:
             "上一次没有正常结束。这一段已经封存，可以回看、导出。"
+        case .userPaused:
+            // 正常情况下到不了这张卡：`interruption` 只由故障路径写入，暂停走
+            // `markUserPaused`（只落停记区间、不改相位、不释放设备），所以
+            // 上面的「四种断法」里没有它——用户主动为之不算断法。
+            // 这一支是给"万一走到了这儿"兜底的：真走到了，说明有路径把暂停误记成了
+            // 故障，那要显示成"你自己暂停的"，不能反过来把用户的动作说成设备出问题。
+            "这一段是你自己暂停的记录，不是出了故障。"
         case .none:
             "这一段停在了断点上。"
         }

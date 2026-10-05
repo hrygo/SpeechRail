@@ -125,6 +125,9 @@ public enum SessionInterruptionReason: String, Codable, Sendable {
     case sleep
     case sourceLost = "source_lost"
     case unexpectedExit = "unexpected_exit"
+    /// 用户自己按了暂停。**不是故障**，但同样留下一段没有录上的时间——
+    /// 不记下来的话，事后看这条记录的人会以为那几分钟是安静的。
+    case userPaused = "user_paused"
 
     /// 直接拿来写界面文案（用户的问法是「这一段到底录没录上」）。
     public var title: String {
@@ -133,6 +136,15 @@ public enum SessionInterruptionReason: String, Codable, Sendable {
         case .sleep: "Mac 睡眠"
         case .sourceLost: "音频来源中断"
         case .unexpectedExit: "应用意外退出"
+        case .userPaused: "你暂停了记录"
+        }
+    }
+
+    /// 是"出了问题"还是"用户主动为之"。前者要追查，后者不用。
+    public var isFault: Bool {
+        switch self {
+        case .userPaused: false
+        case .serviceLost, .sleep, .sourceLost, .unexpectedExit: true
         }
     }
 }

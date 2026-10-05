@@ -199,6 +199,9 @@ actor MeetingRealtimeClientForTests: MeetingRealtimeClient {
     private(set) var connectCount = 0
     private(set) var closeCount = 0
     private(set) var appendedByteCount = 0
+    /// 暂停边界切了几刀（MC-16）。"暂停前后不拼句"就是靠这个数断言的：
+    /// 暂停一次必须恰好切一刀，多了是重复结算，少了就是前后黏成一句。
+    private(set) var flushCount = 0
 
     func events() async -> RealtimeEventStream<RealtimeASRClient.Event> {
         RealtimeEventStream<RealtimeASRClient.Event>(limits: .init(maxBufferedEvents: 1))
@@ -206,6 +209,7 @@ actor MeetingRealtimeClientForTests: MeetingRealtimeClient {
 
     func connect() async throws { connectCount += 1 }
     func append(_ pcm: Data) async throws { appendedByteCount += pcm.count }
+    func flushPendingUtterance() async throws { flushCount += 1 }
     func drainAndClear(timeout: Duration) async throws {}
     func close() async { closeCount += 1 }
 }

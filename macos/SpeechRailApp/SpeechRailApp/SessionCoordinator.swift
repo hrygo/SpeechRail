@@ -132,6 +132,12 @@ public final class SessionCoordinator {
     public private(set) var elapsed: TimeInterval = 0
     /// 当前 epoch 内已经落库的行数水位（中断区间与「提问时的转录水位」都用它）。
     public private(set) var lineWatermark = 0
+    /// 当前那一段用户暂停的区间 id（MC-16）。开着时非空，恢复/收尾时合上并清空。
+    ///
+    /// 停在协调器而不是界面上，是因为它有**收尾兜底**的义务：用户暂停着直接结束会议时，
+    /// 区间得在这里合上，否则库里会留下一条 `resumed_at` 永远为空的暂停记录，
+    /// 事后读出来就成了"这场的记录停在中途且没恢复"。
+    private var pauseInterruptionID: String?
     /// 最近一次读到的服务规格组合。它是**服务的事实**：由每场会话开始时那一次 `/health` 读回，
     /// 记在这里，并写进会话记录，供事后核对当时跑的是哪一组规格。
     public private(set) var lastKnownProfile: String?
@@ -380,6 +386,39 @@ public final class SessionCoordinator {
         startClock()
     }
 
+    /// 用户自己按了暂停（MC-16）。
+    ///
+    /// **刻意不走 `markInterruption`**：那条会切 `.interrupted` 并 `releaseDevices()`，
+    /// 对应的是"设备真的掉了"。暂停是设备还在手里、会话还在录、只是上行停住，
+    /// 走那条路等于把"我先歇会儿"记成设备故障，还会顺手把这一场的音频放掉。
+    ///
+    /// 但区间必须落库：不记的话，事后看这条记录的人会把中间那几分钟当成安静，
+    /// 而实际上那段时间一个字都没录上。
+    @discardableResult
+    public func markUserPaused() async -> String? {
+        guard let activeSessionID else { return nil }
+        // 重复调用只记一段：界面上按一次是一个动作，两段重叠的暂停区间
+        // 会让恢复时合到错的那一条。
+        if pauseInterruptionID != nil { return pauseInterruptionID }
+        let id = try? await store.markInterruption(
+            sessionID: activeSessionID,
+            atOrdinal: lineWatermark,
+            reason: .userPaused
+        )
+        pauseInterruptionID = id
+        return id
+    }
+
+    /// 恢复记录：合上刚才那一段暂停。不重放 PCM、不动设备、不改相位。
+    ///
+    /// 按 id 合而不是按会话合：暂停期间若又发生故障，会话里有两条未闭合区间，
+    /// 按会话合会把暂停的那段一起算到故障恢复的时刻（见 `SessionStore.closeInterruption(id:)`）。
+    public func resumeUserPaused() async {
+        guard let id = pauseInterruptionID else { return }
+        try? await store.closeInterruption(id: id)
+        pauseInterruptionID = nil
+    }
+
     /// 收声停止。设备在此**立刻释放**；会议接下来走 `processing`（纪要 / 分人在收尾）。
     public func stopCapture(endingWith reason: SessionEndReason = .user) async {
         guard let occupancy else { return }
@@ -406,6 +445,10 @@ public final class SessionCoordinator {
         if let kind = occupancy?.kind {
             await stopper?(kind)
         }
+        // 暂停中直接结束：这一段停记到收尾这一刻为止。必须**在封存之前**合上，
+        // 否则归档包里会带一条 `resumed_at` 为空的暂停记录，事后读出来像是
+        //「录到一半没恢复」（MC-16）。
+        await resumeUserPaused()
         if let activeSessionID {
             try? await store.finalizeSession(id: activeSessionID, endReason: reason)
         }

@@ -358,8 +358,39 @@ public final class MeetingSession {
     }
 
     /// 暂停 / 继续上行。它**不结束会话**：麦克风还在会话手里，只是不再上行。
-    public func togglePause() {
-        isPaused.toggle()
+    ///
+    /// 暂停这一次动作做两件事，顺序不能换（MC-16）：
+    /// 1. 先把 `isPaused` 置上，`upload` 立刻不再往下送音频；
+    /// 2. 再向服务端切一刀，把在途的那一句结算成独立 item。
+    ///
+    /// 为什么必须切那一刀：服务端的静音判定（`server_vad`，约 900ms）没到之前
+    /// 按下的暂停，等不到静音边界。快速暂停再恢复时，暂停前送的和恢复后送的
+    /// 音频会落进同一个 buffer，被并成同一句转录——那句话跨越了根本没录的那段时间，
+    /// 是**假的**。切完之后，之后 append 的音频自然进新 buffer。
+    ///
+    /// 同时落一段停记区间：暂停期间一个字都没录上，不记的话事后看这条记录的人
+    /// 会把中间那几分钟当成安静。
+    public func togglePause() async {
+        if isPaused {
+            isPaused = false
+            await coordinator.resumeUserPaused()
+        } else {
+            isPaused = true
+            await flushPendingUtterance()
+            await coordinator.markUserPaused()
+        }
+    }
+
+    /// 把缓冲区里在途的那一句结算掉。切不出去也不取消暂停：用户按的是"别录了"，
+    /// 不是"重来一次"。这一刀失败最坏是多一句跨界的转录，而界面上的断点仍然如实显示；
+    /// 反过来把它当成失败去回滚暂停，界面上的「暂停一下」就变成了一个按了没反应的死按钮。
+    private func flushPendingUtterance() async {
+        guard let client else { return }
+        do {
+            try await client.flushPendingUtterance()
+        } catch {
+            lastFailure = error.localizedDescription
+        }
     }
 
     /// 这一场的来源里有没有麦克风（页头的静音按钮据此决定露不露）。

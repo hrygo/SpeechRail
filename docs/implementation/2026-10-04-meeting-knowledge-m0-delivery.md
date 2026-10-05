@@ -1768,3 +1768,79 @@ MA-14 把待办的执行状态（已完成、受阻、负责人、期限）写�
 - **降级不会自动恢复**：来源重新可得时没有自动重核机制。
 - 未覆盖：来源被**修改**（而非删除）时的重校验。转录行正文目前没有编辑入口，
   所以这条路径尚不可达。
+
+## M1 增量（MC-16 停记区间与暂停断句，2026-10-05）
+
+范围：用户按「暂停一下」时，既要在**转录上**划出边界，也要在**账本上**留下
+「这段时间没录上」。界面侧的三态分离在 MA-10 已覆盖；这次补的是此前落库层
+**完全没有**的两件事。
+
+- **暂停前后不拼句**：`MeetingSession.togglePause()` 改为 `async`。暂停时先把
+  `isPaused` 置上（`upload` 立刻不再送音频），再向服务端切一刀把在途的那一句
+  结算成独立 item。服务端的静音判定（`server_vad`，约 900ms）没到之前按下的暂停
+  等不到静音边界；快速暂停再恢复时，暂停前送的和恢复后送的音频会落进同一个
+  buffer 被并成一句——那句话跨越了根本没录上的时间，是**假的**。
+- 新增 `MeetingRealtimeClient.flushPendingUtterance()`：只提交、**不清缓冲、
+  不结束分人**，连接随后还能接着录。与既有 `drainAndClear` 的分工是刻意的——
+  后者会结束分人、清空缓冲、同一连接上并发调用直接抛错，那是**收尾**原语；
+  暂停用它等于把暂停变成结束。
+- **停记区间可追溯**：`SessionInterruptionReason` 新增 `userPaused`，落一条
+  `session_interruption`。不记的话，事后看这条记录的人会把中间那几分钟当成安静，
+  而那段时间一个字都没录上。
+- `SessionInterruptionReason.isFault` 把「出了问题」和「用户主动为之」分开：
+  用户暂停**不是故障**，混进故障那一堆会让排查口径失真（界面「四种断法」清单
+  仍然只有四条，暂停不在其中）。
+- **暂停不走 `markInterruption`**：那条会切 `.interrupted` 并 `releaseDevices()`，
+  对应的是「设备真的掉了」。新增 `markUserPaused()` / `resumeUserPaused()` 只落区间，
+  不改相位、不放设备。
+- **按 id 合区间**：新增 `SessionStore.closeInterruption(id:)`。暂停期间若又发生
+  故障，同一会话有两条未闭合区间；按会话合的那个会把暂停的那段一起算到故障恢复
+  的时刻，停记区间就不再等于用户实际按下的那段时间。
+- **收尾兜底**：暂停中直接结束会议时，`finalize` 在**封存之前**合上那一段。
+  否则归档包里会带一条 `resumed_at` 为空的暂停记录，事后读出来像「录到一半没恢复」。
+- 切句失败**不取消暂停**：用户按的是「别录了」，不是「重来一次」。最坏是多一句跨界的
+  转录，而界面上的断点仍如实显示；反过来把它当失败回滚暂停，页头那颗「暂停一下」
+  就成了按了没反应的死按钮。
+
+### 回归证据（2026-10-05）
+
+- 新增 `MeetingPauseIntervalTests` **7/7**：
+  - 区间能读回，`at_ordinal` 从暂停那一刻的水位起算，恢复前 `resumed_at` 为空；
+  - **按 id 合只动那一条**：暂停区间合上后，故障区间仍未闭合；
+  - 重复合以第一次的恢复时刻为准（停记长度不随多点几下而变）；
+  - 暂停后相位仍是 `.recording`、设备租约不变、`lastInterruption` 为空；
+  - 重复暂停只记一段；恢复合上且不重复记；
+  - 暂停中 `finalize` 会合上那一段。
+- `RealtimeContractTests` 新增 1 项，从**线路侧**钉住断句的物理前提：
+  `flushPendingUtterance()` 发出 `input_audio_buffer.commit`，且**不**发
+  `input_audio_buffer.clear`、**不**发 `speechrail.diarization.finish`。
+  这三条少一条，暂停就不再是暂停（丢音频 / 丢说话人归属 / 变成结束）。
+- 全量 `swift test --package-path macos/SpeechRailApp`：XCTest **1005 项** +
+  Swift Testing **419 项**，零失败（2026-10-05 核验）。
+- `./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+
+### 迁移与回退
+
+- **无 schema 变更**：`session_interruption` 表结构不变，`user_paused` 只是
+  `reason` 列的一个新取值。
+- 回退只需去掉调用点；已落的 `user_paused` 行留在库里（是用户数据的记录，不是缓存）。
+
+### 未验证事项与已知边界
+
+- **老程序会静默丢掉这一行**：`interruptions(sessionID:)` 用
+  `guard let reason = …init(rawValue:) else { continue }` 解析，**未知取值直接跳过**，
+  既不报错也不降级。所以旧版本打开带 `user_paused` 的库时，那段停记区间会**整个
+  消失**，读起来像「这段录满了」——恰恰是这次要防的那种假的完整。这不是本次引入的
+  行为，是既有解析策略对**任何**新取值都如此；按项目既定口径（旧程序不得打开更高
+  `user_version` 的库）不在本轮修，但值得单独立项：未知取值应显式暴露成「未知原因」，
+  而不是无声消失。
+- **真机断句未验证**：线路侧证明了「切的那一刀只提交」，但真实服务端在 900ms 静音
+  判定与这一刀交错时的实际切分结果没有跑过——**真实采集另行授权**。
+- **`togglePause` 本身未进单测**：`MeetingSession` 因 `import AppKit` 进不了 SPM
+  测试目标（它唯一的 AppKit 用面是 `NSWorkspace` 睡眠/唤醒通知）。所以「暂停一次
+  恰好切一刀」目前只有代码与 App 构建背书，没有可执行的回归。把该通知挪进
+  `MeetingSessionDependencies` 接缝即可让生产 `MeetingSession` 进单测，顺带补上
+  MA-01 的 MC-05～MC-08 端到端缺口——尚未做。
+- **界面未消费停记区间**：`user_paused` 行现在可查、可随归档包往返，但**回看界面
+  还没有把暂停区间画出来**。用户能读到「没录上」，看不到「哪一段没录上」。
+- UI 自动化、真实采集、模型质量基准、发布另行授权。
