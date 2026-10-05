@@ -939,6 +939,34 @@ public final class SessionCoordinator {
         )
     }
 
+    /// 当前该被引用的那一版：采用版优先，没有采用版才用最新可用版（MA-11）。
+    public func currentMinutesVersion(sessionID: String) async throws -> MinutesVersion? {
+        if let accepted = try await store.acceptedMinutes(sessionID: sessionID) { return accepted }
+        return try await store.latestUsableMinutes(sessionID: sessionID)
+    }
+
+    /// 用户改纪要正文（MA-11）。**写新版本，不覆盖**；未就绪 / 跨会议 /
+    /// 已归档的版本会被拒绝，改动写不进去。
+    public func saveUserMinutesEdit(
+        sessionID: String,
+        editingMinutesID: String,
+        body: String
+    ) async throws -> MinutesVersion {
+        try await store.saveUserMinutesEdit(
+            sessionID: sessionID, editingMinutesID: editingMinutesID, body: body
+        )
+    }
+
+    /// 撤销一次编辑：拿回上一版正文，另存一版（MA-11 / MC-47）。
+    public func undoMinutesEdit(minutesID: String) async throws -> MinutesVersion? {
+        try await store.undoMinutesEdit(minutesID: minutesID)
+    }
+
+    /// 这一版是从哪一版改来的（MA-11 / MC-48）。
+    public func minutesEditLineage(minutesID: String) async throws -> [MinutesVersion] {
+        try await store.minutesEditLineage(minutesID: minutesID)
+    }
+
     /// 会议详情快照（MA-12 / MC-50）。一次读取、整体提交：
     /// 纪要、转录与条目同源，不分三次到齐再拼。
     public func meetingReviewSnapshot(documentID: String) async throws -> MeetingReviewSnapshot? {

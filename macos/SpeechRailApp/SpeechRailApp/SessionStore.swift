@@ -5748,7 +5748,7 @@ extension SessionStore {
         WHERE 1 = 1 \(predicate.sql)
         ORDER BY COALESCE(d.occurred_at, d.created_at) DESC, d.id ASC
         """
-        let pageRows = try withStatement("SELECT d.id, d.title, d.occurred_at, d.project_id, d.deleted_at \(from) LIMIT ? OFFSET ?;")
+        let pageRows = try withStatement("SELECT d.id, d.source_session_id, d.title, d.occurred_at, d.project_id, d.deleted_at \(from) LIMIT ? OFFSET ?;")
         { statement -> [MeetingLibraryRow] in
             var index: Int32 = 1
             for value in predicate.bindings {
@@ -5759,12 +5759,13 @@ extension SessionStore {
             bind(statement, index + 1, max(0, offset))
             var rows: [MeetingLibraryRow] = []
             while try step(statement) == SQLITE_ROW {
-                let deletedAtNull = columnIsNull(statement, 4)
+                let deletedAtNull = columnIsNull(statement, 5)
                 rows.append(MeetingLibraryRow(
                     id: columnText(statement, 0) ?? "",
-                    title: columnText(statement, 1) ?? "未命名会议",
-                    occurredAt: columnIsNull(statement, 2) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 2)),
-                    projectID: columnText(statement, 3),
+                    sessionID: columnText(statement, 1),
+                    title: columnText(statement, 2) ?? "未命名会议",
+                    occurredAt: columnIsNull(statement, 3) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 3)),
+                    projectID: columnText(statement, 4),
                     projectName: nil,
                     // 归档与删除都在 meeting_document 上留 deleted_at；
                     // 读出来的那一刻已经分不出是哪一种，所以这里只报"不可用"，

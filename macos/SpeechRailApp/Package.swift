@@ -144,6 +144,10 @@ let package = Package(
                 // 会议知识库列表与详情（MA-12）：选中代次守卫在模型层，视图只负责画。
                 "MeetingLibraryModel.swift",
                 "MeetingKnowledgeLibraryView.swift",
+                // 纪要核对的编辑状态（MA-11）：草稿、失败态与快捷键策略在模型层，
+                // 视图只负责画。
+                "MinutesReviewModel.swift",
+                "MinutesReviewView.swift",
             ]
         ),
         // 确定性回放 runner：只读仓库外 manifest，输出脱敏聚合结果。

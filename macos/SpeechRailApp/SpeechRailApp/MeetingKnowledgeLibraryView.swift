@@ -18,7 +18,13 @@ struct MeetingKnowledgeLibraryView: View {
     /// 翻页位置。冷启动直接打开某场会议（MC-48）时靠它回到原来的位置。
     @AppStorage("meetingLibraryOffset") private var restoredOffset = 0
 
+    private let coordinator: SessionCoordinator
+    /// 正在核对的那一场。nil = 只读浏览，不开编辑器。
+    @State private var reviewTarget: MeetingReviewSnapshot?
+    @State private var reviewVersion: MinutesVersion?
+
     public init(coordinator: SessionCoordinator) {
+        self.coordinator = coordinator
         _model = State(initialValue: MeetingLibraryModel(coordinator: coordinator))
     }
 
@@ -27,6 +33,9 @@ struct MeetingKnowledgeLibraryView: View {
             listColumn
         } detail: {
             detailColumn
+        }
+        .sheet(item: $reviewTarget) { target in
+            reviewSheet(target)
         }
         .task {
             if model.rows.isEmpty {
@@ -220,6 +229,40 @@ struct MeetingKnowledgeLibraryView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// 核对视图。拿不到这一场的会话 id 时不开编辑器——只读浏览仍然可用。
+    @ViewBuilder
+    private func reviewSheet(_ target: MeetingReviewSnapshot) -> some View {
+        if let version = reviewVersion {
+            MinutesReviewView(
+                coordinator: coordinator,
+                sessionID: version.sessionID,
+                version: version,
+                onAdopt: { _ in
+                    await model.reload()
+                    return true
+                }
+            )
+            .speechRailInspectorColumn()
+        } else {
+            ContentUnavailableView(
+                "这一场没有可核对的纪要",
+                systemImage: "doc.text",
+                description: Text("可以先在会议助手页整理出纪要，再回来核对。")
+            )
+            .speechRailInspectorColumn()
+        }
+    }
+
+    private func beginReview(_ snapshot: MeetingReviewSnapshot) async {
+        guard let sessionID = model.selectedSessionID else { return }
+        guard let version = try? await coordinator.currentMinutesVersion(sessionID: sessionID) else {
+            // 这一版没有纪要就不开编辑器——只读浏览仍然可用。
+            return
+        }
+        reviewVersion = version
+        reviewTarget = snapshot
+    }
+
     @ViewBuilder
     private func minutesSection(_ snapshot: MeetingReviewSnapshot) -> some View {
         if let body = snapshot.minutesBody, !body.isEmpty {
@@ -227,7 +270,8 @@ struct MeetingKnowledgeLibraryView: View {
                 .font(.body)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
+            Button("核对与修改") { Task { await beginReview(snapshot) } }
+                .padding(.top, SpeechRailDesignTokens.Spacing.sm)
             Text("这场会还没整理出纪要。下面是转录里有的内容。")
                 .font(.callout)
                 .foregroundStyle(.secondary)

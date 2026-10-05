@@ -55,6 +55,11 @@ public final class MeetingLibraryModel {
 
     public var hasMore: Bool { offset + rows.count < counts.total }
 
+    /// 当前选中那一场的会话 id。核对视图要靠它找到"当前该看哪一版"。
+    public var selectedSessionID: String? {
+        rows.first { $0.id == selectedDocumentID }?.sessionID
+    }
+
     /// 冷启动直接打开某场历史纪要（MC-48）。没服务也能读：全部走本地库。
     public func open(documentID: String) async {
         selectedDocumentID = documentID

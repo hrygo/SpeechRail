@@ -4677,6 +4677,8 @@ public enum MeetingLibraryStatus: String, Hashable, Sendable {
 /// 列表行。**不含正文**：列表只用来定位，正文另读一次。
 public struct MeetingLibraryRow: Identifiable, Hashable, Sendable {
     public var id: String
+    /// 采集会话。可空：导入的纪要允许没有会话（MC-68），不伪造"录过音"。
+    public var sessionID: String?
     public var title: String
     public var occurredAt: Date?
     public var projectID: String?
@@ -4689,10 +4691,12 @@ public struct MeetingLibraryRow: Identifiable, Hashable, Sendable {
     public var openActionCount: Int
 
     public init(
-        id: String, title: String, occurredAt: Date?, projectID: String?, projectName: String?,
-        status: MeetingLibraryStatus, hasMinutes: Bool, needsReviewCount: Int, openActionCount: Int
+        id: String, sessionID: String? = nil, title: String, occurredAt: Date?, projectID: String?,
+        projectName: String?, status: MeetingLibraryStatus, hasMinutes: Bool,
+        needsReviewCount: Int, openActionCount: Int
     ) {
         self.id = id
+        self.sessionID = sessionID
         self.title = title
         self.occurredAt = occurredAt
         self.projectID = projectID
@@ -4739,7 +4743,9 @@ public struct MeetingLibraryPage: Sendable {
 /// 一次详情读取的结果。**整体提交，不分片回填**（MA-12 / MC-50）：
 /// 纪要、转录和条目必须来自同一次读取；分三次到齐再拼，
 /// 中间那一瞬用户看到的是"有标题没内容"的半成品。
-public struct MeetingReviewSnapshot: Sendable {
+public struct MeetingReviewSnapshot: Identifiable, Sendable {
+    public var id: String { documentID }
+
     public var documentID: String
     public var title: String
     public var occurredAt: Date?
