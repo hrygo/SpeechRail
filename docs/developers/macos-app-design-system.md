@@ -2,8 +2,8 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.11.0"
-date: 2026-09-28
+version: "0.11.1"
+date: 2026-10-05
 ---
 
 # SpeechRail macOS App 设计系统与 Token
@@ -459,6 +459,7 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 
 | 范围 | 实际结果 | 验证时间 |
 |---|---|---|
+| 提词器候选段落编辑器高度 Token（2026-10-05） | 候选段落编辑器单段最小高度取 `SpeechRailDesignTokens.Teleprompter.preparedBlockEditorMinHeight`（144pt），与原稿编辑器同级的可读写作空间；无新增自绘视觉，布局语义见 AI 提词器开发说明。`swift test --package-path macos/SpeechRailApp` 通过；桌面视觉走查未做 | 2026-10-05 |
 | 提词器舞台分光镜镜像与景深对比度优化（2026-10-01） | 围绕主播镜头前阅稿和物理提词玻璃场景优化。①**分光镜水平镜像模式**：`stageBase` 接入 `.scaleEffect(x: settings.isMirrored ? -1 : 1, y: 1)`，支持 `⌘⌥M` 键盘快捷键与显示设置 Popover 开关，用户偏好持久化。②**当前行景深与层级对比度**：已读行不透明度收缩至 `stagePastLineOpacity` (0.32)，未读行调至 `stageNextLineOpacity` (0.55)，当前行保持 1.0 加细窄导轨，拉大层次对比，暗光与半透明下焦点更聚拢。③**平滑眼动滚动动效**：`TeleprompterStageMotionPolicy` 采用 `.timingCurve(0.2, 0.0, 0.1, 1.0, duration: 0.28)`，兼顾流畅性与 Reduce Motion 兜底。新增 2 项 Token（`stagePastLineOpacity`、`stageNextLineOpacity`），复用既有组件。`swift test --package-path macos/SpeechRailApp --filter Teleprompter` 375 项全部通过（新增 1 项镜像偏好单测）。**未做 UI 自动化测试与真人视觉走查** | 2026-10-01 |
 | 提词器工作台降干扰与目标时长归属（2026-10-01） | 走查后按「加工稿直接给终稿、机制自述不占首屏」收敛四处。①**目标时长改为稿件级持久化**：新增 `TeleprompterV2Document.targetMinutes`（`target_minutes`），定值只发生在 `TeleprompterSession.resolveTargetMinutes(stored:)`，由 `applyV2Bundle` 与两个 `createDocument` 入口调用；视图不再在 `.onChange(of: session.document?.id)` 里替会话做决定——切页再回来文档 ID 未变、`onChange` 不触发，`targetMinutes` 会停在 `defaultTargetMinutes`（20），一份 200 字稿顶着「目标 20 分」。②**预填与预检同源**：`suggestedTargetMinutes` 在 `isUncertain` 时返回 nil，消除「无法预估」徽标旁却填着分钟数的自相矛盾。③**第二行降噪**：预检只留结论徽标，判断依据／计时试读／恢复默认语速收进一个以徽标为标签的菜单（`readingSetupMenu`），「计时试读」原有两处入口合一；就绪页表头的「读法标注」次级按钮移入文档「⋯」菜单，段落级「照念／只作提示／跳过」标签与起讲位置选择不变。④**删除重复与补齐动作**：`.prepared` 面板内那套与常驻底座处理器完全相同的「用这份稿／先试读／放弃」整块删除（`⌘⏎` 只挂底座一处，同屏两个会冲突）；AI 整理回退横幅改说「没能连上 AI 整理服务（最常见的原因是短时间内请求太频繁）」并带「再整理一次」。全部复用既有 `Spacing`/`Typography`/`StatusPill`/`SpeechRailButtonIcon`/`.speechRailButton` 与 `.menuStyle(.borderlessButton)`，未新增 Token。`swift test --package-path macos/SpeechRailApp` 374 项 / 16 套件通过（新增 3 条：目标时长跨重载、按原稿估算兜底、估不准不给建议）。**未做 VoiceOver 朗读与窄窗布局复核** | 2026-10-01 |
 | 语音助手失败可见与记录切换（2026-09-30） | 用户报「说话后识别文字立即消失、不进 LLM/TTS」与「对话记录切换卡顿」。前者根因三处叠加：`commitUserTurn` 先清 `partialText` 再 `guard` 空文本、空 `partial` 的 `partialSnapshot` 会清屏、`AssistantView` 从不渲染 `lastFailure`（会议／字幕／提词器都渲染了）。改为：识别片段按 `item` 归属，迟到事件只报告失败不再清当前句；空 final 且这一轮确实说过话时保留它并提示「这一句没能识别完整，请再说一次。」（以 `status: .partial` 落库，对话流与库里可见，记录库句数与导出口径不变，刻意不进 LLM/TTS）；新增 `clearFailure()` 与失败提示条，放在打字失败提示旁，用既有 `NoticeBar`（`warning` + 「知道了」）。后者把 `openRecord` 的 4 次串行库读 + 4 处独立 `@State` 收成 `SessionReviewSnapshot` 一次读、一次赋值，翻记录一次到位。**未新增任何视觉 Token**，全部复用既有 `NoticeBar` 与 `SpeechRailDesignTokens`。`scripts/macos_app_test.sh`（仅 `SpeechRailAppTests` 单测 target）374 项 0 failures / exit 0；`swift test --package-path macos/SpeechRailApp` 395 tests / 16 suites 通过；`scripts/macos_app_build.sh --configuration Release` BUILD SUCCEEDED。方案 §7 的「离屏渲染断言提示文案」经实测判定在本 target 不可行（无 `TEST_HOST`，`NSHostingView` 不建无障碍树，探针实测 `accessibilityChildren()` 为 0），故「提示真的出现在屏幕上」归入真机走查。**未做桌面视觉走查、VoiceOver、Reduce Motion 与 UI 自动化；未安装 App；卡顿未做 Instruments 测量，列表行隔离重绘因此未实施** | 2026-09-30 |
