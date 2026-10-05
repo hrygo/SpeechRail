@@ -11,7 +11,7 @@ base: "origin/main @ dab047b2"
 
 ## 范围
 
-分支共 65 个提交（本轮九个增量）。
+分支共 66 个提交（本轮九个增量 + 一条交付说明更正）。
 
 > **下面这段范围描述只涵盖最早的 M0**，当时确实"只动纪要版本链、结束封存上报与
 > 知识检索语义，不做 schema 迁移、不改表结构、不碰采集链路"。
@@ -109,6 +109,7 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 | （同上，第七处） | **检索只给会议名，不给证据**。验收 4 是"返回对应会议**与证据**"，上一条把"会议"接通了，`excerpt` 却仍无消费者——搜出一场会，用户还是不知道命中在哪句话上。已接上：行内显示命中的原话，转录原话优先于纪要正文，标题命中不硬凑 | 实测（回归测试红/绿反证；两条"不过度生成"护栏用例全程绿） |
 | （同上，第十五处，紧接上一节的粒度） | **MC-43 的粒度是错的**：验收要"只选择其中**一句** → 只**该句**进入 source snapshot"，而 `in_minutes` 是整条问答的布尔旗标，快照收的是整段 `answer_text`。用户想只留半句留不下，不想让另一半进纪要也拦不住。已升 schema v13 加 `minutes_excerpt`，读侧与 **prompt 侧同时**改（只改快照不够——纪要从 prompt 生成，prompt 仍拿整段就等于没选的那半句被偷偷用了一次），抽屉加一层逐句勾选（默认全选） | 实测（回归测试红/绿反证，7 项；方案缺陷表 F06 记的就是这件事） |
 
+| （同上，第十六处，**更正本分支自己写错的一条**） | **「MC-05～MC-08 未端到端、`MeetingSession` 是 App-only、测试调用生产 `MeetingSession` 尚未达成」——这条是错的。** 当时写的理由是 `MeetingSession` 依赖 AppKit/CoreAudio/`NSWorkspace`、不在 SPM 目标内；实测 `MeetingSession.swift` 在 `Package.swift:167` 目标内，只 import Foundation/Observation/SpeechRailControlKit。`MeetingSessionLifecycleTests` **直接构造并驱动生产 `MeetingSession`**，19 项全过：MC-05 `testStartSuspendedAtConnectCannotResurrectAfterTheSessionEnded`、MC-06 `testLateStartOfSessionACannotStealSessionBsIdentity`、MC-07 `testOnlyTheNewestConnectionKeepsUpstreaming`、MC-08 `testConnectFailureReleasesEverythingAndLeavesNoBlankRecord` + `testCaptureFailureDoesNotPretendItStarted`；MC-04 的「输入原样保留、来源不被重置」由 `testTitleAndSelectionSurviveAFailedStart` / `testRepeatedFailuresKeepTheTitle` 钉住 | 实测（2026-10-06 跑 `swift test --filter MeetingSessionLifecycleTests`，19/19 通过 + 逐个读测试体确认驱动的是生产类型）。**残留的真实细节**：MC-05 原文的闸门是"麦克风授权/能力检查"，测试用的可暂停闸门是 **ASR 建连**——麦克风权限在本架构里以采集失败（`MeetingAudioBlocked(reason: .microphoneDenied)`）呈现，由 MC-08 那条覆盖。断的是同一个后果，不是同一个闸门位置。同一批复查还推翻了 `MinutesGenerator` / `SpeakerLabeling` 的 App-only 说法（两者均已进目标）；`AudioSourceCoordinator` 与 `MeetingView.swift` 仍是 App-only，这条复核后仍成立 |
 | （同上，第十四处，本轮关闭总账第 14 条） | **MA-14 这一整块此前全部没有入口**：`recordExecutionEvent` / `executionState` / `conflictingDecisions` / `confirmSupersession` / `knowledgeChangeProposals` / `executionEvents` 六个 API 在生产代码里**零消费方**。用户标过的"已完成"、跨会议的两处矛盾、重新生成换掉了哪条结论、一条承诺是怎么变成今天这样的——全部只存在于库里 | 实测（沿六个 API 逐个回查消费方） | 四个提交分四轮接进库页：行动生命周期读写两侧、跨会议结论冲突、详情里的「这一版可能变了什么」、未完成事项里的「变更历史」。每轮都修了同一处的自相矛盾（详见各节）。**总账第 14 条到此关闭** |
 | （同上，第十三处） | **MC-56「列出全部未完成事项」没有入口**。`SessionStore.knowledgeItems(filter:scope:limit:offset:)` 早已能算结构化投影并给出分页计数，但 `KnowledgeItemFilter` 里**没有"未完成"这个条件**，`SessionCoordinator` 没有透传，库页没有入口——`knowledgeItems` 在生产代码里零消费方。用户只能一场一场点开，凭记忆拼自己那份待办清单。已补 `openOnly`、协调器透传、库页「未完成事项」面板与全量计数 | 实测（沿 `knowledgeItems` 回查消费方发现 + 红/绿反证） | 顺带修掉一个**同源的旧缺陷**：`counts.total` 取的是过滤**前**的行数，于是 `needsReview`/`byKind` 会随条件变、总计不会——正是验收里"只返回 top10 却称全部"最可能的成因。现在计数与列表取自同一批行 |
 
@@ -1411,22 +1412,22 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 ### 关键取舍
 
 - **conformance 放在 `MeetingSession.swift` 而非协议文件**：`AudioSourceCoordinator`
-  是 App-only、不在 SPM 目标内，协议与值类型留在目标内，conformance 跟着 App-only
-  实现走。生产默认值 `MeetingSessionDependencies.production` 同理。
+  是 App-only、不在 SPM 目标内（2026-10-06 复核仍成立），协议与值类型留在目标内，
+  conformance 跟着 App-only 实现走。生产默认值 `MeetingSessionDependencies.production` 同理。
 - 协议**不覆盖"以后可能用到"的成员**。会议侧刻意没有 TTS。
 - 代次守卫做成独立值类型而不是 `MeetingSession` 上的裸 `Int`：它因此能被
   在无界面环境下穷举验证，而"旧票永不复活"这类性质裸 Int 是测不出来的。
 
 ### 未验证事项与已知边界
 
-- **MA-01 的验收场景（MC-05～MC-08：启动期间结束、两次重连、旧设备回调）
-  尚未端到端跑过。** 原因是硬的：`MeetingSession` 依赖 AppKit / CoreAudio /
-  `NSWorkspace`，是 App-only 文件，不在 SPM 目标内；把它拉进 SPM 会连带
-  `AudioSourceCoordinator`、`RealtimeASRClient`、采集辅助进程一整串，
-  远超本里程碑范围。本轮交付的是**接缝本身与其不变量**，
-  接上真实 `MeetingSession` 的场景级回归仍缺。
-- 因此"测试调用生产 MeetingSession"这条**尚未达成**——现在能被测试替换的是
-  接缝两侧的假实现，不是编排层本身。
+- ~~**MA-01 的验收场景（MC-05～MC-08）尚未端到端跑过**~~ **这条记错了，
+  已关闭（2026-10-06 实测推翻，见下方总账更正条目）**。当时写的理由是
+  "`MeetingSession` 依赖 AppKit / CoreAudio / `NSWorkspace`，是 App-only 文件，
+  不在 SPM 目标内"——**理由不成立**：`MeetingSession.swift` 在 `Package.swift`
+  目标内（第 167 行），只 import Foundation / Observation / SpeechRailControlKit，
+  没有任何 AppKit 依赖。`RealtimeASRClient` 也已进目标；真正仍是 App-only 的是
+  `AudioSourceCoordinator` 与视图层（`MeetingView.swift`）。
+  驱动生产 `MeetingSession` 的场景级回归见下方「让生产 `MeetingSession` 被单测驱动」一节。
 - 假实现的 `events()` 不会产出任何事件，**没有**用它验证过事件到达路径；
   事件路径的代次丢弃只经过代码审查，未经运行验证。
 - 时钟已可注入，但**转录时间证据的断言仍未写**；抽时钟是为那一步铺路。
@@ -1485,7 +1486,9 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 
 - **账本的事件路径未运行验证**：接线已通过类型检查，但没有任何测试真的
   把 `partialSnapshot(revision:)` 之类的事件喂进 `MeetingSession`。
-  MC-09～MC-13 的断言落在账本这一层，端到端仍缺（同 MA-01 的 App-only 限制）。
+  MC-09～MC-13 的断言落在账本这一层。同 MA-01 那条"App-only 限制"的说法**已不成立**
+  （`MeetingSession` 在 SPM 目标内），此处保留原样是因为**这些用例本身还没写**，
+  与 App-only 无关。
 - ~~**MC-15 未做**~~ → 已在下方「观测时间与声学起止分开」补齐。
 - **MC-16 的界面侧由 MA-10 覆盖**（静音/暂停/恢复三态分离），但
   "暂停前后不拼句、停记区间可追溯"在**落库层**未做断言。
@@ -1667,10 +1670,12 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 
 ### 证据类型说明
 
-`MinutesGenerator` 与 `SpeakerLabeling` 是 App-only 文件、不在 SPM 目标内，
-所以"纪要不收恢复材料"这条**调用点本身是代码审查确认的**
-（三处 `coordinator.lines(sessionID:)` 均用默认参数），而测试证明的是它
-依赖的那条**库层契约**。这两者不是一回事，不合并陈述。
+~~`MinutesGenerator` 与 `SpeakerLabeling` 是 App-only 文件、不在 SPM 目标内~~
+**这条已过时（2026-10-06 复核：两者都在 `Package.swift` 目标内）**。
+写这一段时它们尚未进目标；现在可以直接驱动，证据等级已经提高。
+本段其余的判断不变：三处 `coordinator.lines(sessionID:)` 均用默认参数这一点
+仍是**代码审查确认**，测试证明的是它依赖的那条**库层契约**，
+这两者不是一回事，仍不合并陈述。
 
 ### 未验证事项与已知边界
 
@@ -3658,3 +3663,83 @@ prompt 侧断言 `MinutesGenerator.userSupplements` 的渲染结果。
   一条问答里挑了一句进纪要时，引文校验仍按整条问答的证据判定通过与否。
   本轮没有改它：校验的对象是"这条问答的引文说不说得上话"，
   与"用户挑了哪几句进纪要"是两个维度，混在一起会让引文校验失去意义。
+
+
+## 交付说明更正（第十六处）｜「MC-05～MC-08 未端到端」这条是错的，2026-10-06
+
+### 做了什么
+
+这一轮不写功能，改的是**交付说明本身的一处错误陈述**。
+
+总账与 PR 描述里长期写着：「MA-01 的验收场景 MC-05～MC-08 未端到端执行。
+`MeetingSession` 依赖 AppKit / CoreAudio / `NSWorkspace`，是 App-only 文件，
+不在 SPM 目标内；把它拉进 SPM 会连带一整串，超出本里程碑范围」，
+并据此断言「测试调用生产 `MeetingSession` 这条尚未达成」。
+
+**这条理由不成立。** 2026-10-06 实测：
+
+| 文件 | 在 `Package.swift` 目标内？ |
+|---|---|
+| `MeetingSession.swift` | 是（第 167 行） |
+| `RealtimeASRClient.swift` | 是 |
+| `MinutesGenerator.swift` | 是 |
+| `SpeakerLabeling.swift` | 是 |
+| `MeetingSourcePresentation.swift` | 是 |
+| `AudioSourceCoordinator.swift` | **否**（仍是 App-only，复核后成立） |
+| `MeetingView.swift` | **否**（视图层，仍是 App-only） |
+
+`MeetingSession.swift` 只 import Foundation / Observation / SpeechRailControlKit，
+**没有任何 AppKit 依赖**。而 `MeetingSessionLifecycleTests` 早就在
+`MeetingSession(coordinator:dependencies:)` 上**直接驱动生产 `MeetingSession`**
+（harness 见该文件 494 行），19 项全过。
+
+### 为什么这件事值得单独记一笔
+
+一条**低估**已完成工作的记录，危害和一条高估的记录是对称的：它让 reviewer
+以为 MC-05～MC-08 缺覆盖，从而跳过真正该看的地方；也让"未验证事项"这个
+清单失去可信度——而验收标准明确要求交付物「明确未验证事项」，一份把已证的事
+说成没证的清单，恰恰让这份声明不可用。
+
+本分支此前已经吃过同一种亏的镜像版本：总账第 15 条把「私密问答写进纪要」记成
+"写侧整条不存在"，实测推翻了。这一条是它的反方向，**同一个错误的两面**。
+
+### 回归证据（2026-10-06 实测）
+
+`swift test --package-path macos/SpeechRailApp --filter MeetingSessionLifecycleTests`
+→ **Executed 19 tests, with 0 failures**。逐条对应：
+
+- MC-05 `testStartSuspendedAtConnectCannotResurrectAfterTheSessionEnded`
+- MC-06 `testLateStartOfSessionACannotStealSessionBsIdentity`
+- MC-07 `testOnlyTheNewestConnectionKeepsUpstreaming`
+- MC-08 `testConnectFailureReleasesEverythingAndLeavesNoBlankRecord`
+  与 `testCaptureFailureDoesNotPretendItStarted`
+- MC-04「输入原样保留、来源不被重置」
+  `testTitleAndSelectionSurviveAFailedStart` / `testRepeatedFailuresKeepTheTitle`
+
+并逐个读过测试体，确认它们构造的是生产 `MeetingSession` 而不是替身。
+
+### 残留的真实细节（不要读成"完全等价"）
+
+MC-05 原文写的闸门是「**麦克风授权/能力检查**被 Gate 暂停」，而测试用的
+可暂停闸门是 **ASR 建连**。麦克风权限在本架构里不以闸门形式出现，而是以
+采集失败（`MeetingAudioBlocked(reason: .microphoneDenied)`）呈现，由 MC-08
+那条用例覆盖。所以断的是**同一个后果**（旧启动不得复活、不得建记录），
+不是同一个闸门位置。这一点记下来，避免下一个人把「MC-05 已覆盖」当成
+「麦克风授权弹窗那条路径也覆盖了」。
+
+另外 `MinutesGenerator` / `SpeakerLabeling` 的 App-only 说法同批被推翻
+（两者均已进目标，可直接驱动）；但文档里「纪要不收恢复材料」的**证据等级不变**——
+三处 `coordinator.lines(sessionID:)` 用默认参数这一点仍是代码审查确认，
+测试证明的是它依赖的库层契约，两者仍不合并陈述。
+
+### 迁移与回退
+
+无代码变更，无 schema 变更。仅更正文档陈述；回退即 revert 本次提交。
+
+### 未验证事项与已知边界
+
+- MC-09～MC-13 的**用例本身还没写**。原先它们被挂在"App-only 限制"这条
+  错误理由下面，理由没了，欠账还在：这些断言仍只落在账本层，没有场景级回归。
+  已把那条的措辞改成"缺的是用例，不是目标可达性"。
+- 仍然只有视图层（`MeetingView.swift`）是 App-only，所以纯界面的交互
+  依旧只能靠真机走查——计入总账第 1 条。
