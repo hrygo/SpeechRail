@@ -389,6 +389,67 @@ final class MeetingKnowledgeLibraryTests: XCTestCase {
         XCTAssertTrue(onlyA.rows.allSatisfy { $0.projectID == "p-a" })
     }
 
+    // MARK: - 项目与标签（MA-13 / MC-51、MC-53）
+
+    /// MC-51/MC-53：按项目筛完，**计数与列表仍然同源**。
+    ///
+    /// 这条以前只有"筛完剩 3 场"这种断言，翻页与待核对数对不对没人管。
+    /// 筛选菜单一接上，用户就会靠数字判断筛对没有，数字错了比筛错更糟。
+    func testProjectFilterKeepsCountsAndListInStep() async throws {
+        let store = try requireStore()
+        try await seedMeetings(6)
+        let first = try await store.meetingLibraryPage(projectID: "p-a", limit: 2, offset: 0)
+        let second = try await store.meetingLibraryPage(projectID: "p-a", limit: 2, offset: 2)
+
+        XCTAssertEqual(first.counts.total, 3)
+        XCTAssertEqual(first.rows.count, 2)
+        XCTAssertEqual(second.counts.total, 3, "翻到第二页，总数还是 3")
+        XCTAssertEqual(
+            first.counts.needsReview, second.counts.needsReview,
+            "筛选后待核对数不随翻页跳"
+        )
+        XCTAssertTrue(first.rows.allSatisfy { $0.projectID == "p-a" })
+        XCTAssertTrue(second.rows.allSatisfy { $0.projectID == "p-a" })
+        XCTAssertEqual(
+            Set((first.rows + second.rows).map(\.id)).count, 3,
+            "筛选后翻页不重复也不漏"
+        )
+    }
+
+    /// 标签要**看得见**。只写不读的标签等于没加——
+    /// 用户加完标签，下一次打开库页还是找不到自己分过类。
+    func testLibraryRowsCarryTheirTags() async throws {
+        let store = try requireStore()
+        let documentID = try await makeMeeting(
+            title: "要打标签的会", at: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        try await store.setDocumentTags(documentID: documentID, tags: ["季度规划", "招聘"])
+        try await store.setDocumentTags(documentID: documentID, tags: ["季度规划", "  ", ""])
+
+        let page = try await store.meetingLibraryPage()
+        let row = try XCTUnwrap(page.rows.first { $0.id == documentID })
+        XCTAssertEqual(row.tags, ["季度规划"], "空白标签不算标签，顺序稳定")
+    }
+
+    /// 归到项目之后，按项目筛要能把这场会筛出来——
+    /// 否则"归到项目"只是一个写进去没人读的动作。
+    func testAssigningProjectMovesTheMeetingIntoThatFilter() async throws {
+        let store = try requireStore()
+        let documentID = try await makeMeeting(
+            title: "刚归入项目的会", at: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        let project = try await store.createProject(name: "季度规划", id: "p-new")
+
+        let before = try await store.meetingLibraryPage(projectID: project.id)
+        XCTAssertEqual(before.counts.total, 0)
+
+        try await store.updateMeetingDocument(id: documentID, projectID: .some(project.id))
+
+        let after = try await store.meetingLibraryPage(projectID: project.id)
+        XCTAssertEqual(after.counts.total, 1)
+        XCTAssertEqual(after.rows.first?.projectName, "季度规划")
+    }
+
     // MARK: - MC-50：详情一次读取、整体提交
 
     func testSnapshotReadsMinutesTranscriptAndItemsTogether() async throws {

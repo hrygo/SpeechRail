@@ -80,9 +80,10 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 | 9 | 检索排序是会话时间倒序，无相关性打分（BM25 之类） | 沿用 | 多命中时顺序可能不是最优；不阻塞验收 |
 
 | 12 | **恢复（MA-20 / 验收 5）没有入口**：`restorePreview` / `verifyBackup` 生产代码零消费方 | 实测（同上） | 恢复预演现已接进设置页（见第三节第九处）。~~用户无法备份~~ **上一版这条写错了，见下方更正条目**：备份按钮一直存在 |
-| 13 | **标签（MA-13）与项目没有入口**：`documentTags` / `setDocumentTags` / `documentTagsInProject` / `createProject` / `renameProject` 零消费方；`MeetingLibraryModel.filter(projectID:)` 本身也没有调用方 | 实测（同上 + 读库页视图） | 库页视图的文档注释写着"高级操作（标签、项目、删除、导出）留在更多菜单"，四项里此前只有"删除"存在。知识沉淀这条闭环在用户侧没有落点 |
+
 | 14 | **执行状态与决策演进（MA-14）没有入口**：`executionEvents` / `recordExecutionEvent` / `executionState` / `confirmSupersession` / `conflictingDecisions` / `knowledgeChangeProposals` 零消费方 | 实测（同上） | 决策演进链只能在库里看。**本条上一版写错了**：当时把 `meetingSupplements` 也归到"用户补充"，那是两回事——它读的是 `inner_os_exchange`（私密问答），对应验收 4 的「私密问答默认不进入纪要」与 MC-43，不是验收 2 的第四档来源。验收 2 的「用户补充」已单独处理，见第三节第十一处 |
 | 15 | **私密问答的「加入纪要」没有入口**：`meetingSupplements(snapshotID:)` 零消费方。读侧齐备，写侧（用户从私密问答里选一句加入补充）整条不存在 | 实测（读 `meetingSupplements` 实现 + `grep user_supplement` 全仓无字面量） | 方案 §583 要求「加入纪要的补充说明」显式化并真正进入快照输入；MC-43 要求只该句进入 source snapshot 且不升级为会议事实。本轮补的是**用户自己写的**补充（验收 2 第四档），**从私密问答里选**那条 MC-43 仍未做 |
+| 16 | **MC-56「列出全部未完成事项」没有入口**：结构化的决定/行动/未决投影已有 store 实现（`knowledgeItems` + 分页），但库页没有这个视图，也没有跨会议的事项清单 | 实测（`knowledgeItems` 有消费方，视图层无） | 方案 MA-13 明确"全部事项和计数走结构化分页查询；不把检索 top-k 当全量"。当前用户只能一场一场点开看 undone |
 
 
 ### 三、本轮查证后判定为**已关闭**（此前记为未做，实为误判或过时）
@@ -98,6 +99,7 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 | （此前未被发现） | **验收 3 的触发路径是断的**：改来源有四条路径（改名/合并/标记「我」/拆出），写完 `speaker_revision` 都不重算复核状态，"需复核"要等下一次整理或重开才出现。已加 `SpeakerLabeling.onSourceRevision` 接上 `minutes.reload` | 实测（沿界面消费点回查生产者发现 + 回归测试红/绿反证） |
 | （同上，第四节补记） | **拆出改了归属却不提示复核**。已在 `SpeakerLabeling.split` 这一层单独记归属修订，并加测试守住「实时对齐写归属不得被当成用户改来源」 | 实测（回归测试红/绿反证） |
 | （此前未被发现，第六处） | **全文检索做完了，搜索框却够不着**：MA-15 交付了 `knowledge_fts` + `searchKnowledgeFullText`（14 项测试全绿），但库页谓词只 LIKE 标题与项目名，`excerpt` 无任何消费者，生产代码里唯一调用者是 `SessionCoordinator` 透传——**整条 MA-15 通路没有界面入口**。已把正文检索接进 `libraryPredicate` | 实测（沿 `excerpt` 消费者回查发现 + 回归测试红/绿反证；方案 §10.1 / MC-54 / MC-75 / 第 118 行均要求检索入口） |
+| （同上，第十二处） | **标签与项目（MA-13）在用户侧没有落点**：`documentTags` / `setDocumentTags` / `documentTagsInProject` / `createProject` / `renameProject` / `projects` 零消费方，`MeetingLibraryModel.filter(projectID:)` 本身也没有调用方——**连项目筛选菜单都不存在** | 实测（同上 + 读库页视图；方案 MA-13 实施条要求"项目、标签、会议发生时间可人工编辑"） | 已接进库页：项目筛选、新建、改名、把某场归入/移出项目、标签编辑，且**标签在列表行里看得见**。仍缺 MC-56 的"列出全部未完成事项"结构化分页查询，见第 16 条 |
 | （同上，第十一处） | **验收 2 的第四档来源产不出来**。`MinutesBodyOrigin.userSupplement` 有枚举、有标题「你补充」、被 `isUserAuthored` 收录、复核界面还会渲染「这段是你补充的」——但 `user_supplement` 这个字面量**全仓不存在**，没有任何代码路径写得进去。四档来源里最后一档是空的。已补 `saveUserSupplement` 与复核面板的「补充说明…」 | 实测（`grep user_supplement` 零命中；红/绿反证：出处一放开就退化成 `userEdited`，正是那条失败形态） |
 | （同上，第十处） | **归档包往返（MA-19）没有入口**：`exportKnowledgeArchive` / `previewKnowledgeArchive` / `importKnowledgeArchive` 生产代码零消费方。store 层 22 项测试（往返、冲突、幂等、路径穿越、执行状态）全绿，却没有一条路通向用户 | 实测（同上 + 读 `MeetingKnowledgeArchiveTests` 确认覆盖的是 store 层） | 已接进库页：导出归档包（完整归档／分享包分开）与导入（先预检、有真冲突不给导入按钮）。**新补的是 model 层测试**——store 那 22 项全都自己构造 `KnowledgeArchiveSelection`，"谁来填 minutesID"替换掉不会有一条变红 |
 | （同上，第九处，并更正第 12 条） | **App 能做出的备份，App 自己恢复不了**。设置页「备份记录库」调的是 `backup(to:)`——`VACUUM INTO` 出来的**单个 .sqlite3**，没有 `manifest.json`；而恢复只认「目录 + 库文件 + 清单」，缺清单明确拒绝。用户照着 App 的按钮做完备份，恢复不了自己刚做的那份。上一版总账把它误记成"备份没有入口"，是错的：按钮一直在，坏的是它产出的东西。已改走 `exportBackup(to:)`，并新增恢复预演入口 | 实测（沿 `backup(to:)` 与 `restorePreview` 两条生产路径对读发现；新用例从生产路径出发做红/绿证明，不是手工拼目录） |
@@ -2990,3 +2992,71 @@ store 那 22 项测试全都**自己构造** `KnowledgeArchiveSelection`。
 - 出处的粒度仍然是**按版本**。一个版本里 AI 正文与用户补充并存时，
   徽标显示「你补充」——与「你改过」同样的取舍：粒度粗，但诚实标出
   用户实质参与过这一版。
+
+## M1 增量：项目与标签接进库页（MA-13）
+
+### 做了什么
+
+总账第 13 条记的是「标签与项目没有入口」。这一节接上——接的时候先量了一下范围：
+**连项目筛选菜单都不存在**。`projects()`、`createProject`、`renameProject`、
+`documentTags`、`setDocumentTags` 全部零消费方，`MeetingLibraryModel.filter(projectID:)`
+本身也没有调用方。也就是说 MA-13 实施条里的「项目、标签、会议发生时间可人工编辑」，
+前两项在用户侧一个字都落不了。
+
+**项目**：库页搜索框下方加筛选菜单——全部项目 / 各项目 / 新建项目 / 管理项目。
+菜单标题显示当前筛在哪儿（"季度规划"或"全部项目"），否则用户不知道为什么列表少了。
+详情「更多」里加「归到项目…」：不归项目 / 各项目 / 新建项目。
+管理面板支持改名。
+
+**标签**：详情「更多」里加「标签…」，顿号或逗号分隔。**标签在列表行里显示**——
+只写不读的标签等于没加，用户加完标签下一次打开库页还是找不到自己分过类。
+
+### 几条不肯让步的地方
+
+- **筛选与列表、计数同源**（MC-51/MC-53）。切一下筛选，标题旁的"共 N 场"
+  立刻跟着变；翻页时总数与待核对数都不跳。用户是靠数字判断筛对没有的，
+  数字错了比筛错更糟。
+- **项目名与标签不自动补全、不给建议**。方案 MA-13 写明「导入/生成不猜项目归属」，
+  标签同理——用户想到什么就写什么，程序不替他归类。
+- **没有"删除项目"**。方案没要求，库层也没有那个 API。凭空加一个要么丢会议、
+  要么留一堆孤儿，都不该顺手做。管理面板因此只有改名。
+- `projectError` 对界面**只读**，要清得走 `clearProjectError()`——
+  界面能随手清掉失败原因，提示与真实状态就分家了。
+
+### 回归证据（2026-10-06）
+
+`MeetingKnowledgeLibraryTests` 26 项全绿，新增三条：
+
+- `testProjectFilterKeepsCountsAndListInStep`：筛完翻两页，`counts.total` 都是 3、
+  待核对数不跳、行不重复不漏。此前只有"筛完剩 3 场"这种断言，
+  翻页与待核对数对不对没人管——筛选菜单一接上，用户就会靠这些数字判断。
+- `testLibraryRowsCarryTheirTags`：标签出现在行上，空白标签不算标签、顺序稳定。
+  **红/绿反证已核对**——把批量标签查询改成直接返回空之后该用例变红，
+  报的是 `[]` ≠ `["季度规划"]`。那就是"只写不读"的样子。
+- `testAssigningProjectMovesTheMeetingIntoThatFilter`：归入项目后按项目筛要能把这场
+  会筛出来，否则"归到项目"只是一个写进去没人读的动作。
+
+全量 `swift test --package-path macos/SpeechRailApp`：XCTest **1052 项**
+（上一节 1049 +3）+ Swift Testing **419 项**，零失败。
+`./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+`python3 scripts/check_macos_test_target_coverage.py`：**OK**。
+
+### 迁移与回退
+
+- **无 schema 变更**。`meeting_project` 与 `meeting_document_tag` 两张表早已存在，
+  本轮只是第一次有用户能写它们。
+- 回退：删掉库页的项目菜单、标签面板、管理面板与模型上的对应方法即可；
+  `MeetingLibraryRow.tags` 去掉、两处赋值去掉即可。
+- 标签按文档批量取（一次 `IN` 查询），不在行循环里逐个查——一页 50 场
+  否则就是 50 次查询。
+
+### 未验证事项与已知边界
+
+- **整个项目/标签界面没有在真机走过**（无 UI 自动化授权）：菜单排版、
+  标签行的显示密度、TextField 的输入法行为都只是读代码推断。
+- **MC-56「列出全部未完成事项」仍未做**（总账第 16 条）。方案 MA-13 明确
+  「全部事项和计数走结构化分页查询；不把检索 top-k 当全量」——
+  store 层的 `knowledgeItems` 分页已有，但库页没有这个视图，
+  用户仍然只能一场一场点开看没做完的事。这是 MA-13 剩下的部分，不算完成。
+- 筛选**一次只选一个项目**。跨项目合并视图（"所有项目下全部未完成"）
+  属于 MC-56 那一节，本轮没做。

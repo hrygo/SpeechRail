@@ -29,6 +29,17 @@ struct MeetingKnowledgeLibraryView: View {
     @State private var pendingDeletion: PendingDeletion?
     /// 导出失败时要说的那一句。`nil` = 没有失败，没有理由弹一个空面板。
     @State private var exportError: String?
+    /// 新建项目的输入。空串 = 没打开面板。
+    @State private var projectNameDraft = ""
+    @State private var newProjectPromptPresented = false
+    /// 正在改名的项目。nil = 没打开。
+    @State private var renameTarget: MeetingProject?
+    @State private var renameDraft = ""
+    /// 标签编辑。逗号或顿号分隔。
+    @State private var tagDraft = ""
+    @State private var tagsSheetPresented = false
+    /// 项目管理面板（改名）。没有删除——方案没要求，库层也没有那个 API。
+    @State private var manageProjectsPresented = false
     /// 归档包导入前的预检结果。**没看过它就不许导入**（MC-71）。
     @State private var archivePreview: ArchiveImportPreview?
     /// 导入完成后的实数。`nil` = 还没导。
@@ -111,10 +122,46 @@ struct MeetingKnowledgeLibraryView: View {
         .sheet(item: $archiveImportResult) { report in
             archiveImportSheet(report)
         }
+        .alert("新建项目", isPresented: $newProjectPromptPresented) {
+            TextField("项目名", text: $projectNameDraft)
+            Button("取消", role: .cancel) {}
+            Button("新建") {
+                let name = projectNameDraft
+                Task { _ = await model.createProject(named: name) }
+            }
+        } message: {
+            Text("项目是你自己分的，导入和生成都不会替你猜。")
+        }
+        .alert("项目改名", isPresented: Binding(
+            get: { renameTarget != nil },
+            set: { if !$0 { renameTarget = nil } }
+        )) {
+            TextField("项目名", text: $renameDraft)
+            Button("取消", role: .cancel) { renameTarget = nil }
+            Button("保存") {
+                guard let project = renameTarget else { return }
+                let name = renameDraft
+                renameTarget = nil
+                Task { await model.renameProject(id: project.id, to: name) }
+            }
+        } message: {
+            Text("改名只改显示，归属这场会议的项目不变。")
+        }
+        .alert("项目或标签没改成", isPresented: Binding(
+            get: { model.projectError != nil },
+            set: { if !$0 { model.clearProjectError() } }
+        )) {
+            Button("好", role: .cancel) { model.clearProjectError() }
+        } message: {
+            Text(model.projectError ?? "")
+        }
+        .sheet(isPresented: $manageProjectsPresented) { manageProjectsSheet }
+        .sheet(isPresented: $tagsSheetPresented) { tagsSheet }
         .task {
             if model.rows.isEmpty {
                 await model.loadPage(offset: restoredOffset)
             }
+            await model.loadProjects()
         }
     }
 
@@ -158,6 +205,7 @@ struct MeetingKnowledgeLibraryView: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
             searchField
+            projectMenu
             HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                 archivedToggle
                 Spacer()
@@ -170,6 +218,32 @@ struct MeetingKnowledgeLibraryView: View {
         .padding(.horizontal, SpeechRailDesignTokens.Layout.contentPadding)
         .padding(.top, SpeechRailDesignTokens.Spacing.md)
         .padding(.bottom, SpeechRailDesignTokens.Spacing.sm)
+    }
+
+    /// 项目筛选（MA-13）。**筛选与列表、计数同源**（MC-51/MC-53），
+    /// 所以这里切一下，标题旁的"共 N 场"立刻跟着变。
+    private var projectMenu: some View {
+        Menu {
+            Button("全部项目") { Task { await model.filter(projectID: nil) } }
+            if !model.projects.isEmpty { Divider() }
+            ForEach(model.projects) { project in
+                Button(project.name) { Task { await model.filter(projectID: project.id) } }
+            }
+            Divider()
+            Button("新建项目…") {
+                projectNameDraft = ""
+                newProjectPromptPresented = true
+            }
+            Button("管理项目…") { manageProjectsPresented = true }
+        } label: {
+            // 说清当前筛在哪儿，否则用户不知道列表为什么少了。
+            Label(model.projectID.flatMap { id in model.projects.first { $0.id == id }?.name }
+                ?? "全部项目", systemImage: "folder")
+                .font(.callout)
+        }
+        .menuStyle(.borderlessButton)
+        .controlSize(.small)
+        .accessibilityLabel("按项目筛选会议")
     }
 
     /// 「连归档的一起列」。默认不列——归档的意义就是搜索、导出、问答都看不见它。
@@ -366,6 +440,24 @@ struct MeetingKnowledgeLibraryView: View {
                         Button(format.title) { exportSelected(as: format) }
                     }
                 }
+                Menu("标签…") {
+                    Button("编辑标签…") {
+                        tagDraft = model.documentTags.joined(separator: "、")
+                        tagsSheetPresented = true
+                    }
+                }
+                Menu("归到项目…") {
+                    Button("不归项目") { Task { await model.assignProject(nil) } }
+                    if !model.projects.isEmpty { Divider() }
+                    ForEach(model.projects) { project in
+                        Button(project.name) { Task { await model.assignProject(project.id) } }
+                    }
+                    Divider()
+                    Button("新建项目…") {
+                        projectNameDraft = ""
+                        newProjectPromptPresented = true
+                    }
+                }
                 Menu("导出归档包…") {
                     Button("完整归档（能再导回这个 App）") { exportArchive(scope: .fullArchive) }
                     Button("分享包（只含被引用的原句）") { exportArchive(scope: .share) }
@@ -559,6 +651,81 @@ struct MeetingKnowledgeLibraryView: View {
         }
     }
 
+    /// 项目管理。当前只做改名——方案没要求删项目，库层也没有那个 API，
+    /// 凭空加一个"删除项目"要么丢会议、要么留一堆孤儿，都不该顺手做。
+    private var manageProjectsSheet: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Text("项目")
+                .font(.headline)
+            if model.projects.isEmpty {
+                Text("还没有项目。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(model.projects) { project in
+                    HStack {
+                        Text(project.name).font(.callout)
+                        Spacer()
+                        Button("改名") {
+                            renameDraft = project.name
+                            renameTarget = project
+                            manageProjectsPresented = false
+                        }
+                        .controlSize(.small)
+                    }
+                }
+            }
+            HStack {
+                Spacer()
+                Button("新建项目…") {
+                    projectNameDraft = ""
+                    manageProjectsPresented = false
+                    newProjectPromptPresented = true
+                }
+                Button("好", role: .cancel) { manageProjectsPresented = false }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(SpeechRailDesignTokens.Layout.contentPadding)
+        .frame(minWidth: 320, alignment: .leading)
+    }
+
+    /// 标签编辑。**标签是用户写的，导入与生成都不猜**（MA-13），
+    /// 所以这里不給建议、不自动补全——用户想到什么就写什么。
+    private var tagsSheet: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Text("给这场会议加标签")
+                .font(.headline)
+            Text("用顿号或逗号分隔。标签是你自己写的，导入和生成都不会替你猜。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            TextField("例如：季度规划、招聘", text: $tagDraft)
+                .textFieldStyle(.plain)
+                .accessibilityLabel("标签，用顿号或逗号分隔")
+            HStack {
+                Spacer()
+                Button("取消", role: .cancel) { tagsSheetPresented = false }
+                Button("保存") {
+                    guard let documentID = model.selectedDocumentID else { return }
+                    let tags = tagDraft
+                        .replacingOccurrences(of: "，", with: "、")
+                        .split(separator: "、")
+                        .map { $0.trimmingCharacters(in: .whitespaces) }
+                        .filter { !$0.isEmpty }
+                    tagsSheetPresented = false
+                    Task {
+                        await model.setTags(tags, for: documentID)
+                        await model.reload()
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(SpeechRailDesignTokens.Layout.contentPadding)
+        .frame(minWidth: 360, alignment: .leading)
+    }
+
     /// 要不要确认，判据是**可逆性**：归档能撤，不问；移除转录与完整删除都是单向门，
     /// 问一句。移除转录之后这一场在列表和详情里都还在，容易让人以为"没什么大不了"——
     /// 但原句是被永久删掉的，所以更该问。
@@ -708,6 +875,10 @@ struct MeetingLibraryRowView: View {
                     // 没整理过的会议照样列出来。不列的话，
                     // 用户会以为这场会不存在。
                     Text("未整理").font(.caption).foregroundStyle(.secondary)
+                }
+                // 标签要看得见：只写不读的标签等于没加。
+                ForEach(row.tags, id: \.self) { tag in
+                    Text("#\(tag)").font(.caption).foregroundStyle(.secondary)
                 }
             }
             // 为什么命中，当场就能看见。只给会议名的话，用户还得点进去

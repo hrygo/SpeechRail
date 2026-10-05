@@ -166,6 +166,13 @@ public final class MeetingLibraryModel {
 
     private func loadDetail() async {
         await select(selectedDocumentID)
+        // 标签跟着选中的文档走：切到另一场就该是另一场的标签，
+        // 留着上一场的标签等于把 A 的标签贴到 B 上。
+        if let documentID = selectedDocumentID {
+            documentTags = await tags(for: documentID)
+        } else {
+            documentTags = []
+        }
     }
 
     /// 空态文案。**说清下一步做什么**，不写"暂无数据"。
@@ -184,6 +191,11 @@ public final class MeetingLibraryModel {
     /// 最近一次撤销归档的结果。`false` 表示这份文档不是归档态，撤不了。
     public private(set) var lastRestore: Bool?
     public private(set) var archiveError: String?
+    /// 项目与标签操作失败时的提示。与 `archiveError` 分开：
+    /// 「这场会归不了项目」和「这场会删不掉」对应的下一步动作完全不同。
+    public private(set) var projectError: String?
+    /// 当前选中那一场的标签。详情里的标签编辑改它。
+    public private(set) var documentTags: [String] = []
 
     /// 这一档要不要用户亲自确认。
     ///
@@ -249,6 +261,78 @@ public final class MeetingLibraryModel {
             documentID: documentID,
             minutesVersionID: snapshot?.minutesVersionID
         )
+    }
+
+    // MARK: - 项目与标签（MA-13）
+    //
+    // 项目、标签都是**用户写的**，导入与生成都不猜（方案 MA-13）。
+    // 此前这三个 API 生产代码零消费方：项目筛选用不了、标签加不上、
+    // 连"这场会属于哪个项目"都没地方改。
+
+    /// 全部项目。筛选菜单的数据源；空库时是空的，不影响浏览。
+    public private(set) var projects: [MeetingProject] = []
+
+    public func loadProjects() async {
+        projects = (try? await coordinator.meetingProjects()) ?? []
+    }
+
+    /// 新建项目。**空名拒绝**——项目是筛选依据，空名筛不出任何东西。
+    @discardableResult
+    public func createProject(named name: String) async -> MeetingProject? {
+        do {
+            let project = try await coordinator.createMeetingProject(name: name)
+            await loadProjects()
+            return project
+        } catch {
+            projectError = error.localizedDescription
+            return nil
+        }
+    }
+
+    public func renameProject(id: String, to name: String) async {
+        do {
+            try await coordinator.renameMeetingProject(id: id, name: name)
+            await loadProjects()
+            await loadPage(offset: offset)
+        } catch {
+            projectError = error.localizedDescription
+        }
+    }
+
+    /// 把这一场归到某个项目，或移出项目（`nil`）。
+    ///
+    /// 改完要重载列表：项目名显示在行上，不重载用户会以为没生效。
+    public func assignProject(_ projectID: String?) async {
+        guard let documentID = selectedDocumentID else { return }
+        do {
+            try await coordinator.updateMeetingDocument(
+                id: documentID, projectID: .some(projectID)
+            )
+            await loadPage(offset: offset)
+            if let selected = rows.first(where: { $0.id == documentID }) {
+                selectedDocumentID = selected.id
+                await loadDetail()
+            }
+        } catch {
+            projectError = error.localizedDescription
+        }
+    }
+
+    /// 关掉提示。`projectError` 对界面只读，否则界面就能随手清掉失败原因，
+    /// 提示与真实状态就分家了。
+    public func clearProjectError() { projectError = nil }
+
+    public func tags(for documentID: String) async -> [String] {
+        (try? await coordinator.meetingDocumentTags(documentID: documentID)) ?? []
+    }
+
+    public func setTags(_ newTags: [String], for documentID: String) async {
+        do {
+            try await coordinator.setMeetingDocumentTags(documentID: documentID, tags: newTags)
+            documentTags = await tags(for: documentID)
+        } catch {
+            projectError = error.localizedDescription
+        }
     }
 
     // MARK: - 知识归档包（MA-19）

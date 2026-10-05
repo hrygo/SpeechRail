@@ -4999,11 +4999,15 @@ public struct MeetingLibraryRow: Identifiable, Hashable, Sendable {
     /// **可空，而且大部分时候就是空**：标题或项目名命中的会议没有正文证据，
     /// 没搜正文时也不该有。宁可没有，也不要凑一句看起来像证据的话。
     public var matchExcerpt: String?
+    /// 这一场的标签。**只写不读的标签等于没有**——用户加完看不到，
+    /// 下次打开还得重新想一遍。
+    public var tags: [String]
 
     public init(
         id: String, sessionID: String? = nil, title: String, occurredAt: Date?, projectID: String?,
         projectName: String?, status: MeetingLibraryStatus, hasMinutes: Bool,
-        needsReviewCount: Int, openActionCount: Int, matchExcerpt: String? = nil
+        needsReviewCount: Int, openActionCount: Int, matchExcerpt: String? = nil,
+        tags: [String] = []
     ) {
         self.id = id
         self.sessionID = sessionID
@@ -5016,6 +5020,7 @@ public struct MeetingLibraryRow: Identifiable, Hashable, Sendable {
         self.needsReviewCount = needsReviewCount
         self.openActionCount = openActionCount
         self.matchExcerpt = matchExcerpt
+        self.tags = tags
     }
 }
 

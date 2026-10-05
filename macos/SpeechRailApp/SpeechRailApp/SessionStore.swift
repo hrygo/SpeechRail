@@ -6154,6 +6154,8 @@ extension SessionStore {
         counts.needsReview = try libraryNeedsReviewTotal(predicate: predicate)
 
         let stats = try meetingLibraryStats(documentIDs: pageRows.map(\.id))
+        // 标签按文档批量取，不在行循环里逐个查——一页 50 场就是 50 次查询。
+        let tagsByDocument = try meetingLibraryTags(documentIDs: pageRows.map(\.id))
         // 证据片段只在**真的搜了**的时候去取：空查询下每行都挂一句原文，
         // 那不是证据，是噪声。
         let excerpts = try meetingLibraryMatchExcerpts(
@@ -6169,9 +6171,34 @@ extension SessionStore {
             row.openActionCount = stat?.openActions ?? 0
             row.projectName = row.projectID.flatMap { try? meetingProject(id: $0)?.name }
             row.matchExcerpt = row.sessionID.flatMap { excerpts[$0] }
+            row.tags = tagsByDocument[row.id] ?? []
             return row
         }
         return MeetingLibraryPage(rows: rows, counts: counts, offset: offset, limit: limit)
+    }
+
+    /// 一页文档的标签，`documentID -> [标签]`。一次查完，不在行循环里逐个查。
+    private func meetingLibraryTags(documentIDs: [String]) throws -> [String: [String]] {
+        guard !documentIDs.isEmpty else { return [:] }
+        let placeholders = Array(repeating: "?", count: documentIDs.count).joined(separator: ", ")
+        return try withStatement("""
+        SELECT document_id, tag FROM meeting_document_tag
+        WHERE document_id IN (\(placeholders))
+        ORDER BY document_id ASC, tag ASC;
+        """) { statement -> [String: [String]] in
+            var index: Int32 = 1
+            for id in documentIDs {
+                bind(statement, index, id)
+                index += 1
+            }
+            var result: [String: [String]] = [:]
+            while try step(statement) == SQLITE_ROW {
+                let documentID = columnText(statement, 0) ?? ""
+                guard let tag = columnText(statement, 1) else { continue }
+                result[documentID, default: []].append(tag)
+            }
+            return result
+        }
     }
 
     /// 检索命中时的那句原文（验收 4 的「与证据」）。

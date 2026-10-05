@@ -1086,6 +1086,38 @@ public final class SessionCoordinator {
         )
     }
 
+    // MARK: - 项目与标签（MA-13）
+
+    /// 全部项目，筛选菜单的数据源。
+    public func meetingProjects() async throws -> [MeetingProject] {
+        try await store.projects()
+    }
+
+    @discardableResult
+    public func createMeetingProject(name: String) async throws -> MeetingProject {
+        try await store.createProject(name: name)
+    }
+
+    public func renameMeetingProject(id: String, name: String) async throws {
+        try await store.renameProject(id: id, name: name)
+    }
+
+    /// 改这场会议属于哪个项目。`projectID` 传 nil 表示**移出项目**——
+    /// 这里用双层可选把"不改"和"改成没有"分开，与 store 的约定一致。
+    public func updateMeetingDocument(
+        id: String, projectID: String??
+    ) async throws {
+        try await store.updateMeetingDocument(id: id, projectID: projectID)
+    }
+
+    public func meetingDocumentTags(documentID: String) async throws -> [String] {
+        try await store.documentTags(documentID: documentID)
+    }
+
+    public func setMeetingDocumentTags(documentID: String, tags: [String]) async throws {
+        try await store.setDocumentTags(documentID: documentID, tags: tags)
+    }
+
     // MARK: - 知识归档包（MA-19）
 
     /// 导出归档包（MA-19）。`to` 是**父目录**：包会按"哪场会的第几版"命名落在里面。
