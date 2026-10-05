@@ -4644,3 +4644,111 @@ public enum KnowledgeIdentity {
     /// 判定"看起来是同一条"的阈值。
     public static let rewordSimilarityThreshold = 0.6
 }
+
+// MARK: - 会议知识库列表（MA-12 / MC-48～MC-52、MC-75）
+
+/// 一场会议在列表里的状态。**归档不是删除**（MA-18），
+/// 所以归档的会议仍然列得出来，只是标出来——直接不列会让用户以为记录丢了。
+public enum MeetingLibraryStatus: String, Hashable, Sendable {
+    case active
+    case archived
+    case deleted
+
+    public var title: String {
+        switch self {
+        case .active: "进行中"
+        case .archived: "已归档"
+        case .deleted: "已删除"
+        }
+    }
+}
+
+/// 列表行。**不含正文**：列表只用来定位，正文另读一次。
+public struct MeetingLibraryRow: Identifiable, Hashable, Sendable {
+    public var id: String
+    public var title: String
+    public var occurredAt: Date?
+    public var projectID: String?
+    public var projectName: String?
+    public var status: MeetingLibraryStatus
+    /// 有没有整理出纪要。没有纪要的历史会议也要列出来——
+    /// 只列整理过的，等于告诉用户"没整理过的会议不存在"。
+    public var hasMinutes: Bool
+    public var needsReviewCount: Int
+    public var openActionCount: Int
+
+    public init(
+        id: String, title: String, occurredAt: Date?, projectID: String?, projectName: String?,
+        status: MeetingLibraryStatus, hasMinutes: Bool, needsReviewCount: Int, openActionCount: Int
+    ) {
+        self.id = id
+        self.title = title
+        self.occurredAt = occurredAt
+        self.projectID = projectID
+        self.projectName = projectName
+        self.status = status
+        self.hasMinutes = hasMinutes
+        self.needsReviewCount = needsReviewCount
+        self.openActionCount = openActionCount
+    }
+}
+
+/// 列表计数。与 `MeetingKnowledgeItemCounts` 同一个纪律：
+/// **计数与列表必须出自同一段谓词**，否则会出现"写着 100 场、翻到底只有 8 场"（MC-52）。
+public struct MeetingLibraryCounts: Hashable, Sendable {
+    public var total: Int
+    public var byStatus: [MeetingLibraryStatus: Int]
+    public var needsReview: Int
+
+    public init(total: Int = 0, byStatus: [MeetingLibraryStatus: Int] = [:], needsReview: Int = 0) {
+        self.total = total
+        self.byStatus = byStatus
+        self.needsReview = needsReview
+    }
+
+    public static let zero = MeetingLibraryCounts()
+}
+
+public struct MeetingLibraryPage: Sendable {
+    public var rows: [MeetingLibraryRow]
+    public var counts: MeetingLibraryCounts
+    public var offset: Int
+    public var limit: Int
+
+    public init(rows: [MeetingLibraryRow], counts: MeetingLibraryCounts, offset: Int, limit: Int) {
+        self.rows = rows
+        self.counts = counts
+        self.offset = offset
+        self.limit = limit
+    }
+
+    public var hasMore: Bool { offset + rows.count < counts.total }
+}
+
+/// 一次详情读取的结果。**整体提交，不分片回填**（MA-12 / MC-50）：
+/// 纪要、转录和条目必须来自同一次读取；分三次到齐再拼，
+/// 中间那一瞬用户看到的是"有标题没内容"的半成品。
+public struct MeetingReviewSnapshot: Sendable {
+    public var documentID: String
+    public var title: String
+    public var occurredAt: Date?
+    public var status: MeetingLibraryStatus
+    public var minutesBody: String?
+    public var transcriptLines: [String]
+    public var items: [KnowledgeEvidence]
+
+    public init(
+        documentID: String, title: String, occurredAt: Date?, status: MeetingLibraryStatus,
+        minutesBody: String?, transcriptLines: [String], items: [KnowledgeEvidence]
+    ) {
+        self.documentID = documentID
+        self.title = title
+        self.occurredAt = occurredAt
+        self.status = status
+        self.minutesBody = minutesBody
+        self.transcriptLines = transcriptLines
+        self.items = items
+    }
+
+    public var isEmpty: Bool { minutesBody == nil && transcriptLines.isEmpty && items.isEmpty }
+}

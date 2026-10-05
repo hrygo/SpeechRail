@@ -31,6 +31,9 @@ public struct MeetingView: View {
     @State private var selectedMinutesVersionID: String?
     @State private var confirmingFinish = false
     @State private var recent: [SessionSummary] = []
+    /// 完整会议知识库（MA-12）。这一段只快取最近几场，
+    /// 「查看全部」才是完整分页列表——静默截断到 8 场会让人以为其余的没了（MC-52）。
+    @State private var showsKnowledgeLibrary = false
     @State private var reviewRecord: SessionRecord?
     @State private var reviewLines: [TranscriptLine] = []
     @State private var reviewSpeakerNames: [String: String] = [:]
@@ -196,6 +199,9 @@ public struct MeetingView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("麦克风同一时刻只能由一个会话使用。结束后文字记录会留着，接着开始整理纪要。")
+        }
+        .sheet(isPresented: $showsKnowledgeLibrary) {
+            MeetingKnowledgeLibraryView(coordinator: session)
         }
         .sheet(isPresented: $isCheckingInput) { InputLevelSheet() }
         .sheet(isPresented: $isLabelingSpeakers) {
@@ -1408,7 +1414,7 @@ public struct MeetingView: View {
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                ForEach(recent.prefix(8)) { summary in
+                ForEach(recent.prefix(Self.quickAccessMeetingLimit)) { summary in
                     Button {
                         Task { await openRecord(summary) }
                     } label: {
@@ -1435,10 +1441,35 @@ public struct MeetingView: View {
                     .buttonStyle(.plain)
                     .speechRailPointerCursor()
                 }
+                if recent.count > Self.quickAccessMeetingLimit {
+                    // 截断就**说出来**。只显示最近 8 场而不说明，
+                    // 用户会以为另外那些会议不存在（MC-52）。
+                    Divider()
+                        .overlay(SpeechRailDesignTokens.Color.separator)
+                    Button {
+                        showsKnowledgeLibrary = true
+                    } label: {
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                            Text("查看全部 \(recent.count) 场会议")
+                                .font(SpeechRailDesignTokens.Typography.callout)
+                            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+                            Image(systemName: "chevron.right")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .speechRailPointerCursor()
+                    .accessibilityHint("打开完整的会议知识库，可以搜索、按项目筛选和翻页")
+                }
             }
             .padding(SpeechRailDesignTokens.Spacing.md)
         }
     }
+
+    /// 这一页只做"最近打开过哪几场"的快捷入口。完整列表在会议知识库里。
+    private static let quickAccessMeetingLimit = 8
 
     private static func timecode(_ seconds: TimeInterval) -> String {
         let total = max(0, Int(seconds.rounded()))

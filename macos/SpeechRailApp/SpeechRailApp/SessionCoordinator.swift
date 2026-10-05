@@ -925,6 +925,26 @@ public final class SessionCoordinator {
         try await store.searchKnowledgeFullText(query: query, kind: kind, limit: limit)
     }
 
+    /// 会议知识库列表（MA-12）。完整分页，不截断到最近几场（MC-52）。
+    public func meetingLibraryPage(
+        query: String = "",
+        projectID: String? = nil,
+        includesArchived: Bool = false,
+        limit: Int = 50,
+        offset: Int = 0
+    ) async throws -> MeetingLibraryPage {
+        try await store.meetingLibraryPage(
+            query: query, projectID: projectID,
+            includesArchived: includesArchived, limit: limit, offset: offset
+        )
+    }
+
+    /// 会议详情快照（MA-12 / MC-50）。一次读取、整体提交：
+    /// 纪要、转录与条目同源，不分三次到齐再拼。
+    public func meetingReviewSnapshot(documentID: String) async throws -> MeetingReviewSnapshot? {
+        try await store.meetingReviewSnapshot(documentID: documentID)
+    }
+
     /// 检索索引状态：索引是否可用、有多少待处理项（§6.5「保存与索引分开报状态」）。
     public func searchIndexStatus() async throws -> SessionStore.SearchIndexStatus {
         try await store.searchIndexStatus()

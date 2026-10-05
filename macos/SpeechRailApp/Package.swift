@@ -141,6 +141,9 @@ let package = Package(
                 "SessionCoordinator.swift",
                 "SessionExporter.swift",
                 "MeetingKnowledgeQuery.swift",
+                // 会议知识库列表与详情（MA-12）：选中代次守卫在模型层，视图只负责画。
+                "MeetingLibraryModel.swift",
+                "MeetingKnowledgeLibraryView.swift",
             ]
         ),
         // 确定性回放 runner：只读仓库外 manifest，输出脱敏聚合结果。

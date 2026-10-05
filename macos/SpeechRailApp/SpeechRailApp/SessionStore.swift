@@ -5680,3 +5680,220 @@ extension SessionStore {
         return "缺少限定：" + missing.joined(separator: "、") + "。先补条件，再谈哪个作数"
     }
 }
+
+// MARK: - 会议知识库列表与详情快照（MA-12 / MC-48～MC-52、MC-75）
+
+extension SessionStore {
+    /// 分页列出会议知识文档。**完整分页，不截断到最近几场**（MC-52）：
+    /// 只显示最近 8 场，用户会以为另外 92 场没了。
+    ///
+    /// 计数与列表**共用同一段谓词**，和 MA-13 同一个纪律。
+    public func meetingLibraryPage(
+        query: String = "",
+        projectID: String? = nil,
+        includesArchived: Bool = false,
+        limit: Int = 50,
+        offset: Int = 0
+    ) throws -> MeetingLibraryPage {
+        let predicate = libraryPredicate(
+            query: query, projectID: projectID, includesArchived: includesArchived
+        )
+        let from = """
+        FROM meeting_document d LEFT JOIN meeting_project p ON p.id = d.project_id
+        WHERE 1 = 1 \(predicate.sql)
+        ORDER BY COALESCE(d.occurred_at, d.created_at) DESC, d.id ASC
+        """
+        let pageRows = try withStatement("SELECT d.id, d.title, d.occurred_at, d.project_id, d.deleted_at \(from) LIMIT ? OFFSET ?;")
+        { statement -> [MeetingLibraryRow] in
+            var index: Int32 = 1
+            for value in predicate.bindings {
+                bindArgument(statement, index, value)
+                index += 1
+            }
+            bind(statement, index, max(0, limit))
+            bind(statement, index + 1, max(0, offset))
+            var rows: [MeetingLibraryRow] = []
+            while try step(statement) == SQLITE_ROW {
+                let deletedAtNull = columnIsNull(statement, 4)
+                rows.append(MeetingLibraryRow(
+                    id: columnText(statement, 0) ?? "",
+                    title: columnText(statement, 1) ?? "未命名会议",
+                    occurredAt: columnIsNull(statement, 2) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 2)),
+                    projectID: columnText(statement, 3),
+                    projectName: nil,
+                    // 归档与删除都在 meeting_document 上留 deleted_at；
+                    // 读出来的那一刻已经分不出是哪一种，所以这里只报"不可用"，
+                    // 具体档位由删除入口自己知道，不在这里猜。
+                    status: deletedAtNull ? .active : .deleted,
+                    hasMinutes: false, needsReviewCount: 0, openActionCount: 0
+                ))
+            }
+            return rows
+        }
+
+        // 计数走**同一段谓词**，但不带 LIMIT——数的是全部命中行，不是当前这一页。
+        var counts = try withStatement("""
+        SELECT COUNT(*),
+               SUM(CASE WHEN d.deleted_at IS NULL THEN 1 ELSE 0 END)
+        \(from);
+        """) { statement -> MeetingLibraryCounts in
+            var index: Int32 = 1
+            for value in predicate.bindings {
+                bindArgument(statement, index, value)
+                index += 1
+            }
+            guard try step(statement) == SQLITE_ROW else { return .zero }
+            let total = Int(columnInt(statement, 0))
+            let active = Int(columnInt(statement, 1))
+            return MeetingLibraryCounts(
+                total: total,
+                byStatus: [.active: active, .deleted: total - active],
+                needsReview: 0
+            )
+        }
+        // 待核对数是**全部命中行**的合计，不是当前页的合计——
+        // 翻到第二页数字就跳的话，这个计数没有意义。
+        counts.needsReview = try libraryNeedsReviewTotal(predicate: predicate)
+
+        let stats = try meetingLibraryStats(documentIDs: pageRows.map(\.id))
+        let rows = pageRows.map { row -> MeetingLibraryRow in
+            var row = row
+            let stat = stats[row.id]
+            row.hasMinutes = stat?.hasMinutes ?? false
+            row.needsReviewCount = stat?.needsReview ?? 0
+            row.openActionCount = stat?.openActions ?? 0
+            row.projectName = row.projectID.flatMap { try? meetingProject(id: $0)?.name }
+            return row
+        }
+        return MeetingLibraryPage(rows: rows, counts: counts, offset: offset, limit: limit)
+    }
+
+    /// 列表谓词。**翻页、计数、搜索共用这一份**，所以三者不可能对不上（MC-52）。
+    private func libraryPredicate(
+        query: String, projectID: String?, includesArchived: Bool
+    ) -> (sql: String, bindings: [SQLArgument]) {
+        var sql = ""
+        var bindings: [SQLArgument] = []
+        if !includesArchived {
+            sql += " AND d.deleted_at IS NULL"
+        }
+        if let projectID {
+            sql += " AND d.project_id = ?"
+            bindings.append(.text(projectID))
+        }
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            // 标题与项目名参与搜索；转录正文不进这一层——那是 MA-15 全文检索的活，
+            // 两条路径的代价和口径都不一样，混在一起就没法分别归因。
+            sql += " AND (d.title LIKE ? ESCAPE '\\' OR COALESCE(p.name, '') LIKE ? ESCAPE '\\')"
+            let pattern = "%" + Self.likeEscape(trimmed) + "%"
+            bindings.append(.text(pattern))
+            bindings.append(.text(pattern))
+        }
+        return (sql, bindings)
+    }
+
+    /// 全部命中会议的待核对条目数。**与列表同一段谓词**，所以翻页不会让数字跳。
+    private func libraryNeedsReviewTotal(predicate: (sql: String, bindings: [SQLArgument])) throws -> Int {
+        try withStatement("""
+        SELECT COALESCE(SUM(t.needs), 0) FROM (
+          SELECT (
+            SELECT COUNT(*) FROM minutes_item i
+            JOIN minutes m ON m.id = i.minutes_id
+            JOIN session s ON s.id = m.session_id
+            WHERE s.id = d.source_session_id
+              AND m.status = 'ready' AND m.body IS NOT NULL
+              AND (i.verdict IS NULL OR i.verdict <> 'supported')
+          ) AS needs
+          FROM meeting_document d LEFT JOIN meeting_project p ON p.id = d.project_id
+          WHERE 1 = 1 \(predicate.sql)
+        ) t;
+        """) { statement -> Int in
+            var index: Int32 = 1
+            for value in predicate.bindings {
+                bindArgument(statement, index, value)
+                index += 1
+            }
+            guard try step(statement) == SQLITE_ROW else { return 0 }
+            return Int(columnInt(statement, 0))
+        }
+    }
+
+    private struct MeetingLibraryStat {
+        var hasMinutes: Bool
+        var needsReview: Int
+        var openActions: Int
+    }
+
+    private func meetingLibraryStats(documentIDs: [String]) throws -> [String: MeetingLibraryStat] {
+        guard !documentIDs.isEmpty else { return [:] }
+        let placeholders = Array(repeating: "?", count: documentIDs.count).joined(separator: ", ")
+        return try withStatement("""
+        SELECT COALESCE(d.id, ''),
+               MAX(CASE WHEN m.status = 'ready' AND m.body IS NOT NULL THEN 1 ELSE 0 END),
+               SUM(CASE WHEN i.kind IS NOT NULL AND (i.verdict IS NULL OR i.verdict <> 'supported') THEN 1 ELSE 0 END),
+               SUM(CASE WHEN i.kind = 'action' AND e.status IS NULL THEN 1 ELSE 0 END)
+        FROM meeting_document d
+        LEFT JOIN session s ON s.id = d.source_session_id
+        LEFT JOIN minutes m ON m.session_id = s.id
+        LEFT JOIN minutes_item i ON i.minutes_id = m.id
+        LEFT JOIN knowledge_execution_event e ON e.item_id = i.id AND e.valid_to IS NULL
+        WHERE d.id IN (\(placeholders))
+        GROUP BY d.id;
+        """) { statement -> [String: MeetingLibraryStat] in
+            var index: Int32 = 1
+            for value in documentIDs.sorted() {
+                bind(statement, index, value)
+                index += 1
+            }
+            var result: [String: MeetingLibraryStat] = [:]
+            while try step(statement) == SQLITE_ROW {
+                result[columnText(statement, 0) ?? ""] = MeetingLibraryStat(
+                    hasMinutes: columnInt(statement, 1) != 0,
+                    needsReview: Int(columnInt(statement, 2)),
+                    openActions: Int(columnInt(statement, 3))
+                )
+            }
+            return result
+        }
+    }
+
+    /// 一次读取、整体提交的详情快照（MC-50）。
+    ///
+    /// 纪要、转录、条目**同一次读出来**。分三次到齐再拼的话，
+    /// 中间那一瞬用户看到的是"有标题没内容"的半成品，
+    /// 而标题来自 A、内容来自 B 的组合比空着更糟。
+    public func meetingReviewSnapshot(documentID: String) throws -> MeetingReviewSnapshot? {
+        guard let document = try meetingDocument(id: documentID) else { return nil }
+        let status: MeetingLibraryStatus = document.deletedAt == nil ? .active : .deleted
+        let page = try knowledgeItems(
+            filter: KnowledgeItemFilter(documentIDs: [documentID]),
+            scope: MeetingKnowledgeScope(documentIDs: [documentID], includesArchived: true),
+            limit: 500,
+            offset: 0
+        )
+        var body: String?
+        var transcript: [String] = []
+        if let sessionID = document.sourceSessionID {
+            let minutes = try acceptedMinutes(sessionID: sessionID) ?? latestUsableMinutes(sessionID: sessionID)
+            body = minutes?.body
+            transcript = try lines(sessionID: sessionID).map(\.text)
+        }
+        return MeetingReviewSnapshot(
+            documentID: document.id,
+            title: document.title ?? "未命名会议",
+            occurredAt: document.occurredAt,
+            status: status,
+            minutesBody: body,
+            transcriptLines: transcript,
+            items: page.items
+        )
+    }
+
+    /// `LIKE` 的通配符要转义，否则用户搜「100%」会变成匹配一切。
+    private static func likeEscape(_ text: String) -> String {
+        text.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "%", with: "\\%")
+            .replacingOccurrences(of: "_", with: "\\_")
+    }
+}
