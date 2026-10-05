@@ -164,8 +164,14 @@ def test_real_pipe_pipeline_survives_healthy_consumption_longer_than_deadline() 
             await asyncio.wait_for(controller.wait_closed(), timeout=5)
             assert controller.terminal is TtsStreamTerminal.COMPLETED
             audio = [event for event in received if event.kind is TtsStreamEventKind.AUDIO]
-            assert b"".join(event.pcm16 for event in audio[:80]) == b"\x01\x00" * (80 * 1_920)
-            assert [event.sample_offset for event in audio[:80]] == list(range(0, 153_600, 1_920))
+            pcm = b"".join(event.pcm16 for event in audio)
+            assert len(pcm) == 80 * 1_920 * 2
+            assert pcm[:-240] == b"\x01\x00" * (80 * 1_920 - 120)
+            assert pcm[-2:] == b"\x00\x00"
+            offset = 0
+            for event in audio:
+                assert event.sample_offset == offset
+                offset += len(event.pcm16) // 2
             assert max_unconsumed <= 7_680
             assert sum(event.terminal is not None for event in received) == 1
             # Production has ended while some local audio may still be playing.

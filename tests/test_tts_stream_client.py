@@ -227,7 +227,7 @@ def test_append_is_acknowledged_and_audio_arrives_before_finish() -> None:
             # reports the codec EOS that the real driver only allows afterwards.
             return ScriptedSession(
                 events=[
-                    ModelStepEvent(kind="pcm", pcm16=_pcm(120)),
+                    ModelStepEvent(kind="pcm", pcm16=_pcm(240)),
                     ModelStepEvent(kind="waiting_for_text"),
                     ModelStepEvent(kind="pcm", pcm16=_pcm(80)),
                 ]
@@ -245,15 +245,16 @@ def test_append_is_acknowledged_and_audio_arrives_before_finish() -> None:
 
         assert events[0].kind is TtsStreamEventKind.STARTED
         audio = [event for event in events if event.kind is TtsStreamEventKind.AUDIO]
-        # Two streamed chunks plus the terminal fade-to-silence frame.
+        # Two streamed chunks plus the original retained tail, faded at EOS.
         assert [event.sample_offset for event in audio] == [0, 120, 200]
         assert [event.chunk_index for event in audio] == [0, 1, 2]
         assert [event.pcm16 for event in audio][:2] == [_pcm(120), _pcm(80)]
         fade = audio[-1].pcm16
         fade_samples = struct.unpack(f"<{len(fade) // 2}h", fade)
-        # `_pcm` here is 0x0100 little-endian, so the ramp starts at 256.
+        # The retained real waveform starts at 256 and fades to silence.
         assert fade_samples[0] == 256
         assert fade_samples[-1] == 0
+        assert sum(len(event.pcm16) for event in audio) == 320 * 2
         assert events[-1].kind is TtsStreamEventKind.COMPLETED
         assert events[-1].terminal is TtsStreamTerminal.COMPLETED
         assert transport.host is not None
