@@ -1817,6 +1817,98 @@ final class AssistantSessionTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(counters.close, 1, "语音已经不可用，连接必须收掉")
     }
 
+    // MARK: - M0b/V03：设备恢复先关旧远端
+
+    /// V03a：服务端仍 active 时设备 recovered：旧 request 先收到取消并确认
+    /// terminal，之后第二问题才能新 start；全程不关连接、正文保留、可继续。
+    func testV03DeviceRecoveryWaitsForRemoteTerminalBeforeNextRound() async throws {
+        let harness = try await makeHarness(llmScripts: [.deltas(["首答。"]), .deltas(["次答。"])])
+        defer { cleanup(harness) }
+
+        try await harness.coordinator.begin(.assistant)
+        let sessionID = try XCTUnwrap(harness.session.sessionID)
+        await harness.clients()[0].emit(.configured)
+        await harness.clients()[0].emit(.completed(itemID: "i1", transcript: "念首句"))
+        await waitUntil(
+            { harness.session.turns.contains { $0.role == .assistant } },
+            message: "首轮回复没有落库"
+        )
+        let requestID = await harness.clients()[0].currentTTSRequestID()
+        XCTAssertFalse(requestID.isEmpty, "必须中断真实开过的 request")
+        await harness.clients()[0].emit(
+            .ttsAudio(requestID: requestID, taskID: nil, pcm: Data(repeating: 0, count: 320))
+        )
+        await waitUntil({ harness.session.phase == .speaking }, message: "没有进入朗读态")
+        let before = await harness.clients()[0].snapshot()
+
+        await harness.audio.emitPlaybackInvalidated(recovered: true)
+
+        // 旧远端收尾确认后：当轮按中断收尾、可继续，不关连接。
+        await waitUntil(
+            { harness.session.phase == .listening && harness.session.blocked == nil },
+            message: "旧远端确认收尾后应可继续"
+        )
+        let afterInvalidation = await harness.clients()[0].snapshot()
+        XCTAssertGreaterThanOrEqual(
+            afterInvalidation.cancelTTS - before.cancelTTS, 1, "旧 request 必须先收到取消"
+        )
+        XCTAssertEqual(afterInvalidation.close, 0, "确认收尾后不得关连接")
+        let lines = try await harness.store.lines(sessionID: sessionID, includePartial: true)
+        let first = try XCTUnwrap(lines.first { $0.role == .assistant })
+        XCTAssertEqual(first.text, "首答。", "已经生成完的正文不许被截短")
+        XCTAssertTrue(first.isInterrupted, "被设备切换丢掉的那一轮按打断封存")
+
+        // 随后第二问题：terminal 确认后新 start，不走重试。
+        await harness.clients()[0].emit(.completed(itemID: "i2", transcript: "念次句"))
+        await waitUntil(
+            { harness.session.turns.filter { $0.role == .assistant }.count >= 2 },
+            message: "第二问题应在 terminal 确认后新 start 并回答"
+        )
+        let afterSecond = await harness.clients()[0].snapshot()
+        XCTAssertGreaterThan(afterSecond.startTTS, before.startTTS, "第二轮必须新 start")
+        XCTAssertEqual(afterSecond.close, 0, "全程不得关连接")
+    }
+
+    /// V03b：旧远端在有界时间内不确认 terminal：关连接、显式重试，
+    /// 不自动新合成；recovered 不映射成远端空闲。
+    func testV03DeviceRecoveryWithoutRemoteTerminalClosesConnectionForExplicitRetry() async throws {
+        let harness = try await makeHarness(
+            llmScripts: [.deltas(["首答。"])],
+            autoConfirmTTSCancel: false
+        )
+        defer { cleanup(harness) }
+
+        try await harness.coordinator.begin(.assistant)
+        let sessionID = try XCTUnwrap(harness.session.sessionID)
+        await harness.clients()[0].emit(.configured)
+        await harness.clients()[0].emit(.completed(itemID: "i1", transcript: "念首句"))
+        await waitUntil(
+            { harness.session.turns.contains { $0.role == .assistant } },
+            message: "首轮回复没有落库"
+        )
+        let requestID = await harness.clients()[0].currentTTSRequestID()
+        XCTAssertFalse(requestID.isEmpty, "必须中断真实开过的 request")
+        await harness.clients()[0].emit(
+            .ttsAudio(requestID: requestID, taskID: nil, pcm: Data(repeating: 0, count: 320))
+        )
+        await waitUntil({ harness.session.phase == .speaking }, message: "没有进入朗读态")
+        let before = await harness.clients()[0].snapshot()
+
+        // emit 本身 await 整个收尾 effect（含 2s 有界 terminal 等待）。
+        await harness.audio.emitPlaybackInvalidated(recovered: true)
+
+        XCTAssertNotNil(harness.session.blocked, "远端未确认时必须进入可重试中断")
+        XCTAssertEqual(harness.session.phase, .paused)
+        XCTAssertEqual(harness.session.sessionID, sessionID, "记录要留着，重试语音还在同一场里")
+        XCTAssertTrue(harness.session.canRetryVoice, "之后必须还能重试语音")
+        let after = await harness.clients()[0].snapshot()
+        XCTAssertGreaterThanOrEqual(after.close - before.close, 1, "归属未知的连接必须关掉")
+        XCTAssertEqual(after.startTTS, before.startTTS, "未确认前不得自动新合成")
+        let lines = try await harness.store.lines(sessionID: sessionID, includePartial: true)
+        let first = try XCTUnwrap(lines.first { $0.role == .assistant })
+        XCTAssertTrue(first.isInterrupted, "当轮按打断封存")
+    }
+
     // MARK: - D07：真正可用的文字降级
 
     /// 没开麦克风、也没建语音连接时，打字依然要能问出答案并落库。

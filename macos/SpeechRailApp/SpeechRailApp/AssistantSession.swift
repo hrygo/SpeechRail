@@ -1227,9 +1227,33 @@ public final class AssistantSession {
                 guard let self else { return }
                 // 结束或重连之后到达的旧设备通知只清理它自己那一份。
                 guard self.startToken == token else { return }
-                self.ttsStream?.invalidate()
+                // M0b：本地输出权同步撤销并登记旧 request 的 retired 归属；
+                // 远端仍 active 时必须等匹配 terminal 再放行新轮，不直接
+                // invalidate 丢弃。存活 receiver 继续消费旧连接的终态。
+                let preparation = self.ttsStream?.prepareCancellation()
+                if preparation == nil {
+                    self.ttsStream?.invalidate()
+                }
                 self.isSpeaking = false
                 self.isMutedForPlayback = false
+                // 旧远端收尾与本地收尾都走这一个 effect：停本地播→发取消→等匹配
+                // terminal。确认或超时落定后才收尾正文、改 phase 或关连接；
+                // 旧终态迟到只解自己的闩，不污染新轮（V03）。
+                let effectSession = self.sessionID
+                let effectConnection = self.connectionToken
+                let effectToken = self.startToken
+                let effect = Task<Bool, Never> { [weak self] in
+                    guard let self else { return false }
+                    if let stream = self.ttsStream, let preparation {
+                        return await stream.performCancellation(preparation)
+                    }
+                    await self.stopPlaybackLayer()
+                    return self.ttsStream?.hasUnconfirmedRemoteOwnership != true
+                }
+                let confirmed = await effect.value
+                guard self.sessionID == effectSession,
+                      self.connectionToken == effectConnection,
+                      self.startToken == effectToken else { return }
                 if let reply = self.currentReply {
                     self.invalidateReply()
                     await self.finalizeReply(.interrupted, reply: reply)
@@ -1237,9 +1261,18 @@ public final class AssistantSession {
                     await self.markLastReplyInterruptedAfterPlaybackCut()
                 }
                 if invalidation.recovered {
-                    self.lastFailure = "音频设备已切换，本次朗读已停止。"
-                    if self.phase == .speaking || self.phase == .thinking {
-                        self.phase = .listening
+                    if confirmed {
+                        // 旧远端已确认收尾：当轮按中断收尾，可继续下一轮。
+                        self.lastFailure = "音频设备已切换，本次朗读已停止。"
+                        if self.phase == .speaking || self.phase == .thinking {
+                            self.phase = .listening
+                        }
+                    } else {
+                        // 超时或旧发送未退出：远端归属未知，关连接显式重试，
+                        // 保留记录/文字。recovered 不映射成远端空闲。
+                        await self.handleUnconfirmedRemoteIdle(
+                            message: "设备切换后没能确认上一轮朗读已经结束，已断开连接。请重试语音。"
+                        )
                     }
                 } else {
                     // 恢复失败：这一场已经没法继续语音了。停止采集与连接，
