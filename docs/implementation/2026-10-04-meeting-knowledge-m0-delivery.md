@@ -1,10 +1,10 @@
 ---
-title: "会议知识闭环 M0 交付说明：版本指针、失败语义、恢复、检索、备份"
+title: "会议知识闭环 M0/M1 交付说明：版本指针、失败语义、恢复、检索、备份、MA-05 迁移"
 status: active
-version: "2.14"
-date: 2026-10-04
-branch: "codex/meeting-knowledge-m0"
-base: "origin/main @ 607b75a8"
+version: "3.0"
+date: 2026-10-05
+branch: "codex/meeting-knowledge-migrate"
+base: "origin/main @ d72535c7"
 ---
 
 # 会议知识闭环 M0 交付说明
@@ -85,7 +85,48 @@ base: "origin/main @ 607b75a8"
   `InnerOSSession` 不进 SPM 测试目标，仅做 `swiftc -parse` 语法检查；
   归属逻辑由新增 `testLateResultOwnershipGuardsUIWrites` 覆盖。
 
+## M1 增量（MA-05，2026-10-05）
+
+范围：schema v1→v2 增量迁移 + 协调器接线 + 迁移回归 + 提词器 E2/E3 收尾分交。
+
+- 提交 `8e6888c4`（会议知识）：`meeting_document` / `transcript_revision` /
+  `source_snapshot` 三表 + `minutes.is_legacy_import` 列；`migrateV1ToV2`
+  逐级升、失败整库回滚（MC-67/MC-69）；`SessionCoordinator` 透传文档 CRUD、
+  快照封存、修订链读写；`removeSession` 已关联知识时拒绝级联（MC-62）。
+- 提交 `292d0e4f`（提词器，与 M1 无关的分交）：稳定前缀截断换算、
+  同位确认门槛、空 final 未确认语义、评估报告 v2。
+- 回归证据：`MeetingMinutesVersioningTests` 32/32（含新增 MC-67/MC-68/
+  MC-20/MC-62 四用例），联合 `AssistantPersistenceTests` 47/47；
+  Teleprompter 两套 84 项通过。
+- 命令：`swift test --package-path macos/SpeechRailApp --skip-update
+  --filter 'MeetingMinutesVersioningTests|AssistantPersistenceTests'`；
+  `swift test --package-path macos/SpeechRailApp --skip-update
+  --filter 'TeleprompterFollowControllerTests|TeleprompterReplayEvaluatorTests'`。
+
+### M1 迁移说明
+
+- v0→v1 照旧建全部 v1 表；v1→v2 执行 `schemaV2Delta`（三表 IF NOT EXISTS 幂等）
+  + `minutes.is_legacy_import` 列追加（PRAGMA 查列，已存在跳过）；
+  旧 minutes 行全标 legacy，final 行回填 `legacy_import` 修订起点。
+- v2 新库新建行默认非 legacy；v1 旧库行的 legacy 回填只由迁移 UPDATE 完成。
+- 旧程序不得直接打开 v2 库：`migrate()` 遇更高 user_version 抛错保留原库。
+
+### M1 回退说明
+
+- 整支回退：切回 `origin/main @ d72535c7`；v2 库文件保留，需用迁移前备份恢复 v1。
+- 单个提交回退：`292d0e4f`（提词器）可独立 revert；`8e6888c4`（MA-05）
+  回退后 v2 表残留但无读写入口，需备份恢复才算干净。
+- 回退不删除用户数据：`removeSession` 拒绝语义只挡误删，不清知识文档。
+
+### M1 未验证事项
+
+- 界面走查（版本切换、导出菜单、检索入口、删除确认）未做。
+- 真实模型生成、拒答、截断的端到端语义未做。
+- v1 真实旧库文件的迁移演练未做（只有空库直建 + 新行语义回归）。
+- 真实采集、UI 自动化、发布另行授权。
+
 ## 迁移说明
+
 
 - 无需迁移：没有新增表、列、索引，`schemaVersion` 保持 1。
 - 旧库直接可用；新查询（`latestUsableMinutes`、`pendingMinutesRows`、

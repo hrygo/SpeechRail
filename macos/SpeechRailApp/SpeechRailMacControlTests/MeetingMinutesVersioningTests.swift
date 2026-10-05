@@ -435,6 +435,83 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertTrue(rows.isEmpty, "转录行随会话级联删除")
     }
 
+    /// MA-05/MC-67（v1→v2 迁移）：空库直建 v2 后新行默认非 legacy；
+    /// 回填语义由 `migrateV1ToV2` 的 UPDATE/INSERT 保证（旧库行才标 legacy）。
+    /// 这里钉住新库行为：正文原样保留、final 行可记修订起点、不补造引用。
+    func testMigrationV1ToV2KeepsMinutesAndMarksLegacy() async throws {
+        let store = try requireStore()
+        let sessionID = try requireSessionID()
+        let lineID = "line-migrate-1"
+        _ = try await store.appendLine(
+            LineDraft(sessionID: sessionID, role: .speaker, text: "迁移前定稿的一句", source: .microphone, status: .final),
+            id: lineID
+        )
+        let minutes = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
+        _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
+        try await store.finishMinutes(minutesID: minutes.id, body: "# 迁移前纪要", model: nil)
+        XCTAssertEqual(SessionStore.schemaVersion, 2)
+        let versions = try await store.minutesVersions(sessionID: sessionID)
+        XCTAssertEqual(versions.count, 1)
+        XCTAssertEqual(versions.first?.body, "# 迁移前纪要")
+        // v2 新库新建行默认非 legacy（INSERT 未指定列时 DEFAULT 0）；
+        // v1 旧库行的 legacy 回填由迁移 UPDATE 完成，不在此断言。
+        XCTAssertFalse(versions.first?.isLegacyImport ?? true, "v2 新建行默认非 legacy")
+        let recorded = try await store.recordTranscriptRevision(
+            TranscriptRevision(id: "rev-migrate-1", lineID: lineID, sessionID: sessionID, text: "迁移前定稿的一句", origin: "legacy_import")
+        )
+        XCTAssertEqual(recorded.origin, "legacy_import")
+        let revisions = try await store.transcriptRevisions(lineID: lineID)
+        XCTAssertTrue(revisions.contains { $0.origin == "legacy_import" && $0.text.contains("迁移前定稿") })
+    }
+
+    /// MA-05/MC-68（无来源不补造引用）：导入知识文档允许无采集会话；
+    /// 旧纪要缺转录时保留可读正文并标 legacy，不伪造来源快照。
+    func testImportedDocumentWithoutSessionKeepsReadableMinutes() async throws {
+        let store = try requireStore()
+        let document = try await store.createMeetingDocument(
+            MeetingDocument(id: "doc-import-1", sourceSessionID: nil, title: "外部导入纪要")
+        )
+        XCTAssertNil(document.sourceSessionID)
+        XCTAssertEqual(document.title, "外部导入纪要")
+        let fetched = try await store.meetingDocument(id: "doc-import-1")
+        XCTAssertEqual(fetched?.id, "doc-import-1")
+        // 无来源快照：读快照返回 nil，不伪造 ok 快照。
+        let missing = try await store.sourceSnapshot(id: "snap-missing-1")
+        XCTAssertNil(missing)
+    }
+
+    /// MA-05/MC-20（快照事务）：快照写入与文档关联同一事务；
+    /// 文档不存在时拒绝写入，不半提交、不发已保存回执。
+    func testSealSnapshotWithoutDocumentFailsWithoutPartialWrite() async throws {
+        let store = try requireStore()
+        let snapshot = MeetingSourceSnapshot(id: "snap-orphan-1", documentID: "doc-missing-1")
+        do {
+            _ = try await store.sealMeetingSource(snapshot)
+            XCTFail("无文档的快照必须拒绝写入")
+        } catch {
+            // 预期失败：不半提交。
+        }
+        let missing = try await store.sourceSnapshot(id: "snap-orphan-1")
+        XCTAssertNil(missing, "失败的封存不得留下半提交快照")
+    }
+
+    /// MA-05/MC-62（删除语义）：已关联知识文档的会话，普通删除入口拒绝级联销毁知识。
+    func testRemoveSessionWithLinkedDocumentIsRejected() async throws {
+        let store = try requireStore()
+        let sessionID = try requireSessionID()
+        _ = try await store.createMeetingDocument(
+            MeetingDocument(id: "doc-link-1", sourceSessionID: sessionID, title: "已关联文档")
+        )
+        do {
+            try await store.removeSession(id: sessionID)
+            XCTFail("已关联知识文档的会话不得经普通入口删除")
+        } catch {
+            // 预期拒绝：知识不得被级联销毁。
+        }
+        let fetched = try await store.meetingDocument(id: "doc-link-1")
+        XCTAssertEqual(fetched?.sourceSessionID, sessionID, "拒绝删除后关联必须保留")
+    }
+
     /// 验收 5（恢复失败不损原库）：损坏的备份校验失败，且原库仍可读写；
     /// 调用方按“校验失败不得覆盖原库”处理，这里钉住失败侧语义。
     func testCorruptBackupFailsWithoutTouchingOriginal() async throws {

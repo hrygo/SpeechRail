@@ -546,6 +546,10 @@ public struct MinutesVersion: Identifiable, Hashable, Sendable {
     public var leaseUntil: Date?
     public var createdAt: Date
 
+    /// v2 迁移标记：该版本正文是旧库原样迁入的，没有来源快照与结构引用。
+    /// 不补造引用；只有用户明确生成新候选时才请求模型补充结构（MA-05/MC-68）。
+    public var isLegacyImport: Bool
+
     public init(
         id: String,
         sessionID: String,
@@ -558,7 +562,8 @@ public struct MinutesVersion: Identifiable, Hashable, Sendable {
         attempts: Int = 0,
         failureReason: String? = nil,
         leaseUntil: Date? = nil,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        isLegacyImport: Bool = false
     ) {
         self.id = id
         self.sessionID = sessionID
@@ -571,6 +576,112 @@ public struct MinutesVersion: Identifiable, Hashable, Sendable {
         self.attempts = attempts
         self.failureReason = failureReason
         self.leaseUntil = leaseUntil
+        self.createdAt = createdAt
+        self.isLegacyImport = isLegacyImport
+    }
+}
+
+// MARK: - 会议知识文档（MA-05）
+
+/// 会议知识文档：独立于采集会话对象存在，导入文档可以没有采集会话（MA-05/MC-68）。
+/// 标题与项目元数据由知识文档持有；仍需供旧会话列表显示的标题走统一投影，
+/// 不出现两个独立可改、互相漂移的标题源。
+public struct MeetingDocument: Identifiable, Hashable, Sendable {
+    public var id: String
+    /// 可空：采集会话存在时唯一映射，导入文档允许为 nil，不伪造“录过音”（MC-68）。
+    public var sourceSessionID: String?
+    public var title: String?
+    public var projectID: String?
+    public var occurredAt: Date?
+    public var timezone: String?
+    /// 权威库删除语义：非空表示已删除/不可检索，先标记再清理派生（MA-18/MC-62）。
+    public var deletedAt: Date?
+    public var createdAt: Date
+    public var updatedAt: Date
+
+    public init(
+        id: String,
+        sourceSessionID: String? = nil,
+        title: String? = nil,
+        projectID: String? = nil,
+        occurredAt: Date? = nil,
+        timezone: String? = nil,
+        deletedAt: Date? = nil,
+        createdAt: Date = Date(),
+        updatedAt: Date = Date()
+    ) {
+        self.id = id
+        self.sourceSessionID = sourceSessionID
+        self.title = title
+        self.projectID = projectID
+        self.occurredAt = occurredAt
+        self.timezone = timezone
+        self.deletedAt = deletedAt
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
+/// 转录来源修订：ASR 原文与用户修订分开，新修改产生新 revision，不覆盖原始记录（MA-05/MC-46）。
+public struct TranscriptRevision: Identifiable, Hashable, Sendable {
+    public var id: String
+    public var lineID: String
+    public var sessionID: String
+    public var text: String
+    /// `asr` / `user_edit` / `legacy_import`：旧库迁入正文标 legacy，不补造来源。
+    public var origin: String
+    public var parentRevisionID: String?
+    public var editedAt: Date
+
+    public init(
+        id: String,
+        lineID: String,
+        sessionID: String,
+        text: String,
+        origin: String,
+        parentRevisionID: String? = nil,
+        editedAt: Date = Date()
+    ) {
+        self.id = id
+        self.lineID = lineID
+        self.sessionID = sessionID
+        self.text = text
+        self.origin = origin
+        self.parentRevisionID = parentRevisionID
+        self.editedAt = editedAt
+    }
+}
+
+/// 会议来源快照：生成基于固定快照，同一任务不能边读边跟随变化（MA-05/MC-20）。
+/// 快照写入与文档关联是同一事务，失败全部回滚，不发已保存回执（MC-20）。
+public struct MeetingSourceSnapshot: Identifiable, Hashable, Sendable {
+    public var id: String
+    public var documentID: String
+    public var lineRevisionIDs: [String]
+    public var speakerMapRevision: String?
+    public var noteRefs: [String]
+    public var coverage: String?
+    /// `ok` / `degraded`：降级快照必须携带缺口信息，不能掩盖（MC-19）。
+    public var sealResult: String
+    public var createdAt: Date
+
+    public init(
+        id: String,
+        documentID: String,
+        lineRevisionIDs: [String] = [],
+        speakerMapRevision: String? = nil,
+        noteRefs: [String] = [],
+        coverage: String? = nil,
+        sealResult: String = "ok",
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.documentID = documentID
+        self.lineRevisionIDs = lineRevisionIDs
+        self.speakerMapRevision = speakerMapRevision
+        self.noteRefs = noteRefs
+        self.coverage = coverage
+        self.sealResult = sealResult
         self.createdAt = createdAt
     }
 }
