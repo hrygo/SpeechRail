@@ -2195,9 +2195,13 @@ public final class AssistantSession {
             let titleTask = Task<Void, Never> { [weak self] in
                 guard let self else { return }
                 do {
-                    _ = try await self.coordinator.claimAutomaticTitle(
-                        sessionID: titleSessionID, lineID: titleLineID, title: titleText
-                    )
+                    if let claim = self.dependencies.claimTitle {
+                        _ = try await claim(titleSessionID, titleLineID, titleText)
+                    } else {
+                        _ = try await self.coordinator.claimAutomaticTitle(
+                            sessionID: titleSessionID, lineID: titleLineID, title: titleText
+                        )
+                    }
                 } catch {
                     if self.sessionID == titleSessionID {
                         self.lastFailure = "内容已保存，但记录标题未保存：\(error.localizedDescription)"
@@ -2428,16 +2432,20 @@ public final class AssistantSession {
     ) async {
         defer { replyCreateTasks.removeValue(forKey: replyID) }
         do {
-            let ordinal = try await coordinator.appendLine(
-                LineDraft(
-                    sessionID: sessionID,
-                    role: .assistant,
-                    text: initialText,
-                    source: source,
-                    status: .partial
-                ),
-                id: replyID
+            let draft = LineDraft(
+                sessionID: sessionID,
+                role: .assistant,
+                text: initialText,
+                source: source,
+                status: .partial
             )
+            // M2/V06:测试可 gate 首次 INSERT；默认走 coordinator。
+            let ordinal: Int
+            if let save = dependencies.saveReplyLine {
+                ordinal = try await save(draft, replyID)
+            } else {
+                ordinal = try await coordinator.appendLine(draft, id: replyID)
+            }
             // 返回后重算当前身份：仍是同一轮才更新全文，否则只补旧轮标记。
             // 正文以 finalize 时的最新内存文本为准，这里只记“行已存在 + 序号”。
             if currentReply?.id == replyID {
@@ -2534,17 +2542,20 @@ public final class AssistantSession {
         } catch {
             // 行还没建过（快照过期或建行失败过）：退回 INSERT 路径。
             do {
-                let ordinal = try await coordinator.appendLine(
-                    LineDraft(
-                        sessionID: reply.sessionID,
-                        role: .assistant,
-                        text: text,
-                        source: reply.source,
-                        status: .final,
-                        isInterrupted: termination.marksInterrupted
-                    ),
-                    id: reply.id
+                let draft = LineDraft(
+                    sessionID: reply.sessionID,
+                    role: .assistant,
+                    text: text,
+                    source: reply.source,
+                    status: .final,
+                    isInterrupted: termination.marksInterrupted
                 )
+                let ordinal: Int
+                if let save = dependencies.saveReplyLine {
+                    ordinal = try await save(draft, reply.id)
+                } else {
+                    ordinal = try await coordinator.appendLine(draft, id: reply.id)
+                }
                 reply.ordinal = ordinal
                 reply.isPersisted = true
             } catch {
