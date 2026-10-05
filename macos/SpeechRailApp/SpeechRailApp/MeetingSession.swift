@@ -728,9 +728,7 @@ public final class MeetingSession {
             return
         case .commit(_, let recoveryNote):
             if let recoveryNote {
-                // 空 final 到达时已显示的内容保留为恢复材料：
-                // **不进正式纪要**，但也不能无声消失（MC-11）。
-                lastFailure = "有一句话没有拿到定稿正文，已经原样保留：\(recoveryNote.text)"
+                await persistRecoveryMaterial(recoveryNote)
                 return
             }
         }
@@ -785,6 +783,39 @@ public final class MeetingSession {
                 timingQuality: window.quality
             )
         )
+    }
+
+    /// 空 final 的恢复材料**落成 partial 行**（MA-02 / MC-11）。
+    ///
+    /// `partial` 的既有语义正好就是我们要的：行存得下来、重启后还在、
+    /// 而 `coordinator.lines(sessionID:)` 默认 `includePartial: false`
+    /// 所以它**不会进正式纪要**、也不会进分享包。
+    /// 只放在一行提示文字里是不够的——用户看到提示后没法把那句原文取回来。
+    private func persistRecoveryMaterial(_ note: TranscriptItemLedger.RecoveryNote) async {
+        guard let sessionID, let startedAt else {
+            lastFailure = "有一句话没有拿到定稿正文：\(note.text)"
+            return
+        }
+        let observed = pendingItem ?? (start: commitCursor ?? startedAt, end: dependencies.clock.now())
+        do {
+            _ = try await coordinator.appendLine(
+                LineDraft(
+                    sessionID: sessionID,
+                    role: .speaker,
+                    text: note.text,
+                    source: lineSource,
+                    tStart: observed.start.timeIntervalSince(startedAt),
+                    tEnd: observed.end.timeIntervalSince(startedAt),
+                    status: .partial,
+                    timingQuality: .unavailable
+                ),
+                id: UUID().uuidString
+            )
+            lastFailure = "有一句话没有拿到定稿正文，已原样保留（不进正式纪要）。"
+        } catch {
+            // 连恢复材料都存不下去：明说，别让这句话就此消失。
+            lastFailure = "有一句话没有定稿，而且没能保存下来：\(note.text)"
+        }
     }
 
     /// 每一行标来源（§14.1 的记录口径）：**合流出来的行只能记 `mixed`**——

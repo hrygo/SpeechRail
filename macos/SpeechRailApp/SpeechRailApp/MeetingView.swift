@@ -49,6 +49,11 @@ public struct MeetingView: View {
     /// 空态里「想连电脑里的声音一起记」那一行可选项的展开态。
     @State private var showsSourceOptions = false
 
+    /// 空 final 留下的恢复材料（MA-02 / MC-11）。默认读库口径不返回它们，
+    /// 所以要单独按 `includePartial: true` 取——用户提示里说了"已保留"，
+    /// 就必须真能取回来。
+    @State private var recoveryLines: [TranscriptLine] = []
+
     /// 转录流的粘底状态（MA-10）：用户离开底部后不许被新句子拽走。
     @State private var transcriptFollow = TranscriptFollowState()
 
@@ -775,8 +780,39 @@ public struct MeetingView: View {
                     }
                 }
                 .frame(maxHeight: .infinity)
+                if !recoveryLines.isEmpty {
+                    recoverySection
+                }
             }
         }
+    }
+
+    /// 恢复材料区（MA-02 / MC-11）。
+    ///
+    /// 系统提示里说了"已原样保留"，这里就必须真能取回那句话。
+    /// 它**不是**转录正文，所以单独成区、明说不进纪要——放在正文流里
+    /// 会让用户以为这是这场会正常识别出来的一句。
+    @ViewBuilder
+    private var recoverySection: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Text("没拿到定稿的句子")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Text("原样保留，不进纪要")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+            }
+            ForEach(recoveryLines) { line in
+                Text(line.text)
+                    .font(SpeechRailDesignTokens.Typography.body)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
     }
 
     /// 断点那一行：**时间码在断点处是跳的**（§6.5、D8），所以这里明写一句。
@@ -1142,6 +1178,8 @@ public struct MeetingView: View {
         // 而"重开 App 之后还在不在"只能由库回答（§11.2 的第二条）。
         guard let id = meeting.sessionID else { return }
         reviewLines = (try? await session.lines(sessionID: id)) ?? []
+        recoveryLines = (try? await session.lines(sessionID: id, includePartial: true))?
+            .filter { $0.status == .partial } ?? []
         reviewSpeakerNames = (try? await session.speakerNames(sessionID: id)) ?? [:]
         await meeting.minutes.reload(sessionID: id)
     }
