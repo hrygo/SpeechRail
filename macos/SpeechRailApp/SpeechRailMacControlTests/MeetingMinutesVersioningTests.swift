@@ -449,13 +449,14 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         let minutes = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
         try await store.finishMinutes(minutesID: minutes.id, body: "# 迁移前纪要", model: nil)
-        XCTAssertEqual(SessionStore.schemaVersion, 2)
+        XCTAssertEqual(SessionStore.schemaVersion, 3)
         let versions = try await store.minutesVersions(sessionID: sessionID)
         XCTAssertEqual(versions.count, 1)
         XCTAssertEqual(versions.first?.body, "# 迁移前纪要")
-        // v2 新库新建行默认非 legacy（INSERT 未指定列时 DEFAULT 0）；
+        // v3 新库新建行默认非 legacy、未采用（INSERT 显式写 0，不猜用户意图）；
         // v1 旧库行的 legacy 回填由迁移 UPDATE 完成，不在此断言。
         XCTAssertFalse(versions.first?.isLegacyImport ?? true, "v2 新建行默认非 legacy")
+        XCTAssertFalse(versions.first?.isAccepted ?? true, "v3 新建行默认未采用，首次采用走 adoptMinutes")
         let recorded = try await store.recordTranscriptRevision(
             TranscriptRevision(id: "rev-migrate-1", lineID: lineID, sessionID: sessionID, text: "迁移前定稿的一句", origin: "legacy_import")
         )
@@ -510,6 +511,62 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         }
         let fetched = try await store.meetingDocument(id: "doc-link-1")
         XCTAssertEqual(fetched?.sourceSessionID, sessionID, "拒绝删除后关联必须保留")
+    }
+
+    /// MA-06/MC-25（采用指针）：采用 v1 后生成 v2 失败，采用版仍是 v1；
+    /// 新排队不清采用指针，读采用版固定 v1。
+    func testAcceptedPointerSurvivesFailedNewAttempt() async throws {
+        let store = try requireStore()
+        let sessionID = try requireSessionID()
+        let first = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
+        _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
+        try await store.finishMinutes(minutesID: first.id, body: "# 第一版", model: nil)
+        let beforeAdopt = try await store.acceptedMinutes(sessionID: sessionID)
+        XCTAssertNil(beforeAdopt, "未采用前没有采用版")
+        let adopted = try await store.adoptMinutes(sessionID: sessionID, minutesID: first.id, expectedCurrentID: nil)
+        XCTAssertTrue(adopted)
+        let second = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 9)
+        _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
+        try await store.failMinutes(minutesID: second.id, reason: "模型没有给结果")
+        let accepted = try await store.acceptedMinutes(sessionID: sessionID)
+        XCTAssertEqual(accepted?.id, first.id, "新尝试失败不得清掉用户采用版")
+        XCTAssertEqual(accepted?.body, "# 第一版")
+    }
+
+    /// MA-06/MC-31（采用冲突）：两次采用基于同一旧版时，后返回的操作必须拒绝覆盖；
+    /// 失败版与未知版不能被采用。
+    func testAdoptMinutesRejectsConflictingAndIneligibleVersions() async throws {
+        let store = try requireStore()
+        let sessionID = try requireSessionID()
+        let first = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
+        _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
+        try await store.finishMinutes(minutesID: first.id, body: "# 第一版", model: nil)
+        let second = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 9)
+        _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
+        try await store.finishMinutes(minutesID: second.id, body: "# 第二版", model: nil)
+        // 两次采用都看到“无采用版”：先提交的赢，后提交的必须拒绝。
+        let firstWins = try await store.adoptMinutes(sessionID: sessionID, minutesID: first.id, expectedCurrentID: nil)
+        XCTAssertTrue(firstWins)
+        let staleLoses = try await store.adoptMinutes(sessionID: sessionID, minutesID: second.id, expectedCurrentID: nil)
+        XCTAssertFalse(staleLoses)
+        let kept = try await store.acceptedMinutes(sessionID: sessionID)
+        XCTAssertEqual(kept?.id, first.id)
+        // 基于最新采用版改采第二版：预期一致才能提交。
+        let switchWins = try await store.adoptMinutes(sessionID: sessionID, minutesID: second.id, expectedCurrentID: first.id)
+        XCTAssertTrue(switchWins)
+        let switched = try await store.acceptedMinutes(sessionID: sessionID)
+        XCTAssertEqual(switched?.id, second.id)
+        // 失败版不能被采用：指针保持不动。
+        let failed = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 10)
+        _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
+        try await store.failMinutes(minutesID: failed.id, reason: "模型没有给结果")
+        let failedRejected = try await store.adoptMinutes(sessionID: sessionID, minutesID: failed.id, expectedCurrentID: second.id)
+        XCTAssertFalse(failedRejected)
+        let stillSecond = try await store.acceptedMinutes(sessionID: sessionID)
+        XCTAssertEqual(stillSecond?.id, second.id)
+        // 未知版不能被采用。
+        let missingRejected = try await store.adoptMinutes(sessionID: sessionID, minutesID: "no-such-version", expectedCurrentID: second.id)
+        XCTAssertFalse(missingRejected)
     }
 
     /// 验收 5（恢复失败不损原库）：损坏的备份校验失败，且原库仍可读写；

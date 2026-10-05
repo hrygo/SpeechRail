@@ -541,6 +541,9 @@ public struct MinutesVersion: Identifiable, Hashable, Sendable {
     /// 只存长度：项目约束不允许记录完整 prompt。
     public var promptChars: Int?
     public var isLatest: Bool
+    /// MA-06/MC-25/MC-31：用户当前采用版。`isLatest` 只是最新尝试，
+    /// 生成失败不清采用指针；采用走预期版本比较，冲突拒绝覆盖。
+    public var isAccepted: Bool
     public var attempts: Int
     public var failureReason: String?
     public var leaseUntil: Date?
@@ -559,6 +562,7 @@ public struct MinutesVersion: Identifiable, Hashable, Sendable {
         model: String? = nil,
         promptChars: Int? = nil,
         isLatest: Bool = false,
+        isAccepted: Bool = false,
         attempts: Int = 0,
         failureReason: String? = nil,
         leaseUntil: Date? = nil,
@@ -573,6 +577,7 @@ public struct MinutesVersion: Identifiable, Hashable, Sendable {
         self.model = model
         self.promptChars = promptChars
         self.isLatest = isLatest
+        self.isAccepted = isAccepted
         self.attempts = attempts
         self.failureReason = failureReason
         self.leaseUntil = leaseUntil

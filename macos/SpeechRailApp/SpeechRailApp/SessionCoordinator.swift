@@ -814,6 +814,18 @@ public final class SessionCoordinator {
         try await store.latestUsableMinutes(sessionID: sessionID)
     }
 
+    /// 当前采用版（MA-06/MC-25）：用户明确采用的那一版；没有采用过返回 nil。
+    public func acceptedMinutes(sessionID: String) async throws -> MinutesVersion? {
+        try await store.acceptedMinutes(sessionID: sessionID)
+    }
+
+    /// 采用一版纪要（MA-06/MC-31）：只有已完成且有正文的版本才能被采用；
+    /// `expectedCurrentID` 是调用方开始操作时看到的采用版 id，不一致时拒绝覆盖。
+    @discardableResult
+    public func adoptMinutes(sessionID: String, minutesID: String, expectedCurrentID: String?) async throws -> Bool {
+        try await store.adoptMinutes(sessionID: sessionID, minutesID: minutesID, expectedCurrentID: expectedCurrentID)
+    }
+
     public func removeSession(id: String) async throws {
         try await store.removeSession(id: id)
     }

@@ -52,7 +52,10 @@ public actor SessionStore {
     /// v2（MA-05）：新增会议知识文档、转录来源修订、来源快照三张表；
     /// `minutes` 追加 `is_legacy_import` 列（旧库原样迁入标记，不补造引用）。
     /// v1 库由 `migrateV1ToV2` 逐级升，失败整库回滚（MC-67/MC-69）。
-    public static let schemaVersion: Int32 = 2
+    /// v3（MA-06）：`minutes` 追加 `is_accepted` 列（用户当前采用版，与最新尝试分离；
+    /// 只有明确采用动作立指针，重试/重启/索引更新不得提升，MC-25/MC-31）。
+    /// v1/v2 库逐级升到 v3，失败整库回滚（MC-67/MC-69）。
+    public static let schemaVersion: Int32 = 3
 
     private let directory: URL
     private let fileManager: FileManager
@@ -137,6 +140,7 @@ public actor SessionStore {
 
         // 整库只在一个事务里逐级升；v1 就是「从空库建到当前形状」。
         // v0 → v1：建全部 v1 表；v1 → v2：MA-05 知识文档三表 + legacy 标记列。
+        // v2 → v3：MA-06 采用指针列（只加列，不改已存数据语义）。
         // 中途失败整库回滚，保留原库，不清空重建（MC-69）。
         try execute("BEGIN IMMEDIATE;")
         do {
@@ -145,6 +149,9 @@ public actor SessionStore {
             }
             if version < 2 {
                 try migrateV1ToV2()
+            }
+            if version < 3 {
+                try migrateV2ToV3()
             }
             try execute("PRAGMA user_version=\(Self.schemaVersion);")
             try execute("COMMIT;")
@@ -622,8 +629,8 @@ public actor SessionStore {
                 try step(statement)
             }
             let sql = """
-            INSERT INTO minutes (id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at)
-            VALUES (?, ?, ?, 'queued', NULL, ?, ?, 1, 0, NULL, NULL, ?);
+            INSERT INTO minutes (id, session_id, version, status, body, model, prompt_chars, is_latest, is_accepted, attempts, failure_reason, lease_until, created_at)
+            VALUES (?, ?, ?, 'queued', NULL, ?, ?, 1, 0, 0, NULL, NULL, ?);
             """
             try withStatement(sql) { statement in
                 bind(statement, 1, id)
@@ -657,7 +664,7 @@ public actor SessionStore {
     public func claimMinutes(sessionID: String, lease: TimeInterval) throws -> MinutesVersion? {
         let now = Date()
         let sql = """
-        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at, is_legacy_import
+        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, is_accepted, attempts, failure_reason, lease_until, created_at, is_legacy_import
         FROM minutes
         WHERE session_id = ?
           AND (status = 'queued' OR (status = 'running' AND (lease_until IS NULL OR lease_until < ?)))
@@ -762,7 +769,7 @@ public actor SessionStore {
     /// 返回整行以便调用方按原 job 身份认领，不新建版本。
     public func pendingMinutesRows(now: Date = Date()) throws -> [MinutesVersion] {
         let sql = """
-        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at, is_legacy_import
+        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, is_accepted, attempts, failure_reason, lease_until, created_at, is_legacy_import
         FROM minutes
         WHERE status = 'queued' OR (status = 'running' AND (lease_until IS NULL OR lease_until < ?))
         ORDER BY version ASC;
@@ -1260,7 +1267,7 @@ public actor SessionStore {
     /// 没有可用版时返回 nil，调用方不得把失败尝试或空正文当成功展示。
     public func latestUsableMinutes(sessionID: String) throws -> MinutesVersion? {
         let sql = """
-        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at, is_legacy_import
+        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, is_accepted, attempts, failure_reason, lease_until, created_at, is_legacy_import
         FROM minutes WHERE session_id = ? AND status = 'ready' AND body IS NOT NULL
         ORDER BY version DESC LIMIT 1;
         """
@@ -1275,7 +1282,7 @@ public actor SessionStore {
     /// 找不到返回 nil，调用方不得回退成最新版冒充选定版。
     public func minutesVersion(id: String) throws -> MinutesVersion? {
         let sql = """
-        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at, is_legacy_import
+        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, is_accepted, attempts, failure_reason, lease_until, created_at, is_legacy_import
         FROM minutes WHERE id = ? LIMIT 1;
         """
         return try withStatement(sql) { statement -> MinutesVersion? in
@@ -1287,7 +1294,7 @@ public actor SessionStore {
 
     public func minutesVersions(sessionID: String) throws -> [MinutesVersion] {
         let sql = """
-        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at, is_legacy_import
+        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, is_accepted, attempts, failure_reason, lease_until, created_at, is_legacy_import
         FROM minutes WHERE session_id = ? ORDER BY version DESC;
         """
         return try withStatement(sql) { statement in
@@ -1297,6 +1304,71 @@ public actor SessionStore {
                 rows.append(minutesVersion(from: statement))
             }
             return rows
+        }
+    }
+
+    /// 当前采用版（MA-06/MC-25/MC-31）：用户明确采用的那一版；没有采用过返回 nil。
+    /// 调用方不得把最新尝试或最新可用版冒充成用户采用版。
+    public func acceptedMinutes(sessionID: String) throws -> MinutesVersion? {
+        let sql = """
+        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, is_accepted, attempts, failure_reason, lease_until, created_at, is_legacy_import
+        FROM minutes WHERE session_id = ? AND is_accepted = 1 LIMIT 1;
+        """
+        return try withStatement(sql) { statement -> MinutesVersion? in
+            bind(statement, 1, sessionID)
+            guard try step(statement) == SQLITE_ROW else { return nil }
+            return minutesVersion(from: statement)
+        }
+    }
+
+    /// 采用一版纪要（MA-06/MC-31）：只有已完成且有正文的版本才能被采用；
+    /// 同一事务清旧指针、立新指针；`expectedCurrentID` 是调用方开始操作时看到的
+    /// 采用版 id（nil 表示当时无采用版），不一致时拒绝覆盖并返回 false。
+    /// 返回是否真正提交。
+    @discardableResult
+    public func adoptMinutes(sessionID: String, minutesID: String, expectedCurrentID: String?) throws -> Bool {
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            let current = try withStatement("SELECT id FROM minutes WHERE session_id = ? AND is_accepted = 1 LIMIT 1;") { statement -> String? in
+                bind(statement, 1, sessionID)
+                guard try step(statement) == SQLITE_ROW else { return nil }
+                return columnText(statement, 0)
+            }
+            guard current == expectedCurrentID else {
+                try execute("ROLLBACK;")
+                return false
+            }
+            var eligible = false
+            try withStatement("SELECT status, body FROM minutes WHERE id = ? AND session_id = ? LIMIT 1;") { statement in
+                bind(statement, 1, minutesID)
+                bind(statement, 2, sessionID)
+                guard try step(statement) == SQLITE_ROW else { return }
+                eligible = columnText(statement, 0) == MinutesStatus.ready.rawValue && columnText(statement, 1) != nil
+            }
+            guard eligible else {
+                try execute("ROLLBACK;")
+                return false
+            }
+            try withStatement("UPDATE minutes SET is_accepted = 0 WHERE session_id = ?;") { statement in
+                bind(statement, 1, sessionID)
+                try step(statement)
+            }
+            var committed = false
+            try withStatement("UPDATE minutes SET is_accepted = 1 WHERE id = ? AND session_id = ?;") { statement in
+                bind(statement, 1, minutesID)
+                bind(statement, 2, sessionID)
+                try step(statement)
+                committed = sqlite3_changes(try requireHandle()) > 0
+            }
+            guard committed else {
+                try execute("ROLLBACK;")
+                return false
+            }
+            try execute("COMMIT;")
+            return true
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
         }
     }
     // MARK: - Meeting knowledge documents (MA-05)
@@ -1663,11 +1735,18 @@ public actor SessionStore {
     }
 
     private func minutesVersion(from statement: OpaquePointer) -> MinutesVersion {
+        // 列顺序固定为 SELECT 显式列：0...7 为基础字段，8 为 is_accepted（MA-06），
+        // 其后依次为 attempts / failure_reason / lease_until / created_at / is_legacy_import。
         // v1 老库没有 `is_legacy_import` 列：读不到时按 legacy 处理（不补造引用，MC-68）。
-        // 新库 SELECT 显式带该列（index 12）；老库形状只有 0...11。
+        // v2 老库没有 `is_accepted` 列：新 SELECT 显式带该列，老形状读不到时按未采用处理。
+        let count = Int(sqlite3_column_count(statement))
+        let accepted: Bool = {
+            guard count > 8 else { return false }
+            return columnInt(statement, 8) != 0
+        }()
         let legacy: Bool = {
-            guard sqlite3_column_count(statement) > 12 else { return true }
-            return columnInt(statement, 12) != 0
+            guard count > 13 else { return true }
+            return columnInt(statement, 13) != 0
         }()
         return MinutesVersion(
             id: columnText(statement, 0) ?? "",
@@ -1678,10 +1757,11 @@ public actor SessionStore {
             model: columnText(statement, 5),
             promptChars: columnIsNull(statement, 6) ? nil : Int(columnInt(statement, 6)),
             isLatest: columnInt(statement, 7) != 0,
-            attempts: Int(columnInt(statement, 8)),
-            failureReason: columnText(statement, 9),
-            leaseUntil: columnIsNull(statement, 10) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 10)),
-            createdAt: Date(timeIntervalSince1970: columnDouble(statement, 11)),
+            isAccepted: accepted,
+            attempts: Int(columnInt(statement, 9)),
+            failureReason: columnText(statement, 10),
+            leaseUntil: columnIsNull(statement, 11) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 11)),
+            createdAt: Date(timeIntervalSince1970: columnDouble(statement, 12)),
             isLegacyImport: legacy
         )
     }
@@ -1875,6 +1955,7 @@ extension SessionStore {
       model          TEXT,
       prompt_chars   INTEGER,
       is_latest      INTEGER NOT NULL DEFAULT 0,
+      is_accepted    INTEGER NOT NULL DEFAULT 0,
       attempts       INTEGER NOT NULL DEFAULT 0,
       failure_reason TEXT,
       lease_until    REAL,
@@ -2002,5 +2083,21 @@ extension SessionStore {
         SELECT 'rev-' || line.id, line.id, line.session_id, line.text, 'legacy_import', NULL, line.created_at
         FROM line WHERE line.status = 'final';
         """)
+    }
+
+    /// v2 → v3 的 DDL（调用方已在同一事务内）。
+    /// 只追加 `is_accepted` 列：旧库行默认 0（无采用版），不猜测用户意图；
+    /// 新版首次采用必须走 `adoptMinutes` 显式动作（MC-31）。
+    private func migrateV2ToV3() throws {
+        let columns = try withStatement("PRAGMA table_info(minutes);") { statement in
+            var names: [String] = []
+            while try step(statement) == SQLITE_ROW {
+                if let name = columnText(statement, 1) { names.append(name) }
+            }
+            return names
+        }
+        if !columns.contains("is_accepted") {
+            try execute("ALTER TABLE minutes ADD COLUMN is_accepted INTEGER NOT NULL DEFAULT 0;")
+        }
     }
 }
