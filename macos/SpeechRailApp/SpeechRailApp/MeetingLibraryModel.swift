@@ -251,6 +251,36 @@ public final class MeetingLibraryModel {
         )
     }
 
+    // MARK: - 知识归档包（MA-19）
+
+    /// 导出归档包。**revision 必填**——用户在看哪一版，包里就是哪一版（MC-48）。
+    ///
+    /// 这一场还没整理出纪要时导不了，也不退回"导个空壳"：
+    /// 归档包的 `minutesID` 是必填项，缺了整包就没有意义。
+    public func exportArchive(scope: KnowledgeArchiveScope, to directory: URL) async throws -> URL? {
+        guard let documentID = selectedDocumentID else { return nil }
+        guard let minutesID = snapshot?.minutesVersionID else { return nil }
+        return try await coordinator.exportKnowledgeArchive(
+            selection: KnowledgeArchiveSelection(
+                documentID: documentID, minutesID: minutesID, scope: scope
+            ),
+            to: directory
+        )
+    }
+
+    /// 导入预检（MC-71）。**必须先看这个再谈导入**：同 ID 异内容的冲突
+    /// 静默跳过就是丢用户数据。
+    public func previewArchive(at packageURL: URL) async throws -> KnowledgeArchivePreview {
+        try await coordinator.previewKnowledgeArchive(at: packageURL)
+    }
+
+    /// 真正导入。成功后刷新列表——新文档得当场出现。
+    public func importArchive(at packageURL: URL) async throws -> KnowledgeArchiveImportResult {
+        let result = try await coordinator.importKnowledgeArchive(at: packageURL)
+        await loadPage(offset: 0)
+        return result
+    }
+
     /// 一次删除之后给用户看的那句话。
     ///
     /// **说具体数目与还剩什么**，不写"操作成功"：用户真正想知道的是

@@ -78,7 +78,7 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 | 7 | 删除不做物理安全擦除：SQLite 删行后文件里可能仍有残留页 | 沿用 | 验收 4 的**索引级**已证（`removeSession` 漏清索引那处已修，见该节）；物理残留未做，也无法在常规测试里证明 |
 | 8 | 分享包（`scope == .share`）不是完整往返格式：只装被引用的那几行原句 | 沿用 | 导入新库后这场会议不完整，是有意取舍而非缺陷 |
 | 9 | 检索排序是会话时间倒序，无相关性打分（BM25 之类） | 沿用 | 多命中时顺序可能不是最优；不阻塞验收 |
-| 11 | **归档包往返（MA-19）没有入口**：`exportKnowledgeArchive` / `previewKnowledgeArchive` / `importKnowledgeArchive` 生产代码零消费方 | 实测（列出全部 public 方法逐个查消费方） | 验收 4 的"导出"目前只由本轮新接的**单场导出**覆盖；跨库完整往返（含执行状态与决策演进）仍做不了 |
+
 | 12 | **恢复（MA-20 / 验收 5）没有入口**：`restorePreview` / `verifyBackup` 生产代码零消费方 | 实测（同上） | 恢复预演现已接进设置页（见第三节第九处）。~~用户无法备份~~ **上一版这条写错了，见下方更正条目**：备份按钮一直存在 |
 | 13 | **标签（MA-13）与项目没有入口**：`documentTags` / `setDocumentTags` / `documentTagsInProject` / `createProject` / `renameProject` 零消费方；`MeetingLibraryModel.filter(projectID:)` 本身也没有调用方 | 实测（同上 + 读库页视图） | 库页视图的文档注释写着"高级操作（标签、项目、删除、导出）留在更多菜单"，四项里此前只有"删除"存在。知识沉淀这条闭环在用户侧没有落点 |
 | 14 | **用户补充（验收 2）与执行状态/决策演进（MA-14）没有入口**：`meetingSupplements`、`executionEvents` / `recordExecutionEvent` / `executionState` / `confirmSupersession` / `conflictingDecisions` 零消费方 | 实测（同上） | 验收 2 要求区分"原始转录/人工修订/AI 归纳/**用户补充**"，四档里最后一档用户现在没法产出；决策演进链只能在库里看 |
@@ -97,6 +97,7 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 | （此前未被发现） | **验收 3 的触发路径是断的**：改来源有四条路径（改名/合并/标记「我」/拆出），写完 `speaker_revision` 都不重算复核状态，"需复核"要等下一次整理或重开才出现。已加 `SpeakerLabeling.onSourceRevision` 接上 `minutes.reload` | 实测（沿界面消费点回查生产者发现 + 回归测试红/绿反证） |
 | （同上，第四节补记） | **拆出改了归属却不提示复核**。已在 `SpeakerLabeling.split` 这一层单独记归属修订，并加测试守住「实时对齐写归属不得被当成用户改来源」 | 实测（回归测试红/绿反证） |
 | （此前未被发现，第六处） | **全文检索做完了，搜索框却够不着**：MA-15 交付了 `knowledge_fts` + `searchKnowledgeFullText`（14 项测试全绿），但库页谓词只 LIKE 标题与项目名，`excerpt` 无任何消费者，生产代码里唯一调用者是 `SessionCoordinator` 透传——**整条 MA-15 通路没有界面入口**。已把正文检索接进 `libraryPredicate` | 实测（沿 `excerpt` 消费者回查发现 + 回归测试红/绿反证；方案 §10.1 / MC-54 / MC-75 / 第 118 行均要求检索入口） |
+| （同上，第十处） | **归档包往返（MA-19）没有入口**：`exportKnowledgeArchive` / `previewKnowledgeArchive` / `importKnowledgeArchive` 生产代码零消费方。store 层 22 项测试（往返、冲突、幂等、路径穿越、执行状态）全绿，却没有一条路通向用户 | 实测（同上 + 读 `MeetingKnowledgeArchiveTests` 确认覆盖的是 store 层） | 已接进库页：导出归档包（完整归档／分享包分开）与导入（先预检、有真冲突不给导入按钮）。**新补的是 model 层测试**——store 那 22 项全都自己构造 `KnowledgeArchiveSelection`，"谁来填 minutesID"替换掉不会有一条变红 |
 | （同上，第九处，并更正第 12 条） | **App 能做出的备份，App 自己恢复不了**。设置页「备份记录库」调的是 `backup(to:)`——`VACUUM INTO` 出来的**单个 .sqlite3**，没有 `manifest.json`；而恢复只认「目录 + 库文件 + 清单」，缺清单明确拒绝。用户照着 App 的按钮做完备份，恢复不了自己刚做的那份。上一版总账把它误记成"备份没有入口"，是错的：按钮一直在，坏的是它产出的东西。已改走 `exportBackup(to:)`，并新增恢复预演入口 | 实测（沿 `backup(to:)` 与 `restorePreview` 两条生产路径对读发现；新用例从生产路径出发做红/绿证明，不是手工拼目录） |
 | （同上，第七处） | **检索只给会议名，不给证据**。验收 4 是"返回对应会议**与证据**"，上一条把"会议"接通了，`excerpt` 却仍无消费者——搜出一场会，用户还是不知道命中在哪句话上。已接上：行内显示命中的原话，转录原话优先于纪要正文，标题命中不硬凑 | 实测（回归测试红/绿反证；两条"不过度生成"护栏用例全程绿） |
 
@@ -2836,3 +2837,71 @@ try withStatement("DELETE FROM session WHERE id = ?;") { ... }
 - 设置页的备份仍然 `new` 一个 `SessionStore` 打开当前目录再导出
   （沿用既有写法，本轮未改）。这意味着备份时会跑一次迁移检查；
   是否会在运行中与主连接争用，需要真机验证。
+
+## M1 增量：归档包往返接进库页（MA-19 / 验收 4）
+
+### 做了什么
+
+上一节把 `exportKnowledgeArchive` / `previewKnowledgeArchive` / `importKnowledgeArchive`
+记成"没有入口"。这一节把它们接上——而且接的时候发现一件事：
+
+`MeetingKnowledgeArchiveTests` 的 **22 项测试全绿**，覆盖往返、身份与采用指针、
+冲突预检、幂等、路径穿越与符号链接、执行状态随包往返。没有一条路通向用户。
+
+**导出**：「更多」菜单里加「导出归档包…」子菜单，**完整归档与分享包分开摆**——
+它们不是一回事：完整归档能再导回这个 App，分享包只装被引用的那几行原句
+（总账第 8 条已记分享包不是完整往返格式）。按方案 MA-19「分享包与完整归档分开」。
+
+`minutesID` 取**详情正在显示的那一版**（MC-48）。没整理出纪要的会议**导不出**，
+界面明说"整理出纪要之后才能导出归档包"，不退回导空壳。
+
+**导入**：库页页头加「导入归档包…」。流程是**先预检、再谈写入**（MC-71）：
+
+- 预检面板报：哪一场第几版、什么范围、导出于什么时候、要新增多少、
+  与本机完全相同而跳过多少；
+- **有真冲突（同 ID 异内容）时根本不显示「导入」按钮**——
+  静默覆盖就是丢用户数据，store 侧会拒绝，界面也不该给这条路；
+- 导入结果只报事实：新增了多少文档／版本／结论／锚点，跳过了多少。
+
+### 新补的是 model 层，不是 store 层
+
+store 那 22 项测试全都**自己构造** `KnowledgeArchiveSelection`。
+它们证明的是"给定 document/revision/scope，store 做对了"——
+**"谁来填 minutesID"这一层替换掉，不会有一条变红**。
+
+而这一层恰恰是本轮新写的：`MeetingLibraryModel.exportArchive` 从
+`snapshot?.minutesVersionID` 取值，把"屏幕上显示的那一版"接到了包里。
+
+所以补的两条测试都落在 model 层：
+
+### 回归证据（2026-10-06）
+
+- `testModelArchiveExportPinsTheVersionOnScreen`：**屏幕上停在第一版，
+  库里 meanwhile 已经有第二版**，导出必须仍然是第一版。
+  **红/绿反证已核对**——把 `exportArchive` 改成重新读库（等价于"跟最新版走"）后
+  该用例变红，报的正是「导出必须仍然是屏幕上那一版」。
+  只导最新版就是 MC-48 说的失败形态。
+- `testModelArchiveExportRefusesWithoutMinutes`：没整理出纪要时返回 nil，不导空壳。
+
+`MeetingKnowledgeLibraryTests` 23 项全绿。全量
+`swift test --package-path macos/SpeechRailApp`：XCTest **1046 项**（上一节 1044 +2）
++ Swift Testing **419 项**，零失败。
+`./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+`python3 scripts/check_macos_test_target_coverage.py`：**OK**。
+
+### 迁移与回退
+
+- **无 schema 变更**。归档包格式（`speechrail.meeting.knowledge-archive/1`）未动。
+- 回退：删掉库页菜单里的归档包子菜单与页头的导入按钮，以及 model 的三个方法即可。
+  `SessionCoordinator` 的三个透传留着也无害（只是薄封装）。
+- 旧包继续能导入：`knowledgeArchivePayload` schema 仍是 `/1`，本轮没升版本。
+
+### 未验证事项与已知边界
+
+- **导入与导出都没在真机点过**（无 UI 自动化授权）：目录选择面板、
+  预检面板与结果面板的排版、冲突列表变长时的表现，都只是读代码推断。
+- **导入只在"当前库为空或无冲突"这一路被走过测试**。真冲突那条路
+  现在是"不给按钮"，因此**没有界面证据**说明用户看得到足够信息再决定
+  ——那需要一个单独的"保留本机这份"出口，本轮没做。
+- 分享包的往返**仍然不是完整还原**（总账第 8 条），菜单里的文案已按实情写，
+  没有把它说成"完整归档"。

@@ -29,6 +29,25 @@ struct MeetingKnowledgeLibraryView: View {
     @State private var pendingDeletion: PendingDeletion?
     /// 导出失败时要说的那一句。`nil` = 没有失败，没有理由弹一个空面板。
     @State private var exportError: String?
+    /// 归档包导入前的预检结果。**没看过它就不许导入**（MC-71）。
+    @State private var archivePreview: ArchiveImportPreview?
+    /// 导入完成后的实数。`nil` = 还没导。
+    @State private var archiveImportResult: ArchiveImportReport?
+    /// 导出归档包成功时的一句话。
+    @State private var archiveExportNotice: String?
+
+    /// 一次导入预检。带着包路径，导入时要用。
+    private struct ArchiveImportPreview: Identifiable {
+        let id = UUID()
+        var packageURL: URL
+        var preview: KnowledgeArchivePreview
+    }
+
+    /// 一次导入的结果。
+    private struct ArchiveImportReport: Identifiable {
+        let id = UUID()
+        var result: KnowledgeArchiveImportResult
+    }
 
     /// 一次待确认的删除。用 `Identifiable` 驱动 `confirmationDialog`。
     private struct PendingDeletion: Identifiable {
@@ -78,6 +97,20 @@ struct MeetingKnowledgeLibraryView: View {
         } message: {
             Text(exportError ?? "")
         }
+        .alert("归档包已导出", isPresented: Binding(
+            get: { archiveExportNotice != nil },
+            set: { if !$0 { archiveExportNotice = nil } }
+        )) {
+            Button("好") { archiveExportNotice = nil }
+        } message: {
+            Text(archiveExportNotice ?? "")
+        }
+        .sheet(item: $archivePreview) { pending in
+            archivePreviewSheet(pending)
+        }
+        .sheet(item: $archiveImportResult) { report in
+            archiveImportSheet(report)
+        }
         .task {
             if model.rows.isEmpty {
                 await model.loadPage(offset: restoredOffset)
@@ -125,7 +158,14 @@ struct MeetingKnowledgeLibraryView: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
             searchField
-            archivedToggle
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                archivedToggle
+                Spacer()
+                Button("导入归档包…", action: chooseArchiveToImport)
+                    .buttonStyle(.link)
+                    .controlSize(.small)
+                    .help("把别人分享的会议归档包导入这个知识库")
+            }
         }
         .padding(.horizontal, SpeechRailDesignTokens.Layout.contentPadding)
         .padding(.top, SpeechRailDesignTokens.Spacing.md)
@@ -326,6 +366,10 @@ struct MeetingKnowledgeLibraryView: View {
                         Button(format.title) { exportSelected(as: format) }
                     }
                 }
+                Menu("导出归档包…") {
+                    Button("完整归档（能再导回这个 App）") { exportArchive(scope: .fullArchive) }
+                    Button("分享包（只含被引用的原句）") { exportArchive(scope: .share) }
+                }
                 Divider()
                 if snapshot.status == .archived {
                     Button("撤销归档") {
@@ -356,6 +400,106 @@ struct MeetingKnowledgeLibraryView: View {
         return [preferred] + SessionExportFormat.allCases.filter { $0 != preferred }
     }
 
+    /// 导入预检（MC-71）。**有真冲突时不给「导入」按钮**——
+    /// 同 ID 异内容静默覆盖就是丢用户数据，store 侧会拒绝，界面也不该给这条路。
+    private func archivePreviewSheet(_ pending: ArchiveImportPreview) -> some View {
+        let preview = pending.preview
+        let manifest = preview.manifest
+        let identical = preview.conflicts.count - preview.realConflicts.count
+        return VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Text("这个包里有什么")
+                .font(.headline)
+            Text(manifest.documentTitle ?? "未命名会议")
+                .font(.callout)
+            Text(
+                "第 \(manifest.selectedVersion) 版纪要 · \(manifest.scope.title) · "
+                    + "导出于 \(manifest.createdAt.formatted(date: .abbreviated, time: .shortened))"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            archiveCount("要新增", preview.newObjectCount)
+            if identical > 0 {
+                archiveCount("与本机完全相同，跳过", identical)
+            }
+
+            if !preview.realConflicts.isEmpty {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Text("有 \(preview.realConflicts.count) 处同 ID 但内容不同")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                    Text("这些是你已经有的内容。这里不提供覆盖入口——先决定要不要保留本机这一份。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    ForEach(preview.realConflicts.prefix(5), id: \.self) { conflict in
+                        Text("· \(conflict.kind.rawValue) \(conflict.id)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            HStack {
+                Spacer()
+                if preview.isSafeToImport {
+                    Button("导入") {
+                        let url = pending.packageURL
+                        archivePreview = nil
+                        Task { await performImport(at: url) }
+                    }
+                }
+                Button("好", role: .cancel) { archivePreview = nil }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(SpeechRailDesignTokens.Layout.contentPadding)
+        .frame(minWidth: 380, alignment: .leading)
+    }
+
+    private func performImport(at packageURL: URL) async {
+        do {
+            let result = try await model.importArchive(at: packageURL)
+            archiveImportResult = ArchiveImportReport(result: result)
+        } catch {
+            exportError = error.localizedDescription
+        }
+    }
+
+    /// 导入结果只报事实：**新增了什么、跳过了什么**，不写一句"导入成功"了事。
+    private func archiveImportSheet(_ report: ArchiveImportReport) -> some View {
+        let result = report.result
+        return VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Text("已导入这个归档包")
+                .font(.headline)
+            archiveCount("会议文档", result.inserted.documents)
+            archiveCount("纪要版本", result.inserted.minutes)
+            archiveCount("结论与待办", result.inserted.items)
+            archiveCount("引用锚点", result.inserted.anchors)
+            if result.skippedIdentical > 0 {
+                archiveCount("与本机相同而跳过", result.skippedIdentical)
+            }
+            Text("在左边选它就能读。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("好") { archiveImportResult = nil }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(SpeechRailDesignTokens.Layout.contentPadding)
+        .frame(minWidth: 320, alignment: .leading)
+    }
+
+    private func archiveCount(_ label: String, _ value: Int) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label).font(.callout).foregroundStyle(.secondary)
+            Spacer()
+            Text("\(value)").font(.callout).monospacedDigit()
+        }
+    }
+
     /// 导出**详情正在显示的那一版**纪要（MC-48）。
     ///
     /// 导不出就说导不出：没有会话的导入纪要没有转录行，
@@ -368,6 +512,47 @@ struct MeetingKnowledgeLibraryView: View {
                     return
                 }
                 if !SessionExportPanel.write(payload, as: format) { return }
+            } catch {
+                exportError = error.localizedDescription
+            }
+        }
+    }
+
+    /// 导出归档包（MA-19）。**分享包与完整归档分开摆**，因为它们不是一回事：
+    /// 完整归档能再导回这个 App，分享包只装被引用的那几行原句。
+    private func exportArchive(scope: KnowledgeArchiveScope) {
+        let panel = NSOpenPanel()
+        panel.title = "选择归档包存放位置"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "存到这里"
+        guard panel.runModal() == .OK, let parent = panel.url else { return }
+        Task {
+            do {
+                guard let package = try await model.exportArchive(scope: scope, to: parent) else {
+                    exportError = "这场会议还没有可归档的纪要版本。整理出纪要之后才能导出归档包。"
+                    return
+                }
+                archiveExportNotice = "已导出「\(package.lastPathComponent)」。"
+            } catch {
+                exportError = error.localizedDescription
+            }
+        }
+    }
+
+    /// 导入归档包：先选包，**先看预检**，再谈写入（MC-71）。
+    private func chooseArchiveToImport() {
+        let panel = NSOpenPanel()
+        panel.title = "选择一个归档包"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.prompt = "检查这个包"
+        guard panel.runModal() == .OK, let package = panel.url else { return }
+        Task {
+            do {
+                let preview = try await model.previewArchive(at: package)
+                archivePreview = ArchiveImportPreview(packageURL: package, preview: preview)
             } catch {
                 exportError = error.localizedDescription
             }

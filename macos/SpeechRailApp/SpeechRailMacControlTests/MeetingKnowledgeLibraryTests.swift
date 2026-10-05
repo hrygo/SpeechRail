@@ -497,6 +497,69 @@ final class MeetingKnowledgeLibraryTests: XCTestCase {
         XCTAssertTrue(model.emptyStateHint.contains("换个词"), "没结果要说下一步做什么")
     }
 
+    /// MC-48 在 model 层也要成立：归档包的 `selectedMinutesID` 必须是
+    /// **详情正在显示的那一版**。
+    ///
+    /// `MeetingKnowledgeArchiveTests` 那 22 项全都直接构造
+    /// `KnowledgeArchiveSelection`——它们证明的是 store 层正确，
+    /// 替换掉"谁来填 minutesID"这一层，不会有一条变红。
+    func testModelArchiveExportPinsTheVersionOnScreen() async throws {
+        let store = try requireStore()
+        let documentID = try await makeMeeting(
+            title: "要归档的会", at: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        let model = MeetingLibraryModel(coordinator: try requireCoordinator())
+        await model.loadPage(offset: 0)
+        await model.open(documentID: documentID)
+        let shown = try XCTUnwrap(
+            model.snapshot?.minutesVersionID, "详情拿不到版本 id，归档包就没有东西可钉"
+        )
+
+        // 屏幕停在第一版，库里 meanwhile 已经有第二版。
+        // 只导最新版的话这条会红——那正是 MC-48 说的失败形态。
+        let document = try await store.meetingDocument(id: documentID)
+        let sessionID = try XCTUnwrap(document?.sourceSessionID)
+        _ = try await store.saveUserMinutesEdit(
+            sessionID: sessionID, editingMinutesID: shown, body: "这是第二版。"
+        )
+
+        let parent = try XCTUnwrap(directory)
+            .appendingPathComponent("packages-\(UUID().uuidString)", isDirectory: true)
+        let exported = try await model.exportArchive(scope: .fullArchive, to: parent)
+        let package = try XCTUnwrap(exported)
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let data = try Data(
+            contentsOf: package.appendingPathComponent(KnowledgeArchiveManifest.manifestFileName)
+        )
+        let manifest = try decoder.decode(KnowledgeArchiveManifest.self, from: data)
+        XCTAssertEqual(manifest.documentID, documentID)
+        XCTAssertEqual(
+            manifest.selectedMinutesID, shown,
+            "屏幕上显示的是第一版，库里已经有第二版——导出必须仍然是屏幕上那一版"
+        )
+    }
+
+    /// 没整理出纪要的会议**导不出**归档包——`minutesID` 是必填项。
+    /// 导一个空壳比导不出更糟：用户会以为这场会已经完整带走了。
+    func testModelArchiveExportRefusesWithoutMinutes() async throws {
+        let store = try requireStore()
+        let documentID = try await makeMeeting(
+            title: "还没整理的会", at: Date(timeIntervalSince1970: 1_700_000_000),
+            withMinutes: false
+        )
+        let model = MeetingLibraryModel(coordinator: try requireCoordinator())
+        await model.loadPage(offset: 0)
+        await model.open(documentID: documentID)
+        XCTAssertNil(model.snapshot?.minutesVersionID)
+
+        let parent = try XCTUnwrap(directory)
+            .appendingPathComponent("packages-\(UUID().uuidString)", isDirectory: true)
+        let package = try await model.exportArchive(scope: .fullArchive, to: parent)
+        XCTAssertNil(package, "没有纪要版本就没有可归档的东西")
+    }
+
     func testEmptyLibrarySuggestsWhatToDo() async throws {
         let store = try requireStore()
         let model = MeetingLibraryModel(coordinator: try requireCoordinator())

@@ -1074,6 +1074,30 @@ public final class SessionCoordinator {
         )
     }
 
+    // MARK: - 知识归档包（MA-19）
+
+    /// 导出归档包（MA-19）。`to` 是**父目录**：包会按"哪场会的第几版"命名落在里面。
+    public func exportKnowledgeArchive(
+        selection: KnowledgeArchiveSelection, to directory: URL
+    ) async throws -> URL {
+        try await store.exportKnowledgeArchive(selection: selection, to: directory)
+    }
+
+    /// 导入预检（MC-71）：读包、比对现有库，**只读不写**。
+    public func previewKnowledgeArchive(
+        at packageURL: URL
+    ) async throws -> KnowledgeArchivePreview {
+        try await store.previewKnowledgeArchive(at: packageURL)
+    }
+
+    /// 真正导入。有真冲突时 store 侧会拒绝——界面必须先给用户看预检。
+    @discardableResult
+    public func importKnowledgeArchive(
+        at packageURL: URL
+    ) async throws -> KnowledgeArchiveImportResult {
+        try await store.importKnowledgeArchive(at: packageURL)
+    }
+
     /// 检索索引状态：索引是否可用、有多少待处理项（§6.5「保存与索引分开报状态」）。
     public func searchIndexStatus() async throws -> SessionStore.SearchIndexStatus {
         try await store.searchIndexStatus()
