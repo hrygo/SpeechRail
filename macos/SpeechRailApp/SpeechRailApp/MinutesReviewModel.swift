@@ -34,6 +34,7 @@ public final class MinutesReviewModel {
     public init(coordinator: SessionCoordinator, sessionID: String, version: MinutesVersion) {
         self.coordinator = coordinator
         self.sessionID = sessionID
+        self.openingVersionID = version.id
         self.minutesID = version.id
         self.bodyOrigin = version.bodyOrigin
         self.draft = version.body ?? ""
@@ -68,6 +69,7 @@ public final class MinutesReviewModel {
             hasUnsavedChanges = false
             saveFailure = nil
             isSaving = false
+            await loadLineage()
             return true
         } catch {
             saveFailure = error.localizedDescription
@@ -84,6 +86,55 @@ public final class MinutesReviewModel {
         draft = lastSavedBody
         hasUnsavedChanges = false
         saveFailure = nil
+    }
+
+    /// 血缘：从第一版到当前版。**用户要能看见自己改过什么**（MC-48）。
+    public private(set) var lineage: [MinutesVersion] = []
+    /// 与「打开时的第一版」的差异。nil = 还没加载。
+    public private(set) var comparison: MinutesVersionDiff?
+
+    private var openingVersionID: String
+
+    /// 读一次血缘。进来时记下起点，之后一直和它比——
+    /// 用户要回答的是"我这次改了什么"，不是"和上一版差了什么"。
+    public func loadLineage() async {
+        lineage = (try? await coordinator.minutesEditLineage(minutesID: minutesID)) ?? []
+        recomputeComparison()
+    }
+
+    private func recomputeComparison() {
+        // 基准是**用户打开时看到的那一版**，不是血缘的起点。
+        // 打开一版已经改过的纪要时，起点是 AI 原文，但那不是用户这次想比的。
+        guard let opening = lineage.first(where: { $0.id == openingVersionID }),
+              let current = lineage.first(where: { $0.id == minutesID })
+        else {
+            comparison = nil
+            return
+        }
+        comparison = MinutesDiff.lineDiff(from: opening.body ?? "", to: current.body ?? "")
+    }
+
+    /// 采用当前这一版。**只有用户明确按下去才算**（MC-31）：
+    /// 改完不等于采用，生成新版本也不等于采用。
+    @discardableResult
+    public func adopt() async -> Bool {
+        // 采用之前必须先把草稿落库。存不进去就**不能**继续采用：
+        // 否则采用的是一版用户根本没看到的内容，"采用"就成了空话。
+        if hasUnsavedChanges {
+            guard await save() else { return false }
+        }
+        do {
+            let ok = try await coordinator.adoptMinutes(
+                sessionID: sessionID,
+                minutesID: minutesID,
+                expectedCurrentID: lineage.last(where: { $0.isAccepted })?.id
+            )
+            if ok { await loadLineage() }
+            return ok
+        } catch {
+            saveFailure = error.localizedDescription
+            return false
+        }
     }
 
     /// 正文出处的人话。界面直接显示它，不要让用户去猜。

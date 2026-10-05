@@ -16,18 +16,10 @@ struct MinutesReviewView: View {
     /// 由外层输入法适配层在需要时覆盖——这里留出接口而不是假装测不到。
     @State private var isComposing = false
 
-    private let onAdopt: (String) async throws -> Bool
-
-    init(
-        coordinator: SessionCoordinator,
-        sessionID: String,
-        version: MinutesVersion,
-        onAdopt: @escaping (String) async throws -> Bool
-    ) {
+    init(coordinator: SessionCoordinator, sessionID: String, version: MinutesVersion) {
         _model = State(initialValue: MinutesReviewModel(
             coordinator: coordinator, sessionID: sessionID, version: version
         ))
-        self.onAdopt = onAdopt
     }
 
     public var body: some View {
@@ -53,9 +45,43 @@ struct MinutesReviewView: View {
                     .foregroundStyle(.secondary)
             }
             statusLine
+            if let comparison = model.comparison, !comparison.isIdentical {
+                // 差异常驻，但不抢首屏：用户要回答的是"我改了什么"。
+                DisclosureGroup("与打开时的版本对比：\(comparison.summary)") {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(comparison.lines.enumerated()), id: \.offset) { _, line in
+                            diffRow(line)
+                        }
+                    }
+                    .padding(.top, SpeechRailDesignTokens.Spacing.xs)
+                }
+                .font(.caption)
+            }
         }
         .padding(.horizontal, SpeechRailDesignTokens.Layout.contentPadding)
         .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+        .task { await model.loadLineage() }
+    }
+
+    /// 增删用颜色和符号**两处**表达，不靠颜色单独承载信息。
+    @ViewBuilder
+    private func diffRow(_ line: MinutesVersionDiff.LineChange) -> some View {
+        switch line {
+        case .unchanged(let text):
+            Text(text).foregroundStyle(.secondary)
+        case .added(let text):
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text("+").foregroundStyle(.green).accessibilityHidden(true)
+                Text(text)
+            }
+            .accessibilityLabel("新增：\(text)")
+        case .removed(let text):
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text("−").foregroundStyle(.red).accessibilityHidden(true)
+                Text(text)
+            }
+            .accessibilityLabel("删除：\(text)")
+        }
     }
 
     @ViewBuilder
@@ -127,10 +153,7 @@ struct MinutesReviewView: View {
             // 组字中不弹确认层：用户在选词，不是在结束什么。
             Button("采用这一版") {
                 guard ReviewShortcutPolicy.shouldPresentConfirm(isComposing: isComposing) else { return }
-                Task {
-                    let body = model.draft
-                    _ = try? await onAdopt(body)
-                }
+                Task { await model.adopt() }
             }
             .keyboardShortcut(.return, modifiers: [.command, .shift])
             .help("把这一版设为当前采用的纪要")

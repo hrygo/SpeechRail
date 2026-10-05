@@ -236,11 +236,7 @@ struct MeetingKnowledgeLibraryView: View {
             MinutesReviewView(
                 coordinator: coordinator,
                 sessionID: version.sessionID,
-                version: version,
-                onAdopt: { _ in
-                    await model.reload()
-                    return true
-                }
+                version: version
             )
             .speechRailInspectorColumn()
         } else {

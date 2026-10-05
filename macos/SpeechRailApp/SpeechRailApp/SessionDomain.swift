@@ -4796,3 +4796,91 @@ public enum MinutesBodyOrigin: String, Codable, Hashable, Sendable {
     /// 用户自己写过的内容。导出与复制时要说清楚，不冒充模型输出。
     public var isUserAuthored: Bool { self == .userEdited || self == .userSupplement }
 }
+
+// MARK: - 版本对比（MA-11 / MC-48）
+
+/// 两版纪要的逐行差异。**只说哪里不一样，不替用户判断哪版对**。
+public struct MinutesVersionDiff: Hashable, Sendable {
+    public enum LineChange: Hashable, Sendable {
+        case unchanged(String)
+        case added(String)
+        case removed(String)
+    }
+
+    public var lines: [LineChange]
+    public var addedCount: Int
+    public var removedCount: Int
+
+    public init(lines: [LineChange], addedCount: Int, removedCount: Int) {
+        self.lines = lines
+        self.addedCount = addedCount
+        self.removedCount = removedCount
+    }
+
+    public var isIdentical: Bool { addedCount == 0 && removedCount == 0 }
+
+    /// 用户看这个对比要回答的是"我改了什么、或者 AI 换成了什么"，
+    /// 所以摘要直接给增减条数，不给"相似度"这种没法行动的数字。
+    public var summary: String {
+        if isIdentical { return "两版内容一样" }
+        var parts: [String] = []
+        if addedCount > 0 { parts.append("加了 \(addedCount) 行") }
+        if removedCount > 0 { parts.append("删了 \(removedCount) 行") }
+        return parts.joined(separator: "，")
+    }
+}
+
+public enum MinutesDiff {
+    /// 逐行对比。**行是"看起来像同一句"的最小单位**：
+    /// 按 LCS 做增删，不做同义改写判断——把"发布窗口定在九月"和
+    /// "发布窗口改到十月"判成同一行的话，用户就看不见自己改了什么。
+    public static func lineDiff(from old: String, to new: String) -> MinutesVersionDiff {
+        let oldLines = old.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let newLines = new.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let table = lcsTable(oldLines, newLines)
+
+        var lines: [MinutesVersionDiff.LineChange] = []
+        var added = 0
+        var removed = 0
+        var i = 0
+        var j = 0
+        while i < oldLines.count && j < newLines.count {
+            if oldLines[i] == newLines[j] {
+                lines.append(.unchanged(oldLines[i]))
+                i += 1
+                j += 1
+            } else if table[i + 1][j] >= table[i][j + 1] {
+                lines.append(.removed(oldLines[i]))
+                removed += 1
+                i += 1
+            } else {
+                lines.append(.added(newLines[j]))
+                added += 1
+                j += 1
+            }
+        }
+        while i < oldLines.count {
+            lines.append(.removed(oldLines[i]))
+            removed += 1
+            i += 1
+        }
+        while j < newLines.count {
+            lines.append(.added(newLines[j]))
+            added += 1
+            j += 1
+        }
+        return MinutesVersionDiff(lines: lines, addedCount: added, removedCount: removed)
+    }
+
+    private static func lcsTable(_ a: [String], _ b: [String]) -> [[Int]] {
+        var table = Array(repeating: Array(repeating: 0, count: b.count + 1), count: a.count + 1)
+        for i in stride(from: a.count - 1, through: 0, by: -1) {
+            for j in stride(from: b.count - 1, through: 0, by: -1) {
+                table[i][j] = a[i] == b[j]
+                    ? table[i + 1][j + 1] + 1
+                    : max(table[i + 1][j], table[i][j + 1])
+            }
+        }
+        return table
+    }
+}

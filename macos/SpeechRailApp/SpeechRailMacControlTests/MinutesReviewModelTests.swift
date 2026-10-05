@@ -210,6 +210,111 @@ final class MinutesReviewModelTests: XCTestCase {
         XCTAssertEqual(lineage.last?.body, "第二次改")
     }
 
+    // MARK: - MC-48：版本对比与采用
+
+    func testDiffReportsExactlyWhatChanged() {
+        let diff = MinutesDiff.lineDiff(
+            from: "# 发布评审\n\n发布窗口定在九月。\n",
+            to: "# 发布评审\n\n发布窗口改到十月。\n\n补充：顺延两周。\n"
+        )
+        XCTAssertFalse(diff.isIdentical)
+        // 改写的那句必须**既算删掉又算新增**：判成"同一行"的话，
+        // 用户就看不见自己把九月改成了十月。
+        XCTAssertTrue(diff.lines.contains(.removed("发布窗口定在九月。")))
+        XCTAssertTrue(diff.lines.contains(.added("发布窗口改到十月。")))
+        XCTAssertTrue(diff.lines.contains(.added("补充：顺延两周。")))
+        XCTAssertTrue(diff.lines.contains(.unchanged("# 发布评审")))
+        // 摘要里的数字必须与实际增删行数一致，否则它在骗人。
+        func isAdded(_ line: MinutesVersionDiff.LineChange) -> Bool {
+            if case .added = line { return true }
+            return false
+        }
+        func isRemoved(_ line: MinutesVersionDiff.LineChange) -> Bool {
+            if case .removed = line { return true }
+            return false
+        }
+        XCTAssertEqual(diff.addedCount, diff.lines.filter(isAdded).count)
+        XCTAssertEqual(diff.removedCount, diff.lines.filter(isRemoved).count)
+        XCTAssertTrue(diff.summary.contains("加了"))
+        XCTAssertTrue(diff.summary.contains("删了"))
+    }
+
+    func testIdenticalBodiesProduceNoDiff() {
+        let body = "# 发布评审\n\n发布窗口定在九月。\n"
+        let diff = MinutesDiff.lineDiff(from: body, to: body)
+        XCTAssertTrue(diff.isIdentical)
+        XCTAssertEqual(diff.summary, "两版内容一样")
+    }
+
+    func testComparisonIsAgainstTheVersionOpenedNotThePreviousOne() async throws {
+        let store = try requireStore()
+        let made = try await makeVersion()
+        let model = try await makeModel(sessionID: made.sessionID, minutesID: made.minutesID)
+        await model.loadLineage()
+
+        model.update("第二次改：把九月改成十月")
+        let savedOnce = await model.save()
+        XCTAssertTrue(savedOnce)
+
+        model.update("第三次改：再加一行")
+        let savedTwice = await model.save()
+        XCTAssertTrue(savedTwice)
+
+        let comparison = try XCTUnwrap(model.comparison)
+        XCTAssertEqual(model.lineage.count, 3, "第一版 + 两次改动")
+        // 基准是打开时那一版（AI 原文），所以两次改动都要看得见。
+        XCTAssertTrue(comparison.lines.contains(.removed("发布窗口定在九月。")))
+        XCTAssertTrue(comparison.lines.contains(.added("第三次改：再加一行")))
+        XCTAssertFalse(comparison.isIdentical)
+    }
+
+    func testAdoptMakesTheEditedVersionCurrent() async throws {
+        let store = try requireStore()
+        let made = try await makeVersion()
+        let model = try await makeModel(sessionID: made.sessionID, minutesID: made.minutesID)
+
+        model.update("改完了，采用这一版")
+        let adoptedOnce = await model.adopt()
+        XCTAssertTrue(adoptedOnce)
+
+        let adopted = try await store.minutesVersion(id: model.minutesID)
+        XCTAssertEqual(adopted?.isAccepted, true, "采用指针落在用户编辑出来的那一版")
+        XCTAssertTrue(model.lineage.last(where: { $0.isAccepted }) != nil)
+    }
+
+    func testAdoptSavesPendingDraftFirst() async throws {
+        let store = try requireStore()
+        let made = try await makeVersion()
+        let model = try await makeModel(sessionID: made.sessionID, minutesID: made.minutesID)
+
+        // 直接采用，但草稿还没存——采用必须先把草稿落库，
+        // 否则采用的是一个用户看不见的版本。
+        model.update("还没存就要采用")
+        let adoptedOnce = await model.adopt()
+        XCTAssertTrue(adoptedOnce)
+
+        let stored = try await store.minutesVersion(id: model.minutesID)
+        XCTAssertEqual(stored?.body, "还没存就要采用")
+        XCTAssertEqual(stored?.isAccepted, true)
+        XCTAssertFalse(model.hasUnsavedChanges)
+    }
+
+    func testAdoptFailsCleanlyWhenTheDraftCannotBeSaved() async throws {
+        let store = try requireStore()
+        let made = try await makeVersion()
+        let model = try await makeModel(sessionID: made.sessionID, minutesID: made.minutesID)
+
+        let existing = try await store.meetingDocument(forSessionID: made.sessionID)
+        let documentID = try XCTUnwrap(existing?.id)
+        _ = try await store.deleteMeetingKnowledge(documentID: documentID, mode: .archive)
+
+        model.update("存不进去的内容")
+        let adopted = await model.adopt()
+        XCTAssertFalse(adopted, "草稿存不下去就不能说采用成功")
+        XCTAssertNotNil(model.saveFailure)
+        XCTAssertEqual(model.draft, "存不进去的内容", "草稿仍然留着")
+    }
+
     // MARK: - MC-73：快捷键不穿透输入
 
     func testSessionShortcutsAreSuppressedWhileTyping() {
