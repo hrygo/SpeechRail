@@ -671,6 +671,90 @@ final class MeetingKnowledgeArchiveTests: XCTestCase {
         XCTAssertEqual(restored.count, 1)
     }
 
+    /// 人读的那份纪要里必须有执行状态。只写结构化 JSON 不够——
+    /// 大多数人导出后只读 `minutes.md`，那里没写就等于说"待办都还没做"。
+    func testReadableMarkdownShowsExecutionState() async throws {
+        let store = try requireStore()
+        let version = try await prepareMeetingWithCitations()
+        let items = try await store.minutesItems(minutesID: version.id)
+        let action = try XCTUnwrap(items.first { $0.kind == "action" })
+        try await store.recordExecutionEvent(
+            itemID: action.id, status: .done, ownerText: .some("张三")
+        )
+
+        let documentID = try await requireDocumentID()
+        let package = try await store.exportKnowledgeArchive(
+            selection: KnowledgeArchiveSelection(
+                documentID: documentID, minutesID: version.id, scope: .fullArchive
+            ),
+            to: try exportDestination()
+        )
+        let read = try KnowledgeArchiveFileIO.readPackage(at: package, fileManager: .default)
+        XCTAssertTrue(
+            read.markdown.contains("已完成"),
+            "可读纪要里应当看得出这条待办已经做完：\n\(read.markdown)"
+        )
+        XCTAssertTrue(read.markdown.contains("负责人：张三"), read.markdown)
+    }
+
+    func testManifestCountsIncludeExecutionState() async throws {
+        let store = try requireStore()
+        let version = try await prepareMeetingWithCitations()
+        let items = try await store.minutesItems(minutesID: version.id)
+        let action = try XCTUnwrap(items.first { $0.kind == "action" })
+        try await store.recordExecutionEvent(itemID: action.id, status: .done)
+
+        let documentID = try await requireDocumentID()
+        let selection = KnowledgeArchiveSelection(
+            documentID: documentID, minutesID: version.id, scope: .fullArchive
+        )
+        let payload = try await store.knowledgeArchivePayload(selection: selection)
+        let manifest = try await store.knowledgeArchiveManifest(
+            selection: selection,
+            payload: payload
+        )
+        // 清单说装了什么就得说全；漏报会让核对时对不上却查不出原因。
+        XCTAssertEqual(manifest.counts.executionEvents, 1)
+        XCTAssertEqual(manifest.counts.supersessions, 0)
+    }
+
+    func testSupersededExecutionEventIsNotReportedAsCurrent() async throws {
+        // 双时间日志里已失效的那条是历史，不能算成当前状态。
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let key = "doc\u{1F}action\u{1F}发布"
+        let events = [
+            ArchiveExecutionEvent(
+                id: "e1", itemKey: key, documentID: "d", itemID: "i1", kind: "action",
+                status: "done", ownerText: nil, dueText: nil, dueDate: nil,
+                validFrom: now.timeIntervalSince1970, recordedAt: now.timeIntervalSince1970,
+                validTo: now.timeIntervalSince1970 + 10, note: nil
+            ),
+            ArchiveExecutionEvent(
+                id: "e2", itemKey: key, documentID: "d", itemID: "i1", kind: "action",
+                status: "blocked", ownerText: nil, dueText: nil, dueDate: nil,
+                validFrom: now.timeIntervalSince1970 + 20, recordedAt: now.timeIntervalSince1970 + 20,
+                validTo: nil, note: nil
+            ),
+        ]
+        let current = KnowledgeArchiveMarkdown.currentExecutionByKey(events)
+        XCTAssertEqual(current.count, 1)
+        XCTAssertEqual(current[key]?.status, "blocked")
+    }
+
+    func testExpiredEventAloneDoesNotBecomeCurrent() async throws {
+        // 只有历史、没有当前状态时，不该凭空显示一个状态。
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let events = [
+            ArchiveExecutionEvent(
+                id: "e1", itemKey: "k", documentID: "d", itemID: "i", kind: "action",
+                status: "done", ownerText: nil, dueText: nil, dueDate: nil,
+                validFrom: now.timeIntervalSince1970, recordedAt: now.timeIntervalSince1970,
+                validTo: now.timeIntervalSince1970 + 10, note: nil
+            )
+        ]
+        XCTAssertTrue(KnowledgeArchiveMarkdown.currentExecutionByKey(events).isEmpty)
+    }
+
     func testPayloadSchemaIsV2() async throws {
         let store = try requireStore()
         let version = try await prepareMeetingWithCitations()

@@ -723,8 +723,12 @@ public enum KnowledgeArchiveMarkdown {
         if !items.isEmpty {
             rows.append("## 结论与待办")
             rows.append("")
+            let execution = Self.currentExecutionByKey(payload.execution)
             for item in items {
-                rows.append("- \(kindTitle(item.kind))：\(item.text)\(verdictSuffix(item.verdict))")
+                rows.append(
+                    "- \(kindTitle(item.kind))：\(item.text)\(verdictSuffix(item.verdict))"
+                        + executionSuffix(execution[item.itemKey])
+                )
                 for anchor in item.anchors {
                     guard let quote = anchor.quote, !quote.isEmpty else { continue }
                     let time = anchor.startSeconds.map { " \(SessionExporter.clock($0))" } ?? ""
@@ -764,6 +768,44 @@ public enum KnowledgeArchiveMarkdown {
 
     private static func adoptedSuffix(_ manifest: KnowledgeArchiveManifest) -> String {
         manifest.acceptedMinutesID == manifest.selectedMinutesID ? "（当前采用）" : ""
+    }
+
+    /// 每条 key 上**当前生效**的那条状态。
+    ///
+    /// 只认 `validTo == nil` 的：双时间日志里那些已失效的记录是历史，
+    /// 把它们算成当前状态会让导出件显示一件早就改掉的事还挂着。
+    public static func currentExecutionByKey(
+        _ events: [ArchiveExecutionEvent]
+    ) -> [String: ArchiveExecutionEvent] {
+        var current: [String: ArchiveExecutionEvent] = [:]
+        for event in events where event.validTo == nil {
+            let existing = current[event.itemKey]
+            if existing == nil
+                || (event.validFrom, event.recordedAt) > (existing!.validFrom, existing!.recordedAt) {
+                current[event.itemKey] = event
+            }
+        }
+        return current
+    }
+
+    /// 执行状态的人话后缀。
+    ///
+    /// 不写会怎样：结构化 JSON 里有状态，`minutes.md` 里没有——
+    /// 只看这份可读纪要的人会以为所有待办都还没做。**漏报和报错一样有害。**
+    private static func executionSuffix(_ event: ArchiveExecutionEvent?) -> String {
+        guard let event else { return "" }
+        var parts: [String] = [statusTitle(event.status)]
+        if let owner = event.ownerText, !owner.isEmpty { parts.append("负责人：\(owner)") }
+        if let due = event.dueText, !due.isEmpty {
+            parts.append("期限：\(due)")
+        } else if let dueDate = event.dueDate {
+            parts.append("期限：\(stamp(dueDate))")
+        }
+        return "（\(parts.joined(separator: " · "))）"
+    }
+
+    private static func statusTitle(_ status: String) -> String {
+        ActionExecutionStatus(rawValue: status)?.title ?? status
     }
 
     private static func verdictSuffix(_ verdict: String?) -> String {

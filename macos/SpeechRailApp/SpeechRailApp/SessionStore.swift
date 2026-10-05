@@ -4227,7 +4227,9 @@ extension SessionStore {
                 minutes: payload.minutes.count,
                 items: payload.items.count,
                 anchors: payload.items.reduce(0) { $0 + $1.anchors.count },
-                windows: payload.windows.count
+                windows: payload.windows.count,
+                executionEvents: payload.execution.count,
+                supersessions: payload.supersessions.count
             ),
             files: []
         )
