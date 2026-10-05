@@ -526,6 +526,16 @@ extension MeetingSessionLifecycleTests {
         func settleBriefly() async throws {
             for _ in 0..<20 { try await Task.sleep(for: .milliseconds(5)) }
         }
+
+        /// 往**当前那一代**连接投一条服务端事件。
+        ///
+        /// 投给"最后一条"连接而不是"第一条"：重连场景（MC-13）里新服务
+        /// 才拥有事件流，投错连接的话测试会意外地通过——
+        /// 事件进了旧连接，而旧连接早就不被消费了。
+        func emit(_ payload: RealtimeASRClient.Event) async throws {
+            let client = try XCTUnwrap(clients.all.last, "还没有连接：先把会议开起来再投事件")
+            await client.emit(payload)
+        }
     }
     // MARK: - 会前轻量标题（MA-10 / 方案 §4.1 / MC-04）
     //
@@ -655,6 +665,153 @@ extension MeetingSessionLifecycleTests {
         XCTAssertNil(record?.title, "库里也不能留下上一场的名字")
     }
 
+    // MARK: - MC-09～MC-13：转录身份、空结果与时间（方案 §17.2）
+    //
+    // 这一组此前**端不到端**，原因不是做不到，是没人接线：那份假连接
+    // 的 `events()` 每次现造一条**空流**，测试没有任何办法往里投事件，
+    // 于是生产 `handle` 里那几条 MC-09/10/14 的分支从来没被真的走过。
+    // 断言只落在 `TranscriptItemLedger` 自己身上——那是账本层，
+    // 不是"事件到达 → 落库 → 界面上看见"这条真实链路。
+    //
+    // 现在假连接持有**存下来的那一条**流，事件按真实 wire 顺序投进去。
+
+    /// 起一场会并等到录制态。麦克风必须显式勾上，否则空选择会被
+    /// `noSourceSelected` 挡掉，`start()` 根本进不到录制态。
+    private func startRecording(_ h: Harness) async throws -> String {
+        await h.clients.openGate()
+        await h.session.start(selection: MeetingAudioSelection(usesMicrophone: true))
+        try await h.settle { $0.phase == .recording }
+        return try XCTUnwrap(h.session.sessionID)
+    }
+
+    /// MC-09：A 和 B 交错出 partial。单 item 的文本不许被拼在一起，
+    /// 另一个 item 的结果仍要按**它自己的身份**落库。
+    ///
+    /// 拼错了的后果很具体：库里出现一句"A 的半句 + B 的半句"，
+    /// 归属和引用全都指错，而界面上看起来只是一句正常的话。
+    func testInterleavedPartialsDoNotBleedIntoEachOther() async throws {
+        let h = try await makeHarness()
+        let sessionID = try await startRecording(h)
+
+        try await h.emit(.partial(itemID: "A", delta: "灰度下周三"))
+        try await h.emit(.partial(itemID: "B", delta: "预算是三万"))
+        try await h.emit(.partial(itemID: "A", delta: "开始。"))
+        try await h.emit(.completed(itemID: "A", transcript: "灰度下周三开始。"))
+        try await h.emit(.completed(itemID: "B", transcript: "预算是三万。"))
+        try await h.settle { $0.session.lines.count == 2 }
+
+        let lines = try await h.store.lines(sessionID: sessionID)
+        XCTAssertEqual(lines.count, 2, "两个 item 落两行，不该多也不该少")
+        let texts = lines.map(\.text).sorted()
+        XCTAssertEqual(texts, ["灰度下周三开始。", "预算是三万。"], "各按各的身份落库")
+        for line in lines {
+            let text = line.text ?? ""
+            XCTAssertFalse(
+                text.contains("三万") && text.contains("灰度"),
+                "两个 item 的文本不得被拼进同一行：\(text)"
+            )
+        }
+    }
+
+    /// MC-10：同一 item 连续快照修订，先到 3 再迟到 2。
+    /// **全文替换**而非追加；旧 revision 不许倒写。
+    func testLateSnapshotRevisionDoesNotOverwriteTheNewerOne() async throws {
+        let h = try await makeHarness()
+        _ = try await startRecording(h)
+
+        try await h.emit(.partialSnapshot(itemID: "A", revision: 3, text: "第三版说法"))
+        try await h.emit(.partialSnapshot(itemID: "A", revision: 2, text: "第二版说法"))
+        try await h.settleBriefly()
+
+        let visible = h.session.partialText ?? ""
+        XCTAssertEqual(visible, "第三版说法", "迟到的旧 revision 不许倒写")
+        XCTAssertFalse(
+            visible.contains("第二版"),
+            "快照是替换不是追加：两版拼在一起等于把两份说法当成一句"
+        )
+    }
+
+    /// MC-11：已经显示过非空 partial，同一个 item 却回来一个**空 final**。
+    /// 三件事都要成立：内容**保留为未定稿恢复材料**并给出提示、
+    /// **不进入正式纪要**、**不无声消失**。
+    ///
+    /// 这是验收 2「空输出不得显示成功」在会议侧的具体形态。
+    func testEmptyFinalKeepsTheTextAsRecoveryMaterialInsteadOfLosingIt() async throws {
+        let h = try await makeHarness()
+        let sessionID = try await startRecording(h)
+
+        try await h.emit(.partial(itemID: "A", delta: "这句已经显示给用户了"))
+        try await h.emit(.completed(itemID: "A", transcript: ""))
+        try await h.settleBriefly()
+
+        // ① 不进入正式纪要：默认读法只给终稿行。
+        let finalLines = try await h.store.lines(sessionID: sessionID)
+        XCTAssertTrue(finalLines.isEmpty, "空 final 不得当成一句话落进正式转录")
+
+        // ② 不无声消失：以未定稿身份留在库里。
+        let all = try await h.store.lines(sessionID: sessionID, includePartial: true)
+        XCTAssertEqual(all.count, 1, "这句得留在库里，不能凭空消失")
+        XCTAssertEqual(all.first?.status, .partial, "它只能是非终稿")
+        XCTAssertEqual(all.first?.text, "这句已经显示给用户了")
+
+        // ③ 提示要说清发生了什么，而不是安静地什么都不发生。
+        let hint = try XCTUnwrap(h.session.lastFailure)
+        XCTAssertTrue(
+            hint.contains("没有拿到定稿正文") && hint.contains("已原样保留"),
+            "要明说这句没定稿但已保留：\(hint)"
+        )
+    }
+
+    /// MC-12：同连接同 item 已提交 final，重复的 final 与重复的事件再到达。
+    /// 只一条权威行、只推进一次 ordinal、不重复产出知识项。
+    func testDuplicateFinalDoesNotCreateASecondAuthoritativeRow() async throws {
+        let h = try await makeHarness()
+        let sessionID = try await startRecording(h)
+
+        try await h.emit(.completed(itemID: "A", transcript: "只该有一行"))
+        try await h.settle { $0.session.lines.count == 1 }
+        try await h.emit(.completed(itemID: "A", transcript: "只该有一行"))
+        try await h.settleBriefly()
+
+        let lines = try await h.store.lines(sessionID: sessionID)
+        XCTAssertEqual(lines.count, 1, "同一 item 的重复 final 只留一条权威行")
+        XCTAssertEqual(lines.first?.text, "只该有一行")
+        let ordinal = try XCTUnwrap(lines.first?.ordinal)
+        XCTAssertEqual(ordinal, 1, "重复 final 不得再推进一次 ordinal")
+    }
+
+    /// MC-13：同场重连，**新服务复用 item ID**。
+    /// 新 final 不得被上一条连接的去重集丢弃。
+    ///
+    /// 去重原本按裸 `item_id`，且只在新建会话时清空——同场重连之后，
+    /// 新服务的 ID 落进上一代连接的去重集，于是整句消失。
+    /// 用户看到的是"重连之后后半段话全没了"，而界面上没有任何提示。
+    func testReconnectWithReusedItemIDStillCommitsTheNewFinal() async throws {
+        let h = try await makeHarness()
+        let sessionID = try await startRecording(h)
+
+        try await h.emit(.completed(itemID: "shared-id", transcript: "重连之前说的"))
+        try await h.settle { $0.session.lines.count == 1 }
+
+        // 走生产重连路径（睡眠接缝 → enterInterruption → continueAfterInterruption）。
+        h.power.fireSleep()
+        try await h.settle { $0.phase == .interrupted }
+        await h.session.continueAfterInterruption()
+        try await h.settle { $0.phase == .recording }
+        try await h.settle { await $0.clients.all.count >= 2 }
+
+        // 新服务复用了同一个 item ID。
+        try await h.emit(.completed(itemID: "shared-id", transcript: "重连之后说的"))
+        try await h.settle { $0.session.lines.count == 2 }
+
+        let lines = try await h.store.lines(sessionID: sessionID)
+        XCTAssertEqual(lines.count, 2, "新服务的 final 不得被上一代连接的去重集丢弃")
+        XCTAssertEqual(
+            lines.map(\.text), ["重连之前说的", "重连之后说的"],
+            "两代各落一行，后半句不许凭空消失"
+        )
+    }
+
 }
 /// 这是"启动到一半用户结束了"能被造出来的唯一办法。
 actor ConnectGate {
@@ -701,8 +858,21 @@ actor ControllableRealtimeClient: MeetingRealtimeClient {
         self.gate = gate
     }
 
-    func events() async -> RealtimeEventStream<RealtimeASRClient.Event> {
-        RealtimeEventStream<RealtimeASRClient.Event>(limits: .init(maxBufferedEvents: 32))
+    /// **这条流必须是存下来的那一条**，不能每次 `events()` 现造一条：
+    /// 现造的话测试往里塞的事件，生产 session 永远收不到，于是断言全绿、
+    /// 验的却不是它。此前这份假件正是这么写的，也是 MC-09～MC-13
+    /// 一直端不到端的原因。
+    private let stream = RealtimeEventStream<RealtimeASRClient.Event>(
+        limits: .init(maxBufferedEvents: 256)
+    )
+
+    func events() async -> RealtimeEventStream<RealtimeASRClient.Event> { stream }
+
+    /// 按真实 wire 顺序投一条服务端事件。
+    func emit(_ payload: RealtimeASRClient.Event) async {
+        await stream.yield(
+            RealtimeEventEnvelope(metadata: RealtimeEventMetadata(), payload: payload)
+        )
     }
 
     func connect() async throws {

@@ -1,7 +1,7 @@
 ---
 title: "会议知识闭环 M0/M1 交付说明：保存、版本、来源、检索、导出、备份恢复与删除"
 status: active
-version: "4.9"
+version: "5.0"
 date: 2026-10-06
 branch: "codex/meeting-knowledge-milestones"
 base: "origin/main @ dab047b2"
@@ -11,7 +11,7 @@ base: "origin/main @ dab047b2"
 
 ## 范围
 
-分支共 66 个提交（本轮九个增量 + 一条交付说明更正）。
+分支共 67 个提交（本轮九个增量 + 一条交付说明更正 + MC-09～MC-13 端到端）。
 
 > **下面这段范围描述只涵盖最早的 M0**，当时确实"只动纪要版本链、结束封存上报与
 > 知识检索语义，不做 schema 迁移、不改表结构、不碰采集链路"。
@@ -110,6 +110,7 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 | （同上，第十五处，紧接上一节的粒度） | **MC-43 的粒度是错的**：验收要"只选择其中**一句** → 只**该句**进入 source snapshot"，而 `in_minutes` 是整条问答的布尔旗标，快照收的是整段 `answer_text`。用户想只留半句留不下，不想让另一半进纪要也拦不住。已升 schema v13 加 `minutes_excerpt`，读侧与 **prompt 侧同时**改（只改快照不够——纪要从 prompt 生成，prompt 仍拿整段就等于没选的那半句被偷偷用了一次），抽屉加一层逐句勾选（默认全选） | 实测（回归测试红/绿反证，7 项；方案缺陷表 F06 记的就是这件事） |
 
 | （同上，第十六处，**更正本分支自己写错的一条**） | **「MC-05～MC-08 未端到端、`MeetingSession` 是 App-only、测试调用生产 `MeetingSession` 尚未达成」——这条是错的。** 当时写的理由是 `MeetingSession` 依赖 AppKit/CoreAudio/`NSWorkspace`、不在 SPM 目标内；实测 `MeetingSession.swift` 在 `Package.swift:167` 目标内，只 import Foundation/Observation/SpeechRailControlKit。`MeetingSessionLifecycleTests` **直接构造并驱动生产 `MeetingSession`**，19 项全过：MC-05 `testStartSuspendedAtConnectCannotResurrectAfterTheSessionEnded`、MC-06 `testLateStartOfSessionACannotStealSessionBsIdentity`、MC-07 `testOnlyTheNewestConnectionKeepsUpstreaming`、MC-08 `testConnectFailureReleasesEverythingAndLeavesNoBlankRecord` + `testCaptureFailureDoesNotPretendItStarted`；MC-04 的「输入原样保留、来源不被重置」由 `testTitleAndSelectionSurviveAFailedStart` / `testRepeatedFailuresKeepTheTitle` 钉住 | 实测（2026-10-06 跑 `swift test --filter MeetingSessionLifecycleTests`，19/19 通过 + 逐个读测试体确认驱动的是生产类型）。**残留的真实细节**：MC-05 原文的闸门是"麦克风授权/能力检查"，测试用的可暂停闸门是 **ASR 建连**——麦克风权限在本架构里以采集失败（`MeetingAudioBlocked(reason: .microphoneDenied)`）呈现，由 MC-08 那条覆盖。断的是同一个后果，不是同一个闸门位置。同一批复查还推翻了 `MinutesGenerator` / `SpeakerLabeling` 的 App-only 说法（两者均已进目标）；`AudioSourceCoordinator` 与 `MeetingView.swift` 仍是 App-only，这条复核后仍成立 |
+| （同上，第十七处） | **MC-09～MC-13 端不到端**。此前挂在"MA-01 的 App-only 限制"下面；限制上一节已推翻，但欠账是真的——断言只落在 `TranscriptItemLedger` 自己身上，"事件到达 → 落库"这条链路一次没走过。真正原因是**没人接线**：假连接的 `events()` 每次现造一条空流，测试没有任何办法往里投事件。现改为持有存下来的那一条流并加 `emit`，补 MC-09/10/11/12/13 五条场景级回归，全部断言真实落库结果。MC-13 顺带把早先修掉的"重连复用 item_id 被吞"第一次锁进端到端回归 | 实测（回归测试红/绿反证：`MeetingSessionLifecycleTests` 19 → 24 项；接缝未接上时 `settle` 会超时 XCTFail，故非空跑） |
 | （同上，第十四处，本轮关闭总账第 14 条） | **MA-14 这一整块此前全部没有入口**：`recordExecutionEvent` / `executionState` / `conflictingDecisions` / `confirmSupersession` / `knowledgeChangeProposals` / `executionEvents` 六个 API 在生产代码里**零消费方**。用户标过的"已完成"、跨会议的两处矛盾、重新生成换掉了哪条结论、一条承诺是怎么变成今天这样的——全部只存在于库里 | 实测（沿六个 API 逐个回查消费方） | 四个提交分四轮接进库页：行动生命周期读写两侧、跨会议结论冲突、详情里的「这一版可能变了什么」、未完成事项里的「变更历史」。每轮都修了同一处的自相矛盾（详见各节）。**总账第 14 条到此关闭** |
 | （同上，第十三处） | **MC-56「列出全部未完成事项」没有入口**。`SessionStore.knowledgeItems(filter:scope:limit:offset:)` 早已能算结构化投影并给出分页计数，但 `KnowledgeItemFilter` 里**没有"未完成"这个条件**，`SessionCoordinator` 没有透传，库页没有入口——`knowledgeItems` 在生产代码里零消费方。用户只能一场一场点开，凭记忆拼自己那份待办清单。已补 `openOnly`、协调器透传、库页「未完成事项」面板与全量计数 | 实测（沿 `knowledgeItems` 回查消费方发现 + 红/绿反证） | 顺带修掉一个**同源的旧缺陷**：`counts.total` 取的是过滤**前**的行数，于是 `needsReview`/`byKind` 会随条件变、总计不会——正是验收里"只返回 top10 却称全部"最可能的成因。现在计数与列表取自同一批行 |
 
@@ -1486,9 +1487,9 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 
 - **账本的事件路径未运行验证**：接线已通过类型检查，但没有任何测试真的
   把 `partialSnapshot(revision:)` 之类的事件喂进 `MeetingSession`。
-  MC-09～MC-13 的断言落在账本这一层。同 MA-01 那条"App-only 限制"的说法**已不成立**
-  （`MeetingSession` 在 SPM 目标内），此处保留原样是因为**这些用例本身还没写**，
-  与 App-only 无关。
+  ~~MC-09～MC-13 的断言落在账本这一层，端到端仍缺（同 MA-01 的 App-only 限制）~~
+  **本轮已补齐，见下方「MC-09～MC-13 端到端」一节**。真正的原因不是 App-only，
+  是那份假连接的 `events()` 每次现造一条**空流**，测试根本没有办法往里投事件。
 - ~~**MC-15 未做**~~ → 已在下方「观测时间与声学起止分开」补齐。
 - **MC-16 的界面侧由 MA-10 覆盖**（静音/暂停/恢复三态分离），但
   "暂停前后不拼句、停记区间可追溯"在**落库层**未做断言。
@@ -3743,3 +3744,77 @@ MC-05 原文写的闸门是「**麦克风授权/能力检查**被 Gate 暂停」
   已把那条的措辞改成"缺的是用例，不是目标可达性"。
 - 仍然只有视图层（`MeetingView.swift`）是 App-only，所以纯界面的交互
   依旧只能靠真机走查——计入总账第 1 条。
+
+
+## M1 增量（MC-09～MC-13）｜转录身份、空结果与时间，端到端，2026-10-06
+
+### 这一节先更正一条记账
+
+上一节把 MC-09～MC-13 挂在「同 MA-01 的 App-only 限制」下面。那条限制本身
+上一节已经推翻，但**欠账是真的**：断言只落在 `TranscriptItemLedger` 自己身上，
+"事件到达 → 落库 → 界面上看得见"这条真实链路一次都没走过。
+
+真正的原因不是文件不可测，是**没人接线**：`MeetingSessionLifecycleTests` 里那份
+`ControllableRealtimeClient` 的 `events()` **每次现造一条空流**，
+测试手里没有任何办法往里投一条服务端事件。于是生产 `MeetingSession.handle`
+里那几条标着 MC-09 / MC-10 / MC-12 / MC-14 的分支，从来没有被真的执行过——
+断言全绿，验的却是账本，不是链路。
+
+### 做了什么
+
+- **接缝**：假连接改为持有**存下来的那一条** `RealtimeEventStream`，
+  并加 `emit(_:)` 按真实 wire 顺序投事件。关键是"存下来的那一条"——
+  现造的话测试往里塞的事件生产 session 永远收不到，断言会全绿而验不到东西。
+- **Harness** 加 `emit(_:)`，投给**最后一条**连接而不是第一条：
+  重连场景（MC-13）里只有新服务拥有事件流，投错连接会意外通过——
+  事件进了旧连接，而旧连接早就不被消费了。
+- **五条场景级回归**，全部驱动生产 `MeetingSession` 并断言**真实落库结果**：
+
+| 场景 | 用例 | 钉住什么 |
+|---|---|---|
+| MC-09 | `testInterleavedPartialsDoNotBleedIntoEachOther` | A/B 交错 partial，单 item 文本不被拼接，各按各的身份落库 |
+| MC-10 | `testLateSnapshotRevisionDoesNotOverwriteTheNewerOne` | 先修订 3 再迟到 2：快照**替换**不追加，旧 revision 不倒写 |
+| MC-11 | `testEmptyFinalKeepsTheTextAsRecoveryMaterialInsteadOfLosingIt` | 空 final → 保留为未定稿恢复材料 + 提示；不进正式纪要；不无声消失 |
+| MC-12 | `testDuplicateFinalDoesNotCreateASecondAuthoritativeRow` | 重复 final 只一条权威行、只推进一次 ordinal |
+| MC-13 | `testReconnectWithReusedItemIDStillCommitsTheNewFinal` | 重连后新服务复用 item ID，新 final 不被上一代去重集丢弃 |
+
+### 为什么这几条值得单独写一组
+
+**MC-11 是验收 2「空输出不得显示成功」在会议侧的具体形态**，而且它是最容易被
+糊过去的一条：一个空的 `final` 到达时，最省事的写法是 `guard !text.isEmpty
+else { return }`——那句话就此消失，界面上什么都不说，用户以为模型没听清。
+现在它落成 `status = .partial` 的恢复材料，并给出一句说清发生了什么的话。
+用例从三个方向钉：不进正式转录（默认读法只给终稿）、仍在库里（不是消失）、
+有提示（不是安静地什么都不发生）。
+
+**MC-13 锁的是本分支早先修掉的一个真实丢句缺陷**。那一处此前只有库层证据，
+没有场景级回归——把去重改成按 `(代次, itemID)` 之后，没有一条用例从
+"重连 → 新服务复用 id → 提交"这条真实路径上经过。这条补上之后，
+该修复第一次有了端到端的锁。
+
+### 回归证据（2026-10-06 实测）
+
+- `MeetingSessionLifecycleTests` 19 → **24 项**，零失败。
+- 这几条**不是空跑**：接缝没接上时事件不会到达，`settle` 会等到超时并 XCTFail；
+  MC-10 / MC-11 直接断言具体文本与提示，为空即失败。
+- 全量 `swift test --package-path macos/SpeechRailApp`：XCTest **1117 项**
+  （上一节 1112 +5）+ Swift Testing **419 项**，零失败。
+- `./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+- `python3 scripts/check_macos_test_target_coverage.py`：**OK**。
+- 无 schema 变更，`SessionStore.schemaVersion` 仍是 13（本轮只加测试与接缝）。
+
+### 迁移与回退
+
+无生产代码变更，无 schema 变更。回退即 revert 本次提交；
+`ControllableRealtimeClient` 改回"每次现造空流"即可，其余不受影响。
+
+### 未验证事项与已知边界
+
+- **MC-14（连接 A 失效后发 late failed/closed/attribution）没有一起补**。
+  它与 MC-13 共用重连路径，但断言需要 A 在被换下之后**继续发事件**，
+  而当前假连接只有一条共享流，表达不了"A 已经不被消费但仍在发"。
+  要覆盖它得给每条连接各自独立的流并显式关闭旧连接的消费——不是把断言
+  加在现有接缝上就能得到的，故留待下一轮，不假装已做。
+- 事件注入只覆盖 `RealtimeASRClient.Event` 的**会议侧分支**；
+  `.ttsAudio` 等助手侧事件在会议 session 里本就 `break`，未在此断言。
+- 仍无 UI 自动化授权，以上全部是库层与状态层证据，**不是真机走查**。计入总账第 1 条。
