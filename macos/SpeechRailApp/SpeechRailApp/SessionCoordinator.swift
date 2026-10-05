@@ -818,6 +818,43 @@ public final class SessionCoordinator {
         try await store.removeSession(id: id)
     }
 
+    // MARK: - 会议知识文档（MA-05/MC-68）
+
+    /// 建知识文档透传：导入文档允许无采集会话，不伪造"录过音"。
+    public func createMeetingDocument(_ document: MeetingDocument) async throws -> MeetingDocument {
+        try await store.createMeetingDocument(document)
+    }
+
+    /// 按 id 读知识文档：纯读，不写库。
+    public func meetingDocument(id: String) async throws -> MeetingDocument? {
+        try await store.meetingDocument(id: id)
+    }
+
+    /// 按采集会话查知识文档：纯读，不写库。
+    public func meetingDocument(forSessionID sessionID: String) async throws -> MeetingDocument? {
+        try await store.meetingDocument(forSessionID: sessionID)
+    }
+
+    /// 封存来源快照透传：快照与文档关联同一事务，失败全部回滚（MC-20）。
+    public func sealMeetingSource(_ snapshot: MeetingSourceSnapshot) async throws -> MeetingSourceSnapshot {
+        try await store.sealMeetingSource(snapshot)
+    }
+
+    /// 按 id 读来源快照：纯读，不写库。
+    public func sourceSnapshot(id: String) async throws -> MeetingSourceSnapshot? {
+        try await store.sourceSnapshot(id: id)
+    }
+
+    /// 记一条转录来源修订：只追加不覆盖原文（MA-05/MC-46）。
+    public func recordTranscriptRevision(_ revision: TranscriptRevision) async throws -> TranscriptRevision {
+        try await store.recordTranscriptRevision(revision)
+    }
+
+    /// 读一行的来源修订链：纯读，不写库。
+    public func transcriptRevisions(lineID: String) async throws -> [TranscriptRevision] {
+        try await store.transcriptRevisions(lineID: lineID)
+    }
+
     /// 能力层写库的唯一入口（§5.1：业务模块不持有连接、不写 SQL）。
     public func createSession(_ draft: SessionDraft) async throws -> SessionRecord {
         let record = try await store.createSession(draft)

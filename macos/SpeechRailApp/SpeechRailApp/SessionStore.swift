@@ -49,7 +49,10 @@ private final class SQLiteHandle: @unchecked Sendable {
 public actor SessionStore {
     public static let fileName = "sessions.sqlite3"
     /// 当前 schema 版本。`session` 表建表时就是 §15.2 + R1 + R2 合并后的形状，所以起点是 1。
-    public static let schemaVersion: Int32 = 1
+    /// v2（MA-05）：新增会议知识文档、转录来源修订、来源快照三张表；
+    /// `minutes` 追加 `is_legacy_import` 列（旧库原样迁入标记，不补造引用）。
+    /// v1 库由 `migrateV1ToV2` 逐级升，失败整库回滚（MC-67/MC-69）。
+    public static let schemaVersion: Int32 = 2
 
     private let directory: URL
     private let fileManager: FileManager
@@ -133,9 +136,16 @@ public actor SessionStore {
         guard version < Self.schemaVersion else { return }
 
         // 整库只在一个事务里逐级升；v1 就是「从空库建到当前形状」。
+        // v0 → v1：建全部 v1 表；v1 → v2：MA-05 知识文档三表 + legacy 标记列。
+        // 中途失败整库回滚，保留原库，不清空重建（MC-69）。
         try execute("BEGIN IMMEDIATE;")
         do {
-            try execute(Self.schemaV1)
+            if version < 1 {
+                try execute(Self.schemaV1)
+            }
+            if version < 2 {
+                try migrateV1ToV2()
+            }
             try execute("PRAGMA user_version=\(Self.schemaVersion);")
             try execute("COMMIT;")
         } catch {
@@ -569,7 +579,19 @@ public actor SessionStore {
 
     /// 移除一条记录。靠 `ON DELETE CASCADE` 带走它的行、纪要、OS 问答、中断区间。
     /// **破坏性动作**，界面必须先确认（§16.6）。
+    /// MA-05/MC-62：已关联会议知识文档的会话，普通删除入口拒绝级联销毁知识，
+    /// 调用方必须走 `deleteMeetingKnowledge` 显式删除知识文档；
+    /// `meeting_document.source_session_id` 是 `ON DELETE SET NULL`，
+    /// 脱离关联也必须经过明确领域操作，不由运行时清理自动触发。
     public func removeSession(id: String) throws {
+        let linked = try withStatement("SELECT id FROM meeting_document WHERE source_session_id = ? LIMIT 1;") { statement -> String? in
+            bind(statement, 1, id)
+            guard try step(statement) == SQLITE_ROW else { return nil }
+            return columnText(statement, 0)
+        }
+        if linked != nil {
+            throw SessionStoreError.statementFailed("该会话已有关联会议知识文档，请用知识域删除入口处理")
+        }
         try withStatement("DELETE FROM session WHERE id = ?;") { statement in
             bind(statement, 1, id)
             try step(statement)
@@ -635,7 +657,7 @@ public actor SessionStore {
     public func claimMinutes(sessionID: String, lease: TimeInterval) throws -> MinutesVersion? {
         let now = Date()
         let sql = """
-        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at
+        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at, is_legacy_import
         FROM minutes
         WHERE session_id = ?
           AND (status = 'queued' OR (status = 'running' AND (lease_until IS NULL OR lease_until < ?)))
@@ -740,7 +762,7 @@ public actor SessionStore {
     /// 返回整行以便调用方按原 job 身份认领，不新建版本。
     public func pendingMinutesRows(now: Date = Date()) throws -> [MinutesVersion] {
         let sql = """
-        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at
+        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at, is_legacy_import
         FROM minutes
         WHERE status = 'queued' OR (status = 'running' AND (lease_until IS NULL OR lease_until < ?))
         ORDER BY version ASC;
@@ -1238,7 +1260,7 @@ public actor SessionStore {
     /// 没有可用版时返回 nil，调用方不得把失败尝试或空正文当成功展示。
     public func latestUsableMinutes(sessionID: String) throws -> MinutesVersion? {
         let sql = """
-        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at
+        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at, is_legacy_import
         FROM minutes WHERE session_id = ? AND status = 'ready' AND body IS NOT NULL
         ORDER BY version DESC LIMIT 1;
         """
@@ -1253,7 +1275,7 @@ public actor SessionStore {
     /// 找不到返回 nil，调用方不得回退成最新版冒充选定版。
     public func minutesVersion(id: String) throws -> MinutesVersion? {
         let sql = """
-        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at
+        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at, is_legacy_import
         FROM minutes WHERE id = ? LIMIT 1;
         """
         return try withStatement(sql) { statement -> MinutesVersion? in
@@ -1265,7 +1287,7 @@ public actor SessionStore {
 
     public func minutesVersions(sessionID: String) throws -> [MinutesVersion] {
         let sql = """
-        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at
+        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, attempts, failure_reason, lease_until, created_at, is_legacy_import
         FROM minutes WHERE session_id = ? ORDER BY version DESC;
         """
         return try withStatement(sql) { statement in
@@ -1277,6 +1299,165 @@ public actor SessionStore {
             return rows
         }
     }
+    // MARK: - Meeting knowledge documents (MA-05)
+
+    @discardableResult
+    public func createMeetingDocument(_ document: MeetingDocument) throws -> MeetingDocument {
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            let sql = "INSERT INTO meeting_document (id, source_session_id, title, project_id, occurred_at, timezone, deleted_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);"
+            try withStatement(sql) { statement in
+                bind(statement, 1, document.id)
+                bind(statement, 2, document.sourceSessionID)
+                bind(statement, 3, document.title)
+                bind(statement, 4, document.projectID)
+                bind(statement, 5, document.occurredAt?.timeIntervalSince1970)
+                bind(statement, 6, document.timezone)
+                bind(statement, 7, document.deletedAt?.timeIntervalSince1970)
+                bind(statement, 8, document.createdAt.timeIntervalSince1970)
+                bind(statement, 9, document.updatedAt.timeIntervalSince1970)
+                try step(statement)
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+        guard let saved = try meetingDocument(id: document.id) else {
+            throw SessionStoreError.statementFailed("会议知识文档写入后回读失败")
+        }
+        return saved
+    }
+
+    public func meetingDocument(id: String) throws -> MeetingDocument? {
+        let sql = "SELECT id, source_session_id, title, project_id, occurred_at, timezone, deleted_at, created_at, updated_at FROM meeting_document WHERE id = ? LIMIT 1;"
+        return try withStatement(sql) { statement -> MeetingDocument? in
+            bind(statement, 1, id)
+            guard try step(statement) == SQLITE_ROW else { return nil }
+            return meetingDocument(from: statement)
+        }
+    }
+
+    public func meetingDocument(forSessionID sessionID: String) throws -> MeetingDocument? {
+        let sql = "SELECT id, source_session_id, title, project_id, occurred_at, timezone, deleted_at, created_at, updated_at FROM meeting_document WHERE source_session_id = ? LIMIT 1;"
+        return try withStatement(sql) { statement -> MeetingDocument? in
+            bind(statement, 1, sessionID)
+            guard try step(statement) == SQLITE_ROW else { return nil }
+            return meetingDocument(from: statement)
+        }
+    }
+
+    private func meetingDocument(from statement: OpaquePointer) -> MeetingDocument {
+        MeetingDocument(
+            id: columnText(statement, 0) ?? "",
+            sourceSessionID: columnText(statement, 1),
+            title: columnText(statement, 2),
+            projectID: columnText(statement, 3),
+            occurredAt: columnIsNull(statement, 4) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 4)),
+            timezone: columnText(statement, 5),
+            deletedAt: columnIsNull(statement, 6) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 6)),
+            createdAt: Date(timeIntervalSince1970: columnDouble(statement, 7)),
+            updatedAt: Date(timeIntervalSince1970: columnDouble(statement, 8))
+        )
+    }
+
+    @discardableResult
+    public func sealMeetingSource(_ snapshot: MeetingSourceSnapshot) throws -> MeetingSourceSnapshot {
+        guard try meetingDocument(id: snapshot.documentID) != nil else {
+            throw SessionStoreError.statementFailed("关联的会议知识文档不存在，来源快照未写入")
+        }
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            let sql = "INSERT INTO source_snapshot (id, document_id, line_revision_ids, speaker_map_revision, note_refs, coverage, seal_result, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?);"
+            try withStatement(sql) { statement in
+                bind(statement, 1, snapshot.id)
+                bind(statement, 2, snapshot.documentID)
+                bind(statement, 3, snapshot.lineRevisionIDs.joined(separator: ","))
+                bind(statement, 4, snapshot.speakerMapRevision)
+                bind(statement, 5, snapshot.noteRefs.joined(separator: ","))
+                bind(statement, 6, snapshot.coverage)
+                bind(statement, 7, snapshot.sealResult)
+                bind(statement, 8, snapshot.createdAt.timeIntervalSince1970)
+                try step(statement)
+            }
+            try withStatement("UPDATE meeting_document SET updated_at = ? WHERE id = ?;") { statement in
+                bind(statement, 1, snapshot.createdAt.timeIntervalSince1970)
+                bind(statement, 2, snapshot.documentID)
+                try step(statement)
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+        guard let saved = try sourceSnapshot(id: snapshot.id) else {
+            throw SessionStoreError.statementFailed("来源快照写入后回读失败")
+        }
+        return saved
+    }
+
+    public func sourceSnapshot(id: String) throws -> MeetingSourceSnapshot? {
+        let sql = "SELECT id, document_id, line_revision_ids, speaker_map_revision, note_refs, coverage, seal_result, created_at FROM source_snapshot WHERE id = ? LIMIT 1;"
+        return try withStatement(sql) { statement -> MeetingSourceSnapshot? in
+            bind(statement, 1, id)
+            guard try step(statement) == SQLITE_ROW else { return nil }
+            return sourceSnapshot(from: statement)
+        }
+    }
+
+    private func sourceSnapshot(from statement: OpaquePointer) -> MeetingSourceSnapshot {
+        func split(_ raw: String?) -> [String] {
+            guard let raw, !raw.isEmpty else { return [] }
+            return raw.split(separator: ",").map(String.init)
+        }
+        return MeetingSourceSnapshot(
+            id: columnText(statement, 0) ?? "",
+            documentID: columnText(statement, 1) ?? "",
+            lineRevisionIDs: split(columnText(statement, 2)),
+            speakerMapRevision: columnText(statement, 3),
+            noteRefs: split(columnText(statement, 4)),
+            coverage: columnText(statement, 5),
+            sealResult: columnText(statement, 6) ?? "ok",
+            createdAt: Date(timeIntervalSince1970: columnDouble(statement, 7))
+        )
+    }
+
+    @discardableResult
+    public func recordTranscriptRevision(_ revision: TranscriptRevision) throws -> TranscriptRevision {
+        let sql = "INSERT INTO transcript_revision (id, line_id, session_id, text, origin, parent_revision_id, edited_at) VALUES (?, ?, ?, ?, ?, ?, ?);"
+        try withStatement(sql) { statement in
+            bind(statement, 1, revision.id)
+            bind(statement, 2, revision.lineID)
+            bind(statement, 3, revision.sessionID)
+            bind(statement, 4, revision.text)
+            bind(statement, 5, revision.origin)
+            bind(statement, 6, revision.parentRevisionID)
+            bind(statement, 7, revision.editedAt.timeIntervalSince1970)
+            try step(statement)
+        }
+        return revision
+    }
+
+    public func transcriptRevisions(lineID: String) throws -> [TranscriptRevision] {
+        let sql = "SELECT id, line_id, session_id, text, origin, parent_revision_id, edited_at FROM transcript_revision WHERE line_id = ? ORDER BY edited_at ASC;"
+        return try withStatement(sql) { statement in
+            bind(statement, 1, lineID)
+            var rows: [TranscriptRevision] = []
+            while try step(statement) == SQLITE_ROW {
+                rows.append(TranscriptRevision(
+                    id: columnText(statement, 0) ?? "",
+                    lineID: columnText(statement, 1) ?? lineID,
+                    sessionID: columnText(statement, 2) ?? "",
+                    text: columnText(statement, 3) ?? "",
+                    origin: columnText(statement, 4) ?? "",
+                    parentRevisionID: columnText(statement, 5),
+                    editedAt: Date(timeIntervalSince1970: columnDouble(statement, 6))
+                ))
+            }
+            return rows
+        }
+    }
+
 
     public func innerOSExchanges(sessionID: String) throws -> [InnerOSExchange] {
         let sql = """
@@ -1482,7 +1663,13 @@ public actor SessionStore {
     }
 
     private func minutesVersion(from statement: OpaquePointer) -> MinutesVersion {
-        MinutesVersion(
+        // v1 老库没有 `is_legacy_import` 列：读不到时按 legacy 处理（不补造引用，MC-68）。
+        // 新库 SELECT 显式带该列（index 12）；老库形状只有 0...11。
+        let legacy: Bool = {
+            guard sqlite3_column_count(statement) > 12 else { return true }
+            return columnInt(statement, 12) != 0
+        }()
+        return MinutesVersion(
             id: columnText(statement, 0) ?? "",
             sessionID: columnText(statement, 1) ?? "",
             version: Int(columnInt(statement, 2)),
@@ -1494,7 +1681,8 @@ public actor SessionStore {
             attempts: Int(columnInt(statement, 8)),
             failureReason: columnText(statement, 9),
             leaseUntil: columnIsNull(statement, 10) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 10)),
-            createdAt: Date(timeIntervalSince1970: columnDouble(statement, 11))
+            createdAt: Date(timeIntervalSince1970: columnDouble(statement, 11)),
+            isLegacyImport: legacy
         )
     }
 
@@ -1745,4 +1933,74 @@ extension SessionStore {
 
     CREATE INDEX line_by_text ON line(text);
     """
+
+    /// v1 → v2（MA-05）：会议知识文档三表 + `minutes.is_legacy_import`。
+    /// 只做加法：v1 用户数据原样保留；新库（v0 → v2）由 `migrate()` 先建 v1 再升 v2，
+    /// 所以 `schemaV1` 不改，v2 语句对已存在对象用 `IF NOT EXISTS` 兜底幂等。
+    /// 迁移后旧纪要正文不动；是否 legacy 由调用方按“有无来源快照”判断，
+    /// 库层不猜、不补造引用（MC-68）。
+    static let schemaV2Delta = """
+    CREATE TABLE IF NOT EXISTS meeting_document (
+      id                 TEXT PRIMARY KEY,
+      source_session_id  TEXT UNIQUE REFERENCES session(id) ON DELETE SET NULL,
+      title              TEXT,
+      project_id         TEXT,
+      occurred_at        REAL,
+      timezone           TEXT,
+      deleted_at         REAL,
+      created_at         REAL NOT NULL,
+      updated_at         REAL NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS meeting_document_by_project ON meeting_document(project_id, occurred_at DESC);
+    CREATE INDEX IF NOT EXISTS meeting_document_by_session ON meeting_document(source_session_id);
+
+    CREATE TABLE IF NOT EXISTS transcript_revision (
+      id                 TEXT PRIMARY KEY,
+      line_id            TEXT NOT NULL REFERENCES line(id) ON DELETE CASCADE,
+      session_id         TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
+      text               TEXT NOT NULL,
+      origin             TEXT NOT NULL,
+      parent_revision_id TEXT REFERENCES transcript_revision(id) ON DELETE SET NULL,
+      edited_at          REAL NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS transcript_revision_by_line ON transcript_revision(line_id, edited_at ASC);
+
+    CREATE TABLE IF NOT EXISTS source_snapshot (
+      id                    TEXT PRIMARY KEY,
+      document_id           TEXT NOT NULL REFERENCES meeting_document(id) ON DELETE CASCADE,
+      line_revision_ids     TEXT NOT NULL DEFAULT '[]',
+      speaker_map_revision  TEXT,
+      note_refs             TEXT NOT NULL DEFAULT '[]',
+      coverage              TEXT,
+      seal_result           TEXT NOT NULL DEFAULT 'ok',
+      created_at            REAL NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS source_snapshot_by_document ON source_snapshot(document_id, created_at DESC);
+    """
+
+    /// v1 → v2 的 DDL 与回填（调用方已在同一事务内）。
+    /// `minutes.is_legacy_import` 用 `ALTER TABLE` 追加：SQLite 不支持 `IF NOT EXISTS` 列，
+    /// 所以先查 `PRAGMA table_info`，已存在则跳过，保证迁移幂等。
+    private func migrateV1ToV2() throws {
+        try execute(Self.schemaV2Delta)
+        let columns = try withStatement("PRAGMA table_info(minutes);") { statement in
+            var names: [String] = []
+            while try step(statement) == SQLITE_ROW {
+                if let name = columnText(statement, 1) { names.append(name) }
+            }
+            return names
+        }
+        if !columns.contains("is_legacy_import") {
+            try execute("ALTER TABLE minutes ADD COLUMN is_legacy_import INTEGER NOT NULL DEFAULT 0;")
+        }
+        // 回填：已有 minutes 行全部标为 legacy（v1 时代没有来源快照，不补造引用）；
+        // transcript_revision 回填只针对 final 行做 `legacy_import` 起点，
+        // 让 MC-46 的“引用仍指旧 revision”有据可查。
+        try execute("UPDATE minutes SET is_legacy_import = 1 WHERE is_legacy_import = 0;")
+        try execute("""
+        INSERT OR IGNORE INTO transcript_revision (id, line_id, session_id, text, origin, parent_revision_id, edited_at)
+        SELECT 'rev-' || line.id, line.id, line.session_id, line.text, 'legacy_import', NULL, line.created_at
+        FROM line WHERE line.status = 'final';
+        """)
+    }
 }
