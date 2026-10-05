@@ -26,7 +26,9 @@ final class AssistantReplyPersistenceRaceTests: XCTestCase {
 
     /// 纯文字路径夹具：`ask` 不建语音连接。
     private func makeTextSession(
-        llmScripts: [AssistantSessionTests.FakeAssistantLLM.Script] = []
+        llmScripts: [AssistantSessionTests.FakeAssistantLLM.Script] = [],
+        saveReplyLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
+        claimTitle: (@Sendable (String, String, String) async throws -> Bool)? = nil
     ) async throws -> (AssistantSession, SessionCoordinator, SessionStore, URL, UserDefaults) {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("assistant-reply-race-\(UUID().uuidString)", isDirectory: true)
@@ -42,7 +44,11 @@ final class AssistantReplyPersistenceRaceTests: XCTestCase {
         preferences.llmModel = "test-model"
         let session = AssistantSession(
             coordinator: coordinator,
-            dependencies: AssistantSessionDependencies(llm: llm)
+            dependencies: AssistantSessionDependencies(
+                llm: llm,
+                saveReplyLine: saveReplyLine,
+                claimTitle: claimTitle
+            )
         )
         session.preferences = { preferences }
         session.apiKeyProvider = { "test-key" }
@@ -317,5 +323,104 @@ final class AssistantReplyPersistenceRaceTests: XCTestCase {
         )
         let record = try await store.session(id: sessionID)
         XCTAssertEqual(record?.state, .archived, "end 后记录应为 archived")
+    }
+
+    // MARK: - M2/V06:标题、回复 INSERT 不挡正文
+
+    /// V06a:首次 reply INSERT 被 gate 卡住时，首 delta 正文预览不得被阻塞。
+    /// 基线 `await persistReplyPartial` 会让首 delta 等 INSERT 完成才继续；
+    /// fire-and-forget 后 streamingReply 在建行完成前就可见。
+    func testV06aFirstInsertDoesNotBlockFirstDeltaPreview() async throws {
+        let gate = AssistantSessionTests.Gate()
+        // gate 只卡助手回复首次建行（partial INSERT）；用户行与收尾回退直写同一 store。
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("assistant-v06a-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let store = SessionStore(directory: directory)
+        let suiteName = "assistant-v06a-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let coordinator = SessionCoordinator(store: store, defaults: defaults)
+        await coordinator.openStore()
+        let llm = AssistantSessionTests.FakeAssistantLLM(scripts: [.deltas(["首段正文", "第二段"])])
+        let preferences = SessionPreferences(defaults: defaults)
+        preferences.llmBaseURL = "http://127.0.0.1:8000/v1"
+        preferences.llmModel = "test-model"
+        let session = AssistantSession(
+            coordinator: coordinator,
+            dependencies: AssistantSessionDependencies(
+                llm: llm,
+                saveReplyLine: { draft, id in
+                    if draft.role == .assistant, draft.status == .partial {
+                        await gate.enter()
+                    }
+                    return try await store.appendLine(draft, id: id)
+                }
+            )
+        )
+        session.preferences = { preferences }
+        session.apiKeyProvider = { "test-key" }
+        session.moduleAPIKeyProvider = { _ in nil }
+        session.serviceReadiness = { .ready(profile: nil) }
+        defer {
+            gate.release()
+            try? FileManager.default.removeItem(at: directory)
+            defaults.removePersistentDomain(forName: defaults.description)
+        }
+        _ = await session.ask(typed: "首 delta 预览问题")
+        // 建行 gate 已进入，但预览正文必须已可见——不等首次 INSERT。
+        await waitUntil({ gate.entered }, message: "首次 reply INSERT 没有进入 gate")
+        await waitUntil(
+            { session.streamingReply?.contains("首段正文") == true },
+            message: "首次 INSERT 卡住时首 delta 预览必须可见"
+        )
+        gate.release()
+        await waitUntil(
+            { session.turns.contains { $0.role == .assistant && $0.text.contains("第二段") } },
+            message: "放行建行后整轮应收尾落库"
+        )
+    }
+
+    /// V06b:自动标题 IO 被 gate 卡住时，用户正文投影与 LLM 启动不得被阻塞。
+    /// 基线 `didSaveInput` 内 `await claimAutomaticTitle` 会延迟 submitTurn；
+    /// 后台 effect 化后标题只在后台认领。
+    func testV06bTitleClaimDoesNotBlockSubmitAndLLM() async throws {
+        let gate = AssistantSessionTests.Gate()
+        let (session, _, store, directory, defaults) = try await makeTextSession(
+            llmScripts: [.deltas(["标题门禁后的回答"])],
+            claimTitle: { _, _, _ in
+                await gate.enter()
+                return true
+            }
+        )
+        defer {
+            gate.release()
+            try? FileManager.default.removeItem(at: directory)
+            defaults.removePersistentDomain(forName: defaults.description)
+        }
+        _ = await session.ask(typed: "标题门禁问题请回答")
+        // 标题 gate 已进入，但用户正文必须已投影、LLM 必须已启动。
+        await waitUntil({ gate.entered }, message: "标题认领没有进入 gate")
+        await waitUntil(
+            { session.turns.contains { $0.role == .user && $0.text == "标题门禁问题请回答" } },
+            message: "标题卡住时用户正文必须已投影"
+        )
+        // runReply 已进入流式循环（streamingReply 已置空串）：标题 effect
+        // 卡住时 submitTurn/runReply 照常启动，不等标题认领。
+        await waitUntil(
+            { session.streamingReply != nil },
+            message: "标题卡住时 runReply 必须已进入流式循环（streamingReply 已置空串）"
+        )
+        gate.release()
+        await waitUntil(
+            {
+                session.streamingReply?.contains("标题门禁后的回答") == true
+                    || session.turns.contains { $0.role == .assistant }
+            },
+            message: "放行标题后 LLM 首 delta 必须到达（或整轮已收尾落库）"
+        )
+        await waitUntil(
+            { session.turns.contains { $0.role == .assistant } },
+            message: "放行标题后整轮应收尾落库"
+        )
     }
 }

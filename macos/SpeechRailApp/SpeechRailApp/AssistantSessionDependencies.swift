@@ -83,6 +83,12 @@ public struct AssistantSessionDependencies: Sendable {
     public var now: @Sendable () -> Date
     /// 仅替换用户输入保存 IO；默认仍由 SessionCoordinator 写入。
     public var saveInputLine: (@Sendable (LineDraft, String) async throws -> Int)?
+    /// M2/V06:仅替换助手回复建行/收尾回退 INSERT；默认仍由 SessionCoordinator 写入。
+    /// 测试用它 gate 住首次 INSERT，验证首 delta 正文预览不被建行阻塞。
+    public var saveReplyLine: (@Sendable (LineDraft, String) async throws -> Int)?
+    /// M2/V06:仅替换自动标题认领；默认仍由 SessionCoordinator 写入。
+    /// 测试用它 gate 住标题 IO，验证标题不挡正文投影与 LLM 启动。
+    public var claimTitle: (@Sendable (String, String, String) async throws -> Bool)?
     public var inputPersistenceConfiguration: AssistantInputPersistenceQueue.Configuration
 
     public init(
@@ -102,6 +108,8 @@ public struct AssistantSessionDependencies: Sendable {
         makePlaybackChannel: @escaping @MainActor () -> any AssistantPlaybackChannel = { PCMStreamPlayer() },
         now: @escaping @Sendable () -> Date = { Date() },
         saveInputLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
+        saveReplyLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
+        claimTitle: (@Sendable (String, String, String) async throws -> Bool)? = nil,
         inputPersistenceConfiguration: AssistantInputPersistenceQueue.Configuration = .init()
     ) {
         self.llm = llm
@@ -109,6 +117,8 @@ public struct AssistantSessionDependencies: Sendable {
         self.makePlaybackChannel = makePlaybackChannel
         self.now = now
         self.saveInputLine = saveInputLine
+        self.saveReplyLine = saveReplyLine
+        self.claimTitle = claimTitle
         self.inputPersistenceConfiguration = inputPersistenceConfiguration
     }
 }
