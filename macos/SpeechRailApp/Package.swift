@@ -158,6 +158,8 @@ let package = Package(
                 "MeetingSessionDependencies.swift",
                 // item 级转录账本（MA-02）：按 (代次, itemID) 去重，快照按 revision 替换。
                 "TranscriptItemLedger.swift",
+                // 时间证据（MA-02）：观测时刻与声学起止分开，伪造精度在类型层面不可能。
+                "TranscriptTimeWindow.swift",
             ]
         ),
         // 确定性回放 runner：只读仓库外 manifest，输出脱敏聚合结果。

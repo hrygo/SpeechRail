@@ -707,7 +707,14 @@ public final class MeetingSession {
         }
         let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, let sessionID, let startedAt else { return }
-        let window = pendingItem ?? (start: commitCursor ?? startedAt, end: dependencies.clock.now())
+        // 落库时只有**观测**时间：客户端这一刻刚收到这句话，
+        // 不知道它什么时候被说出来。把接收间隔当发声时间就是编造精度
+        // （MC-15），所以这里显式标 `unavailable`，等对齐结果到达再升级。
+        let observed = pendingItem ?? (start: commitCursor ?? startedAt, end: dependencies.clock.now())
+        let window = TranscriptTimeWindow.observedOnly(
+            start: observed.start.timeIntervalSince(startedAt),
+            end: observed.end.timeIntervalSince(startedAt)
+        )
         let isEpochStart = epoch > 1 && lines.isEmpty
         let lineID = UUID().uuidString
         let ordinal: Int
@@ -719,9 +726,10 @@ public final class MeetingSession {
                     text: text,
                     source: lineSource,
                     speakerLabel: nil,
-                    tStart: window.start.timeIntervalSince(startedAt),
-                    tEnd: window.end.timeIntervalSince(startedAt),
-                    isDeviceSwitch: isEpochStart
+                    tStart: window.observedStart,
+                    tEnd: window.observedEnd,
+                    isDeviceSwitch: isEpochStart,
+                    timingQuality: window.quality
                 ),
                 id: lineID
             )
@@ -740,8 +748,8 @@ public final class MeetingSession {
                 id: lineID,
                 ordinal: ordinal,
                 text: text,
-                start: window.start.timeIntervalSince(startedAt),
-                end: window.end.timeIntervalSince(startedAt),
+                start: window.observedStart,
+                end: window.observedEnd,
                 speakerLabel: nil,
                 source: lineSource,
                 isDeviceSwitch: isEpochStart
