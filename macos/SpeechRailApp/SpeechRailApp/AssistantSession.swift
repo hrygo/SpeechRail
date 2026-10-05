@@ -514,6 +514,10 @@ public final class AssistantSession {
     /// 上游不及时响应，也不能继续把 delta、TTS 或落库写回当前会话。
     private var replyTask: Task<Void, Never>?
     private var replyGeneration = 0
+    // M2/V06:自动标题是有身份、可等待的后台 effect,不挡正文投影与回答。
+    // 结束/新标题按身份回收旧 effect;effect 只写自己的标题认领,不碰正文。
+    private var titleEffect: Task<Void, Never>?
+    private var titleEffectID: UUID?
     /// 重连的 single-flight 句柄。第二次重试与结束都要能让旧重试失效（S2 第 10 条）。
     private var retryTask: Task<Void, Never>?
     /// 用户按了「静音麦克风」：不再上行音频，但会话、连接、记录都留着。
@@ -1575,6 +1579,9 @@ public final class AssistantSession {
             inputsSaved = await waitForInputSaves(sessionID: endingSession)
             let records = voiceRecordEffects.values.filter { $0.sessionID == endingSession }
             for record in records { await record.task.value }
+            // M2/V06:标题 effect 有界收尾——标题无响应不挡结束报告，
+            // 标题失败只记原因，不覆盖正文、不污染封存判定。
+            await drainTitleEffect()
         } else {
             inputsSaved = true
         }
@@ -1819,11 +1826,18 @@ public final class AssistantSession {
             lastFailure = pendingSealReason
             return false
         }
+        // M2/V06:纯文字结束同样有界等标题 effect，不挡封存报告。
+        await drainTitleEffect()
         return true
     }
 
     private func resetToIdleKeepingTurns() {
         invalidateReply()
+        // M2/V06:新场不继承旧标题句柄。结束路径已在 reset 之前 drain；
+        // 这里只取消并清空，迟到标题写 lastFailure 时有 sessionID 守卫。
+        titleEffect?.cancel()
+        titleEffect = nil
+        titleEffectID = nil
         cancelInterruptEffect()
         phase = .idle
         level = 0
@@ -2171,14 +2185,26 @@ public final class AssistantSession {
            command.source == .keyboard || command.connection == connectionToken {
             lastFailure = nil
         }
+        // M2/V06:自动标题是有身份、可等待的后台 effect,不挡正文投影与回答。
+        // 先落正文、先生效回答资格,标题只在后台认领;标题失败只记原因,
+        // 不覆盖正文、不阻塞 LLM 流。
         if command.formal, let name = SessionTitleSuggestion.suggest(from: command.text) {
-            do {
-                _ = try await coordinator.claimAutomaticTitle(
-                    sessionID: command.sessionID, lineID: command.lineID, title: name
-                )
-            } catch {
-                if sessionID == command.sessionID { lastFailure = "内容已保存，但记录标题未保存：\(error.localizedDescription)" }
+            let titleSessionID = command.sessionID
+            let titleLineID = command.lineID
+            let titleText = name
+            let titleTask = Task<Void, Never> { [weak self] in
+                guard let self else { return }
+                do {
+                    _ = try await self.coordinator.claimAutomaticTitle(
+                        sessionID: titleSessionID, lineID: titleLineID, title: titleText
+                    )
+                } catch {
+                    if self.sessionID == titleSessionID {
+                        self.lastFailure = "内容已保存，但记录标题未保存：\(error.localizedDescription)"
+                    }
+                }
             }
+            trackTitleEffect(titleTask)
         }
         // 旧连接仍完成自己的归档；当前 projection 与回答资格单独校验。
         guard sessionID == command.sessionID else { return }
@@ -2207,6 +2233,31 @@ public final class AssistantSession {
             questionID: command.lineID, text: command.text, source: command.source,
             spoken: command.source == .microphone
         )
+    }
+
+    // M2/V06:标题 effect 只登记自己的句柄,不等待、不阻塞调用方。
+    private func trackTitleEffect(_ task: Task<Void, Never>) {
+        titleEffect?.cancel()
+        titleEffectID = UUID()
+        titleEffect = task
+    }
+
+    // M2/V06:结束/收尾等待标题 effect,但有界——标题无响应不挡结束报告。
+    private func drainTitleEffect(timeout: Duration = .seconds(2)) async {
+        guard let effect = titleEffect else { return }
+        let titleID = titleEffectID
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await effect.value }
+            group.addTask {
+                try? await Task.sleep(for: timeout)
+            }
+            _ = await group.next()
+            group.cancelAll()
+        }
+        if titleEffectID == titleID {
+            titleEffect = nil
+            titleEffectID = nil
+        }
     }
 
     private func waitForInputSaves(sessionID: String, timeout: Duration = .seconds(8)) async -> Bool {
@@ -2334,7 +2385,11 @@ public final class AssistantSession {
     /// 不在每个 token 上写库：那既没必要，也会把 WAL 写满。崩溃前还没落库的那部分
     /// 本来就不承诺恢复——已经落库的那部分由 `sealAbandonedSessions` 封成
     /// final + interrupted（见 `SessionStore`），用户至少还能看到已经说过的话。
-    private func persistReplyPartial(generation: Int) async {
+    // M2/V06:每个 reply 只有一个创建任务；创建与收尾共享固定行 ID。
+    // 调用方 fire-and-forget,不 await 首次 INSERT；正文预览与内存累加不等建行。
+    private var replyCreateTasks: [String: Task<Void, Never>] = [:]
+
+    private func persistReplyPartial(generation: Int) {
         // VA-04：按 ID 认领，不用旧整个副本回写 currentReply。
         // 迟到 persist 返回时若新轮已接管，只更新匹配轮的 isPersisted/ordinal，
         // 保留当前较新的 text/revision。
@@ -2343,40 +2398,87 @@ public final class AssistantSession {
               currentReply?.isPersisted == false,
               currentReply?.hasSpeakableText == true
         else { return }
-        guard var reply = currentReply, reply.id == replyID else { return }
-        reply.persistence = .persisting
-        currentReply?.persistence = .persisting
+        guard let reply = currentReply, reply.id == replyID else { return }
+        // 单创建任务：同一 replyID 只建一次行，重复调用直接返回。
+        if replyCreateTasks[reply.id] != nil { return }
         let replyText = reply.text
         let replySessionID = reply.sessionID
         let replySource = reply.source
+        let replyGeneration = reply.generation
+        currentReply?.persistence = .persisting
+        let createTask = Task<Void, Never> { [weak self] in
+            guard let self else { return }
+            await self.runReplyCreate(
+                replyID: reply.id,
+                sessionID: replySessionID,
+                source: replySource,
+                generation: replyGeneration,
+                initialText: replyText
+            )
+        }
+        replyCreateTasks[reply.id] = createTask
+    }
+
+    private func runReplyCreate(
+        replyID: String,
+        sessionID: String,
+        source: SessionLineSource,
+        generation: Int,
+        initialText: String
+    ) async {
+        defer { replyCreateTasks.removeValue(forKey: replyID) }
         do {
             let ordinal = try await coordinator.appendLine(
                 LineDraft(
-                    sessionID: replySessionID,
+                    sessionID: sessionID,
                     role: .assistant,
-                    text: replyText,
-                    source: replySource,
+                    text: initialText,
+                    source: source,
                     status: .partial
                 ),
-                id: reply.id
+                id: replyID
             )
             // 返回后重算当前身份：仍是同一轮才更新全文，否则只补旧轮标记。
-            if currentReply?.id == reply.id {
+            // 正文以 finalize 时的最新内存文本为准，这里只记“行已存在 + 序号”。
+            if currentReply?.id == replyID {
                 currentReply?.isPersisted = true
                 currentReply?.ordinal = ordinal
                 currentReply?.persistence = .persisted
-            } else if currentReply?.generation != generation {
-                // 旧轮建行成功：记录落库事实，不碰新轮正文与状态。
-                reply.isPersisted = true
-                reply.ordinal = ordinal
-                reply.persistence = .persisted
             }
         } catch {
+            // M2/V06:收尾可能在 drain 超时后经回退 INSERT 先建好同一行——
+            // 此时撞主键不是失败，而是"行已存在"。按 id 核对后只补序号与
+            // 已建标记，不报失败、不碰正文； genuinely 失败才走原路径。
+            if let existing = try? await coordinator.lines(sessionID: sessionID, includePartial: true),
+               let row = existing.first(where: { $0.id == replyID }) {
+                if currentReply?.id == replyID {
+                    currentReply?.isPersisted = true
+                    currentReply?.ordinal = row.ordinal
+                    if currentReply?.persistence == .persisting {
+                        currentReply?.persistence = .persisted
+                    }
+                }
+                return
+            }
             // 建行失败不打断这一轮：正文还在内存里，收尾时会再试一次完整落库。
-            if currentReply?.id == reply.id {
+            if currentReply?.id == replyID {
                 currentReply?.persistence = .idle
                 lastFailure = "这一句正在生成，但暂时存不下来：\(error.localizedDescription)"
             }
+        }
+    }
+
+    // M2/V06:收尾等待同一 replyID 的创建任务（同句柄、固定行 ID），
+    // 有界等待——创建无响应不挡结束报告，finalize 会退回 INSERT 路径。
+    private func drainReplyCreate(replyID: String, timeout: Duration = .seconds(2)) async {
+        guard let task = replyCreateTasks[replyID] else { return }
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await task.value }
+            group.addTask {
+                try? await Task.sleep(for: timeout)
+            }
+            _ = await group.next()
+            group.cancelAll()
         }
     }
 
@@ -2417,8 +2519,9 @@ public final class AssistantSession {
             return
         }
 
-        // 不依赖快照的 isPersisted：快照可能过期（persistReplyPartial 在
-        // await 期间完成建行），先试 UPDATE，不存在再退回 INSERT。
+        // M2/V06:收尾与创建同句柄、固定行 ID——先有界等创建任务，
+        // 再试 UPDATE，不存在退回 INSERT。不依赖快照的 isPersisted。
+        await drainReplyCreate(replyID: reply.id)
         do {
             let ordinal = try await coordinator.finalizeAssistantLine(
                 sessionID: reply.sessionID,
@@ -2665,8 +2768,9 @@ public final class AssistantSession {
                 // 这一句的时刻按**开始回答**算，不是按它说完算：生成要几秒，
                 // 用结束时刻会让时间码落在那一句之后（稿行右侧那个 `14:02:16`）。
                 currentReply?.text = reply
-                // 第一次出现非空白正文时按固定 id 建行；之后只 UPDATE，不再 INSERT。
-                await persistReplyPartial(generation: generation)
+                // M2/V06:第一次出现非空白正文时按固定 id 建行；之后只 UPDATE。
+                // 首 delta 只进有界预览与内存累加，不等首次 INSERT，不挡正文消费。
+                persistReplyPartial(generation: generation)
                 // 屏幕与落库永远用**原始**文本。M0e：未定稿不开口——流式 delta
                 // 只做预览与落库，不开嗓、不喂增量；朗读等完整终态后走确认计划。
                 continue
