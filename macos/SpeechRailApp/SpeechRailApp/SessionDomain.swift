@@ -4381,3 +4381,266 @@ public struct MeetingProject: Identifiable, Hashable, Sendable {
         self.createdAt = createdAt
     }
 }
+
+// MARK: - 行动生命周期与决策演进（MA-14 / MC-53、MC-57～MC-59）
+
+/// 执行状态。**与核对状态是两个轴**，不能压成一个枚举。
+///
+/// 一条行动完全可以"内容还没核对"而且"用户已经做完了"。合成一个枚举，
+/// 界面就只能显示一半信息：写"已完成"会让人以为内容已核实，
+/// 写"待核对"又会把已经做完的事重新拎回待办。
+public enum ActionExecutionStatus: String, Codable, Hashable, Sendable, CaseIterable {
+    case open
+    case done
+    case blocked
+    case dropped
+
+    public var title: String {
+        switch self {
+        case .open: "未完成"
+        case .done: "已完成"
+        case .blocked: "受阻"
+        case .dropped: "已放弃"
+        }
+    }
+}
+
+/// 一次执行状态变化。**只追加，不改写**。
+///
+/// `ownerText` / `dueText` 为 nil 的含义是"不知道"，不是"清空"——
+/// 会上没说是谁，就是不知道，不从正文猜（MC-59）。
+public struct KnowledgeExecutionEvent: Identifiable, Hashable, Sendable {
+    public var id: String
+    public var itemKey: String
+    public var documentID: String?
+    public var itemID: String?
+    public var kind: String
+    public var status: ActionExecutionStatus
+    public var ownerText: String?
+    public var dueText: String?
+    public var dueDate: Date?
+    /// 有效时间：这件事从什么时候开始这样。
+    public var validFrom: Date
+    /// 记入时间：我们什么时候知道的。
+    public var recordedAt: Date
+    /// 被后一条取代的时刻；nil = 仍然有效。
+    public var validTo: Date?
+    public var note: String?
+
+    public init(
+        id: String = UUID().uuidString,
+        itemKey: String,
+        documentID: String? = nil,
+        itemID: String? = nil,
+        kind: String,
+        status: ActionExecutionStatus,
+        ownerText: String? = nil,
+        dueText: String? = nil,
+        dueDate: Date? = nil,
+        validFrom: Date,
+        recordedAt: Date = Date(),
+        validTo: Date? = nil,
+        note: String? = nil
+    ) {
+        self.id = id
+        self.itemKey = itemKey
+        self.documentID = documentID
+        self.itemID = itemID
+        self.kind = kind
+        self.status = status
+        self.ownerText = ownerText
+        self.dueText = dueText
+        self.dueDate = dueDate
+        self.validFrom = validFrom
+        self.recordedAt = recordedAt
+        self.validTo = validTo
+        self.note = note
+    }
+
+    public var hasOwner: Bool { !(ownerText ?? "").trimmingCharacters(in: .whitespaces).isEmpty }
+    public var hasDue: Bool { dueDate != nil || !(dueText ?? "").trimmingCharacters(in: .whitespaces).isEmpty }
+}
+
+/// 某一时刻的执行状态。`nil` 字段就是"那一刻还不知道"。
+public struct KnowledgeExecutionState: Hashable, Sendable {
+    public var itemKey: String
+    public var kind: String
+    public var status: ActionExecutionStatus
+    public var ownerText: String?
+    public var dueText: String?
+    public var dueDate: Date?
+    public var validFrom: Date
+    public var recordedAt: Date
+
+    public init(
+        itemKey: String,
+        kind: String,
+        status: ActionExecutionStatus,
+        ownerText: String? = nil,
+        dueText: String? = nil,
+        dueDate: Date? = nil,
+        validFrom: Date,
+        recordedAt: Date
+    ) {
+        self.itemKey = itemKey
+        self.kind = kind
+        self.status = status
+        self.ownerText = ownerText
+        self.dueText = dueText
+        self.dueDate = dueDate
+        self.validFrom = validFrom
+        self.recordedAt = recordedAt
+    }
+}
+
+/// 跨会议替代关系的依据（MC-57、MC-59）。
+///
+/// 这两种之外的任何理由都不足以判定"新结论取代了旧结论"：
+/// 字面相似只是措辞像，不等于承诺变了；沉默更不代表已完成。
+public enum SupersessionBasis: String, Codable, Hashable, Sendable {
+    /// 有明确证据：新一版明说"这条改到 X 月""上面那条作废"。
+    case evidence
+    /// 用户确认过。
+    case userConfirmed
+}
+
+/// 一条已确认的跨会议替代关系。**冲突不建替代，两边都留着**（MC-58）。
+public struct KnowledgeSupersession: Identifiable, Hashable, Sendable {
+    public var id: String
+    public var fromKey: String
+    public var toKey: String
+    public var kind: String
+    public var basis: SupersessionBasis
+    public var evidenceItemIDs: [String]
+    public var createdAt: Date
+
+    public init(
+        id: String = UUID().uuidString,
+        fromKey: String,
+        toKey: String,
+        kind: String,
+        basis: SupersessionBasis,
+        evidenceItemIDs: [String] = [],
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.fromKey = fromKey
+        self.toKey = toKey
+        self.kind = kind
+        self.basis = basis
+        self.evidenceItemIDs = evidenceItemIDs
+        self.createdAt = createdAt
+    }
+}
+
+/// 知识变化建议。**它只是建议，不改任何状态**。
+///
+/// 自动建议的价值在于把"该问的问题"摆出来；一旦它自己动手改状态，
+/// 用户就没法知道系统替他做了什么（MA-14 验收：只提出候选差异）。
+public enum KnowledgeChangeKind: String, Codable, Hashable, Sendable {
+    /// 同一场会重新生成后，同一条被换了个说法又写了一遍。
+    case reworded
+    /// 期限变了，但没有证据说原来的承诺作废。
+    case dueChanged
+    /// 负责人变了，但没有明确指派证据。
+    case ownerChanged
+    /// 这一版里没再出现（**不代表已完成或已放弃**）。
+    case missingFromNewVersion
+    /// 跨会议结论相反，且缺少限定条件。
+    case conflictAcrossMeetings
+    /// 新出现的条目。
+    case added
+}
+
+public struct KnowledgeChangeProposal: Identifiable, Hashable, Sendable {
+    public var id: String
+    public var kind: KnowledgeChangeKind
+    public var summary: String
+    public var previousItemID: String?
+    public var proposedItemID: String?
+    public var previousText: String?
+    public var proposedText: String?
+    public var detail: String?
+
+    public init(
+        id: String = UUID().uuidString,
+        kind: KnowledgeChangeKind,
+        summary: String,
+        previousItemID: String? = nil,
+        proposedItemID: String? = nil,
+        previousText: String? = nil,
+        proposedText: String? = nil,
+        detail: String? = nil
+    ) {
+        self.id = id
+        self.kind = kind
+        self.summary = summary
+        self.previousItemID = previousItemID
+        self.proposedItemID = proposedItemID
+        self.previousText = previousText
+        self.proposedText = proposedText
+        self.detail = detail
+    }
+
+    /// **一律要用户确认。** 没有例外。
+    public var requiresUserConfirmation: Bool { true }
+
+    public var title: String {
+        switch kind {
+        case .reworded: "同一条被改写了"
+        case .dueChanged: "期限变了"
+        case .ownerChanged: "负责人变了"
+        case .missingFromNewVersion: "这一版里没再出现"
+        case .conflictAcrossMeetings: "两场会结论相反"
+        case .added: "新出现的条目"
+        }
+    }
+}
+
+/// 条目的稳定身份（MA-14）。
+///
+/// 纪要每次重新生成都写出新的一版 `minutes_item`，`item.id` 必然变。
+/// 执行状态要跨版本活下来，就得有一个**不依赖数据库行 id** 的 key：
+/// 同一场会 + 同类 + 规范化后的正文。
+///
+/// 规范化只做 trim + 折叠空白 + 小写。**不做更激进的处理**：
+/// 去标点、去同义词会把两条不同的行动并成一条，那比匹配失败更糟。
+public enum KnowledgeIdentity {
+    public static func normalized(_ text: String) -> String {
+        text.split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+            .lowercased()
+    }
+
+    public static func key(documentID: String, kind: String, text: String) -> String {
+        "\(documentID)\u{1F}\(kind)\u{1F}\(normalized(text))"
+    }
+
+    /// 字符二元组的**包含系数**（交集 ÷ 较短一方），中文没有空格分词，二元组比词更稳。
+    ///
+    /// 用包含系数而不是 Jaccard：改写通常是"核心保留、细节增删"，
+    /// Jaccard 会因为长度差直接判成两条毫不相干的事——
+    /// 「整理发布清单」对「整理并归档发布清单（五月前）」只有 0.29，
+    /// 而包含系数是 0.8。**这里只用来提出候选、交给用户定，不自动落定。**
+    public static func similarity(_ lhs: String, _ rhs: String) -> Double {
+        let left = bigrams(normalized(lhs))
+        let right = bigrams(normalized(rhs))
+        if left.isEmpty || right.isEmpty { return 0 }
+        let intersection = left.intersection(right).count
+        let shorter = min(left.count, right.count)
+        return shorter == 0 ? 0 : Double(intersection) / Double(shorter)
+    }
+
+    private static func bigrams(_ text: String) -> Set<String> {
+        let chars = Array(text)
+        guard chars.count >= 2 else { return chars.isEmpty ? [] : [String(chars[0])] }
+        var result: Set<String> = []
+        for index in 0..<(chars.count - 1) {
+            result.insert(String(chars[index..<(index + 2)]))
+        }
+        return result
+    }
+
+    /// 判定"看起来是同一条"的阈值。
+    public static let rewordSimilarityThreshold = 0.6
+}

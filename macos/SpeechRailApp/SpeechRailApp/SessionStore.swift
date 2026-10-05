@@ -71,7 +71,8 @@ public actor SessionStore {
     /// 也要能回答"哪几句转录没被整理到"——这两个问题都要求按窗口查行。
     /// v8（MA-15）：`knowledge_fts` 全文索引 + `search_index_outbox`。
     /// 索引是**派生数据**：内容永远在权威表里，索引坏了重建即可。
-    public static let schemaVersion: Int32 = 9
+    /// v10（MA-14）：`knowledge_execution_event` 双时间事件日志 + `knowledge_supersession`。
+    public static let schemaVersion: Int32 = 10
 
     private let directory: URL
     private let fileManager: FileManager
@@ -190,6 +191,9 @@ public actor SessionStore {
             }
             if version < 9 {
                 try migrateV8ToV9()
+            }
+            if version < 10 {
+                try migrateV9ToV10()
             }
             try execute("PRAGMA user_version=\(Self.schemaVersion);")
             try execute("COMMIT;")
@@ -3765,6 +3769,60 @@ extension SessionStore {
         try execute(Self.schemaV9Delta)
     }
 
+    /// v9 → v10 的 DDL（MA-14）：执行状态事件日志与跨会议替代关系。
+    ///
+    /// 执行状态**不在 `minutes_item` 上**。纪要每次重新生成都会写出新的一版条目，
+    /// 状态写在条目上就会被新版本重置——已完成的任务会自己复活（MC-53）。
+    /// 所以状态按**稳定 key**存在这张表里，重新生成不动它。
+    ///
+    /// 双时间：`valid_from` 是"这件事从什么时候开始这样"（有效时间），
+    /// `recorded_at` 是"我们什么时候知道的"（记入时间）。期限改了也不改历史承诺，
+    /// 因为旧事件仍然在日志里，按有效时间能读回当时承诺的是什么（MC-59）。
+    static let schemaV10Delta = """
+    CREATE TABLE IF NOT EXISTS knowledge_execution_event (
+      id             TEXT PRIMARY KEY,
+      item_key       TEXT NOT NULL,
+      document_id    TEXT,
+      item_id        TEXT,
+      kind           TEXT NOT NULL,
+      status         TEXT NOT NULL,
+      owner_text     TEXT,
+      due_text       TEXT,
+      due_date       REAL,
+      valid_from     REAL NOT NULL,
+      recorded_at    REAL NOT NULL,
+      valid_to       REAL,
+      note           TEXT
+    );
+    CREATE INDEX IF NOT EXISTS knowledge_execution_event_by_key
+      ON knowledge_execution_event(item_key, valid_from);
+    CREATE INDEX IF NOT EXISTS knowledge_execution_event_by_item
+      ON knowledge_execution_event(item_id);
+
+    CREATE TABLE IF NOT EXISTS knowledge_supersession (
+      id                TEXT PRIMARY KEY,
+      from_key          TEXT NOT NULL,
+      to_key            TEXT NOT NULL,
+      kind              TEXT NOT NULL,
+      basis             TEXT NOT NULL,
+      evidence_item_ids TEXT NOT NULL DEFAULT '[]',
+      created_at        REAL NOT NULL,
+      UNIQUE (from_key, to_key)
+    );
+    CREATE INDEX IF NOT EXISTS knowledge_supersession_by_from
+      ON knowledge_supersession(from_key);
+    CREATE INDEX IF NOT EXISTS knowledge_supersession_by_to
+      ON knowledge_supersession(to_key);
+    """
+
+    /// v9 → v10：只建结构，不回填、不推断。
+    ///
+    /// 既有条目**一律当作"未处理"**——不猜哪条其实已经做完了。
+    /// 猜出来的完成状态会直接毁掉用户对这份清单的信任。
+    private func migrateV9ToV10() throws {
+        try execute(Self.schemaV10Delta)
+    }
+
     /// v7 → v8 的 DDL（MA-15）：FTS5 全文索引与事务 outbox。
     ///
     /// 索引与 outbox 分开：outbox 随业务事务一起提交，保证「内容已保存」
@@ -5201,5 +5259,424 @@ extension SessionStore {
             sql += " AND i.verdict = 'supported'"
         }
         return (sql, bindings)
+    }
+}
+
+// MARK: - 行动生命周期与决策演进（MA-14 / MC-53、MC-57～MC-59）
+//
+// 状态存在**版本之外**，按稳定 key 索引。纪要重新生成会写出新的一版 `minutes_item`，
+// `item.id` 每次都变；状态挂在条目上就会被重置掉，已完成的任务会自己复活（MC-53）。
+extension SessionStore {
+    private struct ExecutionContext {
+        var itemKey: String
+        var documentID: String
+        var kind: String
+        var text: String
+    }
+
+    /// 从条目解析稳定 key。要的是这场会 + 这类 + 规范化正文，不是数据库行 id。
+    private func executionContext(itemID: String) throws -> ExecutionContext {
+        let rows = try withStatement("""
+        SELECT i.kind, i.text, COALESCE(d.id, '')
+        FROM minutes_item i
+        JOIN minutes m ON m.id = i.minutes_id
+        JOIN session s ON s.id = m.session_id
+        LEFT JOIN meeting_document d ON d.source_session_id = s.id
+        WHERE i.id = ? LIMIT 1;
+        """) { statement -> [(kind: String, text: String, documentID: String)] in
+            bind(statement, 1, itemID)
+            var found: [(String, String, String)] = []
+            while try step(statement) == SQLITE_ROW {
+                found.append((
+                    columnText(statement, 0) ?? "",
+                    columnText(statement, 1) ?? "",
+                    columnText(statement, 2) ?? ""
+                ))
+            }
+            return found
+        }
+        guard let row = rows.first, !row.documentID.isEmpty else {
+            throw SessionStoreError.statementFailed("找不到这条会议知识条目")
+        }
+        return ExecutionContext(
+            itemKey: KnowledgeIdentity.key(documentID: row.documentID, kind: row.kind, text: row.text),
+            documentID: row.documentID,
+            kind: row.kind,
+            text: row.text
+        )
+    }
+
+    /// 记一次执行状态变化。**只追加事件**，不改写旧事件。
+    ///
+    /// `ownerText` / `dueText` / `dueDate` 传 nil 表示"这次没改"，
+    /// 沿用上一条的值；未知就一直保持未知——**不从正文猜负责人和期限**（MC-59）。
+    @discardableResult
+    public func recordExecutionEvent(
+        itemID: String,
+        status: ActionExecutionStatus,
+        ownerText: String?? = nil,
+        dueText: String?? = nil,
+        dueDate: Date?? = nil,
+        validFrom: Date = Date(),
+        note: String? = nil
+    ) throws -> KnowledgeExecutionEvent {
+        let context = try executionContext(itemID: itemID)
+        let previous = try executionState(itemKey: context.itemKey)
+        let event = KnowledgeExecutionEvent(
+            itemKey: context.itemKey,
+            documentID: context.documentID,
+            itemID: itemID,
+            kind: context.kind,
+            status: status,
+            ownerText: ownerText ?? previous?.ownerText,
+            dueText: dueText ?? previous?.dueText,
+            dueDate: dueDate ?? previous?.dueDate,
+            validFrom: validFrom,
+            note: note
+        )
+        try insertExecutionEvent(event)
+        return event
+    }
+
+    private func insertExecutionEvent(_ event: KnowledgeExecutionEvent) throws {
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            // 补记（validFrom 早于已有事件）时只关掉**不晚于**它的那些，
+            // 后面那些"更新的"承诺保持有效——它们才是现在的状态。
+            try withStatement("""
+            UPDATE knowledge_execution_event SET valid_to = ?
+            WHERE item_key = ? AND valid_to IS NULL AND valid_from <= ?;
+            """) { statement in
+                bind(statement, 1, event.validFrom.timeIntervalSince1970)
+                bind(statement, 2, event.itemKey)
+                bind(statement, 3, event.validFrom.timeIntervalSince1970)
+                try step(statement)
+            }
+            try withStatement("""
+            INSERT INTO knowledge_execution_event
+              (id, item_key, document_id, item_id, kind, status, owner_text, due_text, due_date,
+               valid_from, recorded_at, valid_to, note)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """) { statement in
+                bind(statement, 1, event.id)
+                bind(statement, 2, event.itemKey)
+                bind(statement, 3, event.documentID)
+                bind(statement, 4, event.itemID)
+                bind(statement, 5, event.kind)
+                bind(statement, 6, event.status.rawValue)
+                bind(statement, 7, event.ownerText)
+                bind(statement, 8, event.dueText)
+                bind(statement, 9, event.dueDate?.timeIntervalSince1970)
+                bind(statement, 10, event.validFrom.timeIntervalSince1970)
+                bind(statement, 11, event.recordedAt.timeIntervalSince1970)
+                bind(statement, 12, event.validTo?.timeIntervalSince1970)
+                bind(statement, 13, event.note)
+                try step(statement)
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    /// 当前的执行状态。**没有事件就是"没有状态"**，不是"未完成"：
+    /// 没记录过和记录成未完成是两回事，界面给的提示不一样。
+    public func executionState(itemID: String) throws -> KnowledgeExecutionState? {
+        try executionState(itemKey: try executionContext(itemID: itemID).itemKey)
+    }
+
+    public func executionState(itemKey: String) throws -> KnowledgeExecutionState? {
+        try executionState(itemKey: itemKey, asOfValidTime: nil)
+    }
+
+    /// 按**有效时间**读回那一刻的状态。日期更新不改变历史承诺（MC-59）：
+    /// 三月承诺的期限，四月改成五月之后，仍然能读回"三月时承诺的是三月"。
+    public func executionState(itemKey: String, asOfValidTime date: Date) throws -> KnowledgeExecutionState? {
+        try executionStateValid(itemKey: itemKey, at: date)
+    }
+
+    private func executionStateValid(itemKey: String, at date: Date) throws -> KnowledgeExecutionState? {
+        try executionState(itemKey: itemKey, asOfValidTime: Optional(date))
+    }
+
+    private func executionState(itemKey: String, asOfValidTime date: Date?) throws -> KnowledgeExecutionState? {
+        let clause = date == nil ? "" : " AND valid_from <= ?"
+        return try withStatement("""
+        SELECT item_key, kind, status, owner_text, due_text, due_date, valid_from, recorded_at
+        FROM knowledge_execution_event
+        WHERE item_key = ?\(clause)
+        ORDER BY valid_from DESC, recorded_at DESC, id DESC
+        LIMIT 1;
+        """) { statement -> KnowledgeExecutionState? in
+            bind(statement, 1, itemKey)
+            if let date { bind(statement, 2, date.timeIntervalSince1970) }
+            guard try step(statement) == SQLITE_ROW else { return nil }
+            return KnowledgeExecutionState(
+                itemKey: columnText(statement, 0) ?? "",
+                kind: columnText(statement, 1) ?? "",
+                status: ActionExecutionStatus(rawValue: columnText(statement, 2) ?? "") ?? .open,
+                ownerText: columnText(statement, 3),
+                dueText: columnText(statement, 4),
+                dueDate: columnIsNull(statement, 5) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 5)),
+                validFrom: Date(timeIntervalSince1970: columnDouble(statement, 6)),
+                recordedAt: Date(timeIntervalSince1970: columnDouble(statement, 7))
+            )
+        }
+    }
+
+    /// 完整时间线，按有效时间升序。旧事件永远还在。
+    public func executionEvents(itemKey: String) throws -> [KnowledgeExecutionEvent] {
+        try withStatement("""
+        SELECT id, item_key, document_id, item_id, kind, status, owner_text, due_text, due_date,
+               valid_from, recorded_at, valid_to, note
+        FROM knowledge_execution_event
+        WHERE item_key = ?
+        ORDER BY valid_from ASC, recorded_at ASC, id ASC;
+        """) { statement -> [KnowledgeExecutionEvent] in
+            bind(statement, 1, itemKey)
+            var events: [KnowledgeExecutionEvent] = []
+            while try step(statement) == SQLITE_ROW {
+                events.append(KnowledgeExecutionEvent(
+                    id: columnText(statement, 0) ?? "",
+                    itemKey: columnText(statement, 1) ?? "",
+                    documentID: columnText(statement, 2),
+                    itemID: columnText(statement, 3),
+                    kind: columnText(statement, 4) ?? "",
+                    status: ActionExecutionStatus(rawValue: columnText(statement, 5) ?? "") ?? .open,
+                    ownerText: columnText(statement, 6),
+                    dueText: columnText(statement, 7),
+                    dueDate: columnIsNull(statement, 8) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 8)),
+                    validFrom: Date(timeIntervalSince1970: columnDouble(statement, 9)),
+                    recordedAt: Date(timeIntervalSince1970: columnDouble(statement, 10)),
+                    validTo: columnIsNull(statement, 11) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 11)),
+                    note: columnText(statement, 12)
+                ))
+            }
+            return events
+        }
+    }
+
+    // MARK: - 跨会议替代（MC-57、MC-58）
+
+    /// 确认一条跨会议替代关系。
+    ///
+    /// 只有两种依据：明确证据，或用户确认。**字面相似不作为依据**——
+    /// 措辞像不等于承诺变了。
+    @discardableResult
+    public func confirmSupersession(
+        fromItemID: String,
+        toItemID: String,
+        basis: SupersessionBasis,
+        evidenceItemIDs: [String] = []
+    ) throws -> KnowledgeSupersession {
+        let from = try executionContext(itemID: fromItemID)
+        let to = try executionContext(itemID: toItemID)
+        guard from.documentID != to.documentID else {
+            throw SessionStoreError.statementFailed("同一场会内的重新生成不需要替代关系")
+        }
+        guard from.kind == to.kind else {
+            throw SessionStoreError.statementFailed("只能在同类条目之间建立替代关系")
+        }
+        var evidence = evidenceItemIDs
+        if basis == .evidence {
+            // 有证据这一档就得真的挂得上证据，否则"有证据"是句空话。
+            evidence = try evidence.filter { try minutesItemExists(id: $0) }
+            guard !evidence.isEmpty else {
+                throw SessionStoreError.statementFailed("按证据建立替代关系至少要有一条能对上的证据")
+            }
+        }
+        let supersession = KnowledgeSupersession(
+            fromKey: from.itemKey,
+            toKey: to.itemKey,
+            kind: from.kind,
+            basis: basis,
+            evidenceItemIDs: evidence
+        )
+        try withStatement("""
+        INSERT INTO knowledge_supersession
+          (id, from_key, to_key, kind, basis, evidence_item_ids, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?);
+        """) { statement in
+            bind(statement, 1, supersession.id)
+            bind(statement, 2, supersession.fromKey)
+            bind(statement, 3, supersession.toKey)
+            bind(statement, 4, supersession.kind)
+            bind(statement, 5, supersession.basis.rawValue)
+            bind(statement, 6, String(data: try JSONEncoder().encode(supersession.evidenceItemIDs), encoding: .utf8) ?? "[]")
+            bind(statement, 7, supersession.createdAt.timeIntervalSince1970)
+            try step(statement)
+        }
+        return supersession
+    }
+
+    private func minutesItemExists(id: String) throws -> Bool {
+        try withStatement("SELECT 1 FROM minutes_item WHERE id = ? LIMIT 1;") { statement in
+            bind(statement, 1, id)
+            return try step(statement) == SQLITE_ROW
+        }
+    }
+
+    public func supersessions(itemKey: String) throws -> [KnowledgeSupersession] {
+        try withStatement("""
+        SELECT id, from_key, to_key, kind, basis, evidence_item_ids, created_at
+        FROM knowledge_supersession
+        WHERE from_key = ? OR to_key = ?
+        ORDER BY created_at ASC;
+        """) { statement -> [KnowledgeSupersession] in
+            bind(statement, 1, itemKey)
+            bind(statement, 2, itemKey)
+            var rows: [KnowledgeSupersession] = []
+            while try step(statement) == SQLITE_ROW {
+                let payload = columnText(statement, 5) ?? "[]"
+                rows.append(KnowledgeSupersession(
+                    id: columnText(statement, 0) ?? "",
+                    fromKey: columnText(statement, 1) ?? "",
+                    toKey: columnText(statement, 2) ?? "",
+                    kind: columnText(statement, 3) ?? "",
+                    basis: SupersessionBasis(rawValue: columnText(statement, 4) ?? "") ?? .userConfirmed,
+                    evidenceItemIDs: (try? JSONDecoder().decode([String].self, from: Data(payload.utf8))) ?? [],
+                    createdAt: Date(timeIntervalSince1970: columnDouble(statement, 6))
+                ))
+            }
+            return rows
+        }
+    }
+}
+
+// MARK: - 知识变化建议（MA-14）
+//
+// 只**提出**差异，不落任何状态。自动建议一旦自己动手改状态，
+// 用户就再也说不清"这条为什么变了"。
+extension SessionStore {
+    /// 同一场会重新生成之后，新一版相对上一版**可能**变了什么。
+    ///
+    /// 刻意只报"看起来像同一条"的候选，不做负责人/期限的文本抽取——
+    /// 从正文猜"这条是谁负责、什么时候之前做完"就是凭空补事实（MC-59）。
+    public func knowledgeChangeProposals(documentID: String) throws -> [KnowledgeChangeProposal] {
+        guard let document = try meetingDocument(id: documentID),
+              let sessionID = document.sourceSessionID
+        else { return [] }
+        let usable = try minutesVersions(sessionID: sessionID)
+            .filter { $0.status == .ready }
+            .sorted { $0.version < $1.version }
+        // 用户看到的是采用版，没有采用版才看最新可用版——与展示口径同一处判断。
+        let currentVersion = try acceptedMinutes(sessionID: sessionID) ?? usable.last
+        guard let currentVersion, let previous = usable.dropLast().last,
+              previous.id != currentVersion.id
+        else { return [] }
+
+        let oldItems = try minutesItems(minutesID: previous.id)
+            .filter { $0.kind == "action" || $0.kind == "decision" }
+        let newItems = try minutesItems(minutesID: currentVersion.id)
+            .filter { $0.kind == "action" || $0.kind == "decision" }
+        guard !oldItems.isEmpty || !newItems.isEmpty else { return [] }
+
+        var proposals: [KnowledgeChangeProposal] = []
+        var matchedOld: Set<String> = []
+        for item in newItems {
+            let best = oldItems
+                .filter { $0.kind == item.kind && !matchedOld.contains($0.id) }
+                .map { ($0, KnowledgeIdentity.similarity($0.text, item.text)) }
+                .filter { $0.1 >= KnowledgeIdentity.rewordSimilarityThreshold }
+                .max { $0.1 < $1.1 }
+            guard let (old, score) = best else {
+                proposals.append(KnowledgeChangeProposal(
+                    kind: .added,
+                    summary: "这一版新出现了条目",
+                    proposedItemID: item.id,
+                    proposedText: item.text
+                ))
+                continue
+            }
+            matchedOld.insert(old.id)
+            guard KnowledgeIdentity.normalized(old.text) != KnowledgeIdentity.normalized(item.text) else { continue }
+            proposals.append(KnowledgeChangeProposal(
+                kind: .reworded,
+                summary: "同一条被换了个说法",
+                previousItemID: old.id,
+                proposedItemID: item.id,
+                previousText: old.text,
+                proposedText: item.text,
+                detail: String(format: "相似度 %.0f%%，负责人和期限都没有变化——要不要算同一条由你定",
+                               score * 100)
+            ))
+        }
+        for item in oldItems where !matchedOld.contains(item.id) {
+            // 缺席**不等于完成，也不等于放弃**。原状态原样保留，这里只提示。
+            proposals.append(KnowledgeChangeProposal(
+                kind: .missingFromNewVersion,
+                summary: "这一版里没再出现",
+                previousItemID: item.id,
+                previousText: item.text,
+                detail: "不会因此标记成已完成或已放弃"
+            ))
+        }
+        return proposals
+    }
+
+    /// 跨会议结论看起来相反、且缺少限定条件的候选对（MC-58）。
+    ///
+    /// 只**摆出来**并且说清缺什么限定，**不合成一致意见**：
+    /// "两个会议结论相反但范围不清"的时候，给一句归纳就是编造共识。
+    public func conflictingDecisions(
+        scope: MeetingKnowledgeScope = .standard,
+        limit: Int = 20
+    ) throws -> [KnowledgeChangeProposal] {
+        let page = try knowledgeItems(
+            filter: KnowledgeItemFilter(kinds: ["decision"]),
+            scope: scope,
+            limit: 500,
+            offset: 0
+        )
+        // 按共享词项分组；同组里来自不同会议、字面又不一样的，就是候选对。
+        var groups: [String: [KnowledgeEvidence]] = [:]
+        for item in page.items {
+            for term in Set(KnowledgeSearchTokenizer.indexTerms(for: item.text)) where term.count >= 2 {
+                groups[term, default: []].append(item)
+            }
+        }
+        var proposals: [KnowledgeChangeProposal] = []
+        var seen: Set<String> = []
+        for (term, items) in groups.sorted(by: { $0.key < $1.key }) {
+            guard items.count > 1 else { continue }
+            for i in items.indices {
+                for j in items.indices where j > i {
+                    let lhs = items[i]
+                    let rhs = items[j]
+                    guard lhs.documentID != rhs.documentID else { continue }
+                    // 说法完全一致只是重复记录，不是冲突。
+                    guard KnowledgeIdentity.normalized(lhs.text) != KnowledgeIdentity.normalized(rhs.text) else { continue }
+                    let pairKey = "\(min(lhs.id, rhs.id))|\(max(lhs.id, rhs.id))"
+                    guard seen.insert(pairKey).inserted else { continue }
+                    let detail = conflictDetail(lhs: lhs, rhs: rhs)
+                    let summary = "两场会提到「\(term)」，但说法不一样"
+                    proposals.append(KnowledgeChangeProposal(
+                        kind: .conflictAcrossMeetings,
+                        summary: summary,
+                        previousItemID: lhs.id,
+                        proposedItemID: rhs.id,
+                        previousText: lhs.text,
+                        proposedText: rhs.text,
+                        detail: detail
+                    ))
+                    if proposals.count >= limit { return proposals }
+                }
+            }
+        }
+        return proposals
+    }
+
+    /// 说清**缺了哪些限定**，而不是替用户选一个。
+    private func conflictDetail(lhs: KnowledgeEvidence, rhs: KnowledgeEvidence) -> String {
+        var missing: [String] = []
+        if !lhs.isEstablishedFact { missing.append("前一条还没核对") }
+        if !rhs.isEstablishedFact { missing.append("后一条还没核对") }
+        if !lhs.anchors.isEmpty == false { missing.append("前一条对不上原句") }
+        if !rhs.anchors.isEmpty == false { missing.append("后一条对不上原句") }
+        if missing.isEmpty {
+            return "两条都能追溯到原句，但适用条件不一样的话得你补一句——系统不替你合成一致意见"
+        }
+        return "缺少限定：" + missing.joined(separator: "、") + "。先补条件，再谈哪个作数"
     }
 }
