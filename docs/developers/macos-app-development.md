@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail macOS App 开发与测试"
 status: active
-version: "0.6.5"
+version: "0.6.6"
 date: 2026-10-05
 ---
 
@@ -96,6 +96,8 @@ hypothesis 时清空本地播放队列并显式发送 `speechrail.tts.cancel`；
 唯一 receiver 同步登记插话意图、用户保存命令和音频准入。取消确认、SQLite 保存及播放预算等待均由有句柄的任务承担；匹配终态仍由 receiver 消费。远端归属未知或旧 outbound 任务尚未退出时拒绝同连接新 TTS，不把“取消已发送”视为确认；超时解除等待但保留旧任务归属，直到任务实际退出。ACK 超时不重发 append。
 
 打字与语音输入共用 `AssistantInputPersistenceQueue` 单消费者保序保存，默认最多 32 个在途命令、64,000 Unicode scalar，失败命令仍计预算。保存成功才投影正式对话与提交回答；partial 只归档。前序保存失败时，后续已接纳输入返回 blocked 并保留命令，恢复后按原顺序保存，不由草稿重复发送；本句保存失败仍明确报错。结束等待本记录已经接纳的保存（含正常、partial、draining 与打字在途保存），未完成或失败时保留恢复入口并避免宣称封存成功。主动关闭语音先收尾已有回复，保留文字上下文与待保存正文。恢复按固定行 ID 核对，不直接把唯一键冲突当成功。首条正式用户行在 Store 条件命名，partial 不占命名资格，人工标题不被迟到自动命名覆盖。
+
+实时对话展示同时读取已保存行与当前记录中已接纳的输入，按固定行 ID 去重。输入接纳后立即显示正文和“正在保存”，保存完成原位切换为正式行；失败时保留正文并标记“未保存”，不计入已保存行或模型上下文。队列状态可观察，首轮字幕定稿与保存之间不会重新显示聆听空态；保存上一句不清掉下一句字幕，准入拒绝时保留当前字幕。滚动仅跟随展示行 ID 的变化，保存状态切换不重复触发滚动。
 
 音频使用唯一 FIFO 消费任务。每次 start 默认声明 `audio_window_bytes=1_440_000`（30 秒 PCM，约 1.4 MB），started 必须回显相同窗口；接收事件流、FIFO、在途待入队 PCM 与播放器共享该 request 的未消费额度，不因数据已入播放器而归还。服务端窗口耗尽时暂停音频发送，本代渲染完成回调释放容量后才通过 `speechrail.tts.audio_ack.sample_offset` 归还累计额度。发送由一个有句柄的任务合并水位；取消后的旧回调和旧发送不能给新 request 归还额度。`limits.max_pending_audio_bytes` 仅约束 worker/传输与单块大小，不再用作客户端累计待播预算。单块仍限 48,000 bytes，播放 ledger 默认仍限 24,000 个 Int16 samples（48,000 bytes）；FIFO 吸收提前合成的音频。服务端 completed 不结束 playback waiter，待 FIFO、入队和播放器全部排空后才报告整轮完成。上游事件流原有 4 MiB decoded PCM 限额是额外保护。
 

@@ -1539,12 +1539,12 @@ public struct AssistantView: View {
             ScrollViewReader { proxy in
                 ScrollView(.vertical) {
                     LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                        if assistant.turns.isEmpty && assistant.partialText == nil && assistant.streamingReply == nil {
+                        if assistant.conversationRows.isEmpty && assistant.partialText == nil && assistant.streamingReply == nil {
                             liveListeningWorkspace
                         } else {
-                            ForEach(Array(assistant.turns.enumerated()), id: \.element.id) { index, turn in
-                                turnRow(turn)
-                                    .id(turn.id)
+                            ForEach(assistant.conversationRows) { row in
+                                conversationRow(row)
+                                    .id(row.id)
                             }
                             // 用户实时语音转写中
                             if let partial = assistant.partialText, !partial.isEmpty {
@@ -1566,8 +1566,8 @@ public struct AssistantView: View {
                     .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .onChange(of: assistant.turns.count) { _, _ in
-                    guard let last = assistant.turns.last else { return }
+                .onChange(of: assistant.conversationRows.map(\.id)) { _, _ in
+                    guard let last = assistant.conversationRows.last else { return }
                     if reduceMotion {
                         proxy.scrollTo(last.id, anchor: .bottom)
                     } else {
@@ -2018,7 +2018,25 @@ public struct AssistantView: View {
         isInspectorCollapsed ? 1_128 : 760
     }
 
-    private func turnRow(_ turn: AssistantSession.Turn) -> some View {
+    private func conversationRow(_ row: AssistantConversationRow) -> SessionTurnRow {
+        switch row {
+        case .saved(let turn):
+            return turnRow(turn)
+        case .accepted(let command, let failure):
+            return SessionTurnRow(
+                who: "你",
+                pills: [.init(tone: failure == nil ? .neutral : .attention,
+                              label: failure == nil ? "正在保存" : "未保存")],
+                timestamp: Self.clock(command.observedAt),
+                text: command.text,
+                bodyWidth: bodyWidth,
+                actions: [.copy],
+                onAction: { _ in copy(command.text) }
+            )
+        }
+    }
+
+    private func turnRow(_ turn: AssistantSession.Turn) -> SessionTurnRow {
         let isAssistant = turn.role == .assistant
         var pills: [SessionTurnRow.Pill] = []
         if turn.isInterrupted {
