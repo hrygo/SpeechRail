@@ -3013,6 +3013,11 @@ public struct KnowledgeArchiveCounts: Codable, Hashable, Sendable {
     public var executionEvents: Int
     /// 随包带走的决策替代关系数。
     public var supersessions: Int
+    /// 导入后因**来源不在包里**而被降级为待复核的结论条数。
+    ///
+    /// 单列出来是因为它是"降级"不是"丢弃"：结论还在、还能读，
+    /// 但用户必须知道有几条不再是被核对过的。
+    public var markedForReview: Int
 
     public init(
         sessions: Int,
@@ -3026,7 +3031,8 @@ public struct KnowledgeArchiveCounts: Codable, Hashable, Sendable {
         anchors: Int,
         windows: Int,
         executionEvents: Int = 0,
-        supersessions: Int = 0
+        supersessions: Int = 0,
+        markedForReview: Int = 0
     ) {
         self.sessions = sessions
         self.lines = lines
@@ -3040,6 +3046,7 @@ public struct KnowledgeArchiveCounts: Codable, Hashable, Sendable {
         self.windows = windows
         self.executionEvents = executionEvents
         self.supersessions = supersessions
+        self.markedForReview = markedForReview
     }
 
     public static let zero = KnowledgeArchiveCounts(
@@ -3051,6 +3058,7 @@ public struct KnowledgeArchiveCounts: Codable, Hashable, Sendable {
     enum CodingKeys: String, CodingKey {
         case sessions, lines, speakerNames, documents, snapshots, revisions
         case minutes, items, anchors, windows, executionEvents, supersessions
+        case markedForReview
     }
 
     /// 解码时缺这两项就当 0：旧结果文件不该因为新增计数就读不出来。
@@ -3068,6 +3076,7 @@ public struct KnowledgeArchiveCounts: Codable, Hashable, Sendable {
         windows = try c.decode(Int.self, forKey: .windows)
         executionEvents = try c.decodeIfPresent(Int.self, forKey: .executionEvents) ?? 0
         supersessions = try c.decodeIfPresent(Int.self, forKey: .supersessions) ?? 0
+        markedForReview = try c.decodeIfPresent(Int.self, forKey: .markedForReview) ?? 0
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -3084,6 +3093,7 @@ public struct KnowledgeArchiveCounts: Codable, Hashable, Sendable {
         try c.encode(windows, forKey: .windows)
         try c.encode(executionEvents, forKey: .executionEvents)
         try c.encode(supersessions, forKey: .supersessions)
+        try c.encode(markedForReview, forKey: .markedForReview)
     }
 }
 
@@ -4078,6 +4088,11 @@ public struct MeetingDeletionReport: Hashable, Sendable {
     public var removedMinutes: Int
     public var removedItems: Int
     public var removedAnchors: Int
+    /// 因来源被删而**降级为待复核**的结论条数。
+    ///
+    /// 单独计数是因为它和"删掉了多少"是两件事：结论还在、还能看，
+    /// 但它不再自称已核对。用户需要知道有几条需要自己看一眼。
+    public var markedForReview: Int
     /// 本机已清理的派生索引条数。
     public var purgedIndexEntries: Int
 
@@ -4090,6 +4105,7 @@ public struct MeetingDeletionReport: Hashable, Sendable {
         removedMinutes: Int = 0,
         removedItems: Int = 0,
         removedAnchors: Int = 0,
+        markedForReview: Int = 0,
         purgedIndexEntries: Int = 0
     ) {
         self.documentID = documentID
@@ -4100,6 +4116,7 @@ public struct MeetingDeletionReport: Hashable, Sendable {
         self.removedMinutes = removedMinutes
         self.removedItems = removedItems
         self.removedAnchors = removedAnchors
+        self.markedForReview = markedForReview
         self.purgedIndexEntries = purgedIndexEntries
     }
 

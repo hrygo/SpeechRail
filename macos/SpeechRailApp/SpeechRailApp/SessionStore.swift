@@ -4683,12 +4683,46 @@ extension SessionStore {
                 }
                 inserted.supersessions += 1
             }
+            // 分享包只装锚点引用到的行，所以包里可能有指向**没装进来**的来源的锚点。
+            // 这些锚点导入后必须降级：来源不在这个库里，就无从核对，
+            // 继续自称"逐字命中"是谎报（验收标准 3）。
+            inserted.markedForReview = try markAnchorsWithoutSourceForReview()
             try execute("COMMIT;")
         } catch {
             try? execute("ROLLBACK;")
             throw error
         }
         return inserted
+    }
+
+    /// 把"引用还在、原句没了"的锚点降级为待复核，并返回受影响的条数。
+    ///
+    /// `minutes_evidence.line_id` / `revision_id` 是 `ON DELETE SET NULL`，
+    /// 所以删掉来源行**不会**删掉锚点，只会把它指向空。锚点还在是好事
+    /// （用户还能看见这条结论曾经有过出处），但它必须停止声称已核对。
+    ///
+    /// 两条一起改：锚点的 `verification` 与条目的 `verdict`。只改前者的话，
+    /// 审阅轴读的是后者，界面照样显示"整理好了"。
+    @discardableResult
+    private func markAnchorsWithoutSourceForReview() throws -> Int {
+        let affected = try scalarInt("""
+        SELECT COUNT(*) FROM minutes_evidence
+        WHERE line_id IS NULL OR revision_id IS NULL;
+        """) ?? 0
+        try execute("""
+        UPDATE minutes_evidence SET verification = 'source_removed'
+        WHERE line_id IS NULL OR revision_id IS NULL;
+        """)
+        // 条目自身是"已核对"或空的才降级：已经是 needsReview / rejected 的不动。
+        try execute("""
+        UPDATE minutes_item SET verdict = 'needsReview'
+        WHERE (verdict IS NULL OR verdict = 'supported')
+          AND id IN (
+            SELECT item_id FROM minutes_evidence
+            WHERE line_id IS NULL OR revision_id IS NULL
+          );
+        """)
+        return affected
     }
 
     /// 按 id 读一行转录。导入比对与回读核对都要用。
@@ -4796,6 +4830,10 @@ extension SessionStore {
                 report.removedSnapshots = try deleteRows(
                     "DELETE FROM source_snapshot WHERE document_id = ?;", documentID
                 )
+                // 纪要与结论留着，但它们的依据没了。
+                // 此时必须**降级**：继续自称"逐字命中"就是谎报——原句都不在了，
+                // 这条结论根本无从核对（验收标准 3「修改来源后相关结论提示复核」）。
+                report.markedForReview = try markAnchorsWithoutSourceForReview()
             case .deleteEverything:
                 if let sessionID {
                     report.removedLines = try deleteRows("DELETE FROM line WHERE session_id = ?;", sessionID)

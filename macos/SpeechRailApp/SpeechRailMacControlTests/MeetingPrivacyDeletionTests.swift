@@ -170,6 +170,71 @@ final class MeetingPrivacyDeletionTests: XCTestCase {
         XCTAssertTrue(references.isClean, "锚点指向已删修订是合法状态，不算断裂：\(references.problems)")
     }
 
+    /// 来源被删之后，锚点不能还自称"逐字命中"。
+    ///
+    /// 验收标准 3 要求"修改来源后相关结论提示复核"：原句都没了，
+    /// `exact_source_match` 就是**假话**——它会让这条结论在界面上
+    /// 显示成"已核对"，而它根本无从核对。
+    func testAnchorStopsClaimingExactMatchAfterItsSourceIsRemoved() async throws {
+        let store = try requireStore()
+        let prepared = try await prepareMeetingWithCitations()
+        try await store.deleteMeetingKnowledge(documentID: prepared.documentID, mode: .removeTranscript)
+
+        let items = try await store.minutesItems(minutesID: prepared.minutesID)
+        let anchors = items.flatMap(\.anchors)
+        XCTAssertFalse(anchors.isEmpty, "结论条目应当还在，锚点也应当还在")
+        for anchor in anchors {
+            XCTAssertNotEqual(
+                anchor.verification, "exact_source_match",
+                "来源已被删除，锚点不许继续自称逐字命中"
+            )
+        }
+    }
+
+    /// 已删会议不允许再写新版本：否则一次迟到的编辑会把刚删掉的内容
+    /// 又变出一个可被检索的版本——验收标准 4「删除内容不得被旧任务恢复」。
+    ///
+    /// （因此"降级要沿版本沿用传下去"这条路径在删除之后是**不可达**的，
+    /// 不需要额外断言；降级只需在删除那一刻做对。）
+    func testDeletedMeetingRefusesToProduceANewMinutesVersion() async throws {
+        let store = try requireStore()
+        let prepared = try await prepareMeetingWithCitations()
+        try await store.deleteMeetingKnowledge(documentID: prepared.documentID, mode: .removeTranscript)
+
+        let version = try await store.minutesVersion(id: prepared.minutesID)
+        let body = try XCTUnwrap(version?.body)
+        do {
+            _ = try await store.saveUserMinutesEdit(
+                sessionID: try requireSessionID(),
+                editingMinutesID: prepared.minutesID,
+                body: body + "\n\n偷偷加一句。"
+            )
+            XCTFail("已删会议不该还能写出新版本")
+        } catch {
+            // 预期路径：写入被拒。
+        }
+
+        let unchanged = try await store.minutesVersion(id: prepared.minutesID)
+        XCTAssertEqual(unchanged?.body, body, "正文一个字都不该变")
+    }
+
+    /// 同一条结论的**判定**也要跟着降级，否则审阅轴看不到这件事。
+    func testConclusionIsMarkedForReviewWhenItsSourceDisappears() async throws {
+        let store = try requireStore()
+        let prepared = try await prepareMeetingWithCitations()
+        try await store.deleteMeetingKnowledge(documentID: prepared.documentID, mode: .removeTranscript)
+
+        let items = try await store.minutesItems(minutesID: prepared.minutesID)
+        let cited = items.filter { !$0.anchors.isEmpty }
+        XCTAssertFalse(cited.isEmpty, "被测样本要有带引用的结论")
+        for item in cited {
+            XCTAssertNotEqual(
+                item.verdict, .supported,
+                "来源没了就不能还是『已核对』：\(item.localID)"
+            )
+        }
+    }
+
     // MARK: - MC-72：完整删除
 
     func testFullDeleteRemovesEverythingAndDoesNotPromiseUndo() async throws {

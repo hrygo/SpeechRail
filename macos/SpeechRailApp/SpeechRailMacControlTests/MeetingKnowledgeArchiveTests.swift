@@ -755,6 +755,37 @@ final class MeetingKnowledgeArchiveTests: XCTestCase {
         XCTAssertTrue(KnowledgeArchiveMarkdown.currentExecutionByKey(events).isEmpty)
     }
 
+    /// 完整归档装得下全部来源，所以往返之后**不该**有任何结论被降级。
+    ///
+    /// 这条是给降级逻辑的护栏：来源齐全时误降级，和来源缺失时不降级
+    /// 一样是错的——前者会让用户白白去复核一堆本来没问题的东西。
+    func testCompleteRoundTripDowngradesNothing() async throws {
+        let store = try requireStore()
+        let version = try await prepareMeetingWithCitations()
+        let documentID = try await requireDocumentID()
+        let package = try await store.exportKnowledgeArchive(
+            selection: KnowledgeArchiveSelection(
+                documentID: documentID, minutesID: version.id, scope: .fullArchive
+            ),
+            to: try exportDestination()
+        )
+        let imported = try await makeImportedStore { target in
+            try await target.importKnowledgeArchive(at: package)
+        }
+        defer { Task { await imported.store.close() } }
+
+        XCTAssertEqual(
+            imported.result.inserted.markedForReview, 0,
+            "来源齐全的完整归档不该有任何结论被降级"
+        )
+        let items = try await imported.store.minutesItems(minutesID: version.id)
+        let cited = items.filter { !$0.anchors.isEmpty }
+        XCTAssertFalse(cited.isEmpty)
+        for item in cited {
+            XCTAssertEqual(item.verdict, .supported, "\(item.localID) 不该被降级")
+        }
+    }
+
     func testPayloadSchemaIsV2() async throws {
         let store = try requireStore()
         let version = try await prepareMeetingWithCitations()
