@@ -154,6 +154,8 @@ let package = Package(
                 "MeetingAxisProjection.swift",
                 // 转录流粘底策略（MA-10）：回看时不许被新句子拽走。
                 "TranscriptFollowState.swift",
+                // 会议编排层的依赖边界（MA-01）：设备 / 连接 / 时钟可替换。
+                "MeetingSessionDependencies.swift",
             ]
         ),
         // 确定性回放 runner：只读仓库外 manifest，输出脱敏聚合结果。

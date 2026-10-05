@@ -205,11 +205,13 @@ public final class MeetingSession {
         (@MainActor () async -> RealtimeCapabilityBinding?)?
     public var preferences: (@MainActor () -> SessionPreferences)?
     private let coordinator: SessionCoordinator
-    private let audio = AudioSourceCoordinator()
+    /// 采集、连接与时钟的接缝（MA-01）。默认值就是生产行为。
+    private let dependencies: MeetingSessionDependencies
+    private var audio: any MeetingAudioSource
     private let port: Int
     private let serviceKey: String?
 
-    private var client: RealtimeASRClient?
+    private var client: (any MeetingRealtimeClient)?
     private var pump: Task<Void, Never>?
     private var sleepObserver: NSObjectProtocol?
     private var commitCursor: Date?
@@ -225,9 +227,20 @@ public final class MeetingSession {
     private var isStoppingIntentionally = false
     /// 本场第几个 epoch（一次 WS 连接 = 一个 epoch，§5.2 账本规则 1）。
     private var epoch = 0
+    /// 连接代次守卫（MA-01）。泵任务与异步回调带着启动时领的票，
+    /// 在**发布到 self 之前**重新核对——晚到的 chunk 或事件不许写进
+    /// 已经换了一代的状态。
+    private var connectionGeneration = MeetingConnectionGeneration()
 
-    public init(coordinator: SessionCoordinator, port: Int = 8201, apiKey: String? = nil) {
+    public init(
+        coordinator: SessionCoordinator,
+        port: Int = 8201,
+        apiKey: String? = nil,
+        dependencies: MeetingSessionDependencies = .production
+    ) {
         self.coordinator = coordinator
+        self.dependencies = dependencies
+        self.audio = dependencies.makeAudioSource()
         self.port = port
         self.serviceKey = apiKey
         self.labeling = SpeakerLabeling(coordinator: coordinator)
@@ -383,7 +396,7 @@ public final class MeetingSession {
 
         let stream: AsyncStream<AudioChunk>
         do {
-            stream = try await audio.start(selection: selection)
+            stream = try await audio.start(selection: selection.meetingSelection)
         } catch {
             throw Blocked(reason: Self.blockReason(for: error))
         }
@@ -392,12 +405,13 @@ public final class MeetingSession {
         // 分人现在是任务级 opt-in：按用户开关声明，服务端不可用时如实回报失败。
         let wantsDiarization = preferences?.meetingDiarizationEnabled ?? false
 
-        let client = RealtimeASRClient(
-            port: port,
-            silenceDurationMilliseconds: RealtimeVADProfile.meeting.silenceDurationMilliseconds,
-            diarizationEnabled: wantsDiarization,
-            apiKey: serviceKey,
-            expectedASRRevision: binding?.asrModelRevision
+        let client = dependencies.makeRealtimeClient(
+            MeetingRealtimeClientConfiguration(
+                port: port,
+                apiKey: serviceKey,
+                diarizationEnabled: wantsDiarization,
+                expectedASRRevision: binding?.asrModelRevision
+            )
         )
         do {
             try await client.connect()
@@ -438,7 +452,9 @@ public final class MeetingSession {
         configureLabeling(sessionID: sessionID, enabled: wantsDiarization)
 
         epoch += 1
-        commitCursor = Date()
+        // 新一代从这里开始：此前任何仍在飞的回调都成了旧代。
+        let generation = connectionGeneration.begin()
+        commitCursor = dependencies.clock.now()
         pendingItem = nil
         partialText = nil
         diarizationDrained = false
@@ -452,7 +468,7 @@ public final class MeetingSession {
             Task { await self?.handleSystemAudioLost(reason) }
         }
         if isNewSession { startSleepObserver() }
-        startPump(stream: stream, client: client)
+        startPump(stream: stream, client: client, generation: generation)
     }
 
     private func configureLabeling(sessionID: String?, enabled: Bool) {
@@ -462,6 +478,8 @@ public final class MeetingSession {
 
     /// 释放这一层的设备与连接。**幂等**，中断与结束两条路都走它。
     private func releaseCapture(drain: Bool = false) async {
+        // 断开这一代：还在飞的 chunk 与事件从这一刻起一律作废。
+        connectionGeneration.invalidate()
         if !drain {
             pump?.cancel()
             pump = nil
@@ -514,21 +532,29 @@ public final class MeetingSession {
 
     // MARK: - 上行 / 下行
 
-    private func startPump(stream: AsyncStream<AudioChunk>, client: RealtimeASRClient) {
+    private func startPump(
+        stream: AsyncStream<AudioChunk>,
+        client: any MeetingRealtimeClient,
+        generation token: Int
+    ) {
         pump?.cancel()
         pump = Task { [weak self] in
             await withTaskGroup(of: Void.self) { group in
                 group.addTask { [weak self] in
                     for await chunk in stream {
                         guard let self else { return }
+                        // 旧连接的音频不许写进新一代的状态（MA-01）。
+                        guard await self.isCurrent(token) else { return }
                         await self.upload(chunk, to: client)
                     }
-                    await self?.captureStreamEnded()
+                    guard let self, await self.isCurrent(token) else { return }
+                    await self.captureStreamEnded()
                 }
                 group.addTask { [weak self] in
                     let events = await client.events()
                     for await envelope in events {
                         guard let self else { return }
+                        guard await self.isCurrent(token) else { return }
                         await self.handle(envelope)
                     }
                 }
@@ -537,7 +563,13 @@ public final class MeetingSession {
         }
     }
 
-    private func upload(_ chunk: AudioChunk, to client: RealtimeASRClient) async {
+    /// 这个回调还归当前这一代吗？跨 await 回来之后必须重新问一次——
+    /// 中断、结束、重连都可能在这期间换掉状态。
+    private func isCurrent(_ token: Int) -> Bool {
+        connectionGeneration.isCurrent(token)
+    }
+
+    private func upload(_ chunk: AudioChunk, to client: any MeetingRealtimeClient) async {
         guard !isStoppingIntentionally, !isPaused else { return }
         level = chunk.level
         gapCount = audio.gapCount
@@ -565,7 +597,7 @@ public final class MeetingSession {
         case .completed(let itemID, let transcript):
             // 服务端不再回报 `input_audio_buffer.committed`，所以窗口以终态为界：
             // 起点是上一次终态，终点是这一次终态（契约 §5.1）。
-            let now = Date()
+            let now = dependencies.clock.now()
             pendingItem = (start: commitCursor ?? now, end: now)
             commitCursor = now
             await commit(itemID: itemID, transcript: transcript)
@@ -656,7 +688,7 @@ public final class MeetingSession {
             guard !committedItemIDs.contains(itemID) else { return }
             committedItemIDs.insert(itemID)
         }
-        let window = pendingItem ?? (start: commitCursor ?? startedAt, end: Date())
+        let window = pendingItem ?? (start: commitCursor ?? startedAt, end: dependencies.clock.now())
         let isEpochStart = epoch > 1 && lines.isEmpty
         let lineID = UUID().uuidString
         let ordinal: Int
@@ -773,7 +805,7 @@ public final class MeetingSession {
         isStoppingIntentionally = false
         _ = await coordinator.markInterruption(reason, atOrdinal: currentOrdinal)
         interruption = reason
-        interruptedAt = Date()
+        interruptedAt = dependencies.clock.now()
         phase = .interrupted
     }
 
@@ -839,4 +871,57 @@ public final class MeetingSession {
 
     /// 已存好的段数（界面状态带上那个数字）。
     public var storedLineCount: Int { max(lines.count, coordinator.lineWatermark) }
+}
+
+// MARK: - 生产实现接线
+//
+// `MeetingAudioSource` 的 conformance 只能待在这个 App-only 文件里：
+// `AudioSourceCoordinator` 不在 SPM 目标内，协议边界用的
+// `MeetingAudioSelection` 是它的无损投影。
+
+extension AudioSourceCoordinator: MeetingAudioSource {
+    /// 把协议边界的纯值选择还原成采集层自己的 `Selection`。字段一一对应，
+    /// 没有丢信息——**用户勾了什么，采集层就拿什么**。
+    public func start(selection meetingSelection: MeetingAudioSelection) async throws -> AsyncStream<AudioChunk> {
+        try await start(
+            selection: Selection(
+                usesMicrophone: meetingSelection.usesMicrophone,
+                systemApps: meetingSelection.systemApps.map {
+                    SystemAudioApp(bundleID: $0.bundleID, name: $0.name)
+                }
+            )
+        )
+    }
+}
+
+extension AudioSourceCoordinator.Selection {
+    /// 面向协议边界的无损投影。`isEmpty` 的判定在两侧一致，
+    /// 所以"没选来源"不会在翻译过程中变成"选了麦克风"。
+    var meetingSelection: MeetingAudioSelection {
+        MeetingAudioSelection(
+            usesMicrophone: usesMicrophone,
+            systemApps: systemApps.map { MeetingAudioApp(bundleID: $0.bundleID, name: $0.name) }
+        )
+    }
+}
+
+extension MeetingSessionDependencies {
+    /// 生产依赖：真实设备、真实连接、系统时钟。
+    ///
+    /// 放在 App-only 文件里是因为它要碰 `AudioSourceCoordinator`；
+    /// 协议与值类型留在 SPM 目标内，测试才能在无设备环境下替换实现。
+    public static var production: MeetingSessionDependencies {
+        MeetingSessionDependencies(
+            makeAudioSource: { AudioSourceCoordinator() },
+            makeRealtimeClient: { configuration in
+                RealtimeASRClient(
+                    port: configuration.port,
+                    silenceDurationMilliseconds: RealtimeVADProfile.meeting.silenceDurationMilliseconds,
+                    diarizationEnabled: configuration.diarizationEnabled,
+                    apiKey: configuration.apiKey,
+                    expectedASRRevision: configuration.expectedASRRevision
+                )
+            }
+        )
+    }
 }

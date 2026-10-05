@@ -1283,3 +1283,61 @@ base: "origin/main @ d72535c7"
 - 提示条文案「下面有 n 条新的」未做本地化（项目当前无多语言）。
 - 未读计数只统计**行数变化**，用户手动删除或编辑历史行不计入——
   这类行本来也不是"新内容"。
+
+## M1 增量：会议编排层的依赖边界与连接代次（MA-01 接缝部分）
+
+### 做了什么
+
+`MeetingSession` 是会议链上唯一"什么都认识"的地方：设备、WebSocket、时钟都从它穿过。
+此前它直接 `AudioSourceCoordinator()`、`RealtimeASRClient(...)`、`Date()` 写死，
+**没有办法在无设备、无服务、不 sleep 碰运气的条件下驱动真实的它**。这次开三条窄接缝。
+
+- `MeetingAudioSource`：起停、麦克风静音、系统音频断线重连、补洞计数、本场来源。
+  协议边界用 `MeetingAudioSelection`（`usesMicrophone` + `systemApps: [MeetingAudioApp]`）
+  这个**纯值**——和 `MeetingSourcePresentation` 同样的理由：整条边界要能进 SPM 测试目标。
+  `AudioSourceCoordinator.Selection` 与它一一对应、双向无损。
+- `MeetingRealtimeClient`：**只列 ASR 子集**。会议不接 TTS，把 TTS 写进协议
+  就是给会议链路凭空加一个它永远不会用的依赖。
+- `MeetingClock`：抽它不是为了好看，而是**时间证据可测**——转录行的
+  `tStart` / `tEnd` 依赖取时刻的次数与顺序，真时钟测不出来。
+
+**连接代次守卫**（`MeetingConnectionGeneration`）是这次真正的新机制。
+一次 `await` 之前还算数的东西，回来时可能已经作废：中断、结束、重连都可能在
+这期间换掉状态。所以每条异步回调带着启动时领的票，**发布到 self 之前**重新验一次。
+两条推进路径缺一不可：`begin()`（新管线接管）与 `invalidate()`（连接被释放）。
+**只推进不回收**——旧票永远不会重新变成当前的，这就是"晚到的 chunk 或事件
+不许写进已经换了一代的状态"的准确含义。
+
+### 回归证据（2026-10-05）
+
+- 新增 `MeetingSessionDependenciesTests` 14 项：首代在 begin 前有效；
+  `begin` 发新票；第二次 `begin` 作废第一张票；`invalidate` 让在飞的东西作废；
+  **作废的票永不复活**；两次重连后第一代仍是旧的；中断重连同理；
+  空选择在协议边界仍为空、只勾麦克风与只勾系统音频都不为空、
+  每个 App 的 bundleID 与 name 都带过去；建连参数四个字段齐、相等可数；
+  注入的时钟是唯一的 `now` 来源且可数调用次数。
+- 全量 `swift test --package-path macos/SpeechRailApp`：**909 项全绿**。
+- `./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+
+### 关键取舍
+
+- **conformance 放在 `MeetingSession.swift` 而非协议文件**：`AudioSourceCoordinator`
+  是 App-only、不在 SPM 目标内，协议与值类型留在目标内，conformance 跟着 App-only
+  实现走。生产默认值 `MeetingSessionDependencies.production` 同理。
+- 协议**不覆盖"以后可能用到"的成员**。会议侧刻意没有 TTS。
+- 代次守卫做成独立值类型而不是 `MeetingSession` 上的裸 `Int`：它因此能被
+  在无界面环境下穷举验证，而"旧票永不复活"这类性质裸 Int 是测不出来的。
+
+### 未验证事项与已知边界
+
+- **MA-01 的验收场景（MC-05～MC-08：启动期间结束、两次重连、旧设备回调）
+  尚未端到端跑过。** 原因是硬的：`MeetingSession` 依赖 AppKit / CoreAudio /
+  `NSWorkspace`，是 App-only 文件，不在 SPM 目标内；把它拉进 SPM 会连带
+  `AudioSourceCoordinator`、`RealtimeASRClient`、采集辅助进程一整串，
+  远超本里程碑范围。本轮交付的是**接缝本身与其不变量**，
+  接上真实 `MeetingSession` 的场景级回归仍缺。
+- 因此"测试调用生产 MeetingSession"这条**尚未达成**——现在能被测试替换的是
+  接缝两侧的假实现，不是编排层本身。
+- 假实现的 `events()` 不会产出任何事件，**没有**用它验证过事件到达路径；
+  事件路径的代次丢弃只经过代码审查，未经运行验证。
+- 时钟已可注入，但**转录时间证据的断言仍未写**；抽时钟是为那一步铺路。
