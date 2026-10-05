@@ -377,6 +377,70 @@ public final class MeetingLibraryModel {
         }
     }
 
+    // MARK: - 跨会议问答（MA-17）
+
+    /// 提问框里的话。**没发出去之前它只是草稿**，不算一次问答。
+    public var askDraft: String = ""
+    public private(set) var answer: MeetingKnowledgeQueryService.Answer?
+    public private(set) var isAsking = false
+    public private(set) var askError: String?
+    /// 问答也有代次：连着问两句，先发的那句回来不能盖掉后问的那句。
+    /// 与列表、详情同一条纪律——那一处不守就会出现"上一场的结果配上这一场的标题"。
+    private var askGeneration: Int = 0
+
+    public func ask(_ question: String, configuration: LLMConfiguration) async {
+        await ask(
+            question,
+            resolvedConfiguration: ResolvedLLMConfiguration(
+                configuration: configuration,
+                apiKey: LLMKeychain.load(),
+                origin: .global
+            )
+        )
+    }
+
+    /// 问一句。范围跟着库页当前的筛选走——用户正在看某个项目，
+    /// 问出来的答案就不该把别的项目的内容带进来（MC-64）。
+    public func ask(_ question: String, resolvedConfiguration: ResolvedLLMConfiguration) async {
+        let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        // 没配模型就说没配，不去发一个注定失败的请求。
+        // 话术与纪要侧一致：会议可以照记，整理是之后的事。
+        guard resolvedConfiguration.configuration.isConfigured else {
+            askError = "还没有配置对话模型（设置 → 会话）。会议记录和知识库都可以照常用。"
+            return
+        }
+        askGeneration += 1
+        let generation = askGeneration
+        isAsking = true
+        askError = nil
+        do {
+            let result = try await coordinator.askKnowledge(
+                question: trimmed,
+                scope: openItemScope,
+                configuration: resolvedConfiguration.configuration,
+                resolvedConfiguration: resolvedConfiguration
+            )
+            guard generation == askGeneration else { return }
+            answer = result
+            askDraft = ""
+            isAsking = false
+        } catch {
+            guard generation == askGeneration else { return }
+            askError = error.localizedDescription
+            isAsking = false
+        }
+    }
+
+    /// 清掉当前答案与草稿。范围变了就该重来一次：旧答案的出处可能已经不在授权范围内。
+    public func clearAnswer() {
+        askGeneration += 1
+        answer = nil
+        askDraft = ""
+        askError = nil
+        isAsking = false
+    }
+
     // MARK: - 未完成事项（MC-56）
     //
     // 「某项目有 37 条未完成事项 → 列出所有未完成」。之前这条验收在库里算得出来，

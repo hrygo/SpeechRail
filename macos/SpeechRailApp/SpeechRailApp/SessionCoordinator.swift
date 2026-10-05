@@ -1009,6 +1009,39 @@ public final class SessionCoordinator {
         )
     }
 
+    // MARK: - 跨会议问答（MA-17 / MC-56～MC-64）
+
+    /// 问一句跨会议的问题，返回有出处的答案（MA-17）。
+    ///
+    /// 这一层此前**生产代码零消费方**：`MeetingKnowledgeQueryService` 与它的
+    /// `answer(_:)` 实现完整、测试覆盖拒答／分页／注入防护／MC-63 的展示前
+    /// 范围复核，但**没有任何生产代码构造它或调用它**——用户根本没有入口提问。
+    /// 库里做得再好，够不着就等于没做；这是本分支反复在修的同一类缺陷。
+    ///
+    /// 模型补全在这里接：`LLMProvider` 与纪要侧同一套（§5.1 的缝在
+    /// `SessionCoordinator` 这一层，界面不直接持有 provider）。
+    public func askKnowledge(
+        question: String,
+        scope: MeetingKnowledgeScope = .standard,
+        configuration: LLMConfiguration,
+        resolvedConfiguration: ResolvedLLMConfiguration
+    ) async throws -> MeetingKnowledgeQueryService.Answer {
+        let provider = LLMProvider()
+        let service = MeetingKnowledgeQueryService(store: store) { messages in
+            try await provider.complete(
+                configuration: configuration,
+                messages: messages,
+                apiKey: resolvedConfiguration.apiKey,
+                maxOutputTokens: 1_200,
+                textFormat: MeetingKnowledgeAnswer.jsonSchema,
+                timeout: 90
+            )
+        }
+        return try await service.answer(
+            .init(question: question, scope: scope)
+        )
+    }
+
     // MARK: - 未完成事项（MC-56）
 
     /// 结构化事项查询的透传。此前 `SessionStore.knowledgeItems` 生产代码零消费方：

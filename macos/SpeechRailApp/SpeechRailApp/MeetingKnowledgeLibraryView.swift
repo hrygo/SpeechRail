@@ -13,8 +13,10 @@ import SwiftUI
 /// 高级操作（标签、项目、删除、导出）留在详情里的"更多"菜单，
 /// 首屏只留搜索、翻页和纪要/转录切换。
 struct MeetingKnowledgeLibraryView: View {
+    @Environment(SessionPreferences.self) private var preferences
     @State private var model: MeetingLibraryModel
     @State private var searchText = ""
+    @State private var askPresented = false
     /// 翻页位置。冷启动直接打开某场会议（MC-48）时靠它回到原来的位置。
     @AppStorage("meetingLibraryOffset") private var restoredOffset = 0
 
@@ -176,6 +178,7 @@ struct MeetingKnowledgeLibraryView: View {
             openItemTimelineSheet(target)
         }
         .sheet(isPresented: $conflictsPresented) { conflictsSheet }
+        .sheet(isPresented: $askPresented) { askSheet }
         .confirmationDialog(
             "确认「后一条取代前一条」？",
             isPresented: Binding(
@@ -275,6 +278,14 @@ struct MeetingKnowledgeLibraryView: View {
                 .buttonStyle(.link)
                 .controlSize(.small)
                 .help("两场会的结论对不上时，在这里看，并决定哪一条作数")
+                Button {
+                    askPresented = true
+                } label: {
+                    Text("问知识库")
+                }
+                .buttonStyle(.link)
+                .controlSize(.small)
+                .help("问一句跨会议的问题，答案会标出依据的是哪几场会的哪几条")
                 Button("导入归档包…", action: chooseArchiveToImport)
                     .buttonStyle(.link)
                     .controlSize(.small)
@@ -616,6 +627,113 @@ struct MeetingKnowledgeLibraryView: View {
 
     /// 项目筛选（MA-13）。**筛选与列表、计数同源**（MC-51/MC-53），
     /// 所以这里切一下，标题旁的"共 N 场"立刻跟着变。
+    /// 跨会议问答（MA-17）。**这一层此前完全没有入口**：
+    /// `MeetingKnowledgeQueryService` 与它的拒答／分页／注入防护／展示前范围复核
+    /// 都实现完整、都有测试，但生产代码里没有任何地方构造它——
+    /// 用户能搜、能筛、能导出，却**没法问一句**。
+    private var askSheet: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                TextField("问一句，例如：上次说的灰度排期是哪天", text: $model.askDraft, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(1...3)
+                    .accessibilityLabel("要问的问题")
+                HStack {
+                    // 范围跟着库页当前的筛选走，这里要说出来：不然用户以为问的是全库。
+                    Text(askScopeCaption)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if model.isAsking {
+                        ProgressView().controlSize(.small)
+                    }
+                    Button("问") {
+                        Task { await model.ask(model.askDraft, resolvedConfiguration: resolvedAskConfiguration) }
+                    }
+                    .disabled(model.isAsking || model.askDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .keyboardShortcut(.defaultAction)
+                }
+                if let error = model.askError {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .accessibilityLabel("提问失败：\(error)")
+                }
+                Divider()
+                answerBody
+                Spacer(minLength: 0)
+            }
+            .padding(SpeechRailDesignTokens.Layout.contentPadding)
+            .frame(minWidth: 460, minHeight: 360, alignment: .leading)
+            .navigationTitle("问知识库")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") {
+                        askPresented = false
+                        model.clearAnswer()
+                    }
+                }
+            }
+        }
+    }
+
+    private var resolvedAskConfiguration: ResolvedLLMConfiguration {
+        preferences.resolvedLLMConfiguration(for: .minutes)
+    }
+
+    private var askScopeCaption: String {
+        if let projectID = model.projectID,
+           let name = model.projects.first(where: { $0.id == projectID })?.name {
+            return "只问「\(name)」这个项目里的会议"
+        }
+        return model.includesArchived
+            ? "含已归档的会议"
+            : "只问未归档的会议"
+    }
+
+    @ViewBuilder
+    private var answerBody: some View {
+        if let answer = model.answer {
+            if let refusal = answer.draft.refusal {
+                // 拒答要说清是**哪一种**。三句话的语气完全不同：
+                // "没记录"不是"你问错了"，也不是"这件事没发生过"。
+                Text(refusal.message)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            ForEach(Array(answer.draft.segments.enumerated()), id: \.offset) { _, segment in
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.hairline) {
+                    Text(segment.text)
+                        .font(.body)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                    ForEach(segment.evidenceIDs, id: \.self) { id in
+                        if let evidence = answer.retrieval.evidence.first(where: { $0.id == id }) {
+                            // 出处要看得见原话。只给"来自第 2 场会"等于让用户回去自己找。
+                            Text("「\(evidence.text)」")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            }
+            if answer.stoppedAtPageLimit {
+                // 翻页有上限，而"以为翻到底了"是这类列表问题最坏的失败形态。
+                Text("已经翻到这次检索的上限，可能还有更早的记录没被列进来。")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+        } else if !model.isAsking {
+            Text("问一句，答案会标出依据的是哪几场会的哪几条。没有依据时它会直说没有，而不是编一段。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     private var projectMenu: some View {
         Menu {
             Button("全部项目") { Task { await model.filter(projectID: nil) } }

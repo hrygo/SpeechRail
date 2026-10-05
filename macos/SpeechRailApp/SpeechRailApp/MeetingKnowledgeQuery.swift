@@ -1,5 +1,40 @@
 import Foundation
 
+/// 跨会议问答的模型侧结构化输出契约。
+///
+/// 与 `MeetingKnowledgeQueryService.ModelAnswer` 的解码键一一对应
+/// （`segments[].text` / `segments[].evidence_ids`）。
+/// 字段刻意只有这两个：**不给"动作""结论""建议"这种可以绕过接地的出口**——
+/// 模型能说的每一句都必须挂一个证据 id，挂不上就在 `decode` 之后被丢掉。
+public enum MeetingKnowledgeAnswer {
+    public static var jsonSchema: [String: Any] {
+        [
+            "type": "json_schema",
+            "name": "meeting_knowledge_answer",
+            "strict": true,
+            "schema": [
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["segments"],
+                "properties": [
+                    "segments": [
+                        "type": "array",
+                        "items": [
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["text", "evidence_ids"],
+                            "properties": [
+                                "text": ["type": "string"],
+                                "evidence_ids": ["type": "array", "items": ["type": "string"]]
+                            ]
+                        ]
+                    ]
+                ]
+            ]
+        ]
+    }
+}
+
 /// 跨会议问答的服务层（MA-17）。
 ///
 /// 它只做三件事：**取证据 → 让模型照着证据说话 → 按证据接地**。

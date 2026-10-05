@@ -613,6 +613,100 @@ final class MeetingKnowledgeLibraryTests: XCTestCase {
         XCTAssertTrue(model.emptyStateHint.contains("换个词"), "没结果要说下一步做什么")
     }
 
+    // MARK: - 跨会议问答（MA-17）
+    //
+    // 这一整块此前**一个入口都没有**：`MeetingKnowledgeQueryService` 与它的
+    // 拒答／分页／注入防护／展示前范围复核都实现完整、都有测试，
+    // 但生产代码里没有任何地方构造它——用户能搜、能筛、能导出，却没法问一句。
+    // `MeetingKnowledgeQueryTests` 那十几项证明的是**服务本身**是对的，
+    // 替换掉"谁来构造它"这一层，不会有一条变红。
+    //
+    // 所以下面这几条钉的是**接线**：model → 协调器 → 服务。
+
+    /// 没配模型就说没配。**不发一个注定失败的请求**，也不把空答案摆出来——
+    /// 后者会让用户以为"库里确实没有这条"，而真实原因是压根没问成。
+    func testAskingWithoutAModelSaysSoInsteadOfPretending() async throws {
+        let model = MeetingLibraryModel(coordinator: try requireCoordinator())
+        await model.ask("上次的灰度排期是哪天", configuration: LLMConfiguration())
+
+        XCTAssertNil(model.answer, "没配模型就没有答案，不能摆一个空壳")
+        let error = try XCTUnwrap(model.askError, "必须有一句能看的话")
+        XCTAssertTrue(error.contains("配置"), "要说清是配置的事：\(error)")
+        XCTAssertFalse(model.isAsking, "失败之后不能停在「正在问」上")
+    }
+
+    /// 空问题不问。发出去只是一次无意义的往返，而用户什么都没得到。
+    func testEmptyQuestionIsNotSent() async throws {
+        let model = MeetingLibraryModel(coordinator: try requireCoordinator())
+        await model.ask("   ", configuration: Self.configuredAskConfiguration)
+
+        XCTAssertNil(model.answer)
+        XCTAssertNil(model.askError)
+        XCTAssertFalse(model.isAsking)
+    }
+
+    /// **接线本身**：配好了、库里一条记录都没有 → 本地拒答，**一步都不往模型走**。
+    ///
+    /// 这条同时钉住两件事：model 真的把请求送到了协调器与服务（否则 `answer`
+    /// 会一直是 nil），以及"没有证据就不问模型"这条纪律在**生产路径**上成立
+    /// ——它不成立的时候，用户问一句就烧一次调用，而答案还是"没有记录"。
+    func testAskingWithNoEvidenceRefusesWithoutReachingTheModel() async throws {
+        let model = MeetingLibraryModel(coordinator: try requireCoordinator())
+        await model.ask("上次的灰度排期是哪天", configuration: Self.configuredAskConfiguration)
+
+        XCTAssertNil(model.askError, "库里没有记录不是错误，是答案的一部分")
+        let answer = try XCTUnwrap(model.answer, "接线断在这里：model 没有拿到任何回答")
+        XCTAssertEqual(answer.draft.refusal, .noEvidence)
+        XCTAssertTrue(answer.draft.segments.isEmpty)
+        XCTAssertFalse(model.isAsking)
+        XCTAssertEqual(model.askDraft, "", "问完就把输入框收干净，别留一半")
+    }
+
+    /// 清掉答案要连草稿与错误一起清——范围变了就该重来一次，
+    /// 留着上一句草稿只会让用户以为那句还没问出去。
+    func testClearingTheAnswerResetsDraftAndError() async throws {
+        let model = MeetingLibraryModel(coordinator: try requireCoordinator())
+        await model.ask("灰度排期", configuration: LLMConfiguration())
+        XCTAssertNotNil(model.askError)
+
+        model.askDraft = "没问出去的半句"
+        model.clearAnswer()
+        XCTAssertNil(model.answer)
+        XCTAssertNil(model.askError)
+        XCTAssertEqual(model.askDraft, "")
+    }
+
+    /// **这条是为了区分"真的走到了服务"与"协调器自己造了个拒答"**。
+    ///
+    /// 上一条（库里没记录 → 本地拒答）证明的是 model → 协调器这一段：
+    /// 变异检验把协调器改成绕过服务、直接返回一个伪造的拒答，那条**照样全绿**。
+    /// 所以这里换一个能分辨的判据：库里有记录时，服务必须越过本地拒答、
+    /// **真的去问模型**。端点指向一个必定连接失败的本地端口，于是
+    /// 真实路径必然抛错——伪造的拒答给不出这个结果。
+    func testAskingWithEvidenceActuallyReachesTheModelStep() async throws {
+        _ = try await makeMeeting(
+            title: "发布评审", at: Date(timeIntervalSince1970: 1_700_000_000),
+            actions: ["整理发布清单"]
+        )
+        // 问法里必须带得上记录里的词：检索是按正文匹配的，
+        // 问一个库里根本没出现过的词，返回"没有记录"是正确行为而不是缺陷
+        // ——第一次写这条用例时正是踩了这个坑。
+        let model = MeetingLibraryModel(coordinator: try requireCoordinator())
+        await model.ask("发布清单上次是怎么说的", configuration: Self.configuredAskConfiguration)
+
+        XCTAssertNil(
+            model.answer,
+            "有证据却给出一段本地拒答，说明服务根本没被调用——问模型那一步被跳过了"
+        )
+        let error = try XCTUnwrap(model.askError, "真实路径必然报错：端点是必定连接失败的本地端口")
+        XCTAssertFalse(error.isEmpty)
+        XCTAssertFalse(model.isAsking, "失败之后不能停在「正在问」上")
+    }
+
+    private static let configuredAskConfiguration = LLMConfiguration(
+        baseURL: "http://127.0.0.1:9/v1", model: "test-model"
+    )
+
     /// MC-48 在 model 层也要成立：归档包的 `selectedMinutesID` 必须是
     /// **详情正在显示的那一版**。
     ///
