@@ -22,6 +22,20 @@ struct MeetingKnowledgeLibraryView: View {
     /// 正在核对的那一场。nil = 只读浏览，不开编辑器。
     @State private var reviewTarget: MeetingReviewSnapshot?
     @State private var reviewVersion: MinutesVersion?
+    /// 等用户点头的那一次删除。`nil` = 没有待确认的动作。
+    ///
+    /// 单独一个状态而不是复用模型：**确认是界面的事**，模型只管执行。
+    /// 混在一起就会出现"模型记住了上一次待确认的动作"这类说不清的状态。
+    @State private var pendingDeletion: PendingDeletion?
+
+    /// 一次待确认的删除。用 `Identifiable` 驱动 `confirmationDialog`。
+    private struct PendingDeletion: Identifiable {
+        let id = UUID()
+        let documentID: String
+        let mode: MeetingDeletionMode
+        /// 会议标题。确认面板要指名道姓，不能只说"这一场"。
+        let title: String
+    }
 
     public init(coordinator: SessionCoordinator) {
         self.coordinator = coordinator
@@ -37,10 +51,46 @@ struct MeetingKnowledgeLibraryView: View {
         .sheet(item: $reviewTarget) { target in
             reviewSheet(target)
         }
+        .confirmationDialog(
+            deletionDialogTitle,
+            isPresented: Binding(
+                get: { pendingDeletion != nil },
+                set: { if !$0 { pendingDeletion = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: pendingDeletion
+        ) { pending in
+            Button(pending.mode.title, role: .destructive) {
+                Task { await model.delete(pending.documentID, mode: pending.mode) }
+                pendingDeletion = nil
+            }
+            Button("取消", role: .cancel) { pendingDeletion = nil }
+        } message: { pending in
+            Text(deletionDialogMessage(pending))
+        }
         .task {
             if model.rows.isEmpty {
                 await model.loadPage(offset: restoredOffset)
             }
+        }
+    }
+
+    private var deletionDialogTitle: String {
+        "确定要\(pendingDeletion?.mode.title ?? "删除")「\(pendingDeletion?.title ?? "")」吗？"
+    }
+
+    /// 确认面板要说明**这一步之后还剩什么**，不只说"不可撤销"。
+    ///
+    /// 只写"不可撤销"的话，用户没法判断值不值；说清剩什么，他才判断得了。
+    private func deletionDialogMessage(_ pending: PendingDeletion) -> String {
+        switch pending.mode {
+        case .archive:
+            return "归档之后它不再出现在搜索、导出和问答里，但数据一行不少，随时可以撤销。"
+        case .removeTranscript:
+            return "完整转录会被移除，纪要和结论留着。引用结论的原句从此读不到了，"
+                + "那些结论会被标成需要你再看一眼。这一步不能撤销。"
+        case .deleteEverything:
+            return "转录、纪要、结论、引用和来源快照会一起删掉，删完就没了。这一步不能撤销。"
         }
     }
 
@@ -65,10 +115,28 @@ struct MeetingKnowledgeLibraryView: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
             searchField
+            archivedToggle
         }
         .padding(.horizontal, SpeechRailDesignTokens.Layout.contentPadding)
         .padding(.top, SpeechRailDesignTokens.Spacing.md)
         .padding(.bottom, SpeechRailDesignTokens.Spacing.sm)
+    }
+
+    /// 「连归档的一起列」。默认不列——归档的意义就是搜索、导出、问答都看不见它。
+    ///
+    /// 但撤不了归档，「可恢复」就是一句空话：这个开关是用户把归档件重新摆出来看的入口。
+    /// 它**不**把归档件恢复成可用——那要走详情里的「撤销归档」，两件事不混。
+    private var archivedToggle: some View {
+        Toggle(isOn: Binding(
+            get: { model.includesArchived },
+            set: { value in Task { await model.setIncludesArchived(value) } }
+        )) {
+            Text("连归档的一起列")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .toggleStyle(.checkbox)
+        .accessibilityHint("归档的会议默认不列出来，打开这个才能看到并撤销归档")
     }
 
     private var subtitle: String {
@@ -206,27 +274,99 @@ struct MeetingKnowledgeLibraryView: View {
     }
 
     private func identityBand(_ snapshot: MeetingReviewSnapshot) -> some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-            Text(snapshot.title)
-                .font(.title)
-                .accessibilityAddTraits(.isHeader)
-            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                if let date = snapshot.occurredAt {
-                    Text(date.formatted(date: .abbreviated, time: .shortened))
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
+        HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Text(snapshot.title)
+                    .font(.title)
+                    .accessibilityAddTraits(.isHeader)
+                HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    if let date = snapshot.occurredAt {
+                        Text(date.formatted(date: .abbreviated, time: .shortened))
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    // 状态不是一个词就完事：已归档的会议仍然读得到，只是不能检索与导出。
+                    if snapshot.status != .active {
+                        Text(snapshot.status.title)
+                            .font(.caption)
+                            .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                            .padding(.vertical, 2)
+                            .background(SpeechRailDesignTokens.Color.recessedField, in: .rect(cornerRadius: 4))
+                    }
                 }
-                // 状态不是一个词就完事：已归档的会议仍然读得到，只是不能检索与导出。
-                if snapshot.status != .active {
-                    Text(snapshot.status.title)
-                        .font(.caption)
-                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
-                        .padding(.vertical, 2)
-                        .background(SpeechRailDesignTokens.Color.recessedField, in: .rect(cornerRadius: 4))
-                }
+                archiveOutcome
             }
+            Spacer(minLength: 0)
+            moreMenu(snapshot)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// 删除与撤销。**放在「更多」里而不是页头**：首屏只留搜索、翻页和纪要/转录切换，
+    /// 删除是低频且不可逆的动作，不该和「读这一场」摆在同一视觉层级上。
+    ///
+    /// 三档都摆出来而不是只给一个「删除」：它们的**后果完全不同**
+    /// （可撤销 / 留结论但没来源 / 全清），合成一个开关的三档强度是在骗用户。
+    @ViewBuilder
+    private func moreMenu(_ snapshot: MeetingReviewSnapshot) -> some View {
+        if let documentID = model.selectedDocumentID {
+            Menu {
+                if snapshot.status == .archived {
+                    Button("撤销归档") {
+                        Task { await model.restore(documentID) }
+                    }
+                    Divider()
+                }
+                Button("归档（可恢复）") { requestDeletion(documentID, mode: .archive, snapshot) }
+                Button("只移除完整转录") { requestDeletion(documentID, mode: .removeTranscript, snapshot) }
+                Button("完整删除（不可撤销）", role: .destructive) {
+                    requestDeletion(documentID, mode: .deleteEverything, snapshot)
+                }
+            } label: {
+                Label("更多", systemImage: "ellipsis.circle")
+            }
+            .menuStyle(.borderlessButton)
+            .controlSize(.small)
+            .disabled(model.pendingDocumentID != nil)
+            .help("归档、移除转录或完整删除这场会议")
+            .accessibilityLabel("这场会议的更多操作")
+        }
+    }
+
+    /// 要不要确认，判据是**可逆性**：归档能撤，不问；移除转录与完整删除都是单向门，
+    /// 问一句。移除转录之后这一场在列表和详情里都还在，容易让人以为"没什么大不了"——
+    /// 但原句是被永久删掉的，所以更该问。
+    private func requestDeletion(
+        _ documentID: String,
+        mode: MeetingDeletionMode,
+        _ snapshot: MeetingReviewSnapshot
+    ) {
+        guard MeetingLibraryModel.requiresConfirmation(mode) else {
+            Task { await model.delete(documentID, mode: mode) }
+            return
+        }
+        pendingDeletion = PendingDeletion(documentID: documentID, mode: mode, title: snapshot.title)
+    }
+
+    /// 删除/撤销之后的那句回执。**说具体数目与还剩什么**，不写「操作成功」。
+    @ViewBuilder
+    private var archiveOutcome: some View {
+        if let error = model.archiveError {
+            Label(error, systemImage: "exclamationmark.triangle")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else if let report = model.lastReport {
+            Label(MeetingLibraryModel.summary(for: report), systemImage: "checkmark.circle")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else if let restored = model.lastRestore {
+            Label(
+                restored ? "已撤销归档，这场会回到搜索和导出里。" : "这份记录不是归档态，撤不了。",
+                systemImage: restored ? "checkmark.circle" : "info.circle"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
     }
 
     /// 核对视图。拿不到这一场的会话 id 时不开编辑器——只读浏览仍然可用。

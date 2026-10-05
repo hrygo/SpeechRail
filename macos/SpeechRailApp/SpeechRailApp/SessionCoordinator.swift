@@ -992,6 +992,35 @@ public final class SessionCoordinator {
         )
     }
 
+    // MARK: - 知识归档与删除（MA-18）
+
+    /// 三档删除（MA-18 / MC-43、MC-44、MC-62）。
+    ///
+    /// 顺序固定为"先不可使用、再清理派生"：tombstone 一落，检索、导出、问答就都
+    /// 看不见它，之后才删正文；反过来会出现"内容已经没了但还能被搜到"的窗口。
+    /// 全程一个事务，失败时当前库一个字节都不变。
+    ///
+    /// 这一层之前**不存在**，于是界面上根本够不着删除：`MeetingLibraryModel` 只依赖
+    /// 协调器（§5.1 的缝），而协调器没有透传。三档删除和索引清理都已经在库里做好，
+    /// 缺的只是从界面到它的一条路。
+    @discardableResult
+    public func deleteMeetingKnowledge(
+        documentID: String,
+        mode: MeetingDeletionMode
+    ) async throws -> MeetingDeletionReport {
+        try await store.deleteMeetingKnowledge(documentID: documentID, mode: mode)
+    }
+
+    /// 撤销归档。
+    ///
+    /// **只有 `.archive` 能撤销**：另两档的数据已经不在库里了，`restoreMeetingKnowledge`
+    /// 对它们返回 false。界面不得对那两档显示"撤销"——给一个按了没反应的按钮，
+    /// 比不给更糟。
+    @discardableResult
+    public func restoreMeetingKnowledge(documentID: String) async throws -> Bool {
+        try await store.restoreMeetingKnowledge(documentID: documentID)
+    }
+
     /// 当前该被引用的那一版：采用版优先，没有采用版才用最新可用版（MA-11）。
     public func currentMinutesVersion(sessionID: String) async throws -> MinutesVersion? {
         if let accepted = try await store.acceptedMinutes(sessionID: sessionID) { return accepted }

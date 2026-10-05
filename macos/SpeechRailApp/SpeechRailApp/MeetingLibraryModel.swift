@@ -28,6 +28,14 @@ public final class MeetingLibraryModel {
     public private(set) var query: String = ""
     public private(set) var projectID: String?
 
+    /// 是否把已归档的会议也列出来。默认**不**列——归档的意义就是"搜索、导出、
+    /// 问答都看不见它"。
+    ///
+    /// 但用户必须能在需要时把它找回来：撤不了归档，「可撤销」就是一句空话。
+    /// 所以这个开关是"把归档件也摆出来看看"，不是"把归档件恢复成可用"——
+    /// 撤销要走详情里的动作，语义不同。
+    public private(set) var includesArchived = false
+
     /// 详情页签：纪要 / 转录。真正切换，不是两个都堆在一起。
     public enum DetailTab: String, CaseIterable, Hashable {
         case minutes
@@ -80,6 +88,14 @@ public final class MeetingLibraryModel {
         await loadPage(offset: 0)
     }
 
+    /// 切换"连归档件一起列"。回到第一页：归档件可能在任意位置，
+    /// 停在原来的偏移上会落到一个空页面上。
+    public func setIncludesArchived(_ includes: Bool) async {
+        guard includesArchived != includes else { return }
+        includesArchived = includes
+        await loadPage(offset: 0)
+    }
+
     public func loadPage(offset: Int) async {
         listGeneration += 1
         let generation = listGeneration
@@ -87,7 +103,8 @@ public final class MeetingLibraryModel {
         listError = nil
         do {
             let page = try await coordinator.meetingLibraryPage(
-                query: query, projectID: projectID, limit: limit, offset: offset
+                query: query, projectID: projectID,
+                includesArchived: includesArchived, limit: limit, offset: offset
             )
             guard generation == listGeneration else { return }  // 已经有更新的查询了
             rows = page.rows
@@ -156,5 +173,104 @@ public final class MeetingLibraryModel {
         if !query.isEmpty { return "没有匹配「\(query)」的会议，换个词或清空搜索。" }
         if counts.total == 0 { return "还没有整理过的会议。录一场，或导入一份纪要。" }
         return "往后翻还有 \(max(0, counts.total - rows.count)) 场。"
+    }
+
+    // MARK: - 归档与删除（MA-18）
+
+    /// 正在执行删除或撤销的文档 id。非空时那一行的动作禁用，避免连点两次。
+    public private(set) var pendingDocumentID: String?
+    /// 最近一次删除的结论。成功时带着**具体数目**。
+    public private(set) var lastReport: MeetingDeletionReport?
+    /// 最近一次撤销归档的结果。`false` 表示这份文档不是归档态，撤不了。
+    public private(set) var lastRestore: Bool?
+    public private(set) var archiveError: String?
+
+    /// 这一档要不要用户亲自确认。
+    ///
+    /// 判定放在模型而不是各个按钮里：三档删除散在三个入口各自判断的话，
+    /// 迟早会有一处把不可撤销的那档也放过去。界面的责任只是把确认面板摆出来。
+    public static func requiresConfirmation(_ mode: MeetingDeletionMode) -> Bool {
+        !mode.isRecoverable
+    }
+
+    /// 三档删除（MA-18 / MC-43、MC-44、MC-62）。
+    ///
+    /// 失败**不吞**：出错时 `archiveError` 有话，界面照原样留在这一场，
+    /// 库里一个字节都没变（删除是单事务的）。静默失败会让用户以为删掉了。
+    public func delete(_ documentID: String, mode: MeetingDeletionMode) async {
+        pendingDocumentID = documentID
+        archiveError = nil
+        lastReport = nil
+        lastRestore = nil
+        do {
+            let report = try await coordinator.deleteMeetingKnowledge(
+                documentID: documentID, mode: mode
+            )
+            lastReport = report
+            pendingDocumentID = nil
+            // 刚动过这一场，还开着它的详情就不成立了——留着会让人对着一个已经归档
+            // 或已删的会议读纪要，读到的是一份已经不参与检索与导出的内容。
+            if selectedDocumentID == documentID { await select(nil) }
+            await loadPage(offset: offset)
+        } catch {
+            archiveError = error.localizedDescription
+            pendingDocumentID = nil
+        }
+    }
+
+    /// 撤销归档。**只对 `.archive` 有意义**，另两档数据已经不在库里。
+    @discardableResult
+    public func restore(_ documentID: String) async -> Bool {
+        pendingDocumentID = documentID
+        archiveError = nil
+        lastReport = nil
+        do {
+            let restored = try await coordinator.restoreMeetingKnowledge(documentID: documentID)
+            lastRestore = restored
+            pendingDocumentID = nil
+            await loadPage(offset: offset)
+            return restored
+        } catch {
+            archiveError = error.localizedDescription
+            pendingDocumentID = nil
+            lastRestore = false
+            return false
+        }
+    }
+
+    /// 一次删除之后给用户看的那句话。
+    ///
+    /// **说具体数目与还剩什么**，不写"操作成功"：用户真正想知道的是
+    /// "哪几样东西没了、剩下的还算不算数"。`markedForReview` 要单独说——
+    /// 结论还在、还能看，但它不再自称已核对，这是需要用户动手的那件事。
+    public static func summary(for report: MeetingDeletionReport) -> String {
+        var parts: [String] = []
+        switch report.mode {
+        case .archive:
+            parts.append("已归档。搜索、导出和问答都看不见它，数据一行不少，可以撤销。")
+        case .removeTranscript:
+            parts.append("已移除完整转录 \(report.removedLines) 句。纪要和结论留着。")
+            if report.removedRevisions > 0 {
+                parts.append("原句的修订记录 \(report.removedRevisions) 条也一并移除。")
+            }
+            parts.append("引用它们的原句已经读不到了。")
+        case .deleteEverything:
+            parts.append("已完整删除，不能撤销。")
+            var removed: [String] = []
+            if report.removedLines > 0 { removed.append("转录 \(report.removedLines) 句") }
+            if report.removedMinutes > 0 { removed.append("纪要 \(report.removedMinutes) 版") }
+            if report.removedItems > 0 { removed.append("结论 \(report.removedItems) 条") }
+            if report.removedAnchors > 0 { removed.append("引用 \(report.removedAnchors) 处") }
+            if report.removedSnapshots > 0 { removed.append("来源快照 \(report.removedSnapshots) 份") }
+            parts.append(
+                removed.isEmpty
+                    ? "这一场本来就没有可删的内容。"
+                    : "一并清掉：" + removed.joined(separator: "、") + "。"
+            )
+        }
+        if report.markedForReview > 0 {
+            parts.append("其中 \(report.markedForReview) 条结论不再自称已核对，需要你再看一眼。")
+        }
+        return parts.joined(separator: "")
     }
 }

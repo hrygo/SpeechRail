@@ -4903,7 +4903,13 @@ extension SessionStore {
     /// 调用它们的人不该被这里悄悄恢复一份已经删掉的内容。
     @discardableResult
     public func restoreMeetingKnowledge(documentID: String) throws -> Bool {
-        guard let document = try meetingDocument(id: documentID) else { return false }
+        // 返回值说的是"**确实**撤销了归档"，不是"文档存在"。
+        // 对一份没归档过的文档执行 UPDATE 是一次什么也没改的空操作，
+        // 返回 true 会让界面说「已撤销归档」而实际什么都没发生——
+        // 那比说"这份记录不是归档态，撤不了"坏得多。
+        guard let document = try meetingDocument(id: documentID), document.deletedAt != nil else {
+            return false
+        }
         try execute("BEGIN IMMEDIATE;")
         do {
             try withStatement(

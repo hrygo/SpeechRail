@@ -1937,3 +1937,32 @@ Swift Testing **419 项**，零失败（2026-10-05 核验）。
   仍由 App-only 文件提供，那条链（CoreAudio tap、真实握手）没有回归覆盖。
 - `MeetingPowerMonitor` 只有 `startObservingSleep`，没有停止观察。观察者在会话生命周期
   内一直存在，与原实现一致；真要拆会话复用同一个 `MeetingSession` 实例时需要补。
+
+## 知识删除入口（MA-18 界面部分）
+
+此前 `SessionStore` 已有删除能力，但界面根本够不着：知识库页面只列文档，没有任何删除或
+撤销入口，用户无法从 App 里真正行使"删除我的会议知识"这一承诺。本轮把这条链接上。
+
+### 改了什么
+
+- **`SessionCoordinator`** 新增 `deleteMeetingKnowledge` / `restoreMeetingKnowledge` 透传。
+- **`SessionStore.restoreMeetingKnowledge` 修正**：原先对任何存在的文档都返回 `true`，
+  会让界面把"撤销归档"谎报成功；现在只对**真归档件**返回 `true`。
+- **`MeetingLibraryModel`** 新增删除/撤销状态、`requiresConfirmation(_:)`（按档位判定是否
+  不可逆）、`summary(for:)`、`includesArchived`。
+- **`MeetingKnowledgeLibraryView`** 新增「更多」菜单（三档删除 + 撤销归档）、不可逆档的
+  确认面板、结果回执，以及"连归档的一起列"开关。不可逆动作按项目渐进式披露约定收在
+  命名明确的菜单里，默认路径不受影响。
+
+### 回归证据（2026-10-05）
+
+新增 `MeetingLibraryDeletionTests` **7/7**。全量 `swift test --package-path macos/SpeechRailApp`：
+XCTest **1019 项**（较上一节 +7，即本节新增）+ Swift Testing **419 项**，零失败。
+`./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**（该脚本是唯一能类型检查
+`MeetingKnowledgeLibraryView.swift` 等 App-only 文件的入口）。
+
+### 未验证事项与已知边界
+
+- 界面本身**没有**做 UI 自动化或人工点击验收（本轮未获授权）。以上只证明 model/coordinator/
+  store 三层行为与全项目编译通过，不证明菜单在实际窗口里的呈现与可达性。
+- 三档删除的**真实落盘效果**只在 store 层用假件验证过，未在真实会议库上执行。
