@@ -1022,6 +1022,43 @@ final class AssistantCancelReceiveTests: XCTestCase {
         )
     }
 
+    // MARK: - M3/V09:活动内存有界，SQLite 全记录保留
+
+    /// V09:30 轮问答后场内窗口有界（contextTurns ≤ 24 轮、turns ≤ 48 行），
+    /// SQLite 全 30 轮保留；附属映射无已出窗口残留。
+    func testInMemoryWindowsAreBoundedWhileStoreKeepsEverything() async throws {
+        var scripts: [AssistantSessionTests.FakeAssistantLLM.Script] = []
+        for i in 0..<30 {
+            scripts.append(.deltas(["回答\(i)"]))
+        }
+        let harness = try await makeVoiceHarness(llmScripts: scripts)
+        defer { cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.configured)
+        for i in 0..<30 {
+            _ = await harness.session.ask(typed: "问题\(i)")
+            await waitUntil(
+                { harness.session.turns.contains { $0.role == .assistant && $0.text.contains("回答\(i)") } },
+                message: "第 \(i) 轮应收尾落库"
+            )
+        }
+        let window = AssistantSession.inMemoryTurnWindow
+        XCTAssertLessThanOrEqual(
+            harness.session.turns.count, window * 2,
+            "场内 turns（user+assistant 双行）必须按轮有界"
+        )
+        XCTAssertLessThanOrEqual(
+            harness.session.contextTurnCountForTest, window, "场内 contextTurns 必须有界"
+        )
+        // 权威在库里：30 轮用户问 + 30 轮助手答全部保留。
+        let recordID = try XCTUnwrap(harness.session.sessionID)
+        let lines = try await harness.store.lines(sessionID: recordID)
+        let userLines = lines.filter { $0.role == .user }.count
+        let assistantLines = lines.filter { $0.role == .assistant }.count
+        XCTAssertEqual(userLines, 30, "SQLite 用户问必须全保留")
+        XCTAssertEqual(assistantLines, 30, "SQLite 助手答必须全保留")
+    }
+
     /// V08b:ring 丢样快照差必须累计；快照回退（新采集期）不倒扣。
     func testUploadDroppedSamplesAreCounted() async throws {
         let harness = try await makeVoiceHarness(llmScripts: [])

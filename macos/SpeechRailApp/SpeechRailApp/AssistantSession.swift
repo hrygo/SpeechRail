@@ -383,6 +383,12 @@ public final class AssistantSession {
     /// 差值超阈值即本轮输入断裂，不得回答，转"请重说"。
     private var lastAnsweredChunksSkipped = 0
     private var lastAnsweredSamplesDropped = 0
+    /// M3/V09:场内对话窗口上限（轮）。`contextTurns` 留最近窗口轮，
+    /// `turns` 是 user+assistant 双行镜像，留窗口 2 倍行；
+    /// 权威全文在 SQLite；`buildRequestContext` 只取 suffix（12 轮/16k），
+    /// 场内 24 轮给 UI 回看留余量（请求预算 12 轮的 2 倍）。
+    /// 收尾点修剪，附属映射同步清理。
+    static let inMemoryTurnWindow = 24
     /// M3/V08c:输入完整性阈值——约 1 个 drain 块当量（100ms @24kHz 单声道 16bit
     /// ≈ 2400 样本）或 1 整块跳过。偶发亚块级抖动不挡回答；达到块级断裂才请重说。
     /// 候选值，按真机 gate 复核后集中定义。
@@ -391,6 +397,8 @@ public final class AssistantSession {
     /// 测试 seam：上一块序号（只读）。生产逻辑不依赖它做决策，
     /// 只做单调证据累计；是否"完整"由调用方按证据判定。
     var lastUploadedChunkSequenceForTest: Int? { lastUploadedChunkSequence }
+    /// 测试 seam：场内上下文轮数（只读）。V09 验证活动内存有界。
+    var contextTurnCountForTest: Int { contextTurns.count }
     /// VA-12/A42：当前重播绑定的原始 turnID（playbackInvocation）。
     /// 重播是独立播放调用：停止只更新本次播放记录，不碰另一回复的生成状态。
     /// nil 表示当前没有重播在跑。
@@ -2664,6 +2672,34 @@ public final class AssistantSession {
             turns.sort { $0.ordinal < $1.ordinal }
         }
         if let ordinal = reply.ordinal { currentOrdinal = max(currentOrdinal, ordinal) }
+        trimInMemoryWindows()
+    }
+
+    /// M3/V09:场内窗口修剪——活动内存有界，SQLite 全记录保留。
+    /// 只在收尾点调用：`contextTurns` 按顺序留最近窗口轮，`turns`
+    /// （user+assistant 双行镜像）按 ordinal 留窗口 2 倍行；
+    /// 附属映射（reply* / playbackDeliveryNotes）清理已出窗口的 key。
+    /// 当前轮（currentReply/question）永不修剪：收尾点它已落库投影，
+    /// 不在内存窗口内也不影响正在进行的轮次。
+    private func trimInMemoryWindows() {
+        let window = Self.inMemoryTurnWindow
+        // turns 是 user+assistant 双行镜像：窗口按"轮"计，行上限为 2 倍。
+        // 若按行数直接套窗口，会把 14 轮内已收尾的行提前裁掉，
+        // 导致请求投影缺历史（V09 回归），必须按轮折算。
+        let turnLinesCap = window * 2
+        if turns.count > turnLinesCap {
+            turns.removeFirst(turns.count - turnLinesCap)
+        }
+        if contextTurns.count > window {
+            contextTurns.removeFirst(contextTurns.count - window)
+        }
+        // 附属映射以窗口内 reply 为准：无 reply 的 user 行（输入已保存、
+        // 回答尚未收尾）是活动项，其问句不受 reply 键清理影响。
+        let liveReplyIDs = Set(contextTurns.compactMap(\.reply?.id))
+        replyQuestionIDs = replyQuestionIDs.filter { liveReplyIDs.contains($0.key) }
+        replySpoken = replySpoken.filter { liveReplyIDs.contains($0.key) }
+        replyPlayback = replyPlayback.filter { liveReplyIDs.contains($0.key) }
+        playbackDeliveryNotes = playbackDeliveryNotes.filter { liveReplyIDs.contains($0.key) }
     }
 
     private func projectReplyContext(
