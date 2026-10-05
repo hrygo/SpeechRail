@@ -55,7 +55,12 @@ public actor SessionStore {
     /// v3（MA-06）：`minutes` 追加 `is_accepted` 列（用户当前采用版，与最新尝试分离；
     /// 只有明确采用动作立指针，重试/重启/索引更新不得提升，MC-25/MC-31）。
     /// v1/v2 库逐级升到 v3，失败整库回滚（MC-67/MC-69）。
-    public static let schemaVersion: Int32 = 3
+    /// v4（MA-07）：`minutes` 追加 `remote_response_id` / `config_snapshot` /
+    /// `snapshot_id` / `cancel_requested_at`。任务身份落到行上：重启后能接着轮询**同一个**
+    /// 远端响应（MC-28）、任务跑着时改设置不换端点（MC-32）、取消是一个有痕迹的状态而不是
+    /// 一次内存里的 `Task.cancel()`（MC-30）。不写回既有行：老任务的 response id 本来就
+    /// 没存过，补不出来也不补造。
+    public static let schemaVersion: Int32 = 4
 
     private let directory: URL
     private let fileManager: FileManager
@@ -152,6 +157,9 @@ public actor SessionStore {
             }
             if version < 3 {
                 try migrateV2ToV3()
+            }
+            if version < 4 {
+                try migrateV3ToV4()
             }
             try execute("PRAGMA user_version=\(Self.schemaVersion);")
             try execute("COMMIT;")
@@ -607,11 +615,22 @@ public actor SessionStore {
 
     // MARK: - 纪要队列（§5.8：单飞 + 租约回收 + 失败给可读原因）
 
+    /// `minutes` 的完整读列清单。**所有**读这一行的查询都用它，
+    /// 因为 `minutesVersion(from:)` 按列序号取值：清单和映射对不上，
+    /// 读出来的就是别人的字段——所以这里只留一份，不要再各写各的。
+    private static let minutesSelectColumns = """
+    id, session_id, version, status, body, model, prompt_chars, is_latest, is_accepted, \
+    attempts, failure_reason, lease_until, created_at, is_legacy_import, \
+    remote_response_id, config_snapshot, snapshot_id, cancel_requested_at
+    """
+
     @discardableResult
     public func enqueueMinutes(
         sessionID: String,
         model: String?,
         promptChars: Int?,
+        configSnapshot: String? = nil,
+        snapshotID: String? = nil,
         id: String = UUID().uuidString
     ) throws -> MinutesVersion {
         // MA-06：清旧指针与插入新版本必须是同一事务；INSERT 失败时回滚，
@@ -629,8 +648,10 @@ public actor SessionStore {
                 try step(statement)
             }
             let sql = """
-            INSERT INTO minutes (id, session_id, version, status, body, model, prompt_chars, is_latest, is_accepted, attempts, failure_reason, lease_until, created_at)
-            VALUES (?, ?, ?, 'queued', NULL, ?, ?, 1, 0, 0, NULL, NULL, ?);
+            INSERT INTO minutes (
+                id, session_id, version, status, body, model, prompt_chars, is_latest, is_accepted,
+                attempts, failure_reason, lease_until, created_at, config_snapshot, snapshot_id
+            ) VALUES (?, ?, ?, 'queued', NULL, ?, ?, 1, 0, 0, NULL, NULL, ?, ?, ?);
             """
             try withStatement(sql) { statement in
                 bind(statement, 1, id)
@@ -639,6 +660,10 @@ public actor SessionStore {
                 bind(statement, 4, model)
                 bind(statement, 5, promptChars)
                 bind(statement, 6, now.timeIntervalSince1970)
+                // MA-07：配置与来源快照在**排队这一刻**就冻下来。任务跑着的时候改设置，
+                // 当前任务不跟着换；新配置从下一次任务生效（MC-32）。
+                bind(statement, 7, configSnapshot)
+                bind(statement, 8, snapshotID)
                 try step(statement)
             }
             try execute("COMMIT;")
@@ -654,7 +679,9 @@ public actor SessionStore {
             model: model,
             promptChars: promptChars,
             isLatest: true,
-            createdAt: now
+            createdAt: now,
+            configSnapshot: configSnapshot,
+            snapshotID: snapshotID
         )
     }
 
@@ -664,8 +691,7 @@ public actor SessionStore {
     public func claimMinutes(sessionID: String, lease: TimeInterval) throws -> MinutesVersion? {
         let now = Date()
         let sql = """
-        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, is_accepted, attempts, failure_reason, lease_until, created_at, is_legacy_import
-        FROM minutes
+        SELECT \(Self.minutesSelectColumns) FROM minutes
         WHERE session_id = ?
           AND (status = 'queued' OR (status = 'running' AND (lease_until IS NULL OR lease_until < ?)))
         ORDER BY version DESC LIMIT 1;
@@ -746,6 +772,119 @@ public actor SessionStore {
         return committed
     }
 
+    /// 记下远端后台响应的 id（MA-07/MC-28）。
+    ///
+    /// **必须在收到 id 的那一刻就落库**，不是整理结束之后。App 在这中间退出，
+    /// 重启后才有东西可查——查原请求，而不是把整场重新发一遍（可能重复计费，
+    /// 也可能覆盖用户已经采用的版本）。
+    /// 带 fencing 代际：行已被新 owner 接管时，迟到的写入不算数。
+    @discardableResult
+    public func recordMinutesRemoteResponse(
+        minutesID: String,
+        expectedAttempts: Int,
+        responseID: String
+    ) throws -> Bool {
+        let sql = """
+        UPDATE minutes SET remote_response_id = ?
+        WHERE id = ? AND status = 'running' AND attempts = ?
+          AND (remote_response_id IS NULL OR remote_response_id = ?);
+        """
+        var committed = false
+        try withStatement(sql) { statement in
+            bind(statement, 1, responseID)
+            bind(statement, 2, minutesID)
+            bind(statement, 3, expectedAttempts)
+            bind(statement, 4, responseID)
+            try step(statement)
+            committed = sqlite3_changes(try requireHandle()) > 0
+        }
+        return committed
+    }
+
+    /// 心跳续租（MA-07）。一次整理可能跑十几分钟，租约只写一次的话，
+    /// 后半程会被下一次启动当成"执行者已经不在了"回收掉。
+    /// 同样带代际：旧执行者的心跳不能把新 owner 的租约往后推。
+    @discardableResult
+    public func renewMinutesLease(minutesID: String, expectedAttempts: Int, lease: TimeInterval) throws -> Bool {
+        let sql = "UPDATE minutes SET lease_until = ? WHERE id = ? AND status = 'running' AND attempts = ?;"
+        var committed = false
+        try withStatement(sql) { statement in
+            bind(statement, 1, Date().addingTimeInterval(lease).timeIntervalSince1970)
+            bind(statement, 2, minutesID)
+            bind(statement, 3, expectedAttempts)
+            try step(statement)
+            committed = sqlite3_changes(try requireHandle()) > 0
+        }
+        return committed
+    }
+
+    /// 用户按下「停止整理」：**先**把取消请求写进库里，再去停本地任务（MA-07/MC-30）。
+    ///
+    /// 顺序是有意的：写库之后崩溃，重启仍能看到"有人要求停这一条"，
+    /// 而不是只停了个内存里的 Task、留下一条永远转圈的 `running`。
+    /// 这一步**不代表远端已经停了**——远端确认是另一件事，由调用方另行表达。
+    /// 返回是否写上：已经在终态的行返回 false，不覆盖既有结论。
+    @discardableResult
+    public func requestCancelMinutes(minutesID: String) throws -> Bool {
+        let sql = """
+        UPDATE minutes SET cancel_requested_at = ?
+        WHERE id = ? AND cancel_requested_at IS NULL
+          AND (status = 'queued' OR status = 'running');
+        """
+        var committed = false
+        try withStatement(sql) { statement in
+            bind(statement, 1, Date().timeIntervalSince1970)
+            bind(statement, 2, minutesID)
+            try step(statement)
+            committed = sqlite3_changes(try requireHandle()) > 0
+        }
+        return committed
+    }
+
+    /// 取消已被本地确认：这一条**不是失败**（MC-30）。
+    ///
+    /// "没整理出来"和"用户不要了"给出的下一步不同，所以是两个状态而不是一条失败原因。
+    /// 带代际：被新 owner 接管后，迟到的取消不得改写它的状态。
+    @discardableResult
+    public func cancelMinutesIfOwner(minutesID: String, expectedAttempts: Int) throws -> Bool {
+        let sql = """
+        UPDATE minutes SET status = 'cancelled', lease_until = NULL
+        WHERE id = ? AND status = 'running' AND attempts = ?
+          AND cancel_requested_at IS NOT NULL;
+        """
+        var committed = false
+        try withStatement(sql) { statement in
+            bind(statement, 1, minutesID)
+            bind(statement, 2, expectedAttempts)
+            try step(statement)
+            committed = sqlite3_changes(try requireHandle()) > 0
+        }
+        return committed
+    }
+
+    /// 远端是否已经受理这次提交，本地无法查明（MA-07/MC-28 后半句、§8.5）。
+    ///
+    /// 请求可能已经被供应商收下并开始执行，只是 App 在拿到 response id 之前断了。
+    /// 这时**不自动重发**：没有可验证的幂等能力时，重发可能重复执行、重复计费。
+    /// 该状态不进 `pendingMinutesRows`，所以下一次启动不会把它当成待办自动跑一遍；
+    /// 要不要重试由用户明确决定。
+    @discardableResult
+    public func markMinutesSubmissionUnknown(minutesID: String, expectedAttempts: Int) throws -> Bool {
+        let sql = """
+        UPDATE minutes SET status = 'submission_unknown', lease_until = NULL,
+               failure_reason = '提交结果待确认'
+        WHERE id = ? AND status = 'running' AND attempts = ?;
+        """
+        var committed = false
+        try withStatement(sql) { statement in
+            bind(statement, 1, minutesID)
+            bind(statement, 2, expectedAttempts)
+            try step(statement)
+            committed = sqlite3_changes(try requireHandle()) > 0
+        }
+        return committed
+    }
+
     /// 还有纪要没整理完的会话：排队中的，或者租约已经过期的 `running`。
     ///
     /// 启动时用它回收：App 崩一次之后，那一版纪要会永远卡在 `running`
@@ -769,7 +908,7 @@ public actor SessionStore {
     /// 返回整行以便调用方按原 job 身份认领，不新建版本。
     public func pendingMinutesRows(now: Date = Date()) throws -> [MinutesVersion] {
         let sql = """
-        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, is_accepted, attempts, failure_reason, lease_until, created_at, is_legacy_import
+        SELECT \(Self.minutesSelectColumns)
         FROM minutes
         WHERE status = 'queued' OR (status = 'running' AND (lease_until IS NULL OR lease_until < ?))
         ORDER BY version ASC;
@@ -1267,7 +1406,7 @@ public actor SessionStore {
     /// 没有可用版时返回 nil，调用方不得把失败尝试或空正文当成功展示。
     public func latestUsableMinutes(sessionID: String) throws -> MinutesVersion? {
         let sql = """
-        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, is_accepted, attempts, failure_reason, lease_until, created_at, is_legacy_import
+        SELECT \(Self.minutesSelectColumns)
         FROM minutes WHERE session_id = ? AND status = 'ready' AND body IS NOT NULL
         ORDER BY version DESC LIMIT 1;
         """
@@ -1282,7 +1421,7 @@ public actor SessionStore {
     /// 找不到返回 nil，调用方不得回退成最新版冒充选定版。
     public func minutesVersion(id: String) throws -> MinutesVersion? {
         let sql = """
-        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, is_accepted, attempts, failure_reason, lease_until, created_at, is_legacy_import
+        SELECT \(Self.minutesSelectColumns)
         FROM minutes WHERE id = ? LIMIT 1;
         """
         return try withStatement(sql) { statement -> MinutesVersion? in
@@ -1294,7 +1433,7 @@ public actor SessionStore {
 
     public func minutesVersions(sessionID: String) throws -> [MinutesVersion] {
         let sql = """
-        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, is_accepted, attempts, failure_reason, lease_until, created_at, is_legacy_import
+        SELECT \(Self.minutesSelectColumns)
         FROM minutes WHERE session_id = ? ORDER BY version DESC;
         """
         return try withStatement(sql) { statement in
@@ -1311,7 +1450,7 @@ public actor SessionStore {
     /// 调用方不得把最新尝试或最新可用版冒充成用户采用版。
     public func acceptedMinutes(sessionID: String) throws -> MinutesVersion? {
         let sql = """
-        SELECT id, session_id, version, status, body, model, prompt_chars, is_latest, is_accepted, attempts, failure_reason, lease_until, created_at, is_legacy_import
+        SELECT \(Self.minutesSelectColumns)
         FROM minutes WHERE session_id = ? AND is_accepted = 1 LIMIT 1;
         """
         return try withStatement(sql) { statement -> MinutesVersion? in
@@ -1480,6 +1619,28 @@ public actor SessionStore {
         let sql = "SELECT id, document_id, line_revision_ids, speaker_map_revision, note_refs, coverage, seal_result, created_at FROM source_snapshot WHERE id = ? LIMIT 1;"
         return try withStatement(sql) { statement -> MeetingSourceSnapshot? in
             bind(statement, 1, id)
+            guard try step(statement) == SQLITE_ROW else { return nil }
+            return sourceSnapshot(from: statement)
+        }
+    }
+
+    /// 这一场最近一次封存的来源快照（MA-07/MC-20）。
+    ///
+    /// 生成任务在排队那一刻绑定它：同一任务不能边整理边跟随来源变化，
+    /// 否则"这一版依据的是哪份转录"就说不清了。
+    /// 还没有快照时返回 nil——**不现造一个**：封存语义属于来源封存那一步（MA-08），
+    /// 这里读不到就说"还没有"。
+    public func latestSourceSnapshot(sessionID: String) throws -> MeetingSourceSnapshot? {
+        let sql = """
+        SELECT s.id, s.document_id, s.line_revision_ids, s.speaker_map_revision,
+               s.note_refs, s.coverage, s.seal_result, s.created_at
+        FROM source_snapshot s
+        JOIN meeting_document d ON d.id = s.document_id
+        WHERE d.source_session_id = ?
+        ORDER BY s.created_at DESC LIMIT 1;
+        """
+        return try withStatement(sql) { statement -> MeetingSourceSnapshot? in
+            bind(statement, 1, sessionID)
             guard try step(statement) == SQLITE_ROW else { return nil }
             return sourceSnapshot(from: statement)
         }
@@ -1743,10 +1904,12 @@ public actor SessionStore {
     }
 
     private func minutesVersion(from statement: OpaquePointer) -> MinutesVersion {
-        // 列顺序固定为 SELECT 显式列：0...7 为基础字段，8 为 is_accepted（MA-06），
-        // 其后依次为 attempts / failure_reason / lease_until / created_at / is_legacy_import。
-        // v1 老库没有 `is_legacy_import` 列：读不到时按 legacy 处理（不补造引用，MC-68）。
-        // v2 老库没有 `is_accepted` 列：新 SELECT 显式带该列，老形状读不到时按未采用处理。
+        // 列顺序固定为 `minutesSelectColumns`：0...7 为基础字段，8 为 is_accepted（MA-06），
+        // 其后依次为 attempts / failure_reason / lease_until / created_at / is_legacy_import，
+        // 最后四列是 MA-07 的任务身份（remote_response_id / config_snapshot / snapshot_id /
+        // cancel_requested_at）。
+        // 老库读不到后面的列时按"没有过"处理，不猜：v1 没有 is_legacy_import（按 legacy，
+        // MC-68）、v2 没有 is_accepted（按未采用）、v3 没有任务身份（按没有远端响应）。
         let count = Int(sqlite3_column_count(statement))
         let accepted: Bool = {
             guard count > 8 else { return false }
@@ -1756,6 +1919,10 @@ public actor SessionStore {
             guard count > 13 else { return true }
             return columnInt(statement, 13) != 0
         }()
+        func optionalDate(_ index: Int32) -> Date? {
+            guard count > Int(index) else { return nil }
+            return columnIsNull(statement, index) ? nil : Date(timeIntervalSince1970: columnDouble(statement, index))
+        }
         return MinutesVersion(
             id: columnText(statement, 0) ?? "",
             sessionID: columnText(statement, 1) ?? "",
@@ -1770,7 +1937,11 @@ public actor SessionStore {
             failureReason: columnText(statement, 10),
             leaseUntil: columnIsNull(statement, 11) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 11)),
             createdAt: Date(timeIntervalSince1970: columnDouble(statement, 12)),
-            isLegacyImport: legacy
+            isLegacyImport: legacy,
+            remoteResponseID: count > 14 ? columnText(statement, 14) : nil,
+            configSnapshot: count > 15 ? columnText(statement, 15) : nil,
+            snapshotID: count > 16 ? columnText(statement, 16) : nil,
+            cancelRequestedAt: optionalDate(17)
         )
     }
 
@@ -1968,6 +2139,11 @@ extension SessionStore {
       failure_reason TEXT,
       lease_until    REAL,
       created_at     REAL NOT NULL,
+      -- MA-07 的任务身份四列：新库建表时就在，旧库由 migrateV3ToV4 追加。
+      remote_response_id  TEXT,
+      config_snapshot     TEXT,
+      snapshot_id         TEXT,
+      cancel_requested_at REAL,
       UNIQUE (session_id, version)
     );
 
@@ -2106,6 +2282,30 @@ extension SessionStore {
         }
         if !columns.contains("is_accepted") {
             try execute("ALTER TABLE minutes ADD COLUMN is_accepted INTEGER NOT NULL DEFAULT 0;")
+        }
+    }
+
+    /// v3 → v4 的 DDL（调用方已在同一事务内）：任务身份四列。
+    ///
+    /// 全部可空且**不回填**：老任务当年没有把 response id 存下来过，
+    /// 补一个空值等于伪造"我们确认过远端没在跑"（§8.5）。它们的语义是
+    /// "没有这项信息"，不是"这项为否"。
+    private func migrateV3ToV4() throws {
+        let columns = try withStatement("PRAGMA table_info(minutes);") { statement in
+            var names: [String] = []
+            while try step(statement) == SQLITE_ROW {
+                if let name = columnText(statement, 1) { names.append(name) }
+            }
+            return names
+        }
+        let additions: [(String, String)] = [
+            ("remote_response_id", "TEXT"),
+            ("config_snapshot", "TEXT"),
+            ("snapshot_id", "TEXT"),
+            ("cancel_requested_at", "REAL"),
+        ]
+        for (name, type) in additions where !columns.contains(name) {
+            try execute("ALTER TABLE minutes ADD COLUMN \(name) \(type);")
         }
     }
 }

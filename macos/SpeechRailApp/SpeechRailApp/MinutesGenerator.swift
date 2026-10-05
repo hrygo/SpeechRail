@@ -150,6 +150,10 @@ public final class MinutesGenerator {
         case running
         case ready
         case failed(String)
+        /// 用户停下了这一次（MC-30）。与 `failed` 分开：下一步不同，也不该显示成"整理失败"。
+        case cancelled
+        /// 远端可能已经受理，本地没拿到回执（MC-28、§8.5）。**不自动重发。**
+        case submissionUnknown
 
         public var title: String {
             switch self {
@@ -158,6 +162,8 @@ public final class MinutesGenerator {
             case .running: "正在整理会议…"
             case .ready: "纪要在下面"
             case .failed: "纪要没整理出来 · 文字记录已经存好了"
+            case .cancelled: "整理已停止 · 文字记录已经存好了"
+            case .submissionUnknown: "提交结果待确认 · 文字记录已经存好了"
             }
         }
     }
@@ -170,6 +176,12 @@ public final class MinutesGenerator {
     public private(set) var versionsNeedingReview: Set<String> = []
     /// 最近一次整理用的服务端响应 id（诊断用；它不是用户内容）。
     public private(set) var lastResponseID: String?
+    /// 停止之后关于**远端**的那半句话（MC-30）。本地停下是确定的，
+    /// 远端停没停不是——没确认就要说出来，不能替用户断言。
+    public private(set) var remoteCancellationNote: String?
+    /// 当前设置与在跑任务冻结的那份不一致（MC-32）。界面据此说明
+    /// 「新配置从下一次任务生效」，当前任务不跟着换端点。
+    public private(set) var jobConfigDiffersFromCurrent = false
     /// 这一次失败是不是**配置问题**（没填模型 / 地址不对 / 端点没有 Responses API）。
     /// 由它决定失败条给哪个出口：配置问题给「去设置里填对话模型」，其它给「重新生成」——
     /// 配置没填时按「重新生成」只会原样再失败一次，是个死循环（用户 2026-09-19：
@@ -191,8 +203,13 @@ public final class MinutesGenerator {
     /// 在飞的那一次整理。`stop()` 取消的是它——界面上的「停止整理」要真的停下，
     /// 而不是只把按钮换掉（设计稿 `会议助手 · 会议页 · 整理中` 给出这个出口）。
     private var runTask: Task<Void, Never>?
+    /// 在飞的那一版纪要行。停止时按它写取消请求——取消的是**指定任务**，
+    /// 不影响另一场正在记录的会议，也不删旧纪要（MC-22/MC-30）。
+    private var inFlightMinutesID: String?
     /// 租约时长。它比一次整理该花的时间长一点，短了会被下一个启动误回收。
     private static let lease: TimeInterval = 600
+    /// 心跳间隔：租约的三分之一。整理要跑十几分钟，只写一次租约的话后半程会被误回收。
+    private static let heartbeatInterval: TimeInterval = 200
 
     public init(coordinator: SessionCoordinator) {
         self.coordinator = coordinator
@@ -220,6 +237,8 @@ public final class MinutesGenerator {
         defer { inFlight = nil }
         state = .queued
         failedOnSetup = false
+        remoteCancellationNote = nil
+        jobConfigDiffersFromCurrent = false
         let configuration = resolvedConfiguration.configuration
 
         let version: MinutesVersion
@@ -237,10 +256,16 @@ public final class MinutesGenerator {
                 exchanges: (try? await coordinator.innerOSExchanges(sessionID: sessionID)) ?? [],
                 verifiedExchangeIDs: await Self.verifiedSupplementIDs(coordinator: coordinator, sessionID: sessionID)
             )
+            // MA-07：配置与来源快照在**排队这一刻**冻下来（MC-20/MC-32）。
+            // 任务跑着的时候改设置，当前任务不跟着换；新配置从下一次任务生效。
+            let jobConfig = MinutesJobConfig(configuration)
+            let snapshotID = (try? await coordinator.latestSourceSnapshot(sessionID: sessionID))?.id
             version = try await coordinator.enqueueMinutes(
                 sessionID: sessionID,
                 model: configuration.model.isEmpty ? nil : configuration.model,
-                promptChars: transcript.count
+                promptChars: transcript.count,
+                configSnapshot: jobConfig.fingerprint,
+                snapshotID: snapshotID
             )
             versions = try await coordinator.minutesVersions(sessionID: sessionID)
             versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: sessionID)
@@ -250,6 +275,7 @@ public final class MinutesGenerator {
                         version: version,
                         transcript: transcript,
                         supplements: supplements,
+                        jobConfig: jobConfig,
                         resolvedConfiguration: resolvedConfiguration
                     )
                 }
@@ -318,7 +344,13 @@ public final class MinutesGenerator {
             versions = try await coordinator.minutesVersions(sessionID: row.sessionID)
             versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: row.sessionID)
             let configuration = resolvedConfiguration.configuration
-            guard configuration.isConfigured else {
+            // MC-32：恢复的是**原来那次任务**，它答应过用哪一套配置。
+            // 用户这时改了设置，当前任务也不换端点——界面只说明新配置从下一次生效。
+            // 读不出的指纹（老行没有这一列）才退回当前设置，那不是猜，是没有可还原的东西。
+            let currentConfig = MinutesJobConfig(configuration)
+            let jobConfig = MinutesJobConfig.parse(row.configSnapshot) ?? currentConfig
+            jobConfigDiffersFromCurrent = jobConfig != currentConfig
+            guard jobConfig.configuration.isConfigured else {
                 // 没配大模型：不断原 job，只如实记失败；行仍可被下次恢复认领。
                 _ = try? await coordinator.failMinutes(
                     minutesID: row.id,
@@ -335,6 +367,7 @@ public final class MinutesGenerator {
                     version: row,
                     transcript: transcript,
                     supplements: supplements,
+                    jobConfig: jobConfig,
                     resolvedConfiguration: resolvedConfiguration
                 )
             }
@@ -349,9 +382,21 @@ public final class MinutesGenerator {
     }
 
     /// 「停止整理」：取消在飞的那一次。**转录不受影响**——它早就封存好了，
-    /// 所以这里只把这一版如实标成失败并写明原因，用户可以随时重新生成。
+    /// 所以这里只停这一版，用户可以随时重新生成。
+    ///
+    /// 顺序是刻意的（MA-07/MC-30）：**先**把取消请求写进库，再停本地任务。
+    /// 写库之后崩溃，重启仍看得见"有人要求停这一条"，而不是只停了个内存里的 Task，
+    /// 留下一条永远转圈的 `running`。停掉的这一版落成 `cancelled` 而不是"整理失败"——
+    /// 用户不要了和没整理出来，下一步不一样。
     public func stop() {
-        runTask?.cancel()
+        let task = runTask
+        let minutesID = inFlightMinutesID
+        Task { [weak self] in
+            if let minutesID {
+                _ = try? await self?.coordinator.requestCancelMinutes(minutesID: minutesID)
+            }
+            task?.cancel()
+        }
     }
 
     /// 界面上要不要给「停止整理」这个出口。
@@ -382,8 +427,21 @@ public final class MinutesGenerator {
             let current = try? await coordinator.currentMinutes(sessionID: sessionID)
             latestBody = current?.body
             state = .failed(latest?.failureReason ?? "没有可读的原因")
+        case .cancelled:
+            // MC-30：停掉的这一版不算失败，正文仍按"采用版优先"回退，
+            // 远端那句"无法确认"在没有本次会话内上下文时必须原样说。
+            let current = try? await coordinator.currentMinutes(sessionID: sessionID)
+            latestBody = current?.body
+            remoteCancellationNote = "本地已经停下；远端有没有一起停下无法确认。"
+            state = .cancelled
+        case .submissionUnknown:
+            // MC-28：远端可能已经受理，本地没有回执。不自动重发，也不显示成"没整理出来"。
+            let current = try? await coordinator.currentMinutes(sessionID: sessionID)
+            latestBody = current?.body
+            state = .submissionUnknown
         default:
             latestBody = nil
+            remoteCancellationNote = nil
             state = .idle
         }
     }
@@ -427,22 +485,42 @@ public final class MinutesGenerator {
         version: MinutesVersion,
         transcript: String,
         supplements: String = "",
+        jobConfig: MinutesJobConfig,
         resolvedConfiguration: ResolvedLLMConfiguration
     ) async throws {
         let claimed = try await coordinator.claimMinutes(sessionID: version.sessionID, lease: Self.lease)
         guard let claimed else { return }
         state = .running
-        let configuration = resolvedConfiguration.configuration
+        inFlightMinutesID = claimed.id
+        defer { inFlightMinutesID = nil }
+
+        // MC-32：用任务冻结的那份配置，不跟着当前设置换端点。
+        // 密钥仍然在调用时按安全来源解析、不落库（§8.3）——指纹只回答"是不是同一套配置"。
+        let configuration = jobConfig.configuration
         let key = resolvedConfiguration.apiKey
+        // 心跳：租约定期续一次。整理要跑十几分钟，只写一次租约的话后半程会被误回收。
+        let heartbeat = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(Self.heartbeatInterval))
+                guard !Task.isCancelled, let self else { return }
+                let renewed = (try? await self.coordinator.renewMinutesLease(
+                    minutesID: claimed.id,
+                    expectedAttempts: claimed.attempts,
+                    lease: Self.lease
+                )) ?? false
+                // 续不上说明行已被新 owner 接管或已落终态：不再续，也不去覆盖它。
+                if !renewed { return }
+            }
+        }
+        defer { heartbeat.cancel() }
         do {
-            let responseID = try await provider.startBackground(
+            let responseID = try await responseIDFor(
+                claimed: claimed,
+                transcript: transcript,
+                supplements: supplements,
                 configuration: configuration,
-                messages: Self.prompt(transcript: transcript, supplements: supplements),
-                apiKey: key,
-                maxOutputTokens: 4_000,
-                textFormat: MinutesDocument.jsonSchema
+                key: key
             )
-            lastResponseID = responseID
             let text = try await provider.pollBackground(
                 configuration: configuration,
                 apiKey: key,
@@ -465,6 +543,7 @@ public final class MinutesGenerator {
                 }
                 latestBody = body
                 failedOnSetup = false
+                remoteCancellationNote = nil
                 state = .ready
             case .failed(let reason):
                 // MC-33/MC-34：空输出与结构失败保留候选文本但记成失败，不发布成功。
@@ -477,9 +556,22 @@ public final class MinutesGenerator {
         } catch {
             // 取消与失败要分开说：用户按的「停止整理」不该在记录里留下一条"整理失败"。
             let cancelled = Task.isCancelled || (error as? LLMError) == .cancelled
-            let reason = cancelled
-                ? "你停下了这一次整理。文字记录已经存好，可以重新生成。"
-                : Self.readableReason(for: error)
+            if cancelled {
+                await finishCancellation(claimed: claimed, configuration: configuration, key: key)
+                return
+            }
+            // §8.5：请求可能已被受理，只是回执没到手。不无条件重发，也不谎称"失败"。
+            if MinutesSubmissionCertainty.classify(error) == .unknown {
+                _ = try? await coordinator.markMinutesSubmissionUnknown(
+                    minutesID: claimed.id, expectedAttempts: claimed.attempts
+                )
+                failedOnSetup = false
+                state = .submissionUnknown
+                versions = (try? await coordinator.minutesVersions(sessionID: version.sessionID)) ?? versions
+                versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: version.sessionID)
+                return
+            }
+            let reason = Self.readableReason(for: error)
             _ = try? await coordinator.failMinutesIfOwner(
                 minutesID: claimed.id, expectedAttempts: claimed.attempts, reason: reason
             )
@@ -495,6 +587,86 @@ public final class MinutesGenerator {
             }
             state = .failed(reason)
         }
+    }
+
+    /// 拿这一次要轮询的远端响应 id。
+    ///
+    /// 有存过的就直接查原请求（MC-28）：App 退出再打开，**不把整场重新发一遍**——
+    /// 重发可能重复计费，也可能覆盖用户已经采用的版本。
+    /// 新发的一次在拿到 id 的**那一刻**就落库，中途崩溃也算数。
+    @discardableResult
+    private func responseIDFor(
+        claimed: MinutesVersion,
+        transcript: String,
+        supplements: String,
+        configuration: LLMConfiguration,
+        key: String?
+    ) async throws -> String {
+        if let existing = claimed.remoteResponseID, claimed.hasRemoteResponse {
+            lastResponseID = existing
+            return existing
+        }
+        // 用户已经按下停止，就不要再把这一场发出去。
+        if claimed.cancelRequestedAt != nil {
+            throw LLMError.cancelled
+        }
+        let responseID = try await provider.startBackground(
+            configuration: configuration,
+            messages: Self.prompt(transcript: transcript, supplements: supplements),
+            apiKey: key,
+            maxOutputTokens: 4_000,
+            textFormat: MinutesDocument.jsonSchema
+        )
+        lastResponseID = responseID
+        let recorded = (try? await coordinator.recordMinutesRemoteResponse(
+            minutesID: claimed.id,
+            expectedAttempts: claimed.attempts,
+            responseID: responseID
+        )) ?? false
+        guard recorded else {
+            // 记不进去说明行已被新 owner 接管。请求已经发出去了，但结果不再往这行写，
+            // 也不谎报成功——远端那一侧的事实不由这里替用户断言。
+            throw LLMError.transport("这一版已被新的整理任务接管，这次的结果没有写回。")
+        }
+        return responseID
+    }
+
+    /// 取消落定：本地停、状态说"已停止"，远端给一句**如实的**结论（MC-30）。
+    ///
+    /// 远端取消只对已经拿到 id 的任务问得着；问不到、或端点没有这个接口，
+    /// 就说"无法确认"——本地停下来是我们知道的事，远端停没停不是。
+    private func finishCancellation(
+        claimed: MinutesVersion,
+        configuration: LLMConfiguration,
+        key: String?
+    ) async {
+        _ = try? await coordinator.requestCancelMinutes(minutesID: claimed.id)
+        let note: String
+        if let responseID = claimed.remoteResponseID ?? lastResponseID {
+            let outcome = await provider.cancelBackground(
+                configuration: configuration,
+                apiKey: key,
+                responseID: responseID
+            )
+            note = switch outcome {
+            case .confirmed:
+                "远端的任务也已经停下。"
+            case .unsupported:
+                "这个服务没有取消这次后台任务的接口，远端是不是还在跑无法确认。"
+            case .unconfirmed:
+                "没能确认远端是不是还在跑；文字记录和已经整理出的旧版本都还在。"
+            }
+        } else {
+            note = "这一次还没拿到远端受理凭据，没法去确认它有没有开始跑。"
+        }
+        _ = try? await coordinator.cancelMinutesIfOwner(
+            minutesID: claimed.id, expectedAttempts: claimed.attempts
+        )
+        remoteCancellationNote = note
+        failedOnSetup = false
+        state = .cancelled
+        versions = (try? await coordinator.minutesVersions(sessionID: claimed.sessionID)) ?? versions
+        versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: claimed.sessionID)
     }
 
     /// 快照输入里的用户补充（MC-43）：组装走 Domain 层纯逻辑，

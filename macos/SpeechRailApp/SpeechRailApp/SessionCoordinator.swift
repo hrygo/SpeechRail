@@ -732,8 +732,20 @@ public final class SessionCoordinator {
     }
 
     @discardableResult
-    public func enqueueMinutes(sessionID: String, model: String?, promptChars: Int?) async throws -> MinutesVersion {
-        try await store.enqueueMinutes(sessionID: sessionID, model: model, promptChars: promptChars)
+    public func enqueueMinutes(
+        sessionID: String,
+        model: String?,
+        promptChars: Int?,
+        configSnapshot: String? = nil,
+        snapshotID: String? = nil
+    ) async throws -> MinutesVersion {
+        try await store.enqueueMinutes(
+            sessionID: sessionID,
+            model: model,
+            promptChars: promptChars,
+            configSnapshot: configSnapshot,
+            snapshotID: snapshotID
+        )
     }
 
     @discardableResult
@@ -758,6 +770,48 @@ public final class SessionCoordinator {
     @discardableResult
     public func failMinutesIfOwner(minutesID: String, expectedAttempts: Int, reason: String) async throws -> Bool {
         try await store.failMinutesIfOwner(minutesID: minutesID, expectedAttempts: expectedAttempts, reason: reason)
+    }
+
+    /// 记下远端响应 id（MC-28）。收到就写，不等整理结束。
+    @discardableResult
+    public func recordMinutesRemoteResponse(
+        minutesID: String,
+        expectedAttempts: Int,
+        responseID: String
+    ) async throws -> Bool {
+        try await store.recordMinutesRemoteResponse(
+            minutesID: minutesID,
+            expectedAttempts: expectedAttempts,
+            responseID: responseID
+        )
+    }
+
+    /// 心跳续租：一次整理可能跑十几分钟，只写一次租约会被下一次启动误回收。
+    @discardableResult
+    public func renewMinutesLease(minutesID: String, expectedAttempts: Int, lease: TimeInterval) async throws -> Bool {
+        try await store.renewMinutesLease(minutesID: minutesID, expectedAttempts: expectedAttempts, lease: lease)
+    }
+
+    /// 用户按下「停止整理」：先把取消请求写进库，再停本地任务（MC-30）。
+    @discardableResult
+    public func requestCancelMinutes(minutesID: String) async throws -> Bool {
+        try await store.requestCancelMinutes(minutesID: minutesID)
+    }
+
+    @discardableResult
+    public func cancelMinutesIfOwner(minutesID: String, expectedAttempts: Int) async throws -> Bool {
+        try await store.cancelMinutesIfOwner(minutesID: minutesID, expectedAttempts: expectedAttempts)
+    }
+
+    /// 远端提交结果未知：落成明确状态，不自动重发（MC-28、§8.5）。
+    @discardableResult
+    public func markMinutesSubmissionUnknown(minutesID: String, expectedAttempts: Int) async throws -> Bool {
+        try await store.markMinutesSubmissionUnknown(minutesID: minutesID, expectedAttempts: expectedAttempts)
+    }
+
+    /// 排队那一刻要绑定的来源快照；还没有封存快照时为 nil（MC-20）。
+    public func latestSourceSnapshot(sessionID: String) async throws -> MeetingSourceSnapshot? {
+        try await store.latestSourceSnapshot(sessionID: sessionID)
     }
 
     /// 启动时回收那些"排队中或租约已过期"的纪要（§5.8）。

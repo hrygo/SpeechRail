@@ -125,6 +125,73 @@ base: "origin/main @ d72535c7"
 - v1 真实旧库文件的迁移演练未做（只有空库直建 + 新行语义回归）。
 - 真实采集、UI 自动化、发布另行授权。
 
+## M1 增量（MA-06 采用指针，2026-10-05）
+
+范围：任务状态与内容审阅分离，采用指针成为展示与导出的唯一口径。
+
+- 提交 `80b4ac19`、`ee660959`：schema v3 追加 `minutes.is_accepted`（旧行默认 0，
+  不猜用户意图）；`adoptMinutes(sessionID:minutesID:expectedCurrentID:)` 同事务清旧指针
+  立新指针，按预期采用版比较，冲突/失败版/未知版一律拒绝（MC-31）；
+  `currentMinutes(sessionID:)` 采用版优先、其次最新可用候选，是展示/搜索/导出的唯一口径
+  （MC-25/MC-48）；`MinutesGenerator.reload`、回看、导出接线同步。
+- 界面：版本行区分「当前采用 / 最新 / 历史」，新增「采用」动作与冲突提示。
+- 回归证据：`MeetingMinutesVersioningTests` 35/35、`AssistantPersistenceTests` 15/15。
+
+## M1 增量（MA-07 持久生成队列，2026-10-05）
+
+范围：任务身份落到行上——恢复查原请求、取消有痕迹、配置在排队时冻结。
+
+- 提交（本节）：schema v4 追加 `minutes.remote_response_id` /
+  `config_snapshot` / `snapshot_id` / `cancel_requested_at`；`migrateV3ToV4`
+  只加列、**不回填**（老任务当年没存过远端响应 id，补值等于伪造"确认过远端没在跑"）。
+- 六处 `minutes` 读列清单收敛为单一常量 `minutesSelectColumns`，与
+  `minutesVersion(from:)` 的列序号映射一一对应；映射按 `sqlite3_column_count`
+  兼容 v1～v3 老形状。
+- 新增带 fencing（`expectedAttempts`）的库动作：`recordMinutesRemoteResponse`
+  （收到 id 那一刻就落库，MC-28）、`renewMinutesLease`（心跳，间隔 = 租约/3）、
+  `requestCancelMinutes`（先落取消请求再停本地任务）、`cancelMinutesIfOwner`
+  （取消 ≠ 失败）、`markMinutesSubmissionUnknown`（远端提交结果未知，**不进
+  自动恢复队列**，不无条件重发，§8.5）。
+- `MinutesJobConfig`：排队那一刻冻结端点/模型/兼容模式的指纹，**不含密钥**；
+  恢复旧任务时按指纹还原配置而不是读当前设置（MC-32），差异通过
+  `jobConfigDiffersFromCurrent` 告知界面"新配置从下一次任务生效"。
+- `MinutesGenerator`：`resume` 有远端 id 时直接 `pollBackground` 原请求，
+  不 `startBackground`；`stop()` 先写取消请求再 `Task.cancel()`；
+  取消落 `cancelled` 状态并给出**如实的**远端结论
+  （`LLMProvider.cancelBackground` 返回 confirmed / unsupported / unconfirmed，
+  `404/405/501` 记为端点没有该能力，其余非 2xx 与传输错误记为未确认）。
+- 回归证据：新增 `MeetingMinutesJobRecoveryTests` 10/10（MC-27～MC-32），
+  联合 `MeetingMinutesVersioningTests` 35/35 + `AssistantPersistenceTests` 15/15
+  = **60/60 通过**（2026-10-05 核验）；`./scripts/macos_app_build.sh` BUILD SUCCEEDED。
+
+### M1 增量（MA-06/MA-07）迁移说明
+
+- v2→v3 追加 `is_accepted`；v3→v4 追加任务身份四列，均为 `PRAGMA table_info`
+  查列后 `ALTER TABLE`，已存在则跳过，迁移幂等。新库由 `schemaV1` 一次建全。
+- 新旧行语义差别：新建行 `remote_response_id` 等四列为 NULL，表示"没有这项信息"，
+  不是"这项为否"。旧程序不得直接打开 v4 库（`migrate()` 遇更高 `user_version` 抛错）。
+
+### M1 增量（MA-06/MA-07）回退说明
+
+- 整支回退：切回 `origin/main @ d72535c7`；v3/v4 库文件保留，
+  需用迁移前备份恢复才能让旧程序打开。
+- 单个提交回退：MA-07 提交 revert 后 v4 列残留但无读写入口；
+  回退**不需要**清任务表或删候选（计划明确禁止以清数据作为回退）。
+
+### M1 增量（MA-07）未验证事项与已知边界
+
+- 真实端到端未做：真实 background 提交、远端过期、取消确认、App 退出恢复的真实演练
+  都没有跑过；本轮全部是确定性回归与构建。
+- **偏保守的一侧**：`MinutesSubmissionCertainty` 把所有 `LLMError.transport`
+  都算成"远端收没收到查不出来"，所以"连不上服务"（其实还没发出去）也会显示
+  「提交结果待确认」。宁可多问一句，不替用户断言远端没在跑。
+- 来源快照绑定已落库（`snapshot_id`）并有查询入口 `latestSourceSnapshot(sessionID:)`，
+  但**还没有生产路径创建快照**（MA-05 只交付了库与 API），所以今天排队出来的任务
+  `snapshot_id` 基本为 nil；封存接线属 MA-08。
+- 远端取消只对已拿到 response id 的任务问得着；端点没有该接口时界面明说
+  「无法确认」，不谎称云端任务已消失。
+- 真实采集、UI 自动化、模型质量基准、发布另行授权。
+
 ## 迁移说明
 
 

@@ -449,14 +449,14 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         let minutes = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
         _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
         try await store.finishMinutes(minutesID: minutes.id, body: "# 迁移前纪要", model: nil)
-        XCTAssertEqual(SessionStore.schemaVersion, 3)
+        XCTAssertEqual(SessionStore.schemaVersion, 4)
         let versions = try await store.minutesVersions(sessionID: sessionID)
         XCTAssertEqual(versions.count, 1)
         XCTAssertEqual(versions.first?.body, "# 迁移前纪要")
         // v3 新库新建行默认非 legacy、未采用（INSERT 显式写 0，不猜用户意图）；
         // v1 旧库行的 legacy 回填由迁移 UPDATE 完成，不在此断言。
         XCTAssertFalse(versions.first?.isLegacyImport ?? true, "v2 新建行默认非 legacy")
-        XCTAssertFalse(versions.first?.isAccepted ?? true, "v3 新建行默认未采用，首次采用走 adoptMinutes")
+        XCTAssertFalse(versions.first?.isAccepted ?? true, "新库新建行默认未采用，首次采用走 adoptMinutes")
         let recorded = try await store.recordTranscriptRevision(
             TranscriptRevision(id: "rev-migrate-1", lineID: lineID, sessionID: sessionID, text: "迁移前定稿的一句", origin: "legacy_import")
         )

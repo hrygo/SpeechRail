@@ -801,6 +801,36 @@ public struct MeetingView: View {
                 Text(meeting.minutes.state.title)
                     .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                // MC-32：任务在排队那一刻就固定了用哪套设置。用户中途改设置，
+                // 这一条**不跟着换**——换了等于同一任务前后用了两个端点，出了错无法归因。
+                if meeting.minutes.jobConfigDiffersFromCurrent {
+                    Text("这一次整理用的是它开始时那套设置；你改过的设置从下一次整理生效。")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                }
+            case .cancelled:
+                // MC-30：这是"你停掉的"，不是"没整理出来"。远端停没停要单独说，
+                // 说不准就说不准——本地停下来是确定的，远端不是。
+                StatusBanner(
+                    kind: .standard,
+                    tone: .neutral,
+                    title: "整理已停止 · 文字记录已经存好了",
+                    message: "这一次是你停掉的，不算整理失败，可以随时重新生成。"
+                        + (meeting.minutes.remoteCancellationNote ?? ""),
+                    actionTitle: "重新生成"
+                ) {
+                    Task { await regenerateMinutes() }
+                }
+            case .submissionUnknown:
+                // MC-28：远端可能已经受理，只是没拿到回执。这里**不**给"重新生成"当默认出口，
+                // 因为重发可能重复执行、重复计费；由用户自己决定要不要再试。
+                StatusBanner(
+                    kind: .standard,
+                    tone: .attention,
+                    title: "提交结果待确认 · 文字记录已经存好了",
+                    message: "请求可能已经发出去了，只是没拿到回执。没法确认的时候我们不会自动重试："
+                        + "再来一次可能会重复执行、重复计费。确认服务那边没有在跑之后再重新生成。"
+                )
             default:
                 EmptyView()
             }
@@ -1342,6 +1372,7 @@ public struct MeetingView: View {
         switch status {
         case .ready: .healthy
         case .failed: .attention
+        case .submissionUnknown: .attention
         default: .neutral
         }
     }

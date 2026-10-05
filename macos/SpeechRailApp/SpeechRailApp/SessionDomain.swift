@@ -158,6 +158,12 @@ public enum MinutesStatus: String, Codable, Sendable {
     case running
     case ready
     case failed
+    /// 用户明确停下的这一次（MA-07/MC-30）。与 `failed` 分开说：
+    /// 失败是"没整理出来"，取消是"用户不要了"，两者给出的下一步不同。
+    case cancelled
+    /// 请求可能已被远端受理，但本地没拿到 response id 就断了（MA-07/MC-28、§8.5）。
+    /// 与 `failed` 分开，因为它**不能自动重发**：重发可能重复执行、重复计费。
+    case submissionUnknown = "submission_unknown"
 
     /// 界面上那个胶囊的字（与 `MinutesGenerator.State.title` 同一套词）。
     public var title: String {
@@ -166,6 +172,8 @@ public enum MinutesStatus: String, Codable, Sendable {
         case .running: "整理中"
         case .ready: "已生成"
         case .failed: "没整理出来"
+        case .cancelled: "已停止"
+        case .submissionUnknown: "提交结果待确认"
         }
     }
 }
@@ -243,6 +251,85 @@ public enum MinutesReview: Sendable {
             }
         }
         return ids
+    }
+}
+
+/// 任务冻结的配置指纹（MA-07/MC-32）。
+///
+/// 一次生成任务在排队时就把它用的端点与模型固定下来；用户在任务跑着的时候改设置，
+/// 当前任务**不跟着换**——换了等于同一任务前后用了两个端点，出了错无法归因。
+/// 新配置从下一次任务生效，这件事由界面说明，不靠这里猜。
+///
+/// 刻意**不含密钥**：指纹只用于回答"还是同一套配置吗"，不用于重建凭据。
+/// 凭据在调用时按安全来源解析，不落库（§8.3）。
+public struct MinutesJobConfig: Hashable, Sendable {
+    public var baseURL: String
+    public var model: String
+    public var compatibilityMode: String
+
+    public init(baseURL: String, model: String, compatibilityMode: String) {
+        self.baseURL = baseURL
+        self.model = model
+        self.compatibilityMode = compatibilityMode
+    }
+
+    /// 排队那一刻从当前设置取指纹。
+    public init(_ configuration: LLMConfiguration) {
+        self.init(
+            baseURL: configuration.normalizedBaseURL,
+            model: configuration.model,
+            compatibilityMode: configuration.compatibilityMode.rawValue
+        )
+    }
+
+    /// 还原成可调用的配置。恢复旧任务时**用它**而不是当前设置（MC-32）。
+    ///
+    /// 兼容模式读不出来时按通用档走：那是"调用方式"的默认值，不是替用户选模型或端点。
+    /// 端点与模型一律照指纹原样还原——那才是这次任务答应过的配置。
+    public var configuration: LLMConfiguration {
+        LLMConfiguration(
+            baseURL: baseURL,
+            model: model,
+            compatibilityMode: LLMCompatibilityMode(rawValue: compatibilityMode) ?? .openAICompatible
+        )
+    }
+
+    /// 持久化形态：一行可比较的指纹，不含密钥与正文。
+    public var fingerprint: String {
+        [baseURL, model, compatibilityMode]
+            .map { $0.replacingOccurrences(of: "|", with: "/") }
+            .joined(separator: "|")
+    }
+
+    /// 从持久化指纹读回；形状不合法时返回 nil，调用方按"配置对不上"处理，
+    /// 不猜、不填默认值（MC-32）。
+    public static func parse(_ raw: String?) -> MinutesJobConfig? {
+        guard let raw else { return nil }
+        let parts = raw.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count == 3 else { return nil }
+        return MinutesJobConfig(baseURL: parts[0], model: parts[1], compatibilityMode: parts[2])
+    }
+}
+
+/// 一次生成请求"远端到底收没收到"的确定程度（MA-07/MC-28、§8.5）。
+///
+/// 分两类不是为了显得严谨，是因为它们的下一步不同：
+/// 知道结果的失败可以按原因重试或改配置；查不出来的那一类**不能自动重发**——
+/// 没有可验证的幂等能力时，重发可能重复执行、重复计费。
+public enum MinutesSubmissionCertainty: Equatable, Sendable {
+    /// 知道结果：服务明确回了状态码、明确拒答、明确没有这个 API。
+    case known
+    /// 查不出来：请求可能已经送达，只是回执没到手。
+    case unknown
+
+    /// 只把**传输层**失败算成未知：发出去没等到回执，或连接中途断了。
+    ///
+    /// 已知偏保守的一侧：连不上服务（其实还没发出去）也落在未知这一侧。
+    /// 宁可多问一句，不替用户断言远端没在跑。
+    public static func classify(_ error: Error) -> MinutesSubmissionCertainty {
+        guard let llm = error as? LLMError else { return .known }
+        if case .transport = llm { return .unknown }
+        return .known
     }
 }
 
@@ -553,6 +640,22 @@ public struct MinutesVersion: Identifiable, Hashable, Sendable {
     /// 不补造引用；只有用户明确生成新候选时才请求模型补充结构（MA-05/MC-68）。
     public var isLegacyImport: Bool
 
+    // MARK: - 任务身份（MA-07）：任务与内容版本分离
+
+    /// 远端后台响应 id（MA-07/MC-28）。持久化后，App 退出再打开可以**继续轮询原请求**，
+    /// 而不是把整场重新发一遍——重新发可能重复计费，也可能覆盖用户已采用的版本。
+    /// 它是服务端对象标识，不是用户内容；日志里只记脱敏身份。
+    public var remoteResponseID: String?
+    /// 本次任务冻结的配置（模型/端点指纹，MA-07/MC-32）。
+    /// 用户在任务跑的时候改设置，不能让当前任务偷偷换端点；
+    /// 新配置从下一次任务生效这件事由界面说明。
+    public var configSnapshot: String?
+    /// 任务绑定的来源快照 id（MA-05/MC-20）。同一任务不能边读边跟随来源变化。
+    public var snapshotID: String?
+    /// 用户按下「停止整理」的时刻（MA-07/MC-30）。非空表示取消已被请求；
+    /// 远端是否确认取消是另一件事，不能由这个字段冒充。
+    public var cancelRequestedAt: Date?
+
     public init(
         id: String,
         sessionID: String,
@@ -567,7 +670,11 @@ public struct MinutesVersion: Identifiable, Hashable, Sendable {
         failureReason: String? = nil,
         leaseUntil: Date? = nil,
         createdAt: Date = Date(),
-        isLegacyImport: Bool = false
+        isLegacyImport: Bool = false,
+        remoteResponseID: String? = nil,
+        configSnapshot: String? = nil,
+        snapshotID: String? = nil,
+        cancelRequestedAt: Date? = nil
     ) {
         self.id = id
         self.sessionID = sessionID
@@ -583,6 +690,17 @@ public struct MinutesVersion: Identifiable, Hashable, Sendable {
         self.leaseUntil = leaseUntil
         self.createdAt = createdAt
         self.isLegacyImport = isLegacyImport
+        self.remoteResponseID = remoteResponseID
+        self.configSnapshot = configSnapshot
+        self.snapshotID = snapshotID
+        self.cancelRequestedAt = cancelRequestedAt
+    }
+
+    /// 这次任务是否可以复用已持久化的远端响应（MC-28）：有远端 id，
+    /// 说明请求已被服务端接受，恢复时应当查询原任务而不是重新发起。
+    public var hasRemoteResponse: Bool {
+        guard let remoteResponseID else { return false }
+        return !remoteResponseID.isEmpty
     }
 }
 
