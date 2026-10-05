@@ -815,14 +815,21 @@ private enum StreamRace {
                         }
                         if try local.consume(byte, onDelta: { text in
                             onDelta(text)
-                            if !text.isEmpty {
+                            // 空串是纯进展信号（M1/V15 推理阶段）：只展期停滞
+                            // deadline，不算首正文。非空正文走 noteText，
+                            // 同时解除首正文 deadline 并展期停滞。
+                            if text.isEmpty {
+                                Task { await timer.noteProgress() }
+                            } else {
                                 Task { await timer.noteText() }
                             }
                         }) { break }
                     }
                     try local.finish(onDelta: { text in
                         onDelta(text)
-                        if !text.isEmpty {
+                        if text.isEmpty {
+                            Task { await timer.noteProgress() }
+                        } else {
                             Task { await timer.noteText() }
                         }
                     })
@@ -913,6 +920,15 @@ actor StreamTimer {
 
     func noteText() {
         firstTextSeen = true
+        if let stallTimeout {
+            stallDeadline = ContinuousClock.now.advanced(by: stallTimeout)
+        }
+    }
+
+    /// M1/V15:合法推理进展——重置停滞 deadline，但不解除首正文 deadline。
+    /// reasoning 阶段证明连接与模型活着，但正文尚未开始；首正文 deadline
+    /// 仍按原预算执行，不因推理无限延长。
+    func noteProgress() {
         if let stallTimeout {
             stallDeadline = ContinuousClock.now.advanced(by: stallTimeout)
         }
@@ -1119,6 +1135,11 @@ struct ResponsesEventStreamDecoder {
         case "response.output_text.delta", "response.refusal.delta":
             // refusal 的正文也要朗读，但它本身不是成功终态。
             if let delta = object["delta"] as? String { onDelta(delta) }
+        case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+            // M1/V15:合法推理阶段是有效进展，不是停滞——推进 deadline 计时，
+            // 但不产生正文、不朗读、不落库。未知 reasoning 事件走 default
+            // 忽略，不延长等待（fail-closed）。
+            onDelta("")
         case "response.completed":
             state.complete()
             return true

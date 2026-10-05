@@ -1269,6 +1269,107 @@ final class LLMProviderTests: XCTestCase {
         XCTAssertEqual(try result.get(), "好", "注释和心跳不影响正文")
     }
 
+    // MARK: - M1/V15:正文前合法推理阶段不误杀
+
+    /// V15:reasoning delta 是有效进展（展期停滞 deadline），但不是正文——
+    /// 不产生朗读文本、不占正文预算、不解除首正文 deadline。
+    /// 此处先在解码层验证：reasoning 事件只产生空进展信号，正文为空。
+    func testReasoningDeltasAreProgressNotText() throws {
+        final class Sink: @unchecked Sendable {
+            let lock = NSLock()
+            var texts: [String] = []
+            var emptyCount = 0
+            func record(_ text: String) {
+                lock.withLock {
+                    texts.append(text)
+                    if text.isEmpty { emptyCount += 1 }
+                }
+            }
+        }
+        let sink = Sink()
+        var state = LLMResponseStreamState()
+        var usage: [String: Any]?
+        var total = 0
+        for eventType in [
+            "response.reasoning_summary_text.delta",
+            "response.reasoning_text.delta",
+        ] {
+            let object: [String: Any] = [
+                "type": eventType,
+                "response_id": "resp_a",
+                "delta": "思考中",
+            ]
+            let finished = try ResponsesEventStreamDecoder.countedHandle(
+                object,
+                state: &state,
+                usage: &usage,
+                totalTextScalars: &total,
+                onDelta: { sink.record($0) }
+            )
+            XCTAssertFalse(finished, "\(eventType) 不是终态")
+        }
+        XCTAssertEqual(sink.emptyCount, 2, "reasoning 应只产生空进展信号，不产生正文")
+        XCTAssertEqual(total, 0, "推理进展不占累计正文预算")
+        XCTAssertFalse(state.isFinished, "推理阶段不得终结本轮")
+    }
+
+    /// V15:未知 reasoning 事件类型走 default 忽略，不延长等待（fail-closed）。
+    func testUnknownReasoningEventsDoNotExtendWait() throws {
+        var state = LLMResponseStreamState()
+        var usage: [String: Any]?
+        var total = 0
+        final class Flag: @unchecked Sendable {
+            let lock = NSLock()
+            var called = false
+            func mark() { lock.withLock { called = true } }
+        }
+        let flag = Flag()
+        let object: [String: Any] = [
+            "type": "response.reasoning_mystery.delta",
+            "response_id": "resp_a",
+            "delta": "???",
+        ]
+        let finished = try ResponsesEventStreamDecoder.countedHandle(
+            object,
+            state: &state,
+            usage: &usage,
+            totalTextScalars: &total,
+            onDelta: { _ in flag.mark() }
+        )
+        XCTAssertFalse(finished)
+        XCTAssertFalse(flag.called, "未知 reasoning 事件不得产生进展信号")
+        XCTAssertEqual(total, 0)
+    }
+
+    /// V15:noteProgress 只展期停滞 deadline，不解除首正文 deadline。
+    func testStreamTimerProgressExtendsStallButNotFirstText() async throws {
+        let timer = StreamTimer(
+            firstDeadline: ContinuousClock.now.advanced(by: .milliseconds(300)),
+            stallTimeout: .milliseconds(200),
+            initialStall: ContinuousClock.now.advanced(by: .milliseconds(50))
+        )
+        // 50ms 后来一次推理进展：停滞展期 200ms；再睡 100ms 仍未到期。
+        try await Task.sleep(for: .milliseconds(50))
+        await timer.noteProgress()
+        try await Task.sleep(for: .milliseconds(100))
+        let expired = await timer.expired
+        XCTAssertFalse(expired, "推理进展应展期停滞 deadline，不误杀合法等待")
+        let seen = await timer.firstTextSeen
+        XCTAssertFalse(seen, "推理进展不得算首正文，首正文 deadline 仍有效")
+        // 首正文 deadline 到达仍超限：推理不能无限延长正文等待。
+        try await Task.sleep(for: .milliseconds(250))
+        do {
+            try await timer.waitForExpiry()
+            XCTFail("首正文 deadline 到达必须抛超限，不能被推理无限延长")
+        } catch let error as LLMError {
+            guard case .streamBudgetExceeded(let detail) = error else {
+                XCTFail("应为 streamBudgetExceeded，实际 \(error)")
+                return
+            }
+            XCTAssertTrue(detail.contains("首个有效正文"), "实际 \(detail)")
+        }
+    }
+
     @MainActor
     func testResponsesStreamFailedEventFailsImmediately() async throws {
         FakeTransport.reset([
