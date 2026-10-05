@@ -1037,6 +1037,16 @@ public final class SessionCoordinator {
         )
     }
 
+    /// 这一场重新生成之后，新一版相对上一版**可能**变了什么（MC-54 / MA-14）。
+    ///
+    /// **只是候选差异，不落任何状态**——自动建议一旦自己动手改状态，
+    /// 用户就再也说不清"这条为什么变了"。
+    public func knowledgeChangeProposals(
+        documentID: String
+    ) async throws -> [KnowledgeChangeProposal] {
+        try await store.knowledgeChangeProposals(documentID: documentID)
+    }
+
     // MARK: - 跨会议结论冲突（MC-57、MC-58）
 
     /// 两场会结论看起来相反、且缺少限定的候选对。

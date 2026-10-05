@@ -471,4 +471,100 @@ final class MeetingActionLifecycleTests: XCTestCase {
         )
         XCTAssertTrue(conflicts.isEmpty, "说法一致的重复记录不是冲突")
     }
+
+    // MARK: - MC-54：重新生成之后可能变了什么，得让用户看见
+    //
+    // 上面的用例钉的是库这一侧。**从库到用户之间还有一段没人走**：
+    // `knowledgeChangeProposals` 在生产代码里零消费方。用户重新生成一版之后，
+    // 只能自己把两版纪要来回读，指望他发现"某条行动的负责人悄悄变了"是不现实的。
+
+    private func makeLibrary() throws -> MeetingLibraryModel {
+        MeetingLibraryModel(
+            coordinator: SessionCoordinator(
+                store: try requireStore(),
+                defaults: try XCTUnwrap(UserDefaults(suiteName: "meeting-lifecycle-\(UUID().uuidString)"))
+            )
+        )
+    }
+
+    func testChangeProposalsReachTheLibraryDetail() async throws {
+        let store = try requireStore()
+        let meeting = try await makeMeeting(
+            title: "发布评审", actions: ["整理并归档发布清单"], decisions: []
+        )
+        _ = try await writeMinutesVersion(
+            sessionID: meeting.sessionID, snapshotID: meeting.snapshotID,
+            title: "发布评审", actions: ["整理并归档发布清单（五月前）"], decisions: []
+        )
+
+        let model = try makeLibrary()
+        await model.open(documentID: meeting.documentID)
+        let reworded = try XCTUnwrap(model.changeProposals.first { $0.kind == .reworded })
+        XCTAssertEqual(reworded.previousText, "整理并归档发布清单")
+        XCTAssertEqual(reworded.proposedText, "整理并归档发布清单（五月前）")
+        XCTAssertEqual(model.changeProposalsHeadline, "这一版可能变了什么（1 处）")
+    }
+
+    /// 只有一版时没有"变化"可言。空态要说清原因，不能让用户以为系统看过了。
+    func testNoProposalsForAMeetingThatWasNeverRegenerated() async throws {
+        let meeting = try await makeMeeting(title: "发布评审", actions: ["整理发布清单"])
+        let model = try makeLibrary()
+        await model.open(documentID: meeting.documentID)
+        XCTAssertTrue(model.changeProposals.isEmpty)
+        XCTAssertEqual(model.changeProposalsHeadline, "这一版可能变了什么")
+        XCTAssertNil(
+            model.changeProposalsHint,
+            "读成功但没有差异，不该显示成一句错误提示"
+        )
+    }
+
+    /// 建议只是建议。**看见它不许改变任何状态**——否则"看一眼"就等于做了决定。
+    func testReadingProposalsChangesNothing() async throws {
+        let store = try requireStore()
+        let meeting = try await makeMeeting(
+            title: "发布评审", actions: ["整理发布清单", "同步给客户"]
+        )
+        let first = try await itemID(minutesID: meeting.minutesID, kind: "action", at: 0)
+        try await store.recordExecutionEvent(itemID: first, status: .done)
+        _ = try await writeMinutesVersion(
+            sessionID: meeting.sessionID, snapshotID: meeting.snapshotID,
+            title: "发布评审", actions: ["整理发布清单"], decisions: []
+        )
+
+        let model = try makeLibrary()
+        await model.open(documentID: meeting.documentID)
+        XCTAssertFalse(model.changeProposals.isEmpty)
+        let state = try await store.executionState(itemID: first)
+        XCTAssertEqual(
+            state?.status, .done,
+            "打开详情、把建议摆出来，都不该动用户已经标好的状态"
+        )
+    }
+
+    /// 换一场会看，建议要跟着换。**不能把上一场的建议留在界面上**——
+    /// 那等于让用户对着 A 的内容做 B 的判断。
+    func testProposalsFollowTheSelectedMeeting() async throws {
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let first = try await makeMeeting(
+            title: "A 场", actions: ["整理并归档发布清单"], at: base
+        )
+        _ = try await writeMinutesVersion(
+            sessionID: first.sessionID, snapshotID: first.snapshotID,
+            title: "A 场", actions: ["整理并归档发布清单五月"], decisions: []
+        )
+        let second = try await makeMeeting(
+            title: "B 场", actions: ["约设计师复核"], at: base.addingTimeInterval(86_400)
+        )
+
+        let model = try makeLibrary()
+        await model.open(documentID: first.documentID)
+        XCTAssertFalse(model.changeProposals.isEmpty)
+        await model.open(documentID: second.documentID)
+        XCTAssertTrue(
+            model.changeProposals.isEmpty,
+            "B 场没被重新生成过，不该留着 A 场的建议"
+        )
+        await model.select(nil)
+        XCTAssertTrue(model.changeProposals.isEmpty, "关掉详情就该清空")
+    }
 }

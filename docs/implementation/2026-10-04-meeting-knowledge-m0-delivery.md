@@ -1,7 +1,7 @@
 ---
 title: "会议知识闭环 M0/M1 交付说明：保存、版本、来源、检索、导出、备份恢复与删除"
 status: active
-version: "4.4"
+version: "4.5"
 date: 2026-10-06
 branch: "codex/meeting-knowledge-milestones"
 base: "origin/main @ dab047b2"
@@ -11,7 +11,7 @@ base: "origin/main @ dab047b2"
 
 ## 范围
 
-分支共 60 个提交（含本轮 MC-56、MA-14 写侧、MC-57/58 与 MC-43 各 1 个）。
+分支共 61 个提交（本轮 MC-56、MA-14 写侧、MC-57/58、MC-43、MC-54 各 1 个）。
 
 > **下面这段范围描述只涵盖最早的 M0**，当时确实"只动纪要版本链、结束封存上报与
 > 知识检索语义，不做 schema 迁移、不改表结构、不碰采集链路"。
@@ -81,7 +81,8 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 
 | 12 | **恢复（MA-20 / 验收 5）没有入口**：`restorePreview` / `verifyBackup` 生产代码零消费方 | 实测（同上） | 恢复预演现已接进设置页（见第三节第九处）。~~用户无法备份~~ **上一版这条写错了，见下方更正条目**：备份按钮一直存在 |
 
-| 14 | **知识变化建议与执行时间线没有入口**：`knowledgeChangeProposals` / `executionEvents` 仍零消费方 | 实测（2026-10-06 第三轮再查） | **本条已缩小两次**：行动生命周期（`recordExecutionEvent` / `executionState`）与跨会议冲突（`conflictingDecisions` / `confirmSupersession`）四个 API 都已接进库页。剩下的是**只读的两块**——「这场会重新生成之后可能变了什么」的候选清单，以及一条行动的完整状态变更时间线 |
+| 14 | **执行时间线没有入口**：`executionEvents(itemKey:)` 仍零消费方 | 实测（2026-10-06 第四轮再查） | **本条已缩到最后一块**：行动生命周期的读写两侧、跨会议冲突、知识变化建议（`knowledgeChangeProposals`）都已接进库页。剩下的是**一条行动的完整状态变更历史**——「三月承诺什么、四月改成什么」现在存在库里，但用户看不到 |
+
 
 
 | 15 | ~~私密问答的「加入纪要」没有入口~~ **这条记错了，已关闭** | 实测（2026-10-06 推翻） | 上一版写「读侧齐备，写侧整条不存在」。实测：`setInnerOSInMinutes(exchangeID:included:)` 在库里，`sealMeetingSource` 已经通过 `selectedSupplements` 把 `in_minutes = 1` 的问答收进快照的 `note_refs`，`InnerOSSession.includeInMinutes` 调协调器，`InnerOSDrawer.swift:248` 有「写进纪要」按钮，端到端还有 `testOnlySelectedPrivateAnswerEntersSnapshotAsSupplement` 钉着。**但顺着这条查出了三个真缺陷**，见「私密问答写进纪要」一节 |
@@ -3338,3 +3339,61 @@ store 那 22 项测试全都**自己构造** `KnowledgeArchiveSelection`。
   要改就重新生成一版。
 - 「加入纪要」目前只能选**整条回答**，不能从回答里截取某一句。
   方案 §583 写的是"选一句"，当前粒度是"选一条问答"。
+
+
+## M1 增量（MC-54）｜这一版可能变了什么，2026-10-06
+
+### 做了什么
+
+详情页多一段「这一版可能变了什么」。**只在真有差异时出现**——没重新生成过就没有
+这一段，不必占常态的版面；读失败要说一句，因为"看不出变化"和"没去看"对用户是两件事。
+
+- **数据层**：无新增。`knowledgeChangeProposals(documentID:)` 早已实现，
+  `MeetingActionLifecycleTests` 里四条用例钉着"改写了／期限变了／
+  这一版里没再出现／新出现"，还钉住了**建议本身不改任何状态**。
+- **协调层**：`knowledgeChangeProposals(documentID:)`。
+- **模型层**：`changeProposals` / `loadChangeProposals(documentID:)` /
+  `changeProposalsError`，跟着选中文档走。
+- **界面层**：详情里 `identityBand` 之后的一条分隔带，逐条摆出
+  上一版与这一版两边原话。
+
+### 为什么不和详情里的正文对比合并
+
+两者回答的不是同一个问题：
+
+- 详情里的 `comparison` 是**行级**的 `lineDiff`，基准是**用户打开时看到的那一版**，
+  回答"我这次改了什么"。
+- 这里是**条目级**的跨版本配对，按 `KnowledgeIdentity.similarity` 把新旧两版的
+  决定与行动对上，回答"**重新生成把哪条结论换掉了**"。
+
+正文 diff 看得见"有一行变了"，看不出"那其实是同一条行动，期限被改了"。
+指望用户自己把两版纪要来回读、发现某条行动的负责人悄悄变了，不现实。
+
+### 回归证据（2026-10-06 实测）
+
+- `MeetingActionLifecycleTests` 新增 **4 项**（16 项全绿），先红后绿。覆盖：
+  候选差异真的到达详情页且两边原话都在；没重新生成过时列表为空**且不显示成错误**；
+  **看见建议不改任何状态**（用户标好的已完成仍然已完成）；
+  换一场会看建议跟着换、关掉详情清空——上一场的建议留在界面上，
+  等于让用户对着 A 的内容做 B 的判断。
+- 全量 `swift test --package-path macos/SpeechRailApp`：XCTest **1090 项**
+  （上一节 1086 +4）+ Swift Testing **419 项**，零失败。
+- `./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+- `python3 scripts/check_macos_test_target_coverage.py`：**OK**。
+
+### 迁移与回退
+
+- **无 schema 变更**，`SessionStore.schemaVersion` 仍是 12。
+- 回退：去掉协调器方法、模型上的 `changeProposals*`、视图里的
+  `changeProposalsBand` 即可。纯读侧，没有写入路径要撤。
+
+### 未验证事项与已知边界
+
+- **这一段没有在真机走过**（无 UI 自动化授权）：分隔带与上方身份区的间距、
+  两行原话对照在长句下的换行都只是读代码推断。计入总账第 1 条。
+- **比对的是"采用版（或最新可用版）"与"上一版"**，不是与用户打开时那版。
+  两者在用户连续采用多版时会给出不同的答案，这是 store 既有的口径，
+  本轮没有改动它。
+- 候选差异**不可操作**：没有"接受这条变化"的按钮，也刻意不做——
+  自动建议一旦自己动手改状态，用户就再也说不清"这条为什么变了"（MA-14）。
+  用户要改仍然走复核界面的编辑与采用。

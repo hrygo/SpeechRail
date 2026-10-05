@@ -688,6 +688,7 @@ struct MeetingKnowledgeLibraryView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
                     identityBand(snapshot)
+                    changeProposalsBand
                     switch model.detailTab {
                     case .minutes: minutesSection(snapshot)
                     case .transcript: transcriptSection(snapshot)
@@ -698,6 +699,61 @@ struct MeetingKnowledgeLibraryView: View {
             }
         }
         .speechRailInspectorColumn()
+    }
+
+    /// 这一版可能变了什么（MC-54）。
+    ///
+    /// 与详情里的正文对比**不是一回事**：那边回答"我这次改了什么"（行级），
+    /// 这里回答"重新生成把哪条结论换掉了"（条目级，按相似度跨版本配对）。
+    ///
+    /// **只在真有差异时出现**：没重新生成过就没有这一段，不必占常态的版面。
+    /// 读失败要说一句——"看不出变化"和"没去看"对用户是两件事。
+    @ViewBuilder
+    private var changeProposalsBand: some View {
+        if let hint = model.changeProposalsHint {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Text(hint)
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else if !model.changeProposals.isEmpty {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Text(model.changeProposalsHeadline)
+                    .font(.headline)
+                    .accessibilityAddTraits(.isHeader)
+                ForEach(model.changeProposals) { proposal in
+                    changeProposalRow(proposal)
+                }
+                // 说清它是建议：**系统没有因为这份清单改过任何东西**。
+                Text("这些只是候选差异。系统没有替你改任何一条，要不要算同一条由你定。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Divider()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, SpeechRailDesignTokens.Spacing.xs)
+        }
+    }
+
+    private func changeProposalRow(_ proposal: KnowledgeChangeProposal) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+            Text(proposal.title)
+                .font(.callout)
+            if let previous = proposal.previousText {
+                labelledDecision(previous, tag: "上一版")
+            }
+            if let proposed = proposal.proposedText {
+                labelledDecision(proposed, tag: "这一版")
+            }
+            if let detail = proposal.detail {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
+        .accessibilityElement(children: .contain)
     }
 
     private func identityBand(_ snapshot: MeetingReviewSnapshot) -> some View {

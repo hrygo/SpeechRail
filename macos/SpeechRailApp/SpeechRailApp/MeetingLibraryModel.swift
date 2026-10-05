@@ -175,9 +175,46 @@ public final class MeetingLibraryModel {
         // 留着上一场的标签等于把 A 的标签贴到 B 上。
         if let documentID = selectedDocumentID {
             documentTags = await tags(for: documentID)
+            await loadChangeProposals(documentID: documentID)
         } else {
             documentTags = []
+            changeProposals = []
         }
+    }
+
+    // MARK: - 这一版可能变了什么（MC-54 / MA-14）
+
+    /// 当前选中的那一场，重新生成之后**可能**变了什么。
+    ///
+    /// 与详情里的正文对比不是一回事：正文对比回答"我这次改了什么"（行级），
+    /// 这里回答"重新生成把哪条结论换掉了"（条目级，按相似度跨版本配对）。
+    public private(set) var changeProposals: [KnowledgeChangeProposal] = []
+
+    /// 读候选差异。**失败不是大事**：读不到就说读不到，不清空成"没有变化"——
+    /// 两者对用户的含义完全不同。
+    public func loadChangeProposals(documentID: String) async {
+        do {
+            changeProposals = try await coordinator.knowledgeChangeProposals(documentID: documentID)
+            changeProposalsError = nil
+        } catch {
+            changeProposals = []
+            changeProposalsError = error.localizedDescription
+        }
+    }
+
+    public private(set) var changeProposalsError: String?
+
+    public var changeProposalsHeadline: String {
+        changeProposals.isEmpty
+            ? "这一版可能变了什么"
+            : "这一版可能变了什么（\(changeProposals.count) 处）"
+    }
+
+    /// 读失败时的提示。**只有读失败才说话**：没重新生成过就是没有，
+    /// 界面不摆这一段，不必为常态噪声占地方。
+    public var changeProposalsHint: String? {
+        guard let error = changeProposalsError else { return nil }
+        return "\(error)。暂时看不出这一版改了什么。"
     }
 
     /// 空态文案。**说清下一步做什么**，不写"暂无数据"。
