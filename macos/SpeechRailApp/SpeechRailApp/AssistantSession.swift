@@ -379,6 +379,15 @@ public final class AssistantSession {
     private var lastChunkDroppedBefore: Int?
     private(set) var uploadedChunksSkipped: Int = 0
     private(set) var uploadedSamplesDropped: Int = 0
+    /// M3/V08c:上一次回答资格生效时的丢证据水位。语音 final 落库后对比水位差：
+    /// 差值超阈值即本轮输入断裂，不得回答，转"请重说"。
+    private var lastAnsweredChunksSkipped = 0
+    private var lastAnsweredSamplesDropped = 0
+    /// M3/V08c:输入完整性阈值——约 1 个 drain 块当量（100ms @24kHz 单声道 16bit
+    /// ≈ 2400 样本）或 1 整块跳过。偶发亚块级抖动不挡回答；达到块级断裂才请重说。
+    /// 候选值，按真机 gate 复核后集中定义。
+    static let inputIntegrityMaxSkippedChunks = 1
+    static let inputIntegrityMaxDroppedSamples = 2400
     /// 测试 seam：上一块序号（只读）。生产逻辑不依赖它做决策，
     /// 只做单调证据累计；是否"完整"由调用方按证据判定。
     var lastUploadedChunkSequenceForTest: Int? { lastUploadedChunkSequence }
@@ -2258,6 +2267,22 @@ public final class AssistantSession {
         guard sessionID == command.sessionID,
               command.source == .keyboard || connectionToken == command.connection,
               inputLifecycle == .active, !isStoppingIntentionally else { return }
+        // M3/V08c:语音输入完整性门——自上次回答以来新增的丢证据超阈值，
+        // 说明本轮语音断裂（ring 满 / bufferingNewest 替换），残缺输入不得回答。
+        // 键盘无采集链路，不受此门影响。水位无论放行与否都推进到当前，
+        // 避免同一批证据挡住后续所有轮次。
+        if command.source == .microphone {
+            let skippedDelta = uploadedChunksSkipped - lastAnsweredChunksSkipped
+            let droppedDelta = uploadedSamplesDropped - lastAnsweredSamplesDropped
+            lastAnsweredChunksSkipped = uploadedChunksSkipped
+            lastAnsweredSamplesDropped = uploadedSamplesDropped
+            guard skippedDelta < Self.inputIntegrityMaxSkippedChunks,
+                  droppedDelta < Self.inputIntegrityMaxDroppedSamples
+            else {
+                lastFailure = "刚才那句没能完整收录（丢了音频），请再说一次。"
+                return
+            }
+        }
         submitTurn(
             questionID: command.lineID, text: command.text, source: command.source,
             spoken: command.source == .microphone

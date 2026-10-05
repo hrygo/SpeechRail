@@ -958,6 +958,70 @@ final class AssistantCancelReceiveTests: XCTestCase {
         XCTAssertEqual(session.uploadedSamplesDropped, 0, "无 ring 丢样时丢样计数必须为零")
     }
 
+    /// V08c:语音 final 落库时若自上次回答以来丢证据超阈值，不回答，转请重说；
+    /// 键盘来源不受此门影响；水位推进后后续轮次不受同一批证据阻挡。
+    func testBrokenVoiceInputAsksForRepeatInsteadOfAnswering() async throws {
+        let harness = try await makeVoiceHarness(llmScripts: [.deltas(["回答"])])
+        defer { cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.configured)
+        // 先制造断裂证据：序号跳跃 3 块（超 1 块阈值）。
+        for seq in [0, 10, 11] {
+            harness.audio.emitCapture(
+                AudioChunk(
+                    pcm: Data([1, 2, 3, 4]),
+                    level: 0.5,
+                    sequenceNumber: seq,
+                    droppedSamplesBefore: 0
+                )
+            )
+        }
+        await waitUntil(
+            { harness.session.uploadedChunksSkipped >= 9 },
+            message: "序号 0→10 应累计跳过 9 块"
+        )
+        await harness.clients()[0].emit(.completed(itemID: "q-broken", transcript: "断裂的问题"))
+        await waitUntil(
+            { harness.session.lastFailure?.contains("没能完整收录") == true },
+            message: "断裂语音 final 应转请重说，不回答"
+        )
+        let streamCountAfterBroken = await harness.llm.streamCount
+        XCTAssertEqual(streamCountAfterBroken, 0, "断裂输入不得把问题发送给 provider")
+        // 同一批证据水位已推进：下一句完整语音应正常回答。
+        await harness.clients()[0].emit(.completed(itemID: "q-whole", transcript: "完整的问题"))
+        await waitUntil(
+            { harness.session.turns.contains { $0.role == .assistant } },
+            message: "水位推进后完整语音应正常回答"
+        )
+    }
+
+    /// V08c:键盘来源无采集链路，不受完整性门影响——即使有丢证据也正常回答。
+    func testKeyboardInputBypassesIntegrityGate() async throws {
+        let harness = try await makeVoiceHarness(llmScripts: [.deltas(["键盘回答"])])
+        defer { cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.configured)
+        for seq in [0, 10, 11] {
+            harness.audio.emitCapture(
+                AudioChunk(
+                    pcm: Data([1, 2, 3, 4]),
+                    level: 0.5,
+                    sequenceNumber: seq,
+                    droppedSamplesBefore: 0
+                )
+            )
+        }
+        await waitUntil(
+            { harness.session.uploadedChunksSkipped >= 9 },
+            message: "序号 0→10 应累计跳过 9 块"
+        )
+        _ = await harness.session.ask(typed: "键盘问题")
+        await waitUntil(
+            { harness.session.turns.contains { $0.role == .assistant && $0.text.contains("键盘回答") } },
+            message: "键盘问题不受语音完整性门影响，应正常回答"
+        )
+    }
+
     /// V08b:ring 丢样快照差必须累计；快照回退（新采集期）不倒扣。
     func testUploadDroppedSamplesAreCounted() async throws {
         let harness = try await makeVoiceHarness(llmScripts: [])
