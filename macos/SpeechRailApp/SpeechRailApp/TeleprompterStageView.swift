@@ -132,8 +132,11 @@ public struct TeleprompterStageView: View {
                     revealControls(immediate: true)
                 } else {
                     scheduleControlsHide()
+                    // E7c：弹层关闭后仅当舞台仍是有效操作目标才恢复阅读焦点；
+                    // ASR 回调不得夺焦点，控制焦点存在时不抢回。
                     Task { @MainActor in
                         await Task.yield()
+                        guard session.isStageOpen, focusedControl == nil else { return }
                         readingAreaFocused = true
                     }
                 }
@@ -264,7 +267,7 @@ public struct TeleprompterStageView: View {
 
     private var acceptsReadingKeyCommands: Bool {
         TeleprompterStageInteractionPolicy.acceptsReadingKeyCommands(
-            readingAreaFocused: true,
+            readingAreaFocused: readingAreaFocused,
             controlFocusInside: focusedControl != nil,
             menuOrPopoverPresented: isAppearancePopoverPresented
         )
@@ -311,19 +314,23 @@ public struct TeleprompterStageView: View {
     }
 
     private func handleReadingKeyPress(_ keyPress: KeyPress, by delta: Int) -> KeyPress.Result {
-        guard keyPress.modifiers.isEmpty, !isAppearancePopoverPresented else { return .ignored }
+        // E7c：上下行/空格/j/k/Home/End 等阅读键统一走同一守卫——控制焦点或
+        // 输入焦点存在时不穿透，菜单/弹层展开时不穿透。
+        guard acceptsReadingKeyCommands, keyPress.modifiers.isEmpty else { return .ignored }
         moveByDisplayLine(delta)
         return .handled
     }
 
     private func handleVoiceToggleKey() -> KeyPress.Result {
-        guard !isAppearancePopoverPresented, !voiceAssistBusy else { return .ignored }
+        // E7c：v 键也不得劫持文本输入与控制焦点。
+        guard acceptsReadingKeyCommands, !voiceAssistBusy else { return .ignored }
         handleVoiceAssist()
         return .handled
     }
 
     private func handleMirrorToggleKey() -> KeyPress.Result {
-        guard !isAppearancePopoverPresented else { return .ignored }
+        // E7c：m 键同 v 键，不劫持文本输入与控制焦点。
+        guard acceptsReadingKeyCommands else { return .ignored }
         settings.isMirrored.toggle()
         return .handled
     }
@@ -494,6 +501,8 @@ public struct TeleprompterStageView: View {
             Text(blocked.title + "：" + blocked.detail)
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                // E7c：错误全文不裁剪——纵向展开，键盘/VoiceOver 可读全文。
+                .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
@@ -519,7 +528,7 @@ public struct TeleprompterStageView: View {
         )
         .accessibilityElement(children: .combine)
         .accessibilityLabel("需要注意")
-        .accessibilityValue(blocked.title)
+        .accessibilityValue(blocked.title + "：" + blocked.detail)
     }
 
     private func saveFailureMessage(_ failure: String) -> some View {
@@ -1105,7 +1114,17 @@ public struct TeleprompterStageView: View {
         case .starting:
             return "正在开启语音跟随…"
         case .following, .stopping:
-            return session.hasHeardSpeech ? "语音跟随中" : "麦克风已就绪，可以开始朗读"
+            // E3：有假设后的空 final 置 followState=.catchingUp 且
+            // uncertainty 非空——位置未确认，不得继续呈现“语音跟随中”。
+            // 无定位证据时（listening/catchingUp）统一呈现“正在定位，
+            // 位置已保持”，与 §6.4 文案对齐。
+            if !session.hasHeardSpeech {
+                return "麦克风已就绪，可以开始朗读"
+            }
+            if session.followState == .tracking {
+                return "语音跟随中"
+            }
+            return "正在定位，位置已保持"
         case .stopFailed(let reason):
             return "停止未完成：\(reason)"
         case .pausedByUser:

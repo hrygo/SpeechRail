@@ -2082,7 +2082,7 @@ struct TeleprompterSessionLifecycleTests {
         #expect(!harness.session.isPaceCalibrated)
     }
 
-    /// 读者按下暂停的那一刻，跟读指示就必须已经是「手动浏览中」——不能等到
+    /// 读者按下暂停的那一刻，跟读指示就必须已经是「手动提词」——不能等到
     /// 排空与关闭（最多 8 秒）跑完才改。等待窗口期间 drain 被闸门挡住，
     /// 所以这里断言的是同步交付的状态，不是收尾后的最终状态。
     @Test("pausing follow reports manual browsing before the drain finishes")
@@ -2101,7 +2101,7 @@ struct TeleprompterSessionLifecycleTests {
 
         #expect(harness.session.voiceAssistState == .stopping)
         #expect(harness.session.followState == .manual)
-        #expect(harness.session.followStatusText == "手动浏览中")
+        #expect(harness.session.followStatusText == "手动提词")
 
         await drainGate.open()
         await waitFor { harness.session.voiceAssistState == .pausedByUser }
@@ -2134,7 +2134,7 @@ struct TeleprompterSessionLifecycleTests {
 
     /// 「结束当前会话」走 coordinator，不经过 `requestVoiceStop`，所以把跟读
     /// 收回手动是 `stopCapture()` 自己的职责。少了那一步，采集已经释放、
-    /// 指示却还停在「跟读咬合」，并且落盘的 `mode` 也是 `.following`。
+    /// 指示却还停在「语音跟随中」，并且落盘的 `mode` 也是 `.following`。
     @Test("ending the session from the coordinator returns follow state to manual")
     func coordinatorStopReturnsFollowStateToManual() async throws {
         let harness = try TeleprompterSessionHarness()
@@ -2148,7 +2148,7 @@ struct TeleprompterSessionLifecycleTests {
         await harness.coordinator.stopCapture(endingWith: .user)
 
         #expect(harness.session.followState == .manual)
-        #expect(harness.session.followStatusText == "手动浏览中")
+        #expect(harness.session.followStatusText == "手动提词")
         #expect(harness.coordinator.occupancy == nil)
         #expect(await client.currentCounters().closeCount == 1)
         await harness.session.closeStage()
@@ -2340,6 +2340,369 @@ struct TeleprompterSessionLifecycleTests {
         }
         #expect(harness.sourceFactory.sources.allSatisfy { $0.stopCount == 1 })
     }
+    @Test("a stale empty final after manual takeover cannot move the new position")
+    func staleEmptyFinalAfterTakeoverIsIgnored() async throws {
+        // E4/TP-04：接管在 await 前同步撤销旧 generation；旧连接迟到的
+        // 空 final 不得覆盖新位置，也不得虚构未确认状态。
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        try harness.session.openForManualReading()
+        await harness.session.enableVoiceAssist()
+        let client = try #require(harness.clientFactory.clients.first)
+
+        // 旧管线先给出非空假设（snapshot 推进试探位置）。
+        await client.emit(
+            .partialSnapshot(itemID: "old", revision: 1, text: "第一段内容"),
+            eventID: "old-snap"
+        )
+        await waitFor("旧 snapshot 推进试探位置") {
+            harness.session.partialText != nil
+        }
+
+        // 人工接管到第 3 段：同步撤销旧 generation。
+        harness.session.moveToSegment(2)
+        #expect(harness.session.currentSegmentIndex == 2)
+        await settleTasks()
+
+        // 旧连接迟到的空 final：generation 已失效，必须被拒。
+        await client.emit(.completed(itemID: "old", transcript: ""), eventID: "old-empty")
+        await settleTasks()
+
+        #expect(harness.session.currentSegmentIndex == 2)
+        #expect(harness.session.phase == .manual)
+    }
+
+    /// E5/TP-05 RED：无 AI 配置的手动开台不得调用 preparationClient，且
+    /// 不得创建采集 source / realtime client、不占 coordinator。
+    @Test("manual opening without AI configured never calls preparation or audio paths")
+    func manualOpeningWithoutAITouchesNothingButTheDeterministicVersion() throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        #expect(harness.session.preparationClient == nil, "用例前提：无 AI 配置")
+
+        let preparationCalls = LockedCounter()
+        // 即使有人误配了 client，手动路径也不得调用它：包一层计数。
+        harness.session.preparationClient = TeleprompterPreparationClient { _ in
+            await preparationCalls.increment()
+            throw TestPreparationResponse.Failure.unavailable
+        }
+
+        try harness.session.openForManualReading()
+
+        #expect(harness.session.phase == .manual)
+        #expect(harness.session.activeVersion != nil)
+        #expect(harness.sourceFactory.sources.isEmpty, "手动开台不得创建采集")
+        #expect(harness.clientFactory.clients.isEmpty, "手动开台不得创建连接")
+        #expect(harness.coordinator.occupancy == nil, "手动开台不得占用识别槽位")
+        #expect(preparationCalls.value == 0, "手动开台不得调用 AI 整理")
+    }
+
+    /// E6/TP-06+N01 RED：未经编辑的候选采用不得改变 block ID、来源区间、
+    /// cue/skip 与 rawSourceText。View 主动作当前无条件全文回写（N01），
+    /// 必须先证明“原样采用”这条成立。
+    @Test("adopting an unedited candidate preserves block identity, ranges, and raw text")
+    func adoptingUneditedCandidatePreservesBlocks() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeManyBlockDocument()
+        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
+            try TestPreparationResponse.response(for: prompt)
+        }
+        await harness.session.analyzeDraft()
+        #expect(harness.session.phase == .prepared)
+        let before = harness.session.readingBlocks
+        #expect(before.count >= 2, "这条用例必须在多块文档上跑，否则块身份无从谈起")
+
+        // 模拟 View 主动作的旧路径：无条件把当前 preparedText 全文回写一遍。
+        let preparedSnapshot = harness.session.preparedText
+        harness.session.updatePreparedDraftText(preparedSnapshot)
+        let writtenBack = harness.session.readingBlocks
+        #expect(writtenBack.map(\.id) == before.map(\.id), "全文回写不得重建块 ID")
+        #expect(
+            writtenBack.map(\.sourceRange) == before.map(\.sourceRange),
+            "全文回写不得改写来源区间"
+        )
+        #expect(
+            writtenBack.map(\.rawSourceText) == before.map(\.rawSourceText),
+            "全文回写不得改写原稿正文"
+        )
+        #expect(
+            writtenBack.map(\.disposition) == before.map(\.disposition),
+            "全文回写不得改写段落用途"
+        )
+        #expect(writtenBack.map(\.text) == before.map(\.text), "原样回写不得改写朗读正文")
+        let pendingBeforeAccept = try #require(harness.session.pendingVersion)
+        let segmentsBeforeAccept = pendingBeforeAccept.segments
+        try harness.session.acceptPendingVersion()
+
+        let after = harness.session.activeVersion
+        #expect(after != nil)
+        #expect(after?.segments.count == segmentsBeforeAccept.count, "原样采用不得改变段数")
+        #expect(after?.segments == segmentsBeforeAccept, "原样采用必须逐段保留来源与正文")
+    }
+
+    /// E6 RED：用途撤销必须恢复切换前的改写正文，而不是从 rawSourceText 重拼。
+    @Test("disposition undo restores the rewritten text, not the raw fallback")
+    func dispositionUndoRestoresRewrittenText() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeManyBlockDocument()
+        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
+            try TestPreparationResponse.response(for: prompt)
+        }
+        await harness.session.analyzeDraft()
+        #expect(harness.session.phase == .prepared)
+        let target = try #require(harness.session.readingBlocks.first)
+        harness.session.updateBlockText(id: target.id, text: "改写后的正文")
+        harness.session.setBlockDisposition(id: target.id, disposition: .skip)
+        #expect(
+            harness.session.readingBlocks.first(where: { $0.id == target.id })?.text == "",
+            "skip 不产出朗读正文"
+        )
+        harness.session.undoLastPreparedEdit()
+        #expect(
+            harness.session.readingBlocks.first(where: { $0.id == target.id })?.text == "改写后的正文",
+            "撤销必须恢复切换前的改写正文，而不是 rawSourceText 重拼"
+        )
+        #expect(
+            harness.session.readingBlocks.first(where: { $0.id == target.id })?.disposition == .speak
+        )
+    }
+
+    /// E6 RED：舞台打开期间任何段落编辑入口都不得改变版本。
+    @Test("candidate edits are rejected while the stage is open")
+    func candidateEditsAreRejectedWhileStageIsOpen() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeManyBlockDocument()
+        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
+            try TestPreparationResponse.response(for: prompt)
+        }
+        await harness.session.analyzeDraft()
+        #expect(harness.session.phase == .prepared)
+        try harness.session.openForManualReading()
+        let before = harness.session.readingBlocks
+        let target = try #require(before.first)
+        let candidateID = harness.session.pendingVersion?.id
+
+        harness.session.setBlockDisposition(id: target.id, disposition: .skip)
+        harness.session.updateBlockText(id: target.id, text: "舞台上改的正文")
+        harness.session.updatePreparedDraftText("舞台上全文回写")
+        harness.session.undoLastPreparedEdit()
+
+        #expect(harness.session.readingBlocks == before, "舞台打开期间段落编辑不得生效")
+        #expect(harness.session.pendingVersion?.id == candidateID, "舞台打开期间候选身份不得变化")
+    }
+
+    /// E7a：生成失败按真实分类表达——取消/未配置/认证/限流/额度/格式/
+    /// 截断分别说明；不回显 HTTP body；无“最常见原因是请求过于频繁”推断。
+    @Test("generation failures are classified by evidence, without echoing upstream bodies")
+    func generationFailuresAreClassifiedByEvidence() {
+        #expect(TeleprompterSession.aiFailureMessage(for: CancellationError()) == "已取消整理，原稿没有变化。")
+        #expect(TeleprompterSession.aiFailureMessage(for: LLMError.cancelled) == "已取消整理，原稿没有变化。")
+        #expect(TeleprompterSession.aiFailureMessage(for: LLMError.notConfigured).contains("还没有配置"))
+        #expect(TeleprompterSession.aiFailureMessage(for: LLMError.badBaseURL).contains("地址配置不正确"))
+        #expect(TeleprompterSession.aiFailureMessage(for: LLMError.transport("boom")).contains("连不上"))
+        #expect(TeleprompterSession.aiFailureMessage(for: LLMError.http(status: 401, body: "secret-body")).contains("认证未通过"))
+        #expect(!TeleprompterSession.aiFailureMessage(for: LLMError.http(status: 401, body: "secret-body")).contains("secret-body"), "不得回显上游正文")
+        #expect(TeleprompterSession.aiFailureMessage(for: LLMError.http(status: 429, body: "")).contains("当前繁忙"))
+        #expect(TeleprompterSession.aiFailureMessage(for: LLMError.http(status: 404, body: "")).contains("不支持整理请求"))
+        #expect(TeleprompterSession.aiFailureMessage(for: LLMError.http(status: 503, body: "")).contains("暂时不可用"))
+        #expect(TeleprompterSession.aiFailureMessage(for: LLMError.invalidStructuredResponse).contains("无法使用"))
+        #expect(TeleprompterSession.aiFailureMessage(for: LLMError.outputTruncated).contains("不完整"))
+        #expect(!TeleprompterSession.aiFailureMessage(for: LLMError.http(status: 429, body: "")).contains("最常见原因"), "无证据推断不得写入文案")
+    }
+
+    /// E8/TP-12 RED：保存进度失败时显示位置未保存——内存锚点保留、
+    /// 落盘锚点不推进；复制稿件、手动阅读与再次保存可用，不显示“已保存”。
+    @Test("a failed progress save keeps the in-memory anchor and reports unsaved position")
+    func failedProgressSaveKeepsMemoryAnchorAndReportsUnsaved() throws {
+        try #require(getuid() != 0, "root 绕过目录权限，这条路径无法复现")
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        try harness.session.openForManualReading()
+        harness.session.moveToSegment(1)
+        #expect(harness.session.currentSegmentIndex == 1)
+        let documentID = try #require(harness.session.document?.id)
+
+        // 落盘位置已确认：moveToSegment(1) 同步 saveProgress 落盘段1。
+        let reloadedBefore = try harness.makeReloadedSession()
+        try reloadedBefore.load(documentID: documentID)
+        let landedBefore = reloadedBefore.currentSegmentIndex
+        #expect(landedBefore == 1, "段一切换后落盘锚点为段1，实际 \(landedBefore)")
+
+        // 只读目录：后续 saveProgress 失败。
+        let documentsDirectory = harness.directory.appendingPathComponent("documents", isDirectory: true)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o555],
+            ofItemAtPath: documentsDirectory.path
+        )
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: documentsDirectory.path
+            )
+        }
+        harness.session.moveToSegment(2)
+        #expect(harness.session.currentSegmentIndex == 2, "内存锚点必须保留")
+        #expect(harness.session.lastFailure != nil, "进度保存失败必须有声音")
+        #expect(harness.session.copyableDocumentText() != nil, "失败后复制入口可用")
+
+        // 腾出空间后再次保存：落盘锚点追上内存锚点。
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: documentsDirectory.path
+        )
+        try harness.session.save()
+        let reloadedAfter = try harness.makeReloadedSession()
+        try reloadedAfter.load(documentID: documentID)
+        #expect(reloadedAfter.currentSegmentIndex == 2, "重试保存后落盘锚点追上")
+    }
+
+    /// E8/TP-11 RED：末行不自动退出、开麦或弹复盘——读到最后一段后停在
+    /// 原位继续手动提词，不切 phase、不启语音、不关舞台。
+    @Test("reaching the last segment never auto-exits, opens the mic, or pops a review")
+    func reachingLastSegmentNeverAutoExitsOpensMicOrPopsReview() throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        try harness.session.openForManualReading()
+        let lastIndex = (harness.session.activeVersion?.segments.count ?? 1) - 1
+        harness.session.moveToSegment(lastIndex)
+
+        #expect(harness.session.currentSegmentIndex == lastIndex)
+        #expect(harness.session.phase == .manual, "末行不得自动切相位")
+        #expect(!harness.session.isMicrophoneCapturing, "末行不得自动开麦")
+        #expect(harness.session.voiceAssistState == .off, "末行不得自动启语音")
+        #expect(harness.session.isStageOpen, "末行不得自动关舞台")
+
+        harness.session.moveToNext()
+        #expect(harness.session.currentSegmentIndex == lastIndex, "末行越界停在原位")
+        #expect(harness.session.phase == .manual)
+        #expect(!harness.session.isMicrophoneCapturing)
+        #expect(harness.session.voiceAssistState == .off)
+    }
+
+    /// E6：emoji 编辑后来源仍合法（UTF-16 区间引用不可变原稿，不随正文变长）。
+    @Test("editing a block with emoji keeps its source range valid against the manuscript")
+    func emojiEditKeepsSourceRangeValid() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(title: "emoji", sourceText: "第一段内容。第二段内容。第三段内容。")
+        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
+            try TestPreparationResponse.response(for: prompt)
+        }
+        await harness.session.analyzeDraft()
+        #expect(harness.session.phase == .prepared)
+        let target = try #require(harness.session.readingBlocks.first)
+        let manuscript = harness.session.document?.sourceText ?? ""
+        harness.session.updateBlockText(id: target.id, text: "改写 🎙️ 混排 mixed text 123")
+        let edited = try #require(harness.session.readingBlocks.first(where: { $0.id == target.id }))
+        #expect(edited.sourceRange == target.sourceRange, "改朗读文字不改变原稿来源")
+        #expect(edited.sourceRange.isValid(in: manuscript), "来源区间对不可变原稿保持合法")
+        harness.session.undoLastPreparedEdit()
+        #expect(
+            harness.session.readingBlocks.first(where: { $0.id == target.id })?.text == target.text,
+            "emoji 编辑也可撤销回改前正文"
+        )
+    }
+
+    /// E6：全 skip 时不允许开台并说明“还没有可朗读的段落”。
+    @Test("opening with every block skipped is refused with a readable reason")
+    func allSkippedBlocksRefuseOpening() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
+            try TestPreparationResponse.response(for: prompt)
+        }
+        await harness.session.analyzeDraft()
+        #expect(harness.session.phase == .prepared)
+        for block in harness.session.readingBlocks {
+            harness.session.setBlockDisposition(id: block.id, disposition: .skip)
+        }
+        #expect(harness.session.readingBlocks.allSatisfy { $0.disposition == .skip })
+        #expect(throws: TeleprompterTextError.self) {
+            try harness.session.acceptPendingVersion()
+        }
+        #expect(harness.session.phase == .prepared, "全跳过时采用失败不得推进相位")
+        #expect(harness.session.pendingVersion != nil, "全跳过时候选必须保留可改")
+    }
+
+    /// E1/TP-01 RED：即启编辑必须走 Session 侧入口——首字建稿、后续同 ID、
+    /// 落盘后新 Session 可重载。不用 createDocument 冒充 View 即启路径。
+    @Test("a first quick-draft edit persists under one document identity and survives reload")
+    func quickDraftSurvivesSessionReload() throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        let firstID = try #require(try harness.session.updateQuickDraft(title: "即启", sourceText: "第一段内容。第二段内容。"))
+        let secondID = try #require(try harness.session.updateQuickDraft(title: "即启", sourceText: "第一段内容。第二段内容。第三段内容。"))
+        #expect(secondID == firstID, "同一份即启编辑只用一个文档 ID")
+        try harness.session.flushPendingDraftSave()
+        let reloaded = try harness.makeReloadedSession()
+        try reloaded.load(documentID: firstID)
+        #expect(reloaded.document?.sourceText == "第一段内容。第二段内容。第三段内容。")
+        #expect(reloaded.document?.title == "即启")
+    }
+
+    /// E1/N02 RED：防抖窗口内切稿不得丢已接收编辑——切稿前必须先 flush。
+    @Test("switching documents inside the debounce window keeps the received edit")
+    func switchingDocumentFlushesPendingEdit() throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        let idA = try #require(try harness.session.updateQuickDraft(title: "稿A", sourceText: "稿A第一段。稿A第二段。"))
+        // 不等 500ms 防抖、不手动 flush，直接建新稿切走。
+        harness.session.createDocument(title: "稿B", sourceText: "稿B第一段。稿B第二段。")
+        let idB = try #require(harness.session.document?.id)
+        #expect(idB != idA)
+        try harness.session.load(documentID: idA)
+        #expect(harness.session.document?.sourceText == "稿A第一段。稿A第二段。")
+    }
+
+    /// E1 RED：flush 失败保留当前稿、内存文本与重试入口，不切换身份。
+    @Test("a failed flush keeps the current document, its text, and a retry path")
+    func failedFlushPreservesCurrentDocument() throws {
+        try #require(getuid() != 0, "root 绕过目录权限，这条路径无法复现")
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        let documentsDirectory = harness.directory.appendingPathComponent("documents", isDirectory: true)
+        try FileManager.default.createDirectory(at: documentsDirectory, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o555],
+            ofItemAtPath: documentsDirectory.path
+        )
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: documentsDirectory.path
+            )
+        }
+
+        let source = "即启第一段。即启第二段。"
+        let documentID = try #require(try harness.session.updateQuickDraft(title: "即启", sourceText: source))
+        #expect(throws: Error.self) { try harness.session.flushPendingDraftSave() }
+        #expect(harness.session.document?.id == documentID, "flush 失败不得换掉当前稿件")
+        #expect(harness.session.copyableDocumentText() == source, "失败后内存文本仍可复制")
+        #expect(harness.session.draftSaveState == .failed)
+        guard case .storeUnavailable = harness.session.blocked else {
+            Issue.record("前提：只读目录下 flush 必须进入存盘失败态")
+            return
+        }
+        // 腾出空间后重试：成功清失败态，重载可读。
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: documentsDirectory.path
+        )
+        try harness.session.flushPendingDraftSave()
+        #expect(harness.session.blocked == nil)
+        #expect(harness.session.draftSaveState == .clean)
+        let reloaded = try harness.makeReloadedSession()
+        try reloaded.load(documentID: documentID)
+        #expect(reloaded.document?.sourceText == source)
+    }
 }
 private enum TestPreparationResponse {
     enum Failure: Error {
@@ -2385,6 +2748,13 @@ private enum TestPreparationResponse {
         }
         throw Failure.unavailable
     }
+}
+
+/// E5：跨 task 调用的手动计数器（MainActor），记录 preparation 误调用。
+@MainActor
+private final class LockedCounter {
+    private(set) var value = 0
+    func increment() { value += 1 }
 }
 
 @MainActor

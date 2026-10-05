@@ -291,13 +291,21 @@ public final class TeleprompterSession {
         // 又没有 `disabled` 门控，读者点了另一份稿子什么都没发生，连提示区都被
         // 同一支 `do`/`catch` 清成了 nil。
         guard canEdit else { throw TeleprompterTextError.sessionBusy }
+        if document?.id == documentID { return }
+        // E1/N02：防抖窗口内切稿先提交当前待保存修订。flush 失败时保留旧身份
+        // 并 throw，不继续切换——否则最后一次编辑在 `invalidateAnalysis()` 取消
+        // 待保存任务后丢失。
+        try flushPendingDraftSave()
         invalidateAnalysis()
+        clearPreparedEditHistory()
         applyV2Bundle(try v2Store.load(documentID: documentID))
     }
 
     public func createDocument(title: String, sourceText: String) {
         guard canEdit else { return }
+        try? flushPendingDraftSave()
         invalidateAnalysis()
+        clearPreparedEditHistory()
         savedRunState = nil
         let now = Date()
         document = TeleprompterDocument(
@@ -336,7 +344,9 @@ public final class TeleprompterSession {
     /// 导入文件，界面谎报成功，读者以为换好了稿子，实际还在旧稿上。
     public func createDocument(title: String, importedSource: TeleprompterImportedSource) throws {
         guard canEdit else { throw TeleprompterTextError.sessionBusy }
+        try flushPendingDraftSave()
         invalidateAnalysis()
+        clearPreparedEditHistory()
         savedRunState = nil
         let now = Date()
         document = TeleprompterDocument(
@@ -541,6 +551,7 @@ public final class TeleprompterSession {
         operation: TeleprompterPreparationOperation = .prepare
     ) async {
         phase = .analyzing
+        clearPreparedEditHistory()
         preparationProgress = nil
         preparationResult = nil
         let generation = draftGeneration
@@ -629,6 +640,10 @@ public final class TeleprompterSession {
               candidate.documentID == document.id else {
             throw TeleprompterTextError.invalidAnalysis
         }
+        // E6：全 skip 时没有可朗读的段落，不允许开台。候选保留可改，不推进相位。
+        guard readingBlocks.contains(where: { $0.disposition == .speak }) else {
+            throw TeleprompterTextError.noReadableBlocks
+        }
         guard canAcceptPendingVersion else {
             throw TeleprompterTextError.invalidAnalysis
         }
@@ -658,6 +673,7 @@ public final class TeleprompterSession {
         syncFollowState()
         phase = .ready
         blocked = nil
+        clearPreparedEditHistory()
         cancelScheduledDraftSave()
         do {
             try saveBundle()
@@ -679,6 +695,7 @@ public final class TeleprompterSession {
     public func discardPendingVersion() {
         guard canEdit else { return }
         invalidateAnalysis()
+        clearPreparedEditHistory()
         pendingVersion = nil
         phase = activeVersion == nil ? .draft : .ready
     }
@@ -974,7 +991,9 @@ public final class TeleprompterSession {
     /// 用户在通读纯文本字符稿并修改后，实时或提交更新。
     /// 按自然段（空行）切分，重新同步到 readingBlocks 与 pendingVersion。
     public func updatePreparedDraftText(_ newText: String) {
-        guard canEdit, document != nil else { return }
+        // E6/N01：守卫同段落编辑入口；全文回写只改既有块的正文，不重建块身份。
+        guard canEdit, phase == .prepared, pendingVersion != nil, document != nil else { return }
+        takePreparedEditSnapshot()
         let rawParagraphs = newText
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -1003,27 +1022,67 @@ public final class TeleprompterSession {
             paragraphs = [newText.trimmingCharacters(in: .whitespacesAndNewlines)]
         }
 
-        var newBlocks: [TeleprompterReadingBlock] = []
-        var runningOffset = 0
-        for (idx, para) in paragraphs.enumerated() {
-            let start = runningOffset
-            let end = start + para.count
-            runningOffset = end + 2 // 预留换行
-            newBlocks.append(
-                TeleprompterReadingBlock(
-                    id: "user-block-\(idx)",
-                    ordinal: idx,
-                    sourceRange: TeleprompterSourceRange(start: start, end: end),
-                    text: para,
-                    rawSourceText: para,
-                    disposition: .speak,
-                    origin: .user,
-                    budgetSeconds: 0
+        // E6/N01：按序写回既有块的正文，不重建 ID/来源/用途/origin。
+        // speak 块改 text；cue/skip 块不念，其 text 恒空，写回 rawSourceText 以便查看。
+        // 修改朗读文字不改变 sourceRange；来源区间只引用不可变原稿 UTF-16。
+        if readingBlocks.isEmpty {
+            var newBlocks: [TeleprompterReadingBlock] = []
+            var runningOffset = 0
+            for (idx, para) in paragraphs.enumerated() {
+                let start = runningOffset
+                let end = start + para.count
+                runningOffset = end + 2 // 预留换行
+                newBlocks.append(
+                    TeleprompterReadingBlock(
+                        id: "user-block-\(idx)",
+                        ordinal: idx,
+                        sourceRange: TeleprompterSourceRange(start: start, end: end),
+                        text: para,
+                        rawSourceText: para,
+                        disposition: .speak,
+                        origin: .user,
+                        budgetSeconds: 0
+                    )
                 )
-            )
+            }
+            self.readingBlocks = newBlocks
+        } else {
+            // E6 原样回写短路：join/split 往返会丢块内末尾换行等空白。
+            // 若重组全文与当前 preparedText 一致，说明用户未做实质编辑，
+            // 直接保留原块（ID/来源/用途/正文逐字不动），不做按段重写。
+            let currentPrepared = preparedText
+            if newText == currentPrepared
+                || paragraphs.joined(separator: "\n\n") == currentPrepared {
+                scheduleDraftSave()
+                return
+            }
+            var updated = readingBlocks
+            for idx in updated.indices {
+                let para = idx < paragraphs.count ? paragraphs[idx] : ""
+                if updated[idx].disposition == .speak {
+                    updated[idx].text = para
+                } else {
+                    updated[idx].rawSourceText = para
+                }
+                updated[idx].origin = .user
+            }
+            if paragraphs.count > updated.count {
+                let extra = paragraphs[updated.count...].joined(separator: "\n\n")
+                updated.append(
+                    TeleprompterReadingBlock(
+                        id: UUID().uuidString,
+                        ordinal: updated.count,
+                        sourceRange: updated.last?.sourceRange ?? TeleprompterSourceRange(start: 0, end: 0),
+                        text: extra,
+                        rawSourceText: extra,
+                        disposition: .speak,
+                        origin: .user,
+                        budgetSeconds: 0
+                    )
+                )
+            }
+            self.readingBlocks = updated
         }
-
-        self.readingBlocks = newBlocks
         syncPendingVersionFromBlocks()
         scheduleDraftSave()
     }
@@ -1035,8 +1094,11 @@ public final class TeleprompterSession {
     /// 粒度是「段」而不是「句」：口语稿按段落呼吸，逐句标记既费力，多数人也不会
     /// 真那么用。AI 已经把这一段归好了，用户多数时候只需要改掉少数几段。
     public func setBlockDisposition(id: String, disposition: TeleprompterBlockDisposition) {
-        guard let index = readingBlocks.firstIndex(where: { $0.id == id }),
+        // E6：舞台打开期间任何段落编辑都不生效；只有 prepared 候选可编辑。
+        guard canEdit, phase == .prepared, pendingVersion != nil,
+              let index = readingBlocks.firstIndex(where: { $0.id == id }),
               readingBlocks[index].disposition != disposition else { return }
+        takePreparedEditSnapshot()
         // 本地编辑绕过 decoder，所以这条不变式必须在这里自己守住：
         // speak 的正文非空，cue/skip 的正文为空——与两个 decoder 的判定一致。
         //
@@ -1057,7 +1119,10 @@ public final class TeleprompterSession {
     }
 
     public func updateBlockText(id: String, text: String) {
-        guard let index = readingBlocks.firstIndex(where: { $0.id == id }) else { return }
+        // E6：守卫同 setBlockDisposition；正文只改目标块，不动 sourceRange。
+        guard canEdit, phase == .prepared, pendingVersion != nil,
+              let index = readingBlocks.firstIndex(where: { $0.id == id }) else { return }
+        takePreparedEditSnapshot()
         readingBlocks[index].text = text
         readingBlocks[index].origin = .user
         syncPendingVersionFromBlocks()
@@ -1065,7 +1130,9 @@ public final class TeleprompterSession {
     }
 
     public func mergeBlock(at index: Int) {
-        guard index >= 0, index + 1 < readingBlocks.count else { return }
+        guard canEdit, phase == .prepared, pendingVersion != nil,
+              index >= 0, index + 1 < readingBlocks.count else { return }
+        takePreparedEditSnapshot()
         var current = readingBlocks[index]
         let next = readingBlocks[index + 1]
         // 跳过不念的段落正文是空的，直接拼上去只会留一个游离换行。
@@ -1086,7 +1153,9 @@ public final class TeleprompterSession {
     }
 
     public func splitBlock(at index: Int, splitPoint: Int? = nil) {
-        guard index >= 0, index < readingBlocks.count else { return }
+        guard canEdit, phase == .prepared, pendingVersion != nil,
+              index >= 0, index < readingBlocks.count else { return }
+        takePreparedEditSnapshot()
         let current = readingBlocks[index]
         let text = current.text
         guard text.count > 4 else { return }
@@ -1125,6 +1194,8 @@ public final class TeleprompterSession {
     }
 
     public func insertBlock(after index: Int) {
+        guard canEdit, phase == .prepared, pendingVersion != nil else { return }
+        takePreparedEditSnapshot()
         let newOrdinal = index + 1
         let newBlock = TeleprompterReadingBlock(
             id: UUID().uuidString,
@@ -1146,6 +1217,61 @@ public final class TeleprompterSession {
         }
         syncPendingVersionFromBlocks()
         scheduleDraftSave()
+    }
+
+    /// E6/TP-06：候选块编辑的有界撤销快照。保存完整 readingBlocks +
+    /// pendingVersion + 相关预算状态，绑定 document ID/candidate ID；
+    /// 切稿/放弃/重新整理时清理，不跨身份恢复。只存内存，不入文件格式。
+    public struct TeleprompterPreparedEditSnapshot: Equatable, Sendable {
+        public let documentID: String
+        public let candidateID: String
+        public let readingBlocks: [TeleprompterReadingBlock]
+        public let pendingVersion: TeleprompterVersion?
+        public let targetMinutes: Int
+    }
+
+    private var preparedEditHistory: [TeleprompterPreparedEditSnapshot] = []
+    private static let preparedEditHistoryLimit = 20
+
+    public var canUndoPreparedEdit: Bool { !preparedEditHistory.isEmpty }
+
+    private func takePreparedEditSnapshot() {
+        guard let document, let candidate = pendingVersion else { return }
+        let snapshot = TeleprompterPreparedEditSnapshot(
+            documentID: document.id,
+            candidateID: candidate.id,
+            readingBlocks: readingBlocks,
+            pendingVersion: pendingVersion,
+            targetMinutes: targetMinutes
+        )
+        preparedEditHistory.append(snapshot)
+        if preparedEditHistory.count > Self.preparedEditHistoryLimit {
+            preparedEditHistory.removeFirst(
+                preparedEditHistory.count - Self.preparedEditHistoryLimit
+            )
+        }
+    }
+
+    /// E6：撤销恢复切换前的完整快照（改写正文、origin、用途、来源），随后重存。
+    /// 快照绑定 document/candidate 身份；身份变化则不恢复。
+    public func undoLastPreparedEdit() {
+        guard canEdit, phase == .prepared else { return }
+        guard let snapshot = preparedEditHistory.popLast() else { return }
+        guard let document, document.id == snapshot.documentID,
+              pendingVersion?.id == snapshot.candidateID else {
+            preparedEditHistory.removeAll()
+            return
+        }
+        readingBlocks = snapshot.readingBlocks
+        pendingVersion = snapshot.pendingVersion
+        targetMinutes = snapshot.targetMinutes
+        runClock.targetSeconds = Double(targetMinutes * 60)
+        recalculateCurrentDraftBudget()
+        scheduleDraftSave()
+    }
+
+    private func clearPreparedEditHistory() {
+        preparedEditHistory.removeAll()
     }
 
     private func syncPendingVersionFromBlocks() {
@@ -1209,6 +1335,52 @@ public final class TeleprompterSession {
     private func cancelScheduledDraftSave() {
         draftSaveTask?.cancel()
         draftSaveTask = nil
+    }
+
+    /// E1/TP-01：稿件待保存状态。`failed` 仅表示最近一次落盘失败（`blocked`
+    /// 为 `.storeUnavailable`）；`pending` 表示防抖窗口内有未落盘编辑；
+    /// 其余为 `clean`。同步写入模型下成功即落盘，不另建异步落盘链。
+    public enum DraftSaveState: Equatable, Sendable {
+        case clean
+        case pending
+        case failed
+    }
+
+    public var draftSaveState: DraftSaveState {
+        if case .storeUnavailable = blocked { return .failed }
+        if draftSaveTask != nil { return .pending }
+        return .clean
+    }
+
+    /// E1/TP-01 即启编辑入口：第一份有效非空输入建立普通 document 并同步落盘；
+    /// 后续修改走同一份文档（500ms 防抖），不每个按键建一份。
+    /// 空白输入返回 nil（不建稿）；舞台占用时 throw，由调用方提示。
+    @discardableResult
+    public func updateQuickDraft(title: String, sourceText: String) throws -> String? {
+        guard canEdit else { throw TeleprompterTextError.sessionBusy }
+        guard !sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        if document == nil {
+            let imported = try TeleprompterSourceImporter.importData(Data(sourceText.utf8))
+            try createDocument(title: title, importedSource: imported)
+        } else {
+            updateTitle(title)
+            updateSourceText(sourceText)
+        }
+        return document?.id
+    }
+
+    /// E1/N02：在身份切换前提交当前待保存修订。成功只确认已写出的内容；
+    /// 失败时保留当前 document 与 dirty 状态并 throw，调用方不得继续切换身份。
+    public func flushPendingDraftSave() throws {
+        cancelScheduledDraftSave()
+        guard document != nil else { return }
+        do {
+            try saveBundle()
+            if case .storeUnavailable = blocked { blocked = nil }
+        } catch {
+            blocked = .storeUnavailable("稿子暂时没能保存，请稍后重试。")
+            throw error
+        }
     }
 
     private func localSegments(from blocks: [TeleprompterReadingBlock]) -> [TeleprompterSegment] {
@@ -2273,7 +2445,7 @@ public final class TeleprompterSession {
             didAlign = true
         case .completed(_, _):
             guard !isResuming, let activeVersion else { return }
-            _ = followAdapter.apply(
+            let outcome = followAdapter.apply(
                 envelope.payload,
                 metadata: envelope.metadata,
                 segments: activeVersion.segments,
@@ -2281,7 +2453,15 @@ public final class TeleprompterSession {
             )
             syncFollowState()
             if followController.mode == .following {
-                hasHeardSpeech = true
+                // E3：completed 的“听到了”必须由实际决策表达，不能把所有
+                // completed（含空 final、无定位证据）都记成已跟上。
+                // .aligned（前进对齐）与 .confirmed（同位确认）是有效定位
+                // 证据；.unconfirmed（有假设后的空 final）证明采集链路活着，
+                // 但位置未确认——仍记“听到了”，舞台靠 phase=.uncertain 呈现
+                // “本句未确认，位置已保持”，而不是“语音跟随中”。
+                if outcome == .aligned || outcome == .confirmed || outcome == .unconfirmed {
+                    hasHeardSpeech = true
+                }
                 phase = uncertainty == nil ? .following : .uncertain
             }
             didAlign = true
@@ -2959,13 +3139,38 @@ public final class TeleprompterSession {
         return .serviceNotReady(error.localizedDescription)
     }
 
-    private static func aiFailureMessage(for error: Error) -> String {
-        if let error = error as? LLMError,
-           error == .unsupportedStructuredOutput {
-            return "当前 AI 服务暂时无法整理这份稿子。请在设置中更换 AI 服务，或直接按原文分段；原稿没有变化。"
+    /// E7a：生成失败按真实分类表达——取消、未配置、认证、限流、额度耗尽、
+    /// 格式不符、本地保存失败分别说明；只输出应用自己的分类，不回显 HTTP body。
+    /// 无证据推断（如“最常见原因是请求过于频繁”）不得写入文案。
+    static func aiFailureMessage(for error: Error) -> String {
+        if error is CancellationError {
+            return "已取消整理，原稿没有变化。"
         }
-        if let error = error as? LLMError,
-           case let .usageLimitExceeded(retryAfter) = error {
+        guard let error = error as? LLMError else {
+            return "AI 暂时没能整理这份稿子，原稿没有变化。你可以重试，或直接按原文分段。"
+        }
+        switch error {
+        case .notConfigured:
+            return "还没有配置 AI 服务；你可以直接按原文分段开讲，或去设置中配置后再整理。"
+        case .badBaseURL:
+            return "AI 服务地址配置不正确，请检查设置；原稿没有变化，你可以直接按原文分段。"
+        case .transport:
+            return "连不上 AI 服务，请检查网络与服务地址；原稿没有变化，你可以直接按原文分段。"
+        case .http(let status, _), .httpWithRetry(let status, _, _):
+            if status == 401 || status == 403 {
+                return "AI 服务拒绝了本次请求（认证未通过），请检查设置中的密钥；原稿没有变化。"
+            }
+            if status == 429 {
+                return "AI 服务当前繁忙，请稍后重试；原稿没有变化，你也可以直接按原文分段。"
+            }
+            if status == 404 || status == 405 {
+                return "当前 AI 服务不支持整理请求。请在设置中更换 AI 服务，或直接按原文分段；原稿没有变化。"
+            }
+            if (500...599).contains(status) {
+                return "AI 服务暂时不可用，请稍后重试；原稿没有变化，你也可以直接按原文分段。"
+            }
+            return "AI 暂时没能整理这份稿子，原稿没有变化。你可以重试，或直接按原文分段。"
+        case .usageLimitExceeded(let retryAfter):
             // 配额耗尽要说明白「等多久」，否则读者只会以为是应用卡住，然后反复重试。
             if let retryAfter, retryAfter >= 3_600 {
                 let days = (retryAfter / 86_400).rounded()
@@ -2976,8 +3181,19 @@ public final class TeleprompterSession {
                 return "AI 服务当前繁忙，约 \(minutes) 分钟后可再试。本次没有整理，原稿没有变化；你可以直接用原稿开讲。"
             }
             return "AI 服务当前不接受新的请求（额度已用尽）。本次没有整理，原稿没有变化；你可以直接用原稿开讲。"
+        case .unsupportedStructuredOutput:
+            return "当前 AI 服务暂时无法整理这份稿子。请在设置中更换 AI 服务，或直接按原文分段；原稿没有变化。"
+        case .invalidStructuredResponse, .malformedStreamEvent:
+            return "AI 返回的整理结果无法使用，原稿没有变化。你可以重试，或直接按原文分段。"
+        case .outputTruncated, .streamEndedEarly:
+            return "AI 整理结果不完整，原稿没有变化。你可以缩小篇幅后重试，或直接按原文分段。"
+        case .cancelled:
+            return "已取消整理，原稿没有变化。"
+        case .notResponsesAPI, .notChatAPI, .thinkingControlUnavailable:
+            return "当前 AI 服务不支持整理请求。请在设置中更换 AI 服务，或直接按原文分段；原稿没有变化。"
+        case .refused:
+            return "AI 没有返回整理结果，原稿没有变化。你可以重试，或直接按原文分段。"
         }
-        return "AI 暂时没能整理这份稿子，原稿没有变化。你可以重试，或直接按原文分段。"
     }
 
     private struct Blocked: Error {
