@@ -392,9 +392,30 @@ final class AssistantTTSStreamCoordinator {
     }
 
     private func runCancellation(_ preparation: CancellationPreparation) async -> Bool {
-        // 先让已撤权的音频消费者退出，确保 stop barrier 之后不会再有旧 PCM 入播放器。
-        await preparation.audioConsumerAtPreparation?.value
-        await stopPlayback()
+        // M0c：整次取消共享一个绝对 deadline（§5.3）。consumer 退出与停播屏障
+        // 不再各自无限等待：旧 enqueue 已在同步 epoch 撤销后失效，超时后继续
+        // 等旧 PCM 只会拖住打断；远端归属未知由调用方退役连接。
+        // 剩余等待可被调用方 Task 取消：取消时直接按未确认返回，不吞取消。
+        let deadline = clock().advanced(by: configuration.cancellationTimeout)
+        if let consumer = preparation.audioConsumerAtPreparation {
+            await waitCancellable({ await consumer.value }, until: deadline)
+        }
+        await waitCancellable({ await self.stopPlayback() }, until: deadline)
+        return await cancellationRemainder(preparation)
+    }
+
+    /// 取消的后半段：outbound 退出 → cancel 发送 → 匹配终态。
+    ///
+    /// M0c 的绝对 deadline 只约束本地停播链（consumer 退出 + stop 屏障，
+    /// 原来无限等待）：到点即放弃，不拖住打断。网络侧三阶段原本各自有界，
+    /// 保持原样——cancel 发送不因本地超时被跳过（否则服务端永远收不到取消，
+    /// 比晚到更差）；整次取消的最坏耗时仍是各有界阶段之和，有明确上界。
+    /// 任一阶段未确认都由调用方退役连接/音频实例，不释放未知 owner。
+    private func cancellationRemainder(
+        _ preparation: CancellationPreparation
+    ) async -> Bool {
+        // `cancelTTS()` 返回只代表**发送完成**，不是服务端腾出了这一轮。
+        // 真正的空闲屏障是匹配 requestID 的终态。
         let outboundExited: Bool
         if let outboundTaskID = preparation.outboundTaskID {
             outboundExited = await awaitOutboundExit(taskID: outboundTaskID)
@@ -406,8 +427,6 @@ final class AssistantTTSStreamCoordinator {
         let cancelExited = outboundExited
             ? await cancelServerBounded(requestID: preparation.requestID)
             : false
-        // `cancelTTS()` 返回只代表**发送完成**，不是服务端腾出了这一轮。
-        // 真正的空闲屏障是匹配 requestID 的终态。
         let remoteConfirmed = await awaitRemoteTerminal(for: preparation.requestID)
         if !preparation.outcomeReported {
             reportOutcome(
@@ -419,6 +438,69 @@ final class AssistantTTSStreamCoordinator {
             preparation.outcomeReported = true
         }
         return outboundExited && cancelExited && remoteConfirmed
+    }
+
+    /// 在绝对 deadline 前等待一个不合作的操作：到点即放弃等待，不抛错。
+    ///
+    /// 不用 task group 做竞速：group 作用域退出会隐式等待全部子任务，
+    /// 不合作的操作会把 group 永远拖住。这里只放弃等待——操作本身的 Task
+    /// 句柄仍由调用方保留在 ownership map 里（consumer/outbound），不因放弃
+    /// 等待而丢失；计时与操作任务在落定后尽力取消，不假装操作已退出。
+    private func waitCancellable(
+        _ operation: @escaping @Sendable () async -> Void,
+        until deadline: ContinuousClock.Instant
+    ) async {
+        let remaining = clock().duration(to: deadline)
+        guard remaining > .zero else { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let gate = CancellationWaitGate(continuation)
+            let worker = Task {
+                await operation()
+                await gate.finish()
+            }
+            let timer = Task { @MainActor [weak self, gate] in
+                try? await self?.sleep(remaining)
+                await gate.finish()
+            }
+            Task { @MainActor [weak self] in
+                await self?.attachWaitTasks(gate: gate, worker: worker, timer: timer)
+            }
+        }
+    }
+
+    /// 一次性恢复的等待闩：操作与计时谁先到谁恢复，多到的忽略。
+    /// 落定后取消另一方（尽力，不假装不合作的任务已退出）。
+    private actor CancellationWaitGate {
+        private var continuation: CheckedContinuation<Void, Never>?
+        private var worker: Task<Void, Never>?
+        private var timer: Task<Void, Never>?
+
+        init(_ continuation: CheckedContinuation<Void, Never>) {
+            self.continuation = continuation
+        }
+
+        func attach(worker: Task<Void, Never>, timer: Task<Void, Never>) {
+            self.worker = worker
+            self.timer = timer
+        }
+
+        func finish() {
+            guard let pending = continuation else { return }
+            continuation = nil
+            worker?.cancel()
+            timer?.cancel()
+            worker = nil
+            timer = nil
+            pending.resume()
+        }
+    }
+
+    private func attachWaitTasks(
+        gate: CancellationWaitGate,
+        worker: Task<Void, Never>,
+        timer: Task<Void, Never>
+    ) async {
+        await gate.attach(worker: worker, timer: timer)
     }
 
     /// 只作废本地状态，不发网络命令（断线、设备重建时用）。
@@ -1029,10 +1111,10 @@ final class AssistantTTSStreamCoordinator {
             retiringRequests.remove(requestID)
             return true
         }
+        let timeout = configuration.cancellationTimeout
         return await withCheckedContinuation { continuation in
             let id = UUID()
             retiredTerminals[requestID] = TerminalLatch(id: id, continuation: continuation)
-            let timeout = configuration.cancellationTimeout
             retiredTimeoutTasks[requestID] = Task { @MainActor [weak self] in
                 try? await Task.sleep(for: timeout)
                 self?.resolveRemoteTerminal(requestID, id: id, confirmed: false)

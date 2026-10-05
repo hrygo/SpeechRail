@@ -1187,6 +1187,58 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
     /// §7.3 交叉边界（A03/A04）：terminal 在闩登记前到达。
     /// 终态比等待先到时记进 terminalSignals，随后开始的等待直接命中，
     /// 不白等一个完整超时。反例：去掉 prefetch，直接等到超时才判未确认。
+    /// M0c/V04：enqueue 不响应取消时，整次取消仍受绝对 deadline 约束。
+    /// consumer 挂起 + 无远端终态：200ms 预算内落定为未确认，不无限等待；
+    /// 旧 consumer 句柄保留，晚到的 enqueue 不进播放，下一轮被未知屏障挡住。
+    func testV04HungEnqueueStillSettlesWithinTheCancellationDeadline() async throws {
+        var configuration = AssistantTTSStreamCoordinator.Configuration.default
+        configuration.cancellationTimeout = .milliseconds(200)
+        let (coordinator, recorder) = makeHarness(configuration: configuration)
+        let enqueueGate = Gate()
+        defer { enqueueGate.release() }
+        coordinator.enqueuePlayback = { pcm, epoch in
+            await enqueueGate.enter()
+            recorder.played.append(pcm)
+            recorder.epochs.append(epoch)
+            return true
+        }
+        try await coordinator.begin(generation: 50, requestID: "req-50")
+        await coordinator.handleAudio(requestID: "req-50", pcm: Data([1, 1, 1, 1]))
+        await waitUntil({ enqueueGate.entered }, message: "音频没有进入挂起的 enqueue")
+
+        // 同步撤权：本地输出 epoch 已撤销，不等任何 await。
+        let preparation = try XCTUnwrap(coordinator.prepareCancellation())
+        XCTAssertFalse(coordinator.isActive, "preparation 必须同步撤销本地输出权")
+        XCTAssertEqual(coordinator.queuedAudioBytes, 0, "排队 PCM 必须同步丢弃")
+
+        let startedAt = ContinuousClock.now
+        let confirmed = await coordinator.performCancellation(preparation)
+        let elapsed = ContinuousClock.now - startedAt
+
+        XCTAssertFalse(confirmed, "无终态时取消必须报告未确认")
+        XCTAssertLessThan(elapsed, .seconds(2), "整次取消不得超出绝对 deadline 数量级")
+        XCTAssertEqual(recorder.cancels, 1, "停播之后仍要发网络取消")
+        XCTAssertEqual(
+            recorder.outcomes.map(\.outcome), [.cancelled],
+            "取消结局仍要回报，不因超时丢失"
+        )
+        do {
+            try await coordinator.begin(generation: 51, requestID: "req-51")
+            XCTFail("远端归属未知时下一轮不能越过清理屏障")
+        } catch is AssistantTTSStreamCoordinator.RemoteOwnershipUnknown {
+            // Expected: hung enqueue + missing terminal keep the connection retired.
+        }
+
+        // 挂起中的那次 enqueue 调用无法撤回（出来后由播放器层的 generation 复验拒收，
+        // 见 AudioEngineSession）；但旧消费者失效后不得再发起新的 enqueue 调用。
+        enqueueGate.release()
+        try? await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(
+            recorder.played.count, 1,
+            "只允许挂起中的那一次调用返回，旧消费者失效后不得再发起新调用"
+        )
+    }
+
     func testTerminalArrivingBeforeWaitStillConfirmsCancel() async throws {
         var configuration = AssistantTTSStreamCoordinator.Configuration.default
         configuration.cancellationTimeout = .seconds(2)
