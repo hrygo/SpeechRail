@@ -117,6 +117,34 @@ public struct TranscriptTimeWindow: Hashable, Sendable {
         )
     }
 
+    // MARK: - 界面呈现
+
+    /// 时间列显示的字。
+    ///
+    /// **没有对齐证据时不显示数字**，显示 `—`。原因很直接：那一列如果写着
+    /// `00:12`，用户只会读成"这句话是在 12 秒时说的"，而它其实是
+    /// "这段在 12 秒时**被记下来**"。列宽只够放一个短字，所以选择不写，
+    /// 而不是加一个需要悬停才能看见的角标。
+    public static func timecodeColumn(
+        observed: TimeInterval,
+        quality: SessionTimingQuality?
+    ) -> String {
+        quality == .aligned ? clockText(observed) : "—"
+    }
+
+    /// 读屏与悬停用的完整说明。两件事都要说清：什么时候说的、什么时候记下的。
+    public static func accessibilityText(
+        observedStart: TimeInterval,
+        observedEnd: TimeInterval,
+        quality: SessionTimingQuality?
+    ) -> String {
+        let recorded = "\(clockText(observedStart))–\(clockText(observedEnd))"
+        guard quality == .aligned else {
+            return "说话时刻未知，这一段是在 \(recorded) 记下来的"
+        }
+        return "说话时刻 \(recorded)"
+    }
+
     private static func clockText(_ value: TimeInterval) -> String {
         let total = max(0, Int(value.rounded()))
         return String(format: "%02d:%02d", total / 60, total % 60)

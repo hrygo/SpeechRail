@@ -796,12 +796,33 @@ public struct MeetingView: View {
 
     private func liveLine(_ line: MeetingSession.Line) -> some View {
         HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Text(Self.timecode(line.start))
+            // 没有对齐证据就不显示数字：那一列写着 00:12 时，
+            // 用户只会读成"这句话是 12 秒时说的"，而它其实是记录时刻。
+            Text(
+                TranscriptTimeWindow.timecodeColumn(
+                    observed: line.start,
+                    quality: line.timingQuality
+                )
+            )
                 .font(SpeechRailDesignTokens.Typography.technicalValue)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                 .frame(
                     width: SpeechRailDesignTokens.Layout.sessionTimecodeColumnWidth,
                     alignment: .leading
+                )
+                .help(
+                    TranscriptTimeWindow.accessibilityText(
+                        observedStart: line.start,
+                        observedEnd: line.end,
+                        quality: line.timingQuality
+                    )
+                )
+                .accessibilityLabel(
+                    TranscriptTimeWindow.accessibilityText(
+                        observedStart: line.start,
+                        observedEnd: line.end,
+                        quality: line.timingQuality
+                    )
                 )
             speakerColumn(label: line.speakerLabel)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {

@@ -105,6 +105,11 @@ public final class MeetingSession {
         public var speakerLabel: String?
         public var source: SessionLineSource
         public var isDeviceSwitch: Bool
+        /// 这一行的 `tStart` / `tEnd` 是不是**说话时刻**。
+        ///
+        /// `nil` 或 `.unavailable` 都表示"不知道"——那两列存的是**被记下来的
+        /// 时刻**。界面据此不显示数字（MA-02 / MC-15）。
+        public var timingQuality: SessionTimingQuality?
     }
 
     public enum ServiceReadiness: Sendable {
@@ -687,6 +692,7 @@ public final class MeetingSession {
                     var updated = existing
                     updated.start = acoustic.lowerBound
                     updated.end = acoustic.upperBound
+                    updated.timingQuality = .aligned
                     return updated
                 }
             } catch {
@@ -775,7 +781,8 @@ public final class MeetingSession {
                 end: window.observedEnd,
                 speakerLabel: nil,
                 source: lineSource,
-                isDeviceSwitch: isEpochStart
+                isDeviceSwitch: isEpochStart,
+                timingQuality: window.quality
             )
         )
     }

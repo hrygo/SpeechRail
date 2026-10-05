@@ -189,6 +189,40 @@ final class TranscriptTimeWindowTests: XCTestCase {
         XCTAssertEqual(upgraded?.speechRange, 5 ... 6)
     }
 
+    // MARK: - 界面呈现
+
+    func testTimecodeColumnShowsNothingFakeWithoutAlignment() {
+        // 那一列如果写着 00:12，用户只会读成"这句话是 12 秒时说的"。
+        XCTAssertEqual(
+            TranscriptTimeWindow.timecodeColumn(observed: 12, quality: .unavailable),
+            "—"
+        )
+        XCTAssertEqual(TranscriptTimeWindow.timecodeColumn(observed: 12, quality: nil), "—")
+    }
+
+    func testTimecodeColumnShowsTheTimeOnceAligned() {
+        XCTAssertEqual(
+            TranscriptTimeWindow.timecodeColumn(observed: 12.4, quality: .aligned),
+            "00:12"
+        )
+    }
+
+    func testAccessibilityTextSaysBothThingsWhenUnknown() {
+        let text = TranscriptTimeWindow.accessibilityText(
+            observedStart: 60, observedEnd: 78, quality: .unavailable
+        )
+        XCTAssertTrue(text.contains("未知"), text)
+        XCTAssertTrue(text.contains("记下来"), "必须说明这是记录时刻而不是说话时刻：\(text)")
+    }
+
+    func testAccessibilityTextReportsTheSpokenRangeWhenAligned() {
+        let text = TranscriptTimeWindow.accessibilityText(
+            observedStart: 60, observedEnd: 78, quality: .aligned
+        )
+        XCTAssertTrue(text.contains("说话时刻"), text)
+        XCTAssertFalse(text.contains("未知"), text)
+    }
+
     func testQualityCannotBeAlignedWithoutAnAcousticRange() {
         // 类型层面就不存在"有对齐质量但没有声学区间"的组合。
         let forged = TranscriptTimeWindow(observedStart: 0, observedEnd: 5, acousticRange: nil)
