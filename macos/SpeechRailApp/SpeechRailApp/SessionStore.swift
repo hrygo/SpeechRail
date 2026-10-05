@@ -2065,9 +2065,9 @@ public actor SessionStore {
             projectID: columnText(statement, 3),
             occurredAt: columnIsNull(statement, 4) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 4)),
             timezone: columnText(statement, 5),
-            deletedAt: columnIsNull(statement, 6) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 6)),
+            deletedAt: columnIsNull(statement, 6) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 6 as Int32)),
             createdAt: Date(timeIntervalSince1970: columnDouble(statement, 7)),
-            updatedAt: Date(timeIntervalSince1970: columnDouble(statement, 8))
+            updatedAt: Date(timeIntervalSince1970: columnDouble(statement, 8 as Int32))
         )
     }
 
@@ -2406,7 +2406,7 @@ public actor SessionStore {
                     text: columnText(statement, 3) ?? "",
                     origin: columnText(statement, 4) ?? "",
                     parentRevisionID: columnText(statement, 5),
-                    editedAt: Date(timeIntervalSince1970: columnDouble(statement, 6))
+                    editedAt: Date(timeIntervalSince1970: columnDouble(statement, 6 as Int32))
                 ))
             }
             return rows
@@ -2489,7 +2489,7 @@ public actor SessionStore {
                         sourceSessionID: columnText(statement, 3),
                         isActive: columnInt(statement, 4) != 0,
                         createdAt: Date(timeIntervalSince1970: columnDouble(statement, 5)),
-                        updatedAt: Date(timeIntervalSince1970: columnDouble(statement, 6))
+                        updatedAt: Date(timeIntervalSince1970: columnDouble(statement, 6 as Int32))
                     )
                 )
             }
@@ -3180,7 +3180,7 @@ public actor SessionStore {
                         version: sourceKind == SearchIndexOp.minutesKind ? version : nil,
                         excerpt: body,
                         ordinal: columnIsNull(statement, 5) ? nil : Int(columnInt(statement, 5)),
-                        createdAt: Date(timeIntervalSince1970: columnDouble(statement, 6))
+                        createdAt: Date(timeIntervalSince1970: columnDouble(statement, 6 as Int32))
                     ),
                     isLine: sourceKind == SearchIndexOp.lineKind,
                     isAccepted: columnInt(statement, 9) != 0,
@@ -3245,7 +3245,7 @@ public actor SessionStore {
             state: state,
             createdAt: Date(timeIntervalSince1970: columnDouble(statement, 4)),
             startedAt: Date(timeIntervalSince1970: columnDouble(statement, 5)),
-            endedAt: columnIsNull(statement, 6) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 6)),
+            endedAt: columnIsNull(statement, 6) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 6 as Int32)),
             engineProfile: columnText(statement, 7) ?? "",
             audioSource: source,
             diarization: columnText(statement, 9).flatMap(SessionDiarizationState.init(rawValue:)) ?? .off,
@@ -3266,7 +3266,7 @@ public actor SessionStore {
             role: columnText(statement, 3).flatMap(SessionLineRole.init(rawValue:)) ?? .speaker,
             speakerLabel: columnText(statement, 4),
             text: columnText(statement, 5) ?? "",
-            tStart: columnIsNull(statement, 6) ? nil : columnDouble(statement, 6),
+            tStart: columnIsNull(statement, 6) ? nil : columnDouble(statement, 6 as Int32),
             tEnd: columnIsNull(statement, 7) ? nil : columnDouble(statement, 7),
             source: columnText(statement, 8).flatMap(SessionLineSource.init(rawValue:)) ?? .microphone,
             status: columnText(statement, 9).flatMap(SessionLineStatus.init(rawValue:)) ?? .final,
@@ -3311,7 +3311,7 @@ public actor SessionStore {
             isAccepted: accepted,
             attempts: Int(columnInt(statement, 9)),
             failureReason: columnText(statement, 10),
-            leaseUntil: columnIsNull(statement, 11) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 11)),
+            leaseUntil: columnIsNull(statement, 11) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 11 as Int32)),
             createdAt: Date(timeIntervalSince1970: columnDouble(statement, 12)),
             isLegacyImport: legacy,
             bodyOrigin: count > 21
@@ -3436,6 +3436,13 @@ private func columnText(_ statement: OpaquePointer, _ index: Int32) -> String? {
 
 private func columnDouble(_ statement: OpaquePointer, _ index: Int32) -> Double {
     sqlite3_column_double(statement, index)
+}
+
+/// 可空的时间列。**NULL 必须读成 nil，不能读成 0**——`valid_to = 0`
+/// 的意思是"1970 年就失效了"，把"还没失效"写成这个是在编造事实。
+private func columnDoubleOrNil(_ statement: OpaquePointer, _ index: Int32) -> Double? {
+    guard !columnIsNull(statement, index) else { return nil }
+    return sqlite3_column_double(statement, index)
 }
 
 private func columnInt(_ statement: OpaquePointer, _ index: Int32) -> Int64 {
@@ -3997,6 +4004,11 @@ extension SessionStore {
                 .sorted { $0.version < $1.version }
         }
 
+        // 执行状态挂在 `KnowledgeIdentity.key(documentID:kind:text:)` 上，
+        // 所以这里必须先拿到这份文档自己的 id——条目本身不存它。
+        let archiveDocumentID = try meetingDocument(forSessionID: selected.sessionID)?.id
+            ?? selection.documentID
+
         var items: [ArchiveItem] = []
         var anchorLineIDs: Set<String> = []
         var anchorRevisionIDs: Set<String> = []
@@ -4010,6 +4022,11 @@ extension SessionStore {
                     text: item.text,
                     verdict: item.verdict?.rawValue,
                     sortOrder: item.sortOrder,
+                    itemKey: KnowledgeIdentity.key(
+                        documentID: archiveDocumentID,
+                        kind: item.kind,
+                        text: item.text
+                    ),
                     anchors: item.anchors.map { anchor in
                         if let lineID = anchor.lineID { anchorLineIDs.insert(lineID) }
                         if let revisionID = anchor.revisionID { anchorRevisionIDs.insert(revisionID) }
@@ -4086,8 +4103,96 @@ extension SessionStore {
             revisions: archiveRevisions.map(\.archiveModel),
             minutes: includedVersions.map(\.archiveModel),
             items: items,
-            windows: windowModels
+            windows: windowModels,
+            execution: try knowledgeExecutionEvents(documentID: document.id),
+            supersessions: try knowledgeSupersessions(documentID: document.id)
         )
+    }
+
+    /// 执行状态事件（归档用）。按文档取，双时间日志**整条带走**：
+    /// 只带走当前有效的那一条，等于把"曾经改过又改回来"的历史抹掉。
+    public func knowledgeExecutionEvents(documentID: String) throws -> [ArchiveExecutionEvent] {
+        try withStatement("""
+        SELECT id, item_key, document_id, item_id, kind, status, owner_text, due_text, due_date,
+               valid_from, recorded_at, valid_to, note
+        FROM knowledge_execution_event
+        WHERE document_id = ? OR item_key IN (
+            SELECT DISTINCT e.item_key FROM knowledge_execution_event e
+            JOIN minutes_item i ON i.id = e.item_id
+            JOIN minutes v ON v.id = i.minutes_id
+            WHERE v.session_id = (SELECT source_session_id FROM meeting_document WHERE id = ?)
+        )
+        ORDER BY valid_from ASC, recorded_at ASC;
+        """) { statement in
+            bind(statement, 1, documentID)
+            bind(statement, 2, documentID)
+            var rows: [ArchiveExecutionEvent] = []
+            while try step(statement) == SQLITE_ROW {
+                rows.append(ArchiveExecutionEvent(
+                    id: columnText(statement, 0) ?? "",
+                    itemKey: columnText(statement, 1) ?? "",
+                    documentID: columnText(statement, 2),
+                    itemID: columnText(statement, 3),
+                    kind: columnText(statement, 4) ?? "",
+                    status: columnText(statement, 5) ?? "",
+                    ownerText: columnText(statement, 6),
+                    dueText: columnText(statement, 7),
+                    dueDate: columnDoubleOrNil(statement, 8 as Int32),
+                    validFrom: columnDouble(statement, 9 as Int32) ?? 0,
+                    recordedAt: columnDouble(statement, 10 as Int32) ?? 0,
+                    validTo: columnDoubleOrNil(statement, 11 as Int32),
+                    note: columnText(statement, 12)
+                ))
+            }
+            return rows
+        }
+    }
+
+    /// 决策替代关系（归档用）。
+    public func knowledgeSupersessions(documentID: String) throws -> [ArchiveSupersession] {
+        let keys = try knowledgeItemKeys(documentID: documentID)
+        guard !keys.isEmpty else { return [] }
+        let ph = Array(repeating: "?", count: keys.count).joined(separator: ", ")
+        return try withStatement("""
+        SELECT id, from_key, to_key, kind, basis, evidence_item_ids, created_at
+        FROM knowledge_supersession
+        WHERE from_key IN (\(ph)) OR to_key IN (\(ph))
+        ORDER BY created_at ASC;
+        """) { statement in
+            var index: Int32 = 1
+            for key in keys { bind(statement, index, key); index += 1 }
+            for key in keys { bind(statement, index, key); index += 1 }
+            var rows: [ArchiveSupersession] = []
+            while try step(statement) == SQLITE_ROW {
+                let raw = columnText(statement, 5) ?? "[]"
+                let ids = (try? JSONDecoder().decode([String].self, from: Data(raw.utf8))) ?? []
+                rows.append(ArchiveSupersession(
+                    id: columnText(statement, 0) ?? "",
+                    fromKey: columnText(statement, 1) ?? "",
+                    toKey: columnText(statement, 2) ?? "",
+                    kind: columnText(statement, 3) ?? "",
+                    basis: columnText(statement, 4) ?? "",
+                    evidenceItemIDs: ids,
+                    createdAt: columnDouble(statement, 6 as Int32) ?? 0
+                ))
+            }
+            return rows
+        }
+    }
+
+    /// 这一份文档下所有条目的稳定 key（`KnowledgeIdentity.key`）。
+    private func knowledgeItemKeys(documentID: String) throws -> Set<String> {
+        let versions = try minutesVersions(sessionID: documentID)
+        guard !versions.isEmpty else { return [] }
+        var keys: Set<String> = []
+        for version in versions {
+            for item in try minutesItems(minutesID: version.id) {
+                keys.insert(
+                    KnowledgeIdentity.key(documentID: documentID, kind: item.kind, text: item.text)
+                )
+            }
+        }
+        return keys
     }
 
     /// 归档包清单。计数按实际装进去的东西算，不是按库里有多少——
@@ -4251,8 +4356,18 @@ extension SessionStore {
         }
         for item in payload.items {
             let existing = try minutesItems(minutesID: item.minutesID)
-                .first { $0.id == item.id }?.archiveModel
+                .first { $0.id == item.id }?.archiveModel(documentID: payload.document.id)
             compare(.minutesItem, item.id, item, existing)
+        }
+        for event in payload.execution {
+            let existing = try knowledgeExecutionEvents(documentID: payload.document.id)
+                .first { $0.id == event.id }
+            compare(.executionEvent, event.id, event, existing)
+        }
+        for supersession in payload.supersessions {
+            let existing = try knowledgeSupersessions(documentID: payload.document.id)
+                .first { $0.id == supersession.id }
+            compare(.supersession, supersession.id, supersession, existing)
         }
         for window in payload.windows {
             let existing = try minutesWindows(minutesID: window.minutesID)
@@ -4518,6 +4633,54 @@ extension SessionStore {
                 }
                 inserted.windows += 1
             }
+            // 执行状态与决策演进随包回来（MA-14 / MA-19 补齐）。
+            // 跳过"内容相同"的那些，与其它对象的口径一致：重复导入不重复写。
+            for event in payload.execution where !identicalIDs.contains(event.id) {
+                try withStatement("""
+                INSERT INTO knowledge_execution_event (
+                    id, item_key, document_id, item_id, kind, status, owner_text, due_text,
+                    due_date, valid_from, recorded_at, valid_to, note
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """) { statement in
+                    bind(statement, 1, event.id)
+                    bind(statement, 2, event.itemKey)
+                    bind(statement, 3, event.documentID ?? payload.document.id)
+                    bind(statement, 4, event.itemID)
+                    bind(statement, 5, event.kind)
+                    bind(statement, 6, event.status)
+                    bind(statement, 7, event.ownerText)
+                    bind(statement, 8, event.dueText)
+                    bind(statement, 9, event.dueDate)
+                    bind(statement, 10, event.validFrom)
+                    bind(statement, 11, event.recordedAt)
+                    bind(statement, 12, event.validTo)
+                    bind(statement, 13, event.note)
+                    try step(statement)
+                }
+                inserted.executionEvents += 1
+            }
+            for supersession in payload.supersessions where !identicalIDs.contains(supersession.id) {
+                try withStatement("""
+                INSERT INTO knowledge_supersession (
+                    id, from_key, to_key, kind, basis, evidence_item_ids, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?);
+                """) { statement in
+                    bind(statement, 1, supersession.id)
+                    bind(statement, 2, supersession.fromKey)
+                    bind(statement, 3, supersession.toKey)
+                    bind(statement, 4, supersession.kind)
+                    bind(statement, 5, supersession.basis)
+                    bind(
+                        statement,
+                        6,
+                        (try? JSONEncoder().encode(supersession.evidenceItemIDs))
+                            .map { String(decoding: $0, as: UTF8.self) } ?? "[]"
+                    )
+                    bind(statement, 7, supersession.createdAt)
+                    try step(statement)
+                }
+                inserted.supersessions += 1
+            }
             try execute("COMMIT;")
         } catch {
             try? execute("ROLLBACK;")
@@ -4573,7 +4736,7 @@ extension SessionStore {
             text: columnText(statement, 3) ?? "",
             origin: columnText(statement, 4) ?? "",
             parentRevisionID: columnText(statement, 5),
-            editedAt: Date(timeIntervalSince1970: columnDouble(statement, 6))
+            editedAt: Date(timeIntervalSince1970: columnDouble(statement, 6 as Int32))
         )
     }
 }
@@ -4888,9 +5051,9 @@ extension SessionStore {
                     version: Int(columnInt(statement, 5)),
                     sessionID: columnText(statement, 6) ?? "",
                     candidateJSON: columnText(statement, 7),
-                    createdAt: Date(timeIntervalSince1970: columnDouble(statement, 8)),
+                    createdAt: Date(timeIntervalSince1970: columnDouble(statement, 8 as Int32)),
                     documentID: columnText(statement, 9) ?? "",
-                    occurredAt: columnIsNull(statement, 10) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 10)),
+                    occurredAt: columnIsNull(statement, 10) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 10 as Int32)),
                     isAccepted: columnInt(statement, 11) != 0
                 ))
             }
@@ -5230,9 +5393,9 @@ extension SessionStore {
                     candidateJSON: columnText(statement, 5),
                     sessionID: columnText(statement, 6) ?? "",
                     version: Int(columnInt(statement, 7)),
-                    createdAt: columnDouble(statement, 8),
+                    createdAt: columnDouble(statement, 8 as Int32),
                     documentID: columnText(statement, 9) ?? "",
-                    occurredAt: columnIsNull(statement, 10) ? nil : columnDouble(statement, 10),
+                    occurredAt: columnIsNull(statement, 10) ? nil : columnDouble(statement, 10 as Int32),
                     isAccepted: columnInt(statement, 11) != 0
                 ))
             }
@@ -5489,7 +5652,7 @@ extension SessionStore {
                 ownerText: columnText(statement, 3),
                 dueText: columnText(statement, 4),
                 dueDate: columnIsNull(statement, 5) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 5)),
-                validFrom: Date(timeIntervalSince1970: columnDouble(statement, 6)),
+                validFrom: Date(timeIntervalSince1970: columnDouble(statement, 6 as Int32)),
                 recordedAt: Date(timeIntervalSince1970: columnDouble(statement, 7))
             )
         }
@@ -5516,10 +5679,10 @@ extension SessionStore {
                     status: ActionExecutionStatus(rawValue: columnText(statement, 5) ?? "") ?? .open,
                     ownerText: columnText(statement, 6),
                     dueText: columnText(statement, 7),
-                    dueDate: columnIsNull(statement, 8) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 8)),
-                    validFrom: Date(timeIntervalSince1970: columnDouble(statement, 9)),
-                    recordedAt: Date(timeIntervalSince1970: columnDouble(statement, 10)),
-                    validTo: columnIsNull(statement, 11) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 11)),
+                    dueDate: columnIsNull(statement, 8) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 8 as Int32)),
+                    validFrom: Date(timeIntervalSince1970: columnDouble(statement, 9 as Int32)),
+                    recordedAt: Date(timeIntervalSince1970: columnDouble(statement, 10 as Int32)),
+                    validTo: columnIsNull(statement, 11) ? nil : Date(timeIntervalSince1970: columnDouble(statement, 11 as Int32)),
                     note: columnText(statement, 12)
                 ))
             }
@@ -5606,7 +5769,7 @@ extension SessionStore {
                     kind: columnText(statement, 3) ?? "",
                     basis: SupersessionBasis(rawValue: columnText(statement, 4) ?? "") ?? .userConfirmed,
                     evidenceItemIDs: (try? JSONDecoder().decode([String].self, from: Data(payload.utf8))) ?? [],
-                    createdAt: Date(timeIntervalSince1970: columnDouble(statement, 6))
+                    createdAt: Date(timeIntervalSince1970: columnDouble(statement, 6 as Int32))
                 ))
             }
             return rows

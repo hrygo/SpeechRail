@@ -1592,3 +1592,62 @@ base: "origin/main @ d72535c7"
 - **只在会后加载**：恢复材料区依赖 `reloadPostMeeting`，会中不刷新。
 - 完整归档导出（`scope == .full`）会带上恢复材料（`includePartial: true`），
   分享包不会。这一行为**未写测试**，是代码审查确认的。
+
+## M1 增量：执行状态与决策演进随归档包往返（MA-19 补 MA-14）
+
+### 做了什么
+
+MA-14 把待办的执行状态（已完成、受阻、负责人、期限）写进了
+`knowledge_execution_event` 双时间日志，把决策替代关系写进了
+`knowledge_supersession`。但**归档包里没有这两样**。
+
+后果很直接：用户导出、换个库导入之后，所有待办退回"未完成"、
+负责人和期限清空、决策演进链断掉——**用户已经付出过的成本在一次往返里
+消失**，而且新库里没有任何痕迹说明它曾经存在过。
+
+这轮补上：
+
+- `ArchiveItem` 新增 `itemKey`。执行状态挂在
+  `KnowledgeIdentity.key(documentID:kind:text:)` 上，**不挂 `id`**——
+  重新生成纪要会换一批 `id`，挂 id 等于每次重生成都丢状态。
+- payload 新增 `execution` 与 `supersessions`，`schemaID` 提到 `/2`。
+- 导出：双时间日志**整条带走**（只带当前有效那条等于抹掉"改过又改回来"的历史）。
+- 导入：在同一个事务里写回，与其它对象共用"同 ID 同内容就跳过"的口径，
+  所以重复导入幂等。
+- 预检也纳入比对，同 ID 异内容照样是冲突而不是静默跳过。
+
+### 由测试逼出来的一个真 bug
+
+`valid_to` 原本用 `columnDouble` 读，NULL 会被读成 `0.0`。`valid_to = 0`
+的意思是"1970 年就失效了"——把"还没失效"写成这个是在编造事实，
+而且它只在跨库往返之后才暴露，本地库里的值是对的。
+新增 `columnDoubleOrNil` 修掉，`due_date` 一并改用可空读法。
+
+### 回归证据（2026-10-05）
+
+- `MeetingKnowledgeArchiveTests` 增至 17 项，新增 4 项：执行状态往返后
+  两条事件都在、当前状态/负责人/期限都没丢、当前那条不被写成已失效；
+  条目带上稳定 key 且与事件挂在同一个 key 上；同包重复导入不重复写；
+  payload schema 确为 `/2`。
+- 全量 `swift test --package-path macos/SpeechRailApp`：**966 项全绿**。
+- `./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+
+### 迁移与回退
+
+- **无 schema 变更**：写的是既有的 `knowledge_execution_event` /
+  `knowledge_supersession` 两张表，v10 已经建好。
+- **破坏性变更：`KnowledgeArchivePayload` schema `/1` → `/2`**。
+  按项目策略不为旧包保留兼容层，代价是**此前导出的 v1 包读不了，
+  需要重新导出**。回退只需还原 `schemaID` 与新增的两个数组；
+  已升级的包不受影响。
+
+### 未验证事项与已知边界
+
+- **`minutes.md` 可读纪要里没有执行状态**：结构化 JSON 里有，
+  给人读的那份没有。用户导出后只看 `minutes.md` 会以为待办都还没做。
+- **替代关系的往返未测**：`recordSupersession` 要求两端属于**不同**文档，
+  单文档的包里只会出现"这一侧"的半条关系。跨两个包的完整往返场景未覆盖。
+- **清单计数未纳入新对象**：预检的 `newObjectCount` 与冲突列表已加入，
+  但 `KnowledgeArchiveManifest` 的分项计数没加执行状态与替代关系——
+  清单说装了什么的能力有缺口。
+- 大包（`KnowledgeArchiveFileIO.Limits`）下的执行状态条目数上限未验证。

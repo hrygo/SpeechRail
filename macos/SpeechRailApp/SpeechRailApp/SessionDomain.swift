@@ -3009,6 +3009,10 @@ public struct KnowledgeArchiveCounts: Codable, Hashable, Sendable {
     public var items: Int
     public var anchors: Int
     public var windows: Int
+    /// 随包带走的执行状态事件数（MA-14 / MA-19 补齐）。
+    public var executionEvents: Int
+    /// 随包带走的决策替代关系数。
+    public var supersessions: Int
 
     public init(
         sessions: Int,
@@ -3020,7 +3024,9 @@ public struct KnowledgeArchiveCounts: Codable, Hashable, Sendable {
         minutes: Int,
         items: Int,
         anchors: Int,
-        windows: Int
+        windows: Int,
+        executionEvents: Int = 0,
+        supersessions: Int = 0
     ) {
         self.sessions = sessions
         self.lines = lines
@@ -3032,12 +3038,53 @@ public struct KnowledgeArchiveCounts: Codable, Hashable, Sendable {
         self.items = items
         self.anchors = anchors
         self.windows = windows
+        self.executionEvents = executionEvents
+        self.supersessions = supersessions
     }
 
     public static let zero = KnowledgeArchiveCounts(
         sessions: 0, lines: 0, speakerNames: 0, documents: 0, snapshots: 0,
-        revisions: 0, minutes: 0, items: 0, anchors: 0, windows: 0
+        revisions: 0, minutes: 0, items: 0, anchors: 0, windows: 0,
+        executionEvents: 0, supersessions: 0
     )
+
+    enum CodingKeys: String, CodingKey {
+        case sessions, lines, speakerNames, documents, snapshots, revisions
+        case minutes, items, anchors, windows, executionEvents, supersessions
+    }
+
+    /// 解码时缺这两项就当 0：旧结果文件不该因为新增计数就读不出来。
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sessions = try c.decode(Int.self, forKey: .sessions)
+        lines = try c.decode(Int.self, forKey: .lines)
+        speakerNames = try c.decode(Int.self, forKey: .speakerNames)
+        documents = try c.decode(Int.self, forKey: .documents)
+        snapshots = try c.decode(Int.self, forKey: .snapshots)
+        revisions = try c.decode(Int.self, forKey: .revisions)
+        minutes = try c.decode(Int.self, forKey: .minutes)
+        items = try c.decode(Int.self, forKey: .items)
+        anchors = try c.decode(Int.self, forKey: .anchors)
+        windows = try c.decode(Int.self, forKey: .windows)
+        executionEvents = try c.decodeIfPresent(Int.self, forKey: .executionEvents) ?? 0
+        supersessions = try c.decodeIfPresent(Int.self, forKey: .supersessions) ?? 0
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(sessions, forKey: .sessions)
+        try c.encode(lines, forKey: .lines)
+        try c.encode(speakerNames, forKey: .speakerNames)
+        try c.encode(documents, forKey: .documents)
+        try c.encode(snapshots, forKey: .snapshots)
+        try c.encode(revisions, forKey: .revisions)
+        try c.encode(minutes, forKey: .minutes)
+        try c.encode(items, forKey: .items)
+        try c.encode(anchors, forKey: .anchors)
+        try c.encode(windows, forKey: .windows)
+        try c.encode(executionEvents, forKey: .executionEvents)
+        try c.encode(supersessions, forKey: .supersessions)
+    }
 }
 
 /// 冲突预览的一条（MC-71）。**同 ID 是两回事，同 ID 同内容又是另一回事**：
@@ -3054,6 +3101,8 @@ public struct KnowledgeArchiveConflict: Hashable, Sendable {
         case minutesItem = "minutes_item"
         case evidence
         case window
+        case executionEvent = "execution_event"
+        case supersession
     }
 
     public var kind: Kind
@@ -3112,7 +3161,10 @@ public struct KnowledgeArchiveImportResult: Sendable {
 /// `structured.json` 的根。**字段名与内部类型解耦**：内部改字段名不会静默改掉
 /// 已经发出去的包，老包也不会因为新版本内部重构就读不回来（MA-19 开放格式）。
 public struct KnowledgeArchivePayload: Codable, Hashable, Sendable {
-    public static let schemaID = "speechrail.meeting.knowledge-archive.payload/1"
+    /// v2：补 `execution` 与 `supersessions`（MA-14 的执行状态与决策演进）。
+    /// v1 的包**读不了**——按项目策略不为旧包保留兼容层，
+    /// 代价是此前导出的 v1 包需要重新导出。
+    public static let schemaID = "speechrail.meeting.knowledge-archive.payload/2"
 
     public var schema: String
     public var document: ArchiveDocument
@@ -3125,6 +3177,10 @@ public struct KnowledgeArchivePayload: Codable, Hashable, Sendable {
     public var minutes: [ArchiveMinutes]
     public var items: [ArchiveItem]
     public var windows: [ArchiveWindow]
+    /// 执行状态事件。用户标过的完成、改过的负责人必须随包带走。
+    public var execution: [ArchiveExecutionEvent]
+    /// 「这条取代那条」。丢了它，决策演进链在往返之后会断。
+    public var supersessions: [ArchiveSupersession]
 
     public init(
         schema: String = KnowledgeArchivePayload.schemaID,
@@ -3136,7 +3192,9 @@ public struct KnowledgeArchivePayload: Codable, Hashable, Sendable {
         revisions: [ArchiveRevision],
         minutes: [ArchiveMinutes],
         items: [ArchiveItem],
-        windows: [ArchiveWindow]
+        windows: [ArchiveWindow],
+        execution: [ArchiveExecutionEvent] = [],
+        supersessions: [ArchiveSupersession] = []
     ) {
         self.schema = schema
         self.document = document
@@ -3148,6 +3206,8 @@ public struct KnowledgeArchivePayload: Codable, Hashable, Sendable {
         self.minutes = minutes
         self.items = items
         self.windows = windows
+        self.execution = execution
+        self.supersessions = supersessions
     }
 }
 
@@ -3523,6 +3583,112 @@ public struct ArchiveMinutes: Codable, Hashable, Sendable {
     }
 }
 
+/// 归档包里的执行状态事件（MA-14 写进库、MA-19 之前没进包）。
+///
+/// 少了它，导出再导入会把用户标过的"已完成"、改过的负责人、清掉的期限
+/// 全部退回未标状态——**用户已经付出过成本的东西在往返里消失**。
+public struct ArchiveExecutionEvent: Codable, Hashable, Sendable {
+    public var id: String
+    public var itemKey: String
+    public var documentID: String?
+    public var itemID: String?
+    public var kind: String
+    public var status: String
+    public var ownerText: String?
+    public var dueText: String?
+    public var dueDate: TimeInterval?
+    public var validFrom: TimeInterval
+    public var recordedAt: TimeInterval
+    public var validTo: TimeInterval?
+    public var note: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case kind
+        case status
+        case note
+        case itemKey = "item_key"
+        case documentID = "document_id"
+        case itemID = "item_id"
+        case ownerText = "owner_text"
+        case dueText = "due_text"
+        case dueDate = "due_date"
+        case validFrom = "valid_from"
+        case recordedAt = "recorded_at"
+        case validTo = "valid_to"
+    }
+
+    public init(
+        id: String,
+        itemKey: String,
+        documentID: String?,
+        itemID: String?,
+        kind: String,
+        status: String,
+        ownerText: String?,
+        dueText: String?,
+        dueDate: TimeInterval?,
+        validFrom: TimeInterval,
+        recordedAt: TimeInterval,
+        validTo: TimeInterval?,
+        note: String?
+    ) {
+        self.id = id
+        self.itemKey = itemKey
+        self.documentID = documentID
+        self.itemID = itemID
+        self.kind = kind
+        self.status = status
+        self.ownerText = ownerText
+        self.dueText = dueText
+        self.dueDate = dueDate
+        self.validFrom = validFrom
+        self.recordedAt = recordedAt
+        self.validTo = validTo
+        self.note = note
+    }
+}
+
+/// 归档包里的"这条取代那条"（MA-14）。丢了它，重新导入之后
+/// 决策演进链就断了：用户会看到新旧两条都还活着，且看不出哪条赢了。
+public struct ArchiveSupersession: Codable, Hashable, Sendable {
+    public var id: String
+    public var fromKey: String
+    public var toKey: String
+    public var kind: String
+    public var basis: String
+    public var evidenceItemIDs: [String]
+    public var createdAt: TimeInterval
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case kind
+        case basis
+        case fromKey = "from_key"
+        case toKey = "to_key"
+        case evidenceItemIDs = "evidence_item_ids"
+        case createdAt = "created_at"
+    }
+
+    public init(
+        id: String,
+        fromKey: String,
+        toKey: String,
+        kind: String,
+        basis: String,
+        evidenceItemIDs: [String],
+        createdAt: TimeInterval
+    ) {
+        self.id = id
+        self.fromKey = fromKey
+        self.toKey = toKey
+        self.kind = kind
+        self.basis = basis
+        self.evidenceItemIDs = evidenceItemIDs
+        self.createdAt = createdAt
+    }
+}
+
 public struct ArchiveItem: Codable, Hashable, Sendable {
     public var id: String
     public var minutesID: String
@@ -3531,6 +3697,9 @@ public struct ArchiveItem: Codable, Hashable, Sendable {
     public var text: String
     public var verdict: String?
     public var sortOrder: Int
+    /// 跨版本的稳定身份（`KnowledgeIdentity.key`）。执行状态挂在这个 key 上，
+    /// 不挂 `id`——重新生成纪要会换一批 `id`，挂 id 等于每次重生成都丢状态。
+    public var itemKey: String
     public var anchors: [ArchiveAnchor]
 
     enum CodingKeys: String, CodingKey {
@@ -3538,6 +3707,7 @@ public struct ArchiveItem: Codable, Hashable, Sendable {
         case kind
         case text
         case verdict
+        case itemKey = "item_key"
         case anchors
         case minutesID = "minutes_id"
         case localID = "local_id"
@@ -3552,6 +3722,7 @@ public struct ArchiveItem: Codable, Hashable, Sendable {
         text: String,
         verdict: String?,
         sortOrder: Int,
+        itemKey: String = "",
         anchors: [ArchiveAnchor]
     ) {
         self.id = id
@@ -3561,6 +3732,7 @@ public struct ArchiveItem: Codable, Hashable, Sendable {
         self.text = text
         self.verdict = verdict
         self.sortOrder = sortOrder
+        self.itemKey = itemKey
         self.anchors = anchors
     }
 }
@@ -3795,7 +3967,8 @@ extension MinutesVersion {
 }
 
 extension MinutesItem {
-    var archiveModel: ArchiveItem {
+    /// `documentID` 由调用方给：条目本身不存它，但稳定 key 要用。
+    func archiveModel(documentID: String) -> ArchiveItem {
         ArchiveItem(
             id: id,
             minutesID: minutesID,
@@ -3804,6 +3977,7 @@ extension MinutesItem {
             text: text,
             verdict: verdict?.rawValue,
             sortOrder: sortOrder,
+            itemKey: KnowledgeIdentity.key(documentID: documentID, kind: kind, text: text),
             anchors: anchors.map { anchor in
                 ArchiveAnchor(
                     id: anchor.id,

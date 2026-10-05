@@ -581,4 +581,105 @@ final class MeetingKnowledgeArchiveTests: XCTestCase {
         let result = try await body(store)
         return (store, result)
     }
+
+    // MARK: - 执行状态随包往返（MA-14 / MA-19 补齐）
+
+    /// 用户在待办上标过的状态、换过的负责人，导出再导入之后必须还在。
+    /// 少了这一步，往返一次就把用户已经付出过的成本清零（MC-53 同类风险）。
+    func testExecutionStateSurvivesTheRoundTrip() async throws {
+        let store = try requireStore()
+        let version = try await prepareMeetingWithCitations()
+        let items = try await store.minutesItems(minutesID: version.id)
+        let action = try XCTUnwrap(items.first { $0.kind == "action" })
+
+        try await store.recordExecutionEvent(itemID: action.id, status: .done, ownerText: .some("张三"))
+        try await store.recordExecutionEvent(
+            itemID: action.id,
+            status: .blocked,
+            dueDate: .some(Date(timeIntervalSince1970: 1_800_000_000))
+        )
+
+        let documentID = try await requireDocumentID()
+        let package = try await store.exportKnowledgeArchive(
+            selection: KnowledgeArchiveSelection(
+                documentID: documentID, minutesID: version.id, scope: .fullArchive
+            ),
+            to: try exportDestination()
+        )
+
+        let imported = try await makeImportedStore { target in
+            try await target.importKnowledgeArchive(at: package)
+        }
+        defer { Task { await imported.store.close() } }
+        XCTAssertGreaterThan(imported.result.inserted.executionEvents, 0, "执行状态必须真的写进新库")
+
+        let restored = try await imported.store.knowledgeExecutionEvents(documentID: documentID)
+        XCTAssertEqual(restored.count, 2, "两条事件都要在，一条都不能少")
+        let current = try XCTUnwrap(restored.last)
+        XCTAssertEqual(current.status, ActionExecutionStatus.blocked.rawValue)
+        XCTAssertEqual(current.ownerText, "张三", "负责人不能丢")
+        XCTAssertEqual(current.dueDate, 1_800_000_000, "期限不能丢")
+        XCTAssertNil(current.validTo, "当前有效那条不该被写成已失效")
+    }
+
+    func testArchiveCarriesTheItemKeyThatExecutionStateHangsOn() async throws {
+        let store = try requireStore()
+        let version = try await prepareMeetingWithCitations()
+        let items = try await store.minutesItems(minutesID: version.id)
+        let action = try XCTUnwrap(items.first { $0.kind == "action" })
+        try await store.recordExecutionEvent(itemID: action.id, status: .done)
+
+        let documentID = try await requireDocumentID()
+        let payload = try await store.knowledgeArchivePayload(
+            selection: KnowledgeArchiveSelection(
+                documentID: documentID, minutesID: version.id, scope: .fullArchive
+            )
+        )
+        let exportedItem = try XCTUnwrap(payload.items.first { $0.id == action.id })
+        XCTAssertFalse(exportedItem.itemKey.isEmpty, "条目必须带稳定 key，否则执行状态挂不上去")
+        XCTAssertEqual(
+            exportedItem.itemKey,
+            KnowledgeIdentity.key(documentID: documentID, kind: action.kind, text: action.text)
+        )
+        let event = try XCTUnwrap(payload.execution.first)
+        XCTAssertEqual(event.itemKey, exportedItem.itemKey, "事件与条目必须挂在同一个 key 上")
+    }
+
+    func testReimportingExecutionStateIsIdempotent() async throws {
+        let store = try requireStore()
+        let version = try await prepareMeetingWithCitations()
+        let items = try await store.minutesItems(minutesID: version.id)
+        let action = try XCTUnwrap(items.first { $0.kind == "action" })
+        try await store.recordExecutionEvent(itemID: action.id, status: .done)
+
+        let documentID = try await requireDocumentID()
+        let package = try await store.exportKnowledgeArchive(
+            selection: KnowledgeArchiveSelection(
+                documentID: documentID, minutesID: version.id, scope: .fullArchive
+            ),
+            to: try exportDestination()
+        )
+        let imported = try await makeImportedStore { target in
+            try await target.importKnowledgeArchive(at: package)
+        }
+        defer { Task { await imported.store.close() } }
+
+        // 同一个包导两次：第二次必须全部跳过，不能插出第二份状态。
+        let again = try await imported.store.importKnowledgeArchive(at: package)
+        XCTAssertEqual(again.inserted.executionEvents, 0, "同内容重复导入不该重复写执行状态")
+        let restored = try await imported.store.knowledgeExecutionEvents(documentID: documentID)
+        XCTAssertEqual(restored.count, 1)
+    }
+
+    func testPayloadSchemaIsV2() async throws {
+        let store = try requireStore()
+        let version = try await prepareMeetingWithCitations()
+        let documentID = try await requireDocumentID()
+        let payload = try await store.knowledgeArchivePayload(
+            selection: KnowledgeArchiveSelection(
+                documentID: documentID, minutesID: version.id, scope: .fullArchive
+            )
+        )
+        XCTAssertEqual(payload.schema, "speechrail.meeting.knowledge-archive.payload/2")
+    }
 }
