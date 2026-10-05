@@ -800,3 +800,54 @@ base: "origin/main @ d72535c7"
 - **点问法在词项完全不匹配时退回按范围取全部**：这是有意的（避免悄悄给零结果），
   但也意味着一个措辞古怪的问题会拿到一大批不相关的证据，筛选责任落回上层。
 - 真实采集、UI 自动化、发布另行授权，本轮均未做。
+
+## M1 增量：结构化知识投影（MA-13 / MC-51、MC-52、MC-56）
+
+### 做了什么
+
+- **项目是一等实体，身份是 id 不是名字**（`MeetingProject` / `meeting_project`）。
+  两个同名项目是允许存在的两个项目——2024 年的「发布」和 2025 年的「发布」。
+  所以 `name` 上只建普通索引，不建唯一索引；按名字筛不到任何东西（测试钉住）。
+  改项目名不影响内容归属。
+- **结构化事项查询**（`SessionStore.knowledgeItems(filter:scope:limit:offset:)`）：
+  按项目、文档、标签、kind、核对档位筛选，返回一页事项 + 计数 + 分页信息。
+- **计数与列表共用同一段谓词**（`itemPredicate`）。分开算就会出现"显示 12 条、
+  列出 9 条"，用户没法判断该信哪个。实现上先读全部命中行的元信息（不含正文大块）
+  聚合出计数，再按页取正文与锚点；谓词只有一份，计数不可能和列表对不上。
+  `KnowledgeItemCounts` 带 `total` / `byKind` / `needsReview` / `disputed`。
+- **默认档包含待核对**（MC-52）。只有待核对候选的那场会不能从库里消失——
+  用户看不到它就会以为内容丢了，而它只是还没核对。`KnowledgeVerificationFilter.strictlyVerified`
+  是用户显式选的"只看已确认"，两档都有测试。
+- **标签只由用户写**（`meeting_document_tag`）。多标签筛选取**交集**：
+  同时打了「发布」和「2024」的会才算命中两个标签，命中一个不算。
+  `setDocumentTags` 整体重写（去空白、去重），给不存在的文档打标签会报错。
+- 筛选维度之间是 AND：`documentIDs` 与 `projectIDs` 同时给也不会放宽成"命中一个就算"。
+
+### 回归证据（2026-10-05）
+
+- 新增 `MeetingProjectProjectionTests` 11 项：同名项目各成一份且筛选互不混合、
+  改名不影响归属、按名字筛不到；只有待核对候选的那场会默认可见并标 `needsReview`、
+  严格档排除、严格档保留已确认条目；计数与翻页取全一致（6 条翻 3 页不重不漏、
+  翻过头总数仍如实）；标签交集、整体重写、去重去空白；筛选维度 AND 组合；
+  空项目名与不存在文档被拒绝；标签随文档彻底删除一起清掉（不留孤儿行）。
+- 修正 `MeetingMinutesVersioningTests` 里写死的 `schemaVersion == 8` 断言为 9。
+- 全量 `swift test --package-path macos/SpeechRailApp`：**807 项全绿**。
+- `./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+
+### 迁移与回退
+
+- **schema v8 → v9**：只新增 `meeting_project` 与 `meeting_document_tag` 两张表，
+  **不改任何既有表、不回填任何既有行**。`meeting_project.name` 上不建唯一索引。
+- 迁移**不猜项目归属**：既有会议文档的 `project_id` 保持原值（多数为空），
+  项目与标签由用户自己写。猜出来的归属比没有归属更糟。
+- 回退：删掉两张表即可回到 v8 形状；代码 revert 本次提交。
+  没有用户数据被改写或删除。
+
+### 未验证事项与已知边界
+
+- **界面未接线**：项目、标签、筛选、分页都只有库级入口，App 里没有按钮，
+  用户目前无法触发。属 MA-11/MA-21 的界面工作。
+- **`counts.disputed` 与 `byKind` 未在真实数据上核对**：判定口径复用 MA-17 的
+  `disputedDecisionTexts`（回候选 JSON 的 `conditions` 读标记），只在假数据上验过。
+- 标签没有重命名与合并（改一个标签名要重写所有相关文档），未实现。
+- 真实采集、UI 自动化、发布另行授权，本轮均未做。

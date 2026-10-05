@@ -71,7 +71,7 @@ public actor SessionStore {
     /// 也要能回答"哪几句转录没被整理到"——这两个问题都要求按窗口查行。
     /// v8（MA-15）：`knowledge_fts` 全文索引 + `search_index_outbox`。
     /// 索引是**派生数据**：内容永远在权威表里，索引坏了重建即可。
-    public static let schemaVersion: Int32 = 8
+    public static let schemaVersion: Int32 = 9
 
     private let directory: URL
     private let fileManager: FileManager
@@ -187,6 +187,9 @@ public actor SessionStore {
             }
             if version < 8 {
                 try migrateV7ToV8()
+            }
+            if version < 9 {
+                try migrateV8ToV9()
             }
             try execute("PRAGMA user_version=\(Self.schemaVersion);")
             try execute("COMMIT;")
@@ -3735,6 +3738,33 @@ extension SessionStore {
       ON minutes_window(minutes_id, window_index);
     """
 
+    /// v8 → v9 的 DDL（MA-13）：项目与标签。
+    ///
+    /// 项目**按 id 认，不按名字认**：同名项目是允许存在的两个项目，
+    /// 按名字归一就会把它们混成一份统计与筛选（MC-51）。
+    /// 所以 `name` 上不建唯一索引。
+    static let schemaV9Delta = """
+    CREATE TABLE IF NOT EXISTS meeting_project (
+      id         TEXT PRIMARY KEY,
+      name       TEXT NOT NULL,
+      created_at REAL NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS meeting_project_by_name ON meeting_project(name);
+
+    CREATE TABLE IF NOT EXISTS meeting_document_tag (
+      document_id TEXT NOT NULL REFERENCES meeting_document(id) ON DELETE CASCADE,
+      tag         TEXT NOT NULL,
+      PRIMARY KEY (document_id, tag)
+    );
+    CREATE INDEX IF NOT EXISTS meeting_document_tag_by_tag ON meeting_document_tag(tag);
+    """
+
+    /// v8 → v9：只建结构，不回填。项目与标签都是**用户自己写的**，
+    /// 迁移时猜出来的归属比没有归属更糟（MA-13）。
+    private func migrateV8ToV9() throws {
+        try execute(Self.schemaV9Delta)
+    }
+
     /// v7 → v8 的 DDL（MA-15）：FTS5 全文索引与事务 outbox。
     ///
     /// 索引与 outbox 分开：outbox 随业务事务一起提交，保证「内容已保存」
@@ -4893,5 +4923,283 @@ extension SessionStore {
         var documentID: String
         var occurredAt: Date?
         var isAccepted: Bool
+    }
+}
+
+// MARK: - 项目、标签与结构化事项投影（MA-13 / MC-51、MC-52、MC-56）
+//
+// 计数与列表**共用同一段 WHERE**：分开算就会出现"显示 12 条、列出 9 条"，
+// 用户没法判断该信哪个。这里先把命中行的元信息（不含正文）全部读出来聚合，
+// 再按页取正文，谓词只有一份，计数不可能和列表对不上。
+extension SessionStore {
+    // MARK: 项目
+
+    @discardableResult
+    public func createProject(name: String, id: String = UUID().uuidString) throws -> MeetingProject {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw SessionStoreError.statementFailed("项目名不能为空")
+        }
+        let project = MeetingProject(id: id, name: trimmed)
+        try withStatement(
+            "INSERT INTO meeting_project (id, name, created_at) VALUES (?, ?, ?);"
+        ) { statement in
+            bind(statement, 1, project.id)
+            bind(statement, 2, project.name)
+            bind(statement, 3, project.createdAt.timeIntervalSince1970)
+            try step(statement)
+        }
+        return project
+    }
+
+    public func meetingProject(id: String) throws -> MeetingProject? {
+        try withStatement("SELECT id, name, created_at FROM meeting_project WHERE id = ? LIMIT 1;") { statement -> MeetingProject? in
+            bind(statement, 1, id)
+            guard try step(statement) == SQLITE_ROW else { return nil }
+            return MeetingProject(
+                id: columnText(statement, 0) ?? "",
+                name: columnText(statement, 1) ?? "",
+                createdAt: Date(timeIntervalSince1970: columnDouble(statement, 2))
+            )
+        }
+    }
+
+    public func projects() throws -> [MeetingProject] {
+        try withStatement("SELECT id, name, created_at FROM meeting_project ORDER BY created_at ASC;") { statement -> [MeetingProject] in
+            var rows: [MeetingProject] = []
+            while try step(statement) == SQLITE_ROW {
+                rows.append(MeetingProject(
+                    id: columnText(statement, 0) ?? "",
+                    name: columnText(statement, 1) ?? "",
+                    createdAt: Date(timeIntervalSince1970: columnDouble(statement, 2))
+                ))
+            }
+            return rows
+        }
+    }
+
+    public func renameProject(id: String, name: String) throws {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw SessionStoreError.statementFailed("项目名不能为空")
+        }
+        try withStatement("UPDATE meeting_project SET name = ? WHERE id = ?;") { statement in
+            bind(statement, 1, trimmed)
+            bind(statement, 2, id)
+            try step(statement)
+        }
+    }
+
+    // MARK: 标签
+
+    /// 标签是**用户写的**，导入与生成都不猜（MA-13）。
+    public func setDocumentTags(documentID: String, tags: [String]) throws {
+        guard try meetingDocument(id: documentID) != nil else {
+            throw SessionStoreError.statementFailed("找不到这场会议知识文档")
+        }
+        let cleaned = Set(tags.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            try withStatement("DELETE FROM meeting_document_tag WHERE document_id = ?;") { statement in
+                bind(statement, 1, documentID)
+                try step(statement)
+            }
+            for tag in cleaned.sorted() {
+                try withStatement(
+                    "INSERT INTO meeting_document_tag (document_id, tag) VALUES (?, ?);"
+                ) { statement in
+                    bind(statement, 1, documentID)
+                    bind(statement, 2, tag)
+                    try step(statement)
+                }
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    public func documentTags(documentID: String) throws -> [String] {
+        try withStatement("SELECT tag FROM meeting_document_tag WHERE document_id = ? ORDER BY tag ASC;") { statement -> [String] in
+            bind(statement, 1, documentID)
+            var tags: [String] = []
+            while try step(statement) == SQLITE_ROW {
+                if let tag = columnText(statement, 0) { tags.append(tag) }
+            }
+            return tags
+        }
+    }
+
+    public func documentTagsInProject(projectID: String) throws -> [String] {
+        try withStatement("""
+        SELECT DISTINCT t.tag FROM meeting_document_tag t
+        JOIN meeting_document d ON d.id = t.document_id
+        WHERE d.project_id = ? ORDER BY t.tag ASC;
+        """) { statement -> [String] in
+            bind(statement, 1, projectID)
+            var tags: [String] = []
+            while try step(statement) == SQLITE_ROW {
+                if let tag = columnText(statement, 0) { tags.append(tag) }
+            }
+            return tags
+        }
+    }
+
+    // MARK: 结构化投影
+
+    /// 结构化事项查询：筛选 → 分页 → 计数（MC-51、MC-52、MC-56）。
+    ///
+    /// 默认档**包含待核对**：只有待核对候选的那场会不能从库里消失（MC-52）。
+    /// 严格档是用户显式选的"只看已确认"。
+    public func knowledgeItems(
+        filter: KnowledgeItemFilter = .all,
+        scope: MeetingKnowledgeScope = .standard,
+        limit: Int = 50,
+        offset: Int = 0
+    ) throws -> KnowledgeItemPage {
+        let predicate = itemPredicate(filter: filter, scope: scope)
+
+        // 第一遍：只取命中行的元信息，用来算计数。不读正文，代价可控。
+        struct Meta {
+            var id: String
+            var minutesID: String
+            var kind: String
+            var text: String
+            var verdict: String?
+            var candidateJSON: String?
+            var sessionID: String
+            var version: Int
+            var createdAt: Double
+            var documentID: String
+            var occurredAt: Double?
+            var isAccepted: Bool
+        }
+        let metaSQL = """
+        SELECT i.id, i.minutes_id, i.kind, i.text, i.verdict, m.candidate_json, m.session_id, m.version,
+               m.created_at, COALESCE(d.id, ''), d.occurred_at, m.is_accepted
+        FROM minutes_item i
+        JOIN minutes m ON m.id = i.minutes_id
+        JOIN session s ON s.id = m.session_id
+        LEFT JOIN meeting_document d ON d.source_session_id = s.id
+        WHERE \(predicate.sql)
+        ORDER BY COALESCE(d.occurred_at, m.created_at) DESC, m.version DESC, i.sort_order ASC;
+        """
+        let all = try withStatement(metaSQL) { statement -> [Meta] in
+            var index: Int32 = 1
+            for value in predicate.bindings {
+                bindArgument(statement, index, value)
+                index += 1
+            }
+            var rows: [Meta] = []
+            while try step(statement) == SQLITE_ROW {
+                rows.append(Meta(
+                    id: columnText(statement, 0) ?? "",
+                    minutesID: columnText(statement, 1) ?? "",
+                    kind: columnText(statement, 2) ?? "",
+                    text: columnText(statement, 3) ?? "",
+                    verdict: columnText(statement, 4),
+                    candidateJSON: columnText(statement, 5),
+                    sessionID: columnText(statement, 6) ?? "",
+                    version: Int(columnInt(statement, 7)),
+                    createdAt: columnDouble(statement, 8),
+                    documentID: columnText(statement, 9) ?? "",
+                    occurredAt: columnIsNull(statement, 10) ? nil : columnDouble(statement, 10),
+                    isAccepted: columnInt(statement, 11) != 0
+                ))
+            }
+            return rows
+        }
+
+        var disputedCache: [String: Set<String>] = [:]
+        var byKind: [String: Int] = [:]
+        var needsReviewCount = 0
+        var disputedCount = 0
+        for row in all {
+            byKind[row.kind, default: 0] += 1
+            if row.verdict == nil || row.verdict != MinutesEvidenceValidator.Verdict.supported.rawValue {
+                needsReviewCount += 1
+            }
+            if disputedCache[row.minutesID] == nil {
+                disputedCache[row.minutesID] = disputedDecisionTexts(in: row.candidateJSON)
+            }
+            if disputedCache[row.minutesID]?.contains(row.text) == true { disputedCount += 1 }
+        }
+        let counts = KnowledgeItemCounts(
+            total: all.count,
+            byKind: byKind,
+            needsReview: needsReviewCount,
+            disputed: disputedCount
+        )
+
+        // 第二遍：只为本页取正文与锚点。
+        let pageRows = all.dropFirst(offset).prefix(max(0, limit))
+        let currentIDs = try currentMinutesIDs(for: Set(pageRows.map(\.sessionID)))
+        let items = try pageRows.map { row -> KnowledgeEvidence in
+            let disputed = disputedCache[row.minutesID]?.contains(row.text) == true
+            let items = try minutesItems(minutesID: row.minutesID)
+            let anchorSet = items.first { $0.id == row.id }?.anchors ?? []
+            return KnowledgeEvidence(
+                id: row.id,
+                documentID: row.documentID,
+                sessionID: row.sessionID,
+                minutesID: row.minutesID,
+                version: row.version,
+                kind: row.kind,
+                text: row.text,
+                status: KnowledgeItemStatus(
+                    isCurrent: currentIDs.contains(row.minutesID),
+                    isDisputed: disputed,
+                    needsReview: row.verdict == nil
+                        || row.verdict != MinutesEvidenceValidator.Verdict.supported.rawValue
+                ),
+                anchors: anchorSet,
+                occurredAt: row.occurredAt.map { Date(timeIntervalSince1970: $0) }
+            )
+        }
+        return KnowledgeItemPage(items: items, counts: counts, offset: offset, limit: limit)
+    }
+
+    /// 筛选谓词。**列表与计数都用这一份**，所以两者不可能对不上。
+    private func itemPredicate(
+        filter: KnowledgeItemFilter,
+        scope: MeetingKnowledgeScope
+    ) -> (sql: String, bindings: [SQLArgument]) {
+        var sql = "m.status = 'ready' AND m.body IS NOT NULL"
+        var bindings: [SQLArgument] = []
+        let visibility = Self.visibilityClause(scope: scope, documentAlias: "d")
+        sql += visibility.sql
+        bindings.append(contentsOf: visibility.bindings)
+
+        if !filter.projectIDs.isEmpty {
+            let placeholders = Array(repeating: "?", count: filter.projectIDs.count).joined(separator: ", ")
+            sql += " AND d.project_id IN (\(placeholders))"
+            bindings.append(contentsOf: filter.projectIDs.sorted().map { .text($0) })
+        }
+        if !filter.documentIDs.isEmpty {
+            let placeholders = Array(repeating: "?", count: filter.documentIDs.count).joined(separator: ", ")
+            sql += " AND d.id IN (\(placeholders))"
+            bindings.append(contentsOf: filter.documentIDs.sorted().map { .text($0) })
+        }
+        if !filter.tags.isEmpty {
+            let placeholders = Array(repeating: "?", count: filter.tags.count).joined(separator: ", ")
+            // 标签取交集：同时打了「发布」和「2024」的会才算命中两个标签。
+            sql += """
+             AND d.id IN (
+               SELECT document_id FROM meeting_document_tag WHERE tag IN (\(placeholders))
+               GROUP BY document_id HAVING COUNT(DISTINCT tag) = \(filter.tags.count)
+             )
+            """
+            bindings.append(contentsOf: filter.tags.sorted().map { .text($0) })
+        }
+        if !filter.kinds.isEmpty {
+            let placeholders = Array(repeating: "?", count: filter.kinds.count).joined(separator: ", ")
+            sql += " AND i.kind IN (\(placeholders))"
+            bindings.append(contentsOf: filter.kinds.sorted().map { .text($0) })
+        }
+        if filter.verification == .strictlyVerified {
+            sql += " AND i.verdict = 'supported'"
+        }
+        return (sql, bindings)
     }
 }

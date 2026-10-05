@@ -4288,3 +4288,96 @@ public struct MeetingPrepDraft: Sendable {
         return rows.joined(separator: "\n")
     }
 }
+
+// MARK: - 结构化知识投影（MA-13 / MC-51、MC-52、MC-56）
+
+/// 严格程度。**默认档包含待核对内容**（MC-52）：只有待核对候选的那场会
+/// 不能从库里消失，那会让用户以为内容丢了。严格档是"只看已确认"的显式选择。
+public enum KnowledgeVerificationFilter: String, Hashable, Sendable {
+    case includeUnverified
+    case strictlyVerified
+
+    public var title: String {
+        switch self {
+        case .includeUnverified: "含待核对"
+        case .strictlyVerified: "只看已确认"
+        }
+    }
+}
+
+/// 事项筛选条件。所有条件**同时生效**（AND），不做"命中一个就算"。
+public struct KnowledgeItemFilter: Hashable, Sendable {
+    /// 按**稳定项目 id** 过滤，不按名字（MC-51）。
+    public var projectIDs: Set<String>
+    public var documentIDs: Set<String>
+    public var tags: Set<String>
+    public var kinds: Set<String>
+    public var verification: KnowledgeVerificationFilter
+
+    public init(
+        projectIDs: Set<String> = [],
+        documentIDs: Set<String> = [],
+        tags: Set<String> = [],
+        kinds: Set<String> = ["decision", "action", "open_question", "overview"],
+        verification: KnowledgeVerificationFilter = .includeUnverified
+    ) {
+        self.projectIDs = projectIDs
+        self.documentIDs = documentIDs
+        self.tags = tags
+        self.kinds = kinds
+        self.verification = verification
+    }
+
+    public static let all = KnowledgeItemFilter()
+}
+
+/// 筛选后的计数。**必须与同一批列表出自同一个谓词**——分开算就会出现
+/// "显示 12 条、列出 9 条"，用户没法判断该信哪个。
+public struct KnowledgeItemCounts: Hashable, Sendable {
+    public var total: Int
+    public var byKind: [String: Int]
+    public var needsReview: Int
+    public var disputed: Int
+
+    public init(total: Int = 0, byKind: [String: Int] = [:], needsReview: Int = 0, disputed: Int = 0) {
+        self.total = total
+        self.byKind = byKind
+        self.needsReview = needsReview
+        self.disputed = disputed
+    }
+
+    public static let zero = KnowledgeItemCounts()
+}
+
+/// 一页结构化事项。分页信息齐全，翻页不重复不遗漏（MC-49、MC-56）。
+public struct KnowledgeItemPage: Sendable {
+    public var items: [KnowledgeEvidence]
+    public var counts: KnowledgeItemCounts
+    public var offset: Int
+    public var limit: Int
+
+    public init(items: [KnowledgeEvidence], counts: KnowledgeItemCounts, offset: Int, limit: Int) {
+        self.items = items
+        self.counts = counts
+        self.offset = offset
+        self.limit = limit
+    }
+
+    public var hasMore: Bool { offset + items.count < counts.total }
+}
+
+/// 项目（MA-13 / MC-51）。
+///
+/// **身份是 id，不是名字**：两个项目可以同名——一个是 2024 年的「发布」，
+/// 一个是 2025 年的「发布」。按名字归一，用户看到的计数就会把两场不相干的会混成一份。
+public struct MeetingProject: Identifiable, Hashable, Sendable {
+    public var id: String
+    public var name: String
+    public var createdAt: Date
+
+    public init(id: String = UUID().uuidString, name: String, createdAt: Date = Date()) {
+        self.id = id
+        self.name = name
+        self.createdAt = createdAt
+    }
+}
