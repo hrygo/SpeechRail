@@ -3829,3 +3829,131 @@ extension MinutesWindowRecord {
         )
     }
 }
+
+// MARK: - 知识范围与删除（MA-18 / MC-43、MC-44、MC-62、MC-72）
+
+/// 一次检索、导出或问答**能看到哪些内容**（MA-18）。
+///
+/// 默认值是"最窄的那一档"：不限项目，但**不含已归档的文档**。
+/// 归档之后用户还要能找回，所以数据留着；可它不能再出现在搜索结果、
+/// 分享包和跨会议问答里——「找不回」和「还在被引用」必须是一回事。
+public struct MeetingKnowledgeScope: Hashable, Sendable {
+    /// 只看这一个项目；nil = 不按项目限制。
+    public var projectID: String?
+    /// 显式点名可见的文档。非空时**只认这些**，项目过滤不再生效。
+    public var documentIDs: Set<String>
+    /// 是否包含已归档的文档。默认否。
+    public var includesArchived: Bool
+
+    public init(
+        projectID: String? = nil,
+        documentIDs: Set<String> = [],
+        includesArchived: Bool = false
+    ) {
+        self.projectID = projectID
+        self.documentIDs = documentIDs
+        self.includesArchived = includesArchived
+    }
+
+    /// 默认范围：全库可见内容，不含归档。
+    public static let standard = MeetingKnowledgeScope()
+}
+
+/// 删除的三个档位。**它们不是强度不同的同一个动作**，恢复能力完全不同，
+/// 所以连回退文案都不一样（MA-18）。
+public enum MeetingDeletionMode: String, Codable, Hashable, Sendable {
+    /// 只归档：立刻不可检索、不可导出，数据一行不少。**可以撤销**。
+    case archive
+    /// 只移除完整转录：原句与行修订删掉，纪要与结论留下（锚点变成"来源已不可读"）。
+    case removeTranscript = "remove_transcript"
+    /// 完整删除：正文、纪要、条目、锚点、快照全清。**不假装可撤销**。
+    case deleteEverything = "delete_everything"
+
+    public var title: String {
+        switch self {
+        case .archive: "归档（可恢复）"
+        case .removeTranscript: "只移除完整转录"
+        case .deleteEverything: "完整删除（不可撤销）"
+        }
+    }
+
+    /// 只有归档能撤销。另两档的用户文案里不许出现"撤销"两个字。
+    public var isRecoverable: Bool { self == .archive }
+}
+
+/// 删除报告。**外部副本边界必须说在报告里**（MC-72）：本机删干净了，
+/// 用户自己导出的包、离线备份、已经发出去的文件都不在这件事的管辖范围内，
+/// 不说清楚就等于让用户以为删干净了。
+public struct MeetingDeletionReport: Hashable, Sendable {
+    public var documentID: String
+    public var mode: MeetingDeletionMode
+    public var removedLines: Int
+    public var removedRevisions: Int
+    public var removedSnapshots: Int
+    public var removedMinutes: Int
+    public var removedItems: Int
+    public var removedAnchors: Int
+    /// 本机已清理的派生索引条数。
+    public var purgedIndexEntries: Int
+
+    public init(
+        documentID: String,
+        mode: MeetingDeletionMode,
+        removedLines: Int = 0,
+        removedRevisions: Int = 0,
+        removedSnapshots: Int = 0,
+        removedMinutes: Int = 0,
+        removedItems: Int = 0,
+        removedAnchors: Int = 0,
+        purgedIndexEntries: Int = 0
+    ) {
+        self.documentID = documentID
+        self.mode = mode
+        self.removedLines = removedLines
+        self.removedRevisions = removedRevisions
+        self.removedSnapshots = removedSnapshots
+        self.removedMinutes = removedMinutes
+        self.removedItems = removedItems
+        self.removedAnchors = removedAnchors
+        self.purgedIndexEntries = purgedIndexEntries
+    }
+
+    /// 界面上必须原样念给用户听的一段话。它说谎的代价是用户以为删干净了。
+    public var externalCopyWarning: String {
+        switch mode {
+        case .archive:
+            return "归档只是把它从搜索、分享和问答里收起来，内容还在本机，随时可以撤销。"
+        case .removeTranscript:
+            return "完整转录已从本机删除，纪要与结论保留。已经导出的归档包和离线备份里仍有原句，那些不在本次删除范围内。"
+        case .deleteEverything:
+            return "本机相关的正文、纪要、条目与来源已全部删除，且无法撤销。你此前导出的归档包、离线备份以及已经分享出去的文件仍在别处，需要你自己处理。"
+        }
+    }
+}
+
+/// 用户明确选中的「AI 补充」（MC-43）。
+///
+/// 它**不是会议事实**：说话人、措辞、语气都来自模型，读起来像会议里说过的话，
+/// 实际是模型对用户选中那一句的归纳。所以单独一个类型，不混进转录行，
+/// 也不许被当成"会上有人这么说"。
+public struct MeetingSupplement: Identifiable, Hashable, Sendable {
+    public var id: String
+    public var exchangeID: String
+    public var question: String
+    public var answerText: String
+    public var includedAt: Date
+
+    public init(
+        id: String,
+        exchangeID: String,
+        question: String,
+        answerText: String,
+        includedAt: Date = Date()
+    ) {
+        self.id = id
+        self.exchangeID = exchangeID
+        self.question = question
+        self.answerText = answerText
+        self.includedAt = includedAt
+    }
+}

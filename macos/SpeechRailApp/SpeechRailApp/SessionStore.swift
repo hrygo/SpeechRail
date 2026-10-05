@@ -772,6 +772,8 @@ public actor SessionStore {
     /// 返回是否真正提交。
     @discardableResult
     public func finishMinutesIfOwner(minutesID: String, expectedAttempts: Int, body: String, model: String?) throws -> Bool {
+        // 迟到的结果不许把已经归档/删除的会议写回来（MA-18 / MC-63）。
+        if try rejectLateMinutesIfMeetingDeleted(minutesID: minutesID) { return false }
         let sql = "UPDATE minutes SET status = 'ready', body = ?, model = COALESCE(?, model), lease_until = NULL, failure_reason = NULL WHERE id = ? AND status = 'running' AND attempts = ?;"
         var committed = false
         try withStatement(sql) { statement in
@@ -948,6 +950,8 @@ public actor SessionStore {
         WHERE id = ? AND status = 'running' AND attempts = ?;
         """
         var committed = false
+        // 同 finishMinutesIfOwner：先问这场会还在不在，再决定要不要落库。
+        if try rejectLateMinutesIfMeetingDeleted(minutesID: minutesID) { return false }
         // 正文、条目、锚点三者同生共死：分几次写就会出现"正文在、锚点没了"的
         // 假引用——那比没有引用更坏，因为它看起来像有。
         try execute("BEGIN IMMEDIATE;")
@@ -1656,7 +1660,12 @@ public actor SessionStore {
     /// 跨会议知识检索（MC-49、MC-52、MC-54）：转录终稿与已完成纪要正文。
     /// 私密问答（`inner_os_exchange`）默认不在范围内，不得隐式带出（MC-44）。
     /// 空查询返回空数组，不做全库扫描。
-    public func searchKnowledge(query: String, kind: SessionKind? = nil, limit: Int = 200) throws -> [KnowledgeHit] {
+    public func searchKnowledge(
+        query: String,
+        kind: SessionKind? = nil,
+        limit: Int = 200,
+        scope: MeetingKnowledgeScope = .standard
+    ) throws -> [KnowledgeHit] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
         let pattern = "%" + trimmed
@@ -1667,16 +1676,23 @@ public actor SessionStore {
         let lineSQL = """
         SELECT l.session_id, s.kind, l.id, l.text, l.ordinal, l.created_at
         FROM line l JOIN session s ON s.id = l.session_id
+        LEFT JOIN meeting_document d ON d.source_session_id = s.id
         WHERE l.status = 'final' AND l.text LIKE ? ESCAPE '\\'
         \(kind == nil ? "" : "AND s.kind = ?")
+        \(Self.visibilityClause(scope: scope).sql)
         ORDER BY s.started_at DESC, l.ordinal ASC
         LIMIT ?;
         """
+        let visibility = Self.visibilityClause(scope: scope)
         try withStatement(lineSQL) { statement in
             bind(statement, 1, pattern)
             var index: Int32 = 2
             if let kind {
                 bind(statement, index, kind.rawValue)
+                index += 1
+            }
+            for value in visibility.bindings {
+                bindArgument(statement, index, value)
                 index += 1
             }
             bind(statement, index, limit)
@@ -1697,8 +1713,10 @@ public actor SessionStore {
         let minutesSQL = """
         SELECT m.session_id, s.kind, m.id, m.version, m.body, m.created_at
         FROM minutes m JOIN session s ON s.id = m.session_id
+        LEFT JOIN meeting_document d ON d.source_session_id = s.id
         WHERE m.status = 'ready' AND m.body IS NOT NULL AND m.body LIKE ? ESCAPE '\\'
         \(kind == nil ? "" : "AND s.kind = ?")
+        \(visibility.sql)
         ORDER BY s.started_at DESC, m.version DESC
         LIMIT ?;
         """
@@ -1707,6 +1725,10 @@ public actor SessionStore {
             var index: Int32 = 2
             if let kind {
                 bind(statement, index, kind.rawValue)
+                index += 1
+            }
+            for value in visibility.bindings {
+                bindArgument(statement, index, value)
                 index += 1
             }
             bind(statement, index, limit - hits.count)
@@ -2081,19 +2103,30 @@ public actor SessionStore {
             //   · 文字变了 → revision 集合变了 → 新 id → 新的快照。
             // 这样改了转录再看旧纪要，旧纪要那一份 `snapshot_id` 仍然指着旧快照，
             // 里面是它当时依据的那几段话（MC-46）。
-            let snapshot = "snap-\(sessionID)-\(Self.stableDigest(revisionIDs))"
+            // MC-43：用户明确勾选要写进纪要的那几句私密问答，以 **AI 补充** 的身份
+            // 跟着这份快照走。它们不是会上说的话，所以只进 `note_refs`，
+            // 不混进行修订——混进去就等于把模型的话升级成会议事实。
+            let supplements = try selectedSupplements(sessionID: sessionID)
+
+            let snapshot = "snap-\(sessionID)-\(Self.stableDigest(revisionIDs + supplements.map(\.exchangeID)))"
             snapshotID = snapshot
             try withStatement("""
             INSERT OR IGNORE INTO source_snapshot
                 (id, document_id, line_revision_ids, speaker_map_revision, note_refs, coverage, seal_result, created_at)
-            VALUES (?, ?, ?, ?, '[]', ?, 'ok', ?);
+            VALUES (?, ?, ?, ?, ?, ?, 'ok', ?);
             """) { statement in
                 bind(statement, 1, snapshot)
                 bind(statement, 2, document)
                 bind(statement, 3, revisionIDs.joined(separator: ","))
                 bind(statement, 4, speakerRevision)
-                bind(statement, 5, "final_lines=\(revisionIDs.count)")
-                bind(statement, 6, sealedAt.timeIntervalSince1970)
+                bind(statement, 5, supplements.isEmpty ? "[]" : supplements.map(\.exchangeID).joined(separator: ","))
+                // 没有补充时保持原来的写法不变：`final_lines=N` 是已有契约，
+                // 多一个恒为 0 的字段只会让读它的人多问一句为什么。
+                let coverage = supplements.isEmpty
+                    ? "final_lines=\(revisionIDs.count)"
+                    : "final_lines=\(revisionIDs.count),ai_supplements=\(supplements.count)"
+                bind(statement, 6, coverage)
+                bind(statement, 7, sealedAt.timeIntervalSince1970)
                 try step(statement)
             }
             try withStatement(
@@ -2110,6 +2143,53 @@ public actor SessionStore {
         }
         guard let snapshotID else { return nil }
         return try sourceSnapshot(id: snapshotID)
+    }
+
+    /// 用户勾选要写进纪要的私密问答（MC-43）。**只取勾选过、且已经有答案的那些**：
+    /// 勾了但还没生成出内容的不能进快照——快照里写一个空指针没有意义。
+    private func selectedSupplements(sessionID: String) throws -> [MeetingSupplement] {
+        try withStatement("""
+        SELECT id, question, answer_text FROM inner_os_exchange
+        WHERE session_id = ? AND in_minutes = 1 AND status = 'ready'
+          AND answer_text IS NOT NULL AND TRIM(answer_text) <> ''
+        ORDER BY asked_at ASC;
+        """) { statement -> [MeetingSupplement] in
+            bind(statement, 1, sessionID)
+            var rows: [MeetingSupplement] = []
+            while try step(statement) == SQLITE_ROW {
+                rows.append(MeetingSupplement(
+                    id: columnText(statement, 0) ?? "",
+                    exchangeID: columnText(statement, 0) ?? "",
+                    question: columnText(statement, 1) ?? "",
+                    answerText: columnText(statement, 2) ?? ""
+                ))
+            }
+            return rows
+        }
+    }
+
+    /// 读一份快照里跟着走的 AI 补充（MC-43）。读不到就是没有，不补造。
+    public func meetingSupplements(snapshotID: String) throws -> [MeetingSupplement] {
+        guard let snapshot = try sourceSnapshot(id: snapshotID) else { return [] }
+        let ids = snapshot.noteRefs.filter { $0 != "[]" }
+        guard !ids.isEmpty else { return [] }
+        var rows: [MeetingSupplement] = []
+        for id in ids {
+            let row = try withStatement("""
+            SELECT id, question, answer_text FROM inner_os_exchange WHERE id = ? LIMIT 1;
+            """) { statement -> MeetingSupplement? in
+                bind(statement, 1, id)
+                guard try step(statement) == SQLITE_ROW else { return nil }
+                return MeetingSupplement(
+                    id: columnText(statement, 0) ?? "",
+                    exchangeID: columnText(statement, 0) ?? "",
+                    question: columnText(statement, 1) ?? "",
+                    answerText: columnText(statement, 2) ?? ""
+                )
+            }
+            if let row { rows.append(row) }
+        }
+        return rows
     }
 
     /// 把定稿行物化成不可变的行修订，返回本次快照锚定的 revision id（按 ordinal 序）。
@@ -2971,14 +3051,15 @@ public actor SessionStore {
     public func searchKnowledgeFullText(
         query: String,
         kind: SessionKind? = nil,
-        limit: Int = 200
+        limit: Int = 200,
+        scope: MeetingKnowledgeScope = .standard
     ) throws -> KnowledgeSearchResults {
         guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return KnowledgeSearchResults(hits: [], usedFullText: Self.fts5Available, degradedReason: nil)
         }
         guard Self.fts5Available, let match = KnowledgeSearchTokenizer.matchExpression(for: query) else {
             return KnowledgeSearchResults(
-                hits: try searchKnowledge(query: query, kind: kind, limit: limit),
+                hits: try searchKnowledge(query: query, kind: kind, limit: limit, scope: scope),
                 usedFullText: false,
                 degradedReason: Self.fts5Available
                     ? "查询里没有可检索的词，已回退到词法查询"
@@ -2987,6 +3068,7 @@ public actor SessionStore {
         }
 
         var rows: [SearchRow] = []
+        let visibility = Self.visibilityClause(scope: scope)
         let sql = """
         SELECT f.session_id, f.kind, f.source_kind, f.source_id, f.version, f.ordinal, f.created_at,
                l.text, m.body, m.is_accepted
@@ -2994,10 +3076,12 @@ public actor SessionStore {
         JOIN session s ON s.id = f.session_id
         LEFT JOIN line l ON f.source_kind = 'line' AND l.id = f.source_id
         LEFT JOIN minutes m ON f.source_kind = 'minutes' AND m.id = f.source_id
+        LEFT JOIN meeting_document d ON d.source_session_id = s.id
         WHERE knowledge_fts MATCH ?
           AND (f.source_kind <> 'line' OR (l.id IS NOT NULL AND l.status = 'final'))
           AND (f.source_kind <> 'minutes' OR (m.id IS NOT NULL AND m.status = 'ready'))
           \(kind == nil ? "" : "AND f.kind = ?")
+          \(visibility.sql)
         ORDER BY s.started_at DESC, f.created_at DESC;
         """
         try withStatement(sql) { statement in
@@ -3005,6 +3089,10 @@ public actor SessionStore {
             var index: Int32 = 2
             if let kind {
                 bind(statement, index, kind.rawValue)
+                index += 1
+            }
+            for value in visibility.bindings {
+                bindArgument(statement, index, value)
                 index += 1
             }
             while try step(statement) == SQLITE_ROW {
@@ -4297,5 +4385,266 @@ extension SessionStore {
             parentRevisionID: columnText(statement, 5),
             editedAt: Date(timeIntervalSince1970: columnDouble(statement, 6))
         )
+    }
+}
+
+// MARK: - 知识范围、归档与删除（MA-18 / MC-43、MC-44、MC-62、MC-72）
+//
+// 三档删除是三件事，不是一个开关的三档强度：归档留着数据、只移除转录留着结论、
+// 完整删除什么都不留。**顺序固定为"先不可使用、再清理派生"**：先把文档标成
+// 不可见，之后才删正文；反过来会出现"内容已经没了但还能被搜到"的窗口。
+extension SessionStore {
+    /// 归档/删除的入口（MA-18）。
+    ///
+    /// - `.archive`：写 tombstone + 排索引删除。数据一行不少，`restoreMeetingKnowledge` 能撤销。
+    /// - `.removeTranscript`：删转录行与行修订。纪要、结论条目、锚点留着，
+    ///   锚点变成"来源已不可读"——那是合法状态，不是断裂。
+    /// - `.deleteEverything`：连文档、会话、快照、纪要、条目、锚点、分窗一起删。
+    ///
+    /// 全程一个事务：失败路径上当前库一个字节都不变。
+    @discardableResult
+    public func deleteMeetingKnowledge(
+        documentID: String,
+        mode: MeetingDeletionMode
+    ) throws -> MeetingDeletionReport {
+        guard let document = try meetingDocument(id: documentID) else {
+            throw KnowledgeArchiveError.documentNotFound(documentID)
+        }
+        let now = Date().timeIntervalSince1970
+        let sessionID = document.sourceSessionID
+        var report = MeetingDeletionReport(documentID: documentID, mode: mode)
+
+        // 索引里现有的条目先记下来：它们要排进删除 outbox，而 drain 自己要开事务，
+        // 不能嵌在删除事务里（SQLite 不支持嵌套事务）。
+        let indexedEntries = try indexedSearchEntries(sessionID: sessionID)
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            // 第一步：不可使用。tombstone 一落，检索、导出、问答都看不见它，
+            // 后面的清理哪怕中途出问题也不会让"已删"的东西继续被用。
+            try withStatement("UPDATE meeting_document SET deleted_at = ?, updated_at = ? WHERE id = ?;") { statement in
+                bind(statement, 1, now)
+                bind(statement, 2, now)
+                bind(statement, 3, documentID)
+                try step(statement)
+            }
+
+            // 第二步：按档位删正文层。
+            switch mode {
+            case .archive:
+                break
+            case .removeTranscript:
+                guard let sessionID else { break }
+                report.removedLines = try deleteRows("DELETE FROM line WHERE session_id = ?;", sessionID)
+                report.removedRevisions = try deleteRows(
+                    "DELETE FROM transcript_revision WHERE session_id = ?;", sessionID
+                )
+                report.removedSnapshots = try deleteRows(
+                    "DELETE FROM source_snapshot WHERE document_id = ?;", documentID
+                )
+            case .deleteEverything:
+                if let sessionID {
+                    report.removedLines = try deleteRows("DELETE FROM line WHERE session_id = ?;", sessionID)
+                    report.removedRevisions = try deleteRows(
+                        "DELETE FROM transcript_revision WHERE session_id = ?;", sessionID
+                    )
+                    report.removedSnapshots = try deleteRows(
+                        "DELETE FROM source_snapshot WHERE document_id = ?;", documentID
+                    )
+                    // 从外往里删：锚点 → 条目 → 分窗 → 版本。父行一删子行就被级联带走，
+                    // 先删父行的话下面两条都只能数出 0，报告就成了"删了一些"。
+                    report.removedAnchors = try deleteRows("""
+                    DELETE FROM minutes_evidence WHERE item_id IN
+                        (SELECT i.id FROM minutes_item i JOIN minutes m ON m.id = i.minutes_id
+                         WHERE m.session_id = ?);
+                    """, sessionID)
+                    report.removedItems = try deleteRows("""
+                    DELETE FROM minutes_item WHERE minutes_id IN
+                        (SELECT id FROM minutes WHERE session_id = ?);
+                    """, sessionID)
+                    try deleteRows("""
+                    DELETE FROM minutes_window WHERE minutes_id IN
+                        (SELECT id FROM minutes WHERE session_id = ?);
+                    """, sessionID)
+                    report.removedMinutes = try deleteRows("DELETE FROM minutes WHERE session_id = ?;", sessionID)
+                    try deleteRows("DELETE FROM inner_os_exchange WHERE session_id = ?;", sessionID)
+                    try deleteRows("DELETE FROM speaker_name WHERE session_id = ?;", sessionID)
+                    try deleteRows("DELETE FROM session WHERE id = ?;", sessionID)
+                }
+                try deleteRows("DELETE FROM meeting_document WHERE id = ?;", documentID)
+            }
+            // 第三步（仍在事务内）：把索引删除排进 outbox。真正写索引放在提交之后，
+            // 因为 drain 自己要开事务，不能嵌在这里。
+            for (kind, id) in indexedEntries {
+                try enqueueSearchIndex(op: SearchIndexOp.delete, sessionID: sessionID, sourceKind: kind, sourceID: id)
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+        // 派生索引在提交之后才落。失败不影响"已不可用"这个事实——
+        // 检索还要过 tombstone 那一关，索引里多留几条也搜不出来。
+        report.purgedIndexEntries = (try? drainSearchIndex()) ?? 0
+        return report
+    }
+
+    /// 撤销归档（MA-18 回退条款）。**只对归档有效**——另外两档没有"撤销"这回事，
+    /// 调用它们的人不该被这里悄悄恢复一份已经删掉的内容。
+    @discardableResult
+    public func restoreMeetingKnowledge(documentID: String) throws -> Bool {
+        guard let document = try meetingDocument(id: documentID) else { return false }
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            try withStatement(
+                "UPDATE meeting_document SET deleted_at = NULL, updated_at = ? WHERE id = ?;"
+            ) { statement in
+                bind(statement, 1, Date().timeIntervalSince1970)
+                bind(statement, 2, documentID)
+                try step(statement)
+            }
+            // 恢复后要把索引重新排上：内容回来了，可检索性也要回来。
+            if let sessionID = document.sourceSessionID {
+                try reindex(sessionID: sessionID)
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+        return true
+    }
+
+    /// 这次删除/归档够不够撤销。只有归档够。
+    public func meetingDeletionIsRecoverable(documentID: String) throws -> Bool {
+        guard let document = try meetingDocument(id: documentID) else { return false }
+        // 数据都还在就说明只被归档过；正文被删过的文档不可能恢复原样。
+        let lines = try scalarInt("SELECT COUNT(*) FROM line WHERE session_id = ?;", args: [.text(document.sourceSessionID ?? "")]) ?? 0
+        let minutes = try scalarInt("SELECT COUNT(*) FROM minutes WHERE session_id = ?;", args: [.text(document.sourceSessionID ?? "")]) ?? 0
+        return lines > 0 || minutes == 0
+    }
+
+    private func deleteRows(_ sql: String, _ argument: String) throws -> Int {
+        try withStatement(sql) { statement in
+            bind(statement, 1, argument)
+            try step(statement)
+            return Int(sqlite3_changes(try requireHandle()))
+        }
+    }
+
+    /// 旧任务提交前重检删除状态（MA-18 / MC-63）。
+    ///
+    /// 返回 true 表示"这一场已经不可用了，别写"。此时把这一版标成用户停止：
+    /// 它确实没产出内容，但原因要说清楚是会议被删/被归档，不是模型没整理出来。
+    @discardableResult
+    func rejectLateMinutesIfMeetingDeleted(minutesID: String) throws -> Bool {
+        guard let sessionID = try sessionID(minutesID: minutesID) else { return false }
+        guard try isMeetingDeleted(sessionID: sessionID) else { return false }
+        try withStatement("""
+        UPDATE minutes SET status = 'cancelled', lease_until = NULL,
+               failure_reason = '会议已归档或删除，这次整理结果没有写入'
+        WHERE id = ? AND status IN ('queued', 'running');
+        """) { statement in
+            bind(statement, 1, minutesID)
+            try step(statement)
+        }
+        return true
+    }
+
+    // MARK: - 范围过滤
+
+    /// 可见性 SQL 片段。两个检索路径共用同一段，所以"归档之后还能被搜到"
+    /// 这种漏洞不会只在其中一条路上出现。
+    private static func visibilityClause(scope: MeetingKnowledgeScope, documentAlias: String = "d") -> (sql: String, bindings: [SQLArgument]) {
+        var sql = ""
+        var bindings: [SQLArgument] = []
+        if scope.includesArchived {
+            // 显式包含归档时不做 tombstone 过滤，但点名与项目过滤照旧。
+        } else {
+            sql += " AND (\(documentAlias).id IS NULL OR \(documentAlias).deleted_at IS NULL)"
+        }
+        if !scope.documentIDs.isEmpty {
+            let placeholders = Array(repeating: "?", count: scope.documentIDs.count).joined(separator: ", ")
+            sql += " AND \(documentAlias).id IN (\(placeholders))"
+            bindings.append(contentsOf: scope.documentIDs.sorted().map { .text($0) })
+        } else if let projectID = scope.projectID {
+            // 指定了项目就只能看这个项目。没有文档的行（助手、字幕）不隶属于
+            // 任何项目，因此**不**在范围内——这是"只检索授权范围"的保守读法。
+            sql += " AND \(documentAlias).project_id = ?"
+            bindings.append(.text(projectID))
+        }
+        return (sql, bindings)
+    }
+
+    /// 归档后仍在飞行中的旧任务：**提交前重检**文档是不是已经不可用了。
+    ///
+    /// 不重检的后果是"用户删了/归档了，一条几分钟后才回来的任务把它又写了回来"，
+    /// 而且界面显示的是删除之前的状态——用户完全不知情（MC-63）。
+    func minutesOwnerMayStillCommit(minutesID: String) throws -> Bool {
+        guard let sessionID = try sessionID(minutesID: minutesID) else { return true }
+        return try !isMeetingDeleted(sessionID: sessionID)
+    }
+
+    /// 这一场是不是已经归档/删除。
+    public func isMeetingDeleted(sessionID: String) throws -> Bool {
+        let sql = """
+        SELECT d.deleted_at FROM meeting_document d
+        WHERE d.source_session_id = ? AND d.deleted_at IS NOT NULL LIMIT 1;
+        """
+        return try withStatement(sql) { statement -> Bool in
+            bind(statement, 1, sessionID)
+            return try step(statement) == SQLITE_ROW
+        }
+    }
+
+    func sessionID(minutesID: String) throws -> String? {
+        try withStatement("SELECT session_id FROM minutes WHERE id = ? LIMIT 1;") { statement -> String? in
+            bind(statement, 1, minutesID)
+            guard try step(statement) == SQLITE_ROW else { return nil }
+            return columnText(statement, 0)
+        }
+    }
+
+    /// 把一场会重新排进检索索引（撤销归档、导入之后用）。
+    private func reindex(sessionID: String) throws {
+        let lineIDs = try withStatement("SELECT id FROM line WHERE session_id = ? AND status = 'final';") { statement -> [String] in
+            bind(statement, 1, sessionID)
+            var ids: [String] = []
+            while try step(statement) == SQLITE_ROW {
+                if let id = columnText(statement, 0) { ids.append(id) }
+            }
+            return ids
+        }
+        for id in lineIDs {
+            try enqueueSearchIndex(sessionID: sessionID, sourceKind: SearchIndexOp.lineKind, sourceID: id)
+        }
+        let minutesIDs = try withStatement("SELECT id FROM minutes WHERE session_id = ? AND status = 'ready';") { statement -> [String] in
+            bind(statement, 1, sessionID)
+            var ids: [String] = []
+            while try step(statement) == SQLITE_ROW {
+                if let id = columnText(statement, 0) { ids.append(id) }
+            }
+            return ids
+        }
+        for id in minutesIDs {
+            try enqueueSearchIndex(sessionID: sessionID, sourceKind: SearchIndexOp.minutesKind, sourceID: id)
+        }
+    }
+
+    /// 一场会当前在检索索引里占着哪些条目。
+    private func indexedSearchEntries(sessionID: String?) throws -> [(String, String)] {
+        guard let sessionID, Self.fts5Available else { return [] }
+        let ids = try withStatement("""
+        SELECT source_kind, source_id FROM knowledge_fts WHERE session_id = ?;
+        """) { statement -> [(String, String)] in
+            bind(statement, 1, sessionID)
+            var rows: [(String, String)] = []
+            while try step(statement) == SQLITE_ROW {
+                if let kind = columnText(statement, 0), let id = columnText(statement, 1) {
+                    rows.append((kind, id))
+                }
+            }
+            return rows
+        }
+        return ids
     }
 }
