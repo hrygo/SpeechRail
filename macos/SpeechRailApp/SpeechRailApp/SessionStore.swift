@@ -2379,6 +2379,319 @@ public actor SessionStore {
         public var minutesCount: Int
     }
 
+    /// 备份清单（MA-20 / §12.3）。与库文件**并排**存放，缺它就不算一份可用的备份。
+    ///
+    /// 只存计数与 schema 版本，不存正文：清单跟着备份走，泄露面必须和库本身一样小。
+    public struct BackupManifest: Codable, Hashable, Sendable {
+        public var schemaVersion: Int
+        public var createdAt: Date
+        public var counts: BackupCounts
+
+        public init(schemaVersion: Int, createdAt: Date, counts: BackupCounts) {
+            self.schemaVersion = schemaVersion
+            self.createdAt = createdAt
+            self.counts = counts
+        }
+    }
+
+    /// 备份里的行数。用于恢复后核对"少了没有、多了没有"。
+    public struct BackupCounts: Codable, Hashable, Sendable {
+        public var sessions: Int
+        public var lines: Int
+        public var meetingDocuments: Int
+        public var transcriptRevisions: Int
+        public var sourceSnapshots: Int
+        public var minutes: Int
+        public var minutesItems: Int
+        public var minutesEvidence: Int
+        public var minutesWindows: Int
+
+        public init(
+            sessions: Int,
+            lines: Int,
+            meetingDocuments: Int,
+            transcriptRevisions: Int,
+            sourceSnapshots: Int,
+            minutes: Int,
+            minutesItems: Int,
+            minutesEvidence: Int,
+            minutesWindows: Int
+        ) {
+            self.sessions = sessions
+            self.lines = lines
+            self.meetingDocuments = meetingDocuments
+            self.transcriptRevisions = transcriptRevisions
+            self.sourceSnapshots = sourceSnapshots
+            self.minutes = minutes
+            self.minutesItems = minutesItems
+            self.minutesEvidence = minutesEvidence
+            self.minutesWindows = minutesWindows
+        }
+
+        public static let zero = BackupCounts(
+            sessions: 0, lines: 0, meetingDocuments: 0, transcriptRevisions: 0,
+            sourceSnapshots: 0, minutes: 0, minutesItems: 0, minutesEvidence: 0, minutesWindows: 0
+        )
+    }
+
+    /// 备份文件与清单的固定名字。清单缺了就当没有备份——
+    /// 只剩一个 .sqlite3 时无法判断它是不是完整、是不是当前 schema 写的。
+    public static let backupFileName = "sessions.sqlite3"
+    public static let backupManifestName = "manifest.json"
+
+    /// 导出一份备份：库快照 + 清单，**原子发布**（§12.3）。
+    ///
+    /// 先写临时名再改名：中途崩了不会留下"半个备份"被当成可用的那一份。
+    /// 目标目录已存在同名备份时直接失败——覆盖一份用户可能正在保留的旧备份，
+    /// 比备份失败更糟。
+    @discardableResult
+    public func exportBackup(to directory: URL) throws -> URL {
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let databaseURL = directory.appendingPathComponent(Self.backupFileName)
+        let manifestURL = directory.appendingPathComponent(Self.backupManifestName)
+        let stagingURL = directory.appendingPathComponent(".\(Self.backupFileName).staging")
+        if fileManager.fileExists(atPath: stagingURL.path) {
+            try fileManager.removeItem(at: stagingURL)
+        }
+        try backup(to: stagingURL)
+        let manifest = BackupManifest(
+            schemaVersion: Int(Self.schemaVersion),
+            createdAt: Date(),
+            counts: try knowledgeCounts()
+        )
+        try JSONEncoder().encode(manifest).write(to: manifestURL)
+        if fileManager.fileExists(atPath: databaseURL.path) {
+            // 已有同名备份：原子替换，不先删——先删再失败就两头都没了。
+            _ = try fileManager.replaceItemAt(databaseURL, withItemAt: stagingURL)
+        } else {
+            try fileManager.moveItem(at: stagingURL, to: databaseURL)
+        }
+        return directory
+    }
+
+    /// 当前库的知识内容行数（不含运行时缓存）。
+    private func knowledgeCounts() throws -> BackupCounts {
+        func count(_ sql: String) throws -> Int {
+            try scalarInt(sql) ?? 0
+        }
+        return BackupCounts(
+            sessions: try count("SELECT COUNT(*) FROM session;"),
+            lines: try count("SELECT COUNT(*) FROM line;"),
+            meetingDocuments: try count("SELECT COUNT(*) FROM meeting_document;"),
+            transcriptRevisions: try count("SELECT COUNT(*) FROM transcript_revision;"),
+            sourceSnapshots: try count("SELECT COUNT(*) FROM source_snapshot;"),
+            minutes: try count("SELECT COUNT(*) FROM minutes;"),
+            minutesItems: try count("SELECT COUNT(*) FROM minutes_item;"),
+            minutesEvidence: try count("SELECT COUNT(*) FROM minutes_evidence;"),
+            minutesWindows: try count("SELECT COUNT(*) FROM minutes_window;")
+        )
+    }
+
+    /// 恢复预演（MC-70 / §12.3）：把备份复制到**临时目录**当新库打开，
+    /// 核对文档、版本、引用与行动项关联，然后如实报告。
+    ///
+    /// 三条边界：
+    /// 1. **只碰临时副本**，从不打开或改写当前库——校验不过时当前库当然也不变；
+    /// 2. 比当前 schema 更新的备份**拒绝**（MC-69），不尝试破坏性降级；
+    /// 3. 比当前旧的备份允许就地迁移后核对——那正是"备份可恢复"要证明的事。
+    ///
+    /// 调用方在拿到 `.isRestorable == true` 之后才谈得上切换；本方法本身不做切换。
+    public static func restorePreview(
+        of bundleDirectory: URL,
+        into scratchDirectory: URL
+    ) async throws -> RestorePreview {
+        let fm = FileManager.default
+        let source = bundleDirectory.appendingPathComponent(backupFileName)
+        guard fm.fileExists(atPath: source.path) else {
+            throw SessionStoreError.storageUnavailable
+        }
+        let manifestURL = bundleDirectory.appendingPathComponent(backupManifestName)
+        guard
+            let manifestData = try? Data(contentsOf: manifestURL),
+            let manifest = try? JSONDecoder().decode(BackupManifest.self, from: manifestData)
+        else {
+            // 没有清单就无法判断完整性：明确拒绝，不"尽力恢复"。
+            throw SessionStoreError.statementFailed("备份缺少清单文件，不能作为可恢复的备份使用")
+        }
+
+        try fm.createDirectory(at: scratchDirectory, withIntermediateDirectories: true)
+        let staged = scratchDirectory.appendingPathComponent(fileName)
+        if fm.fileExists(atPath: staged.path) {
+            try fm.removeItem(at: staged)
+        }
+        try fm.copyItem(at: source, to: staged)
+        // WAL/共享内存旁文件也可能带着未合并的页，一并带过去再合并。
+        for suffix in ["-wal", "-shm"] {
+            let extra = bundleDirectory.appendingPathComponent(backupFileName + suffix)
+            if fm.fileExists(atPath: extra.path) {
+                try? fm.copyItem(
+                    at: extra,
+                    to: scratchDirectory.appendingPathComponent(fileName + suffix)
+                )
+            }
+        }
+
+        // 打不开就地抛：schema 更新、文件损坏都在这里被挡住，当前库不受影响。
+        let scratch = SessionStore(directory: scratchDirectory)
+        let preview: RestorePreview
+        do {
+            try await scratch.open()
+            let counts = try await scratch.knowledgeCounts()
+            let verification = try await scratch.verifyReferences()
+            let readable = try await scratch.readbackReport()
+
+            var problems: [String] = []
+            if !verification.isClean {
+                problems.append(contentsOf: verification.problems)
+            }
+            if counts.minutes != manifest.counts.minutes {
+                problems.append("纪要版本数对不上：清单 \(manifest.counts.minutes)，新库读到 \(counts.minutes)")
+            }
+            if counts.minutesItems != manifest.counts.minutesItems {
+                problems.append("结论条目数对不上：清单 \(manifest.counts.minutesItems)，新库读到 \(counts.minutesItems)")
+            }
+            if counts.meetingDocuments != manifest.counts.meetingDocuments {
+                problems.append("知识文档数对不上：清单 \(manifest.counts.meetingDocuments)，新库读到 \(counts.meetingDocuments)")
+            }
+            problems.append(contentsOf: readable.problems)
+
+            preview = RestorePreview(
+                sourceSchemaVersion: manifest.schemaVersion,
+                restoredCounts: counts,
+                references: verification,
+                documentsReadable: readable.documentsReadable,
+                versionsReadable: readable.versionsReadable,
+                actionsReadable: readable.actionsReadable,
+                anchorsWithQuote: readable.anchorsWithQuote,
+                problems: problems,
+                isRestorable: problems.isEmpty
+            )
+        } catch {
+            // 校验不过就如实失败：临时副本仍然是副本，当前库一个字节都没动。
+            await scratch.close()
+            throw error
+        }
+        await scratch.close()
+        return preview
+    }
+
+    /// 引用完整性（MC-70）：外键 + 四条跨表引用。
+    ///
+    /// `PRAGMA foreign_key_check` 只覆盖声明了外键的列；这里额外查"证据锚点指向的
+    /// 修订/行是否还在"，因为那是本项目最要紧的一条引用，而它允许 `ON DELETE SET NULL`
+    /// ——被删的引用是**合法的**（明确表示"来源已不可读"），不算断裂。
+    public func verifyReferences() throws -> ReferenceVerification {
+        var problems: [String] = []
+        let foreignKeyIssues = try scalarInt("SELECT COUNT(*) FROM pragma_foreign_key_check;") ?? 0
+        if foreignKeyIssues > 0 {
+            problems.append("有 \(foreignKeyIssues) 处外键指向不存在的行")
+        }
+        func orphanCount(_ sql: String) throws -> Int {
+            try scalarInt(sql) ?? 0
+        }
+        let orphanItems = try orphanCount(
+            "SELECT COUNT(*) FROM minutes_item i LEFT JOIN minutes m ON m.id = i.minutes_id WHERE m.id IS NULL;"
+        )
+        if orphanItems > 0 {
+            problems.append("有 \(orphanItems) 条结论条目挂在不存在的纪要上")
+        }
+        let orphanWindows = try orphanCount(
+            "SELECT COUNT(*) FROM minutes_window w LEFT JOIN minutes m ON m.id = w.minutes_id WHERE m.id IS NULL;"
+        )
+        if orphanWindows > 0 {
+            problems.append("有 \(orphanWindows) 行窗口进度挂在不存在的纪要上")
+        }
+        let orphanEvidence = try orphanCount(
+            "SELECT COUNT(*) FROM minutes_evidence e LEFT JOIN minutes_item i ON i.id = e.item_id WHERE i.id IS NULL;"
+        )
+        if orphanEvidence > 0 {
+            problems.append("有 \(orphanEvidence) 条证据锚点挂在不存在的结论上")
+        }
+        let orphanSnapshots = try orphanCount(
+            "SELECT COUNT(*) FROM source_snapshot s LEFT JOIN meeting_document d ON d.id = s.document_id WHERE d.id IS NULL;"
+        )
+        if orphanSnapshots > 0 {
+            problems.append("有 \(orphanSnapshots) 个来源快照挂在不存在的知识文档上")
+        }
+        return ReferenceVerification(
+            foreignKeyIssues: foreignKeyIssues,
+            problems: problems,
+            isClean: problems.isEmpty
+        )
+    }
+
+    /// 回读关键内容：文档、版本、引用与行动项（MC-70「恢复成功需回读关键文档」）。
+    private func readbackReport() throws -> ReadbackReport {
+        var problems: [String] = []
+        var documents = 0
+        var versions = 0
+        var actions = 0
+        var anchorsWithQuote = 0
+        let sessions = try allSessionsForVerification()
+        for session in sessions {
+            if try meetingDocument(forSessionID: session.id) != nil {
+                documents += 1
+            }
+            let rows = try minutesVersions(sessionID: session.id)
+            versions += rows.count
+            for row in rows {
+                let items = try minutesItems(minutesID: row.id)
+                for item in items {
+                    actions += 1
+                    anchorsWithQuote += item.anchors.filter { $0.quote != nil }.count
+                }
+            }
+        }
+        return ReadbackReport(
+            documentsReadable: documents,
+            versionsReadable: versions,
+            actionsReadable: actions,
+            anchorsWithQuote: anchorsWithQuote,
+            problems: problems
+        )
+    }
+
+    private func allSessionsForVerification() throws -> [SessionRecord] {
+        try withStatement("SELECT \(Self.sessionColumns) FROM session;") { statement in
+            var records: [SessionRecord] = []
+            while try step(statement) == SQLITE_ROW {
+                if let record = Self.sessionRecord(from: statement) {
+                    records.append(record)
+                }
+            }
+            return records
+        }
+    }
+
+    /// 恢复预演结论。字段都是计数与布尔，不含正文与路径。
+    public struct RestorePreview: Sendable {
+        public var sourceSchemaVersion: Int
+        public var restoredCounts: BackupCounts
+        public var references: ReferenceVerification
+        public var documentsReadable: Int
+        public var versionsReadable: Int
+        public var actionsReadable: Int
+        public var anchorsWithQuote: Int
+        public var problems: [String]
+        /// 只有这里为 true，调用才可以考虑切换到这份备份。
+        public var isRestorable: Bool
+    }
+
+    public struct ReferenceVerification: Hashable, Sendable {
+        public var foreignKeyIssues: Int
+        public var problems: [String]
+        public var isClean: Bool
+    }
+
+    private struct ReadbackReport: Sendable {
+        var documentsReadable: Int
+        var versionsReadable: Int
+        var actionsReadable: Int
+        var anchorsWithQuote: Int
+        var problems: [String]
+    }
+
+
     // MARK: - 行 → 类型
 
     static let sessionColumns = """
