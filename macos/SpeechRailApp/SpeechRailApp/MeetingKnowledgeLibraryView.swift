@@ -27,6 +27,8 @@ struct MeetingKnowledgeLibraryView: View {
     /// 单独一个状态而不是复用模型：**确认是界面的事**，模型只管执行。
     /// 混在一起就会出现"模型记住了上一次待确认的动作"这类说不清的状态。
     @State private var pendingDeletion: PendingDeletion?
+    /// 导出失败时要说的那一句。`nil` = 没有失败，没有理由弹一个空面板。
+    @State private var exportError: String?
 
     /// 一次待确认的删除。用 `Identifiable` 驱动 `confirmationDialog`。
     private struct PendingDeletion: Identifiable {
@@ -67,6 +69,14 @@ struct MeetingKnowledgeLibraryView: View {
             Button("取消", role: .cancel) { pendingDeletion = nil }
         } message: { pending in
             Text(deletionDialogMessage(pending))
+        }
+        .alert("导不了这场会议", isPresented: Binding(
+            get: { exportError != nil },
+            set: { if !$0 { exportError = nil } }
+        )) {
+            Button("好") { exportError = nil }
+        } message: {
+            Text(exportError ?? "")
         }
         .task {
             if model.rows.isEmpty {
@@ -311,6 +321,12 @@ struct MeetingKnowledgeLibraryView: View {
     private func moreMenu(_ snapshot: MeetingReviewSnapshot) -> some View {
         if let documentID = model.selectedDocumentID {
             Menu {
+                Menu("导出这场会议…") {
+                    ForEach(exportFormats) { format in
+                        Button(format.title) { exportSelected(as: format) }
+                    }
+                }
+                Divider()
                 if snapshot.status == .archived {
                     Button("撤销归档") {
                         Task { await model.restore(documentID) }
@@ -330,6 +346,31 @@ struct MeetingKnowledgeLibraryView: View {
             .disabled(model.pendingDocumentID != nil)
             .help("归档、移除转录或完整删除这场会议")
             .accessibilityLabel("这场会议的更多操作")
+        }
+    }
+
+    /// 首选格式排在最前，其余按枚举顺序——与会议页的导出菜单同一套规则，
+    /// 两处菜单给出的默认项不一样的话，用户会以为是两个功能。
+    private var exportFormats: [SessionExportFormat] {
+        let preferred = SessionExportFormat.preferred(for: .meeting)
+        return [preferred] + SessionExportFormat.allCases.filter { $0 != preferred }
+    }
+
+    /// 导出**详情正在显示的那一版**纪要（MC-48）。
+    ///
+    /// 导不出就说导不出：没有会话的导入纪要没有转录行，
+    /// 给一个看着像会议的空壳比失败更糟——用户会以为导全了。
+    private func exportSelected(as format: SessionExportFormat) {
+        Task {
+            do {
+                guard let payload = try await model.exportPayload() else {
+                    exportError = "这场会议没有可导出的转录记录。"
+                    return
+                }
+                if !SessionExportPanel.write(payload, as: format) { return }
+            } catch {
+                exportError = error.localizedDescription
+            }
         }
     }
 

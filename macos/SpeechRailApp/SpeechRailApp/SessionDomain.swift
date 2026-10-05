@@ -5064,10 +5064,14 @@ public struct MeetingReviewSnapshot: Identifiable, Sendable {
     public var minutesBody: String?
     public var transcriptLines: [String]
     public var items: [KnowledgeEvidence]
+    /// 详情正在显示的那一版纪要。导出必须跟着它走——
+    /// 用户看的是这一版，导出的却是另一版，MC-48 说的"始终对应"就没做到。
+    public var minutesVersionID: String?
 
     public init(
         documentID: String, title: String, occurredAt: Date?, status: MeetingLibraryStatus,
-        minutesBody: String?, transcriptLines: [String], items: [KnowledgeEvidence]
+        minutesBody: String?, transcriptLines: [String], items: [KnowledgeEvidence],
+        minutesVersionID: String? = nil
     ) {
         self.documentID = documentID
         self.title = title
@@ -5076,6 +5080,7 @@ public struct MeetingReviewSnapshot: Identifiable, Sendable {
         self.minutesBody = minutesBody
         self.transcriptLines = transcriptLines
         self.items = items
+        self.minutesVersionID = minutesVersionID
     }
 
     public var isEmpty: Bool { minutesBody == nil && transcriptLines.isEmpty && items.isEmpty }

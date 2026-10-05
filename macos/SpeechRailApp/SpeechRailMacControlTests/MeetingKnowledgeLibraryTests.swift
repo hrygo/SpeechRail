@@ -314,6 +314,73 @@ final class MeetingKnowledgeLibraryTests: XCTestCase {
         XCTAssertNil(page.rows.first?.matchExcerpt)
     }
 
+    // MARK: - 验收 4：导出已有资料
+
+    /// 导出件必须是**库里定稿的内容**，而且转录行要带得住 id 与时间。
+    ///
+    /// 详情快照里的转录只有纯文本（`[String]`）。拿它去导出，
+    /// 导出来的文件对不回任何来源——用户拿到的不是"这场会议"，是"一段话"。
+    func testExportPayloadCarriesIdentifiableTranscriptLines() async throws {
+        let store = try requireStore()
+        let documentID = try await makeMeeting(
+            title: "要导出的会", at: Date(timeIntervalSince1970: 1_700_000_000),
+            lineText: "这一句要能对回来源。"
+        )
+
+        let exported = try await store.meetingExportPayload(documentID: documentID)
+        let payload = try XCTUnwrap(exported)
+        XCTAssertEqual(payload.record.title, "要导出的会")
+        XCTAssertEqual(payload.lines.count, 1)
+        XCTAssertEqual(payload.lines.first?.text, "这一句要能对回来源。")
+        XCTAssertFalse(
+            (payload.lines.first?.id ?? "").isEmpty,
+            "没有行 id，导出件就对不回来源"
+        )
+        XCTAssertNotNil(payload.minutes, "整理过的会议要把纪要一起导出去")
+    }
+
+    /// MC-48：用户看的是哪一版，导出去就得是哪一版。
+    ///
+    /// 先记下详情当时显示的那一版，改出第二版之后再导——
+    /// 如果实现是"永远导最新版"，这条会红。
+    func testExportFollowsTheVersionOnScreen() async throws {
+        let store = try requireStore()
+        let documentID = try await makeMeeting(
+            title: "两版的会", at: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        let snapshot = try await store.meetingReviewSnapshot(documentID: documentID)
+        let first = try XCTUnwrap(
+            snapshot?.minutesVersionID,
+            "详情拿不到当前版本的 id，导出就没有东西可钉"
+        )
+        let document = try await store.meetingDocument(id: documentID)
+        let sessionID = try XCTUnwrap(document?.sourceSessionID)
+        let firstVersion = try await store.minutesVersion(id: first)
+        let firstBody = try XCTUnwrap(firstVersion?.body)
+
+        _ = try await store.saveUserMinutesEdit(
+            sessionID: sessionID, editingMinutesID: first, body: "这是用户改过的第二版。"
+        )
+
+        let pinnedExport = try await store.meetingExportPayload(
+            documentID: documentID, minutesVersionID: first
+        )
+        let pinned = try XCTUnwrap(pinnedExport)
+        XCTAssertEqual(pinned.minutes?.id, first, "钉住哪一版就该导出哪一版")
+        XCTAssertEqual(pinned.minutes?.body, firstBody)
+    }
+
+    /// 没有会话的导入纪要（MC-68）导不出转录。**这时要说导不出**，
+    /// 不能给一个只有壳子的文件——用户会以为导全了。
+    func testExportRefusesWhenThereIsNoSession() async throws {
+        let store = try requireStore()
+        let imported = try await store.createMeetingDocument(
+            MeetingDocument(id: "doc-import-export", sourceSessionID: nil, title: "外部导入纪要")
+        )
+        let payload = try await store.meetingExportPayload(documentID: imported.id)
+        XCTAssertNil(payload, "没有会话就没有转录行，不能导出空壳")
+    }
+
     func testProjectFilterNarrowsTheList() async throws {
         let store = try requireStore()
         try await seedMeetings(6)

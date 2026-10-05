@@ -238,6 +238,19 @@ public final class MeetingLibraryModel {
         }
     }
 
+    /// 导出当前选中的那一场（MA-19 / 验收 4「导出已有资料」）。
+    ///
+    /// 钉住详情正在显示的那一版纪要（MC-48）：用户看的是哪一版，
+    /// 导出去就得是哪一版。返回 nil 表示**这场导不出**——导入的纪要
+    /// 没有会话、没有转录行可导，硬凑一个空壳比老实说导不出更坏。
+    public func exportPayload() async throws -> SessionExportPayload? {
+        guard let documentID = selectedDocumentID else { return nil }
+        return try await coordinator.meetingExportPayload(
+            documentID: documentID,
+            minutesVersionID: snapshot?.minutesVersionID
+        )
+    }
+
     /// 一次删除之后给用户看的那句话。
     ///
     /// **说具体数目与还剩什么**，不写"操作成功"：用户真正想知道的是

@@ -6471,9 +6471,11 @@ extension SessionStore {
         )
         var body: String?
         var transcript: [String] = []
+        var minutesVersionID: String?
         if let sessionID = document.sourceSessionID {
             let minutes = try acceptedMinutes(sessionID: sessionID) ?? latestUsableMinutes(sessionID: sessionID)
             body = minutes?.body
+            minutesVersionID = minutes?.id
             transcript = try lines(sessionID: sessionID).map(\.text)
         }
         return MeetingReviewSnapshot(
@@ -6483,7 +6485,39 @@ extension SessionStore {
             status: status,
             minutesBody: body,
             transcriptLines: transcript,
-            items: page.items
+            items: page.items,
+            minutesVersionID: minutesVersionID
+        )
+    }
+
+    /// 从库里读一场会议的导出件（MA-19 / 验收 4「导出已有资料」）。
+    ///
+    /// **重新从库里读，不拿界面上正在显示的那份快照**：快照里的转录只有纯文本，
+    /// 丢了行 id、时间与说话人，导出去就再也对不回来源。宁可多读一次库。
+    ///
+    /// `minutesVersionID` 是详情正在显示的那一版。传 nil 表示"没选版本"，
+    /// 这时导出当前采用版——与 `MeetingReviewSnapshot` 的取法一致。
+    public func meetingExportPayload(
+        documentID: String,
+        minutesVersionID: String? = nil
+    ) throws -> SessionExportPayload? {
+        guard let document = try meetingDocument(id: documentID) else { return nil }
+        guard let sessionID = document.sourceSessionID else {
+            // 导入的纪要允许没有会话（MC-68）。没有会话就没有转录行可导，
+            // 硬造一个空 record 导出去，用户拿到的是一份看着像会议的空壳。
+            return nil
+        }
+        guard let record = try session(id: sessionID) else { return nil }
+        let minutes: MinutesVersion? = if let minutesVersionID {
+            try? minutesVersion(id: minutesVersionID)
+        } else {
+            try acceptedMinutes(sessionID: sessionID) ?? latestUsableMinutes(sessionID: sessionID)
+        }
+        return SessionExportPayload(
+            record: record,
+            lines: try lines(sessionID: sessionID),
+            speakerNames: try speakerNames(sessionID: sessionID),
+            minutes: minutes
         )
     }
 

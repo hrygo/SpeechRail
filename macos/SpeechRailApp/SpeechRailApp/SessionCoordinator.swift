@@ -1063,6 +1063,17 @@ public final class SessionCoordinator {
         try await store.meetingReviewSnapshot(documentID: documentID)
     }
 
+    /// 导出这一场（MA-19 / 验收 4）。传 `minutesVersionID` 就是**钉住那一版**，
+    /// 不传则用当前采用版——与详情显示的取法一致（MC-48）。
+    public func meetingExportPayload(
+        documentID: String,
+        minutesVersionID: String? = nil
+    ) async throws -> SessionExportPayload? {
+        try await store.meetingExportPayload(
+            documentID: documentID, minutesVersionID: minutesVersionID
+        )
+    }
+
     /// 检索索引状态：索引是否可用、有多少待处理项（§6.5「保存与索引分开报状态」）。
     public func searchIndexStatus() async throws -> SessionStore.SearchIndexStatus {
         try await store.searchIndexStatus()

@@ -51,7 +51,7 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 1.4 追加（验收 1/MC-24 断线恢复）：异常退出后 `sealAbandonedSessions`
 只封存不删行，已存正文重开可读、可检索；会议说话人 partial 不受助手封存影响。
 
-## 当前未验证事项总账（截至 2026-10-05）
+## 当前未验证事项总账（截至 2026-10-06）
 
 **这份总账是权威的当前状态。** 下面各节的「未验证事项与已知边界」是**写那一节当时的
 快照**，其中若干条已被后续小节推翻或修正（包括本轮刚更正的两条）。读到某节的未验证
@@ -78,6 +78,11 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 | 7 | 删除不做物理安全擦除：SQLite 删行后文件里可能仍有残留页 | 沿用 | 验收 4 的**索引级**已证（`removeSession` 漏清索引那处已修，见该节）；物理残留未做，也无法在常规测试里证明 |
 | 8 | 分享包（`scope == .share`）不是完整往返格式：只装被引用的那几行原句 | 沿用 | 导入新库后这场会议不完整，是有意取舍而非缺陷 |
 | 9 | 检索排序是会话时间倒序，无相关性打分（BM25 之类） | 沿用 | 多命中时顺序可能不是最优；不阻塞验收 |
+| 11 | **归档包往返（MA-19）没有入口**：`exportKnowledgeArchive` / `previewKnowledgeArchive` / `importKnowledgeArchive` 生产代码零消费方 | 实测（列出全部 public 方法逐个查消费方） | 验收 4 的"导出"目前只由本轮新接的**单场导出**覆盖；跨库完整往返（含执行状态与决策演进）仍做不了 |
+| 12 | **备份与恢复（MA-20 / 验收 5）没有入口**：`exportBackup` 生产代码零消费方 | 实测（同上） | 验收 5 的证据全部来自 store 级用例。用户现在无法备份，也无法把备份恢复到库 |
+| 13 | **标签（MA-13）与项目没有入口**：`documentTags` / `setDocumentTags` / `documentTagsInProject` / `createProject` / `renameProject` 零消费方；`MeetingLibraryModel.filter(projectID:)` 本身也没有调用方 | 实测（同上 + 读库页视图） | 库页视图的文档注释写着"高级操作（标签、项目、删除、导出）留在更多菜单"，四项里此前只有"删除"存在。知识沉淀这条闭环在用户侧没有落点 |
+| 14 | **用户补充（验收 2）与执行状态/决策演进（MA-14）没有入口**：`meetingSupplements`、`executionEvents` / `recordExecutionEvent` / `executionState` / `confirmSupersession` / `conflictingDecisions` 零消费方 | 实测（同上） | 验收 2 要求区分"原始转录/人工修订/AI 归纳/**用户补充**"，四档里最后一档用户现在没法产出；决策演进链只能在库里看 |
+
 
 ### 三、本轮查证后判定为**已关闭**（此前记为未做，实为误判或过时）
 
@@ -2673,3 +2678,75 @@ try withStatement("DELETE FROM session WHERE id = ?;") { ... }
   `bm25` 只用来在同一场的多条命中里挑最相关的那一条。
 - **未在真机界面走查**（无 UI 自动化授权）：两行截断、无障碍朗读顺序
   （标题→日期→证据）都只是代码层面的推断。
+
+## M1 增量：知识库里导不出任何一场会议（验收 4 / MA-19）
+
+### 做了什么
+
+这一轮换了个查法：不看"哪个功能坏了"，而是把 `SessionStore` / `SessionDomain`
+的公开方法全部列出来，逐个查生产代码里有没有消费方。
+`excerpt` 当初就是这样被发现的——它是 14 项绿灯测试背后唯一一个没人用的字段。
+
+结果比预期严重。**知识库里导不出任何一场会议。**
+
+- 库页「更多」菜单只有：撤销归档、归档、只移除完整转录、完整删除、核对与修改；
+- 导出菜单只存在于 `MeetingView`（实时采集页），导的是**当前会话**；
+- `exportKnowledgeArchive` / `previewKnowledgeArchive` / `importKnowledgeArchive`
+  在生产代码里**零消费方**——MA-19 的归档包往返整套没有入口；
+- `exportBackup` 同样零消费方——MA-20 的备份没有入口；
+- `createProject` / `renameProject` 零消费方，**项目筛选 UI 也不存在**
+  （`MeetingLibraryModel.filter(projectID:)` 本身就没有调用方）；
+- `documentTags` / `setDocumentTags` / `documentTagsInProject` 零消费方；
+- `meetingSupplements` 零消费方——验收 2 要求区分「用户补充」，而用户现在没法补；
+- MA-14 的 `executionEvents` / `recordExecutionEvent` / `executionState` /
+  `confirmSupersession` / `conflictingDecisions` 一律零消费方。
+
+`MeetingKnowledgeLibraryView` 的文档注释里明写着
+「高级操作（**标签、项目、删除、导出**）留在详情里的『更多』菜单」——
+四项里当时只有"删除"存在。本轮补上导出，标签与项目仍然欠着。
+
+**这一节只做了导出。** 归档包往返、备份恢复、标签、项目、用户补充都不在这次改动里，
+但它们和导出是同一个病因，必须一起记进总账，不能只修一处就当这轮结束。
+
+### 这一轮做的
+
+库页「更多」菜单顶部加「导出这场会议…」子菜单，格式顺序与会议页的导出菜单一致
+（两处菜单默认项不一样的话，用户会以为是两个功能）。
+
+导出**重新从库里读**，不拿界面上正在显示的那份快照：快照里的转录是 `[String]`，
+丢了行 id、时间与说话人，导出去就再也对不回来源。
+
+- `MeetingReviewSnapshot` 增加 `minutesVersionID`，导出钉住**详情正在显示的那一版**
+  （MC-48「查看、编辑和导出始终对应用户选定的会议与版本」）；
+- 没有会话的导入纪要（MC-68）导不出，界面**明说导不出**，不给空壳文件。
+
+### 回归证据（2026-10-06）
+
+`MeetingKnowledgeLibraryTests` 21 项全绿，新增三条：
+
+- `testExportPayloadCarriesIdentifiableTranscriptLines`：转录行必须带得住 id。
+  只断言"导出了内容"会放过一个把快照纯文本直接写文件的实现。
+- `testExportFollowsTheVersionOnScreen`：先记下详情当时显示的那一版，
+  改出第二版之后再按第一版导出。**红/绿反证已核对**——把版本钉住临时改成
+  `if false` 后该用例变红，导出的确实变成了第二版。
+- `testExportRefusesWhenThereIsNoSession`：无会话的导入纪要返回 nil。
+
+全量 `swift test --package-path macos/SpeechRailApp`：XCTest **1043 项**
+（上一节 1040 +3）+ Swift Testing **419 项**，零失败。
+`./scripts/macos_app_build.sh`：**BUILD SUCCEEDED**。
+`python3 scripts/check_macos_test_target_coverage.py`：**OK**。
+
+### 迁移与回退
+
+- **无 schema 变更**。`minutesVersionID` 是读取时带出来的，不落库。
+- 回退：删掉库页菜单里的导出项与 `MeetingLibraryModel.exportPayload()` 即可；
+  `meetingExportPayload` 留在 store 层也无害（它只是读）。
+- 导出格式与会议页共用 `SessionExporter`，不新增格式、不新增兼容问题。
+
+### 未验证事项与已知边界
+
+- **导出走的是 `SessionExportPanel`（NSSavePanel），未在真机点过**（无 UI 自动化授权）。
+  保存面板的取消路径、文件名建议、覆盖确认都只是读代码推断。
+- 本轮**只接通单场导出**。归档包（MA-19 的完整往返）与备份/恢复（MA-20）
+  仍然没有入口——见总账新增的第 11～14 条。
+- 导出的纪要仍是"某一版正文"，不含执行状态与决策演进链（那属于归档包的范围）。
