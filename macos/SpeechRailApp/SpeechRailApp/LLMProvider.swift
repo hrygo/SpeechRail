@@ -684,6 +684,9 @@ public enum LLMError: LocalizedError, Equatable {
     case streamEndedEarly
     /// 流里出现无法解析或无法分类的事件：不能静默跳过直到"看起来成功"。
     case malformedStreamEvent
+    /// V07:流预算耗尽——SSE 单行/单事件、错误 body 或累计正文超限。
+    /// 已收到的正文由调用方保留；不得静默丢 token，不得强制完成/朗读。
+    case streamBudgetExceeded(String)
     case cancelled
 
     public var errorDescription: String? {
@@ -707,6 +710,8 @@ public enum LLMError: LocalizedError, Equatable {
         case .refused(let reason): "模型没有回答：\(reason)"
         case .streamEndedEarly: "回答提前结束，已保留收到的内容。"
         case .malformedStreamEvent: "服务返回了无法解析的回答流。"
+        case .streamBudgetExceeded(let detail):
+            detail.isEmpty ? "回答流超出容量预算，已保留收到的内容。" : "回答流超出容量预算（\(detail)），已保留收到的内容。"
         case .cancelled: "已取消。"
         }
     }
@@ -748,9 +753,18 @@ struct LLMResponseStreamState {
 ///
 /// 为什么不用 `URLSession.AsyncBytes.lines`：它会丢掉空行，于是拿不到 SSE 的事件边界，
 /// 一个由多行 `data:` 拼成的事件会被读成几个坏事件。
+/// V07:流预算上限（方案 §6.3 首版候选，按 fake 边界复核后集中定义）。
+/// SSE 单行/单事件 256 KiB；错误 body 8 KiB。超限显式失败，不静默丢 token。
+enum AssistantLLMStreamBudget {
+    static let maxSSELineBytes = 256 * 1024
+    static let maxSSEEventBytes = 256 * 1024
+    static let maxErrorBodyBytes = 8 * 1024
+}
+
 struct ResponsesEventStreamDecoder {
     private var lineBytes: [UInt8] = []
     private var dataLines: [String] = []
+    private var eventBytes = 0
     private(set) var state = LLMResponseStreamState()
     private(set) var usage: [String: Any]?
     private(set) var byteCount = 0
@@ -763,6 +777,10 @@ struct ResponsesEventStreamDecoder {
         byteCount += 1
         guard byte != 0x0D else { return false }  // CRLF
         guard byte == 0x0A else {
+            // V07:无换行 SSE 单行无限增长必须有界——超限显式失败。
+            guard lineBytes.count < AssistantLLMStreamBudget.maxSSELineBytes else {
+                throw LLMError.streamBudgetExceeded("SSE 单行超过 \(AssistantLLMStreamBudget.maxSSELineBytes) bytes")
+            }
             lineBytes.append(byte)
             return false
         }
@@ -783,6 +801,7 @@ struct ResponsesEventStreamDecoder {
             if try apply(object, onDelta: onDelta) { return }
         }
         dataLines.removeAll()
+        eventBytes = 0
     }
 
     private mutating func handle(
@@ -795,11 +814,18 @@ struct ResponsesEventStreamDecoder {
                 if try apply(object, onDelta: onDelta) { return true }
             }
             dataLines.removeAll()
+            eventBytes = 0
             return state.isFinished
         }
         // 注释（`: keep-alive`）与 `event:` / `id:` / `retry:` 不影响本任务。
         guard line.hasPrefix("data:") else { return false }
-        dataLines.append(line.dropFirst(5).trimmingCharacters(in: .whitespaces))
+        // V07:多行 data: 拼成的单事件同样有界——超限显式失败。
+        let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+        eventBytes += payload.utf8.count
+        guard eventBytes <= AssistantLLMStreamBudget.maxSSEEventBytes else {
+            throw LLMError.streamBudgetExceeded("SSE 单事件超过 \(AssistantLLMStreamBudget.maxSSEEventBytes) bytes")
+        }
+        dataLines.append(payload)
         return false
     }
 
@@ -1602,9 +1628,20 @@ public actor LLMProvider {
                 streamAttempt = attempt
                 break
             }
+            // V07:非 2xx 错误 body 累加有上限——超限截断并标记，不无界积压。
+            // `AsyncBytes.lines` 按行切分：超长无换行 body 是一整行，`+=` 整行
+            // 追加会越过上限，因此逐行检查累加后是否超限并截断到上限。
             var body = ""
+            var bodyTruncated = false
             do {
-                for try await line in result.0.lines { body += line }
+                for try await line in result.0.lines {
+                    body += line
+                    if body.utf8.count > AssistantLLMStreamBudget.maxErrorBodyBytes {
+                        body = String(body.prefix(AssistantLLMStreamBudget.maxErrorBodyBytes))
+                        bodyTruncated = true
+                        break
+                    }
+                }
             } catch {
                 let failure = LLMError.transport(error.localizedDescription)
                 emitProviderObservation(
@@ -1624,8 +1661,10 @@ public actor LLMProvider {
             responseCapture.record(response: response, data: Data(body.utf8))
             let failure: LLMError
             do {
-                try Self.validate(response: response, data: Data(body.utf8))
-                failure = .http(status: response.statusCode, body: Self.shortBody(body))
+                try Self.validate(response: response, data: Data(body.utf8), truncated: bodyTruncated)
+                var short = Self.shortBody(body)
+                if bodyTruncated { short += "…（正文超限已截断）" }
+                failure = .http(status: response.statusCode, body: short)
             } catch let error as LLMError {
                 failure = error
             }
@@ -2179,13 +2218,16 @@ public actor LLMProvider {
         return response["status"] as? String
     }
 
-    private static func validate(response: URLResponse, data: Data) throws {
+    private static func validate(response: URLResponse, data: Data, truncated: Bool = false) throws {
         guard let http = response as? HTTPURLResponse else { return }
         if http.statusCode == 404 || http.statusCode == 405 {
             throw LLMError.notResponsesAPI
         }
         guard !(200..<300).contains(http.statusCode) else { return }
-        throw LLMError.http(status: http.statusCode, body: shortBody(String(decoding: data, as: UTF8.self)))
+        // V07:调用方截断超限 body 时标记透传——下游仍可分类，不误读为完整正文。
+        var short = shortBody(String(decoding: data, as: UTF8.self))
+        if truncated { short += "…（正文超限已截断）" }
+        throw LLMError.http(status: http.statusCode, body: short)
     }
 
     /// 错误正文只留一小段，且**不回声 Authorization**（它本来也不在正文里）。

@@ -990,6 +990,94 @@ final class LLMProviderTests: XCTestCase {
         XCTAssertEqual(try result.get(), "好")
     }
 
+    // MARK: - M2/V07:流预算有界
+
+    /// V07a:无换行 SSE 单行无限增长必须有界——超限显式失败，不无界积压。
+    /// 已收到的正文由调用方保留，不得静默丢 token，不得强制完成/朗读。
+    @MainActor
+    func testResponsesStreamSingleLineBeyondBudgetFailsExplicitly() async throws {
+        final class Sink: @unchecked Sendable { var deltas: [String] = [] }
+        let sink = Sink()
+        var decoder = ResponsesEventStreamDecoder()
+        let filler = String(repeating: "x", count: 1024)
+        var thrown: Error?
+        // 先喂一个合法 delta 并结算（空行即事件边界），再喂超长无换行单行。
+        let head = "data: {\"type\":\"response.output_text.delta\",\"response_id\":\"resp_a\",\"delta\":\"好\"}\n\n"
+        for byte in head.utf8 { try? decoder.consume(byte, onDelta: { sink.deltas.append($0) }) }
+        do {
+            for _ in 0..<(AssistantLLMStreamBudget.maxSSELineBytes / 1024 + 2) {
+                for byte in filler.utf8 {
+                    try decoder.consume(byte, onDelta: { sink.deltas.append($0) })
+                }
+            }
+        } catch {
+            thrown = error
+        }
+        guard case .streamBudgetExceeded(let detail) = thrown as? LLMError else {
+            XCTFail("超长无换行单行必须报 streamBudgetExceeded，实际 \(String(describing: thrown))")
+            return
+        }
+        XCTAssertTrue(detail.contains("单行"), "失败原因应指明是单行超限，实际 \(detail)")
+        XCTAssertEqual(sink.deltas, ["好"], "超限前已收到的正文必须保留")
+    }
+
+    /// V07b:多行 data: 拼成的单事件同样有界——超限显式失败。
+    @MainActor
+    func testResponsesStreamSingleEventBeyondBudgetFailsExplicitly() async throws {
+        final class Sink: @unchecked Sendable { var deltas: [String] = [] }
+        let sink = Sink()
+        var decoder = ResponsesEventStreamDecoder()
+        let filler = String(repeating: "y", count: 4096)
+        var thrown: Error?
+        do {
+            for _ in 0..<(AssistantLLMStreamBudget.maxSSEEventBytes / 4096 + 2) {
+                let line = "data: " + filler + "\n"
+                for byte in line.utf8 {
+                    try decoder.consume(byte, onDelta: { sink.deltas.append($0) })
+                }
+            }
+        } catch {
+            thrown = error
+        }
+        guard case .streamBudgetExceeded(let detail) = thrown as? LLMError else {
+            XCTFail("超限单事件必须报 streamBudgetExceeded，实际 \(String(describing: thrown))")
+            return
+        }
+        XCTAssertTrue(detail.contains("单事件"), "失败原因应指明是单事件超限，实际 \(detail)")
+    }
+
+    /// V07c:巨大错误 body 不得无界累加——截断并标记，正文仍可分类。
+    @MainActor
+    func testResponsesStreamHugeErrorBodyIsTruncatedAndMarked() async throws {
+        // runStream 先发 attempt 0（含 thinking 控制字段，FakeTransport 按序消费）。
+        // 500 非 400 不触发 thinking-control 回退：attempt 0 即进入错误 body 路径。
+        let huge = String(repeating: "E", count: AssistantLLMStreamBudget.maxErrorBodyBytes + 4096)
+        FakeTransport.reset([
+            .init(
+                status: 500,
+                contentType: "text/plain",
+                body: huge
+            )
+        ])
+        let result = await drainResponsesStream(makeProvider())
+        switch result {
+        case .success(let text):
+            XCTFail("500 必须是失败，实际拿到 \(text)")
+        case .failure(let error):
+            guard case .http(let status, let body) = error as? LLMError else {
+                XCTFail("500 应为 .http，实际 \(error)")
+                return
+            }
+            XCTAssertEqual(status, 500)
+            XCTAssertTrue(body.contains("正文超限已截断"), "超限错误正文必须标记截断")
+            XCTAssertLessThanOrEqual(
+                body.utf8.count,
+                AssistantLLMStreamBudget.maxErrorBodyBytes + 512,
+                "错误正文不得无界累加"
+            )
+        }
+    }
+
     @MainActor
     func testResponsesStreamIgnoresCommentsAndHeartbeats() async throws {
         FakeTransport.reset([

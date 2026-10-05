@@ -489,6 +489,7 @@ public enum TeleprompterAIObservability {
             case .refused: return "refused"
             case .streamEndedEarly: return "stream_ended_early"
             case .malformedStreamEvent: return "malformed_stream_event"
+            case .streamBudgetExceeded: return "stream_budget_exceeded"
             case .cancelled: return "cancelled"
             }
         }
@@ -1740,7 +1741,7 @@ private extension TeleprompterPreparationPipeline {
         switch error {
         // 流提前结束或事件损坏都属于传输层问题：和 `.transport` 一样可以重试。
         case .invalidStructuredResponse, .outputTruncated, .transport,
-            .streamEndedEarly, .malformedStreamEvent:
+            .streamEndedEarly, .malformedStreamEvent, .streamBudgetExceeded:
             return true
         case .http(let status, _), .httpWithRetry(let status, _, _):
             return status == 408 || status == 409 || status == 425 || status == 429
