@@ -1971,6 +1971,7 @@ private func jsonText(_ object: [String: Any]) -> String {
 private func ttsStarted(requestID: String) -> [String: Any] {
     [
         "type": "speechrail.tts.started",
+        "audio_window_bytes": 1_440_000,
         "task_id": "task-1",
         "plan_id": "plan-1",
         "request_id": requestID,

@@ -14,5 +14,6 @@
   },
   "limits": {
     "max_total_codepoints": 4096
-  }
+  },
+  "audio_window_bytes": 48000
 }

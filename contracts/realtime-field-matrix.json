@@ -281,6 +281,30 @@
       "adapter": "optional input retirement receipt",
       "positive_case": "server_commit_receipt",
       "reject_case": null
+    },
+    {
+      "path": "session.speechrail.expected_asr_revision",
+      "validator": "schema:session_speechrail.expected_asr_revision",
+      "task_request": "TaskRequest ASR plan identity",
+      "adapter": "atomic session ASR validation",
+      "positive_case": "client_assistant_session_update",
+      "reject_case": "legacy_session_tts_revision"
+    },
+    {
+      "path": "expected_model_revision",
+      "validator": "schema:client_tts_start.expected_model_revision",
+      "task_request": "TtsStreamOptions.expected_model_revision",
+      "adapter": "per-utterance voice-mode artifact validation",
+      "positive_case": "client_tts_start",
+      "reject_case": null
+    },
+    {
+      "path": "audio_window_bytes",
+      "validator": "schema:client_tts_start.audio_window_bytes",
+      "task_request": "per-request transport consumption credits",
+      "adapter": "TtsAudioWindow, independently of worker transport and caller playback",
+      "positive_case": "client_tts_start",
+      "reject_case": "missing_tts_audio_window"
     }
   ]
 }

@@ -42,6 +42,20 @@ option.
   `input_audio_buffer.commit`.
 - Alignment, diarization and TTS are separate `session.speechrail` opt-ins and
   never turn on implicitly.
+- Pin ASR with `session.speechrail.expected_asr_revision`. TTS voice and model
+  identity belong to each `speechrail.tts.start` (`voice`, `voice_revision`,
+  `expected_model_revision`); they never inherit from the session or a prior
+  utterance. The removed session field `expected_tts_revision` is rejected.
+- Every `speechrail.tts.start` requires an even `audio_window_bytes` in `2...1440000`;
+  `started` echoes it. Return `speechrail.tts.audio_ack` with this request ID and
+  cumulative PCM16 `sample_offset` only after releasing local audio capacity.
+  The sender pauses at this consumption window instead of treating healthy fast
+  generation as overflow. Worker `limits.max_pending_audio_bytes` is a separate
+  transport budget. Duplicate consumption watermarks are idempotent; backward or
+  future watermarks fail with `tts_audio_ack_invalid`. Consumption is not evidence
+  that a user heard the audio. Cancel and credits use the independent control lane.
+  Upgrade direct WebSocket clients together with the service; the current contract
+  has no start mode without consumption flow control. REST/MCP render is unchanged.
 
 These options are session-scoped. After the first accepted PCM frame they cannot
 be changed; the server returns `invalid_state`. Unknown fields or unsupported

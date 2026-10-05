@@ -2,8 +2,8 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.13.2"
-date: 2026-10-03
+version: "3.16.0"
+date: 2026-10-05
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -319,15 +319,19 @@ alias/模型选择行为。
 `expected_model_revision` 显式指定。冲突时应重新 `describe()`，由业务决定继续使用旧版、
 回滚到历史 revision，还是切换音色。
 
-Realtime 客户端在 `session.update.session.speechrail` 中使用
-`expected_asr_revision` / `expected_tts_revision` 绑定计划身份；服务端在 `session.updated`
-回显已解析身份，并在首个工作前以 `model_revision_conflict` 拒绝未知或不匹配的 revision。
+Realtime 客户端在 `session.update.session.speechrail.expected_asr_revision` 中绑定连接的
+ASR 身份，服务端在 `session.updated` 回显，并在首个工作前以 `model_revision_conflict`
+拒绝未知或不匹配的 revision。会话 TTS opt-in 只启用能力。
 
 调用方提交 `speechrail.tts.start` 时携带 `voice_revision` 与
 `expected_model_revision`。Native App 和其他需要跨请求音色一致性的客户端应从同一份
-effective capability snapshot 读取当前 voice 的 `voice_revision`；revision 缺失时省略 pin，
-不能从 voice 名称推断。服务端在该次 utterance 首个 PCM 前校验 pin，冲突或撤销时返回稳定的
-`voice_revision_conflict`，不会静默改用另一音色。
+effective capability snapshot 读取当前 voice 的 `voice_revision` 和 `model.catalog_revision`；
+revision 缺失时省略 pin，不能从 voice 名称推断。服务端按该次 `voice` 选择系统音色的
+CustomVoice 或克隆音色的 Base 制品，在开流前校验 pin，冲突或撤销时返回
+`voice_revision_conflict` / `model_revision_conflict` / `voice_revoked`。
+TTS 身份不从 session 或上一 utterance 继承；切换音色时同步更新两个 pin。
+旧 `session.speechrail.expected_tts_revision` 已移除，返回 `unsupported_operation`；
+客户端必须把模型 pin 移到 `speechrail.tts.start.expected_model_revision`。
 
 客户端不能提交任意 purpose 或绝对时间戳来制造新的优先级。服务仍以同一个
 `ResourceGovernor` 为唯一准入源：同一 TTS capability lane 串行，不同 lane 只有在资源预算
@@ -743,10 +747,11 @@ registry 不可读返回 `503 pronunciation_store_unavailable`（可重试）。
 | `input_audio_buffer.commit` | 客户端 → 服务端 | 一个 utterance 只产生一个 ASR final；`event_id` 在对应终态回显 |
 | `speechrail.input_audio_buffer.committed` | 服务端 → 客户端 | 仅应请求返回，关联 commit ID 与累计24 kHz样本水位的输入完成屏障 |
 | `input_audio_buffer.clear` | 客户端 → 服务端 | 丢弃未提交 PCM，不产生 final |
-| `speechrail.tts.start` | 客户端 → 服务端 | 绑定 request/task/voice/revision/limits |
+| `speechrail.tts.start` | 客户端 → 服务端 | 绑定 request/task/voice/revision/limits 与必需 audio_window_bytes |
 | `speechrail.tts.append_text` | 客户端 → 服务端 | 连续 sequence 的不可变稳定文本 |
 | `speechrail.tts.finish_text` | 客户端 → 服务端 | 以最后 ACK sequence 关闭文本侧 |
 | `speechrail.tts.cancel` | 客户端 → 服务端 | 取消匹配 utterance，取消优先 |
+| `speechrail.tts.audio_ack` | 客户端 → 服务端 | request-scoped 累计 PCM 消费水位，归还传输消费窗口 |
 | `speechrail.tts.started` | 服务端 → 客户端 | 回显 task/plan/request、voice revision、PCM 格式与生效 limits |
 | `speechrail.tts.text_accepted` | 服务端 → 客户端 | 精确 ACK `append_sequence` 与 codepoint 计数 |
 | `speechrail.tts.audio.delta` | 服务端 → 客户端 | 唯一 TTS 音频块事件，携带 chunk/sample offset |
@@ -788,6 +793,10 @@ speechrail.tts.cancel -> speechrail.tts.cancelled
 - `sequence` 是 append 序号，从 0 连续递增；每个事件的 `sequence` 是连接级序号，两者不同义。
 - 追加不重新 prepare reference、不重建 utterance；一轮只初始化一个 worker utterance。
 - `finish_text.last_sequence` 必须等于最后 ACK；音频队列满不能阻塞 cancel/terminal。
+- `start.audio_window_bytes` 必填，为 `2...1_440_000` 内偶数，started 回显。服务端按发送但未消费的总 PCM 暂停/恢复输出；`limits.max_pending_audio_bytes` 是独立 worker/传输预算。macOS 助手默认预取最多 30 秒，生成结束后继续播放本地队列。
+- 释放本地音频容量后发送 `speechrail.tts.audio_ack`，携带 request ID 与累计 PCM16 样本 `sample_offset`。重复水位幂等；回退、超前或无效值返回 `tts_audio_ack_invalid`。收到音频、送入播放器或 transport receipt 本身不代表消费完成。
+- 消费 ACK 不替代文本 ACK；文本 ACK 不排在等待输出窗口的音频后面。completed 之后继续排空本地播放；已知退役 request 的迟到消费 ACK 被忽略，不影响下一 request。
+- 当前 Realtime 契约为 6.1.0，缺少消费窗口的旧 start 被拒绝。消费等待按实际水位进展续期，重复 ACK 不续期，独立于网络写入超时；worker 预算满只暂停生产，交付后恢复。原有不超过 48,000 bytes 的窗口仍有效；一次性 REST/MCP 合成不变。
 - 身份 pin、参考条件缓存和验证记录按 artifact/engine/precision/tokenizer/codec/preprocessing 隔离。
 - `response.output_audio.delta`、`response.done`、`speechrail.tts.create` 和
   `response.output_audio_transcript.*` 都是明确拒绝项，不提供 alias。

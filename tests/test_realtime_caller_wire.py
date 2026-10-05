@@ -17,7 +17,9 @@ from realtime_wire import (
 from speechrail.compatibility.openai_realtime import (
     DEFAULT_TTS_STREAM_LIMITS,
     RealtimeAdapterError,
+    apply_session_update,
     parse_client_event,
+    parse_tts_audio_ack,
     parse_tts_cancel,
     parse_tts_start,
     tts_audio_delta,
@@ -61,6 +63,68 @@ def test_session_update_is_the_canonical_session_event() -> None:
     assert parsed.kind == "session_update"
 
 
+def test_swift_assistant_handshake_fixture_has_only_asr_identity() -> None:
+    fixture_root = (
+        Path(__file__).resolve().parent / "fixtures" / "realtime-current"
+    )
+    event = json.loads(
+        (fixture_root / "client" / "assistant-session-update.json").read_text()
+    )
+    _VALIDATOR.validate(event)
+    _, config = apply_session_update(
+        event,
+        session_id="session-assistant",
+        asr_model=DEFAULT_ASR_MODEL,
+        registered_asr=frozenset({DEFAULT_ASR_MODEL}),
+    )
+    assert config["expected_asr_revision"] == "asr-catalog"
+    assert config["tts_enabled"] is True
+    assert "expected_model_revision" not in config
+    assert "voice" not in config
+
+    legacy = json.loads(
+        (fixture_root / "invalid" / "legacy-session-tts-revision.json").read_text()
+    )
+    with pytest.raises(RealtimeAdapterError) as exc_info:
+        apply_session_update(
+            legacy,
+            session_id="session-assistant",
+            asr_model=DEFAULT_ASR_MODEL,
+            registered_asr=frozenset({DEFAULT_ASR_MODEL}),
+        )
+    assert exc_info.value.code == "unsupported_operation"
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_session_update_rejects_tts_revision_without_utterance_identity(
+    nested: bool,
+) -> None:
+    """TTS pins belong to the start event that also identifies the voice."""
+    event = session_update(tts={"enabled": True})
+    extensions = {"expected_tts_revision": "a" * 40}
+    if nested:
+        event["session"]["audio"]["input"]["speechrail"] = extensions
+    else:
+        event["session"]["speechrail"].update(extensions)
+
+    with pytest.raises(RealtimeAdapterError) as exc_info:
+        apply_session_update(
+            event,
+            session_id="session-identity",
+            asr_model=DEFAULT_ASR_MODEL,
+            registered_asr=frozenset({DEFAULT_ASR_MODEL}),
+        )
+
+    assert exc_info.value.code == "unsupported_operation"
+    assert "expected_tts_revision" in str(exc_info.value)
+
+
+def test_schema_rejects_session_tts_revision_without_voice() -> None:
+    event = session_update(tts={"enabled": True})
+    event["session"]["speechrail"]["expected_tts_revision"] = "a" * 40
+    assert list(_VALIDATOR.iter_errors(event))
+
+
 @pytest.mark.parametrize(
     "event_type",
     [
@@ -99,7 +163,8 @@ def test_tts_start_requires_task_and_voice() -> None:
     assert request.expected_voice_revision == "vr_" + "a" * 40
     assert request.speed == 1.25
 
-    for missing in ("task", "voice"):
+    assert request.audio_window_bytes == 48_000
+    for missing in ("task", "voice", "audio_window_bytes"):
         event = tts_start(request_id="tts_req_002")
         event.pop(missing)
         with pytest.raises(RealtimeAdapterError):
@@ -110,6 +175,41 @@ def test_tts_start_requires_task_and_voice() -> None:
 def test_tts_start_rejects_non_utterance_tasks(task: str) -> None:
     with pytest.raises(RealtimeAdapterError, match="conversation or render"):
         parse_tts_start(tts_start(request_id="tts_req_003", task=task))
+
+@pytest.mark.parametrize("window", [None, True, 0, -2, 3, 1_440_002, "48000", 4.0])
+def test_invalid_consumption_window_is_rejected(window: object) -> None:
+    with pytest.raises(RealtimeAdapterError) as failure:
+        parse_tts_start(tts_start(request_id="invalid-window", audio_window_bytes=window))
+    assert failure.value.code == "tts_request_invalid"
+
+
+@pytest.mark.parametrize("window", [48_002, 1_440_000])
+def test_prefetch_window_is_independent_of_worker_chunk_budget(window: int) -> None:
+    request = parse_tts_start(tts_start(request_id="prefetch-window", audio_window_bytes=window))
+    assert request.audio_window_bytes == window
+    assert request.limits.max_pending_audio_bytes == 48_000
+
+
+@pytest.mark.parametrize("offset", [True, -1, "1920", 1.5, 2**53])
+def test_invalid_audio_consumption_watermark_is_rejected(offset: object) -> None:
+    event = {
+        "type": "speechrail.tts.audio_ack", "event_id": "ack-invalid-offset",
+        "request_id": "invalid-ack", "sample_offset": offset,
+    }
+    with pytest.raises(RealtimeAdapterError) as failure:
+        parse_tts_audio_ack(event)
+    assert failure.value.code == "tts_audio_ack_invalid"
+
+
+@pytest.mark.parametrize("event_id", [None, "", " " * 2, "x" * 129, True, 1])
+def test_audio_consumption_ack_requires_valid_event_id(event_id: object) -> None:
+    event = {
+        "type": "speechrail.tts.audio_ack", "request_id": "ack-id", "sample_offset": 0
+    }
+    if event_id is not None:
+        event["event_id"] = event_id
+    with pytest.raises(RealtimeAdapterError, match="event_id"):
+        parse_tts_audio_ack(event)
 
 
 def test_tts_sequence_helpers_match_the_current_namespace() -> None:
@@ -147,6 +247,7 @@ def test_server_tts_builders_match_the_shared_schema() -> None:
             request_id="req-tts-1",
             voice_revision="vr_" + "a" * 40,
             limits=DEFAULT_TTS_STREAM_LIMITS,
+            audio_window_bytes=48_000,
         ),
         tts_text_accepted(
             task_id="task-1",

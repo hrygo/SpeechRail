@@ -27,6 +27,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import BinaryIO, Final, Literal, Protocol
 
+from speechrail.backends.tts_pcm_tail import Pcm16Tail
 from speechrail.domain.tts_stream import (
     DEFAULT_TTS_STREAM_LIMITS,
     TtsStreamError,
@@ -45,9 +46,6 @@ from speechrail.runtime.worker_protocol import (
 )
 
 TTS_STREAM_PROTOCOL_VERSION: Final[int] = 1
-
-# Tail fade length, kept identical to the batch TTS path in `qwen3_tts_worker`.
-TAIL_FADE_MS: Final[int] = 5
 
 FRAME_STREAM_START: Final[str] = "tts_stream_start"
 FRAME_STREAM_TEXT: Final[str] = "tts_stream_text"
@@ -135,6 +133,7 @@ class HostStepResult:
 
     frames: tuple[StreamFrame, ...] = ()
     waiting_for_text: bool = False
+    waiting_for_output: bool = False
     terminal: bool = False
 
 
@@ -142,20 +141,6 @@ def _require_int(value: object, *, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ProtocolError(f"{name} must be an integer")
     return value
-
-
-def _fade_ramp_from(last_sample: int, sample_rate: int) -> bytes:
-    """Linear PCM16 ramp from ``last_sample`` down to silence over the tail fade."""
-
-    samples = max(1, (sample_rate * TAIL_FADE_MS) // 1000)
-    if last_sample == 0:
-        # Already at silence: emit the window anyway so every finished
-        # utterance ends in the same explicit quiet, never mid-step.
-        return b"\x00\x00" * samples
-    import numpy as np
-
-    curve = np.linspace(float(last_sample), 0.0, samples, dtype=np.float32)
-    return np.clip(curve, -32768.0, 32767.0).astype("<i2").tobytes()
 
 
 def parse_stream_command(frame: Mapping[str, object]) -> StreamCommand:
@@ -231,9 +216,14 @@ class TtsStreamHost:
         self._consumed_codepoints = 0
         self._consumed_sequence = -1
         self._pcm_remainder = b""
-        # Last int16 sample actually handed to the transport, so the terminal
-        # fade can continue the waveform instead of stepping from silence.
-        self._last_audio_sample: int | None = None
+        self._pcm_tail = Pcm16Tail(sample_rate=session.sample_rate)
+        self._model_finished = False
+        # Writer receipts cross threads; only the model thread mutates the
+        # domain state machine. Receipts contain counters, never PCM.
+        self._delivery_lock = threading.Lock()
+        self._delivered_bytes = 0
+        self._last_delivery_at = started_at
+        self._output_wait_since: float | None = None
 
     @property
     def options(self) -> TtsStreamOptions:
@@ -348,15 +338,17 @@ class TtsStreamHost:
 
         if self._state.terminal is not None:
             return HostStepResult(terminal=True)
+        self._retire_delivered_audio()
         if self._pcm_remainder:
             frames = self._flush_pcm_remainder()
             if frames:
                 return HostStepResult(frames=frames)
-            frames = self._terminate(
-                "tts_backpressure",
-                detail="pending audio exceeds the configured byte budget",
-            )
-            return HostStepResult(frames=frames, terminal=True)
+            return self._wait_for_output()
+        if self._model_finished:
+            return HostStepResult(frames=self._complete(), terminal=True)
+        if self._state.pending_audio_bytes >= self._limits.max_pending_audio_bytes:
+            return self._wait_for_output()
+        self._output_wait_since = None
         budget = self._step_size if max_steps is None else max_steps
         try:
             event = self._session.step(max_steps=budget)
@@ -379,8 +371,12 @@ class TtsStreamHost:
                     detail="the model finished before the input was closed",
                 )
                 return HostStepResult(frames=frames, terminal=True)
-            frames = self._complete()
-            return HostStepResult(frames=frames, terminal=True)
+            self._model_finished = True
+            self._pcm_remainder = self._pcm_tail.finish()
+            frames = self._flush_pcm_remainder()
+            if self._pcm_remainder:
+                return HostStepResult(frames=frames)
+            return HostStepResult(frames=(*frames, *self._complete()), terminal=True)
         if event.kind == "waiting_for_text":
             return self._handle_starvation()
         return self._emit_audio(event.pcm16)
@@ -392,6 +388,35 @@ class TtsStreamHost:
         wall = self._limits.utterance_wall_clock_seconds - (now - self._started_at)
         wait = self._limits.input_wait_seconds - (now - self._last_input_at)
         return max(0.0, min(wall, wait))
+
+    def output_timeout_remaining(self) -> float:
+        """Bound inactivity, not the total time spent producing ahead of playback."""
+
+        now = float(self._clock())
+        with self._delivery_lock:
+            progress_at = self._last_delivery_at
+        wait_since = self._output_wait_since
+        base = max(progress_at, now if wait_since is None else wait_since)
+        return max(
+            0.0,
+            min(
+                self._limits.slow_consumer_seconds - (now - base),
+                self._limits.utterance_wall_clock_seconds - (now - self._started_at),
+            ),
+        )
+
+    def _wait_for_output(self) -> HostStepResult:
+        if self._output_wait_since is None:
+            self._output_wait_since = float(self._clock())
+        if self.output_timeout_remaining() > 0:
+            return HostStepResult(waiting_for_output=True)
+        if float(self._clock()) - self._started_at >= self._limits.utterance_wall_clock_seconds:
+            frames = self.expire()
+        else:
+            frames = self._terminate(
+                "tts_backpressure", detail="worker output made no delivery progress"
+            )
+        return HostStepResult(frames=frames, terminal=True)
 
     def expire(self) -> tuple[StreamFrame, ...]:
         """Apply the deadline that ``timeout_remaining`` reported as exhausted."""
@@ -450,14 +475,10 @@ class TtsStreamHost:
         if not pcm16 or len(pcm16) % 2:
             frames = self._terminate("tts_backend_failed", detail="invalid PCM chunk")
             return HostStepResult(frames=frames, terminal=True)
-        self._pcm_remainder += pcm16
+        self._pcm_remainder += self._pcm_tail.push(pcm16)
         frames = self._flush_pcm_remainder()
-        if not frames and self._pcm_remainder == pcm16:
-            frames = self._terminate(
-                "tts_backpressure",
-                detail="pending audio exceeds the configured byte budget",
-            )
-            return HostStepResult(frames=frames, terminal=True)
+        if not frames and self._pcm_remainder:
+            return self._wait_for_output()
         return HostStepResult(frames=frames)
 
     def _flush_pcm_remainder(self) -> tuple[StreamFrame, ...]:
@@ -478,9 +499,6 @@ class TtsStreamHost:
                 return (*frames, *error)
             chunk = self._pcm_remainder[:byte_length]
             self._pcm_remainder = self._pcm_remainder[byte_length:]
-            self._last_audio_sample = int.from_bytes(
-                chunk[-2:], "little", signed=True
-            )
             frames.append(
                 StreamFrame(
                     {
@@ -499,62 +517,25 @@ class TtsStreamHost:
 
     def _audio_sent(self, byte_length: int) -> Callable[[], None]:
         def retire() -> None:
-            if self._state.terminal is None:
-                self._state.dequeue_audio(byte_length)
+            with self._delivery_lock:
+                self._delivered_bytes += byte_length
+                self._last_delivery_at = float(self._clock())
 
         return retire
+
+    def _retire_delivered_audio(self) -> None:
+        with self._delivery_lock:
+            delivered = self._delivered_bytes
+            self._delivered_bytes = 0
+        if delivered:
+            self._state.dequeue_audio(delivered)
 
     def _complete(self) -> tuple[StreamFrame, ...]:
         if self._state.terminal is not None:
             return ()
-        fade = self._emit_tail_fade()
         self._state.complete()
         self._release_session(cancel=False)
-        return (*fade, *self._terminal_frames())
-
-    def _emit_tail_fade(self) -> tuple[StreamFrame, ...]:
-        """Append a short fade-to-silence ramp ahead of the terminal.
-
-        The last codec frame ends wherever the model stopped, and that is often
-        mid-vowel at a large sample value, so the speaker reproduces the step
-        as an audible click. The batch TTS path has always faded its final
-        chunk (`qwen3_tts_worker`); without the same step here the two paths
-        disagree about what a finished utterance sounds like.
-
-        The ramp starts from the last sample that was actually sent, so it
-        continues the waveform rather than stepping away from it. Emitting it
-        as one more ordinary audio frame keeps chunk indices and sample
-        offsets contiguous, and costs no latency: nothing is held back during
-        synthesis, unlike reserving a tail that would also delay short
-        utterances.
-        """
-
-        if self._last_audio_sample is None:
-            return ()
-        ramp = _fade_ramp_from(self._last_audio_sample, self._session.sample_rate)
-        available = self._limits.max_pending_audio_bytes - self._state.pending_audio_bytes
-        if available < len(ramp):
-            # A truncated ramp would reintroduce the step this removes, and the
-            # budget is about to be released anyway; drop it and still finish.
-            return ()
-        try:
-            position = self._state.enqueue_audio(len(ramp))
-        except TtsStreamError:
-            return ()
-        return (
-            StreamFrame(
-                {
-                    "version": PROTOCOL_VERSION,
-                    "type": FRAME_STREAM_AUDIO,
-                    "request_id": self._options.request_id,
-                    "chunk_index": position.chunk_index,
-                    "sample_offset": position.sample_offset,
-                    "sample_rate": self._session.sample_rate,
-                },
-                binary=ramp,
-                on_sent=self._audio_sent(position.byte_length),
-            ),
-        )
+        return self._terminal_frames()
 
     def _recoverable_or_terminal(
         self, error: TtsStreamError, *, sequence: int | None = None
@@ -622,6 +603,8 @@ class TtsStreamHost:
         )
 
     def _release_session(self, *, cancel: bool) -> None:
+        self._pcm_tail.discard()
+        self._pcm_remainder = b""
         session = self._session
         if cancel:
             with contextlib.suppress(Exception):
@@ -660,6 +643,7 @@ class StreamPump:
         # condition, so a terminal can retire the stale PCM of its own request
         # without reordering what a later utterance already queued.
         self._condition = threading.Condition()
+        self._activity_generation = 0
         self._outbound: deque[StreamFrame] = deque()
         self._cancel = threading.Event()
         self._read_finished = threading.Event()
@@ -689,6 +673,25 @@ class StreamPump:
     @property
     def cancel_pending(self) -> bool:
         return self._cancel.is_set()
+
+    @property
+    def activity_generation(self) -> int:
+        with self._condition:
+            return self._activity_generation
+
+    def wait_for_activity(self, after: int, *, timeout: float) -> None:
+        """Wait for input or actual output progress without losing a wakeup."""
+
+        with self._condition:
+            self._condition.wait_for(
+                lambda: self._activity_generation != after or self._closed,
+                timeout=max(0.0, timeout),
+            )
+
+    def _signal_activity(self) -> None:
+        with self._condition:
+            self._activity_generation += 1
+            self._condition.notify_all()
 
     def poll(self, timeout: float | None = None) -> dict[str, object] | None:
         """Return the next inbound frame, or ``None`` on timeout, EOF or failure.
@@ -798,6 +801,7 @@ class StreamPump:
 
         with self._condition:
             self._closed = True
+            self._activity_generation += 1
             self._condition.notify_all()
         for thread in (self._writer, self._reader):
             if thread is not None:
@@ -819,12 +823,15 @@ class StreamPump:
                     # text queue.
                     with contextlib.suppress(queue.Full):
                         self._inbound.put_nowait(frame)
+                    self._signal_activity()
                     continue
                 self._inbound.put(frame)
+                self._signal_activity()
         except BaseException as exc:
             self.read_error = exc
         finally:
             self._read_finished.set()
+            self._signal_activity()
 
     def _write_loop(self) -> None:
         while True:
@@ -838,12 +845,14 @@ class StreamPump:
             except BaseException as exc:
                 with self._condition:
                     self.write_error = exc
+                    self._activity_generation += 1
                     self._condition.notify_all()
                 self._drop_pending()
                 return
             if frame.on_sent is not None:
                 with contextlib.suppress(Exception):
                     frame.on_sent()
+            self._signal_activity()
 
     def _next_outbound(self) -> StreamFrame | None:
         with self._condition:

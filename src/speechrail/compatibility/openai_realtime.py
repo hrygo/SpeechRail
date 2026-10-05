@@ -17,11 +17,12 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from speechrail.domain.tts_stream import (
     DEFAULT_TTS_STREAM_LIMITS,
+    MAX_TTS_AUDIO_WINDOW_BYTES,
     TtsStreamLimits,
 )
 from speechrail.runtime.busy import busy_retry_policy
@@ -82,6 +83,7 @@ _TTS_START_FIELDS: frozenset[str] = frozenset(
         "speed",
         "expected_model_revision",
         "limits",
+        "audio_window_bytes",
     }
 )
 _TTS_APPEND_TEXT_FIELDS: frozenset[str] = frozenset(
@@ -93,6 +95,7 @@ _TTS_FINISH_TEXT_FIELDS: frozenset[str] = frozenset(
 _TTS_CANCEL_FIELDS: frozenset[str] = frozenset(
     {"type", "event_id", "request_id"}
 )
+_TTS_AUDIO_ACK_FIELDS = frozenset({"type", "event_id", "request_id", "sample_offset"})
 
 _UNSUPPORTED_CLIENT_EVENTS: frozenset[str] = frozenset(
     {
@@ -140,6 +143,7 @@ EventKind = Literal[
     "tts_append_text",
     "tts_finish_text",
     "tts_cancel",
+    "tts_audio_ack",
 ]
 
 
@@ -154,6 +158,12 @@ class TTSCancelRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class TTSAudioAckRequest:
+    request_id: str
+    sample_offset: int
+
+
+@dataclass(frozen=True, slots=True)
 class TTSStartRequest:
     """One incremental utterance request, including its tightened limits."""
 
@@ -164,6 +174,7 @@ class TTSStartRequest:
     expected_voice_revision: str | None
     expected_model_revision: str | None
     limits: TtsStreamLimits
+    audio_window_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +209,7 @@ def parse_client_event(event: dict[str, Any]) -> ParsedClientEvent:
         "speechrail.tts.append_text": "tts_append_text",
         "speechrail.tts.finish_text": "tts_finish_text",
         "speechrail.tts.cancel": "tts_cancel",
+        "speechrail.tts.audio_ack": "tts_audio_ack",
     }
     if event_type in kinds:
         return ParsedClientEvent(kinds[event_type])
@@ -343,6 +355,21 @@ def parse_tts_start(event: dict[str, Any]) -> TTSStartRequest:
             model_revision_value, field="expected_model_revision", max_length=128
         )
     )
+    window = event.get("audio_window_bytes")
+    if (
+        isinstance(window, bool)
+        or not isinstance(window, int)
+        or not 2 <= window <= MAX_TTS_AUDIO_WINDOW_BYTES
+        or window % 2
+    ):
+        raise RealtimeAdapterError(
+            "tts_request_invalid",
+            "audio_window_bytes must be an even integer from 2 through 1440000",
+        )
+    limits = _stream_limits(event.get("limits"))
+    # A worker chunk must fit in the caller's window. These remain independent
+    # budgets: transport delivery frees the worker budget; caller ACK frees this window.
+    limits = replace(limits, max_pending_audio_bytes=min(limits.max_pending_audio_bytes, window))
     return TTSStartRequest(
         request_id=request_id,
         task=str(task_value),
@@ -350,8 +377,21 @@ def parse_tts_start(event: dict[str, Any]) -> TTSStartRequest:
         speed=_tts_speed(event.get("speed", 1.0)),
         expected_voice_revision=revision,
         expected_model_revision=model_revision,
-        limits=_stream_limits(event.get("limits")),
+        limits=limits,
+        audio_window_bytes=window,
     )
+
+
+def parse_tts_audio_ack(event: dict[str, Any]) -> TTSAudioAckRequest:
+    _reject_unknown_fields(event, _TTS_AUDIO_ACK_FIELDS, event_type="speechrail.tts.audio_ack")
+    _bounded_string(event.get("event_id"), field="event_id", max_length=128)
+    request_id = _bounded_string(event.get("request_id"), field="request_id", max_length=128)
+    offset = event.get("sample_offset")
+    if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= 2**53 - 1:
+        raise RealtimeAdapterError(
+            "tts_audio_ack_invalid", "sample_offset must be a non-negative safe integer"
+        )
+    return TTSAudioAckRequest(request_id=request_id, sample_offset=offset)
 
 
 def parse_tts_append_text(event: dict[str, Any]) -> TTSAppendTextRequest:
@@ -433,7 +473,6 @@ def session_payload(
     diarization_enabled: bool = False,
     endpointing: dict[str, object] | None = None,
     expected_asr_revision: str | None = None,
-    expected_tts_revision: str | None = None,
 ) -> dict[str, object]:
     """Render the single current ``session`` object shared by create/update.
 
@@ -463,8 +502,6 @@ def session_payload(
         speechrail["endpointing"] = dict(endpointing)
     if expected_asr_revision is not None:
         speechrail["expected_asr_revision"] = expected_asr_revision
-    if expected_tts_revision is not None:
-        speechrail["expected_tts_revision"] = expected_tts_revision
     return {
         "id": session_id,
         "type": "transcription",
@@ -763,12 +800,14 @@ def tts_stream_started(
     request_id: str,
     voice_revision: str | None,
     limits: TtsStreamLimits,
+    audio_window_bytes: int,
     output_format: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Acknowledge ``speechrail.tts.start`` once the utterance is live."""
 
     event: dict[str, object] = {
         "type": "speechrail.tts.started",
+        "audio_window_bytes": audio_window_bytes,
         "task_id": task_id,
         "plan_id": plan_id,
         "request_id": request_id,
@@ -944,7 +983,6 @@ _SESSION_SPEECHRAIL_FIELDS: frozenset[str] = frozenset(
         "diarization",
         "endpointing",
         "expected_asr_revision",
-        "expected_tts_revision",
     }
 )
 _ENDPOINTING_FIELDS: frozenset[str] = frozenset(
@@ -1138,7 +1176,6 @@ def apply_session_update(
     config["languages"] = languages
     config["keywords"] = keywords
     config["timestamp_granularities"] = timestamp_granularities
-    config.setdefault("voice", None)
 
     if "endpointing" in speechrail_obj:
         config["turn_detection"] = _endpointing_config(speechrail_obj["endpointing"])
@@ -1203,10 +1240,6 @@ def apply_session_update(
         config["expected_asr_revision"] = _revision_field(
             speechrail_obj["expected_asr_revision"], label="expected_asr_revision"
         )
-    if "expected_tts_revision" in speechrail_obj:
-        config["expected_model_revision"] = _revision_field(
-            speechrail_obj["expected_tts_revision"], label="expected_tts_revision"
-        )
 
     endpointing = config.get("turn_detection")
     response = session_updated(
@@ -1225,9 +1258,6 @@ def apply_session_update(
         endpointing=endpointing if isinstance(endpointing, dict) else None,
         expected_asr_revision=config.get("expected_asr_revision")
         if isinstance(config.get("expected_asr_revision"), str)
-        else None,
-        expected_tts_revision=config.get("expected_model_revision")
-        if isinstance(config.get("expected_model_revision"), str)
         else None,
     )
     return response, config

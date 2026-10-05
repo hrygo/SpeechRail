@@ -84,6 +84,9 @@
     },
     {
       "$ref": "#/$defs/server_commit_receipt"
+    },
+    {
+      "$ref": "#/$defs/client_tts_audio_ack"
     }
   ],
   "$defs": {
@@ -305,9 +308,6 @@
           "$ref": "#/$defs/endpointing"
         },
         "expected_asr_revision": {
-          "$ref": "#/$defs/revision"
-        },
-        "expected_tts_revision": {
           "$ref": "#/$defs/revision"
         }
       }
@@ -550,7 +550,8 @@
         "event_id",
         "request_id",
         "task",
-        "voice"
+        "voice",
+        "audio_window_bytes"
       ],
       "properties": {
         "type": {
@@ -584,6 +585,12 @@
         },
         "limits": {
           "$ref": "#/$defs/limits"
+        },
+        "audio_window_bytes": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 1440000,
+          "multipleOf": 2
         }
       }
     },
@@ -1220,6 +1227,12 @@
             },
             "limits": {
               "$ref": "#/$defs/limits"
+            },
+            "audio_window_bytes": {
+              "type": "integer",
+              "minimum": 2,
+              "maximum": 1440000,
+              "multipleOf": 2
             }
           },
           "required": [
@@ -1227,7 +1240,8 @@
             "plan_id",
             "request_id",
             "output_format",
-            "limits"
+            "limits",
+            "audio_window_bytes"
           ]
         }
       ],
@@ -1484,6 +1498,32 @@
         }
       ],
       "unevaluatedProperties": false
+    },
+    "client_tts_audio_ack": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "speechrail.tts.audio_ack"
+        },
+        "event_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "request_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "sample_offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "type",
+        "event_id",
+        "request_id",
+        "sample_offset"
+      ],
+      "additionalProperties": false
     }
   }
 }

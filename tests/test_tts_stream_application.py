@@ -15,6 +15,7 @@ import pytest
 
 from speechrail.application.render_receipts import RenderReceiptRegistry
 from speechrail.application.services import AppOverrides, build_app_services
+from speechrail.application.tts_audio_window import TtsAudioWindow
 from speechrail.application.tts_stream import (
     TtsStreamAdmissionError,
     TtsStreamReceipt,
@@ -344,6 +345,33 @@ def test_slow_consumer_is_reported_as_backpressure() -> None:
         receipt_id = controller.receipt_id
         assert receipt_id is not None
         assert receipts.get(receipt_id)["error_code"] == "tts_backpressure"
+
+    asyncio.run(run())
+
+
+def test_consumption_admission_is_outside_the_transport_deadline() -> None:
+    async def run() -> None:
+        synth = _FakeSynthesizer()
+        sink = _Sink()
+        window = TtsAudioWindow(4, inactivity_seconds=0.2)
+        controller = await _service(synth).open(
+            options=_options(),
+            sink=sink,
+            audio_admission=window.reserve,
+            limits=TtsStreamLimits(slow_consumer_seconds=0.03),
+        )
+        session = synth.sessions[0]
+        session.push(_audio_event())
+        session.push(_audio_event(index=1))
+        session.push(_terminal_event(TtsStreamTerminal.COMPLETED))
+        await asyncio.sleep(0.08)
+        assert controller.active
+        assert controller.delivered_samples == 2
+        window.acknowledge(2)
+        await asyncio.wait_for(controller.wait_closed(), timeout=1)
+        assert controller.terminal is TtsStreamTerminal.COMPLETED
+        assert controller.delivered_samples == 4
+        assert len(sink.terminals) == 1
 
     asyncio.run(run())
 

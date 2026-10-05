@@ -84,10 +84,10 @@
   },
   "engine_wheel": {
     "filename": "mlx_audio-0.5.6-py3-none-any.whl",
-    "sha256": "a717972afcbbf07dd3ed3ff30f9f26b8c2b20f07664c25c1dae915b0afe57502",
+    "sha256": "c62639075e2f0fb1fa72ef422fa2c4fa675c3597e01c4a1d9184f0219fb797ef",
     "source_repository": "https://github.com/Blaizzy/mlx-audio",
     "source_revision": "4ab7e6f7dedd69a136cfaa318c5dc8aed5119446",
-    "patch_sha256": "a7521bb21ee3d4b22cba13fb4954bb1a24a1fe51e627ff430560f76c9fc34d63",
-    "build_inputs_sha256": "d4e4b9797c2821e8ff25b33f4735daa7eb80e949045162249566c13dde4627cb"
+    "patch_sha256": "b490a525c71f81bb4b4e3f71a0b8d7338564607d3a9c4caa2bee42c2ffdf498a",
+    "build_inputs_sha256": "4dc9e88942e93f447208ca1b7ed6acdef965639e083ce4bf6181a1fd7364f6ca"
   }
 }

@@ -1,0 +1,39 @@
+{
+  "type": "session.update",
+  "event_id": "evt_session_update",
+  "session": {
+    "type": "transcription",
+    "audio": {
+      "input": {
+        "format": {
+          "type": "audio/pcm",
+          "rate": 24000
+        },
+        "transcription": {
+          "model": "speechrail/qwen3-asr-1.7b"
+        },
+        "turn_detection": null
+      }
+    },
+    "speechrail": {
+      "task": "conversation",
+      "tts": {
+        "enabled": true
+      },
+      "alignment": {
+        "enabled": false
+      },
+      "diarization": {
+        "enabled": false
+      },
+      "endpointing": {
+        "mode": "server_vad",
+        "threshold": 0.5,
+        "prefix_padding_ms": 300,
+        "silence_duration_ms": 400
+      },
+      "expected_asr_revision": "asr-catalog",
+      "expected_tts_revision": "base-catalog"
+    }
+  }
+}

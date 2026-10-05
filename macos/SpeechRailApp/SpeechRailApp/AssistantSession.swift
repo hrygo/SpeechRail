@@ -2133,8 +2133,11 @@ public final class AssistantSession {
         audioSession ownedAudioSession: (any AssistantAudioSession)?
     ) -> AssistantTTSStreamCoordinator {
         let tts = AssistantTTSStreamCoordinator()
+        let audioWindowBytes = tts.audioWindowBytes
         tts.sendStart = { requestID in
-            try await client.startTTSStream(requestID: requestID, speed: nil)
+            try await client.startTTSStream(
+                requestID: requestID, speed: nil, audioWindowBytes: audioWindowBytes
+            )
         }
         tts.sendAppend = { sequence, text in
             try await client.appendTTSText(text, sequence: sequence)
@@ -2143,6 +2146,9 @@ public final class AssistantSession {
             try await client.finishTTSText(lastSequence: lastSequence)
         }
         tts.sendCancel = { try await client.cancelTTS() }
+        tts.sendAudioAcknowledgement = { requestID, sampleOffset in
+            try await client.acknowledgeTTSAudio(requestID: requestID, sampleOffset: sampleOffset)
+        }
         tts.enqueuePlayback = { pcm, epoch in
             if let audioSession = ownedAudioSession {
                 return await audioSession.enqueuePlayback(pcm, epoch: epoch)

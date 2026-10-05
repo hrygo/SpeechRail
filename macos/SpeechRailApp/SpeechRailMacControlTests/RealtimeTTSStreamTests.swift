@@ -7,6 +7,58 @@ import XCTest
 /// 增量 TTS 的线上形状测试：DTO 字段与服务端 §3.3.1 对齐，
 /// 客户端只把**身份匹配、序号连续、偶数字节**的音频块交给上层。
 final class RealtimeTTSStreamTests: XCTestCase {
+    func testCloneRevisionBelongsToUtteranceAndNeverToHandshake() async throws {
+        let transport = TTSStreamTransport()
+        let client = RealtimeASRClient(
+            voice: "clone_fixture",
+            apiKey: "",
+            expectedASRRevision: "asr-catalog",
+            expectedTTSRevision: "base-catalog",
+            expectedVoiceRevision: "vr_clone",
+            callerTTSEnabled: true
+        )
+        try await client.connect(using: transport)
+        let sentUpdate = await transport.lastSentPayload()
+        let update = try XCTUnwrap(jsonObject(sentUpdate))
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let fixtureData = try Data(contentsOf: repoRoot.appendingPathComponent(
+            "tests/fixtures/realtime-current/client/assistant-session-update.json"
+        ))
+        let fixture = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: fixtureData) as? [String: Any]
+        )
+        XCTAssertEqual(update as NSDictionary, fixture as NSDictionary)
+        let session = try XCTUnwrap(update["session"] as? [String: Any])
+        let extensions = try XCTUnwrap(session["speechrail"] as? [String: Any])
+        XCTAssertEqual(extensions["expected_asr_revision"] as? String, "asr-catalog")
+        XCTAssertNil(
+            extensions["expected_tts_revision"],
+            "会话没有音色身份，不能携带克隆模型 revision"
+        )
+
+        try await client.startTTSStream(requestID: "clone-turn")
+        let sentStart = await transport.lastSentPayload()
+        let start = try XCTUnwrap(jsonObject(sentStart))
+        XCTAssertEqual(start["voice"] as? String, "clone_fixture")
+        XCTAssertEqual(start["voice_revision"] as? String, "vr_clone")
+        XCTAssertEqual(start["expected_model_revision"] as? String, "base-catalog")
+
+        try await client.updateVoice(
+            "serena",
+            expectedVoiceRevision: nil,
+            expectedTTSRevision: "custom-catalog"
+        )
+        try await client.startTTSStream(requestID: "system-turn")
+        let sentSystem = await transport.lastSentPayload()
+        let system = try XCTUnwrap(jsonObject(sentSystem))
+        XCTAssertEqual(system["voice"] as? String, "serena")
+        XCTAssertNil(system["voice_revision"], "系统音色不能沿用上一音色的 pin")
+        XCTAssertEqual(system["expected_model_revision"] as? String, "custom-catalog")
+        await client.close()
+    }
+
     func testStartAppendFinishUseTheContractFieldNames() {
         let start = SpeechRailTTSStart(
             requestID: "caller-turn-42",
@@ -24,6 +76,7 @@ final class RealtimeTTSStreamTests: XCTestCase {
         XCTAssertEqual(start["voice"] as? String, "serena")
         XCTAssertEqual(start["voice_revision"] as? String, "vr_1")
         XCTAssertEqual(start["expected_model_revision"] as? String, "deadbeef")
+        XCTAssertEqual(start["audio_window_bytes"] as? Int, 1_440_000)
         XCTAssertNil(start["limits"], "没要求收紧限额时不该带 limits")
         XCTAssertNil(start["response_id"], "旧 response 身份已移除")
 
@@ -54,6 +107,7 @@ final class RealtimeTTSStreamTests: XCTestCase {
             jsonObject("""
             {
               "type": "speechrail.tts.started",
+              "audio_window_bytes": 48000,
               "request_id": "req-1",
               "task_id": "task-1",
               "plan_id": "plan-1",
@@ -117,6 +171,20 @@ final class RealtimeTTSStreamTests: XCTestCase {
         XCTAssertNil(TTSAudioPosition(object: jsonObject(#"{"chunk_index":0}"#) ?? [:]))
     }
 
+    func testConsumptionAcknowledgementMatchesSharedWireFixture() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let data = try Data(contentsOf: repoRoot.appendingPathComponent(
+            "tests/fixtures/realtime-current/client/tts-audio-ack.json"
+        ))
+        let fixture = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let ack = SpeechRailTTSAudioAck(
+            requestID: "tts_req_001", sampleOffset: 1_920, eventID: "evt-tts-audio-ack"
+        ).jsonObject
+        XCTAssertEqual(ack as NSDictionary, fixture as NSDictionary)
+    }
+
     func testClientStreamsTextAndDropsMisplacedAudio() async throws {
         let transport = TTSStreamTransport()
         let client = RealtimeASRClient(voice: "serena", apiKey: "", callerTTSEnabled: true)
@@ -134,6 +202,7 @@ final class RealtimeTTSStreamTests: XCTestCase {
         XCTAssertEqual(startPayload["type"] as? String, "speechrail.tts.start")
         XCTAssertEqual(startPayload["voice"] as? String, "serena")
         XCTAssertEqual(startPayload["task"] as? String, "conversation")
+        XCTAssertEqual(startPayload["audio_window_bytes"] as? Int, 1_440_000)
         XCTAssertNotNil(startPayload["event_id"])
 
         await transport.enqueue(.text(text(started(requestID: "req-1"))))
@@ -173,6 +242,17 @@ final class RealtimeTTSStreamTests: XCTestCase {
         XCTAssertEqual(audioRequest, "req-1")
         XCTAssertEqual(audioTask, "task-1")
         XCTAssertEqual(pcm, Data([1, 2]))
+        try await client.acknowledgeTTSAudio(requestID: "req-1", sampleOffset: 1)
+        let sentAck = await transport.lastSentPayload()
+        let ackPayload = try XCTUnwrap(jsonObject(sentAck))
+        XCTAssertEqual(ackPayload["type"] as? String, "speechrail.tts.audio_ack")
+        XCTAssertEqual(ackPayload["request_id"] as? String, "req-1")
+        XCTAssertEqual(ackPayload["sample_offset"] as? Int, 1)
+        try await client.acknowledgeTTSAudio(requestID: "req-1", sampleOffset: 1)
+        try await client.acknowledgeTTSAudio(requestID: "req-old", sampleOffset: 1)
+        try await client.acknowledgeTTSAudio(requestID: "req-1", sampleOffset: 99)
+        let afterIgnoredCredits = await transport.lastSentPayload()
+        XCTAssertEqual(afterIgnoredCredits, sentAck, "duplicate, foreign and future credits cannot be sent")
 
         // 乱序块 + 奇数字节 + 旧 request：三种都必须被丢掉。
         await transport.enqueue(.text(text(audioDelta(requestID: "req-1", pcm: Data([3, 4]), chunkIndex: 5, sampleOffset: 99))))
@@ -208,6 +288,10 @@ final class RealtimeTTSStreamTests: XCTestCase {
         XCTAssertEqual(requestID, "req-1")
         XCTAssertEqual(taskID, "task-1")
         XCTAssertEqual(status, "completed")
+        let sentBeforeLateAck = await transport.lastSentPayload()
+        try await client.acknowledgeTTSAudio(requestID: "req-1", sampleOffset: 2)
+        let sentAfterLateAck = await transport.lastSentPayload()
+        XCTAssertEqual(sentBeforeLateAck, sentAfterLateAck, "a terminal retires the credit sender identity")
         await client.close()
     }
 
@@ -227,6 +311,7 @@ final class RealtimeTTSStreamTests: XCTestCase {
     private func started(requestID: String) -> [String: Any] {
         [
             "type": "speechrail.tts.started",
+            "audio_window_bytes": 1_440_000,
             "task_id": "task-1",
             "plan_id": "plan-1",
             "request_id": requestID,

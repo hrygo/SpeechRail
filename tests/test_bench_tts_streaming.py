@@ -396,6 +396,23 @@ def test_summarise_reports_no_timings_for_an_empty_run() -> None:
     assert summary.text_gap_ms_p50 is None
 
 
+def test_benchmark_returns_cumulative_credits_only_after_discarding_pcm() -> None:
+    script = [
+        *_handshake(),
+        _STARTED,
+        {"type": "speechrail.tts.text_accepted", "append_sequence": 0},
+        _audio_delta(b"\x01\x02" * 2),
+        _audio_delta(b"\x01\x02" * 3),
+        {"type": "speechrail.tts.completed"},
+    ]
+    trace, connection = _turn(script, text="你好", slices=1)
+    acknowledgements = connection.of_type("speechrail.tts.audio_ack")
+    assert [event["sample_offset"] for event in acknowledgements] == [2, 5]
+    request_id = connection.sent[1]["request_id"]
+    assert all(event["request_id"] == request_id for event in acknowledgements)
+    assert trace.audio_bytes == 10
+
+
 def test_run_incremental_turn_follows_the_incremental_protocol() -> None:
     script = [
         *_handshake(),
@@ -413,10 +430,19 @@ def test_run_incremental_turn_follows_the_incremental_protocol() -> None:
         "speechrail.tts.append_text",
         "speechrail.tts.append_text",
         "speechrail.tts.finish_text",
+        "speechrail.tts.audio_ack",
     ]
     start = connection.sent[1]
     assert start["voice"] == "serena"
     assert start["task"] == "conversation"
+    assert start["audio_window_bytes"] == 1_440_000
+    assert connection.of_type("speechrail.tts.audio_ack") == [
+        {
+            "type": "speechrail.tts.audio_ack",
+            "request_id": start["request_id"],
+            "sample_offset": 24_000,
+        }
+    ]
     appends = connection.of_type("speechrail.tts.append_text")
     assert [event["sequence"] for event in appends] == [0, 1]
     assert "".join(event["text"] for event in appends) == "你好，世界"

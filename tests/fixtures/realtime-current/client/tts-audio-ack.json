@@ -1,0 +1,6 @@
+{
+  "type": "speechrail.tts.audio_ack",
+  "event_id": "evt-tts-audio-ack",
+  "request_id": "tts_req_001",
+  "sample_offset": 1920
+}

@@ -76,8 +76,9 @@ public struct SpeechRailSessionUpdate: Sendable {
     public let ttsEnabled: Bool
     public let alignment: Alignment
     public let diarizationEnabled: Bool
+    /// ASR identity belongs to the connection. Voice and TTS model identity
+    /// belong exclusively to `SpeechRailTTSStart`, which identifies a voice.
     public let expectedASRRevision: String?
-    public let expectedTTSRevision: String?
 
     public init(
         model: String,
@@ -91,7 +92,6 @@ public struct SpeechRailSessionUpdate: Sendable {
         alignment: Alignment = Alignment(enabled: false),
         diarizationEnabled: Bool = false,
         expectedASRRevision: String? = nil,
-        expectedTTSRevision: String? = nil,
         eventID: String = "evt_session_update"
     ) {
         self.eventID = eventID
@@ -106,7 +106,6 @@ public struct SpeechRailSessionUpdate: Sendable {
         self.alignment = alignment
         self.diarizationEnabled = diarizationEnabled
         self.expectedASRRevision = expectedASRRevision
-        self.expectedTTSRevision = expectedTTSRevision
     }
 
     public var jsonObject: [String: Any] {
@@ -125,7 +124,6 @@ public struct SpeechRailSessionUpdate: Sendable {
         ]
         if let endpointing { speechrail["endpointing"] = endpointing.jsonObject }
         if let expectedASRRevision { speechrail["expected_asr_revision"] = expectedASRRevision }
-        if let expectedTTSRevision { speechrail["expected_tts_revision"] = expectedTTSRevision }
         return [
             "type": "session.update",
             "event_id": eventID,
@@ -550,6 +548,7 @@ public enum RealtimeClosePlan {
 /// `task` 与 `voice` 都是**必填**：服务端据此为这一轮选唯一角色与音色身份。
 /// 文本不再随 start 一次给完，而是通过 `speechrail.tts.append_text` 持续追加。
 public struct SpeechRailTTSStart: Sendable {
+    public static let maximumAudioWindowBytes = 1_440_000
     public let type = "speechrail.tts.start"
     public let requestID: String
     public let task: SpeechRailSessionUpdate.Task
@@ -557,6 +556,7 @@ public struct SpeechRailTTSStart: Sendable {
     public let speed: Double?
     public let voiceRevision: String?
     public let expectedModelRevision: String?
+    public let audioWindowBytes: Int
     /// 只能**收紧**服务端默认值；放宽会被 `tts_stream_limit_exceeded` 拒绝。
     public let limits: [String: Double]?
     public let eventID: String
@@ -568,6 +568,7 @@ public struct SpeechRailTTSStart: Sendable {
         speed: Double? = nil,
         voiceRevision: String? = nil,
         expectedModelRevision: String? = nil,
+        audioWindowBytes: Int = SpeechRailTTSStart.maximumAudioWindowBytes,
         limits: [String: Double]? = nil,
         eventID: String = UUID().uuidString
     ) {
@@ -577,6 +578,7 @@ public struct SpeechRailTTSStart: Sendable {
         self.speed = speed
         self.voiceRevision = voiceRevision
         self.expectedModelRevision = expectedModelRevision
+        self.audioWindowBytes = audioWindowBytes
         self.limits = limits
         self.eventID = eventID
     }
@@ -587,7 +589,8 @@ public struct SpeechRailTTSStart: Sendable {
             "event_id": eventID,
             "request_id": requestID,
             "task": task.rawValue,
-            "voice": voice
+            "voice": voice,
+            "audio_window_bytes": audioWindowBytes
         ]
         if let speed { object["speed"] = speed }
         if let voiceRevision { object["voice_revision"] = voiceRevision }
@@ -656,6 +659,29 @@ public struct SpeechRailTTSFinishText: Sendable {
             "event_id": eventID,
             "request_id": requestID,
             "last_sequence": lastSequence
+        ]
+    }
+}
+
+/// Exclusive cumulative PCM16 consumption watermark; it is transport credit,
+/// not a claim that a user heard or understood the audio.
+public struct SpeechRailTTSAudioAck: Sendable {
+    public let requestID: String
+    public let sampleOffset: Int
+    public let eventID: String
+
+    public init(requestID: String, sampleOffset: Int, eventID: String = UUID().uuidString) {
+        self.requestID = requestID
+        self.sampleOffset = sampleOffset
+        self.eventID = eventID
+    }
+
+    public var jsonObject: [String: Any] {
+        [
+            "type": "speechrail.tts.audio_ack",
+            "event_id": eventID,
+            "request_id": requestID,
+            "sample_offset": sampleOffset,
         ]
     }
 }
@@ -740,10 +766,16 @@ public struct TTSSessionStarted: Equatable, Sendable {
     public let limits: TTSStreamLimits?
     public let sampleRate: Int
     public let channels: Int
+    public let audioWindowBytes: Int
 
     public init?(object: [String: Any]) {
-        guard let requestID = object["request_id"] as? String else { return nil }
+        guard let requestID = object["request_id"] as? String,
+              let audioWindowBytes = object["audio_window_bytes"] as? Int,
+              (2...SpeechRailTTSStart.maximumAudioWindowBytes).contains(audioWindowBytes),
+              audioWindowBytes.isMultiple(of: MemoryLayout<Int16>.size)
+        else { return nil }
         self.requestID = requestID
+        self.audioWindowBytes = audioWindowBytes
         self.taskID = object["task_id"] as? String
         self.planID = object["plan_id"] as? String
         self.voiceRevision = object["voice_revision"] as? String

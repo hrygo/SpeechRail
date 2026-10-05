@@ -252,7 +252,9 @@ final class AssistantSessionTests: XCTestCase {
             )
         }
 
-        func startTTSStream(requestID: String, speed: Double?) async throws {
+        func acknowledgeTTSAudio(requestID: String, sampleOffset: Int) async throws {}
+
+        func startTTSStream(requestID: String, speed: Double?, audioWindowBytes: Int) async throws {
             counters.startTTS += 1
             startedVoices.append(appliedVoice)
             ttsRequestID = requestID
@@ -784,7 +786,9 @@ final class AssistantSessionTests: XCTestCase {
         /// App 自选 ``request_id``，fixture 记录的是服务端那一轮的身份。这里把
         /// 两者映射起来：**内容**（准入、ACK 计数、终态）取自 fixture，**身份**
         /// 用 App 自己的，与真服务一致。
-        func startTTSStream(requestID: String, speed: Double?) async throws {
+        func acknowledgeTTSAudio(requestID: String, sampleOffset: Int) async throws {}
+
+        func startTTSStream(requestID: String, speed: Double?, audioWindowBytes: Int) async throws {
             let started = lock.withLock { () -> LifecycleFixture.Scenario.ServerEvent? in
                 let starts = events.filter {
                     $0.type == "speechrail.tts.started" && $0.requestID != nil

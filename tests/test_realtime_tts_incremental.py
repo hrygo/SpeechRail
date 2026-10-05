@@ -28,6 +28,7 @@ from realtime_wire import (
 from speechrail.app import create_app
 from speechrail.application.realtime_openai import OpenAIRealtimeSession
 from speechrail.application.services import AppOverrides, build_app_services
+from speechrail.compatibility.openai_realtime import RealtimeAdapterError
 from speechrail.config import Settings
 from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.domain.tts import VoiceRegistry
@@ -228,6 +229,32 @@ def _channel(socket: Any) -> None:
     socket.receive_json()  # session.created
     socket.send_json(session_update(tts={"enabled": True}))
     assert socket.receive_json()["type"] == "session.updated"
+
+
+def test_legacy_session_tts_pin_is_rejected_without_enabling_tts() -> None:
+    synthesizer = FakeIncrementalSynthesizer()
+    client = _client(synthesizer)
+    snapshot = client.get("/v1/speechrail/capabilities").json()
+    with client.websocket_connect("/v1/realtime") as socket:
+        created = socket.receive_json()
+        assert "expected_tts_revision" not in created["session"]["speechrail"]
+        update = session_update(tts={"enabled": True})
+        update["session"]["speechrail"]["expected_tts_revision"] = (
+            snapshot["models"]["tts"]["catalog_revision"]
+        )
+        socket.send_json(update)
+        rejected = socket.receive_json()
+        assert rejected["type"] == "error"
+        assert rejected["error"]["code"] == "unsupported_operation"
+
+        socket.send_json(tts_start(request_id="still-disabled"))
+        assert socket.receive_json()["error"]["code"] == "tts_not_enabled"
+        assert synthesizer.open_calls == 0
+
+        socket.send_json(session_update(tts={"enabled": True}))
+        updated = socket.receive_json()
+        assert updated["type"] == "session.updated"
+        assert "expected_tts_revision" not in updated["session"]["speechrail"]
 
 
 def _drain(socket: Any, *, limit: int = 40) -> list[dict[str, Any]]:
@@ -675,3 +702,204 @@ def test_incremental_wire_round_trips_json_payloads() -> None:
         events = _drain(socket)
     for event in events:
         assert json.loads(json.dumps(event))["type"] == event["type"]
+
+
+def test_normal_audio_burst_pauses_at_consumption_window_and_resumes() -> None:
+    """A fast healthy producer must wait for consumption, not fail at chunk 13."""
+
+    async def scenario() -> None:
+        synthesizer = FakeIncrementalSynthesizer(audio_chunks=(bytes(3_840),) * 13)
+        services = build_app_services(
+            Settings(**_tier_kwargs()), AppOverrides(tts_synthesizer=synthesizer)
+        )
+        events: list[dict[str, Any]] = []
+
+        async def send(event: dict[str, Any]) -> int:
+            events.append(event)
+            return len(events) - 1
+
+        session = OpenAIRealtimeSession(services, session_id="burst", send=send)
+        try:
+            await session.start()
+            await session.handle(session_update(tts={"enabled": True}))
+            await session.handle(tts_start(request_id="burst", audio_window_bytes=48_000))
+            await session.handle(tts_append_text(request_id="burst", sequence=0, text="burst"))
+            await session.handle(tts_finish_text(request_id="burst", last_sequence=0))
+            for _ in range(200):
+                await asyncio.sleep(0)
+            audio = [e for e in events if e["type"] == "speechrail.tts.audio.delta"]
+            assert len(audio) == 12
+            assert not any(e["type"] in _TERMINALS for e in events)
+            assert sum(len(base64.b64decode(e["delta"])) for e in audio) == 46_080
+
+            await session.handle(
+                {
+                    "type": "speechrail.tts.audio_ack", "event_id": "burst-consumed",
+                    "request_id": "burst", "sample_offset": 1_920,
+                }
+            )
+            for _ in range(200):
+                await asyncio.sleep(0)
+            audio = [e for e in events if e["type"] == "speechrail.tts.audio.delta"]
+            assert len(audio) == 13
+            assert [e["chunk_index"] for e in audio] == list(range(13))
+            assert [e["sample_offset"] for e in audio] == [i * 1_920 for i in range(13)]
+            assert [e["type"] for e in events if e["type"] in _TERMINALS] == [
+                "speechrail.tts.completed"
+            ]
+        finally:
+            await session.close()
+
+    asyncio.run(scenario())
+
+
+def test_cancel_reclaims_exhausted_audio_window_before_next_request() -> None:
+    async def scenario() -> None:
+        synthesizer = FakeIncrementalSynthesizer(audio_chunks=(bytes(3_840),) * 13)
+        services = build_app_services(
+            Settings(**_tier_kwargs()), AppOverrides(tts_synthesizer=synthesizer)
+        )
+        events: list[dict[str, Any]] = []
+
+        async def send(event: dict[str, Any]) -> int:
+            events.append(event)
+            return len(events) - 1
+
+        session = OpenAIRealtimeSession(services, session_id="cancel-window", send=send)
+        try:
+            await session.start()
+            await session.handle(session_update(tts={"enabled": True}))
+            await session.handle(tts_start(request_id="old", audio_window_bytes=48_000))
+            await session.handle(tts_append_text(request_id="old", sequence=0, text="cancel"))
+            await session.handle(tts_finish_text(request_id="old", last_sequence=0))
+            for _ in range(200):
+                await asyncio.sleep(0)
+            assert sum(e["type"] == "speechrail.tts.audio.delta" for e in events) == 12
+            async with asyncio.timeout(1):
+                await session.handle(tts_cancel(request_id="old"))
+            assert [e["type"] for e in events if e["type"] in _TERMINALS] == [
+                "speechrail.tts.cancelled"
+            ]
+            await session.handle(tts_start(request_id="new", audio_window_bytes=48_000))
+            for _ in range(200):
+                await asyncio.sleep(0)
+            await session.handle(
+                {
+                    "type": "speechrail.tts.audio_ack", "event_id": "old-consumed",
+                    "request_id": "old", "sample_offset": 23_040,
+                }
+            )
+            assert events[-1]["type"] == "speechrail.tts.started"
+            assert events[-1]["request_id"] == "new"
+            assert synthesizer.sessions[0].closed
+        finally:
+            await session.close()
+
+    asyncio.run(scenario())
+
+
+def test_disconnect_reclaims_exhausted_audio_window_and_resource_lane() -> None:
+    async def scenario() -> None:
+        synthesizer = FakeIncrementalSynthesizer(audio_chunks=(bytes(3_840),) * 13)
+        services = build_app_services(
+            Settings(**_tier_kwargs()), AppOverrides(tts_synthesizer=synthesizer)
+        )
+        events: list[dict[str, Any]] = []
+
+        async def send(event: dict[str, Any]) -> int:
+            events.append(event)
+            return len(events) - 1
+
+        session = OpenAIRealtimeSession(services, session_id="disconnect-window", send=send)
+        replacement = OpenAIRealtimeSession(services, session_id="after-disconnect", send=send)
+        try:
+            await session.start()
+            await session.handle(session_update(tts={"enabled": True}))
+            await session.handle(tts_start(request_id="disconnected"))
+            await session.handle(
+                tts_append_text(request_id="disconnected", sequence=0, text="disconnect")
+            )
+            await session.handle(tts_finish_text(request_id="disconnected", last_sequence=0))
+            for _ in range(200):
+                await asyncio.sleep(0)
+            assert sum(e["type"] == "speechrail.tts.audio.delta" for e in events) == 12
+            async with asyncio.timeout(1):
+                await session.close()
+            assert synthesizer.sessions[0].closed
+            old_audio_count = sum(e["type"] == "speechrail.tts.audio.delta" for e in events)
+            await replacement.start()
+            await replacement.handle(session_update(tts={"enabled": True}))
+            await replacement.handle(tts_start(request_id="replacement"))
+            for _ in range(200):
+                await asyncio.sleep(0)
+            assert events[-1]["type"] == "speechrail.tts.started"
+            assert events[-1]["request_id"] == "replacement"
+            assert len(synthesizer.sessions) == 2
+            assert sum(e["type"] == "speechrail.tts.audio.delta" for e in events) == old_audio_count
+        finally:
+            await session.close()
+            await replacement.close()
+
+    asyncio.run(scenario())
+
+
+def test_text_ack_bypasses_audio_waiting_for_consumption() -> None:
+    async def scenario() -> None:
+        synthesizer = FakeIncrementalSynthesizer(audio_chunks=())
+        services = build_app_services(
+            Settings(**_tier_kwargs()), AppOverrides(tts_synthesizer=synthesizer)
+        )
+        events: list[dict[str, Any]] = []
+
+        async def send(event: dict[str, Any]) -> int:
+            events.append(event)
+            return len(events) - 1
+
+        session = OpenAIRealtimeSession(services, session_id="control-ack", send=send)
+        try:
+            await session.start()
+            await session.handle(session_update(tts={"enabled": True}))
+            await session.handle(tts_start(request_id="control-ack"))
+            await session.handle(
+                tts_append_text(request_id="control-ack", sequence=0, text="first")
+            )
+            backend = synthesizer.sessions[0]
+            for i in range(13):
+                await backend._queue.put(
+                    TtsStreamEvent(
+                        kind=TtsStreamEventKind.AUDIO, response_id=backend.options.response_id,
+                        pcm16=bytes(3_840), chunk_index=i, sample_offset=i * 1_920,
+                    )
+                )
+            for _ in range(200):
+                await asyncio.sleep(0)
+            assert sum(e["type"] == "speechrail.tts.audio.delta" for e in events) == 12
+            async with asyncio.timeout(0.1):
+                await session.handle(
+                    tts_append_text(request_id="control-ack", sequence=1, text="next")
+                )
+            acks = [e for e in events if e["type"] == "speechrail.tts.text_accepted"]
+            assert [e["append_sequence"] for e in acks] == [0, 1]
+            assert acks[-1]["total_codepoints"] == 9
+            ack = {
+                "type": "speechrail.tts.audio_ack", "event_id": "control-consumed",
+                "request_id": "control-ack", "sample_offset": 99_999,
+            }
+            with pytest.raises(RealtimeAdapterError) as failure:
+                await session.handle(ack)
+            assert failure.value.code == "tts_audio_ack_invalid"
+            assert sum(e["type"] == "speechrail.tts.audio.delta" for e in events) == 12
+            ack["sample_offset"] = 1_920
+            await session.handle(ack)
+            await session.handle(ack)
+            ack["sample_offset"] = 1
+            with pytest.raises(RealtimeAdapterError) as failure:
+                await session.handle(ack)
+            assert failure.value.code == "tts_audio_ack_invalid"
+            for _ in range(200):
+                await asyncio.sleep(0)
+            assert sum(e["type"] == "speechrail.tts.audio.delta" for e in events) == 13
+        finally:
+            await session.close()
+
+    asyncio.run(scenario())

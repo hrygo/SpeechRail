@@ -33,7 +33,6 @@ def session_update(
     alignment: dict[str, object] | None = None,
     diarization: dict[str, object] | None = None,
     expected_asr_revision: str | None = None,
-    expected_tts_revision: str | None = None,
     extra_transcription: dict[str, object] | None = None,
     extra_session: dict[str, object] | None = None,
     event_id: str = "evt-session-1",
@@ -64,8 +63,6 @@ def session_update(
         speechrail["endpointing"] = endpointing
     if expected_asr_revision is not None:
         speechrail["expected_asr_revision"] = expected_asr_revision
-    if expected_tts_revision is not None:
-        speechrail["expected_tts_revision"] = expected_tts_revision
     session: dict[str, object] = {
         "type": "transcription",
         "audio": {
@@ -109,6 +106,7 @@ def tts_start(
     expected_model_revision: str | None = None,
     speed: float | None = None,
     limits: dict[str, object] | None = None,
+    audio_window_bytes: int = 48_000,
     event_id: str = "evt-tts-1",
     **extra: object,
 ) -> dict[str, Any]:
@@ -118,6 +116,7 @@ def tts_start(
         "request_id": request_id,
         "task": task,
         "voice": voice,
+        "audio_window_bytes": audio_window_bytes,
     }
     if voice_revision is not None:
         event["voice_revision"] = voice_revision
