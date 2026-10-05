@@ -1,7 +1,7 @@
 ---
 title: "会议知识闭环 M0/M1 交付说明：保存、版本、来源、检索、导出、备份恢复与删除"
 status: active
-version: "6.2"
+version: "6.3"
 date: 2026-10-06
 branch: "codex/meeting-knowledge-milestones"
 base: "origin/main @ dab047b2"
@@ -11,7 +11,7 @@ base: "origin/main @ dab047b2"
 
 ## 范围
 
-分支相对 `origin/main`（`dab047b2`）共 72 个提交（本轮十个增量 + 一条交付说明更正 + MC-09～MC-14 端到端 + 检索标题优先 + 跨会议问答接线 + 会前准备稿接线 + 全文检索降级提示的核查结论）。
+分支相对 `origin/main`（`dab047b2`）共 73 个提交（本轮十个增量 + 一条交付说明更正 + MC-09～MC-14 端到端 + 检索标题优先 + 跨会议问答接线 + 会前准备稿接线 + 全文检索降级提示核查 + 归档往返丢正文出处与改稿血缘）。
 
 > 这个数字过去一直含糊：它算不算本文件自己那个提交，从没写明，于是每轮都在「文档写 N、分支实际 N-1」之间漂移（写上一版时是文档写 70、分支 69）。现在把基准写出来：相对 `origin/main` 的提交数，**含本文件所在提交**。
 
@@ -116,6 +116,7 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 | （同上，第十九条，关闭总账第 9 条） | **检索排序恒为时间倒序，没有相关性**。用户搜"灰度"，最想要的是那场**就叫《灰度发布评审》**的会，而不是上周某场正文里碰巧提了一次灰度的会——后者时间更近，一直排在前面，用户只能一页页翻。现改为**标题命中优先**，其余仍按时间倒序；空查询时排序原样不变 | 实测（先红后绿：红的那次正是"更新的正文命中排在前面"；**变异检验**把排序绑定与谓词绑定调换顺序 → 10 项失败，证明用例对绑定串位有牙。检验后已恢复生产代码） |
 | （同上，第二十处，**独立审计发现，非计划内**） | **跨会议问答（MA-17）整条能力生产代码零消费方**。`MeetingKnowledgeQueryService` 与它的拒答／清单翻页取全／注入防护／展示前范围复核（MC-63）实现完整、都有测试，但全仓只有 `Package.swift` 与它自己引用——用户能搜、能筛、能导出，**却没法问一句**。已接进库页：协调器接 `LLMProvider`、model 加问答状态与代次、页头多一个「问知识库」，答案逐段摆出处原话 | 实测（`rg` 全仓核对 + 变异检验：协调器绕过服务直接返回伪造拒答时，第一版用例照样全绿；换成"有证据时必须真的走到模型那一步"之后，同样变异 → 2 项失败） |
 | （同上，第二十一处，**独立审计发现**） | **会前准备稿（MA-17）整层此前一个入口都没有**。`MeetingPrepDraft`（`openQuestions` / `pendingActions` / `needsReview`，`needsReview` 排最前）与 `markdown()` 渲染实现完整，`store.meetingPrepDraft(scope:)` 同样完整，但 `rg` 全仓核对下来这三样只出现在库层、查询层与测试里，**界面上一个入口都没有**。用户要自己一场一场点开去拼下一场该准备什么——而目标里六个环节「会前准备」排在第一个。另有一个同源的隐患：一次只取 200 条，而准备稿**不带总数**，界面只能拿数组长度说话 | 实测（`rg` 全仓核对 + 变异检验四次全部被抓住） | 已接进库页（页头「会前准备稿」→ sheet，先核对那组排最前，每条带出处原话）。`MeetingPrepDraft` 加 `totalMatched` / `listedCount` / `stoppedAtLimit`：命中超过 200 条时如实说"只列出了前一段"，没截断时**不出现**这句提示 |
+| （同上，第二十二处，**完成度审计查出**） | **归档往返把「这段话出自谁」和「哪一版改来的」弄丢了**。`ArchiveMinutes` 带了其余每一个 minutes 列，唯独缺 schema v11（MA-11）加的 `body_origin` 与 `parent_minutes_id`；导入侧的 INSERT 同样没有这两列。后果不是「少两个字段」：`body_origin` 在库里是 `NOT NULL DEFAULT 'ai'`，所以**漏写不报错**，用户改过或补写过的正文在往返之后被标成「AI 整理」；血缘断了则「撤销一次编辑」直接失效，用户改过的东西再也拿不回来。这直接顶到验收 2「区分原始转录、人工修订、AI归纳和用户补充」 | 实测（逐列比对 `ArchiveMinutes` 与 `minutes` 表；第二次变异精确复现原缺陷，5 项后果全被抓到） | 已修：两列进包也进库，`schemaID` 升 `/3`（v2 包读不了，同 v1→v2 的既定做法）。**既有往返测试为什么一直没红**：它们的夹具用 `saveMinutesCandidate` 造第二版，`body_origin` 本来就是 `ai`、`parent_minutes_id` 本来就空，恰好绕开了这两列 |
 | （此前记为待办，本轮结清） | **全文检索的降级提示「没露出来」不是缺口**。`searchKnowledgeFullText`（返回**行/版本级** `KnowledgeHit`）与库页在用的 `libraryPredicate`（**文档级**「哪些会议匹配」）是同一能力的两套实现、粒度不同。验收 4「检索返回对应会议**与证据**」已由 Path A 满足——每行显示 `matchExcerpt` 作证据。Path B 独有的 `degradedReason` 守的是「无 FTS5 / 查询无有效词项」，但降级时**仍返回 LIKE 结果**（不是谎报零结果），且 macOS 系统 SQLite 自带 FTS5，该分支在本平台不可达。Path B 那 14 项测试守的 `KnowledgeSearchTokenizer`、索引重建/去重/删除不复活，**Path A 也依赖同一套分词器与索引**——删掉会连带损失 Path A 的覆盖 | 实测（逐层核对两条路径的返回粒度、`matchExcerpt` 消费者、降级分支的实际返回、FTS5 可用性；`rg` 确认 Path B 无生产消费方） | **判定为已知状态而非缺口**：保留 store 能力与 14 项测试（是 Path A 的分词/索引覆盖来源），但没有为它单独造界面——没有任何现有界面需要行级粒度。为此新造 UI 属未被要求的功能 |
 | （同上，第十四处，本轮关闭总账第 14 条） | **MA-14 这一整块此前全部没有入口**：`recordExecutionEvent` / `executionState` / `conflictingDecisions` / `confirmSupersession` / `knowledgeChangeProposals` / `executionEvents` 六个 API 在生产代码里**零消费方**。用户标过的"已完成"、跨会议的两处矛盾、重新生成换掉了哪条结论、一条承诺是怎么变成今天这样的——全部只存在于库里 | 实测（沿六个 API 逐个回查消费方） | 四个提交分四轮接进库页：行动生命周期读写两侧、跨会议结论冲突、详情里的「这一版可能变了什么」、未完成事项里的「变更历史」。每轮都修了同一处的自相矛盾（详见各节）。**总账第 14 条到此关闭** |
 | （同上，第十三处） | **MC-56「列出全部未完成事项」没有入口**。`SessionStore.knowledgeItems(filter:scope:limit:offset:)` 早已能算结构化投影并给出分页计数，但 `KnowledgeItemFilter` 里**没有"未完成"这个条件**，`SessionCoordinator` 没有透传，库页没有入口——`knowledgeItems` 在生产代码里零消费方。用户只能一场一场点开，凭记忆拼自己那份待办清单。已补 `openOnly`、协调器透传、库页「未完成事项」面板与全量计数 | 实测（沿 `knowledgeItems` 回查消费方发现 + 红/绿反证） | 顺带修掉一个**同源的旧缺陷**：`counts.total` 取的是过滤**前**的行数，于是 `needsReview`/`byKind` 会随条件变、总计不会——正是验收里"只返回 top10 却称全部"最可能的成因。现在计数与列表取自同一批行 |
@@ -4126,3 +4127,95 @@ XCTest 1125 → 1131 + Swift Testing 419，零失败；`./scripts/macos_app_buil
 - **`needsReview` 与 `pendingActions` 会重复出现同一条**（一条既是待办又还没核对）。这是
   刻意的：两个问题各自的清单更完整，代价是同一条要看两遍。没有做成「每条只出现一次」的
   列表，因为那要丢掉「这条还归谁管」或「这条还不能当结论用」其中一侧的信息。
+
+## 完成度审计（第一轮）｜归档往返丢正文出处与改稿血缘，2026-10-06
+
+### 这一节是一次验收标准审计的产物，不是计划里的下一项
+
+上一轮把「不需要新授权的待做」清空之后，本轮改做一件更该做的事：**不看文档怎么说，
+逐条拿当前代码与测试去查五条验收标准**，看有没有哪条的实际证据比声明的弱。
+
+第一条查的就是验收 2 的「区分原始转录、人工修订、AI归纳和用户补充」。
+`MinutesBodyOrigin` 四档俱在，四档都能产出，界面上也分得开——但**导出这一环断了**。
+
+### 查到了什么
+
+`ArchiveMinutes` 带了 `minutes` 表的其余每一个列：`is_legacy_import`、`remote_response_id`、
+`config_snapshot`、`snapshot_id`、`cancel_requested_at`、`candidate_json`、`review_json`、
+`coverage_json`……唯独缺 schema v11（MA-11）加的 **`body_origin`** 与 **`parent_minutes_id`**。
+导入侧的 `INSERT INTO minutes` 同样没有这两列（21 列，止于 `coverage_json`）。
+
+后果不是「少两个字段」，是两个具体的坏形态：
+
+1. **出处被抹掉。** `body_origin` 在库里的定义是
+   `TEXT NOT NULL DEFAULT 'ai'`。所以漏写这一列**不会报错**——用户改过的纪要、
+   补写过的说明，往返之后一律变回 `'ai'`。新库里 `MinutesReviewModel` 会照着这一列
+   告诉用户「这段是你补充的」是假的。**这一列存在的全部意义就是防止用户自己写的话
+   被冒充成模型输出**，而导出把它绕过去了。
+2. **改稿血缘断掉。** `parent_minutes_id` 丢了之后，`minutesEditLineage` 只剩孤零零
+   一版，「撤销一次编辑」在往返之后返回 nil。用户在 App 里亲手改过的东西，
+   导出再导入就再也拿不回来了。
+
+这与本分支早前修掉的「归档往返丢掉待办的完成状态、负责人与期限」是同型问题——
+**用户已经付出过的成本在一次往返里消失**。那次补的是 `execution`，这次漏的是
+`body_origin` / `parent_minutes_id`。
+
+### 为什么既有测试一直没红
+
+`testFullArchiveRoundTripPreservesIdentityAndAdoptedPointer` 用了 22 项断言把往返
+钉得很紧：id 不漂移、采用指针保留、条目身份、锚点原文、快照边界、引用不断裂。
+它仍然绿，是因为它的第二版用 `saveMinutesCandidate` 造——那个路径产出的
+`body_origin` 本来就是 `ai`、`parent_minutes_id` 本来就是 NULL，**恰好绕开了这两列**。
+
+这不是「测试写得不够多」，是夹具选的路径刚好避开了缺陷。这也说明「往返保真」这件事
+不能靠一条用例的名字来担保。
+
+### 做了什么
+
+- `ArchiveMinutes` 增 `bodyOrigin`（`body_origin`）与 `parentMinutesID`（`parent_minutes_id`）。
+  **`bodyOrigin` 必填且不给默认值**——库里那一列有 DEFAULT，所以漏传不会报错，
+  只会把用户写的正文默默标成模型写的。留一个「忘了填也没关系」的口子，等于把这个
+  bug 原样留下。DTO 里其余枚举字段（如 `status`）也是 `String` + rawValue，与既有口径一致。
+- `MinutesVersion.archiveModel` 带上这两列；导入侧 `INSERT` 加两列两处绑定。
+- `KnowledgeArchivePayload.schemaID` `/2` → **`/3`**，v2 的包**读不了**。
+  与 v1→v2 同一手法（`guard payload.schema == schemaID`），代价是此前导出的 v2 包
+  需要重新导出。这是有意的：带着缺列的包导入，会把用户写的正文归错出处，
+  而出处**不能猜**。宁可重导一次。
+- 既有 `testPayloadSchemaIsV2` 更名为 `testPayloadSchemaIsV3` 并更新断言。
+
+### 回归证据（2026-10-06 实测）
+
+`MeetingKnowledgeArchiveTests` 22 → 23 项；`swift test --package-path macos/SpeechRailApp`
+XCTest 1131 → **1132** + Swift Testing **419**，零失败；`./scripts/macos_app_build.sh`
+BUILD SUCCEEDED；`python3 scripts/check_macos_test_target_coverage.py` exit 0。
+
+新用例 `testUserAuthoredOriginAndEditLineageSurviveTheRoundTrip` 走真实路径：
+`saveUserMinutesEdit` → `saveUserSupplement` → `exportKnowledgeArchive` →
+`importKnowledgeArchive` 到全新库，然后断言五件事——两版的 `bodyOrigin`、
+`parentMinutesID`、`minutesEditLineage` 走出三版、`undoMinutesEdit` 仍可用。
+
+**两次变异检验**，与前几轮不同，这里刻意做了两级：
+
+| 变异 | 结果 |
+|---|---|
+| 列还在 `INSERT` 里、只是不绑值 | 7 项失败，但形态是 `NOT NULL constraint failed: minutes.body_origin`——**响亮的硬报错**，不是要防的那个 |
+| 两列完全不在 `INSERT` 里（= **修复前的真实形态**） | 5 项失败，全部落在新用例上：`bodyOrigin` 得 `"ai"`、`parentMinutesID` 得 `nil`、血缘只剩 1 版、`undoMinutesEdit` 返回 nil |
+
+第二级是关键：**只有新用例变红，其余 22 项全绿**。这既是变异检验的结论，
+也是本节真正想记的东西——既有往返测试的盲区是被这一次审计照出来的，不是被这次变异
+偶然撞出来的。检验后生产代码已恢复。
+
+### 迁移与回退
+
+不改 schema，不动用户数据。回退 = revert 本提交：包格式退回 `/2`，两列不再往返。
+**注意回退的代价是对称的**：退回之后「用户写的正文被标成 AI 整理」会回来。
+
+### 未验证事项与已知边界
+
+- **既有 v2 包在本 PR 内不可导入**。本 PR 尚未发布，实际影响接近零；若已有用户拿它
+  做过分享，需要重新导出。这是有意的取舍，不是遗漏。
+- **分享包（`scope == .share`）** 同样会带上这两列。分享包只装选中的那一版，
+  但那一版可能正是用户改过或补写过的——所以必须带，否则分享出去的纪要会谎称
+  「AI 整理」。
+- 本轮只审了验收 2 的四种来源这一条。其余四条验收标准尚未做同等的逐条审计，
+  记为下一批候选。

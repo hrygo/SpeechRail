@@ -3284,10 +3284,14 @@ public struct KnowledgeArchiveImportResult: Sendable {
 /// `structured.json` 的根。**字段名与内部类型解耦**：内部改字段名不会静默改掉
 /// 已经发出去的包，老包也不会因为新版本内部重构就读不回来（MA-19 开放格式）。
 public struct KnowledgeArchivePayload: Codable, Hashable, Sendable {
-    /// v2：补 `execution` 与 `supersessions`（MA-14 的执行状态与决策演进）。
-    /// v1 的包**读不了**——按项目策略不为旧包保留兼容层，
-    /// 代价是此前导出的 v1 包需要重新导出。
-    public static let schemaID = "speechrail.meeting.knowledge-archive.payload/2"
+    /// v3：补 `body_origin` 与 `parent_minutes_id`（MA-11 的正文出处与改稿血缘）。
+    /// v2 的包**读不了**——按项目策略不为旧包保留兼容层，代价同 v1→v2。
+    ///
+    /// 为什么要升：v2 丢的不只是两个字段。用户改过的纪要、补写过的说明，
+    /// 导入后 `body_origin` 落回列默认值 `'ai'`，于是**用户自己写的正文被标成
+    /// 「AI 整理」**；血缘断了则「撤销一次编辑」在往返之后直接失效。
+    /// 这两样都是「这段话到底出自谁、是哪一版改来的」，不能猜，只能重导。
+    public static let schemaID = "speechrail.meeting.knowledge-archive.payload/3"
 
     public var schema: String
     public var document: ArchiveDocument
@@ -3634,6 +3638,14 @@ public struct ArchiveMinutes: Codable, Hashable, Sendable {
     public var candidateJSON: String?
     public var reviewJSON: String?
     public var coverageJSON: String?
+    /// 正文出处：`ai` / `user_edited` / `user_supplement` / `legacy_import`。
+    ///
+    /// **必填，不给默认值。** 库里那一列是 `NOT NULL DEFAULT 'ai'`，
+    /// 所以漏传不会报错——只会把用户写的正文默默标成模型写的。
+    /// 这正是它要防的那件事，不能留一个「忘了填也没关系」的口子。
+    public var bodyOrigin: String
+    /// 这一版是从哪一版改来的。用户改稿产生血缘链，丢了它「撤销」就没有依据。
+    public var parentMinutesID: String?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -3657,6 +3669,8 @@ public struct ArchiveMinutes: Codable, Hashable, Sendable {
         case candidateJSON = "candidate_json"
         case reviewJSON = "review_json"
         case coverageJSON = "coverage_json"
+        case bodyOrigin = "body_origin"
+        case parentMinutesID = "parent_minutes_id"
     }
 
     public init(
@@ -3680,7 +3694,9 @@ public struct ArchiveMinutes: Codable, Hashable, Sendable {
         cancelRequestedAt: Double? = nil,
         candidateJSON: String? = nil,
         reviewJSON: String? = nil,
-        coverageJSON: String? = nil
+        coverageJSON: String? = nil,
+        bodyOrigin: String,
+        parentMinutesID: String? = nil
     ) {
         self.id = id
         self.sessionID = sessionID
@@ -3703,6 +3719,8 @@ public struct ArchiveMinutes: Codable, Hashable, Sendable {
         self.candidateJSON = candidateJSON
         self.reviewJSON = reviewJSON
         self.coverageJSON = coverageJSON
+        self.bodyOrigin = bodyOrigin
+        self.parentMinutesID = parentMinutesID
     }
 }
 
@@ -4084,7 +4102,9 @@ extension MinutesVersion {
             cancelRequestedAt: cancelRequestedAt?.timeIntervalSince1970,
             candidateJSON: candidateJSON,
             reviewJSON: reviewJSON,
-            coverageJSON: coverageJSON
+            coverageJSON: coverageJSON,
+            bodyOrigin: bodyOrigin.rawValue,
+            parentMinutesID: parentMinutesID
         )
     }
 }

@@ -323,6 +323,88 @@ final class MeetingKnowledgeArchiveTests: XCTestCase {
         XCTAssertTrue(references.isClean, "往返之后引用不该断裂，问题：\(references.problems)")
     }
 
+    /// **正文出处与改稿血缘必须随包往返**（MA-11 / 验收 2 的第四档与「你改过」）。
+    ///
+    /// `ArchiveMinutes` 带了其余每一个 minutes 列，唯独缺 schema v11 加的
+    /// `body_origin` 与 `parent_minutes_id`。后果不是「少两个字段」：
+    /// - `body_origin` 在库里是 `NOT NULL DEFAULT 'ai'`，漏写**不会报错**，
+    ///   用户改过或补写过的正文会被标成「AI 整理」——正是这一列要防的那件事；
+    /// - 血缘断了，`minutesEditLineage` 只剩一版，「撤销一次编辑」在往返后失效。
+    ///
+    /// 与 `testFullArchiveRoundTripPreservesIdentityAndAdoptedPointer` 的差别：
+    /// 那条用的是 `saveMinutesCandidate` 造的第二版（`body_origin` 本来就是 `ai`、
+    /// `parent_minutes_id` 为空），所以**恰好绕开了这两列**，一直没红。
+    func testUserAuthoredOriginAndEditLineageSurviveTheRoundTrip() async throws {
+        let store = try requireStore()
+        let sessionID = try requireSessionID()
+        let claimed = try await prepareMeetingWithCitations()
+        // 夹具返回的是 `claimMinutes` 的**保存前**行，正文还是空的；
+        // 要读回 `saveMinutesCandidate` 之后的那一版。
+        // `XCTUnwrap` 的自动闭包里不能 await，所以先取出来再断言。
+        let saved = try await store.minutesVersion(id: claimed.id)
+        let first = try XCTUnwrap(saved)
+        let originalBody = try XCTUnwrap(first.body)
+
+        let edited = try await store.saveUserMinutesEdit(
+            sessionID: sessionID,
+            editingMinutesID: first.id,
+            body: originalBody + "\n\n补一句口径。"
+        )
+        XCTAssertEqual(edited.bodyOrigin, .userEdited, "改了正文就该记成「你改过」")
+        XCTAssertEqual(edited.parentMinutesID, first.id, "改稿必须留下它是从哪一版改来的")
+
+        let supplemented = try await store.saveUserSupplement(
+            sessionID: sessionID,
+            editingMinutesID: edited.id,
+            supplement: "延期到下个月。"
+        )
+        XCTAssertEqual(supplemented.bodyOrigin, .userSupplement, "补写就该记成「你补充」")
+
+        let documentID = try await requireDocumentID()
+        let package = try await store.exportKnowledgeArchive(
+            selection: KnowledgeArchiveSelection(
+                documentID: documentID, minutesID: supplemented.id, scope: .fullArchive
+            ),
+            to: try exportDestination()
+        )
+
+        let imported = try await makeImportedStore { target in
+            try await target.importKnowledgeArchive(at: package)
+        }
+        defer { Task { await imported.store.close() } }
+
+        let versions = try await imported.store.minutesVersions(sessionID: sessionID)
+        let byID = Dictionary(uniqueKeysWithValues: versions.map { ($0.id, $0) })
+
+        let newEdited = try XCTUnwrap(byID[edited.id])
+        XCTAssertEqual(
+            newEdited.bodyOrigin, .userEdited,
+            "用户改过的正文在往返之后被标成「AI 整理」——出处被抹掉了"
+        )
+        XCTAssertEqual(
+            newEdited.parentMinutesID, first.id,
+            "改稿血缘在往返之后断了"
+        )
+
+        let newSupplement = try XCTUnwrap(byID[supplemented.id])
+        XCTAssertEqual(
+            newSupplement.bodyOrigin, .userSupplement,
+            "用户补写的正文在往返之后被标成「AI 整理」"
+        )
+
+        // 血缘不只是那一列：它得真的还能被走出来。
+        let lineage = try await imported.store.minutesEditLineage(minutesID: supplemented.id)
+        XCTAssertEqual(
+            lineage.map(\.id), [first.id, edited.id, supplemented.id],
+            "往返之后「这一版是从哪一版改来的」应当仍然答得出来"
+        )
+        let undone = try await imported.store.undoMinutesEdit(minutesID: supplemented.id)
+        XCTAssertNotNil(
+            undone,
+            "往返之后「撤销一次编辑」失效了：用户改过的东西再也拿不回来"
+        )
+    }
+
     func testMarkdownIsReadableOnItsOwn() async throws {
         let store = try requireStore()
         let first = try await prepareMeetingWithCitations()
@@ -786,7 +868,10 @@ final class MeetingKnowledgeArchiveTests: XCTestCase {
         }
     }
 
-    func testPayloadSchemaIsV2() async throws {
+    /// 包格式版本。**升版不是形式主义**：v2 缺 `body_origin` 与 `parent_minutes_id`，
+    /// 旧包读不了正是刻意的——带着缺列的包导入，会把用户写的正文标成「AI 整理」，
+    /// 而那是不能猜的信息。宁可让用户重导一次，也不要静默归错出处。
+    func testPayloadSchemaIsV3() async throws {
         let store = try requireStore()
         let version = try await prepareMeetingWithCitations()
         let documentID = try await requireDocumentID()
@@ -795,6 +880,6 @@ final class MeetingKnowledgeArchiveTests: XCTestCase {
                 documentID: documentID, minutesID: version.id, scope: .fullArchive
             )
         )
-        XCTAssertEqual(payload.schema, "speechrail.meeting.knowledge-archive.payload/2")
+        XCTAssertEqual(payload.schema, "speechrail.meeting.knowledge-archive.payload/3")
     }
 }

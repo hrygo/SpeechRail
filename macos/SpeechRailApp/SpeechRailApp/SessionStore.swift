@@ -4700,8 +4700,9 @@ extension SessionStore {
                     id, session_id, version, status, body, model, prompt_chars,
                     is_latest, is_accepted, attempts, failure_reason, lease_until, created_at,
                     is_legacy_import, remote_response_id, config_snapshot, snapshot_id,
-                    cancel_requested_at, candidate_json, review_json, coverage_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    cancel_requested_at, candidate_json, review_json, coverage_json,
+                    body_origin, parent_minutes_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """) { statement in
                     bind(statement, 1, minutes.id)
                     bind(statement, 2, minutes.sessionID)
@@ -4724,6 +4725,13 @@ extension SessionStore {
                     bind(statement, 19, minutes.candidateJSON)
                     bind(statement, 20, minutes.reviewJSON)
                     bind(statement, 21, minutes.coverageJSON)
+
+                    // 出处与血缘（MA-11）。漏掉这两列**不会报错**——`body_origin` 有列默认值
+                    // `'ai'`、`parent_minutes_id` 可空——但用户改过或补写过的正文会被悄悄
+                    // 标成「AI 整理」，且「撤销一次编辑」在往返之后失效。往返必须原样保真，
+                    // 否则用户已经付出过的成本在一次导出里消失。
+                    bind(statement, 22, minutes.bodyOrigin)
+                    bind(statement, 23, minutes.parentMinutesID)
                     try step(statement)
                 }
                 inserted.minutes += 1
