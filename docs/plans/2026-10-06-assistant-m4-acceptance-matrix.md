@@ -275,3 +275,14 @@ soak 探针为纯 realtime 转写、不落 App 会话库，SQLite 记录数核�
 backpressure 有界）含于 TTS 协调器 40 项内；V17 真机播放层对照待 UI 授权。
 口径修正：Assembler 套件为 Swift Testing，走 `swift test --filter`，
 Xcode `-only-testing` 按 XCTest 类名过滤得 0 项属口径误用，非缺失。
+
+## 默认关闭项源码复核（2026-10-07，main@`d24fc02b`，只读 `rg` 实测）
+
+- 完整文本 adapter 门闩：`AssistantSession.swift:607`
+  `usesFullTextSpeechForTest == false`，保持关闭。
+- 保守端点窗口：`ASRScenePreset.silenceDurationMilliseconds`，
+  turn-taking 1200ms / duplex·meeting 900ms / caption·提词器 400ms，未动。
+- 助手终态策略：duplex 与 turn-taking 均为 `fullSegment`
+  （`previewInterval` 600/800ms），无激进 streaming finalize；
+  仅提词器用 streaming（产品既定语义，非助手路径）。
+- `speech_started` 等已移除事件：未恢复（以上均为静态核对，非行为验收）。
