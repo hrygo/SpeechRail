@@ -907,3 +907,145 @@ def test_resolve_engine_dtype_never_guesses_or_fakes_a_q8_artifact() -> None:
         _resolve_engine_dtype(
             snapshot_quantized=False, requested_dtype="int8", loaded_dtype="float16"
         )
+
+
+class _FinishingFakeEngine(_FakeEngine):
+    """Fake engine with a controllable final transcript or decode failure."""
+
+    def __init__(
+        self,
+        model_dir: Path,
+        device: str,
+        dtype: str,
+        max_new_tokens: int,
+        *,
+        final_text: str = "",
+        finish_error: Exception | None = None,
+    ) -> None:
+        super().__init__(model_dir, device, dtype, max_new_tokens)
+        self.final_text = final_text
+        self.finish_error = finish_error
+        self.finish_calls = 0
+        self.close_calls = 0
+
+    def finish_streaming(self, session_id: str) -> tuple[str, str]:
+        self.finish_calls += 1
+        if self.finish_error is not None:
+            raise self.finish_error
+        if session_id not in self.sessions:
+            raise RuntimeError(f"no active session: {session_id}")
+        self.sessions.pop(session_id)
+        return self.final_text, "zh"
+
+    def close_session(self, session_id: str) -> None:
+        self.close_calls += 1
+        super().close_session(session_id)
+
+
+@pytest.mark.parametrize("final_text", ["", "   ", "recognized text"])
+def test_worker_successful_commit_always_emits_completed_before_finished(
+    final_text: str,
+) -> None:
+    engine = _FinishingFakeEngine(
+        Path("/tmp"),
+        "mps",
+        "float16",
+        512,
+        final_text=final_text,
+    )
+    responses = _run_serve(
+        [
+            _start_frame(),
+            {
+                "version": PROTOCOL_VERSION,
+                "type": "session.open",
+                "session_id": "empty-final",
+                "language": "zh",
+            },
+            {"version": PROTOCOL_VERSION, "type": "commit", "session_id": "empty-final"},
+        ],
+        engine=engine,
+    )
+
+    terminal_frames = [
+        frame
+        for frame in responses
+        if frame.get("type") == "finished"
+        or (frame.get("type") == "event" and frame.get("kind") == "completed")
+    ]
+    assert [
+        (frame.get("type"), frame.get("kind"), frame.get("text")) for frame in terminal_frames
+    ] == [
+        ("event", "completed", final_text),
+        ("finished", None, None),
+    ]
+    assert engine.finish_calls == 1
+    assert engine.close_calls == 1
+    assert engine.active_session_count() == 0
+
+
+def test_worker_commit_failure_does_not_emit_success_terminal() -> None:
+    engine = _FinishingFakeEngine(
+        Path("/tmp"),
+        "mps",
+        "float16",
+        512,
+        finish_error=RuntimeError("fake decode failure"),
+    )
+    responses = _run_serve(
+        [
+            _start_frame(),
+            {
+                "version": PROTOCOL_VERSION,
+                "type": "session.open",
+                "session_id": "failed-final",
+                "language": "zh",
+            },
+            {"version": PROTOCOL_VERSION, "type": "commit", "session_id": "failed-final"},
+        ],
+        engine=engine,
+    )
+
+    assert [
+        frame.get("code") for frame in responses if frame.get("type") == "error"
+    ] == ["worker_inference_error"]
+    assert not [
+        frame
+        for frame in responses
+        if frame.get("type") == "finished"
+        or (frame.get("type") == "event" and frame.get("kind") == "completed")
+    ]
+    assert engine.finish_calls == 1
+    assert engine.close_calls == 1
+    assert engine.active_session_count() == 0
+
+
+def test_worker_duplicate_commit_does_not_emit_a_second_terminal() -> None:
+    engine = _FinishingFakeEngine(Path("/tmp"), "mps", "float16", 512)
+    responses = _run_serve(
+        [
+            _start_frame(),
+            {
+                "version": PROTOCOL_VERSION,
+                "type": "session.open",
+                "session_id": "duplicate-final",
+                "language": "zh",
+            },
+            {"version": PROTOCOL_VERSION, "type": "commit", "session_id": "duplicate-final"},
+            {"version": PROTOCOL_VERSION, "type": "commit", "session_id": "duplicate-final"},
+        ],
+        engine=engine,
+    )
+
+    completed = [
+        frame
+        for frame in responses
+        if frame.get("type") == "event" and frame.get("kind") == "completed"
+    ]
+    finished = [frame for frame in responses if frame.get("type") == "finished"]
+    assert len(completed) == 1
+    assert completed[0].get("text") == ""
+    assert len(finished) == 1
+    assert engine.finish_calls == 1
+    assert engine.close_calls == 1
+    assert engine.active_session_count() == 0

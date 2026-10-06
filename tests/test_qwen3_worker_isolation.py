@@ -256,7 +256,7 @@ def test_commit_finish_failure_closes_only_failed_session_and_allows_next_commit
     assert engine.sessions == {}
     assert engine.close_calls == ["a", "b"]
 
-def test_empty_commit_finishes_and_releases_session() -> None:
+def test_empty_commit_emits_one_completed_and_releases_session() -> None:
     engine = _IsolationEngine(Path("/tmp"), "mps", "float16", 512, empty_text={"a"})
     responses = _run_serve(
         [
@@ -269,7 +269,22 @@ def test_empty_commit_finishes_and_releases_session() -> None:
     )
 
     assert not [frame for frame in responses if frame.get("type") == "error"]
-    assert not [frame for frame in responses if frame.get("kind") == "completed"]
+    assert [
+        frame
+        for frame in responses
+        if frame.get("type") == "event"
+        and frame.get("kind") == "completed"
+        and frame.get("session_id") == "a"
+    ] == [
+        {
+            "version": PROTOCOL_VERSION,
+            "type": "event",
+            "session_id": "a",
+            "kind": "completed",
+            "text": "",
+            "language": "zh",
+        }
+    ]
     assert [
         frame
         for frame in responses
@@ -284,6 +299,7 @@ def test_empty_commit_finishes_and_releases_session() -> None:
     ]
     assert engine.active_session_count() == 0
     assert engine.sessions == {}
+    assert engine.close_calls == ["a"]
 
 
 def test_commit_releases_session_resources() -> None:
