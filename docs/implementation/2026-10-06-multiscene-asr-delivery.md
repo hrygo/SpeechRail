@@ -2,7 +2,7 @@
 title: "共享 ASR #245：实施与验收记录"
 status: in_progress
 audience: "SpeechRail 开发者与验收人员"
-version: "1.8.0"
+version: "1.9.0"
 date: 2026-10-06
 ---
 
@@ -152,9 +152,8 @@ generation 13、quality/quality、原 runtime/vendor/selection/config、ready、
 只读复审发现：40 ms 轮询可跳过同 item 的中间修订或较早 item 的位置，
 后续有效位置可能掩盖早期越界；因此不把 schema 4 的聚合 pass 作为
 全量 gold 保护通过证据，也不追认此前 `[0, 0]` 的失败。
-正在补充 schema 5 事件级观测：逐 alignment event 等待 Session 处理后，
-记录 item、位置和水位，再转发下一事件；缺失、超时、窗口饱和及任何
-早期越界均关闭门。该增量及反例尚待编译、回归和同素材真实复测。
+该观测缺口由下述 schema 5 逐事件确认补齐。schema 4 的原始证据保留，
+不追认为当时已经具备逐事件 gold 保护。
 
 | 仓库外证据 | SHA-256 |
 |---|---|
@@ -169,10 +168,107 @@ generation 13、quality/quality、原 runtime/vendor/selection/config、ready、
 Xcode 包装入口编译整个 unit target 并执行 20 项所选 Swift Testing，
 未运行 UI tests，临时 DerivedData 已清理。以上不证明后续 schema 5 增量通过。
 
-另在独立维护 `maintenance-v8-quality-final-matrix` 中开始串行采集
-五预设 **300 正式请求 / 2441.640 s** 矩阵；结果尚未完成，不计为质量或
-性能通过。结束后仍恢复授权的 `912547085c09` runtime。
-矩阵运行期间不进行 Swift/Xcode 编译或其它真实模型测量。
+### schema 5：逐事件确认及四生产 Session 复测
+
+[#306](https://github.com/hrygo/SpeechRail/pull/306) 的
+`113831b7f8fc7f1c1cab4d8e43bbebc90f37287d` 提交修正验收工具：
+mirror 每次交付定位事件后，等待生产 Session 完成处理，再记录 item、
+位置及事件交付时的源音频水位。接收、处理与观测必须一致且低于
+128 窗口；缺失、2 s 超时、饱和、较早 item 或 final 越界均粘滞失败。
+只有全文 snapshot 计为同 item 修订，delta 只检查 gold。
+外层 client factory 与 observer 均弱持有 Session，避免新增引用环。
+
+对应源码的 Swift package 筛选共 39 项，其中 **38 项执行通过、
+1 项真实回放默认 skip**；Xcode 包装入口编译整个 unit target，
+执行 **23 项所选 Swift Testing，通过且无 skip**。
+三份修改文件无编译警告，未运行 UI tests，临时 DerivedData 已清理。
+此处不把其它文件既有的编译警告报告为已修复。
+
+随后在 `maintenance-v8-session-schema5-event-ack-four-scenes` 使用相同 v8
+wheel 复跑四个生产 Session，全部适用门为 pass；LLM/TTS/播放与采集
+来源为 fake，ASR、生产 Session、保存与消费路径为真实代码。
+
+| 场景 | 本次实际证据 |
+|---|---|
+| 助手 | 完整 fixture 534,840 samples，加显式 36,000 静音；两段各一个成功终态；预算切段不抢答，声学结束后一轮只调用一次 LLM；另有一个无音频 commit 的空成功，不作为有效识别段的真实空文本证据 |
+| 会议 | 完整 534,840 samples；2 个边界 / 2 个终态，正式记录逐项匹配连接、item、文字与输入区间 |
+| 字幕 | 完整 534,840 samples；5 个边界 / 5 个终态，正式记录逐项匹配连接、item、文字与输入区间 |
+| 提词器 | 同 AMI / 原 timed-word gold；90,240 samples 后手动接管；同 item 位置 `[0, 37]`，源水位 `[79,680, 90,240]`；接收 = 处理 = 逐事件观测 = 5，所有事件 gold 检查通过，manual 位置 37 保持 |
+
+四场景均确认 source / uploaded samples 一致，采集来源停止、客户端关闭、
+mirror drain 与 coordinator 采集释放为 true。提词器接管前较早 item
+终态数为 1，停止后总终态数为 2；停止后的 manual 位置保持。
+这证明本 AMI 前缀样本的逐事件保护、实际推进及接管保持，不代表即兴、
+完整脚本恢复或所有延迟事件场景已验收。
+
+实测时 HEAD 为 `b28abd71` 加本地增量；结果保存三份源码 SHA-256，
+逐字核验与随后提交 `113831b7` 一致，也与实际编译源码一致。
+未把旧 schema 3/4 的失败或部分成功覆盖成新成功。
+
+本轮 `measurement_completed=true, original_restored=true`，2026-10-06
+23:14 恢复原 runtime，fresh PID **53061**，唯一 listener、generation 13、
+quality/quality、原 vendor/selection/config、ready、空闲及 catalog
+核验通过。未下载模型、安装 App 或保留候选为当前 runtime。
+
+| 仓库外证据 | SHA-256 |
+|---|---|
+| production-session-results.json | `4cae72c84138a879e0c3ec5d31d099aecd0a9eaf319e21e113db1ef11ff320bd` |
+| production-session-teleprompter.json | `7d61970188b887ef9bdb0e8ca27c14c06d1c36ddbb6313fae48644a5978581d9` |
+| restoration-verification.json | `bf8a295c3358d362c48517eb69ac12577a039abfa60b60d78c68b7681fcce359` |
+| schema 5 final Swift log | `d8bd66304125fc53f4c896594a87e08f628d3e180140a68463571e95ebdc64db` |
+| schema 5 final Xcode log | `b89230afedfde7f33e3e04c4d53ddbf8fbcaeb09c6a2200563fe7e7c6eb54fb8` |
+
+### 五预设正式矩阵
+
+独立维护 `maintenance-v8-quality-final-matrix` 于 2026-10-06 23:06 完成
+五预设 × core / AISHELL-4 / ASCEND 的 **300 正式请求 / 2441.640 s**。
+15 组结果均有完整资源采样，样本覆盖、段预算、边界与终态数量检查通过；
+各组及整个矩阵只观察到同一 ASR worker incarnation。
+采集期间未进行 Swift/Xcode 编译或其它真实模型测量。
+
+按 fixture ID 与 repeat 配对，并核对音频 SHA-256、参考正文、语言、
+规范化方法、参考字符数及音频时长一致。每一配对请求的词法错误数均未
+高于基线；下表为三个素材池分别计算的加权 CER，不能替代标点或业务验收。
+
+| 预设 | core CER | AISHELL-4 CER | ASCEND CER |
+|---|---:|---:|---:|
+| 同口径基线 | 18.14% | 34.34% | 42.53% |
+| assistant-turn-taking | 7.77% | 6.02% | 11.88% |
+| assistant-duplex | 7.77% | 6.02% | 11.88% |
+| meeting | 7.77% | 6.02% | 11.88% |
+| caption | 6.86% | 5.42% | 13.79% |
+| teleprompter | 7.77% | 5.42% | 14.94% |
+
+下表为 nearest-rank **首预览 / last-audio→final p95（秒）**。
+对应基线依次为 core `1.020 / 0.091`、AISHELL-4 `1.035 / 0.077`、
+ASCEND `1.039 / 0.074`。完整段复核增加收尾等待；
+例如 ASCEND meeting 的 final p95 为 1.937 s，尚未据此冻结场景预算。
+
+| 预设 | core | AISHELL-4 | ASCEND |
+|---|---:|---:|---:|
+| assistant-turn-taking | 0.808 / 0.546 | 0.863 / 0.516 | 0.826 / 0.316 |
+| assistant-duplex | 0.603 / 0.465 | 0.603 / 0.259 | 0.736 / 1.178 |
+| meeting | 1.025 / 0.478 | 1.040 / 0.276 | 1.324 / 1.937 |
+| caption | 0.504 / 0.313 | 0.494 / 0.261 | 0.686 / 0.973 |
+| teleprompter | 0.404 / 0.105 | 0.403 / 0.104 | 0.522 / 0.293 |
+
+ASR role 的观察峰值 phys_footprint 为 **7,742,377,512 bytes**；
+整个服务同时峰值为 **14,569,335,608 bytes**，包含驻留 TTS。
+旧基线的资源驻留状态不同，不能把两者直接相减并宣布内存无退化。
+AISHELL-4 人工标点 gold 的 micro-F1 为 0.364（两助手及会议）、
+0.353（字幕）、0.343（提词器）；标点配对基线及阈值仍为 unset，
+不把词法 CER 改善扩展为标点质量通过。
+
+本轮 `measurement_completed=true, original_restored=true`。2026-10-06
+23:06 恢复 PID **47240**，fresh listener 与进程检查确认唯一服务，
+generation 13、quality/quality、原 runtime/vendor/selection/config、
+ready、空闲及 catalog 核验通过。
+
+| 仓库外证据 | SHA-256 |
+|---|---|
+| paired-baseline-summary-v1.json | `6aaa44eb7a2d5a50739e67be1719e030e738a81d69b30147eba3562eb7969769` |
+| maintenance-outcome.json | `809a708b4b346d3d519b4bda98d2ed156e538b0d2b19f94796883520c9f74cfc` |
+| restoration-verification.json | `9f87fa25c4f5e5c6ef3ff80cb2fe9e0960d421928d8cba50bc15413ef2bd968a` |
 
 ### 原工作区 rebase 与改动对账
 
@@ -217,9 +313,10 @@ manifest SHA-256
 允许已开始词的完整前缀，bucket 最多 40 ms lookahead；延迟可令前缀落后，
 另由推进门防止始终停留。它不是即兴或完整脚本恢复验收。
 
-本节尚未提供 v8 的固定 **300 正式请求 / 2441.640 s** 五预设质量矩阵、
-新增诗文和标点基线对照、全部生产 Session 通过的证据、真实即兴/重读恢复、
-充分噪声和长时会议证据。预设未冻结，#249/#253/#245 保持开放。
+本节尚未提供新增诗文和标点基线对照、有效识别段的真实空成功、
+真实即兴/重读恢复、充分噪声和长时会议证据，也未锁定延迟与资源门槛。
+四生产 Session 的短回放通过不扩展为这些场景通过。
+预设未冻结，#249/#253/#245 保持开放。
 素材、参考正文、转写、私有配置、日志和原始 benchmark 都留在仓库外；
 本文只记录统计、制品 digest、限制与可恢复的维护结果。
 
