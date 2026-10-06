@@ -593,3 +593,95 @@ def test_rejected_append_cannot_clear_a_failed_barrier_generation() -> None:
         assert len(factory.sessions) == len(factory.released) == 1
 
     asyncio.run(run())
+
+
+def test_external_commit_cancellation_preserves_owned_final_without_receipt() -> None:
+    class CompletingBlockedFinal(_BlockedFinalSession):
+        async def commit(self, want_segments: bool = False) -> None:
+            await super().commit(want_segments)
+            await FakeStreamingSession.commit(self, want_segments)
+
+    async def run() -> None:
+        factory = _BlockFirstFinalFactory(CompletingBlockedFinal)
+        services = build_app_services(
+            Settings(), AppOverrides(realtime_asr_factory=factory),
+        )
+        sent = []
+
+        async def send(event):
+            sent.append(event)
+            return len(sent)
+
+        session = OpenAIRealtimeSession(services, session_id="caller-cancel", send=send)
+        try:
+            await session.handle({"type": "input_audio_buffer.append", "audio": _pcm16(bytes(16))})
+            pending = asyncio.create_task(session.handle({
+                "type": "input_audio_buffer.commit", "event_id": "caller",
+                "speechrail": {"request_receipt": True},
+            }))
+            blocked = factory.blocked_session
+            assert blocked is not None
+            assert await asyncio.to_thread(blocked.commit_started.wait, 1)
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+            assert not blocked.commit_cancelled.is_set()
+            assert session._asr_finals and all(not t.cancelled() for t in session._asr_finals)
+            blocked.release_from_test_thread()
+            await asyncio.wait_for(session._await_asr_finals(), 1)
+            assert len([e for e in sent if e["type"].endswith("transcription.completed")]) == 1
+            assert not any(e["type"] == "speechrail.input_audio_buffer.committed" for e in sent)
+        finally:
+            await session.close()
+        assert len(factory.sessions) == len(factory.released) == 1
+
+    asyncio.run(run())
+
+
+def test_background_final_transport_failure_is_observed_without_erasing_failure(caplog) -> None:
+    import gc
+
+    from speechrail.application.realtime_openai import _AsrItem
+
+    class MissingTerminalSession(FakeStreamingSession):
+        async def commit(self, want_segments: bool = False) -> None:
+            raise TimeoutError("final deadline expired")
+
+    async def run() -> None:
+        services = build_app_services(Settings(), AppOverrides())
+        sending = asyncio.Event()
+        unhandled = []
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(lambda _, context: unhandled.append(context))
+
+        async def send(event):
+            if event["type"].endswith("transcription.failed"):
+                sending.set()
+                raise OSError("transport unavailable")
+            return 1
+
+        session = OpenAIRealtimeSession(services, session_id="final-send-error", send=send)
+        runtime = MissingTerminalSession(language="zh")
+        item = _AsrItem(asr=runtime, item_id="frozen", generation=0, close_reason="budget_rollover")
+        session._asr_closed_items[item.item_id] = item
+        task = asyncio.create_task(session._finish_asr_item(item, False, 0))
+        session._asr_finals[task] = 0
+        task.add_done_callback(session._discard_asr_final)
+        del task
+        await asyncio.wait_for(sending.wait(), 1)
+        await asyncio.sleep(0)
+        gc.collect()
+        assert not unhandled
+        assert session._asr_barrier_failure == (0, "backend_timeout")
+        with pytest.raises(RealtimeAdapterError) as exc:
+            await session.handle({
+                "type": "input_audio_buffer.commit", "event_id": "retry",
+                "speechrail": {"request_receipt": True},
+            })
+        assert exc.value.code == "backend_timeout"
+        await session.close()
+        await runtime.close()
+        loop.set_exception_handler(None)
+
+    asyncio.run(run())
+    assert "ASR final task ended with an error: type=OSError" in caplog.text

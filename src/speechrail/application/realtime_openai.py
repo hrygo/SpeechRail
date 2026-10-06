@@ -1352,6 +1352,10 @@ class OpenAIRealtimeSession:
 
     def _discard_asr_final(self, task: asyncio.Task[str | None]) -> None:
         self._asr_finals.pop(task, None)
+        if not task.cancelled() and (error := task.exception()) is not None:
+            logger.warning(
+                "ASR final task ended with an error: type=%s", type(error).__name__,
+            )
 
     async def _commit_audio_once(self, reason: str) -> asyncio.Task[str | None] | None:
         tail = self._resampler.flush() if reason == "client" else b""
