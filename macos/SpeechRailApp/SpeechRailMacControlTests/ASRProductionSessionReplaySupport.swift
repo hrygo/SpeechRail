@@ -269,7 +269,7 @@ enum SessionReplayExpectedPrefixRangeIntegrity {
               }),
               sourceSampleWatermarks.allSatisfy({ $0 > 0 }),
               zip(sourceSampleWatermarks, sourceSampleWatermarks.dropFirst())
-                  .allSatisfy({ pair in pair.0 < pair.1 }) else {
+                  .allSatisfy({ pair in pair.0 <= pair.1 }) else {
             return false
         }
 
@@ -414,8 +414,13 @@ final class SessionReplayClientHandle: @unchecked Sendable {
 actor SessionReplayClient: AssistantRealtimeClient, MeetingRealtimeClient,
     CaptionRealtimeClient, TeleprompterRealtimeClientProtocol
 {
+    typealias AlignmentObserver = @Sendable (
+        RealtimeEventEnvelope<RealtimeASRClient.Event>, Int, Int
+    ) async -> Void
+
     private let realtime: RealtimeASRClient
     private let recorder: SessionReplayRecorder
+    private let alignmentObserver: AlignmentObserver?
     private var mirroredEvents: RealtimeEventStream<RealtimeASRClient.Event>?
     private var mirrorTask: Task<Void, Never>?
     private var mirrorWasStarted = false
@@ -426,9 +431,14 @@ actor SessionReplayClient: AssistantRealtimeClient, MeetingRealtimeClient,
     private var activeTTSRequestID: String?
     private var acceptedTTSTextCodepoints = 0
 
-    init(realtime: RealtimeASRClient, recorder: SessionReplayRecorder) {
+    init(
+        realtime: RealtimeASRClient,
+        recorder: SessionReplayRecorder,
+        alignmentObserver: AlignmentObserver? = nil
+    ) {
         self.realtime = realtime
         self.recorder = recorder
+        self.alignmentObserver = alignmentObserver
     }
 
     func events() async -> RealtimeEventStream<RealtimeASRClient.Event> {
@@ -440,8 +450,25 @@ actor SessionReplayClient: AssistantRealtimeClient, MeetingRealtimeClient,
         mirrorTask = Task {
             for await envelope in upstream {
                 await recorder.record(envelope)
+                var snapshot: SessionReplaySnapshot?
+                if alignmentObserver != nil {
+                    snapshot = await recorder.snapshot()
+                }
                 if await mirrored.yield(envelope) != .enqueued {
                     await recorder.recordMirrorOverflow()
+                } else if let alignmentObserver, let snapshot {
+                    switch envelope.payload {
+                    case .partial, .partialSnapshot, .completed:
+                        // Deliver one alignment event at a time. The observer
+                        // acknowledges Session processing before the next yield,
+                        // so intermediate revisions cannot escape observation.
+                        await alignmentObserver(
+                            envelope, snapshot.recordedAlignmentEventCount,
+                            snapshot.sourceSamplesYielded
+                        )
+                    default:
+                        break
+                    }
                 }
             }
             await mirrored.finish()
@@ -647,6 +674,9 @@ actor SessionReplayRecorder {
     private var assistantLLMCallOrders: [Int] = []
     private var teleprompterProgressEvidence: SessionReplayTeleprompterProgressEvidence?
     private var firstPreviewOrder: Int?
+    private var firstPreviewOrderByItem: [String: Int] = [:]
+    private var latestPreviewItemID: String?
+    private var teleprompterProcessingDiagnostics: SessionReplayTeleprompterProcessingDiagnostics?
     private var firstTerminalOrder: Int?
     private var firstPreviewAt: ContinuousClock.Instant?
     private var lastTerminalAt: ContinuousClock.Instant?
@@ -691,6 +721,10 @@ actor SessionReplayRecorder {
 
     func recordTeleprompterProgressEvidence(_ evidence: SessionReplayTeleprompterProgressEvidence) {
         teleprompterProgressEvidence = evidence
+    }
+
+    func recordTeleprompterProcessingDiagnostics(_ diagnostics: SessionReplayTeleprompterProcessingDiagnostics) {
+        teleprompterProcessingDiagnostics = diagnostics
     }
 
     func record(_ envelope: RealtimeEventEnvelope<RealtimeASRClient.Event>) {
@@ -743,6 +777,10 @@ actor SessionReplayRecorder {
             if firstPreviewAt == nil { firstPreviewAt = envelope.receivedAt }
             previewRevisionCount += 1
             previewRevisionCountByItem[itemID, default: 0] += 1
+            if firstPreviewOrderByItem[itemID] == nil {
+                firstPreviewOrderByItem[itemID] = eventOrder
+            }
+            latestPreviewItemID = itemID
             if revision <= lastRevisionByItem[itemID, default: 0] {
                 previewRevisionRegressionCount += 1
             }
@@ -790,7 +828,10 @@ actor SessionReplayRecorder {
             sourceSamplesYielded: sourceSamplesYielded,
             uploadedSamples: uploadedSamples,
             configuredEventCount: configuredEventCount,
-            mirrorOverflowCount: mirrorOverflowCount
+            mirrorOverflowCount: mirrorOverflowCount,
+            firstPreviewOrderByItem: firstPreviewOrderByItem,
+            latestPreviewItemID: latestPreviewItemID,
+            teleprompterProcessingDiagnostics: teleprompterProcessingDiagnostics
         )
     }
 }
@@ -831,6 +872,13 @@ struct SessionReplaySnapshot: Sendable {
     let uploadedSamples: Int
     let configuredEventCount: Int
     let mirrorOverflowCount: Int
+    var firstPreviewOrderByItem: [String: Int] = [:]
+    var latestPreviewItemID: String?
+    var teleprompterProcessingDiagnostics: SessionReplayTeleprompterProcessingDiagnostics?
+
+    var recordedAlignmentEventCount: Int {
+        previewEventCount + emptySuccessCount + nonEmptySuccessCount
+    }
 }
 
 struct SessionReplayUploadSnapshot: Sendable {
@@ -1075,6 +1123,7 @@ struct SessionReplayTeleprompterProgressEvidence: Sendable {
     let noFinalAtManualTakeover: Bool
     let previewBeforeFinal: Bool
     let manualPositionStable: Bool
+    var allObservedPrefixesWithinGold = true
 
     var firstObservedDisplayOffsetUTF16: Int? { observedDisplayPrefixOffsetsUTF16.first }
     var lastObservedDisplayOffsetUTF16: Int? { observedDisplayPrefixOffsetsUTF16.last }
@@ -1113,6 +1162,125 @@ struct SessionReplayTeleprompterFeedEvidence: Sendable {
     let observedDisplayPrefixOffsetsUTF16: [Int]
     let observedSourcePrefixOffsetsUTF16: [Int]
     let observedSourceSampleWatermarks: [Int]
+    let itemID: String?
+    let allObservedPrefixesWithinGold: Bool
+
+    init(
+        sameItemRevisionCount: Int,
+        observedDisplayPrefixOffsetsUTF16: [Int],
+        observedSourcePrefixOffsetsUTF16: [Int],
+        observedSourceSampleWatermarks: [Int],
+        itemID: String? = nil,
+        allObservedPrefixesWithinGold: Bool = true
+    ) {
+        self.sameItemRevisionCount = sameItemRevisionCount
+        self.observedDisplayPrefixOffsetsUTF16 = observedDisplayPrefixOffsetsUTF16
+        self.observedSourcePrefixOffsetsUTF16 = observedSourcePrefixOffsetsUTF16
+        self.observedSourceSampleWatermarks = observedSourceSampleWatermarks
+        self.itemID = itemID
+        self.allObservedPrefixesWithinGold = allObservedPrefixesWithinGold
+    }
+}
+
+struct SessionReplayTeleprompterProcessingDiagnostics: Encodable, Sendable {
+    let receivedAlignmentEvents: Int
+    let processedAlignmentSamples: Int
+    let partialTextCodepoints: Int
+    let uncertainty: Double?
+    let earlierTerminalCount: Int
+    let allObservedPrefixesWithinGold: Bool
+    let observedAlignmentEvents: Int
+
+    enum CodingKeys: String, CodingKey {
+        case receivedAlignmentEvents = "received_alignment_events"
+        case processedAlignmentSamples = "processed_alignment_samples"
+        case partialTextCodepoints = "partial_text_codepoints"
+        case uncertainty
+        case earlierTerminalCount = "earlier_terminal_count"
+        case allObservedPrefixesWithinGold = "all_observed_prefixes_within_gold"
+        case observedAlignmentEvents = "observed_alignment_events"
+    }
+}
+
+/// Records every processed event, including finalized items, before a subsequent
+/// event can revise the global position. The observer's bound matches the
+/// production diagnostics window; incomplete observations fail closed.
+struct SessionReplayTeleprompterObservationLedger {
+    private(set) var observedAlignmentEvents = 0
+    private(set) var allObservedPrefixesWithinGold = true
+    private(set) var latestPreviewItemID: String?
+    private var displayOffsetsByItem: [String: [Int]] = [:]
+    private var sourceOffsetsByItem: [String: [Int]] = [:]
+    private var watermarksByItem: [String: [Int]] = [:]
+
+    mutating func record(
+        expectedAlignmentEvents: Int,
+        itemID: String,
+        isPreview: Bool,
+        position: SessionReplayScriptPosition?,
+        sourceSampleWatermark: Int,
+        expectedPrefixRanges: [SessionReplayExpectedPrefixRange]?
+    ) {
+        guard expectedAlignmentEvents == observedAlignmentEvents + 1,
+              expectedAlignmentEvents < 128,
+              let position,
+              let expectedPrefixRanges else {
+            allObservedPrefixesWithinGold = false
+            return
+        }
+        observedAlignmentEvents += 1
+        allObservedPrefixesWithinGold = allObservedPrefixesWithinGold
+            && SessionReplayExpectedPrefixRangeIntegrity.allows(
+                offsetUTF16: position.sourcePrefixOffsetUTF16,
+                atSourceSampleWatermark: sourceSampleWatermark,
+                in: expectedPrefixRanges
+            )
+        if isPreview {
+            latestPreviewItemID = itemID
+            displayOffsetsByItem[itemID, default: []].append(position.displayPrefixOffsetUTF16)
+            sourceOffsetsByItem[itemID, default: []].append(position.sourcePrefixOffsetUTF16)
+            watermarksByItem[itemID, default: []].append(sourceSampleWatermark)
+        }
+    }
+
+    mutating func recordMissingObservation() {
+        allObservedPrefixesWithinGold = false
+    }
+
+    func feedEvidence(itemID: String?) -> SessionReplayTeleprompterFeedEvidence {
+        SessionReplayTeleprompterFeedEvidence(
+            sameItemRevisionCount: itemID.flatMap { sourceOffsetsByItem[$0]?.count } ?? 0,
+            observedDisplayPrefixOffsetsUTF16: itemID.flatMap { displayOffsetsByItem[$0] } ?? [],
+            observedSourcePrefixOffsetsUTF16: itemID.flatMap { sourceOffsetsByItem[$0] } ?? [],
+            observedSourceSampleWatermarks: itemID.flatMap { watermarksByItem[$0] } ?? [],
+            itemID: itemID,
+            allObservedPrefixesWithinGold: allObservedPrefixesWithinGold
+        )
+    }
+}
+
+@MainActor
+final class SessionReplayTeleprompterObservationState {
+    var ledger = SessionReplayTeleprompterObservationLedger()
+    var isEnabled = true
+}
+
+enum SessionReplayTeleprompterProcessingIntegrity {
+    // The production diagnostics use a bounded 128-sample window. Once it
+    // saturates, it cannot prove which subsequent event has been consumed.
+    static func caughtUp(receivedAlignmentEvents: Int, processedAlignmentSamples: Int) -> Bool {
+        (0..<128).contains(receivedAlignmentEvents)
+            && processedAlignmentSamples == receivedAlignmentEvents
+    }
+
+    static func hasUnfinalizedPreview(
+        itemID: String?,
+        firstPreviewOrders: [String: Int],
+        terminalCounts: [String: Int]
+    ) -> Bool {
+        guard let itemID, let order = firstPreviewOrders[itemID], order > 0 else { return false }
+        return terminalCounts[itemID, default: 0] == 0
+    }
 }
 
 enum SessionReplayTeleprompterFeedIntegrity {
@@ -1124,7 +1292,8 @@ enum SessionReplayTeleprompterFeedIntegrity {
     ) -> Bool {
         let displayOffsets = evidence.observedDisplayPrefixOffsetsUTF16
         let sourceOffsets = evidence.observedSourcePrefixOffsetsUTF16
-        guard evidence.sameItemRevisionCount >= 2,
+        guard evidence.allObservedPrefixesWithinGold,
+              evidence.sameItemRevisionCount >= 2,
               displayOffsets.count >= 2,
               displayOffsets.count == sourceOffsets.count,
               expectedDisplayScriptUTF16Length > 0,
@@ -1166,7 +1335,8 @@ enum SessionReplayTeleprompterProgressIntegrity {
                       sameItemRevisionCount: evidence.maximumSameItemRevisionCount,
                       observedDisplayPrefixOffsetsUTF16: evidence.observedDisplayPrefixOffsetsUTF16,
                       observedSourcePrefixOffsetsUTF16: evidence.observedSourcePrefixOffsetsUTF16,
-                      observedSourceSampleWatermarks: evidence.observedSourceSampleWatermarks
+                      observedSourceSampleWatermarks: evidence.observedSourceSampleWatermarks,
+                      allObservedPrefixesWithinGold: evidence.allObservedPrefixesWithinGold
                   ),
                   expectedDisplayScriptUTF16Length: evidence.expectedDisplayScriptUTF16Length,
                   expectedSourceUTF16Length: evidence.expectedSourceUTF16Length,
@@ -1220,7 +1390,7 @@ enum SessionReplayCaptureReleaseIntegrity {
 }
 
 struct SessionReplaySummary: Encodable {
-    let schemaVersion = 3
+    let schemaVersion = 5
     let fixtureID: String
     let scene: String
     let preset: String
@@ -1269,6 +1439,7 @@ struct SessionReplaySummary: Encodable {
     let teleprompterManualSourceSampleWatermark: Int?
     let teleprompterExpectedDisplayScriptUTF16Length: Int?
     let teleprompterExpectedSourceUTF16Length: Int?
+    let teleprompterProcessingDiagnostics: SessionReplayTeleprompterProcessingDiagnostics?
     let captureReleaseGate: String
     let coordinatorCaptureReleased: Bool
     let captureSourceStopped: Bool
@@ -1335,6 +1506,7 @@ struct SessionReplaySummary: Encodable {
         case teleprompterManualSourceSampleWatermark = "teleprompter_manual_source_sample_watermark"
         case teleprompterExpectedDisplayScriptUTF16Length = "teleprompter_expected_display_script_utf16_length"
         case teleprompterExpectedSourceUTF16Length = "teleprompter_expected_source_utf16_length"
+        case teleprompterProcessingDiagnostics = "teleprompter_processing_diagnostics"
         case captureReleaseGate = "capture_release_gate"
         case coordinatorCaptureReleased = "coordinator_capture_released"
         case captureSourceStopped = "capture_source_stopped"

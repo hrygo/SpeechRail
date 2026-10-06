@@ -231,6 +231,7 @@ struct ASRProductionSessionReplayTests {
                     teleprompterManualSourceSampleWatermark: snapshot.teleprompterProgressEvidence?.manualSourceSampleWatermark,
                     teleprompterExpectedDisplayScriptUTF16Length: snapshot.teleprompterProgressEvidence?.expectedDisplayScriptUTF16Length,
                     teleprompterExpectedSourceUTF16Length: snapshot.teleprompterProgressEvidence?.expectedSourceUTF16Length,
+                    teleprompterProcessingDiagnostics: snapshot.teleprompterProcessingDiagnostics,
                     captureReleaseGate: captureReleasePassed ? "pass" : "fail",
                     coordinatorCaptureReleased: captureReleaseEvidence.coordinatorCaptureReleased,
                     captureSourceStopped: captureReleaseEvidence.captureSourceStopped,
@@ -481,9 +482,10 @@ struct ASRProductionSessionReplayTests {
             port: configuration.port,
             audioSourceFactory: { source }
         )
+        let observationState = SessionReplayTeleprompterObservationState()
         session.preferredSpeechLanguage = configuration.language
         session.serviceReadiness = { .ready(profile: "session-replay") }
-        session.realtimeClientFactory = { port, apiKey, realtimeConfiguration in
+        session.realtimeClientFactory = { [weak session] port, apiKey, realtimeConfiguration in
             let client = SessionReplayClient(
                 realtime: RealtimeASRClient(
                     port: port,
@@ -493,7 +495,51 @@ struct ASRProductionSessionReplayTests {
                     apiKey: apiKey,
                     expectedASRRevision: configuration.expectedASRRevision
                 ),
-                recorder: recorder
+                recorder: recorder,
+                alignmentObserver: { @MainActor [weak session] envelope, expectedCount, watermark in
+                    guard observationState.isEnabled, let session else { return }
+                    let clock = ContinuousClock()
+                    let deadline = clock.now.advanced(by: .seconds(2))
+                    while session.followLatencyDiagnostics.alignmentSampleCount < expectedCount,
+                          expectedCount < 128, clock.now < deadline,
+                          observationState.isEnabled, !Task.isCancelled {
+                        do { try await Task.sleep(for: .milliseconds(2)) }
+                        catch { break }
+                    }
+                    guard observationState.isEnabled else { return }
+                    guard SessionReplayTeleprompterProcessingIntegrity.caughtUp(
+                        receivedAlignmentEvents: expectedCount,
+                        processedAlignmentSamples: session.followLatencyDiagnostics.alignmentSampleCount
+                    ) else {
+                        observationState.ledger.recordMissingObservation()
+                        return
+                    }
+                    let itemID: String
+                    let isPreview: Bool
+                    switch envelope.payload {
+                    case .partialSnapshot(let id, _, _, _):
+                        itemID = id
+                        isPreview = true
+                    case .partial(let id, _):
+                        // Check delta positions for overshoot, but only explicit
+                        // snapshots prove the required same-item revisions.
+                        itemID = id
+                        isPreview = false
+                    case .completed(let id, _):
+                        itemID = id
+                        isPreview = false
+                    default:
+                        return
+                    }
+                    observationState.ledger.record(
+                        expectedAlignmentEvents: expectedCount,
+                        itemID: itemID,
+                        isPreview: isPreview,
+                        position: scriptPosition(for: session, sourceText: referenceText),
+                        sourceSampleWatermark: watermark,
+                        expectedPrefixRanges: configuration.teleprompterExpectedPrefixRanges
+                    )
+                }
             )
             clientHandle.install(client)
             return client
@@ -513,24 +559,46 @@ struct ASRProductionSessionReplayTests {
         }
 
         await recorder.markAudioStarted(at: ContinuousClock().now)
-        let feedEvidence = try await feedUntilTeleprompterPreviewProgress(
+        let selectedEvidence = try await feedUntilTeleprompterPreviewProgress(
             pcm,
             to: source,
             recorder: recorder,
             session: session,
+            observationState: observationState,
             sourceText: referenceText,
             expectedPrefixRanges: configuration.teleprompterExpectedPrefixRanges
         )
-        let positionBeforeTakeover = scriptPosition(for: session, sourceText: referenceText)
         let beforeTakeoverSnapshot = await recorder.snapshot()
-        let noFinalAtManualTakeover = beforeTakeoverSnapshot.terminalCounts.isEmpty
+        let positionBeforeTakeover = scriptPosition(for: session, sourceText: referenceText)
+        let feedEvidence = observationState.ledger.feedEvidence(itemID: selectedEvidence.itemID)
+        let allEventsObserved = beforeTakeoverSnapshot.recordedAlignmentEventCount
+            == observationState.ledger.observedAlignmentEvents
+            && SessionReplayTeleprompterProcessingIntegrity.caughtUp(
+                receivedAlignmentEvents: beforeTakeoverSnapshot.recordedAlignmentEventCount,
+                processedAlignmentSamples: session.followLatencyDiagnostics.alignmentSampleCount
+            )
+            && beforeTakeoverSnapshot.latestPreviewItemID == selectedEvidence.itemID
+        let noFinalAtManualTakeover = SessionReplayTeleprompterProcessingIntegrity.hasUnfinalizedPreview(
+            itemID: feedEvidence.itemID,
+            firstPreviewOrders: beforeTakeoverSnapshot.firstPreviewOrderByItem,
+            terminalCounts: beforeTakeoverSnapshot.terminalCounts
+        )
+        let diagnostics = SessionReplayTeleprompterProcessingDiagnostics(
+            receivedAlignmentEvents: beforeTakeoverSnapshot.recordedAlignmentEventCount,
+            processedAlignmentSamples: session.followLatencyDiagnostics.alignmentSampleCount,
+            partialTextCodepoints: session.partialText?.unicodeScalars.count ?? 0,
+            uncertainty: session.uncertainty.flatMap { $0.isFinite ? $0 : nil },
+            earlierTerminalCount: beforeTakeoverSnapshot.terminalCounts.values.reduce(0, +),
+            allObservedPrefixesWithinGold: feedEvidence.allObservedPrefixesWithinGold,
+            observedAlignmentEvents: observationState.ledger.observedAlignmentEvents
+        )
+        observationState.isEnabled = false
         session.takeOverForManualScroll()
         let positionAtTakeover = scriptPosition(for: session, sourceText: referenceText)
+        await recorder.recordTeleprompterProcessingDiagnostics(diagnostics)
         await session.disableVoiceAssist()
         let positionAfterStop = scriptPosition(for: session, sourceText: referenceText)
-        let previewBeforeFinal = beforeTakeoverSnapshot.firstPreviewOrder.map {
-            $0 < (beforeTakeoverSnapshot.firstTerminalOrder ?? Int.max)
-        } ?? false
+        let previewBeforeFinal = noFinalAtManualTakeover
         let evidence = SessionReplayTeleprompterProgressEvidence(
             maximumSameItemRevisionCount: feedEvidence.sameItemRevisionCount,
             observedDisplayPrefixOffsetsUTF16: feedEvidence.observedDisplayPrefixOffsetsUTF16,
@@ -548,7 +616,8 @@ struct ASRProductionSessionReplayTests {
             manualPositionStable: positionBeforeTakeover != nil
                 && positionBeforeTakeover == positionAtTakeover
                 && positionAtTakeover == positionAfterStop
-                && session.phase == .manual
+                && session.phase == .manual,
+            allObservedPrefixesWithinGold: feedEvidence.allObservedPrefixesWithinGold && allEventsObserved
         )
         await recorder.recordTeleprompterProgressEvidence(evidence)
         return SessionReplayTeleprompterProgressIntegrity.validate(evidence) ? "pass" : "fail"
@@ -605,6 +674,7 @@ struct ASRProductionSessionReplayTests {
         to source: SessionReplayCaptureSource,
         recorder: SessionReplayRecorder,
         session: TeleprompterSession,
+        observationState: SessionReplayTeleprompterObservationState,
         sourceText: String,
         expectedPrefixRanges: [SessionReplayExpectedPrefixRange]?
     ) async throws -> SessionReplayTeleprompterFeedEvidence {
@@ -612,10 +682,6 @@ struct ASRProductionSessionReplayTests {
         let clock = ContinuousClock()
         var deadline = clock.now
         var sequenceNumber = 0
-        var lastObservedRevisionCountByItem: [String: Int] = [:]
-        var displayOffsetsByItem: [String: [Int]] = [:]
-        var sourceOffsetsByItem: [String: [Int]] = [:]
-        var sourceWatermarksByItem: [String: [Int]] = [:]
         for offset in stride(from: 0, to: pcm.count, by: chunkBytes) {
             let end = min(offset + chunkBytes, pcm.count)
             let chunk = AudioChunk(
@@ -631,51 +697,31 @@ struct ASRProductionSessionReplayTests {
             try await clock.sleep(until: deadline, tolerance: .milliseconds(8))
 
             let snapshot = await recorder.snapshot()
-            for (itemID, revisionCount) in snapshot.previewRevisionCountByItem
-            where revisionCount > lastObservedRevisionCountByItem[itemID, default: 0] {
-                lastObservedRevisionCountByItem[itemID] = revisionCount
-                if let position = scriptPosition(for: session, sourceText: sourceText) {
-                    displayOffsetsByItem[itemID, default: []].append(position.displayPrefixOffsetUTF16)
-                    sourceOffsetsByItem[itemID, default: []].append(position.sourcePrefixOffsetUTF16)
-                    sourceWatermarksByItem[itemID, default: []].append(snapshot.sourceSamplesYielded)
+            // A stream yield only proves enqueueing. The existing bounded
+            // Session alignment diagnostics advance after handle/sync finishes.
+            guard SessionReplayTeleprompterProcessingIntegrity.caughtUp(
+                receivedAlignmentEvents: snapshot.recordedAlignmentEventCount,
+                processedAlignmentSamples: session.followLatencyDiagnostics.alignmentSampleCount
+            ) else { continue }
+            if observationState.ledger.observedAlignmentEvents == snapshot.recordedAlignmentEventCount,
+               let position = scriptPosition(for: session, sourceText: sourceText) {
+                let itemID = observationState.ledger.latestPreviewItemID
+                let evidence = observationState.ledger.feedEvidence(itemID: itemID)
+                if SessionReplayTeleprompterProcessingIntegrity.hasUnfinalizedPreview(
+                    itemID: itemID,
+                    firstPreviewOrders: snapshot.firstPreviewOrderByItem,
+                    terminalCounts: snapshot.terminalCounts
+                ) && SessionReplayTeleprompterFeedIntegrity.validate(
+                    evidence,
+                    expectedDisplayScriptUTF16Length: position.expectedDisplayScriptUTF16Length,
+                    expectedSourceUTF16Length: sourceText.utf16.count,
+                    expectedPrefixRanges: expectedPrefixRanges
+                ) {
+                    return evidence
                 }
-            }
-            if let position = scriptPosition(for: session, sourceText: sourceText) {
-                for itemID in sourceOffsetsByItem.keys.sorted() {
-                    let evidence = SessionReplayTeleprompterFeedEvidence(
-                        sameItemRevisionCount: snapshot.previewRevisionCountByItem[itemID] ?? 0,
-                        observedDisplayPrefixOffsetsUTF16: displayOffsetsByItem[itemID] ?? [],
-                        observedSourcePrefixOffsetsUTF16: sourceOffsetsByItem[itemID] ?? [],
-                        observedSourceSampleWatermarks: sourceWatermarksByItem[itemID] ?? []
-                    )
-                    if SessionReplayTeleprompterFeedIntegrity.validate(
-                        evidence,
-                        expectedDisplayScriptUTF16Length: position.expectedDisplayScriptUTF16Length,
-                        expectedSourceUTF16Length: sourceText.utf16.count,
-                        expectedPrefixRanges: expectedPrefixRanges
-                    ) {
-                        return evidence
-                    }
-                }
-            }
-            if !snapshot.terminalCounts.isEmpty {
-                let candidate = sourceOffsetsByItem.max(by: { $0.value.count < $1.value.count })
-                return SessionReplayTeleprompterFeedEvidence(
-                    sameItemRevisionCount: candidate.flatMap { snapshot.previewRevisionCountByItem[$0.key] } ?? 0,
-                    observedDisplayPrefixOffsetsUTF16: candidate.flatMap { displayOffsetsByItem[$0.key] } ?? [],
-                    observedSourcePrefixOffsetsUTF16: candidate?.value ?? [],
-                    observedSourceSampleWatermarks: candidate.flatMap { sourceWatermarksByItem[$0.key] } ?? []
-                )
             }
         }
-        let snapshot = await recorder.snapshot()
-        let candidate = sourceOffsetsByItem.max(by: { $0.value.count < $1.value.count })
-        return SessionReplayTeleprompterFeedEvidence(
-            sameItemRevisionCount: candidate.flatMap { snapshot.previewRevisionCountByItem[$0.key] } ?? 0,
-            observedDisplayPrefixOffsetsUTF16: candidate.flatMap { displayOffsetsByItem[$0.key] } ?? [],
-            observedSourcePrefixOffsetsUTF16: candidate?.value ?? [],
-            observedSourceSampleWatermarks: candidate.flatMap { sourceWatermarksByItem[$0.key] } ?? []
-        )
+        return observationState.ledger.feedEvidence(itemID: observationState.ledger.latestPreviewItemID)
     }
 
     private func scriptPosition(

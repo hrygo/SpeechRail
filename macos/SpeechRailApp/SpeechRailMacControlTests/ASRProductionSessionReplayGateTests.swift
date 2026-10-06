@@ -368,6 +368,130 @@ struct SessionReplayTeleprompterManifestTests {
 }
 
 @Suite
+struct SessionReplayTeleprompterObservationLedgerTests {
+    private let ranges = [
+        SessionReplayExpectedPrefixRange(endSample24K: 960, minPrefixUTF16: 0, maxPrefixUTF16: 12),
+        SessionReplayExpectedPrefixRange(endSample24K: 1_920, minPrefixUTF16: 0, maxPrefixUTF16: 30)
+    ]
+
+    @Test
+    func laterRevisionAtALargerWatermarkCannotHideAnEarlierOvershoot() {
+        var ledger = SessionReplayTeleprompterObservationLedger()
+        record(&ledger, count: 1, item: "first", offset: 13, watermark: 960)
+        record(&ledger, count: 2, item: "first", offset: 14, watermark: 1_920)
+        record(&ledger, count: 3, item: "second", offset: 20, watermark: 1_920)
+
+        #expect(ledger.observedAlignmentEvents == 3)
+        #expect(ledger.feedEvidence(itemID: "first").observedSourcePrefixOffsetsUTF16 == [13, 14])
+        #expect(ledger.latestPreviewItemID == "second")
+        #expect(!ledger.feedEvidence(itemID: "second").allObservedPrefixesWithinGold)
+    }
+
+    @Test
+    func finalPositionAndMissingIntermediateEventsAlsoCloseTheGate() {
+        var finalizedOvershoot = SessionReplayTeleprompterObservationLedger()
+        record(&finalizedOvershoot, count: 1, item: "first", offset: 12, watermark: 960)
+        record(&finalizedOvershoot, count: 2, item: "first", offset: 13, watermark: 960, isPreview: false)
+        record(&finalizedOvershoot, count: 3, item: "second", offset: 20, watermark: 1_920)
+        #expect(!finalizedOvershoot.allObservedPrefixesWithinGold)
+
+        var missingEvent = SessionReplayTeleprompterObservationLedger()
+        record(&missingEvent, count: 2, item: "first", offset: 12, watermark: 960)
+        #expect(missingEvent.observedAlignmentEvents == 0)
+        #expect(!missingEvent.allObservedPrefixesWithinGold)
+    }
+
+    @Test
+    func preservesMultipleProcessedPreviewsAtTheSameAudioWatermark() {
+        var ledger = SessionReplayTeleprompterObservationLedger()
+        record(&ledger, count: 1, item: "first", offset: 0, watermark: 960)
+        record(&ledger, count: 2, item: "first", offset: 12, watermark: 960)
+        let evidence = ledger.feedEvidence(itemID: "first")
+
+        #expect(evidence.observedSourceSampleWatermarks == [960, 960])
+        #expect(SessionReplayTeleprompterFeedIntegrity.validate(
+            evidence,
+            expectedDisplayScriptUTF16Length: 80,
+            expectedSourceUTF16Length: 80,
+            expectedPrefixRanges: ranges
+        ))
+        #expect(!SessionReplayExpectedPrefixRangeIntegrity.validateObservations(
+            sourceOffsetsUTF16: [0, 12],
+            sourceSampleWatermarks: [1_920, 960],
+            ranges: ranges
+        ))
+    }
+
+    private func record(
+        _ ledger: inout SessionReplayTeleprompterObservationLedger,
+        count: Int, item: String, offset: Int, watermark: Int, isPreview: Bool = true
+    ) {
+        ledger.record(
+            expectedAlignmentEvents: count,
+            itemID: item,
+            isPreview: isPreview,
+            position: .init(
+                segmentIndex: 0, segmentOffsetUTF16: offset,
+                displayPrefixOffsetUTF16: offset, sourcePrefixOffsetUTF16: offset,
+                expectedDisplayScriptUTF16Length: 80
+            ),
+            sourceSampleWatermark: watermark,
+            expectedPrefixRanges: ranges
+        )
+    }
+}
+
+@Suite
+struct SessionReplayTeleprompterProcessingIntegrityTests {
+    @Test
+    func waitsForSessionProcessingAndFailsClosedWhenTheWindowSaturates() {
+        #expect(SessionReplayTeleprompterProcessingIntegrity.caughtUp(
+            receivedAlignmentEvents: 2, processedAlignmentSamples: 2
+        ))
+        #expect(!SessionReplayTeleprompterProcessingIntegrity.caughtUp(
+            receivedAlignmentEvents: 2, processedAlignmentSamples: 1
+        ))
+        #expect(!SessionReplayTeleprompterProcessingIntegrity.caughtUp(
+            receivedAlignmentEvents: 1, processedAlignmentSamples: 2
+        ))
+        #expect(!SessionReplayTeleprompterProcessingIntegrity.caughtUp(
+            receivedAlignmentEvents: 128, processedAlignmentSamples: 128
+        ))
+        #expect(!SessionReplayTeleprompterProcessingIntegrity.caughtUp(
+            receivedAlignmentEvents: 129, processedAlignmentSamples: 128
+        ))
+    }
+
+    @Test
+    func earlierTerminalDoesNotPreventTakeoverOfTheCurrentPreview() {
+        #expect(SessionReplayTeleprompterProcessingIntegrity.hasUnfinalizedPreview(
+            itemID: "current",
+            firstPreviewOrders: ["earlier": 2, "current": 6],
+            terminalCounts: ["earlier": 1]
+        ))
+        #expect(!SessionReplayTeleprompterProcessingIntegrity.hasUnfinalizedPreview(
+            itemID: "current",
+            firstPreviewOrders: ["earlier": 2, "current": 6],
+            terminalCounts: ["earlier": 1, "current": 1]
+        ))
+    }
+
+    @Test
+    func cannotTakeOverAnItemWithoutItsOwnPreview() {
+        #expect(!SessionReplayTeleprompterProcessingIntegrity.hasUnfinalizedPreview(
+            itemID: "current",
+            firstPreviewOrders: ["earlier": 2],
+            terminalCounts: ["earlier": 1]
+        ))
+        #expect(!SessionReplayTeleprompterProcessingIntegrity.hasUnfinalizedPreview(
+            itemID: nil,
+            firstPreviewOrders: ["earlier": 2],
+            terminalCounts: [:]
+        ))
+    }
+}
+
+@Suite
 struct SessionReplayTeleprompterProgressIntegrityTests {
     private let expectedRanges = [
         SessionReplayExpectedPrefixRange(
@@ -413,6 +537,26 @@ struct SessionReplayTeleprompterProgressIntegrityTests {
     @Test
     func acceptsRevisedPreviewProgressInsideTheExpectedScriptPrefixRange() {
         #expect(SessionReplayTeleprompterProgressIntegrity.validate(advancingEvidence))
+    }
+
+    @Test
+    func validCurrentItemCannotMaskAnEarlierItemGoldViolation() {
+        var evidence = advancingEvidence
+        evidence.allObservedPrefixesWithinGold = false
+        #expect(!SessionReplayTeleprompterProgressIntegrity.validate(evidence))
+        #expect(!SessionReplayTeleprompterFeedIntegrity.validate(
+            SessionReplayTeleprompterFeedEvidence(
+                sameItemRevisionCount: 2,
+                observedDisplayPrefixOffsetsUTF16: [14, 32],
+                observedSourcePrefixOffsetsUTF16: [12, 28],
+                observedSourceSampleWatermarks: [960, 1_920],
+                itemID: "current",
+                allObservedPrefixesWithinGold: false
+            ),
+            expectedDisplayScriptUTF16Length: 84,
+            expectedSourceUTF16Length: 80,
+            expectedPrefixRanges: expectedRanges
+        ))
     }
 
     @Test
