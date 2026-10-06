@@ -1030,6 +1030,10 @@ public struct MeetingView: View {
                     }
                 }
             case .queued, .running:
+                // 这里只显示状态标题，不显示失败原因：`MinutesGenerator` 的状态机里
+                // 失败只走 `.failed(reason)`，`queued`/`running` 不带原因字段；
+                // 若"一直转圈"且无失败横幅，原因是 `failMinutes` 落库失败，
+                // 查日志分类 `minutes.generate`（P1-5），不是界面吞了错误。
                 Text(meeting.minutes.state.title)
                     .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)

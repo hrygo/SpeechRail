@@ -5239,6 +5239,10 @@ extension SessionStore {
     }
 
     /// 一场会当前在检索索引里占着哪些条目。
+    ///
+    /// FTS 不可用时返回空：调用方（删除两入口）不能区分"没有条目"与"我没看"，
+    /// 但 FTS 不可用时 `enqueueSearchIndex` 同样是空操作，索引里本来就没有东西，
+    /// 所以空在这里恰好是正确答案。想确认 FTS 可用性的一方查 `searchIndexStatus`。
     private func indexedSearchEntries(sessionID: String?) throws -> [(String, String)] {
         guard let sessionID, Self.fts5Available else { return [] }
         let ids = try withStatement("""
