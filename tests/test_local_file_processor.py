@@ -1396,3 +1396,146 @@ def test_e2e_job_lifecycle_speech_artifact(tmp_path: Path) -> None:
         assert result_resp.status_code == 200
         assert result_resp.headers["content-type"] == "audio/x-pcm"
         assert result_resp.content == b"\x00\x01\x02\x03"
+
+
+# ---------------------------------------------------------------------------
+# #244: short-write / staging publish regressions (RED first)
+# ---------------------------------------------------------------------------
+
+
+def test_write_artifact_retries_short_write_until_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """os.write may return fewer bytes; the artifact must still be complete."""
+    import os as _os
+
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    processor = LocalFileJobProcessor(spool_dir=spool)
+    content = b"x" * 16
+    real_write = _os.write
+    calls = {"n": 0}
+
+    def _short_write(fd: int, data: bytes) -> int:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real_write(fd, data[:3])
+        return real_write(fd, data)
+
+    monkeypatch.setattr(_os, "write", _short_write)
+    ref = processor._write_artifact("job_short", "transcript.json", content)
+    artifact = spool / RESULTS_SUBDIR / "job_short" / "transcript.json"
+    assert artifact.read_bytes() == content
+    assert ref == f"{RESULTS_SUBDIR}/job_short/transcript.json"
+
+
+def test_write_artifact_fails_without_partial_final_on_stalled_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A zero-progress write must fail and leave no visible partial final."""
+    import os as _os
+
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    processor = LocalFileJobProcessor(spool_dir=spool)
+
+    monkeypatch.setattr(_os, "write", lambda fd, data: 0)
+    with pytest.raises(JobProcessingError, match="job_artifact_incomplete"):
+        processor._write_artifact("job_stall", "transcript.json", b"y" * 16)
+    assert not (spool / RESULTS_SUBDIR / "job_stall" / "transcript.json").exists()
+
+
+def test_write_artifact_cleans_staging_on_mid_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mid-write OSError must not leave a partial final or staging file behind."""
+    import os as _os
+
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    processor = LocalFileJobProcessor(spool_dir=spool)
+    content = b"z" * 16
+    real_write = _os.write
+    calls = {"n": 0}
+
+    def _flaky_write(fd: int, data: bytes) -> int:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real_write(fd, data[:5])
+        raise OSError("injected mid-write failure")
+
+    monkeypatch.setattr(_os, "write", _flaky_write)
+    with pytest.raises(JobProcessingError, match="job_artifact_incomplete"):
+        processor._write_artifact("job_flaky", "transcript.json", content)
+    target_dir = spool / RESULTS_SUBDIR / "job_flaky"
+    leftovers = list(target_dir.iterdir()) if target_dir.exists() else []
+    assert leftovers == []
+
+
+def test_run_once_short_write_still_publishes_complete_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: short writes through the runner still yield a full artifact."""
+    import os as _os
+
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    audio = spool / "input.wav"
+    audio.write_bytes(b"RIFF-fake-wav")
+    real_write = _os.write
+    first = {"done": False}
+
+    def _short_once(fd: int, data: bytes) -> int:
+        if not first["done"]:
+            first["done"] = True
+            return real_write(fd, bytes(data[:2]))
+        return real_write(fd, data)
+
+    monkeypatch.setattr(_os, "write", _short_once)
+    repository = JobRepository(spool)
+    transcriber = _FakeTranscriber(text="e2e text")
+    processor = LocalFileJobProcessor(spool_dir=spool, batch_transcriber=transcriber)
+    processor._decode_audio = (  # type: ignore[method-assign]
+        lambda input_path: _coro_bytes()
+    )
+
+    async def _coro_bytes() -> bytes:
+        return b"\x00\x01" * 50
+
+    governor = ResourceGovernor(GovernorLimits(2, 1, 1))
+    runner = JobRunner(
+        repository=repository, governor=governor, processor=processor, deadline_seconds=5
+    )
+    job = repository.create(
+        kind="transcription", owner="loopback", request={"input_ref": str(audio)}
+    )
+    assert asyncio.run(runner.run_once()) is True
+    record = repository.get(job.id, owner="loopback")
+    assert record is not None and record.state == "completed"
+    assert record.result_ref is not None
+    resolved = resolve_result_artifact(spool_dir=spool, job_id=job.id, result_ref=record.result_ref)
+    assert resolved is not None
+    artifact, _media_type = resolved
+    assert artifact.stat().st_size > 0
+    assert json.loads(artifact.read_text())["text"] == "e2e text"
+
+
+def test_recover_interrupted_does_not_delete_published_artifact(tmp_path: Path) -> None:
+    """A published final survives restart recovery bookkeeping for its job."""
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    repository = JobRepository(spool)
+    job = repository.create(kind="transcription", owner="loopback", request={"input_ref": "opaque"})
+    processor = LocalFileJobProcessor(spool_dir=spool)
+    content = b'{"text": "keep me"}'
+    ref = processor._write_artifact(job.id, "transcript.json", content)
+    assert repository.claim_next() is not None
+    repository.complete(job.id, result_ref=ref)
+    # Restart recovery only touches rows still marked running; the completed
+    # row keeps its ref and the published bytes stay on disk.
+    assert repository.recover_interrupted(max_attempts=2) == 0
+    record = repository.get(job.id, owner="loopback")
+    assert record is not None and record.state == "completed"
+    assert record.result_ref == ref
+    artifact = spool / RESULTS_SUBDIR / job.id / "transcript.json"
+    assert artifact.read_bytes() == content

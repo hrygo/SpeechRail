@@ -10,6 +10,7 @@ reference instead of an absolute path or raw content.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from collections.abc import Sequence
@@ -390,12 +391,35 @@ class LocalFileJobProcessor:
         target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         target_dir.chmod(0o700)
         target = target_dir / filename
-        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        staging = target_dir / f".{filename}.{os.getpid()}.staging"
         try:
-            os.write(descriptor, content)
-        finally:
-            os.close(descriptor)
-        target.chmod(0o600)
+            with contextlib.suppress(FileNotFoundError):
+                staging.unlink()
+            descriptor = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                view = memoryview(content)
+                offset = 0
+                total = len(content)
+                while offset < total:
+                    try:
+                        written = os.write(descriptor, view[offset:])
+                    except OSError as exc:
+                        raise JobProcessingError("job_artifact_incomplete") from exc
+                    if written <= 0:
+                        raise JobProcessingError("job_artifact_incomplete")
+                    offset += written
+                try:
+                    os.fsync(descriptor)
+                except OSError as exc:
+                    raise JobProcessingError("job_artifact_incomplete") from exc
+            finally:
+                os.close(descriptor)
+            staging.chmod(0o600)
+            staging.replace(target)
+        except JobProcessingError:
+            with contextlib.suppress(OSError):
+                staging.unlink()
+            raise
         return f"{RESULTS_SUBDIR}/{job_id}/{filename}"
 
 
