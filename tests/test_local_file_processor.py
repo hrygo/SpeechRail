@@ -1539,3 +1539,118 @@ def test_recover_interrupted_does_not_delete_published_artifact(tmp_path: Path) 
     assert record.result_ref == ref
     artifact = spool / RESULTS_SUBDIR / job.id / "transcript.json"
     assert artifact.read_bytes() == content
+
+
+@pytest.mark.parametrize("operation", ["close", "fsync", "chmod", "replace"])
+def test_publish_failure_preserves_previous_artifact_and_cleans_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    import os
+
+    processor = LocalFileJobProcessor(spool_dir=tmp_path)
+    processor._write_artifact("job_retry", "speech.pcm", b"\x00\x01" * 8)
+    target_dir = tmp_path / RESULTS_SUBDIR / "job_retry"
+    target = target_dir / "speech.pcm"
+    original = target.read_bytes()
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise OSError("injected publish failure")
+
+    if operation == "close":
+        real_close = os.close
+
+        def fail_close(fd: int) -> None:
+            real_close(fd)
+            fail()
+
+        monkeypatch.setattr(os, "close", fail_close)
+    elif operation == "chmod":
+        real_chmod = Path.chmod
+
+        def fail_staging_chmod(path: Path, mode: int) -> None:
+            if path != target_dir:
+                fail()
+            real_chmod(path, mode)
+
+        monkeypatch.setattr(Path, "chmod", fail_staging_chmod)
+    elif operation == "replace":
+        monkeypatch.setattr(Path, "replace", fail)
+    else:
+        monkeypatch.setattr(os, operation, fail)
+
+    with pytest.raises(JobProcessingError, match="job_artifact_incomplete"):
+        processor._write_artifact("job_retry", "speech.pcm", b"\x02\x03" * 8)
+    assert target.read_bytes() == original
+    assert list(target_dir.iterdir()) == [target]
+
+
+def test_reentrant_publish_uses_independent_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    processor = LocalFileJobProcessor(spool_dir=tmp_path)
+    real_write = os.write
+    nested = False
+
+    def reentrant_write(fd: int, content: bytes) -> int:
+        nonlocal nested
+        if not nested:
+            nested = True
+            processor._write_artifact("job_shared", "speech.pcm", b"\x02\x03")
+        return real_write(fd, content)
+
+    monkeypatch.setattr(os, "write", reentrant_write)
+    processor._write_artifact("job_shared", "speech.pcm", b"\x00\x01")
+    target_dir = tmp_path / RESULTS_SUBDIR / "job_shared"
+    assert (target_dir / "speech.pcm").read_bytes() == b"\x00\x01"
+    assert len(list(target_dir.iterdir())) == 1
+
+
+def test_restart_between_publish_and_database_commit_preserves_complete_file(
+    tmp_path: Path,
+) -> None:
+    repository = JobRepository(tmp_path)
+    job = repository.create(kind="speech", owner="loopback", request={})
+    assert repository.claim_next() is not None
+    processor = LocalFileJobProcessor(spool_dir=tmp_path)
+    processor._write_artifact(job.id, "speech.pcm", b"\x00\x01" * 8)
+    target = tmp_path / RESULTS_SUBDIR / job.id / "speech.pcm"
+    assert repository.recover_interrupted(max_attempts=2) == 1
+    assert target.read_bytes() == b"\x00\x01" * 8
+    recovered = repository.get(job.id, owner="loopback")
+    assert recovered is not None and recovered.state == "queued"
+    assert recovered.result_ref is None
+    assert repository.claim_next() is not None
+    ref = processor._write_artifact(job.id, "speech.pcm", b"\x02\x03" * 8)
+    repository.complete(job.id, result_ref=ref)
+    assert target.read_bytes() == b"\x02\x03" * 8
+
+
+def test_runner_reads_back_completion_when_database_commit_response_fails(
+    tmp_path: Path,
+) -> None:
+    class Repository(JobRepository):
+        def complete(self, job_id: str, *, result_ref: str) -> JobRecord:
+            super().complete(job_id, result_ref=result_ref)
+            raise RuntimeError("injected error after commit")
+
+    repository = Repository(tmp_path)
+    processor = LocalFileJobProcessor(spool_dir=tmp_path)
+
+    class Processor:
+        async def process(self, job: JobRecord) -> str:
+            return processor._write_artifact(job.id, "speech.pcm", b"\x00\x01" * 8)
+
+    job = repository.create(kind="speech", owner="loopback", request={})
+    runner = JobRunner(
+        repository=repository,
+        governor=ResourceGovernor(GovernorLimits(2, 1, 1)),
+        processor=Processor(),
+        deadline_seconds=5,
+    )
+    assert asyncio.run(runner.run_once()) is True
+    completed = repository.get(job.id, owner="loopback")
+    assert completed is not None and completed.state == "completed"
+    assert completed.result_ref is not None
+    assert (tmp_path / completed.result_ref).read_bytes() == b"\x00\x01" * 8
