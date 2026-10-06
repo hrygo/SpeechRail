@@ -216,6 +216,8 @@ class OpenAIRealtimeSession:
         self._asr_generation = 0
         self._asr_finals: set[asyncio.Task[None]] = set()
         self._asr_closed_items: dict[str, _AsrItem] = {}
+        # Item ids whose failed terminal was sent by _clear_audio (#294).
+        self._cleared_item_ids: set[str] = set()
         self._commit_lock = asyncio.Lock()
         self._commit_owner: str | None = None
         self._input_generation = 0
@@ -1360,7 +1362,22 @@ class OpenAIRealtimeSession:
         self._item_end_kernel = item.end_kernel
         self._current_item_id = self._new_item_id()
         if reason == "client":
-            await final
+            # A concurrent clear sends the closed item its failed terminal
+            # and stamps the item id before canceling in-flight finals.
+            # Only that clear-driven cancellation becomes input_cleared: an
+            # external cancel of the commit caller itself leaves no stamp
+            # and must keep surfacing CancelledError with no receipt. The
+            # text terminal bit alone cannot discriminate: the reader claims
+            # it before yielding to a blocked transport.
+            try:
+                await final
+            except asyncio.CancelledError as err:
+                if item.item_id in self._cleared_item_ids:
+                    raise RealtimeAdapterError(
+                        "input_cleared",
+                        "the committed input was cleared before its terminal",
+                    ) from err
+                raise
             await self._await_asr_finals()
 
     async def _finish_asr_item(
@@ -1472,6 +1489,17 @@ class OpenAIRealtimeSession:
         for item in tuple(self._asr_closed_items.values()):
             if not item.terminal:
                 item.terminal = True
+                # Stamp the clear so an in-flight client commit awaiting this
+                # item's final can report input_cleared instead of leaking
+                # the cancellation (#294). The bump of _input_generation
+                # below happens later; the commit may observe the cancel
+                # before the generation changes.
+                self._cleared_item_ids.add(item.item_id)
+                # Bounded: only in-flight commits can observe the stamp;
+                # closed items are popped on final teardown, so keep the
+                # last few ids and drop anything older.
+                if len(self._cleared_item_ids) > 8:
+                    self._cleared_item_ids = set(list(self._cleared_item_ids)[-8:])
                 await self._send(
                     transcription_failed(
                         item_id=item.item_id,
