@@ -2,6 +2,9 @@ import AVFoundation
 import Foundation
 import SpeechRailControlKit
 import XCTest
+#if SWIFT_PACKAGE
+@testable import SpeechRailAppSupport
+#endif
 
 /// V17 真机对照（#268，不关闭 issue）：真实 `PCMStreamPlayer` + 生产 `AssistantTTSStreamCoordinator`。
 ///
