@@ -2,11 +2,50 @@
 title: "共享 ASR #245：实施与验收记录"
 status: in_progress
 audience: "SpeechRail 开发者与验收人员"
-version: "1.9.0"
+version: "1.10.0"
 date: 2026-10-06
 ---
 
 # 共享 ASR #245：实施与验收记录
+
+## 2026-10-07 当前基线回退的单因素隔离
+
+`candidate-v8-current-baseline-comparison-v1.json` 在交接 runtime
+（`912547085c09`，generation 13、quality/quality）上复现三处配对回退，
+预设未冻结。回退只涉及 8 s 段预算预设：core-teleprompter 的
+`ami-meeting-06`（22→27）、ascend-caption 与 ascend-teleprompter 的
+`ascend-zh-en-01`（9→15）、ascend-teleprompter 的 `ascend-zh-en-03`
+（0→3）。同素材的 20 s 预算预设（core/ascend meeting，caption 的
+`ami-meeting-06` 与 `ascend-zh-en-03`）与基线持平或更好。
+
+2026-10-07 经用户授权执行 service-only 单因素隔离
+`maintenance-v8-isolation-v2`：同一 v8 wheel（完整 digest
+`db6b92ebfeae00ff01ca8d3232f43cb34dd9bb7535ad661ea866119363958f68`，
+189 个 wheel 文件逐字核对，零模型下载），同两条音频、同参考、同语言，
+只变段预算与收尾方式。A（8 s + streaming）、B（8 s + full_segment）、
+C（20 s + streaming），各 N=3，共 18 正式请求。
+`measurement_completed=true, original_restored=true`，
+恢复交接 runtime 后 PID **80067**、generation 13、quality/quality、
+原 catalog、ready 与空闲核验通过。
+
+| fixture | A：8 s streaming | B：8 s full | C：20 s streaming |
+|---|---|---|---|
+| ami-meeting-06（6.29 s） | 27 / 1 终态 / 1 边界 ×3 | 22 / 1 / 1 ×3 | 27 / 1 / 1 ×3 |
+| ascend-zh-en-01（10.02 s） | 15 / 2 / 2 ×3 | 15 / 2 / 2 ×3 | 9 / 1 / 1 ×3 |
+
+结论只限这两条样本：`ascend-zh-en-01` 的回退由 8 s 预算切分驱动，
+20 s 下单段即回到基线 9 错误；收尾方式在该样本上不改变错误数。
+`ami-meeting-06` 的回退由收尾方式驱动，8 s 下 full_segment 即回到基线
+22 错误；20 s 不能修复该样本。两处都不涉及音频丢失、重复或尾部截断，
+覆盖与段预算门均为 pass。隔离未覆盖 `ascend-zh-en-03` 的 0→3，
+该项仍待复测。预设仍未冻结，#249/#253/#245 保持开放。
+
+| 仓库外证据 | SHA-256 |
+|---|---|
+| isolation-A-8s-streaming-result.json | `0fc9e140a58c964f87974e42efc61b02132977e32062e65dfb6a16d1e681604a` |
+| isolation-B-8s-full-result.json | `ab9d691ecc6531a291bf9e64db7b6cd277058c28f56cdf94e9f010dd8430f5b9` |
+| isolation-C-20s-streaming-result.json | `f39723a4b4df255f0b5acba6a18250233194ba79200144a230fa78dbf2ece671` |
+| restoration-verification.json | 以恢复后实测为准，不复述历史 PID |
 
 ## 2026-10-06 维护交接后的新证据
 
