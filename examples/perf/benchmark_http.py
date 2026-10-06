@@ -16,9 +16,12 @@ from urllib import request as urllib_request
 from speechrail.config.auth import resolve_api_key
 
 try:
-    from .asr_quality import character_error_metrics
+    from .asr_quality import character_error_metrics, punctuation_error_metrics
 except ImportError:
-    from asr_quality import character_error_metrics  # type: ignore[no-redef]
+    from asr_quality import (  # type: ignore[no-redef]
+        character_error_metrics,
+        punctuation_error_metrics,
+    )
 
 try:
     from .benchmark_manifest import BenchmarkInputError, Fixture
@@ -293,6 +296,12 @@ def _fixture_request(
                 if not isinstance(transcript, str):
                     raise ValueError("ASR response lacks text")
                 quality = character_error_metrics(fixture.reference_text, transcript)
+                if fixture.punctuation_reference_text is not None:
+                    quality["punctuation_metrics"] = punctuation_error_metrics(
+                        fixture.punctuation_reference_text,
+                        transcript,
+                        gold_kind=fixture.punctuation_reference_kind,
+                    )
             except (ValueError, TypeError, AttributeError):
                 measurement_error = "invalid_quality_response"
                 success = False

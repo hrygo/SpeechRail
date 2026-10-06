@@ -58,7 +58,38 @@ def test_out_of_order_finals_are_scored_in_audio_order_and_empty_final_is_succes
     assert result["cer"] == 0
     assert result["terminal_count"] == 3
     assert result["sample_coverage_gate"] == "pass"
+    assert result["punctuation_gate"] == "unset"
+    assert "punctuation_metrics" not in result
     assert "甲" not in json.dumps(result, ensure_ascii=False)
+
+
+def test_realtime_punctuation_scores_only_aligned_marks_and_keeps_text_private():
+    evidence = ASREvidence(require_boundaries=True)
+    reference = "你好世界"
+    punctuation_gold = "你好，世界。"
+    hypothesis = "你好。世界？"
+    evidence.consume(boundary("item", 0, 4_800), 1)
+    evidence.consume(terminal("item", hypothesis), 2)
+    evidence.consume(receipt(4_800), 3)
+
+    result = evidence.score(
+        reference,
+        expected_wire_samples=4_800,
+        punctuation_reference_text=punctuation_gold,
+        punctuation_reference_kind="human_punctuation_annotation",
+    )
+
+    assert result["cer"] == 0
+    punctuation = result["punctuation_metrics"]
+    assert punctuation["true_positives"] == 0
+    assert punctuation["false_positives"] == 2
+    assert punctuation["false_negatives"] == 2
+    assert punctuation["precision"] == punctuation["recall"] == 0.0
+    assert punctuation["f1"] == 0.0
+    assert punctuation["punctuation_gate"] == result["punctuation_gate"] == "unset"
+    assert reference not in json.dumps(result, ensure_ascii=False)
+    assert punctuation_gold not in json.dumps(result, ensure_ascii=False)
+    assert hypothesis not in json.dumps(result, ensure_ascii=False)
 
 
 @pytest.mark.parametrize("bad_span", [(3, 4), (1, 4)])
@@ -228,13 +259,24 @@ def test_resource_only_evidence_keeps_spans_and_skips_all_quality_scores(monkeyp
         asr_benchmark, "character_error_metrics",
         lambda *_args, **_kwargs: pytest.fail("resource-only mode must not calculate CER"),
     )
+    monkeypatch.setattr(
+        asr_benchmark, "punctuation_error_metrics",
+        lambda *_args, **_kwargs: pytest.fail(
+            "resource-only mode must not calculate punctuation metrics"
+        ),
+    )
     evidence.consume(boundary("first", 0, 2), 1)
     evidence.consume(boundary("last", 2, 5), 2)
     evidence.consume(terminal("last", "PRIVATE_TRANSCRIPT"), 3)
     evidence.consume(terminal("first", ""), 4)
     evidence.consume(receipt(5), 5)
 
-    result = evidence.score(None, expected_wire_samples=5)
+    result = evidence.score(
+        None,
+        expected_wire_samples=5,
+        punctuation_reference_text="human source gold, not used here.",
+        punctuation_reference_kind="human_reading_prompt",
+    )
 
     assert result["quality_gate"] == "unset"
     assert result["sample_coverage_gate"] == "pass"
@@ -280,10 +322,15 @@ def test_resource_only_manifest_keeps_resources_without_quality_claims(
         def stop(self):
             return {"fake_resource_sample": True}
 
-    def fake_run(_client, wire, *, language, reference, policy, resource_only):
+    def fake_run(
+        _client, wire, *, language, reference, policy, resource_only,
+        punctuation_reference_text, punctuation_reference_kind,
+    ):
         calls.append({
             "wire": wire, "language": language, "reference": reference,
             "policy": policy, "resource_only": resource_only,
+            "punctuation_reference_text": punctuation_reference_text,
+            "punctuation_reference_kind": punctuation_reference_kind,
         })
         return {
             "effective_policy": {
@@ -324,6 +371,8 @@ def test_resource_only_manifest_keeps_resources_without_quality_claims(
     assert calls == [{
         "wire": b"\x00" * 9_600, "language": "zh", "reference": None,
         "policy": None, "resource_only": True,
+        "punctuation_reference_text": None,
+        "punctuation_reference_kind": None,
     }]
     assert payload["evidence_mode"] == "real"
     assert payload["measurement_mode"] == "resource_only"
@@ -334,6 +383,90 @@ def test_resource_only_manifest_keeps_resources_without_quality_claims(
     resources = payload["resources"]
     assert resources["simultaneous_peak"]["phys_footprint_bytes"] == 12_345
     assert json.loads(output.read_text()) == payload
+
+
+def test_realtime_manifest_passes_punctuation_gold_to_local_quality_runner(
+    monkeypatch, tmp_path: Path,
+):
+    audio = tmp_path / "reading.wav"
+    audio.write_bytes(b"fixture")
+    manifest = tmp_path / "reading.json"
+    reference = "hello world"
+    punctuation_gold = "Hello, world."
+    manifest.write_text(json.dumps({
+        "fixtures": [{
+            "id": "reading-01",
+            "kind": "asr",
+            "path": str(audio),
+            "language": "en",
+            "reference_text": reference,
+            "punctuation_reference_text": punctuation_gold,
+            "punctuation_reference_kind": "human_reading_prompt",
+        }],
+    }))
+    output = tmp_path / "punctuation-result.json"
+    calls = []
+
+    class FakeMonitor:
+        def __init__(self, *, interval_seconds):
+            assert interval_seconds == 0.25
+
+        def start(self):
+            pass
+
+        def stop(self):
+            return {"fake_resource_sample": True}
+
+    def fake_run(
+        _client, wire, *, language, reference, policy, resource_only,
+        punctuation_reference_text, punctuation_reference_kind,
+    ):
+        calls.append({
+            "reference": reference,
+            "punctuation_reference_text": punctuation_reference_text,
+            "punctuation_reference_kind": punctuation_reference_kind,
+            "resource_only": resource_only,
+        })
+        return {
+            "audio_seconds": len(wire) / 48_000,
+            "effective_policy": None,
+            "quality_metrics": {
+                "cer": 0,
+                "punctuation_gate": "unset",
+                "punctuation_metrics": {
+                    "method": "normalized_lexical_character_alignment_v1",
+                    "gold_kind": punctuation_reference_kind,
+                    "f1": 0.5,
+                },
+            },
+        }
+
+    monkeypatch.setattr(asr_benchmark, "OpenAI", lambda **_kwargs: object())
+    monkeypatch.setattr(asr_benchmark, "resolve_api_key", lambda **_kwargs: None)
+    monkeypatch.setattr(asr_benchmark, "_wire_audio", lambda _path: (b"\x00" * 9_600, 0.2))
+    monkeypatch.setattr(asr_benchmark, "_run_asr", fake_run)
+    monkeypatch.setattr(asr_benchmark, "ProcessResourceMonitor", FakeMonitor)
+    monkeypatch.setattr(
+        asr_benchmark,
+        "_normalise_resources",
+        lambda _raw: {"sampling_complete": True},
+    )
+
+    payload = run_manifest_asr_benchmark(
+        manifest, profile="quality", output=output, sessions=1, warmup=False,
+        app_home=None, base_url="http://127.0.0.1:8201/v1",
+    )
+
+    assert calls == [{
+        "reference": reference,
+        "punctuation_reference_text": punctuation_gold,
+        "punctuation_reference_kind": "human_reading_prompt",
+        "resource_only": False,
+    }]
+    assert payload["sessions"][0]["quality_metrics"]["punctuation_metrics"]["f1"] == 0.5
+    encoded = json.dumps(payload, ensure_ascii=False)
+    assert reference not in encoded
+    assert punctuation_gold not in encoded
 
 
 def test_resource_only_asr_run_keeps_pacing_policy_echo_and_exact_barrier(monkeypatch):
