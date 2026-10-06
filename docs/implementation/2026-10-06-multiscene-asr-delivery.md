@@ -2,7 +2,7 @@
 title: "共享 ASR #245：实施与验收记录"
 status: in_progress
 audience: "SpeechRail 开发者与验收人员"
-version: "1.5.0"
+version: "1.6.0"
 date: 2026-10-06
 ---
 
@@ -10,8 +10,12 @@ date: 2026-10-06
 
 2026-10-06 后续交付链核验：App 消费替代 PR #291 已合入 `b6eada5b`，
 证据工具替代 PR #292 已合入 `84330d9c`；原 #278/#280 均已关闭。
-下方原 PR 表与 CI 记录保留为历史来源。#290 的输入归属修复仍待交付和真实复测；
-#249/#253/#245 保持开放，App 实施 Issues 已关闭不代表真实业务验收完成。
+下方原 PR 表与 CI 记录保留为历史来源。#290 的输入归属修复已合入 `437b30d4`，
+#293 的独立段预算门已合入 `65664af9`；两者仍需新候选真实复测。
+#295 的直接 commit/clear 修复已合入 `6daef358`；后续传输层取消屏障修复由
+[#297](https://github.com/hrygo/SpeechRail/pull/297) 交付，替代已关闭、未合并的 #296。
+#247/#248/#250/#251/#252 已关闭，#249/#253/#245 保持开放；
+实施 Issues 已关闭不代表真实业务验收完成。本任务未合并 main。
 
 实施依据为 [完整方案](2026-10-05-multiscene-asr-luna-guide.md)，交付跟踪为
 [#245](https://github.com/hrygo/SpeechRail/issues/245) 及 #247–#253。
@@ -127,7 +131,8 @@ Gate Summary 均通过。该记录对应修复期限时钟前的代码；
 可修订文字使用 SpeechRail hypothesis，不能把可回退快照当成官方 append-only delta。
 调用方需要处理新增边界事件；本次没有保留旧静音配置构造接口或第二套预设。
 更新后的 Swift 客户端要求服务返回有效 ASR policy；旧服务缺少该回显时会拒绝解析，
-因此 App 与服务须使用配套契约。当前正式安装 App 和服务均未替换。
+因此 App 与服务须使用配套契约。原实施阶段未替换正式安装 App 和服务；
+后续临时服务维护及恢复结果见下方实测记录，App 未替换。
 没有变更 SQLite 格式、迁移历史记录或保存 PCM。根 README 未修改。
 
 ## 确定性验证
@@ -376,6 +381,69 @@ Batch `release_pass=false`，缺少 cold、完整模型身份、完整质量、s
 两种 API 行为不可直接称为候选改善，也没有据此冻结预设。
 
 ## Issue 验收矩阵与未验收项
+
+### 两阶段取消屏障与 v8 候选准备
+
+2026-10-06 核验：#297 head 为 `28ab39b3`，base 为 `6daef358`，OPEN / MERGEABLE。
+显式 client commit 先在入站 FIFO 中冻结输入、发段边界、启动 final，
+再由 owned 后台 waiter 等待 final、真实清理及可选 receipt；FIFO 可继续处理 clear。
+clear 在任何 await/send 之前撤销 ASR 代次并 claim 旧段终态；
+被取消的提交返回关联 commit ID 的 `invalid_state`，不发旧 receipt。
+每连接最多 16 个 pending barrier，超限 `queue_full`；断开时取消并 join
+owned waiter，再关闭 session。receipt 使用冻结时 accepted_samples。
+
+正常 worker `failed` 终态且 commit/cleanup 正常完成仍可返回 receipt；
+receipt 只证明上传/完成屏障，不证明识别成功。真正取消、超时或缺完成证据不能
+取得 receipt，也不能被后段成功、重复 commit 或被拒绝 append 掩盖。
+外部 caller cancel 保留 `CancelledError`，不连带取消 shield 内的 owned final。
+后台 final 的异常显式读取，仅记录异常类型，避免未观察异常且保留失败屏障。
+
+该方案基于已合入 #295 的主线保留 #294 直接 commit/clear 回归，但取消错误码
+统一为 `invalid_state`，不保留 #295 的 `input_cleared` 或 canceled-item registry。
+Python、Realtime 契约和用户文档同步；源码相对已验证 `b2155372` 逐字一致，
+新主线只额外保留一条已通过的 #294 回归。独立只读审查未发现阻塞项。
+
+最新主线定向回归为 **323 passed / 4.21 s**，interop 两文件通过；
+Ruff、Mypy 164 files、Realtime 52 fixtures / 45 fields、
+用户文档 39 paths / 21 errors / 9 aliases、版本与 whitespace 检查通过。
+完整 Python 证据对应 `65664af9` 加最终取消生产源码：
+**3451 passed / 1 skipped / 726 warnings，88.56 s，coverage 83.08%**。
+警告主要为 SQLite ResourceWarning，另有弃用及 Pydantic 提示。
+重基后新增 #294 回归独立通过，不将旧完整数量写成 `28ab39b3` HEAD 的全量结果。
+完整日志 SHA-256：
+`26c9973f2cc96fe721b83ccd3f19147e3f62738dcb1f38198d1242c3db3f6f35`。
+传输 FIFO clear、被拒绝 append 与后台终态发送异常均有修复前失败证据；
+此前把正常 failed 终态的 receipt 判为错误的探针不作为缺陷证据。
+
+本任务的 v8 wheel SHA-256：
+`db6b92ebfeae00ff01ca8d3232f43cb34dd9bb7535ad661ea866119363958f68`，
+构建源码 `284fea83`，tree `2c0b1632da8fadb7d0ebc85718a1164cb412c0df`。
+164 份 Python 模块逐字匹配，且与 #297 `28ab39b3` 全部生产模块一致；
+metadata 3.7.1 / Python 3.14、arm64 native、model catalog 和 runtime lock 核验通过。
+仓库外独立环境执行该 wheel 的 `speechrail install --help` 成功。
+中间未验证 wheel 保留但不可安装；版本号及“v8”名称不能代替完整 digest。
+
+本任务尚未安装这个 v8。生命周期维护在隔离检查处以
+`service_not_isolated` 停止，未执行 stop/install，也未生成测量结果。
+随后只读核验发现另一项维护已将同一 managed 服务替换为不同 wheel
+（runtime suffix `912547085c09`），仍在做五预设对照。
+该制品不含 #297，不能混用其结论；即使瞬时连接及资源计数为零，
+也不证明另一维护已经结束。须完成维护交接、重新核验并固定实际回退点后
+才执行本任务候选测试，不能擅自停止另一项维护或套用旧 PID。
+
+下一真实阶段先验 1 ms deadline 释放、冻结段 clear 后同连接恢复、
+100 ms 静音空成功及 180 s 连续预算；通过后才执行固定的五预设质量矩阵
+（300 正式请求 / 2441.640 s 测量音频）和生产 App 消费者入口。
+Swift 的 raw wire/ledger 回放与生产 Session 回放分别报告；
+ServerVAD 可丢弃静音区间，必须检查 admitted spans 合法、不重叠、不超预算，
+并另用生产 drain receipt 核验全部已上传输入屏障，不能伪造连续覆盖。
+真实消费者入口仍在准备，未真实连接服务或设备，未安装 App、未进行 UI 自动化。
+
+字幕标点人工 gold、思考停顿、诗文、即兴/重读、噪声与会议长稳仍缺充分证据。
+44 条公开音频及短会议片段不能独立证明这些门；未冻结预设，
+#249/#253/#245 保持开放。源码回退为撤销 #297 的两个提交；
+真实维护开始前保存其实际旧 runtime/vendor/selection，结束或失败均按该点恢复，
+保留模型、配置、文字数据库及原始证据。
 
 ### v7 完整串行对照与后续边界发现
 
