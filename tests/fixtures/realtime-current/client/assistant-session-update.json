@@ -32,12 +32,7 @@
         "prefix_padding_ms": 300,
         "silence_duration_ms": 400
       },
-      "expected_asr_revision": "asr-catalog",
-      "asr": {
-        "preview_interval_ms": 500,
-        "max_segment_ms": 8000,
-        "finalization": "full_segment"
-      }
+      "expected_asr_revision": "asr-catalog"
     }
   }
 }
