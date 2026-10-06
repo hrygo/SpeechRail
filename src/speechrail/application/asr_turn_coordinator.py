@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 
@@ -117,7 +116,10 @@ class AsrTurnCoordinator:
                 acquired = False
                 try:
                     await segment._connected.wait()
-                    if segment._deadline is not None and time.monotonic() >= segment._deadline:
+                    if (
+                        segment._deadline is not None
+                        and asyncio.get_running_loop().time() >= segment._deadline
+                    ):
                         raise TimeoutError("ASR final deadline expired in the pending lane")
                     runtime = self._factory.create(
                         language=segment._language,
@@ -301,7 +303,8 @@ class CoordinatedAsrSession:
             self._want_segments = want_segments
             deadline_ms = self._options.asr_policy.final_deadline_ms
             self._deadline = (
-                time.monotonic() + deadline_ms / 1000 if deadline_ms is not None else None
+                asyncio.get_running_loop().time() + deadline_ms / 1000
+                if deadline_ms is not None else None
             )
             if self._timeout is not None:
                 self._timeout.reschedule(self._deadline)
