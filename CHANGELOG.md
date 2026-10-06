@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+## [3.8.0] - 2026-10-07
+
+### Added
+
+- ASR 解码器 rollback tokens 成为可调策略：worker session policy 要求
+  rollback tokens，assistant 握手 fixture 同步回显 rollback policy
+  （#249）。
+- V17 有界积压保序真机对照：真实 `PCMStreamPlayer` + 生产
+  `AssistantTTSStreamCoordinator`，3 块各约 400ms 音频保序播完，
+  terminal 先到不提前 completed，取消后旧迟到 played 不污染新轮
+  （#268，不关闭 issue；CI 无音频设备时整类 skip）。
+- 超 512 单单元 coordinator 保序打通：600 scalar 切两片保序发出，
+  全文无丢失（#268，不关闭 issue）。
+
+### Fixed
+
+- ASR ingress 在等待输入完成屏障时释放：后台 ASR final 失败只观测记录，
+  不丢弃屏障失败（#245）。
+- 生产播放通道转发 chunkID：同一 chunk 的重复 played 回调只记账/归还一次，
+  不提前宣布播完（#304）。
+- V17 真机测试补 SwiftPM 可见性头（`@testable import SpeechRailAppSupport`），
+  CI `Swift Package Tests` 编译通过（#268）。
+
+### Notes
+
+- #308（同文本偶发语速慢放约 7-8%）本项目侧完成，等待上游
+  mlx-audio#1002 修复；vendor 锁定 `mlx-audio 0.5.6` 不升级。
+- #245 epic、#257、#258、#268 保持 OPEN；V17 UI 等待指示仍待 UI 专项对照。
+
 ## [3.7.1] - 2026-10-05
 
 ### Fixed
