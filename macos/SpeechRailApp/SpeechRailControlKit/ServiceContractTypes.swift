@@ -1396,6 +1396,42 @@ public struct SpeechRailRequestOptions: Equatable, Sendable {
             validationPolicy: policy
         )
     }
+
+    /// Derive a copy that routes this request into the interactive admission
+    /// class (`SpeechRail-Purpose: interactive`), preserving every other field.
+    /// Quiet companion/assistant speech must not ride the batch class: batch is
+    /// the compatibility default and does not share the realtime TTS
+    /// reservation class. Like `withValidationPolicy`, prefer this over
+    /// rebuilding the options by hand.
+    public func withInteractivePurpose() -> SpeechRailRequestOptions {
+        SpeechRailRequestOptions(
+            expectedVoiceRevision: expectedVoiceRevision,
+            expectedModelRevision: expectedModelRevision,
+            pronunciationSet: pronunciationSet,
+            receiptMode: receiptMode,
+            timingMode: timingMode,
+            purpose: "interactive",
+            latencyBudgetMs: latencyBudgetMs,
+            languageOverride: languageOverride,
+            validationPolicy: validationPolicy
+        )
+    }
+
+    /// Derive a copy that asks for a service-side integrity receipt
+    /// (`SpeechRail-Receipt-Mode: integrity`), preserving every other field.
+    public func withReceiptModeIntegrity() -> SpeechRailRequestOptions {
+        SpeechRailRequestOptions(
+            expectedVoiceRevision: expectedVoiceRevision,
+            expectedModelRevision: expectedModelRevision,
+            pronunciationSet: pronunciationSet,
+            receiptMode: "integrity",
+            timingMode: timingMode,
+            purpose: purpose,
+            latencyBudgetMs: latencyBudgetMs,
+            languageOverride: languageOverride,
+            validationPolicy: validationPolicy
+        )
+    }
 }
 
 public struct SpeechAudioResponse: Sendable {
@@ -2382,6 +2418,19 @@ public enum SpeechRailCapabilityRevisionSelector {
             expectedVoiceRevision: nonEmpty(voice.voiceRevision),
             expectedModelRevision: modelRevision
         )
+    }
+
+    /// 助手实时语音的完整文本请求选项（#257 §6.0 边界 1 的构造器半边）。
+    /// 在 `creatorRequestOptions` 的 revision pin 基础上叠加 interactive
+    /// purpose 与 integrity receipt：固定 revision 由 capability 快照证明，
+    /// 不设 latency budget（不附加迫使答案缩短的预算）。返回 nil 时调用方
+    /// fail-closed，不得猜 revision 或降级走 batch 默认准入。
+    public static func assistantInteractiveSpeechOptions(
+        voiceID: String,
+        in snapshot: EffectiveCapabilitySnapshot?
+    ) -> SpeechRailRequestOptions? {
+        creatorRequestOptions(voiceID: voiceID, in: snapshot)?.withInteractivePurpose()
+            .withReceiptModeIntegrity()
     }
 
     /// 按 voice mode 取服务端比对用的那份 TTS 制品 revision（canonical 映射见

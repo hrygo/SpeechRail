@@ -1749,6 +1749,35 @@ final class ServiceContractTests: XCTestCase {
         }
     }
 
+    /// #257 §6.0 边界 1：派生 helper 不丢字段；interactive 构造器在 revision
+    /// pin 基础上叠加 purpose + integrity receipt，且不带 latency budget。
+    func testInteractivePurposeDerivationKeepsEveryOtherOption() {
+        let original = SpeechRailRequestOptions(
+            expectedVoiceRevision: "vr_0123456789abcdef0123456789abcdef",
+            expectedModelRevision: String(repeating: "a", count: 40),
+            pronunciationSet: "story@pr_0123456789abcdef0123456789abcdef",
+            receiptMode: "integrity",
+            timingMode: "chunk",
+            latencyBudgetMs: 1_500,
+            languageOverride: "ja",
+            validationPolicy: "require_output_pass"
+        )
+
+        let interactive = original.withInteractivePurpose()
+        XCTAssertEqual(interactive.purpose, "interactive")
+        XCTAssertEqual(interactive.headers["SpeechRail-Purpose"], "interactive")
+        for (key, value) in original.headers where key != "SpeechRail-Purpose" {
+            XCTAssertEqual(interactive.headers[key], value, key)
+        }
+
+        let receipted = original.withReceiptModeIntegrity()
+        XCTAssertEqual(receipted.receiptMode, "integrity")
+        XCTAssertEqual(receipted.headers["SpeechRail-Receipt-Mode"], "integrity")
+        for (key, value) in original.headers where key != "SpeechRail-Receipt-Mode" {
+            XCTAssertEqual(receipted.headers[key], value, key)
+        }
+    }
+
     /// F1: formal production must always carry the strict policy, even when the
     /// caller forgot it. Audition keeps the permissive default.
     func testRenderPinsStrictPolicyAndAuditionStaysUnverified() async throws {
