@@ -769,6 +769,38 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         XCTAssertEqual(recorder.outcomes.map(\.outcome), [.completed])
     }
 
+    /// M0d/V05：同一 chunkID 的重复 played 回调只记账/归还一次。
+    /// 生产通道（`AssistantSession` 建连）把播放器的 chunkID 原样带回；
+    /// 丢掉它会退回按样本累加，重复回调提前释放预算、提前宣布播完。
+    func testDuplicatePlayedCallbackWithSameChunkIDCountsOnce() async throws {
+        var configuration = AssistantTTSStreamCoordinator.Configuration.default
+        configuration.maximumPendingAudioBytes = 16
+        let (coordinator, recorder) = makeHarness(configuration: configuration)
+        try await coordinator.begin(generation: 201, requestID: "req-dup-chunk")
+        // 16 字节 PCM = 8 个样本；一次 played 回调记 4 个样本 = 8 字节。
+        XCTAssertEqual(
+            coordinator.admitAudio(
+                requestID: "req-dup-chunk",
+                pcm: Data([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+            ),
+            .accepted
+        )
+        await waitUntil({ recorder.played.count == 1 })
+        let epoch = try XCTUnwrap(recorder.epochs.first)
+        let chunkID = UUID()
+        XCTAssertEqual(coordinator.unconsumedAudioBytes, 16)
+        // 首个回调：记账成功，释放 4 样本（8 字节）预算。
+        coordinator.notePlaybackCompleted(samples: 4, epoch: epoch, chunkID: chunkID)
+        XCTAssertEqual(coordinator.unconsumedAudioBytes, 8)
+        // 同一块的重复回调：必须整条丢掉，不二次归还预算。
+        coordinator.notePlaybackCompleted(samples: 4, epoch: epoch, chunkID: chunkID)
+        XCTAssertEqual(
+            coordinator.unconsumedAudioBytes, 8,
+            "同一 chunkID 的重复 played 回调只能记账一次"
+        )
+        coordinator.invalidate()
+    }
+
     func testAggregateAudioCapIncludesChunkAwaitingPlaybackEnqueue() async throws {
         var configuration = AssistantTTSStreamCoordinator.Configuration.default
         configuration.maximumPendingAudioBytes = 8
