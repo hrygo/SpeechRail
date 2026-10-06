@@ -103,7 +103,18 @@ class JobRunner:
                 deadline=self._deadline_seconds,
                 resource_key=resource_key,
             )
-            self._repository.complete(job.id, result_ref=result_ref)
+            try:
+                self._repository.complete(job.id, result_ref=result_ref)
+            except Exception:
+                # The transaction may have committed before its response failed.
+                # Only the same job and published reference prove completion.
+                committed = self._repository.get(job.id, owner=job.owner)
+                if (
+                    committed is None
+                    or committed.state != "completed"
+                    or committed.result_ref != result_ref
+                ):
+                    raise
         except JobProcessingError as exc:
             self._repository.fail(
                 job.id,

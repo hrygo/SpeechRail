@@ -10,8 +10,10 @@ reference instead of an absolute path or raw content.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import BinaryIO, cast
@@ -386,16 +388,43 @@ class LocalFileJobProcessor:
         return text
 
     def _write_artifact(self, job_id: str, filename: str, content: bytes) -> str:
+        """Publish complete bytes atomically; this is not a power-loss guarantee.
+
+        Each attempt owns its staging file. A retry never truncates the previous
+        final before its replacement is ready. File publication precedes the job
+        database commit; restart recovery may replace an unreferenced complete
+        file when it requeues that job, without treating it as completed.
+        """
         target_dir = self._results_dir / job_id
-        target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        target_dir.chmod(0o700)
         target = target_dir / filename
-        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        staging: Path | None = None
         try:
-            os.write(descriptor, content)
+            target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            target_dir.chmod(0o700)
+            descriptor, staging_name = tempfile.mkstemp(
+                prefix=f".{filename}.", suffix=".staging", dir=target_dir
+            )
+            staging = Path(staging_name)
+            try:
+                view = memoryview(content)
+                offset = 0
+                total = len(content)
+                while offset < total:
+                    written = os.write(descriptor, view[offset:])
+                    if written <= 0:
+                        raise JobProcessingError("job_artifact_incomplete")
+                    offset += written
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            staging.chmod(0o600)
+            staging.replace(target)
+        except OSError as exc:
+            raise JobProcessingError("job_artifact_incomplete") from exc
         finally:
-            os.close(descriptor)
-        target.chmod(0o600)
+            if staging is not None:
+                with contextlib.suppress(OSError):
+                    staging.unlink()
         return f"{RESULTS_SUBDIR}/{job_id}/{filename}"
 
 
