@@ -26,7 +26,7 @@ date: 2026-10-06
 | 空成功终态 | [#276](https://github.com/hrygo/SpeechRail/pull/276) / `codex/asr-empty-terminal-247` | `ed3e8600` | #247，三个文件；base 为 main，可独立先合并 |
 | 共享策略与内核 | [#277](https://github.com/hrygo/SpeechRail/pull/277) / `codex/asr-shared-kernel-245` | `6d119a9` | #248/#249，严格策略与实际执行一同交付；依赖 #276 |
 | 四场景 App 消费 | [#278](https://github.com/hrygo/SpeechRail/pull/278) / `codex/asr-scene-consumers-245` | `ce0975d` | #250/#251/#252，transport、预设与消费者编译一致；依赖 #277 |
-| 基准工具与证据 | 本记录所在 PR / `codex/asr-evidence-253` | 以 PR head 为准 | #253/#245，评分/资源模式、实施方案和证据；依赖 #278 |
+| 基准工具与证据 | [#280](https://github.com/hrygo/SpeechRail/pull/280) / `codex/asr-evidence-253` | 代码 head `da85b54`，后续仅补证据 | #253/#245，评分/资源模式、实施方案和证据；依赖 #278 |
 
 策略若单独先交付会出现“接受并回显但未执行”的公共行为，因此与内核作为一个
 可运行切片；App Event、preset 与四个消费者共同组成一个可编译切片。
@@ -65,13 +65,19 @@ Ruff、Mypy 和 contract checker 通过。
 #277 的 run `37427042514` 在 Python、质量、App build 与 wheel 门通过后，
 暴露一个独立切片 fixture 比较失败：新 App 请求形状提前进入了服务端 PR。
 追加 `6d119a9` 将其保留在 App 切片；服务端独立 TTS 7 passed、
-caller/Schema 53 passed。最终服务端 head 的 CI run 为 `37427924683`，
-完成结论以该 run 为准，不以启动动作作为通过证据。
+caller/Schema 53 passed。最终服务端 head 的 CI run `37427924683` 已 success，
+质量、全量 Python、Swift、App build、wheel 和 Gate Summary 均通过。
 
 #278 的 run `37427316390` 已 success，Python、Swift、质量、App build 和 wheel
 均通过；对应 head `0ce9be3`。最终 `ce0975d` 仅接入服务端依赖历史，
 其 Git tree 与该通过 head 完全相同：
 `5419d4a5c6e512726de0ccea53d91ca0ff9a4024`，复用了仍有效的通过证据。
+
+#280 代码 head `da85b5475b4cd4510daf395108ce6c577dd8dd27` 的 CI run
+`37428267452` 已 success，质量、全量 Python、Swift、App build、wheel 和
+Gate Summary 均通过。后续提交只更新本记录，生产源码、工具与测试保持该通过版本。
+四个 PR 已逐一回读 OPEN、MERGEABLE、base/head；没有执行合并。
+原实施工作树的 68 个归属文件复核仍与保存的源码 snapshot 逐字一致。
 以上新主线证据与下方原实施工作树验证分开，不用旧日志证明中间 PR 可运行。
 
 ## 当前实现与公共影响
@@ -315,6 +321,20 @@ SHA-256 `66e0bdbf52196df61ee4261d7e9869f68f7560b112e2b2354763bd666157554a`；
 评论 URL 和 OPEN 状态。原评论附实测、未验收项、当时源码范围及回退说明；
 PR 提交状态通过追加评论更新，历史评论不改写为当时已提交。
 没有关闭任何子项或总 Issue，也没有勾选尚未验收的质量门。
+
+随后按新增 PR 提交授权，向同一组 Issue 追加交付记录并逐字回读；
+旧评论作为历史证据保留。新评论包含 PR、实测/回归、未验收项与逆序回退：
+
+| Issue | PR 交付更新 |
+|---|---|
+| #247 | [评论](https://github.com/hrygo/SpeechRail/issues/247#issuecomment-6011378837) |
+| #248 | [评论](https://github.com/hrygo/SpeechRail/issues/248#issuecomment-6011379552) |
+| #249 | [评论](https://github.com/hrygo/SpeechRail/issues/249#issuecomment-6011380309) |
+| #250 | [评论](https://github.com/hrygo/SpeechRail/issues/250#issuecomment-6011381007) |
+| #251 | [评论](https://github.com/hrygo/SpeechRail/issues/251#issuecomment-6011381777) |
+| #252 | [评论](https://github.com/hrygo/SpeechRail/issues/252#issuecomment-6011382486) |
+| #253 | [评论](https://github.com/hrygo/SpeechRail/issues/253#issuecomment-6011383238) |
+| #245 | [评论](https://github.com/hrygo/SpeechRail/issues/245#issuecomment-6011383891) |
 
 预设当前是候选参数，没有实测无退化结论。候选运行态验收需经受管 installer
 替换服务；现有授权未包含安装或停启服务。完成可评审候选和代码门后再请求该维护授权。
