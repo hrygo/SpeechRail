@@ -67,6 +67,46 @@
       "reject_case": "unsupported_turn_detection"
     },
     {
+      "path": "session.speechrail.asr.preview_interval_ms",
+      "validator": "schema:asr_policy.preview_interval_ms",
+      "task_request": "RealtimeTranscriptionOptions.asr_policy",
+      "adapter": "ASR policy parser",
+      "positive_case": "client_session_asr_policy",
+      "reject_case": "invalid_asr_policy_bool"
+    },
+    {
+      "path": "session.speechrail.asr.max_segment_ms",
+      "validator": "schema:asr_policy.max_segment_ms",
+      "task_request": "RealtimeTranscriptionOptions.asr_policy",
+      "adapter": "effective segment budget resolver",
+      "positive_case": "client_session_asr_policy",
+      "reject_case": "invalid_asr_policy_bool"
+    },
+    {
+      "path": "session.speechrail.asr.finalization",
+      "validator": "schema:asr_policy.finalization",
+      "task_request": "RealtimeTranscriptionOptions.asr_policy",
+      "adapter": "ASR finalization strategy selection",
+      "positive_case": "client_session_asr_policy",
+      "reject_case": "invalid_asr_policy_bool"
+    },
+    {
+      "path": "session.speechrail.asr.final_deadline_ms",
+      "validator": "schema:asr_policy.final_deadline_ms",
+      "task_request": "RealtimeTranscriptionOptions.asr_policy",
+      "adapter": "request timeout bounded final deadline",
+      "positive_case": "client_session_asr_policy",
+      "reject_case": "invalid_asr_policy_bool"
+    },
+    {
+      "path": "session.speechrail.asr.effective_max_segment_ms",
+      "validator": "schema:effective_asr_policy.effective_max_segment_ms",
+      "task_request": "effective request/service/capability/decoder budget",
+      "adapter": "session.updated policy echo",
+      "positive_case": "server_session_updated_asr_policy",
+      "reject_case": null
+    },
+    {
       "path": "audio",
       "validator": "schema:client_append.audio",
       "task_request": "TaskRequest.input_format",
@@ -144,6 +184,22 @@
       "task_request": "TaskRequest.commit_barrier",
       "adapter": "client commit correlation",
       "positive_case": "server_transcription_completed",
+      "reject_case": null
+    },
+    {
+      "path": "item_id",
+      "validator": "schema:transcription_segment_closed.item_id",
+      "task_request": "Realtime segment identity",
+      "adapter": "ASR segment boundary builder",
+      "positive_case": "server_transcription_segment_closed",
+      "reject_case": null
+    },
+    {
+      "path": "reason",
+      "validator": "schema:transcription_segment_closed.reason",
+      "task_request": "segment close cause",
+      "adapter": "VAD/client commit/budget rollover boundary",
+      "positive_case": "server_transcription_segment_closed",
       "reject_case": null
     },
     {

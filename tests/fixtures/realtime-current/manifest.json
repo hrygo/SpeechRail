@@ -13,6 +13,11 @@
       "valid": true
     },
     {
+      "name": "client_session_asr_policy",
+      "file": "client/session-update-asr-policy.json",
+      "valid": true
+    },
+    {
       "name": "client_append",
       "file": "client/append.json",
       "valid": true
@@ -58,6 +63,17 @@
       "valid": true
     },
     {
+      "name": "server_session_updated_asr_policy",
+      "file": "server/session-updated-asr-policy.json",
+      "valid": true
+    },
+    {
+      "name": "server_session_updated_missing_asr",
+      "file": "invalid/session-updated-missing-asr.json",
+      "valid": false,
+      "rejection": "session.updated must echo the effective ASR policy"
+    },
+    {
       "name": "server_transcription_delta",
       "file": "server/transcription-delta.json",
       "valid": true
@@ -70,6 +86,11 @@
     {
       "name": "server_transcription_failed",
       "file": "server/transcription-failed.json",
+      "valid": true
+    },
+    {
+      "name": "server_transcription_segment_closed",
+      "file": "server/transcription-segment-closed.json",
       "valid": true
     },
     {
@@ -166,6 +187,12 @@
       "file": "invalid/unsupported-turn-detection.json",
       "valid": false,
       "rejection": "official turn_detection is null-only in the first subset"
+    },
+    {
+      "name": "invalid_asr_policy_bool",
+      "file": "invalid/invalid-asr-policy-bool.json",
+      "valid": false,
+      "rejection": "ASR policy durations must be strict integers, not booleans"
     },
     {
       "name": "unsupported_audio_format",

@@ -1,10 +1,7 @@
 {
-  "type": "session.updated",
-  "event_id": "evt-srv-2",
-  "session_id": "sess-1",
-  "sequence": 2,
+  "type": "session.update",
+  "event_id": "evt_asr_policy",
   "session": {
-    "id": "sess-1",
     "type": "transcription",
     "audio": {
       "input": {
@@ -13,26 +10,21 @@
           "rate": 24000
         },
         "transcription": {
-          "model": "speechrail/qwen3-asr-1.7b",
-          "language": "zh",
-          "keywords": [
-            "SpeechRail"
-          ],
-          "timestamp_granularities": [
-            "segment"
-          ]
+          "model": "speechrail/qwen3-asr-1.7b"
         },
         "turn_detection": null
       }
     },
     "speechrail": {
-      "task": "caption",
+      "task": "transcription",
       "asr": {
-        "preview_interval_ms": 1000,
+        "preview_interval_ms": 800,
         "max_segment_ms": 20000,
         "finalization": "full_segment",
-        "final_deadline_ms": 120000,
-        "effective_max_segment_ms": 20000
+        "final_deadline_ms": 8000
+      },
+      "tts": {
+        "enabled": false
       },
       "alignment": {
         "enabled": false

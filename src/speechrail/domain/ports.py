@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
+from speechrail.domain.asr_policy import ASRPolicy
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
 from speechrail.domain.diarization.ports import StreamingActivityPort
 from speechrail.domain.tts_request import ValidationPolicy
@@ -116,6 +117,14 @@ class StreamingAsrEvent(BaseModel):
     language: str | None = Field(default=None, max_length=64)
     segments: tuple[TranscriptSegment, ...] = ()
     error_code: str | None = Field(default=None, max_length=200)
+    sample_watermark: StrictInt | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Decoded 16 kHz kernel PCM sample end within this segment; "
+            "not the received or 24 kHz wire watermark."
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +133,8 @@ class RealtimeTranscriptionOptions:
 
     partial_mode: Literal["delta", "snapshot"] = "delta"
     chunk_duration_ms: int = 2_000
+    asr_policy: ASRPolicy = field(default_factory=ASRPolicy)
+    effective_max_segment_ms: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.partial_mode, str) or self.partial_mode not in {"delta", "snapshot"}:
@@ -134,6 +145,21 @@ class RealtimeTranscriptionOptions:
             or not 100 <= self.chunk_duration_ms <= 30_000
         ):
             raise ValueError("chunk_duration_ms must be between 100 and 30000")
+        if not isinstance(self.asr_policy, ASRPolicy):
+            raise ValueError("asr_policy must be an ASRPolicy")
+        if self.effective_max_segment_ms is not None and (
+            isinstance(self.effective_max_segment_ms, bool)
+            or not isinstance(self.effective_max_segment_ms, int)
+            or not 1_000
+            <= self.effective_max_segment_ms
+            <= self.asr_policy.max_segment_ms
+        ):
+            raise ValueError(
+                "effective_max_segment_ms must be an integer within the requested segment limit"
+            )
+
+
+SegmentCloseReason = Literal["vad", "client_commit", "budget_rollover"]
 
 
 class RealtimeAsrSession(Protocol):

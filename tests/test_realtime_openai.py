@@ -6,6 +6,7 @@ import threading
 import time
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,7 @@ from speechrail.domain.alignment import (
     AlignmentResult,
     AlignmentUnit,
 )
+from speechrail.domain.asr_policy import ASRPolicy
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
 from speechrail.domain.diarization import (
     ActivityFrame,
@@ -508,6 +510,53 @@ def _pcm16(audio: bytes) -> str:
     return base64.b64encode(audio).decode("ascii")
 
 
+def _receive_committed_item(
+    socket: Any,
+    *,
+    expect_boundary: bool = True,
+    allow_error: bool = False,
+    expected_sample_span: tuple[int, int] | None = None,
+    expected_commit_event_id: str | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any], list[dict[str, Any]]]:
+    """Read and validate the close boundary before its matching terminal."""
+    events: list[dict[str, Any]] = []
+    boundary: dict[str, Any] | None = None
+    while True:
+        event = socket.receive_json()
+        events.append(event)
+        if event["type"] == "speechrail.transcription.segment_closed":
+            assert boundary is None, "one committed item must have one close boundary"
+            boundary = event
+            continue
+        if event["type"] in {
+            "conversation.item.input_audio_transcription.completed",
+            "conversation.item.input_audio_transcription.failed",
+        } or (allow_error and event["type"] == "error"):
+            terminal = event
+            break
+        if event["type"] == "error":
+            raise AssertionError(f"unexpected error while waiting for item terminal: {event}")
+
+    assert (terminal["type"] == "error") is allow_error
+    assert (boundary is not None) is expect_boundary
+    if boundary is not None:
+        span = boundary["sample_span"]
+        assert isinstance(span, dict)
+        start = span["start"]
+        end = span["end"]
+        assert type(start) is int and type(end) is int
+        assert 0 <= start < end
+        assert boundary["reason"] in {"vad", "client_commit", "budget_rollover"}
+        if terminal["type"] != "error":
+            assert boundary["item_id"] == terminal["item_id"]
+            assert boundary.get("commit_event_id") == terminal.get("commit_event_id")
+        if expected_sample_span is not None:
+            assert (start, end) == expected_sample_span
+    if expected_commit_event_id is not None:
+        assert terminal.get("commit_event_id") == expected_commit_event_id
+    return boundary, terminal, events
+
+
 def test_backend_busy_error_keeps_compat_code_and_namespaced_reason() -> None:
     event = error_event(
         code="backend_busy",
@@ -604,7 +653,12 @@ def test_openai_append_commit_produces_transcription_completed() -> None:
             {"type": "input_audio_buffer.commit", "event_id": "commit-tail-1"}
         )
 
-        completed = socket.receive_json()
+        boundary, completed, _ = _receive_committed_item(
+            socket,
+            expected_sample_span=(0, len(_FRAME) // 2),
+            expected_commit_event_id="commit-tail-1",
+        )
+        assert boundary is not None
         assert completed["type"] == "conversation.item.input_audio_transcription.completed"
         assert completed["transcript"] == "你好"
         assert completed["commit_event_id"] == "commit-tail-1"
@@ -776,15 +830,8 @@ def test_realtime_first_hypothesis_metrics_record_cancelled_and_failed() -> None
     ] == 1
 
 
-def test_realtime_partial_metrics_tally_withheld_rewrite_without_emitting_a_delta() -> None:
-    """A hypothesis that rewrites the prefix is counted, never delta-sent.
-
-    The append-only delta wire cannot express a changed prefix, so the
-    rewrite stays private until the terminal event replaces the transcript.
-    The rewrite is deliberately longer than the prefix it replaces: an
-    equal-length rewrite slices to an empty delta and would pass by
-    accident.
-    """
+def test_realtime_partial_metrics_count_replaceable_snapshots_without_deltas() -> None:
+    """Revisions reach snapshot consumers without publishing append-only text."""
 
     async def scenario() -> tuple[dict[str, object], list[dict[str, object]]]:
         settings = Settings(
@@ -822,18 +869,12 @@ def test_realtime_partial_metrics_tally_withheld_rewrite_without_emitting_a_delt
     counters = metrics["counters"]
     assert isinstance(counters, dict)
     assert counters[
-        'speechrail_realtime_partial_events_total{outcome="rewrite_withheld"}'
-    ] == 1
-    # The append-only prefix "abc" is the only delta; the rewrite contributes none.
-    assert counters['speechrail_realtime_partial_events_total{outcome="delta_sent"}'] == 1
-    deltas = [
-        event["delta"]
+        'speechrail_realtime_partial_events_total{outcome="snapshot_sent"}'
+    ] == 2
+    assert not any(
+        event["type"] == "conversation.item.input_audio_transcription.delta"
         for event in sent
-        if event["type"] == "conversation.item.input_audio_transcription.delta"
-    ]
-    assert deltas == ["abc"]
-    # The revisioned hypothesis still carries every upstream revision, so a
-    # snapshot consumer sees the rewrite that the delta stream withheld.
+    )
     hypotheses = [
         event["text"]
         for event in sent
@@ -842,10 +883,24 @@ def test_realtime_partial_metrics_tally_withheld_rewrite_without_emitting_a_delt
     assert hypotheses == ["abc", "wbcd"]
 
 
-def test_realtime_first_hypothesis_metrics_survive_a_slow_client() -> None:
+def test_realtime_first_hypothesis_metrics_survive_a_slow_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A slow socket stretches one observation; it never duplicates or drops it."""
 
     send_delay_seconds = 0.02
+
+    class FakeClock:
+        now = 0.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+        def advance(self, duration: float) -> None:
+            self.now += duration
+
+    clock = FakeClock()
+    monkeypatch.setattr(realtime_openai_module, "time", clock)
 
     async def scenario() -> dict[str, object]:
         settings = Settings(
@@ -862,8 +917,8 @@ def test_realtime_first_hypothesis_metrics_survive_a_slow_client() -> None:
         )
 
         async def send(event: dict[str, object]) -> int:
-            del event
-            await asyncio.sleep(send_delay_seconds)
+            if event["type"] == "speechrail.transcription.hypothesis":
+                clock.advance(send_delay_seconds)
             return 1
 
         session = OpenAIRealtimeSession(
@@ -898,7 +953,7 @@ def test_realtime_first_hypothesis_metrics_survive_a_slow_client() -> None:
     assert worker_to_socket["avg"] >= send_delay_seconds
     upstream = latency['{stage="upstream_to_worker"}']
     assert isinstance(upstream, dict)
-    assert upstream["sum"] < send_delay_seconds
+    assert upstream["sum"] == 0.0
 
 
 def test_realtime_first_hypothesis_metrics_record_at_most_once_per_turn() -> None:
@@ -982,10 +1037,9 @@ def test_openai_commit_releases_streaming_slot_for_next_append() -> None:
                 {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
             )
             socket.send_json({"type": "input_audio_buffer.commit"})
-            while socket.receive_json()["type"] != (
-                "conversation.item.input_audio_transcription.completed"
-            ):
-                pass
+            boundary, completed, _ = _receive_committed_item(socket)
+            assert boundary is not None
+            assert completed["type"] == "conversation.item.input_audio_transcription.completed"
 
         commit_round()
         assert len(factory.released) == 1
@@ -1043,10 +1097,9 @@ def test_openai_model_alias_resolves_to_asr_profile() -> None:
             {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
-        while True:
-            event = socket.receive_json()
-            if event["type"] == "conversation.item.input_audio_transcription.completed":
-                break
+        boundary, completed, _ = _receive_committed_item(socket)
+        assert boundary is not None
+        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
         assert len(factory.sessions) == 1
 
 
@@ -1065,12 +1118,9 @@ def test_openai_diarized_model_alias_does_not_enable_realtime_diarization() -> N
             {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
-        events = []
-        while True:
-            event = socket.receive_json()
-            events.append(event)
-            if event["type"] == "conversation.item.input_audio_transcription.completed":
-                break
+        boundary, completed, events = _receive_committed_item(socket)
+        assert boundary is not None
+        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
 
     assert engine.sessions == []
     assert all(not event["type"].startswith("speechrail.diarization") for event in events)
@@ -1091,12 +1141,12 @@ def test_realtime_diarization_encodes_missing_provisional_speaker_as_unknown() -
             {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 8000)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
-        events: list[dict[str, Any]] = []
-        while True:
-            event = socket.receive_json()
-            events.append(event)
-            if event["type"] == "conversation.item.input_audio_transcription.completed":
-                break
+        boundary, completed, events = _receive_committed_item(
+            socket,
+            expected_sample_span=(0, 8_000),
+        )
+        assert boundary is not None
+        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
 
         socket.send_json(
             {"type": "speechrail.diarization.finish", "event_id": "final-no-evidence"}
@@ -1133,12 +1183,9 @@ def test_openai_commit_without_diarization_does_not_request_segments() -> None:
             {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
-        events = []
-        while True:
-            event = socket.receive_json()
-            events.append(event)
-            if event["type"] == "conversation.item.input_audio_transcription.completed":
-                break
+        boundary, completed, events = _receive_committed_item(socket)
+        assert boundary is not None
+        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
 
     assert factory.sessions and factory.sessions[0].want_segments is False
     assert not any(event["type"].endswith(".segment") for event in events)
@@ -1156,10 +1203,9 @@ def test_openai_commit_with_segment_timestamps_requests_segments() -> None:
             {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
-        while socket.receive_json()["type"] != (
-            "conversation.item.input_audio_transcription.completed"
-        ):
-            pass
+        boundary, completed, _ = _receive_committed_item(socket)
+        assert boundary is not None
+        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
 
     assert factory.sessions and factory.sessions[0].want_segments is True
 
@@ -1238,7 +1284,11 @@ def test_openai_commit_without_audio_is_graceful_and_preserves_session() -> None
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()  # session.created
         socket.send_json({"type": "input_audio_buffer.commit"})
-        completed = socket.receive_json()
+        boundary, completed, _ = _receive_committed_item(
+            socket,
+            expect_boundary=False,
+        )
+        assert boundary is None
         assert completed["type"] == "conversation.item.input_audio_transcription.completed"
         assert completed["transcript"] == ""
 
@@ -1247,13 +1297,13 @@ def test_openai_commit_without_audio_is_graceful_and_preserves_session() -> None
             {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
-        events = []
-        while True:
-            event = socket.receive_json()
-            events.append(event["type"])
-            if event["type"] == "conversation.item.input_audio_transcription.completed":
-                break
-        assert "conversation.item.input_audio_transcription.completed" in events
+        boundary, completed, events = _receive_committed_item(socket)
+        assert boundary is not None
+        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
+        assert any(
+            event["type"] == "conversation.item.input_audio_transcription.completed"
+            for event in events
+        )
 
 
 def test_openai_rejects_unsupported_client_event() -> None:
@@ -1292,11 +1342,9 @@ def test_openai_realtime_bad_json_is_recoverable() -> None:
             {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
-        while (
-            socket.receive_json()["type"]
-            != "conversation.item.input_audio_transcription.completed"
-        ):
-            pass
+        boundary, completed, _ = _receive_committed_item(socket)
+        assert boundary is not None
+        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
 
 
 def test_openai_non_string_event_type_is_recoverable_and_releases_asr() -> None:
@@ -1313,11 +1361,9 @@ def test_openai_non_string_event_type_is_recoverable_and_releases_asr() -> None:
         assert error["error"]["code"] == "invalid_event"
 
         socket.send_json({"type": "input_audio_buffer.commit"})
-        while (
-            socket.receive_json()["type"]
-            != "conversation.item.input_audio_transcription.completed"
-        ):
-            pass
+        boundary, completed, _ = _receive_committed_item(socket)
+        assert boundary is not None
+        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
 
     assert len(factory.sessions) == 1
     assert factory.sessions[0].closes == 1
@@ -1481,7 +1527,11 @@ def test_openai_realtime_clear_discards_active_audio_session() -> None:
         # the observable barrier: it must produce an empty final and the clear
         # must already have released the discarded streaming session.
         socket.send_json({"type": "input_audio_buffer.commit"})
-        completed = socket.receive_json()
+        boundary, completed, _ = _receive_committed_item(
+            socket,
+            expect_boundary=False,
+        )
+        assert boundary is None
 
     assert completed["type"] == "conversation.item.input_audio_transcription.completed"
     assert completed["transcript"] == ""
@@ -1505,13 +1555,17 @@ def test_openai_realtime_clear_closes_diarization_session() -> None:
         # as the ordering barrier and the diarization close is observable on the
         # engine.
         socket.send_json({"type": "input_audio_buffer.commit"})
-        completed = socket.receive_json()
+        boundary, completed, _ = _receive_committed_item(
+            socket,
+            expect_boundary=False,
+        )
+        assert boundary is None
 
     assert completed["type"] == "conversation.item.input_audio_transcription.completed"
     assert diarization.sessions[0].closed is True
 
 
-def test_openai_realtime_forwards_multiple_partial_events_before_final() -> None:
+def test_openai_realtime_forwards_multiple_snapshot_events_before_final() -> None:
     client, _ = _client(partials=("你", "你好", "你好啊"))
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()  # session.created
@@ -1520,21 +1574,16 @@ def test_openai_realtime_forwards_multiple_partial_events_before_final() -> None
             {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
-        events = []
-        while True:
-            event = socket.receive_json()
-            events.append(event)
-            if event["type"] == "conversation.item.input_audio_transcription.completed":
-                break
+        boundary, completed, events = _receive_committed_item(socket)
+        assert boundary is not None
+        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
 
-    assert [event["delta"] for event in events if event["type"].endswith(".delta")] == [
-        "你",
-        "好",
-        "啊",
+    hypotheses = [
+        event for event in events
+        if event["type"] == "speechrail.transcription.hypothesis"
     ]
-    # Verify concatenated deltas reconstruct the full text
-    deltas = [event["delta"] for event in events if event["type"].endswith(".delta")]
-    assert "".join(deltas) == "你好啊"
+    assert [event["text"] for event in hypotheses] == ["你", "你好", "你好啊"]
+    assert not any(event["type"].endswith(".delta") for event in events)
 
 
 def test_realtime_hypothesis_revisions_and_final_share_one_asr_fact_series() -> None:
@@ -1545,12 +1594,12 @@ def test_realtime_hypothesis_revisions_and_final_share_one_asr_fact_series() -> 
             {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
-        events: list[dict[str, object]] = []
-        while True:
-            event = socket.receive_json()
-            events.append(event)
-            if event["type"] == "conversation.item.input_audio_transcription.completed":
-                break
+        boundary, completed, events = _receive_committed_item(
+            socket,
+            expected_sample_span=(0, len(_FRAME) // 2),
+        )
+        assert boundary is not None
+        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
 
     hypotheses = [
         event
@@ -1562,31 +1611,122 @@ def test_realtime_hypothesis_revisions_and_final_share_one_asr_fact_series() -> 
         (1, "你好"),
         (2, "你好啊"),
     ]
-    assert [event["stable_prefix_codepoints"] for event in hypotheses] == [0, 2]
+    assert [event["stable_prefix_codepoints"] for event in hypotheses] == [0, 0]
     assert {event["utterance_id"] for event in hypotheses} == {completed["item_id"]}
     assert hypotheses[-1]["text"] == completed["transcript"]
     assert len(factory.sessions) == 1
 
 
-def test_realtime_partial_rewrite_is_withheld_until_final() -> None:
-    """A non-append partial must not corrupt append-only SDK consumers."""
+def test_realtime_policy_drives_snapshot_preview_and_closes_before_terminal() -> None:
+    async def scenario() -> tuple[list[dict[str, object]], FakeStreamingFactory]:
+        factory = FakeStreamingFactory(
+            flush_partials=("preview one", "preview revised"),
+            completed_text="preview revised",
+        )
+        settings = Settings(
+            qwen3_model_dir=None,
+            qwen3_python=None,
+            diarization_model_path=None,
+            diarization_embedding_model_path=None,
+            max_realtime_buffer_bytes=128_000,
+        )
+        services = build_app_services(
+            settings,
+            AppOverrides(realtime_asr_factory=factory),
+        )
+        sent: list[dict[str, object]] = []
+
+        async def send(event: dict[str, object]) -> int:
+            sent.append(event)
+            return len(sent)
+
+        session = OpenAIRealtimeSession(services, session_id="policy-preview", send=send)
+        update = session_update(task="caption")
+        update["session"]["speechrail"]["asr"] = {
+            "preview_interval_ms": 600,
+            "max_segment_ms": 2_000,
+            "finalization": "full_segment",
+            "final_deadline_ms": 5_000,
+        }
+        await session._update_session(update)
+        for _ in range(2):
+            await session._append_audio(
+                {"type": "input_audio_buffer.append", "audio": _pcm16(bytes(28_800))}
+            )
+        await session._commit_audio(reason="client", commit_event_id="policy-close")
+        await session.close()
+        return sent, factory
+
+    sent, factory = asyncio.run(scenario())
+    updated = next(event for event in sent if event["type"] == "session.updated")
+    echoed_policy = updated["session"]["speechrail"]["asr"]
+    assert echoed_policy == {
+        "preview_interval_ms": 600,
+        "max_segment_ms": 2_000,
+        "finalization": "full_segment",
+        "final_deadline_ms": 5_000,
+        "effective_max_segment_ms": 2_000,
+    }
+
+    options = factory.options[0]
+    assert options.partial_mode == "snapshot"
+    assert options.chunk_duration_ms == 600
+    assert options.asr_policy == ASRPolicy(
+        preview_interval_ms=600,
+        max_segment_ms=2_000,
+        finalization="full_segment",
+        final_deadline_ms=5_000,
+    )
+    assert options.effective_max_segment_ms == 2_000
+
+    hypotheses = [
+        event for event in sent
+        if event["type"] == "speechrail.transcription.hypothesis"
+    ]
+    assert [event["text"] for event in hypotheses] == ["preview one", "preview revised"]
+    assert all(event["stable_prefix_codepoints"] == 0 for event in hypotheses)
+    assert not any(
+        event["type"] == "conversation.item.input_audio_transcription.delta"
+        for event in sent
+    )
+
+    boundary = next(
+        event for event in sent
+        if event["type"] == "speechrail.transcription.segment_closed"
+    )
+    terminal = next(
+        event for event in sent
+        if event["type"] == "conversation.item.input_audio_transcription.completed"
+    )
+    assert boundary["reason"] == "client_commit"
+    assert boundary["sample_span"] == {"start": 0, "end": 28_800}
+    assert boundary["commit_event_id"] == "policy-close"
+    assert sent.index(boundary) < sent.index(terminal)
+    assert boundary["item_id"] == terminal["item_id"]
+
+
+def test_realtime_partial_rewrite_is_delivered_as_replaceable_snapshot() -> None:
     client, _ = _client(partials=("abc", "adc"), completed_text="adc")
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()  # session.created
 # current-only handshake has no conversation.created event
         socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
+        {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
-        events = []
-        while True:
-            event = socket.receive_json()
-            events.append(event)
-            if event["type"] == "conversation.item.input_audio_transcription.completed":
-                break
+        boundary, completed, events = _receive_committed_item(
+            socket,
+            expected_sample_span=(0, len(_FRAME) // 2),
+        )
+        assert boundary is not None
+        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
 
-    deltas = [event["delta"] for event in events if event["type"].endswith(".delta")]
-    assert deltas == ["abc"]
+    hypotheses = [
+        event for event in events
+        if event["type"] == "speechrail.transcription.hypothesis"
+    ]
+    assert [event["text"] for event in hypotheses] == ["abc", "adc"]
+    assert not any(event["type"].endswith(".delta") for event in events)
     assert events[-1]["transcript"] == "adc"
 
 
@@ -1631,11 +1771,12 @@ def test_realtime_diarization_receives_partitioned_pcm_identically() -> None:
             for frame in frames:
                 socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(frame)})
             socket.send_json({"type": "input_audio_buffer.commit"})
-            while (
-                socket.receive_json()["type"]
-                != "conversation.item.input_audio_transcription.completed"
-            ):
-                pass
+            boundary, completed, _ = _receive_committed_item(
+                socket,
+                expected_sample_span=(0, len(pcm) // 2),
+            )
+            assert boundary is not None
+            assert completed["type"] == "conversation.item.input_audio_transcription.completed"
         return b"".join(engine.sessions[0].received)
 
     one_frame = capture((pcm,))
@@ -1680,10 +1821,11 @@ def test_realtime_diarization_aligns_frozen_completed_text_without_asr_segments(
             {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 800)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
-        while (completed := socket.receive_json())["type"] != (
-            "conversation.item.input_audio_transcription.completed"
-        ):
-            pass
+        boundary, completed, _ = _receive_committed_item(
+            socket,
+            expected_sample_span=(0, 800),
+        )
+        assert boundary is not None
 
         # Auxiliary timing/speaker units never ride on the ASR text final.
         assert "attribution_units" not in completed
@@ -1731,10 +1873,11 @@ def test_realtime_text_final_is_sent_before_slow_alignment() -> None:
                 {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 800)}
             )
             socket.send_json({"type": "input_audio_buffer.commit"})
-            while (completed := socket.receive_json())["type"] != (
-                "conversation.item.input_audio_transcription.completed"
-            ):
-                pass
+            boundary, completed, _ = _receive_committed_item(
+                socket,
+                expected_sample_span=(0, 800),
+            )
+            assert boundary is not None
 
             assert completed["transcript"] == "你好"
             assert "attribution_units" not in completed
@@ -1946,6 +2089,7 @@ def test_alignment_result_survives_the_turn_moving_on() -> None:
         await session._finish_alignment(
             task_id=session._task_id,
             epoch=session._wire_epoch,
+            generation=session._asr_generation,
             item_id=item_id,
             transcript=transcript,
             transcript_revision=1,
@@ -1970,6 +2114,309 @@ def test_alignment_result_survives_the_turn_moving_on() -> None:
     assert terminal, "a late alignment result must still be delivered"
     assert terminal[0]["type"] == "speechrail.alignment.done"
     assert terminal[0]["utterance_id"] == item_id
+
+
+def test_late_alignment_registers_units_to_its_original_item() -> None:
+    async def scenario() -> tuple[
+        list[dict[str, object]],
+        list[str],
+        tuple[str, int],
+        tuple[str, int],
+    ]:
+        first_alignment_started = asyncio.Event()
+        release_first_alignment = asyncio.Event()
+        alignment_arrived = asyncio.Event()
+        registration_items: list[str] = []
+
+        class BlockingFirstAligner:
+            calls = 0
+
+            async def align(self, request: AlignmentRequest) -> AlignmentResult:
+                self.calls += 1
+                if self.calls == 1:
+                    first_alignment_started.set()
+                    await release_first_alignment.wait()
+                return AlignmentResult(
+                    task_id=request.task_id,
+                    epoch=request.epoch,
+                    utterance_id=request.utterance_id,
+                    transcript_revision=request.transcript_revision,
+                    units=(
+                        AlignmentUnit(
+                            f"unit-{request.utterance_id}",
+                            0,
+                            len(request.text),
+                            request.span,
+                            "segment",
+                        ),
+                    ),
+                )
+
+        settings = Settings(
+            qwen3_model_dir=None,
+            qwen3_python=None,
+            diarization_model_path=None,
+            diarization_embedding_model_path=None,
+        )
+        services = build_app_services(
+            settings,
+            AppOverrides(
+                realtime_asr_factory=FakeStreamingFactory(),
+                diarization_engine=FakeDiarizationEngine(),
+                text_aligner=BlockingFirstAligner(),
+            ),
+        )
+        events: list[dict[str, object]] = []
+
+        async def send(event: dict[str, object]) -> int:
+            events.append(event)
+            if event.get("type") == "speechrail.alignment.done":
+                alignment_arrived.set()
+            return len(events)
+
+        class RecordingSession(OpenAIRealtimeSession):
+            async def _register_units(self, item_id, units) -> None:
+                registration_items.append(item_id)
+                await super()._register_units(item_id, units)
+
+        session = RecordingSession(services, session_id="late-item-register", send=send)
+        await session.start()
+        await session.handle(session_update(diarization={"enabled": True}))
+        audio = _pcm16(b"\x00\x00" * 800)
+
+        async def commit_item(commit_id: str) -> str:
+            await session.handle(
+                {"type": "input_audio_buffer.append", "audio": audio}
+            )
+            await session.handle(
+                {"type": "input_audio_buffer.commit", "event_id": commit_id}
+            )
+            terminals = [
+                event for event in events
+                if event["type"]
+                == "conversation.item.input_audio_transcription.completed"
+            ]
+            return str(terminals[-1]["item_id"])
+
+        first_item = await commit_item("late-item-1")
+        await asyncio.wait_for(first_alignment_started.wait(), timeout=0.5)
+        second_item = await commit_item("late-item-2")
+        assert first_item != second_item
+        current_state_before_late_alignment = (
+            session._current_item_id,
+            session._current_transcript_revision,
+        )
+
+        while not any(
+            event.get("utterance_id") == second_item
+            for event in events
+            if event["type"] == "speechrail.alignment.done"
+        ):
+            alignment_arrived.clear()
+            if any(
+                event.get("utterance_id") == second_item
+                for event in events
+                if event["type"] == "speechrail.alignment.done"
+            ):
+                break
+            await asyncio.wait_for(alignment_arrived.wait(), timeout=0.5)
+
+        assert not any(
+            event.get("utterance_id") == first_item
+            for event in events
+            if event["type"] == "speechrail.alignment.done"
+        )
+        release_first_alignment.set()
+        while not any(
+            event.get("utterance_id") == first_item
+            for event in events
+            if event["type"] == "speechrail.alignment.done"
+        ):
+            alignment_arrived.clear()
+            if any(
+                event.get("utterance_id") == first_item
+                for event in events
+                if event["type"] == "speechrail.alignment.done"
+            ):
+                break
+            await asyncio.wait_for(alignment_arrived.wait(), timeout=0.5)
+
+        await session._wait_for_pending_alignment()
+        current_state_after_late_alignment = (
+            session._current_item_id,
+            session._current_transcript_revision,
+        )
+        await session.handle(
+            {
+                "type": "speechrail.diarization.finish",
+                "event_id": "late-item-finish",
+            }
+        )
+        await session.close()
+        return (
+            events,
+            registration_items,
+            current_state_before_late_alignment,
+            current_state_after_late_alignment,
+        )
+
+    (
+        events,
+        registration_items,
+        current_state_before_late_alignment,
+        current_state_after_late_alignment,
+    ) = asyncio.run(scenario())
+    completed = [
+        event for event in events
+        if event["type"] == "conversation.item.input_audio_transcription.completed"
+    ]
+    aligned_items = {
+        str(event["utterance_id"])
+        for event in events
+        if event["type"] == "speechrail.alignment.done"
+    }
+    done = next(
+        event for event in events if event["type"] == "speechrail.diarization.done"
+    )
+    assert len(completed) == 2
+    assert aligned_items == {str(event["item_id"]) for event in completed}
+    assert set(registration_items) == aligned_items
+    assert len(done["units"]) == 2
+    assert current_state_after_late_alignment == current_state_before_late_alignment
+
+
+def test_clear_discards_an_alignment_result_that_returns_late() -> None:
+    async def scenario() -> tuple[list[dict[str, object]], list[str], str, str]:
+        first_alignment_started = asyncio.Event()
+        first_alignment_cancelled = asyncio.Event()
+        release_cancelled_alignment = asyncio.Event()
+        alignment_arrived = asyncio.Event()
+        registration_items: list[str] = []
+
+        class CancellationResistantFirstAligner:
+            calls = 0
+
+            async def align(self, request: AlignmentRequest) -> AlignmentResult:
+                self.calls += 1
+                if self.calls == 1:
+                    first_alignment_started.set()
+                    try:
+                        await release_cancelled_alignment.wait()
+                    except asyncio.CancelledError:
+                        first_alignment_cancelled.set()
+                        # Emulate a vendor worker that returns after cancellation.
+                        await release_cancelled_alignment.wait()
+                return AlignmentResult(
+                    task_id=request.task_id,
+                    epoch=request.epoch,
+                    utterance_id=request.utterance_id,
+                    transcript_revision=request.transcript_revision,
+                    units=(
+                        AlignmentUnit(
+                            f"unit-{request.utterance_id}",
+                            0,
+                            len(request.text),
+                            request.span,
+                            "segment",
+                        ),
+                    ),
+                )
+
+        settings = Settings(
+            qwen3_model_dir=None,
+            qwen3_python=None,
+            diarization_model_path=None,
+            diarization_embedding_model_path=None,
+        )
+        services = build_app_services(
+            settings,
+            AppOverrides(
+                realtime_asr_factory=FakeStreamingFactory(),
+                diarization_engine=FakeDiarizationEngine(),
+                text_aligner=CancellationResistantFirstAligner(),
+            ),
+        )
+        events: list[dict[str, object]] = []
+
+        async def send(event: dict[str, object]) -> int:
+            events.append(event)
+            if event.get("type") == "speechrail.alignment.done":
+                alignment_arrived.set()
+            return len(events)
+
+        class RecordingSession(OpenAIRealtimeSession):
+            async def _register_units(self, item_id, units) -> None:
+                registration_items.append(item_id)
+                await super()._register_units(item_id, units)
+
+        session = RecordingSession(services, session_id="clear-late-alignment", send=send)
+        await session.start()
+        await session.handle(session_update(diarization={"enabled": True}))
+        audio = _pcm16(b"\x00\x00" * 800)
+
+        async def commit_item(commit_id: str) -> str:
+            await session.handle(
+                {"type": "input_audio_buffer.append", "audio": audio}
+            )
+            await session.handle(
+                {"type": "input_audio_buffer.commit", "event_id": commit_id}
+            )
+            terminals = [
+                event for event in events
+                if event["type"]
+                == "conversation.item.input_audio_transcription.completed"
+            ]
+            return str(terminals[-1]["item_id"])
+
+        cleared_item = await commit_item("clear-cancelled-item")
+        await asyncio.wait_for(first_alignment_started.wait(), timeout=0.5)
+        clear = asyncio.create_task(
+            session.handle({"type": "input_audio_buffer.clear"})
+        )
+        await asyncio.wait_for(first_alignment_cancelled.wait(), timeout=0.5)
+        release_cancelled_alignment.set()
+        await asyncio.wait_for(clear, timeout=0.5)
+        assert not any(
+            event.get("utterance_id") == cleared_item
+            and event["type"] in {
+                "speechrail.alignment.done",
+                "speechrail.alignment.failed",
+            }
+            for event in events
+        )
+        assert cleared_item not in registration_items
+        assert session._units_by_id == {}
+
+        current_item = await commit_item("clear-current-item")
+        while not any(
+            event.get("utterance_id") == current_item
+            for event in events
+            if event["type"] == "speechrail.alignment.done"
+        ):
+            alignment_arrived.clear()
+            if any(
+                event.get("utterance_id") == current_item
+                for event in events
+                if event["type"] == "speechrail.alignment.done"
+            ):
+                break
+            await asyncio.wait_for(alignment_arrived.wait(), timeout=0.5)
+        await session._wait_for_pending_alignment()
+        await session.close()
+        return events, registration_items, cleared_item, current_item
+
+    events, registration_items, cleared_item, current_item = asyncio.run(scenario())
+    alignment_events = [
+        event for event in events
+        if event["type"] in {
+            "speechrail.alignment.done",
+            "speechrail.alignment.failed",
+        }
+    ]
+    assert not any(event["utterance_id"] == cleared_item for event in alignment_events)
+    assert [event["utterance_id"] for event in alignment_events] == [current_item]
+    assert registration_items == [current_item]
+    assert f"unit-{current_item}" != f"unit-{cleared_item}"
 
 
 def test_realtime_diarization_finish_waits_for_pending_alignment() -> None:
@@ -2156,10 +2603,11 @@ def test_realtime_alignment_failure_does_not_rewrite_text_final() -> None:
             {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 800)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
-        while (completed := socket.receive_json())["type"] != (
-            "conversation.item.input_audio_transcription.completed"
-        ):
-            pass
+        boundary, completed, _ = _receive_committed_item(
+            socket,
+            expected_sample_span=(0, 800),
+        )
+        assert boundary is not None
         assert completed["transcript"] == "你好"
         failed = socket.receive_json()
 
@@ -2193,11 +2641,12 @@ def test_regular_realtime_transcription_never_calls_the_fixed_text_aligner() -> 
         socket.receive_json()
         socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 800)})
         socket.send_json({"type": "input_audio_buffer.commit"})
-        while (
-            socket.receive_json()["type"]
-            != "conversation.item.input_audio_transcription.completed"
-        ):
-            pass
+        boundary, completed, _ = _receive_committed_item(
+            socket,
+            expected_sample_span=(0, 800),
+        )
+        assert boundary is not None
+        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
 
     assert aligner.calls == 0
 
@@ -2394,10 +2843,9 @@ def test_openai_query_model_echoed_in_session_created() -> None:
             {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
-        while True:
-            event = socket.receive_json()
-            if event["type"] == "conversation.item.input_audio_transcription.completed":
-                break
+        boundary, completed, _ = _receive_committed_item(socket)
+        assert boundary is not None
+        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
     assert len(factory.sessions) == 1
 
 
@@ -2459,33 +2907,43 @@ def test_openai_error_event_correlates_client_event_id() -> None:
     assert error["event_id"].startswith("event_")
 
 
-def test_openai_unsupported_language_surfaces_error_event_and_recovers() -> None:
+def test_openai_unsupported_language_emits_one_failed_terminal_and_recovers() -> None:
     factory = RejectingLanguageStreamingFactory()
     client, _ = _client(factory=factory)
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()
-        socket.send_json(
-                        session_update(language="xx-qq")
-        )
+        socket.send_json(session_update(language="xx-qq"))
         socket.receive_json()
-        socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
+        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)})
+        failure_boundary, failed, failure_events = _receive_committed_item(
+            socket,
+            expect_boundary=False,
         )
-        error = socket.receive_json()
-        assert error["type"] == "error"
-        assert error["error"]["code"] == "language_not_supported"
-        socket.send_json(
-                        session_update(language="zh")
-        )
-        socket.receive_json()  # session.updated
-        socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
-        )
+        assert failure_boundary is None
+        assert failed["type"] == "conversation.item.input_audio_transcription.failed"
+        assert failed["error"]["code"] == "language_not_supported"
+        failed_item_id = failed["item_id"]
+
+        socket.send_json(session_update(language="zh"))
+        updated = socket.receive_json()
+        assert updated["type"] == "session.updated"
+        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)})
         socket.send_json({"type": "input_audio_buffer.commit"})
-        while True:
-            event = socket.receive_json()
-            if event["type"] == "conversation.item.input_audio_transcription.completed":
-                break
+        boundary, completed, recovery_events = _receive_committed_item(socket)
+        assert boundary is not None
+        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
+        assert completed["item_id"] != failed_item_id
+        terminals_for_failed_item = [
+            event
+            for event in [*failure_events, *recovery_events]
+            if event.get("item_id") == failed_item_id
+            and event["type"]
+            in {
+                "conversation.item.input_audio_transcription.completed",
+                "conversation.item.input_audio_transcription.failed",
+            }
+        ]
+        assert terminals_for_failed_item == [failed]
     assert len(factory.sessions) == 1
 
 
@@ -2501,10 +2959,9 @@ def test_openai_transcription_prompt_forwarded_to_streaming_session() -> None:
             {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
-        while True:
-            event = socket.receive_json()
-            if event["type"] == "conversation.item.input_audio_transcription.completed":
-                break
+        boundary, completed, _ = _receive_committed_item(socket)
+        assert boundary is not None
+        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
     assert factory.sessions[0].prompt == "医疗术语"
 
 
@@ -2627,26 +3084,42 @@ def test_realtime_connect_failure_releases_factory_slot_and_recovers() -> None:
     factory = FlakyConnectFactory()
     client, _ = _client(factory=factory)
     with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
+        # current-only handshake has no conversation.created event
         socket.receive_json()
         socket.send_json(
             {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 80)}
         )
-        error = socket.receive_json()
-        assert error["type"] == "error"
-        assert error["error"]["code"] == "backend_busy"
-        # The closed error object folds the retry policy into the message.
-        assert "retryable=True" in str(error["error"]["message"])
-        assert "hint=retry_after_worker_recovery" in str(error["error"]["message"])
+        failure_boundary, failed, failure_events = _receive_committed_item(
+            socket,
+            expect_boundary=False,
+        )
+        assert failure_boundary is None
+        assert failed["type"] == "conversation.item.input_audio_transcription.failed"
+        assert failed["error"]["code"] == "backend_error"
+        failed_item_id = failed["item_id"]
         assert factory.released == [factory.sessions[0]]
         socket.send_json(
             {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 80)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
-        while True:
-            event = socket.receive_json()
-            if event["type"] == "conversation.item.input_audio_transcription.completed":
-                break
+        boundary, completed, recovery_events = _receive_committed_item(
+            socket,
+            expected_sample_span=(80, 160),
+        )
+        assert boundary is not None
+        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
+        assert completed["item_id"] != failed_item_id
+        terminals_for_failed_item = [
+            event
+            for event in [*failure_events, *recovery_events]
+            if event.get("item_id") == failed_item_id
+            and event["type"]
+            in {
+                "conversation.item.input_audio_transcription.completed",
+                "conversation.item.input_audio_transcription.failed",
+            }
+        ]
+        assert terminals_for_failed_item == [failed]
 
 
 def test_realtime_session_update_error_message_truncates_client_model() -> None:
@@ -2674,10 +3147,12 @@ def test_realtime_prompt_exactly_at_limit_forwards_to_session() -> None:
             {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 80)}
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
-        while True:
-            event = socket.receive_json()
-            if event["type"] == "conversation.item.input_audio_transcription.completed":
-                break
+        boundary, completed, _ = _receive_committed_item(
+            socket,
+            expected_sample_span=(0, 80),
+        )
+        assert boundary is not None
+        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
     assert factory.sessions[0].prompt == "p" * 2000
 
 
@@ -2702,103 +3177,143 @@ def test_realtime_current_audio_profile_emits_one_current_wire_family() -> None:
     assert "response.audio.done" not in events
 
 
-def test_realtime_partial_delta_driven_by_periodic_flush() -> None:
-    """Verifies that accumulating audio frames drives flush() and produces incremental deltas."""
+def test_realtime_snapshot_preview_driven_by_policy_interval() -> None:
+    """The configured preview interval drives replaceable ASR snapshots."""
     client, factory = _client(
         flush_partials=("Hello", "Hello world"),
-        settings_kwargs={"qwen3_streaming_chunk_duration_ms": 500},
+        settings_kwargs={"max_realtime_buffer_bytes": 128_000},
     )
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()  # session.created
 # current-only handshake has no conversation.created event
 # current-only handshake has no conversation.created event
+        update = session_update()
+        update["session"]["speechrail"]["asr"] = {
+            "preview_interval_ms": 500,
+            "max_segment_ms": 2_000,
+            "finalization": "full_segment",
+        }
+        socket.send_json(update)
+        configured = socket.receive_json()
+        assert configured["type"] == "session.updated"
+        assert configured["session"]["speechrail"]["asr"]["preview_interval_ms"] == 500
 
-        # 32,000 wire bytes is 16,000 bytes (0.5 s) at the 16 kHz kernel, the
-        # configured periodic-flush threshold, so each append flushes once.
+        # Each 32,000-byte wire append exceeds the 500 ms preview interval.
         socket.send_json(
             {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 32_000)}
         )
         hypothesis1 = socket.receive_json()
         assert hypothesis1["type"] == "speechrail.transcription.hypothesis"
-        delta1 = socket.receive_json()
-        assert delta1["type"] == "conversation.item.input_audio_transcription.delta"
-        assert delta1["delta"] == "Hello"
+        assert hypothesis1["text"] == "Hello"
 
-        # Send second 32,000 bytes -> triggers second flush
+        # A second append advances the latest full snapshot.
         socket.send_json(
             {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 32_000)}
         )
         hypothesis2 = socket.receive_json()
         assert hypothesis2["type"] == "speechrail.transcription.hypothesis"
-        delta2 = socket.receive_json()
-        assert delta2["type"] == "conversation.item.input_audio_transcription.delta"
-        # Must be incremental diff " world", NOT full "Hello world"!
-        assert delta2["delta"] == " world"
+        assert hypothesis2["text"] == "Hello world"
 
         assert factory.sessions[0].flushes == 2
 
         # Final commit completes cleanly
         socket.send_json({"type": "input_audio_buffer.commit"})
-        events = []
-        while True:
-            event = socket.receive_json()
-            events.append(event["type"])
-            if event["type"] == "conversation.item.input_audio_transcription.completed":
-                break
-        assert "conversation.item.input_audio_transcription.completed" in events
-
-
-def test_realtime_buffer_overflow_auto_commit_rollover() -> None:
-    """Verifies exceeding max_realtime_buffer_bytes triggers auto-commit rollover."""
-    client, factory = _client(
-        settings_kwargs={"max_realtime_buffer_bytes": 4096, "max_realtime_frame_bytes": 8192}
-    )
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()  # session.created
-# current-only handshake has no conversation.created event
-# current-only handshake has no conversation.created event
-
-        # Append 4000 wire bytes (< 4096 frame/null limit, ≈2666 kernel bytes)
-        socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 4000)}
+        boundary, completed, commit_events = _receive_committed_item(
+            socket,
+            expected_sample_span=(0, 32_000),
         )
-
-        # Another 3000 wire bytes (≈2000 kernel bytes) pushes the streaming
-        # buffer past 4096 -> triggers auto-commit rollover
-        socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 3000)}
-        )
-
-        # First segment auto-commits cleanly.
-        completed = socket.receive_json()
+        assert boundary is not None
         assert completed["type"] == "conversation.item.input_audio_transcription.completed"
-        # A rollover is not a client commit, so it carries no correlation id and
-        # must never be mistaken for the caller's own commit barrier.
-        assert "commit_event_id" not in completed
-
-        # A terminal send precedes rollover teardown/new-session creation.
-        # Wait for the tail's own terminal before inspecting the new session.
-        socket.send_json(
-            {"type": "input_audio_buffer.commit", "event_id": "rollover-tail"}
+        assert commit_events[0] == boundary
+        assert commit_events[-1] == completed
+        assert not any(
+            event["type"] == "conversation.item.input_audio_transcription.delta"
+            for event in commit_events
         )
-        completed2 = socket.receive_json()
-        assert completed2["type"] == "conversation.item.input_audio_transcription.completed"
-        assert completed2["commit_event_id"] == "rollover-tail"
-        assert len(factory.sessions) == 2
+
+
+def test_realtime_segment_budget_rolls_over_before_client_commit() -> None:
+    """A valid one-second budget rolls over without losing boundary or final."""
+    async def scenario() -> tuple[list[dict[str, object]], FakeStreamingFactory]:
+        factory = FakeStreamingFactory()
+        settings = Settings(
+            qwen3_model_dir=None,
+            qwen3_python=None,
+            diarization_model_path=None,
+            diarization_embedding_model_path=None,
+            max_realtime_buffer_bytes=128_000,
+        )
+        services = build_app_services(
+            settings,
+            AppOverrides(realtime_asr_factory=factory),
+        )
+        sent: list[dict[str, object]] = []
+
+        async def send(event: dict[str, object]) -> int:
+            sent.append(event)
+            return len(sent)
+
+        session = OpenAIRealtimeSession(services, session_id="budget-rollover", send=send)
+        update = session_update()
+        update["session"]["speechrail"]["asr"] = {
+            "preview_interval_ms": 1_000,
+            "max_segment_ms": 1_000,
+            "finalization": "full_segment",
+        }
+        await session._update_session(update)
+        # Seven 8,192-byte wire frames cross the caller-selected 1,000 ms
+        # segment budget while each input frame remains below the frame limit.
+        for _ in range(7):
+            await session._append_audio(
+                {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 8192)}
+            )
+        await session._commit_audio("client", commit_event_id="rollover-tail")
+        await session.close()
+        return sent, factory
+
+    events, factory = asyncio.run(scenario())
+    boundaries = [
+        event for event in events
+        if event["type"] == "speechrail.transcription.segment_closed"
+    ]
+    terminals = [
+        event for event in events
+        if event["type"] == "conversation.item.input_audio_transcription.completed"
+    ]
+    assert len(boundaries) == len(terminals) == 2
+    assert [event["reason"] for event in boundaries] == [
+        "budget_rollover",
+        "client_commit",
+    ]
+    assert "commit_event_id" not in boundaries[0]
+    assert "commit_event_id" not in terminals[0]
+    assert boundaries[1]["commit_event_id"] == "rollover-tail"
+    assert terminals[1]["commit_event_id"] == "rollover-tail"
+    for boundary in boundaries:
+        terminal = next(
+            event for event in terminals if event["item_id"] == boundary["item_id"]
+        )
+        assert events.index(boundary) < events.index(terminal)
+    assert terminals[0]["item_id"] != terminals[1]["item_id"]
+    assert len(factory.sessions) == 2
 
 
 def test_realtime_single_frame_exceeds_max_buffer_bytes() -> None:
     """Verifies single frame exceeding buffer limit is rejected with buffer_too_large."""
     client, _ = _client(
-        settings_kwargs={"max_realtime_buffer_bytes": 4096, "max_realtime_frame_bytes": 8192}
+        settings_kwargs={
+            "max_realtime_buffer_bytes": 64_000,
+            "max_realtime_frame_bytes": 128_000,
+        }
     )
     with client.websocket_connect("/v1/realtime") as socket:
 # current-only handshake has no conversation.created event
         socket.receive_json()
 
-        # Single frame of 5000 bytes exceeds 4096 max buffer
+        # The service budget can represent a 1,000 ms segment; a single 70 KB
+        # append still exceeds its 64 KB total buffer allowance.
         socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 5000)}
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 70_000)}
         )
         error = socket.receive_json()
         assert error["type"] == "error"
@@ -2807,12 +3322,15 @@ def test_realtime_single_frame_exceeds_max_buffer_bytes() -> None:
 
 def test_realtime_transport_byte_budget_closes_before_queue_growth() -> None:
     client, _ = _client(
-        settings_kwargs={"max_realtime_buffer_bytes": 128, "max_realtime_frame_bytes": 128}
+        settings_kwargs={
+            "max_realtime_buffer_bytes": 64_000,
+            "max_realtime_frame_bytes": 128,
+        }
     )
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()
         socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 200)}
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 100_000)}
         )
         with pytest.raises(WebSocketDisconnect) as exc_info:
             socket.receive_json()
@@ -2872,23 +3390,27 @@ class FailingCommitStreamingFactory(FakeStreamingFactory):
         return session
 
 
-def test_openai_commit_failure_emits_error_and_releases_slot() -> None:
+def test_openai_commit_failure_emits_failed_terminal_and_releases_slot() -> None:
     """A failed commit must not leak the streaming slot or the governor lane."""
     factory = FailingCommitStreamingFactory()
     client, factory = _client(factory=factory)
     with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
+        # current-only handshake has no conversation.created event
         socket.receive_json()
-        socket.send_json(
-                        session_update(model="whisper-1")
-        )
+        socket.send_json(session_update(model="whisper-1"))
         socket.receive_json()  # session.updated
 
         socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)})
         socket.send_json({"type": "input_audio_buffer.commit"})
-        event = socket.receive_json()
-        assert event["type"] == "error"
+        boundary, event, failure_events = _receive_committed_item(
+            socket,
+            expected_sample_span=(0, len(_FRAME) // 2),
+        )
+        assert boundary is not None
+        assert event["type"] == "conversation.item.input_audio_transcription.failed"
         assert event["error"]["code"] == "backend_timeout"
+        failed_terminal = event
+        failed_item_id = event["item_id"]
 
         assert len(factory.released) == 1
 
@@ -2896,14 +3418,23 @@ def test_openai_commit_failure_emits_error_and_releases_slot() -> None:
         # and a normal commit round-trips to completion.
         socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)})
         socket.send_json({"type": "input_audio_buffer.commit"})
-        while True:
-            event = socket.receive_json()
-            if event["type"] == "conversation.item.input_audio_transcription.completed":
-                break
-            if event["type"] == "error":
-                raise AssertionError(f"unexpected error event: {event}")
+        boundary, event, recovery_events = _receive_committed_item(socket)
+        assert boundary is not None
+        assert event["type"] == "conversation.item.input_audio_transcription.completed"
+        assert event["item_id"] != failed_item_id
         assert len(factory.sessions) == 2
         assert len(factory.released) == 2
+        terminals_for_failed_item = [
+            received
+            for received in [*failure_events, *recovery_events]
+            if received.get("item_id") == failed_item_id
+            and received["type"]
+            in {
+                "conversation.item.input_audio_transcription.completed",
+                "conversation.item.input_audio_transcription.failed",
+            }
+        ]
+        assert terminals_for_failed_item == [failed_terminal]
 
 
 def test_openai_commit_total_deadline_releases_hung_reader_slot() -> None:
@@ -2914,15 +3445,29 @@ def test_openai_commit_total_deadline_releases_hung_reader_slot() -> None:
     )
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()
-        socket.send_json(
-                        session_update(model="whisper-1")
-        )
+        socket.send_json(session_update(model="whisper-1"))
         socket.receive_json()  # session.updated
 
         socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)})
         socket.send_json({"type": "input_audio_buffer.commit"})
-        event = socket.receive_json()
+        boundary, event, item_events = _receive_committed_item(
+            socket,
+            expected_sample_span=(0, len(_FRAME) // 2),
+        )
+        assert boundary is not None
+        assert event["type"] == "conversation.item.input_audio_transcription.failed"
         assert event["error"]["code"] == "backend_timeout"
+        terminals = [
+            received
+            for received in item_events
+            if received.get("item_id") == event["item_id"]
+            and received["type"]
+            in {
+                "conversation.item.input_audio_transcription.completed",
+                "conversation.item.input_audio_transcription.failed",
+            }
+        ]
+        assert terminals == [event]
         assert len(factory.released) == 1
 
 
@@ -2958,12 +3503,14 @@ def test_realtime_vad_speech_end_does_not_drop_chunk_audio() -> None:
         for _ in range(4):
             socket.send_json({"type": "input_audio_buffer.append", "audio": audio_b64(silence)})
 
-        while True:
-            event = socket.receive_json()
-            if event["type"] == "conversation.item.input_audio_transcription.completed":
-                break
-            if event["type"] == "error":
-                raise AssertionError(f"unexpected error event: {event}")
+        wire_samples = (len(frame) * 3 + len(silence) * 4) // 2
+        boundary, completed, _ = _receive_committed_item(
+            socket,
+            expected_sample_span=(0, wire_samples),
+        )
+        assert boundary is not None
+        assert boundary["reason"] == "vad"
+        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
 
         assert len(factory.sessions) == 1
         received_samples = sum(
@@ -2971,7 +3518,6 @@ def test_realtime_vad_speech_end_does_not_drop_chunk_audio() -> None:
         )
         # Byte conservation across the 24k wire -> 16k kernel boundary: every
         # frame, including the commit frame, is resampled and appended.
-        wire_samples = (len(frame) * 3 + len(silence) * 4) // 2
         expected_samples = wire_samples * 16_000 // 24_000
         assert abs(received_samples - expected_samples) <= 1
         assert factory.sessions[0].commits == 1
@@ -3086,13 +3632,19 @@ def test_openai_commit_ack_then_hung_reader_times_out_with_failure() -> None:
         await session.handle(
             {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
-        with pytest.raises(RealtimeAdapterError) as raised:
-            await asyncio.wait_for(session._commit_audio("client"), timeout=0.5)
-        assert raised.value.code == "backend_timeout"
+        await asyncio.wait_for(session._commit_audio("client"), timeout=0.5)
         await session.close()
         return sent, factory
 
     sent, factory = asyncio.run(scenario())
+    failed = [
+        event
+        for event in sent
+        if event["type"] == "conversation.item.input_audio_transcription.failed"
+    ]
+    assert len(failed) == 1
+    assert failed[0]["error"]["code"] == "backend_timeout"
+    assert not any(event["type"] == "error" for event in sent)
     assert not any(
         event["type"] == "conversation.item.input_audio_transcription.completed"
         for event in sent
@@ -3207,25 +3759,24 @@ def test_server_vad_silence_never_emits_text_before_commit() -> None:
 
         socket.send_json({"type": "input_audio_buffer.commit"})
 
-        events: list[dict[str, object]] = []
-        while True:
-            event = socket.receive_json()
-            events.append(event)
-            if event["type"] == "conversation.item.input_audio_transcription.completed":
-                break
+        boundary, completed, events = _receive_committed_item(
+            socket,
+            expect_boundary=False,
+        )
+        assert boundary is None
         assert [event["type"] for event in events] == [
             "conversation.item.input_audio_transcription.completed"
         ]
-        assert events[0]["transcript"] == ""
+        assert completed["transcript"] == ""
         # Silence never admitted speech, so no ASR session was ever opened.
         assert factory.sessions == []
 
-def test_server_vad_silence_rollover_has_no_text() -> None:
-    """R0/R2: silence past the buffer threshold still produces one empty final."""
+def test_server_vad_silence_has_no_text_or_asr_item() -> None:
+    """Silence remains an empty final under the smallest valid service budget."""
     client, _ = _client(
         completed_text="嗯",
         settings_kwargs={
-            "max_realtime_buffer_bytes": 4000,
+            "max_realtime_buffer_bytes": 64_000,
             "realtime_speech_admission_enabled": True,
         },
     )
@@ -3241,7 +3792,11 @@ def test_server_vad_silence_rollover_has_no_text() -> None:
             )
         socket.send_json({"type": "input_audio_buffer.commit"})
 
-        event = socket.receive_json()
+        boundary, event, _ = _receive_committed_item(
+            socket,
+            expect_boundary=False,
+        )
+        assert boundary is None
         assert event["type"] == "conversation.item.input_audio_transcription.completed"
         assert event["transcript"] == ""
 
@@ -3261,7 +3816,11 @@ def test_server_vad_silence_explicit_commit_closes_empty() -> None:
         )
         socket.send_json({"type": "input_audio_buffer.commit"})
 
-        event = socket.receive_json()
+        boundary, event, _ = _receive_committed_item(
+            socket,
+            expect_boundary=False,
+        )
+        assert boundary is None
         assert event["type"] == "conversation.item.input_audio_transcription.completed"
         assert event["transcript"] == ""
 
@@ -3298,28 +3857,15 @@ def test_server_vad_admission_admitted_speech_transcription_and_events() -> None
                 {"type": "input_audio_buffer.append", "audio": _pcm16(_wire_silence_frame())}
             )
 
-        events: list[dict[str, object]] = []
-        while True:
-            event = socket.receive_json()
-            events.append(event)
-            if event["type"] == "conversation.item.input_audio_transcription.completed":
-                assert event["transcript"] == "你好世界"
-                break
-            if event["type"] == "error":
-                raise AssertionError(f"unexpected error: {event}")
+        boundary, completed, events = _receive_committed_item(socket)
+        assert boundary is not None
+        assert boundary["reason"] == "vad"
+        assert completed["transcript"] == "你好世界"
 
         observed = {event["type"] for event in events}
-        assert observed == {
-            "speechrail.transcription.hypothesis",
-            "conversation.item.input_audio_transcription.delta",
-            "conversation.item.input_audio_transcription.completed",
-        }
-        hypothesis = next(
-            event
-            for event in events
-            if event["type"] == "speechrail.transcription.hypothesis"
-        )
-        assert hypothesis["text"] == "你好"
+        assert "conversation.item.input_audio_transcription.delta" not in observed
+        assert "speechrail.transcription.segment_closed" in observed
+        assert "conversation.item.input_audio_transcription.completed" in observed
         assert len(factory.sessions) == 1
         assert factory.sessions[0].commits == 1
         assert len(factory.released) == 1
@@ -3359,14 +3905,14 @@ def test_server_vad_admission_diarization_sample_mapping() -> None:
                 {"type": "input_audio_buffer.append", "audio": _pcm16(_wire_silence_frame())}
             )
 
-        completed = None
+        boundary, completed, _ = _receive_committed_item(socket)
+        assert boundary is not None
+        assert boundary["reason"] == "vad"
         # The text final precedes the auxiliary alignment, so wait for the
         # alignment result before asking diarization to publish its units.
         for _ in range(256):
             event = socket.receive_json()
-            if event["type"] == "conversation.item.input_audio_transcription.completed":
-                completed = event
-            elif event["type"] == "speechrail.alignment.done":
+            if event["type"] == "speechrail.alignment.done":
                 break
 
         socket.send_json(
@@ -3396,7 +3942,10 @@ def test_manual_rollover_commit_clear_wire_barrier_collects_every_item_once() ->
 
     client, factory = _client(
         completed_text="same",
-        settings_kwargs={"max_realtime_buffer_bytes": 3500, "max_realtime_frame_bytes": 8192},
+        settings_kwargs={
+            "max_realtime_buffer_bytes": 128_000,
+            "max_realtime_frame_bytes": 8192,
+        },
     )
     collector = ManualTurnCollector(epoch="wire")
     observed: list[dict[str, Any]] = []
@@ -3409,26 +3958,80 @@ def test_manual_rollover_commit_clear_wire_barrier_collects_every_item_once() ->
             return event
 
         receive()  # session.created (sequence 0)
-        # Two server-side rollover commits plus one explicit commit produce one
-        # terminal per item.  Rollover is server-initiated, so the caller must
-        # declare its expected item count up front; each 3000-byte append is
-        # 2000 kernel bytes, so every append past the first rolls over the
-        # 3500-byte streaming buffer.
+        update = session_update()
+        update["session"]["speechrail"]["asr"] = {
+            "preview_interval_ms": 1_000,
+            "max_segment_ms": 1_000,
+            "finalization": "full_segment",
+        }
+        socket.send_json(update)
+        receive()  # session.updated
+        # Two server-side one-second rollovers plus one explicit commit produce
+        # one terminal per item. Rollover is server-initiated, so the caller
+        # declares the expected item count before streaming.
         for _ in range(3):
             collector.expect_item()
-        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 3000)})
-        for _ in range(2):
-            socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 3000)})
-            receive()  # rollover terminal
+        for frame_count in (7, 7, 3):
+            for _ in range(frame_count):
+                socket.send_json(
+                    {
+                        "type": "input_audio_buffer.append",
+                        "audio": _pcm16(b"\x00" * 8192),
+                    }
+                )
+            if frame_count != 3:
+                while receive()["type"] != (
+                    "conversation.item.input_audio_transcription.completed"
+                ):
+                    pass  # Drain the rollover boundary and its matching terminal.
         collector.begin_close()
         socket.send_json({"type": "input_audio_buffer.commit"})
         socket.send_json({"type": "input_audio_buffer.clear"})
-        final = receive()  # explicit commit terminal
+        while True:
+            final = receive()
+            if final["type"] == "conversation.item.input_audio_transcription.completed":
+                break  # The explicit item first publishes its segment boundary.
         assert final["type"] == "conversation.item.input_audio_transcription.completed"
         assert collector.result is not None
         assert collector.result.text == "samesamesame"
         assert len(collector.result.item_ids) == 3
         assert len(set(collector.result.item_ids)) == 3
+        boundaries = [
+            event for event in observed
+            if event["type"] == "speechrail.transcription.segment_closed"
+        ]
+        terminals = [
+            event for event in observed
+            if event["type"] == "conversation.item.input_audio_transcription.completed"
+        ]
+        assert len(boundaries) == len(terminals) == 3
+        assert [event["reason"] for event in boundaries] == [
+            "budget_rollover",
+            "budget_rollover",
+            "client_commit",
+        ]
+        spans = [event["sample_span"] for event in boundaries]
+        assert all(
+            type(span["start"]) is int
+            and type(span["end"]) is int
+            and 0 <= span["start"] < span["end"]
+            for span in spans
+        )
+        assert spans[0]["start"] == 0
+        assert all(
+            previous["end"] == current["start"]
+            for previous, current in pairwise(spans)
+        )
+        assert spans[-1]["end"] == 17 * (8192 // 2)
+        for boundary in boundaries:
+            terminal = next(
+                event for event in terminals if event["item_id"] == boundary["item_id"]
+            )
+            assert observed.index(boundary) < observed.index(terminal)
+        assert not any(
+            event["type"] == "conversation.item.input_audio_transcription.delta"
+            for event in observed
+        )
     assert len(factory.sessions) == 3
     assert all(session.closes == 1 for session in factory.sessions)
 
@@ -3437,7 +4040,10 @@ def test_manual_append_failure_followed_by_clear_never_becomes_final_transcript(
     from speechrail.realtime.turn_collection import ManualTurnCollector
 
     client, _ = _client(
-        settings_kwargs={"max_realtime_buffer_bytes": 4096, "max_realtime_frame_bytes": 8192}
+        settings_kwargs={
+            "max_realtime_buffer_bytes": 64_000,
+            "max_realtime_frame_bytes": 128,
+        }
     )
     collector = ManualTurnCollector(epoch="wire")
     with client.websocket_connect("/v1/realtime") as socket:
@@ -3447,6 +4053,7 @@ def test_manual_append_failure_followed_by_clear_never_becomes_final_transcript(
         socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\0" * 5000)})
         failed = socket.receive_json()
         assert failed["type"] == "error"
+        assert failed["error"]["code"] == "frame_too_large"
         collector.accept(failed, epoch="wire")
         socket.send_json({"type": "input_audio_buffer.clear"})
         # No clear acknowledgement on the current wire; a failed append must
@@ -3470,8 +4077,15 @@ def test_manual_clear_waits_for_terminal_and_preserves_empty_input(empty: bool) 
         collector.begin_close()
         socket.send_json({"type": "input_audio_buffer.commit"})
         socket.send_json({"type": "input_audio_buffer.clear"})
-        event = socket.receive_json()
-        collector.accept(event, epoch="wire")
+        boundary, terminal, item_events = _receive_committed_item(
+            socket,
+            expect_boundary=not empty,
+            expected_sample_span=(0, 500) if not empty else None,
+        )
+        assert (boundary is not None) is not empty
+        for event in item_events:
+            collector.accept(event, epoch="wire")
+        event = terminal
         assert event["type"] == "conversation.item.input_audio_transcription.completed"
     if not empty:
         assert factory.sessions[0].closes == 1
@@ -3505,10 +4119,15 @@ def test_manual_commit_timeout_followed_by_clear_never_succeeds(timeout_reader: 
         collector.begin_close()
         socket.send_json({"type": "input_audio_buffer.commit"})
         socket.send_json({"type": "input_audio_buffer.clear"})
-        error = socket.receive_json()
-        assert error["type"] == "error"
-        assert error["error"]["code"] == "backend_timeout"
-        collector.accept(error, epoch="wire")
+        boundary, terminal, item_events = _receive_committed_item(
+            socket,
+            expected_sample_span=(0, len(_FRAME) // 2),
+        )
+        assert boundary is not None
+        assert terminal["type"] == "conversation.item.input_audio_transcription.failed"
+        assert terminal["error"]["code"] == "backend_timeout"
+        for event in item_events:
+            collector.accept(event, epoch="wire")
     assert collector.state == "failed"
     assert collector.result is None
     assert len(factory.released) == 1
@@ -3639,31 +4258,58 @@ def test_commit_receipt_requires_correlation_id() -> None:
 
 
 def test_auto_rollover_terminal_precedes_tail_commit_receipt_on_real_route() -> None:
-    client, factory = _client(settings_kwargs={
-        "max_realtime_buffer_bytes": 3500, "max_realtime_frame_bytes": 8192,
-    })
+    client, factory = _client(
+        settings_kwargs={
+            "max_realtime_buffer_bytes": 128_000,
+            "max_realtime_frame_bytes": 25_000,
+        }
+    )
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()
+        update = session_update()
+        update["session"]["speechrail"]["asr"] = {
+            "preview_interval_ms": 1_000,
+            "max_segment_ms": 1_000,
+            "finalization": "full_segment",
+        }
+        socket.send_json(update)
+        assert socket.receive_json()["type"] == "session.updated"
         for _ in range(2):
-            socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\0" * 3000)})
-        old = socket.receive_json()
+            socket.send_json(
+                {
+                    "type": "input_audio_buffer.append",
+                    "audio": _pcm16(b"\0" * 25_000),
+                }
+            )
+        old_boundary, old, _ = _receive_committed_item(
+            socket,
+            expected_sample_span=(0, 24_000),
+        )
+        assert old_boundary is not None
+        assert old_boundary["reason"] == "budget_rollover"
         assert old["type"] == "conversation.item.input_audio_transcription.completed"
         assert "commit_event_id" not in old
         socket.send_json({"type": "input_audio_buffer.commit", "event_id": "tail-barrier",
                           "speechrail": {"request_receipt": True}})
-        tail = socket.receive_json()
+        tail_boundary, tail, _ = _receive_committed_item(
+            socket,
+            expected_sample_span=(24_000, 25_000),
+            expected_commit_event_id="tail-barrier",
+        )
+        assert tail_boundary is not None
+        assert tail_boundary["reason"] == "client_commit"
         receipt = socket.receive_json()
         assert tail["type"] == "conversation.item.input_audio_transcription.completed"
         assert tail["commit_event_id"] == "tail-barrier"
         assert receipt["type"] == "speechrail.input_audio_buffer.committed"
         assert receipt["commit_event_id"] == "tail-barrier"
-        assert receipt["accepted_samples"] == 3000
+        assert receipt["accepted_samples"] == 25_000
         assert receipt["sequence"] > tail["sequence"] > old["sequence"]
         socket.send_json({"type": "input_audio_buffer.commit", "event_id": "repeat-barrier",
                           "speechrail": {"request_receipt": True}})
         repeat = socket.receive_json()
         assert repeat["type"] == "speechrail.input_audio_buffer.committed"
-        assert repeat["accepted_samples"] == 3000
+        assert repeat["accepted_samples"] == 25_000
     assert len(factory.sessions) == 2
     assert all(s.closes == 1 for s in factory.sessions)
 

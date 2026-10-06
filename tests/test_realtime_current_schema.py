@@ -69,6 +69,7 @@ def test_legacy_wire_is_not_accepted_by_schema() -> None:
         "unsupported_audio_format",
         "unsupported_model_precision",
         "design_runtime_voice",
+        "invalid_asr_policy_bool",
     }
     assert required_rejections <= invalid_names
     for case in manifest["cases"]:
@@ -100,6 +101,55 @@ def test_field_matrix_covers_positive_fixtures_and_rejections() -> None:
         if rejection is not None:
             assert rejection in case_by_name
             assert case_by_name[rejection]["valid"] is False
+
+
+def test_asr_policy_and_segment_boundary_fields_are_in_the_public_matrix() -> None:
+    matrix = _load(FIELD_MATRIX_PATH)
+    paths = {row["path"] for row in matrix["fields"]}
+
+    assert {
+        "session.speechrail.asr.preview_interval_ms",
+        "session.speechrail.asr.max_segment_ms",
+        "session.speechrail.asr.finalization",
+        "session.speechrail.asr.final_deadline_ms",
+        "session.speechrail.asr.effective_max_segment_ms",
+        "item_id",
+        "reason",
+    } <= paths
+
+
+def test_segment_closed_schema_rejects_commit_id_for_non_client_close() -> None:
+    validator = Draft202012Validator(_load(SCHEMA_PATH))
+    fixture = _load(
+        FIXTURE_ROOT / "server" / "transcription-segment-closed.json"
+    )
+    fixture["reason"] = "vad"
+
+    assert list(validator.iter_errors(fixture))
+
+
+def test_asr_policy_schema_rejects_non_integer_and_unknown_wire_values() -> None:
+    validator = Draft202012Validator(_load(SCHEMA_PATH))
+    fixture = _load(
+        FIXTURE_ROOT / "client" / "session-update-asr-policy.json"
+    )
+    for field, value in (
+        ("preview_interval_ms", 800.5),
+        ("finalization", "vendor_default"),
+        ("unknown", 1),
+    ):
+        invalid = json.loads(json.dumps(fixture))
+        invalid["session"]["speechrail"]["asr"][field] = value
+        assert list(validator.iter_errors(invalid)), field
+
+
+def test_server_session_responses_require_effective_asr_policy_echo() -> None:
+    validator = Draft202012Validator(_load(SCHEMA_PATH))
+    for filename in ("session-created.json", "session-updated.json"):
+        fixture = _load(FIXTURE_ROOT / "server" / filename)
+        assert not list(validator.iter_errors(fixture)), filename
+        del fixture["session"]["speechrail"]["asr"]
+        assert list(validator.iter_errors(fixture)), filename
 
 
 def _path_exists(value: object, dotted: str) -> bool:

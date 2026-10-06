@@ -11,11 +11,13 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
+from dataclasses import dataclass, field
 from typing import Any, cast
 from uuid import uuid4
 
 from starlette.websockets import WebSocketDisconnect
 
+from speechrail.application.asr_turn_coordinator import AsrTurnCoordinator
 from speechrail.application.diarization import (
     DiarizationSession,
     ItemAttributionUpdated,
@@ -54,10 +56,11 @@ from speechrail.compatibility.openai_realtime import (
     parse_tts_start,
     plan_fingerprint,
     session_created,
+    session_updated,
     transcription_completed,
-    transcription_delta,
     transcription_failed,
     transcription_hypothesis,
+    transcription_segment_closed,
     tts_audio_delta,
     tts_cancelled,
     tts_completed,
@@ -70,6 +73,7 @@ from speechrail.compatibility.openai_realtime import (
 from speechrail.config.model_catalog import ModelArtifact
 from speechrail.config.selection import active_model_catalog
 from speechrail.domain.alignment import AlignmentGranularity, AlignmentRequest
+from speechrail.domain.asr_policy import ASRPolicy, resolve_effective_max_segment_ms
 from speechrail.domain.audio_timeline import (
     RateMap,
     RationalResampler,
@@ -87,6 +91,7 @@ from speechrail.domain.itn import apply_light_itn
 from speechrail.domain.ports import (
     RealtimeAsrSession,
     RealtimeTranscriptionOptions,
+    SegmentCloseReason,
 )
 from speechrail.domain.tts import (
     DEFAULT_VOICE_ID,
@@ -119,6 +124,34 @@ SendEvent = Callable[[dict[str, object]], Awaitable[int | None]]
 _MAX_UPDATES_PER_EVENT = 256
 _MAX_TTS_REQUEST_IDS = 256
 _MODEL_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+@dataclass(slots=True)
+class _AsrItem:
+    """Identity and evidence stay with a frozen item while ingress advances."""
+
+    asr: RealtimeAsrSession
+    item_id: str
+    generation: int
+    start_wire: int = 0
+    end_wire: int = 0
+    start_kernel: int = 0
+    end_kernel: int = 0
+    commit_event_id: str | None = None
+    close_reason: str | None = None
+    terminal: bool = False
+    revision: int = 0
+    preview_revision: int = 0
+    pcm: BoundedPcmBuffer = field(
+        default_factory=lambda: BoundedPcmBuffer(MAX_ALIGNMENT_PCM_BYTES)
+    )
+    overflow: bool = False
+    reader: asyncio.Task[None] | None = None
+    first_upstream: float | None = None
+    admitted_at: float | None = None
+    first_partial: float | None = None
+    first_recorded: bool = False
+    commit_started: float | None = None
 
 
 def _str_list(value: object) -> list[str] | None:
@@ -175,8 +208,14 @@ class OpenAIRealtimeSession:
         )
         self._asr: RealtimeAsrSession | None = None
         self._asr_reader: asyncio.Task[None] | None = None
-        self._asr_terminal_sent = False
         self._asr_resources: AsyncExitStack | None = None
+        self._asr_lane: AsrTurnCoordinator | None = None
+        self._asr_input_error: str | None = None
+        self._asr_barrier_failure: tuple[int, str] | None = None
+        self._asr_item: _AsrItem | None = None
+        self._asr_generation = 0
+        self._asr_finals: set[asyncio.Task[None]] = set()
+        self._asr_closed_items: dict[str, _AsrItem] = {}
         self._commit_lock = asyncio.Lock()
         self._commit_owner: str | None = None
         self._input_generation = 0
@@ -293,6 +332,7 @@ class OpenAIRealtimeSession:
         self._last_update_sequence = 0
         self._stable_through_at_degradation = 0
         self._units_by_id: dict[str, AttributionUnit] = {}
+        self._wire_span_by_unit: dict[str, SampleSpan] = {}
         self._speaker_by_unit: dict[str, str | None] = {}
         self._current_item_id = self._new_item_id()
         self._config: dict[str, Any] = {
@@ -337,12 +377,43 @@ class OpenAIRealtimeSession:
 
     def _transcription_chunk_seconds(self) -> float:
         """Return the effective per-session ASR flush duration."""
-        return int(
-            self._config.get(
-                "transcription_chunk_duration_ms",
-                self._settings.qwen3_streaming_chunk_duration_ms,
-            )
-        ) / 1_000
+        return self._asr_policy().preview_interval_ms / 1_000
+
+    def _asr_policy(self) -> ASRPolicy:
+        policy = self._config.get("asr_policy")
+        if isinstance(policy, ASRPolicy):
+            return policy
+        return ASRPolicy()
+
+    def _effective_segment_ms(self) -> int:
+        policy = self._asr_policy()
+        # Two retained spans account for PCM and its inference snapshot; the
+        # capability additionally bounds the admitted audio itself.
+        service_bytes = self._settings.max_realtime_buffer_bytes or 8_388_608
+        return resolve_effective_max_segment_ms(
+            policy,
+            service_max_segment_ms=service_bytes // 64,
+            capability_max_segment_ms=8_000 if self._diarization_enabled else None,
+            decoder_max_segment_ms=30_000,
+        )
+
+    def _sync_asr_item(self) -> None:
+        item = self._asr_item
+        if item is None:
+            return
+        item.start_wire = self._item_start_sample
+        item.end_wire = self._item_end_sample
+        item.start_kernel = self._item_start_kernel
+        item.end_kernel = self._item_end_kernel
+        item.first_upstream = self._first_upstream_received_at
+        item.admitted_at = self._admitted_started_at
+        item.overflow = self._alignment_overflow
+
+    async def _await_asr_finals(self) -> None:
+        while self._asr_finals:
+            tasks = tuple(self._asr_finals)
+            await asyncio.gather(*tasks)
+            self._asr_finals.difference_update(tasks)
 
     def _alignment_granularity(self) -> AlignmentGranularity:
         """Return the requested alignment granularity, defaulting to segments.
@@ -362,7 +433,7 @@ class OpenAIRealtimeSession:
         return "segment"
 
     def _to_wire_sample(self, kernel_sample: int) -> int:
-        return self._kernel_to_wire.to_source(kernel_sample)
+        return self._kernel_to_wire.to_target(kernel_sample)
 
     def _to_kernel_sample(self, wire_sample: int) -> int:
         return self._wire_to_kernel.to_target(wire_sample)
@@ -497,6 +568,15 @@ class OpenAIRealtimeSession:
 
     async def close(self) -> None:
         self._closing = True
+        self._asr_generation += 1
+        if self._asr_lane is not None:
+            await self._asr_lane.close()
+            self._asr_lane = None
+        for final in tuple(self._asr_finals):
+            final.cancel()
+        if self._asr_finals:
+            await asyncio.gather(*self._asr_finals, return_exceptions=True)
+        self._asr_finals.clear()
         if self._first_upstream_received_at is not None:
             self._record_first_hypothesis("cancelled")
         await self._cancel_alignment_tasks()
@@ -548,18 +628,37 @@ class OpenAIRealtimeSession:
             "expected_asr_revision": (
                 expected_asr if isinstance(expected_asr, str) else None
             ),
+            "asr_policy": self._asr_policy(),
+            "effective_max_segment_ms": self._effective_segment_ms(),
+            "request_timeout_ms": int(self._settings.request_timeout_seconds * 1000),
         }
 
     async def _update_session(self, event: dict[str, Any]) -> None:
         from speechrail.compatibility.openai_realtime import apply_session_update
 
-        updated, candidate = apply_session_update(
+        _updated, candidate = apply_session_update(
             event,
             session_id=self._session_id,
             asr_model=self._settings.model_id,
             registered_asr=self._registered_asr,
             current_config=self._config,
+            request_timeout_ms=int(self._settings.request_timeout_seconds * 1000),
+            service_max_segment_ms=(
+                self._settings.max_realtime_buffer_bytes or 8_388_608
+            ) // 64,
+            capability_max_segment_ms=8_000 if self._diarization_enabled else None,
         )
+        if (
+            candidate.get("asr_policy") != self._asr_policy()
+            and (
+                self._asr is not None
+                or (self._asr_lane is not None and self._asr_lane.busy)
+                or self._vad_raw_buffer
+            )
+        ):
+            raise RealtimeAdapterError(
+                "invalid_state", "ASR policy cannot change while input is retained"
+            )
         # The caller opts in to stateless incremental TTS; SpeechRail never
         # infers an assistant mode.
         if candidate.get("tts_explicit"):
@@ -625,6 +724,14 @@ class OpenAIRealtimeSession:
                         "diarization_not_available",
                         str(self._services.diarization_status["message"]),
                     )
+        candidate["effective_max_segment_ms"] = resolve_effective_max_segment_ms(
+            candidate["asr_policy"],
+            service_max_segment_ms=(
+                self._settings.max_realtime_buffer_bytes or 8_388_608
+            ) // 64,
+            capability_max_segment_ms=8_000 if requested_diarization else None,
+            decoder_max_segment_ms=30_000,
+        )
 
         expected_asr_revision = candidate.get("expected_asr_revision")
         if isinstance(expected_asr_revision, str):
@@ -745,7 +852,7 @@ class OpenAIRealtimeSession:
                 self._vad_sample_cursor = self._kernel_timeline.accepted_samples
         self._alignment_enabled = requested_alignment
         self._config = candidate
-        await self._send(updated)
+        await self._send(session_updated(session_id=self._session_id, **self._session_fields()))
 
     async def _ensure_asr_for_turn(self) -> None:
         if self._asr is not None:
@@ -753,7 +860,6 @@ class OpenAIRealtimeSession:
         if self._asr_factory is None:
             raise RealtimeAdapterError("backend_not_ready", "streaming ASR backend is not ready")
 
-        await self._reserve_asr()
         asr: RealtimeAsrSession | None = None
         from speechrail.domain.itn import compose_hotword_prompt
 
@@ -762,30 +868,45 @@ class OpenAIRealtimeSession:
             self._config.get("keywords"),
         )
         try:
-            asr = self._asr_factory.create(
+            if self._asr_lane is None:
+                self._asr_lane = AsrTurnCoordinator(
+                    self._asr_factory,
+                    capacity_bytes=self._settings.max_realtime_buffer_bytes or 8_388_608,
+                    acquire=self._reserve_asr,
+                    release=self._release_asr,
+                )
+            requested_policy = self._asr_policy()
+            policy = ASRPolicy(
+                preview_interval_ms=requested_policy.preview_interval_ms,
+                max_segment_ms=requested_policy.max_segment_ms,
+                finalization=requested_policy.finalization,
+                final_deadline_ms=requested_policy.effective_deadline_ms(
+                    request_timeout_ms=int(self._settings.request_timeout_seconds * 1000)
+                ),
+            )
+            asr = self._asr_lane.create(
                 language=self._config.get("language"),
                 prompt=asr_prompt,
                 options=RealtimeTranscriptionOptions(
-                    partial_mode=self._config.get("transcription_partial_mode", "delta"),
-                    chunk_duration_ms=int(
-                        self._config.get(
-                            "transcription_chunk_duration_ms",
-                            self._settings.qwen3_streaming_chunk_duration_ms,
-                        )
-                    ),
+                    partial_mode="snapshot",
+                    chunk_duration_ms=policy.preview_interval_ms,
+                    asr_policy=policy,
+                    effective_max_segment_ms=self._effective_segment_ms(),
                 ),
             )
             await asr.connect()
         except BaseException as exc:
-            with contextlib.suppress(Exception):
-                await self._release_asr()
             if asr is not None:
                 with contextlib.suppress(Exception):
                     await asr.close()
-                self._asr_factory.release(asr)
             if isinstance(exc, asyncio.CancelledError):
                 raise
             message = str(exc)
+            if message.startswith("asr_buffer_overflow"):
+                await self._fail_asr_input("asr_buffer_overflow")
+                raise RealtimeAdapterError(
+                    "asr_buffer_overflow", "ASR pending segment capacity exhausted"
+                ) from exc
             if message.startswith("language_not_supported"):
                 raise RealtimeAdapterError("language_not_supported", message) from exc
             busy_reason = str(infer_backend_busy_reason(exc))
@@ -795,16 +916,33 @@ class OpenAIRealtimeSession:
                 busy_reason=busy_reason,
             ) from exc
         self._asr = asr
-        self._asr_terminal_sent = False
         self._alignment_pcm.clear()
         self._alignment_overflow = False
-        self._asr_reader = asyncio.create_task(self._drain_asr_events())
+        item = _AsrItem(
+            asr=asr,
+            item_id=self._current_item_id,
+            generation=self._asr_generation,
+            pcm=self._alignment_pcm,
+        )
+        self._asr_item = item
+        self._sync_asr_item()
+        self._asr_reader = asyncio.create_task(self._drain_asr_events(item))
+        item.reader = self._asr_reader
 
     async def _append_asr_audio(self, audio: bytes) -> None:
         """Feed ASR and retain exactly this item's bounded alignment PCM."""
 
         assert self._asr is not None
-        await self._asr.append_audio(audio)
+        try:
+            await self._asr.append_audio(audio)
+        except RuntimeError as exc:
+            if str(exc).startswith("asr_buffer_overflow"):
+                await self._fail_asr_input("asr_buffer_overflow")
+                raise RealtimeAdapterError(
+                    "asr_buffer_overflow", "ASR retained input capacity exhausted"
+                ) from exc
+            raise
+        self._sync_asr_item()
         if not (self._alignment_enabled or self._diarization_enabled):
             return
         try:
@@ -815,6 +953,59 @@ class OpenAIRealtimeSession:
             if not self._alignment_overflow:
                 self._services.metrics.record_alignment_event("fixed_text_overflow")
             self._alignment_overflow = True
+
+    async def _fail_asr_input(self, code: str) -> None:
+        self._asr_input_error = code
+        if self._asr_lane is not None:
+            await self._asr_lane.abort(code)
+
+    async def _feed_admitted_pcm(
+        self, pcm: bytes, start_sample: int, *, in_commit: bool = False
+    ) -> None:
+        """Split on PCM frames once; every accepted sample has one item owner."""
+        offset = 0
+        segment_bytes = self._effective_segment_ms() * 32
+        if segment_bytes < 2:
+            raise RealtimeAdapterError("asr_policy_invalid", "ASR budget holds no PCM sample")
+        while offset < len(pcm):
+            await self._retire_terminal_asr(
+                next_wire_sample=self._to_wire_sample(start_sample + offset // 2)
+            )
+            if self._asr is not None and self._buffered_audio_bytes >= segment_bytes:
+                if in_commit:
+                    await self._commit_audio_once("rollover")
+                else:
+                    await self._commit_audio(reason="rollover")
+                self._input_generation += 1
+            if self._asr is None:
+                self._item_start_kernel = start_sample + offset // 2
+                self._item_start_sample = max(
+                    self._item_start_sample, self._to_wire_sample(self._item_start_kernel)
+                )
+                self._item_end_kernel = self._item_start_kernel
+                self._item_end_sample = self._item_start_sample
+                self._turn_has_admitted_speech = True
+                self._mark_admitted_started(self._item_start_sample)
+                await self._ensure_asr_for_turn()
+            take = min(len(pcm) - offset, segment_bytes - self._buffered_audio_bytes)
+            part = pcm[offset:offset + take]
+            self._item_end_kernel = start_sample + (offset + take) // 2
+            self._item_end_sample = min(
+                self._wire_timeline.accepted_samples,
+                self._to_wire_sample(self._item_end_kernel),
+            )
+            await self._append_asr_audio(part)
+            self._buffered_audio_bytes += take
+            self._unflushed_bytes += take
+            offset += take
+            self._sync_asr_item()
+            if self._unflushed_bytes >= self._asr_policy().preview_interval_ms * 32:
+                self._unflushed_bytes = 0
+                assert self._asr is not None
+                await self._asr.flush()
+            # Yield to the sole lane, without awaiting a GPU operation. Large
+            # packets cannot fill an arbitrary number of pending segments.
+            await asyncio.sleep(0)
 
     async def _handle_admission_decision(
         self, dec: AdmissionDecision, *, in_commit: bool = False
@@ -844,47 +1035,8 @@ class OpenAIRealtimeSession:
                 self._item_start_sample = self._to_wire_sample(dec.start_sample)
                 self._mark_admitted_started(self._item_start_sample)
 
-            max_item_bytes = (
-                256_000
-                if self._diarization_enabled
-                else (self._settings.max_realtime_buffer_bytes or 8_388_608)
-            )
-            if (
-                not in_commit
-                and self._buffered_audio_bytes > 0
-                and (
-                self._buffered_audio_bytes + len(dec.pcm) > max_item_bytes
-                )
-            ):
-                await self._commit_audio(reason="rollover")
-                self._input_generation += 1
-                self._turn_generation += 1
-                self._turn_has_admitted_speech = True
-                self._admitted_start_sample = dec.start_sample
-                self._item_start_kernel = dec.start_sample
-                self._item_start_sample = self._to_wire_sample(dec.start_sample)
-                self._buffered_audio_bytes = 0
-                self._unflushed_bytes = 0
-                await self._ensure_asr_for_turn()
-
-            if self._asr is not None:
-                await self._append_asr_audio(dec.pcm)
-                self._admitted_end_sample = dec.end_sample
-                self._item_end_kernel = dec.end_sample
-                self._item_end_sample = self._to_wire_sample(dec.end_sample)
-                self._buffered_audio_bytes += len(dec.pcm)
-                self._unflushed_bytes += len(dec.pcm)
-
-                chunk_sec = self._transcription_chunk_seconds()
-                flush_threshold = max(1, int(chunk_sec * 32_000))
-                if self._unflushed_bytes >= flush_threshold:
-                    self._unflushed_bytes = 0
-                    flush_started = time.monotonic()
-                    with contextlib.suppress(Exception):
-                        await self._asr.flush()
-                    self._services.metrics.record_realtime_phase(
-                        "asr_flush", time.monotonic() - flush_started
-                    )
+            await self._feed_admitted_pcm(dec.pcm, dec.start_sample, in_commit=in_commit)
+            self._admitted_end_sample = dec.end_sample
 
         elif dec.kind == "end":
             self._services.metrics.record_vad("ended")
@@ -909,6 +1061,10 @@ class OpenAIRealtimeSession:
                     self._vad_raw_buffer.extend(unscored)
 
     async def _append_audio(self, event: dict[str, Any]) -> None:
+        if self._asr_input_error is not None:
+            raise RealtimeAdapterError(
+                "invalid_state", "ASR input failed; clear the input before appending"
+            )
         if self._diarization_phase != "active":
             raise RealtimeAdapterError(
                 "invalid_state",
@@ -920,6 +1076,7 @@ class OpenAIRealtimeSession:
             buffered_bytes=0,
             max_buffer_bytes=None,
         )
+        await self._retire_terminal_asr()
         self._mark_upstream_received(time.monotonic())
         self._input_generation += 1
         max_buf = self._settings.max_realtime_buffer_bytes
@@ -942,7 +1099,8 @@ class OpenAIRealtimeSession:
         if not kernel_audio:
             if self._asr is None:
                 self._item_start_kernel = kernel_span.start
-                self._item_start_sample = self._to_wire_sample(kernel_span.start)
+                if self._vad is not None:
+                    self._item_start_sample = self._to_wire_sample(kernel_span.start)
             return
 
         # 1. SpeechAdmission path (server_vad with admission enabled)
@@ -987,10 +1145,8 @@ class OpenAIRealtimeSession:
                         self._item_end_kernel
                     )
                     if self._asr is not None:
-                        await self._append_asr_audio(kernel_audio)
-                        self._buffered_audio_bytes += len(kernel_audio)
-                        self._unflushed_bytes += len(kernel_audio)
-                        await self._commit_audio()
+                        await self._feed_admitted_pcm(kernel_audio, kernel_span.start)
+                        await self._commit_audio(reason="vad_stop")
                         return
 
             # If not yet in speech (debouncing or pure silence), defer ASR
@@ -1008,21 +1164,14 @@ class OpenAIRealtimeSession:
                     self._bargein_pending_bytes -= len(dropped)
                 return
 
-        # Normal legacy append flow
-        if (
-            max_buf is not None
-            and self._buffered_audio_bytes > 0
-            and self._buffered_audio_bytes + len(kernel_audio) > max_buf
-            and self._asr is not None
-        ):
-            # Auto-commit rollover for long streaming sessions
-            await self._commit_audio()
-            self._input_generation += 1
-
         if self._asr is None:
             await self._ensure_asr_for_turn()
             self._item_start_kernel = kernel_span.start
-            self._item_start_sample = self._to_wire_sample(kernel_span.start)
+            # Manual input starts at the unassigned wire cursor. Resampling
+            # may retain a fractional tail, so reversing its kernel cursor
+            # can otherwise overlap or skip one already accepted sample.
+            if self._vad is not None:
+                self._item_start_sample = self._to_wire_sample(kernel_span.start)
             # The manual/legacy path has no VAD gate: any appended audio belongs
             # to this turn.  Marking it admitted keeps the resampler tail on
             # commit flowing to both ASR and the bounded alignment buffer so the
@@ -1031,27 +1180,15 @@ class OpenAIRealtimeSession:
             self._mark_admitted_started(self._item_start_sample)
             if self._bargein_pending_audio and self._asr is not None:
                 for pending_chunk in self._bargein_pending_audio:
-                    await self._append_asr_audio(pending_chunk)
-                    self._buffered_audio_bytes += len(pending_chunk)
-                    self._unflushed_bytes += len(pending_chunk)
+                    pending_start = max(
+                        0, kernel_span.start - self._bargein_pending_bytes // 2
+                    )
+                    await self._feed_admitted_pcm(pending_chunk, pending_start)
+                    self._bargein_pending_bytes -= len(pending_chunk)
                 self._bargein_pending_audio.clear()
                 self._bargein_pending_bytes = 0
 
-        if self._asr is not None:
-            await self._append_asr_audio(kernel_audio)
-            self._buffered_audio_bytes += len(kernel_audio)
-            self._unflushed_bytes += len(kernel_audio)
-
-            chunk_sec = self._transcription_chunk_seconds()
-            flush_threshold = max(1, int(chunk_sec * 32_000))
-            if self._unflushed_bytes >= flush_threshold:
-                self._unflushed_bytes = 0
-                flush_started = time.monotonic()
-                with contextlib.suppress(Exception):
-                    await self._asr.flush()
-                self._services.metrics.record_realtime_phase(
-                    "asr_flush", time.monotonic() - flush_started
-                )
+        await self._feed_admitted_pcm(kernel_audio, kernel_span.start)
 
     async def _commit_audio(
         self, reason: str = "client", *, commit_event_id: str | None = None,
@@ -1060,6 +1197,10 @@ class OpenAIRealtimeSession:
         """Serialize input retirement and its optional per-command receipt."""
 
         async with self._commit_lock:
+            if self._asr_input_error is not None:
+                raise RealtimeAdapterError(
+                    self._asr_input_error, "the input barrier contains rejected audio"
+                )
             item_id = self._current_item_id
             if not (
                 self._commit_owner == item_id
@@ -1070,10 +1211,23 @@ class OpenAIRealtimeSession:
                 self._active_commit_event_id = commit_event_id
                 try:
                     await self._commit_audio_once(reason)
-                    self._commit_receipt_generation = self._input_generation
+                    if (
+                        self._asr_barrier_failure is None
+                        or self._asr_barrier_failure[0] != self._input_generation
+                    ):
+                        self._commit_receipt_generation = self._input_generation
                 finally:
                     self._active_commit_event_id = None
             if request_receipt:
+                await self._await_asr_finals()
+                if (
+                    self._asr_barrier_failure is not None
+                    and self._asr_barrier_failure[0] == self._input_generation
+                ):
+                    raise RealtimeAdapterError(
+                        self._asr_barrier_failure[1],
+                        "the input barrier did not reach a worker transcription terminal",
+                    )
                 if self._commit_receipt_generation != self._input_generation:
                     raise RealtimeAdapterError(
                         "backend_error", "the input barrier did not reach a transcription terminal"
@@ -1088,16 +1242,21 @@ class OpenAIRealtimeSession:
                 })
 
     async def _commit_audio_once(self, reason: str) -> None:
-        tail = self._resampler.flush()
+        tail = self._resampler.flush() if reason == "client" else b""
         if tail:
             kernel_span = self._kernel_timeline.accept(tail)
             self._item_end_kernel = kernel_span.end
             if self._diarization is not None:
                 await self._diarization.append(tail)
+            if self._asr is None and self._vad is None and self._speech_admission is None:
+                # A one-sample manual packet may live entirely in the
+                # resampler's interpolation tail. It is admitted input too.
+                self._item_start_kernel = kernel_span.start
+                self._turn_has_admitted_speech = True
+                self._mark_admitted_started(self._item_start_sample)
+                await self._ensure_asr_for_turn()
             if self._asr is not None and self._turn_has_admitted_speech:
-                await self._append_asr_audio(tail)
-                self._buffered_audio_bytes += len(tail)
-                self._unflushed_bytes += len(tail)
+                await self._feed_admitted_pcm(tail, kernel_span.start, in_commit=True)
 
         # If speech admission is active, flush any remaining sub-frame leftover.
         # The remainder is always below one 512-sample frame (append drains full
@@ -1105,7 +1264,7 @@ class OpenAIRealtimeSession:
         # its own leftover buffer and emits it as tail audio on finish(). Scoring
         # a partial frame would crash the Silero engine, which requires exactly
         # 512 samples.
-        if self._speech_admission is not None and self._vad is not None:
+        if reason == "client" and self._speech_admission is not None and self._vad is not None:
             if self._vad_raw_buffer:
                 rem = bytes(self._vad_raw_buffer)
                 self._vad_raw_buffer.clear()
@@ -1120,6 +1279,7 @@ class OpenAIRealtimeSession:
                 await self._handle_admission_decision(dec, in_commit=True)
 
         if self._speech_admission is not None and not self._turn_has_admitted_speech:
+            await self._await_asr_finals()
             await self._send(
                 self._completed_event(
                     transcript="",
@@ -1142,6 +1302,7 @@ class OpenAIRealtimeSession:
             return
 
         if self._asr is None:
+            await self._await_asr_finals()
             await self._send(
                 self._completed_event(
                     transcript="",
@@ -1162,51 +1323,122 @@ class OpenAIRealtimeSession:
             self._current_item_id = self._new_item_id()
             return
 
-        try:
-            # The worker's own protocol timeout cannot bound a reader that has
-            # already received the commit acknowledgement but never reaches its
-            # terminal event.  Keep commit, final event delivery and teardown
-            # under one request deadline so its governor lane is recoverable.
-            async with asyncio.timeout(self._settings.request_timeout_seconds):
-                commit_started = time.monotonic()
-                self._asr_commit_started_at = commit_started
-                timestamp_granularities = self._config.get("timestamp_granularities")
-                want_segments = isinstance(timestamp_granularities, list) and (
-                    "segment" in timestamp_granularities
+        self._sync_asr_item()
+        item = self._asr_item
+        assert item is not None
+        item.commit_event_id = self._active_commit_event_id if reason == "client" else None
+        item.close_reason = (
+            "budget_rollover" if reason == "rollover"
+            else "vad" if reason == "vad_stop" else "client_commit"
+        )
+        if item.end_wire > item.start_wire:
+            await self._send(
+                transcription_segment_closed(
+                    item_id=item.item_id,
+                    sample_span=(item.start_wire, item.end_wire),
+                    reason=cast(SegmentCloseReason, item.close_reason),
+                    commit_event_id=item.commit_event_id,
                 )
-                await self._asr.commit(want_segments=want_segments)
-                self._services.metrics.record_realtime_phase(
-                    "asr_commit_ack", time.monotonic() - commit_started
-                )
-                if self._asr_reader is not None:
-                    terminal_started = time.monotonic()
-                    await self._asr_reader
-                    self._services.metrics.record_realtime_phase(
-                        "asr_terminal_wait", time.monotonic() - terminal_started
-                    )
-                    self._asr_reader = None
-                if not self._asr_terminal_sent:
-                    raise RealtimeAdapterError(
-                        "backend_error", "streaming ASR ended without a transcription terminal"
-                    )
-        except TimeoutError as exc:
-            await self._discard_failed_commit()
-            raise RealtimeAdapterError(
-                "backend_timeout", "streaming ASR commit timed out"
-            ) from exc
-        except BaseException:
-            await self._discard_failed_commit()
-            raise
-        finally:
-            self._asr_commit_started_at = None
-            self._turn_has_admitted_speech = False
-        await self._close_asr_session()
-        await self._release_asr()
+            )
+        item.commit_started = time.monotonic()
+        want_segments = "segment" in (self._config.get("timestamp_granularities") or [])
+        self._asr_closed_items[item.item_id] = item
+        final = asyncio.create_task(
+            self._finish_asr_item(item, want_segments, self._input_generation)
+        )
+        self._asr_finals.add(final)
+        final.add_done_callback(self._asr_finals.discard)
+        self._asr = None
+        self._asr_item = None
+        self._asr_reader = None
+        self._alignment_pcm = BoundedPcmBuffer(MAX_ALIGNMENT_PCM_BYTES)
+        self._alignment_overflow = False
+        self._turn_has_admitted_speech = False
         self._buffered_audio_bytes = 0
         self._last_partial_text = ""
         self._unflushed_bytes = 0
-        self._record_first_hypothesis("missing")
         self._reset_turn_observability()
+        self._item_start_sample = item.end_wire
+        self._item_end_sample = item.end_wire
+        self._item_start_kernel = item.end_kernel
+        self._item_end_kernel = item.end_kernel
+        self._current_item_id = self._new_item_id()
+        if reason == "client":
+            await final
+            await self._await_asr_finals()
+
+    async def _finish_asr_item(
+        self, item: _AsrItem, want_segments: bool, input_generation: int
+    ) -> None:
+        try:
+            await item.asr.commit(want_segments=want_segments)
+            if item.reader is not None:
+                await item.reader
+            if not item.terminal:
+                raise RuntimeError("streaming ASR ended without a transcription terminal")
+        except asyncio.CancelledError:
+            await item.asr.close()
+            raise
+        except Exception as exc:
+            if item.reader is not None:
+                await item.reader
+            if item.generation == self._asr_generation:
+                code = "backend_timeout" if isinstance(exc, TimeoutError) else "backend_error"
+                if (
+                    self._asr_barrier_failure is None
+                    or input_generation >= self._asr_barrier_failure[0]
+                ):
+                    self._asr_barrier_failure = (input_generation, code)
+            if not item.terminal and item.generation == self._asr_generation:
+                item.terminal = True
+                await self._send(
+                    transcription_failed(
+                        item_id=item.item_id,
+                        code=(
+                            "backend_timeout" if isinstance(exc, TimeoutError) else "backend_error"
+                        ),
+                        message="streaming transcription failed",
+                        commit_event_id=item.commit_event_id,
+                    )
+                )
+            # The terminal fact is already delivered. A background VAD final
+            # must not throw an unobserved task exception into another item.
+        finally:
+            item.pcm.clear()
+            self._asr_closed_items.pop(item.item_id, None)
+
+    async def _retire_terminal_asr(self, *, next_wire_sample: int | None = None) -> None:
+        """Join an unsealed failed item's cleanup before accepting its successor."""
+
+        item = self._asr_item
+        if item is None or not item.terminal:
+            return
+        # The coordinator may report a create/connect/reader failure before
+        # the caller commits. Its terminal precedes actual owner cleanup;
+        # join that result instead of canceling teardown or reusing the item.
+        with contextlib.suppress(Exception):
+            await item.asr.commit()
+        if item.reader is not None:
+            await item.reader
+            if self._asr_reader is item.reader:
+                self._asr_reader = None
+        await self._close_asr_session()
+        item.pcm.clear()
+        self._alignment_pcm = BoundedPcmBuffer(MAX_ALIGNMENT_PCM_BYTES)
+        self._alignment_overflow = False
+        self._turn_has_admitted_speech = False
+        self._buffered_audio_bytes = 0
+        self._last_partial_text = ""
+        self._unflushed_bytes = 0
+        self._item_start_sample = (
+            self._wire_timeline.accepted_samples
+            if next_wire_sample is None else next_wire_sample
+        )
+        self._item_end_sample = self._item_start_sample
+        self._item_start_kernel = self._kernel_timeline.accepted_samples
+        self._item_end_kernel = self._item_start_kernel
+        self._reset_turn_observability()
+        self._committed_input_generation = self._input_generation
         self._current_item_id = self._new_item_id()
 
     async def _discard_failed_commit(self) -> None:
@@ -1218,6 +1450,9 @@ class OpenAIRealtimeSession:
         """
 
         with contextlib.suppress(Exception):
+            if self._asr_lane is not None:
+                await self._asr_lane.close()
+                self._asr_lane = None
             await self._stop_asr_reader()
             await self._close_asr_session()
             await self._release_asr()
@@ -1235,6 +1470,37 @@ class OpenAIRealtimeSession:
         self._current_item_id = self._new_item_id()
 
     async def _clear_audio(self) -> None:
+        # Only unfrozen input is discarded without a terminal. A boundary
+        # already published to the caller creates an obligation to finish
+        # that item, even when its inference is canceled by clear.
+        for item in tuple(self._asr_closed_items.values()):
+            if not item.terminal:
+                item.terminal = True
+                await self._send(
+                    transcription_failed(
+                        item_id=item.item_id,
+                        code="backend_error",
+                        message="streaming transcription canceled by input clear",
+                        commit_event_id=item.commit_event_id,
+                    )
+                )
+        self._asr_generation += 1
+        if self._asr_lane is not None:
+            await self._asr_lane.close()
+            self._asr_lane = None
+        for final in tuple(self._asr_finals):
+            final.cancel()
+        if self._asr_finals:
+            await asyncio.gather(*self._asr_finals, return_exceptions=True)
+        self._asr_finals.clear()
+        await self._cancel_alignment_tasks()
+        self._asr_input_error = None
+        self._asr_barrier_failure = None
+        # Consume the canceled interpolation tail into the timeline only.
+        # It must not leak into the next item's decoder input.
+        tail = self._resampler.flush()
+        if tail:
+            self._kernel_timeline.accept(tail)
         if self._first_upstream_received_at is not None:
             self._record_first_hypothesis("cancelled")
         self._turn_generation += 1
@@ -1264,6 +1530,7 @@ class OpenAIRealtimeSession:
         self._item_start_kernel = self._kernel_timeline.accepted_samples
         self._item_end_kernel = self._kernel_timeline.accepted_samples
         self._units_by_id.clear()
+        self._wire_span_by_unit.clear()
         self._speaker_by_unit.clear()
         self._reset_turn_observability()
         self._current_item_id = self._new_item_id()
@@ -1852,6 +2119,7 @@ class OpenAIRealtimeSession:
             self._finish_alignment(
                 task_id=task_id,
                 epoch=epoch,
+                generation=self._asr_generation,
                 item_id=item_id,
                 transcript=transcript,
                 transcript_revision=transcript_revision,
@@ -1872,6 +2140,7 @@ class OpenAIRealtimeSession:
         *,
         task_id: str,
         epoch: int,
+        generation: int,
         item_id: str,
         transcript: str,
         transcript_revision: int,
@@ -1898,6 +2167,7 @@ class OpenAIRealtimeSession:
             if (
                 task_id != self._task_id
                 or epoch != self._wire_epoch
+                or generation != self._asr_generation
             ):
                 self._services.metrics.record_alignment_event("fixed_text_stale")
                 # Still terminal: a client that enabled alignment must never
@@ -1914,10 +2184,6 @@ class OpenAIRealtimeSession:
                     )
                 )
                 return
-            turn_is_current = (
-                item_id == self._current_item_id
-                and transcript_revision == self._current_transcript_revision
-            )
             units, failure = await self._build_alignment_units(
                 item_id=item_id,
                 transcript=transcript,
@@ -1928,8 +2194,19 @@ class OpenAIRealtimeSession:
                 overflow=overflow,
                 degraded_reason=degraded_reason,
             )
+            if (
+                task_id != self._task_id
+                or epoch != self._wire_epoch
+                or generation != self._asr_generation
+            ):
+                return
             aligned = bool(units) and all(
                 unit.timing_quality == "aligned" for unit in units
+            )
+            wire_spans = self._alignment_wire_spans(
+                units,
+                kernel_span=SampleSpan(item_start_kernel, item_end_kernel),
+                wire_span=SampleSpan(item_start_wire, item_end_wire),
             )
             if not transcript or aligned:
                 self._services.metrics.record_alignment_event("fixed_text_completed")
@@ -1942,7 +2219,7 @@ class OpenAIRealtimeSession:
                         metadata_revision=self._metadata_revision,
                         sample_span=(item_start_wire, item_end_wire),
                         codepoint_span=(0, len(transcript)),
-                        units=self._render_units(units),
+                        units=self._render_units(units, wire_spans),
                     )
                 )
             else:
@@ -1958,11 +2235,12 @@ class OpenAIRealtimeSession:
                         message="fixed-text alignment failed",
                     )
                 )
-            # Turn-scoped bookkeeping belongs to the turn that is still open.  A
-            # late result is delivered with its own ids but must not advance the
-            # next turn's metadata revision or re-enter the diarization ledger.
-            if units and turn_is_current:
+            # The connection ledger owns completed items, including those whose
+            # final or alignment arrives after the next item has begun.
+            if units:
                 self._metadata_revision += 1
+                if self._diarization is not None:
+                    self._wire_span_by_unit.update(wire_spans)
                 await self._register_units(item_id, units)
         except asyncio.CancelledError:
             raise
@@ -2074,12 +2352,44 @@ class OpenAIRealtimeSession:
             granularity=self._alignment_granularity(),
         )
 
-    def _render_units(self, units: tuple[AttributionUnit, ...]) -> list[dict[str, object]]:
+    def _alignment_wire_spans(
+        self,
+        units: tuple[AttributionUnit, ...],
+        *,
+        kernel_span: SampleSpan,
+        wire_span: SampleSpan,
+    ) -> dict[str, SampleSpan]:
+        # A flushed 24->16 kHz tail can round up. Each frozen item's exact
+        # wire endpoints, rather than a global inverse rate map, own its units.
+        rate_map = RateMap(
+            source_rate=ASR_KERNEL_SAMPLE_RATE,
+            target_rate=WIRE_SAMPLE_RATE,
+            origin_source=kernel_span.start,
+            origin_target=wire_span.start,
+        )
+
+        def endpoint(sample: int) -> int:
+            if sample <= kernel_span.start:
+                return wire_span.start
+            if sample >= kernel_span.end:
+                return wire_span.end
+            return min(wire_span.end, max(wire_span.start, rate_map.to_target(sample)))
+
+        return {
+            unit.segment_uid: SampleSpan(
+                endpoint(unit.start_sample), endpoint(unit.end_sample)
+            )
+            for unit in units
+        }
+
+    def _render_units(
+        self,
+        units: tuple[AttributionUnit, ...],
+        wire_spans: dict[str, SampleSpan],
+    ) -> list[dict[str, object]]:
         rendered: list[dict[str, object]] = []
         for unit in units:
-            wire_span = self._to_wire_span(
-                SampleSpan(unit.start_sample, unit.end_sample)
-            )
+            wire_span = wire_spans[unit.segment_uid]
             rendered.append(
                 {
                     "segment_uid": unit.segment_uid,
@@ -2133,9 +2443,7 @@ class OpenAIRealtimeSession:
         for unit in sorted(
             self._units_by_id.values(), key=lambda item: (item.start_sample, item.segment_uid)
         ):
-            wire_span = self._to_wire_span(
-                SampleSpan(unit.start_sample, unit.end_sample)
-            )
+            wire_span = self._wire_span_by_unit[unit.segment_uid]
             payload.append(
                 {
                     "speaker": self._speaker_by_unit.get(unit.segment_uid),
@@ -2228,6 +2536,7 @@ class OpenAIRealtimeSession:
         done: SessionDone | None = None
         try:
             async with asyncio.timeout(deadline):
+                await self._await_asr_finals()
                 await self._wait_for_pending_alignment()
                 if self._diarization is not None:
                     done = await self._diarization.finish(self._finalization_id)
@@ -2278,11 +2587,12 @@ class OpenAIRealtimeSession:
             if not tasks:
                 return
             await asyncio.gather(*tasks)
+            # gather may return synchronously for already completed tasks.
+            # Do not rely on scheduled discard callbacks to drain the set.
+            self._alignment_tasks.difference_update(tasks)
 
-    async def _drain_asr_events(self) -> None:
-        asr = self._asr
-        if asr is None:
-            return
+    async def _drain_asr_events(self, item: _AsrItem) -> None:
+        asr = item.asr
         try:
             async for event in asr.events():
                 # Stop as soon as this session is no longer the current one
@@ -2290,88 +2600,65 @@ class OpenAIRealtimeSession:
                 # events are stale. A generation counter cannot be used here —
                 # a session opened by a rollover commit legitimately spans
                 # later turn generations when speech re-activates on it.
-                if self._asr is not asr:
+                if item.generation != self._asr_generation or item.terminal:
                     break
                 if event.kind == "partial":
-                    if self._speech_admission is not None and not self._turn_has_admitted_speech:
-                        continue
                     current_text = apply_light_itn(event.text)
-                    if not current_text:
-                        continue
-                    if self._first_partial_received_at is None:
-                        self._first_partial_received_at = time.monotonic()
-                    self._stable_prefix_codepoints = self._common_prefix_codepoints(
-                        self._last_hypothesis_text, current_text
-                    )
-                    self._hypothesis_revision += 1
+                    if item.first_partial is None:
+                        item.first_partial = time.monotonic()
+                    item.preview_revision += 1
+                    decoded_end = item.end_wire
+                    if event.sample_watermark is not None:
+                        decoded_end = min(
+                            item.end_wire,
+                            self._to_wire_sample(item.start_kernel + event.sample_watermark),
+                        )
                     hypothesis_sequence = await self._send(
                         transcription_hypothesis(
                             task_id=self._task_id,
                             epoch=self._wire_epoch,
-                            utterance_id=self._current_item_id,
-                            revision=self._hypothesis_revision,
+                            utterance_id=item.item_id,
+                            revision=item.preview_revision,
                             text=current_text,
-                            sample_span=(self._item_start_sample, self._item_end_sample),
-                            stable_prefix_codepoints=self._stable_prefix_codepoints,
+                            sample_span=(item.start_wire, max(item.start_wire, decoded_end)),
+                            stable_prefix_codepoints=0,
                         )
                     )
-                    self._last_hypothesis_text = current_text
                     if hypothesis_sequence is None:
-                        self._record_first_hypothesis("send_failed")
+                        self._record_item_first_hypothesis(item, "send_failed")
                     else:
-                        self._record_first_hypothesis("partial")
-                    if self._config.get("transcription_partial_mode", "delta") == "snapshot":
-                        # The revisioned hypothesis is the only mutable-text
-                        # event on the current wire: a snapshot consumer reads
-                        # ``speechrail.transcription.hypothesis`` and needs no
-                        # separate append-only reconstruction.
-                        self._services.metrics.record_realtime_partial("snapshot_sent")
-                    else:
-                        if not current_text.startswith(self._last_partial_text):
-                            # This wire event is append-only. Keep a changed suffix
-                            # private until the terminal completed event can replace
-                            # the provisional transcript atomically.
-                            self._services.metrics.record_realtime_partial("rewrite_withheld")
-                            continue
-                        delta = current_text[len(self._last_partial_text):]
-                        self._last_partial_text = current_text
-                        if delta:
-                            self._services.metrics.record_realtime_partial("delta_sent")
-                            await self._send(
-                                transcription_delta(item_id=self._current_item_id, delta=delta)
-                            )
+                        self._record_item_first_hypothesis(item, "partial")
+                    self._services.metrics.record_realtime_partial("snapshot_sent")
                 elif event.kind == "completed":
-                    if self._asr is not asr:
-                        break
-                    self._last_partial_text = ""
-                    self._last_hypothesis_text = ""
-                    self._unflushed_bytes = 0
+                    # Claim before yielding to transport: clear must not
+                    # append a second terminal while this one is being sent.
+                    item.terminal = True
                     norm_text = apply_light_itn(event.text)
-                    self._current_transcript_revision = max(
-                        1, self._hypothesis_revision + 1
+                    item.revision = max(
+                        1, item.preview_revision + 1
                     )
-                    self._record_first_hypothesis("missing")
+                    self._record_item_first_hypothesis(item, "missing")
                     self._services.metrics.record_realtime_turn(
                         mode="server_vad" if self._vad is not None else "manual",
-                        commit_reason="vad_stop" if self._vad is not None else "client",
+                        commit_reason=item.close_reason or "client",
                         outcome="text" if norm_text else "empty",
                         characters=len(norm_text),
-                        active_samples=max(0, self._item_end_sample - self._item_start_sample),
+                        active_samples=max(0, item.end_wire - item.start_wire),
                         duration_seconds=(
-                            max(0.0, time.monotonic() - self._asr_commit_started_at)
-                            if self._asr_commit_started_at is not None
+                            max(0.0, time.monotonic() - item.commit_started)
+                            if item.commit_started is not None
                             else 0.0
                         ),
                     )
                     if self._alignment_enabled or self._diarization_enabled:
-                        item_id = self._current_item_id
-                        item_start_sample = self._item_start_sample
+                        item_id = item.item_id
+                        item_start_sample = item.start_wire
                         item_end_sample = max(
-                            self._item_end_sample, self._item_start_sample
+                            item.end_wire, item.start_wire
                         )
-                        item_start_kernel = self._item_start_kernel
+                        item_start_kernel = item.start_kernel
                         item_end_kernel = max(
-                            self._item_end_kernel, self._item_start_kernel
+                            item.end_kernel, item.start_kernel
                         )
                         # Text final is deliberately independent from the slow
                         # auxiliary aligner.  Timing and speaker units travel in
@@ -2380,48 +2667,47 @@ class OpenAIRealtimeSession:
                             transcription_completed(
                                 item_id=item_id,
                                 transcript=norm_text,
-                                commit_event_id=self._active_commit_event_id,
+                                commit_event_id=item.commit_event_id,
                             )
                         )
-                        self._asr_terminal_sent = True
+                        item.terminal = True
                         self._start_alignment_task(
                             task_id=self._task_id,
                             epoch=self._wire_epoch,
                             item_id=item_id,
                             transcript=norm_text,
-                            transcript_revision=self._current_transcript_revision,
+                            transcript_revision=item.revision,
                             item_start_wire=item_start_sample,
                             item_end_wire=item_end_sample,
                             item_start_kernel=item_start_kernel,
                             item_end_kernel=item_end_kernel,
-                            pcm16=self._alignment_pcm.pin(),
-                            overflow=self._alignment_overflow,
+                            pcm16=item.pcm.pin(),
+                            overflow=item.overflow,
                             degraded_reason=self._degraded_reason,
                         )
-                        self._alignment_pcm.clear()
-                        self._alignment_overflow = False
+                        item.pcm.clear()
+                        item.overflow = False
                         continue
                     await self._send(
                         transcription_completed(
-                            item_id=self._current_item_id,
+                            item_id=item.item_id,
                             transcript=norm_text,
-                            commit_event_id=self._active_commit_event_id,
+                            commit_event_id=item.commit_event_id,
                         )
                     )
-                    self._asr_terminal_sent = True
+                    item.terminal = True
                 elif event.kind == "error":
-                    self._last_partial_text = ""
-                    self._unflushed_bytes = 0
-                    self._record_first_hypothesis("failed")
+                    item.terminal = True
+                    self._record_item_first_hypothesis(item, "failed")
                     await self._send(
                         transcription_failed(
-                            item_id=self._current_item_id,
+                            item_id=item.item_id,
                             code=event.error_code or "backend_error",
                             message="streaming transcription failed",
-                            commit_event_id=self._active_commit_event_id,
+                            commit_event_id=item.commit_event_id,
                         )
                     )
-                    self._asr_terminal_sent = True
+                    item.terminal = True
         except asyncio.CancelledError:
             # The commit deadline cancels this reader while awaiting its
             # terminal event.  Swallowing that cancellation lets the commit
@@ -2436,13 +2722,39 @@ class OpenAIRealtimeSession:
             with contextlib.suppress(Exception):
                 await self._send(
                     transcription_failed(
-                        item_id=self._current_item_id,
+                        item_id=item.item_id,
                         code="backend_error",
                         message="streaming transcription failed",
-                        commit_event_id=self._active_commit_event_id,
+                        commit_event_id=item.commit_event_id,
                     )
                 )
-                self._asr_terminal_sent = True
+                item.terminal = True
+
+    def _record_item_first_hypothesis(self, item: _AsrItem, outcome: str) -> None:
+        if item.first_recorded:
+            return
+        item.first_recorded = True
+        now = time.monotonic()
+        worker = item.first_partial
+        self._services.metrics.record_realtime_first_hypothesis(
+            outcome,
+            admitted_to_worker_seconds=(
+                max(0.0, worker - item.admitted_at)
+                if worker is not None and item.admitted_at is not None else None
+            ),
+            upstream_to_worker_seconds=(
+                max(0.0, worker - item.first_upstream)
+                if worker is not None and item.first_upstream is not None else None
+            ),
+            worker_to_socket_seconds=max(0.0, now - worker) if worker is not None else None,
+            admitted_to_socket_seconds=(
+                max(0.0, now - item.admitted_at) if item.admitted_at is not None else None
+            ),
+            admitted_audio_seconds=(
+                max(0, item.end_wire - item.start_wire) / WIRE_SAMPLE_RATE
+                if outcome == "partial" else None
+            ),
+        )
 
     async def _finalize_tts(
         self,
@@ -2548,8 +2860,7 @@ class OpenAIRealtimeSession:
         self._asr = None
         with contextlib.suppress(Exception):
             await session.close()
-        if self._asr_factory is not None:
-            self._asr_factory.release(session)
+        self._asr_item = None
 
     async def _stop_asr_reader(self) -> None:
         if self._asr_reader is None:

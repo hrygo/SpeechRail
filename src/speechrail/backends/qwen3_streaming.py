@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 from speechrail.backends.qwen3_shared import Qwen3SharedWorker
+from speechrail.domain.asr_policy import ASRPolicy
 from speechrail.domain.contracts import TranscriptSegment
 from speechrail.domain.ports import (
     RealtimeAsrFactory,
@@ -234,6 +235,8 @@ class Qwen3StreamingSession(RealtimeAsrSession):
         chunk_duration_ms: int = 1_000,
         max_context_sec: float = 12.64,
         max_new_tokens: int = 256,
+        asr_policy: ASRPolicy | None = None,
+        effective_max_segment_ms: int | None = None,
     ) -> None:
         self._worker = worker
         self._language = language
@@ -242,6 +245,13 @@ class Qwen3StreamingSession(RealtimeAsrSession):
         self._chunk_duration_ms = chunk_duration_ms
         self._max_context_sec = max_context_sec
         self._max_new_tokens = max_new_tokens
+        self._asr_policy = asr_policy or ASRPolicy()
+        self._effective_max_segment_ms = (
+            effective_max_segment_ms or self._asr_policy.max_segment_ms
+        )
+        self._flushed = asyncio.Event()
+        self._flush_lock = asyncio.Lock()
+        self._terminal_received = False
         self._queue: asyncio.Queue[dict[str, object]] | None = None
         self._events_queue: asyncio.Queue[StreamingAsrEvent | None] = asyncio.Queue(
             maxsize=self.EVENT_QUEUE_MAXSIZE
@@ -253,6 +263,7 @@ class Qwen3StreamingSession(RealtimeAsrSession):
         self._mode_context: AbstractAsyncContextManager[None] | None = None
         self._cleanup_lock = asyncio.Lock()
         self._finalized = False
+        self._worker_reaped = False
         self._events_ended = False
 
     @property
@@ -287,6 +298,10 @@ class Qwen3StreamingSession(RealtimeAsrSession):
                     "chunk_duration_ms": self._chunk_duration_ms,
                     "max_context_sec": self._max_context_sec,
                     "max_new_tokens": self._max_new_tokens,
+                    "asr_policy": self._asr_policy.to_wire_dict(
+                        effective_max_segment_ms=self._effective_max_segment_ms,
+                        request_timeout_ms=int(self._worker.timeout_seconds * 1000),
+                    ),
                 }
             )
             assert self._queue is not None
@@ -319,9 +334,14 @@ class Qwen3StreamingSession(RealtimeAsrSession):
         )
 
     async def flush(self) -> None:
-        await self._worker.send(
-            {"version": PROTOCOL_VERSION, "type": "flush", "session_id": self._session_id}
-        )
+        async with self._flush_lock:
+            self._flushed.clear()
+            await self._worker.send(
+                {"version": PROTOCOL_VERSION, "type": "flush", "session_id": self._session_id}
+            )
+            await asyncio.wait_for(
+                self._flushed.wait(), timeout=max(self._worker.timeout_seconds, 1.0)
+            )
 
     async def commit(self, want_segments: bool = False) -> None:
         await self._worker.send(
@@ -382,11 +402,18 @@ class Qwen3StreamingSession(RealtimeAsrSession):
                 frame = await self._queue.get()
                 kind = frame.get("type")
                 if kind == "event":
-                    if not self._put_event(_to_event(frame)):
+                    event = _to_event(frame)
+                    if self._terminal_received:
+                        continue
+                    if event.kind in {"completed", "error"}:
+                        self._terminal_received = True
+                    if not self._put_event(event):
                         self._replace_events_with_error("session_queue_full")
                         with contextlib.suppress(BaseException):
                             await self._finalize(cancel=True)
                         return
+                elif kind == "flushed":
+                    self._flushed.set()
                 elif kind == "finished":
                     queue_full = not self._put_terminal()
                     if queue_full:
@@ -416,12 +443,11 @@ class Qwen3StreamingSession(RealtimeAsrSession):
                         )
                         self._events_queue.put_nowait(None)
                         self._events_ended = True
-                    await self._finalize(cancel=False)
+                    await self._finalize(cancel=True)
                     return
         except asyncio.CancelledError:
             raise
         except Exception:
-            self._finished.set()
             self._replace_events_with_error("worker_unavailable")
             with contextlib.suppress(BaseException):
                 await self._finalize(cancel=True)
@@ -451,49 +477,34 @@ class Qwen3StreamingSession(RealtimeAsrSession):
         async with self._cleanup_lock:
             if self._finalized:
                 return
-            self._finalized = True
-            cleanup_error: BaseException | None = None
-            try:
-                if cancel and self._queue is not None:
-                    try:
-                        await self._worker.send(
-                            {
-                                "version": PROTOCOL_VERSION,
-                                "type": "cancel",
-                                "session_id": self._session_id,
-                            }
-                        )
-                    except BaseException as exc:
-                        cleanup_error = exc
-            finally:
-                self._connected = False
-                queue = self._queue
+            if cancel and self._queue is not None and not self._worker_reaped:
+                with contextlib.suppress(BaseException):
+                    await self._worker.send(
+                        {
+                            "version": PROTOCOL_VERSION,
+                            "type": "cancel",
+                            "session_id": self._session_id,
+                        }
+                    )
+                # An in-band cancel cannot interrupt synchronous MLX. If
+                # reap fails, retain both leases and permit a later retry.
+                await self._worker.close()
+                self._worker_reaped = True
+            self._connected = False
+            # Advance each cleanup phase only after it succeeds. A failed
+            # teardown remains quarantined and close() can retry the exact
+            # outstanding handle without redoing already completed phases.
+            if self._queue is not None:
+                self._worker.unregister_session(self._session_id)
                 self._queue = None
-                if queue is not None:
-                    try:
-                        self._worker.unregister_session(self._session_id)
-                    except BaseException as exc:
-                        if cleanup_error is None:
-                            cleanup_error = exc
-                mode_context = self._mode_context
+            if self._mode_context is not None:
+                await self._mode_context.__aexit__(None, None, None)
                 self._mode_context = None
-                if mode_context is not None:
-                    try:
-                        await mode_context.__aexit__(None, None, None)
-                    except BaseException as exc:
-                        if cleanup_error is None:
-                            cleanup_error = exc
-                lease = self._mode_lease
+            if self._mode_lease is not None:
+                self._worker.mode_gate.release(self._mode_lease)
                 self._mode_lease = None
-                if lease is not None:
-                    try:
-                        self._worker.mode_gate.release(lease)
-                    except BaseException as exc:
-                        if cleanup_error is None:
-                            cleanup_error = exc
-                self._finished.set()
-            if cleanup_error is not None:
-                raise cleanup_error
+            self._finalized = True
+            self._finished.set()
 
 
 def _clear_event_queue(queue: asyncio.Queue[StreamingAsrEvent | None]) -> None:
@@ -506,6 +517,9 @@ def _clear_event_queue(queue: asyncio.Queue[StreamingAsrEvent | None]) -> None:
 
 def _to_event(frame: Mapping[str, object]) -> StreamingAsrEvent:
     kind = frame.get("kind")
+    watermark = frame.get("sample_watermark")
+    if watermark is not None and (type(watermark) is not int or watermark < 0):
+        raise ValueError("invalid streaming ASR sample watermark")
     if kind == "completed":
         segments = _segments(frame.get("segments"))
         return StreamingAsrEvent(
@@ -513,8 +527,11 @@ def _to_event(frame: Mapping[str, object]) -> StreamingAsrEvent:
             text=str(frame.get("text") or ""),
             language=_language(frame.get("language")),
             segments=segments,
+            sample_watermark=watermark,
         )
-    return StreamingAsrEvent(kind="partial", text=str(frame.get("text") or ""))
+    return StreamingAsrEvent(
+        kind="partial", text=str(frame.get("text") or ""), sample_watermark=watermark
+    )
 
 
 def _segments(value: object) -> tuple[TranscriptSegment, ...]:
@@ -593,6 +610,8 @@ class NativeRealtimeFactory(RealtimeAsrFactory):
             chunk_duration_ms=options.chunk_duration_ms,
             max_context_sec=getattr(config, "max_context_sec", 12.64),
             max_new_tokens=getattr(config, "max_new_tokens", 256),
+            asr_policy=options.asr_policy,
+            effective_max_segment_ms=options.effective_max_segment_ms,
         )
         self._sessions[session.session_id] = session
         return session

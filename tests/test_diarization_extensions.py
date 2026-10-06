@@ -457,7 +457,23 @@ def test_apply_session_update_rejects_unknown_extension_values() -> None:
 # Opted-out clients and unavailable capability
 
 
-def test_client_without_opt_in_never_receives_extension_types() -> None:
+def _assert_only_asr_boundary_before_terminal(
+    events: list[dict[str, Any]], samples: int
+) -> None:
+    extensions = [
+        event for event in events if event["type"].startswith("speechrail.")
+    ]
+    assert len(extensions) == 1
+    boundary = extensions[0]
+    terminal = events[-1]
+    assert boundary["type"] == "speechrail.transcription.segment_closed"
+    assert boundary["item_id"] == terminal["item_id"]
+    assert boundary["sample_span"] == {"start": 0, "end": samples}
+    assert boundary["reason"] == "client_commit"
+    assert boundary["sequence"] < terminal["sequence"]
+
+
+def test_client_without_opt_in_never_receives_diarization_extension_types() -> None:
     client, _ = _client(supports_stream=True)
     with client.websocket_connect("/v1/realtime") as socket:
         _open(socket)
@@ -469,7 +485,7 @@ def test_client_without_opt_in_never_receives_extension_types() -> None:
         assert "attribution_units" not in completed
         assert "diagnostics" not in completed
         assert "event_version" not in completed
-        assert all(not event["type"].startswith("speechrail.") for event in events)
+        _assert_only_asr_boundary_before_terminal(events, 8000)
 
 
 def test_unavailable_diarization_is_rejected_and_session_stays_current() -> None:
@@ -484,20 +500,23 @@ def test_unavailable_diarization_is_rejected_and_session_stays_current() -> None
         assert events[-1]["type"] == (
             "conversation.item.input_audio_transcription.completed"
         )
-        assert all(not event["type"].startswith("speechrail.") for event in events)
+        _assert_only_asr_boundary_before_terminal(events, 8000)
 
 
 # ---------------------------------------------------------------------------
 # Negotiated delivery
 
 
-def test_negotiated_session_delivers_units_on_the_wire_timeline() -> None:
+@pytest.mark.parametrize("first_samples", [7999, 8000, 8001])
+def test_negotiated_session_delivers_units_on_the_wire_timeline(
+    first_samples: int,
+) -> None:
     client, factory = _client(supports_stream=True)
     with client.websocket_connect("/v1/realtime") as socket:
         _open(socket)
         assert _negotiate(socket)["type"] == "session.updated"
 
-        first = _append_and_commit(socket, 8000)
+        first = _append_and_commit(socket, first_samples)
         completed = first[-1]
         # The text final is the current transcription final: no attribution
         # units, diagnostics or event_version ride on it, and there is no
@@ -518,7 +537,7 @@ def test_negotiated_session_delivers_units_on_the_wire_timeline() -> None:
             event["type"] != "conversation.item.input_audio_transcription.segment"
             for event in first
         )
-        assert all(not event["type"].startswith("speechrail.") for event in first)
+        _assert_only_asr_boundary_before_terminal(first, first_samples)
 
         alignment = _collect_until(socket, "speechrail.alignment.done")[-1]
         assert alignment["utterance_id"] == completed["item_id"]
@@ -531,8 +550,9 @@ def test_negotiated_session_delivers_units_on_the_wire_timeline() -> None:
             for unit in alignment["units"]
         )
         # The wire clock is 24 kHz while the aligner owns 16 kHz kernel spans.
-        assert alignment["sample_span"]["end"] == 8000
-        assert alignment["units"][0]["audio_end_sample"] <= 8000
+        assert alignment["sample_span"] == {"start": 0, "end": first_samples}
+        assert alignment["units"][0]["audio_start_sample"] == 0
+        assert alignment["units"][0]["audio_end_sample"] == first_samples
 
         update = _collect_until(socket, "speechrail.diarization.updated")[-1]
         assert update["units"], "a speaker revision must carry the frozen units"
@@ -541,10 +561,25 @@ def test_negotiated_session_delivers_units_on_the_wire_timeline() -> None:
             unit["sample_span"]["end"] > unit["sample_span"]["start"]
             for unit in update["units"]
         )
+        assert update["units"][0]["sample_span"] == {
+            "start": 0, "end": first_samples
+        }
 
-        second = _append_and_commit(socket, 4000)
+        second_samples = 4001
+        second = _append_and_commit(socket, second_samples)
         completed2 = second[-1]
         assert completed2["item_id"] != completed["item_id"]
+        alignment2 = _collect_until(socket, "speechrail.alignment.done")[-1]
+        assert alignment2["utterance_id"] == completed2["item_id"]
+        assert alignment2["sample_span"] == {
+            "start": first_samples, "end": first_samples + second_samples
+        }
+        assert alignment2["units"][0]["audio_start_sample"] == first_samples
+        assert alignment2["units"][0]["audio_end_sample"] == (
+            first_samples + second_samples
+        )
+        update2 = _collect_until(socket, "speechrail.diarization.updated")[-1]
+        assert update2["units"][-1]["sample_span"] == alignment2["sample_span"]
         # The manual wire releases and reopens the streaming slot per commit.
         assert len(factory.sessions) == 2
         assert sum(session.commits for session in factory.sessions) == 2

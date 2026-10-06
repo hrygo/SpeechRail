@@ -729,6 +729,15 @@ registry 不可读返回 `503 pronunciation_store_unavailable`（可重试）。
   `session.speechrail.endpointing.mode="server_vad"`。
 - `session.speechrail.task` 选择 `conversation`、`caption`、`transcription`、`render` 或
   `voice_design`；Alignment、Diarization 按请求 opt-in。
+- 可选的 `session.speechrail.asr` 在首个 PCM 前设置识别策略：
+  `preview_interval_ms` 默认为 `1000`（`100...5000`），`max_segment_ms` 默认为 `20000`
+  （`1000...30000`，且不少于预览间隔），`finalization` 默认为 `full_segment`，也可为
+  `streaming_finalize`。显式 `final_deadline_ms` 必须是正整数且不超过请求 timeout；省略时沿用
+  请求 timeout。布尔值、小数、未知字段或枚举均拒绝。
+- `session.updated.session.speechrail.asr.effective_max_segment_ms` 回显实际有效段预算；它是
+  请求、服务资源、能力与解码器上限的最小值。只有首个 PCM 前可更新；候选失败时旧配置保持不变。
+- ASR 策略形状、范围或 deadline 无效时用 `asr_policy_invalid`；后端不支持该策略时用
+  `asr_policy_unsupported`；无法在有界资源内接纳音频时用 `asr_buffer_overflow`。
 - 更新成功返回 `session.updated`。失败不半应用配置；未知字段、旧字段、Q4/Q6、Design runtime
   voice 和未实现官方 VAD 都返回稳定错误。
 
@@ -745,7 +754,15 @@ registry 不可读返回 `503 pronunciation_store_unavailable`（可重试）。
         "turn_detection": null
       }
     },
-    "speechrail": {"task": "caption", "alignment": {"enabled": false}}
+    "speechrail": {
+      "task": "caption",
+      "asr": {
+        "preview_interval_ms": 1000,
+        "max_segment_ms": 20000,
+        "finalization": "full_segment"
+      },
+      "alignment": {"enabled": false}
+    }
   }
 }
 ```
@@ -768,6 +785,7 @@ registry 不可读返回 `503 pronunciation_store_unavailable`（可重试）。
 | `speechrail.tts.audio.delta` | 服务端 → 客户端 | 唯一 TTS 音频块事件，携带 chunk/sample offset |
 | `speechrail.tts.completed/cancelled/failed` | 服务端 → 客户端 | 每次 utterance 恰好一个 SpeechRail terminal |
 | `speechrail.transcription.hypothesis` | 服务端 → 客户端 | 可修订全文；不能当作 append-only delta |
+| `speechrail.transcription.segment_closed` | 服务端 → 客户端 | 冻结的 item 音频段，含 24 kHz wire 半开样本区间和关闭原因 |
 | `speechrail.alignment.done/failed` | 服务端 → 客户端 | 独立辅助终态，不改写 ASR final |
 | `speechrail.diarization.updated/done/failed` | 服务端 → 客户端 | session-scoped 匿名归属元数据 |
 
@@ -777,6 +795,11 @@ registry 不可读返回 `503 pronunciation_store_unavailable`（可重试）。
 `revision` 递增，只有已证明稳定前缀才能映射到官方 delta。Alignment 和 Diarization 携带
 `task_id`、`epoch`、`utterance_id`、`transcript_revision` 与 `metadata_revision`；迟到、旧 epoch、
 旧 revision 或取消后的结果必须丢弃。辅助失败不会把已发出的 final 改成失败。
+
+`speechrail.transcription.segment_closed` 在对应文本终态前报告冻结边界。其
+`sample_span.start` / `sample_span.end` 是 24 kHz wire 样本数，表示半开区间 `[start, end)`；
+预算切段只结束识别 item，不代表助手业务轮次完成。仅 `client_commit` 可附带可选
+`commit_event_id`。`completed` 的既有形状保持不变。
 
 客户端调用 `input_audio_buffer.commit` 时生成稳定 `event_id`。由这次提交产生的
 `completed` / `failed` 会回显 `commit_event_id`。结束录音时请给 commit 附带

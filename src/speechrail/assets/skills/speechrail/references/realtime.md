@@ -26,7 +26,14 @@ Send the transcription options in `session.update` before the first
         "transcription": {"model": "speechrail/qwen3-asr-1.7b"}
       }
     },
-    "speechrail": {"task": "transcription"}
+    "speechrail": {
+      "task": "transcription",
+      "asr": {
+        "preview_interval_ms": 1000,
+        "max_segment_ms": 20000,
+        "finalization": "full_segment"
+      }
+    }
   }
 }
 ```
@@ -46,6 +53,16 @@ option.
   identity belong to each `speechrail.tts.start` (`voice`, `voice_revision`,
   `expected_model_revision`); they never inherit from the session or a prior
   utterance. The removed session field `expected_tts_revision` is rejected.
+- The optional `session.speechrail.asr` object selects a vendor-neutral policy.
+  `preview_interval_ms` defaults to 1000 and accepts integer values from 100 to
+  5000. `max_segment_ms` defaults to 20000, accepts 1000 to 30000, and must be
+  at least the preview interval. `finalization` is `full_segment` by default or
+  `streaming_finalize`. An explicit positive `final_deadline_ms` cannot exceed
+  the request timeout; when omitted, the request timeout applies. Send integer
+  JSON number tokens, not booleans or decimal-form values. Unknown fields and
+  unsupported enum values are rejected. `session.updated` echoes the effective
+  `effective_max_segment_ms`, the minimum of request, service, capability, and
+  decoder limits.
 - Every `speechrail.tts.start` requires an even `audio_window_bytes` in `2...1440000`;
   `started` echoes it. Return `speechrail.tts.audio_ack` with this request ID and
   cumulative PCM16 `sample_offset` only after releasing local audio capacity.
@@ -60,6 +77,12 @@ option.
 These options are session-scoped. After the first accepted PCM frame they cannot
 be changed; the server returns `invalid_state`. Unknown fields or unsupported
 values are errors, not silently ignored.
+
+For each frozen non-empty segment, `speechrail.transcription.segment_closed`
+reports the item, its half-open `[start, end)` span in 24 kHz wire samples, and
+one reason: `vad`, `client_commit`, or `budget_rollover`. The optional
+`commit_event_id` appears only for a client commit. A budget rollover is an ASR
+segment boundary; the caller decides when a business turn ends.
 
 ## Partial semantics
 
