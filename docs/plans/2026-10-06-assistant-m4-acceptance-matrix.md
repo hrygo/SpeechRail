@@ -228,8 +228,12 @@ App 侧 played 门控仍由 fake 门（V05 定向回归）覆盖，真机播放�
 `speechrail_resource_physical_footprint_bytes` 在干净 soak（24/24，
 p50=70ms/p95=73ms）前为 9.44GB，soak 后即刻 9.64GB，5 分钟后 10.03GB，
 `asr_state` 保持 active。单次观测不能定性为泄漏（可能为 worker 保持 active
-的正常驻留）；“有界”判定与预算口径（declared 13.74GB / budget 68.72GB）
-归 Python 侧评审，本矩阵只记录观测值。
+的正常驻留）。
+追加 idle 6 分钟序列（无推理在途，`governor_active_requests` batch/realtime
+均为 0→realtime 1 的保持态）：11.61 → 9.66 → 10.96 → 9.66 → 13.38 →
+11.67GB，大幅上下波动、无单调爬升。波动形态不支持“泄漏”定性，更像采样口径
+含共享/瞬时映射。“有界”判定与预算口径（declared 13.74GB / budget 68.72GB）
+归 Python 侧评审，本矩阵只记录观测值，不判定。
 soak 探针为纯 realtime 转写、不落 App 会话库，SQLite 记录数核对不适用本探针。
 反例记录：session 2/3 首跑时恰遇他方 `run_candidate_v8.py`（ASR-245 候选验证，
 内部代号 v8，非产品版本）并发占用同一 ASR worker，延迟升至秒级
