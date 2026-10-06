@@ -174,6 +174,21 @@ run2 音频 19.52s（≈2 倍时长）但转写文本与 run1/run3 等价——�
 | f7e9d4b9 | Apple M5 Max | macOS 27.0.1 | quality/quality | serena（系统音色） | 本地 realtime+REST | 延迟 4+4 turns | 听审/V17/取消/长稳待执行 |
 | 95b1fe55 | Apple M5 Max | macOS 27.0.1 | quality/quality | serena（系统音色） | 本地 REST 合成+回转写 | 质量 6 合成/3 回读 | 数字口语化待评审/run2 长音频待查/听审待执行 |
 
+### V03/V05 取消与终态真机对照（2026-10-06，commit `95b1fe55`，不关闭 #258）
+
+3.7.1 quality/quality，Apple M5 Max，macOS 27.0.1，真机 `/v1/realtime`
+（`whisper-1` alias），每项 10 trials（3 + 7 两批），输入 4800B 合成 PCM。
+
+| 项 | 操作 | 应有结果 | 实测（10/10） |
+|---|---|---|---|
+| V03 clear 取消 | append → clear → commit | 空 final completed，不崩 | 10/10 `completed` + 空 transcript `''`，无 `segment_closed` 边界（输入已丢弃） |
+| V05 正常终态 | append → commit | completed + 终态 | 10/10 `completed`，`segment_closed` 边界先到（reason 待记录），转写“嗯。”（合成 PCM 内容所致，非误识别） |
+
+未通过项：无（本项）。V05 的 played 门控（terminal 在 played 前到不提前
+completed、played 唯一记账）属 App 播放层语义，本探针只覆盖服务端终态；
+App 侧 played 门控仍由 fake 门（V05 定向回归）覆盖，真机播放层对照待 UI 授权。
+旧远端收尾确认（设备 recovered）需蓝牙/耳机切换操作，仍待执行。
+
 ## 范围与回退
 
 本文档为纯文档交付，不改产品代码、协议、schema 或运行态。
