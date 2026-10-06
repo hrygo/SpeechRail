@@ -2,11 +2,42 @@
 title: "共享 ASR #245：实施与验收记录"
 status: in_progress
 audience: "SpeechRail 开发者与验收人员"
-version: "1.13.0"
+version: "1.14.0"
 date: 2026-10-06
 ---
 
 # 共享 ASR #245：实施与验收记录
+
+## 2026-10-07 回滚可调与三臂真实对照（PR #317 已合入）
+
+`rollback_tokens` 此前写死在 decoder 构造默认 5，worker 不透传，
+调优测出结论也无法落地。5032e3c0 把它做成策略可调
+（`ASRPolicy.rollback_tokens = 5`，0...32；Schema、契约文档、
+Swift 三方同步，默认行为不变），f503bbf1 把 worker 会话解析改为
+required（此前静默丢弃未知字段会无声回到 5），e43c38f6 同步助手握手
+fixture。三提交经 CI 全绿后以 PR #317 rebase 合入 main（97074cea）。
+
+同一 v9 wheel（ffccf874，164 模块与源码一致，零模型下载）执行回滚
+0/5/10 × 三条已定位音频 × N=3，共 27 正式请求。
+`measurement_completed=true, original_restored=true`，
+恢复后 PID **78292**、generation 13、quality/quality、原 catalog、
+ready 与空闲核验通过。字符错误三臂完全一致
+（ami-meeting-06 始终 27，zh-en-01 始终 15，zh-en-03 始终 3，
+终态/边界稳定，覆盖与预算门全过）。结论只限这三条样本：
+回退数不是配对回退的驱动因素，rollback=5 继续作为默认起点。
+
+途中首轮 R0 被服务端拒绝（worker 丢弃未知回滚字段，零音频测量），
+修复后重跑，失败材料保留为 maintenance-v9-rollback-attempt1。
+main 侧 #249 相关 11 个测试文件 374 项、Ruff 全仓库、mypy 164 文件
+均通过。#249 fake 验收六项已有回归映射（见 #249 评论），
+剩余真实部分（#297 交互复核、预设冻结）仍开放。
+#249/#253/#245 保持开放，预设仍未冻结。
+
+| 仓库外证据 | SHA-256 |
+|---|---|
+| rollback-R0 结果 | `d173523cb5ad68492f7a2ce30f102ccdcfe3cf05fe211e62494081fa4766a0ba` |
+| rollback-R5 结果 | `8c48de1e07eb43223cdf45f7a05ffea484031047b5a57c88683e0ac9ebff10db` |
+| rollback-R10 结果 | `28f533ec00c57bdde5f00be2995312cc6c1003cacacc92fef85d134795792f4e` |
 
 ## 2026-10-07 有效段真实空成功
 
