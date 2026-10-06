@@ -890,6 +890,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         asr=asr_owner,
         tts=tts_worker,
         streaming=streaming_owner,
+        alignment=alignment_worker,
         runner=job_runner,
         evictor=evictor,
         lazy_load=settings.worker_lazy_load,

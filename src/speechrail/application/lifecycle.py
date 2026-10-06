@@ -51,6 +51,7 @@ class RuntimeLifecycle:
         asr: StartableComponent | None = None,
         tts: StartableComponent | None = None,
         streaming: StartableComponent | None = None,
+        alignment: StartableComponent | None = None,
         runner: JobRunner | None = None,
         evictor: WorkerIdleEvictor | None = None,
         lazy_load: bool = False,
@@ -61,9 +62,11 @@ class RuntimeLifecycle:
         self._asr = asr
         self._tts = tts
         self._streaming = streaming
+        self._alignment = alignment
         self._pending: tuple[StartableComponent, ...] = tuple({
             id(component): component
-            for component in (asr, tts, streaming) if component is not None
+            for component in (asr, tts, streaming, alignment)
+            if component is not None
         }.values())
         self._runner = runner
         self._evictor = evictor
@@ -81,6 +84,7 @@ class RuntimeLifecycle:
             ("asr", self._asr),
             ("tts", self._tts),
             ("streaming", self._streaming),
+            ("alignment", self._alignment),
         ):
             if comp is None:
                 continue
@@ -133,6 +137,11 @@ class RuntimeLifecycle:
                 await self._evictor.start()
             self._running = True
         except BaseException:
+            if self._runner_task is not None:
+                self._runner_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._runner_task
+                self._runner_task = None
             await self._close_started()
             raise
 

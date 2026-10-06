@@ -81,6 +81,7 @@ class WorkerIdleEvictor:
         self._was_alive: dict[EvictableWorker, bool] = {}
         self._states: dict[EvictableWorker, WorkerLifecycleState] = {}
         self._lease_locks: dict[EvictableWorker, WorkerLeaseLock] = {}
+        self._activity_sources: dict[EvictableWorker, set[str]] = {}
         # Per-worker TTL overrides; absent entries fall back to the evictor
         # defaults above. Only the design lane overrides today (#135).
         self._idle_timeouts: dict[EvictableWorker, float] = {}
@@ -93,6 +94,7 @@ class WorkerIdleEvictor:
             self._was_alive[worker] = getattr(worker, "alive", False)
             self._states[worker] = WorkerLifecycleState.ACTIVE
             self._lease_locks[worker] = WorkerLeaseLock()
+            self._activity_sources[worker] = set()
 
     def track(
         self,
@@ -117,6 +119,7 @@ class WorkerIdleEvictor:
         self._was_alive[worker] = getattr(worker, "alive", False)
         self._states[worker] = WorkerLifecycleState.ACTIVE
         self._lease_locks[worker] = WorkerLeaseLock()
+        self._activity_sources[worker] = set()
         if idle_timeout_seconds is not None:
             self._idle_timeouts[worker] = idle_timeout_seconds
         if warm_standby_timeout_seconds is not None:
@@ -167,11 +170,33 @@ class WorkerIdleEvictor:
             self._last_active[w] = time.monotonic()
             self._states[w] = WorkerLifecycleState.COLD_EVICTED
 
+    def note_activity(self, worker: EvictableWorker, *, source: str) -> None:
+        """Register an in-progress activity source (e.g. alignment exchange).
+
+        The source stays registered until :meth:`clear_activity` removes it;
+        while any source is registered the worker counts as in use and idle
+        eviction (including :meth:`force_evict`) skips it.
+        """
+        self._activity_sources.setdefault(worker, set()).add(source)
+        self._last_active[worker] = time.monotonic()
+        self._states[worker] = WorkerLifecycleState.ACTIVE
+
+    def clear_activity(self, worker: EvictableWorker, *, source: str) -> None:
+        """Remove a previously registered activity source."""
+        sources = self._activity_sources.get(worker)
+        if sources is not None:
+            sources.discard(source)
+        self._last_active[worker] = time.monotonic()
+
     def _in_use(self, worker: EvictableWorker) -> bool:
         lease = self._lease_locks.get(worker)
         mode_gate = getattr(worker, "mode_gate", None)
-        return bool(lease is not None and lease.active_leases > 0) or (
-            isinstance(mode_gate, AsrModeGate) and mode_gate.active_count > 0
+        return (
+            bool(lease is not None and lease.active_leases > 0)
+            or bool(self._activity_sources.get(worker))
+            or (
+                isinstance(mode_gate, AsrModeGate) and mode_gate.active_count > 0
+            )
         )
 
     async def _eviction_loop(self) -> None:
