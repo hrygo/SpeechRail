@@ -1089,11 +1089,12 @@ class OpenAIRealtimeSession:
             raise RealtimeAdapterError("backend_not_ready", "streaming ASR backend is not ready")
 
         await self._ensure_diarization()
-        wire_span = self._wire_timeline.accept(audio)
+        self._wire_timeline.accept(audio)
         kernel_audio = self._resampler.process(audio)
         kernel_span = self._kernel_timeline.accept(kernel_audio)
-        self._item_end_sample = wire_span.end
-        self._item_end_kernel = kernel_span.end
+        # Accepted input may belong to the next item. Only admitted PCM
+        # advances the current item's end, including across a packet boundary
+        # at which the old item has already filled its segment budget.
         if kernel_audio and self._diarization is not None:
             await self._diarization.append(kernel_audio)
         if not kernel_audio:
@@ -1140,10 +1141,6 @@ class OpenAIRealtimeSession:
                     self._mark_admitted_started(self._item_start_sample)
                 elif v_event.speech_ended:
                     self._services.metrics.record_vad("ended")
-                    self._item_end_kernel = self._kernel_timeline.accepted_samples
-                    self._item_end_sample = self._to_wire_sample(
-                        self._item_end_kernel
-                    )
                     if self._asr is not None:
                         await self._feed_admitted_pcm(kernel_audio, kernel_span.start)
                         await self._commit_audio(reason="vad_stop")
@@ -1245,7 +1242,6 @@ class OpenAIRealtimeSession:
         tail = self._resampler.flush() if reason == "client" else b""
         if tail:
             kernel_span = self._kernel_timeline.accept(tail)
-            self._item_end_kernel = kernel_span.end
             if self._diarization is not None:
                 await self._diarization.append(tail)
             if self._asr is None and self._vad is None and self._speech_admission is None:
