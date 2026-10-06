@@ -2157,7 +2157,7 @@ public final class TeleprompterSession {
                 port: port,
                 language: configuration.language,
                 keywords: configuration.keywords.isEmpty ? nil : configuration.keywords,
-                silenceDurationMilliseconds: RealtimeVADProfile.teleprompter.silenceDurationMilliseconds,
+                scenePreset: configuration.scenePreset,
                 diarizationEnabled: false,
                 apiKey: apiKey,
                 expectedASRRevision: binding?.asrModelRevision
@@ -2321,7 +2321,7 @@ public final class TeleprompterSession {
                 port: port,
                 language: configuration.language,
                 keywords: configuration.keywords.isEmpty ? nil : configuration.keywords,
-                silenceDurationMilliseconds: RealtimeVADProfile.teleprompter.silenceDurationMilliseconds,
+                scenePreset: configuration.scenePreset,
                 diarizationEnabled: false,
                 apiKey: apiKey,
                 expectedASRRevision: binding?.asrModelRevision
@@ -2431,6 +2431,9 @@ public final class TeleprompterSession {
             }
         }
         switch envelope.payload {
+        case .segmentClosed:
+            // Item boundaries do not themselves prove a script position.
+            break
         case .partial(_, _), .partialSnapshot(_, _, _, _):
             guard !isResuming, let activeVersion else { return }
             _ = followAdapter.apply(

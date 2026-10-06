@@ -344,6 +344,9 @@ public final class AssistantSession {
     /// 连接级令牌（D03）：每次建连/重连推进一次。下行事件按它门禁，
     /// 旧连接晚到的事件不许改动当前会话。
     private var connectionToken = 0
+    /// ASR item 按服务端边界归并成一轮 App 输入；连接与会话代次共同隔离迟到事件。
+    private var inputTurnAssembler = AssistantInputTurnAssembler()
+    private var inputTurnIdentity: AssistantInputTurnAssembler.Identity?
     /// M0a：生产 receiver 的输入证据去重集，键为
     /// `(connectionGeneration, itemID, revision)`。重连换新锚时与
     /// `itemObservedAt` 一起清空，旧连接证据不污染新会话；`partial` 无
@@ -1216,7 +1219,7 @@ public final class AssistantSession {
         let client = dependencies.makeRealtimeClient(
             AssistantRealtimeClientConfiguration(
                 port: port,
-                silenceDurationMilliseconds: RealtimeVADProfile.assistant(mode).silenceDurationMilliseconds,
+                scenePreset: ASRScenePreset.assistant(mode),
                 voice: binding?.canonicalVoiceID ?? voiceID,
                 apiKey: serviceKey,
                 expectedASRRevision: binding?.asrModelRevision,
@@ -1232,6 +1235,12 @@ public final class AssistantSession {
         }
         let connection = connectionToken &+ 1
         self.connectionToken = connection
+        let inputIdentity = AssistantInputTurnAssembler.Identity(
+            connection: connection,
+            generation: token
+        )
+        inputTurnAssembler.begin(identity: inputIdentity)
+        inputTurnIdentity = inputIdentity
         // 每条连接换一对时钟锚点（D09）：`receivedAt` 是单调时钟的 instant，
         // 跨连接没有可比性。旧连接的 item 观测时刻一并清掉，
         // 免得重连之后同一个 itemID 沿用上一条连接的时间。
@@ -2021,6 +2030,14 @@ public final class AssistantSession {
             // M0a：空/纯空白 delta 无副作用：不记 observed、不触发打断、
             // 不动字幕槽。非空才走统一证据门并去重。
             guard !delta.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            guard let identity = inputTurnIdentity,
+                  inputTurnAssembler.acceptDelta(
+                    identity: identity,
+                    itemID: itemID,
+                    delta: delta,
+                    eventID: envelope.metadata.eventID
+                  )
+            else { return }
             _ = observedAt(forItem: itemID, receivedAt: envelope.receivedAt)
             noteSpeechEvidence(text: delta, itemID: itemID, revision: -1, connection: connection)
             // 别的 item 的增量不进来：它是**那一句**的证据，不是当前槽位的。
@@ -2028,6 +2045,15 @@ public final class AssistantSession {
             partialItemID = itemID
             partialText = (partialText ?? "") + delta
         case .partialSnapshot(let itemID, let revision, let text, _):
+            guard let identity = inputTurnIdentity,
+                  inputTurnAssembler.acceptSnapshot(
+                    identity: identity,
+                    itemID: itemID,
+                    revision: revision,
+                    text: text,
+                    eventID: envelope.metadata.eventID
+                  )
+            else { return }
             if !text.isEmpty {
                 _ = observedAt(forItem: itemID, receivedAt: envelope.receivedAt)
             }
@@ -2044,18 +2070,55 @@ public final class AssistantSession {
             let hasVisibleText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             partialItemID = hasVisibleText ? itemID : nil
             partialText = hasVisibleText ? text : nil
+        case .segmentClosed(let itemID, let sampleSpan, let reason, let commitEventID):
+            guard let identity = inputTurnIdentity else { return }
+            let closeReason: AssistantInputTurnAssembler.CloseReason
+            switch reason {
+            case .vad:
+                closeReason = .vad
+            case .clientCommit:
+                closeReason = .clientCommit
+            case .budgetRollover:
+                closeReason = .budgetRollover
+            }
+            _ = inputTurnAssembler.closeSegment(
+                identity: identity,
+                itemID: itemID,
+                sampleSpan: sampleSpan,
+                reason: closeReason,
+                commitEventID: commitEventID,
+                eventID: envelope.metadata.eventID
+            )
         case .completed(let itemID, let transcript):
             // final-only 的 item 到这里才有第一个证据，用它自己的接收时刻。
             let observed = observedAt(forItem: itemID, receivedAt: envelope.receivedAt)
-            commitUserTurn(itemID: itemID, transcript: transcript, observedAt: observed)
-        case .failed(let itemID, let code, let message):
-            // 空 itemID 认不出身份（例如 `invalid_hypothesis`），
-            // 只报告失败，不去动别人的可见文字。
-            if ownsPartial(itemID) {
-                partialText = nil
-                partialItemID = nil
+            guard let identity = inputTurnIdentity else { return }
+            let turns = inputTurnAssembler.resolveTerminal(
+                identity: identity,
+                itemID: itemID,
+                terminal: .completed(transcript),
+                eventID: envelope.metadata.eventID
+            )
+            for turn in turns {
+                commitAssembledInputTurn(turn, observedAt: observed)
             }
+        case .failed(let itemID, let code, let message):
+            // 失败事件只提供终态，不等于恢复材料已接纳或保存。
+            // 由 commitAssembledInputTurn 在持久化队列接纳后释放预览槽，
+            // 避免队列拒绝时 UI 与内存里的原文一起消失。
             lastFailure = "\(code)：\(message)"
+            if let identity = inputTurnIdentity {
+                let observed = observedAt(forItem: itemID, receivedAt: envelope.receivedAt)
+                let turns = inputTurnAssembler.resolveTerminal(
+                    identity: identity,
+                    itemID: itemID,
+                    terminal: .failed,
+                    eventID: envelope.metadata.eventID
+                )
+                for turn in turns {
+                    commitAssembledInputTurn(turn, observedAt: observed)
+                }
+            }
         case .ttsStarted(let requestID, let taskID, let limits):
             if let stream = ttsStream, stream.handleStarted(
                 requestID: requestID,
@@ -2191,35 +2254,41 @@ public final class AssistantSession {
         return try await coordinator.appendLine(draft, id: id)
     }
 
-    /// receiver 只认领输入并入队；所有保存与标题 IO 由唯一消费者承担。
-    private func commitUserTurn(itemID: String, transcript: String, observedAt observed: Date) {
-        defer { if !itemID.isEmpty { itemObservedAt.removeValue(forKey: itemID) } }
-        guard inputLifecycle != .closed, let recordID = sessionID, sessionStartedAt != nil else { return }
-        let ownsSlot = ownsPartial(itemID)
-        let visible = ownsSlot ? partialText : nil
-        let formalText = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-        let formal = !formalText.isEmpty
-        let text = formal ? formalText : (visible ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else {
-            if ownsSlot { clearPartialSlot() }
-            return
+    /// receiver 只认领一轮边界闭合的输入并入队；所有保存与标题 IO 由唯一消费者承担.
+    private func commitAssembledInputTurn(
+        _ turn: AssistantInputTurnAssembler.InputTurn,
+        observedAt observed: Date
+    ) {
+        for itemID in turn.itemIDs {
+            itemObservedAt.removeValue(forKey: itemID)
         }
+        guard inputLifecycle != .closed, let recordID = sessionID, sessionStartedAt != nil else { return }
+        let text = (
+            turn.isFormal ? turn.transcript : turn.recoveryText
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
         let target: String
         switch inputLifecycle {
         case .active: target = recordID
         case .draining(let ending, let connection):
-            guard connection == connectionToken else { return }
+            guard connection == turn.identity.connection else { return }
             target = ending ?? recordID
         case .closed: return
         }
         let command = AssistantInputPersistenceQueue.Command(
-            sessionID: target, connection: connectionToken, itemID: itemID,
-            text: text, formal: formal, observedAt: observed
+            sessionID: target,
+            connection: turn.identity.connection,
+            itemID: turn.boundaryItemID,
+            text: text,
+            formal: turn.isFormal,
+            observedAt: observed
         )
         switch inputPersistence.enqueue(command) {
         case .accepted, .duplicate:
-            // 同步交接给可观察的队列后才释放字幕槽；拒绝输入时保留可见正文。
-            if ownsSlot { clearPartialSlot() }
+            // 同步交接给可观察的队列后才释放本轮字幕槽；拒绝输入时保留可见正文。
+            if let partialItemID, turn.itemIDs.contains(partialItemID) {
+                clearPartialSlot()
+            }
         case .capacityExceeded:
             lastFailure = "记录正在保存，暂时无法接纳这句新输入，请稍后重说。"
         case .invalidIdentity:

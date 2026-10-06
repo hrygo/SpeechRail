@@ -108,17 +108,20 @@ extension RealtimeASRClient: MeetingRealtimeClient {}
 /// 不需要真的握手。
 public struct MeetingRealtimeClientConfiguration: Sendable, Equatable {
     public var port: Int
+    public var scenePreset: ASRScenePreset
     public var apiKey: String?
     public var diarizationEnabled: Bool
     public var expectedASRRevision: String?
 
     public init(
         port: Int,
+        scenePreset: ASRScenePreset = .meeting,
         apiKey: String?,
         diarizationEnabled: Bool,
         expectedASRRevision: String?
     ) {
         self.port = port
+        self.scenePreset = scenePreset
         self.apiKey = apiKey
         self.diarizationEnabled = diarizationEnabled
         self.expectedASRRevision = expectedASRRevision

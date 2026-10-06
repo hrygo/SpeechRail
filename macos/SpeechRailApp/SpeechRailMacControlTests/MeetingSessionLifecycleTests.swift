@@ -724,6 +724,109 @@ extension MeetingSessionLifecycleTests {
         }
     }
 
+    /// B 的 final 先到，A 的 final 后到；正文与冻结的输入区间仍按各自 item 归属。
+    func testLateFinalKeepsItsItemAndFrozenInputRange() async throws {
+        let h = try await makeHarness()
+        let sessionID = try await startRecording(h)
+
+        let spanA = RealtimeASRClient.RealtimeSampleSpan(startSample: 0, endSample: 24_000)
+        let spanB = RealtimeASRClient.RealtimeSampleSpan(startSample: 24_000, endSample: 48_000)
+        try await h.emit(
+            .segmentClosed(
+                itemID: "A",
+                sampleSpan: spanA,
+                reason: .vad,
+                commitEventID: nil
+            )
+        )
+        try await h.emit(
+            .segmentClosed(
+                itemID: "B",
+                sampleSpan: spanB,
+                reason: .vad,
+                commitEventID: nil
+            )
+        )
+
+        try await h.emit(.completed(itemID: "B", transcript: "B 的正文"))
+        try await h.settle { $0.session.lines.count == 1 }
+        try await h.emit(.completed(itemID: "A", transcript: "A 的正文"))
+        try await h.settle { $0.session.lines.count == 2 }
+
+        let lines = try await h.store.lines(sessionID: sessionID)
+        XCTAssertEqual(lines.count, 2)
+        let lineA = try XCTUnwrap(lines.first { $0.text == "A 的正文" })
+        let lineB = try XCTUnwrap(lines.first { $0.text == "B 的正文" })
+        let startA = try XCTUnwrap(lineA.tStart)
+        let endA = try XCTUnwrap(lineA.tEnd)
+        let startB = try XCTUnwrap(lineB.tStart)
+        let endB = try XCTUnwrap(lineB.tEnd)
+        XCTAssertEqual(startB - startA, 1, accuracy: 0.02)
+        XCTAssertEqual(endB - endA, 1, accuracy: 0.02)
+        XCTAssertGreaterThan(endA, startA)
+        XCTAssertGreaterThan(endB, startB)
+    }
+
+    /// The save owner must wait until drain events are consumed before it
+    /// archives the meeting. A tail final and its later attribution belong to
+    /// the ending connection and must both reach the original saved row.
+    func testDrainFinalAndLateAttributionReachSaveOwnerBeforeArchive() async throws {
+        let h = try await makeHarness()
+        let preferencesName = "meeting-drain-\(UUID().uuidString)"
+        let preferencesDefaults = try XCTUnwrap(UserDefaults(suiteName: preferencesName))
+        defer { preferencesDefaults.removePersistentDomain(forName: preferencesName) }
+        let preferences = SessionPreferences(defaults: preferencesDefaults)
+        preferences.meetingDiarizationEnabled = true
+        h.session.preferences = { preferences }
+
+        let sessionID = try await startRecording(h)
+        let client = try XCTUnwrap(h.clients.all.last)
+        h.audio.emit(AudioChunk(pcm: Data([0, 1]), level: 0.2))
+        h.audio.emit(AudioChunk(pcm: Data([2, 3]), level: 0.3))
+        await client.setDrainEvents([
+            .segmentClosed(
+                itemID: "tail",
+                sampleSpan: .init(startSample: 0, endSample: 48_000),
+                reason: .clientCommit,
+                commitEventID: "meeting-drain-commit"
+            ),
+            .completed(itemID: "tail", transcript: "会议最后一句"),
+            .attribution(
+                itemID: "tail",
+                units: [
+                    RealtimeASRClient.AttributionUnit(
+                        segmentUID: "tail-segment",
+                        speaker: "A",
+                        textStart: 0,
+                        textEnd: 6,
+                        audioStartSample: 0,
+                        audioEndSample: 48_000,
+                        timingQuality: "aligned"
+                    )
+                ],
+                isFinal: true
+            ),
+            .diarizationFinished
+        ])
+        await client.finishEventsOnClose()
+
+        await h.session.finishAndSummarize()
+
+        let lines = try await h.store.lines(sessionID: sessionID)
+        XCTAssertEqual(lines.count, 1, "drain 尾句应在归档前落库一次")
+        let line = try XCTUnwrap(lines.first)
+        XCTAssertEqual(line.text, "会议最后一句")
+        XCTAssertEqual(line.speakerLabel, "A", "final 之后的 drain attribution 也须写入同一行")
+        XCTAssertEqual(try XCTUnwrap(line.tStart), 0, accuracy: 0.02)
+        XCTAssertEqual(try XCTUnwrap(line.tEnd), 2, accuracy: 0.02)
+        let appendedAtDrain = await client.appendedByteCountAtDrain
+        let appendedBytes = await client.appendedByteCount
+        XCTAssertEqual(appendedAtDrain, 4, "提交 drain 前必须上传采集流里已缓冲的两块音频")
+        XCTAssertEqual(appendedBytes, 4, "已缓冲音频只上传一次")
+        let record = try await h.store.session(id: sessionID)
+        XCTAssertEqual(record?.state, .archived, "只有 drain 和晚到辅助结果完成后才归档")
+    }
+
     /// MC-10：同一 item 连续快照修订，先到 3 再迟到 2。
     /// **全文替换**而非追加；旧 revision 不许倒写。
     func testLateSnapshotRevisionDoesNotOverwriteTheNewerOne() async throws {
@@ -944,6 +1047,9 @@ actor ControllableRealtimeClient: MeetingRealtimeClient {
     private(set) var flushCount = 0
     private(set) var drainCount = 0
     private(set) var appendedByteCount = 0
+    private(set) var appendedByteCountAtDrain = 0
+    private var drainEvents: [RealtimeASRClient.Event] = []
+    private var finishEventsWhenClosed = false
 
     init(gate: ConnectGate) {
         self.gate = gate
@@ -990,8 +1096,29 @@ actor ControllableRealtimeClient: MeetingRealtimeClient {
 
     func append(_ pcm: Data) async throws { appendedByteCount += pcm.count }
     func flushPendingUtterance() async throws { flushCount += 1 }
-    func drainAndClear(timeout: Duration) async throws { drainCount += 1 }
-    func close() async { closeCount += 1 }
+    func setDrainEvents(_ events: [RealtimeASRClient.Event]) {
+        drainEvents = events
+    }
+
+    func finishEventsOnClose() {
+        finishEventsWhenClosed = true
+    }
+
+    func drainAndClear(timeout: Duration) async throws {
+        drainCount += 1
+        appendedByteCountAtDrain = appendedByteCount
+        let events = drainEvents
+        drainEvents = []
+        for event in events {
+            await emit(event)
+        }
+    }
+    func close() async {
+        closeCount += 1
+        if finishEventsWhenClosed {
+            await stream.finish()
+        }
+    }
 }
 
 /// 建出来的连接按顺序收在一处，测试要按"第几条"来断言。

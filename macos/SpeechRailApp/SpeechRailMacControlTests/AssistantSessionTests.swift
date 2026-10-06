@@ -183,6 +183,8 @@ final class AssistantSessionTests: XCTestCase {
         private var counters = Counters()
         private(set) var receivedAudioBytes = 0
         private(set) var configurations: [AssistantRealtimeClientConfiguration] = []
+        private var closedSegmentItemIDs: Set<String> = []
+        private var nextBoundarySample = 0
         private var ttsRequestID = ""
         private let autoConfirmTTSCancel: Bool
         private var ttsAcceptedCodepoints = 0
@@ -300,6 +302,36 @@ final class AssistantSessionTests: XCTestCase {
         }
 
         func emit(_ payload: RealtimeASRClient.Event) async {
+            switch payload {
+            case .segmentClosed(let itemID, _, _, _):
+                closedSegmentItemIDs.insert(itemID)
+            case .completed(let itemID, _), .failed(let itemID, _, _):
+                if !itemID.isEmpty, closedSegmentItemIDs.insert(itemID).inserted {
+                    let startSample = nextBoundarySample
+                    let endSample = startSample + 24_000
+                    nextBoundarySample = endSample
+                    await emitRaw(
+                        .segmentClosed(
+                            itemID: itemID,
+                            sampleSpan: .init(startSample: startSample, endSample: endSample),
+                            reason: .vad,
+                            commitEventID: nil
+                        )
+                    )
+                }
+            default:
+                break
+            }
+            await emitRaw(payload)
+        }
+
+        /// Sends a terminal exactly as given, without synthesizing the preceding
+        /// segment-close event. Used to cover recovery when a boundary is absent.
+        func emitWithoutSegmentBoundary(_ payload: RealtimeASRClient.Event) async {
+            await emitRaw(payload)
+        }
+
+        private func emitRaw(_ payload: RealtimeASRClient.Event) async {
             _ = await stream.yield(
                 RealtimeEventEnvelope(
                     metadata: RealtimeEventMetadata(
@@ -434,6 +466,7 @@ final class AssistantSessionTests: XCTestCase {
         drainFailure: Error? = nil,
         autoConfirmTTSCancel: Bool = true,
         capability: Bool = true,
+        inputPersistenceConfiguration: AssistantInputPersistenceQueue.Configuration = .init(),
         now: @escaping @Sendable () -> Date = { Date() }
     ) async throws -> Harness {
         let directory = FileManager.default.temporaryDirectory
@@ -471,7 +504,8 @@ final class AssistantSessionTests: XCTestCase {
                     box.append(client, configuration: configuration)
                     return client
                 },
-                now: now
+                now: now,
+                inputPersistenceConfiguration: inputPersistenceConfiguration
             )
         )
         session.preferences = { preferences }
@@ -726,10 +760,9 @@ final class AssistantSessionTests: XCTestCase {
 
     /// 按 fixture 的 `server_events` 应答的 Realtime 客户端。
     ///
-    /// 它**不是**另写的模拟协议：每一个下行事件都取自服务端实际录下的那一份
-    /// `server_events`（`tts.started` / `text_accepted` / terminal 全部来自
-    /// fixture），上行调用则被记录下来供断言。服务端时序变了，Python 侧先红；
-    /// 这里消费的是同一份文件，所以两侧不会各自通过。
+    /// TTS 与转写 final 内容取自服务端事件 fixture；fixture 未记录样本区间，
+    /// 所以此 seam 在 final 前提供确定的 VAD `segmentClosed` 边界。完整 wire
+    /// 事件顺序与字段由 RealtimeContractTests 单独验证。
     private final class FixtureRealtime: AssistantRealtimeClient, @unchecked Sendable {
         private let stream: RealtimeEventStream<RealtimeASRClient.Event>
         private let events: [LifecycleFixture.Scenario.ServerEvent]
@@ -746,6 +779,8 @@ final class AssistantSessionTests: XCTestCase {
             var activeFixtureRequestID: String?
             var servedStarts = 0
             var servedFinals = 0
+            var closedSegmentItemIDs: Set<String> = []
+            var nextBoundarySample = 0
         }
 
         init(events: [LifecycleFixture.Scenario.ServerEvent]) {
@@ -870,9 +905,19 @@ final class AssistantSessionTests: XCTestCase {
             let sent = lock.withLock { state.servedFinals }
             guard sent < finals.count else { return false }
             lock.withLock { state.servedFinals += 1 }
+            let itemID = "item_fixture_\(sent)"
+            let startSample = sent * 24_000
+            await emit(
+                .segmentClosed(
+                    itemID: itemID,
+                    sampleSpan: .init(startSample: startSample, endSample: startSample + 24_000),
+                    reason: .vad,
+                    commitEventID: nil
+                )
+            )
             await emit(
                 .completed(
-                    itemID: "item_fixture_\(sent)",
+                    itemID: itemID,
                     transcript: finals[sent].transcript ?? ""
                 )
             )
@@ -891,6 +936,37 @@ final class AssistantSessionTests: XCTestCase {
         }
 
         func emit(_ payload: RealtimeASRClient.Event) async {
+            let syntheticBoundary: RealtimeASRClient.Event? = lock.withLock {
+                switch payload {
+                case .segmentClosed(let itemID, _, _, _):
+                    state.closedSegmentItemIDs.insert(itemID)
+                    return nil
+                case .completed(let itemID, _), .failed(let itemID, _, _):
+                    guard !itemID.isEmpty,
+                          state.closedSegmentItemIDs.insert(itemID).inserted
+                    else {
+                        return nil
+                    }
+                    let startSample = state.nextBoundarySample
+                    let endSample = startSample + 24_000
+                    state.nextBoundarySample = endSample
+                    return .segmentClosed(
+                        itemID: itemID,
+                        sampleSpan: .init(startSample: startSample, endSample: endSample),
+                        reason: .vad,
+                        commitEventID: nil
+                    )
+                default:
+                    return nil
+                }
+            }
+            if let syntheticBoundary {
+                await emitRaw(syntheticBoundary)
+            }
+            await emitRaw(payload)
+        }
+
+        private func emitRaw(_ payload: RealtimeASRClient.Event) async {
             _ = await stream.yield(
                 RealtimeEventEnvelope(
                     metadata: RealtimeEventMetadata(
@@ -1273,12 +1349,15 @@ final class AssistantSessionTests: XCTestCase {
         defer { cleanup(harness) }
 
         try await harness.coordinator.begin(.assistant)
-        XCTAssertEqual(harness.configurations().map(\.silenceDurationMilliseconds), [900])
+        XCTAssertEqual(harness.configurations().map(\.scenePreset), [.assistantDuplex])
 
         await harness.clients()[0].emit(.closed(code: 1006))
         await waitUntil({ harness.session.blocked != nil }, message: "断线没有进入受阻态")
         await harness.session.retry()
-        XCTAssertEqual(harness.configurations().map(\.silenceDurationMilliseconds), [900, 900])
+        XCTAssertEqual(
+            harness.configurations().map(\.scenePreset),
+            [.assistantDuplex, .assistantDuplex]
+        )
     }
 
     func testTurnTakingWaitsLongerForQuestionCompletion() async throws {
@@ -1291,7 +1370,7 @@ final class AssistantSessionTests: XCTestCase {
             mode: .turnTaking
         )
         await waitUntil({ harness.configurations().count == 1 }, message: "一问一答没有建连")
-        XCTAssertEqual(harness.configurations()[0].silenceDurationMilliseconds, 1_200)
+        XCTAssertEqual(harness.configurations()[0].scenePreset, .assistantTurnTaking)
     }
 
     func testHarnessStartsAndStopsThroughTheProductionSession() async throws {
@@ -2218,6 +2297,92 @@ final class AssistantSessionTests: XCTestCase {
         )
         let lines = try await harness.store.lines(sessionID: sessionID, includePartial: true)
         XCTAssertTrue(lines.isEmpty, "没说话不该落库")
+    }
+
+    func testMissingBoundaryFailureKeepsPreviewWhenPersistenceQueueRejectsIt() async throws {
+        let preview = "保留这句待恢复内容"
+        let harness = try await makeHarness(
+            inputPersistenceConfiguration: .init(maximumPendingCommands: 0)
+        )
+        defer { cleanup(harness) }
+
+        try await harness.coordinator.begin(.assistant)
+        let sessionID = try XCTUnwrap(harness.session.sessionID)
+        let client = harness.clients()[0]
+        await client.emit(.configured)
+        await client.emit(.partialSnapshot(itemID: "i1", revision: 1, text: preview))
+        await waitUntil(
+            { harness.session.partialText == preview },
+            message: "预览没有进入助手当前输入槽"
+        )
+        await client.emitWithoutSegmentBoundary(
+            .failed(itemID: "i1", code: "asr_failed", message: "final unavailable")
+        )
+
+        await waitUntil(
+            { harness.session.lastFailure?.contains("暂时无法接纳") == true },
+            message: "队列拒绝后没有报告接纳失败"
+        )
+
+        XCTAssertEqual(
+            harness.session.partialText, preview,
+            "持久化队列拒绝后，UI 与内存预览仍须保留原文"
+        )
+        let lines = try await harness.store.lines(sessionID: sessionID, includePartial: true)
+        XCTAssertTrue(lines.isEmpty, "队列拒绝时不得伪造已保存记录")
+        let llmStreamCount = await harness.llm.streamCount
+        XCTAssertEqual(llmStreamCount, 0, "失败终态的预览不能触发助手回复")
+    }
+
+    func testBudgetRolloverDoesNotReplyUntilVadFinalCompletesTheTurn() async throws {
+        let harness = try await makeHarness(
+            llmScripts: [.deltas(["你好。"])]
+        )
+        defer { cleanup(harness) }
+
+        try await harness.coordinator.begin(.assistant)
+        let sessionID = try XCTUnwrap(harness.session.sessionID)
+        let client = harness.clients()[0]
+        await client.emit(.configured)
+
+        await client.emit(
+            .segmentClosed(
+                itemID: "item-1",
+                sampleSpan: .init(startSample: 0, endSample: 24_000),
+                reason: .budgetRollover,
+                commitEventID: nil
+            )
+        )
+        await client.emit(.completed(itemID: "item-1", transcript: "Good"))
+        try? await Task.sleep(for: .milliseconds(30))
+        XCTAssertTrue(
+            harness.session.turns.filter { $0.role == .user }.isEmpty,
+            "budget rollover 只关闭 ASR item，不得提交业务轮次"
+        )
+        let earlyLLMStreamCount = await harness.llm.streamCount
+        XCTAssertEqual(earlyLLMStreamCount, 0, "预算切段后不得提前抢答")
+
+        await client.emit(
+            .segmentClosed(
+                itemID: "item-2",
+                sampleSpan: .init(startSample: 24_000, endSample: 48_000),
+                reason: .vad,
+                commitEventID: nil
+            )
+        )
+        await client.emit(.completed(itemID: "item-2", transcript: "morning"))
+
+        await waitUntil(
+            { harness.session.turns.contains { $0.role == .assistant } },
+            message: "VAD 终态后未产生助手回复"
+        )
+        let userTurns = harness.session.turns.filter { $0.role == .user }
+        XCTAssertEqual(userTurns.count, 1, "同一轮预算切段只应落一条用户输入")
+        XCTAssertEqual(userTurns.first?.text, "Good morning")
+        let finalLines = try await harness.store.lines(sessionID: sessionID)
+        XCTAssertEqual(finalLines.filter { $0.role == .user }.map(\.text), ["Good morning"])
+        let finalLLMStreamCount = await harness.llm.streamCount
+        XCTAssertEqual(finalLLMStreamCount, 1, "一轮输入只触发一次 LLM 请求")
     }
 
     /// 跨 item：一个还在进行的 item 的可见文字，不能被另一个 item 的事件清掉。

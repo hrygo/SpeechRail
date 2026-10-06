@@ -1,26 +1,10 @@
 import Foundation
 import SpeechRailControlKit
 
-/// App 场景的断句预设。短暂停顿是否结束一轮由调用方场景决定，
-/// Realtime 服务只执行这里传入的静音窗口。
-enum RealtimeVADProfile: Sendable {
-    case assistantTurnTaking
-    case assistantDuplex
-    case caption
-    case meeting
-    case teleprompter
-
-    static func assistant(_ mode: AssistantMode) -> Self {
-        mode == .turnTaking ? .assistantTurnTaking : .assistantDuplex
-    }
-
-    var silenceDurationMilliseconds: Int {
-        switch self {
-        case .assistantTurnTaking: 1_200
-        case .assistantDuplex, .meeting: 900
-        case .caption, .teleprompter: 400
-        }
-    }
+public enum ASRSegmentCloseReason: String, Sendable {
+    case vad
+    case clientCommit = "client_commit"
+    case budgetRollover = "budget_rollover"
 }
 
 enum RealtimeASRSocketFrame: Sendable {
@@ -127,6 +111,7 @@ struct RealtimeEventState: Sendable {
         var transcript: String?
         var frozenTranscriptRevision: Int?
         var isTextTerminal = false
+        var segmentClosed = false
         var latestHypothesisRevision: Int?
         var alignmentTranscriptRevision: Int?
         var alignmentRevision: Int?
@@ -199,7 +184,10 @@ struct RealtimeEventState: Sendable {
     mutating func prune(now: ContinuousClock.Instant) {
         let expiredIDs = itemOrder.filter { itemID in
             guard let item = items[itemID] else { return true }
-            return item.lastActivity.duration(to: now) > Self.itemLifetime
+            // A closed segment may still be waiting on its final deadline.
+            // Only terminal text starts the auxiliary retention window.
+            return item.isTextTerminal
+                && item.lastActivity.duration(to: now) > Self.itemLifetime
         }
         for itemID in expiredIDs {
             retire(itemID, now: now)
@@ -228,7 +216,7 @@ struct RealtimeEventState: Sendable {
     }
 
     func nextExpiryDelay(now: ContinuousClock.Instant) -> Duration? {
-        guard let oldest = items.values.min(by: {
+        guard let oldest = items.values.filter(\.isTextTerminal).min(by: {
             $0.lastActivity < $1.lastActivity
         }) else { return nil }
         let deadline = oldest.lastActivity.advanced(by: Self.itemLifetime)
@@ -305,6 +293,28 @@ struct RealtimeEventState: Sendable {
         else { return false }
         item.latestHypothesisRevision = revision
         item.transcript = text
+        item.lastActivity = now
+        items[itemID] = item
+        touch(itemID)
+        return true
+    }
+
+    @discardableResult
+    mutating func acceptSegmentClosed(
+        itemID: String,
+        sessionID: String,
+        generation: UUID,
+        now: ContinuousClock.Instant
+    ) -> Bool {
+        guard prepareBaseItem(
+            itemID: itemID,
+            sessionID: sessionID,
+            generation: generation,
+            now: now,
+            createIfMissing: true
+        ), var item = items[itemID], !item.isTextTerminal, !item.segmentClosed
+        else { return false }
+        item.segmentClosed = true
         item.lastActivity = now
         items[itemID] = item
         touch(itemID)
@@ -944,6 +954,12 @@ public actor RealtimeASRClient {
             text: String,
             evidence: RealtimeHypothesisEvidence = .init()
         )
+        case segmentClosed(
+            itemID: String,
+            sampleSpan: RealtimeSampleSpan,
+            reason: ASRSegmentCloseReason,
+            commitEventID: String?
+        )
         /// 文本终态。当前 wire 的 final 只承载正文；对齐与匿名声归属**随后独立到达**，
         /// 不得等待它们、也不得用它们改写正文。
         case completed(itemID: String, transcript: String)
@@ -1001,11 +1017,13 @@ public actor RealtimeASRClient {
     private let keywords: [String]?
     /// 静音窗口由 App 的场景预设选择；服务端据此确定句末。
     private let silenceDurationMilliseconds: Int
+    private let prefixPaddingMilliseconds: Int
     private let threshold: Double
     /// 分人开关（每场一次，**首个 PCM 之前**协商，之后改不了）。
     private let diarizationEnabled: Bool
     /// `session.speechrail.task`（会话层语义标签）。
     private let sessionTask: SpeechRailSessionUpdate.Task
+    private let asrPolicy: SpeechRailASRPolicy
     private let expectedASRRevision: String?
     /// 当前 caller-owned TTS voice 的 revision。随 voice 一起在连接内更新。
     private var expectedVoiceRevision: String?
@@ -1069,10 +1087,9 @@ public actor RealtimeASRClient {
         model: String = RealtimeASRClient.canonicalASRModel,
         language: String? = nil,
         keywords: [String]? = nil,
-        silenceDurationMilliseconds: Int = 400,
-        threshold: Double = 0.5,
+        scenePreset: ASRScenePreset = .caption,
+        threshold: Double? = nil,
         diarizationEnabled: Bool = false,
-        sessionTask: SpeechRailSessionUpdate.Task = .conversation,
         voice: String? = nil,
         apiKey: String? = nil,
         session: URLSession = .shared,
@@ -1096,10 +1113,12 @@ public actor RealtimeASRClient {
         self.model = model
         self.language = language
         self.keywords = keywords
-        self.silenceDurationMilliseconds = silenceDurationMilliseconds
-        self.threshold = threshold
+        self.silenceDurationMilliseconds = scenePreset.silenceDurationMilliseconds
+        self.prefixPaddingMilliseconds = scenePreset.prefixPaddingMilliseconds
+        self.threshold = threshold ?? scenePreset.threshold
         self.diarizationEnabled = diarizationEnabled
-        self.sessionTask = sessionTask
+        self.sessionTask = scenePreset.task
+        self.asrPolicy = scenePreset.policy
         self.expectedASRRevision = expectedASRRevision
         self.expectedTTSRevision = expectedTTSRevision
         self.expectedVoiceRevision = expectedVoiceRevision
@@ -1387,6 +1406,7 @@ public actor RealtimeASRClient {
             keywords: keywords,
             endpointing: SpeechRailSessionUpdate.Endpointing(
                 threshold: threshold,
+                prefixPaddingMilliseconds: prefixPaddingMilliseconds,
                 silenceDurationMilliseconds: silenceDurationMilliseconds
             ),
             ttsEnabled: callerTTSEnabled,
@@ -1395,6 +1415,7 @@ public actor RealtimeASRClient {
                 granularity: diarizationEnabled ? "segment" : nil
             ),
             diarizationEnabled: diarizationEnabled,
+            asrPolicy: asrPolicy,
             expectedASRRevision: expectedASRRevision
         ).jsonObject
     }
@@ -1544,6 +1565,10 @@ public actor RealtimeASRClient {
             let model = (object["session"] as? [String: Any])?["model"] as? String ?? self.model
             await emit(.ready(model: model))
         case "session.updated":
+            guard acceptsASRPolicyEcho(object) else {
+                await rejectProtocolEvent(code: "invalid_server_event")
+                return
+            }
             await emit(.configured)
             if !didClose {
                 configurationAcknowledged = true
@@ -1659,6 +1684,30 @@ public actor RealtimeASRClient {
                     )
                 )
             )
+        case "speechrail.transcription.segment_closed":
+            guard let itemID = object["item_id"] as? String, !itemID.isEmpty,
+                  let span = Self.contractSpan(object["sample_span"]), span.end > span.start,
+                  let rawReason = object["reason"] as? String,
+                  let reason = ASRSegmentCloseReason(rawValue: rawReason),
+                  object["commit_event_id"] == nil || (
+                    reason == .clientCommit
+                    && (object["commit_event_id"] as? String)?.isEmpty == false
+                  ) else {
+                await rejectProtocolEvent(code: "invalid_segment_boundary")
+                return
+            }
+            guard eventState.acceptSegmentClosed(
+                itemID: itemID,
+                sessionID: metadata.sessionID!,
+                generation: generation,
+                now: receivedAt
+            ) else { break }
+            await emit(.segmentClosed(
+                itemID: itemID,
+                sampleSpan: .init(startSample: span.start, endSample: span.end),
+                reason: reason,
+                commitEventID: object["commit_event_id"] as? String
+            ))
         case "conversation.item.input_audio_transcription.completed":
             let itemID = object["item_id"] as? String ?? ""
             let transcript = object["transcript"] as? String ?? ""
@@ -2148,6 +2197,43 @@ public actor RealtimeASRClient {
         if let number = value as? NSNumber { return number.intValue }
         if let text = value as? String { return Int(text) }
         return nil
+    }
+
+    private func acceptsASRPolicyEcho(_ object: [String: Any]) -> Bool {
+        guard let session = object["session"] as? [String: Any],
+              let speechrail = session["speechrail"] as? [String: Any],
+              let policy = speechrail["asr"] as? [String: Any],
+              Self.contractInteger(policy["preview_interval_ms"])
+                == asrPolicy.previewIntervalMilliseconds,
+              Self.contractInteger(policy["max_segment_ms"])
+                == asrPolicy.maxSegmentMilliseconds,
+              policy["finalization"] as? String == asrPolicy.finalization.rawValue,
+              let effective = Self.contractInteger(policy["effective_max_segment_ms"]),
+              effective >= 1_000, effective <= asrPolicy.maxSegmentMilliseconds,
+              let deadline = Self.contractInteger(policy["final_deadline_ms"]),
+              deadline > 0
+        else { return false }
+        if let requested = asrPolicy.finalDeadlineMilliseconds {
+            return deadline == requested
+        }
+        return true
+    }
+
+    private static func contractInteger(_ value: Any?) -> Int? {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID(),
+              !["d", "f"].contains(String(cString: number.objCType))
+        else { return nil }
+        return Int(number.stringValue)
+    }
+
+    private static func contractSpan(_ value: Any?) -> RealtimeEventState.Range? {
+        guard let object = value as? [String: Any],
+              let start = contractInteger(object["start"]),
+              let end = contractInteger(object["end"]),
+              start >= 0, end >= start
+        else { return nil }
+        return .init(start: start, end: end)
     }
 
     /// 增量 PCM 的块序号与 sample offset 必须严格连续。输出格式由 `started.output_format`

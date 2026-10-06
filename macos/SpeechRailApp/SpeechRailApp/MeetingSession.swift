@@ -217,16 +217,17 @@ public final class MeetingSession {
 
     private var client: (any MeetingRealtimeClient)?
     private var pump: Task<Void, Never>?
+    private var uploadPump: Task<Void, Never>?
     private var sleepObserver: AnyObject?
-    private var commitCursor: Date?
-    private var pendingItem: (start: Date, end: Date)?
     private var currentOrdinal = 0
     /// item 级账本（MA-02）。去重按 (代次, itemID)，
     /// 所以重连后新服务复用 item ID 不会被旧连接的去重集吞掉（MC-13）。
     private var transcriptLedger = TranscriptItemLedger()
-    /// `utterance_id` → 已落库的行。对齐与分人结果随后按 item 找到那一行，
-    /// 因为文本 final 不再携带 `attribution_units`（契约 §5.2）。
-    private var lineByItem: [String: (lineID: String, ordinal: Int)] = [:]
+    /// 修订文本与输入区间按连接及 item 归属；final 到达时刻不参与声学时间。
+    private var previewLedger = TranscriptPreviewLedger()
+    private var previewIdentity: TranscriptPreviewLedger.Identity?
+    /// `(connection, generation, itemID)` → 已落库行，避免迟到归属命中新连接复用的 item ID。
+    private var lineByItem: [TranscriptPreviewLedger.ItemIdentity: (lineID: String, ordinal: Int)] = [:]
     /// 已经补写过 `timing_quality` 的行；同一行只写一次。
     private var timingQualityApplied: Set<String> = []
     private var diarizationDrained = false
@@ -483,6 +484,7 @@ public final class MeetingSession {
         let client = dependencies.makeRealtimeClient(
             MeetingRealtimeClientConfiguration(
                 port: port,
+                scenePreset: .meeting,
                 apiKey: serviceKey,
                 diarizationEnabled: wantsDiarization,
                 expectedASRRevision: binding?.asrModelRevision
@@ -549,8 +551,15 @@ public final class MeetingSession {
         let generation = connectionGeneration.begin()
         // 无论新建还是续接，都换一代 item 账本：上一代的 item 与这一代无关。
         transcriptLedger.beginGeneration(generation)
-        commitCursor = dependencies.clock.now()
-        pendingItem = nil
+        let previewIdentity = TranscriptPreviewLedger.Identity(
+            connection: epoch,
+            generation: generation
+        )
+        self.previewIdentity = previewIdentity
+        previewLedger.beginGeneration(
+            identity: previewIdentity,
+            captureTimelineOffsetSeconds: dependencies.clock.now().timeIntervalSince1970
+        )
         partialText = nil
         diarizationDrained = false
         isStoppingIntentionally = false
@@ -563,7 +572,12 @@ public final class MeetingSession {
             Task { await self?.handleSystemAudioLost(reason) }
         }
         if isNewSession { startSleepObserver() }
-        startPump(stream: stream, client: client, generation: generation)
+        startPump(
+            stream: stream,
+            client: client,
+            generation: generation,
+            previewIdentity: previewIdentity
+        )
     }
 
     private func configureLabeling(sessionID: String?, enabled: Bool) {
@@ -573,15 +587,25 @@ public final class MeetingSession {
 
     /// 释放这一层的设备与连接。**幂等**，中断与结束两条路都走它。
     private func releaseCapture(drain: Bool = false) async {
-        // 断开这一代：还在飞的 chunk 与事件从这一刻起一律作废。
-        connectionGeneration.invalidate()
-        if !drain {
+        let shouldDrain = drain && phase == .recording && client != nil
+        if !shouldDrain {
+            // 中断路径要立刻断开这一代；录制结束的 drain 则必须让这一代
+            // 继续接收已经生成的终态与辅助归属，直到事件泵消费完成。
+            connectionGeneration.invalidate()
+            uploadPump?.cancel()
+            uploadPump = nil
             pump?.cancel()
             pump = nil
         }
         await audio.stop()
+        if shouldDrain {
+            // AsyncStream 结束后仍会交付缓冲中的 AudioChunk。先把这些块送完，
+            // 再向服务端提交 drain，避免最后一块音频落在 commit 之后。
+            await uploadPump?.value
+            uploadPump = nil
+        }
         if let client {
-            if drain {
+            if shouldDrain {
                 do {
                     try await client.drainAndClear(timeout: .seconds(8))
                 } catch {
@@ -591,7 +615,14 @@ public final class MeetingSession {
             }
             await client.close()
         }
-        pump?.cancel()
+        if shouldDrain {
+            // close 结束事件流；其缓冲区会先被消费。等终态、attribution 与
+            // diarization EOF 屏障都经过 MeetingSession 保存 owner 后再失效代次。
+            await pump?.value
+            connectionGeneration.invalidate()
+        } else {
+            pump?.cancel()
+        }
         pump = nil
         client = nil
         level = 0
@@ -626,30 +657,27 @@ public final class MeetingSession {
     private func startPump(
         stream: AsyncStream<AudioChunk>,
         client: any MeetingRealtimeClient,
-        generation token: Int
+        generation token: Int,
+        previewIdentity: TranscriptPreviewLedger.Identity
     ) {
+        uploadPump?.cancel()
+        uploadPump = Task { [weak self] in
+            for await chunk in stream {
+                guard let self else { return }
+                guard self.isCurrent(token) else { return }
+                await self.upload(chunk, to: client, generation: token)
+            }
+            guard let self, self.isCurrent(token) else { return }
+            await self.captureStreamEnded()
+        }
+
         pump?.cancel()
         pump = Task { [weak self] in
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask { [weak self] in
-                    for await chunk in stream {
-                        guard let self else { return }
-                        // 旧连接的音频不许写进新一代的状态（MA-01）。
-                        guard await self.isCurrent(token) else { return }
-                        await self.upload(chunk, to: client)
-                    }
-                    guard let self, await self.isCurrent(token) else { return }
-                    await self.captureStreamEnded()
-                }
-                group.addTask { [weak self] in
-                    let events = await client.events()
-                    for await envelope in events {
-                        guard let self else { return }
-                        guard await self.isCurrent(token) else { return }
-                        await self.handle(envelope)
-                    }
-                }
-                await group.waitForAll()
+            let events = await client.events()
+            for await envelope in events {
+                guard let self else { return }
+                guard self.isCurrent(token) else { return }
+                await self.handle(envelope, identity: previewIdentity)
             }
         }
     }
@@ -660,8 +688,12 @@ public final class MeetingSession {
         connectionGeneration.isCurrent(token)
     }
 
-    private func upload(_ chunk: AudioChunk, to client: any MeetingRealtimeClient) async {
-        guard !isStoppingIntentionally, !isPaused else { return }
+    private func upload(
+        _ chunk: AudioChunk,
+        to client: any MeetingRealtimeClient,
+        generation token: Int
+    ) async {
+        guard isCurrent(token), !isPaused else { return }
         level = chunk.level
         gapCount = audio.gapCount
         do {
@@ -672,8 +704,10 @@ public final class MeetingSession {
     }
 
     private func handle(
-        _ envelope: RealtimeEventEnvelope<RealtimeASRClient.Event>
+        _ envelope: RealtimeEventEnvelope<RealtimeASRClient.Event>,
+        identity: TranscriptPreviewLedger.Identity
     ) async {
+        guard identity == previewIdentity else { return }
         switch envelope.payload {
         case .ready, .configured, .alignmentFailed,
              .ttsStarted(_, _, _), .ttsTextAccepted(_, _, _, _),
@@ -681,27 +715,54 @@ public final class MeetingSession {
             // 会议会话不接线 TTS：增量 utterance 属于助手那一层。
             break
         case .partial(let itemID, let delta):
-            // 按槽分开，不跨 item 拼接（MC-09）。
-            transcriptLedger.acceptDelta(slot: itemID, delta: delta)
-            partialText = transcriptLedger.visiblePartial
+            _ = previewLedger.acceptDelta(
+                identity: identity,
+                itemID: itemID,
+                delta: delta,
+                eventID: envelope.metadata.eventID
+            )
+            partialText = previewLedger.visiblePartial
         case .partialSnapshot(let itemID, let revision, let text, _):
-            // 快照**替换**而非追加；迟到的小 revision 不许倒写（MC-10）。
-            _ = transcriptLedger.acceptSnapshot(slot: itemID, revision: revision, text: text)
-            partialText = transcriptLedger.visiblePartial
+            _ = previewLedger.acceptSnapshot(
+                identity: identity,
+                itemID: itemID,
+                revision: revision,
+                text: text,
+                eventID: envelope.metadata.eventID
+            )
+            partialText = previewLedger.visiblePartial
+        case .segmentClosed(let itemID, let sampleSpan, let reason, let commitEventID):
+            guard let closeReason = TranscriptPreviewLedger.SegmentCloseReason(
+                rawValue: reason.rawValue
+            ) else { return }
+            _ = previewLedger.closeSegment(
+                identity: identity,
+                itemID: itemID,
+                sampleSpan: sampleSpan,
+                reason: closeReason,
+                commitEventID: commitEventID,
+                eventID: envelope.metadata.eventID
+            )
         case .completed(let itemID, let transcript):
-            // 服务端不再回报 `input_audio_buffer.committed`，所以窗口以终态为界：
-            // 起点是上一次终态，终点是这一次终态（契约 §5.1）。
-            let now = dependencies.clock.now()
-            pendingItem = (start: commitCursor ?? now, end: now)
-            commitCursor = now
-            await commit(itemID: itemID, transcript: transcript)
+            let outcome = previewLedger.resolveCommit(
+                identity: identity,
+                itemID: itemID,
+                transcript: transcript
+            )
+            partialText = previewLedger.visiblePartial
+            guard case .commit(let committed) = outcome else { return }
+            await commit(committed)
         case .failed(let itemID, let code, let message):
             lastFailure = "\(code)：\(message)"
-            // 只清这一个 item 的槽：别的 item 的 partial 还在录，不该被抹掉（MC-14）。
-            transcriptLedger.clearPartial(slot: itemID)
-            partialText = transcriptLedger.visiblePartial
+            let recoveryNote = previewLedger.recoveryNote(identity: identity, itemID: itemID)
+            let boundary = previewLedger.boundary(identity: identity, itemID: itemID)
+            _ = previewLedger.resolveFailure(identity: identity, itemID: itemID)
+            partialText = previewLedger.visiblePartial
+            if let recoveryNote {
+                await persistRecoveryMaterial(recoveryNote, boundary: boundary)
+            }
         case .attribution(let itemID, let units, _):
-            await applyAttribution(itemID: itemID, units: units)
+            await applyAttribution(itemID: itemID, units: units, identity: identity)
         case .diarizationFinished:
             diarizationDrained = true
         case .auxiliaryIncomplete(_, let alignmentMissing, let diarizationMissing):
@@ -745,11 +806,17 @@ public final class MeetingSession {
     /// `timing_quality`。正文与时间码一个字不动（§15.3 第 2 条）。
     private func applyAttribution(
         itemID: String,
-        units: [RealtimeASRClient.AttributionUnit]
+        units: [RealtimeASRClient.AttributionUnit],
+        identity: TranscriptPreviewLedger.Identity
     ) async {
-        guard let entry = lineByItem[itemID], !units.isEmpty else { return }
+        let itemIdentity = TranscriptPreviewLedger.ItemIdentity(identity: identity, itemID: itemID)
+        guard identity == previewIdentity,
+              let entry = lineByItem[itemIdentity],
+              !units.isEmpty
+        else { return }
         labeling.register(units: units, lineID: entry.lineID, ordinal: entry.ordinal)
         await labeling.apply(units: units)
+        guard identity == previewIdentity else { return }
         // 时间证据回填（MA-02 / MC-15）：落库时写的是**观测**时间并标
         // `unavailable`，对齐结果到达后把声学起止**连同质量一起**写回去。
         // 只改标签不改值正是方案点名要修的路，所以这里走
@@ -795,35 +862,23 @@ public final class MeetingSession {
         }
     }
 
-    /// 定稿即落库。同一个 `item_id` 只落一行（幂等在能力层，不在库里，§15.7 R2 ①）。
-    private func commit(
-        itemID: String,
-        transcript: String
-    ) async {
-        let outcome = transcriptLedger.resolveCommit(itemID: itemID, transcript: transcript)
-        partialText = transcriptLedger.visiblePartial
-        defer { pendingItem = nil }
-        switch outcome {
-        case .duplicate:
+    /// 定稿即落库。同一个 `(connection, itemID)` 只落一行，时间来自冻结的
+    /// `segment_closed` 输入区间；没有可信时钟映射时保留未知值。
+    private func commit(_ item: TranscriptPreviewLedger.CommittedItem) async {
+        partialText = previewLedger.visiblePartial
+        if let recoveryNote = item.recoveryNote {
+            await persistRecoveryMaterial(recoveryNote, boundary: item.boundary)
+            return
+        }
+        let text = item.finalText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, let sessionID, let startedAt else { return }
+        guard transcriptLedger.markCommitted(item.itemID) else {
             // 同连接同 item 已定稿：只一条权威行，不重复推进 ordinal（MC-12）。
             return
-        case .discarded:
-            return
-        case .commit(_, let recoveryNote):
-            if let recoveryNote {
-                await persistRecoveryMaterial(recoveryNote)
-                return
-            }
         }
-        let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, let sessionID, let startedAt else { return }
-        // 落库时只有**观测**时间：客户端这一刻刚收到这句话，
-        // 不知道它什么时候被说出来。把接收间隔当发声时间就是编造精度
-        // （MC-15），所以这里显式标 `unavailable`，等对齐结果到达再升级。
-        let observed = pendingItem ?? (start: commitCursor ?? startedAt, end: dependencies.clock.now())
-        let window = TranscriptTimeWindow.observedOnly(
-            start: observed.start.timeIntervalSince(startedAt),
-            end: observed.end.timeIntervalSince(startedAt)
+        let inputTimes = sessionRelativeInputTimes(
+            from: item.boundary,
+            startedAt: startedAt
         )
         let isEpochStart = epoch > 1 && lines.isEmpty
         let lineID = UUID().uuidString
@@ -836,34 +891,40 @@ public final class MeetingSession {
                     text: text,
                     source: lineSource,
                     speakerLabel: nil,
-                    tStart: window.observedStart,
-                    tEnd: window.observedEnd,
+                    tStart: inputTimes?.start,
+                    tEnd: inputTimes?.end,
                     isDeviceSwitch: isEpochStart,
-                    timingQuality: window.quality
+                    timingQuality: .unavailable
                 ),
                 id: lineID
             )
         } catch {
-            transcriptLedger.unmarkCommitted(itemID)
-            lastFailure = error.localizedDescription
+            transcriptLedger.unmarkCommitted(item.itemID)
+            await persistRecoveryMaterial(
+                .init(itemID: item.itemID, text: text),
+                boundary: item.boundary,
+                saveFailure: error.localizedDescription
+            )
             return
         }
         // 行已经在了。对齐/分人结果到达时按 `utterance_id` 找回这一行。
-        if !itemID.isEmpty {
-            lineByItem[itemID] = (lineID: lineID, ordinal: ordinal)
-        }
+        let itemIdentity = TranscriptPreviewLedger.ItemIdentity(
+            identity: item.identity,
+            itemID: item.itemID
+        )
+        lineByItem[itemIdentity] = (lineID: lineID, ordinal: ordinal)
         currentOrdinal = ordinal
         lines.append(
             Line(
                 id: lineID,
                 ordinal: ordinal,
                 text: text,
-                start: window.observedStart,
-                end: window.observedEnd,
+                start: inputTimes?.start ?? 0,
+                end: inputTimes?.end ?? 0,
                 speakerLabel: nil,
                 source: lineSource,
                 isDeviceSwitch: isEpochStart,
-                timingQuality: window.quality
+                timingQuality: .unavailable
             )
         )
     }
@@ -874,12 +935,16 @@ public final class MeetingSession {
     /// 而 `coordinator.lines(sessionID:)` 默认 `includePartial: false`
     /// 所以它**不会进正式纪要**、也不会进分享包。
     /// 只放在一行提示文字里是不够的——用户看到提示后没法把那句原文取回来。
-    private func persistRecoveryMaterial(_ note: TranscriptItemLedger.RecoveryNote) async {
+    private func persistRecoveryMaterial(
+        _ note: TranscriptPreviewLedger.RecoveryNote,
+        boundary: TranscriptPreviewLedger.Boundary?,
+        saveFailure: String? = nil
+    ) async {
         guard let sessionID, let startedAt else {
             lastFailure = "有一句话没有拿到定稿正文：\(note.text)"
             return
         }
-        let observed = pendingItem ?? (start: commitCursor ?? startedAt, end: dependencies.clock.now())
+        let inputTimes = sessionRelativeInputTimes(from: boundary, startedAt: startedAt)
         do {
             _ = try await coordinator.appendLine(
                 LineDraft(
@@ -887,18 +952,37 @@ public final class MeetingSession {
                     role: .speaker,
                     text: note.text,
                     source: lineSource,
-                    tStart: observed.start.timeIntervalSince(startedAt),
-                    tEnd: observed.end.timeIntervalSince(startedAt),
+                    tStart: inputTimes?.start,
+                    tEnd: inputTimes?.end,
                     status: .partial,
                     timingQuality: .unavailable
                 ),
                 id: UUID().uuidString
             )
-            lastFailure = "有一句话没有拿到定稿正文，已原样保留（不进正式纪要）。"
+            if saveFailure == nil {
+                lastFailure = "有一句话没有拿到定稿正文，已原样保留（不进正式纪要）。"
+            } else {
+                lastFailure = "正文未能保存为定稿（\(saveFailure!)），已原样保留为待恢复内容。"
+            }
         } catch {
-            // 连恢复材料都存不下去：明说，别让这句话就此消失。
-            lastFailure = "有一句话没有定稿，而且没能保存下来：\(note.text)"
+            // 连恢复材料都存不下去：把原文留在可见状态与说明里。
+            lastFailure = "正文未能保存（\(error.localizedDescription)），请先复制恢复：\(note.text)"
         }
+    }
+
+    private func sessionRelativeInputTimes(
+        from boundary: TranscriptPreviewLedger.Boundary?,
+        startedAt: Date
+    ) -> (start: TimeInterval, end: TimeInterval)? {
+        guard let range = boundary?.inputRange,
+              range.isApproximate,
+              let absoluteStart = range.startSeconds,
+              let absoluteEnd = range.endSeconds
+        else { return nil }
+        let start = absoluteStart - startedAt.timeIntervalSince1970
+        let end = absoluteEnd - startedAt.timeIntervalSince1970
+        guard start.isFinite, end.isFinite, start >= 0, end > start else { return nil }
+        return (start, end)
     }
 
     /// 每一行标来源（§14.1 的记录口径）：**合流出来的行只能记 `mixed`**——
