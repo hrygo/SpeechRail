@@ -195,6 +195,20 @@ run2 音频 19.52s（≈2.2 倍时长）但转写文本与 run1/run3 等价—�
 |---|---|---|---|---|---|---|---|
 | f7e9d4b9 | Apple M5 Max | macOS 27.0.1 | quality/quality | serena（系统音色） | 本地 realtime+REST | 延迟 4+4 turns | V17/取消/长稳待执行（听审已通过） |
 | 95b1fe55 | Apple M5 Max | macOS 27.0.1 | quality/quality | serena（系统音色） | 本地 REST 合成+回转写 | 质量 6 合成/3 回读 | #308 慢放未修复/V17 待执行（数字口语化已判保义、听审已通过） |
+| 159fea09 | Apple M5 Max | macOS 27.0.1 | quality/quality | n/a（440Hz 正弦块，非语音） | 本地协调器+真实 PCMStreamPlayer | V17 真机 2 项通过（见下节 V17 记录） | #308 等上游 mlx-audio#1002（本项目侧完成） |
+
+### V17 有界积压保序真机对照（2026-10-07，commit `159fea09`，不关闭 #268）
+
+新增 `AssistantV17BacklogPlaybackTests`（2 项，真机通过；CI 无音频设备时整类 skip，不阻碍门禁）：
+真实 `PCMStreamPlayer` + 生产 `AssistantTTSStreamCoordinator`（生产通道：played 回调带 epoch + chunkID 原样带回）。
+相邻 fake 回归 `AssistantTTSStreamCoordinatorTests` 41 项全绿。
+
+| 项 | 操作 | 应有结果 | 实测 |
+|---|---|---|---|
+| V17 有界积压保序 | 3 块各约 400ms（合计 ~1.2s，远超旧 300ms 候选阈值）→ terminal 先到 | 不提前 completed；played 覆盖全部提交样本后 completed；真实播放器排空回调 | 通过（terminal 先到时 outcomes 为空、`isAwaitingPlayback` 为 true；播完 outcomes=[.completed]） |
+| V17 取消隔离 | 首轮 400ms 块 → cancel → 旧轮 terminal 确认 → 新轮 200ms 块 → terminal | 旧轮 cancelled；取消后旧音频不进播放；新轮 played 到齐才 completed；旧迟到 played 不污染新轮 | 通过（outcomes=[.cancelled, .completed]） |
+
+未通过项：无（本项）。V17 的“显示等待”（UI 等待指示）仍待 UI 专项对照；本项只覆盖保序/终态/取消隔离的播放层行为。
 
 ### V03/V05 取消与终态真机对照（2026-10-06，commit `95b1fe55`，不关闭 #258）
 

@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail macOS App AI 提词器"
 status: active
-version: "0.7.1"
+version: "0.7.2"
 date: 2026-10-05
 ---
 
@@ -19,6 +19,10 @@ AI 提词器是 macOS App 内的直播准备、手动提词与可选语音辅助
 - 默认手动：打开舞台不申请麦克风、不连接 ASR，也不要求 AI 整理；语音跟随只能由用户显式开启，手动接管后立即撤销旧的语音推进权并释放本功能占用。
 - 运行时复用现有 `MicrophoneCapture`、`RealtimeASRClient` 和 `SessionCoordinator`，但不创建 `SessionStore` 会话行，也不保存 PCM、摄像头画面、直播画面或完整 ASR 文本。
 - 不包含 TTS、摄像头采集、直播推流、全局提词热键或云端稿件同步。
+
+## 语音跟随的 ASR 策略
+
+App 内场景到 Realtime ASR 策略的唯一映射是 `ASRScenePreset`（`macos/SpeechRailApp/SpeechRailApp/ASRScenePreset.swift`），各会话只传所选场景，不自定策略数值。提词器走 `TeleprompterRealtimeClientProtocol` 默认 `.teleprompter`：`task=transcription`，预览间隔 500 ms，段预算 8000 ms，收尾 `streaming_finalize`，服务端 VAD 起点 silence 400 ms、threshold 0.5、prefix padding 300 ms。500 ms 是 2026-10-07 按 #245 真实对照冻结的值（此前 400 ms 在中英混合样本上多 3 个错，500 ms 回到基线，收尾延迟仅增约 0.02 s）；其余四场景值见该源码文件，服务端默认值与字段范围以 [`Realtime 协议规范`](../../contracts/realtime-openai.md) 为准，本文不复制第二套数值。
 
 ## 用户旅程
 
