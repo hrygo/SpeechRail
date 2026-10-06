@@ -732,8 +732,9 @@ registry 不可读返回 `503 pronunciation_store_unavailable`（可重试）。
 - 可选的 `session.speechrail.asr` 在首个 PCM 前设置识别策略：
   `preview_interval_ms` 默认为 `1000`（`100...5000`），`max_segment_ms` 默认为 `20000`
   （`1000...30000`，且不少于预览间隔），`finalization` 默认为 `full_segment`，也可为
-  `streaming_finalize`。显式 `final_deadline_ms` 必须是正整数且不超过请求 timeout；省略时沿用
-  请求 timeout。布尔值、小数、未知字段或枚举均拒绝。
+  `streaming_finalize`，`rollback_tokens` 默认为 `5`（`0...32`，累计音频重解码时保留的
+  可修订前缀回退 token 数）。显式 `final_deadline_ms` 必须是正整数且不超过请求 timeout；
+  省略时沿用请求 timeout。布尔值、小数、未知字段或枚举均拒绝。
 - `session.updated.session.speechrail.asr.effective_max_segment_ms` 回显实际有效段预算；它是
   请求、服务资源、能力与解码器上限的最小值。只有首个 PCM 前可更新；候选失败时旧配置保持不变。
 - ASR 策略形状、范围或 deadline 无效时用 `asr_policy_invalid`；后端不支持该策略时用
