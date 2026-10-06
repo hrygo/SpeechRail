@@ -64,7 +64,7 @@ from speechrail.runtime.model_budget import (
 from speechrail.runtime.registry import engine_variant_for_role
 from speechrail.runtime.resource_governor import ResourceGovernor
 from speechrail.runtime.resource_observability import service_physical_footprint
-from speechrail.runtime.worker_lease import EvictableWorker, WorkerIdleEvictor
+from speechrail.runtime.worker_lease import EvictableWorker, WorkerIdleEvictor, WorkerLeaseLock
 
 Transcribe = Callable[[bytes, str | None, str, bool], Awaitable[TranscriptResult]]
 _SERVICE_OVERHEAD_BYTES = 512 * 1024**2
@@ -763,6 +763,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         batch_transcriber = _CallableBatchTranscriber(transcribe, settings.model_id)
     text_aligner = overrides.text_aligner
     alignment_worker: Qwen3AlignmentWorker | None = None
+    alignment_lease = WorkerLeaseLock()
     if (
         text_aligner is None
         and settings.qwen3_aligner_model_dir is not None
@@ -784,7 +785,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                 timeout_seconds=settings.request_timeout_seconds,
             )
         )
-        text_aligner = FixedTextAligner(alignment_worker)
+        text_aligner = FixedTextAligner(alignment_worker, worker_lease=alignment_lease.lease)
 
     diarization_admission = DiarizationAdmission()
     # One alignment owner is admitted process-wide: the REST batch route and the
@@ -851,6 +852,9 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                 warm_standby_timeout_seconds=settings.worker_warm_standby_timeout_seconds,
                 min_uptime_seconds=settings.worker_min_uptime_seconds,
                 on_eviction=metrics.record_eviction,
+                lease_locks=(
+                    {alignment_worker: alignment_lease} if alignment_worker is not None else None
+                ),
             )
         if design_worker is not None and settings.voice_design_idle_timeout_seconds > 0:
             if evictor is None:

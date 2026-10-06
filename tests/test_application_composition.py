@@ -144,7 +144,9 @@ def test_lifespan_rolls_back_started_components() -> None:
 
     scenario()
 
-    assert calls == ["repository.recover", "asr.start", "tts.start", "asr.close"]
+    assert calls == [
+        "repository.recover", "asr.start", "tts.start", "tts.close", "asr.close"
+    ]
 
 
 def test_lifespan_closes_started_components_once_on_normal_exit() -> None:
@@ -686,3 +688,71 @@ def test_composition_keeps_serving_injected_components_without_declarations() ->
     settings = Settings(_env_file=None, qwen3_model_dir=None, qwen3_python=None)
     services = build_app_services(settings, AppOverrides(batch_transcriber=object()))
     assert services.governor.snapshot().reject_heavy_compute is False
+
+
+@pytest.mark.parametrize("idle_timeout", [0.0, 10.0])
+def test_composition_owns_lazy_alignment_and_shares_its_activity_lease(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, idle_timeout: float
+) -> None:
+    from speechrail.domain.alignment import AlignmentRequest
+    from speechrail.domain.audio_timeline import SampleSpan
+
+    async def run() -> None:
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        class Aligner:
+            def __init__(self, config: object) -> None:
+                self.alive = False
+                self.starts = 0
+                self.closes = 0
+
+            async def start(self) -> None:
+                self.starts += 1
+                self.alive = True
+
+            async def close(self) -> None:
+                self.closes += 1
+                self.alive = False
+
+            async def align_text(
+                self, pcm: bytes, *, text: str, language: str | None
+            ) -> tuple[tuple[str, float, float], ...]:
+                await self.start()
+                entered.set()
+                await release.wait()
+                assert self.alive
+                return (("test", 0.0, 0.1),)
+
+        monkeypatch.setattr(services_module, "Qwen3AlignmentWorker", Aligner)
+        monkeypatch.setattr(
+            services_module, "Qwen3AlignmentConfig",
+            lambda **kwargs: SimpleNamespace(**kwargs),
+        )
+        monkeypatch.setattr(services_module, "resolve_backend_dtype", lambda *_: "bfloat16")
+        settings = Settings(
+            _env_file=None, qwen3_model_dir=None, qwen3_python=Path(executable),
+            qwen3_aligner_model_dir=tmp_path / "aligner",
+            worker_idle_timeout_seconds=idle_timeout,
+        )
+        services = build_app_services(settings, AppOverrides(batch_transcriber=object()))
+        worker = services.text_aligner._client
+        await services.lifecycle.start()
+        assert worker.starts == 0
+        alignment = asyncio.create_task(
+            services.text_aligner.align(AlignmentRequest(
+                task_id="task", epoch="epoch", utterance_id="utterance",
+                transcript_revision=1, pcm16=b"\x00\x00" * 16000,
+                span=SampleSpan(0, 16000), text="test", language="en",
+            ))
+        )
+        await entered.wait()
+        if idle_timeout:
+            await services.lifecycle._evictor.force_evict(worker)
+            assert worker.closes == 0
+        release.set()
+        assert (await alignment).status == "done"
+        await services.lifecycle.close()
+        assert worker.closes == 1
+        assert not worker.alive
+
+    asyncio.run(run())

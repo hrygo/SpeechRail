@@ -588,30 +588,3 @@ def test_lifecycle_start_failure_releases_already_created_runner_task() -> None:
         assert cancelled, "leaked runner task must be cancelled on start failure"
 
     asyncio.run(run())
-
-
-def test_evictor_does_not_close_alignment_with_inflight_exchange() -> None:
-    """#246: inflight alignment exchange must block idle eviction.
-
-    RED: _in_use only consults lease locks and the ASR mode gate, so an
-    aligner that is mid-exchange (admission reserved, no lease held) is
-    evicted as idle.
-    """
-
-    async def run() -> None:
-        from speechrail.runtime.alignment_admission import AlignmentAdmission
-
-        worker = _FakeWorker()
-        admission = AlignmentAdmission(limit=3)
-        evictor = WorkerIdleEvictor(
-            (worker,), idle_timeout_seconds=0.01, check_interval_seconds=0.001
-        )
-        try:
-            async with admission.reserve():
-                evictor.note_activity(worker, source="alignment-exchange")
-                await asyncio.sleep(0.05)
-                assert worker.alive, "inflight alignment must not be evicted"
-        finally:
-            await evictor.close()
-
-    asyncio.run(run())

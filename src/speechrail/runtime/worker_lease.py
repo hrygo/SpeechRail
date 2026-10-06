@@ -6,11 +6,12 @@ import asyncio
 import contextlib
 import enum
 import time
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Protocol, runtime_checkable
 
 from speechrail.runtime.asr_mode import AsrModeGate
+from speechrail.runtime.cleanup import join_cleanup
 
 
 class WorkerLifecycleState(enum.StrEnum):
@@ -36,6 +37,7 @@ class WorkerLeaseLock:
         self._lock = asyncio.Lock()
         self._active_leases = 0
         self._generation = 0
+        self._last_active = time.monotonic()
 
     @property
     def active_leases(self) -> int:
@@ -45,16 +47,32 @@ class WorkerLeaseLock:
     def generation(self) -> int:
         return self._generation
 
+    @property
+    def last_active(self) -> float:
+        return self._last_active
+
     @asynccontextmanager
     async def lease(self) -> AsyncIterator[int]:
         async with self._lock:
             self._active_leases += 1
             self._generation += 1
+            generation = self._generation
         try:
-            yield self._generation
+            yield generation
         finally:
-            async with self._lock:
-                self._active_leases = max(0, self._active_leases - 1)
+            # No await here: repeated cancellation cannot leak an active lease.
+            self._active_leases -= 1
+            self._last_active = time.monotonic()
+
+    @asynccontextmanager
+    async def idle(self) -> AsyncIterator[bool]:
+        """Hold the admission lock through idle close/trim.
+
+        A new lease either precedes the decision and prevents eviction, or waits
+        for close to finish before it can restart the worker.
+        """
+        async with self._lock:
+            yield self._active_leases == 0
 
 
 class WorkerIdleEvictor:
@@ -69,6 +87,7 @@ class WorkerIdleEvictor:
         min_uptime_seconds: float = 0.0,
         check_interval_seconds: float = 10.0,
         on_eviction: Callable[[str, str], None] | None = None,
+        lease_locks: Mapping[EvictableWorker, WorkerLeaseLock] | None = None,
     ) -> None:
         self._workers = tuple({id(w): w for w in workers if w is not None}.values())
         self._idle_timeout = idle_timeout_seconds
@@ -81,7 +100,6 @@ class WorkerIdleEvictor:
         self._was_alive: dict[EvictableWorker, bool] = {}
         self._states: dict[EvictableWorker, WorkerLifecycleState] = {}
         self._lease_locks: dict[EvictableWorker, WorkerLeaseLock] = {}
-        self._activity_sources: dict[EvictableWorker, set[str]] = {}
         # Per-worker TTL overrides; absent entries fall back to the evictor
         # defaults above. Only the design lane overrides today (#135).
         self._idle_timeouts: dict[EvictableWorker, float] = {}
@@ -93,8 +111,9 @@ class WorkerIdleEvictor:
             self._loaded_at[worker] = now
             self._was_alive[worker] = getattr(worker, "alive", False)
             self._states[worker] = WorkerLifecycleState.ACTIVE
-            self._lease_locks[worker] = WorkerLeaseLock()
-            self._activity_sources[worker] = set()
+            self._lease_locks[worker] = (
+                lease_locks[worker] if lease_locks and worker in lease_locks else WorkerLeaseLock()
+            )
 
     def track(
         self,
@@ -119,7 +138,6 @@ class WorkerIdleEvictor:
         self._was_alive[worker] = getattr(worker, "alive", False)
         self._states[worker] = WorkerLifecycleState.ACTIVE
         self._lease_locks[worker] = WorkerLeaseLock()
-        self._activity_sources[worker] = set()
         if idle_timeout_seconds is not None:
             self._idle_timeouts[worker] = idle_timeout_seconds
         if warm_standby_timeout_seconds is not None:
@@ -158,45 +176,20 @@ class WorkerIdleEvictor:
         """Force immediate cold eviction (e.g. on macOS memory pressure notification)."""
         targets = (worker,) if worker is not None else self._workers
         for w in targets:
-            if self._in_use(w):
-                continue  # In active use, do not evict
-            if getattr(w, "alive", False) or getattr(w, "ready", False):
-                with contextlib.suppress(Exception):
-                    await w.close()
-            # Record the idle stamp AFTER close: workers like Qwen3SharedWorker
-            # refresh their own last_active at end of close(), and a stale
-            # stamp here would let the next tick resurrect the dead worker
-            # back to ACTIVE.
-            self._last_active[w] = time.monotonic()
-            self._states[w] = WorkerLifecycleState.COLD_EVICTED
-
-    def note_activity(self, worker: EvictableWorker, *, source: str) -> None:
-        """Register an in-progress activity source (e.g. alignment exchange).
-
-        The source stays registered until :meth:`clear_activity` removes it;
-        while any source is registered the worker counts as in use and idle
-        eviction (including :meth:`force_evict`) skips it.
-        """
-        self._activity_sources.setdefault(worker, set()).add(source)
-        self._last_active[worker] = time.monotonic()
-        self._states[worker] = WorkerLifecycleState.ACTIVE
-
-    def clear_activity(self, worker: EvictableWorker, *, source: str) -> None:
-        """Remove a previously registered activity source."""
-        sources = self._activity_sources.get(worker)
-        if sources is not None:
-            sources.discard(source)
-        self._last_active[worker] = time.monotonic()
+            async with self._lease_locks[w].idle() as idle:
+                if not idle or self._in_use(w):
+                    continue
+                if getattr(w, "alive", False) or getattr(w, "ready", False):
+                    with contextlib.suppress(Exception):
+                        await join_cleanup(asyncio.create_task(w.close()))
+                self._last_active[w] = time.monotonic()
+                self._states[w] = WorkerLifecycleState.COLD_EVICTED
 
     def _in_use(self, worker: EvictableWorker) -> bool:
         lease = self._lease_locks.get(worker)
         mode_gate = getattr(worker, "mode_gate", None)
-        return (
-            bool(lease is not None and lease.active_leases > 0)
-            or bool(self._activity_sources.get(worker))
-            or (
-                isinstance(mode_gate, AsrModeGate) and mode_gate.active_count > 0
-            )
+        return bool(lease is not None and lease.active_leases > 0) or (
+            isinstance(mode_gate, AsrModeGate) and mode_gate.active_count > 0
         )
 
     async def _eviction_loop(self) -> None:
@@ -204,70 +197,75 @@ class WorkerIdleEvictor:
             await asyncio.sleep(self._check_interval)
             now = time.monotonic()
             for worker in self._workers:
-                worker_activity = getattr(worker, "last_active", None)
-                if (
-                    isinstance(worker_activity, (int, float))
-                    and worker_activity > self._last_active.get(worker, 0.0)
-                ):
-                    self._last_active[worker] = worker_activity
-                    self._states[worker] = WorkerLifecycleState.ACTIVE
+                async with self._lease_locks[worker].idle() as idle:
+                    if not idle:
+                        self.touch(worker)
+                        continue
+                    lease_activity = self._lease_locks[worker].last_active
+                    if lease_activity > self._last_active.get(worker, 0.0):
+                        self._last_active[worker] = lease_activity
+                        self._states[worker] = WorkerLifecycleState.ACTIVE
+                    worker_activity = getattr(worker, "last_active", None)
+                    if isinstance(
+                        worker_activity, (int, float)
+                    ) and worker_activity > self._last_active.get(worker, 0.0):
+                        self._last_active[worker] = worker_activity
+                        self._states[worker] = WorkerLifecycleState.ACTIVE
 
-                if self._in_use(worker):
-                    self._last_active[worker] = now
-                    self._states[worker] = WorkerLifecycleState.ACTIVE
-                    continue
+                    if self._in_use(worker):
+                        self._last_active[worker] = now
+                        self._states[worker] = WorkerLifecycleState.ACTIVE
+                        continue
 
-                # Detect a fresh load (lazy first start or restart after eviction)
-                # and open the anti-thrash uptime window with a fresh idle clock.
-                worker_alive = bool(getattr(worker, "alive", False)) or bool(
-                    getattr(worker, "ready", False)
-                )
-                if worker_alive and not self._was_alive.get(worker, False):
-                    self._loaded_at[worker] = now
-                    self._last_active[worker] = now
-                self._was_alive[worker] = worker_alive
+                    # Detect a fresh load (lazy first start or restart after eviction)
+                    # and open the anti-thrash uptime window with a fresh idle clock.
+                    worker_alive = bool(getattr(worker, "alive", False)) or bool(
+                        getattr(worker, "ready", False)
+                    )
+                    if worker_alive and not self._was_alive.get(worker, False):
+                        self._loaded_at[worker] = now
+                        self._last_active[worker] = now
+                    self._was_alive[worker] = worker_alive
 
-                # Stage 0: Min-Uptime Guard: a freshly loaded worker is kept for
-                # at least min_uptime_seconds so bursty traffic cannot alternate
-                # between long model loads and immediate eviction (thrash).
-                # The guard postpones eviction decisions without refreshing the
-                # idle clock, so eviction proceeds as soon as it expires.
-                if self._min_uptime > 0.0 and (
-                    now - self._loaded_at.get(worker, now) < self._min_uptime
-                ):
-                    self._states[worker] = WorkerLifecycleState.ACTIVE
-                    continue
+                    # Stage 0: Min-Uptime Guard: a freshly loaded worker is kept for
+                    # at least min_uptime_seconds so bursty traffic cannot alternate
+                    # between long model loads and immediate eviction (thrash).
+                    # The guard postpones eviction decisions without refreshing the
+                    # idle clock, so eviction proceeds as soon as it expires.
+                    if self._min_uptime > 0.0 and (
+                        now - self._loaded_at.get(worker, now) < self._min_uptime
+                    ):
+                        self._states[worker] = WorkerLifecycleState.ACTIVE
+                        continue
 
-                last_time = self._last_active.get(worker, now)
-                idle_duration = now - last_time
+                    last_time = self._last_active.get(worker, now)
+                    idle_duration = now - last_time
 
-                idle_timeout = self._idle_timeouts.get(worker, self._idle_timeout)
-                standby_timeout = self._standby_timeouts.get(
-                    worker, self._warm_standby_timeout
-                )
-                # Stage 2: Cold Eviction (idle >= _idle_timeout)
-                if idle_duration >= idle_timeout:
-                    if getattr(worker, "alive", False) or getattr(worker, "ready", False):
-                        with contextlib.suppress(Exception):
-                            await worker.close()
-                    self._states[worker] = WorkerLifecycleState.COLD_EVICTED
-                    # Stamp AFTER close so worker.last_active (refreshed at end of
-                    # Qwen3SharedWorker.close) cannot out-datestamp this tick.
-                    self._last_active[worker] = time.monotonic()
-                    if self._on_eviction is not None:
-                        self._on_eviction(type(worker).__name__, "cold_evict")
-                # Stage 1: Warm Standby (idle >= _warm_standby_timeout)
-                elif idle_duration >= standby_timeout:
-                    if self._states.get(worker) == WorkerLifecycleState.ACTIVE:
-                        trim_fn = getattr(worker, "trim_memory", None) or getattr(
-                            worker, "release_cache", None
-                        )
-                        if callable(trim_fn):
+                    idle_timeout = self._idle_timeouts.get(worker, self._idle_timeout)
+                    standby_timeout = self._standby_timeouts.get(worker, self._warm_standby_timeout)
+                    # Stage 2: Cold Eviction (idle >= _idle_timeout)
+                    if idle_duration >= idle_timeout:
+                        if getattr(worker, "alive", False) or getattr(worker, "ready", False):
                             with contextlib.suppress(Exception):
-                                if asyncio.iscoroutinefunction(trim_fn):
-                                    await trim_fn()
-                                else:
-                                    trim_fn()
-                        self._states[worker] = WorkerLifecycleState.WARM_STANDBY
+                                await join_cleanup(asyncio.create_task(worker.close()))
+                        self._states[worker] = WorkerLifecycleState.COLD_EVICTED
+                        # Stamp AFTER close so worker.last_active (refreshed at end of
+                        # Qwen3SharedWorker.close) cannot out-datestamp this tick.
+                        self._last_active[worker] = time.monotonic()
                         if self._on_eviction is not None:
-                            self._on_eviction(type(worker).__name__, "standby")
+                            self._on_eviction(type(worker).__name__, "cold_evict")
+                    # Stage 1: Warm Standby (idle >= _warm_standby_timeout)
+                    elif idle_duration >= standby_timeout:
+                        if self._states.get(worker) == WorkerLifecycleState.ACTIVE:
+                            trim_fn = getattr(worker, "trim_memory", None) or getattr(
+                                worker, "release_cache", None
+                            )
+                            if callable(trim_fn):
+                                with contextlib.suppress(Exception):
+                                    if asyncio.iscoroutinefunction(trim_fn):
+                                        await join_cleanup(asyncio.create_task(trim_fn()))
+                                    else:
+                                        trim_fn()
+                            self._states[worker] = WorkerLifecycleState.WARM_STANDBY
+                            if self._on_eviction is not None:
+                                self._on_eviction(type(worker).__name__, "standby")
