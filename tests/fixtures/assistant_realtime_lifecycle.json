@@ -217,7 +217,7 @@
         "B03",
         "B06"
       ],
-      "summary": "第一句整包 64 ms 发送，第二句按 1/7/1/5/2 帧的不齐切片发送：分包粒度不改变内容，两句各自恰好一个 completed、item_id 互不相同、commit_event_id 原样回显（B01/B03），两个 ASR session 都被回收（B06）。",
+      "summary": "第一句整包 64 ms 发送，第二句按 1/7/1/5/2 帧的不齐切片发送：分包粒度不改变内容，两句各自恰好一个 completed、item_id 互不相同、segment_closed 在终态之前给出精确输入区间与 commit_event_id 原样回显（B01/B03），两个 ASR session 都被回收（B06）。",
       "client_script": [
         "input_audio_buffer.append(frames=1536)",
         "input_audio_buffer.commit(event_id=evt-c1)",
@@ -234,20 +234,42 @@
           "sequence": 0
         },
         {
+          "type": "speechrail.transcription.segment_closed",
+          "sequence": 1,
+          "item_ref": "<item:0>",
+          "sample_span": {
+            "start": 0,
+            "end": 1536
+          },
+          "reason": "client_commit",
+          "commit_event_id": "evt-c1"
+        },
+        {
           "type": "conversation.item.input_audio_transcription.completed",
           "item_ref": "<item:0>",
           "content_index": 0,
           "transcript": "第一句",
-          "commit_event_id": "evt-c1",
-          "sequence": 1
+          "sequence": 2,
+          "commit_event_id": "evt-c1"
+        },
+        {
+          "type": "speechrail.transcription.segment_closed",
+          "sequence": 3,
+          "item_ref": "<item:1>",
+          "sample_span": {
+            "start": 1536,
+            "end": 1552
+          },
+          "reason": "client_commit",
+          "commit_event_id": "evt-c2"
         },
         {
           "type": "conversation.item.input_audio_transcription.completed",
           "item_ref": "<item:1>",
           "content_index": 0,
           "transcript": "第二句",
-          "commit_event_id": "evt-c2",
-          "sequence": 2
+          "sequence": 4,
+          "commit_event_id": "evt-c2"
         }
       ],
       "app_expectation": {

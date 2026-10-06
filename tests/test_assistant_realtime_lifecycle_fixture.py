@@ -194,6 +194,7 @@ def _run_input_packetization() -> list[dict[str, Any]]:
             }
         )
         socket.send_json({"type": "input_audio_buffer.commit", "event_id": "evt-c1"})
+        observed.append(_recv(socket, expect="speechrail.transcription.segment_closed"))
         observed.append(
             _recv(socket, expect="conversation.item.input_audio_transcription.completed")
         )
@@ -207,6 +208,7 @@ def _run_input_packetization() -> list[dict[str, Any]]:
                 }
             )
         socket.send_json({"type": "input_audio_buffer.commit", "event_id": "evt-c2"})
+        observed.append(_recv(socket, expect="speechrail.transcription.segment_closed"))
         observed.append(
             _recv(socket, expect="conversation.item.input_audio_transcription.completed")
         )
@@ -297,6 +299,19 @@ def test_packetization_keeps_one_item_per_commit() -> None:
     ]
     assert [event["transcript"] for event in finals] == ["第一句", "第二句"]
     assert len({event["item_id"] for event in finals}) == 2
+    boundaries = [
+        event for event in observed
+        if event["type"] == "speechrail.transcription.segment_closed"
+    ]
+    assert [event["commit_event_id"] for event in boundaries] == ["evt-c1", "evt-c2"]
+    assert [event["item_id"] for event in boundaries] == [
+        event["item_id"] for event in finals
+    ]
+    assert [event["sample_span"] for event in boundaries] == [
+        {"start": 0, "end": 1536},
+        {"start": 1536, "end": 1552},
+    ]
+    assert all(event["reason"] == "client_commit" for event in boundaries)
     assert [event["commit_event_id"] for event in finals] == ["evt-c1", "evt-c2"]
     assert [event["sequence"] for event in observed] == list(range(len(observed)))
 
@@ -316,6 +331,8 @@ def test_packetization_releases_every_asr_session() -> None:
                 }
             )
             socket.send_json({"type": "input_audio_buffer.commit", "event_id": commit_id})
+            boundary = _recv(socket, expect="speechrail.transcription.segment_closed")
+            assert boundary["commit_event_id"] == commit_id
             _recv(socket, expect="conversation.item.input_audio_transcription.completed")
     assert factory.creates == 2
     assert len(factory.released) == 2

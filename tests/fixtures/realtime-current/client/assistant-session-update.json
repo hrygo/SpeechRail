@@ -30,9 +30,14 @@
         "mode": "server_vad",
         "threshold": 0.5,
         "prefix_padding_ms": 300,
-        "silence_duration_ms": 400
+        "silence_duration_ms": 1200
       },
-      "expected_asr_revision": "asr-catalog"
+      "expected_asr_revision": "asr-catalog",
+      "asr": {
+        "preview_interval_ms": 800,
+        "max_segment_ms": 20000,
+        "finalization": "full_segment"
+      }
     }
   }
 }
