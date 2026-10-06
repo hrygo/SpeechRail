@@ -2,7 +2,7 @@
 title: "共享 ASR #245：实施与验收记录"
 status: in_progress
 audience: "SpeechRail 开发者与验收人员"
-version: "1.1.0"
+version: "1.2.0"
 date: 2026-10-06
 ---
 
@@ -295,14 +295,73 @@ AISHELL-4 manifest SHA-256：
 测前测后 runtime revision 与 quality/quality 身份一致，active/pending/session 均为 0。
 旧协议无 segment boundary，sample coverage gate 保持 unset。
 
-总可评分素材现在为 38 条、340.696 秒。另已准备同来源 180 秒连续中文会议，
+加入 ASCEND 前，可评分素材为 38 条、340.696 秒。另已准备同来源 180 秒连续中文会议，
 SHA-256 `66e0bdbf52196df61ee4261d7e9869f68f7560b112e2b2354763bd666157554a`；
 多说话人重叠没有唯一参考顺序，仅用作连续输入、边界、尾部与资源门，
 不计算 CER。该连续片段与 6 条短发言重叠，不能相加宣称更多独立素材，
 三分钟也不能作为会议长时 soak 验收。
 五份独立中文补集 manifest 和一份 resource-only manifest 已准备，
-候选推理尚未执行。这些资料仍不覆盖中英混合、远场噪声、提词器重读/脱稿恢复
+候选推理尚未执行。上述资料尚不覆盖中英混合、远场噪声、提词器重读/脱稿恢复
 或原私人问题的真实重现，因此不能冻结预设。
+
+### ASCEND 中英混合自发口语补集
+
+继续按授权取得作者发布的
+[CAiRE/ASCEND 官方数据卡](https://huggingface.co/datasets/CAiRE/ASCEND)，
+固定 revision `b65b9bb87a0412eb94a659660819060825e74b9f`。
+仅下载 test 分片 `main/test-00000-of-00001.parquet`：
+105,756,434 bytes，完整文件 SHA-256
+`a4c81d2b5ed6124f052089a695972808c16e0ce0c365ec9773c5d1a8fcf043a7`
+与作者 LFS metadata 一致；固定版本数据卡及来源 metadata 留在仓库外。
+作者声明 CC BY-SA 4.0，逐字转写保留口语形式。
+解析使用仓库外隔离环境 `pyarrow==20.0.0`，没有修改项目依赖或 managed runtime。
+
+从 1315 条 test utterances 中，固定筛选 `language=mixed`、至少 8 个汉字、
+3 个英文词、3–15 秒；每位符合条件的匿名 speaker 在 3–5、5–8、8–15 秒
+各取一条。按 source ID 的固定 SHA-256 顺序选择覆盖四话题的首个组合，
+未参考任何模型输出。最终 6 条、44.110 秒，4.820–10.890 秒，
+覆盖 2 位匿名 speaker 及 education/persona/sports/technology。
+该 lexical 筛选后只有 2 位 test speaker 符合条件，不能据此宣称覆盖整个说话人群体。
+六份音频均为来源原始 16 kHz mono PCM16 WAV，未重采样；
+逐文件 SHA-256 与 sample count 已校验。原人工正文没有归一化改写或注入模型 prompt。
+
+manifest SHA-256：
+`8e3c5a5795b988a654685e7a691d199350c3c3c8cd326611d87ee30381ac62ac`。
+原服务基线 manifest 与五个候选 preset manifest 均通过正式加载器及音频哈希检查；
+候选 manifest 使用相同音频和参考，语言为 `auto`，不强制单一语言。
+补集没有可靠标点或语义轮次 gold，短句也没有保留完整多轮停顿；
+标点 F1、思考停顿、助手一次回复、提词器恢复及长时门仍需独立证据。
+全部可评分素材现在为 **44 条、384.806 秒**；连续会议的重叠来源仍不额外计数。
+
+2026-10-06 对同一份六条素材实测原已安装服务；Realtime 先预热后 N=3，
+Batch 单独保留每条一次的暖场结果，再以显式重复清单执行 N=5。
+正式 Batch 入口的 `warm` phase 每条 fixture 仅执行一次，不自动重复五次；
+重复清单的 30 个请求仍只代表 6 条独立音频，没有扩大素材计数。
+
+| 指标 | ASCEND Batch warm N=5 | ASCEND Legacy Realtime warm N=3 |
+|---|---:|---:|
+| 成功并可评分请求 | 30/30 | 18/18 |
+| 字符错误 / 参考字符数 | 155/1305 | 333/783 |
+| 加权 CER | 11.877% | 42.529% |
+| 请求延迟 p50 / p95 | 0.191 / 0.269 s | N/A |
+| 首次预览 p50 / p95 | N/A | 1.006 / 1.039 s |
+| 最后音频至终态 p50 / p95 | N/A | 0.061 / 0.074 s |
+| 同 tick 总 phys_footprint 峰值 | 11,550,108,424 bytes | 11,904,756,536 bytes |
+| sampling_complete | true | true |
+
+原始 Batch result SHA-256：
+`6fe2df28002a6e3293d16b96a6bd3ebb9b39e1e3b04aaf1a6204c72ffb8471a9`；
+Realtime result SHA-256：
+`f1e63be69095b8668310b4d3ae2372ec0a11cd815d5b9ce72e288086ec7020ca`。
+两组测前测后 version/profile/runtime revision/ASR ready 一致，
+PID 2864、8201 唯一 listener、无 ESTABLISHED 客户端，active/pending/session 均为 0。
+Realtime 的 `streaming_state` 从 warm_standby 变为 active，属于观察到的生命周期状态变化；
+制品身份并未改变，没有将所有 health 字段整体相等作为身份判据。
+峰值仍包含父进程和 resident TTS。旧协议没有 item boundary，
+sample coverage、标点、业务场景和候选对照门保持 unset。
+Batch `release_pass=false`，缺少 cold、完整模型身份、完整质量、soak 与 switch 证据；
+没有用单次测量或单独保存的身份材料回填发布门。
+两种 API 行为不可直接称为候选改善，也没有据此冻结预设。
 
 ## Issue 验收矩阵与未验收项
 
@@ -314,7 +373,7 @@ SHA-256 `66e0bdbf52196df61ee4261d7e9869f68f7560b112e2b2354763bd666157554a`；
 | [#250 证据](https://github.com/hrygo/SpeechRail/issues/250#issuecomment-6010538890) | 唯一预设、助手轮次聚合、生产 Session 一轮一次回复/恢复回归 | 真实场景语义轮次与候选质量实测 |
 | [#251 证据](https://github.com/hrygo/SpeechRail/issues/251#issuecomment-6010539617) | 会议/字幕 item 账本、区间归属、停录 drain/迟到 attribution 回归、App 编译 | 真实服务和设备下的连续消费/保存验收 |
 | [#252 证据](https://github.com/hrygo/SpeechRail/issues/252#issuecomment-6010540143) | 提词器水位、修订与手动接管保护，54 项相关回归 | 候选及时性、实际推进与重读/脱稿恢复 |
-| [#253 证据](https://github.com/hrygo/SpeechRail/issues/253#issuecomment-6010540799) | 38 条公开可评分素材、连续会议资源素材、现有服务基线 | 候选真实对照、剩余场景代表性、预设冻结 |
+| [#253 证据](https://github.com/hrygo/SpeechRail/issues/253#issuecomment-6010540799) | 44 条公开可评分素材、连续会议资源素材、现有服务基线 | 候选真实对照、剩余场景代表性、预设冻结 |
 | [#245 证据](https://github.com/hrygo/SpeechRail/issues/245#issuecomment-6010541418) | 核心和消费端实现及确定性集成门完成 | 所有子项与真实集成门通过才关闭 |
 
 2026-10-06 已向上述 8 个 Issue 发布范围精确的证据评论，并逐字回读核验正文、
@@ -345,10 +404,11 @@ UI 自动化、真实 App 控制链路和发布未执行；远端 Git 提交/推
 
 目标单元为唯一 `com.speechrail` managed 服务，候选为上述完整 digest 的 v6 wheel。
 保持现有 quality/quality、同一 ASR 模型、精度、重采样链和无词表条件。
-计划预留约 45–60 分钟，包含两次受管停启及 211 次串行测量请求：
+计划预留约 55–75 分钟，包含两次受管停启及 301 次串行测量请求：
 五份固定 manifest 各 8 段、warm N=3（120 次），五份中文补集各 6 段、
-warm N=3（90 次），以及一次 180 秒会议 resource-only Gate。
-测量音频播放本身共 1959.990 秒，另有暖场、加载、推理和恢复开销；
+warm N=3（90 次），五份 ASCEND 混合补集各 6 段、warm N=3（90 次），
+以及一次 180 秒会议 resource-only Gate。
+测量音频播放本身共 2621.640 秒，另有暖场、加载、推理和恢复开销；
 该时间是计划窗口，不是实测耗时承诺。
 
 1. 重新核对 app home、旧 runtime、selection、PID、listener、active requests、
@@ -357,7 +417,7 @@ warm N=3（90 次），以及一次 180 秒会议 resource-only Gate。
    确认父进程、worker、端口与锁释放，再由该 wheel 自带的 managed installer 安装候选。
 3. 启动唯一候选服务，核对 wheel 源码、profile、实际模型身份与 ready；
    不因同为 3.7.1 而把版本字符串当作制品身份。
-4. 顺序执行五份原固定配对 manifest、五份中文补集和连续会议资源门，
+4. 顺序执行五份原固定配对 manifest、五份中文补集、五份混合补集和连续会议资源门，
    核对有效 policy、每 item 唯一终态、sample span 连续和尾部完整性，
    保存 CER（连续门除外）、预览/收尾延迟、资源采样和失败材料。
 5. 结束后通过受管流程恢复旧 release/selection 并核对原身份、ready 与空闲状态；
