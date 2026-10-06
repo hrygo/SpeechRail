@@ -28,6 +28,19 @@ mypy 三文件（`realtime_openai.py`、`routes/realtime_openai.py`、
 仍待授权执行。本节只记录冻结决定、代码改动与上述确定性验证，
 不声称真实验收已通过。
 
+## 2026-10-07 #249 确定性门补强（PR #319 待合并）
+
+在含 #297 的 main `159fea09` 上，本分支确定性验证扩大到 #249 七个
+相关测试文件：`test_asr_policy.py`、`test_asr_turn_coordinator.py`、
+`test_asr_mode.py`、`test_realtime_multiscene_asr.py`、
+`test_realtime_asr_control.py`、`test_realtime_admission_commits.py`、
+`test_realtime_current_schema.py` 共 110 项通过；
+`test_realtime_openai.py` 全文件 120 项通过。两者均用 fake backend，
+不下载模型、不访问云端。PR #319 CI 全绿（Quality Gates、Swift Package
+Tests、macOS App Build、Change Scope），合并状态 CLEAN。
+剩余未验收项不变：预设冻结后的真实验收（质量、延迟、峰值内存对照）
+仍待授权执行；#249/#253/#245 保持开放。
+
 ## 2026-10-07 回滚可调与三臂真实对照（PR #317 已合入）
 
 `rollback_tokens` 此前写死在 decoder 构造默认 5，worker 不透传，
