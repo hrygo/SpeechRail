@@ -332,6 +332,7 @@ class OpenAIRealtimeSession:
         self._last_update_sequence = 0
         self._stable_through_at_degradation = 0
         self._units_by_id: dict[str, AttributionUnit] = {}
+        self._wire_span_by_unit: dict[str, SampleSpan] = {}
         self._speaker_by_unit: dict[str, str | None] = {}
         self._current_item_id = self._new_item_id()
         self._config: dict[str, Any] = {
@@ -1529,6 +1530,7 @@ class OpenAIRealtimeSession:
         self._item_start_kernel = self._kernel_timeline.accepted_samples
         self._item_end_kernel = self._kernel_timeline.accepted_samples
         self._units_by_id.clear()
+        self._wire_span_by_unit.clear()
         self._speaker_by_unit.clear()
         self._reset_turn_observability()
         self._current_item_id = self._new_item_id()
@@ -2201,6 +2203,11 @@ class OpenAIRealtimeSession:
             aligned = bool(units) and all(
                 unit.timing_quality == "aligned" for unit in units
             )
+            wire_spans = self._alignment_wire_spans(
+                units,
+                kernel_span=SampleSpan(item_start_kernel, item_end_kernel),
+                wire_span=SampleSpan(item_start_wire, item_end_wire),
+            )
             if not transcript or aligned:
                 self._services.metrics.record_alignment_event("fixed_text_completed")
                 await self._send(
@@ -2212,7 +2219,7 @@ class OpenAIRealtimeSession:
                         metadata_revision=self._metadata_revision,
                         sample_span=(item_start_wire, item_end_wire),
                         codepoint_span=(0, len(transcript)),
-                        units=self._render_units(units),
+                        units=self._render_units(units, wire_spans),
                     )
                 )
             else:
@@ -2232,6 +2239,8 @@ class OpenAIRealtimeSession:
             # final or alignment arrives after the next item has begun.
             if units:
                 self._metadata_revision += 1
+                if self._diarization is not None:
+                    self._wire_span_by_unit.update(wire_spans)
                 await self._register_units(item_id, units)
         except asyncio.CancelledError:
             raise
@@ -2343,12 +2352,44 @@ class OpenAIRealtimeSession:
             granularity=self._alignment_granularity(),
         )
 
-    def _render_units(self, units: tuple[AttributionUnit, ...]) -> list[dict[str, object]]:
+    def _alignment_wire_spans(
+        self,
+        units: tuple[AttributionUnit, ...],
+        *,
+        kernel_span: SampleSpan,
+        wire_span: SampleSpan,
+    ) -> dict[str, SampleSpan]:
+        # A flushed 24->16 kHz tail can round up. Each frozen item's exact
+        # wire endpoints, rather than a global inverse rate map, own its units.
+        rate_map = RateMap(
+            source_rate=ASR_KERNEL_SAMPLE_RATE,
+            target_rate=WIRE_SAMPLE_RATE,
+            origin_source=kernel_span.start,
+            origin_target=wire_span.start,
+        )
+
+        def endpoint(sample: int) -> int:
+            if sample <= kernel_span.start:
+                return wire_span.start
+            if sample >= kernel_span.end:
+                return wire_span.end
+            return min(wire_span.end, max(wire_span.start, rate_map.to_target(sample)))
+
+        return {
+            unit.segment_uid: SampleSpan(
+                endpoint(unit.start_sample), endpoint(unit.end_sample)
+            )
+            for unit in units
+        }
+
+    def _render_units(
+        self,
+        units: tuple[AttributionUnit, ...],
+        wire_spans: dict[str, SampleSpan],
+    ) -> list[dict[str, object]]:
         rendered: list[dict[str, object]] = []
         for unit in units:
-            wire_span = self._to_wire_span(
-                SampleSpan(unit.start_sample, unit.end_sample)
-            )
+            wire_span = wire_spans[unit.segment_uid]
             rendered.append(
                 {
                     "segment_uid": unit.segment_uid,
@@ -2402,9 +2443,7 @@ class OpenAIRealtimeSession:
         for unit in sorted(
             self._units_by_id.values(), key=lambda item: (item.start_sample, item.segment_uid)
         ):
-            wire_span = self._to_wire_span(
-                SampleSpan(unit.start_sample, unit.end_sample)
-            )
+            wire_span = self._wire_span_by_unit[unit.segment_uid]
             payload.append(
                 {
                     "speaker": self._speaker_by_unit.get(unit.segment_uid),
