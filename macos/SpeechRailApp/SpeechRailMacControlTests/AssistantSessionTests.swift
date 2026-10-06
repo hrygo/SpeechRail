@@ -1210,6 +1210,48 @@ final class AssistantSessionTests: XCTestCase {
         XCTAssertEqual(lines.filter { $0.role == .assistant }.count, 1, "回复行也不许丢")
     }
 
+    // MARK: - #268 V16 前置门：增量累计文本与确认计划文本等价
+
+    /// V16a：同一确认全文经不同 append 切分，增量累计文本一致，
+    /// 且等于确认计划文本——分包改变不得改变朗读表示。
+    /// 含数字/单位/英文词/空白/标点的确认全文，逐字、按词、整段三种切分
+    /// 下累计文本必须完全相同，且与 `AssistantSpeechPlan` 的 `speakText` 一致。
+    /// 这是 V16 分组对照的 fake 前置门：合成质量门本身（漏读/重复/错读、
+    /// 关键实体可懂度、边界韵律）按方案 §9 必须人工听审，
+    /// 不以 bytes 或单次 ASR 分数替代——本用例只锁文本等价，不断言音质。
+    func testV16IncrementalAppendsAgreeWithSpeechPlanAcrossPartitions() async throws {
+        let full = "明天上午 9 点开会，带 3.5kg 的设备。 Hello world，温度 - 5 度。"
+        let plan = try XCTUnwrap(AssistantSpeechPlanBuilder.build(from: full).get())
+        XCTAssertTrue(plan.isValid)
+        for partitions in [1, 3, full.count] {
+            var deltas: [String] = []
+            var scalars = Array(full.unicodeScalars)
+            let size = max(1, scalars.count / partitions)
+            while !scalars.isEmpty {
+                let take = min(size, scalars.count)
+                deltas.append(String(String.UnicodeScalarView(scalars.prefix(take))))
+                scalars.removeFirst(take)
+            }
+            let (harness, client) = try await makeFixtureHarness(
+                try LifecycleFixture().scenario("long_reply"),
+                llmScripts: [.deltas(deltas)]
+            )
+            addTeardownBlock { await Self.stopAndCleanUp(harness) }
+            try await harness.coordinator.begin(.assistant)
+            await client.emitConfigured()
+            await client.emit(.completed(itemID: "i1", transcript: "念一句"))
+            await waitUntil(
+                { harness.session.turns.contains { $0.role == .assistant } },
+                message: "回复没有落库（切分 \(partitions) 段）"
+            )
+            XCTAssertEqual(
+                client.ttsAppendedText,
+                plan.speakText,
+                "增量累计文本必须等于确认计划文本（切分 \(partitions) 段）"
+            )
+        }
+    }
+
     /// 假时钟：让"观测时刻随证据推进"成为可重现的断言，而不是靠 sleep 碰运气。
     private final class MutableClock: @unchecked Sendable {
         private let lock = NSLock()
