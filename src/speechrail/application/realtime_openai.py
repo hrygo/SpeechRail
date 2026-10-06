@@ -152,6 +152,17 @@ class _AsrItem:
     first_partial: float | None = None
     first_recorded: bool = False
     commit_started: float | None = None
+    failure_code: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _AsrInputBarrier:
+    input_generation: int
+    asr_generation: int
+    accepted_samples: int
+    start_input_generation: int
+    finals: tuple[tuple[asyncio.Task[str | None], int], ...]
+    failure_code: str | None = None
 
 
 def _str_list(value: object) -> list[str] | None:
@@ -214,15 +225,15 @@ class OpenAIRealtimeSession:
         self._asr_barrier_failure: tuple[int, str] | None = None
         self._asr_item: _AsrItem | None = None
         self._asr_generation = 0
-        self._asr_finals: set[asyncio.Task[None]] = set()
+        self._asr_finals: dict[asyncio.Task[str | None], int] = {}
+        self._asr_empty_terminals: dict[str, str | None] = {}
         self._asr_closed_items: dict[str, _AsrItem] = {}
-        # Item ids whose failed terminal was sent by _clear_audio (#294).
-        self._cleared_item_ids: set[str] = set()
         self._commit_lock = asyncio.Lock()
         self._commit_owner: str | None = None
         self._input_generation = 0
         self._committed_input_generation = -1
-        self._commit_receipt_generation = -1
+        self._input_barrier: _AsrInputBarrier | None = None
+        self._next_barrier_start_generation = 0
         # Set only while the current ASR item is being committed.  The reader
         # uses this monotonic anchor to record commit-tail latency without
         # putting a session/request identifier into metrics labels.
@@ -415,7 +426,8 @@ class OpenAIRealtimeSession:
         while self._asr_finals:
             tasks = tuple(self._asr_finals)
             await asyncio.gather(*tasks)
-            self._asr_finals.difference_update(tasks)
+            for task in tasks:
+                self._discard_asr_final(task)
 
     def _alignment_granularity(self) -> AlignmentGranularity:
         """Return the requested alignment granularity, defaulting to segments.
@@ -538,17 +550,29 @@ class OpenAIRealtimeSession:
             session_created(session_id=self._session_id, **self._session_fields())
         )
 
-    async def handle(self, event: dict[str, Any]) -> None:
+    async def handle(
+        self, event: dict[str, Any], *, defer_asr_commit: bool = False,
+    ) -> Awaitable[None] | None:
         parsed = parse_client_event(event)
         if parsed.kind == "session_update":
             await self._update_session(event)
         elif parsed.kind == "append":
             await self._append_audio(event)
         elif parsed.kind == "commit":
-            await self._commit_audio(
-                commit_event_id=parse_commit_request(event),
-                request_receipt=parse_commit_receipt_request(event),
+            commit_event_id = parse_commit_request(event)
+            request_receipt = parse_commit_receipt_request(event)
+            barrier = await self._freeze_audio_commit(
+                reason="client",
+                commit_event_id=commit_event_id,
             )
+            completion = self._complete_audio_commit(
+                barrier,
+                commit_event_id=commit_event_id,
+                request_receipt=request_receipt,
+            )
+            if defer_asr_commit:
+                return completion
+            await completion
         elif parsed.kind == "diarization_finish":
             await self._handle_finish(event)
         elif parsed.kind == "clear":
@@ -567,6 +591,7 @@ class OpenAIRealtimeSession:
             raise RealtimeAdapterError(
                 "unsupported_operation", "unsupported SpeechRail event"
             )
+        return None
 
     async def close(self) -> None:
         self._closing = True
@@ -579,6 +604,7 @@ class OpenAIRealtimeSession:
         if self._asr_finals:
             await asyncio.gather(*self._asr_finals, return_exceptions=True)
         self._asr_finals.clear()
+        self._asr_empty_terminals.clear()
         if self._first_upstream_received_at is not None:
             self._record_first_hypothesis("cancelled")
         await self._cancel_alignment_tasks()
@@ -1079,8 +1105,6 @@ class OpenAIRealtimeSession:
             max_buffer_bytes=None,
         )
         await self._retire_terminal_asr()
-        self._mark_upstream_received(time.monotonic())
-        self._input_generation += 1
         max_buf = self._settings.max_realtime_buffer_bytes
         if max_buf is not None and len(audio) > max_buf:
             raise RealtimeAdapterError(
@@ -1092,6 +1116,8 @@ class OpenAIRealtimeSession:
 
         await self._ensure_diarization()
         self._wire_timeline.accept(audio)
+        self._mark_upstream_received(time.monotonic())
+        self._input_generation += 1
         kernel_audio = self._resampler.process(audio)
         kernel_span = self._kernel_timeline.accept(kernel_audio)
         # Accepted input may belong to the next item. Only admitted PCM
@@ -1193,8 +1219,16 @@ class OpenAIRealtimeSession:
         self, reason: str = "client", *, commit_event_id: str | None = None,
         request_receipt: bool = False,
     ) -> None:
-        """Serialize input retirement and its optional per-command receipt."""
+        barrier = await self._freeze_audio_commit(reason, commit_event_id=commit_event_id)
+        if reason == "client" or request_receipt:
+            await self._complete_audio_commit(
+                barrier, commit_event_id=commit_event_id, request_receipt=request_receipt,
+            )
 
+    async def _freeze_audio_commit(
+        self, reason: str, *, commit_event_id: str | None,
+    ) -> _AsrInputBarrier:
+        """Freeze input in FIFO order; model finalization does not hold this lock."""
         async with self._commit_lock:
             if self._asr_input_error is not None:
                 raise RealtimeAdapterError(
@@ -1209,38 +1243,117 @@ class OpenAIRealtimeSession:
                 self._committed_input_generation = self._input_generation
                 self._active_commit_event_id = commit_event_id
                 try:
-                    await self._commit_audio_once(reason)
-                    if (
-                        self._asr_barrier_failure is None
-                        or self._asr_barrier_failure[0] != self._input_generation
-                    ):
-                        self._commit_receipt_generation = self._input_generation
+                    final = await self._commit_audio_once(reason)
+                    self._committed_input_generation = self._input_generation
+                    finals = tuple(self._asr_finals.items())
+                    if final is not None and final not in self._asr_finals:
+                        finals += ((final, self._input_generation),)
+                    self._input_barrier = _AsrInputBarrier(
+                        input_generation=self._input_generation,
+                        asr_generation=self._asr_generation,
+                        accepted_samples=self._wire_timeline.accepted_samples,
+                        start_input_generation=self._next_barrier_start_generation,
+                        finals=finals,
+                        failure_code=(
+                            self._asr_barrier_failure[1]
+                            if self._asr_barrier_failure is not None
+                            and self._asr_barrier_failure[0] >= self._next_barrier_start_generation
+                            else None
+                        ),
+                    )
+                except Exception as exc:
+                    self._input_barrier = _AsrInputBarrier(
+                        self._input_generation, self._asr_generation,
+                        self._wire_timeline.accepted_samples, self._next_barrier_start_generation,
+                        tuple(self._asr_finals.items()),
+                        exc.code if isinstance(exc, RealtimeAdapterError) else (
+                            "backend_timeout" if isinstance(exc, TimeoutError) else "backend_error"
+                        ),
+                    )
+                    if reason == "client":
+                        self._next_barrier_start_generation = self._input_generation + 1
+                    raise
                 finally:
                     self._active_commit_event_id = None
-            if request_receipt:
-                await self._await_asr_finals()
-                if (
-                    self._asr_barrier_failure is not None
-                    and self._asr_barrier_failure[0] == self._input_generation
-                ):
-                    raise RealtimeAdapterError(
-                        self._asr_barrier_failure[1],
-                        "the input barrier did not reach a worker transcription terminal",
-                    )
-                if self._commit_receipt_generation != self._input_generation:
-                    raise RealtimeAdapterError(
-                        "backend_error", "the input barrier did not reach a transcription terminal"
-                    )
-                # _commit_audio_once awaits the ASR reader, including sending
-                # its text terminal. Empty/already retired input has no new
-                # item, but every explicit barrier still gets its own receipt.
-                await self._send({
-                    "type": "speechrail.input_audio_buffer.committed",
-                    "commit_event_id": commit_event_id,
-                    "accepted_samples": self._wire_timeline.accepted_samples,
-                })
+            if self._input_barrier is None:
+                self._input_barrier = _AsrInputBarrier(
+                    self._input_generation, self._asr_generation,
+                    self._wire_timeline.accepted_samples, self._next_barrier_start_generation, (),
+                    self._asr_barrier_failure[1] if (
+                        self._asr_barrier_failure is not None
+                        and self._asr_barrier_failure[0] >= self._next_barrier_start_generation
+                    ) else None,
+                )
+            if self._input_barrier.input_generation != self._input_generation:
+                raise RealtimeAdapterError(
+                    "backend_error", "the input barrier has uncommitted audio",
+                )
+            if reason == "client":
+                self._next_barrier_start_generation = self._input_generation + 1
+            return self._input_barrier
 
-    async def _commit_audio_once(self, reason: str) -> None:
+    async def _complete_audio_commit(
+        self, barrier: _AsrInputBarrier, *, commit_event_id: str | None,
+        request_receipt: bool,
+    ) -> None:
+        try:
+            results = await asyncio.gather(*(asyncio.shield(t) for t, _ in barrier.finals))
+        except asyncio.CancelledError:
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                raise
+            raise RealtimeAdapterError(
+                "invalid_state", "the input barrier was canceled by input clear"
+            ) from None
+        if barrier.asr_generation != self._asr_generation:
+            raise RealtimeAdapterError("invalid_state", "the input barrier was cleared")
+        failure = barrier.failure_code or next((
+            code for (_, generation), code in zip(barrier.finals, results, strict=True)
+            if code and generation >= barrier.start_input_generation
+        ), None)
+        if request_receipt:
+            if failure:
+                raise RealtimeAdapterError(
+                    failure, "the input barrier did not reach a worker transcription terminal",
+                )
+            await self._send({
+                "type": "speechrail.input_audio_buffer.committed",
+                "commit_event_id": commit_event_id,
+                "accepted_samples": barrier.accepted_samples,
+            })
+
+    def _schedule_empty_asr_terminal(self) -> asyncio.Task[str | None]:
+        event = self._completed_event(
+            transcript="", commit_event_id=self._active_commit_event_id,
+        )
+        item_id = self._current_item_id
+        self._asr_empty_terminals[item_id] = self._active_commit_event_id
+        previous = tuple(self._asr_finals)
+        generation = self._asr_generation
+
+        async def finish() -> str | None:
+            try:
+                await asyncio.gather(*(asyncio.shield(t) for t in previous))
+                if (
+                    item_id in self._asr_empty_terminals
+                    and generation == self._asr_generation
+                    and not self._closing
+                ):
+                    self._asr_empty_terminals.pop(item_id)
+                    await self._send(event)
+                return None
+            finally:
+                self._asr_empty_terminals.pop(item_id, None)
+
+        task = asyncio.create_task(finish())
+        self._asr_finals[task] = self._input_generation
+        task.add_done_callback(self._discard_asr_final)
+        return task
+
+    def _discard_asr_final(self, task: asyncio.Task[str | None]) -> None:
+        self._asr_finals.pop(task, None)
+
+    async def _commit_audio_once(self, reason: str) -> asyncio.Task[str | None] | None:
         tail = self._resampler.flush() if reason == "client" else b""
         if tail:
             kernel_span = self._kernel_timeline.accept(tail)
@@ -1277,13 +1390,7 @@ class OpenAIRealtimeSession:
                 await self._handle_admission_decision(dec, in_commit=True)
 
         if self._speech_admission is not None and not self._turn_has_admitted_speech:
-            await self._await_asr_finals()
-            await self._send(
-                self._completed_event(
-                    transcript="",
-                    commit_event_id=self._active_commit_event_id,
-                )
-            )
+            final = self._schedule_empty_asr_terminal()
             self._last_partial_text = ""
             self._unflushed_bytes = 0
             self._buffered_audio_bytes = 0
@@ -1297,16 +1404,10 @@ class OpenAIRealtimeSession:
             self._record_first_hypothesis("missing")
             self._reset_turn_observability()
             self._current_item_id = self._new_item_id()
-            return
+            return final
 
         if self._asr is None:
-            await self._await_asr_finals()
-            await self._send(
-                self._completed_event(
-                    transcript="",
-                    commit_event_id=self._active_commit_event_id,
-                )
-            )
+            final = self._schedule_empty_asr_terminal()
             self._last_partial_text = ""
             self._unflushed_bytes = 0
             self._services.metrics.record_realtime_turn(
@@ -1319,7 +1420,7 @@ class OpenAIRealtimeSession:
             self._record_first_hypothesis("missing")
             self._reset_turn_observability()
             self._current_item_id = self._new_item_id()
-            return
+            return final
 
         self._sync_asr_item()
         item = self._asr_item
@@ -1344,8 +1445,8 @@ class OpenAIRealtimeSession:
         final = asyncio.create_task(
             self._finish_asr_item(item, want_segments, self._input_generation)
         )
-        self._asr_finals.add(final)
-        final.add_done_callback(self._asr_finals.discard)
+        self._asr_finals[final] = self._input_generation
+        final.add_done_callback(self._discard_asr_final)
         self._asr = None
         self._asr_item = None
         self._asr_reader = None
@@ -1361,28 +1462,11 @@ class OpenAIRealtimeSession:
         self._item_start_kernel = item.end_kernel
         self._item_end_kernel = item.end_kernel
         self._current_item_id = self._new_item_id()
-        if reason == "client":
-            # A concurrent clear sends the closed item its failed terminal
-            # and stamps the item id before canceling in-flight finals.
-            # Only that clear-driven cancellation becomes input_cleared: an
-            # external cancel of the commit caller itself leaves no stamp
-            # and must keep surfacing CancelledError with no receipt. The
-            # text terminal bit alone cannot discriminate: the reader claims
-            # it before yielding to a blocked transport.
-            try:
-                await final
-            except asyncio.CancelledError as err:
-                if item.item_id in self._cleared_item_ids:
-                    raise RealtimeAdapterError(
-                        "input_cleared",
-                        "the committed input was cleared before its terminal",
-                    ) from err
-                raise
-            await self._await_asr_finals()
+        return final
 
     async def _finish_asr_item(
         self, item: _AsrItem, want_segments: bool, input_generation: int
-    ) -> None:
+    ) -> str | None:
         try:
             await item.asr.commit(want_segments=want_segments)
             if item.reader is not None:
@@ -1395,15 +1479,17 @@ class OpenAIRealtimeSession:
         except Exception as exc:
             if item.reader is not None:
                 await item.reader
-            if item.generation == self._asr_generation:
-                code = "backend_timeout" if isinstance(exc, TimeoutError) else "backend_error"
-                if (
+            code = item.failure_code or (
+                "backend_timeout" if isinstance(exc, TimeoutError) else "backend_error"
+            )
+            if item.generation == self._asr_generation and (
                     self._asr_barrier_failure is None
                     or input_generation >= self._asr_barrier_failure[0]
-                ):
-                    self._asr_barrier_failure = (input_generation, code)
+            ):
+                self._asr_barrier_failure = (input_generation, code)
             if not item.terminal and item.generation == self._asr_generation:
                 item.terminal = True
+                item.failure_code = code
                 await self._send(
                     transcription_failed(
                         item_id=item.item_id,
@@ -1416,9 +1502,11 @@ class OpenAIRealtimeSession:
                 )
             # The terminal fact is already delivered. A background VAD final
             # must not throw an unobserved task exception into another item.
+            return code if item.generation == self._asr_generation else "backend_error"
         finally:
             item.pcm.clear()
             self._asr_closed_items.pop(item.item_id, None)
+        return None
 
     async def _retire_terminal_asr(self, *, next_wire_sample: int | None = None) -> None:
         """Join an unsealed failed item's cleanup before accepting its successor."""
@@ -1486,21 +1574,12 @@ class OpenAIRealtimeSession:
         # Only unfrozen input is discarded without a terminal. A boundary
         # already published to the caller creates an obligation to finish
         # that item, even when its inference is canceled by clear.
+        canceled_events = []
         for item in tuple(self._asr_closed_items.values()):
             if not item.terminal:
                 item.terminal = True
-                # Stamp the clear so an in-flight client commit awaiting this
-                # item's final can report input_cleared instead of leaking
-                # the cancellation (#294). The bump of _input_generation
-                # below happens later; the commit may observe the cancel
-                # before the generation changes.
-                self._cleared_item_ids.add(item.item_id)
-                # Bounded: only in-flight commits can observe the stamp;
-                # closed items are popped on final teardown, so keep the
-                # last few ids and drop anything older.
-                if len(self._cleared_item_ids) > 8:
-                    self._cleared_item_ids = set(list(self._cleared_item_ids)[-8:])
-                await self._send(
+                item.failure_code = "backend_error"
+                canceled_events.append(
                     transcription_failed(
                         item_id=item.item_id,
                         code="backend_error",
@@ -1508,7 +1587,22 @@ class OpenAIRealtimeSession:
                         commit_event_id=item.commit_event_id,
                     )
                 )
+        empty_terminals = tuple(self._asr_empty_terminals.items())
+        self._asr_empty_terminals.clear()
+        for item_id, commit_event_id in empty_terminals:
+            canceled_events.append(
+                transcription_failed(
+                    item_id=item_id,
+                    code="backend_error",
+                    message="streaming transcription canceled by input clear",
+                    commit_event_id=commit_event_id,
+                )
+            )
+        # Revoke all old barriers before yielding to a slow terminal send.
+        # A naturally completed final must not win a receipt while clear waits.
         self._asr_generation += 1
+        for event in canceled_events:
+            await self._send(event)
         if self._asr_lane is not None:
             await self._asr_lane.close()
             self._asr_lane = None
@@ -2722,11 +2816,12 @@ class OpenAIRealtimeSession:
                     item.terminal = True
                 elif event.kind == "error":
                     item.terminal = True
+                    item.failure_code = event.error_code or "backend_error"
                     self._record_item_first_hypothesis(item, "failed")
                     await self._send(
                         transcription_failed(
                             item_id=item.item_id,
-                            code=event.error_code or "backend_error",
+                            code=item.failure_code,
                             message="streaming transcription failed",
                             commit_event_id=item.commit_event_id,
                         )
@@ -2743,16 +2838,18 @@ class OpenAIRealtimeSession:
             # A dead reader must not die silently: the client would keep
             # believing ASR is alive and never see a terminal failure event.
             logger.exception("realtime ASR event reader failed")
-            with contextlib.suppress(Exception):
-                await self._send(
-                    transcription_failed(
-                        item_id=item.item_id,
-                        code="backend_error",
-                        message="streaming transcription failed",
-                        commit_event_id=item.commit_event_id,
-                    )
-                )
+            if not item.terminal and item.generation == self._asr_generation:
                 item.terminal = True
+                item.failure_code = "backend_error"
+                with contextlib.suppress(Exception):
+                    await self._send(
+                        transcription_failed(
+                            item_id=item.item_id,
+                            code="backend_error",
+                            message="streaming transcription failed",
+                            commit_event_id=item.commit_event_id,
+                        )
+                    )
 
     def _record_item_first_hypothesis(self, item: _AsrItem, outcome: str) -> None:
         if item.first_recorded:

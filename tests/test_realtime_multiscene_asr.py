@@ -207,8 +207,12 @@ def test_drain_removes_completed_tasks_without_waiting_for_callbacks(task_set, d
         task = asyncio.create_task(finish())
         await task
         owned = getattr(session, task_set)
-        owned.add(task)
-        task.add_done_callback(owned.discard)
+        if task_set == "_asr_finals":
+            owned[task] = 0
+            task.add_done_callback(session._discard_asr_final)
+        else:
+            owned.add(task)
+            task.add_done_callback(owned.discard)
         # The discard callback is scheduled for the next loop tick. Draining
         # an already done task must not spin synchronously until that tick.
         await getattr(session, drain)()
@@ -478,7 +482,7 @@ def test_client_commit_interrupted_by_clear_fails_explicitly():
     """#294: a client commit awaiting its final must not leak CancelledError.
 
     Clear cancels in-flight finals after delivering the failed terminal;
-    the commit caller sees input_cleared, and new input still completes.
+    the commit caller sees invalid_state, and new input still completes.
     """
 
     async def run():
@@ -512,7 +516,7 @@ def test_client_commit_interrupted_by_clear_fails_explicitly():
         release.set()
         with pytest.raises(RealtimeAdapterError) as exc_info:
             await asyncio.wait_for(pending, timeout=5)
-        assert exc_info.value.code == "input_cleared"
+        assert exc_info.value.code == "invalid_state"
         # The cleared item already got its failed terminal; new input completes.
         await session._append_audio({
             "type": "input_audio_buffer.append",
