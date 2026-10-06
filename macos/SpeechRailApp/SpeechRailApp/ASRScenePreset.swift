@@ -47,7 +47,7 @@ public enum ASRScenePreset: String, CaseIterable, Equatable, Sendable {
             maxSegment = 8_000
             finalization = .fullSegment
         case .teleprompter:
-            previewInterval = 400
+            previewInterval = 500
             maxSegment = 8_000
             finalization = .streamingFinalize
         }

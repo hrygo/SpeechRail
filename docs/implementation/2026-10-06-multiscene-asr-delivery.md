@@ -2,11 +2,44 @@
 title: "共享 ASR #245：实施与验收记录"
 status: in_progress
 audience: "SpeechRail 开发者与验收人员"
-version: "1.14.0"
+version: "1.15.0"
 date: 2026-10-06
 ---
 
 # 共享 ASR #245：实施与验收记录
+
+## 2026-10-07 预设冻结（提词器预览 400→500 ms）
+
+用户已采纳“提词器方案 B、字幕维持现状”：caption 保持 8 s + full，
+teleprompter 只把预览间隔从 400 ms 放到 500 ms，继续 streaming 收尾，
+20 s 拒绝；其余助手与会议预设不变。本分支改动仅两行：
+`ASRScenePreset.teleprompter` 预览 400→500 ms，
+`ASRScenePresetTests` 期望同步为 500 ms。
+Python 侧无 400 ms 硬编码预设可改（`ASRPolicy` 默认 1000 ms，
+场景值只由 App 显式下发），Schema 与契约文档无需变更。
+验证（rebase 到含 #297 的 main `159fea09` 之后重跑）：
+`test_realtime_multiscene_asr.py` + `test_realtime_asr_control.py` +
+`test_asr_policy.py` 共 69 项通过；Ruff 全仓库通过；
+mypy 三文件（`realtime_openai.py`、`routes/realtime_openai.py`、
+`asr_policy.py`）零问题；`swift test --filter ASRScenePresetTests`
+2 项通过。#297 的 clear-barrier 行为变更（clear 中断的 client commit
+由 `input_cleared` 改为 `invalid_state`）已包含在本分支历史，
+交互门在本分支上重跑通过。#249 剩余真实复核（预设冻结后的真实验收）
+仍待授权执行。本节只记录冻结决定、代码改动与上述确定性验证，
+不声称真实验收已通过。
+
+## 2026-10-07 #249 确定性门补强（PR #319 待合并）
+
+在含 #297 的 main `159fea09` 上，本分支确定性验证扩大到 #249 七个
+相关测试文件：`test_asr_policy.py`、`test_asr_turn_coordinator.py`、
+`test_asr_mode.py`、`test_realtime_multiscene_asr.py`、
+`test_realtime_asr_control.py`、`test_realtime_admission_commits.py`、
+`test_realtime_current_schema.py` 共 110 项通过；
+`test_realtime_openai.py` 全文件 120 项通过。两者均用 fake backend，
+不下载模型、不访问云端。PR #319 CI 全绿（Quality Gates、Swift Package
+Tests、macOS App Build、Change Scope），合并状态 CLEAN。
+剩余未验收项不变：预设冻结后的真实验收（质量、延迟、峰值内存对照）
+仍待授权执行；#249/#253/#245 保持开放。
 
 ## 2026-10-07 回滚可调与三臂真实对照（PR #317 已合入）
 

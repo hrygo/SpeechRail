@@ -34,7 +34,7 @@ struct ASRScenePresetTests {
             (.assistantDuplex, 600),
             (.meeting, 1_000),
             (.caption, 500),
-            (.teleprompter, 400),
+            (.teleprompter, 500),
         ]
 
         for (preset, previewInterval) in expected {
