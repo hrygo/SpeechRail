@@ -2,7 +2,7 @@
 title: "共享 ASR #245：实施与验收记录"
 status: in_progress
 audience: "SpeechRail 开发者与验收人员"
-version: "1.7.0"
+version: "1.8.0"
 date: 2026-10-06
 ---
 
@@ -132,14 +132,57 @@ quality/quality、auto off、ready、空闲、catalog、配置和 runtime/vendor
 [#245](https://github.com/hrygo/SpeechRail/issues/245#issuecomment-6017883935)；
 三项保持 OPEN。
 
+### 提词器处理确认复测与证据限制
+
+随后 `maintenance-v8-session-processing-ack-tele` 只复测同一 AMI fixture，
+音频、原稿及官方 timed-word gold 均未改变。schema 4 的本地工具增量
+使用未饱和的生产 alignment count 确认事件已处理，移除首个 terminal
+即结束采集的分支，并按当前 item 判断接管条件。
+
+实际送入及上传 **90,240 samples（3.76 s）** 后，同一 item 两次预览的
+原稿 UTF-16 位置为 `[0, 37]`，对应源音频水位 `[80,640, 90,240]`；
+接管位置为 37，停止后保持。接管前较早 item 的终态数为 1，
+接收与处理的定位事件数均为 5，采集、客户端、mirror 和 coordinator
+释放均为 true。该轮工具的全部适用门输出 pass，
+`measurement_completed=true, original_restored=true`；恢复 PID **61897**，
+generation 13、quality/quality、原 runtime/vendor/selection/config、ready、
+空闲及 catalog 核验通过。
+
+**这证明了已观察的实际推进和手动保持，尚不能证明每次修订都未误跳。**
+只读复审发现：40 ms 轮询可跳过同 item 的中间修订或较早 item 的位置，
+后续有效位置可能掩盖早期越界；因此不把 schema 4 的聚合 pass 作为
+全量 gold 保护通过证据，也不追认此前 `[0, 0]` 的失败。
+正在补充 schema 5 事件级观测：逐 alignment event 等待 Session 处理后，
+记录 item、位置和水位，再转发下一事件；缺失、超时、窗口饱和及任何
+早期越界均关闭门。该增量及反例尚待编译、回归和同素材真实复测。
+
+| 仓库外证据 | SHA-256 |
+|---|---|
+| schema 4 production-session-results.json | `ed1d1e24563268aa19c003a4694cc9d265844665c834d0a328e969cb2f237c80` |
+| schema 4 production-session-teleprompter.json | `706268556dae397be53e2c56f4c34d0c765779db2aa4701eb9525c3a5940282f` |
+| schema 4 restoration-verification.json | `7fb5993328efdba05ddaf1a9ee486b029d44903fd5a74bd18380d68e55f516c0` |
+
+本轮实测使用 `7f24a2be` 后的本地 schema 4 增量，三份工具源码 hash
+保存在结果中，不能仅按该 HEAD 归属到未包含增量的提交。
+对应 schema 4 的 73 项 XCTest、35 项业务门 Swift Testing 通过，1 项
+真实回放默认 skip；另含跟随纯函数的宽筛选为 102 项执行通过及 1 项 skip。
+Xcode 包装入口编译整个 unit target 并执行 20 项所选 Swift Testing，
+未运行 UI tests，临时 DerivedData 已清理。以上不证明后续 schema 5 增量通过。
+
+另在独立维护 `maintenance-v8-quality-final-matrix` 中开始串行采集
+五预设 **300 正式请求 / 2441.640 s** 矩阵；结果尚未完成，不计为质量或
+性能通过。结束后仍恢复授权的 `912547085c09` runtime。
+矩阵运行期间不进行 Swift/Xcode 编译或其它真实模型测量。
+
 ### 原工作区 rebase 与改动对账
 
-用户授权后，`codex/multiscene-asr-245` 已 rebase 并推送到 main `2c40027f`。
+用户授权后，`codex/multiscene-asr-245` 与 main `2c40027f` rebase 对齐，
+并推送其远端工作分支；后续再次与 `95b1fe55` 对齐并普通 push。
 rebase 前 68 个文件完整保存于 stash
 `db6e829d029d35d73c2483b991292cb0abab69f4`；随后全部取出到仓库外，
 逐文件 SHA-256 与原清单一致，原 stash 继续保留。
 
-54 个文件与当前 main 完全一致；8 个原稿逐字命中 main 的历史提交，
+对账时 54 个文件与 main `2c40027f` 完全一致；8 个原稿逐字命中 main 的历史提交，
 随后继续更新（主要为 #292 基准工具和 #289 回归）。
 其余 6 个文件已逐项核对：原 PBX IDs 全部保留，main 补入新的 Sources；
 助手测试保留并补 V16；Realtime 保留共享内核并补精确区间、对齐和 clear 修复；
