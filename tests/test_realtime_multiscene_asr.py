@@ -2,7 +2,6 @@
 
 import asyncio
 import base64
-import contextlib
 from itertools import pairwise
 
 import pytest
@@ -510,12 +509,10 @@ def test_client_commit_interrupted_by_clear_fails_explicitly():
         await asyncio.wait_for(entered.wait(), timeout=1)
         assert not pending.done()
         await asyncio.wait_for(session._clear_audio(), timeout=2)
-        with pytest.raises(RealtimeAdapterError) as exc_info:
-            await asyncio.wait_for(asyncio.shield(pending), timeout=5)
-        assert exc_info.value.code == "input_cleared"
         release.set()
-        with contextlib.suppress(RealtimeAdapterError, asyncio.CancelledError):
+        with pytest.raises(RealtimeAdapterError) as exc_info:
             await asyncio.wait_for(pending, timeout=5)
+        assert exc_info.value.code == "input_cleared"
         # The cleared item already got its failed terminal; new input completes.
         await session._append_audio({
             "type": "input_audio_buffer.append",
