@@ -3076,6 +3076,9 @@ extension AppModelTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = CreativeWorkStore(directory: directory)
         let audio = silentPreviewWAV(marker: 0x41)
+        // #189：fixture 的服务端摘要必须是 data chunk 的真摘要，
+        // 否则落盘比对会诚实地降为 partial（这正是本测试要覆盖的语义）。
+        let audioDigest = try AudioDigest.sha256HexOfPCM(in: audio)
         let recipe = RenderRecipeSnapshot(
             state: .complete,
             missingFields: [],
@@ -3106,7 +3109,7 @@ extension AppModelTests {
                 planID: "plan_" + String(repeating: "f", count: 32),
                 voiceRevision: "vr_0123456789abcdef0123456789abcdef",
                 planSHA256: String(repeating: "c", count: 64),
-                pcmSHA256: String(repeating: "9", count: 64),
+                pcmSHA256: audioDigest,
                 recipe: recipe,
                 provenance: RenderProvenance(state: .verified, reason: nil)
             )
@@ -3128,7 +3131,7 @@ extension AppModelTests {
         )
         XCTAssertEqual(work.provenance.state, .verified)
         XCTAssertEqual(work.provenance.planSHA256, String(repeating: "c", count: 64))
-        XCTAssertEqual(work.provenance.pcmSHA256, String(repeating: "9", count: 64))
+        XCTAssertEqual(work.provenance.pcmSHA256, audioDigest)
         XCTAssertEqual(work.provenance.recipe, recipe)
         XCTAssertNotNil(work.provenance.audioFileSHA256, "提交后必须记录真实文件摘要")
 
@@ -3171,6 +3174,42 @@ extension AppModelTests {
         XCTAssertEqual(work.provenance.state, .unavailable)
         XCTAssertEqual(work.provenance.reason, "receipt_unavailable")
         XCTAssertEqual(try store.loadAudio(for: work), audio, "追溯不完整不等于丢掉音频")
+    }
+
+    /// #189：服务端摘要与本地 data 摘要对不上时，音频保留、
+    /// provenance 降为 `.partial(audio_digest_mismatch)`——缺失与不匹配不同码。
+    func testDigestMismatchKeepsAudioAndMarksPartial() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("speechrail-mismatch-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = CreativeWorkStore(directory: directory)
+        let audio = silentPreviewWAV(marker: 0x43)
+        let creator = ScriptedRenderClient(
+            audio: audio,
+            renderResult: SpeechRenderResult(
+                audioData: audio,
+                planID: "plan_" + String(repeating: "f", count: 32),
+                voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                planSHA256: String(repeating: "c", count: 64),
+                // 假摘要：与 data chunk 真摘要必然不一致。
+                pcmSHA256: String(repeating: "9", count: 64),
+                recipe: nil,
+                provenance: RenderProvenance(state: .verified, reason: nil)
+            )
+        )
+        let model = makeRenderModel(store: store, creator: creator)
+        await model.refreshDiscovery()
+
+        _ = await model.synthesizeAndSave(
+            text: "摘要对不上也要保住音频。",
+            voice: Self.renderVoice(),
+            speed: 1.0
+        )
+        let work = try XCTUnwrap(model.savePendingDubbing())
+
+        XCTAssertEqual(work.provenance.state, .partial)
+        XCTAssertEqual(work.provenance.reason, "audio_digest_mismatch")
+        XCTAssertEqual(try store.loadAudio(for: work), audio, "摘要不匹配不等于丢掉音频")
     }
 
     /// 保存失败必须保留 pending 以便重试，且不得留下半条作品。

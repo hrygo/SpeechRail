@@ -3782,6 +3782,29 @@ public final class AppModel {
             )
             let data = render.audioData
             try Task.checkCancellation()
+            // #189：落盘前在后台（非 MainActor）算出本地 PCM 摘要。
+            // `synthesizeAndSave` 跑在 `@MainActor` 上；几十秒 PCM 的 SHA-256
+            // 是同步开销，必须 `detached` 出去算，主线程只等结果，不占着跑哈希。
+            // 口径与服务端一致：WAV 解析 data chunk 的 PCM 字节，而非整个文件。
+            // 摘要算不出（非 WAV/损坏）不断然丢音频：provenance 记
+            // `audio_digest_unverified`，核对逻辑（`FullTextReceiptCheck`）不判
+            // deliverable；摘要对不上记 `audio_digest_mismatch`，音频保留、
+            // provenance 降为 `.partial`。缺失与不匹配是两件事，不合并原因码。
+            let localDigest: String? = await Task.detached(priority: .utility) {
+                try? AudioDigest.sha256HexOfPCM(in: data)
+            }.value
+            var provenanceState = render.provenance.state
+            var provenanceReason = render.provenance.reason
+            if let serverDigest = render.pcmSHA256, !serverDigest.isEmpty {
+                if localDigest == nil {
+                    provenanceReason = "audio_digest_unverified"
+                    if provenanceState == .verified { provenanceState = .partial }
+                } else if localDigest!.lowercased() != serverDigest.lowercased() {
+                    provenanceState = .partial
+                    provenanceReason = "audio_digest_mismatch"
+                }
+                // 一致：保留服务端 provenance 原样，不做任何改动。
+            }
             // 生成结果只放内存：用户显式保存后才进入作品库。身份在此刻定下，
             // 之后无论 UI 怎么改，保存的元数据都描述这一次真实的生成。
             let workID = "work_" + UUID().uuidString
@@ -3805,8 +3828,8 @@ public final class AppModel {
                durationSeconds: audioPlaybackController.duration(for: data),
                audioData: data,
                provenance: RenderProvenanceSnapshot(
-                   state: render.provenance.state,
-                   reason: render.provenance.reason,
+                   state: provenanceState,
+                   reason: provenanceReason,
                    planSHA256: render.planSHA256,
                    recipe: render.recipe,
                    pcmSHA256: render.pcmSHA256
