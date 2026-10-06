@@ -165,10 +165,10 @@ struct AssistantSpeechTextBuffer {
     mutating func readyChunks(now: ContinuousClock.Instant, force: Bool = false) -> [String] {
         var chunks: [String] = []
         while !pending.isEmpty {
-            // 硬上限：无论断点好不好看，都不能让 pending 无界增长。
+            // M0e：超单片上限不硬切——暂停朗读，等闭合或终态 flush；
+            // 无界增长由整轮 total 上限挡（append 期拒收），这里只停不断。
             if pending.count >= configuration.maximumChunkScalars {
-                chunks.append(take(upTo: configuration.maximumChunkScalars, now: now))
-                continue
+                break
             }
             let waitedLongEnough = pendingSince.map {
                 $0.duration(to: now) >= configuration.maximumPendingWait
@@ -214,7 +214,11 @@ struct AssistantSpeechTextBuffer {
     private func safeCut(urgency: Urgency) -> Int? {
         guard !pending.isEmpty else { return nil }
 
-        // 已经到了"必须出声"的档：不再挑断点，整段交出去。
+        // M0e：forced 也不切未闭合结构——半句开口无法修订；
+        // 泵停转由调用方的 finish/终态收尾，不靠切坏结构保活。
+        if urgency == .forced, !markdownBalanced(upTo: pending.count) {
+            return nil
+        }
         if urgency == .forced {
             return pending.count
         }
@@ -227,8 +231,9 @@ struct AssistantSpeechTextBuffer {
                 let keepsTokenOpen = Self.continuableTailScalars.contains(previous)
                 switch urgency {
                 case .deadline:
-                    // 尾巴还在长（数字/单位/英文词）就先别切在这一刀上，往下找个天然停顿。
-                    if index == pending.count, keepsTokenOpen { break }
+                    // M0e：尾巴还在长（数字/单位/英文词）就不切在这一刀上——
+                    // 到点不授权半句开口，往下找个天然停顿；找不到就等闭合。
+                    if keepsTokenOpen { break }
                     return index
                 case .conservative:
                     let strong = Self.strongTerminators.contains(previous)
@@ -242,10 +247,8 @@ struct AssistantSpeechTextBuffer {
             index -= 1
         }
 
-        // 到点了却连一个天然停顿都没有：整段交出去（Markdown 没闭合除外）。
-        if urgency == .deadline, markdownBalanced(upTo: pending.count) {
-            return pending.count
-        }
+        // M0e：到点了也没有天然停顿，或尾巴语义未完成——不等了也不硬切：
+        // 未定稿不开口，等闭合（flush/终态）才出声。150ms 不再是开嗓理由。
         return nil
     }
 

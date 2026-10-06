@@ -117,6 +117,9 @@ final class AssistantTTSStreamCoordinator {
 
     private struct PendingAudio {
         let id: UUID
+        /// M0d：播放事实的唯一身份。入队时交给播放层，回调原样带回；
+        /// 重复回调按此去重，只归还一次预算。
+        let chunkID: UUID
         let requestID: String
         let epoch: Int
         let pcm: Data
@@ -130,10 +133,12 @@ final class AssistantTTSStreamCoordinator {
     var sendFinish: @MainActor (Int) async throws -> Void = { _ in }
     var sendCancel: @MainActor () async throws -> Void = {}
     var sendAudioAcknowledgement: @MainActor (String, Int) async throws -> Void = { _, _ in }
-    /// 入队一块音频，第二个参数是**这一块所属的账本 epoch**：播放层必须在"真的播完"
-    /// 的回调里把它原样带回，迟到块才可能被识别出来。
+    /// 入队一块音频，第二个参数是**这一块所属的账本 epoch**，第三个是 chunkID：
+    /// 播放层必须在"真的播完"的回调里把两者原样带回，迟到块才可能被识别出来，
+    /// 重复回调才可能只归还一次。单次 schedule 只选一种 completion 类型
+    /// （M0d 用 played），不能假设同一块回调两次。
     /// 返回 `false` 表示这一块没有真的进播放队列，预算必须原样还回去。
-    var enqueuePlayback: @MainActor (Data, Int) async -> Bool = { _, _ in true }
+    var enqueuePlayback: @MainActor (Data, Int, UUID) async -> Bool = { _, _, _ in true }
     var stopPlayback: @MainActor () async -> Void = {}
     /// 朗读前的清洗（去掉 Markdown、把符号念成词）。返回空串表示这一段不用发声，
     /// 既不占序号也不占预算。
@@ -156,6 +161,9 @@ final class AssistantTTSStreamCoordinator {
     private var audioConsumerTask: Task<Void, Never>?
     private var audioConsumerID: UUID?
     private var audioAcknowledgementTaskID: UUID?
+    /// M0d：已记过 played 的 chunk 身份。重复回调直接忽略，不二次归还预算。
+    /// 世代推进时清空——旧代回调本来就按 epoch 拒绝，不占用集合。
+    private var playedChunkIDs: Set<UUID> = []
     private var consumedSampleOffset = 0
     private var sentConsumptionOffset = 0
     private(set) var unconsumedAudioBytes = 0
@@ -299,8 +307,11 @@ final class AssistantTTSStreamCoordinator {
         }
     }
 
-    /// LLM 又给了一段增量文本。**同步返回**：文本泵自己异步发送，不阻塞 LLM 流。
-    func offer(_ delta: String) {
+    /// 已确认可朗读的文本（确认计划的计划文本，或重播的已定稿整句）。
+    /// 生产默认链走 `speakConfirmedPlan`（完整终态后整体建计划）；
+    /// 重播走整句确认入口。流式未定稿 delta 不得经此入口开嗓。
+    /// **同步返回**：文本泵自己异步发送，不阻塞调用方。
+    func offerConfirmed(_ delta: String) {
         guard isActive else { return }
         if let limit = buffer.append(delta) {
             switch limit {
@@ -310,6 +321,29 @@ final class AssistantTTSStreamCoordinator {
             }
         }
         ensurePump()
+    }
+
+    /// 用完整定稿原文确认本轮朗读计划（M0e 默认链的开嗓入口）。
+    ///
+    /// 对原文做整体解析与保义转换：通过则全量 offer 计划文本；
+    /// 原文超限则暂停朗读并保留全文（抛 `Failure.textLimitExceeded` 由上层落库，
+    /// 不硬切、不开口）；无可朗读内容则同样不开口。
+    /// 确定性：同一原文无论分包如何，计划文本一致。
+    func speakConfirmedPlan(_ source: String) async throws {
+        guard isActive else { return }
+        switch AssistantSpeechPlanBuilder.build(from: source) {
+        case .failure(.sourceTooLong(let offered, let max)):
+            fail(Failure.textLimitExceeded)
+            throw Failure.textLimitExceeded
+        case .failure(.nothingSpeakable):
+            return
+        case .success(let plan):
+            guard plan.isValid else {
+                fail(Failure.server("朗读计划校验未通过，已经取消。"))
+                throw Failure.server("朗读计划校验未通过，已经取消。")
+            }
+            offerConfirmed(plan.speakText)
+        }
     }
 
     /// LLM 结束：冲刷剩余文本、发 `finish_text`，并等文本泵收工。
@@ -392,9 +426,30 @@ final class AssistantTTSStreamCoordinator {
     }
 
     private func runCancellation(_ preparation: CancellationPreparation) async -> Bool {
-        // 先让已撤权的音频消费者退出，确保 stop barrier 之后不会再有旧 PCM 入播放器。
-        await preparation.audioConsumerAtPreparation?.value
-        await stopPlayback()
+        // M0c：整次取消共享一个绝对 deadline（§5.3）。consumer 退出与停播屏障
+        // 不再各自无限等待：旧 enqueue 已在同步 epoch 撤销后失效，超时后继续
+        // 等旧 PCM 只会拖住打断；远端归属未知由调用方退役连接。
+        // 剩余等待可被调用方 Task 取消：取消时直接按未确认返回，不吞取消。
+        let deadline = clock().advanced(by: configuration.cancellationTimeout)
+        if let consumer = preparation.audioConsumerAtPreparation {
+            await waitCancellable({ await consumer.value }, until: deadline)
+        }
+        await waitCancellable({ await self.stopPlayback() }, until: deadline)
+        return await cancellationRemainder(preparation)
+    }
+
+    /// 取消的后半段：outbound 退出 → cancel 发送 → 匹配终态。
+    ///
+    /// M0c 的绝对 deadline 只约束本地停播链（consumer 退出 + stop 屏障，
+    /// 原来无限等待）：到点即放弃，不拖住打断。网络侧三阶段原本各自有界，
+    /// 保持原样——cancel 发送不因本地超时被跳过（否则服务端永远收不到取消，
+    /// 比晚到更差）；整次取消的最坏耗时仍是各有界阶段之和，有明确上界。
+    /// 任一阶段未确认都由调用方退役连接/音频实例，不释放未知 owner。
+    private func cancellationRemainder(
+        _ preparation: CancellationPreparation
+    ) async -> Bool {
+        // `cancelTTS()` 返回只代表**发送完成**，不是服务端腾出了这一轮。
+        // 真正的空闲屏障是匹配 requestID 的终态。
         let outboundExited: Bool
         if let outboundTaskID = preparation.outboundTaskID {
             outboundExited = await awaitOutboundExit(taskID: outboundTaskID)
@@ -406,8 +461,6 @@ final class AssistantTTSStreamCoordinator {
         let cancelExited = outboundExited
             ? await cancelServerBounded(requestID: preparation.requestID)
             : false
-        // `cancelTTS()` 返回只代表**发送完成**，不是服务端腾出了这一轮。
-        // 真正的空闲屏障是匹配 requestID 的终态。
         let remoteConfirmed = await awaitRemoteTerminal(for: preparation.requestID)
         if !preparation.outcomeReported {
             reportOutcome(
@@ -419,6 +472,69 @@ final class AssistantTTSStreamCoordinator {
             preparation.outcomeReported = true
         }
         return outboundExited && cancelExited && remoteConfirmed
+    }
+
+    /// 在绝对 deadline 前等待一个不合作的操作：到点即放弃等待，不抛错。
+    ///
+    /// 不用 task group 做竞速：group 作用域退出会隐式等待全部子任务，
+    /// 不合作的操作会把 group 永远拖住。这里只放弃等待——操作本身的 Task
+    /// 句柄仍由调用方保留在 ownership map 里（consumer/outbound），不因放弃
+    /// 等待而丢失；计时与操作任务在落定后尽力取消，不假装操作已退出。
+    private func waitCancellable(
+        _ operation: @escaping @Sendable () async -> Void,
+        until deadline: ContinuousClock.Instant
+    ) async {
+        let remaining = clock().duration(to: deadline)
+        guard remaining > .zero else { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let gate = CancellationWaitGate(continuation)
+            let worker = Task {
+                await operation()
+                await gate.finish()
+            }
+            let timer = Task { @MainActor [weak self, gate] in
+                try? await self?.sleep(remaining)
+                await gate.finish()
+            }
+            Task { @MainActor [weak self] in
+                await self?.attachWaitTasks(gate: gate, worker: worker, timer: timer)
+            }
+        }
+    }
+
+    /// 一次性恢复的等待闩：操作与计时谁先到谁恢复，多到的忽略。
+    /// 落定后取消另一方（尽力，不假装不合作的任务已退出）。
+    private actor CancellationWaitGate {
+        private var continuation: CheckedContinuation<Void, Never>?
+        private var worker: Task<Void, Never>?
+        private var timer: Task<Void, Never>?
+
+        init(_ continuation: CheckedContinuation<Void, Never>) {
+            self.continuation = continuation
+        }
+
+        func attach(worker: Task<Void, Never>, timer: Task<Void, Never>) {
+            self.worker = worker
+            self.timer = timer
+        }
+
+        func finish() {
+            guard let pending = continuation else { return }
+            continuation = nil
+            worker?.cancel()
+            timer?.cancel()
+            worker = nil
+            timer = nil
+            pending.resume()
+        }
+    }
+
+    private func attachWaitTasks(
+        gate: CancellationWaitGate,
+        worker: Task<Void, Never>,
+        timer: Task<Void, Never>
+    ) async {
+        await gate.attach(worker: worker, timer: timer)
     }
 
     /// 只作废本地状态，不发网络命令（断线、设备重建时用）。
@@ -515,6 +631,7 @@ final class AssistantTTSStreamCoordinator {
         pendingAudio.append(
             PendingAudio(
                 id: UUID(),
+                chunkID: UUID(),
                 requestID: requestID,
                 epoch: utteranceEpoch,
                 pcm: pcm,
@@ -575,12 +692,25 @@ final class AssistantTTSStreamCoordinator {
         fail(Failure.server(text))
     }
 
-    /// 播放器报"这一块真的播完了"（`dataRendered` 语义）。
+    /// 播放器报"这一块渲染了"（`dataRendered`/`dataPlayedBack` 的首个证据）。
+    /// M0d：按 played 回调语义记账——单次 schedule 只选一种 completion 类型，
+    /// 不能假设同一块回调两次，所以首版只认 played：释放队列预算并累计 played。
     /// `epoch` 是入队时交给播放层的身份：**旧代的迟到回调必须整条丢掉**，
     /// 否则它会把新一轮的排队预算当成自己的还掉，让整轮提前宣布播完。
-    func notePlaybackCompleted(samples: Int, epoch: Int) {
+    /// `chunkID` 让重复回调只归还一次：同一块的第二次上报直接忽略。
+    func notePlaybackCompleted(samples: Int, epoch: Int, chunkID: UUID? = nil) {
         guard isActive, samples > 0, samples <= ledger.queuedSamples else { return }
-        guard ledger.complete(samples: samples, generation: epoch) else { return }
+        if let chunkID {
+            guard playedChunkIDs.insert(chunkID).inserted else { return }
+        }
+        guard ledger.complete(samples: samples, generation: epoch) else {
+            if let chunkID { playedChunkIDs.remove(chunkID) }
+            return
+        }
+        guard ledger.markPlayed(samples: samples, generation: epoch) else {
+            if let chunkID { playedChunkIDs.remove(chunkID) }
+            return
+        }
         unconsumedAudioBytes -= samples * MemoryLayout<Int16>.size
         consumedSampleOffset += samples
         ensureAudioAcknowledgement()
@@ -707,9 +837,13 @@ final class AssistantTTSStreamCoordinator {
         }
     }
 
+    // M0e:确认计划文本整体一次转换，不再逐段二次清洗。逐段清洗会
+    // 把“Hello ”/“world”分别 trim 后拼接丢掉词间空格（E12），
+    // 与确认计划的整体保义转换冲突；发现逐段残留先整体修复，
+    // 不把逐段清洗当作朗读兜底。
     private func sendChunk(_ rawChunk: String) async -> Bool {
         guard isActive else { return false }
-        let text = cleanForSpeech(rawChunk)
+        let text = rawChunk
         guard !text.isEmpty else { return true }
         let sequence = acceptedSequence + 1
         let limit = serverLimits?.maxAppendCodepoints ?? TTSStreamLimits.serverDefaults.maxAppendCodepoints
@@ -851,7 +985,7 @@ final class AssistantTTSStreamCoordinator {
             }
             guard ledger.reserve(samples: chunk.samples) else { continue }
 
-            let enqueued = await enqueuePlayback(chunk.pcm, chunk.epoch)
+            let enqueued = await enqueuePlayback(chunk.pcm, chunk.epoch, chunk.chunkID)
             // Cancellation can run while enqueuePlayback is suspended. The
             // cancellation effect joins this consumer before crossing stopPlayback.
             guard audioConsumerID == consumerID,
@@ -930,9 +1064,13 @@ final class AssistantTTSStreamCoordinator {
     }
 
     private func reportCompletedIfDrained() {
+        // M0d：完成必须是 terminal + FIFO/在途排空 + played 覆盖全部提交样本。
+        // rendered 先到只释放队列预算（notePlaybackCompleted 已做），不算完成；
+        // 没有 played 证据就是 incomplete/unknown，不降为 rendered-completed。
         guard isActive,
               ledger.terminalStatus == "completed",
-              isDrained
+              isDrained,
+              ledger.isPlayedThrough
         else { return }
         report(.completed)
     }
@@ -1029,10 +1167,10 @@ final class AssistantTTSStreamCoordinator {
             retiringRequests.remove(requestID)
             return true
         }
+        let timeout = configuration.cancellationTimeout
         return await withCheckedContinuation { continuation in
             let id = UUID()
             retiredTerminals[requestID] = TerminalLatch(id: id, continuation: continuation)
-            let timeout = configuration.cancellationTimeout
             retiredTimeoutTasks[requestID] = Task { @MainActor [weak self] in
                 try? await Task.sleep(for: timeout)
                 self?.resolveRemoteTerminal(requestID, id: id, confirmed: false)
@@ -1089,6 +1227,7 @@ final class AssistantTTSStreamCoordinator {
 
     private func advanceEpoch() -> Int {
         utteranceEpoch += 1
+        playedChunkIDs.removeAll(keepingCapacity: true)
         return utteranceEpoch
     }
 

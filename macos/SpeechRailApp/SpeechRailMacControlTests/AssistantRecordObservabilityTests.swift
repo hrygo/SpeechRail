@@ -72,6 +72,17 @@ final class AssistantRecordObservabilityTests: XCTestCase {
         XCTAssertLessThanOrEqual(obs.droppedNativeSamples, 1_000_000_000)
     }
 
+    /// V10:负增量不得倒扣计数；整数上界饱和不溢出。
+    func testV10NegativeIncrementsAreRejectedAndSaturationHolds() {
+        var obs = AssistantObservability()
+        obs.increment(\.droppedNativeSamples, by: 100)
+        obs.increment(\.droppedNativeSamples, by: -50)
+        XCTAssertEqual(obs.droppedNativeSamples, 100, "负增量不得倒扣计数")
+        obs.increment(\.droppedNativeSamples, by: 1_000_000_000)
+        obs.increment(\.droppedNativeSamples, by: 1)
+        XCTAssertEqual(obs.droppedNativeSamples, 1_000_000_000, "饱和后保持上界，不溢出")
+    }
+
     /// A54：观察失败不影响主流程；负耗时无效，无样本为 N/A。
     func testA54ObservabilityFailureAndNoSamplesAreHonest() {
         XCTAssertFalse(AssistantObservability.isValidLatency(.seconds(-1)), "负耗时无效")

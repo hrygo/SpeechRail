@@ -36,6 +36,9 @@ final class InterleavedFloatRing: @unchecked Sendable {
     private let capacity: Int
     private let writeIndex = Atomic<Int>(0)
     private let readIndex = Atomic<Int>(0)
+    /// M3/V08:累计丢样数（tap 回调侧 ring 满时容纳不下的 samples）。
+    /// 与 `AudioSampleRing.droppedSampleCount` 同一语义：无锁累加，上报离开回调。
+    private let droppedSamples = Atomic<Int>(0)
 
     init(capacity: Int, channels: Int = 1) {
         precondition(channels > 0)
@@ -69,6 +72,20 @@ final class InterleavedFloatRing: @unchecked Sendable {
         guard count > 0 else { return }
         let write = writeIndex.load(ordering: .relaxed)
         writeIndex.store(write &+ count, ordering: .releasing)
+    }
+
+    /// M3/V08:累计丢样数（供诊断/观测读取；单调递增，饱和不再增长）。
+    var droppedSampleCount: Int {
+        droppedSamples.load(ordering: .relaxed)
+    }
+
+    /// M3/V08:记录因 ring 满而未能写入的剩余样本，避免静默吞掉。
+    @inline(__always)
+    func recordDroppedSamples(_ count: Int) {
+        guard count > 0 else { return }
+        let current = droppedSamples.load(ordering: .relaxed)
+        guard current < 1_000_000_000 else { return }
+        droppedSamples.add(count, ordering: .relaxed)
     }
 
     /// 可供读取的**连续**区间（回绕处截断）。返回 `nil` 表示已空。
@@ -377,9 +394,16 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
         var remaining = frames
         var consumed = 0
         while remaining > 0 {
-            guard let span = ring.writableSpan() else { return }
+            // M3/V08:ring 满时剩余帧是丢弃的样本——计数后退出，不静默吞掉。
+            guard let span = ring.writableSpan() else {
+                ring.recordDroppedSamples(remaining * channels)
+                return
+            }
             let writableFrames = min(remaining, span.count / channels)
-            guard writableFrames > 0 else { return }
+            guard writableFrames > 0 else {
+                ring.recordDroppedSamples(remaining * channels)
+                return
+            }
             for frame in 0..<writableFrames {
                 let frameIndex = consumed + frame
                 for channel in 0..<channels {

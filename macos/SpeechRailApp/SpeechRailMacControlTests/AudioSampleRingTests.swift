@@ -29,6 +29,45 @@ final class AudioSampleRingTests: XCTestCase {
         XCTAssertEqual(ring.read(maxCount: 8), [0, 1, 2, 3, 4, 5, 6])
     }
 
+    // MARK: - M3/V08:丢样可计数
+
+    /// V08:整批写满时丢弃的样本必须计数——调用方据此判定输入是否完整。
+    func testFullRingDropIsCounted() {
+        let ring = AudioSampleRing(capacity: 7)
+
+        XCTAssertEqual(ring.droppedSampleCount, 0, "初始丢样计数必须为零")
+        ring.write([0, 1, 2, 3, 4, 5, 6, 7])
+
+        // 可用容量 7：接纳前 7 个，第 8 个丢弃。
+        XCTAssertEqual(ring.droppedSampleCount, 1, "满时多余的 1 个样本必须计数")
+        XCTAssertEqual(ring.read(maxCount: 8), [0, 1, 2, 3, 4, 5, 6])
+    }
+
+    /// V08:部分容纳不下时 accepted + dropped == count，不多不少。
+    func testPartialOverflowCountsExactlyTheRemainder() {
+        let ring = AudioSampleRing(capacity: 7)
+
+        ring.write([0, 1, 2, 3, 4])
+        XCTAssertEqual(ring.droppedSampleCount, 0)
+        // 剩余空位 2：写 5 个，接纳 2 个，丢弃 3 个。
+        ring.write([5, 6, 7, 8, 9])
+
+        XCTAssertEqual(ring.droppedSampleCount, 3, "超出空位的 3 个样本必须精确计数")
+        XCTAssertEqual(ring.read(maxCount: 8), [0, 1, 2, 3, 4, 5, 6])
+    }
+
+    /// V08:ring 满时整批写入直接计数，不吞掉整批。
+    func testWriteToFullRingCountsWholeBatch() {
+        let ring = AudioSampleRing(capacity: 7)
+
+        ring.write([0, 1, 2, 3, 4, 5, 6])
+        XCTAssertEqual(ring.droppedSampleCount, 0)
+        ring.write([7, 8, 9])
+
+        XCTAssertEqual(ring.droppedSampleCount, 3, "满时整批 3 个样本必须计数")
+        XCTAssertEqual(ring.read(maxCount: 8), [0, 1, 2, 3, 4, 5, 6])
+    }
+
     func testDiscardPendingAllowsProducerToContinue() {
         let ring = AudioSampleRing(capacity: 7)
 

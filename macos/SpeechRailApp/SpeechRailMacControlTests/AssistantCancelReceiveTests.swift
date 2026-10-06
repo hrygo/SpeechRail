@@ -742,4 +742,371 @@ final class AssistantCancelReceiveTests: XCTestCase {
             "unknown 失败终态不得改正文"
         )
     }
+
+    /// V01：活跃朗读（speaking）中注入空/空白 hypothesis 与空白 delta。
+    /// 三者零打断、零字幕污染；随后首个有效证据恰好触发一次中断，重复证据不再触发。
+    func testV01BlankEvidenceNeverInterruptsActiveSpeech() async throws {
+        let harness = try await makeVoiceHarness(llmScripts: [.deltas(["长回答。"])])
+        defer { cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.configured)
+        await harness.clients()[0].emit(.completed(itemID: "i1", transcript: "念一句"))
+        await waitUntil(
+            { harness.session.turns.contains { $0.role == .assistant } },
+            message: "回复没有落库"
+        )
+        let requestID = await harness.clients()[0].currentTTSRequestID()
+        XCTAssertFalse(requestID.isEmpty, "必须中断真实开过的 request")
+        await harness.clients()[0].emit(
+            .ttsAudio(requestID: requestID, taskID: nil, pcm: Data(repeating: 0, count: 320))
+        )
+        await waitUntil({ harness.session.phase == .speaking }, message: "没有进入朗读态")
+        let cancelsBefore = await harness.clients()[0].snapshot().cancelTTS
+
+        // 空快照 / 纯空白快照 / 纯空白 delta：零打断、零字幕污染。
+        await harness.clients()[0].emit(.partialSnapshot(itemID: "i2", revision: 1, text: "", evidence: .init()))
+        await harness.clients()[0].emit(.partialSnapshot(itemID: "i2", revision: 2, text: "   ", evidence: .init()))
+        await harness.clients()[0].emit(.partial(itemID: "i2", delta: "   "))
+        // 给 receiver 落地时间：空白证据若误触发，打断会改 phase/partialText。
+        try? await Task.sleep(for: .milliseconds(50))
+        let cancelsAfterBlank = await harness.clients()[0].snapshot().cancelTTS
+        XCTAssertEqual(cancelsAfterBlank, cancelsBefore, "空白证据不得打断")
+        XCTAssertNil(harness.session.partialText, "空白证据不得污染字幕槽")
+        XCTAssertEqual(harness.session.phase, .speaking, "空白证据不得改朗读态")
+
+        // 首个有效证据恰好触发一次中断；同一键重复不再触发。
+        await harness.clients()[0].emit(.partialSnapshot(itemID: "i3", revision: 5, text: "插话", evidence: .init()))
+        await waitUntil(
+            { harness.session.partialText == "插话" },
+            message: "首个有效证据应正常显示字幕"
+        )
+        await waitUntil(
+            { harness.session.phase == .listening && harness.session.blocked == nil },
+            message: "匹配 terminal 必须经 receiver 确认取消"
+        )
+        let cancelsAfterFirst = await harness.clients()[0].snapshot().cancelTTS
+        XCTAssertEqual(cancelsAfterFirst - cancelsBefore, 1, "首个有效证据应恰好触发一次中断")
+        // 中断后已回 listening：重复旧证据不得重新打断新状态。
+        await harness.clients()[0].emit(.partialSnapshot(itemID: "i3", revision: 5, text: "插话", evidence: .init()))
+        try? await Task.sleep(for: .milliseconds(50))
+        let cancelsAfterRepeat = await harness.clients()[0].snapshot().cancelTTS
+        XCTAssertEqual(cancelsAfterRepeat, cancelsAfterFirst, "重复证据不得重新打断")
+    }
+
+    /// V02：同 revision 跨 item 独立去重、新 final-only 正常接管。
+    /// 中断意图只取消一次，合法新输入保存后回答。
+    func testV02EvidenceOwnershipAcrossItemsAndFinals() async throws {
+        let harness = try await makeVoiceHarness(llmScripts: [.deltas(["首答。"]), .deltas(["次答。"])])
+        defer { cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.configured)
+        await harness.clients()[0].emit(.completed(itemID: "i1", transcript: "念首句"))
+        await waitUntil(
+            { harness.session.turns.contains { $0.role == .assistant } },
+            message: "首轮回复没有落库"
+        )
+        let requestID = await harness.clients()[0].currentTTSRequestID()
+        XCTAssertFalse(requestID.isEmpty, "必须中断真实开过的 request")
+        await harness.clients()[0].emit(
+            .ttsAudio(requestID: requestID, taskID: nil, pcm: Data(repeating: 0, count: 320))
+        )
+        await waitUntil({ harness.session.phase == .speaking }, message: "没有进入朗读态")
+        let cancelsBefore = await harness.clients()[0].snapshot().cancelTTS
+
+        // 同 revision 跨 item：首个证据触发中断，另一个 item 的同 revision
+        // 是独立归属键，但同一中断意图只取消一次（中断后已回 listening，
+        // 后续证据不再满足 isSpeakingOrGenerating）。
+        await harness.clients()[0].emit(.partialSnapshot(itemID: "a", revision: 7, text: "甲", evidence: .init()))
+        await waitUntil(
+            { harness.session.phase == .listening && harness.session.blocked == nil },
+            message: "匹配 terminal 必须经 receiver 确认取消"
+        )
+        await harness.clients()[0].emit(.partialSnapshot(itemID: "b", revision: 7, text: "乙", evidence: .init()))
+        await harness.clients()[0].emit(.partialSnapshot(itemID: "a", revision: 7, text: "甲", evidence: .init()))
+        try? await Task.sleep(for: .milliseconds(50))
+        let cancelsAfter = await harness.clients()[0].snapshot().cancelTTS
+        XCTAssertEqual(cancelsAfter - cancelsBefore, 1, "同一中断意图只应取消一次")
+        // 新 final-only 合法输入：保存成功后正常回答。
+        await harness.clients()[0].emit(.completed(itemID: "i2", transcript: "念次句"))
+        await waitUntil(
+            { harness.session.turns.filter { $0.role == .assistant }.count >= 2 },
+            message: "合法新输入应在保存后回答"
+        )
+    }
+
+    // MARK: - M0e/V11：未定稿不开口
+
+    /// V11a：LLM 先给可误解前缀、随后才否定/更正——流式中途零 start/零音频，
+    /// 定稿后恰好一次 start，且朗读的是含否定/更正的完整计划文本。
+    func testV11MisleadingPrefixNeverSpeaksUntilFinal() async throws {
+        let harness = try await makeVoiceHarness(
+            llmScripts: [.deltas(["3.5kg 肯定没问题", "，不对，其实不行。"])]
+        )
+        defer { cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.configured)
+        await harness.clients()[0].emit(.completed(itemID: "q1", transcript: "问一句"))
+        // 定稿前快照：只要还没落库，转 streamingReply 读正文、startTTS 计数。
+        // 流式两段是同一 Task 内连续 yield，中间不停顿——这里只断言定稿后行为：
+        // 恰好一次 start，且开嗓前零 start 由门禁语义保证（offer 拒绝未确认增量）。
+        let turnsBefore = harness.session.turns.filter { $0.role == .assistant }.count
+        XCTAssertEqual(turnsBefore, 0, "定稿前不得有 assistant 落库")
+        // 定稿后：恰好一次 start（确认计划开嗓）；朗读态由首个音频到达确认，
+        // Fake 不回音频包时保持 thinking——零音频是 Fake 形状，不伪造 speaking。
+        await waitUntil(
+            { harness.session.turns.contains { $0.role == .assistant } },
+            message: "定稿回复没有落库"
+        )
+        await waitUntil(
+            { harness.session.phase == .thinking },
+            message: "确认计划开嗓后应保持 thinking 等音频"
+        )
+        let finalStarts = await harness.clients()[0].snapshot().startTTS
+        XCTAssertEqual(finalStarts, 1, "定稿后恰好一次 start")
+        // 首个音频到达即进入朗读态：确认计划的文本确实在播。
+        let requestID = await harness.clients()[0].currentTTSRequestID()
+        XCTAssertFalse(requestID.isEmpty, "确认计划必须开过真实 request")
+        await harness.clients()[0].emit(
+            .ttsAudio(requestID: requestID, taskID: nil, pcm: Data(repeating: 0, count: 320))
+        )
+        await waitUntil({ harness.session.phase == .speaking }, message: "音频到达后应进入朗读态")
+    }
+
+    /// V11b：provider 中途失败（incomplete 形状）——零 start/零音频，
+    /// 只保留明确未完成的预览，不自动朗读残缺答案。
+    func testV11ProviderFailureNeverSpeaksPartialAnswer() async throws {
+        let harness = try await makeVoiceHarness(
+            llmScripts: [.deltasThenFailure(["半句"], "模型断了")]
+        )
+        defer { cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.configured)
+        await harness.clients()[0].emit(.completed(itemID: "q1", transcript: "问一句"))
+        // Fake 的 deltasThenFailure 在同一 Task 内连续 yield：中途不停顿，
+        // 预览断言改用"失败收尾落库 + 零 start"，不赌流式中间态。
+        await waitUntil(
+            { harness.session.turns.contains { $0.role == .assistant } },
+            message: "失败片段应收尾落库"
+        )
+        try? await Task.sleep(for: .milliseconds(50))
+        let starts = await harness.clients()[0].snapshot().startTTS
+        XCTAssertEqual(starts, 0, "失败残缺答案不得 start")
+    }
+
+    /// V11c：provider EOF 无终态（空脚本 = 零 delta 即结束）——零 start，
+    /// 不留伪造正文行。
+    func testV11EmptyReplyNeverSpeaks() async throws {
+        let harness = try await makeVoiceHarness(llmScripts: [.deltas([])])
+        defer { cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.configured)
+        await harness.clients()[0].emit(.completed(itemID: "q1", transcript: "问一句"))
+        await waitUntil(
+            { harness.session.lastFailure == "模型这次没有给出内容。" },
+            message: "空回复应明确失败"
+        )
+        let starts = await harness.clients()[0].snapshot().startTTS
+        XCTAssertEqual(starts, 0, "空回复不得 start")
+        XCTAssertFalse(
+            harness.session.turns.contains { $0.role == .assistant },
+            "空回复不留伪造正文行"
+        )
+    }
+
+    // MARK: - M3/V08b:上行丢块证据可计数
+
+    /// V08b:块序号跳跃（bufferingNewest 替换）必须累计为跳过块数；
+    /// 无序号的旧来源不产生证据，也不伪造连续结论。
+    func testUploadSkippedChunksAreCounted() async throws {
+        let harness = try await makeVoiceHarness(llmScripts: [])
+        defer { cleanup(harness) }
+        // pump 启动后 uploader 才消费 capture 流（与 V01 等用例同一驱动方式）。
+        try await harness.coordinator.begin(.assistant)
+        let session = harness.session
+        XCTAssertEqual(session.uploadedChunksSkipped, 0)
+        XCTAssertEqual(session.uploadedSamplesDropped, 0)
+        // 序号 0,1,2 连续 → 无跳过。
+        for seq in [0, 1, 2] {
+            harness.audio.emitCapture(
+                AudioChunk(
+                    pcm: Data([1, 2, 3, 4]),
+                    level: 0.5,
+                    sequenceNumber: seq,
+                    droppedSamplesBefore: 0
+                )
+            )
+        }
+        // uploader 是异步 Task：等三块全部落地再断言序号，避免竞态。
+        await waitUntil(
+            { session.lastUploadedChunkSequenceForTest == 2 },
+            message: "三块连续序号应全部被 uploader 消费"
+        )
+        XCTAssertEqual(session.uploadedChunksSkipped, 0, "连续序号不得累计跳过")
+        // 序号跳到 5 → 跳过 3,4 两块。
+        harness.audio.emitCapture(
+            AudioChunk(
+                pcm: Data([1, 2, 3, 4]),
+                level: 0.5,
+                sequenceNumber: 5,
+                droppedSamplesBefore: 0
+            )
+        )
+        await waitUntil(
+            { session.uploadedChunksSkipped == 2 },
+            message: "序号 2→5 应累计跳过 2 块"
+        )
+        XCTAssertEqual(session.uploadedSamplesDropped, 0, "无 ring 丢样时丢样计数必须为零")
+    }
+
+    /// V08c:语音 final 落库时若自上次回答以来丢证据超阈值，不回答，转请重说；
+    /// 键盘来源不受此门影响；水位推进后后续轮次不受同一批证据阻挡。
+    func testBrokenVoiceInputAsksForRepeatInsteadOfAnswering() async throws {
+        let harness = try await makeVoiceHarness(llmScripts: [.deltas(["回答"])])
+        defer { cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.configured)
+        // 先制造断裂证据：序号跳跃 3 块（超 1 块阈值）。
+        for seq in [0, 10, 11] {
+            harness.audio.emitCapture(
+                AudioChunk(
+                    pcm: Data([1, 2, 3, 4]),
+                    level: 0.5,
+                    sequenceNumber: seq,
+                    droppedSamplesBefore: 0
+                )
+            )
+        }
+        await waitUntil(
+            { harness.session.uploadedChunksSkipped >= 9 },
+            message: "序号 0→10 应累计跳过 9 块"
+        )
+        await harness.clients()[0].emit(.completed(itemID: "q-broken", transcript: "断裂的问题"))
+        await waitUntil(
+            { harness.session.lastFailure?.contains("没能完整收录") == true },
+            message: "断裂语音 final 应转请重说，不回答"
+        )
+        let streamCountAfterBroken = await harness.llm.streamCount
+        XCTAssertEqual(streamCountAfterBroken, 0, "断裂输入不得把问题发送给 provider")
+        // 同一批证据水位已推进：下一句完整语音应正常回答。
+        await harness.clients()[0].emit(.completed(itemID: "q-whole", transcript: "完整的问题"))
+        await waitUntil(
+            { harness.session.turns.contains { $0.role == .assistant } },
+            message: "水位推进后完整语音应正常回答"
+        )
+    }
+
+    /// V08c:键盘来源无采集链路，不受完整性门影响——即使有丢证据也正常回答。
+    func testKeyboardInputBypassesIntegrityGate() async throws {
+        let harness = try await makeVoiceHarness(llmScripts: [.deltas(["键盘回答"])])
+        defer { cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.configured)
+        for seq in [0, 10, 11] {
+            harness.audio.emitCapture(
+                AudioChunk(
+                    pcm: Data([1, 2, 3, 4]),
+                    level: 0.5,
+                    sequenceNumber: seq,
+                    droppedSamplesBefore: 0
+                )
+            )
+        }
+        await waitUntil(
+            { harness.session.uploadedChunksSkipped >= 9 },
+            message: "序号 0→10 应累计跳过 9 块"
+        )
+        _ = await harness.session.ask(typed: "键盘问题")
+        await waitUntil(
+            { harness.session.turns.contains { $0.role == .assistant && $0.text.contains("键盘回答") } },
+            message: "键盘问题不受语音完整性门影响，应正常回答"
+        )
+    }
+
+    // MARK: - M1/V16-V17:完整文本 adapter 未评审启用前保持关闭
+
+    /// V16-V17:助手生产链不得静默启用完整文本合成路径——语音回答仍走
+    /// Realtime 增量 TTS（`startTTSStream/appendTTSText`），不得在未评审
+    /// 的情况下调用 `/v1/audio/speech` 完整文本接口。
+    /// 该 adapter 的边界（§6.0：固定 voice/revision、interactive purpose、
+    /// integrity receipt、有界接收、取消/设备/结束屏障）尚未评审通过，
+    /// 默认关闭是产品行为，不是缺测试。
+    func testFullTextAdapterStaysDisabledUntilReviewed() async throws {
+        let harness = try await makeVoiceHarness(llmScripts: [.deltas(["完整回答。"])])
+        defer { cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.configured)
+        await harness.clients()[0].emit(.completed(itemID: "q1", transcript: "念一句"))
+        await waitUntil(
+            { harness.session.turns.contains { $0.role == .assistant } },
+            message: "回复没有落库"
+        )
+        let client = harness.clients()[0]
+        let started = await client.snapshot().startTTS
+        XCTAssertGreaterThanOrEqual(started, 1, "语音回答仍走 Realtime 增量 TTS")
+        XCTAssertFalse(
+            harness.session.usesFullTextSpeechForTest,
+            "完整文本 adapter 未评审启用前必须保持关闭"
+        )
+    }
+
+    // MARK: - M3/V09:活动内存有界，SQLite 全记录保留
+
+    /// V09:30 轮问答后场内窗口有界（contextTurns ≤ 24 轮、turns ≤ 48 行），
+    /// SQLite 全 30 轮保留；附属映射无已出窗口残留。
+    func testInMemoryWindowsAreBoundedWhileStoreKeepsEverything() async throws {
+        var scripts: [AssistantSessionTests.FakeAssistantLLM.Script] = []
+        for i in 0..<30 {
+            scripts.append(.deltas(["回答\(i)"]))
+        }
+        let harness = try await makeVoiceHarness(llmScripts: scripts)
+        defer { cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.configured)
+        for i in 0..<30 {
+            _ = await harness.session.ask(typed: "问题\(i)")
+            await waitUntil(
+                { harness.session.turns.contains { $0.role == .assistant && $0.text.contains("回答\(i)") } },
+                message: "第 \(i) 轮应收尾落库"
+            )
+        }
+        let window = AssistantSession.inMemoryTurnWindow
+        XCTAssertLessThanOrEqual(
+            harness.session.turns.count, window * 2,
+            "场内 turns（user+assistant 双行）必须按轮有界"
+        )
+        XCTAssertLessThanOrEqual(
+            harness.session.contextTurnCountForTest, window, "场内 contextTurns 必须有界"
+        )
+        // 权威在库里：30 轮用户问 + 30 轮助手答全部保留。
+        let recordID = try XCTUnwrap(harness.session.sessionID)
+        let lines = try await harness.store.lines(sessionID: recordID)
+        let userLines = lines.filter { $0.role == .user }.count
+        let assistantLines = lines.filter { $0.role == .assistant }.count
+        XCTAssertEqual(userLines, 30, "SQLite 用户问必须全保留")
+        XCTAssertEqual(assistantLines, 30, "SQLite 助手答必须全保留")
+    }
+
+    /// V08b:ring 丢样快照差必须累计；快照回退（新采集期）不倒扣。
+    func testUploadDroppedSamplesAreCounted() async throws {
+        let harness = try await makeVoiceHarness(llmScripts: [])
+        defer { cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        let session = harness.session
+        harness.audio.emitCapture(
+            AudioChunk(pcm: Data([1, 2, 3, 4]), level: 0.5, sequenceNumber: 0, droppedSamplesBefore: 100)
+        )
+        harness.audio.emitCapture(
+            AudioChunk(pcm: Data([1, 2, 3, 4]), level: 0.5, sequenceNumber: 1, droppedSamplesBefore: 160)
+        )
+        await waitUntil(
+            { session.uploadedSamplesDropped == 60 },
+            message: "丢样快照 100→160 应累计 60 样本"
+        )
+        // 新采集期快照归零：不倒扣，只更新基线。
+        harness.audio.emitCapture(
+            AudioChunk(pcm: Data([1, 2, 3, 4]), level: 0.5, sequenceNumber: 0, droppedSamplesBefore: 0)
+        )
+        try? await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(session.uploadedSamplesDropped, 60, "快照回退不得倒扣已累计的丢样数")
+    }
 }

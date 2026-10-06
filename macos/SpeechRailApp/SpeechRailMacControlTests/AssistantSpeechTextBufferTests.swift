@@ -42,8 +42,27 @@ final class AssistantSpeechTextBufferTests: XCTestCase {
             "数字和单位还在长的时候不能提前切"
         )
 
+        // M0e 重写：150ms 到点也不授权半句开口——数字/单位还在长，
+        // 切出去会先播错再改口，已输出的声音无法修订。等闭合或 flush。
         clock.advance(.milliseconds(150))
-        XCTAssertEqual(buffer.readyChunks(now: clock.now), ["3.5kg"])
+        XCTAssertEqual(buffer.readyChunks(now: clock.now), [])
+        buffer.append("。")
+        XCTAssertEqual(buffer.readyChunks(now: clock.now), ["3.5kg。"])
+    }
+
+    /// M0e/V12：数字到期、单位随后到——到期时单位还没来，不切；
+    /// 单位到后整段仍在长，直到语句闭合才出声（分包无关）。
+    func testNumberExpiresBeforeUnitArrives() {
+        let clock = ManualClock()
+        var buffer = makeBuffer(clock: clock)
+        buffer.append("3")
+        clock.advance(.milliseconds(150))
+        XCTAssertEqual(
+            buffer.readyChunks(now: clock.now), [],
+            "数字到期但语义未完成：不切，等单位"
+        )
+        buffer.append(".5kg。")
+        XCTAssertEqual(buffer.readyChunks(now: clock.now), ["3.5kg。"])
     }
 
     func testEnglishTailWaitsForTheDeadline() {
@@ -66,8 +85,12 @@ final class AssistantSpeechTextBufferTests: XCTestCase {
 
         clock.advance(.milliseconds(149))
         XCTAssertEqual(buffer.readyChunks(now: clock.now), [])
+        // M0e 重写：到点只推进时钟语义，不授权半句开口——无断点不断句，
+        // 等闭合（flush/终态）才出声。150ms 不再是开嗓理由。
         clock.advance(.milliseconds(1))
-        XCTAssertEqual(buffer.readyChunks(now: clock.now), ["abc"])
+        XCTAssertEqual(buffer.readyChunks(now: clock.now), [])
+        buffer.append("。")
+        XCTAssertEqual(buffer.readyChunks(now: clock.now), ["abc。"])
     }
 
     func testUnclosedMarkdownIsHeldUntilItCloses() {
@@ -93,8 +116,12 @@ final class AssistantSpeechTextBufferTests: XCTestCase {
         buffer.append("**bold")
         clock.advance(.seconds(10))
 
-        XCTAssertEqual(buffer.readyChunks(now: clock.now, force: true), ["**bold"])
-        XCTAssertFalse(buffer.hasPendingText)
+        // M0e 重写：force 不再切未闭合结构——半句开口无法修订；
+        // 泵停转由调用方的 finish/终态收尾，不靠切坏结构保活。
+        XCTAssertEqual(buffer.readyChunks(now: clock.now, force: true), [])
+        XCTAssertTrue(buffer.hasPendingText)
+        buffer.append("**")
+        XCTAssertEqual(buffer.readyChunks(now: clock.now), ["**bold**"])
     }
 
     /// A35 变体（代码块跨片）：未闭合单反引号代码块超时也不切开，
@@ -125,8 +152,12 @@ final class AssistantSpeechTextBufferTests: XCTestCase {
         var buffer = makeBuffer(clock: clock, configuration: configuration)
 
         buffer.append("0123456789abcdef")
-        let chunks = buffer.readyChunks(now: clock.now)
-        XCTAssertEqual(chunks, ["01234567", "89abcdef"], "超过单片上限必须切开，不能无界攒文本")
+        // M0e 重写：超单片上限不硬切——readyChunks 暂停等待闭合/终态，
+        // 无界增长由整轮 total 上限挡；flush（终态）才按上限切开。
+        XCTAssertEqual(buffer.readyChunks(now: clock.now), [])
+        let chunks = buffer.flush(now: clock.now)
+        XCTAssertEqual(chunks, ["01234567", "89abcdef"], "终态 flush 才按单片上限切开")
+        XCTAssertEqual(chunks.joined(), "0123456789abcdef", "切开不丢内容")
     }
 
     func testWhitespaceInsideAChunkIsPreserved() {

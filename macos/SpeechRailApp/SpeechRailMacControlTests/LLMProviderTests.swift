@@ -21,6 +21,9 @@ final class LLMProviderTests: XCTestCase {
             var contentType: String
             var body: String
             var headers: [String: String] = [:]
+            /// V07f:模拟传输层失败（如 Task 取消穿透的 `URLError.cancelled`）。
+            /// 非 nil 时直接 `didFailWithError`，不返回响应。
+            var failCode: URLError.Code?
         }
 
         nonisolated(unsafe) private static var scripted: [Exchange] = []
@@ -72,6 +75,11 @@ final class LLMProviderTests: XCTestCase {
                 : Self.scripted.removeFirst()
             Self.lock.unlock()
 
+            // V07f:失败注入优先——模拟 Task 取消穿透到底层传输的错误。
+            if let failCode = exchange.failCode {
+                client?.urlProtocol(self, didFailWithError: URLError(failCode))
+                return
+            }
             let response = HTTPURLResponse(
                 url: request.url ?? URL(string: "http://127.0.0.1/v1/responses")!,
                 statusCode: exchange.status,
@@ -990,6 +998,251 @@ final class LLMProviderTests: XCTestCase {
         XCTAssertEqual(try result.get(), "好")
     }
 
+    // MARK: - M2/V07:流预算有界
+
+    /// V07a:无换行 SSE 单行无限增长必须有界——超限显式失败，不无界积压。
+    /// 已收到的正文由调用方保留，不得静默丢 token，不得强制完成/朗读。
+    @MainActor
+    func testResponsesStreamSingleLineBeyondBudgetFailsExplicitly() async throws {
+        final class Sink: @unchecked Sendable { var deltas: [String] = [] }
+        let sink = Sink()
+        var decoder = ResponsesEventStreamDecoder()
+        let filler = String(repeating: "x", count: 1024)
+        var thrown: Error?
+        // 先喂一个合法 delta 并结算（空行即事件边界），再喂超长无换行单行。
+        let head = "data: {\"type\":\"response.output_text.delta\",\"response_id\":\"resp_a\",\"delta\":\"好\"}\n\n"
+        for byte in head.utf8 { try? decoder.consume(byte, onDelta: { sink.deltas.append($0) }) }
+        do {
+            for _ in 0..<(AssistantLLMStreamBudget.maxSSELineBytes / 1024 + 2) {
+                for byte in filler.utf8 {
+                    try decoder.consume(byte, onDelta: { sink.deltas.append($0) })
+                }
+            }
+        } catch {
+            thrown = error
+        }
+        guard case .streamBudgetExceeded(let detail) = thrown as? LLMError else {
+            XCTFail("超长无换行单行必须报 streamBudgetExceeded，实际 \(String(describing: thrown))")
+            return
+        }
+        XCTAssertTrue(detail.contains("单行"), "失败原因应指明是单行超限，实际 \(detail)")
+        XCTAssertEqual(sink.deltas, ["好"], "超限前已收到的正文必须保留")
+    }
+
+    /// V07b:多行 data: 拼成的单事件同样有界——超限显式失败。
+    @MainActor
+    func testResponsesStreamSingleEventBeyondBudgetFailsExplicitly() async throws {
+        final class Sink: @unchecked Sendable { var deltas: [String] = [] }
+        let sink = Sink()
+        var decoder = ResponsesEventStreamDecoder()
+        let filler = String(repeating: "y", count: 4096)
+        var thrown: Error?
+        do {
+            for _ in 0..<(AssistantLLMStreamBudget.maxSSEEventBytes / 4096 + 2) {
+                let line = "data: " + filler + "\n"
+                for byte in line.utf8 {
+                    try decoder.consume(byte, onDelta: { sink.deltas.append($0) })
+                }
+            }
+        } catch {
+            thrown = error
+        }
+        guard case .streamBudgetExceeded(let detail) = thrown as? LLMError else {
+            XCTFail("超限单事件必须报 streamBudgetExceeded，实际 \(String(describing: thrown))")
+            return
+        }
+        XCTAssertTrue(detail.contains("单事件"), "失败原因应指明是单事件超限，实际 \(detail)")
+    }
+
+    /// V07c:巨大错误 body 不得无界累加——截断并标记，正文仍可分类。
+    @MainActor
+    func testResponsesStreamHugeErrorBodyIsTruncatedAndMarked() async throws {
+        // runStream 先发 attempt 0（含 thinking 控制字段，FakeTransport 按序消费）。
+        // 500 非 400 不触发 thinking-control 回退：attempt 0 即进入错误 body 路径。
+        let huge = String(repeating: "E", count: AssistantLLMStreamBudget.maxErrorBodyBytes + 4096)
+        FakeTransport.reset([
+            .init(
+                status: 500,
+                contentType: "text/plain",
+                body: huge
+            )
+        ])
+        let result = await drainResponsesStream(makeProvider())
+        switch result {
+        case .success(let text):
+            XCTFail("500 必须是失败，实际拿到 \(text)")
+        case .failure(let error):
+            guard case .http(let status, let body) = error as? LLMError else {
+                XCTFail("500 应为 .http，实际 \(error)")
+                return
+            }
+            XCTAssertEqual(status, 500)
+            XCTAssertTrue(body.contains("正文超限已截断"), "超限错误正文必须标记截断")
+            XCTAssertLessThanOrEqual(
+                body.utf8.count,
+                AssistantLLMStreamBudget.maxErrorBodyBytes + 512,
+                "错误正文不得无界累加"
+            )
+        }
+    }
+
+    // MARK: - M2/V07d:累计正文有界（decoder 层，不经过网络计时器）
+
+    /// V07d:整轮累计正文超限必须显式失败，不静默丢 token，已收前缀保留。
+    /// decoder 是同步值类型：直接喂事件验证计数边界，不依赖网络计时。
+    func testResponsesStreamTotalTextBeyondBudgetFailsExplicitly() throws {
+        final class Sink: @unchecked Sendable { var deltas: [String] = [] }
+        let sink = Sink()
+        var state = LLMResponseStreamState()
+        var usage: [String: Any]?
+        var total = 0
+        // 每个 delta 4096 scalars：5 个即超 16,384 上限。
+        let big = String(repeating: "文", count: 4096)
+        var thrown: Error?
+        do {
+            for i in 0..<5 {
+                let object: [String: Any] = [
+                    "type": "response.output_text.delta",
+                    "response_id": "resp_a",
+                    "delta": big + String(i),
+                ]
+                _ = try ResponsesEventStreamDecoder.countedHandle(
+                    object,
+                    state: &state,
+                    usage: &usage,
+                    totalTextScalars: &total,
+                    onDelta: { sink.deltas.append($0) }
+                )
+            }
+        } catch {
+            thrown = error
+        }
+        guard case .streamBudgetExceeded(let detail) = thrown as? LLMError else {
+            XCTFail("累计正文超限必须报 streamBudgetExceeded，实际 \(String(describing: thrown))")
+            return
+        }
+        XCTAssertTrue(detail.contains("累计正文"), "失败原因应指明是累计正文超限，实际 \(detail)")
+        XCTAssertEqual(sink.deltas.joined().unicodeScalars.count, 4 * 4097, "超限前已收到的正文必须保留")
+    }
+
+    /// V07d:累计正文未超限时计数精确累加，不误杀合法回答。
+    func testResponsesStreamTotalTextWithinBudgetCountsExactly() throws {
+        final class Sink: @unchecked Sendable { var text = "" }
+        let sink = Sink()
+        var state = LLMResponseStreamState()
+        var usage: [String: Any]?
+        var total = 0
+        let object: [String: Any] = [
+            "type": "response.output_text.delta",
+            "response_id": "resp_a",
+            "delta": "你好世界",
+        ]
+        _ = try ResponsesEventStreamDecoder.countedHandle(
+            object,
+            state: &state,
+            usage: &usage,
+            totalTextScalars: &total,
+            onDelta: { sink.text += $0 }
+        )
+        XCTAssertEqual(total, 4, "累计计数应精确为 4 scalars")
+        XCTAssertEqual(sink.text, "你好世界")
+    }
+
+    // MARK: - M2/V07e:首正文与停滞 deadline 状态机
+
+    /// V07e:首个有效正文到达前 deadline 到达，必须立超限旗并抛错。
+    func testStreamTimerFirstTextTimeoutFires() async throws {
+        let timer = StreamTimer(
+            firstDeadline: ContinuousClock.now,
+            stallTimeout: nil,
+            initialStall: nil
+        )
+        do {
+            try await timer.waitForExpiry()
+            XCTFail("首正文 deadline 已到，必须抛超限错误")
+        } catch let error as LLMError {
+            guard case .streamBudgetExceeded(let detail) = error else {
+                XCTFail("应为 streamBudgetExceeded，实际 \(error)")
+                return
+            }
+            XCTAssertTrue(detail.contains("首个有效正文"), "失败原因应指明首正文超时，实际 \(detail)")
+        }
+        let expired = await timer.expired
+        XCTAssertTrue(expired, "超限后 expired 旗必须立起，供读取循环在下一字节处抛同错")
+    }
+
+    /// V07e:见有效正文后首正文 deadline 解除；停滞 deadline 由正文推进重置。
+    /// 心跳/注释不调用 noteText，不延长等待——此处直接验证"不调用即不重置"：
+    /// deadline 按墙钟推进，不因等待中的事件而顺延。
+    func testStreamTimerTextResetsStallDeadline() async throws {
+        let timer = StreamTimer(
+            firstDeadline: nil,
+            stallTimeout: .milliseconds(200),
+            initialStall: ContinuousClock.now.advanced(by: .milliseconds(50))
+        )
+        // 50ms 后 noteText：stall 重新展期 200ms；再睡 100ms 仍未到期。
+        try await Task.sleep(for: .milliseconds(50))
+        await timer.noteText()
+        try await Task.sleep(for: .milliseconds(100))
+        let expired = await timer.expired
+        XCTAssertFalse(expired, "见正文后停滞 deadline 应被重置，不应误杀合法推理等待")
+        let seen = await timer.firstTextSeen
+        XCTAssertTrue(seen, "noteText 后 firstTextSeen 必须为真，首正文 deadline 永久解除")
+    }
+
+    /// V07e:无 deadline 可等时计时器直接返回认输，不伪造超限。
+    func testStreamTimerWithoutDeadlinesConcedesImmediately() async throws {
+        let timer = StreamTimer(
+            firstDeadline: nil,
+            stallTimeout: nil,
+            initialStall: nil
+        )
+        // 必须立即返回（不抛错）：若此处抛超限，就是"无 deadline 误杀"。
+        try await timer.waitForExpiry()
+        let expired = await timer.expired
+        XCTAssertFalse(expired, "无 deadline 时不得立超限旗")
+    }
+
+    // MARK: - M2/V07f:取消单独成类，不记成传输失败
+
+    /// V07f:建连阶段传输层报 `URLError.cancelled`（Task 取消穿透），
+    /// `runStream` 必须映射为 `.cancelled`，不是 `.transport`。
+    /// 确定性失败注入，不依赖取消时序。
+    @MainActor
+    func testStreamConnectCancellationMapsToCancelled() async throws {
+        FakeTransport.reset([
+            .init(status: 0, contentType: "", body: "", failCode: .cancelled)
+        ])
+        let result = await drainResponsesStream(makeProvider())
+        switch result {
+        case .success(let text):
+            XCTFail("取消后不能返回成功，实际拿到 \(text)")
+        case .failure(let error):
+            XCTAssertEqual(
+                error as? LLMError, .cancelled,
+                "取消必须映射为 .cancelled，实际 \(error)"
+            )
+        }
+    }
+
+    /// V07f:非取消的传输失败（如超时）仍是 `.transport`，不误杀为取消。
+    @MainActor
+    func testStreamConnectTimeoutStaysTransport() async throws {
+        FakeTransport.reset([
+            .init(status: 0, contentType: "", body: "", failCode: .timedOut)
+        ])
+        let result = await drainResponsesStream(makeProvider())
+        switch result {
+        case .success(let text):
+            XCTFail("超时后不能返回成功，实际拿到 \(text)")
+        case .failure(let error):
+            guard case .transport = error as? LLMError else {
+                XCTFail("超时应为 .transport，实际 \(error)")
+                return
+            }
+        }
+    }
+
     @MainActor
     func testResponsesStreamIgnoresCommentsAndHeartbeats() async throws {
         FakeTransport.reset([
@@ -1014,6 +1267,107 @@ final class LLMProviderTests: XCTestCase {
         let result = await drainResponsesStream(makeProvider())
 
         XCTAssertEqual(try result.get(), "好", "注释和心跳不影响正文")
+    }
+
+    // MARK: - M1/V15:正文前合法推理阶段不误杀
+
+    /// V15:reasoning delta 是有效进展（展期停滞 deadline），但不是正文——
+    /// 不产生朗读文本、不占正文预算、不解除首正文 deadline。
+    /// 此处先在解码层验证：reasoning 事件只产生空进展信号，正文为空。
+    func testReasoningDeltasAreProgressNotText() throws {
+        final class Sink: @unchecked Sendable {
+            let lock = NSLock()
+            var texts: [String] = []
+            var emptyCount = 0
+            func record(_ text: String) {
+                lock.withLock {
+                    texts.append(text)
+                    if text.isEmpty { emptyCount += 1 }
+                }
+            }
+        }
+        let sink = Sink()
+        var state = LLMResponseStreamState()
+        var usage: [String: Any]?
+        var total = 0
+        for eventType in [
+            "response.reasoning_summary_text.delta",
+            "response.reasoning_text.delta",
+        ] {
+            let object: [String: Any] = [
+                "type": eventType,
+                "response_id": "resp_a",
+                "delta": "思考中",
+            ]
+            let finished = try ResponsesEventStreamDecoder.countedHandle(
+                object,
+                state: &state,
+                usage: &usage,
+                totalTextScalars: &total,
+                onDelta: { sink.record($0) }
+            )
+            XCTAssertFalse(finished, "\(eventType) 不是终态")
+        }
+        XCTAssertEqual(sink.emptyCount, 2, "reasoning 应只产生空进展信号，不产生正文")
+        XCTAssertEqual(total, 0, "推理进展不占累计正文预算")
+        XCTAssertFalse(state.isFinished, "推理阶段不得终结本轮")
+    }
+
+    /// V15:未知 reasoning 事件类型走 default 忽略，不延长等待（fail-closed）。
+    func testUnknownReasoningEventsDoNotExtendWait() throws {
+        var state = LLMResponseStreamState()
+        var usage: [String: Any]?
+        var total = 0
+        final class Flag: @unchecked Sendable {
+            let lock = NSLock()
+            var called = false
+            func mark() { lock.withLock { called = true } }
+        }
+        let flag = Flag()
+        let object: [String: Any] = [
+            "type": "response.reasoning_mystery.delta",
+            "response_id": "resp_a",
+            "delta": "???",
+        ]
+        let finished = try ResponsesEventStreamDecoder.countedHandle(
+            object,
+            state: &state,
+            usage: &usage,
+            totalTextScalars: &total,
+            onDelta: { _ in flag.mark() }
+        )
+        XCTAssertFalse(finished)
+        XCTAssertFalse(flag.called, "未知 reasoning 事件不得产生进展信号")
+        XCTAssertEqual(total, 0)
+    }
+
+    /// V15:noteProgress 只展期停滞 deadline，不解除首正文 deadline。
+    func testStreamTimerProgressExtendsStallButNotFirstText() async throws {
+        let timer = StreamTimer(
+            firstDeadline: ContinuousClock.now.advanced(by: .milliseconds(300)),
+            stallTimeout: .milliseconds(200),
+            initialStall: ContinuousClock.now.advanced(by: .milliseconds(50))
+        )
+        // 50ms 后来一次推理进展：停滞展期 200ms；再睡 100ms 仍未到期。
+        try await Task.sleep(for: .milliseconds(50))
+        await timer.noteProgress()
+        try await Task.sleep(for: .milliseconds(100))
+        let expired = await timer.expired
+        XCTAssertFalse(expired, "推理进展应展期停滞 deadline，不误杀合法等待")
+        let seen = await timer.firstTextSeen
+        XCTAssertFalse(seen, "推理进展不得算首正文，首正文 deadline 仍有效")
+        // 首正文 deadline 到达仍超限：推理不能无限延长正文等待。
+        try await Task.sleep(for: .milliseconds(250))
+        do {
+            try await timer.waitForExpiry()
+            XCTFail("首正文 deadline 到达必须抛超限，不能被推理无限延长")
+        } catch let error as LLMError {
+            guard case .streamBudgetExceeded(let detail) = error else {
+                XCTFail("应为 streamBudgetExceeded，实际 \(error)")
+                return
+            }
+            XCTAssertTrue(detail.contains("首个有效正文"), "实际 \(detail)")
+        }
     }
 
     @MainActor

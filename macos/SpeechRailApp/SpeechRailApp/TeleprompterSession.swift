@@ -3185,7 +3185,7 @@ public final class TeleprompterSession {
             return "当前 AI 服务暂时无法整理这份稿子。请在设置中更换 AI 服务，或直接按原文分段；原稿没有变化。"
         case .invalidStructuredResponse, .malformedStreamEvent:
             return "AI 返回的整理结果无法使用，原稿没有变化。你可以重试，或直接按原文分段。"
-        case .outputTruncated, .streamEndedEarly:
+        case .outputTruncated, .streamEndedEarly, .streamBudgetExceeded:
             return "AI 整理结果不完整，原稿没有变化。你可以缩小篇幅后重试，或直接按原文分段。"
         case .cancelled:
             return "已取消整理，原稿没有变化。"

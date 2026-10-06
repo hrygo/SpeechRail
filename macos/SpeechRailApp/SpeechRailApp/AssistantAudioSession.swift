@@ -16,10 +16,12 @@ struct AssistantAudioInvalidation: Sendable, Equatable {
 protocol AssistantAudioSession: AnyObject, AudioChunkSource {
     func configure(mode: AssistantMode)
     var onPlaybackDrained: (@MainActor () -> Void)? { get set }
-    /// 每一块**真的播完**（`dataRendered`，不是 `.dataConsumed`）时回调一次，
-    /// 带回入队时的 epoch 与帧数。增量 TTS 的播放预算靠它逐块归还；
-    /// "排空"与"播完"是两件事，而 epoch 让迟到的回调无法改动新一轮的账本。
-    var onPlaybackBufferRendered: (@MainActor (Int, Int) -> Void)? { get set }
+    /// 每一块设备播放完成（M0d 用 `dataPlayedBack`，不是 `.dataConsumed`）时回调一次，
+    /// 带回入队时的 epoch、帧数与 chunkID。增量 TTS 的播放预算靠它逐块归还，
+    /// played 水位靠它累计；"排空"与"播完"是两件事，而 epoch 让迟到的回调
+    /// 无法改动新一轮的账本，chunkID 让重复回调只归还一次。
+    /// 单次 schedule 只选一种 completion 类型，不假设同一块回调两次。
+    var onPlaybackBufferRendered: (@MainActor (Int, Int, UUID) -> Void)? { get set }
     var onFailure: (@MainActor (String) -> Void)? { get set }
     /// 设备重建（切换输出设备/耳机）把这一轮**还没播完**的缓冲丢掉了（D05）。
     ///
@@ -30,9 +32,10 @@ protocol AssistantAudioSession: AnyObject, AudioChunkSource {
     var onPlaybackInvalidated: (@MainActor (AssistantAudioInvalidation) async -> Void)? { get set }
     /// 返回 `false` 表示这一块**没有**进播放队列（已停止/设备不可用），
     /// 调用方必须把已经预约的播放预算还回去。
-    /// `epoch` 是调用方给这一块贴的账本身份，必须原样在 `onPlaybackBufferRendered` 里带回。
+    /// `epoch` 是调用方给这一块贴的账本身份，`chunkID` 是该块的唯一身份，
+    /// 两者必须原样在 `onPlaybackBufferRendered` 里带回。
     @discardableResult
-    func enqueuePlayback(_ pcm: Data, epoch: Int) async -> Bool
+    func enqueuePlayback(_ pcm: Data, epoch: Int, chunkID: UUID) async -> Bool
     func stopPlayback() async
 }
 
@@ -79,6 +82,8 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
     )
     private let stateLock = NSLock()
     private let ring = AudioSampleRing(capacity: AudioEngineSession.ringCapacity)
+    /// M3/V08:已发出的 AudioChunk 块序号（serial queue 上递增）。
+    private var emittedChunkSequence = 0
     private let playbackFormat: AVAudioFormat?
 
     private var mode: AssistantMode = .duplex
@@ -98,7 +103,7 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
     private var playbackGeneration = 0
     private var pendingBuffers = 0
     private var playbackDrainedHandler: (@MainActor () -> Void)?
-    private var playbackBufferRenderedHandler: (@MainActor (Int, Int) -> Void)?
+    private var playbackBufferRenderedHandler: (@MainActor (Int, Int, UUID) -> Void)?
     private var failureHandler: (@MainActor (String) -> Void)?
     private var playbackInvalidatedHandler: (@MainActor (AssistantAudioInvalidation) async -> Void)?
 
@@ -116,7 +121,7 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
         set { stateLock.withLock { playbackDrainedHandler = newValue } }
     }
 
-    var onPlaybackBufferRendered: (@MainActor (Int, Int) -> Void)? {
+    var onPlaybackBufferRendered: (@MainActor (Int, Int, UUID) -> Void)? {
         get { stateLock.withLock { playbackBufferRenderedHandler } }
         set { stateLock.withLock { playbackBufferRenderedHandler = newValue } }
     }
@@ -152,6 +157,11 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
         )
         stateLock.withLock { self.continuation = continuation }
         ring.reset()
+        // M3/V08:新采集期开始，块序号从 0 重计（与 ring 游标同一生命周期）。
+        // 注意：serial queue 上执行，与 drainAudioOnQueue 同队列，无竞争。
+        queue.async { [weak self] in
+            self?.emittedChunkSequence = 0
+        }
 
         do {
             try await withCheckedThrowingContinuation { (result: CheckedContinuation<Void, Error>) in
@@ -201,7 +211,7 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
     }
 
     @discardableResult
-    func enqueuePlayback(_ pcm: Data, epoch: Int) async -> Bool {
+    func enqueuePlayback(_ pcm: Data, epoch: Int, chunkID: UUID) async -> Bool {
         guard !pcm.isEmpty, let playbackFormat else { return false }
         let frameCount = pcm.count / MemoryLayout<Int16>.size
         guard frameCount > 0,
@@ -249,16 +259,18 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
                 if reservation.resetCapture {
                     self.ring.discardPending()
                 }
-                // `.dataRendered`：真的送进了输出，而不是"AVAudioPlayerNode 已经消化了这段数据"。
-                // 增量 TTS 的播放预算和"整轮播完"都按这个语义记账。
+                // M0d：用 `.dataPlayedBack`（计入下游处理与设备延迟）记 played。
+                // 单次 schedule 只选一种 completion 类型，不假设同一块回调两次；
+                // 首版只认 played，同时记录"渲染时点未单独观测"。
                 player.scheduleBuffer(
                     boxedBuffer.buffer,
-                    completionCallbackType: .dataRendered
+                    completionCallbackType: .dataPlayedBack
                 ) { [weak self] _ in
                     self?.didFinishPlaybackBuffer(
                         epoch: epoch,
                         generation: reservation.generation,
-                        frames: frameCount
+                        frames: frameCount,
+                        chunkID: chunkID
                     )
                 }
                 if !player.isPlaying { player.play() }
@@ -342,7 +354,17 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
         let level = data.withUnsafeBytes { raw in
             AudioLevel.peak(raw.bindMemory(to: Int16.self))
         }
-        continuation.yield(AudioChunk(pcm: data, level: level))
+        // M3/V08:drain 逐块发序号 + 丢样快照。serial queue 上递增，无需原子。
+        emittedChunkSequence &+= 1
+        continuation.yield(
+            AudioChunk(
+                pcm: data,
+                level: level,
+                capturedAt: ContinuousClock.now,
+                sequenceNumber: emittedChunkSequence,
+                droppedSamplesBefore: ring.droppedSampleCount
+            )
+        )
     }
 
     /// Builds the graph only on the serial audio queue. In duplex mode voice
@@ -463,6 +485,12 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
             } else { return }
             ring.commitWrite(accepted)
             consumed += accepted
+        }
+        // M3/V08:span 为 nil 提前退出时，剩余帧是因 ring 满而丢弃的样本——计数，
+        // 不静默吞掉。调用方据此判定输入完整性。
+        let remainder = frameCount - consumed
+        if remainder > 0 {
+            ring.recordDroppedSamples(remainder)
         }
     }
 
@@ -606,9 +634,9 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
         }
     }
 
-    private func didFinishPlaybackBuffer(epoch: Int, generation: Int, frames: Int) {
+    private func didFinishPlaybackBuffer(epoch: Int, generation: Int, frames: Int, chunkID: UUID) {
         let handlers: (
-            rendered: (@MainActor (Int, Int) -> Void)?,
+            rendered: (@MainActor (Int, Int, UUID) -> Void)?,
             drained: (@MainActor () -> Void)?,
             discardCapture: Bool
         )? = stateLock.withLock {
@@ -622,7 +650,7 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
         }
         guard let handlers else { return }
         if let rendered = handlers.rendered {
-            Task { @MainActor in rendered(epoch, frames) }
+            Task { @MainActor in rendered(epoch, frames, chunkID) }
         }
         guard let drained = handlers.drained else { return }
         queue.async { [weak self] in
