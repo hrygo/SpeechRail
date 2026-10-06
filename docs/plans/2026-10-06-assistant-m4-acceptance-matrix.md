@@ -252,3 +252,26 @@ soak 探针为纯 realtime 转写、不落 App 会话库，SQLite 记录数核�
 本文档为纯文档交付，不改产品代码、协议、schema 或运行态。
 回退：撤销本文档提交即可；不影响用户数据、服务配置或模型。
 真机执行需 UI/模型/运行态专项授权；授权前不执行本机验证。
+
+## M0–M3 App 定向回归复核（2026-10-07，main@`4057e3d0`，fake，不替代真机）
+
+实现锚点与回归互相印证后记录（`scripts/macos_app_test.sh` 定向 + `swift test --filter`）：
+
+| 门 | 套件 | 结果 |
+|---|---|---|
+| M0 取消/接收 | AssistantCancelReceiveTests | 36/36 ✅ |
+| M0 播放账本 | AssistantTTSStreamCoordinatorTests | 40/40 ✅ |
+| M0 会话终态 | AssistantSessionTests | 43/43 ✅ |
+| M1 保义计划 | AssistantSpeechPlanTests | 11/11 ✅ |
+| M1 作曲策略 | AssistantComposerPolicyTests | 4/4 ✅ |
+| M1 终态路由 | AssistantEndRoutingTests | 4/4 ✅ |
+| M1 持久化竞态 | AssistantReplyPersistenceRaceTests | 11/11 ✅ |
+| M2 provider 有界 | LLMProviderTests | 76/76 ✅ |
+| M3 排空/取消屏障 | AssistantDrainTests | 5/5 ✅ |
+| M3 输入持久化队列 | AssistantInputPersistenceQueueTests | 10/10 ✅ |
+| M3 轮次组装器 | AssistantInputTurnAssemblerTests（Swift Testing） | 7/7 ✅ |
+
+合计 247 项，0 失败。V17 的 App fake 门（取消旧积压、played 门控、
+backpressure 有界）含于 TTS 协调器 40 项内；V17 真机播放层对照待 UI 授权。
+口径修正：Assembler 套件为 Swift Testing，走 `swift test --filter`，
+Xcode `-only-testing` 按 XCTest 类名过滤得 0 项属口径误用，非缺失。
