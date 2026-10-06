@@ -8,12 +8,18 @@ ACTION="build"
 EXPORT_OPTIONS=""
 EXPORT_PATH=""
 ARCHIVE_PATH=""
+CI_DERIVED_DATA=""
 TIMEOUT_SECONDS="1800"
 PASSTHROUGH=()
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister"
 
 while (($# > 0)); do
   case "$1" in
+    --ci-derived-data)
+      [[ $# -ge 2 ]] || { echo "--ci-derived-data requires a value" >&2; exit 2; }
+      CI_DERIVED_DATA="$2"
+      shift 2
+      ;;
     --configuration)
       [[ $# -ge 2 ]] || { echo "--configuration requires a value" >&2; exit 2; }
       CONFIGURATION="$2"
@@ -70,6 +76,23 @@ absolute_path() {
   done
   printf '%s%s\n' "$(cd "$probe" && pwd -P)" "${suffix:+/$suffix}"
 }
+
+if [[ -n "$CI_DERIVED_DATA" ]]; then
+  [[ "${GITHUB_ACTIONS:-}" == "true" && "${CI:-}" == "true" && -n "${RUNNER_TEMP:-}" ]] || {
+    echo "--ci-derived-data is only supported on a GitHub Actions runner" >&2
+    exit 2
+  }
+  [[ "$ACTION" == "build" && -z "$EXPORT_PATH" ]] || {
+    echo "--ci-derived-data supports build without export only" >&2
+    exit 2
+  }
+  CI_DERIVED_DATA="$(absolute_path "$CI_DERIVED_DATA")"
+  CI_TEMP_ROOT="$(absolute_path "$RUNNER_TEMP")"
+  case "$CI_DERIVED_DATA" in
+    "$CI_TEMP_ROOT"/*) ;;
+    *) echo "--ci-derived-data must be inside RUNNER_TEMP" >&2; exit 2 ;;
+  esac
+fi
 
 if [[ "$ACTION" == "archive" ]]; then
   ARCHIVE_PATH="${ARCHIVE_PATH:-$ROOT_DIR/build/SpeechRail.xcarchive}"
@@ -213,7 +236,12 @@ else
       exit 2
     fi
   fi
-  DERIVED_DATA="$(mktemp -d "${TMPDIR:-/tmp}/speechrail-macos-build.XXXXXX")"
+  if [[ -n "$CI_DERIVED_DATA" ]]; then
+    DERIVED_DATA="$CI_DERIVED_DATA"
+    mkdir -p "$DERIVED_DATA"
+  else
+    DERIVED_DATA="$(mktemp -d "${TMPDIR:-/tmp}/speechrail-macos-build.XXXXXX")"
+  fi
   PRODUCT="$DERIVED_DATA/Build/Products/$CONFIGURATION/SpeechRail.app"
 
   cleanup_build_artifacts() {
@@ -223,7 +251,12 @@ else
     if [[ -n "$EXPORT_PATH" && -d "$EXPORT_PATH/SpeechRail.app" ]]; then
       "$LSREGISTER" -u "$EXPORT_PATH/SpeechRail.app" >/dev/null 2>&1 || true
     fi
-    /bin/rm -rf "$DERIVED_DATA"
+    if [[ -n "$CI_DERIVED_DATA" ]]; then
+      # Keep compiler intermediates for CI, never keep a launchable App bundle.
+      /bin/rm -rf "$PRODUCT"
+    else
+      /bin/rm -rf "$DERIVED_DATA"
+    fi
   }
 
   trap cleanup_build_artifacts EXIT
@@ -234,7 +267,8 @@ else
     -configuration "$CONFIGURATION" \
     -sdk macosx \
     -derivedDataPath "$DERIVED_DATA" \
-    build
+    build \
+    ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}
 
   if [[ -n "$EXPORT_PATH" ]]; then
     /bin/mkdir -p "$EXPORT_PATH"

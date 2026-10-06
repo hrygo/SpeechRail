@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 import time
+from concurrent.futures import Future
 from datetime import datetime
 
 import pytest
@@ -269,9 +270,12 @@ def test_settings_max_job_attempts_defaults_to_two_and_accepts_override() -> Non
 
 
 def test_configured_job_processor_executes_new_jobs_in_the_background(tmp_path) -> None:
+    finish: Future[None] = Future()
+
     class FakeProcessor:
         async def process(self, job) -> str:
             assert job.request["input_ref"] == "external/input"
+            await asyncio.wrap_future(finish)
             return "result://speech/1"
 
     spool_dir = tmp_path / "speechrail-job-spool"
@@ -294,10 +298,12 @@ def test_configured_job_processor_executes_new_jobs_in_the_background(tmp_path) 
         deadline = time.monotonic() + 1
         while True:
             result = client.get(f"/v1/jobs/{job_id}").json()
-            if result["state"] != "queued":
+            if result["state"] == "running" and not finish.done():
+                finish.set_result(None)
+            if result["state"] in {"completed", "failed", "cancelled"}:
                 break
             if time.monotonic() >= deadline:
-                raise AssertionError("background job runner did not claim queued work")
+                raise AssertionError("background job runner did not complete queued work")
             time.sleep(0.01)
 
     assert result["state"] == "completed"

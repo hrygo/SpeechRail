@@ -4,6 +4,7 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator
+from concurrent.futures import Future
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -1276,9 +1277,11 @@ def test_e2e_job_lifecycle_with_artifact_bytes(tmp_path: Path) -> None:
 
     spool = tmp_path / "speechrail-job-spool"
     repository = JobRepository(spool)
+    finish: Future[None] = Future()
 
     class FakeProcessor:
         async def process(self, job: JobRecord) -> str:
+            await asyncio.wrap_future(finish)
             result_dir = spool / RESULTS_SUBDIR / job.id
             result_dir.mkdir(parents=True, exist_ok=True)
             result_dir.chmod(0o700)
@@ -1310,7 +1313,9 @@ def test_e2e_job_lifecycle_with_artifact_bytes(tmp_path: Path) -> None:
         deadline = time.monotonic() + 1.0
         while True:
             status = client.get(f"/v1/jobs/{job_id}").json()
-            if status["state"] != "queued":
+            if status["state"] == "running" and not finish.done():
+                finish.set_result(None)
+            if status["state"] in {"completed", "failed", "cancelled"}:
                 break
             if time.monotonic() >= deadline:
                 raise AssertionError("job did not complete in time")
@@ -1342,9 +1347,11 @@ def test_e2e_job_lifecycle_speech_artifact(tmp_path: Path) -> None:
 
     spool = tmp_path / "speechrail-job-spool"
     repository = JobRepository(spool)
+    finish: Future[None] = Future()
 
     class FakeSpeechProcessor:
         async def process(self, job: JobRecord) -> str:
+            await asyncio.wrap_future(finish)
             result_dir = spool / RESULTS_SUBDIR / job.id
             result_dir.mkdir(parents=True, exist_ok=True)
             result_dir.chmod(0o700)
@@ -1375,7 +1382,9 @@ def test_e2e_job_lifecycle_speech_artifact(tmp_path: Path) -> None:
         deadline = time.monotonic() + 1.0
         while True:
             status = client.get(f"/v1/jobs/{job_id}").json()
-            if status["state"] != "queued":
+            if status["state"] == "running" and not finish.done():
+                finish.set_result(None)
+            if status["state"] in {"completed", "failed", "cancelled"}:
                 break
             if time.monotonic() >= deadline:
                 raise AssertionError("job did not complete in time")
