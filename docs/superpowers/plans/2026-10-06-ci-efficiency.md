@@ -4,6 +4,8 @@
 
 **Goal:** 保持全量检查及 80% branch coverage 门槛，端到端 CI 耗时降至原基线的 50% 以下。
 
+**验收口径（用户 2026-10-06 确认）:** 常规缓存命中的完整 CI 严格低于 262.5 秒；冷缓存实测单独报告，不要求其减半。
+
 **Architecture:** Python 的非 wheel 测试与唯一 wheel 构建并行，构建完成后 wheel 测试消费同一制品并合并 coverage。SwiftPM 测试和 Xcode App 构建使用独立 runner；编译缓存按工具链、平台、依赖及源码区分，只恢复内容未变的输入时间戳。
 
 **Tech Stack:** GitHub Actions、uv、pytest-cov、SwiftPM、Xcode、Python 3.14、Bash。
@@ -34,6 +36,7 @@
 - [x] 分别注入 build、普通测试、wheel 测试失败，证明错误未被掩盖。
 - [x] 第一阶段暂缓 coverage report；第二阶段 `--cov-append` 并强制原门槛。
 - [x] 使用 `uv run --no-sync pytest`，保持 editable sync 的 native-build opt-out。
+- [x] 依据远端串行测试瓶颈，加入两个 pytest worker，按文件调度、关闭自动重启，并实测用例全集与 coverage；本机 3294 passed、1 skipped、82.94%，远端验收仍待完成。
 
 ### Task 2: 编译缓存及独立 Swift jobs
 
@@ -55,6 +58,7 @@
 - [x] 修正三个 job 轮询点的过早退出，用受控 `running` 状态做回归。
 - [x] 增加只读的端到端时间验收脚本，强制候选 SHA、完整门禁成功及严格 `<50%`。
 - [ ] 优化分支远端全量 CI 实测低于 262.5 秒；提交、推送及触发运行已获明确授权。
+- [x] 首轮冷缓存 497 秒、热缓存 363 秒均全量成功；明确记录未达标并继续优化。
 
 ## Execution
 

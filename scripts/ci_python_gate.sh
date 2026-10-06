@@ -26,6 +26,7 @@ trap cleanup EXIT
 # The wheel fixture otherwise invokes a second uv build on the same .build tree.
 # Defer only this file, then combine both coverage datasets before enforcing 80%.
 uv run --no-sync pytest --cov=src --ignore=tests/test_wheel_contents.py \
+  -n 2 --dist loadfile --max-worker-restart=0 \
   --cov-report= --cov-fail-under=0 --durations=20
 suite_status=$?
 

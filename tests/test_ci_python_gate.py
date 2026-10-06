@@ -65,6 +65,9 @@ sys.exit(1 if phase == os.getenv('FAIL_PHASE') else 0)
     assert "--ignore=tests/test_wheel_contents.py" in suite["args"]
     assert "--cov-fail-under=0" in suite["args"]
     assert "--cov-report=" in suite["args"]
+    assert suite["args"][suite["args"].index("-n") + 1] == "2"
+    assert suite["args"][suite["args"].index("--dist") + 1] == "loadfile"
+    assert "--max-worker-restart=0" in suite["args"]
     if failure == "build":
         assert not any(call["phase"] == "wheel" for call in calls)
     else:
