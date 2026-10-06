@@ -17,14 +17,17 @@ from speechrail.config.auth import resolve_api_key
 from speechrail.domain.audio_timeline import RationalResampler
 
 try:
-    from .asr_quality import character_error_metrics
+    from .asr_quality import character_error_metrics, punctuation_error_metrics
     from .bench_realtime import get
     from .benchmark_http import validate_base_url
     from .benchmark_manifest import load_manifest
     from .benchmark_resources import ProcessResourceMonitor, _normalise_resources
     from .benchmark_runner import validate_output_path, write_result
 except ImportError:  # pragma: no cover - direct CLI imports
-    from asr_quality import character_error_metrics  # type: ignore[no-redef]
+    from asr_quality import (  # type: ignore[no-redef]
+        character_error_metrics,
+        punctuation_error_metrics,
+    )
     from bench_realtime import get  # type: ignore[no-redef]
     from benchmark_http import validate_base_url  # type: ignore[no-redef]
     from benchmark_manifest import load_manifest  # type: ignore[no-redef]
@@ -120,6 +123,8 @@ class ASREvidence:
     def score(
         self, reference: str | None, *, expected_wire_samples: int,
         effective_max_segment_ms: int | None = None,
+        punctuation_reference_text: str | None = None,
+        punctuation_reference_kind: str | None = None,
     ) -> dict[str, object]:
         if effective_max_segment_ms is not None and (
             type(effective_max_segment_ms) is not int or effective_max_segment_ms < 1
@@ -180,7 +185,14 @@ class ASREvidence:
             return evidence
         if not isinstance(reference, str):
             raise ValueError("ASR quality evidence requires a human reference")
-        return {**character_error_metrics(reference, text), **evidence}
+        quality = character_error_metrics(reference, text)
+        if punctuation_reference_text is not None:
+            quality["punctuation_metrics"] = punctuation_error_metrics(
+                punctuation_reference_text,
+                text,
+                gold_kind=punctuation_reference_kind,
+            )
+        return {**quality, **evidence}
 
 
 def _wire_audio(path: Path) -> tuple[bytes, float]:
@@ -269,6 +281,8 @@ def _observed_policy_echo(configured: object) -> dict[str, object]:
 def _run_asr(
     client: OpenAI, wire: bytes, *, language: str, reference: str | None,
     policy: dict[str, object] | None, resource_only: bool = False,
+    punctuation_reference_text: str | None = None,
+    punctuation_reference_kind: str | None = None,
 ) -> dict[str, object]:
     conn = client.realtime.connect(model="whisper-1").enter()
     events: queue.Queue[tuple[float, object]] = queue.Queue(maxsize=512)
@@ -341,6 +355,8 @@ def _run_asr(
             effective_max_segment_ms=(
                 int(echo["effective_max_segment_ms"]) if echo is not None else None
             ),
+            punctuation_reference_text=punctuation_reference_text,
+            punctuation_reference_kind=punctuation_reference_kind,
         )
         result: dict[str, object] = {
             "audio_seconds": len(wire) / 48000,
@@ -392,6 +408,8 @@ def run_manifest_asr_benchmark(
         _run_asr(
             client, wire, language=first.language,
             reference=first.reference_text, policy=policy, resource_only=resource_only,
+            punctuation_reference_text=first.punctuation_reference_text,
+            punctuation_reference_kind=first.punctuation_reference_kind,
         )
     monitor = ProcessResourceMonitor(interval_seconds=.25)
     monitor.start()
@@ -405,6 +423,8 @@ def run_manifest_asr_benchmark(
                     client, wire, language=fixture.language,
                     reference=fixture.reference_text, policy=policy,
                     resource_only=resource_only,
+                    punctuation_reference_text=fixture.punctuation_reference_text,
+                    punctuation_reference_kind=fixture.punctuation_reference_kind,
                 )
                 results.append({"id": fixture.id, "repeat": repeat + 1, **result})
     except Exception as exc:

@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.3"
+version: "3.3.4"
 date: 2026-10-06
 ---
 
@@ -113,6 +113,25 @@ curl -X POST http://127.0.0.1:8201/v1/audio/speech \
 验收 HTTP 状态、非空文本/偶数字节音频、`X-Request-ID`、模型设备/dtype 与预期 profile。
 测试音频和 `/tmp/speechrail-smoke.pcm` 由操作者本地保存，结束后删除；提交/报告只保留最小
 结果摘要而非文本、音频或 PCM。
+
+### ASR 标点质量对照
+
+`examples/perf/benchmark_http.py` 与 `examples/perf/realtime_asr_benchmark.py` 的外部 manifest
+可在原有 CER/WER 参考之外，成对提供 `punctuation_reference_text` 和
+`punctuation_reference_kind`。后者只接受 `human_punctuation_annotation`（人工标点转写）
+或 `human_reading_prompt`（人工朗读稿）；两种参考应分别汇总，朗读稿不代表逐音频人工转写。
+原有文字参考仍为必填，标点参考去除标点并做 NFKC/casefold 后必须与其文字内容一致。
+参考文本只用于本地评分，不发送给服务，也不写入结果摘要或日志。
+
+评分将字母、数字及 Unicode mark 字符做确定性的 Levenshtein 对齐，以字符位置匹配
+逗号、句号、问号和叹号，报告各类 support、TP/FP/FN 与 micro precision/recall/F1。
+全角形式归一化；顿号、引号、括号及省略号不计入这四类。没有标点支持时不虚构满分；
+超过对齐容量上限时返回未评分原因和空分数。该方法只衡量上述四类标点，不衡量其他排版
+或句读形式。必须同时查看字符错误率，避免把错误转写上的标点分数当成完整质量结论。
+
+当前没有经场景对照确认的标点阈值，`punctuation_gate` 始终为 `unset`；标点分数只作
+描述性证据。资源专用样本不做质量评分，原有终态、输入覆盖、预算和上传回执验收门保持
+独立。原始音频、人工参考、转写和 benchmark 制品仍保存在仓库外。
 
 ## 规格选择与分人供给测试清单
 
