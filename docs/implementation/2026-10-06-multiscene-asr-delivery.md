@@ -2,11 +2,31 @@
 title: "共享 ASR #245：实施与验收记录"
 status: in_progress
 audience: "SpeechRail 开发者与验收人员"
-version: "1.12.0"
+version: "1.13.0"
 date: 2026-10-06
 ---
 
 # 共享 ASR #245：实施与验收记录
+
+## 2026-10-07 有效段真实空成功
+
+此前 `maintenance-v8-lifecycle-observed` 的 100 ms 手动路径静音段得到
+completed 但真实模型输出 2 个字符，`empty_success_gate=unset`。
+2026-10-07 经授权执行 `maintenance-v8-empty-success-v5`：同一 v8 wheel，
+2 s 纯数字静音走 `speechrail.endpointing` 的 server_vad（manual 路径的
+`turn_detection` 只接受 null 或 manual，endpointing 字符串不是合法对照），
+显式 commit。结果为恰一个 `completed(text="")`、零边界、commit receipt
+齐全，`empty_success_gate=pass`。
+`measurement_completed=true, original_restored=true`，
+恢复交接 runtime 后 PID **27726**、generation 13、quality/quality、
+原 catalog、ready 与空闲核验通过。
+这补上有效识别段真实空终态的实测缺口；100 ms 手动路径输出非空仍是模型行为，
+不是终态缺失。#247 的确定性回归与本实测共同覆盖空成功契约。
+#249/#253/#245 保持开放，预设仍未冻结。
+
+| 仓库外证据 | SHA-256 |
+|---|---|
+| empty-success-result.json | `4e0092b3401760ed445ce986a521f91551db7853d6389a716bcbabd6766cd51c` |
 
 ## 2026-10-07 诗文与标点候选对照
 
