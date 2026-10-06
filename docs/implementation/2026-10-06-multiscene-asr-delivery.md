@@ -2,11 +2,27 @@
 title: "共享 ASR #245：实施与验收记录"
 status: in_progress
 audience: "SpeechRail 开发者与验收人员"
-version: "1.14.0"
+version: "1.15.0"
 date: 2026-10-06
 ---
 
 # 共享 ASR #245：实施与验收记录
+
+## 2026-10-07 预设冻结（提词器预览 400→500 ms）
+
+用户已采纳“提词器方案 B、字幕维持现状”：caption 保持 8 s + full，
+teleprompter 只把预览间隔从 400 ms 放到 500 ms，继续 streaming 收尾，
+20 s 拒绝；其余助手与会议预设不变。本分支改动仅两行：
+`ASRScenePreset.teleprompter` 预览 400→500 ms，
+`ASRScenePresetTests` 期望同步为 500 ms。
+Python 侧无 400 ms 硬编码预设可改（`ASRPolicy` 默认 1000 ms，
+场景值只由 App 显式下发），Schema 与契约文档无需变更。
+最小验证：`tests/test_asr_policy.py` +
+`tests/test_realtime_multiscene_asr.py` 全过（58 项），
+`swift test --filter ASRScenePresetTests` 2 项通过。
+Ruff/mypy 与 #249 剩余真实复核（#297 交互、预设冻结后的真实验收）
+仍待后续回合按授权执行。本节只记录冻结决定与代码改动，
+不声称真实验收已通过。
 
 ## 2026-10-07 回滚可调与三臂真实对照（PR #317 已合入）
 
