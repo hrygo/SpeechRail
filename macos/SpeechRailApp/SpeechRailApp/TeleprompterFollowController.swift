@@ -163,6 +163,10 @@ public struct TeleprompterFollowController: Sendable {
     private var nextSequence = 0
     private var finalizedSequence = -1
     private var provisionalItemID: String?
+    /// Highest input sample watermark that has already moved the provisional
+    /// viewport. A revised hypothesis over the same captured audio may update
+    /// its preview, but cannot advance the reader a second time.
+    private var lastAdvancedSampleWatermark: Int?
 
     public init(
         currentIndex: Int = 0,
@@ -263,8 +267,8 @@ public struct TeleprompterFollowController: Sendable {
                 return
             }
             // 越过契约校验之后做截断坐标换算：存下来的是原文的后缀，
-            // 原前缀落在它里面的部分 = 原前缀 − 丢弃数，再夹到保留区范围内。
-            // 旧公式 min(stable, retainedCount) 漏减丢弃数（E2/F03）。
+        // 原前缀落在它里面的部分 = 原前缀 − 丢弃数，再夹到保留区范围内。
+        // 旧公式 min(stable, retainedCount) 漏减丢弃数（E2/F03）。
             let rawScalarCountForMapping = rawScalarCount
             let retainedScalarCount = item.text.unicodeScalars.count
             let droppedScalarCount = rawScalarCountForMapping - retainedScalarCount
@@ -276,6 +280,18 @@ public struct TeleprompterFollowController: Sendable {
             item.stablePrefixCodepoints = nil
         }
         if followState == .waitingForSpeech { followState = .listening }
+        let allowsForwardMovement: Bool
+        if let sampleSpan {
+            allowsForwardMovement = sampleSpan.startSample >= 0
+                && sampleSpan.endSample > sampleSpan.startSample
+                && (lastAdvancedSampleWatermark.map {
+                    sampleSpan.endSample > $0
+                } ?? true)
+        } else {
+            // Older callers and deterministic reducer tests have no sample
+            // mapping; retain their existing alignment behavior.
+            allowsForwardMovement = true
+        }
         let match: TeleprompterAligner.Match
         if let stablePrefixCodepoints = item.stablePrefixCodepoints,
            stablePrefixCodepoints > 0 {
@@ -296,11 +312,19 @@ public struct TeleprompterFollowController: Sendable {
             )
         }
         let viewportBeforePreview = viewportAnchor
-        applyPreviewMatch(match, itemID: itemID)
+        applyPreviewMatch(
+            match,
+            itemID: itemID,
+            allowsForwardMovement: allowsForwardMovement
+        )
+        let didAdvance = isForward(viewportAnchor, from: viewportBeforePreview)
+        if didAdvance, let sampleSpan {
+            lastAdvancedSampleWatermark = sampleSpan.endSample
+        }
         // 与 receivePartial 同规则：试探推进（前进或同位）记到即将写回的
         // item 上，供 final 同位确认核对“同 item 且试探位置仍有效”。
         // apply 内部不碰 items，试探位置由调用方在写回前记录。
-        if viewportAnchor != viewportBeforePreview
+        if didAdvance
             || (candidatePosition == viewportAnchor
                 && match.position == viewportAnchor) {
             item.lastPreviewedPosition = viewportAnchor
@@ -396,7 +420,8 @@ public struct TeleprompterFollowController: Sendable {
 
     private mutating func applyPreviewMatch(
         _ match: TeleprompterAligner.Match,
-        itemID: String
+        itemID: String,
+        allowsForwardMovement: Bool = true
     ) {
         candidatePosition = match.position
         lastMatchConfidence = match.confidence
@@ -409,6 +434,12 @@ public struct TeleprompterFollowController: Sendable {
         }
 
         guard mayAdvance(match) else {
+            uncertainty = match.confidence
+            if followState != .freePlaying { followState = .catchingUp }
+            return
+        }
+
+        if isForward(candidate, from: position), !allowsForwardMovement {
             uncertainty = match.confidence
             if followState != .freePlaying { followState = .catchingUp }
             return
@@ -519,6 +550,7 @@ public struct TeleprompterFollowController: Sendable {
         lastMatchedCount = 0
         lastStableAlignedScalarCount = nil
         lowConfidenceStreak = 0
+        lastAdvancedSampleWatermark = nil
     }
 
     public mutating func pause() {

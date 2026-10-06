@@ -42,7 +42,6 @@ let package = Package(
                 "AppNavigationState.swift",
                 "Assets.xcassets",
                 "CaptionBandWindow.swift",
-                "CaptionSession.swift",
                 "ControlAgentStatusView.swift",
                 "ControlCenterView.swift",
                 "ControlMenuView.swift",
@@ -69,6 +68,10 @@ let package = Package(
                 "CoreAudioTapCapture.swift",
                 "SpeechRailDesignTokens.swift",
                 "RealtimeASRClient.swift",
+                "CaptionSession.swift",
+                "ASRScenePreset.swift",
+                "AssistantInputTurnAssembler.swift",
+                "TranscriptPreviewLedger.swift",
                 // 助手编排层：生产 AssistantSession 本身进单测目标，
                 // 依赖的 LLM / Realtime / 播放通道由 AssistantSessionDependencies 注入。
                 "AssistantSession.swift",

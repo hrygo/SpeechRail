@@ -7,10 +7,16 @@ import SpeechRailControlKit
 public struct TeleprompterRealtimeConfiguration: Sendable, Equatable {
     public var language: String?
     public var keywords: [String]
+    public var scenePreset: ASRScenePreset
 
-    public init(language: String? = nil, keywords: [String] = []) {
+    public init(
+        language: String? = nil,
+        keywords: [String] = [],
+        scenePreset: ASRScenePreset = .teleprompter
+    ) {
         self.language = language
         self.keywords = keywords
+        self.scenePreset = scenePreset
     }
 
     public static let contractMaxKeywords = 128
@@ -61,7 +67,8 @@ public struct TeleprompterRealtimeConfiguration: Sendable, Equatable {
         }
         return .init(
             language: language,
-            keywords: Array(keywords.prefix(Self.contractMaxKeywords))
+            keywords: Array(keywords.prefix(Self.contractMaxKeywords)),
+            scenePreset: scenePreset
         )
     }
 }

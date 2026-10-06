@@ -10,6 +10,7 @@ final class RealtimeTTSStreamTests: XCTestCase {
     func testCloneRevisionBelongsToUtteranceAndNeverToHandshake() async throws {
         let transport = TTSStreamTransport()
         let client = RealtimeASRClient(
+            scenePreset: .assistantTurnTaking,
             voice: "clone_fixture",
             apiKey: "",
             expectedASRRevision: "asr-catalog",
@@ -370,7 +371,7 @@ final class RealtimeTTSStreamTests: XCTestCase {
 }
 
 private actor TTSStreamTransport: RealtimeASRTransport {
-    private enum TestError: Error { case closed }
+    private enum TestError: Error { case closed, invalidSessionUpdate }
 
     private var frames: [RealtimeASRSocketFrame] = []
     private var receiver: CheckedContinuation<RealtimeASRSocketFrame, Error>?
@@ -383,7 +384,25 @@ private actor TTSStreamTransport: RealtimeASRTransport {
     func send(_ text: String) async throws {
         sent.append(text)
         if text.contains("\"type\":\"session.update\"") {
-            enqueue(.text(#"{"type":"session.updated"}"#))
+            guard let data = text.data(using: .utf8),
+                  let update = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  var session = update["session"] as? [String: Any],
+                  var speechrail = session["speechrail"] as? [String: Any],
+                  var policy = speechrail["asr"] as? [String: Any],
+                  let maxSegment = policy["max_segment_ms"] as? Int else {
+                throw TestError.invalidSessionUpdate
+            }
+            policy["effective_max_segment_ms"] = maxSegment
+            if policy["final_deadline_ms"] == nil {
+                policy["final_deadline_ms"] = 15_000
+            }
+            speechrail["asr"] = policy
+            session["speechrail"] = speechrail
+            let response = try JSONSerialization.data(withJSONObject: [
+                "type": "session.updated",
+                "session": session,
+            ])
+            enqueue(.text(String(decoding: response, as: UTF8.self)))
         }
     }
 

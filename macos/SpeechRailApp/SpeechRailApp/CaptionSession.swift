@@ -2,6 +2,62 @@ import Foundation
 import Observation
 import SpeechRailControlKit
 
+public protocol CaptionRealtimeClient: Sendable {
+    func events() async -> RealtimeEventStream<RealtimeASRClient.Event>
+    func connect() async throws
+    func append(_ pcm: Data) async throws
+    func drainAndClear(timeout: Duration) async throws
+    func close() async
+}
+
+extension RealtimeASRClient: CaptionRealtimeClient {}
+
+public struct CaptionRealtimeClientConfiguration: Sendable, Equatable {
+    public var port: Int
+    public var scenePreset: ASRScenePreset
+    public var diarizationEnabled: Bool
+    public var apiKey: String?
+    public var expectedASRRevision: String?
+
+    public init(
+        port: Int,
+        scenePreset: ASRScenePreset = .caption,
+        diarizationEnabled: Bool,
+        apiKey: String?,
+        expectedASRRevision: String?
+    ) {
+        self.port = port
+        self.scenePreset = scenePreset
+        self.diarizationEnabled = diarizationEnabled
+        self.apiKey = apiKey
+        self.expectedASRRevision = expectedASRRevision
+    }
+}
+
+public struct CaptionSessionDependencies: Sendable {
+    public var makeRealtimeClient:
+        @Sendable (CaptionRealtimeClientConfiguration) -> any CaptionRealtimeClient
+
+    public init(
+        makeRealtimeClient: @escaping @Sendable
+            (CaptionRealtimeClientConfiguration) -> any CaptionRealtimeClient
+    ) {
+        self.makeRealtimeClient = makeRealtimeClient
+    }
+
+    public static func production() -> Self {
+        Self { configuration in
+            RealtimeASRClient(
+                port: configuration.port,
+                scenePreset: configuration.scenePreset,
+                diarizationEnabled: configuration.diarizationEnabled,
+                apiKey: configuration.apiKey,
+                expectedASRRevision: configuration.expectedASRRevision
+            )
+        }
+    }
+}
+
 // 实时字幕的会话层（`SESSIONS-SPEC` §6.3、`TECHNICAL-DESIGN` §5.7）。
 //
 // **它不认识 AppKit，也不认识窗口。** 浮层由 `CaptionBandWindowController` 负责；这里只说
@@ -154,27 +210,25 @@ public final class CaptionSession {
     private let coordinator: SessionCoordinator
     /// 分人归属账本。会议与字幕共用底座，这里持有的是本场那一个实例。
     public let labeling: SpeakerLabeling
+    private let dependencies: CaptionSessionDependencies
     private let port: Int
     private let apiKey: String?
 
     private var source: AudioChunkSource?
-    private var client: RealtimeASRClient?
+    private var client: (any CaptionRealtimeClient)?
     private var pump: Task<Void, Never>?
+    private var uploadPump: Task<Void, Never>?
     private var sessionStartedAt: Date?
-    /// 上一段音频的终点（墙钟）。下一行从这里开始。
-    private var commitCursor: Date?
-    private var pendingItem: (start: Date, end: Date)?
+    private var nextConnectionID = 0
+    private var sessionGeneration = 0
+    private var previewIdentity: TranscriptPreviewLedger.Identity?
+    private var previewLedger = TranscriptPreviewLedger()
     /// 终态事件计数：收尾时用来判断"最后半句到底回来了没有"。
     private var terminalCount = 0
     private var isStoppingIntentionally = false
     private var currentOrdinal = 0
-    /// 本次会话已经落库的 `item_id`。**序号唯一索引拦不住重复的 `completed`**——
-    /// 序号是库现场取的 `MAX+1`（§15.7 R2 ①），同一个 item 到两次就会多出一行；
-    /// 幂等这一层因此在客户端，而不是在库里。
-    private var committedItemIDs: Set<String> = []
-    /// `utterance_id` → 已落库的行。对齐与分人结果随后按 item 找回那一行
-    /// （文本 final 不再携带 `attribution_units`，契约 §5.2）。
-    private var lineByItem: [String: (lineID: String, ordinal: Int)] = [:]
+    /// `(connection, generation, itemID)` → 已落库的行，防止迟到辅助结果串写。
+    private var lineByItem: [TranscriptPreviewLedger.ItemIdentity: (lineID: String, ordinal: Int)] = [:]
     /// 已经补写过 `timing_quality` 的行；同一行只写一次。
     private var timingQualityApplied: Set<String> = []
     /// 这一场是否协商过分人（决定了结束时要等 EOF 屏障）。
@@ -186,10 +240,12 @@ public final class CaptionSession {
         coordinator: SessionCoordinator,
         port: Int = 8201,
         apiKey: String? = nil,
+        dependencies: CaptionSessionDependencies? = nil,
         audioSourceFactory: (@MainActor () -> AudioChunkSource)? = nil
     ) {
         self.coordinator = coordinator
         self.labeling = SpeakerLabeling(coordinator: coordinator)
+        self.dependencies = dependencies ?? .production()
         self.port = port
         self.apiKey = apiKey
         if let audioSourceFactory {
@@ -324,12 +380,14 @@ public final class CaptionSession {
         diarizationActive = diarizationEnabled
         diarizationDrained = false
 
-        let client = RealtimeASRClient(
-            port: port,
-            silenceDurationMilliseconds: RealtimeVADProfile.caption.silenceDurationMilliseconds,
-            diarizationEnabled: diarizationEnabled,
-            apiKey: apiKey,
-            expectedASRRevision: binding?.asrModelRevision
+        let client = dependencies.makeRealtimeClient(
+            CaptionRealtimeClientConfiguration(
+                port: port,
+                scenePreset: .caption,
+                diarizationEnabled: diarizationEnabled,
+                apiKey: apiKey,
+                expectedASRRevision: binding?.asrModelRevision
+            )
         )
         do {
             try await client.connect()
@@ -344,12 +402,10 @@ public final class CaptionSession {
         // 留下一条什么都没有的会话（§5.3.1）。
         let startedAt = Date()
         sessionStartedAt = startedAt
-        commitCursor = startedAt
         lines = []
         partialText = nil
         terminalCount = 0
         currentOrdinal = 0
-        committedItemIDs = []
         lineByItem = [:]
         timingQualityApplied = []
         isStoppingIntentionally = false
@@ -376,7 +432,9 @@ public final class CaptionSession {
         }
 
         phase = .running
-        startPump(stream: stream, client: client)
+        sessionGeneration &+= 1
+        let identity = beginPreviewGeneration(captureStartedAt: startedAt)
+        startPump(stream: stream, client: client, identity: identity)
     }
 
     /// 协调器的 stopper：把最后半句交出去、关掉连接。**不封存记录**——那是协调器接下来做的事。
@@ -389,6 +447,10 @@ public final class CaptionSession {
         isStoppingIntentionally = true
         source?.stop()
         source = nil
+        // `stop()` closes the source stream but does not retract chunks it has
+        // already buffered. Upload those before committing the server-side tail.
+        await uploadPump?.value
+        uploadPump = nil
         if let client {
             do {
                 // RealtimeASRClient owns the single commit → terminal →
@@ -400,8 +462,11 @@ public final class CaptionSession {
             }
             await client.close()
         }
-        pump?.cancel()
+        // The client finishes its event stream on close. Let the event owner
+        // persist every buffered final/attribution before retiring this identity.
+        await pump?.value
         pump = nil
+        previewIdentity = nil
         client = nil
         diarizationActive = false
         resetToIdleKeepingLines()
@@ -428,8 +493,7 @@ public final class CaptionSession {
         phase = .idle
         level = 0
         partialText = nil
-        pendingItem = nil
-        commitCursor = nil
+        previewIdentity = nil
         sessionStartedAt = nil
         sessionID = nil
     }
@@ -443,8 +507,11 @@ public final class CaptionSession {
     /// "真的断了"混成同一种事。
     public func pause() async {
         guard phase == .running else { return }
+        isStoppingIntentionally = true
         source?.stop()
         source = nil
+        await uploadPump?.value
+        uploadPump = nil
         if let client {
             do {
                 try await client.drainAndClear(timeout: .seconds(8))
@@ -454,19 +521,19 @@ public final class CaptionSession {
             }
             await client.close()
         }
-        pump?.cancel()
+        await pump?.value
         pump = nil
         client = nil
+        previewIdentity = nil
         level = 0
         // 未定稿的那一句不写成半截行：库里的行只认定稿（§15 的 `status` 取值域）。
         partialText = nil
-        pendingItem = nil
         phase = .paused
+        isStoppingIntentionally = false
     }
 
     public func resume() async {
         guard phase == .paused else { return }
-        commitCursor = Date()
         do {
             try await restartPipeline()
         } catch {
@@ -486,7 +553,6 @@ public final class CaptionSession {
             if coordinator.phase == .interrupted {
                 await coordinator.resumeAfterInterruption()
             }
-            commitCursor = Date()
             do {
                 try await restartPipeline()
             } catch {
@@ -517,12 +583,14 @@ public final class CaptionSession {
         }
         // 续接是**新连接、新 epoch**（§6.5）：分人在新连接上要重新协商一次，
         // 否则这一段的归属会静默丢掉。
-        let client = RealtimeASRClient(
-            port: port,
-            silenceDurationMilliseconds: RealtimeVADProfile.caption.silenceDurationMilliseconds,
-            diarizationEnabled: diarizationActive,
-            apiKey: apiKey,
-            expectedASRRevision: binding?.asrModelRevision
+        let client = dependencies.makeRealtimeClient(
+            CaptionRealtimeClientConfiguration(
+                port: port,
+                scenePreset: .caption,
+                diarizationEnabled: diarizationActive,
+                apiKey: apiKey,
+                expectedASRRevision: binding?.asrModelRevision
+            )
         )
         do {
             try await client.connect()
@@ -536,35 +604,59 @@ public final class CaptionSession {
         isStoppingIntentionally = false
         blocked = nil
         phase = .running
-        startPump(stream: stream, client: client)
+        let identity = beginPreviewGeneration(captureStartedAt: Date())
+        startPump(stream: stream, client: client, identity: identity)
     }
 
     // MARK: - 采集 → 上行
 
-    private func startPump(stream: AsyncStream<AudioChunk>, client: RealtimeASRClient) {
+    private func beginPreviewGeneration(captureStartedAt: Date) -> TranscriptPreviewLedger.Identity {
+        nextConnectionID &+= 1
+        let identity = TranscriptPreviewLedger.Identity(
+            connection: nextConnectionID,
+            generation: sessionGeneration
+        )
+        previewIdentity = identity
+        previewLedger.beginGeneration(
+            identity: identity,
+            captureTimelineOffsetSeconds: captureStartedAt.timeIntervalSince1970
+        )
+        return identity
+    }
+
+    private func startPump(
+        stream: AsyncStream<AudioChunk>,
+        client: any CaptionRealtimeClient,
+        identity: TranscriptPreviewLedger.Identity
+    ) {
+        uploadPump?.cancel()
+        uploadPump = Task { [weak self] in
+            for await chunk in stream {
+                guard let self, self.isCurrent(identity) else { return }
+                await self.upload(chunk, to: client, identity: identity)
+            }
+        }
+
         pump?.cancel()
         pump = Task { [weak self] in
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask { [weak self] in
-                    for await chunk in stream {
-                        guard let self else { return }
-                        await self.upload(chunk, to: client)
-                    }
-                }
-                group.addTask { [weak self] in
-                    let events = await client.events()
-                    for await envelope in events {
-                        guard let self else { return }
-                        await self.handle(envelope)
-                    }
-                }
-                await group.waitForAll()
+            let events = await client.events()
+            for await envelope in events {
+                guard let self, self.isCurrent(identity) else { return }
+                await self.handle(envelope, identity: identity)
             }
         }
     }
 
-    private func upload(_ chunk: AudioChunk, to client: RealtimeASRClient) async {
-        guard !isStoppingIntentionally else { return }
+    private func isCurrent(_ identity: TranscriptPreviewLedger.Identity) -> Bool {
+        identity == previewIdentity
+    }
+
+    private func upload(
+        _ chunk: AudioChunk,
+        to client: any CaptionRealtimeClient,
+        identity: TranscriptPreviewLedger.Identity
+    ) async {
+        guard isCurrent(identity) else { return }
         level = chunk.level
         do {
             try await client.append(chunk.pcm)
@@ -577,33 +669,66 @@ public final class CaptionSession {
     // MARK: - 下行
 
     private func handle(
-        _ envelope: RealtimeEventEnvelope<RealtimeASRClient.Event>
+        _ envelope: RealtimeEventEnvelope<RealtimeASRClient.Event>,
+        identity: TranscriptPreviewLedger.Identity
     ) async {
+        guard identity == previewIdentity else { return }
         switch envelope.payload {
         case .ready, .configured, .alignmentFailed,
              .ttsStarted(_, _, _), .ttsTextAccepted(_, _, _, _),
              .ttsAudio(_, _, _), .ttsEnded(_, _, _, _, _):
             // 字幕会话不接线 TTS：增量 utterance 属于助手那一层。
             break
-        case .partial(_, let delta):
-            guard !delta.isEmpty else { return }
-            partialText = (partialText ?? "") + delta
-        case .partialSnapshot(_, _, let text, _):
-            partialText = text.isEmpty ? nil : text
+        case .partial(let itemID, let delta):
+            _ = previewLedger.acceptDelta(
+                identity: identity,
+                itemID: itemID,
+                delta: delta,
+                eventID: envelope.metadata.eventID
+            )
+            partialText = previewLedger.visiblePartial
+        case .partialSnapshot(let itemID, let revision, let text, _):
+            _ = previewLedger.acceptSnapshot(
+                identity: identity,
+                itemID: itemID,
+                revision: revision,
+                text: text,
+                eventID: envelope.metadata.eventID
+            )
+            partialText = previewLedger.visiblePartial
+        case .segmentClosed(let itemID, let sampleSpan, let reason, let commitEventID):
+            guard let closeReason = TranscriptPreviewLedger.SegmentCloseReason(
+                rawValue: reason.rawValue
+            ) else { return }
+            _ = previewLedger.closeSegment(
+                identity: identity,
+                itemID: itemID,
+                sampleSpan: sampleSpan,
+                reason: closeReason,
+                commitEventID: commitEventID,
+                eventID: envelope.metadata.eventID
+            )
         case .completed(let itemID, let transcript):
-            // 服务端不再回报 `input_audio_buffer.committed`，所以窗口以终态为界：
-            // 起点是上一次终态，终点是这一次终态（契约 §5.1）。
-            let now = Date()
-            pendingItem = (start: commitCursor ?? now, end: now)
-            commitCursor = now
             terminalCount += 1
-            await commit(itemID: itemID, transcript: transcript)
-        case .failed(_, let code, let message):
+            let outcome = previewLedger.resolveCommit(
+                identity: identity,
+                itemID: itemID,
+                transcript: transcript
+            )
+            partialText = previewLedger.visiblePartial
+            guard case .commit(let committed) = outcome else { return }
+            await commit(committed)
+        case .failed(let itemID, let code, let message):
             terminalCount += 1
             lastFailure = "\(code)：\(message)"
-            partialText = nil
+            let recoveryText = previewLedger.recoveryNote(
+                identity: identity,
+                itemID: itemID
+            )?.text
+            _ = previewLedger.resolveFailure(identity: identity, itemID: itemID)
+            partialText = recoveryText ?? previewLedger.visiblePartial
         case .attribution(let itemID, let units, _):
-            await applyAttribution(itemID: itemID, units: units)
+            await applyAttribution(itemID: itemID, units: units, identity: identity)
         case .diarizationFinished:
             diarizationDrained = true
         case .auxiliaryIncomplete(_, let alignmentMissing, let diarizationMissing):
@@ -640,11 +765,17 @@ public final class CaptionSession {
     /// 正文与时间码一个字不动，也不留新行（§15.3 第 2 条）。
     private func applyAttribution(
         itemID: String,
-        units: [RealtimeASRClient.AttributionUnit]
+        units: [RealtimeASRClient.AttributionUnit],
+        identity: TranscriptPreviewLedger.Identity
     ) async {
-        guard let entry = lineByItem[itemID], !units.isEmpty else { return }
+        let itemIdentity = TranscriptPreviewLedger.ItemIdentity(identity: identity, itemID: itemID)
+        guard identity == previewIdentity,
+              let entry = lineByItem[itemIdentity],
+              !units.isEmpty
+        else { return }
         labeling.register(units: units, lineID: entry.lineID, ordinal: entry.ordinal)
         await labeling.apply(units: units)
+        guard identity == previewIdentity else { return }
         if let quality = Self.timingQuality(from: units),
            timingQualityApplied.insert(entry.lineID).inserted {
             do {
@@ -665,22 +796,16 @@ public final class CaptionSession {
         }
     }
 
-    /// 定稿即落库。**同一个 `item_id` 只落一行**：序号是库现场取的 `MAX+1`
-    /// （§15.7 R2 ①），所以"同一个 `completed` 到了两次"不会被唯一索引拦住，
-    /// 会多出一行——幂等在这里，不在库里。
-    private func commit(
-        itemID: String,
-        transcript: String
-    ) async {
-        let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-        partialText = nil
-        defer { pendingItem = nil }
-        guard !text.isEmpty, let sessionID, let startedAt = sessionStartedAt else { return }
-        if !itemID.isEmpty {
-            guard !committedItemIDs.contains(itemID) else { return }
-            committedItemIDs.insert(itemID)
+    /// 定稿即落库；preview ledger 按连接和 item 去重，输入 sample span 冻结时间区间。
+    private func commit(_ item: TranscriptPreviewLedger.CommittedItem) async {
+        if let recoveryNote = item.recoveryNote {
+            partialText = recoveryNote.text
+            return
         }
-        let window = pendingItem ?? (start: commitCursor ?? startedAt, end: Date())
+        let text = item.finalText.trimmingCharacters(in: .whitespacesAndNewlines)
+        partialText = nil
+        guard !text.isEmpty, let sessionID, let startedAt = sessionStartedAt else { return }
+        let inputTimes = sessionRelativeInputTimes(from: item.boundary, startedAt: startedAt)
         let lineID = UUID().uuidString
         let ordinal: Int
         do {
@@ -691,32 +816,50 @@ public final class CaptionSession {
                     text: text,
                     source: .microphone,
                     speakerLabel: nil,
-                    tStart: window.start.timeIntervalSince(startedAt),
-                    tEnd: window.end.timeIntervalSince(startedAt)
+                    tStart: inputTimes?.start,
+                    tEnd: inputTimes?.end,
+                    timingQuality: .unavailable
                 ),
                 id: lineID
             )
         } catch {
-            // 没写成就不算处理过：同一个 item 再来一次还要有机会落库。
-            committedItemIDs.remove(itemID)
+            // 正文继续可见，用户可以复制恢复；不把 final 到达时刻伪装成说话时间。
+            partialText = text
             lastFailure = error.localizedDescription
             return
         }
         // 行已经在了。对齐/分人结果到达时按 `utterance_id` 找回这一行。
-        if !itemID.isEmpty {
-            lineByItem[itemID] = (lineID: lineID, ordinal: ordinal)
-        }
+        let itemIdentity = TranscriptPreviewLedger.ItemIdentity(
+            identity: item.identity,
+            itemID: item.itemID
+        )
+        lineByItem[itemIdentity] = (lineID: lineID, ordinal: ordinal)
         currentOrdinal = ordinal
         lines.append(
             Line(
                 id: lineID,
                 ordinal: ordinal,
                 text: text,
-                start: window.start.timeIntervalSince(startedAt),
-                end: window.end.timeIntervalSince(startedAt),
+                start: inputTimes?.start,
+                end: inputTimes?.end,
                 speakerLabel: nil
             )
         )
+    }
+
+    private func sessionRelativeInputTimes(
+        from boundary: TranscriptPreviewLedger.Boundary?,
+        startedAt: Date
+    ) -> (start: TimeInterval, end: TimeInterval)? {
+        guard let range = boundary?.inputRange,
+              range.isApproximate,
+              let absoluteStart = range.startSeconds,
+              let absoluteEnd = range.endSeconds
+        else { return nil }
+        let start = absoluteStart - startedAt.timeIntervalSince1970
+        let end = absoluteEnd - startedAt.timeIntervalSince1970
+        guard start.isFinite, end.isFinite, start >= 0, end > start else { return nil }
+        return (start, end)
     }
 
     /// 分人档位下 `timing_quality` 由归属单元给：有对齐结果就是 `aligned`，
@@ -755,15 +898,17 @@ public final class CaptionSession {
     private func enterInterrupted(_ reason: BlockReason) async {
         source?.stop()
         source = nil
+        uploadPump?.cancel()
+        uploadPump = nil
         pump?.cancel()
         pump = nil
+        previewIdentity = nil
         if let client {
             await client.close()
             self.client = nil
         }
         level = 0
         partialText = nil
-        pendingItem = nil
         if coordinator.occupancy?.kind == .captions {
             _ = await coordinator.markInterruption(.serviceLost, atOrdinal: currentOrdinal)
         }

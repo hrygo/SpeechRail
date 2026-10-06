@@ -283,6 +283,66 @@ struct TeleprompterFollowControllerTests {
         #expect(controller.partialPreview == "今天我们介绍相机设置")
     }
 
+    @Test func snapshotRevisionWithNoNewAudioWatermarkCannotCreateAnotherAdvance() throws {
+        let segments = try script()
+        var controller = TeleprompterFollowController()
+        controller.receiveSnapshot(
+            itemID: "a",
+            revision: 1,
+            text: "今天我们介绍相机设置",
+            segments: segments,
+            eventID: "s1",
+            sampleSpan: .init(startSample: 0, endSample: 24_000)
+        )
+        #expect(controller.currentIndex == 1)
+
+        controller.receiveSnapshot(
+            itemID: "a",
+            revision: 2,
+            text: "最后演示照片导出",
+            segments: segments,
+            eventID: "s2",
+            sampleSpan: .init(startSample: 0, endSample: 24_000)
+        )
+        #expect(controller.currentIndex == 1)
+        #expect(controller.partialPreview == "最后演示照片导出")
+
+        controller.receiveSnapshot(
+            itemID: "a",
+            revision: 3,
+            text: "最后演示照片导出",
+            segments: segments,
+            eventID: "s3",
+            sampleSpan: .init(startSample: 24_000, endSample: 48_000)
+        )
+        #expect(controller.currentIndex == 2)
+    }
+
+    @Test func aNewInputGenerationCanRestartItsSampleWatermark() throws {
+        let segments = try script()
+        var controller = TeleprompterFollowController()
+        controller.receiveSnapshot(
+            itemID: "before-pause",
+            revision: 1,
+            text: "今天我们介绍相机设置",
+            segments: segments,
+            sampleSpan: .init(startSample: 0, endSample: 24_000)
+        )
+        #expect(controller.currentIndex == 1)
+
+        controller.pause()
+        controller.resume()
+        controller.receiveSnapshot(
+            itemID: "after-resume",
+            revision: 1,
+            text: "最后演示照片导出",
+            segments: segments,
+            sampleSpan: .init(startSample: 0, endSample: 24_000)
+        )
+
+        #expect(controller.currentIndex == 2)
+    }
+
     @Test func stableHypothesisPrefixLimitsPreviewToProvenText() throws {
         let segments = try TeleprompterSegmenter.segment(
             sourceText: "今天我们介绍相机设置。后文稳定性。"
