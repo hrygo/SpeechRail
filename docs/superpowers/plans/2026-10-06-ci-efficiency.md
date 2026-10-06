@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 保持全量检查及 80% branch coverage 门槛，端到端 CI 耗时降至原基线的 50% 以下。
+**Goal:** 保持全量检查及既有 80% 覆盖率门槛（启用 `branch=true`），端到端 CI 耗时降至原基线的 50% 以下。
 
 **验收口径（用户 2026-10-06 确认）:** 常规缓存命中的完整 CI 严格低于 262.5 秒；冷缓存实测单独报告，不要求其减半。
 
@@ -57,12 +57,12 @@
 - [x] 写清 `<50%` 验收条件与未执行的远端前后对比。
 - [x] 修正三个 job 轮询点的过早退出，用受控 `running` 状态做回归。
 - [x] 增加只读的端到端时间验收脚本，强制候选 SHA、完整门禁成功及严格 `<50%`。
-- [ ] 优化分支远端全量 CI 实测低于 262.5 秒；提交、推送及触发运行已获明确授权。
+- [x] 优化分支远端全量 CI 实测低于 262.5 秒；run 37422635179 为 229 秒，减少 56.38%，七个 job 全部成功。
 - [x] 首轮冷缓存 497 秒、热缓存 363 秒均全量成功；明确记录未达标并继续优化。
 - [x] 两个 pytest worker 的远端运行 331 秒，仍未达标；保持所有测试和覆盖率门槛。
 - [x] 剖析并隔离五个流程测试模块的重复音高估计；真实音高算法专门用例继续执行，新增 fixture 边界回归先红后绿。
 - [x] fixture 隔离后的本机完整门禁：3295 passed、1 skipped、82.93%，完整编排 42.72 秒。
-- [ ] fixture 隔离后的远端缓存命中 CI 严格低于 262.5 秒。
+- [x] fixture 隔离后的远端缓存命中 CI 严格低于 262.5 秒：3295 passed、1 skipped、82.94%；真实音高算法测试保留，wheel 和 native 内容验证成功。
 
 ## Execution
 
