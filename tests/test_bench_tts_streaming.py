@@ -436,13 +436,11 @@ def test_run_incremental_turn_follows_the_incremental_protocol() -> None:
     assert start["voice"] == "serena"
     assert start["task"] == "conversation"
     assert start["audio_window_bytes"] == 1_440_000
-    assert connection.of_type("speechrail.tts.audio_ack") == [
-        {
-            "type": "speechrail.tts.audio_ack",
-            "request_id": start["request_id"],
-            "sample_offset": 24_000,
-        }
-    ]
+    acks = connection.of_type("speechrail.tts.audio_ack")
+    assert len(acks) == 1
+    assert acks[0]["request_id"] == start["request_id"]
+    assert acks[0]["sample_offset"] == 24_000
+    assert isinstance(acks[0].get("event_id"), str) and acks[0]["event_id"].strip()
     appends = connection.of_type("speechrail.tts.append_text")
     assert [event["sequence"] for event in appends] == [0, 1]
     assert "".join(event["text"] for event in appends) == "你好，世界"
@@ -702,3 +700,34 @@ def test_run_incremental_turn_drives_the_real_realtime_server() -> None:
     assert [sequence for sequence, _ in session.appended] == [0, 1]
     assert "".join(piece for _, piece in session.appended) == "你好，这是增量朗读的延迟测量。"
     assert session.finished == 1
+
+
+def test_run_incremental_turn_sends_event_id_on_every_client_event() -> None:
+    """Every client event must carry the contract-required ``event_id`` (#279)."""
+
+    script = [
+        *_handshake(),
+        _STARTED,
+        {"type": "speechrail.tts.text_accepted", "append_sequence": 0},
+        {"type": "speechrail.tts.text_accepted", "append_sequence": 1},
+        _audio_delta(b"\x01\x02" * 24_000),
+        {"type": "speechrail.tts.completed"},
+    ]
+    _, connection = _turn(script, text="你好，世界", slices=2)
+
+    client_events = [
+        event
+        for event in connection.sent
+        if event["type"] in
+        (
+            "speechrail.tts.start",
+            "speechrail.tts.append_text",
+            "speechrail.tts.finish_text",
+            "speechrail.tts.audio_ack",
+        )
+    ]
+    assert client_events, "expected incremental TTS client events"
+    for event in client_events:
+        assert isinstance(event.get("event_id"), str) and event["event_id"].strip(), (
+            f"{event['type']} must carry a non-blank event_id"
+        )

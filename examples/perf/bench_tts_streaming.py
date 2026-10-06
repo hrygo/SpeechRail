@@ -56,6 +56,7 @@ import math
 import queue
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,6 +78,7 @@ def tts_start_event(request_id: str, voice: str | None) -> dict[str, Any]:
 
     return {
         "type": "speechrail.tts.start",
+        "event_id": f"evt_{uuid.uuid4().hex}",
         "request_id": request_id,
         "task": "conversation",
         "voice": voice or DEFAULT_VOICE,
@@ -94,6 +96,7 @@ def session_update_event(model: str = _DEFAULT_ASR_MODEL) -> dict[str, Any]:
 
     return {
         "type": "session.update",
+        "event_id": f"evt_{uuid.uuid4().hex}",
         "session": {
             "type": "transcription",
             "audio": {
@@ -657,6 +660,7 @@ def run_incremental_turn(
                     connection.send(
                         {
                             "type": "speechrail.tts.append_text",
+                            "event_id": f"evt_{uuid.uuid4().hex}",
                             "request_id": request_id,
                             "sequence": sent,
                             "text": pieces[sent],
@@ -668,6 +672,7 @@ def run_incremental_turn(
                     connection.send(
                         {
                             "type": "speechrail.tts.finish_text",
+                            "event_id": f"evt_{uuid.uuid4().hex}",
                             "request_id": request_id,
                             "last_sequence": accepted_sequence,
                         }
@@ -723,6 +728,7 @@ def run_incremental_turn(
                     connection.send(
                         {
                             "type": "speechrail.tts.audio_ack",
+                            "event_id": f"evt_{uuid.uuid4().hex}",
                             "request_id": request_id,
                             "sample_offset": audio_bytes // _BYTES_PER_SAMPLE,
                         }
