@@ -24,7 +24,9 @@ struct AssistantObservability: Sendable {
     var deviceStopsCompleted: Int = 0
 
     /// 有界：计数饱和不再增长，不溢出。
+    /// M1/V10:负增量无效（调用方不得倒扣计数）；饱和后保持上界。
     mutating func increment(_ keyPath: WritableKeyPath<AssistantObservability, Int>, by value: Int = 1) {
+        guard value >= 0 else { return }
         let current = self[keyPath: keyPath]
         let next = current.addingReportingOverflow(value).partialValue
         self[keyPath: keyPath] = min(next, 1_000_000_000)
