@@ -2,11 +2,50 @@
 title: "共享 ASR #245：实施与验收记录"
 status: in_progress
 audience: "SpeechRail 开发者与验收人员"
-version: "1.11.0"
+version: "1.12.0"
 date: 2026-10-06
 ---
 
 # 共享 ASR #245：实施与验收记录
+
+## 2026-10-07 诗文与标点候选对照
+
+`maintenance-v8-supplement-v1` 于同一 v8 wheel 完成诗文 10 条与
+FLEURS 标点 10 条 × 五预设 × N=3，共 **300 正式请求 / 3547.1 s**，
+配对基线为交接 runtime 的 `baseline-poetry-punctuation-v2`（78 请求）。
+`measurement_completed=true, original_restored=true`，
+恢复交接 runtime 后 PID **18485**、generation 13、quality/quality、
+原 catalog、ready 与空闲核验通过。总量字符错误基线与候选均为
+780/24540，加权 CER 3.18% 持平。
+
+六组零配对回退：poetry turn-taking / duplex / meeting，
+fleurs turn-taking / duplex / meeting。候选首预览中位数普遍早于基线
+（如 poetry duplex 0.59 s vs 1.00 s），收尾中位数持平或更好。
+
+四组各有一到两条长样本多 1 个错（×3 稳定），均为 caption/tele 短预算档
+把基线单段切成两段或多段所致，覆盖与段预算门均为 pass：
+
+| 组 | 样本 | 基线 错误/终态/边界 | 候选 错误/终态/边界 |
+|---|---|---|---|
+| poetry-caption | 121-123852-0002 | 1 / 1 / 1 | 2 / 3 / 3 |
+| poetry-teleprompter | 121-123852-0002 | 1 / 1 / 1 | 2 / 3 / 3 |
+| poetry-teleprompter | 121-123859-0001 | 3 / 2 / 2 | 4 / 4 / 4 |
+| fleurs-caption | fleurs-zh-05 | 3 / 1 / 1 | 4 / 2 / 2 |
+| fleurs-caption | fleurs-zh-10 | 15 / 1 / 1 | 16 / 2 / 2 |
+| fleurs-teleprompter | fleurs-zh-05 | 3 / 1 / 1 | 5 / 2 / 2 |
+| fleurs-teleprompter | fleurs-zh-10 | 15 / 1 / 1 | 16 / 2 / 2 |
+
+模式与此前隔离一致：回退只出现在 8 s 预算的 caption（full）与
+teleprompter（streaming）档，20 s 档零回退。长朗读与长中文句在短预算下
+多切分一次就多一次终态固化，这是预算取舍，不是解码能力退化。
+标点 F1 只在有 reading-prompt gold 的 FLEURS 子集上 scored，
+问号与叹号 gold 仍缺，标点质量门保持 unset。预设仍未冻结，
+#249/#253/#245 保持开放。
+
+| 仓库外证据 | SHA-256 |
+|---|---|
+| supplement outcome/restoration | 以实测为准，不复述历史 PID |
+| 10 份候选结果 | 仓库外受限目录，以 manifest 配对清单为准 |
 
 ## 2026-10-07 zh-en-03 单因素隔离
 
