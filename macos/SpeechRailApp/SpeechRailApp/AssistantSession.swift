@@ -1357,8 +1357,11 @@ public final class AssistantSession {
                 throw Blocked(.serviceNotReady("播放通道没起来：\(error.localizedDescription)"))
             }
             player.onDrained = playbackDrained
-            player.onBufferRendered = { [weak tts] epoch, frames, _ in
-                tts?.notePlaybackCompleted(samples: frames, epoch: epoch)
+            // M0d/V05：生产通道的 played 回调必须带 chunkID：
+            // 同一块的重复回调只记账一次（去重在协调器 `playedChunkIDs`）。
+            // 丢掉它等于退回“按样本累加”，重复回调会提前宣布播完。
+            player.onBufferRendered = { [weak tts] epoch, frames, chunkID in
+                tts?.notePlaybackCompleted(samples: frames, epoch: epoch, chunkID: chunkID)
             }
             tts.enqueuePlayback = { pcm, epoch, chunkID in await player.enqueue(pcm, epoch: epoch, chunkID: chunkID) }
             tts.stopPlayback = { await player.stop() }
