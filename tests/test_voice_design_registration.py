@@ -28,6 +28,7 @@ from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.domain.ports import AudioChunk, SpeechRequest, TranscriptionRequest
 from speechrail.domain.tts import VoiceRegistry
 from speechrail.http.routes import voice_designs as voice_designs_module
+from voice_test_fixtures import fake_pitch_measurement as fake_pitch_measurement
 
 TEXT = "这是用于音色注册的测试语句，请保持自然清晰的表达。"
 VOICE_ID = "designed_base"

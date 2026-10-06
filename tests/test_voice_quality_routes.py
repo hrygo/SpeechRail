@@ -36,6 +36,7 @@ from speechrail.domain.ports import (
 )
 from speechrail.domain.tts import VoiceRegistry
 from speechrail.domain.tts_errors import TtsBackendError
+from voice_test_fixtures import fake_pitch_measurement as fake_pitch_measurement
 
 _SAMPLE_RATE = 24_000
 
