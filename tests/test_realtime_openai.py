@@ -3691,7 +3691,7 @@ def test_openai_asr_reader_runtime_error_emits_transcription_failed() -> None:
     assert failed[0]["error"]["code"] == "backend_error"
 
 
-def test_openai_client_event_queue_overflow_closes_session() -> None:
+def test_openai_client_event_queue_overflow_closes_session(monkeypatch) -> None:
     """A stalled handler must not buffer client audio without bound.
 
     The whole interaction runs on a daemon thread with a bounded wait: the
@@ -3700,6 +3700,15 @@ def test_openai_client_event_queue_overflow_closes_session() -> None:
     import threading
 
     factory = HangingCommitStreamingFactory()
+    append_started = threading.Event()
+
+    async def blocked_append(self, event):
+        append_started.set()
+        await asyncio.Event().wait()
+
+    # Model finalization runs independently of ingress. Hold the ingress
+    # operation itself to exercise the transport queue's overflow boundary.
+    monkeypatch.setattr(OpenAIRealtimeSession, "_append_audio", blocked_append)
     client, _ = _client(factory=factory)
     done = threading.Event()
     outcome: dict[str, object] = {}
@@ -3716,7 +3725,7 @@ def test_openai_client_event_queue_overflow_closes_session() -> None:
                 socket.send_json(
                     {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
                 )
-                socket.send_json({"type": "input_audio_buffer.commit"})
+                assert append_started.wait(2.0)
                 for index in range(600):
                     socket.send_json(
                         {
@@ -3987,11 +3996,11 @@ def test_manual_rollover_commit_clear_wire_barrier_collects_every_item_once() ->
                     pass  # Drain the rollover boundary and its matching terminal.
         collector.begin_close()
         socket.send_json({"type": "input_audio_buffer.commit"})
-        socket.send_json({"type": "input_audio_buffer.clear"})
         while True:
             final = receive()
             if final["type"] == "conversation.item.input_audio_transcription.completed":
                 break  # The explicit item first publishes its segment boundary.
+        socket.send_json({"type": "input_audio_buffer.clear"})
         assert final["type"] == "conversation.item.input_audio_transcription.completed"
         assert collector.result is not None
         assert collector.result.text == "samesamesame"
@@ -4063,7 +4072,7 @@ def test_manual_append_failure_followed_by_clear_never_becomes_final_transcript(
 
 
 @pytest.mark.parametrize("empty", [False, True])
-def test_manual_clear_waits_for_terminal_and_preserves_empty_input(empty: bool) -> None:
+def test_manual_clear_after_terminal_preserves_completed_and_empty_input(empty: bool) -> None:
     from speechrail.realtime.turn_collection import ManualTurnCollector
 
     client, factory = _client(factory=EarlyCompletionStreamingFactory())
@@ -4077,7 +4086,6 @@ def test_manual_clear_waits_for_terminal_and_preserves_empty_input(empty: bool) 
         collector.expect_item()
         collector.begin_close()
         socket.send_json({"type": "input_audio_buffer.commit"})
-        socket.send_json({"type": "input_audio_buffer.clear"})
         boundary, terminal, item_events = _receive_committed_item(
             socket,
             expect_boundary=not empty,
@@ -4088,6 +4096,7 @@ def test_manual_clear_waits_for_terminal_and_preserves_empty_input(empty: bool) 
             collector.accept(event, epoch="wire")
         event = terminal
         assert event["type"] == "conversation.item.input_audio_transcription.completed"
+        socket.send_json({"type": "input_audio_buffer.clear"})
     if not empty:
         assert factory.sessions[0].closes == 1
     assert collector.state == "completed"
@@ -4119,7 +4128,6 @@ def test_manual_commit_timeout_followed_by_clear_never_succeeds(timeout_reader: 
         collector.expect_item()
         collector.begin_close()
         socket.send_json({"type": "input_audio_buffer.commit"})
-        socket.send_json({"type": "input_audio_buffer.clear"})
         boundary, terminal, item_events = _receive_committed_item(
             socket,
             expected_sample_span=(0, len(_FRAME) // 2),
@@ -4127,6 +4135,7 @@ def test_manual_commit_timeout_followed_by_clear_never_succeeds(timeout_reader: 
         assert boundary is not None
         assert terminal["type"] == "conversation.item.input_audio_transcription.failed"
         assert terminal["error"]["code"] == "backend_timeout"
+        socket.send_json({"type": "input_audio_buffer.clear"})
         for event in item_events:
             collector.accept(event, epoch="wire")
     assert collector.state == "failed"

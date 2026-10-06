@@ -7,6 +7,7 @@ import contextlib
 import json
 import logging
 import time
+from collections.abc import Awaitable
 from typing import Any
 from uuid import uuid4
 
@@ -33,6 +34,7 @@ OUTBOUND_SEND_TIMEOUT_CLOSE_CODE = 1011
 # 512 events ≈ 16.4s of 32ms audio chunks, accommodating commit/diarization spikes.
 CLIENT_EVENT_QUEUE_LIMIT = 512
 CONTROL_EVENT_QUEUE_LIMIT = 16
+INPUT_BARRIER_LIMIT = 16
 _CONTROL_EVENT_TYPES = frozenset({"speechrail.tts.cancel", "speechrail.tts.audio_ack"})
 
 
@@ -152,6 +154,13 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
         control_events: asyncio.Queue[event_envelope | None] = asyncio.Queue(
             maxsize=CONTROL_EVENT_QUEUE_LIMIT
         )
+        input_barriers: set[asyncio.Task[None]] = set()
+        input_barrier_failed = asyncio.Event()
+
+        def reap_input_barrier(task: asyncio.Task[None]) -> None:
+            input_barriers.discard(task)
+            if not task.cancelled() and task.exception() is not None:
+                input_barrier_failed.set()
         pending_client_event_bytes = 0
         # JSON/Base64 is larger than decoded PCM.  Leave headroom for one
         # legal maximum frame so API-level ``buffer_too_large`` remains a
@@ -230,7 +239,10 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                 with contextlib.suppress(asyncio.QueueFull):
                     control_events.put_nowait(None)
 
-        async def handle_client_event(payload: dict[str, Any], payload_size: int) -> None:
+        async def handle_client_event(
+            payload: dict[str, Any], payload_size: int,
+            completion: Awaitable[None] | None = None,
+        ) -> None:
             nonlocal pending_client_event_bytes
             pending_client_event_bytes -= payload_size
             client_event_id: str | None = None
@@ -239,7 +251,24 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                 raw_event_id = payload.get("event_id")
                 if isinstance(raw_event_id, str) and raw_event_id.strip():
                     client_event_id = raw_event_id
-                await session.handle(payload)
+                if completion is not None:
+                    await completion
+                else:
+                    if (
+                        payload.get("type") == "input_audio_buffer.commit"
+                        and len(input_barriers) >= INPUT_BARRIER_LIMIT
+                    ):
+                        raise RealtimeAdapterError(
+                            "queue_full", "too many pending input barriers",
+                        )
+                    completion = await session.handle(payload, defer_asr_commit=True)
+                    if completion is not None:
+                        task = asyncio.create_task(
+                            handle_client_event(payload, 0, completion),
+                            name="realtime-input-barrier",
+                        )
+                        input_barriers.add(task)
+                        task.add_done_callback(reap_input_barrier)
             except (WebSocketDisconnect, RuntimeError):
                 logger.debug("realtime client disconnected during event handling")
                 raise
@@ -298,17 +327,22 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
         recv_task = asyncio.create_task(receive_loop())
         handle_task = asyncio.create_task(handle_loop())
         control_task = asyncio.create_task(control_loop())
+        barrier_failure_task = asyncio.create_task(input_barrier_failed.wait())
         try:
             await session.start()
             # Finish when either side completes; the other is cancelled below so a
             # client disconnect interrupts a blocking handle instead of leaking
             # the ASR factory slot until the backend answers.
             await asyncio.wait(
-                {recv_task, handle_task, control_task}, return_when=asyncio.FIRST_COMPLETED
+                {recv_task, handle_task, control_task, barrier_failure_task},
+                return_when=asyncio.FIRST_COMPLETED,
             )
         finally:
             async def close_owned_session() -> None:
-                tasks = (recv_task, handle_task, control_task)
+                tasks = (
+                    recv_task, handle_task, control_task, barrier_failure_task,
+                    *tuple(input_barriers),
+                )
                 for task in tasks:
                     task.cancel()
                 for task in tasks:
@@ -321,6 +355,7 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                             "realtime loop ended with an error: type=%s",
                             type(task_error).__name__,
                         )
+                input_barriers.clear()
                 try:
                     await session.close()
                 finally:
