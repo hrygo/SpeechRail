@@ -533,18 +533,17 @@ def _handle_commit(
         return
     try:
         text, language = engine.finish_streaming(session_id)
-        if text:
-            write_frame(
-                output_stream,
-                {
-                    "version": PROTOCOL_VERSION,
-                    "type": "event",
-                    "session_id": session_id,
-                    "kind": "completed",
-                    "text": text,
-                    "language": language or None,
-                },
-            )
+        write_frame(
+            output_stream,
+            {
+                "version": PROTOCOL_VERSION,
+                "type": "event",
+                "session_id": session_id,
+                "kind": "completed",
+                "text": text,
+                "language": language or None,
+            },
+        )
         write_frame(
             output_stream,
             {
