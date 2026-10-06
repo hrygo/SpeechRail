@@ -199,7 +199,7 @@ run2 音频 19.52s（≈2.2 倍时长）但转写文本与 run1/run3 等价—�
 | 项 | 操作 | 应有结果 | 实测（10/10） |
 |---|---|---|---|
 | V03 clear 取消 | append → clear → commit | 空 final completed，不崩 | 10/10 `completed` + 空 transcript `''`，无 `segment_closed` 边界（输入已丢弃） |
-| V05 正常终态 | append → commit | completed + 终态 | 10/10 `completed`，`segment_closed` 边界先到（reason 待记录），转写“嗯。”（合成 PCM 内容所致，非误识别） |
+| V05 正常终态 | append → commit | completed + 终态 | 10/10 `completed`，`speechrail.transcription.segment_closed` 边界先到（`reason='client_commit'` + `commit_event_id` 回显，与契约 §5.1 一致；2026-10-07 单轮补记，真机同配置），转写“嗯。”（合成 PCM 内容所致，非误识别） |
 
 未通过项：无（本项）。V05 的 played 门控（terminal 在 played 前到不提前
 completed、played 唯一记账）属 App 播放层语义，本探针只覆盖服务端终态；
