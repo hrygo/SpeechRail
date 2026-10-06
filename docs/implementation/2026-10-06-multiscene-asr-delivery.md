@@ -2,11 +2,16 @@
 title: "共享 ASR #245：实施与验收记录"
 status: in_progress
 audience: "SpeechRail 开发者与验收人员"
-version: "1.4.0"
+version: "1.5.0"
 date: 2026-10-06
 ---
 
 # 共享 ASR #245：实施与验收记录
+
+2026-10-06 后续交付链核验：App 消费替代 PR #291 已合入 `b6eada5b`，
+证据工具替代 PR #292 已合入 `84330d9c`；原 #278/#280 均已关闭。
+下方原 PR 表与 CI 记录保留为历史来源。#290 的输入归属修复仍待交付和真实复测；
+#249/#253/#245 保持开放，App 实施 Issues 已关闭不代表真实业务验收完成。
 
 实施依据为 [完整方案](2026-10-05-multiscene-asr-luna-guide.md)，交付跟踪为
 [#245](https://github.com/hrygo/SpeechRail/issues/245) 及 #247–#253。
@@ -553,6 +558,26 @@ Quality、Python、Swift Package、App build、wheel 和 Gate Summary 全部通�
 其终态和业务验收结果与上述 CI 分开记录。
 
 ## 回退与复现
+
+### 独立段预算验收门
+
+`ASREvidence.score` 新增 `segment_budget_gate`，以已校验的策略回显
+`effective_max_segment_ms` 限制每个 24 kHz wire span。允许重采样锚点最多一个
+wire sample 的舍入，不允许整包音频延长旧段。质量模式与 resource-only 模式均
+执行该门；缺少有效预算或未要求边界时保持 `unset`。
+
+两个模式的红反例均确认：此前连续区间门会接受首段 482,400 samples
+（20.1 s），即使回显预算为 20,000 ms。新增预算门拒绝此反例，另覆盖
+0/1 sample 舍入允许、2 samples 超限拒绝以及正式 runner 接线。
+2026-10-06 基于 #292 主线的评分、工具与 profile contract 回归为
+83 passed；Ruff 与 whitespace 检查通过。
+
+新门回放旧 v7 连续资源制品，原连续/尾部覆盖为 pass，而段预算校验明确失败。
+原制品 SHA-256 为
+`6595d70e35de76e686774fb1540f89aa60df89fccae2d5aaefb92532cc251c1f`，
+仓库外回放记录为 `source-evidence/historical-boundary-budget-replay.json`。
+没有改写原始结果或追认 v7 的逐段输入归属。该工具补丁可独立回退；
+新 wheel 实测通过之前，逐段预算门仍属未验收项。
 
 源码已按上述依赖切片提交或准备为本 PR。源码回退按依赖逆序撤销各 PR 的提交；
 原实施工作树未提交差异保留。不得使用
