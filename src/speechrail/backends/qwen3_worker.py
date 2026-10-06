@@ -452,6 +452,7 @@ def _parse_asr_policy(raw: object) -> tuple[ASRPolicy, int]:
             "preview_interval_ms",
             "max_segment_ms",
             "finalization",
+            "rollback_tokens",
             "effective_max_segment_ms",
         }
         allowed = required | {"final_deadline_ms"}
@@ -1181,6 +1182,7 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
             language=state.language,
             context=state.context,
             sample_watermark=sample_count,
+            rollback_tokens=state.policy.rollback_tokens,
             max_new_tokens=_dynamic_budget(
                 sample_count / ASR_SAMPLE_RATE,
                 state.max_new_tokens,
@@ -1238,6 +1240,7 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
             language=state.language,
             context=state.context,
             sample_watermark=sample_count,
+            rollback_tokens=state.policy.rollback_tokens,
             max_new_tokens=_dynamic_budget(
                 sample_count / ASR_SAMPLE_RATE,
                 state.max_new_tokens,

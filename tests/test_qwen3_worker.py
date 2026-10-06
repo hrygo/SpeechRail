@@ -429,6 +429,7 @@ class _FakeBoundDecoder:
         context: str,
         sample_watermark: int,
         max_new_tokens: int,
+        rollback_tokens: int | None = None,
         final: bool = False,
     ) -> Qwen3DecodeResult:
         del state
@@ -439,6 +440,7 @@ class _FakeBoundDecoder:
                 "context": context,
                 "sample_watermark": sample_watermark,
                 "max_new_tokens": max_new_tokens,
+                "rollback_tokens": rollback_tokens,
                 "final": final,
             }
         )
@@ -877,6 +879,7 @@ def test_worker_forwards_asr_policy_and_effective_segment_bound() -> None:
         "preview_interval_ms": 600,
         "max_segment_ms": 20_000,
         "finalization": "full_segment",
+        "rollback_tokens": 5,
         "effective_max_segment_ms": 8_000,
         "final_deadline_ms": 4_000,
     }
@@ -901,6 +904,7 @@ def test_worker_forwards_asr_policy_and_effective_segment_bound() -> None:
         preview_interval_ms=600,
         max_segment_ms=20_000,
         finalization="full_segment",
+        rollback_tokens=5,
         final_deadline_ms=4_000,
     )
     assert options["effective_max_segment_ms"] == 8_000
@@ -919,8 +923,9 @@ def test_worker_forwards_asr_policy_and_effective_segment_bound() -> None:
             "preview_interval_ms": 600,
             "max_segment_ms": 20_000,
             "finalization": "full_segment",
-            "effective_max_segment_ms": 8_000,
             "rollback_tokens": 5,
+            "effective_max_segment_ms": 8_000,
+            "unknown_field": 1,
         },
         {
             "preview_interval_ms": 600,

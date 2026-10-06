@@ -29,9 +29,15 @@ def test_asr_policy_defaults_are_immutable_and_round_trip() -> None:
     assert policy.max_segment_ms == 20_000
     assert policy.finalization == "full_segment"
     assert policy.final_deadline_ms is None
+    assert policy.rollback_tokens == 5
     with pytest.raises(FrozenInstanceError):
         policy.preview_interval_ms = 500  # type: ignore[misc]
     assert ASRPolicy.from_mapping({}) == policy
+
+
+def test_asr_policy_rollback_tokens_round_trip() -> None:
+    assert ASRPolicy.from_mapping({"rollback_tokens": 0}).rollback_tokens == 0
+    assert ASRPolicy.from_mapping({"rollback_tokens": 10}).rollback_tokens == 10
 
 
 @pytest.mark.parametrize(
@@ -48,6 +54,10 @@ def test_asr_policy_defaults_are_immutable_and_round_trip() -> None:
         ("final_deadline_ms", True),
         ("final_deadline_ms", 10_000.0),
         ("final_deadline_ms", 0),
+        ("rollback_tokens", True),
+        ("rollback_tokens", 5.0),
+        ("rollback_tokens", -1),
+        ("rollback_tokens", 33),
     ],
 )
 def test_asr_policy_rejects_invalid_numeric_values(field: str, value: object) -> None:
@@ -174,6 +184,7 @@ def test_session_update_parses_policy_and_echoes_effective_limits() -> None:
         "preview_interval_ms": 800,
         "max_segment_ms": 20_000,
         "finalization": "full_segment",
+        "rollback_tokens": 5,
         "final_deadline_ms": 12_000,
         "effective_max_segment_ms": 8_000,
     }
@@ -220,6 +231,7 @@ def test_unrelated_session_update_preserves_existing_asr_policy() -> None:
         "preview_interval_ms": 600,
         "max_segment_ms": 8_000,
         "finalization": "streaming_finalize",
+        "rollback_tokens": 5,
         "final_deadline_ms": 12_000,
         "effective_max_segment_ms": 8_000,
     }

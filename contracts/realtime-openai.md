@@ -72,7 +72,9 @@ query 不得携带 key。每连接有独立 session、epoch、sequence 与临时
   `voice_design`。Alignment、Diarization、TTS 均为任务 opt-in，不随规格自动开启。
 - `session.speechrail.asr` 是可选的中立策略对象：`preview_interval_ms` 默认 `1000`，范围
   `100...5000`；`max_segment_ms` 默认 `20000`，范围 `1000...30000`，且不得小于预览间隔；
-  `finalization` 默认 `full_segment`，只接受 `full_segment` / `streaming_finalize`。
+  `finalization` 默认 `full_segment`，只接受 `full_segment` / `streaming_finalize`；
+  `rollback_tokens` 默认 `5`，范围 `0...32`，为累计音频重解码时保留可修订前缀的回退
+  token 数（调优点，不是正确性证明）。
   `final_deadline_ms` 为正整数并不得超过当前 request timeout；省略时沿用该 timeout。
   这些字段必须用 JSON 整数值，不接受布尔值或小数形式。
 - 成功的 `session.updated` 回显所请求的 ASR 策略和 `effective_max_segment_ms`。有效段预算是
@@ -80,7 +82,8 @@ query 不得携带 key。每连接有独立 session、epoch、sequence 与临时
   不静默夹取。场景预设由客户端选择，服务端不依据 task 推断策略或自动打开其他能力。
 - `session.created` 和每个成功的 `session.updated` 都必须回显完整的有效 ASR 策略。默认值为
   `preview_interval_ms=1000`、`max_segment_ms=20000`、`finalization=full_segment`、
-  `final_deadline_ms=120000`、`effective_max_segment_ms=20000`；该默认值与 `task` 无关。
+  `rollback_tokens=5`、`final_deadline_ms=120000`、`effective_max_segment_ms=20000`；
+  该默认值与 `task` 无关。
 - `session.speechrail.expected_asr_revision` 只绑定连接的 ASR 模型身份，在 `session.updated`
   回显。TTS opt-in 只启用能力，不选择音色或绑定 TTS 模型。
 - 模型、语言、能力与预算在首个工作前验证；TTS 音色与 revision 在每次

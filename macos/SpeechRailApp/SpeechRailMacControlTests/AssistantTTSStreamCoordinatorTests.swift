@@ -1417,4 +1417,27 @@ final class AssistantTTSStreamCoordinatorTests: XCTestCase {
         await waitUntil({ recorder.outcomes.count >= 1 }, message: "超限应有明确结局")
         XCTAssertEqual(recorder.appends.count, 0, "超限片不得发出去")
     }
+
+    /// #268 超限语义打通：单个不可拆单元超 512（默认服务端 append 上限），
+    /// 不硬切分包、不静默截尾——buffer 照收（VA-11），flush 按 512 切片交出，
+    /// 各片保序发 append，全文无一字丢失；调用方保留全文，暂停朗读只发生在
+    /// 4096 整轮上限（`sourceTooLong` → `textLimitExceeded`），不在 512 处。
+    func testOversizedSingleUnitFlowsThroughInOrder() async throws {
+        let (coordinator, recorder) = makeHarness()
+        try await coordinator.begin(generation: 111, requestID: "req-111")
+        // 600 scalar 一次到达：超 512 单片上限，buffer 必须准入（VA-11）。
+        let text = String(repeating: "啊", count: 600)
+        coordinator.offerConfirmed(text)
+        await coordinator.finishInput()
+        // flush 按 512 切片：600 = 512 + 88，两片都发出去，顺序不错。
+        await waitUntil({ recorder.appends.count == 2 }, message: "超 512 单元应切成两片发出")
+        XCTAssertEqual(recorder.appends.map(\.sequence), [0, 1])
+        XCTAssertEqual(
+            recorder.appends.map(\.text).joined(),
+            text,
+            "超 512 单元全文必须保序送达，无一字丢失"
+        )
+        XCTAssertEqual(recorder.finishes, [1], "finish 序号等于最后一次 ACK")
+        XCTAssertNil(coordinator.outcome, "超 512 不是失败：不得落 textLimitExceeded")
+    }
 }

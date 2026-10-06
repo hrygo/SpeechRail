@@ -2,11 +2,171 @@
 title: "共享 ASR #245：实施与验收记录"
 status: in_progress
 audience: "SpeechRail 开发者与验收人员"
-version: "1.9.0"
+version: "1.14.0"
 date: 2026-10-06
 ---
 
 # 共享 ASR #245：实施与验收记录
+
+## 2026-10-07 回滚可调与三臂真实对照（PR #317 已合入）
+
+`rollback_tokens` 此前写死在 decoder 构造默认 5，worker 不透传，
+调优测出结论也无法落地。5032e3c0 把它做成策略可调
+（`ASRPolicy.rollback_tokens = 5`，0...32；Schema、契约文档、
+Swift 三方同步，默认行为不变），f503bbf1 把 worker 会话解析改为
+required（此前静默丢弃未知字段会无声回到 5），e43c38f6 同步助手握手
+fixture。三提交经 CI 全绿后以 PR #317 rebase 合入 main（97074cea）。
+
+同一 v9 wheel（ffccf874，164 模块与源码一致，零模型下载）执行回滚
+0/5/10 × 三条已定位音频 × N=3，共 27 正式请求。
+`measurement_completed=true, original_restored=true`，
+恢复后 PID **78292**、generation 13、quality/quality、原 catalog、
+ready 与空闲核验通过。字符错误三臂完全一致
+（ami-meeting-06 始终 27，zh-en-01 始终 15，zh-en-03 始终 3，
+终态/边界稳定，覆盖与预算门全过）。结论只限这三条样本：
+回退数不是配对回退的驱动因素，rollback=5 继续作为默认起点。
+
+途中首轮 R0 被服务端拒绝（worker 丢弃未知回滚字段，零音频测量），
+修复后重跑，失败材料保留为 maintenance-v9-rollback-attempt1。
+main 侧 #249 相关 11 个测试文件 374 项、Ruff 全仓库、mypy 164 文件
+均通过。#249 fake 验收六项已有回归映射（见 #249 评论），
+剩余真实部分（#297 交互复核、预设冻结）仍开放。
+#249/#253/#245 保持开放，预设仍未冻结。
+
+| 仓库外证据 | SHA-256 |
+|---|---|
+| rollback-R0 结果 | `d173523cb5ad68492f7a2ce30f102ccdcfe3cf05fe211e62494081fa4766a0ba` |
+| rollback-R5 结果 | `8c48de1e07eb43223cdf45f7a05ffea484031047b5a57c88683e0ac9ebff10db` |
+| rollback-R10 结果 | `28f533ec00c57bdde5f00be2995312cc6c1003cacacc92fef85d134795792f4e` |
+
+## 2026-10-07 有效段真实空成功
+
+此前 `maintenance-v8-lifecycle-observed` 的 100 ms 手动路径静音段得到
+completed 但真实模型输出 2 个字符，`empty_success_gate=unset`。
+2026-10-07 经授权执行 `maintenance-v8-empty-success-v5`：同一 v8 wheel，
+2 s 纯数字静音走 `speechrail.endpointing` 的 server_vad（manual 路径的
+`turn_detection` 只接受 null 或 manual，endpointing 字符串不是合法对照），
+显式 commit。结果为恰一个 `completed(text="")`、零边界、commit receipt
+齐全，`empty_success_gate=pass`。
+`measurement_completed=true, original_restored=true`，
+恢复交接 runtime 后 PID **27726**、generation 13、quality/quality、
+原 catalog、ready 与空闲核验通过。
+这补上有效识别段真实空终态的实测缺口；100 ms 手动路径输出非空仍是模型行为，
+不是终态缺失。#247 的确定性回归与本实测共同覆盖空成功契约。
+#249/#253/#245 保持开放，预设仍未冻结。
+
+| 仓库外证据 | SHA-256 |
+|---|---|
+| empty-success-result.json | `4e0092b3401760ed445ce986a521f91551db7853d6389a716bcbabd6766cd51c` |
+
+## 2026-10-07 诗文与标点候选对照
+
+`maintenance-v8-supplement-v1` 于同一 v8 wheel 完成诗文 10 条与
+FLEURS 标点 10 条 × 五预设 × N=3，共 **300 正式请求 / 3547.1 s**，
+配对基线为交接 runtime 的 `baseline-poetry-punctuation-v2`（78 请求）。
+`measurement_completed=true, original_restored=true`，
+恢复交接 runtime 后 PID **18485**、generation 13、quality/quality、
+原 catalog、ready 与空闲核验通过。总量字符错误基线与候选均为
+780/24540，加权 CER 3.18% 持平。
+
+六组零配对回退：poetry turn-taking / duplex / meeting，
+fleurs turn-taking / duplex / meeting。候选首预览中位数普遍早于基线
+（如 poetry duplex 0.59 s vs 1.00 s），收尾中位数持平或更好。
+
+四组各有一到两条长样本多 1 个错（×3 稳定），均为 caption/tele 短预算档
+把基线单段切成两段或多段所致，覆盖与段预算门均为 pass：
+
+| 组 | 样本 | 基线 错误/终态/边界 | 候选 错误/终态/边界 |
+|---|---|---|---|
+| poetry-caption | 121-123852-0002 | 1 / 1 / 1 | 2 / 3 / 3 |
+| poetry-teleprompter | 121-123852-0002 | 1 / 1 / 1 | 2 / 3 / 3 |
+| poetry-teleprompter | 121-123859-0001 | 3 / 2 / 2 | 4 / 4 / 4 |
+| fleurs-caption | fleurs-zh-05 | 3 / 1 / 1 | 4 / 2 / 2 |
+| fleurs-caption | fleurs-zh-10 | 15 / 1 / 1 | 16 / 2 / 2 |
+| fleurs-teleprompter | fleurs-zh-05 | 3 / 1 / 1 | 5 / 2 / 2 |
+| fleurs-teleprompter | fleurs-zh-10 | 15 / 1 / 1 | 16 / 2 / 2 |
+
+模式与此前隔离一致：回退只出现在 8 s 预算的 caption（full）与
+teleprompter（streaming）档，20 s 档零回退。长朗读与长中文句在短预算下
+多切分一次就多一次终态固化，这是预算取舍，不是解码能力退化。
+标点 F1 只在有 reading-prompt gold 的 FLEURS 子集上 scored，
+问号与叹号 gold 仍缺，标点质量门保持 unset。预设仍未冻结，
+#249/#253/#245 保持开放。
+
+| 仓库外证据 | SHA-256 |
+|---|---|
+| supplement outcome/restoration | 以实测为准，不复述历史 PID |
+| 10 份候选结果 | 仓库外受限目录，以 manifest 配对清单为准 |
+
+## 2026-10-07 zh-en-03 单因素隔离
+
+`ascend-zh-en-03`（6.46 s，中英混合）在提词器预设（400 ms + streaming）
+下 0→3 错误，而同样本的 meeting（20 s + full）与 caption（8 s + full）
+均为 0 错误。经授权执行 `maintenance-v8-isolation-03`：同一 v8 wheel、
+同音频、同参考，只变收尾与预览间隔。D（400 ms + streaming）、
+E（400 ms + full_segment）、F（500 ms + streaming），各 N=3，
+共 9 正式请求。`measurement_completed=true, original_restored=true`，
+恢复交接 runtime 后 PID **86200**、generation 13、quality/quality、
+原 catalog、ready 与空闲核验通过。
+
+| 臂 | 错误 / 终态 / 边界（×3 稳定） | 收尾延迟 |
+|---|---|---|
+| D：400 ms streaming（提词器原样） | 3 / 1 / 1 | last-audio→final 约 0.09 s |
+| E：400 ms full_segment | 0 / 1 / 1 | 约 0.19 s |
+| F：500 ms streaming | 0 / 1 / 1 | 约 0.11 s |
+
+结论只限该样本：把收尾换成 full_segment，或把预览间隔从 400 ms 放到
+500 ms，都能单独回到基线 0 错误。提词器回退不是音频丢失、重复或截断，
+覆盖与段预算门均为 pass。这是速度与完整段复核的取舍，不是解码能力退化。
+三处配对回退至此全部定位：zh-en-01 由段预算切分驱动，ami-meeting-06 与
+zh-en-03 由收尾方式驱动（zh-en-03 另受预览间隔影响）。预设仍未冻结，
+待定的是提词器场景选哪条路：接受 full 复核的收尾延迟，还是放宽预览间隔。
+#249/#253/#245 保持开放。
+
+| 仓库外证据 | SHA-256 |
+|---|---|
+| isolation-D-400-streaming-result.json | `d8931762c164801c95d7545e10a582c115b41afe7e54499c8e02aa7d525dee46` |
+| isolation-E-400-full-result.json | `ea119e97175ff3302b41aafe2a78f9673801a3c7bc70ace326d3fb6b6ba73be6` |
+| isolation-F-500-streaming-result.json | `3c0f7f383fd3e76b4bb59407ba4880dc1238ddc421fadd2504c8d29e5fdf00ee` |
+
+## 2026-10-07 当前基线回退的单因素隔离
+
+`candidate-v8-current-baseline-comparison-v1.json` 在交接 runtime
+（`912547085c09`，generation 13、quality/quality）上复现三处配对回退，
+预设未冻结。回退只涉及 8 s 段预算预设：core-teleprompter 的
+`ami-meeting-06`（22→27）、ascend-caption 与 ascend-teleprompter 的
+`ascend-zh-en-01`（9→15）、ascend-teleprompter 的 `ascend-zh-en-03`
+（0→3）。同素材的 20 s 预算预设（core/ascend meeting，caption 的
+`ami-meeting-06` 与 `ascend-zh-en-03`）与基线持平或更好。
+
+2026-10-07 经用户授权执行 service-only 单因素隔离
+`maintenance-v8-isolation-v2`：同一 v8 wheel（完整 digest
+`db6b92ebfeae00ff01ca8d3232f43cb34dd9bb7535ad661ea866119363958f68`，
+189 个 wheel 文件逐字核对，零模型下载），同两条音频、同参考、同语言，
+只变段预算与收尾方式。A（8 s + streaming）、B（8 s + full_segment）、
+C（20 s + streaming），各 N=3，共 18 正式请求。
+`measurement_completed=true, original_restored=true`，
+恢复交接 runtime 后 PID **80067**、generation 13、quality/quality、
+原 catalog、ready 与空闲核验通过。
+
+| fixture | A：8 s streaming | B：8 s full | C：20 s streaming |
+|---|---|---|---|
+| ami-meeting-06（6.29 s） | 27 / 1 终态 / 1 边界 ×3 | 22 / 1 / 1 ×3 | 27 / 1 / 1 ×3 |
+| ascend-zh-en-01（10.02 s） | 15 / 2 / 2 ×3 | 15 / 2 / 2 ×3 | 9 / 1 / 1 ×3 |
+
+结论只限这两条样本：`ascend-zh-en-01` 的回退由 8 s 预算切分驱动，
+20 s 下单段即回到基线 9 错误；收尾方式在该样本上不改变错误数。
+`ami-meeting-06` 的回退由收尾方式驱动，8 s 下 full_segment 即回到基线
+22 错误；20 s 不能修复该样本。两处都不涉及音频丢失、重复或尾部截断，
+覆盖与段预算门均为 pass。隔离未覆盖 `ascend-zh-en-03` 的 0→3，
+该项仍待复测。预设仍未冻结，#249/#253/#245 保持开放。
+
+| 仓库外证据 | SHA-256 |
+|---|---|
+| isolation-A-8s-streaming-result.json | `0fc9e140a58c964f87974e42efc61b02132977e32062e65dfb6a16d1e681604a` |
+| isolation-B-8s-full-result.json | `ab9d691ecc6531a291bf9e64db7b6cd277058c28f56cdf94e9f010dd8430f5b9` |
+| isolation-C-20s-streaming-result.json | `f39723a4b4df255f0b5acba6a18250233194ba79200144a230fa78dbf2ece671` |
+| restoration-verification.json | 以恢复后实测为准，不复述历史 PID |
 
 ## 2026-10-06 维护交接后的新证据
 

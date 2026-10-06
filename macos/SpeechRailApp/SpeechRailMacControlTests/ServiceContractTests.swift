@@ -752,6 +752,41 @@ final class ServiceContractTests: XCTestCase {
         XCTAssertThrowsError(try AudioDigest.sha256HexOfPCM(in: overrun))
     }
 
+    /// #189 验收变异：data chunk 边界、字节序、采样宽度各错一次，
+    /// 摘要都必须变化——口径漂移（多/少字节、大小端反、位宽错）不能悄悄通过。
+    func testAudioDigestMutationsChangeTheDigest() throws {
+        // 偶长度 PCM：相邻字节不同，交换才有意义。
+        let pcm = Data([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08])
+        let baseline = try AudioDigest.sha256HexOfPCM(in: makeWAV(pcm: pcm))
+
+        // 1. data chunk 边界错：尾部多一个字节。
+        var longer = pcm
+        longer.append(0x09)
+        XCTAssertNotEqual(
+            try AudioDigest.sha256HexOfPCM(in: makeWAV(pcm: longer)),
+            baseline,
+            "data 边界多一字节必须改变摘要"
+        )
+
+        // 2. 字节序错：交换前两个字节（模拟大小端解析反了）。
+        var swapped = pcm
+        swapped.swapAt(0, 1)
+        XCTAssertNotEqual(
+            try AudioDigest.sha256HexOfPCM(in: makeWAV(pcm: swapped)),
+            baseline,
+            "字节序反转必须改变摘要"
+        )
+
+        // 3. 采样宽度错：每 2 字节只取低字节（模拟 16bit 按 8bit 解析）。
+        var narrowed = Data()
+        for i in stride(from: 0, to: pcm.count, by: 2) { narrowed.append(pcm[i]) }
+        XCTAssertNotEqual(
+            try AudioDigest.sha256HexOfPCM(in: makeWAV(pcm: narrowed)),
+            baseline,
+            "采样宽度解析错必须改变摘要"
+        )
+    }
+
     /// pending 保持 unknown：2xx 拿到 receipt 不等于资源空闲，
     /// 调用方停止自动新合成，转显式重试。
     func testFullTextReceiptCheckHoldsUnknownWhilePending() throws {

@@ -2208,6 +2208,8 @@ public actor RealtimeASRClient {
               Self.contractInteger(policy["max_segment_ms"])
                 == asrPolicy.maxSegmentMilliseconds,
               policy["finalization"] as? String == asrPolicy.finalization.rawValue,
+              Self.contractInteger(policy["rollback_tokens"])
+                == asrPolicy.rollbackTokens,
               let effective = Self.contractInteger(policy["effective_max_segment_ms"]),
               effective >= 1_000, effective <= asrPolicy.maxSegmentMilliseconds,
               let deadline = Self.contractInteger(policy["final_deadline_ms"]),

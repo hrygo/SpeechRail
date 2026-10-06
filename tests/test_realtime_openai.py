@@ -1664,6 +1664,7 @@ def test_realtime_policy_drives_snapshot_preview_and_closes_before_terminal() ->
         "preview_interval_ms": 600,
         "max_segment_ms": 2_000,
         "finalization": "full_segment",
+        "rollback_tokens": 5,
         "final_deadline_ms": 5_000,
         "effective_max_segment_ms": 2_000,
     }

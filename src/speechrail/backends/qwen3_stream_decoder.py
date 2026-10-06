@@ -98,6 +98,7 @@ class BoundQwen3Decoder:
         context: str,
         sample_watermark: int,
         max_new_tokens: int | None = None,
+        rollback_tokens: int | None = None,
         final: bool = False,
     ) -> Qwen3DecodeResult:
         """Decode one cumulative waveform snapshot and update its revision state."""
@@ -108,6 +109,10 @@ class BoundQwen3Decoder:
         token_budget = self._max_new_tokens if max_new_tokens is None else max_new_tokens
         if type(token_budget) is not int or token_budget <= 0:
             raise ValueError("max_new_tokens must be a positive integer")
+        if rollback_tokens is not None and (
+            type(rollback_tokens) is not int or rollback_tokens < 0
+        ):
+            raise ValueError("rollback_tokens must be a non-negative integer")
 
         runtime = self._get_runtime()
         forced_language = runtime.canonicalize_language(
@@ -124,6 +129,7 @@ class BoundQwen3Decoder:
             state.raw_tokens,
             preview_updates=state.preview_updates,
             preserve_language_header=forced_language is None,
+            rollback_tokens=rollback_tokens,
         )
         if len(prefix_tokens) >= token_budget:
             # A stale or externally restored state must not consume the whole
@@ -195,6 +201,7 @@ class BoundQwen3Decoder:
         *,
         preview_updates: int,
         preserve_language_header: bool,
+        rollback_tokens: int | None = None,
     ) -> list[int]:
         if not raw_tokens or preview_updates < self._initial_unfixed_updates:
             return []
@@ -202,7 +209,10 @@ class BoundQwen3Decoder:
             decoded = self._tokenizer.decode(raw_tokens)
             if decoded.lstrip().startswith("language ") and "<asr_text>" not in decoded:
                 return []
-        prefix_end = max(0, len(raw_tokens) - self._rollback_tokens)
+        rollback = self._rollback_tokens if rollback_tokens is None else rollback_tokens
+        if type(rollback) is not int or rollback < 0:
+            raise ValueError("rollback_tokens must be a non-negative integer")
+        prefix_end = max(0, len(raw_tokens) - rollback)
         if preserve_language_header:
             prefix_end = max(prefix_end, self._language_header_end(raw_tokens))
         candidate = raw_tokens[:prefix_end]

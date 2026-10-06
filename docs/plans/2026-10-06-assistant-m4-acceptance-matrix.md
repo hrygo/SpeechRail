@@ -28,15 +28,15 @@ fake 测试不替代真机，真机对照需按专项授权执行。
 | STT 与端点 | CER/WER、关键实体错误、否定反转、漏尾音、误切句、自纠正保留 | 同场景对照，不只看平均 CER；更短窗口不得用吞尾/提前定稿换速度 | 待真机 |
 | 回答完整与依据 | 任务答案、条件/例外/步骤覆盖、关键歧义处理、未知诚实表达 | 由预期答案/任务证据评估；completed 与模型自评分不是正确性证明 | 待真机 |
 | 朗读保义 | 原文与 speech plan 实体/条件/符号/词边界对照；分包无关性 | 确定性用例无保义错误；分包改变不得改变确认朗读表示 | fake 通过（V12/V13 定向回归），真机待对照 |
-| 合成质量 | 漏读/重复/错读、关键实体可懂度、韵律与边界；人工听审 | 增量与完整文本分组对照（V16），不以相同 bytes 或单次 ASR 分数替代听审 | fake 前置门通过（#272），分组听审待执行 |
+| 合成质量 | 漏读/重复/错读、关键实体可懂度、韵律与边界；人工听审 | 增量与完整文本分组对照（V16），不以相同 bytes 或单次 ASR 分数替代听审 | 人工听审已通过（2026-10-07 用户亲耳双听，关键实体全清、无漏读重复；慢放单记 #308），V17 待执行 |
 | 自动打断 | 误打断率、漏打断率、明确停止命令响应 | 噪声/双讲/短词分别统计；证据不足不启用更激进策略 | 待真机（V14 对照组，见 #256） |
 
 ## 取消 / 设备恢复 / 长稳对照（#258 实施 §2）
 
 | 对照项 | 应有结果 | 状态 |
 |---|---|---|
-| 旧远端收尾确认 | 设备 recovered 时旧 request 先确认 terminal 再开新轮；无确认则关连接走显式重试（V03） | fake 通过，真机待对照 |
-| played 门控完成 | terminal 在 played 前到不提前 completed；played 唯一记账；invalidation 落 incomplete（V05） | fake 通过，真机待对照 |
+| 旧远端收尾确认 | 设备 recovered 时旧 request 先确认 terminal 再开新轮；无确认则关连接走显式重试（V03） | V03 真机 10/10 + 用户蓝牙/耳机切换验证通过（2026-10-06/07） |
+| played 门控完成 | terminal 在 played 前到不提前 completed；played 唯一记账；invalidation 落 incomplete（V05） | V05 真机 10/10 + `segment_closed reason='client_commit'`（2026-10-06/07）；App 播放层真机对照待 UI 授权 |
 | 未知 owner 隔离 | 未知 owner 不放新轮；取消/失效/未知均为 incomplete；played 覆盖全部提交样本才宣布完成 | fake 通过，真机待对照 |
 | 长会话内存有界 | 24 轮窗口活动内存有界；SQLite 全记录保留（M3/V09） | fake 通过，真机待对照 |
 
@@ -134,8 +134,8 @@ commit、设备、系统、ASR/TTS active spec、voice revision、provider 模�
 | V16-B 增量 3 slices | 3.18–3.66s | 13.60–15.76s | 0.23–0.24x | 29–76ms | 4/4 completed |
 
 结论：同文本两条路径延迟同级（RTF 均 <0.3x）。
-质量听审（关键实体零漏读/零错读、漏读/重复/边界韵律人工听审）待执行；
-未通过项：无（延迟部分）；听审与 V17 对照仍为待执行。
+人工听审已通过（2026-10-07，用户亲耳双听正常版 A/B，结论见下节）；
+未通过项：无（延迟部分）；V17 对照仍为待执行。
 
 ### V16 合成质量真机对照（2026-10-06，commit `95b1fe55`，不关闭 #268）
 
@@ -164,9 +164,10 @@ commit、设备、系统、ASR/TTS active spec、voice revision、provider 模�
 - 否定/变更“取消周五改下周一”：3/3 正确。
 - 漏读/重复：3/3 无整句漏读、无重复整句。
 
-未通过项：“三千五百元”读作“3500元”是否算保义改写（数字口语化），需 #257 评审确认；
+“三千五百元”读作“3500元”已评审为保义 ITN（#257，2026-10-07：数值/单位/量级未变，
+V12/V13 保义门禁未触发；小数/大单位换算仍零容忍另起用例）。
 run2 音频 19.52s（≈2.2 倍时长）但转写文本与 run1/run3 等价——根因经人工听审
-与分半转写证伪修正为**偶发语速慢放**（约 0.45×），非重复渲染：
+与分半转写证伪修正为**偶发语速慢放**（约 0.45×），非重复渲染，单记 #308：
 人工听审耳感为“语速超慢、其他正常”；分半转写显示前半音频=前半文本、
 后半音频=后半文本（run2 前半“明天九点…幺三”/后半“八幺二三四五六七八…
 改下周一”），若为重复渲染则每半应各自转出全文。
@@ -174,6 +175,14 @@ run2 音频 19.52s（≈2.2 倍时长）但转写文本与 run1/run3 等价—�
 多段，计数方法未归一化语速，不作为定性依据。
 同文本追加 20 次复现：2 次超 14s（14.16s/15.44s，分半转写同样前半/后半
 各半文本，无重复），复现率约 3/36 ≈ 8%。
+30 次复测（2026-10-07，干净窗口 warm_standby 起跑）：2 次慢放
+（16.80s/17.92s，分半确认慢放非重复），复现率 2/30 ≈ 7%，与此前一致；
+28 次正常 7.52–12.48s（mean 10.13s / stdev 2.23s）。
+第三轮复测（2026-10-07 同日稍晚，同文本/同参数，干净窗口 warm_standby 起跑）：
+28 次正常 8.40–11.36s，2 次慢放（14.24s/18.16s，分半确认慢放非重复），
+复现率 2/30 ≈ 7%，三轮一致（8%/7%/7%）——慢放仍在，未修复
+（mean 9.88s / stdev 1.95s，慢放判定阈值 >14s，正常上限约 12.5s）。
+结论同步 #308，服务端修复后按“同文本 ≥30 次零慢放”复验。
 不放行“合成时长稳定”结论；服务端偶发语速慢放按新增缺陷提 issue 跟踪（#308），
 不擅自改服务端，App 侧 played 门控不受影响（played 覆盖全部提交样本才完成）。
 人工听审（2026-10-07，用户亲耳双听正常版 A/B，通过）：
@@ -184,8 +193,8 @@ run2 音频 19.52s（≈2.2 倍时长）但转写文本与 run1/run3 等价—�
 
 | commit | 设备 | 系统 | spec | voice revision | provider | 样本数 | 未通过项 |
 |---|---|---|---|---|---|---|---|
-| f7e9d4b9 | Apple M5 Max | macOS 27.0.1 | quality/quality | serena（系统音色） | 本地 realtime+REST | 延迟 4+4 turns | 听审/V17/取消/长稳待执行 |
-| 95b1fe55 | Apple M5 Max | macOS 27.0.1 | quality/quality | serena（系统音色） | 本地 REST 合成+回转写 | 质量 6 合成/3 回读 | 数字口语化待评审/run2 长音频待查/听审待执行 |
+| f7e9d4b9 | Apple M5 Max | macOS 27.0.1 | quality/quality | serena（系统音色） | 本地 realtime+REST | 延迟 4+4 turns | V17/取消/长稳待执行（听审已通过） |
+| 95b1fe55 | Apple M5 Max | macOS 27.0.1 | quality/quality | serena（系统音色） | 本地 REST 合成+回转写 | 质量 6 合成/3 回读 | #308 慢放未修复/V17 待执行（数字口语化已判保义、听审已通过） |
 
 ### V03/V05 取消与终态真机对照（2026-10-06，commit `95b1fe55`，不关闭 #258）
 
@@ -195,7 +204,7 @@ run2 音频 19.52s（≈2.2 倍时长）但转写文本与 run1/run3 等价—�
 | 项 | 操作 | 应有结果 | 实测（10/10） |
 |---|---|---|---|
 | V03 clear 取消 | append → clear → commit | 空 final completed，不崩 | 10/10 `completed` + 空 transcript `''`，无 `segment_closed` 边界（输入已丢弃） |
-| V05 正常终态 | append → commit | completed + 终态 | 10/10 `completed`，`segment_closed` 边界先到（reason 待记录），转写“嗯。”（合成 PCM 内容所致，非误识别） |
+| V05 正常终态 | append → commit | completed + 终态 | 10/10 `completed`，`speechrail.transcription.segment_closed` 边界先到（`reason='client_commit'` + `commit_event_id` 回显，与契约 §5.1 一致；2026-10-07 单轮补记，真机同配置），转写“嗯。”（合成 PCM 内容所致，非误识别） |
 
 未通过项：无（本项）。V05 的 played 门控（terminal 在 played 前到不提前
 completed、played 唯一记账）属 App 播放层语义，本探针只覆盖服务端终态；
@@ -252,3 +261,38 @@ soak 探针为纯 realtime 转写、不落 App 会话库，SQLite 记录数核�
 本文档为纯文档交付，不改产品代码、协议、schema 或运行态。
 回退：撤销本文档提交即可；不影响用户数据、服务配置或模型。
 真机执行需 UI/模型/运行态专项授权；授权前不执行本机验证。
+
+## M0–M3 App 定向回归复核（2026-10-07，main@`4057e3d0`，fake，不替代真机）
+
+实现锚点与回归互相印证后记录（`scripts/macos_app_test.sh` 定向 + `swift test --filter`）：
+
+| 门 | 套件 | 结果 |
+|---|---|---|
+| M0 取消/接收 | AssistantCancelReceiveTests | 36/36 ✅ |
+| M0 播放账本 | AssistantTTSStreamCoordinatorTests | 41/41 ✅ |
+| M0 会话终态 | AssistantSessionTests | 43/43 ✅ |
+| M1 保义计划 | AssistantSpeechPlanTests | 11/11 ✅ |
+| M1 作曲策略 | AssistantComposerPolicyTests | 4/4 ✅ |
+| M1 终态路由 | AssistantEndRoutingTests | 4/4 ✅ |
+| M1 持久化竞态 | AssistantReplyPersistenceRaceTests | 11/11 ✅ |
+| M2 provider 有界 | LLMProviderTests | 76/76 ✅ |
+| M3 排空/取消屏障 | AssistantDrainTests | 5/5 ✅ |
+| M3 输入持久化队列 | AssistantInputPersistenceQueueTests | 10/10 ✅ |
+| M3 轮次组装器 | AssistantInputTurnAssemblerTests（Swift Testing） | 7/7 ✅ |
+
+合计 248 项，0 失败。V17 的 App fake 门（取消旧积压、played 门控、
+backpressure 有界、超 512 单单元保序打通 #311）含于 TTS 协调器 41 项内；
+V17 真机播放层对照待 UI 授权。
+口径修正：Assembler 套件为 Swift Testing，走 `swift test --filter`，
+Xcode `-only-testing` 按 XCTest 类名过滤得 0 项属口径误用，非缺失。
+
+## 默认关闭项源码复核（2026-10-07，main@`d24fc02b`，只读 `rg` 实测）
+
+- 完整文本 adapter 门闩：`AssistantSession.swift:607`
+  `usesFullTextSpeechForTest == false`，保持关闭。
+- 保守端点窗口：`ASRScenePreset.silenceDurationMilliseconds`，
+  turn-taking 1200ms / duplex·meeting 900ms / caption·提词器 400ms，未动。
+- 助手终态策略：duplex 与 turn-taking 均为 `fullSegment`
+  （`previewInterval` 600/800ms），无激进 streaming finalize；
+  仅提词器用 streaming（产品既定语义，非助手路径）。
+- `speech_started` 等已移除事件：未恢复（以上均为静态核对，非行为验收）。

@@ -10,6 +10,8 @@ public struct SpeechRailASRPolicy: Sendable, Equatable {
     public let previewIntervalMilliseconds: Int
     public let maxSegmentMilliseconds: Int
     public let finalization: Finalization
+    /// Tokens to roll back when re-decoding cumulative audio for a revisable preview.
+    public let rollbackTokens: Int
     /// `nil` asks the service to use the enclosing request timeout.
     public let finalDeadlineMilliseconds: Int?
 
@@ -17,11 +19,13 @@ public struct SpeechRailASRPolicy: Sendable, Equatable {
         previewIntervalMilliseconds: Int = 1_000,
         maxSegmentMilliseconds: Int = 20_000,
         finalization: Finalization = .fullSegment,
+        rollbackTokens: Int = 5,
         finalDeadlineMilliseconds: Int? = nil
     ) {
         self.previewIntervalMilliseconds = previewIntervalMilliseconds
         self.maxSegmentMilliseconds = maxSegmentMilliseconds
         self.finalization = finalization
+        self.rollbackTokens = rollbackTokens
         self.finalDeadlineMilliseconds = finalDeadlineMilliseconds
     }
 
@@ -29,7 +33,8 @@ public struct SpeechRailASRPolicy: Sendable, Equatable {
         var object: [String: Any] = [
             "preview_interval_ms": previewIntervalMilliseconds,
             "max_segment_ms": maxSegmentMilliseconds,
-            "finalization": finalization.rawValue
+            "finalization": finalization.rawValue,
+            "rollback_tokens": rollbackTokens
         ]
         if let finalDeadlineMilliseconds {
             object["final_deadline_ms"] = finalDeadlineMilliseconds
