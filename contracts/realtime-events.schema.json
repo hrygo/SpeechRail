@@ -44,6 +44,9 @@
       "$ref": "#/$defs/server_transcription_failed"
     },
     {
+      "$ref": "#/$defs/server_transcription_segment_closed"
+    },
+    {
       "$ref": "#/$defs/server_hypothesis"
     },
     {
@@ -239,6 +242,72 @@
         }
       }
     },
+    "asr_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "preview_interval_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 5000,
+          "default": 1000
+        },
+        "max_segment_ms": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 30000,
+          "default": 20000
+        },
+        "finalization": {
+          "enum": [
+            "full_segment",
+            "streaming_finalize"
+          ],
+          "default": "full_segment"
+        },
+        "final_deadline_ms": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "effective_asr_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "preview_interval_ms",
+        "max_segment_ms",
+        "finalization",
+        "effective_max_segment_ms"
+      ],
+      "properties": {
+        "preview_interval_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 5000
+        },
+        "max_segment_ms": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 30000
+        },
+        "finalization": {
+          "enum": [
+            "full_segment",
+            "streaming_finalize"
+          ]
+        },
+        "final_deadline_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "effective_max_segment_ms": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 30000
+        }
+      }
+    },
     "alignment_options": {
       "type": "object",
       "additionalProperties": false,
@@ -285,6 +354,55 @@
             "render",
             "voice_design"
           ]
+        },
+        "asr": {
+          "$ref": "#/$defs/asr_policy"
+        },
+        "tts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          }
+        },
+        "alignment": {
+          "$ref": "#/$defs/alignment_options"
+        },
+        "diarization": {
+          "$ref": "#/$defs/diarization_options"
+        },
+        "endpointing": {
+          "$ref": "#/$defs/endpointing"
+        },
+        "expected_asr_revision": {
+          "$ref": "#/$defs/revision"
+        }
+      }
+    },
+    "speechrail_session_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task",
+        "asr"
+      ],
+      "properties": {
+        "task": {
+          "enum": [
+            "conversation",
+            "caption",
+            "transcription",
+            "render",
+            "voice_design"
+          ]
+        },
+        "asr": {
+          "$ref": "#/$defs/effective_asr_policy"
         },
         "tts": {
           "type": "object",
@@ -360,14 +478,14 @@
                   ]
                 },
                 "speechrail": {
-                  "$ref": "#/$defs/speechrail_session"
+                  "$ref": "#/$defs/speechrail_session_response"
                 }
               }
             }
           }
         },
         "speechrail": {
-          "$ref": "#/$defs/speechrail_session"
+          "$ref": "#/$defs/speechrail_session_response"
         }
       }
     },
@@ -825,6 +943,64 @@
             "content_index",
             "error"
           ]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "server_transcription_segment_closed": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/server_base"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "speechrail.transcription.segment_closed"
+            },
+            "item_id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "sample_span": {
+              "$ref": "#/$defs/sample_span"
+            },
+            "reason": {
+              "enum": [
+                "vad",
+                "client_commit",
+                "budget_rollover"
+              ]
+            },
+            "commit_event_id": {
+              "$ref": "#/$defs/identifier"
+            }
+          },
+          "required": [
+            "item_id",
+            "sample_span",
+            "reason"
+          ]
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "vad",
+                  "budget_rollover"
+                ]
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "commit_event_id"
+              ]
+            }
+          }
         }
       ],
       "unevaluatedProperties": false

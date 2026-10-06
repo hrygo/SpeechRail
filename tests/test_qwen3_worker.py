@@ -11,13 +11,16 @@ import pytest
 
 import speechrail.backends.qwen3_worker as worker_module
 from speechrail.backends.model_identity import SnapshotIdentity
+from speechrail.backends.qwen3_stream_decoder import Qwen3DecodeResult
 from speechrail.backends.qwen3_worker import (
+    ASRBufferOverflowError,
     Qwen3Engine,
     WorkerIdentity,
     _segments,
     serve,
 )
 from speechrail.config.model_catalog import QuantizationSpec
+from speechrail.domain.asr_policy import ASRPolicy
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, read_frame, write_frame
 
 
@@ -366,7 +369,7 @@ def test_qwen3_engine_rejects_loader_variant_mismatch(
         Qwen3Engine(tmp_path, "mps", "float16")
 
 
-def test_qwen3_engine_maps_chunk_duration_to_vendor_seconds(
+def test_qwen3_engine_opens_a_bounded_pcm_buffer_without_vendor_stream_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(worker_module, "inspect_model", lambda _: _snapshot_identity())
@@ -399,18 +402,194 @@ def test_qwen3_engine_maps_chunk_duration_to_vendor_seconds(
         chunk_duration_ms=2_000,
         max_context_sec=9.5,
         max_new_tokens=128,
+        asr_policy=ASRPolicy(preview_interval_ms=600, max_segment_ms=20_000),
+        effective_max_segment_ms=8_000,
     )
 
-    assert init_kwargs == [
-        {
-            "context": "prompt",
-            "language": "zh",
-            "chunk_size_sec": 2.0,
-            "max_context_sec": 9.5,
-            "max_new_tokens": 128,
-            "enable_tail_refine": False,
-        }
-    ]
+    assert init_kwargs == []
+    buffered = engine._streaming_states["sess_test"]
+    assert buffered.context == "prompt"
+    assert buffered.max_new_tokens == 128
+    assert buffered.policy.preview_interval_ms == 600
+    assert buffered.policy.max_segment_ms == 20_000
+    assert buffered.effective_max_segment_ms == 8_000
+    assert buffered.max_buffer_bytes == 256_000
+
+
+class _FakeBoundDecoder:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def decode(
+        self,
+        audio: object,
+        state: object,
+        *,
+        language: str,
+        context: str,
+        sample_watermark: int,
+        max_new_tokens: int,
+        final: bool = False,
+    ) -> Qwen3DecodeResult:
+        del state
+        self.calls.append(
+            {
+                "audio": list(audio),  # type: ignore[arg-type]
+                "language": language,
+                "context": context,
+                "sample_watermark": sample_watermark,
+                "max_new_tokens": max_new_tokens,
+                "final": final,
+            }
+        )
+        return Qwen3DecodeResult(
+            text="stream final" if final else f"preview {sample_watermark}",
+            language="Chinese",
+            raw_tokens=(),
+            revision=len(self.calls),
+            sample_watermark=sample_watermark,
+            finish_reason="eos",
+            truncated=False,
+        )
+
+
+class _FakeFullSegmentSession:
+    def __init__(self, result: object | None = None) -> None:
+        self.result = result or SimpleNamespace(
+            text="full segment",
+            language="Chinese",
+            finish_reason="eos",
+            truncated=False,
+        )
+        self.transcribe_calls: list[tuple[object, dict[str, object]]] = []
+
+    def transcribe(self, audio: object, **kwargs: object) -> object:
+        self.transcribe_calls.append((audio, dict(kwargs)))
+        return self.result
+
+
+def _engine_with_fake_decoder(
+    *,
+    session: _FakeFullSegmentSession,
+    decoder: _FakeBoundDecoder,
+) -> Qwen3Engine:
+    engine = object.__new__(Qwen3Engine)
+    engine._session = session
+    engine._decoder = decoder
+    engine._max_new_tokens = 512
+    engine._streaming_states = {}
+    return engine
+
+
+def test_qwen3_engine_buffers_until_flush_and_full_segment_reuses_loaded_session() -> None:
+    session = _FakeFullSegmentSession()
+    decoder = _FakeBoundDecoder()
+    engine = _engine_with_fake_decoder(session=session, decoder=decoder)
+    engine.open_session(
+        session_id="full-final",
+        language="zh",
+        context="project names",
+        max_new_tokens=128,
+        asr_policy=ASRPolicy(max_segment_ms=1_000),
+        effective_max_segment_ms=1_000,
+    )
+
+    engine.append_audio("full-final", b"\x01\x00\x02\x00")
+    assert decoder.calls == []
+    assert session.transcribe_calls == []
+
+    assert engine.partial_text("full-final") == "preview 2"
+    assert len(decoder.calls) == 1
+    assert decoder.calls[0]["sample_watermark"] == 2
+    assert engine.decoded_samples("full-final") == 2
+    assert engine.preview_revision("full-final") == 1
+
+    engine.append_audio("full-final", b"\x03\x00\x04\x00")
+    assert len(decoder.calls) == 1
+    text, language = engine.finish_streaming("full-final")
+
+    assert (text, language) == ("full segment", "Chinese")
+    assert len(session.transcribe_calls) == 1
+    audio, kwargs = session.transcribe_calls[0]
+    waveform, sample_rate = audio  # type: ignore[misc]
+    assert sample_rate == 16_000
+    assert waveform.tolist() == pytest.approx(
+        [1 / 32768, 2 / 32768, 3 / 32768, 4 / 32768]
+    )
+    assert kwargs["context"] == "project names"
+    assert kwargs["language"] == "zh"
+    assert kwargs["max_new_tokens"] == 32
+    assert len(decoder.calls) == 1
+
+
+def test_qwen3_engine_streaming_finalize_decodes_latest_cumulative_snapshot() -> None:
+    session = _FakeFullSegmentSession()
+    decoder = _FakeBoundDecoder()
+    engine = _engine_with_fake_decoder(session=session, decoder=decoder)
+    engine.open_session(
+        session_id="stream-final",
+        language="auto",
+        context="",
+        asr_policy=ASRPolicy(max_segment_ms=1_000, finalization="streaming_finalize"),
+        effective_max_segment_ms=1_000,
+    )
+    engine.append_audio("stream-final", b"\x01\x00\x02\x00")
+    engine.partial_text("stream-final")
+    engine.append_audio("stream-final", b"\x03\x00\x04\x00")
+
+    text, language = engine.finish_streaming("stream-final")
+
+    assert (text, language) == ("stream final", "Chinese")
+    assert session.transcribe_calls == []
+    assert [call["sample_watermark"] for call in decoder.calls] == [2, 4]
+    assert decoder.calls[-1]["audio"] == pytest.approx(
+        [1 / 32768, 2 / 32768, 3 / 32768, 4 / 32768]
+    )
+    assert decoder.calls[-1]["final"] is True
+
+
+def test_qwen3_engine_full_segment_rejects_truncated_final() -> None:
+    session = _FakeFullSegmentSession(
+        SimpleNamespace(
+            text="unfinished",
+            language="Chinese",
+            finish_reason="length",
+            truncated=True,
+        )
+    )
+    engine = _engine_with_fake_decoder(session=session, decoder=_FakeBoundDecoder())
+    engine.open_session(
+        session_id="truncated-final",
+        language="zh",
+        context="",
+        asr_policy=ASRPolicy(max_segment_ms=1_000),
+        effective_max_segment_ms=1_000,
+    )
+    engine.append_audio("truncated-final", b"\x01\x00")
+
+    with pytest.raises(RuntimeError, match="truncated"):
+        engine.finish_streaming("truncated-final")
+
+
+def test_qwen3_engine_rejects_an_append_that_exceeds_segment_buffer() -> None:
+    engine = _engine_with_fake_decoder(
+        session=_FakeFullSegmentSession(),
+        decoder=_FakeBoundDecoder(),
+    )
+    engine.open_session(
+        session_id="buffer-bound",
+        language="zh",
+        context="",
+        asr_policy=ASRPolicy(max_segment_ms=1_000),
+        effective_max_segment_ms=1_000,
+    )
+    oversized_audio = bytes(32_002)
+
+    with pytest.raises(ASRBufferOverflowError):
+        engine.append_audio("buffer-bound", oversized_audio)
+
+    state = engine._streaming_states["buffer-bound"]
+    assert state.pcm == bytearray()
 
 
 class _FakeEngine:
@@ -420,6 +599,7 @@ class _FakeEngine:
         del model_dir, dtype, max_new_tokens
         self.identity = type("Identity", (), {"device": device, "dtype": "float16"})()
         self.sessions: dict[str, list[bytes]] = {}
+        self.session_options: dict[str, dict[str, object]] = {}
 
     def transcribe(
         self,
@@ -441,9 +621,15 @@ class _FakeEngine:
         chunk_duration_ms: int = 1_000,
         max_context_sec: float = 12.64,
         max_new_tokens: int = 256,
+        asr_policy: ASRPolicy | None = None,
+        effective_max_segment_ms: int | None = None,
     ) -> None:
         del language, context, chunk_duration_ms, max_context_sec
-        del max_new_tokens
+        self.session_options[session_id] = {
+            "max_new_tokens": max_new_tokens,
+            "asr_policy": asr_policy,
+            "effective_max_segment_ms": effective_max_segment_ms,
+        }
         if session_id in self.sessions:
             raise RuntimeError(f"session already open: {session_id}")
         self.sessions[session_id] = []
@@ -457,7 +643,17 @@ class _FakeEngine:
     def partial_text(self, session_id: str) -> str:
         if session_id not in self.sessions:
             raise RuntimeError(f"no active session: {session_id}")
+        if not self.sessions[session_id]:
+            return ""
         return f"partial:{len(self.sessions[session_id])}"
+
+    def decoded_samples(self, session_id: str) -> int:
+        if session_id not in self.sessions:
+            raise RuntimeError(f"no active session: {session_id}")
+        return sum(len(audio) // 2 for audio in self.sessions[session_id])
+
+    def preview_revision(self, session_id: str) -> int:
+        return len(self.sessions.get(session_id, []))
 
     def finish_streaming(self, session_id: str) -> tuple[str, str]:
         if session_id not in self.sessions:
@@ -473,6 +669,39 @@ class _FakeEngine:
 
     def has_session(self, session_id: str) -> bool:
         return session_id in self.sessions
+
+
+class _FinishingFakeEngine(_FakeEngine):
+    """Fake engine with a controllable final transcript or decode failure."""
+
+    def __init__(
+        self,
+        model_dir: Path,
+        device: str,
+        dtype: str,
+        max_new_tokens: int,
+        *,
+        final_text: str = "",
+        finish_error: Exception | None = None,
+    ) -> None:
+        super().__init__(model_dir, device, dtype, max_new_tokens)
+        self.final_text = final_text
+        self.finish_error = finish_error
+        self.finish_calls = 0
+        self.close_calls = 0
+
+    def finish_streaming(self, session_id: str) -> tuple[str, str]:
+        self.finish_calls += 1
+        if self.finish_error is not None:
+            raise self.finish_error
+        if session_id not in self.sessions:
+            raise RuntimeError(f"no active session: {session_id}")
+        self.sessions.pop(session_id)
+        return self.final_text, "zh"
+
+    def close_session(self, session_id: str) -> None:
+        self.close_calls += 1
+        super().close_session(session_id)
 
 
 def _run_serve(
@@ -642,6 +871,131 @@ def test_worker_forwards_task_streaming_policy_to_engine() -> None:
     ]
 
 
+def test_worker_forwards_asr_policy_and_effective_segment_bound() -> None:
+    engine = _FakeEngine(Path("/tmp"), "mps", "float16", 512)
+    policy_wire = {
+        "preview_interval_ms": 600,
+        "max_segment_ms": 20_000,
+        "finalization": "full_segment",
+        "effective_max_segment_ms": 8_000,
+        "final_deadline_ms": 4_000,
+    }
+
+    responses = _run_serve(
+        [
+            _start_frame(),
+            {
+                "version": PROTOCOL_VERSION,
+                "type": "session.open",
+                "session_id": "policy-bound",
+                "language": "auto",
+                "asr_policy": policy_wire,
+            },
+        ],
+        engine=engine,
+    )
+
+    assert [frame for frame in responses if frame.get("type") == "session.opened"]
+    options = engine.session_options["policy-bound"]
+    assert options["asr_policy"] == ASRPolicy(
+        preview_interval_ms=600,
+        max_segment_ms=20_000,
+        finalization="full_segment",
+        final_deadline_ms=4_000,
+    )
+    assert options["effective_max_segment_ms"] == 8_000
+
+
+@pytest.mark.parametrize(
+    "policy_wire",
+    [
+        {
+            "preview_interval_ms": 600,
+            "max_segment_ms": 20_000,
+            "finalization": "full_segment",
+            "effective_max_segment_ms": True,
+        },
+        {
+            "preview_interval_ms": 600,
+            "max_segment_ms": 20_000,
+            "finalization": "full_segment",
+            "effective_max_segment_ms": 8_000,
+            "rollback_tokens": 5,
+        },
+        {
+            "preview_interval_ms": 600,
+            "max_segment_ms": 8_000,
+            "finalization": "full_segment",
+            "effective_max_segment_ms": 20_000,
+        },
+    ],
+)
+def test_worker_rejects_invalid_asr_policy_before_opening_session(
+    policy_wire: dict[str, object],
+) -> None:
+    engine = _FakeEngine(Path("/tmp"), "mps", "float16", 512)
+    responses = _run_serve(
+        [
+            _start_frame(),
+            {
+                "version": PROTOCOL_VERSION,
+                "type": "session.open",
+                "session_id": "invalid-policy",
+                "language": "auto",
+                "asr_policy": policy_wire,
+            },
+        ],
+        engine=engine,
+    )
+
+    errors = [frame for frame in responses if frame.get("type") == "error"]
+    assert errors == [
+        {
+            "version": PROTOCOL_VERSION,
+            "type": "error",
+            "code": "asr_policy_invalid",
+            "session_id": "invalid-policy",
+        }
+    ]
+    assert not engine.sessions
+
+
+def test_worker_flush_emits_empty_watermark_and_acknowledges_without_audio() -> None:
+    engine = _FakeEngine(Path("/tmp"), "mps", "float16", 512)
+    responses = _run_serve(
+        [
+            _start_frame(),
+            {
+                "version": PROTOCOL_VERSION,
+                "type": "session.open",
+                "session_id": "flush",
+                "language": "zh",
+            },
+            {"version": PROTOCOL_VERSION, "type": "flush", "session_id": "flush"},
+            {
+                "version": PROTOCOL_VERSION,
+                "type": "audio.append",
+                "session_id": "flush",
+                "pcm_b64": "AQACAA==",
+            },
+            {"version": PROTOCOL_VERSION, "type": "flush", "session_id": "flush"},
+        ],
+        engine=engine,
+    )
+
+    partials = [
+        frame
+        for frame in responses
+        if frame.get("type") == "event" and frame.get("kind") == "partial"
+    ]
+    flushed = [frame for frame in responses if frame.get("type") == "flushed"]
+    assert len(partials) == 2
+    assert partials[0].get("text") == ""
+    assert partials[0].get("sample_watermark") == 0
+    assert partials[1].get("sample_watermark") == 2
+    assert [frame.get("sample_watermark") for frame in flushed] == [0, 2]
+
+
 def test_worker_commit_uses_only_that_sessions_audio() -> None:
     engine = _FakeEngine(Path("/tmp"), "mps", "float16", 512)
     frames = [
@@ -668,6 +1022,115 @@ def test_worker_commit_uses_only_that_sessions_audio() -> None:
     assert completed[0]["text"] == "text:2"
     assert engine.active_session_count() == 1
     assert list(engine.sessions) == ["b"]
+
+
+@pytest.mark.parametrize("final_text", ["", "   ", "recognized text"])
+def test_worker_successful_commit_always_emits_completed_before_finished(
+    final_text: str,
+) -> None:
+    engine = _FinishingFakeEngine(
+        Path("/tmp"),
+        "mps",
+        "float16",
+        512,
+        final_text=final_text,
+    )
+    responses = _run_serve(
+        [
+            _start_frame(),
+            {
+                "version": PROTOCOL_VERSION,
+                "type": "session.open",
+                "session_id": "empty-final",
+                "language": "zh",
+            },
+            {"version": PROTOCOL_VERSION, "type": "commit", "session_id": "empty-final"},
+        ],
+        engine=engine,
+    )
+
+    terminal_frames = [
+        frame
+        for frame in responses
+        if frame.get("type") == "finished"
+        or (frame.get("type") == "event" and frame.get("kind") == "completed")
+    ]
+    assert [
+        (frame.get("type"), frame.get("kind"), frame.get("text")) for frame in terminal_frames
+    ] == [
+        ("event", "completed", final_text),
+        ("finished", None, None),
+    ]
+    assert engine.finish_calls == 1
+    assert engine.close_calls == 1
+    assert engine.active_session_count() == 0
+
+
+def test_worker_commit_failure_does_not_emit_success_terminal() -> None:
+    engine = _FinishingFakeEngine(
+        Path("/tmp"),
+        "mps",
+        "float16",
+        512,
+        finish_error=RuntimeError("fake decode failure"),
+    )
+    responses = _run_serve(
+        [
+            _start_frame(),
+            {
+                "version": PROTOCOL_VERSION,
+                "type": "session.open",
+                "session_id": "failed-final",
+                "language": "zh",
+            },
+            {"version": PROTOCOL_VERSION, "type": "commit", "session_id": "failed-final"},
+        ],
+        engine=engine,
+    )
+
+    assert [
+        frame.get("code") for frame in responses if frame.get("type") == "error"
+    ] == ["worker_inference_error"]
+    assert not [
+        frame
+        for frame in responses
+        if frame.get("type") == "finished"
+        or (frame.get("type") == "event" and frame.get("kind") == "completed")
+    ]
+    assert engine.finish_calls == 1
+    assert engine.close_calls == 1
+    assert engine.active_session_count() == 0
+
+
+def test_worker_duplicate_commit_does_not_emit_a_second_terminal() -> None:
+    engine = _FinishingFakeEngine(Path("/tmp"), "mps", "float16", 512)
+    responses = _run_serve(
+        [
+            _start_frame(),
+            {
+                "version": PROTOCOL_VERSION,
+                "type": "session.open",
+                "session_id": "duplicate-final",
+                "language": "zh",
+            },
+            {"version": PROTOCOL_VERSION, "type": "commit", "session_id": "duplicate-final"},
+            {"version": PROTOCOL_VERSION, "type": "commit", "session_id": "duplicate-final"},
+        ],
+        engine=engine,
+    )
+
+    completed = [
+        frame
+        for frame in responses
+        if frame.get("type") == "event" and frame.get("kind") == "completed"
+    ]
+    finished = [frame for frame in responses if frame.get("type") == "finished"]
+    assert len(completed) == 1
+    assert completed[0].get("text") == ""
+    assert len(finished) == 1
+    assert engine.finish_calls == 1
+    assert engine.close_calls == 1
+    assert engine.active_session_count() == 0
 
 
 def test_worker_commit_emits_no_segments_and_leaves_alignment_out() -> None:
@@ -907,145 +1370,3 @@ def test_resolve_engine_dtype_never_guesses_or_fakes_a_q8_artifact() -> None:
         _resolve_engine_dtype(
             snapshot_quantized=False, requested_dtype="int8", loaded_dtype="float16"
         )
-
-
-class _FinishingFakeEngine(_FakeEngine):
-    """Fake engine with a controllable final transcript or decode failure."""
-
-    def __init__(
-        self,
-        model_dir: Path,
-        device: str,
-        dtype: str,
-        max_new_tokens: int,
-        *,
-        final_text: str = "",
-        finish_error: Exception | None = None,
-    ) -> None:
-        super().__init__(model_dir, device, dtype, max_new_tokens)
-        self.final_text = final_text
-        self.finish_error = finish_error
-        self.finish_calls = 0
-        self.close_calls = 0
-
-    def finish_streaming(self, session_id: str) -> tuple[str, str]:
-        self.finish_calls += 1
-        if self.finish_error is not None:
-            raise self.finish_error
-        if session_id not in self.sessions:
-            raise RuntimeError(f"no active session: {session_id}")
-        self.sessions.pop(session_id)
-        return self.final_text, "zh"
-
-    def close_session(self, session_id: str) -> None:
-        self.close_calls += 1
-        super().close_session(session_id)
-
-
-@pytest.mark.parametrize("final_text", ["", "   ", "recognized text"])
-def test_worker_successful_commit_always_emits_completed_before_finished(
-    final_text: str,
-) -> None:
-    engine = _FinishingFakeEngine(
-        Path("/tmp"),
-        "mps",
-        "float16",
-        512,
-        final_text=final_text,
-    )
-    responses = _run_serve(
-        [
-            _start_frame(),
-            {
-                "version": PROTOCOL_VERSION,
-                "type": "session.open",
-                "session_id": "empty-final",
-                "language": "zh",
-            },
-            {"version": PROTOCOL_VERSION, "type": "commit", "session_id": "empty-final"},
-        ],
-        engine=engine,
-    )
-
-    terminal_frames = [
-        frame
-        for frame in responses
-        if frame.get("type") == "finished"
-        or (frame.get("type") == "event" and frame.get("kind") == "completed")
-    ]
-    assert [
-        (frame.get("type"), frame.get("kind"), frame.get("text")) for frame in terminal_frames
-    ] == [
-        ("event", "completed", final_text),
-        ("finished", None, None),
-    ]
-    assert engine.finish_calls == 1
-    assert engine.close_calls == 1
-    assert engine.active_session_count() == 0
-
-
-def test_worker_commit_failure_does_not_emit_success_terminal() -> None:
-    engine = _FinishingFakeEngine(
-        Path("/tmp"),
-        "mps",
-        "float16",
-        512,
-        finish_error=RuntimeError("fake decode failure"),
-    )
-    responses = _run_serve(
-        [
-            _start_frame(),
-            {
-                "version": PROTOCOL_VERSION,
-                "type": "session.open",
-                "session_id": "failed-final",
-                "language": "zh",
-            },
-            {"version": PROTOCOL_VERSION, "type": "commit", "session_id": "failed-final"},
-        ],
-        engine=engine,
-    )
-
-    assert [
-        frame.get("code") for frame in responses if frame.get("type") == "error"
-    ] == ["worker_inference_error"]
-    assert not [
-        frame
-        for frame in responses
-        if frame.get("type") == "finished"
-        or (frame.get("type") == "event" and frame.get("kind") == "completed")
-    ]
-    assert engine.finish_calls == 1
-    assert engine.close_calls == 1
-    assert engine.active_session_count() == 0
-
-
-def test_worker_duplicate_commit_does_not_emit_a_second_terminal() -> None:
-    engine = _FinishingFakeEngine(Path("/tmp"), "mps", "float16", 512)
-    responses = _run_serve(
-        [
-            _start_frame(),
-            {
-                "version": PROTOCOL_VERSION,
-                "type": "session.open",
-                "session_id": "duplicate-final",
-                "language": "zh",
-            },
-            {"version": PROTOCOL_VERSION, "type": "commit", "session_id": "duplicate-final"},
-            {"version": PROTOCOL_VERSION, "type": "commit", "session_id": "duplicate-final"},
-        ],
-        engine=engine,
-    )
-
-    completed = [
-        frame
-        for frame in responses
-        if frame.get("type") == "event" and frame.get("kind") == "completed"
-    ]
-    finished = [frame for frame in responses if frame.get("type") == "finished"]
-    assert len(completed) == 1
-    assert completed[0].get("text") == ""
-    assert len(finished) == 1
-    assert engine.finish_calls == 1
-    assert engine.close_calls == 1
-    assert engine.active_session_count() == 0

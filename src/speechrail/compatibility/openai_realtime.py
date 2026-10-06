@@ -20,6 +20,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Literal
 
+from speechrail.domain.asr_policy import ASRPolicy, resolve_effective_max_segment_ms
+from speechrail.domain.ports import SegmentCloseReason
 from speechrail.domain.tts_stream import (
     DEFAULT_TTS_STREAM_LIMITS,
     MAX_TTS_AUDIO_WINDOW_BYTES,
@@ -473,6 +475,9 @@ def session_payload(
     diarization_enabled: bool = False,
     endpointing: dict[str, object] | None = None,
     expected_asr_revision: str | None = None,
+    asr_policy: ASRPolicy | None = None,
+    effective_max_segment_ms: int | None = None,
+    request_timeout_ms: int | None = None,
 ) -> dict[str, object]:
     """Render the single current ``session`` object shared by create/update.
 
@@ -502,6 +507,15 @@ def session_payload(
         speechrail["endpointing"] = dict(endpointing)
     if expected_asr_revision is not None:
         speechrail["expected_asr_revision"] = expected_asr_revision
+    if asr_policy is not None:
+        speechrail["asr"] = asr_policy.to_wire_dict(
+            effective_max_segment_ms=(
+                effective_max_segment_ms
+                if effective_max_segment_ms is not None
+                else asr_policy.max_segment_ms
+            ),
+            request_timeout_ms=request_timeout_ms,
+        )
     return {
         "id": session_id,
         "type": "transcription",
@@ -577,6 +591,52 @@ def transcription_completed(
         "item_id": item_id,
         "content_index": 0,
         "transcript": transcript,
+    }
+    if commit_event_id is not None:
+        payload["commit_event_id"] = commit_event_id
+    return payload
+
+
+def transcription_segment_closed(
+    *,
+    item_id: str,
+    sample_span: tuple[int, int],
+    reason: SegmentCloseReason,
+    commit_event_id: str | None = None,
+) -> dict[str, object]:
+    """Render one frozen ASR segment boundary on the 24 kHz wire sample axis.
+
+    ``sample_span`` is a non-empty half-open ``[start, end)`` interval in
+    24 kHz mono PCM16 wire samples. A commit correlation ID is meaningful only
+    for a client-triggered close; direct commits may omit it.
+    """
+    if not isinstance(item_id, str) or not 1 <= len(item_id) <= 128:
+        raise ValueError("item_id must be a 1-128 character identifier")
+    if (
+        not isinstance(sample_span, tuple)
+        or len(sample_span) != 2
+        or any(isinstance(value, bool) or not isinstance(value, int) for value in sample_span)
+        or sample_span[0] < 0
+        or sample_span[1] <= sample_span[0]
+    ):
+        raise ValueError("sample_span must be a non-empty half-open wire sample interval")
+    if not isinstance(reason, str) or reason not in {
+        "vad",
+        "client_commit",
+        "budget_rollover",
+    }:
+        raise ValueError("reason must be vad, client_commit, or budget_rollover")
+    if commit_event_id is not None:
+        if not isinstance(commit_event_id, str) or not 1 <= len(commit_event_id) <= 128:
+            raise ValueError("commit_event_id must be a 1-128 character identifier")
+        if reason != "client_commit":
+            raise ValueError("commit_event_id is only valid for client_commit")
+
+    payload: dict[str, object] = {
+        "type": "speechrail.transcription.segment_closed",
+        "item_id": item_id,
+        "sample_span": {"start": sample_span[0], "end": sample_span[1]},
+        "reason": reason,
     }
     if commit_event_id is not None:
         payload["commit_event_id"] = commit_event_id
@@ -978,6 +1038,7 @@ _SESSION_TRANSCRIPTION_FIELDS: frozenset[str] = frozenset(
 _SESSION_SPEECHRAIL_FIELDS: frozenset[str] = frozenset(
     {
         "task",
+        "asr",
         "tts",
         "alignment",
         "diarization",
@@ -1079,6 +1140,10 @@ def apply_session_update(
     asr_model: str,
     registered_asr: frozenset[str],
     current_config: Mapping[str, Any] | None = None,
+    request_timeout_ms: int | None = None,
+    service_max_segment_ms: int | None = None,
+    capability_max_segment_ms: int | None = None,
+    decoder_max_segment_ms: int = 30_000,
 ) -> tuple[dict[str, object], dict[str, Any]]:
     """Validate the single ``session.update`` event and return its config.
 
@@ -1167,10 +1232,52 @@ def apply_session_update(
             "invalid_event", "session.speechrail.task must be a supported task"
         )
 
+    try:
+        raw_asr_policy = speechrail_obj.get("asr")
+        if "asr" in speechrail_obj:
+            if not isinstance(raw_asr_policy, Mapping):
+                raise ValueError("ASR policy must be an object")
+            asr_policy = ASRPolicy.from_mapping(
+                raw_asr_policy,
+                request_timeout_ms=request_timeout_ms,
+            )
+            if (
+                asr_policy.final_deadline_ms is not None
+                and request_timeout_ms is None
+            ):
+                raise ValueError(
+                    "request_timeout_ms is required to validate final_deadline_ms"
+                )
+        elif current_config is not None and "asr_policy" in current_config:
+            existing_policy = current_config["asr_policy"]
+            if not isinstance(existing_policy, ASRPolicy):
+                raise ValueError("current ASR policy is not valid")
+            asr_policy = existing_policy
+            if request_timeout_ms is not None:
+                asr_policy.effective_deadline_ms(request_timeout_ms=request_timeout_ms)
+        else:
+            asr_policy = ASRPolicy()
+            if request_timeout_ms is not None:
+                asr_policy.effective_deadline_ms(request_timeout_ms=request_timeout_ms)
+        effective_max_segment_ms = resolve_effective_max_segment_ms(
+            asr_policy,
+            service_max_segment_ms=(
+                service_max_segment_ms
+                if service_max_segment_ms is not None
+                else asr_policy.max_segment_ms
+            ),
+            capability_max_segment_ms=capability_max_segment_ms,
+            decoder_max_segment_ms=decoder_max_segment_ms,
+        )
+    except (TypeError, ValueError) as exc:
+        raise RealtimeAdapterError("asr_policy_invalid", str(exc)) from exc
+
     base_config = dict(current_config or {})
     config: dict[str, Any] = dict(base_config)
     config["model"] = resolved_asr or asr_model
     config["task"] = str(task)
+    config["asr_policy"] = asr_policy
+    config["effective_max_segment_ms"] = effective_max_segment_ms
     config["language"] = language
     config["prompt"] = prompt or ""
     config["languages"] = languages
@@ -1259,6 +1366,9 @@ def apply_session_update(
         expected_asr_revision=config.get("expected_asr_revision")
         if isinstance(config.get("expected_asr_revision"), str)
         else None,
+        asr_policy=asr_policy,
+        effective_max_segment_ms=effective_max_segment_ms,
+        request_timeout_ms=request_timeout_ms,
     )
     return response, config
 

@@ -38,7 +38,11 @@ def test_realtime_slot_remains_available_when_batch_lane_is_saturated() -> None:
 
         batch_tasks = [
             asyncio.create_task(
-                governor.run(lambda index=index: blocking_batch(index), WorkClass.BATCH_ASR)
+                governor.run(
+                    lambda index=index: blocking_batch(index),
+                    WorkClass.BATCH_TTS,
+                    resource_key=f"voice-{index}",
+                )
             )
             for index in range(2)
         ]
@@ -47,9 +51,142 @@ def test_realtime_slot_remains_available_when_batch_lane_is_saturated() -> None:
         await governor.run(realtime, WorkClass.REALTIME_ASR)
         assert realtime_started.is_set()
         assert governor.snapshot().active_batch == 2
+        assert governor.snapshot().active_tts == 2
 
         release_batch.set()
         await asyncio.gather(*batch_tasks)
+
+    asyncio.run(scenario())
+
+
+def test_realtime_asr_reservations_share_one_lane_with_heavy_overlap_enabled() -> None:
+    async def scenario() -> None:
+        governor = ResourceGovernor(
+            GovernorLimits(
+                total_capacity=4,
+                realtime_reserved_capacity=1,
+                max_pending_per_class=2,
+            ),
+            allow_heavy_overlap=True,
+        )
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        second_started = asyncio.Event()
+        release_second = asyncio.Event()
+
+        async def first_asr() -> None:
+            first_started.set()
+            await release_first.wait()
+
+        async def second_asr() -> None:
+            second_started.set()
+            await release_second.wait()
+
+        first_task = asyncio.create_task(
+            governor.run(first_asr, WorkClass.REALTIME_ASR)
+        )
+        second_task: asyncio.Task[None] | None = None
+        try:
+            await asyncio.wait_for(first_started.wait(), timeout=1)
+            second_task = asyncio.create_task(
+                governor.run(second_asr, WorkClass.REALTIME_ASR)
+            )
+            await asyncio.sleep(0.01)
+
+            before_first_release = governor.snapshot()
+            second_was_queued = (
+                before_first_release.pending_realtime == 1
+                and before_first_release.active_asr == 1
+                and not second_started.is_set()
+            )
+
+            release_first.set()
+            await asyncio.wait_for(second_started.wait(), timeout=1)
+            release_second.set()
+            await asyncio.wait_for(
+                asyncio.gather(first_task, second_task),
+                timeout=1,
+            )
+
+            assert second_was_queued
+            assert governor.snapshot().active_asr == 0
+        finally:
+            release_first.set()
+            release_second.set()
+            tasks = [first_task]
+            if second_task is not None:
+                tasks.append(second_task)
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("owner_class", "waiter_class"),
+    [
+        (WorkClass.BATCH_ASR, WorkClass.REALTIME_ASR),
+        (WorkClass.REALTIME_ASR, WorkClass.BATCH_ASR),
+    ],
+)
+def test_batch_and_realtime_asr_share_one_worker_gate(owner_class, waiter_class) -> None:
+    async def scenario() -> None:
+        governor = ResourceGovernor(
+            GovernorLimits(
+                total_capacity=4,
+                realtime_reserved_capacity=1,
+                max_pending_per_class=2,
+            ),
+            allow_heavy_overlap=True,
+        )
+        owner_started = asyncio.Event()
+        release_owner = asyncio.Event()
+        waiter_started = asyncio.Event()
+        release_waiter = asyncio.Event()
+
+        async def owner() -> None:
+            owner_started.set()
+            await release_owner.wait()
+
+        async def waiter() -> None:
+            waiter_started.set()
+            await release_waiter.wait()
+
+        owner_task = asyncio.create_task(governor.run(owner, owner_class))
+        waiter_task: asyncio.Task[None] | None = None
+        try:
+            await asyncio.wait_for(owner_started.wait(), timeout=1)
+            waiter_task = asyncio.create_task(governor.run(waiter, waiter_class))
+            await asyncio.sleep(0.01)
+
+            snapshot = governor.snapshot()
+            pending_count = (
+                snapshot.pending_realtime
+                if waiter_class.is_realtime
+                else snapshot.pending_batch
+            )
+            waiter_was_queued = (
+                pending_count == 1
+                and snapshot.active_asr == 1
+                and not waiter_started.is_set()
+            )
+
+            release_owner.set()
+            await asyncio.wait_for(waiter_started.wait(), timeout=1)
+            release_waiter.set()
+            await asyncio.wait_for(
+                asyncio.gather(owner_task, waiter_task),
+                timeout=1,
+            )
+
+            assert waiter_was_queued
+            assert governor.snapshot().active_asr == 0
+        finally:
+            release_owner.set()
+            release_waiter.set()
+            tasks = [owner_task]
+            if waiter_task is not None:
+                tasks.append(waiter_task)
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     asyncio.run(scenario())
 
@@ -106,9 +243,13 @@ def test_batch_aging_wakes_without_another_release_or_notify() -> None:
         async def second() -> None:
             second_started.set()
 
-        first_task = asyncio.create_task(governor.run(first, WorkClass.BATCH_ASR))
+        first_task = asyncio.create_task(
+            governor.run(first, WorkClass.BATCH_TTS, resource_key="voice-holder")
+        )
         await first_started.wait()
-        second_task = asyncio.create_task(governor.run(second, WorkClass.BATCH_ASR))
+        second_task = asyncio.create_task(
+            governor.run(second, WorkClass.BATCH_TTS, resource_key="voice-pending")
+        )
         try:
             await asyncio.wait_for(second_started.wait(), timeout=0.5)
         finally:
@@ -152,13 +293,23 @@ def test_batch_aging_hands_timer_to_next_waiter_after_admission() -> None:
             second_waiter_started.set()
             await release_second_waiter.wait()
 
-        holder_task = asyncio.create_task(governor.run(holder, WorkClass.BATCH_ASR))
+        holder_task = asyncio.create_task(
+            governor.run(holder, WorkClass.BATCH_TTS, resource_key="voice-holder")
+        )
         await holder_started.wait()
         first_task = asyncio.create_task(
-            governor.run(first_waiter, WorkClass.BATCH_ASR)
+            governor.run(
+                first_waiter,
+                WorkClass.BATCH_TTS,
+                resource_key="voice-first",
+            )
         )
         second_task = asyncio.create_task(
-            governor.run(second_waiter, WorkClass.BATCH_ASR)
+            governor.run(
+                second_waiter,
+                WorkClass.BATCH_TTS,
+                resource_key="voice-second",
+            )
         )
         try:
             await asyncio.wait_for(first_waiter_started.wait(), timeout=0.5)
@@ -563,7 +714,13 @@ def test_governor_queue_full_fires_rejection_metric_callback() -> None:
             governor.run(blocking, WorkClass.REALTIME_ASR)
         )
         await entered.wait()
-        batch_holder = asyncio.create_task(governor.run(blocking, WorkClass.BATCH_ASR))
+        batch_holder = asyncio.create_task(
+            governor.run(
+                blocking,
+                WorkClass.BATCH_TTS,
+                resource_key="voice_design",
+            )
+        )
         for _ in range(100):
             if governor.snapshot().active_batch == 1:
                 break
@@ -631,12 +788,20 @@ def test_batch_aging_admits_starved_batch_past_threshold() -> None:
             await batch_release.wait()
 
         realtime_holder = asyncio.create_task(
-            governor.run(blocking, WorkClass.REALTIME_ASR)
+            governor.run(
+                blocking,
+                WorkClass.REALTIME_TTS,
+                resource_key="rt-owner",
+            )
         )
         await entered.wait()
         entered.clear()
         batch_holder = asyncio.create_task(
-            governor.run(blocking_batch, WorkClass.BATCH_ASR)
+            governor.run(
+                blocking_batch,
+                WorkClass.BATCH_TTS,
+                resource_key="batch-owner",
+            )
         )
         for _ in range(200):
             if governor.snapshot().active_batch == 1:
@@ -644,7 +809,11 @@ def test_batch_aging_admits_starved_batch_past_threshold() -> None:
             await asyncio.sleep(0.01)
         entered.clear()
         realtime_waiter = asyncio.create_task(
-            governor.run(blocking, WorkClass.REALTIME_ASR)
+            governor.run(
+                blocking,
+                WorkClass.REALTIME_TTS,
+                resource_key="rt-waiter",
+            )
         )
         for _ in range(200):
             if governor.snapshot().pending_realtime == 1:
@@ -657,7 +826,13 @@ def test_batch_aging_admits_starved_batch_past_threshold() -> None:
         async def starved() -> None:
             starved_started.set()
 
-        starved_task = asyncio.create_task(governor.run(starved, WorkClass.BATCH_ASR))
+        starved_task = asyncio.create_task(
+            governor.run(
+                starved,
+                WorkClass.BATCH_TTS,
+                resource_key="batch-starved",
+            )
+        )
         await asyncio.sleep(0.01)
         assert not starved_started.is_set()
 
@@ -695,12 +870,20 @@ def test_batch_below_aging_threshold_still_defers_to_reserved_capacity() -> None
             await batch_release.wait()
 
         realtime_holder = asyncio.create_task(
-            governor.run(blocking, WorkClass.REALTIME_ASR)
+            governor.run(
+                blocking,
+                WorkClass.REALTIME_TTS,
+                resource_key="rt-owner",
+            )
         )
         await entered.wait()
         entered.clear()
         batch_holder = asyncio.create_task(
-            governor.run(blocking_batch, WorkClass.BATCH_ASR)
+            governor.run(
+                blocking_batch,
+                WorkClass.BATCH_TTS,
+                resource_key="batch-owner",
+            )
         )
         for _ in range(200):
             if governor.snapshot().active_batch == 1:
@@ -708,7 +891,11 @@ def test_batch_below_aging_threshold_still_defers_to_reserved_capacity() -> None
             await asyncio.sleep(0.01)
         entered.clear()
         realtime_waiter = asyncio.create_task(
-            governor.run(blocking, WorkClass.REALTIME_ASR)
+            governor.run(
+                blocking,
+                WorkClass.REALTIME_TTS,
+                resource_key="rt-waiter",
+            )
         )
         for _ in range(200):
             if governor.snapshot().pending_realtime == 1:
@@ -721,7 +908,13 @@ def test_batch_below_aging_threshold_still_defers_to_reserved_capacity() -> None
         async def starved() -> None:
             starved_started.set()
 
-        starved_task = asyncio.create_task(governor.run(starved, WorkClass.BATCH_ASR))
+        starved_task = asyncio.create_task(
+            governor.run(
+                starved,
+                WorkClass.BATCH_TTS,
+                resource_key="batch-starved",
+            )
+        )
         await asyncio.sleep(0.01)
 
         # Churn the realtime lane below the aging threshold: the batch waiter

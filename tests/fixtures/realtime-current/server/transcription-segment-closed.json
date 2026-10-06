@@ -1,0 +1,13 @@
+{
+  "type": "speechrail.transcription.segment_closed",
+  "event_id": "evt_segment_closed",
+  "session_id": "sess-asr-policy",
+  "sequence": 2,
+  "item_id": "item_asr_1",
+  "sample_span": {
+    "start": 0,
+    "end": 24000
+  },
+  "reason": "client_commit",
+  "commit_event_id": "evt_commit_1"
+}

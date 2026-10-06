@@ -11,12 +11,19 @@ import sys
 import traceback
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import BinaryIO, Final, Protocol
 
 from speechrail.backends.mlx_precision import mlx_dtype, resolve_load_dtype
 from speechrail.backends.model_identity import SnapshotIdentity, inspect_model, read_quantization
+from speechrail.backends.qwen3_stream_decoder import (
+    BoundQwen3Decoder,
+    Qwen3DecodeResult,
+    StreamingDecodeState,
+)
 from speechrail.config.model_catalog import QuantizationSpec
+from speechrail.domain.asr_policy import ASRPolicy
 from speechrail.runtime.limits import MAX_PCM_BYTES
 from speechrail.runtime.worker_protocol import (
     MAX_FRAME_BYTES,
@@ -37,6 +44,7 @@ MAX_BATCH_PCM_BYTES = MAX_FRAME_BYTES - 4096
 # SPEECHRAIL_REALTIME_MAX_SESSIONS (default 3) before frames reach the worker;
 # this constant only guards against a misbehaving protocol peer.
 MAX_ACTIVE_STREAMING_SESSIONS = 8
+MAX_STREAMING_SEGMENT_MS = MAX_PCM_BYTES * 1_000 // (ASR_SAMPLE_RATE * 2)
 LANGUAGES = {
     "auto": "auto",
     "zh": "Chinese", "chinese": "Chinese",
@@ -96,6 +104,17 @@ def _dynamic_budget(audio_sec: float, max_new_tokens: int) -> int:
     """
     cap = max_new_tokens or 512
     return min(cap, max(32, int(audio_sec * 6) + 24))
+
+
+def _require_complete_final(result: object) -> None:
+    finish_reason = getattr(result, "finish_reason", None)
+    truncated = getattr(result, "truncated", False)
+    if truncated is True or finish_reason == "length":
+        raise RuntimeError("Qwen3-ASR full-segment final was truncated by the token budget")
+    if finish_reason != "eos":
+        raise RuntimeError(
+            f"Qwen3-ASR full-segment final ended with unsupported finish reason: {finish_reason}"
+        )
 
 
 _ENGINE_DTYPE_ALIASES: Final = {
@@ -251,11 +270,17 @@ class WorkerEngine(Protocol):
         chunk_duration_ms: int = 1_000,
         max_context_sec: float = 12.64,
         max_new_tokens: int = 256,
+        asr_policy: ASRPolicy | None = None,
+        effective_max_segment_ms: int | None = None,
     ) -> None: ...
 
     def append_audio(self, session_id: str, audio: bytes) -> str: ...
 
     def partial_text(self, session_id: str) -> str: ...
+
+    def decoded_samples(self, session_id: str) -> int: ...
+
+    def preview_revision(self, session_id: str) -> int: ...
 
     def finish_streaming(self, session_id: str) -> tuple[str, str]: ...
 
@@ -264,6 +289,23 @@ class WorkerEngine(Protocol):
     def active_session_count(self) -> int: ...
 
     def has_session(self, session_id: str) -> bool: ...
+
+
+class ASRBufferOverflowError(RuntimeError):
+    """An append would exceed the session's effective PCM budget."""
+
+
+@dataclass(slots=True)
+class _BufferedASRSession:
+    language: str
+    context: str
+    max_new_tokens: int
+    policy: ASRPolicy
+    effective_max_segment_ms: int
+    max_buffer_bytes: int
+    pcm: bytearray = dataclass_field(default_factory=bytearray)
+    decoder_state: StreamingDecodeState = dataclass_field(default_factory=StreamingDecodeState)
+    preview: Qwen3DecodeResult | None = None
 
 
 EngineFactory = Callable[[Path, str, str, int], WorkerEngine]
@@ -397,6 +439,44 @@ def _coerce_session_int(value: object) -> int:
         raise ValueError("invalid session option") from exc
 
 
+def _parse_asr_policy(raw: object) -> tuple[ASRPolicy, int]:
+    if raw is _MISSING:
+        policy = ASRPolicy()
+        effective_max_segment_ms = policy.max_segment_ms
+    else:
+        if not isinstance(raw, Mapping):
+            raise ValueError("ASR policy must be an object")
+        if any(not isinstance(key, str) for key in raw):
+            raise ValueError("ASR policy keys must be strings")
+        required = {
+            "preview_interval_ms",
+            "max_segment_ms",
+            "finalization",
+            "effective_max_segment_ms",
+        }
+        allowed = required | {"final_deadline_ms"}
+        keys = set(raw)
+        if not required.issubset(keys) or keys - allowed:
+            raise ValueError("ASR policy has missing or unsupported fields")
+        raw_effective = raw["effective_max_segment_ms"]
+        if type(raw_effective) is not int:
+            raise ValueError("effective_max_segment_ms must be an integer")
+        effective_max_segment_ms = raw_effective
+        policy_fields = {
+            key: value for key, value in raw.items() if key != "effective_max_segment_ms"
+        }
+        policy = ASRPolicy.from_mapping(policy_fields)
+
+    if (
+        type(effective_max_segment_ms) is not int
+        or effective_max_segment_ms < 1_000
+        or effective_max_segment_ms > policy.max_segment_ms
+        or effective_max_segment_ms > MAX_STREAMING_SEGMENT_MS
+    ):
+        raise ValueError("effective_max_segment_ms is outside the supported buffer range")
+    return policy, effective_max_segment_ms
+
+
 def _handle_session_open(
     frame: dict[str, object],
     output_stream: BinaryIO,
@@ -412,6 +492,15 @@ def _handle_session_open(
         return
     raw_context = frame.get("context")
     context = raw_context if isinstance(raw_context, str) else ""
+    has_asr_policy = "asr_policy" in frame
+    asr_policy: ASRPolicy | None = None
+    effective_max_segment_ms: int | None = None
+    if has_asr_policy:
+        try:
+            asr_policy, effective_max_segment_ms = _parse_asr_policy(frame["asr_policy"])
+        except (TypeError, ValueError):
+            _write_error(output_stream, "asr_policy_invalid", session_id=session_id)
+            return
     try:
         chunk_duration_ms = _coerce_session_int(frame.get("chunk_duration_ms", 1_000))
         max_context_sec = _coerce_session_float(frame.get("max_context_sec", 12.64))
@@ -425,14 +514,27 @@ def _handle_session_open(
         _write_error(output_stream, "session_limit_reached", session_id=session_id)
         return
     try:
-        engine.open_session(
-            session_id=session_id,
-            language=language,
-            context=context,
-            chunk_duration_ms=chunk_duration_ms,
-            max_context_sec=max_context_sec,
-            max_new_tokens=max_new_tokens,
-        )
+        if has_asr_policy:
+            assert asr_policy is not None and effective_max_segment_ms is not None
+            engine.open_session(
+                session_id=session_id,
+                language=language,
+                context=context,
+                chunk_duration_ms=chunk_duration_ms,
+                max_context_sec=max_context_sec,
+                max_new_tokens=max_new_tokens,
+                asr_policy=asr_policy,
+                effective_max_segment_ms=effective_max_segment_ms,
+            )
+        else:
+            engine.open_session(
+                session_id=session_id,
+                language=language,
+                context=context,
+                chunk_duration_ms=chunk_duration_ms,
+                max_context_sec=max_context_sec,
+                max_new_tokens=max_new_tokens,
+            )
     except Exception:
         traceback.print_exc(file=sys.stderr)
         _write_error(output_stream, "session_open_failed", session_id=session_id)
@@ -476,6 +578,10 @@ def _handle_audio_append(
         return
     try:
         engine.append_audio(session_id, audio)
+    except ASRBufferOverflowError:
+        engine.close_session(session_id)
+        _write_error(output_stream, "asr_buffer_overflow", session_id=session_id)
+        return
     except Exception:
         traceback.print_exc(file=sys.stderr)
         _write_error(output_stream, "session_invalid", session_id=session_id)
@@ -502,11 +608,11 @@ def _handle_flush(
         return
     try:
         text = engine.partial_text(session_id)
+        decoded_samples = engine.decoded_samples(session_id)
+        revision = engine.preview_revision(session_id)
     except Exception:
         traceback.print_exc(file=sys.stderr)
         _write_error(output_stream, "worker_inference_error", session_id=session_id)
-        return
-    if not text:
         return
     write_frame(
         output_stream,
@@ -518,6 +624,18 @@ def _handle_flush(
             "text": text,
             "language": None,
             "segments": [],
+            "sample_watermark": decoded_samples,
+            "revision": revision,
+        },
+    )
+    write_frame(
+        output_stream,
+        {
+            "version": PROTOCOL_VERSION,
+            "type": "flushed",
+            "session_id": session_id,
+            "sample_watermark": decoded_samples,
+            "revision": revision,
         },
     )
 
@@ -956,8 +1074,8 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
             quantization_group_size=expected.quantization.group_size,
             weight_fingerprint=expected.weight_fingerprint,
         )
-        self._streaming_states: dict[str, object] = {}
-        self._session_contexts: dict[str, tuple[str, str]] = {}
+        self._decoder: BoundQwen3Decoder | None = None
+        self._streaming_states: dict[str, _BufferedASRSession] = {}
         _clear_metal_cache()
 
     def transcribe(
@@ -994,73 +1112,156 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         chunk_duration_ms: int = 1_000,
         max_context_sec: float = 12.64,
         max_new_tokens: int = 256,
+        asr_policy: ASRPolicy | None = None,
+        effective_max_segment_ms: int | None = None,
     ) -> None:
         if not session_id:
             raise ValueError("session_id is required")
         if session_id in self._streaming_states:
             raise RuntimeError(f"session already open: {session_id}")
-        streaming_language = None if language in {"auto", ""} else language
         if chunk_duration_ms <= 0:
             raise ValueError("chunk_duration_ms must be positive")
         if max_context_sec <= 0:
             raise ValueError("max_context_sec must be positive")
-        self._session_contexts[session_id] = (language, context)
-        self._streaming_states[session_id] = self._session.init_streaming(
+        if max_new_tokens <= 0:
+            raise ValueError("max_new_tokens must be positive")
+        policy = asr_policy or ASRPolicy()
+        effective = (
+            policy.max_segment_ms
+            if effective_max_segment_ms is None
+            else effective_max_segment_ms
+        )
+        if (
+            type(effective) is not int
+            or effective < 1_000
+            or effective > policy.max_segment_ms
+            or effective > MAX_STREAMING_SEGMENT_MS
+        ):
+            raise ValueError("effective_max_segment_ms is outside the supported buffer range")
+        max_buffer_bytes = (effective * ASR_SAMPLE_RATE // 1_000) * 2
+        self._streaming_states[session_id] = _BufferedASRSession(
+            language=language,
             context=context,
-            language=streaming_language,
-            chunk_size_sec=chunk_duration_ms / 1_000,
-            max_context_sec=max_context_sec,
             max_new_tokens=max_new_tokens,
-            # The vendor tail-refine fallback calls ``transcribe()`` with an
-            # already-loaded model object, which makes it resolve the tokenizer
-            # from the upstream default repo id instead of the local snapshot.
-            # Offline that raises ``LocalEntryNotFoundError`` and turns every
-            # commit whose tail decode adds no text into
-            # ``worker_inference_error``.  The committed text is already
-            # complete without the refinement pass, so keep it off.
-            enable_tail_refine=False,
+            policy=policy,
+            effective_max_segment_ms=effective,
+            max_buffer_bytes=max_buffer_bytes,
         )
 
     def append_audio(self, session_id: str, audio: bytes) -> str:
-        import numpy as np
-
         state = self._streaming_states.get(session_id)
         if state is None:
             raise RuntimeError(f"no active session: {session_id}")
-        waveform = np.frombuffer(audio, dtype="<i2").astype(np.float32) / np.float32(32768)
-        state = self._session.feed_audio(waveform, state)
-        self._streaming_states[session_id] = state
-        current = getattr(state, "text", "") or ""
-        return current if isinstance(current, str) else ""
+        if not audio or len(audio) % 2:
+            raise ValueError("streaming PCM must contain complete PCM16 samples")
+        if len(state.pcm) + len(audio) > state.max_buffer_bytes:
+            raise ASRBufferOverflowError("session PCM exceeds effective segment budget")
+        state.pcm.extend(audio)
+        return ""
 
     def partial_text(self, session_id: str) -> str:
         state = self._streaming_states.get(session_id)
         if state is None:
             raise RuntimeError(f"no active session: {session_id}")
-        text = getattr(state, "text", "") or ""
-        return text if isinstance(text, str) else ""
+        sample_count = len(state.pcm) // 2
+        if sample_count == 0:
+            return ""
+        if (
+            state.preview is not None
+            and state.preview.sample_watermark == sample_count
+        ):
+            return state.preview.text
+        import numpy as np
+
+        waveform = np.frombuffer(state.pcm, dtype="<i2").astype(np.float32)
+        waveform /= np.float32(32768)
+        state.preview = self._bound_decoder().decode(
+            waveform,
+            state.decoder_state,
+            language=state.language,
+            context=state.context,
+            sample_watermark=sample_count,
+            max_new_tokens=_dynamic_budget(
+                sample_count / ASR_SAMPLE_RATE,
+                state.max_new_tokens,
+            ),
+        )
+        return state.preview.text
+
+    def decoded_samples(self, session_id: str) -> int:
+        state = self._streaming_states.get(session_id)
+        if state is None:
+            raise RuntimeError(f"no active session: {session_id}")
+        return state.preview.sample_watermark if state.preview is not None else 0
+
+    def preview_revision(self, session_id: str) -> int:
+        state = self._streaming_states.get(session_id)
+        if state is None:
+            raise RuntimeError(f"no active session: {session_id}")
+        return state.preview.revision if state.preview is not None else 0
 
     def finish_streaming(self, session_id: str) -> tuple[str, str]:
         state = self._streaming_states.get(session_id)
         if state is None:
             raise RuntimeError(f"no active session: {session_id}")
-        final = self._session.finish_streaming(state)
-        del self._streaming_states[session_id]
-        text = getattr(final, "text", "") or ""
-        language = getattr(final, "language", None) or ""
-        return (text if isinstance(text, str) else ""), (
-            language if isinstance(language, str) else ""
+        sample_count = len(state.pcm) // 2
+        if sample_count == 0:
+            return "", "" if state.language in {"", "auto"} else state.language
+        import numpy as np
+
+        waveform = np.frombuffer(state.pcm, dtype="<i2").astype(np.float32)
+        waveform /= np.float32(32768)
+        if state.policy.finalization == "full_segment":
+            kwargs: dict[str, object] = {
+                "context": state.context,
+                "max_new_tokens": _dynamic_budget(
+                    sample_count / ASR_SAMPLE_RATE,
+                    state.max_new_tokens,
+                ),
+            }
+            if state.language not in {"", "auto"}:
+                kwargs["language"] = state.language
+            final = self._session.transcribe((waveform, ASR_SAMPLE_RATE), **kwargs)
+            _require_complete_final(final)
+            text = getattr(final, "text", "") or ""
+            language = getattr(final, "language", None) or ""
+            return (
+                text.strip() if isinstance(text, str) else "",
+                str(language) if language else (
+                    "" if state.language in {"", "auto"} else state.language
+                ),
+            )
+
+        final = self._bound_decoder().decode(
+            waveform,
+            state.decoder_state,
+            language=state.language,
+            context=state.context,
+            sample_watermark=sample_count,
+            max_new_tokens=_dynamic_budget(
+                sample_count / ASR_SAMPLE_RATE,
+                state.max_new_tokens,
+            ),
+            final=True,
         )
+        return final.text, final.language
 
     def close_session(self, session_id: str) -> None:
         self._streaming_states.pop(session_id, None)
-        self._session_contexts.pop(session_id, None)
 
     def active_session_count(self) -> int:
         return len(self._streaming_states)
 
     def has_session(self, session_id: str) -> bool:
         return session_id in self._streaming_states
+
+    def _bound_decoder(self) -> BoundQwen3Decoder:
+        if self._decoder is None:
+            self._decoder = BoundQwen3Decoder(
+                self._session,
+                max_new_tokens=self._max_new_tokens,
+            )
+        return self._decoder
 
 
 def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - process entry point.

@@ -1,5 +1,43 @@
 import Foundation
 
+/// Caller-selected, application-neutral realtime ASR policy.
+public struct SpeechRailASRPolicy: Sendable, Equatable {
+    public enum Finalization: String, Sendable {
+        case fullSegment = "full_segment"
+        case streamingFinalize = "streaming_finalize"
+    }
+
+    public let previewIntervalMilliseconds: Int
+    public let maxSegmentMilliseconds: Int
+    public let finalization: Finalization
+    /// `nil` asks the service to use the enclosing request timeout.
+    public let finalDeadlineMilliseconds: Int?
+
+    public init(
+        previewIntervalMilliseconds: Int = 1_000,
+        maxSegmentMilliseconds: Int = 20_000,
+        finalization: Finalization = .fullSegment,
+        finalDeadlineMilliseconds: Int? = nil
+    ) {
+        self.previewIntervalMilliseconds = previewIntervalMilliseconds
+        self.maxSegmentMilliseconds = maxSegmentMilliseconds
+        self.finalization = finalization
+        self.finalDeadlineMilliseconds = finalDeadlineMilliseconds
+    }
+
+    var jsonObject: [String: Any] {
+        var object: [String: Any] = [
+            "preview_interval_ms": previewIntervalMilliseconds,
+            "max_segment_ms": maxSegmentMilliseconds,
+            "finalization": finalization.rawValue
+        ]
+        if let finalDeadlineMilliseconds {
+            object["final_deadline_ms"] = finalDeadlineMilliseconds
+        }
+        return object
+    }
+}
+
 /// Canonical current-only transcription session configuration (`session.update`).
 ///
 /// The factory intentionally exposes only the fields SpeechRail implements; it
@@ -76,6 +114,7 @@ public struct SpeechRailSessionUpdate: Sendable {
     public let ttsEnabled: Bool
     public let alignment: Alignment
     public let diarizationEnabled: Bool
+    public let asrPolicy: SpeechRailASRPolicy?
     /// ASR identity belongs to the connection. Voice and TTS model identity
     /// belong exclusively to `SpeechRailTTSStart`, which identifies a voice.
     public let expectedASRRevision: String?
@@ -91,6 +130,7 @@ public struct SpeechRailSessionUpdate: Sendable {
         ttsEnabled: Bool = false,
         alignment: Alignment = Alignment(enabled: false),
         diarizationEnabled: Bool = false,
+        asrPolicy: SpeechRailASRPolicy? = nil,
         expectedASRRevision: String? = nil,
         eventID: String = "evt_session_update"
     ) {
@@ -105,6 +145,7 @@ public struct SpeechRailSessionUpdate: Sendable {
         self.ttsEnabled = ttsEnabled
         self.alignment = alignment
         self.diarizationEnabled = diarizationEnabled
+        self.asrPolicy = asrPolicy
         self.expectedASRRevision = expectedASRRevision
     }
 
@@ -123,6 +164,7 @@ public struct SpeechRailSessionUpdate: Sendable {
             "diarization": ["enabled": diarizationEnabled]
         ]
         if let endpointing { speechrail["endpointing"] = endpointing.jsonObject }
+        if let asrPolicy { speechrail["asr"] = asrPolicy.jsonObject }
         if let expectedASRRevision { speechrail["expected_asr_revision"] = expectedASRRevision }
         return [
             "type": "session.update",

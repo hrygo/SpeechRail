@@ -27,6 +27,13 @@
     },
     "speechrail": {
       "task": "caption",
+      "asr": {
+        "preview_interval_ms": 1000,
+        "max_segment_ms": 20000,
+        "finalization": "full_segment",
+        "final_deadline_ms": 120000,
+        "effective_max_segment_ms": 20000
+      },
       "alignment": {
         "enabled": false
       },

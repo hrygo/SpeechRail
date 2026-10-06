@@ -347,6 +347,11 @@ class ResourceGovernor:
             return False
         if self._active_realtime + self._active_batch >= self._limits.total_capacity:
             return False
+        is_asr = waiter.work_class in (WorkClass.BATCH_ASR, WorkClass.REALTIME_ASR)
+        if is_asr and self._active_asr > 0:
+            # ASR has one shared model owner. Heavy overlap permits an
+            # independent TTS lane, never a second ASR session on this lane.
+            return False
         if self._is_tts(waiter.work_class) and self._tts_lane_busy(waiter.resource_key):
             # Keep a same-capability request in the bounded governor queue
             # instead of letting it wait on the backend's private worker lock.
@@ -354,7 +359,6 @@ class ResourceGovernor:
             # an unkeyed request is a wildcard and therefore remains serial.
             return False
         if not self._allow_heavy_overlap:
-            is_asr = waiter.work_class in (WorkClass.BATCH_ASR, WorkClass.REALTIME_ASR)
             if is_asr and self._active_tts > 0:
                 return False
             if not is_asr and self._active_asr > 0:

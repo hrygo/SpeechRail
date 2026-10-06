@@ -34,6 +34,13 @@ class FakeStreamingWorker:
     ) -> None:
         self.sent: list[Mapping[str, object]] = []
         self._queues: dict[str, asyncio.Queue[dict[str, object]]] = {}
+        self.session_registered = asyncio.Event()
+        self.commit_sent = asyncio.Event()
+        self.close_started = asyncio.Event()
+        self.close_attempted = asyncio.Event()
+        self.close_gate: asyncio.Event | None = None
+        self.close_error: BaseException | None = None
+        self.close_calls = 0
         self._ready = False
         self._alive = False
         self._closed = False
@@ -47,6 +54,7 @@ class FakeStreamingWorker:
         self._start_error = start_error
         self.send_error: BaseException | None = None
         self.unregister_calls: list[str] = []
+        self.unregister_failures_remaining = 0
         self.timeout_seconds = 5.0
         self.last_active = 0.0
 
@@ -75,6 +83,15 @@ class FakeStreamingWorker:
             frame["_binary"] = binary_payload
         self.sent.append(frame)
         self.last_active += 1
+        if frame.get("type") == "commit":
+            self.commit_sent.set()
+        elif frame.get("type") == "flush":
+            session_id = frame.get("session_id")
+            if isinstance(session_id, str):
+                self.push(
+                    session_id,
+                    {"type": "flushed", "session_id": session_id},
+                )
         if self.send_error is not None and frame.get("type") == "cancel":
             raise self.send_error
 
@@ -84,13 +101,24 @@ class FakeStreamingWorker:
     def register_session(self, session_id: str) -> asyncio.Queue[dict[str, object]]:
         queue: asyncio.Queue[dict[str, object]] = asyncio.Queue(maxsize=64)
         self._queues[session_id] = queue
+        self.session_registered.set()
         return queue
 
     def unregister_session(self, session_id: str) -> None:
         self.unregister_calls.append(session_id)
+        if self.unregister_failures_remaining:
+            self.unregister_failures_remaining -= 1
+            raise RuntimeError("fake unregister failure")
         self._queues.pop(session_id, None)
 
     async def close(self) -> None:
+        self.close_calls += 1
+        self.close_started.set()
+        self.close_attempted.set()
+        if self.close_gate is not None:
+            await self.close_gate.wait()
+        if self.close_error is not None:
+            raise self.close_error
         self._closed = True
         self._ready = False
         self._alive = False
@@ -99,6 +127,68 @@ class FakeStreamingWorker:
     def push(self, session_id: str, frame: dict[str, object]) -> None:
         self._queues[session_id].put_nowait(frame)
         self.last_active += 1
+
+
+class FailOnceStreamingContext:
+    def __init__(self, gate: AsrModeGate, *, fail_exit_once: bool = False) -> None:
+        self._gate = gate
+        self._fail_exit_once = fail_exit_once
+        self._lease = None
+        self.exit_calls = 0
+
+    async def __aenter__(self) -> None:
+        self._lease = self._gate.acquire("streaming")
+
+    async def __aexit__(self, *_: object) -> bool:
+        self.exit_calls += 1
+        if self._fail_exit_once and self.exit_calls == 1:
+            raise RuntimeError("fake context exit failure")
+        assert self._lease is not None
+        self._gate.release(self._lease)
+        return False
+
+
+class FixedStreamingScheduler:
+    def __init__(self, context: FailOnceStreamingContext) -> None:
+        self._context = context
+
+    def streaming(self) -> FailOnceStreamingContext:
+        return self._context
+
+
+class FailOnceModeGate:
+    def __init__(self) -> None:
+        self._gate = AsrModeGate()
+        self.release_calls = 0
+
+    @property
+    def active_mode(self) -> str | None:
+        return self._gate.active_mode
+
+    def acquire(self, mode: str) -> object:
+        return self._gate.acquire(mode)  # type: ignore[arg-type]
+
+    def release(self, lease: object) -> None:
+        self.release_calls += 1
+        if self.release_calls == 1:
+            raise RuntimeError("fake mode gate release failure")
+        self._gate.release(lease)  # type: ignore[arg-type]
+
+
+def _factory_session(
+    worker: FakeStreamingWorker, session_id: str
+) -> tuple[NativeRealtimeFactory, Qwen3StreamingSession]:
+    factory = NativeRealtimeFactory(
+        worker=worker,  # type: ignore[arg-type]
+        next_session_id=lambda: session_id,
+        max_sessions=1,
+    )
+    session = factory.create(
+        language="zh",
+        prompt="",
+        options=RealtimeTranscriptionOptions(),
+    )
+    return factory, session
 
 
 def test_streaming_facade_delegates_start_failure_to_shared_owner() -> None:
@@ -438,6 +528,341 @@ def test_session_proxies_open_and_streams_events() -> None:
     asyncio.run(scenario())
 
 
+def test_session_flush_waits_until_worker_acknowledges() -> None:
+    async def scenario() -> None:
+        worker = FakeStreamingWorker()
+        session = Qwen3StreamingSession(
+            worker=worker,  # type: ignore[arg-type]
+            language="zh",
+            prompt="",
+            session_id="flush-ack",
+        )
+        connect = asyncio.create_task(session.connect())
+        await worker.session_registered.wait()
+        worker.push(
+            "flush-ack",
+            {"type": "session.opened", "session_id": "flush-ack", "language": "zh"},
+        )
+        await connect
+
+        await session.flush()
+
+        assert any(frame.get("type") == "flush" for frame in worker.sent)
+        await session.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("transcript", ["", "   "])
+def test_empty_completed_is_success_and_finished_only_releases_reader(
+    transcript: str,
+) -> None:
+    async def scenario() -> None:
+        worker = FakeStreamingWorker()
+        session = Qwen3StreamingSession(
+            worker=worker,  # type: ignore[arg-type]
+            language="zh",
+            prompt="",
+            session_id="empty-final",
+        )
+        connect = asyncio.create_task(session.connect())
+        await worker.session_registered.wait()
+        worker.push(
+            "empty-final",
+            {"type": "session.opened", "session_id": "empty-final", "language": "zh"},
+        )
+        await connect
+
+        events = session.events()
+        next_event = asyncio.create_task(anext(events))
+        worker.push(
+            "empty-final",
+            {
+                "type": "event",
+                "session_id": "empty-final",
+                "kind": "completed",
+                "text": transcript,
+            },
+        )
+        completed = await asyncio.wait_for(next_event, timeout=1)
+        assert completed.kind == "completed"
+        assert completed.text == transcript
+
+        finalizer_started = asyncio.Event()
+
+        async def wait_for_finalized() -> None:
+            finalizer_started.set()
+            await session.wait_finalized()
+
+        finalizer = asyncio.create_task(wait_for_finalized())
+        await finalizer_started.wait()
+        assert not finalizer.done()
+        assert worker.mode_gate.active_mode == "streaming"
+
+        next_event = asyncio.create_task(anext(events))
+        worker.push("empty-final", {"type": "finished", "session_id": "empty-final"})
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(next_event, timeout=1)
+        await asyncio.wait_for(finalizer, timeout=1)
+        assert worker.unregister_calls == ["empty-final"]
+        assert worker.mode_gate.active_mode is None
+        await session.close()
+
+    asyncio.run(scenario())
+
+
+def test_reader_eof_error_does_not_create_success_terminal_and_releases_lease() -> None:
+    async def scenario() -> None:
+        worker = FakeStreamingWorker()
+        worker.close_gate = asyncio.Event()
+        session = Qwen3StreamingSession(
+            worker=worker,  # type: ignore[arg-type],
+            language="zh",
+            prompt="",
+            session_id="eof-final",
+        )
+        connect = asyncio.create_task(session.connect())
+        await worker.session_registered.wait()
+        worker.push(
+            "eof-final",
+            {"type": "session.opened", "session_id": "eof-final", "language": "zh"},
+        )
+        await connect
+
+        events: list[StreamingAsrEvent] = []
+        collect = asyncio.create_task(_collect(session, events, until=1))
+        commit = asyncio.create_task(session.commit())
+        await worker.commit_sent.wait()
+        # Qwen3SharedWorker maps a transport EOF to this terminal error frame.
+        worker.push(
+            "eof-final",
+            {"type": "error", "session_id": "eof-final", "code": "worker_unavailable"},
+        )
+
+        await asyncio.wait_for(worker.close_started.wait(), timeout=1)
+        assert not commit.done()
+        assert worker.unregister_calls == []
+        assert worker.mode_gate.active_mode == "streaming"
+        await asyncio.wait_for(collect, timeout=1)
+        assert len(events) == 1
+        assert events[0].kind == "error"
+        assert events[0].error_code == "worker_unavailable"
+        worker.close_gate.set()
+        await asyncio.wait_for(commit, timeout=1)
+        assert worker.close_calls == 1
+        assert worker.unregister_calls == ["eof-final"]
+        assert worker.mode_gate.active_mode is None
+        await session.close()
+        assert worker.close_calls == 1
+        assert worker.unregister_calls == ["eof-final"]
+
+    asyncio.run(scenario())
+
+
+def test_failed_worker_reap_keeps_streaming_lease_until_retry_succeeds() -> None:
+    async def scenario() -> None:
+        worker = FakeStreamingWorker()
+        worker.close_error = RuntimeError("fake reap failure")
+        session = Qwen3StreamingSession(
+            worker=worker,  # type: ignore[arg-type]
+            language="zh",
+            prompt="",
+            session_id="reap-retry",
+        )
+        connect = asyncio.create_task(session.connect())
+        await worker.session_registered.wait()
+        worker.push(
+            "reap-retry",
+            {"type": "session.opened", "session_id": "reap-retry", "language": "zh"},
+        )
+        await connect
+
+        events = session.events()
+        next_event = asyncio.create_task(anext(events))
+        worker.push(
+            "reap-retry",
+            {"type": "error", "session_id": "reap-retry", "code": "worker_unavailable"},
+        )
+        event = await asyncio.wait_for(next_event, timeout=1)
+        assert event.kind == "error"
+
+        while worker.close_calls < 2:
+            worker.close_attempted.clear()
+            if worker.close_calls < 2:
+                await asyncio.wait_for(worker.close_attempted.wait(), timeout=1)
+        assert worker.unregister_calls == []
+        assert worker.mode_gate.active_mode == "streaming"
+
+        worker.close_error = None
+        await session.close()
+
+        assert worker.close_calls == 3
+        assert worker.unregister_calls == ["reap-retry"]
+        assert worker.mode_gate.active_mode is None
+
+    asyncio.run(scenario())
+
+
+def test_finalize_retries_unregister_failure_without_repeating_reap() -> None:
+    async def scenario() -> None:
+        worker = FakeStreamingWorker()
+        worker.unregister_failures_remaining = 1
+        context = FailOnceStreamingContext(worker.mode_gate)
+        worker.mode_scheduler = FixedStreamingScheduler(context)  # type: ignore[assignment]
+        factory, session = _factory_session(worker, "unregister-retry")
+        connect = asyncio.create_task(session.connect())
+        await worker.session_registered.wait()
+        worker.push(
+            "unregister-retry",
+            {"type": "session.opened", "session_id": "unregister-retry", "language": "zh"},
+        )
+        await connect
+
+        with pytest.raises(RuntimeError, match="fake unregister failure"):
+            await session.close()
+
+        assert not session._finalized
+        assert not session._finished.is_set()
+        assert session._queue is not None
+        assert "unregister-retry" in worker._queues
+        assert context.exit_calls == 0
+        assert worker.close_calls == 1
+        assert worker.unregister_calls == ["unregister-retry"]
+        assert worker.mode_gate.active_mode == "streaming"
+        with pytest.raises(RealtimeSessionLimitError):
+            factory.create(
+                language="zh",
+                prompt="",
+                options=RealtimeTranscriptionOptions(),
+            )
+
+        await session.close()
+
+        assert session._finalized
+        assert session._finished.is_set()
+        assert "unregister-retry" not in worker._queues
+        assert context.exit_calls == 1
+        assert worker.close_calls == 1
+        assert worker.unregister_calls == ["unregister-retry", "unregister-retry"]
+        assert worker.mode_gate.active_mode is None
+        factory.release(session)
+        replacement = factory.create(
+            language="zh",
+            prompt="",
+            options=RealtimeTranscriptionOptions(),
+        )
+        factory.release(replacement)
+
+    asyncio.run(scenario())
+
+
+def test_finalize_retries_context_exit_failure_without_repeating_unregister() -> None:
+    async def scenario() -> None:
+        worker = FakeStreamingWorker()
+        context = FailOnceStreamingContext(worker.mode_gate, fail_exit_once=True)
+        worker.mode_scheduler = FixedStreamingScheduler(context)  # type: ignore[assignment]
+        factory, session = _factory_session(worker, "context-retry")
+        connect = asyncio.create_task(session.connect())
+        await worker.session_registered.wait()
+        worker.push(
+            "context-retry",
+            {"type": "session.opened", "session_id": "context-retry", "language": "zh"},
+        )
+        await connect
+
+        with pytest.raises(RuntimeError, match="fake context exit failure"):
+            await session.close()
+
+        assert not session._finalized
+        assert not session._finished.is_set()
+        assert session._mode_context is context
+        assert "context-retry" not in worker._queues
+        assert context.exit_calls == 1
+        assert worker.close_calls == 1
+        assert worker.unregister_calls == ["context-retry"]
+        assert worker.mode_gate.active_mode == "streaming"
+        with pytest.raises(RealtimeSessionLimitError):
+            factory.create(
+                language="zh",
+                prompt="",
+                options=RealtimeTranscriptionOptions(),
+            )
+
+        await session.close()
+
+        assert session._finalized
+        assert session._finished.is_set()
+        assert context.exit_calls == 2
+        assert worker.close_calls == 1
+        assert worker.unregister_calls == ["context-retry"]
+        assert worker.mode_gate.active_mode is None
+        factory.release(session)
+        replacement = factory.create(
+            language="zh",
+            prompt="",
+            options=RealtimeTranscriptionOptions(),
+        )
+        factory.release(replacement)
+
+    asyncio.run(scenario())
+
+
+def test_finalize_retries_mode_gate_release_failure_without_repeating_unregister() -> None:
+    async def scenario() -> None:
+        worker = FakeStreamingWorker()
+        gate = FailOnceModeGate()
+        worker.mode_gate = gate  # type: ignore[assignment]
+        worker.mode_scheduler = None
+        factory, session = _factory_session(worker, "mode-release-retry")
+        connect = asyncio.create_task(session.connect())
+        await worker.session_registered.wait()
+        worker.push(
+            "mode-release-retry",
+            {
+                "type": "session.opened",
+                "session_id": "mode-release-retry",
+                "language": "zh",
+            },
+        )
+        await connect
+
+        with pytest.raises(RuntimeError, match="fake mode gate release failure"):
+            await session.close()
+
+        assert not session._finalized
+        assert not session._finished.is_set()
+        assert session._mode_lease is not None
+        assert "mode-release-retry" not in worker._queues
+        assert gate.release_calls == 1
+        assert worker.close_calls == 1
+        assert worker.unregister_calls == ["mode-release-retry"]
+        assert gate.active_mode == "streaming"
+        with pytest.raises(RealtimeSessionLimitError):
+            factory.create(
+                language="zh",
+                prompt="",
+                options=RealtimeTranscriptionOptions(),
+            )
+
+        await session.close()
+
+        assert session._finalized
+        assert session._finished.is_set()
+        assert gate.release_calls == 2
+        assert worker.close_calls == 1
+        assert worker.unregister_calls == ["mode-release-retry"]
+        assert gate.active_mode is None
+        factory.release(session)
+        replacement = factory.create(
+            language="zh",
+            prompt="",
+            options=RealtimeTranscriptionOptions(),
+        )
+        factory.release(replacement)
+
+    asyncio.run(scenario())
+
+
 def test_session_commit_propagates_want_segments_true() -> None:
     async def scenario() -> None:
         worker = FakeStreamingWorker()
@@ -727,6 +1152,7 @@ def test_session_commit_times_out_when_worker_never_finishes() -> None:
     async def scenario() -> None:
         worker = FakeStreamingWorker()
         worker.timeout_seconds = 0.05
+        worker.close_gate = asyncio.Event()
         session = Qwen3StreamingSession(
             worker=worker,  # type: ignore[arg-type]
             language="zh",
@@ -744,7 +1170,16 @@ def test_session_commit_times_out_when_worker_never_finishes() -> None:
         with pytest.raises(TimeoutError):
             await session.commit()
 
-        await session.close()
+        close = asyncio.create_task(session.close())
+        await asyncio.wait_for(worker.close_started.wait(), timeout=1)
+        assert not close.done()
+        assert worker.unregister_calls == []
+        assert worker.mode_gate.active_mode == "streaming"
+        worker.close_gate.set()
+        await asyncio.wait_for(close, timeout=1)
+        assert worker.close_calls == 1
+        assert worker.unregister_calls == ["sess_test"]
+        assert worker.mode_gate.active_mode is None
 
     asyncio.run(scenario())
 
@@ -774,6 +1209,41 @@ def test_worker_error_always_delivers_its_cause_and_ends_iterator(queued: int) -
     asyncio.run(scenario())
 
 
+def test_reader_validation_failure_waits_for_actual_reap_before_finalized() -> None:
+    async def scenario() -> None:
+        worker = FakeStreamingWorker()
+        worker.close_gate = asyncio.Event()
+        session = Qwen3StreamingSession(
+            worker=worker, language="zh", prompt="", session_id="invalid-watermark"
+        )
+        connect = asyncio.create_task(session.connect())
+        await asyncio.wait_for(worker.session_registered.wait(), 1)
+        worker.push(session.session_id, {"type": "session.opened"})
+        await connect
+        worker.push(session.session_id, {
+            "type": "event", "kind": "partial", "sample_watermark": -1,
+        })
+        await asyncio.wait_for(worker.close_started.wait(), 1)
+        waiter = asyncio.create_task(session.wait_finalized())
+        try:
+            events = [event async for event in session.events()]
+            assert len(events) == 1
+            assert events[0].error_code == "worker_unavailable"
+            assert worker.mode_gate.active_mode == "streaming"
+            assert worker.unregister_calls == []
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(waiter), 0.05)
+        finally:
+            worker.close_gate.set()
+            await session.close()
+            await asyncio.wait_for(waiter, 1)
+        assert worker._closed
+        assert worker.mode_gate.active_mode is None
+        assert worker.unregister_calls == [session.session_id]
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("cancel_error", [False, True])
 def test_close_ends_parked_event_consumer_even_when_cancel_send_fails(cancel_error: bool) -> None:
     async def scenario() -> None:
@@ -791,12 +1261,51 @@ def test_close_ends_parked_event_consumer_even_when_cancel_send_fails(cancel_err
         await asyncio.sleep(0)
         if cancel_error:
             worker.send_error = RuntimeError("cancel failed")
-            with pytest.raises(RuntimeError, match="cancel failed"):
-                await session.close()
-        else:
-            await session.close()
+        await session.close()
+        await session.wait_finalized()
         assert await asyncio.wait_for(consumer, 0.2) == []
         assert worker.mode_gate.active_mode is None
         assert worker.unregister_calls == [session.session_id]
+        assert worker.close_calls == 1
+        assert worker._closed
+
+    asyncio.run(scenario())
+
+
+def test_failed_reap_propagates_and_keeps_lease_until_retry_succeeds() -> None:
+    async def scenario() -> None:
+        worker = FakeStreamingWorker()
+        worker.send_error = RuntimeError("cancel failed")
+        worker.close_error = RuntimeError("reap failed")
+        session = Qwen3StreamingSession(
+            worker=worker, language="zh", prompt="", session_id="reap-required"
+        )
+        connect = asyncio.create_task(session.connect())
+        await asyncio.sleep(0)
+        worker.push(session.session_id, {"type": "session.opened"})
+        await connect
+
+        async def collect() -> list[StreamingAsrEvent]:
+            return [event async for event in session.events()]
+
+        consumer = asyncio.create_task(collect())
+        await asyncio.sleep(0)
+
+        with pytest.raises(RuntimeError, match="reap failed"):
+            await session.close()
+
+        assert await asyncio.wait_for(consumer, 0.2) == []
+        assert worker.mode_gate.active_mode == "streaming"
+        assert worker.unregister_calls == []
+        assert not session._finished.is_set()
+
+        worker.close_error = None
+        await session.close()
+        await session.wait_finalized()
+
+        assert worker.close_calls == 2
+        assert worker.unregister_calls == [session.session_id]
+        assert worker.mode_gate.active_mode is None
+        assert worker._closed
 
     asyncio.run(scenario())
