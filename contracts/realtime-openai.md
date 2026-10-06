@@ -1,6 +1,6 @@
 # SpeechRail Realtime current-only 契约
 
-> 契约版本：`6.1.0`；生效日期：2026-10-05。唯一机器 schema 是
+> 契约版本：`6.3.0`；生效日期：2026-10-06。唯一机器 schema 是
 > [`realtime-events.schema.json`](realtime-events.schema.json)，字段责任表是
 > [`realtime-field-matrix.json`](realtime-field-matrix.json)。本版本直接切换，不提供旧事件、
 > 旧字段、旧 profile alias 或 `/v2` 兼容层。
@@ -52,6 +52,12 @@ query 不得携带 key。每连接有独立 session、epoch、sequence 与临时
     },
     "speechrail": {
       "task": "caption",
+      "asr": {
+        "preview_interval_ms": 1000,
+        "max_segment_ms": 20000,
+        "finalization": "full_segment",
+        "final_deadline_ms": 10000
+      },
       "alignment": {"enabled": false},
       "diarization": {"enabled": false}
     }
@@ -64,6 +70,17 @@ query 不得携带 key。每连接有独立 session、epoch、sequence 与临时
   `turn_detection` 互斥，不把 Silero 冒充官方云模型能力。
 - `session.speechrail.task` 为 `conversation`、`caption`、`transcription`、`render` 或
   `voice_design`。Alignment、Diarization、TTS 均为任务 opt-in，不随规格自动开启。
+- `session.speechrail.asr` 是可选的中立策略对象：`preview_interval_ms` 默认 `1000`，范围
+  `100...5000`；`max_segment_ms` 默认 `20000`，范围 `1000...30000`，且不得小于预览间隔；
+  `finalization` 默认 `full_segment`，只接受 `full_segment` / `streaming_finalize`。
+  `final_deadline_ms` 为正整数并不得超过当前 request timeout；省略时沿用该 timeout。
+  这些字段必须用 JSON 整数值，不接受布尔值或小数形式。
+- 成功的 `session.updated` 回显所请求的 ASR 策略和 `effective_max_segment_ms`。有效段预算是
+  请求值、服务资源上限、能力上限与解码器上限的最小值；超出请求或无效字段直接拒绝，
+  不静默夹取。场景预设由客户端选择，服务端不依据 task 推断策略或自动打开其他能力。
+- `session.created` 和每个成功的 `session.updated` 都必须回显完整的有效 ASR 策略。默认值为
+  `preview_interval_ms=1000`、`max_segment_ms=20000`、`finalization=full_segment`、
+  `final_deadline_ms=120000`、`effective_max_segment_ms=20000`；该默认值与 `task` 无关。
 - `session.speechrail.expected_asr_revision` 只绑定连接的 ASR 模型身份，在 `session.updated`
   回显。TTS opt-in 只启用能力，不选择音色或绑定 TTS 模型。
 - 模型、语言、能力与预算在首个工作前验证；TTS 音色与 revision 在每次
@@ -81,7 +98,7 @@ query 不得携带 key。每连接有独立 session、epoch、sequence 与临时
 |---|---|---|
 | `input_audio_buffer.append` | `event_id`, `audio` | 追加 24 kHz PCM16 |
 | `input_audio_buffer.commit` | `event_id` | 结束当前输入 turn，最多产生一个 ASR final；`event_id` 会在对应终态原样回显 |
-| `input_audio_buffer.clear` | `event_id` | 清空未提交输入；不产生 final |
+| `input_audio_buffer.clear` | `event_id` | 丢弃尚未冻结的输入；已发段边界但尚无终态的冻结段以 `failed` 收尾 |
 | `speechrail.diarization.finish` | `event_id` | 关闭已 opt-in 的 diarization 会话；同 `event_id` 可重放，异 `event_id` 拒绝 |
 | `speechrail.tts.start` | `event_id`, `request_id`, `task`, `voice`, `audio_window_bytes` | 开始一个有界消费窗口的增量 TTS utterance |
 | `speechrail.tts.append_text` | `event_id`, `request_id`, `sequence`, `text` | 追加不可变稳定文本；sequence 从 0 连续递增 |
@@ -109,6 +126,7 @@ snapshot 的对应 voice 读取。系统音色校验 CustomVoice 制品，克隆
 ### 5.1 ASR
 
 - `session.created`、`session.updated`
+- `speechrail.transcription.segment_closed`
 - `conversation.item.input_audio_transcription.delta`
 - `conversation.item.input_audio_transcription.completed`
 - `conversation.item.input_audio_transcription.failed`
@@ -116,7 +134,28 @@ snapshot 的对应 voice 读取。系统音色校验 CustomVoice 制品，克隆
 服务端没有 `input_audio_buffer.speech_started` / `speech_stopped`，也没有
 官方 `input_audio_buffer.committed` / `cleared` 回执。普通 `commit` 保持原有终态行为；
 需要可靠结束录音的调用方应使用下述可选 SpeechRail 完成屏障。
-`clear` 是本地丢弃语义（其后的一次 commit 产生空 final）。
+`clear` 丢弃尚未冻结的输入，不为这些字节创建 item、边界或终态。若某个非空段已发出
+`segment_closed`、但其 ASR 终态尚未发送，`clear` 不能撤回该边界，必须为该 item 发送唯一的
+`conversation.item.input_audio_transcription.failed`，错误码为 `backend_error`，说明该段因
+clear 取消。此后对空缓冲区执行一次 `commit` 会产生空 `completed`。
+
+`session.speechrail.asr` 在首个 PCM 前原子更新；当前或待处理输入非空时拒绝更新。每个冻结的
+非空段在文字终态前发送 `speechrail.transcription.segment_closed`，报告该 item 的
+24 kHz wire 样本半开区间 `[start, end)` 和关闭原因 `vad`、`client_commit` 或
+`budget_rollover`。只有 client commit 关闭可选带 `commit_event_id`。预算切段仅说明输入段
+冻结，不代表语义结束，也不应单独触发调用方的一轮回复；空输入不创建虚假的样本区间。
+
+```json
+{
+  "type": "speechrail.transcription.segment_closed",
+  "event_id": "evt_3",
+  "session_id": "sess_1",
+  "sequence": 7,
+  "item_id": "item_2",
+  "sample_span": {"start": 24000, "end": 48000},
+  "reason": "budget_rollover"
+}
+```
 
 ### 可选输入完成屏障
 
@@ -180,7 +219,8 @@ hypothesis 可修订，使用 `speechrail.transcription.hypothesis`：
   `input_audio_buffer.append` 的分包粒度。
 - **每个 utterance 恰好一个终态。** commit 已 ACK 但后续读取挂起时，utterance 必须在
   deadline 后以 `failed` 收尾并释放资源，不得既无终态也不释放；读取成功后的错误不再产生
-  矛盾的第二个终态。
+  矛盾的第二个终态。`clear` 若取消已经冻结但仍未发送终态的段，也必须发送唯一 `failed`
+  终态；仍未冻结的输入只是被丢弃，不创建 item。
 - **空 final 不等于"用户没说话"。** 空 `transcript` 有两个来源：`clear` 之后的那一次
   commit（此时确实没有可提交的语音），以及语音已经准入、但 ASR 终态文本经轻量 ITN
   之后为空。调用方无法从事件本身区分这两者，因此**已经向用户展示过该 item 的
@@ -331,7 +371,10 @@ request 返回 `tts_not_active`，绝不归还到新 request。
 `backend_not_ready`、`tts_request_invalid`、`tts_in_progress`、`tts_not_active`、
 `voice_not_found`、`voice_not_available`、`voice_revision_conflict`、
 `model_revision_conflict`、`tts_sequence_invalid`、`tts_input_closed`、`tts_input_timeout`、
-`tts_stream_limit_exceeded`、`tts_backpressure`、`tts_audio_ack_invalid`、`tts_backend_failed`、`invalid_state`。
+`tts_stream_limit_exceeded`、`tts_backpressure`、`tts_audio_ack_invalid`、`tts_backend_failed`、
+`invalid_state`、`asr_policy_invalid`、`asr_policy_unsupported`、`asr_buffer_overflow`。
+策略形状、范围或 deadline 无效时返回 `asr_policy_invalid`；后端不支持所请求策略时返回
+`asr_policy_unsupported`；无法在有界资源内接纳音频时返回 `asr_buffer_overflow`。
 
 ## 7. 明确拒绝项
 

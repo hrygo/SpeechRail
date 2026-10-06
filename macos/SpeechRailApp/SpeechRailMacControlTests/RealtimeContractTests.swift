@@ -1188,6 +1188,32 @@ final class RealtimeContractTests: XCTestCase {
         XCTAssertNil(speechrail?["transcription"])
     }
 
+    func testSessionUpdateASRPolicyMatchesSharedWireFixture() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let fixture = try jsonObject(
+            at: repoRoot.appendingPathComponent(
+                "tests/fixtures/realtime-current/client/session-update-asr-policy.json"
+            )
+        )
+        let event = SpeechRailSessionUpdate(
+            model: RealtimeASRClientModelFixture.canonical,
+            task: .transcription,
+            asrPolicy: SpeechRailASRPolicy(
+                previewIntervalMilliseconds: 800,
+                maxSegmentMilliseconds: 20_000,
+                finalization: .fullSegment,
+                finalDeadlineMilliseconds: 8_000
+            ),
+            eventID: "evt_asr_policy"
+        )
+
+        XCTAssertEqual(event.jsonObject as NSDictionary, fixture as NSDictionary)
+    }
+
     func testSessionUpdateCarriesLanguageAndKeywordsOnlyWhenConfigured() {
         let configured = SpeechRailSessionUpdate(
             model: RealtimeASRClientModelFixture.canonical,

@@ -22,6 +22,7 @@ from speechrail.compatibility.openai_realtime import (
     parse_tts_audio_ack,
     parse_tts_cancel,
     parse_tts_start,
+    transcription_segment_closed,
     tts_audio_delta,
     tts_cancelled,
     tts_completed,
@@ -279,3 +280,21 @@ def test_server_tts_builders_match_the_shared_schema() -> None:
 
     for sequence, event in enumerate(events, start=12):
         _VALIDATOR.validate(_envelope(event, sequence=sequence))
+
+
+def test_segment_closed_builder_matches_the_shared_schema() -> None:
+    event = transcription_segment_closed(
+        item_id="item_asr_1",
+        sample_span=(0, 24_000),
+        reason="client_commit",
+        commit_event_id="evt_commit_1",
+    )
+
+    _VALIDATOR.validate(_envelope(event))
+
+    without_commit_id = transcription_segment_closed(
+        item_id="item_asr_2",
+        sample_span=(24_000, 48_000),
+        reason="budget_rollover",
+    )
+    _VALIDATOR.validate(_envelope(without_commit_id, sequence=2))

@@ -17,13 +17,21 @@ import base64
 import math
 from typing import Any
 
+import pytest
+
 from realtime_wire import server_vad, session_update
 from speechrail.application.realtime_openai import OpenAIRealtimeSession
 from speechrail.application.services import AppOverrides, build_app_services
+from speechrail.compatibility.openai_realtime import RealtimeAdapterError
 from speechrail.config import Settings
 from test_realtime_openai import FakeSpeechSynthesizer, FakeStreamingFactory, FakeTranscriber
 
 _VAD_UPDATE: dict[str, Any] = session_update(endpointing=server_vad())
+_VAD_UPDATE["session"]["speechrail"]["asr"] = {
+    "preview_interval_ms": 1_000,
+    "max_segment_ms": 1_000,
+    "finalization": "full_segment",
+}
 
 
 def _sine_frame_16k() -> bytes:
@@ -77,7 +85,9 @@ def _build(**settings_overrides: Any) -> tuple[Any, FakeStreamingFactory]:
     return services, factory
 
 
-async def _stream_speech_then_commit(**settings_overrides: Any) -> list[dict[str, Any]]:
+async def _stream_speech_then_commit(
+    *, frame_count: int = 12, **settings_overrides: Any
+) -> list[dict[str, Any]]:
     """Enable server_vad, stream 12 admitted speech frames, then commit explicitly."""
     services, _ = _build(**settings_overrides)
     sent: list[dict[str, Any]] = []
@@ -89,7 +99,7 @@ async def _stream_speech_then_commit(**settings_overrides: Any) -> list[dict[str
     session = OpenAIRealtimeSession(services, session_id="s", send=send)
     await session._update_session(_VAD_UPDATE)
     frame = _sine_frame_16k()
-    for _ in range(12):
+    for _ in range(frame_count):
         await session._append_audio(
             {"type": "input_audio_buffer.append", "audio": _b64(frame)}
         )
@@ -120,18 +130,45 @@ def test_commit_during_admitted_utterance_produces_single_sequence() -> None:
 
 
 def test_rollover_during_admitted_utterance_produces_single_sequence_per_item() -> None:
-    """Finding: each rollover commit used to duplicate the empty close-out.
-    A small buffer cap forces several rollovers inside one continuous utterance."""
+    """The smallest valid service budget rolls over without duplicating terminals."""
     sent = asyncio.run(
         _stream_speech_then_commit(
             realtime_speech_admission_enabled=True,
-            max_realtime_buffer_bytes=4096,
+            max_realtime_buffer_bytes=128_000,
+            frame_count=36,
         )
     )
     types = [event["type"] for event in sent]
     completed = _completed_events(sent)
     assert len(completed) >= 2, f"rollover never triggered: {types}"
     assert all(event["transcript"] == "你好" for event in completed)
+    boundaries = [
+        event for event in sent
+        if event["type"] == "speechrail.transcription.segment_closed"
+    ]
+    assert len(boundaries) == len(completed)
+    assert boundaries[0]["reason"] == "budget_rollover"
+    for boundary in boundaries:
+        terminal = next(
+            event for event in completed if event["item_id"] == boundary["item_id"]
+        )
+        assert sent.index(boundary) < sent.index(terminal)
+
+
+def test_buffer_budget_below_one_second_fails_closed() -> None:
+    async def run() -> None:
+        services, _ = _build(max_realtime_buffer_bytes=4096)
+
+        async def send(_event: dict[str, Any]) -> int:
+            return 1
+
+        session = OpenAIRealtimeSession(services, session_id="undersized-budget", send=send)
+        with pytest.raises(RealtimeAdapterError) as exc_info:
+            await session._update_session(_VAD_UPDATE)
+        assert exc_info.value.code == "asr_policy_invalid"
+        await session.close()
+
+    asyncio.run(run())
 
 
 def test_rollover_during_explicit_commit_never_reenters_commit_lock() -> None:
@@ -142,7 +179,7 @@ def test_rollover_during_explicit_commit_never_reenters_commit_lock() -> None:
     async def run() -> None:
         services, _ = _build(
             realtime_speech_admission_enabled=True,
-            max_realtime_buffer_bytes=4096,
+            max_realtime_buffer_bytes=128_000,
         )
 
         async def send(_event: dict[str, Any]) -> int:
@@ -151,15 +188,16 @@ def test_rollover_during_explicit_commit_never_reenters_commit_lock() -> None:
         session = OpenAIRealtimeSession(services, session_id="s", send=send)
         await session._update_session(_VAD_UPDATE)
         frame = _sine_frame_16k()
-        for _ in range(4):
-            await session._append_audio(
-                {"type": "input_audio_buffer.append", "audio": _b64(frame)}
-            )
-        assert session._buffered_audio_bytes == 4096
+        wire_audio = b"".join([frame] * 31) + frame[:768]
+        await session._append_audio(
+            {"type": "input_audio_buffer.append", "audio": _b64(wire_audio)}
+        )
+        assert session._buffered_audio_bytes == 31_744
         assert session._speech_admission is not None
         assert session._speech_admission.state == "ACTIVE"
-        # An odd wire tail leaves one PCM16 sample for admission.finish() to
-        # emit as audio while _commit_audio owns the lock.
+        # The unfinished VAD frame is below the 1,000 ms segment cap. Adding
+        # one sample makes admission.finish() cross it while _commit_audio owns
+        # the lock, exercising the in-commit rollover path.
         session._vad_raw_buffer.extend(b"\x01\x00")
         await asyncio.wait_for(session._commit_audio("client"), timeout=0.5)
         await session.close()
