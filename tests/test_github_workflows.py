@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,10 +45,12 @@ def test_ci_is_reusable_and_keeps_service_and_app_runner_boundaries() -> None:
     assert jobs["test"]["runs-on"] == "${{ matrix.os }}"
     assert jobs["test"]["strategy"]["matrix"]["os"] == ["macos-26"]
     assert jobs["macos-app"]["runs-on"] == "macos-26"
+    assert jobs["swift-tests"]["runs-on"] == "macos-26"
     # The heavy gates hang off change-scope; `package` follows `test` so a
     # skipped Python gate skips the wheel rather than publishing an untested one.
     assert jobs["test"]["needs"] == ["change-scope"]
     assert jobs["macos-app"]["needs"] == ["change-scope"]
+    assert jobs["swift-tests"]["needs"] == ["change-scope"]
     assert jobs["test"]["if"] == "${{ needs.change-scope.outputs.run_python == 'true' }}"
     assert (
         jobs["macos-app"]["if"]
@@ -84,8 +89,10 @@ def test_ci_reuses_the_tested_wheel_artifact_in_the_package_job() -> None:
         if isinstance(step, dict) and isinstance(step.get("run", ""), str)
     )
 
-    assert "uv build --no-sources --wheel" in test_run_text
-    assert "SPEECHRAIL_WHEEL_PATH" in test_run_text
+    gate = (ROOT / "scripts/ci_python_gate.sh").read_text()
+    assert "bash scripts/ci_python_gate.sh" in test_run_text
+    assert "uv build --no-sources --wheel" in gate
+    assert "SPEECHRAIL_WHEEL_PATH" in gate
     assert "speechrail-wheel-candidate" in ci_text
     assert any(
         isinstance(step, dict)
@@ -109,16 +116,8 @@ def test_ci_reuses_the_tested_wheel_artifact_in_the_package_job() -> None:
     assert "tests/test_wheel_contents.py" not in package_run_text
 
 
-def test_ci_overlaps_the_native_wheel_build_with_the_test_suite() -> None:
-    """The wheel build and the suite must stay concurrent, and stay honest.
-
-    The wheel is the job's long pole (~3m of Swift release compilation) and the
-    suite consumes nothing it produces, so running them back to back put both
-    on the critical path. Two details are load-bearing and easy to regress into
-    a silent serial run: the sync must carry the native-build opt-out, and the
-    foreground `uv run` must pass `--no-sync` (a bare `uv run` re-syncs the
-    project, re-entering the build hook without the opt-out).
-    """
+def test_ci_overlaps_native_build_without_rebuilding_the_wheel_in_pytest() -> None:
+    """Checkout tests overlap the build; wheel tests reuse its successful output."""
 
     workflow = _workflow("ci.yml")
     jobs = _jobs(workflow)
@@ -138,7 +137,8 @@ def test_ci_overlaps_the_native_wheel_build_with_the_test_suite() -> None:
         for step in test_steps
         if isinstance(step, dict) and step.get("name") == "Build wheel and run test suite"
     )
-    script = overlap["run"]
+    assert overlap["run"] == "bash scripts/ci_python_gate.sh"
+    script = (ROOT / "scripts/ci_python_gate.sh").read_text()
     # The build is backgrounded and awaited by PID within the same step; each
     # `run:` is a fresh shell, so a PID from an earlier step cannot be waited on.
     assert "uv build --no-sources --wheel" in script
@@ -147,12 +147,67 @@ def test_ci_overlaps_the_native_wheel_build_with_the_test_suite() -> None:
     assert "uv run --no-sync pytest --cov=src" in script
     assert "uv run pytest" not in script
     # A failing suite must not be masked by a successful build, or vice versa.
-    assert "pytest_status=$?" in script
-    assert "exit \"$pytest_status\"" in script
+    assert "suite_status=$?" in script
+    assert 'exit "$suite_status"' in script
+    assert "--ignore=tests/test_wheel_contents.py" in script
+    assert "--cov-append" in script
 
     # The opt-out must never reach the release wheel, or the published artifact
     # would ship without the worker.
-    assert "SPEECHRAIL_SKIP_NATIVE_WORKER_BUILD" not in script
+    assert "env -u SPEECHRAIL_SKIP_NATIVE_WORKER_BUILD" in script
+
+
+@pytest.mark.parametrize(
+    ("scope", "python", "swift", "failed_job", "result", "expected"),
+    [
+        ("full", "true", "true", None, "success", 0),
+        ("swift", "false", "true", None, "success", 0),
+        ("python", "true", "false", None, "success", 0),
+        ("meta", "false", "false", None, "success", 0),
+        ("explicit", "true", "false", None, "success", 0),
+        ("full", "true", "true", "SWIFT_RESULT", "failure", 1),
+        ("swift", "false", "true", "SWIFT_RESULT", "skipped", 1),
+        ("swift", "false", "true", "MACOS_RESULT", "skipped", 1),
+        ("python", "true", "false", "TEST_RESULT", "skipped", 1),
+        ("explicit", "true", "false", "PACKAGE_RESULT", "skipped", 1),
+        ("meta", "false", "false", "QUALITY_RESULT", "skipped", 1),
+        ("full", "true", "true", "SWIFT_RESULT", "cancelled", 1),
+        ("full", "true", "true", "SWIFT_RESULT", "", 1),
+    ],
+)
+def test_summary_requires_every_selected_gate(
+    tmp_path: Path,
+    scope: str,
+    python: str,
+    swift: str,
+    failed_job: str | None,
+    result: str,
+    expected: int,
+) -> None:
+    jobs = _jobs(_workflow("ci.yml"))
+    assert "swift-tests" in jobs["gate-summary"]["needs"]
+    script = jobs["gate-summary"]["steps"][0]["run"]
+    values = {
+        "SCOPE": scope,
+        "RUN_PYTHON": python,
+        "RUN_SWIFT": swift,
+        "QUALITY_RESULT": "success",
+        "TEST_RESULT": "success" if python == "true" else "skipped",
+        "PACKAGE_RESULT": "success" if python == "true" else "skipped",
+        "MACOS_RESULT": "success" if swift == "true" else "skipped",
+        "SWIFT_RESULT": "success" if swift == "true" else "skipped",
+        "GITHUB_STEP_SUMMARY": str(tmp_path / "summary.md"),
+    }
+    if failed_job:
+        values[failed_job] = result
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        env={**os.environ, **values},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert completed.returncode == expected, completed.stdout + completed.stderr
 
 
 def test_release_blocks_publish_until_tag_ci_and_unsigned_dmg_are_verified() -> None:

@@ -143,29 +143,10 @@ jobs:
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: ${{ env.UV_VERSION }}
-          enable-cache: false
-
-      # Do NOT pin UV_CACHE_DIR here: GitHub does not expand `~` in env
-      # values, so uv would write into a literal `~` directory while
-      # actions/cache resolves the path to $HOME/.cache/uv. The save step
-      # then fails with "Path Validation Error ... no cache is being
-      # saved" and the cache never exists. uv's own runner default is
-      # already $HOME/.cache/uv, which is what the path below resolves to.
-      #
-      # setup-uv keys its cache on the uv.lock hash. A release only rewrites the
-      # project's own version inside uv.lock, so that key changes on every
-      # release and forces a full ~85MB re-download. restore-keys falls back to
-      # the newest cache for this platform; uv is content-addressed, so it only
-      # fetches what genuinely changed.
-      # Pinned to v6: v4.3.0 still targets the Node.js 20 runtime that GitHub
-      # deprecated, and v6 is the same action with unchanged inputs.
-      - name: Restore uv download cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/uv
-          key: uv-${{ runner.os }}-${{ runner.arch }}-${{ env.UV_VERSION }}-${{ hashFiles('uv.lock') }}
-          restore-keys: |
-            uv-${{ runner.os }}-${{ runner.arch }}-${{ env.UV_VERSION }}-
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: ci-pruned-v1
+          prune-cache: true
 
       - name: Set up Python 3.14.7
         run: uv python install 3.14.7
@@ -243,32 +224,31 @@ jobs:
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: ${{ env.UV_VERSION }}
-          enable-cache: false
-
-      # Do NOT pin UV_CACHE_DIR here: GitHub does not expand `~` in env
-      # values, so uv would write into a literal `~` directory while
-      # actions/cache resolves the path to $HOME/.cache/uv. The save step
-      # then fails with "Path Validation Error ... no cache is being
-      # saved" and the cache never exists. uv's own runner default is
-      # already $HOME/.cache/uv, which is what the path below resolves to.
-      #
-      # setup-uv keys its cache on the uv.lock hash. A release only rewrites the
-      # project's own version inside uv.lock, so that key changes on every
-      # release and forces a full ~85MB re-download. restore-keys falls back to
-      # the newest cache for this platform; uv is content-addressed, so it only
-      # fetches what genuinely changed.
-      # Pinned to v6: v4.3.0 still targets the Node.js 20 runtime that GitHub
-      # deprecated, and v6 is the same action with unchanged inputs.
-      - name: Restore uv download cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/uv
-          key: uv-${{ runner.os }}-${{ runner.arch }}-${{ env.UV_VERSION }}-${{ hashFiles('uv.lock') }}
-          restore-keys: |
-            uv-${{ runner.os }}-${{ runner.arch }}-${{ env.UV_VERSION }}-
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: ci-pruned-v1
+          prune-cache: true
 
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
+
+      - name: Fingerprint native toolchain
+        id: native-toolchain
+        run: |
+          test "$(uname -m)" = "arm64"
+          fingerprint=$({ xcodebuild -version; xcrun --sdk macosx --show-sdk-version; swift --version; } | shasum -a 256 | cut -d ' ' -f 1)
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+
+      - name: Restore native build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: native/diarization/.build
+          key: native-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.fingerprint }}-${{ hashFiles('native/diarization/Package.swift', 'hatch_build.py', 'scripts/ci_build_cache.py') }}-${{ hashFiles('native/diarization/Sources/**') }}
+          restore-keys: |
+            native-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.fingerprint }}-${{ hashFiles('native/diarization/Package.swift', 'hatch_build.py', 'scripts/ci_build_cache.py') }}-
+
+      - name: Restore unchanged native input timestamps
+        run: python3 scripts/ci_build_cache.py restore --manifest native/diarization/.build/ci-inputs.json native/diarization
 
       - name: Install locked project dependencies
         env:
@@ -280,44 +260,11 @@ jobs:
           SPEECHRAIL_SKIP_NATIVE_WORKER_BUILD: "1"
         run: uv sync --locked --extra dev --extra mcp
 
-      # The wheel build is this job's long pole (~3m of Swift release
-      # compilation) and the suite reads nothing it produces, so build it in
-      # the background and run the suite against the same checkout meanwhile.
-      # Start, await and check happen in ONE step on purpose: each `run:` is a
-      # fresh shell, so a PID recorded by an earlier step is not a child of the
-      # shell that would `wait` on it.
-      #
-      # `--no-sync` is load-bearing. A bare `uv run` re-syncs the project, which
-      # re-enters the build hook WITHOUT the opt-out and pays the full compile
-      # again on the foreground path, silently restoring the serial cost.
       - name: Build wheel and run test suite
-        run: |
-          # No `set -e`: both the build and the suite must be awaited so a
-          # failure in either is reported, and the wheel log is always shown.
-          set -uo pipefail
+        run: bash scripts/ci_python_gate.sh
 
-          mkdir -p dist
-          uv build --no-sources --wheel >"$RUNNER_TEMP/wheel-build.log" 2>&1 &
-          build_pid=$!
-
-          echo "--- pytest ---"
-          uv run --no-sync pytest --cov=src
-          pytest_status=$?
-
-          if wait "$build_pid"; then build_status=0; else build_status=$?; fi
-
-          echo "--- uv build ---"
-          cat "$RUNNER_TEMP/wheel-build.log"
-          if [[ "$build_status" -ne 0 ]]; then
-            echo "::error::wheel 构建失败，退出码 $build_status"
-            exit 1
-          fi
-
-          shopt -s nullglob
-          wheels=(dist/speechrail-*.whl)
-          test "${#wheels[@]}" -eq 1
-          echo "SPEECHRAIL_WHEEL_PATH=${wheels[0]}" >> "$GITHUB_ENV"
-          exit "$pytest_status"
+      - name: Snapshot native build inputs
+        run: python3 scripts/ci_build_cache.py snapshot --manifest native/diarization/.build/ci-inputs.json native/diarization
 
       - name: Verify the wheel installs itself without a checkout (macOS)
         if: runner.os == 'macOS'
@@ -338,8 +285,45 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  swift-tests:
+    name: Swift Package Tests
+    runs-on: macos-26
+    timeout-minutes: 15
+    needs: [change-scope]
+    if: ${{ needs.change-scope.outputs.run_swift == 'true' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify and fingerprint Apple toolchain
+        id: toolchain
+        run: |
+          test "$(uname -m)" = "arm64"
+          xcodebuild -showsdks | grep -F 'macOS 26'
+          fingerprint=$({ xcodebuild -version; xcrun --sdk macosx --show-sdk-version; swift --version; } | shasum -a 256 | cut -d ' ' -f 1)
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Swift package build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: macos/SpeechRailApp/.build
+          key: swift-test-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('macos/SpeechRailApp/Package.swift', 'macos/SpeechRailApp/Package.resolved', 'scripts/ci_build_cache.py') }}-${{ hashFiles('macos/SpeechRailApp/**/*.swift') }}
+          restore-keys: |
+            swift-test-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('macos/SpeechRailApp/Package.swift', 'macos/SpeechRailApp/Package.resolved', 'scripts/ci_build_cache.py') }}-
+
+      - name: Restore unchanged Swift input timestamps
+        run: python3 scripts/ci_build_cache.py restore --manifest macos/SpeechRailApp/.build/ci-inputs.json macos/SpeechRailApp
+
+      - name: Run Swift package tests
+        run: swift test --package-path macos/SpeechRailApp
+
+      - name: Snapshot Swift build inputs
+        run: python3 scripts/ci_build_cache.py snapshot --manifest macos/SpeechRailApp/.build/ci-inputs.json macos/SpeechRailApp
+
   macos-app:
-    name: macOS App Build & Tests
+    name: macOS App Build
     runs-on: macos-26
     timeout-minutes: 20
     needs: [change-scope]
@@ -352,15 +336,32 @@ jobs:
           persist-credentials: false
 
       - name: Verify Apple toolchain and arm64 runner
+        id: toolchain
         run: |
           test "$(uname -m)" = "arm64"
           xcodebuild -version
           xcodebuild -showsdks | grep -F 'macOS 26'
 
-      - name: Run Swift package tests
-        run: swift test --package-path macos/SpeechRailApp
+          fingerprint=$({ xcodebuild -version; xcrun --sdk macosx --show-sdk-version; swift --version; } | shasum -a 256 | cut -d ' ' -f 1)
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
 
-      # Deliberately `build`, never `test`. The step above already runs every
+      - name: Restore Xcode compilation cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/speechrail-ci-xcode/Build/Intermediates.noindex
+            ${{ runner.temp }}/speechrail-ci-xcode/Build/Products
+            ${{ runner.temp }}/speechrail-ci-xcode/SourcePackages
+            ${{ runner.temp }}/speechrail-ci-xcode/ModuleCache.noindex
+            ${{ runner.temp }}/speechrail-ci-xcode/ci-inputs.json
+          key: xcode-debug-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('macos/SpeechRailApp/**/*.pbxproj', 'macos/SpeechRailApp/**/*.xcconfig', 'macos/SpeechRailApp/**/Package.resolved', 'scripts/macos_app_build.sh', 'scripts/ci_build_cache.py') }}-${{ hashFiles('macos/SpeechRailApp/**/*.swift', 'macos/SpeechRailApp/**/*.plist', 'macos/SpeechRailApp/**/*.entitlements', 'macos/SpeechRailApp/**/*.xcscheme', 'macos/SpeechRailApp/**/Assets.xcassets/**') }}
+          restore-keys: |
+            xcode-debug-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('macos/SpeechRailApp/**/*.pbxproj', 'macos/SpeechRailApp/**/*.xcconfig', 'macos/SpeechRailApp/**/Package.resolved', 'scripts/macos_app_build.sh', 'scripts/ci_build_cache.py') }}-
+
+      - name: Restore unchanged Xcode input timestamps
+        run: python3 scripts/ci_build_cache.py restore --manifest "$RUNNER_TEMP/speechrail-ci-xcode/ci-inputs.json" macos/SpeechRailApp
+
+      # Deliberately `build`, never `test`. swift-tests runs every
       # test in macos/SpeechRailApp/SpeechRailMacControlTests through SwiftPM,
       # and SwiftPM is the superset: it compiles every `.swift` in that
       # directory, while the Xcode `Unit Test Sources` phase names a subset.
@@ -381,16 +382,15 @@ jobs:
       # require explicit per-run authorization.
       - name: Build unsigned App
         run: |
-          # UI tests take over the foreground and require explicit per-run authorization.
-          xcodebuild \
-            -project macos/SpeechRailApp/SpeechRailApp.xcodeproj \
-            -scheme SpeechRailApp \
-            -configuration Debug \
-            -destination 'platform=macOS' \
+          bash scripts/macos_app_build.sh \
+            --ci-derived-data "$RUNNER_TEMP/speechrail-ci-xcode" \
+            -- \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            ARCHS=arm64 \
-            build
+            ARCHS=arm64
+
+      - name: Snapshot Xcode build inputs
+        run: python3 scripts/ci_build_cache.py snapshot --manifest "$RUNNER_TEMP/speechrail-ci-xcode/ci-inputs.json" macos/SpeechRailApp
 
       - name: Lint macOS bundle metadata
         run: |
@@ -441,7 +441,7 @@ jobs:
     name: Gate Summary
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    needs: [change-scope, quality, test, macos-app, package]
+    needs: [change-scope, quality, test, swift-tests, macos-app, package]
     if: ${{ always() }}
 
     steps:
@@ -453,6 +453,7 @@ jobs:
           QUALITY_RESULT: ${{ needs.quality.result }}
           TEST_RESULT: ${{ needs.test.result }}
           MACOS_RESULT: ${{ needs.macos-app.result }}
+          SWIFT_RESULT: ${{ needs.swift-tests.result }}
           PACKAGE_RESULT: ${{ needs.package.result }}
         run: |
           set -euo pipefail
@@ -465,6 +466,7 @@ jobs:
             echo "| Quality Gates | $QUALITY_RESULT |"
             echo "| Test | $TEST_RESULT |"
             echo "| macOS App | $MACOS_RESULT |"
+            echo "| Swift Package Tests | $SWIFT_RESULT |"
             echo "| Package | $PACKAGE_RESULT |"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -511,7 +513,7 @@ jobs:
           # A skipped gate is only legitimate when its scope says so; anything
           # else must not be reported as a green run.
           for entry in "quality:$QUALITY_RESULT" "test:$TEST_RESULT" \
-                       "macos-app:$MACOS_RESULT" "package:$PACKAGE_RESULT"; do
+                       "macos-app:$MACOS_RESULT" "swift-tests:$SWIFT_RESULT" "package:$PACKAGE_RESULT"; do
             name="${entry%%:*}"; result="${entry##*:}"
             if [[ "$result" == "failure" || "$result" == "cancelled" ]]; then
               echo "::error::门禁 $name 结果为 $result"
@@ -519,6 +521,20 @@ jobs:
             fi
             if [[ "$result" == "skipped" && "$SCOPE" == "full" ]]; then
               echo "::error::scope=full 但门禁 $name 被跳过"
+              exit 1
+            fi
+            if [[ "$result" == "skipped" ]]; then
+              case "$name" in
+                quality) echo "::error::quality must never be skipped"; exit 1 ;;
+                test|package) selected="$RUN_PYTHON" ;;
+                macos-app|swift-tests) selected="$RUN_SWIFT" ;;
+              esac
+              if [[ "$selected" == "true" ]]; then
+                echo "::error::selected gate $name was skipped"
+                exit 1
+              fi
+            elif [[ "$result" != "success" ]]; then
+              echo "::error::unexpected gate result $name=$result"
               exit 1
             fi
           done
