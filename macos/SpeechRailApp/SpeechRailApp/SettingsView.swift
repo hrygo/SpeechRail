@@ -20,6 +20,8 @@ public struct SettingsView: View {
     /// 新密钥测试通过但写入安全保管库失败时的独立提示；连接结论本身仍然保留。
     @State private var keySaveError: String?
     @State private var backupErrorMessage: String?
+    @State private var backupDoneMessage: String?
+    @State private var restoreReport: RestoreReport?
     @State private var isChecking = false
     @State private var checkedModule: LLMModule?
     @State private var isAdvancedLLMConfigurationExpanded = false
@@ -56,7 +58,8 @@ public struct SettingsView: View {
                     onClearGlobalKey: clearGlobalKey,
                     onClearModuleKey: clearModuleKey,
                     onOpenDataDirectory: openDataDirectory,
-                    onBackupLibrary: backupLibrary
+                    onBackupLibrary: backupLibrary,
+                    onCheckBackup: checkBackupRestore
                 )
             }
             Tab("服务", systemImage: "server.rack") {
@@ -91,6 +94,22 @@ public struct SettingsView: View {
             }
         } message: {
             Text(backupErrorMessage ?? "无法完成备份。")
+        }
+        .alert(
+            "已备份",
+            isPresented: Binding(
+                get: { backupDoneMessage != nil },
+                set: { isPresented in
+                    if !isPresented { backupDoneMessage = nil }
+                }
+            )
+        ) {
+            Button("好", role: .cancel) { backupDoneMessage = nil }
+        } message: {
+            Text(backupDoneMessage ?? "")
+        }
+        .sheet(item: $restoreReport) { report in
+            restoreReportSheet(report)
         }
     }
 
@@ -382,17 +401,29 @@ public struct SettingsView: View {
             backupErrorMessage = "当前还没有可备份的记录库。"
             return
         }
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = "sessions-\(Self.backupStamp()).sqlite3"
-        panel.title = "备份记录库"
+        let panel = NSOpenPanel()
+        panel.title = "选择备份存放位置"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
         panel.canCreateDirectories = true
-        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        panel.prompt = "备份到这里"
+        guard panel.runModal() == .OK, let parent = panel.url else { return }
+        // 每次备份开一个新目录：用户可能还留着上一份，不能替他决定覆盖掉。
+        let destination = parent.appendingPathComponent(
+            "SpeechRail 备份 \(Self.backupStamp())", isDirectory: true
+        )
         Task { @MainActor in
             let store = SessionStore(directory: source.deletingLastPathComponent())
             do {
                 try await store.open()
                 do {
-                    try await store.backup(to: destination)
+                    // 必须是 `exportBackup` 而不是 `backup(to:)`：后者 VACUUM 出来的
+                    // 是**单个 .sqlite3**，没有 `manifest.json`；而唯一的恢复实现
+                    // `restorePreview` 明确拒绝没有清单的备份
+                    // （"备份缺少清单文件，不能作为可恢复的备份使用"）。
+                    // 走错这一条，App 能做出的备份，App 自己恢复不了。
+                    let bundle = try await store.exportBackup(to: destination)
+                    backupDoneMessage = "已备份到「\(bundle.lastPathComponent)」。"
                     await store.close()
                 } catch {
                     await store.close()
@@ -401,6 +432,105 @@ public struct SettingsView: View {
             } catch {
                 backupErrorMessage = error.localizedDescription
             }
+        }
+    }
+
+    /// 恢复预演（验收 5 / MC-67～MC-72）：把备份复制到**临时目录**当新库打开，
+    /// 核对文档、版本、引用与行动项关联，然后如实报告。
+    ///
+    /// **不切换当前库**——验收 5 要的是"恢复到临时新库后核对"，
+    /// 破坏性的库切换不在范围内，这里也不该替用户做。
+    private func checkBackupRestore() {
+        let panel = NSOpenPanel()
+        panel.title = "选择一份备份"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.prompt = "检查这份备份"
+        guard panel.runModal() == .OK, let bundle = panel.url else { return }
+        Task { @MainActor in
+            let scratch = FileManager.default.temporaryDirectory
+                .appendingPathComponent("speechrail-restore-\(UUID().uuidString)", isDirectory: true)
+            // 预演只在临时副本上做过，核对完就把临时目录收掉。
+            defer { try? FileManager.default.removeItem(at: scratch) }
+            do {
+                let preview = try await SessionStore.restorePreview(of: bundle, into: scratch)
+                restoreReport = RestoreReport(bundleName: bundle.lastPathComponent, preview: preview)
+            } catch {
+                backupErrorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    /// 一次恢复预演的结果。**不是**一次恢复——切换库不在这一步里。
+    private struct RestoreReport: Identifiable {
+        let id = UUID()
+        var bundleName: String
+        var preview: SessionStore.RestorePreview
+    }
+
+    /// 核对结果要说具体数目与还剩什么，不写"恢复成功"——
+    /// 这一步只做了核对，库还没换，说成功就是撒谎。
+    private func restoreReportSheet(_ report: RestoreReport) -> some View {
+        let preview = report.preview
+        return VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Text("这份备份核对结果")
+                .font(.headline)
+            Text("「\(report.bundleName)」· 备份来自 schema \(preview.sourceSchemaVersion)，当前库是 \(SessionStore.schemaVersion)。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                restoreFact("会议文档", preview.documentsReadable)
+                restoreFact("纪要版本", preview.versionsReadable)
+                restoreFact("行动项", preview.actionsReadable)
+                restoreFact("带原句的引用", preview.anchorsWithQuote)
+                restoreFact("采集会话", preview.restoredCounts.sessions)
+                restoreFact("转录行", preview.restoredCounts.lines)
+                HStack(alignment: .firstTextBaseline) {
+                    Text("引用完整性").font(.callout).foregroundStyle(.secondary)
+                    Spacer()
+                    Text(
+                        preview.references.isClean
+                            ? "通过"
+                            : "\(preview.references.problems.count) 处问题"
+                    )
+                    .font(.callout)
+                }
+            }
+
+            if !preview.problems.isEmpty {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Text("发现的问题").font(.callout).fontWeight(.medium)
+                    ForEach(preview.problems, id: \.self) { problem in
+                        Text("· \(problem)").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            Text(
+                preview.isRestorable
+                    ? "这份备份的内容是完整的。当前库没有被改动——真正切换需要你另行决定。"
+                    : "这份备份**不能**用来恢复：上面的问题没有解决之前，换库会丢东西。"
+            )
+            .font(.callout)
+            .foregroundStyle(preview.isRestorable ? Color.secondary : Color.orange)
+            .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                Spacer()
+                Button("好") { restoreReport = nil }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(SpeechRailDesignTokens.Layout.contentPadding)
+        .frame(minWidth: 380, alignment: .leading)
+    }
+
+    private func restoreFact(_ label: String, _ value: Int) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label).font(.callout).foregroundStyle(.secondary)
+            Spacer()
+            Text("\(value)").font(.callout).monospacedDigit()
         }
     }
 

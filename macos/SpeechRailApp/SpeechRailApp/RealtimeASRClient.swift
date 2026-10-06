@@ -1188,6 +1188,14 @@ public actor RealtimeASRClient {
         return eventID
     }
 
+    /// 只提交在途的那一句，不清缓冲、不结束分人、连接继续可用（MC-16 暂停边界）。
+    ///
+    /// 与 `drainAndClear` 的区别是刻意分开的：收尾走后者，因为它要把分人跑完并清空；
+    /// 暂停走这里，因为暂停之后这条连接还要接着录。
+    public func flushPendingUtterance() async throws {
+        _ = try await commit(eventID: UUID().uuidString)
+    }
+
     /// Discards the uncommitted input buffer. Repeating the operation on one
     /// connection is intentionally idempotent, but a new connection gets a
     /// fresh clear barrier.

@@ -1780,6 +1780,55 @@ public actor LLMProvider {
         throw LLMError.transport("等了很久也没整理完（超时）。")
     }
 
+    /// 后台响应的取消结论（MA-07/MC-30、§8.4）。
+    ///
+    /// 三种，不是一种：确认停下来了 / 这个端点根本没有取消接口 / 问过了但没得到确认。
+    /// 把后两种合并成"取消成功"就是在替用户断言一件我们并不知道的事。
+    public enum BackgroundCancellation: Equatable, Sendable {
+        case confirmed
+        case unsupported
+        case unconfirmed
+    }
+
+    /// 请求取消一个还在跑的后台响应。
+    ///
+    /// 兼容 OpenAI 的端点**不等于**支持 Responses 的取消扩展，所以这里
+    /// 按实际回应说话：`404 / 405 / 501` 记为"这个端点没有取消能力"，
+    /// 其它非 2xx 与传输错误都记为"没有确认"。调用方据此决定界面上写哪句话。
+    public func cancelBackground(
+        configuration: LLMConfiguration,
+        apiKey: String?,
+        responseID: String,
+        timeout: TimeInterval = 10
+    ) async -> BackgroundCancellation {
+        guard
+            configuration.isBaseURLValid,
+            !configuration.embedsCredential,
+            let url = URL(string: "\(configuration.normalizedBaseURL)/responses/\(responseID)/cancel")
+        else { return .unconfirmed }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        if let apiKey, !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        do {
+            let (data, response) = try await perform(request, timeout: timeout)
+            guard let http = response as? HTTPURLResponse else { return .unconfirmed }
+            switch http.statusCode {
+            case 404, 405, 501:
+                return .unsupported
+            case 200 ..< 300:
+                let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                // 只有服务方**明确**说停了，才算确认；2xx 但状态不明仍是不确认。
+                return (object?["status"] as? String) == "cancelled" ? .confirmed : .unconfirmed
+            default:
+                return .unconfirmed
+            }
+        } catch {
+            return .unconfirmed
+        }
+    }
+
     private func runStream(
         configuration: LLMConfiguration,
         messages: [LLMMessage],

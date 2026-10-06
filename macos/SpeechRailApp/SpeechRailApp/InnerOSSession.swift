@@ -282,16 +282,139 @@ public final class InnerOSSession {
     }
 
     /// 「写进纪要」：显式动作，写的是 `in_minutes = 1`（默认不进纪要是结构决定的）。
-    public func includeInMinutes(exchangeID: String) async {
-        try? await coordinator.setInnerOSInMinutes(exchangeID: exchangeID, included: true)
-        if let index = exchanges.firstIndex(where: { $0.id == exchangeID }) {
-            exchanges[index].inMinutes = true
+    ///
+    /// **返回是否真的写进了库。** 原来这里是 `try?` 吞掉错误、无论成败都把标签翻过去，
+    /// 于是写失败时界面照样显示「已写进纪要」——用户据此以为这句已经收进纪要，
+    /// 封存之后却发现没有。私密问答默认不进入纪要，这个标签就是他的判断依据，
+    /// 它不能说谎。
+    @discardableResult
+    public func includeInMinutes(exchangeID: String, excerpt: String? = nil) async -> Bool {
+        await setInMinutes(true, exchangeID: exchangeID, excerpt: excerpt)
+    }
+
+    /// 撤回「写进纪要」。原来这条**够不着**：`setInnerOSInMinutes(included: false)`
+    /// 在生产代码里没有调用方，界面上勾上之后只剩一枚静态标签，勾错了只能重新封存。
+    @discardableResult
+    public func excludeFromMinutes(exchangeID: String) async -> Bool {
+        await setInMinutes(false, exchangeID: exchangeID, excerpt: nil)
+    }
+
+    /// 写进纪要失败时的提示。`nil` = 没有失败。
+    public private(set) var supplementError: String?
+
+    /// 只有**真的写进库了**才翻标签。失败时列表保持原样，并把话说到界面上。
+    private func setInMinutes(
+        _ included: Bool,
+        exchangeID: String,
+        excerpt: String?
+    ) async -> Bool {
+        supplementError = nil
+        let changed: Bool
+        do {
+            changed = try await coordinator.setInnerOSInMinutes(
+                exchangeID: exchangeID, included: included, excerpt: excerpt
+            )
+        } catch {
+            supplementError = "\(error.localizedDescription)。这一句的「写进纪要」没有改动。"
+            return false
         }
+        guard changed else {
+            supplementError = "找不到这一条问答。这一句的「写进纪要」没有改动。"
+            return false
+        }
+        if let index = exchanges.firstIndex(where: { $0.id == exchangeID }) {
+            exchanges[index].inMinutes = included
+            // 撤回时一并清掉：库里已经把 excerpt 置空了，内存里留着会让界面上
+            // 那枚标签与用户"这句不要"的判断对不上。
+            exchanges[index].minutesExcerpt = included ? normalizedExcerpt(excerpt) : nil
+        }
+        return true
+    }
+
+    private func normalizedExcerpt(_ excerpt: String?) -> String? {
+        let trimmed = excerpt?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (trimmed?.isEmpty ?? true) ? nil : trimmed
     }
 
     /// 收起态那一行要的两个数：问过几次、几条已写进纪要。
     public var askedCount: Int { exchanges.count }
     public var inMinutesCount: Int { exchanges.filter(\.inMinutes).count }
+
+    // MARK: - 选句（MC-43）
+
+    /// 把一条答案切成用户可以逐句勾选的句子。
+    ///
+    /// MC-43 的粒度是"一句"：用户要能只把某半句写进纪要，而不是整条问答的
+    /// 全有或全无。切分只认**句末标点**，不猜语义——把"5% 流量"从
+    /// "先跑 5% 流量"里切出来，界面上就会出现一个用户从没说过、
+    /// 也没法认领的碎片。
+    ///
+    /// 小数点与版本号不断句：`0.5%`、`v3.5.6` 被切开之后用户看到的是两个
+    /// 他没写过的东西。规则与 `TeleprompterSegmenter` 一致，刻意不合并成
+    /// 一处：提词器切的是朗读单元，这里切的是"用户勾了哪几句"，
+    /// 边界处的坑相同但后果不同，合成一处会让其中一个被另一个的假设绑住。
+    static func selectableSentences(in answer: String) -> [String] {
+        let characters = Array(answer)
+        var sentences: [String] = []
+        var start = 0
+        var index = 0
+        while index < characters.count {
+            guard Self.isSentenceEnd(characters, at: index) else {
+                index += 1
+                continue
+            }
+            var end = index + 1
+            while end < characters.count, Self.isClosingMark(characters[end]) { end += 1 }
+            let slice = String(characters[start..<end])
+            if !slice.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                sentences.append(slice)
+            }
+            start = end
+            index = end
+        }
+        if start < characters.count {
+            let tail = String(characters[start...])
+            if !tail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                sentences.append(tail)
+            }
+        }
+        return sentences
+    }
+
+    private static func isSentenceEnd(_ characters: [Character], at index: Int) -> Bool {
+        guard ".。!?！？;；\n".contains(characters[index]) else { return false }
+        guard characters[index] == "." || characters[index] == ";" else { return true }
+        let previous = index > 0 ? characters[index - 1] : nil
+        let next = index + 1 < characters.count ? characters[index + 1] : nil
+        // 小数、版本号、域名、缩写：句号不是句末。
+        if let previous, let next,
+           previous.isNumber, next.isNumber {
+            return false
+        }
+        if let previous, let next, previous.isLetter, next.isLetter {
+            return false
+        }
+        if characters[index] == ";", previous.map({ "：:，,".contains($0) }) == true {
+            return true
+        }
+        if characters[index] == ";" { return true }
+        return !abbreviationBefore(characters, at: index)
+    }
+
+    private static func abbreviationBefore(_ characters: [Character], at index: Int) -> Bool {
+        var start = index
+        while start > 0 {
+            let previous = characters[start - 1]
+            guard previous.isLetter || previous.isNumber || previous == "." else { break }
+            start -= 1
+        }
+        let token = String(characters[start..<index]).lowercased()
+        return ["dr", "mr", "mrs", "ms", "prof", "sr", "jr", "e.g", "i.e"].contains(token)
+    }
+
+    private static func isClosingMark(_ character: Character) -> Bool {
+        "\"'\u{201D}\u{2019}》」』）)]}〉〕】".contains(character)
+    }
 
     // MARK: - Prompt
 

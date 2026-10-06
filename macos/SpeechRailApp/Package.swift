@@ -140,6 +140,35 @@ let package = Package(
                 "SessionStore.swift",
                 "SessionCoordinator.swift",
                 "SessionExporter.swift",
+                "MeetingKnowledgeQuery.swift",
+                // 会议知识库列表与详情（MA-12）：选中代次守卫在模型层，视图只负责画。
+                "MeetingLibraryModel.swift",
+                "MeetingKnowledgeLibraryView.swift",
+                // 纪要核对的编辑状态（MA-11）：草稿、失败态与快捷键策略在模型层，
+                // 视图只负责画。
+                "MinutesReviewModel.swift",
+                "MinutesReviewView.swift",
+                // 会前/会中来源呈现门面（MA-10）：采集状态到用户语言的翻译。
+                "MeetingSourcePresentation.swift",
+                // 六条状态轴的统一投影（MA-21）。
+                "MeetingAxisProjection.swift",
+                // 转录流粘底策略（MA-10）：回看时不许被新句子拽走。
+                "TranscriptFollowState.swift",
+                // 会议编排层的依赖边界（MA-01）：设备 / 连接 / 时钟可替换。
+                "MeetingSessionDependencies.swift",
+                // item 级转录账本（MA-02）：按 (代次, itemID) 去重，快照按 revision 替换。
+                "TranscriptItemLedger.swift",
+                // 时间证据（MA-02）：观测时刻与声学起止分开，伪造精度在类型层面不可能。
+                "TranscriptTimeWindow.swift",
+                // 生产 MeetingSession 进单测目标（MA-01 收尾）：设备 / 连接 / 时钟 / 睡眠通知
+                // 都经 `MeetingSessionDependencies` 注入，协议与值类型留在本目标内；
+                // App-only 的 `AudioSourceCoordinator` 由 `MeetingSessionProductionWiring.swift`
+                // 在 App target 里接线。所以这里进得来的是**生产类本身**，不是一个替身。
+                "MeetingAudioBlockReason.swift",
+                "MeetingSession.swift",
+                "SpeakerLabeling.swift",
+                "InnerOSSession.swift",
+                "MinutesGenerator.swift",
             ]
         ),
         // 确定性回放 runner：只读仓库外 manifest，输出脱敏聚合结果。
