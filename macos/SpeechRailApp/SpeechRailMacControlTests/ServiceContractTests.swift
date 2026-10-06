@@ -698,6 +698,67 @@ final class ServiceContractTests: XCTestCase {
         )
     }
 
+
+    // MARK: - #267 §6.0 界限 4：取消/设备/结束屏障
+
+    /// 好路径：全部提交样本 played 才 completed；
+    /// 部分 played 时仍为 incomplete，不提前宣布完成。
+    func testFullTextPlaybackGateCompletesOnlyWhenAllCommittedSamplesPlayed() {
+        let gate = FullTextPlaybackGate()
+        XCTAssertTrue(gate.commit(samples: 24000))
+        XCTAssertEqual(gate.completion(), .incomplete(reason: "awaiting_played"))
+        let first = UUID()
+        XCTAssertTrue(gate.notePlayed(samples: 16000, chunkID: first))
+        XCTAssertEqual(gate.completion(), .incomplete(reason: "awaiting_played"))
+        XCTAssertTrue(gate.notePlayed(samples: 8000, chunkID: UUID()))
+        XCTAssertEqual(gate.completion(), .completed)
+    }
+
+    /// 取消中途停止新合成：invalidate 后提交拒绝、
+    /// 回调作废，结论始终 incomplete。
+    func testFullTextPlaybackGateInvalidationStopsNewSynthesis() {
+        let gate = FullTextPlaybackGate()
+        XCTAssertTrue(gate.commit(samples: 24000))
+        gate.invalidate(reason: "cancelled")
+        XCTAssertFalse(gate.commit(samples: 24000), "取消后不得开新合成")
+        XCTAssertFalse(
+            gate.notePlayed(samples: 24000, chunkID: UUID()),
+            "取消后的旧回调不得记账"
+        )
+        XCTAssertEqual(gate.completion(), .incomplete(reason: "cancelled"))
+    }
+
+    /// 旧积压隔离：重复 chunkID 只记一次，
+    /// 超量回调拒绝记账，旧积压不进正式回答。
+    func testFullTextPlaybackGateRejectsStaleAndDuplicateCallbacks() {
+        let gate = FullTextPlaybackGate()
+        XCTAssertTrue(gate.commit(samples: 1000))
+        let chunk = UUID()
+        XCTAssertTrue(gate.notePlayed(samples: 600, chunkID: chunk))
+        XCTAssertFalse(gate.notePlayed(samples: 600, chunkID: chunk), "重复回调只记一次")
+        XCTAssertFalse(
+            gate.notePlayed(samples: 500, chunkID: UUID()),
+            "超量回调不得记账"
+        )
+        let snap = gate.snapshot()
+        XCTAssertEqual(snap.played, 600)
+        XCTAssertEqual(gate.completion(), .incomplete(reason: "awaiting_played"))
+    }
+
+    /// 设备恢复旧收尾确认：未 invalidate 的旧 gate 可继续排空到 completed；
+    /// 已 invalidate 的旧 gate 永远 incomplete，新轮用新 gate、
+    /// 不复用旧结论。
+    func testFullTextPlaybackGateOldGateNeverReusedForNewRound() {
+        let old = FullTextPlaybackGate()
+        XCTAssertTrue(old.commit(samples: 1000))
+        old.invalidate(reason: "device_recovered")
+        let fresh = FullTextPlaybackGate()
+        XCTAssertTrue(fresh.commit(samples: 1000), "新轮用新 gate 正常提交")
+        XCTAssertTrue(fresh.notePlayed(samples: 1000, chunkID: UUID()))
+        XCTAssertEqual(fresh.completion(), .completed)
+        XCTAssertEqual(old.completion(), .incomplete(reason: "device_recovered"))
+    }
+
     func testRecipeRoundTripsThroughItsOwnEncoding() throws {
         let recipe = try JSONDecoder().decode(
             RenderRecipeSnapshot.self,
