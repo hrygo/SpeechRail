@@ -542,6 +542,162 @@ final class ServiceContractTests: XCTestCase {
         )
     }
 
+
+    // MARK: - #266 §6.0 界限 3：receipt 核对与 unknown 语义
+
+    /// 好路径：completed + voice/model revision 对上 + 有样本 + 有摘要
+    /// + 字节交叉核对一致 → deliverable。只证明服务交付事实，
+    /// 不证明逐字读对或用户已听完。
+    func testFullTextReceiptCheckPassesCompletedMatchingReceipt() throws {
+        let receipt = try decodeReceipt("""
+        {
+          "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+          "request_id": "req-1",
+          "status": "completed",
+          "voice": {"id": "narrator", "revision": "vr_x"},
+          "model": {"artifact": "tts-artifact", "catalog_revision": "cat-1"},
+          "audio": {
+            "format": "wav",
+            "pcm_sample_rate": 24000,
+            "channels": 1,
+            "integrity_boundary": "pcm16_pre_transport",
+            "sample_count": 24000,
+            "pcm_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          },
+          "recipe": null,
+          "error_code": null,
+          "created_at": 1,
+          "completed_at": 2
+        }
+        """)
+        XCTAssertEqual(receipt.audioSampleCount, 24_000)
+        XCTAssertEqual(receipt.modelCatalogRevision, "cat-1")
+        XCTAssertEqual(
+            FullTextReceiptCheck.evaluate(
+                receipt: receipt,
+                expectation: .init(expectedVoiceRevision: "vr_x", expectedModelRevision: "cat-1"),
+                receivedBytes: 48_000
+            ),
+            .deliverable
+        )
+    }
+
+    /// pending 保持 unknown：2xx 拿到 receipt 不等于资源空闲，
+    /// 调用方停止自动新合成，转显式重试。
+    func testFullTextReceiptCheckHoldsUnknownWhilePending() throws {
+        let receipt = try decodeReceipt("""
+        {
+          "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+          "request_id": "req-1",
+          "status": "pending",
+          "voice": {"id": "narrator", "revision": "vr_x"},
+          "model": {"artifact": "tts-artifact", "catalog_revision": "cat-1"},
+          "audio": {"sample_count": 0, "pcm_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+          "recipe": null,
+          "error_code": null,
+          "created_at": 1,
+          "completed_at": null
+        }
+        """)
+        XCTAssertEqual(
+            FullTextReceiptCheck.evaluate(receipt: receipt),
+            .unknown(reason: "receipt_status_pending")
+        )
+    }
+
+    /// cancelled 保持 unknown：cancelled 回执不证明资源已释放
+    ///（外层取消路径可能先记 cancelled 再执行 stream close，见 #243）。
+    func testFullTextReceiptCheckHoldsUnknownAfterCancelled() throws {
+        let receipt = try decodeReceipt("""
+        {
+          "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+          "request_id": "req-1",
+          "status": "cancelled",
+          "voice": {"id": "narrator", "revision": "vr_x"},
+          "model": {"artifact": "tts-artifact", "catalog_revision": "cat-1"},
+          "audio": {"sample_count": 24000, "pcm_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+          "recipe": null,
+          "error_code": "cancelled",
+          "created_at": 1,
+          "completed_at": 2
+        }
+        """)
+        XCTAssertEqual(
+            FullTextReceiptCheck.evaluate(receipt: receipt),
+            .unknown(reason: "receipt_status_cancelled")
+        )
+    }
+
+    /// revision 对不上显式 unknown：来源不明的音频不播出。
+    func testFullTextReceiptCheckRejectsRevisionMismatch() throws {
+        let receipt = try decodeReceipt("""
+        {
+          "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+          "request_id": "req-1",
+          "status": "completed",
+          "voice": {"id": "narrator", "revision": "vr_OTHER"},
+          "model": {"artifact": "tts-artifact", "catalog_revision": "cat-OTHER"},
+          "audio": {"sample_count": 24000, "pcm_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+          "recipe": null,
+          "error_code": null,
+          "created_at": 1,
+          "completed_at": 2
+        }
+        """)
+        XCTAssertEqual(
+            FullTextReceiptCheck.evaluate(
+                receipt: receipt,
+                expectation: .init(expectedVoiceRevision: "vr_x", expectedModelRevision: "cat-1")
+            ),
+            .unknown(reason: "voice_revision_mismatch")
+        )
+        XCTAssertEqual(
+            FullTextReceiptCheck.evaluate(
+                receipt: receipt,
+                expectation: .init(expectedVoiceRevision: "vr_OTHER", expectedModelRevision: "cat-1")
+            ),
+            .unknown(reason: "model_revision_mismatch")
+        )
+    }
+
+    /// 样本证据不一致显式 unknown：completed 却零样本、
+    /// 字节交叉核对不上、有样本无摘要——一律不播出。
+    func testFullTextReceiptCheckRejectsSampleEvidenceMismatch() throws {
+        func receipt(status: String, samples: Int, digest: String?) throws -> RenderReceipt {
+            let digestJSON = digest.map { "\"(\($0))\"" } ?? "null"
+            return try decodeReceipt("""
+            {
+              "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+              "request_id": "req-1",
+              "status": "\(status)",
+              "voice": {"id": "narrator", "revision": "vr_x"},
+              "model": {"artifact": "tts-artifact", "catalog_revision": "cat-1"},
+              "audio": {"sample_count": \(samples), "pcm_sha256": \(digestJSON)},
+              "recipe": null,
+              "error_code": null,
+              "created_at": 1,
+              "completed_at": 2
+            }
+            """)
+        }
+        let digest = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        XCTAssertEqual(
+            FullTextReceiptCheck.evaluate(receipt: try receipt(status: "completed", samples: 0, digest: digest)),
+            .unknown(reason: "receipt_empty_audio")
+        )
+        XCTAssertEqual(
+            FullTextReceiptCheck.evaluate(
+                receipt: try receipt(status: "completed", samples: 24000, digest: digest),
+                receivedBytes: 47_999
+            ),
+            .unknown(reason: "receipt_sample_count_mismatch")
+        )
+        XCTAssertEqual(
+            FullTextReceiptCheck.evaluate(receipt: try receipt(status: "completed", samples: 24000, digest: nil)),
+            .unknown(reason: "audio_digest_missing")
+        )
+    }
+
     func testRecipeRoundTripsThroughItsOwnEncoding() throws {
         let recipe = try JSONDecoder().decode(
             RenderRecipeSnapshot.self,
