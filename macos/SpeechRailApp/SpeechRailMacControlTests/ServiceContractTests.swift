@@ -575,10 +575,85 @@ final class ServiceContractTests: XCTestCase {
         XCTAssertEqual(
             FullTextReceiptCheck.evaluate(
                 receipt: receipt,
-                expectation: .init(expectedVoiceRevision: "vr_x", expectedModelRevision: "cat-1"),
+                expectation: .init(
+                    expectedVoiceRevision: "vr_x",
+                    expectedModelRevision: "cat-1",
+                    expectedAudioSHA256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                ),
                 receivedBytes: 48_000
             ),
             .deliverable
+        )
+    }
+
+    /// #189：有摘要但无本地摘要时不判 deliverable（未核对≠已核对）。
+    func testFullTextReceiptCheckHoldsUnverifiedWithoutLocalDigest() throws {
+        let receipt = try decodeReceipt("""
+        {
+          "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+          "request_id": "req-1",
+          "status": "completed",
+          "voice": {"id": "narrator", "revision": "vr_x"},
+          "model": {"artifact": "tts-artifact", "catalog_revision": "cat-1"},
+          "audio": {
+            "format": "wav",
+            "pcm_sample_rate": 24000,
+            "channels": 1,
+            "integrity_boundary": "pcm16_pre_transport",
+            "sample_count": 24000,
+            "pcm_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          },
+          "recipe": null,
+          "error_code": null,
+          "created_at": 1,
+          "completed_at": 2
+        }
+        """)
+        // 本地摘要缺席：只核到“有摘要”为止，不降级通过。
+        XCTAssertEqual(
+            FullTextReceiptCheck.evaluate(
+                receipt: receipt,
+                expectation: .init(expectedVoiceRevision: "vr_x", expectedModelRevision: "cat-1"),
+                receivedBytes: 48_000
+            ),
+            .unknown(reason: "audio_digest_unverified")
+        )
+    }
+
+    /// #189：摘要不一致时显式 unknown，不播出、不开新合成。
+    func testFullTextReceiptCheckRejectsDigestMismatch() throws {
+        let receipt = try decodeReceipt("""
+        {
+          "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+          "request_id": "req-1",
+          "status": "completed",
+          "voice": {"id": "narrator", "revision": "vr_x"},
+          "model": {"artifact": "tts-artifact", "catalog_revision": "cat-1"},
+          "audio": {
+            "format": "wav",
+            "pcm_sample_rate": 24000,
+            "channels": 1,
+            "integrity_boundary": "pcm16_pre_transport",
+            "sample_count": 24000,
+            "pcm_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          },
+          "recipe": null,
+          "error_code": null,
+          "created_at": 1,
+          "completed_at": 2
+        }
+        """)
+        XCTAssertEqual(
+            FullTextReceiptCheck.evaluate(
+                receipt: receipt,
+                expectation: .init(
+                    expectedVoiceRevision: "vr_x",
+                    expectedModelRevision: "cat-1",
+                    expectedAudioSHA256: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                ),
+                receivedBytes: 48_000
+            ),
+            .unknown(reason: "audio_digest_mismatch")
         )
     }
 
