@@ -207,8 +207,12 @@ def test_drain_removes_completed_tasks_without_waiting_for_callbacks(task_set, d
         task = asyncio.create_task(finish())
         await task
         owned = getattr(session, task_set)
-        owned.add(task)
-        task.add_done_callback(owned.discard)
+        if task_set == "_asr_finals":
+            owned[task] = 0
+            task.add_done_callback(session._discard_asr_final)
+        else:
+            owned.add(task)
+            task.add_done_callback(owned.discard)
         # The discard callback is scheduled for the next loop tick. Draining
         # an already done task must not spin synchronously until that tick.
         await getattr(session, drain)()

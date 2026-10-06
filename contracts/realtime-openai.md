@@ -138,6 +138,8 @@ snapshot 的对应 voice 读取。系统音色校验 CustomVoice 制品，克隆
 `segment_closed`、但其 ASR 终态尚未发送，`clear` 不能撤回该边界，必须为该 item 发送唯一的
 `conversation.item.input_audio_transcription.failed`，错误码为 `backend_error`，说明该段因
 clear 取消。此后对空缓冲区执行一次 `commit` 会产生空 `completed`。
+已提交但仍在等待前序 final 的空终态也必须在 clear 时发送唯一的 `failed`；
+尚未完成的提交屏障返回关联原 commit ID 的 `invalid_state`，不发送完成回执。
 
 `session.speechrail.asr` 在首个 PCM 前原子更新；当前或待处理输入非空时拒绝更新。每个冻结的
 非空段在文字终态前发送 `speechrail.transcription.segment_closed`，报告该 item 的
@@ -160,15 +162,15 @@ clear 取消。此后对空缓冲区执行一次 `commit` 会产生空 `complete
 ### 可选输入完成屏障
 
 `input_audio_buffer.commit` 可附带 `"speechrail":{"request_receipt":true}`，且必须有
-1–128 字符的 `event_id`。服务端在同一个 commit 锁内处理之前已接受的输入，等待对应
-转写 `completed` 或 `failed` **发送完成**及 ASR 清理后，发送：
+1–128 字符的 `event_id`。服务端按音频入站 FIFO 在 commit 锁内冻结此前已接受的输入，
+随后释放该锁并等待对应转写 `completed` 或 `failed` **发送完成**及 ASR 清理后，发送：
 
 ```json
 {"type":"speechrail.input_audio_buffer.committed","commit_event_id":"commit_1","accepted_samples":24000}
 ```
 
-它仍带公共 envelope 的 `event_id/session_id/sequence`。`accepted_samples` 是当前连接累计
-接受的 **24 kHz 单声道 PCM 样本数**（字节数除以 2），不是 kernel 样本数、音频时长或
+它仍带公共 envelope 的 `event_id/session_id/sequence`。`accepted_samples` 是该 commit 冻结时
+当前连接累计接受的 **24 kHz 单声道 PCM 样本数**（字节数除以 2），不是 kernel 样本数、音频时长或
 转写成功量；`clear` 不归零，新连接从零开始。调用方收到回执前先处理其前面的文本终态。
 失败转写也可结束输入屏障，不能把回执当作转写成功证明。
 
@@ -180,6 +182,10 @@ clear 取消。此后对空缓冲区执行一次 `commit` 会产生空 `complete
 失败后同一代输入的重复屏障仍拒绝，直到明确 clear 或新输入开始下一代，不能通过重试伪造回执。
 WebSocket 断开会取消处理并释放资源，未完成屏障不发回执。追加与 commit 在同一入站队列保持
 顺序；客户端开始收尾后必须停止追加，按关联 ID **及累计样本水位**确认，再 clear/close。
+模型收尾等待不会占住入站队列；clear 仍按 FIFO 执行，不越过此前的 append。
+同一连接最多有 16 个尚未完成的提交屏障，超限返回关联 commit ID 的 `queue_full`。
+同一次显式提交覆盖的自动切段若超时或缺少完成证据，不能被后段成功或重复提交掩盖；
+新输入开始下一次提交范围后可恢复。
 
 新 macOS 客户端始终请求此屏障。旧服务没有该扩展时，客户端有界超时并关闭连接，**不发送
 clear**；不能以旧转写终态替代回执。这是安全失败，并不声称新客户端能在旧服务上成功收尾。

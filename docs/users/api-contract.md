@@ -2,8 +2,8 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.16.1"
-date: 2026-10-05
+version: "3.16.2"
+date: 2026-10-06
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -774,7 +774,7 @@ registry 不可读返回 `503 pronunciation_store_unavailable`（可重试）。
 | `input_audio_buffer.append` | 客户端 → 服务端 | 追加 Base64 24 kHz PCM16 |
 | `input_audio_buffer.commit` | 客户端 → 服务端 | 一个 utterance 只产生一个 ASR final；`event_id` 在对应终态回显 |
 | `speechrail.input_audio_buffer.committed` | 服务端 → 客户端 | 仅应请求返回，关联 commit ID 与累计24 kHz样本水位的输入完成屏障 |
-| `input_audio_buffer.clear` | 客户端 → 服务端 | 丢弃未提交 PCM，不产生 final |
+| `input_audio_buffer.clear` | 客户端 → 服务端 | 丢弃未冻结 PCM；已冻结但未终结的 item 返回唯一 failed |
 | `speechrail.tts.start` | 客户端 → 服务端 | 绑定 request/task/voice/revision/limits 与必需 audio_window_bytes |
 | `speechrail.tts.append_text` | 客户端 → 服务端 | 连续 sequence 的不可变稳定文本 |
 | `speechrail.tts.finish_text` | 客户端 → 服务端 | 以最后 ACK sequence 关闭文本侧 |
@@ -806,6 +806,10 @@ registry 不可读返回 `503 pronunciation_store_unavailable`（可重试）。
 `"speechrail":{"request_receipt":true}`，等待 `speechrail.input_audio_buffer.committed` 的
 `commit_event_id` 与本次请求匹配，且 `accepted_samples` 等于本连接累计发送的 24 kHz
 PCM 样本数，再 clear/close。空/重复提交也返回回执，不重复文本 final；clear 不重置水位。
+该水位在 commit 冻结输入时捕获。模型收尾期间 clear 可按原音频 FIFO 执行，
+取消旧 item 并使其未完成屏障返回关联 commit ID 的 `invalid_state`；后续输入可继续使用该连接。
+每连接最多 16 个待完成提交屏障，超限返回 `queue_full`。失败转写在 worker 正常结束且完成
+清理时仍可返回屏障回执，回执不证明转写成功；取消、超时或缺少完成证据时不返回回执。
 缺省/false 保持旧 wire。旧服务无回执时新 macOS 客户端超时关闭而不 clear，不能用旧终态
 替代完成证据。超时/取消/缺少终态的 EOF 不产生回执，详见 Realtime 契约的可选输入完成屏障。同一 `utterance_id` 收到 hypothesis 全文后，客户端不应
 再把对应 delta 追加到同一段临时文本。
