@@ -50,6 +50,7 @@ class Fixture:
     language: str
     voice: str
     text: str | None
+    reference_text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +170,11 @@ def load_manifest(
             raise BenchmarkInputError(f"{label}.text is required for TTS fixtures")
         if text is not None and not isinstance(text, str):
             raise BenchmarkInputError(f"{label}.text must be a string")
+        reference = raw_item.get("reference_text")
+        if reference is not None and (
+            not isinstance(reference, str) or not reference.strip() or len(reference) > 10_000
+        ):
+            raise BenchmarkInputError(f"{label}.reference_text must be non-empty bounded text")
         language = str(raw_item.get("language", "auto")).strip()
         if _LANGUAGE_RE.fullmatch(language) is None:
             raise BenchmarkInputError(f"{label}.language must be a safe language tag")
@@ -180,6 +186,7 @@ def load_manifest(
                 language=language,
                 voice=str(raw_item.get("voice", "default")),
                 text=text.strip() if isinstance(text, str) else None,
+                reference_text=reference,
             )
         )
 

@@ -108,7 +108,17 @@ def run_realtime_benchmark(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("pcm_file", type=Path, help="16 kHz mono PCM16 fixture")
+    parser.add_argument("pcm_file", nargs="?", type=Path, help="16 kHz mono PCM16 fixture")
+    parser.add_argument(
+        "--asr-manifest",
+        type=Path,
+        help="external local WAV fixtures with human references unless resource-only is enabled",
+    )
+    parser.add_argument(
+        "--asr-resource-only",
+        action="store_true",
+        help="skip CER only with --asr-manifest; retain resource and input-integrity evidence",
+    )
     parser.add_argument(
         "--profile",
         required=True,
@@ -128,17 +138,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--app-home", type=Path, help="managed app home for API-key discovery")
     args = parser.parse_args(argv)
     try:
-        payload = run_realtime_benchmark(
-            args.pcm_file,
-            profile=args.profile,
-            output=args.output,
-            sessions=args.sessions,
-            warmup=args.warmup,
-            tts_text=args.tts_text,
-            app_home=args.app_home,
-            base_url=args.base_url,
-        )
-    except (OSError, ValueError, TypeError) as exc:
+        if args.asr_resource_only and args.asr_manifest is None:
+            raise ValueError("--asr-resource-only requires --asr-manifest")
+        if (args.pcm_file is None) == (args.asr_manifest is None):
+            raise ValueError("provide exactly one PCM file or --asr-manifest")
+        if args.asr_manifest is not None:
+            try:
+                from .realtime_asr_benchmark import run_manifest_asr_benchmark
+            except ImportError:
+                from realtime_asr_benchmark import run_manifest_asr_benchmark
+            payload = run_manifest_asr_benchmark(
+                args.asr_manifest, profile=args.profile, output=args.output,
+                sessions=args.sessions, warmup=args.warmup, app_home=args.app_home,
+                base_url=args.base_url, resource_only=args.asr_resource_only,
+            )
+        else:
+            payload = run_realtime_benchmark(
+                args.pcm_file,
+                profile=args.profile,
+                output=args.output,
+                sessions=args.sessions,
+                warmup=args.warmup,
+                tts_text=args.tts_text,
+                app_home=args.app_home,
+                base_url=args.base_url,
+            )
+    except (OSError, ValueError, TypeError, RuntimeError) as exc:
         print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
     resources = payload["resources"]
