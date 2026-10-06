@@ -2,7 +2,7 @@
 title: "共享 ASR #245：实施与验收记录"
 status: in_progress
 audience: "SpeechRail 开发者与验收人员"
-version: "1.2.0"
+version: "1.4.0"
 date: 2026-10-06
 ---
 
@@ -24,14 +24,20 @@ date: 2026-10-06
 | 切片 | PR / 分支 | 提交 | 内容与依赖 |
 |---|---|---|---|
 | 空成功终态 | [#276](https://github.com/hrygo/SpeechRail/pull/276) / `codex/asr-empty-terminal-247` | `ed3e8600` | #247，三个文件；base 为 main，可独立先合并 |
-| 共享策略与内核 | [#277](https://github.com/hrygo/SpeechRail/pull/277) / `codex/asr-shared-kernel-245` | `6d119a9` | #248/#249，严格策略与实际执行一同交付；依赖 #276 |
-| 四场景 App 消费 | [#278](https://github.com/hrygo/SpeechRail/pull/278) / `codex/asr-scene-consumers-245` | `ce0975d` | #250/#251/#252，transport、预设与消费者编译一致；依赖 #277 |
-| 基准工具与证据 | [#280](https://github.com/hrygo/SpeechRail/pull/280) / `codex/asr-evidence-253` | 代码 head `da85b54`，后续仅补证据 | #253/#245，评分/资源模式、实施方案和证据；依赖 #278 |
+| 共享策略与内核 | [#277](https://github.com/hrygo/SpeechRail/pull/277) / `codex/asr-shared-kernel-245` | `edde6dae` | #248/#249，严格策略与实际执行一同交付；依赖 #276 |
+| 四场景 App 消费 | [#278](https://github.com/hrygo/SpeechRail/pull/278) / `codex/asr-scene-consumers-245` | `1d115241` | #250/#251/#252，transport、预设与消费者编译一致；依赖 #277 |
+| 基准工具与证据 | [#280](https://github.com/hrygo/SpeechRail/pull/280) / `codex/asr-evidence-253` | v7 源 head `4e513ea1`，后续补证据 | #253/#245，评分/资源模式、实施方案和证据；依赖 #278 |
 
 策略若单独先交付会出现“接受并回显但未执行”的公共行为，因此与内核作为一个
 可运行切片；App Event、preset 与四个消费者共同组成一个可编译切片。
 App 与服务公共契约需配套部署，逐 PR 合并不等于可混用旧 App / 新服务。
 这四个 PR 提供可评审源码，不代表候选真实场景质量已验收。
+
+2026-10-06 后续远端核验：#276 已以 `d89e067a` 合入 main；
+原 #277 CLOSED，替代 #289 已以 `a8d4fb2d` 合入 main，保留期限时钟修复。
+原 #278 CLOSED，消费端须追踪后续实际交付；#280 在本次核验时仍 OPEN。
+上表和下方 CI 是原切片的历史证据，不代表当前合并链。
+本任务未执行 main 合并；精确分包修复在独立工作树实施，保留原证据分支的改动。
 
 2026-10-06 在各 PR 边界重新验证：
 
@@ -75,7 +81,8 @@ caller/Schema 53 passed。最终服务端 head 的 CI run `37427924683` 已 succ
 
 #280 代码 head `da85b5475b4cd4510daf395108ce6c577dd8dd27` 的 CI run
 `37428267452` 已 success，质量、全量 Python、Swift、App build、wheel 和
-Gate Summary 均通过。后续提交只更新本记录，生产源码、工具与测试保持该通过版本。
+Gate Summary 均通过。该记录对应修复期限时钟前的代码；
+下方记录的 v7 新增协调器时钟修复与两个反例，不能复用旧 CI 声称新 head 已通过。
 四个 PR 已逐一回读 OPEN、MERGEABLE、base/head；没有执行合并。
 原实施工作树的 68 个归属文件复核仍与保存的源码 snapshot 逐字一致。
 以上新主线证据与下方原实施工作树验证分开，不用旧日志证明中间 PR 可运行。
@@ -365,6 +372,86 @@ Batch `release_pass=false`，缺少 cold、完整模型身份、完整质量、s
 
 ## Issue 验收矩阵与未验收项
 
+### v7 完整串行对照与后续边界发现
+
+v7 wheel SHA-256：
+`245857d92c875b998ac852877121ef5d40c98fc1bd6184f9ec9690e2d778db3a`，
+源 head `4e513ea1`。164 份 Python 模块逐字匹配源码，安装态 189 份文件匹配；
+保持 quality/quality、同一模型和精度，零模型下载。原始音频、参考、维护日志、
+逐请求结果及回退备份均保存在仓库外。
+时钟修复后的原交付 head CI run `37434825821`（内核）、`37434829883`
+（消费端）、`37434833184`（证据）全部 success，均为历史 head 的证据。
+
+`maintenance-v7` 完成 **301/301** 正式请求、2621.640 秒测量音频：
+core 8 条 × N3 × 5 预设共 120 次，AISHELL-4 与 ASCEND 分别
+6 条 × N3 × 5 预设各 90 次，另一次 180 秒连续会议资源测试。
+每份 manifest 的暖场请求不计入 301。重复测量没有扩大独立素材数。
+16 份结果均完成资源采样，每个完整 tick 恰一个 ASR worker，
+同组 worker incarnation 未变化。维护结果明确
+`measurement_completed=true, original_restored=true`。
+
+| 预设 | core CER（旧 18.140%） | AISHELL-4 CER（旧 34.337%） | ASCEND CER（旧 42.529%） |
+|---|---:|---:|---:|
+| assistant-turn-taking | 7.774% | 6.024% | 11.877% |
+| assistant-duplex | 7.774% | 6.024% | 11.877% |
+| meeting | 7.774% | 6.024% | 11.877% |
+| caption | 6.860% | 5.422% | 13.793% |
+| teleprompter | 7.774% | 5.422% | 14.943% |
+
+首预览 p95 范围为 0.399–1.039 s，末音频至 final p95 为 0.099–0.467 s；
+core 完整段复核三个预设收尾 p95 为 0.450–0.467 s，旧基线为 0.090 s。
+准确率改善伴随收尾延迟增加，不能称为所有指标无退化。
+ASCEND 字幕与提词器 CER 高于同候选完整段复核的 11.877%，仍需评估段预算及收尾取舍。
+可评分组同 tick 总 phys_footprint peak 为 13,908,536,120–14,448,782,136 bytes。
+core 的旧资源峰值来自三个较大的测量池，不是精确八条配对子集的峰值；
+不把它用于完全同组资源增量声明。峰值包含服务父进程与 resident TTS。
+
+180 秒连续会议记录 4,320,000 accepted wire samples、9 个边界、9 个终态、
+180 次预览，peak 为 14,530,325,304 bytes。没有唯一参考，质量门 unset；
+三分钟不构成长时 soak。
+原评分器的唯一终态、公开区间连续及尾部覆盖检查全部通过，
+但后续检查发现首段 wire span `0...482400` 对应 20.1 s，超过有效 20 s 预算。
+**这些 coverage pass 不能证明实际逐段 PCM 和公开区间归属一致。**
+
+确定性反例在更新后的 main 上复现该根因：先将新包 accepted 水位写入
+当前 item，再为已经满预算的旧段 rollover。100 ms 分包使旧段边界多出下一包；
+1 s 分包可进一步漏发一个有效段的边界。强化的回归同时核对每段实际 PCM
+和精确 wire 区间，2400 / 24000 wire-sample 分包修复前失败。
+独立只读审查进一步发现 legacy VAD 停止分支也提前覆盖末端，补充反例修复前失败；
+隔离修复移除 append、client 尾部和该 VAD 分支的提前覆盖，区间只随实际准入 PCM 推进。
+四个相关 Python 文件 157 项通过；完整 Python 回归为 3405 passed、1 skipped、
+3 warnings（41.61 s），Ruff、Mypy 164 source files 及 whitespace 通过。
+修复已以 `6157e33c` 提交到独立 [PR #290](https://github.com/hrygo/SpeechRail/pull/290)，
+尚待真实连续输入复测，v7 原始结果保留，不回填为新候选证据。
+完整 Python 回归日志 SHA-256：
+`68d509f702fdff64fff357beb616f514758870dbd0a809b631b9f14a110cb787`。
+
+`maintenance-v7-lifecycle` 的 1 ms final deadline 探针得到一次
+`backend_timeout` 失败终态，关闭后约 0.455 s 观察到 active/pending/session 全 0、
+无 ESTABLISHED 连接；紧接新真实识别成功并再次释放资源。
+clear 探针收到 completed，错误为 `cancel_probe_final_won_the_clear_race`，
+因此取消门未通过，静音空成功探针也未执行。
+源码核查表明显式 client commit 在同一传输队列等待 final，clear 会排在其后；
+还需用传输层反例和修复验证。该次维护结果为
+`measurement_completed=false, original_restored=true`。
+
+汇总 SHA-256：
+`87f24a3d451b3a0218f71fe2f7dba3c646fc6a2635de8f2bdc0759da291142b9`；
+主维护 outcome：
+`809a708b4b346d3d519b4bda98d2ed156e538b0d2b19f94796883520c9f74cfc`；
+生命周期部分结果：
+`1f630f10a9c7ac0789abba69852c9f054ed48e2229cca9290eae4e3262be2a67`；
+生命周期 outcome：
+`8b5b6b4572604dd74eeb4c0736c2b10d07a46f1a51d3acf12fae116413d21e5c`。
+以上证明测试实际执行及恢复结果，不证明所有业务场景已验收。
+助手语义轮次、会议/字幕实际消费与保存、字幕标点、提词器重读/脱稿恢复、
+取消、空成功与长时门仍待完成；预设未冻结，#245 及剩余验收任务保持开放。
+2026-10-06 已将以上新结果、限制和回退发布并逐字回读：
+[#249](https://github.com/hrygo/SpeechRail/issues/249#issuecomment-6013397822)、
+[#253](https://github.com/hrygo/SpeechRail/issues/253#issuecomment-6013398768)、
+[#245](https://github.com/hrygo/SpeechRail/issues/245#issuecomment-6013399281)。
+#249 因新边界缺陷重新打开；三项核验为 OPEN。原有已合入子项与历史评论保留。
+
 | Issue | 当前交付 | 仍需完成 |
 |---|---|---|
 | [#247 证据](https://github.com/hrygo/SpeechRail/issues/247#issuecomment-6010521881) | 空成功终态、重复终态、回收完成屏障与 release 回归 | 候选真实集成验收与交付 |
@@ -395,14 +482,14 @@ PR 提交状态通过追加评论更新，历史评论不改写为当时已提�
 | #253 | [评论](https://github.com/hrygo/SpeechRail/issues/253#issuecomment-6011383238) |
 | #245 | [评论](https://github.com/hrygo/SpeechRail/issues/245#issuecomment-6011383891) |
 
-预设当前是候选参数，没有实测无退化结论。候选运行态验收需经受管 installer
-替换服务；现有授权未包含安装或停启服务。完成可评审候选和代码门后再请求该维护授权。
+预设当前是候选参数，没有实测无退化结论。用户于 2026-10-06 明确授权执行下方
+service-only 临时维护和测量，成功或失败均恢复原服务。候选通过受管 installer 替换服务。
 不通过另启源码服务、第二 worker 或偷偷切档绕过这一边界。
 UI 自动化、真实 App 控制链路和发布未执行；远端 Git 提交/推送与 PR 已按新增授权执行。
 
-## 待授权的候选服务维护方案
+## 已授权的候选服务维护与期限时钟修复
 
-目标单元为唯一 `com.speechrail` managed 服务，候选为上述完整 digest 的 v6 wheel。
+目标单元为唯一 `com.speechrail` managed 服务，最初候选为上述完整 digest 的 v6 wheel。
 保持现有 quality/quality、同一 ASR 模型、精度、重采样链和无词表条件。
 计划预留约 55–75 分钟，包含两次受管停启及 301 次串行测量请求：
 五份固定 manifest 各 8 段、warm N=3（120 次），五份中文补集各 6 段、
@@ -428,14 +515,51 @@ manual endpointing 对照不能完成所有业务质量门；会议连续长稳�
 提词器即兴/重读恢复、实际场景语义轮次仍需独立证据。未通过门不冻结 preset，
 不关闭子 Issue 或总 Issue。
 
+### v6 真实失败、根因和回退
+
+2026-10-06 16:06（Asia/Shanghai），v6 受管安装成功，189 个 wheel 文件逐字核对，
+quality/quality、ASR runtime revision、模型与音色 catalog 一致，模型下载为零。
+首个 4.281 秒暖场音频在提交时失败；没有正式测量样本，不能报告候选 CER 或延迟。
+16:08 的单项诊断复现同一失败，捕获稳定代码 `backend_timeout`。
+两轮均停止后续请求并恢复旧 runtime/vendor/selection；原 generation 13、
+quality/quality、配置、模型身份、唯一监听、ready 和空闲验证通过。
+
+根因由本机实测及确定性反例共同确认：uvloop 的 `loop.time()` 比
+`time.monotonic()` 大约 16,553 秒。新 ASR 协调器用后者计算绝对期限，
+却交给 `asyncio.timeout_at` / `Timeout.reschedule` 使用，提交时立即误超时。
+修复将期限计算及排队过期检查统一为事件循环时钟，不调整公共字段或预设。
+两个反例覆盖已准入和等待准入的段；修复前 2 failed，修复后四个相关 Python
+文件 83 passed，Ruff、Mypy 164 source files 和 whitespace 检查通过。
+内核修复 commit 为 `edde6dae02f36d3a1a33d4bafd781f1dcfa8e088`，
+当时已同步 #277/#278/#280，尚未合并 main；后续 #289 的合入状态见上方记录。
+
+v7 wheel SHA-256：
+`245857d92c875b998ac852877121ef5d40c98fc1bd6184f9ec9690e2d778db3a`；
+源 head `4e513ea142781b19e9cf0c2a9df700ba64af39cc`。
+164 个 Python 模块逐字匹配，arm64、metadata、版本检查及仓库外安装入口核验通过；
+相对 v6 仅协调器源码与 wheel RECORD 变化。16:16 受管安装后再次核验
+189 个文件、零模型下载、原档位与 catalog，固定矩阵开始正式测量。
+原始证据位于仓库外 `maintenance-v6`、`maintenance-v6-diagnostic`、
+`maintenance-v7`、`candidate-v7-wheel` 和 `source-evidence/clock-*.log`。
+
+对应追踪评论已逐字回读：
+[#249](https://github.com/hrygo/SpeechRail/issues/249#issuecomment-6012250858)、
+[#253](https://github.com/hrygo/SpeechRail/issues/253#issuecomment-6012251316)、
+[#245](https://github.com/hrygo/SpeechRail/issues/245#issuecomment-6012251810)。
+新 CI run `37434825821`、`37434829883`、`37434833184` 分别对应内核、
+App、证据三个新 head，2026-10-06 回读均为 completed / success；
+Quality、Python、Swift Package、App build、wheel 和 Gate Summary 全部通过。
+该 CI 核验时真实固定矩阵仍在执行；最终结果见上方 v7 段落，
+其终态和业务验收结果与上述 CI 分开记录。
+
 ## 回退与复现
 
 源码已按上述依赖切片提交或准备为本 PR。源码回退按依赖逆序撤销各 PR 的提交；
 原实施工作树未提交差异保留。不得使用
 `git reset --hard` / `git checkout --` 清除共享工作区。
 已保留本轮误置的旧测试副本到仓库外，正式测试在 Swift Package 目录中。
-生产服务尚未替换，因此目前没有运行态回退动作。
-安装候选前应保存旧 runtime/selection；失败只按 managed controller/installer
+v6 两次临时维护、v7 主矩阵与生命周期探针均已恢复旧服务。
+安装候选前保存旧 runtime/vendor/selection；失败只按 managed controller/installer
 回退该服务单元，保留模型、配置、文字数据库和原始证据。
 
 可移植的定向验证入口：
