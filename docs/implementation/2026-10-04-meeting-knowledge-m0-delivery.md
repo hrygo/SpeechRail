@@ -11,9 +11,11 @@ base: "origin/main @ dab047b2"
 
 ## 范围
 
-分支相对 `origin/main`（`dab047b2`）共 80 个提交（截至本文件所在提交；含 PR Review 五条 P1 修补、验收 1/3/4 审计记账与历次计数同步）。
+分支基线为 `origin/main @ dab047b2`。提交数不写死（写死的数字每次提交都会过时，
+已漂移三次）：以 `git log origin/main..HEAD --oneline | wc -l` 为准；
+`git status --short --branch` 应为干净且与远端同步。
 
-> 这个数字过去一直含糊：它算不算本文件自己那个提交，从没写明，于是每轮都在「文档写 N、分支实际 N-1」之间漂移（写上一版时是文档写 70、分支 69）。现在把基准写出来：相对 `origin/main` 的提交数，**含本文件所在提交**。
+> 计数口径说明：此前的写法是"分支共 N 个提交（含本文件所在提交）"，每次提交都过时，已漂移三次。现改成命令口径，不再写死数字。
 
 > **下面这段范围描述只涵盖最早的 M0**，当时确实"只动纪要版本链、结束封存上报与
 > 知识检索语义，不做 schema 迁移、不改表结构、不碰采集链路"。
@@ -128,6 +130,8 @@ M0 部分的提交内容：排队指针原子化、空输出与结构失败记�
 | （同上，第二十七处，**P2-1 死代码清理**） | `SessionStore.verifyBackup(at:)` 里 `let probe = SessionStore(directory:)` 建了立刻丢（交付文档完成度审计第二节记账）。本轮删两行。改动无行为变化：该函数是只读校验（只读连接 + `integrity_check`），probe 本来就没参与任何逻辑 | 实测（删后编译过 + 备份/损坏两条用例绿；全量回归等 CI） | 无 |
 
 | （同上，第二十八处，**P2 收尾：P2-3 加注释、P1-5 补 View 归因、P2-2 核验为准确**） | P2-3：`indexedSearchEntries` 的 FTS 不可用返回空，加注释说明为什么恰好是正确答案（`enqueueSearchIndex` 同样是空操作 + 可用性查 `searchIndexStatus`），不改逻辑——该函数是删除两入口的内部步骤，不值得为它加新测试。P1-5 后半句：`MeetingView` 的 `queued`/`running` 分支加注释，写明失败只走 `.failed(reason)`、"一直转圈"查 `minutes.generate` 日志——View 层进不了 SPM，只能靠真机走查（总账第 1 条），注释是当前唯一能做的。P2-2：`SettingsView.swift:420-424` 注释经核对**准确**（`exportBackup` 带清单 vs `backup(to:)` 单文件 + `restorePreview` 拒无清单），不改。如实记：P2-2 无需改动，不是遗漏 | 实测（两处注释改动 + `./scripts/macos_app_build.sh` 待 CI；`indexedSearchEntries` 无行为变化） | 无 |
+
+| （同上，第二十九处，**P2-4 拆分可行性评估：可拆，不在本 PR 做**） | `SessionStore.swift` 7091 行、10 个 `// MARK` 段、9 个 `extension SessionStore` 块：MA 域边界与文件切分点基本重合（MA-19 归档包 :4163、MA-18 删除 :4977、MA-17 问答 :5264、MA-13 投影 :5482、MA-14 演进 :5842、MA-12 库页 :6351、MA-11 编辑 :6877），且状态集中在文件头（`directory/fileManager/handle/isOpen`），extension 拆文件无跨文件私有状态问题——**下次动该文件时按 MARK 段拆**。`MeetingView.swift` 1827 行但只有一个 MARK 段（:1768 标注面板），按 tab 拆需要先补 MARK 分段，那是 View 层重构，需真机走查配合（总账第 1 条），**与拆 store 不在同一批**。本轮只读评估，不写代码 | 实测（行数/MARK/extension 结构 + `git status` 干净；CI run 37394785460 全绿沿用上一轮） | 无 |
 
 | （此前记为待办，本轮结清） | **全文检索的降级提示「没露出来」不是缺口**。`searchKnowledgeFullText`（返回**行/版本级** `KnowledgeHit`）与库页在用的 `libraryPredicate`（**文档级**「哪些会议匹配」）是同一能力的两套实现、粒度不同。验收 4「检索返回对应会议**与证据**」已由 Path A 满足——每行显示 `matchExcerpt` 作证据。Path B 独有的 `degradedReason` 守的是「无 FTS5 / 查询无有效词项」，但降级时**仍返回 LIKE 结果**（不是谎报零结果），且 macOS 系统 SQLite 自带 FTS5，该分支在本平台不可达。Path B 那 14 项测试守的 `KnowledgeSearchTokenizer`、索引重建/去重/删除不复活，**Path A 也依赖同一套分词器与索引**——删掉会连带损失 Path A 的覆盖 | 实测（逐层核对两条路径的返回粒度、`matchExcerpt` 消费者、降级分支的实际返回、FTS5 可用性；`rg` 确认 Path B 无生产消费方） | **判定为已知状态而非缺口**：保留 store 能力与 14 项测试（是 Path A 的分词/索引覆盖来源），但没有为它单独造界面——没有任何现有界面需要行级粒度。为此新造 UI 属未被要求的功能 |
 | （同上，第十四处，本轮关闭总账第 14 条） | **MA-14 这一整块此前全部没有入口**：`recordExecutionEvent` / `executionState` / `conflictingDecisions` / `confirmSupersession` / `knowledgeChangeProposals` / `executionEvents` 六个 API 在生产代码里**零消费方**。用户标过的"已完成"、跨会议的两处矛盾、重新生成换掉了哪条结论、一条承诺是怎么变成今天这样的——全部只存在于库里 | 实测（沿六个 API 逐个回查消费方） | 四个提交分四轮接进库页：行动生命周期读写两侧、跨会议结论冲突、详情里的「这一版可能变了什么」、未完成事项里的「变更历史」。每轮都修了同一处的自相矛盾（详见各节）。**总账第 14 条到此关闭** |
