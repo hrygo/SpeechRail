@@ -81,6 +81,45 @@ async def new_segment(coordinator):
     return session
 
 
+@pytest.mark.parametrize("already_admitted", [False, True])
+def test_final_deadline_uses_the_event_loop_clock(monkeypatch, already_admitted):
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        original_time = loop.time
+        # uvloop on macOS can have a different epoch from time.monotonic().
+        # All asyncio timers share this offset; the ASR deadline must too.
+        monkeypatch.setattr(loop, "time", lambda: original_time() + 20_000)
+        factory = ControlledFactory()
+        coordinator = AsrTurnCoordinator(factory, capacity_bytes=128)
+        segment = coordinator.create(
+            language=None, prompt="",
+            options=RealtimeTranscriptionOptions(
+                asr_policy=ASRPolicy(final_deadline_ms=500),
+            ),
+        )
+        await segment.append_audio(b"\x01\x00" * 16)
+        if already_admitted:
+            await segment.connect()
+            runtime = await asyncio.wait_for(factory.created.get(), timeout=1)
+        commit = asyncio.create_task(segment.commit())
+        try:
+            if not already_admitted:
+                await asyncio.sleep(0)
+                await segment.connect()
+                runtime = await asyncio.wait_for(factory.created.get(), timeout=1)
+            runtime.finish.set()
+            await asyncio.wait_for(commit, timeout=1)
+            assert [event.kind async for event in segment.events()] == ["completed"]
+            assert bytes(runtime.audio) == b"\x01\x00" * 16
+            assert coordinator.retained_bytes == 0
+            assert factory.running == 0
+        finally:
+            await coordinator.close()
+            await asyncio.gather(commit, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("code", ["language_not_supported", "queue_full"])
 def test_create_or_admission_failure_preserves_public_terminal_code(code):
     async def scenario():
