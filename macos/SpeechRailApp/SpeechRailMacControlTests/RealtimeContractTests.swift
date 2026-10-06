@@ -2058,6 +2058,7 @@ struct RealtimeSessionPolicyContractTests {
             #expect(policy["preview_interval_ms"] as? Int == 1_000)
             #expect(policy["max_segment_ms"] as? Int == 20_000)
             #expect(policy["finalization"] as? String == "full_segment")
+            #expect(policy["rollback_tokens"] as? Int == 5)
             #expect(policy["final_deadline_ms"] as? Int == 120_000)
             #expect(policy["effective_max_segment_ms"] as? Int == 20_000)
         }
@@ -2131,6 +2132,7 @@ private actor TestRealtimeASRTransport: RealtimeASRTransport {
             "preview_interval_ms": requestedPolicy["preview_interval_ms"] ?? 1_000,
             "max_segment_ms": requestedPolicy["max_segment_ms"] ?? 20_000,
             "finalization": requestedPolicy["finalization"] ?? "full_segment",
+            "rollback_tokens": requestedPolicy["rollback_tokens"] ?? 5,
             "final_deadline_ms": requestedPolicy["final_deadline_ms"] ?? 120_000,
             "effective_max_segment_ms": requestedPolicy["max_segment_ms"] ?? 20_000
         ]

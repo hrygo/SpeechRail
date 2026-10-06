@@ -379,3 +379,60 @@ def test_repeated_truncated_previews_keep_total_raw_tokens_within_budget() -> No
         assert len(state.raw_tokens) <= 16
 
     assert [config.max_new_tokens for config in runtime.configs] == [16, 16, 5, 5]
+
+def test_decode_rollback_tokens_override_controls_prefix_length() -> None:
+    def _third_input_ids(rollback: int | None) -> list[int]:
+        decoder, runtime, _model, _tokenizer = _make_decoder(
+            [
+                FakeGeneration([5, 6, 7, 8, 9, 10, 11, 12]),
+                FakeGeneration([5, 6, 7, 8, 9, 10, 11, 12]),
+                FakeGeneration([5]),
+            ]
+        )
+        state = StreamingDecodeState()
+        for watermark in (2, 4):
+            decoder.decode(
+                [0.1] * watermark,
+                state,
+                language="zh",
+                context="",
+                sample_watermark=watermark,
+                max_new_tokens=32,
+            )
+        kwargs: dict[str, object] = (
+            {} if rollback is None else {"rollback_tokens": rollback}
+        )
+        decoder.decode(
+            [0.1] * 6,
+            state,
+            language="zh",
+            context="",
+            sample_watermark=6,
+            max_new_tokens=32,
+            **kwargs,  # type: ignore[arg-type]
+        )
+        return runtime.input_ids[2]
+
+    prompt = [100, 101, 102, 102, 102, 103]
+    # Default construction keeps rollback_tokens=5: only the first three
+    # transcript tokens survive as revisable prefix.
+    assert _third_input_ids(None) == [*prompt, 5, 6, 7]
+    # An explicit zero rollback keeps the whole previous hypothesis.
+    assert _third_input_ids(0) == [*prompt, 5, 6, 7, 8, 9, 10, 11, 12]
+    # A smaller rollback keeps proportionally more prefix.
+    assert _third_input_ids(2) == [*prompt, 5, 6, 7, 8, 9, 10]
+
+
+def test_decode_rejects_invalid_rollback_tokens_override() -> None:
+    decoder, _runtime, _model, _tokenizer = _make_decoder(
+        [FakeGeneration([5, 6])]
+    )
+    with pytest.raises(ValueError, match="rollback_tokens"):
+        decoder.decode(
+            [0.1, 0.2],
+            StreamingDecodeState(),
+            language="auto",
+            context="",
+            sample_watermark=2,
+            rollback_tokens=-1,
+        )
