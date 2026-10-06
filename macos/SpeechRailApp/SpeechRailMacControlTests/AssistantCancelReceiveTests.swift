@@ -1022,6 +1022,33 @@ final class AssistantCancelReceiveTests: XCTestCase {
         )
     }
 
+    // MARK: - M1/V16-V17:完整文本 adapter 未评审启用前保持关闭
+
+    /// V16-V17:助手生产链不得静默启用完整文本合成路径——语音回答仍走
+    /// Realtime 增量 TTS（`startTTSStream/appendTTSText`），不得在未评审
+    /// 的情况下调用 `/v1/audio/speech` 完整文本接口。
+    /// 该 adapter 的边界（§6.0：固定 voice/revision、interactive purpose、
+    /// integrity receipt、有界接收、取消/设备/结束屏障）尚未评审通过，
+    /// 默认关闭是产品行为，不是缺测试。
+    func testFullTextAdapterStaysDisabledUntilReviewed() async throws {
+        let harness = try await makeVoiceHarness(llmScripts: [.deltas(["完整回答。"])])
+        defer { cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.configured)
+        await harness.clients()[0].emit(.completed(itemID: "q1", transcript: "念一句"))
+        await waitUntil(
+            { harness.session.turns.contains { $0.role == .assistant } },
+            message: "回复没有落库"
+        )
+        let client = harness.clients()[0]
+        let started = await client.snapshot().startTTS
+        XCTAssertGreaterThanOrEqual(started, 1, "语音回答仍走 Realtime 增量 TTS")
+        XCTAssertFalse(
+            harness.session.usesFullTextSpeechForTest,
+            "完整文本 adapter 未评审启用前必须保持关闭"
+        )
+    }
+
     // MARK: - M3/V09:活动内存有界，SQLite 全记录保留
 
     /// V09:30 轮问答后场内窗口有界（contextTurns ≤ 24 轮、turns ≤ 48 行），

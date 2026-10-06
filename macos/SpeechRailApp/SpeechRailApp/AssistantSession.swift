@@ -596,6 +596,12 @@ public final class AssistantSession {
     /// 能不能朗读。纯文字对话没有语音通道，「重播」要禁用并说明怎么开启，
     /// 不能偷偷去拿设备。
     public var canReplaySpeech: Bool { ttsStream != nil }
+    /// M1/V16-V17 测试门闩：完整文本合成路径（`/v1/audio/speech`）是否启用。
+    /// 该 adapter 边界（§6.0：固定 voice/revision、interactive purpose、
+    /// integrity receipt、有界接收、取消/设备/结束屏障）评审通过前恒为 false；
+    /// 生产链只走 Realtime 增量 TTS。门禁测试断言它保持关闭，评审通过后
+    /// 再由启用该路径的提交把它置 true 并同步更新门禁测试。
+    var usesFullTextSpeechForTest: Bool { false }
 
     public init(
         coordinator: SessionCoordinator,
