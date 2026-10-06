@@ -213,9 +213,22 @@ App 侧 played 门控仍由 fake 门（V05 定向回归）覆盖，真机播放�
 `/health` 前后一致：`status ok`、`version 3.7.1`、`profile quality/quality`、
 `asr_state warm_standby`、`ready true`。
 
-范围声明：本项只完成矩阵“3 sessions × ≥24 轮”中的 **1 个 session**；
-多 session 累积、活动内存有界量化、SQLite 记录数 == 提交数核对仍待执行。
-未通过项：无（本项 scope 内）。不宣称长稳通过。
+3 sessions 累计（同一探针 `/tmp/soak_probe.py`，单连接 24 轮，同 1s PCM 切片）：
+
+| session | 终态 | p50 | p95 | health 前/后 |
+|---|---|---|---|---|
+| 1 | 24/24 completed（round1 warm 125ms，其余 65–70ms 平坦） | 67ms | 70ms | warm_standby / warm_standby |
+| 2 | 24/24 completed（round1 warm 133ms，其余 72–77ms 平坦） | 76ms | 77ms | warm_standby / warm_standby |
+| 3 | 24/24 completed（round1 warm 120ms，其余 70–79ms 平坦） | 74ms | 79ms | active / active（ok，ready true） |
+
+三 session 同级（p50 67–76ms，p95 70–79ms），轮间无漂移。
+范围声明：矩阵“3 sessions × ≥24 轮”轮数口径已满；
+活动内存有界量化、SQLite 记录数 == 提交数核对仍待执行。
+反例记录：session 2/3 首跑时恰遇他方 `run_candidate_v8.py`（ASR-245 候选验证，
+内部代号 v8，非产品版本）并发占用同一 ASR worker，延迟升至秒级
+（p50 4.9–6.3s）；待其 `matrix_complete`（300/300）退出、worker 回
+`warm_standby` 后重跑即恢复 70ms 级。该两轮污染数据作废，不计入本表。
+未通过项：无（本项 scope 内）。不宣称长稳通过（内存/SQLite 口径待补）。
 
 ## 范围与回退
 
