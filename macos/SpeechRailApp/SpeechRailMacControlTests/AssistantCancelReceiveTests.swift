@@ -193,6 +193,7 @@ final class AssistantCancelReceiveTests: XCTestCase {
         XCTAssertEqual(harness.session.conversationRows.map(\.id), ids)
     }
 
+    /// V14 fake 可测部分：空 final 不进 LLM（#256 真机声学对照的前置行为门）。
     func testEmptyFinalKeepsRecognizedTextVisibleDuringSaveWithoutCallingProvider() async throws {
         let gate = AssistantSessionTests.Gate()
         let harness = try await makeVoiceHarness(llmScripts: [], inputSaveGate: gate)
@@ -238,6 +239,7 @@ final class AssistantCancelReceiveTests: XCTestCase {
         XCTAssertEqual(harness.session.conversationRows.filter { $0.id == pending.id }.count, 1)
     }
 
+    /// V14 fake 可测部分：拒收保留字幕，不建 accepted 行、不进 LLM。
     func testRejectedFinalRetainsItsVisiblePartialWithoutCreatingAnAcceptedRow() async throws {
         let harness = try await makeVoiceHarness(
             llmScripts: [], inputConfiguration: .init(maximumPendingCommands: 0)
