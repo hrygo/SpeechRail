@@ -264,7 +264,7 @@ soak 探针为纯 realtime 转写、不落 App 会话库，SQLite 记录数核�
 | 门 | 套件 | 结果 |
 |---|---|---|
 | M0 取消/接收 | AssistantCancelReceiveTests | 36/36 ✅ |
-| M0 播放账本 | AssistantTTSStreamCoordinatorTests | 40/40 ✅ |
+| M0 播放账本 | AssistantTTSStreamCoordinatorTests | 41/41 ✅ |
 | M0 会话终态 | AssistantSessionTests | 43/43 ✅ |
 | M1 保义计划 | AssistantSpeechPlanTests | 11/11 ✅ |
 | M1 作曲策略 | AssistantComposerPolicyTests | 4/4 ✅ |
@@ -275,8 +275,9 @@ soak 探针为纯 realtime 转写、不落 App 会话库，SQLite 记录数核�
 | M3 输入持久化队列 | AssistantInputPersistenceQueueTests | 10/10 ✅ |
 | M3 轮次组装器 | AssistantInputTurnAssemblerTests（Swift Testing） | 7/7 ✅ |
 
-合计 247 项，0 失败。V17 的 App fake 门（取消旧积压、played 门控、
-backpressure 有界）含于 TTS 协调器 40 项内；V17 真机播放层对照待 UI 授权。
+合计 248 项，0 失败。V17 的 App fake 门（取消旧积压、played 门控、
+backpressure 有界、超 512 单单元保序打通 #311）含于 TTS 协调器 41 项内；
+V17 真机播放层对照待 UI 授权。
 口径修正：Assembler 套件为 Swift Testing，走 `swift test --filter`，
 Xcode `-only-testing` 按 XCTest 类名过滤得 0 项属口径误用，非缺失。
 
