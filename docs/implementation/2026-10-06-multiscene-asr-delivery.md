@@ -126,6 +126,11 @@ quality/quality、auto off、ready、空闲、catalog、配置和 runtime/vendor
 均核验通过。未修改 gold、预设或失败结果；提词器失败仍待定位。
 脱敏汇总 `production-session-observed-results.json` SHA-256：
 `63bd3834aa148fb69020b32294e6654b03153a49b32d31bd12538f47aad8406f`。
+新证据、失败、未验项和回退说明已追加并逐字回读：
+[#249](https://github.com/hrygo/SpeechRail/issues/249#issuecomment-6017881435)、
+[#253](https://github.com/hrygo/SpeechRail/issues/253#issuecomment-6017882725)、
+[#245](https://github.com/hrygo/SpeechRail/issues/245#issuecomment-6017883935)；
+三项保持 OPEN。
 
 ### 原工作区 rebase 与改动对账
 
