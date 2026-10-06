@@ -119,7 +119,12 @@ class ASREvidence:
 
     def score(
         self, reference: str | None, *, expected_wire_samples: int,
+        effective_max_segment_ms: int | None = None,
     ) -> dict[str, object]:
+        if effective_max_segment_ms is not None and (
+            type(effective_max_segment_ms) is not int or effective_max_segment_ms < 1
+        ):
+            raise ValueError("invalid effective ASR segment budget")
         if self.receipt_samples != expected_wire_samples or not self.terminals:
             raise ValueError("ASR input barrier lacks exact terminal coverage")
         text = ""
@@ -129,6 +134,13 @@ class ASREvidence:
             for item, (start, end) in spans:
                 if start != cursor or item not in self.terminals:
                     raise ValueError("ASR input boundary has a gap or missing terminal")
+                if (
+                    effective_max_segment_ms is not None
+                    # A manual wire anchor can precede its rounded 16 kHz
+                    # cursor by one 24 kHz sample. It cannot absorb a packet.
+                    and end - start > effective_max_segment_ms * 24 + 1
+                ):
+                    raise ValueError("ASR input boundary exceeds its effective segment budget")
                 cursor = end
             if cursor != expected_wire_samples:
                 raise ValueError("ASR final tail is not covered")
@@ -143,6 +155,10 @@ class ASREvidence:
             "preview_count": self.preview_count,
             "revised_characters": self.revised_characters,
             "sample_coverage_gate": "pass" if self.require_boundaries else "unset",
+            "segment_budget_gate": (
+                "pass" if self.require_boundaries and effective_max_segment_ms is not None
+                else "unset"
+            ),
         }
         if self.resource_only:
             evidence.update(
@@ -321,7 +337,10 @@ def _run_asr(
             received_at, event = next_event(deadline)
             evidence.consume(event, received_at)
         evidence_result = evidence.score(
-            reference, expected_wire_samples=len(wire) // 2
+            reference, expected_wire_samples=len(wire) // 2,
+            effective_max_segment_ms=(
+                int(echo["effective_max_segment_ms"]) if echo is not None else None
+            ),
         )
         result: dict[str, object] = {
             "audio_seconds": len(wire) / 48000,

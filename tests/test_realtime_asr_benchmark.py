@@ -73,6 +73,41 @@ def test_gap_or_overlap_fails_even_with_correct_text(bad_span):
         evidence.score("甲乙", expected_wire_samples=4)
 
 
+@pytest.mark.parametrize("resource_only", [False, True])
+def test_contiguous_coverage_rejects_a_boundary_shifted_past_the_segment_budget(resource_only):
+    evidence = ASREvidence(require_boundaries=True, resource_only=resource_only)
+    evidence.consume(boundary("first", 0, 482_400), 1)
+    evidence.consume(boundary("last", 482_400, 960_000), 2)
+    evidence.consume(terminal("first", "甲"), 3)
+    evidence.consume(terminal("last", "乙"), 4)
+    evidence.consume(receipt(960_000), 5)
+    with pytest.raises(ValueError, match="segment budget"):
+        evidence.score(
+            None if resource_only else "甲乙",
+            expected_wire_samples=960_000,
+            effective_max_segment_ms=20_000,
+        )
+
+
+@pytest.mark.parametrize("tail_samples", [0, 1, 2])
+def test_segment_budget_allows_only_one_wire_sample_of_resampler_rounding(tail_samples):
+    evidence = ASREvidence(require_boundaries=True, resource_only=True)
+    end = 480_000 + tail_samples
+    evidence.consume(boundary("item", 0, end), 1)
+    evidence.consume(terminal("item", ""), 2)
+    evidence.consume(receipt(end), 3)
+    if tail_samples > 1:
+        with pytest.raises(ValueError, match="segment budget"):
+            evidence.score(
+                None, expected_wire_samples=end, effective_max_segment_ms=20_000,
+            )
+        return
+    result = evidence.score(
+        None, expected_wire_samples=end, effective_max_segment_ms=20_000,
+    )
+    assert result["segment_budget_gate"] == "pass"
+
+
 def test_duplicate_terminal_and_terminal_before_boundary_fail():
     evidence = ASREvidence(require_boundaries=True)
     with pytest.raises(ValueError, match="precedes"):
@@ -380,6 +415,7 @@ def test_resource_only_asr_run_keeps_pacing_policy_echo_and_exact_barrier(monkey
         {"item_id": "last", "start_sample": 2_400, "end_sample": 4_800},
     ]
     assert result["resource_evidence"]["accepted_samples"] == 4_800
+    assert result["resource_evidence"]["segment_budget_gate"] == "pass"
     assert "PRIVATE_TRANSCRIPT" not in json.dumps(result)
 
 
