@@ -31,6 +31,7 @@ from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.domain.ports import AudioChunk, SpeechRequest, TranscriptionRequest
 from speechrail.domain.tts import VoiceRegistry
 from speechrail.domain.tts_errors import TtsBackendError
+from voice_test_fixtures import fake_pitch_measurement as fake_pitch_measurement
 
 REFERENCE_TEXT = "这是用于音色设计的参考语句，请保持自然清晰的表达方式。"
 EDITED_TEXT = "重新确认之后的参考文本，语气依旧自然清晰并且停顿合理。"
@@ -386,6 +387,26 @@ def test_reference_confirmation_checks_numbers_without_changing_rejected_candida
     assert {
         path: path.read_bytes() for path in repository.assets_dir.rglob("*.wav")
     } == files_before
+
+
+def test_workflow_does_not_repeat_the_pitch_algorithm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_pitch_scan(*_args: object) -> None:
+        pytest.fail("workflow tests must use the fake pitch measurement")
+
+    monkeypatch.setattr(
+        "speechrail.domain.voice_quality._autocorrelation_f0", unexpected_pitch_scan
+    )
+    client, registry, _synth, _asr = make_client(tmp_path, monkeypatch)
+    candidate_id, created = create_candidate(client)
+    assert created["state"] == "generated"
+    repository = VoiceDesignRepository(
+        registry.storage_path.with_name("voice_design_candidates.json"),
+        registry.storage_path.with_name("voice_design_candidates"),
+    )
+    assert repository.get(candidate_id).quality["reference"]["f0_median_hz"] == 220.0
 
 
 def test_candidate_lifecycle_publishes_only_after_base_and_human_review(

@@ -32,6 +32,7 @@ from speechrail.domain.tts import (
     canonicalize_clone_reference_audio,
     transcode_and_validate_clone_audio,
 )
+from voice_test_fixtures import fake_pitch_measurement as fake_pitch_measurement
 
 
 def _generate_test_wav(
