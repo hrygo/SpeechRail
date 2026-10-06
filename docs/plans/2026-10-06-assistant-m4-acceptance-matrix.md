@@ -137,9 +137,115 @@ commit、设备、系统、ASR/TTS active spec、voice revision、provider 模�
 质量听审（关键实体零漏读/零错读、漏读/重复/边界韵律人工听审）待执行；
 未通过项：无（延迟部分）；听审与 V17 对照仍为待执行。
 
+### V16 合成质量真机对照（2026-10-06，commit `95b1fe55`，不关闭 #268）
+
+同一确认全文 43 字（含日期/金额/电话/否定关键实体：
+“明天九点朝阳公园东门集合、身份证、三千五百元、
+幺三八幺二三四五六七八、取消周五改下周一”），
+3.7.1 quality/quality，serena，Apple M5 Max，macOS 27.0.1，
+完整文本 REST（`SpeechRail-Purpose: interactive`，wav）6 次合成。
+转写用本机同模型回转（`whisper-1` alias → `speechrail/qwen3-asr-1.7b`），
+只作客观对照，不替代人工听审。
+
+| run | 合成耗时 | 音频时长 | 转写回读 |
+|---|---|---|---|
+| 1 | 2.26s | 8.96s | 明天九点，朝阳公园东门集合。身份证3500元，幺三八幺二三四五六七八。取消周五，改下周一。 |
+| 2 | 4.78s | 19.52s | 明天九点，朝阳公园东门集合。身份证，3500元，幺三八幺二三四五六七八。取消周五，改下周一。 |
+| 3 | 2.36s | 9.28s | 明天九点，朝阳公园东门集合，身份证3500元，幺三八幺二三四五六七八，取消周五，改下周一。 |
+| 4 | 2.57s | 9.92s | （未转写，只计延迟与时长） |
+| 5 | 2.26s | 8.72s | （未转写，只计延迟与时长） |
+| 6 | 2.06s | 8.16s | （未转写，只计延迟与时长） |
+
+关键实体核对（run1–3 转写回读）：
+
+- 日期“明天九点”：3/3 正确。
+- 金额“三千五百元”→“3500元”：3/3 数值正确（中文数字转阿拉伯数字属正常 ITN）。
+- 电话“幺三八幺二三四五六七八”：3/3 正确。
+- 否定/变更“取消周五改下周一”：3/3 正确。
+- 漏读/重复：3/3 无整句漏读、无重复整句。
+
+未通过项：“三千五百元”读作“3500元”是否算保义改写（数字口语化），需 #257 评审确认；
+run2 音频 19.52s（≈2.2 倍时长）但转写文本与 run1/run3 等价——根因经人工听审
+与分半转写证伪修正为**偶发语速慢放**（约 0.45×），非重复渲染：
+人工听审耳感为“语速超慢、其他正常”；分半转写显示前半音频=前半文本、
+后半音频=后半文本（run2 前半“明天九点…幺三”/后半“八幺二三四五六七八…
+改下周一”），若为重复渲染则每半应各自转出全文。
+此前“重复渲染”初判（能量分段计出 8 语音段）有误：慢速语音的打出被误计为
+多段，计数方法未归一化语速，不作为定性依据。
+同文本追加 20 次复现：2 次超 14s（14.16s/15.44s，分半转写同样前半/后半
+各半文本，无重复），复现率约 3/36 ≈ 8%。
+不放行“合成时长稳定”结论；服务端偶发语速慢放按新增缺陷提 issue 跟踪（#308），
+不擅自改服务端，App 侧 played 门控不受影响（played 覆盖全部提交样本才完成）。
+人工听审（2026-10-07，用户亲耳双听正常版 A/B，通过）：
+关键实体（日期/金额/电话/否定变更）全部听清、无错读；
+无整句漏读、无重复整句；分句停顿自然、无怪异拖音。
+异常慢放版耳感与分半转写结论一致（慢放非重复）。
+听审材料在仓库外（`/tmp/v16a65_1.wav`、`v16a65_3.wav`），仓库仅保留本结论。
+
 | commit | 设备 | 系统 | spec | voice revision | provider | 样本数 | 未通过项 |
 |---|---|---|---|---|---|---|---|
 | f7e9d4b9 | Apple M5 Max | macOS 27.0.1 | quality/quality | serena（系统音色） | 本地 realtime+REST | 延迟 4+4 turns | 听审/V17/取消/长稳待执行 |
+| 95b1fe55 | Apple M5 Max | macOS 27.0.1 | quality/quality | serena（系统音色） | 本地 REST 合成+回转写 | 质量 6 合成/3 回读 | 数字口语化待评审/run2 长音频待查/听审待执行 |
+
+### V03/V05 取消与终态真机对照（2026-10-06，commit `95b1fe55`，不关闭 #258）
+
+3.7.1 quality/quality，Apple M5 Max，macOS 27.0.1，真机 `/v1/realtime`
+（`whisper-1` alias），每项 10 trials（3 + 7 两批），输入 4800B 合成 PCM。
+
+| 项 | 操作 | 应有结果 | 实测（10/10） |
+|---|---|---|---|
+| V03 clear 取消 | append → clear → commit | 空 final completed，不崩 | 10/10 `completed` + 空 transcript `''`，无 `segment_closed` 边界（输入已丢弃） |
+| V05 正常终态 | append → commit | completed + 终态 | 10/10 `completed`，`segment_closed` 边界先到（reason 待记录），转写“嗯。”（合成 PCM 内容所致，非误识别） |
+
+未通过项：无（本项）。V05 的 played 门控（terminal 在 played 前到不提前
+completed、played 唯一记账）属 App 播放层语义，本探针只覆盖服务端终态；
+App 侧 played 门控仍由 fake 门（V05 定向回归）覆盖，真机播放层对照待 UI 授权。
+旧远端收尾确认（2026-10-07，用户真机蓝牙/耳机切换验证，通过）：
+设备 recovered 时旧 request 先确认 terminal 再开新轮，无确认走显式重试；
+实测符合预期，通过。:codex-annotation{index="1"}
+
+### 长稳单连接 soak（2026-10-06，commit `e1781b06`，不关闭 #258）
+
+3.7.1 quality/quality，Apple M5 Max，macOS 27.0.1，真机 `/v1/realtime`
+（`whisper-1` alias）。单连接 24 轮 `append`（1s PCM 切片）→ `commit` →
+等 `completed` terminal；逐轮记终态与耗时；`/health` 前后对照。
+
+| 轮 | 终态 | 耗时 |
+|---|---|---|
+| 1（warm） | completed | 125ms |
+| 2–24 | completed | 65–70ms（平坦，无漂移） |
+
+汇总：**24/24 completed，p50=67ms，p95=70ms**。
+`/health` 前后一致：`status ok`、`version 3.7.1`、`profile quality/quality`、
+`asr_state warm_standby`、`ready true`。
+
+3 sessions 累计（同一探针 `/tmp/soak_probe.py`，单连接 24 轮，同 1s PCM 切片）：
+
+| session | 终态 | p50 | p95 | health 前/后 |
+|---|---|---|---|---|
+| 1 | 24/24 completed（round1 warm 125ms，其余 65–70ms 平坦） | 67ms | 70ms | warm_standby / warm_standby |
+| 2 | 24/24 completed（round1 warm 133ms，其余 72–77ms 平坦） | 76ms | 77ms | warm_standby / warm_standby |
+| 3 | 24/24 completed（round1 warm 120ms，其余 70–79ms 平坦） | 74ms | 79ms | active / active（ok，ready true） |
+
+三 session 同级（p50 67–76ms，p95 70–79ms），轮间无漂移。
+范围声明：矩阵“3 sessions × ≥24 轮”轮数口径已满；
+活动内存有界量化、SQLite 记录数 == 提交数核对仍待执行。
+内存观测（2026-10-06，只读 `/metrics`，不判定）：
+`speechrail_resource_physical_footprint_bytes` 在干净 soak（24/24，
+p50=70ms/p95=73ms）前为 9.44GB，soak 后即刻 9.64GB，5 分钟后 10.03GB，
+`asr_state` 保持 active。单次观测不能定性为泄漏（可能为 worker 保持 active
+的正常驻留）。
+追加 idle 6 分钟序列（无推理在途，`governor_active_requests` batch/realtime
+均为 0→realtime 1 的保持态）：11.61 → 9.66 → 10.96 → 9.66 → 13.38 →
+11.67GB，大幅上下波动、无单调爬升。波动形态不支持“泄漏”定性，更像采样口径
+含共享/瞬时映射。“有界”判定与预算口径（declared 13.74GB / budget 68.72GB）
+归 Python 侧评审，本矩阵只记录观测值，不判定。
+soak 探针为纯 realtime 转写、不落 App 会话库，SQLite 记录数核对不适用本探针。
+反例记录：session 2/3 首跑时恰遇他方 `run_candidate_v8.py`（ASR-245 候选验证，
+内部代号 v8，非产品版本）并发占用同一 ASR worker，延迟升至秒级
+（p50 4.9–6.3s）；待其 `matrix_complete`（300/300）退出、worker 回
+`warm_standby` 后重跑即恢复 70ms 级。该两轮污染数据作废，不计入本表。
+未通过项：无（本项 scope 内）。不宣称长稳通过（内存/SQLite 口径待补）。
 
 ## 范围与回退
 
