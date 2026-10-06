@@ -16,6 +16,11 @@ from urllib import request as urllib_request
 from speechrail.config.auth import resolve_api_key
 
 try:
+    from .asr_quality import character_error_metrics
+except ImportError:
+    from asr_quality import character_error_metrics  # type: ignore[no-redef]
+
+try:
     from .benchmark_manifest import BenchmarkInputError, Fixture
     from .profile_metrics import rtf
 except ImportError:  # pragma: no cover - exercised when run as a script
@@ -263,6 +268,7 @@ def _fixture_request(
     duration_source: str | None = "ffprobe"
     measured_rtf: float | None
     measurement_error: str | None = None
+    quality: dict[str, object] | None = None
     if fixture.kind == "tts":
         pcm_body = response.body if success and response is not None else b""
         actual_duration = _pcm_duration_seconds(pcm_body) if success else None
@@ -281,6 +287,15 @@ def _fixture_request(
             measured_rtf = rtf(elapsed, duration)
         except ValueError:
             measured_rtf = None
+        if success and fixture.reference_text is not None and response is not None:
+            try:
+                transcript = json.loads(response.body).get("text")
+                if not isinstance(transcript, str):
+                    raise ValueError("ASR response lacks text")
+                quality = character_error_metrics(fixture.reference_text, transcript)
+            except (ValueError, TypeError, AttributeError):
+                measurement_error = "invalid_quality_response"
+                success = False
     return {
         "id": fixture.id,
         "kind": fixture.kind,
@@ -292,4 +307,5 @@ def _fixture_request(
         "status_code": status_code,
         "inference_observed": success,
         **({"measurement_error": measurement_error} if measurement_error else {}),
+        **({"quality_metrics": quality} if quality is not None else {}),
     }
