@@ -6,8 +6,9 @@ from itertools import pairwise
 
 import pytest
 
-from realtime_wire import session_update
+from realtime_wire import server_vad, session_update
 from speechrail.application.realtime_openai import OpenAIRealtimeSession
+from speechrail.backends.vad import VadEvent
 from speechrail.compatibility.openai_realtime import RealtimeAdapterError
 from speechrail.domain.audio_timeline import RationalResampler
 from speechrail.domain.ports import StreamingAsrEvent
@@ -217,7 +218,7 @@ def test_drain_removes_completed_tasks_without_waiting_for_callbacks(task_set, d
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("packet_samples", [768, 1001, 26_000])
+@pytest.mark.parametrize("packet_samples", [768, 1001, 2400, 24_000, 26_000])
 def test_packet_boundaries_do_not_change_admitted_pcm_or_frozen_spans(packet_samples):
     async def run():
         services, factory = _build(
@@ -243,6 +244,9 @@ def test_packet_boundaries_do_not_change_admitted_pcm_or_frozen_spans(packet_sam
         expected = resampler.process(wire) + resampler.flush()
         received = b"".join(chunk for item in factory.sessions for chunk in item.received)
         assert received == expected
+        assert [b"".join(item.received) for item in factory.sessions] == [
+            expected[:32_000], expected[32_000:64_000], expected[64_000:],
+        ]
         boundaries = [e for e in sent if e["type"] == "speechrail.transcription.segment_closed"]
         finals = [
             e for e in sent
@@ -251,6 +255,11 @@ def test_packet_boundaries_do_not_change_admitted_pcm_or_frozen_spans(packet_sam
         assert len(boundaries) == len(finals) == 3
         assert [b["reason"] for b in boundaries] == [
             "budget_rollover", "budget_rollover", "client_commit",
+        ]
+        assert [b["sample_span"] for b in boundaries] == [
+            {"start": 0, "end": 24_000},
+            {"start": 24_000, "end": 48_000},
+            {"start": 48_000, "end": 57_601},
         ]
         assert boundaries[0]["sample_span"]["start"] == 0
         assert boundaries[-1]["sample_span"]["end"] == 57_601
@@ -264,6 +273,65 @@ def test_packet_boundaries_do_not_change_admitted_pcm_or_frozen_spans(packet_sam
         assert not any("commit_event_id" in b for b in boundaries[:-1])
         assert session._asr_lane.retained_bytes == 0
         await session.close()
+
+    asyncio.run(run())
+
+
+def test_vad_stop_after_full_budget_does_not_move_the_previous_item_end():
+    async def run():
+        services, factory = _build(
+            realtime_speech_admission_enabled=False,
+            realtime_vad_engine="legacy",
+        )
+        sent = []
+
+        async def send(event):
+            sent.append(event)
+            return len(sent)
+
+        class StopOnSecondPacket:
+            in_speech = True
+
+            def __init__(self):
+                self.calls = 0
+
+            def process_chunk(self, pcm):
+                self.calls += 1
+                return [VadEvent(
+                    is_speech=self.calls == 1,
+                    speech_started=self.calls == 1,
+                    speech_ended=self.calls == 2,
+                )]
+
+            def reset(self):
+                pass
+
+        session = OpenAIRealtimeSession(services, session_id="vad-budget", send=send)
+        update = session_update(endpointing=server_vad())
+        update["session"]["speechrail"]["asr"] = _policy_update()["session"]["speechrail"]["asr"]
+        await session._update_session(update)
+        session._vad = StopOnSecondPacket()
+        wire = (500).to_bytes(2, "little", signed=True) * 26_400
+        try:
+            for pcm in (wire[:48_000], wire[48_000:]):
+                await session._append_audio({
+                    "type": "input_audio_buffer.append",
+                    "audio": base64.b64encode(pcm).decode(),
+                })
+            await session._await_asr_finals()
+            boundaries = [e for e in sent if e["type"].endswith("segment_closed")]
+            assert [e["sample_span"] for e in boundaries] == [
+                {"start": 0, "end": 24_000},
+                {"start": 24_000, "end": 26_400},
+            ]
+            assert [e["reason"] for e in boundaries] == ["budget_rollover", "vad"]
+            resampler = RationalResampler(24_000, 16_000)
+            expected = resampler.process(wire)
+            assert [b"".join(item.received) for item in factory.sessions] == [
+                expected[:32_000], expected[32_000:],
+            ]
+        finally:
+            await session.close()
 
     asyncio.run(run())
 
