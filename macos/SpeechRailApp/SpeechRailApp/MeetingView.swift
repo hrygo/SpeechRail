@@ -21,6 +21,11 @@ public struct MeetingView: View {
 
     @State private var usesMicrophone = true
     @State private var systemApps: [SystemAudioApp] = []
+    /// 会前标题（方案 §4.1：「保留**轻量标题**和来源摘要。标题可为空」）。
+    ///
+    /// **不写进偏好**：上一场叫什么不该替下一场预填——用户多半是在开新一场会，
+    /// 带着上一场的名字开始，事后还得回来改。
+    @State private var titleDraft = ""
     @State private var sourceCandidates: [SystemAudioApp] = []
     @State private var isInspectorCollapsed = false
     @FocusState private var inspectorToggleFocused: Bool
@@ -31,14 +36,39 @@ public struct MeetingView: View {
     @State private var selectedMinutesVersionID: String?
     @State private var confirmingFinish = false
     @State private var recent: [SessionSummary] = []
+    /// 完整会议知识库（MA-12）。这一段只快取最近几场，
+    /// 「查看全部」才是完整分页列表——静默截断到 8 场会让人以为其余的没了（MC-52）。
+    @State private var showsKnowledgeLibrary = false
     @State private var reviewRecord: SessionRecord?
     @State private var reviewLines: [TranscriptLine] = []
     @State private var reviewSpeakerNames: [String: String] = [:]
     @State private var reviewMinutes: MinutesVersion?
+    /// 采用哪一版时的冲突提示（MC-31）：两个窗口基于同一旧版改采用时，
+    /// 后返回的那个不覆盖，改为提示刷新。
+    @State private var adoptConflictNotice: String?
     /// 录制中打开「标注说话人」面板（稿 `screenMeetingRecording` 表头那一颗）。
     @State private var isLabelingSpeakers = false
+
+    /// 转录滚动区的命名坐标系，量底边位置用。
+    private static let transcriptSpace = "meeting.transcript"
     /// 空态里「想连电脑里的声音一起记」那一行可选项的展开态。
     @State private var showsSourceOptions = false
+
+    /// 当前纪要各条结论的核对结论（MA-21 审阅轴）。
+    /// 没有依据可核的条目**不计入**——"没核过"不是"核过了"。
+    @State private var reviewVerdicts: [MinutesEvidenceValidator.Verdict] = []
+
+    /// 空 final 留下的恢复材料（MA-02 / MC-11）。默认读库口径不返回它们，
+    /// 所以要单独按 `includePartial: true` 取——用户提示里说了"已保留"，
+    /// 就必须真能取回来。
+    @State private var recoveryLines: [TranscriptLine] = []
+
+    /// 转录流的粘底状态（MA-10）：用户离开底部后不许被新句子拽走。
+    @State private var transcriptFollow = TranscriptFollowState()
+
+    /// 内容底边在滚动坐标里的位置，用来算「离底部多远」。
+    @State private var transcriptBottomMarkerY: CGFloat = 0
+    @State private var transcriptViewportHeight: CGFloat = 0
 
     private enum PostTab: String, CaseIterable, Identifiable {
         case minutes
@@ -182,6 +212,8 @@ public struct MeetingView: View {
             Task { await reloadPostMeeting() }
         }
         .onChange(of: meeting.sessionID) { _, newValue in
+            // 换一场会就复位：上一场的回看位置不该带过来。
+            transcriptFollow = transcriptFollow.reset()
             Task { await meeting.innerOS.bind(sessionID: newValue) }
         }
         .confirmationDialog(
@@ -193,6 +225,9 @@ public struct MeetingView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("麦克风同一时刻只能由一个会话使用。结束后文字记录会留着，接着开始整理纪要。")
+        }
+        .sheet(isPresented: $showsKnowledgeLibrary) {
+            MeetingKnowledgeLibraryView(coordinator: session)
         }
         .sheet(isPresented: $isCheckingInput) { InputLevelSheet() }
         .sheet(isPresented: $isLabelingSpeakers) {
@@ -255,7 +290,7 @@ public struct MeetingView: View {
         ) {
             if meeting.phase.isLive {
                 Button(meeting.isPaused ? "继续录" : "暂停一下") {
-                    meeting.togglePause()
+                    Task { await meeting.togglePause() }
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -291,12 +326,66 @@ public struct MeetingView: View {
         }
     }
 
+    /// MA-10 的呈现门面。把采集状态翻译成用户语言的那一层集中在这里，
+    /// 界面不自己拼"现在到底在录什么"。
+    private var sourcePresentation: MeetingSourcePresentation {
+        MeetingSourcePresentation(
+            capture: sourceCapture,
+            selection: MeetingSourcePresentation.Selection(
+                usesMicrophone: meeting.selection?.usesMicrophone ?? true,
+                systemAppNames: meeting.selection?.systemApps.map(\.name) ?? []
+            ),
+            // 采集层没有独立的"识别已连上"标志。可得的诚实信号是**流有没有断**：
+            // `interruption` 非空就说明上行中断过。这一近似会在采集层补上
+            // 显式标志之后换掉——现在不拿它冒充"识别正常"。
+            isRecognizing: meeting.interruption == nil,
+            savedLineCount: meeting.storedLineCount
+        )
+    }
+
+    /// 六条轴的统一投影（MA-21）。就绪/采集/识别/保存/索引/审阅分别说话。
+    private var axisProjection: MeetingAxisProjection {
+        let live = meeting.phase.isLive || meeting.phase == .interrupted
+        return MeetingAxisProjection(
+            readiness: meeting.blocked.map { .failed($0.title) } ?? (live ? .ready : .idle),
+            capture: live ? axis(for: sourceCapture) : .idle,
+            // 采集层没有独立的"识别已连上"标志；这里用**上行有没有断过**近似，
+            // 采集层补上显式标志之后要换掉。
+            recognition: live
+                ? (meeting.interruption == nil ? .active : .failed("上行中断过"))
+                : .idle,
+            persistence: meeting.storedLineCount > 0 ? .ready : (live ? .active : .idle),
+            // 保存与索引分开报（§6.5）：存下了不等于搜得到。
+            index: meeting.gapCount > 0 ? .degraded("补过 \(meeting.gapCount) 处静音") : .ready,
+            // 审阅轴之前恒为 .idle，等于界面明明有待复核的结论却什么都不说。
+            review: MeetingAxisProjection.reviewState(verdicts: reviewVerdicts)
+        )
+    }
+
+    private func axis(for capture: MeetingSourcePresentation.Capture) -> MeetingAxisProjection.State {
+        switch capture {
+        case .notStarted: .idle
+        case .pausedAll: .paused
+        case .microphoneMuted: .active
+        case .live: .active
+        }
+    }
+
+    private var sourceCapture: MeetingSourcePresentation.Capture {
+        guard meeting.phase.isLive || meeting.phase == .interrupted else { return .notStarted }
+        if meeting.isPaused { return .pausedAll }
+        if meeting.isMicrophoneMuted { return .microphoneMuted }
+        return .live
+    }
+
     private var statusFacts: [String] {
         guard meeting.phase != .idle else {
             return meeting.selection.map { [$0.label] } ?? []
         }
         var facts: [String] = []
-        if let selection = meeting.selection { facts.append("来源：\(selection.label)") }
+        // 来源摘要走 MA-10 的呈现门面：用户没勾麦克风时，那句话里**不会出现"麦克风"**
+        // （MC-03）。直接用 `selection.label` 会把麦克风带出来，等于谎报采集范围。
+        if meeting.selection != nil { facts.append(sourcePresentation.sourceSummary) }
         // 「谁在说话」这件事只说**一句**：有编号就说几位，没有就说这一场标不标。
         // 原来"还没有分人"与"分人已开"会同时出现（开着但一个编号都还没有时），
         // 两句摆在一起自相矛盾，也是用户点名的那个看不懂的词（2026-09-19）。
@@ -313,6 +402,15 @@ public struct MeetingView: View {
         if meeting.reconnectedSources > 0 {
             facts.append("接回过 \(meeting.reconnectedSources) 次")
         }
+        // 电平、识别、保存是三件事，分开说（MC-74）。合成一句会让用户以为
+        // 看到电平就等于声音已经变成文字了。
+        if meeting.phase.isLive {
+            facts.append(sourcePresentation.levelCaption)
+        }
+        // MA-21：采集/识别/保存/索引/审阅各走各的轴，一条异常不掩盖另一条。
+        // 之前这些是临时拼进 facts 的，拼到最后最常见的后果就是
+        // "识别断了但界面写着正在录音"。
+        facts.append(contentsOf: axisProjection.factLines)
         return facts
     }
 
@@ -376,6 +474,7 @@ public struct MeetingView: View {
             // 3 列（来源卡只剩 308pt），连稿里那句「本机音频：抓这个 App 正在播放的声音…」
             // 都被折成三行后截断。稿 `screenClosureMeetingSources` 里 split 只有
             // 「音频来源 + 本次会议」两栏。
+            titleField
             sourceOptions
             libraryCard
         }
@@ -564,14 +663,37 @@ public struct MeetingView: View {
         )
     }
 
+    /// 会前标题。**一个输入框，不是一张表单**——
+    /// §4.1 写得很直接：「不要为了归档要求用户先完成复杂表单」。
+    ///
+    /// 留在 `@State` 里而不是绑定到会话：启动失败之后它**一个字都不该丢**
+    /// （MC-04）。失败往往还发生在同一台机器、同一个占着麦克风的应用上，
+    /// 让用户重打一遍他没有能力消除的那个问题，是白添摩擦。
+    private var titleField: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Text("标题")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            TextField("可以不填，之后在知识库里改也行", text: $titleDraft)
+                .textFieldStyle(.plain)
+                .accessibilityLabel("这场会议的标题，可以留空")
+            Text("可以不填")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+        }
+        .speechRailSingleLineInput(.regular)
+    }
+
     private func start() async {
         preferences.meetingUsesMicrophone = usesMicrophone
         preferences.meetingSystemAudioBundleIDs = systemApps.map(\.bundleID)
         await meeting.start(
-            selection: AudioSourceCoordinator.Selection(
+            selection: MeetingAudioSelection(
                 usesMicrophone: usesMicrophone,
-                systemApps: systemApps
-            )
+                systemApps: systemApps.map { MeetingAudioApp(bundleID: $0.bundleID, name: $0.name) }
+            ),
+            title: titleDraft
         )
     }
 
@@ -617,22 +739,114 @@ public struct MeetingView: View {
                             if let partial = meeting.partialText, !partial.isEmpty {
                                 partialLine(partial)
                             }
+                            // 底边标记：量得出「离底部多远」，回看时才不会被抢滚动。
+                            Color.clear
+                                .frame(height: 1)
+                                .background(
+                                    GeometryReader { geo in
+                                        Color.clear.preference(
+                                            key: TranscriptBottomMarkerKey.self,
+                                            value: geo.frame(in: .named(Self.transcriptSpace)).maxY
+                                        )
+                                    }
+                                )
                         }
                         .padding(SpeechRailDesignTokens.Spacing.md)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .onChange(of: meeting.lines.count) { _, _ in
-                        guard let last = meeting.lines.last else { return }
+                    .coordinateSpace(name: Self.transcriptSpace)
+                    .background(
+                        GeometryReader { geo in
+                            Color.clear.preference(
+                                key: TranscriptViewportHeightKey.self,
+                                value: geo.size.height
+                            )
+                        }
+                    )
+                    .onPreferenceChange(TranscriptBottomMarkerKey.self) { y in
+                        transcriptBottomMarkerY = y
+                    }
+                    .onPreferenceChange(TranscriptViewportHeightKey.self) { h in
+                        transcriptViewportHeight = h
+                    }
+                    .onChange(of: meeting.lines.count) { oldCount, newCount in
+                        // 用户正在回看时，新句子一条都不许抢滚动（MA-10）。
+                        let arrived = transcriptFollow.anchoring(meeting.lines.last?.id)
+                            .contentArrived(lineCount: newCount - oldCount)
+                        transcriptFollow = arrived.state
+                        guard case .follow = arrived.decision,
+                              let last = meeting.lines.last else { return }
                         if reduceMotion {
                             proxy.scrollTo(last.id, anchor: .bottom)
                         } else {
                             withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
                         }
                     }
+                    .onChange(of: transcriptBottomMarkerY) { _, _ in
+                        guard transcriptViewportHeight > 0 else { return }
+                        let distance = transcriptViewportHeight - transcriptBottomMarkerY
+                        transcriptFollow = transcriptFollow.userScrolled(
+                            toBottomWithin: Double(distance)
+                        )
+                    }
+                    .safeAreaInset(edge: .bottom) {
+                        if let banner = transcriptFollow.unseenBannerText {
+                            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                                Text(banner)
+                                    .font(SpeechRailDesignTokens.Typography.caption)
+                                Button("回到最新") {
+                                    transcriptFollow = transcriptFollow.jumpToLatest(
+                                        anchor: meeting.lines.last?.id
+                                    )
+                                    guard let last = meeting.lines.last else { return }
+                                    if reduceMotion {
+                                        proxy.scrollTo(last.id, anchor: .bottom)
+                                    } else {
+                                        withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                                    }
+                                }
+                                .buttonStyle(.bordered)
+                                .keyboardShortcut(.defaultAction)
+                            }
+                            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                            .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+                        }
+                    }
                 }
                 .frame(maxHeight: .infinity)
+                if !recoveryLines.isEmpty {
+                    recoverySection
+                }
             }
         }
+    }
+
+    /// 恢复材料区（MA-02 / MC-11）。
+    ///
+    /// 系统提示里说了"已原样保留"，这里就必须真能取回那句话。
+    /// 它**不是**转录正文，所以单独成区、明说不进纪要——放在正文流里
+    /// 会让用户以为这是这场会正常识别出来的一句。
+    @ViewBuilder
+    private var recoverySection: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Text("没拿到定稿的句子")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Text("原样保留，不进纪要")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+            }
+            ForEach(recoveryLines) { line in
+                Text(line.text)
+                    .font(SpeechRailDesignTokens.Typography.body)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
     }
 
     /// 断点那一行：**时间码在断点处是跳的**（§6.5、D8），所以这里明写一句。
@@ -652,12 +866,33 @@ public struct MeetingView: View {
 
     private func liveLine(_ line: MeetingSession.Line) -> some View {
         HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Text(Self.timecode(line.start))
+            // 没有对齐证据就不显示数字：那一列写着 00:12 时，
+            // 用户只会读成"这句话是 12 秒时说的"，而它其实是记录时刻。
+            Text(
+                TranscriptTimeWindow.timecodeColumn(
+                    observed: line.start,
+                    quality: line.timingQuality
+                )
+            )
                 .font(SpeechRailDesignTokens.Typography.technicalValue)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                 .frame(
                     width: SpeechRailDesignTokens.Layout.sessionTimecodeColumnWidth,
                     alignment: .leading
+                )
+                .help(
+                    TranscriptTimeWindow.accessibilityText(
+                        observedStart: line.start,
+                        observedEnd: line.end,
+                        quality: line.timingQuality
+                    )
+                )
+                .accessibilityLabel(
+                    TranscriptTimeWindow.accessibilityText(
+                        observedStart: line.start,
+                        observedEnd: line.end,
+                        quality: line.timingQuality
+                    )
                 )
             speakerColumn(label: line.speakerLabel)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
@@ -795,22 +1030,56 @@ public struct MeetingView: View {
                     }
                 }
             case .queued, .running:
+                // 这里只显示状态标题，不显示失败原因：`MinutesGenerator` 的状态机里
+                // 失败只走 `.failed(reason)`，`queued`/`running` 不带原因字段；
+                // 若"一直转圈"且无失败横幅，原因是 `failMinutes` 落库失败，
+                // 查日志分类 `minutes.generate`（P1-5），不是界面吞了错误。
                 Text(meeting.minutes.state.title)
                     .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                // MC-32：任务在排队那一刻就固定了用哪套设置。用户中途改设置，
+                // 这一条**不跟着换**——换了等于同一任务前后用了两个端点，出了错无法归因。
+                if meeting.minutes.jobConfigDiffersFromCurrent {
+                    Text("这一次整理用的是它开始时那套设置；你改过的设置从下一次整理生效。")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                }
+            case .cancelled:
+                // MC-30：这是"你停掉的"，不是"没整理出来"。远端停没停要单独说，
+                // 说不准就说不准——本地停下来是确定的，远端不是。
+                StatusBanner(
+                    kind: .standard,
+                    tone: .neutral,
+                    title: "整理已停止 · 文字记录已经存好了",
+                    message: "这一次是你停掉的，不算整理失败，可以随时重新生成。"
+                        + (meeting.minutes.remoteCancellationNote ?? ""),
+                    actionTitle: "重新生成"
+                ) {
+                    Task { await regenerateMinutes() }
+                }
+            case .submissionUnknown:
+                // MC-28：远端可能已经受理，只是没拿到回执。这里**不**给"重新生成"当默认出口，
+                // 因为重发可能重复执行、重复计费；由用户自己决定要不要再试。
+                StatusBanner(
+                    kind: .standard,
+                    tone: .attention,
+                    title: "提交结果待确认 · 文字记录已经存好了",
+                    message: "请求可能已经发出去了，只是没拿到回执。没法确认的时候我们不会自动重试："
+                        + "再来一次可能会重复执行、重复计费。确认服务那边没有在跑之后再重新生成。"
+                )
             default:
                 EmptyView()
             }
             // 「在看哪一版」是一个**有落点的状态**：点了版本列表里的旧版就必须换正文，
             // 否则那一行按下去什么都不会发生（而这正是"旧版一直可看"的承诺）。
-            if let viewing = selectedMinutesVersion, !viewing.isLatest {
+            if let viewing = selectedMinutesVersion, viewing.id != latestVersionID {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     Text("正在看第 \(viewing.version) 版")
                         .font(SpeechRailDesignTokens.Typography.captionMedium)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     StatusPill(tone: Self.tone(for: viewing.status), label: viewing.status.title)
                     Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
-                    Button("回到最新") { selectedMinutesVersionID = nil }
+                    Button("回到当前版本") { selectedMinutesVersionID = nil }
                         .buttonStyle(.link)
                         .font(SpeechRailDesignTokens.Typography.caption)
                 }
@@ -820,6 +1089,13 @@ public struct MeetingView: View {
                meeting.minutes.versionsNeedingReview.contains(viewing.id)
             {
                 Text("这一版创建之后说话人有过修订，结论可能已过期，引用仍指修订前的原文。")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            }
+            // MA-08：结构合法但语义撑不住的结论留在正文里，同时说明要核对。
+            // 不把"有引用"说成"核对通过"——那正是验证器最不该犯的错。
+            if let review = meeting.minutes.candidateReview, review.needsReview {
+                Text(reviewSummary(review))
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
@@ -838,16 +1114,31 @@ public struct MeetingView: View {
 
     /// 被点开的那一版。**选中即唯一来源**：找不到就是没选（比如换了会话，版本列表变了），
     /// 不把失效的 id 当成"还在看旧版"。
+    /// 核对报告转成一句人话。数字要说清楚：几条没通过引用核对、几条语义上要核对。
+    private func reviewSummary(_ review: MinutesEvidenceValidator.Report) -> String {
+        if review.rejectedCount > 0, review.reviewCount > 0 {
+            return "这一版有 \(review.rejectedCount) 条结论没通过引用核对、\(review.reviewCount) 条语气或数字对不上。"
+                + "内容留在下面，请对着文字记录核对后再用。"
+        }
+        if review.rejectedCount > 0 {
+            return "这一版有 \(review.rejectedCount) 条结论没通过引用核对，内容仍留在下面，请对着文字记录核对后再用。"
+        }
+        return "这一版有 \(review.reviewCount) 条结论的语气或数字与转录对不上，已标在正文里，请核对后再用。"
+    }
+
     private var selectedMinutesVersion: MinutesVersion? {
         guard let selectedMinutesVersionID else { return nil }
         return meeting.minutes.versions.first { $0.id == selectedMinutesVersionID }
     }
 
-    /// 正文只在这一处决定：选了旧版就显示旧版，否则是最新版（`latestBody` 只作为
-    /// 版本列表还没刷出来时的兜底）。
+    /// 正文只在这一处决定：选了旧版就显示旧版，否则是当前展示版
+    /// （采用版优先，其次最新可用候选；`latestBody` 只作为版本列表还没刷出来时的兜底）。
     private var displayedMinutesBody: String? {
         if let selectedMinutesVersion { return selectedMinutesVersion.body }
-        // MC-25：最新尝试失败时仍显示最新可用版正文，不把失败版的空正文当成功。
+        // MC-25：已采用 v2 后 v3 失败，仍显示 v2；不把失败版的空正文当成功。
+        if let accepted = meeting.minutes.versions.first(where: \.isAccepted) {
+            return accepted.body
+        }
         if let latest = meeting.minutes.versions.first(where: \.isLatest) {
             if latest.status == .ready { return latest.body }
             if let usable = meeting.minutes.versions.filter({ $0.status == .ready }).max(by: { $0.version < $1.version }) {
@@ -925,8 +1216,28 @@ public struct MeetingView: View {
         // 而"重开 App 之后还在不在"只能由库回答（§11.2 的第二条）。
         guard let id = meeting.sessionID else { return }
         reviewLines = (try? await session.lines(sessionID: id)) ?? []
+        recoveryLines = (try? await session.lines(sessionID: id, includePartial: true))?
+            .filter { $0.status == .partial } ?? []
         reviewSpeakerNames = (try? await session.speakerNames(sessionID: id)) ?? [:]
         await meeting.minutes.reload(sessionID: id)
+        await reloadReviewVerdicts(sessionID: id)
+    }
+
+    /// 采用版里每条结论的核对结论。取的是**采用指针指向的那一版**，
+    /// 不是"最新一版"——界面此刻显示什么，审阅轴就该说什么。
+    private func reloadReviewVerdicts(sessionID: String) async {
+        // `??` 的右操作数是自动闭包，装不下 `await`，所以分步取。
+        var adopted = try? await session.acceptedMinutes(sessionID: sessionID)
+        if adopted == nil {
+            adopted = try? await session.currentMinutes(sessionID: sessionID)
+        }
+        guard let adopted,
+              let items = try? await session.minutesItems(minutesID: adopted.id)
+        else {
+            reviewVerdicts = []
+            return
+        }
+        reviewVerdicts = items.compactMap(\.verdict)
     }
 
     private func regenerateMinutes() async {
@@ -942,7 +1253,7 @@ public struct MeetingView: View {
             resolvedConfiguration: preferences.resolvedLLMConfiguration(for: .minutes)
         )
         if reviewRecord?.id == id {
-            reviewMinutes = try? await session.latestUsableMinutes(sessionID: id)
+            reviewMinutes = try? await session.currentMinutes(sessionID: id)
             selectedMinutesVersionID = nil
             postTab = .minutes
             return
@@ -988,8 +1299,8 @@ public struct MeetingView: View {
                 if let pinnedMinutesID {
                     try? await session.minutesVersion(id: pinnedMinutesID)
                 } else {
-                    // MC-25：没选旧版时导最新可用版；最新尝试失败不带空正文。
-                    try? await session.latestUsableMinutes(sessionID: id)
+                    // MC-25：没选旧版时导当前展示版（采用版优先）；最新尝试失败不带空正文。
+                    try? await session.currentMinutes(sessionID: id)
                 }
             } else {
                 nil
@@ -1017,8 +1328,8 @@ public struct MeetingView: View {
         reviewRecord = record
         reviewLines = (try? await session.lines(sessionID: summary.id)) ?? []
         reviewSpeakerNames = (try? await session.speakerNames(sessionID: summary.id)) ?? [:]
-        // MC-25：回看读最新可用版；最新尝试失败时不拿失败版的空正文遮旧版。
-        reviewMinutes = try? await session.latestUsableMinutes(sessionID: summary.id)
+        // MC-25：回看读当前展示版（采用版优先）；最新尝试失败时不拿失败版的空正文遮旧版。
+        reviewMinutes = try? await session.currentMinutes(sessionID: summary.id)
         selectedMinutesVersionID = nil
     }
 
@@ -1026,6 +1337,33 @@ public struct MeetingView: View {
         reviewRecord = nil
         reviewMinutes = nil
         Task { await reloadPostMeeting() }
+    }
+
+    /// 采用某一版（MA-06/MC-31）：只有用户明确采用才移动当前采用版；
+    /// 采用基于"点下去时看到的那个采用版"做比较，期间别人改过就拒绝覆盖并提示刷新。
+    private func adoptMinutesVersion(_ version: MinutesVersion, sessionID: String) async {
+        let expected = ((try? await session.acceptedMinutes(sessionID: sessionID)) ?? nil)?.id
+        let committed = (try? await session.adoptMinutes(
+            sessionID: sessionID,
+            minutesID: version.id,
+            expectedCurrentID: expected
+        )) ?? false
+        guard committed else {
+            adoptConflictNotice = "当前采用的版本已经变了，刷新后再试一次。"
+            await refreshAfterAdopt(sessionID: sessionID)
+            return
+        }
+        adoptConflictNotice = nil
+        await refreshAfterAdopt(sessionID: sessionID)
+    }
+
+    /// 采用之后把这一场的展示口径刷回"当前展示版"：当前会议刷生成器状态，
+    /// 回看旧记录刷右栏正文，两条路径都不自己拼回退链。
+    private func refreshAfterAdopt(sessionID: String) async {
+        if reviewRecord?.id == sessionID {
+            reviewMinutes = try? await session.currentMinutes(sessionID: sessionID)
+        }
+        await reloadPostMeeting()
     }
 
     private func reloadRecent() async {
@@ -1196,6 +1534,17 @@ public struct MeetingView: View {
             meeting.interruptionNote ?? "音频来源停下来了。已经定稿的文字记录都在。"
         case .unexpectedExit:
             "上一次没有正常结束。这一段已经封存，可以回看、导出。"
+        case .userPaused:
+            // 正常情况下到不了这张卡：`interruption` 只由故障路径写入，暂停走
+            // `markUserPaused`（只落停记区间、不改相位、不释放设备），所以
+            // 上面的「四种断法」里没有它——用户主动为之不算断法。
+            // 这一支是给"万一走到了这儿"兜底的：真走到了，说明有路径把暂停误记成了
+            // 故障，那要显示成"你自己暂停的"，不能反过来把用户的动作说成设备出问题。
+            "这一段是你自己暂停的记录，不是出了故障。"
+        case .unknown:
+            // 库里这一段确实没录上，原因却是这一版程序读不懂的。宁可说"原因不明"，
+            // 也不能默认当成安静或当成设备故障——用户据此判断该不该重录。
+            "这一段时间没有录上，原因不明。"
         case .none:
             "这一段停在了断点上。"
         }
@@ -1224,39 +1573,63 @@ public struct MeetingView: View {
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 }
                 ForEach(meeting.minutes.versions) { version in
-                    Button {
-                        // 点一行 = 「看这一版」：换正文，并且把分段切回纪要
-                        // ——在「转录」页签上点版本号却什么都没变，和没接线是一回事。
-                        selectedMinutesVersionID = version.id
-                        postTab = .minutes
-                    } label: {
-                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                            Text(version.isLatest ? "最新 · 第 \(version.version) 版" : "第 \(version.version) 版")
-                                .font(SpeechRailDesignTokens.Typography.callout)
-                            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
-                            // MC-46 后半句：来源修订晚于该版创建时标需复核；正文不动，引用仍指旧版。
-                            if meeting.minutes.versionsNeedingReview.contains(version.id) {
-                                StatusPill(tone: .attention, label: "需复核")
+                    // 「看这一版」与「采用这一版」是两个动作，所以是两个控件：
+                    // 把采用按钮套在行按钮里会变成嵌套按钮，键盘与指针都拿不到它。
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Button {
+                            // 点一行 = 「看这一版」：换正文，并且把分段切回纪要
+                            // ——在「转录」页签上点版本号却什么都没变，和没接线是一回事。
+                            selectedMinutesVersionID = version.id
+                            postTab = .minutes
+                        } label: {
+                            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                                Text(versionLabel(version))
+                                    .font(SpeechRailDesignTokens.Typography.callout)
+                                Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+                                // MC-46 后半句：来源修订晚于该版创建时标需复核；正文不动，引用仍指旧版。
+                                if meeting.minutes.versionsNeedingReview.contains(version.id) {
+                                    StatusPill(tone: .attention, label: "需复核")
+                                }
+                                // MA-06：采用版是当前口径；失败/排队中的版本不可采用。
+                                if version.isAccepted {
+                                    StatusPill(tone: .healthy, label: "已采用")
+                                }
+                                StatusPill(tone: Self.tone(for: version.status), label: version.status.title)
                             }
-                            StatusPill(tone: Self.tone(for: version.status), label: version.status.title)
+                            .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                            .padding(.vertical, SpeechRailDesignTokens.Spacing.hairline)
+                            .contentShape(Rectangle())
                         }
-                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
-                        .padding(.vertical, SpeechRailDesignTokens.Spacing.hairline)
-                        .contentShape(Rectangle())
+                        .buttonStyle(.plain)
+                        .accessibilityValue(
+                            (selectedMinutesVersionID ?? latestVersionID) == version.id ? "正在查看" : "未选中"
+                        )
+                        .speechRailPointerCursor()
                         .background(
                             // 选中行与"正在看的那一版"必须一致：`selectedMinutesVersion` 为空时
-                            // 实际在看最新版，所以最新那一行也是选中的。
+                            // 实际在看当前展示版，所以那一行也是选中的。
                             (selectedMinutesVersionID ?? latestVersionID) == version.id
                                 ? SpeechRailDesignTokens.Surface.selectedFill
                                 : Color.clear,
                             in: SpeechRailDesignTokens.Corner.nestedShape
                         )
+                        if !version.isAccepted, canAdopt(version), let sessionID = meeting.sessionID {
+                            Button {
+                                Task { await adoptMinutesVersion(version, sessionID: sessionID) }
+                            } label: {
+                                Text("采用")
+                                    .font(SpeechRailDesignTokens.Typography.caption)
+                            }
+                            .buttonStyle(.link)
+                            .speechRailPointerCursor()
+                            .accessibilityLabel("采用第 \(version.version) 版作为当前纪要")
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityValue(
-                        (selectedMinutesVersionID ?? latestVersionID) == version.id ? "正在查看" : "未选中"
-                    )
-                    .speechRailPointerCursor()
+                }
+                if let adoptConflictNotice {
+                    Text(adoptConflictNotice)
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 }
             }
             .padding(SpeechRailDesignTokens.Spacing.md)
@@ -1264,13 +1637,28 @@ public struct MeetingView: View {
     }
 
     private var latestVersionID: String? {
-        meeting.minutes.versions.first(where: \.isLatest)?.id
+        // MA-06/MC-25：默认选中的那一版是当前展示版——采用版优先，其次最新尝试。
+        meeting.minutes.versions.first(where: \.isAccepted)?.id
+            ?? meeting.minutes.versions.first(where: \.isLatest)?.id
+    }
+
+    /// 版本行标题：采用版、最新尝试与普通历史版各说各的，不让"最新"冒充"当前"。
+    private func versionLabel(_ version: MinutesVersion) -> String {
+        if version.isAccepted { return "当前采用 · 第 \(version.version) 版" }
+        if version.isLatest { return "最新 · 第 \(version.version) 版" }
+        return "第 \(version.version) 版"
+    }
+
+    /// 只有已完成且有正文的版本能被采用；失败、排队、运行中一律不给这个出口。
+    private func canAdopt(_ version: MinutesVersion) -> Bool {
+        version.status == .ready && version.body?.isEmpty == false
     }
 
     private static func tone(for status: MinutesStatus) -> StatusTone {
         switch status {
         case .ready: .healthy
         case .failed: .attention
+        case .submissionUnknown: .attention
         default: .neutral
         }
     }
@@ -1287,7 +1675,7 @@ public struct MeetingView: View {
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                ForEach(recent.prefix(8)) { summary in
+                ForEach(recent.prefix(Self.quickAccessMeetingLimit)) { summary in
                     Button {
                         Task { await openRecord(summary) }
                     } label: {
@@ -1314,10 +1702,35 @@ public struct MeetingView: View {
                     .buttonStyle(.plain)
                     .speechRailPointerCursor()
                 }
+                if recent.count > Self.quickAccessMeetingLimit {
+                    // 截断就**说出来**。只显示最近 8 场而不说明，
+                    // 用户会以为另外那些会议不存在（MC-52）。
+                    Divider()
+                        .overlay(SpeechRailDesignTokens.Color.separator)
+                    Button {
+                        showsKnowledgeLibrary = true
+                    } label: {
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                            Text("查看全部 \(recent.count) 场会议")
+                                .font(SpeechRailDesignTokens.Typography.callout)
+                            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+                            Image(systemName: "chevron.right")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .speechRailPointerCursor()
+                    .accessibilityHint("打开完整的会议知识库，可以搜索、按项目筛选和翻页")
+                }
             }
             .padding(SpeechRailDesignTokens.Spacing.md)
         }
     }
+
+    /// 这一页只做"最近打开过哪几场"的快捷入口。完整列表在会议知识库里。
+    private static let quickAccessMeetingLimit = 8
 
     private static func timecode(_ seconds: TimeInterval) -> String {
         let total = max(0, Int(seconds.rounded()))
@@ -1394,5 +1807,21 @@ struct SpeakerLabelingSheet: View {
     private func close() {
         onClose()
         dismiss()
+    }
+}
+
+/// 内容底边在滚动坐标系里的 Y。仅用于「离底部多远」的判定。
+private struct TranscriptBottomMarkerKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+/// 转录滚动视口的高度。
+private struct TranscriptViewportHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }

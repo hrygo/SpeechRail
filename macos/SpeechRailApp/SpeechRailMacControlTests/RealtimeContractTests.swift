@@ -1851,6 +1851,39 @@ final class RealtimeContractTests: XCTestCase {
         )
     }
 
+    /// MC-16「暂停前后不拼句」的物理前提：暂停切的那一刀只提交在途的那一句，
+    /// **不清缓冲、不结束分人**，连接随后还能接着录。
+    ///
+    /// 三件事任意一件被顺手做掉，暂停就不再是"暂停"：清缓冲丢的是已经上传、还没成句的音频；
+    /// 结束分人让恢复后的音频没有说话人归属；而把连接收尾掉等于把暂停变成了结束。
+    /// 所以这里逐条钉住"没发什么"，而不是只钉"发了 commit"。
+    func testPauseFlushCommitsWithoutClearingOrFinishingDiarization() async throws {
+        let transport = TestRealtimeASRTransport()
+        let client = RealtimeASRClient(diarizationEnabled: true, apiKey: "")
+        var events = await client.events().makeAsyncIterator()
+
+        try await client.connect(using: transport)
+        _ = await events.next()  // .configured
+        try await client.append(Data([0, 0]))
+
+        try await client.flushPendingUtterance()
+
+        let types = await sentEventTypes(transport)
+        XCTAssertTrue(
+            types.contains("input_audio_buffer.commit"),
+            "暂停必须切一刀提交，否则服务端静音判定之前按下的暂停，会把前后两段并成同一句"
+        )
+        XCTAssertFalse(
+            types.contains("input_audio_buffer.clear"),
+            "暂停切的那一刀不能清缓冲：清掉的是已经上传、还没成句的音频"
+        )
+        XCTAssertFalse(
+            types.contains("speechrail.diarization.finish"),
+            "暂停不能结束分人：恢复后的音频会失去说话人归属，暂停也就没法续着录"
+        )
+        await client.close()
+    }
+
     private func sentEventTypes(_ transport: TestRealtimeASRTransport) async -> [String] {
         await transport.sentMessages().compactMap { message in
             let data = Data(message.utf8)
