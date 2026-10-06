@@ -189,6 +189,25 @@ completed、played 唯一记账）属 App 播放层语义，本探针只覆盖�
 App 侧 played 门控仍由 fake 门（V05 定向回归）覆盖，真机播放层对照待 UI 授权。
 旧远端收尾确认（设备 recovered）需蓝牙/耳机切换操作，仍待执行。
 
+### 长稳单连接 soak（2026-10-06，commit `e1781b06`，不关闭 #258）
+
+3.7.1 quality/quality，Apple M5 Max，macOS 27.0.1，真机 `/v1/realtime`
+（`whisper-1` alias）。单连接 24 轮 `append`（1s PCM 切片）→ `commit` →
+等 `completed` terminal；逐轮记终态与耗时；`/health` 前后对照。
+
+| 轮 | 终态 | 耗时 |
+|---|---|---|
+| 1（warm） | completed | 125ms |
+| 2–24 | completed | 65–70ms（平坦，无漂移） |
+
+汇总：**24/24 completed，p50=67ms，p95=70ms**。
+`/health` 前后一致：`status ok`、`version 3.7.1`、`profile quality/quality`、
+`asr_state warm_standby`、`ready true`。
+
+范围声明：本项只完成矩阵“3 sessions × ≥24 轮”中的 **1 个 session**；
+多 session 累积、活动内存有界量化、SQLite 记录数 == 提交数核对仍待执行。
+未通过项：无（本项 scope 内）。不宣称长稳通过。
+
 ## 范围与回退
 
 本文档为纯文档交付，不改产品代码、协议、schema 或运行态。
