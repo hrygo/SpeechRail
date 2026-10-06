@@ -1210,8 +1210,8 @@
       "id": "F9",
       "note": "可本地恢复的错误种类被收窄（漏掉传输层与流中断的兜底）",
       "file": "macos/SpeechRailApp/SpeechRailApp/TeleprompterPreparationPipeline.swift",
-      "find": "        case .invalidStructuredResponse, .outputTruncated, .transport,\n            .streamEndedEarly, .malformedStreamEvent:",
-      "replace": "        case .invalidStructuredResponse:\n            return true\n        case .outputTruncated, .transport, .streamEndedEarly, .malformedStreamEvent:\n            return false",
+      "find": "        case .invalidStructuredResponse, .outputTruncated, .transport,\n            .streamEndedEarly, .malformedStreamEvent, .streamBudgetExceeded:",
+      "replace": "        case .invalidStructuredResponse:\n            return true\n        case .outputTruncated, .transport, .streamEndedEarly, .malformedStreamEvent, .streamBudgetExceeded:\n            return false",
       "expect": "KILLED",
       "rationale": "第六十八轮转杀。新增用例 `transportFailureFallsBackLocallyInsteadOfFailingTheWholeDraft`：让分组阶段抛 `LLMError.transport`，断言仍拿到**完整原稿**的本地兜底稿且状态为 `reviewRequired`。去掉守卫后传输层抖动不再兜底，一次网络抖动会让整篇准备失败、读者开不了讲。杀掉 2 条。"
     },
