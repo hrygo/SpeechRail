@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.2"
+version: "3.3.3"
 date: 2026-10-06
 ---
 
@@ -27,6 +27,8 @@ GitHub Actions 使用同一套锁定依赖门禁：`quality` 运行 Ruff、Mypy�
 编译缓存按平台、工具链及锁定依赖隔离，只为内容未变的跟踪输入恢复时间戳；源码修改仍触发重新编译。Xcode 构建通过仓库包装脚本执行，结束时注销并删除临时 App 包，只保留可重用编译输入与输出。uv 使用官方缓存裁剪，不继续恢复旧的整目录大缓存。耗时口径、实测范围及 `<50%` 验收条件见 [CI 效率分析](ci-efficiency.md)。
 
 非 wheel pytest 由 `pytest-xdist` 使用两个进程按文件调度；同一测试文件的用例和 fixture 保持在同一进程，worker 自动重启关闭。`pytest-cov` 先合并两个 worker 的 coverage，wheel 阶段再追加并检查原 80% 门槛；不因并行执行而跳过用例、降低门槛或重试失败。
+
+音色的流程、并发和路由测试使用 fake backend；仅显式导入 `voice_test_fixtures` 的模块会自动启用音高 fixture，每个用例后恢复真实函数，避免每次状态机断言都重复执行昂贵的自相关计算。真实音高估计仍由专门的声学门禁测试验证，输入质量和流程安全断言继续执行；这些流程测试不代表真实模型质量验收。
 
 版本 tag release 还会并行构建 unsigned arm64 DMG。发布前核对 tag、App bundle 版本、App 架构、DMG 可挂载内容和 wheel/DMG checksum；最终 Release 资产为 wheel、`SpeechRail-<version>-macOS-arm64.dmg` 和 `SHA256SUMS`。GitHub 上生成的 DMG 不做 Developer ID、notarization 或 staple，因此不能替代本机正式分发验收。
 

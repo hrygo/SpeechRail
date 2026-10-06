@@ -32,6 +32,7 @@ from test_voice_design_workflow import (
     make_client,
     validate_candidate,
 )
+from voice_test_fixtures import fake_pitch_measurement as fake_pitch_measurement
 
 
 @pytest.mark.parametrize("second_finishes_first", [False, True])
