@@ -31,6 +31,7 @@
         "preview_interval_ms": 1000,
         "max_segment_ms": 20000,
         "finalization": "full_segment",
+        "rollback_tokens": 5,
         "final_deadline_ms": 120000,
         "effective_max_segment_ms": 20000
       },

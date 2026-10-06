@@ -13,6 +13,7 @@ _ASR_POLICY_FIELDS = frozenset(
         "max_segment_ms",
         "finalization",
         "final_deadline_ms",
+        "rollback_tokens",
     }
 )
 
@@ -33,6 +34,7 @@ class ASRPolicy:
     max_segment_ms: int = 20_000
     finalization: ASRFinalization = "full_segment"
     final_deadline_ms: int | None = None
+    rollback_tokens: int = 5
 
     def __post_init__(self) -> None:
         _strict_integer(
@@ -60,6 +62,12 @@ class ASRPolicy:
                 field="final_deadline_ms",
                 minimum=1,
             )
+        _strict_integer(
+            self.rollback_tokens,
+            field="rollback_tokens",
+            minimum=0,
+            maximum=32,
+        )
 
     @classmethod
     def from_mapping(
@@ -109,6 +117,7 @@ class ASRPolicy:
             "preview_interval_ms": self.preview_interval_ms,
             "max_segment_ms": self.max_segment_ms,
             "finalization": self.finalization,
+            "rollback_tokens": self.rollback_tokens,
             "effective_max_segment_ms": effective,
         }
         if request_timeout_ms is not None:
