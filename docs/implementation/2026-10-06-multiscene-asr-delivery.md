@@ -2,11 +2,42 @@
 title: "共享 ASR #245：实施与验收记录"
 status: in_progress
 audience: "SpeechRail 开发者与验收人员"
-version: "1.10.0"
+version: "1.11.0"
 date: 2026-10-06
 ---
 
 # 共享 ASR #245：实施与验收记录
+
+## 2026-10-07 zh-en-03 单因素隔离
+
+`ascend-zh-en-03`（6.46 s，中英混合）在提词器预设（400 ms + streaming）
+下 0→3 错误，而同样本的 meeting（20 s + full）与 caption（8 s + full）
+均为 0 错误。经授权执行 `maintenance-v8-isolation-03`：同一 v8 wheel、
+同音频、同参考，只变收尾与预览间隔。D（400 ms + streaming）、
+E（400 ms + full_segment）、F（500 ms + streaming），各 N=3，
+共 9 正式请求。`measurement_completed=true, original_restored=true`，
+恢复交接 runtime 后 PID **86200**、generation 13、quality/quality、
+原 catalog、ready 与空闲核验通过。
+
+| 臂 | 错误 / 终态 / 边界（×3 稳定） | 收尾延迟 |
+|---|---|---|
+| D：400 ms streaming（提词器原样） | 3 / 1 / 1 | last-audio→final 约 0.09 s |
+| E：400 ms full_segment | 0 / 1 / 1 | 约 0.19 s |
+| F：500 ms streaming | 0 / 1 / 1 | 约 0.11 s |
+
+结论只限该样本：把收尾换成 full_segment，或把预览间隔从 400 ms 放到
+500 ms，都能单独回到基线 0 错误。提词器回退不是音频丢失、重复或截断，
+覆盖与段预算门均为 pass。这是速度与完整段复核的取舍，不是解码能力退化。
+三处配对回退至此全部定位：zh-en-01 由段预算切分驱动，ami-meeting-06 与
+zh-en-03 由收尾方式驱动（zh-en-03 另受预览间隔影响）。预设仍未冻结，
+待定的是提词器场景选哪条路：接受 full 复核的收尾延迟，还是放宽预览间隔。
+#249/#253/#245 保持开放。
+
+| 仓库外证据 | SHA-256 |
+|---|---|
+| isolation-D-400-streaming-result.json | `d8931762c164801c95d7545e10a582c115b41afe7e54499c8e02aa7d525dee46` |
+| isolation-E-400-full-result.json | `ea119e97175ff3302b41aafe2a78f9673801a3c7bc70ace326d3fb6b6ba73be6` |
+| isolation-F-500-streaming-result.json | `3c0f7f383fd3e76b4bb59407ba4880dc1238ddc421fadd2504c8d29e5fdf00ee` |
 
 ## 2026-10-07 当前基线回退的单因素隔离
 
