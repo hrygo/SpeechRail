@@ -452,6 +452,7 @@ def _parse_asr_policy(raw: object) -> tuple[ASRPolicy, int]:
             "preview_interval_ms",
             "max_segment_ms",
             "finalization",
+            "rollback_tokens",
             "effective_max_segment_ms",
         }
         allowed = required | {"final_deadline_ms"}
