@@ -287,7 +287,17 @@ def test_evictor_resets_idle_timer_after_close() -> None:
             await asyncio.sleep(0.06)
             assert worker.close_count == 1
 
-            # Simulate worker being restarted by a new request
+            # Simulate worker being restarted by a new request.
+            # A restart only counts once the monitor has observed the
+            # evicted (not-alive) state; otherwise the tick cannot tell
+            # the restart apart from a worker that never went down, and
+            # the idle clock keeps running from the eviction stamp.
+            for _ in range(100):
+                if worker.close_count == 1 and not worker.alive:
+                    break
+                await asyncio.sleep(0.005)
+            assert worker.close_count == 1
+            assert not worker.alive
             worker.alive = True
 
             # Wait less than idle_timeout_seconds (e.g. 0.02s)
@@ -296,7 +306,10 @@ def test_evictor_resets_idle_timer_after_close() -> None:
             assert worker.close_count == 1
 
             # After full idle timeout, it gets evicted again
-            await asyncio.sleep(0.04)
+            for _ in range(200):
+                if worker.close_count == 2:
+                    break
+                await asyncio.sleep(0.005)
             assert worker.close_count == 2
         finally:
             await evictor.close()

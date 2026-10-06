@@ -10,6 +10,11 @@ from pathlib import Path
 from types import MappingProxyType
 from urllib import parse as urllib_parse
 
+try:
+    from .asr_quality import _characters
+except ImportError:  # pragma: no cover - exercised when run as a script
+    from asr_quality import _characters  # type: ignore[no-redef]
+
 PHASES = frozenset({"baseline", "quality", "cold", "warm", "soak", "switch"})
 PROFILE_DEVICE_PHASES: Mapping[str, str] = MappingProxyType(
     {
@@ -51,6 +56,8 @@ class Fixture:
     voice: str
     text: str | None
     reference_text: str | None = None
+    punctuation_reference_text: str | None = None
+    punctuation_reference_kind: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +182,37 @@ def load_manifest(
             not isinstance(reference, str) or not reference.strip() or len(reference) > 10_000
         ):
             raise BenchmarkInputError(f"{label}.reference_text must be non-empty bounded text")
+        punctuation_reference = raw_item.get("punctuation_reference_text")
+        punctuation_kind = raw_item.get("punctuation_reference_kind")
+        if (punctuation_reference is None) != (punctuation_kind is None):
+            raise BenchmarkInputError(
+                f"{label}.punctuation_reference_text and punctuation_reference_kind "
+                "must be provided together"
+            )
+        if punctuation_reference is not None:
+            if (
+                not isinstance(punctuation_reference, str)
+                or not punctuation_reference.strip()
+                or len(punctuation_reference) > 10_000
+            ):
+                raise BenchmarkInputError(
+                    f"{label}.punctuation_reference_text must be non-empty bounded text"
+                )
+            if not isinstance(punctuation_kind, str) or punctuation_kind not in {
+                "human_punctuation_annotation",
+                "human_reading_prompt",
+            }:
+                raise BenchmarkInputError(
+                    f"{label}.punctuation_reference_kind is unsupported"
+                )
+            if reference is None:
+                raise BenchmarkInputError(
+                    f"{label}.punctuation gold requires reference_text"
+                )
+            if _characters(punctuation_reference) != _characters(reference):
+                raise BenchmarkInputError(
+                    f"{label}.punctuation gold and reference_text must have the same lexical text"
+                )
         language = str(raw_item.get("language", "auto")).strip()
         if _LANGUAGE_RE.fullmatch(language) is None:
             raise BenchmarkInputError(f"{label}.language must be a safe language tag")
@@ -187,6 +225,8 @@ def load_manifest(
                 voice=str(raw_item.get("voice", "default")),
                 text=text.strip() if isinstance(text, str) else None,
                 reference_text=reference,
+                punctuation_reference_text=punctuation_reference,
+                punctuation_reference_kind=punctuation_kind,
             )
         )
 

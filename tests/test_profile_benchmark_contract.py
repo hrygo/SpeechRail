@@ -18,6 +18,7 @@ from examples.perf import benchmark_resources
 from examples.perf.bench_profiles import (
     PROFILE_DEVICE_PHASES,
     BenchmarkDependencies,
+    BenchmarkInputError,
     HttpResponse,
     ProcessResourceMonitor,
     ResourceMonitor,
@@ -30,6 +31,7 @@ from examples.perf.bench_profiles import (
     validate_output_path,
     write_result,
 )
+from examples.perf.benchmark_http import _fixture_request
 
 
 def test_profile_benchmark_has_one_modular_entrypoint() -> None:
@@ -821,6 +823,187 @@ def test_manifest_rejects_non_language_labels_that_could_leak_tokens(tmp_path: P
 
     with pytest.raises(ValueError, match="language"):
         load_manifest(manifest, repository_root=tmp_path / "repo")
+
+
+def test_manifest_accepts_matching_punctuation_gold_with_explicit_kind(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    audio = tmp_path / "fixture.wav"
+    audio.write_bytes(b"fixture")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps({
+            "fixtures": [{
+                "id": "fixture-1",
+                "path": str(audio),
+                "kind": "asr",
+                "language": "en",
+                "reference_text": "hello world",
+                "punctuation_reference_text": "Hello， world。",
+                "punctuation_reference_kind": "human_reading_prompt",
+            }],
+        }),
+        encoding="utf-8",
+    )
+
+    fixture = load_manifest(manifest, repository_root=repo).fixtures[0]
+
+    assert fixture.reference_text == "hello world"
+    assert fixture.punctuation_reference_text == "Hello， world。"
+    assert fixture.punctuation_reference_kind == "human_reading_prompt"
+
+
+@pytest.mark.parametrize(
+    ("extra_fields", "reference_text", "message"),
+    [
+        ({"punctuation_reference_text": "hello."}, "hello", "provided together"),
+        (
+            {
+                "punctuation_reference_text": "hello.",
+                "punctuation_reference_kind": "model_output",
+            },
+            "hello",
+            "kind",
+        ),
+        (
+            {
+                "punctuation_reference_text": "goodbye.",
+                "punctuation_reference_kind": "human_punctuation_annotation",
+            },
+            "hello",
+            "same lexical",
+        ),
+        (
+            {
+                "punctuation_reference_text": "hello.",
+                "punctuation_reference_kind": "human_reading_prompt",
+            },
+            None,
+            "reference_text",
+        ),
+    ],
+)
+def test_manifest_rejects_incomplete_or_misaligned_punctuation_gold(
+    tmp_path: Path,
+    extra_fields: dict[str, str],
+    reference_text: str | None,
+    message: str,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    audio = tmp_path / "fixture.wav"
+    audio.write_bytes(b"fixture")
+    fixture_data: dict[str, object] = {
+        "id": "fixture-1",
+        "path": str(audio),
+        "kind": "asr",
+        "language": "en",
+        **extra_fields,
+    }
+    if reference_text is not None:
+        fixture_data["reference_text"] = reference_text
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps({"fixtures": [fixture_data]}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=message):
+        load_manifest(manifest, repository_root=repo)
+
+
+@pytest.mark.parametrize(
+    "punctuation_kind",
+    [["human_reading_prompt"], {"kind": "human_reading_prompt"}, True],
+    ids=["list", "dict", "bool"],
+)
+def test_manifest_rejects_non_string_punctuation_kind(
+    tmp_path: Path,
+    punctuation_kind: object,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    audio = tmp_path / "fixture.wav"
+    audio.write_bytes(b"fixture")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps({
+            "fixtures": [{
+                "id": "fixture-1",
+                "path": str(audio),
+                "kind": "asr",
+                "language": "en",
+                "reference_text": "hello",
+                "punctuation_reference_text": "hello.",
+                "punctuation_reference_kind": punctuation_kind,
+            }],
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        BenchmarkInputError,
+        match="punctuation_reference_kind is unsupported",
+    ):
+        load_manifest(manifest, repository_root=repo)
+
+
+def test_http_benchmark_scores_punctuation_locally_without_emitting_text(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    audio = tmp_path / "fixture.wav"
+    audio.write_bytes(b"fixture")
+    reference_text = "hello world"
+    punctuation_gold = "Hello, world."
+    hypothesis = "hello. world?"
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps({
+            "fixtures": [{
+                "id": "fixture-1",
+                "path": str(audio),
+                "kind": "asr",
+                "language": "en",
+                "reference_text": reference_text,
+                "punctuation_reference_text": punctuation_gold,
+                "punctuation_reference_kind": "human_punctuation_annotation",
+            }],
+        }),
+        encoding="utf-8",
+    )
+    fixture = load_manifest(manifest, repository_root=repo).fixtures[0]
+    request_bodies: list[bytes | None] = []
+
+    def runner(method, url, body, headers):
+        request_bodies.append(body)
+        return HttpResponse(
+            status_code=200,
+            body=json.dumps({"text": hypothesis}).encode(),
+        )
+
+    times = iter((1.0, 1.25))
+    result = _fixture_request(
+        fixture,
+        base_url="http://127.0.0.1:8201",
+        runner=runner,
+        clock=lambda: next(times),
+        duration=1.0,
+        auth_headers={},
+    )
+
+    metrics = result["quality_metrics"]
+    assert metrics["cer"] == 0
+    punctuation = metrics["punctuation_metrics"]
+    assert punctuation["true_positives"] == 0
+    assert punctuation["false_positives"] == 2
+    assert punctuation["false_negatives"] == 2
+    assert punctuation["punctuation_gate"] == "unset"
+    assert reference_text.encode() not in request_bodies[0]
+    assert punctuation_gold.encode() not in request_bodies[0]
+    assert hypothesis not in json.dumps(result)
+    assert punctuation_gold not in json.dumps(result)
 
 
 def test_output_path_cannot_overwrite_existing_file(tmp_path: Path) -> None:

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import XCTest
 #if SWIFT_PACKAGE
@@ -575,11 +576,180 @@ final class ServiceContractTests: XCTestCase {
         XCTAssertEqual(
             FullTextReceiptCheck.evaluate(
                 receipt: receipt,
-                expectation: .init(expectedVoiceRevision: "vr_x", expectedModelRevision: "cat-1"),
+                expectation: .init(
+                    expectedVoiceRevision: "vr_x",
+                    expectedModelRevision: "cat-1",
+                    expectedAudioSHA256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                ),
                 receivedBytes: 48_000
             ),
             .deliverable
         )
+    }
+
+    /// #189：有摘要但无本地摘要时不判 deliverable（未核对≠已核对）。
+    func testFullTextReceiptCheckHoldsUnverifiedWithoutLocalDigest() throws {
+        let receipt = try decodeReceipt("""
+        {
+          "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+          "request_id": "req-1",
+          "status": "completed",
+          "voice": {"id": "narrator", "revision": "vr_x"},
+          "model": {"artifact": "tts-artifact", "catalog_revision": "cat-1"},
+          "audio": {
+            "format": "wav",
+            "pcm_sample_rate": 24000,
+            "channels": 1,
+            "integrity_boundary": "pcm16_pre_transport",
+            "sample_count": 24000,
+            "pcm_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          },
+          "recipe": null,
+          "error_code": null,
+          "created_at": 1,
+          "completed_at": 2
+        }
+        """)
+        // 本地摘要缺席：只核到“有摘要”为止，不降级通过。
+        XCTAssertEqual(
+            FullTextReceiptCheck.evaluate(
+                receipt: receipt,
+                expectation: .init(expectedVoiceRevision: "vr_x", expectedModelRevision: "cat-1"),
+                receivedBytes: 48_000
+            ),
+            .unknown(reason: "audio_digest_unverified")
+        )
+    }
+
+    /// #189：摘要不一致时显式 unknown，不播出、不开新合成。
+    func testFullTextReceiptCheckRejectsDigestMismatch() throws {
+        let receipt = try decodeReceipt("""
+        {
+          "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+          "request_id": "req-1",
+          "status": "completed",
+          "voice": {"id": "narrator", "revision": "vr_x"},
+          "model": {"artifact": "tts-artifact", "catalog_revision": "cat-1"},
+          "audio": {
+            "format": "wav",
+            "pcm_sample_rate": 24000,
+            "channels": 1,
+            "integrity_boundary": "pcm16_pre_transport",
+            "sample_count": 24000,
+            "pcm_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          },
+          "recipe": null,
+          "error_code": null,
+          "created_at": 1,
+          "completed_at": 2
+        }
+        """)
+        XCTAssertEqual(
+            FullTextReceiptCheck.evaluate(
+                receipt: receipt,
+                expectation: .init(
+                    expectedVoiceRevision: "vr_x",
+                    expectedModelRevision: "cat-1",
+                    expectedAudioSHA256: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                ),
+                receivedBytes: 48_000
+            ),
+            .unknown(reason: "audio_digest_mismatch")
+        )
+    }
+
+
+    // MARK: - #189 WAV data chunk 摘要
+
+    /// 拼一个最小 WAV：RIFF 头 + fmt chunk + data chunk，用于摘要口径测试。
+    private func makeWAV(pcm: Data, extraChunks: [(id: String, body: Data)] = []) -> Data {
+        var out = Data()
+        func u32(_ v: Int) {
+            out.append(UInt8(v & 0xFF)); out.append(UInt8((v >> 8) & 0xFF))
+            out.append(UInt8((v >> 16) & 0xFF)); out.append(UInt8((v >> 24) & 0xFF))
+        }
+        out.append(contentsOf: "RIFF".utf8); u32(0) // size 占位，解析不校验
+        out.append(contentsOf: "WAVE".utf8)
+        // fmt chunk（16 字节 PCM16 单声道描述，内容不参与 data 定位）
+        out.append(contentsOf: "fmt ".utf8); u32(16)
+        out.append(contentsOf: [0x01, 0x00, 0x01, 0x00, 0x80, 0xBB, 0x00, 0x00,
+                                0x00, 0x77, 0x01, 0x00, 0x02, 0x00, 0x10, 0x00])
+        for chunk in extraChunks {
+            out.append(contentsOf: chunk.id.utf8); u32(chunk.body.count)
+            out.append(chunk.body)
+            if chunk.body.count % 2 == 1 { out.append(0x00) } // odd-size pad
+        }
+        out.append(contentsOf: "data".utf8); u32(pcm.count)
+        out.append(pcm)
+        return out
+    }
+
+    /// #189：摘要取自 data chunk 字节，而非整个 WAV 文件。
+    func testAudioDigestHashesDataChunkNotWholeFile() throws {
+        let pcm = Data([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08])
+        let wav = makeWAV(pcm: pcm)
+        let digest = try AudioDigest.sha256HexOfPCM(in: wav)
+        // data chunk 区间正确。
+        let range = try AudioDigest.pcmRange(in: wav)
+        XCTAssertEqual(Data(wav[range]), pcm)
+        // 整文件哈希必然不同（容器头不同即不同——口径错了就会撞上这个断言）。
+        let whole = SHA256.hash(data: wav).map { String(format: "%02x", $0) }.joined()
+        XCTAssertNotEqual(digest, whole)
+        XCTAssertEqual(digest.count, 64)
+    }
+
+    /// #189：fmt 之后、data 之前的多余 chunk（LIST/奇数长度）不影响定位。
+    func testAudioDigestSkipsChunksBeforeData() throws {
+        let pcm = Data([0xAA, 0xBB, 0xCC, 0xDD])
+        let plain = makeWAV(pcm: pcm)
+        let withJunk = makeWAV(
+            pcm: pcm,
+            extraChunks: [("LIST", Data([0x01, 0x02, 0x03])), ("cue ", Data([0x09, 0x09]))]
+        )
+        XCTAssertEqual(
+            try AudioDigest.sha256HexOfPCM(in: withJunk),
+            try AudioDigest.sha256HexOfPCM(in: plain)
+        )
+    }
+
+    /// #189：同一 PCM 无论容器头如何，摘要一致（字节序/采样宽度是 PCM 内容的事）。
+    func testAudioDigestIsStableForSamePCM() throws {
+        let pcm = Data(repeating: 0x7F, count: 64)
+        XCTAssertEqual(
+            try AudioDigest.sha256HexOfPCM(in: makeWAV(pcm: pcm)),
+            try AudioDigest.sha256HexOfPCM(in: makeWAV(
+                pcm: pcm, extraChunks: [("bext", Data(repeating: 0x00, count: 10))]
+            ))
+        )
+    }
+
+    /// #189 变异：非 RIFF / 截断头 / 无 data chunk / 声明超长，各错一次。
+    func testAudioDigestRejectsMalformedWAV() {
+        XCTAssertThrowsError(try AudioDigest.sha256HexOfPCM(in: Data("NOTWAVEFILE!".utf8))) { error in
+            XCTAssertEqual(error as? AudioDigest.Failure, .notRIFF)
+        }
+        XCTAssertThrowsError(try AudioDigest.sha256HexOfPCM(in: Data([0x52, 0x49]))) { error in
+            XCTAssertEqual(error as? AudioDigest.Failure, .truncatedHeader)
+        }
+        // 有 RIFF 头但无 data chunk。
+        var noData = Data()
+        noData.append(contentsOf: "RIFF".utf8)
+        noData.append(contentsOf: [0x00, 0x00, 0x00, 0x00])
+        noData.append(contentsOf: "WAVE".utf8)
+        noData.append(contentsOf: "fmt ".utf8)
+        noData.append(contentsOf: [0x04, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04])
+        XCTAssertThrowsError(try AudioDigest.sha256HexOfPCM(in: noData)) { error in
+            XCTAssertEqual(error as? AudioDigest.Failure, .dataChunkNotFound)
+        }
+        // data 声明长度超出文件。
+        var overrun = Data()
+        overrun.append(contentsOf: "RIFF".utf8)
+        overrun.append(contentsOf: [0x00, 0x00, 0x00, 0x00])
+        overrun.append(contentsOf: "WAVE".utf8)
+        overrun.append(contentsOf: "data".utf8)
+        overrun.append(contentsOf: [0xFF, 0xFF, 0x00, 0x00])
+        overrun.append(contentsOf: [0x01, 0x02])
+        XCTAssertThrowsError(try AudioDigest.sha256HexOfPCM(in: overrun))
     }
 
     /// pending 保持 unknown：2xx 拿到 receipt 不等于资源空闲，

@@ -34,10 +34,19 @@ public enum FullTextReceiptCheck {
     public struct Expectation: Equatable, Sendable {
         public let expectedVoiceRevision: String?
         public let expectedModelRevision: String?
+        /// 调用方手里这段 PCM（WAV data chunk 字节）的 SHA-256 hex。
+        /// nil = 尚未算出本地摘要：`evaluate` 只核到“有摘要”为止，
+        /// 记 `audio_digest_unverified`，不判 deliverable（#189）。
+        public let expectedAudioSHA256: String?
 
-        public init(expectedVoiceRevision: String? = nil, expectedModelRevision: String? = nil) {
+        public init(
+            expectedVoiceRevision: String? = nil,
+            expectedModelRevision: String? = nil,
+            expectedAudioSHA256: String? = nil
+        ) {
             self.expectedVoiceRevision = expectedVoiceRevision
             self.expectedModelRevision = expectedModelRevision
+            self.expectedAudioSHA256 = expectedAudioSHA256
         }
     }
 
@@ -80,10 +89,23 @@ public enum FullTextReceiptCheck {
         if let receivedBytes, receivedBytes != samples * 2 {
             return .unknown(reason: "receipt_sample_count_mismatch")
         }
-        guard receipt.pcmSHA256 != nil else {
+        guard let digest = receipt.pcmSHA256, !digest.isEmpty else {
             // 有样本但无摘要：无法把手里这段音频锚定到服务端交付的那段
             //（`provenance(for:)` 同样要求 `audio_digest_missing` 时只给 partial）。
             return .unknown(reason: "audio_digest_missing")
+        }
+        // 摘要只是“有”还不够：必须与调用方手里这段 PCM 的摘要逐字节一致，
+        // 否则服务端交付声明与实际收到内容锚定不到同一段音频（#189）。
+        // `expectedAudioSHA256 == nil` 表示调用方尚未算出本地摘要（例如流式
+        // 边收边播）：此时不降级通过，只核到“有摘要”为止，记
+        // `audio_digest_unverified`，调用方不得视为 deliverable。
+        // 字节口径与服务端一致：WAV 解析 data chunk 的 PCM 字节，
+        // 而非整个 WAV 文件（见 receipt `pcm_sha256` 定义）。
+        guard let local = expectation.expectedAudioSHA256 else {
+            return .unknown(reason: "audio_digest_unverified")
+        }
+        guard local.lowercased() == digest.lowercased() else {
+            return .unknown(reason: "audio_digest_mismatch")
         }
         return .deliverable
     }
