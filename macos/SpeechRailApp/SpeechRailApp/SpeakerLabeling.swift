@@ -125,9 +125,10 @@ public final class SpeakerLabeling {
 
     // MARK: - 事件
 
-    /// `completed` 带回来的单元：记下"uid 落在这一行"，并返回**当前**归属。
+    /// 把归属单元关联到已经创建的行，并返回第一项可用标签。
     ///
-    /// 返回值要写进 `LineDraft.speakerLabel`——否则界面在修订事件到达之前会显示成"未标注"。
+    /// 这里仅建立 `segment_uid` → 行的索引；只有 `apply` 成功写入库后才登记为已应用。
+    /// 这样首个晚到归属不会因为刚注册时就被标成"已应用"而跳过持久化。
     @discardableResult
     public func register(
         units: [RealtimeASRClient.AttributionUnit],
@@ -139,7 +140,6 @@ public final class SpeakerLabeling {
         for unit in units {
             lineByUnit[unit.segmentUID] = lineID
             guard let speaker = unit.speaker, !speaker.isEmpty else { continue }
-            appliedByUnit[unit.segmentUID] = speaker
             if label == nil { label = speaker }
             observe(label: speaker, ordinal: ordinal)
         }

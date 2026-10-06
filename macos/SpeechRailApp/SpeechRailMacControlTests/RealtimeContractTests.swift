@@ -1,4 +1,5 @@
 import XCTest
+import Testing
 @testable import SpeechRailControlKit
 #if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
@@ -1214,6 +1215,50 @@ final class RealtimeContractTests: XCTestCase {
         XCTAssertEqual(event.jsonObject as NSDictionary, fixture as NSDictionary)
     }
 
+    func testClientRejectsSessionUpdatedWithWrongASRPreviewInterval() async throws {
+        let transport = TestRealtimeASRTransport(sessionUpdateEcho: .wrongPreviewInterval)
+        let client = RealtimeASRClient(apiKey: "")
+        var events = await client.events().makeAsyncIterator()
+
+        do {
+            try await client.connect(using: transport)
+            XCTFail("Expected an invalid ASR policy echo to reject the configuration")
+        } catch {
+            // The configuration failure is also delivered as a typed event.
+        }
+
+        guard let failure = await events.next(),
+              case .serverError(let code, _, _) = failure.payload else {
+            XCTFail("Expected the invalid configuration echo to become serverError")
+            await client.close()
+            return
+        }
+        XCTAssertEqual(code, "invalid_server_event")
+        await client.close()
+    }
+
+    func testClientRejectsSessionUpdatedWithEffectiveSegmentBelowMinimum() async throws {
+        let transport = TestRealtimeASRTransport(sessionUpdateEcho: .invalidEffectiveBudget)
+        let client = RealtimeASRClient(apiKey: "")
+        var events = await client.events().makeAsyncIterator()
+
+        do {
+            try await client.connect(using: transport)
+            XCTFail("Expected an invalid effective segment budget to reject the configuration")
+        } catch {
+            // The configuration failure is also delivered as a typed event.
+        }
+
+        guard let failure = await events.next(),
+              case .serverError(let code, _, _) = failure.payload else {
+            XCTFail("Expected the invalid configuration echo to become serverError")
+            await client.close()
+            return
+        }
+        XCTAssertEqual(code, "invalid_server_event")
+        await client.close()
+    }
+
     func testSessionUpdateCarriesLanguageAndKeywordsOnlyWhenConfigured() {
         let configured = SpeechRailSessionUpdate(
             model: RealtimeASRClientModelFixture.canonical,
@@ -1837,6 +1882,70 @@ final class RealtimeContractTests: XCTestCase {
         )
     }
 
+    func testPendingSegmentClosedItemSurvivesLateFinalThenExpiresAfterTerminal() {
+        let clock = ContinuousClock()
+        let generation = UUID()
+        let pendingAt = clock.now
+        var state = RealtimeEventState()
+        state.reset(generation: generation, auxiliaryExpected: false)
+
+        XCTAssertTrue(
+            state.acceptHypothesis(
+                itemID: "item-pending",
+                taskID: "task-1",
+                epoch: 0,
+                revision: 1,
+                text: "预览",
+                sessionID: "session-1",
+                generation: generation,
+                now: pendingAt
+            )
+        )
+        XCTAssertTrue(
+            state.acceptSegmentClosed(
+                itemID: "item-pending",
+                sessionID: "session-1",
+                generation: generation,
+                now: pendingAt
+            )
+        )
+
+        let lateFinalAt = pendingAt.advanced(by: .seconds(31))
+        state.prune(now: lateFinalAt)
+        XCTAssertNil(state.nextExpiryDelay(now: lateFinalAt))
+        XCTAssertTrue(
+            state.complete(
+                itemID: "item-pending",
+                transcript: "迟到的终态",
+                sessionID: "session-1",
+                generation: generation,
+                now: lateFinalAt
+            ),
+            "待终态 item 不因 segment_closed 后经过 30 秒而退役"
+        )
+        XCTAssertEqual(
+            state.nextExpiryDelay(now: lateFinalAt),
+            .seconds(30),
+            "终态后才开始 30 秒保留期"
+        )
+
+        state.prune(now: lateFinalAt.advanced(by: .seconds(31)))
+        XCTAssertNil(state.snapshot(itemID: "item-pending"))
+        XCTAssertFalse(
+            state.acceptHypothesis(
+                itemID: "item-pending",
+                taskID: "task-1",
+                epoch: 0,
+                revision: 2,
+                text: "旧预览",
+                sessionID: "session-1",
+                generation: generation,
+                now: lateFinalAt.advanced(by: .seconds(32))
+            ),
+            "终态保留期到期后，迟到 hypothesis 不得复活 item"
+        )
+    }
+
     func testRealtimeItemStateRejectsAForeignTaskIDWithinOneConnection() {
         let clock = ContinuousClock()
         let generation = UUID()
@@ -1925,9 +2034,72 @@ private enum RealtimeASRClientModelFixture {
     static let canonical = "speechrail/qwen3-asr-1.7b"
 }
 
+struct RealtimeSessionPolicyContractTests {
+    @Test func defaultServerSessionFixturesEchoEffectiveASRPolicy() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let fixtureRoot = repoRoot.appendingPathComponent(
+            "tests/fixtures/realtime-current/server",
+            isDirectory: true
+        )
+
+        for filename in ["session-created.json", "session-updated.json"] {
+            let data = try Data(contentsOf: fixtureRoot.appendingPathComponent(filename))
+            let object = try #require(
+                JSONSerialization.jsonObject(with: data) as? [String: Any]
+            )
+            let session = try #require(object["session"] as? [String: Any])
+            let speechrail = try #require(session["speechrail"] as? [String: Any])
+            let policy = try #require(speechrail["asr"] as? [String: Any])
+
+            #expect(policy["preview_interval_ms"] as? Int == 1_000)
+            #expect(policy["max_segment_ms"] as? Int == 20_000)
+            #expect(policy["finalization"] as? String == "full_segment")
+            #expect(policy["final_deadline_ms"] as? Int == 120_000)
+            #expect(policy["effective_max_segment_ms"] as? Int == 20_000)
+        }
+    }
+
+    @Test func clientRejectsSessionUpdatedWithoutASRPolicyEcho() async {
+        let transport = TestRealtimeASRTransport(sessionUpdateEcho: .missingASRPolicy)
+        let client = RealtimeASRClient(apiKey: "")
+        var events = await client.events().makeAsyncIterator()
+
+        var didReject = false
+        do {
+            try await client.connect(using: transport)
+        } catch {
+            didReject = true
+        }
+        #expect(didReject)
+
+        guard let failure = await events.next() else {
+            Issue.record("The missing ASR policy echo must publish a protocol failure")
+            await client.close()
+            return
+        }
+        guard case .serverError(let code, _, _) = failure.payload else {
+            Issue.record("The missing ASR policy echo must become serverError")
+            await client.close()
+            return
+        }
+        #expect(code == "invalid_server_event")
+        await client.close()
+    }
+}
+
 private actor TestRealtimeASRTransport: RealtimeASRTransport {
     private enum TestError: Error {
         case closed
+    }
+
+    enum SessionUpdateEcho: Sendable {
+        case wrongPreviewInterval
+        case invalidEffectiveBudget
+        case missingASRPolicy
     }
 
     private var frames: [RealtimeASRSocketFrame] = []
@@ -1935,6 +2107,11 @@ private actor TestRealtimeASRTransport: RealtimeASRTransport {
     private var sent: [String] = []
     private var closed = false
     private var nextSequence = 0
+    private let sessionUpdateEcho: SessionUpdateEcho?
+
+    init(sessionUpdateEcho: SessionUpdateEcho? = nil) {
+        self.sessionUpdateEcho = sessionUpdateEcho
+    }
 
     func resume() async {}
 
@@ -1947,7 +2124,39 @@ private actor TestRealtimeASRTransport: RealtimeASRTransport {
         else {
             return
         }
-        enqueue(.text(#"{"type":"session.updated"}"#))
+        let requestSession = payload["session"] as? [String: Any] ?? [:]
+        let requestSpeechRail = requestSession["speechrail"] as? [String: Any] ?? [:]
+        let requestedPolicy = requestSpeechRail["asr"] as? [String: Any] ?? [:]
+        var echoedPolicy: [String: Any] = [
+            "preview_interval_ms": requestedPolicy["preview_interval_ms"] ?? 1_000,
+            "max_segment_ms": requestedPolicy["max_segment_ms"] ?? 20_000,
+            "finalization": requestedPolicy["finalization"] ?? "full_segment",
+            "final_deadline_ms": requestedPolicy["final_deadline_ms"] ?? 120_000,
+            "effective_max_segment_ms": requestedPolicy["max_segment_ms"] ?? 20_000
+        ]
+        var echoedSpeechRail: [String: Any] = ["asr": echoedPolicy]
+        switch sessionUpdateEcho {
+        case .some(.wrongPreviewInterval):
+            echoedPolicy["preview_interval_ms"] = 200
+            echoedSpeechRail["asr"] = echoedPolicy
+        case .some(.invalidEffectiveBudget):
+            echoedPolicy["effective_max_segment_ms"] = 500
+            echoedSpeechRail["asr"] = echoedPolicy
+        case .some(.missingASRPolicy):
+            echoedSpeechRail = ["task": "conversation"]
+        case .none:
+            break
+        }
+        enqueue(
+            .text(
+                jsonText([
+                    "type": "session.updated",
+                    "session": [
+                        "speechrail": echoedSpeechRail
+                    ]
+                ])
+            )
+        )
     }
 
     func receive() async throws -> RealtimeASRSocketFrame {

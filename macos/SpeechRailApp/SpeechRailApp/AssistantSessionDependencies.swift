@@ -96,7 +96,7 @@ public struct AssistantSessionDependencies: Sendable {
         makeRealtimeClient: @escaping @Sendable (AssistantRealtimeClientConfiguration) -> any AssistantRealtimeClient = { configuration in
             RealtimeASRClient(
                 port: configuration.port,
-                silenceDurationMilliseconds: configuration.silenceDurationMilliseconds,
+                scenePreset: configuration.scenePreset,
                 voice: configuration.voice,
                 apiKey: configuration.apiKey,
                 expectedASRRevision: configuration.expectedASRRevision,
@@ -127,7 +127,7 @@ public struct AssistantSessionDependencies: Sendable {
 /// 哪个修订建连"，而不必读 `RealtimeASRClient` 的私有状态。
 public struct AssistantRealtimeClientConfiguration: Sendable {
     public var port: Int
-    public var silenceDurationMilliseconds: Int
+    public var scenePreset: ASRScenePreset
     public var voice: String?
     public var apiKey: String?
     public var expectedASRRevision: String?
@@ -136,7 +136,7 @@ public struct AssistantRealtimeClientConfiguration: Sendable {
 
     public init(
         port: Int,
-        silenceDurationMilliseconds: Int,
+        scenePreset: ASRScenePreset = .assistantTurnTaking,
         voice: String?,
         apiKey: String?,
         expectedASRRevision: String?,
@@ -144,7 +144,7 @@ public struct AssistantRealtimeClientConfiguration: Sendable {
         expectedVoiceRevision: String?
     ) {
         self.port = port
-        self.silenceDurationMilliseconds = silenceDurationMilliseconds
+        self.scenePreset = scenePreset
         self.voice = voice
         self.apiKey = apiKey
         self.expectedASRRevision = expectedASRRevision

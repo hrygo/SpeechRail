@@ -44,7 +44,7 @@ extension MeetingSessionDependencies {
             makeRealtimeClient: { configuration in
                 RealtimeASRClient(
                     port: configuration.port,
-                    silenceDurationMilliseconds: RealtimeVADProfile.meeting.silenceDurationMilliseconds,
+                    scenePreset: configuration.scenePreset,
                     diarizationEnabled: configuration.diarizationEnabled,
                     apiKey: configuration.apiKey,
                     expectedASRRevision: configuration.expectedASRRevision
