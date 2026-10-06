@@ -3,7 +3,9 @@ import CryptoKit
 import Foundation
 import SpeechRailControlKit
 import Testing
+#if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
+#endif
 
 // Opt-in live wire contract:
 // - enable with SPEECHRAIL_ASR_CONSUMER_E2E=1;
