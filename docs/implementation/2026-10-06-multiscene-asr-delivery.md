@@ -17,11 +17,15 @@ teleprompter 只把预览间隔从 400 ms 放到 500 ms，继续 streaming 收�
 `ASRScenePresetTests` 期望同步为 500 ms。
 Python 侧无 400 ms 硬编码预设可改（`ASRPolicy` 默认 1000 ms，
 场景值只由 App 显式下发），Schema 与契约文档无需变更。
-最小验证：`tests/test_asr_policy.py` +
-`tests/test_realtime_multiscene_asr.py` 全过（58 项），
-`swift test --filter ASRScenePresetTests` 2 项通过。
-Ruff/mypy 与 #249 剩余真实复核（#297 交互、预设冻结后的真实验收）
-仍待后续回合按授权执行。本节只记录冻结决定与代码改动，
+验证（rebase 到含 #297 的 main `159fea09` 之后重跑）：
+`test_realtime_multiscene_asr.py` + `test_realtime_asr_control.py` +
+`test_asr_policy.py` 共 69 项通过；Ruff 全仓库通过；
+mypy 三文件（`realtime_openai.py`、`routes/realtime_openai.py`、
+`asr_policy.py`）零问题；`swift test --filter ASRScenePresetTests`
+2 项通过。#297 的 clear-barrier 行为变更（clear 中断的 client commit
+由 `input_cleared` 改为 `invalid_state`）已包含在本分支历史，
+交互门在本分支上重跑通过。#249 剩余真实复核（预设冻结后的真实验收）
+仍待授权执行。本节只记录冻结决定、代码改动与上述确定性验证，
 不声称真实验收已通过。
 
 ## 2026-10-07 回滚可调与三臂真实对照（PR #317 已合入）
