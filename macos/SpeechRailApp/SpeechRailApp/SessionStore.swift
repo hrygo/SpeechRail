@@ -2642,8 +2642,6 @@ public actor SessionStore {
         guard fm.fileExists(atPath: url.path) else {
             throw SessionStoreError.storageUnavailable
         }
-        let probe = SessionStore(directory: url.deletingLastPathComponent())
-        _ = probe
         // 备份文件本身就是库文件：用只读连接做 integrity_check，不迁移、不写入。
         var pointer: OpaquePointer?
         let flags = SQLITE_OPEN_READONLY
