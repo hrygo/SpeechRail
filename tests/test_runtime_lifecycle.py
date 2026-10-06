@@ -1,6 +1,7 @@
 """Failure and cancellation contracts for the physical runtime owners."""
 
 import asyncio
+import traceback
 
 import pytest
 
@@ -151,5 +152,22 @@ def test_timed_out_cleanup_keeps_handle_and_closes_remaining_owners() -> None:
         release.set()
         await task
         assert gated.closes == 1
+
+    asyncio.run(run())
+
+
+def test_cleanup_report_does_not_expose_backend_exception_detail() -> None:
+    async def run() -> None:
+        class FailingWorker(Worker):
+            async def close(self) -> None:
+                raise RuntimeError("backend_private_detail")
+
+        life = RuntimeLifecycle(asr=FailingWorker())
+        await life.start()
+        with pytest.raises(ExceptionGroup) as result:
+            await life.close()
+        report = "".join(traceback.format_exception(result.value))
+        assert "backend_private_detail" not in report
+        assert "asr cleanup failed (RuntimeError)" in report
 
     asyncio.run(run())

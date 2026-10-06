@@ -218,7 +218,6 @@ class RuntimeLifecycle:
             return False
         except Exception as exc:
             failure = RuntimeError(f"{role} cleanup failed ({type(exc).__name__})")
-            failure.__cause__ = exc
             errors.append(failure)
             return False
         return True
