@@ -1778,6 +1778,96 @@ final class ServiceContractTests: XCTestCase {
         }
     }
 
+    // MARK: - #265 §6.0 边界 2：有界接收与解码校验
+
+    /// 空响应不进 player：零字节走 emptyResponse，不冒充成功。
+    func testFullTextBoundsRejectsEmptyResponse() {
+        let result = FullTextSpeechBounds.validate(
+            data: Data(),
+            contentType: "audio/wav",
+            elapsed: .seconds(1)
+        )
+        guard case .failure(.emptyResponse) = result else {
+            return XCTFail("空响应应显式失败，不进 player：\(result)")
+        }
+    }
+
+    /// 超硬字节上限显式失败：4 MiB 以上的完整响应不截尾、不播出，
+    /// 调用方保留文字转显式重试。
+    func testFullTextBoundsRejectsOversizedPayload() {
+        let big = Data(repeating: 0x52, count: FullTextSpeechBounds.maxAudioBytes + 1)
+        let result = FullTextSpeechBounds.validate(
+            data: big,
+            contentType: "audio/wav",
+            elapsed: .seconds(1)
+        )
+        guard case .failure(.byteLimitExceeded(let got, let max)) = result else {
+            return XCTFail("超限载荷应显式失败：\(result)")
+        }
+        XCTAssertEqual(got, FullTextSpeechBounds.maxAudioBytes + 1)
+        XCTAssertEqual(max, FullTextSpeechBounds.maxAudioBytes)
+    }
+
+    /// 超绝对 deadline 不播出：60s 后到达的完整响应走 incomplete，
+    /// 不冒充成功、不进 player。
+    func testFullTextBoundsRejectsLateArrival() {
+        let wav = Data([0x52, 0x49, 0x46, 0x46, 0x00, 0x00, 0x00, 0x00, 0x57, 0x41, 0x56, 0x45])
+        let result = FullTextSpeechBounds.validate(
+            data: wav,
+            contentType: "audio/wav",
+            elapsed: .seconds(61)
+        )
+        guard case .failure(.deadlineExceeded) = result else {
+            return XCTFail("超时到达应显式失败：\(result)")
+        }
+    }
+
+    /// 非音频 content-type 不提交 player：即使 2xx + 非空也不播出。
+    func testFullTextBoundsRejectsNonAudioContentType() {
+        let result = FullTextSpeechBounds.validate(
+            data: Data([0x01, 0x02]),
+            contentType: "application/json",
+            elapsed: .seconds(1)
+        )
+        guard case .failure(.unsupportedContentType(let ct)) = result else {
+            return XCTFail("非音频 content-type 应显式失败：\(result)")
+        }
+        XCTAssertEqual(ct, "application/json")
+    }
+
+    /// 坏载荷不提交 player：content-type 宣称 wav 但魔数不是 RIFF/WAVE。
+    func testFullTextBoundsRejectsUndecodableWav() {
+        let result = FullTextSpeechBounds.validate(
+            data: Data([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C]),
+            contentType: "audio/wav",
+            elapsed: .seconds(1)
+        )
+        guard case .failure(.undecodablePayload(let ct)) = result else {
+            return XCTFail("坏 wav 载荷应显式失败：\(result)")
+        }
+        XCTAssertEqual(ct, "audio/wav")
+    }
+
+    /// 好路径：RIFF/WAVE 魔数 + 有界 + 按时到达即通过；
+    /// 未知 audio/* 子类型不误杀未来格式。
+    func testFullTextBoundsAcceptsValidWavAndUnknownSubtype() {
+        let wav = Data([0x52, 0x49, 0x46, 0x46, 0x00, 0x00, 0x00, 0x00, 0x57, 0x41, 0x56, 0x45])
+        guard case .success = FullTextSpeechBounds.validate(
+            data: wav,
+            contentType: "audio/wav",
+            elapsed: .seconds(1)
+        ) else {
+            return XCTFail("合法 wav 应通过接纳屏障")
+        }
+        guard case .success = FullTextSpeechBounds.validate(
+            data: Data([0x01, 0x02]),
+            contentType: "audio/x-future-codec",
+            elapsed: .seconds(1)
+        ) else {
+            return XCTFail("未知 audio 子类型不应误杀")
+        }
+    }
+
     /// F1: formal production must always carry the strict policy, even when the
     /// caller forgot it. Audition keeps the permissive default.
     func testRenderPinsStrictPolicyAndAuditionStaysUnverified() async throws {
