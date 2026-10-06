@@ -224,6 +224,13 @@ App 侧 played 门控仍由 fake 门（V05 定向回归）覆盖，真机播放�
 三 session 同级（p50 67–76ms，p95 70–79ms），轮间无漂移。
 范围声明：矩阵“3 sessions × ≥24 轮”轮数口径已满；
 活动内存有界量化、SQLite 记录数 == 提交数核对仍待执行。
+内存观测（2026-10-06，只读 `/metrics`，不判定）：
+`speechrail_resource_physical_footprint_bytes` 在干净 soak（24/24，
+p50=70ms/p95=73ms）前为 9.44GB，soak 后即刻 9.64GB，5 分钟后 10.03GB，
+`asr_state` 保持 active。单次观测不能定性为泄漏（可能为 worker 保持 active
+的正常驻留）；“有界”判定与预算口径（declared 13.74GB / budget 68.72GB）
+归 Python 侧评审，本矩阵只记录观测值。
+soak 探针为纯 realtime 转写、不落 App 会话库，SQLite 记录数核对不适用本探针。
 反例记录：session 2/3 首跑时恰遇他方 `run_candidate_v8.py`（ASR-245 候选验证，
 内部代号 v8，非产品版本）并发占用同一 ASR worker，延迟升至秒级
 （p50 4.9–6.3s）；待其 `matrix_complete`（300/300）退出、worker 回
