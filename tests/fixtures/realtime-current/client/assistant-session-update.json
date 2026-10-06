@@ -36,7 +36,8 @@
       "asr": {
         "preview_interval_ms": 800,
         "max_segment_ms": 20000,
-        "finalization": "full_segment"
+        "finalization": "full_segment",
+        "rollback_tokens": 5
       }
     }
   }
