@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import contextlib
 from itertools import pairwise
 
 import pytest
@@ -469,6 +470,60 @@ def test_clear_discards_resampler_tail_before_new_input():
             int.from_bytes(received[i:i + 2], "little", signed=True)
             for i in range(0, len(received), 2)
         } == {-30000}
+        await session.close()
+
+    asyncio.run(run())
+
+
+def test_client_commit_interrupted_by_clear_fails_explicitly():
+    """#294: a client commit awaiting its final must not leak CancelledError.
+
+    Clear cancels in-flight finals after delivering the failed terminal;
+    the commit caller sees input_cleared, and new input still completes.
+    """
+
+    async def run():
+        services, factory = _build()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class SlowFinal(FakeStreamingSession):
+            async def commit(self, want_segments=False):
+                entered.set()
+                await release.wait()
+                return await super().commit(want_segments=want_segments)
+
+        factory.session_class = lambda: SlowFinal
+        sent = []
+
+        async def send(event):
+            sent.append(event)
+            return len(sent)
+
+        session = OpenAIRealtimeSession(services, session_id="commit-clear", send=send)
+        await session._update_session(_policy_update())
+        await session._append_audio({
+            "type": "input_audio_buffer.append",
+            "audio": base64.b64encode(bytes(4800)).decode(),
+        })
+        pending = asyncio.create_task(session._commit_audio(reason="client"))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        assert not pending.done()
+        await asyncio.wait_for(session._clear_audio(), timeout=2)
+        with pytest.raises(RealtimeAdapterError) as exc_info:
+            await asyncio.wait_for(asyncio.shield(pending), timeout=5)
+        assert exc_info.value.code == "input_cleared"
+        release.set()
+        with contextlib.suppress(RealtimeAdapterError, asyncio.CancelledError):
+            await asyncio.wait_for(pending, timeout=5)
+        # The cleared item already got its failed terminal; new input completes.
+        await session._append_audio({
+            "type": "input_audio_buffer.append",
+            "audio": base64.b64encode(bytes(4800)).decode(),
+        })
+        await session._commit_audio(reason="client", request_receipt=True)
+        assert any(e["type"].endswith("transcription.failed") for e in sent)
+        assert any(e["type"].endswith("transcription.completed") for e in sent)
         await session.close()
 
     asyncio.run(run())

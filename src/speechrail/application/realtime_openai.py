@@ -1360,7 +1360,18 @@ class OpenAIRealtimeSession:
         self._item_end_kernel = item.end_kernel
         self._current_item_id = self._new_item_id()
         if reason == "client":
-            await final
+            try:
+                await final
+            except asyncio.CancelledError as err:
+                # A concurrent clear cancels in-flight finals after sending
+                # the item its failed terminal. The commit caller must see an
+                # explicit input-cleared failure, never a bare cancellation.
+                if item.terminal:
+                    raise RealtimeAdapterError(
+                        "input_cleared",
+                        "the committed input was cleared before its terminal",
+                    ) from err
+                raise
             await self._await_asr_finals()
 
     async def _finish_asr_item(
