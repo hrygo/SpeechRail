@@ -40,7 +40,7 @@ final class VoicePromptTests: XCTestCase {
         XCTAssertTrue(spoken.contains("朗读"), "语音模态保留朗读契约")
     }
 
-    /// A34：关键事实歧义不自动猜改，必要澄清一次一问题；无伪造置信度。
+    /// A34 / V14 fake 可测部分：关键语音歧义走澄清，不猜金额/日期/否定/专名。
     func testA34CriticalRecognitionAmbiguityIsNotGuessed() {
         for modality in [
             VoicePrompt.instructionsFor(input: .keyboard, output: .textOnly),
