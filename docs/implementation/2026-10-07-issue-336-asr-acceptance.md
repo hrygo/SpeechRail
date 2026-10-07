@@ -2,7 +2,7 @@
 title: "共享 ASR #336：冻结预设后的真实验收"
 status: in_progress
 audience: "SpeechRail 开发者与验收人员"
-version: "0.15.0"
+version: "0.16.0"
 date: 2026-10-07
 ---
 
@@ -105,9 +105,51 @@ ready 类型及资源角色类型反例在修正前为 2 failed / 1 passed；
 runner SHA-256：
 `764997b91d64531d9d68015f06ba12402af6fd54d40bb9143206a669cf8be52a`。
 
-上述只证明离线接线，不证明真实短回放、退出边界采样、长会资源或恢复。
-新入口尚未启动消费者；下一步在外层 managed 维护和独立恢复核验下
-先运行短会议，再用相同新 binary、监督器、素材与驻留口径重跑双臂长会。
+上述 v5 证据只证明离线接线。后续短真实回放与修订见下一节；
+双臂长会仍须用相同新 binary、监督器、素材与驻留口径重跑。
+
+### 新监督器的短真实回放与 revision 边界修正
+
+2026-10-07 21:02 UTC 的首次短会议没有进入录制，在 120 秒后返回
+`.sessionRunFailed`，未发布 ready，资源材料与失败 outcome 原样保留。
+原因是本次维护入口把 `/health.asr_runtime_revision` 传给了消费者的
+`expected_asr_revision`；后者绑定的是 ASR catalog revision。
+实际协议探查确认：runtime revision 返回 `model_revision_conflict`，
+catalog revision 返回 `session.updated`。探查没有上传 PCM 或执行推理；
+两个早期不完整探查请求被 `invalid_event` 拒绝，不作为 revision 证据。
+
+修正另存于 `sampled-session-v6/`，不覆盖冻结 v5 工具。CLI 改用明确的
+`--asr-catalog-revision`，先以鉴权能力快照核对，再启动消费者；
+结果分别记录 catalog 与 runtime revision。新反例在旧入口为 1 failed /
+3 passed；修订后共 61 项离线测试与 Ruff 通过。当前实际服务也确认错误
+revision 在输出目录创建、采样及消费者启动前被拒绝。
+
+21:12 UTC，冻结 main `3a4cb713` 的相同 wheel 完成 22.285 秒短会议回放。
+原有十二项消费者门中十项适用并通过，助手/提词器专属两项为
+`not_applicable`；fixture、yield、input 与上传水位均为 534,840 个
+24 kHz 样本，完整 EOF、零合成尾静音。schema 6 客户端观测齐全；
+append 返回至最后终态为 148.092ms，名义采集结束至最后终态为
+144.278ms。两者均为单次客户端观测，不是声学末语音时延或 p50/p95。
+
+实际 SwiftPM helper 的 bundle 路径与冻结 binary 一致，binary SHA-256：
+`e8e57725b6a96a0f41432aecc62f1cb6ab7eb038c8e8baeb9c6b75f63947ffc5`。
+ready、原始资源、归一化资源、release 与正常退出的执行路径完成；
+资源文件在 release 前保存并 fsync。45 个采样 tick 全部完整，
+active windows 与全局采样门通过；逐 tick 重算物理内存峰值为
+14,206,168,752 bytes（13.231 GiB）。这只证明本次短回放资源观测，
+绝对资源、绝对延迟、文字质量、麦克风与分人门仍分别为 unset / 未执行。
+
+监督器总用时 25.107 秒，消费者退出码为 0，模型下载量为零。
+21:12:50 UTC 的独立恢复核验确认原 runtime/vendor、配置/selection/plist
+字节与权限一致，`quality/quality`、generation 13、auto off；
+PID 67400，唯一 listener、ready 且活动请求清零。首次失败也已独立恢复，
+不以第二次成功覆盖第一次失败。
+
+短回放汇总 proof SHA-256：
+`dd841eaf4c8bdfee6bdb62f1c5ca71d2f2cced3e9b4bcc855dfb2fb3ede5c746`；
+独立恢复 proof SHA-256：
+`e04af6a2743a6ff7fa1e7951bc32d4339835b2a51d00fc12009b9410e1414098`。
+旧长会 candidate 的采样失败保持原结论；新双臂 37 分钟测量尚未完成。
 
 ### 长输入期间消费事件
 
@@ -643,9 +685,10 @@ candidate 单次真实本机 LLM 证据通过正式输入与非空响应门，
 `dc13c67a3c9059b37745a709a920086dfc73a91731c46c5315e0b76f1475ccc7`。
 
 候选仍未采纳，#253/#336 保持 OPEN，PR #340 保持 DRAFT。
-Python/Swift 精确计时修订与新长会监督入口已完成离线接入和确定性验证，
-尚无新口径真实测量。下一步为核验当前消费者的短真实回放与退出采样顺序、
-同新夹具重新配对长会，以及受限诊断上述真实新增错误。
+Python/Swift 精确计时修订与新长会监督入口已完成离线接入和确定性验证。
+新消费者已在冻结 main 的 22.285 秒短会议验证退出协调、完整资源采样与
+schema 6 客户端计时；新口径双臂长会仍未完成。下一步为同新夹具重新
+配对长会，以及受限诊断上述真实新增错误。
 原始音频、参考、转写、配置、日志与结果继续保留在仓库外；
 真实设备、人工语义/可读性和提词器恢复门仍未完成。
 
@@ -758,7 +801,7 @@ CER 门保持 `unset`，也不证明生产 `MeetingSession` 的长会保存、
 
 | 项目 | 本轮状态 | 证据边界 |
 |---|---|---|
-| 最终主线与冻结预设复测 | 部分完成 | 冻结双臂各 35 矩阵 / 855 请求完整配对且最终恢复通过；新消费者与修订夹具尚待验证 |
+| 最终主线与冻结预设复测 | 部分完成 | 冻结双臂各 35 矩阵 / 855 请求完整配对且最终恢复通过；新消费者短会议的计时/退出/资源门通过，新双臂长会待验 |
 | 8 秒档质量回退 | 未通过 | main 相对历史有七个矩阵回退，candidate 有六个；candidate 相对本轮 main 的三个提词器矩阵新增错误，旧 90 请求不外推 |
 | 标点门 | 未通过完整验收 | 完整配对有 AISHELL-4 提词器逗号及 QE 提词器句号类别回退；人工会议问号 F1 0.400、感叹号 0；可读性与绝对门待验 |
 | 提词器恢复与时延 | 部分证据 | 短直读推进和接管已通过；即兴、重读、脱稿恢复及其延迟未验证 |
