@@ -130,7 +130,11 @@ wheel SHA-256 为
 旧实现均失败，修正后通过；158 项 decoder、worker、streaming、Realtime control
 与策略定向回归通过，Ruff、decoder mypy 与 diff 检查通过。
 公共契约与用户文档明确 rollback 调优作用于预览、最终结果可修正整段。
-该候选尚未构建和真实复测，质量与额外生成的收尾时延成本不能由 fake 测试推断。
+该候选固定于 `ccd68ba04edc39ccd6f7037dc577161be8c63c47`，wheel SHA-256 为
+`646216d6524cac1ecb98b5c828c17e60795c72d496ba9d15d6c725eaebf9ee85`。
+171 个生产模块与该提交逐字一致；与新主线 wheel 的包内容差异仍只有 decoder
+和 `RECORD`，原生二进制相同，独立安装入口校验通过。
+90 请求真实对照正在进行，未采纳；质量与额外生成的收尾时延成本不能由 fake 测试推断。
 
 新主线的完整矩阵、生产长会和真实本机 LLM 回放另行采集。
 PR #340 保持草稿，#253 与 #336 保持开放。
