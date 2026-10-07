@@ -2,7 +2,7 @@
 title: "转录保存命令、原子确认与恢复合同"
 status: active
 audience: "macOS App 开发者、会话数据层维护者"
-version: "0.1.5"
+version: "0.1.6"
 date: 2026-10-07
 ---
 
@@ -18,11 +18,11 @@ R07 PR #330 已合入 main（`c997f7b0`）：Store 原子确认、共享命令�
 ## 所有权与边界
 
 ASR 客户端、Preview Ledger 和 Assembler 定义识别事实；保存 owner 消费已经归约的正文，
-不反向修改识别终态、revision、segment boundary 或 clear 协议。#245 继续拥有这些识别语义。
+不反向修改识别终态、revision、segment boundary 或 clear 协议。#245 的识别重构已由用户确认实施完成；本包仍聚焦保存与收尾，不修改识别语义。
 
 助手、会议和字幕复用 `TranscriptPersistenceQueue`，各 feature 持有自己的串行实例，
 不依赖整个 `AssistantSession`。源文件暂保留 `AssistantInputPersistenceQueue.swift`：
-两个构建系统均已登记该编译单元，保留文件名可以避开在途 pbxproj 修改；旧类型 alias 不保留。
+两个构建系统均已登记该编译单元，保留文件名延续当前构建登记，不再以 #245 避让为限制；旧类型 alias 不保留。
 
 receiver 接纳命令后即可继续消费控制事件，保存 owner 才等待 Store I/O。
 接纳不表示已保存；读到同 ID 的正文也不单独证明 outbox 和 ordinal 确认成功。
@@ -154,3 +154,5 @@ UI 视觉、键盘实际操作和 VoiceOver 尚未实测，不把编译通过视
 
 实测命令、精确计数、提交和审查结论记录于
 [R07 loop 账本](../implementation/2026-10-07-issue-238-solid-loop-plan-r2.md)。
+
+R08 的联合消费与封存门见[应用收尾合同](session-drain-completion-contract.md)，当前为分支实施与确定性验证，尚未以此宣布 #232 已完成联合验收。

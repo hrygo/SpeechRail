@@ -90,6 +90,7 @@ public struct AssistantSessionDependencies: Sendable {
     /// 测试用它 gate 住标题 IO，验证标题不挡正文投影与 LLM 启动。
     public var claimTitle: (@Sendable (String, String, String) async throws -> Bool)?
     public var inputPersistenceConfiguration: TranscriptPersistenceQueue.Configuration
+    public var drainTimeout: Duration
 
     public init(
         llm: any AssistantLLM = LLMProvider(),
@@ -110,7 +111,8 @@ public struct AssistantSessionDependencies: Sendable {
         saveInputLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
         saveReplyLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
         claimTitle: (@Sendable (String, String, String) async throws -> Bool)? = nil,
-        inputPersistenceConfiguration: TranscriptPersistenceQueue.Configuration = .init()
+        inputPersistenceConfiguration: TranscriptPersistenceQueue.Configuration = .init(),
+        drainTimeout: Duration = .seconds(12)
     ) {
         self.llm = llm
         self.makeRealtimeClient = makeRealtimeClient
@@ -120,6 +122,7 @@ public struct AssistantSessionDependencies: Sendable {
         self.saveReplyLine = saveReplyLine
         self.claimTitle = claimTitle
         self.inputPersistenceConfiguration = inputPersistenceConfiguration
+        self.drainTimeout = drainTimeout
     }
 }
 

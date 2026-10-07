@@ -397,6 +397,38 @@ final class SessionSealContractTests: XCTestCase {
         XCTAssertEqual(count, 1)
     }
 
+    func testCaptureDeadlineAlsoBoundsArchiveConfirmationWithoutDroppingTheWriter() async throws {
+        let original = try await record()
+        let writer = ArchiveWriter(store: store, blocksConfirmation: true)
+        coordinator = SessionCoordinator(store: store, archiveWriter: writer)
+        let deadline = SessionDrainDeadline(timeout: .milliseconds(80))
+        coordinator.recordCaptureCompletionDeadline(recordID: original.id, deadline: deadline)
+        var stopped = false
+        var result: SessionCoordinator.SessionSealResult?
+        let sealing = Task {
+            result = await coordinator.sealSessionReporting(id: original.id, reason: .user)
+            stopped = true
+        }
+        await waitForArchive(writer)
+        for _ in 0..<100 {
+            if stopped { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(stopped, "archive confirmation must not escape the capture deadline")
+        XCTAssertNil(coordinator.lastFinalizedSessionID)
+        XCTAssertNotNil(coordinator.pendingSeals[original.id])
+        await writer.release()
+        await sealing.value
+        guard case .failed = result else { return XCTFail("timeout must report failure: \(String(describing: result))") }
+        for _ in 0..<100 {
+            if deadline.pendingOperationCount == 0 { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertNil(coordinator.lastFinalizedSessionID, "late confirmation cannot publish the timed-out attempt")
+        let retry = await coordinator.retryPendingSeal(id: original.id)
+        XCTAssertEqual(retry, .sealed(recordID: original.id))
+    }
+
     func testMeetingSnapshotFailureRetriesOnlySnapshotAndReleasesOwnership() async throws {
         let original = try await record(.meeting)
         _ = try await store.appendLine(

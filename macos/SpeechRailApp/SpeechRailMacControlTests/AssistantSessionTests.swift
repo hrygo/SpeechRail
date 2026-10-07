@@ -399,16 +399,22 @@ final class AssistantSessionTests: XCTestCase {
         func start() async throws -> AsyncStream<AudioChunk> {
             lock.withLock { _startCount += 1 }
             if let startFailure { throw startFailure }
-            if autoStartCapture {
-                // 被取消的 AsyncStream iterator 会结束旧流，重连要像新设备一样创建新流。
-                let (stream, continuation) = AsyncStream<AudioChunk>.makeStream()
-                lock.withLock { captureContinuation = continuation }
-                return stream
-            }
-            return AsyncStream { _ in }
+            // The production source always closes its stream on stop, even when
+            // the test never injects any audio.
+            let (stream, continuation) = AsyncStream<AudioChunk>.makeStream()
+            lock.withLock { captureContinuation = continuation }
+            return stream
         }
 
-        func stop() { lock.withLock { _stopCount += 1 } }
+        func stop() {
+            let continuation = lock.withLock {
+                _stopCount += 1
+                let continuation = captureContinuation
+                captureContinuation = nil
+                return continuation
+            }
+            continuation?.finish()
+        }
 
         /// 往采集流里塞一块音频，验证上行确实发生了。
         func emitCapture(_ chunk: AudioChunk) {

@@ -28,14 +28,189 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         saveLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
         attachSpeakerLabel: (@Sendable (String, String?) async throws -> Void)? = nil,
         configuration: TranscriptPersistenceQueue.Configuration = .init(),
-        makeRealtimeClient: (@Sendable (MeetingRealtimeClientConfiguration) -> any MeetingRealtimeClient)? = nil
+        makeRealtimeClient: (@Sendable (MeetingRealtimeClientConfiguration) -> any MeetingRealtimeClient)? = nil,
+        drainTimeout: Duration = .seconds(12),
+        receiverGateForFirst: ConnectGate? = nil,
+        archiveDelay: Duration = .zero
     ) async throws -> Harness {
         let harness = try await Harness.make(
             saveLine: saveLine, attachSpeakerLabel: attachSpeakerLabel,
-            configuration: configuration, makeRealtimeClient: makeRealtimeClient
+            configuration: configuration, makeRealtimeClient: makeRealtimeClient,
+            drainTimeout: drainTimeout, receiverGateForFirst: receiverGateForFirst, archiveDelay: archiveDelay
         )
         self.harness = harness
         return harness
+    }
+
+    func testLateUploadFailureCannotPolluteTheNextRecord() async throws {
+        let gate = ConnectGate()
+        let h = try await makeHarness(drainTimeout: .milliseconds(80))
+        let id = try await startRecording(h)
+        let old = try XCTUnwrap(h.clients.all.last)
+        await old.finishEventsOnClose()
+        await old.failAppend(gate: gate)
+        h.audio.emit(AudioChunk(pcm: Data([0, 1]), level: 0.2))
+        for _ in 0..<100 {
+            if await gate.entered { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let entered = await gate.entered
+        XCTAssertTrue(entered)
+        await h.session.finishAndSummarize()
+        let nextID = try await startRecording(h)
+        XCTAssertNotEqual(id, nextID)
+        XCTAssertNil(h.session.lastFailure)
+        await gate.open()
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertNil(h.session.lastFailure)
+        XCTAssertNil(h.coordinator.captureCompletionFailure(recordID: nextID))
+    }
+
+    func testFailedSaveCanBeRetriedAndFinishedThroughThePublicAction() async throws {
+        let gate = TranscriptPersistenceGate()
+        let h = try await makeHarness(saveLine: { try await gate.save($0, id: $1) })
+        await gate.attach(h.store)
+        let id = try await startRecording(h)
+        let client = try XCTUnwrap(h.clients.all.last)
+        await client.finishEventsOnClose()
+        try await h.emit(.segmentClosed(
+            itemID: "retry", sampleSpan: .init(startSample: 0, endSample: 24_000),
+            reason: .vad, commitEventID: nil
+        ))
+        try await h.emit(.completed(itemID: "retry", transcript: "结束前保存失败的正文"))
+        try await h.settle { _ in await gate.entered }
+        await gate.release(failing: true)
+        try await h.settle { !$0.session.saveFailures(recordID: id).isEmpty }
+        await h.session.requestFinish()
+        XCTAssertEqual(h.session.phase, .processing)
+        await gate.release()
+        let saved = await h.session.retryPendingSaves(recordID: id)
+        XCTAssertTrue(saved)
+        await h.session.requestFinish()
+        let record = try await h.store.session(id: id)
+        XCTAssertEqual(record?.state, .archived)
+        XCTAssertEqual(h.session.phase, .archived)
+    }
+
+    func testIncompleteCaptureCanOnlyBeExplicitlyArchivedAsInterruptedWithoutMinutes() async throws {
+        let h = try await makeHarness()
+        let id = try await startRecording(h)
+        let client = try XCTUnwrap(h.clients.all.last)
+        await client.finishEventsOnClose()
+        await client.failDrain()
+        await h.session.finishAndSummarize()
+        let complete = await h.session.finishIncompleteCapture()
+        XCTAssertTrue(complete)
+        let record = try await h.store.session(id: id)
+        XCTAssertEqual(record?.state, .archived)
+        XCTAssertEqual(record?.endReason, .interrupted)
+        XCTAssertEqual(h.session.phase, .archived)
+        XCTAssertFalse(h.session.minutes.isBusy)
+    }
+
+    func testFinishDoesNotResetTheDrainBudgetBeforeTheRealArchive() async throws {
+        let h = try await makeHarness(drainTimeout: .milliseconds(300), archiveDelay: .milliseconds(200))
+        let id = try await startRecording(h)
+        let client = try XCTUnwrap(h.clients.all.last)
+        await client.finishEventsOnClose()
+        await client.delayDrain(.milliseconds(200))
+        await h.session.finishAndSummarize()
+        XCTAssertNotEqual(h.session.phase, .archived)
+        XCTAssertNil(h.coordinator.lastFinalizedSessionID)
+        XCTAssertNotNil(h.session.lastFailure)
+        try await Task.sleep(for: .milliseconds(230))
+        XCTAssertNil(h.coordinator.lastFinalizedSessionID, "late confirmation cannot publish success")
+        XCTAssertEqual(h.session.sessionID, id)
+    }
+
+    func testUploadFailureCannotBeHiddenBySuccessfulDrain() async throws {
+        let h = try await makeHarness()
+        let id = try await startRecording(h)
+        let client = try XCTUnwrap(h.clients.all.last)
+        await client.finishEventsOnClose()
+        await client.failAppend()
+        h.audio.emit(AudioChunk(pcm: Data([0, 1]), level: 0.2))
+        await h.session.finishAndSummarize()
+        let record = try await h.store.session(id: id)
+        XCTAssertNotEqual(record?.state, .archived)
+        XCTAssertEqual(h.coordinator.captureCompletionFailure(recordID: id)?.stage, .upload)
+    }
+
+    func testDiarizationDrainFailureStillRecordsDegradedState() async throws {
+        let h = try await makeHarness()
+        let suite = "meeting-diarization-drain-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = SessionPreferences(defaults: defaults)
+        preferences.meetingDiarizationEnabled = true
+        h.session.preferences = { preferences }
+        let id = try await startRecording(h)
+        let client = try XCTUnwrap(h.clients.all.last)
+        await client.finishEventsOnClose()
+        await client.failDiarizationDrain()
+        await h.session.finishAndSummarize()
+        let record = try await h.store.session(id: id)
+        XCTAssertEqual(record?.diarization, .degraded)
+        XCTAssertNotEqual(record?.state, .archived)
+    }
+
+    func testProtocolFailureCannotArchiveOrSummarizeAnEmptyMeeting() async throws {
+        let h = try await makeHarness()
+        let id = try await startRecording(h)
+        let client = try XCTUnwrap(h.clients.all.last)
+        await client.finishEventsOnClose()
+        await client.failDrain()
+        await h.session.finishAndSummarize()
+        let record = try await h.store.session(id: id)
+        XCTAssertNotEqual(record?.state, .archived)
+        XCTAssertNotEqual(h.session.phase, .archived)
+        XCTAssertNil(h.coordinator.lastFinalizedSessionID)
+        XCTAssertNil(h.coordinator.occupancy)
+        XCTAssertNotNil(h.session.lastFailure)
+        let retries = await h.coordinator.sealMeeting(id: id)
+        guard case .failed = retries else {
+            return XCTFail("a retry cannot manufacture missing protocol proof: \(retries)")
+        }
+    }
+
+    func testReceiverDeadlineDoesNotSealMeetingOrLetLateEventsEnterTheNextRecord() async throws {
+        let receiver = ConnectGate()
+        let h = try await makeHarness(
+            drainTimeout: .milliseconds(80), receiverGateForFirst: receiver
+        )
+        let id = try await startRecording(h)
+        let client = try XCTUnwrap(h.clients.all.last)
+        await client.finishEventsOnClose()
+        await client.setDrainEvents([.completed(itemID: "tail", transcript: "超时的旧会议尾句")])
+        var stopped = false
+        let stop = Task {
+            await h.session.finishAndSummarize()
+            stopped = true
+        }
+        for _ in 0..<100 {
+            if stopped { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(stopped, "meeting receiver wait must use the entire-stop deadline")
+        XCTAssertNil(h.coordinator.occupancy)
+        XCTAssertNotNil(h.session.lastFailure)
+        await stop.value
+        let record = try await h.store.session(id: id)
+        XCTAssertNotEqual(record?.state, .archived)
+        XCTAssertNotEqual(h.session.phase, .archived)
+        await h.session.start(selection: MeetingAudioSelection())
+        try await h.settle { $0.phase == .recording && $0.session.sessionID != id }
+        let nextID = try XCTUnwrap(h.session.sessionID)
+        let next = try XCTUnwrap(h.clients.all.last)
+        await next.emit(.completed(itemID: "tail", transcript: "新会议只接纳新连接"))
+        await receiver.open()
+        try await h.settleBriefly()
+        let rows = try await h.store.lines(sessionID: id)
+        XCTAssertTrue(rows.isEmpty, "expired receive permission must not be resurrected by a late Gate")
+        let nextRows = try await h.store.lines(sessionID: nextID)
+        XCTAssertEqual(nextRows.map(\.text), ["新会议只接纳新连接"])
+        await next.finishEventsOnClose()
+        _ = await h.coordinator.finalize(reason: .user)
     }
 
     func testFinalFailureKeepsFrozenCommandAndExplicitRetryNeedsNoSecondCompleted() async throws {
@@ -1015,7 +1190,10 @@ extension MeetingSessionLifecycleTests {
             saveLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
             attachSpeakerLabel: (@Sendable (String, String?) async throws -> Void)? = nil,
             configuration: TranscriptPersistenceQueue.Configuration = .init(),
-            makeRealtimeClient: (@Sendable (MeetingRealtimeClientConfiguration) -> any MeetingRealtimeClient)? = nil
+            makeRealtimeClient: (@Sendable (MeetingRealtimeClientConfiguration) -> any MeetingRealtimeClient)? = nil,
+            drainTimeout: Duration = .seconds(12),
+            receiverGateForFirst: ConnectGate? = nil,
+            archiveDelay: Duration = .zero
         ) async throws -> Harness {
             let directory = FileManager.default.temporaryDirectory
                 .appendingPathComponent("meeting-lifecycle-\(UUID().uuidString)", isDirectory: true)
@@ -1024,11 +1202,12 @@ extension MeetingSessionLifecycleTests {
             try await store.open()
 
             let defaults = UserDefaults(suiteName: "meeting-lifecycle-\(UUID().uuidString)") ?? .standard
-            let coordinator = SessionCoordinator(store: store, defaults: defaults)
+            let coordinator = SessionCoordinator(store: store, defaults: defaults,
+                archiveWriter: DelayedMeetingArchiveWriter(store: store, delay: archiveDelay))
             await coordinator.openStore()
 
             let audio = ControllableAudioSource()
-            let clients = ClientRegistry()
+            let clients = ClientRegistry(receiverGateForFirst: receiverGateForFirst)
             let power = MeetingPowerMonitorForTests()
             let dependencies = MeetingSessionDependencies(
                 makeAudioSource: { audio },
@@ -1038,7 +1217,8 @@ extension MeetingSessionLifecycleTests {
                 powerMonitor: power,
                 persistenceConfiguration: configuration,
                 saveLine: saveLine,
-                attachSpeakerLabel: attachSpeakerLabel
+                attachSpeakerLabel: attachSpeakerLabel,
+                drainTimeout: drainTimeout
             )
             let session = MeetingSession(coordinator: coordinator, dependencies: dependencies)
             coordinator.starter = { _ in try await session.beginCapture() }
@@ -1560,6 +1740,7 @@ extension MeetingSessionLifecycleTests {
 /// 这是"启动到一半用户结束了"能被造出来的唯一办法。
 actor ConnectGate {
     private var isOpen = false
+    private(set) var entered = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private var pendingFailure: Error?
 
@@ -1573,6 +1754,7 @@ actor ConnectGate {
     }
 
     func wait() async throws {
+        entered = true
         if isOpen {
             if let failure = pendingFailure { pendingFailure = nil; throw failure }
             return
@@ -1592,6 +1774,7 @@ actor ConnectGate {
 /// 一条不握手、不连 loopback 的连接。建连时机由闸门控制。
 actor ControllableRealtimeClient: MeetingRealtimeClient {
     private let gate: ConnectGate
+    private let receiverGate: ConnectGate?
     private(set) var connectCount = 0
     private(set) var closeCount = 0
     private(set) var flushCount = 0
@@ -1599,10 +1782,16 @@ actor ControllableRealtimeClient: MeetingRealtimeClient {
     private(set) var appendedByteCount = 0
     private(set) var appendedByteCountAtDrain = 0
     private var drainEvents: [RealtimeASRClient.Event] = []
+    private var drainFails = false
+    private var appendFails = false
+    private var appendGate: ConnectGate?
+    private var diarizationDrainFails = false
+    private var drainDelay: Duration = .zero
     private var finishEventsWhenClosed = false
 
-    init(gate: ConnectGate) {
+    init(gate: ConnectGate, receiverGate: ConnectGate? = nil) {
         self.gate = gate
+        self.receiverGate = receiverGate
     }
 
     /// **这条流必须是存下来的那一条**，不能每次 `events()` 现造一条：
@@ -1613,7 +1802,10 @@ actor ControllableRealtimeClient: MeetingRealtimeClient {
         limits: .init(maxBufferedEvents: 256)
     )
 
-    func events() async -> RealtimeEventStream<RealtimeASRClient.Event> { stream }
+    func events() async -> RealtimeEventStream<RealtimeASRClient.Event> {
+        if let receiverGate { try? await receiverGate.wait() }
+        return stream
+    }
 
     /// 按真实 wire 顺序投一条服务端事件。
     func emit(_ payload: RealtimeASRClient.Event) async {
@@ -1644,7 +1836,13 @@ actor ControllableRealtimeClient: MeetingRealtimeClient {
         }
     }
 
-    func append(_ pcm: Data) async throws { appendedByteCount += pcm.count }
+    func failAppend(gate: ConnectGate? = nil) { appendFails = true; appendGate = gate }
+    func failDiarizationDrain() { diarizationDrainFails = true }
+    func append(_ pcm: Data) async throws {
+        if let appendGate { try await appendGate.wait() }
+        if appendFails { throw URLError(.networkConnectionLost) }
+        appendedByteCount += pcm.count
+    }
     func flushPendingUtterance() async throws { flushCount += 1 }
     func setDrainEvents(_ events: [RealtimeASRClient.Event]) {
         drainEvents = events
@@ -1653,15 +1851,20 @@ actor ControllableRealtimeClient: MeetingRealtimeClient {
     func finishEventsOnClose() {
         finishEventsWhenClosed = true
     }
+    func failDrain() { drainFails = true }
+    func delayDrain(_ delay: Duration) { drainDelay = delay }
 
     func drainAndClear(timeout: Duration) async throws {
         drainCount += 1
+        try await Task.sleep(for: drainDelay)
         appendedByteCountAtDrain = appendedByteCount
         let events = drainEvents
         drainEvents = []
         for event in events {
             await emit(event)
         }
+        if diarizationDrainFails { throw RealtimeASRClient.Failure.drainTimedOut(.diarization) }
+        if drainFails { throw URLError(.timedOut) }
     }
     func close() async {
         closeCount += 1
@@ -1675,11 +1878,16 @@ actor ControllableRealtimeClient: MeetingRealtimeClient {
 final class ClientRegistry: @unchecked Sendable {
     private let lock = NSLock()
     private var storage: [ControllableRealtimeClient] = []
+    private let receiverGateForFirst: ConnectGate?
     let gate = ConnectGate()
 
+    init(receiverGateForFirst: ConnectGate? = nil) { self.receiverGateForFirst = receiverGateForFirst }
+
     func make(_ configuration: MeetingRealtimeClientConfiguration) -> any MeetingRealtimeClient {
-        let client = ControllableRealtimeClient(gate: gate)
         lock.lock()
+        let client = ControllableRealtimeClient(
+            gate: gate, receiverGate: storage.isEmpty ? receiverGateForFirst : nil
+        )
         storage.append(client)
         lock.unlock()
         return client
@@ -1742,4 +1950,13 @@ final class ControllableAudioSource: MeetingAudioSource {
         continuation?.yield(chunk)
     }
 
+}
+
+private struct DelayedMeetingArchiveWriter: SessionArchiveWriting {
+    let store: SessionStore
+    let delay: Duration
+    func finalizeSession(id: String, endReason: SessionEndReason, endedAt: Date) async throws -> SessionRecord {
+        try await Task.sleep(for: delay)
+        return try await store.finalizeSession(id: id, endReason: endReason, endedAt: endedAt)
+    }
 }

@@ -8,7 +8,7 @@
 **Spec:** [Epic #238](https://github.com/hrygo/SpeechRail/issues/238)、[Epic #245](https://github.com/hrygo/SpeechRail/issues/245)。
 **核验日期：** 2026-10-07，Asia/Shanghai；CI 时间戳为 UTC。进度以本次回读的 SHA、PR 状态和 run ID 为准。基线 `origin/main = c997f7b0`（已 fetch）；每包合并后刷新。
 
-**当前实施目标（2026-10-07 更新）：** R01、R02、R05、R03、R04、R06、R07 已合入；剩余 2 个 issue 分 2 个独立 PR，按 **R08 #231 → R09 #234** 完成实施、整包独立审查、定向验证与必要 CI，验证通过立即 squash 合并，再刷新 main。每包 1–3 issue；不堆叠 PR、不 force-push、不关闭未验收 issue、不 `Closes #238`。保持 #245 的语义禁写区，最终逐条核对十一项验收矩阵后决定关闭 issue 与完成 goal。
+**当前实施目标（2026-10-07 更新）：** R01、R02、R05、R03、R04、R06、R07 已合入；剩余 2 个 issue 分 2 个独立 PR，按 **R08 #231 → R09 #234** 完成实施、整包独立审查、定向验证与必要 CI，验证通过立即 squash 合并，再刷新 main。每包 1–3 issue；不堆叠 PR、不 force-push、不关闭未验收 issue、不 `Closes #238`。用户已确认 #245 实施完成，撤销临时避让限制；最终逐条核对十一项验收矩阵后决定关闭 issue 与完成 goal。
 
 **最新执行目标（2026-10-07，Asia/Shanghai）：** R07 PR **#330** 已在 head `776bce9f` 的全部必要 CI `37573261584` 通过后 squash 合并为 `c997f7b0`（UTC `2026-10-07T04:52:21Z`）。一次整包独立审查的 Required 已修，**228 项定向实测通过**，CI 完整 Swift 测试与 App 构建通过。R08 已从最新 main 创建 `codex/238-r08-session-drain-proof`；立即目标是冻结正常 drain / abort / reconnect 的接收权限与有界截止时间合同，补 receiver/store Gate 反例，接入消费 EOF、保存 settled 和真实封存结果。只关联 #231，不改 #245 的 clear/wire 语义；完成后再从新 main 实施 R09。
 
@@ -22,7 +22,7 @@
 
 - **R07 完成门槛：** 固定身份和完整命令可恢复；行、ordinal 与 outbox 原子确认；失败和容量拒绝不能被成功封存掩盖；partial 不进入正式纪要、默认分享或正式来源快照；归属缓存有界且跨 record/generation 隔离。保存后 metadata I/O 归共享 owner 管理，迟到完成不改新场标签或文字；用户能重试/复制旧记录，并显式处理拒绝证明，不能永久卡在记录容量上限。完成一次整包独立审查，修复 Required，定向验证和必要 CI 通过后立即合并。
 - **后续目标：** R08 补足消费 EOF、保存 settled 和封存结果的完整收尾证明；R09 收敛 loader 内核规则。各自从更新后的 main 开独立 PR，分别只关联 #231、#234。
-- **跨团队边界：** #245 的 decoder、ASR policy、turn coordinator、scene、Assembler、Ledger 与 wire 禁写；在途 clear 协议和路由只读；避让 pbxproj。同一文件出现无法分离的并行修改时暂停该处写入，核实后再继续。
+- **跨团队边界（2026-10-07 用户更正）：** #245 实施已完成，不再设置该团队的语义禁写区或 pbxproj 避让。GitHub #245/#253 仍 OPEN（本次回读），不能据此推翻用户对实施完成的确认，也不据此关闭其他团队的 issue。仍按实际 worktree 改动核对共享文件；同一文件出现无法分离的并行修改时暂停该处写入，核实后再继续。7a61 的助手上下文预算改动与 R08 收尾段可分离，保留其修改。
 - **最终完成条件：** 九包合并并逐条审计十一项 issue 的验收矩阵，更新相关 issue 与文档；满足全部要求后才关闭对应 issue 和完成 goal。未执行的真实模型、性能、长稳及 UI 验收如实列出，不以确定性测试替代。
 
 结构化 goal 仍 active。2026-10-07 再次核对：Goal 工具只提供完成/阻塞状态，不能改正文；原生 Codex UI 入口也被 computer-use 安全规则拒绝。旧 goal 的基线、PR 状态、逐包等待确认及错误同文件判断由本段执行目标更正，不虚假标为 complete 再重建，不绕过 UI 限制。
@@ -72,7 +72,9 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 
 ## 3. 与 #245 及在途分支的文件边界
 
-### 3.1 语义禁写区（#253 关闭前仍有效）
+**当前边界：** 以下 3.1–3.4 是原并行期的历史分工，2026-10-07 用户确认 #245 实施完成后，临时禁写与避让限制撤销。R08 仍围绕应用收尾证明实施，R09 仍围绕 loader 规则实施；授权不因解除避让而扩大为无关 ASR 重构。
+
+### 3.1 原语义禁写区（历史，已撤销）
 
 `qwen3_stream_decoder.py`、`domain/asr_policy.py`、`application/asr_turn_coordinator.py`、`ASRScenePreset.swift`、`AssistantInputTurnAssembler.swift`、`TranscriptPreviewLedger.swift`、ASR wire 契约（`RealtimeContractTypes.swift` ASR 部分）。
 
@@ -112,7 +114,7 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 | R04 #237+#236 | MERGED | PR #328 / `151297f6` | 283 定向 Swift、2 项 Python 守卫、独立编译；Required 已修，CI `37560283532` 全绿后合并 |
 | R06 #241 | MERGED | PR #329 / `4f6b7356` | 138 XCTest +77 Swift Testing；首轮 Required 已修，CI `37562890224` 全绿后立即合并 |
 | R07 #232 | MERGED | PR #330 / `c997f7b0` | 228 定向 XCTest；Required 红→绿修复；最终 head `776bce9f` CI `37573261584` 全绿；避让 pbxproj |
-| R08 #231 | 已定基线，待反例 | 分支 `codex/238-r08-session-drain-proof`，base `c997f7b0`；尚无 PR | 正常收尾权限、消费 EOF/截止时间/保存/封存联合证明；clear 协议只读 |
+| R08 #231 | 实施与定向验证进行中 | 分支 `codex/238-r08-session-drain-proof`，base `c997f7b0`；尚无 PR | 正常收尾权限、消费 EOF/截止时间/保存/封存联合证明；clear 协议只读 |
 | R09 #234 | planned | 无 | #249 关闭已解锁，排末位 |
 
 ### R03 验证与取舍（2026-10-07）
@@ -198,3 +200,21 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 - 11 个 issue 全文历史 + 2026-10-07 状态同步评论（`issuecomment-6027094348` epic；各 issue 同日评论见时间线）。
 - 新基线只读证据：`git log dc0744fb..b91e6f88 -- <file>` + 当前源码行级核对（§1 括号内锚点为阅读定位，非长期合同）。
 - r1 `docs/implementation/2026-10-07-issue-238-solid-loop-plan.md`（随 PR #320）：分组/边界/跨包门结论继承；不一致处以本文件为准。
+
+
+### R08 当前实施与验证账本（2026-10-07，尚未审查 / PR / 合并）
+
+- 统一 `SessionDrainDeadline` 已接三 feature 和 Coordinator：停产 → uploader → protocol → close → 唯一 receiver EOF → 保存 owner → 真实归档 / 来源确认。正常 drain 保留输入归档权，abort / reconnect 撤销旧身份；不改 wire、schema 或模型运行态。
+- 真实反例：Assistant receipt / receiver Gate 2 项 5 failures；非合作 receiver 4 failures；Meeting / Caption protocol 7 failures；ArchiveWriter deadline 2 failures；保存重试旧预算 1 failure；缓冲 stream error 2 failures。均已有生产修复。
+- 本次恢复复验五类套件 143 XCTest / 0 failures。追加上传失败与分人降级 5 项 / 8 failures，修复后 5 / 0；可选标题失败 2 failures，修复后通过；Caption stopping busy 重复 cleanup 与 Meeting public retry 共 4 failures，修复后通过。
+- 追加旧 uploader Gate 的新记录隔离、真实会议归档共享预算与显式中断归档测试。最终扩大套件、受控突变、App build、一次独立审查和最终 head CI 待记录，不以中间绿灯宣称交付完成。
+- Ruling：自动标题取消并保留完成句柄，不进入正文成功条件；必要正文与已接纳 metadata 仍必须确认。若判断错，可能缺少标题但不应丢正文。
+- Ruling：收尾证明不可恢复时不伪造正常成功，会议提供显式按中断归档与导出；仅保存故障可重试正常结束。代价是用户需明确选择处理不完整记录。
+- 用户确认 #245 实施完成，历史语义禁写 / pbxproj 避让已撤销；当前其他 worktree 的 Assistant 上下文预算 WIP 继续保护。未动该预算、取消测试文件、wire 或 pbxproj。
+- [收尾合同](../architecture/session-drain-completion-contract.md) 记录截止时间、任务句柄、接收权限与恢复边界；状态仍 `under_review`。
+
+- 2026-10-07 13:58（Asia/Shanghai）扩大 R06–R08 联合回归：15 类过滤，**289 XCTest / 0 failures**，日志 `/tmp/speechrail-r08-joint-final-green.log`；之前同范围 289 / 2 failures 来自标题用例同时启动回复，fixture 改为 drain 中尾句后隔离标题。标题等待突变仍给出 1 项 / 2 failures，恢复后联合套件绿灯。
+- 受控突变：删掉三个 uploader 的 await 后身份 guard，3 项 / 3 failures；停用截止计时器和 `.user` incomplete guard，3 项 / 4 failures（非合作任务等待和会议直接 seal 重试），全部已恢复，无突变标记残留。
+- App Debug 包装构建 `scripts/macos_app_build.sh --configuration Debug --timeout 600` 成功（13:56）；临时 bundle 按脚本清理，未安装 / 启动 App / 运行 UI 自动化。
+- 已 dispatch 一次 `luna_worker` 整包只读审查；尚待结果。当前 origin/main 回读仍 `c997f7b0`，main protection 要求线性历史与 Quality Gates / Gate Summary，squash 允许。
+- 原生 goal 仍 active；已发现的 goal 工具只支持 complete / blocked，不能编辑正文，因此未假完成重建。执行目标以本文首部和本账本为准。

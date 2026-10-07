@@ -26,7 +26,9 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         saveLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
         attachSpeakerLabel: (@Sendable (String, String?) async throws -> Void)? = nil,
         configuration: TranscriptPersistenceQueue.Configuration = .init(),
-        makeRealtimeClient: (@Sendable (CaptionRealtimeClientConfiguration) -> any CaptionRealtimeClient)? = nil
+        makeRealtimeClient: (@Sendable (CaptionRealtimeClientConfiguration) -> any CaptionRealtimeClient)? = nil,
+        drainTimeout: Duration = .seconds(12),
+        receiverGateForFirst: ConnectGate? = nil
     ) async throws -> Harness {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("caption-lifecycle-\(UUID().uuidString)", isDirectory: true)
@@ -43,14 +45,15 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         await coordinator.openStore()
 
         let audio = ControllableCaptionAudioSource()
-        let clients = CaptionClientRegistry()
+        let clients = CaptionClientRegistry(receiverGateForFirst: receiverGateForFirst)
         let dependencies = CaptionSessionDependencies(
             makeRealtimeClient: { configuration in
                 makeRealtimeClient?(configuration) ?? clients.make(configuration)
             },
             persistenceConfiguration: configuration,
             saveLine: saveLine,
-            attachSpeakerLabel: attachSpeakerLabel
+            attachSpeakerLabel: attachSpeakerLabel,
+            drainTimeout: drainTimeout
         )
         let session = CaptionSession(
             coordinator: coordinator,
@@ -90,6 +93,114 @@ final class CaptionSessionLifecycleTests: XCTestCase {
             harness.session.sessionID,
             harness.session.blocked?.detail ?? harness.session.lastFailure ?? "没有建立字幕记录"
         )
+    }
+
+    func testLateUploadFailureCannotPolluteTheNextRecord() async throws {
+        let gate = ConnectGate()
+        let h = try await makeHarness(drainTimeout: .milliseconds(80))
+        let id = try await start(h)
+        let old = try XCTUnwrap(h.clients.all.last)
+
+        await old.failAppend(gate: gate)
+        h.audio.emit(AudioChunk(pcm: Data([0, 1]), level: 0.2))
+        for _ in 0..<100 {
+            if await gate.entered { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let entered = await gate.entered
+        XCTAssertTrue(entered)
+        await h.coordinator.finalize(reason: .user)
+        let nextID = try await start(h)
+        XCTAssertNotEqual(id, nextID)
+        XCTAssertNil(h.session.lastFailure)
+        await gate.open()
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertNil(h.session.lastFailure)
+        XCTAssertNil(h.coordinator.captureCompletionFailure(recordID: nextID))
+    }
+
+    func testBufferedBusyDuringStopDoesNotStartASecondInterruptionCleanup() async throws {
+        let h = try await makeHarness()
+        let id = try await start(h)
+        let client = try XCTUnwrap(h.clients.all.last)
+        await client.setDrainEvents([.serverError(code: "backend_busy", message: "忙碌", requestID: nil)])
+        await h.coordinator.finalize(reason: .user)
+        XCTAssertEqual(h.session.phase, .idle)
+        let closes = await client.closeCount
+        XCTAssertEqual(closes, 1)
+        let record = try await h.store.session(id: id)
+        XCTAssertNotEqual(record?.state, .archived)
+    }
+
+    func testUploadFailureCannotBeHiddenBySuccessfulDrain() async throws {
+        let h = try await makeHarness()
+        let id = try await start(h)
+        let client = try XCTUnwrap(h.clients.all.last)
+        await client.failAppend()
+        h.audio.emit(AudioChunk(pcm: Data([0, 1]), level: 0.2))
+        await h.coordinator.finalize(reason: .user)
+        let record = try await h.store.session(id: id)
+        XCTAssertNotEqual(record?.state, .archived)
+        XCTAssertEqual(h.coordinator.captureCompletionFailure(recordID: id)?.stage, .upload)
+    }
+
+    func testDiarizationDrainFailureStillRecordsDegradedState() async throws {
+        let h = try await makeHarness()
+        h.session.diarizationPreference = { true }
+        let id = try await start(h)
+        let client = try XCTUnwrap(h.clients.all.last)
+        await client.failDiarizationDrain()
+        await h.coordinator.finalize(reason: .user)
+        let record = try await h.store.session(id: id)
+        XCTAssertEqual(record?.diarization, .degraded)
+        XCTAssertNotEqual(record?.state, .archived)
+    }
+
+    func testProtocolFailureCannotArchiveEmptyCaptionAsComplete() async throws {
+        let h = try await makeHarness()
+        let id = try await start(h)
+        let client = try XCTUnwrap(h.clients.all.last)
+        await client.failDrain()
+        await h.session.finish()
+        let record = try await h.store.session(id: id)
+        XCTAssertNotEqual(record?.state, .archived)
+        XCTAssertNil(h.coordinator.lastFinalizedSessionID)
+        XCTAssertNil(h.coordinator.occupancy)
+        XCTAssertNotNil(h.session.lastFailure)
+    }
+
+    func testReceiverDeadlineCannotSealCaptionAndLateBufferedFinalIsDiscarded() async throws {
+        let receiver = ConnectGate()
+        let h = try await makeHarness(
+            drainTimeout: .milliseconds(80), receiverGateForFirst: receiver
+        )
+        let id = try await start(h)
+        let client = try XCTUnwrap(h.clients.all.last)
+        await client.setDrainEvents([.completed(itemID: "tail", transcript: "超时的字幕尾句")])
+        var stopped = false
+        let stop = Task {
+            await h.session.finish()
+            stopped = true
+        }
+        for _ in 0..<100 {
+            if stopped { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(stopped)
+        XCTAssertNil(h.coordinator.occupancy)
+        XCTAssertNotNil(h.session.lastFailure)
+        await stop.value
+        let record = try await h.store.session(id: id)
+        XCTAssertNotEqual(record?.state, .archived)
+        let nextID = try await start(h)
+        let next = try XCTUnwrap(h.clients.all.last)
+        await next.emit(.completed(itemID: "tail", transcript: "新字幕只接纳新连接"))
+        await receiver.open()
+        try await h.settle { $0.session.lines.contains { $0.text == "新字幕只接纳新连接" } }
+        let rows = try await h.store.lines(sessionID: id)
+        XCTAssertTrue(rows.isEmpty)
+        let nextRows = try await h.store.lines(sessionID: nextID)
+        XCTAssertEqual(nextRows.map(\.text), ["新字幕只接纳新连接"])
     }
 
     func testFinalSaveFailureRetainsOneFrozenCommandAndRetriesWithoutCompletedReplay() async throws {
@@ -729,18 +840,34 @@ private final class ControllableCaptionAudioSource: AudioChunkSource, @unchecked
 private actor ControllableCaptionRealtimeClient: CaptionRealtimeClient {
     private let stream = RealtimeEventStream<RealtimeASRClient.Event>()
     private var drainEvents: [RealtimeASRClient.Event] = []
+    private var drainFails = false
+    private var appendFails = false
+    private var appendGate: ConnectGate?
+    private var diarizationDrainFails = false
+    private let receiverGate: ConnectGate?
     private(set) var drainCount = 0
     private(set) var closeCount = 0
     private(set) var appendedByteCount = 0
     private(set) var appendedByteCountAtDrain = 0
 
-    func events() async -> RealtimeEventStream<RealtimeASRClient.Event> { stream }
+    init(receiverGate: ConnectGate? = nil) { self.receiverGate = receiverGate }
+    func events() async -> RealtimeEventStream<RealtimeASRClient.Event> {
+        if let receiverGate { try? await receiverGate.wait() }
+        return stream
+    }
     func connect() async throws {}
-    func append(_ pcm: Data) async throws { appendedByteCount += pcm.count }
+    func failAppend(gate: ConnectGate? = nil) { appendFails = true; appendGate = gate }
+    func failDiarizationDrain() { diarizationDrainFails = true }
+    func append(_ pcm: Data) async throws {
+        if let appendGate { try await appendGate.wait() }
+        if appendFails { throw URLError(.networkConnectionLost) }
+        appendedByteCount += pcm.count
+    }
 
     func setDrainEvents(_ events: [RealtimeASRClient.Event]) {
         drainEvents = events
     }
+    func failDrain() { drainFails = true }
 
     func drainAndClear(timeout: Duration) async throws {
         drainCount += 1
@@ -750,6 +877,8 @@ private actor ControllableCaptionRealtimeClient: CaptionRealtimeClient {
         for event in events {
             await emit(event)
         }
+        if diarizationDrainFails { throw RealtimeASRClient.Failure.drainTimedOut(.diarization) }
+        if drainFails { throw URLError(.timedOut) }
     }
 
     func close() async {
@@ -770,10 +899,15 @@ private actor ControllableCaptionRealtimeClient: CaptionRealtimeClient {
 private final class CaptionClientRegistry: @unchecked Sendable {
     private let lock = NSLock()
     private var storage: [ControllableCaptionRealtimeClient] = []
+    private let receiverGateForFirst: ConnectGate?
+
+    init(receiverGateForFirst: ConnectGate? = nil) { self.receiverGateForFirst = receiverGateForFirst }
 
     func make(_ configuration: CaptionRealtimeClientConfiguration) -> any CaptionRealtimeClient {
-        let client = ControllableCaptionRealtimeClient()
         lock.lock()
+        let client = ControllableCaptionRealtimeClient(
+            receiverGate: storage.isEmpty ? receiverGateForFirst : nil
+        )
         storage.append(client)
         lock.unlock()
         return client

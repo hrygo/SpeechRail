@@ -181,6 +181,28 @@ public final class SessionCoordinator {
     /// 这个 kind 停止采集。`finalize` 会先等它收尾，再封存记录——
     /// 反过来的话，停止期间到达的最后一行会写进已归档的记录。
     public var stopper: (@MainActor (SessionKind) async -> Void)?
+    /// A failed protocol/consumer proof cannot be repaired by a later empty
+    /// persistence queue. Explicit interrupted closure remains available.
+    private var captureCompletionFailures: [String: SessionDrainFailure] = [:]
+    private var captureCompletionDeadlines: [String: SessionDrainDeadline] = [:]
+
+    public func recordCaptureCompletionDeadline(recordID: String, deadline: SessionDrainDeadline) {
+        captureCompletionDeadlines[recordID] = deadline
+    }
+
+    public func discardCaptureCompletionDeadline(recordID: String) {
+        captureCompletionDeadlines[recordID] = nil
+    }
+
+    public func recordCaptureCompletionFailure(recordID: String, failure: SessionDrainFailure) {
+        if captureCompletionFailures[recordID] == nil {
+            captureCompletionFailures[recordID] = failure
+        }
+    }
+
+    public func captureCompletionFailure(recordID: String) -> SessionDrainFailure? {
+        captureCompletionFailures[recordID]
+    }
 
     /// 「结束当前会话」的**收尾**钩子。
     ///
@@ -199,6 +221,7 @@ public final class SessionCoordinator {
     private struct SealFlight {
         let token: UUID
         let task: Task<SessionSealResult, Never>
+        let deadline: SessionDrainDeadline
         var requiresSourceSnapshot: Bool
     }
     private var sealTasks: [String: SealFlight] = [:]
@@ -584,6 +607,10 @@ public final class SessionCoordinator {
         id: String, reason: SessionEndReason, endedAt: Date,
         pauseID: String? = nil, requiresSourceSnapshot: Bool = false
     ) async -> SessionSealResult {
+        if reason == .user, let failure = captureCompletionFailures[id] {
+            captureCompletionDeadlines[id] = nil
+            return .failed(recordID: id, reason: failure.message)
+        }
         if let flight = sealTasks[id] {
             // 并发的会议请求提升仍在执行的命令；基础归档不能代替来源封存。
             let needsFollowup = requiresSourceSnapshot
@@ -592,7 +619,9 @@ public final class SessionCoordinator {
                 pendingSeals[id]?.requiresSourceSnapshot = true
                 sealTasks[id]?.requiresSourceSnapshot = true
             }
-            let result = await flight.task.value
+            guard let result = await flight.deadline.value(stage: .seal, operation: { await flight.task.value }) else {
+                return .failed(recordID: id, reason: "封存确认超时，原任务仍在收尾，请稍后重试。")
+            }
             if needsFollowup, case .sealed = result {
                 if sealTasks[id]?.token == flight.token { sealTasks[id] = nil }
                 return await seal(
@@ -608,26 +637,39 @@ public final class SessionCoordinator {
         )
         command.requiresSourceSnapshot = command.requiresSourceSnapshot || requiresSourceSnapshot
         pendingSeals[id] = command
+        let capturedDeadline = captureCompletionDeadlines.removeValue(forKey: id)
+        let deadline = reason == .interrupted ? SessionDrainDeadline(timeout: .seconds(12))
+            : capturedDeadline ?? SessionDrainDeadline(timeout: .seconds(12))
+        guard !deadline.isExpired else {
+            return .failed(recordID: id, reason: "结束等待超时，记录尚未确认封存。")
+        }
         let token = UUID()
-        let task = Task { @MainActor in await self.performSeal(command) }
+        let task = Task { @MainActor in
+            defer { if self.sealTasks[id]?.token == token { self.sealTasks[id] = nil } }
+            return await self.performSeal(command, deadline: deadline)
+        }
         sealTasks[id] = SealFlight(
-            token: token, task: task, requiresSourceSnapshot: command.requiresSourceSnapshot
+            token: token, task: task, deadline: deadline, requiresSourceSnapshot: command.requiresSourceSnapshot
         )
-        let result = await task.value
-        if sealTasks[id]?.token == token { sealTasks[id] = nil }
+        guard let result = await deadline.value(stage: .seal, operation: { await task.value }) else {
+            // The flight is cleared by its actual task completion, never by timeout.
+            return .failed(recordID: id, reason: "封存确认超时，原任务仍在收尾，请稍后重试。")
+        }
         return result
     }
 
-    private func performSeal(_ initial: PendingSessionSeal) async -> SessionSealResult {
+    private func performSeal(_ initial: PendingSessionSeal, deadline: SessionDrainDeadline) async -> SessionSealResult {
         var command = initial
         let id = command.recordID
         do {
+            try requireSealDeadline(deadline)
             if command.stage == .pauseClosure, let pauseID = command.pauseID {
                 try await closePause(id: pauseID)
                 command.pauseID = nil
                 command.stage = .archive
                 pendingSeals[id] = command
             }
+            try requireSealDeadline(deadline)
             if command.stage == .archive {
                 let record = try await archiveWriter.finalizeSession(
                     id: id, endReason: command.endReason, endedAt: command.endedAt
@@ -636,6 +678,7 @@ public final class SessionCoordinator {
                       record.endedAt != nil, record.endReason != nil else {
                     throw SessionStoreError.statementFailed("封存后读回状态不是同一条已归档记录")
                 }
+                try requireSealDeadline(deadline)
                 command.requiresSourceSnapshot = command.requiresSourceSnapshot
                     || pendingSeals[id]?.requiresSourceSnapshot == true
                     || record.kind == .meeting
@@ -648,8 +691,10 @@ public final class SessionCoordinator {
             if command.stage == .sourceSnapshot {
                 _ = try await store.sealMeetingSource(sessionID: id)
             }
+            try requireSealDeadline(deadline)
             pendingSeals[id] = nil
             lastFinalizedSessionID = id
+            if command.endReason == .interrupted { captureCompletionFailures[id] = nil }
             return .sealed(recordID: id)
         } catch {
             let reason: String
@@ -665,6 +710,12 @@ public final class SessionCoordinator {
             command.failureReason = reason
             pendingSeals[id] = command
             return .failed(recordID: id, reason: reason)
+        }
+    }
+
+    private func requireSealDeadline(_ deadline: SessionDrainDeadline) throws {
+        guard !deadline.isExpired else {
+            throw SessionDrainFailure(stage: .seal, message: "封存确认超时，请重试同一条记录。")
         }
     }
 

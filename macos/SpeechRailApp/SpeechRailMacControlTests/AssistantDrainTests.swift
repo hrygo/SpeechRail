@@ -83,24 +83,38 @@ final class AssistantDrainTests: XCTestCase {
         private let stream: RealtimeEventStream<RealtimeASRClient.Event>
         private var counters = Counters()
         private let drainGate: Gate?
+        private let receiverGate: Gate?
+        private let failDrain: Bool
         var didEmitTail = false
+        private var appendFails = false
+        private var appendGate: Gate?
 
-        init(drainGate: Gate? = nil) {
+        init(drainGate: Gate? = nil, receiverGate: Gate? = nil, failDrain: Bool = false) {
             self.stream = RealtimeEventStream()
             self.drainGate = drainGate
+            self.receiverGate = receiverGate
+            self.failDrain = failDrain
         }
 
-        func events() async -> RealtimeEventStream<RealtimeASRClient.Event> { stream }
+        func events() async -> RealtimeEventStream<RealtimeASRClient.Event> {
+            if let receiverGate { await receiverGate.enter() }
+            return stream
+        }
         func connect() async throws {}
         func close() async {
             counters.close += 1
             await stream.finish()
         }
 
-        func append(_ pcm: Data) async throws {}
+        func failAppend(gate: Gate? = nil) { appendFails = true; appendGate = gate }
+        func append(_ pcm: Data) async throws {
+            if let appendGate { await appendGate.enter() }
+            if appendFails { throw URLError(.networkConnectionLost) }
+        }
         func drainAndClear(timeout: Duration) async throws {
             counters.drain += 1
             if let drainGate { await drainGate.enter() }
+            if failDrain { throw URLError(.timedOut) }
         }
 
         func updateVoice(
@@ -135,9 +149,15 @@ final class AssistantDrainTests: XCTestCase {
         var onPlaybackBufferRendered: (@MainActor (Int, Int, UUID) -> Void)?
         var onFailure: (@MainActor (String) -> Void)?
         var onPlaybackInvalidated: (@MainActor (AssistantAudioInvalidation) async -> Void)?
+        private var capture: AsyncStream<AudioChunk>.Continuation?
         func configure(mode: AssistantMode) {}
-        func start() async throws -> AsyncStream<AudioChunk> { AsyncStream { _ in } }
-        func stop() {}
+        func start() async throws -> AsyncStream<AudioChunk> {
+            let pair = AsyncStream<AudioChunk>.makeStream()
+            capture = pair.continuation
+            return pair.stream
+        }
+        func emit(_ chunk: AudioChunk) { capture?.yield(chunk) }
+        func stop() { capture?.finish(); capture = nil }
         @discardableResult
         func enqueuePlayback(_ pcm: Data, epoch: Int, chunkID: UUID) async -> Bool { true }
         func stopPlayback() async {}
@@ -145,6 +165,7 @@ final class AssistantDrainTests: XCTestCase {
 
     struct Harness: @unchecked Sendable {
         let session: AssistantSession
+        let audio: FakeAudio
         let coordinator: SessionCoordinator
         let store: SessionStore
         let llm: FakeLLM
@@ -160,7 +181,10 @@ final class AssistantDrainTests: XCTestCase {
         func append(_ client: FakeRealtime) { lock.withLock { stored.append(client) } }
     }
 
-    private func makeHarness(drainGate: Gate? = nil) async throws -> Harness {
+    private func makeHarness(
+        drainGate: Gate? = nil, receiverGate: Gate? = nil, failDrain: Bool = false,
+        saveGate: Gate? = nil, titleGate: Gate? = nil, drainTimeout: Duration = .seconds(12)
+    ) async throws -> Harness {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("assistant-drain-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -180,10 +204,21 @@ final class AssistantDrainTests: XCTestCase {
             dependencies: AssistantSessionDependencies(
                 llm: llm,
                 makeRealtimeClient: { _ in
-                    let client = FakeRealtime(drainGate: drainGate)
+                    let client = FakeRealtime(
+                        drainGate: drainGate, receiverGate: receiverGate, failDrain: failDrain
+                    )
                     box.append(client)
                     return client
-                }
+                },
+                saveInputLine: { draft, id in
+                    if let saveGate { await saveGate.enter() }
+                    return try await store.appendLine(draft, id: id)
+                },
+                claimTitle: { _, _, _ in
+                    if let titleGate { await titleGate.enter() }
+                    return true
+                },
+                drainTimeout: drainTimeout
             )
         )
         session.preferences = { preferences }
@@ -209,6 +244,7 @@ final class AssistantDrainTests: XCTestCase {
         }
         return Harness(
             session: session,
+            audio: audio,
             coordinator: coordinator,
             store: store,
             llm: llm,
@@ -264,6 +300,277 @@ final class AssistantDrainTests: XCTestCase {
     }
 
     /// A06：receipt 已到但 final 写入 Gate 挂起时，不得发布保存成功。
+    func testReceiptWithEmptyQueueCannotBypassTheOnlyReceiver() async throws {
+        let receiverGate = Gate()
+        let drainGate = Gate()
+        let h = try await makeHarness(drainGate: drainGate, receiverGate: receiverGate)
+        defer { cleanup(h) }
+        try await h.coordinator.begin(.assistant)
+        let id = try XCTUnwrap(h.session.sessionID)
+        await waitUntil({ receiverGate.entered })
+        var stopped = false
+        let stop = Task { @MainActor in
+            _ = await h.coordinator.finalize(reason: .user)
+            stopped = true
+        }
+        await waitUntil({ drainGate.entered })
+        let client = try XCTUnwrap(h.clientBox.clients.first)
+        await client.emit(.segmentClosed(
+            itemID: "buffered-tail", sampleSpan: .init(startSample: 0, endSample: 24_000),
+            reason: .clientCommit, commitEventID: nil
+        ))
+        await client.emit(.completed(itemID: "buffered-tail", transcript: "接收器尚未消费的尾句"))
+        drainGate.release()
+        // The receipt has arrived, but the one feature receiver has not admitted
+        // the buffered final. Empty pending state is deliberately insufficient.
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertFalse(stopped, "receipt and an empty queue cannot authorize a complete archive")
+        let before = try await h.store.session(id: id)
+        XCTAssertNotEqual(before?.state, .archived)
+        receiverGate.release()
+        await stop.value
+        let rows = try await h.store.lines(sessionID: id)
+        XCTAssertEqual(rows.map(\.text), ["接收器尚未消费的尾句"])
+        let llmCalls = await h.llm.streamCount
+        XCTAssertEqual(llmCalls, 0)
+    }
+
+    func testLateUploadFailureCannotPolluteTheNextRecord() async throws {
+        let gate = Gate()
+        let h = try await makeHarness(drainTimeout: .milliseconds(80))
+        defer { cleanup(h) }
+        try await h.coordinator.begin(.assistant)
+        let id = try XCTUnwrap(h.session.sessionID)
+        let old = try XCTUnwrap(h.clientBox.clients.last)
+        await old.failAppend(gate: gate)
+        h.audio.emit(AudioChunk(pcm: Data([0, 1]), level: 0.2))
+        await waitUntil({ gate.entered })
+        await h.coordinator.finalize(reason: .user)
+        try await h.coordinator.begin(.assistant)
+        let nextID = try XCTUnwrap(h.session.sessionID)
+        XCTAssertNotEqual(id, nextID)
+        let currentFailure = h.session.lastFailure
+        gate.release()
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(h.session.lastFailure, currentFailure)
+        XCTAssertNil(h.coordinator.captureCompletionFailure(recordID: nextID))
+        await h.coordinator.finalize(reason: .user)
+    }
+
+    func testOptionalTitleCannotConsumeTheCaptureSealBudget() async throws {
+        let title = Gate()
+        let drain = Gate()
+        let h = try await makeHarness(drainGate: drain, titleGate: title, drainTimeout: .milliseconds(300))
+        defer { cleanup(h) }
+        try await h.coordinator.begin(.assistant)
+        let id = try XCTUnwrap(h.session.sessionID)
+        let client = try XCTUnwrap(h.clientBox.clients.last)
+        let stop = Task { await h.coordinator.finalize(reason: .user) }
+        await waitUntil({ drain.entered })
+        await client.emit(.segmentClosed(
+            itemID: "title-tail", sampleSpan: .init(startSample: 0, endSample: 48_000),
+            reason: .clientCommit, commitEventID: "title-commit"
+        ))
+        await client.emit(.completed(itemID: "title-tail", transcript: "正文正常保存"))
+        await waitUntil({ title.entered })
+        drain.release()
+        await stop.value
+        let record = try await h.store.session(id: id)
+        XCTAssertEqual(record?.state, .archived)
+        XCTAssertEqual(h.coordinator.lastFinalizedSessionID, id)
+        title.release()
+    }
+
+    func testUploadFailureCannotBeHiddenBySuccessfulDrain() async throws {
+        let h = try await makeHarness()
+        defer { cleanup(h) }
+        try await h.coordinator.begin(.assistant)
+        let id = try XCTUnwrap(h.session.sessionID)
+        let client = try XCTUnwrap(h.clientBox.clients.last)
+        await client.failAppend()
+        h.audio.emit(AudioChunk(pcm: Data([0, 1]), level: 0.2))
+        await h.coordinator.finalize(reason: .user)
+        let record = try await h.store.session(id: id)
+        XCTAssertNotEqual(record?.state, .archived)
+        XCTAssertEqual(h.coordinator.captureCompletionFailure(recordID: id)?.stage, .upload)
+    }
+
+    func testProtocolFailureCannotBecomeNormalArchiveEvenWhenNoSavesArePending() async throws {
+        let h = try await makeHarness(failDrain: true)
+        defer { cleanup(h) }
+        try await h.coordinator.begin(.assistant)
+        let id = try XCTUnwrap(h.session.sessionID)
+        _ = await h.coordinator.finalize(reason: .user)
+        let record = try await h.store.session(id: id)
+        XCTAssertNotEqual(record?.state, .archived, "local close does not prove the remote drain")
+        XCTAssertNil(h.coordinator.lastFinalizedSessionID)
+        XCTAssertNotNil(h.session.lastFailure)
+    }
+
+    func testDeadlineReturnsWithNoncooperativeWorkStillOwnedUntilItActuallyEnds() async throws {
+        let gate = Gate()
+        let deadline = SessionDrainDeadline(timeout: .milliseconds(40))
+        var finished = false
+        var passed = true
+        let waiter = Task {
+            passed = await deadline.wait(stage: .protocolDrain) { await gate.enter() }
+            finished = true
+        }
+        await waitUntil({ gate.entered })
+        await waitUntil({ finished }, iterations: 300, message: "noncooperative work bypassed the deadline")
+        XCTAssertFalse(passed)
+        XCTAssertNotNil(deadline.failure)
+        XCTAssertEqual(deadline.pendingOperationCount, 1, "timeout is not proof that the operation ended")
+        gate.release()
+        await waiter.value
+        await waitUntil({ deadline.pendingOperationCount == 0 })
+    }
+
+    func testReceiverTimeoutReleasesOccupancyAndCannotBeRetriedAsComplete() async throws {
+        let gate = Gate()
+        let h = try await makeHarness(receiverGate: gate, drainTimeout: .milliseconds(80))
+        defer { cleanup(h) }
+        try await h.coordinator.begin(.assistant)
+        let id = try XCTUnwrap(h.session.sessionID)
+        await waitUntil({ gate.entered })
+        var finished = false
+        let stop = Task {
+            _ = await h.coordinator.finalize(reason: .user)
+            finished = true
+        }
+        await waitUntil({ finished }, iterations: 400, message: "receiver EOF wait must be bounded")
+        XCTAssertNil(h.coordinator.occupancy)
+        XCTAssertNotNil(h.session.lastFailure)
+        gate.release()
+        await stop.value
+        let retry = await h.session.retryPendingSeal()
+        XCTAssertFalse(retry, "lost consumer proof cannot be repaired by checking an empty save queue")
+        let retryAgain = await h.session.retryPendingSeal()
+        XCTAssertFalse(retryAgain, "a fresh retry deadline cannot manufacture lost consumer proof")
+        let record = try await h.store.session(id: id)
+        XCTAssertNotEqual(record?.state, .archived)
+    }
+
+    func testNoncooperativeProtocolDrainHasTheSameBoundedStopDeadline() async throws {
+        let gate = Gate()
+        let h = try await makeHarness(drainGate: gate, drainTimeout: .milliseconds(80))
+        defer { cleanup(h) }
+        try await h.coordinator.begin(.assistant)
+        let id = try XCTUnwrap(h.session.sessionID)
+        var stopped = false
+        let stop = Task {
+            _ = await h.coordinator.finalize(reason: .user)
+            stopped = true
+        }
+        await waitUntil({ gate.entered })
+        await waitUntil({ stopped }, iterations: 400)
+        XCTAssertNil(h.coordinator.occupancy)
+        let before = try await h.store.session(id: id)
+        XCTAssertNotEqual(before?.state, .archived)
+        gate.release()
+        await stop.value
+        let record = try await h.store.session(id: id)
+        XCTAssertNotEqual(record?.state, .archived)
+    }
+
+    func testBufferedStreamFailureCannotBeHiddenBySuccessfulLocalClose() async throws {
+        let receiver = Gate()
+        let drain = Gate()
+        let h = try await makeHarness(drainGate: drain, receiverGate: receiver)
+        defer { cleanup(h) }
+        try await h.coordinator.begin(.assistant)
+        let id = try XCTUnwrap(h.session.sessionID)
+        await waitUntil({ receiver.entered })
+        let stop = Task { _ = await h.coordinator.finalize(reason: .user) }
+        await waitUntil({ drain.entered })
+        let client = try XCTUnwrap(h.clientBox.clients.first)
+        await client.emit(.serverError(
+            code: "realtime_event_stream_overflow", message: "buffered stream was lost", requestID: nil
+        ))
+        await client.emit(.closed(code: nil))
+        drain.release()
+        for _ in 0..<100 {
+            if await client.snapshot().close == 1 { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let counts = await client.snapshot()
+        XCTAssertEqual(counts.close, 1)
+        receiver.release()
+        await stop.value
+        let record = try await h.store.session(id: id)
+        XCTAssertNotEqual(record?.state, .archived, "local close cannot overwrite a buffered stream failure")
+        XCTAssertNotNil(h.coordinator.captureCompletionFailure(recordID: id))
+    }
+
+    func testSaveTimeoutKeepsTheCommandAndExplicitRetryGetsAFreshBudget() async throws {
+        let save = Gate()
+        let drain = Gate()
+        let h = try await makeHarness(
+            drainGate: drain, saveGate: save, drainTimeout: .milliseconds(80)
+        )
+        defer { cleanup(h) }
+        try await h.coordinator.begin(.assistant)
+        let id = try XCTUnwrap(h.session.sessionID)
+        var stopped = false
+        let stop = Task {
+            _ = await h.coordinator.finalize(reason: .user)
+            stopped = true
+        }
+        await waitUntil({ drain.entered })
+        let client = try XCTUnwrap(h.clientBox.clients.first)
+        await client.emit(.segmentClosed(
+            itemID: "save-timeout", sampleSpan: .init(startSample: 0, endSample: 24_000),
+            reason: .clientCommit, commitEventID: nil
+        ))
+        await client.emit(.completed(itemID: "save-timeout", transcript: "保存超时仍可恢复"))
+        await waitUntil({ save.entered })
+        drain.release()
+        await waitUntil({ stopped }, iterations: 400)
+        XCTAssertNil(h.coordinator.occupancy)
+        XCTAssertTrue(h.session.unsavedTranscriptText().contains("保存超时仍可恢复"))
+        XCTAssertNil(h.coordinator.captureCompletionFailure(recordID: id), "confirmed EOF survives a storage timeout")
+        save.release()
+        await stop.value
+        let retried = await h.session.retryPendingSeal()
+        XCTAssertTrue(retried, "an explicit save retry must get a fresh deadline")
+        let rows = try await h.store.lines(sessionID: id)
+        XCTAssertEqual(rows.map(\.text), ["保存超时仍可恢复"])
+    }
+
+    func testReceiverEOFStillWaitsForTheRealInputSaveOwner() async throws {
+        let saveGate = Gate()
+        let drainGate = Gate()
+        // Receiver must admit this formal input while the session is draining,
+        // so it cannot start another LLM reply.
+        let blocked = try await makeHarness(drainGate: drainGate, saveGate: saveGate)
+        defer { cleanup(blocked) }
+        try await blocked.coordinator.begin(.assistant)
+        let blockedID = try XCTUnwrap(blocked.session.sessionID)
+        var finished = false
+        let stop = Task {
+            _ = await blocked.coordinator.finalize(reason: .user)
+            finished = true
+        }
+        await waitUntil({ drainGate.entered })
+        let tailClient = try XCTUnwrap(blocked.clientBox.clients.first)
+        await tailClient.emit(.segmentClosed(
+            itemID: "saved-tail", sampleSpan: .init(startSample: 0, endSample: 24_000),
+            reason: .clientCommit, commitEventID: nil
+        ))
+        await tailClient.emit(.completed(itemID: "saved-tail", transcript: "EOF后仍待保存"))
+        await waitUntil({ saveGate.entered })
+        drainGate.release()
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertFalse(finished)
+        let before = try await blocked.store.session(id: blockedID)
+        XCTAssertNotEqual(before?.state, .archived)
+        saveGate.release()
+        await stop.value
+        let rows = try await blocked.store.lines(sessionID: blockedID)
+        XCTAssertEqual(rows.map(\.text), ["EOF后仍待保存"])
+    }
+
+    /// A06：真实 feature/store Gate 集成由 R08 补充；以下仅验证基础封存结果。
     func testA06ReceiptCannotBypassStoreGate() async throws {
         let (store, directory): (SessionStore, URL) = {
             let dir = FileManager.default.temporaryDirectory

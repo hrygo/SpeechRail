@@ -1560,8 +1560,20 @@ public final class AssistantSession {
     }
 
     /// 协调器的 `stopper`：把最后半句交出去、关连接、释放设备。
+    private var stopCaptureTask: Task<Void, Never>?
+    private var isClosingCaptureTransport = false
+
     public func stopCapture() async {
-        guard phase != .ending else { return }
+        if let stopCaptureTask { return await stopCaptureTask.value }
+        let task = Task { @MainActor in await self.performStopCapture() }
+        stopCaptureTask = task
+        await task.value
+        stopCaptureTask = nil
+    }
+
+    private func performStopCapture() async {
+        let deadline = SessionDrainDeadline(timeout: dependencies.drainTimeout)
+        isClosingCaptureTransport = false
         phase = .ending
         // VA-03 结束顺序：ending target once-claim → 拒新发布 → 本地停播与取消 effect
         // → capture 停产 → uploader 排空 → commit(receipt) → draining 保存 → seal。
@@ -1571,6 +1583,9 @@ public final class AssistantSession {
         // TTS 输出权立即撤销，receiver 继续消费该连接的 final。
         let drainingConnection = connectionToken
         let endingSession = sessionID
+        if let endingSession {
+            coordinator.recordCaptureCompletionDeadline(recordID: endingSession, deadline: deadline)
+        }
         inputLifecycle = .draining(session: endingSession, connection: drainingConnection)
         startToken &+= 1
         selectedVoice = nil
@@ -1581,8 +1596,21 @@ public final class AssistantSession {
         retryTask?.cancel()
         retryTask = nil
         isStoppingIntentionally = true
-        if let effect = transportCloseEffect { await effect.value }
-        if let effect = interruptEffect { _ = await effect.value }
+        // Device release does not wait for transport, receiver or storage IO.
+        if let audioSession { audioSession.stop() }
+        else { source?.stop() }
+        audioSession = nil
+        source = nil
+        if let playback {
+            self.playback = nil
+            await deadline.wait(stage: .capture, cleanup: true) { await playback.stop() }
+        }
+        if let effect = transportCloseEffect {
+            await deadline.wait(stage: .effects) { await effect.value }
+        }
+        if let effect = interruptEffect {
+            await deadline.wait(stage: .effects) { _ = await effect.value }
+        }
         cancelInterruptEffect()
         // 结束对话也是一次回复收尾：正在生成的那一轮先把已知正文存下来并标成打断，
         // 再去关连接。否则最后半句会随着连接一起消失（D06 / D08）。
@@ -1590,65 +1618,83 @@ public final class AssistantSession {
         let endingCancellation = ttsStream?.prepareCancellation()
         invalidateReply()
         if let stream = ttsStream, let endingCancellation {
-            _ = await stream.performCancellation(endingCancellation)
+            await deadline.wait(stage: .effects) { _ = await stream.performCancellation(endingCancellation) }
         } else {
-            await stopPlaybackLayer()
+            await deadline.wait(stage: .effects, cleanup: true) { await self.stopPlaybackLayer() }
         }
         if let reply = endingReply {
-            await finalizeReply(.interrupted, reply: reply)
+            await deadline.wait(stage: .effects) { await self.finalizeReply(.interrupted, reply: reply) }
         }
         invalidateReply()
         ttsStream?.invalidate()
-        // capture 停产：停止 tap 生产；uploader 按准入规则排空已捕获尾部。
-        // 现有引擎 stop 为同步释放，此处先停产再排空 drain，避免尾句随连接消失。
-        if let audioSession {
-            audioSession.stop()
-            self.audioSession = nil
-        } else {
-            source?.stop()
-            if let playback {
-                await playback.stop()
-                self.playback = nil
-            }
+        if let uploader = uploaderTask {
+            await deadline.wait(stage: .upload) { await uploader.value }
         }
-        source = nil
         // 输入排空：commit(request_receipt=true) → draining receiver 保存 matching final。
-        // drainAndClear 返回与应用 marker 到达可能赛跑，结束同时等两者，不假定顺序。
+        // 协议回执只证明服务端水位；关闭后的同一 FIFO receiver EOF 才证明应用消费水位。
+        var protocolComplete = deadline.failure == nil
         if let client {
-            do {
+            protocolComplete = await deadline.wait(stage: .protocolDrain) {
                 try await client.drainAndClear(timeout: .seconds(8))
-            } catch {
-                // The session can still be closed locally, but it must not
-                // claim that the final remote item completed.
-                lastFailure = error.localizedDescription
             }
+            isClosingCaptureTransport = true
+            let closed = await deadline.wait(stage: .transportClose, cleanup: true) { await client.close() }
+            protocolComplete = protocolComplete && closed
         }
-        // 等待 marker 之前的保存任务全部 settled；receiver 不等待该聚合。
-        // 有界等待排空保存，避免结束时仍在飞的 final 丢失。
+        if let receiver = receiverTask {
+            let received = await deadline.wait(stage: .receiver) { await receiver.value }
+            protocolComplete = protocolComplete && received
+        }
+        if let endingSession, coordinator.captureCompletionFailure(recordID: endingSession) != nil {
+            protocolComplete = false
+        }
+        if let endingSession, let failure = deadline.failure {
+            // Storage may be retried with its frozen commands. Lost protocol or
+            // consumption proof must never turn into a normal successful seal.
+            coordinator.recordCaptureCompletionFailure(recordID: endingSession, failure: failure)
+        }
+        // EOF 之前的 final 全部已被唯一 receiver 接纳，才能检查保存结果。
         let inputsSaved: Bool
         if let endingSession {
-            inputsSaved = await waitForInputSaves(sessionID: endingSession)
+            let queue = inputPersistence
+            let saved = await deadline.wait(stage: .persistence) {
+                let report = await queue.waitUntilSettled(sessionID: endingSession)
+                guard report.isComplete else {
+                    throw SessionDrainFailure(stage: .persistence, message: "部分输入尚未保存，请重试保存。")
+                }
+            }
+            inputsSaved = saved && protocolComplete
             let records = voiceRecordEffects.values.filter { $0.sessionID == endingSession }
-            for record in records { await record.task.value }
+            for record in records {
+                await deadline.wait(stage: .effects) { await record.task.value }
+            }
             // M2/V06:标题 effect 有界收尾——标题无响应不挡结束报告，
             // 标题失败只记原因，不覆盖正文、不污染封存判定。
-            await drainTitleEffect()
+            if let title = titleEffect {
+                title.cancel()
+                deadline.retain(stage: .effects) { await title.value }
+                titleEffect = nil
+                titleEffectID = nil
+            }
         } else {
-            inputsSaved = true
+            inputsSaved = protocolComplete
         }
         if !inputsSaved, let endingSession {
-            lastFailure = "部分输入尚未保存，请重试保存；本轮记录尚未封存。"
+            coordinator.discardCaptureCompletionDeadline(recordID: endingSession)
+            if protocolComplete {
+                lastFailure = "部分输入尚未保存，请重试保存；本轮记录尚未封存。"
+            } else {
+                lastFailure = coordinator.captureCompletionFailure(recordID: endingSession)?.message
+                    ?? deadline.failure?.message ?? "本轮收尾未确认完整，记录尚未封存。"
+            }
             retainPendingSeal(id: endingSession, reason: lastFailure ?? "部分输入尚未保存。")
             // 归还本场设备但不封存；coordinator 的 stopper 返回后也不能误宣称保存齐全。
             if coordinator.activeSessionID == endingSession, coordinator.occupancy?.kind == .assistant {
                 coordinator.abandonOccupancy()
             }
         }
-        // 保存屏障之后再关闭 transport：draining 期间的合法 final 已归档。
-        if let client {
-            await client.close()
-        }
         stopPumpTasks()
+        isClosingCaptureTransport = false
         // 结束时推进 connection 代次，撤销该连接的归档资格。
         connectionToken &+= 1
         inputLifecycle = .closed
@@ -1920,7 +1966,8 @@ public final class AssistantSession {
         uploaderTask = Task { [weak self] in
             for await chunk in stream {
                 guard let self else { return }
-                await self.upload(chunk, to: client)
+                guard connection == self.connectionToken else { return }
+                await self.upload(chunk, to: client, connection: connection)
             }
         }
         receiverTask = Task { [weak self] in
@@ -1948,8 +1995,12 @@ public final class AssistantSession {
         pump = nil
     }
 
-    private func upload(_ chunk: AudioChunk, to client: any AssistantRealtimeClient) async {
-        guard !isStoppingIntentionally else { return }
+    private func upload(_ chunk: AudioChunk, to client: any AssistantRealtimeClient, connection: Int) async {
+        guard connection == connectionToken else { return }
+        let recordID = sessionID
+        if isStoppingIntentionally {
+            guard case .draining = inputLifecycle else { return }
+        }
         // M3/V08:块序号跳跃（bufferingNewest 替换）与丢样快照差（ring 满）
         // 都在这里累计为单调证据。无序号/无快照的旧来源不产生证据，
         // 也不伪造"连续"结论。
@@ -1973,7 +2024,13 @@ public final class AssistantSession {
         do {
             try await client.append(chunk.pcm)
         } catch {
+            guard connection == connectionToken else { return }
             lastFailure = error.localizedDescription
+            if let recordID {
+                coordinator.recordCaptureCompletionFailure(recordID: recordID, failure: .init(
+                    stage: .upload, message: "部分音频未能送达，记录尚未确认完整。"
+                ))
+            }
         }
     }
 
@@ -2175,11 +2232,22 @@ public final class AssistantSession {
                 }
             }
         case .serverError(let code, let message, let requestID):
+            if requestID == nil, case .draining(let recordID, _) = inputLifecycle, let recordID {
+                coordinator.recordCaptureCompletionFailure(recordID: recordID, failure: .init(
+                    stage: .protocolDrain, message: Self.readableError(code: code, message: message)
+                ))
+            }
             if let stream = ttsStream, stream.isActive {
                 await stream.handleServerError(requestID: requestID, code: code, message: message)
             }
             lastFailure = Self.readableError(code: code, message: message)
         case .closed(let code):
+            if case .draining(let recordID, _) = inputLifecycle,
+               let recordID, !isClosingCaptureTransport || (code != nil && code != 1000) {
+                coordinator.recordCaptureCompletionFailure(recordID: recordID, failure: .init(
+                    stage: .protocolDrain, message: "识别连接在收尾确认前断开，记录尚未确认完整。"
+                ))
+            }
             scheduleUnexpectedClose(code: code)
         }
     }

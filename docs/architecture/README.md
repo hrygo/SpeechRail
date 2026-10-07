@@ -2,7 +2,7 @@
 title: "SpeechRail 架构文档目录"
 status: active
 audience: "系统架构师、核心开发者、技术决策者"
-version: "3.10.1"
+version: "3.10.2"
 date: 2026-10-07
 ---
 
@@ -79,3 +79,5 @@ graph TD
 > 1. **单机共享但有界并行**：专为本机单人多应用设计，通过队列与 Resource Governor 防范资源争抢，严禁引入多租户或分布式复杂性。
 > 2. **分层进程边界**：ASR/TTS 模型运算封装在独立 Python Worker 进程中；VAD 位于 FastAPI 主进程，而分人模型位于专用 Swift/CoreML worker。主服务通过私有二进制 IPC 调度外部 Worker。
 > 3. **请求路径本地化**：请求期间不下载模型、不读取远程音频 URL；音频与完整转写不写入普通日志或仓库。显式安装和模型准备命令可以联网供给本机制品。
+
+- [应用收尾的消费、保存与封存证明](session-drain-completion-contract.md)（`under_review`）：#231 的 receiver EOF、统一截止时间与失败恢复合同。
