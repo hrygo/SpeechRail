@@ -3,7 +3,7 @@ import Foundation
 /// 对话展示与存储分开：已接纳输入和保存后的行使用同一个 lineID。
 enum AssistantConversationRow: Identifiable, Equatable, Sendable {
     case saved(AssistantSession.Turn)
-    case accepted(AssistantInputPersistenceQueue.Command, failure: String?)
+    case accepted(TranscriptPersistenceQueue.Command, failure: String?)
 
     var id: String {
         switch self {

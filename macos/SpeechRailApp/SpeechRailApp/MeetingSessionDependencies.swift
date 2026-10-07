@@ -156,17 +156,23 @@ public struct MeetingSessionDependencies: Sendable {
     /// 而睡眠中断恰好属于"不接就看不出缺了"的那种行为——真合盖才发现没记中断，
     /// 那一段的音频已经白丢了。所以生产必须显式给出真的那个。
     public var powerMonitor: any MeetingPowerMonitor
+    public var persistenceConfiguration: TranscriptPersistenceQueue.Configuration
+    public var saveLine: (@Sendable (LineDraft, String) async throws -> Int)?
 
     public init(
         makeAudioSource: @escaping @MainActor () -> any MeetingAudioSource,
         makeRealtimeClient: @escaping @Sendable (MeetingRealtimeClientConfiguration) -> any MeetingRealtimeClient,
         clock: any MeetingClock = SystemMeetingClock(),
-        powerMonitor: any MeetingPowerMonitor
+        powerMonitor: any MeetingPowerMonitor,
+        persistenceConfiguration: TranscriptPersistenceQueue.Configuration = .init(),
+        saveLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil
     ) {
         self.makeAudioSource = makeAudioSource
         self.makeRealtimeClient = makeRealtimeClient
         self.clock = clock
         self.powerMonitor = powerMonitor
+        self.persistenceConfiguration = persistenceConfiguration
+        self.saveLine = saveLine
     }
 
 }

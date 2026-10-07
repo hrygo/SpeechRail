@@ -1,25 +1,29 @@
 import Foundation
 import Observation
 
-/// 串行保存已接纳的助手输入，把 Store IO 从事件 receiver 中移出。
+/// 串行保存已接纳的转录输入，把 Store IO 从事件 receiver 中移出。
 ///
-/// 队列由 MainActor 持有，因为唯一消费者要把保存结果投影回助手状态；
+/// 队列由 MainActor 持有，因为唯一消费者要把保存结果投影回对应功能状态；
 /// 实际 IO 仍通过注入的异步闭包进入 Store actor。
 @MainActor
 @Observable
-public final class AssistantInputPersistenceQueue {
+public final class TranscriptPersistenceQueue {
     public struct Configuration: Equatable, Sendable {
         public let maximumPendingCommands: Int
         public let maximumPendingTextScalars: Int
+        public let maximumRememberedItems: Int
 
         public init(
             maximumPendingCommands: Int = 32,
-            maximumPendingTextScalars: Int = 64_000
+            maximumPendingTextScalars: Int = 64_000,
+            maximumRememberedItems: Int = 512
         ) {
             precondition(maximumPendingCommands >= 0)
             precondition(maximumPendingTextScalars >= 0)
+            precondition(maximumRememberedItems >= 0)
             self.maximumPendingCommands = maximumPendingCommands
             self.maximumPendingTextScalars = maximumPendingTextScalars
+            self.maximumRememberedItems = maximumRememberedItems
         }
     }
 
@@ -28,13 +32,20 @@ public final class AssistantInputPersistenceQueue {
         public let sessionID: String
         public let connection: Int
         public let itemID: String
+        public let generation: Int
         /// provider 未提供 `itemID` 时使用的本地唯一身份。
         public let acceptanceID: String
         public let lineID: String
         public let text: String
         public let source: SessionLineSource
+        public let role: SessionLineRole
+        public let speakerLabel: String?
         public let tStart: TimeInterval?
+        public let tEnd: TimeInterval?
         public let formal: Bool
+        public let isInterrupted: Bool
+        public let isDeviceSwitch: Bool
+        public let timingQuality: SessionTimingQuality?
         public let observedAt: Date
 
         public var id: String { acceptanceID }
@@ -43,28 +54,51 @@ public final class AssistantInputPersistenceQueue {
             sessionID: String,
             connection: Int,
             itemID: String,
+            generation: Int = 0,
             acceptanceID: String = UUID().uuidString,
             lineID: String = UUID().uuidString,
             text: String,
             source: SessionLineSource = .microphone,
+            role: SessionLineRole = .user,
+            speakerLabel: String? = nil,
             tStart: TimeInterval? = nil,
+            tEnd: TimeInterval? = nil,
             formal: Bool,
+            isInterrupted: Bool? = nil,
+            isDeviceSwitch: Bool = false,
+            timingQuality: SessionTimingQuality? = .unavailable,
             observedAt: Date
         ) {
             self.sessionID = sessionID
             self.connection = connection
             self.itemID = itemID
+            self.generation = generation
             self.acceptanceID = acceptanceID
             self.lineID = lineID
             self.text = text
             self.source = source
+            self.role = role
+            self.speakerLabel = speakerLabel
             self.tStart = tStart
+            self.tEnd = tEnd
             self.formal = formal
+            self.isInterrupted = isInterrupted ?? !formal
+            self.isDeviceSwitch = isDeviceSwitch
+            self.timingQuality = timingQuality
             self.observedAt = observedAt
         }
 
         public var textScalarCount: Int {
             text.unicodeScalars.count
+        }
+
+        public var lineDraft: LineDraft {
+            LineDraft(
+                sessionID: sessionID, role: role, text: text, source: source,
+                speakerLabel: speakerLabel, tStart: tStart, tEnd: tEnd,
+                status: formal ? .final : .partial, isInterrupted: isInterrupted,
+                isDeviceSwitch: isDeviceSwitch, timingQuality: timingQuality, createdAt: observedAt
+            )
         }
     }
 
@@ -96,14 +130,16 @@ public final class AssistantInputPersistenceQueue {
     public struct DrainReport: Equatable, Sendable {
         public let pendingCommands: [Command]
         public let failures: [Failure]
+        public let admissionRejections: Int
 
         public var isComplete: Bool {
-            pendingCommands.isEmpty && failures.isEmpty
+            pendingCommands.isEmpty && failures.isEmpty && admissionRejections == 0
         }
 
-        public init(pendingCommands: [Command], failures: [Failure]) {
+        public init(pendingCommands: [Command], failures: [Failure], admissionRejections: Int = 0) {
             self.pendingCommands = pendingCommands
             self.failures = failures
+            self.admissionRejections = admissionRejections
         }
     }
 
@@ -125,6 +161,8 @@ public final class AssistantInputPersistenceQueue {
         let sessionID: String
         let connection: Int
         let itemID: String
+        let generation: Int
+        let source: SessionLineSource
     }
 
     private let configuration: Configuration
@@ -132,6 +170,7 @@ public final class AssistantInputPersistenceQueue {
     private let didSave: DidSave
     private var entries: [Entry] = []
     private var acceptedItems: [ItemKey: String] = [:]
+    private var completedItemOrder: [ItemKey] = []
     private var worker: Task<Void, Never>?
     private var drainWaiters: [String: [CheckedContinuation<DrainReport, Never>]] = [:]
     private var resultWaiters: [String: [UUID: CheckedContinuation<SaveResult, Never>]] = [:]
@@ -154,6 +193,11 @@ public final class AssistantInputPersistenceQueue {
     /// 尚未完全完成的已接纳命令数，包含失败项。
     public var outstandingCommandCount: Int {
         entries.count
+    }
+
+    public var outstandingRecordIDs: [String] {
+        var seen: Set<String> = []
+        return entries.compactMap { seen.insert($0.command.sessionID).inserted ? $0.command.sessionID : nil }
     }
 
     /// 已接纳命令占用的 Unicode scalar 数，包含失败项。
@@ -294,11 +338,13 @@ public final class AssistantInputPersistenceQueue {
     }
 
     private func itemKey(for command: Command) -> ItemKey? {
-        guard command.source == .microphone, !command.itemID.isEmpty else { return nil }
+        guard command.source != .keyboard, !command.itemID.isEmpty else { return nil }
         return ItemKey(
             sessionID: command.sessionID,
             connection: command.connection,
-            itemID: command.itemID
+            itemID: command.itemID,
+            generation: command.generation,
+            source: command.source
         )
     }
 
@@ -321,6 +367,7 @@ public final class AssistantInputPersistenceQueue {
                 }) {
                     entries.remove(at: savedIndex)
                 }
+                rememberCompletedItem(command)
                 completeResult(.saved(ordinal: ordinal), lineID: command.lineID)
             } catch {
                 if let failedIndex = entries.firstIndex(where: {
@@ -337,6 +384,14 @@ public final class AssistantInputPersistenceQueue {
         worker = nil
         resumeSettledWaiters()
         startWorkerIfNeeded()
+    }
+
+    private func rememberCompletedItem(_ command: Command) {
+        guard let key = itemKey(for: command) else { return }
+        completedItemOrder.append(key)
+        while completedItemOrder.count > configuration.maximumRememberedItems {
+            acceptedItems.removeValue(forKey: completedItemOrder.removeFirst())
+        }
     }
 
     private func completeResult(_ result: SaveResult, lineID: String) {
@@ -439,5 +494,99 @@ public final class AssistantInputPersistenceQueue {
     private func isFailed(_ state: State) -> Bool {
         if case .failed = state { return true }
         return false
+    }
+}
+
+/// 拒绝接纳也是收尾证明的一部分，不能在保存队列排空后被抹掉。
+/// 只保存每场最近一次拒绝的可复制预览；不把它冒充已接纳的命令。
+struct TranscriptAdmissionLedger {
+    private struct Entry {
+        var count: Int
+        var copyText: String
+    }
+    private let maximumRecords: Int
+    private let maximumPreviewScalars: Int
+    private var entries: [String: Entry] = [:]
+    private(set) var recordIDs: [String] = []
+    private var hasUntrackedRejection = false
+
+    init(maximumRecords: Int = 32, maximumPreviewScalars: Int = 64_000) {
+        precondition(maximumRecords > 0 && maximumPreviewScalars >= 0)
+        self.maximumRecords = maximumRecords
+        self.maximumPreviewScalars = maximumPreviewScalars
+    }
+
+    var canStartNewRecord: Bool { entries.count < maximumRecords && !hasUntrackedRejection }
+
+    mutating func reject(recordID: String, text: String) {
+        guard entries[recordID] != nil || entries.count < maximumRecords else {
+            hasUntrackedRejection = true
+            return
+        }
+        if entries[recordID] == nil { recordIDs.append(recordID) }
+        let previousCount = entries[recordID]?.count ?? 0
+        let count = previousCount == Int.max ? Int.max : previousCount + 1
+        var copyText = String(text.unicodeScalars.prefix(maximumPreviewScalars))
+        if text.unicodeScalars.count > maximumPreviewScalars {
+            copyText += "\n[这句内容过长，恢复预览只保留了开头。]"
+        }
+        entries[recordID] = Entry(count: count, copyText: copyText)
+    }
+
+    func report(
+        recordID: String, saved: TranscriptPersistenceQueue.DrainReport
+    ) -> TranscriptPersistenceQueue.DrainReport {
+        TranscriptPersistenceQueue.DrainReport(
+            pendingCommands: saved.pendingCommands, failures: saved.failures,
+            admissionRejections: entries[recordID]?.count ?? (hasUntrackedRejection ? 1 : 0)
+        )
+    }
+
+    func copyText(recordID: String) -> String? {
+        guard let entry = entries[recordID] else { return nil }
+        if entry.count > 1 {
+            return "[有 \(entry.count) 句未接纳，以下只保留了最近一句。]\n" + entry.copyText
+        }
+        return entry.copyText
+    }
+}
+
+/// 保存确认前到达的辅助归属，按记录及 ASR 代次关联；不改权威正文。
+struct TranscriptAttributionBuffer {
+    struct Payload {
+        let units: [RealtimeASRClient.AttributionUnit]
+        let labelsEnabled: Bool
+    }
+    private struct Key: Hashable {
+        let recordID: String
+        let identity: TranscriptPreviewLedger.ItemIdentity
+    }
+    private let maximumItems: Int
+    private let maximumUnits: Int
+    private var entries: [Key: Payload] = [:]
+
+    init(maximumItems: Int = 128, maximumUnits: Int = 1_024) {
+        precondition(maximumItems >= 0 && maximumUnits >= 0)
+        self.maximumItems = maximumItems
+        self.maximumUnits = maximumUnits
+    }
+
+    mutating func store(
+        _ units: [RealtimeASRClient.AttributionUnit], recordID: String,
+        identity: TranscriptPreviewLedger.ItemIdentity, labelsEnabled: Bool
+    ) -> Bool {
+        let key = Key(recordID: recordID, identity: identity)
+        let previousCount = entries[key]?.units.count ?? 0
+        let used = entries.values.reduce(0) { $0 + $1.units.count }
+        guard entries[key] != nil || entries.count < maximumItems,
+              units.count <= maximumUnits - used + previousCount else { return false }
+        entries[key] = Payload(units: units, labelsEnabled: labelsEnabled)
+        return true
+    }
+
+    mutating func take(
+        recordID: String, identity: TranscriptPreviewLedger.ItemIdentity
+    ) -> Payload? {
+        entries.removeValue(forKey: Key(recordID: recordID, identity: identity))
     }
 }

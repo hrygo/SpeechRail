@@ -2,7 +2,7 @@
 title: "SpeechRail 架构文档目录"
 status: active
 audience: "系统架构师、核心开发者、技术决策者"
-version: "3.10.0"
+version: "3.10.1"
 date: 2026-10-07
 ---
 
@@ -37,6 +37,8 @@ date: 2026-10-07
 [LLM 响应校验与观测边界](llm-response-and-observation-boundaries.md) 定义 App 侧探测/正式调用的最低响应校验、中立 correlation、唯一严格 JSON parser、feature adapter 和注入式 recorder。
 
 [会话归档确认、所有权与恢复合同](session-seal-contract.md) 定义归档确认、暂停关闭、会议来源封存、冻结租约和进程内 pending 命令的边界。
+
+[转录保存命令、原子确认与恢复合同](transcript-persistence-contract.md)（`under_review`）记录 R07 已验证的保存命令与 Store 事务边界，并明确归属 I/O、用户恢复入口和整包验收的剩余门槛。
 
 ```mermaid
 graph TD

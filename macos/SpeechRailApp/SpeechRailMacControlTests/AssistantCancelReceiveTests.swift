@@ -45,7 +45,7 @@ final class AssistantCancelReceiveTests: XCTestCase {
         inputSaveGate: AssistantSessionTests.Gate? = nil,
         typedSaveGate: AssistantSessionTests.Gate? = nil,
         saveControl: SaveControl? = nil,
-        inputConfiguration: AssistantInputPersistenceQueue.Configuration = .init()
+        inputConfiguration: TranscriptPersistenceQueue.Configuration = .init()
     ) async throws -> AssistantSessionTests.Harness {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("assistant-cancel-\(UUID().uuidString)", isDirectory: true)

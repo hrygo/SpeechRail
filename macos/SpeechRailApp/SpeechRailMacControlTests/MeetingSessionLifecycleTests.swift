@@ -24,10 +24,207 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         try await super.tearDown()
     }
 
-    private func makeHarness() async throws -> Harness {
-        let harness = try await Harness.make()
+    private func makeHarness(
+        saveLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
+        configuration: TranscriptPersistenceQueue.Configuration = .init(),
+        makeRealtimeClient: (@Sendable (MeetingRealtimeClientConfiguration) -> any MeetingRealtimeClient)? = nil
+    ) async throws -> Harness {
+        let harness = try await Harness.make(
+            saveLine: saveLine, configuration: configuration, makeRealtimeClient: makeRealtimeClient
+        )
         self.harness = harness
         return harness
+    }
+
+    func testFinalFailureKeepsFrozenCommandAndExplicitRetryNeedsNoSecondCompleted() async throws {
+        let gate = TranscriptPersistenceGate()
+        let h = try await makeHarness(saveLine: { try await gate.save($0, id: $1) })
+        await gate.attach(h.store)
+        await h.clients.openGate()
+        await h.session.start(selection: MeetingAudioSelection())
+        try await h.settle { $0.phase == .recording }
+        let id = try XCTUnwrap(h.session.sessionID)
+        try await h.emit(.completed(itemID: "fixed-item", transcript: "只接收一次定稿正文。"))
+        try await h.settle { _ in await gate.entered }
+        await gate.release(failing: true)
+        try await h.settle { !$0.session.saveFailures(recordID: id).isEmpty }
+        let command = try XCTUnwrap(h.session.pendingSaveCommands(recordID: id).first)
+        XCTAssertEqual(command.text, "只接收一次定稿正文。")
+        XCTAssertEqual(command.role, .speaker)
+        XCTAssertEqual(command.source, .microphone)
+        XCTAssertEqual(command.timingQuality, .unavailable)
+        await gate.release()
+        let recovered = await h.session.retryPendingSaves(recordID: id)
+        XCTAssertTrue(recovered)
+        let rows = try await h.store.lines(sessionID: id, includePartial: true)
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?.id, command.lineID)
+        XCTAssertEqual(rows.first?.status, .final, "saving a final must not create a partial substitute")
+        let attempts = await gate.attempts
+        XCTAssertEqual(attempts.map(\.id), [command.lineID, command.lineID])
+        XCTAssertEqual(try XCTUnwrap(rows.first?.createdAt).timeIntervalSince1970,
+                       command.observedAt.timeIntervalSince1970, accuracy: 0.000001)
+    }
+
+    func testPendingSaveDoesNotBlockControlAndAttributionArrivingBeforeSaveIsReplayed() async throws {
+        let gate = TranscriptPersistenceGate()
+        let h = try await makeHarness(saveLine: { try await gate.save($0, id: $1) })
+        await gate.attach(h.store)
+        await h.clients.openGate()
+        await h.session.start(selection: MeetingAudioSelection())
+        try await h.settle { $0.phase == .recording }
+        let id = try XCTUnwrap(h.session.sessionID)
+        let span = RealtimeASRClient.RealtimeSampleSpan(startSample: 0, endSample: 24_000)
+        try await h.emit(.segmentClosed(itemID: "item", sampleSpan: span, reason: .vad, commitEventID: nil))
+        try await h.emit(.completed(itemID: "item", transcript: "缓存归属正文"))
+        try await h.settle { _ in await gate.entered }
+        try await h.emit(.attribution(itemID: "item", units: [
+            .init(segmentUID: "unit", speaker: "A", textStart: 0, textEnd: 6,
+                  audioStartSample: 0, audioEndSample: 24_000, timingQuality: "aligned")
+        ], isFinal: true))
+        try await h.emit(.serverError(code: "test_control", message: "控制事件已消费", requestID: nil))
+        try await h.settle { $0.session.lastFailure == "test_control：控制事件已消费" }
+        await gate.release()
+        let settled = await h.session.waitForPendingSaves(recordID: id)
+        XCTAssertTrue(settled.isComplete)
+        let rows = try await h.store.lines(sessionID: id)
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?.text, "缓存归属正文")
+        XCTAssertEqual(rows.first?.timingQuality, .aligned)
+    }
+
+    func testCapacityFailureKeepsAcceptedCommandAndControlReceiverResponsive() async throws {
+        let gate = TranscriptPersistenceGate()
+        let h = try await makeHarness(
+            saveLine: { try await gate.save($0, id: $1) },
+            configuration: .init(maximumPendingCommands: 1)
+        )
+        await gate.attach(h.store)
+        await h.clients.openGate()
+        await h.session.start(selection: MeetingAudioSelection())
+        try await h.settle { $0.phase == .recording }
+        let id = try XCTUnwrap(h.session.sessionID)
+        try await h.emit(.completed(itemID: "first", transcript: "先接纳的正文"))
+        try await h.settle { _ in await gate.entered }
+        try await h.emit(.completed(itemID: "second", transcript: "容量外的正文"))
+        try await h.emit(.serverError(code: "test_control", message: "容量满时仍消费控制", requestID: nil))
+        try await h.settle { $0.session.lastFailure == "test_control：容量满时仍消费控制" }
+        XCTAssertEqual(h.session.pendingSaveCommands(recordID: id).map(\.text), ["先接纳的正文"])
+        await gate.release()
+        let settled = await h.session.waitForPendingSaves(recordID: id)
+        XCTAssertFalse(settled.isComplete, "容量拒绝不能在已接纳命令排空后变成全部保存")
+        XCTAssertEqual(h.session.unsavedTranscriptText(recordID: id), "容量外的正文")
+        let rows = try await h.store.lines(sessionID: id)
+        XCTAssertEqual(rows.map(\.text), ["先接纳的正文"])
+        await h.clients.all.last?.finishEventsOnClose()
+        let result = await h.coordinator.finalize(reason: .user)
+        XCTAssertEqual(result, .skipped(recordID: id))
+        let record = try await h.store.session(id: id)
+        XCTAssertNotEqual(record?.state, .archived)
+    }
+
+    func testFailedItemRecoveryRetainsFixedPartialCommandAfterStoreFailure() async throws {
+        let gate = TranscriptPersistenceGate()
+        let h = try await makeHarness(saveLine: { try await gate.save($0, id: $1) })
+        await gate.attach(h.store)
+        await h.clients.openGate()
+        await h.session.start(selection: MeetingAudioSelection())
+        try await h.settle { $0.phase == .recording }
+        let id = try XCTUnwrap(h.session.sessionID)
+        try await h.emit(.partialSnapshot(itemID: "failed", revision: 1, text: "会议失败前的预览"))
+        try await h.emit(.failed(itemID: "failed", code: "asr_failed", message: "识别未完成"))
+        try await h.settle { _ in await gate.entered }
+        await gate.release(failing: true)
+        try await h.settle { !$0.session.saveFailures(recordID: id).isEmpty }
+        let command = try XCTUnwrap(h.session.pendingSaveCommands(recordID: id).first)
+        XCTAssertFalse(command.formal)
+        XCTAssertEqual(command.text, "会议失败前的预览")
+        await gate.release()
+        let recovered = await h.session.retryPendingSaves(recordID: id)
+        XCTAssertTrue(recovered)
+        let formal = try await h.store.lines(sessionID: id)
+        let all = try await h.store.lines(sessionID: id, includePartial: true)
+        XCTAssertTrue(formal.isEmpty)
+        XCTAssertEqual(all.map(\.id), [command.lineID])
+        XCTAssertTrue(h.session.lines.isEmpty)
+    }
+
+    func testRejectedRecoveryMaterialDoesNotClaimItIsBeingSaved() async throws {
+        let h = try await makeHarness(configuration: .init(maximumPendingCommands: 0))
+        await h.clients.openGate()
+        await h.session.start(selection: MeetingAudioSelection())
+        try await h.settle { $0.phase == .recording }
+        let id = try XCTUnwrap(h.session.sessionID)
+        try await h.emit(.partialSnapshot(itemID: "recovery", revision: 1, text: "容量外的恢复材料"))
+        try await h.emit(.completed(itemID: "recovery", transcript: ""))
+        try await h.settle { $0.session.pendingSaveRecordIDs == [id] }
+        let hint = try XCTUnwrap(h.session.lastFailure)
+        XCTAssertTrue(hint.contains("请先复制"))
+        XCTAssertFalse(hint.contains("正在保留"))
+        let report = await h.session.waitForPendingSaves(recordID: id)
+        XCTAssertFalse(report.isComplete)
+        XCTAssertEqual(h.session.unsavedTranscriptText(recordID: id), "容量外的恢复材料")
+    }
+
+    func testMeetingProductionClientSaveRetryDoesNotNeedTerminalReplay() async throws {
+        let gate = TranscriptPersistenceGate()
+        let transport = TranscriptRealtimeTestTransport()
+        let h = try await makeHarness(
+            saveLine: { try await gate.save($0, id: $1) },
+            makeRealtimeClient: { configuration in
+                TranscriptRealtimeTestClient(
+                    client: RealtimeASRClient(scenePreset: configuration.scenePreset, apiKey: ""),
+                    transport: transport
+                )
+            }
+        )
+        await gate.attach(h.store)
+        await h.session.start(selection: MeetingAudioSelection())
+        try await h.settle { $0.phase == .recording }
+        let id = try XCTUnwrap(h.session.sessionID)
+        try await transport.completed(itemID: "real-item", text: "会议真实客户端唯一终稿")
+        try await h.settle { _ in await gate.entered }
+        await gate.release(failing: true)
+        try await h.settle { !$0.session.saveFailures(recordID: id).isEmpty }
+        let frozen = try XCTUnwrap(h.session.pendingSaveCommands(recordID: id).first)
+        await gate.release()
+        let recovered = await h.session.retryPendingSaves(recordID: id)
+        XCTAssertTrue(recovered)
+        let beforeDuplicate = try await h.store.lines(sessionID: id)
+        XCTAssertEqual(beforeDuplicate.map(\.id), [frozen.lineID])
+        try await transport.completed(itemID: "real-item", text: "重复终态不得覆盖")
+        try await transport.control("已越过重复终态")
+        try await h.settle { $0.session.lastFailure == "test_control：已越过重复终态" }
+        let rows = try await h.store.lines(sessionID: id)
+        let attempts = await gate.attempts
+        XCTAssertEqual(rows.map(\.text), ["会议真实客户端唯一终稿"])
+        XCTAssertEqual(attempts.map(\.id), [frozen.lineID, frozen.lineID])
+        await h.session.stopCapture()
+    }
+
+    func testMeetingFinalizeWaitsForSaveAndFailureDoesNotArchive() async throws {
+        let gate = TranscriptPersistenceGate()
+        let h = try await makeHarness(saveLine: { try await gate.save($0, id: $1) })
+        await gate.attach(h.store)
+        await h.clients.openGate()
+        await h.session.start(selection: MeetingAudioSelection())
+        try await h.settle { $0.phase == .recording }
+        let id = try XCTUnwrap(h.session.sessionID)
+        await h.clients.all.last?.finishEventsOnClose()
+        try await h.emit(.completed(itemID: "tail", transcript: "会议最后一句未存"))
+        try await h.settle { _ in await gate.entered }
+        let finish = Task { await h.coordinator.finalize(reason: .user) }
+        try await h.settle { _ in await h.clients.all.last?.closeCount == 1 }
+        let pendingRecord = try await h.store.session(id: id)
+        XCTAssertNil(pendingRecord?.endedAt)
+        XCTAssertEqual(h.coordinator.activeSessionID, id)
+        await gate.release(failing: true)
+        let result = await finish.value
+        XCTAssertEqual(result, .skipped(recordID: id), "stopper撤销保存证明后不得归档")
+        let failedRecord = try await h.store.session(id: id)
+        XCTAssertNil(failedRecord?.endedAt)
+        XCTAssertNotEqual(failedRecord?.state, .archived)
+        XCTAssertEqual(h.session.pendingSaveRecordIDs, [id])
     }
 
     // MARK: - MC-08：采集起来了但建连失败
@@ -472,7 +669,11 @@ extension MeetingSessionLifecycleTests {
             self.captureFailure = MeetingAudioBlocked(reason: .microphoneDenied)
         }
 
-        static func make() async throws -> Harness {
+        static func make(
+            saveLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
+            configuration: TranscriptPersistenceQueue.Configuration = .init(),
+            makeRealtimeClient: (@Sendable (MeetingRealtimeClientConfiguration) -> any MeetingRealtimeClient)? = nil
+        ) async throws -> Harness {
             let directory = FileManager.default.temporaryDirectory
                 .appendingPathComponent("meeting-lifecycle-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -488,8 +689,12 @@ extension MeetingSessionLifecycleTests {
             let power = MeetingPowerMonitorForTests()
             let dependencies = MeetingSessionDependencies(
                 makeAudioSource: { audio },
-                makeRealtimeClient: { configuration in clients.make(configuration) },
-                powerMonitor: power
+                makeRealtimeClient: { configuration in
+                    makeRealtimeClient?(configuration) ?? clients.make(configuration)
+                },
+                powerMonitor: power,
+                persistenceConfiguration: configuration,
+                saveLine: saveLine
             )
             let session = MeetingSession(coordinator: coordinator, dependencies: dependencies)
             coordinator.starter = { _ in try await session.beginCapture() }
@@ -519,7 +724,8 @@ extension MeetingSessionLifecycleTests {
                 if await predicate(self) { return }
                 try await Task.sleep(for: .milliseconds(5))
             }
-            XCTFail("等待超时：相位 \(session.phase.rawValue)，连接数 \(await clients.all.count)")
+            XCTFail("等待超时：相位 \(session.phase.rawValue)，连接数 \(await clients.all.count)，"
+                + "blocked=\(session.blocked?.detail ?? session.lastFailure ?? "none")")
         }
 
         /// 让已经在飞的东西走完一小段，而不是等某个具体状态。

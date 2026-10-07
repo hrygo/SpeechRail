@@ -1,4 +1,5 @@
 import Foundation
+import SpeechRailControlKit
 import XCTest
 #if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
@@ -133,5 +134,119 @@ final class MeetingRecoveryMaterialTests: XCTestCase {
         let recovered = try XCTUnwrap(all.first)
         // 恢复材料同样不许把记录时刻说成说话时刻。
         XCTAssertEqual(recovered.timingQuality, .unavailable)
+    }
+}
+
+/// 真实 Store 边界前的确定性 Gate；不接设备或网络。
+actor TranscriptPersistenceGate {
+    enum Failure: Error { case unavailable }
+    private var store: SessionStore?
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var blocked = true
+    private var failing = false
+    private(set) var entered = false
+    private(set) var attempts: [(draft: LineDraft, id: String)] = []
+
+    func attach(_ store: SessionStore) { self.store = store }
+
+    func save(_ draft: LineDraft, id: String) async throws -> Int {
+        attempts.append((draft, id))
+        if blocked {
+            entered = true
+            await withCheckedContinuation { continuation = $0 }
+        }
+        if failing { throw Failure.unavailable }
+        guard let store else { throw Failure.unavailable }
+        return try await store.appendLine(draft, id: id)
+    }
+
+    func release(failing: Bool = false) {
+        blocked = false
+        self.failing = failing
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+/// 只替换网络 transport；解析、终态去重和结束协议使用生产客户端。
+struct TranscriptRealtimeTestClient: MeetingRealtimeClient, CaptionRealtimeClient {
+    let client: RealtimeASRClient
+    let transport: TranscriptRealtimeTestTransport
+
+    func events() async -> RealtimeEventStream<RealtimeASRClient.Event> { await client.events() }
+    func connect() async throws { try await client.connect(using: transport) }
+    func append(_ pcm: Data) async throws { try await client.append(pcm) }
+    func flushPendingUtterance() async throws { try await client.flushPendingUtterance() }
+    func drainAndClear(timeout: Duration) async throws { try await client.drainAndClear(timeout: timeout) }
+    func close() async { await client.close() }
+}
+
+actor TranscriptRealtimeTestTransport: RealtimeASRTransport {
+    private enum Failure: Error { case closed }
+    private var frames: [RealtimeASRSocketFrame] = []
+    private var receiver: CheckedContinuation<RealtimeASRSocketFrame, Error>?
+    private var sequence = 0
+    private var closed = false
+
+    func resume() async {}
+    func closeCode() async -> Int? { nil }
+
+    func send(_ text: String) async throws {
+        let object = try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] ?? [:]
+        switch object["type"] as? String {
+        case "session.update":
+            let session = object["session"] as? [String: Any] ?? [:]
+            let speechrail = session["speechrail"] as? [String: Any] ?? [:]
+            var policy = speechrail["asr"] as? [String: Any] ?? [:]
+            policy["effective_max_segment_ms"] = policy["max_segment_ms"]
+            policy["final_deadline_ms"] = policy["final_deadline_ms"] ?? 120_000
+            try deliver(["type": "session.updated", "session": ["speechrail": ["asr": policy]]])
+        case "input_audio_buffer.commit":
+            try deliver([
+                "type": "speechrail.input_audio_buffer.committed",
+                "commit_event_id": object["event_id"] ?? "",
+                "accepted_samples": 0
+            ])
+        default: break
+        }
+    }
+
+    func completed(itemID: String, text: String) throws {
+        try deliver([
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": itemID, "transcript": text
+        ])
+    }
+
+    func control(_ message: String) throws {
+        try deliver(["type": "error", "error": ["code": "test_control", "message": message]])
+    }
+
+    private func deliver(_ object: [String: Any]) throws {
+        var stamped = object
+        stamped["event_id"] = "persistence-event-\(sequence)"
+        stamped["session_id"] = "persistence-test-session"
+        stamped["sequence"] = sequence
+        sequence += 1
+        let data = try JSONSerialization.data(withJSONObject: stamped)
+        let frame = RealtimeASRSocketFrame.text(String(decoding: data, as: UTF8.self))
+        if let receiver {
+            self.receiver = nil
+            receiver.resume(returning: frame)
+        } else {
+            frames.append(frame)
+        }
+    }
+
+    func receive() async throws -> RealtimeASRSocketFrame {
+        if !frames.isEmpty { return frames.removeFirst() }
+        if closed { throw Failure.closed }
+        return try await withCheckedThrowingContinuation { receiver = $0 }
+    }
+
+    func cancel() async {
+        closed = true
+        receiver?.resume(throwing: Failure.closed)
+        receiver = nil
     }
 }

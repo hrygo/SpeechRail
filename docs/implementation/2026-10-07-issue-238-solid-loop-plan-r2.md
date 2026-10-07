@@ -10,6 +10,13 @@
 
 **当前实施目标（2026-10-07 更新）：** R01、R02、R05、R03、R04、R06 已合入；剩余 3 个 issue 分 3 个独立 PR，按 **R07 #232 → R08 #231 → R09 #234** 完成实施、整包独立审查、定向验证与必要 CI，验证通过立即 squash 合并，再刷新 main。每包 1–3 issue；不堆叠 PR、不 force-push、不关闭未验收 issue、不 `Closes #238`。保持 #245 的语义禁写区，最终逐条核对十一项验收矩阵后决定关闭 issue 与完成 goal。
 
+**最新执行目标（2026-10-07 11:31，Asia/Shanghai）：** 最近 fetch 的 `origin/main` 为 `4f6b7356`。当前分支为 `codex/238-r07-transcript-persistence`；Store 原子保存子任务已提交 `36c0ba3a`，保存 owner 子任务的 **198 项定向测试通过**，尚无 R07 PR。立即目标是把保存后 attribution 的 I/O 移入有界串行 owner，冻结 metadata 完成的目标；再补用户重试/复制、拒绝证明的恢复/结束流程，更新合同草稿并完成一次整包独立审查、必要 CI 和合并。编译错误、真实客户端单次终态下的保存重试、稳定 partial 和容量假成功已在子任务中修复，不能以这些局部通过记录宣称 R07 已验收。
+
+- **R07 完成门槛：** 固定身份和完整命令可恢复；行、ordinal 与 outbox 原子确认；失败和容量拒绝不能被成功封存掩盖；partial 不进入正式纪要、默认分享或正式来源快照；归属缓存有界且跨 record/generation 隔离。完成一次整包独立审查，修复 Required，定向验证和必要 CI 通过后立即合并。
+- **后续目标：** R08 补足消费 EOF、保存 settled 和封存结果的完整收尾证明；R09 收敛 loader 内核规则。各自从更新后的 main 开独立 PR，分别只关联 #231、#234。
+- **跨团队边界：** #245 的 decoder、ASR policy、turn coordinator、scene、Assembler、Ledger 与 wire 禁写；在途 clear 协议和路由只读；避让 pbxproj。同一文件出现无法分离的并行修改时暂停该处写入，核实后再继续。
+- **最终完成条件：** 九包合并并逐条审计十一项 issue 的验收矩阵，更新相关 issue 与文档；满足全部要求后才关闭对应 issue 和完成 goal。未执行的真实模型、性能、长稳及 UI 验收如实列出，不以确定性测试替代。
+
 结构化 goal 仍 active。2026-10-07 再次核对：Goal 工具只提供完成/阻塞状态，不能改正文；原生 Codex UI 入口也被 computer-use 安全规则拒绝。旧 goal 的基线、PR 状态、逐包等待确认及错误同文件判断由本段执行目标更正，不虚假标为 complete 再重建，不绕过 UI 限制。
 
 ## 0. 基线与 #245 现状（只读快照）
@@ -150,6 +157,16 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 - 路径：先建立 Store 有限事务与固定 ID 确认，再将既有助手队列中立化并冻结完整行字段，最后接入 Meeting/Caption 的接纳、恢复、归属缓存与 settled 结果；R08 后续接完整消费 EOF 屏障，不修改 #245 的识别或 clear 协议语义。
 - Store：正文、序号确认和持久化索引待办同事务；同 ID 按 session/正文/来源/role/归属/时间/状态/设备切换/质量比对，冲突拒绝。匹配的旧半提交可补缺失索引待办，已待处理或已索引不重复排队；partial 不进正式读取或索引。观察时间采用 SQLite Double 精度的 1 微秒确认容差，不承诺纳秒相等；未指定观察时间的旧调用不凭空要求新时间相同。
 - 五个新增 SQLite 反例在旧实现出现 8 个失败（含两个未捕获 UNIQUE 错误）；事务和确认修订后 `swift test --package-path macos/SpeechRailApp --filter "SessionStoreTransactionTests|MeetingRecoveryMaterialTests|SessionSealContractTests"` → 34 XCTest passed。这是 Store 子任务实测，不表示 #232 全包已交付。
+- 既有队列中立化为 `TranscriptPersistenceQueue`，不保留旧类型 alias；Command 冻结 generation、role、speaker、起止、状态、设备切换、质量和观察时间，唯一 `lineDraft` 投影供三种功能使用。系统来源重复接纳先出现两个断言失败；generation/source/record 隔离及完整字段恢复先出现缺少中立 API 的编译红灯。修订后队列与助手相关定向套件 116 XCTest passed。
+- 已完成 item 身份记忆上限默认 512；失败与未完成命令继续占用队列预算且不被身份过期移除。移除身份回收接线会使有界回归转红，恢复后通过。Ruling：类型中立化但暂保留既有源文件名 `AssistantInputPersistenceQueue.swift` 与测试文件名，以复用两个构建系统已登记的编译单元，避让 pbxproj 在途改动；代价是文件名不能直接表达新类型，正式合同明确导航到此处，后续单独安全重命名，不引入兼容层。
+- Meeting/Caption 已接入同一保存内核；receiver 的正文保存只冻结和接纳，保存失败保留完整字段、同一 lineID 和复制文本。空 final 与 failed 的恢复 preview 都是稳定 partial，不生成另一条 formal 替代。保存前的有界 attribution 按 record/connection/generation/item 回放；跨场复用同 item/unit 时，旧失败命令的重试只写旧记录，当前文字和 speaker B 状态保持属于新场。
+- Swift 6.4 的最小复现确认：lazy 初始化表达式内直接调用注入的异步 `@Sendable` 保存闭包会出现 `default argument cannot be both main actor-isolated and @concurrent`；去掉 Observation 宏/队列默认参数仍复现。将调用移入 feature 的具名保存方法后最小复现及 feature 编译通过，不调整隔离语义或工具链。
+- Caption failed item 没有命令、Meeting partial 成功后提示仍“正在保留”的反例出现 4 个失败后转绿；会议两个控制测试的预期修正为当前 `readableError` 的精确 code+正文（不改生产错误格式）。真实 Realtime 客户端配 fake transport 在第二个 completed 出现前完成同 ID 的 retry，随后重复终态不会覆盖正文；不修改共享 ASR 测试或协议。
+- 新结束 Gate 证明关闭等待活动保存，写前失败不归档，旧目标 retry 不投影新记录。测试 fixture 最初缺少 ASR echo 的 server final deadline、Meeting fake close 没有结束 stream，已修正 fixture；终止了那个明确定位的 XCTest 进程并单独复验，未操作本机服务。
+- 容量拒绝在队列排空后曾被报告完整并归档：两场景合计 8 个断言失败。新增有界 `TranscriptAdmissionLedger` 和 `DrainReport.admissionRejections` 后转绿；失败/拒绝不能被“全部保存”掩盖。Ruling：拒绝内容未接纳，仅保留每场最近一次有界复制预览，重复拒绝/截断明示，已接纳失败命令仍完整占预算；拒绝证明不因复制自动消失。代价：目前缺少用户确认后的解除/结束流程，须在 R07 完成前补齐，不能把永久阻止新记录当作完成。
+- staged 复核发现恢复材料的接纳提示覆盖容量拒绝提示；新增反例先出现 2 个断言失败，再由接纳结果决定提示，拒绝时继续明确给出复制出口。
+- 最新定向 `swift test --package-path macos/SpeechRailApp --filter "SessionStoreTransactionTests|TranscriptItemLedgerTests|AssistantInputPersistenceQueueTests|AssistantSessionTests|AssistantCancelReceiveTests|AssistantDrainTests|SessionSealContractTests|MeetingSessionLifecycleTests|MeetingRecoveryMaterialTests|CaptionSessionLifecycleTests"` → **198 XCTest、0 failures、exit 0**（2026-10-07）。这是保存 owner 子任务的实测；R07 尚未独立审查/创建 PR/运行必要 CI。
+- [保存合同草稿](../architecture/transcript-persistence-contract.md) 与架构导航已建立，`under_review`。下一步仍须移出保存后 attribution 的 receiver I/O、冻结 metadata 的异步目标、接用户重试/复制和拒绝恢复入口，再做一次整包审查与 CI。R08/R09 不提前启动；#245 禁写边界继续有效。
 
 ## 6. 来源
 
