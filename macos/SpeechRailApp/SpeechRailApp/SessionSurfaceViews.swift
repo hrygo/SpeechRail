@@ -287,9 +287,12 @@ public struct SessionLibraryView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var summaries: [SessionSummary] = []
     @State private var selectedID: String?
-    @State private var lines: [TranscriptLine] = []
-    @State private var recoveryLines: [TranscriptLine] = []
-    @State private var speakerNames: [String: String] = [:]
+    private typealias LibraryDetail = (review: SessionReviewSnapshot, recoveryLines: [TranscriptLine])
+    @State private var detail: LibraryDetail?
+    @State private var detailLoad = SpeechRailSelectionLoad<LibraryDetail>()
+    private var lines: [TranscriptLine] { detail?.review.lines ?? [] }
+    private var recoveryLines: [TranscriptLine] { detail?.recoveryLines ?? [] }
+    private var speakerNames: [String: String] { detail?.review.speakerNames ?? [:] }
     @State private var searchText = ""
     /// 全文检索命中（MC-49/MC-52/MC-54）：转录终稿与已完成纪要正文。
     /// 为空表示未检索或无命中；与标题过滤互斥，检索优先。
@@ -390,6 +393,7 @@ public struct SessionLibraryView: View {
             syncInspectorWithLayoutContract(navigation.layoutContract)
         }
         .task(id: refreshToken) { await reload() }
+        .task(id: selectedID) { await loadLines() }
         .confirmationDialog(
             "移除这条记录？",
             isPresented: Binding(
@@ -855,7 +859,7 @@ public struct SessionLibraryView: View {
                             }
                     }
                 }
-                .listStyle(.inset)
+                .speechRailSelectableList()
                 .frame(maxHeight: .infinity)
             }
         }
@@ -868,7 +872,7 @@ public struct SessionLibraryView: View {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     Text(displayTitle(for: summary))
                         .font(SpeechRailDesignTokens.Typography.bodyMedium)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                        .foregroundStyle(.primary)
                         .lineLimit(1)
                     if let reason = summary.openInterruption {
                         StatusPill(tone: .critical, label: reason.title)
@@ -882,7 +886,7 @@ public struct SessionLibraryView: View {
                 }
                 Text(recordSubtitle(summary))
                     .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .foregroundStyle(.secondary)
                     .frame(
                         maxWidth: SpeechRailDesignTokens.Layout.sessionListRowInnerWidth,
                         alignment: .leading
@@ -896,7 +900,7 @@ public struct SessionLibraryView: View {
                 Task { await remove(summary) }
             }
         }
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
+        .speechRailSelectableRow()
     }
 
     private func recordDetail(_ summary: SessionSummary) -> some View {
@@ -936,7 +940,19 @@ public struct SessionLibraryView: View {
 
                 Divider()
 
-                if lines.isEmpty && recoveryLines.isEmpty {
+                if detailLoad.isLoading {
+                    ProgressView("正在打开记录…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let failure = detailLoad.failure {
+                    ContentUnavailableView {
+                        Label("记录暂时没能打开", systemImage: "exclamationmark.triangle")
+                    } description: {
+                        Text(failure)
+                    } actions: {
+                        Button("重试") { Task { await loadLines() } }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if lines.isEmpty && recoveryLines.isEmpty {
                     Text("这条记录里还没有正文。")
                         .font(SpeechRailDesignTokens.Typography.callout)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
@@ -1078,32 +1094,41 @@ public struct SessionLibraryView: View {
         do {
             let loaded = try await session.listSummaries(kind: kind)
             summaries = loaded
+            let previousID = selectedID
             if selectedID == nil || !loaded.contains(where: { $0.id == selectedID }) {
                 selectedID = loaded.first?.id
             }
             loadFailure = nil
-            await loadLines()
+            if previousID == selectedID { await loadLines() }
         } catch {
             loadFailure = error.localizedDescription
             summaries = []
-            lines = []
-            recoveryLines = []
+            detailLoad.reset()
+            detail = nil
         }
     }
 
     private func loadLines() async {
         guard let selectedID else {
-            lines = []
-            recoveryLines = []
-            speakerNames = [:]
+            detailLoad.reset()
+            detail = nil
             return
         }
-        let loaded = (try? await session.lines(sessionID: selectedID, includePartial: true)) ?? []
-        let names = (try? await session.speakerNames(sessionID: selectedID)) ?? [:]
-        guard self.selectedID == selectedID else { return }
-        lines = loaded.filter { $0.status == .final }
-        recoveryLines = loaded.filter { $0.status == .partial }
-        speakerNames = names
+        detail = nil
+        do {
+            guard let snapshot = try await detailLoad.load(id: selectedID, operation: {
+                guard let snapshot = try await session.reviewSnapshot(sessionID: selectedID) else {
+                    throw CocoaError(.fileNoSuchFile)
+                }
+                let recovery = try await session.lines(sessionID: selectedID, includePartial: true)
+                    .filter { $0.status == .partial }
+                return (review: snapshot, recoveryLines: recovery)
+            }) else { return }
+            guard self.selectedID == selectedID else { return }
+            detail = snapshot
+        } catch {
+            // The loader exposes the failure beside its retry action.
+        }
     }
 
     private func copyTranscript(of summary: SessionSummary) async {

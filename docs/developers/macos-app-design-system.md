@@ -2,8 +2,8 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.11.1"
-date: 2026-10-05
+version: "0.11.2"
+date: 2026-10-07
 ---
 
 # SpeechRail macOS App 设计系统与 Token
@@ -262,6 +262,38 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 | 状态与反馈 | `StatusPill`、`NoticeBar`、`SettingsConnectionStatus` 等 | 默认、忙碌、完成、受阻、失败使用文字与图标；颜色只是补充；失败指出下一步 |
 
 每个组件只实现适用的 default、hover、pressed、focus、disabled、selected、busy、error 状态。设置内联编辑的 `.small` 原生按钮、字幕带和提词舞台的紧凑控件保留各自空间合同，不强制套主窗口的高度。所有自定义动效遵守 Reduce Motion；系统强调色、Increase Contrast 和 Reduce Transparency 优先由原生控件与语义色处理。页面新增产品视觉数值时，先写入 `SpeechRailDesignTokens.swift`，再更新本文。
+
+### 3.2.3 列表选择与读取反馈
+
+助手历史、提词器稿件和共享记录库使用 `List(selection:)`，由系统提供整行选择、方向键、
+焦点与 selected 无障碍语义。音色库、作品库、会议知识库、诊断列表复用
+`.speechRailSelectableList()`；稿件与记录行复用 `.speechRailSelectableRow()`。
+两行内容的高度下限统一取 `List.selectionRowMinimumHeight`（复用既有 64pt
+`pageRowMinimumHeight`）；侧栏与其他紧凑控件保留各自高度合同。
+音色库、作品库已有的选中色例外继续有效；其他列表使用系统选中反馈。
+
+命中区域使用 `.contentShape(.interaction, Rectangle())` 覆盖可选择内容的完整矩形。
+自定义按钮的 frame、padding 与 content shape 必须在按钮标签或 ButtonStyle 内，
+不能只加在包着按钮的外层 HStack；行内删除、菜单与确认操作使用独立控件，
+不嵌进选择按钮，不用父级 tap gesture 抢占它们的输入。
+
+选择与读取分开：先响应选择并显示“正在打开…”；读取过程中保留列表可继续切换，
+编辑操作暂时不可用。`SpeechRailSelectionLoad` 用请求代次保证只有最近一次选择
+能提交正文或错误，取消、离开或返回当前项会让旧请求失效。共享记录库在选中 ID
+变化时读取一个完整快照，不把旧正文配到新标题下；助手读取失败保留当前记录并显示原因。
+
+提词器目标文件的读取、解码与校验在主 actor 外执行，写入仍由主 actor 串行负责。
+切稿前仅提交待保存或失败的编辑，干净稿件不重复写盘；目标读取失败保留当前稿件。
+切换已有稿件不重新扫描目录，当前稿件的名称与正文修改直接同步列表快照；
+新增、删除、复制与显式重读才刷新目录，一次扫描对每份文件只解码一次。
+以上属于源码和确定性回归约束，不代表真实桌面操作延迟或 VoiceOver 已验收。
+
+研究依据（2026-10-07 核对）：Apple 的
+[List](https://developer.apple.com/documentation/swiftui/list) 提供按需行与 selection，
+[ContentShapeKinds.interaction](https://developer.apple.com/documentation/swiftui/contentshapekinds/interaction)
+定义命中与无障碍区域，
+[Improving app responsiveness](https://developer.apple.com/documentation/xcode/improving-app-responsiveness)
+要求主线程只承担 UI 更新，其他工作异步执行；不能靠延迟高亮或增加动画掩盖阻塞。
 
 ### 3.3 Settings scene 契约
 

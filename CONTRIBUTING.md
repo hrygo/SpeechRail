@@ -74,7 +74,14 @@ chmod 600 .env
 ## 自动化测试与质量门禁
 
 SpeechRail 对代码质量、类型安全与测试覆盖率有严格的自动化门禁要求。提交 PR 前请
-确保以下命令全部通过：
+按改动范围完成相应验证。平台无关质量门禁先使用与 GitHub 共用的入口：
+
+```bash
+bash scripts/ci_quality_gate.sh --base-ref origin/main
+```
+
+该入口包括 macOS 测试文件清单检查；`swift test` 和 App 构建成功不能替代此检查。
+完整测试与覆盖率属于另外的 CI job，下面列出各项独立运行入口。
 
 ### 1. 运行全量单元与契约测试
 
@@ -91,7 +98,7 @@ uv run --extra dev pytest --cov=src
 ### 3. 代码规范与 Lint 检查
 
 ```bash
-uv run --extra dev ruff check src tests
+uv run --extra dev ruff check src tests scripts hatch_build.py
 ```
 
 ### 4. 严格静态类型检查
@@ -105,7 +112,7 @@ uv run --extra dev mypy src
 公共契约有多条对齐门禁，改动 API 或 Realtime wire 时必须一并通过：
 
 ```bash
-npx @redocly/cli lint contracts/openapi.yaml
+npx --yes @redocly/cli@2.52.1 lint contracts/openapi.yaml
 uv run python scripts/check_openapi_contract.py
 uv run python scripts/check_realtime_contract.py
 uv run python scripts/check_mcp_tool_contract.py

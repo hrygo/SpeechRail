@@ -86,12 +86,23 @@ public struct TeleprompterView: View {
         .task {
             reloadDocuments()
         }
-        .onChange(of: session.document?.id) { _, _ in
-            reloadDocuments()
+        .onDisappear { session.cancelDocumentSelection() }
+        .onChange(of: session.document) { previous, document in
+            // Selection reuses the directory snapshot. Editing updates this row
+            // in memory; creating a new identity is the only reason to rescan.
+            if let document {
+                if let index = documents.firstIndex(where: { $0.id == document.id }) {
+                    documents[index] = document
+                } else {
+                    reloadDocuments()
+                }
+            }
             // 目标时长由会话在载入时定好（存过用存的，否则按原稿估算），
             // 这里只把输入框同步到那个值。原先由视图顺手 `setTargetMinutes`，
             // 于是「打开哪份稿」这件事有了两个负责人，切页回来还可能不触发。
-            targetMinutesInput = "\(session.targetMinutes)"
+            if previous?.id != document?.id {
+                targetMinutesInput = "\(session.targetMinutes)"
+            }
         }
         .sheet(isPresented: $isTrialReadingPresented) {
             TeleprompterTrialReadingSheet(session: session)
@@ -680,7 +691,7 @@ public struct TeleprompterView: View {
             HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
                 recentDocuments
                     .frame(width: SpeechRailDesignTokens.Layout.sessionListWidth)
-                    .disabled(!session.canEdit || session.isPreparingDraft)
+                    .disabled(!session.canSelectDocument)
                 editor(showInlineDocumentPicker: false)
             }
             .frame(minWidth: populatedWorkspaceMinimumWidth, alignment: .top)
@@ -701,7 +712,10 @@ public struct TeleprompterView: View {
     private var recentDocuments: some View {
         CardSurface {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                CardHead(title: "我的稿子", detail: "\(documents.count) 篇稿件与跟读版本") {
+                CardHead(
+                    title: "我的稿子",
+                    detail: session.isLoadingDocument ? "正在打开稿件…" : "\(documents.count) 篇稿件与跟读版本"
+                ) {
                     Menu {
                         Button("新建空白稿") {
                             session.createDocument(title: "未命名稿子", sourceText: "")
@@ -768,89 +782,74 @@ public struct TeleprompterView: View {
                     .frame(maxWidth: .infinity, minHeight: SpeechRailDesignTokens.Teleprompter.searchEmptyMinHeight)
                     .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                 } else {
-                    ScrollView(.vertical, showsIndicators: false) {
-                        VStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
-                            ForEach(filteredDocuments) { document in
-                                let isSelected = document.id == session.document?.id
-                                HStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
-                                    Button {
+                    List(selection: documentSelection) {
+                        ForEach(filteredDocuments) { document in
+                            let isSelected = document.id == session.document?.id
+                            HStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
+                                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
+                                    HStack {
+                                        Text(document.title)
+                                            .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                                            .foregroundStyle(.primary)
+                                            .lineLimit(1)
+                                        Spacer(minLength: 0)
+                                        if document.id == session.loadingDocumentID {
+                                            ProgressView()
+                                                .controlSize(.mini)
+                                                .accessibilityLabel("正在打开稿件")
+                                        } else if isSelected {
+                                            StatusPill(tone: .healthy, label: "当前")
+                                        }
+                                    }
+                                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                                        Text("\(document.sourceText.count) 字")
+                                            .font(SpeechRailDesignTokens.Typography.caption)
+                                            .foregroundStyle(.secondary)
+                                        Text("·")
+                                            .font(SpeechRailDesignTokens.Typography.caption)
+                                            .foregroundStyle(.secondary)
+                                        Text(document.updatedAt.formatted(date: .abbreviated, time: .shortened))
+                                            .font(SpeechRailDesignTokens.Typography.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+
+                                Menu {
+                                    Button("创建副本", systemImage: SpeechRailDesignTokens.Icon.Symbol.duplicate.systemName) {
                                         do {
-                                            try session.load(documentID: document.id)
-                                            operationMessage = nil
+                                            _ = try session.duplicateDocument(documentID: document.id)
+                                            reloadDocuments()
                                         } catch {
                                             operationMessage = error.localizedDescription
                                         }
-                                    } label: {
-                                        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
-                                            HStack {
-                                                Text(document.title)
-                                                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
-                                                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                                                    .lineLimit(1)
-                                                Spacer(minLength: 0)
-                                                if isSelected {
-                                                    StatusPill(tone: .healthy, label: "当前")
-                                                }
-                                            }
-                                            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                                                Text("\(document.sourceText.count) 字")
-                                                    .font(SpeechRailDesignTokens.Typography.caption)
-                                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                                                Text("·")
-                                                    .font(SpeechRailDesignTokens.Typography.caption)
-                                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                                                Text(document.updatedAt.formatted(date: .abbreviated, time: .shortened))
-                                                    .font(SpeechRailDesignTokens.Typography.caption)
-                                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                                            }
-                                        }
-                                        .frame(maxWidth: .infinity, alignment: .leading)
                                     }
-                                    .buttonStyle(.plain)
-                                    .speechRailPointerCursor()
-
-                                    Menu {
-                                        Button("创建副本", systemImage: SpeechRailDesignTokens.Icon.Symbol.duplicate.systemName) {
-                                            do {
-                                                _ = try session.duplicateDocument(documentID: document.id)
-                                                reloadDocuments()
-                                            } catch {
-                                                operationMessage = error.localizedDescription
-                                            }
+                                    Button("复制稿件内容", systemImage: SpeechRailDesignTokens.Icon.Symbol.copy.systemName) {
+                                        if let markdown = session.exportMarkdown() {
+                                            NSPasteboard.general.clearContents()
+                                            NSPasteboard.general.setString(markdown, forType: .string)
+                                            operationMessage = "已复制稿件内容"
                                         }
-                                        Button("复制稿件内容", systemImage: SpeechRailDesignTokens.Icon.Symbol.copy.systemName) {
-                                            if let markdown = session.exportMarkdown() {
-                                                NSPasteboard.general.clearContents()
-                                                NSPasteboard.general.setString(markdown, forType: .string)
-                                                operationMessage = "已复制稿件内容"
-                                            }
-                                        }
-                                        Divider()
-                                        Button("删除…", systemImage: SpeechRailDesignTokens.Icon.Symbol.delete.systemName, role: .destructive) {
-                                            documentToDelete = document
-                                            isDeleteAlertPresented = true
-                                        }
-                                    } label: {
-                                        SpeechRailButtonIcon(.more)
-                                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                                            .frame(width: SpeechRailDesignTokens.Layout.badgeSmallSize, height: SpeechRailDesignTokens.Layout.badgeSmallSize)
                                     }
-                                    .menuStyle(.borderlessButton)
+                                    Divider()
+                                    Button("删除…", systemImage: SpeechRailDesignTokens.Icon.Symbol.delete.systemName, role: .destructive) {
+                                        documentToDelete = document
+                                        isDeleteAlertPresented = true
+                                    }
+                                } label: {
+                                    SpeechRailButtonIcon(.more)
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: SpeechRailDesignTokens.Layout.badgeSmallSize, height: SpeechRailDesignTokens.Layout.badgeSmallSize)
                                 }
-                                .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-                                .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
-                                .background(
-                                    isSelected
-                                        ? SpeechRailDesignTokens.Surface.selectionTint
-                                        : Color.clear,
-                                    in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                                )
-                                .contentShape(RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous))
+                                .menuStyle(.borderlessButton)
+                                .accessibilityLabel("稿件操作：\(document.title)")
+                                .disabled(!session.canEdit)
                             }
+                            .speechRailSelectableRow()
+                            .tag(document.id)
                         }
-                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
-                        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
                     }
+                    .speechRailSelectableList()
                     .frame(maxHeight: .infinity)
                 }
 
@@ -868,6 +867,24 @@ public struct TeleprompterView: View {
             }
         }
         .frame(maxHeight: .infinity, alignment: .top)
+    }
+
+    private var documentSelection: Binding<String?> {
+        Binding(
+            get: { session.loadingDocumentID ?? session.document?.id },
+            set: { id in
+                guard let id else { return }
+                Task {
+                    do {
+                        if try await session.loadForSelection(documentID: id) {
+                            operationMessage = nil
+                        }
+                    } catch {
+                        operationMessage = "打开稿件失败：\(error.localizedDescription)"
+                    }
+                }
+            }
+        )
     }
 
     private var filteredDocuments: [TeleprompterDocument] {
@@ -945,12 +962,7 @@ public struct TeleprompterView: View {
                 Menu {
                     ForEach(documents) { document in
                         Button {
-                            do {
-                                try session.load(documentID: document.id)
-                                operationMessage = nil
-                            } catch {
-                                operationMessage = error.localizedDescription
-                            }
+                            documentSelection.wrappedValue = document.id
                         } label: {
                             Text(document.title)
                         }
@@ -968,9 +980,13 @@ public struct TeleprompterView: View {
                     }
                 } label: {
                     HStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
-                        Image(systemName: "doc.text")
-                            .font(SpeechRailDesignTokens.Typography.bodyMedium)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                        if session.isLoadingDocument {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Image(systemName: "doc.text")
+                                .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                        }
                         Image(systemName: "chevron.up.chevron.down")
                             .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
@@ -978,7 +994,8 @@ public struct TeleprompterView: View {
                 }
                 .menuStyle(.borderlessButton)
                 .accessibilityLabel("选择稿件")
-                .accessibilityValue(session.document?.title ?? "未选择")
+                .accessibilityValue(session.isLoadingDocument ? "正在打开稿件" : (session.document?.title ?? "未选择"))
+                .disabled(!session.canSelectDocument)
                 .speechRailPointerCursor()
             } else {
                 Image(systemName: "doc.text")

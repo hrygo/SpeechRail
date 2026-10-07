@@ -151,49 +151,20 @@ jobs:
       - name: Set up Python 3.14.7
         run: uv python install 3.14.7
 
-      - name: Install locked project dependencies
-        run: uv sync --locked --extra dev --extra mcp
-
-      - name: Code style check (Ruff)
-        run: uv run ruff check src tests scripts hatch_build.py
-
-      - name: Static type check (Mypy)
-        run: uv run mypy src
-
-      - name: Check release version consistency
-        run: uv run python scripts/check_version_consistency.py
-
-      - name: Lint OpenAPI contract
-        run: npx --yes @redocly/cli@2.52.1 lint contracts/openapi.yaml
-
-      - name: Check OpenAPI path parity
-        run: uv run python scripts/check_openapi_contract.py
-
-      - name: Check user guide contract coverage
-        run: uv run python scripts/check_user_doc_contract.py
-
-      - name: Check MCP tool surface parity
-        run: uv run python scripts/check_mcp_tool_contract.py
-
-      - name: Check macOS test target coverage parity
-        run: uv run python scripts/check_macos_test_target_coverage.py
-
-      - name: Run explicit diarization contract regression tests
-        run: uv run pytest --no-cov tests/test_diarization_extensions.py tests/test_diarization_sdk.py
-
-      - name: Check patch whitespace
+      - name: Run shared local and GitHub quality gates
         env:
           EVENT_NAME: ${{ github.event_name }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EVENT_BEFORE: ${{ github.event.before }}
         run: |
           if [[ "$EVENT_NAME" == "pull_request" && -n "$PR_BASE_SHA" ]]; then
-            git diff --check "$PR_BASE_SHA...HEAD"
+            base_ref="$PR_BASE_SHA"
           elif [[ -n "$EVENT_BEFORE" && "$EVENT_BEFORE" != "0000000000000000000000000000000000000000" ]]; then
-            git diff --check "$EVENT_BEFORE" HEAD
+            base_ref="$EVENT_BEFORE"
           else
-            git diff --check HEAD^ HEAD
+            base_ref="HEAD^"
           fi
+          bash scripts/ci_quality_gate.sh --base-ref "$base_ref"
 
   test:
     name: Test (${{ matrix.os }} / Python ${{ matrix.python-version }})
