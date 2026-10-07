@@ -1,16 +1,16 @@
-<!-- loop-plan-r2: 2026-10-07, baseline c997f7b0 -->
-# Issue #238 DRY / SOLID 收敛 Loop 实施计划 r2（新基线 `c997f7b0`）
+<!-- loop-plan-r2: 2026-10-07, baseline cb77d296 -->
+# Issue #238 DRY / SOLID 收敛 Loop 实施计划 r2（新基线 `cb77d296`）
 
 > r1（`2026-10-07-issue-238-solid-loop-plan.md`，基线 `159fea09`，随 R01 PR #320 提交）的后继修订。
 > 凡与 r1 不一致处以本文件为准。当前目标包含实施、审查、验证、提交、推送及通过后的合并；分组/跨包门结论继承 r1。
 
 **Goal:** 11 个 issue（#231 #232 #234 #235 #236 #237 #240 #241 #242 #244 #246）分 9 个 PR 交付。
 **Spec:** [Epic #238](https://github.com/hrygo/SpeechRail/issues/238)、[Epic #245](https://github.com/hrygo/SpeechRail/issues/245)。
-**核验日期：** 2026-10-07，Asia/Shanghai；CI 时间戳为 UTC。进度以本次回读的 SHA、PR 状态和 run ID 为准。基线 `origin/main = c997f7b0`（已 fetch）；每包合并后刷新。
+**核验日期：** 2026-10-07，Asia/Shanghai；CI 时间戳为 UTC。进度以本次回读的 SHA、PR 状态和 run ID 为准。基线 `origin/main = cb77d296`（已 fetch）；每包合并后刷新。
 
-**当前实施目标（2026-10-07 更新）：** R01、R02、R05、R03、R04、R06、R07 已合入；剩余 2 个 issue 分 2 个独立 PR，按 **R08 #231 → R09 #234** 完成实施、整包独立审查、定向验证与必要 CI，验证通过立即 squash 合并，再刷新 main。每包 1–3 issue；不堆叠 PR、不 force-push、不关闭未验收 issue、不 `Closes #238`。用户已确认 #245 实施完成，撤销临时避让限制；最终逐条核对十一项验收矩阵后决定关闭 issue 与完成 goal。
+**当前实施目标（2026-10-07 更新）：** R01、R02、R05、R03、R04、R06、R07 已合入；R08 也已合入；剩余 #234 一个独立 PR，按 **R08 #231 → R09 #234** 完成实施、整包独立审查、定向验证与必要 CI，验证通过立即 squash 合并，再刷新 main。每包 1–3 issue；不堆叠 PR、不 force-push、不关闭未验收 issue、不 `Closes #238`。用户已确认 #245 实施完成，撤销临时避让限制；最终逐条核对十一项验收矩阵后决定关闭 issue 与完成 goal。
 
-**最新执行目标（2026-10-07，Asia/Shanghai）：** R07 PR **#330** 已在 head `776bce9f` 的全部必要 CI `37573261584` 通过后 squash 合并为 `c997f7b0`（UTC `2026-10-07T04:52:21Z`）。一次整包独立审查的 Required 已修，**228 项定向实测通过**，CI 完整 Swift 测试与 App 构建通过。R08 已从最新 main 创建 `codex/238-r08-session-drain-proof`；立即目标是冻结正常 drain / abort / reconnect 的接收权限与有界截止时间合同，补 receiver/store Gate 反例，接入消费 EOF、保存 settled 和真实封存结果。只关联 #231，不改 #245 的 clear/wire 语义；完成后再从新 main 实施 R09。
+**最新执行目标（2026-10-07，Asia/Shanghai）：** R08 PR #331 已在最终 head `70d40a46` 必要 CI `37581248688` 全绿后 squash 合入 `cb77d296`。一次整包独立审查的两项 Required 已反例修复，293 定向 XCTest 与 App build 通过。R09 已从新 main 开 `codex/238-r09-loader-metadata`，181 项 identity/worker 与 60 项 catalog 实测通过；立即目标为整包独立审查、最终 head CI、squash 合并，随后逐条审计十一项矩阵并更新 issue。
 
 **较早 goal 更新检查点（历史，2026-10-07）：** 当时本地 HEAD 为 `0d2cf68e`，恢复入口等尚未提交；以下 R07 前三步现已完成，以最新执行目标与账本为准：
 
@@ -114,8 +114,8 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 | R04 #237+#236 | MERGED | PR #328 / `151297f6` | 283 定向 Swift、2 项 Python 守卫、独立编译；Required 已修，CI `37560283532` 全绿后合并 |
 | R06 #241 | MERGED | PR #329 / `4f6b7356` | 138 XCTest +77 Swift Testing；首轮 Required 已修，CI `37562890224` 全绿后立即合并 |
 | R07 #232 | MERGED | PR #330 / `c997f7b0` | 228 定向 XCTest；Required 红→绿修复；最终 head `776bce9f` CI `37573261584` 全绿；避让 pbxproj |
-| R08 #231 | 独立审查修订验证中 | PR #331，base `c997f7b0`；首个 head `0f0f02a3` CI `37579247632` 全绿 | 两项 Required 已补反例修复；修订 head CI 待完成 |
-| R09 #234 | planned | 无 | #249 关闭已解锁，排末位 |
+| R08 #231 | MERGED | PR #331 / `cb77d296` | 293 定向 XCTest、App build、一次审查 Required 修订；最终 head `70d40a46` CI `37581248688` 全绿 |
+| R09 #234 | 实施中 | 分支 `codex/238-r09-loader-metadata`，base `cb77d296` | 纯 loader 规则收敛；保留来源顺序、专属精度策略与 catalog 范围 |
 
 ### R03 验证与取舍（2026-10-07）
 
@@ -225,3 +225,18 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 - 上述四个反例合计先 **16 failures**，修复后 **4 XCTest / 0 failures**；日志 `/tmp/speechrail-r08-required-red.log` / `/tmp/speechrail-r08-required-green.log`。修订联合套件 **293 XCTest / 0 failures**（14:22，Asia/Shanghai），App Debug 包装构建成功；日志 `/tmp/speechrail-r08-required-joint-green.log` / `/tmp/speechrail-r08-required-app-build.log`。修订 head CI 待验证。
 - Final: Ruling: Caption request-scoped serverError 未证明属于其 ASR drain — 保留 session-level error 与 throwing drain 的失败证明，不扩大 wire 语义；代价是服务将来若新增该错误形状，需要同步新增契约与回归。
 - Final: Ruling: Caption 捕获证明丢失后保留复制/导出与保存恢复，不新增通用中断归档按钮 — #231 要求失败可见、保留内容及阻止假完整，不要求三场景相同 UI；合同精确说明会议有中断归档、助手有 pending/copy、字幕有复制/导出。代价是字幕此类记录在本进程内不会正常归档，但已保存内容保留。
+
+- R08 最终 head `70d40a46` 的 CI `37581248688` 必要检查全成功；PR #331 在 UTC `2026-10-07T06:27:26Z` squash 合入 `cb77d296`，main 已 fetch。独立首轮审查两项 Required 经主代理一次反例修复，无二审、无剩余 Required；#231/#238 仍等联合审计。
+
+### R09 执行 brief（2026-10-07）
+
+- 从 `cb77d296` 开独立分支；精确范围：两个 worker 的 metadata collectors/取值/量化规则、`model_identity.py` 的 bits/group 基础验证、新纯 `loader_metadata.py` 及相应测试/合同。其他 worktree 在这些文件无 WIP，现有 ASR 解码和精度选择不改。
+- Step 1: 同一向量记录旧 loaded 规则与 snapshot 区别；新增纯 API 与严格类型/冲突/unknown 反例并观察 RED。
+- Step 2: 共享 missing sentinel、带来源的有限 collector 输入、Mapping/attribute 取值、量化合并及 identity bits/group；基础约束复用 model_identity，ASR/TTS 来源顺序与 family/variant/dtype/sample_rate 留 adapter。
+- Step 3: 两 backend 真实 fake loader 接线、纯 import 无 vendor/IO、catalog 产品范围回归；定向 pytest/Ruff/Mypy 与一次整包独立审查。Required 一次 TDD 修复，新 head CI 全绿后立即 squash。
+- Ruling: loaded 缺失/None 为未观察，不等同于显式未量化；不同声明只比较 bits/group，snapshot 仍全规格相等。合法 QuantizationSpec 实例重新校验，拒绝先前绕过 parser 的非法位宽/配对；代价是错误实例会更早 fail-closed，不扩大模型规格。
+
+- R09 旧行为差分：两个旧 loader 的同一 7 向量结果一致（14 次调用），缺失/None→未观察、显式空 pair→未量化、合法量化/同 pair 不同 format 保持、bool/unknown 拒绝。新纯模块尚不存在时 pytest import RED；42 项纯向量在共享规则实现后 GREEN。
+- R09 两后端 fake 构造接线 7 项，保留 collector 优先级与专属 family/variant/rate/compute。最初 ASR fixture 未给 tensor 精度摘要却断言 compute=float16，出现 1 failure；Ruling: 补 F16 weights 的完整 snapshot fixture 后验证现有 compute 策略，不为缺失 fixture 修改产品精度 fallback。代价为增加一个显式 mixed_precision fixture 字段。
+- R09 定向 pytest **181 passed**（6 文件，包含纯模块、snapshot/ready、ASR/TTS、limits/isolation），catalog 两文件 **60 passed**；Ruff 7 个改动文件与 Mypy 4 个生产文件通过。
+- R09 临时移除两个生产 loader 的共享 quantization 接线，真实 fake 构造冲突用例 **2 failed / 5 passed**，随后恢复全部 source；日志 `/tmp/speechrail-r09-loader-wiring-mutation-red.log`。恢复后最终同范围复验与整包审查待记录。

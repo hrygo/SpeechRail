@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -367,6 +368,38 @@ def test_qwen3_engine_rejects_loader_variant_mismatch(
 
     with pytest.raises(RuntimeError, match=r"identity|family|variant"):
         Qwen3Engine(tmp_path, "mps", "float16")
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+def test_real_asr_loader_keeps_source_order_and_checks_all_quantization_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, conflict: bool,
+) -> None:
+    _install_fake_mlx(monkeypatch)
+    expected = replace(
+        _snapshot_identity(bits=8, group_size=64), mixed_precision=(("weights", "F16"),)
+    )
+    monkeypatch.setattr(worker_module, "inspect_model", lambda _: expected)
+
+    class FakeSession:
+        def __init__(self, **kwargs: object) -> None:
+            self.model_info = {"dtype": "int8", "family": "qwen3_asr", "variant": "asr"}
+            self.config = {"dtype": "wrong-lower-priority", "family": "lower-priority",
+                           "quantization": {"bits": 8, "group_size": 64, "format": "mlx"}}
+            self.model = SimpleNamespace(config={
+                "quantization_config": {"bits": 4 if conflict else 8, "group_size": 64},
+            })
+
+    runtime = ModuleType("mlx_qwen3_asr")
+    runtime.Session = FakeSession  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mlx_qwen3_asr", runtime)
+    if conflict:
+        with pytest.raises(RuntimeError, match="loader quantization conflict"):
+            Qwen3Engine(tmp_path, "mps", "int8")
+    else:
+        engine = Qwen3Engine(tmp_path, "mps", "int8")
+        assert engine.identity.dtype == "int8"
+        assert engine.identity.compute_dtype == "float16"
+        assert engine.identity.quantization_bits == 8
 
 
 def test_qwen3_engine_opens_a_bounded_pcm_buffer_without_vendor_stream_state(

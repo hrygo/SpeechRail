@@ -69,6 +69,43 @@ def test_expected_tts_dtype_uses_the_declared_bfloat16_snapshot(
     assert worker_module._expected_tts_dtype(tmp_path, "mps") == "bfloat16"
 
 
+@pytest.mark.parametrize("failure", [None, "pair", "family", "variant", "rate"])
+def test_real_tts_loader_keeps_its_collector_and_precision_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str | None,
+) -> None:
+    monkeypatch.setattr(
+        worker_module, "inspect_model", lambda _: _snapshot_identity(bits=8, group_size=64)
+    )
+    model = SimpleNamespace(
+        model_info={"family": "qwen3_asr" if failure == "family" else "qwen3_tts",
+                    "quantization": {"bits": 8, "group_size": 64, "format": "mlx"}},
+        config=SimpleNamespace(
+            family="ignored-lower-priority",
+            tts_model_type="base" if failure == "variant" else "voice_design",
+            quantization_config={"bits": 4 if failure == "pair" else 8, "group_size": 64},
+        ),
+        quantization_bits=8, quantization_group_size=64,
+    )
+
+    def load() -> worker_module.MlxQwenTtsEngine:
+        return worker_module.MlxQwenTtsEngine(
+            tmp_path, device="mps", load_fn=lambda _: model, numpy_module=np,
+            audio_loader_fn=lambda _: None, warmup=False,
+            sample_rate=16_000 if failure == "rate" else 24_000,
+        )
+
+    if failure:
+        code = "qwen3_tts_output_invalid" if failure == "rate" else "backend_identity_mismatch"
+        with pytest.raises(RuntimeError, match=code):
+            load()
+    else:
+        engine = load()
+        assert engine.identity.dtype == "int8"
+        assert engine.identity.sample_rate == 24_000
+        assert engine.identity.model_variant == "voice_design"
+        assert engine.identity.quantization_bits == 8
+
+
 class FakeEngine:
     identity = TtsWorkerIdentity(device="mps", dtype="float16", sample_rate=24_000)
 

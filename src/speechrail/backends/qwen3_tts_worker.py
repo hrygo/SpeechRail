@@ -11,12 +11,19 @@ import os
 import sys
 import traceback
 from collections import Counter, OrderedDict
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Literal, Protocol
 
-from speechrail.backends.model_identity import inspect_model, read_quantization
+from speechrail.backends.loader_metadata import (
+    MISSING,
+    LoaderSource,
+    identity_quantization,
+    loader_quantization,
+    loader_value,
+)
+from speechrail.backends.model_identity import inspect_model
 from speechrail.backends.qwen3_native import snapshot_is_quantized
 from speechrail.backends.qwen3_tts_stream_host import (
     FRAME_STREAM_DONE,
@@ -31,7 +38,6 @@ from speechrail.backends.qwen3_tts_stream_host import (
     parse_stream_command,
 )
 from speechrail.backends.qwen3_voice_binding import resolve_binding
-from speechrail.config.model_catalog import QuantizationSpec
 from speechrail.domain.tts import (
     VOICE_ID_RE,
     VoiceProfile,
@@ -195,96 +201,15 @@ class TtsWorkerEngine(Protocol):
 
 EngineFactory = Callable[[Path], TtsWorkerEngine]
 ModelLoader = Callable[[str], Any]
-_MISSING = object()
 
 
-def _loader_sources(model: object) -> tuple[object, ...]:
+def _loader_sources(model: object) -> tuple[LoaderSource, ...]:
     model_config = getattr(model, "config", None)
     return (
-        getattr(model, "model_info", None),
-        model_config,
-        model,
+        LoaderSource("model.model_info", getattr(model, "model_info", None)),
+        LoaderSource("model.config", model_config),
+        LoaderSource("model", model),
     )
-
-
-def _loader_value(sources: tuple[object, ...], names: tuple[str, ...]) -> object:
-    for source in sources:
-        if source is None:
-            continue
-        for name in names:
-            if isinstance(source, Mapping):
-                value = source.get(name, _MISSING)
-            else:
-                value = getattr(source, name, _MISSING)
-            if value is not _MISSING and value is not None:
-                return value
-    return _MISSING
-
-
-def _loader_quantization(sources: tuple[object, ...]) -> QuantizationSpec | None:
-    declarations: list[QuantizationSpec] = []
-    for source in sources:
-        if source is None:
-            continue
-        for field_name in ("quantization", "quantization_config"):
-            if isinstance(source, Mapping):
-                raw = source.get(field_name, _MISSING)
-            else:
-                raw = getattr(source, field_name, _MISSING)
-            if raw is _MISSING or raw is None:
-                continue
-            if isinstance(raw, QuantizationSpec):
-                declarations.append(raw)
-            elif isinstance(raw, Mapping):
-                declarations.append(read_quantization({field_name: raw}))
-            else:
-                raise RuntimeError("backend_identity_mismatch: invalid loader quantization")
-
-        if isinstance(source, Mapping):
-            bits = source.get("quantization_bits", _MISSING)
-            group_size = source.get("quantization_group_size", _MISSING)
-        else:
-            bits = getattr(source, "quantization_bits", _MISSING)
-            group_size = getattr(source, "quantization_group_size", _MISSING)
-        if bits is not _MISSING or group_size is not _MISSING:
-            declarations.append(
-                read_quantization(
-                    {
-                        "quantization": {
-                            "bits": None if bits is _MISSING else bits,
-                            "group_size": None if group_size is _MISSING else group_size,
-                        }
-                    }
-                )
-            )
-
-    if not declarations:
-        return None
-    first = declarations[0]
-    if any(
-        (item.bits, item.group_size) != (first.bits, first.group_size)
-        for item in declarations[1:]
-    ):
-        raise RuntimeError("backend_identity_mismatch: loader quantization conflict")
-    return first
-
-
-def _identity_quantization(identity: object) -> tuple[int | None, int | None]:
-    bits = getattr(identity, "quantization_bits", None)
-    group_size = getattr(identity, "quantization_group_size", None)
-    if bits is not None and (
-        not isinstance(bits, int) or isinstance(bits, bool) or bits not in {4, 8}
-    ):
-        raise ValueError("invalid TTS worker quantization bits")
-    if group_size is not None and (
-        not isinstance(group_size, int) or isinstance(group_size, bool) or group_size <= 0
-    ):
-        raise ValueError("invalid TTS worker quantization group size")
-    if bits is None and group_size is not None:
-        raise ValueError("unquantized TTS worker cannot report group size")
-    if bits is not None and group_size is None:
-        raise ValueError("quantized TTS worker must report group size")
-    return bits, group_size
 
 
 def _expected_tts_dtype(model_dir: Path, device: str) -> str:
@@ -309,7 +234,7 @@ def _identity_matches_tts(
     identity: object, *, device: str, sample_rate: int, model_dir: Path
 ) -> bool:
     try:
-        bits, _ = _identity_quantization(identity)
+        bits, _ = identity_quantization(identity)
     except ValueError:
         return False
     family = getattr(identity, "family", None)
@@ -416,10 +341,10 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         if model_type is not None and model_type != expected.variant:
             raise RuntimeError("backend_identity_mismatch: loader variant mismatch")
         loader_sources = _loader_sources(self._model)
-        loaded_family = _loader_value(loader_sources, ("family", "model_type"))
-        if loaded_family is not _MISSING and loaded_family != expected.family:
+        loaded_family = loader_value(loader_sources, ("family", "model_type"))
+        if loaded_family is not MISSING and loaded_family != expected.family:
             raise RuntimeError("backend_identity_mismatch: loader family mismatch")
-        loaded_quantization = _loader_quantization(loader_sources)
+        loaded_quantization = loader_quantization(loader_sources)
         if loaded_quantization is not None and (
             loaded_quantization.bits,
             loaded_quantization.group_size,
