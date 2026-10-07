@@ -1896,7 +1896,13 @@ struct TranscriptSaveRecoveryPanel: View {
                 }
             }
             .confirmationDialog(
-                "按不完整记录结束？", item: $pendingConfirmation, titleVisibility: .visible
+                "按不完整记录结束？",
+                isPresented: Binding(
+                    get: { pendingConfirmation != nil },
+                    set: { if !$0 { pendingConfirmation = nil } }
+                ),
+                titleVisibility: .visible,
+                presenting: pendingConfirmation
             ) { snapshot in
                 Button("保留恢复预览并结束", role: .destructive) {
                     workingID = snapshot.recordID
