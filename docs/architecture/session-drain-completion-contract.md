@@ -1,8 +1,8 @@
 ---
 title: "应用收尾的消费、保存与封存证明"
-status: under_review
+status: active
 audience: "App 核心开发者"
-version: "0.1.1"
+version: "0.1.2"
 date: 2026-10-07
 ---
 
@@ -10,8 +10,8 @@ date: 2026-10-07
 
 本合同对应 #231 / #238 R08。它约束 Assistant、Meeting、Caption 的应用层正常结束，
 不改变 RealtimeASRClient 的 commit / receipt / clear、识别归约或公开 wire。
-实现与确定性验证已在 R08 分支；整包独立审查已结束，Required 已补反例修复，
-尚待修订 head 的联合验证、CI 与合并。
+R08 PR #331 已合入 main（`cb77d296`）；一次整包独立审查的 Required 已补反例修复，
+293 项联合 XCTest、App 构建与最终 head `70d40a46` 的必要 CI `37581248688` 均通过。
 
 ## 正常结束的证明链
 
