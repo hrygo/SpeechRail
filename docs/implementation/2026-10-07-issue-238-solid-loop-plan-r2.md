@@ -1,16 +1,16 @@
-<!-- loop-plan-r2: 2026-10-07, baseline cb77d296 -->
-# Issue #238 DRY / SOLID 收敛 Loop 实施计划 r2（新基线 `cb77d296`）
+<!-- loop-plan-r2: 2026-10-07, baseline df8bb539 -->
+# Issue #238 DRY / SOLID 收敛 Loop 实施计划 r2（新基线 `df8bb539`）
 
 > r1（`2026-10-07-issue-238-solid-loop-plan.md`，基线 `159fea09`，随 R01 PR #320 提交）的后继修订。
 > 凡与 r1 不一致处以本文件为准。当前目标包含实施、审查、验证、提交、推送及通过后的合并；分组/跨包门结论继承 r1。
 
-**Goal:** 11 个 issue（#231 #232 #234 #235 #236 #237 #240 #241 #242 #244 #246）分 9 个 PR 交付。
+**Goal:** 11 个 issue（#231 #232 #234 #235 #236 #237 #240 #241 #242 #244 #246）原分 9 包交付；最终矩阵审计追加 R10（仅 #242 的 Store 故障补证），仍每 PR 1–3 issue。
 **Spec:** [Epic #238](https://github.com/hrygo/SpeechRail/issues/238)、[Epic #245](https://github.com/hrygo/SpeechRail/issues/245)。
-**核验日期：** 2026-10-07，Asia/Shanghai；CI 时间戳为 UTC。进度以本次回读的 SHA、PR 状态和 run ID 为准。基线 `origin/main = cb77d296`（已 fetch）；每包合并后刷新。
+**核验日期：** 2026-10-07，Asia/Shanghai；CI 时间戳为 UTC。进度以本次回读的 SHA、PR 状态和 run ID 为准。基线 `origin/main = df8bb539`（已 fetch）；每包合并后刷新。
 
-**当前实施目标（2026-10-07 更新）：** R01、R02、R05、R03、R04、R06、R07 已合入；R08 也已合入；剩余 #234 一个独立 PR，按 **R08 #231 → R09 #234** 完成实施、整包独立审查、定向验证与必要 CI，验证通过立即 squash 合并，再刷新 main。每包 1–3 issue；不堆叠 PR、不 force-push、不关闭未验收 issue、不 `Closes #238`。用户已确认 #245 实施完成，撤销临时避让限制；最终逐条核对十一项验收矩阵后决定关闭 issue 与完成 goal。
+**当前实施目标（2026-10-07 更新）：** R01–R09 九包均已合入；最终逐条审计十一项矩阵时发现 #242 的 UPSERT、COMMIT 与回滚首因缺独立 Store 回归，追加一个测试补证 PR R10。补证经一次整包独立审查、定向验证和匹配最终 head 的必要 CI 后立即 squash 合并，再更新十一项验收矩阵、合同与 Epic。每包 1–3 issue；不堆叠 PR、不 force-push、不关闭未验收 issue、不 `Closes #238`。#245 已完成，临时避让限制撤销；实际 worktree WIP 继续保护。
 
-**最新执行目标（2026-10-07，Asia/Shanghai）：** R08 PR #331 已在最终 head `70d40a46` 必要 CI `37581248688` 全绿后 squash 合入 `cb77d296`。一次整包独立审查的两项 Required 已反例修复，293 定向 XCTest 与 App build 通过。R09 已从新 main 开 `codex/238-r09-loader-metadata`，181 项 identity/worker 与 60 项 catalog 实测通过；立即目标为整包独立审查、最终 head CI、squash 合并，随后逐条审计十一项矩阵并更新 issue。
+**最新执行目标（2026-10-07，Asia/Shanghai）：** R09 PR #332 在 head `6ad4c2ac` 的 CI `37582419447` 全绿、一次独立审查无 Required/Critical 后，于 UTC `2026-10-07T06:43:31Z` squash 合入 `df8bb539`。R10 从该 main 开 `codex/238-r10-rename-acceptance`，只补测试自有 SQLite 故障与现有合同验收证据；生产服务、模型和用户数据库不变。
 
 **较早 goal 更新检查点（历史，2026-10-07）：** 当时本地 HEAD 为 `0d2cf68e`，恢复入口等尚未提交；以下 R07 前三步现已完成，以最新执行目标与账本为准：
 
@@ -240,3 +240,15 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 - R09 两后端 fake 构造接线 7 项，保留 collector 优先级与专属 family/variant/rate/compute。最初 ASR fixture 未给 tensor 精度摘要却断言 compute=float16，出现 1 failure；Ruling: 补 F16 weights 的完整 snapshot fixture 后验证现有 compute 策略，不为缺失 fixture 修改产品精度 fallback。代价为增加一个显式 mixed_precision fixture 字段。
 - R09 定向 pytest **181 passed**（6 文件，包含纯模块、snapshot/ready、ASR/TTS、limits/isolation），catalog 两文件 **60 passed**；Ruff 7 个改动文件与 Mypy 4 个生产文件通过。
 - R09 临时移除两个生产 loader 的共享 quantization 接线，真实 fake 构造冲突用例 **2 failed / 5 passed**，随后恢复全部 source；日志 `/tmp/speechrail-r09-loader-wiring-mutation-red.log`。恢复后最终同范围复验与整包审查待记录。
+
+- R09 最终复验 **241 pytest passed**（8 文件），Ruff/Mypy 与 diff check 通过；一次 fresh `luna_worker` 整包审查无 Required/Critical。Final: minor (fixed in R10 ledger): 旧“待记录”由本条最终事实替代。
+- Final: Ruling: `LoaderSource.name` 为 internal collector 固定标签合同，生产来源全是静态字符串；不增加动态 label 校验 — 当前没有动态敏感值输入，新增 collector 必须继续遵守静态标签约束。代价是未来采集器作者需维护这项内部合同。
+- R09 head `6ad4c2ac` 的 CI `37582419447`：Change Scope、Quality Gates、完整 Python 3.14.7、wheel、Gate Summary 均 success；Swift/App 按 scope skipped。#332 已 squash 合入 `df8bb539`，#234 与 #238 等待最终矩阵收口。
+
+### R10 #242 验收补证（2026-10-07）
+
+- 最终矩阵发现 R05 没有分别证明 UPSERT、真实 COMMIT 和 rollback 首因，不能用 revision INSERT 故障替代。只扩展已注册的 `MeetingMinutesVersioningTests.swift`，不改生产方法、产品 schema 或 pbxproj。
+- 新增 8 个真实 Store 回归：UPSERT trigger、deferred FK 的真实 COMMIT、RAISE(ROLLBACK) 后清理二次回滚、缺失会话 FK、同 label 跨会话、关闭存储、第二连接写锁、失败/成功改名的祖先复核与正文/采用指针/血缘保留。
+- 初次 6 个补证 + 既有定向范围 **58 XCTest / 0 failures**；追加两个用例后 fixture 使用不存在的 `parentID` 导致编译失败，改为当前领域字段 `parentMinutesID` 后 **60 XCTest / 0 failures**，不改变产品代码。
+- 有界突变：吞掉 COMMIT 错误 → 1 项 / 4 failures；revision 错误路径让二次 rollback 覆盖首因 → 1 项 / 1 failure。均由真实断言检出，生产源码已 finally 原样恢复。
+- 恢复后最终定向 **60 XCTest / 0 failures、exit 0**（2026-10-07 14:50，Asia/Shanghai），diff check 通过；一次独立审查及最终 head CI 在本包完成后补记。所有 SQLite 故障都仅作用于测试临时数据库；不宣称真实设备/UI/模型质量验收。

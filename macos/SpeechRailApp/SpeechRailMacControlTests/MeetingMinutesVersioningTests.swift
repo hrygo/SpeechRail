@@ -1131,6 +1131,214 @@ final class SessionStoreTransactionTests: XCTestCase {
         XCTAssertTrue(events.isEmpty)
     }
 
+    func testRenameUpsertFailureKeepsOldStateAndRetryAddsOneRevision() async throws {
+        let store = try XCTUnwrap(store)
+        let sessionID = try XCTUnwrap(sessionID)
+        try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "旧名")
+        let before = try await store.speakerRevisions(sessionID: sessionID)
+        try executeTestSQL("""
+        CREATE TRIGGER fail_speaker_upsert BEFORE INSERT ON speaker_name
+        BEGIN SELECT RAISE(ABORT, 'injected upsert failure'); END;
+        """)
+        do {
+            try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "新名")
+            XCTFail("UPSERT must fail")
+        } catch {
+            XCTAssertEqual(error as? SessionStoreError, .statementFailed("injected upsert failure"))
+        }
+        let failedNames = try await store.speakerNames(sessionID: sessionID)
+        let failedEvents = try await store.speakerRevisions(sessionID: sessionID)
+        XCTAssertEqual(failedNames["A"], "旧名")
+        XCTAssertEqual(failedEvents, before)
+        try executeTestSQL("DROP TRIGGER fail_speaker_upsert;")
+        try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "新名")
+        let names = try await store.speakerNames(sessionID: sessionID)
+        let events = try await store.speakerRevisions(sessionID: sessionID)
+        XCTAssertEqual(names["A"], "新名")
+        XCTAssertEqual(events.count, before.count + 1)
+    }
+
+    /// Deferred FK permits both writes, then rejects the real COMMIT on the Store connection.
+    func testRenameCommitFailureRollsBackBothWritesAndRetryAddsOneRevision() async throws {
+        let store = try XCTUnwrap(store)
+        let sessionID = try XCTUnwrap(sessionID)
+        try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "旧名")
+        let before = try await store.speakerRevisions(sessionID: sessionID)
+        try executeTestSQL("""
+        CREATE TABLE rename_commit_guard (
+          parent_id TEXT REFERENCES session(id) DEFERRABLE INITIALLY DEFERRED
+        );
+        CREATE TRIGGER fail_speaker_commit AFTER INSERT ON session_change
+        WHEN NEW.kind = 'speaker'
+        BEGIN INSERT INTO rename_commit_guard(parent_id) VALUES ('missing-test-session'); END;
+        """)
+        do {
+            try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "新名")
+            XCTFail("deferred foreign key must reject COMMIT")
+        } catch {
+            XCTAssertEqual(error as? SessionStoreError, .statementFailed("FOREIGN KEY constraint failed"))
+        }
+        let failedNames = try await store.speakerNames(sessionID: sessionID)
+        let failedEvents = try await store.speakerRevisions(sessionID: sessionID)
+        XCTAssertEqual(failedNames["A"], "旧名")
+        XCTAssertEqual(failedEvents, before)
+        try executeTestSQL("DROP TRIGGER fail_speaker_commit; DROP TABLE rename_commit_guard;")
+        try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "新名")
+        let names = try await store.speakerNames(sessionID: sessionID)
+        let events = try await store.speakerRevisions(sessionID: sessionID)
+        XCTAssertEqual(names["A"], "新名")
+        XCTAssertEqual(events.count, before.count + 1)
+    }
+
+    /// RAISE(ROLLBACK) ends the transaction; the cleanup ROLLBACK then has no transaction.
+    func testRenameRollbackFailurePreservesFirstErrorAndAllowsRetry() async throws {
+        let store = try XCTUnwrap(store)
+        let sessionID = try XCTUnwrap(sessionID)
+        try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "旧名")
+        let before = try await store.speakerRevisions(sessionID: sessionID)
+        try executeTestSQL("""
+        CREATE TRIGGER rollback_speaker_revision BEFORE INSERT ON session_change
+        WHEN NEW.kind = 'speaker'
+        BEGIN SELECT RAISE(ROLLBACK, 'first rename failure'); END;
+        """)
+        do {
+            try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "新名")
+            XCTFail("revision must fail and automatically roll back")
+        } catch {
+            XCTAssertEqual(error as? SessionStoreError, .statementFailed("first rename failure"))
+        }
+        let failedNames = try await store.speakerNames(sessionID: sessionID)
+        let failedEvents = try await store.speakerRevisions(sessionID: sessionID)
+        XCTAssertEqual(failedNames["A"], "旧名")
+        XCTAssertEqual(failedEvents, before)
+        try executeTestSQL("DROP TRIGGER rollback_speaker_revision;")
+        try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "新名")
+        let events = try await store.speakerRevisions(sessionID: sessionID)
+        XCTAssertEqual(events.count, before.count + 1)
+    }
+
+    func testRenameMissingSessionFailsForeignKeyWithoutLeavingRows() async throws {
+        let store = try XCTUnwrap(store)
+        do {
+            try await store.renameSpeaker(sessionID: "missing-test-session", label: "A", name: "新名")
+            XCTFail("missing session must fail")
+        } catch {
+            XCTAssertEqual(error as? SessionStoreError, .statementFailed("FOREIGN KEY constraint failed"))
+        }
+        let names = try await store.speakerNames(sessionID: "missing-test-session")
+        let events = try await store.speakerRevisions(sessionID: "missing-test-session")
+        XCTAssertTrue(names.isEmpty)
+        XCTAssertTrue(events.isEmpty)
+        try await store.renameSpeaker(sessionID: XCTUnwrap(sessionID), label: "A", name: "可重试")
+    }
+
+    func testRenameSameLabelInDifferentSessionsStaysIsolated() async throws {
+        let store = try XCTUnwrap(store)
+        let firstID = try XCTUnwrap(sessionID)
+        let second = try await store.createSession(
+            SessionDraft(kind: .meeting, engineProfile: "test", audioSource: .microphone)
+        )
+        try await store.renameSpeaker(sessionID: firstID, label: "A", name: "第一场")
+        try await store.renameSpeaker(sessionID: second.id, label: "A", name: "第二场")
+        let firstNames = try await store.speakerNames(sessionID: firstID)
+        let secondNames = try await store.speakerNames(sessionID: second.id)
+        let firstEvents = try await store.speakerRevisions(sessionID: firstID)
+        let secondEvents = try await store.speakerRevisions(sessionID: second.id)
+        XCTAssertEqual(firstNames["A"], "第一场")
+        XCTAssertEqual(secondNames["A"], "第二场")
+        XCTAssertEqual(firstEvents.count, 1)
+        XCTAssertEqual(secondEvents.count, 1)
+        XCTAssertEqual(firstEvents.first?.value, "A|第一场")
+        XCTAssertEqual(secondEvents.first?.value, "A|第二场")
+    }
+
+    func testRenameUnavailableStorageReturnsExplicitErrorWithoutChangingSavedState() async throws {
+        let store = try XCTUnwrap(store)
+        let sessionID = try XCTUnwrap(sessionID)
+        try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "旧名")
+        let before = try await store.speakerRevisions(sessionID: sessionID)
+        await store.close()
+        do {
+            try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "新名")
+            XCTFail("closed storage must fail")
+        } catch {
+            XCTAssertEqual(error as? SessionStoreError, .storageUnavailable)
+        }
+        try await store.open()
+        let names = try await store.speakerNames(sessionID: sessionID)
+        let events = try await store.speakerRevisions(sessionID: sessionID)
+        XCTAssertEqual(names["A"], "旧名")
+        XCTAssertEqual(events, before)
+    }
+
+    func testRenameLockedStorageFailsBeforeWritingAndAllowsRetry() async throws {
+        let store = try XCTUnwrap(store)
+        let sessionID = try XCTUnwrap(sessionID)
+        let directory = try XCTUnwrap(directory)
+        try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "旧名")
+        let before = try await store.speakerRevisions(sessionID: sessionID)
+        var pointer: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(
+            directory.appendingPathComponent(SessionStore.fileName).path,
+            &pointer, SQLITE_OPEN_READWRITE, nil
+        ), SQLITE_OK)
+        let lock = try XCTUnwrap(pointer)
+        defer { sqlite3_close_v2(lock) }
+        XCTAssertEqual(sqlite3_exec(lock, "BEGIN IMMEDIATE;", nil, nil, nil), SQLITE_OK)
+        defer { sqlite3_exec(lock, "ROLLBACK;", nil, nil, nil) }
+        do {
+            try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "新名")
+            XCTFail("another writer must block the transaction")
+        } catch {
+            XCTAssertEqual(error as? SessionStoreError, .statementFailed("database is locked"))
+        }
+        XCTAssertEqual(sqlite3_exec(lock, "ROLLBACK;", nil, nil, nil), SQLITE_OK)
+        let names = try await store.speakerNames(sessionID: sessionID)
+        let events = try await store.speakerRevisions(sessionID: sessionID)
+        XCTAssertEqual(names["A"], "旧名")
+        XCTAssertEqual(events, before)
+        try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "新名")
+        let retried = try await store.speakerRevisions(sessionID: sessionID)
+        XCTAssertEqual(retried.count, before.count + 1)
+    }
+
+    func testFailedRenameDoesNotMarkMinutesOrRewriteAdoptionAndLineage() async throws {
+        let store = try XCTUnwrap(store)
+        let sessionID = try XCTUnwrap(sessionID)
+        let original = try await store.enqueueMinutes(sessionID: sessionID, model: nil, promptChars: 8)
+        _ = try await store.claimMinutes(sessionID: sessionID, lease: 600)
+        try await store.finishMinutesForTestOnly(minutesID: original.id, body: "# 原版", model: nil)
+        _ = try await store.adoptMinutes(sessionID: sessionID, minutesID: original.id, expectedCurrentID: nil)
+        let edited = try await store.saveUserMinutesEdit(
+            sessionID: sessionID, editingMinutesID: original.id, body: "# 编辑版"
+        )
+        let currentBefore = try await store.currentMinutes(sessionID: sessionID)
+        try installRevisionFailure()
+        do {
+            try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "新名")
+            XCTFail("revision failure must reject rename")
+        } catch {
+            XCTAssertTrue(error is SessionStoreError)
+        }
+        let originalNeedsReview = try await store.minutesNeedsReview(minutesID: original.id)
+        let editedNeedsReview = try await store.minutesNeedsReview(minutesID: edited.id)
+        XCTAssertFalse(originalNeedsReview)
+        XCTAssertFalse(editedNeedsReview)
+        try executeTestSQL("DROP TRIGGER fail_speaker_revision;")
+        try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "新名")
+        let renamedOriginalNeedsReview = try await store.minutesNeedsReview(minutesID: original.id)
+        let renamedEditedNeedsReview = try await store.minutesNeedsReview(minutesID: edited.id)
+        XCTAssertTrue(renamedOriginalNeedsReview)
+        XCTAssertTrue(renamedEditedNeedsReview)
+        let savedOriginal = try await store.minutesVersion(id: original.id)
+        let savedEdited = try await store.minutesVersion(id: edited.id)
+        let currentAfter = try await store.currentMinutes(sessionID: sessionID)
+        XCTAssertEqual(savedOriginal?.body, "# 原版")
+        XCTAssertEqual(savedEdited?.body, "# 编辑版")
+        XCTAssertEqual(savedEdited?.parentMinutesID, original.id)
+        XCTAssertEqual(currentAfter?.id, currentBefore?.id)
+    }
+
     /// 在本测试独占的数据库内使真实 SQLite INSERT 失败，不使用生产注入开关。
     func testLineAndIndexOutboxRollbackTogether() async throws {
         let store = try XCTUnwrap(store)
