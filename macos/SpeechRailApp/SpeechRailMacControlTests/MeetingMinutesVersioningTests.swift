@@ -1132,6 +1132,138 @@ final class SessionStoreTransactionTests: XCTestCase {
     }
 
     /// 在本测试独占的数据库内使真实 SQLite INSERT 失败，不使用生产注入开关。
+    func testLineAndIndexOutboxRollbackTogether() async throws {
+        let store = try XCTUnwrap(store)
+        let sessionID = try XCTUnwrap(sessionID)
+        let before = try await store.searchIndexStatus()
+        XCTAssertTrue(before.isFullTextAvailable)
+        try executeTestSQL("""
+        CREATE TRIGGER fail_line_outbox BEFORE INSERT ON search_index_outbox
+        WHEN NEW.source_kind = 'line'
+        BEGIN SELECT RAISE(ABORT, 'outbox unavailable'); END;
+        """)
+        let draft = LineDraft(
+            sessionID: sessionID, role: .speaker, text: "正文和索引待办一起提交。",
+            source: .mixed, createdAt: Date(timeIntervalSince1970: 123)
+        )
+        do {
+            _ = try await store.appendLine(draft, id: "atomic-line")
+            XCTFail("outbox failure must fail the save")
+        } catch {}
+        let failedLines = try await store.lines(sessionID: sessionID, includePartial: true)
+        XCTAssertTrue(failedLines.isEmpty, "failed outbox cannot leave half a line")
+        let failedStatus = try await store.searchIndexStatus()
+        XCTAssertEqual(failedStatus.pendingCount, before.pendingCount)
+        try executeTestSQL("DROP TRIGGER fail_line_outbox;")
+        let ordinal = try await store.appendLine(draft, id: "atomic-line")
+        XCTAssertEqual(ordinal, 1)
+        let savedLines = try await store.lines(sessionID: sessionID)
+        XCTAssertEqual(savedLines.count, 1)
+        let status = try await store.searchIndexStatus()
+        XCTAssertEqual(status.pendingCount, before.pendingCount + 1)
+    }
+
+    func testLineOrdinalReadFailureRollsBackBodyAndOutbox() async throws {
+        let store = try XCTUnwrap(store)
+        let sessionID = try XCTUnwrap(sessionID)
+        let before = try await store.searchIndexStatus()
+        try executeTestSQL("""
+        CREATE TRIGGER remove_before_confirmation AFTER INSERT ON line
+        BEGIN DELETE FROM line WHERE id = NEW.id; END;
+        """)
+        do {
+            _ = try await store.appendLine(
+                LineDraft(sessionID: sessionID, role: .speaker, text: "确认失败的正文。", source: .system),
+                id: "unconfirmed-line"
+            )
+            XCTFail("missing ordinal must fail")
+        } catch {}
+        let status = try await store.searchIndexStatus()
+        XCTAssertEqual(status.pendingCount, before.pendingCount, "failed confirmation cannot commit outbox")
+        try executeTestSQL("DROP TRIGGER remove_before_confirmation;")
+        let ordinal = try await store.appendLine(
+            LineDraft(sessionID: sessionID, role: .speaker, text: "确认失败的正文。", source: .system),
+            id: "unconfirmed-line"
+        )
+        XCTAssertEqual(ordinal, 1)
+    }
+
+    func testFixedLineIdentityConfirmsExactFieldsWithoutDuplicateIndexWork() async throws {
+        let store = try XCTUnwrap(store)
+        let sessionID = try XCTUnwrap(sessionID)
+        let draft = LineDraft(
+            sessionID: sessionID, role: .speaker, text: "冻结的正文。", source: .mixed,
+            speakerLabel: "A", tStart: 1.25, tEnd: 2.5, isDeviceSwitch: true,
+            timingQuality: .unavailable, createdAt: Date(timeIntervalSince1970: 120.25)
+        )
+        let first = try await store.appendLine(draft, id: "fixed-line")
+        let before = try await store.searchIndexStatus()
+        do {
+            let retry = try await store.appendLine(draft, id: "fixed-line")
+            XCTAssertEqual(retry, first)
+        } catch {
+            XCTFail("same fixed command must confirm the committed line: \(error)")
+        }
+        let after = try await store.searchIndexStatus()
+        XCTAssertEqual(after.pendingCount, before.pendingCount)
+        let lines = try await store.lines(sessionID: sessionID)
+        XCTAssertEqual(lines.count, 1)
+        XCTAssertEqual(lines.first?.speakerLabel, "A")
+        XCTAssertEqual(lines.first?.createdAt, draft.createdAt)
+        var conflict = draft
+        conflict.text = "不能覆盖原文。"
+        do {
+            _ = try await store.appendLine(conflict, id: "fixed-line")
+            XCTFail("same ID with different frozen fields must fail")
+        } catch {}
+        let confirmed = try await store.lines(sessionID: sessionID)
+        XCTAssertEqual(confirmed.first?.text, draft.text)
+    }
+
+    func testFixedLineRetryRepairsMissingIndexWorkAndDoesNotRequeueIndexedLine() async throws {
+        let store = try XCTUnwrap(store)
+        let sessionID = try XCTUnwrap(sessionID)
+        let draft = LineDraft(
+            sessionID: sessionID, role: .speaker, text: "旧半提交需要补齐索引。", source: .microphone,
+            createdAt: Date(timeIntervalSince1970: 120)
+        )
+        _ = try await store.appendLine(draft, id: "repair-line")
+        try executeTestSQL("DELETE FROM search_index_outbox WHERE source_id = 'repair-line';")
+        do {
+            _ = try await store.appendLine(draft, id: "repair-line")
+        } catch {
+            XCTFail("matching existing line must recover missing index work: \(error)")
+        }
+        let repaired = try await store.searchIndexStatus()
+        XCTAssertEqual(repaired.pendingCount, 1)
+        _ = try await store.drainSearchIndex()
+        _ = try await store.appendLine(draft, id: "repair-line")
+        let indexed = try await store.searchIndexStatus()
+        XCTAssertEqual(indexed.pendingCount, 0)
+    }
+
+    func testFixedPartialIdentityRemainsExcludedFromFormalLinesAndIndex() async throws {
+        let store = try XCTUnwrap(store)
+        let sessionID = try XCTUnwrap(sessionID)
+        let draft = LineDraft(
+            sessionID: sessionID, role: .speaker, text: "没有定稿的恢复材料。", source: .system,
+            status: .partial, createdAt: Date(timeIntervalSince1970: 120)
+        )
+        let first = try await store.appendLine(draft, id: "partial-line")
+        do {
+            let retry = try await store.appendLine(draft, id: "partial-line")
+            XCTAssertEqual(retry, first)
+        } catch {
+            XCTFail("partial recovery also has a stable identity: \(error)")
+        }
+        let formal = try await store.lines(sessionID: sessionID)
+        XCTAssertTrue(formal.isEmpty)
+        let all = try await store.lines(sessionID: sessionID, includePartial: true)
+        XCTAssertEqual(all.count, 1)
+        let status = try await store.searchIndexStatus()
+        XCTAssertEqual(status.pendingCount, 0)
+    }
+
     private func installRevisionFailure() throws {
         try executeTestSQL("""
         CREATE TRIGGER fail_speaker_revision BEFORE INSERT ON session_change
