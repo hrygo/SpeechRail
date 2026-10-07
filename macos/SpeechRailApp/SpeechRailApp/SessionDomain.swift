@@ -85,7 +85,10 @@ public final class SessionDrainDeadline {
                     }
                     do {
                         try await operation()
-                        self.resolve(id: id, failure: nil)
+                        let late = self.isExpired
+                        self.resolve(id: id, failure: late ? .init(
+                            stage: stage, message: "结束等待超时，记录尚未确认完整。"
+                        ) : nil)
                     } catch {
                         self.resolve(id: id, failure: .init(stage: stage, message: error.localizedDescription))
                     }

@@ -114,7 +114,7 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 | R04 #237+#236 | MERGED | PR #328 / `151297f6` | 283 定向 Swift、2 项 Python 守卫、独立编译；Required 已修，CI `37560283532` 全绿后合并 |
 | R06 #241 | MERGED | PR #329 / `4f6b7356` | 138 XCTest +77 Swift Testing；首轮 Required 已修，CI `37562890224` 全绿后立即合并 |
 | R07 #232 | MERGED | PR #330 / `c997f7b0` | 228 定向 XCTest；Required 红→绿修复；最终 head `776bce9f` CI `37573261584` 全绿；避让 pbxproj |
-| R08 #231 | 实施与定向验证进行中 | 分支 `codex/238-r08-session-drain-proof`，base `c997f7b0`；尚无 PR | 正常收尾权限、消费 EOF/截止时间/保存/封存联合证明；clear 协议只读 |
+| R08 #231 | 独立审查修订验证中 | PR #331，base `c997f7b0`；首个 head `0f0f02a3` CI `37579247632` 全绿 | 两项 Required 已补反例修复；修订 head CI 待完成 |
 | R09 #234 | planned | 无 | #249 关闭已解锁，排末位 |
 
 ### R03 验证与取舍（2026-10-07）
@@ -202,7 +202,7 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 - r1 `docs/implementation/2026-10-07-issue-238-solid-loop-plan.md`（随 PR #320）：分组/边界/跨包门结论继承；不一致处以本文件为准。
 
 
-### R08 当前实施与验证账本（2026-10-07，尚未审查 / PR / 合并）
+### R08 当前实施与验证账本（2026-10-07，PR #331 修订中）
 
 - 统一 `SessionDrainDeadline` 已接三 feature 和 Coordinator：停产 → uploader → protocol → close → 唯一 receiver EOF → 保存 owner → 真实归档 / 来源确认。正常 drain 保留输入归档权，abort / reconnect 撤销旧身份；不改 wire、schema 或模型运行态。
 - 真实反例：Assistant receipt / receiver Gate 2 项 5 failures；非合作 receiver 4 failures；Meeting / Caption protocol 7 failures；ArchiveWriter deadline 2 failures；保存重试旧预算 1 failure；缓冲 stream error 2 failures。均已有生产修复。
@@ -218,3 +218,10 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 - App Debug 包装构建 `scripts/macos_app_build.sh --configuration Debug --timeout 600` 成功（13:56）；临时 bundle 按脚本清理，未安装 / 启动 App / 运行 UI 自动化。
 - 已 dispatch 一次 `luna_worker` 整包只读审查；尚待结果。当前 origin/main 回读仍 `c997f7b0`，main protection 要求线性历史与 Quality Gates / Gate Summary，squash 允许。
 - 原生 goal 仍 active；已发现的 goal 工具只支持 complete / blocked，不能编辑正文，因此未假完成重建。执行目标以本文首部和本账本为准。
+- 首个 head `0f0f02a3` 的必要 CI `37579247632` 全绿，但整包独立审查确认两项 Required，未据此合并。Required 由主代理统一一次修复，不二审。
+- Final: fixed 必需音色 metadata 失败/超时可被封存绕过 — 两个真实助手反例 RED→GREEN；同 request 的所有生产调用者复用唯一 `Task<Bool, Never>`，冻结 ordinal/voice，失败保留命令，超时保留句柄。EOF 后联合确认正文与 metadata；重试不绕过旧任务，迟到完成只写旧记录，不投影新场。
+- Final: fixed 会议显式中断结束重开封存预算 — 保存 Gate 消耗 150ms、真实归档耗时 180ms、单次预算 250ms 的反例 RED→GREEN；同一 deadline 传入 Coordinator，迟到提交不发布成功。
+- 主代理追加确认：同步 MainActor 操作在绝对 deadline 后返回、计时器尚未执行时被接纳。短同步 clock 反例先出现 2 failures，返回路径复核绝对截止时间后通过。
+- 上述四个反例合计先 **16 failures**，修复后 **4 XCTest / 0 failures**；日志 `/tmp/speechrail-r08-required-red.log` / `/tmp/speechrail-r08-required-green.log`。修订联合套件 **293 XCTest / 0 failures**（14:22，Asia/Shanghai），App Debug 包装构建成功；日志 `/tmp/speechrail-r08-required-joint-green.log` / `/tmp/speechrail-r08-required-app-build.log`。修订 head CI 待验证。
+- Final: Ruling: Caption request-scoped serverError 未证明属于其 ASR drain — 保留 session-level error 与 throwing drain 的失败证明，不扩大 wire 语义；代价是服务将来若新增该错误形状，需要同步新增契约与回归。
+- Final: Ruling: Caption 捕获证明丢失后保留复制/导出与保存恢复，不新增通用中断归档按钮 — #231 要求失败可见、保留内容及阻止假完整，不要求三场景相同 UI；合同精确说明会议有中断归档、助手有 pending/copy、字幕有复制/导出。代价是字幕此类记录在本进程内不会正常归档，但已保存内容保留。

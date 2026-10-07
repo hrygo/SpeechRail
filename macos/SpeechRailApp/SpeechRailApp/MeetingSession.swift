@@ -485,7 +485,7 @@ public final class MeetingSession {
             }
         }
         guard saved else { return false }
-        let result = await coordinator.sealMeeting(id: id, reason: .interrupted)
+        let result = await coordinator.sealMeeting(id: id, reason: .interrupted, completionDeadline: deadline)
         guard case .sealed(recordID: id) = result else { return false }
         if sessionID == id {
             phase = .archived

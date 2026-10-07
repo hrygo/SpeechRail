@@ -123,6 +123,36 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         XCTAssertEqual(h.session.sessionID, id)
     }
 
+    func testInterruptedRecoverySharesOneBudgetAcrossSaveAndArchive() async throws {
+        let gate = TranscriptPersistenceGate()
+        let h = try await makeHarness(
+            saveLine: { try await gate.save($0, id: $1) },
+            drainTimeout: .milliseconds(250), archiveDelay: .milliseconds(180)
+        )
+        await gate.attach(h.store)
+        let id = try await startRecording(h)
+        let client = try XCTUnwrap(h.clients.all.last)
+        await client.finishEventsOnClose()
+        await client.failDrain()
+        try await h.emit(.segmentClosed(
+            itemID: "interrupted-budget", sampleSpan: .init(startSample: 0, endSample: 24_000),
+            reason: .vad, commitEventID: nil
+        ))
+        try await h.emit(.completed(itemID: "interrupted-budget", transcript: "已接纳的最后一句"))
+        try await h.settle { _ in await gate.entered }
+        await h.session.finishAndSummarize()
+        let recovery = Task { await h.session.finishIncompleteCapture() }
+        try await Task.sleep(for: .milliseconds(150))
+        await gate.release()
+        let completed = await recovery.value
+        XCTAssertFalse(completed, "保存与真实归档必须共用一次动作的绝对截止时间")
+        XCTAssertNotEqual(h.session.phase, .archived)
+        XCTAssertNil(h.coordinator.lastFinalizedSessionID)
+        try await Task.sleep(for: .milliseconds(220))
+        XCTAssertNil(h.coordinator.lastFinalizedSessionID, "迟到归档确认不能发布恢复成功")
+        XCTAssertNotNil(h.coordinator.captureCompletionFailure(recordID: id))
+    }
+
     func testUploadFailureCannotBeHiddenBySuccessfulDrain() async throws {
         let h = try await makeHarness()
         let id = try await startRecording(h)

@@ -89,6 +89,8 @@ public struct AssistantSessionDependencies: Sendable {
     /// M2/V06:仅替换自动标题认领；默认仍由 SessionCoordinator 写入。
     /// 测试用它 gate 住标题 IO，验证标题不挡正文投影与 LLM 启动。
     public var claimTitle: (@Sendable (String, String, String) async throws -> Bool)?
+    /// 必需的已接纳音色 metadata 写入；默认由 Coordinator 写入。
+    public var saveVoiceChange: (@Sendable (String, Int, VoiceSnapshot) async throws -> Void)?
     public var inputPersistenceConfiguration: TranscriptPersistenceQueue.Configuration
     public var drainTimeout: Duration
 
@@ -111,6 +113,7 @@ public struct AssistantSessionDependencies: Sendable {
         saveInputLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
         saveReplyLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
         claimTitle: (@Sendable (String, String, String) async throws -> Bool)? = nil,
+        saveVoiceChange: (@Sendable (String, Int, VoiceSnapshot) async throws -> Void)? = nil,
         inputPersistenceConfiguration: TranscriptPersistenceQueue.Configuration = .init(),
         drainTimeout: Duration = .seconds(12)
     ) {
@@ -121,6 +124,7 @@ public struct AssistantSessionDependencies: Sendable {
         self.saveInputLine = saveInputLine
         self.saveReplyLine = saveReplyLine
         self.claimTitle = claimTitle
+        self.saveVoiceChange = saveVoiceChange
         self.inputPersistenceConfiguration = inputPersistenceConfiguration
         self.drainTimeout = drainTimeout
     }

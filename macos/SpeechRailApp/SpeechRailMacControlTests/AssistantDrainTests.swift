@@ -426,6 +426,18 @@ final class AssistantDrainTests: XCTestCase {
         await waitUntil({ deadline.pendingOperationCount == 0 })
     }
 
+    func testOperationReturningAfterAbsoluteDeadlineCannotWinBeforeTheTimerRuns() async {
+        let deadline = SessionDrainDeadline(timeout: .milliseconds(10))
+        let result = await deadline.wait(stage: .persistence) {
+            // A synchronous callback can occupy MainActor until after expiry.
+            // The clock is authoritative even when the timer cannot be scheduled.
+            let until = ContinuousClock().now.advanced(by: .milliseconds(30))
+            while ContinuousClock().now < until {}
+        }
+        XCTAssertFalse(result)
+        XCTAssertEqual(deadline.failure?.stage, .persistence)
+    }
+
     func testReceiverTimeoutReleasesOccupancyAndCannotBeRetriedAsComplete() async throws {
         let gate = Gate()
         let h = try await makeHarness(receiverGate: gate, drainTimeout: .milliseconds(80))

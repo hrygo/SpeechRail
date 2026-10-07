@@ -314,10 +314,10 @@ public final class AssistantSession {
         var selection: VoiceSelectionIntent
         var voice: String
         var accepted = false
+        var ordinal: Int?
     }
     private var requestVoices: [String: RequestVoice] = [:]
-    private var voiceRecordEffects: [String: (sessionID: String, task: Task<Void, Never>)] = [:]
-    private var recordedVoiceRequests: Set<String> = []
+    private var voiceRecordEffects: [String: (sessionID: String, task: Task<Bool, Never>)] = [:]
     private var recordedVoiceSelections: [String: Int] = [:]
     private var pump: Task<Void, Never>?
     /// VA-02：拆分后的上传/接收任务句柄。receiver 保持单一顺序消费者，
@@ -725,36 +725,70 @@ public final class AssistantSession {
     }
 
     private func recordAcceptedVoice(requestID: String, ordinal: Int) async {
+        let task = startVoiceRecord(requestID: requestID, ordinal: ordinal)
+        // Stop must drain the receiver before waiting for required metadata.
+        // Normal reply actions keep their existing confirmed-write semantics.
+        if !isStoppingIntentionally { _ = await task?.value }
+    }
+
+    private func startVoiceRecord(requestID: String, ordinal: Int) -> Task<Bool, Never>? {
+        if let effect = voiceRecordEffects[requestID] { return effect.task }
         guard let accepted = requestVoices[requestID],
-              accepted.accepted,
-              !recordedVoiceRequests.contains(requestID) else { return }
+              accepted.accepted else { return nil }
         if recordedVoiceSelections[accepted.sessionID] == accepted.selection.revision {
             requestVoices.removeValue(forKey: requestID)
-            return
+            return nil
         }
-        // 先认领避免 started 与 ordinal 返回同时重复登记；失败撤销认领供再次保存恢复。
-        recordedVoiceRequests.insert(requestID)
+        requestVoices[requestID]?.ordinal = ordinal
+        let task = Task { @MainActor in
+            defer { self.voiceRecordEffects.removeValue(forKey: requestID) }
+            return await self.persistAcceptedVoice(requestID: requestID, accepted: accepted, ordinal: ordinal)
+        }
+        voiceRecordEffects[requestID] = (accepted.sessionID, task)
+        return task
+    }
+
+    private func persistAcceptedVoice(requestID: String, accepted: RequestVoice, ordinal: Int) async -> Bool {
         do {
-            try await coordinator.noteVoiceChange(
-                sessionID: accepted.sessionID, atOrdinal: ordinal,
-                voice: VoiceSnapshot(id: accepted.voice, name: accepted.selection.name)
-            )
+            let voice = VoiceSnapshot(id: accepted.voice, name: accepted.selection.name)
+            if let save = dependencies.saveVoiceChange {
+                try await save(accepted.sessionID, ordinal, voice)
+            } else {
+                try await coordinator.noteVoiceChange(sessionID: accepted.sessionID, atOrdinal: ordinal, voice: voice)
+            }
             recordedVoiceSelections[accepted.sessionID] = max(
                 recordedVoiceSelections[accepted.sessionID] ?? -1, accepted.selection.revision
             )
             requestVoices.removeValue(forKey: requestID)
-            recordedVoiceRequests.remove(requestID)
-            guard sessionID == accepted.sessionID else { return }
+            guard sessionID == accepted.sessionID else { return true }
             if !voiceChanges.contains(where: { $0.atOrdinal == ordinal && $0.voiceID == accepted.voice }) {
                 voiceChanges.append(VoiceChange(atOrdinal: ordinal, voiceID: accepted.voice, name: accepted.selection.name))
                 voiceChanges.sort { $0.atOrdinal < $1.atOrdinal }
             }
+            return true
         } catch {
-            recordedVoiceRequests.remove(requestID)
-            if sessionID == accepted.sessionID, selectedVoice?.revision == accepted.selection.revision {
+            if sessionID == accepted.sessionID {
                 lastFailure = "已用于朗读，但音色变更记录未保存：\(error.localizedDescription)"
             }
+            return false
         }
+    }
+
+    private func waitForVoiceSaves(recordID: String, deadline: SessionDrainDeadline, retry: Bool = false) async -> Bool {
+        if retry {
+            for (requestID, accepted) in requestVoices where accepted.sessionID == recordID && accepted.accepted {
+                if let ordinal = accepted.ordinal { _ = startVoiceRecord(requestID: requestID, ordinal: ordinal) }
+            }
+        }
+        let effects = voiceRecordEffects.values.filter { $0.sessionID == recordID }
+        for effect in effects {
+            guard await deadline.wait(stage: .persistence, operation: {
+                guard await effect.task.value else {
+                    throw SessionDrainFailure(stage: .persistence, message: "音色变更记录未保存，请重试保存。")
+                }
+            }) else { return false }
+        }
+        return !requestVoices.values.contains { $0.sessionID == recordID && $0.accepted }
     }
 
     /// 会话内改人设：**拒绝，并给出口**（§14.4 的实现约束 1）。
@@ -1663,11 +1697,8 @@ public final class AssistantSession {
                     throw SessionDrainFailure(stage: .persistence, message: "部分输入尚未保存，请重试保存。")
                 }
             }
-            inputsSaved = saved && protocolComplete
-            let records = voiceRecordEffects.values.filter { $0.sessionID == endingSession }
-            for record in records {
-                await deadline.wait(stage: .effects) { await record.task.value }
-            }
+            let voicesSaved = await waitForVoiceSaves(recordID: endingSession, deadline: deadline)
+            inputsSaved = saved && voicesSaved && protocolComplete && !deadline.isExpired
             // M2/V06:标题 effect 有界收尾——标题无响应不挡结束报告，
             // 标题失败只记原因，不覆盖正文、不污染封存判定。
             if let title = titleEffect {
@@ -1716,14 +1747,23 @@ public final class AssistantSession {
     @discardableResult
     public func retryPendingSeal() async -> Bool {
         guard let recordID = pendingSealRecordID else { return false }
+        let deadline = SessionDrainDeadline(timeout: dependencies.drainTimeout)
         for failure in inputPersistence.failures(sessionID: recordID) {
             _ = inputPersistence.retry(sessionID: recordID, lineID: failure.command.lineID)
         }
-        guard await waitForInputSaves(sessionID: recordID) else {
+        let queue = inputPersistence
+        let inputsSaved = await deadline.wait(stage: .persistence) {
+            guard await queue.waitUntilSettled(sessionID: recordID).isComplete else {
+                throw SessionDrainFailure(stage: .persistence, message: "仍有输入未保存，请重试保存。")
+            }
+        }
+        let voicesSaved = await waitForVoiceSaves(recordID: recordID, deadline: deadline, retry: true)
+        guard inputsSaved && voicesSaved else {
             retainPendingSeal(id: recordID, reason: "仍有输入未保存，请重试保存。")
             lastFailure = "仍有输入未保存，请重试保存。"
             return false
         }
+        coordinator.recordCaptureCompletionDeadline(recordID: recordID, deadline: deadline)
         let seal = await coordinator.sealSessionReporting(id: recordID, reason: .user)
         recordSealResult(seal, targetID: recordID)
         switch seal {
@@ -2185,12 +2225,7 @@ public final class AssistantSession {
                 if let accepted = requestVoices[requestID],
                    let ordinal = turns.first(where: { $0.id == accepted.replyID })?.ordinal,
                    voiceRecordEffects[requestID] == nil {
-                    let task = Task { [weak self] in
-                        guard let self else { return }
-                        await self.recordAcceptedVoice(requestID: requestID, ordinal: ordinal)
-                        self.voiceRecordEffects.removeValue(forKey: requestID)
-                    }
-                    voiceRecordEffects[requestID] = (accepted.sessionID, task)
+                    _ = startVoiceRecord(requestID: requestID, ordinal: ordinal)
                 }
             }
         case .ttsTextAccepted(let requestID, _, let appendSequence, let totalCodepoints):
