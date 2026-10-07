@@ -882,9 +882,12 @@ class Qwen3TtsWorker:
     async def close(self) -> None:
         """Terminate the worker, waiting for any active stream to finish first."""
         async with self._lock:
+            # Cold children still need an abort attempt for retained-owner
+            # cleanup, but closing a never-started worker is not a reload.
+            if self._epoch > 0 or self._started or self._transport.alive:
+                self._epoch += 1
             self._started = False
             self._runtime_revision = None
-            self._epoch += 1
             await self._transport.abort()
 
 
@@ -1006,6 +1009,12 @@ class Qwen3TtsCapabilityRouter:
         """Return the maximum number of TTS workers this router may keep warm."""
 
         return len(self._workers)
+
+    @property
+    def configured_runtime_roles(self) -> tuple[str, ...]:
+        """Return ordinary synthesis lanes without requiring resident workers."""
+
+        return tuple(role for role in TTS_RUNTIME_ROLES if role in self._workers)
 
     @property
     def active_incremental_streams(self) -> int:

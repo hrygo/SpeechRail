@@ -925,7 +925,83 @@ def test_idle_tts_reclamation_failure_blocks_ordinary_speech_admission(
                 release_other.set()
                 await asyncio.wait_for(closing, timeout=1)
                 assert evictor.state_of(owner).value == "reclamation_failed"
+            still_ready = target == "design" and overlap
+            health = (await client.get("/health")).json()
+            assert health["tts_ready"] is still_ready
+            assert health["ready"] is still_ready
+            readiness = await client.get("/readyz")
+            assert readiness.status_code == (200 if still_ready else 503)
         workers[failed_variant].failing = False
         await services.lifecycle.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("asr_ready", [False, True])
+def test_tts_quarantine_preserves_independent_asr_readiness(
+    monkeypatch: pytest.MonkeyPatch, fake_services: AppServices, asr_ready: bool,
+) -> None:
+    import httpx
+
+    import speechrail.app as app_module
+
+    async def run() -> None:
+        services = replace(
+            fake_services,
+            batch_transcriber=object() if asr_ready else None,
+            tts_synthesizer=object(),
+            governor=services_module.ResourceGovernor(
+                fake_services.settings.governor_limits, allow_heavy_overlap=True,
+            ),
+        )
+        services.governor.quarantine_tts_lane(None)
+        monkeypatch.setattr(app_module, "build_app_services", lambda *_: services)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=create_app(services.settings)),
+            base_url="http://test",
+        ) as client:
+            health = (await client.get("/health")).json()
+            assert health["tts_ready"] is False
+            assert health["asr_ready"] is asr_ready
+            assert health["ready"] is asr_ready
+            readiness = await client.get("/readyz")
+            assert readiness.status_code == (200 if asr_ready else 503)
+
+    asyncio.run(run())
+
+
+def test_cold_or_busy_tts_remains_ready_on_demand(
+    fake_services: AppServices,
+) -> None:
+    from speechrail.runtime.resource_governor import WorkClass
+
+    async def run() -> None:
+        services = replace(fake_services, tts_synthesizer=SimpleNamespace(ready=False))
+        assert services.tts_warm is False
+        assert services.tts_ready is True
+        async with services.governor.reserve(WorkClass.REALTIME_TTS):
+            assert not services.governor.lane_available(WorkClass.REALTIME_TTS)
+            assert services.tts_ready is True
+
+    asyncio.run(run())
+
+
+def test_tts_readiness_tracks_the_configured_production_lanes(
+    fake_services: AppServices,
+) -> None:
+    from speechrail.backends.qwen3_tts import Qwen3TtsCapabilityRouter
+
+    router = Qwen3TtsCapabilityRouter({
+        "tts_custom_voice": SimpleNamespace(model_variant="custom_voice", ready=False),
+        "tts_base": SimpleNamespace(model_variant="base", ready=False),
+    })
+    services = replace(
+        fake_services, tts_synthesizer=router,
+        governor=services_module.ResourceGovernor(
+            fake_services.settings.governor_limits, allow_heavy_overlap=True,
+        ),
+    )
+    services.governor.quarantine_tts_lane("tts_base")
+    assert services.tts_ready is True
+    services.governor.quarantine_tts_lane("tts_custom_voice")
+    assert services.tts_ready is False

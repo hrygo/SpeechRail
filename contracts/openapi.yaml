@@ -90,6 +90,11 @@ paths:
       operationId: getReadiness
       tags: [health]
       summary: Check model readiness
+      description: |
+        Returns 200 when ASR or an ordinary TTS lane can serve on demand.
+        Cold workers and temporary queue occupancy do not make TTS unready.
+        Reclamation quarantine of every configured ordinary TTS lane makes
+        `tts_ready` false; a TTS-only runtime then returns 503.
       security: [{}]
       responses:
         '200':
@@ -959,7 +964,9 @@ paths:
         reference audio. This endpoint is available only when the active
         selection resolves the independent VoiceDesign role. Availability
         follows the active capability and is not tied to a profile name.
-        Design uses conservative TTS resource admission. Initialization and
+        Previews share the `voice_design` resource lane with design tasks.
+        An isolated design lane returns 503 `backend_reclamation_failed`
+        with `retryable=false` without entering the backend. Initialization and
         transport failures return 503, inference/output failures return 502,
         and parameter failures return 400. Errors may include safe worker
         attribution; raw stderr is never returned.
@@ -2769,7 +2776,10 @@ components:
           description: Low-disclosure identity of a currently ready ASR worker; null when unobserved.
         tts_ready:
           type: boolean
-          description: TTS is configured and able to serve on demand.
+          description: >
+            At least one configured ordinary TTS lane can serve on demand.
+            Cold workers and temporary queue occupancy do not make it false;
+            reclamation quarantine of every ordinary TTS lane does.
         tts_warm:
           type: [boolean, 'null']
           description: TTS worker is loaded and ready without a load transition; null when the injected backend does not expose this signal.

@@ -96,7 +96,7 @@ from speechrail.runtime.busy import BusyReason, busy_retry_policy, infer_backend
 from speechrail.runtime.cleanup import join_cleanup
 from speechrail.runtime.diarization_admission import DiarizationAdmissionFullError
 from speechrail.runtime.executable import resolve_configured_executable
-from speechrail.runtime.registry import engine_variant_for_role
+from speechrail.runtime.registry import VOICE_DESIGN_ROLE, engine_variant_for_role
 from speechrail.runtime.resource_governor import (
     GovernorLaneIsolatedError,
     GovernorQueueFullError,
@@ -1375,7 +1375,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "Voice previews require an active VoiceDesign TTS capability",
             )
         synthesizer = services.tts_synthesizer
-        if synthesizer is None or not services.tts_ready:
+        if synthesizer is None:
             return error_response(
                 503,
                 request_id,
@@ -1426,7 +1426,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
             async with services.governor.reserve(
                 WorkClass.BATCH_TTS,
                 expires_at=expires_at,
-                resource_key="tts",
+                resource_key=VOICE_DESIGN_ROLE,
                 purpose=WorkPurpose.VOICE_CREATION,
             ):
                 async for chunk in iter_until(
@@ -1626,7 +1626,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 f"Unknown TTS model: {body.model}",
                 param="model",
             )
-        if services.tts_synthesizer is None or not services.tts_ready:
+        if services.tts_synthesizer is None:
             return error_response(
                 503,
                 request_id,
@@ -1789,7 +1789,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 param="voice",
             )
         synthesizer = services.tts_synthesizer
-        if synthesizer is None or not services.tts_ready:
+        if synthesizer is None:
             return error_response(
                 503,
                 request_id,
