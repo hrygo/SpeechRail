@@ -401,15 +401,11 @@ public actor SessionStore {
             bind(statement, 4, now)
             try step(statement)
         }
-        // 显示名确有变化才记修订事件：首次命名与重复同名不刷事件。
+        // 首次命名也记录修订；重复同名不追加事件。
         if previous != name {
             // at_ordinal 用 0：改名是会话级映射修订，不指向某一句。
             // value 存 `label|name`：回看时仍说得清当时改的是谁。
             let eventSQL = "INSERT INTO session_change (id, session_id, at_ordinal, kind, value, created_at) VALUES (?, ?, 0, 'speaker', ?, ?);"
-            // 测试注入：置位时模拟修订 INSERT 失败，验证整体回滚。
-            if SessionStore.failRevisionInsertForTests {
-                throw SessionStoreError.statementFailed("injected revision insert failure")
-            }
             try withStatement(eventSQL) { statement in
                 bind(statement, 1, UUID().uuidString)
                 bind(statement, 2, sessionID)
@@ -420,20 +416,6 @@ public actor SessionStore {
         }
         try execute("COMMIT;")
         committed = true
-    }
-
-    /// 测试故障注入开关：置位后下一次修订事件 INSERT 抛错并整体回滚。
-    /// 生产路径永不置位；测试用 `withFailingRevisionInsert` 限时启用。
-    nonisolated(unsafe) static var failRevisionInsertForTests = false
-
-    /// 在闭包内启用修订 INSERT 失败注入，退出时恢复。仅测试使用。
-    /// `@Sendable` 使调用方闭包满足 Swift 6 region 隔离。
-    func withFailingRevisionInsert<T: Sendable>(
-        _ body: @Sendable () async throws -> T
-    ) async rethrows -> T {
-        SessionStore.failRevisionInsertForTests = true
-        defer { SessionStore.failRevisionInsertForTests = false }
-        return try await body()
     }
 
     /// 记一条**归属**修订（拆出用），只追加事件，不碰 `speaker_name`。
