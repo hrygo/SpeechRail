@@ -203,6 +203,8 @@ def _make_decoder(
         BoundQwen3Decoder(
             session,
             max_new_tokens=64,
+            # Tiny fake waveforms use a four-sample unfixed window.
+            initial_unfixed_samples=4,
             runtime=runtime.bindings(),
         ),
         runtime,
@@ -211,7 +213,7 @@ def _make_decoder(
     )
 
 
-def test_first_two_previews_avoid_prefix_then_rollback_tokens_and_rebuild_audio() -> None:
+def test_initial_audio_window_avoids_prefix_then_rolls_back_and_rebuilds_audio() -> None:
     decoder, runtime, model, tokenizer = _make_decoder(
         [
             FakeGeneration([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
@@ -367,7 +369,7 @@ def test_repeated_truncated_previews_keep_total_raw_tokens_within_budget() -> No
     )
     state = StreamingDecodeState()
 
-    for watermark in (1, 2, 3, 4):
+    for watermark in (2, 4, 6, 8):
         decoder.decode(
             [0.1] * watermark,
             state,
@@ -436,3 +438,80 @@ def test_decode_rejects_invalid_rollback_tokens_override() -> None:
             sample_watermark=2,
             rollback_tokens=-1,
         )
+
+
+@pytest.mark.parametrize("preview_ms", [250, 500, 2_000])
+def test_preview_cadence_does_not_shorten_initial_prefix_free_audio(preview_ms: int) -> None:
+    # The model's reference 2 x 2-second prefix-free window is audio time.
+    # More frequent preview requests must not force early mistaken tokens.
+    watermarks = [ms * 16 for ms in range(preview_ms, 4_001, preview_ms)]
+    watermarks.append(4_000 * 16 + preview_ms * 16)
+    runtime = FakeRuntime(
+        [FakeGeneration([5, 6, 7, 8, 9, 10, 11, 12]) for _ in watermarks]
+    )
+    session = SimpleNamespace(
+        model=FakeModel(), tokenizer=FakeTokenizer(), dtype="float16",
+    )
+    decoder = BoundQwen3Decoder(session, max_new_tokens=64, runtime=runtime.bindings())
+    state = StreamingDecodeState()
+
+    for watermark in watermarks:
+        decoder.decode(
+            [0.1] * watermark, state, language="zh", context="",
+            sample_watermark=watermark,
+        )
+
+    assert all(prompt[-1] == 103 for prompt in runtime.input_ids[:-1])
+    assert all(config.max_new_tokens == 64 for config in runtime.configs[:-1])
+    assert runtime.input_ids[-1][-3:] == [5, 6, 7]
+    assert runtime.configs[-1].max_new_tokens == 61
+
+
+def test_latest_wins_skips_do_not_delay_prefix_warmup_past_audio_window() -> None:
+    runtime = FakeRuntime([
+        FakeGeneration([5, 6, 7, 8, 9, 10, 11, 12]),
+        FakeGeneration([5]),
+    ])
+    session = SimpleNamespace(
+        model=FakeModel(), tokenizer=FakeTokenizer(), dtype="float16",
+    )
+    decoder = BoundQwen3Decoder(session, max_new_tokens=64, runtime=runtime.bindings())
+    state = StreamingDecodeState()
+
+    for watermark in (64_000, 72_000):
+        decoder.decode(
+            [0.1] * watermark, state, language="zh", context="",
+            sample_watermark=watermark,
+        )
+
+    assert runtime.input_ids[0][-1] == 103
+    assert runtime.input_ids[1][-3:] == [5, 6, 7]
+    assert runtime.configs[1].max_new_tokens == 61
+
+
+@pytest.mark.parametrize("value", [-1, True, 1.5])
+def test_decoder_rejects_invalid_initial_unfixed_samples(value: object) -> None:
+    session = SimpleNamespace(
+        model=FakeModel(), tokenizer=FakeTokenizer(), dtype="float16",
+    )
+    with pytest.raises(ValueError, match="initial_unfixed_samples"):
+        BoundQwen3Decoder(
+            session, max_new_tokens=64,
+            initial_unfixed_samples=value,  # type: ignore[arg-type]
+        )
+
+
+def test_late_audio_cannot_freeze_a_prefix_decoded_before_the_unfixed_window() -> None:
+    decoder, runtime, _model, _tokenizer = _make_decoder([
+        FakeGeneration([5, 6, 7, 8, 9, 10, 11, 12]),
+        FakeGeneration([5, 6, 7, 8, 9, 10, 11, 12]),
+        FakeGeneration([5]),
+    ])
+    state = StreamingDecodeState()
+    for watermark in (2, 6, 8):
+        decoder.decode(
+            [0.1] * watermark, state, language="zh", context="",
+            sample_watermark=watermark,
+        )
+    assert all(prompt[-1] == 103 for prompt in runtime.input_ids[:2])
+    assert runtime.input_ids[2][-3:] == [5, 6, 7]
