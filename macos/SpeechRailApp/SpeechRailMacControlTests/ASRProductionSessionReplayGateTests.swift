@@ -1193,3 +1193,276 @@ struct SessionReplayCaptureReleaseIntegrityTests {
         )
     }
 }
+
+@Suite
+struct ASRSessionReplaySamplerHandshakeTests {
+    @Test
+    func ordinaryReplayDoesNotRequireASampler() throws {
+        #expect(try SessionReplaySamplerHandshake.load(
+            outputURL: URL(fileURLWithPath: "/tmp/result.json"),
+            environment: [:]
+        ) == nil)
+    }
+
+    @Test
+    func partialConfigurationIsRejected() throws {
+        #expect(throws: SessionReplaySamplerHandshakeFailure.invalidConfiguration) {
+            _ = try SessionReplaySamplerHandshake.load(
+                outputURL: URL(fileURLWithPath: "/tmp/result.json"),
+                environment: ["SPEECHRAIL_ASR_SESSION_SAMPLER_RUN_ID": UUID().uuidString.lowercased()]
+            )
+        }
+    }
+
+    @Test(arguments: [
+        "disabled", "relative", "same_path", "ready_output", "release_output",
+        "other_directory", "bad_uuid", "uppercase_uuid", "repository_output",
+    ])
+    func unsafeConfigurationIsRejected(_ variant: String) throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        var environment = fixture.environment
+        var repositoryRoot = fixture.root.appendingPathComponent("repository", isDirectory: true)
+        switch variant {
+        case "disabled": environment.removeValue(forKey: "SPEECHRAIL_ASR_SESSION_E2E")
+        case "relative": environment["SPEECHRAIL_ASR_SESSION_SAMPLER_READY"] = "ready.json"
+        case "same_path": environment["SPEECHRAIL_ASR_SESSION_SAMPLER_RELEASE"] = fixture.readyURL.path
+        case "ready_output": environment["SPEECHRAIL_ASR_SESSION_SAMPLER_READY"] = fixture.outputURL.path
+        case "release_output": environment["SPEECHRAIL_ASR_SESSION_SAMPLER_RELEASE"] = fixture.outputURL.path
+        case "other_directory":
+            environment["SPEECHRAIL_ASR_SESSION_SAMPLER_RELEASE"] = fixture.root
+                .appendingPathComponent("other/release.json").path
+        case "bad_uuid": environment["SPEECHRAIL_ASR_SESSION_SAMPLER_RUN_ID"] = "bad"
+        case "uppercase_uuid":
+            environment["SPEECHRAIL_ASR_SESSION_SAMPLER_RUN_ID"] = "ABCDEFAB-1234-4567-89AB-123456789ABC"
+        case "repository_output": repositoryRoot = fixture.root
+        default: Issue.record("Unknown configuration fixture")
+        }
+        #expect(throws: SessionReplaySamplerHandshakeFailure.invalidConfiguration) {
+            _ = try SessionReplaySamplerHandshake.load(
+                outputURL: fixture.outputURL, environment: environment,
+                repositoryRootURL: repositoryRoot
+            )
+        }
+    }
+
+    @Test(arguments: ["ready.json", "release.json"])
+    func existingMarkersCannotReleaseANewRun(_ name: String) throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try Data("old run".utf8).write(to: fixture.root.appendingPathComponent(name))
+        #expect(throws: SessionReplaySamplerHandshakeFailure.markerAlreadyExists) {
+            _ = try SessionReplaySamplerHandshake.load(
+                outputURL: fixture.outputURL, environment: fixture.environment
+            )
+        }
+    }
+
+    @Test
+    func readyIsNonceBoundAndConsumerWaitsUntilRelease() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let handshake = try #require(try SessionReplaySamplerHandshake.load(
+            outputURL: fixture.outputURL, environment: fixture.environment
+        ))
+        let consumer = Task { try await handshake.waitForSamplerStop(timeout: .seconds(1)) }
+        defer { consumer.cancel() }
+        try await waitForReady(fixture.readyURL)
+        let marker = try JSONSerialization.jsonObject(with: Data(contentsOf: fixture.readyURL)) as? [String: Any]
+        #expect(marker?["schema_version"] as? Int == 1)
+        #expect(marker?["run_id"] as? String == fixture.runID)
+        #expect(marker?["consumer_finished"] as? Bool == true)
+        #expect(!FileManager.default.fileExists(atPath: fixture.releaseURL.path))
+        try publishRelease(fixture, runID: fixture.runID)
+        try await consumer.value
+    }
+
+    @Test(arguments: [
+        "wrong_run", "not_stopped", "malformed", "extra_key", "boolean_schema",
+        "numeric_stopped", "oversized", "symlink", "directory",
+    ])
+    func invalidReleaseDoesNotCountAsSamplerStopped(_ variant: String) async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let handshake = try #require(try SessionReplaySamplerHandshake.load(
+            outputURL: fixture.outputURL, environment: fixture.environment
+        ))
+        let consumer = Task { try await handshake.waitForSamplerStop(timeout: .seconds(1)) }
+        defer { consumer.cancel() }
+        try await waitForReady(fixture.readyURL)
+        if variant == "malformed" {
+            try Data("{".utf8).write(to: fixture.releaseURL, options: .atomic)
+        } else if variant == "oversized" {
+            try Data(repeating: 0x20, count: 1_025).write(to: fixture.releaseURL)
+        } else if variant == "symlink" {
+            let target = fixture.root.appendingPathComponent("target.json")
+            let bytes = try JSONSerialization.data(withJSONObject: [
+                "schema_version": 1, "run_id": fixture.runID, "sampler_stopped": true,
+            ])
+            try bytes.write(to: target)
+            try FileManager.default.createSymbolicLink(at: fixture.releaseURL, withDestinationURL: target)
+        } else if variant == "directory" {
+            try FileManager.default.createDirectory(at: fixture.releaseURL, withIntermediateDirectories: false)
+        } else if ["extra_key", "boolean_schema", "numeric_stopped"].contains(variant) {
+            var marker: [String: Any] = [
+                "schema_version": 1, "run_id": fixture.runID, "sampler_stopped": true,
+            ]
+            if variant == "extra_key" { marker["unexpected"] = true }
+            if variant == "boolean_schema" { marker["schema_version"] = true }
+            if variant == "numeric_stopped" { marker["sampler_stopped"] = 1 }
+            try JSONSerialization.data(withJSONObject: marker).write(to: fixture.releaseURL, options: .atomic)
+        } else {
+            try publishRelease(
+                fixture,
+                runID: variant == "wrong_run" ? UUID().uuidString.lowercased() : fixture.runID,
+                stopped: variant != "not_stopped"
+            )
+        }
+        var rejected = false
+        do {
+            try await consumer.value
+        } catch SessionReplaySamplerHandshakeFailure.invalidReleaseMarker {
+            rejected = true
+        }
+        #expect(rejected)
+    }
+
+    @Test
+    func readyPublicationCannotOverwriteAMarkerCreatedAfterLoad() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let handshake = try #require(try SessionReplaySamplerHandshake.load(
+            outputURL: fixture.outputURL, environment: fixture.environment
+        ))
+        let oldBytes = Data("a different writer".utf8)
+        try oldBytes.write(to: fixture.readyURL)
+        var rejected = false
+        do {
+            try await handshake.waitForSamplerStop(timeout: .seconds(1))
+        } catch SessionReplaySamplerHandshakeFailure.markerAlreadyExists {
+            rejected = true
+        }
+        #expect(rejected)
+        #expect(try Data(contentsOf: fixture.readyURL) == oldBytes)
+        #expect(!FileManager.default.fileExists(atPath: fixture.releaseURL.path))
+    }
+
+    @Test
+    func danglingExistingMarkerIsRejected() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try FileManager.default.createSymbolicLink(
+            at: fixture.readyURL, withDestinationURL: fixture.root.appendingPathComponent("missing.json")
+        )
+        #expect(throws: SessionReplaySamplerHandshakeFailure.markerAlreadyExists) {
+            _ = try SessionReplaySamplerHandshake.load(
+                outputURL: fixture.outputURL, environment: fixture.environment
+            )
+        }
+    }
+
+    @Test
+    func missingReleaseTimesOutWithoutClaimingSuccess() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let handshake = try #require(try SessionReplaySamplerHandshake.load(
+            outputURL: fixture.outputURL, environment: fixture.environment
+        ))
+        var timedOut = false
+        do {
+            try await handshake.waitForSamplerStop(timeout: .milliseconds(2))
+        } catch SessionReplaySamplerHandshakeFailure.samplerReleaseTimedOut {
+            timedOut = true
+        }
+        #expect(timedOut)
+        #expect(FileManager.default.fileExists(atPath: fixture.readyURL.path))
+        #expect(!FileManager.default.fileExists(atPath: fixture.releaseURL.path))
+    }
+
+    @Test
+    func cancellationDoesNotBecomeSuccess() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let handshake = try #require(try SessionReplaySamplerHandshake.load(
+            outputURL: fixture.outputURL, environment: fixture.environment
+        ))
+        let consumer = Task { try await handshake.waitForSamplerStop(timeout: .seconds(1)) }
+        try await waitForReady(fixture.readyURL)
+        consumer.cancel()
+        var cancelled = false
+        do {
+            try await consumer.value
+        } catch is CancellationError {
+            cancelled = true
+        }
+        #expect(cancelled)
+        #expect(!FileManager.default.fileExists(atPath: fixture.releaseURL.path))
+    }
+
+    @Test
+    func cancellationBeforePublicationDoesNotEmitReady() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let handshake = try #require(try SessionReplaySamplerHandshake.load(
+            outputURL: fixture.outputURL, environment: fixture.environment
+        ))
+        let consumer = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            try await handshake.waitForSamplerStop(timeout: .seconds(1))
+        }
+        var cancelled = false
+        do {
+            try await consumer.value
+        } catch is CancellationError {
+            cancelled = true
+        }
+        #expect(cancelled)
+        #expect(!FileManager.default.fileExists(atPath: fixture.readyURL.path))
+        #expect(!FileManager.default.fileExists(atPath: fixture.releaseURL.path))
+    }
+
+    private struct Fixture {
+        let root: URL
+        let runID: String
+        var outputURL: URL { root.appendingPathComponent("result.json") }
+        var readyURL: URL { root.appendingPathComponent("ready.json") }
+        var releaseURL: URL { root.appendingPathComponent("release.json") }
+        var environment: [String: String] {
+            [
+                "SPEECHRAIL_ASR_SESSION_E2E": "1",
+                "SPEECHRAIL_ASR_SESSION_SAMPLER_RUN_ID": runID,
+                "SPEECHRAIL_ASR_SESSION_SAMPLER_READY": readyURL.path,
+                "SPEECHRAIL_ASR_SESSION_SAMPLER_RELEASE": releaseURL.path,
+            ]
+        }
+    }
+
+    private func makeFixture() throws -> Fixture {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "speechrail-sampler-handshake-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: root, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        return Fixture(root: root, runID: UUID().uuidString.lowercased())
+    }
+
+    private func publishRelease(_ fixture: Fixture, runID: String, stopped: Bool = true) throws {
+        let bytes = try JSONSerialization.data(withJSONObject: [
+            "schema_version": 1, "run_id": runID, "sampler_stopped": stopped,
+        ])
+        try bytes.write(to: fixture.releaseURL, options: .atomic)
+    }
+
+    private func waitForReady(_ url: URL) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(1))
+        while !FileManager.default.fileExists(atPath: url.path) {
+            guard clock.now < deadline else {
+                throw SessionReplaySamplerHandshakeFailure.samplerReleaseTimedOut
+            }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+    }
+}

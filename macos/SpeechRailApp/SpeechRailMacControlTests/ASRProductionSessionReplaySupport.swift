@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 import CryptoKit
 import SpeechRailControlKit
 import Testing
@@ -1626,4 +1627,161 @@ func requireClient(_ handle: SessionReplayClientHandle) throws -> SessionReplayC
 func requireSessionID(_ value: String?) throws -> String {
     guard let value else { throw SessionReplayFailure.sessionRunFailed }
     return value
+}
+
+enum SessionReplaySamplerHandshakeFailure: Error, Equatable {
+    case invalidConfiguration
+    case markerAlreadyExists
+    case invalidReleaseMarker
+    case samplerReleaseTimedOut
+}
+
+struct SessionReplaySamplerHandshake: Sendable {
+    let runID: String
+    let readyURL: URL
+    let releaseURL: URL
+
+    private init(runID: String, readyURL: URL, releaseURL: URL) {
+        self.runID = runID
+        self.readyURL = readyURL
+        self.releaseURL = releaseURL
+    }
+
+    static func load(
+        outputURL: URL,
+        environment: [String: String],
+        repositoryRootURL: URL = inferredRepositoryRoot
+    ) throws -> Self? {
+        let runID = environment["SPEECHRAIL_ASR_SESSION_SAMPLER_RUN_ID"] ?? ""
+        let readyPath = environment["SPEECHRAIL_ASR_SESSION_SAMPLER_READY"] ?? ""
+        let releasePath = environment["SPEECHRAIL_ASR_SESSION_SAMPLER_RELEASE"] ?? ""
+        if runID.isEmpty && readyPath.isEmpty && releasePath.isEmpty { return nil }
+        guard environment["SPEECHRAIL_ASR_SESSION_E2E"] == "1",
+              let uuid = UUID(uuidString: runID),
+              uuid.uuidString.lowercased() == runID,
+              readyPath.hasPrefix("/"), releasePath.hasPrefix("/"),
+              outputURL.isFileURL, outputURL.path.hasPrefix("/") else {
+            throw SessionReplaySamplerHandshakeFailure.invalidConfiguration
+        }
+
+        let rawReadyURL = URL(fileURLWithPath: readyPath)
+        let rawReleaseURL = URL(fileURLWithPath: releasePath)
+        guard !markerExists(rawReadyURL), !markerExists(rawReleaseURL) else {
+            throw SessionReplaySamplerHandshakeFailure.markerAlreadyExists
+        }
+        let readyURL = canonical(rawReadyURL)
+        let releaseURL = canonical(rawReleaseURL)
+        let outputURL = canonical(outputURL)
+        let root = canonical(repositoryRootURL)
+        let directory = outputURL.deletingLastPathComponent()
+        var isDirectory: ObjCBool = false
+        guard readyURL != releaseURL, readyURL != outputURL, releaseURL != outputURL,
+              readyURL.deletingLastPathComponent() == directory,
+              releaseURL.deletingLastPathComponent() == directory,
+              isExternal(directory, from: root),
+              FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            throw SessionReplaySamplerHandshakeFailure.invalidConfiguration
+        }
+        return Self(runID: runID, readyURL: readyURL, releaseURL: releaseURL)
+    }
+
+    func waitForSamplerStop(timeout: Duration) async throws {
+        guard timeout > .zero && timeout <= .seconds(30) else {
+            throw SessionReplaySamplerHandshakeFailure.invalidConfiguration
+        }
+        try Task.checkCancellation()
+        let ready = try JSONSerialization.data(withJSONObject: [
+            "schema_version": 1,
+            "run_id": runID,
+            "consumer_finished": true,
+        ], options: [.sortedKeys])
+        try publishReady(ready)
+
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while true {
+            try Task.checkCancellation()
+            let remaining = clock.now.duration(to: deadline)
+            guard remaining > .zero else {
+                throw SessionReplaySamplerHandshakeFailure.samplerReleaseTimedOut
+            }
+            if Self.markerExists(releaseURL) {
+                try validateRelease()
+                try Task.checkCancellation()
+                return
+            }
+            try await Task.sleep(for: min(.milliseconds(10), remaining))
+        }
+    }
+
+    private func publishReady(_ data: Data) throws {
+        let temporary = readyURL.deletingLastPathComponent().appendingPathComponent(
+            ".sampler-ready-\(UUID().uuidString.lowercased()).tmp"
+        )
+        // Both files live on one filesystem. Hard-link publication is atomic
+        // and refuses an existing destination, including a dangling symlink.
+        guard FileManager.default.createFile(
+            atPath: temporary.path, contents: data,
+            attributes: [.posixPermissions: 0o600]
+        ) else {
+            throw SessionReplaySamplerHandshakeFailure.invalidConfiguration
+        }
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        do {
+            try FileManager.default.linkItem(at: temporary, to: readyURL)
+        } catch {
+            if Self.markerExists(readyURL) {
+                throw SessionReplaySamplerHandshakeFailure.markerAlreadyExists
+            }
+            throw error
+        }
+    }
+
+    private func validateRelease() throws {
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: releaseURL.path)
+            guard attributes[.type] as? FileAttributeType == .typeRegular,
+                  let size = attributes[.size] as? NSNumber,
+                  size.intValue > 0, size.intValue <= 1_024 else {
+                throw SessionReplaySamplerHandshakeFailure.invalidReleaseMarker
+            }
+            let data = try Data(contentsOf: releaseURL)
+            guard data.count <= 1_024,
+                  let marker = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  Set(marker.keys) == Set(["schema_version", "run_id", "sampler_stopped"]),
+                  let schema = marker["schema_version"] as? NSNumber,
+                  CFGetTypeID(schema) != CFBooleanGetTypeID(),
+                  !["f", "d"].contains(String(cString: schema.objCType)),
+                  schema.intValue == 1,
+                  marker["run_id"] as? String == runID,
+                  let stopped = marker["sampler_stopped"] as? NSNumber,
+                  CFGetTypeID(stopped) == CFBooleanGetTypeID(),
+                  stopped.boolValue else {
+                throw SessionReplaySamplerHandshakeFailure.invalidReleaseMarker
+            }
+        } catch {
+            throw SessionReplaySamplerHandshakeFailure.invalidReleaseMarker
+        }
+    }
+
+    private static func markerExists(_ url: URL) -> Bool {
+        // attributesOfItem observes the directory entry, including a broken
+        // symlink, rather than accepting only an existing symlink destination.
+        (try? FileManager.default.attributesOfItem(atPath: url.path)) != nil
+    }
+
+    private static func canonical(_ url: URL) -> URL {
+        url.standardizedFileURL.resolvingSymlinksInPath()
+    }
+
+    private static func isExternal(_ url: URL, from root: URL) -> Bool {
+        url.path != root.path && !url.path.hasPrefix(root.path + "/")
+    }
+
+    static var inferredRepositoryRoot: URL {
+        var url = URL(fileURLWithPath: #filePath)
+        for _ in 0..<4 { url.deleteLastPathComponent() }
+        return canonical(url)
+    }
 }

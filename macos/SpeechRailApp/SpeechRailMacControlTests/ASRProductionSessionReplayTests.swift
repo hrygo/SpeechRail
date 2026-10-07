@@ -26,6 +26,10 @@ struct ASRProductionSessionReplayTests {
     )
     func selectedProductionSessionConsumesPacedFakeCapture() async throws {
         let configuration = try SessionReplayConfiguration.load()
+        let samplerHandshake = try SessionReplaySamplerHandshake.load(
+            outputURL: configuration.outputURL,
+            environment: ProcessInfo.processInfo.environment
+        )
         let maximumAudioSeconds = ProcessInfo.processInfo.environment[
             "SPEECHRAIL_ASR_SESSION_LONG_FIXTURE"
         ] == "1" ? 3_600 : 30
@@ -56,6 +60,7 @@ struct ASRProductionSessionReplayTests {
         if configuration.scene == .teleprompter {
             #expect(run.summary.teleprompterProgressGate == "pass", "Revised previews must advance within the expected script and manual takeover must hold position.")
         }
+        try await samplerHandshake?.waitForSamplerStop(timeout: .seconds(30))
     }
 
     private func replay(_ configuration: SessionReplayConfiguration, pcm: Data) async throws -> SessionReplayRun {

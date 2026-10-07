@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.5"
+version: "3.3.6"
 date: 2026-10-07
 ---
 
@@ -144,6 +144,37 @@ curl -X POST http://127.0.0.1:8201/v1/audio/speech \
 当前没有经场景对照确认的标点阈值，`punctuation_gate` 始终为 `unset`；标点分数只作
 描述性证据。资源专用样本不做质量评分，原有终态、输入覆盖、预算和上传回执验收门保持
 独立。原始音频、人工参考、转写和 benchmark 制品仍保存在仓库外。
+
+### 生产 Session 回放的采样退出协调
+
+对显式启用 `SPEECHRAIL_ASR_SESSION_E2E=1` 的生产 Session 回放，
+外部资源监督器可同时提供以下三个变量：
+
+- `SPEECHRAIL_ASR_SESSION_SAMPLER_RUN_ID`：本次运行的 canonical 小写 UUID。
+- `SPEECHRAIL_ASR_SESSION_SAMPLER_READY`：消费者 ready JSON 的绝对路径。
+- `SPEECHRAIL_ASR_SESSION_SAMPLER_RELEASE`：监督器 release JSON 的绝对路径。
+
+两个 marker 与结果文件须为不同文件，位于同一个现有仓库外目录；已有 marker、
+部分配置、相对路径、路径冲突与仓库内目录均拒绝。三个变量均为空时不启用协调。
+
+消费者在排空、释放、结果写入及原有验收断言后，原子发布且不覆盖 ready：
+`{"schema_version":1,"run_id":"<本次 UUID>","consumer_finished":true}`。
+监督器须先停止并 join 采样线程，保存原始资源材料，成功后才原子发布且不覆盖
+release：`{"schema_version":1,"run_id":"<同一 UUID>","sampler_stopped":true}`，
+随后等待消费者实际退出。消费者限时等待最多 30 秒；错误 UUID、格式或字段、
+非普通文件、超大 marker、超时与取消均失败，取消不转换为成功。
+
+marker 只协调进程退出顺序，不表示质量、消费者或资源门通过。原有失败结果、
+不完整资源和非零退出码必须原样保留；异常路径仍须由监督器回收消费者。
+握手的确定性回归位于现有 `ASRProductionSessionReplayGateTests.swift`，
+Xcode 与 SwiftPM 使用同一测试文件。可单独运行：
+
+```bash
+swift test --package-path macos/SpeechRailApp --filter ASRSessionReplaySamplerHandshakeTests
+```
+
+定向测试使用临时 marker 与替身状态，不加载模型或接管 UI。真实长会资源门须另以
+同一消费者 binary、监督器、素材与驻留口径配对重测，不能用确定性测试改写旧失败。
 
 ## 规格选择与分人供给测试清单
 
