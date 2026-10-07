@@ -399,16 +399,22 @@ final class AssistantSessionTests: XCTestCase {
         func start() async throws -> AsyncStream<AudioChunk> {
             lock.withLock { _startCount += 1 }
             if let startFailure { throw startFailure }
-            if autoStartCapture {
-                // 被取消的 AsyncStream iterator 会结束旧流，重连要像新设备一样创建新流。
-                let (stream, continuation) = AsyncStream<AudioChunk>.makeStream()
-                lock.withLock { captureContinuation = continuation }
-                return stream
-            }
-            return AsyncStream { _ in }
+            // The production source always closes its stream on stop, even when
+            // the test never injects any audio.
+            let (stream, continuation) = AsyncStream<AudioChunk>.makeStream()
+            lock.withLock { captureContinuation = continuation }
+            return stream
         }
 
-        func stop() { lock.withLock { _stopCount += 1 } }
+        func stop() {
+            let continuation = lock.withLock {
+                _stopCount += 1
+                let continuation = captureContinuation
+                captureContinuation = nil
+                return continuation
+            }
+            continuation?.finish()
+        }
 
         /// 往采集流里塞一块音频，验证上行确实发生了。
         func emitCapture(_ chunk: AudioChunk) {
@@ -468,6 +474,8 @@ final class AssistantSessionTests: XCTestCase {
         autoConfirmTTSCancel: Bool = true,
         capability: Bool = true,
         inputPersistenceConfiguration: TranscriptPersistenceQueue.Configuration = .init(),
+        saveVoiceChange: (@Sendable (String, Int, VoiceSnapshot) async throws -> Void)? = nil,
+        drainTimeout: Duration = .seconds(12),
         now: @escaping @Sendable () -> Date = { Date() }
     ) async throws -> Harness {
         let directory = FileManager.default.temporaryDirectory
@@ -506,7 +514,9 @@ final class AssistantSessionTests: XCTestCase {
                     return client
                 },
                 now: now,
-                inputPersistenceConfiguration: inputPersistenceConfiguration
+                saveVoiceChange: saveVoiceChange,
+                inputPersistenceConfiguration: inputPersistenceConfiguration,
+                drainTimeout: drainTimeout
             )
         )
         session.preferences = { preferences }
@@ -1424,6 +1434,88 @@ final class AssistantSessionTests: XCTestCase {
     }
 
     // MARK: - D02：启动没有所有权屏障
+
+    actor VoiceMetadataWriter {
+        private var store: SessionStore?
+        private let gate: AssistantDrainTests.Gate?
+        private var fails: Bool
+        private(set) var attempts = 0
+        init(gate: AssistantDrainTests.Gate? = nil, fails: Bool = false) {
+            self.gate = gate
+            self.fails = fails
+        }
+        func attach(_ store: SessionStore) { self.store = store }
+        func allowWrites() { fails = false }
+        func save(_ id: String, ordinal: Int, voice: VoiceSnapshot) async throws {
+            attempts += 1
+            if let gate { await gate.enter() }
+            if fails { throw FakeAssistantError.connect }
+            try await store?.noteVoiceChange(sessionID: id, atOrdinal: ordinal, voice: voice)
+        }
+    }
+
+    func testAcceptedVoiceFailureBlocksSealUntilFrozenMetadataIsRetried() async throws {
+        let writer = VoiceMetadataWriter(fails: true)
+        let h = try await makeHarness(
+            llmScripts: [.deltas(["实际朗读的回答。"])],
+            saveVoiceChange: { try await writer.save($0, ordinal: $1, voice: $2) }
+        )
+        defer { cleanup(h) }
+        await writer.attach(h.store)
+        try await h.coordinator.begin(.assistant)
+        let id = try XCTUnwrap(h.session.sessionID)
+        await h.session.changeVoice(to: "voice-1", name: "已接纳音色")
+        await h.clients()[0].emit(.completed(itemID: "voice-failure", transcript: "请朗读"))
+        await waitUntil({ h.session.lastFailure?.contains("音色变更记录未保存") == true })
+        _ = await h.session.endConversation()
+        let record = try await h.store.session(id: id)
+        XCTAssertNotEqual(record?.state, .archived)
+        XCTAssertEqual(h.session.pendingSealRecordID, id)
+        XCTAssertNil(h.session.lastFinalizedSessionID)
+        await writer.allowWrites()
+        let recovered = await h.session.retryPendingSeal()
+        XCTAssertTrue(recovered)
+        let changes = try await h.store.voiceChanges(sessionID: id)
+        XCTAssertEqual(changes.count, 1)
+        XCTAssertEqual(changes.first?.value, "voice-1|已接纳音色")
+        let lines = try await h.store.lines(sessionID: id)
+        XCTAssertEqual(changes.first?.atOrdinal, lines.first(where: { $0.role == .assistant })?.ordinal)
+    }
+
+    func testTimedOutAcceptedVoiceCannotBeBypassedByRetryOrPolluteTheNextRecord() async throws {
+        let gate = AssistantDrainTests.Gate()
+        let writer = VoiceMetadataWriter(gate: gate)
+        let h = try await makeHarness(
+            llmScripts: [.deltas(["等待 metadata 的回答。"])],
+            saveVoiceChange: { try await writer.save($0, ordinal: $1, voice: $2) },
+            drainTimeout: .milliseconds(100)
+        )
+        defer { gate.release(); cleanup(h) }
+        await writer.attach(h.store)
+        try await h.coordinator.begin(.assistant)
+        let id = try XCTUnwrap(h.session.sessionID)
+        await h.session.changeVoice(to: "voice-1", name: "冻结旧场")
+        await h.clients()[0].emit(.completed(itemID: "voice-gate", transcript: "请朗读"))
+        await waitUntil({ gate.entered })
+        _ = await h.session.endConversation()
+        XCTAssertEqual(h.session.pendingSealRecordID, id)
+        XCTAssertNil(h.coordinator.captureCompletionFailure(recordID: id), "metadata 可恢复，不能误归类为输入证明丢失")
+        let premature = await h.session.retryPendingSeal()
+        XCTAssertFalse(premature, "仍运行的旧 metadata 不能被空转录队列绕过")
+        try await h.coordinator.begin(.assistant)
+        let nextID = try XCTUnwrap(h.session.sessionID)
+        XCTAssertNotEqual(nextID, id)
+        gate.release()
+        let recovered = await h.session.retryPendingSeal()
+        XCTAssertTrue(recovered)
+        let oldChanges = try await h.store.voiceChanges(sessionID: id)
+        let nextChanges = try await h.store.voiceChanges(sessionID: nextID)
+        XCTAssertEqual(oldChanges.count, 1, "重试复用同一在飞任务，不能重复写 metadata")
+        XCTAssertTrue(nextChanges.isEmpty)
+        XCTAssertTrue(h.session.voiceChanges.isEmpty)
+        XCTAssertEqual(h.session.sessionID, nextID)
+        _ = await h.session.endConversation()
+    }
 
     /// 建连卡住时用户结束会话：晚到的 connect 不能再把这一轮复活，
     /// 也不能让设备留在会话手里。

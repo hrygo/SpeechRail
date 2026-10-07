@@ -1,5 +1,132 @@
 import Foundation
 
+/// Application completion is separate from the remote drain receipt.
+public enum SessionDrainStage: String, Sendable {
+    case capture, effects, upload, protocolDrain, transportClose, receiver, persistence, seal
+}
+
+public struct SessionDrainFailure: Error, LocalizedError, Equatable, Sendable {
+    public let stage: SessionDrainStage
+    public let message: String
+    public var errorDescription: String? { message }
+}
+
+/// One monotonic deadline for the entire local stop, including noncooperative IO.
+/// Timed-out work remains owned until it actually returns; cancellation is not EOF.
+@MainActor
+public final class SessionDrainDeadline {
+    private let deadline: ContinuousClock.Instant
+    private var operations: [UUID: Task<Void, Never>] = [:]
+    private var stages: [UUID: SessionDrainStage] = [:]
+    private var timers: [UUID: Task<Void, Never>] = [:]
+    private var waiters: [UUID: CheckedContinuation<Bool, Never>] = [:]
+    public private(set) var failure: SessionDrainFailure?
+    public var pendingOperationCount: Int { operations.count }
+    public var isExpired: Bool { ContinuousClock().now >= deadline }
+
+    public init(timeout: Duration) {
+        deadline = ContinuousClock().now.advanced(by: timeout)
+    }
+
+    public func hasPending(_ stage: SessionDrainStage) -> Bool {
+        stages.values.contains(stage)
+    }
+
+    public func reject(stage: SessionDrainStage, message: String) {
+        if failure == nil { failure = .init(stage: stage, message: message) }
+    }
+
+    /// Abort can originate inside the receiver itself. Retain its completion
+    /// handle without making that receiver await its own EOF.
+    public func retain(
+        stage: SessionDrainStage,
+        operation: @escaping @MainActor @Sendable () async -> Void
+    ) {
+        let id = UUID()
+        stages[id] = stage
+        operations[id] = Task { @MainActor in
+            defer { self.operations[id] = nil; self.stages[id] = nil }
+            await operation()
+        }
+    }
+
+    public func value<Value: Sendable>(
+        stage: SessionDrainStage,
+        operation: @escaping @MainActor @Sendable () async throws -> Value
+    ) async -> Value? {
+        let result = SessionDrainValue<Value>()
+        let completed = await wait(stage: stage) { result.value = try await operation() }
+        return completed ? result.value : nil
+    }
+
+    /// Cleanup may start even after expiry, but the caller never waits beyond
+    /// the original deadline and the live cleanup handle is retained.
+    @discardableResult
+    public func wait(
+        stage: SessionDrainStage,
+        cleanup: Bool = false,
+        operation: @escaping @MainActor @Sendable () async throws -> Void
+    ) async -> Bool {
+        let expired = ContinuousClock().now >= deadline
+        if expired, !cleanup {
+            reject(stage: stage, message: "结束等待超时，记录尚未确认完整。")
+            return false
+        }
+        let id = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                waiters[id] = continuation
+                stages[id] = stage
+                operations[id] = Task { @MainActor in
+                    defer {
+                        self.operations[id] = nil
+                        self.stages[id] = nil
+                        self.timers.removeValue(forKey: id)?.cancel()
+                    }
+                    do {
+                        try await operation()
+                        let late = self.isExpired
+                        self.resolve(id: id, failure: late ? .init(
+                            stage: stage, message: "结束等待超时，记录尚未确认完整。"
+                        ) : nil)
+                    } catch {
+                        self.resolve(id: id, failure: .init(stage: stage, message: error.localizedDescription))
+                    }
+                }
+                timers[id] = Task { @MainActor in
+                    do { try await ContinuousClock().sleep(until: self.deadline) }
+                    catch { return }
+                    self.resolve(id: id, failure: .init(
+                        stage: stage, message: "结束等待超时，记录尚未确认完整。"
+                    ))
+                    // Keep the operation handle: its cancellation may not finish it.
+                    self.operations[id]?.cancel()
+                }
+                if Task.isCancelled {
+                    resolve(id: id, failure: .init(stage: stage, message: "结束等待已取消，记录尚未确认完整。"))
+                    operations[id]?.cancel()
+                }
+            }
+        } onCancel: {
+            Task { @MainActor in
+                self.resolve(id: id, failure: .init(stage: stage, message: "结束等待已取消，记录尚未确认完整。"))
+                self.operations[id]?.cancel()
+            }
+        }
+    }
+
+    private func resolve(id: UUID, failure: SessionDrainFailure?) {
+        guard let waiter = waiters.removeValue(forKey: id) else { return }
+        if let failure { reject(stage: failure.stage, message: failure.message) }
+        waiter.resume(returning: failure == nil)
+    }
+}
+
+@MainActor
+private final class SessionDrainValue<Value: Sendable> {
+    var value: Value?
+}
+
 // 会话三能力的领域类型。**取值一律对着库里的取值域写**（SESSIONS-SPEC §15.2 / §15.6 R1 / §15.7 R2），
 // 所以这里的 `rawValue` 不是内部实现细节：它就是列里那一串字符，改它等于改数据。
 //

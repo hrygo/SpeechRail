@@ -97,6 +97,26 @@ public struct MeetingView: View {
                         finishIncomplete: { await meeting.endIncompleteRecord($0) }
                     )
                 }
+                if meeting.phase == .processing, !meeting.minutes.isBusy,
+                   let id = meeting.sessionID, let failure = meeting.lastFailure {
+                    CardSurface {
+                        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                            Text("这场会议尚未完成收尾")
+                                .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                            Text(failure).fixedSize(horizontal: false, vertical: true)
+                            HStack {
+                                if session.captureCompletionFailure(recordID: id) != nil {
+                                    Button("按中断结束") { Task { await meeting.finishIncompleteCapture() } }
+                                        .help("保留已保存的文字，按中断归档，不生成完整纪要")
+                                } else {
+                                    Button("重试结束并整理") { Task { await meeting.requestFinish() } }
+                                }
+                                exportMenu(title: "导出已保存文字…", helpText: "保留已保存的文字记录")
+                            }
+                        }
+                        .padding(SpeechRailDesignTokens.Spacing.md)
+                    }
+                }
                 if let blocked = meeting.blocked, !meeting.phase.isLive {
                     blockedCard(blocked)
                 }
@@ -318,7 +338,7 @@ public struct MeetingView: View {
             if meeting.isPaused { return "已暂停" }
             return meeting.isMicrophoneMuted ? "正在录音 · 麦克风已静音" : "正在录音"
         case .interrupted: return "录制中断"
-        case .processing: return "正在整理会议…"
+        case .processing: return meeting.minutes.isBusy ? "正在整理会议…" : "会议收尾需要处理"
         case .archived: return "这一场已经结束"
         }
     }

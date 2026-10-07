@@ -40,18 +40,21 @@ public struct CaptionSessionDependencies: Sendable {
     public var persistenceConfiguration: TranscriptPersistenceQueue.Configuration
     public var saveLine: (@Sendable (LineDraft, String) async throws -> Int)?
     public var attachSpeakerLabel: (@Sendable (String, String?) async throws -> Void)?
+    public var drainTimeout: Duration
 
     public init(
         makeRealtimeClient: @escaping @Sendable
             (CaptionRealtimeClientConfiguration) -> any CaptionRealtimeClient,
         persistenceConfiguration: TranscriptPersistenceQueue.Configuration = .init(),
         saveLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
-        attachSpeakerLabel: (@Sendable (String, String?) async throws -> Void)? = nil
+        attachSpeakerLabel: (@Sendable (String, String?) async throws -> Void)? = nil,
+        drainTimeout: Duration = .seconds(12)
     ) {
         self.makeRealtimeClient = makeRealtimeClient
         self.persistenceConfiguration = persistenceConfiguration
         self.saveLine = saveLine
         self.attachSpeakerLabel = attachSpeakerLabel
+        self.drainTimeout = drainTimeout
     }
 
     public static func production() -> Self {
@@ -549,47 +552,93 @@ public final class CaptionSession {
     ///
     /// 唯一要挡的是重入（`:ending` 里还等着最后一句）。其余相位都照做：`idle` 时也把浮层
     /// 收起来——协调器决定"这次会话结束了"，浮层就不该继续挂在屏幕上。
+    private var stopCaptureTask: Task<Void, Never>?
+    private var isClosingCaptureTransport = false
+
     public func stopCapture() async {
-        guard phase != .ending else { return }
+        if let stopCaptureTask { return await stopCaptureTask.value }
+        let task = Task { @MainActor in await self.performStopCapture() }
+        stopCaptureTask = task
+        await task.value
+        stopCaptureTask = nil
+    }
+
+    private func performStopCapture() async {
+        let deadline = SessionDrainDeadline(timeout: dependencies.drainTimeout)
         let endingRecordID = sessionID
+        if let endingRecordID {
+            coordinator.recordCaptureCompletionDeadline(recordID: endingRecordID, deadline: deadline)
+        }
+        let endingIdentity = previewIdentity
+        let endingClient = client
+        let endingUploader = uploadPump
+        let endingPump = pump
+        isClosingCaptureTransport = false
         phase = .ending
         isStoppingIntentionally = true
         source?.stop()
         source = nil
         // `stop()` closes the source stream but does not retract chunks it has
         // already buffered. Upload those before committing the server-side tail.
-        await uploadPump?.value
-        uploadPump = nil
-        if let client {
-            do {
-                // RealtimeASRClient owns the single commit → terminal →
-                // diarization (if negotiated) → clear barrier.
-                try await client.drainAndClear(timeout: .seconds(8))
-            } catch {
-                lastFailure = error.localizedDescription
-                await markDiarizationDrainFailureIfNeeded(error)
+        if let endingUploader {
+            await deadline.wait(stage: .upload) { await endingUploader.value }
+        }
+        if let endingClient {
+            await deadline.wait(stage: .protocolDrain) {
+                do { try await endingClient.drainAndClear(timeout: .seconds(8)) }
+                catch {
+                    if self.previewIdentity == endingIdentity, self.sessionID == endingRecordID {
+                        await self.markDiarizationDrainFailureIfNeeded(error)
+                    }
+                    throw error
+                }
             }
-            await client.close()
+            isClosingCaptureTransport = true
+            await deadline.wait(stage: .transportClose, cleanup: true) { await endingClient.close() }
         }
         // The client finishes its event stream on close. Let the event owner
         // persist every buffered final/attribution before retiring this identity.
-        await pump?.value
-        pump = nil
+        if let endingPump {
+            await deadline.wait(stage: .receiver) { await endingPump.value }
+        }
+        var complete = deadline.failure == nil
+        if let endingRecordID, let failure = deadline.failure {
+            coordinator.recordCaptureCompletionFailure(recordID: endingRecordID, failure: failure)
+        }
+        if let endingRecordID, coordinator.captureCompletionFailure(recordID: endingRecordID) != nil {
+            complete = false
+        }
         if let endingRecordID {
-            let report = await waitForPendingSaves(recordID: endingRecordID)
-            if !report.isComplete {
-                if sessionID == endingRecordID { lastFailure = "部分文字尚未保存，请重试保存。" }
+            let saved = await deadline.wait(stage: .persistence) {
+                let report = await self.waitForPendingSaves(recordID: endingRecordID)
+                guard report.isComplete else {
+                    throw SessionDrainFailure(stage: .persistence, message: "部分文字尚未保存，请重试保存。")
+                }
+            }
+            complete = complete && saved
+            if !complete {
+                coordinator.discardCaptureCompletionDeadline(recordID: endingRecordID)
+                if sessionID == endingRecordID {
+                    lastFailure = coordinator.captureCompletionFailure(recordID: endingRecordID)?.message
+                        ?? deadline.failure?.message ?? "本场收尾尚未确认完整。"
+                }
                 if coordinator.activeSessionID == endingRecordID, coordinator.occupancy?.kind == .captions {
                     coordinator.abandonOccupancy()
                 }
             }
         }
-        previewIdentity = nil
-        client = nil
-        diarizationActive = false
-        resetToIdleKeepingLines()
-        // 浮层跟着这次结束一起收：来自 `✕`、`⌘⇧.`、或切到别的会话，都一样。
-        setBandVisible(false)
+        endingUploader?.cancel()
+        endingPump?.cancel()
+        if previewIdentity == endingIdentity, sessionID == endingRecordID {
+            uploadPump = nil
+            pump = nil
+            previewIdentity = nil
+            client = nil
+            diarizationActive = false
+            isClosingCaptureTransport = false
+            resetToIdleKeepingLines()
+            setBandVisible(false)
+        }
     }
 
     /// 用户在浮层上按 `✕`：字幕闭环**唯一**的结束点（E6）。结束即保存。
@@ -636,6 +685,11 @@ public final class CaptionSession {
             } catch {
                 lastFailure = error.localizedDescription
                 await markDiarizationDrainFailureIfNeeded(error)
+                if let sessionID {
+                    coordinator.recordCaptureCompletionFailure(recordID: sessionID, failure: .init(
+                        stage: .protocolDrain, message: "暂停收尾未确认完整，已保存的文字仍在。"
+                    ))
+                }
             }
             await client.close()
         }
@@ -775,12 +829,18 @@ public final class CaptionSession {
         identity: TranscriptPreviewLedger.Identity
     ) async {
         guard isCurrent(identity) else { return }
+        let recordID = sessionID
         level = chunk.level
         do {
             try await client.append(chunk.pcm)
         } catch {
-            // 送不出去就是连接没了：由接收侧的 `closed` 统一处置，这里不重复报错。
+            guard isCurrent(identity) else { return }
             lastFailure = error.localizedDescription
+            if let recordID {
+                coordinator.recordCaptureCompletionFailure(recordID: recordID, failure: .init(
+                    stage: .upload, message: "部分音频未能送达，记录尚未确认完整。"
+                ))
+            }
         }
     }
 
@@ -878,9 +938,21 @@ public final class CaptionSession {
             if let sessionID, let note = labeling.note {
                 await coordinator.updateSessionDiarization(id: sessionID, state: .degraded, note: note)
             }
-        case .serverError(let code, let message, _):
-            await handleServerError(code: code, message: message)
+        case .serverError(let code, let message, let requestID):
+            if phase == .ending, requestID == nil, let sessionID {
+                coordinator.recordCaptureCompletionFailure(recordID: sessionID, failure: .init(
+                    stage: .protocolDrain, message: message
+                ))
+            }
+            if isStoppingIntentionally { lastFailure = message }
+            else { await handleServerError(code: code, message: message) }
         case .closed(let code):
+            if phase == .ending, let sessionID,
+               !isClosingCaptureTransport || (code != nil && code != 1000) {
+                coordinator.recordCaptureCompletionFailure(recordID: sessionID, failure: .init(
+                    stage: .protocolDrain, message: "识别连接在收尾确认前断开，记录尚未确认完整。"
+                ))
+            }
             await handleUnexpectedClose(code: code)
         }
     }

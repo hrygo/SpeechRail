@@ -2,7 +2,7 @@
 title: "SpeechRail 用户与集成指南中心"
 status: active
 audience: "应用开发者、客户端集成工程师、API 消费者"
-version: "3.2.1"
+version: "3.2.2"
 date: 2026-10-07
 ---
 
@@ -81,7 +81,7 @@ HTTP 客户端可读取 `GET /health`；需要跨模型、音色和操作参数�
 ## macOS App 控制面
 
 会议与字幕的保存失败、复制及不完整结束操作见
-[找回未保存的文字](transcript-save-recovery.md)（R07 开发分支，待整包验收）。
+[找回未保存的文字](transcript-save-recovery.md)。
 
 SpeechRail macOS App 面向本机用户提供三类入口：
 

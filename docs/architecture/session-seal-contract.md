@@ -2,7 +2,7 @@
 title: "会话归档确认、所有权与恢复合同"
 status: active
 audience: "App 核心开发者"
-version: "1.0.0"
+version: "1.1.0"
 date: 2026-10-07
 ---
 
@@ -43,3 +43,7 @@ stopper 必须先完成保存责任。它若通过 `abandonOccupancy` 撤销所�
 回归使用临时 SQLite、测试自有 trigger、fake archive writer 和受控 Gate，覆盖缺失目标、幂等、UPDATE 失败、提交后确认失败、暂停关闭失败、会议来源失败、重复结束、无记录结束与旧租约迟到。
 
 本合同不增加跨重启 pending 命令的持久化或迁移，不修改 ASR wire、识别/解码策略、Assembler/Ledger，也不证明真实设备、LLM、模型质量、性能或长稳已验收。回退仅 revert 本包代码，不降 schema、不清理用户记录。
+
+## R08 消费与截止时间接线（待最终审查与合并）
+
+正常语音封存还须满足[应用收尾合同](session-drain-completion-contract.md)。Coordinator 按 record 保留捕获 / 消费失败，`.user` 不得凭后来空队列绕过；显式 `.interrupted` 仍允许。正常封存使用 feature 注册的同一个绝对截止时间；归档或来源确认晚于截止时间时保留任务与原命令，禁止迟到发布成功。句柄只在实际 task 完成时清理。没有改变 Store 原子归档合同或 schema。
