@@ -15,14 +15,20 @@ from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import BinaryIO, Final, Protocol
 
+from speechrail.backends.loader_metadata import (
+    MISSING,
+    LoaderSource,
+    identity_quantization,
+    loader_quantization,
+    loader_value,
+)
 from speechrail.backends.mlx_precision import mlx_dtype, resolve_load_dtype
-from speechrail.backends.model_identity import SnapshotIdentity, inspect_model, read_quantization
+from speechrail.backends.model_identity import SnapshotIdentity, inspect_model
 from speechrail.backends.qwen3_stream_decoder import (
     BoundQwen3Decoder,
     Qwen3DecodeResult,
     StreamingDecodeState,
 )
-from speechrail.config.model_catalog import QuantizationSpec
 from speechrail.domain.asr_policy import ASRPolicy
 from speechrail.runtime.limits import MAX_PCM_BYTES
 from speechrail.runtime.worker_protocol import (
@@ -440,7 +446,7 @@ def _coerce_session_int(value: object) -> int:
 
 
 def _parse_asr_policy(raw: object) -> tuple[ASRPolicy, int]:
-    if raw is _MISSING:
+    if raw is MISSING:
         policy = ASRPolicy()
         effective_max_segment_ms = policy.max_segment_ms
     else:
@@ -679,101 +685,29 @@ def _handle_commit(
         engine.close_session(session_id)
 
 
-_MISSING = object()
 
 
-def _loader_sources(session: object) -> tuple[object, ...]:
+def _loader_sources(session: object) -> tuple[LoaderSource, ...]:
     model = getattr(session, "model", None)
     return (
-        getattr(session, "model_info", None),
-        getattr(session, "config", None),
-        model,
-        getattr(model, "config", None),
+        LoaderSource("session.model_info", getattr(session, "model_info", None)),
+        LoaderSource("session.config", getattr(session, "config", None)),
+        LoaderSource("session.model", model),
+        LoaderSource("session.model.config", getattr(model, "config", None)),
     )
-
-
-def _loader_value(sources: tuple[object, ...], names: tuple[str, ...]) -> object:
-    for source in sources:
-        if source is None:
-            continue
-        for name in names:
-            if isinstance(source, Mapping):
-                value = source.get(name, _MISSING)
-            else:
-                value = getattr(source, name, _MISSING)
-            if value is not _MISSING and value is not None:
-                return value
-    return _MISSING
-
-
-def _loader_quantization(sources: tuple[object, ...]) -> QuantizationSpec | None:
-    declarations: list[QuantizationSpec] = []
-    for source in sources:
-        if source is None:
-            continue
-        for field_name in ("quantization", "quantization_config"):
-            if isinstance(source, Mapping):
-                raw = source.get(field_name, _MISSING)
-            else:
-                raw = getattr(source, field_name, _MISSING)
-            if raw is _MISSING or raw is None:
-                continue
-            if isinstance(raw, QuantizationSpec):
-                declarations.append(raw)
-            elif isinstance(raw, Mapping):
-                declarations.append(
-                    read_quantization({field_name: raw})
-                )
-            else:
-                raise RuntimeError("backend_identity_mismatch: invalid loader quantization")
-
-        if isinstance(source, Mapping):
-            bits = source.get("quantization_bits", _MISSING)
-        else:
-            bits = getattr(source, "quantization_bits", _MISSING)
-        group_size = (
-            source.get("quantization_group_size", _MISSING)
-            if isinstance(source, Mapping)
-            else getattr(source, "quantization_group_size", _MISSING)
-        )
-        if bits is not _MISSING or group_size is not _MISSING:
-            if bits is _MISSING:
-                bits = None
-            if group_size is _MISSING:
-                group_size = None
-            declarations.append(
-                read_quantization(
-                    {
-                        "quantization": {
-                            "bits": bits,
-                            "group_size": group_size,
-                        }
-                    }
-                )
-            )
-
-    if not declarations:
-        return None
-    first = declarations[0]
-    if any(
-        (item.bits, item.group_size) != (first.bits, first.group_size)
-        for item in declarations[1:]
-    ):
-        raise RuntimeError("backend_identity_mismatch: loader quantization conflict")
-    return first
 
 
 def _check_loader_identity(
     session: object, expected: SnapshotIdentity
-) -> tuple[object, ...]:
+) -> tuple[LoaderSource, ...]:
     sources = _loader_sources(session)
-    family = _loader_value(sources, ("family", "model_type"))
-    if family is not _MISSING and family != expected.family:
+    family = loader_value(sources, ("family", "model_type"))
+    if family is not MISSING and family != expected.family:
         raise RuntimeError("backend_identity_mismatch: loader family mismatch")
-    variant = _loader_value(sources, ("model_variant", "variant"))
-    if variant is not _MISSING and variant != expected.variant:
+    variant = loader_value(sources, ("model_variant", "variant"))
+    if variant is not MISSING and variant != expected.variant:
         raise RuntimeError("backend_identity_mismatch: loader variant mismatch")
-    loaded_quantization = _loader_quantization(sources)
+    loaded_quantization = loader_quantization(sources)
     if loaded_quantization is not None and (
         loaded_quantization.bits,
         loaded_quantization.group_size,
@@ -782,27 +716,9 @@ def _check_loader_identity(
     return sources
 
 
-def _identity_quantization(identity: object) -> tuple[int | None, int | None]:
-    bits = getattr(identity, "quantization_bits", None)
-    group_size = getattr(identity, "quantization_group_size", None)
-    if bits is not None and (
-        not isinstance(bits, int) or isinstance(bits, bool) or bits not in {4, 8}
-    ):
-        raise ValueError("invalid worker quantization bits")
-    if group_size is not None and (
-        not isinstance(group_size, int) or isinstance(group_size, bool) or group_size <= 0
-    ):
-        raise ValueError("invalid worker quantization group size")
-    if bits is None and group_size is not None:
-        raise ValueError("unquantized worker cannot report group size")
-    if bits is not None and group_size is None:
-        raise ValueError("quantized worker must report group size")
-    return bits, group_size
-
-
 def _identity_matches_asr(identity: object, *, device: str, dtype: str) -> bool:
     try:
-        bits, _ = _identity_quantization(identity)
+        bits, _ = identity_quantization(identity)
     except ValueError:
         return False
     family = getattr(identity, "family", None)
@@ -1048,11 +964,11 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         )
         loader_sources = _check_loader_identity(self._session, expected)
 
-        info_dtype = _loader_value(loader_sources, ("dtype",))
+        info_dtype = loader_value(loader_sources, ("dtype",))
         resolved_dtype = _resolve_engine_dtype(
             snapshot_quantized=snapshot_quantized,
             requested_dtype=dtype,
-            loaded_dtype=None if info_dtype is _MISSING else info_dtype,
+            loaded_dtype=None if info_dtype is MISSING else info_dtype,
         )
         declared = expected.quantization.dtype
         compute_dtype = (

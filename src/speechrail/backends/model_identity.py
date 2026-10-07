@@ -181,6 +181,14 @@ def _strict_group_size(value: object, *, bits: int | None) -> int | None:
     return value
 
 
+def validate_quantization_pair(
+    bits: object, group_size: object,
+) -> tuple[int | None, int | None]:
+    """One strict bits/group rule for snapshots and loaded/ready observations."""
+    validated_bits = _strict_bits(bits)
+    return validated_bits, _strict_group_size(group_size, bits=validated_bits)
+
+
 def _quantization_declaration(raw: object, *, field_name: str) -> QuantizationSpec:
     if raw is None:
         return QuantizationSpec(bits=None, group_size=None, format="none")
@@ -192,8 +200,7 @@ def _quantization_declaration(raw: object, *, field_name: str) -> QuantizationSp
     if not raw:
         raise ValueError(f"{field_name} must not be empty")
 
-    bits = _strict_bits(raw.get("bits"))
-    group_size = _strict_group_size(raw.get("group_size"), bits=bits)
+    bits, group_size = validate_quantization_pair(raw.get("bits"), raw.get("group_size"))
     raw_dtype = raw.get("dtype")
     if raw_dtype is not None and (
         not isinstance(raw_dtype, str) or raw_dtype not in {"bf16", "bfloat16"}
