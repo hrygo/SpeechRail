@@ -442,9 +442,9 @@ public struct TeleprompterV2DocumentListItem: Equatable, Sendable {
 
 @MainActor
 public final class TeleprompterV2Store {
-    public static let formatVersion = 3
+    nonisolated public static let formatVersion = 3
 
-    private let directoryURL: URL
+    nonisolated private let directoryURL: URL
     private let fileManager: FileManager
 
     public init(directoryURL: URL? = nil, fileManager: FileManager = .default) throws {
@@ -466,9 +466,9 @@ public final class TeleprompterV2Store {
         try fileManager.createDirectory(at: self.directoryURL, withIntermediateDirectories: true)
     }
 
-    public func load(documentID: String) throws -> TeleprompterV2DocumentBundle {
+    nonisolated public func load(documentID: String) throws -> TeleprompterV2DocumentBundle {
         let url = try fileURL(documentID: documentID)
-        guard fileManager.fileExists(atPath: url.path) else { throw TeleprompterV2StoreError.notFound }
+        guard FileManager.default.fileExists(atPath: url.path) else { throw TeleprompterV2StoreError.notFound }
         do {
             return try decode(Data(contentsOf: url))
         } catch let error as TeleprompterV2StoreError {
@@ -479,27 +479,34 @@ public final class TeleprompterV2Store {
     }
 
     public func listDocuments() throws -> [TeleprompterV2DocumentListItem] {
+        try readDocuments().map(\.item)
+    }
+
+    /// A directory read decodes each bundle once. The list projection and the
+    /// editor share that snapshot instead of reopening every document.
+    func readDocuments() throws -> [(item: TeleprompterV2DocumentListItem, bundle: TeleprompterV2DocumentBundle?)] {
         let urls = try fileManager.contentsOfDirectory(
             at: directoryURL,
             includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
         ).filter { $0.pathExtension == "json" }
-        return urls.compactMap { url in
+        return urls.map { url in
             let id = url.deletingPathExtension().lastPathComponent
             do {
                 let bundle = try decode(Data(contentsOf: url))
-                return .init(
-                    id: id,
-                    title: bundle.document.title,
-                    updatedAt: bundle.document.updatedAt,
-                    isAvailable: true
+                let item = TeleprompterV2DocumentListItem(
+                    id: id, title: bundle.document.title,
+                    updatedAt: bundle.document.updatedAt, isAvailable: true
                 )
-            } catch let error as TeleprompterV2StoreError {
-                return .init(id: id, title: nil, updatedAt: nil, isAvailable: false, error: error)
+                return (item: item, bundle: Optional(bundle))
             } catch {
-                return .init(id: id, title: nil, updatedAt: nil, isAvailable: false, error: .corruptBundle)
+                let item = TeleprompterV2DocumentListItem(
+                    id: id, title: nil, updatedAt: nil, isAvailable: false,
+                    error: error as? TeleprompterV2StoreError ?? .corruptBundle
+                )
+                return (item: item, bundle: nil)
             }
-        }.sorted { ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast) }
+        }.sorted { ($0.item.updatedAt ?? .distantPast) > ($1.item.updatedAt ?? .distantPast) }
     }
 
     public func save(_ bundle: TeleprompterV2DocumentBundle) throws {
@@ -673,7 +680,7 @@ private extension TeleprompterV2Store {
         case future(Int)
     }
 
-    func fileURL(documentID: String) throws -> URL {
+    nonisolated func fileURL(documentID: String) throws -> URL {
         guard !documentID.isEmpty,
               documentID.rangeOfCharacter(from: CharacterSet(charactersIn: "/\\")) == nil,
               documentID != ".",
@@ -694,7 +701,7 @@ private extension TeleprompterV2Store {
         }
     }
 
-    func decode(_ data: Data) throws -> TeleprompterV2DocumentBundle {
+    nonisolated func decode(_ data: Data) throws -> TeleprompterV2DocumentBundle {
         switch try decodeExisting(data) {
         case let .v2(bundle):
             try validate(bundle)
@@ -704,7 +711,7 @@ private extension TeleprompterV2Store {
         }
     }
 
-    func decodeExisting(_ data: Data) throws -> ExistingBundle {
+    nonisolated func decodeExisting(_ data: Data) throws -> ExistingBundle {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let number = object["format_version"] as? NSNumber else {
             throw TeleprompterV2StoreError.invalidBundle
@@ -721,7 +728,7 @@ private extension TeleprompterV2Store {
         }
     }
 
-    func validate(_ bundle: TeleprompterV2DocumentBundle) throws {
+    nonisolated func validate(_ bundle: TeleprompterV2DocumentBundle) throws {
         guard bundle.formatVersion == Self.formatVersion,
               !bundle.document.id.isEmpty,
               !bundle.document.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -791,7 +798,7 @@ private extension TeleprompterV2Store {
         }
     }
 
-    func validate(_ version: TeleprompterV2ReadingVersion, in bundle: TeleprompterV2DocumentBundle) throws {
+    nonisolated func validate(_ version: TeleprompterV2ReadingVersion, in bundle: TeleprompterV2DocumentBundle) throws {
         guard version.documentID == bundle.document.id,
               bundle.sourceRevisions.contains(where: { $0.id == version.sourceRevisionID }),
               (try? TeleprompterTimingPlanner.validateTargetMinutes(version.goalSnapshot.targetSeconds / 60.0)) != nil,
@@ -840,7 +847,7 @@ private extension TeleprompterV2Store {
     /// to, so one that no longer describes its segment means the caller built the
     /// bundle wrong. Rejecting the save is safer than storing an alias that would
     /// later be silently dropped — or worse, honoured against the wrong words.
-    static func acceptedReadingsAreValid(_ segment: TeleprompterV2ReadingSegment) -> Bool {
+    nonisolated static func acceptedReadingsAreValid(_ segment: TeleprompterV2ReadingSegment) -> Bool {
         var previousEnd: Int?
         for alias in segment.acceptedReadings.sorted(by: { $0.displayRange.start < $1.displayRange.start }) {
             if let previousEnd, previousEnd > alias.displayRange.start { return false }
@@ -850,7 +857,7 @@ private extension TeleprompterV2Store {
         return true
     }
 
-    func validate(
+    nonisolated func validate(
         blocks: [TeleprompterV2ReadingBlock],
         source: TeleprompterV2SourceRevision?
     ) throws {
@@ -873,7 +880,7 @@ private extension TeleprompterV2Store {
         }
     }
 
-    func validate(
+    nonisolated func validate(
         timing: TeleprompterTimingPlan,
         source: TeleprompterV2SourceRevision?
     ) throws {
@@ -901,7 +908,7 @@ private extension TeleprompterV2Store {
         }
     }
 
-    func overlaps(_ lhs: TeleprompterSourceRange, _ rhs: TeleprompterSourceRange) -> Bool {
+    nonisolated func overlaps(_ lhs: TeleprompterSourceRange, _ rhs: TeleprompterSourceRange) -> Bool {
         lhs.start < rhs.end && rhs.start < lhs.end
     }
 

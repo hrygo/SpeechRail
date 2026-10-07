@@ -94,6 +94,11 @@ if [[ -n "$CI_DERIVED_DATA" ]]; then
   esac
 fi
 
+# A successful App build does not compile the unit-test target. Check the
+# hand-maintained test manifest before building so local validation cannot
+# miss a test file that GitHub's Quality Gates would reject.
+python3 "$ROOT_DIR/scripts/check_macos_test_target_coverage.py"
+
 if [[ "$ACTION" == "archive" ]]; then
   ARCHIVE_PATH="${ARCHIVE_PATH:-$ROOT_DIR/build/SpeechRail.xcarchive}"
   if [[ -n "$EXPORT_PATH" ]]; then

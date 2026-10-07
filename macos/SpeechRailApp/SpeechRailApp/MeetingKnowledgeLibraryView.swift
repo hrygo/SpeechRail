@@ -953,6 +953,7 @@ struct MeetingKnowledgeLibraryView: View {
                 Section {
                     ForEach(model.rows) { row in
                         MeetingLibraryRowView(row: row)
+                            .speechRailSelectableRow()
                             .tag(row.id)
                             .listRowInsets(EdgeInsets(
                                 top: SpeechRailDesignTokens.Spacing.xs,
@@ -972,7 +973,7 @@ struct MeetingKnowledgeLibraryView: View {
                     Text("按会议时间倒序")
                 }
             }
-            .listStyle(.inset)
+            .speechRailSelectableList()
         }
     }
 

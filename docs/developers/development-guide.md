@@ -2,8 +2,8 @@
 title: "SpeechRail 开发者实战指南"
 status: active
 audience: "核心开发者、开源贡献者"
-version: "3.1.3"
-date: 2026-09-21
+version: "3.1.4"
+date: 2026-10-07
 ---
 
 # 🛠️ SpeechRail 开发者实战指南
@@ -82,21 +82,14 @@ graph TD
 
 ## 4. 质量门禁与提交前检查
 
-在提交代码前，必须在本地依次执行并全部通过以下门禁：
+本地质量检查与 GitHub `Quality Gates` 使用同一入口，避免手写命令清单漏项：
 
 ```bash
-# 1. 运行全部单元测试与契约测试
-uv run --extra dev pytest tests/ -q --no-cov
-
-# 2. 代码风格与规范检查
-uv run --extra dev ruff check src tests
-
-# 3. 静态强类型检查（Strict 模式）
-uv run --extra dev mypy src
-
-# 4. OpenAPI 契约格式验证
-npx @redocly/cli lint contracts/openapi.yaml
+bash scripts/ci_quality_gate.sh --base-ref origin/main
 ```
+
+该命令只证明平台无关质量门禁通过。Python 测试/覆盖率、SwiftPM 测试及 App 构建按改动范围
+独立验证；具体入口与证据边界见 [测试与验收](testing-acceptance.md)。
 
 > [!IMPORTANT]
 > 自动化测试必须保持 **100% 确定性**：严禁在单元测试中联网下载权重、调用外部云端 API 或使用真实敏感音频。

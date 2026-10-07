@@ -189,7 +189,7 @@ public struct PreflightDiagnosticsView: View {
                         .accessibilityIdentifier("preflight-\(check.name)")
                     }
                 }
-                .listStyle(.inset)
+                .speechRailSelectableList()
                 .scrollContentBackground(.hidden)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .accessibilityLabel("诊断检查项")

@@ -2664,6 +2664,82 @@ struct TeleprompterSessionLifecycleTests {
         #expect(harness.session.document?.sourceText == "稿A第一段。稿A第二段。")
     }
 
+    @Test("selecting another document does not rewrite a clean current document")
+    func cleanDocumentSwitchDoesNotRewrite() throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(title: "稿A", sourceText: "第一份原稿。")
+        let idA = try #require(harness.session.document?.id)
+        harness.session.createDocument(title: "稿B", sourceText: "第二份原稿。")
+        let idB = try #require(harness.session.document?.id)
+        let urlB = harness.documentBundleURL(documentID: idB)
+        let originalDate = Date(timeIntervalSince1970: 1_000_000)
+        try FileManager.default.setAttributes([.modificationDate: originalDate], ofItemAtPath: urlB.path)
+        try harness.session.load(documentID: idA)
+        let attributes = try FileManager.default.attributesOfItem(atPath: urlB.path)
+        #expect(attributes[.modificationDate] as? Date == originalDate)
+        #expect(harness.session.document?.id == idA)
+    }
+
+    @Test("discarding a saved candidate survives an immediate document switch")
+    func discardedCandidateStaysDiscardedAfterSwitch() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(title: "另一份", sourceText: "另一份稿件。")
+        let otherID = try #require(harness.session.document?.id)
+        harness.makeThreeSegmentDocument()
+        let originalID = try #require(harness.session.document?.id)
+        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
+            try TestPreparationResponse.response(for: prompt)
+        }
+        await harness.session.analyzeDraft()
+        let before = try harness.makeReloadedSession()
+        try before.load(documentID: originalID)
+        #expect(before.pendingVersion != nil, "前提：候选稿已写入磁盘")
+
+        harness.session.discardPendingVersion()
+        try harness.session.load(documentID: otherID)
+
+        let after = try harness.makeReloadedSession()
+        try after.load(documentID: originalID)
+        #expect(after.pendingVersion == nil, "恢复原稿后切稿不得复活已丢弃的候选")
+        #expect(after.phase == .draft)
+    }
+
+    @Test("async document selection saves pending edits and releases the editor")
+    func asyncSelectionPreservesPendingEdits() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(title: "稿A", sourceText: "第一份原稿。")
+        let idA = try #require(harness.session.document?.id)
+        harness.session.createDocument(title: "稿B", sourceText: "第二份原稿。")
+        let idB = try #require(harness.session.document?.id)
+        harness.session.updateSourceText("第二份原稿的最后编辑。")
+        #expect(harness.session.draftSaveState == .pending)
+        #expect(try await harness.session.loadForSelection(documentID: idA))
+        #expect(harness.session.document?.id == idA)
+        #expect(harness.session.canEdit)
+        #expect(!harness.session.isLoadingDocument)
+        let reloaded = try harness.makeReloadedSession()
+        try reloaded.load(documentID: idB)
+        #expect(reloaded.document?.sourceText == "第二份原稿的最后编辑。")
+    }
+
+    @Test("a failed async selection keeps the current document and releases the editor")
+    func asyncSelectionFailurePreservesCurrentDocument() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(title: "当前稿", sourceText: "保留这份稿。")
+        let id = try #require(harness.session.document?.id)
+        await #expect(throws: TeleprompterV2StoreError.notFound) {
+            try await harness.session.loadForSelection(documentID: "missing")
+        }
+        #expect(harness.session.document?.id == id)
+        #expect(harness.session.document?.sourceText == "保留这份稿。")
+        #expect(harness.session.canEdit)
+        #expect(harness.session.loadingDocumentID == nil)
+    }
+
     /// E1 RED：flush 失败保留当前稿、内存文本与重试入口，不切换身份。
     @Test("a failed flush keeps the current document, its text, and a retry path")
     func failedFlushPreservesCurrentDocument() throws {

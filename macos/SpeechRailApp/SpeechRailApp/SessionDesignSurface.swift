@@ -985,33 +985,28 @@ public struct SessionLibraryColumn: View {
 
             SessionHairline()
 
-            // 列表区
-            ScrollView(.vertical, showsIndicators: false) {
-                LazyVStack(alignment: .leading, spacing: 6) {
-                    ForEach(filtered) { summary in
-                        libraryRow(summary)
-                    }
-                    if filtered.isEmpty {
-                        VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                            Spacer()
-                            Image(systemName: summaries.isEmpty ? "archivebox" : "line.3.horizontal.decrease.circle")
-                                .font(SpeechRailDesignTokens.Typography.emptyStateIcon)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                            Text(summaries.isEmpty ? "还没有历史会话记录" : "没有匹配的记录")
-                                .font(SpeechRailDesignTokens.Typography.bodyMedium)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                            Text(summaries.isEmpty ? "与助手完成对话后，记录将自动加密保存在此处。" : "请尝试输入其他关键词或清空搜索框。")
-                                .font(SpeechRailDesignTokens.Typography.caption)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                                .multilineTextAlignment(.center)
-                            Spacer()
-                        }
-                        .frame(maxWidth: .infinity, minHeight: 180)
-                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+            List(selection: Binding(
+                get: { selectedID },
+                set: { id in
+                    if let summary = summaries.first(where: { $0.id == id }), id != selectedID {
+                        onSelect(summary)
                     }
                 }
-                .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-                .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+            )) {
+                ForEach(filtered) { summary in
+                    libraryRow(summary)
+                        .tag(summary.id)
+                }
+            }
+            .speechRailSelectableList()
+            .overlay {
+                if filtered.isEmpty {
+                    ContentUnavailableView(
+                        summaries.isEmpty ? "还没有历史会话记录" : "没有匹配的记录",
+                        systemImage: summaries.isEmpty ? "archivebox" : "magnifyingglass",
+                        description: Text(summaries.isEmpty ? "结束对话后，记录会保存在这里。" : "请更换关键词或清空搜索框。")
+                    )
+                }
             }
             .frame(maxHeight: .infinity)
 
@@ -1037,69 +1032,63 @@ public struct SessionLibraryColumn: View {
         let isSelected = (selectedID == summary.id)
 
         return HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-            Button {
-                onSelect(summary)
-            } label: {
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                    // 顶行：微徽标 + 标题 + 状态胶囊
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        ZStack {
-                            Circle()
-                                .fill(SpeechRailDesignTokens.Color.rail.opacity(isSelected ? 0.22 : 0.12))
-                                .frame(width: SpeechRailDesignTokens.Layout.badgeSmallSize, height: SpeechRailDesignTokens.Layout.badgeSmallSize)
-                            Image(systemName: "waveform.and.mic")
-                                .font(SpeechRailDesignTokens.Typography.captionBold)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.rail)
-                        }
-
-                        Text(summary.record.title ?? "未命名对话")
-                            .font(SpeechRailDesignTokens.Typography.bodyMedium)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                            .lineLimit(1)
-
-                        Spacer(minLength: 4)
-
-                        if summary.openInterruption != nil {
-                            StatusPill(tone: .attention, label: "中断")
-                        } else if summary.lineCount == 0 {
-                            StatusPill(tone: .neutral, label: "0 句")
-                        } else {
-                            StatusPill(
-                                tone: isSelected ? .healthy : .neutral,
-                                label: "\(summary.lineCount) 句"
-                            )
-                        }
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                // 顶行：微徽标 + 标题 + 状态胶囊
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    ZStack {
+                        Circle()
+                            .fill(SpeechRailDesignTokens.Color.rail.opacity(isSelected ? 0.22 : 0.12))
+                            .frame(width: SpeechRailDesignTokens.Layout.badgeSmallSize, height: SpeechRailDesignTokens.Layout.badgeSmallSize)
+                        Image(systemName: "waveform.and.mic")
+                            .font(SpeechRailDesignTokens.Typography.captionBold)
+                            .foregroundStyle(.primary)
                     }
 
-                    // 底行：角色 · 日期 · 耗时
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                        if let persona = summary.record.persona?.title {
-                            Text(persona)
-                                .font(SpeechRailDesignTokens.Typography.captionMedium)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.rail)
-                            Text("·")
-                                .font(SpeechRailDesignTokens.Typography.caption)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                        }
+                    Text(summary.record.title ?? "未命名对话")
+                        .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
 
-                        Text(Self.formatSessionDate(summary.record.startedAt))
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    Spacer(minLength: 4)
 
-                        if summary.duration() > 1 {
-                            Text("·")
-                                .font(SpeechRailDesignTokens.Typography.caption)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                            Text(Self.formatDuration(summary.duration()))
-                                .font(SpeechRailDesignTokens.Typography.caption)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                        }
+                    if summary.openInterruption != nil {
+                        StatusPill(tone: .attention, label: "中断")
+                    } else if summary.lineCount == 0 {
+                        StatusPill(tone: .neutral, label: "0 句")
+                    } else {
+                        StatusPill(
+                            tone: isSelected ? .healthy : .neutral,
+                            label: "\(summary.lineCount) 句"
+                        )
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+
+                // 底行：角色 · 日期 · 耗时
+                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                    if let persona = summary.record.persona?.title {
+                        Text(persona)
+                            .font(SpeechRailDesignTokens.Typography.captionMedium)
+                            .foregroundStyle(.primary)
+                        Text("·")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Text(Self.formatSessionDate(summary.record.startedAt))
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(.secondary)
+
+                    if summary.duration() > 1 {
+                        Text("·")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(.secondary)
+                        Text(Self.formatDuration(summary.duration()))
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
-            .buttonStyle(.plain)
-            .speechRailPointerCursor()
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             InPlaceDeleteButton(
                 style: .compactIcon,
@@ -1111,27 +1100,7 @@ public struct SessionLibraryColumn: View {
                 }
             }
         }
-        .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            isSelected
-                ? SpeechRailDesignTokens.Surface.selectionTint
-                : SpeechRailDesignTokens.Color.field,
-            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                .stroke(
-                    isSelected
-                        ? SpeechRailDesignTokens.Color.rail.opacity(0.45)
-                        : SpeechRailDesignTokens.Surface.border,
-                    lineWidth: isSelected
-                        ? SpeechRailDesignTokens.Stroke.strong
-                        : SpeechRailDesignTokens.Stroke.hairline
-                )
-        )
-        .contentShape(RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous))
+        .speechRailSelectableRow()
         .contextMenu {
             Button("在此处继续对话") { onSelect(summary) }
             Button("复制会话 ID") {

@@ -40,6 +40,8 @@ public struct AssistantView: View {
     /// 每次 `await` 返回都触发一次界面更新，于是高亮、页头、正文、元信息分几步
     /// 跳出来——用户看着像卡住。合成一个值之后，翻记录一次到位。
     @State private var review: SessionReviewSnapshot?
+    @State private var reviewLoad = SpeechRailSelectionLoad<SessionReviewSnapshot>()
+    @State private var requestedReviewSummary: SessionSummary?
     @State private var selectedPersonaID = ""
     @State private var selectedVoiceID = ""
     @State private var mode: AssistantMode = .duplex
@@ -144,7 +146,7 @@ public struct AssistantView: View {
 
     /// 四态：未开始 / 运行时受阻 / 对话中 / 记录库回看。
     private var state: PageState {
-        if review != nil { return .review }
+        if review != nil || reviewLoad.isLoading || reviewLoad.failure != nil { return .review }
         if isLive { return .live }
         return blockedReason == nil ? .ready : .blocked
     }
@@ -173,6 +175,7 @@ public struct AssistantView: View {
             purpose: pagePurpose,
         ) {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
+                recordFailureNotice
                 if state == .live {
                     statusBar
                     splitArea
@@ -235,7 +238,10 @@ public struct AssistantView: View {
             voicePageIndex = 0
         }
         .onAppear { isOnScreen = true }
-        .onDisappear { isOnScreen = false }
+        .onDisappear {
+            isOnScreen = false
+            reviewLoad.reset()
+        }
         .sheet(isPresented: $isCreatingPersona) { personaSheet }
         .sheet(isPresented: $isCheckingInput) { InputLevelSheet() }
         .sheet(isPresented: $isShowingConfigHelp) { configurationHelpSheet }
@@ -327,6 +333,7 @@ public struct AssistantView: View {
                     ) { closeReview() }
                 }
                 exportMenu
+                    .disabled(review == nil)
                 PageActionButton(
                     title: "新建对话",
                     systemImage: "message",
@@ -1584,18 +1591,6 @@ public struct AssistantView: View {
                     message: sendFailure,
                     actionTitle: "重试",
                     action: { send() }
-                )
-                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-                .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
-            }
-            // VA-12/A43：无 TTS 通道时的朗读禁用说明（纯文字场点播放），
-            // 与记录改名/删除/导出的失败提示同一条通道展示。
-            if let recordFailure = recordOperationError {
-                NoticeBar(
-                    tone: .warning,
-                    message: recordFailure,
-                    actionTitle: "知道了",
-                    action: { recordOperationError = nil }
                 )
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                 .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
@@ -3498,7 +3493,7 @@ public struct AssistantView: View {
             } else {
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 6) {
-                        ForEach(Array(recent.prefix(8).enumerated()), id: \.element.id) { _, summary in
+                        ForEach(recent.prefix(8)) { summary in
                             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                                 Button {
                                     Task { await openRecord(summary) }
@@ -3528,10 +3523,15 @@ public struct AssistantView: View {
                                                 .lineLimit(1)
                                         }
                                     }
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+                                    .speechRailSelectableRow()
                                 }
-                                .buttonStyle(.plain)
-                                .speechRailPointerCursor()
+                                .speechRailInteractiveButtonStyle(
+                                    fillsAvailableWidth: true,
+                                    minimumHeight: SpeechRailDesignTokens.List.selectionRowMinimumHeight,
+                                    horizontalInset: SpeechRailDesignTokens.Spacing.sm,
+                                    baseFill: SpeechRailDesignTokens.Color.field
+                                )
 
                                 InPlaceDeleteButton(
                                     style: .compactIcon,
@@ -3549,8 +3549,6 @@ public struct AssistantView: View {
                                     }
                                 }
                             }
-                            .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-                            .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
                             .background(
                                 SpeechRailDesignTokens.Color.field,
                                 in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
@@ -3737,13 +3735,33 @@ public struct AssistantView: View {
 
     // MARK: - 记录库（刚结束 / 回看）
 
+    @ViewBuilder
+    private var recordFailureNotice: some View {
+        if let failure = reviewLoad.failure, let summary = requestedReviewSummary {
+            NoticeBar(
+                tone: .warning,
+                message: "打开对话失败：\(failure)",
+                actionTitle: "重试",
+                action: { Task { await openRecord(summary) } }
+            )
+        }
+        if let failure = recordOperationError {
+            NoticeBar(
+                tone: .warning,
+                message: failure,
+                actionTitle: "知道了",
+                action: { recordOperationError = nil }
+            )
+        }
+    }
+
     private var reviewArea: some View {
         HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.gutter) {
             SessionLibraryColumn(
                 kind: .assistant,
                 title: "对话记录",
                 foot: "搜索标题与正文；记录长期留在记录库，App 重启也在。",
-                selectedID: review?.record.id,
+                selectedID: reviewLoad.isLoading ? reviewLoad.requestedID : review?.record.id,
                 reloadToken: libraryReloadToken,
                 onSelect: { summary in Task { await openRecord(summary) } }
             )
@@ -3753,6 +3771,12 @@ public struct AssistantView: View {
             SessionPanel(expandsVertically: true) {
                 SessionPanelHead(title: review?.record.title ?? "历史对话复盘", detail: nil, trailingDetail: reviewDetail)
                 SessionHairline()
+
+                if reviewLoad.isLoading {
+                    ProgressView("正在打开对话…")
+                        .controlSize(.small)
+                        .padding(SpeechRailDesignTokens.Spacing.sm)
+                }
 
                 // 历史记录摘要状态栏
                 if let record = review?.record {
@@ -3835,7 +3859,13 @@ public struct AssistantView: View {
                                 bodyWidth: 760
                             )
                         }
-                        if review?.lines.isEmpty != false {
+                        if review == nil && reviewLoad.failure != nil {
+                            SessionEmptyState(
+                                systemImage: "exclamationmark.triangle",
+                                title: "对话暂时没能打开",
+                                message: "请重试或选择其他记录。"
+                            ) { EmptyView() }
+                        } else if !reviewLoad.isLoading && review?.lines.isEmpty != false {
                             SessionEmptyState(
                                 systemImage: "text.alignleft",
                                 title: "这一条记录里还没有正文",
@@ -3849,9 +3879,11 @@ public struct AssistantView: View {
                 SessionHairline()
                 CardFoot(note: "继续这一轮是新开一轮：角色与声音可以重新选；这一条记录一个字不动。") {
                     reviewFooterActions
+                        .disabled(review == nil)
                 }
             }
             .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
+            .disabled(reviewLoad.isLoading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
@@ -3997,17 +4029,37 @@ public struct AssistantView: View {
     }
 
     private func openRecord(_ summary: SessionSummary) async {
+        if review?.record.id == summary.id {
+            reviewLoad.reset()
+            requestedReviewSummary = nil
+            return
+        }
+        requestedReviewSummary = summary
         // 翻记录先把这个标记清掉：下面 `endConversation()` 会在打开之后重新写上它。
         justEndedSessionID = nil
         // 一次库读、一次赋值。原来是 4 次串行 `await` + 4 处独立状态写入，
         // 每次返回都触发一次界面更新，右侧于是分几步跳出来——用户看着像卡住。
-        guard let snapshot = (try? await session.reviewSnapshot(sessionID: summary.id)) ?? nil else { return }
-        review = snapshot
-        inspectorTab = .session
+        do {
+            guard let snapshot = try await reviewLoad.load(id: summary.id, operation: {
+                guard let snapshot = try await session.reviewSnapshot(sessionID: summary.id) else {
+                    throw CocoaError(.fileNoSuchFile)
+                }
+                return snapshot
+            }) else { return }
+            review = snapshot
+            recordOperationError = nil
+            inspectorTab = .session
+        } catch {
+            // reviewLoad retains the latest failure and retry identity. The
+            // page-level notice remains visible in ready/review/live states.
+        }
     }
 
     private func closeReview() {
         justEndedSessionID = nil
+        reviewLoad.reset()
+        requestedReviewSummary = nil
+        recordOperationError = nil
         review = nil
     }
 

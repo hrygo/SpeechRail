@@ -2520,7 +2520,7 @@ public struct VoiceLibraryView: View {
                                 )
                         }
                     }
-                    .listStyle(.inset)
+                    .speechRailSelectableList()
                     .scrollContentBackground(.hidden)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .accessibilityLabel("音色列表")
@@ -3660,7 +3660,7 @@ public struct WorksView: View {
                                 }
                         }
                     }
-                    .listStyle(.inset)
+                    .speechRailSelectableList()
                     .scrollContentBackground(.hidden)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .accessibilityLabel("作品列表")

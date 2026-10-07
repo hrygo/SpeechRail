@@ -1,26 +1,38 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.4"
-date: 2026-10-06
+version: "3.3.5"
+date: 2026-10-07
 ---
 
 # SpeechRail 测试与验收
 
 ## 自动化门禁
 
-提交前运行：
+本地与 GitHub 的平台无关 `Quality Gates` 共用同一入口：
 
 ```bash
 cd <path-to-SpeechRail>
-uv run --extra dev pytest
-uv run --extra dev ruff check src tests scripts hatch_build.py
-uv run --extra dev mypy src
-npx --yes @redocly/cli@2.52.1 lint contracts/openapi.yaml
-uv run python scripts/check_openapi_contract.py
-uv run python scripts/check_mcp_tool_contract.py
-git diff --check
+# PR 验证前先同步 base ref；这里检查已提交差异及当前暂存/未暂存修改。
+bash scripts/ci_quality_gate.sh --base-ref origin/main
 ```
+
+该入口使用 `uv sync --locked --extra dev --extra mcp`，随后以 `--no-sync`
+执行 Ruff、Mypy、版本一致性、OpenAPI lint、用户文档、MCP、macOS 测试清单及分人契约回归，
+任一步失败立即返回失败。质量检查不构建 native worker；真实制品仍由 Python 测试/打包门禁构建。
+不指定 `--base-ref` 时只检查当前工作区与暂存区空白，不能证明已提交的 PR 差异通过。
+
+质量门禁通过不等于所有 CI job 通过。按改动范围另外运行对应测试或构建：
+
+```bash
+uv run --extra dev pytest
+swift test --package-path macos/SpeechRailApp
+bash scripts/macos_app_build.sh --configuration Debug
+```
+
+`macos_app_build.sh` 在创建构建产物前也执行测试清单检查，避免新增 SwiftPM 测试未加入
+Xcode 单测 target 却得到本地 App 构建成功。SwiftPM 测试、App target 构建和 Xcode 测试清单
+是不同检查；PR #341 的差异分析与证据见 [本地与 GitHub CI 一致性](ci-local-parity.md)。
 
 GitHub Actions 使用同一套锁定依赖门禁：`quality` 运行 Ruff、Mypy、版本一致性、OpenAPI lint、OpenAPI 路径对齐、MCP 工具面（`tools/list` / `resources/list` / 文档 / skill manifest）对齐、分人契约回归和差异空白检查；`test` 在 `macos-26` 的 Python 3.14.7 环境中构建一次 wheel。`scripts/ci_python_gate.sh` 让非 wheel 测试与构建并行，随后通过 `SPEECHRAIL_WHEEL_PATH` 让 wheel 测试消费该制品；两段 coverage 合并后仍强制 80% 门槛，任一段失败均阻止 artifact 上传。`swift-tests` 和 `macos-app` 使用独立的 `macos-26` arm64 runner，分别执行完整 SwiftPM 测试及 Xcode App 构建，不运行 UI 自动化或重复执行 Xcode 测试。`Gate Summary` 必须等待并验证每个选中的 job；被选中的检查意外 skip 也会失败。`package` 下载已测 wheel，只做压缩包、Darwin CoreML native worker 和 checksum 校验后上传，避免重复同步依赖和构建。普通 CI 与 tag Release 的 `package` 都使用 `macos-26`。Ubuntu 仅承载平台无关的 Quality Gates，不代表产品运行支持。CI workflow 同时支持普通 push/PR 和 Release workflow 的 `workflow_call`，Release 不重复维护 Python 检查命令。
 

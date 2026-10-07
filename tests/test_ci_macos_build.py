@@ -10,6 +10,30 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/macos_app_build.sh"
 
 
+def test_local_build_rejects_test_manifest_drift_before_invoking_xcode(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    checker = bin_dir / "python3"
+    checker.write_text("#!/bin/sh\nexit 23\n", encoding="utf-8")
+    checker.chmod(0o755)
+    marker = tmp_path / "xcode-invoked"
+    xcode = bin_dir / "xcodebuild"
+    xcode.write_text('#!/bin/sh\ntouch "$XCODE_MARKER"\nexit 9\n', encoding="utf-8")
+    xcode.chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "--configuration", "Debug"],
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "XCODE_MARKER": str(marker),
+        },
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode == 23, result.stderr
+    assert not marker.exists(), "Xcode must not start when manifest parity fails"
+
+
 @pytest.mark.parametrize("build_status", ["0", "7"])
 def test_ci_build_preserves_cache_and_removes_bundle(
     tmp_path: Path, build_status: str
