@@ -378,6 +378,9 @@ public enum SpeechRailDesignTokens {
         /// 改后 64.0 / 64.0，内容区（两条分隔线之间）**63.0**——与帧逐位相同，
         /// 行内墨迹也落在「上 16.5 / 下 15.0」（帧 15.75 / 15.0）。
         public static let pageRowMinimumHeight: CGFloat = 64
+        /// Two-line document/record selection rows use the same native geometry.
+        /// Their full rectangular bounds select; trailing commands stay independent.
+        public static let selectionRowMinimumHeight: CGFloat = pageRowMinimumHeight
         public static let compactRowHeight: CGFloat = 42
         public static let tallRowHeight: CGFloat = 58
         public static let rowSpacing: CGFloat = Spacing.xs

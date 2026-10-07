@@ -1,6 +1,69 @@
 import AppKit
 import SwiftUI
+import Observation
 import SpeechRailControlKit
+
+/// Selection is acknowledged before reading. Only the latest request may publish
+/// content or an error; cancellation alone cannot retire synchronous file reads.
+@MainActor
+@Observable
+public final class SpeechRailSelectionLoad<Value: Sendable> {
+ public private(set) var requestedID: String?
+ public private(set) var isLoading = false
+ public private(set) var failure: String?
+ private var generation = UUID()
+
+ public init() {}
+
+ public func reset() {
+ generation = UUID()
+ requestedID = nil
+ isLoading = false
+ failure = nil
+ }
+
+ public func load(
+ id: String,
+ operation: () async throws -> Value
+ ) async throws -> Value? {
+ let request = UUID()
+ generation = request
+ requestedID = id
+ isLoading = true
+ failure = nil
+ defer {
+ if generation == request { isLoading = false }
+ }
+ // Give UI feedback an opportunity to update before starting the read.
+ await Task.yield()
+ guard generation == request, !Task.isCancelled else { return nil }
+ do {
+ let result = try await operation()
+ guard generation == request, !Task.isCancelled else { return nil }
+ return result
+ } catch {
+ guard generation == request, !Task.isCancelled else { return nil }
+ failure = error.localizedDescription
+ throw error
+ }
+ }
+}
+
+public extension View {
+ /// Apply to the selectable content, before attaching row actions.
+ func speechRailSelectableRow() -> some View {
+ self
+ .frame(maxWidth: .infinity, minHeight: SpeechRailDesignTokens.List.selectionRowMinimumHeight, alignment: .leading)
+ .contentShape(.interaction, Rectangle())
+ }
+
+ /// Native selection, keyboard navigation and accessibility share one recipe.
+ func speechRailSelectableList() -> some View {
+ self
+ .listStyle(.inset)
+ .environment(\.defaultMinListRowHeight, SpeechRailDesignTokens.List.selectionRowMinimumHeight)
+ }
+}
 
 public enum SpeechRailButtonLevel: Sendable {
  case primary

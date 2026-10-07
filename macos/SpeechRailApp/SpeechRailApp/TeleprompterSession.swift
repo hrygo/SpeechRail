@@ -132,10 +132,22 @@ public final class TeleprompterSession {
     private var stageGeneration: UUID?
     private var stageCloseToken: UUID?
 
+    private let documentSelection = SpeechRailSelectionLoad<TeleprompterV2DocumentBundle>()
+    public var isLoadingDocument: Bool { documentSelection.isLoading }
+    public var loadingDocumentID: String? {
+        isLoadingDocument ? documentSelection.requestedID : nil
+    }
+
+    public var canSelectDocument: Bool {
+        source == nil && client == nil && runningVersion == nil
+            && phase != .preparing && !isResuming && !isStoppingIntentionally
+            && !isAnnotating && !isPreparingDraft
+    }
+
     public var canEdit: Bool {
         source == nil && client == nil && runningVersion == nil
             && phase != .preparing && !isResuming && !isStoppingIntentionally
-            && !isAnnotating
+            && !isAnnotating && !isLoadingDocument
     }
     public var isCapturing: Bool { source != nil }
     /// True only while this stage owns the monotonic run clock. Re-fronting a
@@ -277,12 +289,39 @@ public final class TeleprompterSession {
     }
 
     public func listDocuments() throws -> [TeleprompterDocument] {
-        let items = try v2Store.listDocuments()
-        unavailableDocuments = items.filter { !$0.isAvailable }
-        return items.compactMap { item in
-            guard item.isAvailable else { return nil }
-            return try? legacyDocument(from: v2Store.load(documentID: item.id))
+        let entries = try v2Store.readDocuments()
+        unavailableDocuments = entries.map(\.item).filter { !$0.isAvailable }
+        return entries.compactMap { entry in
+            guard let bundle = entry.bundle else { return nil }
+            return try? legacyDocument(from: bundle)
         }
+    }
+
+    /// UI selection reads and validates the target off the main actor. The
+    /// current editor remains intact until a successful, still-current result.
+    @discardableResult
+    public func loadForSelection(documentID: String) async throws -> Bool {
+        guard canSelectDocument else { throw TeleprompterTextError.sessionBusy }
+        if document?.id == documentID {
+            documentSelection.reset()
+            return true
+        }
+        let store = v2Store
+        guard let bundle = try await documentSelection.load(id: documentID, operation: {
+            try self.flushPendingDraftSave()
+            return try await Task.detached(priority: .userInitiated) {
+                try store.load(documentID: documentID)
+            }.value
+        }) else { return false }
+        guard canSelectDocument else { throw TeleprompterTextError.sessionBusy }
+        invalidateAnalysis()
+        clearPreparedEditHistory()
+        applyV2Bundle(bundle)
+        return true
+    }
+
+    public func cancelDocumentSelection() {
+        documentSelection.reset()
     }
 
     public func load(documentID: String) throws {
@@ -296,9 +335,10 @@ public final class TeleprompterSession {
         // 并 throw，不继续切换——否则最后一次编辑在 `invalidateAnalysis()` 取消
         // 待保存任务后丢失。
         try flushPendingDraftSave()
+        let bundle = try v2Store.load(documentID: documentID)
         invalidateAnalysis()
         clearPreparedEditHistory()
-        applyV2Bundle(try v2Store.load(documentID: documentID))
+        applyV2Bundle(bundle)
     }
 
     public func createDocument(title: String, sourceText: String) {
@@ -1372,6 +1412,7 @@ public final class TeleprompterSession {
     /// E1/N02：在身份切换前提交当前待保存修订。成功只确认已写出的内容；
     /// 失败时保留当前 document 与 dirty 状态并 throw，调用方不得继续切换身份。
     public func flushPendingDraftSave() throws {
+        guard draftSaveState != .clean else { return }
         cancelScheduledDraftSave()
         guard document != nil else { return }
         do {
