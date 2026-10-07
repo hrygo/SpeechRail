@@ -251,7 +251,11 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorBody'
         '503':
-          description: Model runtime is not ready or a worker is recovering
+          description: |
+            Model runtime is not ready or a worker is recovering.
+            Under serial heavy-compute policy, unconfirmed TTS reclamation can
+            also block ASR admission: `backend_reclamation_failed` has
+            `retryable=false` and requires operator runtime recovery.
           headers:
             SpeechRail-Busy-Reason:
               schema:

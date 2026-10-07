@@ -440,6 +440,7 @@ claude mcp add --scope user speechrail \
    `backend_reclamation_failed` 则为 `503`、`retryable=false`：受影响的 lane 仍被隔离，后续调用也不能靠退避恢复。
    停止重试，由操作者按受管运维流程恢复 runtime 后再验证或生成；刷新 `describe()` 不证明隔离已解除。
    详见[音色验证失败](voice-validation-failures.md)；MCP 不自动重启或切换档位。
+   串行重计算策略下，TTS 隔离还可能阻止 ASR 转写准入；同样须先恢复 runtime。
 5. **长任务**：同步 `transcribe`/`synthesize` 超时或报 `audio_too_long` 时，改用 `create_job` + `get_job`。
 6. **自定义音色跨档**：`available` 始终依据当前快照报告。MCP 不切换档位；操作者若在 MCP 外变更运行配置，之后重新调用 `describe()` 获取当前能力。
 7. **ChatGPT 远程模式**：先确认 tunnel/gateway 可访问 `/mcp`，再调用 `describe()`；不要把本地路径当作 ChatGPT 可直接读取的文件或把 `audio_path` 当作对话附件。

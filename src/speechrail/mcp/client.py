@@ -37,7 +37,7 @@ _DEFAULT_AUDIO_CONTENT_TYPE = "application/octet-stream"
 _RETRYABLE_HINTS: dict[str, str] = {
     "backend_reclamation_failed": (
         "the affected lane remains isolated; stop retries. "
-        "An operator must recover the runtime before validation or rendering can resume; "
+        "An operator must recover the runtime before affected ASR/TTS work can resume; "
         "describe() alone does not prove recovery"
     ),
     "backend_busy": "SpeechRail is busy; retry with backoff starting at 1s and do not loop",

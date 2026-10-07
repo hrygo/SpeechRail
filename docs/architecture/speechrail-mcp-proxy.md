@@ -419,6 +419,7 @@ REST 的统一错误 envelope 会被转为 MCP tool error，并保留 `code`、r
 隔离后的后续请求继续返回 `backend_reclamation_failed`，不改成普通排队满载。
 MCP 提供操作者恢复提示，不自动重启服务或切换档位。
 `describe()` 只报告能力快照，成功返回不能证明 governor 的隔离已经解除。
+串行重计算策略下，隔离的 TTS owner 也会阻止 ASR 准入，返回相同的不可重试错误。
 
 ### 7.2 隐私边界
 

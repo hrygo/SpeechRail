@@ -11,6 +11,8 @@ request, a real status, and the declared response set.
 
 from __future__ import annotations
 
+import io
+import wave
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -28,6 +30,42 @@ from speechrail.http.routes.audio import create_audio_router
 _CONTRACT = Path(__file__).resolve().parents[1] / "contracts" / "openapi.yaml"
 _TRANSCRIPTIONS = "/v1/audio/transcriptions"
 _SPEECH = "/v1/audio/speech"
+
+
+def test_serial_tts_isolation_blocks_transcription_without_retry() -> None:
+    class RefusingTranscriber:
+        async def transcribe(self, request: object) -> None:
+            pytest.fail("isolated serial policy must not start ASR")
+
+    services = build_app_services(
+        Settings(qwen3_model_dir=None, qwen3_python=None),
+        AppOverrides(
+            batch_transcriber=RefusingTranscriber(),
+            tts_synthesizer=_RefusingSynthesizer(),
+        ),
+    )
+    assert not services.governor.snapshot().allow_heavy_overlap
+    services.governor.quarantine_tts_lane("tts_base")
+    app = FastAPI()
+    app.add_middleware(RequestIdMiddleware)
+    app.include_router(create_audio_router(services))
+    audio = io.BytesIO()
+    with wave.open(audio, "wb") as container:
+        container.setnchannels(1)
+        container.setsampwidth(2)
+        container.setframerate(16000)
+        container.writeframes(b"\x00\x00" * 1600)
+    response = TestClient(app).post(
+        _TRANSCRIPTIONS,
+        headers={"X-Request-ID": "req_isolated_test"},
+        data={"model": "whisper-1"},
+        files={"file": ("synthetic.wav", audio.getvalue(), "audio/wav")},
+    )
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "backend_reclamation_failed"
+    assert response.json()["error"]["retryable"] is False
+    assert response.json()["error"]["request_id"] == "req_isolated_test"
+    assert "Retry-After" not in response.headers
 
 
 class _RefusingSynthesizer:

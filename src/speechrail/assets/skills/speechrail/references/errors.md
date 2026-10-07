@@ -10,8 +10,9 @@ the category before retrying:
 - `backend_reclamation_failed`: HTTP 503 with `retryable=false` means backend
   ownership is unconfirmed. The affected lane stays isolated, including later
   calls. Stop retries and ask the service operator to recover the runtime
-  through the managed operations workflow before validating or rendering
-  again. A successful `describe()` does not prove isolation has cleared.
+  through the managed operations workflow before affected ASR/TTS work resumes.
+  Serial heavy-compute policy can also block transcription beside an isolated
+  TTS owner. A successful `describe()` does not prove isolation has cleared.
   MCP must not automatically restart the service or change its profile.
 - worker initialization or deterministic clone-parameter errors: do not retry
   blindly; report the code and inspect readiness/parameters;
