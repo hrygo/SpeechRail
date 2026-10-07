@@ -575,6 +575,9 @@ def test_lifecycle_start_failure_releases_already_created_runner_task() -> None:
             async def close(self) -> None:
                 pass
 
+            def confirm_shutdown(self) -> None:
+                pass
+
         life = RuntimeLifecycle(
             asr=_FakeWorker(), runner=_Runner(), evictor=_FailingEvictor(), poll_seconds=0.001
         )

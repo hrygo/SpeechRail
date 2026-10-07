@@ -17,7 +17,7 @@ date: 2026-10-07
 | 包 | 发现 | 修正与回归 | 关联 |
 |---|---|---|---|
 | A01 | TTS 回收失败初次不可重试，后续隔离准入却被解释为可重试队列满；MCP 恢复指南漏同步 | 隔离异常独立类型；REST、Realtime、MCP 保留 `backend_reclamation_failed`，REST `503/retryable=false`；打包 skill 与门禁包含恢复指引。补串行策略下 ASR 同样被阻断的契约与真实 fake HTTP 回归 | #235/#238，[PR #335](https://github.com/hrygo/SpeechRail/pull/335) |
-| A02 | force/TTL 吞掉 close 异常后仍报 cold；transport 在 terminate/kill/wait 失败前已摘掉旧 owner，可能启动替代 child | 共享 lease 标记 `reclamation_failed` 并拒绝新 lease；活动和 TTL 不解除隔离。transport 保留 process/stderr owner，禁止 start 与 I/O；只有显式再次 close/reap 确认成功后解除。取消等待者不丢失已完成的关闭结果 | #246/#238，[PR #337](https://github.com/hrygo/SpeechRail/pull/337) |
+| A02 | force/TTL 吞掉 close 异常后仍报 cold；transport 在 terminate/kill/wait 失败前已摘掉旧 owner，可能启动替代 child | 共享 lease 标记 `reclamation_failed` 并拒绝新 lease；活动和 TTL 不解除隔离。transport 保留 process/stderr owner，禁止 start 与 I/O；显式再次 close/reap，或 lifecycle 确认全部物理 owner 成功关闭后解除。取消等待者不丢失已完成的关闭结果 | #240/#246/#238，[PR #337](https://github.com/hrygo/SpeechRail/pull/337) |
 
 A01 最终 head `262d5aad94d97f6ef23a07843a0af8664b13de70` 的 CI run `37592748454`
 全部成功，于 UTC `2026-10-07T08:22:50Z` squash 合入 `ebe42872a792f4e5c60fb14fcc8365ce2aafce4a`。
@@ -38,6 +38,10 @@ A02 以该合并提交为源码基线；其最终 head、CI 和合并提交以�
   已成功关闭的 worker 记录为 cold，随后向等待者传播取消。
 - transport 失败期间不复用旧管道、不 spawn 替代 child；显式 close/reap 成功后才能 start。
   该恢复合同不新增自动服务重启、第二个模型 owner 或额外并发 lane。
+- 同一 `RuntimeLifecycle` 关闭后再启动的既有语义保留：先 join monitor/runner/全部物理 owner
+  的 close，成功后调用 evictor 的明确 shutdown 确认，恢复全部 tracked lease，包括 router
+  拥有、evictor 单独跟踪的 design 子 worker。任何关闭失败/取消/超时都不解除隔离；
+  monitor.close 或属性变为 false 本身不足以确认。
 - alignment 的受管调用保留 `alignment_unavailable` 失败结果；共享 lease 的 TTS 消费者保留
   `backend_reclamation_failed`。公共 REST/MCP 的不可重试和操作者恢复指引由 A01 同步。
   `describe()` 成功本身不证明隔离解除。
@@ -53,13 +57,15 @@ A02 以该合并提交为源码基线；其最终 head、CI 和合并提交以�
 | 审计初始 Swift 联合回归 | 422 XCTest / 0 failures，另 35 Swift Testing；非 UI 自动化 |
 | 契约与静态门禁 | OpenAPI、Realtime、MCP 工具/资源/打包 skill、用户文档、当前边界、运维文档、版本、macOS target coverage、route、独立 LLM 支持层检查通过 |
 | A01 红绿 | 连续两次 HTTP 故障反例 8 failures；MCP hint/名单防漂移 4 failures。最终 442 passed，独立审查的 ASR 契约 Required 已修复 |
-| A02 红绿 | 先确认 8 个旧实现反例失败；加入 TTS 接线后，在一次性源码副本选择旧 lease/transport，9 个反例全部失败。覆盖 force/TTL、异常/仍活着、重复取消、terminate/kill/wait 及 TTS；修订后 384 passed，1 个既有 asyncio 弃用警告 |
-| A02 扩展接线 | 生产 FixedTextAligner 的隔离失败/恢复；TTS open 在 idle close 失败后返回隔离码；共享 ASR 故障恢复、runtime lifecycle、governor、MCP 及原 worker 回归保留 |
+| A02 红绿 | 先确认 8 个旧实现反例失败；加入 TTS 接线后，一次性源码副本选择旧 lease/transport，9 个反例全部失败。独立审查再补同实例 lifecycle 恢复，修订前 3 failed / 2 passed；最终 389 passed，1 个既有 asyncio 弃用警告 |
+| A02 扩展接线 | 生产 FixedTextAligner 的隔离失败/恢复；TTS open 在 idle close 失败后返回隔离码；同实例 alignment/TTS lifecycle 成功关闭后恢复、失败不恢复、父 owner 确认关闭后恢复子 worker；共享 ASR、governor、MCP 及原 worker 回归保留 |
 | Python 静态检查 | Ruff 全 `src tests scripts hatch_build.py`；Mypy 全 `src`（171 个源文件）。无新增依赖或产品能力 |
 
 A02 的首轮扩展回归曾出现 3 个共享 ASR 恢复失败：保留 owner 不能改变 transport 关闭即不可用的
-语义。修正 `alive` 的可用性表达后，384 项联合回归通过。所有失败记录属于本地反例和中间版本，
-不隐去失败过程，也不将既有弃用/编译警告写成零警告。
+语义。修正 `alive` 的可用性表达后，384 项联合回归通过。完整 diff 独立审查的唯一 Required
+是同实例 lifecycle 成功关闭后未清隔离；新增 alignment、TTS 与 parent/child 三个红灯，
+补成功确认接线后扩大为 389 项通过。所有失败记录属于本地反例和中间版本，不隐去失败过程，
+也不将既有弃用/编译警告写成零警告。
 
 ## 审查范围、并行保护与未验边界
 

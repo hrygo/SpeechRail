@@ -6,6 +6,8 @@ import traceback
 import pytest
 
 from speechrail.application.lifecycle import RuntimeLifecycle
+from speechrail.runtime.resource_governor import GovernorLaneIsolatedError
+from speechrail.runtime.worker_lease import WorkerIdleEvictor
 
 
 class Worker:
@@ -169,5 +171,87 @@ def test_cleanup_report_does_not_expose_backend_exception_detail() -> None:
         report = "".join(traceback.format_exception(result.value))
         assert "backend_private_detail" not in report
         assert "asr cleanup failed (RuntimeError)" in report
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("role", ["alignment", "tts"])
+@pytest.mark.parametrize("shutdown_fails", [False, True])
+def test_runtime_reuse_clears_idle_isolation_only_after_confirmed_owned_shutdown(
+    role: str, shutdown_fails: bool,
+) -> None:
+    async def run() -> None:
+        class FailingWorker(Worker):
+            failing = True
+
+            async def close(self) -> None:
+                if self.failing:
+                    raise OSError("fake reap failure")
+                await super().close()
+
+        worker = FailingWorker()
+        worker.alive = True
+        evictor = WorkerIdleEvictor([worker], idle_timeout_seconds=0)
+        lease = evictor.lease_lock_of(worker)
+        life = RuntimeLifecycle(
+            alignment=worker if role == "alignment" else None,
+            tts=worker if role == "tts" else None,
+            evictor=evictor, lazy_load=True,
+        )
+        await life.start()
+        await evictor.force_evict()
+        assert life.worker_states()[role] == "reclamation_failed"
+        worker.failing = shutdown_fails
+        if shutdown_fails:
+            with pytest.raises(ExceptionGroup, match="cleanup incomplete"):
+                await life.close()
+            assert life.worker_states()[role] == "reclamation_failed"
+            with pytest.raises(GovernorLaneIsolatedError):
+                async with lease.lease():
+                    pytest.fail("failed shutdown cleared admission isolation")
+        else:
+            await life.close()
+            assert life.worker_states()[role] == "cold_evicted"
+            await life.start()
+            async with lease.lease():
+                await worker.start()
+                assert worker.alive
+            await life.close()
+
+    asyncio.run(run())
+
+
+def test_confirmed_parent_shutdown_recovers_tracked_child_isolation() -> None:
+    async def run() -> None:
+        class Child(Worker):
+            failing = True
+
+            async def close(self) -> None:
+                if self.failing:
+                    raise OSError("fake child reap failure")
+                await super().close()
+
+        child = Child()
+
+        class Parent(Worker):
+            async def close(self) -> None:
+                await child.close()
+                await super().close()
+
+        parent = Parent()
+        parent.alive = child.alive = True
+        evictor = WorkerIdleEvictor([parent], idle_timeout_seconds=0)
+        evictor.track(child)
+        life = RuntimeLifecycle(tts=parent, evictor=evictor, lazy_load=True)
+        await life.start()
+        await evictor.force_evict(child)
+        child.failing = False
+        await life.close()
+        assert evictor.state_of(child).value == "cold_evicted"
+        await life.start()
+        async with evictor.lease_lock_of(child).lease():
+            await child.start()
+            assert child.alive
+        await life.close()
 
     asyncio.run(run())

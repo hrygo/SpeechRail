@@ -47,7 +47,7 @@ class WorkerLeaseLock:
         return self._reclamation_failed
 
     def mark_reclamation(self, *, failed: bool) -> None:
-        """Called under idle admission ownership after a close outcome is known."""
+        """Record a known close outcome under idle admission or shutdown ownership."""
         self._reclamation_failed = failed
 
     @property
@@ -187,6 +187,26 @@ class WorkerIdleEvictor:
                 await self._task
             self._task = None
 
+    def confirm_shutdown(self) -> None:
+        """Restore admission only after lifecycle joined all physical-owner closes.
+
+        Stopping this monitor alone is not reclamation evidence. Lifecycle owns
+        the shutdown boundary, including router children tracked independently.
+        """
+        if any(
+            getattr(worker, "alive", False) or getattr(worker, "ready", False)
+            for worker in self._workers
+        ):
+            raise RuntimeError("backend_reclamation_failed")
+        for worker in self._workers:
+            self._record_cold(worker)
+
+    def _record_cold(self, worker: EvictableWorker) -> None:
+        self._lease_locks[worker].mark_reclamation(failed=False)
+        self._states[worker] = WorkerLifecycleState.COLD_EVICTED
+        self._was_alive[worker] = False
+        self._last_active[worker] = time.monotonic()
+
     async def force_evict(self, worker: EvictableWorker | None = None) -> None:
         """Force immediate cold eviction (e.g. on macOS memory pressure notification)."""
         targets = (worker,) if worker is not None else self._workers
@@ -217,10 +237,7 @@ class WorkerIdleEvictor:
                 if self._on_eviction is not None:
                     self._on_eviction(type(worker).__name__, "reclamation_failed")
                 raise
-            lease.mark_reclamation(failed=False)
-            self._states[worker] = WorkerLifecycleState.COLD_EVICTED
-            self._was_alive[worker] = False
-            self._last_active[worker] = time.monotonic()
+            self._record_cold(worker)
             if self._on_eviction is not None:
                 self._on_eviction(type(worker).__name__, "cold_evict")
 
