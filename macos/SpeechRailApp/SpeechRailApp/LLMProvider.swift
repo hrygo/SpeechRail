@@ -3,6 +3,213 @@ import Foundation
 import OpenAI
 import Security
 
+/// 最低文本响应合同的失败分类，不包含供应商正文或业务 schema。
+public enum LLMResponseIssue: String, Codable, Equatable, Sendable, Error {
+    case invalidShape
+    case emptyText
+    case refused
+    case incomplete
+    case failed
+    case notCompleted
+
+    public var detail: String {
+        switch self {
+        case .invalidShape: "服务返回的内容不符合所选接口，尚未确认能回答。"
+        case .emptyText: "服务没有返回可用正文，尚未确认能回答。"
+        case .refused: "服务拒绝了探测请求，尚未确认能回答。"
+        case .incomplete: "服务的回答未完成；短探测预算不能证明模型不可用。"
+        case .failed: "服务报告请求失败，尚未确认能回答。"
+        case .notCompleted: "请求仍未完成，尚未确认能回答。"
+        }
+    }
+}
+
+enum LLMResponseValidation {
+    /// 探测与正式文本解析共享最低合同；JSON/schema/usage 是调用者的附加要求。
+    static func text(from data: Data, operation: LLMOperation) throws -> String {
+        guard data.count <= 256 * 1024,
+              let object = try? LLMStrictJSON.object(from: data),
+              object["error"] == nil || object["error"] is NSNull else {
+            throw LLMResponseIssue.invalidShape
+        }
+        let text: String
+        switch operation {
+        case .chat:
+            guard object["object"] == nil || object["object"] as? String == "chat.completion",
+                  let choices = object["choices"] as? [[String: Any]], choices.count == 1,
+                  let message = choices[0]["message"] as? [String: Any],
+                  message["role"] as? String == "assistant" else {
+                throw LLMResponseIssue.invalidShape
+            }
+            if let refusal = message["refusal"] as? String, !refusal.isEmpty {
+                throw LLMResponseIssue.refused
+            }
+            if choices[0]["finish_reason"] as? String == "length" { throw LLMResponseIssue.incomplete }
+            guard choices[0]["finish_reason"] as? String == "stop",
+                  message["tool_calls"] == nil || message["tool_calls"] is NSNull
+                    || (message["tool_calls"] as? [Any])?.isEmpty == true,
+                  let content = message["content"] as? String else {
+                throw LLMResponseIssue.invalidShape
+            }
+            text = content
+        case .responses:
+            guard object["object"] == nil || object["object"] as? String == "response",
+                  object["choices"] == nil else { throw LLMResponseIssue.invalidShape }
+            if let status = object["status"] as? String {
+                switch status {
+                case "completed": break
+                case "incomplete": throw LLMResponseIssue.incomplete
+                case "failed": throw LLMResponseIssue.failed
+                case "queued", "in_progress", "cancelled": throw LLMResponseIssue.notCompleted
+                default: throw LLMResponseIssue.invalidShape
+                }
+            } else if object["status"] != nil {
+                throw LLMResponseIssue.invalidShape
+            }
+            if let output = object["output"] as? [[String: Any]] {
+                guard object["status"] as? String == "completed" else {
+                    throw LLMResponseIssue.notCompleted
+                }
+                var chunks = ""
+                for item in output {
+                    // Reasoning items carry no user text; only assistant messages do.
+                    guard item["type"] as? String == "message",
+                          item["role"] as? String == "assistant",
+                          let contents = item["content"] as? [[String: Any]] else { continue }
+                    for content in contents {
+                        if content["type"] as? String == "refusal" { throw LLMResponseIssue.refused }
+                        if content["type"] as? String == "output_text",
+                           let chunk = content["text"] as? String { chunks += chunk }
+                    }
+                }
+                text = chunks
+            } else if object["output"] == nil, let content = object["output_text"] as? String {
+                // Explicit compatible-provider shape; no business schema implied.
+                text = content
+            } else {
+                throw LLMResponseIssue.invalidShape
+            }
+        }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw LLMResponseIssue.emptyText
+        }
+        return text
+    }
+}
+
+public struct LLMRequestContext: Codable, Equatable, Sendable {
+    public let sessionID: String
+    public let requestID: String
+
+    public init(sessionID: String = UUID().uuidString, requestID: String = UUID().uuidString) {
+        self.sessionID = sessionID
+        self.requestID = requestID
+    }
+}
+
+public enum LLMObservationKind: String, Codable, Equatable, Sendable {
+    case providerRequestStarted = "provider_request_started"
+    case providerResponse = "provider_response"
+    case providerFailed = "provider_failed"
+}
+
+public struct LLMProviderObservation: Codable, Equatable, Sendable {
+    public let kind: LLMObservationKind
+    public let component: String
+    public let context: LLMRequestContext?
+    public let elapsedMilliseconds: Int?
+    public let httpStatus: Int?
+    public let responseBytes: Int?
+    public let choiceCount: Int?
+    public let finishReason: String?
+    public let promptTokens: Int?
+    public let completionTokens: Int?
+    public let reasoningTokens: Int?
+    public let model: String?
+    public let endpointHost: String?
+    public let transportAttempt: Int?
+    public let operation: LLMOperation?
+    public let compatibilityMode: LLMCompatibilityMode?
+    public let thinkingControl: String?
+    public let structuredOutputMode: LLMStructuredOutputMode?
+    public let outcome: String?
+    public let errorCode: String?
+
+    public init(
+        kind: LLMObservationKind,
+        component: String = "provider",
+        context: LLMRequestContext? = nil,
+        elapsedMilliseconds: Int? = nil,
+        httpStatus: Int? = nil,
+        responseBytes: Int? = nil,
+        choiceCount: Int? = nil,
+        finishReason: String? = nil,
+        promptTokens: Int? = nil,
+        completionTokens: Int? = nil,
+        reasoningTokens: Int? = nil,
+        model: String? = nil,
+        endpointHost: String? = nil,
+        transportAttempt: Int? = nil,
+        operation: LLMOperation? = nil,
+        compatibilityMode: LLMCompatibilityMode? = nil,
+        thinkingControl: String? = nil,
+        structuredOutputMode: LLMStructuredOutputMode? = nil,
+        outcome: String? = nil,
+        errorCode: String? = nil
+    ) {
+        self.kind = kind
+        self.component = component
+        self.context = context
+        self.elapsedMilliseconds = elapsedMilliseconds
+        self.httpStatus = httpStatus
+        self.responseBytes = responseBytes
+        self.choiceCount = choiceCount
+        self.finishReason = finishReason
+        self.promptTokens = promptTokens
+        self.completionTokens = completionTokens
+        self.reasoningTokens = reasoningTokens
+        self.model = model
+        self.endpointHost = endpointHost
+        self.transportAttempt = transportAttempt
+        self.operation = operation
+        self.compatibilityMode = compatibilityMode
+        self.thinkingControl = thinkingControl
+        self.structuredOutputMode = structuredOutputMode
+        self.outcome = outcome
+        self.errorCode = errorCode
+    }
+}
+
+public typealias LLMObservationHandler = @Sendable (LLMProviderObservation) throws -> Void
+
+enum LLMObservability {
+    static func errorCode(for error: Error) -> String {
+        if error is CancellationError { return "cancelled" }
+        if let error = error as? LLMError {
+            switch error {
+            case .notConfigured: return "not_configured"
+            case .badBaseURL: return "bad_base_url"
+            case .transport: return "transport"
+            case .http(let status, _), .httpWithRetry(let status, _, _): return "http_\(status)"
+            case .usageLimitExceeded: return "usage_limit_exceeded"
+            case .notChatAPI: return "not_chat_api"
+            case .notResponsesAPI: return "not_responses_api"
+            case .thinkingControlUnavailable: return "thinking_control_unavailable"
+            case .unsupportedStructuredOutput: return "unsupported_structured_output"
+            case .outputTruncated: return "output_truncated"
+            case .invalidStructuredResponse: return "invalid_structured_response"
+            case .refused: return "refused"
+            case .streamEndedEarly: return "stream_ended_early"
+            case .malformedStreamEvent: return "malformed_stream_event"
+            case .streamBudgetExceeded: return "stream_budget_exceeded"
+            case .cancelled: return "cancelled"
+            }
+        }
+        if (error as? URLError)?.code == .cancelled { return "cancelled" }
+        return "unknown"
+    }
+}
+
 private final class SpeechRailOpenAIResponseCapture: @unchecked Sendable {
     private static let maxResponseBytes = 256 * 1024
 
@@ -567,6 +774,7 @@ public enum LLMConnectionResult: Sendable, Equatable {
     case unreachable(String)
     case notConfigured
     case badBaseURL
+    case responseUnconfirmed(LLMResponseIssue)
 
     public var title: String {
         switch self {
@@ -577,6 +785,7 @@ public enum LLMConnectionResult: Sendable, Equatable {
         case .unreachable: "连不上"
         case .notConfigured: "还没配置"
         case .badBaseURL: "地址不对"
+        case .responseUnconfirmed: "服务可达，回答能力未确认"
         }
     }
 
@@ -596,6 +805,8 @@ public enum LLMConnectionResult: Sendable, Equatable {
             "填上地址与模型之后，这里会给出四选一的可判定结论。"
         case .badBaseURL:
             "地址里不要带密钥，也不要带查询参数；给到 /v1 这一层即可。"
+        case .responseUnconfirmed(let issue):
+            issue.detail
         }
     }
 
@@ -1172,7 +1383,7 @@ struct ResponsesEventStreamDecoder {
 /// LLM 客户端。`actor`：它被助手、纪要、内心 OS 与提词器共用，而流式读取不该与界面线程争。
 public actor LLMProvider {
     private let session: URLSession
-    private let observationHandler: TeleprompterAIObservationHandler?
+    private let observationHandler: LLMObservationHandler?
     /// 已经明确拒绝原生 thinking 控制的端点（键是 `baseURL|model`）。
     /// 只记在内存里：换端点或重启后重新探一次，不做持久化。
     private var thinkingControlRejected: Set<String> = []
@@ -1182,7 +1393,7 @@ public actor LLMProvider {
 
     public init(
         session: URLSession = .shared,
-        observationHandler: TeleprompterAIObservationHandler? = nil
+        observationHandler: LLMObservationHandler? = nil
     ) {
         self.session = session
         self.observationHandler = observationHandler
@@ -1261,7 +1472,8 @@ public actor LLMProvider {
         schema: [String: Any],
         maxOutputTokens: Int,
         timeout: TimeInterval = 90,
-        observationContext: TeleprompterAICallContext? = nil,
+        observationContext: LLMRequestContext? = nil,
+        observationHandler: LLMObservationHandler? = nil,
         structuredOutputMode: LLMStructuredOutputMode = .jsonObject
     ) async throws -> String {
         guard configuration.isConfigured else { throw LLMError.notConfigured }
@@ -1280,7 +1492,8 @@ public actor LLMProvider {
         let controlKey = thinkingKey(configuration, operation: .chat)
         // OpenCode Go uses this header for routing and prompt-cache affinity. A preparation
         // run is one logical conversation, so reuse its run id across map/reduce calls.
-        let sessionID = observationContext?.runID ?? UUID().uuidString
+        let observationContext = observationContext ?? LLMRequestContext()
+        let sessionID = observationContext.sessionID
         let structuredOutputKey = structuredOutputKey(
             configuration: configuration,
             schemaName: schema["name"] as? String,
@@ -1316,42 +1529,48 @@ public actor LLMProvider {
                 includeThinkingControl: includeThinkingControl,
                 outcome: "started",
                 errorCode: nil,
-                structuredOutputMode: requestedMode
+                structuredOutputMode: requestedMode,
+                observer: observationHandler
             )
-            let client = try makeChatClient(
-                configuration: configuration,
-                apiKey: apiKey,
-                sessionID: sessionID,
-                includeThinkingControl: includeThinkingControl,
-                timeout: timeout,
-                responseCapture: responseCapture
-            )
-            var query = ChatQuery(
-                messages: [
-                    .system(.init(content: .textContent(system))),
-                    .user(.init(content: .string(input)))
-                ],
-                model: configuration.model,
-                reasoningEffort: includeThinkingControl
-                    && configuration.compatibilityMode.chatThinkingControl == .standard
-                    ? ChatQuery.ReasoningEffort.none
-                    : nil,
-                responseFormat: try responseFormat(
-                    schema: schema,
-                    mode: requestedMode
-                ),
-                store: false,
-                temperature: 0
-            )
-            // MacPaw SDK 的标准 reasoning_effort 由上面的 query 编码；OpenCode 与本机
-            // 模板字段由 middleware 在 Chat 请求边界注入，避免把某个 provider 的字段
-            // 无条件带给其他兼容端点。
-            query.maxTokens = maxOutputTokens
-
             do {
+                let client = try makeChatClient(
+                    configuration: configuration,
+                    apiKey: apiKey,
+                    sessionID: sessionID,
+                    includeThinkingControl: includeThinkingControl,
+                    timeout: timeout,
+                    responseCapture: responseCapture
+                )
+                var query = ChatQuery(
+                    messages: [
+                        .system(.init(content: .textContent(system))),
+                        .user(.init(content: .string(input)))
+                    ],
+                    model: configuration.model,
+                    reasoningEffort: includeThinkingControl
+                        && configuration.compatibilityMode.chatThinkingControl == .standard
+                        ? ChatQuery.ReasoningEffort.none
+                        : nil,
+                    responseFormat: try responseFormat(
+                        schema: schema,
+                        mode: requestedMode
+                    ),
+                    store: false,
+                    temperature: 0
+                )
+                // MacPaw SDK 的标准 reasoning_effort 由上面的 query 编码；OpenCode 与本机
+                // 模板字段由 middleware 在 Chat 请求边界注入，避免把某个 provider 的字段
+                // 无条件带给其他兼容端点。
+                query.maxTokens = maxOutputTokens
+
                 let result = try await client.chats(query: query)
                 try Task.checkCancellation()
                 let snapshot = responseCapture.snapshot()
+                guard !snapshot.isOversized else {
+                    throw LLMError.invalidStructuredResponse
+                }
+                _ = try LLMResponseValidation.text(from: Data(snapshot.body.utf8), operation: .chat)
+                let content = try Self.extractChatJSON(result, maxOutputTokens: maxOutputTokens)
                 emitProviderObservation(
                     kind: .providerResponse,
                     context: observationContext,
@@ -1362,12 +1581,10 @@ public actor LLMProvider {
                     includeThinkingControl: includeThinkingControl,
                     outcome: "received",
                     errorCode: nil,
-                    structuredOutputMode: requestedMode
+                    structuredOutputMode: requestedMode,
+                    observer: observationHandler
                 )
-                guard !snapshot.isOversized else {
-                    throw LLMError.invalidStructuredResponse
-                }
-                return try Self.extractChatJSON(result, maxOutputTokens: maxOutputTokens)
+                return content
             } catch {
                 let snapshot = responseCapture.snapshot()
                 emitProviderObservation(
@@ -1379,8 +1596,9 @@ public actor LLMProvider {
                     transportAttempt: attempt,
                     includeThinkingControl: includeThinkingControl,
                     outcome: "failed",
-                    errorCode: TeleprompterAIObservability.errorCode(for: error),
-                    structuredOutputMode: requestedMode
+                    errorCode: LLMObservability.errorCode(for: (error as? LLMResponseIssue).map { $0 == .incomplete ? LLMError.outputTruncated : LLMError.invalidStructuredResponse } ?? error),
+                    structuredOutputMode: requestedMode,
+                    observer: observationHandler
                 )
                 if error is CancellationError || (error as? URLError)?.code == .cancelled {
                     throw LLMError.cancelled
@@ -1416,6 +1634,9 @@ public actor LLMProvider {
                         body: "",
                         retryAfter: retryAfter
                     )
+                }
+                if let issue = error as? LLMResponseIssue {
+                    throw issue == .incomplete ? LLMError.outputTruncated : LLMError.invalidStructuredResponse
                 }
                 if let llmError = error as? LLMError {
                     throw llmError
@@ -1506,8 +1727,8 @@ public actor LLMProvider {
     }
 
     private func emitProviderObservation(
-        kind: TeleprompterAIObservationKind,
-        context: TeleprompterAICallContext?,
+        kind: LLMObservationKind,
+        context: LLMRequestContext?,
         configuration: LLMConfiguration,
         startedAt: Date,
         snapshot: SpeechRailOpenAIResponseCapture.Snapshot?,
@@ -1518,7 +1739,8 @@ public actor LLMProvider {
         operation: LLMOperation = .chat,
         component: String = "provider",
         thinkingControlOverride: String? = nil,
-        structuredOutputMode: LLMStructuredOutputMode? = nil
+        structuredOutputMode: LLMStructuredOutputMode? = nil,
+        observer: LLMObservationHandler? = nil
     ) {
         let endpointHost = URL(string: configuration.normalizedBaseURL)?.host
         let thinkingControl: LLMThinkingControl
@@ -1528,7 +1750,7 @@ public actor LLMProvider {
         case .responses:
             thinkingControl = configuration.compatibilityMode.responsesThinkingControl
         }
-        TeleprompterAIObservability.emit(
+        try? (observer ?? observationHandler)?(
             .init(
                 kind: kind,
                 component: component,
@@ -1552,8 +1774,7 @@ public actor LLMProvider {
                 structuredOutputMode: structuredOutputMode,
                 outcome: outcome,
                 errorCode: errorCode
-            ),
-            to: observationHandler
+            )
         )
     }
 
@@ -1611,7 +1832,7 @@ public actor LLMProvider {
               let content = choice.message.content else {
             throw LLMError.invalidStructuredResponse
         }
-        do { _ = try TeleprompterStrictJSON.object(from: Data(content.utf8)) }
+        do { _ = try LLMStrictJSON.object(from: Data(content.utf8)) }
         catch {
             throw LLMError.invalidStructuredResponse
         }
@@ -1670,6 +1891,7 @@ public actor LLMProvider {
         else { throw LLMError.badBaseURL }
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
+            let observationContext = LLMRequestContext()
             var request = URLRequest(url: url)
             request.httpMethod = "GET"
             if let apiKey, !apiKey.isEmpty {
@@ -1679,7 +1901,7 @@ public actor LLMProvider {
             let responseCapture = SpeechRailOpenAIResponseCapture()
             emitProviderObservation(
                 kind: .providerRequestStarted,
-                context: nil,
+                context: observationContext,
                 configuration: configuration,
                 startedAt: providerStartedAt,
                 snapshot: nil,
@@ -1698,14 +1920,14 @@ public actor LLMProvider {
             } catch {
                 emitProviderObservation(
                     kind: .providerFailed,
-                    context: nil,
+                    context: observationContext,
                     configuration: configuration,
                     startedAt: providerStartedAt,
                     snapshot: nil,
                     transportAttempt: 0,
                     includeThinkingControl: false,
                     outcome: "failed",
-                    errorCode: TeleprompterAIObservability.errorCode(for: error),
+                    errorCode: LLMObservability.errorCode(for: error),
                     operation: .responses,
                     component: "provider_poll",
                     thinkingControlOverride: "not_applicable"
@@ -1726,7 +1948,7 @@ public actor LLMProvider {
                     }
                     emitProviderObservation(
                         kind: .providerResponse,
-                        context: nil,
+                        context: observationContext,
                         configuration: configuration,
                         startedAt: providerStartedAt,
                         snapshot: responseCapture.snapshot(),
@@ -1744,7 +1966,7 @@ public actor LLMProvider {
                 default:
                     emitProviderObservation(
                         kind: .providerResponse,
-                        context: nil,
+                        context: observationContext,
                         configuration: configuration,
                         startedAt: providerStartedAt,
                         snapshot: responseCapture.snapshot(),
@@ -1762,14 +1984,14 @@ public actor LLMProvider {
             } catch {
                 emitProviderObservation(
                     kind: .providerFailed,
-                    context: nil,
+                    context: observationContext,
                     configuration: configuration,
                     startedAt: providerStartedAt,
                     snapshot: responseCapture.snapshot(),
                     transportAttempt: 0,
                     includeThinkingControl: false,
                     outcome: "failed",
-                    errorCode: TeleprompterAIObservability.errorCode(for: error),
+                    errorCode: LLMObservability.errorCode(for: error),
                     operation: .responses,
                     component: "provider_poll",
                     thinkingControlOverride: "not_applicable"
@@ -1839,6 +2061,7 @@ public actor LLMProvider {
         stallTimeout: Duration? = nil,
         onDelta: @Sendable @escaping (String) -> Void
     ) async throws {
+        let observationContext = LLMRequestContext()
         let controlKey = thinkingKey(configuration, operation: .responses)
         var includeThinkingControl = !thinkingControlRejected.contains(controlKey)
         guard includeThinkingControl else { throw LLMError.thinkingControlUnavailable }
@@ -1854,7 +2077,7 @@ public actor LLMProvider {
             let responseCapture = SpeechRailOpenAIResponseCapture()
             emitProviderObservation(
                 kind: .providerRequestStarted,
-                context: nil,
+                context: observationContext,
                 configuration: configuration,
                 startedAt: providerStartedAt,
                 snapshot: nil,
@@ -1879,14 +2102,14 @@ public actor LLMProvider {
             } catch {
                 emitProviderObservation(
                     kind: .providerFailed,
-                    context: nil,
+                    context: observationContext,
                     configuration: configuration,
                     startedAt: providerStartedAt,
                     snapshot: nil,
                     transportAttempt: attempt,
                     includeThinkingControl: includeThinkingControl,
                     outcome: "failed",
-                    errorCode: TeleprompterAIObservability.errorCode(for: error),
+                    errorCode: LLMObservability.errorCode(for: error),
                     operation: .responses
                 )
                 throw error
@@ -1907,14 +2130,14 @@ public actor LLMProvider {
                 }
                 emitProviderObservation(
                     kind: .providerFailed,
-                    context: nil,
+                    context: observationContext,
                     configuration: configuration,
                     startedAt: providerStartedAt,
                     snapshot: nil,
                     transportAttempt: attempt,
                     includeThinkingControl: includeThinkingControl,
                     outcome: "failed",
-                    errorCode: TeleprompterAIObservability.errorCode(for: failure),
+                    errorCode: LLMObservability.errorCode(for: failure),
                     operation: .responses
                 )
                 throw failure
@@ -1923,14 +2146,14 @@ public actor LLMProvider {
                 let failure = LLMError.transport("没有收到 HTTP 响应")
                 emitProviderObservation(
                     kind: .providerFailed,
-                    context: nil,
+                    context: observationContext,
                     configuration: configuration,
                     startedAt: providerStartedAt,
                     snapshot: nil,
                     transportAttempt: attempt,
                     includeThinkingControl: includeThinkingControl,
                     outcome: "failed",
-                    errorCode: TeleprompterAIObservability.errorCode(for: failure),
+                    errorCode: LLMObservability.errorCode(for: failure),
                     operation: .responses
                 )
                 throw failure
@@ -1962,14 +2185,14 @@ public actor LLMProvider {
                 let failure = LLMError.transport(error.localizedDescription)
                 emitProviderObservation(
                     kind: .providerFailed,
-                    context: nil,
+                    context: observationContext,
                     configuration: configuration,
                     startedAt: providerStartedAt,
                     snapshot: responseCapture.snapshot(),
                     transportAttempt: attempt,
                     includeThinkingControl: includeThinkingControl,
                     outcome: "failed",
-                    errorCode: TeleprompterAIObservability.errorCode(for: failure),
+                    errorCode: LLMObservability.errorCode(for: failure),
                     operation: .responses
                 )
                 throw failure
@@ -1986,14 +2209,14 @@ public actor LLMProvider {
             }
             emitProviderObservation(
                 kind: .providerFailed,
-                context: nil,
+                context: observationContext,
                 configuration: configuration,
                 startedAt: providerStartedAt,
                 snapshot: responseCapture.snapshot(),
                 transportAttempt: attempt,
                 includeThinkingControl: includeThinkingControl,
                 outcome: "failed",
-                errorCode: TeleprompterAIObservability.errorCode(for: failure),
+                errorCode: LLMObservability.errorCode(for: failure),
                 operation: .responses
             )
             // 语音助手不能在关闭推理失败后省略控制字段继续生成。
@@ -2007,14 +2230,14 @@ public actor LLMProvider {
             let failure = LLMError.transport("请求没有完成")
             emitProviderObservation(
                 kind: .providerFailed,
-                context: nil,
+                context: observationContext,
                 configuration: configuration,
                 startedAt: Date(),
                 snapshot: nil,
                 transportAttempt: streamAttempt,
                 includeThinkingControl: includeThinkingControl,
                 outcome: "failed",
-                errorCode: TeleprompterAIObservability.errorCode(for: failure),
+                errorCode: LLMObservability.errorCode(for: failure),
                 operation: .responses
             )
             throw failure
@@ -2047,7 +2270,7 @@ public actor LLMProvider {
             )
             emitProviderObservation(
                 kind: .providerResponse,
-                context: nil,
+                context: observationContext,
                 configuration: configuration,
                 startedAt: streamStartedAt,
                 snapshot: streamResponseCapture.snapshot(),
@@ -2065,14 +2288,14 @@ public actor LLMProvider {
             )
             emitProviderObservation(
                 kind: .providerFailed,
-                context: nil,
+                context: observationContext,
                 configuration: configuration,
                 startedAt: streamStartedAt,
                 snapshot: streamResponseCapture.snapshot(),
                 transportAttempt: streamAttempt,
                 includeThinkingControl: includeThinkingControl,
                 outcome: "failed",
-                errorCode: TeleprompterAIObservability.errorCode(for: error),
+                errorCode: LLMObservability.errorCode(for: error),
                 operation: .responses
             )
             throw error
@@ -2158,6 +2381,7 @@ public actor LLMProvider {
         instructions: String?,
         timeout: TimeInterval
     ) async throws -> (Data, URLResponse) {
+        let observationContext = LLMRequestContext()
         let controlKey = thinkingKey(configuration, operation: .responses)
         var includeThinkingControl = !thinkingControlRejected.contains(controlKey)
         for attempt in 0...1 {
@@ -2165,7 +2389,7 @@ public actor LLMProvider {
             let responseCapture = SpeechRailOpenAIResponseCapture()
             emitProviderObservation(
                 kind: .providerRequestStarted,
-                context: nil,
+                context: observationContext,
                 configuration: configuration,
                 startedAt: providerStartedAt,
                 snapshot: nil,
@@ -2191,14 +2415,14 @@ public actor LLMProvider {
             } catch {
                 emitProviderObservation(
                     kind: .providerFailed,
-                    context: nil,
+                    context: observationContext,
                     configuration: configuration,
                     startedAt: providerStartedAt,
                     snapshot: nil,
                     transportAttempt: attempt,
                     includeThinkingControl: includeThinkingControl,
                     outcome: "failed",
-                    errorCode: TeleprompterAIObservability.errorCode(for: error),
+                    errorCode: LLMObservability.errorCode(for: error),
                     operation: .responses
                 )
                 throw error
@@ -2209,14 +2433,14 @@ public actor LLMProvider {
             } catch {
                 emitProviderObservation(
                     kind: .providerFailed,
-                    context: nil,
+                    context: observationContext,
                     configuration: configuration,
                     startedAt: providerStartedAt,
                     snapshot: nil,
                     transportAttempt: attempt,
                     includeThinkingControl: includeThinkingControl,
                     outcome: "failed",
-                    errorCode: TeleprompterAIObservability.errorCode(for: error),
+                    errorCode: LLMObservability.errorCode(for: error),
                     operation: .responses
                 )
                 throw error
@@ -2224,9 +2448,10 @@ public actor LLMProvider {
             responseCapture.record(response: result.1, data: result.0)
             do {
                 try Self.validate(response: result.1, data: result.0)
+                if !background { _ = try Self.extractText(from: result.0) }
                 emitProviderObservation(
                     kind: .providerResponse,
-                    context: nil,
+                    context: observationContext,
                     configuration: configuration,
                     startedAt: providerStartedAt,
                     snapshot: responseCapture.snapshot(),
@@ -2240,14 +2465,14 @@ public actor LLMProvider {
             } catch let error as LLMError {
                 emitProviderObservation(
                     kind: .providerFailed,
-                    context: nil,
+                    context: observationContext,
                     configuration: configuration,
                     startedAt: providerStartedAt,
                     snapshot: responseCapture.snapshot(),
                     transportAttempt: attempt,
                     includeThinkingControl: includeThinkingControl,
                     outcome: "failed",
-                    errorCode: TeleprompterAIObservability.errorCode(for: error),
+                    errorCode: LLMObservability.errorCode(for: error),
                     operation: .responses
                 )
                 if textFormat != nil, Self.rejectsStructuredOutput(error) {
@@ -2476,6 +2701,13 @@ public actor LLMProvider {
             }
             return .unreachable("服务回了 \(http.statusCode)：\(Self.shortBody(body))")
         }
+        do {
+            _ = try LLMResponseValidation.text(from: data, operation: operation)
+        } catch let issue as LLMResponseIssue {
+            return .responseUnconfirmed(issue)
+        } catch {
+            return .responseUnconfirmed(.invalidShape)
+        }
         let milliseconds = Int(Date().timeIntervalSince(started) * 1000)
         return .connected(milliseconds: milliseconds, model: configuration.model)
     }
@@ -2510,27 +2742,15 @@ public actor LLMProvider {
 
     /// 非流式返回的正文：`output[].content[].text`。拒答走 `refusal`，不假装成正文。
     static func extractText(from data: Data) throws -> String {
-        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw LLMError.transport("返回的不是 JSON")
-        }
-        if let output = object["output"] as? [[String: Any]] {
-            var text = ""
-            var refusal: String?
-            for item in output {
-                guard let contents = item["content"] as? [[String: Any]] else { continue }
-                for content in contents {
-                    if let chunk = content["text"] as? String, content["type"] as? String != "refusal" {
-                        text += chunk
-                    }
-                    if let chunk = content["refusal"] as? String { refusal = chunk }
-                }
+        do {
+            return try LLMResponseValidation.text(from: data, operation: .responses)
+        } catch let issue as LLMResponseIssue {
+            switch issue {
+            case .refused: throw LLMError.refused("服务拒绝了这次请求。")
+            case .incomplete: throw LLMError.outputTruncated
+            default: throw LLMError.transport(issue.detail)
             }
-            if text.isEmpty, let refusal { throw LLMError.refused(refusal) }
-            return text
         }
-        // 有的兼容实现直接给一个 `output_text`。
-        if let text = object["output_text"] as? String { return text }
-        throw LLMError.transport("返回里没有正文")
     }
 
     private static func failureReason(from object: [String: Any]) -> String? {
@@ -2680,6 +2900,125 @@ public enum LLMKeychain {
             case .status(let code): "密钥写入失败（\(code)）。"
             case .vaultError(let message): "安全保管库操作失败（\(message)）。"
             }
+        }
+    }
+}
+
+enum LLMStrictJSONError: Error {
+    case oversized
+    case invalidSyntax
+    case duplicateKey
+    case notObject
+}
+
+enum LLMStrictJSON {
+    static func object(from data: Data) throws -> [String: Any] {
+        guard data.count <= 256 * 1024 else {
+            throw LLMStrictJSONError.oversized
+        }
+        var scanner = Scanner(bytes: Array(data))
+        try scanner.parseDocument()
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw LLMStrictJSONError.notObject
+        }
+        return object
+    }
+
+    private struct Scanner {
+        let bytes: [UInt8]
+        var index = 0
+
+        mutating func parseDocument() throws {
+            skipWhitespace()
+            try parseValue()
+            skipWhitespace()
+            guard index == bytes.count else { throw LLMStrictJSONError.invalidSyntax }
+        }
+
+        mutating func parseValue() throws {
+            skipWhitespace()
+            guard index < bytes.count else { throw LLMStrictJSONError.invalidSyntax }
+            switch bytes[index] {
+            case 0x7B: try parseObject()
+            case 0x5B: try parseArray()
+            case 0x22: _ = try parseString()
+            default: try parsePrimitive()
+            }
+        }
+
+        mutating func parseObject() throws {
+            index += 1
+            skipWhitespace()
+            var keys = Set<String>()
+            if consume(0x7D) { return }
+            while true {
+                skipWhitespace()
+                let key = try parseString()
+                guard keys.insert(key).inserted else {
+                    throw LLMStrictJSONError.duplicateKey
+                }
+                skipWhitespace()
+                guard consume(0x3A) else { throw LLMStrictJSONError.invalidSyntax }
+                try parseValue()
+                skipWhitespace()
+                if consume(0x7D) { return }
+                guard consume(0x2C) else { throw LLMStrictJSONError.invalidSyntax }
+            }
+        }
+
+        mutating func parseArray() throws {
+            index += 1
+            skipWhitespace()
+            if consume(0x5D) { return }
+            while true {
+                try parseValue()
+                skipWhitespace()
+                if consume(0x5D) { return }
+                guard consume(0x2C) else { throw LLMStrictJSONError.invalidSyntax }
+            }
+        }
+
+        mutating func parseString() throws -> String {
+            guard consume(0x22) else { throw LLMStrictJSONError.invalidSyntax }
+            let start = index
+            while index < bytes.count {
+                switch bytes[index] {
+                case 0x22:
+                    index += 1
+                    // 按 JSON 转义后的实际字符串比较 key，拒绝 name / \u006eame 等同名键。
+                    return try JSONDecoder().decode(String.self, from: Data(bytes[(start - 1)..<index]))
+                case 0x5C:
+                    index += 1
+                    guard index < bytes.count else { throw LLMStrictJSONError.invalidSyntax }
+                    if bytes[index] == 0x75 {
+                        guard index + 4 < bytes.count else { throw LLMStrictJSONError.invalidSyntax }
+                        index += 4
+                    }
+                    index += 1
+                default:
+                    guard bytes[index] >= 0x20 else { throw LLMStrictJSONError.invalidSyntax }
+                    index += 1
+                }
+            }
+            throw LLMStrictJSONError.invalidSyntax
+        }
+
+        mutating func parsePrimitive() throws {
+            let start = index
+            while index < bytes.count, ![0x20, 0x09, 0x0A, 0x0D, 0x2C, 0x5D, 0x7D].contains(bytes[index]) {
+                index += 1
+            }
+            guard index > start else { throw LLMStrictJSONError.invalidSyntax }
+        }
+
+        mutating func skipWhitespace() {
+            while index < bytes.count, [0x20, 0x09, 0x0A, 0x0D].contains(bytes[index]) { index += 1 }
+        }
+
+        mutating func consume(_ byte: UInt8) -> Bool {
+            guard index < bytes.count, bytes[index] == byte else { return false }
+            index += 1
+            return true
         }
     }
 }

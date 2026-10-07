@@ -457,6 +457,7 @@ final class AssistantSessionTests: XCTestCase {
     private func makeHarness(
         llmScripts: [FakeAssistantLLM.Script] = [],
         llmIsReady: LLMConnectionResult = .connected(milliseconds: 1, model: "test-model"),
+        llmOverride: (any AssistantLLM)? = nil,
         audioStartFailure: Error? = nil,
         autoStartCapture: Bool = true,
         connectGate: Gate? = nil,
@@ -491,7 +492,7 @@ final class AssistantSessionTests: XCTestCase {
         let session = AssistantSession(
             coordinator: coordinator,
             dependencies: AssistantSessionDependencies(
-                llm: llm,
+                llm: llmOverride ?? llm,
                 makeRealtimeClient: { configuration in
                     let client = FakeAssistantRealtime(
                         connectGate: connectGate,
@@ -607,6 +608,29 @@ final class AssistantSessionTests: XCTestCase {
 
 
     // MARK: - §7.2 跨层 fixture：App 侧消费服务端同一份事件序列
+
+    func testInvalidSuccessfulProbeDoesNotCreateAudioOrRealtimeSession() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [LLMProviderTests.FakeTransport.self]
+        let provider = LLMProvider(session: URLSession(configuration: config))
+        LLMProviderTests.FakeTransport.reset([
+            .init(status: 404, contentType: "application/json", body: "{}"),
+            .init(status: 200, contentType: "text/html", body: "<html>gateway</html>")
+        ])
+        let harness = try await makeHarness(llmOverride: provider)
+        defer { cleanup(harness) }
+        harness.session.audioSourceFactory = {
+            XCTFail("invalid probe must stop before audio construction")
+            return FakeAssistantAudio()
+        }
+        do {
+            try await harness.session.beginCapture()
+            XCTFail("invalid probe must block capture")
+        } catch {}
+        XCTAssertTrue(harness.clients().isEmpty)
+        XCTAssertNil(harness.session.sessionID)
+        XCTAssertNotNil(harness.session.blocked)
+    }
 
     private struct LifecycleFixture: Decodable {
         struct Scenario: Decodable {

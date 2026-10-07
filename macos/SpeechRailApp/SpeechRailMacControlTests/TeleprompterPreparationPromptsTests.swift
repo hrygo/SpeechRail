@@ -34,7 +34,7 @@ struct TeleprompterPreparationPromptsTests {
 
     @Test func escapedDuplicateJSONKeysAreRejected() throws {
         #expect(throws: (any Error).self) {
-            try TeleprompterStrictJSON.object(from: Data(#"{"name":1,"\u006eame":2}"#.utf8))
+            try LLMStrictJSON.object(from: Data(#"{"name":1,"\u006eame":2}"#.utf8))
         }
     }
 

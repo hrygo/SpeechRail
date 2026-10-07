@@ -89,7 +89,7 @@ public final class MinutesGenerator {
     }
 
     private let coordinator: SessionCoordinator
-    private let provider = LLMProvider()
+    private let provider: LLMProvider
     /// 一次只整理一份（§5.8「同会话单飞」）。
     private var inFlight: String?
     /// 在飞的那一次整理。`stop()` 取消的是它——界面上的「停止整理」要真的停下，
@@ -103,8 +103,9 @@ public final class MinutesGenerator {
     /// 心跳间隔：租约的三分之一。整理要跑十几分钟，只写一次租约的话后半程会被误回收。
     private static let heartbeatInterval: TimeInterval = 200
 
-    public init(coordinator: SessionCoordinator) {
+    public init(coordinator: SessionCoordinator, provider: LLMProvider = LLMProvider()) {
         self.coordinator = coordinator
+        self.provider = provider
     }
 
     /// 转录封存之后调它：排队 → 认领 → 生成 → 落库（§8.2 的最后一步）。

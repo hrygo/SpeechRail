@@ -243,6 +243,7 @@ public final class MeetingSession {
         coordinator: SessionCoordinator,
         port: Int = 8201,
         apiKey: String? = nil,
+        llmProvider: LLMProvider = LLMProvider(),
         dependencies: MeetingSessionDependencies
     ) {
         self.coordinator = coordinator
@@ -251,8 +252,8 @@ public final class MeetingSession {
         self.port = port
         self.serviceKey = apiKey
         self.labeling = SpeakerLabeling(coordinator: coordinator)
-        self.minutes = MinutesGenerator(coordinator: coordinator)
-        self.innerOS = InnerOSSession(coordinator: coordinator)
+        self.minutes = MinutesGenerator(coordinator: coordinator, provider: llmProvider)
+        self.innerOS = InnerOSSession(coordinator: coordinator, provider: llmProvider)
         // 改了来源（改名 / 合并 / 标记「我」/ 拆出）就重算一次复核状态。
         // 验收标准 3 说的「修改来源后相关结论提示复核」要**当场**兑现：
         // 此前这四条路径写完修订就结束，界面上的"需复核"要等下一次重新整理或

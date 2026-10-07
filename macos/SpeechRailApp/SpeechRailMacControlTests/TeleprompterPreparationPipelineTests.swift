@@ -5,6 +5,35 @@ import Testing
 #endif
 
 struct TeleprompterPreparationPipelineTests {
+    @Test func providerAdapterKeepsFeatureCorrelationOutsideProvider() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speechrail-r04-adapter-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = TeleprompterAIObservationRecorder(
+            location: .init(appHome: root, historyDirectory: root, logDirectory: root)
+        )
+        let context = TeleprompterAICallContext(
+            runID: "run-adapter", requestID: "request-adapter", stage: .map,
+            itemIndex: 2, itemCount: 3, attempt: 1
+        )
+        let sink = TeleprompterProviderObservationAdapter.handler(
+            context: context, to: recorder.record
+        )
+        try sink(.init(kind: .providerResponse, context: context.providerContext,
+                       elapsedMilliseconds: 2, transportAttempt: 0,
+                       operation: .chat, compatibilityMode: .openAICompatible, outcome: "received"))
+        recorder.flush()
+        let file = try String(contentsOf: recorder.eventFileURL(for: Date()), encoding: .utf8)
+        #expect(file.split(separator: "\n").count == 1)
+        #expect(file.contains("request-adapter"))
+        #expect(file.contains("\"stage\":\"map\""))
+        #expect(file.contains("\"itemIndex\":2"))
+        #expect(file.contains("\"attempt\":1"))
+        #expect(recorder.snapshot().counters[
+            "speechrail_llm_provider_responses_total|stage=map|operation=chat|mode=openai_compatible|outcome=received"
+        ] == 1)
+    }
+
     @Test func observationRecorderPersistsEventsAndAggregatesLowCardinalityMetrics() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("speechrail-ai-observability-(UUID().uuidString)", isDirectory: true)

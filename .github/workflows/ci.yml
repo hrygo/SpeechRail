@@ -319,6 +319,9 @@ jobs:
       - name: Run Swift package tests
         run: swift test --package-path macos/SpeechRailApp
 
+      - name: Verify independent LLM support compilation
+        run: python3 scripts/check_llm_support_boundary.py
+
       - name: Snapshot Swift build inputs
         run: python3 scripts/ci_build_cache.py snapshot --manifest macos/SpeechRailApp/.build/ci-inputs.json macos/SpeechRailApp
 

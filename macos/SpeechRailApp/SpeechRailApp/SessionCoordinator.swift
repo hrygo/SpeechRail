@@ -170,15 +170,21 @@ public final class SessionCoordinator {
     public var finisher: (@MainActor (SessionKind) async -> Void)?
 
     private let store: SessionStore
+    private let llmProvider: LLMProvider
     private let defaults: UserDefaults
     private var clockTask: Task<Void, Never>?
 
     /// 「以后不再询问」的持久化键。只对助手 / 字幕生效。
     private static let doNotAskAgainKey = "speechrail.session.skipSwitchConfirmation"
 
-    public init(store: SessionStore, defaults: UserDefaults = .standard) {
+    public init(
+        store: SessionStore,
+        defaults: UserDefaults = .standard,
+        llmProvider: LLMProvider = LLMProvider()
+    ) {
         self.store = store
         self.defaults = defaults
+        self.llmProvider = llmProvider
     }
 
     /// 开库（含 `WAL` 与 `user_version` 迁移）。App 启动时调一次；失败只记录结论，
@@ -1032,7 +1038,7 @@ public final class SessionCoordinator {
         configuration: LLMConfiguration,
         resolvedConfiguration: ResolvedLLMConfiguration
     ) async throws -> MeetingKnowledgeQueryService.Answer {
-        let provider = LLMProvider()
+        let provider = llmProvider
         let service = MeetingKnowledgeQueryService(store: store) { messages in
             try await provider.complete(
                 configuration: configuration,

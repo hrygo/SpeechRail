@@ -118,17 +118,17 @@ final class LLMProviderTests: XCTestCase {
         }
     }
 
-    private final class ObservationLog: @unchecked Sendable {
+    final class ObservationLog: @unchecked Sendable {
         private let lock = NSLock()
-        private var stored: [TeleprompterAIObservation] = []
+        private var stored: [LLMProviderObservation] = []
 
-        func append(_ observation: TeleprompterAIObservation) {
+        func append(_ observation: LLMProviderObservation) {
             lock.lock()
             stored.append(observation)
             lock.unlock()
         }
 
-        var values: [TeleprompterAIObservation] {
+        var values: [LLMProviderObservation] {
             lock.lock()
             defer { lock.unlock() }
             return stored
@@ -183,7 +183,7 @@ final class LLMProviderTests: XCTestCase {
     ]
 
     private func makeProvider(
-        observationHandler: TeleprompterAIObservationHandler? = nil
+        observationHandler: LLMObservationHandler? = nil
     ) -> LLMProvider {
         let sessionConfiguration = URLSessionConfiguration.ephemeral
         sessionConfiguration.protocolClasses = [FakeTransport.self]
@@ -209,7 +209,7 @@ final class LLMProviderTests: XCTestCase {
     private func completeJSON(
         provider: LLMProvider? = nil,
         configuration: LLMConfiguration? = nil,
-        observationContext: TeleprompterAICallContext? = nil,
+        observationContext: LLMRequestContext? = nil,
         structuredOutputMode: LLMStructuredOutputMode = .jsonObject
     ) async throws -> String {
         try await (provider ?? makeProvider()).completeJSON(
@@ -545,13 +545,9 @@ final class LLMProviderTests: XCTestCase {
 
     func testChatJSONEmitsSafeProviderMetadataOnStructuredFailure() async throws {
         let observations = ObservationLog()
-        let context = TeleprompterAICallContext(
-            runID: "run-test",
-            requestID: "request-test",
-            stage: .map,
-            itemIndex: 2,
-            itemCount: 4,
-            attempt: 0
+        let context = LLMRequestContext(
+            sessionID: "run-test",
+            requestID: "request-test"
         )
         FakeTransport.reset([
             .init(status: 200, contentType: "application/json", body: try chatBody(finish: "length", tokens: 128))
@@ -567,8 +563,12 @@ final class LLMProviderTests: XCTestCase {
             XCTAssertEqual(error, .outputTruncated)
         }
 
+        XCTAssertEqual(observations.values.filter { $0.kind == .providerRequestStarted }.count, 1)
+        XCTAssertEqual(observations.values.filter {
+            $0.kind == .providerResponse || $0.kind == .providerFailed
+        }.count, 1, "one transport attempt must have one terminal observation")
         let response = try XCTUnwrap(
-            observations.values.first { $0.kind == .providerResponse }
+            observations.values.first { $0.kind == .providerFailed }
         )
         XCTAssertEqual(response.context, context)
         XCTAssertEqual(response.httpStatus, 200)
@@ -587,12 +587,9 @@ final class LLMProviderTests: XCTestCase {
     }
 
     func testChatJSONReusesStableOpenCodeSessionForOnePreparationRun() async throws {
-        let context = TeleprompterAICallContext(
-            runID: "run-stable",
-            requestID: "request-1",
-            stage: .map,
-            itemIndex: 0,
-            itemCount: 2
+        let context = LLMRequestContext(
+            sessionID: "run-stable",
+            requestID: "request-1"
         )
         FakeTransport.reset([
             .init(status: 200, contentType: "application/json", body: try chatBody()),
@@ -609,11 +606,8 @@ final class LLMProviderTests: XCTestCase {
             provider: provider,
             configuration: openCodeConfiguration,
             observationContext: .init(
-                runID: context.runID,
-                requestID: "request-2",
-                stage: .reduce,
-                itemIndex: 0,
-                itemCount: 1
+                sessionID: context.sessionID,
+                requestID: "request-2"
             )
         )
 
@@ -719,6 +713,44 @@ final class LLMProviderTests: XCTestCase {
         XCTAssertEqual(response.completionTokens, 3)
         XCTAssertEqual(response.reasoningTokens, 2)
         XCTAssertEqual(response.outcome, "received")
+        XCTAssertNotNil(started.context)
+        XCTAssertEqual(started.context, response.context)
+    }
+
+    func testThrowingObserverDoesNotChangeSuccessFailureOrCancellation() async throws {
+        enum ObserverFailure: Error { case unavailable }
+        let provider = makeProvider(observationHandler: { _ in throw ObserverFailure.unavailable })
+        FakeTransport.reset([.init(status: 200, contentType: "application/json", body: try chatBody())])
+        let content = try await completeJSON(provider: provider)
+        XCTAssertEqual(content, "{}")
+
+        FakeTransport.reset([.init(status: 200, contentType: "application/json", body: try chatBody(finish: "length"))])
+        do {
+            _ = try await completeJSON(provider: provider)
+            XCTFail("truncation must survive observation failure")
+        } catch let error as LLMError { XCTAssertEqual(error, .outputTruncated) }
+
+        FakeTransport.reset([.init(status: 200, contentType: "application/json", body: "", failCode: .cancelled)])
+        do {
+            _ = try await completeJSON(provider: provider)
+            XCTFail("cancellation must survive observation failure")
+        } catch let error as LLMError { XCTAssertEqual(error, .cancelled) }
+    }
+
+    func testPerCallObserverReplacesDefaultWithoutDoubleDelivery() async throws {
+        let global = ObservationLog()
+        let local = ObservationLog()
+        let provider = makeProvider(observationHandler: global.append)
+        FakeTransport.reset([.init(status: 200, contentType: "application/json", body: try chatBody())])
+        _ = try await provider.completeJSON(
+            configuration: configuration, apiKey: nil, instructions: "schema", input: "fixture",
+            schema: TeleprompterPreparationJSONSchema.map, maxOutputTokens: 128,
+            observationHandler: local.append
+        )
+        XCTAssertTrue(global.values.isEmpty)
+        XCTAssertEqual(local.values.map(\.kind), [.providerRequestStarted, .providerResponse])
+        XCTAssertNotNil(local.values.first?.context)
+        XCTAssertEqual(local.values.first?.context, local.values.last?.context)
     }
 
     @MainActor
@@ -1558,6 +1590,99 @@ final class LLMProviderTests: XCTestCase {
         zip(FakeTransport.requestURLs(), FakeTransport.requestBodies())
             .filter { $0.0.hasSuffix("/responses") }
             .map(\.1)
+    }
+
+    func testProbeRejectsInvalidSuccessBodiesAndDoesNotSaveDraft() async throws {
+        let bodies = [
+            "<html>gateway</html>", "", "{}", #"{"error":{"message":"SECRET_BODY"}}"#,
+            #"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#,
+            #"{"output":[]}"#, #"{"output_text":"   "}"#,
+            #"{"output_text":"one","output_text":"two"}"#,
+            #"{"status":"incomplete","output_text":"partial"}"#,
+            #"{"status":"failed","output_text":"partial"}"#,
+            #"{"status":"queued","output_text":"partial"}"#,
+            #"{"output":[{"type":"message","role":"assistant","content":[{"type":"refusal","refusal":"SECRET_BODY"}]}]}"#
+        ]
+        for body in bodies {
+            FakeTransport.reset([
+                .init(status: 404, contentType: "application/json", body: "{}"),
+                .init(status: body.isEmpty ? 204 : 200, contentType: "application/json", body: body)
+            ])
+            let result = await makeProvider().check(configuration: configuration, apiKey: nil)
+            XCTAssertFalse(result.isReady, "invalid success must not become ready: \(body)")
+            XCTAssertFalse(LLMKeyDraftPolicy.shouldPersist(
+                draft: "draft-key", connection: result, saveRequested: true
+            ))
+            XCTAssertFalse(result.detail.contains("SECRET_BODY"))
+            XCTAssertThrowsError(try LLMProvider.extractText(from: Data(body.utf8)))
+        }
+    }
+
+    func testChatProbeUsesTextContractWithoutBusinessSchemaOrUsage() async throws {
+        let bodies = [
+            try chatBody(content: "普通文本", partialUsageDetails: true),
+            try chatBody(tokens: nil, content: "普通文本")
+        ]
+        for body in bodies {
+            FakeTransport.reset([
+                .init(status: 404, contentType: "application/json", body: "{}"),
+                .init(status: 200, contentType: "application/json", body: body)
+            ])
+            let result = await makeProvider().check(configuration: configuration, apiKey: nil, operation: .chat)
+            XCTAssertTrue(result.isReady, result.detail)
+        }
+    }
+
+    func testChatProbeRejectsWrongOperationEmptyRefusalTruncationAndTools() async throws {
+        let bodies = [
+            Self.okBody, "{}", "",
+            #"{"error":{"message":"SECRET_BODY"}}"#,
+            try chatBody(content: " "),
+            try chatBody(finish: "length", content: "partial"),
+            try chatBody(content: "ok", refusal: "SECRET_BODY"),
+            try chatBody(content: "ok", toolCalls: true)
+        ]
+        for body in bodies {
+            FakeTransport.reset([
+                .init(status: 404, contentType: "application/json", body: "{}"),
+                .init(status: 200, contentType: "application/json", body: body)
+            ])
+            let result = await makeProvider().check(configuration: configuration, apiKey: nil, operation: .chat)
+            XCTAssertFalse(result.isReady, body)
+            XCTAssertFalse(result.detail.contains("SECRET_BODY"))
+        }
+    }
+
+    func testResponsesProbeAcceptsDeclaredTextShapes() async throws {
+        for body in [Self.okBody, #"{"output_text":"普通文本"}"#, Self.responsesBodyWithUsage] {
+            FakeTransport.reset([
+                .init(status: 404, contentType: "application/json", body: "{}"),
+                .init(status: 200, contentType: "application/json", body: body)
+            ])
+            let result = await makeProvider().check(configuration: configuration, apiKey: nil)
+            XCTAssertTrue(result.isReady, result.detail)
+            XCTAssertFalse(try LLMProvider.extractText(from: Data(body.utf8)).isEmpty)
+        }
+    }
+
+    func testResponsesOutputNeedsCompletedStatusInProbeAndFormalCall() async throws {
+        let body = #"{"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}"#
+        FakeTransport.reset([
+            .init(status: 404, contentType: "application/json", body: "{}"),
+            .init(status: 200, contentType: "application/json", body: body)
+        ])
+        let result = await makeProvider().check(configuration: configuration, apiKey: nil)
+        XCTAssertEqual(result, .responseUnconfirmed(.notCompleted))
+        XCTAssertThrowsError(try LLMResponseValidation.text(from: Data(body.utf8), operation: .responses)) {
+            XCTAssertEqual($0 as? LLMResponseIssue, .notCompleted)
+        }
+        FakeTransport.reset([.init(status: 200, contentType: "application/json", body: body)])
+        do {
+            _ = try await complete()
+            XCTFail("missing terminal status must not complete a formal call")
+        } catch let error as LLMError {
+            XCTAssertEqual(error, .transport(LLMResponseIssue.notCompleted.detail))
+        }
     }
 
     func testConnectionProbeLearnsThinkingRejectionOnce() async throws {
