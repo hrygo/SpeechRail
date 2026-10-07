@@ -12,18 +12,25 @@ public final class TranscriptPersistenceQueue {
         public let maximumPendingCommands: Int
         public let maximumPendingTextScalars: Int
         public let maximumRememberedItems: Int
+        public let maximumPendingProjections: Int
+        public let maximumProjectionUnits: Int
 
         public init(
             maximumPendingCommands: Int = 32,
             maximumPendingTextScalars: Int = 64_000,
-            maximumRememberedItems: Int = 512
+            maximumRememberedItems: Int = 512,
+            maximumPendingProjections: Int = 128,
+            maximumProjectionUnits: Int = 1_024
         ) {
             precondition(maximumPendingCommands >= 0)
             precondition(maximumPendingTextScalars >= 0)
             precondition(maximumRememberedItems >= 0)
+            precondition(maximumPendingProjections >= 0 && maximumProjectionUnits >= 0)
             self.maximumPendingCommands = maximumPendingCommands
             self.maximumPendingTextScalars = maximumPendingTextScalars
             self.maximumRememberedItems = maximumRememberedItems
+            self.maximumPendingProjections = maximumPendingProjections
+            self.maximumProjectionUnits = maximumProjectionUnits
         }
     }
 
@@ -145,6 +152,7 @@ public final class TranscriptPersistenceQueue {
 
     public typealias Save = @MainActor (Command) async throws -> Int
     public typealias DidSave = @MainActor (Command, Int) async -> Void
+    typealias ProjectionOperation = @MainActor () async -> Void
 
     private enum State: Equatable {
         case pending
@@ -155,6 +163,17 @@ public final class TranscriptPersistenceQueue {
     private struct Entry {
         let command: Command
         var state: State
+    }
+
+    private struct ProjectionKey: Hashable {
+        let recordID: String
+        let lineID: String
+    }
+
+    private struct ProjectionWork {
+        let key: ProjectionKey
+        let unitCount: Int
+        let operation: ProjectionOperation
     }
 
     private struct ItemKey: Hashable {
@@ -171,6 +190,8 @@ public final class TranscriptPersistenceQueue {
     private var entries: [Entry] = []
     private var acceptedItems: [ItemKey: String] = [:]
     private var completedItemOrder: [ItemKey] = []
+    private var projections: [ProjectionWork] = []
+    private var activeProjection: ProjectionWork?
     private var worker: Task<Void, Never>?
     private var drainWaiters: [String: [CheckedContinuation<DrainReport, Never>]] = [:]
     private var resultWaiters: [String: [UUID: CheckedContinuation<SaveResult, Never>]] = [:]
@@ -197,7 +218,38 @@ public final class TranscriptPersistenceQueue {
 
     public var outstandingRecordIDs: [String] {
         var seen: Set<String> = []
-        return entries.compactMap { seen.insert($0.command.sessionID).inserted ? $0.command.sessionID : nil }
+        let recordIDs = entries.map(\.command.sessionID)
+            + projections.map(\.key.recordID)
+            + (activeProjection.map { [$0.key.recordID] } ?? [])
+        return recordIDs.filter { seen.insert($0).inserted }
+    }
+
+    var outstandingProjectionCount: Int { projections.count + (activeProjection == nil ? 0 : 1) }
+    var outstandingProjectionUnits: Int {
+        projections.reduce(activeProjection?.unitCount ?? 0) { $0 + $1.unitCount }
+    }
+
+    /// 辅助写入复用正文保存 owner；只有尚未执行的同一目标可合并。
+    @discardableResult
+    func enqueueProjection(
+        recordID: String, lineID: String, unitCount: Int,
+        operation: @escaping ProjectionOperation
+    ) -> Bool {
+        guard !recordID.isEmpty, !lineID.isEmpty, unitCount >= 0 else { return false }
+        let key = ProjectionKey(recordID: recordID, lineID: lineID)
+        let existing = projections.firstIndex { $0.key == key }
+        let previousUnits = existing.map { projections[$0].unitCount } ?? 0
+        guard existing != nil || outstandingProjectionCount < configuration.maximumPendingProjections,
+              unitCount <= configuration.maximumProjectionUnits - outstandingProjectionUnits + previousUnits
+        else { return false }
+        let work = ProjectionWork(key: key, unitCount: unitCount, operation: operation)
+        if let existing {
+            projections[existing] = work
+        } else {
+            projections.append(work)
+        }
+        startWorkerIfNeeded()
+        return true
     }
 
     /// 已接纳命令占用的 Unicode scalar 数，包含失败项。
@@ -349,14 +401,27 @@ public final class TranscriptPersistenceQueue {
     }
 
     private func startWorkerIfNeeded() {
-        guard worker == nil, nextReadyPendingIndex() != nil else { return }
+        guard worker == nil, nextReadyPendingIndex() != nil || !projections.isEmpty else { return }
         worker = Task { @MainActor [weak self] in
             await self?.consume()
         }
     }
 
     private func consume() async {
-        while let index = nextReadyPendingIndex() {
+        var lastWasProjection = false
+        while true {
+            let nextLine = nextReadyPendingIndex()
+            if !projections.isEmpty, nextLine == nil || !lastWasProjection {
+                let work = projections.removeFirst()
+                activeProjection = work
+                await work.operation()
+                activeProjection = nil
+                lastWasProjection = true
+                resumeSettledWaiters()
+                continue
+            }
+            guard let index = nextLine else { break }
+            lastWasProjection = false
             let command = entries[index].command
             entries[index].state = .saving
             do {
@@ -464,6 +529,9 @@ public final class TranscriptPersistenceQueue {
 
     private func settledReport(sessionID: String) -> DrainReport? {
         let recordEntries = entries.filter { $0.command.sessionID == sessionID }
+        guard activeProjection?.key.recordID != sessionID,
+              !projections.contains(where: { $0.key.recordID == sessionID })
+        else { return nil }
         guard !recordEntries.contains(where: { $0.state == .saving }) else { return nil }
 
         let failures = recordEntries.compactMap { entry -> Failure? in

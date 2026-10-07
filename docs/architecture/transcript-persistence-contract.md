@@ -2,7 +2,7 @@
 title: "转录保存命令、原子确认与恢复合同"
 status: under_review
 audience: "macOS App 开发者、会话数据层维护者"
-version: "0.1.0"
+version: "0.1.1"
 date: 2026-10-07
 ---
 
@@ -24,6 +24,13 @@ ASR 客户端、Preview Ledger 和 Assembler 定义识别事实；保存 owner �
 
 receiver 接纳命令后即可继续消费控制事件，保存 owner 才等待 Store I/O。
 接纳不表示已保存；读到同 ID 的正文也不单独证明 outbox 和 ordinal 确认成功。
+
+队列已有辅助写入调度端口 `enqueueProjection`，复用唯一 worker。
+辅助任务最多 128 项、合计 1,024 units，活动任务也占预算；
+只合并尚未执行的相同 record/line 更新，超预算不替换已有工作。
+正文与辅助任务轮换执行，避免辅助更新挤占已接纳正文；
+queued/in-flight 辅助任务会阻止对应 record 提前返回 settled。
+Meeting/Caption 尚未接入该端口，不能把队列端口已通过测试写成 receiver 已全面解耦。
 
 ## 冻结命令
 

@@ -6,6 +6,95 @@ import XCTest
 
 @MainActor
 final class AssistantInputPersistenceQueueTests: XCTestCase {
+    func testQueuedProjectionBurstCannotStarveAnAcceptedTranscript() async {
+        let gate = SaveGate()
+        var order: [String] = []
+        let queue = TranscriptPersistenceQueue(
+            save: { _ in order.append("transcript"); return 1 }, didSave: { _, _ in }
+        )
+        XCTAssertTrue(queue.enqueueProjection(recordID: "A", lineID: "active", unitCount: 1) {
+            _ = await gate.wait()
+            order.append("active")
+        })
+        await gate.waitUntilEntered()
+        XCTAssertEqual(queue.enqueue(command(
+            sessionID: "A", connection: 1, itemID: "item", lineID: "line"
+        )), .accepted)
+        for index in 0..<3 {
+            XCTAssertTrue(queue.enqueueProjection(recordID: "A", lineID: "aux-\(index)", unitCount: 1) {
+                order.append("aux-\(index)")
+            })
+        }
+        gate.release(ordinal: 0)
+        let report = await queue.waitUntilSettled(sessionID: "A")
+        XCTAssertTrue(report.isComplete)
+        XCTAssertEqual(Array(order.prefix(2)), ["active", "transcript"])
+        XCTAssertEqual(Set(order), Set(["active", "transcript", "aux-0", "aux-1", "aux-2"]))
+    }
+
+    func testProjectionUsesTheSameOwnerAndPreventsPrematureSettlement() async {
+        let gate = SaveGate()
+        var order: [String] = []
+        var settled = false
+        let queue = TranscriptPersistenceQueue(
+            save: { input in order.append(input.text); return 1 },
+            didSave: { _, _ in }
+        )
+        XCTAssertTrue(queue.enqueueProjection(recordID: "A", lineID: "metadata", unitCount: 1) {
+            order.append("metadata started")
+            _ = await gate.wait()
+            order.append("metadata finished")
+        })
+        await gate.waitUntilEntered()
+        let observer = Task { @MainActor in
+            let report = await queue.waitUntilSettled(sessionID: "A")
+            settled = report.isComplete
+        }
+        XCTAssertEqual(queue.enqueue(command(
+            sessionID: "B", connection: 1, itemID: "item", lineID: "line",
+            text: "next line"
+        )), .accepted)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertFalse(settled)
+        XCTAssertEqual(order, ["metadata started"])
+        XCTAssertEqual(Set(queue.outstandingRecordIDs), Set(["A", "B"]))
+        gate.release(ordinal: 0)
+        await observer.value
+        let report = await queue.waitUntilSettled(sessionID: "B")
+        XCTAssertTrue(report.isComplete)
+        XCTAssertEqual(order, ["metadata started", "metadata finished", "next line"])
+    }
+
+    func testProjectionBudgetIncludesActiveWorkAndCoalescesOnlyQueuedUpdates() async {
+        let gate = SaveGate()
+        var projected: [String] = []
+        let queue = TranscriptPersistenceQueue(
+            configuration: .init(maximumPendingProjections: 2, maximumProjectionUnits: 3),
+            save: { _ in 1 }, didSave: { _, _ in }
+        )
+        XCTAssertTrue(queue.enqueueProjection(recordID: "A", lineID: "active", unitCount: 2) {
+            _ = await gate.wait()
+            projected.append("active")
+        })
+        await gate.waitUntilEntered()
+        XCTAssertTrue(queue.enqueueProjection(recordID: "A", lineID: "queued", unitCount: 1) {
+            projected.append("original")
+        })
+        XCTAssertFalse(queue.enqueueProjection(recordID: "A", lineID: "queued", unitCount: 2) {
+            projected.append("over budget")
+        })
+        XCTAssertFalse(queue.enqueueProjection(recordID: "B", lineID: "new", unitCount: 1) {})
+        XCTAssertTrue(queue.enqueueProjection(recordID: "A", lineID: "queued", unitCount: 1) {
+            projected.append("latest")
+        })
+        XCTAssertEqual(queue.outstandingProjectionCount, 2)
+        XCTAssertEqual(queue.outstandingProjectionUnits, 3)
+        gate.release(ordinal: 0)
+        let report = await queue.waitUntilSettled(sessionID: "A")
+        XCTAssertTrue(report.isComplete)
+        XCTAssertEqual(projected, ["active", "latest"])
+    }
+
     func testAdmissionRejectionKeepsBoundedCopyEvidenceAndCannotBecomeSuccessful() {
         var ledger = TranscriptAdmissionLedger(maximumRecords: 1, maximumPreviewScalars: 3)
         let saved = TranscriptPersistenceQueue.DrainReport(pendingCommands: [], failures: [])
