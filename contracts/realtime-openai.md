@@ -1,6 +1,6 @@
 # SpeechRail Realtime current-only 契约
 
-> 契约版本：`6.3.0`；生效日期：2026-10-06。唯一机器 schema 是
+> 契约版本：`6.3.1`；生效日期：2026-10-07。唯一机器 schema 是
 > [`realtime-events.schema.json`](realtime-events.schema.json)，字段责任表是
 > [`realtime-field-matrix.json`](realtime-field-matrix.json)。本版本直接切换，不提供旧事件、
 > 旧字段、旧 profile alias 或 `/v2` 兼容层。
@@ -384,6 +384,9 @@ request 返回 `tts_not_active`，绝不归还到新 request。
 `invalid_state`、`asr_policy_invalid`、`asr_policy_unsupported`、`asr_buffer_overflow`。
 策略形状、范围或 deadline 无效时返回 `asr_policy_invalid`；后端不支持所请求策略时返回
 `asr_policy_unsupported`；无法在有界资源内接纳音频时返回 `asr_buffer_overflow`。
+资源回收未确认导致 lane 隔离时，后续 TTS 准入（以及串行策略下受阻的 ASR 准入）返回
+`backend_reclamation_failed`。它不是可退避重试的 `queue_full`：调用方须停止重试，
+由操作者恢复 runtime 后再请求；能力发现成功不证明隔离已解除。
 
 ## 7. 明确拒绝项
 

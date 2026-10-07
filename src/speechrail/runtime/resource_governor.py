@@ -46,6 +46,10 @@ class GovernorBudgetError(GovernorQueueFullError):
     """Declared footprints prove heavy compute cannot fit the memory budget."""
 
 
+class GovernorLaneIsolatedError(GovernorQueueFullError):
+    """Backend ownership is unconfirmed; queue backoff cannot recover this lane."""
+
+
 @dataclass(frozen=True, slots=True)
 class GovernorSnapshot:
     active_realtime: int
@@ -278,7 +282,9 @@ class ResourceGovernor:
                     or "declared footprints exceed the memory budget; refusing heavy compute"
                 )
             if self._quarantine_blocks(work_class, resource_key):
-                raise GovernorQueueFullError("backend reclamation is unconfirmed; lane is isolated")
+                raise GovernorLaneIsolatedError(
+                    "backend reclamation is unconfirmed; lane is isolated"
+                )
             waiters = self._waiters_for(work_class)
             if len(waiters) >= self._limits.max_pending_per_class:
                 if self._on_reject is not None:
@@ -296,7 +302,7 @@ class ResourceGovernor:
             try:
                 while not self._can_admit(waiter):
                     if self._quarantine_blocks(work_class, resource_key):
-                        raise GovernorQueueFullError(
+                        raise GovernorLaneIsolatedError(
                             "backend reclamation is unconfirmed; lane is isolated"
                         )
                     timeout = self._batch_aging_wait_timeout(waiter)
@@ -492,6 +498,7 @@ class ResourceGovernor:
 
 __all__ = [
     "GovernorBudgetError",
+    "GovernorLaneIsolatedError",
     "GovernorLimits",
     "GovernorQueueFullError",
     "GovernorSnapshot",

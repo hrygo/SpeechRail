@@ -365,6 +365,12 @@ def test_candidate_reclamation_failure_returns_safe_envelope_without_evidence(
         assert not asr.requests
         assert detail not in response.text
         assert detail not in caplog.text
+        retry = client.post("/v1/voice-designs", json=payload())
+        assert retry.status_code == 503
+        assert retry.json()["error"]["code"] == "backend_reclamation_failed"
+        assert retry.json()["error"]["retryable"] is False
+        assert "Retry-After" not in retry.headers
+        assert not asr.requests
         return
 
     candidate_id, _ = create_candidate(client)
@@ -385,6 +391,16 @@ def test_candidate_reclamation_failure_returns_safe_envelope_without_evidence(
     assert client.get(f"/v1/voice-designs/{candidate_id}").json()["candidate"]["validations"] == []
     assert detail not in response.text
     assert detail not in caplog.text
+    retry = client.post(
+        f"/v1/voice-designs/{candidate_id}/validate",
+        json={"test_text": CONTROLLED_TEST_TEXT},
+    )
+    assert retry.status_code == 503
+    assert retry.json()["error"]["code"] == "backend_reclamation_failed"
+    assert retry.json()["error"]["retryable"] is False
+    assert "Retry-After" not in retry.headers
+    assert len(asr.requests) == asr_count
+    assert client.get(f"/v1/voice-designs/{candidate_id}").json()["candidate"]["validations"] == []
 
 
 def test_numeric_misread_fails_machine_validation_and_blocks_publication(

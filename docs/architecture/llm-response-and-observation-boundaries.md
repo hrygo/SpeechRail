@@ -2,7 +2,7 @@
 title: "LLM 响应校验与观测边界"
 status: active
 audience: "macOS App 开发者"
-version: "1.0.0"
+version: "1.0.1"
 date: 2026-10-07
 ---
 
@@ -52,6 +52,6 @@ Provider observer 由构造或单次调用注入；单次 observer 覆盖构造 
 python3 scripts/check_llm_support_boundary.py
 ```
 
-它只构建 SDK 依赖，再独立 type-check `LLMProvider.swift`，不向编译器传入任何 feature 源文件。公共类型和唯一 scanner 暂集中在这个已登记 source 中，以避开 #245 在途 `.pbxproj` 注册改动；类型职责仍分离，未来可在协调后拆文件。
+它只构建 SDK 依赖，再独立 type-check `LLMProvider.swift`，不向编译器传入任何 feature 源文件。公共类型和唯一 scanner 集中在这个已登记 source 中，类型职责保持分离。实施时曾避开 #245 的 `.pbxproj` 并行改动；用户已确认 #245 完成，这一临时限制已撤销。
 
 合成响应回归覆盖坏 2xx、普通文本、thinking/models、schema/重复键、observer 单路投递与失败、真实 AssistantSession 的音频准入及既有 SSE/background/cancel。测试不连接真实 LLM、不读写真实钥匙串、不取音频设备。回退本包 commit 可恢复接线与校验；不删除配置、密钥、作品或日志。

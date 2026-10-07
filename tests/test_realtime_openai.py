@@ -510,6 +510,35 @@ def _pcm16(audio: bytes) -> str:
     return base64.b64encode(audio).decode("ascii")
 
 
+def test_realtime_asr_admission_preserves_isolation_error_under_serial_policy() -> None:
+    async def scenario() -> None:
+        settings = Settings(qwen3_model_dir=None, qwen3_python=None)
+        services = build_app_services(
+            settings,
+            AppOverrides(
+                batch_transcriber=FakeTranscriber(),
+                tts_synthesizer=FakeSpeechSynthesizer(),
+                realtime_asr_factory=FakeStreamingFactory(),
+            ),
+        )
+        assert not services.governor.snapshot().allow_heavy_overlap
+        services.governor.quarantine_tts_lane("tts_base")
+
+        async def send(event: dict[str, object]) -> None:
+            pytest.fail("isolated ASR must not publish successful work")
+
+        session = OpenAIRealtimeSession(services, session_id="isolated-test", send=send)
+        with pytest.raises(RealtimeAdapterError) as isolated:
+            await session._reserve_asr()
+        assert isolated.value.code == "backend_reclamation_failed"
+        assert not getattr(isolated.value, "busy_reason", None)
+        assert session._asr_resources is None
+        assert services.governor.snapshot().active_asr == 0
+        assert services.governor.snapshot().pending_realtime == 0
+
+    asyncio.run(scenario())
+
+
 def _receive_committed_item(
     socket: Any,
     *,

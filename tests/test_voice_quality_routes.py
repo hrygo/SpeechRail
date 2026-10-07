@@ -1634,6 +1634,31 @@ def test_quality_reclamation_failure_stops_asr_and_commit(
     assert len(synth.requests) == (1 if failure_phase == "close" else 12)
     assert sentinel not in caplog.text
     assert sentinel not in response.text
+    requests_before_retry = len(synth.requests)
+    retry = client.post(
+        "/v1/voices/serena/quality-runs",
+        json={"probe_set": "voice_quality_v1_zh", "runs": 2},
+    )
+    assert retry.status_code == 503
+    assert retry.json()["error"]["code"] == "backend_reclamation_failed"
+    assert retry.json()["error"]["retryable"] is False
+    assert "Retry-After" not in retry.headers
+    assert len(synth.requests) == requests_before_retry
+    for output_format in ("pcm", "wav"):
+        speech = client.post(
+            "/v1/audio/speech",
+            json={
+                "model": "tts-1",
+                "input": "合成的测试文字",
+                "voice": "serena",
+                "response_format": output_format,
+            },
+        )
+        assert speech.status_code == 503
+        assert speech.json()["error"]["code"] == "backend_reclamation_failed"
+        assert speech.json()["error"]["retryable"] is False
+        assert "Retry-After" not in speech.headers
+        assert len(synth.requests) == requests_before_retry
 
 
 def test_quality_runs_classifies_probe_failed_and_counts_ok(

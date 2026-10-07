@@ -115,6 +115,7 @@ from speechrail.runtime.diarization_admission import DiarizationAdmissionFullErr
 from speechrail.runtime.limits import MAX_ALIGNMENT_PCM_BYTES
 from speechrail.runtime.pcm_buffer import BoundedPcmBuffer, PcmBufferOverflowError
 from speechrail.runtime.resource_governor import (
+    GovernorLaneIsolatedError,
     GovernorQueueFullError,
     WorkClass,
     WorkPurpose,
@@ -2967,6 +2968,13 @@ class OpenAIRealtimeSession:
             self._services.metrics.record_realtime_phase(
                 "asr_admission", time.monotonic() - admission_started
             )
+        except GovernorLaneIsolatedError as exc:
+            await self._asr_resources.aclose()
+            self._asr_resources = None
+            raise RealtimeAdapterError(
+                "backend_reclamation_failed",
+                "Backend resources remain isolated until runtime recovery",
+            ) from exc
         except GovernorQueueFullError as exc:
             await self._asr_resources.aclose()
             self._asr_resources = None
