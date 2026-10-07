@@ -334,6 +334,8 @@ paths:
         and transport failures return 503, inference/output failures return 502,
         and parameter failures return 400. Errors may include safe worker
         attribution; raw stderr is never returned.
+        Unconfirmed TTS close returns 503 `backend_reclamation_failed` with
+        `retryable=false`; the design lane is quarantined before returning.
       security:
         - BearerAuth: []
         - {}
@@ -672,6 +674,9 @@ paths:
         Base initialization and transport failures return 503, inference/output
         failures return 502, and TTS parameter failures return 400. Existing
         validation conflicts retain 409. Errors may include safe worker attribution.
+        Unconfirmed TTS close or eviction returns 503
+        `backend_reclamation_failed` with `retryable=false`; the affected lane
+        is quarantined and no validation evidence is committed.
       security:
         - BearerAuth: []
         - {}
@@ -1135,8 +1140,10 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '503':
           description: TTS runtime not ready (`backend_not_ready`) or the custom
-            voice registry is unreadable (`voice_store_unavailable`); both are
-            retryable.
+            voice registry is unreadable (`voice_store_unavailable`) are retryable.
+            Unconfirmed TTS reclamation (`backend_reclamation_failed`) is not
+            automatically retryable; the affected lane stays quarantined until
+            runtime recovery. No successful validation evidence is committed.
           content:
             application/json:
               schema:

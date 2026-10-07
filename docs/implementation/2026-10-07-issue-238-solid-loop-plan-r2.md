@@ -1,22 +1,24 @@
-<!-- loop-plan-r2: 2026-10-07, baseline 451aeb1e -->
-# Issue #238 DRY / SOLID 收敛 Loop 实施计划 r2（新基线 `451aeb1e`）
+<!-- loop-plan-r2: 2026-10-07, baseline 1edf9398 -->
+# Issue #238 DRY / SOLID 收敛 Loop 实施计划 r2（新基线 `1edf9398`）
 
 > r1（`2026-10-07-issue-238-solid-loop-plan.md`，基线 `159fea09`，随 R01 PR #320 提交）的后继修订。
 > 凡与 r1 不一致处以本文件为准。当前目标包含实施、审查、验证、提交、推送及通过后的合并；分组/跨包门结论继承 r1。
 
 **Goal:** 11 个 issue（#231 #232 #234 #235 #236 #237 #240 #241 #242 #244 #246）分 9 个 PR 交付。
 **Spec:** [Epic #238](https://github.com/hrygo/SpeechRail/issues/238)、[Epic #245](https://github.com/hrygo/SpeechRail/issues/245)。
-**核验日期：** 2026-10-07，Asia/Shanghai（对应 UTC 2026-10-06）。基线 `origin/main = 451aeb1e`（已 fetch）；每包合并后刷新。
+**核验日期：** 2026-10-07，Asia/Shanghai；CI 时间戳为 UTC。进度以本次回读的 SHA、PR 状态和 run ID 为准。基线 `origin/main = 1edf9398`（已 fetch）；每包合并后刷新。
+
+**当前实施目标：** R01、R02、R05 已合入；剩余 7 个 issue 分 6 个 PR，按 R03 → R04 → R06 → R07 → R08 → R09 完成实施、实质审查、必要验证与通过后的合并。保持 #245 的语义边界；完整验收对照前不关闭 issue。结构化 goal 仍 active；现有接口不支持更新正文，旧正文中的基线、逐包等待确认和错误同文件判断均由本文更正，不将旧目标虚假标为完成。
 
 ## 0. 基线与 #245 现状（只读快照）
 
-- `origin/main = 55c8df2a`：包含 #249/#252 文档及提词器 preview 500ms 预设变更（这是业务行为变化），以及 #321 V17 回归与 #324 3.8.0 发布提交。
+- `origin/main = 1edf9398`：包含 #249/#252 文档及提词器 preview 500ms 预设变更（这是业务行为变化）、#321 V17 回归、#324 3.8.0 发布提交，以及 R01/R02/R05。
 - #245 子任务历史快照：#247–#252 CLOSED、#253 OPEN，开工前重新核验。`git worktree list` 当前未登记 4841；不据此断言目录不存在。已登记 acceptance-evidence、app-validation、boundary-fix、consumer-replay、delivery、validation-v8 等 ASR worktree。
-- #320 R01（#244）已合并为 `451aeb1e`，补齐后的 head 为 `36e85493`，全部选中 CI 通过。#322 R02 和 #323 R05 仍待补齐、最新基线验证及合并。
+- #320 R01（#244）已合并为 `451aeb1e`；#322 R02（#240/#246）已合并为 `1edf9398`；#323 R05（#242）已合并为 `ff34bfcf`。三包均在匹配的 head 上通过实质审查、定向验证与必需 CI 后 squash 合并。
 - 在途远端分支（只读核对）：`asr-production-consumer-replay-253`（pbxproj + 新增 `ASRProductionConsumerReplayTests.swift` 881 行）、`asr-clear-barrier-245`（`application/realtime_openai.py` 283 行 + 路由 + 契约文档，#245 语义面）、`v17-backlog-playback-268`（矩阵文档 + V17 测试）。
 - 用户最新授权：**PR 经实质审查和必要验证通过后尽快合并**，不再逐包询问；旧版等待合并确认的限制已被替代。main 要求线性历史，采用 squash/rebase 合并，不绕过 `Quality Gates` / `Gate Summary`，不 force-push。
 
-本轮审查发现 #320 还需覆盖所有发布失败清理和独占 staging；#322 只增加活动 API、没有接生产 alignment，runner 异常仍可能跳过回收；#323 的新测试未加入 Xcode target，且全局测试注入存在跨实例干扰。下表的“已交付”只表示 draft 已推送，不能证明 issue 完成。
+审查发现的发布失败清理、独占 staging、alignment 活动未接线、退出失败隔离及测试 target/全局注入问题均已在各包补齐。合并证明代码与所列 gate 通过，不能代替未运行的真实模型、质量、性能或长稳验收。
 
 ## 1. 十一条逐条复验结论（`b91e6f88` 只读核对）
 
@@ -25,10 +27,10 @@
 | Issue | 档 | 当前事实（main） | PR 包 |
 |---|---|---|---|
 | #244 短写制品 | 已合并 | 独占 staging、完整写入、发布前失败清理及数据库完成回读；127 个定向测试和选中 CI 通过。仅承诺进程级原子可见 | R01 #320 |
-| #240 owner 登记 | 审查补齐，待 CI | R02 分支区分 eager/owned，aligner 按需加载；partial-start 回收、runner/monitor/worker 失败隔离、取消保护及超时句柄保留 | R02 #322 |
-| #246 活动保护 | 审查补齐，待 CI | 复用 WorkerLeaseLock；生产 alignment 与 evictor 共用活动/回收互斥边界，结束后重设 idle 起点；移除接线导致两个回归失败 | R02 #322 |
-| #242 改名事务 | 已交付（待合并） | `SessionStore.swift:369` 起仍三次独立 `withStatement`；R05 分支已包 `BEGIN IMMEDIATE`/COMMIT + 注入测试 | R05 #323 |
-| #235 验证用例 | 未修 | `voice_designs.py:83-91` 仍 7 个 system 私有导入 + audio 私有导入；两路由文件零提交 | R03 |
+| #240 owner 登记 | 已合并 | eager/owned 分离，aligner 按需加载；partial-start 回收、runner/monitor/worker 失败隔离、取消保护及超时句柄保留 | R02 #322 |
+| #246 活动保护 | 已合并 | 生产 alignment 与 evictor 共用 WorkerLeaseLock；活动/回收互斥，结束后重设 idle 起点；移除接线导致两个回归失败 | R02 #322 |
+| #242 改名事务 | 已合并 | 映射和修订事件共用 SQLite 事务；5 个故障/幂等回归，测试自有 trigger，无生产开关和 pbxproj 修改 | R05 #323 |
+| #235 验证用例 | CI 中 | 两个应用用例已接线；同次执行身份、unknown、CAS/撤销、保存失败、重复取消与 timeout/cancel 交错回归通过；372 项定向验证通过，独立审查 Required 已修复，待必需 CI | R03 #325 |
 | #237 坏 2xx | 未修 | `LLMProvider.check`（约 2475–2480）2xx 即 `.connected`；`operationUnavailable` 只判 operation 不可用 | R04 |
 | #236 中立支持 | 未修 | provider 仍持 `TeleprompterAIObservationHandler/Context/StrictJSON`（1175/1264/1382/1509+/1614 行）；零提交 | R04 |
 | #241 封存结果 | 部分改善 | 剩余 `finalize`(442-)/`endAssistant`(543-) 纯文字分支 `try?` + 无条件成功 ID | R06（收窄） |
@@ -83,14 +85,26 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 | 包 | 状态 | 真实 PR / SHA | 备注 |
 |---|---|---|---|
 | R01 #244 | MERGED | PR #320 / `451aeb1e` | 127 定向测试、Ruff/Mypy、选中 CI 通过 |
-| R02 #240+#246 | 审查补齐，待 CI | PR #322 | 99 定向测试、四生产文件 Mypy 通过；移除活动接线，2 个回归转红 |
-| R05 #242 | draft 待合并 | PR #323 / `ca2fea32` | 已 rebase `b91e6f88` |
-| R03 #235 | WIP，未达验收 | 无 | 当前草稿尚缺两个应用用例接线及同次身份采集；原 333 passing 不能代替要求验收 |
+| R02 #240+#246 | MERGED | PR #322 / `1edf9398` | 99 定向测试、28 个 HTTP/lifecycle 测试；移除接线使 2 个回归转红；同步 R05 后 CI run `37550404724` 通过 |
+| R05 #242 | MERGED | PR #323 / `ff34bfcf` | 42 定向 Swift 测试；去掉事务使 3 项转红；CI run `37549739387` 的 Swift/App/必需 gate 通过 |
+| R03 #235 | CI 中 | PR #325 | 基线 `1edf9398`；372 项定向 fake/HTTP/contract 回归、Ruff/Mypy 通过；独立审查 Required 已修复，待必需 CI |
 | R04 #237+#236 | planned | 无 | 主要修改 LLMProvider，与 R06 文件不同 |
 | R06 #241 | planned | 无 | 范围收窄（§1 行） |
 | R07 #232 | planned | 无 | 注意 consumer-replay 分支 |
 | R08 #231 | planned | 无 | 注意 clear-barrier 分支，只读合同 |
 | R09 #234 | planned | 无 | #249 关闭已解锁，排末位 |
+
+### R03 验证与取舍（2026-10-07）
+
+- 两个用例各自拥有状态/提交，共享有界执行组件；阶段表见 [执行所有权](../architecture/voice-validation-usecases.md)。HTTP 不导入其他 route 私有业务，application 不依赖 HTTP 框架。
+- 先观察重复取消提前释放 reservation、timeout 后再次取消中断清理、质量保存失败错误类型、日志私密异常文本回归转红，再修复。移除 quality expected revision guard 使回归以 `DID NOT RAISE VoiceRevisionConflictError` 转红，恢复后通过。
+- Ruling：阶段 task 与其 deadline 同 owner，复用 `join_cleanup`；deadline 已取消时不追加 cancel，避免第二次取消打断 backend 清理。回收未确认时保留 ownership 或隔离 lane；不将响应 deadline 解释为强制进程回收上界。
+- Ruling：清理失败中止后续 probe/ASR/commit，返回不可自动重试的 `503 backend_reclamation_failed`；契约与独立用户说明同步。ASR 团队在改 `docs/users/api-contract.md`，本包不写该文件。
+- 独立审查指出候选 close/eviction 的原始异常未映射，新增两个 HTTP 反例观察未处理 RuntimeError，再接稳定 503；共享 helper 的生成入口也补映射与 design lane 隔离。候选生成/验证和 quality-runs 共 5 个清理失败 HTTP 回归通过。
+- 最终独立审查发现一项 Required：`aclose()` 自身抛 TimeoutError 被普通超时抢先分类。3 个 HTTP 反例先转红，再将 close failure 优先分类，稳定返回不可重试的 reclamation failure；纯执行/驱逐 deadline 保持原语义。最终清理失败 HTTP 矩阵共 8 项通过，没有遗留 Critical/Required；审查人没有运行真实模型，最终修订由主代理 TDD 验证。
+- 定向命令：`SPEECHRAIL_SKIP_NATIVE_WORKER_BUILD=1 uv run pytest --no-cov -rA tests/test_voice_validation_execution.py tests/test_candidate_validation_usecase.py tests/test_voice_quality_routes.py tests/test_voice_design_workflow.py tests/test_voice_design_concurrency.py tests/test_voice_validation.py tests/test_voice_validation_residency.py tests/test_voice_quality_gates.py tests/test_voice_quality_evidence.py tests/test_voice_revision_routes.py tests/test_voice_revision_contract.py tests/test_tts_delivery.py tests/test_tts_errors.py tests/test_resource_governor.py tests/test_tts_profile_snapshot.py tests/test_openapi_contract.py tests/test_audio_error_contract.py tests/test_user_doc_contract.py` → 372 passed。
+- `ruff check` 全部改动 Python；`mypy` 9 个生产 source 文件通过。没有运行完整本机测试、真实模型、服务/UI、性能或长稳验收。
+- 提交前核对六个已登记 ASR worktree：本包路由、registry、架构导航、OpenAPI 无 dirty 或 branch diff；仅 API 手册存在独立 ASR 文档变更，已避让。新文件无对应图谱索引，按当前源码审查，不宣称图谱完整。
 
 ## 6. 来源
 
