@@ -8,7 +8,7 @@
 **Spec:** [Epic #238](https://github.com/hrygo/SpeechRail/issues/238)、[Epic #245](https://github.com/hrygo/SpeechRail/issues/245)。
 **核验日期：** 2026-10-07，Asia/Shanghai；CI 时间戳为 UTC。进度以本次回读的 SHA、PR 状态和 run ID 为准。验收基线 `origin/main = 5c7590b0`（已 fetch）；每包合并后刷新。
 
-**当前收口目标（2026-10-07 更新）：** R01–R09 与 #242 补证 R10 均已合入，十一项共 91 条矩阵已逐条核对；证据区分定向实测、匹配 head CI、突变与静态边界，见 [最终验收证据矩阵](2026-10-07-issue-238-final-acceptance.md)。剩余工作是提交本次文档收口、同步 issue 验收状态，实际完成后将 goal 标为 complete。每包 1–3 issue，不堆叠、不 force-push、不 `Closes #238`。#245 已完成，临时避让限制撤销；实际 worktree WIP 继续保护。
+**最终交付目标与证据（2026-10-07 更新）：** R01–R09 与 #242 补证 R10 均已合入，十一项共 91 条矩阵已逐条核对；证据区分定向实测、匹配 head CI、突变与静态边界，见 [最终验收证据矩阵](2026-10-07-issue-238-final-acceptance.md)。文档、issue 验收状态与 goal 依次收口；外部状态以 GitHub 时间线和 Codex goal 回读为准。每包 1–3 issue，不堆叠、不 force-push、不 `Closes #238`。#245 已完成，临时避让限制撤销；实际 worktree WIP 继续保护。
 
 **最新执行事实（2026-10-07，Asia/Shanghai）：** R09 PR #332 在 head `6ad4c2ac` 的 CI `37582419447` 全绿后 squash 合入 `df8bb539`；R10 PR #333 在 head `01e69f45` 的 CI `37583882519` 全绿、一次独立审查无 Critical/Required 后，于 UTC `2026-10-07T06:56:00Z` squash 合入 `5c7590b0`。60 项定向 Store/Minutes/SourceSeal XCTest 与两次突变补证完成。收口 PR 只更新账本、证据和合同状态，不改变运行态。
 
