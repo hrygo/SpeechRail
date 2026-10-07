@@ -2783,15 +2783,15 @@ components:
           $ref: '#/components/schemas/RealtimeVADStatus'
         asr_state:
           type: string
-          enum: [active, warm_standby, cold_evicted, inactive, unconfigured]
+          enum: [active, warm_standby, cold_evicted, reclamation_failed, inactive, unconfigured]
           description: Granular ASR inference lifecycle state.
         tts_state:
           type: string
-          enum: [active, warm_standby, cold_evicted, inactive, unconfigured]
+          enum: [active, warm_standby, cold_evicted, reclamation_failed, inactive, unconfigured]
           description: Granular TTS inference lifecycle state.
         streaming_state:
           type: string
-          enum: [active, warm_standby, cold_evicted, inactive, unconfigured]
+          enum: [active, warm_standby, cold_evicted, reclamation_failed, inactive, unconfigured]
           description: Granular streaming ASR lifecycle state.
         ready:
           type: boolean
@@ -2899,7 +2899,7 @@ components:
           type: object
           additionalProperties:
             type: string
-            enum: [active, warm_standby, cold_evicted, inactive, unconfigured, starting, stopping, failed]
+            enum: [active, warm_standby, cold_evicted, reclamation_failed, inactive, unconfigured, starting, stopping, failed]
         health:
           type: object
           additionalProperties:

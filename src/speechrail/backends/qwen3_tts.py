@@ -974,7 +974,12 @@ class Qwen3TtsCapabilityRouter:
     while lifecycle operations stay serialized.
     """
 
-    def __init__(self, workers: Mapping[str, Qwen3TtsWorker]) -> None:
+    def __init__(
+        self,
+        workers: Mapping[str, Qwen3TtsWorker],
+        *,
+        on_reclamation_failure: Callable[[], None] | None = None,
+    ) -> None:
         resolved: dict[str, Qwen3TtsWorker] = {}
         for role, worker in workers.items():
             try:
@@ -990,6 +995,7 @@ class Qwen3TtsCapabilityRouter:
             resolved[role] = worker
         self._workers = resolved
         self._capability_lock = asyncio.Lock()
+        self._on_reclamation_failure = on_reclamation_failure
 
     @property
     def _worker_list(self) -> tuple[Qwen3TtsWorker, ...]:
@@ -1253,10 +1259,10 @@ class Qwen3TtsCapabilityRouter:
         """
         if self.active_incremental_streams:
             raise TtsWorkerBusyError("an incremental TTS utterance still owns a worker")
-        async with self._capability_lock:
-            for worker in self._worker_list:
-                if worker.alive or worker.ready:
-                    await worker.close()
+        # Usability is not process ownership: a failed reap intentionally hides
+        # alive/ready. The owned close visits every child and reports failures
+        # only after attempting the remaining owners.
+        await self.close()
 
     async def trim_memory(self) -> None:
         for worker in self._worker_list:
@@ -1271,5 +1277,9 @@ class Qwen3TtsCapabilityRouter:
                 except BaseException as exc:
                     if first_error is None:
                         first_error = exc
+                        # Isolate admission before awaiting another child:
+                        # ordinary requests do not acquire the group close lock.
+                        if self._on_reclamation_failure is not None:
+                            self._on_reclamation_failure()
             if first_error is not None:
                 raise first_error

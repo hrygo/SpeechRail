@@ -61,7 +61,7 @@ from speechrail.runtime.model_budget import (
     can_overlap_heavy_compute,
     detect_system_memory_bytes,
 )
-from speechrail.runtime.registry import engine_variant_for_role
+from speechrail.runtime.registry import VOICE_DESIGN_ROLE, engine_variant_for_role
 from speechrail.runtime.resource_governor import ResourceGovernor
 from speechrail.runtime.resource_observability import service_physical_footprint
 from speechrail.runtime.worker_lease import EvictableWorker, WorkerIdleEvictor, WorkerLeaseLock
@@ -664,7 +664,10 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                 role="voice_design",
                 warmup=False,
             )
-        tts_worker = Qwen3TtsCapabilityRouter(tts_workers)
+        # The Governor is composed below before any worker can start or close.
+        tts_worker = Qwen3TtsCapabilityRouter(
+            tts_workers, on_reclamation_failure=lambda: governor.quarantine_tts_lane(None),
+        )
         tts_synthesizer = tts_worker
 
     realtime_asr_factory = overrides.realtime_asr_factory
@@ -845,6 +848,15 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         # stay resident (#135). The router still owns full lifecycle; the
         # evictor only borrows this handle for per-lane idle close.
         design_worker = getattr(tts_worker, "design_worker", None)
+
+        def isolate_unreclaimed_tts(worker: EvictableWorker) -> None:
+            # Every TTS entry point uses the Governor, including REST, jobs and
+            # validation. Group close cannot identify one failed child lane.
+            if worker is tts_worker:
+                governor.quarantine_tts_lane(None)
+            elif worker is design_worker:
+                governor.quarantine_tts_lane(VOICE_DESIGN_ROLE)
+
         if evictable:
             evictor = WorkerIdleEvictor(
                 evictable,
@@ -852,6 +864,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                 warm_standby_timeout_seconds=settings.worker_warm_standby_timeout_seconds,
                 min_uptime_seconds=settings.worker_min_uptime_seconds,
                 on_eviction=metrics.record_eviction,
+                on_reclamation_failure=isolate_unreclaimed_tts,
                 lease_locks=(
                     {alignment_worker: alignment_lease} if alignment_worker is not None else None
                 ),
@@ -864,6 +877,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                     warm_standby_timeout_seconds=settings.voice_design_warm_standby_timeout_seconds,
                     min_uptime_seconds=settings.worker_min_uptime_seconds,
                     on_eviction=metrics.record_eviction,
+                    on_reclamation_failure=isolate_unreclaimed_tts,
                 )
             else:
                 evictor.track(

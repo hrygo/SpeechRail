@@ -219,6 +219,63 @@ async def test_router_can_evict_every_plan_role(
 
 
 @pytest.mark.anyio
+async def test_explicit_eviction_reaps_unusable_owner_before_validation() -> None:
+    import asyncio
+
+    from speechrail.application.voice_validation_execution import (
+        VoiceValidationExecutionError,
+        evict_quality_tts_if_supported,
+    )
+
+    class FailedOwner(_Worker):
+        retained_owner = True
+        fail_reap = True
+
+        async def close(self) -> None:
+            self.closed += 1
+            if self.fail_reap:
+                raise OSError("fake retained owner")
+            self.retained_owner = False
+
+    failed = FailedOwner("base")
+    other = _Worker("custom_voice")
+    await other.start()
+    router = _router(custom=other, base=failed)
+    failures: list[str] = []
+    with pytest.raises(VoiceValidationExecutionError) as caught:
+        await evict_quality_tts_if_supported(
+            router,
+            expires_at=asyncio.get_running_loop().time() + 1,
+            on_reclamation_failure=lambda: failures.append("isolated"),
+        )
+    assert caught.value.code == "backend_reclamation_failed"
+    assert failures == ["isolated"]
+    assert failed.retained_owner
+    assert not other.alive
+
+    failed.fail_reap = False
+    await router.evict_warm_capability()
+    assert not failed.retained_owner
+
+
+@pytest.mark.anyio
+async def test_explicit_eviction_attempts_other_children_after_reap_failure() -> None:
+    class FailedOwner(_Worker):
+        async def close(self) -> None:
+            raise OSError("fake reap failure")
+
+    failed = FailedOwner("custom_voice")
+    other = _Worker("base")
+    await failed.start()
+    await other.start()
+    router = _router(custom=failed, base=other)
+    with pytest.raises(OSError, match="fake reap failure"):
+        await router.evict_warm_capability()
+    assert not other.alive
+    assert failed.alive
+
+
+@pytest.mark.anyio
 async def test_router_closes_child_stream_before_releasing_model_slot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
