@@ -136,11 +136,13 @@ class AsyncFramedWorkerProcess:
         self._read_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
         self._lifecycle_lock = asyncio.Lock()
+        self._reclamation_failed = False
 
     @property
     def alive(self) -> bool:
+        """Usable transport state; a retained failed owner is never reusable."""
         process = self._process
-        return process is not None and process.returncode is None
+        return not self._reclamation_failed and process is not None and process.returncode is None
 
     @property
     def handshake_timeout_seconds(self) -> float:
@@ -149,6 +151,8 @@ class AsyncFramedWorkerProcess:
 
     async def start(self) -> None:
         async with self._lifecycle_lock:
+            if self._reclamation_failed:
+                raise RuntimeError("backend_reclamation_failed")
             if self.alive:
                 return
             await self._abort_unlocked()
@@ -332,12 +336,15 @@ class AsyncFramedWorkerProcess:
             await self._abort_unlocked()
 
     async def _abort_unlocked(self) -> None:
-        process, self._process = self._process, None
-        stderr_task, self._stderr_task = self._stderr_task, None
+        process = self._process
+        stderr_task = self._stderr_task
         if stderr_task is not None:
             stderr_task.cancel()
         if process is None and stderr_task is None:
             return
+        # Preserve both owners until reap succeeds. Failed termination must not
+        # look like a cold transport, nor may its old pipes accept new work.
+        self._reclamation_failed = True
         cleanup = asyncio.create_task(self._reap(process, stderr_task))
         cancelled = False
         while not cleanup.done():
@@ -346,6 +353,9 @@ class AsyncFramedWorkerProcess:
             except asyncio.CancelledError:
                 cancelled = True
         cleanup.result()
+        self._process = None
+        self._stderr_task = None
+        self._reclamation_failed = False
         if cancelled:
             raise asyncio.CancelledError
 
@@ -361,6 +371,8 @@ class AsyncFramedWorkerProcess:
         await self.abort()
 
     def _require_process(self) -> asyncio.subprocess.Process:
+        if self._reclamation_failed:
+            raise RuntimeError("backend_reclamation_failed")
         process = self._process
         if process is None:
             raise RuntimeError("worker_not_started")

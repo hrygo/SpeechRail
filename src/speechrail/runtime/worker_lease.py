@@ -12,12 +12,14 @@ from typing import Protocol, runtime_checkable
 
 from speechrail.runtime.asr_mode import AsrModeGate
 from speechrail.runtime.cleanup import join_cleanup
+from speechrail.runtime.resource_governor import GovernorLaneIsolatedError
 
 
 class WorkerLifecycleState(enum.StrEnum):
     ACTIVE = "active"
     WARM_STANDBY = "warm_standby"
     COLD_EVICTED = "cold_evicted"
+    RECLAMATION_FAILED = "reclamation_failed"
 
 
 @runtime_checkable
@@ -38,6 +40,15 @@ class WorkerLeaseLock:
         self._active_leases = 0
         self._generation = 0
         self._last_active = time.monotonic()
+        self._reclamation_failed = False
+
+    @property
+    def reclamation_failed(self) -> bool:
+        return self._reclamation_failed
+
+    def mark_reclamation(self, *, failed: bool) -> None:
+        """Called under idle admission ownership after a close outcome is known."""
+        self._reclamation_failed = failed
 
     @property
     def active_leases(self) -> int:
@@ -54,6 +65,8 @@ class WorkerLeaseLock:
     @asynccontextmanager
     async def lease(self) -> AsyncIterator[int]:
         async with self._lock:
+            if self._reclamation_failed:
+                raise GovernorLaneIsolatedError("backend_reclamation_failed")
             self._active_leases += 1
             self._generation += 1
             generation = self._generation
@@ -148,6 +161,8 @@ class WorkerIdleEvictor:
 
     def touch(self, worker: EvictableWorker) -> None:
         """Record activity on a worker at current time."""
+        if self._lease_locks[worker].reclamation_failed:
+            return
         self._last_active[worker] = time.monotonic()
         self._states[worker] = WorkerLifecycleState.ACTIVE
 
@@ -179,11 +194,38 @@ class WorkerIdleEvictor:
             async with self._lease_locks[w].idle() as idle:
                 if not idle or self._in_use(w):
                     continue
-                if getattr(w, "alive", False) or getattr(w, "ready", False):
-                    with contextlib.suppress(Exception):
-                        await join_cleanup(asyncio.create_task(w.close()))
-                self._last_active[w] = time.monotonic()
-                self._states[w] = WorkerLifecycleState.COLD_EVICTED
+                await self._cold_evict(w)
+
+    async def _cold_evict(self, worker: EvictableWorker) -> None:
+        """Keep admission isolated until the owned close confirms reclamation.
+
+        Record the outcome inside the cleanup task: join_cleanup may propagate
+        waiter cancellation after that task has already closed successfully.
+        """
+        lease = self._lease_locks[worker]
+
+        async def close_and_record() -> None:
+            try:
+                # alive/ready describe usability, not retained process ownership.
+                # An idempotent close must also confirm an unusable owner is reaped.
+                await worker.close()
+                if getattr(worker, "alive", False) or getattr(worker, "ready", False):
+                    raise RuntimeError("backend_reclamation_failed")
+            except BaseException:
+                lease.mark_reclamation(failed=True)
+                self._states[worker] = WorkerLifecycleState.RECLAMATION_FAILED
+                if self._on_eviction is not None:
+                    self._on_eviction(type(worker).__name__, "reclamation_failed")
+                raise
+            lease.mark_reclamation(failed=False)
+            self._states[worker] = WorkerLifecycleState.COLD_EVICTED
+            self._was_alive[worker] = False
+            self._last_active[worker] = time.monotonic()
+            if self._on_eviction is not None:
+                self._on_eviction(type(worker).__name__, "cold_evict")
+
+        with contextlib.suppress(Exception):
+            await join_cleanup(asyncio.create_task(close_and_record()))
 
     def _in_use(self, worker: EvictableWorker) -> bool:
         lease = self._lease_locks.get(worker)
@@ -198,6 +240,9 @@ class WorkerIdleEvictor:
             now = time.monotonic()
             for worker in self._workers:
                 async with self._lease_locks[worker].idle() as idle:
+                    if self._lease_locks[worker].reclamation_failed:
+                        # TTL/activity cannot confirm that a failed reap recovered.
+                        continue
                     if not idle:
                         self.touch(worker)
                         continue
@@ -245,27 +290,21 @@ class WorkerIdleEvictor:
                     standby_timeout = self._standby_timeouts.get(worker, self._warm_standby_timeout)
                     # Stage 2: Cold Eviction (idle >= _idle_timeout)
                     if idle_duration >= idle_timeout:
-                        if getattr(worker, "alive", False) or getattr(worker, "ready", False):
-                            with contextlib.suppress(Exception):
-                                await join_cleanup(asyncio.create_task(worker.close()))
-                        self._states[worker] = WorkerLifecycleState.COLD_EVICTED
-                        # Stamp AFTER close so worker.last_active (refreshed at end of
-                        # Qwen3SharedWorker.close) cannot out-datestamp this tick.
-                        self._last_active[worker] = time.monotonic()
-                        if self._on_eviction is not None:
-                            self._on_eviction(type(worker).__name__, "cold_evict")
+                        await self._cold_evict(worker)
                     # Stage 1: Warm Standby (idle >= _warm_standby_timeout)
-                    elif idle_duration >= standby_timeout:
-                        if self._states.get(worker) == WorkerLifecycleState.ACTIVE:
-                            trim_fn = getattr(worker, "trim_memory", None) or getattr(
-                                worker, "release_cache", None
-                            )
-                            if callable(trim_fn):
-                                with contextlib.suppress(Exception):
-                                    if asyncio.iscoroutinefunction(trim_fn):
-                                        await join_cleanup(asyncio.create_task(trim_fn()))
-                                    else:
-                                        trim_fn()
-                            self._states[worker] = WorkerLifecycleState.WARM_STANDBY
-                            if self._on_eviction is not None:
-                                self._on_eviction(type(worker).__name__, "standby")
+                    elif (
+                        idle_duration >= standby_timeout
+                        and self._states.get(worker) == WorkerLifecycleState.ACTIVE
+                    ):
+                        trim_fn = getattr(worker, "trim_memory", None) or getattr(
+                            worker, "release_cache", None
+                        )
+                        if callable(trim_fn):
+                            with contextlib.suppress(Exception):
+                                if asyncio.iscoroutinefunction(trim_fn):
+                                    await join_cleanup(asyncio.create_task(trim_fn()))
+                                else:
+                                    trim_fn()
+                        self._states[worker] = WorkerLifecycleState.WARM_STANDBY
+                        if self._on_eviction is not None:
+                            self._on_eviction(type(worker).__name__, "standby")

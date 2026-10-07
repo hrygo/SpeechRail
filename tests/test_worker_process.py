@@ -6,7 +6,7 @@ import asyncio
 import sys
 from collections.abc import Callable, Coroutine
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -395,6 +395,75 @@ def test_error_frame_without_stderr_reports_no_stderr_captured(tmp_path: Path) -
             assert frame["code"] == "unknown_action"
             assert frame["stderr_tail"] == "(no stderr captured)"
         finally:
+            await transport.close()
+
+    _run(scenario)
+
+
+@pytest.mark.parametrize("failure", ["terminate", "kill", "wait"])
+def test_failed_reap_retains_owner_and_blocks_io_and_replacement_until_confirmed_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    class Child:
+        stdin = None
+        returncode: int | None = None
+        failing = True
+
+        def terminate(self) -> None:
+            if self.failing and failure == "terminate":
+                raise OSError("fake terminate failure")
+
+        def kill(self) -> None:
+            if self.failing:
+                raise OSError("fake kill failure")
+
+        async def wait(self) -> int:
+            if self.failing:
+                if failure == "kill":
+                    raise TimeoutError
+                raise OSError("fake wait failure")
+            self.returncode = 0
+            return 0
+
+    async def scenario() -> None:
+        transport = AsyncFramedWorkerProcess(_spec(tmp_path))
+        child = Child()
+        original = cast(asyncio.subprocess.Process, child)
+        transport._process = original
+        stderr = asyncio.create_task(asyncio.sleep(60))
+        transport._stderr_task = stderr
+        spawned = 0
+        spawn = asyncio.create_subprocess_exec
+
+        async def counted_spawn(*args, **kwargs):
+            nonlocal spawned
+            spawned += 1
+            return await spawn(*args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", counted_spawn)
+        try:
+            with pytest.raises(OSError, match="fake"):
+                await transport.close()
+            assert transport._process is original and child.returncode is None
+            assert transport._stderr_task is stderr
+            with pytest.raises(RuntimeError, match="backend_reclamation_failed"):
+                await transport.start()
+            with pytest.raises(RuntimeError, match="backend_reclamation_failed"):
+                await transport.send({"action": "echo"})
+            with pytest.raises(RuntimeError, match="backend_reclamation_failed"):
+                await transport.receive()
+            assert spawned == 0
+            child.failing = False
+            await transport.close()
+            assert child.returncode == 0
+            assert transport._process is transport._stderr_task is None
+            await transport.start()
+            assert spawned == 1
+            assert await transport.exchange({"action": "echo", "text": "recovered"}) == {
+                "type": "echo", "text": "recovered",
+            }
+        finally:
+            child.failing = False
             await transport.close()
 
     _run(scenario)
