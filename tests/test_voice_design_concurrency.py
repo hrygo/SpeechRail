@@ -81,9 +81,11 @@ def test_concurrent_validations_both_persist_their_record(
 
     synth.synthesize = distinct_synthesize  # type: ignore[method-assign]
     # The fake backend emits no real audio, so the 24k->16k quality resample
-    # would only obscure which synthesis a transcript belongs to.
+    # would only obscure which synthesis a transcript belongs to.  The resample
+    # helper lives in the shared validation execution module (#235); patch it
+    # at its definition site, not through the route that consumes it.
     monkeypatch.setattr(
-        "speechrail.http.routes.voice_designs._resample_quality_pcm_24k_to_16k",
+        "speechrail.application.voice_validation_execution.resample_quality_pcm_24k_to_16k",
         lambda pcm: pcm,
     )
 
@@ -98,25 +100,23 @@ def test_concurrent_validations_both_persist_their_record(
     asr.transcribe = transcribe  # type: ignore[method-assign]
 
     async def scenario() -> list[httpx.Response]:
-        from speechrail.http.routes import voice_designs
+        from speechrail.application import voice_validation_execution as execution
 
         texts = (CONTROLLED_TEST_TEXT, SECOND_TEST_TEXT)
         ready = {text: asyncio.Event() for text in texts}
         release = {text: asyncio.Event() for text in texts}
-        original_transcribe = voice_designs._transcribe_pcm
+        original_transcribe = execution.transcribe_pcm
 
-        async def hold_after_transcription(services, pcm, *, language, expires_at):
+        async def hold_after_transcription(**kwargs):
             # Wait after the real helper releases its resource lane. Holding a
             # backend call itself would prevent the second request reaching ASR.
-            transcript = await original_transcribe(
-                services, pcm, language=language, expires_at=expires_at
-            )
-            text = spoken_text[pcm]
+            transcript = await original_transcribe(**kwargs)
+            text = spoken_text[kwargs["pcm"]]
             ready[text].set()
             await release[text].wait()
             return transcript
 
-        monkeypatch.setattr(voice_designs, "_transcribe_pcm", hold_after_transcription)
+        monkeypatch.setattr(execution, "transcribe_pcm", hold_after_transcription)
         transport = httpx.ASGITransport(app=client.app)
         async with httpx.AsyncClient(
             transport=transport, base_url="http://voice-design.test"
@@ -139,9 +139,7 @@ def test_concurrent_validations_both_persist_their_record(
                 release[texts[first]].set()
                 first_response = await tasks[first]
                 assert first_response.status_code == 200, first_response.text
-                first_id = first_response.json()["candidate"]["validations"][-1][
-                    "validation_id"
-                ]
+                first_id = first_response.json()["candidate"]["validations"][-1]["validation_id"]
                 review = await async_client.post(
                     f"/v1/voice-designs/{candidate_id}/validate",
                     json={
@@ -164,8 +162,7 @@ def test_concurrent_validations_both_persist_their_record(
 
     assert [response.status_code for response in responses] == [200, 200]
     returned_ids = [
-        response.json()["candidate"]["validations"][-1]["validation_id"]
-        for response in responses
+        response.json()["candidate"]["validations"][-1]["validation_id"] for response in responses
     ]
     assert returned_ids[0] != returned_ids[1]
 
@@ -173,10 +170,12 @@ def test_concurrent_validations_both_persist_their_record(
     assert {entry["validation_id"] for entry in stored["validations"]} == set(returned_ids)
     assert stored["state"] == "publishable"
     already_reviewed = returned_ids[int(second_finishes_first)]
-    assert next(
-        item for item in stored["validations"]
-        if item["validation_id"] == already_reviewed
-    )["identity_status"] == "pass"
+    assert (
+        next(item for item in stored["validations"] if item["validation_id"] == already_reviewed)[
+            "identity_status"
+        ]
+        == "pass"
+    )
 
     # A fresh repository instance reads durable JSON/WAV, rather than relying
     # on either response snapshot or the original repository's memory.
@@ -205,9 +204,7 @@ def test_concurrent_validations_both_persist_their_record(
         assert hashlib.sha256(pcm).hexdigest() == validation.output_audio_sha256
 
     for validation_id in returned_ids:
-        reviewed = human_review(
-            client, candidate_id, validation_id=validation_id, expect=200
-        )
+        reviewed = human_review(client, candidate_id, validation_id=validation_id, expect=200)
         assert any(
             entry["validation_id"] == validation_id and entry["status"] == "pass"
             for entry in reviewed["candidate"]["validations"]
@@ -233,9 +230,9 @@ def test_repeating_a_machine_validation_keeps_the_human_verdict(
     candidate_id, _created = create_candidate(client)
     confirm_candidate(client, asr, candidate_id)
     first = validate_candidate(client, asr, candidate_id)["candidate"]["validations"][-1]
-    reviewed = human_review(
-        client, candidate_id, validation_id=first["validation_id"], expect=200
-    )["candidate"]
+    reviewed = human_review(client, candidate_id, validation_id=first["validation_id"], expect=200)[
+        "candidate"
+    ]
     assert reviewed["validations"][-1]["status"] == "pass"
 
     repeated = validate_candidate(client, asr, candidate_id)["candidate"]
@@ -342,20 +339,21 @@ def test_conflicting_machine_facts_for_one_validation_id_return_a_conflict(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from speechrail.http.routes import voice_designs
 
     client, registry, _synth, asr = make_client(tmp_path, monkeypatch)
     candidate_id, _ = create_candidate(client)
     confirm_candidate(client, asr, candidate_id)
     first = validate_candidate(client, asr, candidate_id)["candidate"]["validations"][-1]
-    original_validation = voice_designs._candidate_validation
+    from speechrail.application import candidate_validation
+
+    original_validation = candidate_validation.build_candidate_validation
 
     def conflicting_validation(**kwargs):
         return original_validation(**kwargs).model_copy(
             update={"machine_status": "reject", "failure_codes": ["output_invalid"]}
         )
 
-    monkeypatch.setattr(voice_designs, "_candidate_validation", conflicting_validation)
+    monkeypatch.setattr(candidate_validation, "build_candidate_validation", conflicting_validation)
     asr.text = CONTROLLED_TEST_TEXT
     response = client.post(
         f"/v1/voice-designs/{candidate_id}/validate",
@@ -392,14 +390,11 @@ def test_the_validation_limit_refuses_instead_of_evicting_a_returned_record(
     candidate = repository.get(candidate_id)
     template = candidate.validations[-1]
     filler = [
-        template.model_copy(update={"validation_id": f"vv_{index:024x}"})
-        for index in range(1, 32)
+        template.model_copy(update={"validation_id": f"vv_{index:024x}"}) for index in range(1, 32)
     ]
     repository.update(
         candidate_id,
-        lambda current: current.model_copy(
-            update={"validations": [*filler, template]}
-        ),
+        lambda current: current.model_copy(update={"validations": [*filler, template]}),
     )
     fresh = template.model_copy(update={"validation_id": "vv_" + "f" * 24})
     wav = repository.read_validation_audio(
@@ -429,7 +424,7 @@ def test_inflight_validation_cannot_undo_a_completed_transition(
     monkeypatch: pytest.MonkeyPatch,
     transition: str,
 ) -> None:
-    from speechrail.http.routes import voice_designs
+    from speechrail.application import voice_validation_execution as execution
 
     client, registry, _synth, asr = make_client(tmp_path, monkeypatch)
     candidate_id, created = create_candidate(client)
@@ -441,23 +436,21 @@ def test_inflight_validation_cannot_undo_a_completed_transition(
         registry.storage_path.with_name("voice_design_candidates"),
     )
     assets_before = set(repository.assets_dir.rglob("*.wav"))
-    original_transcribe = voice_designs._transcribe_pcm
+    original_transcribe = execution.transcribe_pcm
     asr.text = SECOND_TEST_TEXT
 
     async def scenario() -> httpx.Response:
         ready = asyncio.Event()
         release = asyncio.Event()
 
-        async def hold_after_transcription(services, pcm, *, language, expires_at):
-            transcript = await original_transcribe(
-                services, pcm, language=language, expires_at=expires_at
-            )
+        async def hold_after_transcription(**kwargs):
+            transcript = await original_transcribe(**kwargs)
             if not ready.is_set():
                 ready.set()
                 await release.wait()
             return transcript
 
-        monkeypatch.setattr(voice_designs, "_transcribe_pcm", hold_after_transcription)
+        monkeypatch.setattr(execution, "transcribe_pcm", hold_after_transcription)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=client.app),
             base_url="http://voice-design.test",
@@ -474,9 +467,9 @@ def test_inflight_validation_cannot_undo_a_completed_transition(
                     response = await async_client.post(
                         f"/v1/voice-designs/{candidate_id}/{transition}", json={}
                     )
-                    assert response.status_code == (
-                        201 if transition == "publish" else 200
-                    ), response.text
+                    assert response.status_code == (201 if transition == "publish" else 200), (
+                        response.text
+                    )
                 elif transition == "failed":
                     response = await async_client.post(
                         f"/v1/voice-designs/{candidate_id}/validate",
@@ -556,8 +549,7 @@ def test_two_repository_instances_compete_for_the_last_validation_slot(
     before = repositories[0].get(candidate_id)
     start = threading.Barrier(2, timeout=10)
     attempts = [
-        template.model_copy(update={"validation_id": f"vv_{index:024x}"})
-        for index in (30, 31)
+        template.model_copy(update={"validation_id": f"vv_{index:024x}"}) for index in (30, 31)
     ]
 
     def add_validation(index: int) -> str:
@@ -589,16 +581,17 @@ def test_two_repository_instances_compete_for_the_last_validation_slot(
     assert assets == before_ids | {winner}
     assert loser not in assets
     for item in stored.validations:
-        assert repositories[1].read_validation_audio(
-            candidate_id,
-            item.validation_id,
-            expected_revision=stored.revision,
-            max_bytes=8 * 1024 * 1024,
-        )[1] == wav
+        assert (
+            repositories[1].read_validation_audio(
+                candidate_id,
+                item.validation_id,
+                expected_revision=stored.revision,
+                max_bytes=8 * 1024 * 1024,
+            )[1]
+            == wav
+        )
     # Replaying a reviewed result remains allowed even when all slots are full.
-    reviewed = human_review(client, candidate_id, validation_id=template.validation_id)[
-        "candidate"
-    ]
+    reviewed = human_review(client, candidate_id, validation_id=template.validation_id)["candidate"]
     repeated = repositories[1].update_with_validation_audio(
         candidate_id,
         expected_revision=stored.revision,
@@ -634,9 +627,7 @@ def test_validation_save_failure_only_rolls_back_the_new_asset(
         expected_revision=before.revision,
         max_bytes=8 * 1024 * 1024,
     )[1]
-    files_before = {
-        path: path.read_bytes() for path in repository.assets_dir.rglob("*.wav")
-    }
+    files_before = {path: path.read_bytes() for path in repository.assets_dir.rglob("*.wav")}
     json_before = repository.path.read_bytes()
     validation = (
         template

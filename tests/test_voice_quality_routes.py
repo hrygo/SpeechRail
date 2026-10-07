@@ -54,9 +54,7 @@ def _wav_from_pcm(pcm: bytes) -> bytes:
 def _sine_pcm(duration: float, amplitude: float = 0.3) -> bytes:
     n = int(duration * _SAMPLE_RATE)
     t = np.arange(n, dtype=np.float32) / _SAMPLE_RATE
-    samples = np.asarray(
-        np.round(amplitude * np.sin(2 * np.pi * 220 * t) * 32767), dtype="<i2"
-    )
+    samples = np.asarray(np.round(amplitude * np.sin(2 * np.pi * 220 * t) * 32767), dtype="<i2")
     return samples.tobytes()
 
 
@@ -85,9 +83,9 @@ def _padded_clean_wav() -> bytes:
 def _clip_wav(duration: float = 4.0) -> bytes:
     n = int(duration * _SAMPLE_RATE)
     t = np.arange(n, dtype=np.float32) / _SAMPLE_RATE
-    samples = np.clip(
-        np.round(1.2 * np.sin(2 * np.pi * 220 * t) * 32767), -32768, 32767
-    ).astype("<i2")
+    samples = np.clip(np.round(1.2 * np.sin(2 * np.pi * 220 * t) * 32767), -32768, 32767).astype(
+        "<i2"
+    )
     return _wav_from_pcm(samples.tobytes())
 
 
@@ -133,9 +131,7 @@ class SineSynthesizer:
             )
 
         async def chunks() -> AsyncIterator[AudioChunk]:
-            yield AudioChunk(
-                response_id="quality_probe", chunk_index=0, audio=_sine_pcm(0.5)
-            )
+            yield AudioChunk(response_id="quality_probe", chunk_index=0, audio=_sine_pcm(0.5))
 
         return chunks()
 
@@ -156,24 +152,22 @@ class SpeedUnsupportedSynthesizer:
                     "clone_speed_unsupported",
                     stage="validate",
                 )
-            yield AudioChunk(
-                response_id="quality_probe", chunk_index=0, audio=_sine_pcm(0.5)
-            )
+            yield AudioChunk(response_id="quality_probe", chunk_index=0, audio=_sine_pcm(0.5))
 
         return chunks()
 
 
 def test_probe_failure_uses_structured_clone_code_not_error_text() -> None:
-    from speechrail.http.routes.system import _classify_probe_failure
+    from speechrail.application.voice_validation_execution import (
+        classify_probe_failure,
+    )
 
     assert (
-        _classify_probe_failure(RuntimeError("backend failed while checking speed"))
+        classify_probe_failure(RuntimeError("backend failed while checking speed"))
         == vq.VoiceQualityFailureCode.PROBE_FAILED.value
     )
     assert (
-        _classify_probe_failure(
-            TtsBackendError("clone_speed_unsupported", stage="validate")
-        )
+        classify_probe_failure(TtsBackendError("clone_speed_unsupported", stage="validate"))
         == vq.VoiceQualityFailureCode.CLONE_SPEED_UNSUPPORTED.value
     )
 
@@ -187,13 +181,9 @@ class MalformedAudioSynthesizer:
 
         async def chunks() -> AsyncIterator[AudioChunk]:
             if len(self.requests) == 1:
-                yield AudioChunk(
-                    response_id="quality_probe", chunk_index=0, audio=b"\x00\x00\x00"
-                )
+                yield AudioChunk(response_id="quality_probe", chunk_index=0, audio=b"\x00\x00\x00")
             else:
-                yield AudioChunk(
-                    response_id="quality_probe", chunk_index=0, audio=_sine_pcm(0.5)
-                )
+                yield AudioChunk(response_id="quality_probe", chunk_index=0, audio=_sine_pcm(0.5))
 
         return chunks()
 
@@ -208,9 +198,7 @@ class GenericFailureSynthesizer:
         async def chunks() -> AsyncIterator[AudioChunk]:
             if len(self.requests) == 1:
                 raise OSError("synthetic backend failure")
-            yield AudioChunk(
-                response_id="quality_probe", chunk_index=0, audio=_sine_pcm(0.5)
-            )
+            yield AudioChunk(response_id="quality_probe", chunk_index=0, audio=_sine_pcm(0.5))
 
         return chunks()
 
@@ -265,8 +253,6 @@ class NondeterministicSynthesizer:
             )
 
         return chunks()
-
-
 
 
 class OutOfOrderSynthesizer:
@@ -360,9 +346,7 @@ def _make_client(
     if synthesizer is None:
         synthesizer = SineSynthesizer()
     resolved_transcriber = (
-        ProbeEchoTranscriber()
-        if batch_transcriber is _DEFAULT_TRANSCRIBER
-        else batch_transcriber
+        ProbeEchoTranscriber() if batch_transcriber is _DEFAULT_TRANSCRIBER else batch_transcriber
     )
     app = create_app(
         settings,
@@ -427,9 +411,7 @@ def test_clone_routes_reject_the_same_reserved_and_malformed_voice_ids(
 
     transcoded: list[bytes] = []
 
-    async def _tracking_transcode(
-        audio_content: bytes, ffmpeg_cmd: str
-    ) -> tuple[bytes, float]:
+    async def _tracking_transcode(audio_content: bytes, ffmpeg_cmd: str) -> tuple[bytes, float]:
         del ffmpeg_cmd
         transcoded.append(audio_content)
         return wav, 4.0
@@ -468,11 +450,14 @@ def test_published_voice_entries_never_claim_available_while_unavailable(
     client, registry, _synth, _voices_dir = _make_client(tmp_path)
     wav = _clean_wav(4.0)
     _patch(registry, wav, monkeypatch)
-    assert client.post(
-        "/v1/voices/clone",
-        data={**_clone_payload(), "id": "availability_probe_voice"},
-        files={"audio": ("sample.wav", wav, "audio/wav")},
-    ).status_code == 201
+    assert (
+        client.post(
+            "/v1/voices/clone",
+            data={**_clone_payload(), "id": "availability_probe_voice"},
+            files={"audio": ("sample.wav", wav, "audio/wav")},
+        ).status_code
+        == 201
+    )
 
     listed = client.get("/v1/voices")
     assert listed.status_code == 200, listed.text
@@ -484,9 +469,7 @@ def test_published_voice_entries_never_claim_available_while_unavailable(
     assert clone["availability_reason"] == "binding_unavailable", clone
     # The invariant itself: "available" is claimed if and only if it is true.
     for entry in entries:
-        assert (entry["availability_reason"] == "available") is bool(
-            entry["available"]
-        ), entry
+        assert (entry["availability_reason"] == "available") is bool(entry["available"]), entry
 
 
 def test_second_key_on_the_same_clone_id_converges_but_never_overwrites(
@@ -803,11 +786,14 @@ def test_clone_rejects_oversized_name_before_starting_idempotency(
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_name"
-    assert journal.lookup(
-        owner=system_routes._CLONE_IDEMPOTENCY_OWNER,
-        operation=system_routes._CLONE_IDEMPOTENCY_OPERATION,
-        key="oversized-name",
-    ) is None
+    assert (
+        journal.lookup(
+            owner=system_routes._CLONE_IDEMPOTENCY_OWNER,
+            operation=system_routes._CLONE_IDEMPOTENCY_OPERATION,
+            key="oversized-name",
+        )
+        is None
+    )
     assert [p for p in registry.list_profiles() if not p.is_system] == []
 
 
@@ -978,9 +964,7 @@ def test_s4_no_sensitive_values_in_logs(
 # ---------------------------------------------------------------------------
 
 
-def test_s5_quality_runs_ok_and_bounded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_s5_quality_runs_ok_and_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     client, registry, synth, _voices_dir = _make_client(tmp_path)
     monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
 
@@ -1065,8 +1049,6 @@ def test_namespaced_quality_run_binds_observed_runtime_identity_before_eviction(
     assert stored["validated_for"] == ["output"]
 
 
-
-
 def test_quality_runs_asr_phase_uses_one_16khz_sample_per_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1147,11 +1129,9 @@ def test_quality_runs_attributes_a_rejection_to_a_single_probe(
     graded = {
         probe_id: (
             0.0
-            if next(
-                score
-                for score in synthesis["probe_scores"]
-                if score["probe_id"] == probe_id
-            )["numbers_exact"]
+            if next(score for score in synthesis["probe_scores"] if score["probe_id"] == probe_id)[
+                "numbers_exact"
+            ]
             is False
             else score
         )
@@ -1177,9 +1157,7 @@ def test_quality_runs_rejects_a_misread_number_that_edit_distance_would_pass(
         async def transcribe(self, request: TranscriptionRequest) -> TranscriptResult:
             result = await super().transcribe(request)
             if request.request_id.endswith(":numbers_punct"):
-                return result.model_copy(
-                    update={"text": result.text.replace("22.5℃", "25℃")}
-                )
+                return result.model_copy(update={"text": result.text.replace("22.5℃", "25℃")})
             return result
 
     client, registry, _synth, _voices_dir = _make_client(
@@ -1241,9 +1219,7 @@ def test_quality_runs_accepts_the_same_number_spelled_out(
     body = resp.json()
     assert body["status"] == "pass"
     numbers = next(
-        score
-        for score in body["synthesis"]["probe_scores"]
-        if score["probe_id"] == "numbers_punct"
+        score for score in body["synthesis"]["probe_scores"] if score["probe_id"] == "numbers_punct"
     )
     assert numbers["numbers_exact"] is True
 
@@ -1338,9 +1314,7 @@ def test_s5_quality_runs_include_audio_false_or_omitted_ok(
 def test_quality_runs_classifies_clone_speed_unsupported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, registry, _synth, _voices_dir = _make_client(
-        tmp_path, SpeedUnsupportedSynthesizer()
-    )
+    client, registry, _synth, _voices_dir = _make_client(tmp_path, SpeedUnsupportedSynthesizer())
     monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
 
     resp = client.post(
@@ -1381,11 +1355,7 @@ def test_quality_run_persists_output_validation_and_promotes_capability_state(
     persisted = registry.get_profile(profile.id)
     base_key = required_spec_artifact("quality", "tts_base")
     assert base_key is not None
-    artifact = next(
-        item
-        for item in load_catalog().artifacts
-        if item.key == base_key
-    )
+    artifact = next(item for item in load_catalog().artifacts if item.key == base_key)
     validation = registry.validation_store.get(
         voice_id=profile.id,
         voice_revision=profile.revision,
@@ -1402,9 +1372,7 @@ def test_quality_run_persists_output_validation_and_promotes_capability_state(
     # The quality run evicts its worker before the independent ASR phase.
     # Discovery stays cold and honest...
     assert entry["validation_state"]["synthesis"]["status"] == "unevaluated"
-    assert entry["validation_state"]["synthesis"]["reason"] == (
-        "model_runtime_identity_unknown"
-    )
+    assert entry["validation_state"]["synthesis"]["reason"] == ("model_runtime_identity_unknown")
     assert entry["production_ready"] is False
 
     # ...while the strict request itself may prepare the current worker and
@@ -1441,10 +1409,13 @@ def test_strict_synthesis_prepares_cold_worker_but_rejects_changed_runtime(
     )
     monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
     monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", registry)
-    assert client.post(
-        f"/v1/voices/{profile.id}/quality-runs",
-        json={"probe_set": "voice_quality_v1_zh", "runs": 1},
-    ).status_code == 200
+    assert (
+        client.post(
+            f"/v1/voices/{profile.id}/quality-runs",
+            json={"probe_set": "voice_quality_v1_zh", "runs": 1},
+        ).status_code
+        == 200
+    )
     probe_count = len(synthesizer.requests)
     synthesizer.flip_on_synthesize = True
 
@@ -1528,9 +1499,7 @@ async def test_strict_gate_lets_prepare_cancellation_propagate(
     monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", registry)
 
     class _CancellingSynthesizer(SineSynthesizer):
-        async def prepare_voice(
-            self, voice: str, *, expected_voice_revision: str | None
-        ) -> str:
+        async def prepare_voice(self, voice: str, *, expected_voice_revision: str | None) -> str:
             raise asyncio.CancelledError()
 
     with pytest.raises(asyncio.CancelledError):
@@ -1586,9 +1555,7 @@ def test_strict_synthesis_rejects_missing_evidence_before_synthesis(
 def test_quality_runs_classifies_output_invalid(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, registry, _synth, _voices_dir = _make_client(
-        tmp_path, MalformedAudioSynthesizer()
-    )
+    client, registry, _synth, _voices_dir = _make_client(tmp_path, MalformedAudioSynthesizer())
     monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
 
     resp = client.post(
@@ -1602,12 +1569,69 @@ def test_quality_runs_classifies_output_invalid(
     assert body["synthesis"]["successful_probe_count"] == 17
 
 
+@pytest.mark.parametrize("failure_phase", ["close", "eviction"])
+def test_quality_reclamation_failure_stops_asr_and_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure_phase: str,
+) -> None:
+    sentinel = "private_backend_payload_must_not_be_logged"
+
+    class FailingSynthesizer(SineSynthesizer):
+        def synthesize(self, request):
+            if failure_phase != "close":
+                return super().synthesize(request)
+            self.requests.append(request)
+
+            class Source:
+                def __aiter__(self):
+                    return self
+
+                async def __anext__(self):
+                    raise StopAsyncIteration
+
+                async def aclose(self):
+                    raise RuntimeError(sentinel)
+
+            return Source()
+
+        async def evict_warm_capability(self):
+            raise RuntimeError(sentinel)
+
+    class Transcriber:
+        async def transcribe(self, request):
+            pytest.fail("uncertain TTS ownership must not start ASR")
+
+    synth = FailingSynthesizer()
+    client, registry, _, _ = _make_client(
+        tmp_path,
+        synth,
+        batch_transcriber=Transcriber(),
+    )
+    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+    monkeypatch.setattr(
+        registry,
+        "update_quality_validation",
+        lambda *args, **kwargs: pytest.fail("uncertain TTS ownership must not commit"),
+    )
+    with caplog.at_level(logging.WARNING):
+        response = client.post(
+            "/v1/voices/serena/quality-runs",
+            json={"probe_set": "voice_quality_v1_zh", "runs": 2},
+        )
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "backend_reclamation_failed"
+    assert response.json()["error"]["retryable"] is False
+    assert len(synth.requests) == (1 if failure_phase == "close" else 12)
+    assert sentinel not in caplog.text
+    assert sentinel not in response.text
+
+
 def test_quality_runs_classifies_probe_failed_and_counts_ok(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, registry, _synth, _voices_dir = _make_client(
-        tmp_path, GenericFailureSynthesizer()
-    )
+    client, registry, _synth, _voices_dir = _make_client(tmp_path, GenericFailureSynthesizer())
     monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
 
     resp = client.post(
@@ -1674,9 +1698,7 @@ def test_quality_runs_rejects_clipped_output(
 def test_quality_runs_detects_repeated_output_nondeterminism(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, registry, _synth, _voices_dir = _make_client(
-        tmp_path, NondeterministicSynthesizer()
-    )
+    client, registry, _synth, _voices_dir = _make_client(tmp_path, NondeterministicSynthesizer())
     monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
 
     resp = client.post(
@@ -1780,8 +1802,10 @@ def test_quality_runs_returns_503_when_tts_not_ready(tmp_path: Path) -> None:
 
 
 def test_reject_response_keeps_error_code_header() -> None:
+    from fastapi.responses import JSONResponse
+
     from speechrail.domain import voice_quality as vq
-    from speechrail.http.routes.system import _quality_reject_response
+    from speechrail.http.voice_projection import quality_reject_content
 
     report = vq.make_quality_report(
         vq.VoiceQualityReference(
@@ -1806,7 +1830,8 @@ def test_reject_response_keeps_error_code_header() -> None:
             deterministic=False,
         ),
     )
-    resp = _quality_reject_response("req_123", report)
+    status, content, headers = quality_reject_content("req_123", report)
+    resp = JSONResponse(status_code=status, content=content, headers=headers)
     assert resp.status_code == 400
     assert resp.headers["X-SpeechRail-Error-Code"] == "voice_quality_reject"
     body = json.loads(resp.body)
@@ -1818,7 +1843,7 @@ def test_reject_response_keeps_error_code_header() -> None:
 async def test_oversized_probe_closes_source_before_next_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from speechrail.http.routes.system import _synthesize_probes
+    import speechrail.application.voice_validation_execution as execution
 
     class RetainedSynthesizer:
         def __init__(self) -> None:
@@ -1836,15 +1861,17 @@ async def test_oversized_probe_closes_source_before_next_probe(
             self.sources.append(source)
             return source
 
-    monkeypatch.setattr("speechrail.http.routes.system._MAX_QUALITY_PROBE_PCM_BYTES", 8)
+    monkeypatch.setattr(execution, "MAX_QUALITY_PROBE_PCM_BYTES", 8)
     synth = RetainedSynthesizer()
-    result = await _synthesize_probes(synth, "serena", 1)
+    result = await execution.synthesize_probes(synth, "serena", 1)
     assert result[2] == 0
     assert synth.closed == len(vq.VOICE_QUALITY_V1_ZH_PROBES)
 
 
 def test_asr_validation_error_does_not_log_backend_payload(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     private = "private-transcript-DO-NOT-LOG /private/model/path"
 
@@ -1867,7 +1894,9 @@ def test_asr_validation_error_does_not_log_backend_payload(
 async def test_quality_eviction_obeys_request_deadline() -> None:
     import asyncio
 
-    from speechrail.http.routes.system import _evict_quality_tts_if_supported
+    from speechrail.application.voice_validation_execution import (
+        evict_quality_tts_if_supported,
+    )
 
     class SlowEviction(SineSynthesizer):
         cancelled = False
@@ -1881,7 +1910,8 @@ async def test_quality_eviction_obeys_request_deadline() -> None:
 
     synth = SlowEviction()
     with pytest.raises(TimeoutError):
-        await _evict_quality_tts_if_supported(
-            synth, expires_at=asyncio.get_running_loop().time() + 0.02,
+        await evict_quality_tts_if_supported(
+            synth,
+            expires_at=asyncio.get_running_loop().time() + 0.02,
         )
     assert synth.cancelled

@@ -10,10 +10,11 @@ import logging
 import time
 import uuid
 import wave
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime
-from functools import lru_cache, partial
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
@@ -21,17 +22,15 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
-from speechrail.application.render_receipts import observed_runtime_revision_for_synthesizer
+from speechrail.application.candidate_validation import CandidateHumanReview
+from speechrail.application.candidate_validation import (
+    validate_candidate as run_candidate_validation,
+)
 from speechrail.application.services import AppServices
-from speechrail.application.tts_admission import tts_resource_key
 from speechrail.application.tts_delivery import (
-    PcmOutputCounter,
     TTSDeliveryError,
-    iter_until,
-    iter_validated_audio,
 )
 from speechrail.application.voice_design import (
-    VOICE_DESIGN_VALIDATION_POLICY_REVISION,
     VoiceDesignActionError,
     VoiceDesignAssetUnavailableError,
     VoiceDesignCandidate,
@@ -41,11 +40,21 @@ from speechrail.application.voice_design import (
     VoiceDesignRepository,
     VoiceDesignReview,
     VoiceDesignStoreUnavailableError,
-    VoiceDesignValidation,
     VoiceDesignValidationLimitError,
-    review_state_for,
 )
-from speechrail.application.voice_validation_gate import build_validation_binding
+from speechrail.application.voice_validation_execution import (
+    TRANSCRIPT_PASS_SCORE,
+    ValidationRuntime,
+    VoiceValidationExecutionError,
+    empty_synthesis,
+    grade_clone_audio,
+)
+from speechrail.application.voice_validation_execution import (
+    collect_audio as _collect_audio_execution,
+)
+from speechrail.application.voice_validation_execution import (
+    transcribe_pcm as _transcribe_pcm_execution,
+)
 from speechrail.config.selection import active_model_catalog
 from speechrail.domain import voice_quality as vq
 from speechrail.domain.idempotency import (
@@ -56,7 +65,6 @@ from speechrail.domain.idempotency import (
 from speechrail.domain.ports import (
     SpeechRequest,
     SpeechSynthesizer,
-    TranscriptionRequest,
 )
 from speechrail.domain.tts import (
     DEFAULT_VOICE_ID,
@@ -67,7 +75,6 @@ from speechrail.domain.tts import (
     canonicalize_clone_reference_audio,
     get_voice_registry,
     normalize_tts_text,
-    use_voice_profile,
     voice_revision_for_clone,
 )
 from speechrail.domain.tts_errors import TtsBackendError
@@ -80,16 +87,8 @@ from speechrail.domain.voice_validation import (
 )
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error_response
-from speechrail.http.routes.audio import _tts_backend_error_response
-from speechrail.http.routes.system import (
-    _TRANSCRIPT_PASS_SCORE,
-    _empty_synthesis,
-    _evict_quality_tts_if_supported,
-    _grade_clone_audio,
-    _quality_reject_response,
-    _resample_quality_pcm_24k_to_16k,
-    _voice_entry,
-)
+from speechrail.http.tts_errors import tts_backend_error_response
+from speechrail.http.voice_projection import quality_reject_content, voice_entry
 from speechrail.runtime.admission import QueueFullError
 from speechrail.runtime.asr_mode import AsrModeBusy
 from speechrail.runtime.resource_governor import (
@@ -105,14 +104,6 @@ _MAX_REFERENCE_PCM_BYTES = 30 * _SAMPLE_RATE * 2
 _MAX_VALIDATION_PCM_BYTES = 30 * _SAMPLE_RATE * 2
 _MAX_REFERENCE_WAV_BYTES = _MAX_REFERENCE_PCM_BYTES + 44
 _MAX_VALIDATION_WAV_BYTES = _MAX_VALIDATION_PCM_BYTES + 44
-# Server-controlled audition texts. Clients may always pass their own test_text,
-# but a simple client cannot silently re-use the reference text as its own
-# evidence: the server substitutes a distinct controlled text when it is absent.
-_CONTROLLED_TEST_TEXTS = (
-    "今天的天气很适合在公园里慢慢散步，听听周围自然的声音。",
-    "请用平稳自然的语气朗读这句话，注意每个字的清晰程度。",
-    "生活里的小事往往最值得记录，比如清晨第一缕阳光照进房间。",
-)
 _DESIGN_IDEMPOTENCY_OWNER = "speechrail-local"
 _DESIGN_IDEMPOTENCY_OPERATION = "voice.design.candidate"
 
@@ -133,9 +124,7 @@ def _design_idempotency_journal() -> DurableIdempotencyJournal:
     """
 
     registry = get_voice_registry()
-    return _journal_for_path(
-        registry.storage_path.with_name("voice_design_idempotency.json")
-    )
+    return _journal_for_path(registry.storage_path.with_name("voice_design_idempotency.json"))
 
 
 class VoiceDesignCreateRequest(BaseModel):
@@ -240,24 +229,24 @@ async def _collect_audio(
     expires_at: float,
     design: bool,
     max_bytes: int,
+    on_close_failure: Callable[[], None] | None = None,
 ) -> bytes:
-    counter = PcmOutputCounter(max_bytes)
-    pcm = bytearray()
-    if design:
-        method = getattr(synthesizer, "synthesize_design", None)
-        source = method(synthesis) if callable(method) else synthesizer.synthesize(synthesis)
-    else:
-        source = synthesizer.synthesize(synthesis)
-    stream = iter_until(iter_validated_audio(source), expires_at)
     try:
-        async for chunk in stream:
-            counter.accept(len(chunk.audio))
-            pcm.extend(chunk.audio)
-    finally:
-        close = getattr(stream, "aclose", None)
-        if close is not None:
-            await close()
-    return bytes(pcm)
+        return await _collect_audio_execution(
+            synthesizer,
+            synthesis,
+            expires_at=expires_at,
+            design=design,
+            max_bytes=max_bytes,
+            on_close_failure=on_close_failure,
+        )
+    except VoiceValidationExecutionError as exc:
+        raise VoiceDesignActionError(
+            exc.code,
+            str(exc),
+            status_code=503,
+            retryable=exc.retryable,
+        ) from None
 
 
 async def _transcribe_pcm(
@@ -275,29 +264,20 @@ async def _transcribe_pcm(
             status_code=503,
             retryable=True,
         )
-    request = TranscriptionRequest(
-        request_id=f"req_design_{uuid.uuid4().hex}",
-        audio=_resample_quality_pcm_24k_to_16k(pcm),
-        language=language,
-        prompt="",
-        include_timestamps=False,
-    )
     try:
-        async with services.governor.reserve(
-            WorkClass.BATCH_ASR,
+        return await _transcribe_pcm_execution(
+            transcriber=transcriber,
+            governor=services.governor,
+            admission=services.admission,
+            pcm=pcm,
+            language=language,
             expires_at=expires_at,
+            request_id_prefix="req_design",
             purpose=WorkPurpose.VOICE_CREATION,
-        ):
-            remaining = expires_at - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                raise TimeoutError
-            result = await services.admission.run(
-                partial(transcriber.transcribe, request),
-                deadline=remaining,
-            )
-    except (GovernorQueueFullError, QueueFullError, AsrModeBusy, TimeoutError):
-        raise
-    except Exception as exc:
+        )
+    except VoiceValidationExecutionError as exc:
+        if exc.code != "transcription_unavailable":
+            raise
         # Never surface vendor text: a local ASR failure is reported as one
         # stable, retryable unavailability code.
         raise VoiceDesignActionError(
@@ -306,11 +286,11 @@ async def _transcribe_pcm(
             status_code=503,
             retryable=True,
         ) from exc
-    return result.text
 
 
 def _quality_error(request_id: str, report: vq.VoiceQualityReport) -> JSONResponse:
-    return _quality_reject_response(request_id, report)
+    status, content, headers = quality_reject_content(request_id, report)
+    return JSONResponse(status_code=status, content=content, headers=headers)
 
 
 def _safe_candidate(
@@ -370,145 +350,6 @@ def _selected_capability_key(services: AppServices) -> str:
 
 def _hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def _validation_id(
-    *,
-    candidate_revision: str,
-    capability_key: str,
-    validation_policy_revision: str,
-    test_text_sha256: str,
-    transcript_text_sha256: str | None,
-    output_audio_sha256: str,
-    model_artifact: str,
-    model_catalog_revision: str,
-    model_runtime_revision: str | None,
-    runtime_fingerprint: str | None,
-    preprocess_version: str,
-    generation_recipe_revision: str,
-    policy_version: str,
-) -> str:
-    digest = hashlib.sha256(
-        json.dumps(
-            {
-                "candidate_revision": candidate_revision,
-                "capability_key": capability_key,
-                "validation_policy_revision": validation_policy_revision,
-                "test_text_sha256": test_text_sha256,
-                "transcript_text_sha256": transcript_text_sha256,
-                "output_audio_sha256": output_audio_sha256,
-                "model_artifact": model_artifact,
-                "model_catalog_revision": model_catalog_revision,
-                "model_runtime_revision": model_runtime_revision,
-                "runtime_fingerprint": runtime_fingerprint,
-                "preprocess_version": preprocess_version,
-                "generation_recipe_revision": generation_recipe_revision,
-                "policy_version": policy_version,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-    return f"vv_{digest[:24]}"
-
-
-def _candidate_validation(
-    *,
-    candidate: VoiceDesignCandidate,
-    capability_key: str,
-    test_text: str,
-    output_pcm: bytes,
-    quality: vq.VoiceQualityReport,
-    transcript: str | None,
-    transcript_match: float | None,
-    output_wav_sha256: str,
-    model_artifact: str,
-    model_catalog_revision: str,
-    model_runtime_revision: str | None,
-    runtime_fingerprint: str | None,
-    preprocess_version: str,
-    generation_recipe_revision: str,
-    policy_version: str,
-) -> VoiceDesignValidation:
-    test_text_sha256 = _hash_text(test_text)
-    transcript_text_sha256 = _hash_text(transcript) if transcript is not None else None
-    # Character edit distance cannot see a misread digit: swapping one digit in
-    # a long probe still scores above the pass threshold, while the number the
-    # listener hears is simply wrong.  Numbers are therefore compared by value,
-    # independently of the similarity score.
-    transcript_numbers_match = (
-        vq.transcript_numbers_match(test_text, transcript)
-        if transcript is not None
-        else None
-    )
-    validation_id = _validation_id(
-        candidate_revision=candidate.revision,
-        capability_key=capability_key,
-        validation_policy_revision=VOICE_DESIGN_VALIDATION_POLICY_REVISION,
-        test_text_sha256=test_text_sha256,
-        transcript_text_sha256=transcript_text_sha256,
-        output_audio_sha256=hashlib.sha256(output_pcm).hexdigest(),
-        model_artifact=model_artifact,
-        model_catalog_revision=model_catalog_revision,
-        model_runtime_revision=model_runtime_revision,
-        runtime_fingerprint=runtime_fingerprint,
-        preprocess_version=preprocess_version,
-        generation_recipe_revision=generation_recipe_revision,
-        policy_version=policy_version,
-    )
-    failures: list[str] = []
-    machine_status: Literal["pass", "warn", "reject"]
-    if quality.status == vq.VoiceQualityStatus.REJECT.value:
-        machine_status = "reject"
-        failures.append("output_invalid")
-    elif transcript_match is None or transcript_numbers_match is None:
-        machine_status = "warn"
-        failures.append("transcription_unavailable")
-    else:
-        if transcript_match >= _TRANSCRIPT_PASS_SCORE:
-            machine_status = "pass"
-        elif transcript_match >= 0.80:
-            machine_status = "warn"
-            failures.append("transcript_warn")
-        else:
-            machine_status = "reject"
-            failures.append("transcript_mismatch")
-        if machine_status != "reject" and not transcript_numbers_match:
-            # The sentence as a whole was close enough to pass on similarity,
-            # yet it says a different number.  Report the number, which is the
-            # actionable defect, rather than the similarity it also tripped.
-            machine_status = "reject"
-            failures = ["transcript_numbers_mismatch"]
-    if model_runtime_revision is None or runtime_fingerprint is None:
-        machine_status = "warn" if machine_status != "reject" else machine_status
-        failures.append("model_runtime_identity_unknown")
-    now = time.time()
-    return VoiceDesignValidation(
-        validation_id=validation_id,
-        candidate_revision=candidate.revision,
-        status="warn",
-        machine_status=machine_status,
-        failure_codes=failures,
-        transcript_numbers_match=transcript_numbers_match,
-        validation_policy_revision=VOICE_DESIGN_VALIDATION_POLICY_REVISION,
-        capability_key=capability_key,
-        model_artifact=model_artifact,
-        model_catalog_revision=model_catalog_revision,
-        model_runtime_revision=model_runtime_revision,
-        runtime_fingerprint=runtime_fingerprint,
-        preprocess_version=preprocess_version,
-        generation_recipe_revision=generation_recipe_revision,
-        policy_version=policy_version,
-        test_text_sha256=test_text_sha256,
-        output_audio_sha256=hashlib.sha256(output_pcm).hexdigest(),
-        output_wav_sha256=output_wav_sha256,
-        transcript_text_sha256=(
-            _hash_text(transcript) if transcript is not None else None
-        ),
-        transcript_match=transcript_match,
-        created_at=now,
-        updated_at=now,
-    )
 
 
 def _candidate_for_request(
@@ -573,13 +414,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
     @router.post(
         "",
         status_code=201,
-        responses={
-            200: {
-                "description": (
-                    "Idempotent replay of an already created candidate"
-                )
-            }
-        },
+        responses={200: {"description": ("Idempotent replay of an already created candidate")}},
     )
     async def create_candidate(
         request: Request,
@@ -595,10 +430,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 400,
                 request_id,
                 "voice_design_unsupported",
-                (
-                    f"Active TTS selection ({tier_name}) does not provide the "
-                    "VoiceDesign capability"
-                ),
+                (f"Active TTS selection ({tier_name}) does not provide the VoiceDesign capability"),
             )
         synthesizer = services.tts_synthesizer
         if synthesizer is None:
@@ -697,9 +529,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                         )
                     return JSONResponse(
                         status_code=200,
-                        content={
-                            "candidate": _safe_candidate(repository, existing_candidate)
-                        },
+                        content={"candidate": _safe_candidate(repository, existing_candidate)},
                     )
                 if decision.state == "completed":
                     return error_response(
@@ -712,10 +542,11 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
         # A replay above returns the original candidate; only a genuinely new
         # request must prove the target voice ID is still unreserved.
         for existing in repository.list():
-            if (
-                existing.target_voice_id == body.voice_id
-                and existing.state not in {"cancelled", "failed", "published"}
-            ):
+            if existing.target_voice_id == body.voice_id and existing.state not in {
+                "cancelled",
+                "failed",
+                "published",
+            }:
                 return error_response(
                     409,
                     request_id,
@@ -723,10 +554,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                     "Target voice ID is already reserved by another candidate",
                 )
 
-        expires_at = (
-            asyncio.get_running_loop().time()
-            + services.settings.request_timeout_seconds
-        )
+        expires_at = asyncio.get_running_loop().time() + services.settings.request_timeout_seconds
         try:
             synthesis = SpeechRequest(
                 text=reference_text,
@@ -750,15 +578,16 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                     expires_at=expires_at,
                     design=True,
                     max_bytes=_MAX_REFERENCE_PCM_BYTES,
+                    on_close_failure=lambda: services.governor.quarantine_tts_lane("voice_design"),
                 )
             if len(raw_pcm) < 2 * _SAMPLE_RATE * 2:
                 raise TTSDeliveryError("voice_reference_too_short")
             raw_wav = _wav_from_pcm(raw_pcm)
-            raw_report = _grade_clone_audio(raw_wav)
+            raw_report = grade_clone_audio(raw_wav)
             if raw_report.status == vq.VoiceQualityStatus.REJECT.value:
                 return _quality_error(request_id, raw_report)
             wav_bytes, duration = canonicalize_clone_reference_audio(raw_wav)
-            report = _grade_clone_audio(wav_bytes)
+            report = grade_clone_audio(wav_bytes)
             if report.status == vq.VoiceQualityStatus.REJECT.value:
                 return _quality_error(request_id, report)
 
@@ -772,13 +601,9 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 language=body.language,
                 expires_at=expires_at,
             )
-            score = (
-                vq.transcript_match_score(reference_text, transcript)
-                if transcript
-                else None
-            )
+            score = vq.transcript_match_score(reference_text, transcript) if transcript else None
             if report.reference is None:
-                # `_grade_clone_audio` always grades against a real reference
+                # `grade_clone_audio` always grades against a real reference
                 # block; a missing one is an internal invariant violation, not
                 # a licence to synthesize placeholder metrics.
                 return error_response(
@@ -798,7 +623,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
             )
             quality = vq.make_quality_report(
                 reference,
-                _empty_synthesis(),
+                empty_synthesis(),
                 transcript_match=score,
             ).to_dict()
             candidate = _candidate_for_request(
@@ -831,7 +656,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
             if idempotency_key:
                 try:
                     stored = repository.get(candidate_id)
-                except (VoiceDesignNotFoundError, VoiceDesignStoreUnavailableError):
+                except VoiceDesignNotFoundError, VoiceDesignStoreUnavailableError:
                     stored = None
                 if stored is not None and stored.request_fingerprint == fingerprint:
                     return JSONResponse(
@@ -863,7 +688,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 retryable=True,
             )
         except TtsBackendError as exc:
-            backend_response = _tts_backend_error_response(
+            backend_response = tts_backend_error_response(
                 request_id, exc, worker_role="voice_design"
             )
             assert backend_response is not None
@@ -878,7 +703,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 "Durable idempotency state is unavailable",
                 retryable=True,
             )
-        except (TTSDeliveryError, OverflowError, ValueError):
+        except TTSDeliveryError, OverflowError, ValueError:
             logger.exception(
                 "voice design candidate generation produced invalid output",
                 extra={"speechrail": {"request_id": request_id}},
@@ -901,7 +726,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
             if journal_started and idempotency_key:
                 try:
                     repository.get(candidate_id)
-                except (VoiceDesignNotFoundError, VoiceDesignStoreUnavailableError):
+                except VoiceDesignNotFoundError, VoiceDesignStoreUnavailableError:
                     with suppress(IdempotencyStoreUnavailableError):
                         journal.abort(
                             owner=_DESIGN_IDEMPOTENCY_OWNER,
@@ -919,10 +744,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
             repository = _repository()
             return {
                 "object": "list",
-                "data": [
-                    _safe_candidate(repository, candidate)
-                    for candidate in repository.list()
-                ],
+                "data": [_safe_candidate(repository, candidate) for candidate in repository.list()],
             }
         except VoiceDesignStoreUnavailableError:
             return error_response(
@@ -1116,8 +938,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
             with wave.open(io.BytesIO(audio_bytes), "rb") as wav:
                 pcm = wav.readframes(wav.getnframes())
             expires_at = (
-                asyncio.get_running_loop().time()
-                + services.settings.request_timeout_seconds
+                asyncio.get_running_loop().time() + services.settings.request_timeout_seconds
             )
             transcript = await _transcribe_pcm(
                 services,
@@ -1126,9 +947,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 expires_at=expires_at,
             )
             score = vq.transcript_match_score(text, transcript)
-            if score < _TRANSCRIPT_PASS_SCORE or not vq.transcript_numbers_match(
-                text, transcript
-            ):
+            if score < TRANSCRIPT_PASS_SCORE or not vq.transcript_numbers_match(text, transcript):
                 return error_response(
                     400,
                     request_id,
@@ -1154,13 +973,8 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
             now = time.time()
 
             def confirm(current: VoiceDesignCandidate) -> VoiceDesignCandidate:
-                if (
-                    current.revision != candidate.revision
-                    or current.state != candidate.state
-                ):
-                    raise VoiceDesignConflictError(
-                        "candidate revision or state changed"
-                    )
+                if current.revision != candidate.revision or current.state != candidate.state:
+                    raise VoiceDesignConflictError("candidate revision or state changed")
                 return current.model_copy(
                     update={
                         "reference_text": text,
@@ -1207,7 +1021,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 "Voice design store is unavailable",
                 retryable=True,
             )
-        except (GovernorQueueFullError, QueueFullError, AsrModeBusy):
+        except GovernorQueueFullError, QueueFullError, AsrModeBusy:
             return error_response(
                 429,
                 request_id,
@@ -1226,7 +1040,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 "Candidate confirmation timed out",
                 retryable=True,
             )
-        except (OSError, ValueError, TTSDeliveryError):
+        except OSError, ValueError, TTSDeliveryError:
             logger.exception(
                 "voice design candidate confirmation failed",
                 extra={"speechrail": {"request_id": request_id}},
@@ -1249,266 +1063,32 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
             return auth_error
         try:
             repository = _repository()
-            candidate = repository.get(candidate_id)
-            if candidate.state == "published":
-                return _invalid_state(request_id, candidate)
-            if candidate.state in {"generated", "cancelled", "failed"}:
-                return _invalid_state(request_id, candidate)
-            capability_key = body.capability_key or _selected_capability_key(services)
-            if capability_key != _selected_capability_key(services):
-                return error_response(
-                    422,
-                    request_id,
-                    "voice_design_capability_mismatch",
-                    (
-                        "VoiceDesign validation must be observed for the "
-                        "currently selected render capability"
-                    ),
-                )
-            now = time.time()
-            if body.human_review is not None:
-                review = body.human_review
-                current_validation = next(
-                    (
-                        item
-                        for item in candidate.validations
-                        if item.validation_id == review.validation_id
-                    ),
-                    None,
-                )
-                if current_validation is None:
-                    return error_response(
-                        404,
-                        request_id,
-                        "voice_design_validation_not_found",
-                        "Validation result was not found for this candidate",
+            updated = await run_candidate_validation(
+                repository=repository,
+                candidate_id=candidate_id,
+                active=active,
+                runtime=ValidationRuntime(
+                    synthesizer=services.tts_synthesizer,
+                    transcriber=services.batch_transcriber,
+                    governor=services.governor,
+                    admission=services.admission,
+                    tts_ready=services.tts_ready,
+                    asr_ready=services.asr_ready,
+                ),
+                selected_capability_key=_selected_capability_key(services),
+                requested_capability_key=body.capability_key,
+                test_text=body.test_text,
+                human_review=(
+                    CandidateHumanReview(
+                        validation_id=body.human_review.validation_id,
+                        identity=body.human_review.identity,
+                        naturalness=body.human_review.naturalness,
                     )
-                if current_validation.candidate_revision != candidate.revision:
-                    return error_response(
-                        409,
-                        request_id,
-                        "voice_design_revision_conflict",
-                        "Validation belongs to an older candidate revision",
-                    )
-                if not candidate.has_current_machine_pass(
-                    review.validation_id, capability_key=capability_key
-                ):
-                    return error_response(
-                        409,
-                        request_id,
-                        "voice_design_machine_validation_required",
-                        (
-                            "Human review can only follow a passing Base "
-                            "validation under the current text-fidelity policy "
-                            "for this candidate revision"
-                        ),
-                    )
-                def apply_review(current: VoiceDesignCandidate) -> VoiceDesignCandidate:
-                    current.require_validation_writable(
-                        expected_revision=candidate.revision
-                    )
-                    # Both the machine facts and the list come from the locked
-                    # current record; the route's pre-await snapshot is only an
-                    # early check, never the source of a replacement record.
-                    if not current.has_current_machine_pass(
-                        review.validation_id, capability_key=capability_key
-                    ):
-                        raise VoiceDesignConflictError("validation record changed")
-                    latest = next(
-                        item for item in current.validations
-                        if item.validation_id == review.validation_id
-                    )
-                    status: Literal["pass", "warn", "reject"]
-                    if "reject" in {review.identity, review.naturalness}:
-                        status = "reject"
-                    elif (
-                        review.identity == "pass"
-                        and review.naturalness == "pass"
-                        and latest.runtime_fingerprint is not None
-                    ):
-                        status = "pass"
-                    else:
-                        status = "warn"
-                    reviewed = latest.model_copy(
-                        update={
-                            "identity_status": review.identity,
-                            "naturalness_status": review.naturalness,
-                            "status": status,
-                            "updated_at": max(latest.updated_at, now),
-                        }
-                    )
-                    merged = current.model_copy(
-                        update={
-                            "validations": [
-                                reviewed
-                                if item.validation_id == reviewed.validation_id
-                                else item
-                                for item in current.validations
-                            ],
-                            "updated_at": max(current.updated_at, reviewed.updated_at),
-                        }
-                    )
-                    return merged.model_copy(update={"state": review_state_for(merged)})
-
-                updated = repository.update(
-                    candidate_id,
-                    apply_review,
-                )
-                return JSONResponse(
-                    status_code=200,
-                    content={"candidate": _safe_candidate(repository, updated)},
-                )
-
-            test_text = (
-                normalize_tts_text(body.test_text)
-                if body.test_text is not None
-                else next(
-                    (
-                        candidate_text
-                        for candidate_text in _CONTROLLED_TEST_TEXTS
-                        if normalize_tts_text(candidate_text)
-                        != candidate.reference_text
-                    ),
-                    None,
-                )
-            )
-            if test_text is None:
-                return error_response(
-                    422,
-                    request_id,
-                    "controlled_test_text_conflict",
-                    (
-                        "No controlled test text differs from the candidate "
-                        "reference text; pass an explicit test_text"
-                    ),
-                )
-            if not 20 <= len(test_text) <= 240:
-                return error_response(
-                    422,
-                    request_id,
-                    "invalid_test_text",
-                    "Normalized test text must contain 20 to 240 characters",
-                )
-            if test_text == candidate.reference_text:
-                return error_response(
-                    422,
-                    request_id,
-                    "test_text_matches_reference",
-                    "Base validation requires a different test text",
-                )
-            base = active.tts_clone
-            synthesizer = services.tts_synthesizer
-            if base is None or base.variant != "base" or synthesizer is None:
-                return error_response(
-                    503,
-                    request_id,
-                    "voice_design_base_unavailable",
-                    "Base validation requires an active Base capability",
-                    retryable=True,
-                )
-
-            def mark_validating(current: VoiceDesignCandidate) -> VoiceDesignCandidate:
-                current.require_validation_writable(
-                    expected_revision=candidate.revision
-                )
-                return current.model_copy(
-                    update={
-                        "state": review_state_for(current),
-                        "updated_at": max(current.updated_at, now),
-                    }
-                )
-
-            repository.update(candidate_id, mark_validating)
-            expires_at = (
-                asyncio.get_running_loop().time()
-                + services.settings.request_timeout_seconds
-            )
-            synthesis = SpeechRequest(
-                text=test_text,
-                voice=candidate.target_voice_id,
-                language=candidate.language,
-                sample_rate=_SAMPLE_RATE,
-                expected_voice_revision=candidate.revision,
-            )
-            profile = candidate.profile()
-            with use_voice_profile(profile):
-                async with services.governor.reserve(
-                    WorkClass.BATCH_TTS,
-                    expires_at=expires_at,
-                    resource_key=tts_resource_key(
-                        synthesizer, candidate.target_voice_id
-                    ),
-                    purpose=WorkPurpose.VOICE_CREATION,
-                ):
-                    output_pcm = await _collect_audio(
-                        synthesizer,
-                        synthesis,
-                        expires_at=expires_at,
-                        design=False,
-                        max_bytes=_MAX_VALIDATION_PCM_BYTES,
-                    )
-                runtime_revision = observed_runtime_revision_for_synthesizer(
-                    synthesizer,
-                    candidate.target_voice_id,
-                )
-            if not output_pcm:
-                raise TTSDeliveryError("voice_validation_output_empty")
-            output_wav = _wav_from_pcm(output_pcm)
-            quality = _grade_clone_audio(output_wav)
-            async with services.governor.reserve(
-                WorkClass.BATCH_TTS,
-                expires_at=expires_at,
-                purpose=WorkPurpose.VOICE_CREATION,
-            ):
-                await _evict_quality_tts_if_supported(
-                    synthesizer,
-                    expires_at=expires_at,
-                )
-            transcript: str | None = None
-            transcript_match: float | None = None
-            try:
-                transcript = await _transcribe_pcm(
-                    services,
-                    output_pcm,
-                    language=candidate.language,
-                    expires_at=expires_at,
-                )
-                transcript_match = vq.transcript_match_score(test_text, transcript)
-            except VoiceDesignActionError as exc:
-                if exc.code != "transcription_unavailable":
-                    raise
-
-            binding = build_validation_binding(
-                profile,
-                base,
-                synthesizer,
-                require_current_binding=True,
-                observed_runtime_revision=runtime_revision,
-                capability_key=capability_key,
-            )
-            validation = _candidate_validation(
-                candidate=candidate,
-                capability_key=capability_key,
-                test_text=test_text,
-                output_pcm=output_pcm,
-                quality=quality,
-                transcript=transcript,
-                transcript_match=transcript_match,
-                output_wav_sha256=hashlib.sha256(output_wav).hexdigest(),
-                model_artifact=base.key,
-                model_catalog_revision=base.revision,
-                model_runtime_revision=binding.model_runtime_revision,
-                runtime_fingerprint=binding.runtime_fingerprint,
-                preprocess_version=binding.preprocess_version,
-                generation_recipe_revision=binding.generation_recipe_revision,
-                policy_version=binding.policy_version,
-            )
-            updated = repository.update_with_validation_audio(
-                candidate_id,
-                expected_revision=candidate.revision,
-                validation=validation,
-                audio_bytes=output_wav,
-                max_bytes=_MAX_VALIDATION_WAV_BYTES,
+                    if body.human_review is not None
+                    else None
+                ),
+                expires_at=asyncio.get_running_loop().time()
+                + services.settings.request_timeout_seconds,
             )
             return JSONResponse(
                 status_code=200,
@@ -1521,10 +1101,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 409,
                 request_id,
                 "voice_design_validation_limit_reached",
-                (
-                    "This candidate already retains the maximum number of "
-                    "validation results"
-                ),
+                ("This candidate already retains the maximum number of validation results"),
             )
         except VoiceDesignConflictError:
             return error_response(
@@ -1550,7 +1127,15 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 "Voice design store is unavailable",
                 retryable=True,
             )
-        except (GovernorQueueFullError, QueueFullError, AsrModeBusy):
+        except VoiceValidationExecutionError as exc:
+            return error_response(
+                503,
+                request_id,
+                exc.code,
+                str(exc),
+                retryable=exc.retryable,
+            )
+        except GovernorQueueFullError, QueueFullError, AsrModeBusy:
             return error_response(
                 429,
                 request_id,
@@ -1567,13 +1152,15 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 retryable=True,
             )
         except TtsBackendError as exc:
-            response = _tts_backend_error_response(request_id, exc, worker_role="tts_base")
+            response = tts_backend_error_response(request_id, exc, worker_role="tts_base")
             assert response is not None
             return response
-        except (OSError, ValueError, TTSDeliveryError, OverflowError):
-            logger.exception(
-                "voice design Base validation produced invalid output",
-                extra={"speechrail": {"request_id": request_id}},
+        except (OSError, ValueError, TTSDeliveryError, OverflowError) as exc:
+            logger.warning(
+                "voice design Base validation failed: code=output_invalid "
+                "request_id=%s exception_type=%s",
+                request_id,
+                type(exc).__name__,
             )
             return error_response(
                 502,
@@ -1585,11 +1172,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
     @router.post(
         "/{candidate_id}/publish",
         status_code=201,
-        responses={
-            200: {
-                "description": "The candidate was already published"
-            }
-        },
+        responses={200: {"description": "The candidate was already published"}},
     )
     async def publish_candidate(
         candidate_id: str,
@@ -1617,7 +1200,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                     status_code=200,
                     content={
                         "candidate": _safe_candidate(repository, candidate),
-                        "voice": _voice_entry(
+                        "voice": voice_entry(
                             profile,
                             active,
                             services.tts_ready,
@@ -1650,7 +1233,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                     status_code=200,
                     content={
                         "candidate": _safe_candidate(repository, candidate),
-                        "voice": _voice_entry(
+                        "voice": voice_entry(
                             profile,
                             active,
                             services.tts_ready,
@@ -1665,9 +1248,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 or current_validation is None
                 or current_validation.validation_id != validation.validation_id
             ):
-                raise VoiceDesignConflictError(
-                    "candidate state or validation changed"
-                )
+                raise VoiceDesignConflictError("candidate state or validation changed")
 
             registry = get_voice_registry()
             validation_record = {
@@ -1743,7 +1324,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 status_code=201,
                 content={
                     "candidate": _safe_candidate(repository, published),
-                    "voice": _voice_entry(
+                    "voice": voice_entry(
                         profile,
                         active,
                         services.tts_ready,
@@ -1780,7 +1361,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 "Voice publication store is unavailable",
                 retryable=True,
             )
-        except (OSError, ValueError):
+        except OSError, ValueError:
             logger.exception(
                 "voice design candidate publication failed",
                 extra={"speechrail": {"request_id": request_id}},

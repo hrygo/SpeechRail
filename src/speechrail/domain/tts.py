@@ -1509,6 +1509,8 @@ class VoiceRegistry:
         self,
         voice_id: str,
         validation: dict[str, Any],
+        *,
+        expected_revision: str | None = None,
     ) -> VoiceProfile:
         """Persist output evidence without changing the acoustic voice record.
 
@@ -1530,6 +1532,11 @@ class VoiceRegistry:
             profile = self._custom_voices.get(vid)
             if profile is None:
                 raise KeyError(f"custom voice not found: {vid}")
+            if expected_revision is not None:
+                if profile.revision != expected_revision:
+                    raise VoiceRevisionConflictError("voice changed during quality validation")
+                if profile.revoked:
+                    raise VoiceRevokedError("voice revoked during quality validation")
             evidence = dict(validation)
             evidence.setdefault("voice_id", profile.id)
             if profile.revision is None:
