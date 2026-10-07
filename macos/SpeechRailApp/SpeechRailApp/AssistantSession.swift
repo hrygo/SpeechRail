@@ -1657,6 +1657,7 @@ public final class AssistantSession {
             case .sealed:
                 pendingSealRecordID = nil
                 pendingSealReason = nil
+                lastFinalizedSessionID = recordID
             case .failed(let failedID, let reason):
                 lastFailure = "记录尚未保存（\(reason)），可在记录库中重试。"
                 pendingSealRecordID = failedID ?? recordID
@@ -1666,7 +1667,6 @@ public final class AssistantSession {
                 pendingSealReason = nil
             }
         }
-        lastFinalizedSessionID = isTextOnlyConversation ? sessionID : lastFinalizedSessionID
         resetToIdleKeepingTurns()
     }
 
@@ -1697,9 +1697,9 @@ public final class AssistantSession {
             lastFailure = "记录尚未保存（\(reason)），可在记录库中重试。"
             return false
         case .skipped:
-            pendingSealRecordID = nil
-            pendingSealReason = nil
-            return true
+            pendingSealReason = "记录仍在使用，尚未确认归档。"
+            lastFailure = pendingSealReason
+            return false
         }
     }
 
@@ -1836,6 +1836,10 @@ public final class AssistantSession {
         let result = await coordinator.endAssistant(target, reason: .user)
         if case .ended(let recordID) = result {
             lastFinalizedSessionID = recordID ?? lastFinalizedSessionID
+        } else if case .failed(let recordID, let reason) = result {
+            pendingSealRecordID = recordID
+            pendingSealReason = reason
+            lastFailure = "记录尚未保存（\(reason)），可在记录库中重试。"
         }
         return result
     }
