@@ -501,9 +501,11 @@ actor SessionReplayClient: AssistantRealtimeClient, MeetingRealtimeClient,
     }
 
     func append(_ pcm: Data) async throws {
+        let startedAt = ContinuousClock().now
         try await realtime.append(pcm)
+        let returnedAt = ContinuousClock().now
         uploadedSamples += pcm.count / MemoryLayout<Int16>.size
-        await recorder.recordUploadedPCM(pcm)
+        await recorder.recordUploadedPCM(pcm, startedAt: startedAt, returnedAt: returnedAt)
     }
 
     func flushPendingUtterance() async throws {
@@ -511,8 +513,11 @@ actor SessionReplayClient: AssistantRealtimeClient, MeetingRealtimeClient,
     }
 
     func drainAndClear(timeout: Duration) async throws {
+        let startedAt = ContinuousClock().now
         try await realtime.drainAndClear(timeout: timeout)
+        let returnedAt = ContinuousClock().now
         drainSucceeded = true
+        await recorder.recordDrain(startedAt: startedAt, returnedAt: returnedAt)
     }
 
     func updateVoice(
@@ -751,8 +756,13 @@ actor SessionReplayRecorder {
     private var firstTerminalOrder: Int?
     private var firstPreviewAt: ContinuousClock.Instant?
     private var lastTerminalAt: ContinuousClock.Instant?
-    private var audioStartedAt = ContinuousClock().now
-    private var lastAudioSentAt = ContinuousClock().now
+    private var audioStartedAt: ContinuousClock.Instant?
+    private var lastSourceYieldReturnedAt: ContinuousClock.Instant?
+    private var lastAppendStartedAt: ContinuousClock.Instant?
+    private var lastAppendReturnedAt: ContinuousClock.Instant?
+    private var lastAppendSampleSpan: SessionReplayTimingEvidence.SampleSpan?
+    private var drainStartedAt: ContinuousClock.Instant?
+    private var drainReturnedAt: ContinuousClock.Instant?
     private var sourceSamplesYielded = 0
     private var uploadedSamples = 0
     private var sourcePCMHasher = SHA256()
@@ -764,15 +774,28 @@ actor SessionReplayRecorder {
         audioStartedAt = instant
     }
 
-    func recordSourcePCM(_ pcm: Data, sentAt instant: ContinuousClock.Instant) {
+    func recordSourcePCM(_ pcm: Data, yieldReturnedAt instant: ContinuousClock.Instant) {
         sourceSamplesYielded += pcm.count / MemoryLayout<Int16>.size
         sourcePCMHasher.update(data: pcm)
-        lastAudioSentAt = instant
+        lastSourceYieldReturnedAt = instant
     }
 
-    func recordUploadedPCM(_ pcm: Data) {
+    func recordUploadedPCM(
+        _ pcm: Data,
+        startedAt: ContinuousClock.Instant,
+        returnedAt: ContinuousClock.Instant
+    ) {
+        let startSample = uploadedSamples
         uploadedSamples += pcm.count / MemoryLayout<Int16>.size
         uploadedPCMHasher.update(data: pcm)
+        lastAppendStartedAt = startedAt
+        lastAppendReturnedAt = returnedAt
+        lastAppendSampleSpan = .init(start: startSample, end: uploadedSamples)
+    }
+
+    func recordDrain(startedAt: ContinuousClock.Instant, returnedAt: ContinuousClock.Instant) {
+        drainStartedAt = startedAt
+        drainReturnedAt = returnedAt
     }
 
     func pcmStreamsMatch() -> Bool {
@@ -895,7 +918,12 @@ actor SessionReplayRecorder {
             firstPreviewAt: firstPreviewAt,
             lastTerminalAt: lastTerminalAt,
             audioStartedAt: audioStartedAt,
-            lastAudioSentAt: lastAudioSentAt,
+            lastSourceYieldReturnedAt: lastSourceYieldReturnedAt,
+            lastAppendStartedAt: lastAppendStartedAt,
+            lastAppendReturnedAt: lastAppendReturnedAt,
+            lastAppendSampleSpan: lastAppendSampleSpan,
+            drainStartedAt: drainStartedAt,
+            drainReturnedAt: drainReturnedAt,
             sourceSamplesYielded: sourceSamplesYielded,
             uploadedSamples: uploadedSamples,
             configuredEventCount: configuredEventCount,
@@ -937,8 +965,13 @@ struct SessionReplaySnapshot: Sendable {
     let firstTerminalOrder: Int?
     let firstPreviewAt: ContinuousClock.Instant?
     let lastTerminalAt: ContinuousClock.Instant?
-    let audioStartedAt: ContinuousClock.Instant
-    let lastAudioSentAt: ContinuousClock.Instant
+    let audioStartedAt: ContinuousClock.Instant?
+    let lastSourceYieldReturnedAt: ContinuousClock.Instant?
+    let lastAppendStartedAt: ContinuousClock.Instant?
+    let lastAppendReturnedAt: ContinuousClock.Instant?
+    let lastAppendSampleSpan: SessionReplayTimingEvidence.SampleSpan?
+    let drainStartedAt: ContinuousClock.Instant?
+    let drainReturnedAt: ContinuousClock.Instant?
     let sourceSamplesYielded: Int
     let uploadedSamples: Int
     let configuredEventCount: Int
@@ -1460,8 +1493,114 @@ enum SessionReplayCaptureReleaseIntegrity {
     }
 }
 
+/// Client observations from fake capture; neither enqueue nor append return is
+/// evidence of acoustic speech end or server acceptance.
+struct SessionReplayTimingEvidence: Encodable, Sendable {
+    let clock = "continuous_monotonic"
+    let origin = "fake_capture_start"
+    let acousticSpeechEnd = "not_observed"
+    let serverAppendAcceptance = "not_observed"
+    let commitSend = "not_observed"
+    let inputReceiptReceived = "not_observed"
+    let observationsComplete: Bool
+    let firstPreviewMilliseconds: Double?
+    let lastSourceYieldReturnedMilliseconds: Double?
+    let lastAppendStartedMilliseconds: Double?
+    let lastAppendReturnedMilliseconds: Double?
+    let nominalCaptureEndMilliseconds: Double?
+    let lastTerminalReceivedMilliseconds: Double?
+    let drainStartedMilliseconds: Double?
+    let drainReturnedMilliseconds: Double?
+    let sourceYieldToLastTerminalMilliseconds: Double?
+    let appendReturnToLastTerminalMilliseconds: Double?
+    let nominalCaptureEndToLastTerminalMilliseconds: Double?
+    let lastAppendSampleSpan: SampleSpan?
+
+    struct SampleSpan: Encodable, Sendable, Equatable {
+        let start: Int
+        let end: Int
+    }
+
+    init(snapshot: SessionReplaySnapshot) throws {
+        let start = snapshot.audioStartedAt
+        let observations = [
+            snapshot.firstPreviewAt, snapshot.lastSourceYieldReturnedAt,
+            snapshot.lastAppendStartedAt, snapshot.lastAppendReturnedAt,
+            snapshot.lastTerminalAt, snapshot.drainStartedAt, snapshot.drainReturnedAt,
+        ]
+        if let start, observations.compactMap({ $0 }).contains(where: { $0 < start }) {
+            throw SessionReplayFailure.invalidTimingObservations
+        }
+        if let began = snapshot.lastAppendStartedAt, let returned = snapshot.lastAppendReturnedAt,
+           began > returned {
+            throw SessionReplayFailure.invalidTimingObservations
+        }
+        if let began = snapshot.drainStartedAt, let returned = snapshot.drainReturnedAt,
+           began > returned {
+            throw SessionReplayFailure.invalidTimingObservations
+        }
+        if let span = snapshot.lastAppendSampleSpan,
+           !(0 <= span.start && span.start < span.end && span.end == snapshot.uploadedSamples) {
+            throw SessionReplayFailure.invalidTimingObservations
+        }
+        func difference(
+            _ began: ContinuousClock.Instant?, _ ended: ContinuousClock.Instant?
+        ) -> Double? {
+            guard let began, let ended else { return nil }
+            return SessionReplayClock.milliseconds(from: began, to: ended)
+        }
+        firstPreviewMilliseconds = difference(start, snapshot.firstPreviewAt)
+        lastSourceYieldReturnedMilliseconds = difference(start, snapshot.lastSourceYieldReturnedAt)
+        lastAppendStartedMilliseconds = difference(start, snapshot.lastAppendStartedAt)
+        lastAppendReturnedMilliseconds = difference(start, snapshot.lastAppendReturnedAt)
+        nominalCaptureEndMilliseconds = start != nil && snapshot.sourceSamplesYielded > 0
+            ? Double(snapshot.sourceSamplesYielded) / 24 : nil
+        lastTerminalReceivedMilliseconds = difference(start, snapshot.lastTerminalAt)
+        drainStartedMilliseconds = difference(start, snapshot.drainStartedAt)
+        drainReturnedMilliseconds = difference(start, snapshot.drainReturnedAt)
+        sourceYieldToLastTerminalMilliseconds = difference(
+            snapshot.lastSourceYieldReturnedAt, snapshot.lastTerminalAt
+        )
+        appendReturnToLastTerminalMilliseconds = difference(
+            snapshot.lastAppendReturnedAt, snapshot.lastTerminalAt
+        )
+        if let terminal = lastTerminalReceivedMilliseconds, let nominal = nominalCaptureEndMilliseconds {
+            nominalCaptureEndToLastTerminalMilliseconds = terminal - nominal
+        } else {
+            nominalCaptureEndToLastTerminalMilliseconds = nil
+        }
+        lastAppendSampleSpan = snapshot.lastAppendSampleSpan
+        observationsComplete = start != nil
+            && lastSourceYieldReturnedMilliseconds != nil
+            && lastAppendStartedMilliseconds != nil && lastAppendReturnedMilliseconds != nil
+            && lastAppendSampleSpan != nil && lastTerminalReceivedMilliseconds != nil
+            && drainStartedMilliseconds != nil && drainReturnedMilliseconds != nil
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case clock, origin
+        case acousticSpeechEnd = "acoustic_speech_end"
+        case serverAppendAcceptance = "server_append_acceptance"
+        case commitSend = "commit_send"
+        case inputReceiptReceived = "input_receipt_received"
+        case observationsComplete = "observations_complete"
+        case firstPreviewMilliseconds = "first_preview_ms"
+        case lastSourceYieldReturnedMilliseconds = "last_source_yield_returned_ms"
+        case lastAppendStartedMilliseconds = "last_append_started_ms"
+        case lastAppendReturnedMilliseconds = "last_append_returned_ms"
+        case nominalCaptureEndMilliseconds = "nominal_capture_end_ms"
+        case lastTerminalReceivedMilliseconds = "last_terminal_received_ms"
+        case drainStartedMilliseconds = "drain_started_ms"
+        case drainReturnedMilliseconds = "drain_returned_ms"
+        case sourceYieldToLastTerminalMilliseconds = "source_yield_to_last_terminal_ms"
+        case appendReturnToLastTerminalMilliseconds = "append_return_to_last_terminal_ms"
+        case nominalCaptureEndToLastTerminalMilliseconds = "nominal_capture_end_to_last_terminal_ms"
+        case lastAppendSampleSpan = "last_append_sample_span_24k"
+    }
+}
+
 struct SessionReplaySummary: Encodable {
-    let schemaVersion = 5
+    let schemaVersion = 6
     let fixtureID: String
     let scene: String
     let preset: String
@@ -1481,8 +1620,7 @@ struct SessionReplaySummary: Encodable {
     let previewEventCount: Int
     let previewRevisionCount: Int
     let previewRevisionRegressionCount: Int
-    let firstPreviewMilliseconds: Double?
-    let finalAfterLastAudioMilliseconds: Double?
+    let timingObservations: SessionReplayTimingEvidence
     let uploadGate: String
     let pcmIntegrityGate: String
     let receiptBarrierGate: String
@@ -1548,8 +1686,7 @@ struct SessionReplaySummary: Encodable {
         case previewEventCount = "preview_event_count"
         case previewRevisionCount = "preview_revision_count"
         case previewRevisionRegressionCount = "preview_revision_regression_count"
-        case firstPreviewMilliseconds = "first_preview_ms"
-        case finalAfterLastAudioMilliseconds = "final_after_last_audio_ms"
+        case timingObservations = "timing_observations"
         case uploadGate = "upload_gate"
         case pcmIntegrityGate = "pcm_integrity_gate"
         case receiptBarrierGate = "receipt_barrier_gate"
@@ -1596,10 +1733,7 @@ struct SessionReplayRun {
 enum SessionReplayClock {
     static func milliseconds(from start: ContinuousClock.Instant, to end: ContinuousClock.Instant) -> Double {
         let duration = start.duration(to: end).components
-        return max(
-            0,
-            (Double(duration.seconds) + Double(duration.attoseconds) / 1_000_000_000_000_000_000) * 1_000
-        )
+        return (Double(duration.seconds) + Double(duration.attoseconds) / 1_000_000_000_000_000_000) * 1_000
     }
 }
 
@@ -1615,6 +1749,7 @@ enum SessionReplayFailure: Error {
     case businessTurnDidNotArrive
     case captureBufferOverflow
     case syntheticTTSUnavailable
+    case invalidTimingObservations
 }
 
 @MainActor

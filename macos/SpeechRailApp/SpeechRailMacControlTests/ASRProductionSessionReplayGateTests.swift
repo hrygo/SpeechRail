@@ -7,6 +7,131 @@ import Testing
 #endif
 
 @Suite
+struct ASRSessionReplayTimingTests {
+    @Test
+    func preservesTerminalBeforeUploadReturnInsteadOfClampingToZero() {
+        let start = ContinuousClock().now
+        #expect(SessionReplayClock.milliseconds(
+            from: start, to: start.advanced(by: .milliseconds(-250))
+        ) == -250)
+    }
+
+    @Test
+    func distinguishesSourceYieldAppendReturnAndNominalEnd() async throws {
+        let recorder = SessionReplayRecorder()
+        let start = ContinuousClock().now
+        await recorder.markAudioStarted(at: start)
+        let pcm = Data(repeating: 0, count: 24_000 * MemoryLayout<Int16>.size)
+        await recorder.recordSourcePCM(pcm, yieldReturnedAt: start.advanced(by: .milliseconds(1_000)))
+        await recorder.recordUploadedPCM(
+            pcm, startedAt: start.advanced(by: .milliseconds(900)),
+            returnedAt: start.advanced(by: .milliseconds(1_100))
+        )
+        await recorder.recordSourcePCM(pcm, yieldReturnedAt: start.advanced(by: .milliseconds(2_050)))
+        await recorder.recordUploadedPCM(
+            pcm, startedAt: start.advanced(by: .milliseconds(2_000)),
+            returnedAt: start.advanced(by: .milliseconds(2_200))
+        )
+        await recorder.record(.init(
+            metadata: .init(eventID: "synthetic-terminal", sessionID: "synthetic"),
+            payload: .completed(itemID: "synthetic", transcript: "PRIVATE_TEST_SENTINEL"),
+            receivedAt: start.advanced(by: .milliseconds(1_500))
+        ))
+        await recorder.recordDrain(
+            startedAt: start.advanced(by: .milliseconds(2_300)),
+            returnedAt: start.advanced(by: .milliseconds(2_500))
+        )
+        let snapshot = await recorder.snapshot()
+        let timing = try SessionReplayTimingEvidence(snapshot: snapshot)
+        #expect(timing.observationsComplete)
+        #expect(timing.firstPreviewMilliseconds == nil)
+        #expect(timing.lastSourceYieldReturnedMilliseconds == 2_050)
+        #expect(timing.lastAppendStartedMilliseconds == 2_000)
+        #expect(timing.lastAppendReturnedMilliseconds == 2_200)
+        #expect(timing.nominalCaptureEndMilliseconds == 2_000)
+        #expect(timing.sourceYieldToLastTerminalMilliseconds == -550)
+        #expect(timing.appendReturnToLastTerminalMilliseconds == -700)
+        #expect(timing.nominalCaptureEndToLastTerminalMilliseconds == -500)
+        #expect(timing.lastAppendSampleSpan == .init(start: 24_000, end: 48_000))
+        #expect(await recorder.pcmStreamsMatch())
+        let json = try #require(try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(timing)
+        ) as? [String: Any])
+        #expect(json["acoustic_speech_end"] as? String == "not_observed")
+        #expect(json["server_append_acceptance"] as? String == "not_observed")
+        #expect(json["commit_send"] as? String == "not_observed")
+        #expect(json["input_receipt_received"] as? String == "not_observed")
+        #expect(json["append_return_to_last_terminal_ms"] as? Double == -700)
+        #expect(json["final_after_last_audio_ms"] == nil)
+        #expect(!String(decoding: try JSONEncoder().encode(timing), as: UTF8.self)
+            .contains("PRIVATE_TEST_SENTINEL"))
+    }
+
+    @Test
+    func missingObservationsDoNotInventConstructionTimeOrZeroLatency() async throws {
+        let recorder = SessionReplayRecorder()
+        let snapshot = await recorder.snapshot()
+        #expect(snapshot.audioStartedAt == nil)
+        #expect(snapshot.lastSourceYieldReturnedAt == nil)
+        #expect(snapshot.lastAppendReturnedAt == nil)
+        let timing = try SessionReplayTimingEvidence(snapshot: snapshot)
+        #expect(!timing.observationsComplete)
+        #expect(timing.firstPreviewMilliseconds == nil)
+        #expect(timing.lastAppendStartedMilliseconds == nil)
+        #expect(timing.nominalCaptureEndMilliseconds == nil)
+        #expect(timing.lastTerminalReceivedMilliseconds == nil)
+        #expect(timing.sourceYieldToLastTerminalMilliseconds == nil)
+        #expect(timing.appendReturnToLastTerminalMilliseconds == nil)
+        #expect(timing.nominalCaptureEndToLastTerminalMilliseconds == nil)
+        #expect(timing.lastAppendSampleSpan == nil)
+    }
+
+    @Test
+    func absentCaptureOriginDoesNotHideKnownSignedUploadDifference() async throws {
+        let recorder = SessionReplayRecorder()
+        let start = ContinuousClock().now
+        await recorder.recordUploadedPCM(
+            Data(repeating: 0, count: 2), startedAt: start,
+            returnedAt: start.advanced(by: .milliseconds(100))
+        )
+        await recorder.record(.init(
+            metadata: .init(eventID: "synthetic-terminal"),
+            payload: .completed(itemID: "synthetic", transcript: ""),
+            receivedAt: start.advanced(by: .milliseconds(40))
+        ))
+        let timing = try SessionReplayTimingEvidence(snapshot: await recorder.snapshot())
+        #expect(!timing.observationsComplete)
+        #expect(timing.lastAppendReturnedMilliseconds == nil)
+        #expect(timing.lastTerminalReceivedMilliseconds == nil)
+        #expect(timing.nominalCaptureEndMilliseconds == nil)
+        #expect(timing.appendReturnToLastTerminalMilliseconds == -60)
+    }
+
+    @Test(arguments: ["before_origin", "reversed_append", "reversed_drain", "empty_append"])
+    func rejectsImpossibleObservationOrderOrEmptySampleSpan(variant: String) async {
+        let recorder = SessionReplayRecorder()
+        let start = ContinuousClock().now
+        await recorder.markAudioStarted(at: start)
+        if variant == "reversed_drain" {
+            await recorder.recordDrain(startedAt: start.advanced(by: .milliseconds(1)), returnedAt: start)
+        } else {
+            await recorder.recordUploadedPCM(
+                Data(repeating: 0, count: variant == "empty_append" ? 0 : 2),
+                startedAt: start,
+                returnedAt: start.advanced(by: .milliseconds(variant == "reversed_append" ? -1 : 1))
+            )
+            if variant == "before_origin" {
+                await recorder.markAudioStarted(at: start.advanced(by: .milliseconds(2)))
+            }
+        }
+        let snapshot = await recorder.snapshot()
+        #expect(throws: (any Error).self) {
+            _ = try SessionReplayTimingEvidence(snapshot: snapshot)
+        }
+    }
+}
+
+@Suite
 struct SessionReplayFixtureBudgetTests {
     @Test
     func keepsTheDefaultThirtySecondFixtureLimit() throws {

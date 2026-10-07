@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.7"
+version: "3.3.8"
 date: 2026-10-07
 ---
 
@@ -174,6 +174,27 @@ uv run --no-sync pytest --no-cov tests/test_realtime_asr_timing.py tests/test_re
 schema 1 历史结果保留原始定义；旧审计器不得接受 schema 2 或向旧结果补写新观测。
 新结果须以支持 schema 2 的审计器和相同工具版本配对，另记源码 digest；
 这些客户端观测不能证明声学时延或场景绝对门通过。
+
+生产 Session 回放的 `SessionReplaySummary` 使用 schema 6，其
+`timing_observations` 与上述 Python schema 2 独立。原 schema 5 的
+`final_after_last_audio_ms` 已移除。新对象以显式 fake capture 起点记录相对毫秒，
+区分最后一次 source yield 返回、`RealtimeASRClient.append` 调用起止、
+最后终态接收和 `drainAndClear` 调用起止；最后 append 的 24kHz
+半开样本区间另存于 `last_append_sample_span_24k`。
+名义采集结束由实际已 yield 样本数计算，包含夹具的合成尾静音，不表示声学结束。
+
+`source_yield_to_last_terminal_ms`、`append_return_to_last_terminal_ms` 与
+`nominal_capture_end_to_last_terminal_ms` 分别从这三个起点计算有符号差值。
+缺少观测时保持 optional，不以构造时钟或零值代替；JSON 中缺失的 optional 字段
+表示未观测。`observations_complete` 只表示这些客户端观测齐全。
+声学结束、服务端 append 接收、内部 commit 发送和 receipt 接收时刻均明确标为
+`not_observed`；drain 返回不能代替其中任何时刻。时钟逆序或空/无效上传区间拒绝。
+schema 5 历史证据保持原样；新监督器须显式校验 schema 6。
+确定性计时反例位于已有回放门测试文件，可运行：
+
+```bash
+swift test --package-path macos/SpeechRailApp --filter ASRSessionReplayTimingTests
+```
 
 ### 生产 Session 回放的采样退出协调
 

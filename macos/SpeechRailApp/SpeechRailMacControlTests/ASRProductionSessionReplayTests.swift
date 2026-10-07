@@ -206,12 +206,7 @@ struct ASRProductionSessionReplayTests {
                     previewEventCount: snapshot.previewEventCount,
                     previewRevisionCount: snapshot.previewRevisionCount,
                     previewRevisionRegressionCount: snapshot.previewRevisionRegressionCount,
-                    firstPreviewMilliseconds: snapshot.firstPreviewAt.map {
-                        SessionReplayClock.milliseconds(from: snapshot.audioStartedAt, to: $0)
-                    },
-                    finalAfterLastAudioMilliseconds: snapshot.lastTerminalAt.map {
-                        SessionReplayClock.milliseconds(from: snapshot.lastAudioSentAt, to: $0)
-                    },
+                    timingObservations: try SessionReplayTimingEvidence(snapshot: snapshot),
                     uploadGate: uploadPassed ? "pass" : "fail",
                     pcmIntegrityGate: pcmIntegrityPassed ? "pass" : "fail",
                     receiptBarrierGate: receiptPassed ? "pass" : "fail",
@@ -735,7 +730,7 @@ struct ASRProductionSessionReplayTests {
                 droppedSamplesBefore: 0
             )
             guard source.yield(chunk) else { throw SessionReplayFailure.captureBufferOverflow }
-            await recorder.recordSourcePCM(chunk.pcm, sentAt: clock.now)
+            await recorder.recordSourcePCM(chunk.pcm, yieldReturnedAt: clock.now)
             sequenceNumber += 1
             deadline = deadline.advanced(by: .milliseconds(40))
             try await clock.sleep(until: deadline, tolerance: .milliseconds(8))
@@ -783,7 +778,7 @@ struct ASRProductionSessionReplayTests {
                 droppedSamplesBefore: 0
             )
             guard source.yield(chunk) else { throw SessionReplayFailure.captureBufferOverflow }
-            await recorder.recordSourcePCM(chunk.pcm, sentAt: clock.now)
+            await recorder.recordSourcePCM(chunk.pcm, yieldReturnedAt: clock.now)
             sequenceNumber += 1
             deadline = deadline.advanced(by: .milliseconds(40))
             try await clock.sleep(until: deadline, tolerance: .milliseconds(8))
