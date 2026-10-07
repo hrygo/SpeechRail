@@ -142,6 +142,17 @@ def _contract() -> dict:
     )
 
 
+def test_health_contract_covers_every_worker_lifecycle_state() -> None:
+    from speechrail.runtime.worker_lease import WorkerLifecycleState
+
+    properties = _contract()["components"]["schemas"]["HealthResponse"]["properties"]
+    expected = {str(state) for state in WorkerLifecycleState} | {"inactive", "unconfigured"}
+    for field in ("asr_state", "tts_state", "streaming_state"):
+        assert set(properties[field]["enum"]) == expected, field
+    metrics = _contract()["components"]["schemas"]["RuntimeMetrics"]["properties"]
+    assert expected <= set(metrics["workers"]["additionalProperties"]["enum"])
+
+
 def test_speech_request_body_is_the_openai_subset() -> None:
     """SpeechRail options live in headers, so the body must not accept them."""
 

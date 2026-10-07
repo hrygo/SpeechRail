@@ -4,9 +4,93 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from speechrail.application.lifecycle import RuntimeLifecycle
 from speechrail.runtime.asr_mode import AsrModeGate
 from speechrail.runtime.worker_lease import WorkerIdleEvictor
+
+
+def test_internal_close_cancellation_keeps_other_workers_under_ttl_monitoring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    import speechrail.runtime.worker_lease as worker_lease
+
+    now = [100.0]
+    monkeypatch.setattr(worker_lease, "time", SimpleNamespace(monotonic=lambda: now[0]))
+
+    async def run() -> None:
+        reclaimed = asyncio.Event()
+
+        class CancelledWorker(_FakeWorker):
+            async def close(self) -> None:
+                raise asyncio.CancelledError
+
+        class OtherWorker(_FakeWorker):
+            async def close(self) -> None:
+                await super().close()
+                reclaimed.set()
+
+        failed, other = CancelledWorker(), OtherWorker()
+        evictor = WorkerIdleEvictor(
+            [failed, other], idle_timeout_seconds=10, check_interval_seconds=0,
+        )
+        now[0] = 111.0
+        await evictor.start()
+        try:
+            await asyncio.wait_for(reclaimed.wait(), timeout=1)
+            assert evictor.state_of(failed).value == "reclamation_failed"
+            assert evictor.lease_lock_of(failed).reclamation_failed
+            assert evictor.state_of(other).value == "cold_evicted"
+            assert evictor._task is not None and not evictor._task.done()
+        finally:
+            await evictor.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("internal_cancel", [False, True])
+def test_monitor_shutdown_cancellation_survives_failed_owned_close(
+    monkeypatch: pytest.MonkeyPatch, internal_cancel: bool,
+) -> None:
+    from types import SimpleNamespace
+
+    import speechrail.runtime.worker_lease as worker_lease
+
+    now = [100.0]
+    monkeypatch.setattr(worker_lease, "time", SimpleNamespace(monotonic=lambda: now[0]))
+
+    async def run() -> None:
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        class FailingWorker(_FakeWorker):
+            async def close(self) -> None:
+                entered.set()
+                await release.wait()
+                if internal_cancel:
+                    raise asyncio.CancelledError
+                raise OSError("fake reap failure")
+
+        failed, other = FailingWorker(), _FakeWorker()
+        evictor = WorkerIdleEvictor(
+            [failed, other], idle_timeout_seconds=10, check_interval_seconds=0,
+        )
+        now[0] = 111.0
+        await evictor.start()
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        monitor = evictor._task
+        stopping = asyncio.create_task(evictor.close())
+        await asyncio.sleep(0)
+        assert not stopping.done()
+        release.set()
+        await asyncio.wait_for(stopping, timeout=1)
+        assert monitor is not None and monitor.cancelled()
+        assert evictor.state_of(failed).value == "reclamation_failed"
+        assert not other.closed
+
+    asyncio.run(run())
 
 
 class _FakeWorker:
