@@ -93,7 +93,7 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 | R05 #242 | MERGED | PR #323 / `ff34bfcf` | 42 定向 Swift 测试；去掉事务使 3 项转红；CI run `37549739387` 的 Swift/App/必需 gate 通过 |
 | R03 #235 | MERGED | PR #325 / `baafb59b` | 372 项定向 fake/HTTP/contract、Ruff/Mypy；独立审查 Required 已修；CI `37556276635` 全部必要检查通过 |
 | R04 #237+#236 | MERGED | PR #328 / `151297f6` | 283 定向 Swift、2 项 Python 守卫、独立编译；Required 已修，CI `37560283532` 全绿后合并 |
-| R06 #241 | 实施与验证中 | 分支 `codex/238-r06-session-seal` | 已同步 `151297f6`；136 项定向测试通过，整包独立审查进行中，CI 待完成 |
+| R06 #241 | CI 待完成 | PR #329 / 分支 `codex/238-r06-session-seal` | 已同步 `151297f6`；138 XCTest +77 Swift Testing 通过，首轮 Required 已修，新 head CI 待完成 |
 | R07 #232 | planned | 无 | 注意 consumer-replay 分支 |
 | R08 #231 | planned | 无 | 注意 clear-barrier 分支，只读合同 |
 | R09 #234 | planned | 无 | #249 关闭已解锁，排末位 |
@@ -138,6 +138,8 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 - draft PR #329 首次 CI `37561798476`：新测试文件未登记 Xcode target，Quality Gates 失败。为避让在途 pbxproj，原样将 15 项封存合同测试搬入已登记的 `AssistantEndRoutingTests.swift`；覆盖守卫 OK，搬迁后 19 XCTest 通过。
 - 首次 Swift CI 的 1251 XCTest 均通过，但提词器一次运行回归在释放占用后立即断言 manual 失败；本地同一反例也转红。Ruling：占用释放证明租约交还，不能代替功能层等待封存返回后的收尾证明。测试增加有界等待 manual，保留资源/phase/位置断言；不改变产品或 ASR 语义。已核对其他登记 worktree 与 consumer-replay 分支该测试文件没有重叠改动；代价是多一个异步测试屏障，若最终不收尾仍明确失败。
 - 上述测试屏障修订后扩大定向套件：原 136 XCTest + 77 项提词器生命周期 Swift Testing 全部通过；新 head 的必要 CI 与独立首轮审查仍待完成。
+- 首轮整包独立审查发现 1 项 Required：助手单槽恢复入口被新会话成功清空或失败覆盖。两个跨会话反例先出现 10 个失败断言；修订按记录保留原因及冻结复制文本，成功只移除该记录，按失败顺序逐条重试。reviewer 未运行测试、不做二次审查，修订由主代理红→绿和最终定向套件验证。
+- 最终定向命令在原过滤项后追加 `TeleprompterSessionLifecycleTests`，138 XCTest +77 Swift Testing 全部通过（含 17 个封存合同测试）。`cd7b13dd` 的 CI `37562445317` 全绿，但上述 Required 修订还须匹配新 head 的必要 CI，尚未合并。
 - 不改 schema v13、ASR 识别事实/协议、pbxproj；不持久化跨重启 pending 命令，不运行真实音频/LLM、UI、服务、模型或发布。
 
 ## 6. 来源

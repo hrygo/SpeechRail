@@ -549,6 +549,58 @@ final class SessionSealContractTests: XCTestCase {
         XCTAssertNil(assistant.lastFinalizedSessionID)
     }
 
+    func testNewSuccessfulConversationKeepsOldFailedSealAndCopyText() async throws {
+        let assistant = makeTextAssistant()
+        _ = await assistant.ask(typed: "第一场需要恢复的正文。")
+        let first = try XCTUnwrap(assistant.sessionID)
+        try sql("""
+            CREATE TRIGGER fail_archive BEFORE UPDATE OF state ON session
+            BEGIN SELECT RAISE(ABORT, 'archive unavailable'); END;
+            """)
+        await assistant.endConversation()
+        let reason = try XCTUnwrap(assistant.pendingSealReason)
+        try sql("DROP TRIGGER fail_archive;")
+        _ = await assistant.ask(typed: "第二场已经保存的正文。")
+        let second = try XCTUnwrap(assistant.sessionID)
+        XCTAssertNotEqual(first, second)
+        await assistant.endConversation()
+        XCTAssertEqual(assistant.lastFinalizedSessionID, second)
+        XCTAssertEqual(assistant.pendingSealRecordID, first)
+        XCTAssertEqual(assistant.pendingSealReason, reason)
+        XCTAssertTrue(assistant.unsavedTranscriptText().contains("第一场需要恢复的正文。"))
+        XCTAssertFalse(assistant.unsavedTranscriptText().contains("第二场已经保存的正文。"))
+        let recovered = await assistant.retryPendingSeal()
+        XCTAssertTrue(recovered)
+        let stored = try await store.session(id: first)
+        XCTAssertEqual(stored?.state, .archived)
+        XCTAssertNil(assistant.pendingSealRecordID)
+    }
+
+    func testMultipleFailedConversationsRemainIndividuallyRetryable() async throws {
+        let assistant = makeTextAssistant()
+        _ = await assistant.ask(typed: "第一场失败正文。")
+        let first = try XCTUnwrap(assistant.sessionID)
+        try sql("""
+            CREATE TRIGGER fail_archive BEFORE UPDATE OF state ON session
+            BEGIN SELECT RAISE(ABORT, 'archive unavailable'); END;
+            """)
+        await assistant.stopCapture()
+        _ = await assistant.ask(typed: "第二场失败正文。")
+        let second = try XCTUnwrap(assistant.sessionID)
+        await assistant.stopCapture()
+        XCTAssertEqual(assistant.pendingSealRecordID, first)
+        try sql("DROP TRIGGER fail_archive;")
+        let recoveredFirst = await assistant.retryPendingSeal()
+        XCTAssertTrue(recoveredFirst)
+        XCTAssertEqual(assistant.lastFinalizedSessionID, first)
+        XCTAssertEqual(assistant.pendingSealRecordID, second)
+        XCTAssertTrue(assistant.unsavedTranscriptText().contains("第二场失败正文。"))
+        let recoveredSecond = await assistant.retryPendingSeal()
+        XCTAssertTrue(recoveredSecond)
+        XCTAssertEqual(assistant.lastFinalizedSessionID, second)
+        XCTAssertNil(assistant.pendingSealRecordID)
+    }
+
     func testMeetingRequestJoiningBasicArchiveStillRequiresSnapshot() async throws {
         let original = try await record(.meeting)
         _ = try await store.appendLine(

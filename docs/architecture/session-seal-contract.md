@@ -26,6 +26,8 @@ Coordinator 的 `pendingSeals` 按 record ID 保存当前进程内命令。失�
 
 `sealSession`、`sealSessionReporting`、`finalize` 和助手目标结束使用同一内核。助手自身的失败状态与复制出口保留；skipped 表示尚未确认，重试不得清掉恢复目标并返回成功。
 
+助手按记录保存失败原因及冻结的复制文本，界面恢复入口按失败顺序逐条处理。新会话成功只清除自己的恢复目标，新会话失败不能覆盖旧目标；旧目标重试成功后才推进到下一条。新会话的文字不混入旧目标的复制内容。
+
 ## await 与租约
 
 `finalize` 在入口冻结 kind、lease ID、record ID、结束时间、暂停 ID 和 stopper。相同租约的重复结束共享任务；相同记录的并发封存共享提交，会议调用加入时不能降低来源成功条件。

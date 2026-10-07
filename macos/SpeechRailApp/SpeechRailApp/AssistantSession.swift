@@ -190,11 +190,17 @@ public final class AssistantSession {
     public private(set) var level: Double = 0
     public private(set) var sessionID: String?
     public private(set) var lastFailure: String?
-    /// VA-03/A47：封存失败后保留的恢复出口。成功封存后清空。
+    /// VA-03/A47：按失败顺序呈现恢复出口；确认一条记录只移除该目标。
     /// View 用它提供“重试封存 / 复制未保存文本”入口；
     /// lastFailure 只做提示文案，不承载恢复动作。
-    public private(set) var pendingSealRecordID: String?
-    public private(set) var pendingSealReason: String?
+    public var pendingSealRecordID: String? { pendingAssistantSeals.first?.recordID }
+    public var pendingSealReason: String? { pendingAssistantSeals.first?.reason }
+    private struct PendingAssistantSeal {
+        let recordID: String
+        var reason: String
+        let transcriptText: String
+    }
+    private var pendingAssistantSeals: [PendingAssistantSeal] = []
     /// 本场用的人设（**开始那一刻定死**）。
     public private(set) var persona: Persona?
     public private(set) var voiceID: String?
@@ -1632,8 +1638,7 @@ public final class AssistantSession {
         }
         if !inputsSaved, let endingSession {
             lastFailure = "部分输入尚未保存，请重试保存；本轮记录尚未封存。"
-            pendingSealRecordID = endingSession
-            pendingSealReason = lastFailure
+            retainPendingSeal(id: endingSession, reason: lastFailure ?? "部分输入尚未保存。")
             // 归还本场设备但不封存；coordinator 的 stopper 返回后也不能误宣称保存齐全。
             if coordinator.activeSessionID == endingSession, coordinator.occupancy?.kind == .assistant {
                 coordinator.abandonOccupancy()
@@ -1653,19 +1658,7 @@ public final class AssistantSession {
         if inputsSaved, isTextOnlyConversation, let recordID = sessionID {
             // VA-03：真实结果封存。失败保留 pendingSeal 与内存文本，硬件仍释放。
             let seal = await coordinator.sealSessionReporting(id: recordID, reason: .user)
-            switch seal {
-            case .sealed:
-                pendingSealRecordID = nil
-                pendingSealReason = nil
-                lastFinalizedSessionID = recordID
-            case .failed(let failedID, let reason):
-                lastFailure = "记录尚未保存（\(reason)），可在记录库中重试。"
-                pendingSealRecordID = failedID ?? recordID
-                pendingSealReason = reason
-            case .skipped:
-                pendingSealRecordID = nil
-                pendingSealReason = nil
-            }
+            recordSealResult(seal, targetID: recordID)
         }
         resetToIdleKeepingTurns()
     }
@@ -1681,34 +1674,57 @@ public final class AssistantSession {
             _ = inputPersistence.retry(sessionID: recordID, lineID: failure.command.lineID)
         }
         guard await waitForInputSaves(sessionID: recordID) else {
-            pendingSealReason = "仍有输入未保存，请重试保存。"
-            lastFailure = pendingSealReason
+            retainPendingSeal(id: recordID, reason: "仍有输入未保存，请重试保存。")
+            lastFailure = "仍有输入未保存，请重试保存。"
             return false
         }
         let seal = await coordinator.sealSessionReporting(id: recordID, reason: .user)
+        recordSealResult(seal, targetID: recordID)
         switch seal {
         case .sealed:
-            pendingSealRecordID = nil
-            pendingSealReason = nil
-            lastFinalizedSessionID = recordID
             return true
-        case .failed(_, let reason):
-            pendingSealReason = reason
-            lastFailure = "记录尚未保存（\(reason)），可在记录库中重试。"
-            return false
-        case .skipped:
-            pendingSealReason = "记录仍在使用，尚未确认归档。"
-            lastFailure = pendingSealReason
+        case .failed, .skipped:
             return false
         }
     }
 
-    /// VA-03/A47：复制未保存文本的来源。内存 turns 为准，不读库；
-    /// turns 为空时返回空字符串，调用方按“无可复制内容”处理。
+    private func retainPendingSeal(id: String, reason: String) {
+        if let index = pendingAssistantSeals.firstIndex(where: { $0.recordID == id }) {
+            pendingAssistantSeals[index].reason = reason
+        } else {
+            pendingAssistantSeals.append(PendingAssistantSeal(
+                recordID: id, reason: reason, transcriptText: transcriptText(for: id)
+            ))
+        }
+    }
+
+    private func recordSealResult(_ result: SessionCoordinator.SessionSealResult, targetID: String) {
+        switch result {
+        case .sealed(let id):
+            pendingAssistantSeals.removeAll { $0.recordID == id }
+            lastFinalizedSessionID = id
+        case .failed(let id, let reason):
+            retainPendingSeal(id: id ?? targetID, reason: reason)
+            lastFailure = "记录尚未保存（\(reason)），可在记录库中重试。"
+        case .skipped:
+            let reason = "记录仍在使用，尚未确认归档。"
+            retainPendingSeal(id: targetID, reason: reason)
+            lastFailure = reason
+        }
+    }
+
+    /// VA-03/A47：优先复制恢复目标冻结的正文；没有恢复目标才取本场 turns。
+    /// 不读库，也不把新场的文字混入旧目标。
     public func unsavedTranscriptText() -> String {
-        var texts = turns.map(\.text)
-        if let recordID = pendingSealRecordID ?? sessionID {
-            let projectedIDs = Set(turns.map(\.id))
+        if let pending = pendingAssistantSeals.first { return pending.transcriptText }
+        return transcriptText(for: sessionID)
+    }
+
+    private func transcriptText(for recordID: String?) -> String {
+        let projected = recordID == sessionID ? turns : []
+        var texts = projected.map(\.text)
+        if let recordID {
+            let projectedIDs = Set(projected.map(\.id))
             let unprojected = inputPersistence.pendingCommands(sessionID: recordID)
                 + inputPersistence.failures(sessionID: recordID).map(\.command)
             texts += unprojected
@@ -1770,20 +1786,7 @@ public final class AssistantSession {
             // VA-03 真实结果封存：失败保留 pendingSeal 与原因，
             // 界面走重试/复制出口，不发布虚假的“已封存”。
             let seal = await coordinator.sealSessionReporting(id: recordID, reason: .user)
-            switch seal {
-            case .sealed:
-                pendingSealRecordID = nil
-                pendingSealReason = nil
-            case .failed(let failedID, let reason):
-                lastFailure = "记录尚未保存（\(reason)），可在记录库中重试。"
-                pendingSealRecordID = failedID ?? recordID
-                pendingSealReason = reason
-            case .skipped:
-                // 纯文字记录本就不在 occupancy 里：跳过只表示无需再封，
-                // 本场仍收尾为 idle，不发布虚假的已封存 ID。
-                pendingSealRecordID = nil
-                pendingSealReason = nil
-            }
+            recordSealResult(seal, targetID: recordID)
             // 只有真实 sealed 才发布界面落地结果；failed/skipped 不伪造已封存。
             if case .sealed = seal {
                 lastFinalizedSessionID = recordID
@@ -1803,19 +1806,7 @@ public final class AssistantSession {
                 return .noConversation
             }
             let seal = await coordinator.sealSessionReporting(id: recordID, reason: .user)
-            switch seal {
-            case .sealed:
-                pendingSealRecordID = nil
-                pendingSealReason = nil
-                lastFinalizedSessionID = recordID
-            case .failed(let failedID, let reason):
-                lastFailure = "记录尚未保存（\(reason)），可在记录库中重试。"
-                pendingSealRecordID = failedID ?? recordID
-                pendingSealReason = reason
-            case .skipped:
-                pendingSealRecordID = nil
-                pendingSealReason = nil
-            }
+            recordSealResult(seal, targetID: recordID)
             resetToIdleKeepingTurns()
             if case .sealed = seal {
                 return .ended(recordID: recordID)
@@ -1832,13 +1823,15 @@ public final class AssistantSession {
             return .superseded
         }
         await stopCapture()
-        if pendingSealRecordID == target.recordID { return .noConversation }
+        if pendingAssistantSeals.contains(where: { $0.recordID == target.recordID }) {
+            return .noConversation
+        }
         let result = await coordinator.endAssistant(target, reason: .user)
         if case .ended(let recordID) = result {
+            if let recordID { pendingAssistantSeals.removeAll { $0.recordID == recordID } }
             lastFinalizedSessionID = recordID ?? lastFinalizedSessionID
         } else if case .failed(let recordID, let reason) = result {
-            pendingSealRecordID = recordID
-            pendingSealReason = reason
+            if let recordID { retainPendingSeal(id: recordID, reason: reason) }
             lastFailure = "记录尚未保存（\(reason)），可在记录库中重试。"
         }
         return result
@@ -1870,9 +1863,8 @@ public final class AssistantSession {
         ttsStream = nil
         stopPumpTasks()
         if let endingSession, !(await waitForInputSaves(sessionID: endingSession)) {
-            pendingSealRecordID = endingSession
-            pendingSealReason = "仍有输入未保存，记录尚未封存。"
-            lastFailure = pendingSealReason
+            retainPendingSeal(id: endingSession, reason: "仍有输入未保存，记录尚未封存。")
+            lastFailure = "仍有输入未保存，记录尚未封存。"
             return false
         }
         // M2/V06:纯文字结束同样有界等标题 effect，不挡封存报告。
