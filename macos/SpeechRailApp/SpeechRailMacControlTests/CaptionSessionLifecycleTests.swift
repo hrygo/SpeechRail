@@ -24,6 +24,7 @@ final class CaptionSessionLifecycleTests: XCTestCase {
 
     private func makeHarness(
         saveLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
+        attachSpeakerLabel: (@Sendable (String, String?) async throws -> Void)? = nil,
         configuration: TranscriptPersistenceQueue.Configuration = .init(),
         makeRealtimeClient: (@Sendable (CaptionRealtimeClientConfiguration) -> any CaptionRealtimeClient)? = nil
     ) async throws -> Harness {
@@ -48,7 +49,8 @@ final class CaptionSessionLifecycleTests: XCTestCase {
                 makeRealtimeClient?(configuration) ?? clients.make(configuration)
             },
             persistenceConfiguration: configuration,
-            saveLine: saveLine
+            saveLine: saveLine,
+            attachSpeakerLabel: attachSpeakerLabel
         )
         let session = CaptionSession(
             coordinator: coordinator,
@@ -132,6 +134,61 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         let rows = try await h.store.lines(sessionID: id)
         XCTAssertEqual(rows.first?.text, "缓存归属字幕")
         XCTAssertEqual(rows.first?.timingQuality, .aligned)
+    }
+
+    func testSavedCaptionAttributionHonoursProjectionCapacity() async throws {
+        let h = try await makeHarness(configuration: .init(maximumPendingProjections: 0))
+        let id = try await start(h)
+        try await h.emit(.completed(itemID: "item", transcript: "已保存字幕正文"))
+        try await h.settle { $0.session.lines.count == 1 }
+        try await h.emit(.attribution(itemID: "item", units: [
+            .init(segmentUID: "unit", speaker: "A", timingQuality: "aligned")
+        ], isFinal: true))
+        try await h.emit(.serverError(code: "control", message: "容量后控制", requestID: nil))
+        try await h.settle { $0.session.lastFailure == "容量后控制" }
+        _ = await h.session.waitForPendingSaves(recordID: id)
+        let rows = try await h.store.lines(sessionID: id)
+        XCTAssertEqual(rows.map(\.text), ["已保存字幕正文"])
+        XCTAssertEqual(rows.first?.timingQuality, .unavailable, "rejected auxiliary work must not run inline")
+    }
+
+    func testBlockedCaptionMetadataKeepsControlResponsiveAndSettlementPending() async throws {
+        let gate = SpeakerAttributionWriteGate()
+        let h = try await makeHarness(attachSpeakerLabel: { try await gate.write($0, label: $1) })
+        await gate.attach(h.store)
+        h.session.diarizationPreference = { true }
+        let id = try await start(h)
+        try await h.emit(.completed(itemID: "item", transcript: "metadata等待中的字幕正文"))
+        try await h.settle { $0.session.lines.count == 1 }
+        try await h.emit(.attribution(itemID: "item", units: [
+            .init(segmentUID: "unit", speaker: "A", timingQuality: "aligned")
+        ], isFinal: true))
+        try await h.settle { _ in await gate.entered }
+        try await h.emit(.attribution(itemID: "item", units: [
+            .init(segmentUID: "unit", speaker: "B", timingQuality: "aligned")
+        ], isFinal: false))
+        try await h.emit(.attribution(itemID: "item", units: [
+            .init(segmentUID: "another-unit", speaker: nil, timingQuality: "unavailable")
+        ], isFinal: true))
+        try await h.emit(.serverError(code: "control", message: "metadata等待时控制", requestID: nil))
+        var settled = false
+        let waiter = Task {
+            _ = await h.session.waitForPendingSaves(recordID: id)
+            settled = true
+        }
+        for _ in 0..<200 {
+            if h.session.lastFailure == "metadata等待时控制" { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertEqual(h.session.lastFailure, "metadata等待时控制")
+        XCTAssertFalse(settled)
+        XCTAssertTrue(h.session.pendingSaveRecordIDs.contains(id))
+        await gate.release()
+        await waiter.value
+        let rows = try await h.store.lines(sessionID: id)
+        XCTAssertEqual(rows.first?.speakerLabel, "B", "accepted unit revisions must survive a later partial batch")
+        XCTAssertEqual(rows.first?.timingQuality, .aligned)
+        XCTAssertEqual(h.session.lines.first?.speakerLabel, "B")
     }
 
     func testCaptionRecoveryPartialAlsoRetainsFixedIdentityAndStaysOutOfFormalRows() async throws {

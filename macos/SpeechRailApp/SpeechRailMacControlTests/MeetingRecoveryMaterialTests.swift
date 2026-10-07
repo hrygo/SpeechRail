@@ -137,6 +137,189 @@ final class MeetingRecoveryMaterialTests: XCTestCase {
     }
 }
 
+@MainActor
+final class SpeakerLabelingPersistenceTests: XCTestCase {
+    private var directory: URL!
+    private var store: SessionStore!
+    private var coordinator: SessionCoordinator!
+    private var defaults: UserDefaults!
+    private var defaultsName: String!
+
+    override func setUp() async throws {
+        directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speaker-persistence-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        store = SessionStore(directory: directory)
+        try await store.open()
+        defaultsName = "speaker-persistence-\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: defaultsName)
+        coordinator = SessionCoordinator(store: store, defaults: defaults)
+    }
+
+    override func tearDown() async throws {
+        await store.close()
+        defaults.removePersistentDomain(forName: defaultsName)
+        try FileManager.default.removeItem(at: directory)
+        try await super.tearDown()
+    }
+
+    private func record(with ids: [String]) async throws -> String {
+        let record = try await store.createSession(
+            SessionDraft(kind: .meeting, engineProfile: "test", audioSource: .microphone)
+        )
+        for id in ids {
+            _ = try await store.appendLine(
+                LineDraft(sessionID: record.id, role: .speaker, text: id, source: .microphone), id: id
+            )
+        }
+        return record.id
+    }
+
+    private func waitUntilEntered(_ gate: SpeakerAttributionWriteGate) async throws {
+        for _ in 0..<1_000 {
+            if await gate.entered { return }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTFail("speaker write never entered the gate")
+        await gate.release()
+    }
+
+    func testWholeBatchKeepsOldTargetsAcrossNewSessionDuringWrite() async throws {
+        let old = try await record(with: ["old-one", "old-two"])
+        let new = try await record(with: ["new-two"])
+        let gate = SpeakerAttributionWriteGate(store: store)
+        let owner = SpeakerLabeling(coordinator: coordinator, attachLabel: { try await gate.write($0, label: $1) })
+        owner.begin(sessionID: old, enabled: true)
+        let units: [RealtimeASRClient.AttributionUnit] = [
+            .init(segmentUID: "one", speaker: "A"), .init(segmentUID: "two", speaker: "B")
+        ]
+        owner.register(units: [units[0]], lineID: "old-one", ordinal: 1)
+        owner.register(units: [units[1]], lineID: "old-two", ordinal: 2)
+        let task = Task { await owner.apply(units: units) }
+        try await waitUntilEntered(gate)
+        owner.begin(sessionID: new, enabled: true)
+        owner.register(units: [.init(segmentUID: "two", speaker: nil)], lineID: "new-two", ordinal: 1)
+        await gate.release()
+        await task.value
+        let oldRows = try await store.lines(sessionID: old)
+        let newRows = try await store.lines(sessionID: new)
+        XCTAssertEqual(oldRows.map(\.speakerLabel), ["A", "B"])
+        XCTAssertNil(newRows.first?.speakerLabel)
+        XCTAssertTrue(owner.labels.isEmpty, "old completions must not populate new-session labels")
+    }
+
+    func testHistoryLoadInvalidatesLateLiveProjection() async throws {
+        let old = try await record(with: ["old"])
+        let new = try await record(with: ["history"])
+        let gate = SpeakerAttributionWriteGate(store: store)
+        let owner = SpeakerLabeling(coordinator: coordinator, attachLabel: { try await gate.write($0, label: $1) })
+        owner.begin(sessionID: old, enabled: true)
+        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit", speaker: "A")]
+        owner.register(units: units, lineID: "old", ordinal: 1)
+        let task = Task { await owner.apply(units: units) }
+        try await waitUntilEntered(gate)
+        owner.load(sessionID: new, labels: ["C"], displayNames: ["C": "历史说话人"])
+        await gate.release()
+        await task.value
+        XCTAssertEqual(owner.labels, ["C"])
+        XCTAssertNil(owner.attributedLabel(forLineID: "old"))
+        let rows = try await store.lines(sessionID: old)
+        XCTAssertEqual(rows.first?.speakerLabel, "A", "accepted old work still writes its frozen target")
+    }
+
+    func testRebindingUnitDoesNotReusePriorLinesPersistenceProof() async throws {
+        let id = try await record(with: ["one", "two"])
+        let owner = SpeakerLabeling(coordinator: coordinator)
+        owner.begin(sessionID: id, enabled: true)
+        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit", speaker: "A")]
+        owner.register(units: units, lineID: "one", ordinal: 1)
+        await owner.apply(units: units)
+        owner.register(units: units, lineID: "two", ordinal: 2)
+        await owner.apply(units: units)
+        let rows = try await store.lines(sessionID: id)
+        XCTAssertEqual(rows.map(\.speakerLabel), ["A", "A"])
+    }
+
+    func testRebindingDuringWriteDoesNotMarkNewLineAsAlreadyPersisted() async throws {
+        let id = try await record(with: ["one", "two"])
+        let gate = SpeakerAttributionWriteGate(store: store)
+        let owner = SpeakerLabeling(coordinator: coordinator, attachLabel: { try await gate.write($0, label: $1) })
+        owner.begin(sessionID: id, enabled: true)
+        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit", speaker: "A")]
+        owner.register(units: units, lineID: "one", ordinal: 1)
+        let task = Task { await owner.apply(units: units) }
+        try await waitUntilEntered(gate)
+        owner.register(units: units, lineID: "two", ordinal: 2)
+        await gate.release()
+        await task.value
+        await owner.apply(units: units)
+        let rows = try await store.lines(sessionID: id)
+        XCTAssertEqual(rows.map(\.speakerLabel), ["A", "A"])
+    }
+
+    func testQueuedCommandKeepsItsTargetAcrossSameRecordGenerationReset() async throws {
+        let id = try await record(with: ["old-generation", "new-generation"])
+        let owner = SpeakerLabeling(coordinator: coordinator)
+        owner.begin(sessionID: id, enabled: true)
+        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit", speaker: "A")]
+        owner.register(units: units, lineID: "old-generation", ordinal: 1)
+        let command = owner.freezeAttribution(units: units)
+        owner.begin(sessionID: id, enabled: true)
+        owner.register(
+            units: [.init(segmentUID: "unit", speaker: nil)], lineID: "new-generation", ordinal: 2
+        )
+        await owner.apply(command)
+        let rows = try await store.lines(sessionID: id)
+        XCTAssertEqual(rows.map(\.speakerLabel), ["A", nil])
+        XCTAssertTrue(owner.labels.isEmpty)
+        XCTAssertNil(owner.attributedLabel(forLineID: "new-generation"))
+    }
+
+    func testQueuedNilRevisionClearsPriorWriteInsteadOfBeingDiscardedAtAcceptance() async throws {
+        let id = try await record(with: ["line"])
+        let gate = SpeakerAttributionWriteGate(store: store)
+        let owner = SpeakerLabeling(coordinator: coordinator, attachLabel: { try await gate.write($0, label: $1) })
+        owner.begin(sessionID: id, enabled: true)
+        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit", speaker: "A")]
+        owner.register(units: units, lineID: "line", ordinal: 1)
+        let first = Task { await owner.apply(units: units) }
+        try await waitUntilEntered(gate)
+        let clear = owner.freezeAttribution(units: [.init(segmentUID: "unit", speaker: nil)])
+        await gate.release()
+        await first.value
+        await owner.apply(clear)
+        let rows = try await store.lines(sessionID: id)
+        XCTAssertNil(rows.first?.speakerLabel)
+        XCTAssertNil(owner.attributedLabel(forLineID: "line"))
+    }
+}
+
+actor SpeakerAttributionWriteGate {
+    private var store: SessionStore?
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var blocked = true
+    private(set) var entered = false
+
+    init(store: SessionStore? = nil) { self.store = store }
+
+    func attach(_ store: SessionStore) { self.store = store }
+
+    func write(_ lineID: String, label: String?) async throws {
+        if blocked {
+            entered = true
+            await withCheckedContinuation { continuation = $0 }
+        }
+        guard let store else { throw TranscriptPersistenceGate.Failure.unavailable }
+        try await store.attachSpeakerLabel(lineID: lineID, label: label)
+    }
+
+    func release() {
+        blocked = false
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
 /// 真实 Store 边界前的确定性 Gate；不接设备或网络。
 actor TranscriptPersistenceGate {
     enum Failure: Error { case unavailable }

@@ -263,7 +263,7 @@ public final class MeetingSession {
         self.audio = dependencies.makeAudioSource()
         self.port = port
         self.serviceKey = apiKey
-        self.labeling = SpeakerLabeling(coordinator: coordinator)
+        self.labeling = SpeakerLabeling(coordinator: coordinator, attachLabel: dependencies.attachSpeakerLabel)
         self.minutes = MinutesGenerator(coordinator: coordinator, provider: llmProvider)
         self.innerOS = InnerOSSession(coordinator: coordinator, provider: llmProvider)
         // 改了来源（改名 / 合并 / 标记「我」/ 拆出）就重算一次复核状态。
@@ -885,60 +885,84 @@ public final class MeetingSession {
         identity: TranscriptPreviewLedger.Identity
     ) async {
         let itemIdentity = TranscriptPreviewLedger.ItemIdentity(identity: identity, itemID: itemID)
-        guard identity == previewIdentity, !units.isEmpty else { return }
+        guard identity == previewIdentity, !units.isEmpty, let sessionID else { return }
         guard let entry = lineByItem[itemIdentity] else {
-            if let sessionID, !pendingAttributions.store(
+            if !pendingAttributions.store(
                 units, recordID: sessionID, identity: itemIdentity, labelsEnabled: labeling.isEnabled
             ) {
                 lastFailure = "部分说话人信息未能保存，正文继续保留。"
             }
             return
         }
-        labeling.register(units: units, lineID: entry.lineID, ordinal: entry.ordinal)
-        await labeling.apply(units: units)
-        guard identity == previewIdentity else { return }
-        // 时间证据回填（MA-02 / MC-15）：落库时写的是**观测**时间并标
-        // `unavailable`，对齐结果到达后把声学起止**连同质量一起**写回去。
-        // 只改标签不改值正是方案点名要修的路，所以这里走
-        // `attachAcousticTiming`——一条 UPDATE，不留"标签到了值没到"的中间态。
-        if timingQualityApplied.insert(entry.lineID).inserted,
-           let line = lines.first(where: { $0.id == entry.lineID }),
-           let upgraded = TranscriptTimeWindow.aligned(
-               observed: .observedOnly(start: line.start, end: line.end),
-               units: units,
-               sampleRate: RealtimeASRClient.sampleRate
-           ),
-           let acoustic = upgraded.speechRange {
-            do {
-                try await coordinator.attachAcousticTiming(
-                    lineID: entry.lineID,
-                    start: acoustic.lowerBound,
-                    end: acoustic.upperBound,
-                    quality: .aligned
-                )
-                // 内存里那一行也换成真实发声时刻，界面才不会再显示观测时间。
-                lines = lines.map { existing in
-                    guard existing.id == entry.lineID else { return existing }
-                    var updated = existing
-                    updated.start = acoustic.lowerBound
-                    updated.end = acoustic.upperBound
-                    updated.timingQuality = .aligned
-                    return updated
-                }
-            } catch {
-                lastFailure = error.localizedDescription
-                timingQualityApplied.remove(entry.lineID)
-            }
+        let line = lines.first { $0.id == entry.lineID }
+        enqueueAttribution(
+            recordID: sessionID, identity: identity, lineID: entry.lineID, ordinal: entry.ordinal,
+            units: units, labelsEnabled: labeling.isEnabled,
+            observedStart: line?.start, observedEnd: line?.end
+        )
+    }
+
+    /// receiver 只接纳冻结目标；正文和辅助 I/O 共用同一个有界 owner。
+    private func enqueueAttribution(
+        recordID: String, identity: TranscriptPreviewLedger.Identity, lineID: String, ordinal: Int,
+        units: [RealtimeASRClient.AttributionUnit], labelsEnabled: Bool,
+        observedStart: TimeInterval?, observedEnd: TimeInterval?
+    ) {
+        let owner: SpeakerLabeling
+        if sessionID == recordID, previewIdentity == identity {
+            owner = labeling
+        } else {
+            owner = SpeakerLabeling(coordinator: coordinator, attachLabel: dependencies.attachSpeakerLabel)
+            owner.begin(sessionID: recordID, enabled: labelsEnabled)
         }
-        // 归属修订不改正文，所以它更新的是内存里的 chip，不新增行（§15.3 第 2 条）。
-        if !lines.isEmpty {
-            lines = lines.map { line in
-                var updated = line
-                if let label = labeling.attributedLabel(forLineID: line.id) {
-                    updated.speakerLabel = label
+        let command = owner.freezeAttribution(units: units, lineID: lineID)
+        let acoustic: ClosedRange<TimeInterval>?
+        if let observedStart, let observedEnd {
+            acoustic = TranscriptTimeWindow.aligned(
+                observed: .observedOnly(start: observedStart, end: observedEnd),
+                units: units, sampleRate: RealtimeASRClient.sampleRate
+            )?.speechRange
+        } else {
+            acoustic = nil
+        }
+        let accepted = inputPersistence.enqueueProjection(
+            recordID: recordID, lineID: lineID, unitCount: units.count, coalescing: false
+        ) { [weak self, owner] in
+            guard let self else { return }
+            let confirmedLabels = await owner.apply(command)
+            var savedTiming: ClosedRange<TimeInterval>?
+            if let acoustic, !(self.sessionID == recordID && self.timingQualityApplied.contains(lineID)) {
+                do {
+                    try await self.coordinator.attachAcousticTiming(
+                        lineID: lineID, start: acoustic.lowerBound, end: acoustic.upperBound, quality: .aligned
+                    )
+                    savedTiming = acoustic
+                } catch {
+                    if self.sessionID == recordID, self.previewIdentity == identity {
+                        self.lastFailure = "有一条时间信息未能保存。"
+                    }
+                }
+            }
+            guard self.sessionID == recordID, self.previewIdentity == identity else { return }
+            if savedTiming != nil { self.timingQualityApplied.insert(lineID) }
+            self.lines = self.lines.map { existing in
+                guard existing.id == lineID else { return existing }
+                var updated = existing
+                if confirmedLabels.contains(lineID) {
+                    updated.speakerLabel = owner.attributedLabel(forLineID: lineID)
+                }
+                if let savedTiming {
+                    updated.start = savedTiming.lowerBound
+                    updated.end = savedTiming.upperBound
+                    updated.timingQuality = .aligned
                 }
                 return updated
             }
+        }
+        if accepted {
+            owner.register(units: units, lineID: lineID, ordinal: ordinal)
+        } else if sessionID == recordID, previewIdentity == identity {
+            lastFailure = "部分说话人和时间信息未能保存，正文已保留。"
         }
     }
 
@@ -1021,29 +1045,11 @@ public final class MeetingSession {
         }
         guard let payload = pendingAttributions.take(recordID: command.sessionID, identity: itemIdentity),
               command.formal else { return }
-        if sessionID == command.sessionID, identity == previewIdentity {
-            await applyAttribution(itemID: command.itemID, units: payload.units, identity: identity)
-        } else {
-            // 旧目标仍保存自己的归属；临时 owner 不改新会话的标签账本或界面。
-            let owner = SpeakerLabeling(coordinator: coordinator)
-            owner.begin(sessionID: command.sessionID, enabled: payload.labelsEnabled)
-            owner.register(units: payload.units, lineID: command.lineID, ordinal: ordinal)
-            await owner.apply(units: payload.units)
-            if let start = command.tStart, let end = command.tEnd,
-               let upgraded = TranscriptTimeWindow.aligned(
-                   observed: .observedOnly(start: start, end: end), units: payload.units,
-                   sampleRate: RealtimeASRClient.sampleRate
-               ), let acoustic = upgraded.speechRange {
-                do {
-                    try await coordinator.attachAcousticTiming(
-                        lineID: command.lineID, start: acoustic.lowerBound,
-                        end: acoustic.upperBound, quality: .aligned
-                    )
-                } catch {
-                    if sessionID == command.sessionID { lastFailure = "有一条时间信息未能保存。" }
-                }
-            }
-        }
+        enqueueAttribution(
+            recordID: command.sessionID, identity: identity, lineID: command.lineID, ordinal: ordinal,
+            units: payload.units, labelsEnabled: payload.labelsEnabled,
+            observedStart: command.tStart, observedEnd: command.tEnd
+        )
     }
 
     /// 空 final 的恢复材料**落成 partial 行**（MA-02 / MC-11）。

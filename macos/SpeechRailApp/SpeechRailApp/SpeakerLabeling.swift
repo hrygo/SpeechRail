@@ -52,6 +52,7 @@ public final class SpeakerLabeling {
     public static let maxSpeakers = 4
 
     private let coordinator: SessionCoordinator
+    private let attachLabel: @MainActor (String, String?) async throws -> Void
     /// 写下一条说话人修订之后要跑一次。
     ///
     /// 改名/合并/标记「我」都会追加一条 `kind='speaker'` 的修订事件，
@@ -80,14 +81,19 @@ public final class SpeakerLabeling {
     private var lineByUnit: [String: String] = [:]
     /// `segment_uid` → 已经写进库的那个标签（去重：同一个归属不重复写库）。
     private var appliedByUnit: [String: String] = [:]
+    private var lifecycle = UUID()
     /// 本场被并掉的标签 → 目标标签（"已并入 A"）。
     private var mergedInto: [String: String] = [:]
 
     public init(
         coordinator: SessionCoordinator,
+        attachLabel: (@MainActor (String, String?) async throws -> Void)? = nil,
         onSourceRevision: (@MainActor () async -> Void)? = nil
     ) {
         self.coordinator = coordinator
+        self.attachLabel = attachLabel ?? { lineID, label in
+            try await coordinator.attachSpeakerLabel(lineID: lineID, label: label)
+        }
         self.onSourceRevision = onSourceRevision
     }
 
@@ -95,6 +101,7 @@ public final class SpeakerLabeling {
 
     /// 新会话开始：账本归零（**不跨会话**——§14.3 的边界：不做跨会话身份）。
     public func begin(sessionID: String, enabled: Bool) {
+        lifecycle = UUID()
         self.sessionID = sessionID
         labels = []
         displayNames = [:]
@@ -110,12 +117,16 @@ public final class SpeakerLabeling {
     /// 打开一场历史记录：只读回已经落库的显示名与出现过的标签，
     /// 不重建 uid 表（那时候修订早结束了）。
     public func load(sessionID: String, labels: [String], displayNames: [String: String]) {
+        lifecycle = UUID()
+        lineByUnit = [:]
+        appliedByUnit = [:]
         self.sessionID = sessionID
         self.labels = labels
         self.displayNames = displayNames
     }
 
     public func end() {
+        lifecycle = UUID()
         sessionID = nil
         lineByUnit = [:]
         appliedByUnit = [:]
@@ -138,6 +149,9 @@ public final class SpeakerLabeling {
         guard isEnabled, !units.isEmpty else { return nil }
         var label: String?
         for unit in units {
+            if lineByUnit[unit.segmentUID] != lineID {
+                appliedByUnit.removeValue(forKey: unit.segmentUID)
+            }
             lineByUnit[unit.segmentUID] = lineID
             guard let speaker = unit.speaker, !speaker.isEmpty else { continue }
             if label == nil { label = speaker }
@@ -150,28 +164,66 @@ public final class SpeakerLabeling {
     ///
     /// 写库前比较一次：同一个归属重复到达（服务端会重复推稳定前缀）不产生第二次写。
     public func apply(units: [RealtimeASRClient.AttributionUnit]) async {
-        guard isEnabled else { return }
-        for unit in units {
-            guard let lineID = lineByUnit[unit.segmentUID] else { continue }
-            let desired = unit.speaker
-            if let applied = appliedByUnit[unit.segmentUID], applied == desired { continue }
-            // 没有任何归属可清除时（对齐单元本身不带说话人）不产生一次空写。
-            if desired == nil, appliedByUnit[unit.segmentUID] == nil { continue }
+        await apply(freezeAttribution(units: units))
+    }
+
+    struct AttributionCommand {
+        fileprivate let lifecycle: UUID
+        fileprivate let targets: [AttributionTarget]
+    }
+
+    fileprivate struct AttributionTarget {
+        let unitID: String
+        let lineID: String
+        let label: String?
+    }
+
+    /// 接纳时冻结整批坐标，供共享保存 owner 延后执行；不从新场账本重新查目标。
+    func freezeAttribution(
+        units: [RealtimeASRClient.AttributionUnit], lineID: String? = nil
+    ) -> AttributionCommand {
+        AttributionCommand(
+            lifecycle: lifecycle,
+            targets: isEnabled ? units.compactMap { unit in
+                guard let targetLineID = lineID ?? lineByUnit[unit.segmentUID] else { return nil }
+                return AttributionTarget(unitID: unit.segmentUID, lineID: targetLineID, label: unit.speaker)
+            } : []
+        )
+    }
+
+    @discardableResult
+    func apply(_ command: AttributionCommand) async -> Set<String> {
+        var confirmedLines: Set<String> = []
+        for target in command.targets {
+            let ownsProjection = lifecycle == command.lifecycle && lineByUnit[target.unitID] == target.lineID
+            if ownsProjection {
+                if let applied = appliedByUnit[target.unitID], applied == target.label {
+                    confirmedLines.insert(target.lineID)
+                    continue
+                }
+                // 同生命周期、同一行没有任何已写归属可清除时，省去空写。
+                if target.label == nil, appliedByUnit[target.unitID] == nil { continue }
+            }
             do {
-                try await coordinator.attachSpeakerLabel(lineID: lineID, label: desired)
+                try await attachLabel(target.lineID, target.label)
             } catch {
                 // 写不进去不是"归属没发生"，但也不该让整条链停下：正文已经落了库，
                 // 归属可以事后人工标注。如实留一句。
-                note = "有一条说话人归属没能写进记录库：\(error.localizedDescription)"
+                if lifecycle == command.lifecycle, lineByUnit[target.unitID] == target.lineID {
+                    note = "有一条说话人归属没能写进记录库：\(error.localizedDescription)"
+                }
                 continue
             }
-            if let desired {
-                appliedByUnit[unit.segmentUID] = desired
+            guard lifecycle == command.lifecycle, lineByUnit[target.unitID] == target.lineID else { continue }
+            confirmedLines.insert(target.lineID)
+            if let desired = target.label {
+                appliedByUnit[target.unitID] = desired
                 observe(label: desired, ordinal: nil)
             } else {
-                appliedByUnit.removeValue(forKey: unit.segmentUID)
+                appliedByUnit.removeValue(forKey: target.unitID)
             }
         }
+        return confirmedLines
     }
 
     /// 这一行当前归属到的标签（按 uid 反查）。

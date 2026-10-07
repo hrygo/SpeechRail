@@ -26,11 +26,13 @@ final class MeetingSessionLifecycleTests: XCTestCase {
 
     private func makeHarness(
         saveLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
+        attachSpeakerLabel: (@Sendable (String, String?) async throws -> Void)? = nil,
         configuration: TranscriptPersistenceQueue.Configuration = .init(),
         makeRealtimeClient: (@Sendable (MeetingRealtimeClientConfiguration) -> any MeetingRealtimeClient)? = nil
     ) async throws -> Harness {
         let harness = try await Harness.make(
-            saveLine: saveLine, configuration: configuration, makeRealtimeClient: makeRealtimeClient
+            saveLine: saveLine, attachSpeakerLabel: attachSpeakerLabel,
+            configuration: configuration, makeRealtimeClient: makeRealtimeClient
         )
         self.harness = harness
         return harness
@@ -91,6 +93,77 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         XCTAssertEqual(rows.count, 1)
         XCTAssertEqual(rows.first?.text, "缓存归属正文")
         XCTAssertEqual(rows.first?.timingQuality, .aligned)
+    }
+
+    func testSavedMeetingAttributionHonoursProjectionCapacity() async throws {
+        let h = try await makeHarness(configuration: .init(maximumPendingProjections: 0))
+        await h.clients.openGate()
+        await h.session.start(selection: MeetingAudioSelection())
+        try await h.settle { $0.phase == .recording }
+        let id = try XCTUnwrap(h.session.sessionID)
+        try await h.emit(.segmentClosed(
+            itemID: "item", sampleSpan: .init(startSample: 0, endSample: 24_000),
+            reason: .vad, commitEventID: nil
+        ))
+        try await h.emit(.completed(itemID: "item", transcript: "已保存会议正文"))
+        try await h.settle { $0.session.lines.count == 1 }
+        try await h.emit(.attribution(itemID: "item", units: [
+            .init(segmentUID: "unit", speaker: "A", audioStartSample: 0,
+                  audioEndSample: 24_000, timingQuality: "aligned")
+        ], isFinal: true))
+        try await h.emit(.serverError(code: "control", message: "容量后控制", requestID: nil))
+        try await h.settle { $0.session.lastFailure == "control：容量后控制" }
+        _ = await h.session.waitForPendingSaves(recordID: id)
+        let rows = try await h.store.lines(sessionID: id)
+        XCTAssertEqual(rows.map(\.text), ["已保存会议正文"])
+        XCTAssertEqual(rows.first?.timingQuality, .unavailable, "rejected auxiliary work must not run inline")
+    }
+
+    func testBlockedMeetingMetadataKeepsControlResponsiveAndSettlementPending() async throws {
+        let gate = SpeakerAttributionWriteGate()
+        let h = try await makeHarness(attachSpeakerLabel: { try await gate.write($0, label: $1) })
+        await gate.attach(h.store)
+        let preferencesName = "meeting-metadata-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: preferencesName))
+        defer { defaults.removePersistentDomain(forName: preferencesName) }
+        let preferences = SessionPreferences(defaults: defaults)
+        preferences.meetingDiarizationEnabled = true
+        h.session.preferences = { preferences }
+        await h.clients.openGate()
+        await h.session.start(selection: MeetingAudioSelection())
+        try await h.settle { $0.phase == .recording }
+        let id = try XCTUnwrap(h.session.sessionID)
+        try await h.emit(.completed(itemID: "item", transcript: "metadata等待中的会议正文"))
+        try await h.settle { $0.session.lines.count == 1 }
+        try await h.emit(.attribution(itemID: "item", units: [
+            .init(segmentUID: "unit", speaker: "A", timingQuality: "aligned")
+        ], isFinal: true))
+        try await h.settle { _ in await gate.entered }
+        try await h.emit(.attribution(itemID: "item", units: [
+            .init(segmentUID: "unit", speaker: "B", timingQuality: "aligned")
+        ], isFinal: false))
+        try await h.emit(.attribution(itemID: "item", units: [
+            .init(segmentUID: "another-unit", speaker: nil, timingQuality: "unavailable")
+        ], isFinal: true))
+        try await h.emit(.serverError(code: "control", message: "metadata等待时控制", requestID: nil))
+        var settled = false
+        let waiter = Task {
+            _ = await h.session.waitForPendingSaves(recordID: id)
+            settled = true
+        }
+        for _ in 0..<200 {
+            if h.session.lastFailure == "control：metadata等待时控制" { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertEqual(h.session.lastFailure, "control：metadata等待时控制")
+        XCTAssertFalse(settled, "metadata I/O must participate in the same record settlement")
+        XCTAssertTrue(h.session.pendingSaveRecordIDs.contains(id))
+        await gate.release()
+        await waiter.value
+        XCTAssertTrue(settled)
+        let rows = try await h.store.lines(sessionID: id)
+        XCTAssertEqual(rows.first?.speakerLabel, "B", "later partial batches cannot erase an accepted unit revision")
+        XCTAssertEqual(h.session.lines.first?.speakerLabel, "B")
     }
 
     func testCapacityFailureKeepsAcceptedCommandAndControlReceiverResponsive() async throws {
@@ -671,6 +744,7 @@ extension MeetingSessionLifecycleTests {
 
         static func make(
             saveLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
+            attachSpeakerLabel: (@Sendable (String, String?) async throws -> Void)? = nil,
             configuration: TranscriptPersistenceQueue.Configuration = .init(),
             makeRealtimeClient: (@Sendable (MeetingRealtimeClientConfiguration) -> any MeetingRealtimeClient)? = nil
         ) async throws -> Harness {
@@ -694,7 +768,8 @@ extension MeetingSessionLifecycleTests {
                 },
                 powerMonitor: power,
                 persistenceConfiguration: configuration,
-                saveLine: saveLine
+                saveLine: saveLine,
+                attachSpeakerLabel: attachSpeakerLabel
             )
             let session = MeetingSession(coordinator: coordinator, dependencies: dependencies)
             coordinator.starter = { _ in try await session.beginCapture() }

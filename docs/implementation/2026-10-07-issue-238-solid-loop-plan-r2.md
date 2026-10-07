@@ -10,7 +10,7 @@
 
 **当前实施目标（2026-10-07 更新）：** R01、R02、R05、R03、R04、R06 已合入；剩余 3 个 issue 分 3 个独立 PR，按 **R07 #232 → R08 #231 → R09 #234** 完成实施、整包独立审查、定向验证与必要 CI，验证通过立即 squash 合并，再刷新 main。每包 1–3 issue；不堆叠 PR、不 force-push、不关闭未验收 issue、不 `Closes #238`。保持 #245 的语义禁写区，最终逐条核对十一项验收矩阵后决定关闭 issue 与完成 goal。
 
-**最新执行目标（2026-10-07，Asia/Shanghai）：** 本次 fetch 后 `origin/main` 仍为 `4f6b7356`。当前分支为 `codex/238-r07-transcript-persistence`；Store 子任务 `36c0ba3a`、保存接线子任务 `e60b79b`、辅助工作预算子任务 `049ef127` 已推送。最近一次定向实测为 **201 项通过**（2026-10-07 11:38，Asia/Shanghai），本次仅更新目标账本，未重跑测试；尚无 R07 PR。立即目标是让 Meeting/Caption 接入已验证的 `enqueueProjection` 端口，冻结 metadata 完成的目标，将保存后 attribution I/O 移出 receiver；再补用户重试/复制、拒绝证明的恢复/结束流程，更新合同草稿并完成一次整包独立审查、必要 CI 和合并。编译错误、真实客户端单次终态下的保存重试、稳定 partial 和容量假成功已在子任务中修复，不能以这些局部通过记录宣称 R07 已验收。
+**最新执行目标（2026-10-07，Asia/Shanghai）：** 本次 fetch 后 `origin/main` 仍为 `4f6b7356`。当前分支为 `codex/238-r07-transcript-persistence`；Store 子任务 `36c0ba3a`、保存接线子任务 `e60b79b`、辅助工作预算子任务 `049ef127` 已推送。Meeting/Caption 保存后 attribution 已接入共享 owner，冻结 metadata 目标；最新 **211 项定向实测通过**，尚无 R07 PR。立即目标是补用户重试/复制、拒绝证明的恢复/结束流程，更新合同草稿并完成一次整包独立审查、必要 CI 和合并。编译错误、真实客户端单次终态下的保存重试、稳定 partial、容量假成功及归属串场已在子任务中修复，不能以这些局部通过记录宣称 R07 已验收。
 
 - **R07 完成门槛：** 固定身份和完整命令可恢复；行、ordinal 与 outbox 原子确认；失败和容量拒绝不能被成功封存掩盖；partial 不进入正式纪要、默认分享或正式来源快照；归属缓存有界且跨 record/generation 隔离。保存后 metadata I/O 归共享 owner 管理，迟到完成不改新场标签或文字；用户能重试/复制旧记录，并显式处理拒绝证明，不能永久卡在记录容量上限。完成一次整包独立审查，修复 Required，定向验证和必要 CI 通过后立即合并。
 - **后续目标：** R08 补足消费 EOF、保存 settled 和封存结果的完整收尾证明；R09 收敛 loader 内核规则。各自从更新后的 main 开独立 PR，分别只关联 #231、#234。
@@ -102,7 +102,7 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 | R03 #235 | MERGED | PR #325 / `baafb59b` | 372 项定向 fake/HTTP/contract、Ruff/Mypy；独立审查 Required 已修；CI `37556276635` 全部必要检查通过 |
 | R04 #237+#236 | MERGED | PR #328 / `151297f6` | 283 定向 Swift、2 项 Python 守卫、独立编译；Required 已修，CI `37560283532` 全绿后合并 |
 | R06 #241 | MERGED | PR #329 / `4f6b7356` | 138 XCTest +77 Swift Testing；首轮 Required 已修，CI `37562890224` 全绿后立即合并 |
-| R07 #232 | 实施中 | 分支 `codex/238-r07-transcript-persistence`；已推送 `049ef127` | 基于 `4f6b7356`；201 项为子任务实测，metadata 接线、恢复 UI、整包审查和 CI 尚待完成；避让 pbxproj |
+| R07 #232 | 实施中 | 分支 `codex/238-r07-transcript-persistence`；已推送 `049ef127` | 基于 `4f6b7356`；metadata 子任务定向实测 211 项，恢复 UI、整包审查和 CI 尚待完成；避让 pbxproj |
 | R08 #231 | planned | 无 | 注意 clear-barrier 分支，只读合同 |
 | R09 #234 | planned | 无 | #249 关闭已解锁，排末位 |
 
@@ -169,6 +169,10 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 - [保存合同草稿](../architecture/transcript-persistence-contract.md) 与架构导航已建立，`under_review`。下一步仍须移出保存后 attribution 的 receiver I/O、冻结 metadata 的异步目标、接用户重试/复制和拒绝恢复入口，再做一次整包审查与 CI。R08/R09 不提前启动；#245 禁写边界继续有效。
 - 保存接线子任务已提交并推送 `e60b79b36167c062671384bb812bddf54865f966`；#232 / #238 的进度评论分别为 `issuecomment-6030341273` / `issuecomment-6030341587`，明确保留未完成门槛，没有关闭 issue。
 - 共享 owner 新增 `enqueueProjection`：同一 worker 处理正文和辅助写入，活动辅助任务继续占 128 项/1,024 units 预算，仅合并 queued 的相同 record/line 更新，辅助任务 queued/in-flight 时不会报告该 record settled。新增端口/预算测试先编译红灯；辅助任务优先会挤占正文的公平性反例出现 1 个失败后，改为两类工作轮换。包含三个新增队列反例的同一范围定向验证 → **201 XCTest、0 failures、exit 0**。该端口还未接入 Meeting/Caption；不得提前宣称其 attribution I/O 已移出 receiver。
+- Meeting/Caption 已将保存前归属回放与保存后 attribution 接到 `enqueueProjection`。正文确认后仅排辅助工作，不在 didSave 内等待它；queued/in-flight metadata 继续阻止本 record 提前 settled。超预算保留正文并给出辅助信息不完整提示。两个零容量反例先出现 2 个真实 Store timing 断言失败，接线后转绿；两个 Store Gate 证明写入挂起时控制事件仍消费且 settled 不提前返回。
+- `SpeakerLabeling` 整批冻结 unit/line/label/lifecycle；begin/load/end 使旧 UI 投影失效，unit 重绑清旧行确认，旧任务不读取新映射。四个真实 SQLite 反例先出现 7 个失败后转绿；追加同记录新生命周期的 queued 命令、nil 修订清除回归。Ruling：旧任务继续写冻结目标，但只发布已确认且仍属原生命周期的界面变化——保证已接纳工作的完整性，同时避免把迟到成功或失败投到新场；代价是旧场辅助错误不会覆盖当前场提示。
+- attribution 局部批次按整行替换会抹掉已接纳的另一批 unit 修订：两个 Gate 反例出现 4 个失败断言。Ruling：此类修订禁用整行 coalescing，逐批受相同 128 项/1,024 units 预算约束——不假设每次事件都是整行完整快照；代价是高频局部更新更早达到预算，达到时明确提示辅助信息未保存，正文仍保留。
+- 最新同范围追加 `SpeakerLabelingPersistenceTests` 的定向命令 → **211 XCTest、0 failures、exit 0**（2026-10-07）。无真实模型/设备、UI、服务或安装操作。R07 尚待恢复入口、拒绝结束路径、整包独立审查和必要 CI。
 
 ## 6. 来源
 

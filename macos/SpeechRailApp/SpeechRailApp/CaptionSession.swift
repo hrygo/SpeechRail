@@ -39,16 +39,19 @@ public struct CaptionSessionDependencies: Sendable {
         @Sendable (CaptionRealtimeClientConfiguration) -> any CaptionRealtimeClient
     public var persistenceConfiguration: TranscriptPersistenceQueue.Configuration
     public var saveLine: (@Sendable (LineDraft, String) async throws -> Int)?
+    public var attachSpeakerLabel: (@Sendable (String, String?) async throws -> Void)?
 
     public init(
         makeRealtimeClient: @escaping @Sendable
             (CaptionRealtimeClientConfiguration) -> any CaptionRealtimeClient,
         persistenceConfiguration: TranscriptPersistenceQueue.Configuration = .init(),
-        saveLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil
+        saveLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
+        attachSpeakerLabel: (@Sendable (String, String?) async throws -> Void)? = nil
     ) {
         self.makeRealtimeClient = makeRealtimeClient
         self.persistenceConfiguration = persistenceConfiguration
         self.saveLine = saveLine
+        self.attachSpeakerLabel = attachSpeakerLabel
     }
 
     public static func production() -> Self {
@@ -261,9 +264,10 @@ public final class CaptionSession {
         dependencies: CaptionSessionDependencies? = nil,
         audioSourceFactory: (@MainActor () -> AudioChunkSource)? = nil
     ) {
+        let resolvedDependencies = dependencies ?? .production()
         self.coordinator = coordinator
-        self.labeling = SpeakerLabeling(coordinator: coordinator)
-        self.dependencies = dependencies ?? .production()
+        self.labeling = SpeakerLabeling(coordinator: coordinator, attachLabel: resolvedDependencies.attachSpeakerLabel)
+        self.dependencies = resolvedDependencies
         self.port = port
         self.apiKey = apiKey
         if let audioSourceFactory {
@@ -851,35 +855,65 @@ public final class CaptionSession {
         identity: TranscriptPreviewLedger.Identity
     ) async {
         let itemIdentity = TranscriptPreviewLedger.ItemIdentity(identity: identity, itemID: itemID)
-        guard identity == previewIdentity, !units.isEmpty else { return }
+        guard identity == previewIdentity, !units.isEmpty, let sessionID else { return }
         guard let entry = lineByItem[itemIdentity] else {
-            if let sessionID, !pendingAttributions.store(
+            if !pendingAttributions.store(
                 units, recordID: sessionID, identity: itemIdentity, labelsEnabled: labeling.isEnabled
             ) {
                 lastFailure = "部分说话人信息未能保存，正文继续保留。"
             }
             return
         }
-        labeling.register(units: units, lineID: entry.lineID, ordinal: entry.ordinal)
-        await labeling.apply(units: units)
-        guard identity == previewIdentity else { return }
-        if let quality = Self.timingQuality(from: units),
-           timingQualityApplied.insert(entry.lineID).inserted {
-            do {
-                try await coordinator.attachTimingQuality(lineID: entry.lineID, quality: quality)
-            } catch {
-                lastFailure = error.localizedDescription
-                timingQualityApplied.remove(entry.lineID)
-            }
+        enqueueAttribution(
+            recordID: sessionID, identity: identity, lineID: entry.lineID, ordinal: entry.ordinal,
+            units: units, labelsEnabled: labeling.isEnabled
+        )
+    }
+
+    private func enqueueAttribution(
+        recordID: String, identity: TranscriptPreviewLedger.Identity, lineID: String, ordinal: Int,
+        units: [RealtimeASRClient.AttributionUnit], labelsEnabled: Bool
+    ) {
+        let owner: SpeakerLabeling
+        if sessionID == recordID, previewIdentity == identity {
+            owner = labeling
+        } else {
+            owner = SpeakerLabeling(coordinator: coordinator, attachLabel: dependencies.attachSpeakerLabel)
+            owner.begin(sessionID: recordID, enabled: labelsEnabled)
         }
-        if !lines.isEmpty {
-            lines = lines.map { line in
-                var updated = line
-                if let label = labeling.attributedLabel(forLineID: line.id) {
-                    updated.speakerLabel = label
+        let command = owner.freezeAttribution(units: units, lineID: lineID)
+        let quality = Self.timingQuality(from: units)
+        let accepted = inputPersistence.enqueueProjection(
+            recordID: recordID, lineID: lineID, unitCount: units.count, coalescing: false
+        ) { [weak self, owner] in
+            guard let self else { return }
+            let confirmedLabels = await owner.apply(command)
+            var savedTiming = false
+            if let quality, !(self.sessionID == recordID && self.timingQualityApplied.contains(lineID)) {
+                do {
+                    try await self.coordinator.attachTimingQuality(lineID: lineID, quality: quality)
+                    savedTiming = true
+                } catch {
+                    if self.sessionID == recordID, self.previewIdentity == identity {
+                        self.lastFailure = "有一条时间信息未能保存。"
+                    }
+                }
+            }
+            guard self.sessionID == recordID, self.previewIdentity == identity else { return }
+            if savedTiming { self.timingQualityApplied.insert(lineID) }
+            self.lines = self.lines.map { existing in
+                guard existing.id == lineID else { return existing }
+                var updated = existing
+                if confirmedLabels.contains(lineID) {
+                    updated.speakerLabel = owner.attributedLabel(forLineID: lineID)
                 }
                 return updated
             }
+        }
+        if accepted {
+            owner.register(units: units, lineID: lineID, ordinal: ordinal)
+        } else if sessionID == recordID, previewIdentity == identity {
+            lastFailure = "部分说话人和时间信息未能保存，正文已保留。"
         }
     }
 
@@ -943,21 +977,10 @@ public final class CaptionSession {
         }
         guard let payload = pendingAttributions.take(recordID: command.sessionID, identity: itemIdentity),
               command.formal else { return }
-        if sessionID == command.sessionID, identity == previewIdentity {
-            await applyAttribution(itemID: command.itemID, units: payload.units, identity: identity)
-        } else {
-            let owner = SpeakerLabeling(coordinator: coordinator)
-            owner.begin(sessionID: command.sessionID, enabled: payload.labelsEnabled)
-            owner.register(units: payload.units, lineID: command.lineID, ordinal: ordinal)
-            await owner.apply(units: payload.units)
-            if let quality = Self.timingQuality(from: payload.units) {
-                do {
-                    try await coordinator.attachTimingQuality(lineID: command.lineID, quality: quality)
-                } catch {
-                    if sessionID == command.sessionID { lastFailure = "有一条时间信息未能保存。" }
-                }
-            }
-        }
+        enqueueAttribution(
+            recordID: command.sessionID, identity: identity, lineID: command.lineID, ordinal: ordinal,
+            units: payload.units, labelsEnabled: payload.labelsEnabled
+        )
     }
 
     private func sessionRelativeInputTimes(

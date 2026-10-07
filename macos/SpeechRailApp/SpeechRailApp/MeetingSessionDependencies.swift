@@ -158,6 +158,7 @@ public struct MeetingSessionDependencies: Sendable {
     public var powerMonitor: any MeetingPowerMonitor
     public var persistenceConfiguration: TranscriptPersistenceQueue.Configuration
     public var saveLine: (@Sendable (LineDraft, String) async throws -> Int)?
+    public var attachSpeakerLabel: (@Sendable (String, String?) async throws -> Void)?
 
     public init(
         makeAudioSource: @escaping @MainActor () -> any MeetingAudioSource,
@@ -165,7 +166,8 @@ public struct MeetingSessionDependencies: Sendable {
         clock: any MeetingClock = SystemMeetingClock(),
         powerMonitor: any MeetingPowerMonitor,
         persistenceConfiguration: TranscriptPersistenceQueue.Configuration = .init(),
-        saveLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil
+        saveLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
+        attachSpeakerLabel: (@Sendable (String, String?) async throws -> Void)? = nil
     ) {
         self.makeAudioSource = makeAudioSource
         self.makeRealtimeClient = makeRealtimeClient
@@ -173,6 +175,7 @@ public struct MeetingSessionDependencies: Sendable {
         self.powerMonitor = powerMonitor
         self.persistenceConfiguration = persistenceConfiguration
         self.saveLine = saveLine
+        self.attachSpeakerLabel = attachSpeakerLabel
     }
 
 }

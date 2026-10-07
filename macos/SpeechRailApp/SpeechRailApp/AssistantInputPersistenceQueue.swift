@@ -233,11 +233,12 @@ public final class TranscriptPersistenceQueue {
     @discardableResult
     func enqueueProjection(
         recordID: String, lineID: String, unitCount: Int,
+        coalescing: Bool = true,
         operation: @escaping ProjectionOperation
     ) -> Bool {
         guard !recordID.isEmpty, !lineID.isEmpty, unitCount >= 0 else { return false }
         let key = ProjectionKey(recordID: recordID, lineID: lineID)
-        let existing = projections.firstIndex { $0.key == key }
+        let existing = coalescing ? projections.firstIndex { $0.key == key } : nil
         let previousUnits = existing.map { projections[$0].unitCount } ?? 0
         guard existing != nil || outstandingProjectionCount < configuration.maximumPendingProjections,
               unitCount <= configuration.maximumProjectionUnits - outstandingProjectionUnits + previousUnits

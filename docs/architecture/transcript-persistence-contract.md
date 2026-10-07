@@ -2,7 +2,7 @@
 title: "转录保存命令、原子确认与恢复合同"
 status: under_review
 audience: "macOS App 开发者、会话数据层维护者"
-version: "0.1.1"
+version: "0.1.2"
 date: 2026-10-07
 ---
 
@@ -10,7 +10,7 @@ date: 2026-10-07
 
 本文件跟踪 [#232](https://github.com/hrygo/SpeechRail/issues/232) 的 R07 实施。
 当前为合同草稿：Store 原子确认、共享命令队列和 Meeting/Caption 接线已有定向测试证据，
-整包独立审查、归属 I/O 的完整 receiver 解耦及用户操作入口尚未完成。
+保存后 attribution 的 I/O 已接共享 owner；整包独立审查及用户操作入口尚未完成。
 不得依据本文或子任务通过记录宣布 #232 已验收。
 
 ## 所有权与边界
@@ -27,10 +27,14 @@ receiver 接纳命令后即可继续消费控制事件，保存 owner 才等待 
 
 队列已有辅助写入调度端口 `enqueueProjection`，复用唯一 worker。
 辅助任务最多 128 项、合计 1,024 units，活动任务也占预算；
-只合并尚未执行的相同 record/line 更新，超预算不替换已有工作。
+只有调用方声明可替换的工作才合并尚未执行的相同 record/line 更新；
+attribution 是按 unit 修订，Meeting/Caption 禁用整行替换，逐批保留已接纳更新。
+超预算不替换已有工作。
 正文与辅助任务轮换执行，避免辅助更新挤占已接纳正文；
 queued/in-flight 辅助任务会阻止对应 record 提前返回 settled。
-Meeting/Caption 尚未接入该端口，不能把队列端口已通过测试写成 receiver 已全面解耦。
+Meeting/Caption 已接入该端口：保存前缓存回放和保存后 attribution 使用同一路径，
+receiver 不等待其归属或时间写入。超预算明确提示辅助信息未保存，正文保持可用；
+这个结论只覆盖 attribution 写入，不扩大为所有事件处理都没有 Store I/O。
 
 ## 冻结命令
 
@@ -99,9 +103,11 @@ partial 不进入正式索引；schema v13 不改动，不重建或降级用户�
 辅助归属只回填原行，不能改 canonical transcript。
 旧 record 的迟到保存使用冻结目标处理，不能把文字或 speaker 状态投影到新 record。
 
-当前保存后 attribution 分支仍等待 metadata I/O；必须继续移入可等待的串行 owner，
-并验证跨 generation 的异步 metadata 完成不会改写新会话的标签账本。
-不能仅凭“正文保存已解耦”宣称 receiver 的所有存储等待都已移出。
+归属命令在接纳时冻结整批 unit、lineID、目标 label 和标签账本生命周期，
+时间写入也冻结原行及区间。保存 owner 执行时不重新读取新场 unit→line 映射。
+开始新场、加载历史和结束账本都使旧界面投影失效；旧命令仍写自己的固定行。
+同一 unit 重绑另一行时不沿用旧行的保存证明。只有已确认的同生命周期写入
+才更新当前 chip；nil 修订仍能清除此前标签，不把接纳时尚未保存解释为无标签可清除。
 
 ## 关闭与封存
 
@@ -120,11 +126,12 @@ R07 的 settled 证明只覆盖已接纳/明确拒绝的保存结果；
 Meeting/Caption 的固定命令重试、partial、控制事件、容量拒绝及跨记录归属，
 并通过真实 `RealtimeASRClient` + fake transport 验证：
 第二个 completed 出现前可重试保存，重复终态不覆盖权威行。
+211 项定向测试还覆盖 metadata 容量拒绝、挂起写入时控制响应及 settled 等待，
+跨记录/同记录新生命周期的冻结批次、历史加载、重绑与 nil 修订。
 这些测试不使用设备、网络服务、真实音频或模型。
 
 剩余门槛：
 
-- 归属 I/O 由同一有界串行 owner 接管，并冻结 metadata 的投影目标；
 - Meeting/Caption 页面和字幕浮层接入旧 record 的重试/复制及拒绝提示；
 - 明确拒绝证明的用户恢复/结束路径；
 - 整包独立审查、Required 红→绿修复、必要 CI 与 PR 合并；
