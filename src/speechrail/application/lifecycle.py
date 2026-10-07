@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from typing import Protocol
 
+from speechrail.runtime.cleanup import join_cleanup
 from speechrail.runtime.job_runner import JobRunner
 from speechrail.runtime.worker_lease import WorkerIdleEvictor
 
@@ -40,8 +40,9 @@ class RuntimeLifecycle:
     """Own repository recovery, worker start/close, idle eviction and JobRunner task.
 
     Startup order is repository recovery → ASR worker → TTS worker → JobRunner
-    task → Evictor. Failure cleans up only the components that already reported a
-    successful start, and ``close`` is idempotent.
+    task → Evictor. Alignment is owned but starts on demand. Shutdown attempts
+    every physical owner, joins cleanup despite waiter cancellation, and reports
+    failures after the other owners have been processed.
     """
 
     def __init__(
@@ -51,37 +52,55 @@ class RuntimeLifecycle:
         asr: StartableComponent | None = None,
         tts: StartableComponent | None = None,
         streaming: StartableComponent | None = None,
+        alignment: StartableComponent | None = None,
         runner: JobRunner | None = None,
         evictor: WorkerIdleEvictor | None = None,
         lazy_load: bool = False,
         poll_seconds: float = 1.0,
         max_job_attempts: int = 2,
+        cleanup_timeout_seconds: float = 5.0,
     ) -> None:
+        if cleanup_timeout_seconds <= 0:
+            raise ValueError("cleanup_timeout_seconds must be positive")
         self._repository = repository
         self._asr = asr
         self._tts = tts
         self._streaming = streaming
-        self._pending: tuple[StartableComponent, ...] = tuple({
-            id(component): component
-            for component in (asr, tts, streaming) if component is not None
-        }.values())
+        self._alignment = alignment
+        self._roles = (
+            ("asr", asr),
+            ("tts", tts),
+            ("streaming", streaming),
+            ("alignment", alignment),
+        )
+        self._pending: tuple[StartableComponent, ...] = tuple(
+            {
+                id(component): component for _, component in self._roles if component is not None
+            }.values()
+        )
+        self._eager = tuple(
+            {
+                id(component): component
+                for name, component in self._roles
+                if component is not None and name != "alignment"
+            }.values()
+        )
         self._runner = runner
         self._evictor = evictor
         self._lazy_load = lazy_load
         self._poll_seconds = poll_seconds
         self._max_job_attempts = max_job_attempts
-        self._started_components: list[StartableComponent] = []
+        self._started_components: list[StartableComponent] = list(self._pending)
         self._runner_task: asyncio.Task[None] | None = None
+        self._cleanup_timeout = cleanup_timeout_seconds
+        self._shutdown_task: asyncio.Task[None] | None = None
+        self._cleanup_tasks: dict[str, asyncio.Task[None]] = {}
         self._running = False
 
     def worker_states(self) -> dict[str, str]:
         """Return low-cardinality lifecycle states for managed inference workers."""
         states: dict[str, str] = {}
-        for name, comp in (
-            ("asr", self._asr),
-            ("tts", self._tts),
-            ("streaming", self._streaming),
-        ):
+        for name, comp in self._roles:
             if comp is None:
                 continue
             if self._evictor is not None:
@@ -114,17 +133,18 @@ class RuntimeLifecycle:
     async def start(self) -> None:
         if self._running:
             return
+        if self._shutdown_task is not None:
+            # Failed/unconfirmed cleanup cannot be silently reused.
+            await join_cleanup(self._shutdown_task)
+            self._shutdown_task = None
+            self._started_components = list(self._pending)
+            self._cleanup_tasks.clear()
         try:
             if self._repository is not None:
-                self._repository.recover_interrupted(
-                    max_attempts=self._max_job_attempts
-                )
+                self._repository.recover_interrupted(max_attempts=self._max_job_attempts)
             if not self._lazy_load:
-                for component in self._pending:
+                for component in self._eager:
                     await component.start()
-                    self._started_components.append(component)
-            else:
-                self._started_components = list(self._pending)
             if self._runner is not None:
                 self._runner_task = asyncio.create_task(
                     run_job_runner(self._runner, poll_seconds=self._poll_seconds)
@@ -132,23 +152,72 @@ class RuntimeLifecycle:
             if self._evictor is not None:
                 await self._evictor.start()
             self._running = True
-        except BaseException:
-            await self._close_started()
+        except BaseException as startup_error:
+            try:
+                await self.close()
+            except BaseException as cleanup_error:
+                raise BaseExceptionGroup(
+                    "runtime startup and rollback failed", [startup_error, cleanup_error]
+                ) from None
             raise
 
     async def close(self) -> None:
         self._running = False
+        if self._shutdown_task is None:
+            self._shutdown_task = asyncio.create_task(self._shutdown())
+        await join_cleanup(self._shutdown_task)
+
+    async def _shutdown(self) -> None:
+        errors: list[Exception] = []
         if self._evictor is not None:
-            await self._evictor.close()
+            await self._close_operation("monitor", self._evictor.close(), errors)
         if self._runner_task is not None:
             self._runner_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._runner_task
-            self._runner_task = None
-        await self._close_started()
+            if await self._join_operation("runner", self._runner_task, errors, cancelled_ok=True):
+                self._runner_task = None
+        for component in tuple(reversed(self._started_components)):
+            role = next(name for name, value in self._roles if value is component)
+            if await self._close_operation(role, component.close(), errors):
+                self._started_components.remove(component)
+        if errors:
+            raise ExceptionGroup("runtime cleanup incomplete", errors)
 
-    async def _close_started(self) -> None:
-        while self._started_components:
-            component = self._started_components.pop()
-            with contextlib.suppress(Exception):
-                await component.close()
+    async def _close_operation(
+        self, role: str, operation: Awaitable[None], errors: list[Exception]
+    ) -> bool:
+        async def run() -> None:
+            await operation
+
+        task = asyncio.create_task(run())
+        def observe(finished: asyncio.Task[None]) -> None:
+            if not finished.cancelled():
+                finished.exception()
+        task.add_done_callback(observe)
+        self._cleanup_tasks[role] = task
+        return await self._join_operation(role, task, errors)
+
+    async def _join_operation(
+        self,
+        role: str,
+        task: asyncio.Task[None],
+        errors: list[Exception],
+        *,
+        cancelled_ok: bool = False,
+    ) -> bool:
+        done, _ = await asyncio.wait({task}, timeout=self._cleanup_timeout)
+        if not done:
+            # Keep the handle: timeout does not prove that the resource closed.
+            errors.append(RuntimeError(f"{role} cleanup timed out"))
+            return False
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            if cancelled_ok:
+                return True
+            errors.append(RuntimeError(f"{role} cleanup cancelled"))
+            return False
+        except Exception as exc:
+            failure = RuntimeError(f"{role} cleanup failed ({type(exc).__name__})")
+            errors.append(failure)
+            return False
+        return True

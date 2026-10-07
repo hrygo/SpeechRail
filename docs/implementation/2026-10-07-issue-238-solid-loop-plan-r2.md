@@ -1,18 +1,18 @@
-<!-- loop-plan-r2: 2026-10-07, baseline 55c8df2a -->
-# Issue #238 DRY / SOLID 收敛 Loop 实施计划 r2（新基线 `55c8df2a`）
+<!-- loop-plan-r2: 2026-10-07, baseline 451aeb1e -->
+# Issue #238 DRY / SOLID 收敛 Loop 实施计划 r2（新基线 `451aeb1e`）
 
 > r1（`2026-10-07-issue-238-solid-loop-plan.md`，基线 `159fea09`，随 R01 PR #320 提交）的后继修订。
 > 凡与 r1 不一致处以本文件为准。当前目标包含实施、审查、验证、提交、推送及通过后的合并；分组/跨包门结论继承 r1。
 
 **Goal:** 11 个 issue（#231 #232 #234 #235 #236 #237 #240 #241 #242 #244 #246）分 9 个 PR 交付。
 **Spec:** [Epic #238](https://github.com/hrygo/SpeechRail/issues/238)、[Epic #245](https://github.com/hrygo/SpeechRail/issues/245)。
-**核验日期：** 2026-10-07，Asia/Shanghai。基线 `origin/main = 55c8df2a`（已 fetch）；每包合并后刷新。
+**核验日期：** 2026-10-07，Asia/Shanghai（对应 UTC 2026-10-06）。基线 `origin/main = 451aeb1e`（已 fetch）；每包合并后刷新。
 
 ## 0. 基线与 #245 现状（只读快照）
 
 - `origin/main = 55c8df2a`：包含 #249/#252 文档及提词器 preview 500ms 预设变更（这是业务行为变化），以及 #321 V17 回归与 #324 3.8.0 发布提交。
 - #245 子任务历史快照：#247–#252 CLOSED、#253 OPEN，开工前重新核验。`git worktree list` 当前未登记 4841；不据此断言目录不存在。已登记 acceptance-evidence、app-validation、boundary-fix、consumer-replay、delivery、validation-v8 等 ASR worktree。
-- #238 已推 draft PR（未合并）：#320 R01（#244，`2e8653c9`）、#322 R02（#240+#246，`75440f78`，基线 `159fea09`）、#323 R05（#242，`ca2fea32`，已 rebase 到 `b91e6f88`）。R01/R02 merge-tree 对 main 无冲突标记。
+- #320 R01（#244）已合并为 `451aeb1e`，补齐后的 head 为 `36e85493`，全部选中 CI 通过。#322 R02 和 #323 R05 仍待补齐、最新基线验证及合并。
 - 在途远端分支（只读核对）：`asr-production-consumer-replay-253`（pbxproj + 新增 `ASRProductionConsumerReplayTests.swift` 881 行）、`asr-clear-barrier-245`（`application/realtime_openai.py` 283 行 + 路由 + 契约文档，#245 语义面）、`v17-backlog-playback-268`（矩阵文档 + V17 测试）。
 - 用户最新授权：**PR 经实质审查和必要验证通过后尽快合并**，不再逐包询问；旧版等待合并确认的限制已被替代。main 要求线性历史，采用 squash/rebase 合并，不绕过 `Quality Gates` / `Gate Summary`，不 force-push。
 
@@ -24,9 +24,9 @@
 
 | Issue | 档 | 当前事实（main） | PR 包 |
 |---|---|---|---|
-| #244 短写制品 | 已交付（待合并） | `local_file_processor.py:393-395` 仍单次 `os.write` + `O_TRUNC`；R01 分支 staging + 完整写 + fsync + 原子 replace | R01 #320 |
-| #240 owner 登记 | 已交付（待合并） | `lifecycle.py:64` `_pending` 仍 asr/tts/streaming 三件；R02 分支加 `alignment` 槽 + `start()` 失败撤销 runner task | R02 #322 |
-| #246 活动保护 | 已交付（待合并） | `worker_lease.py:170-174` `_in_use` 仍只看 lease/mode_gate；R02 分支加 `note_activity`/`clear_activity` | R02 #322 |
+| #244 短写制品 | 已合并 | 独占 staging、完整写入、发布前失败清理及数据库完成回读；127 个定向测试和选中 CI 通过。仅承诺进程级原子可见 | R01 #320 |
+| #240 owner 登记 | 审查补齐，待 CI | R02 分支区分 eager/owned，aligner 按需加载；partial-start 回收、runner/monitor/worker 失败隔离、取消保护及超时句柄保留 | R02 #322 |
+| #246 活动保护 | 审查补齐，待 CI | 复用 WorkerLeaseLock；生产 alignment 与 evictor 共用活动/回收互斥边界，结束后重设 idle 起点；移除接线导致两个回归失败 | R02 #322 |
 | #242 改名事务 | 已交付（待合并） | `SessionStore.swift:369` 起仍三次独立 `withStatement`；R05 分支已包 `BEGIN IMMEDIATE`/COMMIT + 注入测试 | R05 #323 |
 | #235 验证用例 | 未修 | `voice_designs.py:83-91` 仍 7 个 system 私有导入 + audio 私有导入；两路由文件零提交 | R03 |
 | #237 坏 2xx | 未修 | `LLMProvider.check`（约 2475–2480）2xx 即 `.connected`；`operationUnavailable` 只判 operation 不可用 | R04 |
@@ -82,8 +82,8 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 
 | 包 | 状态 | 真实 PR / SHA | 备注 |
 |---|---|---|---|
-| R01 #244 | draft 待合并 | PR #320 / `2e8653c9` | 计划文档 r1 两份随附 |
-| R02 #240+#246 | draft 待合并 | PR #322 / `75440f78` | 基线 `159fea09`，merge-tree 干净 |
+| R01 #244 | MERGED | PR #320 / `451aeb1e` | 127 定向测试、Ruff/Mypy、选中 CI 通过 |
+| R02 #240+#246 | 审查补齐，待 CI | PR #322 | 99 定向测试、四生产文件 Mypy 通过；移除活动接线，2 个回归转红 |
 | R05 #242 | draft 待合并 | PR #323 / `ca2fea32` | 已 rebase `b91e6f88` |
 | R03 #235 | WIP，未达验收 | 无 | 当前草稿尚缺两个应用用例接线及同次身份采集；原 333 passing 不能代替要求验收 |
 | R04 #237+#236 | planned | 无 | 主要修改 LLMProvider，与 R06 文件不同 |

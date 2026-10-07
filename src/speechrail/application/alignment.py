@@ -20,7 +20,8 @@ from __future__ import annotations
 import bisect
 import math
 import unicodedata
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass, replace
 from typing import Protocol
 
@@ -46,17 +47,24 @@ class FixedTextTokenClient(Protocol):
 class FixedTextAligner:
     """Application adapter that validates worker tokens against immutable text."""
 
-    def __init__(self, client: FixedTextTokenClient) -> None:
+    def __init__(
+        self,
+        client: FixedTextTokenClient,
+        *,
+        worker_lease: Callable[[], AbstractAsyncContextManager[object]] | None = None,
+    ) -> None:
         self._client = client
+        self._worker_lease = worker_lease
 
     async def align(self, request: AlignmentRequest) -> AlignmentResult:
         try:
-            raw = await self._client.align_text(
-                request.pcm16, text=request.text, language=request.language
-            )
+            async with self._worker_lease() if self._worker_lease else nullcontext():
+                raw = await self._client.align_text(
+                    request.pcm16, text=request.text, language=request.language
+                )
+                return validate_alignment(request, raw)
         except (RuntimeError, ValueError):
             return _failed(request, "alignment_unavailable")
-        return validate_alignment(request, raw)
 
 
 class TranscriptAlignmentError(RuntimeError):

@@ -505,3 +505,86 @@ def test_workers_expose_async_trim_memory() -> None:
     tts_worker = Qwen3TtsWorker.__new__(Qwen3TtsWorker)
     tts_worker._transport = mock_transport
     assert hasattr(tts_worker, "trim_memory")
+
+
+# ---------------------------------------------------------------------------
+# R02 (#240/#246): owned-lifecycle + activity RED regressions
+# ---------------------------------------------------------------------------
+
+
+def test_lifecycle_close_never_skips_unstarted_owned_aligner() -> None:
+    """#240: an owned aligner must be closed even when lazy start was skipped.
+
+    RED: RuntimeLifecycle only tracks asr/tts/streaming, so an owned aligner
+    that never started is silently dropped from shutdown bookkeeping.
+    """
+
+    class _OwnedAligner:
+        def __init__(self) -> None:
+            self.alive = False
+            self.closed = False
+
+        async def start(self) -> None:
+            self.alive = True
+
+        async def close(self) -> None:
+            self.closed = True
+            self.alive = False
+
+    async def run() -> None:
+        from speechrail.application.lifecycle import RuntimeLifecycle
+
+        aligner = _OwnedAligner()
+        life = RuntimeLifecycle(asr=_FakeWorker(), alignment=aligner)
+        await life.start()
+        await life.close()
+        assert aligner.closed is True
+
+    asyncio.run(run())
+
+
+def test_lifecycle_start_failure_releases_already_created_runner_task() -> None:
+    """#240: evictor.start failure must cancel the already-created runner task.
+
+    RED: start() creates the runner task before starting the evictor; when
+    evictor.start raises, the runner task leaks and _close_started never sees
+    it because it was never assigned to _started_components either.
+    """
+
+    async def run() -> None:
+        from speechrail.application.lifecycle import RuntimeLifecycle
+
+        started: list[str] = []
+        cancelled: list[str] = []
+
+        class _Runner:
+            async def run_once(self) -> bool:
+                started.append("run")
+                try:
+                    await asyncio.sleep(60)
+                except asyncio.CancelledError:
+                    cancelled.append("cancelled")
+                    raise
+                return False
+
+        class _FailingEvictor:
+            async def start(self) -> None:
+                await asyncio.sleep(0.02)
+                raise RuntimeError("evictor.start failed")
+
+            async def close(self) -> None:
+                pass
+
+        life = RuntimeLifecycle(
+            asr=_FakeWorker(), runner=_Runner(), evictor=_FailingEvictor(), poll_seconds=0.001
+        )
+        try:
+            await life.start()
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("start should have raised")
+        assert started, "runner task must have been created before the failure"
+        assert cancelled, "leaked runner task must be cancelled on start failure"
+
+    asyncio.run(run())
