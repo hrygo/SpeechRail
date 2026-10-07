@@ -460,6 +460,30 @@ def test_reclamation_stops_generation_before_releasing_the_admission() -> None:
     asyncio.run(run())
 
 
+def test_idle_reap_failure_blocks_tts_open_with_non_retryable_isolation_code() -> None:
+    async def run() -> None:
+        class Worker(_EvictableWorker):
+            async def close(self) -> None:
+                raise OSError("fake reap failure")
+
+        worker = Worker()
+        evictor = WorkerIdleEvictor([worker])
+        synth = _FakeSynthesizer()
+        governor = _governor()
+        service = _service(
+            synth, governor=governor,
+            worker_lease=evictor.lease_lock_of(worker).lease,
+        )
+        await evictor.force_evict()
+        with pytest.raises(TtsStreamAdmissionError) as caught:
+            await service.open(options=_options(), sink=_Sink())
+        assert caught.value.code == "backend_reclamation_failed"
+        assert not hasattr(caught.value, "busy_reason")
+        assert not synth.opened
+
+    asyncio.run(run())
+
+
 def test_service_passes_effective_limits_to_the_incremental_opener() -> None:
     async def run() -> None:
         synth = _FakeSynthesizer()

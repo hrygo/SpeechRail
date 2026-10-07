@@ -2,7 +2,7 @@
 title: "Issue #238 十一项最终验收证据矩阵"
 status: active
 audience: "维护者、架构审查者"
-version: "1.0.0"
+version: "1.0.1"
 date: 2026-10-07
 ---
 
@@ -79,7 +79,7 @@ date: 2026-10-07
 | 1 | 热重用、执行时间超过 TTL 但未超过请求 deadline 时，idle tick 不关闭在途 process。 | **T**：production_aligner_is_protected_during_warm_exchange 的 TTL Gate/热重用 |
 | 2 | 首次懒加载、回收后重启、min-uptime 正常；不新增下载/预热。 | **T**：lazy_load、idle 后 restart、min_uptime 与 cold worker 回归 |
 | 3 | 回收决定前后与新 lease 接纳前后设置 Gate，禁止已接纳任务被过时回收动作关闭。 | **T**：request_waits_for_decided_eviction_before_restarting_worker；共享同一 lease lock |
-| 4 | queue-full、不曾进入执行的取消、执行异常、deadline、无效结果都正确回收 lease，未确认清理时不复用旧实例。 | **T+S**：alignment 错误/取消/deadline/queue 回归；finally 交还，未知清理隔离 |
+| 4 | queue-full、不曾进入执行的取消、执行异常、deadline、无效结果都正确回收 lease，未确认清理时不复用旧实例。 | **T+S**：原 alignment 错误/取消/deadline/queue 回归；追加审计纠正 idle close 失败缺口，force/TTL 隔离、进程 owner 保留、禁止 start/I/O、显式确认后恢复由 A02 故障回归补证，见[追加审计](2026-10-07-issue-238-alignment-audit.md) |
 | 5 | force_evict 不关闭活动 alignment；shutdown 按 #240 的明确合同回收并等待。 | **T**：活动 exchange 的 force_evict 与 R02 lifecycle owned cleanup |
 | 6 | ASR、TTS 的现有活动保护、router/child 去重、独立 lane 条件不回归。 | **T**：evictor dedup/ASR mode/lease/min_uptime；lane 合同无变更 |
 | 7 | 使用 tests/test_worker_lease.py 与 alignment worker 的真实接线测试，不只验证 lease helper 或恒定 alive fake。 | **T+M**：生产 Aligner 接线；临时删除接线出现 2 个失败，不只测 helper |
@@ -238,4 +238,8 @@ R07 留存 Minor：冻结字段冲突回归只单独改变正文，其余字段�
 
 保存/归档失败使用同 record/line 命令恢复；捕获证明不可恢复时显式保留 incomplete，不伪造成功。历史缺失改名事件不能从当前名字倒推并补写，未知仍未知。回退通过新增 revert PR 撤销对应包代码并验证合同；不 force-push main，不清除已有数据、作品、模型或密钥。其他 worktree 未提交修改和旧 stash 保持原状。
 
-十一项矩阵据上述 T/CI/M/S 联合证据满足本轮结构与正确性关闭条件。Epic 的相邻八项以及真实设备/声学验收仍独立跟踪，不将本次结果扩展为全系统生产质量完成。
+原十一项矩阵的关闭依据对应 `6f91c25d`；追加审计发现隔离错误映射和 idle close 失败两个缺口，
+原证据不能证明这两个路径已正确。补修 A01/A02 及最新验证范围见
+[契约、MCP、文档与代码追加审计](2026-10-07-issue-238-alignment-audit.md)，合并状态以各补修 PR
+最终 head CI 和时间线为准。Epic 的相邻八项以及真实设备/声学验收仍独立跟踪，不将本次结果
+扩展为全系统生产质量完成。

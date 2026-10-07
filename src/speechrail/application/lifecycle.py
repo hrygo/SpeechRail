@@ -179,6 +179,11 @@ class RuntimeLifecycle:
             role = next(name for name, value in self._roles if value is component)
             if await self._close_operation(role, component.close(), errors):
                 self._started_components.remove(component)
+        if not errors and self._evictor is not None:
+            try:
+                self._evictor.confirm_shutdown()
+            except Exception as exc:
+                errors.append(RuntimeError(f"admission cleanup failed ({type(exc).__name__})"))
         if errors:
             raise ExceptionGroup("runtime cleanup incomplete", errors)
 
