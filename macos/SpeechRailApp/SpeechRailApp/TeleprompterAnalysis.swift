@@ -54,7 +54,7 @@ public struct TeleprompterAnalysisDecoder: Sendable {
         do {
             let data = Data(json.utf8)
             // Validate closed objects and duplicate keys locally as well as through Structured Outputs.
-            let object = try TeleprompterStrictJSON.object(from: data)
+            let object = try LLMStrictJSON.object(from: data)
             guard Set(object.keys) == ["schema_version", "segments"],
                   let raw = object["segments"] as? [[String: Any]], !raw.isEmpty,
                   raw.allSatisfy({ Set($0.keys) == ["start_unit", "end_unit", "keywords", "match_phrases", "pause_hint"] }) else {

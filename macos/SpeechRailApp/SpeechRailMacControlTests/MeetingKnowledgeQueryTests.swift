@@ -40,6 +40,30 @@ final class MeetingKnowledgeQueryTests: XCTestCase {
 
     private func requireStore() throws -> SessionStore { try XCTUnwrap(store) }
 
+    func testCoordinatorKnowledgeQueryUsesInjectedProviderObserver() async throws {
+        let store = try requireStore()
+        _ = try await makeMeeting(title: "发布评审", actions: ["整理发布清单"])
+        let session = URLSessionConfiguration.ephemeral
+        session.protocolClasses = [LLMProviderTests.FakeTransport.self]
+        let observations = LLMProviderTests.ObservationLog()
+        let provider = LLMProvider(
+            session: URLSession(configuration: session),
+            observationHandler: observations.append
+        )
+        LLMProviderTests.FakeTransport.reset([
+            .init(status: 200, contentType: "application/json",
+                  body: #"{"status":"completed","output_text":"{\"segments\":[]}"}"#)
+        ])
+        let coordinator = SessionCoordinator(store: store, llmProvider: provider)
+        let configuration = LLMConfiguration(baseURL: "https://provider.example/v1", model: "test-model")
+        _ = try await coordinator.askKnowledge(
+            question: "上次都做了哪些待办", configuration: configuration,
+            resolvedConfiguration: .init(configuration: configuration, apiKey: nil, origin: .global)
+        )
+        XCTAssertEqual(observations.values.map(\.kind), [.providerRequestStarted, .providerResponse])
+        XCTAssertEqual(LLMProviderTests.FakeTransport.requestURLs().count, 1)
+    }
+
     /// 造一场会：`items` 是 (候选内编号, 文本, 是否决策) 三元组，决定用哪个 kind。
     @discardableResult
     private func makeMeeting(

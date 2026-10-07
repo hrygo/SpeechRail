@@ -94,14 +94,15 @@ public final class InnerOSSession {
     public var isExpanded = false
 
     private let coordinator: SessionCoordinator
-    private let provider = LLMProvider()
+    private let provider: LLMProvider
     /// 在飞的那一问。**必须留着引用**：`cancel()` 取消的是它，没有引用就只是
     /// 改了一下界面状态，而请求还在跑、还会回来把答案写进库。
     private var askTask: Task<Void, Never>?
     private var sessionID: String?
 
-    public init(coordinator: SessionCoordinator) {
+    public init(coordinator: SessionCoordinator, provider: LLMProvider = LLMProvider()) {
         self.coordinator = coordinator
+        self.provider = provider
     }
 
     /// 进会议时绑定会话；离开时解绑（问答不跨会话——证据必须能在本场核对）。

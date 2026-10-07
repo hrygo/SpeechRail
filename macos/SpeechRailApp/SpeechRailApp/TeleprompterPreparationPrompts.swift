@@ -1007,10 +1007,10 @@ public struct TeleprompterGroupingDecoder: Sendable {
         }
         let object: [String: Any]
         do {
-            object = try TeleprompterStrictJSON.object(from: Data(json.utf8))
-        } catch TeleprompterStrictJSONError.duplicateKey {
+            object = try LLMStrictJSON.object(from: Data(json.utf8))
+        } catch LLMStrictJSONError.duplicateKey {
             throw reject(.duplicateKey)
-        } catch TeleprompterStrictJSONError.oversized {
+        } catch LLMStrictJSONError.oversized {
             throw reject(.outputTruncated)
         } catch {
             throw reject(.jsonSyntax)
@@ -1102,10 +1102,10 @@ public struct TeleprompterRewriteDecoder: Sendable {
         guard !groups.isEmpty else { throw reject(.fieldType, fieldPath: "groups") }
         let object: [String: Any]
         do {
-            object = try TeleprompterStrictJSON.object(from: Data(json.utf8))
-        } catch TeleprompterStrictJSONError.duplicateKey {
+            object = try LLMStrictJSON.object(from: Data(json.utf8))
+        } catch LLMStrictJSONError.duplicateKey {
             throw reject(.duplicateKey)
-        } catch TeleprompterStrictJSONError.oversized {
+        } catch LLMStrictJSONError.oversized {
             throw reject(.outputTruncated)
         } catch {
             throw reject(.jsonSyntax)
@@ -1195,10 +1195,10 @@ public struct TeleprompterMapDecoder: Sendable {
 
         let object: [String: Any]
         do {
-            object = try TeleprompterStrictJSON.object(from: Data(json.utf8))
-        } catch TeleprompterStrictJSONError.duplicateKey {
+            object = try LLMStrictJSON.object(from: Data(json.utf8))
+        } catch LLMStrictJSONError.duplicateKey {
             throw reject(.duplicateKey)
-        } catch TeleprompterStrictJSONError.oversized {
+        } catch LLMStrictJSONError.oversized {
             throw reject(.outputTruncated)
         } catch {
             throw reject(.jsonSyntax)
@@ -1298,125 +1298,6 @@ public struct TeleprompterMapDecoder: Sendable {
             throw error
         } catch {
             throw reject(.fieldType, fieldPath: "blocks")
-        }
-    }
-}
-
-private enum TeleprompterStrictJSONError: Error {
-    case oversized
-    case invalidSyntax
-    case duplicateKey
-    case notObject
-}
-
-enum TeleprompterStrictJSON {
-    static func object(from data: Data) throws -> [String: Any] {
-        guard data.count <= 256 * 1024 else {
-            throw TeleprompterStrictJSONError.oversized
-        }
-        var scanner = Scanner(bytes: Array(data))
-        try scanner.parseDocument()
-        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw TeleprompterStrictJSONError.notObject
-        }
-        return object
-    }
-
-    private struct Scanner {
-        let bytes: [UInt8]
-        var index = 0
-
-        mutating func parseDocument() throws {
-            skipWhitespace()
-            try parseValue()
-            skipWhitespace()
-            guard index == bytes.count else { throw TeleprompterStrictJSONError.invalidSyntax }
-        }
-
-        mutating func parseValue() throws {
-            skipWhitespace()
-            guard index < bytes.count else { throw TeleprompterStrictJSONError.invalidSyntax }
-            switch bytes[index] {
-            case 0x7B: try parseObject()
-            case 0x5B: try parseArray()
-            case 0x22: _ = try parseString()
-            default: try parsePrimitive()
-            }
-        }
-
-        mutating func parseObject() throws {
-            index += 1
-            skipWhitespace()
-            var keys = Set<String>()
-            if consume(0x7D) { return }
-            while true {
-                skipWhitespace()
-                let key = try parseString()
-                guard keys.insert(key).inserted else {
-                    throw TeleprompterStrictJSONError.duplicateKey
-                }
-                skipWhitespace()
-                guard consume(0x3A) else { throw TeleprompterStrictJSONError.invalidSyntax }
-                try parseValue()
-                skipWhitespace()
-                if consume(0x7D) { return }
-                guard consume(0x2C) else { throw TeleprompterStrictJSONError.invalidSyntax }
-            }
-        }
-
-        mutating func parseArray() throws {
-            index += 1
-            skipWhitespace()
-            if consume(0x5D) { return }
-            while true {
-                try parseValue()
-                skipWhitespace()
-                if consume(0x5D) { return }
-                guard consume(0x2C) else { throw TeleprompterStrictJSONError.invalidSyntax }
-            }
-        }
-
-        mutating func parseString() throws -> String {
-            guard consume(0x22) else { throw TeleprompterStrictJSONError.invalidSyntax }
-            let start = index
-            while index < bytes.count {
-                switch bytes[index] {
-                case 0x22:
-                    index += 1
-                    // 按 JSON 转义后的实际字符串比较 key，拒绝 name / \u006eame 等同名键。
-                    return try JSONDecoder().decode(String.self, from: Data(bytes[(start - 1)..<index]))
-                case 0x5C:
-                    index += 1
-                    guard index < bytes.count else { throw TeleprompterStrictJSONError.invalidSyntax }
-                    if bytes[index] == 0x75 {
-                        guard index + 4 < bytes.count else { throw TeleprompterStrictJSONError.invalidSyntax }
-                        index += 4
-                    }
-                    index += 1
-                default:
-                    guard bytes[index] >= 0x20 else { throw TeleprompterStrictJSONError.invalidSyntax }
-                    index += 1
-                }
-            }
-            throw TeleprompterStrictJSONError.invalidSyntax
-        }
-
-        mutating func parsePrimitive() throws {
-            let start = index
-            while index < bytes.count, ![0x20, 0x09, 0x0A, 0x0D, 0x2C, 0x5D, 0x7D].contains(bytes[index]) {
-                index += 1
-            }
-            guard index > start else { throw TeleprompterStrictJSONError.invalidSyntax }
-        }
-
-        mutating func skipWhitespace() {
-            while index < bytes.count, [0x20, 0x09, 0x0A, 0x0D].contains(bytes[index]) { index += 1 }
-        }
-
-        mutating func consume(_ byte: UInt8) -> Bool {
-            guard index < bytes.count, bytes[index] == byte else { return false }
-            index += 1
-            return true
         }
     }
 }

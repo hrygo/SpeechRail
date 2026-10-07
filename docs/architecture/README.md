@@ -2,7 +2,7 @@
 title: "SpeechRail 架构文档目录"
 status: active
 audience: "系统架构师、核心开发者、技术决策者"
-version: "3.8.0"
+version: "3.9.0"
 date: 2026-10-07
 ---
 
@@ -33,6 +33,8 @@ date: 2026-10-07
 ---
 
 ## 📑 推荐阅读路径
+
+[LLM 响应校验与观测边界](llm-response-and-observation-boundaries.md) 定义 App 侧探测/正式调用的最低响应校验、中立 correlation、唯一严格 JSON parser、feature adapter 和注入式 recorder。
 
 ```mermaid
 graph TD

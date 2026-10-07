@@ -44,12 +44,17 @@ public struct TeleprompterAICallContext: Codable, Equatable, Sendable {
         self.itemCount = itemCount
         self.attempt = max(0, attempt)
     }
+
+    public var providerContext: LLMRequestContext {
+        .init(sessionID: runID, requestID: requestID)
+    }
 }
 
 public struct TeleprompterAIObservation: Codable, Equatable, Sendable {
     public let kind: TeleprompterAIObservationKind
     public let component: String
     public let context: TeleprompterAICallContext?
+    public let providerContext: LLMRequestContext?
     public let elapsedMilliseconds: Int?
     public let httpStatus: Int?
     public let responseBytes: Int?
@@ -72,6 +77,7 @@ public struct TeleprompterAIObservation: Codable, Equatable, Sendable {
         kind: TeleprompterAIObservationKind,
         component: String = "pipeline",
         context: TeleprompterAICallContext? = nil,
+        providerContext: LLMRequestContext? = nil,
         elapsedMilliseconds: Int? = nil,
         httpStatus: Int? = nil,
         responseBytes: Int? = nil,
@@ -93,6 +99,7 @@ public struct TeleprompterAIObservation: Codable, Equatable, Sendable {
         self.kind = kind
         self.component = component
         self.context = context
+        self.providerContext = providerContext
         self.elapsedMilliseconds = elapsedMilliseconds
         self.httpStatus = httpStatus
         self.responseBytes = responseBytes
@@ -114,6 +121,40 @@ public struct TeleprompterAIObservation: Codable, Equatable, Sendable {
 }
 
 public typealias TeleprompterAIObservationHandler = @Sendable (TeleprompterAIObservation) -> Void
+
+/// The feature attaches its stage/item/retry metadata outside the provider.
+public enum TeleprompterProviderObservationAdapter {
+    public static func handler(
+        context: TeleprompterAICallContext? = nil,
+        to sink: @escaping TeleprompterAIObservationHandler
+    ) -> LLMObservationHandler {
+        { event in
+            let kind: TeleprompterAIObservationKind
+            switch event.kind {
+            case .providerRequestStarted: kind = .providerRequestStarted
+            case .providerResponse: kind = .providerResponse
+            case .providerFailed: kind = .providerFailed
+            }
+            TeleprompterAIObservability.emit(
+                .init(
+                    kind: kind, component: event.component, context: context,
+                    providerContext: event.context,
+                    elapsedMilliseconds: event.elapsedMilliseconds,
+                    httpStatus: event.httpStatus, responseBytes: event.responseBytes,
+                    choiceCount: event.choiceCount, finishReason: event.finishReason,
+                    promptTokens: event.promptTokens, completionTokens: event.completionTokens,
+                    reasoningTokens: event.reasoningTokens, model: event.model,
+                    endpointHost: event.endpointHost, transportAttempt: event.transportAttempt,
+                    operation: event.operation, compatibilityMode: event.compatibilityMode,
+                    thinkingControl: event.thinkingControl,
+                    structuredOutputMode: event.structuredOutputMode,
+                    outcome: event.outcome, errorCode: event.errorCode
+                ),
+                to: sink
+            )
+        }
+    }
+}
 
 public struct TeleprompterAIMetricHistogram: Codable, Equatable, Sendable {
     public let count: Int
@@ -389,26 +430,7 @@ public final class TeleprompterAIObservationRecorder: @unchecked Sendable {
     }
 }
 
-private final class TeleprompterAIRecorderBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var recorder: TeleprompterAIObservationRecorder?
-
-    func install(_ recorder: TeleprompterAIObservationRecorder?) {
-        lock.lock()
-        self.recorder = recorder
-        lock.unlock()
-    }
-
-    func record(_ observation: TeleprompterAIObservation) {
-        lock.lock()
-        let recorder = self.recorder
-        lock.unlock()
-        recorder?.record(observation)
-    }
-}
-
 public enum TeleprompterAIObservability {
-    private static let recorderBox = TeleprompterAIRecorderBox()
 
     private static let logger = Logger(
         subsystem: "com.speechrail.desktop",
@@ -427,15 +449,14 @@ public enum TeleprompterAIObservability {
         to handler: TeleprompterAIObservationHandler? = nil
     ) {
         handler?(observation)
-        recorderBox.record(observation)
 
         let context = observation.context
         let message = [
             "app=\(applicationVersion)",
             "kind=\(observation.kind.rawValue)",
             "component=\(observation.component)",
-            "run_id=\(context?.runID ?? "-")",
-            "request_id=\(context?.requestID ?? "-")",
+            "run_id=\(context?.runID ?? observation.providerContext?.sessionID ?? "-")",
+            "request_id=\(context?.requestID ?? observation.providerContext?.requestID ?? "-")",
             "stage=\(context?.stage.rawValue ?? "-")",
             "index=\(context?.itemIndex.map(String.init) ?? "-")",
             "count=\(context?.itemCount.map(String.init) ?? "-")",
@@ -467,31 +488,9 @@ public enum TeleprompterAIObservability {
         }
     }
 
-    public static func install(recorder: TeleprompterAIObservationRecorder?) {
-        recorderBox.install(recorder)
-    }
-
     public static func errorCode(for error: Error) -> String {
-        if error is CancellationError { return "cancelled" }
-        if let error = error as? LLMError {
-            switch error {
-            case .notConfigured: return "not_configured"
-            case .badBaseURL: return "bad_base_url"
-            case .transport: return "transport"
-            case .http(let status, _), .httpWithRetry(let status, _, _): return "http_\(status)"
-            case .usageLimitExceeded: return "usage_limit_exceeded"
-            case .notChatAPI: return "not_chat_api"
-            case .notResponsesAPI: return "not_responses_api"
-            case .thinkingControlUnavailable: return "thinking_control_unavailable"
-            case .unsupportedStructuredOutput: return "unsupported_structured_output"
-            case .outputTruncated: return "output_truncated"
-            case .invalidStructuredResponse: return "invalid_structured_response"
-            case .refused: return "refused"
-            case .streamEndedEarly: return "stream_ended_early"
-            case .malformedStreamEvent: return "malformed_stream_event"
-            case .streamBudgetExceeded: return "stream_budget_exceeded"
-            case .cancelled: return "cancelled"
-            }
+        if error is CancellationError || error is LLMError || error is URLError {
+            return LLMObservability.errorCode(for: error)
         }
         if let error = error as? TeleprompterPreparationError {
             return error.diagnostic?.code.rawValue ?? "preparation_error"
@@ -705,13 +704,16 @@ public struct TeleprompterPreparationPipeline: Sendable {
 
     private let completion: Completion
     private let policy: TeleprompterPreparationPolicy
+    private let observationHandler: ObservationHandler?
 
     public init(
         completion: @escaping Completion,
-        policy: TeleprompterPreparationPolicy = .init()
+        policy: TeleprompterPreparationPolicy = .init(),
+        observationHandler: ObservationHandler? = nil
     ) {
         self.completion = completion
         self.policy = policy
+        self.observationHandler = observationHandler
     }
 
     public func prepare(
@@ -719,6 +721,7 @@ public struct TeleprompterPreparationPipeline: Sendable {
         onProgress: ProgressHandler? = nil,
         onObservation: ObservationHandler? = nil
     ) async throws -> TeleprompterPreparationResult {
+        let onObservation = onObservation ?? observationHandler
         let runID = UUID().uuidString
         let runStartedAt = Date()
         let runContext = TeleprompterAICallContext(
@@ -1109,9 +1112,12 @@ public struct TeleprompterPreparationClient: Sendable {
 
     public init(
         completion: @escaping Completion,
-        policy: TeleprompterPreparationPolicy = .init()
+        policy: TeleprompterPreparationPolicy = .init(),
+        observationHandler: ObservationHandler? = nil
     ) {
-        self.pipeline = TeleprompterPreparationPipeline(completion: completion, policy: policy)
+        self.pipeline = TeleprompterPreparationPipeline(
+            completion: completion, policy: policy, observationHandler: observationHandler
+        )
     }
 
     public func prepare(
@@ -2058,7 +2064,7 @@ struct TeleprompterReduceDecoder: Sendable {
         editableBlocks: [TeleprompterReduceEditableBlock]
     ) throws -> TeleprompterReduceOutput {
         do {
-            let object = try TeleprompterStrictJSON.object(from: Data(json.utf8))
+            let object = try LLMStrictJSON.object(from: Data(json.utf8))
             guard Set(object.keys) == ["schema_version", "patches"] else {
                 throw TeleprompterPreparationError.invalidPromptResponse
             }

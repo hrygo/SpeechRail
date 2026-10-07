@@ -135,7 +135,12 @@ struct SpeechRailApp: App {
 
         // 会话层的三个件与它们的接线。**接线放在这里**：协调器只认"开始 / 停止采集"两个钩子，
         // 不认识字幕、会议、助手各自的采集与连接（`TECHNICAL-DESIGN` §5.2）。
-        let coordinator = SessionCoordinator(store: SessionStore())
+        let aiRecorder = TeleprompterAIObservationRecorder(location: .default)
+        let aiObservationSink: TeleprompterAIObservationHandler = { aiRecorder.record($0) }
+        let llmProvider = LLMProvider(
+            observationHandler: TeleprompterProviderObservationAdapter.handler(to: aiObservationSink)
+        )
+        let coordinator = SessionCoordinator(store: SessionStore(), llmProvider: llmProvider)
         let captionSession = CaptionSession(coordinator: coordinator)
         let sessionPreferences = SessionPreferences()
         let teleprompterV2Store: TeleprompterV2Store
@@ -162,15 +167,11 @@ struct SpeechRailApp: App {
             fatalError("Unable to initialize teleprompter v2 store")
         }
 #endif
-        TeleprompterAIObservability.install(
-            recorder: TeleprompterAIObservationRecorder(location: .default)
-        )
-        let llmProvider = LLMProvider()
         let teleprompterSession = TeleprompterSession(
             coordinator: coordinator,
             v2Store: teleprompterV2Store
         )
-        teleprompterSession.preparationClient = TeleprompterPreparationClient { prompt in
+        teleprompterSession.preparationClient = TeleprompterPreparationClient(completion: { prompt in
             let resolved = await MainActor.run {
                 sessionPreferences.resolvedLLMConfiguration(for: .teleprompter)
             }
@@ -213,10 +214,13 @@ struct SpeechRailApp: App {
                 schema: schema,
                 maxOutputTokens: maxOutputTokens,
                 timeout: timeout,
-                observationContext: prompt.observationContext,
+                observationContext: prompt.observationContext?.providerContext,
+                observationHandler: TeleprompterProviderObservationAdapter.handler(
+                    context: prompt.observationContext, to: aiObservationSink
+                ),
                 structuredOutputMode: .jsonSchema
             )
-        }
+        }, observationHandler: aiObservationSink)
         teleprompterSession.aiClient = TeleprompterAIClient { prompt in
             let resolved = sessionPreferences.resolvedLLMConfiguration(for: .teleprompter)
             guard resolved.configuration.isConfigured,
@@ -234,7 +238,9 @@ struct SpeechRailApp: App {
                 structuredOutputMode: .jsonSchema
             )
         }
-        let assistantSession = AssistantSession(coordinator: coordinator)
+        let assistantSession = AssistantSession(
+            coordinator: coordinator, dependencies: AssistantSessionDependencies(llm: llmProvider)
+        )
         assistantSession.preferences = { sessionPreferences }
         assistantSession.realtimeCapabilityBindingProvider = { [weak appModel] voiceID in
             await appModel?.realtimeCapabilityBinding(for: voiceID)
@@ -309,7 +315,9 @@ struct SpeechRailApp: App {
         )
         // 会议助手的接线（§12 阶段 6）。它与字幕共用分人那条链路，差别在来源与纪要，
         // 所以这里只接 operation binding、服务运行诊断、新会话预填值和来源中断出口。
-        let meetingSession = MeetingSession(coordinator: coordinator)
+        let meetingSession = MeetingSession(
+            coordinator: coordinator, llmProvider: llmProvider, dependencies: .production
+        )
         meetingSession.preferences = { sessionPreferences }
         meetingSession.realtimeCapabilityBindingProvider = { [weak appModel] in
             await appModel?.realtimeCapabilityBinding()
