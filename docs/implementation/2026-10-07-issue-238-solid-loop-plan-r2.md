@@ -10,9 +10,9 @@
 
 **当前实施目标（2026-10-07 更新）：** R01、R02、R05、R03、R04、R06 已合入；剩余 3 个 issue 分 3 个独立 PR，按 **R07 #232 → R08 #231 → R09 #234** 完成实施、整包独立审查、定向验证与必要 CI，验证通过立即 squash 合并，再刷新 main。每包 1–3 issue；不堆叠 PR、不 force-push、不关闭未验收 issue、不 `Closes #238`。保持 #245 的语义禁写区，最终逐条核对十一项验收矩阵后决定关闭 issue 与完成 goal。
 
-**最新执行目标（2026-10-07，Asia/Shanghai）：** 最近 fetch 的 `origin/main` 为 `4f6b7356`。当前分支为 `codex/238-r07-transcript-persistence`；Store 子任务 `36c0ba3a`、保存接线子任务 `e60b79b` 已推送；最新 **201 项定向测试通过**，尚无 R07 PR。立即目标是让 Meeting/Caption 接入已验证的 `enqueueProjection` 端口，冻结 metadata 完成的目标，将保存后 attribution I/O 移出 receiver；再补用户重试/复制、拒绝证明的恢复/结束流程，更新合同草稿并完成一次整包独立审查、必要 CI 和合并。编译错误、真实客户端单次终态下的保存重试、稳定 partial 和容量假成功已在子任务中修复，不能以这些局部通过记录宣称 R07 已验收。
+**最新执行目标（2026-10-07，Asia/Shanghai）：** 本次 fetch 后 `origin/main` 仍为 `4f6b7356`。当前分支为 `codex/238-r07-transcript-persistence`；Store 子任务 `36c0ba3a`、保存接线子任务 `e60b79b`、辅助工作预算子任务 `049ef127` 已推送。最近一次定向实测为 **201 项通过**（2026-10-07 11:38，Asia/Shanghai），本次仅更新目标账本，未重跑测试；尚无 R07 PR。立即目标是让 Meeting/Caption 接入已验证的 `enqueueProjection` 端口，冻结 metadata 完成的目标，将保存后 attribution I/O 移出 receiver；再补用户重试/复制、拒绝证明的恢复/结束流程，更新合同草稿并完成一次整包独立审查、必要 CI 和合并。编译错误、真实客户端单次终态下的保存重试、稳定 partial 和容量假成功已在子任务中修复，不能以这些局部通过记录宣称 R07 已验收。
 
-- **R07 完成门槛：** 固定身份和完整命令可恢复；行、ordinal 与 outbox 原子确认；失败和容量拒绝不能被成功封存掩盖；partial 不进入正式纪要、默认分享或正式来源快照；归属缓存有界且跨 record/generation 隔离。完成一次整包独立审查，修复 Required，定向验证和必要 CI 通过后立即合并。
+- **R07 完成门槛：** 固定身份和完整命令可恢复；行、ordinal 与 outbox 原子确认；失败和容量拒绝不能被成功封存掩盖；partial 不进入正式纪要、默认分享或正式来源快照；归属缓存有界且跨 record/generation 隔离。保存后 metadata I/O 归共享 owner 管理，迟到完成不改新场标签或文字；用户能重试/复制旧记录，并显式处理拒绝证明，不能永久卡在记录容量上限。完成一次整包独立审查，修复 Required，定向验证和必要 CI 通过后立即合并。
 - **后续目标：** R08 补足消费 EOF、保存 settled 和封存结果的完整收尾证明；R09 收敛 loader 内核规则。各自从更新后的 main 开独立 PR，分别只关联 #231、#234。
 - **跨团队边界：** #245 的 decoder、ASR policy、turn coordinator、scene、Assembler、Ledger 与 wire 禁写；在途 clear 协议和路由只读；避让 pbxproj。同一文件出现无法分离的并行修改时暂停该处写入，核实后再继续。
 - **最终完成条件：** 九包合并并逐条审计十一项 issue 的验收矩阵，更新相关 issue 与文档；满足全部要求后才关闭对应 issue 和完成 goal。未执行的真实模型、性能、长稳及 UI 验收如实列出，不以确定性测试替代。
@@ -102,7 +102,7 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 | R03 #235 | MERGED | PR #325 / `baafb59b` | 372 项定向 fake/HTTP/contract、Ruff/Mypy；独立审查 Required 已修；CI `37556276635` 全部必要检查通过 |
 | R04 #237+#236 | MERGED | PR #328 / `151297f6` | 283 定向 Swift、2 项 Python 守卫、独立编译；Required 已修，CI `37560283532` 全绿后合并 |
 | R06 #241 | MERGED | PR #329 / `4f6b7356` | 138 XCTest +77 Swift Testing；首轮 Required 已修，CI `37562890224` 全绿后立即合并 |
-| R07 #232 | 实施中 | 分支 `codex/238-r07-transcript-persistence` | 基于 `4f6b7356`；注意 consumer-replay 分支，避让 pbxproj |
+| R07 #232 | 实施中 | 分支 `codex/238-r07-transcript-persistence`；已推送 `049ef127` | 基于 `4f6b7356`；201 项为子任务实测，metadata 接线、恢复 UI、整包审查和 CI 尚待完成；避让 pbxproj |
 | R08 #231 | planned | 无 | 注意 clear-barrier 分支，只读合同 |
 | R09 #234 | planned | 无 | #249 关闭已解锁，排末位 |
 
