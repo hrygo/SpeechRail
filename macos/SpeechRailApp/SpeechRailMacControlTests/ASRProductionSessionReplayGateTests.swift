@@ -140,9 +140,136 @@ struct SessionReplayRecognitionIntegrityTests {
 }
 
 @Suite
+struct SessionReplayLLMInputIntegrityTests {
+    private var boundaries: [SessionReplayBoundary] {
+        [
+            SessionReplayBoundary(
+                itemID: "tail",
+                span: .init(startSample: 480_000, endSample: 528_000),
+                reason: .vad, order: 3, connectionID: "same"
+            ),
+            SessionReplayBoundary(
+                itemID: "head",
+                span: .init(startSample: 0, endSample: 480_000),
+                reason: .budgetRollover, order: 1, connectionID: "same"
+            )
+        ]
+    }
+
+    @Test
+    func comparesAllFormalSegmentsInInputOrder() {
+        #expect(SessionReplayLLMInputIntegrity.matches(
+            messages: [.init(role: .user, text: "不要改成 12，保留 21。")],
+            boundaries: boundaries,
+            terminalTexts: ["head": "不要改成12，", "tail": "保留21。"]
+        ))
+    }
+
+    @Test
+    func rejectsLostNegationOrChangedDigits() {
+        for input in ["改成12，保留21。", "不要改成12，保留12。", "不要改成12，"] {
+            #expect(!SessionReplayLLMInputIntegrity.matches(
+                messages: [.init(role: .user, text: input)],
+                boundaries: boundaries,
+                terminalTexts: ["head": "不要改成12，", "tail": "保留21。"]
+            ))
+        }
+    }
+
+    @Test
+    func rejectsMissingTerminalOrMultipleUserMessages() {
+        #expect(!SessionReplayLLMInputIntegrity.matches(
+            messages: [.init(role: .user, text: "不要改成12，")],
+            boundaries: boundaries,
+            terminalTexts: ["head": "不要改成12，"]
+        ))
+        #expect(!SessionReplayLLMInputIntegrity.matches(
+            messages: [.init(role: .user, text: "不要改成12，"), .init(role: .user, text: "保留21。")],
+            boundaries: boundaries,
+            terminalTexts: ["head": "不要改成12，", "tail": "保留21。"]
+        ))
+    }
+}
+
+@Suite
+struct SessionReplayLLMResponseEvidenceTests {
+    private struct Upstream: AssistantLLM {
+        let chunks: [String]
+        var fails = false
+
+        func check(
+            configuration: LLMConfiguration, apiKey: String?, operation: LLMOperation,
+            allowThinkingControlFallback: Bool
+        ) async -> LLMConnectionResult {
+            .connected(milliseconds: 1, model: "fake")
+        }
+
+        func stream(
+            configuration: LLMConfiguration, messages: [LLMMessage], apiKey: String?,
+            maxOutputTokens: Int?, instructions: String?
+        ) async -> AsyncThrowingStream<String, Error> {
+            AsyncThrowingStream { continuation in
+                for chunk in chunks { continuation.yield(chunk) }
+                if fails {
+                    continuation.finish(throwing: SessionReplayFailure.businessTurnDidNotArrive)
+                } else {
+                    continuation.finish()
+                }
+            }
+        }
+    }
+
+    private func stream(_ llm: SessionReplayAssistantLLM) async -> AsyncThrowingStream<String, Error> {
+        await llm.stream(
+            configuration: LLMConfiguration(baseURL: "http://127.0.0.1:1/v1", model: "fake"),
+            messages: [.init(role: .user, text: "test")], apiKey: nil,
+            maxOutputTokens: nil, instructions: nil
+        )
+    }
+
+    @Test
+    func whitespaceOnlyResponseDoesNotCountAsContent() async throws {
+        let llm = SessionReplayAssistantLLM(
+            recorder: SessionReplayRecorder(), provider: Upstream(chunks: [" \n", "\t"])
+        )
+        for try await _ in await stream(llm) {}
+        #expect(await llm.completedStreamCount == 1)
+        #expect(await llm.outputCharacters == 3)
+        #expect(await llm.outputContentCharacters == 0)
+        #expect(await llm.formalInputMatched == false)
+    }
+
+    @Test
+    func forwardsContentAndDoesNotRecordFailureAsCompletion() async throws {
+        let llm = SessionReplayAssistantLLM(
+            recorder: SessionReplayRecorder(), provider: Upstream(chunks: ["已", "处理。"], fails: true)
+        )
+        var received = ""
+        do {
+            for try await delta in await stream(llm) { received += delta }
+            Issue.record("The upstream failure must reach the consumer.")
+        } catch SessionReplayFailure.businessTurnDidNotArrive {
+            #expect(received == "已处理。")
+        }
+        #expect(await llm.completedStreamCount == 0)
+        #expect(await llm.outputContentCharacters == 4)
+    }
+}
+
+@Suite
 struct SessionReplayRowIntegrityTests {
     private let recordStartedAt = Date(timeIntervalSince1970: 1_000)
     private let ledgerOrigin = Date(timeIntervalSince1970: 1_001)
+
+    @Test
+    func laterPersistenceObservationMustNotMoveReplayCaptureOrigin() async throws {
+        let clock = SessionReplayMeetingClock()
+        let origin = clock.now()
+        try await Task.sleep(for: .milliseconds(10))
+        let persistenceObservation = clock.now()
+        #expect(persistenceObservation > origin)
+        #expect(clock.captureOrigin == origin)
+    }
 
     @Test
     func matchesRowsOneToOneAcrossReorderedSameTextAndDuration() {

@@ -387,16 +387,20 @@ final class SessionReplayPowerMonitor: MeetingPowerMonitor {
 
 final class SessionReplayMeetingClock: MeetingClock, @unchecked Sendable {
     private let lock = NSLock()
-    private var latestReturnedDate = Date()
+    private var captureOriginDate: Date?
 
     func now() -> Date {
         let current = Date()
-        lock.withLock { latestReturnedDate = current }
+        // The first call anchors this fresh capture generation. Later calls
+        // timestamp persistence observations and must not move that anchor.
+        lock.withLock {
+            if captureOriginDate == nil { captureOriginDate = current }
+        }
         return current
     }
 
-    var lastReturnedDate: Date {
-        lock.withLock { latestReturnedDate }
+    var captureOrigin: Date? {
+        lock.withLock { captureOriginDate }
     }
 }
 
@@ -622,10 +626,17 @@ final class SessionReplayDiscardingPlayback: AssistantPlaybackChannel, @unchecke
 
 actor SessionReplayAssistantLLM: AssistantLLM {
     private let recorder: SessionReplayRecorder
+    private let provider: (any AssistantLLM)?
     private(set) var streamCount = 0
+    private(set) var completedStreamCount = 0
+    private(set) var outputCharacters = 0
+    private(set) var outputContentCharacters = 0
+    private(set) var formalInputMatched = true
+    private(set) var finalToLLMSeconds: Double?
 
-    init(recorder: SessionReplayRecorder) {
+    init(recorder: SessionReplayRecorder, provider: (any AssistantLLM)? = nil) {
         self.recorder = recorder
+        self.provider = provider
     }
 
     func check(
@@ -634,7 +645,13 @@ actor SessionReplayAssistantLLM: AssistantLLM {
         operation: LLMOperation,
         allowThinkingControlFallback: Bool
     ) async -> LLMConnectionResult {
-        .connected(milliseconds: 1, model: "session-replay-fake")
+        if let provider {
+            return await provider.check(
+                configuration: configuration, apiKey: apiKey, operation: operation,
+                allowThinkingControlFallback: allowThinkingControlFallback
+            )
+        }
+        return .connected(milliseconds: 1, model: "session-replay-fake")
     }
 
     func stream(
@@ -644,12 +661,65 @@ actor SessionReplayAssistantLLM: AssistantLLM {
         maxOutputTokens: Int?,
         instructions: String?
     ) async -> AsyncThrowingStream<String, Error> {
+        let calledAt = ContinuousClock().now
         await recorder.recordAssistantLLMStreamCall()
         streamCount += 1
+        if let provider {
+            let snapshot = await recorder.snapshot()
+            if let finalAt = snapshot.lastTerminalAt {
+                let duration = finalAt.duration(to: calledAt).components
+                finalToLLMSeconds = Double(duration.seconds)
+                    + Double(duration.attoseconds) / 1e18
+            }
+            formalInputMatched = formalInputMatched && SessionReplayLLMInputIntegrity.matches(
+                messages: messages,
+                boundaries: snapshot.boundaries,
+                terminalTexts: snapshot.terminalTexts
+            )
+            let upstream = await provider.stream(
+                configuration: configuration, messages: messages, apiKey: apiKey,
+                maxOutputTokens: maxOutputTokens, instructions: instructions
+            )
+            return AsyncThrowingStream { continuation in
+                let task = Task {
+                    do {
+                        for try await delta in upstream {
+                            try Task.checkCancellation()
+                            self.outputCharacters += delta.count
+                            self.outputContentCharacters += delta.filter { !$0.isWhitespace }.count
+                            continuation.yield(delta)
+                        }
+                        self.completedStreamCount += 1
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+                continuation.onTermination = { _ in task.cancel() }
+            }
+        }
         return AsyncThrowingStream { continuation in
             continuation.yield("已处理。")
             continuation.finish()
         }
+    }
+}
+
+enum SessionReplayLLMInputIntegrity {
+    static func matches(
+        messages: [LLMMessage],
+        boundaries: [SessionReplayBoundary],
+        terminalTexts: [String: String]
+    ) -> Bool {
+        let users = messages.filter { $0.role == .user }
+        let ordered = boundaries.sorted { $0.span.startSample < $1.span.startSample }
+        guard users.count == 1, !ordered.isEmpty,
+              ordered.allSatisfy({ terminalTexts[$0.itemID] != nil }) else { return false }
+        let expected = ordered.map { terminalTexts[$0.itemID] ?? "" }.joined()
+        // The production assembler supplies CJK/Latin boundary whitespace.
+        // Compare every other character, including punctuation and digits.
+        let actual = users[0].text.filter { !$0.isWhitespace }
+        return !actual.isEmpty && actual == expected.filter { !$0.isWhitespace }
     }
 }
 
