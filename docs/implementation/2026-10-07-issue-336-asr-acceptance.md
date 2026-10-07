@@ -2,7 +2,7 @@
 title: "共享 ASR #336：冻结预设后的真实验收"
 status: in_progress
 audience: "SpeechRail 开发者与验收人员"
-version: "0.2.0"
+version: "0.3.0"
 date: 2026-10-07
 ---
 
@@ -134,7 +134,32 @@ wheel SHA-256 为
 `646216d6524cac1ecb98b5c828c17e60795c72d496ba9d15d6c725eaebf9ee85`。
 171 个生产模块与该提交逐字一致；与新主线 wheel 的包内容差异仍只有 decoder
 和 `RECORD`，原生二进制相同，独立安装入口校验通过。
-90 请求真实对照正在进行，未采纳；质量与额外生成的收尾时延成本不能由 fake 测试推断。
+2026-10-07 13:22 UTC，90 请求真实对照完成，相对冻结 main `48a0b726` 的
+逐条“不新增错误”门通过。以下提词器变化均在三次重复出现：
+`ami-meeting-06` 27→22、`ami-meeting-01` 23→20、
+`fleurs-zh-05` 5→4、`librispeech-poetry-121-123859-0001` 4→3；
+其余请求字符错误数一致。历史质量回退仍未全部消除，不能据此判定完整质量门通过。
+
+每臂每预设 45 请求的 nearest-rank p50 / p95：
+
+| 预设 / 制品 | 首预览（s） | 最后上传至 final（s） |
+|---|---:|---:|
+| 字幕 / main48 | 0.491 / 0.510 | 0.131 / 0.271 |
+| 字幕 / 最终解码候选 | 0.491 / 0.508 | 0.126 / 0.265 |
+| 提词器 / main48 | 0.493 / 0.514 | 0.085 / 0.104 |
+| 提词器 / 最终解码候选 | 0.492 / 0.522 | 0.106 / 0.233 |
+
+上述时延没有声学结束标注，不能称为“末语音至 final”；绝对时延与资源门仍为
+`unset`，候选未作为正式安装采纳。
+`maintenance-final-redecode-probe-v3/probe-outcome.json` SHA-256 为
+`7c498e856fa08c449001c198f9b39f21027831ba16322936ffb1841094832e33`。
+维护记录 `measurement_completed=true`、`original_restored=true`；
+13:22:32 UTC 核验原 runtime、vendor、selection、配置、generation 13、
+`quality/quality`、ready、空闲和唯一监听恢复。
+
+随后分支整合 main `3a4cb71357095cdb5a92d05630e86a07d4c9a27d` 的
+TTS 准入与回收失败改动。上述候选制品仍归属 `ccd68ba0`，
+不能自动覆盖整合后的生产源码；最新双臂矩阵与生产长会须另记制品身份。
 
 新主线的完整矩阵、生产长会和真实本机 LLM 回放另行采集。
 PR #340 保持草稿，#253 与 #336 保持开放。
