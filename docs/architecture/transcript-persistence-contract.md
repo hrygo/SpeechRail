@@ -1,19 +1,19 @@
 ---
 title: "转录保存命令、原子确认与恢复合同"
-status: under_review
+status: active
 audience: "macOS App 开发者、会话数据层维护者"
-version: "0.1.4"
+version: "0.1.5"
 date: 2026-10-07
 ---
 
 # 转录保存命令、原子确认与恢复合同
 
 本文件跟踪 [#232](https://github.com/hrygo/SpeechRail/issues/232) 的 R07 实施。
-当前为合同草稿：Store 原子确认、共享命令队列和 Meeting/Caption 接线已有定向测试证据，
+R07 PR #330 已合入 main（`c997f7b0`）：Store 原子确认、共享命令队列和 Meeting/Caption 接线已有定向测试证据，
 保存后 attribution 的 I/O 已接共享 owner，用户操作入口已接线；
 整包独立审查已完成，Required 缓存释放修复及验收补充已有定向实测；
-修订 head 的必要 CI 和合并尚未完成。
-不得依据本文或子任务通过记录宣布 #232 已验收。
+修订 head `776bce9f` 的必要 CI `37573261584` 全部通过。
+#232 的完整消费/封存联合验收仍待 R08，不依据本文宣布该 issue 已全部验收。
 
 ## 所有权与边界
 
@@ -150,7 +150,6 @@ UI 视觉、键盘实际操作和 VoiceOver 尚未实测，不把编译通过视
 
 剩余门槛：
 
-- 修订 head 的必要 CI 与 PR 合并；
 - 与 R08 的完整 EOF/封存屏障联合验收。
 
 实测命令、精确计数、提交和审查结论记录于
