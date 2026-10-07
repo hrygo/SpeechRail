@@ -1,16 +1,16 @@
-<!-- loop-plan-r2: 2026-10-07, baseline df8bb539 -->
-# Issue #238 DRY / SOLID 收敛 Loop 实施计划 r2（新基线 `df8bb539`）
+<!-- loop-plan-r2: 2026-10-07, baseline 5c7590b0 -->
+# Issue #238 DRY / SOLID 收敛 Loop 实施计划 r2（验收基线 `5c7590b0`）
 
 > r1（`2026-10-07-issue-238-solid-loop-plan.md`，基线 `159fea09`，随 R01 PR #320 提交）的后继修订。
 > 凡与 r1 不一致处以本文件为准。当前目标包含实施、审查、验证、提交、推送及通过后的合并；分组/跨包门结论继承 r1。
 
 **Goal:** 11 个 issue（#231 #232 #234 #235 #236 #237 #240 #241 #242 #244 #246）原分 9 包交付；最终矩阵审计追加 R10（仅 #242 的 Store 故障补证），仍每 PR 1–3 issue。
 **Spec:** [Epic #238](https://github.com/hrygo/SpeechRail/issues/238)、[Epic #245](https://github.com/hrygo/SpeechRail/issues/245)。
-**核验日期：** 2026-10-07，Asia/Shanghai；CI 时间戳为 UTC。进度以本次回读的 SHA、PR 状态和 run ID 为准。基线 `origin/main = df8bb539`（已 fetch）；每包合并后刷新。
+**核验日期：** 2026-10-07，Asia/Shanghai；CI 时间戳为 UTC。进度以本次回读的 SHA、PR 状态和 run ID 为准。验收基线 `origin/main = 5c7590b0`（已 fetch）；每包合并后刷新。
 
-**当前实施目标（2026-10-07 更新）：** R01–R09 九包均已合入；最终逐条审计十一项矩阵时发现 #242 的 UPSERT、COMMIT 与回滚首因缺独立 Store 回归，追加一个测试补证 PR R10。补证经一次整包独立审查、定向验证和匹配最终 head 的必要 CI 后立即 squash 合并，再更新十一项验收矩阵、合同与 Epic。每包 1–3 issue；不堆叠 PR、不 force-push、不关闭未验收 issue、不 `Closes #238`。#245 已完成，临时避让限制撤销；实际 worktree WIP 继续保护。
+**当前收口目标（2026-10-07 更新）：** R01–R09 与 #242 补证 R10 均已合入，十一项共 91 条矩阵已逐条核对；证据区分定向实测、匹配 head CI、突变与静态边界，见 [最终验收证据矩阵](2026-10-07-issue-238-final-acceptance.md)。剩余工作是提交本次文档收口、同步 issue 验收状态，实际完成后将 goal 标为 complete。每包 1–3 issue，不堆叠、不 force-push、不 `Closes #238`。#245 已完成，临时避让限制撤销；实际 worktree WIP 继续保护。
 
-**最新执行目标（2026-10-07，Asia/Shanghai）：** R09 PR #332 在 head `6ad4c2ac` 的 CI `37582419447` 全绿、一次独立审查无 Required/Critical 后，于 UTC `2026-10-07T06:43:31Z` squash 合入 `df8bb539`。R10 从该 main 开 `codex/238-r10-rename-acceptance`，只补测试自有 SQLite 故障与现有合同验收证据；生产服务、模型和用户数据库不变。
+**最新执行事实（2026-10-07，Asia/Shanghai）：** R09 PR #332 在 head `6ad4c2ac` 的 CI `37582419447` 全绿后 squash 合入 `df8bb539`；R10 PR #333 在 head `01e69f45` 的 CI `37583882519` 全绿、一次独立审查无 Critical/Required 后，于 UTC `2026-10-07T06:56:00Z` squash 合入 `5c7590b0`。60 项定向 Store/Minutes/SourceSeal XCTest 与两次突变补证完成。收口 PR 只更新账本、证据和合同状态，不改变运行态。
 
 **较早 goal 更新检查点（历史，2026-10-07）：** 当时本地 HEAD 为 `0d2cf68e`，恢复入口等尚未提交；以下 R07 前三步现已完成，以最新执行目标与账本为准：
 
@@ -21,11 +21,11 @@
 5. 九包均合并后审计十一项 issue 的联合验收矩阵；只关闭已满足完整验收条件的 issue，全部完成后再将结构化 goal 标为 complete。
 
 - **R07 完成门槛：** 固定身份和完整命令可恢复；行、ordinal 与 outbox 原子确认；失败和容量拒绝不能被成功封存掩盖；partial 不进入正式纪要、默认分享或正式来源快照；归属缓存有界且跨 record/generation 隔离。保存后 metadata I/O 归共享 owner 管理，迟到完成不改新场标签或文字；用户能重试/复制旧记录，并显式处理拒绝证明，不能永久卡在记录容量上限。完成一次整包独立审查，修复 Required，定向验证和必要 CI 通过后立即合并。
-- **后续目标：** R08 补足消费 EOF、保存 settled 和封存结果的完整收尾证明；R09 收敛 loader 内核规则。各自从更新后的 main 开独立 PR，分别只关联 #231、#234。
+- **当时后续目标（已完成）：** R08 补足消费 EOF、保存 settled 和封存结果的完整收尾证明；R09 收敛 loader 内核规则。各自从更新后的 main 开独立 PR，分别只关联 #231、#234。
 - **跨团队边界（2026-10-07 用户更正）：** #245 实施已完成，不再设置该团队的语义禁写区或 pbxproj 避让。GitHub #245/#253 仍 OPEN（本次回读），不能据此推翻用户对实施完成的确认，也不据此关闭其他团队的 issue。仍按实际 worktree 改动核对共享文件；同一文件出现无法分离的并行修改时暂停该处写入，核实后再继续。7a61 的助手上下文预算改动与 R08 收尾段可分离，保留其修改。
-- **最终完成条件：** 九包合并并逐条审计十一项 issue 的验收矩阵，更新相关 issue 与文档；满足全部要求后才关闭对应 issue 和完成 goal。未执行的真实模型、性能、长稳及 UI 验收如实列出，不以确定性测试替代。
+- **最终完成条件：** 九包和 R10 补证合并并逐条审计十一项 issue 的验收矩阵，更新相关 issue 与文档；满足全部要求后才关闭对应 issue 和完成 goal。未执行的真实模型、性能、长稳及 UI 验收如实列出，不以确定性测试替代。
 
-结构化 goal 仍 active。2026-10-07 再次核对：Goal 工具只提供完成/阻塞状态，不能改正文；原生 Codex UI 入口也被 computer-use 安全规则拒绝。旧 goal 的基线、PR 状态、逐包等待确认及错误同文件判断由本段执行目标更正，不虚假标为 complete 再重建，不绕过 UI 限制。
+原生 goal 正文保留旧快照：已核对可用工具只能更新完成/阻塞状态，不能编辑正文；未假完成再重建，未绕过 UI 限制。当前执行目标由本文与最终矩阵更正，实际外部收口完成后更新 goal 状态。
 
 ## 0. 基线与 #245 现状（R07 开工历史快照，已补合并证据）
 
@@ -41,31 +41,31 @@
 
 审查发现的发布失败清理、独占 staging、alignment 活动未接线、退出失败隔离及测试 target/全局注入问题均已在各包补齐。合并证明代码与所列 gate 通过，不能代替未运行的真实模型、质量、性能或长稳验收。
 
-## 1. 十一条状态与复验结论（历史源码锚点保留，状态更新至 `c997f7b0`）
+## 1. 十一条当前状态（验收基线 `5c7590b0`）
 
-方法：`git log dc0744fb..HEAD -- <file>` 定文件是否被 #245 改动，再读当前源码确认根因。**未修**（可按原计划做）、**部分改善**（范围收窄）、**可启动**（等待解除）。
+方法：逐条回读原 issue 验收要求，对照已合入源码、合同、定向实测、突变及各包最终 head CI。以下为已实施状态；历史复验与红绿过程保留在后续账本。
 
 | Issue | 档 | 当前事实（main） | PR 包 |
 |---|---|---|---|
 | #244 短写制品 | 已合并 | 独占 staging、完整写入、发布前失败清理及数据库完成回读；127 个定向测试和选中 CI 通过。仅承诺进程级原子可见 | R01 #320 |
 | #240 owner 登记 | 已合并 | eager/owned 分离，aligner 按需加载；partial-start 回收、runner/monitor/worker 失败隔离、取消保护及超时句柄保留 | R02 #322 |
 | #246 活动保护 | 已合并 | 生产 alignment 与 evictor 共用 WorkerLeaseLock；活动/回收互斥，结束后重设 idle 起点；移除接线导致两个回归失败 | R02 #322 |
-| #242 改名事务 | 已合并 | 映射和修订事件共用 SQLite 事务；5 个故障/幂等回归，测试自有 trigger，无生产开关和 pbxproj 修改 | R05 #323 |
+| #242 改名事务 | 已合并 | 映射和修订事件共用 SQLite 事务；R10 补齐 UPSERT/COMMIT/回滚首因与复核/隔离等 8 个真实 Store 回归 | R05 #323 + R10 #333 |
 | #235 验证用例 | 已合并 | 两个用例接线；同次身份、unknown、CAS/撤销、保存失败、重复取消与 timeout/cancel 回归通过；372 项定向测试，独立审查 Required 修复及全部必要 CI 通过 | R03 #325 |
 | #237 坏 2xx | 已合并 | probe/正式调用共用最低响应校验；坏 2xx 不再 ready；App 展示新状态编译通过 | R04 #328 |
 | #236 中立支持 | 已合并 | 中立 context/observer、唯一 parser、显式 recorder 注入；支持层独立 type-check 与全部 CI 通过 | R04 #328 |
 | #241 封存结果 | 已合并 | 归档提交后读回、记录/租约冻结、会议来源确认、按记录保留失败恢复；138 XCTest +77 Swift Testing、审查修订与 CI 通过 | R06 #329 |
-| #232 保存恢复 | 已合并，联合验收待 R08 | 共享冻结命令、同 ID 原子确认、metadata owner、拒绝恢复与缓存释放；228 项定向实测、独立审查修订及必要 CI 通过 | R07 #330 |
-| #231 收尾屏障 | 部分改善 | Meeting/Caption 已等单一下行消费及保存 owner；Assistant 仍先检查队列再 close/cancel；协议失败封存资格与整个流程的明确截止时间待补 | R08（收尾证明） |
-| #234 loader 规则 | 可启动 | 双份规则仍在（`qwen3_worker.py:695/709/770-776` + `model_identity.py`）；worker 现 1315 行，R09 只动 loader 内核 | R09（#249 关闭，解锁） |
+| #232 保存恢复 | 已合并、联合验收已完成 | 共享冻结命令、同 ID 原子确认、metadata owner、拒绝恢复与缓存释放；228 项定向实测、独立审查修订及必要 CI 通过 | R07 #330 |
+| #231 收尾屏障 | 已合并 | 唯一 receiver EOF、正文/metadata owner、统一绝对预算与真实封存确认；293 项联合回归、审查修订与必要 CI 通过 | R08 #331 |
+| #234 loader 规则 | 已合并 | 纯 loader 共享规则与唯一 bits/group 约束；adapter 保留来源/精度策略，241 pytest 与必要 CI 通过 | R09 #332 |
 
-## 2. 启动顺序（#249 关闭后更新）
+## 2. 实际实施顺序（均已完成）
 
 ```text
-R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R08 → R09
+R01 → R02 → R05 → R03 → R04 → R06 → R07 → R08 → R09 → R10（#242 补证）
 ```
 
-- R01/R02/R05 均须审查补齐后合并。R09 不再等待 #249，改排 R02–R08 之后、重定基线且核对 worker 当前写入窗口再做；不等整个 #253 验收关闭。
+- 各包完成独立审查、必要验证和最终 head CI 后合并。R09 在 R02–R08 完成后重定基线，只改 loader，不等待 #253 的真实验收。
 - R06 → R07 → R08 必须串行：同一批 Store/Session 文件，seal seam → save 内核 → drain 接线。
 - R04 主要修改 `LLMProvider.swift`，R06 主要修改 `SessionCoordinator.swift`；两者不是同一文件。仍按既定顺序执行，若扩展到共同调用者再核对占用。
 - #231/#232/#241、#240/#246 之间不设整单循环 blocked-by；接口可先行、实现串行、联合验收。
@@ -78,12 +78,12 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 
 `qwen3_stream_decoder.py`、`domain/asr_policy.py`、`application/asr_turn_coordinator.py`、`ASRScenePreset.swift`、`AssistantInputTurnAssembler.swift`、`TranscriptPreviewLedger.swift`、ASR wire 契约（`RealtimeContractTypes.swift` ASR 部分）。
 
-### 3.2 #238 可写区（自 dc0744fb 零提交，已核对）
+### 3.2 原 #238 可写区（开工时快照，历史）
 
 `runtime/local_file_processor.py`、`application/lifecycle.py`、`runtime/worker_lease.py`、`application/services.py`、`http/routes/voice_designs.py`、`http/routes/system.py`、`backends/model_identity.py`、`SessionStore.swift`、`LLMProvider.swift`。
 `qwen3_worker.py`/`qwen3_tts_worker.py`：R09 只动 loader 内核（`_loader_value`/`_loader_quantization`），不动 #249 合入的解码/策略/终态语义。
 
-### 3.3 需交接的共享文件
+### 3.3 原需交接的共享文件（历史）
 
 - `MeetingSession.swift` / `CaptionSession.swift` / `AssistantSession.swift`：R07/R08 开工前以当时 main 重定基线，一次只一处写入。
 - `application/realtime_openai.py` + `http/routes/realtime_openai.py` + `contracts/realtime-openai.md`：`asr-clear-barrier-245` 在途（#245 语义面）；R08 只读 `drainAndClear` 合同，不改语义。
@@ -96,12 +96,12 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 
 ## 4. 每轮 loop 执行规则
 
-- [ ] **定基线**：记录 checkout、base/head、在途分支 heads；只读核对同文件变更来源。
-- [ ] **领边界**：列出 issue、精确文件、输入/输出接口、禁写项；同一文件同时只一个写入者。
-- [ ] **补反例**：先写失败回归并确认红灯（TDD），再做最小修复。
-- [ ] **最小验证**：本包定向测试 + `ruff`/`swift` 编译 + `git diff --check`；记录实测命令与 SHA。
-- [ ] **成 PR 并合并**：分支 `codex/238-rXX-<slug>`，一个 PR 只关联本包 1–3 issue；检查新 main、审查及必要验证通过后直接合并，随后同步 main 开下一包。不关闭尚未完整验收的 issue，不 `Closes #238`。
-- [ ] **更新账本**：§5 填真实 SHA/日期/未验项；下一轮从新 head 重建判断。
+- [x] **定基线**：记录 checkout、base/head、在途分支 heads；只读核对同文件变更来源。
+- [x] **领边界**：列出 issue、精确文件、输入/输出接口、禁写项；同一文件同时只一个写入者。
+- [x] **补反例**：先写失败回归并确认红灯（TDD），再做最小修复。
+- [x] **最小验证**：本包定向测试 + `ruff`/`swift` 编译 + `git diff --check`；记录实测命令与 SHA。
+- [x] **成 PR 并合并**：分支 `codex/238-rXX-<slug>`，一个 PR 只关联本包 1–3 issue；检查新 main、审查及必要验证通过后直接合并，随后同步 main 开下一包。不关闭尚未完整验收的 issue，不 `Closes #238`。
+- [x] **更新账本**：§5 填真实 SHA/日期/未验项；下一轮从新 head 重建判断。
 
 ## 5. 执行账本
 
@@ -115,7 +115,8 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 | R06 #241 | MERGED | PR #329 / `4f6b7356` | 138 XCTest +77 Swift Testing；首轮 Required 已修，CI `37562890224` 全绿后立即合并 |
 | R07 #232 | MERGED | PR #330 / `c997f7b0` | 228 定向 XCTest；Required 红→绿修复；最终 head `776bce9f` CI `37573261584` 全绿；避让 pbxproj |
 | R08 #231 | MERGED | PR #331 / `cb77d296` | 293 定向 XCTest、App build、一次审查 Required 修订；最终 head `70d40a46` CI `37581248688` 全绿 |
-| R09 #234 | 实施中 | 分支 `codex/238-r09-loader-metadata`，base `cb77d296` | 纯 loader 规则收敛；保留来源顺序、专属精度策略与 catalog 范围 |
+| R09 #234 | MERGED | PR #332 / `df8bb539` | 241 pytest、Ruff/Mypy；一次独立审查无 Required；CI `37582419447` 通过 |
+| R10 #242 补证 | MERGED | PR #333 / `5c7590b0` | 60 XCTest；COMMIT/首因突变检出 5 failures；一次独立审查与 CI `37583882519` 通过 |
 
 ### R03 验证与取舍（2026-10-07）
 
@@ -202,7 +203,7 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 - r1 `docs/implementation/2026-10-07-issue-238-solid-loop-plan.md`（随 PR #320）：分组/边界/跨包门结论继承；不一致处以本文件为准。
 
 
-### R08 当前实施与验证账本（2026-10-07，PR #331 修订中）
+### R08 历史实施与验证账本（2026-10-07，最终结果见末条）
 
 - 统一 `SessionDrainDeadline` 已接三 feature 和 Coordinator：停产 → uploader → protocol → close → 唯一 receiver EOF → 保存 owner → 真实归档 / 来源确认。正常 drain 保留输入归档权，abort / reconnect 撤销旧身份；不改 wire、schema 或模型运行态。
 - 真实反例：Assistant receipt / receiver Gate 2 项 5 failures；非合作 receiver 4 failures；Meeting / Caption protocol 7 failures；ArchiveWriter deadline 2 failures；保存重试旧预算 1 failure；缓冲 stream error 2 failures。均已有生产修复。
@@ -239,7 +240,7 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 - R09 旧行为差分：两个旧 loader 的同一 7 向量结果一致（14 次调用），缺失/None→未观察、显式空 pair→未量化、合法量化/同 pair 不同 format 保持、bool/unknown 拒绝。新纯模块尚不存在时 pytest import RED；42 项纯向量在共享规则实现后 GREEN。
 - R09 两后端 fake 构造接线 7 项，保留 collector 优先级与专属 family/variant/rate/compute。最初 ASR fixture 未给 tensor 精度摘要却断言 compute=float16，出现 1 failure；Ruling: 补 F16 weights 的完整 snapshot fixture 后验证现有 compute 策略，不为缺失 fixture 修改产品精度 fallback。代价为增加一个显式 mixed_precision fixture 字段。
 - R09 定向 pytest **181 passed**（6 文件，包含纯模块、snapshot/ready、ASR/TTS、limits/isolation），catalog 两文件 **60 passed**；Ruff 7 个改动文件与 Mypy 4 个生产文件通过。
-- R09 临时移除两个生产 loader 的共享 quantization 接线，真实 fake 构造冲突用例 **2 failed / 5 passed**，随后恢复全部 source；日志 `/tmp/speechrail-r09-loader-wiring-mutation-red.log`。恢复后最终同范围复验与整包审查待记录。
+- R09 临时移除两个生产 loader 的共享 quantization 接线，真实 fake 构造冲突用例 **2 failed / 5 passed**，随后恢复全部 source；日志 `/tmp/speechrail-r09-loader-wiring-mutation-red.log`。恢复后最终同范围 241 pytest 通过，整包审查与合并结果见下条。
 
 - R09 最终复验 **241 pytest passed**（8 文件），Ruff/Mypy 与 diff check 通过；一次 fresh `luna_worker` 整包审查无 Required/Critical。Final: minor (fixed in R10 ledger): 旧“待记录”由本条最终事实替代。
 - Final: Ruling: `LoaderSource.name` 为 internal collector 固定标签合同，生产来源全是静态字符串；不增加动态 label 校验 — 当前没有动态敏感值输入，新增 collector 必须继续遵守静态标签约束。代价是未来采集器作者需维护这项内部合同。
@@ -251,4 +252,9 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 - 新增 8 个真实 Store 回归：UPSERT trigger、deferred FK 的真实 COMMIT、RAISE(ROLLBACK) 后清理二次回滚、缺失会话 FK、同 label 跨会话、关闭存储、第二连接写锁、失败/成功改名的祖先复核与正文/采用指针/血缘保留。
 - 初次 6 个补证 + 既有定向范围 **58 XCTest / 0 failures**；追加两个用例后 fixture 使用不存在的 `parentID` 导致编译失败，改为当前领域字段 `parentMinutesID` 后 **60 XCTest / 0 failures**，不改变产品代码。
 - 有界突变：吞掉 COMMIT 错误 → 1 项 / 4 failures；revision 错误路径让二次 rollback 覆盖首因 → 1 项 / 1 failure。均由真实断言检出，生产源码已 finally 原样恢复。
-- 恢复后最终定向 **60 XCTest / 0 failures、exit 0**（2026-10-07 14:50，Asia/Shanghai），diff check 通过；一次独立审查及最终 head CI 在本包完成后补记。所有 SQLite 故障都仅作用于测试临时数据库；不宣称真实设备/UI/模型质量验收。
+- 恢复后最终定向 **60 XCTest / 0 failures、exit 0**（2026-10-07 14:50，Asia/Shanghai），diff check 通过；一次 fresh `luna_worker` 整包独立审查无 Critical/Required/Minor/Declined；head `01e69f45` 的 CI `37583882519` 全部选中检查通过，PR #333 已 squash 合入 `5c7590b0`（UTC `2026-10-07T06:56:00Z`）。所有 SQLite 故障都仅作用于测试临时数据库；不宣称真实设备/UI/模型质量验收。
+
+
+## 7. 最终验收收口
+
+十一项 91 条按原矩阵逐条建立关闭依据，详见 [最终验收矩阵](2026-10-07-issue-238-final-acceptance.md)。R06–R08 A 轨联合门已通过；#242 缺证已由 R10 补齐。来源/快照、保存/封存、资源 owner/activity 和 loader 差异分别验收，不把 helper 或绿灯数代替业务后置条件。相邻八项和 #245 保持其他团队归属，真实模型/设备/UI/性能/长稳未实测。issue 状态同步以 GitHub 最终时间线为准。

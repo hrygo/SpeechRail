@@ -2,7 +2,7 @@
 title: "转录保存命令、原子确认与恢复合同"
 status: active
 audience: "macOS App 开发者、会话数据层维护者"
-version: "0.1.6"
+version: "0.1.7"
 date: 2026-10-07
 ---
 
@@ -13,7 +13,7 @@ R07 PR #330 已合入 main（`c997f7b0`）：Store 原子确认、共享命令�
 保存后 attribution 的 I/O 已接共享 owner，用户操作入口已接线；
 整包独立审查已完成，Required 缓存释放修复及验收补充已有定向实测；
 修订 head `776bce9f` 的必要 CI `37573261584` 全部通过。
-#232 的完整消费/封存联合验收仍待 R08，不依据本文宣布该 issue 已全部验收。
+R08 PR #331 已合入 `cb77d296`，293 项联合 XCTest 与最终 head 必要 CI 通过，完整消费/封存联合门已完成；证据性质与关闭依据见[最终矩阵](../implementation/2026-10-07-issue-238-final-acceptance.md)。
 
 ## 所有权与边界
 
@@ -129,11 +129,11 @@ feature 关闭时等待事件消费任务以及已接纳命令真正 settled；
 失败记录的 retry/copy 目标不随 `sessionID` 清空或开启新场而消失。
 
 R07 的 settled 证明只覆盖已接纳/明确拒绝的保存结果；
-完整消费 EOF、超时、stream failure 和封存结果的联合屏障由 R08 / #231 补齐。
+完整消费 EOF、超时、stream failure 和封存结果的联合屏障由已合入的 R08 / #231 补齐。
 最终封存仍服从[会话归档确认合同](session-seal-contract.md)，不能用释放租约或单次网络 drain
 代替完整结束证明。
 
-## 当前证据与未完成门槛
+## 当前证据与验证边界
 
 2026-10-07 的定向验证包含 Store/outbox 失败、ordinal 确认失败、同 ID 冲突、
 Meeting/Caption 的固定命令重试、partial、控制事件、容量拒绝及跨记录归属，
@@ -148,11 +148,9 @@ App Debug 构建通过；
 UI 视觉、键盘实际操作和 VoiceOver 尚未实测，不把编译通过视为这些验收通过。
 这些测试不使用设备、网络服务、真实音频或模型。
 
-剩余门槛：
-
-- 与 R08 的完整 EOF/封存屏障联合验收。
+R08 的完整 EOF/封存联合门已通过：唯一 receiver、正文与 metadata settled、归档/来源确认均有 Gate 和失败反例；不将此结果扩展为真实设备或 UI 验收。
 
 实测命令、精确计数、提交和审查结论记录于
 [R07 loop 账本](../implementation/2026-10-07-issue-238-solid-loop-plan-r2.md)。
 
-R08 的联合消费与封存门见[应用收尾合同](session-drain-completion-contract.md)，当前为分支实施与确定性验证，尚未以此宣布 #232 已完成联合验收。
+R08 的联合消费与封存门见[应用收尾合同](session-drain-completion-contract.md)，已合入 main 并通过确定性联合验收；真实声学、UI 与长稳仍无本次实测证据。

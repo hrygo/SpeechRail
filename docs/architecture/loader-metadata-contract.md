@@ -1,14 +1,14 @@
 ---
 title: "Loader 身份声明的纯归一化边界"
-status: under_review
+status: active
 audience: "Worker / backend 开发者"
-version: "0.1.0"
+version: "0.1.1"
 date: 2026-10-07
 ---
 
 # Loader 身份声明的纯归一化边界
 
-对应 #234 / #238 R09。`backends/loader_metadata.py` 只处理调用者明确选择的有限来源，
+对应 #234 / #238 R09。PR #332 已合入 `df8bb539`，241 项定向 pytest、一次独立审查及最终 head 的必要 CI 通过。`backends/loader_metadata.py` 只处理调用者明确选择的有限来源，
 不读取模型目录、不导入 MLX/vendor、不加载模型、不拥有进程或 registry。
 共享 bits/group 规则来自 `model_identity.validate_quantization_pair`，
 snapshot 声明、loaded 观测和 ready identity 都复用它。

@@ -2,7 +2,7 @@
 title: "SpeechRail 架构文档目录"
 status: active
 audience: "系统架构师、核心开发者、技术决策者"
-version: "3.10.3"
+version: "3.10.4"
 date: 2026-10-07
 ---
 
@@ -38,9 +38,9 @@ date: 2026-10-07
 
 [会话归档确认、所有权与恢复合同](session-seal-contract.md) 定义归档确认、暂停关闭、会议来源封存、冻结租约和进程内 pending 命令的边界。
 
-[转录保存命令、原子确认与恢复合同](transcript-persistence-contract.md)（`under_review`）记录 R07 已验证的保存命令与 Store 事务边界，并明确归属 I/O、用户恢复入口和整包验收的剩余门槛。
+[转录保存命令、原子确认与恢复合同](transcript-persistence-contract.md)（`active`）记录已合入的保存命令、Store 原子确认、归属 I/O 和用户恢复入口；R08 联合消费/封存门已完成。
 
-[Loader 身份声明的纯归一化边界](loader-metadata-contract.md)（`under_review`）说明 ASR/TTS 来源采集、共享量化约束及 snapshot / loaded 观测的差异。
+[Loader 身份声明的纯归一化边界](loader-metadata-contract.md)（`active`）说明 ASR/TTS 来源采集、共享量化约束及 snapshot / loaded 观测的差异。
 
 ```mermaid
 graph TD
@@ -82,4 +82,6 @@ graph TD
 > 2. **分层进程边界**：ASR/TTS 模型运算封装在独立 Python Worker 进程中；VAD 位于 FastAPI 主进程，而分人模型位于专用 Swift/CoreML worker。主服务通过私有二进制 IPC 调度外部 Worker。
 > 3. **请求路径本地化**：请求期间不下载模型、不读取远程音频 URL；音频与完整转写不写入普通日志或仓库。显式安装和模型准备命令可以联网供给本机制品。
 
-- [应用收尾的消费、保存与封存证明](session-drain-completion-contract.md)（`under_review`）：#231 的 receiver EOF、统一截止时间与失败恢复合同。
+- [应用收尾的消费、保存与封存证明](session-drain-completion-contract.md)（`active`）：#231 的 receiver EOF、统一截止时间与失败恢复合同。
+
+[#238 十一项最终验收证据矩阵](../implementation/2026-10-07-issue-238-final-acceptance.md) 区分定向实测、CI、突变和静态边界，记录 91 条关闭依据及未运行的真实/UI能力。
