@@ -52,3 +52,28 @@ def test_user_guide_parser_reads_declared_count_and_names() -> None:
     assert "describe" in names
     assert "publish_voice_design" in names
     assert len(names) == len(set(names)) == 18
+
+
+def test_reclamation_failure_requires_packaged_recovery_guidance() -> None:
+    """A quarantined lane cannot be recovered by generic 503 retry advice."""
+
+    assert "backend_reclamation_failed" in _checker().REQUIRED_SKILL_ERROR_CODES
+
+
+def test_checker_rejects_missing_reclamation_guidance(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    module = _checker()
+    errors = tmp_path / "errors.md"
+    errors.write_text(
+        module.SKILL_ERRORS.read_text(encoding="utf-8").replace(
+            "backend_reclamation_failed", "removed_reclamation_code"
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "SKILL_ERRORS", errors)
+
+    assert (
+        "packaged skill does not teach error code: backend_reclamation_failed"
+        in module.find_drift()
+    )

@@ -2,7 +2,7 @@
 title: "音色验证应用用例与执行所有权"
 status: active
 audience: "核心开发者、架构评审者"
-version: "3.8.0"
+version: "3.8.1"
 date: 2026-10-07
 ---
 
@@ -58,5 +58,5 @@ pass；保存失败不能发布 production-ready。固定探针验证的是输�
 fake 端口回归覆盖身份切换、unknown、提交 CAS、保存失败、重复取消及 timeout/cancel
 交错；HTTP 回归单独检查错误与响应。定向测试与 CI 不能代表真实模型质量、性能或长稳验收。
 本变更不迁移持久化格式；普通 revert 恢复入口接线，不删除候选或音色资产。
-Epic 分组与 ASR 重构避让见 [#238 loop 计划 r2](../implementation/2026-10-07-issue-238-solid-loop-plan-r2.md)。
+Epic 分组与实施账本见 [#238 loop 计划 r2](../implementation/2026-10-07-issue-238-solid-loop-plan-r2.md)。#245 已由用户确认实施完成，临时避让限制已撤销；实际其他 worktree 的未提交改动仍须保留。
 API 消费方处理见 [音色验证失败与证据保存](../users/voice-validation-failures.md)。

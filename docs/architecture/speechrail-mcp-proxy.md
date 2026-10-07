@@ -2,8 +2,8 @@
 title: "SpeechRail MCP Proxy 架构与终态契约"
 status: active
 audience: "系统架构师、协议设计者、Agent 集成方"
-version: "3.7.0"
-date: 2026-09-27
+version: "3.7.1"
+date: 2026-10-07
 ---
 
 # SpeechRail MCP Proxy 架构与终态契约
@@ -410,10 +410,16 @@ REST 的统一错误 envelope 会被转为 MCP tool error，并保留 `code`、r
 | `voice_not_available` | 否 | 选择 `available=true` 或切换 profile |
 | `voice_revision_conflict`、`voice_revoked`、`model_revision_conflict` | 否 | 重新发现并显式选择 revision |
 | `backend_busy`、`queue_full` | 是 | 从约 1 秒开始退避；禁止无上限循环 |
+| `backend_reclamation_failed` | 否 | `503`、`retryable=false`；lane 保持隔离，停止重试，由操作者恢复 runtime 后再验证或生成 |
 | `backend_not_ready` | 有条件 | 检查 readiness；不要在 Proxy 内启动/下载模型 |
 | `audio_too_long`、`audio_too_large` | 否 | 缩短输入或改用 job / 本地引用 |
 | `diarization_not_available` | 否 | 先确认安装与 readiness |
 | `connection_error` | 是 | 检查主服务 listener，再以有界次数重试 |
+
+隔离后的后续请求继续返回 `backend_reclamation_failed`，不改成普通排队满载。
+MCP 提供操作者恢复提示，不自动重启服务或切换档位。
+`describe()` 只报告能力快照，成功返回不能证明 governor 的隔离已经解除。
+串行重计算策略下，隔离的 TTS owner 也会阻止 ASR 准入，返回相同的不可重试错误。
 
 ### 7.2 隐私边界
 

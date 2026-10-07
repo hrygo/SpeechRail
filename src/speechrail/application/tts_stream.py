@@ -40,6 +40,7 @@ from speechrail.domain.tts_stream import (
 from speechrail.runtime.busy import BusyReason
 from speechrail.runtime.cleanup import join_cleanup
 from speechrail.runtime.resource_governor import (
+    GovernorLaneIsolatedError,
     GovernorQueueFullError,
     ResourceGovernor,
     WorkClass,
@@ -522,6 +523,12 @@ class TtsStreamService:
                         "render_receipt_store_full",
                         "render receipt store has no safe capacity",
                     ) from exc
+        except GovernorLaneIsolatedError as exc:
+            await self._abort_open(session, admission, resource_key)
+            raise TtsStreamAdmissionError(
+                "backend_reclamation_failed",
+                "Backend resources remain isolated until runtime recovery",
+            ) from exc
         except GovernorQueueFullError as exc:
             await self._abort_open(session, admission, resource_key)
             raise TtsStreamAdmissionError(

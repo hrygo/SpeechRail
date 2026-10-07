@@ -15,6 +15,17 @@ from starlette.responses import Response
 from speechrail.http.speech_contract import SPEECH_ROUTE_PATH, speech_validation_error
 
 
+def backend_reclamation_error_response(request_id: str) -> JSONResponse:
+    """Unconfirmed backend ownership requires operator recovery, not backoff."""
+    return error_response(
+        503,
+        request_id,
+        "backend_reclamation_failed",
+        "Backend resources remain isolated until runtime recovery",
+        retryable=False,
+    )
+
+
 def error(
     *,
     message: str,

@@ -2,7 +2,7 @@
 title: "会话归档确认、所有权与恢复合同"
 status: active
 audience: "App 核心开发者"
-version: "1.1.0"
+version: "1.1.1"
 date: 2026-10-07
 ---
 
@@ -36,7 +36,7 @@ stopper 必须先完成保存责任。它若通过 `abandonOccupancy` 撤销所�
 
 归档提交期间出现新租约时，只能确认冻结的旧记录。清理函数同时核对 lease ID 和 record ID；不能清空新会话的 occupancy、active ID、phase、设备或时钟。纯文字目标结束不调用其他会话的 stopper。
 
-设备释放、协议 drain、逐行保存、归档和来源快照各自有独立证据。归档结果不能替代尚未完成的消费/保存屏障；这些连接由 #232/#231 后续包完善。
+设备释放、协议 drain、逐行保存、归档和来源快照各自有独立证据。归档结果不能替代消费/保存屏障；这些连接已由 #232/#231 完成，见[应用收尾合同](session-drain-completion-contract.md)和[最终验收矩阵](../implementation/2026-10-07-issue-238-final-acceptance.md)。
 
 ## 验证与限制
 
@@ -44,6 +44,6 @@ stopper 必须先完成保存责任。它若通过 `abandonOccupancy` 撤销所�
 
 本合同不增加跨重启 pending 命令的持久化或迁移，不修改 ASR wire、识别/解码策略、Assembler/Ledger，也不证明真实设备、LLM、模型质量、性能或长稳已验收。回退仅 revert 本包代码，不降 schema、不清理用户记录。
 
-## R08 消费与截止时间接线（待最终审查与合并）
+## R08 消费与截止时间接线（已合并并通过确定性验收）
 
 正常语音封存还须满足[应用收尾合同](session-drain-completion-contract.md)。Coordinator 按 record 保留捕获 / 消费失败，`.user` 不得凭后来空队列绕过；显式 `.interrupted` 仍允许。正常封存使用 feature 注册的同一个绝对截止时间；归档或来源确认晚于截止时间时保留任务与原命令，禁止迟到发布成功。句柄只在实际 task 完成时清理。没有改变 Store 原子归档合同或 schema。

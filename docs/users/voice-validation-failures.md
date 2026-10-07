@@ -2,7 +2,7 @@
 title: "音色验证失败与证据保存"
 status: active
 audience: "API 消费者"
-version: "3.8.0"
+version: "3.8.1"
 date: 2026-10-07
 ---
 
@@ -14,7 +14,8 @@ date: 2026-10-07
 
 候选生成、候选机器验证和 quality-runs 如果不能确认 TTS 流已关闭或驱逐正常完成，会停止后续阶段。
 关闭失败返回 `503 backend_reclamation_failed`，`retryable=false`；受影响的 lane
-保持隔离，须恢复 runtime 后再验证。驱逐超时仍返回 `503 backend_timeout`，
+保持隔离，后续受阻准入同样返回不可重试的 `backend_reclamation_failed`，不改成 `queue_full` 或 `backend_busy`。
+须由操作者恢复 runtime 后再验证；刷新能力快照不能解除隔离。驱逐超时仍返回 `503 backend_timeout`，
 但超时本身不证明资源已回收。错误响应不包含音频或 backend 原始异常文本。
 
 候选自动验证不能代替人工听审。实际执行身份未知时保持 unknown，不能拼入后续 worker

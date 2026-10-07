@@ -48,6 +48,10 @@ _PROXY_TOOL_COUNT = re.compile(r"当前工具集为 (\d+) 个")
 #: rationale: a future edit that drops a code should have to argue that the
 #: behaviour it protects is no longer reachable.
 REQUIRED_SKILL_ERROR_CODES: dict[str, str] = {
+    "backend_reclamation_failed": (
+        "backend ownership is unconfirmed and the lane stays isolated; queue "
+        "backoff or refreshing discovery cannot replace operator runtime recovery"
+    ),
     "transcript_mismatch": (
         "candidate confirmation now also rejects a misread number that still "
         "passes similarity, so a retry with the same reference never succeeds"

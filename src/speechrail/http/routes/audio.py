@@ -80,7 +80,7 @@ from speechrail.domain.tts_request import TtsParameterError, validate_tts_parame
 from speechrail.domain.tts_routing import TtsExecutionMode, tts_capability_key
 from speechrail.domain.tts_text_planner import PLANNER_VERSION, TtsTextPlanner
 from speechrail.http.auth import http_auth_error
-from speechrail.http.errors import error, error_response
+from speechrail.http.errors import backend_reclamation_error_response, error, error_response
 from speechrail.http.formatters import (
     format_diarized,
     format_json,
@@ -98,6 +98,7 @@ from speechrail.runtime.diarization_admission import DiarizationAdmissionFullErr
 from speechrail.runtime.executable import resolve_configured_executable
 from speechrail.runtime.registry import engine_variant_for_role
 from speechrail.runtime.resource_governor import (
+    GovernorLaneIsolatedError,
     GovernorQueueFullError,
     WorkClass,
     WorkPurpose,
@@ -1095,6 +1096,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 ),
                 headers={"Retry-After": "1"},
             )
+        except GovernorLaneIsolatedError:
+            return backend_reclamation_error_response(request_id)
         except GovernorQueueFullError:
             return JSONResponse(
                 status_code=429,
@@ -1447,6 +1450,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "TTS backend delivered an invalid audio stream",
                 retryable=True,
             )
+        except GovernorLaneIsolatedError:
+            return backend_reclamation_error_response(request_id)
         except GovernorQueueFullError:
             return JSONResponse(
                 status_code=429,
@@ -2144,11 +2149,15 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 if timing_id is not None and not reclamation_failed:
                     services.tts_timings.fail(timing_id, "voice_store_unavailable")
                 raise
-            except GovernorQueueFullError:
+            except GovernorQueueFullError as exc:
+                code = (
+                    "backend_reclamation_failed"
+                    if isinstance(exc, GovernorLaneIsolatedError) else "queue_full"
+                )
                 if receipt_id is not None and not reclamation_failed:
-                    services.render_receipts.fail(receipt_id, "queue_full")
+                    services.render_receipts.fail(receipt_id, code)
                 if timing_id is not None and not reclamation_failed:
-                    services.tts_timings.fail(timing_id, "queue_full")
+                    services.tts_timings.fail(timing_id, code)
                 raise
             except TimeoutError:
                 if receipt_id is not None and not reclamation_failed:
@@ -2197,6 +2206,9 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     "TTS backend delivered an invalid audio stream",
                     retryable=True,
                 )
+            except GovernorLaneIsolatedError:
+                await _close_audio_stream(pcm_stream)
+                return backend_reclamation_error_response(request_id)
             except GovernorQueueFullError:
                 await _close_audio_stream(pcm_stream)
                 return JSONResponse(
@@ -2363,6 +2375,9 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     "TTS backend delivered an invalid audio stream",
                     retryable=True,
                 )
+            except GovernorLaneIsolatedError:
+                await _close_audio_stream(encoded_stream)
+                return backend_reclamation_error_response(request_id)
             except GovernorQueueFullError:
                 await _close_audio_stream(encoded_stream)
                 return JSONResponse(
@@ -2519,6 +2534,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "TTS backend delivered an invalid audio stream",
                 retryable=True,
             )
+        except GovernorLaneIsolatedError:
+            return backend_reclamation_error_response(request_id)
         except GovernorQueueFullError:
             return JSONResponse(
                 status_code=429,

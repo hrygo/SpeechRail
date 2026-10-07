@@ -251,7 +251,11 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorBody'
         '503':
-          description: Model runtime is not ready or a worker is recovering
+          description: |
+            Model runtime is not ready or a worker is recovering.
+            Under serial heavy-compute policy, unconfirmed TTS reclamation can
+            also block ASR admission: `backend_reclamation_failed` has
+            `retryable=false` and requires operator runtime recovery.
           headers:
             SpeechRail-Busy-Reason:
               schema:
@@ -336,6 +340,8 @@ paths:
         attribution; raw stderr is never returned.
         Unconfirmed TTS close returns 503 `backend_reclamation_failed` with
         `retryable=false`; the design lane is quarantined before returning.
+        Subsequent admission to an isolated lane returns the same non-retryable
+        error until operator runtime recovery, never a retryable queue-full error.
       security:
         - BearerAuth: []
         - {}
@@ -1167,6 +1173,9 @@ paths:
         admission returns `503 backend_busy` with bounded
         `SpeechRail-Busy-Reason` / `SpeechRail-Retry-Hint` headers; private
         worker stderr is never returned.
+        Admission blocked by an unconfirmed backend owner returns
+        `503 backend_reclamation_failed`, `retryable=false`. The affected lane
+        stays isolated until operator runtime recovery; discovery is not recovery.
       security:
         - BearerAuth: []
         - {}

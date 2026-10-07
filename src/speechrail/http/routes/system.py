@@ -64,10 +64,11 @@ from speechrail.domain.tts_pronunciation import (
     get_pronunciation_registry,
 )
 from speechrail.http.auth import http_auth_error
-from speechrail.http.errors import error, error_response
+from speechrail.http.errors import backend_reclamation_error_response, error, error_response
 from speechrail.http.voice_projection import quality_reject_content, voice_entry
 from speechrail.runtime.admission import QueueFullError
 from speechrail.runtime.resource_governor import (
+    GovernorLaneIsolatedError,
     GovernorQueueFullError,
 )
 
@@ -1809,6 +1810,8 @@ def create_system_router(services: AppServices) -> APIRouter:
                 request_id=request_id,
                 expires_at=asyncio.get_running_loop().time() + resolved.request_timeout_seconds,
             )
+        except GovernorLaneIsolatedError:
+            return backend_reclamation_error_response(request_id)
         except GovernorQueueFullError, QueueFullError:
             return JSONResponse(
                 status_code=429,

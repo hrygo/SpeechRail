@@ -86,12 +86,13 @@ from speechrail.domain.voice_validation import (
     VoiceValidationStoreUnavailableError,
 )
 from speechrail.http.auth import http_auth_error
-from speechrail.http.errors import error_response
+from speechrail.http.errors import backend_reclamation_error_response, error_response
 from speechrail.http.tts_errors import tts_backend_error_response
 from speechrail.http.voice_projection import quality_reject_content, voice_entry
 from speechrail.runtime.admission import QueueFullError
 from speechrail.runtime.asr_mode import AsrModeBusy
 from speechrail.runtime.resource_governor import (
+    GovernorLaneIsolatedError,
     GovernorQueueFullError,
     WorkClass,
     WorkPurpose,
@@ -669,6 +670,8 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 "voice_design_candidate_conflict",
                 "Candidate identity is already in use",
             )
+        except GovernorLaneIsolatedError:
+            return backend_reclamation_error_response(request_id)
         except (GovernorQueueFullError, QueueFullError, AsrModeBusy) as exc:
             response = error_response(
                 429,
@@ -1021,6 +1024,8 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 "Voice design store is unavailable",
                 retryable=True,
             )
+        except GovernorLaneIsolatedError:
+            return backend_reclamation_error_response(request_id)
         except GovernorQueueFullError, QueueFullError, AsrModeBusy:
             return error_response(
                 429,
@@ -1135,6 +1140,8 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 str(exc),
                 retryable=exc.retryable,
             )
+        except GovernorLaneIsolatedError:
+            return backend_reclamation_error_response(request_id)
         except GovernorQueueFullError, QueueFullError, AsrModeBusy:
             return error_response(
                 429,

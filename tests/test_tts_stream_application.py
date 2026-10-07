@@ -599,8 +599,10 @@ def test_failed_session_close_keeps_lane_and_receipt_unconfirmed() -> None:
             assert not sink.terminals
             assert receipts.get(controller.receipt_id)["status"] == "pending"
             assert not governor.lane_available(WorkClass.REALTIME_TTS, "tts_custom_voice")
-            with pytest.raises(TtsStreamAdmissionError):
+            with pytest.raises(TtsStreamAdmissionError) as isolated:
                 await _service(synth, governor=governor).open(options=_options(), sink=_Sink())
+            assert isolated.value.code == "backend_reclamation_failed"
+            assert not hasattr(isolated.value, "busy_reason")
             assert len(synth.sessions) == 1
         finally:
             # Test-only release of a known fake owner; production must keep it blocked.

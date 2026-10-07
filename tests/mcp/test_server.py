@@ -686,6 +686,83 @@ def test_describe_success_returns_structured_content() -> None:
     assert isinstance(result.content[0], TextContent)
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "endpoint"),
+    [
+        ("validate_voice", {"voice_id": "serena"}, "/v1/voices/serena/quality-runs"),
+        (
+            "validate_voice_design",
+            {"candidate_id": "vd_" + "a" * 24},
+            "/v1/voice-designs/vd_" + "a" * 24 + "/validate",
+        ),
+    ],
+)
+def test_validation_reclamation_error_is_nonretryable_at_mcp_boundary(
+    tool_name: str, arguments: dict[str, str], endpoint: str
+) -> None:
+    """A 503 cleanup failure stays an error, with its request ID, without retries."""
+
+    posted: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/speechrail/capabilities":
+            return httpx.Response(
+                200,
+                json={
+                    "schema_version": "effective_capabilities_v1",
+                    "snapshot_id": "validation-test",
+                    "profile": "quality",
+                    "models": {
+                        "tts": {"variant": "custom_voice"},
+                        "tts_clone": {"variant": "base"},
+                        "voice_design": {"artifact": "tts-1.7b-design-bf16"},
+                    },
+                    "voices": [],
+                },
+            )
+        assert request.method == "POST"
+        assert request.url.path == endpoint
+        posted.append(request.url.path)
+        return httpx.Response(
+            503,
+            json={
+                "error": {
+                    "code": "backend_reclamation_failed",
+                    "type": "server_error",
+                    "message": "Backend reclamation failed.",
+                    "request_id": "req_cleanup_test",
+                    "retryable": False,
+                }
+            },
+        )
+
+    client = SpeechRailClient(
+        base_url="http://rail.test/v1", transport=httpx.MockTransport(handler)
+    )
+    app = server.create_server(client=client)
+    context = ServerRequestContext(
+        session=None,
+        lifespan_context=None,
+        protocol_version="2026-07-28",
+        method="tools/call",
+    )
+    result = _run(
+        app._handle_call_tool(
+            context, CallToolRequestParams(name=tool_name, arguments=arguments)
+        )
+    )
+
+    assert result.is_error is True
+    assert result.structured_content is None
+    assert len(result.content) == 1
+    assert isinstance(result.content[0], TextContent)
+    assert "backend_reclamation_failed (not retryable)" in result.content[0].text
+    assert "request_id=req_cleanup_test" in result.content[0].text
+    assert "lane remains isolated" in result.content[0].text
+    assert "operator must recover the runtime" in result.content[0].text
+    assert posted == [endpoint]
+
+
 def test_transcribe_success_reports_started_and_done_progress(tmp_path: Path) -> None:
     """A successful transcribe reports both progress edges and the transcript."""
     audio_path = tmp_path / "sample.wav"

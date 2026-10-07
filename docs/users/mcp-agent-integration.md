@@ -2,8 +2,8 @@
 title: "SpeechRail MCP 主流 Agent 集成指南"
 status: active
 audience: "Agent 集成工程师、客户端开发者、AI 工具使用者"
-version: "2.8.0"
-date: 2026-09-26
+version: "2.8.1"
+date: 2026-10-07
 ---
 
 # 🔌 SpeechRail MCP 主流 Agent 集成指南
@@ -437,6 +437,10 @@ claude mcp add --scope user speechrail \
 3. **能力差异**：`diarize` 需 `diarization_ready=true`（分人是任务级 opt-in，取决于当前实例是否显式供给 Sortformer + aligner，与档位无关）；
    `preview_voice`、`design_voice` 和 `clone_voice` 只在当前有效能力快照明确声明 VoiceDesign/Base 时可用。
 4. **忙时退避**：遇 `backend_busy` / `queue_full`（`retryable=true`）按 `retry_after` 退避重试，勿死循环。
+   `backend_reclamation_failed` 则为 `503`、`retryable=false`：受影响的 lane 仍被隔离，后续调用也不能靠退避恢复。
+   停止重试，由操作者按受管运维流程恢复 runtime 后再验证或生成；刷新 `describe()` 不证明隔离已解除。
+   详见[音色验证失败](voice-validation-failures.md)；MCP 不自动重启或切换档位。
+   串行重计算策略下，TTS 隔离还可能阻止 ASR 转写准入；同样须先恢复 runtime。
 5. **长任务**：同步 `transcribe`/`synthesize` 超时或报 `audio_too_long` 时，改用 `create_job` + `get_job`。
 6. **自定义音色跨档**：`available` 始终依据当前快照报告。MCP 不切换档位；操作者若在 MCP 外变更运行配置，之后重新调用 `describe()` 获取当前能力。
 7. **ChatGPT 远程模式**：先确认 tunnel/gateway 可访问 `/mcp`，再调用 `describe()`；不要把本地路径当作 ChatGPT 可直接读取的文件或把 `audio_path` 当作对话附件。
@@ -450,6 +454,7 @@ claude mcp add --scope user speechrail \
 | 客户端启动 proxy 报 `ModuleNotFoundError: mcp` | 源码模式未装 `mcp` extra | 在源码目录 `uv sync --extra mcp`；或改用受管安装的 `speechrail-mcp` |
 | 连接被拒绝 / 工具全部报错 | 主服务未运行 | `curl http://127.0.0.1:8201/readyz`，必要时重启服务 |
 | 工具返回 `backend_busy` / `queue_full` | 单机共享 worker 忙 | 退避重试，勿并发轰炸 |
+| 工具返回 `backend_reclamation_failed` | 后端资源回收未确认，lane 已隔离 | 停止重试，请操作者恢复 runtime 后再验证；`describe()` 成功不能清除隔离 |
 | `audio_ref` 被拒 | 传了远程 URL 或 base64 | 改传本机路径 / `file://` |
 | HTTP 模式端口占用 | 默认端口被其它服务占用 | 用 `--port` / `SPEECHRAIL_MCP_PORT` 改端口 |
 | 项目级配置不生效 | 多数客户端对项目级 MCP 需审批 | 在客户端内批准该 server |
