@@ -258,11 +258,66 @@ public actor SessionStore: SessionArchiveWriting {
     /// 落一行正文，返回库分配的 `ordinal`。取号与插入是同一条语句（§15.7 R2 ①），
     /// 所以同一个会话里不可能出现两个相同的序号。
     ///
-    /// **它不提供"同一个 `completed` 只落一次"的保证**：序号是现场取的 `MAX+1`，
-    /// 同一个 item 到两次会老老实实落成两行。幂等在客户端（`CaptionSession.committedItemIDs`），
-    /// 库这一层只保证序号单调且唯一。
+    /// 接纳层固定 lineID；相同 ID 只在冻结字段一致时确认，不覆盖冲突。
+    /// 正文、序号确认与索引待办共用有限事务，实际索引 drain 仍独立。
     @discardableResult
     public func appendLine(_ draft: LineDraft, id: String = UUID().uuidString) throws -> Int {
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            let ordinal: Int
+            if let existing = try storedLine(id: id) {
+                guard existing.sessionID == draft.sessionID,
+                      existing.role == draft.role, existing.text == draft.text,
+                      existing.source == draft.source, existing.status == draft.status,
+                      existing.speakerLabel == draft.speakerLabel,
+                      existing.tStart == draft.tStart, existing.tEnd == draft.tEnd,
+                      existing.isInterrupted == draft.isInterrupted,
+                      existing.isDeviceSwitch == draft.isDeviceSwitch,
+                      existing.timingQuality == draft.timingQuality,
+                      draft.createdAt.map({
+                          abs(existing.createdAt.timeIntervalSince($0)) <= 0.000001
+                      }) ?? true
+                else { throw SessionStoreError.statementFailed("固定行身份与已存字段冲突") }
+                ordinal = existing.ordinal
+            } else {
+                ordinal = try insertLine(draft, id: id)
+            }
+            if draft.status == .final {
+                try ensureLineIndexWork(sessionID: draft.sessionID, id: id)
+            }
+            try execute("COMMIT;")
+            return ordinal
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    private func storedLine(id: String) throws -> TranscriptLine? {
+        try withStatement("""
+        SELECT id, session_id, ordinal, role, speaker_label, text, t_start, t_end, source, status,
+               interrupted, device_switch, starred, timing_quality, created_at
+        FROM line WHERE id = ?;
+        """) { statement in
+            bind(statement, 1, id)
+            guard try step(statement) == SQLITE_ROW else { return nil }
+            return Self.transcriptLine(from: statement)
+        }
+    }
+
+    /// 同一次保存重试不堆积派生待办；旧半提交缺少索引时可靠补齐。
+    private func ensureLineIndexWork(sessionID: String, id: String) throws {
+        guard Self.fts5Available else { return }
+        let confirmed = try scalarInt("""
+        SELECT EXISTS(SELECT 1 FROM search_index_outbox WHERE source_kind = 'line' AND source_id = ?)
+            OR EXISTS(SELECT 1 FROM knowledge_fts WHERE source_kind = 'line' AND source_id = ?);
+        """, args: [.text(id), .text(id)]) == 1
+        if !confirmed {
+            try enqueueSearchIndex(sessionID: sessionID, sourceKind: SearchIndexOp.lineKind, sourceID: id)
+        }
+    }
+
+    private func insertLine(_ draft: LineDraft, id: String) throws -> Int {
         let sql = """
         INSERT INTO line (
             id, session_id, ordinal, role, speaker_label, text, t_start, t_end,
@@ -289,15 +344,6 @@ public actor SessionStore: SessionArchiveWriting {
             // 有观测时刻就用它；没有才退回"这一刻"（D09）。
             bind(statement, 14, (draft.createdAt ?? Date()).timeIntervalSince1970)
             try step(statement)
-        }
-        // MA-15：内容保存与索引更新分开报状态——这里只排队，
-        // 由 drainSearchIndex 真正写索引。崩溃也不会漏，因为 outbox 与内容同事务。
-        if draft.status == .final {
-            try enqueueSearchIndex(
-                sessionID: draft.sessionID,
-                sourceKind: SearchIndexOp.lineKind,
-                sourceID: id
-            )
         }
         guard let ordinal = try scalarInt("SELECT ordinal FROM line WHERE id = ?;", args: [.text(id)]) else {
             throw SessionStoreError.statementFailed("行写入后读不回序号")

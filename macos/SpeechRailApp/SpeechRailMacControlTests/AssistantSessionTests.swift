@@ -467,7 +467,7 @@ final class AssistantSessionTests: XCTestCase {
         drainFailure: Error? = nil,
         autoConfirmTTSCancel: Bool = true,
         capability: Bool = true,
-        inputPersistenceConfiguration: AssistantInputPersistenceQueue.Configuration = .init(),
+        inputPersistenceConfiguration: TranscriptPersistenceQueue.Configuration = .init(),
         now: @escaping @Sendable () -> Date = { Date() }
     ) async throws -> Harness {
         let directory = FileManager.default.temporaryDirectory

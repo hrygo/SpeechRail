@@ -89,7 +89,7 @@ public struct AssistantSessionDependencies: Sendable {
     /// M2/V06:仅替换自动标题认领；默认仍由 SessionCoordinator 写入。
     /// 测试用它 gate 住标题 IO，验证标题不挡正文投影与 LLM 启动。
     public var claimTitle: (@Sendable (String, String, String) async throws -> Bool)?
-    public var inputPersistenceConfiguration: AssistantInputPersistenceQueue.Configuration
+    public var inputPersistenceConfiguration: TranscriptPersistenceQueue.Configuration
 
     public init(
         llm: any AssistantLLM = LLMProvider(),
@@ -110,7 +110,7 @@ public struct AssistantSessionDependencies: Sendable {
         saveInputLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
         saveReplyLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
         claimTitle: (@Sendable (String, String, String) async throws -> Bool)? = nil,
-        inputPersistenceConfiguration: AssistantInputPersistenceQueue.Configuration = .init()
+        inputPersistenceConfiguration: TranscriptPersistenceQueue.Configuration = .init()
     ) {
         self.llm = llm
         self.makeRealtimeClient = makeRealtimeClient

@@ -228,6 +228,18 @@ public final class MeetingSession {
     private var previewIdentity: TranscriptPreviewLedger.Identity?
     /// `(connection, generation, itemID)` → 已落库行，避免迟到归属命中新连接复用的 item ID。
     private var lineByItem: [TranscriptPreviewLedger.ItemIdentity: (lineID: String, ordinal: Int)] = [:]
+    private var pendingAttributions = TranscriptAttributionBuffer()
+    private var admissionLedger = TranscriptAdmissionLedger()
+    @ObservationIgnored private lazy var inputPersistence = TranscriptPersistenceQueue(
+        configuration: dependencies.persistenceConfiguration,
+        save: { [weak self] command in
+            guard let self else { throw CancellationError() }
+            return try await self.saveTranscriptLine(command)
+        },
+        didSave: { [weak self] command, ordinal in
+            await self?.didSaveTranscript(command, ordinal: ordinal)
+        }
+    )
     /// 已经补写过 `timing_quality` 的行；同一行只写一次。
     private var timingQualityApplied: Set<String> = []
     private var diarizationDrained = false
@@ -251,7 +263,7 @@ public final class MeetingSession {
         self.audio = dependencies.makeAudioSource()
         self.port = port
         self.serviceKey = apiKey
-        self.labeling = SpeakerLabeling(coordinator: coordinator)
+        self.labeling = SpeakerLabeling(coordinator: coordinator, attachLabel: dependencies.attachSpeakerLabel)
         self.minutes = MinutesGenerator(coordinator: coordinator, provider: llmProvider)
         self.innerOS = InnerOSSession(coordinator: coordinator, provider: llmProvider)
         // 改了来源（改名 / 合并 / 标记「我」/ 拆出）就重算一次复核状态。
@@ -265,6 +277,86 @@ public final class MeetingSession {
     }
 
     // MARK: - 入口
+
+    public var pendingSaveRecordIDs: [String] {
+        let pending = inputPersistence.outstandingRecordIDs
+        return pending + admissionLedger.recordIDs.filter { !pending.contains($0) }
+    }
+
+    public func pendingSaveCommands(recordID: String) -> [TranscriptPersistenceQueue.Command] {
+        inputPersistence.unsettledInputs(sessionID: recordID).map(\.command)
+    }
+
+    public func saveFailures(recordID: String) -> [TranscriptPersistenceQueue.Failure] {
+        inputPersistence.failures(sessionID: recordID)
+    }
+
+    public func waitForPendingSaves(recordID: String) async -> TranscriptPersistenceQueue.DrainReport {
+        let saved = await inputPersistence.waitUntilSettled(sessionID: recordID)
+        return admissionLedger.report(recordID: recordID, saved: saved)
+    }
+
+    @discardableResult
+    public func retryPendingSaves(recordID: String) async -> Bool {
+        for failure in saveFailures(recordID: recordID) {
+            inputPersistence.retry(sessionID: recordID, lineID: failure.command.lineID)
+        }
+        return await waitForPendingSaves(recordID: recordID).isComplete
+    }
+
+    public func unsavedTranscriptText(recordID: String) -> String {
+        var text = pendingSaveCommands(recordID: recordID).map(\.text)
+        if let rejected = admissionLedger.copyText(recordID: recordID) { text.append(rejected) }
+        return text.joined(separator: "\n")
+    }
+
+    public func admissionRecovery(recordID: String) -> TranscriptAdmissionRecovery? {
+        admissionLedger.recovery(recordID: recordID)
+    }
+
+    public var saveRecoveryRecords: [TranscriptSaveRecoveryRecord] {
+        pendingSaveRecordIDs.compactMap { id in
+            let failures = saveFailures(recordID: id)
+            let admission = admissionRecovery(recordID: id)
+            guard !failures.isEmpty || admission != nil,
+                  let observedAt = failures.first?.command.observedAt ?? admission?.observedAt else { return nil }
+            return .init(id: id, observedAt: observedAt, failedCount: failures.count, admission: admission)
+        }
+    }
+
+    private var resolvingAdmissionRecords: Set<String> = []
+
+    /// 由用户明确确认：保留可恢复预览并按中断结束，不生成正式纪要或丢弃已接纳命令。
+    public func endIncompleteRecord(_ snapshot: TranscriptAdmissionRecovery) async -> Bool {
+        let id = snapshot.recordID
+        guard admissionLedger.recovery(recordID: id) == snapshot,
+              resolvingAdmissionRecords.insert(id).inserted else { return false }
+        defer { resolvingAdmissionRecords.remove(id) }
+        if sessionID == id {
+            isStoppingIntentionally = true
+            await releaseCapture(drain: true)
+            if sessionID == id { phase = .processing }
+        }
+        let saved = await inputPersistence.waitUntilSettled(sessionID: id)
+        guard saved.isComplete, admissionLedger.recovery(recordID: id) == snapshot else { return false }
+        do {
+            _ = try await saveTranscriptLine(snapshot.command)
+        } catch {
+            return false
+        }
+        guard admissionLedger.recovery(recordID: id) == snapshot else { return false }
+        let result = await coordinator.sealMeeting(id: id, reason: .interrupted)
+        guard case .sealed(recordID: id) = result,
+              let record = try? await coordinator.record(id: id),
+              record.state == .archived, record.endReason == .interrupted,
+              admissionLedger.confirmResolution(snapshot) else { return false }
+        pendingAttributions.discard(recordID: id)
+        if sessionID == id {
+            phase = .archived
+            lastFailure = "本次记录已按中断结束，未完整保存的预览保留在恢复内容中。"
+        }
+        return true
+    }
 
     /// 页面主按钮：选好来源之后从这里进（§6.2 的空态度）。
     /// 会前写的标题（方案 §4.1）。
@@ -284,11 +376,26 @@ public final class MeetingSession {
         await coordinator.requestStart(.meeting)
     }
 
+    private func saveTranscriptLine(_ command: TranscriptPersistenceQueue.Command) async throws -> Int {
+        do {
+            if let save = dependencies.saveLine {
+                return try await save(command.lineDraft, command.lineID)
+            }
+            return try await coordinator.appendLine(command.lineDraft, id: command.lineID)
+        } catch {
+            if sessionID == command.sessionID { lastFailure = "这一句未保存，可重试保存。" }
+            throw error
+        }
+    }
+
     /// 协调器的 `starter`：真的拿设备、连服务。
     public func beginCapture() async throws {
         phase = .preparing
         blocked = nil
         do {
+            guard admissionLedger.canStartNewRecord else {
+                throw Blocked(reason: .storeUnavailable("未保存的恢复记录已达到上限，请先复制恢复内容。"))
+            }
             try await startPipeline(isNewSession: true)
         } catch {
             let reason = Self.blockReason(for: error)
@@ -326,6 +433,11 @@ public final class MeetingSession {
         // ① RealtimeASRClient drains ASR and diarization before clear/close;
         // devices are released before the record is archived (R4).
         await releaseCapture(drain: true)
+        if let id, !(await waitForPendingSaves(recordID: id)).isComplete {
+            phase = .processing
+            lastFailure = "部分文字尚未保存，请重试保存后再整理。"
+            return
+        }
         phase = .processing
         await coordinator.stopCapture(endingWith: .user)
         // MC-17/MC-20 收尾：封存走上报结果，失败如实留痕并保留重试/复制出口。
@@ -588,6 +700,7 @@ public final class MeetingSession {
 
     /// 释放这一层的设备与连接。**幂等**，中断与结束两条路都走它。
     private func releaseCapture(drain: Bool = false) async {
+        let endingRecordID = sessionID
         let shouldDrain = drain && phase == .recording && client != nil
         if !shouldDrain {
             // 中断路径要立刻断开这一代；录制结束的 drain 则必须让这一代
@@ -620,10 +733,19 @@ public final class MeetingSession {
             // close 结束事件流；其缓冲区会先被消费。等终态、attribution 与
             // diarization EOF 屏障都经过 MeetingSession 保存 owner 后再失效代次。
             await pump?.value
-            connectionGeneration.invalidate()
         } else {
             pump?.cancel()
         }
+        if drain, let endingRecordID {
+            let report = await waitForPendingSaves(recordID: endingRecordID)
+            if !report.isComplete {
+                if sessionID == endingRecordID { lastFailure = "部分文字尚未保存，请重试保存。" }
+                if coordinator.activeSessionID == endingRecordID, coordinator.occupancy?.kind == .meeting {
+                    coordinator.abandonOccupancy()
+                }
+            }
+        }
+        if shouldDrain { connectionGeneration.invalidate() }
         pump = nil
         client = nil
         level = 0
@@ -760,7 +882,7 @@ public final class MeetingSession {
             _ = previewLedger.resolveFailure(identity: identity, itemID: itemID)
             partialText = previewLedger.visiblePartial
             if let recoveryNote {
-                await persistRecoveryMaterial(recoveryNote, boundary: boundary)
+                persistRecoveryMaterial(recoveryNote, boundary: boundary, identity: identity)
             }
         case .attribution(let itemID, let units, _):
             await applyAttribution(itemID: itemID, units: units, identity: identity)
@@ -811,55 +933,84 @@ public final class MeetingSession {
         identity: TranscriptPreviewLedger.Identity
     ) async {
         let itemIdentity = TranscriptPreviewLedger.ItemIdentity(identity: identity, itemID: itemID)
-        guard identity == previewIdentity,
-              let entry = lineByItem[itemIdentity],
-              !units.isEmpty
-        else { return }
-        labeling.register(units: units, lineID: entry.lineID, ordinal: entry.ordinal)
-        await labeling.apply(units: units)
-        guard identity == previewIdentity else { return }
-        // 时间证据回填（MA-02 / MC-15）：落库时写的是**观测**时间并标
-        // `unavailable`，对齐结果到达后把声学起止**连同质量一起**写回去。
-        // 只改标签不改值正是方案点名要修的路，所以这里走
-        // `attachAcousticTiming`——一条 UPDATE，不留"标签到了值没到"的中间态。
-        if timingQualityApplied.insert(entry.lineID).inserted,
-           let line = lines.first(where: { $0.id == entry.lineID }),
-           let upgraded = TranscriptTimeWindow.aligned(
-               observed: .observedOnly(start: line.start, end: line.end),
-               units: units,
-               sampleRate: RealtimeASRClient.sampleRate
-           ),
-           let acoustic = upgraded.speechRange {
-            do {
-                try await coordinator.attachAcousticTiming(
-                    lineID: entry.lineID,
-                    start: acoustic.lowerBound,
-                    end: acoustic.upperBound,
-                    quality: .aligned
-                )
-                // 内存里那一行也换成真实发声时刻，界面才不会再显示观测时间。
-                lines = lines.map { existing in
-                    guard existing.id == entry.lineID else { return existing }
-                    var updated = existing
-                    updated.start = acoustic.lowerBound
-                    updated.end = acoustic.upperBound
-                    updated.timingQuality = .aligned
-                    return updated
-                }
-            } catch {
-                lastFailure = error.localizedDescription
-                timingQualityApplied.remove(entry.lineID)
+        guard identity == previewIdentity, !units.isEmpty, let sessionID else { return }
+        guard let entry = lineByItem[itemIdentity] else {
+            if !pendingAttributions.store(
+                units, recordID: sessionID, identity: itemIdentity, labelsEnabled: labeling.isEnabled
+            ) {
+                lastFailure = "部分说话人信息未能保存，正文继续保留。"
             }
+            return
         }
-        // 归属修订不改正文，所以它更新的是内存里的 chip，不新增行（§15.3 第 2 条）。
-        if !lines.isEmpty {
-            lines = lines.map { line in
-                var updated = line
-                if let label = labeling.attributedLabel(forLineID: line.id) {
-                    updated.speakerLabel = label
+        let line = lines.first { $0.id == entry.lineID }
+        enqueueAttribution(
+            recordID: sessionID, identity: identity, lineID: entry.lineID, ordinal: entry.ordinal,
+            units: units, labelsEnabled: labeling.isEnabled,
+            observedStart: line?.start, observedEnd: line?.end
+        )
+    }
+
+    /// receiver 只接纳冻结目标；正文和辅助 I/O 共用同一个有界 owner。
+    private func enqueueAttribution(
+        recordID: String, identity: TranscriptPreviewLedger.Identity, lineID: String, ordinal: Int,
+        units: [RealtimeASRClient.AttributionUnit], labelsEnabled: Bool,
+        observedStart: TimeInterval?, observedEnd: TimeInterval?
+    ) {
+        let owner: SpeakerLabeling
+        if sessionID == recordID, previewIdentity == identity {
+            owner = labeling
+        } else {
+            owner = SpeakerLabeling(coordinator: coordinator, attachLabel: dependencies.attachSpeakerLabel)
+            owner.begin(sessionID: recordID, enabled: labelsEnabled)
+        }
+        let command = owner.freezeAttribution(units: units, lineID: lineID)
+        let acoustic: ClosedRange<TimeInterval>?
+        if let observedStart, let observedEnd {
+            acoustic = TranscriptTimeWindow.aligned(
+                observed: .observedOnly(start: observedStart, end: observedEnd),
+                units: units, sampleRate: RealtimeASRClient.sampleRate
+            )?.speechRange
+        } else {
+            acoustic = nil
+        }
+        let accepted = inputPersistence.enqueueProjection(
+            recordID: recordID, lineID: lineID, unitCount: units.count, coalescing: false
+        ) { [weak self, owner] in
+            guard let self else { return }
+            let confirmedLabels = await owner.apply(command)
+            var savedTiming: ClosedRange<TimeInterval>?
+            if let acoustic, !(self.sessionID == recordID && self.timingQualityApplied.contains(lineID)) {
+                do {
+                    try await self.coordinator.attachAcousticTiming(
+                        lineID: lineID, start: acoustic.lowerBound, end: acoustic.upperBound, quality: .aligned
+                    )
+                    savedTiming = acoustic
+                } catch {
+                    if self.sessionID == recordID, self.previewIdentity == identity {
+                        self.lastFailure = "有一条时间信息未能保存。"
+                    }
+                }
+            }
+            guard self.sessionID == recordID, self.previewIdentity == identity else { return }
+            if savedTiming != nil { self.timingQualityApplied.insert(lineID) }
+            self.lines = self.lines.map { existing in
+                guard existing.id == lineID else { return existing }
+                var updated = existing
+                if confirmedLabels.contains(lineID) {
+                    updated.speakerLabel = owner.attributedLabel(forLineID: lineID)
+                }
+                if let savedTiming {
+                    updated.start = savedTiming.lowerBound
+                    updated.end = savedTiming.upperBound
+                    updated.timingQuality = .aligned
                 }
                 return updated
             }
+        }
+        if accepted {
+            owner.register(units: units, lineID: lineID, ordinal: ordinal)
+        } else if sessionID == recordID, previewIdentity == identity {
+            lastFailure = "部分说话人和时间信息未能保存，正文已保留。"
         }
     }
 
@@ -868,7 +1019,7 @@ public final class MeetingSession {
     private func commit(_ item: TranscriptPreviewLedger.CommittedItem) async {
         partialText = previewLedger.visiblePartial
         if let recoveryNote = item.recoveryNote {
-            await persistRecoveryMaterial(recoveryNote, boundary: item.boundary)
+            persistRecoveryMaterial(recoveryNote, boundary: item.boundary, identity: item.identity)
             return
         }
         let text = item.finalText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -882,51 +1033,70 @@ public final class MeetingSession {
             startedAt: startedAt
         )
         let isEpochStart = epoch > 1 && lines.isEmpty
-        let lineID = UUID().uuidString
-        let ordinal: Int
-        do {
-            ordinal = try await coordinator.appendLine(
-                LineDraft(
-                    sessionID: sessionID,
-                    role: .speaker,
-                    text: text,
-                    source: lineSource,
-                    speakerLabel: nil,
-                    tStart: inputTimes?.start,
-                    tEnd: inputTimes?.end,
-                    isDeviceSwitch: isEpochStart,
-                    timingQuality: .unavailable
-                ),
-                id: lineID
-            )
-        } catch {
-            transcriptLedger.unmarkCommitted(item.itemID)
-            await persistRecoveryMaterial(
-                .init(itemID: item.itemID, text: text),
-                boundary: item.boundary,
-                saveFailure: error.localizedDescription
-            )
-            return
+        acceptTranscript(TranscriptPersistenceQueue.Command(
+            sessionID: sessionID, connection: item.identity.connection, itemID: item.itemID,
+            generation: item.identity.generation, text: text, source: lineSource, role: .speaker,
+            tStart: inputTimes?.start, tEnd: inputTimes?.end, formal: true,
+            isInterrupted: false, isDeviceSwitch: isEpochStart,
+            timingQuality: .unavailable, observedAt: dependencies.clock.now()
+        ))
+    }
+
+    @discardableResult
+    private func acceptTranscript(
+        _ command: TranscriptPersistenceQueue.Command
+    ) -> TranscriptPersistenceQueue.Admission {
+        let admission = inputPersistence.enqueue(command)
+        switch admission {
+        case .accepted, .duplicate: break
+        case .capacityExceeded:
+            admissionLedger.reject(recordID: command.sessionID, text: command.text)
+            partialText = command.text
+            lastFailure = "记录正在保存，暂时无法保存这句新内容，请先复制。"
+        case .invalidIdentity:
+            admissionLedger.reject(recordID: command.sessionID, text: command.text)
+            partialText = command.text
+            lastFailure = "无法确认这句内容属于哪场记录，请先复制。"
         }
-        // 行已经在了。对齐/分人结果到达时按 `utterance_id` 找回这一行。
-        let itemIdentity = TranscriptPreviewLedger.ItemIdentity(
-            identity: item.identity,
-            itemID: item.itemID
+        return admission
+    }
+
+    private func didSaveTranscript(_ command: TranscriptPersistenceQueue.Command, ordinal: Int) async {
+        if sessionID == command.sessionID, !command.formal,
+           lastFailure?.contains("正在保留恢复内容") == true {
+            lastFailure = "有一句话没有拿到定稿正文，已原样保留恢复内容（不进正式纪要）。"
+        }
+        let identity = TranscriptPreviewLedger.Identity(
+            connection: command.connection, generation: command.generation
         )
-        lineByItem[itemIdentity] = (lineID: lineID, ordinal: ordinal)
-        currentOrdinal = ordinal
-        lines.append(
-            Line(
-                id: lineID,
-                ordinal: ordinal,
-                text: text,
-                start: inputTimes?.start ?? 0,
-                end: inputTimes?.end ?? 0,
-                speakerLabel: nil,
-                source: lineSource,
-                isDeviceSwitch: isEpochStart,
-                timingQuality: .unavailable
-            )
+        let itemIdentity = TranscriptPreviewLedger.ItemIdentity(identity: identity, itemID: command.itemID)
+        // 行已经在了。对齐/分人结果到达时按 `utterance_id` 找回这一行。
+        if sessionID == command.sessionID, command.formal {
+            lineByItem[itemIdentity] = (lineID: command.lineID, ordinal: ordinal)
+            currentOrdinal = max(currentOrdinal, ordinal)
+            if !lines.contains(where: { $0.id == command.lineID }) {
+                lines.append(
+                    Line(
+                        id: command.lineID,
+                        ordinal: ordinal,
+                        text: command.text,
+                        start: command.tStart ?? 0,
+                        end: command.tEnd ?? 0,
+                        speakerLabel: command.speakerLabel,
+                        source: command.source,
+                        isDeviceSwitch: command.isDeviceSwitch,
+                        timingQuality: command.timingQuality
+                    )
+                )
+                lines.sort { $0.ordinal < $1.ordinal }
+            }
+        }
+        guard let payload = pendingAttributions.take(recordID: command.sessionID, identity: itemIdentity),
+              command.formal else { return }
+        enqueueAttribution(
+            recordID: command.sessionID, identity: identity, lineID: command.lineID, ordinal: ordinal,
+            units: payload.units, labelsEnabled: payload.labelsEnabled,
+            observedStart: command.tStart, observedEnd: command.tEnd
         )
     }
 
@@ -939,35 +1109,24 @@ public final class MeetingSession {
     private func persistRecoveryMaterial(
         _ note: TranscriptPreviewLedger.RecoveryNote,
         boundary: TranscriptPreviewLedger.Boundary?,
-        saveFailure: String? = nil
-    ) async {
+        identity: TranscriptPreviewLedger.Identity
+    ) {
         guard let sessionID, let startedAt else {
-            lastFailure = "有一句话没有拿到定稿正文：\(note.text)"
+            partialText = note.text
+            lastFailure = "有一句话没有拿到定稿正文，请先复制。"
             return
         }
         let inputTimes = sessionRelativeInputTimes(from: boundary, startedAt: startedAt)
-        do {
-            _ = try await coordinator.appendLine(
-                LineDraft(
-                    sessionID: sessionID,
-                    role: .speaker,
-                    text: note.text,
-                    source: lineSource,
-                    tStart: inputTimes?.start,
-                    tEnd: inputTimes?.end,
-                    status: .partial,
-                    timingQuality: .unavailable
-                ),
-                id: UUID().uuidString
-            )
-            if saveFailure == nil {
-                lastFailure = "有一句话没有拿到定稿正文，已原样保留（不进正式纪要）。"
-            } else {
-                lastFailure = "正文未能保存为定稿（\(saveFailure!)），已原样保留为待恢复内容。"
-            }
-        } catch {
-            // 连恢复材料都存不下去：把原文留在可见状态与说明里。
-            lastFailure = "正文未能保存（\(error.localizedDescription)），请先复制恢复：\(note.text)"
+        let admission = acceptTranscript(TranscriptPersistenceQueue.Command(
+            sessionID: sessionID, connection: identity.connection, itemID: note.itemID,
+            generation: identity.generation, text: note.text, source: lineSource, role: .speaker,
+            tStart: inputTimes?.start, tEnd: inputTimes?.end, formal: false,
+            isInterrupted: false, timingQuality: .unavailable, observedAt: dependencies.clock.now()
+        ))
+        switch admission {
+        case .accepted, .duplicate:
+            lastFailure = "有一句话没有拿到定稿正文，正在保留恢复内容（不进正式纪要）。"
+        case .capacityExceeded, .invalidIdentity: break
         }
     }
 

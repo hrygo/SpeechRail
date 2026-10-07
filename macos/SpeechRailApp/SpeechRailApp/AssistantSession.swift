@@ -872,7 +872,7 @@ public final class AssistantSession {
             return .rejected("还有输入未保存，请先重试保存。")
         }
         let observedAt = dependencies.now()
-        let command = AssistantInputPersistenceQueue.Command(
+        let command = TranscriptPersistenceQueue.Command(
             sessionID: sessionID, connection: connectionToken, itemID: "",
             text: question, source: .keyboard,
             tStart: max(0, observedAt.timeIntervalSince(startedAt)),
@@ -2217,30 +2217,26 @@ public final class AssistantSession {
     /// 刻意**不进 LLM / TTS**：`speechrail.transcription.hypothesis` 是可改写的
     /// 全文，不是权威文本。拿它去问模型等于把未确认内容当事实，而且用户无法
     /// 分清哪句是真的。要让用户知道的是"这句没定稿"，不是让它自己往下走。
-    @ObservationIgnored private lazy var inputPersistence = AssistantInputPersistenceQueue(
+    @ObservationIgnored private lazy var inputPersistence = TranscriptPersistenceQueue(
         configuration: dependencies.inputPersistenceConfiguration,
         save: { [weak self] command in
             guard let self else { throw CancellationError() }
-            let draft = LineDraft(
-                sessionID: command.sessionID, role: .user, text: command.text,
-                source: command.source, tStart: command.tStart, tEnd: nil,
-                status: command.formal ? .final : .partial, isInterrupted: !command.formal,
-                timingQuality: .unavailable, createdAt: command.observedAt
-            )
+            let draft = command.lineDraft
             do {
                 return try await self.saveInputLine(draft, id: command.lineID)
             } catch {
-                // 指定 ID 的 INSERT 不提供幂等成功；恢复必须按 ID 与不可变正文核对。
+                // 不确定结果必须由 Store 核对完整字段及索引待办，不能只看到正文就成功。
+                var failure: any Error = error
                 if let lines = try? await self.coordinator.lines(sessionID: command.sessionID, includePartial: true),
-                   let line = lines.first(where: { $0.id == command.lineID }),
-                   line.role == .user, line.text == command.text, line.source == command.source,
-                   line.status == draft.status, line.isInterrupted == draft.isInterrupted,
-                   line.tStart == command.tStart, line.tEnd == nil, line.timingQuality == .unavailable,
-                   abs(line.createdAt.timeIntervalSince(command.observedAt)) < 0.001 {
-                    return line.ordinal
+                   lines.contains(where: { $0.id == command.lineID }) {
+                    do {
+                        return try await self.coordinator.appendLine(draft, id: command.lineID)
+                    } catch {
+                        failure = error
+                    }
                 }
-                if self.sessionID == command.sessionID { self.lastFailure = "这一句未保存：\(error.localizedDescription)" }
-                throw error
+                if self.sessionID == command.sessionID { self.lastFailure = "这一句未保存：\(failure.localizedDescription)" }
+                throw failure
             }
         },
         didSave: { [weak self] command, ordinal in
@@ -2274,10 +2270,11 @@ public final class AssistantSession {
             target = ending ?? recordID
         case .closed: return
         }
-        let command = AssistantInputPersistenceQueue.Command(
+        let command = TranscriptPersistenceQueue.Command(
             sessionID: target,
             connection: turn.identity.connection,
             itemID: turn.boundaryItemID,
+            generation: turn.identity.generation,
             text: text,
             formal: turn.isFormal,
             observedAt: observed
@@ -2295,7 +2292,7 @@ public final class AssistantSession {
         }
     }
 
-    private func didSaveInput(_ command: AssistantInputPersistenceQueue.Command, ordinal: Int) async {
+    private func didSaveInput(_ command: TranscriptPersistenceQueue.Command, ordinal: Int) async {
         if command.formal, sessionID == command.sessionID,
            inputLifecycle == .active,
            command.source == .keyboard || command.connection == connectionToken {

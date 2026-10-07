@@ -434,6 +434,7 @@ struct CaptionBandView: View {
     @State private var isHovering = false
     @State private var isFollowing = true
     @State private var scrollProxy: ScrollViewProxy?
+    @State private var showsSaveRecovery = false
     /// 自己量出来的内容宽度：宽度参与折行，所以高度得跟着它变。
     @State private var contentWidth: CGFloat = 0
 
@@ -647,6 +648,22 @@ struct CaptionBandView: View {
                 .truncationMode(.tail)
                 .help(footerHelp)
             Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+            if !session.saveRecoveryRecords.isEmpty {
+                Button("未保存文字") { showsSaveRecovery = true }
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .buttonStyle(.borderless)
+                    .help("重试保存、复制未保存文字或处理不完整记录")
+                    .popover(isPresented: $showsSaveRecovery) {
+                        TranscriptSaveRecoveryPanel(
+                            records: session.saveRecoveryRecords,
+                            preview: { session.unsavedTranscriptText(recordID: $0) },
+                            retry: { await session.retryPendingSaves(recordID: $0) },
+                            finishIncomplete: { await session.endIncompleteRecord($0) }
+                        )
+                        .padding(SpeechRailDesignTokens.Spacing.md)
+                        .frame(width: SpeechRailDesignTokens.Layout.inspectorColumnWidth)
+                    }
+            }
             if !isFollowing {
                 Button {
                     isFollowing = true
@@ -671,6 +688,7 @@ struct CaptionBandView: View {
 
     private var footerHint: String {
         if session.blocked != nil { return "" }
+        if !session.saveRecoveryRecords.isEmpty { return "有文字尚未保存" }
         if session.phase == .paused { return "已暂停 · ⌘⇧L 继续" }
         if session.phase == .ending { return "正在保存最后一句…" }
         // 服务端说过"这句不行"（`failed` / `error`）时要说出来：否则那一句就这么

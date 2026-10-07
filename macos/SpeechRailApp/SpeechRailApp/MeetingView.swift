@@ -89,6 +89,14 @@ public struct MeetingView: View {
         ) {
             VStack(spacing: SpeechRailDesignTokens.Spacing.gutter) {
                 statusBar
+                if !meeting.saveRecoveryRecords.isEmpty {
+                    TranscriptSaveRecoveryPanel(
+                        records: meeting.saveRecoveryRecords,
+                        preview: { meeting.unsavedTranscriptText(recordID: $0) },
+                        retry: { await meeting.retryPendingSaves(recordID: $0) },
+                        finishIncomplete: { await meeting.endIncompleteRecord($0) }
+                    )
+                }
                 if let blocked = meeting.blocked, !meeting.phase.isLive {
                     blockedCard(blocked)
                 }
@@ -828,23 +836,7 @@ public struct MeetingView: View {
     /// 会让用户以为这是这场会正常识别出来的一句。
     @ViewBuilder
     private var recoverySection: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Text("没拿到定稿的句子")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                Text("原样保留，不进纪要")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-            }
-            ForEach(recoveryLines) { line in
-                Text(line.text)
-                    .font(SpeechRailDesignTokens.Typography.body)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        TranscriptRecoveryMaterialSection(lines: recoveryLines)
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
         .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
     }
@@ -1326,7 +1318,10 @@ public struct MeetingView: View {
     private func openRecord(_ summary: SessionSummary) async {
         guard let record = (try? await session.record(id: summary.id)) ?? nil else { return }
         reviewRecord = record
-        reviewLines = (try? await session.lines(sessionID: summary.id)) ?? []
+        let loaded = (try? await session.lines(sessionID: summary.id, includePartial: true)) ?? []
+        guard reviewRecord?.id == summary.id else { return }
+        reviewLines = loaded.filter { $0.status == .final }
+        recoveryLines = loaded.filter { $0.status == .partial }
         reviewSpeakerNames = (try? await session.speakerNames(sessionID: summary.id)) ?? [:]
         // MC-25：回看读当前展示版（采用版优先）；最新尝试失败时不拿失败版的空正文遮旧版。
         reviewMinutes = try? await session.currentMinutes(sessionID: summary.id)

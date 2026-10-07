@@ -6,12 +6,288 @@ import XCTest
 
 @MainActor
 final class AssistantInputPersistenceQueueTests: XCTestCase {
+    func testQueuedProjectionBurstCannotStarveAnAcceptedTranscript() async {
+        let gate = SaveGate()
+        var order: [String] = []
+        let queue = TranscriptPersistenceQueue(
+            save: { _ in order.append("transcript"); return 1 }, didSave: { _, _ in }
+        )
+        XCTAssertTrue(queue.enqueueProjection(recordID: "A", lineID: "active", unitCount: 1) {
+            _ = await gate.wait()
+            order.append("active")
+        })
+        await gate.waitUntilEntered()
+        XCTAssertEqual(queue.enqueue(command(
+            sessionID: "A", connection: 1, itemID: "item", lineID: "line"
+        )), .accepted)
+        for index in 0..<3 {
+            XCTAssertTrue(queue.enqueueProjection(recordID: "A", lineID: "aux-\(index)", unitCount: 1) {
+                order.append("aux-\(index)")
+            })
+        }
+        gate.release(ordinal: 0)
+        let report = await queue.waitUntilSettled(sessionID: "A")
+        XCTAssertTrue(report.isComplete)
+        XCTAssertEqual(Array(order.prefix(2)), ["active", "transcript"])
+        XCTAssertEqual(Set(order), Set(["active", "transcript", "aux-0", "aux-1", "aux-2"]))
+    }
+
+    func testProjectionUsesTheSameOwnerAndPreventsPrematureSettlement() async {
+        let gate = SaveGate()
+        var order: [String] = []
+        var settled = false
+        let queue = TranscriptPersistenceQueue(
+            save: { input in order.append(input.text); return 1 },
+            didSave: { _, _ in }
+        )
+        XCTAssertTrue(queue.enqueueProjection(recordID: "A", lineID: "metadata", unitCount: 1) {
+            order.append("metadata started")
+            _ = await gate.wait()
+            order.append("metadata finished")
+        })
+        await gate.waitUntilEntered()
+        let observer = Task { @MainActor in
+            let report = await queue.waitUntilSettled(sessionID: "A")
+            settled = report.isComplete
+        }
+        XCTAssertEqual(queue.enqueue(command(
+            sessionID: "B", connection: 1, itemID: "item", lineID: "line",
+            text: "next line"
+        )), .accepted)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertFalse(settled)
+        XCTAssertEqual(order, ["metadata started"])
+        XCTAssertEqual(Set(queue.outstandingRecordIDs), Set(["A", "B"]))
+        gate.release(ordinal: 0)
+        await observer.value
+        let report = await queue.waitUntilSettled(sessionID: "B")
+        XCTAssertTrue(report.isComplete)
+        XCTAssertEqual(order, ["metadata started", "metadata finished", "next line"])
+    }
+
+    func testProjectionBudgetIncludesActiveWorkAndCoalescesOnlyQueuedUpdates() async {
+        let gate = SaveGate()
+        var projected: [String] = []
+        let queue = TranscriptPersistenceQueue(
+            configuration: .init(maximumPendingProjections: 2, maximumProjectionUnits: 3),
+            save: { _ in 1 }, didSave: { _, _ in }
+        )
+        XCTAssertTrue(queue.enqueueProjection(recordID: "A", lineID: "active", unitCount: 2) {
+            _ = await gate.wait()
+            projected.append("active")
+        })
+        await gate.waitUntilEntered()
+        XCTAssertTrue(queue.enqueueProjection(recordID: "A", lineID: "queued", unitCount: 1) {
+            projected.append("original")
+        })
+        XCTAssertFalse(queue.enqueueProjection(recordID: "A", lineID: "queued", unitCount: 2) {
+            projected.append("over budget")
+        })
+        XCTAssertFalse(queue.enqueueProjection(recordID: "B", lineID: "new", unitCount: 1) {})
+        XCTAssertTrue(queue.enqueueProjection(recordID: "A", lineID: "queued", unitCount: 1) {
+            projected.append("latest")
+        })
+        XCTAssertEqual(queue.outstandingProjectionCount, 2)
+        XCTAssertEqual(queue.outstandingProjectionUnits, 3)
+        gate.release(ordinal: 0)
+        let report = await queue.waitUntilSettled(sessionID: "A")
+        XCTAssertTrue(report.isComplete)
+        XCTAssertEqual(projected, ["active", "latest"])
+    }
+
+    func testAdmissionRejectionKeepsBoundedCopyEvidenceAndCannotBecomeSuccessful() {
+        var ledger = TranscriptAdmissionLedger(maximumRecords: 1, maximumPreviewScalars: 3)
+        let saved = TranscriptPersistenceQueue.DrainReport(pendingCommands: [], failures: [])
+        ledger.reject(recordID: "record", text: "abcdef")
+        XCTAssertFalse(ledger.canStartNewRecord)
+        XCTAssertFalse(ledger.report(recordID: "record", saved: saved).isComplete)
+        XCTAssertEqual(ledger.copyText(recordID: "record"), "abc\n[这句内容过长，恢复预览只保留了开头。]")
+        ledger.reject(recordID: "record", text: "最新句")
+        XCTAssertEqual(ledger.report(recordID: "record", saved: saved).admissionRejections, 2)
+        XCTAssertEqual(ledger.copyText(recordID: "record"), "[有 2 句未接纳，以下只保留了最近一句。]\n最新句")
+        ledger.reject(recordID: "overflow", text: "超预算")
+        XCTAssertEqual(ledger.recordIDs, ["record"])
+        XCTAssertNil(ledger.copyText(recordID: "overflow"))
+        XCTAssertFalse(ledger.report(recordID: "overflow", saved: saved).isComplete)
+    }
+
+    func testAdmissionResolutionOnlyAcknowledgesTheConfirmedSnapshot() throws {
+        var ledger = TranscriptAdmissionLedger(maximumRecords: 1)
+        ledger.reject(recordID: "record", text: "第一句")
+        let first = try XCTUnwrap(ledger.recovery(recordID: "record"))
+        XCTAssertEqual(ledger.recovery(recordID: "record"), first)
+        ledger.reject(recordID: "record", text: "后来的一句")
+        XCTAssertFalse(ledger.confirmResolution(first), "a newer refusal cannot be dismissed by an older dialog")
+        XCTAssertFalse(ledger.canStartNewRecord)
+        let latest = try XCTUnwrap(ledger.recovery(recordID: "record"))
+        XCTAssertNotEqual(latest.id, first.id)
+        XCTAssertEqual(latest.rejectionCount, 2)
+        XCTAssertTrue(latest.text.contains("后来的一句"))
+        XCTAssertTrue(latest.text.contains("只保留了最近一句"))
+        XCTAssertTrue(ledger.confirmResolution(latest))
+        XCTAssertTrue(ledger.canStartNewRecord)
+        XCTAssertNil(ledger.recovery(recordID: "record"))
+    }
+
+    func testAttributionBufferIsBoundedAndRecordGenerationScoped() {
+        var buffer = TranscriptAttributionBuffer(maximumItems: 1, maximumUnits: 2)
+        let identity = TranscriptPreviewLedger.ItemIdentity(
+            identity: .init(connection: 1, generation: 2), itemID: "item"
+        )
+        let unit = RealtimeASRClient.AttributionUnit(segmentUID: "unit", speaker: "A")
+        XCTAssertTrue(buffer.store([unit], recordID: "record", identity: identity, labelsEnabled: true))
+        XCTAssertFalse(buffer.store([unit], recordID: "other", identity: identity, labelsEnabled: true))
+        XCTAssertNil(buffer.take(recordID: "other", identity: identity))
+        XCTAssertFalse(buffer.store([unit, unit, unit], recordID: "record", identity: identity, labelsEnabled: true))
+        let retained = buffer.take(recordID: "record", identity: identity)
+        XCTAssertEqual(retained?.units, [unit])
+        XCTAssertTrue(retained?.labelsEnabled == true)
+        XCTAssertTrue(buffer.store([unit], recordID: "other", identity: identity, labelsEnabled: false))
+        let newGeneration = TranscriptPreviewLedger.ItemIdentity(
+            identity: .init(connection: 1, generation: 3), itemID: "item"
+        )
+        XCTAssertNil(buffer.take(recordID: "other", identity: newGeneration))
+    }
+
+    func testAttributionDiscardReleasesOnlyTheConfirmedRecordBudget() {
+        var buffer = TranscriptAttributionBuffer(maximumItems: 2, maximumUnits: 2)
+        let identity = TranscriptPreviewLedger.ItemIdentity(
+            identity: .init(connection: 1, generation: 2), itemID: "item"
+        )
+        let unit = RealtimeASRClient.AttributionUnit(segmentUID: "unit", speaker: "A")
+        XCTAssertTrue(buffer.store([unit], recordID: "old", identity: identity, labelsEnabled: true))
+        XCTAssertTrue(buffer.store([unit], recordID: "current", identity: identity, labelsEnabled: false))
+        buffer.discard(recordID: "old")
+        XCTAssertNil(buffer.take(recordID: "old", identity: identity))
+        XCTAssertTrue(buffer.store([unit], recordID: "next", identity: identity, labelsEnabled: true))
+        XCTAssertEqual(buffer.take(recordID: "current", identity: identity)?.units, [unit])
+    }
+
+    func testCompletedIdentityMemoryIsBoundedWhileFailuresRetainTheirIdentity() async {
+        enum SaveError: Error { case unavailable }
+        let queue = TranscriptPersistenceQueue(
+            configuration: .init(maximumRememberedItems: 1),
+            save: { input in
+                if input.sessionID == "failed-record" { throw SaveError.unavailable }
+                return 1
+            },
+            didSave: { _, _ in }
+        )
+        func input(_ item: String, record: String = "record") -> TranscriptPersistenceQueue.Command {
+            .init(sessionID: record, connection: 1, itemID: item,
+                  text: "正文", formal: true, observedAt: observedAt)
+        }
+        let failed = input("failed", record: "failed-record")
+        XCTAssertEqual(queue.enqueue(failed), .accepted)
+        _ = await queue.waitUntilSettled(sessionID: failed.sessionID)
+        let first = input("first")
+        XCTAssertEqual(queue.enqueue(first), .accepted)
+        _ = await queue.waitUntilSettled(sessionID: first.sessionID)
+        let second = input("second")
+        XCTAssertEqual(queue.enqueue(second), .accepted)
+        _ = await queue.waitUntilSettled(sessionID: second.sessionID)
+        XCTAssertEqual(queue.enqueue(input("second")), .duplicate(existingLineID: second.lineID))
+        XCTAssertEqual(queue.enqueue(input("failed", record: "failed-record")),
+                       .duplicate(existingLineID: failed.lineID))
+        XCTAssertEqual(queue.enqueue(input("first")), .accepted, "only settled identities expire")
+        _ = await queue.waitUntilSettled(sessionID: "record")
+    }
+
+    func testGenerationSourceAndRecordBoundariesRemainIndependent() async {
+        let queue = TranscriptPersistenceQueue(save: { _ in 1 }, didSave: { _, _ in })
+        func input(_ generation: Int, _ source: SessionLineSource, _ record: String = "record")
+            -> TranscriptPersistenceQueue.Command {
+            .init(sessionID: record, connection: 1, itemID: "reused", generation: generation,
+                  text: "正文", source: source, formal: true, observedAt: observedAt)
+        }
+        XCTAssertEqual(queue.enqueue(input(1, .microphone)), .accepted)
+        XCTAssertEqual(queue.enqueue(input(2, .microphone)), .accepted)
+        XCTAssertEqual(queue.enqueue(input(1, .mixed)), .accepted)
+        XCTAssertEqual(queue.enqueue(input(1, .microphone, "other-record")), .accepted)
+        let report = await queue.waitUntilSettled(sessionID: "record")
+        XCTAssertTrue(report.isComplete)
+    }
+
+    func testMeetingCommandPreservesEveryFrozenLineFieldAcrossRetry() async {
+        enum SaveError: Error { case unavailable }
+        var drafts: [LineDraft] = []
+        var failing = true
+        let queue = TranscriptPersistenceQueue(
+            save: { command in
+                drafts.append(command.lineDraft)
+                if failing { throw SaveError.unavailable }
+                return 7
+            },
+            didSave: { _, _ in }
+        )
+        let input = TranscriptPersistenceQueue.Command(
+            sessionID: "meeting", connection: 2, itemID: "remote", generation: 3,
+            lineID: "fixed-line", text: "恢复材料正文", source: .mixed, role: .speaker,
+            speakerLabel: "A", tStart: 1, tEnd: 2, formal: false,
+            isInterrupted: false, isDeviceSwitch: true, timingQuality: .unavailable,
+            observedAt: observedAt
+        )
+        XCTAssertEqual(queue.enqueue(input), .accepted)
+        let failed = await queue.waitUntilSettled(sessionID: input.sessionID)
+        XCTAssertEqual(failed.failures.first?.command, input)
+        failing = false
+        XCTAssertTrue(queue.retry(sessionID: input.sessionID, lineID: input.lineID))
+        let recovered = await queue.waitUntilSettled(sessionID: input.sessionID)
+        XCTAssertTrue(recovered.isComplete)
+        XCTAssertEqual(drafts.count, 2)
+        for draft in drafts {
+            XCTAssertEqual(draft.sessionID, input.sessionID)
+            XCTAssertEqual(draft.role, .speaker)
+            XCTAssertEqual(draft.text, input.text)
+            XCTAssertEqual(draft.source, .mixed)
+            XCTAssertEqual(draft.speakerLabel, "A")
+            XCTAssertEqual(draft.tStart, 1)
+            XCTAssertEqual(draft.tEnd, 2)
+            XCTAssertEqual(draft.status, .partial)
+            XCTAssertFalse(draft.isInterrupted)
+            XCTAssertTrue(draft.isDeviceSwitch)
+            XCTAssertEqual(draft.timingQuality, .unavailable)
+            XCTAssertEqual(draft.createdAt, observedAt)
+        }
+    }
+
+    func testSystemInputKeepsStableIdentityAfterFailureWithoutNetworkReplay() async {
+        enum SaveError: Error { case unavailable }
+        var attempts: [TranscriptPersistenceQueue.Command] = []
+        var failing = true
+        let queue = TranscriptPersistenceQueue(
+            save: { command in
+                attempts.append(command)
+                if failing { throw SaveError.unavailable }
+                return 1
+            },
+            didSave: { _, _ in }
+        )
+        let input = command(
+            sessionID: "meeting", connection: 1, itemID: "remote-item",
+            lineID: "fixed-system-line", source: .system
+        )
+        XCTAssertEqual(queue.enqueue(input), .accepted)
+        let failed = await queue.waitUntilSettled(sessionID: input.sessionID)
+        XCTAssertFalse(failed.isComplete)
+        let repeated = command(
+            sessionID: input.sessionID, connection: 1, itemID: input.itemID,
+            lineID: "different-line", source: .system
+        )
+        XCTAssertEqual(queue.enqueue(repeated), .duplicate(existingLineID: input.lineID))
+        failing = false
+        XCTAssertTrue(queue.retry(sessionID: input.sessionID, lineID: input.lineID))
+        let retried = await queue.waitUntilSettled(sessionID: input.sessionID)
+        XCTAssertTrue(retried.isComplete)
+        XCTAssertEqual(attempts, [input, input])
+    }
+
     func testKeyboardAndMicrophoneInputsShareQueueOrderAndWaitForProjection() async {
         var savedLineIDs: [String] = []
         var savedSources: [SessionLineSource] = []
         var savedTStarts: [TimeInterval?] = []
         var projectedLineIDs: [String] = []
-        let queue = AssistantInputPersistenceQueue(
+        let queue = TranscriptPersistenceQueue(
             save: { command in
                 savedLineIDs.append(command.lineID)
                 savedSources.append(command.source)
@@ -22,7 +298,7 @@ final class AssistantInputPersistenceQueueTests: XCTestCase {
                 projectedLineIDs.append(command.lineID)
             }
         )
-        let microphone = AssistantInputPersistenceQueue.Command(
+        let microphone = TranscriptPersistenceQueue.Command(
             sessionID: "record",
             connection: 1,
             itemID: "asr-item",
@@ -31,7 +307,7 @@ final class AssistantInputPersistenceQueueTests: XCTestCase {
             formal: true,
             observedAt: observedAt
         )
-        let keyboard = AssistantInputPersistenceQueue.Command(
+        let keyboard = TranscriptPersistenceQueue.Command(
             sessionID: "record",
             connection: 1,
             itemID: "",
@@ -63,7 +339,7 @@ final class AssistantInputPersistenceQueueTests: XCTestCase {
 
     func testKeyboardResultCanBeConsumedAfterSaveAndIsRemovedAfterConsumption() async {
         var didSaveLineIDs: [String] = []
-        let queue = AssistantInputPersistenceQueue(
+        let queue = TranscriptPersistenceQueue(
             save: { _ in 7 },
             didSave: { command, _ in
                 didSaveLineIDs.append(command.lineID)
@@ -95,9 +371,9 @@ final class AssistantInputPersistenceQueueTests: XCTestCase {
             case unavailable
         }
 
-        var attemptedCommands: [AssistantInputPersistenceQueue.Command] = []
+        var attemptedCommands: [TranscriptPersistenceQueue.Command] = []
         var didSaveLineIDs: [String] = []
-        let queue = AssistantInputPersistenceQueue(
+        let queue = TranscriptPersistenceQueue(
             save: { command in
                 attemptedCommands.append(command)
                 if attemptedCommands.count == 1 { throw SaveError.unavailable }
@@ -142,7 +418,7 @@ final class AssistantInputPersistenceQueueTests: XCTestCase {
         let gate = SaveGate()
         var attemptedLineIDs: [String] = []
         var didSaveLineIDs: [String] = []
-        let queue = AssistantInputPersistenceQueue(
+        let queue = TranscriptPersistenceQueue(
             save: { command in
                 attemptedLineIDs.append(command.lineID)
                 if command.lineID == "earlier-line",
@@ -214,7 +490,7 @@ final class AssistantInputPersistenceQueueTests: XCTestCase {
         }
 
         var attemptedLineIDs: [String] = []
-        let queue = AssistantInputPersistenceQueue(
+        let queue = TranscriptPersistenceQueue(
             save: { command in
                 attemptedLineIDs.append(command.lineID)
                 if command.lineID == "failed-before-enqueue" && attemptedLineIDs.count == 1 {
@@ -257,7 +533,7 @@ final class AssistantInputPersistenceQueueTests: XCTestCase {
 
     func testCancelledResultWaiterDoesNotCancelAcceptedSaveOrRetainResult() async {
         let gate = SaveGate()
-        let queue = AssistantInputPersistenceQueue(
+        let queue = TranscriptPersistenceQueue(
             save: { _ in await gate.wait() },
             didSave: { _, _ in }
         )
@@ -294,7 +570,7 @@ final class AssistantInputPersistenceQueueTests: XCTestCase {
         var savedLineIDs: [String] = []
         var projectedLineIDs: [String] = []
         var projectedOrdinals: [Int] = []
-        let queue = AssistantInputPersistenceQueue(
+        let queue = TranscriptPersistenceQueue(
             save: { command in
                 savedLineIDs.append(command.lineID)
                 return savedLineIDs.count
@@ -324,7 +600,7 @@ final class AssistantInputPersistenceQueueTests: XCTestCase {
 
     func testDuplicateItemsAreConnectionScopedAndMissingItemIDsGetUniqueAcceptances() async {
         var savedLineIDs: [String] = []
-        let queue = AssistantInputPersistenceQueue(
+        let queue = TranscriptPersistenceQueue(
             save: { command in
                 savedLineIDs.append(command.lineID)
                 return savedLineIDs.count
@@ -358,7 +634,7 @@ final class AssistantInputPersistenceQueueTests: XCTestCase {
         var shouldFailFirstRecord = true
         var attemptedLineIDs: [String] = []
         var savedLineIDs: [String] = []
-        let queue = AssistantInputPersistenceQueue(
+        let queue = TranscriptPersistenceQueue(
             configuration: .init(
                 maximumPendingCommands: 4,
                 maximumPendingTextScalars: 4
@@ -410,8 +686,8 @@ final class AssistantInputPersistenceQueueTests: XCTestCase {
     }
 
     func testPartialAndFormalFlagsAndObservationTimeReachTheSaveCallback() async {
-        var savedCommands: [AssistantInputPersistenceQueue.Command] = []
-        let queue = AssistantInputPersistenceQueue(
+        var savedCommands: [TranscriptPersistenceQueue.Command] = []
+        let queue = TranscriptPersistenceQueue(
             save: { command in
                 savedCommands.append(command)
                 return savedCommands.count
@@ -448,10 +724,10 @@ final class AssistantInputPersistenceQueueTests: XCTestCase {
     }
 
     private func resultWithin(
-        _ waiter: Task<AssistantInputPersistenceQueue.SaveResult, Never>,
+        _ waiter: Task<TranscriptPersistenceQueue.SaveResult, Never>,
         timeoutIterations: Int = 200
-    ) async -> AssistantInputPersistenceQueue.SaveResult? {
-        var observedResult: AssistantInputPersistenceQueue.SaveResult?
+    ) async -> TranscriptPersistenceQueue.SaveResult? {
+        var observedResult: TranscriptPersistenceQueue.SaveResult?
         let observer = Task { @MainActor in
             observedResult = await waiter.value
         }
@@ -479,8 +755,8 @@ final class AssistantInputPersistenceQueueTests: XCTestCase {
         formal: Bool = true,
         source: SessionLineSource = .microphone,
         tStart: TimeInterval? = nil
-    ) -> AssistantInputPersistenceQueue.Command {
-        AssistantInputPersistenceQueue.Command(
+    ) -> TranscriptPersistenceQueue.Command {
+        TranscriptPersistenceQueue.Command(
             sessionID: sessionID,
             connection: connection,
             itemID: itemID,

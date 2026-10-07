@@ -1,24 +1,40 @@
-<!-- loop-plan-r2: 2026-10-07, baseline 151297f6 -->
-# Issue #238 DRY / SOLID 收敛 Loop 实施计划 r2（新基线 `151297f6`）
+<!-- loop-plan-r2: 2026-10-07, baseline 4f6b7356 -->
+# Issue #238 DRY / SOLID 收敛 Loop 实施计划 r2（新基线 `4f6b7356`）
 
 > r1（`2026-10-07-issue-238-solid-loop-plan.md`，基线 `159fea09`，随 R01 PR #320 提交）的后继修订。
 > 凡与 r1 不一致处以本文件为准。当前目标包含实施、审查、验证、提交、推送及通过后的合并；分组/跨包门结论继承 r1。
 
 **Goal:** 11 个 issue（#231 #232 #234 #235 #236 #237 #240 #241 #242 #244 #246）分 9 个 PR 交付。
 **Spec:** [Epic #238](https://github.com/hrygo/SpeechRail/issues/238)、[Epic #245](https://github.com/hrygo/SpeechRail/issues/245)。
-**核验日期：** 2026-10-07，Asia/Shanghai；CI 时间戳为 UTC。进度以本次回读的 SHA、PR 状态和 run ID 为准。基线 `origin/main = 151297f6`（已 fetch）；每包合并后刷新。
+**核验日期：** 2026-10-07，Asia/Shanghai；CI 时间戳为 UTC。进度以本次回读的 SHA、PR 状态和 run ID 为准。基线 `origin/main = 4f6b7356`（已 fetch）；每包合并后刷新。
 
-**当前实施目标（2026-10-07 更新）：** R01、R02、R05、R03、R04 已合入；剩余 4 个 issue 分 4 个独立 PR，按 **R06 #241 → R07 #232 → R08 #231 → R09 #234** 完成实施、整包独立审查、定向验证与必要 CI，验证通过立即 squash 合并，再刷新 main。每包 1–3 issue；不堆叠 PR、不 force-push、不关闭未验收 issue、不 `Closes #238`。保持 #245 的语义禁写区，最终逐条核对十一项验收矩阵后决定关闭 issue 与完成 goal。
+**当前实施目标（2026-10-07 更新）：** R01、R02、R05、R03、R04、R06 已合入；剩余 3 个 issue 分 3 个独立 PR，按 **R07 #232 → R08 #231 → R09 #234** 完成实施、整包独立审查、定向验证与必要 CI，验证通过立即 squash 合并，再刷新 main。每包 1–3 issue；不堆叠 PR、不 force-push、不关闭未验收 issue、不 `Closes #238`。保持 #245 的语义禁写区，最终逐条核对十一项验收矩阵后决定关闭 issue 与完成 goal。
+
+**最新执行目标（2026-10-07，Asia/Shanghai）：** 本次 fetch 后 `origin/main` 仍为 `4f6b7356`。R07 分支 `codex/238-r07-transcript-persistence` 的 draft PR 为 **#330**。确认框 SDK 差异已修；head `81b2cb27` 的 CI `37572108064` 全部必要检查通过。一次整包独立审查已结束，无 Critical；发现的拒绝 item 归属缓存泄漏已修，并补齐封存失败/并发验收，最新 **228 项定向实测通过**。立即目标是提交修订、等待匹配新 head 的必要 CI，通过后立即合并；不能以旧 head 的绿灯代替修订验证。R08/R09 仍在下一包。
+
+**本次 goal 更新检查点（2026-10-07）：** 本地 HEAD 为 `0d2cf68e`；恢复入口、不完整结束、历史恢复材料展示及相关文档仍有未提交改动。220 项测试与 App 构建是前一执行阶段的实测证据，本次更新目标未重跑。接下来按以下顺序推进：
+
+1. 检查完整 R07 diff、敏感字段和提交差异，将已验证的恢复实现与文档提交、推送到现有分支；保留未知及其他 worktree 改动。
+2. 对 `4f6b7356` 到最终 R07 HEAD 做一次整包独立审查；创建只关联 #232 的 draft PR，并运行匹配最终 head 的必要 CI。Required 由主代理补反例并修复，按影响复验。
+3. 审查、必要验证和 CI 通过后立即 squash 合并，刷新 main，更新 #232/#238 与执行账本；无需再次请求逐包合并确认。
+4. 顺序完成 R08 #231、R09 #234，各一个从最新 main 开出的独立 PR；每包沿用相同审查、验证、合并和账本更新闭环。
+5. 九包均合并后审计十一项 issue 的联合验收矩阵；只关闭已满足完整验收条件的 issue，全部完成后再将结构化 goal 标为 complete。
+
+- **R07 完成门槛：** 固定身份和完整命令可恢复；行、ordinal 与 outbox 原子确认；失败和容量拒绝不能被成功封存掩盖；partial 不进入正式纪要、默认分享或正式来源快照；归属缓存有界且跨 record/generation 隔离。保存后 metadata I/O 归共享 owner 管理，迟到完成不改新场标签或文字；用户能重试/复制旧记录，并显式处理拒绝证明，不能永久卡在记录容量上限。完成一次整包独立审查，修复 Required，定向验证和必要 CI 通过后立即合并。
+- **后续目标：** R08 补足消费 EOF、保存 settled 和封存结果的完整收尾证明；R09 收敛 loader 内核规则。各自从更新后的 main 开独立 PR，分别只关联 #231、#234。
+- **跨团队边界：** #245 的 decoder、ASR policy、turn coordinator、scene、Assembler、Ledger 与 wire 禁写；在途 clear 协议和路由只读；避让 pbxproj。同一文件出现无法分离的并行修改时暂停该处写入，核实后再继续。
+- **最终完成条件：** 九包合并并逐条审计十一项 issue 的验收矩阵，更新相关 issue 与文档；满足全部要求后才关闭对应 issue 和完成 goal。未执行的真实模型、性能、长稳及 UI 验收如实列出，不以确定性测试替代。
 
 结构化 goal 仍 active。2026-10-07 再次核对：Goal 工具只提供完成/阻塞状态，不能改正文；原生 Codex UI 入口也被 computer-use 安全规则拒绝。旧 goal 的基线、PR 状态、逐包等待确认及错误同文件判断由本段执行目标更正，不虚假标为 complete 再重建，不绕过 UI 限制。
 
 ## 0. 基线与 #245 现状（只读快照）
 
-- `origin/main = 151297f6`：包含 #249/#252 文档及提词器 preview 500ms 预设变更（这是业务行为变化）、#321 V17 回归、#324 3.8.0、#326 限时 ASR 诊断、#327 3.8.1 发布提交，以及 R01/R02/R05/R03/R04。
+- `origin/main = 4f6b7356`：包含 #249/#252 文档及提词器 preview 500ms 预设变更（这是业务行为变化）、#321 V17 回归、#324 3.8.0、#326 限时 ASR 诊断、#327 3.8.1 发布提交，以及 R01/R02/R05/R03/R04/R06。
 - #245 子任务历史快照：#247–#252 CLOSED。R04 开工回读 #245/#253 仍 OPEN。R03 曾核对 acceptance-evidence、app-validation、boundary-fix、consumer-replay、delivery、validation-v8 等 ASR worktree；R04 的当前登记表已无这些 checkout，不据此断言在途分支停工或语义禁写区解除。
 - #320 R01（#244）已合并为 `451aeb1e`；#322 R02（#240/#246）已合并为 `1edf9398`；#323 R05（#242）已合并为 `ff34bfcf`。三包均在匹配的 head 上通过实质审查、定向验证与必需 CI 后 squash 合并。
 - #325 R03（#235）已在修订 head `ed02d7a3` 的全部必要 CI 通过后合并为 `baafb59b`；CI run `37556276635`，UTC `2026-10-07T01:21:27Z` 合并。
 - #328 R04（#237/#236）已在 head `0f22ada5` 的全部必要 CI 通过后合并为 `151297f6`；CI run `37560283532`，UTC `2026-10-07T02:12:35Z` 合并。
+- #329 R06（#241）已在 head `b38f08dc` 的全部必要 CI 通过后合并为 `4f6b7356`；CI run `37562890224`，UTC `2026-10-07T02:41:27Z` 合并。
 - 在途远端分支（只读核对）：`asr-production-consumer-replay-253`（pbxproj + 新增 `ASRProductionConsumerReplayTests.swift` 881 行）、`asr-clear-barrier-245`（`application/realtime_openai.py` 283 行 + 路由 + 契约文档，#245 语义面）、`v17-backlog-playback-268`（矩阵文档 + V17 测试）。
 - 用户最新授权：**PR 经实质审查和必要验证通过后尽快合并**，不再逐包询问；旧版等待合并确认的限制已被替代。main 要求线性历史，采用 squash/rebase 合并，不绕过 `Quality Gates` / `Gate Summary`，不 force-push。
 
@@ -37,7 +53,7 @@
 | #235 验证用例 | 已合并 | 两个用例接线；同次身份、unknown、CAS/撤销、保存失败、重复取消与 timeout/cancel 回归通过；372 项定向测试，独立审查 Required 修复及全部必要 CI 通过 | R03 #325 |
 | #237 坏 2xx | 已合并 | probe/正式调用共用最低响应校验；坏 2xx 不再 ready；App 展示新状态编译通过 | R04 #328 |
 | #236 中立支持 | 已合并 | 中立 context/observer、唯一 parser、显式 recorder 注入；支持层独立 type-check 与全部 CI 通过 | R04 #328 |
-| #241 封存结果 | 部分改善 | 剩余 `finalize`(442-)/`endAssistant`(543-) 纯文字分支 `try?` + 无条件成功 ID | R06（收窄） |
+| #241 封存结果 | 已合并 | 归档提交后读回、记录/租约冻结、会议来源确认、按记录保留失败恢复；138 XCTest +77 Swift Testing、审查修订与 CI 通过 | R06 #329 |
 | #232 保存恢复 | 部分改善 | Meeting `commit`(867-) 每次 UUID 新行、恢复 note(949-) 另 UUID；Caption(809-) 同；行/outbox 两次提交 | R07 |
 | #231 收尾屏障 | 部分改善 | 收尾证明面：Meeting stop(594-626)/Caption(458-525) 等了消费但不验保存成败 | R08（收窄） |
 | #234 loader 规则 | 可启动 | 双份规则仍在（`qwen3_worker.py:695/709/770-776` + `model_identity.py`）；worker 现 1315 行，R09 只动 loader 内核 | R09（#249 关闭，解锁） |
@@ -93,8 +109,8 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 | R05 #242 | MERGED | PR #323 / `ff34bfcf` | 42 定向 Swift 测试；去掉事务使 3 项转红；CI run `37549739387` 的 Swift/App/必需 gate 通过 |
 | R03 #235 | MERGED | PR #325 / `baafb59b` | 372 项定向 fake/HTTP/contract、Ruff/Mypy；独立审查 Required 已修；CI `37556276635` 全部必要检查通过 |
 | R04 #237+#236 | MERGED | PR #328 / `151297f6` | 283 定向 Swift、2 项 Python 守卫、独立编译；Required 已修，CI `37560283532` 全绿后合并 |
-| R06 #241 | CI 待完成 | PR #329 / 分支 `codex/238-r06-session-seal` | 已同步 `151297f6`；138 XCTest +77 Swift Testing 通过，首轮 Required 已修，新 head CI 待完成 |
-| R07 #232 | planned | 无 | 注意 consumer-replay 分支 |
+| R06 #241 | MERGED | PR #329 / `4f6b7356` | 138 XCTest +77 Swift Testing；首轮 Required 已修，CI `37562890224` 全绿后立即合并 |
+| R07 #232 | Required 已修，待修订 CI | draft PR #330；分支 `codex/238-r07-transcript-persistence` | 基于 `4f6b7356`；228 项定向实测；独立审查完成，`81b2cb27` CI 已绿，修订 head 待验证；避让 pbxproj |
 | R08 #231 | planned | 无 | 注意 clear-barrier 分支，只读合同 |
 | R09 #234 | planned | 无 | #249 关闭已解锁，排末位 |
 
@@ -140,7 +156,40 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 - 上述测试屏障修订后扩大定向套件：原 136 XCTest + 77 项提词器生命周期 Swift Testing 全部通过；新 head 的必要 CI 与独立首轮审查仍待完成。
 - 首轮整包独立审查发现 1 项 Required：助手单槽恢复入口被新会话成功清空或失败覆盖。两个跨会话反例先出现 10 个失败断言；修订按记录保留原因及冻结复制文本，成功只移除该记录，按失败顺序逐条重试。reviewer 未运行测试、不做二次审查，修订由主代理红→绿和最终定向套件验证。
 - 最终定向命令在原过滤项后追加 `TeleprompterSessionLifecycleTests`，138 XCTest +77 Swift Testing 全部通过（含 17 个封存合同测试）。`cd7b13dd` 的 CI `37562445317` 全绿，但上述 Required 修订还须匹配新 head 的必要 CI，尚未合并。
+- Required 修订 head `b38f08dc` 的 CI `37562890224`：Quality Gates、App Build、Swift Package Tests、独立 LLM 支持编译、Gate Summary 全部通过；已立即 squash 合并为 `4f6b7356`。选中 scope 的 Python 全套和 wheel job 跳过，不扩展为本机完整测试或真实能力验收。
 - 不改 schema v13、ASR 识别事实/协议、pbxproj；不持久化跨重启 pending 命令，不运行真实音频/LLM、UI、服务、模型或发布。
+
+### R07 实施边界与账本（2026-10-07）
+
+- 从 R06 合并后的 `4f6b7356` 开独立分支；其他登记 worktree 在 Store/Queue/Meeting/Caption/所用事务测试文件无 dirty，在途 consumer-replay 分支在三个生产文件无差异。图谱只覆盖主 checkout 的旧 generation，相关片段已按当前源码回读，不以旧图谱证明穷尽或重建索引。
+- 路径：先建立 Store 有限事务与固定 ID 确认，再将既有助手队列中立化并冻结完整行字段，最后接入 Meeting/Caption 的接纳、恢复、归属缓存与 settled 结果；R08 后续接完整消费 EOF 屏障，不修改 #245 的识别或 clear 协议语义。
+- Store：正文、序号确认和持久化索引待办同事务；同 ID 按 session/正文/来源/role/归属/时间/状态/设备切换/质量比对，冲突拒绝。匹配的旧半提交可补缺失索引待办，已待处理或已索引不重复排队；partial 不进正式读取或索引。观察时间采用 SQLite Double 精度的 1 微秒确认容差，不承诺纳秒相等；未指定观察时间的旧调用不凭空要求新时间相同。
+- 五个新增 SQLite 反例在旧实现出现 8 个失败（含两个未捕获 UNIQUE 错误）；事务和确认修订后 `swift test --package-path macos/SpeechRailApp --filter "SessionStoreTransactionTests|MeetingRecoveryMaterialTests|SessionSealContractTests"` → 34 XCTest passed。这是 Store 子任务实测，不表示 #232 全包已交付。
+- 既有队列中立化为 `TranscriptPersistenceQueue`，不保留旧类型 alias；Command 冻结 generation、role、speaker、起止、状态、设备切换、质量和观察时间，唯一 `lineDraft` 投影供三种功能使用。系统来源重复接纳先出现两个断言失败；generation/source/record 隔离及完整字段恢复先出现缺少中立 API 的编译红灯。修订后队列与助手相关定向套件 116 XCTest passed。
+- 已完成 item 身份记忆上限默认 512；失败与未完成命令继续占用队列预算且不被身份过期移除。移除身份回收接线会使有界回归转红，恢复后通过。Ruling：类型中立化但暂保留既有源文件名 `AssistantInputPersistenceQueue.swift` 与测试文件名，以复用两个构建系统已登记的编译单元，避让 pbxproj 在途改动；代价是文件名不能直接表达新类型，正式合同明确导航到此处，后续单独安全重命名，不引入兼容层。
+- Meeting/Caption 已接入同一保存内核；receiver 的正文保存只冻结和接纳，保存失败保留完整字段、同一 lineID 和复制文本。空 final 与 failed 的恢复 preview 都是稳定 partial，不生成另一条 formal 替代。保存前的有界 attribution 按 record/connection/generation/item 回放；跨场复用同 item/unit 时，旧失败命令的重试只写旧记录，当前文字和 speaker B 状态保持属于新场。
+- Swift 6.4 的最小复现确认：lazy 初始化表达式内直接调用注入的异步 `@Sendable` 保存闭包会出现 `default argument cannot be both main actor-isolated and @concurrent`；去掉 Observation 宏/队列默认参数仍复现。将调用移入 feature 的具名保存方法后最小复现及 feature 编译通过，不调整隔离语义或工具链。
+- Caption failed item 没有命令、Meeting partial 成功后提示仍“正在保留”的反例出现 4 个失败后转绿；会议两个控制测试的预期修正为当前 `readableError` 的精确 code+正文（不改生产错误格式）。真实 Realtime 客户端配 fake transport 在第二个 completed 出现前完成同 ID 的 retry，随后重复终态不会覆盖正文；不修改共享 ASR 测试或协议。
+- 新结束 Gate 证明关闭等待活动保存，写前失败不归档，旧目标 retry 不投影新记录。测试 fixture 最初缺少 ASR echo 的 server final deadline、Meeting fake close 没有结束 stream，已修正 fixture；终止了那个明确定位的 XCTest 进程并单独复验，未操作本机服务。
+- 容量拒绝在队列排空后曾被报告完整并归档：两场景合计 8 个断言失败。新增有界 `TranscriptAdmissionLedger` 和 `DrainReport.admissionRejections` 后转绿；失败/拒绝不能被“全部保存”掩盖。Ruling：拒绝内容未接纳，仅保留每场最近一次有界复制预览，重复拒绝/截断明示，已接纳失败命令仍完整占预算；拒绝证明不因复制自动消失。代价：目前缺少用户确认后的解除/结束流程，须在 R07 完成前补齐，不能把永久阻止新记录当作完成。
+- staged 复核发现恢复材料的接纳提示覆盖容量拒绝提示；新增反例先出现 2 个断言失败，再由接纳结果决定提示，拒绝时继续明确给出复制出口。
+- 最新定向 `swift test --package-path macos/SpeechRailApp --filter "SessionStoreTransactionTests|TranscriptItemLedgerTests|AssistantInputPersistenceQueueTests|AssistantSessionTests|AssistantCancelReceiveTests|AssistantDrainTests|SessionSealContractTests|MeetingSessionLifecycleTests|MeetingRecoveryMaterialTests|CaptionSessionLifecycleTests"` → **198 XCTest、0 failures、exit 0**（2026-10-07）。这是保存 owner 子任务的实测；R07 尚未独立审查/创建 PR/运行必要 CI。
+- [保存合同草稿](../architecture/transcript-persistence-contract.md) 与架构导航已建立，`under_review`。下一步仍须移出保存后 attribution 的 receiver I/O、冻结 metadata 的异步目标、接用户重试/复制和拒绝恢复入口，再做一次整包审查与 CI。R08/R09 不提前启动；#245 禁写边界继续有效。
+- 保存接线子任务已提交并推送 `e60b79b36167c062671384bb812bddf54865f966`；#232 / #238 的进度评论分别为 `issuecomment-6030341273` / `issuecomment-6030341587`，明确保留未完成门槛，没有关闭 issue。
+- 共享 owner 新增 `enqueueProjection`：同一 worker 处理正文和辅助写入，活动辅助任务继续占 128 项/1,024 units 预算，仅合并 queued 的相同 record/line 更新，辅助任务 queued/in-flight 时不会报告该 record settled。新增端口/预算测试先编译红灯；辅助任务优先会挤占正文的公平性反例出现 1 个失败后，改为两类工作轮换。包含三个新增队列反例的同一范围定向验证 → **201 XCTest、0 failures、exit 0**。该端口还未接入 Meeting/Caption；不得提前宣称其 attribution I/O 已移出 receiver。
+- Meeting/Caption 已将保存前归属回放与保存后 attribution 接到 `enqueueProjection`。正文确认后仅排辅助工作，不在 didSave 内等待它；queued/in-flight metadata 继续阻止本 record 提前 settled。超预算保留正文并给出辅助信息不完整提示。两个零容量反例先出现 2 个真实 Store timing 断言失败，接线后转绿；两个 Store Gate 证明写入挂起时控制事件仍消费且 settled 不提前返回。
+- `SpeakerLabeling` 整批冻结 unit/line/label/lifecycle；begin/load/end 使旧 UI 投影失效，unit 重绑清旧行确认，旧任务不读取新映射。四个真实 SQLite 反例先出现 7 个失败后转绿；追加同记录新生命周期的 queued 命令、nil 修订清除回归。Ruling：旧任务继续写冻结目标，但只发布已确认且仍属原生命周期的界面变化——保证已接纳工作的完整性，同时避免把迟到成功或失败投到新场；代价是旧场辅助错误不会覆盖当前场提示。
+- attribution 局部批次按整行替换会抹掉已接纳的另一批 unit 修订：两个 Gate 反例出现 4 个失败断言。Ruling：此类修订禁用整行 coalescing，逐批受相同 128 项/1,024 units 预算约束——不假设每次事件都是整行完整快照；代价是高频局部更新更早达到预算，达到时明确提示辅助信息未保存，正文仍保留。
+- 最新同范围追加 `SpeakerLabelingPersistenceTests` 的定向命令 → **211 XCTest、0 failures、exit 0**（2026-10-07）。无真实模型/设备、UI、服务或安装操作。R07 尚待恢复入口、拒绝结束路径、整包独立审查和必要 CI。
+- 会议页、字幕页和字幕浮层复用同一 retry/copy/不完整结束组件；记录按观察日期选取，动作冻结 record ID。浮层恢复入口位于常驻页脚，不依赖 hover；恢复材料在会议/字幕回看区单独可读可复制，正式读取/全文复制/默认导出不收 partial。没有新增 Token 或修改 pbxproj。
+- `TranscriptAdmissionRecovery` 冻结拒绝版本、固定恢复行与日期。显式确认后先等待所有已接纳命令，保存有限 partial 说明，再按 interrupted 封存并读回确认，最后才解除本记录的拒绝证明。新增拒绝使旧确认失效；失败保留原身份供重试。Ruling：将拒绝预览存为说明性 partial，并按中断结束来释放恢复限额——承认未完整保留，不用清空账本冒充完整保存；代价是多句/过长拒绝仍不能恢复全部正文，UI、复制和用户指南明确说明。
+- 3 个端口/版本反例先编译红灯后通过；另外 6 个真实 Store/Gate 边界证明不完整结束不能丢已接纳失败项、旧 record 不停止新场、预览写入失败时保留证明且同 ID 重试。最终同范围 **220 XCTest、0 failures、exit 0**；`scripts/macos_app_build.sh --configuration Debug --timeout 600` 成功，恢复回看 UI 最终修改后重新构建也成功。未做 UI 自动化、视觉/VoiceOver 走查，未操作生产服务或安装。新用户说明见 [找回未保存的文字](../users/transcript-save-recovery.md)。
+- 首轮 CI `37571682793` 的 Quality Gates 通过，Swift/App 在确认框 `item:` 重载处编译红灯。本机 SDK 与 CI SDK 差异已从两条编译日志核实；Ruling：改用基线原生 `isPresented:presenting:`，将不可变快照交给 actions 捕获——不升级 CI、不改最低平台、不让用户确认改绑新记录；代价是显式维护展示 Binding。修订后本机 **220 XCTest、0 failures、exit 0** 与 App 包装 Debug 构建均通过，CI 待匹配新 head 验证。
+- 一次整包独立审查范围 `4f6b7356..81b2cb27` 完成，无 Critical。Required：正文容量拒绝后，迟到 attribution 永远无法对接正式行，成功不完整结束后仍占缓存预算。两条跨记录反例复现新行 `timingQuality=unavailable` 而非 aligned；最小修复是在 sealed、读回及精确拒绝确认均成功后按 record 释放缓存。Ruling：只回收已确认结束记录的孤立 attribution——既释放无未来消费者的预算，又保留其他场；代价是结束记录的未匹配辅助信息不再驻留。
+- 审查指出不完整结束的封存失败/并发缺少 feature 集成断言，已补两种 feature 的 archive 失败、会议 source_snapshot 失败、两条并发结束测试与缓存 record 隔离测试。临时移除并发守卫出现 **6 个失败断言**；临时移除封存确认守卫出现 **18 个失败断言**，随后全部恢复。最终定向范围 **228 XCTest、0 failures、exit 0**；测试 SQL trigger 只作用于测试自建 SQLite，没有生产故障开关。
+- Final: minor (deferred): `docs/developers/macos-app-development.md` 仍以源文件旧名引用队列类型；当前合同已区分 `TranscriptPersistenceQueue` 类型与保留的注册文件名，未扩写无关开发手册。
+- Final: minor (deferred): Store 同 ID 冲突回归只单独变更正文，其余不可变字段已有实现比较与丰富同 ID 成功核对，字段逐项冲突测试暂未扩充。
+- Final: minor (deferred): 复制路径已静态确认只读，专门“复制后仍有拒绝证明”的 feature 回归未增加；UI/键盘/VoiceOver 未实测。完整 EOF/截止时间/协议失败封存资格仍由 R08 联合验收。
 
 ## 6. 来源
 

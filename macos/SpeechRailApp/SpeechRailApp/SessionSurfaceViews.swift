@@ -288,6 +288,7 @@ public struct SessionLibraryView: View {
     @State private var summaries: [SessionSummary] = []
     @State private var selectedID: String?
     @State private var lines: [TranscriptLine] = []
+    @State private var recoveryLines: [TranscriptLine] = []
     @State private var speakerNames: [String: String] = [:]
     @State private var searchText = ""
     /// 全文检索命中（MC-49/MC-52/MC-54）：转录终稿与已完成纪要正文。
@@ -321,6 +322,14 @@ public struct SessionLibraryView: View {
                     facts: pageStatusPresentation.facts,
                     elapsed: session.occupancy == nil ? nil : session.elapsed
                 )
+                if kind == .captions, !caption.saveRecoveryRecords.isEmpty {
+                    TranscriptSaveRecoveryPanel(
+                        records: caption.saveRecoveryRecords,
+                        preview: { caption.unsavedTranscriptText(recordID: $0) },
+                        retry: { await caption.retryPendingSaves(recordID: $0) },
+                        finishIncomplete: { await caption.endIncompleteRecord($0) }
+                    )
+                }
 
                 if let loadFailure {
                     StatusBanner(
@@ -927,7 +936,7 @@ public struct SessionLibraryView: View {
 
                 Divider()
 
-                if lines.isEmpty {
+                if lines.isEmpty && recoveryLines.isEmpty {
                     Text("这条记录里还没有正文。")
                         .font(SpeechRailDesignTokens.Typography.callout)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
@@ -937,6 +946,9 @@ public struct SessionLibraryView: View {
                         LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                             ForEach(lines) { line in
                                 lineRow(line)
+                            }
+                            if !recoveryLines.isEmpty {
+                                TranscriptRecoveryMaterialSection(lines: recoveryLines)
                             }
                         }
                         .padding(SpeechRailDesignTokens.Spacing.md)
@@ -1075,17 +1087,23 @@ public struct SessionLibraryView: View {
             loadFailure = error.localizedDescription
             summaries = []
             lines = []
+            recoveryLines = []
         }
     }
 
     private func loadLines() async {
         guard let selectedID else {
             lines = []
+            recoveryLines = []
             speakerNames = [:]
             return
         }
-        lines = (try? await session.lines(sessionID: selectedID)) ?? []
-        speakerNames = (try? await session.speakerNames(sessionID: selectedID)) ?? [:]
+        let loaded = (try? await session.lines(sessionID: selectedID, includePartial: true)) ?? []
+        let names = (try? await session.speakerNames(sessionID: selectedID)) ?? [:]
+        guard self.selectedID == selectedID else { return }
+        lines = loaded.filter { $0.status == .final }
+        recoveryLines = loaded.filter { $0.status == .partial }
+        speakerNames = names
     }
 
     private func copyTranscript(of summary: SessionSummary) async {
