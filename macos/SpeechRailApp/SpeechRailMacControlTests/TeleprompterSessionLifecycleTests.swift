@@ -2315,6 +2315,8 @@ struct TeleprompterSessionLifecycleTests {
         // 掉线：连接关闭后必须释放占用并回到手动，位置留在用户离开的地方。
         await client.emit(.closed(code: 1006))
         await waitFor("掉线后释放占用") { harness.coordinator.occupancy == nil }
+        // 释放占用只证明 Coordinator 已交还租约；功能仍可能在等待封存结果返回。
+        await waitFor("掉线后完成功能收尾") { harness.session.phase == .manual }
         #expect(harness.session.phase == .manual)
         #expect(harness.session.currentSegmentIndex >= 0, "掉线不得丢掉用户的阅读位置")
         #expect(await client.currentCounters().closeCount >= 1, "掉线后传输必须已关闭")

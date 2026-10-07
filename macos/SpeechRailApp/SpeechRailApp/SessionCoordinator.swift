@@ -63,6 +63,7 @@ public final class SessionCoordinator {
 
     public enum AssistantEndResult: Equatable, Sendable {
         case ended(recordID: String?)
+        case failed(recordID: String?, reason: String)
         case superseded
         case mismatch
         case noConversation
@@ -148,6 +149,26 @@ public final class SessionCoordinator {
     /// 的中间态——那时读回来的 `ended_at` 还是空的，页面上"结束于 / 时长"两行会说错。
     public private(set) var lastFinalizedSessionID: String?
 
+    /// 仅当前进程内的恢复命令；不会靠保持设备占用保存失败信息。
+    public struct PendingSessionSeal: Equatable, Sendable {
+        public enum Stage: String, Sendable {
+            case pauseClosure
+            case archive
+            case sourceSnapshot
+        }
+
+        public let recordID: String
+        public let endReason: SessionEndReason
+        public let endedAt: Date
+        public fileprivate(set) var stage: Stage
+        public fileprivate(set) var failureReason: String?
+        fileprivate var pauseID: String?
+        fileprivate var requiresSourceSnapshot: Bool
+    }
+
+    public private(set) var pendingSeals: [String: PendingSessionSeal] = [:]
+    public private(set) var pauseClosureFailure: String?
+
     // MARK: - 能力层挂载点
     //
     // 协调器是会话生命周期的唯一权威（`TECHNICAL-DESIGN` §5.2），但它不认识"字幕""会议""助手"
@@ -171,8 +192,16 @@ public final class SessionCoordinator {
 
     private let store: SessionStore
     private let llmProvider: LLMProvider
+    private let archiveWriter: any SessionArchiveWriting
     private let defaults: UserDefaults
     private var clockTask: Task<Void, Never>?
+    private var finalizeTasks: [UUID: Task<SessionSealResult, Never>] = [:]
+    private struct SealFlight {
+        let token: UUID
+        let task: Task<SessionSealResult, Never>
+        var requiresSourceSnapshot: Bool
+    }
+    private var sealTasks: [String: SealFlight] = [:]
 
     /// 「以后不再询问」的持久化键。只对助手 / 字幕生效。
     private static let doNotAskAgainKey = "speechrail.session.skipSwitchConfirmation"
@@ -180,9 +209,11 @@ public final class SessionCoordinator {
     public init(
         store: SessionStore,
         defaults: UserDefaults = .standard,
-        llmProvider: LLMProvider = LLMProvider()
+        llmProvider: LLMProvider = LLMProvider(),
+        archiveWriter: (any SessionArchiveWriting)? = nil
     ) {
         self.store = store
+        self.archiveWriter = archiveWriter ?? store
         self.defaults = defaults
         self.llmProvider = llmProvider
     }
@@ -337,6 +368,8 @@ public final class SessionCoordinator {
         lastInterruption = nil
         holdsDeviceLease = true
         activeLeaseID = UUID()
+        pauseInterruptionID = nil
+        pauseClosureFailure = nil
         startClock()
         do {
             try await starter?(kind)
@@ -419,10 +452,24 @@ public final class SessionCoordinator {
     ///
     /// 按 id 合而不是按会话合：暂停期间若又发生故障，会话里有两条未闭合区间，
     /// 按会话合会把暂停的那段一起算到故障恢复的时刻（见 `SessionStore.closeInterruption(id:)`）。
-    public func resumeUserPaused() async {
-        guard let id = pauseInterruptionID else { return }
-        try? await store.closeInterruption(id: id)
-        pauseInterruptionID = nil
+    @discardableResult
+    public func resumeUserPaused() async -> Bool {
+        guard let id = pauseInterruptionID else { return true }
+        do {
+            try await closePause(id: id)
+            return true
+        } catch {
+            pauseClosureFailure = error.localizedDescription
+            return false
+        }
+    }
+
+    private func closePause(id: String) async throws {
+        try await store.closeInterruption(id: id)
+        if pauseInterruptionID == id {
+            pauseInterruptionID = nil
+            pauseClosureFailure = nil
+        }
     }
 
     /// 收声停止。设备在此**立刻释放**；会议接下来走 `processing`（纪要 / 分人在收尾）。
@@ -445,60 +492,53 @@ public final class SessionCoordinator {
     }
 
     /// 封存并交还。`activeSessionID` 为空说明还没落在库里，此时只清占用。
-    public func finalize(reason: SessionEndReason) async {
-        // 先停采集、再封存：倒过来的话，收尾期间到达的最后一句会写进已归档的记录
-        // （库里那一条已经不是 `recording`，行却还在往里加）。
-        if let kind = occupancy?.kind {
-            await stopper?(kind)
+    @discardableResult
+    public func finalize(reason: SessionEndReason) async -> SessionSealResult {
+        guard let leaseID = activeLeaseID, let kind = occupancy?.kind else {
+            return .skipped(recordID: activeSessionID)
         }
-        // 暂停中直接结束：这一段停记到收尾这一刻为止。必须**在封存之前**合上，
-        // 否则归档包里会带一条 `resumed_at` 为空的暂停记录，事后读出来像是
-        //「录到一半没恢复」（MC-16）。
-        await resumeUserPaused()
-        if let activeSessionID {
-            try? await store.finalizeSession(id: activeSessionID, endReason: reason)
+        if let task = finalizeTasks[leaseID] { return await task.value }
+        let recordID = activeSessionID
+        let pauseID = pauseInterruptionID
+        let endedAt = Date()
+        let stop = stopper
+        let task = Task { @MainActor in
+            // 保存 owner 必须先完成；它若 abandonOccupancy（例如输入未保存），
+            // 就撤销了归档许可。旧 stopper 不能转而封存一个新租约的记录。
+            await stop?(kind)
+            guard self.owns(leaseID: leaseID, recordID: recordID) else {
+                return SessionSealResult.skipped(recordID: recordID)
+            }
+            let result: SessionSealResult
+            if let recordID {
+                result = await self.seal(
+                    id: recordID, reason: reason, endedAt: endedAt,
+                    pauseID: pauseID, requiresSourceSnapshot: kind == .meeting
+                )
+            } else {
+                result = .skipped(recordID: nil)
+            }
+            self.releaseOwnedOccupancy(leaseID: leaseID, recordID: recordID)
+            return result
         }
-        // 先把库写完，再让页面知道"有一段刚刚封存了"（`lastFinalizedSessionID` 的注解）。
-        if let finalized = activeSessionID {
-            lastFinalizedSessionID = finalized
-        }
-        releaseDevices()
-        stopClock()
-        activeSessionID = nil
-        occupancy = nil
-        activeLeaseID = nil
-        startedAt = nil
-        elapsed = 0
-        lineWatermark = 0
-        lastInterruption = nil
-        phase = .idle
+        finalizeTasks[leaseID] = task
+        let result = await task.value
+        finalizeTasks[leaseID] = nil
+        return result
     }
 
     /// 会议封存结果上报（MC-17、MC-20）：封存必须返回明确结果，不吞失败。
     /// 成功要求落库且读回为 archived；失败保留调用方的重试/复制出口。
     @discardableResult
     public func sealMeeting(id: String, reason: SessionEndReason = .user) async -> SessionSealResult {
-        do {
-            try await store.finalizeSession(id: id, endReason: reason)
-            guard let record = try await store.session(id: id), record.state == .archived else {
-                return .failed(recordID: id, reason: "封存后读回状态不是已归档")
-            }
-            // MA-03 收尾：来源快照冻结成功，才算"封存"成功——排纪要这一步依赖它。
-            // 这一步失败时**转录已经归档**，所以原因里必须说清文字记录没丢，
-            // 否则用户会以为整场都没存上，白白重录一遍。
-            do {
-                try await store.sealMeetingSource(sessionID: id)
-            } catch {
-                return .failed(
-                    recordID: id,
-                    reason: "文字记录已经归档，但来源快照没有封存成功：\(error.localizedDescription)"
-                )
-            }
-            lastFinalizedSessionID = id
-            return .sealed(recordID: id)
-        } catch {
-            return .failed(recordID: id, reason: error.localizedDescription)
-        }
+        let leaseID = activeSessionID == id ? activeLeaseID : nil
+        let result = await seal(
+            id: id, reason: reason, endedAt: Date(),
+            pauseID: activeSessionID == id ? pauseInterruptionID : nil,
+            requiresSourceSnapshot: true
+        )
+        if let leaseID { releaseOwnedOccupancy(leaseID: leaseID, recordID: id) }
+        return result
     }
 
     /// 按**明确的 sessionID** 封存一条记录，且不碰当前占用。
@@ -506,9 +546,9 @@ public final class SessionCoordinator {
     /// 建档是启动流程里最后一个 await：它落库之后启动可能已经被取消。
     /// 那时不能删记录（用户的操作真的发生过），也不该把它挂到新会话上，
     /// 所以只按它自己的 ID 收口。
-    public func sealSession(id: String, reason: SessionEndReason = .user) async {
-        guard activeSessionID != id else { return }
-        try? await store.finalizeSession(id: id, endReason: reason)
+    @discardableResult
+    public func sealSession(id: String, reason: SessionEndReason = .user) async -> SessionSealResult {
+        await sealSessionReporting(id: id, reason: reason)
     }
 
     /// VA-03 封存结果：成功且读回 archived 才算保存成功。
@@ -526,17 +566,115 @@ public final class SessionCoordinator {
     public func sealSessionReporting(id: String, reason: SessionEndReason = .user) async -> SessionSealResult {
         // activeSessionID == id 表示该记录仍在占用中：由 finalize 路径收口，此处跳过。
         if activeSessionID == id { return .skipped(recordID: id) }
-        do {
-            try await store.finalizeSession(id: id, endReason: reason)
-            // 读回验证：成功且为 archived 才发布成功 ID。
-            if let record = try await store.session(id: id), record.state == .archived {
-                lastFinalizedSessionID = id
-                return .sealed(recordID: id)
+        return await seal(id: id, reason: reason, endedAt: Date())
+    }
+
+    /// 只重试已冻结的命令，不创记录、不改第一次结束时间/原因、不碰当前租约。
+    @discardableResult
+    public func retryPendingSeal(id: String) async -> SessionSealResult {
+        guard let command = pendingSeals[id] else { return .skipped(recordID: id) }
+        guard activeSessionID != id else { return .skipped(recordID: id) }
+        return await seal(
+            id: id, reason: command.endReason, endedAt: command.endedAt,
+            pauseID: command.pauseID, requiresSourceSnapshot: command.requiresSourceSnapshot
+        )
+    }
+
+    private func seal(
+        id: String, reason: SessionEndReason, endedAt: Date,
+        pauseID: String? = nil, requiresSourceSnapshot: Bool = false
+    ) async -> SessionSealResult {
+        if let flight = sealTasks[id] {
+            // 并发的会议请求提升仍在执行的命令；基础归档不能代替来源封存。
+            let needsFollowup = requiresSourceSnapshot
+                && !flight.requiresSourceSnapshot && pendingSeals[id] == nil
+            if requiresSourceSnapshot, pendingSeals[id] != nil {
+                pendingSeals[id]?.requiresSourceSnapshot = true
+                sealTasks[id]?.requiresSourceSnapshot = true
             }
-            return .failed(recordID: id, reason: "封存后读回状态不是已归档")
-        } catch {
-            return .failed(recordID: id, reason: error.localizedDescription)
+            let result = await flight.task.value
+            if needsFollowup, case .sealed = result {
+                if sealTasks[id]?.token == flight.token { sealTasks[id] = nil }
+                return await seal(
+                    id: id, reason: reason, endedAt: endedAt, requiresSourceSnapshot: true
+                )
+            }
+            return result
         }
+        var command = pendingSeals[id] ?? PendingSessionSeal(
+            recordID: id, endReason: reason, endedAt: endedAt,
+            stage: pauseID == nil ? .archive : .pauseClosure,
+            failureReason: nil, pauseID: pauseID, requiresSourceSnapshot: requiresSourceSnapshot
+        )
+        command.requiresSourceSnapshot = command.requiresSourceSnapshot || requiresSourceSnapshot
+        pendingSeals[id] = command
+        let token = UUID()
+        let task = Task { @MainActor in await self.performSeal(command) }
+        sealTasks[id] = SealFlight(
+            token: token, task: task, requiresSourceSnapshot: command.requiresSourceSnapshot
+        )
+        let result = await task.value
+        if sealTasks[id]?.token == token { sealTasks[id] = nil }
+        return result
+    }
+
+    private func performSeal(_ initial: PendingSessionSeal) async -> SessionSealResult {
+        var command = initial
+        let id = command.recordID
+        do {
+            if command.stage == .pauseClosure, let pauseID = command.pauseID {
+                try await closePause(id: pauseID)
+                command.pauseID = nil
+                command.stage = .archive
+                pendingSeals[id] = command
+            }
+            if command.stage == .archive {
+                let record = try await archiveWriter.finalizeSession(
+                    id: id, endReason: command.endReason, endedAt: command.endedAt
+                )
+                guard record.id == id, record.state == .archived,
+                      record.endedAt != nil, record.endReason != nil else {
+                    throw SessionStoreError.statementFailed("封存后读回状态不是同一条已归档记录")
+                }
+                command.requiresSourceSnapshot = command.requiresSourceSnapshot
+                    || pendingSeals[id]?.requiresSourceSnapshot == true
+                    || record.kind == .meeting
+                if command.requiresSourceSnapshot {
+                    sealTasks[id]?.requiresSourceSnapshot = true
+                    command.stage = .sourceSnapshot
+                    pendingSeals[id] = command
+                }
+            }
+            if command.stage == .sourceSnapshot {
+                _ = try await store.sealMeetingSource(sessionID: id)
+            }
+            pendingSeals[id] = nil
+            lastFinalizedSessionID = id
+            return .sealed(recordID: id)
+        } catch {
+            let reason: String
+            switch command.stage {
+            case .pauseClosure:
+                reason = "暂停区间尚未结束，记录未归档：\(error.localizedDescription)"
+                pauseClosureFailure = reason
+            case .archive:
+                reason = error.localizedDescription
+            case .sourceSnapshot:
+                reason = "文字记录已经归档，但来源快照没有封存成功：\(error.localizedDescription)"
+            }
+            command.failureReason = reason
+            pendingSeals[id] = command
+            return .failed(recordID: id, reason: reason)
+        }
+    }
+
+    private func owns(leaseID: UUID, recordID: String?) -> Bool {
+        activeLeaseID == leaseID && activeSessionID == recordID
+    }
+
+    private func releaseOwnedOccupancy(leaseID: UUID, recordID: String?) {
+        guard owns(leaseID: leaseID, recordID: recordID) else { return }
+        abandonOccupancy()
     }
 
     /// 助手专属的目标结束（VA-01 / A01/A02/A18）。
@@ -550,17 +688,13 @@ public final class SessionCoordinator {
         // 纯文字：无占用路径。
         if occupancy == nil {
             guard let recordID = target.recordID else { return .noConversation }
-            try? await store.finalizeSession(id: recordID, endReason: reason)
-            lastFinalizedSessionID = recordID
-            return .ended(recordID: recordID)
+            return Self.assistantEndResult(await sealSessionReporting(id: recordID, reason: reason))
         }
         // 文字目标（无 lease 身份）：只封自己的记录，不碰任何占用。
         // A02：会议/其他功能占用设备时，文字结束不得改占用/phase/记录/stopper。
         if target.leaseID == nil, target.recordID != nil, target.recordID != activeSessionID {
             let recordID = target.recordID!
-            try? await store.finalizeSession(id: recordID, endReason: reason)
-            lastFinalizedSessionID = recordID
-            return .ended(recordID: recordID)
+            return Self.assistantEndResult(await sealSessionReporting(id: recordID, reason: reason))
         }
         // 有占用：只允许助手自己的目标结束。
         guard occupancy?.kind == .assistant else { return .mismatch }
@@ -574,16 +708,22 @@ public final class SessionCoordinator {
         }
         let leaseAtEntry = activeLeaseID
         let recordAtEntry = target.recordID ?? activeSessionID
-        await finalize(reason: reason)
+        let result = await finalize(reason: reason)
         // finalize 期间占用若被新会话接管（理论上 finalize 串行持有占用，
         // 此处为防御性复核），只完成旧目标记录，不清新占用。
         if leaseAtEntry != nil, activeLeaseID != nil, activeLeaseID != leaseAtEntry {
-            if let recordAtEntry {
-                try? await store.finalizeSession(id: recordAtEntry, endReason: reason)
-            }
             return .superseded
         }
-        return .ended(recordID: recordAtEntry)
+        if recordAtEntry == nil, case .skipped = result { return .ended(recordID: nil) }
+        return Self.assistantEndResult(result)
+    }
+
+    private static func assistantEndResult(_ result: SessionSealResult) -> AssistantEndResult {
+        switch result {
+        case .sealed(let id): .ended(recordID: id)
+        case .failed(let id, let reason): .failed(recordID: id, reason: reason)
+        case .skipped: .noConversation
+        }
     }
 
     private func releaseDevices() {
@@ -1307,6 +1447,7 @@ public final class SessionCoordinator {
         elapsed = 0
         lineWatermark = 0
         lastInterruption = nil
+        pauseInterruptionID = nil
         phase = .idle
     }
 

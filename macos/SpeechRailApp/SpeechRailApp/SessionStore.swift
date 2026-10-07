@@ -46,7 +46,14 @@ private final class SQLiteHandle: @unchecked Sendable {
     }
 }
 
-public actor SessionStore {
+/// 归档确认边界：返回值必须是提交后读回的同一条 archived 记录。
+public protocol SessionArchiveWriting: Sendable {
+    func finalizeSession(
+        id: String, endReason: SessionEndReason, endedAt: Date
+    ) async throws -> SessionRecord
+}
+
+public actor SessionStore: SessionArchiveWriting {
     public static let fileName = "sessions.sqlite3"
     /// 当前 schema 版本。`session` 表建表时就是 §15.2 + R1 + R2 合并后的形状，所以起点是 1。
     /// v2（MA-05）：新增会议知识文档、转录来源修订、来源快照三张表；
@@ -621,15 +628,27 @@ public actor SessionStore {
         }
     }
 
-    /// 封存：`archived` + `ended_at` + `end_reason`。空 reason 视为 `user`（§15.6 R1）。
-    public func finalizeSession(id: String, endReason: SessionEndReason = .user, endedAt: Date = Date()) throws {
-        let sql = "UPDATE session SET state = 'archived', ended_at = ?, end_reason = ? WHERE id = ?;"
+    /// 首次归档写入结束时间与原因；重复确认只读首次提交，不重写历史。
+    /// UPDATE 无异常不构成证明：不存在或读回非 archived 必须失败。
+    @discardableResult
+    public func finalizeSession(
+        id: String, endReason: SessionEndReason = .user, endedAt: Date = Date()
+    ) throws -> SessionRecord {
+        let sql = """
+        UPDATE session SET state = 'archived', ended_at = ?, end_reason = ?
+        WHERE id = ? AND state != 'archived';
+        """
         try withStatement(sql) { statement in
             bind(statement, 1, endedAt.timeIntervalSince1970)
             bind(statement, 2, endReason.rawValue)
             bind(statement, 3, id)
             try step(statement)
         }
+        guard let record = try session(id: id), record.state == .archived,
+              record.endedAt != nil, record.endReason != nil else {
+            throw SessionStoreError.statementFailed("封存目标不存在或归档状态未确认")
+        }
+        return record
     }
 
     /// 助手单轮回复的**幂等收尾**（D08 / 方案 S4 第 3 条）。
