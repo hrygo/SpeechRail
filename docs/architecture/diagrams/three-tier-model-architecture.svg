@@ -62,7 +62,7 @@
   <rect class="top-box" x="60" y="125" width="310" height="120" rx="16"/>
   <text class="box-title" x="85" y="164">Clients / Agents</text>
   <text class="box-copy" x="85" y="193">OpenAI SDK · Sona · 本地 App</text>
-  <text class="box-copy-small" x="85" y="220">REST · current-only WebSocket</text>
+  <text class="box-copy-small" x="85" y="220">REST · Realtime WebSocket</text>
 
   <rect class="top-box" x="465" y="125" width="420" height="120" rx="16"/>
   <text class="box-title" x="490" y="164">FastAPI Gateway</text>

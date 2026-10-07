@@ -78,7 +78,7 @@ caller owns all of that; SpeechRail delivers speech facts and renders audio.
 | `/v1/voice-designs*`, `/v1/voices/clone*` | Voice creation and cloning | Design a voice from a description, preview it, clone from a reference recording, validate, and publish to the voice library. |
 | `/v1/speechrail/voices*`, `/v1/speechrail/pronunciation-sets*` | Voice library and pronunciation | Immutable voice revisions with rollback and revocation; versioned pronunciation sets for synthesis. |
 | `/v1/jobs*` | Durable async jobs | Owner-scoped job records for long transcriptions. You pass opaque references; the service never stores raw audio or transcripts. |
-| `WS /v1/realtime` | Realtime ASR/TTS | current-only stateless Speech Plane (contract `4.1.0`): transcription sessions, server VAD facts, word-level alignment and diarization as independent opt-ins, and explicit `speechrail.tts.*` render control. |
+| `WS /v1/realtime` | Realtime ASR/TTS | Stateless Speech Plane: transcription sessions, server VAD facts, word-level alignment and diarization as independent opt-ins, and explicit `speechrail.tts.*` render control. Protocol rules and version are defined in the [Realtime contract](contracts/realtime-openai.md). |
 
 The full machine-readable contract is
 [`contracts/openapi.yaml`](contracts/openapi.yaml); the WebSocket contract is
@@ -275,11 +275,9 @@ speech.stream_to_file("speech-output.wav")
 ```
 
 Realtime clients connect to `ws://127.0.0.1:8201/v1/realtime` and follow
-[`contracts/realtime-openai.md`](contracts/realtime-openai.md). The wire is
-current-only: `delta` partials are append-only, the optional `snapshot`
-extension replaces an item's text by monotonic `revision`, and both
-`partial_mode` and `chunk_duration_ms` must be confirmed by
-`transcription_session.updated` before the first PCM frame. SDK, cURL,
+[`contracts/realtime-openai.md`](contracts/realtime-openai.md) for the supported
+ASR/TTS events and fields. Clients own LLM orchestration and playback; undeclared
+events, fields, and compatibility aliases are rejected. SDK, cURL,
 Open-WebUI, LiveKit/Pipecat, and OpenClaw examples live in
 [`docs/users/integrations.md`](docs/users/integrations.md).
 

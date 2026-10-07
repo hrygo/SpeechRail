@@ -1,9 +1,13 @@
-# SpeechRail Realtime current-only 契约
+# SpeechRail Realtime ASR/TTS 协议契约
 
 > 契约版本：`6.3.1`；生效日期：2026-10-07。唯一机器 schema 是
 > [`realtime-events.schema.json`](realtime-events.schema.json)，字段责任表是
-> [`realtime-field-matrix.json`](realtime-field-matrix.json)。本版本直接切换，不提供旧事件、
-> 旧字段、旧 profile alias 或 `/v2` 兼容层。
+> [`realtime-field-matrix.json`](realtime-field-matrix.json)。
+
+本文定义 SpeechRail `/v1/realtime` 的 ASR/TTS 协议，包括采用的 OpenAI Realtime 事件子集与
+`speechrail.*` 扩展。支持的事件与字段以本契约及配套 schema 为准；未列出的事件、字段和
+兼容别名不受支持。服务不提供旧事件翻译、旧字段或 profile alias、双协议分支或 `/v2` 兼容层。
+契约版本标识具体协议规则；服务端与客户端须遵循相同规则，不进行隐式协议降级。
 
 ## 1. 责任边界
 
@@ -111,15 +115,15 @@ query 不得携带 key。每连接有独立 session、epoch、sequence 与临时
 
 `speechrail.tts.start` 还接受 `voice_revision`、`expected_model_revision`、`speed` 和仅能收紧的
 `limits`。未知字段不是 no-op，返回稳定错误。`speechrail.tts.create`、
-`transcription_session.update` 和 conversation/response 事件均已移除。
+`transcription_session.update` 和 conversation/response 客户端事件均不受支持。
 
 TTS 身份只属于本次 start 请求：`voice` 必填，两个 revision pin 从同一 effective capability
 snapshot 的对应 voice 读取。系统音色校验 CustomVoice 制品，克隆音色校验 Base 制品；
 `voice_revision_conflict` / `model_revision_conflict` 在开流前拒绝该次请求。每次请求独立校验，
 不继承 session 或上一 utterance 的音色与模型 pin；省略 pin 时使用该音色当前版本。
-旧 `session.speechrail.expected_tts_revision`（包括 `audio.input.speechrail` 中的同名字段）
-已移除，返回 `unsupported_operation`，失败不部分启用 TTS。客户端须同步更新，把 TTS pin
-移至带有音色身份的 start 事件。
+`session.speechrail.expected_tts_revision`（包括 `audio.input.speechrail` 中的同名字段）
+不受支持，返回 `unsupported_operation`，失败不部分启用 TTS。TTS pin 只能由带有音色身份的
+`speechrail.tts.start` 事件携带。
 
 ## 5. 服务端事件
 
@@ -179,7 +183,7 @@ clear 取消。此后对空缓冲区执行一次 `commit` 会产生空 `complete
 
 空输入、已经自动提交的输入和重复 commit 都返回本次 `event_id` 的回执，**不重复文本 final**。
 相同 ID 的重试可重复回执；调用方以关联 ID 幂等消费。缺省或 `request_receipt:false` 不发新增
-回执，旧客户端 wire 保持不变。未知扩展字段、非布尔值或请求回执却没有 ID 会拒绝。
+回执。未知扩展字段、非布尔值或请求回执却没有 ID 会拒绝。
 
 仅 worker EOF、commit 超时/取消不构成完成证据；没有文本终态的 EOF 返回 `backend_error`。
 失败后同一代输入的重复屏障仍拒绝，直到明确 clear 或新输入开始下一代，不能通过重试伪造回执。
@@ -190,8 +194,8 @@ WebSocket 断开会取消处理并释放资源，未完成屏障不发回执。�
 同一次显式提交覆盖的自动切段若超时或缺少完成证据，不能被后段成功或重复提交掩盖；
 新输入开始下一次提交范围后可恢复。
 
-新 macOS 客户端始终请求此屏障。旧服务没有该扩展时，客户端有界超时并关闭连接，**不发送
-clear**；不能以旧转写终态替代回执。这是安全失败，并不声称新客户端能在旧服务上成功收尾。
+macOS 客户端始终请求此屏障。服务没有该扩展时，客户端有界超时并关闭连接，**不发送
+clear**；不能以转写终态替代回执。缺少完成屏障时，客户端不能宣称输入已可靠收尾。
 
 hypothesis 可修订，使用 `speechrail.transcription.hypothesis`：
 
@@ -339,8 +343,8 @@ backend 接受 append 后独立发送，不等待输出窗口；不能用消费�
 不等待最终消费确认：调用方继续排空本地音频，已知退役 request 的迟到 ACK 被忽略，未知
 request 返回 `tts_not_active`，绝不归还到新 request。
 
-这是必需的当前契约：缺少 `audio_window_bytes` 的 start 被拒绝，不提供无流控旧模式或 alias。
-服务与直接 WebSocket 客户端须同步更新；REST/MCP 一次性合成不受此次事件变更影响。
+`audio_window_bytes` 是 start 的必需字段：缺少时请求被拒绝，不提供无流控模式或 alias。
+服务与直接 WebSocket 客户端须遵循相同的消费窗口规则；REST/MCP 一次性合成不使用这些事件。
 
 本节的三条时序是调用方可以依赖的契约，不只是当前实现细节：
 

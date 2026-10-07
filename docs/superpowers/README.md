@@ -1,6 +1,7 @@
 # Superpowers 过程目录
 
-本目录保存近期设计规格与实施计划。当前 Speech Plane 契约仍以 2026-09-20 的无状态 Speech Plane 方案为准；
+本目录保存近期设计规格与实施计划。公共协议以 [Realtime ASR/TTS 契约](../../contracts/realtime-openai.md)为准，
+无状态 Speech Plane 的决策背景见 [ADR-0019](../decisions/0019-stateless-speech-plane-caller-orchestration.md)；
 旧的 preset / 四档体系（含 `extreme`）已由 [Issue #95 目标架构](plans/2026-09-25-issue-95-asr-tts-target-architecture-luna-guide.md)
 移除，档位只选择 ASR / TTS 两项独立 spec（`fast` / `quality` / `reference`）。标记为
 `superseded` 的旧方案只用于历史追溯，不得作为当前契约、兼容策略或实施入口。
@@ -13,7 +14,7 @@
 - [TTS 分段边界稳定性设计](specs/2026-09-05-tts-segment-boundary-stability-design.md)
 - [GitHub Actions 现代化设计](specs/2026-09-06-github-actions-modernization-design.md)
 - [服务运维效率设计](specs/2026-09-07-service-operator-efficiency-design.md)
-- [讲话人分离整洁架构](specs/2026-09-08-diarization-clean-architecture-design.md)（`accepted`；Realtime wire 以 current-only 契约为准）
+- [讲话人分离整洁架构](specs/2026-09-08-diarization-clean-architecture-design.md)（`accepted`；Realtime wire 以 Realtime ASR/TTS 契约为准）
 - [讲话人分离 D1 选择证据](specs/2026-09-08-diarization-d1-selection-evidence.md)
 - [Clone frozen-gain 边界修复候选](specs/2026-09-12-clone-loudness-boundaries.md)（`draft`）
 - [无状态 Speech Plane 与调用方编排设计](specs/2026-09-20-stateless-speech-plane-caller-orchestration-design.md)（`approved`）
@@ -44,7 +45,7 @@
 - [macOS App 音色 revision 一致性与文档一致性收敛](plans/2026-09-20-macos-app-voice-revision-consistency.md)（`completed`）
 - [Extreme BF16 候选档实施计划](plans/2026-09-23-extreme-tier-bf16.md)（`superseded`；preset/四档体系已被目标架构移除，仅历史追溯）
 - [Issue #95 ASR/TTS 目标架构与验收指导](plans/2026-09-25-issue-95-asr-tts-target-architecture-luna-guide.md)（`active`；本轮实施与验收）
-- [macOS App 契约对齐旧计划](plans/2026-09-20-macos-app-contract-alignment-plan.md)（`superseded`；已被 current-only 方案取代）
+- [macOS App 契约对齐旧计划](plans/2026-09-20-macos-app-contract-alignment-plan.md)（`superseded`；已被无状态 Speech Plane 方案取代）
 
 ## 当前正式架构文档
 

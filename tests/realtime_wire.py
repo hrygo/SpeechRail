@@ -1,4 +1,4 @@
-"""Shared builders for the single current-only Realtime wire.
+"""Shared builders for the SpeechRail Realtime ASR/TTS protocol.
 
 The runtime has exactly one Realtime vocabulary: ``session.update`` with the
 nested ``session.audio.input`` configuration and the namespaced

@@ -1,4 +1,4 @@
-"""Current-only Realtime schema and shared cross-language fixtures.
+"""Realtime ASR/TTS schema and shared cross-language fixtures.
 
 The Python service and Swift clients consume the same fixture manifest.  The
 schema is intentionally strict: removed events and unknown fields fail instead

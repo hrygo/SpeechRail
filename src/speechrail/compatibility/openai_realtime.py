@@ -1,6 +1,6 @@
 """OpenAI Realtime WebSocket wire adapter for SpeechRail's ASR/TTS only.
 
-This module builds and validates the single current-only Realtime event
+This module builds and validates the Realtime ASR/TTS event
 envelope described by ``contracts/realtime-openai.md`` and
 ``contracts/realtime-events.schema.json``.  It deliberately supports only the
 ASR/TTS subset of the protocol: one ``session.update`` configuration event,
@@ -193,7 +193,7 @@ class TTSFinishTextRequest:
 
 
 def parse_client_event(event: dict[str, Any]) -> ParsedClientEvent:
-    """Classify the one current-only client event vocabulary.
+    """Classify the client events declared by the Realtime ASR/TTS contract.
 
     This is deliberately strict: a removed event is not translated into the
     current caller-owned command and an unknown event is not silently ignored.

@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://speechrail.local/contracts/realtime-events.schema.json",
-  "title": "SpeechRail current OpenAI Realtime ASR/TTS subset",
-  "description": "Strict current-only wire schema. Legacy events and fields are rejected without aliases.",
+  "title": "SpeechRail Realtime ASR/TTS protocol",
+  "description": "Wire schema for SpeechRail's OpenAI Realtime ASR/TTS subset and speechrail.* extensions. Only the declared events and fields are supported; undeclared events, fields, and compatibility aliases are rejected.",
   "oneOf": [
     {
       "$ref": "#/$defs/client_session_update"

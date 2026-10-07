@@ -8,7 +8,7 @@ date: 2026-09-27
 
 # 🔌 SpeechRail 客户端与 SDK 接入指南
 
-> SpeechRail 提供文档所列的 OpenAI-compatible REST 与 current-only Realtime WebSocket 语音子集。Realtime 是无状态 Speech Plane：客户端拥有 LLM、历史、工具、播放队列和 barge-in，服务只交付 ASR/VAD/匿名分人事实与显式 TTS render；未列出的 OpenAI 功能不在本服务承诺范围内。
+> SpeechRail 提供文档所列的 OpenAI-compatible REST 与 Realtime WebSocket 语音子集及 `speechrail.*` 扩展。Realtime 是无状态 Speech Plane：客户端拥有 LLM、历史、工具、播放队列和 barge-in，服务只交付 ASR/VAD/匿名分人事实与显式 TTS render；未列出的 OpenAI 功能不在本服务承诺范围内。
 
 ---
 

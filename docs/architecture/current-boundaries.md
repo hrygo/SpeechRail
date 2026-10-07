@@ -24,12 +24,12 @@ date: 2026-09-27
 10. Qwen3-ASR 没有原生词级时间戳：请求 `timestamp_granularities` 时，vendor 会尝试解析隐式的 `Qwen/Qwen3-ForcedAligner` 仓库，在受管离线环境下无法解析。因此词级时间戳由独立的固定文本 aligner 在冻结转写上计算，不来自 ASR 解码；`diarized_json` 的分段来自分人，不请求时间轴。未显式供给 aligner 时，需要时间戳的调用按有效契约失败，而不是伪造位置。分人由任务 opt-in 触发，只有显式供给 Sortformer 与 aligner 时才按当前 readiness 声明。
 11. ASR∥TTS 重计算重叠是可配置策略（ADR-0016）：`SPEECHRAIL_ALLOW_HEAVY_OVERLAP=auto`（默认）按声明常驻字节与 `max(4 GiB, host_memory // 2)` 预算 fail-closed 判定——任一启用组件未声明非零峰或总量超预算即串行；`true`/`false` 为运维强制。各 TTS spec 的 `custom_voice` / `base` 是独立 capability lane，`voice_design` 不与档位绑定：不同 lane 可并发，同一 lane 串行；未声明的 TTS lane 仍受单 worker 约束。ASR∥ASR 仍返回 `backend_busy`，不复制进程。现存 A/B 只覆盖记录中声明的组件组合，不能直接作为其他组合或双 TTS 峰值证据。
 12. Realtime 并发会话的源码默认值由 `Settings.realtime_max_sessions` 唯一定义，当前为 **3**（环境变量 `SPEECHRAIL_REALTIME_MAX_SESSIONS` 可覆盖，校验范围 1–8）。历史文档中的默认值 2 已废弃；能力/运行时判断不得再复制第二套默认常量。
-13. Realtime 已切换为 current-only 无状态 Speech Plane：客户端只使用 `session.update`、音频 buffer 事件、`speechrail.tts.start/append_text/finish_text/cancel` 和 diarization barrier。服务端只交付 ASR/VAD/匿名分人事实与显式 TTS 音频，不拥有 LLM、conversation history、memory、tools、播放或 barge-in 策略；新 hypothesis 不自动取消 TTS。旧事件和旧字段明确拒绝，不做 alias、双 wire profile 或 `/v2` 迁移层。
+13. Realtime 是无状态 ASR/TTS Speech Plane：客户端只使用契约声明的 `session.update`、音频 buffer 事件、`speechrail.tts.*` 和 diarization barrier。服务端只交付 ASR/VAD/匿名分人事实与显式 TTS 音频，不拥有 LLM、conversation history、memory、tools、播放或 barge-in 策略；hypothesis 不自动取消 TTS。旧事件和旧字段明确拒绝，不做 alias、双 wire profile 或 `/v2` 兼容层。
 14. `reference` 使用 BF16 ASR、CustomVoice、Base 与 VoiceDesign；按用户裁定继承同族 8-bit 档位已通过的门禁证据，未在本机逐项复测。代码、准备制品和静态契约已完成；本轮不把继承证据写成质量排名、资源峰值或延迟报告。
 
 ## 明确限制
 
-- `/v1/realtime` 是 current-only 的 ASR/TTS 子集；不伪装 LLM 对话、工具调用、历史或持续
+- `/v1/realtime` 支持契约声明的 ASR/TTS 子集与 `speechrail.*` 扩展；不伪装 LLM 对话、工具调用、历史或持续
   会话语义。分人是 `session.speechrail.diarization.enabled` opt-in 扩展；文件匿名分人使用
   `gpt-4o-transcribe-diarize` / `diarized_json`。调用方必须自己实现 LLM、历史、工具、播放
   和 barge-in 编排，TTS 由调用方显式的 `speechrail.tts.start`/`append_text`/`finish_text` 驱动。
@@ -78,7 +78,7 @@ date: 2026-09-27
 
 ## 发布与端口切换门
 
-REST 自动化门禁、真实 Qwen3 ASR/TTS smoke、目标客户端真实 smoke、current-only Realtime
+REST 自动化门禁、真实 Qwen3 ASR/TTS smoke、目标客户端真实 smoke、Realtime ASR/TTS
 所需契约实现、回滚演练和安全审计全部通过后，SpeechRail 才作为生产默认。当前 `8201` 是
 独立服务端口；sona 的旧 TTS bridge 已退役，若需回滚只能恢复已验证版本目录与配置，
 不能依赖一个仍在运行的旧 bridge 进程。

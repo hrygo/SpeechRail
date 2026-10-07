@@ -8,7 +8,7 @@ date: 2026-09-26
 
 # 📋 SpeechRail 产品范围与职责边界
 
-> **核心定位**：SpeechRail 是一项本地优先的共享 ASR/TTS 运行时服务，并按需提供匿名讲话人分离。它负责管理仓库外部模型运行时，向多个本机应用提供稳定、高性能的 REST 语音子集与 current-only Realtime Speech Plane；分人是任务级 opt-in，能力由显式供给与运行时 readiness 决定，完整助手由调用方编排。
+> **核心定位**：SpeechRail 是一项本地优先的共享 ASR/TTS 运行时服务，并按需提供匿名讲话人分离。它负责管理仓库外部模型运行时，向多个本机应用提供稳定、高性能的 REST 语音子集与 Realtime ASR/TTS Speech Plane；分人是任务级 opt-in，能力由显式供给与运行时 readiness 决定，完整助手由调用方编排。
 
 ---
 
@@ -50,10 +50,10 @@ graph TD
 | 客户端应用 | 接入场景与模式 | 当前状态 | 验证证据 |
 |---|---|---|---|
 | **QwenPaw** | 桌面听写：通过 `whisper_api` 发送短音频录音 | 契约可用 | 真实客户端质量与长时行为需单独验收 |
-| **OpenAI 官方 SDK** | Python / Node.js SDK 直连文档声明的 REST 语音子集；Realtime 使用 current-only WebSocket wire | 🟡 契约就绪 | Python 契约测试与 Native 纯测试通过；真实模型/音频质量另行验收 |
+| **OpenAI 官方 SDK** | Python / Node.js SDK 直连文档声明的 REST 语音子集；Realtime 使用契约声明的 WebSocket ASR/TTS 协议 | 🟡 契约就绪 | Python 契约测试与 Native 纯测试通过；真实模型/音频质量另行验收 |
 | **Sona 会议助理** | 实时全双工会议字幕与语音助手合成；可选分人扩展按服务端 capability 广播启用 | 🟡 契约就绪、能力依赖 | `/v1/realtime` 端点接入与协议回归测试通过；连续 native 分人另需独立 gate |
 | **Hermes Agent** | 桌面智能体：专用 STT 接口接入 | 🟢 文档就绪 | 独立 STT 路由配置完成，待端到端验收 |
-| **通用 WebSocket 客户端** | 自研客户端对接 `/v1/realtime` current-only wire | 契约可用 | 协议测试通过；真实模型/音频质量需单独验收 |
+| **通用 WebSocket 客户端** | 自研客户端对接 `/v1/realtime` ASR/TTS 协议 | 契约可用 | 协议测试通过；真实模型/音频质量需单独验收 |
 
 ---
 

@@ -1136,7 +1136,7 @@ public actor RealtimeASRClient {
 
     // MARK: - 连接
 
-    /// 建连、声明转写会话、发送 current-only 配置。返回即表示可以开始喂 PCM。
+    /// 建连、声明转写会话、发送契约规定的配置。返回即表示可以开始喂 PCM。
     public func connect() async throws {
         guard transport == nil else { return }
         guard !didClose else { throw Failure.closed(closeCode) }
@@ -1390,7 +1390,7 @@ public actor RealtimeASRClient {
         }
     }
 
-    /// 转写会话的配置。形状对着服务端的 current-only 解析写：
+    /// 转写会话的配置。形状遵循 Realtime ASR/TTS 契约：
     /// `session.audio.input.format` 固定 24 kHz `audio/pcm`，转写模型位于
     /// `session.audio.input.transcription`，SpeechRail 扩展位于 `session.speechrail`。
     ///

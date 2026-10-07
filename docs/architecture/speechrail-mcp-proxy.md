@@ -1,25 +1,26 @@
 ---
-title: "SpeechRail MCP Proxy 架构与终态契约"
+title: "SpeechRail MCP Proxy 架构与接口契约"
 status: active
 audience: "系统架构师、协议设计者、Agent 集成方"
-version: "3.7.1"
+version: "3.7.2"
 date: 2026-10-07
 ---
 
-# SpeechRail MCP Proxy 架构与终态契约
+# SpeechRail MCP Proxy 架构与接口契约
 
-本文档是当前 `speechrail-mcp` 的发布级架构与行为说明。它描述外置 MCP Proxy 如何把本机
-SpeechRail REST 能力交给 Agent，以及如何通过 effective capability snapshot 与 revision pin
-控制音色和模型身份的一致性。
+本文定义 `speechrail-mcp` 的组件职责、REST 适配边界、能力发现、工具接口与错误处理规则。
+外置 MCP Proxy 将本机 SpeechRail 的 REST 能力提供给 Agent，通过 effective capability
+snapshot 与 revision pin 约束音色和模型身份的一致性。
 
-本版将 `effective_capabilities_v1` 定为 MCP 的必需能力发现契约，移除旧服务的
-`/v1/models` + `/v1/voices` discovery fallback，并从 `describe` 结果删除 legacy 诊断字段。
+`effective_capabilities_v1` 是 MCP 的必需能力发现契约。`describe()` 的安全音色目录
+取自该原子快照；`/v1/models`、`/v1/voices` 与 `/health` 的独立观察不能拼接成替代快照。
+能力快照缺失、不可识别或读取失败时，Proxy 返回稳定错误。
 
-当前版本（2026-09-21）补充 Realtime caller-owned transcription 扩展的 MCP 边界：
-MCP 不代理该 WebSocket 能力，直连客户端可协商 mutable snapshot partial 与会话级分块。
-同时保留 durable speech job 的共享参数校验，并明确 output validation
-必须绑定当前 runtime、前处理、generation recipe 与 policy；cold/unknown runtime 不得把历史
-pass 投影为 `production_ready`。
+Realtime 客户端直接连接 `/v1/realtime`，其事件与配置遵循
+[Realtime ASR/TTS 协议契约](../../contracts/realtime-openai.md)。MCP 只代理 REST 请求，
+不持有 WebSocket 或 Realtime 会话。同步请求与 durable speech job 使用共享的参数校验规则；
+output validation 必须绑定请求采用的 runtime、前处理、generation recipe 与 policy，
+cold/unknown runtime 不得把历史 pass 投影为 `production_ready`。
 
 事实来源按以下顺序解释冲突：
 
@@ -53,7 +54,7 @@ Proxy 负责：
 - 在本地文件边界处理音频引用，避免把音频字节放入 Agent context；
 - 将 SpeechRail 的稳定错误 envelope 映射为带 retry/action hint 的 MCP tool error；
 - 将二进制语音写入 Proxy 主机的临时文件，并返回文件路径而不是音频内容；
-- 在支持新契约的服务上，把有效的 voice/model revision pin 转发到 TTS 请求。
+- 将有效的 voice/model revision pin 转发到 TTS 请求。
 
 Proxy 不负责：
 
@@ -64,7 +65,7 @@ Proxy 不负责：
 
 ### 1.2 Realtime 边界
 
-Realtime 仍由调用方直连唯一的 `/v1/realtime`。MCP 只代理无状态 REST 的 ASR、TTS、音色和
+Realtime 由调用方直连唯一的 `/v1/realtime`。MCP 只代理无状态 REST 的 ASR、TTS、音色和
 job 工具；需要实时字幕、语音助手或会议能力的客户端自行拥有连接、会话状态、LLM 编排、播放
 与打断策略。SpeechRail Realtime 只交付 ASR/VAD/匿名分人事实，并处理调用方显式发送的
 `speechrail.tts.start` / `append_text` / `finish_text` / `cancel`。
@@ -159,7 +160,7 @@ sequenceDiagram
 MCP 只用 namespaced capability 中的安全 voice entries 填充结果中的 `voices`，并返回：
 
 - `effective_capabilities`：原子快照原文；
-- `voices`：原子快照的安全投影；不再混入另一次 `/v1/voices` 读取。
+- `voices`：仅投影本次原子快照中的安全音色条目，不混入独立的 `/v1/voices` 读取结果。
 
 能力路径返回 `404`、`405`、未知 schema 或其他服务错误时，MCP 直接返回稳定错误，不拼接
 `/v1/models`、`/v1/voices` 和 `/health` 来伪造能力快照，也不静默降级。
@@ -227,7 +228,7 @@ revision pin 只保证请求绑定到同一个声明版本，不保证跨文本 
 
 ### 4.4 voice revision 管理边界
 
-当前 MCP 工具集不暴露 revision 编辑、历史列表、rollback 或 revoke 工具。需要管理版本时，
+MCP 工具集不暴露 revision 编辑、历史列表、rollback 或 revoke 工具。需要管理版本时，
 调用方直接使用 REST namespaced 管理接口：
 
 | REST 接口 | 作用 |
@@ -237,13 +238,13 @@ revision pin 只保证请求绑定到同一个声明版本，不保证跨文本 
 | `POST /v1/speechrail/voices/{voice_id}/rollback` | CAS 指向未撤销的历史 revision |
 | `POST /v1/speechrail/voices/{voice_id}/revisions/{revision}/revoke` | 撤销指定 revision；不杀已取得的 lease |
 
-MCP `create_voice` / `delete_voice` 保持面向 Agent 的简单生命周期；创建后的 revision 以服务响应
+MCP `create_voice` / `delete_voice` 提供面向 Agent 的音色创建与删除操作；创建后的 revision 以服务响应
 为准，后续一致性控制通过 `describe()` 和 `synthesize` pin 完成。
 
 ## 5. MCP 工具契约
 
-当前工具集为 18 个：既有的请求级语音/任务工具，加上音色详情、VoiceDesign 候选确认/复验/发布、
-输出验收和 job 结果恢复。工具的公开 schema、标题、注解和结构化输出由
+MCP 公开 18 个工具，覆盖能力发现、请求级语音处理、音色管理、VoiceDesign 候选确认/复验/发布、
+输出验收和 job 管理与结果获取。工具的公开 schema、标题、注解和结构化输出由
 `src/speechrail/mcp` 注册；`ctx`、REST client 等内部参数不会出现在 MCP input schema。
 工具集不包含 profile apply/setup/prepare 或同义档位变更能力。VoiceDesign/Base 候选与发布是音色资源操作，不改变活动档位；调用前先核对当前有效能力快照，能力缺失时在 REST mutation 前拒绝。
 
@@ -424,7 +425,7 @@ MCP 提供操作者恢复提示，不自动重启服务或切换档位。
 ### 7.2 隐私边界
 
 - 输入音频、Base64、完整 prompt、完整转写和 embedding 不进入 Proxy 日志或 MCP 结构化输出；
-- `/v1/voices` 的 legacy 原始来源内容经 client allowlist 过滤后才进入 discovery context；
+- `/v1/voices` 的响应经 client allowlist 过滤后才进入对应 resource 的输出；
 - namespaced effective snapshot 不返回 reference path、私有 instruction、参考文本或完整质量对象；
 - 临时音频文件只存于 Proxy 主机，由调用方在交付后删除；
 - 连接错误会剥离 URL userinfo，API key 不写入错误、命令参数或交付文档；
@@ -437,14 +438,15 @@ MCP 提供操作者恢复提示，不自动重启服务或切换档位。
 - Agent 可以从一个有效快照得到同一代目录中的 voice/model 选择；
 - TTS 请求可以在首个 PCM 前拒绝 stale/revoked voice 或 model revision；
 - MCP 成功输出会回显实际采用的 revision，便于调用方记录和审计；
-- legacy daemon 仍可工作，但不会被包装成具有不可变声学身份。
+- 能力发现要求服务提供可识别的 `effective_capabilities_v1` 快照；快照中的身份字段缺失
+  或为 `null` 时，不宣称获得不可变声学身份。
 
 ### 8.2 不能保证什么
 
 - `catalog_revision`、`snapshot_id` 或 `voice_revision` 不等价于人工 MOS、speaker embedding
   相似度、自然度、发音正确率或跨文本稳定性；
 - `available=true` 不等价于 worker warm、队列空闲或质量合格；
-- MCP 当前不请求 REST integrity receipt，也不向 Agent 暴露 receipt 查询句柄；需要完整渲染回执
+- MCP 不请求 REST integrity receipt，也不向 Agent 暴露 receipt 查询句柄；需要完整渲染回执
   时应直接使用 REST `SpeechRail-Receipt-Mode: integrity` 契约；
 - MCP 不会自动切换 profile、启动 worker、下载模型或替用户回滚 voice revision；
 - Realtime 的连接内一致性由直连 WebSocket 的调用方维护，不由 MCP 代管。
