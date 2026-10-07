@@ -237,7 +237,7 @@ def _validated_policy_echo(
         key: get(key, effective)
         for key in (
             "preview_interval_ms", "max_segment_ms", "effective_max_segment_ms",
-            "finalization", "final_deadline_ms",
+            "finalization", "final_deadline_ms", "rollback_tokens",
         )
     }
     # Decode the reply with the same strict integer and enum contract as requests.
@@ -248,6 +248,7 @@ def _validated_policy_echo(
         echoed_policy.preview_interval_ms != policy.preview_interval_ms
         or echoed_policy.max_segment_ms != policy.max_segment_ms
         or echoed_policy.finalization != policy.finalization
+        or echoed_policy.rollback_tokens != policy.rollback_tokens
         or echoed_policy.final_deadline_ms is None
         or (
             policy.final_deadline_ms is not None
@@ -271,6 +272,7 @@ def _observed_policy_echo(configured: object) -> dict[str, object]:
             "max_segment_ms",
             "finalization",
             "final_deadline_ms",
+            "rollback_tokens",
         )
     }
     if any(value is None for value in requested.values()):
@@ -323,6 +325,19 @@ def _run_asr(
             if get("type", event) == kind:
                 return event
 
+    def consume_available() -> None:
+        # Consume while sending paced PCM too. A long meeting can produce more
+        # than 512 previews before commit; retaining all of them in the receiver
+        # queue would end the transport even when the service keeps up.
+        if errors:
+            raise RuntimeError("ASR transport ended before its input barrier")
+        while True:
+            try:
+                received_at, event = events.get_nowait()
+            except queue.Empty:
+                return
+            evidence.consume(event, received_at)
+
     try:
         wait_kind("session.created")
         conn.send(_session_update(language, policy))
@@ -336,11 +351,13 @@ def _run_asr(
         started = time.monotonic()
         for offset in range(0, len(wire), 4800):
             time.sleep(max(0, started + offset / 48000 - time.monotonic()))
+            consume_available()
             conn.send({
                 "type": "input_audio_buffer.append",
                 "audio": base64.b64encode(wire[offset:offset + 4800]).decode(),
             })
         time.sleep(max(0, started + len(wire) / 48000 - time.monotonic()))
+        consume_available()
         committed_at = time.monotonic()
         conn.send({
             "type": "input_audio_buffer.commit", "event_id": "benchmark-final",
