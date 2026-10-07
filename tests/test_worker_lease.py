@@ -71,14 +71,23 @@ def test_evictor_deduplicates_owner_and_preserves_active_asr_mode() -> None:
 
 def test_worker_idle_evictor_closes_idle_worker() -> None:
     async def run() -> None:
-        worker = _FakeWorker()
+        closed = asyncio.Event()
+
+        class ObservedWorker(_FakeWorker):
+            async def close(self) -> None:
+                await super().close()
+                closed.set()
+
+        worker = ObservedWorker()
         worker.started = True
         evictor = WorkerIdleEvictor(
             (worker,), idle_timeout_seconds=0.05, check_interval_seconds=0.02
         )
         await evictor.start()
         try:
-            await asyncio.sleep(0.08)
+            # Parallel CI can awaken the assertion timer before the newly owned
+            # close task runs. Wait for the close outcome rather than a sleep.
+            await asyncio.wait_for(closed.wait(), timeout=2.0)
             assert worker.closed is True
             assert worker.alive is False
         finally:
