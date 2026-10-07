@@ -111,6 +111,24 @@ final class AssistantInputPersistenceQueueTests: XCTestCase {
         XCTAssertFalse(ledger.report(recordID: "overflow", saved: saved).isComplete)
     }
 
+    func testAdmissionResolutionOnlyAcknowledgesTheConfirmedSnapshot() throws {
+        var ledger = TranscriptAdmissionLedger(maximumRecords: 1)
+        ledger.reject(recordID: "record", text: "第一句")
+        let first = try XCTUnwrap(ledger.recovery(recordID: "record"))
+        XCTAssertEqual(ledger.recovery(recordID: "record"), first)
+        ledger.reject(recordID: "record", text: "后来的一句")
+        XCTAssertFalse(ledger.confirmResolution(first), "a newer refusal cannot be dismissed by an older dialog")
+        XCTAssertFalse(ledger.canStartNewRecord)
+        let latest = try XCTUnwrap(ledger.recovery(recordID: "record"))
+        XCTAssertNotEqual(latest.id, first.id)
+        XCTAssertEqual(latest.rejectionCount, 2)
+        XCTAssertTrue(latest.text.contains("后来的一句"))
+        XCTAssertTrue(latest.text.contains("只保留了最近一句"))
+        XCTAssertTrue(ledger.confirmResolution(latest))
+        XCTAssertTrue(ledger.canStartNewRecord)
+        XCTAssertNil(ledger.recovery(recordID: "record"))
+    }
+
     func testAttributionBufferIsBoundedAndRecordGenerationScoped() {
         var buffer = TranscriptAttributionBuffer(maximumItems: 1, maximumUnits: 2)
         let identity = TranscriptPreviewLedger.ItemIdentity(

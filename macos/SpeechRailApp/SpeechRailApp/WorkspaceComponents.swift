@@ -1815,6 +1815,141 @@ public struct StatusBanner: View {
 }
 
 /// 语义化轻量通知栏（NoticeBar）：规范化工作台/表单内部的轻量提示、预检警告与待确认提醒
+struct TranscriptRecoveryMaterialSection: View {
+    let lines: [TranscriptLine]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Text("恢复内容").font(SpeechRailDesignTokens.Typography.captionMedium)
+                Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+                Button("复制恢复内容") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(lines.map(\.text).joined(separator: "\n"), forType: .string)
+                }
+                .speechRailButton(.quiet)
+            }
+            Text("这些内容没有完整定稿，单独保留，不计入纪要、复制全文或默认导出。")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(lines) { line in
+                Text(line.text)
+                    .font(SpeechRailDesignTokens.Typography.body)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// 三个入口共用同一组恢复动作；按钮始终冻结所选记录，不读“当前会话”来确定写入目标。
+struct TranscriptSaveRecoveryPanel: View {
+    let records: [TranscriptSaveRecoveryRecord]
+    let preview: (String) -> String
+    let retry: (String) async -> Bool
+    let finishIncomplete: (TranscriptAdmissionRecovery) async -> Bool
+
+    @State private var selectedID: String?
+    @State private var workingID: String?
+    @State private var pendingConfirmation: TranscriptAdmissionRecovery?
+    @State private var feedback: (recordID: String, message: String)?
+
+    private var selected: TranscriptSaveRecoveryRecord? {
+        records.first { $0.id == selectedID } ?? records.first
+    }
+
+    private func title(_ record: TranscriptSaveRecoveryRecord) -> String {
+        "记录 · " + record.observedAt.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    var body: some View {
+        if let record = selected {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                if records.count > 1 {
+                    Picker("需要处理的记录", selection: Binding(
+                        get: { selected?.id ?? "" }, set: { selectedID = $0 }
+                    )) {
+                        ForEach(records) { item in Text(title(item)).tag(item.id) }
+                    }
+                    .pickerStyle(.menu)
+                    .disabled(workingID != nil)
+                } else {
+                    Text(title(record)).font(SpeechRailDesignTokens.Typography.captionMedium)
+                }
+                NoticeBar(
+                    tone: .warning,
+                    message: record.admission == nil
+                        ? "有文字尚未保存，可以重试或先复制。"
+                        : "部分文字未能完整保留，请先复制能恢复的内容，再决定如何结束这场记录。"
+                )
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) { actions(record) }
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) { actions(record) }
+                }
+                if let feedback, feedback.recordID == record.id {
+                    Text(feedback.message)
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .confirmationDialog(
+                "按不完整记录结束？", item: $pendingConfirmation, titleVisibility: .visible
+            ) { snapshot in
+                Button("保留恢复预览并结束", role: .destructive) {
+                    workingID = snapshot.recordID
+                    Task {
+                        let completed = await finishIncomplete(snapshot)
+                        feedback = (
+                            snapshot.recordID,
+                            completed ? "已按中断结束，恢复预览已保留。" : "尚未结束。请重试保存；如果有新内容，请重新确认。"
+                        )
+                        workingID = nil
+                        pendingConfirmation = nil
+                    }
+                }
+                Button("取消", role: .cancel) { pendingConfirmation = nil }
+            } message: { _ in
+                Text("已保存的文字会保留，能恢复的预览会存入恢复内容，记录标为“中断后结束”。多句未保存或内容过长时，预览可能只有最近一句或开头。尚未保存的已接纳文字必须先重试，此操作不会丢弃它们。")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func actions(_ record: TranscriptSaveRecoveryRecord) -> some View {
+        Button(workingID == record.id ? "正在处理…" : "重试保存") {
+            let id = record.id
+            workingID = id
+            Task {
+                let completed = await retry(id)
+                feedback = (id, completed ? "文字已保存。" : "仍有内容未保存，请先复制，再重试或处理不完整记录。")
+                workingID = nil
+            }
+        }
+        .speechRailButton(.secondary)
+        .disabled(workingID != nil || record.failedCount == 0)
+
+        Button("复制未保存文字") {
+            let text = preview(record.id)
+            NSPasteboard.general.clearContents()
+            let copied = NSPasteboard.general.setString(text, forType: .string)
+            feedback = (record.id, copied ? "已复制。复制不会自动结束记录。" : "未能复制，请再试一次。")
+        }
+        .speechRailButton(.quiet)
+        .disabled(workingID != nil || preview(record.id).isEmpty)
+
+        if let snapshot = record.admission {
+            Button("按不完整记录结束…") {
+                pendingConfirmation = snapshot
+            }
+            .speechRailButton(.quiet)
+            .disabled(workingID != nil || record.failedCount > 0)
+        }
+    }
+}
+
 public struct NoticeBar: View {
  public enum Tone: Sendable {
  case info

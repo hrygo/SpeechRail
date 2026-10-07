@@ -166,6 +166,119 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         XCTAssertEqual(h.session.lines.first?.speakerLabel, "B")
     }
 
+    func testExplicitIncompleteMeetingEndPersistsRecoveryAndReleasesRejectionBudget() async throws {
+        let h = try await makeHarness(configuration: .init(maximumPendingCommands: 0))
+        await h.clients.openGate()
+        await h.session.start(selection: MeetingAudioSelection())
+        try await h.settle { $0.phase == .recording }
+        let id = try XCTUnwrap(h.session.sessionID)
+        try await h.emit(.completed(itemID: "rejected", transcript: "容量拒绝的恢复预览"))
+        try await h.settle { !$0.session.unsavedTranscriptText(recordID: id).isEmpty }
+        let snapshot = try XCTUnwrap(h.session.admissionRecovery(recordID: id))
+        await h.clients.all.last?.finishEventsOnClose()
+        let ended = await h.session.endIncompleteRecord(snapshot)
+        XCTAssertTrue(ended)
+        XCTAssertFalse(h.session.pendingSaveRecordIDs.contains(id))
+        let record = try await h.store.session(id: id)
+        XCTAssertEqual(record?.state, .archived)
+        XCTAssertEqual(record?.endReason, .interrupted)
+        let formal = try await h.store.lines(sessionID: id)
+        let all = try await h.store.lines(sessionID: id, includePartial: true)
+        XCTAssertTrue(formal.isEmpty)
+        XCTAssertEqual(all.map(\.id), [snapshot.id])
+        XCTAssertTrue(all.first?.text.contains("本记录未完整保存") == true)
+        XCTAssertTrue(all.first?.text.contains("容量拒绝的恢复预览") == true)
+    }
+
+    func testIncompleteMeetingEndCannotDiscardAnAcceptedFailedCommand() async throws {
+        let gate = TranscriptPersistenceGate()
+        let h = try await makeHarness(
+            saveLine: { try await gate.save($0, id: $1) }, configuration: .init(maximumPendingCommands: 1)
+        )
+        await gate.attach(h.store)
+        await h.clients.openGate()
+        await h.session.start(selection: MeetingAudioSelection())
+        try await h.settle { $0.phase == .recording }
+        let id = try XCTUnwrap(h.session.sessionID)
+        try await h.emit(.completed(itemID: "accepted", transcript: "已接纳的完整正文"))
+        try await h.settle { _ in await gate.entered }
+        try await h.emit(.completed(itemID: "rejected", transcript: "拒绝的预览"))
+        try await h.settle { $0.session.admissionRecovery(recordID: id) != nil }
+        await gate.release(failing: true)
+        try await h.settle { !$0.session.saveFailures(recordID: id).isEmpty }
+        let failedID = try XCTUnwrap(h.session.pendingSaveCommands(recordID: id).first?.lineID)
+        let snapshot = try XCTUnwrap(h.session.admissionRecovery(recordID: id))
+        await h.clients.all.last?.finishEventsOnClose()
+        let refused = await h.session.endIncompleteRecord(snapshot)
+        XCTAssertFalse(refused)
+        XCTAssertEqual(h.session.pendingSaveCommands(recordID: id).map(\.lineID), [failedID])
+        XCTAssertEqual(h.session.admissionRecovery(recordID: id), snapshot)
+        await gate.release()
+        _ = await h.session.retryPendingSaves(recordID: id)
+        let completed = await h.session.endIncompleteRecord(snapshot)
+        XCTAssertTrue(completed)
+        let rows = try await h.store.lines(sessionID: id)
+        XCTAssertEqual(rows.map(\.id), [failedID])
+        XCTAssertEqual(rows.map(\.text), ["已接纳的完整正文"])
+    }
+
+    func testEndingOldIncompleteMeetingDoesNotStopOrProjectIntoNewMeeting() async throws {
+        let h = try await makeHarness(configuration: .init(maximumPendingCommands: 0))
+        await h.clients.openGate()
+        await h.session.start(selection: MeetingAudioSelection())
+        try await h.settle { $0.phase == .recording }
+        let old = try XCTUnwrap(h.session.sessionID)
+        try await h.emit(.completed(itemID: "old", transcript: "旧场拒绝内容"))
+        try await h.settle { $0.session.admissionRecovery(recordID: old) != nil }
+        let snapshot = try XCTUnwrap(h.session.admissionRecovery(recordID: old))
+        await h.clients.all.last?.finishEventsOnClose()
+        await h.session.stopCapture()
+        await h.session.start(selection: MeetingAudioSelection())
+        try await h.settle { $0.phase == .recording && $0.session.sessionID != old }
+        let current = try XCTUnwrap(h.session.sessionID)
+        let clients = await h.clients.all
+        let client = try XCTUnwrap(clients.last)
+        let completed = await h.session.endIncompleteRecord(snapshot)
+        XCTAssertTrue(completed)
+        XCTAssertEqual(h.session.sessionID, current)
+        XCTAssertEqual(h.session.phase, .recording)
+        XCTAssertEqual(h.coordinator.activeSessionID, current)
+        XCTAssertTrue(h.session.lines.isEmpty)
+        let currentRows = try await h.store.lines(sessionID: current, includePartial: true)
+        XCTAssertTrue(currentRows.isEmpty)
+        let closeCount = await client.closeCount
+        XCTAssertEqual(closeCount, 0)
+    }
+
+    func testIncompleteMeetingPreviewFailureKeepsSnapshotForSameIdentityRetry() async throws {
+        let gate = TranscriptPersistenceGate()
+        let h = try await makeHarness(
+            saveLine: { try await gate.save($0, id: $1) }, configuration: .init(maximumPendingCommands: 0)
+        )
+        await gate.attach(h.store)
+        await h.clients.openGate()
+        await h.session.start(selection: MeetingAudioSelection())
+        try await h.settle { $0.phase == .recording }
+        let id = try XCTUnwrap(h.session.sessionID)
+        try await h.emit(.completed(itemID: "rejected", transcript: "预览保存也会失败"))
+        try await h.settle { $0.session.admissionRecovery(recordID: id) != nil }
+        let snapshot = try XCTUnwrap(h.session.admissionRecovery(recordID: id))
+        await h.clients.all.last?.finishEventsOnClose()
+        await gate.release(failing: true)
+        let first = await h.session.endIncompleteRecord(snapshot)
+        XCTAssertFalse(first)
+        XCTAssertEqual(h.session.admissionRecovery(recordID: id), snapshot)
+        let before = try await h.store.session(id: id)
+        XCTAssertNotEqual(before?.state, .archived)
+        await gate.release()
+        let retried = await h.session.endIncompleteRecord(snapshot)
+        XCTAssertTrue(retried)
+        let attempts = await gate.attempts
+        XCTAssertEqual(attempts.map(\.id), [snapshot.id, snapshot.id])
+        let rows = try await h.store.lines(sessionID: id, includePartial: true)
+        XCTAssertEqual(rows.map(\.id), [snapshot.id])
+    }
+
     func testCapacityFailureKeepsAcceptedCommandAndControlReceiverResponsive() async throws {
         let gate = TranscriptPersistenceGate()
         let h = try await makeHarness(

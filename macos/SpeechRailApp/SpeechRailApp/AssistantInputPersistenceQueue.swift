@@ -566,12 +566,39 @@ public final class TranscriptPersistenceQueue {
     }
 }
 
+/// 用户确认结束不完整记录时使用的固定恢复快照；更新拒绝会产生新的身份。
+public struct TranscriptAdmissionRecovery: Identifiable, Equatable, Sendable {
+    public let id: String
+    public let recordID: String
+    public let text: String
+    public let rejectionCount: Int
+    public let observedAt: Date
+
+    @MainActor
+    var command: TranscriptPersistenceQueue.Command {
+        .init(
+            sessionID: recordID, connection: 0, itemID: "", lineID: id,
+            text: text, source: .keyboard, role: .speaker, formal: false,
+            isInterrupted: true, timingQuality: .unavailable, observedAt: observedAt
+        )
+    }
+}
+
+public struct TranscriptSaveRecoveryRecord: Identifiable, Sendable {
+    public let id: String
+    public let observedAt: Date
+    public let failedCount: Int
+    public let admission: TranscriptAdmissionRecovery?
+}
+
 /// 拒绝接纳也是收尾证明的一部分，不能在保存队列排空后被抹掉。
 /// 只保存每场最近一次拒绝的可复制预览；不把它冒充已接纳的命令。
 struct TranscriptAdmissionLedger {
     private struct Entry {
         var count: Int
         var copyText: String
+        var recoveryID: String
+        var observedAt: Date
     }
     private let maximumRecords: Int
     private let maximumPreviewScalars: Int
@@ -599,7 +626,9 @@ struct TranscriptAdmissionLedger {
         if text.unicodeScalars.count > maximumPreviewScalars {
             copyText += "\n[这句内容过长，恢复预览只保留了开头。]"
         }
-        entries[recordID] = Entry(count: count, copyText: copyText)
+        entries[recordID] = Entry(
+            count: count, copyText: copyText, recoveryID: UUID().uuidString, observedAt: Date()
+        )
     }
 
     func report(
@@ -617,6 +646,23 @@ struct TranscriptAdmissionLedger {
             return "[有 \(entry.count) 句未接纳，以下只保留了最近一句。]\n" + entry.copyText
         }
         return entry.copyText
+    }
+
+    func recovery(recordID: String) -> TranscriptAdmissionRecovery? {
+        guard let entry = entries[recordID], let preview = copyText(recordID: recordID) else { return nil }
+        return TranscriptAdmissionRecovery(
+            id: entry.recoveryID, recordID: recordID,
+            text: "本记录未完整保存。以下是仍可恢复的未接纳预览，不属于正式文字记录。\n" + preview,
+            rejectionCount: entry.count, observedAt: entry.observedAt
+        )
+    }
+
+    /// 只能在冻结预览已落 partial、记录按中断结束之后调用。
+    mutating func confirmResolution(_ snapshot: TranscriptAdmissionRecovery) -> Bool {
+        guard recovery(recordID: snapshot.recordID) == snapshot else { return false }
+        entries.removeValue(forKey: snapshot.recordID)
+        recordIDs.removeAll { $0 == snapshot.recordID }
+        return true
     }
 }
 

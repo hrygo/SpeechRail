@@ -321,6 +321,44 @@ public final class CaptionSession {
         return text.joined(separator: "\n")
     }
 
+    public func admissionRecovery(recordID: String) -> TranscriptAdmissionRecovery? {
+        admissionLedger.recovery(recordID: recordID)
+    }
+
+    public var saveRecoveryRecords: [TranscriptSaveRecoveryRecord] {
+        pendingSaveRecordIDs.compactMap { id in
+            let failures = saveFailures(recordID: id)
+            let admission = admissionRecovery(recordID: id)
+            guard !failures.isEmpty || admission != nil,
+                  let observedAt = failures.first?.command.observedAt ?? admission?.observedAt else { return nil }
+            return .init(id: id, observedAt: observedAt, failedCount: failures.count, admission: admission)
+        }
+    }
+
+    private var resolvingAdmissionRecords: Set<String> = []
+
+    public func endIncompleteRecord(_ snapshot: TranscriptAdmissionRecovery) async -> Bool {
+        let id = snapshot.recordID
+        guard admissionLedger.recovery(recordID: id) == snapshot,
+              resolvingAdmissionRecords.insert(id).inserted else { return false }
+        defer { resolvingAdmissionRecords.remove(id) }
+        if sessionID == id { await stopCapture() }
+        let saved = await inputPersistence.waitUntilSettled(sessionID: id)
+        guard saved.isComplete, admissionLedger.recovery(recordID: id) == snapshot else { return false }
+        do {
+            _ = try await saveTranscriptLine(snapshot.command)
+        } catch {
+            return false
+        }
+        guard admissionLedger.recovery(recordID: id) == snapshot else { return false }
+        let result = await coordinator.sealSessionReporting(id: id, reason: .interrupted)
+        guard case .sealed(recordID: id) = result,
+              let record = try? await coordinator.record(id: id),
+              record.state == .archived, record.endReason == .interrupted,
+              admissionLedger.confirmResolution(snapshot) else { return false }
+        return true
+    }
+
     /// 记录库文件位置。设置页与受阻时的「打开数据目录」读它。
     public var libraryURL: URL { coordinator.libraryURL }
 

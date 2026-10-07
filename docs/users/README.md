@@ -2,8 +2,8 @@
 title: "SpeechRail 用户与集成指南中心"
 status: active
 audience: "应用开发者、客户端集成工程师、API 消费者"
-version: "3.2.0"
-date: 2026-09-27
+version: "3.2.1"
+date: 2026-10-07
 ---
 
 # 🔌 SpeechRail 用户与集成指南
@@ -79,6 +79,9 @@ HTTP 客户端可读取 `GET /health`；需要跨模型、音色和操作参数�
 `/readyz` 只表示至少一个 ASR/TTS 能力可按需接受推理；成功响应中的 `realtime_vad` 仍是独立诊断。需要某项能力时，先读取对应字段和 `GET /v1/speechrail/capabilities`，再发起推理请求。readiness、`available` 和质量验收不是同一语义。
 
 ## macOS App 控制面
+
+会议与字幕的保存失败、复制及不完整结束操作见
+[找回未保存的文字](transcript-save-recovery.md)（R07 开发分支，待整包验收）。
 
 SpeechRail macOS App 面向本机用户提供三类入口：
 

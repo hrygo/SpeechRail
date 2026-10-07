@@ -191,6 +191,96 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         XCTAssertEqual(h.session.lines.first?.speakerLabel, "B")
     }
 
+    func testExplicitIncompleteCaptionEndPreservesPreviewInsteadOfClaimingFullSave() async throws {
+        let h = try await makeHarness(configuration: .init(maximumPendingCommands: 0))
+        let id = try await start(h)
+        try await h.emit(.completed(itemID: "rejected", transcript: "字幕拒绝的恢复预览"))
+        try await h.settle { !$0.session.unsavedTranscriptText(recordID: id).isEmpty }
+        let snapshot = try XCTUnwrap(h.session.admissionRecovery(recordID: id))
+        let ended = await h.session.endIncompleteRecord(snapshot)
+        XCTAssertTrue(ended)
+        XCTAssertFalse(h.session.pendingSaveRecordIDs.contains(id))
+        let record = try await h.store.session(id: id)
+        XCTAssertEqual(record?.state, .archived)
+        XCTAssertEqual(record?.endReason, .interrupted)
+        let formal = try await h.store.lines(sessionID: id)
+        let all = try await h.store.lines(sessionID: id, includePartial: true)
+        XCTAssertTrue(formal.isEmpty)
+        XCTAssertEqual(all.map(\.id), [snapshot.id])
+        XCTAssertTrue(all.first?.text.contains("本记录未完整保存") == true)
+    }
+
+    func testIncompleteCaptionEndCannotDiscardAnAcceptedFailedCommand() async throws {
+        let gate = TranscriptPersistenceGate()
+        let h = try await makeHarness(
+            saveLine: { try await gate.save($0, id: $1) }, configuration: .init(maximumPendingCommands: 1)
+        )
+        await gate.attach(h.store)
+        let id = try await start(h)
+        try await h.emit(.completed(itemID: "accepted", transcript: "已接纳的字幕正文"))
+        try await h.settle { _ in await gate.entered }
+        try await h.emit(.completed(itemID: "rejected", transcript: "拒绝的字幕预览"))
+        try await h.settle { $0.session.admissionRecovery(recordID: id) != nil }
+        await gate.release(failing: true)
+        try await h.settle { !$0.session.saveFailures(recordID: id).isEmpty }
+        let failedID = try XCTUnwrap(h.session.pendingSaveCommands(recordID: id).first?.lineID)
+        let snapshot = try XCTUnwrap(h.session.admissionRecovery(recordID: id))
+        let refused = await h.session.endIncompleteRecord(snapshot)
+        XCTAssertFalse(refused)
+        XCTAssertEqual(h.session.pendingSaveCommands(recordID: id).map(\.lineID), [failedID])
+        XCTAssertEqual(h.session.admissionRecovery(recordID: id), snapshot)
+        await gate.release()
+        _ = await h.session.retryPendingSaves(recordID: id)
+        let completed = await h.session.endIncompleteRecord(snapshot)
+        XCTAssertTrue(completed)
+        let rows = try await h.store.lines(sessionID: id)
+        XCTAssertEqual(rows.map(\.id), [failedID])
+        XCTAssertEqual(rows.map(\.text), ["已接纳的字幕正文"])
+    }
+
+    func testEndingOldIncompleteCaptionRecordLeavesNewCaptureAndLabelsAlone() async throws {
+        let h = try await makeHarness(configuration: .init(maximumPendingCommands: 0))
+        let old = try await start(h)
+        try await h.emit(.completed(itemID: "old", transcript: "旧字幕拒绝内容"))
+        try await h.settle { $0.session.admissionRecovery(recordID: old) != nil }
+        let snapshot = try XCTUnwrap(h.session.admissionRecovery(recordID: old))
+        await h.session.stopCapture()
+        let current = try await start(h)
+        let completed = await h.session.endIncompleteRecord(snapshot)
+        XCTAssertTrue(completed)
+        XCTAssertEqual(h.session.sessionID, current)
+        XCTAssertEqual(h.session.phase, .running)
+        XCTAssertEqual(h.coordinator.activeSessionID, current)
+        XCTAssertTrue(h.session.lines.isEmpty)
+        let currentRows = try await h.store.lines(sessionID: current, includePartial: true)
+        XCTAssertTrue(currentRows.isEmpty)
+    }
+
+    func testIncompleteCaptionPreviewFailureKeepsRefusalProofUntilRetryCommits() async throws {
+        let gate = TranscriptPersistenceGate()
+        let h = try await makeHarness(
+            saveLine: { try await gate.save($0, id: $1) }, configuration: .init(maximumPendingCommands: 0)
+        )
+        await gate.attach(h.store)
+        let id = try await start(h)
+        try await h.emit(.completed(itemID: "rejected", transcript: "字幕预览保存失败"))
+        try await h.settle { $0.session.admissionRecovery(recordID: id) != nil }
+        let snapshot = try XCTUnwrap(h.session.admissionRecovery(recordID: id))
+        await gate.release(failing: true)
+        let first = await h.session.endIncompleteRecord(snapshot)
+        XCTAssertFalse(first)
+        XCTAssertEqual(h.session.admissionRecovery(recordID: id), snapshot)
+        let before = try await h.store.session(id: id)
+        XCTAssertNotEqual(before?.state, .archived)
+        await gate.release()
+        let retried = await h.session.endIncompleteRecord(snapshot)
+        XCTAssertTrue(retried)
+        let attempts = await gate.attempts
+        XCTAssertEqual(attempts.map(\.id), [snapshot.id, snapshot.id])
+        let rows = try await h.store.lines(sessionID: id, includePartial: true)
+        XCTAssertEqual(rows.map(\.id), [snapshot.id])
+    }
+
     func testCaptionRecoveryPartialAlsoRetainsFixedIdentityAndStaysOutOfFormalRows() async throws {
         let gate = TranscriptPersistenceGate()
         let h = try await makeHarness(saveLine: { try await gate.save($0, id: $1) })

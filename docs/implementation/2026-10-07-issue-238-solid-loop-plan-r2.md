@@ -10,7 +10,15 @@
 
 **当前实施目标（2026-10-07 更新）：** R01、R02、R05、R03、R04、R06 已合入；剩余 3 个 issue 分 3 个独立 PR，按 **R07 #232 → R08 #231 → R09 #234** 完成实施、整包独立审查、定向验证与必要 CI，验证通过立即 squash 合并，再刷新 main。每包 1–3 issue；不堆叠 PR、不 force-push、不关闭未验收 issue、不 `Closes #238`。保持 #245 的语义禁写区，最终逐条核对十一项验收矩阵后决定关闭 issue 与完成 goal。
 
-**最新执行目标（2026-10-07，Asia/Shanghai）：** 本次 fetch 后 `origin/main` 仍为 `4f6b7356`。当前分支为 `codex/238-r07-transcript-persistence`；Store 子任务 `36c0ba3a`、保存接线子任务 `e60b79b`、辅助工作预算子任务 `049ef127` 已推送。Meeting/Caption 保存后 attribution 已接入共享 owner，冻结 metadata 目标；最新 **211 项定向实测通过**，尚无 R07 PR。立即目标是补用户重试/复制、拒绝证明的恢复/结束流程，更新合同草稿并完成一次整包独立审查、必要 CI 和合并。编译错误、真实客户端单次终态下的保存重试、稳定 partial、容量假成功及归属串场已在子任务中修复，不能以这些局部通过记录宣称 R07 已验收。
+**最新执行目标（2026-10-07，Asia/Shanghai）：** 本次 fetch 后 `origin/main` 仍为 `4f6b7356`。当前分支为 `codex/238-r07-transcript-persistence`；Store 子任务 `36c0ba3a`、保存接线子任务 `e60b79b`、辅助工作预算子任务 `049ef127`、metadata 接线子任务 `0d2cf68e` 已推送。恢复入口与不完整结束流程已实施，最新 **220 项定向实测通过**，App 包装脚本 Debug 构建成功；尚无 R07 PR。立即目标是完成一次整包独立审查，修复 Required，运行匹配最终 head 的必要 CI，通过后立即合并。不能以局部通过或 App 编译记录宣称 R07 已验收。
+
+**本次 goal 更新检查点（2026-10-07）：** 本地 HEAD 为 `0d2cf68e`；恢复入口、不完整结束、历史恢复材料展示及相关文档仍有未提交改动。220 项测试与 App 构建是前一执行阶段的实测证据，本次更新目标未重跑。接下来按以下顺序推进：
+
+1. 检查完整 R07 diff、敏感字段和提交差异，将已验证的恢复实现与文档提交、推送到现有分支；保留未知及其他 worktree 改动。
+2. 对 `4f6b7356` 到最终 R07 HEAD 做一次整包独立审查；创建只关联 #232 的 draft PR，并运行匹配最终 head 的必要 CI。Required 由主代理补反例并修复，按影响复验。
+3. 审查、必要验证和 CI 通过后立即 squash 合并，刷新 main，更新 #232/#238 与执行账本；无需再次请求逐包合并确认。
+4. 顺序完成 R08 #231、R09 #234，各一个从最新 main 开出的独立 PR；每包沿用相同审查、验证、合并和账本更新闭环。
+5. 九包均合并后审计十一项 issue 的联合验收矩阵；只关闭已满足完整验收条件的 issue，全部完成后再将结构化 goal 标为 complete。
 
 - **R07 完成门槛：** 固定身份和完整命令可恢复；行、ordinal 与 outbox 原子确认；失败和容量拒绝不能被成功封存掩盖；partial 不进入正式纪要、默认分享或正式来源快照；归属缓存有界且跨 record/generation 隔离。保存后 metadata I/O 归共享 owner 管理，迟到完成不改新场标签或文字；用户能重试/复制旧记录，并显式处理拒绝证明，不能永久卡在记录容量上限。完成一次整包独立审查，修复 Required，定向验证和必要 CI 通过后立即合并。
 - **后续目标：** R08 补足消费 EOF、保存 settled 和封存结果的完整收尾证明；R09 收敛 loader 内核规则。各自从更新后的 main 开独立 PR，分别只关联 #231、#234。
@@ -102,7 +110,7 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 | R03 #235 | MERGED | PR #325 / `baafb59b` | 372 项定向 fake/HTTP/contract、Ruff/Mypy；独立审查 Required 已修；CI `37556276635` 全部必要检查通过 |
 | R04 #237+#236 | MERGED | PR #328 / `151297f6` | 283 定向 Swift、2 项 Python 守卫、独立编译；Required 已修，CI `37560283532` 全绿后合并 |
 | R06 #241 | MERGED | PR #329 / `4f6b7356` | 138 XCTest +77 Swift Testing；首轮 Required 已修，CI `37562890224` 全绿后立即合并 |
-| R07 #232 | 实施中 | 分支 `codex/238-r07-transcript-persistence`；已推送 `049ef127` | 基于 `4f6b7356`；metadata 子任务定向实测 211 项，恢复 UI、整包审查和 CI 尚待完成；避让 pbxproj |
+| R07 #232 | 待整包审查 | 分支 `codex/238-r07-transcript-persistence`；已推送 `0d2cf68e` | 基于 `4f6b7356`；220 项定向实测、App Debug 构建成功；独立审查和 CI 尚待完成；避让 pbxproj |
 | R08 #231 | planned | 无 | 注意 clear-barrier 分支，只读合同 |
 | R09 #234 | planned | 无 | #249 关闭已解锁，排末位 |
 
@@ -173,6 +181,9 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 - `SpeakerLabeling` 整批冻结 unit/line/label/lifecycle；begin/load/end 使旧 UI 投影失效，unit 重绑清旧行确认，旧任务不读取新映射。四个真实 SQLite 反例先出现 7 个失败后转绿；追加同记录新生命周期的 queued 命令、nil 修订清除回归。Ruling：旧任务继续写冻结目标，但只发布已确认且仍属原生命周期的界面变化——保证已接纳工作的完整性，同时避免把迟到成功或失败投到新场；代价是旧场辅助错误不会覆盖当前场提示。
 - attribution 局部批次按整行替换会抹掉已接纳的另一批 unit 修订：两个 Gate 反例出现 4 个失败断言。Ruling：此类修订禁用整行 coalescing，逐批受相同 128 项/1,024 units 预算约束——不假设每次事件都是整行完整快照；代价是高频局部更新更早达到预算，达到时明确提示辅助信息未保存，正文仍保留。
 - 最新同范围追加 `SpeakerLabelingPersistenceTests` 的定向命令 → **211 XCTest、0 failures、exit 0**（2026-10-07）。无真实模型/设备、UI、服务或安装操作。R07 尚待恢复入口、拒绝结束路径、整包独立审查和必要 CI。
+- 会议页、字幕页和字幕浮层复用同一 retry/copy/不完整结束组件；记录按观察日期选取，动作冻结 record ID。浮层恢复入口位于常驻页脚，不依赖 hover；恢复材料在会议/字幕回看区单独可读可复制，正式读取/全文复制/默认导出不收 partial。没有新增 Token 或修改 pbxproj。
+- `TranscriptAdmissionRecovery` 冻结拒绝版本、固定恢复行与日期。显式确认后先等待所有已接纳命令，保存有限 partial 说明，再按 interrupted 封存并读回确认，最后才解除本记录的拒绝证明。新增拒绝使旧确认失效；失败保留原身份供重试。Ruling：将拒绝预览存为说明性 partial，并按中断结束来释放恢复限额——承认未完整保留，不用清空账本冒充完整保存；代价是多句/过长拒绝仍不能恢复全部正文，UI、复制和用户指南明确说明。
+- 3 个端口/版本反例先编译红灯后通过；另外 6 个真实 Store/Gate 边界证明不完整结束不能丢已接纳失败项、旧 record 不停止新场、预览写入失败时保留证明且同 ID 重试。最终同范围 **220 XCTest、0 failures、exit 0**；`scripts/macos_app_build.sh --configuration Debug --timeout 600` 成功，恢复回看 UI 最终修改后重新构建也成功。未做 UI 自动化、视觉/VoiceOver 走查，未操作生产服务或安装。新用户说明见 [找回未保存的文字](../users/transcript-save-recovery.md)。
 
 ## 6. 来源
 

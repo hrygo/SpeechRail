@@ -310,6 +310,53 @@ public final class MeetingSession {
         return text.joined(separator: "\n")
     }
 
+    public func admissionRecovery(recordID: String) -> TranscriptAdmissionRecovery? {
+        admissionLedger.recovery(recordID: recordID)
+    }
+
+    public var saveRecoveryRecords: [TranscriptSaveRecoveryRecord] {
+        pendingSaveRecordIDs.compactMap { id in
+            let failures = saveFailures(recordID: id)
+            let admission = admissionRecovery(recordID: id)
+            guard !failures.isEmpty || admission != nil,
+                  let observedAt = failures.first?.command.observedAt ?? admission?.observedAt else { return nil }
+            return .init(id: id, observedAt: observedAt, failedCount: failures.count, admission: admission)
+        }
+    }
+
+    private var resolvingAdmissionRecords: Set<String> = []
+
+    /// 由用户明确确认：保留可恢复预览并按中断结束，不生成正式纪要或丢弃已接纳命令。
+    public func endIncompleteRecord(_ snapshot: TranscriptAdmissionRecovery) async -> Bool {
+        let id = snapshot.recordID
+        guard admissionLedger.recovery(recordID: id) == snapshot,
+              resolvingAdmissionRecords.insert(id).inserted else { return false }
+        defer { resolvingAdmissionRecords.remove(id) }
+        if sessionID == id {
+            isStoppingIntentionally = true
+            await releaseCapture(drain: true)
+            if sessionID == id { phase = .processing }
+        }
+        let saved = await inputPersistence.waitUntilSettled(sessionID: id)
+        guard saved.isComplete, admissionLedger.recovery(recordID: id) == snapshot else { return false }
+        do {
+            _ = try await saveTranscriptLine(snapshot.command)
+        } catch {
+            return false
+        }
+        guard admissionLedger.recovery(recordID: id) == snapshot else { return false }
+        let result = await coordinator.sealMeeting(id: id, reason: .interrupted)
+        guard case .sealed(recordID: id) = result,
+              let record = try? await coordinator.record(id: id),
+              record.state == .archived, record.endReason == .interrupted,
+              admissionLedger.confirmResolution(snapshot) else { return false }
+        if sessionID == id {
+            phase = .archived
+            lastFailure = "本次记录已按中断结束，未完整保存的预览保留在恢复内容中。"
+        }
+        return true
+    }
+
     /// 页面主按钮：选好来源之后从这里进（§6.2 的空态度）。
     /// 会前写的标题（方案 §4.1）。
     ///
