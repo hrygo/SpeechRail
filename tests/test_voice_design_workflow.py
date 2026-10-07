@@ -323,12 +323,22 @@ def test_base_validation_does_not_log_invalid_backend_detail(
     assert detail not in caplog.text
 
 
-@pytest.mark.parametrize("failure_phase", ["close", "eviction", "design_close"])
+@pytest.mark.parametrize(
+    "failure_phase,close_error",
+    [
+        ("close", RuntimeError),
+        ("close", TimeoutError),
+        ("eviction", RuntimeError),
+        ("design_close", RuntimeError),
+        ("design_close", TimeoutError),
+    ],
+)
 def test_candidate_reclamation_failure_returns_safe_envelope_without_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     failure_phase: str,
+    close_error: type[Exception],
 ) -> None:
     client, _registry, synth, asr = make_client(tmp_path, monkeypatch)
     detail = "private-candidate-reclamation-detail"
@@ -341,7 +351,7 @@ def test_candidate_reclamation_failure_returns_safe_envelope_without_evidence(
             raise StopAsyncIteration
 
         async def aclose(self):
-            raise RuntimeError(detail)
+            raise close_error(detail)
 
     async def failed_eviction():
         raise RuntimeError(detail)

@@ -303,14 +303,14 @@ async def synthesize_probes(
                     close = getattr(bounded, "aclose", None)
                     if close is not None:
                         await close()
-            except TimeoutError:
-                raise
             except Exception as exc:
                 if close_failed:
                     raise VoiceValidationExecutionError(
                         "backend_reclamation_failed",
                         "TTS resources could not be reclaimed",
                     ) from None
+                if isinstance(exc, TimeoutError):
+                    raise
                 failure_codes.append(classify_probe_failure(exc))
                 continue
             if not probe_pcm or len(probe_pcm) % 2 != 0:
@@ -503,8 +503,6 @@ async def collect_audio(
             close = getattr(stream, "aclose", None)
             if close is not None:
                 await close()
-    except TimeoutError:
-        raise
     except Exception:
         if close_failed:
             raise VoiceValidationExecutionError(

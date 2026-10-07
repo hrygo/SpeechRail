@@ -1569,12 +1569,20 @@ def test_quality_runs_classifies_output_invalid(
     assert body["synthesis"]["successful_probe_count"] == 17
 
 
-@pytest.mark.parametrize("failure_phase", ["close", "eviction"])
+@pytest.mark.parametrize(
+    "failure_phase,close_error",
+    [
+        ("close", RuntimeError),
+        ("close", TimeoutError),
+        ("eviction", RuntimeError),
+    ],
+)
 def test_quality_reclamation_failure_stops_asr_and_commit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     failure_phase: str,
+    close_error: type[Exception],
 ) -> None:
     sentinel = "private_backend_payload_must_not_be_logged"
 
@@ -1592,7 +1600,7 @@ def test_quality_reclamation_failure_stops_asr_and_commit(
                     raise StopAsyncIteration
 
                 async def aclose(self):
-                    raise RuntimeError(sentinel)
+                    raise close_error(sentinel)
 
             return Source()
 

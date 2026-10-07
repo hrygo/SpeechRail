@@ -30,7 +30,7 @@
 | #240 owner 登记 | 已合并 | eager/owned 分离，aligner 按需加载；partial-start 回收、runner/monitor/worker 失败隔离、取消保护及超时句柄保留 | R02 #322 |
 | #246 活动保护 | 已合并 | 生产 alignment 与 evictor 共用 WorkerLeaseLock；活动/回收互斥，结束后重设 idle 起点；移除接线导致两个回归失败 | R02 #322 |
 | #242 改名事务 | 已合并 | 映射和修订事件共用 SQLite 事务；5 个故障/幂等回归，测试自有 trigger，无生产开关和 pbxproj 修改 | R05 #323 |
-| #235 验证用例 | 审查中 | 两个应用用例已接线；同次执行身份、unknown、CAS/撤销、保存失败、重复取消与 timeout/cancel 交错回归通过；369 项定向验证通过，待独立审查完成与必需 CI | R03 |
+| #235 验证用例 | CI 中 | 两个应用用例已接线；同次执行身份、unknown、CAS/撤销、保存失败、重复取消与 timeout/cancel 交错回归通过；372 项定向验证通过，独立审查 Required 已修复，待必需 CI | R03 #325 |
 | #237 坏 2xx | 未修 | `LLMProvider.check`（约 2475–2480）2xx 即 `.connected`；`operationUnavailable` 只判 operation 不可用 | R04 |
 | #236 中立支持 | 未修 | provider 仍持 `TeleprompterAIObservationHandler/Context/StrictJSON`（1175/1264/1382/1509+/1614 行）；零提交 | R04 |
 | #241 封存结果 | 部分改善 | 剩余 `finalize`(442-)/`endAssistant`(543-) 纯文字分支 `try?` + 无条件成功 ID | R06（收窄） |
@@ -87,7 +87,7 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 | R01 #244 | MERGED | PR #320 / `451aeb1e` | 127 定向测试、Ruff/Mypy、选中 CI 通过 |
 | R02 #240+#246 | MERGED | PR #322 / `1edf9398` | 99 定向测试、28 个 HTTP/lifecycle 测试；移除接线使 2 个回归转红；同步 R05 后 CI run `37550404724` 通过 |
 | R05 #242 | MERGED | PR #323 / `ff34bfcf` | 42 定向 Swift 测试；去掉事务使 3 项转红；CI run `37549739387` 的 Swift/App/必需 gate 通过 |
-| R03 #235 | 审查中 | 无 | 基线 `1edf9398`；369 项定向 fake/HTTP/contract 回归、Ruff/Mypy 通过；独立审查及必需 CI 待完成 |
+| R03 #235 | CI 中 | PR #325 | 基线 `1edf9398`；372 项定向 fake/HTTP/contract 回归、Ruff/Mypy 通过；独立审查 Required 已修复，待必需 CI |
 | R04 #237+#236 | planned | 无 | 主要修改 LLMProvider，与 R06 文件不同 |
 | R06 #241 | planned | 无 | 范围收窄（§1 行） |
 | R07 #232 | planned | 无 | 注意 consumer-replay 分支 |
@@ -101,7 +101,8 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 - Ruling：阶段 task 与其 deadline 同 owner，复用 `join_cleanup`；deadline 已取消时不追加 cancel，避免第二次取消打断 backend 清理。回收未确认时保留 ownership 或隔离 lane；不将响应 deadline 解释为强制进程回收上界。
 - Ruling：清理失败中止后续 probe/ASR/commit，返回不可自动重试的 `503 backend_reclamation_failed`；契约与独立用户说明同步。ASR 团队在改 `docs/users/api-contract.md`，本包不写该文件。
 - 独立审查指出候选 close/eviction 的原始异常未映射，新增两个 HTTP 反例观察未处理 RuntimeError，再接稳定 503；共享 helper 的生成入口也补映射与 design lane 隔离。候选生成/验证和 quality-runs 共 5 个清理失败 HTTP 回归通过。
-- 定向命令：`SPEECHRAIL_SKIP_NATIVE_WORKER_BUILD=1 uv run pytest --no-cov -rA tests/test_voice_validation_execution.py tests/test_candidate_validation_usecase.py tests/test_voice_quality_routes.py tests/test_voice_design_workflow.py tests/test_voice_design_concurrency.py tests/test_voice_validation.py tests/test_voice_validation_residency.py tests/test_voice_quality_gates.py tests/test_voice_quality_evidence.py tests/test_voice_revision_routes.py tests/test_voice_revision_contract.py tests/test_tts_delivery.py tests/test_tts_errors.py tests/test_resource_governor.py tests/test_tts_profile_snapshot.py tests/test_openapi_contract.py tests/test_audio_error_contract.py tests/test_user_doc_contract.py` → 369 passed。
+- 最终独立审查发现一项 Required：`aclose()` 自身抛 TimeoutError 被普通超时抢先分类。3 个 HTTP 反例先转红，再将 close failure 优先分类，稳定返回不可重试的 reclamation failure；纯执行/驱逐 deadline 保持原语义。最终清理失败 HTTP 矩阵共 8 项通过，没有遗留 Critical/Required；审查人没有运行真实模型，最终修订由主代理 TDD 验证。
+- 定向命令：`SPEECHRAIL_SKIP_NATIVE_WORKER_BUILD=1 uv run pytest --no-cov -rA tests/test_voice_validation_execution.py tests/test_candidate_validation_usecase.py tests/test_voice_quality_routes.py tests/test_voice_design_workflow.py tests/test_voice_design_concurrency.py tests/test_voice_validation.py tests/test_voice_validation_residency.py tests/test_voice_quality_gates.py tests/test_voice_quality_evidence.py tests/test_voice_revision_routes.py tests/test_voice_revision_contract.py tests/test_tts_delivery.py tests/test_tts_errors.py tests/test_resource_governor.py tests/test_tts_profile_snapshot.py tests/test_openapi_contract.py tests/test_audio_error_contract.py tests/test_user_doc_contract.py` → 372 passed。
 - `ruff check` 全部改动 Python；`mypy` 9 个生产 source 文件通过。没有运行完整本机测试、真实模型、服务/UI、性能或长稳验收。
 - 提交前核对六个已登记 ASR worktree：本包路由、registry、架构导航、OpenAPI 无 dirty 或 branch diff；仅 API 手册存在独立 ASR 文档变更，已避让。新文件无对应图谱索引，按当前源码审查，不宣称图谱完整。
 
