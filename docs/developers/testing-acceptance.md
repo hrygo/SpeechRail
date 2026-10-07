@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.6"
+version: "3.3.7"
 date: 2026-10-07
 ---
 
@@ -144,6 +144,36 @@ curl -X POST http://127.0.0.1:8201/v1/audio/speech \
 当前没有经场景对照确认的标点阈值，`punctuation_gate` 始终为 `unset`；标点分数只作
 描述性证据。资源专用样本不做质量评分，原有终态、输入覆盖、预算和上传回执验收门保持
 独立。原始音频、人工参考、转写和 benchmark 制品仍保存在仓库外。
+
+### ASR 客户端计时观测
+
+`examples/perf/realtime_asr_benchmark.py` 输出 schema 2。每个请求记录最后一包
+append 调用起止、名义回放结束、回放等待返回、commit 调用起止、最后终态及
+receipt 的相对单调时间，并保留最后上传的 wire 样本区间。
+`first_preview_seconds` 仍从 paced 回放起点计算；以下三个字段分别使用不同起点：
+
+- `last_upload_to_last_terminal_seconds`：最后终态接收减去最后 append 返回。
+- `nominal_playback_end_to_last_terminal_seconds`：最后终态接收减去回放起点与 wire 时长。
+- `commit_to_last_terminal_seconds`：最后终态接收减去 commit 调用开始。
+
+上述差值保留负值：终态可能先于上传返回、名义回放结束或 commit 到达。
+`barrier_seconds` 为 receipt 接收减去 commit 调用开始。所有观测位于
+`timing_observations`，定义位于 `timing_definitions`；缺失、非有限、
+布尔伪装与不可能的时钟顺序拒绝。上传返回不证明服务端已接收，名义回放结束
+不证明声音已播放，声学语音结束固定标记 `not_observed`。
+旧 `last_audio_to_final_seconds` 已移除，不用截零值冒充末语音时延。
+
+WAV 入口同时核对声明帧数与实际 PCM 字节数，拒绝尾部截断和半个 PCM16
+采样帧，避免以不完整素材产生看似通过的输入覆盖证据。
+确定性反例位于 `tests/test_realtime_asr_timing.py`，可单独运行：
+
+```bash
+uv run --no-sync pytest --no-cov tests/test_realtime_asr_timing.py tests/test_realtime_asr_benchmark.py tests/test_asr_quality_metrics.py
+```
+
+schema 1 历史结果保留原始定义；旧审计器不得接受 schema 2 或向旧结果补写新观测。
+新结果须以支持 schema 2 的审计器和相同工具版本配对，另记源码 digest；
+这些客户端观测不能证明声学时延或场景绝对门通过。
 
 ### 生产 Session 回放的采样退出协调
 

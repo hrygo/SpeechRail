@@ -2,7 +2,7 @@
 title: "共享 ASR #336：冻结预设后的真实验收"
 status: in_progress
 audience: "SpeechRail 开发者与验收人员"
-version: "0.12.0"
+version: "0.13.0"
 date: 2026-10-07
 ---
 
@@ -35,6 +35,24 @@ date: 2026-10-07
   `benchmarks/asr-336-20261007/`。本文件只保留聚合统计与 digest。
 
 ## 本轮发现并修复的验收工具问题
+
+### Realtime benchmark 计时口径与 WAV 完整性
+
+2026-10-07 UTC 将已准备的计时修订应用到
+实际 worktree。原工具的 `last_audio_to_final_seconds` 实际以 commit 为起点，
+并把负值截为零；该名字不能证明末语音时延。新工具使用 schema 2，记录最后一包
+上传、名义回放结束、等待返回、commit、终态及 receipt 的相对单调时间，分别
+计算三个有符号差值；声学结束明确为 `not_observed`。上传返回不等于服务端接收。
+WAV 入口另拒绝声明长度与实际 PCM 不一致、尾部截断和半个 PCM16 采样帧。
+
+实际 worktree 的 25 项新反例在旧实现全部失败，修订后的计时、ASR evidence
+及质量评分定向测试共 88 项通过，改动文件 Ruff 通过。新测试补齐独立运行的
+仓库导入路径。这里的 fake 证据不证明真实模型质量、设备链或声学时延；
+本次没有运行真实回放或改变 managed 服务。
+
+新工具未参与冻结 v4 测量。schema 1 历史结果及其审计器保持原始口径，
+不得补写新观测或跨 schema 直接相减；新真实测量与支持新 schema 的审计器
+仍须另行执行。Swift 消费者的 schema 5 计时尚未在本增量修订。
 
 ### 长输入期间消费事件
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import queue
 import threading
 import time
@@ -199,7 +200,12 @@ def _wire_audio(path: Path) -> tuple[bytes, float]:
     with wave.open(str(path)) as audio:
         if (audio.getnchannels(), audio.getsampwidth(), audio.getframerate()) != (1, 2, 16000):
             raise ValueError("ASR fixture must be 16 kHz mono PCM16 WAV")
-        pcm = audio.readframes(audio.getnframes())
+        frames = audio.getnframes()
+        # One extra frame exposes a malformed half sample in the data chunk;
+        # a truncated file must not redefine the declared fixture duration.
+        pcm = audio.readframes(frames + 1)
+        if len(pcm) != frames * 2:
+            raise ValueError("ASR fixture PCM length differs from its declared frame count")
     if not pcm:
         raise ValueError("ASR fixture is empty")
     resampler = RationalResampler(16000, 24000)
@@ -280,12 +286,82 @@ def _observed_policy_echo(configured: object) -> dict[str, object]:
     return _validated_policy_echo(configured, requested)
 
 
+def _timing_metrics(
+    evidence: ASREvidence, *, started: float,
+    last_upload_started: float | None, last_upload_completed: float | None,
+    playback_wait_completed: float, committed_at: float,
+    commit_send_completed: float, wire_samples: int,
+) -> dict[str, object]:
+    """Record client timestamps; signed differences do not imply acoustic latency."""
+    if type(wire_samples) is not int or wire_samples <= 0:
+        raise ValueError("invalid ASR timing sample count")
+    timestamps: dict[str, float] = {}
+    for name, value in {
+        "started": started,
+        "last_upload_started": last_upload_started,
+        "last_upload_completed": last_upload_completed,
+        "playback_wait_completed": playback_wait_completed,
+        "commit_send_started": committed_at,
+        "commit_send_completed": commit_send_completed,
+        "last_terminal_received": evidence.last_terminal_at,
+        "receipt_received": evidence.receipt_at,
+    }.items():
+        if (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            raise ValueError("incomplete or invalid ASR timing observations")
+        timestamps[name] = float(value)
+    ordered = [
+        timestamps[name] for name in (
+            "started", "last_upload_started", "last_upload_completed",
+            "playback_wait_completed", "commit_send_started", "commit_send_completed",
+        )
+    ]
+    terminal = timestamps["last_terminal_received"]
+    receipt = timestamps["receipt_received"]
+    if (
+        ordered != sorted(ordered)
+        or not started <= terminal <= receipt
+        or receipt < committed_at
+    ):
+        raise ValueError("invalid ASR timing order")
+    preview = evidence.first_preview_at
+    if preview is not None:
+        if (
+            isinstance(preview, bool) or not isinstance(preview, (int, float))
+            or not math.isfinite(preview)
+        ):
+            raise ValueError("invalid ASR timing preview")
+        if not started <= preview <= receipt:
+            raise ValueError("invalid ASR timing order")
+    offsets: dict[str, object] = {
+        name + "_seconds": value - started
+        for name, value in timestamps.items() if name != "started"
+    }
+    offsets.update(
+        clock="monotonic", origin="paced_playback_start",
+        nominal_playback_end_seconds=wire_samples / 24000,
+        acoustic_speech_end="not_observed",
+    )
+    return {
+        "first_preview_seconds": preview - started if preview is not None else None,
+        "last_upload_to_last_terminal_seconds": terminal - timestamps["last_upload_completed"],
+        "nominal_playback_end_to_last_terminal_seconds": terminal - started - wire_samples / 24000,
+        "commit_to_last_terminal_seconds": terminal - committed_at,
+        "barrier_seconds": receipt - committed_at,
+        "timing_observations": offsets,
+    }
+
+
 def _run_asr(
     client: OpenAI, wire: bytes, *, language: str, reference: str | None,
     policy: dict[str, object] | None, resource_only: bool = False,
     punctuation_reference_text: str | None = None,
     punctuation_reference_kind: str | None = None,
 ) -> dict[str, object]:
+    if not wire or len(wire) % 2:
+        raise ValueError("ASR benchmark requires nonempty PCM16 wire audio")
     conn = client.realtime.connect(model="whisper-1").enter()
     events: queue.Queue[tuple[float, object]] = queue.Queue(maxsize=512)
     errors: list[BaseException] = []
@@ -349,20 +425,28 @@ def _run_asr(
         else:
             echo = None
         started = time.monotonic()
+        last_upload_started: float | None = None
+        last_upload_completed: float | None = None
         for offset in range(0, len(wire), 4800):
             time.sleep(max(0, started + offset / 48000 - time.monotonic()))
             consume_available()
-            conn.send({
+            packet = {
                 "type": "input_audio_buffer.append",
                 "audio": base64.b64encode(wire[offset:offset + 4800]).decode(),
-            })
+            }
+            last_upload_started = time.monotonic()
+            conn.send(packet)
+            last_upload_completed = time.monotonic()
         time.sleep(max(0, started + len(wire) / 48000 - time.monotonic()))
+        playback_wait_completed = time.monotonic()
         consume_available()
-        committed_at = time.monotonic()
-        conn.send({
+        commit = {
             "type": "input_audio_buffer.commit", "event_id": "benchmark-final",
             "speechrail": {"request_receipt": True},
-        })
+        }
+        committed_at = time.monotonic()
+        conn.send(commit)
+        commit_send_completed = time.monotonic()
         deadline = committed_at + 125
         while evidence.receipt_at is None:
             received_at, event = next_event(deadline)
@@ -377,14 +461,14 @@ def _run_asr(
         )
         result: dict[str, object] = {
             "audio_seconds": len(wire) / 48000,
-            "first_preview_seconds": (
-                evidence.first_preview_at - started
-                if evidence.first_preview_at is not None else None
+            **_timing_metrics(
+                evidence, started=started, last_upload_started=last_upload_started,
+                last_upload_completed=last_upload_completed,
+                playback_wait_completed=playback_wait_completed,
+                committed_at=committed_at, commit_send_completed=commit_send_completed,
+                wire_samples=len(wire) // 2,
             ),
-            "last_audio_to_final_seconds": max(
-                0, (evidence.last_terminal_at or committed_at) - committed_at
-            ),
-            "barrier_seconds": evidence.receipt_at - committed_at,
+            "last_upload_sample_span": {"start": offset // 2, "end": len(wire) // 2},
             "effective_policy": echo,
         }
         if resource_only:
@@ -449,12 +533,27 @@ def run_manifest_asr_benchmark(
     finally:
         resources = _normalise_resources(monitor.stop())
     payload = {
-        "schema_version": 1, "tool": "speechrail-bench-realtime-asr",
+        "schema_version": 2, "tool": "speechrail-bench-realtime-asr",
         "evidence_mode": "real", "profile": profile,
         "warmup_completed": warmup, "sessions": results, "resources": resources,
         "measurement_completed": failure is None,
         "failure_kind": type(failure).__name__ if failure is not None else None,
         "scene_business_gate": "unset", "baseline_comparison_gate": "unset",
+        "timing_definitions": {
+            "first_preview_seconds": "first preview receive minus paced playback start",
+            "last_upload_to_last_terminal_seconds": (
+                "last terminal receive minus last append send return; signed; "
+                "send return does not prove server acceptance or acoustic speech end"
+            ),
+            "nominal_playback_end_to_last_terminal_seconds": (
+                "last terminal receive minus paced playback start and wire duration; signed"
+            ),
+            "commit_to_last_terminal_seconds": (
+                "last terminal receive minus commit send start; signed"
+            ),
+            "barrier_seconds": "input receipt receive minus commit send start",
+            "acoustic_speech_end": "not_observed",
+        },
     }
     if resource_only:
         payload["measurement_mode"] = "resource_only"
