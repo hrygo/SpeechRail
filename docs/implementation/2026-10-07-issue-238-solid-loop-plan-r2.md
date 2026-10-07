@@ -120,6 +120,7 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 - 最终定向 Swift：200 个 XCTest + 83 个 Swift Testing 通过，共 283 项。Python 架构守卫 2 passed，Ruff/format 与 diff check 通过。独立编译脚本通过，已接入 Swift CI。首轮整包独立审查结束，未发现 Critical，两个 Required 均经主代理反例修复；reviewer 未再次语义复审，修订由红→绿与最终定向套件验证。
 - 提交前刷新 main 至 `fe106a60`（#326 限时 ASR 排障采集）；新增文件与 R04 无交集，`AGENTS.md` 仅增加显式限时录音例外。本任务未操作录音开关或运行态。将同步该基线后提交；匹配 head/base 的 CI 仍待完成，不声明 merge-ready。
 - PR #328 首个 App CI（run `37559927131`）发现 `SettingsComponents` 的 exhaustive switch 漏接新响应状态。SPM 排除了该 UI 文件，不能证明 App target 编译；补上“服务已连接，尚未确认能回答”的展示分支，颜色沿用既有未确认状态。CI 编译反例为红灯，修复后的 App 编译须由新 head CI 证明。
+- Ruling：PR #327 发布提交 `eb45faaa` 在 R04 推送后合入 main。为遵守不 force-push、保留远端历史并满足 strict base，仅在 feature 分支合入最新 main（无文件内容冲突）；最终仍 squash 到 main，保持 main 线性。代价是重跑匹配新 head 的必要 CI；发布的版本材料仅随基线继承，不归 R04 变更。
 
 ## 6. 来源
 
