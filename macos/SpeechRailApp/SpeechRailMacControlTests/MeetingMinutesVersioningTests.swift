@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import XCTest
 #if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
@@ -1008,5 +1009,149 @@ final class MeetingMinutesVersioningTests: XCTestCase {
         XCTAssertEqual(rows.map(\.text), ["崩之前定稿的一句"])
         let hits = try await store.searchKnowledge(query: "崩之前定稿")
         XCTAssertTrue(hits.contains { $0.sessionID == sessionID })
+    }
+}
+
+/// R05 (#242)：说话人显示名改名必须是原子业务事务。
+///
+/// RED 期望：`renameSpeaker` 的 SELECT → UPSERT → 修订 INSERT 是三次独立提交；
+/// 第二步之后失败会留下“名已改、事件无”的半状态，同名重试也不补事件。
+/// 本文件用测试自有 SQLite 与可控失败注入钉住该行为，不碰用户数据。
+@MainActor
+final class SessionStoreTransactionTests: XCTestCase {
+    private var directory: URL?
+    private var store: SessionStore?
+    private var sessionID: String?
+
+    override func setUp() async throws {
+        try await super.setUp()
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("store-transaction-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let store = SessionStore(directory: directory)
+        try await store.open()
+        let record = try await store.createSession(
+            SessionDraft(kind: .meeting, engineProfile: "test", audioSource: .microphone)
+        )
+        self.directory = directory
+        self.store = store
+        self.sessionID = record.id
+    }
+
+    override func tearDown() async throws {
+        if let store { await store.close() }
+        store = nil
+        sessionID = nil
+        if let directory { try? FileManager.default.removeItem(at: directory) }
+        directory = nil
+        try await super.tearDown()
+    }
+
+    /// 第二次写入（修订事件 INSERT）失败时，名字 UPSERT 必须一起回滚：
+    /// 旧名、事件数都不变，不留“新名已存、事件为 0”的半状态。
+    func testRenameRollsBackNameWhenRevisionInsertFails() async throws {
+        let store = try XCTUnwrap(store)
+        let sessionID = try XCTUnwrap(sessionID)
+        try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "旧名")
+        let eventsBefore = try await store.speakerRevisions(sessionID: sessionID)
+
+        try installRevisionFailure()
+        do {
+            try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "新名")
+            XCTFail("修订 INSERT 失败时改名必须抛错")
+        } catch {
+            XCTAssertTrue(error is SessionStoreError)
+        }
+        try executeTestSQL("DROP TRIGGER fail_speaker_revision;")
+        let names = try await store.speakerNames(sessionID: sessionID)
+        XCTAssertEqual(names["A"], "旧名", "修订失败时名字不得半提交")
+        let eventsAfter = try await store.speakerRevisions(sessionID: sessionID)
+        XCTAssertEqual(eventsAfter.count, eventsBefore.count)
+    }
+
+    /// 失败解除后同名重试成功，且恰好补一条修订事件，不多不漏。
+    func testRetryAfterFailureInsertsExactlyOneRevision() async throws {
+        let store = try XCTUnwrap(store)
+        let sessionID = try XCTUnwrap(sessionID)
+        try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "旧名")
+        let eventsBefore = try await store.speakerRevisions(sessionID: sessionID)
+
+        try installRevisionFailure()
+        do {
+            try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "新名")
+            XCTFail("触发器应拒绝修订 INSERT")
+        } catch {
+            XCTAssertTrue(error is SessionStoreError)
+        }
+        try executeTestSQL("DROP TRIGGER fail_speaker_revision;")
+        try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "新名")
+        let names = try await store.speakerNames(sessionID: sessionID)
+        XCTAssertEqual(names["A"], "新名")
+        let eventsAfter = try await store.speakerRevisions(sessionID: sessionID)
+        XCTAssertEqual(eventsAfter.count, eventsBefore.count + 1)
+    }
+
+    /// 成功命令重复执行不追加事件（同名幂等）。
+    func testRepeatSameNameDoesNotAppendRevision() async throws {
+        let store = try XCTUnwrap(store)
+        let sessionID = try XCTUnwrap(sessionID)
+        try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "同名")
+        let eventsBefore = try await store.speakerRevisions(sessionID: sessionID)
+        try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "同名")
+        let eventsAfter = try await store.speakerRevisions(sessionID: sessionID)
+        XCTAssertEqual(eventsAfter.count, eventsBefore.count)
+    }
+
+    /// A→B→A 保留两次真实变化，各一条修订事件。
+    func testRenameBackAndForthRecordsTwoRevisions() async throws {
+        let store = try XCTUnwrap(store)
+        let sessionID = try XCTUnwrap(sessionID)
+        try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "甲")
+        try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "乙")
+        try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "甲")
+        let events = try await store.speakerRevisions(sessionID: sessionID)
+        XCTAssertEqual(events.count, 3)
+        let names = try await store.speakerNames(sessionID: sessionID)
+        XCTAssertEqual(names["A"], "甲")
+    }
+
+    func testFirstNameFailureLeavesNeitherMappingNorRevision() async throws {
+        let store = try XCTUnwrap(store)
+        let sessionID = try XCTUnwrap(sessionID)
+        try installRevisionFailure()
+        do {
+            try await store.renameSpeaker(sessionID: sessionID, label: "A", name: "新名")
+            XCTFail("触发器应拒绝修订 INSERT")
+        } catch {
+            XCTAssertTrue(error is SessionStoreError)
+        }
+        let names = try await store.speakerNames(sessionID: sessionID)
+        let events = try await store.speakerRevisions(sessionID: sessionID)
+        XCTAssertNil(names["A"])
+        XCTAssertTrue(events.isEmpty)
+    }
+
+    /// 在本测试独占的数据库内使真实 SQLite INSERT 失败，不使用生产注入开关。
+    private func installRevisionFailure() throws {
+        try executeTestSQL("""
+        CREATE TRIGGER fail_speaker_revision BEFORE INSERT ON session_change
+        WHEN NEW.kind = 'speaker'
+        BEGIN SELECT RAISE(ABORT, 'injected revision failure'); END;
+        """)
+    }
+
+    private func executeTestSQL(_ sql: String) throws {
+        let directory = try XCTUnwrap(directory)
+        var pointer: OpaquePointer?
+        let path = directory.appendingPathComponent(SessionStore.fileName).path
+        guard sqlite3_open_v2(path, &pointer, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK,
+              let pointer else {
+            if let pointer { sqlite3_close_v2(pointer) }
+            throw SessionStoreError.openFailed("test database")
+        }
+        defer { sqlite3_close_v2(pointer) }
+        guard sqlite3_exec(pointer, sql, nil, nil, nil) == SQLITE_OK else {
+            throw SessionStoreError.statementFailed("test trigger setup")
+        }
     }
 }

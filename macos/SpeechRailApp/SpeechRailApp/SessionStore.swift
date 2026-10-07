@@ -366,8 +366,20 @@ public actor SessionStore {
     /// 读取方用"修订事件时间晚于纪要创建时间"判断旧版需复核，
     /// 引用仍指向旧 revision（`line` 原文不动）。`ON CONFLICT` 仍保证幂等，
     /// 修订事件只在显示名确有变化时追加，避免重复改名刷出多条事件。
+    /// R05 (#242)：SELECT 旧名 → UPSERT 映射 → 修订事件 INSERT 在同一个
+    /// `BEGIN IMMEDIATE` / COMMIT 范围内；任一步失败整体回滚，不留
+    /// “新名已存、事件为 0”的半状态。事务不跨 await，只包同步 SQLite 语句。
     public func renameSpeaker(sessionID: String, label: String, name: String) throws {
         let now = Date().timeIntervalSince1970
+        // 首次命名（previous == nil）产生修订事件；重复同名不刷事件。
+        // 行为与 testRenameMarksOldMinutesNeedsReview 锁定的现有语义一致。
+        try execute("BEGIN IMMEDIATE;")
+        var committed = false
+        defer {
+            if !committed {
+                try? execute("ROLLBACK;")
+            }
+        }
         let previous = try withStatement(
             "SELECT display_name FROM speaker_name WHERE session_id = ? AND label = ? LIMIT 1;"
         ) { statement -> String? in
@@ -389,18 +401,21 @@ public actor SessionStore {
             bind(statement, 4, now)
             try step(statement)
         }
-        // 显示名确有变化才记修订事件：首次命名与重复同名不刷事件。
-        guard previous != name else { return }
-        // at_ordinal 用 0：改名是会话级映射修订，不指向某一句。
-        // value 存 `label|name`：回看时仍说得清当时改的是谁。
-        let eventSQL = "INSERT INTO session_change (id, session_id, at_ordinal, kind, value, created_at) VALUES (?, ?, 0, 'speaker', ?, ?);"
-        try withStatement(eventSQL) { statement in
-            bind(statement, 1, UUID().uuidString)
-            bind(statement, 2, sessionID)
-            bind(statement, 3, "\(label)|\(name)")
-            bind(statement, 4, now)
-            try step(statement)
+        // 首次命名也记录修订；重复同名不追加事件。
+        if previous != name {
+            // at_ordinal 用 0：改名是会话级映射修订，不指向某一句。
+            // value 存 `label|name`：回看时仍说得清当时改的是谁。
+            let eventSQL = "INSERT INTO session_change (id, session_id, at_ordinal, kind, value, created_at) VALUES (?, ?, 0, 'speaker', ?, ?);"
+            try withStatement(eventSQL) { statement in
+                bind(statement, 1, UUID().uuidString)
+                bind(statement, 2, sessionID)
+                bind(statement, 3, "\(label)|\(name)")
+                bind(statement, 4, now)
+                try step(statement)
+            }
         }
+        try execute("COMMIT;")
+        committed = true
     }
 
     /// 记一条**归属**修订（拆出用），只追加事件，不碰 `speaker_name`。
