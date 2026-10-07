@@ -546,7 +546,7 @@ def test_configured_worker_lifecycle_does_not_depend_on_local_env(
     assert lifecycle == ["start", "close"]
 
 
-def test_startup_failure_closes_already_started_runtime_workers(
+def test_startup_failure_closes_partially_started_and_started_runtime_workers(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     asr_snapshot = tmp_path / "external-qwen3-asr-snapshot"
@@ -557,6 +557,7 @@ def test_startup_failure_closes_already_started_runtime_workers(
     tts_snapshot.mkdir()
     (tts_snapshot / "config.json").touch()
     lifecycle: list[str] = []
+    live_resources: set[str] = set()
 
     class FakeAsrWorker:
         def __init__(self, config: object) -> None:
@@ -564,9 +565,11 @@ def test_startup_failure_closes_already_started_runtime_workers(
 
         async def start(self) -> None:
             lifecycle.append("asr.start")
+            live_resources.add("asr")
 
         async def close(self) -> None:
             lifecycle.append("asr.close")
+            live_resources.remove("asr")
 
         async def transcribe(self, audio: bytes, language: str | None, prompt: str) -> object:
             del audio, language, prompt
@@ -582,10 +585,12 @@ def test_startup_failure_closes_already_started_runtime_workers(
 
         async def start(self) -> None:
             lifecycle.append("tts.start")
+            live_resources.add("tts")
             raise RuntimeError("tts_start_failed")
 
         async def close(self) -> None:
             lifecycle.append("tts.close")
+            live_resources.remove("tts")
 
     monkeypatch.setattr(services_module, "Qwen3Worker", FakeAsrWorker)
     monkeypatch.setattr(services_module, "Qwen3TtsWorker", FailingTtsWorker)
@@ -607,7 +612,8 @@ def test_startup_failure_closes_already_started_runtime_workers(
     with pytest.raises(RuntimeError, match="tts_start_failed"), TestClient(create_app(settings)):
         pass
 
-    assert lifecycle == ["asr.start", "tts.start", "asr.close"]
+    assert lifecycle == ["asr.start", "tts.start", "tts.close", "asr.close"]
+    assert live_resources == set()
 
 
 def test_api_key_and_model_errors_are_distinct() -> None:
