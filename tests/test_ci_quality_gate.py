@@ -62,7 +62,12 @@ if phase == os.environ['FAIL_PHASE']:
         assert "All quality gates passed" not in result.stdout
     else:
         assert any(call["phase"] == "parity" for call in calls)
-        assert any(call["phase"] == "pytest" for call in calls)
+        pytest_calls = [call for call in calls if call["phase"] == "pytest"]
+        assert len(pytest_calls) == 2
+        assert "tests/test_github_workflows.py" in pytest_calls[0]["args"]
+        assert "tests/test_ci_quality_gate.py" in pytest_calls[0]["args"]
+        assert "tests/test_diarization_extensions.py" in pytest_calls[1]["args"]
+        assert "tests/test_diarization_sdk.py" in pytest_calls[1]["args"]
         assert any("origin/main...HEAD" in call["args"] for call in calls)
         assert all("--no-sync" in call["args"] for call in calls if call["args"][0] == "run")
         assert "All quality gates passed" in result.stdout

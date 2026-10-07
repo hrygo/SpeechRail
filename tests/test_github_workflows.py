@@ -59,13 +59,21 @@ def test_ci_is_reusable_and_keeps_service_and_app_runner_boundaries() -> None:
     assert jobs["package"]["needs"] == ["change-scope", "quality", "test"]
     assert "speechrail-*.whl" in ci_text
     assert "speechrail-wheel-candidate" in ci_text
-    assert "tests/test_diarization_extensions.py" in ci_text
-    assert "tests/test_diarization_sdk.py" in ci_text
-    assert "tests/test_diarization_contracts.py" not in ci_text
+    quality_steps = jobs["quality"]["steps"]
+    assert isinstance(quality_steps, list)
+    assert any(
+        isinstance(step, dict)
+        and 'bash scripts/ci_quality_gate.sh --base-ref "$base_ref"'
+        in str(step.get("run", "")).splitlines()
+        for step in quality_steps
+    )
+    quality_gate = (ROOT / "scripts/ci_quality_gate.sh").read_text(encoding="utf-8")
+    assert "tests/test_diarization_contracts.py" not in quality_gate
     for relative_path in (
         "tests/test_diarization_extensions.py",
         "tests/test_diarization_sdk.py",
     ):
+        assert relative_path in quality_gate
         assert (ROOT / relative_path).is_file()
 
 
