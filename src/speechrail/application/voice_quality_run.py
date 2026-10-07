@@ -60,7 +60,7 @@ async def run_voice_quality(
     if probe_set != "voice_quality_v1_zh" or type(runs) is not int or not 1 <= runs <= 3:
         raise ValueError("invalid fixed quality probe request")
     synthesizer = runtime.synthesizer
-    if synthesizer is None or not runtime.tts_ready:
+    if synthesizer is None:
         raise VoiceValidationExecutionError(
             "backend_not_ready",
             "SpeechRail TTS backend is not ready",
@@ -70,6 +70,14 @@ async def run_voice_quality(
     # ASR and commit; each production request remains pinned to this revision.
     with registry.lease_profile(voice_id) as profile:
         resource_key = tts_resource_key(synthesizer, profile.id)
+        # Readiness includes quarantine. Let the Governor reject an isolated
+        # lane with its non-retryable reclamation error instead of masking it.
+        if not runtime.tts_ready and not runtime.governor.tts_lane_isolated(resource_key):
+            raise VoiceValidationExecutionError(
+                "backend_not_ready",
+                "SpeechRail TTS backend is not ready",
+                retryable=True,
+            )
         reclamation_failed = False
 
         def quarantine() -> None:
