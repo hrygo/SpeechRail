@@ -54,6 +54,17 @@ def test_user_guide_parser_reads_declared_count_and_names() -> None:
     assert len(names) == len(set(names)) == 18
 
 
+def test_proxy_contract_parser_reads_declared_count_and_names() -> None:
+    """The stable contract declaration and grouped tool rows are parsed."""
+
+    declared, names = _checker()._proxy_contract_tools()
+
+    assert declared == 18
+    assert "create_voice" in names
+    assert "delete_voice" in names
+    assert len(names) == len(set(names)) == 18
+
+
 def test_reclamation_failure_requires_packaged_recovery_guidance() -> None:
     """A quarantined lane cannot be recovered by generic 503 retry advice."""
 

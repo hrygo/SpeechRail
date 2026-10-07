@@ -41,7 +41,7 @@ SKILL_ERRORS = (
 _USER_GUIDE_HEADING = re.compile(r"^### 1\.1 工具集（(\d+) 个）$")
 _BACKTICKED_CALL = re.compile(r"`([A-Za-z_][A-Za-z0-9_]*)(?:\(\))?`")
 _RESOURCE_URI = re.compile(r"`(speechrail://[a-z0-9\-]+)`")
-_PROXY_TOOL_COUNT = re.compile(r"当前工具集为 (\d+) 个")
+_PROXY_TOOL_COUNT = re.compile(r"MCP 公开 (\d+) 个工具")
 
 #: Error codes whose correct next action is not the generic "fix the request and
 #: retry" advice.  Each entry is ``code -> why an agent must know it``.  Keep the
