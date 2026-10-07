@@ -135,6 +135,9 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 - 首批 5 个真实 SQLite/Gate 反例出现 13 个断言失败后转绿；随后直接文字 stop 假成功、skipped retry 清掉恢复目标、会议并发加入基础归档漏快照的 3 个反例出现 4 个失败后修复。
 - 通用会议入口也必须根据归档后读回的 kind 组合来源封存；新增来源失败反例先红，再修复。基础 Store 命令仍不依赖会议知识域。
 - 同步后定向验证：`swift test --package-path macos/SpeechRailApp --filter "SessionSealContractTests|AssistantSessionTests|AssistantEndRoutingTests|AssistantDrainTests|MeetingSourceSealTests|MeetingKnowledgeArchiveTests|MeetingSessionLifecycleTests|CaptionSessionLifecycleTests|MeetingKnowledgeQueryTests"` → 136 XCTest passed，含 15 项封存合同测试。独立整包审查进行中；不宣称 merge-ready。
+- draft PR #329 首次 CI `37561798476`：新测试文件未登记 Xcode target，Quality Gates 失败。为避让在途 pbxproj，原样将 15 项封存合同测试搬入已登记的 `AssistantEndRoutingTests.swift`；覆盖守卫 OK，搬迁后 19 XCTest 通过。
+- 首次 Swift CI 的 1251 XCTest 均通过，但提词器一次运行回归在释放占用后立即断言 manual 失败；本地同一反例也转红。Ruling：占用释放证明租约交还，不能代替功能层等待封存返回后的收尾证明。测试增加有界等待 manual，保留资源/phase/位置断言；不改变产品或 ASR 语义。已核对其他登记 worktree 与 consumer-replay 分支该测试文件没有重叠改动；代价是多一个异步测试屏障，若最终不收尾仍明确失败。
+- 上述测试屏障修订后扩大定向套件：原 136 XCTest + 77 项提词器生命周期 Swift Testing 全部通过；新 head 的必要 CI 与独立首轮审查仍待完成。
 - 不改 schema v13、ASR 识别事实/协议、pbxproj；不持久化跨重启 pending 命令，不运行真实音频/LLM、UI、服务、模型或发布。
 
 ## 6. 来源
