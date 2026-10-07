@@ -337,6 +337,21 @@ final class SessionSealContractTests: XCTestCase {
         XCTAssertNotNil(snapshot, "joining a basic archive must not lower the meeting success condition")
     }
 
+    func testGenericMeetingSealCannotPublishSuccessBeforeSourceConfirmation() async throws {
+        let original = try await record(.meeting)
+        _ = try await store.appendLine(
+            LineDraft(sessionID: original.id, role: .speaker, text: "来源封存测试。", source: .microphone)
+        )
+        try sql("""
+            CREATE TRIGGER fail_source BEFORE INSERT ON source_snapshot
+            BEGIN SELECT RAISE(ABORT, 'snapshot unavailable'); END;
+            """)
+        let result = await coordinator.sealSessionReporting(id: original.id)
+        guard case .failed = result else { return XCTFail("meeting source is part of confirmation") }
+        XCTAssertNil(coordinator.lastFinalizedSessionID)
+        XCTAssertEqual(coordinator.pendingSeals[original.id]?.stage, .sourceSnapshot)
+    }
+
     private func makeTextAssistant() -> AssistantSession {
         let defaults = UserDefaults(suiteName: "session-seal-text-\(UUID().uuidString)")!
         let preferences = SessionPreferences(defaults: defaults)

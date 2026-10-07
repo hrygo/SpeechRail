@@ -638,7 +638,9 @@ public final class SessionCoordinator {
                 }
                 command.requiresSourceSnapshot = command.requiresSourceSnapshot
                     || pendingSeals[id]?.requiresSourceSnapshot == true
+                    || record.kind == .meeting
                 if command.requiresSourceSnapshot {
+                    sealTasks[id]?.requiresSourceSnapshot = true
                     command.stage = .sourceSnapshot
                     pendingSeals[id] = command
                 }

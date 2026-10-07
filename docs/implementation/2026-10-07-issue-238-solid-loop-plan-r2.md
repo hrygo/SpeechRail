@@ -1,21 +1,24 @@
-<!-- loop-plan-r2: 2026-10-07, baseline baafb59b -->
-# Issue #238 DRY / SOLID 收敛 Loop 实施计划 r2（新基线 `baafb59b`）
+<!-- loop-plan-r2: 2026-10-07, baseline 151297f6 -->
+# Issue #238 DRY / SOLID 收敛 Loop 实施计划 r2（新基线 `151297f6`）
 
 > r1（`2026-10-07-issue-238-solid-loop-plan.md`，基线 `159fea09`，随 R01 PR #320 提交）的后继修订。
 > 凡与 r1 不一致处以本文件为准。当前目标包含实施、审查、验证、提交、推送及通过后的合并；分组/跨包门结论继承 r1。
 
 **Goal:** 11 个 issue（#231 #232 #234 #235 #236 #237 #240 #241 #242 #244 #246）分 9 个 PR 交付。
 **Spec:** [Epic #238](https://github.com/hrygo/SpeechRail/issues/238)、[Epic #245](https://github.com/hrygo/SpeechRail/issues/245)。
-**核验日期：** 2026-10-07，Asia/Shanghai；CI 时间戳为 UTC。进度以本次回读的 SHA、PR 状态和 run ID 为准。基线 `origin/main = baafb59b`（已 fetch）；每包合并后刷新。
+**核验日期：** 2026-10-07，Asia/Shanghai；CI 时间戳为 UTC。进度以本次回读的 SHA、PR 状态和 run ID 为准。基线 `origin/main = 151297f6`（已 fetch）；每包合并后刷新。
 
-**当前实施目标：** R01、R02、R05、R03 已合入；剩余 6 个 issue 分 5 个 PR，按 R04 → R06 → R07 → R08 → R09 完成实施、实质审查、必要验证与通过后的合并。保持 #245 的语义边界；完整验收对照前不关闭 issue。结构化 goal 仍 active；现有接口不支持更新正文，旧正文中的基线、逐包等待确认和错误同文件判断均由本文更正，不将旧目标虚假标为完成。
+**当前实施目标（2026-10-07 更新）：** R01、R02、R05、R03、R04 已合入；剩余 4 个 issue 分 4 个独立 PR，按 **R06 #241 → R07 #232 → R08 #231 → R09 #234** 完成实施、整包独立审查、定向验证与必要 CI，验证通过立即 squash 合并，再刷新 main。每包 1–3 issue；不堆叠 PR、不 force-push、不关闭未验收 issue、不 `Closes #238`。保持 #245 的语义禁写区，最终逐条核对十一项验收矩阵后决定关闭 issue 与完成 goal。
+
+结构化 goal 仍 active。2026-10-07 再次核对：Goal 工具只提供完成/阻塞状态，不能改正文；原生 Codex UI 入口也被 computer-use 安全规则拒绝。旧 goal 的基线、PR 状态、逐包等待确认及错误同文件判断由本段执行目标更正，不虚假标为 complete 再重建，不绕过 UI 限制。
 
 ## 0. 基线与 #245 现状（只读快照）
 
-- `origin/main = baafb59b`：包含 #249/#252 文档及提词器 preview 500ms 预设变更（这是业务行为变化）、#321 V17 回归、#324 3.8.0 发布提交，以及 R01/R02/R05/R03。
+- `origin/main = 151297f6`：包含 #249/#252 文档及提词器 preview 500ms 预设变更（这是业务行为变化）、#321 V17 回归、#324 3.8.0、#326 限时 ASR 诊断、#327 3.8.1 发布提交，以及 R01/R02/R05/R03/R04。
 - #245 子任务历史快照：#247–#252 CLOSED。R04 开工回读 #245/#253 仍 OPEN。R03 曾核对 acceptance-evidence、app-validation、boundary-fix、consumer-replay、delivery、validation-v8 等 ASR worktree；R04 的当前登记表已无这些 checkout，不据此断言在途分支停工或语义禁写区解除。
 - #320 R01（#244）已合并为 `451aeb1e`；#322 R02（#240/#246）已合并为 `1edf9398`；#323 R05（#242）已合并为 `ff34bfcf`。三包均在匹配的 head 上通过实质审查、定向验证与必需 CI 后 squash 合并。
 - #325 R03（#235）已在修订 head `ed02d7a3` 的全部必要 CI 通过后合并为 `baafb59b`；CI run `37556276635`，UTC `2026-10-07T01:21:27Z` 合并。
+- #328 R04（#237/#236）已在 head `0f22ada5` 的全部必要 CI 通过后合并为 `151297f6`；CI run `37560283532`，UTC `2026-10-07T02:12:35Z` 合并。
 - 在途远端分支（只读核对）：`asr-production-consumer-replay-253`（pbxproj + 新增 `ASRProductionConsumerReplayTests.swift` 881 行）、`asr-clear-barrier-245`（`application/realtime_openai.py` 283 行 + 路由 + 契约文档，#245 语义面）、`v17-backlog-playback-268`（矩阵文档 + V17 测试）。
 - 用户最新授权：**PR 经实质审查和必要验证通过后尽快合并**，不再逐包询问；旧版等待合并确认的限制已被替代。main 要求线性历史，采用 squash/rebase 合并，不绕过 `Quality Gates` / `Gate Summary`，不 force-push。
 
@@ -32,8 +35,8 @@
 | #246 活动保护 | 已合并 | 生产 alignment 与 evictor 共用 WorkerLeaseLock；活动/回收互斥，结束后重设 idle 起点；移除接线导致两个回归失败 | R02 #322 |
 | #242 改名事务 | 已合并 | 映射和修订事件共用 SQLite 事务；5 个故障/幂等回归，测试自有 trigger，无生产开关和 pbxproj 修改 | R05 #323 |
 | #235 验证用例 | 已合并 | 两个用例接线；同次身份、unknown、CAS/撤销、保存失败、重复取消与 timeout/cancel 回归通过；372 项定向测试，独立审查 Required 修复及全部必要 CI 通过 | R03 #325 |
-| #237 坏 2xx | 未修 | `LLMProvider.check`（约 2475–2480）2xx 即 `.connected`；`operationUnavailable` 只判 operation 不可用 | R04 |
-| #236 中立支持 | 未修 | provider 仍持 `TeleprompterAIObservationHandler/Context/StrictJSON`（1175/1264/1382/1509+/1614 行）；零提交 | R04 |
+| #237 坏 2xx | 已合并 | probe/正式调用共用最低响应校验；坏 2xx 不再 ready；App 展示新状态编译通过 | R04 #328 |
+| #236 中立支持 | 已合并 | 中立 context/observer、唯一 parser、显式 recorder 注入；支持层独立 type-check 与全部 CI 通过 | R04 #328 |
 | #241 封存结果 | 部分改善 | 剩余 `finalize`(442-)/`endAssistant`(543-) 纯文字分支 `try?` + 无条件成功 ID | R06（收窄） |
 | #232 保存恢复 | 部分改善 | Meeting `commit`(867-) 每次 UUID 新行、恢复 note(949-) 另 UUID；Caption(809-) 同；行/outbox 两次提交 | R07 |
 | #231 收尾屏障 | 部分改善 | 收尾证明面：Meeting stop(594-626)/Caption(458-525) 等了消费但不验保存成败 | R08（收窄） |
@@ -89,8 +92,8 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 | R02 #240+#246 | MERGED | PR #322 / `1edf9398` | 99 定向测试、28 个 HTTP/lifecycle 测试；移除接线使 2 个回归转红；同步 R05 后 CI run `37550404724` 通过 |
 | R05 #242 | MERGED | PR #323 / `ff34bfcf` | 42 定向 Swift 测试；去掉事务使 3 项转红；CI run `37549739387` 的 Swift/App/必需 gate 通过 |
 | R03 #235 | MERGED | PR #325 / `baafb59b` | 372 项定向 fake/HTTP/contract、Ruff/Mypy；独立审查 Required 已修；CI `37556276635` 全部必要检查通过 |
-| R04 #237+#236 | 实施与验证中 | 无 | 基线 `baafb59b`；响应反例已红→绿，中立类型/parser/observer 已迁移 |
-| R06 #241 | planned | 无 | 范围收窄（§1 行） |
+| R04 #237+#236 | MERGED | PR #328 / `151297f6` | 283 定向 Swift、2 项 Python 守卫、独立编译；Required 已修，CI `37560283532` 全绿后合并 |
+| R06 #241 | 实施与验证中 | 分支 `codex/238-r06-session-seal` | 已同步 `151297f6`；136 项定向测试通过，整包独立审查进行中，CI 待完成 |
 | R07 #232 | planned | 无 | 注意 consumer-replay 分支 |
 | R08 #231 | planned | 无 | 注意 clear-barrier 分支，只读合同 |
 | R09 #234 | planned | 无 | #249 关闭已解锁，排末位 |
@@ -121,6 +124,18 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 - 提交前刷新 main 至 `fe106a60`（#326 限时 ASR 排障采集）；新增文件与 R04 无交集，`AGENTS.md` 仅增加显式限时录音例外。本任务未操作录音开关或运行态。将同步该基线后提交；匹配 head/base 的 CI 仍待完成，不声明 merge-ready。
 - PR #328 首个 App CI（run `37559927131`）发现 `SettingsComponents` 的 exhaustive switch 漏接新响应状态。SPM 排除了该 UI 文件，不能证明 App target 编译；补上“服务已连接，尚未确认能回答”的展示分支，颜色沿用既有未确认状态。CI 编译反例为红灯，修复后的 App 编译须由新 head CI 证明。
 - Ruling：PR #327 发布提交 `eb45faaa` 在 R04 推送后合入 main。为遵守不 force-push、保留远端历史并满足 strict base，仅在 feature 分支合入最新 main（无文件内容冲突）；最终仍 squash 到 main，保持 main 线性。代价是重跑匹配新 head 的必要 CI；发布的版本材料仅随基线继承，不归 R04 变更。
+- 修订 head `0f22ada5` 的 CI `37560283532`：Quality Gates、Gate Summary、Python、Swift、App Build、Package 全部通过；已立即 squash 合并为 `151297f6`。#237/#236/#238 的进度评论已同步，issue 尚 OPEN。
+
+### R06 验证与取舍（2026-10-07）
+
+- Ruling：R04 App/Swift CI 排队期间，从当时 main `eb45faaa` 启动独立 R06 本地分支；R04 合并后、本包推送前 rebase 到 `151297f6`。只出现两包自有构造注入的冲突，明确保留 LLM recorder 和 archive writer 两个依赖，不覆盖 ASR 工作。代价是同步后的定向复验；不会形成 stacked PR。
+- Store 的唯一基础归档命令返回同一条提交后读回的 archived 记录，missing/未确认失败；已 archived 时不再 UPDATE，保留首次时间与原因。`SessionArchiveWriting` 只暴露该确认边界，默认为真实 Store，fake 可模拟提交后确认失败。
+- 复用 `SessionSealResult`，冻结 record/lease/结束时间/原因和暂停区间；按记录保存进程内 pending 命令。先合暂停，再归档确认，会议最后封来源快照。快照失败只重试快照，不重新归档或生成。失败释放本目标资源，不发布成功 ID；无持久化记录只释放。
+- Ruling：stopper 调用 `abandonOccupancy` 表示它撤销了保存证明（助手输入失败已有这条路径）。迟到的 finalize 返回 skipped，不能越过撤销去归档任何记录；若归档提交期间才出现新租约，则可以确认冻结的旧记录，但只能清理仍匹配的原租约。代价是被撤销目标的保存恢复仍由原 feature owner 负责，R08 后续补保存屏障结果接线。
+- 首批 5 个真实 SQLite/Gate 反例出现 13 个断言失败后转绿；随后直接文字 stop 假成功、skipped retry 清掉恢复目标、会议并发加入基础归档漏快照的 3 个反例出现 4 个失败后修复。
+- 通用会议入口也必须根据归档后读回的 kind 组合来源封存；新增来源失败反例先红，再修复。基础 Store 命令仍不依赖会议知识域。
+- 同步后定向验证：`swift test --package-path macos/SpeechRailApp --filter "SessionSealContractTests|AssistantSessionTests|AssistantEndRoutingTests|AssistantDrainTests|MeetingSourceSealTests|MeetingKnowledgeArchiveTests|MeetingSessionLifecycleTests|CaptionSessionLifecycleTests|MeetingKnowledgeQueryTests"` → 136 XCTest passed，含 15 项封存合同测试。独立整包审查进行中；不宣称 merge-ready。
+- 不改 schema v13、ASR 识别事实/协议、pbxproj；不持久化跨重启 pending 命令，不运行真实音频/LLM、UI、服务、模型或发布。
 
 ## 6. 来源
 
