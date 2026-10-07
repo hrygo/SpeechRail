@@ -72,7 +72,7 @@ OpenAI 兼容接口。
 | `/v1/voice-designs*`、`/v1/voices/clone*` | 音色创建与克隆 | 用一句话设计音色、试听、用参考录音克隆、验证，再发布进音色库。 |
 | `/v1/speechrail/voices*`、`/v1/speechrail/pronunciation-sets*` | 音色库与发音映射 | 不可变音色 revision，支持回滚与撤销；面向合成的版本化发音映射集。 |
 | `/v1/jobs*` | 持久异步任务 | owner-scoped 任务记录，用于长转写。你传不透明引用；服务不落盘原始音频或转写文本。 |
-| `WS /v1/realtime` | Realtime ASR/TTS | current-only 无状态 Speech Plane（契约 `4.1.0`）：转写 session、服务端 VAD 事实、彼此独立的词级对齐与分人 opt-in，以及显式的 `speechrail.tts.*` 渲染控制。 |
+| `WS /v1/realtime` | Realtime ASR/TTS | 无状态 Speech Plane：转写 session、服务端 VAD 事实、彼此独立的词级对齐与分人 opt-in，以及显式的 `speechrail.tts.*` 渲染控制。协议规则与版本以 [Realtime 契约](contracts/realtime-openai.md)为准。 |
 
 完整机器可读契约见
 [`contracts/openapi.yaml`](contracts/openapi.yaml)，WebSocket 契约见
@@ -245,10 +245,8 @@ speech.stream_to_file("speech-output.wav")
 ```
 
 Realtime 客户端连接 `ws://127.0.0.1:8201/v1/realtime`，并遵循
-[`contracts/realtime-openai.md`](contracts/realtime-openai.md)。当前 wire 为
-current-only 语义：`delta` partial 只能追加；可选的 `snapshot` 扩展按同一 item 的
-单调递增 `revision` 替换完整文本；`partial_mode` 与 `chunk_duration_ms` 必须先收到
-`transcription_session.updated` 的实际回显，再发送首个 PCM。SDK、cURL、Open-WebUI、
+[`contracts/realtime-openai.md`](contracts/realtime-openai.md)中声明的 ASR/TTS 事件与字段。
+客户端负责 LLM 编排与播放；未声明的事件、字段和兼容别名均被拒绝。SDK、cURL、Open-WebUI、
 LiveKit/Pipecat 和 OpenClaw 示例见
 [`docs/users/integrations.md`](docs/users/integrations.md)。
 

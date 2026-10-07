@@ -1054,12 +1054,12 @@ def test_realtime_first_hypothesis_metrics_record_at_most_once_per_turn() -> Non
 def test_openai_commit_releases_streaming_slot_for_next_append() -> None:
     client, factory = _client()
     with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
         socket.receive_json()  # session.created
         socket.send_json(
                         session_update(model="whisper-1")
         )
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
 
         def commit_round() -> None:
             socket.send_json(
@@ -1096,7 +1096,7 @@ def test_openai_disconnect_releases_slot_while_connect_pending() -> None:
 
     client, factory = _client(factory=HangingConnectStreamingFactory())
     with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
         socket.receive_json()  # session.created
         socket.send_json(
             {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
@@ -1116,12 +1116,12 @@ def test_openai_disconnect_releases_slot_while_connect_pending() -> None:
 def test_openai_model_alias_resolves_to_asr_profile() -> None:
     client, factory = _client()
     with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
         socket.receive_json()  # session.created
         socket.send_json(
                         session_update(model="gpt-4o-transcribe")
         )
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
         socket.send_json(
             {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
@@ -1137,12 +1137,12 @@ def test_openai_diarized_model_alias_does_not_enable_realtime_diarization() -> N
     segment = TranscriptSegment(id=1, start_ms=0, end_ms=500, text="你好")
     client, factory = _client(segments=(segment,), diarization_engine=engine)
     with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
         socket.receive_json()  # session.created
         socket.send_json(
                         session_update(model="gpt-4o-transcribe-diarize")
         )
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
         socket.send_json(
             {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
@@ -1202,7 +1202,7 @@ def test_realtime_diarization_encodes_missing_provisional_speaker_as_unknown() -
 def test_openai_commit_without_diarization_does_not_request_segments() -> None:
     client, factory = _client()
     with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
         socket.receive_json()  # session.created
         socket.send_json(
                         session_update(model="whisper-1")
@@ -1242,7 +1242,7 @@ def test_openai_commit_with_segment_timestamps_requests_segments() -> None:
 def test_openai_realtime_rejects_a_frame_over_the_configured_limit() -> None:
     factory_client, _ = _client()
     with factory_client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
         socket.receive_json()  # session.created
         socket.send_json(
                         session_update(model="whisper-1")
@@ -1260,7 +1260,7 @@ def test_openai_realtime_rejects_a_frame_over_the_configured_limit() -> None:
 def test_openai_tts_model_is_rejected_in_transcription_session() -> None:
     client, _ = _client()
     with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
         socket.receive_json()  # session.created
         socket.send_json(
                         session_update(model="tts-1")
@@ -1272,7 +1272,7 @@ def test_openai_tts_model_is_rejected_in_transcription_session() -> None:
 def test_openai_rejects_unknown_model() -> None:
     client, _ = _client()
     with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
         socket.receive_json()  # session.created
         socket.send_json(
                         session_update(model="gpt-5-fake")
@@ -1285,7 +1285,7 @@ def test_openai_rejects_unknown_model() -> None:
 def test_openai_rejects_unsupported_turn_detection() -> None:
     client, _ = _client()
     with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
         socket.receive_json()  # session.created
         socket.send_json(
                         session_update(turn_detection={"type": "unsupported_mode"})
@@ -1298,7 +1298,7 @@ def test_openai_rejects_unsupported_turn_detection() -> None:
 def test_openai_rejects_tools() -> None:
     client, _ = _client()
     with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
         socket.receive_json()  # session.created
         socket.send_json(
                         session_update(extra_session={"tools": [{"type": "function", "name": "x"}]})
@@ -1338,7 +1338,7 @@ def test_openai_commit_without_audio_is_graceful_and_preserves_session() -> None
 def test_openai_rejects_unsupported_client_event() -> None:
     client, _ = _client()
     with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
         socket.receive_json()  # session.created
         socket.send_json({"type": "conversation.item.delete", "item_id": "x"})
         error = socket.receive_json()
@@ -1349,7 +1349,7 @@ def test_openai_rejects_unsupported_client_event() -> None:
 def test_openai_invalid_audio_fails_closed() -> None:
     client, _ = _client()
     with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
         socket.receive_json()  # session.created
         socket.send_json({"type": "input_audio_buffer.append", "audio": "not-base64!!"})
         error = socket.receive_json()
@@ -1360,7 +1360,7 @@ def test_openai_invalid_audio_fails_closed() -> None:
 def test_openai_realtime_bad_json_is_recoverable() -> None:
     client, _ = _client()
     with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
         socket.receive_json()  # session.created
         socket.send_text("{invalid json")
         error = socket.receive_json()
@@ -1404,7 +1404,7 @@ def test_openai_removed_response_create_is_rejected() -> None:
     client, _ = _client()
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()  # session.created
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
         socket.send_json({"type": "response.create"})
         error = socket.receive_json()
         assert error["type"] == "error"
@@ -1434,8 +1434,8 @@ def test_openai_session_release_called_on_disconnect() -> None:
     client, factory = _client()
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()  # session.created
-# current-only handshake has no conversation.created event
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
         socket.send_json(
             {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
@@ -1470,7 +1470,7 @@ def test_openai_disconnect_releases_slot_even_when_commit_blocks(request_receipt
     client, factory = _client(factory=_BlockedCommitFactory())
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()  # session.created
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
         socket.send_json(
             {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
@@ -1534,7 +1534,7 @@ def test_openai_realtime_rejects_diarization_without_profile() -> None:
     client, _ = _client()
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()  # session.created
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
         socket.send_json(
                         session_update(diarization={"enabled": True})
         )
@@ -1598,7 +1598,7 @@ def test_openai_realtime_forwards_multiple_snapshot_events_before_final() -> Non
     client, _ = _client(partials=("你", "你好", "你好啊"))
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()  # session.created
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
         socket.send_json(
             {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
@@ -1739,7 +1739,7 @@ def test_realtime_partial_rewrite_is_delivered_as_replaceable_snapshot() -> None
     client, _ = _client(partials=("abc", "adc"), completed_text="adc")
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()  # session.created
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
         socket.send_json(
         {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
@@ -1841,7 +1841,7 @@ def test_realtime_diarization_aligns_frozen_completed_text_without_asr_segments(
         text_aligner=aligner,
     )
     with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
         socket.receive_json()
         socket.send_json(
                         session_update(diarization={"enabled": True})
@@ -2667,7 +2667,7 @@ def test_regular_realtime_transcription_never_calls_the_fixed_text_aligner() -> 
         diarization_engine=FakeDiarizationEngine(), text_aligner=aligner
     )
     with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
         socket.receive_json()
         socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 800)})
         socket.send_json({"type": "input_audio_buffer.commit"})
@@ -3114,7 +3114,7 @@ def test_realtime_connect_failure_releases_factory_slot_and_recovers() -> None:
     factory = FlakyConnectFactory()
     client, _ = _client(factory=factory)
     with client.websocket_connect("/v1/realtime") as socket:
-        # current-only handshake has no conversation.created event
+        # Realtime ASR/TTS handshake has no conversation.created event
         socket.receive_json()
         socket.send_json(
             {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 80)}
@@ -3167,7 +3167,7 @@ def test_realtime_session_update_error_message_truncates_client_model() -> None:
 def test_realtime_prompt_exactly_at_limit_forwards_to_session() -> None:
     client, factory = _client()
     with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
         socket.receive_json()
         socket.send_json(
                         session_update(prompt="p" * 2000)
@@ -3215,8 +3215,8 @@ def test_realtime_snapshot_preview_driven_by_policy_interval() -> None:
     )
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()  # session.created
-# current-only handshake has no conversation.created event
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
         update = session_update()
         update["session"]["speechrail"]["asr"] = {
             "preview_interval_ms": 500,
@@ -3337,7 +3337,7 @@ def test_realtime_single_frame_exceeds_max_buffer_bytes() -> None:
         }
     )
     with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
         socket.receive_json()
 
         # The service budget can represent a 1,000 ms segment; a single 70 KB
@@ -3425,7 +3425,7 @@ def test_openai_commit_failure_emits_failed_terminal_and_releases_slot() -> None
     factory = FailingCommitStreamingFactory()
     client, factory = _client(factory=factory)
     with client.websocket_connect("/v1/realtime") as socket:
-        # current-only handshake has no conversation.created event
+        # Realtime ASR/TTS handshake has no conversation.created event
         socket.receive_json()
         socket.send_json(session_update(model="whisper-1"))
         socket.receive_json()  # session.updated
@@ -3745,7 +3745,7 @@ def test_openai_client_event_queue_overflow_closes_session(monkeypatch) -> None:
     def scenario() -> None:
         try:
             with client.websocket_connect("/v1/realtime") as socket:
-# current-only handshake has no conversation.created event
+# Realtime ASR/TTS handshake has no conversation.created event
                 socket.receive_json()
                 socket.send_json(
                                         session_update(model="whisper-1")

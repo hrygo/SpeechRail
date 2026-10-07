@@ -713,12 +713,13 @@ registry 不可读返回 `503 pronunciation_store_unavailable`（可重试）。
 
 ---
 
-## 6. Realtime current-only WebSocket (`WS /v1/realtime`)
+## 6. Realtime ASR/TTS WebSocket (`WS /v1/realtime`)
 
 连接端点：`ws://127.0.0.1:8201/v1/realtime`。唯一机器 schema 与共享 fixtures 位于
 [`contracts/realtime-events.schema.json`](../../contracts/realtime-events.schema.json) 和
-`tests/fixtures/realtime-current/`。本节与它们必须同批更新；没有旧事件翻译、双 wire profile
-或 `/v2` 迁移层。
+`tests/fixtures/realtime-current/`。支持的事件与字段以 [Realtime ASR/TTS 契约](../../contracts/realtime-openai.md)
+及配套 schema 为准；未声明的事件、字段和兼容别名均不受支持。本节与它们必须同批更新；
+没有旧事件翻译、双 wire profile 或 `/v2` 兼容层。
 
 ### 6.1 音频与会话
 

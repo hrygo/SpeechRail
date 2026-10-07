@@ -46,7 +46,7 @@ App 的 TTS 请求必须把这个快照当作 revision pin 的来源：Realtime 
 `SpeechRail-Expected-Model-Revision` 传递同代约束。匹配不到可用 voice、对应 operation 或
 revision 时显式保持 `nil`，走服务端普通协商，不从 voice 名称、模型名或本地时间推断版本。
 
-### Native Realtime 编排边界（current-only）
+### Native Realtime ASR/TTS 编排边界
 
 `SpeechRailApp` 的 `RealtimeASRClient` 只发当前契约：先发一次 `session.update`
 （`session.type=transcription`、24 kHz mono PCM16、`session.audio.input.transcription.model` 与

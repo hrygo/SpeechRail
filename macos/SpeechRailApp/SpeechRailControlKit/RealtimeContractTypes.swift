@@ -43,7 +43,7 @@ public struct SpeechRailASRPolicy: Sendable, Equatable {
     }
 }
 
-/// Canonical current-only transcription session configuration (`session.update`).
+/// Transcription session configuration declared by the Realtime ASR/TTS contract (`session.update`).
 ///
 /// The factory intentionally exposes only the fields SpeechRail implements; it
 /// cannot emit the removed `transcription_session.update`, flat

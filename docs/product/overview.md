@@ -2,191 +2,132 @@
 title: "SpeechRail 产品白皮书与全景概述"
 status: active
 audience: "产品经理、业务架构师、技术决策者"
-version: "3.2.0"
-date: 2026-09-26
+version: "3.3.0"
+date: 2026-10-07
 ---
 
-# 🌟 SpeechRail 产品全景白皮书
+# SpeechRail 产品白皮书与全景概述
 
-> **产品定位**：面向 macOS (Apple Silicon) 本机应用的高性能、隐私优先、OpenAI REST/Realtime 语音子集运行时服务；Realtime 采用 current-only 无状态 Speech Plane。
-> **中文名称**：声轨 (SpeechRail) &nbsp;|&nbsp; **技术标识**：`speechrail`
+SpeechRail 面向单人 Apple Silicon Mac，提供原生语音创作与会话应用，以及供本机应用共享的语音识别、合成和音色服务。用户可以在 macOS App 中配音、管理音色、使用语音助手、记录会议、显示字幕和准备口播稿；开发者可以通过 REST、Realtime WebSocket 或 MCP 接入同一套语音能力。
 
----
+产品由原生 App、共享语音服务和 MCP 代理组成。语音模型在本机服务中运行；App 和第三方客户端负责各自的界面、音频采集、播放、记录和 AI 业务编排。功能是否可用由已准备的模型、配置、权限及服务公布的有效能力共同决定。
 
-## 🎯 1. 产品愿景与电梯演讲 (Elevator Pitch)
+## 1. 产品组成与价值
 
-对于需要高质量语音识别与合成能力的**端侧 AI 应用**（如会议助理、桌面智能体、配音工具、无障碍辅助等），**SpeechRail** 是一个**轻量、高效、本地优先的共享语音引擎**。
-
-与各应用分别嵌入语音模型运行时的方案相比，SpeechRail 提供**统一的单机多应用共享运行时**，将模型生命周期、资源准入和协议转换集中在一个可观测边界内。请求路径默认本地处理，不静默下载模型或读取远程音频；安装与模型准备由用户显式触发并可能联网。SpeechRail 对齐 OpenAI Audio / Realtime 的已实现语音子集，Realtime 不承载服务端 LLM、对话历史或播放控制，完整助手由调用方编排。
-
----
-
-## 💎 2. 核心价值主张 (Value Propositions)
-
-```mermaid
-mindmap
-  root((SpeechRail 核心价值))
-    🔒 隐私安全与合规
-      请求路径不外呼
-      音频与完整转写不入普通日志
-      服务不留存原始音频
-      App 会话可持久化文字
-    ⚡ 极致性能与硬件调优
-      Apple Silicon 统一内存优化
-      WAV 零拷贝 Fast-Path
-      低显存占用与动态 Token 预算
-    🔌 清晰的语音契约边界
-      OpenAI REST 语音子集
-      current-only Realtime Speech Plane
-      调用方拥有助手编排
-    🛡️ 稳健的资源调度
-      进程级物理隔离
-      Resource Governor 配额管控
-      智能有界并发与优雅降级
-```
-
-### 🔒 1. 绝对隐私与企业级合规 (Privacy-First & Offline)
-- **请求路径本地化**：模型快照从仓库外的本地制品加载；服务请求路径不下载模型、不读取远程音频 URL。安装和模型准备是显式的运维动作，可访问锁定的本地制品源。
-- **敏感数据最小化**：原始音频、PCM、完整转写和完整 prompt 不进入普通日志、fixture 或报告；自定义音色与任务元数据是否持久化以当前接口契约为准。
-- **最小化日志审计**：日志中仅记录 Request ID、时长与耗时指标，严禁打印原始音频与转写正文。
-
-### ⚡ 2. Apple Silicon 硬件级性能 (Apple Silicon Accelerated)
-- **按规格声明模型精度**：ASR 与 TTS 使用 MLX/MPS 运行。`fast`、`quality` 使用 8-bit 语音权重；`reference` 使用 bf16，并按用户裁定继承同族 8-bit 档位已通过的门禁证据，未在本机逐项复测。该精度差异不证明质量、资源或延迟更优。曾评估的 4-bit 轻量方案因验收门 E1 在公开真人语料上测得 0.6B ASR 相对 8-bit 基线劣化 1.38pp（>0.5pp 阈值）而未采纳。
-- **有界推理链路**：WAV 容器支持 fast-path；Resource Governor、worker 生命周期与有限队列共同控制单机资源。延迟和吞吐不在产品概述中作固定承诺。
-- **整句语音合成**：24 kHz 自然语音生成，支持多语种与预设音色；每个 TTS spec 都有 CustomVoice 系统声音与 Base reference clone；`reference` 另含仅供设计作业使用的 VoiceDesign（1.7B BF16）。设计与克隆使用独立 capability lane，不把 Design 作为普通合成或 clone fallback。
-
-### 🔌 3. 标准语音契约与清晰编排边界
-- **REST 子集**：`/v1/audio/transcriptions` 与 `/v1/audio/speech` 提供文档声明的 OpenAI 兼容语音接口。
-- **Realtime Speech Plane**：`/v1/realtime` 只接收 current-only transcription session、音频 buffer 和 `speechrail.tts.*`；调用方持有 LLM、历史、工具、播放队列与 barge-in 策略。
-- **当前 wire**：`3.0.2` 不提供旧 Realtime 事件、字段、双 wire 或 `/v2` 迁移层；新集成直接按当前契约实现。数据迁移不属于当前交付范围，需保留的数据由调用方自行备份。
-
-### 🛡️ 4. 稳健的单机多应用调度 (Multi-App Resource Governor)
-- **物理进程隔离**：主 HTTP 服务与推理 Worker 物理分离，模型崩溃不波及服务 API。
-- **流量调度与背压**：内置 Resource Governor，自动协调实时流式与批量任务，防止显存过载或系统卡死。
-
----
-
-## 👥 3. 目标用户画像与角色旅程 (User Personas & Journeys)
-
-```mermaid
-journey
-    title 典型用户角色与使用旅程
-    section 桌面 AI 助手用户 (如 QwenPaw)
-      开启应用: 5: 快速启动
-      按下快捷键录音: 5: 丝滑体验
-      获取准确文本: 5: 高精度/带标点
-    section 实时会议记录用户 (如 Sona)
-      进入实时会议: 5: 极速建立 WebSocket
-      持续多方发言: 5: 实时流式字幕 + 说话人分离
-      生成会议纪要: 5: 导出带时间戳与角色记录
-    section 配音与内容创作者
-      输入合成文案: 5: 选择自然音色
-      试听与微调: 5: 24kHz 高保真流式生成
-      导出媒体音频: 5: WAV/MP3/PCM 批量产出
-```
-
-SpeechRail 以三个**用户差异化规格**交付共享 API payload 契约；ASR 与 TTS 独立选档，规格只绑定权重与角色制品，分人、对齐和 VoiceDesign 仍由任务显式 opt-in，worker 协议与调度保持共享：
-
-| spec | 用户定位 | ASR / TTS 权重 | TTS 角色 | 分人 |
-|---|---|---|---|---|
-| 🟢 `fast` | 嵌入/听写、个人桌面助手 | 8-bit | CustomVoice + Base | 按显式供给 |
-| 🟡 `quality` | 会议、播客、访谈、日常创作 | 8-bit | CustomVoice + Base | 按显式供给 |
-| 🟣 `reference` | 参考精度、声音设计作业 | bf16（继承 8-bit 门禁证据） | CustomVoice + Base + VoiceDesign | 按显式供给 |
-
-`fast` / `quality` / `reference` 的 CustomVoice 与 Base 是独立 TTS capability lane；`reference` 的 VoiceDesign 是仅供设计作业的第三条 lane。不同 lane 可并发，同一 lane 仍串行；空闲冷却后按 capability group trim/close，下一次请求再惰性恢复所需角色。设备内存推荐只作为起始建议，不写成硬门槛。
-
-![三档模型与 TTS capability 关系图](../architecture/diagrams/three-tier-model-architecture.svg)
-
-### 画像一：🟢 `fast`— 桌面智能体与语音输入用户 (Desktop Agents)
-- **典型应用**：QwenPaw、Hermes Agent、本地听写工具。
-- **核心诉求**：随时按下快捷键说话，极速返回精准转写文本；绝不上传麦克风录音至云端。
-- **SpeechRail 解法**：通过 `/v1/audio/transcriptions` 或 `whisper-1` 别名直连，秒级返回识别结果。
-
-### 画像二：🟡 `quality`— 沉浸式会议与协同办公用户 (Meeting & Collaboration)
-- **典型应用**：Sona 会议助理、团队协作套件。
-- **核心诉求**：长时间连续会议流式字幕、说话人分离（Diarization）、低延迟无缝对齐。
-- **SpeechRail 解法**：通过 `/v1/realtime` 提供流式 ASR、Server VAD；分人由任务显式 opt-in，只有 Sortformer 与点名 aligner 供给且 readiness 成功时才声明匿名声纹分割。
-
-### 画像三：🟣 `reference`— 内容创作者与自动化配音系统 (Content Creators)
-- **典型应用**：播客生成器、小说朗读器、短视频配音脚本。
-- **核心诉求**：多情感、多角色、高保真自然声音输出，支持长文案与流式断句播放。
-- **SpeechRail 解法**：通过 `/v1/audio/speech` 输出 24 kHz 音频，提供 `warm`、`calm`、`bright` 等预设音色；`reference` 的自然语言设计路由到 VoiceDesign，普通系统声音与参考音频克隆分别路由到 CustomVoice/Base capability worker，不触发模型频繁来回切换。
-
----
-
-## 📊 4. 业务场景与能力矩阵 (Capability Matrix)
-
-| 业务场景 | 对应核心能力 | 接口入口 | 当前证据口径 | 适配客户端 / 工具 |
-|---|---|---|---|---|
-| **录音速记 / 播客转写** | 批量文件 ASR、分段与时间戳 | `POST /v1/audio/transcriptions` | 契约可用；长时质量与性能按对应验收报告核定 | QwenPaw, OpenAI SDK, cURL |
-| **实时会议字幕与纪要** | 流式 ASR + 匿名声纹分离 | `WS /v1/realtime` (transcription) | 契约可用；DER/JER、长时延迟与资源行为需单独验收 | Sona, Pipecat |
-| **全双工语音助手** | Server VAD + 打断 + 流式 TTS | `WS /v1/realtime` (full-duplex) | 服务交付语音事实；播放队列与打断时延由调用方验收 | 智能桌面 Assistant, Sona |
-| **高保真文案朗读** | 24kHz 整句/分段语音合成 | `POST /v1/audio/speech` | 契约可用；音质、RTF 与首音时延按 runtime 单独验收 | 听书工具, 配音工作流 |
-| **长音频异步离线处理** | 任务队列与 Spool 调度 | `POST/GET/DELETE /v1/jobs` | 提供有界队列；吞吐与 OOM 包络需按 profile 验收 | 后台自动化任务, SRE 批处理 |
-
-### 4.1 三档能力矩阵（API 声明契约）
-
-| 能力 | `fast` | `quality` | `reference` |
+| 组成 | 面向谁 | 提供什么 | 职责边界 |
 |---|---|---|---|
-| 批量 ASR（分段与词级时间戳）/ Realtime（分段事实） | ✓ | ✓ | ✓ |
-| 系统声音 / 参考克隆（`custom_voice` / `base`） | ✓ | ✓ | ✓ |
-| 说话人分离 (Diarization) | 按显式供给 | 按显式供给 | 按显式供给 |
-| VoiceDesign（仅设计作业） | ✗ | ✗ | ✓ |
+| macOS App | 内容创作者、本机语音用户 | 创作、会话与引擎管理界面 | 调用服务；负责功能内的采集、播放、本机记录和 LLM 编排，不加载语音模型 |
+| 共享语音服务 | App、桌面工具和自建工作流 | 识别、合成、音色管理、可选对齐与匿名说话人分离 | 管理模型与资源、校验请求并交付结果，不保存助手对话上下文或代管业务流程 |
+| `speechrail-mcp` | Agent、IDE 与 MCP 客户端 | 能力发现及请求级语音、音色和任务工具 | 无状态 REST 代理，不加载模型或持有 Realtime WebSocket |
 
-> 说明：本表描述 catalog 中的角色供给，不构成固定性能 SLA 或质量排名；服务只向客户端声明当前 ready 的能力。词级时间戳由 ASR 原生提供，与 aligner 无关，三档均可用。分人是任务级 opt-in，不配置或未供给制品时不会出现在 `/v1/models`。`reference` 的 bf16 制品继承同族 8-bit 档位已通过的门禁证据，未在本机逐项复测；公共 API payload 结构一致，ASR/TTS 规格可独立选择。
-
----
-
-## 🚫 5. 产品边界与明确非目标 (Scope & Non-Goals)
-
-为确保 SpeechRail 专注于做小、做强、做稳本地语音引擎，以下职责被明确划定在**产品范围之外**，由上层调用方应用自行负责：
+共享服务将模型加载、资源准入、协议适配和故障诊断集中到一个本机运行边界，减少多个应用分别维护语音运行时的成本。App 为用户提供直接可操作的工作流程，接口则让其他工具复用相同的音色身份、能力发现和错误规则。
 
 ```mermaid
-graph LR
-    subgraph Client ["📱 上层客户端应用职责 (如 Sona / QwenPaw)"]
-        UI["麦克风采集 & 播放器 UI"]
-        DB["会议记录持久化 & PostgreSQL"]
-        LLM["LLM 对话编排 & 业务 Prompt"]
-        AUTH["用户多租户账号体系"]
-    end
-
-    subgraph Rail ["🎙️ SpeechRail 核心职责"]
-        API["OpenAI 兼容协议层"]
-        SCHED["Resource Governor 资源调度"]
-        ASR_W["Qwen3-ASR 本地推理"]
-        TTS_W["Qwen3-TTS 本地合成"]
-        DIAR_W["Sortformer 匿名分割"]
-    end
-
-    Client -.->|"严格基于公共 API"| Rail
+flowchart LR
+    User[本机用户] --> App[SpeechRail macOS App]
+    Client[桌面应用与自建工作流] -->|REST / Realtime| Service[共享语音服务]
+    Agent[Agent / IDE] --> MCP[speechrail-mcp]
+    App -->|本机接口| Service
+    MCP -->|REST| Service
+    Service --> Models[本地语音模型与资源管理]
 ```
 
-- ❌ **不做麦克风录音与扬声器播放**：客户端自行采集音频并发送，SpeechRail 仅负责推理计算。
-- ❌ **不做会议管理与关系数据库**：会议 ID、说话人实名映射（如将 `spk_0` 映射为“张三”）、历史存档均属于客户端应用资产。
-- ❌ **不做多租户云端平台**：系统专为单人本机设计，不预留复杂的分布式服务网格或多租户账单系统。
-- ❌ **不做 LLM 业务对话编排**：SpeechRail 是纯粹的语音基建，不混合 Prompt 工程或大语言模型聊天上下文。
+## 2. 原生 App 的功能与使用场景
 
----
+App 按用户任务分为“创作”“会话”“引擎”三组。入口名称与分组来自 [App 导航定义](../../macos/SpeechRailApp/SpeechRailApp/AppRoute.swift)；页面存在表示产品提供该工作流，执行所需能力仍以服务发现、权限和具体请求校验为准。
 
-## 🗺️ 6. 产品发展路线图 (Product Roadmap)
+| 分组 | 功能 | 用户完成的任务 |
+|---|---|---|
+| 创作 | 配音台 | 输入文稿、选择音色、生成与试听音频 |
+| 创作 | 音色创作、音色克隆 | 用描述设计候选音色，或用参考录音创建可复用音色；按对应流程确认、验证和保存 |
+| 创作 | 音色库、我的作品 | 管理音色与生成作品，回听、导出或删除作品 |
+| 会话 | 语音助手 | 通过语音与文字对话；App 将识别、LLM 回复与语音播放串成一条会话流程 |
+| 会话 | 会议助手 | 采集选定来源、形成转写并保存本机会议记录；说话人信息按启用能力提供 |
+| 会话 | 实时字幕 | 显示字幕带，并在本机记录库中回看、搜索与导出文字 |
+| 会话 | AI 提词器 | 粘贴或导入稿件，在独立窗口中手动提词；按需使用 AI 整理与语音跟随 |
+| 引擎 | 服务状态、运行监控 | 查看服务是否可用、请求耗时、失败情况和模型驻留状态 |
+| 引擎 | 模型组合、诊断、开发者文档 | 准备和选择识别/配音模型，处理故障并获取接入信息 |
 
-```mermaid
-gantt
-    title SpeechRail 产品演进路线
-    dateFormat  YYYY-MM
-    section 已就绪 (v1.0 - v2.0)
-    OpenAI 契约文件转写 (ASR)           :done, a1, 2026-08, 2026-08
-    24kHz 整句与流式语音合成 (TTS)      :done, a2, 2026-08, 2026-09
-    OpenAI Realtime WebSocket 双向流式  :done, a3, 2026-08, 2026-09
-    Sortformer 说话人分割               :done, a4, 2026-08, 2026-09
-    macOS LaunchAgent 常驻服务 CLI       :done, a5, 2026-08, 2026-09
-    三档用户定位重排与按档位精度策略      :done, a6, 2026-09, 2026-09
-    section 演进中 (v2.x+)
-    本地局域网安全访问与配额控制          :active, b1, 2026-09, 2026-10
-    更多特色音色预设库扩充              :b2, 2026-10, 2026-11
-```
+创作者可以从文稿和音色开始生成作品，再试听与导出；需要自己的声音时使用克隆流程。音色候选的参考验证、实际合成验证与人工听审各有独立作用，正式作品应使用通过相应质量要求的音色。
 
----
+会议、字幕和助手共用服务的识别能力，但由 App 保持各自的会话与记录。麦克风、系统音频采集和播放设备按功能启用，停止后释放；字幕或转写结果不自动构成会议纪要、实名身份或助手回复。
 
-> [!NOTE]
-> 了解更多技术细节？欢迎查阅 [🏛️ 系统架构设计](../architecture/architecture.md) 与 [🔌 开发者开发指南](../developers/development-guide.md)。
+提词器可以直接使用原稿并手动阅读。AI 整理与语音跟随由用户显式开启；整理稿由人阅稿确认，语音跟随不能取代手动控制。稿件处理和舞台能力见 [AI 提词器说明](../developers/macos-app-teleprompter.md)。
+
+## 3. 共享语音能力与集成方式
+
+| 能力 | 入口 | 使用条件与交付范围 |
+|---|---|---|
+| 文件转写 | `POST /v1/audio/transcriptions` | 接收契约允许的音频文件，返回所选格式的文字及可用时间戳；格式、长度和输出参数在请求边界校验 |
+| 实时识别 | `WS /v1/realtime` | 接收音频缓冲，交付可修订识别结果、分段信息及转写终态；调用方维护采集与文本展示 |
+| 语音合成 | `POST /v1/audio/speech` | 将稳定文本按所选音色合成为音频；格式、速度和其他参数以该音色对应的操作能力为准 |
+| 增量合成 | Realtime 的 `speechrail.tts.*` 事件 | 调用方追加稳定文本并处理音频消费确认、取消和播放；服务提供有界生成与交付 |
+| 音色设计、克隆与管理 | VoiceDesign、voice 与 namespaced 管理接口 | 设计、参考确认、验证、发布和 revision 管理遵循各自契约；候选不自动等同于可用于正式作品的音色 |
+| 对齐与匿名说话人分离 | 对应文件输出及 Realtime 扩展 | 显式启用并具备所需制品和就绪条件；对齐与分人独立门控，只输出约定的时间信息和会话内匿名标签 |
+| 异步任务 | `/v1/jobs` 与任务查询、结果、取消接口 | 用于符合任务契约的长请求；须具备相应队列、执行器与本地输入引用条件 |
+| 能力与运行诊断 | 有效能力快照、健康与监控接口；MCP `describe()` | 返回能力、音色、参数和运行事实，帮助调用方决定请求方式；发现成功不预留推理资源 |
+
+REST 采用契约声明的 OpenAI 语音接口子集；Realtime 使用声明的事件子集与 `speechrail.*` 扩展。兼容范围以 [OpenAPI](../../contracts/openapi.yaml) 和 [Realtime ASR/TTS 协议契约](../../contracts/realtime-openai.md)为准。第三方客户端需要遵循这些具体接口，客户端名称或上游 SDK 支持某项功能不构成 SpeechRail 的支持承诺。
+
+Realtime 只承担语音处理。LLM、提示词、对话历史、工具调用、句子队列和打断播放策略由 App 或其他调用方负责。WebSocket 可以双向传输；实时对讲、回声处理、双讲与打断体验还取决于模型准入、设备、音频链路和客户端实现，须按有效能力与联合验收结论判断。
+
+MCP 提供请求级工具。实时字幕或语音会话客户端直接建立 WebSocket，不通过 MCP 获得持续音频连接。接入方式见 [客户端指南](../users/integrations.md) 与 [MCP 集成指南](../users/mcp-agent-integration.md)。
+
+## 4. 模型规格与能力选择
+
+ASR 与 TTS 分别选择 `fast`、`quality`、`reference`，可以混搭。App 的预置组合是同时填写两项规格的快捷方式，规格不绑定某类用户或业务场景。
+
+下表描述仓库 [model catalog](../../src/speechrail/assets/model-catalog.json) 中的模型组成；它不表示当前设备已下载、已加载或已通过质量验收。
+
+| 规格 | ASR | TTS 系统声音与参考克隆 |
+|---|---|---|
+| `fast` | 0.6B，8-bit | 0.6B CustomVoice 与 Base，8-bit |
+| `quality` | 1.7B，8-bit | 1.7B CustomVoice 与 Base，8-bit |
+| `reference` | 1.7B，BF16 | 1.7B CustomVoice 与 Base，BF16 |
+
+系统声音由 CustomVoice 处理，参考克隆由 Base 处理。VoiceDesign 使用独立的 1.7B BF16 设计制品，与 TTS 规格无关；任一 TTS 规格在该制品已供给且相应操作可用时都可进入音色设计流程。对齐和匿名分人按任务启用，不由规格名称自动开启。
+
+模型大小、权重精度和规格名称用于描述运行组合，选择时需要结合目标语言、素材、可用资源及对应验收证据。BF16 不自动证明识别更准、声音更自然或延迟更低，`fast` 也不构成固定响应时间承诺。
+
+服务由一个 ASGI worker 运行，重计算按资源预算准入。同一能力 lane 串行；跨 lane 并发须具备明确的独立能力与资源证据，预算不足或峰值缺失时按串行策略处理。文件 ASR 与流式 ASR 冲突返回 `backend_busy`。模型共享支持多应用接入，具体请求仍受资源和生命周期约束。
+
+## 5. 部署、数据与隐私边界
+
+服务与 App 的交付平台为 Apple Silicon `arm64`、macOS 26.0 及以上。服务和 App 分别安装：唯一的 `com.speechrail` 用户级 LaunchAgent 运行语音服务，App 通过受约束的控制接口管理它。退出 App 不会卸载或替换服务，安装 App 也不等于已安装模型和服务。
+
+模型准备与推理请求是独立操作。安装和显式模型准备可联网获取锁定制品；识别与合成请求从本机模型加载，不在请求路径下载模型、读取远程音频 URL 或静默外呼。App 的语音助手与 AI 整稿使用用户配置的 LLM 端点，所提交的文字、联网行为和费用取决于该端点及调用设置。
+
+服务默认绑定 loopback。非 loopback 暴露需要配置 Bearer 鉴权及明确的 origin 策略；网络开放和远程客户端的数据边界须单独确定。
+
+数据保存按用途区分：
+
+- 会话采集的 PCM 默认不落盘；文字与会话记录保存在本机，提词器稿件与作品按各自存储流程保存。
+- 克隆参考素材、自定义音色制品和生成音频属于用户数据，可按对应流程持久化；临时克隆录音与 MCP 临时交付物按其生命周期清理。
+- API key、原始音频、完整转写、完整 prompt 和 embedding 不进入普通日志。实名映射和跨会话身份不由服务端分人管理。
+- 显式启用的 ASR 排障录音使用限时、有上限的诊断开关；默认关闭，复现后清理，不能作为常规会话存储。
+
+这些边界用于说明实际的数据流和保存责任。第三方应用如何采集、转发、保存或分享结果由该应用的实现与用户设置决定；本机语音处理不构成企业合规认证。
+
+## 6. 可用性与质量判断
+
+功能声明、请求准入、结果交付和质量验收分别提供不同证据：
+
+| 判断 | 依据 | 能得出的结论 |
+|---|---|---|
+| 某项操作是否可用 | `effective_capabilities_v1` 的对应操作、模型、音色和参数域 | 可以按声明条件请求该能力，资源准入仍在实际请求时发生 |
+| 音色能否路由 | 音色的 `available` 与原因字段 | 音色在该快照下可按需服务，不证明声音质量 |
+| 音色能否用于正式制作 | 当前绑定的输出验证、`production_ready` 与必要人工听审 | 证据覆盖对应音色、模型、运行时与验证策略，不自动覆盖所有文本和场景 |
+| 音频是否交付或播放完成 | 对应协议回执，以及客户端自己的播放状态 | 服务端交付与客户端播放分别判断；连接结束或生成完成不能证明用户已听到全部内容 |
+| 目标场景质量与稳定性是否满足要求 | 带日期、版本、设备、样本和负载条件的专项验收 | 在报告覆盖条件下评估识别、数字读法、声音自然度、分人、取消与长时运行表现 |
+
+语音服务本体不按云端语音调用次数计费，但需要本机磁盘、内存与计算资源；外部 LLM 和其他外部服务的费用另计。实际性能取决于设备、运行组合、输入长度、冷/热状态和并发负载，本文不提供固定 SLA、统一内存数字或无条件质量评级。
+
+能力语义见 [有效能力快照](../users/effective-capabilities.md)，专项验证范围见 [测试与验收](../developers/testing-acceptance.md)。产品路线与阶段进度以对应决策、计划和带日期的验收记录为准。
+
+## 7. 进一步阅读
+
+- [安装与首次使用](../users/installing-speechrail.md)：发布制品、模型准备、服务与 App 安装。
+- [macOS App 开发与功能边界](../developers/macos-app-development.md)：创作、会话和引擎的职责与生命周期。
+- [系统总体架构](../architecture/architecture.md)：服务分层、worker、资源管理与接口边界。
+- [公共 API 契约手册](../users/api-contract.md)、[OpenAPI](../../contracts/openapi.yaml)、[Realtime 契约](../../contracts/realtime-openai.md)：接口、参数与错误规则。
+- [MCP 架构与接口契约](../architecture/speechrail-mcp-proxy.md)：Agent 工具、能力发现和代理边界。

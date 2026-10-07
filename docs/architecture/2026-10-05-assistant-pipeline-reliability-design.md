@@ -161,7 +161,7 @@ Effect = effectID + Ownership + immutable input + deadline + retained task handl
 
 `recordID` 是本地 SQLite 记录，不能当作 wire `session_id`；`connectionGeneration` 是 App 代次，
 不能与服务端 transcription epoch 混用。旧 effect 可以保存自己的记录，但只能更新匹配身份的当前投影。
-Realtime 线上继续使用 current-only envelope 与 `speechrail.tts.*`；完整文本 adapter 使用现有 HTTP 契约。
+Realtime 线上继续使用契约声明的事件 envelope 与 `speechrail.tts.*`；完整文本 adapter 使用现有 HTTP 契约。
 不增加应用 replyID、LLM 或播放协议。
 
 状态至少拆为四条轴：输入（active/draining/closed）、生成（idle/running/terminal）、

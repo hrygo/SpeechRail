@@ -87,7 +87,7 @@ def tts_start_event(request_id: str, voice: str | None) -> dict[str, Any]:
 
 
 def session_update_event(model: str = _DEFAULT_ASR_MODEL) -> dict[str, Any]:
-    """Build the one current-only ``session.update`` that enables incremental TTS.
+    """Build a Realtime ``session.update`` that enables incremental TTS.
 
     The single wire carries the ASR model under ``session.audio.input`` and the
     SpeechRail extension under ``session.speechrail``; there is no flat

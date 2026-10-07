@@ -165,7 +165,7 @@ sequenceDiagram
 | `src/speechrail/backends/` | Qwen3 ASR/TTS、VAD、唯一 CoreML Sortformer adapter |
 | `src/speechrail/runtime/` | queue、ResourceGovernor、worker lifecycle、IPC、jobs |
 | `src/speechrail/http/` | REST/WebSocket 传输、鉴权、错误与 metrics middleware |
-| `src/speechrail/compatibility/` | OpenAI model selection、current-only Realtime event mapping 与稳定 envelope |
+| `src/speechrail/compatibility/` | OpenAI model selection、Realtime ASR/TTS event mapping 与稳定 envelope |
 | `src/speechrail/mcp/` | 独立 `speechrail-mcp` 进程的 REST client 与工具组合根 |
 
 ## 6. 不变边界
@@ -175,4 +175,4 @@ sequenceDiagram
 - 一个 SpeechRail 服务、一个 ASGI worker；不得通过复制模型进程提高吞吐（ASR∥TTS 重计算重叠是既有单 worker 进程内的准入策略，不复制进程）。
 - `fast` / `quality` / `reference` 是 ASR 与 TTS 可分别选择的规格；规格只绑定对应角色的权重与量化组合，不继承分人或对齐能力；VoiceDesign 制品不与档位绑定，缺失时只降级设计能力。公共 API payload 结构、调度和 worker 协议保持一致，对外声明能力随当前 readiness 不同，必须如实声明。
 - 客户端拥有麦克风、播放、会议、数据库和 LLM 编排；SpeechRail 提供本地推理、协议与资源边界。
-- Realtime 是 current-only：不保留旧事件翻译、双 wire profile、服务端 LLM 或服务端 conversation state。MCP 只代理无状态 REST 工具，Realtime 必须由调用方直连 WebSocket。
+- Realtime 只支持契约声明的 ASR/TTS 事件与字段，不保留旧事件翻译或双 wire profile；服务端不持有 LLM 或 conversation state。MCP 只代理无状态 REST 工具，Realtime 必须由调用方直连 WebSocket。
