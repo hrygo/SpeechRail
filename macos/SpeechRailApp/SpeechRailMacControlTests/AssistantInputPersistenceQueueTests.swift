@@ -149,6 +149,20 @@ final class AssistantInputPersistenceQueueTests: XCTestCase {
         XCTAssertNil(buffer.take(recordID: "other", identity: newGeneration))
     }
 
+    func testAttributionDiscardReleasesOnlyTheConfirmedRecordBudget() {
+        var buffer = TranscriptAttributionBuffer(maximumItems: 2, maximumUnits: 2)
+        let identity = TranscriptPreviewLedger.ItemIdentity(
+            identity: .init(connection: 1, generation: 2), itemID: "item"
+        )
+        let unit = RealtimeASRClient.AttributionUnit(segmentUID: "unit", speaker: "A")
+        XCTAssertTrue(buffer.store([unit], recordID: "old", identity: identity, labelsEnabled: true))
+        XCTAssertTrue(buffer.store([unit], recordID: "current", identity: identity, labelsEnabled: false))
+        buffer.discard(recordID: "old")
+        XCTAssertNil(buffer.take(recordID: "old", identity: identity))
+        XCTAssertTrue(buffer.store([unit], recordID: "next", identity: identity, labelsEnabled: true))
+        XCTAssertEqual(buffer.take(recordID: "current", identity: identity)?.units, [unit])
+    }
+
     func testCompletedIdentityMemoryIsBoundedWhileFailuresRetainTheirIdentity() async {
         enum SaveError: Error { case unavailable }
         let queue = TranscriptPersistenceQueue(

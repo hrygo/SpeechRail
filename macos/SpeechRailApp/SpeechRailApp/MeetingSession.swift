@@ -350,6 +350,7 @@ public final class MeetingSession {
               let record = try? await coordinator.record(id: id),
               record.state == .archived, record.endReason == .interrupted,
               admissionLedger.confirmResolution(snapshot) else { return false }
+        pendingAttributions.discard(recordID: id)
         if sessionID == id {
             phase = .archived
             lastFailure = "本次记录已按中断结束，未完整保存的预览保留在恢复内容中。"

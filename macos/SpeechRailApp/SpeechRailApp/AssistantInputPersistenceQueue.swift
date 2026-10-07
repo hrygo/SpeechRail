@@ -704,4 +704,9 @@ struct TranscriptAttributionBuffer {
     ) -> Payload? {
         entries.removeValue(forKey: Key(recordID: recordID, identity: identity))
     }
+
+    /// 已确认结束的记录不会再生成对应权威行；释放其孤立缓存，不动其他记录。
+    mutating func discard(recordID: String) {
+        entries = entries.filter { $0.key.recordID != recordID }
+    }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import SpeechRailControlKit
 import XCTest
 #if SWIFT_PACKAGE
@@ -324,7 +325,7 @@ actor SpeakerAttributionWriteGate {
 actor TranscriptPersistenceGate {
     enum Failure: Error { case unavailable }
     private var store: SessionStore?
-    private var continuation: CheckedContinuation<Void, Never>?
+    private var continuations: [CheckedContinuation<Void, Never>] = []
     private var blocked = true
     private var failing = false
     private(set) var entered = false
@@ -336,7 +337,7 @@ actor TranscriptPersistenceGate {
         attempts.append((draft, id))
         if blocked {
             entered = true
-            await withCheckedContinuation { continuation = $0 }
+            await withCheckedContinuation { continuations.append($0) }
         }
         if failing { throw Failure.unavailable }
         guard let store else { throw Failure.unavailable }
@@ -346,9 +347,25 @@ actor TranscriptPersistenceGate {
     func release(failing: Bool = false) {
         blocked = false
         self.failing = failing
-        continuation?.resume()
-        continuation = nil
+        let waiting = continuations
+        continuations.removeAll()
+        for continuation in waiting { continuation.resume() }
     }
+}
+
+/// 故障仅注入测试自建数据库，不给生产 Store 添加测试开关。
+func executeTranscriptRecoverySQL(directory: URL, statement: String) throws {
+    var db: OpaquePointer?
+    XCTAssertEqual(
+        sqlite3_open_v2(
+            directory.appendingPathComponent(SessionStore.fileName).path,
+            &db, SQLITE_OPEN_READWRITE, nil
+        ),
+        SQLITE_OK
+    )
+    let pointer = try XCTUnwrap(db)
+    defer { sqlite3_close_v2(pointer) }
+    XCTAssertEqual(sqlite3_exec(pointer, statement, nil, nil, nil), SQLITE_OK)
 }
 
 /// 只替换网络 transport；解析、终态去重和结束协议使用生产客户端。

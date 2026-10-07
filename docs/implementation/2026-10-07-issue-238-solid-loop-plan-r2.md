@@ -10,7 +10,7 @@
 
 **当前实施目标（2026-10-07 更新）：** R01、R02、R05、R03、R04、R06 已合入；剩余 3 个 issue 分 3 个独立 PR，按 **R07 #232 → R08 #231 → R09 #234** 完成实施、整包独立审查、定向验证与必要 CI，验证通过立即 squash 合并，再刷新 main。每包 1–3 issue；不堆叠 PR、不 force-push、不关闭未验收 issue、不 `Closes #238`。保持 #245 的语义禁写区，最终逐条核对十一项验收矩阵后决定关闭 issue 与完成 goal。
 
-**最新执行目标（2026-10-07，Asia/Shanghai）：** 本次 fetch 后 `origin/main` 仍为 `4f6b7356`。当前分支为 `codex/238-r07-transcript-persistence`；Store 子任务 `36c0ba3a`、保存接线子任务 `e60b79b`、辅助工作预算子任务 `049ef127`、metadata 接线子任务 `0d2cf68e`、恢复入口子任务 `27f70599` 已推送，draft PR 为 **#330**。首轮 CI 的 Quality Gates 通过，但确认框用了 CI SDK 不提供的重载，Swift/App 编译失败；已改用基线原生 `isPresented:presenting:`，继续捕获固定快照。本机复验 **220 项定向实测通过**，App 包装脚本 Debug 构建成功；最终 head 必要 CI 与一次整包独立审查仍待完成，通过后立即合并。不能以局部通过或 App 编译记录宣称 R07 已验收。
+**最新执行目标（2026-10-07，Asia/Shanghai）：** 本次 fetch 后 `origin/main` 仍为 `4f6b7356`。R07 分支 `codex/238-r07-transcript-persistence` 的 draft PR 为 **#330**。确认框 SDK 差异已修；head `81b2cb27` 的 CI `37572108064` 全部必要检查通过。一次整包独立审查已结束，无 Critical；发现的拒绝 item 归属缓存泄漏已修，并补齐封存失败/并发验收，最新 **228 项定向实测通过**。立即目标是提交修订、等待匹配新 head 的必要 CI，通过后立即合并；不能以旧 head 的绿灯代替修订验证。R08/R09 仍在下一包。
 
 **本次 goal 更新检查点（2026-10-07）：** 本地 HEAD 为 `0d2cf68e`；恢复入口、不完整结束、历史恢复材料展示及相关文档仍有未提交改动。220 项测试与 App 构建是前一执行阶段的实测证据，本次更新目标未重跑。接下来按以下顺序推进：
 
@@ -110,7 +110,7 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 | R03 #235 | MERGED | PR #325 / `baafb59b` | 372 项定向 fake/HTTP/contract、Ruff/Mypy；独立审查 Required 已修；CI `37556276635` 全部必要检查通过 |
 | R04 #237+#236 | MERGED | PR #328 / `151297f6` | 283 定向 Swift、2 项 Python 守卫、独立编译；Required 已修，CI `37560283532` 全绿后合并 |
 | R06 #241 | MERGED | PR #329 / `4f6b7356` | 138 XCTest +77 Swift Testing；首轮 Required 已修，CI `37562890224` 全绿后立即合并 |
-| R07 #232 | 审查与 CI 中 | draft PR #330；分支 `codex/238-r07-transcript-persistence` | 基于 `4f6b7356`；220 项定向实测、App Debug 构建成功；首轮 CI 编译问题已修，最终 head CI 与独立审查待完成；避让 pbxproj |
+| R07 #232 | Required 已修，待修订 CI | draft PR #330；分支 `codex/238-r07-transcript-persistence` | 基于 `4f6b7356`；228 项定向实测；独立审查完成，`81b2cb27` CI 已绿，修订 head 待验证；避让 pbxproj |
 | R08 #231 | planned | 无 | 注意 clear-barrier 分支，只读合同 |
 | R09 #234 | planned | 无 | #249 关闭已解锁，排末位 |
 
@@ -185,6 +185,11 @@ R01 审查补齐并合并 → R02 → R05 → R03 → R04 → R06 → R07 → R0
 - `TranscriptAdmissionRecovery` 冻结拒绝版本、固定恢复行与日期。显式确认后先等待所有已接纳命令，保存有限 partial 说明，再按 interrupted 封存并读回确认，最后才解除本记录的拒绝证明。新增拒绝使旧确认失效；失败保留原身份供重试。Ruling：将拒绝预览存为说明性 partial，并按中断结束来释放恢复限额——承认未完整保留，不用清空账本冒充完整保存；代价是多句/过长拒绝仍不能恢复全部正文，UI、复制和用户指南明确说明。
 - 3 个端口/版本反例先编译红灯后通过；另外 6 个真实 Store/Gate 边界证明不完整结束不能丢已接纳失败项、旧 record 不停止新场、预览写入失败时保留证明且同 ID 重试。最终同范围 **220 XCTest、0 failures、exit 0**；`scripts/macos_app_build.sh --configuration Debug --timeout 600` 成功，恢复回看 UI 最终修改后重新构建也成功。未做 UI 自动化、视觉/VoiceOver 走查，未操作生产服务或安装。新用户说明见 [找回未保存的文字](../users/transcript-save-recovery.md)。
 - 首轮 CI `37571682793` 的 Quality Gates 通过，Swift/App 在确认框 `item:` 重载处编译红灯。本机 SDK 与 CI SDK 差异已从两条编译日志核实；Ruling：改用基线原生 `isPresented:presenting:`，将不可变快照交给 actions 捕获——不升级 CI、不改最低平台、不让用户确认改绑新记录；代价是显式维护展示 Binding。修订后本机 **220 XCTest、0 failures、exit 0** 与 App 包装 Debug 构建均通过，CI 待匹配新 head 验证。
+- 一次整包独立审查范围 `4f6b7356..81b2cb27` 完成，无 Critical。Required：正文容量拒绝后，迟到 attribution 永远无法对接正式行，成功不完整结束后仍占缓存预算。两条跨记录反例复现新行 `timingQuality=unavailable` 而非 aligned；最小修复是在 sealed、读回及精确拒绝确认均成功后按 record 释放缓存。Ruling：只回收已确认结束记录的孤立 attribution——既释放无未来消费者的预算，又保留其他场；代价是结束记录的未匹配辅助信息不再驻留。
+- 审查指出不完整结束的封存失败/并发缺少 feature 集成断言，已补两种 feature 的 archive 失败、会议 source_snapshot 失败、两条并发结束测试与缓存 record 隔离测试。临时移除并发守卫出现 **6 个失败断言**；临时移除封存确认守卫出现 **18 个失败断言**，随后全部恢复。最终定向范围 **228 XCTest、0 failures、exit 0**；测试 SQL trigger 只作用于测试自建 SQLite，没有生产故障开关。
+- Final: minor (deferred): `docs/developers/macos-app-development.md` 仍以源文件旧名引用队列类型；当前合同已区分 `TranscriptPersistenceQueue` 类型与保留的注册文件名，未扩写无关开发手册。
+- Final: minor (deferred): Store 同 ID 冲突回归只单独变更正文，其余不可变字段已有实现比较与丰富同 ID 成功核对，字段逐项冲突测试暂未扩充。
+- Final: minor (deferred): 复制路径已静态确认只读，专门“复制后仍有拒绝证明”的 feature 回归未增加；UI/键盘/VoiceOver 未实测。完整 EOF/截止时间/协议失败封存资格仍由 R08 联合验收。
 
 ## 6. 来源
 

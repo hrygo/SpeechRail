@@ -356,6 +356,7 @@ public final class CaptionSession {
               let record = try? await coordinator.record(id: id),
               record.state == .archived, record.endReason == .interrupted,
               admissionLedger.confirmResolution(snapshot) else { return false }
+        pendingAttributions.discard(recordID: id)
         return true
     }
 
