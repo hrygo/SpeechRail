@@ -5,6 +5,74 @@ import Testing
 #if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
 #endif
+
+@Suite
+struct SessionReplayFixtureBudgetTests {
+    @Test
+    func keepsTheDefaultThirtySecondFixtureLimit() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+        #expect(throws: (any Error).self) {
+            _ = try ReplayPCM24K.load(from: fixture)
+        }
+    }
+
+    @Test
+    func explicitlyBoundedLongFixturePreservesAllSamples() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+        let pcm = try ReplayPCM24K.load(from: fixture, maximumAudioSeconds: 3_600)
+        #expect(abs(pcm.bytes.count / MemoryLayout<Int16>.size - 31 * 24_000) <= 2)
+    }
+
+    @Test(arguments: [-1, 0, 3_601, Int.max])
+    func rejectsInvalidDurationBeforeAllocation(maximumAudioSeconds: Int) throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+        #expect(throws: (any Error).self) {
+            _ = try ReplayPCM24K.load(from: fixture, maximumAudioSeconds: maximumAudioSeconds)
+        }
+    }
+
+    private func makeFixture() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speechrail-replay-budget-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let url = directory.appendingPathComponent("silence.wav")
+        let payloadBytes = UInt32(31 * 16_000 * MemoryLayout<Int16>.size)
+        var wav = Data("RIFF".utf8)
+        func append32(_ value: UInt32) {
+            var little = value.littleEndian
+            Swift.withUnsafeBytes(of: &little) { wav.append(contentsOf: $0) }
+        }
+        func append16(_ value: UInt16) {
+            var little = value.littleEndian
+            Swift.withUnsafeBytes(of: &little) { wav.append(contentsOf: $0) }
+        }
+        append32(36 + payloadBytes)
+        wav.append(Data("WAVEfmt ".utf8))
+        append32(16)
+        append16(1)
+        append16(1)
+        append32(16_000)
+        append32(32_000)
+        append16(2)
+        append16(16)
+        wav.append(Data("data".utf8))
+        append32(payloadBytes)
+        wav.append(Data(repeating: 0, count: Int(payloadBytes)))
+        guard FileManager.default.createFile(
+            atPath: url.path, contents: wav, attributes: [.posixPermissions: 0o600]
+        ) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        return url
+    }
+}
+
 @Suite
 struct SessionReplayTerminalIntegrityTests {
     private let boundary = SessionReplayBoundary(

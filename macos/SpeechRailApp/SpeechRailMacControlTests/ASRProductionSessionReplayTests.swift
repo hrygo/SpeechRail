@@ -26,7 +26,12 @@ struct ASRProductionSessionReplayTests {
     )
     func selectedProductionSessionConsumesPacedFakeCapture() async throws {
         let configuration = try SessionReplayConfiguration.load()
-        let pcm = try ReplayPCM24K.load(from: configuration.audioURL)
+        let maximumAudioSeconds = ProcessInfo.processInfo.environment[
+            "SPEECHRAIL_ASR_SESSION_LONG_FIXTURE"
+        ] == "1" ? 3_600 : 30
+        let pcm = try ReplayPCM24K.load(
+            from: configuration.audioURL, maximumAudioSeconds: maximumAudioSeconds
+        )
         guard configuration.hasCompleteTeleprompterPrefixCoverage(
             fixtureSamples: pcm.bytes.count / MemoryLayout<Int16>.size
         ) else {
