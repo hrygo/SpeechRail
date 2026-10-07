@@ -738,6 +738,7 @@ public final class TeleprompterSession {
         clearPreparedEditHistory()
         pendingVersion = nil
         phase = activeVersion == nil ? .draft : .ready
+        scheduleDraftSave()
     }
 
     // MARK: - 目标时长、节奏与校准

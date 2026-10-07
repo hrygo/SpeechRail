@@ -2681,6 +2681,31 @@ struct TeleprompterSessionLifecycleTests {
         #expect(harness.session.document?.id == idA)
     }
 
+    @Test("discarding a saved candidate survives an immediate document switch")
+    func discardedCandidateStaysDiscardedAfterSwitch() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(title: "另一份", sourceText: "另一份稿件。")
+        let otherID = try #require(harness.session.document?.id)
+        harness.makeThreeSegmentDocument()
+        let originalID = try #require(harness.session.document?.id)
+        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
+            try TestPreparationResponse.response(for: prompt)
+        }
+        await harness.session.analyzeDraft()
+        let before = try harness.makeReloadedSession()
+        try before.load(documentID: originalID)
+        #expect(before.pendingVersion != nil, "前提：候选稿已写入磁盘")
+
+        harness.session.discardPendingVersion()
+        try harness.session.load(documentID: otherID)
+
+        let after = try harness.makeReloadedSession()
+        try after.load(documentID: originalID)
+        #expect(after.pendingVersion == nil, "恢复原稿后切稿不得复活已丢弃的候选")
+        #expect(after.phase == .draft)
+    }
+
     @Test("async document selection saves pending edits and releases the editor")
     func asyncSelectionPreservesPendingEdits() async throws {
         let harness = try TeleprompterSessionHarness()

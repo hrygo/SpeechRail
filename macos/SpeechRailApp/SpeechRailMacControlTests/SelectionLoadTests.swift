@@ -28,6 +28,22 @@ private actor SelectionReadGate {
 
 @MainActor
 struct SelectionLoadTests {
+    @Test func currentFailureKeepsRetryIdentityUntilAnotherSelection() async throws {
+        let loader = SpeechRailSelectionLoad<String>()
+        await #expect(throws: CocoaError.self) {
+            try await loader.load(id: "missing") {
+                throw CocoaError(.fileNoSuchFile)
+            }
+        }
+        #expect(!loader.isLoading)
+        #expect(loader.requestedID == "missing")
+        #expect(loader.failure != nil)
+        #expect(try await loader.load(id: "missing") { "重试正文" } == "重试正文")
+        #expect(loader.failure == nil)
+        loader.reset()
+        #expect(loader.requestedID == nil)
+    }
+
     @Test func latestSelectionWinsWhenOlderReadFinishesLast() async throws {
         let loader = SpeechRailSelectionLoad<String>()
         let gate = SelectionReadGate()
