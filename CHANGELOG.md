@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [3.8.1] - 2026-10-07
+
+### Added
+
+- 限时 ASR 排障录音开关：`SPEECHRAIL_ASR_DEBUG_CAPTURE_UNTIL`
+  设定期限内记录 ASR 实际输入的 16 kHz PCM（WAV，可直接播放），
+  到期自动停；默认关闭。用于定位语音助手连续说话后卡住的现场
+  （#326）。
+
 ## [3.8.0] - 2026-10-07
 
 ### Added
