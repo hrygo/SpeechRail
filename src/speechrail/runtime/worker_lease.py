@@ -100,6 +100,7 @@ class WorkerIdleEvictor:
         min_uptime_seconds: float = 0.0,
         check_interval_seconds: float = 10.0,
         on_eviction: Callable[[str, str], None] | None = None,
+        on_reclamation_failure: Callable[[EvictableWorker], None] | None = None,
         lease_locks: Mapping[EvictableWorker, WorkerLeaseLock] | None = None,
     ) -> None:
         self._workers = tuple({id(w): w for w in workers if w is not None}.values())
@@ -108,6 +109,7 @@ class WorkerIdleEvictor:
         self._min_uptime = min_uptime_seconds
         self._check_interval = check_interval_seconds
         self._on_eviction = on_eviction
+        self._on_reclamation_failure = on_reclamation_failure
         self._last_active: dict[EvictableWorker, float] = {}
         self._loaded_at: dict[EvictableWorker, float] = {}
         self._was_alive: dict[EvictableWorker, bool] = {}
@@ -234,6 +236,8 @@ class WorkerIdleEvictor:
             except BaseException:
                 lease.mark_reclamation(failed=True)
                 self._states[worker] = WorkerLifecycleState.RECLAMATION_FAILED
+                if self._on_reclamation_failure is not None:
+                    self._on_reclamation_failure(worker)
                 if self._on_eviction is not None:
                     self._on_eviction(type(worker).__name__, "reclamation_failed")
                 raise
@@ -241,8 +245,15 @@ class WorkerIdleEvictor:
             if self._on_eviction is not None:
                 self._on_eviction(type(worker).__name__, "cold_evict")
 
-        with contextlib.suppress(Exception):
+        try:
             await join_cleanup(asyncio.create_task(close_and_record()))
+        except (Exception, asyncio.CancelledError):
+            # A cancelled close owns a failed reclamation, not cancellation of
+            # this monitor. Preserve actual waiter cancellation even when the
+            # joined close raises a different exception.
+            waiter = asyncio.current_task()
+            if waiter is not None and waiter.cancelling():
+                raise asyncio.CancelledError from None
 
     def _in_use(self, worker: EvictableWorker) -> bool:
         lease = self._lease_locks.get(worker)

@@ -10,7 +10,11 @@ from typing import Any
 
 import pytest
 
-from speechrail.backends.qwen3_tts import Qwen3TtsBackendConfig, Qwen3TtsWorker
+from speechrail.backends.qwen3_tts import (
+    Qwen3TtsBackendConfig,
+    Qwen3TtsCapabilityRouter,
+    Qwen3TtsWorker,
+)
 from speechrail.backends.qwen3_tts_worker import TTS_BACKEND_ID
 from speechrail.domain.ports import SpeechRequest
 from speechrail.domain.tts import VoiceStoreUnavailableError
@@ -394,6 +398,42 @@ def test_tts_worker_starts_offline_transport_and_checks_ready_identity(tmp_path:
         assert worker.runtime_revision is None
 
     asyncio.run(start_and_close())
+
+
+def test_router_eviction_keeps_first_load_distinct_from_reload(tmp_path: Path) -> None:
+    events: list[tuple[str, int]] = []
+    worker, fake = _worker(
+        tmp_path, on_delivery_event=lambda event, amount: events.append((event, amount)),
+    )
+    worker._started = False
+    fake.alive = False
+    router = Qwen3TtsCapabilityRouter({"voice_design": worker})
+
+    async def start_transport() -> None:
+        fake.alive = True
+        fake.push({
+            "type": "ready", "model_loaded": True, "backend": TTS_BACKEND_ID,
+            "device": "mps", "dtype": "float16", "sample_rate": 24_000,
+            "model_variant": "voice_design", "profile_snapshot_version": 1,
+        })
+
+    fake.start = start_transport  # type: ignore[method-assign]
+
+    async def run() -> None:
+        # A group eviction still attempts cleanup on cold children.
+        await router.evict_warm_capability()
+        await router.evict_warm_capability()
+        assert fake.abort_count == 2
+        await worker.start()
+        assert router.lifecycle_stats["reload_count_by_role"] == {"voice_design": 0}
+        assert events == []
+        await router.evict_warm_capability()
+        await worker.start()
+        assert router.lifecycle_stats["reload_count_by_role"] == {"voice_design": 1}
+        assert events == [("reload", 1)]
+        await router.close()
+
+    asyncio.run(run())
 
 
 def test_tts_worker_prepare_returns_the_observed_runtime_identity(

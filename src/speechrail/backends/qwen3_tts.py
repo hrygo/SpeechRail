@@ -882,9 +882,12 @@ class Qwen3TtsWorker:
     async def close(self) -> None:
         """Terminate the worker, waiting for any active stream to finish first."""
         async with self._lock:
+            # Cold children still need an abort attempt for retained-owner
+            # cleanup, but closing a never-started worker is not a reload.
+            if self._epoch > 0 or self._started or self._transport.alive:
+                self._epoch += 1
             self._started = False
             self._runtime_revision = None
-            self._epoch += 1
             await self._transport.abort()
 
 
@@ -974,7 +977,12 @@ class Qwen3TtsCapabilityRouter:
     while lifecycle operations stay serialized.
     """
 
-    def __init__(self, workers: Mapping[str, Qwen3TtsWorker]) -> None:
+    def __init__(
+        self,
+        workers: Mapping[str, Qwen3TtsWorker],
+        *,
+        on_reclamation_failure: Callable[[], None] | None = None,
+    ) -> None:
         resolved: dict[str, Qwen3TtsWorker] = {}
         for role, worker in workers.items():
             try:
@@ -990,6 +998,7 @@ class Qwen3TtsCapabilityRouter:
             resolved[role] = worker
         self._workers = resolved
         self._capability_lock = asyncio.Lock()
+        self._on_reclamation_failure = on_reclamation_failure
 
     @property
     def _worker_list(self) -> tuple[Qwen3TtsWorker, ...]:
@@ -1000,6 +1009,12 @@ class Qwen3TtsCapabilityRouter:
         """Return the maximum number of TTS workers this router may keep warm."""
 
         return len(self._workers)
+
+    @property
+    def configured_runtime_roles(self) -> tuple[str, ...]:
+        """Return ordinary synthesis lanes without requiring resident workers."""
+
+        return tuple(role for role in TTS_RUNTIME_ROLES if role in self._workers)
 
     @property
     def active_incremental_streams(self) -> int:
@@ -1253,10 +1268,10 @@ class Qwen3TtsCapabilityRouter:
         """
         if self.active_incremental_streams:
             raise TtsWorkerBusyError("an incremental TTS utterance still owns a worker")
-        async with self._capability_lock:
-            for worker in self._worker_list:
-                if worker.alive or worker.ready:
-                    await worker.close()
+        # Usability is not process ownership: a failed reap intentionally hides
+        # alive/ready. The owned close visits every child and reports failures
+        # only after attempting the remaining owners.
+        await self.close()
 
     async def trim_memory(self) -> None:
         for worker in self._worker_list:
@@ -1271,5 +1286,9 @@ class Qwen3TtsCapabilityRouter:
                 except BaseException as exc:
                     if first_error is None:
                         first_error = exc
+                        # Isolate admission before awaiting another child:
+                        # ordinary requests do not acquire the group close lock.
+                        if self._on_reclamation_failure is not None:
+                            self._on_reclamation_failure()
             if first_error is not None:
                 raise first_error

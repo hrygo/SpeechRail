@@ -1577,12 +1577,14 @@ def test_quality_runs_classifies_output_invalid(
         ("eviction", RuntimeError),
     ],
 )
+@pytest.mark.parametrize("route_prefix", ["/v1/voices", "/v1/speechrail/voices"])
 def test_quality_reclamation_failure_stops_asr_and_commit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     failure_phase: str,
     close_error: type[Exception],
+    route_prefix: str,
 ) -> None:
     sentinel = "private_backend_payload_must_not_be_logged"
 
@@ -1625,7 +1627,7 @@ def test_quality_reclamation_failure_stops_asr_and_commit(
     )
     with caplog.at_level(logging.WARNING):
         response = client.post(
-            "/v1/voices/serena/quality-runs",
+            f"{route_prefix}/serena/quality-runs",
             json={"probe_set": "voice_quality_v1_zh", "runs": 2},
         )
     assert response.status_code == 503
@@ -1634,9 +1636,10 @@ def test_quality_reclamation_failure_stops_asr_and_commit(
     assert len(synth.requests) == (1 if failure_phase == "close" else 12)
     assert sentinel not in caplog.text
     assert sentinel not in response.text
+    assert client.get("/health").json()["tts_ready"] is False
     requests_before_retry = len(synth.requests)
     retry = client.post(
-        "/v1/voices/serena/quality-runs",
+        f"{route_prefix}/serena/quality-runs",
         json={"probe_set": "voice_quality_v1_zh", "runs": 2},
     )
     assert retry.status_code == 503

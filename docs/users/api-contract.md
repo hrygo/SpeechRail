@@ -2,8 +2,8 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.16.2"
-date: 2026-10-06
+version: "3.16.4"
+date: 2026-10-07
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -99,9 +99,18 @@ SpeechRail 保存独立的 ASR 与 TTS 规格，默认 `quality/quality`。三�
 填充 `rt_...`；未驻留、组件未提供 optional resolver 或身份不完整时为 `null`。它是低披露的当前 worker
 结构身份摘要，不是模型路径或权重内容哈希；不会触发模型加载。`tts_ready` 保持 v1 兼容含义：TTS 已配置并可按需接收请求；它不承诺权重
 当前驻留。新增的 `tts_warm` 为 `true` 时表示 worker 已完成加载握手，可直接产生 PCM，
-为 `false` 时表示冷/未配置，注入的 backend 无法报告驻留状态时为 `null`。`tts_state` 提供
-`active`、`warm_standby`、`cold_evicted`、`inactive` 或 `unconfigured` 等低基数诊断；冷状态
+为 `false` 时表示冷/未配置，注入的 backend 无法报告驻留状态时为 `null`。
+`asr_state`、`tts_state` 和 `streaming_state` 提供 `active`、`warm_standby`、`cold_evicted`、
+`reclamation_failed`、`inactive` 或 `unconfigured` 等低基数诊断；冷状态
 不会单独把仍可在请求时加载的 `tts_ready=true` 改成 false。
+`reclamation_failed` 表示 worker 回收失败、旧资源尚未确认释放，相关准入保持隔离；
+它不表示已经冷回收成功，活动通知和自动 TTL 不会清除它。
+所有已配置的普通 TTS lane 均被隔离时，`tts_ready=false`；TTS-only 服务的
+`/readyz` 返回 503。独立 lane 并发策略允许时，仍可服务的普通 TTS lane 保持就绪，
+独立 ASR 也可使 `/readyz` 返回 200。暂时排队或请求占用不会单独改变 `tts_ready`。
+普通合成和 VoiceDesign 预览由 Governor 按各自 lane 准入；隔离请求返回
+`503 backend_reclamation_failed`、`retryable=false`，预览与设计任务共用 `voice_design` lane。
+`/metrics` 的 JSON 响应（`Accept: application/json`）中，`workers` 同样可返回该状态。
 
 `tts_design` 独立报告辅助 VoiceDesign worker 的 `configured`、`ready`、`state` 和
 `last_error`。状态为 `unconfigured`、`cold`、`loading`、`ready`、`failed` 或 `unknown`；
@@ -125,6 +134,9 @@ handshake 提供完整可验证身份后才会填充 `rt_...`；否则保持 `nu
 已有终态回执的 `cancelled` 只陈述该请求的终止事实，不是全服务空闲证明；
 客户端自身的 HTTP Task 退出或超时也不能代替服务端收尾证据。
 隔离状态须在确认旧 worker 已回收后通过受控服务重启恢复，不由请求路径自行清除。
+空闲回收失败也遵循此隔离规则：TTS router 整组失败隔离全部 TTS lane，
+独立 VoiceDesign 回收失败隔离 `voice_design` lane；禁止重计算重叠时同时拒绝 ASR。
+worker 自身取消回收会记录失败，其他 worker 的空闲监控继续运行。
 
 ### 制作身份与配方 (plan / recipe)
 
