@@ -17,7 +17,7 @@ date: 2026-10-07
 | 包 | 发现 | 修正与回归 | 关联 |
 |---|---|---|---|
 | A01 | TTS 回收失败初次不可重试，后续隔离准入却被解释为可重试队列满；MCP 恢复指南漏同步 | 隔离异常独立类型；REST、Realtime、MCP 保留 `backend_reclamation_failed`，REST `503/retryable=false`；打包 skill 与门禁包含恢复指引。补串行策略下 ASR 同样被阻断的契约与真实 fake HTTP 回归 | #235/#238，[PR #335](https://github.com/hrygo/SpeechRail/pull/335) |
-| A02 | force/TTL 吞掉 close 异常后仍报 cold；transport 在 terminate/kill/wait 失败前已摘掉旧 owner，可能启动替代 child | 共享 lease 标记 `reclamation_failed` 并拒绝新 lease；活动和 TTL 不解除隔离。transport 保留 process/stderr owner，禁止 start 与 I/O；只有显式再次 close/reap 确认成功后解除。取消等待者不丢失已完成的关闭结果 | #246/#238，本补修 PR |
+| A02 | force/TTL 吞掉 close 异常后仍报 cold；transport 在 terminate/kill/wait 失败前已摘掉旧 owner，可能启动替代 child | 共享 lease 标记 `reclamation_failed` 并拒绝新 lease；活动和 TTL 不解除隔离。transport 保留 process/stderr owner，禁止 start 与 I/O；只有显式再次 close/reap 确认成功后解除。取消等待者不丢失已完成的关闭结果 | #246/#238，[PR #337](https://github.com/hrygo/SpeechRail/pull/337) |
 
 A01 最终 head `262d5aad94d97f6ef23a07843a0af8664b13de70` 的 CI run `37592748454`
 全部成功，于 UTC `2026-10-07T08:22:50Z` squash 合入 `ebe42872a792f4e5c60fb14fcc8365ce2aafce4a`。
