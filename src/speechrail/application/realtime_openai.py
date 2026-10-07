@@ -109,6 +109,7 @@ from speechrail.domain.tts_stream import (
 )
 from speechrail.realtime.speech_admission import AdmissionDecision, SpeechAdmission
 from speechrail.runtime.alignment_admission import AlignmentAdmissionFullError
+from speechrail.runtime.asr_debug_tap import AsrDebugTap
 from speechrail.runtime.busy import BusyReason, infer_backend_busy_reason
 from speechrail.runtime.diarization_admission import DiarizationAdmissionFullError
 from speechrail.runtime.limits import MAX_ALIGNMENT_PCM_BYTES
@@ -292,6 +293,10 @@ class OpenAIRealtimeSession:
         # never written to disk, independently of generic WebSocket buffering.
         self._alignment_pcm = BoundedPcmBuffer(MAX_ALIGNMENT_PCM_BYTES)
         self._alignment_overflow = False
+        # Field-diagnosis tap: off unless the operator arms
+        # SPEECHRAIL_ASR_DEBUG_CAPTURE_UNTIL. Writes 16 kHz kernel PCM to a
+        # WAV file under the service log dir; never enabled by default.
+        self._asr_debug_tap = AsrDebugTap(session_id)
         self._alignment_tasks: set[asyncio.Task[None]] = set()
         self._buffered_audio_bytes = 0
         self._unflushed_bytes = 0
@@ -596,6 +601,7 @@ class OpenAIRealtimeSession:
     async def close(self) -> None:
         self._closing = True
         self._asr_generation += 1
+        self._asr_debug_tap.close()
         if self._asr_lane is not None:
             await self._asr_lane.close()
             self._asr_lane = None
@@ -971,6 +977,9 @@ class OpenAIRealtimeSession:
                 ) from exc
             raise
         self._sync_asr_item()
+        # Diagnosis tap: records the exact kernel PCM fed to ASR while armed.
+        # Placed after backend acceptance so failed appends leave no trace.
+        self._asr_debug_tap.append(audio)
         if not (self._alignment_enabled or self._diarization_enabled):
             return
         try:
