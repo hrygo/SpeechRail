@@ -127,7 +127,9 @@ class BoundQwen3Decoder:
             language=forced_language,
             context=context,
         )
-        prefix_tokens = self._rollback_prefix(
+        # A preview prefix is only a latency heuristic. Formal finalization
+        # must be able to correct every token from the complete bounded audio.
+        prefix_tokens = [] if final else self._rollback_prefix(
             state.raw_tokens,
             decoded_samples=state.decoded_samples,
             preserve_language_header=forced_language is None,

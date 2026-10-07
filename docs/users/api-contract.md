@@ -2,7 +2,7 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.16.4"
+version: "3.16.5"
 date: 2026-10-07
 ---
 
@@ -745,8 +745,10 @@ registry 不可读返回 `503 pronunciation_store_unavailable`（可重试）。
 - 可选的 `session.speechrail.asr` 在首个 PCM 前设置识别策略：
   `preview_interval_ms` 默认为 `1000`（`100...5000`），`max_segment_ms` 默认为 `20000`
   （`1000...30000`，且不少于预览间隔），`finalization` 默认为 `full_segment`，也可为
-  `streaming_finalize`，`rollback_tokens` 默认为 `5`（`0...32`，累计音频重解码时保留的
-  可修订前缀回退 token 数）。显式 `final_deadline_ms` 必须是正整数且不超过请求 timeout；
+  `streaming_finalize`，`rollback_tokens` 默认为 `5`（`0...32`，累计音频预览重解码时保留的
+  可修订前缀回退 token 数）。`streaming_finalize` 的最终解码允许从完整有界段音频修正
+  整段预览，不强制保留旧文本前缀，`rollback_tokens=0` 也不例外；它沿用流式 decoder，
+  不另调用完整段转写接口。显式 `final_deadline_ms` 必须是正整数且不超过请求 timeout；
   省略时沿用请求 timeout。布尔值、小数、未知字段或枚举均拒绝。
 - `session.updated.session.speechrail.asr.effective_max_segment_ms` 回显实际有效段预算；它是
   请求、服务资源、能力与解码器上限的最小值。只有首个 PCM 前可更新；候选失败时旧配置保持不变。

@@ -515,3 +515,42 @@ def test_late_audio_cannot_freeze_a_prefix_decoded_before_the_unfixed_window() -
         )
     assert all(prompt[-1] == 103 for prompt in runtime.input_ids[:2])
     assert runtime.input_ids[2][-3:] == [5, 6, 7]
+
+
+@pytest.mark.parametrize("language", ["en", "auto"])
+@pytest.mark.parametrize("rollback", [0, 5])
+def test_final_can_correct_an_entire_previously_fixed_hypothesis(
+    language: str, rollback: int,
+) -> None:
+    header = [1, 2, 3] if language == "auto" else []
+    decoder, runtime, _model, _tokenizer = _make_decoder(
+        [
+            FakeGeneration([*header, 5, 6, 7, 8, 9, 10, 11, 12]),
+            FakeGeneration([*header, 11, 12]),
+        ]
+    )
+    state = StreamingDecodeState()
+    decoder.decode(
+        [0.1] * 4,
+        state,
+        language=language,
+        context="",
+        sample_watermark=4,
+        max_new_tokens=32,
+    )
+
+    final = decoder.decode(
+        [0.1] * 6,
+        state,
+        language=language,
+        context="",
+        sample_watermark=6,
+        max_new_tokens=32,
+        rollback_tokens=rollback,
+        final=True,
+    )
+
+    assert final.text == "next words"
+    assert final.language == "English"
+    assert final.raw_tokens == (*header, 11, 12)
+    assert runtime.configs[-1].max_new_tokens == 32
