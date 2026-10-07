@@ -2,7 +2,7 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.16.3"
+version: "3.16.4"
 date: 2026-10-07
 ---
 
@@ -105,6 +105,11 @@ SpeechRail 保存独立的 ASR 与 TTS 规格，默认 `quality/quality`。三�
 不会单独把仍可在请求时加载的 `tts_ready=true` 改成 false。
 `reclamation_failed` 表示 worker 回收失败、旧资源尚未确认释放，相关准入保持隔离；
 它不表示已经冷回收成功，活动通知和自动 TTL 不会清除它。
+所有已配置的普通 TTS lane 均被隔离时，`tts_ready=false`；TTS-only 服务的
+`/readyz` 返回 503。独立 lane 并发策略允许时，仍可服务的普通 TTS lane 保持就绪，
+独立 ASR 也可使 `/readyz` 返回 200。暂时排队或请求占用不会单独改变 `tts_ready`。
+普通合成和 VoiceDesign 预览由 Governor 按各自 lane 准入；隔离请求返回
+`503 backend_reclamation_failed`、`retryable=false`，预览与设计任务共用 `voice_design` lane。
 `/metrics` 的 JSON 响应（`Accept: application/json`）中，`workers` 同样可返回该状态。
 
 `tts_design` 独立报告辅助 VoiceDesign worker 的 `configured`、`ready`、`state` 和

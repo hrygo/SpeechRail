@@ -301,7 +301,15 @@ class AppServices:
 
     @property
     def tts_ready(self) -> bool:
-        return self.tts_synthesizer is not None or self.settings.backend_ready
+        synthesizer = self.tts_synthesizer
+        if synthesizer is None and not self.settings.backend_ready:
+            return False
+        if isinstance(synthesizer, Qwen3TtsCapabilityRouter):
+            return any(
+                not self.governor.tts_lane_isolated(role)
+                for role in synthesizer.configured_runtime_roles
+            )
+        return not self.governor.tts_lane_isolated()
 
     @property
     def tts_warm(self) -> bool | None:

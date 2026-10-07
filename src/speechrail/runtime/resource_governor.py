@@ -251,6 +251,12 @@ class ResourceGovernor:
             or resource_key in self._quarantined_tts_lanes
         )
 
+    def tts_lane_isolated(self, resource_key: str | None = None) -> bool:
+        """Report persistent reclamation isolation without considering queue occupancy."""
+
+        key = self._normalize_resource_key(WorkClass.REALTIME_TTS, resource_key)
+        return self._quarantine_blocks(WorkClass.REALTIME_TTS, key)
+
     def lane_available(
         self, work_class: WorkClass, resource_key: str | None = None
     ) -> bool:

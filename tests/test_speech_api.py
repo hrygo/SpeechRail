@@ -262,6 +262,41 @@ def test_voice_preview_returns_audio_without_creating_voice_profile(
     assert not custom_voices.exists()
 
 
+def test_voice_preview_rejects_quarantined_design_lane(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from dataclasses import replace
+
+    import speechrail.app as app_module
+    from speechrail.runtime.registry import VOICE_DESIGN_ROLE
+    from speechrail.runtime.resource_governor import ResourceGovernor
+
+    build_services = services_module.build_app_services
+
+    def build_with_isolated_design(settings, overrides):
+        services = build_services(settings, overrides)
+        governor = ResourceGovernor(
+            settings.governor_limits, allow_heavy_overlap=True,
+        )
+        governor.quarantine_tts_lane(VOICE_DESIGN_ROLE)
+        return replace(services, governor=governor)
+
+    monkeypatch.setattr(app_module, "build_app_services", build_with_isolated_design)
+    client, synthesizer, _ = _preview_client(tmp_path)
+    response = client.post(
+        "/v1/voices/previews",
+        json={
+            "model": "tts-1", "input": "test", "instruction": "test",
+            "response_format": "pcm",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "backend_reclamation_failed"
+    assert response.json()["error"]["retryable"] is False
+    assert synthesizer.design_requests == []
+
+
 @pytest.mark.parametrize("tier", ["fast", "quality", "reference"])
 def test_voice_preview_works_on_every_tier_with_a_design_snapshot(
     tmp_path: Path, tier: str
