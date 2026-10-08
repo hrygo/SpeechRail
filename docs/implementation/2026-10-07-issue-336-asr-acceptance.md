@@ -2,7 +2,7 @@
 title: "共享 ASR #336：冻结预设后的真实验收"
 status: in_progress
 audience: "SpeechRail 开发者与验收人员"
-version: "0.18.0"
+version: "0.19.0"
 date: 2026-10-08
 ---
 
@@ -192,6 +192,26 @@ FLEURS 的额外错误由 vendor 整段路径也原样复现。前缀约束改�
 quality/quality、auto off、catalog、ready、单 listener 与零活动请求。
 当前恢复 proof SHA-256：
 `8fecb69ff802b5acecf1bb5f76daef3a56e56fcae2b6d76f6496468850598e4c`。
+
+### CI 失败与助手测试的稳定断言
+
+HEAD `fe0863bedf7e0b263b90889ef8aceb445a06c4df` 的 CI
+`37751124846` 于 08:41:54 UTC 结束，整体失败。Python 完整测试、质量门、
+App 构建及 wheel 打包通过；Swift 的
+`testV06bTitleClaimDoesNotBlockSubmitAndLLM` 要求观察短暂的
+`streamingReply != nil`，回答快速完成后该状态已经收起。
+
+08:58 UTC 的确定性复现保持标题 gate 未释放，先等待完整回答完成且预览
+收起，再执行旧断言；只有旧瞬态断言失败。修正后要求标题仍被阻塞时，
+完整预期回答可见、预览收起，且库中恰好一条该正文的正式回复。
+没有延长轮询、增加重试或修改生产编排。11 项回复持久化回归通过。
+09:00:39 UTC 本机完整 SwiftPM 的 1347 项 XCTest 零失败；
+Swift Testing 报告 519 项、零失败，其中两项真实服务回放按 opt-in
+条件跳过。这些确定性检查不覆盖模型、真实设备或语义质量门。
+
+复现、定向回归和完整 Swift 日志留在仓库外。后继提交的远端 CI 需按
+其精确 HEAD 独立核验，不能沿用旧 HEAD 的通过记录；#253/#336 与
+PR #340 草稿状态保持不变。
 
 ## 制品与测量边界
 
