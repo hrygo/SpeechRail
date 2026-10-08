@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import math
 import queue
 import threading
 import time
 import wave
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -488,17 +490,45 @@ def run_manifest_asr_benchmark(
     manifest: Path, *, profile: str, output: Path, sessions: int,
     warmup: bool, app_home: Path | None, base_url: str,
     resource_only: bool = False,
+    fixture_ids: Sequence[str] | None = None,
 ) -> dict[str, object]:
     if sessions < 1:
         raise ValueError("sessions must be positive")
     base_url = validate_base_url(base_url)
+    manifest_bytes = manifest.read_bytes() if fixture_ids is not None else None
     loaded = load_manifest(manifest)
+    if manifest_bytes is not None and manifest.read_bytes() != manifest_bytes:
+        raise ValueError("ASR manifest changed during fixture selection")
     fixtures = [fixture for fixture in loaded.fixtures if fixture.kind == "asr"]
     if not fixtures:
         raise ValueError("ASR-only evidence requires at least one ASR fixture")
+    selection = None
+    if fixture_ids is not None:
+        if (
+            not isinstance(fixture_ids, Sequence)
+            or isinstance(fixture_ids, (str, bytes)) or not fixture_ids
+            or any(not isinstance(value, str) for value in fixture_ids)
+        ):
+            raise ValueError("ASR fixture selection must be a nonempty list of IDs")
+        selected = set(fixture_ids)
+        if len(selected) != len(fixture_ids):
+            raise ValueError("ASR fixture selection contains duplicate IDs")
+        if not selected <= {fixture.id for fixture in fixtures}:
+            raise ValueError("ASR fixture selection contains unknown IDs")
+        fixtures = [fixture for fixture in fixtures if fixture.id in selected]
+        selection = {
+            "requested_ids": list(fixture_ids),
+            "executed_order": [fixture.id for fixture in fixtures],
+            "warmup_fixture_id": fixtures[0].id if warmup else None,
+            "source_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+            "scope": "selected_fixtures",
+            "frozen_v4_matrix_scope": False,
+        }
     if not resource_only and any(fixture.reference_text is None for fixture in fixtures):
         raise ValueError("ASR-only evidence requires external human references")
-    policy = json.loads(manifest.read_text()).get("asr_policy")
+    policy = json.loads(
+        manifest_bytes if manifest_bytes is not None else manifest.read_text()
+    ).get("asr_policy")
     if policy is not None and not isinstance(policy, dict):
         raise ValueError("asr_policy must be an object")
     output = validate_output_path(output)
@@ -527,6 +557,8 @@ def run_manifest_asr_benchmark(
                     punctuation_reference_text=fixture.punctuation_reference_text,
                     punctuation_reference_kind=fixture.punctuation_reference_kind,
                 )
+                if selection is not None:
+                    result["wire_pcm_sha256"] = hashlib.sha256(wire).hexdigest()
                 results.append({"id": fixture.id, "repeat": repeat + 1, **result})
     except Exception as exc:
         failure = exc
@@ -558,6 +590,8 @@ def run_manifest_asr_benchmark(
     if resource_only:
         payload["measurement_mode"] = "resource_only"
         payload["quality_gate"] = "unset"
+    if selection is not None:
+        payload["fixture_selection"] = selection
     write_result(payload, output)
     if failure is not None:
         raise RuntimeError("ASR benchmark stopped; partial evidence was saved") from failure
