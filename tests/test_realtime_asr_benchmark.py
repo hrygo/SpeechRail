@@ -4,6 +4,7 @@ import base64
 import json
 import queue
 import sys
+import threading
 import wave
 from pathlib import Path
 
@@ -208,7 +209,7 @@ def test_policy_echo_cannot_silently_change_the_measured_preset(override):
         "preview_interval_ms": 500, "max_segment_ms": 8000,
         "finalization": "full_segment", "final_deadline_ms": 10000,
     }
-    echo = {**requested, "effective_max_segment_ms": 4000, **override}
+    echo = {**requested, "rollback_tokens": 5, "effective_max_segment_ms": 4000, **override}
     with pytest.raises(ValueError):
         _validated_policy_echo({"session": {"speechrail": {"asr": echo}}}, requested)
 
@@ -218,10 +219,42 @@ def test_policy_echo_records_a_valid_effective_resource_budget():
         "preview_interval_ms": 500, "max_segment_ms": 8000,
         "finalization": "full_segment",
     }
-    echo = {**requested, "effective_max_segment_ms": 4000, "final_deadline_ms": 120000}
+    echo = {
+        **requested, "rollback_tokens": 5,
+        "effective_max_segment_ms": 4000, "final_deadline_ms": 120000,
+    }
     assert _validated_policy_echo(
         {"session": {"speechrail": {"asr": echo}}}, requested,
     ) == echo
+
+
+@pytest.mark.parametrize("rollback", [0, 5, 20, 32])
+def test_policy_echo_records_the_measured_rollback_budget(rollback):
+    requested = {
+        "preview_interval_ms": 500, "max_segment_ms": 8000,
+        "finalization": "streaming_finalize", "rollback_tokens": rollback,
+    }
+    echo = {**requested, "effective_max_segment_ms": 8000, "final_deadline_ms": 120000}
+
+    observed = _validated_policy_echo(
+        {"session": {"speechrail": {"asr": echo}}}, requested,
+    )
+
+    assert observed["rollback_tokens"] == rollback
+
+
+@pytest.mark.parametrize("rollback", ["missing", None, False, -1, 33, 6])
+def test_policy_echo_rejects_missing_malformed_or_changed_default_rollback(rollback):
+    requested = {
+        "preview_interval_ms": 500, "max_segment_ms": 8000,
+        "finalization": "streaming_finalize",
+    }
+    echo = {**requested, "effective_max_segment_ms": 8000, "final_deadline_ms": 120000}
+    if rollback != "missing":
+        echo["rollback_tokens"] = rollback
+
+    with pytest.raises(ValueError):
+        _validated_policy_echo({"session": {"speechrail": {"asr": echo}}}, requested)
 
 
 def test_benchmark_rejects_remote_origin_before_loading_audio_or_credentials(tmp_path):
@@ -339,6 +372,7 @@ def test_resource_only_manifest_keeps_resources_without_quality_claims(
                 "effective_max_segment_ms": 10_000,
                 "finalization": "full_segment",
                 "final_deadline_ms": 120_000,
+                "rollback_tokens": 5,
             },
             "quality_gate": "unset",
             "resource_evidence": {
@@ -469,11 +503,27 @@ def test_realtime_manifest_passes_punctuation_gold_to_local_quality_runner(
     assert punctuation_gold not in encoded
 
 
-def test_resource_only_asr_run_keeps_pacing_policy_echo_and_exact_barrier(monkeypatch):
+@pytest.mark.parametrize("continuous_previews", [False, True])
+def test_resource_only_asr_run_keeps_pacing_policy_echo_and_exact_barrier(
+    monkeypatch, continuous_previews,
+):
+    wire_samples = 9_600 if continuous_previews else 4_800
+    preview_batch_received = threading.Event()
+    consumed_previews = []
+    consume = ASREvidence.consume
+
+    def observe(self, event, received_at):
+        consume(self, event, received_at)
+        if event["type"] == "speechrail.transcription.hypothesis":
+            consumed_previews.append(event)
+
+    monkeypatch.setattr(ASREvidence, "consume", observe)
+
     class FakeConnection:
         def __init__(self):
             self.inbound = queue.Queue()
             self.sent = []
+            self.append_count = 0
             self.inbound.put({"type": "session.created"})
 
         def send(self, event):
@@ -489,17 +539,30 @@ def test_resource_only_asr_run_keeps_pacing_policy_echo_and_exact_barrier(monkey
                                 "effective_max_segment_ms": 10_000,
                                 "finalization": "full_segment",
                                 "final_deadline_ms": 120_000,
+                                "rollback_tokens": 5,
                             },
                         },
                     },
                 })
+            elif event["type"] == "input_audio_buffer.append" and continuous_previews:
+                # More than the receiver's total queue capacity across four
+                # paced packets. Evidence must be consumed during upload.
+                if self.append_count:
+                    assert len(consumed_previews) >= self.append_count * 300 - 1
+                self.append_count += 1
+                for index in range(300):
+                    self.inbound.put({
+                        "type": "speechrail.transcription.hypothesis",
+                        "utterance_id": "first", "text": "PRIVATE_PREVIEW",
+                        "batch_end": index == 299,
+                    })
             elif event["type"] == "input_audio_buffer.commit":
                 for result in (
                     boundary("first", 0, 2_400),
-                    boundary("last", 2_400, 4_800),
+                    boundary("last", 2_400, wire_samples),
                     terminal("last", "PRIVATE_TRANSCRIPT"),
                     terminal("first", ""),
-                    receipt(4_800),
+                    receipt(wire_samples),
                 ):
                     self.inbound.put(result)
 
@@ -507,6 +570,8 @@ def test_resource_only_asr_run_keeps_pacing_policy_echo_and_exact_barrier(monkey
             event = self.inbound.get(timeout=2)
             if event is None:
                 raise RuntimeError("fake connection closed")
+            if event.get("batch_end"):
+                preview_batch_received.set()
             return event
 
         def close(self):
@@ -526,8 +591,15 @@ def test_resource_only_asr_run_keeps_pacing_policy_echo_and_exact_barrier(monkey
         realtime = FakeRealtime()
 
     sleeps = []
-    monkeypatch.setattr(asr_benchmark.time, "sleep", sleeps.append)
-    wire = b"\x01\x02" * 4_800
+
+    def paced_wait(delay):
+        sleeps.append(delay)
+        if continuous_previews and connection.append_count:
+            assert preview_batch_received.wait(timeout=2)
+            preview_batch_received.clear()
+
+    monkeypatch.setattr(asr_benchmark.time, "sleep", paced_wait)
+    wire = b"\x01\x02" * wire_samples
 
     result = asr_benchmark._run_asr(
         FakeClient(), wire, language="zh", reference=None, policy=None, resource_only=True,
@@ -537,7 +609,9 @@ def test_resource_only_asr_run_keeps_pacing_policy_echo_and_exact_barrier(monkey
         event for event in connection.sent
         if event["type"] == "input_audio_buffer.append"
     ]
-    assert [len(base64.b64decode(event["audio"])) for event in appends] == [4_800, 4_800]
+    assert [len(base64.b64decode(event["audio"])) for event in appends] == (
+        [4_800] * (len(wire) // 4_800)
+    )
     assert b"".join(base64.b64decode(event["audio"]) for event in appends) == wire
     assert any(delay >= 0.05 for delay in sleeps)
     assert result["effective_policy"]["effective_max_segment_ms"] == 10_000
@@ -545,9 +619,10 @@ def test_resource_only_asr_run_keeps_pacing_policy_echo_and_exact_barrier(monkey
     assert "quality_metrics" not in result
     assert result["resource_evidence"]["sample_spans"] == [
         {"item_id": "first", "start_sample": 0, "end_sample": 2_400},
-        {"item_id": "last", "start_sample": 2_400, "end_sample": 4_800},
+        {"item_id": "last", "start_sample": 2_400, "end_sample": wire_samples},
     ]
-    assert result["resource_evidence"]["accepted_samples"] == 4_800
+    assert result["resource_evidence"]["accepted_samples"] == wire_samples
+    assert result["resource_evidence"]["preview_count"] == (1_200 if continuous_previews else 0)
     assert result["resource_evidence"]["segment_budget_gate"] == "pass"
     assert "PRIVATE_TRANSCRIPT" not in json.dumps(result)
 

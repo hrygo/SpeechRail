@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.5"
-date: 2026-10-07
+version: "3.3.9"
+date: 2026-10-08
 ---
 
 # SpeechRail 测试与验收
@@ -144,6 +144,119 @@ curl -X POST http://127.0.0.1:8201/v1/audio/speech \
 当前没有经场景对照确认的标点阈值，`punctuation_gate` 始终为 `unset`；标点分数只作
 描述性证据。资源专用样本不做质量评分，原有终态、输入覆盖、预算和上传回执验收门保持
 独立。原始音频、人工参考、转写和 benchmark 制品仍保存在仓库外。
+
+### ASR 定向诊断与配对
+
+真实质量诊断先固定待检验因素、制品、模型/精度、参考、策略、输入字节和请求顺序。
+`bench_realtime_json.py --asr-manifest` 可重复指定 `--asr-fixture-id`；
+执行顺序保持 manifest 原顺序，warmup 使用所选第一个素材。
+未知、重复或空选择在客户端与凭据初始化前拒绝；不指定时执行全池。
+选择结果保存来源 manifest 摘要、实际 wire PCM 摘要和独立范围，
+缩小池不代表完整验收覆盖。
+
+`asr_segment_error_diagnostics.run_diagnostic_probe()` 只接受质量模式、正整数
+次数、明确的布尔 warmup 和包含有效 `max_segment_ms` 的 ASR policy，
+在模型请求前校验。它沿用公共事件、receipt、水位、覆盖、预算和质量断言，
+仅添加脱敏文字诊断。终态、最后预览分别记录原输出摘要和 CER 规范化摘要；
+标点 gold 另记录精确摘要。文字对齐选择一种最优路径，
+字符位置不构成声学时间定位；输出不包含参考或转写正文。
+
+离线 `asr_focus_analysis.py --baseline ... --candidate ... --output ...`
+要求两份完成的真实分段诊断，核验请求身份/顺序、连续重复、
+参考、有效策略、时长、覆盖和已记录的实际 wire PCM 摘要；
+逐次展示字符错误差值、预览/终态变化和重复一致性。
+标点差值须同时核验 gold 精确摘要及评分口径；缺失或不同标为
+`not_comparable`。历史缺少原输出摘要时标为 `not_observed`，不回填。
+制品、模型与方法身份由实验冻结及独立审计另行核验，
+工具本身的 `measurement_identity_gate` 和完整 `acceptance_gate` 不自动通过。
+
+初筛按观察家族选代表，全部退化仍保留。固定配置已重复一致时，
+只有新假设、变量或修复才启动额外测量；单因素初筛后仅确认影响决定的素材，
+再保护其余独立风险及未用于调参的素材。候选确定后才执行必要完整验收。
+字符错误与各类标点分别判定，平均改善不抵消新增退化；
+gold 不得进入模型 context 或生产输出选择。
+
+### ASR 客户端计时观测
+
+`examples/perf/realtime_asr_benchmark.py` 输出 schema 2。每个请求记录最后一包
+append 调用起止、名义回放结束、回放等待返回、commit 调用起止、最后终态及
+receipt 的相对单调时间，并保留最后上传的 wire 样本区间。
+`first_preview_seconds` 仍从 paced 回放起点计算；以下三个字段分别使用不同起点：
+
+- `last_upload_to_last_terminal_seconds`：最后终态接收减去最后 append 返回。
+- `nominal_playback_end_to_last_terminal_seconds`：最后终态接收减去回放起点与 wire 时长。
+- `commit_to_last_terminal_seconds`：最后终态接收减去 commit 调用开始。
+
+上述差值保留负值：终态可能先于上传返回、名义回放结束或 commit 到达。
+`barrier_seconds` 为 receipt 接收减去 commit 调用开始。所有观测位于
+`timing_observations`，定义位于 `timing_definitions`；缺失、非有限、
+布尔伪装与不可能的时钟顺序拒绝。上传返回不证明服务端已接收，名义回放结束
+不证明声音已播放，声学语音结束固定标记 `not_observed`。
+旧 `last_audio_to_final_seconds` 已移除，不用截零值冒充末语音时延。
+
+WAV 入口同时核对声明帧数与实际 PCM 字节数，拒绝尾部截断和半个 PCM16
+采样帧，避免以不完整素材产生看似通过的输入覆盖证据。
+确定性反例位于 `tests/test_realtime_asr_timing.py`，可单独运行：
+
+```bash
+uv run --no-sync pytest --no-cov tests/test_realtime_asr_timing.py tests/test_realtime_asr_benchmark.py tests/test_asr_quality_metrics.py
+```
+
+schema 1 历史结果保留原始定义；旧审计器不得接受 schema 2 或向旧结果补写新观测。
+新结果须以支持 schema 2 的审计器和相同工具版本配对，另记源码 digest；
+这些客户端观测不能证明声学时延或场景绝对门通过。
+
+生产 Session 回放的 `SessionReplaySummary` 使用 schema 6，其
+`timing_observations` 与上述 Python schema 2 独立。原 schema 5 的
+`final_after_last_audio_ms` 已移除。新对象以显式 fake capture 起点记录相对毫秒，
+区分最后一次 source yield 返回、`RealtimeASRClient.append` 调用起止、
+最后终态接收和 `drainAndClear` 调用起止；最后 append 的 24kHz
+半开样本区间另存于 `last_append_sample_span_24k`。
+名义采集结束由实际已 yield 样本数计算，包含夹具的合成尾静音，不表示声学结束。
+
+`source_yield_to_last_terminal_ms`、`append_return_to_last_terminal_ms` 与
+`nominal_capture_end_to_last_terminal_ms` 分别从这三个起点计算有符号差值。
+缺少观测时保持 optional，不以构造时钟或零值代替；JSON 中缺失的 optional 字段
+表示未观测。`observations_complete` 只表示这些客户端观测齐全。
+声学结束、服务端 append 接收、内部 commit 发送和 receipt 接收时刻均明确标为
+`not_observed`；drain 返回不能代替其中任何时刻。时钟逆序或空/无效上传区间拒绝。
+schema 5 历史证据保持原样；新监督器须显式校验 schema 6。
+确定性计时反例位于已有回放门测试文件，可运行：
+
+```bash
+swift test --package-path macos/SpeechRailApp --filter ASRSessionReplayTimingTests
+```
+
+### 生产 Session 回放的采样退出协调
+
+对显式启用 `SPEECHRAIL_ASR_SESSION_E2E=1` 的生产 Session 回放，
+外部资源监督器可同时提供以下三个变量：
+
+- `SPEECHRAIL_ASR_SESSION_SAMPLER_RUN_ID`：本次运行的 canonical 小写 UUID。
+- `SPEECHRAIL_ASR_SESSION_SAMPLER_READY`：消费者 ready JSON 的绝对路径。
+- `SPEECHRAIL_ASR_SESSION_SAMPLER_RELEASE`：监督器 release JSON 的绝对路径。
+
+两个 marker 与结果文件须为不同文件，位于同一个现有仓库外目录；已有 marker、
+部分配置、相对路径、路径冲突与仓库内目录均拒绝。三个变量均为空时不启用协调。
+
+消费者在排空、释放、结果写入及原有验收断言后，原子发布且不覆盖 ready：
+`{"schema_version":1,"run_id":"<本次 UUID>","consumer_finished":true}`。
+监督器须先停止并 join 采样线程，保存原始资源材料，成功后才原子发布且不覆盖
+release：`{"schema_version":1,"run_id":"<同一 UUID>","sampler_stopped":true}`，
+随后等待消费者实际退出。消费者限时等待最多 30 秒；错误 UUID、格式或字段、
+非普通文件、超大 marker、超时与取消均失败，取消不转换为成功。
+
+marker 只协调进程退出顺序，不表示质量、消费者或资源门通过。原有失败结果、
+不完整资源和非零退出码必须原样保留；异常路径仍须由监督器回收消费者。
+握手的确定性回归位于现有 `ASRProductionSessionReplayGateTests.swift`，
+Xcode 与 SwiftPM 使用同一测试文件。可单独运行：
+
+```bash
+swift test --package-path macos/SpeechRailApp --filter ASRSessionReplaySamplerHandshakeTests
+```
+
+定向测试使用临时 marker 与替身状态，不加载模型或接管 UI。真实长会资源门须另以
+同一消费者 binary、监督器、素材与驻留口径配对重测，不能用确定性测试改写旧失败。
 
 ## 规格选择与分人供给测试清单
 

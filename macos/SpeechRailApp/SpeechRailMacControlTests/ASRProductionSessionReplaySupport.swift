@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 import CryptoKit
 import SpeechRailControlKit
 import Testing
@@ -387,16 +388,20 @@ final class SessionReplayPowerMonitor: MeetingPowerMonitor {
 
 final class SessionReplayMeetingClock: MeetingClock, @unchecked Sendable {
     private let lock = NSLock()
-    private var latestReturnedDate = Date()
+    private var captureOriginDate: Date?
 
     func now() -> Date {
         let current = Date()
-        lock.withLock { latestReturnedDate = current }
+        // The first call anchors this fresh capture generation. Later calls
+        // timestamp persistence observations and must not move that anchor.
+        lock.withLock {
+            if captureOriginDate == nil { captureOriginDate = current }
+        }
         return current
     }
 
-    var lastReturnedDate: Date {
-        lock.withLock { latestReturnedDate }
+    var captureOrigin: Date? {
+        lock.withLock { captureOriginDate }
     }
 }
 
@@ -496,9 +501,11 @@ actor SessionReplayClient: AssistantRealtimeClient, MeetingRealtimeClient,
     }
 
     func append(_ pcm: Data) async throws {
+        let startedAt = ContinuousClock().now
         try await realtime.append(pcm)
+        let returnedAt = ContinuousClock().now
         uploadedSamples += pcm.count / MemoryLayout<Int16>.size
-        await recorder.recordUploadedPCM(pcm)
+        await recorder.recordUploadedPCM(pcm, startedAt: startedAt, returnedAt: returnedAt)
     }
 
     func flushPendingUtterance() async throws {
@@ -506,8 +513,11 @@ actor SessionReplayClient: AssistantRealtimeClient, MeetingRealtimeClient,
     }
 
     func drainAndClear(timeout: Duration) async throws {
+        let startedAt = ContinuousClock().now
         try await realtime.drainAndClear(timeout: timeout)
+        let returnedAt = ContinuousClock().now
         drainSucceeded = true
+        await recorder.recordDrain(startedAt: startedAt, returnedAt: returnedAt)
     }
 
     func updateVoice(
@@ -622,10 +632,17 @@ final class SessionReplayDiscardingPlayback: AssistantPlaybackChannel, @unchecke
 
 actor SessionReplayAssistantLLM: AssistantLLM {
     private let recorder: SessionReplayRecorder
+    private let provider: (any AssistantLLM)?
     private(set) var streamCount = 0
+    private(set) var completedStreamCount = 0
+    private(set) var outputCharacters = 0
+    private(set) var outputContentCharacters = 0
+    private(set) var formalInputMatched = true
+    private(set) var finalToLLMSeconds: Double?
 
-    init(recorder: SessionReplayRecorder) {
+    init(recorder: SessionReplayRecorder, provider: (any AssistantLLM)? = nil) {
         self.recorder = recorder
+        self.provider = provider
     }
 
     func check(
@@ -634,7 +651,13 @@ actor SessionReplayAssistantLLM: AssistantLLM {
         operation: LLMOperation,
         allowThinkingControlFallback: Bool
     ) async -> LLMConnectionResult {
-        .connected(milliseconds: 1, model: "session-replay-fake")
+        if let provider {
+            return await provider.check(
+                configuration: configuration, apiKey: apiKey, operation: operation,
+                allowThinkingControlFallback: allowThinkingControlFallback
+            )
+        }
+        return .connected(milliseconds: 1, model: "session-replay-fake")
     }
 
     func stream(
@@ -644,12 +667,65 @@ actor SessionReplayAssistantLLM: AssistantLLM {
         maxOutputTokens: Int?,
         instructions: String?
     ) async -> AsyncThrowingStream<String, Error> {
+        let calledAt = ContinuousClock().now
         await recorder.recordAssistantLLMStreamCall()
         streamCount += 1
+        if let provider {
+            let snapshot = await recorder.snapshot()
+            if let finalAt = snapshot.lastTerminalAt {
+                let duration = finalAt.duration(to: calledAt).components
+                finalToLLMSeconds = Double(duration.seconds)
+                    + Double(duration.attoseconds) / 1e18
+            }
+            formalInputMatched = formalInputMatched && SessionReplayLLMInputIntegrity.matches(
+                messages: messages,
+                boundaries: snapshot.boundaries,
+                terminalTexts: snapshot.terminalTexts
+            )
+            let upstream = await provider.stream(
+                configuration: configuration, messages: messages, apiKey: apiKey,
+                maxOutputTokens: maxOutputTokens, instructions: instructions
+            )
+            return AsyncThrowingStream { continuation in
+                let task = Task {
+                    do {
+                        for try await delta in upstream {
+                            try Task.checkCancellation()
+                            self.outputCharacters += delta.count
+                            self.outputContentCharacters += delta.filter { !$0.isWhitespace }.count
+                            continuation.yield(delta)
+                        }
+                        self.completedStreamCount += 1
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+                continuation.onTermination = { _ in task.cancel() }
+            }
+        }
         return AsyncThrowingStream { continuation in
             continuation.yield("已处理。")
             continuation.finish()
         }
+    }
+}
+
+enum SessionReplayLLMInputIntegrity {
+    static func matches(
+        messages: [LLMMessage],
+        boundaries: [SessionReplayBoundary],
+        terminalTexts: [String: String]
+    ) -> Bool {
+        let users = messages.filter { $0.role == .user }
+        let ordered = boundaries.sorted { $0.span.startSample < $1.span.startSample }
+        guard users.count == 1, !ordered.isEmpty,
+              ordered.allSatisfy({ terminalTexts[$0.itemID] != nil }) else { return false }
+        let expected = ordered.map { terminalTexts[$0.itemID] ?? "" }.joined()
+        // The production assembler supplies CJK/Latin boundary whitespace.
+        // Compare every other character, including punctuation and digits.
+        let actual = users[0].text.filter { !$0.isWhitespace }
+        return !actual.isEmpty && actual == expected.filter { !$0.isWhitespace }
     }
 }
 
@@ -680,8 +756,13 @@ actor SessionReplayRecorder {
     private var firstTerminalOrder: Int?
     private var firstPreviewAt: ContinuousClock.Instant?
     private var lastTerminalAt: ContinuousClock.Instant?
-    private var audioStartedAt = ContinuousClock().now
-    private var lastAudioSentAt = ContinuousClock().now
+    private var audioStartedAt: ContinuousClock.Instant?
+    private var lastSourceYieldReturnedAt: ContinuousClock.Instant?
+    private var lastAppendStartedAt: ContinuousClock.Instant?
+    private var lastAppendReturnedAt: ContinuousClock.Instant?
+    private var lastAppendSampleSpan: SessionReplayTimingEvidence.SampleSpan?
+    private var drainStartedAt: ContinuousClock.Instant?
+    private var drainReturnedAt: ContinuousClock.Instant?
     private var sourceSamplesYielded = 0
     private var uploadedSamples = 0
     private var sourcePCMHasher = SHA256()
@@ -693,15 +774,28 @@ actor SessionReplayRecorder {
         audioStartedAt = instant
     }
 
-    func recordSourcePCM(_ pcm: Data, sentAt instant: ContinuousClock.Instant) {
+    func recordSourcePCM(_ pcm: Data, yieldReturnedAt instant: ContinuousClock.Instant) {
         sourceSamplesYielded += pcm.count / MemoryLayout<Int16>.size
         sourcePCMHasher.update(data: pcm)
-        lastAudioSentAt = instant
+        lastSourceYieldReturnedAt = instant
     }
 
-    func recordUploadedPCM(_ pcm: Data) {
+    func recordUploadedPCM(
+        _ pcm: Data,
+        startedAt: ContinuousClock.Instant,
+        returnedAt: ContinuousClock.Instant
+    ) {
+        let startSample = uploadedSamples
         uploadedSamples += pcm.count / MemoryLayout<Int16>.size
         uploadedPCMHasher.update(data: pcm)
+        lastAppendStartedAt = startedAt
+        lastAppendReturnedAt = returnedAt
+        lastAppendSampleSpan = .init(start: startSample, end: uploadedSamples)
+    }
+
+    func recordDrain(startedAt: ContinuousClock.Instant, returnedAt: ContinuousClock.Instant) {
+        drainStartedAt = startedAt
+        drainReturnedAt = returnedAt
     }
 
     func pcmStreamsMatch() -> Bool {
@@ -824,7 +918,12 @@ actor SessionReplayRecorder {
             firstPreviewAt: firstPreviewAt,
             lastTerminalAt: lastTerminalAt,
             audioStartedAt: audioStartedAt,
-            lastAudioSentAt: lastAudioSentAt,
+            lastSourceYieldReturnedAt: lastSourceYieldReturnedAt,
+            lastAppendStartedAt: lastAppendStartedAt,
+            lastAppendReturnedAt: lastAppendReturnedAt,
+            lastAppendSampleSpan: lastAppendSampleSpan,
+            drainStartedAt: drainStartedAt,
+            drainReturnedAt: drainReturnedAt,
             sourceSamplesYielded: sourceSamplesYielded,
             uploadedSamples: uploadedSamples,
             configuredEventCount: configuredEventCount,
@@ -866,8 +965,13 @@ struct SessionReplaySnapshot: Sendable {
     let firstTerminalOrder: Int?
     let firstPreviewAt: ContinuousClock.Instant?
     let lastTerminalAt: ContinuousClock.Instant?
-    let audioStartedAt: ContinuousClock.Instant
-    let lastAudioSentAt: ContinuousClock.Instant
+    let audioStartedAt: ContinuousClock.Instant?
+    let lastSourceYieldReturnedAt: ContinuousClock.Instant?
+    let lastAppendStartedAt: ContinuousClock.Instant?
+    let lastAppendReturnedAt: ContinuousClock.Instant?
+    let lastAppendSampleSpan: SessionReplayTimingEvidence.SampleSpan?
+    let drainStartedAt: ContinuousClock.Instant?
+    let drainReturnedAt: ContinuousClock.Instant?
     let sourceSamplesYielded: Int
     let uploadedSamples: Int
     let configuredEventCount: Int
@@ -1389,8 +1493,114 @@ enum SessionReplayCaptureReleaseIntegrity {
     }
 }
 
+/// Client observations from fake capture; neither enqueue nor append return is
+/// evidence of acoustic speech end or server acceptance.
+struct SessionReplayTimingEvidence: Encodable, Sendable {
+    let clock = "continuous_monotonic"
+    let origin = "fake_capture_start"
+    let acousticSpeechEnd = "not_observed"
+    let serverAppendAcceptance = "not_observed"
+    let commitSend = "not_observed"
+    let inputReceiptReceived = "not_observed"
+    let observationsComplete: Bool
+    let firstPreviewMilliseconds: Double?
+    let lastSourceYieldReturnedMilliseconds: Double?
+    let lastAppendStartedMilliseconds: Double?
+    let lastAppendReturnedMilliseconds: Double?
+    let nominalCaptureEndMilliseconds: Double?
+    let lastTerminalReceivedMilliseconds: Double?
+    let drainStartedMilliseconds: Double?
+    let drainReturnedMilliseconds: Double?
+    let sourceYieldToLastTerminalMilliseconds: Double?
+    let appendReturnToLastTerminalMilliseconds: Double?
+    let nominalCaptureEndToLastTerminalMilliseconds: Double?
+    let lastAppendSampleSpan: SampleSpan?
+
+    struct SampleSpan: Encodable, Sendable, Equatable {
+        let start: Int
+        let end: Int
+    }
+
+    init(snapshot: SessionReplaySnapshot) throws {
+        let start = snapshot.audioStartedAt
+        let observations = [
+            snapshot.firstPreviewAt, snapshot.lastSourceYieldReturnedAt,
+            snapshot.lastAppendStartedAt, snapshot.lastAppendReturnedAt,
+            snapshot.lastTerminalAt, snapshot.drainStartedAt, snapshot.drainReturnedAt,
+        ]
+        if let start, observations.compactMap({ $0 }).contains(where: { $0 < start }) {
+            throw SessionReplayFailure.invalidTimingObservations
+        }
+        if let began = snapshot.lastAppendStartedAt, let returned = snapshot.lastAppendReturnedAt,
+           began > returned {
+            throw SessionReplayFailure.invalidTimingObservations
+        }
+        if let began = snapshot.drainStartedAt, let returned = snapshot.drainReturnedAt,
+           began > returned {
+            throw SessionReplayFailure.invalidTimingObservations
+        }
+        if let span = snapshot.lastAppendSampleSpan,
+           !(0 <= span.start && span.start < span.end && span.end == snapshot.uploadedSamples) {
+            throw SessionReplayFailure.invalidTimingObservations
+        }
+        func difference(
+            _ began: ContinuousClock.Instant?, _ ended: ContinuousClock.Instant?
+        ) -> Double? {
+            guard let began, let ended else { return nil }
+            return SessionReplayClock.milliseconds(from: began, to: ended)
+        }
+        firstPreviewMilliseconds = difference(start, snapshot.firstPreviewAt)
+        lastSourceYieldReturnedMilliseconds = difference(start, snapshot.lastSourceYieldReturnedAt)
+        lastAppendStartedMilliseconds = difference(start, snapshot.lastAppendStartedAt)
+        lastAppendReturnedMilliseconds = difference(start, snapshot.lastAppendReturnedAt)
+        nominalCaptureEndMilliseconds = start != nil && snapshot.sourceSamplesYielded > 0
+            ? Double(snapshot.sourceSamplesYielded) / 24 : nil
+        lastTerminalReceivedMilliseconds = difference(start, snapshot.lastTerminalAt)
+        drainStartedMilliseconds = difference(start, snapshot.drainStartedAt)
+        drainReturnedMilliseconds = difference(start, snapshot.drainReturnedAt)
+        sourceYieldToLastTerminalMilliseconds = difference(
+            snapshot.lastSourceYieldReturnedAt, snapshot.lastTerminalAt
+        )
+        appendReturnToLastTerminalMilliseconds = difference(
+            snapshot.lastAppendReturnedAt, snapshot.lastTerminalAt
+        )
+        if let terminal = lastTerminalReceivedMilliseconds, let nominal = nominalCaptureEndMilliseconds {
+            nominalCaptureEndToLastTerminalMilliseconds = terminal - nominal
+        } else {
+            nominalCaptureEndToLastTerminalMilliseconds = nil
+        }
+        lastAppendSampleSpan = snapshot.lastAppendSampleSpan
+        observationsComplete = start != nil
+            && lastSourceYieldReturnedMilliseconds != nil
+            && lastAppendStartedMilliseconds != nil && lastAppendReturnedMilliseconds != nil
+            && lastAppendSampleSpan != nil && lastTerminalReceivedMilliseconds != nil
+            && drainStartedMilliseconds != nil && drainReturnedMilliseconds != nil
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case clock, origin
+        case acousticSpeechEnd = "acoustic_speech_end"
+        case serverAppendAcceptance = "server_append_acceptance"
+        case commitSend = "commit_send"
+        case inputReceiptReceived = "input_receipt_received"
+        case observationsComplete = "observations_complete"
+        case firstPreviewMilliseconds = "first_preview_ms"
+        case lastSourceYieldReturnedMilliseconds = "last_source_yield_returned_ms"
+        case lastAppendStartedMilliseconds = "last_append_started_ms"
+        case lastAppendReturnedMilliseconds = "last_append_returned_ms"
+        case nominalCaptureEndMilliseconds = "nominal_capture_end_ms"
+        case lastTerminalReceivedMilliseconds = "last_terminal_received_ms"
+        case drainStartedMilliseconds = "drain_started_ms"
+        case drainReturnedMilliseconds = "drain_returned_ms"
+        case sourceYieldToLastTerminalMilliseconds = "source_yield_to_last_terminal_ms"
+        case appendReturnToLastTerminalMilliseconds = "append_return_to_last_terminal_ms"
+        case nominalCaptureEndToLastTerminalMilliseconds = "nominal_capture_end_to_last_terminal_ms"
+        case lastAppendSampleSpan = "last_append_sample_span_24k"
+    }
+}
+
 struct SessionReplaySummary: Encodable {
-    let schemaVersion = 5
+    let schemaVersion = 6
     let fixtureID: String
     let scene: String
     let preset: String
@@ -1410,8 +1620,7 @@ struct SessionReplaySummary: Encodable {
     let previewEventCount: Int
     let previewRevisionCount: Int
     let previewRevisionRegressionCount: Int
-    let firstPreviewMilliseconds: Double?
-    let finalAfterLastAudioMilliseconds: Double?
+    let timingObservations: SessionReplayTimingEvidence
     let uploadGate: String
     let pcmIntegrityGate: String
     let receiptBarrierGate: String
@@ -1477,8 +1686,7 @@ struct SessionReplaySummary: Encodable {
         case previewEventCount = "preview_event_count"
         case previewRevisionCount = "preview_revision_count"
         case previewRevisionRegressionCount = "preview_revision_regression_count"
-        case firstPreviewMilliseconds = "first_preview_ms"
-        case finalAfterLastAudioMilliseconds = "final_after_last_audio_ms"
+        case timingObservations = "timing_observations"
         case uploadGate = "upload_gate"
         case pcmIntegrityGate = "pcm_integrity_gate"
         case receiptBarrierGate = "receipt_barrier_gate"
@@ -1525,10 +1733,7 @@ struct SessionReplayRun {
 enum SessionReplayClock {
     static func milliseconds(from start: ContinuousClock.Instant, to end: ContinuousClock.Instant) -> Double {
         let duration = start.duration(to: end).components
-        return max(
-            0,
-            (Double(duration.seconds) + Double(duration.attoseconds) / 1_000_000_000_000_000_000) * 1_000
-        )
+        return (Double(duration.seconds) + Double(duration.attoseconds) / 1_000_000_000_000_000_000) * 1_000
     }
 }
 
@@ -1544,6 +1749,7 @@ enum SessionReplayFailure: Error {
     case businessTurnDidNotArrive
     case captureBufferOverflow
     case syntheticTTSUnavailable
+    case invalidTimingObservations
 }
 
 @MainActor
@@ -1556,4 +1762,161 @@ func requireClient(_ handle: SessionReplayClientHandle) throws -> SessionReplayC
 func requireSessionID(_ value: String?) throws -> String {
     guard let value else { throw SessionReplayFailure.sessionRunFailed }
     return value
+}
+
+enum SessionReplaySamplerHandshakeFailure: Error, Equatable {
+    case invalidConfiguration
+    case markerAlreadyExists
+    case invalidReleaseMarker
+    case samplerReleaseTimedOut
+}
+
+struct SessionReplaySamplerHandshake: Sendable {
+    let runID: String
+    let readyURL: URL
+    let releaseURL: URL
+
+    private init(runID: String, readyURL: URL, releaseURL: URL) {
+        self.runID = runID
+        self.readyURL = readyURL
+        self.releaseURL = releaseURL
+    }
+
+    static func load(
+        outputURL: URL,
+        environment: [String: String],
+        repositoryRootURL: URL = inferredRepositoryRoot
+    ) throws -> Self? {
+        let runID = environment["SPEECHRAIL_ASR_SESSION_SAMPLER_RUN_ID"] ?? ""
+        let readyPath = environment["SPEECHRAIL_ASR_SESSION_SAMPLER_READY"] ?? ""
+        let releasePath = environment["SPEECHRAIL_ASR_SESSION_SAMPLER_RELEASE"] ?? ""
+        if runID.isEmpty && readyPath.isEmpty && releasePath.isEmpty { return nil }
+        guard environment["SPEECHRAIL_ASR_SESSION_E2E"] == "1",
+              let uuid = UUID(uuidString: runID),
+              uuid.uuidString.lowercased() == runID,
+              readyPath.hasPrefix("/"), releasePath.hasPrefix("/"),
+              outputURL.isFileURL, outputURL.path.hasPrefix("/") else {
+            throw SessionReplaySamplerHandshakeFailure.invalidConfiguration
+        }
+
+        let rawReadyURL = URL(fileURLWithPath: readyPath)
+        let rawReleaseURL = URL(fileURLWithPath: releasePath)
+        guard !markerExists(rawReadyURL), !markerExists(rawReleaseURL) else {
+            throw SessionReplaySamplerHandshakeFailure.markerAlreadyExists
+        }
+        let readyURL = canonical(rawReadyURL)
+        let releaseURL = canonical(rawReleaseURL)
+        let outputURL = canonical(outputURL)
+        let root = canonical(repositoryRootURL)
+        let directory = outputURL.deletingLastPathComponent()
+        var isDirectory: ObjCBool = false
+        guard readyURL != releaseURL, readyURL != outputURL, releaseURL != outputURL,
+              readyURL.deletingLastPathComponent() == directory,
+              releaseURL.deletingLastPathComponent() == directory,
+              isExternal(directory, from: root),
+              FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            throw SessionReplaySamplerHandshakeFailure.invalidConfiguration
+        }
+        return Self(runID: runID, readyURL: readyURL, releaseURL: releaseURL)
+    }
+
+    func waitForSamplerStop(timeout: Duration) async throws {
+        guard timeout > .zero && timeout <= .seconds(30) else {
+            throw SessionReplaySamplerHandshakeFailure.invalidConfiguration
+        }
+        try Task.checkCancellation()
+        let ready = try JSONSerialization.data(withJSONObject: [
+            "schema_version": 1,
+            "run_id": runID,
+            "consumer_finished": true,
+        ], options: [.sortedKeys])
+        try publishReady(ready)
+
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while true {
+            try Task.checkCancellation()
+            let remaining = clock.now.duration(to: deadline)
+            guard remaining > .zero else {
+                throw SessionReplaySamplerHandshakeFailure.samplerReleaseTimedOut
+            }
+            if Self.markerExists(releaseURL) {
+                try validateRelease()
+                try Task.checkCancellation()
+                return
+            }
+            try await Task.sleep(for: min(.milliseconds(10), remaining))
+        }
+    }
+
+    private func publishReady(_ data: Data) throws {
+        let temporary = readyURL.deletingLastPathComponent().appendingPathComponent(
+            ".sampler-ready-\(UUID().uuidString.lowercased()).tmp"
+        )
+        // Both files live on one filesystem. Hard-link publication is atomic
+        // and refuses an existing destination, including a dangling symlink.
+        guard FileManager.default.createFile(
+            atPath: temporary.path, contents: data,
+            attributes: [.posixPermissions: 0o600]
+        ) else {
+            throw SessionReplaySamplerHandshakeFailure.invalidConfiguration
+        }
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        do {
+            try FileManager.default.linkItem(at: temporary, to: readyURL)
+        } catch {
+            if Self.markerExists(readyURL) {
+                throw SessionReplaySamplerHandshakeFailure.markerAlreadyExists
+            }
+            throw error
+        }
+    }
+
+    private func validateRelease() throws {
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: releaseURL.path)
+            guard attributes[.type] as? FileAttributeType == .typeRegular,
+                  let size = attributes[.size] as? NSNumber,
+                  size.intValue > 0, size.intValue <= 1_024 else {
+                throw SessionReplaySamplerHandshakeFailure.invalidReleaseMarker
+            }
+            let data = try Data(contentsOf: releaseURL)
+            guard data.count <= 1_024,
+                  let marker = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  Set(marker.keys) == Set(["schema_version", "run_id", "sampler_stopped"]),
+                  let schema = marker["schema_version"] as? NSNumber,
+                  CFGetTypeID(schema) != CFBooleanGetTypeID(),
+                  !["f", "d"].contains(String(cString: schema.objCType)),
+                  schema.intValue == 1,
+                  marker["run_id"] as? String == runID,
+                  let stopped = marker["sampler_stopped"] as? NSNumber,
+                  CFGetTypeID(stopped) == CFBooleanGetTypeID(),
+                  stopped.boolValue else {
+                throw SessionReplaySamplerHandshakeFailure.invalidReleaseMarker
+            }
+        } catch {
+            throw SessionReplaySamplerHandshakeFailure.invalidReleaseMarker
+        }
+    }
+
+    private static func markerExists(_ url: URL) -> Bool {
+        // attributesOfItem observes the directory entry, including a broken
+        // symlink, rather than accepting only an existing symlink destination.
+        (try? FileManager.default.attributesOfItem(atPath: url.path)) != nil
+    }
+
+    private static func canonical(_ url: URL) -> URL {
+        url.standardizedFileURL.resolvingSymlinksInPath()
+    }
+
+    private static func isExternal(_ url: URL, from root: URL) -> Bool {
+        url.path != root.path && !url.path.hasPrefix(root.path + "/")
+    }
+
+    static var inferredRepositoryRoot: URL {
+        var url = URL(fileURLWithPath: #filePath)
+        for _ in 0..<4 { url.deleteLastPathComponent() }
+        return canonical(url)
+    }
 }

@@ -26,7 +26,16 @@ struct ASRProductionSessionReplayTests {
     )
     func selectedProductionSessionConsumesPacedFakeCapture() async throws {
         let configuration = try SessionReplayConfiguration.load()
-        let pcm = try ReplayPCM24K.load(from: configuration.audioURL)
+        let samplerHandshake = try SessionReplaySamplerHandshake.load(
+            outputURL: configuration.outputURL,
+            environment: ProcessInfo.processInfo.environment
+        )
+        let maximumAudioSeconds = ProcessInfo.processInfo.environment[
+            "SPEECHRAIL_ASR_SESSION_LONG_FIXTURE"
+        ] == "1" ? 3_600 : 30
+        let pcm = try ReplayPCM24K.load(
+            from: configuration.audioURL, maximumAudioSeconds: maximumAudioSeconds
+        )
         guard configuration.hasCompleteTeleprompterPrefixCoverage(
             fixtureSamples: pcm.bytes.count / MemoryLayout<Int16>.size
         ) else {
@@ -51,6 +60,7 @@ struct ASRProductionSessionReplayTests {
         if configuration.scene == .teleprompter {
             #expect(run.summary.teleprompterProgressGate == "pass", "Revised previews must advance within the expected script and manual takeover must hold position.")
         }
+        try await samplerHandshake?.waitForSamplerStop(timeout: .seconds(30))
     }
 
     private func replay(_ configuration: SessionReplayConfiguration, pcm: Data) async throws -> SessionReplayRun {
@@ -196,12 +206,7 @@ struct ASRProductionSessionReplayTests {
                     previewEventCount: snapshot.previewEventCount,
                     previewRevisionCount: snapshot.previewRevisionCount,
                     previewRevisionRegressionCount: snapshot.previewRevisionRegressionCount,
-                    firstPreviewMilliseconds: snapshot.firstPreviewAt.map {
-                        SessionReplayClock.milliseconds(from: snapshot.audioStartedAt, to: $0)
-                    },
-                    finalAfterLastAudioMilliseconds: snapshot.lastTerminalAt.map {
-                        SessionReplayClock.milliseconds(from: snapshot.lastAudioSentAt, to: $0)
-                    },
+                    timingObservations: try SessionReplayTimingEvidence(snapshot: snapshot),
                     uploadGate: uploadPassed ? "pass" : "fail",
                     pcmIntegrityGate: pcmIntegrityPassed ? "pass" : "fail",
                     receiptBarrierGate: receiptPassed ? "pass" : "fail",
@@ -277,7 +282,10 @@ struct ASRProductionSessionReplayTests {
         clientHandle: SessionReplayClientHandle,
         storage: SessionReplayStorage
     ) async throws -> String {
-        let llm = SessionReplayAssistantLLM(recorder: recorder)
+        let realLLM = ProcessInfo.processInfo.environment["SPEECHRAIL_ASR_SESSION_REAL_LLM"] == "1"
+        let llm = SessionReplayAssistantLLM(
+            recorder: recorder, provider: realLLM ? LLMProvider() : nil
+        )
         let dependencies = AssistantSessionDependencies(
             llm: llm,
             makeRealtimeClient: { clientConfiguration in
@@ -301,9 +309,36 @@ struct ASRProductionSessionReplayTests {
         )
         let session = AssistantSession(coordinator: storage.coordinator, port: configuration.port, dependencies: dependencies)
         let preferences = SessionPreferences(defaults: storage.defaults)
-        preferences.llmBaseURL = "http://127.0.0.1:1/v1"
-        preferences.llmModel = "session-replay-fake"
-        session.preferences = { preferences }
+        if realLLM {
+            // Copy only the LLM preference keys into an isolated suite. The
+            // production preferences and credential store remain read-only.
+            guard let appDefaults = UserDefaults(suiteName: "com.speechrail.desktop") else {
+                throw SessionReplayFailure.invalidConfiguration
+            }
+            for key in [
+                "speechrail.llm.baseURL", "speechrail.llm.model",
+                "speechrail.llm.compatibilityMode", "speechrail.llm.moduleOverrides.v1"
+            ] {
+                if let value = appDefaults.object(forKey: key) {
+                    storage.defaults.set(value, forKey: key)
+                }
+            }
+            let copied = SessionPreferences(defaults: storage.defaults)
+            let resolved = copied.llmConfiguration(for: .assistant)
+            guard resolved.isConfigured, resolved.isBaseURLValid,
+                  !resolved.embedsCredential,
+                  let host = URL(string: resolved.normalizedBaseURL)?.host,
+                  ["127.0.0.1", "localhost", "::1"].contains(host) else {
+                throw SessionReplayFailure.invalidConfiguration
+            }
+            session.preferences = { copied }
+        } else {
+            preferences.llmBaseURL = "http://127.0.0.1:1/v1"
+            preferences.llmModel = "session-replay-fake"
+            session.preferences = { preferences }
+            session.apiKeyProvider = { nil }
+            session.moduleAPIKeyProvider = { _ in nil }
+        }
         session.serviceReadiness = { .ready(profile: "session-replay") }
         session.audioSourceFactory = { source }
         storage.coordinator.starter = { kind in
@@ -337,6 +372,14 @@ struct ASRProductionSessionReplayTests {
                 && streamCount > 0
         }
         guard businessTurnArrived else { throw SessionReplayFailure.businessTurnDidNotArrive }
+        if realLLM {
+            do {
+                try await verifyRealLLMResponse(llm, configuration: configuration)
+            } catch {
+                _ = await session.endConversation()
+                throw error
+            }
+        }
         let turnOrderingPassed = SessionReplayAssistantTurnIntegrity.validate(await recorder.snapshot())
         let callsBeforeEnd = await llm.streamCount
         _ = await session.endConversation()
@@ -344,6 +387,47 @@ struct ASRProductionSessionReplayTests {
 
         return budgetRolloverObserved && turnOrderingPassed && callsBeforeEnd == 1 && callsAfterEnd == 1
             ? "pass" : "fail"
+    }
+
+    private func verifyRealLLMResponse(
+        _ llm: SessionReplayAssistantLLM,
+        configuration: SessionReplayConfiguration
+    ) async throws {
+        let responseArrived = await waitUntil(timeout: .seconds(90)) {
+            await llm.completedStreamCount == 1
+        }
+        let inputMatched = await llm.formalInputMatched
+        let outputCharacters = await llm.outputCharacters
+        let outputContentCharacters = await llm.outputContentCharacters
+        var evidence: [String: Any] = [
+            "schema_version": 1,
+            "mode": "real_local_llm",
+            "stream_count": await llm.streamCount,
+            "completed_stream_count": await llm.completedStreamCount,
+            "output_characters": outputCharacters,
+            "output_content_characters": outputContentCharacters,
+            "formal_input_gate": inputMatched ? "pass" : "fail",
+            "response_gate": responseArrived && outputContentCharacters > 0 ? "pass" : "fail",
+            "scope": "real ASR + production AssistantSession + LLMProvider; fake capture/TTS/playback",
+            "semantic_correctness_gate": "unset"
+        ]
+        if let latency = await llm.finalToLLMSeconds {
+            evidence["received_final_to_llm_seconds"] = latency
+        }
+        let evidenceURL = configuration.outputURL.appendingPathExtension("llm.json")
+        try FileManager.default.createDirectory(
+            at: evidenceURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        guard !FileManager.default.fileExists(atPath: evidenceURL.path),
+              FileManager.default.createFile(
+                atPath: evidenceURL.path,
+                contents: try JSONSerialization.data(withJSONObject: evidence, options: [.sortedKeys]),
+                attributes: [.posixPermissions: 0o600]
+              ),
+              responseArrived, inputMatched, outputContentCharacters > 0 else {
+            throw SessionReplayFailure.businessTurnDidNotArrive
+        }
     }
 
     private func replayMeeting(
@@ -390,6 +474,9 @@ struct ASRProductionSessionReplayTests {
             throw SessionReplayFailure.sessionDidNotStart
         }
         let sessionID = try requireSessionID(session.sessionID)
+        guard let ledgerOrigin = meetingClock.captureOrigin else {
+            throw SessionReplayFailure.invalidConfiguration
+        }
         try await feedPaced(pcm, to: source, recorder: recorder)
         await session.finishAndSummarize()
         let rows = try await storage.store.lines(sessionID: sessionID)
@@ -400,7 +487,7 @@ struct ASRProductionSessionReplayTests {
             rows: rows,
             sessionID: sessionID,
             recordStartedAt: record.startedAt,
-            ledgerOrigin: meetingClock.lastReturnedDate
+            ledgerOrigin: ledgerOrigin
         ) ? "pass" : "fail"
     }
 
@@ -643,7 +730,7 @@ struct ASRProductionSessionReplayTests {
                 droppedSamplesBefore: 0
             )
             guard source.yield(chunk) else { throw SessionReplayFailure.captureBufferOverflow }
-            await recorder.recordSourcePCM(chunk.pcm, sentAt: clock.now)
+            await recorder.recordSourcePCM(chunk.pcm, yieldReturnedAt: clock.now)
             sequenceNumber += 1
             deadline = deadline.advanced(by: .milliseconds(40))
             try await clock.sleep(until: deadline, tolerance: .milliseconds(8))
@@ -691,7 +778,7 @@ struct ASRProductionSessionReplayTests {
                 droppedSamplesBefore: 0
             )
             guard source.yield(chunk) else { throw SessionReplayFailure.captureBufferOverflow }
-            await recorder.recordSourcePCM(chunk.pcm, sentAt: clock.now)
+            await recorder.recordSourcePCM(chunk.pcm, yieldReturnedAt: clock.now)
             sequenceNumber += 1
             deadline = deadline.advanced(by: .milliseconds(40))
             try await clock.sleep(until: deadline, tolerance: .milliseconds(8))

@@ -337,7 +337,10 @@ private enum ReplayInputError: Error {
 struct ReplayPCM24K {
     let bytes: Data
 
-    static func load(from url: URL) throws -> Self {
+    static func load(from url: URL, maximumAudioSeconds: Int = 30) throws -> Self {
+        guard maximumAudioSeconds > 0, maximumAudioSeconds <= 3_600 else {
+            throw ReplayInputError.unsupportedAudio
+        }
         let file: AVAudioFile
         do {
             file = try AVAudioFile(forReading: url)
@@ -349,7 +352,7 @@ struct ReplayPCM24K {
         guard sourceFormat.sampleRate == 16_000,
               sourceFormat.channelCount == 1,
               sourceFrames > 0,
-              sourceFrames <= 480_000,
+              sourceFrames <= AVAudioFramePosition(maximumAudioSeconds) * 16_000,
               file.fileFormat.streamDescription.pointee.mBitsPerChannel == 16 else {
             throw ReplayInputError.unsupportedAudio
         }

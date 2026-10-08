@@ -5,6 +5,199 @@ import Testing
 #if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
 #endif
+
+@Suite
+struct ASRSessionReplayTimingTests {
+    @Test
+    func preservesTerminalBeforeUploadReturnInsteadOfClampingToZero() {
+        let start = ContinuousClock().now
+        #expect(SessionReplayClock.milliseconds(
+            from: start, to: start.advanced(by: .milliseconds(-250))
+        ) == -250)
+    }
+
+    @Test
+    func distinguishesSourceYieldAppendReturnAndNominalEnd() async throws {
+        let recorder = SessionReplayRecorder()
+        let start = ContinuousClock().now
+        await recorder.markAudioStarted(at: start)
+        let pcm = Data(repeating: 0, count: 24_000 * MemoryLayout<Int16>.size)
+        await recorder.recordSourcePCM(pcm, yieldReturnedAt: start.advanced(by: .milliseconds(1_000)))
+        await recorder.recordUploadedPCM(
+            pcm, startedAt: start.advanced(by: .milliseconds(900)),
+            returnedAt: start.advanced(by: .milliseconds(1_100))
+        )
+        await recorder.recordSourcePCM(pcm, yieldReturnedAt: start.advanced(by: .milliseconds(2_050)))
+        await recorder.recordUploadedPCM(
+            pcm, startedAt: start.advanced(by: .milliseconds(2_000)),
+            returnedAt: start.advanced(by: .milliseconds(2_200))
+        )
+        await recorder.record(.init(
+            metadata: .init(eventID: "synthetic-terminal", sessionID: "synthetic"),
+            payload: .completed(itemID: "synthetic", transcript: "PRIVATE_TEST_SENTINEL"),
+            receivedAt: start.advanced(by: .milliseconds(1_500))
+        ))
+        await recorder.recordDrain(
+            startedAt: start.advanced(by: .milliseconds(2_300)),
+            returnedAt: start.advanced(by: .milliseconds(2_500))
+        )
+        let snapshot = await recorder.snapshot()
+        let timing = try SessionReplayTimingEvidence(snapshot: snapshot)
+        #expect(timing.observationsComplete)
+        #expect(timing.firstPreviewMilliseconds == nil)
+        #expect(timing.lastSourceYieldReturnedMilliseconds == 2_050)
+        #expect(timing.lastAppendStartedMilliseconds == 2_000)
+        #expect(timing.lastAppendReturnedMilliseconds == 2_200)
+        #expect(timing.nominalCaptureEndMilliseconds == 2_000)
+        #expect(timing.sourceYieldToLastTerminalMilliseconds == -550)
+        #expect(timing.appendReturnToLastTerminalMilliseconds == -700)
+        #expect(timing.nominalCaptureEndToLastTerminalMilliseconds == -500)
+        #expect(timing.lastAppendSampleSpan == .init(start: 24_000, end: 48_000))
+        #expect(await recorder.pcmStreamsMatch())
+        let json = try #require(try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(timing)
+        ) as? [String: Any])
+        #expect(json["acoustic_speech_end"] as? String == "not_observed")
+        #expect(json["server_append_acceptance"] as? String == "not_observed")
+        #expect(json["commit_send"] as? String == "not_observed")
+        #expect(json["input_receipt_received"] as? String == "not_observed")
+        #expect(json["append_return_to_last_terminal_ms"] as? Double == -700)
+        #expect(json["final_after_last_audio_ms"] == nil)
+        #expect(!String(decoding: try JSONEncoder().encode(timing), as: UTF8.self)
+            .contains("PRIVATE_TEST_SENTINEL"))
+    }
+
+    @Test
+    func missingObservationsDoNotInventConstructionTimeOrZeroLatency() async throws {
+        let recorder = SessionReplayRecorder()
+        let snapshot = await recorder.snapshot()
+        #expect(snapshot.audioStartedAt == nil)
+        #expect(snapshot.lastSourceYieldReturnedAt == nil)
+        #expect(snapshot.lastAppendReturnedAt == nil)
+        let timing = try SessionReplayTimingEvidence(snapshot: snapshot)
+        #expect(!timing.observationsComplete)
+        #expect(timing.firstPreviewMilliseconds == nil)
+        #expect(timing.lastAppendStartedMilliseconds == nil)
+        #expect(timing.nominalCaptureEndMilliseconds == nil)
+        #expect(timing.lastTerminalReceivedMilliseconds == nil)
+        #expect(timing.sourceYieldToLastTerminalMilliseconds == nil)
+        #expect(timing.appendReturnToLastTerminalMilliseconds == nil)
+        #expect(timing.nominalCaptureEndToLastTerminalMilliseconds == nil)
+        #expect(timing.lastAppendSampleSpan == nil)
+    }
+
+    @Test
+    func absentCaptureOriginDoesNotHideKnownSignedUploadDifference() async throws {
+        let recorder = SessionReplayRecorder()
+        let start = ContinuousClock().now
+        await recorder.recordUploadedPCM(
+            Data(repeating: 0, count: 2), startedAt: start,
+            returnedAt: start.advanced(by: .milliseconds(100))
+        )
+        await recorder.record(.init(
+            metadata: .init(eventID: "synthetic-terminal"),
+            payload: .completed(itemID: "synthetic", transcript: ""),
+            receivedAt: start.advanced(by: .milliseconds(40))
+        ))
+        let timing = try SessionReplayTimingEvidence(snapshot: await recorder.snapshot())
+        #expect(!timing.observationsComplete)
+        #expect(timing.lastAppendReturnedMilliseconds == nil)
+        #expect(timing.lastTerminalReceivedMilliseconds == nil)
+        #expect(timing.nominalCaptureEndMilliseconds == nil)
+        #expect(timing.appendReturnToLastTerminalMilliseconds == -60)
+    }
+
+    @Test(arguments: ["before_origin", "reversed_append", "reversed_drain", "empty_append"])
+    func rejectsImpossibleObservationOrderOrEmptySampleSpan(variant: String) async {
+        let recorder = SessionReplayRecorder()
+        let start = ContinuousClock().now
+        await recorder.markAudioStarted(at: start)
+        if variant == "reversed_drain" {
+            await recorder.recordDrain(startedAt: start.advanced(by: .milliseconds(1)), returnedAt: start)
+        } else {
+            await recorder.recordUploadedPCM(
+                Data(repeating: 0, count: variant == "empty_append" ? 0 : 2),
+                startedAt: start,
+                returnedAt: start.advanced(by: .milliseconds(variant == "reversed_append" ? -1 : 1))
+            )
+            if variant == "before_origin" {
+                await recorder.markAudioStarted(at: start.advanced(by: .milliseconds(2)))
+            }
+        }
+        let snapshot = await recorder.snapshot()
+        #expect(throws: (any Error).self) {
+            _ = try SessionReplayTimingEvidence(snapshot: snapshot)
+        }
+    }
+}
+
+@Suite
+struct SessionReplayFixtureBudgetTests {
+    @Test
+    func keepsTheDefaultThirtySecondFixtureLimit() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+        #expect(throws: (any Error).self) {
+            _ = try ReplayPCM24K.load(from: fixture)
+        }
+    }
+
+    @Test
+    func explicitlyBoundedLongFixturePreservesAllSamples() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+        let pcm = try ReplayPCM24K.load(from: fixture, maximumAudioSeconds: 3_600)
+        #expect(abs(pcm.bytes.count / MemoryLayout<Int16>.size - 31 * 24_000) <= 2)
+    }
+
+    @Test(arguments: [-1, 0, 3_601, Int.max])
+    func rejectsInvalidDurationBeforeAllocation(maximumAudioSeconds: Int) throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+        #expect(throws: (any Error).self) {
+            _ = try ReplayPCM24K.load(from: fixture, maximumAudioSeconds: maximumAudioSeconds)
+        }
+    }
+
+    private func makeFixture() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speechrail-replay-budget-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let url = directory.appendingPathComponent("silence.wav")
+        let payloadBytes = UInt32(31 * 16_000 * MemoryLayout<Int16>.size)
+        var wav = Data("RIFF".utf8)
+        func append32(_ value: UInt32) {
+            var little = value.littleEndian
+            Swift.withUnsafeBytes(of: &little) { wav.append(contentsOf: $0) }
+        }
+        func append16(_ value: UInt16) {
+            var little = value.littleEndian
+            Swift.withUnsafeBytes(of: &little) { wav.append(contentsOf: $0) }
+        }
+        append32(36 + payloadBytes)
+        wav.append(Data("WAVEfmt ".utf8))
+        append32(16)
+        append16(1)
+        append16(1)
+        append32(16_000)
+        append32(32_000)
+        append16(2)
+        append16(16)
+        wav.append(Data("data".utf8))
+        append32(payloadBytes)
+        wav.append(Data(repeating: 0, count: Int(payloadBytes)))
+        guard FileManager.default.createFile(
+            atPath: url.path, contents: wav, attributes: [.posixPermissions: 0o600]
+        ) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        return url
+    }
+}
+
 @Suite
 struct SessionReplayTerminalIntegrityTests {
     private let boundary = SessionReplayBoundary(
@@ -140,9 +333,136 @@ struct SessionReplayRecognitionIntegrityTests {
 }
 
 @Suite
+struct SessionReplayLLMInputIntegrityTests {
+    private var boundaries: [SessionReplayBoundary] {
+        [
+            SessionReplayBoundary(
+                itemID: "tail",
+                span: .init(startSample: 480_000, endSample: 528_000),
+                reason: .vad, order: 3, connectionID: "same"
+            ),
+            SessionReplayBoundary(
+                itemID: "head",
+                span: .init(startSample: 0, endSample: 480_000),
+                reason: .budgetRollover, order: 1, connectionID: "same"
+            )
+        ]
+    }
+
+    @Test
+    func comparesAllFormalSegmentsInInputOrder() {
+        #expect(SessionReplayLLMInputIntegrity.matches(
+            messages: [.init(role: .user, text: "不要改成 12，保留 21。")],
+            boundaries: boundaries,
+            terminalTexts: ["head": "不要改成12，", "tail": "保留21。"]
+        ))
+    }
+
+    @Test
+    func rejectsLostNegationOrChangedDigits() {
+        for input in ["改成12，保留21。", "不要改成12，保留12。", "不要改成12，"] {
+            #expect(!SessionReplayLLMInputIntegrity.matches(
+                messages: [.init(role: .user, text: input)],
+                boundaries: boundaries,
+                terminalTexts: ["head": "不要改成12，", "tail": "保留21。"]
+            ))
+        }
+    }
+
+    @Test
+    func rejectsMissingTerminalOrMultipleUserMessages() {
+        #expect(!SessionReplayLLMInputIntegrity.matches(
+            messages: [.init(role: .user, text: "不要改成12，")],
+            boundaries: boundaries,
+            terminalTexts: ["head": "不要改成12，"]
+        ))
+        #expect(!SessionReplayLLMInputIntegrity.matches(
+            messages: [.init(role: .user, text: "不要改成12，"), .init(role: .user, text: "保留21。")],
+            boundaries: boundaries,
+            terminalTexts: ["head": "不要改成12，", "tail": "保留21。"]
+        ))
+    }
+}
+
+@Suite
+struct SessionReplayLLMResponseEvidenceTests {
+    private struct Upstream: AssistantLLM {
+        let chunks: [String]
+        var fails = false
+
+        func check(
+            configuration: LLMConfiguration, apiKey: String?, operation: LLMOperation,
+            allowThinkingControlFallback: Bool
+        ) async -> LLMConnectionResult {
+            .connected(milliseconds: 1, model: "fake")
+        }
+
+        func stream(
+            configuration: LLMConfiguration, messages: [LLMMessage], apiKey: String?,
+            maxOutputTokens: Int?, instructions: String?
+        ) async -> AsyncThrowingStream<String, Error> {
+            AsyncThrowingStream { continuation in
+                for chunk in chunks { continuation.yield(chunk) }
+                if fails {
+                    continuation.finish(throwing: SessionReplayFailure.businessTurnDidNotArrive)
+                } else {
+                    continuation.finish()
+                }
+            }
+        }
+    }
+
+    private func stream(_ llm: SessionReplayAssistantLLM) async -> AsyncThrowingStream<String, Error> {
+        await llm.stream(
+            configuration: LLMConfiguration(baseURL: "http://127.0.0.1:1/v1", model: "fake"),
+            messages: [.init(role: .user, text: "test")], apiKey: nil,
+            maxOutputTokens: nil, instructions: nil
+        )
+    }
+
+    @Test
+    func whitespaceOnlyResponseDoesNotCountAsContent() async throws {
+        let llm = SessionReplayAssistantLLM(
+            recorder: SessionReplayRecorder(), provider: Upstream(chunks: [" \n", "\t"])
+        )
+        for try await _ in await stream(llm) {}
+        #expect(await llm.completedStreamCount == 1)
+        #expect(await llm.outputCharacters == 3)
+        #expect(await llm.outputContentCharacters == 0)
+        #expect(await llm.formalInputMatched == false)
+    }
+
+    @Test
+    func forwardsContentAndDoesNotRecordFailureAsCompletion() async throws {
+        let llm = SessionReplayAssistantLLM(
+            recorder: SessionReplayRecorder(), provider: Upstream(chunks: ["已", "处理。"], fails: true)
+        )
+        var received = ""
+        do {
+            for try await delta in await stream(llm) { received += delta }
+            Issue.record("The upstream failure must reach the consumer.")
+        } catch SessionReplayFailure.businessTurnDidNotArrive {
+            #expect(received == "已处理。")
+        }
+        #expect(await llm.completedStreamCount == 0)
+        #expect(await llm.outputContentCharacters == 4)
+    }
+}
+
+@Suite
 struct SessionReplayRowIntegrityTests {
     private let recordStartedAt = Date(timeIntervalSince1970: 1_000)
     private let ledgerOrigin = Date(timeIntervalSince1970: 1_001)
+
+    @Test
+    func laterPersistenceObservationMustNotMoveReplayCaptureOrigin() async throws {
+        let clock = SessionReplayMeetingClock()
+        let origin = clock.now()
+        try await Task.sleep(for: .milliseconds(10))
+        let persistenceObservation = clock.now()
+        #expect(persistenceObservation > origin)
+        #expect(clock.captureOrigin == origin)
+    }
 
     @Test
     func matchesRowsOneToOneAcrossReorderedSameTextAndDuration() {
@@ -996,5 +1316,278 @@ struct SessionReplayCaptureReleaseIntegrityTests {
                 )
             )
         )
+    }
+}
+
+@Suite
+struct ASRSessionReplaySamplerHandshakeTests {
+    @Test
+    func ordinaryReplayDoesNotRequireASampler() throws {
+        #expect(try SessionReplaySamplerHandshake.load(
+            outputURL: URL(fileURLWithPath: "/tmp/result.json"),
+            environment: [:]
+        ) == nil)
+    }
+
+    @Test
+    func partialConfigurationIsRejected() throws {
+        #expect(throws: SessionReplaySamplerHandshakeFailure.invalidConfiguration) {
+            _ = try SessionReplaySamplerHandshake.load(
+                outputURL: URL(fileURLWithPath: "/tmp/result.json"),
+                environment: ["SPEECHRAIL_ASR_SESSION_SAMPLER_RUN_ID": UUID().uuidString.lowercased()]
+            )
+        }
+    }
+
+    @Test(arguments: [
+        "disabled", "relative", "same_path", "ready_output", "release_output",
+        "other_directory", "bad_uuid", "uppercase_uuid", "repository_output",
+    ])
+    func unsafeConfigurationIsRejected(_ variant: String) throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        var environment = fixture.environment
+        var repositoryRoot = fixture.root.appendingPathComponent("repository", isDirectory: true)
+        switch variant {
+        case "disabled": environment.removeValue(forKey: "SPEECHRAIL_ASR_SESSION_E2E")
+        case "relative": environment["SPEECHRAIL_ASR_SESSION_SAMPLER_READY"] = "ready.json"
+        case "same_path": environment["SPEECHRAIL_ASR_SESSION_SAMPLER_RELEASE"] = fixture.readyURL.path
+        case "ready_output": environment["SPEECHRAIL_ASR_SESSION_SAMPLER_READY"] = fixture.outputURL.path
+        case "release_output": environment["SPEECHRAIL_ASR_SESSION_SAMPLER_RELEASE"] = fixture.outputURL.path
+        case "other_directory":
+            environment["SPEECHRAIL_ASR_SESSION_SAMPLER_RELEASE"] = fixture.root
+                .appendingPathComponent("other/release.json").path
+        case "bad_uuid": environment["SPEECHRAIL_ASR_SESSION_SAMPLER_RUN_ID"] = "bad"
+        case "uppercase_uuid":
+            environment["SPEECHRAIL_ASR_SESSION_SAMPLER_RUN_ID"] = "ABCDEFAB-1234-4567-89AB-123456789ABC"
+        case "repository_output": repositoryRoot = fixture.root
+        default: Issue.record("Unknown configuration fixture")
+        }
+        #expect(throws: SessionReplaySamplerHandshakeFailure.invalidConfiguration) {
+            _ = try SessionReplaySamplerHandshake.load(
+                outputURL: fixture.outputURL, environment: environment,
+                repositoryRootURL: repositoryRoot
+            )
+        }
+    }
+
+    @Test(arguments: ["ready.json", "release.json"])
+    func existingMarkersCannotReleaseANewRun(_ name: String) throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try Data("old run".utf8).write(to: fixture.root.appendingPathComponent(name))
+        #expect(throws: SessionReplaySamplerHandshakeFailure.markerAlreadyExists) {
+            _ = try SessionReplaySamplerHandshake.load(
+                outputURL: fixture.outputURL, environment: fixture.environment
+            )
+        }
+    }
+
+    @Test
+    func readyIsNonceBoundAndConsumerWaitsUntilRelease() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let handshake = try #require(try SessionReplaySamplerHandshake.load(
+            outputURL: fixture.outputURL, environment: fixture.environment
+        ))
+        let consumer = Task { try await handshake.waitForSamplerStop(timeout: .seconds(1)) }
+        defer { consumer.cancel() }
+        try await waitForReady(fixture.readyURL)
+        let marker = try JSONSerialization.jsonObject(with: Data(contentsOf: fixture.readyURL)) as? [String: Any]
+        #expect(marker?["schema_version"] as? Int == 1)
+        #expect(marker?["run_id"] as? String == fixture.runID)
+        #expect(marker?["consumer_finished"] as? Bool == true)
+        #expect(!FileManager.default.fileExists(atPath: fixture.releaseURL.path))
+        try publishRelease(fixture, runID: fixture.runID)
+        try await consumer.value
+    }
+
+    @Test(arguments: [
+        "wrong_run", "not_stopped", "malformed", "extra_key", "boolean_schema",
+        "numeric_stopped", "oversized", "symlink", "directory",
+    ])
+    func invalidReleaseDoesNotCountAsSamplerStopped(_ variant: String) async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let handshake = try #require(try SessionReplaySamplerHandshake.load(
+            outputURL: fixture.outputURL, environment: fixture.environment
+        ))
+        let consumer = Task { try await handshake.waitForSamplerStop(timeout: .seconds(1)) }
+        defer { consumer.cancel() }
+        try await waitForReady(fixture.readyURL)
+        if variant == "malformed" {
+            try Data("{".utf8).write(to: fixture.releaseURL, options: .atomic)
+        } else if variant == "oversized" {
+            try Data(repeating: 0x20, count: 1_025).write(to: fixture.releaseURL)
+        } else if variant == "symlink" {
+            let target = fixture.root.appendingPathComponent("target.json")
+            let bytes = try JSONSerialization.data(withJSONObject: [
+                "schema_version": 1, "run_id": fixture.runID, "sampler_stopped": true,
+            ])
+            try bytes.write(to: target)
+            try FileManager.default.createSymbolicLink(at: fixture.releaseURL, withDestinationURL: target)
+        } else if variant == "directory" {
+            try FileManager.default.createDirectory(at: fixture.releaseURL, withIntermediateDirectories: false)
+        } else if ["extra_key", "boolean_schema", "numeric_stopped"].contains(variant) {
+            var marker: [String: Any] = [
+                "schema_version": 1, "run_id": fixture.runID, "sampler_stopped": true,
+            ]
+            if variant == "extra_key" { marker["unexpected"] = true }
+            if variant == "boolean_schema" { marker["schema_version"] = true }
+            if variant == "numeric_stopped" { marker["sampler_stopped"] = 1 }
+            try JSONSerialization.data(withJSONObject: marker).write(to: fixture.releaseURL, options: .atomic)
+        } else {
+            try publishRelease(
+                fixture,
+                runID: variant == "wrong_run" ? UUID().uuidString.lowercased() : fixture.runID,
+                stopped: variant != "not_stopped"
+            )
+        }
+        var rejected = false
+        do {
+            try await consumer.value
+        } catch SessionReplaySamplerHandshakeFailure.invalidReleaseMarker {
+            rejected = true
+        }
+        #expect(rejected)
+    }
+
+    @Test
+    func readyPublicationCannotOverwriteAMarkerCreatedAfterLoad() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let handshake = try #require(try SessionReplaySamplerHandshake.load(
+            outputURL: fixture.outputURL, environment: fixture.environment
+        ))
+        let oldBytes = Data("a different writer".utf8)
+        try oldBytes.write(to: fixture.readyURL)
+        var rejected = false
+        do {
+            try await handshake.waitForSamplerStop(timeout: .seconds(1))
+        } catch SessionReplaySamplerHandshakeFailure.markerAlreadyExists {
+            rejected = true
+        }
+        #expect(rejected)
+        #expect(try Data(contentsOf: fixture.readyURL) == oldBytes)
+        #expect(!FileManager.default.fileExists(atPath: fixture.releaseURL.path))
+    }
+
+    @Test
+    func danglingExistingMarkerIsRejected() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try FileManager.default.createSymbolicLink(
+            at: fixture.readyURL, withDestinationURL: fixture.root.appendingPathComponent("missing.json")
+        )
+        #expect(throws: SessionReplaySamplerHandshakeFailure.markerAlreadyExists) {
+            _ = try SessionReplaySamplerHandshake.load(
+                outputURL: fixture.outputURL, environment: fixture.environment
+            )
+        }
+    }
+
+    @Test
+    func missingReleaseTimesOutWithoutClaimingSuccess() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let handshake = try #require(try SessionReplaySamplerHandshake.load(
+            outputURL: fixture.outputURL, environment: fixture.environment
+        ))
+        var timedOut = false
+        do {
+            try await handshake.waitForSamplerStop(timeout: .milliseconds(2))
+        } catch SessionReplaySamplerHandshakeFailure.samplerReleaseTimedOut {
+            timedOut = true
+        }
+        #expect(timedOut)
+        #expect(FileManager.default.fileExists(atPath: fixture.readyURL.path))
+        #expect(!FileManager.default.fileExists(atPath: fixture.releaseURL.path))
+    }
+
+    @Test
+    func cancellationDoesNotBecomeSuccess() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let handshake = try #require(try SessionReplaySamplerHandshake.load(
+            outputURL: fixture.outputURL, environment: fixture.environment
+        ))
+        let consumer = Task { try await handshake.waitForSamplerStop(timeout: .seconds(1)) }
+        try await waitForReady(fixture.readyURL)
+        consumer.cancel()
+        var cancelled = false
+        do {
+            try await consumer.value
+        } catch is CancellationError {
+            cancelled = true
+        }
+        #expect(cancelled)
+        #expect(!FileManager.default.fileExists(atPath: fixture.releaseURL.path))
+    }
+
+    @Test
+    func cancellationBeforePublicationDoesNotEmitReady() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let handshake = try #require(try SessionReplaySamplerHandshake.load(
+            outputURL: fixture.outputURL, environment: fixture.environment
+        ))
+        let consumer = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            try await handshake.waitForSamplerStop(timeout: .seconds(1))
+        }
+        var cancelled = false
+        do {
+            try await consumer.value
+        } catch is CancellationError {
+            cancelled = true
+        }
+        #expect(cancelled)
+        #expect(!FileManager.default.fileExists(atPath: fixture.readyURL.path))
+        #expect(!FileManager.default.fileExists(atPath: fixture.releaseURL.path))
+    }
+
+    private struct Fixture {
+        let root: URL
+        let runID: String
+        var outputURL: URL { root.appendingPathComponent("result.json") }
+        var readyURL: URL { root.appendingPathComponent("ready.json") }
+        var releaseURL: URL { root.appendingPathComponent("release.json") }
+        var environment: [String: String] {
+            [
+                "SPEECHRAIL_ASR_SESSION_E2E": "1",
+                "SPEECHRAIL_ASR_SESSION_SAMPLER_RUN_ID": runID,
+                "SPEECHRAIL_ASR_SESSION_SAMPLER_READY": readyURL.path,
+                "SPEECHRAIL_ASR_SESSION_SAMPLER_RELEASE": releaseURL.path,
+            ]
+        }
+    }
+
+    private func makeFixture() throws -> Fixture {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "speechrail-sampler-handshake-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: root, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        return Fixture(root: root, runID: UUID().uuidString.lowercased())
+    }
+
+    private func publishRelease(_ fixture: Fixture, runID: String, stopped: Bool = true) throws {
+        let bytes = try JSONSerialization.data(withJSONObject: [
+            "schema_version": 1, "run_id": runID, "sampler_stopped": stopped,
+        ])
+        try bytes.write(to: fixture.releaseURL, options: .atomic)
+    }
+
+    private func waitForReady(_ url: URL) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(1))
+        while !FileManager.default.fileExists(atPath: url.path) {
+            guard clock.now < deadline else {
+                throw SessionReplaySamplerHandshakeFailure.samplerReleaseTimedOut
+            }
+            try await Task.sleep(for: .milliseconds(1))
+        }
     }
 }

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import math
 import queue
 import threading
 import time
 import wave
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -199,7 +202,12 @@ def _wire_audio(path: Path) -> tuple[bytes, float]:
     with wave.open(str(path)) as audio:
         if (audio.getnchannels(), audio.getsampwidth(), audio.getframerate()) != (1, 2, 16000):
             raise ValueError("ASR fixture must be 16 kHz mono PCM16 WAV")
-        pcm = audio.readframes(audio.getnframes())
+        frames = audio.getnframes()
+        # One extra frame exposes a malformed half sample in the data chunk;
+        # a truncated file must not redefine the declared fixture duration.
+        pcm = audio.readframes(frames + 1)
+        if len(pcm) != frames * 2:
+            raise ValueError("ASR fixture PCM length differs from its declared frame count")
     if not pcm:
         raise ValueError("ASR fixture is empty")
     resampler = RationalResampler(16000, 24000)
@@ -237,7 +245,7 @@ def _validated_policy_echo(
         key: get(key, effective)
         for key in (
             "preview_interval_ms", "max_segment_ms", "effective_max_segment_ms",
-            "finalization", "final_deadline_ms",
+            "finalization", "final_deadline_ms", "rollback_tokens",
         )
     }
     # Decode the reply with the same strict integer and enum contract as requests.
@@ -248,6 +256,7 @@ def _validated_policy_echo(
         echoed_policy.preview_interval_ms != policy.preview_interval_ms
         or echoed_policy.max_segment_ms != policy.max_segment_ms
         or echoed_policy.finalization != policy.finalization
+        or echoed_policy.rollback_tokens != policy.rollback_tokens
         or echoed_policy.final_deadline_ms is None
         or (
             policy.final_deadline_ms is not None
@@ -271,11 +280,80 @@ def _observed_policy_echo(configured: object) -> dict[str, object]:
             "max_segment_ms",
             "finalization",
             "final_deadline_ms",
+            "rollback_tokens",
         )
     }
     if any(value is None for value in requested.values()):
         raise ValueError("ASR session omitted its effective policy echo")
     return _validated_policy_echo(configured, requested)
+
+
+def _timing_metrics(
+    evidence: ASREvidence, *, started: float,
+    last_upload_started: float | None, last_upload_completed: float | None,
+    playback_wait_completed: float, committed_at: float,
+    commit_send_completed: float, wire_samples: int,
+) -> dict[str, object]:
+    """Record client timestamps; signed differences do not imply acoustic latency."""
+    if type(wire_samples) is not int or wire_samples <= 0:
+        raise ValueError("invalid ASR timing sample count")
+    timestamps: dict[str, float] = {}
+    for name, value in {
+        "started": started,
+        "last_upload_started": last_upload_started,
+        "last_upload_completed": last_upload_completed,
+        "playback_wait_completed": playback_wait_completed,
+        "commit_send_started": committed_at,
+        "commit_send_completed": commit_send_completed,
+        "last_terminal_received": evidence.last_terminal_at,
+        "receipt_received": evidence.receipt_at,
+    }.items():
+        if (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            raise ValueError("incomplete or invalid ASR timing observations")
+        timestamps[name] = float(value)
+    ordered = [
+        timestamps[name] for name in (
+            "started", "last_upload_started", "last_upload_completed",
+            "playback_wait_completed", "commit_send_started", "commit_send_completed",
+        )
+    ]
+    terminal = timestamps["last_terminal_received"]
+    receipt = timestamps["receipt_received"]
+    if (
+        ordered != sorted(ordered)
+        or not started <= terminal <= receipt
+        or receipt < committed_at
+    ):
+        raise ValueError("invalid ASR timing order")
+    preview = evidence.first_preview_at
+    if preview is not None:
+        if (
+            isinstance(preview, bool) or not isinstance(preview, (int, float))
+            or not math.isfinite(preview)
+        ):
+            raise ValueError("invalid ASR timing preview")
+        if not started <= preview <= receipt:
+            raise ValueError("invalid ASR timing order")
+    offsets: dict[str, object] = {
+        name + "_seconds": value - started
+        for name, value in timestamps.items() if name != "started"
+    }
+    offsets.update(
+        clock="monotonic", origin="paced_playback_start",
+        nominal_playback_end_seconds=wire_samples / 24000,
+        acoustic_speech_end="not_observed",
+    )
+    return {
+        "first_preview_seconds": preview - started if preview is not None else None,
+        "last_upload_to_last_terminal_seconds": terminal - timestamps["last_upload_completed"],
+        "nominal_playback_end_to_last_terminal_seconds": terminal - started - wire_samples / 24000,
+        "commit_to_last_terminal_seconds": terminal - committed_at,
+        "barrier_seconds": receipt - committed_at,
+        "timing_observations": offsets,
+    }
 
 
 def _run_asr(
@@ -284,6 +362,8 @@ def _run_asr(
     punctuation_reference_text: str | None = None,
     punctuation_reference_kind: str | None = None,
 ) -> dict[str, object]:
+    if not wire or len(wire) % 2:
+        raise ValueError("ASR benchmark requires nonempty PCM16 wire audio")
     conn = client.realtime.connect(model="whisper-1").enter()
     events: queue.Queue[tuple[float, object]] = queue.Queue(maxsize=512)
     errors: list[BaseException] = []
@@ -323,6 +403,19 @@ def _run_asr(
             if get("type", event) == kind:
                 return event
 
+    def consume_available() -> None:
+        # Consume while sending paced PCM too. A long meeting can produce more
+        # than 512 previews before commit; retaining all of them in the receiver
+        # queue would end the transport even when the service keeps up.
+        if errors:
+            raise RuntimeError("ASR transport ended before its input barrier")
+        while True:
+            try:
+                received_at, event = events.get_nowait()
+            except queue.Empty:
+                return
+            evidence.consume(event, received_at)
+
     try:
         wait_kind("session.created")
         conn.send(_session_update(language, policy))
@@ -334,18 +427,28 @@ def _run_asr(
         else:
             echo = None
         started = time.monotonic()
+        last_upload_started: float | None = None
+        last_upload_completed: float | None = None
         for offset in range(0, len(wire), 4800):
             time.sleep(max(0, started + offset / 48000 - time.monotonic()))
-            conn.send({
+            consume_available()
+            packet = {
                 "type": "input_audio_buffer.append",
                 "audio": base64.b64encode(wire[offset:offset + 4800]).decode(),
-            })
+            }
+            last_upload_started = time.monotonic()
+            conn.send(packet)
+            last_upload_completed = time.monotonic()
         time.sleep(max(0, started + len(wire) / 48000 - time.monotonic()))
-        committed_at = time.monotonic()
-        conn.send({
+        playback_wait_completed = time.monotonic()
+        consume_available()
+        commit = {
             "type": "input_audio_buffer.commit", "event_id": "benchmark-final",
             "speechrail": {"request_receipt": True},
-        })
+        }
+        committed_at = time.monotonic()
+        conn.send(commit)
+        commit_send_completed = time.monotonic()
         deadline = committed_at + 125
         while evidence.receipt_at is None:
             received_at, event = next_event(deadline)
@@ -360,14 +463,14 @@ def _run_asr(
         )
         result: dict[str, object] = {
             "audio_seconds": len(wire) / 48000,
-            "first_preview_seconds": (
-                evidence.first_preview_at - started
-                if evidence.first_preview_at is not None else None
+            **_timing_metrics(
+                evidence, started=started, last_upload_started=last_upload_started,
+                last_upload_completed=last_upload_completed,
+                playback_wait_completed=playback_wait_completed,
+                committed_at=committed_at, commit_send_completed=commit_send_completed,
+                wire_samples=len(wire) // 2,
             ),
-            "last_audio_to_final_seconds": max(
-                0, (evidence.last_terminal_at or committed_at) - committed_at
-            ),
-            "barrier_seconds": evidence.receipt_at - committed_at,
+            "last_upload_sample_span": {"start": offset // 2, "end": len(wire) // 2},
             "effective_policy": echo,
         }
         if resource_only:
@@ -387,17 +490,45 @@ def run_manifest_asr_benchmark(
     manifest: Path, *, profile: str, output: Path, sessions: int,
     warmup: bool, app_home: Path | None, base_url: str,
     resource_only: bool = False,
+    fixture_ids: Sequence[str] | None = None,
 ) -> dict[str, object]:
     if sessions < 1:
         raise ValueError("sessions must be positive")
     base_url = validate_base_url(base_url)
+    manifest_bytes = manifest.read_bytes() if fixture_ids is not None else None
     loaded = load_manifest(manifest)
+    if manifest_bytes is not None and manifest.read_bytes() != manifest_bytes:
+        raise ValueError("ASR manifest changed during fixture selection")
     fixtures = [fixture for fixture in loaded.fixtures if fixture.kind == "asr"]
     if not fixtures:
         raise ValueError("ASR-only evidence requires at least one ASR fixture")
+    selection = None
+    if fixture_ids is not None:
+        if (
+            not isinstance(fixture_ids, Sequence)
+            or isinstance(fixture_ids, (str, bytes)) or not fixture_ids
+            or any(not isinstance(value, str) for value in fixture_ids)
+        ):
+            raise ValueError("ASR fixture selection must be a nonempty list of IDs")
+        selected = set(fixture_ids)
+        if len(selected) != len(fixture_ids):
+            raise ValueError("ASR fixture selection contains duplicate IDs")
+        if not selected <= {fixture.id for fixture in fixtures}:
+            raise ValueError("ASR fixture selection contains unknown IDs")
+        fixtures = [fixture for fixture in fixtures if fixture.id in selected]
+        selection = {
+            "requested_ids": list(fixture_ids),
+            "executed_order": [fixture.id for fixture in fixtures],
+            "warmup_fixture_id": fixtures[0].id if warmup else None,
+            "source_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+            "scope": "selected_fixtures",
+            "frozen_v4_matrix_scope": False,
+        }
     if not resource_only and any(fixture.reference_text is None for fixture in fixtures):
         raise ValueError("ASR-only evidence requires external human references")
-    policy = json.loads(manifest.read_text()).get("asr_policy")
+    policy = json.loads(
+        manifest_bytes if manifest_bytes is not None else manifest.read_text()
+    ).get("asr_policy")
     if policy is not None and not isinstance(policy, dict):
         raise ValueError("asr_policy must be an object")
     output = validate_output_path(output)
@@ -426,22 +557,41 @@ def run_manifest_asr_benchmark(
                     punctuation_reference_text=fixture.punctuation_reference_text,
                     punctuation_reference_kind=fixture.punctuation_reference_kind,
                 )
+                if selection is not None:
+                    result["wire_pcm_sha256"] = hashlib.sha256(wire).hexdigest()
                 results.append({"id": fixture.id, "repeat": repeat + 1, **result})
     except Exception as exc:
         failure = exc
     finally:
         resources = _normalise_resources(monitor.stop())
     payload = {
-        "schema_version": 1, "tool": "speechrail-bench-realtime-asr",
+        "schema_version": 2, "tool": "speechrail-bench-realtime-asr",
         "evidence_mode": "real", "profile": profile,
         "warmup_completed": warmup, "sessions": results, "resources": resources,
         "measurement_completed": failure is None,
         "failure_kind": type(failure).__name__ if failure is not None else None,
         "scene_business_gate": "unset", "baseline_comparison_gate": "unset",
+        "timing_definitions": {
+            "first_preview_seconds": "first preview receive minus paced playback start",
+            "last_upload_to_last_terminal_seconds": (
+                "last terminal receive minus last append send return; signed; "
+                "send return does not prove server acceptance or acoustic speech end"
+            ),
+            "nominal_playback_end_to_last_terminal_seconds": (
+                "last terminal receive minus paced playback start and wire duration; signed"
+            ),
+            "commit_to_last_terminal_seconds": (
+                "last terminal receive minus commit send start; signed"
+            ),
+            "barrier_seconds": "input receipt receive minus commit send start",
+            "acoustic_speech_end": "not_observed",
+        },
     }
     if resource_only:
         payload["measurement_mode"] = "resource_only"
         payload["quality_gate"] = "unset"
+    if selection is not None:
+        payload["fixture_selection"] = selection
     write_result(payload, output)
     if failure is not None:
         raise RuntimeError("ASR benchmark stopped; partial evidence was saved") from failure
