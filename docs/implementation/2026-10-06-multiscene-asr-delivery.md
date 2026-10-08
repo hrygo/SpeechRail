@@ -2,11 +2,25 @@
 title: "共享 ASR #245：实施与验收记录"
 status: in_progress
 audience: "SpeechRail 开发者与验收人员"
-version: "1.15.0"
-date: 2026-10-06
+version: "1.16.0"
+date: 2026-10-07
 ---
 
 # 共享 ASR #245：实施与验收记录
+
+## 当前跟踪入口（2026-10-07）
+
+WP1–WP6 的 #247/#248/#249/#250/#251/#252 已完成并合入 main；
+#245 按实施完成结案。冻结预设后的质量与真实验收由
+[#253](https://github.com/hrygo/SpeechRail/issues/253) 和
+[#336](https://github.com/hrygo/SpeechRail/issues/336) 继续跟踪，
+最新证据见 [#336 验收记录](2026-10-07-issue-336-asr-acceptance.md)。
+提词器已冻结为 500ms preview、8 秒预算、streaming_finalize；
+字幕保持 500ms、8 秒、full_segment，20 秒提词器已否决。
+
+下文为逐轮历史记录，其中“#249 OPEN”“预设未冻结”“#297/#319 待合并”
+和旧关闭门只描述各段所记录的时点，不代表当前状态。
+历史 v8 的真实证据不自动覆盖后续生产变更或最终主线验收。
 
 ## 2026-10-07 预设冻结（提词器预览 400→500 ms）
 

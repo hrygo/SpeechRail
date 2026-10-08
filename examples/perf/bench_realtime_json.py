@@ -120,6 +120,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="skip CER only with --asr-manifest; retain resource and input-integrity evidence",
     )
     parser.add_argument(
+        "--asr-fixture-id",
+        action="append",
+        help="select an explicit ASR fixture; repeat for more IDs; preserve manifest order",
+    )
+    parser.add_argument(
         "--profile",
         required=True,
         choices=("fast", "quality", "reference"),
@@ -140,6 +145,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.asr_resource_only and args.asr_manifest is None:
             raise ValueError("--asr-resource-only requires --asr-manifest")
+        if args.asr_fixture_id is not None and args.asr_manifest is None:
+            raise ValueError("--asr-fixture-id requires --asr-manifest")
         if (args.pcm_file is None) == (args.asr_manifest is None):
             raise ValueError("provide exactly one PCM file or --asr-manifest")
         if args.asr_manifest is not None:
@@ -151,6 +158,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.asr_manifest, profile=args.profile, output=args.output,
                 sessions=args.sessions, warmup=args.warmup, app_home=args.app_home,
                 base_url=args.base_url, resource_only=args.asr_resource_only,
+                fixture_ids=args.asr_fixture_id,
             )
         else:
             payload = run_realtime_benchmark(

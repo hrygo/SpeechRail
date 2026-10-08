@@ -380,7 +380,7 @@ final class AssistantReplyPersistenceRaceTests: XCTestCase {
         )
     }
 
-    /// V06b:自动标题 IO 被 gate 卡住时，用户正文投影与 LLM 启动不得被阻塞。
+    /// V06b:自动标题 IO 被 gate 卡住时，用户正文投影与完整回答不得被阻塞。
     /// 基线 `didSaveInput` 内 `await claimAutomaticTitle` 会延迟 submitTurn；
     /// 后台 effect 化后标题只在后台认领。
     func testV06bTitleClaimDoesNotBlockSubmitAndLLM() async throws {
@@ -398,29 +398,29 @@ final class AssistantReplyPersistenceRaceTests: XCTestCase {
             defaults.removePersistentDomain(forName: defaults.description)
         }
         _ = await session.ask(typed: "标题门禁问题请回答")
-        // 标题 gate 已进入，但用户正文必须已投影、LLM 必须已启动。
+        // 标题 gate 已进入，但用户正文必须已投影、回答必须能完成。
         await waitUntil({ gate.entered }, message: "标题认领没有进入 gate")
         await waitUntil(
             { session.turns.contains { $0.role == .user && $0.text == "标题门禁问题请回答" } },
             message: "标题卡住时用户正文必须已投影"
         )
-        // runReply 已进入流式循环（streamingReply 已置空串）：标题 effect
-        // 卡住时 submitTurn/runReply 照常启动，不等标题认领。
-        await waitUntil(
-            { session.streamingReply != nil },
-            message: "标题卡住时 runReply 必须已进入流式循环（streamingReply 已置空串）"
-        )
-        gate.release()
+        // 标题 gate 仍未放行，完成正文必须可见，流式预览已收起。
+        // 立即完成的 fake 允许观察者错过整个预览阶段，不能要求抓到瞬态。
         await waitUntil(
             {
-                session.streamingReply?.contains("标题门禁后的回答") == true
-                    || session.turns.contains { $0.role == .assistant }
+                session.streamingReply == nil
+                    && session.turns.contains {
+                        $0.role == .assistant && $0.text == "标题门禁后的回答"
+                    }
             },
-            message: "放行标题后 LLM 首 delta 必须到达（或整轮已收尾落库）"
+            message: "标题卡住时整轮回答必须已完成"
         )
-        await waitUntil(
-            { session.turns.contains { $0.role == .assistant } },
-            message: "放行标题后整轮应收尾落库"
-        )
+        let sessionID = try XCTUnwrap(session.sessionID)
+        let lines = try await store.lines(sessionID: sessionID)
+        let assistantLines = lines.filter { $0.role == .assistant }
+        XCTAssertEqual(assistantLines.count, 1, "标题卡住时回答必须恰好保存一次")
+        XCTAssertEqual(assistantLines.first?.text, "标题门禁后的回答")
+        XCTAssertEqual(assistantLines.first?.status, .final)
+        gate.release()
     }
 }
