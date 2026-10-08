@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.8"
-date: 2026-10-07
+version: "3.3.9"
+date: 2026-10-08
 ---
 
 # SpeechRail 测试与验收
@@ -144,6 +144,37 @@ curl -X POST http://127.0.0.1:8201/v1/audio/speech \
 当前没有经场景对照确认的标点阈值，`punctuation_gate` 始终为 `unset`；标点分数只作
 描述性证据。资源专用样本不做质量评分，原有终态、输入覆盖、预算和上传回执验收门保持
 独立。原始音频、人工参考、转写和 benchmark 制品仍保存在仓库外。
+
+### ASR 定向诊断与配对
+
+真实质量诊断先固定待检验因素、制品、模型/精度、参考、策略、输入字节和请求顺序。
+`bench_realtime_json.py --asr-manifest` 可重复指定 `--asr-fixture-id`；
+执行顺序保持 manifest 原顺序，warmup 使用所选第一个素材。
+未知、重复或空选择在客户端与凭据初始化前拒绝；不指定时执行全池。
+选择结果保存来源 manifest 摘要、实际 wire PCM 摘要和独立范围，
+缩小池不代表完整验收覆盖。
+
+`asr_segment_error_diagnostics.run_diagnostic_probe()` 只接受质量模式、正整数
+次数、明确的布尔 warmup 和包含有效 `max_segment_ms` 的 ASR policy，
+在模型请求前校验。它沿用公共事件、receipt、水位、覆盖、预算和质量断言，
+仅添加脱敏文字诊断。终态、最后预览分别记录原输出摘要和 CER 规范化摘要；
+标点 gold 另记录精确摘要。文字对齐选择一种最优路径，
+字符位置不构成声学时间定位；输出不包含参考或转写正文。
+
+离线 `asr_focus_analysis.py --baseline ... --candidate ... --output ...`
+要求两份完成的真实分段诊断，核验请求身份/顺序、连续重复、
+参考、有效策略、时长、覆盖和已记录的实际 wire PCM 摘要；
+逐次展示字符错误差值、预览/终态变化和重复一致性。
+标点差值须同时核验 gold 精确摘要及评分口径；缺失或不同标为
+`not_comparable`。历史缺少原输出摘要时标为 `not_observed`，不回填。
+制品、模型与方法身份由实验冻结及独立审计另行核验，
+工具本身的 `measurement_identity_gate` 和完整 `acceptance_gate` 不自动通过。
+
+初筛按观察家族选代表，全部退化仍保留。固定配置已重复一致时，
+只有新假设、变量或修复才启动额外测量；单因素初筛后仅确认影响决定的素材，
+再保护其余独立风险及未用于调参的素材。候选确定后才执行必要完整验收。
+字符错误与各类标点分别判定，平均改善不抵消新增退化；
+gold 不得进入模型 context 或生产输出选择。
 
 ### ASR 客户端计时观测
 
