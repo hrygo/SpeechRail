@@ -375,6 +375,10 @@ def test_job_timestamps_require_a_configured_aligner(tmp_path: Path) -> None:
     transcriber = _FakeTranscriber()
     processor = _timestamp_processor(spool, transcriber, None)
 
+    async def unexpected_decode(input_path: Path) -> bytes:
+        raise AssertionError("missing alignment must be refused before decoding")
+
+    processor._decode_audio = unexpected_decode  # type: ignore[method-assign]
     with pytest.raises(JobProcessingError) as failure:
         asyncio.run(processor.process(_transcription_job(spool, audio, timestamps=True)))
 

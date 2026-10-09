@@ -40,6 +40,7 @@ from speechrail.domain.ports import (
     SpeechSynthesizer,
     TranscriptionRequest,
 )
+from speechrail.domain.transcription_requirements import TranscriptionRequirements
 from speechrail.domain.tts import (
     DEFAULT_VOICE_ID,
     VoiceRevisionConflictError,
@@ -203,8 +204,11 @@ class LocalFileJobProcessor:
         # offline environment.  Timestamps therefore come from the independent
         # fixed-text aligner over the frozen transcript, exactly as the REST
         # batch route does it, and its absence is refused before any inference.
-        if timestamps and not diarize and self._text_aligner is None:
-            raise JobProcessingError("timestamp_alignment_unavailable")
+        requirements = TranscriptionRequirements(timestamps=timestamps, diarization=diarize)
+        if code := requirements.missing_alignment_error(
+            aligner_available=self._text_aligner is not None
+        ):
+            raise JobProcessingError(code)
         pcm = await self._decode_audio(input_path)
         try:
             request = TranscriptionRequest(

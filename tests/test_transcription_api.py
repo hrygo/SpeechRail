@@ -133,6 +133,58 @@ def test_timestamped_formats_require_the_independent_aligner() -> None:
         assert response.json()["error"]["request_id"]
 
 
+@pytest.mark.parametrize("response_format", ["verbose_json", "srt", "vtt"])
+@pytest.mark.parametrize("backend_kind", ["callback", "batch", "streaming"])
+def test_missing_aligner_refuses_before_any_heavy_work(
+    monkeypatch: pytest.MonkeyPatch, response_format: str, backend_kind: str
+) -> None:
+    calls: list[str] = []
+
+    async def callback(*args: object) -> TranscriptResult:
+        calls.append("callback")
+        return await _backend(b"", None, "")
+
+    class Batch:
+        async def transcribe(self, request: TranscriptionRequest) -> TranscriptResult:
+            calls.append("batch")
+            return await _backend(b"", None, "")
+
+    class Streaming(Batch):
+        async def transcribe_stream(self, *args: object) -> TranscriptResult:
+            calls.append("streaming")
+            return await _backend(b"", None, "")
+
+    services = _services(transcribe=callback)
+    if backend_kind != "callback":
+        services = dataclasses.replace(
+            services,
+            transcribe=None,
+            batch_transcriber=Batch() if backend_kind == "batch" else Streaming(),
+        )
+    original_run = services.governor.run
+
+    async def observe_admission(*args: object, **kwargs: object) -> object:
+        calls.append("admission")
+        return await original_run(*args, **kwargs)
+
+    def unexpected_decode(*args: object, **kwargs: object) -> object:
+        calls.append("decode")
+        raise AssertionError("missing alignment must be refused before decoding")
+
+    monkeypatch.setattr(services.governor, "run", observe_admission)
+    monkeypatch.setattr(audio_module, "_try_fast_decode_wav", unexpected_decode)
+    monkeypatch.setattr(audio_module, "decode_upload", unexpected_decode)
+    response = _client_for(services).post(
+        "/v1/audio/transcriptions",
+        files={"file": ("clip.wav", b"1234", "audio/wav")},
+        data={"response_format": response_format},
+    )
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "timestamp_alignment_unavailable"
+    assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"]
+    assert calls == []
+
+
 def test_verbose_json_timeline_comes_from_the_aligner_not_the_asr_decode() -> None:
     aligner = _FakeAligner()
     response = _client(text_aligner=aligner).post(
