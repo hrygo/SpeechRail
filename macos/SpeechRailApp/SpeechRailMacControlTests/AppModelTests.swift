@@ -1,9 +1,214 @@
 import XCTest
+import Observation
 import SpeechRailControlKit
 
 #if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
 #endif
+
+@MainActor
+final class WorkflowOwnershipTests: XCTestCase {
+    func testEngineObservationsNeedOnlyEnginePorts() async {
+        let health = HealthProbeScript()
+        await health.setSnapshot(HealthSnapshot(jobSpoolReady: true))
+        let engine = EngineModel(
+            transport: ClosureControlTransport { request in
+                ControlResponse(requestID: request.requestID, command: request.command, status: .completed)
+            },
+            apiClient: health
+        )
+        XCTAssertEqual(engine.discoveryState, .idle)
+        XCTAssertEqual(engine.jobQueueSummary, "未读取")
+        await engine.refresh()
+        XCTAssertEqual(engine.jobQueueSummary, "可用")
+        XCTAssertEqual(engine.controlConnectionSummary, "已响应")
+        XCTAssertNotEqual(engine.discoveryState, .loaded)
+        XCTAssertNil(engine.capabilityFacade.speechRequestOptions(for: "unobserved"))
+    }
+
+    func testPlaybackUsesCapturedIdentityAndRejectsAllOldCallbacks() throws {
+        let driver = ScriptedSharedPlaybackDriver()
+        let playback = SharedPlaybackOwner(driver: driver)
+        var voiceFinished: [Bool] = []
+        var workFinished: [Bool] = []
+        try playback.play(data: Data(), target: .voice("voice-1")) { voiceFinished.append($0) }
+        let oldFinish = try XCTUnwrap(driver.onPlaybackFinished)
+        let oldProgress = try XCTUnwrap(driver.onProgress)
+        let oldLevel = try XCTUnwrap(driver.onLevel)
+        try playback.play(data: Data(), target: .work("work-1")) { workFinished.append($0) }
+        driver.onProgress?(0.4)
+        driver.onLevel?(0.6)
+        oldFinish(false)
+        oldProgress(0.9)
+        oldLevel(0.9)
+        XCTAssertEqual(playback.target, .work("work-1"))
+        XCTAssertEqual(playback.progress, 0.4)
+        XCTAssertEqual(playback.level, 0.6)
+        XCTAssertTrue(playback.isPlaying)
+        XCTAssertTrue(voiceFinished.isEmpty)
+        driver.onPlaybackFinished?(false)
+        XCTAssertEqual(workFinished, [false])
+        XCTAssertNil(playback.target)
+        XCTAssertEqual(playback.progress, 0)
+        XCTAssertEqual(playback.level, 0)
+    }
+
+    func testPlaybackStopAndFailureRevokeCapturedCompletion() throws {
+        let driver = ScriptedSharedPlaybackDriver()
+        let playback = SharedPlaybackOwner(driver: driver)
+        var completed = false
+        try playback.play(data: Data(), target: .dubbingCandidate("candidate")) { _ in completed = true }
+        let oldFinish = try XCTUnwrap(driver.onPlaybackFinished)
+        playback.stop(ifTarget: .voice("other"))
+        XCTAssertTrue(playback.isPlaying)
+        playback.stop()
+        oldFinish(true)
+        XCTAssertFalse(completed)
+        driver.failNextPlay = true
+        XCTAssertThrowsError(try playback.play(data: Data(), target: .voice("new")))
+        XCTAssertNil(playback.target)
+        XCTAssertFalse(playback.isPlaying)
+        XCTAssertFalse(completed)
+    }
+
+    func testCreationAdmissionCannotBeReleasedByAnotherFeature() {
+        let admission = SpeechCreationAdmission()
+        XCTAssertTrue(admission.acquire(.voice))
+        XCTAssertFalse(admission.acquire(.dubbing))
+        admission.release(.dubbing)
+        XCTAssertTrue(admission.isBusy)
+        admission.release(.voice)
+        XCTAssertTrue(admission.acquire(.dubbing))
+        admission.release(.voice)
+        XCTAssertTrue(admission.isBusy)
+        admission.release(.dubbing)
+        XCTAssertFalse(admission.isBusy)
+    }
+
+    func testPreviewRechecksSharedAdmissionAfterAwaitingCapabilityBinding() async throws {
+        let capabilities = HeldWorkflowCapabilities()
+        let admission = SpeechCreationAdmission()
+        let feedback = CreatorFeedback()
+        let model = VoiceWorkflowModel(
+            capabilities: capabilities,
+            playback: SharedPlaybackOwner(driver: ScriptedSharedPlaybackDriver()),
+            admission: admission,
+            feedback: feedback
+        )
+        let preview = Task {
+            await model.previewVoice(CreatorVoice(id: "voice-1", name: "测试", available: true))
+        }
+        for _ in 0..<200 {
+            if capabilities.bindingContinuation != nil { break }
+            await Task.yield()
+        }
+        let binding = try XCTUnwrap(capabilities.bindingContinuation)
+        XCTAssertTrue(admission.acquire(.dubbing))
+        binding.resume(returning: SpeechRailRequestOptions())
+        await preview.value
+        XCTAssertNil(feedback.message, "a preview denied admission must not call a rendering port")
+        XCTAssertEqual(admission.owner, .dubbing)
+    }
+
+    func testDubbingOwnsFrozenSaveWithoutDesignCloneOrEngineControlPorts() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = CreativeWorkStore(directory: directory.appendingPathComponent("works"))
+        let model = DubbingWorkflowModel(
+            capabilities: ImmediateWorkflowCapabilities(),
+            voices: EmptyWorkflowVoiceDirectory(),
+            playback: SharedPlaybackOwner(driver: ScriptedSharedPlaybackDriver()),
+            admission: SpeechCreationAdmission(),
+            feedback: CreatorFeedback(),
+            speechRenderClient: ScriptedRenderClient(audio: silentPreviewWAV(marker: 0)),
+            workStore: store,
+            dubbingProjectStore: DubbingProjectStore(directory: directory.appendingPathComponent("projects"))
+        )
+        let voice = CreatorVoice(id: "voice-1", name: "测试音色", available: true, mode: "system")
+        _ = await model.synthesizeAndSave(text: " 固定文稿。 ", voice: voice, speed: 1.2)
+        let pending = try XCTUnwrap(model.pendingDubbing)
+        XCTAssertEqual(pending.scriptText, "固定文稿。")
+        XCTAssertEqual(pending.voiceID, voice.id)
+        XCTAssertEqual(pending.speed, 1.2)
+        let saved = try XCTUnwrap(model.savePendingDubbing())
+        XCTAssertEqual(saved.id, pending.workID)
+        XCTAssertNotNil(saved.provenance.audioFileSHA256)
+        XCTAssertEqual(
+            saved.provenance,
+            pending.provenance.withAudioFileSHA256(saved.provenance.audioFileSHA256)
+        )
+        XCTAssertEqual(saved.scriptText, pending.scriptText)
+        XCTAssertNil(model.savePendingDubbing())
+        XCTAssertEqual(try store.list().count, 1)
+    }
+
+    func testCompositionObservesChildStateWithoutCopyingIt() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let health = HealthProbeScript()
+        let model = AppModel(
+            transport: ClosureControlTransport { _ in throw CancellationError() },
+            apiClient: health,
+            workStore: CreativeWorkStore(directory: directory.appendingPathComponent("works")),
+            dubbingProjectStore: DubbingProjectStore(directory: directory.appendingPathComponent("projects"))
+        )
+        let changed = expectation(description: "nested engine observation")
+        withObservationTracking {
+            _ = model.health
+        } onChange: {
+            changed.fulfill()
+        }
+        await health.setSnapshot(HealthSnapshot(jobSpoolReady: true))
+        await model.engine.refresh()
+        await fulfillment(of: [changed], timeout: 1)
+        XCTAssertEqual(model.health?.jobSpoolReady, model.engine.health?.jobSpoolReady)
+        XCTAssertEqual(model.jobQueueSummary, "可用")
+    }
+}
+
+@MainActor
+private final class ImmediateWorkflowCapabilities: EngineCapabilityReading {
+    var capabilityFacade: AppCapabilityFacade { AppCapabilityFacade(snapshot: nil, discoveryState: .idle) }
+    var discoveryState: CapabilityDiscoveryState { .idle }
+    var safeVoiceCatalog: SafeVoiceList? { nil }
+    var effectiveCapabilities: EffectiveCapabilitySnapshot? { nil }
+    func refreshDiscovery() async {}
+    func speechRequestOptions(for voiceID: String) async throws -> SpeechRailRequestOptions { .init() }
+}
+
+@MainActor
+private final class EmptyWorkflowVoiceDirectory: CreatorVoiceReading {
+    var creatorVoices: [CreatorVoice] { [] }
+    var creatorVoicesLoadState: CreatorVoicesLoadState { .loaded }
+}
+
+@MainActor
+private final class HeldWorkflowCapabilities: EngineCapabilityReading {
+    var capabilityFacade: AppCapabilityFacade { AppCapabilityFacade(snapshot: nil, discoveryState: .idle) }
+    var discoveryState: CapabilityDiscoveryState { .idle }
+    var safeVoiceCatalog: SafeVoiceList? { nil }
+    var effectiveCapabilities: EffectiveCapabilitySnapshot? { nil }
+    var bindingContinuation: CheckedContinuation<SpeechRailRequestOptions, Never>?
+    func refreshDiscovery() async {}
+    func speechRequestOptions(for voiceID: String) async throws -> SpeechRailRequestOptions {
+        await withCheckedContinuation { bindingContinuation = $0 }
+    }
+}
+
+@MainActor
+private final class ScriptedSharedPlaybackDriver: SharedAudioPlaybackDriver {
+    var isPlaying = false
+    var failNextPlay = false
+    var onPlaybackFinished: (@MainActor (Bool) -> Void)?
+    var onProgress: (@MainActor (Double) -> Void)?
+    var onLevel: (@MainActor (Float) -> Void)?
+    func play(data: Data) throws {
+        if failNextPlay { throw AudioPlaybackError.playbackFailed }
+        isPlaying = true
+    }
+    func stop() { isPlaying = false }
+    func duration(for data: Data) -> TimeInterval? { 1 }
+}
 
 /// Issue #88: 模型下载取消链缺少代际守卫。
 ///
@@ -13,7 +218,7 @@ import SpeechRailControlKit
 @MainActor
 final class AppModelTests: XCTestCase {
     func testMissingCreatorCapabilityIsReportedWithoutInventingServiceFailure() async {
-        let model = makeModel(transport: ClosureControlTransport { request in
+        let model = makeVoiceModel(transport: ClosureControlTransport { request in
             Self.modelCatalogResponse(for: request)
         })
         do {
@@ -31,7 +236,7 @@ final class AppModelTests: XCTestCase {
 
     func testControlProbeStartsUnknownAndCancellationKeepsConfirmedFailure() async {
         let script = ControlProbeScript()
-        let model = makeModel(transport: ClosureControlTransport { request in
+        let model = makeEngineModel(transport: ClosureControlTransport { request in
             try await script.respond(to: request)
         })
         XCTAssertEqual(model.controlConnectionSummary, "未读取")
@@ -56,7 +261,7 @@ final class AppModelTests: XCTestCase {
     }
 
     func testControlProbeCancelledBeforeAnyResultRemainsUnknown() async {
-        let model = makeModel(transport: ClosureControlTransport { _ in
+        let model = makeEngineModel(transport: ClosureControlTransport { _ in
             throw CancellationError()
         })
         await model.refresh()
@@ -65,7 +270,7 @@ final class AppModelTests: XCTestCase {
 
     func testJobQueueDistinguishesAbsentFalseTrueAndFailedHealthRead() async {
         let health = HealthProbeScript()
-        let model = AppModel(
+        let model = EngineModel(
             transport: ClosureControlTransport { _ in throw CancellationError() },
             apiClient: health
         )
@@ -711,7 +916,7 @@ final class AppModelTests: XCTestCase {
 
     func testPendingCloneRegistrationReplaysTheSameOperationAndBlocksRerecording() async throws {
         let creator = PendingCloneRegistrationClient()
-        let model = makeModel(
+        let model = makeVoiceModel(
             transport: ClosureControlTransport { request in
                 ControlResponse(
                     requestID: request.requestID,
@@ -756,7 +961,7 @@ final class AppModelTests: XCTestCase {
 
     func testDefinitiveCloneRejectionAllowsRerecordingWithANewOperation() async throws {
         let creator = RejectingCloneRegistrationClient()
-        let model = makeModel(
+        let model = makeVoiceModel(
             transport: ClosureControlTransport { request in
                 ControlResponse(
                     requestID: request.requestID,
@@ -982,11 +1187,11 @@ final class AppModelTests: XCTestCase {
         )
 
         model.startVoiceDesignPublication(preview, name: "测试音色")
-        await waitForVoiceDesignPhase(.awaitingReferenceReview, model: model)
+        await waitForVoiceDesignPhase(.awaitingReferenceReview, snapshot: { model.voiceDesignPublication })
         await creator.failNextValidationWithTerminalCandidate()
         model.markVoiceDesignReferenceAudioPlaybackFinished(successfully: true)
         model.confirmVoiceDesignReference()
-        await waitForVoiceDesignPhase(.failed, model: model)
+        await waitForVoiceDesignPhase(.failed, snapshot: { model.voiceDesignPublication })
 
         XCTAssertEqual(model.voiceDesignPublicationRetryActionTitle, "重新生成候选")
         let eventsBeforeRetry = await creator.events()
@@ -1005,6 +1210,33 @@ final class AppModelTests: XCTestCase {
             eventsAfterRetry.filter { $0 == "validate" }.count,
             eventsBeforeRetry.filter { $0 == "validate" }.count
         )
+    }
+
+    func testVoiceDesignLostCreateResponseRetriesTheSameCommittedIdentity() async throws {
+        let creator = VoiceDesignWorkflowCreatorClient()
+        await creator.loseNextCreateResponseAfterCommit()
+        let model = makeVoiceModel(
+            transport: ClosureControlTransport { _ in throw CancellationError() },
+            voiceDesignClient: creator
+        )
+        let candidate = VoiceDesignCandidateSnapshot(
+            slot: "1", seed: 101, title: "候选 1",
+            instructionSnapshot: "温暖、清晰、自然",
+            referenceTextSnapshot: "这是一段用于耐久候选复核的固定测试参考文案。",
+            status: .ready, audioData: Data([0, 1, 2])
+        )
+        model.startVoiceDesignPublication(candidate, name: "测试音色")
+        await waitForVoiceDesignPhase(.failed, snapshot: { model.voiceDesignPublication })
+        XCTAssertNil(model.voiceDesignPublication.candidateID)
+        model.retryVoiceDesignPublication()
+        await waitForVoiceDesignPhase(.awaitingReferenceReview, snapshot: { model.voiceDesignPublication })
+        let requests = await creator.createRequests()
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(requests.first, requests.last)
+        XCTAssertFalse(try XCTUnwrap(requests.first?.idempotencyKey).isEmpty)
+        let committedCount = await creator.committedCreateCount()
+        XCTAssertEqual(committedCount, 1)
+        XCTAssertEqual(model.voiceDesignPublication.candidateID, "vd_0123456789abcdef01234567")
     }
 
     func testVoiceDesignCannotReviewOrPublishBeforeHearingDurableAudio() async {
@@ -1031,7 +1263,7 @@ final class AppModelTests: XCTestCase {
         )
 
         model.startVoiceDesignPublication(preview, name: "测试音色")
-        await waitForVoiceDesignPhase(.awaitingReferenceReview, model: model)
+        await waitForVoiceDesignPhase(.awaitingReferenceReview, snapshot: { model.voiceDesignPublication })
 
         var events = await creator.events()
         XCTAssertEqual(events, ["create", "candidate.get", "reference.audio"])
@@ -1041,7 +1273,7 @@ final class AppModelTests: XCTestCase {
 
         model.markVoiceDesignReferenceAudioPlaybackFinished(successfully: true)
         model.confirmVoiceDesignReference()
-        await waitForVoiceDesignPhase(.awaitingValidationReview, model: model)
+        await waitForVoiceDesignPhase(.awaitingValidationReview, snapshot: { model.voiceDesignPublication })
 
         events = await creator.events()
         XCTAssertEqual(
@@ -1070,14 +1302,14 @@ final class AppModelTests: XCTestCase {
             identityConfirmed: true,
             naturalnessConfirmed: true
         )
-        await waitForVoiceDesignPhase(.published, model: model)
+        await waitForVoiceDesignPhase(.published, snapshot: { model.voiceDesignPublication })
         events = await creator.events()
         XCTAssertEqual(events.suffix(3), ["review", "candidate.get", "publish"])
     }
 
     func testFailedVoiceDesignCancellationRetainsCandidateForRetry() async {
         let creator = VoiceDesignWorkflowCreatorClient()
-        let model = makeModel(
+        let model = makeVoiceModel(
             transport: ClosureControlTransport { request in
                 ControlResponse(
                     requestID: request.requestID,
@@ -1098,19 +1330,19 @@ final class AppModelTests: XCTestCase {
             audioData: Data([1, 2, 3])
         )
         model.startVoiceDesignPublication(preview, name: "可重试取消")
-        await waitForVoiceDesignPhase(.awaitingReferenceReview, model: model)
+        await waitForVoiceDesignPhase(.awaitingReferenceReview, snapshot: { model.voiceDesignPublication })
         let candidateID = model.voiceDesignPublication.candidateID
         await creator.failNextCandidateCancel()
 
         model.cancelVoiceDesignPublication()
-        await waitForVoiceDesignPhase(.failed, model: model)
+        await waitForVoiceDesignPhase(.failed, snapshot: { model.voiceDesignPublication })
 
         XCTAssertEqual(model.voiceDesignPublication.candidateID, candidateID)
         var events = await creator.events()
         XCTAssertEqual(events.filter { $0 == "cancel" }.count, 1)
 
         model.retryVoiceDesignPublication()
-        await waitForVoiceDesignPhase(.idle, model: model)
+        await waitForVoiceDesignPhase(.idle, snapshot: { model.voiceDesignPublication })
 
         XCTAssertNil(model.voiceDesignPublication.candidateID)
         events = await creator.events()
@@ -1119,7 +1351,7 @@ final class AppModelTests: XCTestCase {
 
     func testUnknownVoiceDesignCandidateStateBlocksReviewOperations() async {
         let creator = VoiceDesignWorkflowCreatorClient()
-        let model = makeModel(
+        let model = makeVoiceModel(
             transport: ClosureControlTransport { request in
                 ControlResponse(
                     requestID: request.requestID,
@@ -1142,7 +1374,7 @@ final class AppModelTests: XCTestCase {
         )
 
         model.startVoiceDesignPublication(preview, name: "未知状态")
-        await waitForVoiceDesignPhase(.failed, model: model)
+        await waitForVoiceDesignPhase(.failed, snapshot: { model.voiceDesignPublication })
 
         XCTAssertEqual(model.voiceDesignPublication.candidateID, "vd_0123456789abcdef01234567")
         let events = await creator.events()
@@ -1174,21 +1406,21 @@ final class AppModelTests: XCTestCase {
         )
 
         model.startVoiceDesignPublication(preview, name: "复验重试")
-        await waitForVoiceDesignPhase(.awaitingReferenceReview, model: model)
+        await waitForVoiceDesignPhase(.awaitingReferenceReview, snapshot: { model.voiceDesignPublication })
         model.markVoiceDesignReferenceAudioPlaybackFinished(successfully: true)
         await creator.failNextValidationLeavingCandidateValidating()
         model.confirmVoiceDesignReference()
 
         // The service commits `validating` before it synthesizes, so a failure
         // after that point strands the candidate there with no stored result.
-        await waitForVoiceDesignPhase(.failed, model: model)
+        await waitForVoiceDesignPhase(.failed, snapshot: { model.voiceDesignPublication })
         XCTAssertEqual(
             model.voiceDesignPublication.candidateID,
             "vd_0123456789abcdef01234567"
         )
 
         model.retryVoiceDesignPublication()
-        await waitForVoiceDesignPhase(.awaitingValidationReview, model: model)
+        await waitForVoiceDesignPhase(.awaitingValidationReview, snapshot: { model.voiceDesignPublication })
 
         let events = await creator.events()
         XCTAssertEqual(
@@ -1232,10 +1464,10 @@ final class AppModelTests: XCTestCase {
             audioData: Data([0, 1, 2])
         )
         model.startVoiceDesignPublication(firstPreview, name: "第一版音色")
-        await waitForVoiceDesignPhase(.awaitingReferenceReview, model: model)
+        await waitForVoiceDesignPhase(.awaitingReferenceReview, snapshot: { model.voiceDesignPublication })
         model.markVoiceDesignReferenceAudioPlaybackFinished(successfully: true)
         model.confirmVoiceDesignReference()
-        await waitForVoiceDesignPhase(.awaitingValidationReview, model: model)
+        await waitForVoiceDesignPhase(.awaitingValidationReview, snapshot: { model.voiceDesignPublication })
         model.markVoiceDesignValidationAudioPlaybackFinished(successfully: true)
 
         await creator.holdNextPublication()
@@ -1245,7 +1477,7 @@ final class AppModelTests: XCTestCase {
         )
         await waitForCreatorEvent("publish", creator: creator)
         model.cancelVoiceDesignPublication()
-        await waitForVoiceDesignPhase(.published, model: model)
+        await waitForVoiceDesignPhase(.published, snapshot: { model.voiceDesignPublication })
         for _ in 0..<200 where model.isRegisteringVoice {
             await Task.yield()
         }
@@ -1260,7 +1492,7 @@ final class AppModelTests: XCTestCase {
             audioData: Data([3, 4, 5])
         )
         model.startVoiceDesignPublication(secondPreview, name: "第二版音色")
-        await waitForVoiceDesignPhase(.awaitingReferenceReview, model: model)
+        await waitForVoiceDesignPhase(.awaitingReferenceReview, snapshot: { model.voiceDesignPublication })
 
         await creator.releaseHeldPublication()
         for _ in 0..<200 {
@@ -1275,23 +1507,23 @@ final class AppModelTests: XCTestCase {
 
         model.markVoiceDesignReferenceAudioPlaybackFinished(successfully: true)
         model.confirmVoiceDesignReference()
-        await waitForVoiceDesignPhase(.awaitingValidationReview, model: model)
+        await waitForVoiceDesignPhase(.awaitingValidationReview, snapshot: { model.voiceDesignPublication })
     }
 
     private func waitForVoiceDesignPhase(
         _ expected: VoiceDesignPublicationPhase,
-        model: AppModel,
+        snapshot: @MainActor () -> VoiceDesignPublicationSnapshot,
         file: StaticString = #filePath,
         line: UInt = #line
     ) async {
         for _ in 0..<200 {
-            if model.voiceDesignPublication.phase == expected {
+            if snapshot().phase == expected {
                 return
             }
             await Task.yield()
         }
         XCTFail(
-            "音色发布阶段未到达 \(expected)，当前为 \(model.voiceDesignPublication.phase)",
+            "音色发布阶段未到达 \(expected)，当前为 \(snapshot().phase)",
             file: file,
             line: line
         )
@@ -1372,7 +1604,7 @@ final class AppModelTests: XCTestCase {
             }
         }
 
-        let model = makeModel(transport: transport)
+        let model = makeEngineModel(transport: transport)
         await supersede.install { await model.refreshModels() }
 
         // 先让一个 model-prepare 操作处于活动态。
@@ -1423,7 +1655,7 @@ final class AppModelTests: XCTestCase {
             }
         }
 
-        let model = makeModel(transport: transport)
+        let model = makeEngineModel(transport: transport)
         await model.refreshModels()
         XCTAssertTrue(
             model.hasActiveMutation,
@@ -1457,7 +1689,7 @@ final class AppModelTests: XCTestCase {
             }
         }
 
-        let model = makeModel(transport: transport)
+        let model = makeEngineModel(transport: transport)
         // 第一次刷新会在 modelStatus 处被拦下；拦截点内再发起一次更新的刷新，
         // 并让更新的刷新先返回，从而确定性地制造「旧读取后到」的竞争。
         await race.install { await model.refreshModels() }
@@ -1495,7 +1727,7 @@ final class AppModelTests: XCTestCase {
             }
         }
 
-        let model = makeModel(transport: transport)
+        let model = makeEngineModel(transport: transport)
         await supersede.install { await model.refreshModels() }
         await model.refreshModels()
         XCTAssertTrue(
@@ -1515,8 +1747,8 @@ final class AppModelTests: XCTestCase {
 
     private func makeVoiceOutputCheckModel(
         creatorClient: VoiceOutputCheckCreatorClient
-    ) async -> AppModel {
-        let model = makeModel(
+    ) async -> VoiceWorkflowModel {
+        let model = makeVoiceModel(
             transport: ClosureControlTransport { request in
                 ControlResponse(
                     requestID: request.requestID,
@@ -1542,6 +1774,29 @@ final class AppModelTests: XCTestCase {
             available: true,
             mode: "clone",
             revision: revision
+        )
+    }
+
+    private func makeEngineModel(transport: any SpeechRailControlTransport) -> EngineModel {
+        EngineModel(transport: transport, apiClient: UnavailableDiagnosticsClient())
+    }
+
+    private func makeVoiceModel(
+        transport: any SpeechRailControlTransport,
+        voiceDirectoryClient: (any SpeechRailVoiceDirectoryClient)? = nil,
+        speechRenderClient: (any SpeechRailSpeechRenderClient)? = nil,
+        voiceDesignClient: (any SpeechRailVoiceDesignClient)? = nil,
+        voiceCloneClient: (any SpeechRailVoiceCloneClient)? = nil,
+        voiceEditingClient: (any SpeechRailVoiceEditingClient)? = nil,
+        voiceQualityClient: (any SpeechRailVoiceQualityClient)? = nil
+    ) -> VoiceWorkflowModel {
+        VoiceWorkflowModel(
+            capabilities: makeEngineModel(transport: transport),
+            playback: SharedPlaybackOwner(driver: ScriptedSharedPlaybackDriver()),
+            admission: SpeechCreationAdmission(), feedback: CreatorFeedback(),
+            voiceDirectoryClient: voiceDirectoryClient, speechRenderClient: speechRenderClient,
+            voiceDesignClient: voiceDesignClient, voiceCloneClient: voiceCloneClient,
+            voiceEditingClient: voiceEditingClient, voiceQualityClient: voiceQualityClient
         )
     }
 
@@ -1787,7 +2042,18 @@ private actor RejectingCloneRegistrationClient: SpeechRailVoiceDirectoryClient, 
 }
 
 private actor VoiceDesignWorkflowCreatorClient: SpeechRailVoiceDirectoryClient, SpeechRailVoiceDesignClient {
+    struct CreateRequest: Equatable, Sendable {
+        let voiceID: String
+        let name: String
+        let instruction: String
+        let referenceText: String
+        let seed: Int
+        let idempotencyKey: String?
+    }
     private var currentCandidate: VoiceDesignCandidate?
+    private var recordedCreateRequests: [CreateRequest] = []
+    private var committedCreates: [String: VoiceDesignCandidate] = [:]
+    private var shouldLoseNextCreateResponse = false
     private var recordedEvents: [String] = []
     private let candidateID = "vd_0123456789abcdef01234567"
     private let candidateRevision = "vr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -1801,6 +2067,9 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailVoiceDirectoryClient, 
     private var nextCandidateState = "generated"
 
     func events() -> [String] { recordedEvents }
+    func createRequests() -> [CreateRequest] { recordedCreateRequests }
+    func committedCreateCount() -> Int { committedCreates.count }
+    func loseNextCreateResponseAfterCommit() { shouldLoseNextCreateResponse = true }
 
     func holdNextPublication() {
         shouldHoldNextPublication = true
@@ -1862,6 +2131,14 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailVoiceDirectoryClient, 
         idempotencyKey: String?
     ) async throws -> VoiceDesignCandidate {
         recordedEvents.append("create")
+        recordedCreateRequests.append(CreateRequest(
+            voiceID: voiceID, name: name, instruction: instruction,
+            referenceText: referenceText, seed: seed, idempotencyKey: idempotencyKey
+        ))
+        if let idempotencyKey, let committed = committedCreates[idempotencyKey] {
+            currentCandidate = committed
+            return committed
+        }
         let candidate = makeCandidate(
             voiceID: voiceID,
             name: name,
@@ -1871,6 +2148,11 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailVoiceDirectoryClient, 
         )
         nextCandidateState = "generated"
         currentCandidate = candidate
+        if let idempotencyKey { committedCreates[idempotencyKey] = candidate }
+        if shouldLoseNextCreateResponse {
+            shouldLoseNextCreateResponse = false
+            throw ServiceAPIClientError.requestFailed
+        }
         return candidate
     }
 
@@ -2781,7 +3063,7 @@ extension AppModelTests {
                 moved += 1
             })
         )
-        let model = makeRenderModel(store: store, creator: ScriptedRenderClient(audio: silentPreviewWAV(marker: 0x20)))
+        let model = makeRenderModel(store: store, creator: ScriptedRenderClient(audio: silentPreviewWAV(marker: 0x20))).dubbingWorkflow
         let work = try store.save(
             Self.dubbingWork(script: "待删除的作品。", provenance: .legacyUnknown),
             audioData: silentPreviewWAV(marker: 0x20)
