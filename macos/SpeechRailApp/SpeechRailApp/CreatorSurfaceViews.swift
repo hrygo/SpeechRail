@@ -4017,6 +4017,7 @@ private struct DubbingProjectSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     let work: CreativeWork
+    @State private var rebuildCandidate: DubbingCandidate?
 
     var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
@@ -4042,6 +4043,24 @@ private struct DubbingProjectSheet: View {
             guard bundle != nil else { return }
             chooseExportDirectory()
         }
+        .confirmationDialog(
+            "按这个候选的条件建立新项目？",
+            isPresented: Binding(
+                get: { rebuildCandidate != nil },
+                set: { if !$0 { rebuildCandidate = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("建立新项目") {
+                if let candidate = rebuildCandidate {
+                    model.rebuildDubbingProject(using: candidate)
+                }
+                rebuildCandidate = nil
+            }
+            Button("取消", role: .cancel) { rebuildCandidate = nil }
+        } message: {
+            Text("旧项目、候选音频和采用记录会保留。新项目重新分段，各段需要重新生成和采用。")
+        }
     }
 
     private var header: some View {
@@ -4057,7 +4076,7 @@ private struct DubbingProjectSheet: View {
     }
 
     private var subtitle: String {
-        return "只重做你点的那一段，其余段落保持原样。成品由被采用的段落按顺序拼成，"
+        return "只重做你点的那一段。成品由被采用的段落按顺序拼成，"
             + "正文只包含这些段落，\(model.dubbingProjectVoice.text)。"
     }
 
@@ -4066,6 +4085,12 @@ private struct DubbingProjectSheet: View {
         if let project = model.dubbingProject {
             ScrollView {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    if let message = model.dubbingConditionsMessage {
+                        Text(message)
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     ForEach(Array(project.segments.enumerated()), id: \.element.id) {
                         index, segment in
                         segmentCard(segment, index: index)
@@ -4174,10 +4199,19 @@ private struct DubbingProjectSheet: View {
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             } else {
-                Button("采用") {
-                    model.adoptDubbingCandidate(candidate)
+                switch model.dubbingProject?.rejection(for: candidate) {
+                case .candidateRuntimeChanged, .candidateConditionsChanged:
+                    Button("按此条件新建项目…") {
+                        rebuildCandidate = candidate
+                    }
+                    .speechRailButton(.secondary)
+                    .disabled(model.dubbingBusySegmentID != nil)
+                default:
+                    Button("采用") {
+                        model.adoptDubbingCandidate(candidate)
+                    }
+                    .speechRailButton(.secondary)
                 }
-                .speechRailButton(.secondary)
             }
         }
     }
