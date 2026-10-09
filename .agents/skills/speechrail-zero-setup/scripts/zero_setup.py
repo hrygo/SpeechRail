@@ -132,7 +132,6 @@ from speechrail.service.profile_smoke import (  # noqa: E402
     PublicApiSmokeProbe,
     SmokeProbeError,
 )
-from speechrail.service.skill_installer import install_video_podcast_skill  # noqa: E402
 
 
 def _log(stage: str, message: str) -> None:
@@ -347,7 +346,6 @@ def run_zero_setup(
     run_smoke: bool = True,
     timeout_seconds: int = 300,
     confirmed: bool = False,
-    install_video_skill: bool = False,
 ) -> None:
     if not confirmed:
         raise InstallerError("zero-setup requires explicit confirmation")
@@ -369,11 +367,6 @@ def run_zero_setup(
     )
 
     wheel_path = _build_wheel()
-
-    if install_video_skill:
-        _log("SKILL", "安装 video-podcast skill 到用户级 .agents/skills ...")
-        install_video_podcast_skill(REPO_ROOT / ".agents" / "skills" / "video-podcast")
-        _success("video-podcast skill 已安装到用户级 .agents/skills/video-podcast")
 
     _log(
         "INSTALL",
@@ -477,11 +470,6 @@ def main() -> None:
         help="安装后不立即激活 LaunchAgent 常驻服务",
     )
     parser.add_argument(
-        "--install-video-podcast-skill",
-        action="store_true",
-        help="另行安装项目附带的 video-podcast 用户级 skill",
-    )
-    parser.add_argument(
         "--skip-smoke",
         action="store_true",
         help="跳过服务启动后的端到端 ASR/TTS 冒烟测试",
@@ -497,7 +485,6 @@ def main() -> None:
             enable=not args.no_enable,
             run_smoke=not args.skip_smoke,
             confirmed=args.yes,
-            install_video_skill=args.install_video_podcast_skill,
         )
     except (InstallerError, ServiceError, KeyboardInterrupt) as exc:
         _fail(f"搭建过程终止: {exc}")
