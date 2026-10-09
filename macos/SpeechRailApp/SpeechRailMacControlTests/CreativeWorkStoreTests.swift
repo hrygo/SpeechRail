@@ -781,6 +781,107 @@ final class CreativeWorkStoreTests: XCTestCase {
         XCTAssertEqual(try store.loadAudio(for: work), audio)
     }
 
+    func testDeletedWorksAreVisibleAndCanMoveToTrashWithoutTouchingActiveWorks() throws {
+        let trash = directory.appendingPathComponent("test-trash")
+        let store = CreativeWorkStore(
+            directory: directory,
+            fileOperations: CreativeWorkFileOperations(trashHandler: { url in
+                try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
+                try FileManager.default.moveItem(at: url, to: trash.appendingPathComponent(url.lastPathComponent))
+            })
+        )
+        let removed = makeWork(id: "work_removed")
+        let retained = makeWork(id: "work_retained")
+        try store.save(removed, audioData: Data([1, 2, 3]))
+        try store.save(retained, audioData: Data([4, 5]))
+        let transactionID = try XCTUnwrap(try store.delete(removed))
+        XCTAssertEqual(try store.deletedWorksSummary().count, 1)
+        XCTAssertGreaterThanOrEqual(try store.deletedWorksSummary().byteCount, 3)
+        XCTAssertEqual(try store.trashDeletedWorks(transactionIDs: [transactionID]), 1)
+        XCTAssertEqual(try store.deletedWorksSummary().count, 0)
+        XCTAssertEqual(try Data(contentsOf: trash.appendingPathComponent(transactionID)
+            .appendingPathComponent(removed.audioFileName)), Data([1, 2, 3]))
+        XCTAssertEqual(try store.loadAudio(for: retained), Data([4, 5]))
+        XCTAssertEqual(try store.list().map(\.id), [retained.id])
+        XCTAssertEqual(try store.trashDeletedWorks(transactionIDs: [transactionID]), 0)
+    }
+
+    func testTrashFailurePreservesDeletedAudioAndAllowsRetry() throws {
+        let work = makeWork(id: "work_trash_failure")
+        let store = CreativeWorkStore(directory: directory)
+        try store.save(work, audioData: Data([1, 2]))
+        try store.delete(work)
+        let failing = CreativeWorkStore(
+            directory: directory,
+            fileOperations: CreativeWorkFileOperations(trashHandler: { _ in
+                throw CocoaError(.fileWriteNoPermission)
+            })
+        )
+        XCTAssertThrowsError(try failing.trashDeletedWorks())
+        XCTAssertEqual(try store.deletedWorksSummary().count, 1)
+        XCTAssertTrue(try store.list().isEmpty)
+        let retried = CreativeWorkStore(
+            directory: directory,
+            fileOperations: CreativeWorkFileOperations(trashHandler: { url in
+                try FileManager.default.removeItem(at: url)
+            })
+        )
+        XCTAssertEqual(try retried.trashDeletedWorks(), 1)
+    }
+
+    func testTrashRefusesChangedAudioAndForeignFilesBeforeMovingAnyEntry() throws {
+        let work = makeWork(id: "work_changed_recovery")
+        var moved: [URL] = []
+        let store = CreativeWorkStore(
+            directory: directory,
+            fileOperations: CreativeWorkFileOperations(trashHandler: { moved.append($0) })
+        )
+        try store.save(work, audioData: Data([1, 2]))
+        let id = try XCTUnwrap(try store.delete(work))
+        let entry = directory.appendingPathComponent(".recovery").appendingPathComponent(id)
+        let audio = entry.appendingPathComponent(work.audioFileName)
+        try Data([9, 9]).write(to: audio)
+        XCTAssertThrowsError(try store.trashDeletedWorks())
+        XCTAssertTrue(moved.isEmpty)
+        try Data([1, 2]).write(to: audio)
+        let foreign = entry.appendingPathComponent(".foreign")
+        try Data([7]).write(to: foreign)
+        XCTAssertThrowsError(try store.trashDeletedWorks())
+        XCTAssertTrue(moved.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: foreign), Data([7]))
+    }
+
+    func testRecoverySummaryAndTrashRefuseSymbolicLinkRoots() throws {
+        let store = CreativeWorkStore(directory: directory)
+        try store.save(makeWork(id: "work_active"), audioData: Data([1]))
+        let foreign = directory.appendingPathComponent("foreign")
+        try FileManager.default.createDirectory(at: foreign, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: directory.appendingPathComponent(".recovery"), withDestinationURL: foreign
+        )
+        XCTAssertThrowsError(try store.deletedWorksSummary())
+        XCTAssertThrowsError(try store.trashDeletedWorks())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: foreign.path))
+    }
+
+    func testCommittedDeleteDoesNotMoveAudioThatChangedBeforeRecovery() throws {
+        let work = makeWork(id: "work_changed_after_commit")
+        try CreativeWorkStore(directory: directory).save(work, audioData: Data([1, 2]))
+        let audio = directory.appendingPathComponent(work.audioFileName)
+        let store = CreativeWorkStore(
+            directory: directory,
+            fileOperations: CreativeWorkFileOperations(syncInterceptor: { url in
+                if url.lastPathComponent == "works.json" {
+                    try Data([9, 9]).write(to: audio)
+                }
+            })
+        )
+        try store.delete(work)
+        XCTAssertThrowsError(try CreativeWorkStore(directory: directory).list())
+        XCTAssertEqual(try Data(contentsOf: audio), Data([9, 9]),
+                       "未确认归属的新字节必须原地保留")
+    }
+
     func testRestartCompletesADeleteWhoseIndexCommitAlreadySucceeded() throws {
         let work = makeWork(id: "work_delete_committed")
         let audio = Data([2, 7, 1, 8])

@@ -270,6 +270,11 @@ public enum CreativeWorkStoreError: Error, LocalizedError, Sendable {
     }
 }
 
+public struct CreativeWorkRecoverySummary: Equatable, Sendable {
+    public let count: Int
+    public let byteCount: Int64
+}
+
 @MainActor
 public final class CreativeWorkStore {
     private let operations: CreativeWorkFileOperations
@@ -375,15 +380,16 @@ public final class CreativeWorkStore {
 
     /// Removes the work from the index first, then moves its audio into a managed
     /// recovery area. An interrupted delete is completed on the next open.
-    public func delete(_ work: CreativeWork) throws {
+    @discardableResult
+    public func delete(_ work: CreativeWork) throws -> String? {
         guard Self.isSafeIdentifier(work.id),
               work.audioFileName == "\(work.id).wav"
         else {
             throw CreativeWorkStoreError.invalidWorkID
         }
-        try withRecoveredLibrary {
+        return try withRecoveredLibrary {
             var works = try readIndexUnlocked()
-            guard let index = works.firstIndex(where: { $0.id == work.id }) else { return }
+            guard let index = works.firstIndex(where: { $0.id == work.id }) else { return nil }
             let existing = works.remove(at: index)
             let audioURL = directory.appendingPathComponent(
                 existing.audioFileName,
@@ -407,7 +413,70 @@ public final class CreativeWorkStore {
                journal.operation == .delete
             {
                 try? completeCommittedDeleteUnlocked(journal)
+                return journal.transactionID
             }
+            return nil
+        }
+    }
+
+    public func deletedWorksSummary() throws -> CreativeWorkRecoverySummary {
+        try withRecoveredLibrary {
+            let entries = try recoveryEntriesUnlocked(validateAudio: false)
+            return CreativeWorkRecoverySummary(
+                count: entries.count,
+                byteCount: entries.reduce(0) { $0 + $1.byteCount }
+            )
+        }
+    }
+
+    /// Transfer only journal-owned deleted assets. All selected entries are
+    /// validated before the first move; failure leaves remaining entries retryable.
+    @discardableResult
+    public func trashDeletedWorks(transactionIDs: Set<String>? = nil) throws -> Int {
+        try withRecoveredLibrary {
+            let entries = try recoveryEntriesUnlocked(validateAudio: true)
+                .filter { transactionIDs?.contains($0.url.lastPathComponent) ?? true }
+            for entry in entries {
+                try operations.trash(at: entry.url)
+                try operations.synchronize(at: recoveryDirectory)
+            }
+            return entries.count
+        }
+    }
+
+    private func recoveryEntriesUnlocked(validateAudio: Bool) throws -> [(url: URL, byteCount: Int64)] {
+        guard !operations.isSymbolicLink(at: recoveryDirectory) else {
+            throw CreativeWorkStoreError.recoveryRequired
+        }
+        guard operations.fileExists(at: recoveryDirectory) else { return [] }
+        return try operations.contentsOfDirectory(at: recoveryDirectory, includeHidden: true).map { url in
+            guard url.lastPathComponent.isValidTransactionIdentifier,
+                  !operations.isSymbolicLink(at: url), operations.isDirectory(at: url) else {
+                throw CreativeWorkStoreError.recoveryRequired
+            }
+            let journalURL = url.appendingPathComponent("journal.json")
+            guard !operations.isSymbolicLink(at: journalURL) else {
+                throw CreativeWorkStoreError.recoveryRequired
+            }
+            let journalData = try operations.read(from: journalURL)
+            let journal = try CreativeWorkTransaction.decodeJournal(journalData)
+            guard journal.transactionID == url.lastPathComponent, journal.operation == .delete else {
+                throw CreativeWorkStoreError.recoveryRequired
+            }
+            let children = try operations.contentsOfDirectory(at: url, includeHidden: true)
+            guard children.allSatisfy({
+                ($0.lastPathComponent == "journal.json" || $0.lastPathComponent == journal.audioFileName)
+                    && !operations.isSymbolicLink(at: $0) && !operations.isDirectory(at: $0)
+            }) else { throw CreativeWorkStoreError.recoveryRequired }
+            let audio = url.appendingPathComponent(journal.audioFileName)
+            if validateAudio, operations.fileExists(at: audio) {
+                guard let expected = journal.audioSHA256,
+                      CreativeWorkTransaction.digest(try operations.read(from: audio)) == expected else {
+                    throw CreativeWorkStoreError.recoveryRequired
+                }
+            }
+            let byteCount = try children.reduce(Int64(0)) { try $0 + operations.fileSize(at: $1) }
+            return (url, byteCount)
         }
     }
 
@@ -782,15 +851,23 @@ public final class CreativeWorkStore {
             let preservedURL = transactionDirectory
                 .appendingPathComponent(journal.audioFileName, isDirectory: false)
             if !operations.fileExists(at: preservedURL) {
+                guard CreativeWorkTransaction.publishedAudioMatches(
+                    at: audioURL, expectedDigest: journal.audioSHA256, operations: operations
+                ) else { throw CreativeWorkStoreError.recoveryRequired }
                 try operations.move(from: audioURL, to: preservedURL)
             }
             try operations.synchronize(at: preservedURL)
+        }
+        guard !operations.isSymbolicLink(at: recoveryDirectory) else {
+            throw CreativeWorkStoreError.recoveryRequired
         }
         try operations.createDirectory(at: recoveryDirectory)
         let destination = recoveryDirectory
             .appendingPathComponent(journal.transactionID, isDirectory: true)
         if operations.fileExists(at: destination) {
-            try operations.remove(at: transactionDirectory)
+            // An occupied destination is not proof of an earlier successful move.
+            // Preserve both directories for explicit diagnosis.
+            throw CreativeWorkStoreError.recoveryRequired
         } else {
             try operations.move(from: transactionDirectory, to: destination)
         }
@@ -842,22 +919,30 @@ struct CreativeWorkFileOperations {
     typealias WriteInterceptor = (URL, Data) throws -> Void
     typealias MoveInterceptor = (URL, URL) throws -> Void
     typealias SyncInterceptor = (URL) throws -> Void
+    typealias RemoveInterceptor = (URL) throws -> Void
+    typealias TrashHandler = (URL) throws -> Void
 
     private let fileManager: FileManager
     private let writeInterceptor: WriteInterceptor?
     private let moveInterceptor: MoveInterceptor?
     private let syncInterceptor: SyncInterceptor?
+    private let removeInterceptor: RemoveInterceptor?
+    private let trashHandler: TrashHandler?
 
     init(
         fileManager: FileManager = .default,
         writeInterceptor: WriteInterceptor? = nil,
         moveInterceptor: MoveInterceptor? = nil,
-        syncInterceptor: SyncInterceptor? = nil
+        syncInterceptor: SyncInterceptor? = nil,
+        removeInterceptor: RemoveInterceptor? = nil,
+        trashHandler: TrashHandler? = nil
     ) {
         self.fileManager = fileManager
         self.writeInterceptor = writeInterceptor
         self.moveInterceptor = moveInterceptor
         self.syncInterceptor = syncInterceptor
+        self.removeInterceptor = removeInterceptor
+        self.trashHandler = trashHandler
     }
 
     func createDirectory(at url: URL) throws {
@@ -879,11 +964,20 @@ struct CreativeWorkFileOperations {
         return attributes[.type] as? FileAttributeType == .typeSymbolicLink
     }
 
-    func contentsOfDirectory(at url: URL) throws -> [URL] {
+    func isDirectory(at url: URL) -> Bool {
+        (try? fileManager.attributesOfItem(atPath: url.path)[.type]) as? FileAttributeType == .typeDirectory
+    }
+
+    func fileSize(at url: URL) throws -> Int64 {
+        let attributes = try fileManager.attributesOfItem(atPath: url.path)
+        return (attributes[.size] as? NSNumber)?.int64Value ?? 0
+    }
+
+    func contentsOfDirectory(at url: URL, includeHidden: Bool = false) throws -> [URL] {
         try fileManager.contentsOfDirectory(
             at: url,
             includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
+            options: includeHidden ? [] : [.skipsHiddenFiles]
         )
     }
 
@@ -902,7 +996,16 @@ struct CreativeWorkFileOperations {
     }
 
     func remove(at url: URL) throws {
+        try removeInterceptor?(url)
         try fileManager.removeItem(at: url)
+    }
+
+    func trash(at url: URL) throws {
+        if let trashHandler {
+            try trashHandler(url)
+        } else {
+            try fileManager.trashItem(at: url, resultingItemURL: nil)
+        }
     }
 
     func synchronize(at url: URL) throws {
