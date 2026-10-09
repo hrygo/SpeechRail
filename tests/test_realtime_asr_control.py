@@ -420,7 +420,7 @@ def test_completed_rollover_failure_is_retained_by_the_later_input_barrier() -> 
         await session.handle({
             "type": "input_audio_buffer.append", "audio": _pcm16(b"\x01\x00" * 25_000),
         })
-        await session._await_asr_finals()
+        await session._asr_owner._await_asr_finals()
         assert any(e["type"].endswith("transcription.failed") for e in sent)
         for event_id in ("first", "repeat"):
             with pytest.raises(RealtimeAdapterError) as exc:
@@ -455,7 +455,7 @@ def test_clear_gives_waiting_empty_commit_exactly_one_failed_terminal() -> None:
 
         session = OpenAIRealtimeSession(services, session_id="empty-commit-clear", send=send)
         await session.handle(session_update(endpointing=server_vad()))
-        session._vad = _EnergyScriptedVad()
+        session._asr_owner._vad = _EnergyScriptedVad()
         for _ in range(12):
             await session.handle({
                 "type": "input_audio_buffer.append", "audio": _pcm16(_sine_frame_16k()),
@@ -626,9 +626,9 @@ def test_external_commit_cancellation_preserves_owned_final_without_receipt() ->
             with pytest.raises(asyncio.CancelledError):
                 await pending
             assert not blocked.commit_cancelled.is_set()
-            assert session._asr_finals and all(not t.cancelled() for t in session._asr_finals)
+            assert session._asr_owner._asr_finals and all(not t.cancelled() for t in session._asr_owner._asr_finals)
             blocked.release_from_test_thread()
-            await asyncio.wait_for(session._await_asr_finals(), 1)
+            await asyncio.wait_for(session._asr_owner._await_asr_finals(), 1)
             assert len([e for e in sent if e["type"].endswith("transcription.completed")]) == 1
             assert not any(e["type"] == "speechrail.input_audio_buffer.committed" for e in sent)
         finally:
@@ -641,7 +641,7 @@ def test_external_commit_cancellation_preserves_owned_final_without_receipt() ->
 def test_background_final_transport_failure_is_observed_without_erasing_failure(caplog) -> None:
     import gc
 
-    from speechrail.application.realtime_openai import _AsrItem
+    from speechrail.application.realtime_asr import _AsrItem
 
     class MissingTerminalSession(FakeStreamingSession):
         async def commit(self, want_segments: bool = False) -> None:
@@ -663,16 +663,16 @@ def test_background_final_transport_failure_is_observed_without_erasing_failure(
         session = OpenAIRealtimeSession(services, session_id="final-send-error", send=send)
         runtime = MissingTerminalSession(language="zh")
         item = _AsrItem(asr=runtime, item_id="frozen", generation=0, close_reason="budget_rollover")
-        session._asr_closed_items[item.item_id] = item
-        task = asyncio.create_task(session._finish_asr_item(item, False, 0))
-        session._asr_finals[task] = 0
-        task.add_done_callback(session._discard_asr_final)
+        session._asr_owner._asr_closed_items[item.item_id] = item
+        task = asyncio.create_task(session._asr_owner._finish_asr_item(item, False, 0))
+        session._asr_owner._asr_finals[task] = 0
+        task.add_done_callback(session._asr_owner._discard_asr_final)
         del task
         await asyncio.wait_for(sending.wait(), 1)
         await asyncio.sleep(0)
         gc.collect()
         assert not unhandled
-        assert session._asr_barrier_failure == (0, "backend_timeout")
+        assert session._asr_owner._asr_barrier_failure == (0, "backend_timeout")
         with pytest.raises(RealtimeAdapterError) as exc:
             await session.handle({
                 "type": "input_audio_buffer.commit", "event_id": "retry",
