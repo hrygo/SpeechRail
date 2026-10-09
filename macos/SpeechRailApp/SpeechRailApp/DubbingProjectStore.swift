@@ -44,14 +44,28 @@ public struct DubbingProject: Codable, Equatable, Identifiable, Sendable {
     ///
     /// 没有配方摘要的项目一律判为失效：无法证明两次制作是同一条件。
     public func isValid(_ candidate: DubbingCandidate) -> Bool {
-        guard let projectDigest = recipe.recipe?.digest,
-              let candidateDigest = candidate.provenance.recipe?.digest,
-              projectDigest == candidateDigest
-        else { return false }
+        rejection(for: candidate) == nil
+    }
+
+    public func rejection(for candidate: DubbingCandidate) -> DubbingProjectError? {
         guard let segment = segments.first(where: { $0.id == candidate.segmentID }) else {
-            return false
+            return .segmentNotFound
         }
-        return segment.text == candidate.text
+        guard segment.text == candidate.text else { return .candidateTextChanged }
+        guard let projectDigest = recipe.recipe?.digest,
+              let candidateDigest = candidate.provenance.recipe?.digest else {
+            return .candidateRecipeMissing
+        }
+        guard projectDigest != candidateDigest else { return nil }
+        let old = recipe.recipe
+        let new = candidate.provenance.recipe
+        if let previous = old?.engineRevision, let current = new?.engineRevision,
+           previous != current { return .candidateRuntimeChanged }
+        if let previous = old?.modelArtifactRevision, let current = new?.modelArtifactRevision,
+           previous != current { return .candidateRuntimeChanged }
+        if let previous = old?.modelArtifact, let current = new?.modelArtifact,
+           previous != current { return .candidateRuntimeChanged }
+        return .candidateConditionsChanged
     }
 }
 
@@ -122,6 +136,10 @@ public enum DubbingProjectError: Error, LocalizedError, Sendable {
     case segmentNotFound
     case candidateNotFound
     case candidateNotAdoptable
+    case candidateRecipeMissing
+    case candidateTextChanged
+    case candidateRuntimeChanged
+    case candidateConditionsChanged
     case recoveryRequired
     /// 候选音频不是本项目支持的线性 PCM 剖面（单声道 16 bit）。
     case audioFormatUnsupported
@@ -137,7 +155,15 @@ public enum DubbingProjectError: Error, LocalizedError, Sendable {
         case .candidateNotFound:
             "找不到这个候选"
         case .candidateNotAdoptable:
-            "这个候选的制作条件与当前项目不一致，需要重新生成"
+            "这个候选无法安全采用，请保留音频并检查项目记录"
+        case .candidateRecipeMissing:
+            "项目或候选缺少完整制作配方，无法证明条件一致"
+        case .candidateTextChanged:
+            "这一段的正文已变化，请按新正文重新生成"
+        case .candidateRuntimeChanged:
+            "模型或运行版本已变化，请按这个候选的条件新建项目"
+        case .candidateConditionsChanged:
+            "制作条件已变化，请按这个候选的条件新建项目"
         case .recoveryRequired:
             "配音项目音频未通过完整性校验，请保留项目并打开诊断"
         case .audioFormatUnsupported:
@@ -299,6 +325,39 @@ public final class DubbingProjectStore {
         }
     }
 
+    /// 以已观察到的完整候选配方创建新项目；旧项目、候选和采用关系原样保留。
+    @discardableResult
+    public func rebuild(projectID: String, usingCandidateID candidateID: String) throws -> DubbingProject {
+        try withRecoveredLibrary {
+            var records = try readRecordsUnlocked()
+            guard let original = records.first(where: { $0.project.id == projectID }),
+                  let candidate = original.candidates.first(where: { $0.id == candidateID }) else {
+                throw DubbingProjectError.candidateNotFound
+            }
+            guard original.project.segments.contains(where: {
+                $0.id == candidate.segmentID && $0.text == candidate.text
+            }) else { throw DubbingProjectError.candidateTextChanged }
+            guard let recipe = candidate.provenance.recipe,
+                  recipe.state == .complete, recipe.digest != nil,
+                  recipe.missingFields?.isEmpty == true else {
+                throw DubbingProjectError.candidateRecipeMissing
+            }
+            let id = "dub_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+            let texts = DubbingSegmentPlanner.segments(from: original.project.scriptText)
+            guard !texts.isEmpty else { throw DubbingProjectError.segmentNotFound }
+            let project = DubbingProject(
+                id: id, title: original.project.title, scriptText: original.project.scriptText,
+                recipe: candidate.provenance,
+                segments: texts.enumerated().map {
+                    DubbingSegment(id: "\(id)_s\($0.offset + 1)", text: $0.element)
+                }
+            )
+            records.append(DubbingProjectRecord(project: project, candidates: []))
+            try commitUnlocked(records: records, operation: "rebuild")
+            return project
+        }
+    }
+
     @discardableResult
     public func save(_ project: DubbingProject) throws -> DubbingProject {
         guard Self.isSafeIdentifier(project.id) else {
@@ -413,8 +472,8 @@ public final class DubbingProjectStore {
             }) else {
                 throw DubbingProjectError.candidateNotFound
             }
-            guard records[index].project.isValid(candidate) else {
-                throw DubbingProjectError.candidateNotAdoptable
+            if let rejection = records[index].project.rejection(for: candidate) {
+                throw rejection
             }
             var segment = records[index].project.segments[segmentIndex]
             if segment.acceptedCandidateID != candidateID {

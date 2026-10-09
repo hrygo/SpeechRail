@@ -3405,6 +3405,46 @@ public final class AppModel {
 
     // MARK: - 段落返修
 
+    /// 只报告可比的当前模型事实；缺少身份时不推断版本相同或不同。
+    public var dubbingConditionsMessage: String? {
+        guard let recipe = dubbingProject?.recipe.recipe,
+              let mode = recipe.voiceMode,
+              let slot = SpeechRailCapabilityRevisionSelector.ttsArtifactSlot(forVoiceMode: mode),
+              let current = capabilityFacade.snapshot?.models[slot] else { return nil }
+        let pairs: [(String?, String?)] = [
+            (recipe.engineRevision, current.runtimeRevision),
+            (recipe.modelArtifactRevision, current.catalogRevision),
+            (recipe.modelArtifact, current.artifact)
+        ]
+        guard pairs.contains(where: { previous, observed in
+            guard let previous, let observed else { return false }
+            return previous != observed
+        }) else { return nil }
+        return "这件作品的制作版本与当前服务不同。新生成的版本可能无法直接采用；可在候选中按新条件建立项目。"
+    }
+
+    @discardableResult
+    public func rebuildDubbingProject(using candidate: DubbingCandidate) -> Bool {
+        guard let project = dubbingProject else { return false }
+        guard dubbingBusySegmentID == nil else {
+            dubbingMessage = "请先完成或取消正在进行的重做，再建立新项目。"
+            return false
+        }
+        do {
+            let rebuilt = try dubbingProjectStore.rebuild(
+                projectID: project.id, usingCandidateID: candidate.id
+            )
+            closeDubbingProject()
+            dubbingProject = rebuilt
+            dubbingCandidates = []
+            dubbingMessage = "已按这次生成的制作条件建立新项目。各段需要重新生成和采用，旧项目和音频已保留。"
+            return true
+        } catch {
+            dubbingMessage = Self.dubbingErrorMessage(for: error)
+            return false
+        }
+    }
+
     /// 从一件已保存作品打开段落编辑。
     ///
     /// 原作品音频原地不动：项目只记录"每段现在用哪个候选"，导出时才按段落顺序拼装。
@@ -3729,7 +3769,10 @@ public final class AppModel {
         if let projectError = error as? DubbingProjectError {
             return switch projectError {
             case .candidateNotAdoptable:
-                "这个候选的制作条件与当前项目不一致，需要重新生成这一段。"
+                "这个候选无法安全采用，请保留音频并检查项目记录。"
+            case .candidateRecipeMissing, .candidateTextChanged,
+                 .candidateRuntimeChanged, .candidateConditionsChanged:
+                projectError.errorDescription ?? "这个候选无法安全采用。"
             case .recoveryRequired:
                 "配音项目音频未通过完整性校验，请保留项目并打开诊断。"
             case .candidateNotFound, .segmentNotFound:

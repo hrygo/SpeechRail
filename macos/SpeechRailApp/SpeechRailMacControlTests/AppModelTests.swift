@@ -3585,6 +3585,52 @@ extension AppModelTests {
         XCTAssertEqual(try projects.list().count, 1)
     }
 
+    /// 版本漂移拒绝旧项目采用；显式建立新项目后可继续生成与采用。
+    func testChangedConditionsCanStartANewProjectWithoutRewritingTheOldOne() async throws {
+        let currentRecipe = Self.dubbingRecipe(digest: "current-digest")
+        let creator = DubbingRenderClient(
+            audio: silentPreviewWAV(marker: 0x61),
+            recipe: currentRecipe, voice: Self.dubbingVoice()
+        )
+        let (model, works, projects) = makeDubbingModel(creator: creator, recipeDigest: "old-digest")
+        await model.refreshDiscovery()
+        await model.refreshCreatorVoices()
+        let work = Self.dubbingWork(
+            script: "第一段。\n第二段。",
+            provenance: RenderProvenanceSnapshot(
+                state: .verified, reason: nil,
+                recipe: RenderRecipeSnapshot(
+                    state: .complete, missingFields: [], digest: "old-digest",
+                    voiceID: "ryan", voiceMode: "system",
+                    modelArtifactRevision: "old-catalog", effectiveSpeed: 1
+                )
+            )
+        )
+        try works.save(work, audioData: silentPreviewWAV(marker: 0x10))
+        let original = try XCTUnwrap(model.startDubbingProject(for: work))
+        let storedOriginal = try XCTUnwrap(projects.list().first { $0.id == original.id })
+        XCTAssertNotNil(model.dubbingConditionsMessage, "入口立即提示可确认的模型版本漂移")
+        let segment = try XCTUnwrap(original.segments.first)
+        model.startDubbingSegmentRedo(segment.id)
+        try await waitUntilDubbing { model.dubbingBusySegmentID == nil && !model.dubbingCandidates.isEmpty }
+        let changed = try XCTUnwrap(model.dubbingCandidates.first)
+        XCTAssertFalse(model.adoptDubbingCandidate(changed))
+        XCTAssertFalse(model.dubbingMessage?.contains("重新生成") == true)
+        XCTAssertTrue(model.rebuildDubbingProject(using: changed))
+        let rebuilt = try XCTUnwrap(model.dubbingProject)
+        XCTAssertNotEqual(rebuilt.id, original.id)
+        XCTAssertEqual(rebuilt.recipe.recipe?.digest, "current-digest")
+        XCTAssertTrue(model.dubbingCandidates.isEmpty)
+        XCTAssertTrue(rebuilt.segments.allSatisfy { $0.acceptedCandidateID == nil })
+        XCTAssertEqual(try projects.list().first { $0.id == original.id }, storedOriginal)
+        XCTAssertEqual(try projects.loadAudio(for: changed), silentPreviewWAV(marker: 0x61))
+
+        model.startDubbingSegmentRedo(try XCTUnwrap(rebuilt.segments.first).id)
+        try await waitUntilDubbing { model.dubbingBusySegmentID == nil && !model.dubbingCandidates.isEmpty }
+        XCTAssertTrue(model.adoptDubbingCandidate(try XCTUnwrap(model.dubbingCandidates.first)))
+        XCTAssertEqual(try projects.list().first { $0.id == original.id }, storedOriginal)
+    }
+
     /// 只重做被点中的那一段：送出的文本只有这一段，其余候选与采用关系不变。
     func testRedoingOneSegmentOnlyRendersThatSegment() async throws {
         let recipe = Self.dubbingRecipe(digest: "digest-1")

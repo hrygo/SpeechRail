@@ -134,6 +134,107 @@ final class DubbingProjectStoreTests: XCTestCase {
 
     // MARK: - 候选与采用
 
+    func testRuntimeDriftRejectsAdoptionAndRebuildPreservesTheOriginalAssets() throws {
+        func recipe(_ revision: String, digest: String) -> RenderProvenanceSnapshot {
+            RenderProvenanceSnapshot(
+                state: .verified, reason: nil,
+                recipe: RenderRecipeSnapshot(
+                    state: .complete, missingFields: [], digest: digest,
+                    voiceID: "ryan", modelArtifact: "tts",
+                    modelArtifactRevision: "catalog-1", engineRevision: revision
+                )
+            )
+        }
+        let oldRecipe = recipe("runtime-old", digest: "old-digest")
+        let newRecipe = recipe("runtime-new", digest: "new-digest")
+        let store = DubbingProjectStore(directory: directory)
+        let project = DubbingProject(
+            id: "project_drift", title: "旧条件项目", scriptText: "第一段。\n第二段。",
+            recipe: oldRecipe,
+            segments: [
+                DubbingSegment(id: "seg_first", text: "第一段。"),
+                DubbingSegment(id: "seg_second", text: "第二段。")
+            ]
+        )
+        try store.save(project)
+        let old = DubbingCandidate(
+            id: "cand_old", segmentID: "seg_first", text: "第一段。",
+            audioFileName: "cand_old.wav", provenance: oldRecipe
+        )
+        try store.addCandidate(old, audioData: wav(0x11), toProject: project.id)
+        try store.adopt(candidateID: old.id, inSegment: old.segmentID, ofProject: project.id)
+        let current = DubbingCandidate(
+            id: "cand_current", segmentID: "seg_first", text: "第一段。",
+            audioFileName: "cand_current.wav", provenance: newRecipe
+        )
+        try store.addCandidate(current, audioData: wav(0x22), toProject: project.id)
+        XCTAssertThrowsError(try store.adopt(
+            candidateID: current.id, inSegment: current.segmentID, ofProject: project.id
+        )) { error in
+            guard case DubbingProjectError.candidateRuntimeChanged = error else {
+                return XCTFail("运行版本漂移应给出专属原因：\(error)")
+            }
+            XCTAssertFalse(error.localizedDescription.contains("重新生成"))
+        }
+        let original = try XCTUnwrap(store.list().first)
+        let rebuilt = try store.rebuild(projectID: project.id, usingCandidateID: current.id)
+        XCTAssertNotEqual(rebuilt.id, project.id)
+        XCTAssertEqual(rebuilt.recipe.recipe?.digest, "new-digest")
+        XCTAssertEqual(rebuilt.segments.map(\.text), project.segments.map(\.text))
+        XCTAssertTrue(rebuilt.segments.allSatisfy {
+            $0.acceptedCandidateID == nil && $0.adoptionHistory.isEmpty
+        })
+        XCTAssertTrue(Set(rebuilt.segments.map(\.id)).isDisjoint(with: project.segments.map(\.id)))
+        XCTAssertTrue(try store.candidates(forProject: rebuilt.id).isEmpty)
+        XCTAssertEqual(try store.list().first { $0.id == project.id }, original)
+        XCTAssertEqual(try store.loadAudio(for: old), wav(0x11))
+        XCTAssertEqual(try store.loadAudio(for: current), wav(0x22))
+        XCTAssertNil(try store.export(projectID: rebuilt.id))
+    }
+
+    func testModelDriftAndTextChangesHaveDistinctRejections() {
+        func snapshot(artifact: String, revision: String, digest: String) -> RenderProvenanceSnapshot {
+            RenderProvenanceSnapshot(
+                state: .verified, reason: nil,
+                recipe: RenderRecipeSnapshot(
+                    state: .complete, missingFields: [], digest: digest,
+                    modelArtifact: artifact, modelArtifactRevision: revision
+                )
+            )
+        }
+        let project = DubbingProject(
+            id: "project_model", title: "模型版本", scriptText: "第一段。",
+            recipe: snapshot(artifact: "tts-old", revision: "rev-old", digest: "old"),
+            segments: [DubbingSegment(id: "seg_first", text: "第一段。")]
+        )
+        for (artifact, revision) in [("tts-new", "rev-old"), ("tts-old", "rev-new")] {
+            let candidate = DubbingCandidate(
+                id: "cand_new", segmentID: "seg_first", text: "第一段。",
+                audioFileName: "cand_new.wav",
+                provenance: snapshot(artifact: artifact, revision: revision, digest: "new")
+            )
+            XCTAssertEqual(project.rejection(for: candidate), .candidateRuntimeChanged)
+            XCTAssertFalse(project.isValid(candidate))
+        }
+        let edited = makeCandidate(id: "cand_edited", segmentID: "seg_first", text: "正文改了。")
+        XCTAssertEqual(project.rejection(for: edited), .candidateTextChanged)
+    }
+
+    func testRebuildWithAnIncompleteCandidateDoesNotCreateANewProject() throws {
+        let store = DubbingProjectStore(directory: directory)
+        let project = makeProject()
+        try store.save(project)
+        let candidate = try store.addCandidate(
+            makeCandidate(id: "cand_partial", segmentID: "seg_first", text: "第一段。", state: .partial),
+            audioData: wav(0x11), toProject: project.id
+        )
+        XCTAssertThrowsError(try store.rebuild(projectID: project.id, usingCandidateID: candidate.id)) {
+            XCTAssertEqual($0 as? DubbingProjectError, .candidateRecipeMissing)
+        }
+        XCTAssertEqual(try store.list().map(\.id), [project.id])
+        XCTAssertEqual(try store.loadAudio(for: candidate), wav(0x11))
+    }
+
     func testSavingACandidateDoesNotAdoptIt() throws {
         let store = DubbingProjectStore(directory: directory)
         let project = makeProject()
@@ -338,7 +439,7 @@ final class DubbingProjectStoreTests: XCTestCase {
                 ofProject: project.id
             )
         ) { error in
-            XCTAssertEqual(error as? DubbingProjectError, .candidateNotAdoptable)
+            XCTAssertEqual(error as? DubbingProjectError, .candidateConditionsChanged)
         }
         XCTAssertNil(try XCTUnwrap(store.list().first).segments[0].acceptedCandidateID)
     }
@@ -360,7 +461,7 @@ final class DubbingProjectStoreTests: XCTestCase {
                 ofProject: project.id
             )
         ) { error in
-            XCTAssertEqual(error as? DubbingProjectError, .candidateNotAdoptable)
+            XCTAssertEqual(error as? DubbingProjectError, .candidateRecipeMissing)
         }
     }
 
