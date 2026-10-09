@@ -68,7 +68,7 @@ def create_capability_router(services: AppServices) -> APIRouter:
                 binding = build_validation_binding(
                     profile,
                     active.tts_clone,
-                    services.tts_synthesizer,
+                    services.tts_execution.runtime_identity,
                     require_current_binding=True,
                     capability_key=capability_key,
                 )

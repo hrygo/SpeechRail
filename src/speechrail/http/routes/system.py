@@ -42,6 +42,7 @@ from speechrail.domain.idempotency import (
     IdempotencyConflictError,
     IdempotencyStoreUnavailableError,
 )
+from speechrail.domain.ports import SpeechSynthesizer
 from speechrail.domain.tts import (
     SYSTEM_VOICE_PROFILES,
     VOICE_ALIASES,
@@ -56,6 +57,7 @@ from speechrail.domain.tts import (
     canonicalize_clone_reference_audio,
     get_voice_registry,
 )
+from speechrail.domain.tts_execution import EMPTY_TTS_EXECUTION, TtsExecutionPorts
 from speechrail.domain.tts_pronunciation import (
     PronunciationConflictError,
     PronunciationEntry,
@@ -241,7 +243,8 @@ def _voice_entry(
     tts_ready: bool,
     *,
     enabled: bool = True,
-    synthesizer: object | None = None,
+    synthesizer: SpeechSynthesizer | None = None,
+    tts_execution: TtsExecutionPorts = EMPTY_TTS_EXECUTION,
     strict_validation: bool = False,
     include_streaming: bool = False,
     stream_service: TtsStreamService | None = None,
@@ -252,6 +255,7 @@ def _voice_entry(
         tts_ready,
         enabled=enabled,
         synthesizer=synthesizer,
+        tts_execution=tts_execution,
         strict_validation=strict_validation,
         include_streaming=include_streaming,
         stream_service=stream_service,
@@ -264,7 +268,8 @@ def _voice_list_entry(
     tts_ready: bool,
     *,
     enabled: bool = True,
-    synthesizer: object | None = None,
+    synthesizer: SpeechSynthesizer | None = None,
+    tts_execution: TtsExecutionPorts = EMPTY_TTS_EXECUTION,
     strict_validation: bool = False,
     include_streaming: bool = False,
     stream_service: TtsStreamService | None = None,
@@ -277,6 +282,7 @@ def _voice_list_entry(
         tts_ready,
         enabled=enabled,
         synthesizer=synthesizer,
+        tts_execution=tts_execution,
         strict_validation=strict_validation,
         include_streaming=include_streaming,
         stream_service=stream_service,
@@ -522,7 +528,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 tts_target,
                 active,
                 active.tts,
-                streaming_input=tts_stream_model_payload(services.tts_synthesizer),
+                streaming_input=tts_stream_model_payload(services.tts_execution),
             ),
         ]
         for alias, target in sorted(asr_model_aliases().items()):
@@ -552,7 +558,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                         and active.tts_clone.variant == "base",
                         "supports_instruction": active.voice_design is not None
                         and active.voice_design.variant == "voice_design",
-                        "streaming_input": tts_stream_model_payload(services.tts_synthesizer),
+                        "streaming_input": tts_stream_model_payload(services.tts_execution),
                     },
                 }
             )
@@ -595,6 +601,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                     services.tts_ready,
                     enabled=not profile.is_system or profile.id in resolved.tts_voice_ids,
                     synthesizer=services.tts_synthesizer,
+                    tts_execution=services.tts_execution,
                     strict_validation=True,
                     include_streaming=True,
                     stream_service=services.tts_streams,
@@ -634,6 +641,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 services.tts_ready,
                 enabled=not profile.is_system or profile.id in resolved.tts_voice_ids,
                 synthesizer=services.tts_synthesizer,
+                tts_execution=services.tts_execution,
                 strict_validation=True,
                 include_streaming=True,
                 stream_service=services.tts_streams,
@@ -746,6 +754,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 active,
                 services.tts_ready,
                 synthesizer=services.tts_synthesizer,
+                tts_execution=services.tts_execution,
                 strict_validation=True,
             ),
         )
@@ -1280,6 +1289,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                     active,
                     services.tts_ready,
                     synthesizer=services.tts_synthesizer,
+                    tts_execution=services.tts_execution,
                     strict_validation=True,
                 ),
             )
@@ -1484,6 +1494,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                             active,
                             services.tts_ready,
                             synthesizer=services.tts_synthesizer,
+                            tts_execution=services.tts_execution,
                             strict_validation=True,
                         ),
                     )
@@ -1524,6 +1535,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                         active,
                         services.tts_ready,
                         synthesizer=services.tts_synthesizer,
+                        tts_execution=services.tts_execution,
                         strict_validation=True,
                     ),
                 )
@@ -1621,6 +1633,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 active,
                 services.tts_ready,
                 synthesizer=services.tts_synthesizer,
+                tts_execution=services.tts_execution,
                 strict_validation=True,
             ),
         )
@@ -1799,6 +1812,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 active=active,
                 runtime=ValidationRuntime(
                     synthesizer=services.tts_synthesizer,
+                    tts_execution=services.tts_execution,
                     transcriber=services.batch_transcriber,
                     governor=services.governor,
                     admission=services.admission,

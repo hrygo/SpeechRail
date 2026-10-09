@@ -7,7 +7,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from speechrail.application.render_receipts import observed_runtime_revision_for_synthesizer
+from speechrail.application.render_receipts import observed_runtime_revision_for_voice
 from speechrail.application.tts_admission import tts_resource_key
 from speechrail.application.voice_validation_execution import (
     ValidationRuntime,
@@ -69,7 +69,7 @@ async def run_voice_quality(
     # The reference asset and immutable voice snapshot remain owned through
     # ASR and commit; each production request remains pinned to this revision.
     with registry.lease_profile(voice_id) as profile:
-        resource_key = tts_resource_key(synthesizer, profile.id)
+        resource_key = tts_resource_key(runtime.tts_execution.lanes, profile.id)
         # Readiness includes quarantine. Let the Governor reject an isolated
         # lane with its non-retryable reclamation error instead of masking it.
         if not runtime.tts_ready and not runtime.governor.tts_lane_isolated(resource_key):
@@ -107,8 +107,8 @@ async def run_voice_quality(
                     expires_at=expires_at,
                     on_close_failure=quarantine,
                 )
-                producing_revision = observed_runtime_revision_for_synthesizer(
-                    synthesizer, profile.id
+                producing_revision = observed_runtime_revision_for_voice(
+                    runtime.tts_execution.runtime_identity, profile.id
                 )
         except TimeoutError:
             raise VoiceValidationExecutionError(

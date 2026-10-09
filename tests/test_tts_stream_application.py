@@ -15,12 +15,14 @@ import pytest
 
 from speechrail.application.render_receipts import RenderReceiptRegistry
 from speechrail.application.services import AppOverrides, build_app_services
+from speechrail.application.tts_admission import tts_resource_key
 from speechrail.application.tts_audio_window import TtsAudioWindow
 from speechrail.application.tts_stream import (
     TtsStreamAdmissionError,
     TtsStreamReceipt,
     TtsStreamService,
 )
+from speechrail.backends.tts_execution_adapter import bind_tts_execution
 from speechrail.config import Settings
 from speechrail.domain.resource_limits import GovernorLimits
 from speechrail.domain.tts import VoiceRevokedError
@@ -195,13 +197,104 @@ def _service(
     worker_lease: Callable | None = None,
     admission_timeout_seconds: float = 1.0,
 ) -> TtsStreamService:
+    execution = bind_tts_execution(synthesizer)
     return TtsStreamService(
-        synthesizer=synthesizer,
+        stream_factory=execution.incremental,
+        lane_resolver=execution.lanes,
+        runtime_identity=execution.runtime_identity,
         governor=governor or _governor(),
         receipts=receipts or RenderReceiptRegistry(),
         worker_lease=worker_lease,
         admission_timeout_seconds=admission_timeout_seconds,
     )
+
+
+def test_native_incremental_factory_needs_no_batch_or_vendor_interface() -> None:
+    async def run() -> None:
+        class NativeFactory:
+            protocol_negotiated = None
+
+            async def open_stream(self, options, *, limits):
+                assert limits == DEFAULT_TTS_STREAM_LIMITS
+                session = _FakeSession(options)
+                session.queued.put_nowait(_terminal_event(TtsStreamTerminal.COMPLETED))
+                return session
+
+        sink = _Sink()
+        governor = _governor()
+        service = TtsStreamService(
+            stream_factory=NativeFactory(),
+            governor=governor,
+            receipts=RenderReceiptRegistry(),
+        )
+        controller = await service.open(options=_options(), sink=sink)
+        await asyncio.wait_for(controller.wait_closed(), timeout=1)
+        assert controller.terminal is TtsStreamTerminal.COMPLETED
+        assert len(sink.terminals) == 1
+        assert governor.snapshot().active_tts == 0
+
+    asyncio.run(run())
+
+
+def test_vendor_adapter_does_not_advertise_noncallable_factory() -> None:
+    class BadBackend:
+        open_incremental_stream = True
+
+    assert bind_tts_execution(BadBackend()).incremental is None
+    assert bind_tts_execution(object()).incremental is None
+    assert bind_tts_execution(None).incremental is None
+
+
+def test_vendor_adapter_rejects_incompatible_factory_signature_at_composition() -> None:
+    class BadBackend:
+        async def open_incremental_stream(self):
+            return object()
+
+    with pytest.raises(ValueError, match="invalid_incremental_factory_signature"):
+        bind_tts_execution(BadBackend())
+
+
+def test_vendor_negotiation_is_live_and_does_not_imply_ready() -> None:
+    class Backend(_FakeSynthesizer):
+        supports_incremental_stream = False
+
+    backend = Backend()
+    execution = bind_tts_execution(backend)
+    assert execution.incremental is not None
+    assert execution.incremental.protocol_negotiated is False
+    backend.supports_incremental_stream = True
+    assert execution.incremental.protocol_negotiated is True
+    backend.supports_incremental_stream = False
+    assert execution.incremental.protocol_negotiated is False
+
+
+def test_invalid_vendor_session_releases_admission_without_controller() -> None:
+    async def run() -> None:
+        class BadBackend:
+            async def open_incremental_stream(self, options, *, limits):
+                return object()
+
+        governor = _governor()
+        service = _service(BadBackend(), governor=governor)
+        with pytest.raises(TtsStreamError) as error:
+            await service.open(options=_options(), sink=_Sink())
+        assert error.value.code == "tts_backend_failed"
+        assert governor.snapshot().active_tts == 0
+        assert governor.tts_lane_isolated(None)
+
+    asyncio.run(run())
+
+
+def test_explicit_lane_resolver_keeps_wildcard_and_rejects_invalid_lanes() -> None:
+    class Resolver:
+        def resource_key_for_voice(self, voice):
+            return voice
+
+    assert tts_resource_key(None, "serena") is None
+    assert tts_resource_key(Resolver(), " tts_base ") == "tts_base"
+    for lane in ("voice_clone", "", "lane:serena"):
+        with pytest.raises(RuntimeError, match="invalid_tts_resource_key"):
+            tts_resource_key(Resolver(), lane)
 
 
 def test_finish_and_cancel_race_emits_exactly_one_terminal() -> None:
@@ -581,7 +674,9 @@ def test_composition_shares_one_receipt_registry_with_the_stream_service() -> No
 
     assert services.tts_streams is not None
     assert services.tts_streams.receipts is services.render_receipts
-    assert services.tts_streams.synthesizer is synth
+    assert services.tts_streams.stream_factory is services.tts_execution.incremental
+    assert services.tts_streams.lane_resolver is services.tts_execution.lanes
+    assert services.tts_streams.runtime_identity is services.tts_execution.runtime_identity
     assert services.tts_streams.supported is True
     assert services.tts_streams.worker_lease is None
 

@@ -9,7 +9,9 @@ from speechrail.application.voice_validation_presentation import present_validat
 from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.config.selection import ActiveModelCatalog
 from speechrail.domain import voice_quality as vq
+from speechrail.domain.ports import SpeechSynthesizer
 from speechrail.domain.tts import VOICE_ALIASES, VoiceProfile, get_voice_registry
+from speechrail.domain.tts_execution import EMPTY_TTS_EXECUTION, TtsExecutionPorts
 from speechrail.domain.tts_routing import TtsExecutionMode, tts_capability_key
 from speechrail.domain.voice_preview import preview_for_profile
 from speechrail.domain.voice_validation import VoiceValidationStoreUnavailableError
@@ -25,7 +27,8 @@ def voice_entry(
     tts_ready: bool,
     *,
     enabled: bool = True,
-    synthesizer: object | None = None,
+    synthesizer: SpeechSynthesizer | None = None,
+    tts_execution: TtsExecutionPorts = EMPTY_TTS_EXECUTION,
     strict_validation: bool = False,
     include_streaming: bool = False,
     stream_service: Any | None = None,
@@ -74,7 +77,7 @@ def voice_entry(
                     profile,
                     artifact,
                     repository,
-                    synthesizer,
+                    tts_execution.runtime_identity,
                     require_current_binding=True,
                     capability_key=capability_key,
                 )
@@ -172,7 +175,7 @@ def voice_entry(
                 artifact=artifact,
                 tts_ready=tts_ready,
                 voice_enabled=available,
-                synthesizer=synthesizer,
+                execution=tts_execution,
                 stream_service=stream_service,
             )
         )

@@ -18,6 +18,7 @@ from speechrail.application.lifecycle import RuntimeLifecycle
 from speechrail.application.services import AppOverrides, AppServices, build_app_services
 from speechrail.backends.qwen3_native import MODEL_FILES
 from speechrail.config import Settings
+from speechrail.domain.tts_execution import TtsExecutionPorts
 
 
 @pytest.fixture
@@ -30,6 +31,7 @@ def fake_services() -> AppServices:
         realtime_asr_factory=None,
         diarization_engine=None,
         tts_synthesizer=None,
+        tts_execution=TtsExecutionPorts(),
         job_repository=None,
         asr_worker=None,
         admission=services_module.AdmissionQueue(settings.max_queue_size),
@@ -235,6 +237,7 @@ def test_lifespan_logs_worker_startup_failure_with_stderr_tail(
         realtime_asr_factory=None,
         diarization_engine=None,
         tts_synthesizer=None,
+        tts_execution=TtsExecutionPorts(),
         job_repository=None,
         asr_worker=None,
         admission=services_module.AdmissionQueue(settings.max_queue_size),
