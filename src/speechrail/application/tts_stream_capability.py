@@ -29,6 +29,7 @@ from speechrail.compatibility.openai_realtime import (
     tts_stream_limits_payload,
 )
 from speechrail.config.model_catalog import ModelArtifact
+from speechrail.domain.tts_execution import TtsExecutionPorts
 from speechrail.domain.tts_routing import TtsRouteError, route_role_for_mode
 from speechrail.domain.tts_stream import DEFAULT_TTS_STREAM_LIMITS, TtsStreamLimits
 from speechrail.runtime.registry import TTS_RUNTIME_ROLES, engine_variant_for_role
@@ -74,15 +75,6 @@ class TtsStreamCapability:
     limits: TtsStreamLimits | None = None
 
 
-def _protocol_negotiated(synthesizer: object | None) -> bool | None:
-    """Read the transport's own negotiation flag when it exposes one."""
-
-    value = getattr(synthesizer, "supports_incremental_stream", None)
-    if isinstance(value, bool):
-        return value
-    return None
-
-
 def resolve_tts_stream_capability(
     *,
     voice_id: str,
@@ -90,7 +82,7 @@ def resolve_tts_stream_capability(
     artifact: ModelArtifact | None,
     tts_ready: bool,
     voice_enabled: bool,
-    synthesizer: object | None,
+    execution: TtsExecutionPorts,
     stream_service: TtsStreamService | None,
 ) -> TtsStreamCapability:
     """Resolve the incremental capability of one voice on the current service."""
@@ -119,8 +111,12 @@ def resolve_tts_stream_capability(
             ).supports_incremental_stream
         except ValueError:
             reference_ready = False
-    negotiated = _protocol_negotiated(synthesizer)
-    implementation_supported = supports_incremental_stream(synthesizer) and negotiated is not False
+    negotiated = (
+        execution.incremental.protocol_negotiated if execution.incremental is not None else None
+    )
+    implementation_supported = (
+        supports_incremental_stream(execution.incremental) and negotiated is not False
+    )
     ready = (
         tts_ready
         and voice_enabled
@@ -132,18 +128,14 @@ def resolve_tts_stream_capability(
     budget_available: bool | None = None
     if stream_service is not None:
         budget_available = stream_service.governor.lane_available(
-            WorkClass.REALTIME_TTS, tts_resource_key(synthesizer, voice_id)
+            WorkClass.REALTIME_TTS, tts_resource_key(execution.lanes, voice_id)
         )
 
     reason: str | None = None
     hint: str | None = None
     if role_error is not None:
         reason = role_error.code
-        hint = (
-            _DESIGN_ONLY_HINT
-            if role_error.code == "voice_design_task_required"
-            else None
-        )
+        hint = _DESIGN_ONLY_HINT if role_error.code == "voice_design_task_required" else None
     elif not voice_enabled:
         reason = "voice_disabled"
     elif not tts_ready:
@@ -254,7 +246,7 @@ def tts_stream_capability_payload(capability: TtsStreamCapability) -> dict[str, 
     }
 
 
-def tts_stream_model_payload(synthesizer: object | None) -> dict[str, object]:
+def tts_stream_model_payload(execution: TtsExecutionPorts) -> dict[str, object]:
     """Render the model-level view without claiming support for every voice.
 
     A model lists many voices, so the model scope reports only the
@@ -262,8 +254,12 @@ def tts_stream_model_payload(synthesizer: object | None) -> dict[str, object]:
     per-voice verdict.  It never ORs voice support into a model-wide claim.
     """
 
-    negotiated = _protocol_negotiated(synthesizer)
-    implementation_supported = supports_incremental_stream(synthesizer) and negotiated is not False
+    negotiated = (
+        execution.incremental.protocol_negotiated if execution.incremental is not None else None
+    )
+    implementation_supported = (
+        supports_incremental_stream(execution.incremental) and negotiated is not False
+    )
     return {
         "scope": "per_voice",
         "protocol_version": (

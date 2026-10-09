@@ -18,7 +18,7 @@ import math
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Final, Protocol
+from typing import Final, Protocol, runtime_checkable
 
 # Caller prefetch is independent of the worker's much smaller PCM budget.
 MAX_TTS_AUDIO_WINDOW_BYTES: Final[int] = 1_440_000  # 30s, 24 kHz mono PCM16
@@ -476,6 +476,7 @@ class TtsStreamStateMachine:
             raise TtsStreamError("tts_input_closed", "stream already reached a terminal state")
 
 
+@runtime_checkable
 class IncrementalSpeechSession(Protocol):
     """One open incremental utterance owned by a model backend."""
 
@@ -495,6 +496,9 @@ class IncrementalSpeechSession(Protocol):
 
 class IncrementalSpeechSynthesizer(Protocol):
     """Vendor-neutral entry point; implementations must fail closed when unsupported."""
+
+    @property
+    def protocol_negotiated(self) -> bool | None: ...
 
     async def open_stream(
         self,

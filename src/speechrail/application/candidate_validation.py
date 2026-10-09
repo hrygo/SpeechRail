@@ -204,6 +204,7 @@ async def validate_candidate(
     with use_voice_profile(profile):
         result = await execute_candidate_validation(
             synthesizer=synthesizer,
+            runtime_identity=runtime.tts_execution.runtime_identity,
             transcriber=runtime.transcriber,
             governor=runtime.governor,
             admission=runtime.admission,
@@ -211,7 +212,7 @@ async def validate_candidate(
             candidate_voice_id=profile.id,
             candidate_language=candidate.language,
             candidate_revision=candidate.revision,
-            resource_key=tts_resource_key(synthesizer, profile.id),
+            resource_key=tts_resource_key(runtime.tts_execution.lanes, profile.id),
             expires_at=expires_at,
             max_pcm_bytes=MAX_VALIDATION_PCM_BYTES,
         )

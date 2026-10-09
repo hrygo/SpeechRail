@@ -34,6 +34,7 @@ from speechrail.backends.qwen3_tts import (
     Qwen3TtsWorker,
     TtsModelVariant,
 )
+from speechrail.backends.tts_execution_adapter import bind_tts_execution
 from speechrail.config import Settings
 from speechrail.config.model_catalog import ModelRole
 from speechrail.config.selection import active_model_catalog
@@ -47,6 +48,7 @@ from speechrail.domain.ports import (
     SpeechSynthesizer,
     TranscriptionRequest,
 )
+from speechrail.domain.tts_execution import TtsExecutionPorts
 from speechrail.domain.tts_routing import TtsExecutionMode, tts_capability_key
 from speechrail.observability.metrics import Metrics
 from speechrail.runtime.admission import AdmissionQueue
@@ -253,6 +255,7 @@ class AppOverrides:
     diarization_engine: DiarizationEngine | None = None
     text_aligner: AlignTextPort | None = None
     tts_synthesizer: SpeechSynthesizer | None = None
+    tts_execution: TtsExecutionPorts | None = None
     job_repository: JobRepository | None = None
     job_processor: JobProcessor | None = None
 
@@ -267,6 +270,7 @@ class AppServices:
     realtime_asr_factory: RealtimeAsrFactory | None
     diarization_engine: DiarizationEngine | None
     tts_synthesizer: SpeechSynthesizer | None
+    tts_execution: TtsExecutionPorts
     job_repository: JobRepository | None
     asr_worker: Qwen3Worker | None
     admission: AdmissionQueue
@@ -678,6 +682,8 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         )
         tts_synthesizer = tts_worker
 
+    tts_execution = overrides.tts_execution or bind_tts_execution(tts_synthesizer)
+
     realtime_asr_factory = overrides.realtime_asr_factory
     streaming_worker: Qwen3StreamingWorker | None = None
     if (
@@ -814,6 +820,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                 spool_dir=job_repository.spool_dir,
                 batch_transcriber=batch_transcriber,
                 tts_synthesizer=tts_synthesizer,
+                tts_execution=tts_execution,
                 max_upload_bytes=settings.max_upload_bytes,
                 max_audio_seconds=settings.max_audio_seconds,
                 tts_sample_rate=settings.tts_sample_rate,
@@ -895,7 +902,9 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                 )
 
     tts_streams = TtsStreamService(
-        synthesizer=tts_synthesizer,
+        stream_factory=tts_execution.incremental,
+        lane_resolver=tts_execution.lanes,
+        runtime_identity=tts_execution.runtime_identity,
         governor=governor,
         receipts=render_receipts,
         worker_lease=(
@@ -930,6 +939,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         realtime_asr_factory=realtime_asr_factory,
         diarization_engine=diarization_engine,
         tts_synthesizer=tts_synthesizer,
+        tts_execution=tts_execution,
         job_repository=job_repository,
         asr_worker=asr_worker,
         admission=admission,

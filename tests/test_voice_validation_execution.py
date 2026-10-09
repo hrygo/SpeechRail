@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from speechrail.backends.tts_execution_adapter import bind_tts_execution
+
 _VOICE_DESIGNS = Path(__file__).resolve().parent.parent / (
     "src/speechrail/http/routes/voice_designs.py"
 )
@@ -309,8 +311,10 @@ async def test_candidate_execution_keeps_producing_identity_after_eviction(
             del deadline
             return await operation()
 
+    synthesizer = _FlipSynthesizer()
     result = await execute_candidate_validation(
-        synthesizer=_FlipSynthesizer(),
+        synthesizer=synthesizer,
+        runtime_identity=bind_tts_execution(synthesizer).runtime_identity,
         transcriber=_EchoTranscriber(),
         test_text="执行绑定回归文本，长度满足二十字以上的有效验证输入。",
         candidate_voice_id="candidate_flip",
@@ -499,12 +503,14 @@ async def test_quality_usecase_owns_same_run_binding_and_commit(
             return await operation()
 
     expires_at = asyncio.get_running_loop().time() + 30
+    synthesizer = Synthesizer()
     result = await run_voice_quality(
         voice_id=profile.id,
         registry=Registry(),
         active=active,
         runtime=ValidationRuntime(
-            synthesizer=Synthesizer(),
+            synthesizer=synthesizer,
+            tts_execution=bind_tts_execution(synthesizer),
             transcriber=Transcriber(),
             governor=Governor(),
             admission=Admission(),

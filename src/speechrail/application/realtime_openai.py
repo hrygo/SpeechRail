@@ -1778,7 +1778,7 @@ class OpenAIRealtimeSession:
             artifact=self._tts_artifact_for_mode(mode),
             tts_ready=self._services.tts_ready,
             voice_enabled=True,
-            synthesizer=self._tts,
+            execution=self._services.tts_execution,
             stream_service=self._services.tts_streams,
         )
 

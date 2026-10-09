@@ -17,7 +17,6 @@ import time
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from dataclasses import dataclass
-from typing import cast
 
 from speechrail.application.render_receipts import (
     RenderReceiptRegistry,
@@ -27,9 +26,15 @@ from speechrail.application.tts_admission import (
     supports_incremental_stream,
     tts_resource_key,
 )
+from speechrail.domain.tts_execution import (
+    InvalidIncrementalSessionError,
+    VoiceLaneResolver,
+    VoiceRuntimeIdentity,
+)
 from speechrail.domain.tts_stream import (
     DEFAULT_TTS_STREAM_LIMITS,
     IncrementalSpeechSession,
+    IncrementalSpeechSynthesizer,
     TtsStreamError,
     TtsStreamEvent,
     TtsStreamEventKind,
@@ -460,15 +465,19 @@ class TtsStreamService:
     def __init__(
         self,
         *,
-        synthesizer: object | None,
+        stream_factory: IncrementalSpeechSynthesizer | None,
         governor: ResourceGovernor,
         receipts: RenderReceiptRegistry,
+        lane_resolver: VoiceLaneResolver | None = None,
+        runtime_identity: VoiceRuntimeIdentity | None = None,
         worker_lease: WorkerLeaseFactory | None = None,
         limits: TtsStreamLimits = DEFAULT_TTS_STREAM_LIMITS,
         admission_timeout_seconds: float = 10.0,
         clock: Callable[[], float] | None = None,
     ) -> None:
-        self.synthesizer = synthesizer
+        self.stream_factory = stream_factory
+        self.lane_resolver = lane_resolver
+        self.runtime_identity = runtime_identity
         self.governor = governor
         self.receipts = receipts
         self.worker_lease = worker_lease
@@ -478,9 +487,9 @@ class TtsStreamService:
 
     @property
     def supported(self) -> bool:
-        """Whether the configured synthesizer negotiated the incremental port."""
+        """Whether an incremental factory is composed, independently of ready state."""
 
-        return supports_incremental_stream(self.synthesizer)
+        return supports_incremental_stream(self.stream_factory)
 
     async def open(
         self,
@@ -499,7 +508,7 @@ class TtsStreamService:
                 "the configured synthesizer exposes no incremental stream",
             )
         effective = limits or self.limits
-        resource_key = tts_resource_key(self.synthesizer, options.voice)
+        resource_key = tts_resource_key(self.lane_resolver, options.voice)
         admission = AsyncExitStack()
         session: IncrementalSpeechSession | None = None
         receipt_id: str | None = None
@@ -543,6 +552,12 @@ class TtsStreamService:
                 "TTS stream admission timed out",
                 busy_reason=BusyReason.BACKEND_TRANSITION,
             ) from exc
+        except InvalidIncrementalSessionError:
+            # No trustworthy session was returned. The logical reservation can
+            # close, but the physical lane stays unavailable until recovery.
+            self.governor.quarantine_tts_lane(resource_key)
+            await self._abort_open(session, admission, resource_key)
+            raise
         except BaseException:
             await self._abort_open(session, admission, resource_key)
             raise
@@ -565,13 +580,12 @@ class TtsStreamService:
     async def _open_session(
         self, options: TtsStreamOptions, limits: TtsStreamLimits
     ) -> IncrementalSpeechSession:
-        opener = getattr(self.synthesizer, "open_incremental_stream", None)
-        if not callable(opener):
+        if self.stream_factory is None:
             raise TtsStreamError(
                 "tts_streaming_unsupported",
                 "the configured synthesizer exposes no incremental stream",
             )
-        return cast(IncrementalSpeechSession, await opener(options, limits=limits))
+        return await self.stream_factory.open_stream(options, limits=limits)
 
     def _begin_receipt(self, options: TtsStreamOptions, receipt: TtsStreamReceipt) -> str:
         receipt_id = self.receipts.begin(
@@ -592,7 +606,7 @@ class TtsStreamService:
         bind_observed_runtime_revision(
             self.receipts,
             receipt_id,
-            synthesizer=self.synthesizer,
+            runtime_identity=self.runtime_identity,
             voice=options.voice,
         )
         return receipt_id

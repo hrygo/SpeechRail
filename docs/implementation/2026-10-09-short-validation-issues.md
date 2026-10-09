@@ -208,6 +208,26 @@ SwiftPM/Xcode 沿用原文件及工程登记，不新增编译成员；
 仓库包装脚本 Debug App 返回 `BUILD SUCCEEDED`，验证正式与 DEBUG 组合根。
 未运行 UI 自动化、真实模型、服务或安装操作。
 
+## TTS 执行能力的显式端口（#224）
+
+PR #349 门禁通过后按 rebase 合入，#229 关闭；回读开放数量为 21。
+
+增量服务注入既有 `IncrementalSpeechSynthesizer.open_stream`，生产 adapter 委托
+worker/router 的租约 factory，不绕过音色/槽位 owner。prepare、lane、runtime identity、
+采样读取通过独立 typed port 接线，批量 synthesize 接口保持窄合同。
+组合根绑定同一快照供 REST、Realtime、作业与验证使用；动态发现仅在后端 adapter。
+无提示继续保守 wildcard，非法 lane 拒绝；协商与 ready 动态判定。
+错误 factory 签名在装配时拒绝，无效会话返回隔离 lane，避免误报物理资源已回收。
+原 StreamController、owned cleanup、ACK、receipt 与 quarantine 保持原 owner。
+
+2026-10-09：13 个相关测试文件 368 passed，10.30 秒；
+19 个源文件定向 Mypy 通过，改动 Python 文件 Ruff 与 diff check 通过。
+新增 domain factory fake 不需要批量或 vendor 方法；覆盖错误签名/返回值、实时协商、
+缺失 lane、非法 lane。原取消、清理失败、唯一终态、背压、strict prepare、运行身份、
+HTTP、Realtime、文件作业、同次验证与组合根回归通过。
+直接构造验证用例的测试显式注入同一生产身份读取器，不再期待隐式后端附加方法。
+未执行真实模型、完整性能/质量基准、长稳、UI、安装或服务操作。
+
 ## 证据与回退
 
 当前图谱工具未索引此 worktree，且只读 profile 不提供索引入口，结构结论以定向源码为准。

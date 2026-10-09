@@ -1057,9 +1057,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
             # every post-processing pass derived from it.  Timestamps and
             # speakers are add-ons over the frozen transcript, so they continue
             # this budget instead of starting a second one.
-            expires_at = (
-                asyncio.get_running_loop().time() + resolved.request_timeout_seconds
-            )
+            expires_at = asyncio.get_running_loop().time() + resolved.request_timeout_seconds
             # Batch REST work flows through the governor so the realtime
             # reservation cannot be starved by concurrent uploads.
             result = await services.governor.run(
@@ -1676,10 +1674,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 400,
                 request_id,
                 "voice_design_task_required",
-                (
-                    "instruction voices are served by the voice_design task, "
-                    "not by speech synthesis"
-                ),
+                ("instruction voices are served by the voice_design task, not by speech synthesis"),
                 param="voice",
             )
         # A programmatically injected synthesizer is the explicit backend
@@ -2016,7 +2011,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
         )
 
         reclamation_failed = False
-        resource_key = tts_resource_key(synthesizer, synthesis.voice)
+        resource_key = tts_resource_key(services.tts_execution.lanes, synthesis.voice)
 
         def quarantine_backend() -> None:
             nonlocal reclamation_failed
@@ -2039,7 +2034,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 ):
                     admitted_synthesis = await prepare_validated_speech(
                         synthesis,
-                        synthesizer=synthesizer,
+                        preparer=services.tts_execution.preparer,
                         artifact=tts_artifact,
                         capability_key=render_capability_key,
                         registry=get_voice_registry(),
@@ -2072,7 +2067,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                                         bind_observed_runtime_revision(
                                             services.render_receipts,
                                             receipt_id,
-                                            synthesizer=synthesizer,
+                                            runtime_identity=services.tts_execution.runtime_identity,
                                             voice=synthesis.voice,
                                         )
                                 services.render_receipts.accept_pcm(
@@ -2090,7 +2085,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     bind_observed_sampling(
                         services.render_receipts,
                         receipt_id,
-                        synthesizer=synthesizer,
+                        sampling=services.tts_execution.sampling,
                         response_id=backend_response_id,
                     )
                 if timing_id is not None and not reclamation_failed:

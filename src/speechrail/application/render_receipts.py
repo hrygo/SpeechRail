@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from speechrail.backends.model_identity import is_observed_runtime_revision
 from speechrail.domain.render_recipe import RenderRecipe
+from speechrail.domain.tts_execution import SamplingObservationReader, VoiceRuntimeIdentity
 
 ReceiptStatus = Literal["pending", "completed", "cancelled", "error"]
 
@@ -347,11 +348,11 @@ def bind_observed_runtime_revision(
     registry: RenderReceiptRegistry,
     receipt_id: str,
     *,
-    synthesizer: object,
+    runtime_identity: VoiceRuntimeIdentity | None,
     voice: str,
 ) -> bool:
     """Bind an optional worker identity without changing the synthesis port."""
-    revision = observed_runtime_revision_for_synthesizer(synthesizer, voice)
+    revision = observed_runtime_revision_for_voice(runtime_identity, voice)
     if revision is None:
         return False
     try:
@@ -364,7 +365,7 @@ def bind_observed_sampling(
     registry: RenderReceiptRegistry,
     receipt_id: str,
     *,
-    synthesizer: object,
+    sampling: SamplingObservationReader | None,
     response_id: str,
 ) -> bool:
     """Bind what the worker reported it sampled with, without touching audio.
@@ -373,11 +374,10 @@ def bind_observed_sampling(
     the recipe partial instead of failing a render that already produced audio.
     """
 
-    take = getattr(synthesizer, "take_sampling_observation", None)
-    if not callable(take):
+    if sampling is None:
         return False
     try:
-        observation = take(response_id)
+        observation = sampling.take_sampling_observation(response_id)
     except Exception:
         return False
     if observation is None:
@@ -392,16 +392,15 @@ def bind_observed_sampling(
         return False
 
 
-def observed_runtime_revision_for_synthesizer(
-    synthesizer: object,
+def observed_runtime_revision_for_voice(
+    runtime_identity: VoiceRuntimeIdentity | None,
     voice: str,
 ) -> str | None:
     """Read an optional worker identity without changing the synthesis port."""
-    resolver = getattr(synthesizer, "runtime_revision_for_voice", None)
-    if not callable(resolver):
+    if runtime_identity is None:
         return None
     try:
-        revision = resolver(voice)
+        revision = runtime_identity.runtime_revision_for_voice(voice)
     except Exception:
         # Receipt metadata is best-effort and must not turn a valid audio chunk
         # into a failed synthesis if a mutable voice registry changes mid-stream.
