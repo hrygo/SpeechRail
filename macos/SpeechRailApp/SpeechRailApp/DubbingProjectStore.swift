@@ -122,6 +122,7 @@ public enum DubbingProjectError: Error, LocalizedError, Sendable {
     case segmentNotFound
     case candidateNotFound
     case candidateNotAdoptable
+    case recoveryRequired
     /// 候选音频不是本项目支持的线性 PCM 剖面（单声道 16 bit）。
     case audioFormatUnsupported
     /// 参与拼接的候选格式互不相同，拼接结果无法标定采样率。
@@ -137,6 +138,8 @@ public enum DubbingProjectError: Error, LocalizedError, Sendable {
             "找不到这个候选"
         case .candidateNotAdoptable:
             "这个候选的制作条件与当前项目不一致，需要重新生成"
+        case .recoveryRequired:
+            "配音项目音频未通过完整性校验，请保留项目并打开诊断"
         case .audioFormatUnsupported:
             "候选音频不是单声道 16 bit 线性 PCM，无法与其它段落拼接"
         case .audioFormatMismatch:
@@ -606,6 +609,7 @@ public final class DubbingProjectStore {
                 try? rollbackUnlocked(journal: journal, transactionDirectory: transactionDirectory)
                 throw DubbingProjectError.invalidIdentifier
             }
+            try validateCommittedAudio(journal)
             try? removeTransactionDirectoryUnlocked(transactionDirectory)
         } catch let error as DubbingProjectError {
             throw error
@@ -684,6 +688,7 @@ public final class DubbingProjectStore {
         }
         let currentDigest = try indexDataUnlocked().map(CreativeWorkTransaction.digest)
         if currentDigest == journal.committedIndexSHA256 {
+            try validateCommittedAudio(journal)
             try? removeTransactionDirectoryUnlocked(transactionDirectory)
             return
         }
@@ -691,6 +696,22 @@ public final class DubbingProjectStore {
             throw DubbingProjectError.invalidIdentifier
         }
         try? rollbackUnlocked(journal: journal, transactionDirectory: transactionDirectory)
+    }
+
+    private func validateCommittedAudio(_ journal: DubbingProjectJournal) throws {
+        guard let fileName = journal.publishedAudioFileName else {
+            guard journal.publishedAudioSHA256 == nil else {
+                throw DubbingProjectError.recoveryRequired
+            }
+            return
+        }
+        guard CreativeWorkTransaction.publishedAudioMatches(
+            at: directory.appendingPathComponent(fileName),
+            expectedDigest: journal.publishedAudioSHA256,
+            operations: operations
+        ) else {
+            throw DubbingProjectError.recoveryRequired
+        }
     }
 
     private func removeTransactionDirectoryUnlocked(_ url: URL) throws {

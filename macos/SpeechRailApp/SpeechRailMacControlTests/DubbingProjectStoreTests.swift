@@ -1004,6 +1004,71 @@ final class DubbingProjectStoreTests: XCTestCase {
         XCTAssertEqual(try reopened.loadAudio(for: try XCTUnwrap(
  reopened.candidates(forProject: "project_one").first)), wav(0x11))
     }
+
+    func testCommittedCandidateRecoveryRejectsMissingChangedAndSymlinkedAudio() throws {
+        for fault in ["missing", "changed", "symlink"] {
+            let root = directory.appendingPathComponent(fault, isDirectory: true)
+            let armed = ArmedInterruption()
+            let store = DubbingProjectStore(
+                directory: root,
+                fileOperations: CreativeWorkFileOperations(syncInterceptor: { url in
+                    if armed.isArmed, url.lastPathComponent == "projects.json" {
+                        throw CreativeWorkTransactionInterruption.simulatedProcessExit
+                    }
+                })
+            )
+            try store.save(makeProject())
+            armed.isArmed = true
+            XCTAssertThrowsError(try store.addCandidate(
+                makeCandidate(id: "cand_done", segmentID: "seg_first", text: "第一段。"),
+                audioData: wav(0x11), toProject: "project_one"
+            ))
+            let audio = root.appendingPathComponent("cand_done.wav")
+            if fault == "changed" {
+                try wav(0x22).write(to: audio)
+            } else {
+                try FileManager.default.removeItem(at: audio)
+                if fault == "symlink" {
+                    let outside = directory.appendingPathComponent("outside.wav")
+                    try wav(0x11).write(to: outside)
+                    try FileManager.default.createSymbolicLink(at: audio, withDestinationURL: outside)
+                }
+            }
+            let journals = root.appendingPathComponent(".transactions")
+            let before = try FileManager.default.contentsOfDirectory(atPath: journals.path)
+            XCTAssertFalse(before.isEmpty)
+            let reopened = DubbingProjectStore(directory: root)
+            XCTAssertThrowsError(try reopened.list()) { error in
+                XCTAssertEqual(error.localizedDescription, "配音项目音频未通过完整性校验，请保留项目并打开诊断")
+            }
+            XCTAssertEqual(
+                try FileManager.default.contentsOfDirectory(atPath: journals.path), before,
+                "不能清掉恢复证据后假装提交完整"
+            )
+        }
+    }
+
+    func testSuccessfulCandidateCommitAlsoValidatesPublishedAudio() throws {
+        let armed = ArmedInterruption()
+        let root = try XCTUnwrap(directory)
+        let store = DubbingProjectStore(
+            directory: root,
+            fileOperations: CreativeWorkFileOperations(syncInterceptor: { url in
+                if armed.isArmed, url.lastPathComponent == "projects.json" {
+                    try Data("damaged".utf8).write(to: root.appendingPathComponent("cand_done.wav"))
+                }
+            })
+        )
+        try store.save(makeProject())
+        armed.isArmed = true
+        XCTAssertThrowsError(try store.addCandidate(
+            makeCandidate(id: "cand_done", segmentID: "seg_first", text: "第一段。"),
+            audioData: wav(0x11), toProject: "project_one"
+        )) { error in
+            XCTAssertEqual(error.localizedDescription, "配音项目音频未通过完整性校验，请保留项目并打开诊断")
+        }
+        XCTAssertThrowsError(try DubbingProjectStore(directory: root).list())
+    }
 }
 
 /// Lets a test interrupt exactly one later commit instead of the first one.

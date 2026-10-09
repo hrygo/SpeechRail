@@ -60,6 +60,25 @@ final class CreativeWorkStoreTests: XCTestCase {
         }
     }
 
+    func testSuccessfulSaveRefusesDamagedPublishedAudioAndKeepsRecoveryJournal() throws {
+        let root = try XCTUnwrap(directory)
+        let work = makeWork(id: "work_damaged")
+        let store = CreativeWorkStore(
+            directory: root,
+            fileOperations: CreativeWorkFileOperations(syncInterceptor: { url in
+                if url.lastPathComponent == "works.json" {
+                    try Data("damaged".utf8).write(to: root.appendingPathComponent(work.audioFileName))
+                }
+            })
+        )
+        XCTAssertThrowsError(try store.save(work, audioData: Data("original".utf8))) { error in
+            XCTAssertEqual(error.localizedDescription, CreativeWorkStoreError.recoveryRequired.localizedDescription)
+        }
+        XCTAssertThrowsError(try CreativeWorkStore(directory: root).list()) { error in
+            XCTAssertEqual(error.localizedDescription, CreativeWorkStoreError.recoveryRequired.localizedDescription)
+        }
+    }
+
     private func makeWork(
         id: String,
         script: String = "第一行文稿",
