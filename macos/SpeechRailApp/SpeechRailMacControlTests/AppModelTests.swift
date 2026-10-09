@@ -12,6 +12,58 @@ import SpeechRailControlKit
 /// 满足 `AppModel.init` 的必填依赖（这些用例根本不走服务 HTTP）。
 @MainActor
 final class AppModelTests: XCTestCase {
+    func testControlProbeStartsUnknownAndCancellationKeepsConfirmedFailure() async {
+        let script = ControlProbeScript()
+        let model = makeModel(transport: ClosureControlTransport { request in
+            try await script.respond(to: request)
+        })
+        XCTAssertEqual(model.controlConnectionSummary, "未读取")
+        XCTAssertEqual(model.jobQueueSummary, "未读取")
+        await script.setStep(.failure)
+        await model.refresh()
+        XCTAssertEqual(model.controlConnectionSummary, "不可用")
+        let confirmedMessage = model.controlPlaneMessage
+        for step in [ControlProbeScript.Step.cancelList, .cancelStatus] {
+            await script.setStep(step)
+            await model.refresh()
+            XCTAssertEqual(model.controlPlaneMessage, confirmedMessage)
+            XCTAssertEqual(model.controlConnectionSummary, "不可用")
+        }
+        await script.setStep(.success)
+        await model.refresh()
+        XCTAssertNil(model.controlPlaneMessage)
+        XCTAssertEqual(model.controlConnectionSummary, "已响应")
+        await script.setStep(.cancelStatus)
+        await model.refresh()
+        XCTAssertEqual(model.controlConnectionSummary, "已响应")
+    }
+
+    func testControlProbeCancelledBeforeAnyResultRemainsUnknown() async {
+        let model = makeModel(transport: ClosureControlTransport { _ in
+            throw CancellationError()
+        })
+        await model.refresh()
+        XCTAssertEqual(model.controlConnectionSummary, "未读取")
+    }
+
+    func testJobQueueDistinguishesAbsentFalseTrueAndFailedHealthRead() async {
+        let health = HealthProbeScript()
+        let model = AppModel(
+            transport: ClosureControlTransport { _ in throw CancellationError() },
+            apiClient: health, creatorClient: UnavailableCreatorClient()
+        )
+        XCTAssertEqual(model.jobQueueSummary, "未读取")
+        for (ready, expected) in [(nil, "未读取"), (true, "可用"), (false, "未就绪")] {
+            await health.setSnapshot(HealthSnapshot(jobSpoolReady: ready))
+            await model.refresh()
+            XCTAssertEqual(model.jobQueueSummary, expected)
+        }
+        await health.setSnapshot(nil)
+        await model.refresh()
+        XCTAssertEqual(model.health?.jobSpoolReady, false, "失败不清掉旧快照")
+        XCTAssertEqual(model.jobQueueSummary, "未读取", "旧快照不能冒充这次的读取事实")
+    }
+
     func testCapabilityFacadeFailsClosedWhenSnapshotIsStale() {
         let facade = AppCapabilityFacade(
             snapshot: Self.capabilitySnapshot(
@@ -1518,6 +1570,37 @@ final class AppModelTests: XCTestCase {
                 message: "model preparation was cancelled"
             )
         )
+    }
+}
+
+private actor ControlProbeScript {
+    enum Step: Sendable { case success, failure, cancelList, cancelStatus }
+    private var step = Step.success
+
+    func setStep(_ value: Step) { step = value }
+
+    func respond(to request: ControlRequest) throws -> ControlResponse {
+        if step == .failure { throw CancelTransportFailure() }
+        if (step == .cancelList && request.command == .profileList)
+            || (step == .cancelStatus && request.command == .profileStatus) {
+            throw CancellationError()
+        }
+        return ControlResponse(
+            requestID: request.requestID, command: request.command, status: .completed
+        )
+    }
+}
+
+private actor HealthProbeScript: ServiceDiagnosticsClient {
+    nonisolated var port: Int? { nil }
+    private var snapshot: HealthSnapshot?
+    func setSnapshot(_ value: HealthSnapshot?) { snapshot = value }
+    func fetchHealthSnapshot() async throws -> HealthSnapshot {
+        guard let snapshot else { throw ServiceAPIClientError.requestFailed }
+        return snapshot
+    }
+    func fetchMetrics() async throws -> RuntimeMetricsSnapshot {
+        throw ServiceAPIClientError.requestFailed
     }
 }
 
