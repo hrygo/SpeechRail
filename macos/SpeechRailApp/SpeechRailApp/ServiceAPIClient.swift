@@ -1162,7 +1162,14 @@ public final class ServiceAPIClient: @unchecked Sendable {
 
 extension ServiceAPIClient:
     ServiceDiagnosticsClient,
-    SpeechRailCreatorClient,
+    SpeechRailVoiceDirectoryClient,
+    SpeechRailSpeechRenderClient,
+    SpeechRailVoiceDesignClient,
+    SpeechRailVoiceCloneClient,
+    SpeechRailVoiceEditingClient,
+    SpeechRailVoiceRevisionClient,
+    SpeechRailPronunciationClient,
+    SpeechRailVoiceQualityClient,
     SpeechRailReceiptClient,
     ServiceCapabilityDiscoveryClient
 {}

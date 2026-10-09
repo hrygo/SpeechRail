@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail macOS App 开发与测试"
 status: active
-version: "0.6.9"
+version: "0.6.10"
 date: 2026-10-09
 ---
 
@@ -29,6 +29,17 @@ App 只连接 loopback；健康/目录读取保持公开状态语义，创作 RE
 `Accept: application/json` 的 `/metrics`；UI 测试用 fake client 返回 typed snapshot，不能
 因为测试参数而访问 loopback。`model.status` 另外返回分人 CoreML/aligner 状态，避免只看
 `models/` 快照就误判 diarization 已就绪。
+
+创作依赖按用例注入：`SpeechRailVoiceDirectoryClient` 负责音色读取，
+`SpeechRailSpeechRenderClient` 负责音频制作，`SpeechRailVoiceDesignClient` 与
+`SpeechRailVoiceCloneClient` 分别负责设计和克隆，`SpeechRailVoiceEditingClient`
+负责创建、删除与条件更新，`SpeechRailVoiceRevisionClient` 负责版本读取、回滚与撤销，
+`SpeechRailPronunciationClient` 负责发音表，`SpeechRailVoiceQualityClient` 负责质量运行。
+生产组合根将同一个 `ServiceAPIClient` 按所需接口注入，鉴权、传输和错误解析继续共享。
+AppModel 的各工作流只调用对应接口；未使用的发音表与版本管理接口不进入其依赖。
+未装配某项接口时在操作边界明确报告客户端能力缺失，不以默认 501 或伪造服务失败补位。
+接口存在仍需经过服务能力快照准入。仅提供音频的合成实现可以使用渲染降级：
+保留字节、身份字段为空、追溯等级为 `unavailable`，取消和失败照常传播。
 
 能力结论只认服务声明：`ServiceModelCapabilityClient` 读取 `GET /v1/models` 的
 `capabilities`（`supports_preview` / `supports_clone` / `supports_instruction`），服务只在对应

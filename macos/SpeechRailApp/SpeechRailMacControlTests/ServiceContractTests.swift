@@ -6,7 +6,47 @@ import XCTest
 #endif
 @testable import SpeechRailControlKit
 
+/// A render fixture has no directory, clone, quality or design requirements.
+private struct AudioOnlyRenderPort: SpeechRailSpeechRenderClient {
+    let audio: Data?
+
+    func createSpeech(
+        text: String, voiceID: String, speed: Double, options: SpeechRailRequestOptions
+    ) async throws -> Data {
+        guard let audio else { throw CancellationError() }
+        return audio
+    }
+}
+
 final class ServiceContractTests: XCTestCase {
+    func testAudioOnlyRenderPortPreservesBytesAndUnknownIdentity() async throws {
+        let audio = Data([0, 1, 2, 3])
+        let client: any SpeechRailSpeechRenderClient = AudioOnlyRenderPort(audio: audio)
+        let result = try await client.createSpeechRender(
+            text: "fixture", voiceID: "voice_demo", speed: 1,
+            options: SpeechRailRequestOptions()
+        )
+        XCTAssertEqual(result.audioData, audio)
+        XCTAssertNil(result.planID)
+        XCTAssertNil(result.voiceRevision)
+        XCTAssertNil(result.receiptID)
+        XCTAssertEqual(result.provenance.state, .unavailable)
+        XCTAssertEqual(result.provenance.reason, RenderProvenance.unsupportedClientReason)
+    }
+
+    func testAudioOnlyRenderPortPropagatesCancellation() async {
+        let client: any SpeechRailSpeechRenderClient = AudioOnlyRenderPort(audio: nil)
+        do {
+            _ = try await client.createSpeechRender(
+                text: "fixture", voiceID: "voice_demo", speed: 1,
+                options: SpeechRailRequestOptions()
+            )
+            XCTFail("cancellation must not become an audio result")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+    }
+
     func testCapabilityDiscoveryCanRetryAfterRecoverableStates() {
         XCTAssertTrue(CapabilityDiscoveryState.idle.shouldRetryOnRefresh)
         XCTAssertTrue(CapabilityDiscoveryState.unauthorized.shouldRetryOnRefresh)
