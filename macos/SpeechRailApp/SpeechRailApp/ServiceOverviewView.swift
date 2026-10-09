@@ -64,13 +64,13 @@ public struct ServiceOverviewView: View {
                 LabeledContent("健康连接", value: healthConnectionSummary)
                 LabeledContent(
                     "控制通道",
-                    value: model.controlPlaneMessage == nil ? "已响应" : "不可用"
+                    value: model.controlConnectionSummary
                 )
                 Divider()
                 LabeledContent("运行档位", value: SpeechRailProfilePresentation.title(displayedHealth?.selection))
                 LabeledContent("配置档位", value: SpeechRailProfilePresentation.title(model.profile?.selection))
                 LabeledContent("配置代次", value: model.profile?.generation.map(String.init) ?? "未读取")
-                LabeledContent("作业队列", value: displayedHealth?.jobSpoolReady == true ? "可用" : "未就绪")
+                LabeledContent("作业队列", value: model.jobQueueSummary)
                 LabeledContent("控制 Agent", value: model.controlAgentStatus.title)
                 LabeledContent("影响", value: model.controlAgentStatus.impact)
             }

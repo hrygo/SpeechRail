@@ -768,6 +768,15 @@ public final class AppModel {
     public private(set) var healthMessage: String? = nil
     public private(set) var healthFailure: ServiceHealthFailureKind? = nil
     public private(set) var controlPlaneMessage: String? = nil
+    private var hasControlPlaneObservation = false
+    public var controlConnectionSummary: String {
+        guard hasControlPlaneObservation else { return "未读取" }
+        return controlPlaneMessage == nil ? "已响应" : "不可用"
+    }
+    public var jobQueueSummary: String {
+        guard healthFailure == nil, let ready = health?.jobSpoolReady else { return "未读取" }
+        return ready ? "可用" : "未就绪"
+    }
     public private(set) var metricsMessage: String? = nil
     public private(set) var lastHealthRefresh: Date?
     public private(set) var lastMetricsRefresh: Date?
@@ -4081,23 +4090,23 @@ public final class AppModel {
             healthMessage = Self.healthFailureMessage(for: error)
             service = ServiceSnapshot(serviceState: "unavailable", port: apiClient.port)
         }
-        controlPlaneMessage = nil
-        profiles = []
-        profile = nil
         // 能力结论只读 effective snapshot；失败时保留健康快照，但不准入需要能力的动作。
         await refreshDiscovery()
         do {
             let list = try await transport.send(ControlRequest(command: .profileList))
             guard refreshGeneration == healthRefreshGeneration else { return }
-            profiles = list.profiles ?? []
             let status = try await transport.send(ControlRequest(command: .profileStatus))
             guard refreshGeneration == healthRefreshGeneration else { return }
+            profiles = list.profiles ?? []
             profile = status.profile
+            hasControlPlaneObservation = true
+            controlPlaneMessage = nil
             setMessage(nil, generation: messageGeneration)
         } catch is CancellationError {
             return
         } catch {
             guard refreshGeneration == healthRefreshGeneration else { return }
+            hasControlPlaneObservation = true
             controlPlaneMessage = Self.controlErrorMessage(for: error, fallback: "控制 Agent 尚未连接")
             setMessage(controlPlaneMessage, generation: messageGeneration)
         }
