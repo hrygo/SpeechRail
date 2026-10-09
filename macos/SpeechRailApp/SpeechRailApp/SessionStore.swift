@@ -2744,23 +2744,25 @@ public actor SessionStore: SessionArchiveWriting {
             throw SessionStoreError.statementFailed("备份校验语句准备失败")
         }
         defer { sqlite3_finalize(query) }
-        var verdict = "ok"
-        if sqlite3_step(query) == SQLITE_ROW, let text = sqlite3_column_text(query, 0) {
-            verdict = String(cString: text)
+        guard sqlite3_step(query) == SQLITE_ROW,
+              let text = sqlite3_column_text(query, 0) else {
+            throw SessionStoreError.statementFailed("备份完整性校验没有返回有效结论")
         }
+        let verdict = String(cString: text)
         guard verdict.lowercased() == "ok" else {
             throw SessionStoreError.statementFailed("备份完整性校验未通过：\(verdict)")
         }
         let countSQL = "SELECT COUNT(*) FROM minutes;"
         var countStatement: OpaquePointer?
-        var minutesCount = 0
-        if sqlite3_prepare_v2(db, countSQL, -1, &countStatement, nil) == SQLITE_OK,
-           let counter = countStatement {
-            defer { sqlite3_finalize(counter) }
-            if sqlite3_step(counter) == SQLITE_ROW {
-                minutesCount = Int(sqlite3_column_int64(counter, 0))
-            }
+        guard sqlite3_prepare_v2(db, countSQL, -1, &countStatement, nil) == SQLITE_OK,
+              let counter = countStatement else {
+            throw SessionStoreError.statementFailed("备份纪要计数无法读取")
         }
+        defer { sqlite3_finalize(counter) }
+        guard sqlite3_step(counter) == SQLITE_ROW else {
+            throw SessionStoreError.statementFailed("备份纪要计数无法读取")
+        }
+        let minutesCount = Int(sqlite3_column_int64(counter, 0))
         return BackupVerification(integrity: verdict, minutesCount: minutesCount)
     }
 
@@ -2885,6 +2887,10 @@ public actor SessionStore: SessionArchiveWriting {
             _ = try fileManager.replaceItemAt(databaseURL, withItemAt: stagingURL)
         } else {
             try fileManager.moveItem(at: stagingURL, to: databaseURL)
+        }
+        let verification = try Self.verifyBackup(at: databaseURL)
+        guard verification.minutesCount == manifest.counts.minutes else {
+            throw SessionStoreError.statementFailed("备份纪要计数与清单不一致，未通过快检")
         }
         return directory
     }

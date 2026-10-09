@@ -5,6 +5,35 @@ import XCTest
 @testable import SpeechRailAppSupport
 #endif
 
+private enum BackupFault: Sendable { case corrupt, missingMinutes }
+
+private final class FaultyBackupFileManager: FileManager, @unchecked Sendable {
+    let fault: BackupFault
+
+    init(fault: BackupFault) {
+        self.fault = fault
+        super.init()
+    }
+
+    override func moveItem(at srcURL: URL, to dstURL: URL) throws {
+        try super.moveItem(at: srcURL, to: dstURL)
+        guard srcURL.lastPathComponent == ".sessions.sqlite3.staging" else { return }
+        switch fault {
+        case .corrupt:
+            try Data("corrupt".utf8).write(to: dstURL)
+        case .missingMinutes:
+            var db: OpaquePointer?
+            guard sqlite3_open_v2(dstURL.path, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else {
+                throw SessionStoreError.storageUnavailable
+            }
+            defer { sqlite3_close_v2(db) }
+            guard sqlite3_exec(db, "DELETE FROM minutes;", nil, nil, nil) == SQLITE_OK else {
+                throw SessionStoreError.statementFailed("测试备份故障注入失败")
+            }
+        }
+    }
+}
+
 /// 备份校验与恢复演练（方案 MA-20 / §12.3 / MC-67～MC-72）。
 ///
 /// 目标那条验收标准是"**恢复可证**"：备份恢复到临时新库后，
@@ -52,6 +81,27 @@ final class MeetingBackupRestoreTests: XCTestCase {
 
     private func requireSessionID() throws -> String {
         try XCTUnwrap(sessionID)
+    }
+
+    func testExportBackupRunsQuickCheckBeforeReportingSuccess() async throws {
+        for fault in [BackupFault.corrupt, .missingMinutes] {
+            let root = try XCTUnwrap(directory).appendingPathComponent(UUID().uuidString)
+            let store = SessionStore(directory: root, fileManager: FaultyBackupFileManager(fault: fault))
+            try await store.open()
+            let session = try await store.createSession(
+                SessionDraft(kind: .meeting, engineProfile: "test", audioSource: .microphone)
+            )
+            _ = try await store.enqueueMinutes(sessionID: session.id, model: nil, promptChars: 10)
+            do {
+                _ = try await store.exportBackup(to: root.appendingPathComponent("backup"))
+                XCTFail("备份完成路径必须拒绝损坏或缺少纪要的文件")
+            } catch {
+                XCTAssertTrue(error.localizedDescription.contains("备份"))
+            }
+            let original = try await store.minutesVersions(sessionID: session.id)
+            XCTAssertEqual(original.count, 1, "快检失败不改变原库")
+            await store.close()
+        }
     }
 
     /// 造一场有转录、已封存、带结构化结论与锚点的会议。
