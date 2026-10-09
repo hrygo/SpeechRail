@@ -35,6 +35,7 @@ from speechrail.domain.tts_stream import (
     TtsStreamLimits,
     TtsStreamOptions,
 )
+from speechrail.infrastructure.voice_registry import FileVoiceRegistry
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, ProtocolError
 
 _PCM = b"\x01\x00\x02\x00"
@@ -147,6 +148,7 @@ def _worker(
     *,
     variant: str,
     stream_protocol: int | None,
+    voice_leases=None,
 ) -> tuple[Qwen3TtsWorker, _LoopbackTransport]:
     snapshot = tmp_path.parent / f"external-qwen3-{variant}"
     snapshot.mkdir(exist_ok=True)
@@ -160,7 +162,10 @@ def _worker(
             device="mps",
             dtype="float16",
             sample_rate=24_000,
-        )
+        ),
+        voice_leases=voice_leases
+        if voice_leases is not None
+        else FileVoiceRegistry.open(tmp_path / "voices.json", tmp_path / "audio"),
     )
     transport = _LoopbackTransport()
     worker._transport = transport  # type: ignore[assignment]
@@ -327,10 +332,10 @@ def test_base_start_frame_carries_the_clone_reference(
             assert expected_revision == "rev_0123456789abcdef"
             return _lease()
 
-    monkeypatch.setattr(
-        "speechrail.domain.tts.get_voice_registry", lambda: _Registry()
+    voice_store = _Registry()
+    worker, transport = _worker(
+        tmp_path, variant="base", stream_protocol=1, voice_leases=voice_store
     )
-    worker, transport = _worker(tmp_path, variant="base", stream_protocol=1)
 
     async def run() -> None:
         session = await worker.open_incremental_stream(
@@ -431,11 +436,11 @@ def test_router_routes_incremental_streams_by_voice_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry = _ModeRegistry({"serena": "system", "cloned": "clone"})
-    monkeypatch.setattr("speechrail.domain.tts.get_voice_registry", lambda: registry)
     custom = _RecordingStreamWorker("custom_voice")
     base = _RecordingStreamWorker("base")
     router = Qwen3TtsCapabilityRouter(
-        {"tts_custom_voice": custom, "tts_base": base}  # type: ignore[arg-type]
+        {"tts_custom_voice": custom, "tts_base": base},  # type: ignore[arg-type]
+        voice_directory=registry,
     )
 
     async def run() -> None:
@@ -453,9 +458,9 @@ def test_router_fails_closed_when_the_clone_lane_is_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry = _ModeRegistry({"cloned": "clone"})
-    monkeypatch.setattr("speechrail.domain.tts.get_voice_registry", lambda: registry)
     router = Qwen3TtsCapabilityRouter(
-        {"tts_custom_voice": _RecordingStreamWorker("custom_voice")}  # type: ignore[arg-type]
+        {"tts_custom_voice": _RecordingStreamWorker("custom_voice")},  # type: ignore[arg-type]
+        voice_directory=registry,
     )
 
     async def run() -> None:

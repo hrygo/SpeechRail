@@ -22,7 +22,7 @@ from realtime_wire import session_update, tts_cancel, tts_start
 from speechrail.app import create_app
 from speechrail.config import Settings
 from speechrail.domain.model_spec import required_spec_artifact
-from speechrail.domain.tts import VoiceRegistry
+from speechrail.infrastructure.voice_registry import FileVoiceRegistry as VoiceRegistry
 from test_realtime_tts_incremental import FakeIncrementalSynthesizer, _until
 
 _TIERS = ("fast", "quality", "reference")
@@ -46,7 +46,10 @@ def _wav_bytes(duration_seconds: float = 1.0, sample_rate: int = 24_000) -> byte
 
 
 def _register_voices(tmp_path: Path) -> VoiceRegistry:
-    registry = VoiceRegistry(tmp_path / "custom_voices.json")
+    registry = VoiceRegistry.open(
+        tmp_path / "custom_voices.json",
+        voices_dir=(tmp_path / "custom_voices.json").parent / "audio",
+    )
     registry.create_cloned_profile(
         name="W10 clone",
         ref_text="这是一段用于分档能力矩阵的参考文本。",
@@ -90,13 +93,13 @@ def _tier_kwargs(tier: str, tmp_path: Path) -> dict[str, Any]:
 def test_each_utterance_binds_its_own_voice_and_model_revision(
     tier: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        "speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", _register_voices(tmp_path)
-    )
+    voice_store = _register_voices(tmp_path)
     synthesizer = FakeIncrementalSynthesizer()
     client = TestClient(
         create_app(
-            Settings(**_tier_kwargs(tier, tmp_path)), tts_synthesizer=synthesizer
+            Settings(**_tier_kwargs(tier, tmp_path)),
+            tts_synthesizer=synthesizer,
+            voice_store=voice_store,
         )
     )
     snapshot = client.get("/v1/speechrail/capabilities").json()
@@ -140,12 +143,19 @@ def test_each_utterance_binds_its_own_voice_and_model_revision(
             assert _until(socket, "speechrail.tts.cancelled")[-1]["request_id"] == request_id
 
         for request_id, model_revision, voice_revision, expected_code in (
-            ("wrong-role", system_revision, voices[_CLONE_ID]["voice_revision"],
-             "model_revision_conflict"),
-            ("stale-model", "0" * 40, voices[_CLONE_ID]["voice_revision"],
-             "model_revision_conflict"),
-            ("stale-voice", clone_revision, "vr_" + "0" * 32,
-             "voice_revision_conflict"),
+            (
+                "wrong-role",
+                system_revision,
+                voices[_CLONE_ID]["voice_revision"],
+                "model_revision_conflict",
+            ),
+            (
+                "stale-model",
+                "0" * 40,
+                voices[_CLONE_ID]["voice_revision"],
+                "model_revision_conflict",
+            ),
+            ("stale-voice", clone_revision, "vr_" + "0" * 32, "voice_revision_conflict"),
         ):
             open_calls = synthesizer.open_calls
             socket.send_json(
@@ -188,13 +198,12 @@ def test_realtime_handshake_reports_the_runtime_role_matrix(
     TTS roles the active tier actually routes to.
     """
 
-    monkeypatch.setattr(
-        "speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", _register_voices(tmp_path)
-    )
+    voice_store = _register_voices(tmp_path)
     client = TestClient(
         create_app(
             Settings(**_tier_kwargs(tier, tmp_path)),
             tts_synthesizer=FakeIncrementalSynthesizer(),
+            voice_store=voice_store,
         )
     )
 
@@ -217,13 +226,12 @@ def test_realtime_handshake_reports_the_runtime_role_matrix(
 def test_public_voice_list_reports_each_runtime_role_for_the_tier(
     tier: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        "speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", _register_voices(tmp_path)
-    )
+    voice_store = _register_voices(tmp_path)
     client = TestClient(
         create_app(
             Settings(**_tier_kwargs(tier, tmp_path)),
             tts_synthesizer=FakeIncrementalSynthesizer(),
+            voice_store=voice_store,
         )
     )
     voices = {voice["id"]: voice for voice in client.get("/v1/voices").json()["data"]}
@@ -248,13 +256,12 @@ def test_public_voice_list_reports_each_runtime_role_for_the_tier(
 def test_model_scope_never_claims_every_voice_streams(
     tier: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        "speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", _register_voices(tmp_path)
-    )
+    voice_store = _register_voices(tmp_path)
     client = TestClient(
         create_app(
             Settings(**_tier_kwargs(tier, tmp_path)),
             tts_synthesizer=FakeIncrementalSynthesizer(),
+            voice_store=voice_store,
         )
     )
     models = client.get("/v1/models").json()["data"]
@@ -273,13 +280,12 @@ def test_voice_design_is_never_advertised_as_an_incremental_role(
 ) -> None:
     """A VoiceDesign instruction voice stays complete-text/design-task only."""
 
-    monkeypatch.setattr(
-        "speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", _register_voices(tmp_path)
-    )
+    voice_store = _register_voices(tmp_path)
     client = TestClient(
         create_app(
             Settings(**_tier_kwargs(tier, tmp_path)),
             tts_synthesizer=FakeIncrementalSynthesizer(),
+            voice_store=voice_store,
         )
     )
     voices = {voice["id"]: voice for voice in client.get("/v1/voices").json()["data"]}

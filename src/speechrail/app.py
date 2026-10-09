@@ -25,6 +25,7 @@ from speechrail.domain.ports import (
     RealtimeAsrFactory,
     SpeechSynthesizer,
 )
+from speechrail.domain.voice_ports import VoiceStore
 from speechrail.http.errors import RequestIdMiddleware, install_error_handlers
 from speechrail.http.openapi_document import install_openapi_document
 from speechrail.http.routes.audio import create_audio_router
@@ -107,6 +108,7 @@ def create_app(
     realtime_asr_factory: RealtimeAsrFactory | None = None,
     diarization_engine: DiarizationEngine | None = None,
     tts_synthesizer: SpeechSynthesizer | None = None,
+    voice_store: VoiceStore | None = None,
     job_repository: JobRepository | None = None,
     job_processor: JobProcessor | None = None,
 ) -> FastAPI:
@@ -118,6 +120,7 @@ def create_app(
         realtime_asr_factory=realtime_asr_factory,
         diarization_engine=diarization_engine,
         tts_synthesizer=tts_synthesizer,
+        voice_store=voice_store,
         job_repository=job_repository,
         job_processor=job_processor,
     )
@@ -146,6 +149,7 @@ def create_app(
 
     app = FastAPI(title="SpeechRail API", version=resolved.version, lifespan=lifespan)
     app.state.settings = resolved
+    app.state.services = services
     app.add_middleware(RequestIdMiddleware)
 
     # Lightweight HTTP metrics middleware.  A pure ASGI wrapper measures from
@@ -161,9 +165,7 @@ def create_app(
         def __init__(self, app: ASGIApp) -> None:
             self._app = app
 
-        async def __call__(
-            self, scope: Scope, receive: Receive, send: Send
-        ) -> None:
+        async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
             if scope["type"] != "http":
                 await self._app(scope, receive, send)
                 return

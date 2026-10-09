@@ -358,7 +358,8 @@ def test_quality_commit_rejects_changed_voice_snapshot(tmp_path: Path, change: s
     import io
     import wave
 
-    from speechrail.domain.tts import VoiceRegistry, VoiceRevisionConflictError, VoiceRevokedError
+    from speechrail.domain.tts import VoiceRevisionConflictError, VoiceRevokedError
+    from speechrail.infrastructure.voice_registry import FileVoiceRegistry as VoiceRegistry
 
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as wav:
@@ -366,7 +367,9 @@ def test_quality_commit_rejects_changed_voice_snapshot(tmp_path: Path, change: s
         wav.setsampwidth(2)
         wav.setframerate(24_000)
         wav.writeframes(b"\x01\x00" * 24_000)
-    registry = VoiceRegistry(storage_path=tmp_path / "voices.json", voices_dir=tmp_path / "voices")
+    registry = VoiceRegistry.open(
+        storage_path=tmp_path / "voices.json", voices_dir=tmp_path / "voices"
+    )
     profile = registry.create_cloned_profile(
         name="test",
         ref_text="original reference",

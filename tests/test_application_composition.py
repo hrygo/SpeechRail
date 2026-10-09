@@ -18,11 +18,12 @@ from speechrail.application.lifecycle import RuntimeLifecycle
 from speechrail.application.services import AppOverrides, AppServices, build_app_services
 from speechrail.backends.qwen3_native import MODEL_FILES
 from speechrail.config import Settings
+from speechrail.domain.idempotency import DurableIdempotencyJournal
 from speechrail.domain.tts_execution import TtsExecutionPorts
 
 
 @pytest.fixture
-def fake_services() -> AppServices:
+def fake_services(voice_store) -> AppServices:
     settings = Settings(api_key=None, qwen3_model_dir=None, qwen3_python=None)
     return AppServices(
         settings=settings,
@@ -32,6 +33,10 @@ def fake_services() -> AppServices:
         diarization_engine=None,
         tts_synthesizer=None,
         tts_execution=TtsExecutionPorts(),
+        voice_store=voice_store,
+        voice_clone_journal=DurableIdempotencyJournal(
+            voice_store.artifact_path("voice_clone_idempotency.json")
+        ),
         job_repository=None,
         asr_worker=None,
         admission=services_module.AdmissionQueue(settings.max_queue_size),
@@ -215,7 +220,7 @@ def test_fake_overrides_never_construct_real_qwen_workers(
 
 
 def test_lifespan_logs_worker_startup_failure_with_stderr_tail(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, voice_store
 ) -> None:
     import logging
 
@@ -238,6 +243,10 @@ def test_lifespan_logs_worker_startup_failure_with_stderr_tail(
         diarization_engine=None,
         tts_synthesizer=None,
         tts_execution=TtsExecutionPorts(),
+        voice_store=voice_store,
+        voice_clone_journal=DurableIdempotencyJournal(
+            voice_store.artifact_path("voice_clone_idempotency.json")
+        ),
         job_repository=None,
         asr_worker=None,
         admission=services_module.AdmissionQueue(settings.max_queue_size),
@@ -305,10 +314,12 @@ def test_build_app_services_tts_dtype_resolves_from_snapshot(
         lambda _: SimpleNamespace(variant="custom_voice"),
     )
 
-    def spy_worker(config: object, *, on_delivery_event: object | None = None) -> object:
+    def spy_worker(
+        config: object, *, voice_leases, on_delivery_event: object | None = None
+    ) -> object:
         captured["dtype"] = getattr(config, "dtype", "")
         assert callable(on_delivery_event)
-        return real_worker(config, on_delivery_event=on_delivery_event)
+        return real_worker(config, voice_leases=voice_leases, on_delivery_event=on_delivery_event)
 
     monkeypatch.setattr(services_module, "Qwen3TtsWorker", spy_worker)
     asr_snapshot = tmp_path / "asr"
@@ -994,14 +1005,19 @@ def test_tts_readiness_tracks_the_configured_production_lanes(
 ) -> None:
     from speechrail.backends.qwen3_tts import Qwen3TtsCapabilityRouter
 
-    router = Qwen3TtsCapabilityRouter({
-        "tts_custom_voice": SimpleNamespace(model_variant="custom_voice", ready=False),
-        "tts_base": SimpleNamespace(model_variant="base", ready=False),
-    })
+    router = Qwen3TtsCapabilityRouter(
+        {
+            "tts_custom_voice": SimpleNamespace(model_variant="custom_voice", ready=False),
+            "tts_base": SimpleNamespace(model_variant="base", ready=False),
+        },
+        voice_directory=fake_services.voice_store,
+    )
     services = replace(
-        fake_services, tts_synthesizer=router,
+        fake_services,
+        tts_synthesizer=router,
         governor=services_module.ResourceGovernor(
-            fake_services.settings.governor_limits, allow_heavy_overlap=True,
+            fake_services.settings.governor_limits,
+            allow_heavy_overlap=True,
         ),
     )
     services.governor.quarantine_tts_lane("tts_base")

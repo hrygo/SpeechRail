@@ -73,13 +73,13 @@ from speechrail.domain.tts import (
     VoiceAlreadyExistsError,
     VoiceStoreUnavailableError,
     canonicalize_clone_reference_audio,
-    get_voice_registry,
     normalize_tts_text,
     voice_revision_for_clone,
 )
 from speechrail.domain.tts_errors import TtsBackendError
 from speechrail.domain.tts_routing import TtsExecutionMode, tts_capability_key
 from speechrail.domain.voice_creation import VoiceCreation
+from speechrail.domain.voice_ports import VoiceStore
 from speechrail.domain.voice_validation import (
     OUTPUT_VALIDATION_SCOPE,
     VOICE_DESIGN_OUTPUT_PROBE_SET,
@@ -116,7 +116,7 @@ def _journal_for_path(path: Path) -> DurableIdempotencyJournal:
     return DurableIdempotencyJournal(path, max_entries=128)
 
 
-def _design_idempotency_journal() -> DurableIdempotencyJournal:
+def _design_idempotency_journal(registry: VoiceStore) -> DurableIdempotencyJournal:
     """Derive durable replay state beside the active voice registry.
 
     Deriving from the registry keeps tests and alternate app homes isolated
@@ -124,8 +124,7 @@ def _design_idempotency_journal() -> DurableIdempotencyJournal:
     ``~/.speechrail`` directory.
     """
 
-    registry = get_voice_registry()
-    return _journal_for_path(registry.storage_path.with_name("voice_design_idempotency.json"))
+    return _journal_for_path(registry.artifact_path("voice_design_idempotency.json"))
 
 
 class VoiceDesignCreateRequest(BaseModel):
@@ -205,11 +204,10 @@ def _payload_fingerprint(body: BaseModel) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _repository() -> VoiceDesignRepository:
-    registry = get_voice_registry()
+def _repository(registry: VoiceStore) -> VoiceDesignRepository:
     return VoiceDesignRepository(
-        registry.storage_path.with_name("voice_design_candidates.json"),
-        registry.storage_path.with_name("voice_design_candidates"),
+        registry.artifact_path("voice_design_candidates.json"),
+        registry.artifact_path("voice_design_candidates"),
     )
 
 
@@ -458,7 +456,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 "invalid_ref_text",
                 "Normalized reference text must contain 20 to 240 characters",
             )
-        registry = get_voice_registry()
+        registry = services.voice_store
         try:
             registry.get_profile(body.voice_id)
         except ValueError:
@@ -479,8 +477,8 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 "Target voice ID already exists",
             )
 
-        repository = _repository()
-        journal = _design_idempotency_journal()
+        repository = _repository(services.voice_store)
+        journal = _design_idempotency_journal(services.voice_store)
         idempotency_key = request.headers.get("Idempotency-Key")
         fingerprint = _payload_fingerprint(body)
         journal_started = False
@@ -744,7 +742,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
         if (auth_error := http_auth_error(request, services.settings)) is not None:
             return auth_error
         try:
-            repository = _repository()
+            repository = _repository(services.voice_store)
             return {
                 "object": "list",
                 "data": [_safe_candidate(repository, candidate) for candidate in repository.list()],
@@ -764,7 +762,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
         if (auth_error := http_auth_error(request, services.settings)) is not None:
             return auth_error
         try:
-            repository = _repository()
+            repository = _repository(services.voice_store)
             candidate = repository.get(candidate_id)
         except VoiceDesignNotFoundError:
             return _not_found(request_id, candidate_id)
@@ -793,7 +791,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
         if isinstance(expected_revision, JSONResponse):
             return expected_revision
         try:
-            _candidate, audio_bytes = _repository().read_reference_audio(
+            _candidate, audio_bytes = _repository(services.voice_store).read_reference_audio(
                 candidate_id,
                 expected_revision=expected_revision,
                 max_bytes=_MAX_REFERENCE_WAV_BYTES,
@@ -848,7 +846,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
         if isinstance(expected_revision, JSONResponse):
             return expected_revision
         try:
-            _candidate, audio_bytes = _repository().read_validation_audio(
+            _candidate, audio_bytes = _repository(services.voice_store).read_validation_audio(
                 candidate_id,
                 validation_id,
                 expected_revision=expected_revision,
@@ -908,7 +906,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
         if (auth_error := http_auth_error(request, services.settings)) is not None:
             return auth_error
         try:
-            repository = _repository()
+            repository = _repository(services.voice_store)
             candidate = repository.get(candidate_id)
             if candidate.state == "published":
                 return JSONResponse(
@@ -1067,7 +1065,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
         if (auth_error := http_auth_error(request, services.settings)) is not None:
             return auth_error
         try:
-            repository = _repository()
+            repository = _repository(services.voice_store)
             updated = await run_candidate_validation(
                 repository=repository,
                 candidate_id=candidate_id,
@@ -1191,7 +1189,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
         if (auth_error := http_auth_error(request, services.settings)) is not None:
             return auth_error
         try:
-            repository = _repository()
+            repository = _repository(services.voice_store)
             candidate = repository.get(candidate_id)
             if body.expected_candidate_revision is not None and (
                 body.expected_candidate_revision != candidate.revision
@@ -1203,7 +1201,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                     "Candidate revision changed before publication",
                 )
             if candidate.state == "published":
-                profile = get_voice_registry().get_profile(candidate.target_voice_id)
+                profile = services.voice_store.get_profile(candidate.target_voice_id)
                 return JSONResponse(
                     status_code=200,
                     content={
@@ -1215,6 +1213,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                             synthesizer=services.tts_synthesizer,
                             tts_execution=services.tts_execution,
                             strict_validation=True,
+                            voice_store=services.voice_store,
                         ),
                     },
                 )
@@ -1237,7 +1236,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 max_bytes=_MAX_REFERENCE_WAV_BYTES,
             )
             if candidate.state == "published":
-                profile = get_voice_registry().get_profile(candidate.target_voice_id)
+                profile = services.voice_store.get_profile(candidate.target_voice_id)
                 return JSONResponse(
                     status_code=200,
                     content={
@@ -1249,6 +1248,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                             synthesizer=services.tts_synthesizer,
                             tts_execution=services.tts_execution,
                             strict_validation=True,
+                            voice_store=services.voice_store,
                         ),
                     },
                 )
@@ -1260,7 +1260,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
             ):
                 raise VoiceDesignConflictError("candidate state or validation changed")
 
-            registry = get_voice_registry()
+            registry = services.voice_store
             validation_record = {
                 "voice_id": candidate.target_voice_id,
                 "voice_revision": candidate.revision,
@@ -1341,6 +1341,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                         synthesizer=services.tts_synthesizer,
                         tts_execution=services.tts_execution,
                         strict_validation=True,
+                        voice_store=services.voice_store,
                     ),
                 },
             )
@@ -1390,7 +1391,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
         if (auth_error := http_auth_error(request, services.settings)) is not None:
             return auth_error
         try:
-            repository = _repository()
+            repository = _repository(services.voice_store)
             candidate = repository.get(candidate_id)
             if candidate.state == "published":
                 return _invalid_state(request_id, candidate)

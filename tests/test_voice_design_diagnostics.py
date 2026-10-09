@@ -24,8 +24,8 @@ from speechrail.backends.qwen3_tts import (
 from speechrail.config import Settings
 from speechrail.config.model_catalog import VOICE_DESIGN_ARTIFACT_KEY
 from speechrail.domain.model_spec import required_spec_artifact
-from speechrail.domain.tts import VoiceRegistry
 from speechrail.domain.tts_errors import TtsBackendError
+from speechrail.infrastructure.voice_registry import FileVoiceRegistry as VoiceRegistry
 from speechrail.runtime.worker_process import (
     AsyncFramedWorkerProcess,
     WorkerProcessSpec,
@@ -190,7 +190,7 @@ class _Transport:
         self.alive = False
 
 
-def _worker(tmp_path: Path, variant: str) -> tuple[Qwen3TtsWorker, _Transport]:
+def _worker(tmp_path: Path, variant: str, *, voice_store=None) -> tuple[Qwen3TtsWorker, _Transport]:
     snapshot = tmp_path / variant
     snapshot.mkdir()
     (snapshot / "config.json").write_text("{}", encoding="utf-8")
@@ -201,7 +201,10 @@ def _worker(tmp_path: Path, variant: str) -> tuple[Qwen3TtsWorker, _Transport]:
             model_dir=snapshot,
             model_variant=variant,  # type: ignore[arg-type]
             device="mps",
-        )
+        ),
+        voice_leases=voice_store
+        if voice_store is not None
+        else VoiceRegistry.open(tmp_path / "voices.json", tmp_path / "voices"),
     )
     transport = _Transport(variant)
     worker._transport = transport  # type: ignore[assignment]
@@ -211,17 +214,14 @@ def _worker(tmp_path: Path, variant: str) -> tuple[Qwen3TtsWorker, _Transport]:
 def _client(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, with_design: bool = True
 ) -> tuple[TestClient, Qwen3TtsCapabilityRouter, _Transport | None]:
-    monkeypatch.setattr(
-        "speechrail.domain.tts._GLOBAL_VOICE_REGISTRY",
-        VoiceRegistry(tmp_path / "voices.json", voices_dir=tmp_path / "voices"),
-    )
-    primary, _ = _worker(tmp_path, "custom_voice")
+    registry = VoiceRegistry.open(tmp_path / "voices.json", voices_dir=tmp_path / "voices")
+    primary, _ = _worker(tmp_path, "custom_voice", voice_store=registry)
     workers = {"tts_custom_voice": primary}
     design = None
     if with_design:
-        design_worker, design = _worker(tmp_path, "voice_design")
+        design_worker, design = _worker(tmp_path, "voice_design", voice_store=registry)
         workers["voice_design"] = design_worker
-    router = Qwen3TtsCapabilityRouter(workers)
+    router = Qwen3TtsCapabilityRouter(workers, voice_directory=registry)
     settings = Settings(
         api_key=None,
         qwen3_model_dir=None,
@@ -242,7 +242,11 @@ def _client(
             raise AssertionError("a failed design must not invoke ASR")
 
     return (
-        TestClient(create_app(settings, tts_synthesizer=router, batch_transcriber=Asr())),
+        TestClient(
+            create_app(
+                settings, tts_synthesizer=router, batch_transcriber=Asr(), voice_store=registry
+            )
+        ),
         router,
         design,
     )

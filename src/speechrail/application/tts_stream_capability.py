@@ -29,6 +29,7 @@ from speechrail.compatibility.openai_realtime import (
     tts_stream_limits_payload,
 )
 from speechrail.config.model_catalog import ModelArtifact
+from speechrail.domain.tts import VoiceProfile
 from speechrail.domain.tts_execution import TtsExecutionPorts
 from speechrail.domain.tts_routing import TtsRouteError, route_role_for_mode
 from speechrail.domain.tts_stream import DEFAULT_TTS_STREAM_LIMITS, TtsStreamLimits
@@ -77,8 +78,7 @@ class TtsStreamCapability:
 
 def resolve_tts_stream_capability(
     *,
-    voice_id: str,
-    voice_mode: str,
+    profile: VoiceProfile,
     artifact: ModelArtifact | None,
     tts_ready: bool,
     voice_enabled: bool,
@@ -87,6 +87,8 @@ def resolve_tts_stream_capability(
 ) -> TtsStreamCapability:
     """Resolve the incremental capability of one voice on the current service."""
 
+    voice_id = profile.id
+    voice_mode = profile.mode
     artifact_available = artifact is not None
     variant = artifact.variant if artifact is not None else None
     role_error: TtsRouteError | None = None
@@ -107,7 +109,7 @@ def resolve_tts_stream_capability(
     if role is not None and variant_supported:
         try:
             reference_ready = resolve_binding(
-                role, voice_id
+                role, voice_id, profile=profile
             ).supports_incremental_stream
         except ValueError:
             reference_ready = False

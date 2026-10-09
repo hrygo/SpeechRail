@@ -21,9 +21,7 @@ import pytest
 
 from speechrail.domain.tts import (
     VoiceProfile,
-    VoiceRegistry,
     VoiceUpdateUnsupportedError,
-    transcode_and_validate_clone_audio,
 )
 from speechrail.domain.voice_quality import (
     POLICY_VERSION,
@@ -47,6 +45,8 @@ from speechrail.domain.voice_quality import (
     transcript_match_score,
     transcript_numbers_match,
 )
+from speechrail.infrastructure.voice_reference import transcode_and_validate_clone_audio
+from speechrail.infrastructure.voice_registry import FileVoiceRegistry as VoiceRegistry
 
 # ---------------------------------------------------------------------------
 # Fixtures / builders
@@ -854,7 +854,7 @@ def test_voice_profile_to_dict_includes_quality_when_present() -> None:
 
 
 def test_profile_from_record_parses_optional_quality(tmp_path: Path) -> None:
-    registry = VoiceRegistry(
+    registry = VoiceRegistry.open(
         storage_path=tmp_path / "registry.json",
         voices_dir=tmp_path / "voices",
     )
@@ -881,7 +881,7 @@ def test_profile_from_record_parses_optional_quality(tmp_path: Path) -> None:
 def test_create_cloned_profile_accepts_and_persists_quality(tmp_path: Path) -> None:
     storage_path = tmp_path / "registry.json"
     voices_dir = tmp_path / "voices"
-    registry = VoiceRegistry(storage_path=storage_path, voices_dir=voices_dir)
+    registry = VoiceRegistry.open(storage_path=storage_path, voices_dir=voices_dir)
 
     quality: dict[str, object] = {
         "policy_version": "voice_quality_v1",
@@ -898,7 +898,7 @@ def test_create_cloned_profile_accepts_and_persists_quality(tmp_path: Path) -> N
     )
     assert profile.quality == quality
 
-    reloaded_registry = VoiceRegistry(storage_path=storage_path, voices_dir=voices_dir)
+    reloaded_registry = VoiceRegistry.open(storage_path=storage_path, voices_dir=voices_dir)
     reloaded = reloaded_registry.get_profile("clone_with_quality")
     assert reloaded.quality == quality
 
@@ -942,7 +942,7 @@ def test_transcode_skip_signal_validation_param() -> None:
 
 
 def test_create_cloned_profile_quality_defaults_to_none(tmp_path: Path) -> None:
-    registry = VoiceRegistry(
+    registry = VoiceRegistry.open(
         storage_path=tmp_path / "registry.json",
         voices_dir=tmp_path / "voices",
     )
@@ -959,7 +959,7 @@ def test_create_cloned_profile_quality_defaults_to_none(tmp_path: Path) -> None:
 def test_voice_registry_updates_instruction_profile_and_persists_it(tmp_path: Path) -> None:
     storage_path = tmp_path / "registry.json"
     voices_dir = tmp_path / "voices"
-    registry = VoiceRegistry(storage_path=storage_path, voices_dir=voices_dir)
+    registry = VoiceRegistry.open(storage_path=storage_path, voices_dir=voices_dir)
     registry.create_custom_profile(
         name="原始名称",
         instruction="自然清晰",
@@ -977,12 +977,12 @@ def test_voice_registry_updates_instruction_profile_and_persists_it(tmp_path: Pa
     assert updated.name == "更新名称"
     assert updated.instruction == "沉稳温暖"
     assert updated.seed == 2026
-    reloaded = VoiceRegistry(storage_path=storage_path, voices_dir=voices_dir)
+    reloaded = VoiceRegistry.open(storage_path=storage_path, voices_dir=voices_dir)
     assert reloaded.get_profile("update_instruction") == updated
 
 
 def test_voice_registry_only_allows_name_update_for_clone_profile(tmp_path: Path) -> None:
-    registry = VoiceRegistry(
+    registry = VoiceRegistry.open(
         storage_path=tmp_path / "registry.json",
         voices_dir=tmp_path / "voices",
     )

@@ -34,8 +34,8 @@ from speechrail.domain.ports import (
     SpeechRequest,
     TranscriptionRequest,
 )
-from speechrail.domain.tts import VoiceRegistry
 from speechrail.domain.tts_errors import TtsBackendError
+from speechrail.infrastructure.voice_registry import FileVoiceRegistry as VoiceRegistry
 from voice_test_fixtures import fake_pitch_measurement as fake_pitch_measurement
 
 _SAMPLE_RATE = 24_000
@@ -326,7 +326,7 @@ def _make_client(
     assert asr_key is not None and tts_key is not None and base_key is not None
     storage_path = tmp_path / "custom_voices.json"
     voices_dir = tmp_path / "voices"
-    registry = VoiceRegistry(storage_path=storage_path, voices_dir=voices_dir)
+    registry = VoiceRegistry.open(storage_path=storage_path, voices_dir=voices_dir)
 
     settings = Settings(
         qwen3_model_dir=tmp_path / asr_key,
@@ -351,7 +351,8 @@ def _make_client(
     app = create_app(
         settings,
         tts_synthesizer=synthesizer,
-        batch_transcriber=resolved_transcriber,  # type: ignore[arg-type]
+        batch_transcriber=resolved_transcriber,
+        voice_store=registry,  # type: ignore[arg-type]
     )
     return TestClient(app), registry, synthesizer, voices_dir
 
@@ -363,7 +364,6 @@ def _patch(
     *,
     journal_path: Path | None = None,
 ) -> None:
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
 
     async def _fake_transcode(audio_content: bytes, ffmpeg_cmd: str) -> tuple[bytes, float]:
         del ffmpeg_cmd
@@ -376,14 +376,7 @@ def _patch(
         _fake_transcode,
     )
     if journal_path is not None:
-        from speechrail.domain.idempotency import DurableIdempotencyJournal
-        from speechrail.http.routes import system as system_routes
-
-        monkeypatch.setattr(
-            system_routes,
-            "_clone_idempotency_journal",
-            DurableIdempotencyJournal(journal_path, max_entries=128),
-        )
+        assert journal_path == registry.artifact_path("voice_clone_idempotency.json")
 
 
 def _clone_payload(name: str = "我的数字分身", ref_text: str = "测试参考文本") -> dict[str, str]:
@@ -459,6 +452,16 @@ def test_published_voice_entries_never_claim_available_while_unavailable(
         == 201
     )
 
+    from speechrail.http import voice_projection
+
+    original_binding = voice_projection.resolve_binding
+
+    def unavailable_binding(role, voice, *, profile):
+        if voice == "availability_probe_voice":
+            raise ValueError("injected unavailable binding")
+        return original_binding(role, voice, profile=profile)
+
+    monkeypatch.setattr(voice_projection, "resolve_binding", unavailable_binding)
     listed = client.get("/v1/voices")
     assert listed.status_code == 200, listed.text
     entries = listed.json()["data"]
@@ -487,7 +490,12 @@ def test_second_key_on_the_same_clone_id_converges_but_never_overwrites(
     wav = _clean_wav(4.0)
     # The journal singleton defaults to the real ~/.speechrail path; redirect it
     # or this test writes into the user's own durable state.
-    _patch(registry, wav, monkeypatch, journal_path=tmp_path / "converge_journal.json")
+    _patch(
+        registry,
+        wav,
+        monkeypatch,
+        journal_path=registry.artifact_path("voice_clone_idempotency.json"),
+    )
 
     first = client.post(
         "/v1/voices/clone",
@@ -641,7 +649,6 @@ def test_clip_quality_gate_is_authoritative_over_signal_validation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, registry, _synth, _voices_dir = _make_client(tmp_path)
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
     wav = _clip_wav()
     monkeypatch.setattr(
         subprocess,
@@ -688,7 +695,7 @@ def test_s3_warn_clone_and_idempotency_dedup(
         registry,
         wav,
         monkeypatch,
-        journal_path=tmp_path / "clone-idempotency.json",
+        journal_path=registry.artifact_path("voice_clone_idempotency.json"),
     )
 
     payload = _clone_payload(name="轻度告警克隆", ref_text="白日依山尽，黄河入海流。")
@@ -711,17 +718,15 @@ def test_clone_replay_recovers_a_created_voice_when_completion_recording_failed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from speechrail.domain.idempotency import (
-        DurableIdempotencyJournal,
         IdempotencyStoreUnavailableError,
     )
     from speechrail.http.routes import system as system_routes
 
     client, registry, _synth, _voices_dir = _make_client(tmp_path)
     wav = _clean_wav(4.0)
-    journal_path = tmp_path / "clone-idempotency.json"
+    journal_path = registry.artifact_path("voice_clone_idempotency.json")
     _patch(registry, wav, monkeypatch, journal_path=journal_path)
-    journal = DurableIdempotencyJournal(journal_path, max_entries=32)
-    monkeypatch.setattr(system_routes, "_clone_idempotency_journal", journal)
+    journal = client.app.state.services.voice_clone_journal
     original_complete = journal.complete
 
     def unavailable_complete(**kwargs: object) -> str:
@@ -767,15 +772,13 @@ def test_clone_replay_recovers_a_created_voice_when_completion_recording_failed(
 def test_clone_rejects_oversized_name_before_starting_idempotency(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from speechrail.domain.idempotency import DurableIdempotencyJournal
     from speechrail.http.routes import system as system_routes
 
     client, registry, _synth, _voices_dir = _make_client(tmp_path)
     wav = _clean_wav(4.0)
-    journal_path = tmp_path / "clone-idempotency.json"
+    journal_path = registry.artifact_path("voice_clone_idempotency.json")
     _patch(registry, wav, monkeypatch, journal_path=journal_path)
-    journal = DurableIdempotencyJournal(journal_path, max_entries=32)
-    monkeypatch.setattr(system_routes, "_clone_idempotency_journal", journal)
+    journal = client.app.state.services.voice_clone_journal
 
     response = client.post(
         "/v1/voices/clone",
@@ -806,7 +809,7 @@ def test_clone_completed_idempotency_result_is_not_recreated_after_delete(
         registry,
         wav,
         monkeypatch,
-        journal_path=tmp_path / "clone-idempotency.json",
+        journal_path=registry.artifact_path("voice_clone_idempotency.json"),
     )
 
     payload = _clone_payload(name="过期幂等克隆", ref_text="白日依山尽，黄河入海流。")
@@ -852,18 +855,11 @@ def test_s3_tampered_revalidate_still_rejects(
 def test_idempotency_key_rejects_different_payload_and_stores_no_raw_text(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from speechrail.domain.idempotency import DurableIdempotencyJournal
-    from speechrail.http.routes import system as system_routes
 
     client, registry, _synth, _voices_dir = _make_client(tmp_path)
     wav = _clean_wav(4.0)
     _patch(registry, wav, monkeypatch)
-    journal_path = tmp_path / "clone-idempotency.json"
-    monkeypatch.setattr(
-        system_routes,
-        "_clone_idempotency_journal",
-        DurableIdempotencyJournal(journal_path, max_entries=128),
-    )
+    journal_path = registry.artifact_path("voice_clone_idempotency.json")
 
     headers = {"Idempotency-Key": "idem-reftext-001"}
     files = {"audio": ("a.wav", wav, "audio/wav")}
@@ -965,8 +961,7 @@ def test_s4_no_sensitive_values_in_logs(
 
 
 def test_s5_quality_runs_ok_and_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    client, registry, synth, _voices_dir = _make_client(tmp_path)
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+    client, _registry, synth, _voices_dir = _make_client(tmp_path)
 
     resp = client.post(
         "/v1/voices/serena/quality-runs",
@@ -1015,8 +1010,6 @@ def test_namespaced_quality_run_binds_observed_runtime_identity_before_eviction(
         duration_seconds=4.0,
         quality={"policy_version": "voice_quality_v1", "status": "pass"},
     )
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
-    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", registry)
 
     response = client.post(
         f"/v1/speechrail/voices/{profile.id}/quality-runs",
@@ -1053,11 +1046,10 @@ def test_quality_runs_asr_phase_uses_one_16khz_sample_per_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     transcriber = ProbeEchoTranscriber()
-    client, registry, _synth, _voices_dir = _make_client(
+    client, _registry, _synth, _voices_dir = _make_client(
         tmp_path,
         batch_transcriber=transcriber,
     )
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
 
     resp = client.post(
         "/v1/voices/serena/quality-runs",
@@ -1076,11 +1068,10 @@ def test_quality_runs_asr_phase_uses_one_16khz_sample_per_probe(
 def test_quality_runs_rejects_transcript_mismatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, registry, _synth, _voices_dir = _make_client(
+    client, _registry, _synth, _voices_dir = _make_client(
         tmp_path,
         batch_transcriber=MismatchTranscriber(),
     )
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
 
     resp = client.post(
         "/v1/voices/serena/quality-runs",
@@ -1109,11 +1100,10 @@ def test_quality_runs_attributes_a_rejection_to_a_single_probe(
                 return result.model_copy(update={"text": "今天天气不错适合出门散步"})
             return result
 
-    client, registry, _synth, _voices_dir = _make_client(
+    client, _registry, _synth, _voices_dir = _make_client(
         tmp_path,
         batch_transcriber=OneBadProbeTranscriber(),
     )
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
 
     resp = client.post(
         "/v1/voices/serena/quality-runs",
@@ -1160,11 +1150,10 @@ def test_quality_runs_rejects_a_misread_number_that_edit_distance_would_pass(
                 return result.model_copy(update={"text": result.text.replace("22.5℃", "25℃")})
             return result
 
-    client, registry, _synth, _voices_dir = _make_client(
+    client, _registry, _synth, _voices_dir = _make_client(
         tmp_path,
         batch_transcriber=MisreadDigitTranscriber(),
     )
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
 
     resp = client.post(
         "/v1/voices/serena/quality-runs",
@@ -1204,11 +1193,10 @@ def test_quality_runs_accepts_the_same_number_spelled_out(
                 )
             return result
 
-    client, registry, _synth, _voices_dir = _make_client(
+    client, _registry, _synth, _voices_dir = _make_client(
         tmp_path,
         batch_transcriber=SpelledOutTranscriber(),
     )
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
 
     resp = client.post(
         "/v1/voices/serena/quality-runs",
@@ -1227,11 +1215,10 @@ def test_quality_runs_accepts_the_same_number_spelled_out(
 def test_quality_runs_is_unevaluated_without_asr(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, registry, _synth, _voices_dir = _make_client(
+    client, _registry, _synth, _voices_dir = _make_client(
         tmp_path,
         batch_transcriber=None,
     )
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
 
     resp = client.post(
         "/v1/voices/serena/quality-runs",
@@ -1250,8 +1237,7 @@ def test_quality_runs_is_unevaluated_without_asr(
 def test_s5_quality_runs_rejects_runs_out_of_range(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, registry, _synth, _voices_dir = _make_client(tmp_path)
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+    client, _registry, _synth, _voices_dir = _make_client(tmp_path)
 
     resp = client.post(
         "/v1/voices/serena/quality-runs",
@@ -1263,8 +1249,7 @@ def test_s5_quality_runs_rejects_runs_out_of_range(
 def test_s5_quality_runs_rejects_unknown_probe_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, registry, _synth, _voices_dir = _make_client(tmp_path)
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+    client, _registry, _synth, _voices_dir = _make_client(tmp_path)
 
     resp = client.post(
         "/v1/voices/serena/quality-runs",
@@ -1281,8 +1266,7 @@ def test_s5_quality_runs_rejects_unknown_probe_set(
 def test_s5_quality_runs_include_audio_unsupported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, registry, _synth, _voices_dir = _make_client(tmp_path)
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+    client, _registry, _synth, _voices_dir = _make_client(tmp_path)
 
     resp = client.post(
         "/v1/voices/serena/quality-runs",
@@ -1295,8 +1279,7 @@ def test_s5_quality_runs_include_audio_unsupported(
 def test_s5_quality_runs_include_audio_false_or_omitted_ok(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, registry, _synth, _voices_dir = _make_client(tmp_path)
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+    client, _registry, _synth, _voices_dir = _make_client(tmp_path)
 
     for body in (
         {"probe_set": "voice_quality_v1_zh", "runs": 1, "include_audio": False},
@@ -1314,8 +1297,7 @@ def test_s5_quality_runs_include_audio_false_or_omitted_ok(
 def test_quality_runs_classifies_clone_speed_unsupported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, registry, _synth, _voices_dir = _make_client(tmp_path, SpeedUnsupportedSynthesizer())
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+    client, _registry, _synth, _voices_dir = _make_client(tmp_path, SpeedUnsupportedSynthesizer())
 
     resp = client.post(
         "/v1/voices/serena/quality-runs",
@@ -1344,8 +1326,6 @@ def test_quality_run_persists_output_validation_and_promotes_capability_state(
         duration_seconds=4.0,
         quality={"policy_version": "voice_quality_v1", "status": "pass"},
     )
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
-    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", registry)
 
     response = client.post(
         f"/v1/voices/{profile.id}/quality-runs",
@@ -1407,8 +1387,6 @@ def test_strict_synthesis_prepares_cold_worker_but_rejects_changed_runtime(
         duration_seconds=4.0,
         quality={"policy_version": "voice_quality_v1", "status": "pass"},
     )
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
-    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", registry)
     assert (
         client.post(
             f"/v1/voices/{profile.id}/quality-runs",
@@ -1444,7 +1422,7 @@ async def test_strict_gate_rejects_non_canonical_runtime_identity(
     unknown" rather than trusted, otherwise an arbitrary value would flow into
     a field every other producer validates against that shape.
     """
-    registry = VoiceRegistry(
+    registry = VoiceRegistry.open(
         storage_path=tmp_path / "custom_voices.json",
         voices_dir=tmp_path / "voices",
     )
@@ -1456,7 +1434,6 @@ async def test_strict_gate_rejects_non_canonical_runtime_identity(
         duration_seconds=4.0,
         quality={"policy_version": "voice_quality_v1", "status": "pass"},
     )
-    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", registry)
 
     with pytest.raises(TtsBackendError) as excinfo:
         await prepare_validated_speech(
@@ -1484,7 +1461,7 @@ async def test_strict_gate_lets_prepare_cancellation_propagate(
     ``CancelledError`` the request would turn into a retryable 503 and the
     admission would never release the slot and lease it still holds.
     """
-    registry = VoiceRegistry(
+    registry = VoiceRegistry.open(
         storage_path=tmp_path / "custom_voices.json",
         voices_dir=tmp_path / "voices",
     )
@@ -1496,7 +1473,6 @@ async def test_strict_gate_lets_prepare_cancellation_propagate(
         duration_seconds=4.0,
         quality={"policy_version": "voice_quality_v1", "status": "pass"},
     )
-    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", registry)
 
     class _CancellingSynthesizer(SineSynthesizer):
         async def prepare_voice(self, voice: str, *, expected_voice_revision: str | None) -> str:
@@ -1533,8 +1509,6 @@ def test_strict_synthesis_rejects_missing_evidence_before_synthesis(
         duration_seconds=4.0,
         quality={"policy_version": "voice_quality_v1", "status": "pass"},
     )
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
-    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", registry)
 
     response = client.post(
         "/v1/audio/speech",
@@ -1555,8 +1529,7 @@ def test_strict_synthesis_rejects_missing_evidence_before_synthesis(
 def test_quality_runs_classifies_output_invalid(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, registry, _synth, _voices_dir = _make_client(tmp_path, MalformedAudioSynthesizer())
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+    client, _registry, _synth, _voices_dir = _make_client(tmp_path, MalformedAudioSynthesizer())
 
     resp = client.post(
         "/v1/voices/serena/quality-runs",
@@ -1619,7 +1592,6 @@ def test_quality_reclamation_failure_stops_asr_and_commit(
         synth,
         batch_transcriber=Transcriber(),
     )
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
     monkeypatch.setattr(
         registry,
         "update_quality_validation",
@@ -1667,8 +1639,7 @@ def test_quality_reclamation_failure_stops_asr_and_commit(
 def test_quality_runs_classifies_probe_failed_and_counts_ok(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, registry, _synth, _voices_dir = _make_client(tmp_path, GenericFailureSynthesizer())
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+    client, _registry, _synth, _voices_dir = _make_client(tmp_path, GenericFailureSynthesizer())
 
     resp = client.post(
         "/v1/voices/serena/quality-runs",
@@ -1684,8 +1655,7 @@ def test_quality_runs_classifies_probe_failed_and_counts_ok(
 def test_quality_runs_empty_output_is_rejected_not_counted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, registry, synth, _voices_dir = _make_client(tmp_path, EmptySynthesizer())
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+    client, _registry, synth, _voices_dir = _make_client(tmp_path, EmptySynthesizer())
 
     resp = client.post(
         "/v1/voices/serena/quality-runs",
@@ -1702,8 +1672,7 @@ def test_quality_runs_empty_output_is_rejected_not_counted(
 def test_quality_runs_rejects_silent_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, registry, _synth, _voices_dir = _make_client(tmp_path, SilentSynthesizer())
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+    client, _registry, _synth, _voices_dir = _make_client(tmp_path, SilentSynthesizer())
 
     resp = client.post(
         "/v1/voices/serena/quality-runs",
@@ -1718,8 +1687,7 @@ def test_quality_runs_rejects_silent_output(
 def test_quality_runs_rejects_clipped_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, registry, _synth, _voices_dir = _make_client(tmp_path, ClippedOutputSynthesizer())
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+    client, _registry, _synth, _voices_dir = _make_client(tmp_path, ClippedOutputSynthesizer())
 
     resp = client.post(
         "/v1/voices/serena/quality-runs",
@@ -1734,8 +1702,7 @@ def test_quality_runs_rejects_clipped_output(
 def test_quality_runs_detects_repeated_output_nondeterminism(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, registry, _synth, _voices_dir = _make_client(tmp_path, NondeterministicSynthesizer())
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+    client, _registry, _synth, _voices_dir = _make_client(tmp_path, NondeterministicSynthesizer())
 
     resp = client.post(
         "/v1/voices/serena/quality-runs",
@@ -1751,8 +1718,7 @@ def test_quality_runs_detects_repeated_output_nondeterminism(
 def test_quality_runs_single_run_never_claims_determinism(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, registry, synth, _voices_dir = _make_client(tmp_path)
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+    client, _registry, synth, _voices_dir = _make_client(tmp_path)
 
     resp = client.post(
         "/v1/voices/serena/quality-runs",
@@ -1772,8 +1738,7 @@ def test_quality_runs_rejects_malformed_chunk_order(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     synth = OutOfOrderSynthesizer()
-    client, registry, _synth, _voices_dir = _make_client(tmp_path, synth)  # type: ignore[arg-type]
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+    client, _registry, _synth, _voices_dir = _make_client(tmp_path, synth)  # type: ignore[arg-type]
 
     resp = client.post(
         "/v1/voices/serena/quality-runs",
@@ -1789,8 +1754,7 @@ def test_quality_runs_rejects_malformed_chunk_order(
 def test_quality_runs_runs_every_fixed_probe_category(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, registry, synth, _voices_dir = _make_client(tmp_path)
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+    client, _registry, synth, _voices_dir = _make_client(tmp_path)
 
     resp = client.post(
         "/v1/voices/serena/quality-runs",
@@ -1915,8 +1879,7 @@ def test_asr_validation_error_does_not_log_backend_payload(
         async def transcribe(self, request: TranscriptionRequest) -> TranscriptResult:
             raise RuntimeError(private)
 
-    client, registry, _, _ = _make_client(tmp_path, batch_transcriber=FailingTranscriber())
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+    client, _registry, _, _ = _make_client(tmp_path, batch_transcriber=FailingTranscriber())
     with caplog.at_level(logging.WARNING):
         response = client.post("/v1/voices/serena/quality-runs", json={"runs": 1})
     assert response.status_code == 200

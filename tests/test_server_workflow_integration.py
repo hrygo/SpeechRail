@@ -36,6 +36,7 @@ from speechrail.domain.ports import (
 )
 from speechrail.http.errors import RequestIdMiddleware
 from speechrail.http.routes.audio import create_audio_router
+from speechrail.infrastructure.voice_registry import FileVoiceRegistry
 from speechrail.runtime.job_artifacts import RESULTS_SUBDIR
 from speechrail.runtime.job_runner import JobProcessingError
 from speechrail.runtime.jobs import JobRecord
@@ -220,7 +221,11 @@ def test_the_job_refuses_a_tts_stream_the_delivery_contract_forbids(
     text_file = spool / "input.txt"
     text_file.write_text("hello speech")
     synthesizer = _MisbehavingSynthesizer()
-    processor = LocalFileJobProcessor(spool_dir=spool, tts_synthesizer=synthesizer)
+    processor = LocalFileJobProcessor(
+        spool_dir=spool,
+        tts_synthesizer=synthesizer,
+        voice_store=FileVoiceRegistry.open(tmp_path / "voices.json", tmp_path / "voices"),
+    )
     job = JobRecord(
         id="job_bad_tts",
         kind="speech",
@@ -244,9 +249,7 @@ def test_a_plain_transcription_needs_no_aligner_at_all(tmp_path: Path) -> None:
 
     spool = tmp_path / "spool"
     spool.mkdir()
-    processor = LocalFileJobProcessor(
-        spool_dir=spool, batch_transcriber=_FrozenTranscriber()
-    )
+    processor = LocalFileJobProcessor(spool_dir=spool, batch_transcriber=_FrozenTranscriber())
 
     async def _decode(input_path: Path) -> bytes:
         del input_path

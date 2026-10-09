@@ -51,12 +51,9 @@ class _PrimaryWorker:
 async def test_clone_request_reports_explicit_error_without_base_worker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        "speechrail.domain.tts.get_voice_registry",
-        lambda: _Registry(),
-    )
+    voice_store = _Registry()
     primary = _PrimaryWorker()
-    router = Qwen3TtsCapabilityRouter({"tts_custom_voice": primary})  # type: ignore[arg-type]
+    router = Qwen3TtsCapabilityRouter({"tts_custom_voice": primary}, voice_directory=voice_store)  # type: ignore[arg-type]
     request = SpeechRequest(text="test", voice="cloned", output_format="pcm16")
 
     with pytest.raises(RuntimeError, match="voice_clone_base_model_unavailable"):
@@ -67,12 +64,9 @@ async def test_clone_request_reports_explicit_error_without_base_worker(
 async def test_builtin_speaker_uses_custom_voice_without_base_worker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        "speechrail.domain.tts.get_voice_registry",
-        lambda: _Registry(),
-    )
+    voice_store = _Registry()
     primary = _PrimaryWorker()
-    router = Qwen3TtsCapabilityRouter({"tts_custom_voice": primary})  # type: ignore[arg-type]
+    router = Qwen3TtsCapabilityRouter({"tts_custom_voice": primary}, voice_directory=voice_store)  # type: ignore[arg-type]
     request = SpeechRequest(text="test", voice="serena", output_format="pcm16")
 
     chunks = [chunk async for chunk in router.synthesize(request)]
@@ -80,9 +74,9 @@ async def test_builtin_speaker_uses_custom_voice_without_base_worker(
 
 
 @pytest.mark.anyio
-async def test_close_is_safe_without_optional_clone_worker() -> None:
+async def test_close_is_safe_without_optional_clone_worker(voice_store) -> None:
     primary = _PrimaryWorker()
-    router = Qwen3TtsCapabilityRouter({"tts_custom_voice": primary})  # type: ignore[arg-type]
+    router = Qwen3TtsCapabilityRouter({"tts_custom_voice": primary}, voice_directory=voice_store)  # type: ignore[arg-type]
     await router.start()
     assert primary.alive is True
 

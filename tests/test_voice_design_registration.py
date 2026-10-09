@@ -26,8 +26,8 @@ from speechrail.config.model_catalog import VOICE_DESIGN_ARTIFACT_KEY
 from speechrail.domain.contracts import TranscriptResult
 from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.domain.ports import AudioChunk, SpeechRequest, TranscriptionRequest
-from speechrail.domain.tts import VoiceRegistry
 from speechrail.http.routes import voice_designs as voice_designs_module
+from speechrail.infrastructure.voice_registry import FileVoiceRegistry as VoiceRegistry
 from voice_test_fixtures import fake_pitch_measurement as fake_pitch_measurement
 
 TEXT = "这是用于音色注册的测试语句，请保持自然清晰的表达。"
@@ -110,11 +110,10 @@ def make_client(
     # VoiceDesign 是与档位无关的按需制品: 任何 tier 都用同一份设计权重。
     design_key = VOICE_DESIGN_ARTIFACT_KEY if with_design else None
     assert asr_key is not None and tts_key is not None
-    registry = VoiceRegistry(
+    registry = VoiceRegistry.open(
         storage_path=tmp_path / "voices.json",
         voices_dir=tmp_path / "voices",
     )
-    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", registry)
     synth = DesignSynth()
     asr = DesignAsr(synth)
     settings = Settings(
@@ -141,6 +140,7 @@ def make_client(
         settings,
         tts_synthesizer=synth,
         batch_transcriber=asr if with_asr else None,
+        voice_store=registry,
     )
     return TestClient(app), registry, synth, asr
 
@@ -158,7 +158,7 @@ def payload(**overrides: object) -> dict[str, object]:
 
 
 def candidate_assets(registry: VoiceRegistry) -> Path:
-    return registry.storage_path.with_name("voice_design_candidates")
+    return registry.artifact_path("voice_design_candidates")
 
 
 def test_create_candidate_keeps_reference_private_and_unpublished(
@@ -206,7 +206,9 @@ def test_create_candidate_keeps_reference_private_and_unpublished(
     assert synth.requests[0].seed == 123
     assert asr.requests[0].prompt == ""
 
-    reloaded = voice_designs_module._repository().get(candidate["id"])
+    reloaded = voice_designs_module._repository(client.app.state.services.voice_store).get(
+        candidate["id"]
+    )
     assert reloaded.target_voice_id == VOICE_ID
     assert reloaded.reference_text == TEXT
     assert reloaded.revision == candidate["revision"]
@@ -367,7 +369,9 @@ def test_create_that_loses_a_race_stays_private_and_keeps_the_competitor(
     assert response.status_code == 201, response.text
     candidate_id = response.json()["candidate"]["id"]
     assert registry.get_profile(VOICE_ID).instruction == "Keep this"
-    stored = voice_designs_module._repository().get(candidate_id)
+    stored = voice_designs_module._repository(client.app.state.services.voice_store).get(
+        candidate_id
+    )
     assert stored.target_voice_id == VOICE_ID
     assert stored.state == "generated"
 
@@ -446,7 +450,7 @@ def test_registry_create_only_is_atomic_in_concurrent_calls(tmp_path: Path) -> N
 
     from speechrail.domain.tts import VoiceAlreadyExistsError
 
-    registry = VoiceRegistry(
+    registry = VoiceRegistry.open(
         storage_path=tmp_path / "voices.json",
         voices_dir=tmp_path / "voices",
     )

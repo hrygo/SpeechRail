@@ -31,7 +31,6 @@ from speechrail.application.services import AppOverrides, build_app_services
 from speechrail.compatibility.openai_realtime import RealtimeAdapterError
 from speechrail.config import Settings
 from speechrail.domain.model_spec import required_spec_artifact
-from speechrail.domain.tts import VoiceRegistry
 from speechrail.domain.tts_stream import (
     DEFAULT_TTS_STREAM_LIMITS,
     TtsStreamEvent,
@@ -41,6 +40,7 @@ from speechrail.domain.tts_stream import (
     TtsStreamStateMachine,
     TtsStreamTerminal,
 )
+from speechrail.infrastructure.voice_registry import FileVoiceRegistry as VoiceRegistry
 
 
 class FakeIncrementalSession:
@@ -216,10 +216,12 @@ def _tier_kwargs(tier: str = "quality") -> dict[str, Any]:
 
 
 def _client(
-    synthesizer: FakeIncrementalSynthesizer, *, tier: str = "quality"
+    synthesizer: FakeIncrementalSynthesizer, *, tier: str = "quality", voice_store=None
 ) -> TestClient:
     return TestClient(
-        create_app(Settings(**_tier_kwargs(tier)), tts_synthesizer=synthesizer)
+        create_app(
+            Settings(**_tier_kwargs(tier)), tts_synthesizer=synthesizer, voice_store=voice_store
+        )
     )
 
 
@@ -282,6 +284,10 @@ def _until(socket: Any, kind: str, *, limit: int = 40) -> list[dict[str, Any]]:
         events.append(event)
         if event["type"] == kind:
             return events
+        if event["type"] == "error":
+            raise AssertionError(
+                f"unexpected error while awaiting {kind}: {event['error']['code']}"
+            )
     raise AssertionError(f"never received {kind}: {[item['type'] for item in events]}")
 
 
@@ -488,15 +494,17 @@ def test_voice_design_voice_has_no_incremental_path_on_any_surface(
 ) -> None:
     """An instruction voice stays design-only: every surface agrees on that."""
 
-    registry = VoiceRegistry(tmp_path / "custom_voices.json")
+    registry = VoiceRegistry.open(
+        tmp_path / "custom_voices.json",
+        voices_dir=(tmp_path / "custom_voices.json").parent / "audio",
+    )
     registry.create_custom_profile(
         name="W8 design",
         instruction="自然清晰的中文女声，用于设计任务。",
         voice_id="w8_design_fixture",
     )
-    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", registry)
     synthesizer = FakeIncrementalSynthesizer()
-    client = _client(synthesizer)
+    client = _client(synthesizer, voice_store=registry)
     voices = {voice["id"]: voice for voice in client.get("/v1/voices").json()["data"]}
     streaming = voices["w8_design_fixture"]["streaming"]
     assert streaming["supported"] is False
@@ -506,9 +514,7 @@ def test_voice_design_voice_has_no_incremental_path_on_any_surface(
 
     with client.websocket_connect("/v1/realtime") as socket:
         _channel(socket)
-        socket.send_json(
-            tts_start(request_id="inc_design", voice="w8_design_fixture")
-        )
+        socket.send_json(tts_start(request_id="inc_design", voice="w8_design_fixture"))
         error = socket.receive_json()
     assert error["type"] == "error"
     # A design-only profile has no runtime role, so the synthesis path refuses it

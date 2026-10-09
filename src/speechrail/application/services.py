@@ -41,6 +41,7 @@ from speechrail.config.selection import active_model_catalog
 from speechrail.domain.alignment import AlignTextPort
 from speechrail.domain.contracts import TranscriptResult
 from speechrail.domain.diarization import DiarizationReadiness
+from speechrail.domain.idempotency import DurableIdempotencyJournal
 from speechrail.domain.ports import (
     BatchTranscriber,
     DiarizationEngine,
@@ -50,6 +51,8 @@ from speechrail.domain.ports import (
 )
 from speechrail.domain.tts_execution import TtsExecutionPorts
 from speechrail.domain.tts_routing import TtsExecutionMode, tts_capability_key
+from speechrail.domain.voice_ports import VoiceStore
+from speechrail.infrastructure.voice_registry import FileVoiceRegistry
 from speechrail.observability.metrics import Metrics
 from speechrail.runtime.admission import AdmissionQueue
 from speechrail.runtime.alignment_admission import AlignmentAdmission
@@ -256,6 +259,7 @@ class AppOverrides:
     text_aligner: AlignTextPort | None = None
     tts_synthesizer: SpeechSynthesizer | None = None
     tts_execution: TtsExecutionPorts | None = None
+    voice_store: VoiceStore | None = None
     job_repository: JobRepository | None = None
     job_processor: JobProcessor | None = None
 
@@ -271,6 +275,8 @@ class AppServices:
     diarization_engine: DiarizationEngine | None
     tts_synthesizer: SpeechSynthesizer | None
     tts_execution: TtsExecutionPorts
+    voice_store: VoiceStore
+    voice_clone_journal: DurableIdempotencyJournal
     job_repository: JobRepository | None
     asr_worker: Qwen3Worker | None
     admission: AdmissionQueue
@@ -561,6 +567,9 @@ class AppServices:
 
 def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServices:
     """Compose concrete Qwen/NeMo/job components without starting them."""
+    voice_store = overrides.voice_store
+    if voice_store is None:
+        voice_store = FileVoiceRegistry.open(settings.voice_store_path, settings.voice_audio_dir)
     metrics = Metrics()
     job_repository = overrides.job_repository
     if job_repository is None and settings.job_spool_dir is not None:
@@ -652,6 +661,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                     cache_limit_mb=settings.mlx_cache_limit_mb,
                     memory_limit_mb=settings.mlx_memory_limit_mb,
                 ),
+                voice_leases=voice_store,
                 on_delivery_event=lambda event, amount: metrics.record_tts_delivery_event(
                     event, amount=amount
                 ),
@@ -678,7 +688,9 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
             )
         # The Governor is composed below before any worker can start or close.
         tts_worker = Qwen3TtsCapabilityRouter(
-            tts_workers, on_reclamation_failure=lambda: governor.quarantine_tts_lane(None),
+            tts_workers,
+            voice_directory=voice_store,
+            on_reclamation_failure=lambda: governor.quarantine_tts_lane(None),
         )
         tts_synthesizer = tts_worker
 
@@ -731,9 +743,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
 
     admission = AdmissionQueue(settings.max_queue_size)
     asr_enabled = (
-        transcribe is not None
-        or batch_transcriber is not None
-        or realtime_asr_factory is not None
+        transcribe is not None or batch_transcriber is not None or realtime_asr_factory is not None
     )
     tts_enabled = tts_synthesizer is not None
     diarization_enabled = diarization_engine is not None
@@ -794,9 +804,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                 python_executable=settings.qwen3_python,
                 model_dir=settings.qwen3_aligner_model_dir,
                 device=settings.device,
-                dtype=resolve_backend_dtype(
-                    settings.qwen3_aligner_model_dir, settings.dtype
-                ),
+                dtype=resolve_backend_dtype(settings.qwen3_aligner_model_dir, settings.dtype),
                 cache_limit_mb=settings.mlx_cache_limit_mb,
                 memory_limit_mb=settings.mlx_memory_limit_mb,
                 timeout_seconds=settings.request_timeout_seconds,
@@ -821,6 +829,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                 batch_transcriber=batch_transcriber,
                 tts_synthesizer=tts_synthesizer,
                 tts_execution=tts_execution,
+                voice_store=voice_store,
                 max_upload_bytes=settings.max_upload_bytes,
                 max_audio_seconds=settings.max_audio_seconds,
                 tts_sample_rate=settings.tts_sample_rate,
@@ -940,6 +949,10 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         diarization_engine=diarization_engine,
         tts_synthesizer=tts_synthesizer,
         tts_execution=tts_execution,
+        voice_store=voice_store,
+        voice_clone_journal=DurableIdempotencyJournal(
+            voice_store.artifact_path("voice_clone_idempotency.json"), max_entries=128
+        ),
         job_repository=job_repository,
         asr_worker=asr_worker,
         admission=admission,
