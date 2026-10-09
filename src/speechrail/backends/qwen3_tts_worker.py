@@ -44,7 +44,7 @@ from speechrail.domain.tts import (
     VoiceStoreUnavailableError,
     apply_crossfade,
     generation_token_budget,
-    get_voice_profile,
+    get_system_voice_profile,
     normalize_tts_text,
     resolve_voice,
 )
@@ -412,7 +412,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         if profile is None and instruction is None and ref_audio is None and ref_text is None:
             # Legacy private callers still receive one request-local recipe, never
             # a fresh registry resolution for each acoustic chunk.
-            profile = get_voice_profile(voice)
+            profile = get_system_voice_profile(voice)
         first_chunk = True
         loudness_controller = (
             StreamingPcm16LoudnessController(
@@ -558,9 +558,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
             seeded = _seed_clone_generation(voice=voice, text=text, ref_text=ref_text)
             clone_repetition_penalty = max(self._repetition_penalty, 1.5)
             self._last_sampling_observation = _sampling_observation(
-                seed_policy=(
-                    "clone_reference_derived" if seeded else "unseeded_sampler"
-                ),
+                seed_policy=("clone_reference_derived" if seeded else "unseeded_sampler"),
                 seed=_clone_generation_seed(voice=voice, text=text, ref_text=ref_text)
                 if seeded
                 else None,
@@ -601,7 +599,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
             except Exception:
                 pass
         if profile is None and instruction is None and variant == "voice_design":
-            profile = get_voice_profile(voice)
+            profile = get_system_voice_profile(voice)
         condition = generation_condition(variant, voice, instruction=instruction, profile=profile)
         used_temperature = self._temperature
         if variant == "voice_design":
@@ -617,9 +615,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
                 if seed is not None:
                     mx.random.seed(seed)
                     applied_seed = int(seed)
-                    seed_policy = (
-                        "voice_profile_fixed" if instruction is None else "caller_fixed"
-                    )
+                    seed_policy = "voice_profile_fixed" if instruction is None else "caller_fixed"
             except Exception:
                 pass
         self._last_sampling_observation = _sampling_observation(
@@ -710,7 +706,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
                 ref_text=ref_text,
             )
         if profile is None and instruction is None:
-            profile = get_voice_profile(voice)
+            profile = get_system_voice_profile(voice)
         condition = generation_condition(
             "custom_voice", voice, instruction=instruction, profile=profile
         )

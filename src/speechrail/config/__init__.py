@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     voice_design_artifact_key: str | None = None
     alignment_artifact_key: str | None = None
     tts_voice_ids: tuple[str, ...] = tuple(VOICE_PROFILES)
+    voice_store_path: Path = Field(
+        default_factory=lambda: Path.home() / ".speechrail" / "custom_voices.json"
+    )
+    voice_audio_dir: Path = Field(default_factory=lambda: Path.home() / ".speechrail" / "voices")
     qwen3_tts_model_dir: Path | None = None
     qwen3_tts_clone_model_dir: Path | None = None
     qwen3_tts_design_model_dir: Path | None = None

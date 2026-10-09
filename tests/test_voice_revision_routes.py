@@ -4,17 +4,13 @@ from fastapi.testclient import TestClient
 
 from speechrail.app import create_app
 from speechrail.config import Settings
-from speechrail.domain.tts import VoiceRegistry
+from speechrail.infrastructure.voice_registry import FileVoiceRegistry as VoiceRegistry
 
 
 def _client(tmp_path, monkeypatch):
-    registry = VoiceRegistry(
+    registry = VoiceRegistry.open(
         storage_path=tmp_path / "custom_voices.json",
         voices_dir=tmp_path / "voices",
-    )
-    monkeypatch.setattr(
-        "speechrail.http.routes.system.get_voice_registry",
-        lambda: registry,
     )
     app = create_app(
         Settings(
@@ -23,7 +19,8 @@ def _client(tmp_path, monkeypatch):
             qwen3_python=None,
             qwen3_tts_model_dir=None,
             qwen3_tts_python=None,
-        )
+        ),
+        voice_store=registry,
     )
     return TestClient(app), registry
 

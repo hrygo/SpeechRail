@@ -27,7 +27,10 @@ from speechrail.app import create_app
 from speechrail.config import Settings
 from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.domain.ports import AudioChunk, SpeechRequest
-from speechrail.domain.tts import VoiceRegistry, VoiceRevisionConflictError
+from speechrail.domain.tts import (
+    VoiceRevisionConflictError,
+)
+from speechrail.infrastructure.voice_registry import FileVoiceRegistry as VoiceRegistry
 from speechrail.mcp.client import SpeechRailClient, SpeechRailError
 from speechrail.mcp.tools import ToolCallError
 from speechrail.mcp.tools import synthesize as mcp_synthesize
@@ -174,11 +177,10 @@ def parity_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     tts_key = required_spec_artifact("quality", "tts_custom_voice")
     base_key = required_spec_artifact("quality", "tts_base")
     assert asr_key is not None and tts_key is not None and base_key is not None
-    registry = VoiceRegistry(
+    registry = VoiceRegistry.open(
         storage_path=tmp_path / "custom_voices.json",
         voices_dir=tmp_path / "voices",
     )
-    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", registry)
     profile = registry.create_cloned_profile(
         name="Narrator",
         ref_text="参考文本。",
@@ -205,6 +207,7 @@ def parity_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             tts_base_artifact_key=base_key,
         ),
         tts_synthesizer=synth,
+        voice_store=registry,
     )
     return app, synth
 

@@ -55,7 +55,6 @@ from speechrail.domain.tts import (
     VoiceStoreUnavailableError,
     VoiceUpdateUnsupportedError,
     canonicalize_clone_reference_audio,
-    get_voice_registry,
 )
 from speechrail.domain.tts_execution import EMPTY_TTS_EXECUTION, TtsExecutionPorts
 from speechrail.domain.tts_pronunciation import (
@@ -65,6 +64,7 @@ from speechrail.domain.tts_pronunciation import (
     PronunciationStoreUnavailableError,
     get_pronunciation_registry,
 )
+from speechrail.domain.voice_ports import ValidatedVoiceDirectory
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import backend_reclamation_error_response, error, error_response
 from speechrail.http.voice_projection import quality_reject_content, voice_entry
@@ -108,10 +108,6 @@ _LOGGER = logging.getLogger(__name__)
 # operation metadata and the resulting profile ID; raw audio/text/API keys are never persisted.
 _CLONE_IDEMPOTENCY_OWNER = "speechrail-local"
 _CLONE_IDEMPOTENCY_OPERATION = "voice.clone"
-_clone_idempotency_journal = DurableIdempotencyJournal(
-    Path.home() / ".speechrail" / "voice_clone_idempotency.json",
-    max_entries=128,
-)
 
 
 def _clone_payload_fingerprint(
@@ -242,6 +238,7 @@ def _voice_entry(
     active: ActiveModelCatalog,
     tts_ready: bool,
     *,
+    voice_store: ValidatedVoiceDirectory,
     enabled: bool = True,
     synthesizer: SpeechSynthesizer | None = None,
     tts_execution: TtsExecutionPorts = EMPTY_TTS_EXECUTION,
@@ -253,6 +250,7 @@ def _voice_entry(
         profile,
         active,
         tts_ready,
+        voice_store=voice_store,
         enabled=enabled,
         synthesizer=synthesizer,
         tts_execution=tts_execution,
@@ -267,6 +265,7 @@ def _voice_list_entry(
     active: ActiveModelCatalog,
     tts_ready: bool,
     *,
+    voice_store: ValidatedVoiceDirectory,
     enabled: bool = True,
     synthesizer: SpeechSynthesizer | None = None,
     tts_execution: TtsExecutionPorts = EMPTY_TTS_EXECUTION,
@@ -280,6 +279,7 @@ def _voice_list_entry(
         profile,
         active,
         tts_ready,
+        voice_store=voice_store,
         enabled=enabled,
         synthesizer=synthesizer,
         tts_execution=tts_execution,
@@ -581,7 +581,7 @@ def create_system_router(services: AppServices) -> APIRouter:
     @router.get("/v1/voices", response_model=None)
     async def voices(request: Request) -> dict[str, Any] | Response:
         """List system preset voices and custom user-designed voices."""
-        registry = get_voice_registry()
+        registry = services.voice_store
         try:
             profiles = registry.list_profiles()
         except VoiceStoreUnavailableError:
@@ -605,6 +605,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                     strict_validation=True,
                     include_streaming=True,
                     stream_service=services.tts_streams,
+                    voice_store=services.voice_store,
                 )
                 for profile in profiles
             ],
@@ -617,7 +618,7 @@ def create_system_router(services: AppServices) -> APIRouter:
         if (auth_error := http_auth_error(request, resolved)) is not None:
             return auth_error
         try:
-            profile = get_voice_registry().get_profile(voice_id)
+            profile = services.voice_store.get_profile(voice_id)
         except VoiceStoreUnavailableError:
             return error_response(
                 503,
@@ -645,6 +646,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 strict_validation=True,
                 include_streaming=True,
                 stream_service=services.tts_streams,
+                voice_store=services.voice_store,
             ),
         )
 
@@ -712,7 +714,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 f"Voice seed must be an integer between 0 and {_MAX_VOICE_SEED}",
             )
         try:
-            profile = get_voice_registry().update_custom_profile(
+            profile = services.voice_store.update_custom_profile(
                 voice_id,
                 name=name,
                 instruction=instruction,
@@ -756,6 +758,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 synthesizer=services.tts_synthesizer,
                 tts_execution=services.tts_execution,
                 strict_validation=True,
+                voice_store=services.voice_store,
             ),
         )
 
@@ -1020,7 +1023,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 "At least one mutable voice field is required",
             )
         try:
-            profile = get_voice_registry().update_custom_profile(
+            profile = services.voice_store.update_custom_profile(
                 voice_id,
                 name=name,
                 instruction=instruction,
@@ -1071,7 +1074,7 @@ def create_system_router(services: AppServices) -> APIRouter:
         request_id = getattr(request.state, "request_id", "") or "req_voices"
         if (auth_error := http_auth_error(request, resolved)) is not None:
             return auth_error
-        registry = get_voice_registry()
+        registry = services.voice_store
         try:
             current = registry.get_profile(voice_id)
             revisions = registry.list_revisions(voice_id)
@@ -1130,7 +1133,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 "Voice revisions must be strings",
             )
         try:
-            profile = get_voice_registry().rollback_custom_profile(
+            profile = services.voice_store.rollback_custom_profile(
                 voice_id,
                 target_revision=target,
                 expected_revision=expected,
@@ -1188,7 +1191,7 @@ def create_system_router(services: AppServices) -> APIRouter:
         if (auth_error := http_auth_error(request, resolved)) is not None:
             return auth_error
         try:
-            profile = get_voice_registry().revoke_revision(
+            profile = services.voice_store.revoke_revision(
                 voice_id,
                 revision=revision,
             )
@@ -1276,7 +1279,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             voice_id.strip().lower() if isinstance(voice_id, str) and voice_id.strip() else None
         )
         try:
-            profile = get_voice_registry().create_custom_profile(
+            profile = services.voice_store.create_custom_profile(
                 name=name.strip(),
                 instruction=instruction.strip(),
                 voice_id=vid_str,
@@ -1291,6 +1294,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                     synthesizer=services.tts_synthesizer,
                     tts_execution=services.tts_execution,
                     strict_validation=True,
+                    voice_store=services.voice_store,
                 ),
             )
         except VoiceStoreUnavailableError:
@@ -1414,7 +1418,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 voice_id=vid_str,
             )
             try:
-                decision = _clone_idempotency_journal.begin(
+                decision = services.voice_clone_journal.begin(
                     owner=_CLONE_IDEMPOTENCY_OWNER,
                     operation=_CLONE_IDEMPOTENCY_OPERATION,
                     key=idempotency_key,
@@ -1447,7 +1451,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                     )
                 vid_str = decision.result_id
                 try:
-                    profile = get_voice_registry().get_profile(decision.result_id)
+                    profile = services.voice_store.get_profile(decision.result_id)
                 except VoiceStoreUnavailableError:
                     return error_response(
                         503,
@@ -1472,7 +1476,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                             "Target voice ID is owned by a different clone payload",
                         )
                     try:
-                        _clone_idempotency_journal.complete(
+                        services.voice_clone_journal.complete(
                             owner=_CLONE_IDEMPOTENCY_OWNER,
                             operation=_CLONE_IDEMPOTENCY_OPERATION,
                             key=idempotency_key,
@@ -1496,6 +1500,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                             synthesizer=services.tts_synthesizer,
                             tts_execution=services.tts_execution,
                             strict_validation=True,
+                            voice_store=services.voice_store,
                         ),
                     )
             if decision.state == "completed":
@@ -1508,7 +1513,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                         retryable=True,
                     )
                 try:
-                    profile = get_voice_registry().get_profile(decision.result_id)
+                    profile = services.voice_store.get_profile(decision.result_id)
                 except ValueError, VoiceStoreUnavailableError:
                     return error_response(
                         409,
@@ -1537,11 +1542,12 @@ def create_system_router(services: AppServices) -> APIRouter:
                         synthesizer=services.tts_synthesizer,
                         tts_execution=services.tts_execution,
                         strict_validation=True,
+                        voice_store=services.voice_store,
                     ),
                 )
 
         try:
-            profile = get_voice_registry().create_cloned_profile(
+            profile = services.voice_store.create_cloned_profile(
                 name=name.strip(),
                 ref_text=ref_text.strip(),
                 audio_bytes=canonical_wav,
@@ -1554,7 +1560,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 create_only=True,
             )
             if idempotency_key and fingerprint is not None:
-                result_id = _clone_idempotency_journal.complete(
+                result_id = services.voice_clone_journal.complete(
                     owner=_CLONE_IDEMPOTENCY_OWNER,
                     operation=_CLONE_IDEMPOTENCY_OPERATION,
                     key=idempotency_key,
@@ -1595,7 +1601,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                     "Target voice already exists",
                 )
             try:
-                profile = get_voice_registry().get_profile(vid_str)
+                profile = services.voice_store.get_profile(vid_str)
                 if not _clone_result_matches(
                     profile,
                     name=name,
@@ -1608,7 +1614,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                         "voice_already_exists",
                         "Target voice ID is owned by a different clone payload",
                     )
-                _clone_idempotency_journal.complete(
+                services.voice_clone_journal.complete(
                     owner=_CLONE_IDEMPOTENCY_OWNER,
                     operation=_CLONE_IDEMPOTENCY_OPERATION,
                     key=idempotency_key,
@@ -1635,6 +1641,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 synthesizer=services.tts_synthesizer,
                 tts_execution=services.tts_execution,
                 strict_validation=True,
+                voice_store=services.voice_store,
             ),
         )
 
@@ -1654,7 +1661,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 "Idempotency-Key header is required",
             )
         try:
-            decision = _clone_idempotency_journal.lookup(
+            decision = services.voice_clone_journal.lookup(
                 owner=_CLONE_IDEMPOTENCY_OWNER,
                 operation=_CLONE_IDEMPOTENCY_OPERATION,
                 key=idempotency_key,
@@ -1808,7 +1815,7 @@ def create_system_router(services: AppServices) -> APIRouter:
         try:
             result = await execute_voice_quality_run(
                 voice_id=voice_id,
-                registry=get_voice_registry(),
+                registry=services.voice_store,
                 active=active,
                 runtime=ValidationRuntime(
                     synthesizer=services.tts_synthesizer,
@@ -1889,7 +1896,7 @@ def create_system_router(services: AppServices) -> APIRouter:
         if (auth_error := http_auth_error(request, resolved)) is not None:
             return auth_error
         try:
-            get_voice_registry().delete_custom_profile(voice_id)
+            services.voice_store.delete_custom_profile(voice_id)
             return JSONResponse(status_code=200, content={"status": "deleted", "id": voice_id})
         except VoiceInUseError:
             response = error_response(

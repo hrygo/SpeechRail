@@ -4,9 +4,9 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-import speechrail.domain.tts as voices
 from speechrail.app import create_app
 from speechrail.config import Settings
+from speechrail.infrastructure.voice_registry import FileVoiceRegistry as VoiceRegistry
 
 
 def _client_with_private_clone(
@@ -15,7 +15,7 @@ def _client_with_private_clone(
     *,
     api_key: str | None,
 ) -> TestClient:
-    registry = voices.VoiceRegistry(
+    registry = VoiceRegistry.open(
         storage_path=tmp_path / "voices.json",
         voices_dir=tmp_path / "voice-assets",
     )
@@ -32,14 +32,14 @@ def _client_with_private_clone(
         voice_id="private_clone",
         duration_seconds=3.0,
     )
-    monkeypatch.setattr(voices, "_GLOBAL_VOICE_REGISTRY", registry)
     return TestClient(
         create_app(
             Settings(
                 api_key=api_key,
                 qwen3_model_dir=None,
                 qwen3_python=None,
-            )
+            ),
+            voice_store=registry,
         )
     )
 

@@ -41,6 +41,7 @@ from speechrail.domain.tts_stream import (
     TtsStreamOptions,
 )
 from speechrail.domain.tts_timing import TtsTimingSidecar
+from speechrail.domain.voice_ports import VoiceDirectory, VoiceLeases
 from speechrail.runtime.busy import BusyReason
 from speechrail.runtime.cleanup import join_cleanup
 from speechrail.runtime.registry import (
@@ -179,9 +180,11 @@ class Qwen3TtsWorker:
         self,
         config: Qwen3TtsBackendConfig,
         *,
+        voice_leases: VoiceLeases,
         on_delivery_event: DeliveryEventRecorder | None = None,
     ) -> None:
         self.config = config
+        self._voice_leases = voice_leases
         self._transport = AsyncFramedWorkerProcess(config.worker_spec())
         self._lock = asyncio.Lock()
         self._started = False
@@ -191,6 +194,7 @@ class Qwen3TtsWorker:
         # Complete-text synthesis waits here instead of racing the stream's
         # single receive dispatcher on the same worker transport.
         self._incremental_slot = asyncio.Lock()
+        self._retained_voice_leases: list[ExitStack] = []
         self._epoch: int = 0
         self._fallback_abort_count = 0
         self._reload_count = 0
@@ -346,6 +350,8 @@ class Qwen3TtsWorker:
             return revision
 
     async def _start_locked(self) -> None:
+        if self._retained_voice_leases:
+            await self._abort_locked()
         if self.ready:
             return
         self._started = False
@@ -429,7 +435,7 @@ class Qwen3TtsWorker:
                 )
             if failure is not None:
                 self._record_failure(failure)
-            await self._transport.abort()
+            await self._abort_locked()
             if failure is not None:
                 raise failure from None
             raise
@@ -441,14 +447,16 @@ class Qwen3TtsWorker:
 
         async def stream() -> AsyncGenerator[AudioChunk]:
             from speechrail.backends.qwen3_voice_binding import resolve_binding
-            from speechrail.domain.tts import get_voice_registry
 
             # Keep the immutable clone reference alive until the worker has
             # completed (or the abort/reap path has finished).  The registry
             # lock itself is held only for the short snapshot/refcount steps.
-            with get_voice_registry().lease_profile(
-                request.voice, expected_revision=request.expected_voice_revision
-            ) as profile:
+            with ExitStack() as lease:
+                profile = lease.enter_context(
+                    self._voice_leases.lease_profile(
+                        request.voice, expected_revision=request.expected_voice_revision
+                    )
+                )
                 binding = resolve_binding(
                     self.model_variant,
                     request.voice,
@@ -496,7 +504,8 @@ class Qwen3TtsWorker:
                     frame_payload["speed"] = validated.speed
                     frame_payload["language"] = validated.language
                     if (
-                        self.model_variant == "voice_design" and request.instruction is None
+                        self.model_variant == "voice_design"
+                        and request.instruction is None
                         and not self._supports_profile_snapshot
                     ):
                         raise RuntimeError("worker_profile_snapshot_unsupported")
@@ -586,11 +595,7 @@ class Qwen3TtsWorker:
                                     request_id=response_id,
                                     worker_attempt_id=self._worker_attempt_id,
                                 )
-                            if (
-                                chunk_index != expected_chunk_index
-                                or not audio
-                                or len(audio) % 2
-                            ):
+                            if chunk_index != expected_chunk_index or not audio or len(audio) % 2:
                                 raise TtsBackendError(
                                     "worker_audio_frame_invalid",
                                     stage="decode",
@@ -616,9 +621,7 @@ class Qwen3TtsWorker:
                         self._record_failure(failure)
                         raise failure from None
                     except TimeoutError:
-                        failure = self._timeout_failure(
-                            stage="deliver", request_id=response_id
-                        )
+                        failure = self._timeout_failure(stage="deliver", request_id=response_id)
                         self._record_failure(failure)
                         raise failure from None
                     finally:
@@ -628,7 +631,13 @@ class Qwen3TtsWorker:
                             self._runtime_revision = None
                             self._fallback_abort_count += 1
                             self._record_delivery_event("abort_fallback")
-                            await self._transport.abort()
+                            try:
+                                await self._abort_locked()
+                            except BaseException:
+                                # A child may still be reading the clone reference.
+                                # Transfer ownership before the generator unwinds.
+                                self._retained_voice_leases.append(lease.pop_all())
+                                raise
 
         return stream()
 
@@ -660,7 +669,6 @@ class Qwen3TtsWorker:
         """
 
         from speechrail.backends.qwen3_voice_binding import resolve_binding
-        from speechrail.domain.tts import get_voice_registry
 
         await self._incremental_slot.acquire()
         inner: Qwen3TtsIncrementalSession | None = None
@@ -668,7 +676,7 @@ class Qwen3TtsWorker:
         stack = contextlib.ExitStack()
         try:
             profile = stack.enter_context(
-                get_voice_registry().lease_profile(
+                self._voice_leases.lease_profile(
                     options.voice,
                     expected_revision=options.expected_voice_revision,
                 )
@@ -888,7 +896,14 @@ class Qwen3TtsWorker:
                 self._epoch += 1
             self._started = False
             self._runtime_revision = None
-            await self._transport.abort()
+            await self._abort_locked()
+
+    async def _abort_locked(self) -> None:
+        """Release retained clone readers only after transport reclamation."""
+        await self._transport.abort()
+        while self._retained_voice_leases:
+            self._retained_voice_leases[-1].close()
+            self._retained_voice_leases.pop()
 
 
 class _LeasedTtsStreamSession:
@@ -981,6 +996,7 @@ class Qwen3TtsCapabilityRouter:
         self,
         workers: Mapping[str, Qwen3TtsWorker],
         *,
+        voice_directory: VoiceDirectory,
         on_reclamation_failure: Callable[[], None] | None = None,
     ) -> None:
         resolved: dict[str, Qwen3TtsWorker] = {}
@@ -997,6 +1013,7 @@ class Qwen3TtsCapabilityRouter:
                 )
             resolved[role] = worker
         self._workers = resolved
+        self._voice_directory = voice_directory
         self._capability_lock = asyncio.Lock()
         self._on_reclamation_failure = on_reclamation_failure
 
@@ -1160,9 +1177,7 @@ class Qwen3TtsCapabilityRouter:
         reaches a worker.
         """
 
-        from speechrail.domain.tts import get_voice_registry
-
-        profile = get_voice_registry().get_profile(voice)
+        profile = self._voice_directory.get_profile(voice)
         if profile.mode == "clone":
             return "tts_base"
         if profile.mode == "system":
@@ -1171,9 +1186,8 @@ class Qwen3TtsCapabilityRouter:
 
     def runtime_revision_for_voice(self, voice: str) -> str | None:
         """Return the ready worker identity for the voice's selected lane."""
-        from speechrail.domain.tts import get_voice_registry
 
-        profile = get_voice_registry().get_profile(voice)
+        profile = self._voice_directory.get_profile(voice)
         role = profile.runtime_role
         if role is None:
             return None
@@ -1196,10 +1210,9 @@ class Qwen3TtsCapabilityRouter:
     def _require_runtime_worker(self, voice: str) -> tuple[str, Qwen3TtsWorker]:
         """Resolve one voice to its plan role and resident worker, or fail closed."""
 
-        from speechrail.domain.tts import get_voice_registry
         from speechrail.domain.tts_routing import TtsRouteError, route_role_for_voice
 
-        profile = get_voice_registry().get_profile(voice)
+        profile = self._voice_directory.get_profile(voice)
         try:
             role = route_role_for_voice(profile)
         except TtsRouteError as exc:

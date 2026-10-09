@@ -28,10 +28,10 @@ from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.domain.ports import AudioChunk, SpeechRequest
 from speechrail.domain.tts import (
     VoiceInUseError,
-    VoiceRegistry,
     canonicalize_clone_reference_audio,
-    transcode_and_validate_clone_audio,
 )
+from speechrail.infrastructure.voice_reference import transcode_and_validate_clone_audio
+from speechrail.infrastructure.voice_registry import FileVoiceRegistry as VoiceRegistry
 from voice_test_fixtures import fake_pitch_measurement as fake_pitch_measurement
 
 
@@ -119,7 +119,7 @@ def _make_test_client(
         assert base_key is not None
     storage_path = tmp_path / "custom_voices.json"
     voices_dir = tmp_path / "voices"
-    registry = VoiceRegistry(storage_path=storage_path, voices_dir=voices_dir)
+    registry = VoiceRegistry.open(storage_path=storage_path, voices_dir=voices_dir)
 
     settings = Settings(
         qwen3_model_dir=tmp_path / asr_key,
@@ -139,7 +139,7 @@ def _make_test_client(
         tts_base_artifact_key=base_key if include_base else None,
     )
     synthesizer = CapturingSpeechSynthesizer()
-    app = create_app(settings, tts_synthesizer=synthesizer)
+    app = create_app(settings, tts_synthesizer=synthesizer, voice_store=registry)
     return TestClient(app), registry, synthesizer
 
 
@@ -149,7 +149,7 @@ def _make_test_client(
 def test_voice_registry_cloned_profile_lifecycle(tmp_path: Path) -> None:
     storage_path = tmp_path / "custom_voices.json"
     voices_dir = tmp_path / "voices"
-    registry = VoiceRegistry(storage_path=storage_path, voices_dir=voices_dir)
+    registry = VoiceRegistry.open(storage_path=storage_path, voices_dir=voices_dir)
 
     wav_bytes = _generate_test_wav(duration_seconds=5.0)
     profile = registry.create_cloned_profile(
@@ -181,7 +181,7 @@ def test_voice_registry_cloned_profile_lifecycle(tmp_path: Path) -> None:
 
 
 def test_clone_replacement_keeps_immutable_reference_until_lease_release(tmp_path: Path) -> None:
-    registry = VoiceRegistry(
+    registry = VoiceRegistry.open(
         storage_path=tmp_path / "custom_voices.json",
         voices_dir=tmp_path / "voices",
     )
@@ -242,7 +242,7 @@ def test_legacy_voice_audio_filename_remains_readable(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    registry = VoiceRegistry(storage_path=storage_path, voices_dir=voices_dir)
+    registry = VoiceRegistry.open(storage_path=storage_path, voices_dir=voices_dir)
     profile = registry.get_profile("legacy_clone")
     assert profile.audio_path == str(legacy_path.resolve())
 
@@ -250,7 +250,7 @@ def test_legacy_voice_audio_filename_remains_readable(tmp_path: Path) -> None:
 def test_voice_registry_security_validations(tmp_path: Path) -> None:
     storage_path = tmp_path / "custom_voices.json"
     voices_dir = tmp_path / "voices"
-    registry = VoiceRegistry(storage_path=storage_path, voices_dir=voices_dir)
+    registry = VoiceRegistry.open(storage_path=storage_path, voices_dir=voices_dir)
     wav_bytes = _generate_test_wav(duration_seconds=3.0)
 
     # Empty name
@@ -295,8 +295,8 @@ def test_voice_registry_security_validations(tmp_path: Path) -> None:
 def test_voice_registry_cross_process_mtime_reload(tmp_path: Path) -> None:
     storage_path = tmp_path / "custom_voices.json"
     voices_dir = tmp_path / "voices"
-    reg1 = VoiceRegistry(storage_path=storage_path, voices_dir=voices_dir)
-    reg2 = VoiceRegistry(storage_path=storage_path, voices_dir=voices_dir)
+    reg1 = VoiceRegistry.open(storage_path=storage_path, voices_dir=voices_dir)
+    reg2 = VoiceRegistry.open(storage_path=storage_path, voices_dir=voices_dir)
 
     wav_bytes = _generate_test_wav(duration_seconds=4.0)
     # reg1 adds profile
@@ -482,11 +482,7 @@ def test_resolve_binding_voice_cloning(tmp_path: Path, monkeypatch: pytest.Monke
 
     storage_path = tmp_path / "custom_voices.json"
     voices_dir = tmp_path / "voices"
-    test_reg = VoiceRegistry(storage_path=storage_path, voices_dir=voices_dir)
-    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", test_reg)
-    monkeypatch.setattr(
-        "speechrail.backends.qwen3_voice_binding.get_voice_profile", test_reg.get_profile
-    )
+    test_reg = VoiceRegistry.open(storage_path=storage_path, voices_dir=voices_dir)
 
     wav_bytes = _generate_test_wav(duration_seconds=3.0)
     test_reg.create_cloned_profile(
@@ -498,7 +494,9 @@ def test_resolve_binding_voice_cloning(tmp_path: Path, monkeypatch: pytest.Monke
     )
 
     # 1. Quality clone capability is provided by the Base model.
-    binding_qd = resolve_binding("base", "test_binding_clone")
+    binding_qd = resolve_binding(
+        "base", "test_binding_clone", profile=test_reg.get_profile("test_binding_clone")
+    )
     assert binding_qd.is_clone is True
     assert binding_qd.ref_audio_path is not None
     assert binding_qd.ref_text == "这是测试引导句。"
@@ -506,7 +504,9 @@ def test_resolve_binding_voice_cloning(tmp_path: Path, monkeypatch: pytest.Monke
 
     # 2. Balanced tier (custom_voice): does not support cloning.
     with pytest.raises(ValueError, match="requires an active Base clone capability"):
-        resolve_binding("custom_voice", "test_binding_clone")
+        resolve_binding(
+            "custom_voice", "test_binding_clone", profile=test_reg.get_profile("test_binding_clone")
+        )
 
 
 # ===================== 4. Worker & ICL Execution =====================
@@ -1152,11 +1152,7 @@ def test_api_voices_clone_prompts() -> None:
 def test_api_voices_clone_success_in_quality_tier(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, reg, _synthesizer = _make_test_client(tmp_path, "quality")
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: reg)
-    monkeypatch.setattr(
-        "speechrail.backends.qwen3_voice_binding.get_voice_profile", reg.get_profile
-    )
+    client, _reg, _synthesizer = _make_test_client(tmp_path, "quality")
 
     wav_bytes = _clean_clone_wav(duration_seconds=4.0)
 
@@ -1232,11 +1228,7 @@ async def test_qwen3_tts_client_packs_clone_metadata_into_frame(
 
     storage_path = tmp_path / "custom_voices.json"
     voices_dir = tmp_path / "voices"
-    reg = VoiceRegistry(storage_path=storage_path, voices_dir=voices_dir)
-    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", reg)
-    monkeypatch.setattr(
-        "speechrail.backends.qwen3_voice_binding.get_voice_profile", reg.get_profile
-    )
+    reg = VoiceRegistry.open(storage_path=storage_path, voices_dir=voices_dir)
 
     wav_bytes = _generate_test_wav(duration_seconds=3.0)
     profile = reg.create_cloned_profile(
@@ -1311,7 +1303,7 @@ async def test_qwen3_tts_client_packs_clone_metadata_into_frame(
         device="mps",
         sample_rate=24_000,
     )
-    worker = Qwen3TtsWorker(config)
+    worker = Qwen3TtsWorker(config, voice_leases=reg)
     worker._transport = FakeTransport()  # type: ignore[assignment]
     worker.model_variant = "base"
 
@@ -1336,11 +1328,6 @@ def test_audio_speech_with_cloned_voice_across_tiers(
 ) -> None:
     # 1. Quality tier: clone is available, /v1/audio/speech accepts it
     client_q, reg_q, _ = _make_test_client(tmp_path / "q", "quality")
-    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", reg_q)
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: reg_q)
-    monkeypatch.setattr(
-        "speechrail.backends.qwen3_voice_binding.get_voice_profile", reg_q.get_profile
-    )
 
     wav_bytes = _generate_test_wav(duration_seconds=3.0)
     reg_q.create_cloned_profile(
@@ -1411,11 +1398,6 @@ def test_audio_speech_with_cloned_voice_across_tiers(
 
     # 2. Fast tier: Base is still the clone owner, so the same voice routes there.
     client_b, reg_b, _synth_b = _make_test_client(tmp_path / "b", "fast")
-    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", reg_b)
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: reg_b)
-    monkeypatch.setattr(
-        "speechrail.backends.qwen3_voice_binding.get_voice_profile", reg_b.get_profile
-    )
 
     reg_b.create_cloned_profile(
         name="均衡音色",

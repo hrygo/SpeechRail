@@ -19,13 +19,12 @@ from speechrail.config.model_catalog import ModelArtifact
 from speechrail.domain.ports import SpeechRequest
 from speechrail.domain.tts import (
     VoiceProfile,
-    VoiceRegistry,
     VoiceRevisionConflictError,
     VoiceStoreUnavailableError,
-    get_voice_registry,
 )
 from speechrail.domain.tts_errors import TtsBackendError
 from speechrail.domain.tts_execution import VoicePreparer, VoiceRuntimeIdentity
+from speechrail.domain.voice_ports import ValidatedVoiceDirectory
 from speechrail.domain.voice_quality import POLICY_VERSION
 from speechrail.domain.voice_validation import (
     RETIRED_VALIDATION_PROBE_SETS,
@@ -321,7 +320,7 @@ async def prepare_validated_speech(
     preparer: VoicePreparer | None,
     artifact: ModelArtifact | VoiceValidationArtifact | None,
     capability_key: str | None,
-    registry: VoiceRegistry | None = None,
+    registry: ValidatedVoiceDirectory,
 ) -> SpeechRequest:
     """Prepare a strict request's worker and admit only current evidence.
 
@@ -334,7 +333,6 @@ async def prepare_validated_speech(
     if request.validation_policy != "require_output_pass":
         return request
 
-    registry = registry or get_voice_registry()
     try:
         profile = registry.get_profile(request.voice)
     except VoiceStoreUnavailableError as exc:

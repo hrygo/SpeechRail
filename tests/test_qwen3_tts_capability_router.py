@@ -75,13 +75,12 @@ class _Worker:
         self.ready = False
 
 
-def _router(*variants: str) -> Qwen3TtsCapabilityRouter:
+def _router(*variants: str, voice_directory=None) -> Qwen3TtsCapabilityRouter:
     return Qwen3TtsCapabilityRouter(
-        {
-            role: _Worker(variant)
-            for role, variant in _ROLE_VARIANTS.items()
-            if variant in variants
-        }
+        {role: _Worker(variant) for role, variant in _ROLE_VARIANTS.items() if variant in variants},
+        voice_directory=voice_directory
+        if voice_directory is not None
+        else _Registry({"serena": "system"}),
     )
 
 
@@ -90,8 +89,7 @@ async def test_router_routes_builtin_speaker_and_clone_by_plan_role(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry = _Registry({"serena": "system", "cloned": "clone"})
-    monkeypatch.setattr("speechrail.domain.tts.get_voice_registry", lambda: registry)
-    router = _router("custom_voice", "base")
+    router = _router("custom_voice", "base", voice_directory=registry)
     custom = router._workers["tts_custom_voice"]
     base = router._workers["tts_base"]
 
@@ -116,8 +114,7 @@ async def test_router_rejects_clone_when_base_capability_is_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry = _Registry({"cloned": "clone"})
-    monkeypatch.setattr("speechrail.domain.tts.get_voice_registry", lambda: registry)
-    router = _router("custom_voice")
+    router = _router("custom_voice", voice_directory=registry)
     request = SpeechRequest(text="clone", voice="cloned", output_format="pcm16")
 
     with pytest.raises(RuntimeError, match="voice_clone_base_model_unavailable"):
@@ -129,8 +126,7 @@ async def test_router_never_routes_design_candidates_through_runtime_synthesis(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry = _Registry({"designed": "instruction"})
-    monkeypatch.setattr("speechrail.domain.tts.get_voice_registry", lambda: registry)
-    router = _router("custom_voice", "base")
+    router = _router("custom_voice", "base", voice_directory=registry)
     custom = router._workers["tts_custom_voice"]
     request = SpeechRequest(text="design", voice="designed", output_format="pcm16")
 
@@ -138,9 +134,7 @@ async def test_router_never_routes_design_candidates_through_runtime_synthesis(
         _ = [chunk async for chunk in router.synthesize(request)]
     with pytest.raises(TtsStreamError) as raised:
         await router.open_incremental_stream(
-            TtsStreamOptions(
-                request_id="req_1", response_id="resp_1", voice="designed"
-            )
+            TtsStreamOptions(request_id="req_1", response_id="resp_1", voice="designed")
         )
 
     assert raised.value.code == "tts_streaming_unsupported"
@@ -151,9 +145,11 @@ async def test_router_never_routes_design_candidates_through_runtime_synthesis(
 
 def test_router_rejects_a_worker_whose_variant_does_not_match_its_role() -> None:
     with pytest.raises(ValueError, match="backend_identity_mismatch"):
-        Qwen3TtsCapabilityRouter({"tts_custom_voice": _Worker("base")})
+        Qwen3TtsCapabilityRouter(
+            {"tts_custom_voice": _Worker("base")}, voice_directory=_Registry({})
+        )
     with pytest.raises(ValueError, match="unsupported TTS plan role"):
-        Qwen3TtsCapabilityRouter({"narrator": _Worker("base")})
+        Qwen3TtsCapabilityRouter({"narrator": _Worker("base")}, voice_directory=_Registry({}))
 
 
 @pytest.mark.anyio

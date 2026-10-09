@@ -22,12 +22,12 @@ from speechrail.application.voice_validation_gate import build_validation_bindin
 from speechrail.config.selection import ActiveModelCatalog
 from speechrail.domain import voice_quality as vq
 from speechrail.domain.tts import (
-    VoiceRegistry,
     VoiceRevisionConflictError,
     VoiceRevokedError,
     VoiceStoreUnavailableError,
 )
 from speechrail.domain.tts_routing import TtsExecutionMode, tts_capability_key
+from speechrail.domain.voice_ports import VoiceValidationWriter
 from speechrail.domain.voice_quality_evidence import build_quality_evidence
 from speechrail.domain.voice_validation import (
     OUTPUT_VALIDATION_SCOPE,
@@ -49,7 +49,7 @@ class QualityRunResult:
 async def run_voice_quality(
     *,
     voice_id: str,
-    registry: VoiceRegistry,
+    registry: VoiceValidationWriter,
     active: ActiveModelCatalog,
     runtime: ValidationRuntime,
     runs: int,

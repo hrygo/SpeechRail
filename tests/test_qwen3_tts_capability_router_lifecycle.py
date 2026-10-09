@@ -114,6 +114,7 @@ class _FailOnceWorker(_Worker):
 
 def _router(
     *,
+    voice_directory=None,
     custom: _Worker | None = None,
     base: _Worker | None = None,
     design: _Worker | None = None,
@@ -125,7 +126,12 @@ def _router(
         workers["tts_base"] = base
     if design is not None:
         workers["voice_design"] = design
-    return Qwen3TtsCapabilityRouter(workers)
+    return Qwen3TtsCapabilityRouter(
+        workers,
+        voice_directory=voice_directory
+        if voice_directory is not None
+        else _Registry({"serena": "system"}),
+    )
 
 
 @pytest.mark.anyio
@@ -133,12 +139,11 @@ async def test_router_allows_custom_and_clone_roles_concurrently(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry = _Registry({"serena": "system", "cloned": "clone"})
-    monkeypatch.setattr("speechrail.domain.tts.get_voice_registry", lambda: registry)
     entered = anyio.Event()
     release = anyio.Event()
     custom = _Worker("custom_voice")
     base = _BlockingWorker("base", entered, release)
-    router = _router(custom=custom, base=base)
+    router = _router(custom=custom, base=base, voice_directory=registry)
     assert router.warm_capability is None
     await router.start()
     assert router.warm_capability == "both"
@@ -178,10 +183,9 @@ async def test_router_releases_capability_lock_after_worker_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry = _Registry({"serena": "system", "cloned": "clone"})
-    monkeypatch.setattr("speechrail.domain.tts.get_voice_registry", lambda: registry)
     custom = _Worker("custom_voice")
     base = _FailOnceWorker("base")
-    router = _router(custom=custom, base=base)
+    router = _router(custom=custom, base=base, voice_directory=registry)
     await router.start()
 
     clone_request = SpeechRequest(text="clone", voice="cloned", output_format="pcm16")
@@ -201,10 +205,9 @@ async def test_router_can_evict_every_plan_role(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry = _Registry({"serena": "system", "cloned": "clone"})
-    monkeypatch.setattr("speechrail.domain.tts.get_voice_registry", lambda: registry)
     custom = _Worker("custom_voice")
     base = _Worker("base")
-    router = _router(custom=custom, base=base)
+    router = _router(custom=custom, base=base, voice_directory=registry)
     await router.start()
 
     request = SpeechRequest(text="clone", voice="cloned", output_format="pcm16")
@@ -282,7 +285,6 @@ async def test_router_closes_child_stream_before_releasing_model_slot(
     from contextlib import aclosing
 
     registry = _Registry({"cloned": "clone"})
-    monkeypatch.setattr("speechrail.domain.tts.get_voice_registry", lambda: registry)
 
     class RetainedStreamWorker(_Worker):
         finalized = False
@@ -299,7 +301,7 @@ async def test_router_closes_child_stream_before_releasing_model_slot(
             return self.source
 
     base = RetainedStreamWorker("base")
-    router = _router(base=base)
+    router = _router(base=base, voice_directory=registry)
     request = SpeechRequest(text="test", voice="cloned")
     async with aclosing(router.synthesize(request)) as source:
         await anext(source)
@@ -312,10 +314,9 @@ async def test_start_preserves_already_warm_clone_capability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry = _Registry({"cloned": "clone"})
-    monkeypatch.setattr("speechrail.domain.tts.get_voice_registry", lambda: registry)
     custom = _Worker("custom_voice")
     base = _Worker("base")
-    router = _router(custom=custom, base=base)
+    router = _router(custom=custom, base=base, voice_directory=registry)
     request = SpeechRequest(text="test", voice="cloned")
     assert [chunk async for chunk in router.synthesize(request)]
     await router.start()
@@ -332,9 +333,8 @@ async def test_router_reports_busy_instead_of_evicting_an_active_utterance(
     """A group-level evict must never cut off an utterance that still owns a worker."""
 
     registry = _Registry({"serena": "system"})
-    monkeypatch.setattr("speechrail.domain.tts.get_voice_registry", lambda: registry)
     custom = _Worker("custom_voice")
-    router = _router(custom=custom)
+    router = _router(custom=custom, voice_directory=registry)
     await router.start()
     custom.active_incremental_stream = True  # type: ignore[attr-defined]
 

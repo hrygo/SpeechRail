@@ -14,7 +14,7 @@ from speechrail.application.voice_validation_gate import (
     load_validation_evidence,
 )
 from speechrail.config.selection import active_model_catalog
-from speechrail.domain.tts import VoiceStoreUnavailableError, get_voice_registry, resolve_voice
+from speechrail.domain.tts import VoiceStoreUnavailableError, resolve_voice
 from speechrail.domain.tts_routing import TtsExecutionMode, tts_capability_key
 from speechrail.domain.voice_validation import VoiceValidationStoreUnavailableError
 from speechrail.http.auth import http_auth_error
@@ -58,7 +58,7 @@ def create_capability_router(services: AppServices) -> APIRouter:
         if (auth_error := http_auth_error(request, services.settings)) is not None:
             return auth_error
         try:
-            registry = get_voice_registry()
+            registry = services.voice_store
             profiles = registry.snapshot_profiles()
             validations: dict[str, dict[str, object]] = {}
             validation_bindings: dict[str, dict[str, object]] = {}
@@ -91,7 +91,7 @@ def create_capability_router(services: AppServices) -> APIRouter:
                 validation_bindings=validation_bindings,
                 asr_capabilities=asr_capability_facts(),
             )
-        except (VoiceStoreUnavailableError, VoiceValidationStoreUnavailableError):
+        except VoiceStoreUnavailableError, VoiceValidationStoreUnavailableError:
             return error_response(
                 503,
                 request.state.request_id,

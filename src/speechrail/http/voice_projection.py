@@ -10,9 +10,10 @@ from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.config.selection import ActiveModelCatalog
 from speechrail.domain import voice_quality as vq
 from speechrail.domain.ports import SpeechSynthesizer
-from speechrail.domain.tts import VOICE_ALIASES, VoiceProfile, get_voice_registry
+from speechrail.domain.tts import VOICE_ALIASES, VoiceProfile
 from speechrail.domain.tts_execution import EMPTY_TTS_EXECUTION, TtsExecutionPorts
 from speechrail.domain.tts_routing import TtsExecutionMode, tts_capability_key
+from speechrail.domain.voice_ports import ValidatedVoiceDirectory
 from speechrail.domain.voice_preview import preview_for_profile
 from speechrail.domain.voice_validation import VoiceValidationStoreUnavailableError
 from speechrail.domain.voice_validation_policy import (
@@ -26,6 +27,7 @@ def voice_entry(
     active: ActiveModelCatalog,
     tts_ready: bool,
     *,
+    voice_store: ValidatedVoiceDirectory,
     enabled: bool = True,
     synthesizer: SpeechSynthesizer | None = None,
     tts_execution: TtsExecutionPorts = EMPTY_TTS_EXECUTION,
@@ -71,7 +73,7 @@ def voice_entry(
     )
     if profile.mode == "clone":
         try:
-            repository = get_voice_registry().validation_store
+            repository = voice_store.validation_store
             if strict_validation:
                 verdict, validation, _ = validation_verdict_for_voice(
                     profile,
@@ -102,7 +104,7 @@ def voice_entry(
     binding_variant = variant
     if binding_variant in {"voice_design", "custom_voice", "base"}:
         try:
-            binding = resolve_binding(binding_variant, profile.id)
+            binding = resolve_binding(binding_variant, profile.id, profile=profile)
         except ValueError:
             available = False
             binding_resolved = False
@@ -170,8 +172,7 @@ def voice_entry(
     if include_streaming:
         entry["streaming"] = tts_stream_capability_payload(
             resolve_tts_stream_capability(
-                voice_id=profile.id,
-                voice_mode=profile.mode,
+                profile=profile,
                 artifact=artifact,
                 tts_ready=tts_ready,
                 voice_enabled=available,

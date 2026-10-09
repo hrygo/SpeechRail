@@ -1700,10 +1700,9 @@ class OpenAIRealtimeSession:
             )
 
     def _resolve_voice_profile(self, selected_voice: str) -> VoiceProfile:
-        from speechrail.domain.tts import get_voice_profile
 
         try:
-            return get_voice_profile(selected_voice)
+            return self._services.voice_store.get_profile(selected_voice)
         except VoiceStoreUnavailableError:
             raise RealtimeAdapterError(
                 "voice_store_unavailable", "custom voice storage is unavailable"
@@ -1717,7 +1716,6 @@ class OpenAIRealtimeSession:
         return self._active_model_catalog.artifact_for_voice_mode(voice_mode)
 
     def _require_voice_available(self, voice: str) -> None:
-        from speechrail.domain.tts import get_voice_profile
 
         # Injected/test synthesizers may not have an active catalog-backed TTS
         # variant. Preserve the historical contract in that case: endpoint
@@ -1726,15 +1724,13 @@ class OpenAIRealtimeSession:
             return
 
         try:
-            profile = get_voice_profile(voice)
+            profile = self._services.voice_store.get_profile(voice)
         except VoiceStoreUnavailableError:
             raise RealtimeAdapterError(
                 "voice_store_unavailable", "custom voice storage is unavailable"
             ) from None
         except ValueError:
-            raise RealtimeAdapterError(
-                "voice_not_found", f"unknown voice: {voice[:200]}"
-            ) from None
+            raise RealtimeAdapterError("voice_not_found", f"unknown voice: {voice[:200]}") from None
 
         if profile.revoked:
             raise RealtimeAdapterError(
@@ -1748,7 +1744,7 @@ class OpenAIRealtimeSession:
                 f"voice {voice[:200]} is unavailable for the active TTS capabilities",
             )
         try:
-            resolve_binding(role, voice)
+            resolve_binding(role, voice, profile=profile)
         except VoiceStoreUnavailableError:
             raise RealtimeAdapterError(
                 "voice_store_unavailable", "custom voice storage is unavailable"
@@ -1771,11 +1767,10 @@ class OpenAIRealtimeSession:
     # ``speechrail.tts.completed`` / ``cancelled`` / ``failed`` terminal.
     # ------------------------------------------------------------------
 
-    def _stream_capability(self, voice: str, mode: str) -> TtsStreamCapability:
+    def _stream_capability(self, profile: VoiceProfile) -> TtsStreamCapability:
         return resolve_tts_stream_capability(
-            voice_id=voice,
-            voice_mode=mode,
-            artifact=self._tts_artifact_for_mode(mode),
+            profile=profile,
+            artifact=self._tts_artifact_for_mode(profile.mode),
             tts_ready=self._services.tts_ready,
             voice_enabled=True,
             execution=self._services.tts_execution,
@@ -1805,9 +1800,7 @@ class OpenAIRealtimeSession:
         selected_voice = resolve_voice(request.voice)
         selected_profile = self._resolve_voice_profile(selected_voice)
         if selected_profile.revoked:
-            raise RealtimeAdapterError(
-                "voice_revoked", f"voice {selected_voice[:200]} is revoked"
-            )
+            raise RealtimeAdapterError("voice_revoked", f"voice {selected_voice[:200]} is revoked")
         self._require_voice_available(selected_voice)
         if (
             request.expected_voice_revision is not None
@@ -1825,7 +1818,7 @@ class OpenAIRealtimeSession:
                 "model_revision_conflict",
                 "Requested model revision is not the active TTS artifact",
             )
-        capability = self._stream_capability(selected_voice, selected_profile.mode)
+        capability = self._stream_capability(selected_profile)
         if not capability.supported:
             detail = capability.reason or "unsupported"
             hint = f"; {capability.hint}" if capability.hint else ""

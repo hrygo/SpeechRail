@@ -65,7 +65,6 @@ from speechrail.domain.tts import (
     VoiceRevisionConflictError,
     VoiceRevokedError,
     VoiceStoreUnavailableError,
-    get_voice_registry,
     normalize_tts_text,
     resolve_voice,
     tts_voice_class,
@@ -749,9 +748,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
         ),
         stream: bool = Form(default=False),
         chunking_strategy: str | None = Form(default=None),
-        chunking_strategy_type: str | None = Form(
-            default=None, alias="chunking_strategy[type]"
-        ),
+        chunking_strategy_type: str | None = Form(default=None, alias="chunking_strategy[type]"),
         include: list[str] = Form(default=[]),  # noqa: B008 - multipart marker.
         keywords: list[str] = Form(default=[]),  # noqa: B008 - multipart marker.
         known_speaker_names: list[str] = Form(default=[]),  # noqa: B008 - multipart marker.
@@ -863,9 +860,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "unsupported_parameter",
                 "known speaker references are not supported by this anonymous diarization service",
                 param=(
-                    "known_speaker_names"
-                    if known_speaker_names
-                    else "known_speaker_references"
+                    "known_speaker_names" if known_speaker_names else "known_speaker_references"
                 ),
             )
         if temperature is not None and not 0 <= temperature <= 2:
@@ -940,9 +935,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
         # diarization instead, so it does not ask for a timeline here.
         requirements = TranscriptionRequirements.for_response_format(response_format)
         alignment_requested = requirements.timestamps
-        if code := requirements.missing_alignment_error(
-            aligner_available=text_aligner is not None
-        ):
+        if code := requirements.missing_alignment_error(aligner_available=text_aligner is not None):
             return error_response(
                 503,
                 request_id,
@@ -1360,9 +1353,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
         request_id = request.state.request_id
         if (auth_error := http_auth_error(request, resolved)) is not None:
             return auth_error
-        if canonical_tts_model(
-            body.model, registered=frozenset({resolved.tts_model_id})
-        ) is None:
+        if canonical_tts_model(body.model, registered=frozenset({resolved.tts_model_id})) is None:
             return error_response(
                 400,
                 request_id,
@@ -1480,9 +1471,9 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 retryable=True,
             )
         except TtsBackendError as exc:
-            if (response := _tts_backend_error_response(
-                request_id, exc, worker_role="voice_design"
-            )) is not None:
+            if (
+                response := _tts_backend_error_response(request_id, exc, worker_role="voice_design")
+            ) is not None:
                 return response
             raise
         except RuntimeError as exc:
@@ -1546,7 +1537,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
             return error_response(
                 503, request_id, "backend_timeout", "Inference timed out", retryable=True
             )
-        except (OverflowError, ValueError):
+        except OverflowError, ValueError:
             return error_response(
                 502,
                 request_id,
@@ -1619,9 +1610,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
         effective_validation_policy = validation_policy or "allow_unverified"
         if (auth_error := http_auth_error(request, resolved)) is not None:
             return auth_error
-        if canonical_tts_model(
-            body.model, registered=frozenset({resolved.tts_model_id})
-        ) is None:
+        if canonical_tts_model(body.model, registered=frozenset({resolved.tts_model_id})) is None:
             return error_response(
                 400,
                 request_id,
@@ -1639,9 +1628,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
             )
         requested_voice = body.voice.id if isinstance(body.voice, _SpeechVoiceID) else body.voice
         preset_voice = resolve_voice(requested_voice)
-        from speechrail.domain.tts import get_voice_profile
         try:
-            profile = get_voice_profile(preset_voice)
+            profile = services.voice_store.get_profile(preset_voice)
             if profile.is_system and preset_voice not in resolved.tts_voice_ids:
                 raise ValueError(f"voice {preset_voice} not configured")
         except VoiceStoreUnavailableError:
@@ -1682,9 +1670,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
         # managed catalog selection. Production workers still require the active
         # artifact below and never infer identity from a directory name.
         injected_backend = (
-            active.tts is None
-            and active.tts_clone is None
-            and services.tts_synthesizer is not None
+            active.tts is None and active.tts_clone is None and services.tts_synthesizer is not None
         )
         tts_artifact = active.artifact_for_role(runtime_role)
         if tts_artifact is not None and tts_artifact.variant != engine_variant_for_role(
@@ -1740,7 +1726,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
             )
         if validation_variant in {"voice_design", "custom_voice", "base"}:
             try:
-                resolve_binding(binding_role, preset_voice)
+                resolve_binding(binding_role, preset_voice, profile=profile)
                 validated_tts = validate_tts_parameters(
                     model_variant=validation_variant,
                     is_clone=profile.mode == "clone",
@@ -1856,9 +1842,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
             display_spans: tuple[tuple[int, int] | None, ...]
             if spoken is not None and normalized_spoken == spoken.text:
                 mapped = TtsTextPlanner().plan_spoken(spoken)
-                if tuple(
-                    (item.source_start, item.source_end) for item in mapped.chunks
-                ) == tuple(
+                if tuple((item.source_start, item.source_end) for item in mapped.chunks) == tuple(
                     (item.source_start, item.source_end) for item in timing_plan.chunks
                 ):
                     mapped_display_spans = tuple(
@@ -1885,8 +1869,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
             elif normalized_spoken == body.input and synthesis_text == body.input:
                 display_mapping_status = "identity"
                 display_spans = tuple(
-                    (item.source_start, item.source_end)
-                    for item in timing_plan.chunks
+                    (item.source_start, item.source_end) for item in timing_plan.chunks
                 )
             else:
                 display_mapping_status = "unavailable"
@@ -1898,8 +1881,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     sample_rate=resolved.tts_sample_rate,
                     display_mapping_status=display_mapping_status,
                     expected_text_spans=tuple(
-                        (item.source_start, item.source_end)
-                        for item in timing_plan.chunks
+                        (item.source_start, item.source_end) for item in timing_plan.chunks
                     ),
                     display_spans=display_spans,
                     display_mapping_reason=display_mapping_reason,
@@ -1932,7 +1914,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 ),
                 voice_id=preset_voice,
                 voice_revision=profile.revision,
-                voice_mode=tts_voice_class(preset_voice),
+                voice_mode=tts_voice_class(preset_voice, profile=profile),
                 model_role="tts",
                 model_artifact=tts_artifact.key if tts_artifact is not None else None,
                 model_artifact_revision=(
@@ -2018,9 +2000,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
             reclamation_failed = True
             services.governor.quarantine_tts_lane(resource_key)
 
-        async def audio_stream(
-            *, counter: PcmOutputCounter | None = None
-        ) -> AsyncIterator[bytes]:
+        async def audio_stream(*, counter: PcmOutputCounter | None = None) -> AsyncIterator[bytes]:
             # Integrity and timing are measured over validated PCM16 before encoding.
             backend_response_id: str | None = None
             emitted_samples = 0
@@ -2037,7 +2017,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                         preparer=services.tts_execution.preparer,
                         artifact=tts_artifact,
                         capability_key=render_capability_key,
-                        registry=get_voice_registry(),
+                        registry=services.voice_store,
                     )
                     # Closing the response must join the backend iterator before
                     # leaving its Governor reservation, including at a yield.
@@ -2098,9 +2078,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                             None,
                         )
                         sidecar = (
-                            take_timing(backend_response_id)
-                            if callable(take_timing)
-                            else None
+                            take_timing(backend_response_id) if callable(take_timing) else None
                         )
                         if sidecar is None:
                             services.tts_timings.unavailable(
@@ -2152,7 +2130,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
             except GovernorQueueFullError as exc:
                 code = (
                     "backend_reclamation_failed"
-                    if isinstance(exc, GovernorLaneIsolatedError) else "queue_full"
+                    if isinstance(exc, GovernorLaneIsolatedError)
+                    else "queue_full"
                 )
                 if receipt_id is not None and not reclamation_failed:
                     services.render_receipts.fail(receipt_id, code)
@@ -2283,7 +2262,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 async def _record_if_complete() -> None:
                     audio_sec = _emitted_bytes / 2 / resolved.tts_sample_rate
                     services.metrics.record_tts(
-                        voice_class=tts_voice_class(preset_voice),
+                        voice_class=tts_voice_class(preset_voice, profile=profile),
                         char_count=len(body.input),
                         audio_duration_sec=audio_sec,
                         inference_duration_sec=_time.monotonic() - _tts_t0,
@@ -2310,6 +2289,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     delivery_failed = True
                     raise
                 finally:
+
                     async def finish_delivery() -> None:
                         await _close_audio_stream(pcm_stream)
                         if receipt_id is not None and not reclamation_failed:
@@ -2318,9 +2298,12 @@ def create_audio_router(services: AppServices) -> APIRouter:
                             elif delivery_failed:
                                 services.render_receipts.fail(receipt_id, "stream_delivery_error")
 
-                    await join_cleanup(asyncio.create_task(
-                        finish_delivery(), name="http-audio-delivery-close",
-                    ))
+                    await join_cleanup(
+                        asyncio.create_task(
+                            finish_delivery(),
+                            name="http-audio-delivery-close",
+                        )
+                    )
 
             response_body = streamed_pcm()
 
@@ -2337,7 +2320,9 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     services.tts_timings.cancel(timing_id)
 
             response = _streaming_audio_response(
-                response_body, media_type="audio/x-pcm", close=close_pcm_response,
+                response_body,
+                media_type="audio/x-pcm",
+                close=close_pcm_response,
             )
             if receipt_id is not None:
                 response.headers["SpeechRail-Receipt-Id"] = receipt_id
@@ -2425,7 +2410,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     "TTS backend failed to synthesize audio",
                     retryable=True,
                 )
-            except (OverflowError, ValueError):
+            except OverflowError, ValueError:
                 await _close_audio_stream(encoded_stream)
                 if receipt_id is not None:
                     services.render_receipts.fail(
@@ -2459,11 +2444,9 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     async for chunk in iter_until(encoded_stream, expires_at):
                         yield chunk
                     services.metrics.record_tts(
-                        voice_class=tts_voice_class(preset_voice),
+                        voice_class=tts_voice_class(preset_voice, profile=profile),
                         char_count=len(body.input),
-                        audio_duration_sec=pcm_counter.total_bytes
-                        / 2
-                        / resolved.tts_sample_rate,
+                        audio_duration_sec=pcm_counter.total_bytes / 2 / resolved.tts_sample_rate,
                         inference_duration_sec=_time.monotonic() - _tts_t0,
                     )
                     if receipt_id is not None:
@@ -2478,6 +2461,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     delivery_failed = True
                     raise
                 finally:
+
                     async def finish_delivery() -> None:
                         await _close_audio_stream(encoded_stream)
                         if receipt_id is not None and not reclamation_failed:
@@ -2486,9 +2470,12 @@ def create_audio_router(services: AppServices) -> APIRouter:
                             elif delivery_failed:
                                 services.render_receipts.fail(receipt_id, "stream_delivery_error")
 
-                    await join_cleanup(asyncio.create_task(
-                        finish_delivery(), name="http-audio-delivery-close",
-                    ))
+                    await join_cleanup(
+                        asyncio.create_task(
+                            finish_delivery(),
+                            name="http-audio-delivery-close",
+                        )
+                    )
 
             response_body = streamed_encoded()
 
@@ -2505,7 +2492,9 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     services.tts_timings.cancel(timing_id)
 
             response = _streaming_audio_response(
-                response_body, media_type=media_type, close=close_encoded_response,
+                response_body,
+                media_type=media_type,
+                close=close_encoded_response,
             )
             if receipt_id is not None:
                 response.headers["SpeechRail-Receipt-Id"] = receipt_id
@@ -2567,9 +2556,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "Requested voice revision has been revoked",
             )
         except RuntimeError as exc:
-            if (
-                typed_response := _tts_backend_error_response(request_id, exc)
-            ) is not None:
+            if (typed_response := _tts_backend_error_response(request_id, exc)) is not None:
                 return typed_response
             if (worker_response := _worker_unavailable_response(request_id, exc)) is not None:
                 return worker_response
@@ -2602,7 +2589,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
         # Record TTS metrics: audio_sec = pcm_bytes / 2 / sample_rate
         _tts_audio_sec = len(pcm) / 2 / resolved.tts_sample_rate
         services.metrics.record_tts(
-            voice_class=tts_voice_class(preset_voice),
+            voice_class=tts_voice_class(preset_voice, profile=profile),
             char_count=len(body.input),
             audio_duration_sec=_tts_audio_sec,
             inference_duration_sec=_tts_inference_sec,
@@ -2610,7 +2597,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
         try:
             content = _wav_pcm16(bytes(pcm), sample_rate=resolved.tts_sample_rate)
             media_type = "audio/wav"
-        except (OverflowError, ValueError):
+        except OverflowError, ValueError:
             if receipt_id is not None:
                 services.render_receipts.fail(
                     receipt_id,

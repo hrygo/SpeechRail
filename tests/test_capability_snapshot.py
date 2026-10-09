@@ -10,15 +10,17 @@ from fastapi.testclient import TestClient
 import speechrail.domain.tts as voices
 from speechrail.app import create_app
 from speechrail.config import Settings
+from speechrail.infrastructure.voice_registry import FileVoiceRegistry as VoiceRegistry
 
 
 def test_capability_snapshot_is_stable_and_discovery_remains_available(
     tmp_path: Path, monkeypatch
 ) -> None:
-    registry = voices.VoiceRegistry(tmp_path / "voices.json")
-    monkeypatch.setattr(voices, "_GLOBAL_VOICE_REGISTRY", registry)
+    registry = VoiceRegistry.open(
+        tmp_path / "voices.json", voices_dir=(tmp_path / "voices.json").parent / "audio"
+    )
     settings = Settings(api_key=None, qwen3_model_dir=None, qwen3_python=None)
-    client = TestClient(create_app(settings))
+    client = TestClient(create_app(settings, voice_store=registry))
     first = client.get("/v1/speechrail/capabilities")
     assert first.status_code == 200
     again = client.get("/v1/speechrail/capabilities")
@@ -30,7 +32,11 @@ def test_capability_snapshot_is_stable_and_discovery_remains_available(
         ).status_code
         == 304
     )
-    restart = TestClient(create_app(settings)).get("/v1/speechrail/capabilities").json()
+    restart = (
+        TestClient(create_app(settings, voice_store=registry))
+        .get("/v1/speechrail/capabilities")
+        .json()
+    )
     assert first.json()["catalog_revision"] == restart["catalog_revision"]
     assert first.json()["service_instance_epoch"] != restart["service_instance_epoch"]
     assert first.json()["realtime"] == {
@@ -45,9 +51,14 @@ def test_capability_snapshot_is_stable_and_discovery_remains_available(
 
 
 def test_capability_discovery_uses_configured_auth(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(voices, "_GLOBAL_VOICE_REGISTRY", voices.VoiceRegistry(tmp_path / "v.json"))
+    registry = VoiceRegistry.open(
+        tmp_path / "v.json", voices_dir=(tmp_path / "v.json").parent / "audio"
+    )
     client = TestClient(
-        create_app(Settings(api_key="test-key", qwen3_model_dir=None, qwen3_python=None))
+        create_app(
+            Settings(api_key="test-key", qwen3_model_dir=None, qwen3_python=None),
+            voice_store=registry,
+        )
     )
     assert client.get("/v1/speechrail/capabilities").status_code == 401
     assert (
@@ -250,7 +261,6 @@ def test_effective_matrix_uses_captured_voice_and_base_lane(
     def forbidden(*args, **kwargs):
         raise AssertionError("unexpected registry reread")
 
-    monkeypatch.setattr("speechrail.backends.qwen3_voice_binding.get_voice_profile", forbidden)
     data = build_capability_snapshot(
         (profile,),
         _active(asr_spec, tts_spec),
@@ -276,8 +286,7 @@ def test_effective_matrix_uses_captured_voice_and_base_lane(
     # Instructions are a VoiceDesign-only parameter; no tier's primary TTS is
     # VoiceDesign, so both built-in speakers and the Base clone lane reject them.
     assert (
-        entry["operations"]["http_speech"]["parameters"]["instructions"]["status"]
-        == "unsupported"
+        entry["operations"]["http_speech"]["parameters"]["instructions"]["status"] == "unsupported"
     )
     parameters = entry["operations"]["http_speech"]["parameters"]
     # S3-2: custom_voice (system) accepts a caller seed via the SpeechRail-Seed
@@ -380,7 +389,9 @@ def test_content_revision_invalidates_on_private_recipe_but_not_readiness() -> N
 
 
 def test_registry_snapshot_is_detached_from_mutable_quality(tmp_path: Path) -> None:
-    registry = voices.VoiceRegistry(tmp_path / "voices.json")
+    registry = VoiceRegistry.open(
+        tmp_path / "voices.json", voices_dir=(tmp_path / "voices.json").parent / "audio"
+    )
     registry.create_custom_profile(name="local", instruction="private", voice_id="local")
     snapshot = registry.snapshot_profiles()
     registry.update_custom_profile("local", name="updated")
@@ -391,9 +402,14 @@ def test_registry_snapshot_is_detached_from_mutable_quality(tmp_path: Path) -> N
 
 
 def test_namespaced_unknown_voice_and_store_failure_are_safe(tmp_path: Path, monkeypatch) -> None:
-    registry = voices.VoiceRegistry(tmp_path / "voices.json")
-    monkeypatch.setattr(voices, "_GLOBAL_VOICE_REGISTRY", registry)
-    client = TestClient(create_app(Settings(api_key=None, qwen3_model_dir=None, qwen3_python=None)))
+    registry = VoiceRegistry.open(
+        tmp_path / "voices.json", voices_dir=(tmp_path / "voices.json").parent / "audio"
+    )
+    client = TestClient(
+        create_app(
+            Settings(api_key=None, qwen3_model_dir=None, qwen3_python=None), voice_store=registry
+        )
+    )
     assert client.get("/v1/speechrail/voices/not-found").status_code == 404
     assert client.get("/v1/speechrail/voices/alloy").json()["id"] == "serena"
     assert client.get("/v1/speechrail/voices").json()["data"]

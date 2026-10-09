@@ -29,8 +29,8 @@ from speechrail.domain.idempotency import (
 )
 from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.domain.ports import AudioChunk, SpeechRequest, TranscriptionRequest
-from speechrail.domain.tts import VoiceRegistry
 from speechrail.domain.tts_errors import TtsBackendError
+from speechrail.infrastructure.voice_registry import FileVoiceRegistry as VoiceRegistry
 from voice_test_fixtures import fake_pitch_measurement as fake_pitch_measurement
 
 REFERENCE_TEXT = "这是用于音色设计的参考语句，请保持自然清晰的表达方式。"
@@ -141,11 +141,10 @@ def make_client(
     # VoiceDesign 是与档位无关的按需制品: 任何 tier 都用同一份设计权重。
     design_key = VOICE_DESIGN_ARTIFACT_KEY if with_design else None
     assert asr_key is not None and tts_key is not None
-    registry = VoiceRegistry(
+    registry = VoiceRegistry.open(
         storage_path=tmp_path / "voices.json",
         voices_dir=tmp_path / "voices",
     )
-    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", registry)
     synth = DesignSynth()
     asr = DesignAsr(synth)
     settings = Settings(
@@ -172,6 +171,7 @@ def make_client(
         settings,
         tts_synthesizer=synth,
         batch_transcriber=asr if with_asr else None,
+        voice_store=registry,
     )
     return TestClient(app), registry, synth, asr
 
@@ -464,8 +464,8 @@ def test_reference_confirmation_checks_numbers_without_changing_rejected_candida
     client, registry, _synth, asr = make_client(tmp_path, monkeypatch)
     candidate_id, created = create_candidate(client, reference_text=NUMERIC_TEST_TEXT)
     repository = VoiceDesignRepository(
-        registry.storage_path.with_name("voice_design_candidates.json"),
-        registry.storage_path.with_name("voice_design_candidates"),
+        registry.artifact_path("voice_design_candidates.json"),
+        registry.artifact_path("voice_design_candidates"),
     )
     before = repository.get(candidate_id)
     files_before = {path: path.read_bytes() for path in repository.assets_dir.rglob("*.wav")}
@@ -501,8 +501,8 @@ def test_workflow_does_not_repeat_the_pitch_algorithm(
     candidate_id, created = create_candidate(client)
     assert created["state"] == "generated"
     repository = VoiceDesignRepository(
-        registry.storage_path.with_name("voice_design_candidates.json"),
-        registry.storage_path.with_name("voice_design_candidates"),
+        registry.artifact_path("voice_design_candidates.json"),
+        registry.artifact_path("voice_design_candidates"),
     )
     assert repository.get(candidate_id).quality["reference"]["f0_median_hz"] == 220.0
 
@@ -530,8 +530,7 @@ def test_candidate_lifecycle_publishes_only_after_base_and_human_review(
     assert synth.requests[0].seed == 123
     assert asr.requests and asr.requests[0].prompt == ""
     assert (
-        Path(registry.storage_path)
-        .parent.joinpath("voice_design_candidates", f"{candidate_id}.wav")
+        registry.artifact_path("voice_design_candidates").joinpath(f"{candidate_id}.wav")
         .is_file()
     )
 
@@ -700,7 +699,7 @@ def test_base_transcript_mismatch_never_publishes(
     assert blocked.status_code == 409
     assert all(profile.is_system for profile in registry.list_profiles())
     # Failed validation preserves the candidate assets for a retry.
-    assert list((registry.storage_path.parent / "voice_design_candidates").glob("*.wav"))
+    assert list((registry.artifact_path("voice_design_candidates")).glob("*.wav"))
 
 
 def test_base_invalid_audio_never_publishes(
@@ -759,7 +758,7 @@ def test_candidate_reference_and_validation_audio_require_current_revision(
     candidate_id, created = create_candidate(client)
     revision_header = {"SpeechRail-Expected-Candidate-Revision": created["revision"]}
     reference_path = (
-        registry.storage_path.parent / "voice_design_candidates" / f"{candidate_id}.wav"
+        registry.artifact_path("voice_design_candidates") / f"{candidate_id}.wav"
     )
 
     reference_audio = client.get(
@@ -785,8 +784,7 @@ def test_candidate_reference_and_validation_audio_require_current_revision(
     validated = validate_candidate(client, asr, candidate_id)["candidate"]
     validation = validated["validations"][-1]
     validation_audio_path = (
-        registry.storage_path.parent
-        / "voice_design_candidates"
+        registry.artifact_path("voice_design_candidates")
         / candidate_id
         / f"{validation['validation_id']}.wav"
     )
@@ -824,7 +822,7 @@ def test_reference_audio_identity_is_checked_before_confirm_and_publish(
     )
     candidate_id, _ = create_candidate(confirm_client)
     reference_path = (
-        confirm_registry.storage_path.parent / "voice_design_candidates" / f"{candidate_id}.wav"
+        confirm_registry.artifact_path("voice_design_candidates") / f"{candidate_id}.wav"
     )
     reference_path.write_bytes(reference_path.read_bytes() + b"changed")
     transcription_count = len(confirm_asr.requests)
@@ -853,8 +851,7 @@ def test_reference_audio_identity_is_checked_before_confirm_and_publish(
         validation_id=validated["validations"][-1]["validation_id"],
     )
     publish_reference_path = (
-        publish_registry.storage_path.parent
-        / "voice_design_candidates"
+        publish_registry.artifact_path("voice_design_candidates")
         / f"{publish_candidate_id}.wav"
     )
     publish_reference_path.write_bytes(b"changed")
@@ -874,7 +871,7 @@ def test_reference_audio_read_rejects_a_symlinked_asset_root(
 ) -> None:
     client, registry, _synth, _asr = make_client(tmp_path, monkeypatch)
     candidate_id, candidate = create_candidate(client)
-    assets_dir = registry.storage_path.parent / "voice_design_candidates"
+    assets_dir = registry.artifact_path("voice_design_candidates")
     moved_assets_dir = tmp_path / "saved_candidate_assets"
     assets_dir.rename(moved_assets_dir)
     outside_dir = tmp_path / "outside"
@@ -901,7 +898,7 @@ def test_cancel_during_confirmation_cannot_be_overwritten_by_stale_asr(
 
     from speechrail.http.routes import voice_designs
 
-    repository = voice_designs._repository()
+    repository = voice_designs._repository(client.app.state.services.voice_store)
 
     async def cancel_before_transcript(request: TranscriptionRequest) -> TranscriptResult:
         repository.update(
@@ -937,7 +934,7 @@ def test_cancel_during_publish_cannot_be_overwritten_by_stale_candidate(
 
     from speechrail.http.routes import voice_designs
 
-    repository = voice_designs._repository()
+    repository = voice_designs._repository(client.app.state.services.voice_store)
 
     class CancelAfterReferenceRead:
         def __getattr__(self, name: str) -> object:
@@ -954,7 +951,7 @@ def test_cancel_during_publish_cannot_be_overwritten_by_stale_candidate(
     monkeypatch.setattr(
         voice_designs,
         "_repository",
-        lambda: CancelAfterReferenceRead(),
+        lambda _voice_store: CancelAfterReferenceRead(),
     )
     response = client.post(
         f"/v1/voice-designs/{candidate_id}/publish",
@@ -964,7 +961,7 @@ def test_cancel_during_publish_cannot_be_overwritten_by_stale_candidate(
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "voice_design_publish_conflict"
     assert VOICE_ID not in published_voice_ids(client)
-    monkeypatch.setattr(voice_designs, "_repository", lambda: repository)
+    monkeypatch.setattr(voice_designs, "_repository", lambda _voice_store: repository)
     assert repository.get(candidate_id).state == "cancelled"
 
 
@@ -1066,7 +1063,7 @@ def test_confirm_requires_reference_transcript_match(
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "transcript_mismatch"
     assert all(profile.is_system for profile in registry.list_profiles())
-    assert list((registry.storage_path.parent / "voice_design_candidates").glob("*.wav"))
+    assert list((registry.artifact_path("voice_design_candidates")).glob("*.wav"))
 
 
 def test_confirm_asr_timeout_is_a_retryable_backend_timeout(
@@ -1111,8 +1108,8 @@ def test_a_retired_text_fidelity_record_is_kept_but_revalidatable(
     current = validate_candidate(client, asr, candidate_id)["candidate"]["validations"][-1]
 
     repository = VoiceDesignRepository(
-        registry.storage_path.with_name("voice_design_candidates.json"),
-        registry.storage_path.with_name("voice_design_candidates"),
+        registry.artifact_path("voice_design_candidates.json"),
+        registry.artifact_path("voice_design_candidates"),
     )
     legacy = current["validation_id"]
     repository.update(

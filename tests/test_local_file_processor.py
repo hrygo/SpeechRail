@@ -25,6 +25,7 @@ from speechrail.domain.ports import (
 )
 from speechrail.domain.tts import VoiceProfile
 from speechrail.domain.voice_validation import VoiceValidationArtifact, VoiceValidationRepository
+from speechrail.infrastructure.voice_registry import FileVoiceRegistry as VoiceRegistry
 from speechrail.runtime.job_artifacts import delete_job_result_artifact
 from speechrail.runtime.job_runner import JobProcessingError, JobRunner
 from speechrail.runtime.jobs import JobRecord, JobRepository
@@ -621,10 +622,12 @@ def _speech_job(spool: Path, text_file: Path, **params: object) -> JobRecord:
     )
 
 
-def _speech_processor(
-    spool: Path, synthesizer: SpeechSynthesizer
-) -> LocalFileJobProcessor:
-    return LocalFileJobProcessor(spool_dir=spool, tts_synthesizer=synthesizer)
+def _speech_processor(spool: Path, synthesizer: SpeechSynthesizer) -> LocalFileJobProcessor:
+    return LocalFileJobProcessor(
+        spool_dir=spool,
+        tts_synthesizer=synthesizer,
+        voice_store=VoiceRegistry.open((spool) / "voices.json", (spool) / "voice-audio"),
+    )
 
 
 def test_processor_speech_writes_artifact_and_returns_relative_ref(tmp_path: Path) -> None:
@@ -636,6 +639,7 @@ def test_processor_speech_writes_artifact_and_returns_relative_ref(tmp_path: Pat
     processor = LocalFileJobProcessor(
         spool_dir=spool,
         tts_synthesizer=synthesizer,
+        voice_store=VoiceRegistry.open((spool) / "voices.json", (spool) / "voice-audio"),
     )
     job = JobRecord(
         id="job_s1",
@@ -734,6 +738,7 @@ def test_processor_accepts_file_uri_for_an_allowlisted_input(tmp_path: Path) -> 
     processor = LocalFileJobProcessor(
         spool_dir=spool,
         tts_synthesizer=_FakeSynthesizer(pcm=b"\xaa\xbb"),
+        voice_store=VoiceRegistry.open((spool) / "voices.json", (spool) / "voice-audio"),
     )
     job = JobRecord(
         id="job_file_uri",
@@ -807,14 +812,12 @@ def test_processor_speech_uses_the_same_strict_validation_gate_as_http(
             return profile
 
     registry = _Registry(validation_store)
-    monkeypatch.setattr(
-        "speechrail.runtime.local_file_processor.get_voice_registry", lambda: registry
-    )
     processor = LocalFileJobProcessor(
         spool_dir=spool,
         tts_synthesizer=synthesizer,
         clone_model_artifact=artifact_key,
         clone_model_catalog_revision=catalog_revision,
+        voice_store=registry,
     )
     job = JobRecord(
         id="job_strict",
@@ -906,14 +909,12 @@ def test_processor_speech_strict_rejects_evidence_without_the_output_dimension(
             return profile
 
     registry = _Registry(validation_store)
-    monkeypatch.setattr(
-        "speechrail.runtime.local_file_processor.get_voice_registry", lambda: registry
-    )
     processor = LocalFileJobProcessor(
         spool_dir=spool,
         tts_synthesizer=synthesizer,
         clone_model_artifact=artifact_key,
         clone_model_catalog_revision=catalog_revision,
+        voice_store=registry,
     )
     job = JobRecord(
         id="job_strict_rejected",
@@ -941,7 +942,11 @@ def test_processor_speech_strict_rejects_evidence_without_the_output_dimension(
 def test_processor_speech_rejects_url_input_ref(tmp_path: Path) -> None:
     spool = tmp_path / "spool"
     spool.mkdir()
-    processor = LocalFileJobProcessor(spool_dir=spool, tts_synthesizer=_FakeSynthesizer())
+    processor = LocalFileJobProcessor(
+        spool_dir=spool,
+        tts_synthesizer=_FakeSynthesizer(),
+        voice_store=VoiceRegistry.open((spool) / "voices.json", (spool) / "voice-audio"),
+    )
     job = JobRecord(
         id="job_x",
         kind="speech",
