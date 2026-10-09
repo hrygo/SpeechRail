@@ -17,6 +17,7 @@ public enum SessionStoreError: LocalizedError, Equatable {
     case openFailed(String)
     case statementFailed(String)
     case unsupportedSchemaVersion(Int32)
+    case meetingUnavailable
 
     public var errorDescription: String? {
         switch self {
@@ -28,6 +29,8 @@ public enum SessionStoreError: LocalizedError, Equatable {
             "记录库操作失败：\(detail)"
         case .unsupportedSchemaVersion(let version):
             "记录库版本 \(version) 比这个 App 支持的版本新，请先升级 App"
+        case .meetingUnavailable:
+            "会议已归档或删除，无法排队整理"
         }
     }
 }
@@ -869,6 +872,10 @@ public actor SessionStore: SessionArchiveWriting {
         let version: Int
         try execute("BEGIN IMMEDIATE;")
         do {
+            guard try session(id: sessionID) != nil,
+                  try !isMeetingDeleted(sessionID: sessionID) else {
+                throw SessionStoreError.meetingUnavailable
+            }
             version = try scalarInt(
                 "SELECT COALESCE(MAX(version), 0) + 1 FROM minutes WHERE session_id = ?;",
                 args: [.text(sessionID)]
