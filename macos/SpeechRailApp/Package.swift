@@ -100,6 +100,12 @@ let package = Package(
                 // Xcode Sources 登记；Xcode 单测经 macos_app_build.sh --test-unit
                 // 执行，编译器另外验证被测实现的依赖闭包。
                 "AppModel.swift",
+                "EngineModel.swift",
+                "SharedPlaybackOwner.swift",
+                "AppWorkflowTypes.swift",
+                "CreatorWorkflowErrors.swift",
+                "VoiceWorkflowModel.swift",
+                "DubbingWorkflowModel.swift",
                 "ServiceAPIClient.swift",
                 "CreatorServiceClient.swift",
                 "CreativeWorkStore.swift",
