@@ -592,6 +592,14 @@ public final class CreativeWorkStore {
                 )
                 throw CreativeWorkStoreError.storageUnavailable
             }
+            if operation == .save,
+               !CreativeWorkTransaction.publishedAudioMatches(
+                at: directory.appendingPathComponent(journal.audioFileName),
+                expectedDigest: journal.audioSHA256,
+                operations: operations
+               ) {
+                throw CreativeWorkStoreError.recoveryRequired
+            }
             if operation != .delete {
                 try? removeTransactionDirectoryUnlocked(transactionDirectory)
             }
@@ -677,12 +685,11 @@ public final class CreativeWorkStore {
                     journal.audioFileName,
                     isDirectory: false
                 )
-                guard !operations.isSymbolicLink(at: audioURL),
-                      operations.fileExists(at: audioURL),
-                      let expectedDigest = journal.audioSHA256,
-                      CreativeWorkTransaction.digest(
-                        try operations.read(from: audioURL)
-                      ) == expectedDigest
+                guard CreativeWorkTransaction.publishedAudioMatches(
+                    at: audioURL,
+                    expectedDigest: journal.audioSHA256,
+                    operations: operations
+                )
                 else {
                     throw CreativeWorkStoreError.recoveryRequired
                 }
@@ -949,6 +956,20 @@ struct CreativeWorkTransactionJournal: Codable {
 }
 
 enum CreativeWorkTransaction {
+    /// A committed index is usable only while its published bytes still match.
+    /// Read failures and links preserve the journal for explicit recovery.
+    static func publishedAudioMatches(
+        at url: URL,
+        expectedDigest: String?,
+        operations: CreativeWorkFileOperations
+    ) -> Bool {
+        guard let expectedDigest,
+              !operations.isSymbolicLink(at: url),
+              operations.fileExists(at: url),
+              let data = try? operations.read(from: url) else { return false }
+        return digest(data) == expectedDigest
+    }
+
     static func digest(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }

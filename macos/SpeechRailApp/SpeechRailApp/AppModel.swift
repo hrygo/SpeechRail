@@ -3709,6 +3709,8 @@ public final class AppModel {
             return switch projectError {
             case .candidateNotAdoptable:
                 "这个候选的制作条件与当前项目不一致，需要重新生成这一段。"
+            case .recoveryRequired:
+                "配音项目音频未通过完整性校验，请保留项目并打开诊断。"
             case .candidateNotFound, .segmentNotFound:
                 "找不到这一段或这个候选，请刷新后重试。"
             case .invalidIdentifier:
