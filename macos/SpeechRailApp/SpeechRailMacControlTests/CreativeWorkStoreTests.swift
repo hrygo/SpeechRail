@@ -156,6 +156,10 @@ final class CreativeWorkStoreTests: XCTestCase {
         XCTAssertEqual(loaded.provenance, .legacyUnknown, "老记录没有追溯字段，不回填")
         XCTAssertNil(loaded.provenance.recipe)
         XCTAssertNil(loaded.provenance.audioFileSHA256)
+        XCTAssertNil(loaded.provenance.requestID)
+        XCTAssertNil(loaded.provenance.receiptID)
+        XCTAssertNil(loaded.provenance.receiptStatus)
+        XCTAssertNil(loaded.provenance.receiptCompletedAt)
         XCTAssertEqual(try Data(contentsOf: indexURL), Data(legacy.utf8), "只读不落盘")
     }
 

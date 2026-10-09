@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail macOS App 开发与测试"
 status: active
-version: "0.6.6"
-date: 2026-10-05
+version: "0.6.7"
+date: 2026-10-09
 ---
 
 # SpeechRail macOS App 开发与测试
@@ -45,6 +45,22 @@ App 的 TTS 请求必须把这个快照当作 revision pin 的来源：Realtime 
 已移除，服务端明确拒绝。REST creator 通过 `SpeechRail-Expected-Voice-Revision` 和
 `SpeechRail-Expected-Model-Revision` 传递同代约束。匹配不到可用 voice、对应 operation 或
 revision 时显式保持 `nil`，走服务端普通协商，不从 voice 名称、模型名或本地时间推断版本。
+
+### 作品与段落候选的执行追溯
+
+正式制作结果在 `RenderProvenanceSnapshot` 保存可选 `request_id`、`receipt_id`、
+`receipt_status` 和 `receipt_completed_at`，与 recipe、plan 和音频摘要一起落盘。
+这四项描述渲染返回时服务实际报告的执行身份与状态；本地作品 ID、候选 ID 与 render ID
+不能替代它们。回执暂不可读时保留响应头已报告的编号，状态保持未知；回执身份与响应头
+不一致时保留音频及响应头编号，追溯原因记为 `receipt_identity_mismatch`，不采用该回执的事实。
+旧记录以缺失值读取，不从既有 `verified` 或原因码补造编号、终态或时间，不自动迁移原文件。
+
+「我的作品」详情的「制作记录」显示保存时回执与执行编号。用户显式点击「查询服务回执」后，
+通过独立 `SpeechRailReceiptClient` 优先按 receipt ID 查询，只有 request ID 时使用
+by-request 入口，并核对所有已保存的执行身份。查询结果只属于本次观察，不覆盖作品快照、
+recipe、音频或追溯等级；失败或取消不改写已保存记录。旧作品没有执行编号时明确说明无法查询。
+回执在服务中的保留期限与当前服务实例有关，因此持有编号不保证仍能查询到资源。
+`completed` 描述服务交付终态，不证明设备播放完成、内容质量或音色身份质量。
 
 ### Native Realtime ASR/TTS 编排边界
 

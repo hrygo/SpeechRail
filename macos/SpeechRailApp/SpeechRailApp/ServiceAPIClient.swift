@@ -271,6 +271,9 @@ public final class ServiceAPIClient: @unchecked Sendable {
         var planSHA256: String?
         var pcmSHA256: String?
         var recipe: RenderRecipeSnapshot?
+        var requestID = response.metadata.requestID
+        var receiptStatus: RenderReceiptStatus?
+        var receiptCompletedAt: Double?
         var provenance = RenderProvenance(
             state: .unavailable,
             reason: response.receiptID == nil ? "receipt_not_negotiated" : "receipt_unavailable"
@@ -278,12 +281,20 @@ public final class ServiceAPIClient: @unchecked Sendable {
         if let receiptID = response.receiptID,
            let receipt = try? await fetchReceipt(id: receiptID)
         {
-            voiceRevision = receipt.voiceRevision ?? voiceRevision
-            planID = receipt.planID
-            planSHA256 = receipt.planSHA256
-            pcmSHA256 = receipt.pcmSHA256
-            recipe = receipt.recipe
-            provenance = Self.provenance(for: receipt)
+            if receipt.receiptID == receiptID,
+               requestID.map({ $0 == receipt.requestID }) ?? true {
+                requestID = receipt.requestID
+                receiptStatus = receipt.status
+                receiptCompletedAt = receipt.completedAt
+                voiceRevision = receipt.voiceRevision ?? voiceRevision
+                planID = receipt.planID
+                planSHA256 = receipt.planSHA256
+                pcmSHA256 = receipt.pcmSHA256
+                recipe = receipt.recipe
+                provenance = Self.provenance(for: receipt)
+            } else {
+                provenance = RenderProvenance(state: .unavailable, reason: "receipt_identity_mismatch")
+            }
         }
         return SpeechRenderResult(
             audioData: response.audioData,
@@ -292,6 +303,10 @@ public final class ServiceAPIClient: @unchecked Sendable {
             planSHA256: planSHA256,
             pcmSHA256: pcmSHA256,
             recipe: recipe,
+            requestID: requestID,
+            receiptID: response.receiptID,
+            receiptStatus: receiptStatus,
+            receiptCompletedAt: receiptCompletedAt,
             provenance: provenance
         )
     }
@@ -1148,6 +1163,7 @@ public final class ServiceAPIClient: @unchecked Sendable {
 extension ServiceAPIClient:
     ServiceDiagnosticsClient,
     SpeechRailCreatorClient,
+    SpeechRailReceiptClient,
     ServiceCapabilityDiscoveryClient
 {}
 

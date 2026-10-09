@@ -81,6 +81,7 @@ struct SpeechRailApp: App {
         let diagnosticsClient: any ServiceDiagnosticsClient
         let discoveryClient: any ServiceCapabilityDiscoveryClient
         let creatorClient: (any SpeechRailCreatorClient)?
+        let receiptClient: (any SpeechRailReceiptClient)?
 #if DEBUG
         if isUITest {
             let fixtureClient = UITestServiceDiagnosticsClient(
@@ -91,17 +92,20 @@ struct SpeechRailApp: App {
             diagnosticsClient = fixtureClient
             discoveryClient = fixtureClient
             creatorClient = UITestCreatorClient()
+            receiptClient = nil
         } else {
             let liveServiceClient = ServiceAPIClient()
             diagnosticsClient = liveServiceClient
             discoveryClient = liveServiceClient
             creatorClient = liveServiceClient
+            receiptClient = liveServiceClient
         }
 #else
         let liveServiceClient = ServiceAPIClient()
         diagnosticsClient = liveServiceClient
         discoveryClient = liveServiceClient
         creatorClient = liveServiceClient
+        receiptClient = liveServiceClient
 #endif
         let workStore: CreativeWorkStore
 #if DEBUG
@@ -128,6 +132,7 @@ struct SpeechRailApp: App {
             apiClient: diagnosticsClient,
             discoveryClient: discoveryClient,
             creatorClient: creatorClient,
+            receiptClient: receiptClient,
             workStore: workStore,
             registration: registration
         )
