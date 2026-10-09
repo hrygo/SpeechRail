@@ -349,6 +349,17 @@ SwiftPM 清单和六个新增 Swift 文件在 App/单测 target 的唯一成员�
 回退按四个逻辑提交逆序恢复 owner 与组合接线源码；不改变 JSON/SQLite、
 作品目录或用户数据。没有运行态部署。
 
+## PR #352 门禁回归
+
+首轮 Quality Gates 发现 Realtime 测试断言超过行长限制，拆行后全仓 Ruff
+通过，相关 11 项回归通过。随后 Python 全量回归为 3,823 passed、2 failed、
+1 skipped（179.27 秒）：启动失败 fake 漏接 `voice_leases`，预览 lane 测试
+仍 patch 已迁出的路由符号。两项在本机定向复现后修正测试接线，同时断言
+注入的唯一 lease owner 及实际 `voice_design` reservation；两个文件的 38 项
+回归通过（3.26 秒）。原启动失败清理和预览不选择运行音色 lane 的保证保留。
+同次远端 Swift Package Tests 与 macOS App Build 通过。合入仍须以修正后
+提交的完整必需门禁为准，不沿用旧 head 的成功结果。
+
 ## 本批剩余边界
 
 提交阶段的 19 项开放 Issue 中，本批完成 #223、#226、#228、#230 的实施与短时验证。

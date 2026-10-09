@@ -12,6 +12,7 @@ from speechrail.backends.qwen3_native import MODEL_FILES
 from speechrail.config import Settings
 from speechrail.config.model_catalog import VOICE_DESIGN_ARTIFACT_KEY, load_catalog
 from speechrail.domain.model_spec import required_spec_artifact
+from speechrail.domain.voice_ports import VoiceLeases
 
 
 def _client() -> TestClient:
@@ -558,6 +559,7 @@ def test_startup_failure_closes_partially_started_and_started_runtime_workers(
     (tts_snapshot / "config.json").touch()
     lifecycle: list[str] = []
     live_resources: set[str] = set()
+    injected_voice_leases: list[VoiceLeases] = []
 
     class FakeAsrWorker:
         def __init__(self, config: object) -> None:
@@ -579,9 +581,16 @@ def test_startup_failure_closes_partially_started_and_started_runtime_workers(
         ready = False
         model_variant = "custom_voice"
 
-        def __init__(self, config: object, *, on_delivery_event: object | None = None) -> None:
+        def __init__(
+            self,
+            config: object,
+            *,
+            voice_leases: VoiceLeases,
+            on_delivery_event: object | None = None,
+        ) -> None:
             del config
             del on_delivery_event
+            injected_voice_leases.append(voice_leases)
 
         async def start(self) -> None:
             lifecycle.append("tts.start")
@@ -609,7 +618,9 @@ def test_startup_failure_closes_partially_started_and_started_runtime_workers(
         worker_lazy_load=False,
     )
 
-    with pytest.raises(RuntimeError, match="tts_start_failed"), TestClient(create_app(settings)):
+    app = create_app(settings)
+    assert injected_voice_leases == [app.state.services.voice_store]
+    with pytest.raises(RuntimeError, match="tts_start_failed"), TestClient(app):
         pass
 
     assert lifecycle == ["asr.start", "tts.start", "tts.close", "asr.close"]

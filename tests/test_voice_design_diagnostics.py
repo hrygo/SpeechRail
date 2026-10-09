@@ -398,16 +398,26 @@ def test_design_loading_and_idle_exit_are_visible_and_restartable(tmp_path: Path
 def test_preview_uses_conservative_design_lane_instead_of_default_speaker_lane(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from speechrail.http.routes import audio as audio_routes
+    from speechrail.application import render_operation
 
     def wrong_lane(*args: object) -> str:
         raise AssertionError("VoiceDesign must not resolve a runtime voice lane")
 
-    monkeypatch.setattr(audio_routes, "tts_resource_key", wrong_lane)
+    monkeypatch.setattr(render_operation, "tts_resource_key", wrong_lane)
     client, _router, _design = _client(tmp_path, monkeypatch)
+    governor = client.app.state.services.governor
+    reserve = governor.reserve
+    reserved_lanes: list[str | None] = []
+
+    def record_reservation(*args: Any, **kwargs: Any) -> Any:
+        reserved_lanes.append(kwargs.get("resource_key"))
+        return reserve(*args, **kwargs)
+
+    monkeypatch.setattr(governor, "reserve", record_reservation)
     with client:
         response = client.post("/v1/voices/previews", json=PREVIEW)
     assert response.status_code == 200
+    assert reserved_lanes == ["voice_design"]
 
 
 def test_candidate_creation_uses_same_transport_status_and_diagnostics_as_preview(
