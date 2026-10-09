@@ -226,6 +226,9 @@ worker/router 的租约 factory，不绕过音色/槽位 owner。prepare、lane�
 缺失 lane、非法 lane。原取消、清理失败、唯一终态、背压、strict prepare、运行身份、
 HTTP、Realtime、文件作业、同次验证与组合根回归通过。
 直接构造验证用例的测试显式注入同一生产身份读取器，不再期待隐式后端附加方法。
+PR #350 首轮 CI 发现真实 pipe 回归仍使用旧构造参数；改为直接注入
+`Qwen3TtsIncrementalSynthesizer` 的 domain factory，保留管道、序列化与背压链路。
+该回归定向实测 1 passed，1.08 秒；合入以修正后的远端门禁为准。
 未执行真实模型、完整性能/质量基准、长稳、UI、安装或服务操作。
 
 ## 证据与回退

@@ -15,7 +15,6 @@ from speechrail.backends.qwen3_tts_stream_host import ModelStepEvent, StreamPump
 from speechrail.backends.qwen3_tts_worker import _drive_stream
 from speechrail.domain.resource_limits import GovernorLimits
 from speechrail.domain.tts_stream import (
-    IncrementalSpeechSession,
     TtsStreamEvent,
     TtsStreamEventKind,
     TtsStreamLimits,
@@ -120,12 +119,6 @@ def test_real_pipe_pipeline_survives_healthy_consumption_longer_than_deadline() 
         transport = _PipeTransport(options, limits)
         client = Qwen3TtsIncrementalSynthesizer(transport, stream_protocol=1)
 
-        class Synthesizer:
-            async def open_incremental_stream(
-                self, options: TtsStreamOptions, *, limits: TtsStreamLimits
-            ) -> IncrementalSpeechSession:
-                return await client.open_stream(options, limits=limits)
-
         governor = ResourceGovernor(
             GovernorLimits(total_capacity=2, realtime_reserved_capacity=1, max_pending_per_class=2)
         )
@@ -152,7 +145,7 @@ def test_real_pipe_pipeline_survives_healthy_consumption_longer_than_deadline() 
 
         consumer = asyncio.create_task(consume())
         service = TtsStreamService(
-            synthesizer=Synthesizer(), governor=governor, receipts=RenderReceiptRegistry()
+            stream_factory=client, governor=governor, receipts=RenderReceiptRegistry()
         )
         controller = None
         try:
