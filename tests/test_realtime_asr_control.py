@@ -626,7 +626,9 @@ def test_external_commit_cancellation_preserves_owned_final_without_receipt() ->
             with pytest.raises(asyncio.CancelledError):
                 await pending
             assert not blocked.commit_cancelled.is_set()
-            assert session._asr_owner._asr_finals and all(not t.cancelled() for t in session._asr_owner._asr_finals)
+            assert session._asr_owner._asr_finals and all(
+                not t.cancelled() for t in session._asr_owner._asr_finals
+            )
             blocked.release_from_test_thread()
             await asyncio.wait_for(session._asr_owner._await_asr_finals(), 1)
             assert len([e for e in sent if e["type"].endswith("transcription.completed")]) == 1
