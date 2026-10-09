@@ -1,7 +1,7 @@
 # 开放 Issue 筛选与短时回归交付记录
 
-核验日期：2026-10-09。范围为 GitHub 当日全部 33 个开放 issue；实施位于
-`codex/short-validation-issues`，工作区已有改动继续保留。以下耗时是定向确定性验证，
+核验日期：2026-10-09。首次筛选覆盖 GitHub 当时全部 33 个开放 issue；首批实施位于
+`codex/short-validation-issues`，后续批次与远端回读见各节。以下耗时是定向确定性验证，
 不代表真实模型、性能、设备或 UI 验收。远端 issue 状态不随本地实施自动变化。
 
 ## 筛选规则与实施顺序
@@ -250,3 +250,111 @@ SpeechAdmission 和有界词尾等待策略做同口径人工回放。
 当前图谱工具未索引此 worktree，且只读 profile 不提供索引入口，结构结论以定向源码为准。
 不操作真实库、模型、服务、安装副本或前台窗口；测试数据库与文件均使用临时目录。
 回退以对应 issue 的局部 diff 为单位，保留本轮开始前已有改动和用户数据。
+
+## 音色存储与租约显式注入（#223）
+
+2026-10-09 复核 GitHub 开放清单为 19 项。#223 的本地实现将文件 registry
+移入 infrastructure；领域导入仅提供纯音色值与规则。组合根打开唯一 owner，
+目录、修订、验证、HTTP/Realtime/job 与 backend 租约使用显式依赖。
+
+默认 `custom_voices.json` 的辅助制品位置保持；其他文件名使用 owner 命名空间，
+同目录中的两个 store 不共享验证证据、候选或幂等日志。旧未命名制品归属不明
+时拒绝装配，不自动迁移或删除。测试默认路径在 collection 前就进入临时目录，
+覆盖测试模块导入默认 ASGI app 的场景。
+
+审查发现并修复 batch abort/reap 失败提前退出读租约：worker 保留引用至后续
+明确回收成功。新回归先证明该路径允许错误删除，再确认清理前持续拒绝删除。
+双 owner 测试使用真实临时 clone 文件，验证实际音频读保护。
+
+定向实测：34 个相关测试文件 791 passed，27.79 秒；随后补齐默认布局与五类
+旧制品保护，组合测试 13 passed，0.68 秒。Ruff 与 21 个源文件 Mypy 通过；
+只读独立复核未发现阻塞问题。所有文件制品均为临时合成数据；没有模型、
+服务、UI、安装或真实用户目录操作。此阶段远端 #223 保持开放，关闭以合入后回读为准。
+
+## 渲染准备、执行与交付用例（#226）
+
+纯准备构造固定请求、配方和时间轴坐标；单次 `RenderOperation` 负责 deadline、
+准入、严格准备、validated PCM、身份/采样计量与交付收尾。HTTP 保留鉴权、
+错误优先级、结果登记、格式编码、headers 及 ASGI send/disconnect。
+PCM 和编码流共用交付 owner，首块预取后 body 未开始也能回收。
+严格准备自身使用同一 deadline，不依赖 HTTP 包装器才得到时限。
+
+2026-10-09 定向实测：8 个测试文件 146 passed，4.62 秒；覆盖纯用例、
+原 HTTP/receipt/timing/发音接线、重复执行拒绝、严格准备 deadline、
+PCM 与 fake 编码流的 send 失败/取消/清理失败隔离及反复取消。
+3 个源文件定向 Mypy 与 Ruff 通过。未执行模型、UI 或完整套件；
+代码与接口事实见[渲染应用用例](../architecture/render-usecase.md)。
+
+只读独立复核未发现阻塞问题；补充 timing sidecar 的 body 未开始取消、
+重复关闭、deadline 失败与回收未确认 pending 断言，相关 36 项实测通过（1.25 秒）。
+
+## Realtime 状态与资源所有权（#228）
+
+根 session 负责协议配置、派发和组合关闭；ASR ingress/frozen final、
+TTS utterance、alignment/diarization 分属独立 owner。子 owner 接收窄端口，
+不持有 AppServices 或 root 任意写接口。配置读取使用独立的只读快照；
+辅助输入使用 `FrozenTranscript` 与 `AsrIdentity`。
+
+TTS 每次请求聚合 ready/task/controller/window/receipt/terminal 与计量，
+旧 ACK/finally/terminal 使用捕获的 context。连接 owner 保留退休但仍在发送的
+task，关闭时同样等待。未确认模型回收保留 context、pending receipt 和 lane
+隔离；组合关闭不因一个 owner 失败而跳过其他 owner，并传播汇总错误。
+
+2026-10-09：20 个相关测试文件 416 passed，6.35 秒；5 个源文件 Mypy 通过。
+覆盖独立 owner 构造、admission 前取消、旧 context 收尾、关闭重复取消、
+失败清理、采样轴/冻结 final/commit、辅助 epoch 与原 transport 组合回归。
+现有私有测试引用迁至实际 owner；ASR debug tap 仅使用临时测试 WAV。
+公开 wire、模型进程、用户存储与运行态保持。
+架构见[Realtime 状态与资源所有权](../architecture/realtime-ownership.md)。
+
+独立只读复核未发现阻塞回归；补充关闭期间及关闭后拒绝新事件的回归后，
+owner 定向集合为 9 项通过。5 个源文件重新运行 Mypy、Ruff，`git diff --check`
+通过。未确认资源回收时仍保留隔离与可见错误，不把清理失败当作成功。
+
+## macOS 引擎、音色与配音所有权（#230）
+
+引擎、音色和配音的可变状态、task、generation 与依赖分别进入
+`EngineModel`、`VoiceWorkflowModel`、`DubbingWorkflowModel`。AppModel
+保留装配、命令转发和直接读取子 owner 的投影；功能不反持组合根。
+能力快照由引擎唯一持有，配音只读取音色目录；克隆与设计幂等回读、
+配音固定保存身份和返修代际保持。
+
+共享播放 owner 捕获 token、target 与功能回调；旧完成、进度和电平
+不影响新播放。设计听审捕获 candidate/revision/validation，不按当前选择推断。
+试听与正式生成通过唯一准入 owner 互斥，原创作反馈文案保持唯一。
+实测发现并修复试听等待能力绑定时准入被配音取得后的检查遗漏：
+恢复时核对取消、请求代际与共享准入，不越过当前生成归属。
+
+2026-10-09 18:52（Asia/Shanghai）：95 项定向 Swift 测试通过，运行 1.533 秒。
+包含原 AppModel 回归及独立引擎/配音、组合层 Observation、播放旧回调、
+停止/失败撤销身份、准入归属和绑定后再检查。引擎相关测试直接构造引擎；
+部分音色用例直接构造音色 workflow，不构造作品、设计或克隆无关依赖。
+新增候选创建响应丢失回归验证完整请求与幂等键保持相同，服务端 fake
+仅提交一份候选；原注册、发布与保存失败重试继续通过。
+
+包装脚本 Debug 编译出现 `BUILD SUCCEEDED`，临时 App 由脚本清理；
+SwiftPM 清单和六个新增 Swift 文件在 App/单测 target 的唯一成员登记均已核对。
+当前实测工具链为 Swift 6.4 / arm64，部署目标保持 macOS 26。
+独立只读复核未发现阻塞问题。没有 UI 自动化、真实模型、用户内容、安装
+或服务操作；编译不构成视觉、音质或长稳验收。
+
+所有权与依赖矩阵见[macOS 引擎与创作状态所有权](../architecture/macos-feature-ownership.md)
+及[实施计划](../superpowers/plans/2026-10-09-app-feature-ownership.md)。
+图谱对本 worktree 的十个相关路径报告 `outside_project`，判断依据为当前源码、
+旧源码比较、定向测试与成员解析，不依据主 checkout 的图谱宣称覆盖。
+四项改造在 `codex/voice-store-ownership` 按 Issue 分成四个独立提交。
+#223、#226、#228 的暂存源码分别导出到临时目录，通过各自组合与生命周期定向回归；
+#230 复用上述未发生语义变化的测试、编译与成员登记证据。
+交付通过同一 PR 执行必需 CI，以当前提交的门禁结果和合入后 GitHub 回读判定关闭。
+回退按四个逻辑提交逆序恢复 owner 与组合接线源码；不改变 JSON/SQLite、
+作品目录或用户数据。没有运行态部署。
+
+## 本批剩余边界
+
+提交阶段的 19 项开放 Issue 中，本批完成 #223、#226、#228、#230 的实施与短时验证。
+提交前回读 GitHub，开放清单仍为相同 19 项，没有新增或消失的条目；
+四项合入后的目标数量为 15，实际数量须重新读取，不能以本地完成推断。
+#263 的 SessionStore 部分可单独短测，但完整 Issue 包括 MeetingView
+专项 UI 走查，不能按局部存储单测宣称整条完成；#260 的转录编辑入口前提
+尚未满足。其余 #336、#308、#286、#268、#259、#258、#257、#256、
+#253、#118、#95、#89、#79 仍需各自真实、长稳或专项验收。
