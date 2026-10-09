@@ -106,6 +106,4 @@ SpeechRail 是面向单人 Apple Silicon Mac 的本地共享 ASR/TTS 服务，�
 - OpenAPI / WebSocket 行为变化必须同步契约、测试与用户文档；正式文档的 `version` / `date` 只在正文实质变化时更新；归档材料不改写成当前承诺。
 - 持久化命令使用可移植的原生命令，不写入本机 wrapper、RTK 缓存绝对路径、真实配置值或秘密。
 - 一个 commit 表达一个逻辑主题，消息使用 `<type>: <why>`；提交前检查 staged diff、`git diff --staged --check` 和敏感字段。不 force-push，不覆盖他人分支；未被明确要求时不自动提交、推送或创建发布物。
-- Review bot 发现的真实问题未解决前，不得自动合并 PR，也不得启用 auto-merge 或加入 merge queue。逐条核实发现：真实问题须完成修复与必要验证；误报须有具体源码、契约或实测依据。仅 resolve 线程、标记 outdated、降低严重级别或 CI 全绿，均不构成问题已解决的证据；无法裁定的发现保持阻塞。
-- 合并前确认本 PR 要求的 Review bot 已完成对最终 head SHA 的评审，逐条发现已有可核验的处理结论，必要检查在最终待合入版本上通过。评审未完成、失败、超时或状态无法读取时不得自动合并；固定等待时长或暂时没有评论不代表评审完成。新增提交或同步 base 后重新核验评审覆盖范围；合并动作前再次读取 head SHA、评审结果、未解决线程与必要检查，变更后重新核验，不沿用旧版本的合并许可。
 - 合并到受保护 `main`/`master` 前核实保护规则与线性历史要求；要求线性历史时使用 rebase 与 fast-forward 策略，不默认制造 merge commit。
