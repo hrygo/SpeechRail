@@ -566,7 +566,7 @@ def test_clone_reference_pass_does_not_imply_production_ready_without_output_pas
 
 
 def test_clone_output_pass_does_not_survive_unknown_current_runtime() -> None:
-    from speechrail.application.capability_snapshot import _validation_state
+    from speechrail.domain.voice_validation_policy import evaluate_voice_validation
 
     active = _active("quality", "quality")
     revision = "vr_" + "d" * 32
@@ -591,7 +591,7 @@ def test_clone_output_pass_does_not_survive_unknown_current_runtime() -> None:
         "policy_version": "voice_quality_v1",
         "validated_for": ["output"],
     }
-    state = _validation_state(
+    state = evaluate_voice_validation(
         profile,
         active.tts_clone,
         validation,
@@ -605,9 +605,9 @@ def test_clone_output_pass_does_not_survive_unknown_current_runtime() -> None:
         },
         binding_required=True,
     )
-    assert state["production_ready"] is False
-    assert state["production_ready_reason"] == "stale_synthesis_validation"
-    assert state["synthesis"]["stale_reason"] == "model_runtime_identity_unknown"
+    assert state.production_ready is False
+    assert state.production_ready_reason == "stale_synthesis_validation"
+    assert state.synthesis.stale_reason == "model_runtime_identity_unknown"
 
 
 def _snapshot(**overrides):

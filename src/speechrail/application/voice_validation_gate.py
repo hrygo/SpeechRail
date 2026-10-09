@@ -13,7 +13,6 @@ import json
 from dataclasses import dataclass, replace
 from typing import Any, Literal, cast
 
-from speechrail.application.capability_snapshot import _validation_state
 from speechrail.application.render_receipts import observed_runtime_revision_for_synthesizer
 from speechrail.backends.model_identity import is_observed_runtime_revision
 from speechrail.config.model_catalog import ModelArtifact
@@ -32,6 +31,10 @@ from speechrail.domain.voice_validation import (
     VoiceValidationArtifact,
     VoiceValidationRepository,
     VoiceValidationStoreUnavailableError,
+)
+from speechrail.domain.voice_validation_policy import (
+    VoiceValidationVerdict,
+    evaluate_voice_validation,
 )
 
 REFERENCE_PREPROCESS_VERSION = "energy_v1"
@@ -265,7 +268,7 @@ def _binding_from_recorded_runtime(
     )
 
 
-def validation_state_for_voice(
+def validation_verdict_for_voice(
     profile: VoiceProfile,
     artifact: ModelArtifact | VoiceValidationArtifact | None,
     repository: VoiceValidationRepository,
@@ -274,8 +277,8 @@ def validation_state_for_voice(
     require_current_binding: bool,
     capability_key: str | None = None,
     observed_runtime_revision: str | None = None,
-) -> tuple[dict[str, object], dict[str, Any] | None, VoiceValidationBinding]:
-    """Return the evidence, binding, and shared projected validation state."""
+) -> tuple[VoiceValidationVerdict, dict[str, Any] | None, VoiceValidationBinding]:
+    """Return the evidence, binding, and shared typed validation verdict."""
 
     binding = build_validation_binding(
         profile,
@@ -299,7 +302,7 @@ def validation_state_for_voice(
                 binding,
                 require_current_binding=require_current_binding,
             )
-    state = _validation_state(
+    state = evaluate_voice_validation(
         profile,
         artifact,
         evidence,
@@ -387,7 +390,7 @@ async def prepare_validated_speech(
         )
 
     try:
-        state, _evidence, _binding = validation_state_for_voice(
+        state, _evidence, _binding = validation_verdict_for_voice(
             profile,
             artifact,
             registry.validation_store,
@@ -402,7 +405,7 @@ async def prepare_validated_speech(
             public_code="voice_validation_store_unavailable",
             retryable=True,
         ) from exc
-    if state["production_ready"] is not True:
+    if not state.production_ready:
         raise TtsBackendError(
             "voice_not_production_ready",
             stage="validate",
@@ -425,5 +428,5 @@ __all__ = [
     "build_validation_binding",
     "load_validation_evidence",
     "prepare_validated_speech",
-    "validation_state_for_voice",
+    "validation_verdict_for_voice",
 ]

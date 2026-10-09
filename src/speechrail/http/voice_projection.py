@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from speechrail.application.capability_snapshot import _validation_state
-from speechrail.application.voice_validation_gate import validation_state_for_voice
+from speechrail.application.voice_validation_gate import validation_verdict_for_voice
+from speechrail.application.voice_validation_presentation import present_validation_verdict
 from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.config.selection import ActiveModelCatalog
 from speechrail.domain import voice_quality as vq
@@ -13,6 +13,10 @@ from speechrail.domain.tts import VOICE_ALIASES, VoiceProfile, get_voice_registr
 from speechrail.domain.tts_routing import TtsExecutionMode, tts_capability_key
 from speechrail.domain.voice_preview import preview_for_profile
 from speechrail.domain.voice_validation import VoiceValidationStoreUnavailableError
+from speechrail.domain.voice_validation_policy import (
+    VoiceValidationVerdict,
+    evaluate_voice_validation,
+)
 
 
 def voice_entry(
@@ -56,7 +60,7 @@ def voice_entry(
         and (artifact is not None or variant is not None)
     )
     validation: dict[str, Any] | None = None
-    validation_state: dict[str, object]
+    verdict: VoiceValidationVerdict
     capability_key = (
         tts_capability_key(active.tts_spec, TtsExecutionMode.RENDER)
         if active.tts_spec is not None
@@ -66,7 +70,7 @@ def voice_entry(
         try:
             repository = get_voice_registry().validation_store
             if strict_validation:
-                validation_state, validation, _ = validation_state_for_voice(
+                verdict, validation, _ = validation_verdict_for_voice(
                     profile,
                     artifact,
                     repository,
@@ -81,12 +85,13 @@ def voice_entry(
                     model_artifact=artifact.key if artifact is not None else None,
                     model_catalog_revision=artifact.revision if artifact is not None else None,
                 )
-                validation_state = _validation_state(profile, artifact, validation)
+                verdict = evaluate_voice_validation(profile, artifact, validation)
         except VoiceValidationStoreUnavailableError:
             validation = None
-            validation_state = _validation_state(profile, artifact, validation)
+            verdict = evaluate_voice_validation(profile, artifact, validation)
     else:
-        validation_state = _validation_state(profile, artifact, validation)
+        verdict = evaluate_voice_validation(profile, artifact, validation)
+    validation_state = present_validation_verdict(verdict)
     supports_speaker = False
     supports_instruction = False
     supports_clone = False
