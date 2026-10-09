@@ -40,6 +40,10 @@ public struct DubbingProject: Codable, Equatable, Identifiable, Sendable {
             .joined(separator: "\n")
     }
 
+    public func isUsingCandidate(_ id: String) -> Bool {
+        segments.contains { $0.acceptedCandidateID == id || $0.adoptionHistory.contains(id) }
+    }
+
     /// 仍然有效的候选：配方与文本都对得上。
     ///
     /// 没有配方摘要的项目一律判为失效：无法证明两次制作是同一条件。
@@ -140,6 +144,9 @@ public enum DubbingProjectError: Error, LocalizedError, Sendable {
     case candidateTextChanged
     case candidateRuntimeChanged
     case candidateConditionsChanged
+    case candidateInUse
+    case projectHasAdoptedCandidates
+    case cleanupRequired
     case recoveryRequired
     /// 候选音频不是本项目支持的线性 PCM 剖面（单声道 16 bit）。
     case audioFormatUnsupported
@@ -164,6 +171,12 @@ public enum DubbingProjectError: Error, LocalizedError, Sendable {
             "模型或运行版本已变化，请按这个候选的条件新建项目"
         case .candidateConditionsChanged:
             "制作条件已变化，请按这个候选的条件新建项目"
+        case .candidateInUse:
+            "这个候选仍被采用或撤销记录使用，请先撤销相关采用"
+        case .projectHasAdoptedCandidates:
+            "项目仍有已采用版本，请先导出成品并撤销采用，再删除项目"
+        case .cleanupRequired:
+            "删除已提交，但音频清理尚未完成，请重试或打开诊断"
         case .recoveryRequired:
             "配音项目音频未通过完整性校验，请保留项目并打开诊断"
         case .audioFormatUnsupported:
@@ -253,6 +266,11 @@ struct DubbingProjectRecord: Codable, Equatable, Sendable {
     var candidates: [DubbingCandidate]
 }
 
+private struct DubbingAudioDeletion: Codable {
+    let fileName: String
+    let sha256: String
+}
+
 private struct DubbingProjectJournal: Codable {
     static let currentSchemaVersion = 1
 
@@ -264,6 +282,7 @@ private struct DubbingProjectJournal: Codable {
     let committedIndexSHA256: String
     let publishedAudioFileName: String?
     let publishedAudioSHA256: String?
+    let deletedAudio: [DubbingAudioDeletion]?
 
     init(
         transactionID: String,
@@ -272,7 +291,8 @@ private struct DubbingProjectJournal: Codable {
         previousIndexData: Data?,
         committedIndexSHA256: String,
         publishedAudioFileName: String? = nil,
-        publishedAudioSHA256: String? = nil
+        publishedAudioSHA256: String? = nil,
+        deletedAudio: [DubbingAudioDeletion]? = nil
     ) {
         schemaVersion = Self.currentSchemaVersion
         self.transactionID = transactionID
@@ -282,6 +302,7 @@ private struct DubbingProjectJournal: Codable {
         self.committedIndexSHA256 = committedIndexSHA256
         self.publishedAudioFileName = publishedAudioFileName
         self.publishedAudioSHA256 = publishedAudioSHA256
+        self.deletedAudio = deletedAudio
     }
 }
 
@@ -322,6 +343,56 @@ public final class DubbingProjectStore {
     public func candidates(forProject projectID: String) throws -> [DubbingCandidate] {
         try withRecoveredLibrary {
             try recordUnlocked(projectID: projectID).candidates
+        }
+    }
+
+    public func deleteCandidate(_ candidateID: String, fromProject projectID: String) throws {
+        try withRecoveredLibrary {
+            var records = try readRecordsUnlocked()
+            guard let index = records.firstIndex(where: { $0.project.id == projectID }) else {
+                throw DubbingProjectError.candidateNotFound
+            }
+            // Recovery completes any committed cleanup before this lookup.
+            // A retry therefore confirms that the candidate is already gone.
+            guard let candidate = records[index].candidates.first(where: { $0.id == candidateID }) else {
+                return
+            }
+            guard !records[index].project.isUsingCandidate(candidateID) else {
+                throw DubbingProjectError.candidateInUse
+            }
+            records[index].candidates.removeAll { $0.id == candidateID }
+            try commitDeletionUnlocked(records: records, removing: [candidate])
+        }
+    }
+
+    @discardableResult
+    public func discardUnusedCandidates(inProject projectID: String) throws -> Int {
+        try withRecoveredLibrary {
+            var records = try readRecordsUnlocked()
+            guard let index = records.firstIndex(where: { $0.project.id == projectID }) else {
+                throw DubbingProjectError.candidateNotFound
+            }
+            let project = records[index].project
+            let unused = records[index].candidates.filter { !project.isUsingCandidate($0.id) }
+            guard !unused.isEmpty else { return 0 }
+            let ids = Set(unused.map(\.id))
+            records[index].candidates.removeAll { ids.contains($0.id) }
+            try commitDeletionUnlocked(records: records, removing: unused)
+            return unused.count
+        }
+    }
+
+    public func deleteProject(_ projectID: String) throws {
+        try withRecoveredLibrary {
+            var records = try readRecordsUnlocked()
+            guard let index = records.firstIndex(where: { $0.project.id == projectID }) else {
+                return
+            }
+            guard records[index].project.segments.allSatisfy({ $0.acceptedCandidateID == nil }) else {
+                throw DubbingProjectError.projectHasAdoptedCandidates
+            }
+            let candidates = records.remove(at: index).candidates
+            try commitDeletionUnlocked(records: records, removing: candidates)
         }
     }
 
@@ -621,11 +692,34 @@ public final class DubbingProjectStore {
         }
     }
 
+    private func commitDeletionUnlocked(
+        records: [DubbingProjectRecord],
+        removing candidates: [DubbingCandidate]
+    ) throws {
+        let retainedFiles = Set(records.flatMap { $0.candidates.map(\.audioFileName) })
+        var deletions: [DubbingAudioDeletion] = []
+        for candidate in candidates where !retainedFiles.contains(candidate.audioFileName) {
+            guard Self.isSafeAudioFileName(candidate.audioFileName) else {
+                throw DubbingProjectError.invalidIdentifier
+            }
+            let url = directory.appendingPathComponent(candidate.audioFileName)
+            guard !operations.isSymbolicLink(at: url) else { throw DubbingProjectError.recoveryRequired }
+            guard operations.fileExists(at: url) else { continue }
+            let digest = CreativeWorkTransaction.digest(try operations.read(from: url))
+            if let expected = candidate.provenance.audioFileSHA256, digest != expected {
+                throw DubbingProjectError.recoveryRequired
+            }
+            deletions.append(DubbingAudioDeletion(fileName: candidate.audioFileName, sha256: digest))
+        }
+        try commitUnlocked(records: records, operation: "delete", deletedAudio: deletions)
+    }
+
     private func commitUnlocked(
         records: [DubbingProjectRecord],
         operation: String,
         publishedAudioFileName: String? = nil,
         publishedAudioSHA256: String? = nil,
+        deletedAudio: [DubbingAudioDeletion]? = nil,
         preCommit: ((URL) throws -> Void)? = nil
     ) throws {
         let previousData = try indexDataUnlocked()
@@ -645,7 +739,8 @@ public final class DubbingProjectStore {
             previousIndexData: previousData,
             committedIndexSHA256: CreativeWorkTransaction.digest(committedData),
             publishedAudioFileName: publishedAudioFileName,
-            publishedAudioSHA256: publishedAudioSHA256
+            publishedAudioSHA256: publishedAudioSHA256,
+            deletedAudio: deletedAudio
         )
         do {
             try operations.createDirectory(at: transactionDirectory)
@@ -665,10 +760,22 @@ public final class DubbingProjectStore {
                 if error is CreativeWorkTransactionInterruption {
                     throw error
                 }
+                if deletedAudio != nil {
+                    let currentDigest: String?
+                    do {
+                        currentDigest = try indexDataUnlocked().map(CreativeWorkTransaction.digest)
+                    } catch {
+                        throw DubbingProjectError.cleanupRequired
+                    }
+                    guard currentDigest == journal.previousIndexSHA256 else {
+                        throw DubbingProjectError.cleanupRequired
+                    }
+                }
                 try? rollbackUnlocked(journal: journal, transactionDirectory: transactionDirectory)
                 throw DubbingProjectError.invalidIdentifier
             }
             try validateCommittedAudio(journal)
+            try completeCommittedDeletion(journal)
             try? removeTransactionDirectoryUnlocked(transactionDirectory)
         } catch let error as DubbingProjectError {
             throw error
@@ -741,13 +848,20 @@ public final class DubbingProjectStore {
         }
         guard journal.schemaVersion == DubbingProjectJournal.currentSchemaVersion,
               journal.transactionID == transactionDirectory.lastPathComponent,
-              Self.isSafeAudioFileName(journal.publishedAudioFileName)
+              (journal.publishedAudioFileName.map({ Self.isSafeAudioFileName($0) })
+                ?? (journal.publishedAudioSHA256 == nil)),
+              (journal.operation == "delete") == (journal.deletedAudio != nil),
+              journal.deletedAudio?.allSatisfy({
+                Self.isSafeAudioFileName($0.fileName)
+                    && $0.sha256.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil
+              }) ?? true
         else {
             throw DubbingProjectError.invalidIdentifier
         }
         let currentDigest = try indexDataUnlocked().map(CreativeWorkTransaction.digest)
         if currentDigest == journal.committedIndexSHA256 {
             try validateCommittedAudio(journal)
+            try completeCommittedDeletion(journal)
             try? removeTransactionDirectoryUnlocked(transactionDirectory)
             return
         }
@@ -755,6 +869,24 @@ public final class DubbingProjectStore {
             throw DubbingProjectError.invalidIdentifier
         }
         try? rollbackUnlocked(journal: journal, transactionDirectory: transactionDirectory)
+    }
+
+    private func completeCommittedDeletion(_ journal: DubbingProjectJournal) throws {
+        guard let deletions = journal.deletedAudio else { return }
+        do {
+            for deletion in deletions {
+                let url = directory.appendingPathComponent(deletion.fileName)
+                guard !operations.isSymbolicLink(at: url) else { throw DubbingProjectError.cleanupRequired }
+                guard operations.fileExists(at: url) else { continue }
+                guard CreativeWorkTransaction.digest(try operations.read(from: url)) == deletion.sha256 else {
+                    throw DubbingProjectError.cleanupRequired
+                }
+                try operations.remove(at: url)
+            }
+            try operations.synchronize(at: directory)
+        } catch {
+            throw DubbingProjectError.cleanupRequired
+        }
     }
 
     private func validateCommittedAudio(_ journal: DubbingProjectJournal) throws {

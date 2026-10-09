@@ -2976,6 +2976,43 @@ extension AppModelTests {
         )
     }
 
+    func testWorkDeletionMovesItsAudioToTrashAndKeepsFailedTransfersVisibleForRetry() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var failing = true
+        var moved = 0
+        let store = CreativeWorkStore(
+            directory: directory,
+            fileOperations: CreativeWorkFileOperations(trashHandler: { url in
+                if failing { throw CocoaError(.fileWriteNoPermission) }
+                try FileManager.default.removeItem(at: url)
+                moved += 1
+            })
+        )
+        let model = makeRenderModel(store: store, creator: ScriptedRenderClient(audio: silentPreviewWAV(marker: 0x20)))
+        let work = try store.save(
+            Self.dubbingWork(script: "待删除的作品。", provenance: .legacyUnknown),
+            audioData: silentPreviewWAV(marker: 0x20)
+        )
+        model.refreshWorks()
+        XCTAssertTrue(model.deleteWork(work), "列表删除成功与废纸篓转移失败应分别报告")
+        XCTAssertTrue(model.works.isEmpty)
+        XCTAssertEqual(model.deletedWorksSummary?.count, 1)
+        XCTAssertTrue(model.workActionMessage?.contains("尚未完成") == true)
+        failing = false
+        XCTAssertTrue(model.trashDeletedWorks())
+        XCTAssertEqual(moved, 1)
+        XCTAssertEqual(model.deletedWorksSummary?.count, 0)
+        XCTAssertTrue(model.workActionMessage?.contains("废纸篓") == true)
+        let next = try store.save(
+            Self.dubbingWork(script: "下一件待删除作品。", provenance: .legacyUnknown),
+            audioData: silentPreviewWAV(marker: 0x20)
+        )
+        XCTAssertTrue(model.deleteWork(next))
+        XCTAssertEqual(moved, 2)
+        XCTAssertEqual(model.deletedWorksSummary?.count, 0)
+    }
+
     /// 生成、播放、导出不入库；显式保存只增加一条；重复保存仍是同一条。
     /// F1: formal production must state its validation policy at the call site,
     /// not only at the client boundary. Otherwise a creator client that resolves
@@ -3629,6 +3666,67 @@ extension AppModelTests {
         try await waitUntilDubbing { model.dubbingBusySegmentID == nil && !model.dubbingCandidates.isEmpty }
         XCTAssertTrue(model.adoptDubbingCandidate(try XCTUnwrap(model.dubbingCandidates.first)))
         XCTAssertEqual(try projects.list().first { $0.id == original.id }, storedOriginal)
+    }
+
+    /// 清理与项目重开保留采用；完整导出只确认当时的选择。
+    func testProjectCleanupPreservesAdoptionAndCanResumeOrDeleteTheSavedProject() async throws {
+        let creator = DubbingRenderClient(
+            audio: silentPreviewWAV(marker: 0x60),
+            recipe: Self.dubbingRecipe(digest: "digest-1"),
+            voice: Self.dubbingVoice()
+        )
+        let (model, works, projects) = makeDubbingModel(creator: creator, recipeDigest: "digest-1")
+        await model.refreshCreatorVoices()
+        let work = try saveSourceWork(into: works, script: "第一段正文。", recipeDigest: "digest-1")
+        let project = try XCTUnwrap(model.startDubbingProject(for: work))
+        let segment = try XCTUnwrap(project.segments.first)
+        model.startDubbingSegmentRedo(segment.id)
+        try await waitUntilDubbing { model.dubbingBusySegmentID == nil && model.dubbingCandidates.count == 1 }
+        let adopted = try XCTUnwrap(model.dubbingCandidates.first)
+        XCTAssertTrue(model.adoptDubbingCandidate(adopted))
+        model.startDubbingSegmentRedo(segment.id)
+        try await waitUntilDubbing { model.dubbingBusySegmentID == nil && model.dubbingCandidates.count == 2 }
+        XCTAssertEqual(model.unusedDubbingCandidateCount, 1)
+        XCTAssertFalse(model.deleteDubbingCandidate(adopted))
+        XCTAssertTrue(model.discardUnusedDubbingCandidates())
+        XCTAssertEqual(model.dubbingCandidates.map(\.id), [adopted.id])
+        XCTAssertTrue(model.dubbingHasUnexportedAdoptions)
+        model.prepareDubbingExport()
+        let output = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: output) }
+        XCTAssertTrue(model.writeDubbingExport(to: output))
+        XCTAssertFalse(model.dubbingHasUnexportedAdoptions)
+
+        model.closeDubbingProject()
+        XCTAssertTrue(model.openDubbingProject(project.id))
+        XCTAssertEqual(model.dubbingCandidates.map(\.id), [adopted.id])
+        XCTAssertTrue(model.dubbingHasUnexportedAdoptions, "再次打开不猜测此前是否已在用户目录导出")
+        XCTAssertFalse(model.deleteCurrentDubbingProject())
+        XCTAssertTrue(model.undoDubbingAdoption(inSegment: segment.id))
+        XCTAssertTrue(model.deleteCurrentDubbingProject())
+        XCTAssertNil(model.dubbingProject)
+        XCTAssertTrue(try projects.list().isEmpty)
+        XCTAssertEqual(try works.list().map(\.id), [work.id], "清理项目不删除原作品")
+    }
+
+    func testSavedProjectRemainsAccessibleWhenTheOriginalWorkLibraryIsEmpty() throws {
+        let creator = DubbingRenderClient(
+            audio: silentPreviewWAV(marker: 0x60),
+            recipe: Self.dubbingRecipe(digest: "digest-1"),
+            voice: Self.dubbingVoice()
+        )
+        let (model, works, projects) = makeDubbingModel(creator: creator, recipeDigest: "digest-1")
+        let work = try saveSourceWork(into: works, script: "仍要继续返修的正文。", recipeDigest: "digest-1")
+        let project = try XCTUnwrap(model.startDubbingProject(for: work))
+        let persisted = try XCTUnwrap(try projects.list().first)
+        model.closeDubbingProject()
+        try works.delete(work)
+        model.refreshWorks()
+        model.refreshDubbingProjects()
+        XCTAssertTrue(model.works.isEmpty)
+        XCTAssertEqual(model.dubbingProjects.map(\.id), [project.id])
+        XCTAssertTrue(model.openDubbingProject(project.id))
+        XCTAssertEqual(model.dubbingProject, persisted)
     }
 
     /// 只重做被点中的那一段：送出的文本只有这一段，其余候选与采用关系不变。

@@ -134,6 +134,166 @@ final class DubbingProjectStoreTests: XCTestCase {
 
     // MARK: - 候选与采用
 
+    func testCleanupProtectsCurrentAndUndoCandidatesAndReclaimsUnusedAudio() throws {
+        let store = DubbingProjectStore(directory: directory)
+        let project = makeProject()
+        try store.save(project)
+        for (id, marker) in [("cand_first", UInt8(0x11)), ("cand_second", UInt8(0x22)), ("cand_unused", UInt8(0x33))] {
+            try store.addCandidate(
+                makeCandidate(id: id, segmentID: "seg_first", text: "第一段。"),
+                audioData: wav(marker), toProject: project.id
+            )
+        }
+        try store.adopt(candidateID: "cand_first", inSegment: "seg_first", ofProject: project.id)
+        try store.adopt(candidateID: "cand_second", inSegment: "seg_first", ofProject: project.id)
+        for id in ["cand_first", "cand_second"] {
+            XCTAssertThrowsError(try store.deleteCandidate(id, fromProject: project.id)) {
+                XCTAssertEqual($0 as? DubbingProjectError, .candidateInUse)
+            }
+        }
+        XCTAssertEqual(try store.discardUnusedCandidates(inProject: project.id), 1)
+        XCTAssertEqual(Set(try store.candidates(forProject: project.id).map(\.id)), ["cand_first", "cand_second"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("cand_unused.wav").path))
+        try store.undoAdoption(inSegment: "seg_first", ofProject: project.id)
+        XCTAssertEqual(try store.list().first?.segments.first?.acceptedCandidateID, "cand_first")
+    }
+
+    func testDeletingAProjectRefusesAdoptedAudioThenRemovesItsRecordsAndFiles() throws {
+        let store = DubbingProjectStore(directory: directory)
+        let project = makeProject()
+        try store.save(project)
+        let candidate = try store.addCandidate(
+            makeCandidate(id: "cand_delete", segmentID: "seg_first", text: "第一段。"),
+            audioData: wav(0x11), toProject: project.id
+        )
+        try store.adopt(candidateID: candidate.id, inSegment: candidate.segmentID, ofProject: project.id)
+        XCTAssertThrowsError(try store.deleteProject(project.id)) {
+            XCTAssertEqual($0 as? DubbingProjectError, .projectHasAdoptedCandidates)
+        }
+        try store.undoAdoption(inSegment: candidate.segmentID, ofProject: project.id)
+        try store.deleteProject(project.id)
+        XCTAssertTrue(try store.list().isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent(candidate.audioFileName).path))
+    }
+
+    func testInterruptedDeletionRetainsAudioAndRestartCompletesTheCommittedCleanup() throws {
+        let store = DubbingProjectStore(directory: directory)
+        let project = makeProject()
+        try store.save(project)
+        let candidate = try store.addCandidate(
+            makeCandidate(id: "cand_crash_delete", segmentID: "seg_first", text: "第一段。"),
+            audioData: wav(0x11), toProject: project.id
+        )
+        let crashing = DubbingProjectStore(
+            directory: directory,
+            fileOperations: CreativeWorkFileOperations(syncInterceptor: { url in
+                if url.lastPathComponent == "projects.json" {
+                    throw CreativeWorkTransactionInterruption.simulatedProcessExit
+                }
+            })
+        )
+        XCTAssertThrowsError(try crashing.deleteCandidate(candidate.id, fromProject: project.id))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent(candidate.audioFileName).path))
+        let reopened = DubbingProjectStore(directory: directory)
+        XCTAssertTrue(try reopened.candidates(forProject: project.id).isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent(candidate.audioFileName).path))
+        XCTAssertEqual(try reopened.list().map(\.id), [project.id])
+    }
+
+    func testFailedDeletionCommitKeepsTheOriginalIndexAndAudio() throws {
+        let store = DubbingProjectStore(directory: directory)
+        let project = makeProject()
+        try store.save(project)
+        let candidate = try store.addCandidate(
+            makeCandidate(id: "cand_keep", segmentID: "seg_first", text: "第一段。"),
+            audioData: wav(0x11), toProject: project.id
+        )
+        let index = directory.appendingPathComponent("projects.json")
+        let before = try Data(contentsOf: index)
+        let failing = DubbingProjectStore(
+            directory: directory,
+            fileOperations: CreativeWorkFileOperations(writeInterceptor: { url, _ in
+                if url.lastPathComponent == "projects.json" { throw CocoaError(.fileWriteNoPermission) }
+            })
+        )
+        XCTAssertThrowsError(try failing.deleteCandidate(candidate.id, fromProject: project.id))
+        XCTAssertEqual(try Data(contentsOf: index), before)
+        XCTAssertEqual(try store.loadAudio(for: candidate), wav(0x11))
+    }
+
+    func testAudioCleanupFailureKeepsTheCommittedJournalUntilRestartCanReclaimIt() throws {
+        let store = DubbingProjectStore(directory: directory)
+        let project = makeProject()
+        try store.save(project)
+        let candidate = try store.addCandidate(
+            makeCandidate(id: "cand_remove_fail", segmentID: "seg_first", text: "第一段。"),
+            audioData: wav(0x11), toProject: project.id
+        )
+        let failing = DubbingProjectStore(
+            directory: directory,
+            fileOperations: CreativeWorkFileOperations(removeInterceptor: { url in
+                if url.lastPathComponent == candidate.audioFileName { throw CocoaError(.fileWriteNoPermission) }
+            })
+        )
+        XCTAssertThrowsError(try failing.deleteCandidate(candidate.id, fromProject: project.id)) {
+            XCTAssertEqual($0 as? DubbingProjectError, .cleanupRequired)
+        }
+        let journals = directory.appendingPathComponent(".transactions")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: journals.path).count, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent(candidate.audioFileName).path))
+        let restarted = DubbingProjectStore(directory: directory)
+        XCTAssertNoThrow(try restarted.deleteCandidate(candidate.id, fromProject: project.id),
+                         "清理失败后重试同一删除动作，应恢复事务并确认删除完成")
+        XCTAssertTrue(try restarted.candidates(forProject: project.id).isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent(candidate.audioFileName).path))
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: journals.path).isEmpty)
+    }
+
+    func testProjectDeletionCanBeRetriedAfterItsCleanupFailed() throws {
+        let store = DubbingProjectStore(directory: directory)
+        let project = makeProject()
+        try store.save(project)
+        let candidate = try store.addCandidate(
+            makeCandidate(id: "cand_project_retry", segmentID: "seg_first", text: "第一段。"),
+            audioData: wav(0x11), toProject: project.id
+        )
+        let failing = DubbingProjectStore(
+            directory: directory,
+            fileOperations: CreativeWorkFileOperations(removeInterceptor: { url in
+                if url.lastPathComponent == candidate.audioFileName { throw CocoaError(.fileWriteNoPermission) }
+            })
+        )
+        XCTAssertThrowsError(try failing.deleteProject(project.id))
+        let reopened = DubbingProjectStore(directory: directory)
+        XCTAssertNoThrow(try reopened.deleteProject(project.id))
+        XCTAssertTrue(try reopened.list().isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent(candidate.audioFileName).path))
+    }
+
+    func testCommittedDeletionRefusesAudioThatChangedAfterItsIndexWasCommitted() throws {
+        let store = DubbingProjectStore(directory: directory)
+        let project = makeProject()
+        try store.save(project)
+        let candidate = try store.addCandidate(
+            makeCandidate(id: "cand_changed_delete", segmentID: "seg_first", text: "第一段。"),
+            audioData: wav(0x11), toProject: project.id
+        )
+        let audio = directory.appendingPathComponent(candidate.audioFileName)
+        let changed = DubbingProjectStore(
+            directory: directory,
+            fileOperations: CreativeWorkFileOperations(syncInterceptor: { url in
+                if url.lastPathComponent == "projects.json" {
+                    try Data("unknown changed bytes".utf8).write(to: audio)
+                }
+            })
+        )
+        XCTAssertThrowsError(try changed.deleteCandidate(candidate.id, fromProject: project.id)) {
+            XCTAssertEqual($0 as? DubbingProjectError, .cleanupRequired)
+        }
+        XCTAssertThrowsError(try DubbingProjectStore(directory: directory).list())
+        XCTAssertEqual(try Data(contentsOf: audio), Data("unknown changed bytes".utf8))
+    }
+
     func testRuntimeDriftRejectsAdoptionAndRebuildPreservesTheOriginalAssets() throws {
         func recipe(_ revision: String, digest: String) -> RenderProvenanceSnapshot {
             RenderProvenanceSnapshot(

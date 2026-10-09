@@ -858,12 +858,15 @@ public final class AppModel {
     /// 项目**不含**原作品音频。它只记录每段当前采用哪个候选，音频一律留在候选里；
     /// 导出的成品由被采用的候选按顺序拼成，正文与音频因此始终一一对应。
     public private(set) var dubbingProject: DubbingProject?
+    public private(set) var dubbingProjects: [DubbingProject] = []
     public private(set) var dubbingCandidates: [DubbingCandidate] = []
     /// 正在重做的段落 ID。同一时间只允许一段在飞，避免两次生成互相覆盖状态。
     public private(set) var dubbingBusySegmentID: String?
     public private(set) var dubbingMessage: String?
     public private(set) var playingDubbingCandidateID: String?
     public private(set) var dubbingExportBundle: DubbingExportBundle?
+    private var dubbingExportPreparedSelection: [String]?
+    private var dubbingExportedSelection: [String]?
     public private(set) var isCreatingVoicePreview = false
     public private(set) var voiceDesignCandidates: [VoiceDesignCandidateSnapshot] = []
     public private(set) var voiceDesignSavedSlots: Set<String> = []
@@ -3203,6 +3206,34 @@ public final class AppModel {
             works = []
             worksMessage = "作品历史暂时不可用"
         }
+        refreshDeletedWorks()
+    }
+
+    public private(set) var deletedWorksSummary: CreativeWorkRecoverySummary?
+    public private(set) var deletedWorksMessage: String?
+
+    public func refreshDeletedWorks() {
+        do {
+            deletedWorksSummary = try workStore.deletedWorksSummary()
+            deletedWorksMessage = nil
+        } catch {
+            deletedWorksSummary = nil
+            deletedWorksMessage = "已删除作品暂时无法读取，请保留恢复区并打开诊断。"
+        }
+    }
+
+    @discardableResult
+    public func trashDeletedWorks() -> Bool {
+        do {
+            let count = try workStore.trashDeletedWorks()
+            refreshDeletedWorks()
+            workActionMessage = "已将 \(count) 件已删除作品移入系统废纸篓；清空废纸篓后才会永久移除。"
+            return true
+        } catch {
+            refreshDeletedWorks()
+            workActionMessage = "音频转移尚未完成；剩余内容仍在本机恢复区，请重新读取后重试。"
+            return false
+        }
     }
 
     public func loadWorkAudio(_ work: CreativeWork) throws -> Data {
@@ -3214,7 +3245,7 @@ public final class AppModel {
         try? workStore.audioURL(for: work)
     }
 
-    /// Deletes a saved work and moves its audio into the managed recovery area.
+    /// Deletes a saved work, then transfers its recoverable transaction to Trash.
     /// The caller must still confirm because the work disappears from the list.
     @discardableResult
     public func deleteWork(_ work: CreativeWork) -> Bool {
@@ -3222,11 +3253,22 @@ public final class AppModel {
             stopAudio()
         }
         do {
-            try workStore.delete(work)
-            works = try workStore.list()
+            let transactionID = try workStore.delete(work)
+            works.removeAll { $0.id == work.id }
+            if let refreshed = try? workStore.list() { works = refreshed }
             worksMessage = nil
             workPlaybackMessage = nil
-            workActionMessage = "“\(work.displayTitle)”已从作品列表删除；音频已移入本机恢复区。"
+            do {
+                if let transactionID {
+                    try workStore.trashDeletedWorks(transactionIDs: [transactionID])
+                }
+                workActionMessage = transactionID == nil
+                    ? "作品已不在列表中；仍待转移的音频可在「已删除作品」中重试。"
+                    : "“\(work.displayTitle)”已从作品列表删除；音频已移入系统废纸篓。"
+            } catch {
+                workActionMessage = "作品已从列表删除，音频转移尚未完成；请在「已删除作品」中重试。"
+            }
+            refreshDeletedWorks()
             if lastCreatedWork?.id == work.id {
                 lastCreatedWork = nil
             }
@@ -3405,6 +3447,90 @@ public final class AppModel {
 
     // MARK: - 段落返修
 
+    private var dubbingSelection: [String]? {
+        guard let project = dubbingProject else { return nil }
+        return [project.id] + project.segments.map { $0.acceptedCandidateID ?? "" }
+    }
+
+    public var dubbingHasUnexportedAdoptions: Bool {
+        guard let project = dubbingProject,
+              project.segments.contains(where: { $0.acceptedCandidateID != nil }) else { return false }
+        return dubbingSelection != dubbingExportedSelection
+    }
+
+    public var unusedDubbingCandidateCount: Int {
+        guard let project = dubbingProject else { return 0 }
+        return dubbingCandidates.filter { !project.isUsingCandidate($0.id) }.count
+    }
+
+    public func refreshDubbingProjects() {
+        do { dubbingProjects = try dubbingProjectStore.list() }
+        catch { dubbingMessage = Self.dubbingErrorMessage(for: error) }
+    }
+
+    @discardableResult
+    public func openDubbingProject(_ id: String) -> Bool {
+        closeDubbingProject()
+        do {
+            guard let project = try dubbingProjectStore.list().first(where: { $0.id == id }) else {
+                throw DubbingProjectError.candidateNotFound
+            }
+            let candidates = try dubbingProjectStore.candidates(forProject: id)
+            dubbingProject = project
+            dubbingCandidates = candidates
+            refreshDubbingProjects()
+            return true
+        } catch {
+            dubbingMessage = Self.dubbingErrorMessage(for: error)
+            return false
+        }
+    }
+
+    @discardableResult
+    public func deleteDubbingCandidate(_ candidate: DubbingCandidate) -> Bool {
+        guard let project = dubbingProject, dubbingBusySegmentID == nil else { return false }
+        do {
+            try dubbingProjectStore.deleteCandidate(candidate.id, fromProject: project.id)
+            if playingDubbingCandidateID == candidate.id { stopAudio() }
+            dubbingCandidates = try dubbingProjectStore.candidates(forProject: project.id)
+            dubbingMessage = "已删除这个未采用候选及其音频。"
+            return true
+        } catch {
+            dubbingMessage = Self.dubbingErrorMessage(for: error)
+            return false
+        }
+    }
+
+    @discardableResult
+    public func discardUnusedDubbingCandidates() -> Bool {
+        guard let project = dubbingProject, dubbingBusySegmentID == nil else { return false }
+        do {
+            let count = try dubbingProjectStore.discardUnusedCandidates(inProject: project.id)
+            if let id = playingDubbingCandidateID, !project.isUsingCandidate(id) { stopAudio() }
+            dubbingCandidates = try dubbingProjectStore.candidates(forProject: project.id)
+            dubbingMessage = "已清理 \(count) 个未采用候选及其音频，采用和撤销记录已保留。"
+            return true
+        } catch {
+            dubbingMessage = Self.dubbingErrorMessage(for: error)
+            return false
+        }
+    }
+
+    @discardableResult
+    public func deleteCurrentDubbingProject() -> Bool {
+        guard let project = dubbingProject, dubbingBusySegmentID == nil else { return false }
+        do {
+            try dubbingProjectStore.deleteProject(project.id)
+            closeDubbingProject()
+            refreshDubbingProjects()
+            dubbingMessage = "已删除项目及候选音频，原作品仍保留。"
+            return true
+        } catch {
+            dubbingMessage = Self.dubbingErrorMessage(for: error)
+            return false
+        }
+    }
+
     /// 只报告可比的当前模型事实；缺少身份时不推断版本相同或不同。
     public var dubbingConditionsMessage: String? {
         guard let recipe = dubbingProject?.recipe.recipe,
@@ -3437,6 +3563,7 @@ public final class AppModel {
             closeDubbingProject()
             dubbingProject = rebuilt
             dubbingCandidates = []
+            refreshDubbingProjects()
             dubbingMessage = "已按这次生成的制作条件建立新项目。各段需要重新生成和采用，旧项目和音频已保留。"
             return true
         } catch {
@@ -3473,6 +3600,7 @@ public final class AppModel {
             let committed = try dubbingProjectStore.save(project)
             dubbingProject = committed
             dubbingCandidates = try dubbingProjectStore.candidates(forProject: committed.id)
+            refreshDubbingProjects()
             dubbingMessage = nil
             return committed
         } catch {
@@ -3491,6 +3619,8 @@ public final class AppModel {
         dubbingBusySegmentID = nil
         dubbingMessage = nil
         dubbingExportBundle = nil
+        dubbingExportPreparedSelection = nil
+        dubbingExportedSelection = nil
         if playingDubbingCandidateID != nil {
             stopAudio()
         }
@@ -3707,6 +3837,7 @@ public final class AppModel {
                 audio: exported.audio,
                 script: exported.script
             )
+            dubbingExportPreparedSelection = dubbingSelection
             dubbingMessage = nil
         } catch {
             dubbingMessage = Self.dubbingErrorMessage(for: error)
@@ -3741,6 +3872,8 @@ public final class AppModel {
             dubbingMessage = "已写入 \(bundle.audioFileName)，但正文没能写入：目标位置可能被占用或空间不足。"
             return false
         }
+        dubbingExportedSelection = dubbingExportPreparedSelection
+        dubbingExportPreparedSelection = nil
         dubbingExportBundle = nil
         dubbingMessage = "已导出 \(bundle.audioFileName) 和 \(bundle.scriptFileName)。"
         return true
@@ -3749,6 +3882,7 @@ public final class AppModel {
     /// 放弃这次导出准备。用户改了主意时清空，避免下一次导出写出一份旧的成品。
     public func discardDubbingExport() {
         dubbingExportBundle = nil
+        dubbingExportPreparedSelection = nil
     }
 
     private static func exportBaseName(for title: String) -> String {
@@ -3771,7 +3905,8 @@ public final class AppModel {
             case .candidateNotAdoptable:
                 "这个候选无法安全采用，请保留音频并检查项目记录。"
             case .candidateRecipeMissing, .candidateTextChanged,
-                 .candidateRuntimeChanged, .candidateConditionsChanged:
+                 .candidateRuntimeChanged, .candidateConditionsChanged,
+                 .candidateInUse, .projectHasAdoptedCandidates, .cleanupRequired:
                 projectError.errorDescription ?? "这个候选无法安全采用。"
             case .recoveryRequired:
                 "配音项目音频未通过完整性校验，请保留项目并打开诊断。"
