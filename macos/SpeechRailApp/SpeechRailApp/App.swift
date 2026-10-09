@@ -80,7 +80,12 @@ struct SpeechRailApp: App {
 #endif
         let diagnosticsClient: any ServiceDiagnosticsClient
         let discoveryClient: any ServiceCapabilityDiscoveryClient
-        let creatorClient: (any SpeechRailCreatorClient)?
+        let voiceDirectoryClient: (any SpeechRailVoiceDirectoryClient)?
+        let speechRenderClient: (any SpeechRailSpeechRenderClient)?
+        let voiceDesignClient: (any SpeechRailVoiceDesignClient)?
+        let voiceCloneClient: (any SpeechRailVoiceCloneClient)?
+        let voiceEditingClient: (any SpeechRailVoiceEditingClient)?
+        let voiceQualityClient: (any SpeechRailVoiceQualityClient)?
         let receiptClient: (any SpeechRailReceiptClient)?
 #if DEBUG
         if isUITest {
@@ -91,20 +96,36 @@ struct SpeechRailApp: App {
             )
             diagnosticsClient = fixtureClient
             discoveryClient = fixtureClient
-            creatorClient = UITestCreatorClient()
+            let fixtureCreator = UITestCreatorClient()
+            voiceDirectoryClient = fixtureCreator
+            speechRenderClient = fixtureCreator
+            voiceDesignClient = fixtureCreator
+            voiceCloneClient = fixtureCreator
+            voiceEditingClient = fixtureCreator
+            voiceQualityClient = nil
             receiptClient = nil
         } else {
             let liveServiceClient = ServiceAPIClient()
             diagnosticsClient = liveServiceClient
             discoveryClient = liveServiceClient
-            creatorClient = liveServiceClient
+            voiceDirectoryClient = liveServiceClient
+            speechRenderClient = liveServiceClient
+            voiceDesignClient = liveServiceClient
+            voiceCloneClient = liveServiceClient
+            voiceEditingClient = liveServiceClient
+            voiceQualityClient = liveServiceClient
             receiptClient = liveServiceClient
         }
 #else
         let liveServiceClient = ServiceAPIClient()
         diagnosticsClient = liveServiceClient
         discoveryClient = liveServiceClient
-        creatorClient = liveServiceClient
+        voiceDirectoryClient = liveServiceClient
+        speechRenderClient = liveServiceClient
+        voiceDesignClient = liveServiceClient
+        voiceCloneClient = liveServiceClient
+        voiceEditingClient = liveServiceClient
+        voiceQualityClient = liveServiceClient
         receiptClient = liveServiceClient
 #endif
         let workStore: CreativeWorkStore
@@ -131,7 +152,12 @@ struct SpeechRailApp: App {
             transport: transport,
             apiClient: diagnosticsClient,
             discoveryClient: discoveryClient,
-            creatorClient: creatorClient,
+            voiceDirectoryClient: voiceDirectoryClient,
+            speechRenderClient: speechRenderClient,
+            voiceDesignClient: voiceDesignClient,
+            voiceCloneClient: voiceCloneClient,
+            voiceEditingClient: voiceEditingClient,
+            voiceQualityClient: voiceQualityClient,
             receiptClient: receiptClient,
             workStore: workStore,
             registration: registration
@@ -929,7 +955,7 @@ private struct UITestServiceDiagnosticsClient:
 /// Deterministic creator transport for UI tests. It exercises the same AppModel
 /// state transitions as the live REST client while keeping tests offline and
 /// free of user audio or model assets.
-private struct UITestCreatorClient: SpeechRailCreatorClient {
+private struct UITestCreatorClient: SpeechRailVoiceDirectoryClient, SpeechRailSpeechRenderClient, SpeechRailVoiceDesignClient, SpeechRailVoiceCloneClient, SpeechRailVoiceEditingClient {
     private let store: UITestVoiceStore
     private let voiceDesignStore: UITestVoiceDesignStore
 
@@ -1161,6 +1187,12 @@ private struct UITestCreatorClient: SpeechRailCreatorClient {
             mode: voice.mode,
             revoked: voice.revoked
         )
+    }
+
+    func createVoice(name: String, instruction: String, id: String?, seed: Int?) async throws -> CreatorVoice {
+        await store.insert(CreatorVoice(
+            id: id ?? "fixture_created_voice", name: name, instruction: instruction, seed: seed
+        ))
     }
 
     func deleteVoice(id: String) async throws {

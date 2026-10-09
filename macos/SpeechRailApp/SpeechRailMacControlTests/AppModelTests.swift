@@ -12,6 +12,23 @@ import SpeechRailControlKit
 /// 满足 `AppModel.init` 的必填依赖（这些用例根本不走服务 HTTP）。
 @MainActor
 final class AppModelTests: XCTestCase {
+    func testMissingCreatorCapabilityIsReportedWithoutInventingServiceFailure() async {
+        let model = makeModel(transport: ClosureControlTransport { request in
+            Self.modelCatalogResponse(for: request)
+        })
+        do {
+            _ = try await model.fetchCreatorVoices()
+            XCTFail("a missing directory port must reject the operation")
+        } catch {
+            XCTAssertTrue(error is CreatorCapabilityUnavailableError)
+        }
+        let state = await model.checkVoiceOutput(voiceID: "voice_demo")
+        guard case .error(_, _, let message) = state else {
+            return XCTFail("a missing quality port must not report a completed check")
+        }
+        XCTAssertEqual(message, CreatorCapabilityUnavailableError().errorDescription)
+    }
+
     func testControlProbeStartsUnknownAndCancellationKeepsConfirmedFailure() async {
         let script = ControlProbeScript()
         let model = makeModel(transport: ClosureControlTransport { request in
@@ -50,7 +67,7 @@ final class AppModelTests: XCTestCase {
         let health = HealthProbeScript()
         let model = AppModel(
             transport: ClosureControlTransport { _ in throw CancellationError() },
-            apiClient: health, creatorClient: UnavailableCreatorClient()
+            apiClient: health
         )
         XCTAssertEqual(model.jobQueueSummary, "未读取")
         for (ready, expected) in [(nil, "未读取"), (true, "可用"), (false, "未就绪")] {
@@ -702,7 +719,8 @@ final class AppModelTests: XCTestCase {
                     status: .completed
                 )
             },
-            creatorClient: creator
+            voiceDirectoryClient: creator,
+            voiceCloneClient: creator
         )
         let firstAudio = Data([1, 2, 3, 4])
         let firstRecording = FileManager.default.temporaryDirectory
@@ -746,7 +764,8 @@ final class AppModelTests: XCTestCase {
                     status: .completed
                 )
             },
-            creatorClient: creator
+            voiceDirectoryClient: creator,
+            voiceCloneClient: creator
         )
         let recording = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
@@ -949,7 +968,8 @@ final class AppModelTests: XCTestCase {
                     status: .completed
                 )
             },
-            creatorClient: creator
+            voiceDirectoryClient: creator,
+            voiceDesignClient: creator
         )
         let preview = VoiceDesignCandidateSnapshot(
             slot: "1",
@@ -997,7 +1017,8 @@ final class AppModelTests: XCTestCase {
                     status: .completed
                 )
             },
-            creatorClient: creator
+            voiceDirectoryClient: creator,
+            voiceDesignClient: creator
         )
         let preview = VoiceDesignCandidateSnapshot(
             slot: "1",
@@ -1064,7 +1085,8 @@ final class AppModelTests: XCTestCase {
                     status: .completed
                 )
             },
-            creatorClient: creator
+            voiceDirectoryClient: creator,
+            voiceDesignClient: creator
         )
         let preview = VoiceDesignCandidateSnapshot(
             slot: "1",
@@ -1105,7 +1127,8 @@ final class AppModelTests: XCTestCase {
                     status: .completed
                 )
             },
-            creatorClient: creator
+            voiceDirectoryClient: creator,
+            voiceDesignClient: creator
         )
         await creator.setNextCandidateState("future_state")
         let preview = VoiceDesignCandidateSnapshot(
@@ -1137,7 +1160,8 @@ final class AppModelTests: XCTestCase {
                     status: .completed
                 )
             },
-            creatorClient: creator
+            voiceDirectoryClient: creator,
+            voiceDesignClient: creator
         )
         let preview = VoiceDesignCandidateSnapshot(
             slot: "1",
@@ -1195,7 +1219,8 @@ final class AppModelTests: XCTestCase {
                     status: .completed
                 )
             },
-            creatorClient: creator
+            voiceDirectoryClient: creator,
+            voiceDesignClient: creator
         )
         let firstPreview = VoiceDesignCandidateSnapshot(
             slot: "1",
@@ -1499,7 +1524,8 @@ final class AppModelTests: XCTestCase {
                     status: .completed
                 )
             },
-            creatorClient: creatorClient
+            voiceDirectoryClient: creatorClient,
+            voiceQualityClient: creatorClient
         )
         let didLoadVoices = await model.refreshCreatorVoices()
         XCTAssertTrue(didLoadVoices, "the check needs an authoritative voice revision")
@@ -1521,12 +1547,22 @@ final class AppModelTests: XCTestCase {
 
     private func makeModel(
         transport: any SpeechRailControlTransport,
-        creatorClient: any SpeechRailCreatorClient = UnavailableCreatorClient()
+        voiceDirectoryClient: (any SpeechRailVoiceDirectoryClient)? = nil,
+        speechRenderClient: (any SpeechRailSpeechRenderClient)? = nil,
+        voiceDesignClient: (any SpeechRailVoiceDesignClient)? = nil,
+        voiceCloneClient: (any SpeechRailVoiceCloneClient)? = nil,
+        voiceEditingClient: (any SpeechRailVoiceEditingClient)? = nil,
+        voiceQualityClient: (any SpeechRailVoiceQualityClient)? = nil
     ) -> AppModel {
         AppModel(
             transport: transport,
             apiClient: UnavailableDiagnosticsClient(),
-            creatorClient: creatorClient
+            voiceDirectoryClient: voiceDirectoryClient,
+            speechRenderClient: speechRenderClient,
+            voiceDesignClient: voiceDesignClient,
+            voiceCloneClient: voiceCloneClient,
+            voiceEditingClient: voiceEditingClient,
+            voiceQualityClient: voiceQualityClient
         )
     }
 
@@ -1620,8 +1656,8 @@ private struct UnavailableDiagnosticsClient: ServiceDiagnosticsClient {
 
 /// Returns a scripted namespaced quality-run envelope so the check state machine
 /// can be driven without a service. `runVoiceQuality` is the only method that
-/// matters here; the rest use the protocol's default implementations.
-private actor VoiceOutputCheckCreatorClient: SpeechRailCreatorClient {
+/// matters here; this fake only implements quality and directory reads.
+private actor VoiceOutputCheckCreatorClient: SpeechRailVoiceDirectoryClient, SpeechRailVoiceQualityClient {
     private var response: VoiceQualityRunResponse
     private var runs = 0
     private var voices: [CreatorVoice]
@@ -1651,53 +1687,6 @@ private actor VoiceOutputCheckCreatorClient: SpeechRailCreatorClient {
         throw ServiceAPIClientError.requestFailed
     }
 
-    func createSpeech(
-        text: String,
-        voiceID: String,
-        speed: Double,
-        options: SpeechRailRequestOptions
-    ) async throws -> Data {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func createVoicePreview(
-        text: String,
-        instruction: String,
-        speed: Double,
-        seed: Int?
-    ) async throws -> Data {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func fetchCloneIdempotencyStatus(
-        idempotencyKey: String
-    ) async throws -> CloneIdempotencyStatus {
-        CloneIdempotencyStatus(state: .new, resultID: nil)
-    }
-
-    func fetchClonePrompts() async throws -> [ClonePrompt] { [] }
-
-    func validateVoiceClone(
-        audio: Data,
-        referenceText: String,
-        name: String,
-        voiceID: String?
-    ) async throws -> VoiceQualityReportSnapshot {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func registerVoiceClone(
-        audio: Data,
-        referenceText: String,
-        name: String,
-        voiceID: String?,
-        idempotencyKey: String?
-    ) async throws -> CreatorVoice {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func deleteVoice(id: String) async throws {}
-
     func runVoiceQuality(
         id: String,
         request: VoiceQualityRunRequest
@@ -1711,31 +1700,13 @@ private actor VoiceOutputCheckCreatorClient: SpeechRailCreatorClient {
     }
 }
 
-private actor PendingCloneRegistrationClient: SpeechRailCreatorClient {
+private actor PendingCloneRegistrationClient: SpeechRailVoiceDirectoryClient, SpeechRailVoiceCloneClient {
     private var queriedKeys: [String] = []
     private var registrations = 0
 
     func fetchVoices() async throws -> [CreatorVoice] { [] }
 
     func fetchVoice(id: String) async throws -> CreatorVoice {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func createSpeech(
-        text: String,
-        voiceID: String,
-        speed: Double,
-        options: SpeechRailRequestOptions
-    ) async throws -> Data {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func createVoicePreview(
-        text: String,
-        instruction: String,
-        speed: Double,
-        seed: Int?
-    ) async throws -> Data {
         throw ServiceAPIClientError.requestFailed
     }
 
@@ -1768,35 +1739,15 @@ private actor PendingCloneRegistrationClient: SpeechRailCreatorClient {
         throw ServiceAPIClientError.requestFailed
     }
 
-    func deleteVoice(id: String) async throws {}
-
     func statusKeys() -> [String] { queriedKeys }
 
     func registrationCount() -> Int { registrations }
 }
 
-private actor RejectingCloneRegistrationClient: SpeechRailCreatorClient {
+private actor RejectingCloneRegistrationClient: SpeechRailVoiceDirectoryClient, SpeechRailVoiceCloneClient {
     func fetchVoices() async throws -> [CreatorVoice] { [] }
 
     func fetchVoice(id: String) async throws -> CreatorVoice {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func createSpeech(
-        text: String,
-        voiceID: String,
-        speed: Double,
-        options: SpeechRailRequestOptions
-    ) async throws -> Data {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func createVoicePreview(
-        text: String,
-        instruction: String,
-        speed: Double,
-        seed: Int?
-    ) async throws -> Data {
         throw ServiceAPIClientError.requestFailed
     }
 
@@ -1833,10 +1784,9 @@ private actor RejectingCloneRegistrationClient: SpeechRailCreatorClient {
         )
     }
 
-    func deleteVoice(id: String) async throws {}
 }
 
-private actor VoiceDesignWorkflowCreatorClient: SpeechRailCreatorClient {
+private actor VoiceDesignWorkflowCreatorClient: SpeechRailVoiceDirectoryClient, SpeechRailVoiceDesignClient {
     private var currentCandidate: VoiceDesignCandidate?
     private var recordedEvents: [String] = []
     private let candidateID = "vd_0123456789abcdef01234567"
@@ -1892,15 +1842,6 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailCreatorClient {
             available: true,
             revision: candidateRevision
         )
-    }
-
-    func createSpeech(
-        text: String,
-        voiceID: String,
-        speed: Double,
-        options: SpeechRailRequestOptions
-    ) async throws -> Data {
-        throw ServiceAPIClientError.requestFailed
     }
 
     func createVoicePreview(
@@ -2125,35 +2066,6 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailCreatorClient {
         return cancelled
     }
 
-    func fetchCloneIdempotencyStatus(
-        idempotencyKey: String
-    ) async throws -> CloneIdempotencyStatus {
-        CloneIdempotencyStatus(state: .new, resultID: nil)
-    }
-
-    func fetchClonePrompts() async throws -> [ClonePrompt] { [] }
-
-    func validateVoiceClone(
-        audio: Data,
-        referenceText: String,
-        name: String,
-        voiceID: String?
-    ) async throws -> VoiceQualityReportSnapshot {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func registerVoiceClone(
-        audio: Data,
-        referenceText: String,
-        name: String,
-        voiceID: String?,
-        idempotencyKey: String?
-    ) async throws -> CreatorVoice {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func deleteVoice(id: String) async throws {}
-
     private func makeCandidate(
         voiceID: String,
         name: String,
@@ -2178,6 +2090,7 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailCreatorClient {
             publishable: publishable
         )
     }
+    func fetchVoiceDesignCandidates() async throws -> [VoiceDesignCandidate] { [] }
 }
 
 /// 按调用次序给出 `modelStatus` 响应的脚本。用 actor 隔离，保证并行测试之间
@@ -2464,7 +2377,7 @@ private func silentPreviewWAV(marker: UInt8, frames: Int = 2_400) -> Data {
 }
 
 /// 只在第一次合成上挂起，让"取消 → 重新开始 → 迟到返回"这条交错可复现。
-private actor HeldPreviewCreatorClient: SpeechRailCreatorClient {
+private actor HeldPreviewCreatorClient: SpeechRailVoiceDirectoryClient, SpeechRailSpeechRenderClient {
     private(set) var requestedInputs: [String] = []
     private var heldContinuation: CheckedContinuation<Data, Error>?
     private var pendingInput: String?
@@ -2510,47 +2423,6 @@ private actor HeldPreviewCreatorClient: SpeechRailCreatorClient {
         return silentPreviewWAV(marker: 0xB2)
     }
 
-    func createVoicePreview(
-        text: String,
-        instruction: String,
-        speed: Double,
-        seed: Int?
-    ) async throws -> Data {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func fetchClonePrompts() async throws -> [ClonePrompt] { [] }
-
-    func validateVoiceClone(
-        audio: Data,
-        referenceText: String,
-        name: String,
-        voiceID: String?
-    ) async throws -> VoiceQualityReportSnapshot {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func registerVoiceClone(
-        audio: Data,
-        referenceText: String,
-        name: String,
-        voiceID: String?,
-        idempotencyKey: String?
-    ) async throws -> CreatorVoice {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func deleteVoice(id: String) async throws {}
-
-    func createVoiceDesignCandidate(
-        voiceID: String,
-        name: String,
-        instruction: String,
-        referenceText: String,
-        seed: Int
-    ) async throws -> VoiceQualityReportSnapshotV2 {
-        throw ServiceAPIClientError.requestFailed
-    }
 }
 
 private struct PreviewDiscoveryClient: ServiceCapabilityDiscoveryClient {
@@ -2641,7 +2513,8 @@ extension AppModelTests {
             },
             apiClient: UnavailableDiagnosticsClient(),
             discoveryClient: PreviewDiscoveryClient(snapshot: Self.previewSnapshot()),
-            creatorClient: creator
+            voiceDirectoryClient: creator,
+            speechRenderClient: creator
         )
         await model.refreshDiscovery()
 
@@ -2693,7 +2566,7 @@ extension AppModelTests {
 // MARK: - (m) 显式保存：只保存一次、身份冻结、不静默丢弃
 
 /// 正式制作路径的可控替身：返回合法 WAV，并记录每次 render 的身份参数。
-private actor ScriptedRenderClient: SpeechRailCreatorClient {
+private actor ScriptedRenderClient: SpeechRailVoiceDirectoryClient, SpeechRailSpeechRenderClient {
     private(set) var renderCalls: [(text: String, voiceID: String, speed: Double)] = []
     private(set) var renderPolicies: [String?] = []
     private let audio: Data
@@ -2758,47 +2631,6 @@ private actor ScriptedRenderClient: SpeechRailCreatorClient {
         )
     }
 
-    func createVoicePreview(
-        text: String,
-        instruction: String,
-        speed: Double,
-        seed: Int?
-    ) async throws -> Data {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func fetchClonePrompts() async throws -> [ClonePrompt] { [] }
-
-    func validateVoiceClone(
-        audio: Data,
-        referenceText: String,
-        name: String,
-        voiceID: String?
-    ) async throws -> VoiceQualityReportSnapshot {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func registerVoiceClone(
-        audio: Data,
-        referenceText: String,
-        name: String,
-        voiceID: String?,
-        idempotencyKey: String?
-    ) async throws -> CreatorVoice {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func deleteVoice(id: String) async throws {}
-
-    func createVoiceDesignCandidate(
-        voiceID: String,
-        name: String,
-        instruction: String,
-        referenceText: String,
-        seed: Int
-    ) async throws -> VoiceQualityReportSnapshotV2 {
-        throw ServiceAPIClientError.requestFailed
-    }
 }
 
 private struct SavedReceiptClient: SpeechRailReceiptClient {
@@ -2849,7 +2681,7 @@ private actor RenderGate {
 
 /// 段落返修用的正式制作替身：音色目录里只有一件可用音色，
 /// 渲染结果携带与原作品相同的配方摘要，因此候选可被采用。
-private actor DubbingRenderClient: SpeechRailCreatorClient {
+private actor DubbingRenderClient: SpeechRailVoiceDirectoryClient, SpeechRailSpeechRenderClient {
     private(set) var renderCalls: [(text: String, voiceID: String, speed: Double)] = []
     private let audio: Data
     private let renderResult: SpeechRenderResult
@@ -2911,47 +2743,6 @@ private actor DubbingRenderClient: SpeechRailCreatorClient {
         return renderResult
     }
 
-    func createVoicePreview(
-        text: String,
-        instruction: String,
-        speed: Double,
-        seed: Int?
-    ) async throws -> Data {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func fetchClonePrompts() async throws -> [ClonePrompt] { [] }
-
-    func validateVoiceClone(
-        audio: Data,
-        referenceText: String,
-        name: String,
-        voiceID: String?
-    ) async throws -> VoiceQualityReportSnapshot {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func registerVoiceClone(
-        audio: Data,
-        referenceText: String,
-        name: String,
-        voiceID: String?,
-        idempotencyKey: String?
-    ) async throws -> CreatorVoice {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func deleteVoice(id: String) async throws {}
-
-    func createVoiceDesignCandidate(
-        voiceID: String,
-        name: String,
-        instruction: String,
-        referenceText: String,
-        seed: Int
-    ) async throws -> VoiceQualityReportSnapshotV2 {
-        throw ServiceAPIClientError.requestFailed
-    }
 }
 
 extension AppModelTests {
@@ -2961,7 +2752,7 @@ extension AppModelTests {
 
     private func makeRenderModel(
         store: CreativeWorkStore,
-        creator: any SpeechRailCreatorClient,
+        creator: any SpeechRailVoiceDirectoryClient & SpeechRailSpeechRenderClient,
         receiptClient: (any SpeechRailReceiptClient)? = nil
     ) -> AppModel {
         AppModel(
@@ -2970,7 +2761,8 @@ extension AppModelTests {
             },
             apiClient: UnavailableDiagnosticsClient(),
             discoveryClient: PreviewDiscoveryClient(snapshot: Self.previewSnapshot()),
-            creatorClient: creator,
+            voiceDirectoryClient: creator,
+            speechRenderClient: creator,
             receiptClient: receiptClient,
             workStore: store
         )
@@ -3534,7 +3326,7 @@ extension AppModelTests {
     }
 
     private func makeDubbingModel(
-        creator: any SpeechRailCreatorClient,
+        creator: any SpeechRailVoiceDirectoryClient & SpeechRailSpeechRenderClient,
         recipeDigest: String?
     ) -> (AppModel, CreativeWorkStore, DubbingProjectStore) {
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -3551,7 +3343,8 @@ extension AppModelTests {
             },
             apiClient: UnavailableDiagnosticsClient(),
             discoveryClient: PreviewDiscoveryClient(snapshot: Self.previewSnapshot()),
-            creatorClient: creator,
+            voiceDirectoryClient: creator,
+            speechRenderClient: creator,
             workStore: works,
             dubbingProjectStore: projects
         )

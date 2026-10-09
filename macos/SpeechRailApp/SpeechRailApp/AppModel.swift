@@ -943,7 +943,12 @@ public final class AppModel {
     private let transport: any SpeechRailControlTransport
     private let apiClient: any ServiceDiagnosticsClient
     private let discoveryClient: any ServiceCapabilityDiscoveryClient
-    private let creatorClient: any SpeechRailCreatorClient
+    private let voiceDirectoryClient: (any SpeechRailVoiceDirectoryClient)?
+    private let speechRenderClient: (any SpeechRailSpeechRenderClient)?
+    private let voiceDesignClient: (any SpeechRailVoiceDesignClient)?
+    private let voiceCloneClient: (any SpeechRailVoiceCloneClient)?
+    private let voiceEditingClient: (any SpeechRailVoiceEditingClient)?
+    private let voiceQualityClient: (any SpeechRailVoiceQualityClient)?
     private let receiptClient: (any SpeechRailReceiptClient)?
     private let audioPlaybackController: AudioPlaybackController
     private let workStore: CreativeWorkStore
@@ -1053,7 +1058,12 @@ public final class AppModel {
         transport: any SpeechRailControlTransport,
         apiClient: any ServiceDiagnosticsClient,
         discoveryClient: (any ServiceCapabilityDiscoveryClient)? = nil,
-        creatorClient: (any SpeechRailCreatorClient)? = nil,
+        voiceDirectoryClient: (any SpeechRailVoiceDirectoryClient)? = nil,
+        speechRenderClient: (any SpeechRailSpeechRenderClient)? = nil,
+        voiceDesignClient: (any SpeechRailVoiceDesignClient)? = nil,
+        voiceCloneClient: (any SpeechRailVoiceCloneClient)? = nil,
+        voiceEditingClient: (any SpeechRailVoiceEditingClient)? = nil,
+        voiceQualityClient: (any SpeechRailVoiceQualityClient)? = nil,
         receiptClient: (any SpeechRailReceiptClient)? = nil,
         audioPlaybackController: AudioPlaybackController = AudioPlaybackController(),
         workStore: CreativeWorkStore = CreativeWorkStore(),
@@ -1064,7 +1074,12 @@ public final class AppModel {
         self.transport = transport
         self.apiClient = apiClient
         self.discoveryClient = discoveryClient ?? UnavailableServiceCapabilityDiscoveryClient()
-        self.creatorClient = creatorClient ?? UnavailableCreatorClient()
+        self.voiceDirectoryClient = voiceDirectoryClient
+        self.speechRenderClient = speechRenderClient
+        self.voiceDesignClient = voiceDesignClient
+        self.voiceCloneClient = voiceCloneClient
+        self.voiceEditingClient = voiceEditingClient
+        self.voiceQualityClient = voiceQualityClient
         self.receiptClient = receiptClient
         self.audioPlaybackController = audioPlaybackController
         self.workStore = workStore
@@ -1104,7 +1119,7 @@ public final class AppModel {
     }
 
     public func fetchCreatorVoices() async throws -> [CreatorVoice] {
-        try await creatorClient.fetchVoices()
+        try await requireCreatorCapability(voiceDirectoryClient).fetchVoices()
     }
 
     public func realtimeCapabilityBinding(for voiceID: String? = nil) async -> RealtimeCapabilityBinding? {
@@ -1134,7 +1149,7 @@ public final class AppModel {
         language: String? = nil
     ) async throws -> Data {
         let options = try await speechRequestOptions(for: voiceID)
-        return try await creatorClient.createSpeech(
+        return try await requireCreatorCapability(speechRenderClient).createSpeech(
             text: text,
             voiceID: voiceID,
             speed: speed,
@@ -1148,7 +1163,7 @@ public final class AppModel {
         speed: Double,
         seed: Int?
     ) async throws -> Data {
-        try await creatorClient.createVoicePreview(
+        try await requireCreatorCapability(voiceDesignClient).createVoicePreview(
             text: text,
             instruction: instruction,
             speed: speed,
@@ -1471,7 +1486,7 @@ public final class AppModel {
         case .createCandidate:
             voiceDesignPublication.phase = .creatingCandidate
             do {
-                let candidate = try await creatorClient.createVoiceDesignCandidate(
+                let candidate = try await requireCreatorCapability(voiceDesignClient).createVoiceDesignCandidate(
                     voiceID: context.voiceID,
                     name: context.name,
                     instruction: context.instruction,
@@ -1480,7 +1495,7 @@ public final class AppModel {
                     idempotencyKey: context.idempotencyKey
                 )
                 guard isCurrentVoiceDesignPublication(generation) else {
-                    _ = try? await creatorClient.cancelVoiceDesignCandidate(id: candidate.id)
+                    _ = try? await requireCreatorCapability(voiceDesignClient).cancelVoiceDesignCandidate(id: candidate.id)
                     return
                 }
                 context.candidateID = candidate.id
@@ -1508,7 +1523,7 @@ public final class AppModel {
             }
             voiceDesignPublication.phase = .confirmingReference
             do {
-                let confirmed = try await creatorClient.confirmVoiceDesignCandidate(
+                let confirmed = try await requireCreatorCapability(voiceDesignClient).confirmVoiceDesignCandidate(
                     id: candidateID,
                     referenceText: nil
                 )
@@ -1563,7 +1578,7 @@ public final class AppModel {
             }
             voiceDesignPublication.phase = .validating
             do {
-                let latest = try await creatorClient.fetchVoiceDesignCandidate(id: candidateID)
+                let latest = try await requireCreatorCapability(voiceDesignClient).fetchVoiceDesignCandidate(id: candidateID)
                 guard isCurrentVoiceDesignPublication(generation) else { return }
                 guard let state = latest.knownState else {
                     failVoiceDesignPublication(
@@ -1682,7 +1697,7 @@ public final class AppModel {
             if context.candidateID == nil {
                 // Recover a create whose response raced with cancellation by
                 // replaying the same logical request with its original key.
-                let recovered = try await creatorClient.createVoiceDesignCandidate(
+                let recovered = try await requireCreatorCapability(voiceDesignClient).createVoiceDesignCandidate(
                     voiceID: context.voiceID,
                     name: context.name,
                     instruction: context.instruction,
@@ -1691,7 +1706,7 @@ public final class AppModel {
                     idempotencyKey: context.idempotencyKey
                 )
                 guard isCurrentVoiceDesignPublication(generation) else {
-                    _ = try? await creatorClient.cancelVoiceDesignCandidate(id: recovered.id)
+                    _ = try? await requireCreatorCapability(voiceDesignClient).cancelVoiceDesignCandidate(id: recovered.id)
                     return
                 }
                 context.candidateID = recovered.id
@@ -1709,7 +1724,7 @@ public final class AppModel {
                 return
             }
 
-            let current = try await creatorClient.fetchVoiceDesignCandidate(id: candidateID)
+            let current = try await requireCreatorCapability(voiceDesignClient).fetchVoiceDesignCandidate(id: candidateID)
             guard isCurrentVoiceDesignPublication(generation) else { return }
             if current.knownState == .cancelled {
                 finishVoiceDesignCancellation(generation: generation)
@@ -1732,7 +1747,7 @@ public final class AppModel {
                 return
             }
 
-            let cancelled = try await creatorClient.cancelVoiceDesignCandidate(id: candidateID)
+            let cancelled = try await requireCreatorCapability(voiceDesignClient).cancelVoiceDesignCandidate(id: candidateID)
             guard isCurrentVoiceDesignPublication(generation) else { return }
             if cancelled.knownState == .cancelled {
                 finishVoiceDesignCancellation(generation: generation)
@@ -1766,7 +1781,7 @@ public final class AppModel {
     ) async -> Bool {
         guard isCurrentVoiceDesignPublication(generation),
               let candidateID = context.candidateID,
-              let current = try? await creatorClient.fetchVoiceDesignCandidate(id: candidateID)
+              let current = try? await requireCreatorCapability(voiceDesignClient).fetchVoiceDesignCandidate(id: candidateID)
         else {
             return false
         }
@@ -1796,7 +1811,7 @@ public final class AppModel {
         guard candidate.revision == expectedRevision,
               candidate.publishedVoiceRevision == expectedRevision,
               candidate.targetVoiceID == context.voiceID,
-              let voice = try? await creatorClient.fetchVoice(id: context.voiceID)
+              let voice = try? await requireCreatorCapability(voiceDirectoryClient).fetchVoice(id: context.voiceID)
         else {
             failVoiceDesignPublication(
                 "候选已发布但无法确认音色版本；请刷新音色库确认结果。",
@@ -1834,7 +1849,7 @@ public final class AppModel {
         }
         voiceDesignPublication.phase = .loadingReferenceAudio
         do {
-            let candidate = try await creatorClient.fetchVoiceDesignCandidate(id: candidateID)
+            let candidate = try await requireCreatorCapability(voiceDesignClient).fetchVoiceDesignCandidate(id: candidateID)
             guard isCurrentVoiceDesignPublication(generation) else { return }
             guard candidate.knownState?.canReadReferenceAudio == true else {
                 let message = candidate.knownState == nil
@@ -1859,7 +1874,7 @@ public final class AppModel {
                 voiceDesignPublication.referenceAudioWasPlayed = false
             }
             let currentRevision = candidate.revision
-            let audio = try await creatorClient.fetchVoiceDesignReferenceAudio(
+            let audio = try await requireCreatorCapability(voiceDesignClient).fetchVoiceDesignReferenceAudio(
                 id: candidateID,
                 expectedRevision: currentRevision
             )
@@ -1893,7 +1908,7 @@ public final class AppModel {
         }
         voiceDesignPublication.phase = .validating
         do {
-            let current = try await creatorClient.fetchVoiceDesignCandidate(id: candidateID)
+            let current = try await requireCreatorCapability(voiceDesignClient).fetchVoiceDesignCandidate(id: candidateID)
             guard isCurrentVoiceDesignPublication(generation) else { return }
             guard current.revision == expectedRevision else {
                 var updated = context
@@ -1925,7 +1940,7 @@ public final class AppModel {
                 )
                 return
             }
-            let validated = try await creatorClient.validateVoiceDesignCandidate(
+            let validated = try await requireCreatorCapability(voiceDesignClient).validateVoiceDesignCandidate(
                 id: candidateID,
                 testText: nil,
                 capabilityKey: nil,
@@ -1993,7 +2008,7 @@ public final class AppModel {
         }
         voiceDesignPublication.phase = .loadingValidationAudio
         do {
-            let candidate = try await creatorClient.fetchVoiceDesignCandidate(id: candidateID)
+            let candidate = try await requireCreatorCapability(voiceDesignClient).fetchVoiceDesignCandidate(id: candidateID)
             guard isCurrentVoiceDesignPublication(generation) else { return }
             guard candidate.knownState?.canReadValidationAudio == true,
                   candidate.revision == expectedRevision,
@@ -2010,7 +2025,7 @@ public final class AppModel {
                 )
                 return
             }
-            let audio = try await creatorClient.fetchVoiceDesignValidationAudio(
+            let audio = try await requireCreatorCapability(voiceDesignClient).fetchVoiceDesignValidationAudio(
                 id: candidateID,
                 validationID: validationID,
                 expectedRevision: expectedRevision
@@ -2046,7 +2061,7 @@ public final class AppModel {
             return
         }
         do {
-            let candidate = try await creatorClient.fetchVoiceDesignCandidate(id: candidateID)
+            let candidate = try await requireCreatorCapability(voiceDesignClient).fetchVoiceDesignCandidate(id: candidateID)
             guard isCurrentVoiceDesignPublication(generation) else { return }
             guard candidate.knownState == .validating
                     || candidate.knownState == .publishable,
@@ -2066,7 +2081,7 @@ public final class AppModel {
                 identity: .pass,
                 naturalness: .pass
             )
-            let reviewed = try await creatorClient.validateVoiceDesignCandidate(
+            let reviewed = try await requireCreatorCapability(voiceDesignClient).validateVoiceDesignCandidate(
                 id: candidateID,
                 testText: nil,
                 capabilityKey: nil,
@@ -2113,7 +2128,7 @@ public final class AppModel {
         }
         voiceDesignPublication.phase = .publishing
         do {
-            let current = try await creatorClient.fetchVoiceDesignCandidate(id: candidateID)
+            let current = try await requireCreatorCapability(voiceDesignClient).fetchVoiceDesignCandidate(id: candidateID)
             guard isCurrentVoiceDesignPublication(generation) else { return }
             if current.knownState == .published {
                 await reconcilePublishedVoiceDesignCandidate(
@@ -2140,7 +2155,7 @@ public final class AppModel {
                 )
                 return
             }
-            let result = try await creatorClient.publishVoiceDesignCandidate(
+            let result = try await requireCreatorCapability(voiceDesignClient).publishVoiceDesignCandidate(
                 id: candidateID,
                 expectedCandidateRevision: expectedRevision
             )
@@ -2162,10 +2177,10 @@ public final class AppModel {
                 generation: generation
             )
         } catch {
-            if let current = try? await creatorClient.fetchVoiceDesignCandidate(id: candidateID),
+            if let current = try? await requireCreatorCapability(voiceDesignClient).fetchVoiceDesignCandidate(id: candidateID),
                current.state == "published",
                current.publishedVoiceRevision == expectedRevision,
-               let voice = try? await creatorClient.fetchVoice(id: context.voiceID)
+               let voice = try? await requireCreatorCapability(voiceDirectoryClient).fetchVoice(id: context.voiceID)
             {
                 await finishVoiceDesignPublication(
                     voice,
@@ -2334,7 +2349,7 @@ public final class AppModel {
         creatorMessage = nil
         defer { isCreatingVoicePreview = false }
         do {
-            let data = try await creatorClient.createVoicePreview(
+            let data = try await requireCreatorCapability(voiceDesignClient).createVoicePreview(
                 text: previewText,
                 instruction: voiceInstruction,
                 speed: speed,
@@ -2355,7 +2370,7 @@ public final class AppModel {
     /// 读取官方提词稿（`GET /v1/voices/clone/prompts`）。
     public func refreshClonePrompts() async {
         do {
-            let prompts = try await creatorClient.fetchClonePrompts()
+            let prompts = try await requireCreatorCapability(voiceCloneClient).fetchClonePrompts()
             clonePrompts = prompts
             clonePromptLoadState = prompts.isEmpty ? .empty : .ready
         } catch {
@@ -2418,7 +2433,7 @@ public final class AppModel {
         cloneMessage = nil
         defer { isEvaluatingCloneReference = false }
         do {
-            let report = try await creatorClient.validateVoiceClone(
+            let report = try await requireCreatorCapability(voiceCloneClient).validateVoiceClone(
                 audio: audio,
                 referenceText: referenceText,
                 name: name,
@@ -2565,7 +2580,7 @@ public final class AppModel {
     private func submitCloneRegistration(
         _ context: CloneRegistrationContext
     ) async throws -> CreatorVoice {
-        try await creatorClient.registerVoiceClone(
+        try await requireCreatorCapability(voiceCloneClient).registerVoiceClone(
             audio: context.audio,
             referenceText: context.referenceText,
             name: context.name,
@@ -2578,7 +2593,7 @@ public final class AppModel {
         _ context: CloneRegistrationContext
     ) async -> CloneIdempotencyLookup {
         do {
-            let status = try await creatorClient.fetchCloneIdempotencyStatus(
+            let status = try await requireCreatorCapability(voiceCloneClient).fetchCloneIdempotencyStatus(
                 idempotencyKey: context.idempotencyKey
             )
             switch status.state {
@@ -2593,7 +2608,7 @@ public final class AppModel {
                     return .unknown("completed_without_expected_result_id")
                 }
                 do {
-                    return .completed(try await creatorClient.fetchVoice(id: resultID))
+                    return .completed(try await requireCreatorCapability(voiceDirectoryClient).fetchVoice(id: resultID))
                 } catch {
                     return .failed("注册已确认，但暂时无法读取该音色。请重新检查音色列表。")
                 }
@@ -2677,7 +2692,7 @@ public final class AppModel {
         creatorMessage = nil
         defer { isDeletingVoice = false }
         do {
-            try await creatorClient.deleteVoice(id: voice.id)
+            try await requireCreatorCapability(voiceEditingClient).deleteVoice(id: voice.id)
             if playingVoiceID == voice.id {
                 stopAudio()
             }
@@ -2757,7 +2772,7 @@ public final class AppModel {
         creatorMessage = nil
         defer { isUpdatingVoice = false }
         do {
-            _ = try await creatorClient.updateVoice(
+            _ = try await requireCreatorCapability(voiceEditingClient).updateVoice(
                 id: voice.id,
                 name: trimmedName,
                 instruction: trimmedInstruction,
@@ -2877,7 +2892,7 @@ public final class AppModel {
             }
         }
         do {
-            let data = try await creatorClient.createSpeech(
+            let data = try await requireCreatorCapability(speechRenderClient).createSpeech(
                 text: previewText,
                 voiceID: voice.id,
                 speed: speed,
@@ -3107,7 +3122,7 @@ public final class AppModel {
             }
         }
         do {
-            let voices = try await creatorClient.fetchVoices()
+            let voices = try await requireCreatorCapability(voiceDirectoryClient).fetchVoices()
                 .sorted { lhs, rhs in
                     if lhs.isSystem != rhs.isSystem { return lhs.isSystem }
                     return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
@@ -3168,7 +3183,7 @@ public final class AppModel {
         }
 
         do {
-            let voice = try await creatorClient.fetchVoice(id: id)
+            let voice = try await requireCreatorCapability(voiceDirectoryClient).fetchVoice(id: id)
             try Task.checkCancellation()
             guard creatorVoiceDetailGeneration == generation else { return false }
             if let index = creatorVoices.firstIndex(where: { $0.id == id }) {
@@ -3700,7 +3715,7 @@ public final class AppModel {
         defer { finishDubbingSegmentRedo(generation: generation) }
         do {
             let options = try await speechRequestOptions(for: voice.id)
-            let render = try await creatorClient.createSpeechRender(
+            let render = try await requireCreatorCapability(speechRenderClient).createSpeechRender(
                 text: text,
                 voiceID: voice.id,
                 speed: speed,
@@ -3972,7 +3987,7 @@ public final class AppModel {
 
         do {
             let options = try await speechRequestOptions(for: voice.id)
-            let render = try await creatorClient.createSpeechRender(
+            let render = try await requireCreatorCapability(speechRenderClient).createSpeechRender(
                 text: scriptText,
                 voiceID: voice.id,
                 speed: speed,
@@ -4085,7 +4100,7 @@ public final class AppModel {
             }
         }
         do {
-            let response = try await creatorClient.runVoiceQuality(
+            let response = try await requireCreatorCapability(voiceQualityClient).runVoiceQuality(
                 id: voiceID,
                 request: VoiceQualityRunRequest()
             )
@@ -4810,6 +4825,9 @@ public final class AppModel {
     }
 
     private static func creatorErrorMessage(for error: Error) -> String {
+        if let error = error as? CreatorCapabilityUnavailableError {
+            return error.errorDescription ?? "当前连接未提供这项创作能力。"
+        }
         if let workStoreError = error as? CreativeWorkStoreError {
             return switch workStoreError {
             case .invalidWorkID:
