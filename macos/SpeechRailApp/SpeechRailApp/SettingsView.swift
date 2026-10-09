@@ -423,7 +423,7 @@ public struct SettingsView: View {
                     // （"备份缺少清单文件，不能作为可恢复的备份使用"）。
                     // 走错这一条，App 能做出的备份，App 自己恢复不了。
                     let bundle = try await store.exportBackup(to: destination)
-                    backupDoneMessage = "已备份到「\(bundle.lastPathComponent)」。"
+                    backupDoneMessage = "已备份到「\(bundle.lastPathComponent)」并通过完整性快检。恢复前仍需运行恢复预演。"
                     await store.close()
                 } catch {
                     await store.close()
