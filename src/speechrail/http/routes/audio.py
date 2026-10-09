@@ -58,6 +58,7 @@ from speechrail.domain.ports import (
     TranscriptionRequest,
 )
 from speechrail.domain.render_recipe import render_plan_identity
+from speechrail.domain.transcription_requirements import TranscriptionRequirements
 from speechrail.domain.tts import (
     DEFAULT_VOICE_ID,
     TTS_NORMALIZATION_REVISION,
@@ -937,7 +938,18 @@ def create_audio_router(services: AppServices) -> APIRouter:
         # independent fixed-text aligner over the frozen transcript, never
         # from the ASR decode.  `diarized_json` derives its segments from
         # diarization instead, so it does not ask for a timeline here.
-        alignment_requested = response_format in {"verbose_json", "srt", "vtt"}
+        requirements = TranscriptionRequirements.for_response_format(response_format)
+        alignment_requested = requirements.timestamps
+        if code := requirements.missing_alignment_error(
+            aligner_available=text_aligner is not None
+        ):
+            return error_response(
+                503,
+                request_id,
+                code,
+                "timestamped transcription requires a configured local aligner",
+                retryable=False,
+            )
         requested_granularities: frozenset[AlignmentGranularity] = frozenset()
         if alignment_requested:
             requested_granularities = cast(
@@ -1157,14 +1169,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
         if alignment_requested:
             # Timestamps are an add-on result over frozen text: never a second
             # recognition, and never a silent downgrade to empty arrays.
-            if text_aligner is None:
-                return error_response(
-                    503,
-                    request_id,
-                    "timestamp_alignment_unavailable",
-                    "timestamped transcription requires a configured local aligner",
-                    retryable=False,
-                )
+            assert text_aligner is not None
             try:
                 async with services.alignment_admission.reserve():
                     result = await await_until(
