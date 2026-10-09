@@ -25,6 +25,12 @@ public struct RenderProvenanceSnapshot: Codable, Equatable, Sendable {
     public let pcmSHA256: String?
     /// 保存下来的音频文件字节摘要，由作品库在提交时计算。
     public let audioFileSHA256: String?
+    /// 服务端执行身份，不使用本地作品 ID 替代。
+    public let requestID: String?
+    public let receiptID: String?
+    /// 渲染返回时已观察到的回执状态；后续查询不会改写此快照。
+    public let receiptStatus: RenderReceiptStatus?
+    public let receiptCompletedAt: Double?
 
     public init(
         state: RenderProvenance.State,
@@ -32,7 +38,11 @@ public struct RenderProvenanceSnapshot: Codable, Equatable, Sendable {
         planSHA256: String? = nil,
         recipe: RenderRecipeSnapshot? = nil,
         pcmSHA256: String? = nil,
-        audioFileSHA256: String? = nil
+        audioFileSHA256: String? = nil,
+        requestID: String? = nil,
+        receiptID: String? = nil,
+        receiptStatus: RenderReceiptStatus? = nil,
+        receiptCompletedAt: Double? = nil
     ) {
         self.state = state
         self.reason = reason
@@ -40,6 +50,10 @@ public struct RenderProvenanceSnapshot: Codable, Equatable, Sendable {
         self.recipe = recipe
         self.pcmSHA256 = pcmSHA256
         self.audioFileSHA256 = audioFileSHA256
+        self.requestID = requestID
+        self.receiptID = receiptID
+        self.receiptStatus = receiptStatus
+        self.receiptCompletedAt = receiptCompletedAt
     }
 
     public func withAudioFileSHA256(_ digest: String?) -> RenderProvenanceSnapshot {
@@ -49,7 +63,11 @@ public struct RenderProvenanceSnapshot: Codable, Equatable, Sendable {
             planSHA256: planSHA256,
             recipe: recipe,
             pcmSHA256: pcmSHA256,
-            audioFileSHA256: digest
+            audioFileSHA256: digest,
+            requestID: requestID,
+            receiptID: receiptID,
+            receiptStatus: receiptStatus,
+            receiptCompletedAt: receiptCompletedAt
         )
     }
 
@@ -69,6 +87,10 @@ public struct RenderProvenanceSnapshot: Codable, Equatable, Sendable {
         case recipe
         case pcmSHA256 = "pcm_sha256"
         case audioFileSHA256 = "audio_file_sha256"
+        case requestID = "request_id"
+        case receiptID = "receipt_id"
+        case receiptStatus = "receipt_status"
+        case receiptCompletedAt = "receipt_completed_at"
     }
 
     public init(from decoder: Decoder) throws {
@@ -82,6 +104,10 @@ public struct RenderProvenanceSnapshot: Codable, Equatable, Sendable {
         recipe = try container.decodeIfPresent(RenderRecipeSnapshot.self, forKey: .recipe)
         pcmSHA256 = try container.decodeIfPresent(String.self, forKey: .pcmSHA256)
         audioFileSHA256 = try container.decodeIfPresent(String.self, forKey: .audioFileSHA256)
+        requestID = try container.decodeIfPresent(String.self, forKey: .requestID)
+        receiptID = try container.decodeIfPresent(String.self, forKey: .receiptID)
+        receiptStatus = try container.decodeIfPresent(RenderReceiptStatus.self, forKey: .receiptStatus)
+        receiptCompletedAt = try container.decodeIfPresent(Double.self, forKey: .receiptCompletedAt)
     }
 }
 

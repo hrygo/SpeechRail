@@ -941,6 +941,7 @@ public final class AppModel {
     private let apiClient: any ServiceDiagnosticsClient
     private let discoveryClient: any ServiceCapabilityDiscoveryClient
     private let creatorClient: any SpeechRailCreatorClient
+    private let receiptClient: (any SpeechRailReceiptClient)?
     private let audioPlaybackController: AudioPlaybackController
     private let workStore: CreativeWorkStore
     private let dubbingProjectStore: DubbingProjectStore
@@ -1050,6 +1051,7 @@ public final class AppModel {
         apiClient: any ServiceDiagnosticsClient,
         discoveryClient: (any ServiceCapabilityDiscoveryClient)? = nil,
         creatorClient: (any SpeechRailCreatorClient)? = nil,
+        receiptClient: (any SpeechRailReceiptClient)? = nil,
         audioPlaybackController: AudioPlaybackController = AudioPlaybackController(),
         workStore: CreativeWorkStore = CreativeWorkStore(),
         dubbingProjectStore: DubbingProjectStore? = nil,
@@ -1060,6 +1062,7 @@ public final class AppModel {
         self.apiClient = apiClient
         self.discoveryClient = discoveryClient ?? UnavailableServiceCapabilityDiscoveryClient()
         self.creatorClient = creatorClient ?? UnavailableCreatorClient()
+        self.receiptClient = receiptClient
         self.audioPlaybackController = audioPlaybackController
         self.workStore = workStore
         self.dubbingProjectStore = dubbingProjectStore ?? DubbingProjectStore(
@@ -3187,6 +3190,11 @@ public final class AppModel {
         }
     }
 
+    public func lookupWorkReceipt(_ work: CreativeWork) async throws -> RenderReceipt {
+        guard let receiptClient else { throw SavedRenderReceiptError.clientUnavailable }
+        return try await SavedRenderReceiptLookup.fetch(snapshot: work.provenance, client: receiptClient)
+    }
+
     public func refreshWorks() {
         do {
             works = try workStore.list()
@@ -3547,7 +3555,11 @@ public final class AppModel {
                     reason: render.provenance.reason,
                     planSHA256: render.planSHA256,
                     recipe: render.recipe,
-                    pcmSHA256: render.pcmSHA256
+                    pcmSHA256: render.pcmSHA256,
+                    requestID: render.requestID,
+                    receiptID: render.receiptID,
+                    receiptStatus: render.receiptStatus,
+                    receiptCompletedAt: render.receiptCompletedAt
                 ),
                 durationSeconds: audioPlaybackController.duration(for: render.audioData)
             )
@@ -3843,7 +3855,11 @@ public final class AppModel {
                    reason: provenanceReason,
                    planSHA256: render.planSHA256,
                    recipe: render.recipe,
-                   pcmSHA256: render.pcmSHA256
+                   pcmSHA256: render.pcmSHA256,
+                   requestID: render.requestID,
+                   receiptID: render.receiptID,
+                   receiptStatus: render.receiptStatus,
+                   receiptCompletedAt: render.receiptCompletedAt
                )
            )
             pendingDubbing = pending

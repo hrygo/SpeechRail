@@ -737,6 +737,10 @@ public struct VoiceDesignPublishResult: Codable, Equatable, Sendable {
 /// 刷新到新 plan 只能由用户显式重做一次，产生新的 render revision。
 public struct SpeechRenderResult: Sendable {
     public let audioData: Data
+    public let requestID: String?
+    public let receiptID: String?
+    public let receiptStatus: RenderReceiptStatus?
+    public let receiptCompletedAt: Double?
     /// 服务端 render receipt 里的 plan 身份（`plan_<digest[:32]>`）；服务端没给就是 nil。
     public let planID: String?
     /// 这一次实际生效的音色 revision；服务端没给就是 nil。
@@ -757,18 +761,69 @@ public struct SpeechRenderResult: Sendable {
         planSHA256: String? = nil,
         pcmSHA256: String? = nil,
         recipe: RenderRecipeSnapshot? = nil,
+        requestID: String? = nil,
+        receiptID: String? = nil,
+        receiptStatus: RenderReceiptStatus? = nil,
+        receiptCompletedAt: Double? = nil,
         provenance: RenderProvenance = RenderProvenance(
             state: .unavailable,
             reason: RenderProvenance.unsupportedClientReason
         )
     ) {
         self.audioData = audioData
+        self.requestID = requestID
+        self.receiptID = receiptID
+        self.receiptStatus = receiptStatus
+        self.receiptCompletedAt = receiptCompletedAt
         self.planID = planID
         self.voiceRevision = voiceRevision
         self.planSHA256 = planSHA256
         self.pcmSHA256 = pcmSHA256
         self.recipe = recipe
         self.provenance = provenance
+    }
+}
+
+/// 已保存制作结果的只读回执查询；不包含合成或音色工作流。
+public protocol SpeechRailReceiptClient: Sendable {
+    func fetchReceipt(id: String) async throws -> RenderReceipt
+    func fetchReceipt(byRequestID requestID: String) async throws -> RenderReceipt
+}
+
+public enum SavedRenderReceiptError: Error, LocalizedError {
+    case identityUnavailable
+    case clientUnavailable
+    case identityMismatch
+
+    public var errorDescription: String? {
+        switch self {
+        case .identityUnavailable: "这件作品没有保存服务执行编号，无法查询回执。"
+        case .clientUnavailable: "当前连接不支持回执查询。"
+        case .identityMismatch: "查询到的回执与这件作品的执行编号不一致。"
+        }
+    }
+}
+
+/// 查询结果独立于保存时快照；只接受与已知执行身份一致的回执。
+public enum SavedRenderReceiptLookup {
+    public static func fetch(
+        snapshot: RenderProvenanceSnapshot,
+        client: any SpeechRailReceiptClient
+    ) async throws -> RenderReceipt {
+        let receipt: RenderReceipt
+        if let receiptID = snapshot.receiptID {
+            receipt = try await client.fetchReceipt(id: receiptID)
+        } else if let requestID = snapshot.requestID {
+            receipt = try await client.fetchReceipt(byRequestID: requestID)
+        } else {
+            throw SavedRenderReceiptError.identityUnavailable
+        }
+        try Task.checkCancellation()
+        guard snapshot.receiptID.map({ $0 == receipt.receiptID }) ?? true,
+              snapshot.requestID.map({ $0 == receipt.requestID }) ?? true else {
+            throw SavedRenderReceiptError.identityMismatch
+        }
+        return receipt
     }
 }
 

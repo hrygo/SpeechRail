@@ -2801,6 +2801,12 @@ private actor ScriptedRenderClient: SpeechRailCreatorClient {
     }
 }
 
+private struct SavedReceiptClient: SpeechRailReceiptClient {
+    let receipt: RenderReceipt
+    func fetchReceipt(id: String) async throws -> RenderReceipt { receipt }
+    func fetchReceipt(byRequestID requestID: String) async throws -> RenderReceipt { receipt }
+}
+
 /// 写盘失败的 FileManager，用来验证"保存失败仍保留 pending、可重试"。
 /// Fails the first index write and then behaves normally, so a retry has to
 /// travel through the same recovery path a real disk-full retry would.
@@ -2864,6 +2870,10 @@ private actor DubbingRenderClient: SpeechRailCreatorClient {
             planSHA256: "plan_sha_segment",
             pcmSHA256: "pcm_sha_segment",
             recipe: recipe,
+            requestID: "req-segment",
+            receiptID: "rr_0123456789abcdef0123456789abcdef",
+            receiptStatus: .completed,
+            receiptCompletedAt: 2,
             provenance: RenderProvenance(state: .verified, reason: nil)
         )
         self.voice = voice
@@ -2951,7 +2961,8 @@ extension AppModelTests {
 
     private func makeRenderModel(
         store: CreativeWorkStore,
-        creator: any SpeechRailCreatorClient
+        creator: any SpeechRailCreatorClient,
+        receiptClient: (any SpeechRailReceiptClient)? = nil
     ) -> AppModel {
         AppModel(
             transport: ClosureControlTransport { request in
@@ -2960,6 +2971,7 @@ extension AppModelTests {
             apiClient: UnavailableDiagnosticsClient(),
             discoveryClient: PreviewDiscoveryClient(snapshot: Self.previewSnapshot()),
             creatorClient: creator,
+            receiptClient: receiptClient,
             workStore: store
         )
     }
@@ -3194,6 +3206,10 @@ extension AppModelTests {
                 planSHA256: String(repeating: "c", count: 64),
                 pcmSHA256: audioDigest,
                 recipe: recipe,
+                requestID: "req-production",
+                receiptID: "rr_0123456789abcdef0123456789abcdef",
+                receiptStatus: .completed,
+                receiptCompletedAt: 2,
                 provenance: RenderProvenance(state: .verified, reason: nil)
             )
         )
@@ -3223,6 +3239,26 @@ extension AppModelTests {
         XCTAssertEqual(reopened.provenance.recipe, recipe)
         XCTAssertEqual(reopened.provenance.state, .verified)
         XCTAssertEqual(reopened.provenance.audioFileSHA256, work.provenance.audioFileSHA256)
+        XCTAssertEqual(reopened.provenance.requestID, "req-production")
+        XCTAssertEqual(reopened.provenance.receiptID, "rr_0123456789abcdef0123456789abcdef")
+        XCTAssertEqual(reopened.provenance.receiptStatus, .completed)
+        XCTAssertEqual(reopened.provenance.receiptCompletedAt, 2)
+
+        let laterReceipt = try JSONDecoder().decode(RenderReceipt.self, from: Data("""
+        {
+          "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+          "request_id": "req-production", "status": "cancelled",
+          "voice": {}, "model": {}, "audio": {},
+          "error_code": null, "created_at": 1, "completed_at": 3
+        }
+        """.utf8))
+        let queryModel = makeRenderModel(
+            store: store, creator: creator,
+            receiptClient: SavedReceiptClient(receipt: laterReceipt)
+        )
+        let queried = try await queryModel.lookupWorkReceipt(reopened)
+        XCTAssertEqual(queried.status, .cancelled)
+        XCTAssertEqual(try store.list().first?.provenance, reopened.provenance)
     }
 
     /// 回执拿不到时音频照常保存，追溯状态照实标为不可用，绝不补造身份。
@@ -3557,7 +3593,7 @@ extension AppModelTests {
             recipe: recipe,
             voice: Self.dubbingVoice()
         )
-        let (model, works, _) = makeDubbingModel(creator: creator, recipeDigest: "digest-1")
+        let (model, works, projects) = makeDubbingModel(creator: creator, recipeDigest: "digest-1")
         await model.refreshCreatorVoices()
         let work = try saveSourceWork(
             into: works,
@@ -3574,6 +3610,11 @@ extension AppModelTests {
         XCTAssertEqual(calls.map(\.text), ["第二段正文。"], "只重做被点中的那一段")
         let candidate = try XCTUnwrap(model.dubbingCandidates.first)
         XCTAssertEqual(candidate.segmentID, secondSegment.id)
+        let reopened = try XCTUnwrap(projects.candidates(forProject: project.id).first)
+        XCTAssertEqual(reopened.provenance.requestID, "req-segment")
+        XCTAssertEqual(reopened.provenance.receiptID, "rr_0123456789abcdef0123456789abcdef")
+        XCTAssertEqual(reopened.provenance.receiptStatus, .completed)
+        XCTAssertEqual(reopened.provenance.receiptCompletedAt, 2)
         XCTAssertNil(
             project.segments.first?.acceptedCandidateID,
             "生成候选不会自动采用"

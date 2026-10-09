@@ -2373,6 +2373,9 @@ final class ServiceContractTests: XCTestCase {
         XCTAssertNil(render.planSHA256)
         XCTAssertNil(render.pcmSHA256)
         XCTAssertNil(render.recipe)
+        XCTAssertEqual(render.receiptID, "rr_0123456789abcdef0123456789abcdef")
+        XCTAssertNil(render.requestID)
+        XCTAssertNil(render.receiptStatus, "取不到回执时保留协商身份，状态仍未知")
     }
 
     /// 回执还没终态时同样不丢音频，只是把"还没写完"如实说出来。
@@ -2416,6 +2419,10 @@ final class ServiceContractTests: XCTestCase {
         XCTAssertEqual(render.provenance.state, .partial)
         XCTAssertEqual(render.provenance.reason, "receipt_status_pending")
         XCTAssertNil(render.recipe, "还没有配方就不是没有配方，是还没写完")
+        XCTAssertEqual(render.requestID, "req-1")
+        XCTAssertEqual(render.receiptID, "rr_0123456789abcdef0123456789abcdef")
+        XCTAssertEqual(render.receiptStatus, .pending)
+        XCTAssertNil(render.receiptCompletedAt)
     }
 
     /// 回执终态但配方不齐：音频与已观察到的事实都保留，digest 不签发。
@@ -2458,6 +2465,9 @@ final class ServiceContractTests: XCTestCase {
         XCTAssertEqual(render.audioData, audio)
         XCTAssertEqual(render.provenance.state, .partial)
         XCTAssertEqual(render.voiceRevision, "vr_x")
+        XCTAssertEqual(render.requestID, "req-1")
+        XCTAssertEqual(render.receiptStatus, .completed)
+        XCTAssertEqual(render.receiptCompletedAt, 2)
         let recipe = try XCTUnwrap(render.recipe)
         XCTAssertEqual(recipe.state, .partial)
         XCTAssertNil(recipe.digest, "事实不齐时不签发可复用的摘要")
@@ -2465,6 +2475,110 @@ final class ServiceContractTests: XCTestCase {
             recipe.missingFields,
             ["model.engine_revision", "parameters.seed_policy"]
         )
+    }
+
+    func testRenderRejectsReceiptIdentityMismatchButPreservesAudioAndHeaderIDs() async throws {
+        let audio = Data([0x52, 0x49, 0x46, 0x46])
+        let client = makeHTTPClient(statusCode: 200, body: audio)
+        ServiceAPIURLProtocolStub.state.setRoute(
+            pathContains: "/v1/audio/speech", statusCode: 200, body: audio,
+            contentType: "audio/wav",
+            headers: [
+                "SpeechRail-Receipt-Id": "rr_0123456789abcdef0123456789abcdef",
+                "SpeechRail-Request-Id": "req-audio"
+            ]
+        )
+        ServiceAPIURLProtocolStub.state.setRoute(
+            pathContains: "/receipts/", statusCode: 200, body: Data("""
+            {
+              "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+              "request_id": "req-other", "status": "completed",
+              "voice": {}, "model": {}, "audio": {},
+              "error_code": null, "created_at": 1, "completed_at": 2
+            }
+            """.utf8)
+        )
+        let render = try await client.createSpeechRender(
+            text: "身份核对", voiceID: "voice_demo", speed: 1,
+            options: SpeechRailRequestOptions()
+        )
+        XCTAssertEqual(render.audioData, audio)
+        XCTAssertEqual(render.requestID, "req-audio")
+        XCTAssertEqual(render.receiptID, "rr_0123456789abcdef0123456789abcdef")
+        XCTAssertNil(render.receiptStatus)
+        XCTAssertEqual(render.provenance.reason, "receipt_identity_mismatch")
+        XCTAssertEqual(render.provenance.state, .unavailable)
+    }
+
+    func testSavedReceiptLookupPreservesTheFrozenSnapshotAndUsesRequestFallback() async throws {
+        let client = makeHTTPClient(statusCode: 200, body: Data("""
+        {
+          "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+          "request_id": "req-saved",
+          "status": "completed",
+          "voice": {}, "model": {}, "audio": {},
+          "error_code": null, "created_at": 1, "completed_at": 2
+        }
+        """.utf8))
+        let snapshot = RenderProvenanceSnapshot(
+            state: .partial, reason: "receipt_status_pending",
+            requestID: "req-saved", receiptStatus: .pending
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let before = try encoder.encode(snapshot)
+        let queried = try await SavedRenderReceiptLookup.fetch(snapshot: snapshot, client: client)
+        XCTAssertEqual(queried.status, .completed)
+        XCTAssertEqual(snapshot.receiptStatus, .pending, "查询结果不替换制作时的观察")
+        XCTAssertEqual(try encoder.encode(snapshot), before)
+        XCTAssertEqual(
+            ServiceAPIURLProtocolStub.state.recordedRequests().last?.url?.path,
+            "/v1/speechrail/audio/receipts/by-request/req-saved"
+        )
+    }
+
+    func testSavedReceiptLookupRejectsMismatchedExecutionIdentity() async throws {
+        let client = makeHTTPClient(statusCode: 200, body: Data("""
+        {
+          "receipt_id": "rr_0123456789abcdef0123456789abcdef",
+          "request_id": "req-other",
+          "status": "completed",
+          "voice": {}, "model": {}, "audio": {},
+          "error_code": null, "created_at": 1, "completed_at": 2
+        }
+        """.utf8))
+        let snapshot = RenderProvenanceSnapshot(
+            state: .partial, reason: nil,
+            requestID: "req-saved", receiptID: "rr_0123456789abcdef0123456789abcdef"
+        )
+        do {
+            _ = try await SavedRenderReceiptLookup.fetch(snapshot: snapshot, client: client)
+            XCTFail("另一请求的回执不能作为这件作品的查询结果")
+        } catch SavedRenderReceiptError.identityMismatch {}
+        let request = try XCTUnwrap(ServiceAPIURLProtocolStub.state.recordedRequests().last)
+        XCTAssertEqual(request.url?.path, "/v1/speechrail/audio/receipts/rr_0123456789abcdef0123456789abcdef")
+    }
+
+    func testLegacyWorkReceiptLookupRefusesWithoutSendingARequest() async throws {
+        let client = makeHTTPClient(statusCode: 200, body: Data())
+        do {
+            _ = try await SavedRenderReceiptLookup.fetch(snapshot: .legacyUnknown, client: client)
+            XCTFail("老作品不得用本地作品 ID 猜测请求身份")
+        } catch SavedRenderReceiptError.identityUnavailable {}
+        XCTAssertTrue(ServiceAPIURLProtocolStub.state.recordedRequests().isEmpty)
+    }
+
+    func testUnknownReceiptStatusRoundTripsWithoutBeingPromotedToTerminal() throws {
+        let snapshot = RenderProvenanceSnapshot(
+            state: .partial, reason: nil,
+            requestID: "req-future", receiptStatus: .unknown("future_status")
+        )
+        let decoded = try JSONDecoder().decode(
+            RenderProvenanceSnapshot.self, from: JSONEncoder().encode(snapshot)
+        )
+        XCTAssertEqual(decoded, snapshot)
+        XCTAssertEqual(decoded.receiptStatus, .unknown("future_status"))
+        XCTAssertNil(decoded.receiptCompletedAt)
     }
 
     private static func safeVoiceEntryJSON(

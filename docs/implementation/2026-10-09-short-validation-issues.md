@@ -103,7 +103,23 @@ scripts/macos_app_build.sh --test-unit --timeout 600 -- \
   公开 JSON 与原因码保持原合同，持久化格式未变。
 - 未执行真实模型、设备、质量/性能基准、UI 自动化、完整测试套件或安装发布。
 - 本地实施对应 #222/#261/#152/#262/#187/#194/#225，按 issue 分成七个独立提交。
-  远端关闭以 main 合入与 GitHub 状态回读为准。
+远端关闭以 main 合入与 GitHub 状态回读为准。
+
+## 执行身份快照与作品回执查询（#196）
+
+作品和段落候选保存可选 request/receipt ID、渲染返回时的回执状态与终态时间。
+原文件无需迁移，缺失身份保持未知；响应头与回执身份失配时保留音频并拒绝采用错误回执。
+作品详情通过独立只读 port 查询回执，结果与保存时快照分开展示，不回写用户资产。
+相关说明见 `docs/developers/macos-app-development.md`。
+
+2026-10-09 定向 SwiftPM：240 tests，0 failures，2.09 秒；覆盖真实 HTTP 接线、
+作品和候选重新读取、旧记录、身份失配、未知状态与查询不改写快照。
+新增断言先证明结果类型缺少身份字段，再完成接线。
+`scripts/macos_app_build.sh --configuration Debug --timeout 600` 返回 `BUILD SUCCEEDED`，
+验证详情区与生产组合根编译；未运行 UI 自动化、真实服务或安装 App。
+
+第一批 PR #345 的七个 CI job 全成功，已按 rebase 合入；GitHub 回读七个 issue 全部关闭，
+开放数量为 26。#196 的远端完成状态仍以其独立 PR 合入后回读为准。
 
 ## 后续可短测但需要独立实施的范围
 

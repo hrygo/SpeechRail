@@ -3234,6 +3234,75 @@ private struct VoiceEditorSheet: View {
 
 // MARK: - 我的作品 (Works with Privacy Boundary & Inspector)
 
+private struct SavedWorkReceiptDetails: View {
+    let work: CreativeWork
+    let lookup: @MainActor () async throws -> RenderReceipt
+    @State private var queryGeneration = 0
+    @State private var isQuerying = false
+    @State private var queriedReceipt: RenderReceipt?
+    @State private var queryMessage: String?
+
+    var body: some View {
+        DisclosureGroup("制作记录") {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                Text("以下是制作时保存的记录，查询服务不会改写作品。")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                LabeledContent("保存时回执", value: statusText(work.provenance.receiptStatus))
+                LabeledContent("请求编号", value: work.provenance.requestID ?? "未记录")
+                LabeledContent("回执编号", value: work.provenance.receiptID ?? "未记录")
+                if work.provenance.receiptID != nil || work.provenance.requestID != nil {
+                    Button(isQuerying ? "正在查询…" : "查询服务回执") {
+                        isQuerying = true
+                        queryGeneration += 1
+                    }
+                    .speechRailButton(.secondary)
+                    .disabled(isQuerying)
+                } else {
+                    Text("这件作品没有服务执行编号，无法查询回执。")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                }
+                if let queriedReceipt {
+                    LabeledContent("本次查询结果", value: statusText(queriedReceipt.status))
+                }
+                if let queryMessage {
+                    Text(queryMessage)
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                }
+            }
+            .textSelection(.enabled)
+        }
+        .task(id: queryGeneration) {
+            guard queryGeneration > 0 else { return }
+            defer { isQuerying = false }
+            queriedReceipt = nil
+            queryMessage = nil
+            do {
+                let receipt = try await lookup()
+                try Task.checkCancellation()
+                queriedReceipt = receipt
+            } catch is CancellationError {
+                return
+            } catch let error as SavedRenderReceiptError {
+                queryMessage = error.errorDescription
+            } catch {
+                queryMessage = "无法查询服务回执，请确认服务正在运行后重试。"
+            }
+        }
+    }
+
+    private func statusText(_ status: RenderReceiptStatus?) -> String {
+        switch status {
+        case .pending: "尚未完成"
+        case .completed: "已完成"
+        case .cancelled: "已取消"
+        case .error: "失败"
+        case .unknown, nil: "未知"
+        }
+    }
+}
+
 public struct WorksView: View {
     @Environment(AppModel.self) private var model
     @Environment(AppNavigationState.self) private var navigation
@@ -3536,6 +3605,11 @@ public struct WorksView: View {
                 LabeledContent("文稿字数", value: "\(work.scriptText.count) 字")
             }
             .speechRailInspectorContent()
+
+            SavedWorkReceiptDetails(work: work) {
+                try await model.lookupWorkReceipt(work)
+            }
+            .id(work.id)
 
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text("文稿")
