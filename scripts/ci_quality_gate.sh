@@ -39,6 +39,8 @@ gate "Check user guide contract coverage" \
 gate "Check MCP tool surface parity" uv run --no-sync python scripts/check_mcp_tool_contract.py
 gate "Check macOS test target coverage parity" \
   uv run --no-sync python scripts/check_macos_test_target_coverage.py
+gate "Check macOS route contract" \
+  bash scripts/check_macos_route_contract.sh
 gate "Run CI workflow and gate regressions" \
   uv run --no-sync pytest --no-cov tests/test_github_workflows.py tests/test_ci_quality_gate.py \
     tests/test_ci_macos_build.py tests/test_macos_test_target_coverage.py tests/test_ci_changed_scope.py
