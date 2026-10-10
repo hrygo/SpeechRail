@@ -144,6 +144,19 @@ let package = Package(
                 "TeleprompterStageWindow.swift",
                 "AssistantReplayEvaluator.swift",
                 "SessionStore.swift",
+                // 会话持久化的共享 SQLite 薄封装与绑定助手：跨 MA 域文件复用，
+                // 访问级为 internal，仅本 target 内使用。
+                "SessionStoreSQLite.swift",
+                // 以下按 MA 域拆分的 SessionStore extension，行为与主文件逐字一致。
+                "SessionStoreSchema.swift",
+                "SessionStoreArchivePackage.swift",
+                "SessionStoreKnowledgeScope.swift",
+                "SessionStoreCrossMeetingEvidence.swift",
+                "SessionStoreProjection.swift",
+                "SessionStoreActionEvolution.swift",
+                "SessionStoreKnowledgeSuggestions.swift",
+                "SessionStoreKnowledgeLibrary.swift",
+                "SessionStoreMinutesEdit.swift",
                 "SessionCoordinator.swift",
                 "SessionExporter.swift",
                 "MeetingKnowledgeQuery.swift",
