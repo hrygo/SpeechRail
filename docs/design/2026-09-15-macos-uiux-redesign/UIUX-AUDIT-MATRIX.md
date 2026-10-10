@@ -238,11 +238,16 @@ Task 6 已逐项更新此表。每个值已选择 Token、System 或 Structural�
 | 2026-09-22 | Package 全量测试（状态摘要收敛后） | `swift test --package-path macos/SpeechRailApp` | exit 0；159 XCTest 与 85 Swift Testing 通过 |
 | 2026-09-22 | Debug App build（状态摘要收敛后） | `scripts/macos_app_build.sh --configuration Debug` | exit 0；`** BUILD SUCCEEDED **`；存在非致命 AppIntents metadata 提示 |
 | 2026-09-22 | 恢复桌面状态 | System Settings 与 SpeechRail AX/UI | Appearance Auto、Increase Contrast off、Reduce Transparency off、Reduce Motion off、字号默认、VoiceOver off；Assistant idle、侧栏可见、Inspector 收起 |
+| 2026-10-10 | Issue #89 逐项对账：路由/快捷键/UI 测试/审计矩阵漂移防线 | PR #357 将 `scripts/check_macos_route_contract.py` 接入 Quality Gates（替代依赖 `rg` 的 bash 版，两个 GitHub runner 实测均无 `rg`）；CI run 38017130705 全绿 | automation；此后漂移由门禁常驻拦截，14/14/14/14 + one registry |
+| 2026-10-10 | Issue #89 逐项对账：会话主动作映射（MeetingView 2026-10-10 拆分后） | 拆分产物 `MeetingViewStatusBar.swift` / `MeetingViewPostMeeting.swift` 主动作抽查（开始/暂停/继续录、四种格式导出菜单）；Swift Package Tests 与 macOS App Build 于 CI 38017130705 通过 | code/build；真机 live 与恢复态桌面走查仍 manual unverified |
+| 2026-10-10 | Issue #89 逐项对账：1120pt Inspector 切换 accessibilityValue 定论 | `SessionDesignSurface.swift:88` 的 value 绑定折叠状态（自 2026-09-22 `8db0c6b3` 未变）；`SpeechRailAppUITests.swift` 对 `session-panel-toggle` 断言「已展开/已收起」切换与恢复 | code；末次实跑 2026-09-22 automation，当前测试形态未重跑 |
+| 2026-10-10 | Issue #89 逐项对账：验收文档同步与无障碍预览去重 | `macos-app-design-system.md` 快捷键清单（`⌘1–⌘5`/`⌘6–⌘8`+`⌘⇧T`/`⌘9`+`⌘0`+`⌘⇧M/D/H`）与 `AppRoute.shortcutSpec` 逐一对应；全 App `#Preview` 集中于 `SessionDesignSurface.swift` | code |
 
 ### 9.2 非阻塞未覆盖项
 
 - Task 1–6 的 code/unit/build 证据已记录；UI test plan 全部 255 项通过；
 - 四档窗口和六个代表页面主动作已有自动化证据；searchable/List 全页面矩阵、大字号联动及真实录音/采集 live 状态未覆盖；
+- 四档窗口矩阵与 `session-panel-toggle` AX 断言的**当前代码形态**未再执行：授权运行在 2026-09-22，此后 UI 测试文件（2026-09-23 小屏 skip、2026-09-27 契约对齐）与 `ControlCenterView`（2026-09-23/09-26/09-27）均有变更；重跑需逐次 UI 自动化授权，不把 9-22 绿灯当作当前证据；
 - 完整 VoiceOver 与 Full Keyboard Access 专项遍历不属于当前目标人群验收；基本 macOS 控件语义、常用键盘入口和焦点反馈仍保留在产品基线中。
 
 ## 10. 完成判据
