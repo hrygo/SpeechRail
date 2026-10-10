@@ -77,6 +77,7 @@ def test_workflow_runs_the_same_quality_entrypoint() -> None:
     workflow = (ROOT / ".github/workflows/ci.yml").read_text()
     quality_job = workflow.split("\n  quality:", 1)[1].split("\n  test:", 1)[0]
     assert "bash scripts/ci_quality_gate.sh" in quality_job
+    assert "ripgrep" in quality_job
     assert "uv run ruff" not in quality_job
 
 

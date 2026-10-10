@@ -151,6 +151,9 @@ jobs:
       - name: Set up Python 3.14.7
         run: uv python install 3.14.7
 
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
       - name: Run shared local and GitHub quality gates
         env:
           EVENT_NAME: ${{ github.event_name }}
