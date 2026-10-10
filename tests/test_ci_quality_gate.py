@@ -78,3 +78,12 @@ def test_workflow_runs_the_same_quality_entrypoint() -> None:
     quality_job = workflow.split("\n  quality:", 1)[1].split("\n  test:", 1)[0]
     assert "bash scripts/ci_quality_gate.sh" in quality_job
     assert "uv run ruff" not in quality_job
+
+
+def test_quality_gate_checks_macos_route_contract() -> None:
+    gate = SCRIPT.read_text()
+    assert "bash scripts/check_macos_route_contract.sh" in gate
+    coverage_gate = gate.index("check_macos_test_target_coverage.py")
+    route_gate = gate.index("check_macos_route_contract.sh")
+    pytest_gate = gate.index("test_ci_quality_gate.py")
+    assert coverage_gate < route_gate < pytest_gate

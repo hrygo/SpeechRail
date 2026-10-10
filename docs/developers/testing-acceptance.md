@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.9"
-date: 2026-10-08
+version: "3.3.10"
+date: 2026-10-10
 ---
 
 # SpeechRail 测试与验收
@@ -18,7 +18,7 @@ bash scripts/ci_quality_gate.sh --base-ref origin/main
 ```
 
 该入口使用 `uv sync --locked --extra dev --extra mcp`，随后以 `--no-sync`
-执行 Ruff、Mypy、版本一致性、OpenAPI lint、用户文档、MCP、macOS 测试清单及分人契约回归，
+执行 Ruff、Mypy、版本一致性、OpenAPI lint、用户文档、MCP、macOS 测试清单、macOS 路由契约及分人契约回归，
 任一步失败立即返回失败。质量检查不构建 native worker；真实制品仍由 Python 测试/打包门禁构建。
 不指定 `--base-ref` 时只检查当前工作区与暂存区空白，不能证明已提交的 PR 差异通过。
 
