@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/ci_quality_gate.sh"
 
 
-@pytest.mark.parametrize("failure", ["none", "sync", "ruff", "parity", "pytest", "diff"])
+@pytest.mark.parametrize("failure", ["none", "sync", "ruff", "parity", "route", "pytest", "diff"])
 def test_quality_gate_stops_on_failure_and_uses_locked_dependencies(
     tmp_path: Path, failure: str
 ) -> None:
@@ -25,6 +25,7 @@ tool = pathlib.Path(sys.argv[0]).name
 phase = ('sync' if args[0] == 'sync' else
          'ruff' if 'ruff' in args else
          'parity' if 'scripts/check_macos_test_target_coverage.py' in args else
+         'route' if 'scripts/check_macos_route_contract.py' in args else
          'pytest' if 'pytest' in args else
          'diff' if tool == 'git' and 'diff' in args else 'other')
 with open(os.environ['QUALITY_CALL_LOG'], 'a') as stream:
@@ -77,14 +78,13 @@ def test_workflow_runs_the_same_quality_entrypoint() -> None:
     workflow = (ROOT / ".github/workflows/ci.yml").read_text()
     quality_job = workflow.split("\n  quality:", 1)[1].split("\n  test:", 1)[0]
     assert "bash scripts/ci_quality_gate.sh" in quality_job
-    assert "ripgrep" in quality_job
     assert "uv run ruff" not in quality_job
 
 
 def test_quality_gate_checks_macos_route_contract() -> None:
     gate = SCRIPT.read_text()
-    assert "bash scripts/check_macos_route_contract.sh" in gate
+    assert "uv run --no-sync python scripts/check_macos_route_contract.py" in gate
     coverage_gate = gate.index("check_macos_test_target_coverage.py")
-    route_gate = gate.index("check_macos_route_contract.sh")
+    route_gate = gate.index("check_macos_route_contract.py")
     pytest_gate = gate.index("test_ci_quality_gate.py")
     assert coverage_gate < route_gate < pytest_gate

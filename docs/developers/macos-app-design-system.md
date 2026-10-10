@@ -1185,7 +1185,7 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 > 1. **路由更名**：`AppRoute.models.title` 由「模型」改为「**模型组合**」。这一页真正的
 >    对象是识别 × 配音的**组合**（三套预置 + 九种自由搭配），不是「一堆模型」；侧栏、
 >    工具栏页面名与 View 菜单都读这一处。页首副标题与 `purpose` 同步改成组合口径。
->    UI 测试与 `scripts/check_macos_route_contract.sh` 的标题清单同步。
+>    UI 测试与 `scripts/check_macos_route_contract.py` 的标题清单同步。
 > 2. **控制台重排为两段**：`modelControlConsole` 现在是「预置组合」+「自定义组合」两段，
 >    中间仍然隔着 `Divider`。
 >    - 预置组合：三张卡仍是一行（宽度不足按两列），但卡内从「档位名 + 三行规格」改成
@@ -1218,7 +1218,7 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 >
 > **本轮证据**：`scripts/macos_app_build.sh --configuration Debug` **BUILD SUCCEEDED**；
 > `swift test --package-path macos/SpeechRailApp` XCTest 298 + swift-testing 145 全绿；
-> `scripts/check_macos_route_contract.sh` 通过。
+> `scripts/check_macos_route_contract.py` 通过。
 > **未验证**：真机走查、UI 自动化、Light/Dark 与窄窗观感、VoiceOver 实读（本会话均无授权，
 > 未安装 App）。三档色的对比度是按取值算出来的，尚未在真机两种外观下取样复核。
 
