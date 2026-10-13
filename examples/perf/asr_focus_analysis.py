@@ -198,9 +198,10 @@ def analyze_pair(
         right = after[key]
         old = left["quality_metrics"]["segment_diagnostic"]
         new = right["quality_metrics"]["segment_diagnostic"]
-        if "wire_pcm_sha256" in left or "wire_pcm_sha256" in right:
-            if _digest(left.get("wire_pcm_sha256")) != _digest(right.get("wire_pcm_sha256")):
-                raise ValueError("paired wire audio must match")
+        if (
+            "wire_pcm_sha256" in left or "wire_pcm_sha256" in right
+        ) and _digest(left.get("wire_pcm_sha256")) != _digest(right.get("wire_pcm_sha256")):
+            raise ValueError("paired wire audio must match")
         if any(
             old[field] != new[field]
             for field in ("normalization", "reference_characters", "reference_normalized_sha256")
@@ -218,8 +219,12 @@ def analyze_pair(
                     a.get("preview_normalized_sha256"), b.get("preview_normalized_sha256"),
                 )
                 preview_exact = (
-                    _change(a.get("preview_exact_sha256"), b.get("preview_exact_sha256"), exact=True)
-                    if preview_change not in ("missing_baseline", "missing_candidate", "missing_both")
+                    _change(
+                        a.get("preview_exact_sha256"), b.get("preview_exact_sha256"), exact=True,
+                    )
+                    if preview_change not in (
+                        "missing_baseline", "missing_candidate", "missing_both",
+                    )
                     else preview_change
                 )
                 segment_comparisons.append({
@@ -241,7 +246,9 @@ def analyze_pair(
                 ):
                     changed_finals.append(ordinal)
         delta = new["character_errors"] - old["character_errors"]
-        normalized_changed = old["hypothesis_normalized_sha256"] != new["hypothesis_normalized_sha256"]
+        normalized_changed = (
+            old["hypothesis_normalized_sha256"] != new["hypothesis_normalized_sha256"]
+        )
         exact_change = _change(
             old.get("hypothesis_exact_sha256"), new.get("hypothesis_exact_sha256"), exact=True,
         )
