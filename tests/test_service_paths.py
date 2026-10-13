@@ -24,6 +24,19 @@ def test_layout_uses_private_app_home_and_stable_runtime_paths(tmp_path: Path) -
     )
 
 
+def test_default_user_home_is_isolated_for_service_layout(tmp_path: Path) -> None:
+    user_home = Path.home()
+    assert user_home.is_relative_to(tmp_path)
+
+    layout = ServiceLayout.for_app_home(tmp_path / "SpeechRail")
+
+    assert layout.log_directory.is_relative_to(user_home)
+    assert layout.plist_path.is_relative_to(user_home)
+    layout.ensure_directories()
+    assert layout.log_directory.is_dir()
+    assert layout.plist_path.parent.is_dir()
+
+
 def test_layout_keeps_current_runtime_as_a_symlink_path(tmp_path: Path) -> None:
     app_home = tmp_path / "SpeechRail"
     layout = ServiceLayout.for_app_home(app_home)
