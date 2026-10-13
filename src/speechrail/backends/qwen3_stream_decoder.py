@@ -66,14 +66,14 @@ class BoundQwen3Decoder:
         session: object,
         *,
         max_new_tokens: int,
-        initial_unfixed_updates: int = 2,
+        initial_unfixed_samples: int = 64_000,
         rollback_tokens: int = 5,
         runtime: DecoderRuntime | None = None,
     ) -> None:
         if type(max_new_tokens) is not int or max_new_tokens <= 0:
             raise ValueError("max_new_tokens must be a positive integer")
-        if type(initial_unfixed_updates) is not int or initial_unfixed_updates < 0:
-            raise ValueError("initial_unfixed_updates must be a non-negative integer")
+        if type(initial_unfixed_samples) is not int or initial_unfixed_samples < 0:
+            raise ValueError("initial_unfixed_samples must be a non-negative integer")
         if type(rollback_tokens) is not int or rollback_tokens < 0:
             raise ValueError("rollback_tokens must be a non-negative integer")
         self._session = session
@@ -85,7 +85,9 @@ class BoundQwen3Decoder:
         self._model = cast(Any, model)
         self._tokenizer = cast(Any, tokenizer)
         self._max_new_tokens = max_new_tokens
-        self._initial_unfixed_updates = initial_unfixed_updates
+        # Audio arrives at 16 kHz. Keep the first four seconds revisable even
+        # when previews are frequent or latest-wins scheduling skips updates.
+        self._initial_unfixed_samples = initial_unfixed_samples
         self._rollback_tokens = rollback_tokens
         self._runtime = runtime
 
@@ -125,9 +127,11 @@ class BoundQwen3Decoder:
             language=forced_language,
             context=context,
         )
-        prefix_tokens = self._rollback_prefix(
+        # A preview prefix is only a latency heuristic. Formal finalization
+        # must be able to correct every token from the complete bounded audio.
+        prefix_tokens = [] if final else self._rollback_prefix(
             state.raw_tokens,
-            preview_updates=state.preview_updates,
+            decoded_samples=state.decoded_samples,
             preserve_language_header=forced_language is None,
             rollback_tokens=rollback_tokens,
         )
@@ -199,11 +203,11 @@ class BoundQwen3Decoder:
         self,
         raw_tokens: list[int],
         *,
-        preview_updates: int,
+        decoded_samples: int,
         preserve_language_header: bool,
         rollback_tokens: int | None = None,
     ) -> list[int]:
-        if not raw_tokens or preview_updates < self._initial_unfixed_updates:
+        if not raw_tokens or decoded_samples < self._initial_unfixed_samples:
             return []
         if preserve_language_header:
             decoded = self._tokenizer.decode(raw_tokens)
