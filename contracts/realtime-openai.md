@@ -1,6 +1,6 @@
 # SpeechRail Realtime ASR/TTS 协议契约
 
-> 契约版本：`6.3.1`；生效日期：2026-10-07。唯一机器 schema 是
+> 契约版本：`6.3.2`；生效日期：2026-10-07。唯一机器 schema 是
 > [`realtime-events.schema.json`](realtime-events.schema.json)，字段责任表是
 > [`realtime-field-matrix.json`](realtime-field-matrix.json)。
 
@@ -77,8 +77,10 @@ query 不得携带 key。每连接有独立 session、epoch、sequence 与临时
 - `session.speechrail.asr` 是可选的中立策略对象：`preview_interval_ms` 默认 `1000`，范围
   `100...5000`；`max_segment_ms` 默认 `20000`，范围 `1000...30000`，且不得小于预览间隔；
   `finalization` 默认 `full_segment`，只接受 `full_segment` / `streaming_finalize`；
-  `rollback_tokens` 默认 `5`，范围 `0...32`，为累计音频重解码时保留可修订前缀的回退
-  token 数（调优点，不是正确性证明）。
+  `rollback_tokens` 默认 `5`，范围 `0...32`，为累计音频预览重解码时保留可修订前缀的回退
+  token 数（调优点，不是正确性证明）。`streaming_finalize` 的最终解码使用完整的有界段音频，
+  不强制保留预览文本前缀；此时即使 `rollback_tokens=0`，正式结果仍可修正整段预览。
+  它沿用流式 decoder，不另调用完整段转写接口；`full_segment` 则调用完整段转写接口复核。
   `final_deadline_ms` 为正整数并不得超过当前 request timeout；省略时沿用该 timeout。
   这些字段必须用 JSON 整数值，不接受布尔值或小数形式。
 - 成功的 `session.updated` 回显所请求的 ASR 策略和 `effective_max_segment_ms`。有效段预算是
