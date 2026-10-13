@@ -52,7 +52,7 @@ public struct InnerOSDrawer: View {
             }
         }
         .animation(
-            reduceMotion ? nil : .smooth(duration: 0.18),
+            SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.smoothTransition, reduceMotion: reduceMotion),
             value: session.isExpanded
         )
         .sheet(item: $pickingSentencesFor) { exchange in

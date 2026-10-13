@@ -30,10 +30,10 @@ public struct SessionKeycap: View {
             .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
             .background(
                 SpeechRailDesignTokens.Color.recessedField,
-                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Spacing.micro, style: .continuous)
+                in: SpeechRailDesignTokens.Corner.compactShape
             )
             .overlay {
-                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Spacing.micro, style: .continuous)
+                SpeechRailDesignTokens.Corner.compactShape
                     .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
             }
             .accessibilityHidden(true)
@@ -545,12 +545,12 @@ public struct SessionTurnRow: View {
                         }
                         .opacity(isHovered ? 1.0 : 0.0)
                         .animation(
-                            reduceMotion ? nil : .easeInOut(duration: 0.15),
+                            SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.hoverFeedback, reduceMotion: reduceMotion),
                             value: isHovered
                         )
                     }
 
-                    Spacer(minLength: 4)
+                    Spacer(minLength: SpeechRailDesignTokens.Spacing.micro)
                 }
             }
             .frame(maxWidth: bodyWidth ?? 640, alignment: .leading)
@@ -595,7 +595,7 @@ public struct SessionTurnRow: View {
                     }
                     .opacity(isHovered ? 1.0 : 0.0)
                     .animation(
-                        reduceMotion ? nil : .easeInOut(duration: 0.15),
+                        SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.hoverFeedback, reduceMotion: reduceMotion),
                         value: isHovered
                     )
                 }
@@ -627,7 +627,7 @@ public struct SessionTurnRow: View {
                 .frame(width: SpeechRailDesignTokens.Layout.actionIconButtonWidth, height: SpeechRailDesignTokens.Layout.actionIconButtonHeight)
                 .background(
                     SpeechRailDesignTokens.Color.recessedField,
-                    in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Spacing.micro, style: .continuous)
+                    in: SpeechRailDesignTokens.Corner.compactShape
                 )
         }
         .buttonStyle(.plain)
@@ -789,7 +789,7 @@ public struct SessionConclusionBand: View {
     public var body: some View {
         HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.md) {
             Image(systemName: tone.systemImage)
-                .font(.system(size: SpeechRailDesignTokens.Control.statusBannerIconSize, weight: .semibold))
+                .font(SpeechRailDesignTokens.Typography.statusBannerIcon)
                 .foregroundStyle(tone.color)
                 .accessibilityHidden(true)
 
@@ -1215,7 +1215,7 @@ public struct InPlaceDeleteButton: View {
                             .padding(.vertical, SpeechRailDesignTokens.Spacing.tiny)
                             .background(
                                 SpeechRailDesignTokens.Color.critical.opacity(0.12),
-                                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Spacing.micro, style: .continuous)
+                                in: SpeechRailDesignTokens.Corner.compactShape
                             )
                     }
                     .buttonStyle(.plain)
@@ -1231,10 +1231,10 @@ public struct InPlaceDeleteButton: View {
                             .padding(.vertical, SpeechRailDesignTokens.Spacing.tiny)
                             .background(
                                 SpeechRailDesignTokens.Color.field,
-                                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Spacing.micro, style: .continuous)
+                                in: SpeechRailDesignTokens.Corner.compactShape
                             )
                             .overlay(
-                                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Spacing.micro, style: .continuous)
+                                SpeechRailDesignTokens.Corner.compactShape
                                     .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
                             )
                     }
@@ -1294,7 +1294,7 @@ public struct InPlaceDeleteButton: View {
         if reduceMotion {
             update()
         } else {
-            withAnimation(.easeInOut(duration: 0.16), update)
+            withAnimation(SpeechRailDesignTokens.Motion.panelTransition, update)
         }
     }
 }

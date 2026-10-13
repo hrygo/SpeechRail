@@ -1297,10 +1297,10 @@ public struct TeleprompterView: View {
 
             HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: SpeechRailDesignTokens.Notice.iconSize, weight: .semibold))
+                    .font(SpeechRailDesignTokens.Typography.noticeIcon)
                     .foregroundStyle(SpeechRailDesignTokens.Color.attention)
 
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
                     HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                         Text(blocked.title)
                             .font(SpeechRailDesignTokens.Typography.captionMedium)

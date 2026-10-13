@@ -67,6 +67,35 @@ final class ServiceContractTests: XCTestCase {
         XCTAssertEqual(SpeechRailDesignTokens.Icon.Symbol.more.rawValue, "ellipsis")
     }
 
+    func testDesignTokensContracts() {
+        XCTAssertEqual(SpeechRailDesignTokens.Corner.compact, 4)
+        XCTAssertEqual(SpeechRailDesignTokens.Layout.capabilityTileSize, 32)
+        XCTAssertEqual(SpeechRailDesignTokens.Layout.assistantWorkbenchMinimumHeight, 460)
+        XCTAssertEqual(SpeechRailDesignTokens.Layout.creatorVoicePopoverWidth, 320)
+        XCTAssertEqual(SpeechRailDesignTokens.Layout.creatorVoicePopoverHeight, 280)
+        XCTAssertEqual(SpeechRailDesignTokens.Layout.Sheet.compactWidth, 420)
+        XCTAssertEqual(SpeechRailDesignTokens.Layout.Sheet.regularWidth, 460)
+        XCTAssertEqual(SpeechRailDesignTokens.Layout.Sheet.formWidth, 520)
+        XCTAssertEqual(SpeechRailDesignTokens.Layout.Sheet.wideWidth, 560)
+        XCTAssertEqual(SpeechRailDesignTokens.Layout.Sheet.prominentWidth, 720)
+        XCTAssertEqual(SpeechRailDesignTokens.Motion.quickDuration, 0.16)
+
+        let anim = SpeechRailDesignTokens.Motion.interactiveSpring
+        XCTAssertNil(SpeechRailDesignTokens.Motion.resolved(anim, reduceMotion: true))
+        XCTAssertNotNil(SpeechRailDesignTokens.Motion.resolved(anim, reduceMotion: false))
+
+        let stageScroll = SpeechRailDesignTokens.Motion.stageScrollCurve
+        XCTAssertNil(SpeechRailDesignTokens.Motion.resolved(stageScroll, reduceMotion: true))
+        XCTAssertNotNil(SpeechRailDesignTokens.Motion.resolved(stageScroll, reduceMotion: false))
+
+        _ = SpeechRailInteractiveCorner.compact
+
+        // SwiftUI.Material does not conform to Equatable; verify accessibility of tokens
+        _ = SpeechRailDesignTokens.Surface.elevatedMaterial
+        _ = SpeechRailDesignTokens.Surface.floatingToolbarMaterial
+        _ = SpeechRailDesignTokens.Surface.stageOverlayMaterial
+    }
+
     func testEffectiveSnapshotKeepsAtomicIdentityAndUnknownAvailabilityReason() throws {
         let data = Data("""
         {

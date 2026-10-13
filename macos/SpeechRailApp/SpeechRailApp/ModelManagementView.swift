@@ -2248,7 +2248,10 @@ private struct OnDemandCapabilityRow: View {
             Image(systemName: capability.icon)
                 .font(SpeechRailDesignTokens.Typography.iconMediumSemibold)
                 .foregroundStyle(capability.iconColor)
-                .frame(width: 32, height: 32)
+                .frame(
+                    width: SpeechRailDesignTokens.Layout.capabilityTileSize,
+                    height: SpeechRailDesignTokens.Layout.capabilityTileSize
+                )
                 .background(
                     capability.iconColor.opacity(0.12),
                     in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
@@ -2338,7 +2341,10 @@ private struct UnmanagedArtifactRow: View {
             Image(systemName: statusPresentation.systemImage)
                 .font(SpeechRailDesignTokens.Typography.iconMedium)
                 .foregroundStyle(statusPresentation.color)
-                .frame(width: 32, height: 32)
+                .frame(
+                    width: SpeechRailDesignTokens.Layout.capabilityTileSize,
+                    height: SpeechRailDesignTokens.Layout.capabilityTileSize
+                )
                 .background(
                     statusPresentation.color.opacity(0.12),
                     in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)

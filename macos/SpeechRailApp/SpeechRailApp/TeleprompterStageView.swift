@@ -69,15 +69,15 @@ public struct TeleprompterStageView: View {
             .clipShape(SpeechRailDesignTokens.Corner.containerShape)
             .scaleEffect(x: settings.isMirrored ? -1 : 1, y: 1)
             .animation(
-                reduceMotion ? nil : .easeInOut(duration: SpeechRailDesignTokens.Motion.standardDuration),
+                SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.standardEaseInOut, reduceMotion: reduceMotion),
                 value: session.currentSegmentIndex
             )
             .animation(
-                reduceMotion ? nil : .easeInOut(duration: SpeechRailDesignTokens.Motion.standardDuration),
+                SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.standardEaseInOut, reduceMotion: reduceMotion),
                 value: session.phase
             )
             .animation(
-                reduceMotion ? nil : .easeInOut(duration: SpeechRailDesignTokens.Motion.standardDuration),
+                SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.standardEaseInOut, reduceMotion: reduceMotion),
                 value: isBrowsingAll
             )
             .accessibilityElement(children: .contain)
@@ -236,7 +236,7 @@ public struct TeleprompterStageView: View {
                 )
                 .fill(SpeechRailDesignTokens.Color.canvas.opacity(settings.opacity))
                 .background(
-                    .ultraThinMaterial.opacity(settings.opacity),
+                    SpeechRailDesignTokens.Surface.stageOverlayMaterial.opacity(settings.opacity),
                     in: RoundedRectangle(
                         cornerRadius: SpeechRailDesignTokens.Corner.container,
                         style: .continuous
@@ -385,7 +385,7 @@ public struct TeleprompterStageView: View {
         if reduceMotion || immediate {
             controlsVisible = true
         } else {
-            withAnimation(.easeInOut(duration: SpeechRailDesignTokens.Motion.standardDuration)) {
+            withAnimation(SpeechRailDesignTokens.Motion.standardEaseInOut) {
                 controlsVisible = true
             }
         }
@@ -404,7 +404,7 @@ public struct TeleprompterStageView: View {
             if reduceMotion {
                 controlsVisible = false
             } else {
-                withAnimation(.easeInOut(duration: SpeechRailDesignTokens.Motion.standardDuration)) {
+                withAnimation(SpeechRailDesignTokens.Motion.standardEaseInOut) {
                     controlsVisible = false
                 }
             }
@@ -466,7 +466,7 @@ public struct TeleprompterStageView: View {
                     .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                     .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
                     .background(
-                        .ultraThinMaterial,
+                        SpeechRailDesignTokens.Surface.stageOverlayMaterial,
                         in: RoundedRectangle(
                             cornerRadius: SpeechRailDesignTokens.Corner.container,
                             style: .continuous

@@ -125,8 +125,9 @@ public struct SpeechRailButtonAppearance: ViewModifier {
 /// 用容器档（`Corner.containerShape`，12pt）——否则填色的圆角会比卡片本身小一档、
 /// 在四角露出来（REDESIGN-SPEC §11 第五十二轮）。
 public enum SpeechRailInteractiveCorner: Sendable {
- case nested
- case container
+    case nested
+    case container
+    case compact
 }
 
 /// A shared style for custom rows/cards that are buttons but intentionally do
@@ -191,7 +192,7 @@ public struct SpeechRailDisclosureGroupStyle: DisclosureGroupStyle {
  VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
  Button {
  withAnimation(
- reduceMotion ? nil : SpeechRailDesignTokens.Motion.selectionFeedback
+ SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.selectionFeedback, reduceMotion: reduceMotion)
  ) {
  configuration.isExpanded.toggle()
  }
@@ -291,7 +292,7 @@ private struct SpeechRailInteractiveButtonBody: View {
  )
  .padding(.horizontal, horizontalInset)
  .background(backgroundShape)
- .speechRailFocusRing(isFocused)
+ .speechRailFocusRing(isFocused, in: shape)
  // The visual treatment stays rounded, but the complete button
  // bounds—including transparent padding—remain one hit target.
  // The system already animates press; a custom scale would double
@@ -307,11 +308,11 @@ private struct SpeechRailInteractiveButtonBody: View {
  .allowsHitTesting(false)
  }
  .animation(
- reduceMotion ? nil : SpeechRailDesignTokens.Motion.hoverFeedback,
+ SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.hoverFeedback, reduceMotion: reduceMotion),
  value: isHovered
  )
  .animation(
- reduceMotion ? nil : SpeechRailDesignTokens.Motion.pressFeedback,
+ SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.pressFeedback, reduceMotion: reduceMotion),
  value: configuration.isPressed
  )
  }
@@ -352,6 +353,7 @@ private struct SpeechRailInteractiveButtonBody: View {
  switch corner {
  case .nested: AnyShape(SpeechRailDesignTokens.Corner.nestedShape)
  case .container: AnyShape(SpeechRailDesignTokens.Corner.containerShape)
+ case .compact: AnyShape(SpeechRailDesignTokens.Corner.compactShape)
  }
  }
 }
@@ -1555,11 +1557,11 @@ private struct PageActionButtonBody: View {
  isHovered = isEnabled && hovering
  }
  .animation(
- reduceMotion ? nil : SpeechRailDesignTokens.Motion.hoverFeedback,
+ SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.hoverFeedback, reduceMotion: reduceMotion),
  value: isHovered
  )
  .animation(
- reduceMotion ? nil : SpeechRailDesignTokens.Motion.pressFeedback,
+ SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.pressFeedback, reduceMotion: reduceMotion),
  value: configuration.isPressed
  )
  }
@@ -1674,7 +1676,7 @@ public struct PageActionsMenu<Content: View>: View {
  isHovered = hovering
  }
  .animation(
- reduceMotion ? nil : SpeechRailDesignTokens.Motion.hoverFeedback,
+ SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.hoverFeedback, reduceMotion: reduceMotion),
  value: isHovered
  )
  .speechRailPointerCursor()
@@ -2048,7 +2050,7 @@ public struct NoticeBar: View {
  public var body: some View {
  HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
  toneIcon
- .font(.system(size: SpeechRailDesignTokens.Notice.iconSize, weight: .semibold))
+ .font(SpeechRailDesignTokens.Typography.noticeIcon)
  .foregroundStyle(toneColor)
  .accessibilityHidden(true)
 
