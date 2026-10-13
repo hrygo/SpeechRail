@@ -26,6 +26,12 @@ def isolated_voice_store_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("SPEECHRAIL_VOICE_AUDIO_DIR", str(tmp_path / "voice-store" / "audio"))
 
 
+@pytest.fixture(autouse=True)
+def isolated_user_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default service paths must never touch the real user's home."""
+    monkeypatch.setenv("HOME", str(tmp_path / "user-home"))
+
+
 @pytest.fixture
 def voice_store(tmp_path: Path) -> FileVoiceRegistry:
     return FileVoiceRegistry.open(
