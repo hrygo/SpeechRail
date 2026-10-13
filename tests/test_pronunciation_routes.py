@@ -9,8 +9,8 @@ from speechrail.app import create_app
 from speechrail.config import Settings
 from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.domain.ports import AudioChunk, SpeechRequest
-from speechrail.domain.tts import VoiceRegistry
 from speechrail.domain.tts_pronunciation import PronunciationRegistry
+from speechrail.infrastructure.voice_registry import FileVoiceRegistry as VoiceRegistry
 
 _VOICE_ID = "serena"
 
@@ -39,17 +39,11 @@ def _client(
     asr_key = required_spec_artifact("quality", "asr")
     tts_key = required_spec_artifact("quality", "tts_custom_voice")
     assert asr_key is not None and tts_key is not None
-    voice_registry = VoiceRegistry(
+    voice_registry = VoiceRegistry.open(
         storage_path=tmp_path / "voices.json",
         voices_dir=tmp_path / "voices",
     )
-    pronunciation_registry = PronunciationRegistry(
-        tmp_path / "pronunciation.json"
-    )
-    monkeypatch.setattr(
-        "speechrail.domain.tts._GLOBAL_VOICE_REGISTRY",
-        voice_registry,
-    )
+    pronunciation_registry = PronunciationRegistry(tmp_path / "pronunciation.json")
     monkeypatch.setattr(
         "speechrail.http.routes.system.get_pronunciation_registry",
         lambda: pronunciation_registry,
@@ -69,6 +63,7 @@ def _client(
             qwen3_tts_python=None,
         ),
         tts_synthesizer=synth,
+        voice_store=voice_registry,
     )
     return TestClient(app), synth, pronunciation_registry
 

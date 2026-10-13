@@ -43,7 +43,7 @@ class Settings(BaseSettings):
         return cls(_env_file=env_file)  # type: ignore[call-arg]
 
     service_name: str = "speechrail"
-    version: str = "3.8.1"
+    version: str = "3.8.2"
     host: str = "127.0.0.1"
     port: int = Field(default=8201, ge=1, le=65535)
     model_id: str = "speechrail/qwen3-asr-1.7b"
@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     voice_design_artifact_key: str | None = None
     alignment_artifact_key: str | None = None
     tts_voice_ids: tuple[str, ...] = tuple(VOICE_PROFILES)
+    voice_store_path: Path = Field(
+        default_factory=lambda: Path.home() / ".speechrail" / "custom_voices.json"
+    )
+    voice_audio_dir: Path = Field(default_factory=lambda: Path.home() / ".speechrail" / "voices")
     qwen3_tts_model_dir: Path | None = None
     qwen3_tts_clone_model_dir: Path | None = None
     qwen3_tts_design_model_dir: Path | None = None

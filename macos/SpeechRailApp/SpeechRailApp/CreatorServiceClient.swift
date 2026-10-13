@@ -737,6 +737,10 @@ public struct VoiceDesignPublishResult: Codable, Equatable, Sendable {
 /// 刷新到新 plan 只能由用户显式重做一次，产生新的 render revision。
 public struct SpeechRenderResult: Sendable {
     public let audioData: Data
+    public let requestID: String?
+    public let receiptID: String?
+    public let receiptStatus: RenderReceiptStatus?
+    public let receiptCompletedAt: Double?
     /// 服务端 render receipt 里的 plan 身份（`plan_<digest[:32]>`）；服务端没给就是 nil。
     public let planID: String?
     /// 这一次实际生效的音色 revision；服务端没给就是 nil。
@@ -757,18 +761,69 @@ public struct SpeechRenderResult: Sendable {
         planSHA256: String? = nil,
         pcmSHA256: String? = nil,
         recipe: RenderRecipeSnapshot? = nil,
+        requestID: String? = nil,
+        receiptID: String? = nil,
+        receiptStatus: RenderReceiptStatus? = nil,
+        receiptCompletedAt: Double? = nil,
         provenance: RenderProvenance = RenderProvenance(
             state: .unavailable,
             reason: RenderProvenance.unsupportedClientReason
         )
     ) {
         self.audioData = audioData
+        self.requestID = requestID
+        self.receiptID = receiptID
+        self.receiptStatus = receiptStatus
+        self.receiptCompletedAt = receiptCompletedAt
         self.planID = planID
         self.voiceRevision = voiceRevision
         self.planSHA256 = planSHA256
         self.pcmSHA256 = pcmSHA256
         self.recipe = recipe
         self.provenance = provenance
+    }
+}
+
+/// 已保存制作结果的只读回执查询；不包含合成或音色工作流。
+public protocol SpeechRailReceiptClient: Sendable {
+    func fetchReceipt(id: String) async throws -> RenderReceipt
+    func fetchReceipt(byRequestID requestID: String) async throws -> RenderReceipt
+}
+
+public enum SavedRenderReceiptError: Error, LocalizedError {
+    case identityUnavailable
+    case clientUnavailable
+    case identityMismatch
+
+    public var errorDescription: String? {
+        switch self {
+        case .identityUnavailable: "这件作品没有保存服务执行编号，无法查询回执。"
+        case .clientUnavailable: "当前连接不支持回执查询。"
+        case .identityMismatch: "查询到的回执与这件作品的执行编号不一致。"
+        }
+    }
+}
+
+/// 查询结果独立于保存时快照；只接受与已知执行身份一致的回执。
+public enum SavedRenderReceiptLookup {
+    public static func fetch(
+        snapshot: RenderProvenanceSnapshot,
+        client: any SpeechRailReceiptClient
+    ) async throws -> RenderReceipt {
+        let receipt: RenderReceipt
+        if let receiptID = snapshot.receiptID {
+            receipt = try await client.fetchReceipt(id: receiptID)
+        } else if let requestID = snapshot.requestID {
+            receipt = try await client.fetchReceipt(byRequestID: requestID)
+        } else {
+            throw SavedRenderReceiptError.identityUnavailable
+        }
+        try Task.checkCancellation()
+        guard snapshot.receiptID.map({ $0 == receipt.receiptID }) ?? true,
+              snapshot.requestID.map({ $0 == receipt.requestID }) ?? true else {
+            throw SavedRenderReceiptError.identityMismatch
+        }
+        return receipt
     }
 }
 
@@ -798,22 +853,27 @@ public struct RenderProvenance: Equatable, Sendable, Codable {
     }
 }
 
-public protocol SpeechRailCreatorClient: Sendable {
+public protocol SpeechRailVoiceDirectoryClient: Sendable {
     func fetchVoices() async throws -> [CreatorVoice]
     func fetchVoice(id: String) async throws -> CreatorVoice
+}
+
+public protocol SpeechRailSpeechRenderClient: Sendable {
     func createSpeech(
         text: String,
         voiceID: String,
         speed: Double,
         options: SpeechRailRequestOptions
     ) async throws -> Data
-    /// 正式制作：在 `createSpeech` 之外再把这次渲染的身份带回来（服务端支持时）。
     func createSpeechRender(
         text: String,
         voiceID: String,
         speed: Double,
         options: SpeechRailRequestOptions
     ) async throws -> SpeechRenderResult
+}
+
+public protocol SpeechRailVoiceDesignClient: Sendable {
     func createVoicePreview(
         text: String,
         instruction: String,
@@ -854,6 +914,9 @@ public protocol SpeechRailCreatorClient: Sendable {
         id: String,
         expectedCandidateRevision: String?
     ) async throws -> VoiceDesignPublishResult
+}
+
+public protocol SpeechRailVoiceCloneClient: Sendable {
     func fetchCloneIdempotencyStatus(idempotencyKey: String) async throws -> CloneIdempotencyStatus
     func fetchClonePrompts() async throws -> [ClonePrompt]
     func validateVoiceClone(
@@ -869,15 +932,16 @@ public protocol SpeechRailCreatorClient: Sendable {
         voiceID: String?,
         idempotencyKey: String?
     ) async throws -> CreatorVoice
-    func deleteVoice(id: String) async throws
+}
 
+public protocol SpeechRailVoiceEditingClient: Sendable {
+    func deleteVoice(id: String) async throws
     func createVoice(
         name: String,
         instruction: String,
         id: String?,
         seed: Int?
     ) async throws -> CreatorVoice
-    func fetchVoiceRevisions(id: String) async throws -> [VoiceRevision]
     func updateVoice(
         id: String,
         name: String?,
@@ -885,12 +949,19 @@ public protocol SpeechRailCreatorClient: Sendable {
         seed: Int?,
         expectedRevision: String
     ) async throws -> VoiceRevisionMutation
+}
+
+public protocol SpeechRailVoiceRevisionClient: Sendable {
+    func fetchVoiceRevisions(id: String) async throws -> [VoiceRevision]
     func rollbackVoice(
         id: String,
         targetRevision: String,
         expectedRevision: String
     ) async throws -> VoiceRevisionMutation
     func revokeVoiceRevision(id: String, revision: String) async throws -> VoiceRevisionMutation
+}
+
+public protocol SpeechRailPronunciationClient: Sendable {
     func fetchPronunciationSet(id: String, revision: String) async throws -> PronunciationSet
     func upsertPronunciationSet(
         id: String,
@@ -900,14 +971,17 @@ public protocol SpeechRailCreatorClient: Sendable {
     func revokePronunciationRevision(id: String, revision: String) async throws -> PronunciationSet
     func deletePronunciationSet(id: String) async throws
     func fetchPronunciationSetSummaries() async throws -> [PronunciationSetSummary]
+}
+
+public protocol SpeechRailVoiceQualityClient: Sendable {
     func runVoiceQuality(
         id: String,
         request: VoiceQualityRunRequest
     ) async throws -> VoiceQualityRunResponse
 }
 
-public extension SpeechRailCreatorClient {
-    /// 默认退化：拿不到渲染身份时仍返回音频，`planID`/`voiceRevision` 留空。
+public extension SpeechRailSpeechRenderClient {
+    /// 音频已生成时保留字节；缺少回执的身份仍为 unavailable。
     func createSpeechRender(
         text: String,
         voiceID: String,
@@ -925,350 +999,14 @@ public extension SpeechRailCreatorClient {
             voiceRevision: nil
         )
     }
-
-    func createVoiceDesignCandidate(
-        voiceID: String,
-        name: String,
-        instruction: String,
-        referenceText: String,
-        seed: Int,
-        idempotencyKey: String?
-    ) async throws -> VoiceDesignCandidate {
-        throw ServiceAPIClientError.http(
-            statusCode: 501,
-            code: "unsupported",
-            message: "voice design candidates are unsupported by this client",
-            requestID: nil,
-            retryable: false
-        )
-    }
-
-    func fetchVoiceDesignCandidates() async throws -> [VoiceDesignCandidate] {
-        throw ServiceAPIClientError.http(
-            statusCode: 501,
-            code: "unsupported",
-            message: "voice design candidate listing is unsupported by this client",
-            requestID: nil,
-            retryable: false
-        )
-    }
-
-    func fetchVoiceDesignCandidate(id: String) async throws -> VoiceDesignCandidate {
-        throw ServiceAPIClientError.http(
-            statusCode: 501,
-            code: "unsupported",
-            message: "voice design candidate lookup is unsupported by this client",
-            requestID: nil,
-            retryable: false
-        )
-    }
-
-    func fetchVoiceDesignReferenceAudio(
-        id: String,
-        expectedRevision: String
-    ) async throws -> Data {
-        throw ServiceAPIClientError.http(
-            statusCode: 501,
-            code: "unsupported",
-            message: "voice design reference audio is unsupported by this client",
-            requestID: nil,
-            retryable: false
-        )
-    }
-
-    func fetchVoiceDesignValidationAudio(
-        id: String,
-        validationID: String,
-        expectedRevision: String
-    ) async throws -> Data {
-        throw ServiceAPIClientError.http(
-            statusCode: 501,
-            code: "unsupported",
-            message: "voice design validation audio is unsupported by this client",
-            requestID: nil,
-            retryable: false
-        )
-    }
-
-    func cancelVoiceDesignCandidate(id: String) async throws -> VoiceDesignCandidate {
-        throw ServiceAPIClientError.http(
-            statusCode: 501,
-            code: "unsupported",
-            message: "voice design candidate cancellation is unsupported by this client",
-            requestID: nil,
-            retryable: false
-        )
-    }
-
-    func confirmVoiceDesignCandidate(
-        id: String,
-        referenceText: String?
-    ) async throws -> VoiceDesignCandidate {
-        throw ServiceAPIClientError.http(
-            statusCode: 501,
-            code: "unsupported",
-            message: "voice design confirmation is unsupported by this client",
-            requestID: nil,
-            retryable: false
-        )
-    }
-
-    func validateVoiceDesignCandidate(
-        id: String,
-        testText: String?,
-        capabilityKey: String?,
-        humanReview: VoiceDesignHumanReview?
-    ) async throws -> VoiceDesignCandidate {
-        throw ServiceAPIClientError.http(
-            statusCode: 501,
-            code: "unsupported",
-            message: "voice design validation is unsupported by this client",
-            requestID: nil,
-            retryable: false
-        )
-    }
-
-    func publishVoiceDesignCandidate(
-        id: String,
-        expectedCandidateRevision: String?
-    ) async throws -> VoiceDesignPublishResult {
-        throw ServiceAPIClientError.http(
-            statusCode: 501,
-            code: "unsupported",
-            message: "voice design publication is unsupported by this client",
-            requestID: nil,
-            retryable: false
-        )
-    }
-
-    func fetchCloneIdempotencyStatus(idempotencyKey: String) async throws -> CloneIdempotencyStatus {
-        throw ServiceAPIClientError.http(
-            statusCode: 501,
-            code: "unsupported",
-            message: "clone idempotency lookup is unsupported by this client",
-            requestID: nil,
-            retryable: false
-        )
-    }
-
-    func createVoice(
-        name: String,
-        instruction: String,
-        id: String?,
-        seed: Int?
-    ) async throws -> CreatorVoice {
-        throw ServiceAPIClientError.http(
-            statusCode: 501,
-            code: "unsupported",
-            message: "voice creation is unsupported by this client",
-            requestID: nil,
-            retryable: false
-        )
-    }
-
-    func fetchVoiceRevisions(id: String) async throws -> [VoiceRevision] {
-        throw ServiceAPIClientError.http(
-            statusCode: 501,
-            code: "unsupported",
-            message: "voice revisions are unsupported by this client",
-            requestID: nil,
-            retryable: false
-        )
-    }
-
-    func updateVoice(
-        id: String,
-        name: String?,
-        instruction: String?,
-        seed: Int?,
-        expectedRevision: String
-    ) async throws -> VoiceRevisionMutation {
-        throw ServiceAPIClientError.http(
-            statusCode: 501,
-            code: "unsupported",
-            message: "conditional voice updates are unsupported by this client",
-            requestID: nil,
-            retryable: false
-        )
-    }
-
-    func rollbackVoice(
-        id: String,
-        targetRevision: String,
-        expectedRevision: String
-    ) async throws -> VoiceRevisionMutation {
-        throw ServiceAPIClientError.http(
-            statusCode: 501,
-            code: "unsupported",
-            message: "voice rollback is unsupported by this client",
-            requestID: nil,
-            retryable: false
-        )
-    }
-
-    func revokeVoiceRevision(id: String, revision: String) async throws -> VoiceRevisionMutation {
-        throw ServiceAPIClientError.http(
-            statusCode: 501,
-            code: "unsupported",
-            message: "voice revision revocation is unsupported by this client",
-            requestID: nil,
-            retryable: false
-        )
-    }
-
-    func fetchPronunciationSet(id: String, revision: String) async throws -> PronunciationSet {
-        throw ServiceAPIClientError.http(
-            statusCode: 501,
-            code: "unsupported",
-            message: "pronunciation sets are unsupported by this client",
-            requestID: nil,
-            retryable: false
-        )
-    }
-
-    func upsertPronunciationSet(
-        id: String,
-        expectedRevision: String?,
-        entries: [PronunciationEntry]
-    ) async throws -> PronunciationSet {
-        throw ServiceAPIClientError.http(
-            statusCode: 501,
-            code: "unsupported",
-            message: "pronunciation sets are unsupported by this client",
-            requestID: nil,
-            retryable: false
-        )
-    }
-
-    func revokePronunciationRevision(id: String, revision: String) async throws -> PronunciationSet {
-        throw ServiceAPIClientError.http(
-            statusCode: 501,
-            code: "unsupported",
-            message: "pronunciation revisions are unsupported by this client",
-            requestID: nil,
-            retryable: false
-        )
-    }
-
-    func deletePronunciationSet(id: String) async throws {
-        throw ServiceAPIClientError.http(
-            statusCode: 501,
-            code: "unsupported",
-            message: "pronunciation sets are unsupported by this client",
-            requestID: nil,
-            retryable: false
-        )
-    }
-
-    func fetchPronunciationSetSummaries() async throws -> [PronunciationSetSummary] {
-        throw ServiceAPIClientError.http(
-            statusCode: 501,
-            code: "unsupported",
-            message: "pronunciation-set listing is unsupported by this client",
-            requestID: nil,
-            retryable: false
-        )
-    }
-
-    func runVoiceQuality(
-        id: String,
-        request: VoiceQualityRunRequest
-    ) async throws -> VoiceQualityRunResponse {
-        throw ServiceAPIClientError.http(
-            statusCode: 501,
-            code: "unsupported",
-            message: "voice quality runs are unsupported by this client",
-            requestID: nil,
-            retryable: false
-        )
-    }
 }
 
-struct UnavailableCreatorClient: SpeechRailCreatorClient {
-    func fetchVoices() async throws -> [CreatorVoice] {
-        throw ServiceAPIClientError.requestFailed
-    }
+/// 未装配客户端能力时在操作边界明确拒绝；端口存在不代表服务运行就绪。
+public struct CreatorCapabilityUnavailableError: Error, LocalizedError, Sendable {
+    public var errorDescription: String? { "当前连接未提供这项创作能力，请检查连接设置。" }
+}
 
-    func fetchVoice(id: String) async throws -> CreatorVoice {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func createSpeech(
-        text: String,
-        voiceID: String,
-        speed: Double,
-        options: SpeechRailRequestOptions
-    ) async throws -> Data {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func createVoicePreview(
-        text: String,
-        instruction: String,
-        speed: Double,
-        seed: Int?
-    ) async throws -> Data {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func createVoiceDesignCandidate(
-        voiceID: String,
-        name: String,
-        instruction: String,
-        referenceText: String,
-        seed: Int,
-        idempotencyKey: String?
-    ) async throws -> VoiceDesignCandidate {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func confirmVoiceDesignCandidate(
-        id: String,
-        referenceText: String?
-    ) async throws -> VoiceDesignCandidate {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func validateVoiceDesignCandidate(
-        id: String,
-        testText: String?,
-        capabilityKey: String?,
-        humanReview: VoiceDesignHumanReview?
-    ) async throws -> VoiceDesignCandidate {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func publishVoiceDesignCandidate(
-        id: String,
-        expectedCandidateRevision: String?
-    ) async throws -> VoiceDesignPublishResult {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func fetchClonePrompts() async throws -> [ClonePrompt] {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func validateVoiceClone(
-        audio: Data,
-        referenceText: String,
-        name: String,
-        voiceID: String?
-    ) async throws -> VoiceQualityReportSnapshot {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func registerVoiceClone(
-        audio: Data,
-        referenceText: String,
-        name: String,
-        voiceID: String?,
-        idempotencyKey: String?
-    ) async throws -> CreatorVoice {
-        throw ServiceAPIClientError.requestFailed
-    }
-
-    func deleteVoice(id: String) async throws {
-        throw ServiceAPIClientError.requestFailed
-    }
+func requireCreatorCapability<Client>(_ client: Client?) throws -> Client {
+    guard let client else { throw CreatorCapabilityUnavailableError() }
+    return client
 }

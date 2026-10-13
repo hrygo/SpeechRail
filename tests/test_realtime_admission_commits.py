@@ -100,10 +100,10 @@ async def _stream_speech_then_commit(
     await session._update_session(_VAD_UPDATE)
     frame = _sine_frame_16k()
     for _ in range(frame_count):
-        await session._append_audio(
+        await session._asr_owner.append(
             {"type": "input_audio_buffer.append", "audio": _b64(frame)}
         )
-    await session._commit_audio("client")
+    await session._asr_owner.commit("client")
     await session.close()
     return sent
 
@@ -189,17 +189,17 @@ def test_rollover_during_explicit_commit_never_reenters_commit_lock() -> None:
         await session._update_session(_VAD_UPDATE)
         frame = _sine_frame_16k()
         wire_audio = b"".join([frame] * 31) + frame[:768]
-        await session._append_audio(
+        await session._asr_owner.append(
             {"type": "input_audio_buffer.append", "audio": _b64(wire_audio)}
         )
-        assert session._buffered_audio_bytes == 31_744
-        assert session._speech_admission is not None
-        assert session._speech_admission.state == "ACTIVE"
+        assert session._asr_owner._buffered_audio_bytes == 31_744
+        assert session._asr_owner._speech_admission is not None
+        assert session._asr_owner._speech_admission.state == "ACTIVE"
         # The unfinished VAD frame is below the 1,000 ms segment cap. Adding
         # one sample makes admission.finish() cross it while _commit_audio owns
         # the lock, exercising the in-commit rollover path.
-        session._vad_raw_buffer.extend(b"\x01\x00")
-        await asyncio.wait_for(session._commit_audio("client"), timeout=0.5)
+        session._asr_owner._vad_raw_buffer.extend(b"\x01\x00")
+        await asyncio.wait_for(session._asr_owner.commit("client"), timeout=0.5)
         await session.close()
 
     asyncio.run(run())
@@ -226,9 +226,9 @@ def test_vad_packetization_preserves_following_utterance() -> None:
 
         session = OpenAIRealtimeSession(services, session_id="s", send=send)
         await session._update_session(_VAD_UPDATE)
-        session._vad = _EnergyScriptedVad()
+        session._asr_owner._vad = _EnergyScriptedVad()
         if packetized:
-            await session._append_audio(
+            await session._asr_owner.append(
                 {
                     "type": "input_audio_buffer.append",
                     "audio": _b64(b"".join(frames)),
@@ -236,7 +236,7 @@ def test_vad_packetization_preserves_following_utterance() -> None:
             )
         else:
             for frame in frames:
-                await session._append_audio(
+                await session._asr_owner.append(
                     {"type": "input_audio_buffer.append", "audio": _b64(frame)}
                 )
         await session.close()
@@ -266,11 +266,11 @@ def test_legacy_vad_pending_silence_is_bounded() -> None:
         silence = bytes(1024)
         # 200 x 32ms = 6.4s of pure silence
         for _ in range(200):
-            await session._append_audio(
+            await session._asr_owner.append(
                 {"type": "input_audio_buffer.append", "audio": _b64(silence)}
             )
         for _ in range(3):  # confirm speech
-            await session._append_audio(
+            await session._asr_owner.append(
                 {"type": "input_audio_buffer.append", "audio": _b64(_sine_frame_16k())}
             )
         await session.close()

@@ -2,8 +2,8 @@
 title: "音色验证应用用例与执行所有权"
 status: active
 audience: "核心开发者、架构评审者"
-version: "3.8.1"
-date: 2026-10-07
+version: "3.8.2"
+date: 2026-10-09
 ---
 
 # 音色验证应用用例与执行所有权
@@ -13,6 +13,33 @@ date: 2026-10-07
 request ID、错误 envelope 和响应投影，不再依赖另一 route 的私有业务函数。
 两用例共享 `voice_validation_execution.py` 中的有界合成、重采样、ASR 与评分组件，
 复用现有领域评分和 validation binding，不合并不同的验证策略。
+
+## 音色存储与租约
+
+`domain/tts.py` 只定义音色值、纯规则、错误和内存中的系统音色，不在导入时访问
+用户存储。目录、修订、验证与租约的消费合同位于 `domain/voice_ports.py`；
+文件实现为 `infrastructure/voice_registry.py` 的 `FileVoiceRegistry`。
+
+应用组合根根据 `Settings.voice_store_path` 与 `Settings.voice_audio_dir` 显式打开
+一个文件 owner；`create_app(..., voice_store=...)` 和 `AppOverrides.voice_store`
+允许构造时注入独立存储。HTTP、Realtime、文件作业、质量用例、TTS router 和 worker
+共享该 owner。候选、验证证据和 clone/design 幂等记录从此 owner 的路径定位；
+同进程中的应用实例可隔离路径、缓存、修订、证据及租约。
+
+默认 `custom_voices.json` 沿用相邻辅助文件位置。其他 metadata 文件名通过
+`artifact_path` 为验证、候选及幂等制品增加完整文件名命名空间，各 owner 的
+音频目录也须独立。非默认文件旁若已有未命名的旧辅助制品，装配明确拒绝，
+由操作者先解决归属；不自动迁移、覆盖或忽略既有资产。
+
+binding 和流式能力判定消费已捕获的 profile，模型 worker 只消费请求快照或纯系统
+音色，不重新定位用户 registry。临时设计 profile 保持在调用上下文内，不成为默认存储。
+需要目录或租约的组件必须在装配时取得依赖，不能在请求途中建立默认 owner。
+
+文件 owner 保留跨进程锁、原子替换、CAS、撤销和读租约。加载失败保留不可用状态，
+相关发现与音色操作返回既有稳定错误；系统音色的内存解析成功不能证明文件存储正常。
+实际 backend 清理完成前租约不得退出；本节不改变音色 JSON 或用户资产格式。
+批量合成的 abort/reap 失败时，worker 保留读租约；后续 close 或重新启动前
+先确认旧进程回收，再释放引用。清理失败期间目录变更仍受活动读租约保护。
 
 ## 阶段、资源与提交
 

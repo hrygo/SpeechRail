@@ -214,9 +214,9 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: native/diarization/.build
-          key: native-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.fingerprint }}-${{ hashFiles('native/diarization/Package.swift', 'hatch_build.py', 'scripts/ci_build_cache.py') }}-${{ hashFiles('native/diarization/Sources/**') }}
+          key: native-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.fingerprint }}-${{ hashFiles('native/diarization/Package.swift', 'hatch_build.py', 'scripts/ci_build_cache.py') }}-${{ hashFiles('native/diarization/Sources/**') }}
           restore-keys: |
-            native-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.fingerprint }}-${{ hashFiles('native/diarization/Package.swift', 'hatch_build.py', 'scripts/ci_build_cache.py') }}-
+            native-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.fingerprint }}-${{ hashFiles('native/diarization/Package.swift', 'hatch_build.py', 'scripts/ci_build_cache.py') }}-
 
       - name: Restore unchanged native input timestamps
         run: python3 scripts/ci_build_cache.py restore --manifest native/diarization/.build/ci-inputs.json native/diarization
@@ -280,9 +280,9 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: macos/SpeechRailApp/.build
-          key: swift-test-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('macos/SpeechRailApp/Package.swift', 'macos/SpeechRailApp/Package.resolved', 'scripts/ci_build_cache.py') }}-${{ hashFiles('macos/SpeechRailApp/**/*.swift') }}
+          key: swift-test-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('macos/SpeechRailApp/Package.swift', 'macos/SpeechRailApp/Package.resolved', 'scripts/ci_build_cache.py') }}-${{ hashFiles('macos/SpeechRailApp/**/*.swift') }}
           restore-keys: |
-            swift-test-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('macos/SpeechRailApp/Package.swift', 'macos/SpeechRailApp/Package.resolved', 'scripts/ci_build_cache.py') }}-
+            swift-test-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('macos/SpeechRailApp/Package.swift', 'macos/SpeechRailApp/Package.resolved', 'scripts/ci_build_cache.py') }}-
 
       - name: Restore unchanged Swift input timestamps
         run: python3 scripts/ci_build_cache.py restore --manifest macos/SpeechRailApp/.build/ci-inputs.json macos/SpeechRailApp
@@ -328,9 +328,9 @@ jobs:
             ${{ runner.temp }}/speechrail-ci-xcode/SourcePackages
             ${{ runner.temp }}/speechrail-ci-xcode/ModuleCache.noindex
             ${{ runner.temp }}/speechrail-ci-xcode/ci-inputs.json
-          key: xcode-debug-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('macos/SpeechRailApp/**/*.pbxproj', 'macos/SpeechRailApp/**/*.xcconfig', 'macos/SpeechRailApp/**/Package.resolved', 'scripts/macos_app_build.sh', 'scripts/ci_build_cache.py') }}-${{ hashFiles('macos/SpeechRailApp/**/*.swift', 'macos/SpeechRailApp/**/*.plist', 'macos/SpeechRailApp/**/*.entitlements', 'macos/SpeechRailApp/**/*.xcscheme', 'macos/SpeechRailApp/**/Assets.xcassets/**') }}
+          key: xcode-debug-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('macos/SpeechRailApp/**/*.pbxproj', 'macos/SpeechRailApp/**/*.xcconfig', 'macos/SpeechRailApp/**/Package.resolved', 'scripts/macos_app_build.sh', 'scripts/ci_build_cache.py') }}-${{ hashFiles('macos/SpeechRailApp/**/*.swift', 'macos/SpeechRailApp/**/*.plist', 'macos/SpeechRailApp/**/*.entitlements', 'macos/SpeechRailApp/**/*.xcscheme', 'macos/SpeechRailApp/**/Assets.xcassets/**') }}
           restore-keys: |
-            xcode-debug-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('macos/SpeechRailApp/**/*.pbxproj', 'macos/SpeechRailApp/**/*.xcconfig', 'macos/SpeechRailApp/**/Package.resolved', 'scripts/macos_app_build.sh', 'scripts/ci_build_cache.py') }}-
+            xcode-debug-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('macos/SpeechRailApp/**/*.pbxproj', 'macos/SpeechRailApp/**/*.xcconfig', 'macos/SpeechRailApp/**/Package.resolved', 'scripts/macos_app_build.sh', 'scripts/ci_build_cache.py') }}-
 
       - name: Restore unchanged Xcode input timestamps
         run: python3 scripts/ci_build_cache.py restore --manifest "$RUNNER_TEMP/speechrail-ci-xcode/ci-inputs.json" macos/SpeechRailApp

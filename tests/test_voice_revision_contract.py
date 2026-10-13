@@ -8,14 +8,14 @@ from pathlib import Path
 import pytest
 
 from speechrail.domain.tts import (
-    VoiceRegistry,
     VoiceRevisionConflictError,
     VoiceRevokedError,
 )
+from speechrail.infrastructure.voice_registry import FileVoiceRegistry as VoiceRegistry
 
 
 def test_instruction_voice_revision_changes_only_for_acoustic_fields(tmp_path):
-    registry = VoiceRegistry(
+    registry = VoiceRegistry.open(
         storage_path=tmp_path / "custom_voices.json",
         voices_dir=tmp_path / "voices",
     )
@@ -53,7 +53,7 @@ def test_instruction_voice_revision_changes_only_for_acoustic_fields(tmp_path):
 
 
 def test_alias_update_does_not_mutate_an_inflight_revision_lease(tmp_path) -> None:
-    registry = VoiceRegistry(
+    registry = VoiceRegistry.open(
         storage_path=tmp_path / "custom_voices.json",
         voices_dir=tmp_path / "voices",
     )
@@ -120,10 +120,14 @@ def test_alias_update_does_not_mutate_an_inflight_revision_lease(tmp_path) -> No
     thread.join(timeout=2)
     assert not thread.is_alive()
     assert failure == []
-    assert observed["before"] == observed["after"] == (
-        created.revision,
-        "old recipe",
-        7,
+    assert (
+        observed["before"]
+        == observed["after"]
+        == (
+            created.revision,
+            "old recipe",
+            7,
+        )
     )
 
     with registry.lease_profile(
@@ -138,7 +142,7 @@ def test_alias_update_does_not_mutate_an_inflight_revision_lease(tmp_path) -> No
 
 
 def test_conditional_lease_checks_revision_inside_registry_lock(tmp_path):
-    registry = VoiceRegistry(
+    registry = VoiceRegistry.open(
         storage_path=tmp_path / "custom_voices.json",
         voices_dir=tmp_path / "voices",
     )
@@ -188,7 +192,7 @@ def test_legacy_record_without_revision_remains_unknown(tmp_path):
     )
     storage.chmod(0o600)
 
-    registry = VoiceRegistry(storage_path=storage, voices_dir=tmp_path / "voices")
+    registry = VoiceRegistry.open(storage_path=storage, voices_dir=tmp_path / "voices")
     legacy = registry.get_profile("legacy")
     assert legacy.revision is None
 
@@ -200,7 +204,7 @@ def test_legacy_record_without_revision_remains_unknown(tmp_path):
 
 
 def test_expected_revision_rejects_system_voice_without_identity(tmp_path):
-    registry = VoiceRegistry(
+    registry = VoiceRegistry.open(
         storage_path=tmp_path / "custom_voices.json",
         voices_dir=tmp_path / "voices",
     )
@@ -215,7 +219,7 @@ def test_expected_revision_rejects_system_voice_without_identity(tmp_path):
 def test_revision_persists_across_registry_restart(tmp_path):
     storage = tmp_path / "custom_voices.json"
     voices = tmp_path / "voices"
-    first = VoiceRegistry(storage_path=storage, voices_dir=voices)
+    first = VoiceRegistry.open(storage_path=storage, voices_dir=voices)
     created = first.create_custom_profile(
         name="Persistent",
         instruction="persistent identity",
@@ -223,14 +227,14 @@ def test_revision_persists_across_registry_restart(tmp_path):
         seed=17,
     )
 
-    second = VoiceRegistry(storage_path=storage, voices_dir=voices)
+    second = VoiceRegistry.open(storage_path=storage, voices_dir=voices)
     reloaded = second.get_profile("persistent")
     assert reloaded.revision == created.revision
 
 
 def test_registry_waits_for_a_process_lock_held_by_another_instance(tmp_path) -> None:
     storage = tmp_path / "custom_voices.json"
-    registry = VoiceRegistry(storage_path=storage, voices_dir=tmp_path / "voices")
+    registry = VoiceRegistry.open(storage_path=storage, voices_dir=tmp_path / "voices")
     lock_path = storage.with_name(f".{storage.name}.lock")
     finished = threading.Event()
     revisions = []
@@ -263,7 +267,7 @@ def test_registry_waits_for_a_process_lock_held_by_another_instance(tmp_path) ->
 def test_revision_history_survives_restart_and_supports_cas_rollback(tmp_path):
     storage = tmp_path / "custom_voices.json"
     voices_dir = tmp_path / "voices"
-    registry = VoiceRegistry(storage_path=storage, voices_dir=voices_dir)
+    registry = VoiceRegistry.open(storage_path=storage, voices_dir=voices_dir)
     created = registry.create_custom_profile(
         name="Narrator",
         instruction="old recipe",
@@ -278,7 +282,7 @@ def test_revision_history_survives_restart_and_supports_cas_rollback(tmp_path):
     )
     assert updated.revision != created.revision
 
-    restarted = VoiceRegistry(storage_path=storage, voices_dir=voices_dir)
+    restarted = VoiceRegistry.open(storage_path=storage, voices_dir=voices_dir)
     revisions = restarted.list_revisions("narrator")
     assert {item.revision for item in revisions} == {
         created.revision,
@@ -306,7 +310,7 @@ def test_revision_history_survives_restart_and_supports_cas_rollback(tmp_path):
 def test_clone_history_keeps_old_audio_until_voice_is_deleted(tmp_path):
     storage = tmp_path / "custom_voices.json"
     voices_dir = tmp_path / "voices"
-    registry = VoiceRegistry(storage_path=storage, voices_dir=voices_dir)
+    registry = VoiceRegistry.open(storage_path=storage, voices_dir=voices_dir)
 
     first = registry.create_cloned_profile(
         name="Clone",
@@ -347,7 +351,7 @@ def test_clone_history_keeps_old_audio_until_voice_is_deleted(tmp_path):
 
 
 def test_revocation_blocks_new_leases_but_not_an_existing_snapshot(tmp_path):
-    registry = VoiceRegistry(
+    registry = VoiceRegistry.open(
         storage_path=tmp_path / "custom_voices.json",
         voices_dir=tmp_path / "voices",
     )
@@ -358,9 +362,7 @@ def test_revocation_blocks_new_leases_but_not_an_existing_snapshot(tmp_path):
         seed=31,
     )
 
-    with registry.lease_profile(
-        "revocable", expected_revision=created.revision
-    ) as leased:
+    with registry.lease_profile("revocable", expected_revision=created.revision) as leased:
         revoked = registry.revoke_revision(
             "revocable",
             revision=created.revision,
@@ -371,15 +373,13 @@ def test_revocation_blocks_new_leases_but_not_an_existing_snapshot(tmp_path):
 
     with (
         pytest.raises(VoiceRevokedError),
-        registry.lease_profile(
-            "revocable", expected_revision=created.revision
-        ),
+        registry.lease_profile("revocable", expected_revision=created.revision),
     ):
         pass
 
 
 def test_revoked_historic_revision_cannot_be_rolled_back(tmp_path):
-    registry = VoiceRegistry(
+    registry = VoiceRegistry.open(
         storage_path=tmp_path / "custom_voices.json",
         voices_dir=tmp_path / "voices",
     )
@@ -408,7 +408,7 @@ def test_revoked_historic_revision_cannot_be_rolled_back(tmp_path):
 
 
 def test_new_acoustic_revision_can_replace_a_revoked_current_alias(tmp_path):
-    registry = VoiceRegistry(
+    registry = VoiceRegistry.open(
         storage_path=tmp_path / "custom_voices.json",
         voices_dir=tmp_path / "voices",
     )
@@ -427,7 +427,5 @@ def test_new_acoustic_revision_can_replace_a_revoked_current_alias(tmp_path):
     )
     assert second.revision != first.revision
     assert second.revoked is False
-    with registry.lease_profile(
-        "revoked_alias", expected_revision=second.revision
-    ) as leased:
+    with registry.lease_profile("revoked_alias", expected_revision=second.revision) as leased:
         assert leased.revision == second.revision

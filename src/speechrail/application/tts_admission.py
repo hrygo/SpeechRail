@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from speechrail.domain.tts_execution import VoiceLaneResolver
+from speechrail.domain.tts_stream import IncrementalSpeechSynthesizer
+
 # The lanes a TTS router may hand to the governor.  ``tts`` is the conservative
 # wildcard for an injected or design-only component; the plan roles keep the
 # CustomVoice and Base weights in separate lanes.  A stale lane name (for
@@ -14,18 +17,16 @@ from __future__ import annotations
 _ALLOWED_TTS_LANES = frozenset({"tts", "tts_custom_voice", "tts_base", "voice_design"})
 
 
-def tts_resource_key(synthesizer: object | None, voice: str) -> str | None:
+def tts_resource_key(resolver: VoiceLaneResolver | None, voice: str) -> str | None:
     """Return an optional stable worker lane for a TTS voice.
 
     The public ``SpeechSynthesizer`` port deliberately stays vendor-neutral.
-    Concrete capability routers may expose this internal scheduling hint; an
-    injected synthesizer without it keeps the governor's conservative wildcard
-    TTS lane.
+    A separately injected resolver supplies the scheduling hint. Without it,
+    the governor keeps its conservative wildcard TTS lane.
     """
-    resolver = getattr(synthesizer, "resource_key_for_voice", None)
-    if not callable(resolver):
+    if resolver is None:
         return None
-    key = resolver(voice)
+    key = resolver.resource_key_for_voice(voice)
     if key is None:
         return None
     if not isinstance(key, str) or not key.strip():
@@ -36,14 +37,15 @@ def tts_resource_key(synthesizer: object | None, voice: str) -> str | None:
     return normalized
 
 
-def supports_incremental_stream(synthesizer: object | None) -> bool:
-    """Return whether a synthesizer exposes the negotiated incremental port.
+def supports_incremental_stream(factory: IncrementalSpeechSynthesizer | None) -> bool:
+    """Return whether the composition supplied an incremental factory.
 
     Capability is never inferred from a profile name, a resident model or the
     Python version: only an implementation that actually offers the append-only
-    entry point can serve an incremental utterance.
+    entry point can serve an incremental utterance. Readiness and protocol
+    negotiation are evaluated separately.
     """
-    return callable(getattr(synthesizer, "open_incremental_stream", None))
+    return factory is not None
 
 
 __all__ = ["supports_incremental_stream", "tts_resource_key"]

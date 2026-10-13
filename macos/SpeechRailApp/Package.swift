@@ -96,13 +96,16 @@ let package = Package(
                 // AppModel 及其最小闭包：SPM 测试目标与 Xcode 单测目标编译同一份实现，
                 // 让 cancel/refresh 等状态机回归不用桩替身。
                 //
-                // 两条路径并不等价，不要按「同一个目录」推断覆盖面：CI 只跑
-                // `swift test` 一条，`xcodebuild test` 仅本机经
-                // `scripts/macos_app_build.sh --test-unit` 复跑，且它编译的测试文件
-                // 更少（`WindowLayoutPolicy.swift` 等 3 个源文件与
-                // `WindowLayoutPolicyTests.swift` 不在 `Unit Test Sources` 里）。
-                // 见 #194。
+                // CI 的 check_macos_test_target_coverage.py 核对所有测试文件的
+                // Xcode Sources 登记；Xcode 单测经 macos_app_build.sh --test-unit
+                // 执行，编译器另外验证被测实现的依赖闭包。
                 "AppModel.swift",
+                "EngineModel.swift",
+                "SharedPlaybackOwner.swift",
+                "AppWorkflowTypes.swift",
+                "CreatorWorkflowErrors.swift",
+                "VoiceWorkflowModel.swift",
+                "DubbingWorkflowModel.swift",
                 "ServiceAPIClient.swift",
                 "CreatorServiceClient.swift",
                 "CreativeWorkStore.swift",
@@ -141,6 +144,19 @@ let package = Package(
                 "TeleprompterStageWindow.swift",
                 "AssistantReplayEvaluator.swift",
                 "SessionStore.swift",
+                // 会话持久化的共享 SQLite 薄封装与绑定助手：跨 MA 域文件复用，
+                // 访问级为 internal，仅本 target 内使用。
+                "SessionStoreSQLite.swift",
+                // 以下按 MA 域拆分的 SessionStore extension，行为与主文件逐字一致。
+                "SessionStoreSchema.swift",
+                "SessionStoreArchivePackage.swift",
+                "SessionStoreKnowledgeScope.swift",
+                "SessionStoreCrossMeetingEvidence.swift",
+                "SessionStoreProjection.swift",
+                "SessionStoreActionEvolution.swift",
+                "SessionStoreKnowledgeSuggestions.swift",
+                "SessionStoreKnowledgeLibrary.swift",
+                "SessionStoreMinutesEdit.swift",
                 "SessionCoordinator.swift",
                 "SessionExporter.swift",
                 "MeetingKnowledgeQuery.swift",

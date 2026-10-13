@@ -15,7 +15,6 @@ from speechrail.config import Settings
 from speechrail.config.model_catalog import VOICE_DESIGN_ARTIFACT_KEY
 from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.domain.ports import AudioChunk, SpeechRequest
-from speechrail.domain.tts import get_voice_registry
 
 
 class FakeSpeechSynthesizer:
@@ -665,7 +664,7 @@ def test_speech_rejects_unavailable_custom_voice_before_synthesis(tmp_path: Path
             tts_synthesizer=FailIfCalled(),
         )
     )
-    registry = get_voice_registry()
+    registry = client.app.state.services.voice_store
     voice_id = "test_unavailable_rest_voice"
     registry.create_custom_profile(
         name="不可用测试音色",
@@ -707,7 +706,9 @@ def test_configured_tts_paths_create_and_lifecycle_manage_private_worker(
         def ready(self) -> bool:
             return self.started and not self.closed
 
-        def __init__(self, config: object, *, on_delivery_event: object | None = None) -> None:
+        def __init__(
+            self, config: object, *, voice_leases, on_delivery_event: object | None = None
+        ) -> None:
             self.config = config
             self.on_delivery_event = on_delivery_event
             self.started = False

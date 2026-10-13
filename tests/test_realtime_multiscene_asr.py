@@ -59,7 +59,7 @@ def test_failed_input_recovery_joins_teardown_and_terminal_delivery():
             "type": "input_audio_buffer.append",
             "audio": base64.b64encode(bytes(4800)).decode(),
         }
-        await session._append_audio(append)
+        await session._asr_owner.append(append)
         runtime = factory.sessions[0]
         await runtime.events_queue.put(
             StreamingAsrEvent(kind="error", error_code="backend_error")
@@ -67,7 +67,7 @@ def test_failed_input_recovery_joins_teardown_and_terminal_delivery():
         await runtime.events_queue.put(None)
         await asyncio.wait_for(terminal_sending.wait(), timeout=1)
         await asyncio.wait_for(cleanup_entered.wait(), timeout=1)
-        recovery = asyncio.create_task(session._append_audio(append))
+        recovery = asyncio.create_task(session._asr_owner.append(append))
         try:
             assert not recovery.done()
             assert len(factory.sessions) == 1
@@ -80,7 +80,7 @@ def test_failed_input_recovery_joins_teardown_and_terminal_delivery():
             cleanup_release.set()
             terminal_release.set()
             await asyncio.wait_for(recovery, timeout=1)
-            await session._commit_audio()
+            await session._asr_owner.commit()
             await session.close()
         failures = [e for e in sent if e["type"].endswith("transcription.failed")]
         completions = [e for e in sent if e["type"].endswith("transcription.completed")]
@@ -106,11 +106,11 @@ def test_manual_commits_keep_exact_wire_anchors_and_single_sample_tail(first_sam
         first = (500).to_bytes(2, "little", signed=True) * first_samples
         second = (-300).to_bytes(2, "little", signed=True)
         for audio in (first, second):
-            await session._append_audio({
+            await session._asr_owner.append({
                 "type": "input_audio_buffer.append",
                 "audio": base64.b64encode(audio).decode(),
             })
-            await session._commit_audio()
+            await session._asr_owner.commit()
         boundaries = [e for e in sent if e["type"].endswith("segment_closed")]
         assert [e["sample_span"] for e in boundaries] == [
             {"start": 0, "end": first_samples},
@@ -158,10 +158,10 @@ def test_failed_barrier_is_not_repaired_by_retry_but_new_input_can_complete(fail
             "audio": base64.b64encode(bytes(160)).decode(),
         }
         try:
-            await session._append_audio(append)
+            await session._asr_owner.append(append)
             for event_id in ("failed", "failed-retry"):
                 with pytest.raises(RealtimeAdapterError) as rejected:
-                    await session._commit_audio(
+                    await session._asr_owner.commit(
                         commit_event_id=event_id, request_receipt=True,
                     )
                 assert rejected.value.code == (
@@ -170,8 +170,8 @@ def test_failed_barrier_is_not_repaired_by_retry_but_new_input_can_complete(fail
             assert not any(e["type"].endswith("buffer.committed") for e in sent)
             assert len([e for e in sent if e["type"].endswith("transcription.failed")]) == 1
             assert len(factory.released) == 1
-            await session._append_audio(append)
-            await session._commit_audio(commit_event_id="new-input", request_receipt=True)
+            await session._asr_owner.append(append)
+            await session._asr_owner.commit(commit_event_id="new-input", request_receipt=True)
             receipts = [e for e in sent if e["type"].endswith("buffer.committed")]
             assert len(receipts) == 1
             assert receipts[0]["commit_event_id"] == "new-input"
@@ -206,16 +206,17 @@ def test_drain_removes_completed_tasks_without_waiting_for_callbacks(task_set, d
         session = OpenAIRealtimeSession(services, session_id="done-drain", send=send)
         task = asyncio.create_task(finish())
         await task
-        owned = getattr(session, task_set)
+        owner = session._asr_owner if task_set == "_asr_finals" else session._auxiliary_owner
+        owned = getattr(owner, task_set)
         if task_set == "_asr_finals":
             owned[task] = 0
-            task.add_done_callback(session._discard_asr_final)
+            task.add_done_callback(session._asr_owner._discard_asr_final)
         else:
             owned.add(task)
             task.add_done_callback(owned.discard)
         # The discard callback is scheduled for the next loop tick. Draining
         # an already done task must not spin synchronously until that tick.
-        await getattr(session, drain)()
+        await getattr(owner, drain)()
         assert not owned
         await session.close()
 
@@ -239,11 +240,11 @@ def test_packet_boundaries_do_not_change_admitted_pcm_or_frozen_spans(packet_sam
         await session._update_session(_policy_update())
         wire = b"".join((i % 1024).to_bytes(2, "little") for i in range(57_601))
         for start in range(0, len(wire), packet_samples * 2):
-            await session._append_audio({
+            await session._asr_owner.append({
                 "type": "input_audio_buffer.append",
                 "audio": base64.b64encode(wire[start:start + packet_samples * 2]).decode(),
             })
-        await session._commit_audio(commit_event_id="commit-vector", request_receipt=True)
+        await session._asr_owner.commit(commit_event_id="commit-vector", request_receipt=True)
         resampler = RationalResampler(24_000, 16_000)
         expected = resampler.process(wire) + resampler.flush()
         received = b"".join(chunk for item in factory.sessions for chunk in item.received)
@@ -275,7 +276,7 @@ def test_packet_boundaries_do_not_change_admitted_pcm_or_frozen_spans(packet_sam
             assert sent.index(boundary) < sent.index(final)
         assert boundaries[-1]["commit_event_id"] == "commit-vector"
         assert not any("commit_event_id" in b for b in boundaries[:-1])
-        assert session._asr_lane.retained_bytes == 0
+        assert session._asr_owner._asr_lane.retained_bytes == 0
         await session.close()
 
     asyncio.run(run())
@@ -314,15 +315,15 @@ def test_vad_stop_after_full_budget_does_not_move_the_previous_item_end():
         update = session_update(endpointing=server_vad())
         update["session"]["speechrail"]["asr"] = _policy_update()["session"]["speechrail"]["asr"]
         await session._update_session(update)
-        session._vad = StopOnSecondPacket()
+        session._asr_owner._vad = StopOnSecondPacket()
         wire = (500).to_bytes(2, "little", signed=True) * 26_400
         try:
             for pcm in (wire[:48_000], wire[48_000:]):
-                await session._append_audio({
+                await session._asr_owner.append({
                     "type": "input_audio_buffer.append",
                     "audio": base64.b64encode(pcm).decode(),
                 })
-            await session._await_asr_finals()
+            await session._asr_owner._await_asr_finals()
             boundaries = [e for e in sent if e["type"].endswith("segment_closed")]
             assert [e["sample_span"] for e in boundaries] == [
                 {"start": 0, "end": 24_000},
@@ -352,11 +353,11 @@ def test_empty_success_is_one_terminal_after_a_real_segment_boundary():
 
         session = OpenAIRealtimeSession(services, session_id="empty-vector", send=send)
         await session._update_session(_policy_update())
-        await session._append_audio({
+        await session._asr_owner.append({
             "type": "input_audio_buffer.append", "audio": base64.b64encode(bytes(4800)).decode(),
         })
-        await session._commit_audio()
-        await session._commit_audio()
+        await session._asr_owner.commit()
+        await session._asr_owner.commit()
         terminals = [e for e in sent if e["type"].endswith((".completed", ".failed"))]
         assert len(terminals) == 1
         assert terminals[0]["transcript"] == ""
@@ -382,7 +383,7 @@ def test_preview_uses_decoded_snapshot_watermark_and_policy_is_frozen():
         session = OpenAIRealtimeSession(services, session_id="snapshot-vector", send=send)
         update = _policy_update()
         await session._update_session(update)
-        await session._append_audio({
+        await session._asr_owner.append({
             "type": "input_audio_buffer.append", "audio": base64.b64encode(bytes(24_000)).decode(),
         })
         # Updating unrelated session settings must preserve the same policy.
@@ -399,7 +400,7 @@ def test_preview_uses_decoded_snapshot_watermark_and_policy_is_frozen():
         preview = next(e for e in sent if e["type"] == "speechrail.transcription.hypothesis")
         assert preview["sample_span"] == {"start": 0, "end": 1500}
         assert preview["stable_prefix_codepoints"] == 0
-        await session._commit_audio()
+        await session._asr_owner.commit()
         await session.close()
 
     asyncio.run(run())
@@ -429,7 +430,7 @@ def test_backlog_overflow_fails_retained_items_and_rejects_false_barrier():
         session = OpenAIRealtimeSession(services, session_id="overflow-vector", send=send)
         await session._update_session(_policy_update())
         with pytest.raises(RealtimeAdapterError, match="capacity exhausted"):
-            await session._append_audio({
+            await session._asr_owner.append({
                 "type": "input_audio_buffer.append",
                 "audio": base64.b64encode(bytes(240_000)).decode(),
             })
@@ -438,10 +439,10 @@ def test_backlog_overflow_fails_retained_items_and_rejects_false_barrier():
         assert len({e["item_id"] for e in failures}) == 3
         assert all(e["error"]["code"] == "asr_buffer_overflow" for e in failures)
         with pytest.raises(RealtimeAdapterError, match="rejected audio"):
-            await session._commit_audio(request_receipt=True)
+            await session._asr_owner.commit(request_receipt=True)
         assert not any(e["type"].endswith("buffer.committed") for e in sent)
-        assert session._asr_lane.retained_bytes == 0
-        await session._clear_audio()
+        assert session._asr_owner._asr_lane.retained_bytes == 0
+        await session._asr_owner.clear()
         await session.close()
 
     asyncio.run(run())
@@ -459,15 +460,15 @@ def test_clear_discards_resampler_tail_before_new_input():
         session = OpenAIRealtimeSession(services, session_id="clear-vector", send=send)
         await session._update_session(_policy_update())
         first = (30000).to_bytes(2, "little", signed=True) * 25
-        await session._append_audio({
+        await session._asr_owner.append({
             "type": "input_audio_buffer.append", "audio": base64.b64encode(first).decode(),
         })
-        await session._clear_audio()
+        await session._asr_owner.clear()
         second = (-30000).to_bytes(2, "little", signed=True) * 100
-        await session._append_audio({
+        await session._asr_owner.append({
             "type": "input_audio_buffer.append", "audio": base64.b64encode(second).decode(),
         })
-        await session._commit_audio()
+        await session._asr_owner.commit()
         received = b"".join(factory.sessions[-1].received)
         assert received and {
             int.from_bytes(received[i:i + 2], "little", signed=True)
@@ -505,24 +506,24 @@ def test_client_commit_interrupted_by_clear_fails_explicitly():
 
         session = OpenAIRealtimeSession(services, session_id="commit-clear", send=send)
         await session._update_session(_policy_update())
-        await session._append_audio({
+        await session._asr_owner.append({
             "type": "input_audio_buffer.append",
             "audio": base64.b64encode(bytes(4800)).decode(),
         })
-        pending = asyncio.create_task(session._commit_audio(reason="client"))
+        pending = asyncio.create_task(session._asr_owner.commit(reason="client"))
         await asyncio.wait_for(entered.wait(), timeout=1)
         assert not pending.done()
-        await asyncio.wait_for(session._clear_audio(), timeout=2)
+        await asyncio.wait_for(session._asr_owner.clear(), timeout=2)
         release.set()
         with pytest.raises(RealtimeAdapterError) as exc_info:
             await asyncio.wait_for(pending, timeout=5)
         assert exc_info.value.code == "invalid_state"
         # The cleared item already got its failed terminal; new input completes.
-        await session._append_audio({
+        await session._asr_owner.append({
             "type": "input_audio_buffer.append",
             "audio": base64.b64encode(bytes(4800)).decode(),
         })
-        await session._commit_audio(reason="client", request_receipt=True)
+        await session._asr_owner.commit(reason="client", request_receipt=True)
         assert any(e["type"].endswith("transcription.failed") for e in sent)
         assert any(e["type"].endswith("transcription.completed") for e in sent)
         await session.close()
@@ -549,24 +550,24 @@ def test_clear_gives_closed_pending_items_one_failed_terminal():
 
         session = OpenAIRealtimeSession(services, session_id="clear-closed", send=send)
         await session._update_session(_policy_update())
-        await session._append_audio({
+        await session._asr_owner.append({
             "type": "input_audio_buffer.append",
             "audio": base64.b64encode(bytes(52_800)).decode(),
         })
         await asyncio.wait_for(entered.wait(), timeout=1)
         boundaries = [e for e in sent if e["type"].endswith("segment_closed")]
         assert len(boundaries) == 1
-        await session._clear_audio()
+        await session._asr_owner.clear()
         terminals = [e for e in sent if e["type"].endswith(("completed", "failed"))]
         assert len(terminals) == 1
         assert terminals[0]["item_id"] == boundaries[0]["item_id"]
         assert terminals[0]["type"].endswith("transcription.failed")
         assert terminals[0]["error"]["code"] == "backend_error"
         assert len([e for e in sent if e["type"].endswith("segment_closed")]) == 1
-        assert not session._asr_finals
+        assert not session._asr_owner._asr_finals
         assert len(factory.released) == 1
         # A new empty input still succeeds; it cannot reuse the canceled item.
-        await session._commit_audio()
+        await session._asr_owner.commit()
         assert sent[-1]["type"].endswith("transcription.completed")
         assert sent[-1]["transcript"] == ""
         assert sent[-1]["item_id"] != boundaries[0]["item_id"]

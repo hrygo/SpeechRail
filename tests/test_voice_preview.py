@@ -19,6 +19,7 @@ from speechrail.domain.voice_preview import (
     preview_for_profile,
     preview_text_for_locale,
 )
+from speechrail.infrastructure.voice_registry import FileVoiceRegistry as VoiceRegistry
 
 # The plan fixes these per Qwen's speaker table.  Accented Mandarin voices are
 # Chinese sample voices, not English ones.
@@ -55,11 +56,13 @@ _EXPECTED_SCRIPT = {"zh": "han", "ja": "kana", "ko": "hangul", "en": "latin"}
 
 
 def _client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
-    monkeypatch.setattr(
-        voices, "_GLOBAL_VOICE_REGISTRY", voices.VoiceRegistry(tmp_path / "voices.json")
+    registry = VoiceRegistry.open(
+        tmp_path / "voices.json", voices_dir=(tmp_path / "voices.json").parent / "audio"
     )
     return TestClient(
-        create_app(Settings(api_key=None, qwen3_model_dir=None, qwen3_python=None))
+        create_app(
+            Settings(api_key=None, qwen3_model_dir=None, qwen3_python=None), voice_store=registry
+        )
     )
 
 
@@ -128,7 +131,9 @@ def test_preview_is_projected_consistently_by_catalog_and_capability(
 def test_legacy_or_invalid_stored_locale_loads_without_a_preview(
     tmp_path: Path, stored: object
 ) -> None:
-    registry = voices.VoiceRegistry(tmp_path / "voices.json")
+    registry = VoiceRegistry.open(
+        tmp_path / "voices.json", voices_dir=(tmp_path / "voices.json").parent / "audio"
+    )
     # Keep the reference audio inside this test's own voices directory; the
     # registry refuses paths that escape it.
     registry._voices_dir = tmp_path / "voice-audio"

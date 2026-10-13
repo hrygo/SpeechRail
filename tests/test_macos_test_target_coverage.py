@@ -24,6 +24,14 @@ def test_both_manifests_agree_today() -> None:
     module = _checker()
     assert module.find_drift() == []  # type: ignore[attr-defined]
 
+def test_model_presentation_suites_are_compiled_without_an_exemption() -> None:
+    module = _checker()
+    compiled = module.xcode_unit_test_sources()  # type: ignore[attr-defined]
+    for name in ("ModelNamePresentationTests.swift", "ModelReadinessPresentationTests.swift"):
+        assert f"SpeechRailMacControlTests/{name}" in compiled
+        assert name not in module.ALLOWLIST  # type: ignore[attr-defined]
+    assert "SpeechRailApp/WorkspaceComponents.swift" in compiled
+
 
 def test_a_test_file_dropping_out_of_the_xcode_phase_is_reported() -> None:
     """The exact drift #194 describes: on disk, absent from Unit Test Sources."""

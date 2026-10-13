@@ -1,8 +1,8 @@
 ---
 title: "CI 效率分析与优化验收"
 status: active
-version: "1.0.4"
-date: 2026-10-06
+version: "1.1.0"
+date: 2026-10-10
 ---
 
 # CI 效率分析与优化验收
@@ -79,7 +79,7 @@ date: 2026-10-06
 - 端到端包括 runner 排队、缓存恢复、制品上传和 post-actions；从 run 创建到最后 job 完成为 229 秒。只读验收脚本验证候选完整 SHA、全量门禁和严格时限后退出 0。
 - GitHub API 的所有 job 时长之和由 956 秒降至 423 秒，减少 55.8%；该和用于观察总工作量，不作为并行端到端时间或实际计费额。
 
-**冷缓存与热缓存分别报告。** 历史冷缓存候选 497 秒没有达到减半目标，最终 fixture 版本没有重新测完全冷缓存；用户已明确无需冷缓存减半。已合并的首轮 CI 优化保留，fixture 调整作为后续独立测试提交交付。
+**冷缓存与热缓存分别报告。** 冷缓存全量复测见下节；用户已明确无需冷缓存减半，冷缓存数据不并入热缓存收益。首轮 CI 优化与 fixture 调整均已合并保留。
 
 至少检查：
 
@@ -101,5 +101,28 @@ uv run --no-sync python scripts/check_ci_efficiency.py \
 `CI_CANDIDATE_RUN_ID` 必须来自已授权运行的实际 run ID，候选提交必须是已推送并运行的优化提交。退出码 0 表示完整成功 CI 的耗时严格低于基线一半，1 表示未达到时间目标，2 表示证据不完整或不匹配。脚本只读取 GitHub，不触发或修改运行；coverage、用例数和缓存状态仍须从对应 run 日志核对。
 
 拆分后增加一个 macOS job 的固定启动/checkout 成本，但编译及测试工作量不增加；取消重复 wheel 构建及热缓存收益预期降低 runner 总分钟数。精确计费变化依远端 job 总分钟数确认，当前不承诺节省比例。
+
+## 冷缓存全量复测
+
+冷缓存结果与常规缓存命中口径分别记录。基线仍为 run `37415078886` 的 525 秒；热缓存达标值 229 秒不变，冷缓存数据不并入该收益。
+
+| Run ID | 事件 | 候选 SHA | 端到端秒数 | 相对基线减少 | 非 wheel pytest 秒数 | 结论 |
+|---|---|---|---:|---:|---:|---|
+| 38000384151 | pull_request #353 | `71b3a7ed8d793a52e377b939317fe7671bf0f248` | 408 | 22.29% | 184.01 | 七个 job 全成功；冷缓存不要求减半 |
+
+核验时间：北京时间 2026-10-10 06:39:25–06:46:14（UTC 2026-10-09 22:39:25–22:46:14），端到端按 run 创建至 `Gate Summary` 完成计算。三个编译缓存均为首次创建：`native-v2`、`swift-test-v2`、`xcode-debug-v2` 的 restore 步骤分别只有 2、1、2 秒，日志明确 `Cache not found`；run 结束时三个缓存分别保存。setup-uv 缓存命中，约 5 MB（5,653,562 字节），恢复约 2 秒。
+
+job 用时：`Change Scope` 9 秒、`Quality Gates` 34 秒、`Test (macos-26 / Python 3.14.7)` 288 秒、`Swift Package Tests` 383 秒、`macOS App Build` 340 秒、`Package wheel artifact` 8 秒、`Gate Summary` 3 秒，全部 success；job 时长之和 1065 秒。
+
+冷缓存阶段拆分：
+
+- Python：锁定依赖安装 6 秒；非 wheel pytest 3825 passed、1 skipped、184.01 秒（两个 worker，未自动重启）；wheel 阶段 4 passed、5.34 秒；合并 coverage 83.98%，通过 80% 门槛。只有一次 wheel 构建，wheel 独立安装检查、ZIP 校验与制品上传均成功。
+- SwiftPM：冷编译从零开始，测试于该 step 开始约 4 分 36 秒后启动；XCTest 1391 个用例、0 failures（68.0 秒），Swift Testing 519 个用例、41 个 suite（3.53 秒）；独立 LLM 支持编译检查 14 秒。
+- Xcode App：冷编译 303 秒；缓存 miss 后 `ci_build_cache.py` 无有效输入清单，改用 checkout timestamps，不伪造命中。
+- 用例与门槛口径：保留既有 1 skipped，无新增 skip；80% branch coverage 门槛保持；`Quality Gates` 与 `Gate Summary` 为 required 检查且通过；无 worker 重试放绿。
+
+冷缓存 408 秒高于热缓存 229 秒，差距来自三个编译缓存从零编译；相对优化前冷缓存 run `37418527900`（497 秒）减少 17.9%。用户已确认冷缓存不要求减半，本节补齐的阶段拆分与缓存证据满足 #286 的验收项。
+
+回退：撤销本次缓存键与文档改动即可恢复原缓存口径；远端旧缓存不删除，新缓存前缀停止引用即可。
 
 回退时仅撤销本轮 CI workflow、辅助脚本、包装脚本 CI 选项和相关测试/文档改动；不用恢复服务、App 安装、模型或数据。远端旧缓存无须删除，新缓存前缀停止引用即可。

@@ -38,17 +38,9 @@ PBXPROJ_MANIFEST = "macos/SpeechRailApp/SpeechRailApp.xcodeproj/project.pbxproj"
 TEST_TARGET_NAME = "SpeechRailMacControlTests"
 UNIT_TEST_TARGET_NAME = "SpeechRailAppTests"
 
-#: Test files that exist on disk but cannot join the Xcode gate yet.
-#:
-#: `ModelNamePresentation` / `ModelReadinessPresenter` live inside
-#: `ModelManagementView.swift`, which `Package.swift` excludes from
-#: `SpeechRailAppSupport`, so the Xcode test target has no definition to link
-#: against either. Joining them is a structural split, not a phase entry —
-#: see #194. Every entry here must name the issue that unblocks it.
-ALLOWLIST: dict[str, str] = {
-    "ModelNamePresentationTests.swift": "#194",
-    "ModelReadinessPresentationTests.swift": "#194",
-}
+#: Every exemption must name its blocking issue. Presentation types are shared
+#: by both targets, so their tests require no exemption.
+ALLOWLIST: dict[str, str] = {}
 
 
 def _spm_test_target_body() -> str:

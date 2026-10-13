@@ -17,7 +17,9 @@ from speechrail.backends.qwen3_tts import (
 )
 from speechrail.backends.qwen3_tts_worker import TTS_BACKEND_ID
 from speechrail.domain.ports import SpeechRequest
-from speechrail.domain.tts import VoiceStoreUnavailableError
+from speechrail.domain.tts import VoiceInUseError, VoiceStoreUnavailableError
+from speechrail.domain.voice_ports import VoiceLeases
+from speechrail.infrastructure.voice_registry import FileVoiceRegistry
 
 
 class _FakeTransport:
@@ -65,6 +67,8 @@ def _worker(
     tmp_path: Path,
     responses: list[dict[str, Any]] | None = None,
     on_delivery_event: Callable[[str, int], None] | None = None,
+    *,
+    voice_leases: VoiceLeases | None = None,
 ) -> tuple[Qwen3TtsWorker, _FakeTransport]:
     snapshot = tmp_path.parent / "external-qwen3-tts"
     snapshot.mkdir(exist_ok=True)
@@ -80,6 +84,9 @@ def _worker(
             sample_rate=24_000,
         ),
         on_delivery_event=on_delivery_event,
+        voice_leases=voice_leases
+        if voice_leases is not None
+        else FileVoiceRegistry.open(tmp_path / "voices.json", tmp_path / "audio"),
     )
     fake = _FakeTransport(responses)
     worker._transport = fake  # type: ignore[assignment]
@@ -364,7 +371,8 @@ def test_tts_worker_starts_offline_transport_and_checks_ready_identity(tmp_path:
             device="mps",
             dtype="float16",
             sample_rate=24_000,
-        )
+        ),
+        voice_leases=FileVoiceRegistry.open(tmp_path / "voices.json", tmp_path / "audio"),
     )
     fake = _FakeTransport(
         [
@@ -403,19 +411,30 @@ def test_tts_worker_starts_offline_transport_and_checks_ready_identity(tmp_path:
 def test_router_eviction_keeps_first_load_distinct_from_reload(tmp_path: Path) -> None:
     events: list[tuple[str, int]] = []
     worker, fake = _worker(
-        tmp_path, on_delivery_event=lambda event, amount: events.append((event, amount)),
+        tmp_path,
+        on_delivery_event=lambda event, amount: events.append((event, amount)),
     )
     worker._started = False
     fake.alive = False
-    router = Qwen3TtsCapabilityRouter({"voice_design": worker})
+    router = Qwen3TtsCapabilityRouter(
+        {"voice_design": worker},
+        voice_directory=FileVoiceRegistry.open(tmp_path / "voices.json", tmp_path / "audio"),
+    )
 
     async def start_transport() -> None:
         fake.alive = True
-        fake.push({
-            "type": "ready", "model_loaded": True, "backend": TTS_BACKEND_ID,
-            "device": "mps", "dtype": "float16", "sample_rate": 24_000,
-            "model_variant": "voice_design", "profile_snapshot_version": 1,
-        })
+        fake.push(
+            {
+                "type": "ready",
+                "model_loaded": True,
+                "backend": TTS_BACKEND_ID,
+                "device": "mps",
+                "dtype": "float16",
+                "sample_rate": 24_000,
+                "model_variant": "voice_design",
+                "profile_snapshot_version": 1,
+            }
+        )
 
     fake.start = start_transport  # type: ignore[method-assign]
 
@@ -451,7 +470,8 @@ def test_tts_worker_prepare_returns_the_observed_runtime_identity(
             device="mps",
             dtype="float16",
             sample_rate=24_000,
-        )
+        ),
+        voice_leases=FileVoiceRegistry.open(tmp_path / "voices.json", tmp_path / "audio"),
     )
     fake = _FakeTransport(
         [
@@ -497,7 +517,8 @@ def test_tts_worker_rejects_a_runtime_change_after_strict_admission(
             device="mps",
             dtype="float16",
             sample_rate=24_000,
-        )
+        ),
+        voice_leases=FileVoiceRegistry.open(tmp_path / "voices.json", tmp_path / "audio"),
     )
     fake = _FakeTransport(
         [
@@ -545,7 +566,8 @@ def test_start_failure_keeps_worker_diagnostics_out_of_exception_text(tmp_path: 
             device="mps",
             dtype="float16",
             sample_rate=24_000,
-        )
+        ),
+        voice_leases=FileVoiceRegistry.open(tmp_path / "voices.json", tmp_path / "audio"),
     )
     fake = _FakeTransport(
         [
@@ -580,7 +602,8 @@ def test_ready_identity_mismatch_aborts_the_tts_worker(tmp_path: Path) -> None:
             device="mps",
             dtype="float16",
             sample_rate=24_000,
-        )
+        ),
+        voice_leases=FileVoiceRegistry.open(tmp_path / "voices.json", tmp_path / "audio"),
     )
     fake = _FakeTransport(
         [
@@ -617,7 +640,8 @@ def test_ready_identity_rejects_model_variant_mismatch(tmp_path: Path) -> None:
             device="mps",
             dtype="float16",
             sample_rate=24_000,
-        )
+        ),
+        voice_leases=FileVoiceRegistry.open(tmp_path / "voices.json", tmp_path / "audio"),
     )
     fake = _FakeTransport(
         [
@@ -662,7 +686,8 @@ def test_ready_identity_rejects_dtype_mismatch_even_when_device_matches(
             device="mps",
             dtype="float16",
             sample_rate=24_000,
-        )
+        ),
+        voice_leases=FileVoiceRegistry.open(tmp_path / "voices.json", tmp_path / "audio"),
     )
     fake = _FakeTransport(
         [
@@ -839,6 +864,45 @@ def test_tts_worker_aborts_private_generation_when_consumer_cancels(tmp_path: Pa
         ]
         assert len(chunks) == 1
         assert worker.lifecycle_stats["reload_count"] == 1
+
+    asyncio.run(scenario())
+
+
+def test_batch_clone_lease_survives_failed_reap_until_close_confirms_cleanup(
+    tmp_path: Path,
+) -> None:
+    registry = FileVoiceRegistry.open(tmp_path / "voices.json", tmp_path / "audio")
+    registry.create_cloned_profile(
+        name="Clone", voice_id="same", ref_text="test reference",
+        audio_bytes=b"fake audio", duration_seconds=1.0,
+    )
+    worker, fake = _worker(
+        tmp_path,
+        [{"type": "error", "request_id": "pending", "code": "worker_inference_error"}],
+        voice_leases=registry,
+    )
+    worker.model_variant = "base"
+    original_abort = fake.abort
+
+    async def failed_abort() -> None:
+        raise RuntimeError("backend_reclamation_failed")
+
+    fake.abort = failed_abort  # type: ignore[method-assign]
+
+    async def scenario() -> None:
+        with pytest.raises(RuntimeError, match="backend_reclamation_failed"):
+            await _collect(worker.synthesize(SpeechRequest(text="test", voice="same")))
+        with pytest.raises(VoiceInUseError):
+            registry.delete_custom_profile("same")
+        with pytest.raises(RuntimeError, match="backend_reclamation_failed"):
+            await worker.close()
+        with pytest.raises(VoiceInUseError):
+            registry.delete_custom_profile("same")
+        fake.abort = original_abort  # type: ignore[method-assign]
+        await worker.close()
+        registry.delete_custom_profile("same")
+        with pytest.raises(ValueError, match="unknown preset voice"):
+            registry.get_profile("same")
 
     asyncio.run(scenario())
 

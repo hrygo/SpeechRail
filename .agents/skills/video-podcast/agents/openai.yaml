@@ -1,4 +1,0 @@
-interface:
-  display_name: "视频播客制作"
-  short_description: "从文稿、录音或访谈制作视频播客，支持局部返修、自然混音与成片验收"
-  default_prompt: "使用 $video-podcast 按当前请求制作或局部修复视频播客，保留自然表达，并报告实际完成的成片检查。"

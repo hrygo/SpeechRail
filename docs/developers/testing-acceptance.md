@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.9"
-date: 2026-10-08
+version: "3.3.10"
+date: 2026-10-10
 ---
 
 # SpeechRail 测试与验收
@@ -18,7 +18,7 @@ bash scripts/ci_quality_gate.sh --base-ref origin/main
 ```
 
 该入口使用 `uv sync --locked --extra dev --extra mcp`，随后以 `--no-sync`
-执行 Ruff、Mypy、版本一致性、OpenAPI lint、用户文档、MCP、macOS 测试清单及分人契约回归，
+执行 Ruff、Mypy、版本一致性、OpenAPI lint、用户文档、MCP、macOS 测试清单、macOS 路由契约及分人契约回归，
 任一步失败立即返回失败。质量检查不构建 native worker；真实制品仍由 Python 测试/打包门禁构建。
 不指定 `--base-ref` 时只检查当前工作区与暂存区空白，不能证明已提交的 PR 差异通过。
 
@@ -273,7 +273,7 @@ swift test --package-path macos/SpeechRailApp --filter ASRSessionReplaySamplerHa
 | 三档申请与推荐：内存推荐只有建议语义、未知档位拒绝、失败不切档 | `tests/test_profile_commands.py`（`test_catalog_lists_three_spec_tiers_with_explicit_bindings`、`test_recommendation_uses_memory_only`、`test_apply_rejects_unknown_spec_tier`、`test_prepare_failure_keeps_previous_selection_and_skips_switch`）|
 | `profile apply` 只在 opt-in 时写分人键，供给失败显式报错 | `tests/test_profile_commands.py`（`test_apply_without_diarization_opt_in_skips_auxiliary_assets`、`test_diarization_writes_env_for_explicit_aligner`、`test_diarization_prepare_failure_is_explicit`）|
 | preflight aligner 门控：未设置时跳过、缺 CoreML 时仍校验、不完整 snapshot 拒绝 | `tests/test_service_preflight.py`（`test_preflight_skips_aligner_snapshot_when_aligner_dir_unset`、`test_preflight_checks_aligner_snapshot_without_coreml_bundle`、`test_preflight_rejects_incomplete_aligner_snapshot`）|
-| installer / zero-setup 传双 spec，分人供给按显式 aligner 门控 smoke | `tests/test_installer.py`（`test_managed_install_adds_diarization_when_configured`、`test_managed_install_without_diarization_assets_omits_diarization_config`）、`tests/test_video_podcast_skill_install.py`（`test_zero_setup_without_aligner_skips_diarization_smoke`、`test_zero_setup_with_aligner_runs_diarization_smoke`）|
+| installer / zero-setup 传双 spec，分人供给按显式 aligner 门控 smoke | `tests/test_installer.py`（`test_managed_install_adds_diarization_when_configured`、`test_managed_install_without_diarization_assets_omits_diarization_config`）|
 
 这些测试使用 fake backend 与脱敏 fixture，不加载真实模型、不下载 aligner。`reference` 档的高精度制品
 继承同族 8-bit 档位的门禁证据，未在本机逐项复测；能力认证集合见

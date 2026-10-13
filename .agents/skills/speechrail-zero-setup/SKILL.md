@@ -29,7 +29,7 @@ wheel/App 发布或已有 App 整理读 [speechrail-release](../speechrail-relea
 ./.agents/skills/speechrail-zero-setup/scripts/bootstrap_mac.sh --yes
 ```
 
-可显式指定档位、app home，并可独立选择是否安装附带的视频制作技能：
+可显式指定档位和 app home：
 
 ```bash
 ./.agents/skills/speechrail-zero-setup/scripts/bootstrap_mac.sh \
@@ -37,12 +37,6 @@ wheel/App 发布或已有 App 整理读 [speechrail-release](../speechrail-relea
   --asr-spec quality \
   --tts-spec quality \
   --app-home "$HOME/Library/Application Support/SpeechRail"
-
-./.agents/skills/speechrail-zero-setup/scripts/bootstrap_mac.sh \
-  --yes \
-  --asr-spec fast \
-  --tts-spec fast \
-  --install-video-podcast-skill
 ```
 
 已有 `uv` 与 Python 3.14.7 时可直接调用核心安装器；同样必须显式确认：
@@ -53,7 +47,7 @@ uv run --python 3.14.7 python \
   --yes --asr-spec quality --tts-spec quality
 ```
 
-`zero_setup.py` 在独立输出目录构建本次唯一 wheel，核对 wheel metadata 版本并记录 SHA-256；不会从 `dist/` 猜测旧产物。默认不安装用户级 `video-podcast` skill，该操作只有传入 `--install-video-podcast-skill` 时才执行，且失败不应改变 managed runtime。
+`zero_setup.py` 在独立输出目录构建本次唯一 wheel，核对 wheel metadata 版本并记录 SHA-256；不会从 `dist/` 猜测旧产物。
 
 ## 安装事务
 
@@ -86,6 +80,5 @@ app home 持续增长。因此磁盘预算还需考虑 release 累积，不能�
 - managed runtime preflight 通过，只有一个目标 listener，PID/executable、profile 和 selection 一致。
 - `/health`、`/readyz`、`/v1/models`、`/v1/voices` 以及真实 TTS→ASR smoke 通过。本次供给分人资产时额外要求 `diarization_ready=true`、`/v1/models` 包含 `gpt-4o-transcribe-diarize`，且匿名分人 smoke 返回有效 `segments` 数组；未供给时应报告分人未配置且 `/v1/models` 不含该别名。
 - 安装失败时旧 runtime/selection 保持可恢复；首次安装失败时不留下可误启动的半配置。
-- 只有显式请求安装 `video-podcast` 时才验证其用户级副本；该技能不是 SpeechRail 服务安装的完成条件。
 
 交付报告区分已安装、已验证和未验证项，不使用“100%”或“自动自愈”代替证据。

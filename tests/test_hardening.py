@@ -23,10 +23,10 @@ from speechrail.config import Settings
 from speechrail.domain.ports import AudioChunk, SpeechRequest
 from speechrail.domain.tts import (
     VoiceInUseError,
-    VoiceRegistry,
     VoiceStoreUnavailableError,
     tts_voice_class,
 )
+from speechrail.infrastructure.voice_registry import FileVoiceRegistry as VoiceRegistry
 from speechrail.observability.metrics import Metrics
 
 
@@ -51,7 +51,7 @@ class _CapturingSynth:
 
 
 def _registry(tmp_path: Path) -> VoiceRegistry:
-    return VoiceRegistry(
+    return VoiceRegistry.open(
         storage_path=tmp_path / "custom_voices.json",
         voices_dir=tmp_path / "voices",
     )
@@ -80,8 +80,7 @@ def _authed_app(api_key: str = "s3cret") -> TestClient:
 def test_voice_mutation_routes_require_auth_when_api_key_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    registry = _registry(tmp_path)
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+    _registry(tmp_path)
     client = _authed_app()
 
     # Unauthenticated / wrong-key writes must be rejected with 401.
@@ -162,7 +161,7 @@ def test_voice_registry_refuses_symlinked_metadata_parent(tmp_path: Path) -> Non
     redirected_root.mkdir()
     metadata_parent = tmp_path / "metadata-parent"
     metadata_parent.symlink_to(redirected_root, target_is_directory=True)
-    registry = VoiceRegistry(
+    registry = VoiceRegistry.open(
         storage_path=metadata_parent / "custom_voices.json",
         voices_dir=tmp_path / "voices",
     )
@@ -211,7 +210,7 @@ def test_corrupt_registry_fails_closed_and_preserves_bytes(
     storage.write_bytes(original)
 
     with caplog.at_level(logging.WARNING, logger="speechrail.domain.tts"):
-        registry = VoiceRegistry(storage_path=storage, voices_dir=tmp_path / "voices")
+        registry = VoiceRegistry.open(storage_path=storage, voices_dir=tmp_path / "voices")
 
     assert "failed to load custom voices" in caplog.text
     with pytest.raises(VoiceStoreUnavailableError):
@@ -229,12 +228,11 @@ def test_corrupt_registry_routes_return_stable_503_and_system_tts_survives(
     storage = tmp_path / "custom_voices.json"
     storage.write_bytes(b"{broken")
     registry = _registry(tmp_path)
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
-    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", registry)
     client = TestClient(
         create_app(
             Settings(qwen3_model_dir=None, qwen3_python=None),
             tts_synthesizer=_CapturingSynth(),
+            voice_store=registry,
         )
     )
 
@@ -242,9 +240,7 @@ def test_corrupt_registry_routes_return_stable_503_and_system_tts_survives(
     assert listed.status_code == 503
     assert listed.json()["error"]["code"] == "voice_store_unavailable"
 
-    created = client.post(
-        "/v1/voices", json={"name": "n", "instruction": "i", "id": "custom_x"}
-    )
+    created = client.post("/v1/voices", json={"name": "n", "instruction": "i", "id": "custom_x"})
     assert created.status_code == 503
     assert created.json()["error"]["code"] == "voice_store_unavailable"
 
@@ -309,11 +305,11 @@ def test_voice_in_use_response_includes_retry_after(
         voice_id="leased_voice",
         duration_seconds=3.0,
     )
-    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
     client = TestClient(
         create_app(
             Settings(qwen3_model_dir=None, qwen3_python=None),
             tts_synthesizer=_CapturingSynth(),
+            voice_store=registry,
         )
     )
 
@@ -345,7 +341,6 @@ def test_tts_voice_class_maps_to_bounded_categories(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     registry = _registry(tmp_path)
-    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", registry)
 
     assert tts_voice_class("serena") == "system"
     assert tts_voice_class("alloy") == "system"  # alias -> serena -> system
@@ -354,10 +349,13 @@ def test_tts_voice_class_maps_to_bounded_categories(
     assert tts_voice_class("custom_c") == "custom"
 
     registry.create_cloned_profile(
-        name="cl", ref_text="t", audio_bytes=_generate_test_wav(3.0), voice_id="clone_c",
+        name="cl",
+        ref_text="t",
+        audio_bytes=_generate_test_wav(3.0),
+        voice_id="clone_c",
         duration_seconds=3.0,
     )
-    assert tts_voice_class("clone_c") == "clone"
+    assert tts_voice_class("clone_c", profile=registry.get_profile("clone_c")) == "clone"
     assert tts_voice_class("does_not_exist") == "custom"
 
 

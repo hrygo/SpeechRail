@@ -20,7 +20,7 @@ from typing import cast
 from speechrail.application.voice_validation_gate import (
     BASE_GENERATION_RECIPE_REVISION,
     _runtime_fingerprint,
-    validation_state_for_voice,
+    validation_verdict_for_voice,
 )
 from speechrail.domain.tts import VoiceProfile
 from speechrail.domain.voice_validation import (
@@ -105,7 +105,7 @@ def test_cold_worker_reports_the_same_production_ready_as_a_warm_one(tmp_path: P
     repository = _repository(tmp_path)
     profile = _profile()
 
-    warm_state, warm_evidence, _ = validation_state_for_voice(
+    warm_state, warm_evidence, _ = validation_verdict_for_voice(
         profile,
         _ARTIFACT,
         repository,
@@ -113,7 +113,7 @@ def test_cold_worker_reports_the_same_production_ready_as_a_warm_one(tmp_path: P
         require_current_binding=True,
         capability_key="quality.render",
     )
-    cold_state, cold_evidence, _ = validation_state_for_voice(
+    cold_state, cold_evidence, _ = validation_verdict_for_voice(
         profile,
         _ARTIFACT,
         repository,
@@ -122,10 +122,10 @@ def test_cold_worker_reports_the_same_production_ready_as_a_warm_one(tmp_path: P
         capability_key="quality.render",
     )
 
-    assert warm_state["production_ready"] is True
-    assert cold_state["production_ready"] is True
-    assert cold_state["production_ready_reason"] == "validated"
-    assert cold_state["synthesis"]["status"] == "pass"
+    assert warm_state.production_ready is True
+    assert cold_state.production_ready is True
+    assert cold_state.production_ready_reason == "validated"
+    assert cold_state.synthesis.status == "pass"
     # Same evidence record, not a re-derivation that happens to agree.
     assert cold_evidence is not None
     assert cold_evidence["run_id"] == warm_evidence["run_id"] == "vqr_fixed"
@@ -137,7 +137,7 @@ def test_a_resident_worker_reporting_another_runtime_still_invalidates_evidence(
     # The residency fix must not become "always trust the record": a worker that
     # is up and reports a different runtime is real, detectable staleness.
     repository = _repository(tmp_path)
-    state, _, _ = validation_state_for_voice(
+    state, _, _ = validation_verdict_for_voice(
         _profile(),
         _ARTIFACT,
         repository,
@@ -146,8 +146,8 @@ def test_a_resident_worker_reporting_another_runtime_still_invalidates_evidence(
         capability_key="quality.render",
     )
 
-    assert state["production_ready"] is False
-    assert state["synthesis"]["status"] == "unevaluated"
+    assert state.production_ready is False
+    assert state.synthesis.status == "unevaluated"
 
 
 def test_evidence_without_a_canonical_runtime_revision_still_fails_closed(
@@ -162,7 +162,7 @@ def test_evidence_without_a_canonical_runtime_revision_still_fails_closed(
             runtime_revision=cast(str | None, unusable),
         )
 
-        state, _, _ = validation_state_for_voice(
+        state, _, _ = validation_verdict_for_voice(
             _profile(),
             _ARTIFACT,
             repository,
@@ -171,8 +171,8 @@ def test_evidence_without_a_canonical_runtime_revision_still_fails_closed(
             capability_key="quality.render",
         )
 
-        assert state["production_ready"] is False, unusable
-        assert state["production_ready_reason"] != "validated", unusable
+        assert state.production_ready is False, unusable
+        assert state.production_ready_reason != "validated", unusable
 
 
 def test_legacy_voice_design_output_evidence_is_not_production_evidence(
@@ -192,7 +192,7 @@ def test_legacy_voice_design_output_evidence_is_not_production_evidence(
             probe_set="voice_design_base_v1",
         )
 
-        state, evidence, _ = validation_state_for_voice(
+        state, evidence, _ = validation_verdict_for_voice(
             _profile(),
             _ARTIFACT,
             repository,
@@ -201,7 +201,7 @@ def test_legacy_voice_design_output_evidence_is_not_production_evidence(
             capability_key="quality.render",
         )
 
-        assert state["production_ready"] is False, worker.ready
+        assert state.production_ready is False, worker.ready
         assert evidence is None, worker.ready
 
 
@@ -210,7 +210,7 @@ def test_current_voice_design_output_evidence_still_admits(tmp_path: Path) -> No
 
     repository = _repository(tmp_path, probe_set="voice_design_base_v2")
 
-    state, evidence, _ = validation_state_for_voice(
+    state, evidence, _ = validation_verdict_for_voice(
         _profile(),
         _ARTIFACT,
         repository,
@@ -219,5 +219,5 @@ def test_current_voice_design_output_evidence_still_admits(tmp_path: Path) -> No
         capability_key="quality.render",
     )
 
-    assert state["production_ready"] is True
+    assert state.production_ready is True
     assert evidence is not None

@@ -47,6 +47,41 @@ final class MeetingLibraryDeletionTests: XCTestCase {
 
     private func requireStore() throws -> SessionStore { try XCTUnwrap(store) }
 
+    func testUnavailableMeetingRejectsNewMinutesWithoutChangingExistingVersions() async throws {
+        let store = try requireStore()
+        for mode in [MeetingDeletionMode.archive, .removeTranscript, .deleteEverything] {
+            let documentID = try await makeMeeting(title: "排队守卫 \(mode.rawValue)")
+            let loaded = try await store.meetingDocument(id: documentID)
+            let sessionID = try XCTUnwrap(try XCTUnwrap(loaded).sourceSessionID)
+            try await store.deleteMeetingKnowledge(documentID: documentID, mode: mode)
+            let before = try await store.minutesVersions(sessionID: sessionID)
+            do {
+                _ = try await store.enqueueMinutes(
+                    sessionID: sessionID, model: nil, promptChars: 20
+                )
+                XCTFail("归档或删除后的会议不能承诺稍后整理")
+            } catch {
+                XCTAssertEqual(error.localizedDescription, "会议已归档或删除，无法排队整理")
+            }
+            let after = try await store.minutesVersions(sessionID: sessionID)
+            XCTAssertEqual(after, before)
+        }
+    }
+
+    func testRestoredMeetingCanQueueMinutesAgain() async throws {
+        let store = try requireStore()
+        let documentID = try await makeMeeting(title: "恢复后排队")
+        let loaded = try await store.meetingDocument(id: documentID)
+        let sessionID = try XCTUnwrap(try XCTUnwrap(loaded).sourceSessionID)
+        try await store.deleteMeetingKnowledge(documentID: documentID, mode: .archive)
+        _ = try await store.restoreMeetingKnowledge(documentID: documentID)
+        let queued = try await store.enqueueMinutes(
+            sessionID: sessionID, model: nil, promptChars: 20
+        )
+        XCTAssertEqual(queued.status, .queued)
+        XCTAssertTrue(queued.isLatest)
+    }
+
     /// 造一场带转录与纪要的会，产出可直接归档/删除的文档 id。
     @discardableResult
     private func makeMeeting(title: String, withTranscript: Bool = true) async throws -> String {

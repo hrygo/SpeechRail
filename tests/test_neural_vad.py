@@ -265,13 +265,13 @@ def test_silero_commit_with_subframe_remainder_does_not_error(tmp_path: Path) ->
             )
             # 640 bytes (20ms) — below one 512-sample frame; commit must not
             # score it through Silero and must close out the empty turn cleanly.
-            await session._append_audio(
+            await session._asr_owner.append(
                 {
                     "type": "input_audio_buffer.append",
                     "audio": base64.b64encode(bytes(640)).decode("ascii"),
                 }
             )
-            await session._commit_audio("client")
+            await session._asr_owner.commit("client")
             await session.close()
 
         asyncio.run(run())
@@ -395,7 +395,7 @@ def test_shadow_vad_records_agreement_metrics(tmp_path: Path) -> None:
             # The 24k wire is resampled to the 16k kernel, so one 512-sample
             # kernel frame is 768 wire samples (1536 bytes).
             for pcm in [sine, sine, sine, bytes(1536), bytes(1536), bytes(1536)]:
-                await session._append_audio(
+                await session._asr_owner.append(
                     {
                         "type": "input_audio_buffer.append",
                         "audio": base64.b64encode(pcm).decode("ascii"),

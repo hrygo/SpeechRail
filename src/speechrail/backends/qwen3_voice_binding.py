@@ -10,7 +10,7 @@ from typing import Final
 from speechrail.domain.tts import (
     VoiceCapabilities,
     VoiceProfile,
-    get_voice_profile,
+    get_system_voice_profile,
     resolve_voice,
 )
 
@@ -82,9 +82,7 @@ class VoiceBinding:
         return False
 
 
-def resolve_binding(
-    role: str, voice: str, *, profile: VoiceProfile | None = None
-) -> VoiceBinding:
+def resolve_binding(role: str, voice: str, *, profile: VoiceProfile | None = None) -> VoiceBinding:
     """Resolve a public voice for one plan role while preserving alias casing.
 
     A built-in fixed speaker resolves only for the CustomVoice role, a clone
@@ -103,7 +101,7 @@ def resolve_binding(
 
     preset_voice = resolve_voice(voice)
     if profile is None:
-        profile = get_voice_profile(preset_voice)
+        profile = get_system_voice_profile(preset_voice)
     elif profile.id != preset_voice:
         raise ValueError("voice profile does not match requested voice")
     if variant == "base":

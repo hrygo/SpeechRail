@@ -3234,6 +3234,75 @@ private struct VoiceEditorSheet: View {
 
 // MARK: - 我的作品 (Works with Privacy Boundary & Inspector)
 
+private struct SavedWorkReceiptDetails: View {
+    let work: CreativeWork
+    let lookup: @MainActor () async throws -> RenderReceipt
+    @State private var queryGeneration = 0
+    @State private var isQuerying = false
+    @State private var queriedReceipt: RenderReceipt?
+    @State private var queryMessage: String?
+
+    var body: some View {
+        DisclosureGroup("制作记录") {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                Text("以下是制作时保存的记录，查询服务不会改写作品。")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                LabeledContent("保存时回执", value: statusText(work.provenance.receiptStatus))
+                LabeledContent("请求编号", value: work.provenance.requestID ?? "未记录")
+                LabeledContent("回执编号", value: work.provenance.receiptID ?? "未记录")
+                if work.provenance.receiptID != nil || work.provenance.requestID != nil {
+                    Button(isQuerying ? "正在查询…" : "查询服务回执") {
+                        isQuerying = true
+                        queryGeneration += 1
+                    }
+                    .speechRailButton(.secondary)
+                    .disabled(isQuerying)
+                } else {
+                    Text("这件作品没有服务执行编号，无法查询回执。")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                }
+                if let queriedReceipt {
+                    LabeledContent("本次查询结果", value: statusText(queriedReceipt.status))
+                }
+                if let queryMessage {
+                    Text(queryMessage)
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                }
+            }
+            .textSelection(.enabled)
+        }
+        .task(id: queryGeneration) {
+            guard queryGeneration > 0 else { return }
+            defer { isQuerying = false }
+            queriedReceipt = nil
+            queryMessage = nil
+            do {
+                let receipt = try await lookup()
+                try Task.checkCancellation()
+                queriedReceipt = receipt
+            } catch is CancellationError {
+                return
+            } catch let error as SavedRenderReceiptError {
+                queryMessage = error.errorDescription
+            } catch {
+                queryMessage = "无法查询服务回执，请确认服务正在运行后重试。"
+            }
+        }
+    }
+
+    private func statusText(_ status: RenderReceiptStatus?) -> String {
+        switch status {
+        case .pending: "尚未完成"
+        case .completed: "已完成"
+        case .cancelled: "已取消"
+        case .error: "失败"
+        case .unknown, nil: "未知"
+        }
+    }
+}
+
 public struct WorksView: View {
     @Environment(AppModel.self) private var model
     @Environment(AppNavigationState.self) private var navigation
@@ -3244,6 +3313,7 @@ public struct WorksView: View {
     @State private var sortOrder = WorkSortOrder.newestFirst
     @State private var pendingDeleteWork: CreativeWork?
     @State private var isConfirmingDeletion = false
+    @State private var isConfirmingRecoveryTrash = false
     @State private var renamingWork: CreativeWork?
     @State private var renameText = ""
     @State private var isRenaming = false
@@ -3251,8 +3321,9 @@ public struct WorksView: View {
     @State private var exportFileName = "SpeechRail-作品"
     @State private var isExporting = false
     @State private var exportMessage: String?
-    /// 段落返修弹层的目标作品。段落项目的生命周期跟这张表走，不跨页面保留。
+    /// 新项目的来源作品；关闭弹层只结束编辑，项目继续保存在本机。
     @State private var dubbingWork: CreativeWork?
+    @State private var savedDubbingProject: DubbingProject?
 
     private enum WorkSortOrder: String, CaseIterable, Identifiable {
         case newestFirst
@@ -3291,6 +3362,24 @@ public struct WorksView: View {
         PageScaffold(route: .works, layout: .content) {
             worksBody
         } trailing: {
+            Menu("配音项目") {
+                ForEach(model.dubbingProjects) { project in
+                    Button(project.title) { savedDubbingProject = project }
+                }
+                Divider()
+                Button("重新读取") { model.refreshDubbingProjects() }
+            }
+            Menu("已删除作品") {
+                if let summary = model.deletedWorksSummary {
+                    Text("\(summary.count) 件，占用 \(ByteCountFormatter.string(fromByteCount: summary.byteCount, countStyle: .file))")
+                    Button("移入系统废纸篓…", role: .destructive) {
+                        isConfirmingRecoveryTrash = true
+                    }
+                    .disabled(summary.count == 0)
+                }
+                if let message = model.deletedWorksMessage { Text(message) }
+                Button("重新读取") { model.refreshDeletedWorks() }
+            }
             worksInspectorToggle
         }
         .focusedSceneValue(
@@ -3324,13 +3413,26 @@ public struct WorksView: View {
                 pendingDeleteWork = nil
             }
         } message: {
-            Text("作品条目和它的音频文件会一起从本机移除，且不可恢复。")
+            Text("作品会从列表删除，音频移入系统废纸篓。清空废纸篓后才会永久移除；已有配音项目保留。")
+        }
+        .confirmationDialog(
+            "将已删除作品移入系统废纸篓？",
+            isPresented: $isConfirmingRecoveryTrash,
+            titleVisibility: .visible
+        ) {
+            Button("移入系统废纸篓", role: .destructive) { model.trashDeletedWorks() }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("将转移本机恢复区中的已删除作品及音频。当前作品与配音项目保留；清空系统废纸篓后才会永久移除。")
         }
         .sheet(isPresented: $isRenaming) {
             renameSheet
         }
         .sheet(item: $dubbingWork) { work in
             DubbingProjectSheet(work: work)
+        }
+        .sheet(item: $savedDubbingProject) { project in
+            DubbingProjectSheet(projectID: project.id)
         }
         .fileExporter(
             isPresented: $isExporting,
@@ -3347,6 +3449,7 @@ public struct WorksView: View {
         }
         .task {
             model.refreshWorks()
+            model.refreshDubbingProjects()
             if selectedWorkID == nil {
                 selectedWorkID = model.works.first?.id
             }
@@ -3537,6 +3640,11 @@ public struct WorksView: View {
             }
             .speechRailInspectorContent()
 
+            SavedWorkReceiptDetails(work: work) {
+                try await model.lookupWorkReceipt(work)
+            }
+            .id(work.id)
+
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text("文稿")
                     .font(SpeechRailDesignTokens.Typography.captionMedium)
@@ -3670,7 +3778,7 @@ public struct WorksView: View {
                         return .handled
                     }
                     Divider()
-                    CardFoot(note: "导出快捷键 ⌘E。删除作品会同时移除本地音频文件。") {
+                    CardFoot(note: "导出快捷键 ⌘E。删除的音频进入系统废纸篓；旧恢复区可在「已删除作品」中查看和转移。") {
                         Group {
                             Button {
                                 navigation.request(.dubbing)
@@ -3939,10 +4047,30 @@ private struct WAVFileDocument: FileDocument {
 ///
 /// 首屏只放"把这段改好"要用的动作：重做、采用、导出。多余的候选版本收在每段的
 /// 展开区里，不去打断只想重做一段的普通路径。原作品音频始终留在作品库原处。
+private enum DubbingCleanupAction {
+    case candidate(DubbingCandidate)
+    case unused
+    case project
+    case close
+}
+
 private struct DubbingProjectSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
-    let work: CreativeWork
+    let work: CreativeWork?
+    let projectID: String?
+    @State private var rebuildCandidate: DubbingCandidate?
+    @State private var cleanupAction: DubbingCleanupAction?
+
+    init(work: CreativeWork) {
+        self.work = work
+        self.projectID = nil
+    }
+
+    init(projectID: String) {
+        self.work = nil
+        self.projectID = projectID
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
@@ -3958,15 +4086,51 @@ private struct DubbingProjectSheet: View {
             height: SpeechRailDesignTokens.Layout.creatorDubbingSheetHeight
         )
         .task {
-            model.startDubbingProject(for: work)
+            model.refreshDubbingProjects()
+            if let work {
+                model.startDubbingProject(for: work)
+            } else if let projectID {
+                model.openDubbingProject(projectID)
+            }
         }
         .onDisappear {
-            // 关闭弹层即结束这个项目：在途重做的落地结果不会写进下一个项目。
+            // 关闭编辑保留项目；在途重做的落地结果不会写进下一个项目。
             model.closeDubbingProject()
         }
         .onChange(of: model.dubbingExportBundle) { _, bundle in
             guard bundle != nil else { return }
             chooseExportDirectory()
+        }
+        .confirmationDialog(
+            "按这个候选的条件建立新项目？",
+            isPresented: Binding(
+                get: { rebuildCandidate != nil },
+                set: { if !$0 { rebuildCandidate = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("建立新项目") {
+                if let candidate = rebuildCandidate {
+                    model.rebuildDubbingProject(using: candidate)
+                }
+                rebuildCandidate = nil
+            }
+            Button("取消", role: .cancel) { rebuildCandidate = nil }
+        } message: {
+            Text("旧项目、候选音频和采用记录会保留。新项目重新分段，各段需要重新生成和采用。")
+        }
+        .confirmationDialog(
+            "配音项目与候选",
+            isPresented: Binding(
+                get: { cleanupAction != nil },
+                set: { if !$0 { cleanupAction = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            cleanupButtons
+            Button("取消", role: .cancel) { cleanupAction = nil }
+        } message: {
+            Text(cleanupExplanation)
         }
     }
 
@@ -3983,7 +4147,7 @@ private struct DubbingProjectSheet: View {
     }
 
     private var subtitle: String {
-        return "只重做你点的那一段，其余段落保持原样。成品由被采用的段落按顺序拼成，"
+        return "只重做你点的那一段。成品由被采用的段落按顺序拼成，"
             + "正文只包含这些段落，\(model.dubbingProjectVoice.text)。"
     }
 
@@ -3992,6 +4156,12 @@ private struct DubbingProjectSheet: View {
         if let project = model.dubbingProject {
             ScrollView {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    if let message = model.dubbingConditionsMessage {
+                        Text(message)
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     ForEach(Array(project.segments.enumerated()), id: \.element.id) {
                         index, segment in
                         segmentCard(segment, index: index)
@@ -4001,7 +4171,7 @@ private struct DubbingProjectSheet: View {
             }
         } else {
             ContentUnavailableView(
-                "无法按段落返修",
+                "当前没有打开的项目",
                 systemImage: "exclamationmark.triangle",
                 description: Text(model.dubbingMessage ?? "请稍后重试。")
             )
@@ -4100,11 +4270,29 @@ private struct DubbingProjectSheet: View {
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             } else {
-                Button("采用") {
-                    model.adoptDubbingCandidate(candidate)
+                switch model.dubbingProject?.rejection(for: candidate) {
+                case .candidateRuntimeChanged, .candidateConditionsChanged:
+                    Button("按此条件新建项目…") {
+                        rebuildCandidate = candidate
+                    }
+                    .speechRailButton(.secondary)
+                    .disabled(model.dubbingBusySegmentID != nil)
+                default:
+                    Button("采用") {
+                        model.adoptDubbingCandidate(candidate)
+                    }
+                    .speechRailButton(.secondary)
                 }
-                .speechRailButton(.secondary)
             }
+            Button("删除…", role: .destructive) {
+                cleanupAction = .candidate(candidate)
+            }
+            .speechRailButton(.quiet)
+            .disabled(
+                model.dubbingBusySegmentID != nil
+                    || model.dubbingProject?.isUsingCandidate(candidate.id) == true
+            )
+            .help("已采用或撤销记录引用的候选需要先撤销相关采用。")
         }
     }
 
@@ -4123,13 +4311,82 @@ private struct DubbingProjectSheet: View {
                 .speechRailButton(.primary)
                 .disabled(model.dubbingProject == nil)
 
+                Menu("项目") {
+                    Menu("打开已有项目") {
+                        ForEach(model.dubbingProjects) { project in
+                            Button(project.title) { model.openDubbingProject(project.id) }
+                        }
+                    }
+                    .disabled(model.dubbingBusySegmentID != nil)
+                    Button("清理未采用候选…", role: .destructive) { cleanupAction = .unused }
+                        .disabled(model.unusedDubbingCandidateCount == 0 || model.dubbingBusySegmentID != nil)
+                    Button("删除当前项目…", role: .destructive) { cleanupAction = .project }
+                        .disabled(
+                            model.dubbingProject == nil || model.dubbingBusySegmentID != nil
+                                || model.dubbingProject?.segments.contains { $0.acceptedCandidateID != nil } == true
+                        )
+                    Text("删除项目前请先导出成品并撤销采用。")
+                }
+
                 Spacer(minLength: 0)
 
                 Button("完成") {
-                    dismiss()
+                    if model.dubbingHasUnexportedAdoptions || model.unusedDubbingCandidateCount > 0 {
+                        cleanupAction = .close
+                    } else {
+                        dismiss()
+                    }
                 }
                 .speechRailButton(.secondary)
             }
+        }
+    }
+
+    private var cleanupExplanation: String {
+        switch cleanupAction {
+        case .close:
+            model.dubbingHasUnexportedAdoptions
+                ? "当前采用结果尚未在本次编辑中完整导出。可以保留项目稍后继续；清理只删除未被采用或撤销记录引用的候选音频，无法撤销。"
+                : "可以保留项目稍后继续，也可以清理未采用候选后关闭。清理会释放这些音频占用，无法撤销。"
+        case .candidate:
+            "这个未采用候选及其音频会被删除，无法撤销。原作品与其他候选保留。"
+        case .unused:
+            "将删除 \(model.unusedDubbingCandidateCount) 个未采用候选及其音频，无法撤销。当前采用与撤销记录引用的候选保留。"
+        case .project:
+            "当前项目和其中全部候选音频会被删除，无法撤销。原作品保留。"
+        case nil: ""
+        }
+    }
+
+    @ViewBuilder
+    private var cleanupButtons: some View {
+        switch cleanupAction {
+        case .candidate(let candidate):
+            Button("删除候选音频", role: .destructive) {
+                model.deleteDubbingCandidate(candidate)
+                cleanupAction = nil
+            }
+        case .unused:
+            Button("清理未采用候选", role: .destructive) {
+                model.discardUnusedDubbingCandidates()
+                cleanupAction = nil
+            }
+        case .project:
+            Button("删除项目及候选音频", role: .destructive) {
+                model.deleteCurrentDubbingProject()
+                cleanupAction = nil
+            }
+        case .close:
+            Button("保留项目并关闭") { cleanupAction = nil; dismiss() }
+            if model.unusedDubbingCandidateCount > 0 {
+                Button("清理未采用候选并关闭", role: .destructive) {
+                    if model.discardUnusedDubbingCandidates() { dismiss() }
+                    cleanupAction = nil
+                }
+                .disabled(model.dubbingBusySegmentID != nil)
+            }
+        case nil:
+            EmptyView()
         }
     }
 

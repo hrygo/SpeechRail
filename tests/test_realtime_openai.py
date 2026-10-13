@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+import speechrail.application.realtime_asr as realtime_asr_module
 import speechrail.application.realtime_openai as realtime_openai_module
 from realtime_wire import (
     server_vad,
@@ -24,6 +25,7 @@ from realtime_wire import (
     tts_finish_text,
     tts_start,
 )
+from speechrail.application.realtime_asr import RealtimeAsrOwner
 from speechrail.application.realtime_openai import OpenAIRealtimeSession
 from speechrail.application.services import AppOverrides, build_app_services
 from speechrail.compatibility.openai_realtime import (
@@ -529,10 +531,10 @@ def test_realtime_asr_admission_preserves_isolation_error_under_serial_policy() 
 
         session = OpenAIRealtimeSession(services, session_id="isolated-test", send=send)
         with pytest.raises(RealtimeAdapterError) as isolated:
-            await session._reserve_asr()
+            await session._asr_owner._reserve_asr()
         assert isolated.value.code == "backend_reclamation_failed"
         assert not getattr(isolated.value, "busy_reason", None)
-        assert session._asr_resources is None
+        assert session._asr_owner._asr_resources is None
         assert services.governor.snapshot().active_asr == 0
         assert services.governor.snapshot().pending_realtime == 0
 
@@ -929,7 +931,7 @@ def test_realtime_first_hypothesis_metrics_survive_a_slow_client(
             self.now += duration
 
     clock = FakeClock()
-    monkeypatch.setattr(realtime_openai_module, "time", clock)
+    monkeypatch.setattr(realtime_asr_module, "time", clock)
 
     async def scenario() -> dict[str, object]:
         settings = Settings(
@@ -1679,10 +1681,10 @@ def test_realtime_policy_drives_snapshot_preview_and_closes_before_terminal() ->
         }
         await session._update_session(update)
         for _ in range(2):
-            await session._append_audio(
+            await session._asr_owner.append(
                 {"type": "input_audio_buffer.append", "audio": _pcm16(bytes(28_800))}
             )
-        await session._commit_audio(reason="client", commit_event_id="policy-close")
+        await session._asr_owner.commit(reason="client", commit_event_id="policy-close")
         await session.close()
         return sent, factory
 
@@ -1988,7 +1990,7 @@ def test_rejected_session_update_does_not_partially_enable_alignment() -> None:
                 )
             )
         assert raised.value.code == "model_revision_conflict"
-        assert session._alignment_enabled is False
+        assert session._auxiliary_owner._alignment_enabled is False
         assert session._config == before
         await session.close()
         return session
@@ -2111,15 +2113,15 @@ def test_alignment_result_survives_the_turn_moving_on() -> None:
 
         # Reproduce what commit cleanup does to the turn an already-scheduled
         # alignment task is about to look at.
-        session._reset_turn_observability()
-        session._current_item_id = session._new_item_id()
-        assert session._current_item_id != item_id
+        session._asr_owner._reset_turn_observability()
+        session._asr_owner._current_item_id = session._asr_owner._new_item_id()
+        assert session._asr_owner._current_item_id != item_id
 
         events.clear()
-        await session._finish_alignment(
-            task_id=session._task_id,
-            epoch=session._wire_epoch,
-            generation=session._asr_generation,
+        await session._auxiliary_owner._finish_alignment(
+            task_id=session._asr_owner._task_id,
+            epoch=session._asr_owner._wire_epoch,
+            generation=session._asr_owner._asr_generation,
             item_id=item_id,
             transcript=transcript,
             transcript_revision=1,
@@ -2204,12 +2206,14 @@ def test_late_alignment_registers_units_to_its_original_item() -> None:
                 alignment_arrived.set()
             return len(events)
 
-        class RecordingSession(OpenAIRealtimeSession):
-            async def _register_units(self, item_id, units) -> None:
-                registration_items.append(item_id)
-                await super()._register_units(item_id, units)
+        session = OpenAIRealtimeSession(services, session_id="late-item-register", send=send)
+        register_units = session._auxiliary_owner._register_units
 
-        session = RecordingSession(services, session_id="late-item-register", send=send)
+        async def record_units(item_id, units) -> None:
+            registration_items.append(item_id)
+            await register_units(item_id, units)
+
+        session._auxiliary_owner._register_units = record_units
         await session.start()
         await session.handle(session_update(diarization={"enabled": True}))
         audio = _pcm16(b"\x00\x00" * 800)
@@ -2233,8 +2237,8 @@ def test_late_alignment_registers_units_to_its_original_item() -> None:
         second_item = await commit_item("late-item-2")
         assert first_item != second_item
         current_state_before_late_alignment = (
-            session._current_item_id,
-            session._current_transcript_revision,
+            session._asr_owner._current_item_id,
+            session._asr_owner._current_transcript_revision,
         )
 
         while not any(
@@ -2271,10 +2275,10 @@ def test_late_alignment_registers_units_to_its_original_item() -> None:
                 break
             await asyncio.wait_for(alignment_arrived.wait(), timeout=0.5)
 
-        await session._wait_for_pending_alignment()
+        await session._auxiliary_owner._wait_for_pending_alignment()
         current_state_after_late_alignment = (
-            session._current_item_id,
-            session._current_transcript_revision,
+            session._asr_owner._current_item_id,
+            session._asr_owner._current_transcript_revision,
         )
         await session.handle(
             {
@@ -2374,12 +2378,14 @@ def test_clear_discards_an_alignment_result_that_returns_late() -> None:
                 alignment_arrived.set()
             return len(events)
 
-        class RecordingSession(OpenAIRealtimeSession):
-            async def _register_units(self, item_id, units) -> None:
-                registration_items.append(item_id)
-                await super()._register_units(item_id, units)
+        session = OpenAIRealtimeSession(services, session_id="clear-late-alignment", send=send)
+        register_units = session._auxiliary_owner._register_units
 
-        session = RecordingSession(services, session_id="clear-late-alignment", send=send)
+        async def record_units(item_id, units) -> None:
+            registration_items.append(item_id)
+            await register_units(item_id, units)
+
+        session._auxiliary_owner._register_units = record_units
         await session.start()
         await session.handle(session_update(diarization={"enabled": True}))
         audio = _pcm16(b"\x00\x00" * 800)
@@ -2415,7 +2421,7 @@ def test_clear_discards_an_alignment_result_that_returns_late() -> None:
             for event in events
         )
         assert cleared_item not in registration_items
-        assert session._units_by_id == {}
+        assert session._auxiliary_owner._units_by_id == {}
 
         current_item = await commit_item("clear-current-item")
         while not any(
@@ -2431,7 +2437,7 @@ def test_clear_discards_an_alignment_result_that_returns_late() -> None:
             ):
                 break
             await asyncio.wait_for(alignment_arrived.wait(), timeout=0.5)
-        await session._wait_for_pending_alignment()
+        await session._auxiliary_owner._wait_for_pending_alignment()
         await session.close()
         return events, registration_items, cleared_item, current_item
 
@@ -3294,10 +3300,10 @@ def test_realtime_segment_budget_rolls_over_before_client_commit() -> None:
         # Seven 8,192-byte wire frames cross the caller-selected 1,000 ms
         # segment budget while each input frame remains below the frame limit.
         for _ in range(7):
-            await session._append_audio(
+            await session._asr_owner.append(
                 {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 8192)}
             )
-        await session._commit_audio("client", commit_event_id="rollover-tail")
+        await session._asr_owner.commit("client", commit_event_id="rollover-tail")
         await session.close()
         return sent, factory
 
@@ -3662,7 +3668,7 @@ def test_openai_commit_ack_then_hung_reader_times_out_with_failure() -> None:
         await session.handle(
             {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
-        await asyncio.wait_for(session._commit_audio("client"), timeout=0.5)
+        await asyncio.wait_for(session._asr_owner.commit("client"), timeout=0.5)
         await session.close()
         return sent, factory
 
@@ -3706,7 +3712,7 @@ def test_openai_asr_reader_runtime_error_emits_transcription_failed() -> None:
         await session.handle(
             {"type": "input_audio_buffer.append", "audio": _pcm16(_FRAME)}
         )
-        await asyncio.wait_for(session._commit_audio("client"), timeout=0.5)
+        await asyncio.wait_for(session._asr_owner.commit("client"), timeout=0.5)
         await session.close()
         return sent
 
@@ -3737,7 +3743,7 @@ def test_openai_client_event_queue_overflow_closes_session(monkeypatch) -> None:
 
     # Model finalization runs independently of ingress. Hold the ingress
     # operation itself to exercise the transport queue's overflow boundary.
-    monkeypatch.setattr(OpenAIRealtimeSession, "_append_audio", blocked_append)
+    monkeypatch.setattr(RealtimeAsrOwner, "append", blocked_append)
     client, _ = _client(factory=factory)
     done = threading.Event()
     outcome: dict[str, object] = {}

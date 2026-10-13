@@ -2,8 +2,8 @@
 title: "SpeechRail 架构文档目录"
 status: active
 audience: "系统架构师、核心开发者、技术决策者"
-version: "3.10.4"
-date: 2026-10-07
+version: "3.10.8"
+date: 2026-10-09
 ---
 
 # 🏛️ SpeechRail 架构文档
@@ -74,6 +74,18 @@ graph TD
 [生成式音色注册](generated-voice-registration.md) 说明 `/v1/voice-designs` 的候选、确认、Base 复验、人工听审和原子发布；当前 API 不提供旧数据迁移层。
 
 [音色验证应用用例与执行所有权](voice-validation-usecases.md) 记录候选验证与固定探针的阶段、资源、取消、身份绑定和证据提交边界。
+
+[TTS 执行端口与组合边界](tts-execution-ports.md) 定义增量 factory、严格准备、lane、
+运行身份与采样事实的依赖注入，以及后端 adapter 与应用清理 owner 的职责。
+
+[语音渲染应用用例与交付所有权](render-usecase.md) 定义纯准备、单次执行、
+PCM 计量、响应预取与关闭，以及编码和 ASGI adapter 的边界。
+
+[Realtime 会话状态与资源所有权](realtime-ownership.md) 定义 ASR、单次 TTS utterance、
+辅助任务的状态边界、不可变身份、窄依赖与组合关闭。
+
+[macOS 引擎与创作状态所有权](macos-feature-ownership.md) 定义引擎能力事实、
+音色与配音任务、共享播放身份和组合投影的依赖边界。
 
 ## 🔑 核心架构原则
 

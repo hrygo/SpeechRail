@@ -63,7 +63,7 @@ def _scenario(monkeypatch, tmp_path: Path, *, armed: bool) -> Path | None:
             services, session_id="tap-test", send=send
         )
         # Redirect the tap into the test tmp dir, bypassing the log dir.
-        session._asr_debug_tap = AsrDebugTap(
+        session._asr_owner._asr_debug_tap = AsrDebugTap(
             "tap-test", log_dir=tmp_path, max_bytes=1_000_000
         )
         await session.start()
@@ -71,7 +71,7 @@ def _scenario(monkeypatch, tmp_path: Path, *, armed: bool) -> Path | None:
             {"type": "input_audio_buffer.append", "audio": "AAA="}
         )
         await session.handle({"type": "input_audio_buffer.commit"})
-        path = session._asr_debug_tap.path
+        path = session._asr_owner._asr_debug_tap.path
         await session.close()
         return path
 

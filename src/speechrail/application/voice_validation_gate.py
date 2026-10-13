@@ -13,25 +13,28 @@ import json
 from dataclasses import dataclass, replace
 from typing import Any, Literal, cast
 
-from speechrail.application.capability_snapshot import _validation_state
-from speechrail.application.render_receipts import observed_runtime_revision_for_synthesizer
+from speechrail.application.render_receipts import observed_runtime_revision_for_voice
 from speechrail.backends.model_identity import is_observed_runtime_revision
 from speechrail.config.model_catalog import ModelArtifact
 from speechrail.domain.ports import SpeechRequest
 from speechrail.domain.tts import (
     VoiceProfile,
-    VoiceRegistry,
     VoiceRevisionConflictError,
     VoiceStoreUnavailableError,
-    get_voice_registry,
 )
 from speechrail.domain.tts_errors import TtsBackendError
+from speechrail.domain.tts_execution import VoicePreparer, VoiceRuntimeIdentity
+from speechrail.domain.voice_ports import ValidatedVoiceDirectory
 from speechrail.domain.voice_quality import POLICY_VERSION
 from speechrail.domain.voice_validation import (
     RETIRED_VALIDATION_PROBE_SETS,
     VoiceValidationArtifact,
     VoiceValidationRepository,
     VoiceValidationStoreUnavailableError,
+)
+from speechrail.domain.voice_validation_policy import (
+    VoiceValidationVerdict,
+    evaluate_voice_validation,
 )
 
 REFERENCE_PREPROCESS_VERSION = "energy_v1"
@@ -109,7 +112,7 @@ class VoiceValidationBinding:
 def build_validation_binding(
     profile: VoiceProfile,
     artifact: ModelArtifact | VoiceValidationArtifact | None,
-    synthesizer: object | None = None,
+    runtime_identity: VoiceRuntimeIdentity | None = None,
     *,
     require_current_binding: bool = False,
     observed_runtime_revision: str | None = None,
@@ -127,8 +130,8 @@ def build_validation_binding(
         observed_runtime_revision
         if observed_runtime_revision is not None
         else (
-            observed_runtime_revision_for_synthesizer(synthesizer, profile.id)
-            if synthesizer is not None
+            observed_runtime_revision_for_voice(runtime_identity, profile.id)
+            if runtime_identity is not None
             else None
         )
     )
@@ -265,22 +268,22 @@ def _binding_from_recorded_runtime(
     )
 
 
-def validation_state_for_voice(
+def validation_verdict_for_voice(
     profile: VoiceProfile,
     artifact: ModelArtifact | VoiceValidationArtifact | None,
     repository: VoiceValidationRepository,
-    synthesizer: object | None = None,
+    runtime_identity: VoiceRuntimeIdentity | None = None,
     *,
     require_current_binding: bool,
     capability_key: str | None = None,
     observed_runtime_revision: str | None = None,
-) -> tuple[dict[str, object], dict[str, Any] | None, VoiceValidationBinding]:
-    """Return the evidence, binding, and shared projected validation state."""
+) -> tuple[VoiceValidationVerdict, dict[str, Any] | None, VoiceValidationBinding]:
+    """Return the evidence, binding, and shared typed validation verdict."""
 
     binding = build_validation_binding(
         profile,
         artifact,
-        synthesizer,
+        runtime_identity,
         require_current_binding=require_current_binding,
         capability_key=capability_key,
         observed_runtime_revision=observed_runtime_revision,
@@ -299,7 +302,7 @@ def validation_state_for_voice(
                 binding,
                 require_current_binding=require_current_binding,
             )
-    state = _validation_state(
+    state = evaluate_voice_validation(
         profile,
         artifact,
         evidence,
@@ -314,10 +317,10 @@ def validation_state_for_voice(
 async def prepare_validated_speech(
     request: SpeechRequest,
     *,
-    synthesizer: object,
+    preparer: VoicePreparer | None,
     artifact: ModelArtifact | VoiceValidationArtifact | None,
     capability_key: str | None,
-    registry: VoiceRegistry | None = None,
+    registry: ValidatedVoiceDirectory,
 ) -> SpeechRequest:
     """Prepare a strict request's worker and admit only current evidence.
 
@@ -330,7 +333,6 @@ async def prepare_validated_speech(
     if request.validation_policy != "require_output_pass":
         return request
 
-    registry = registry or get_voice_registry()
     try:
         profile = registry.get_profile(request.voice)
     except VoiceStoreUnavailableError as exc:
@@ -350,8 +352,7 @@ async def prepare_validated_speech(
     if profile.mode != "clone":
         return request
 
-    prepare = getattr(synthesizer, "prepare_voice", None)
-    if not callable(prepare):
+    if preparer is None:
         raise TtsBackendError(
             "voice_validation_runtime_unavailable",
             stage="validate",
@@ -359,7 +360,7 @@ async def prepare_validated_speech(
             retryable=True,
         )
     try:
-        runtime_revision = await prepare(
+        runtime_revision = await preparer.prepare_voice(
             request.voice,
             expected_voice_revision=profile.revision,
         )
@@ -387,7 +388,7 @@ async def prepare_validated_speech(
         )
 
     try:
-        state, _evidence, _binding = validation_state_for_voice(
+        state, _evidence, _binding = validation_verdict_for_voice(
             profile,
             artifact,
             registry.validation_store,
@@ -402,7 +403,7 @@ async def prepare_validated_speech(
             public_code="voice_validation_store_unavailable",
             retryable=True,
         ) from exc
-    if state["production_ready"] is not True:
+    if not state.production_ready:
         raise TtsBackendError(
             "voice_not_production_ready",
             stage="validate",
@@ -425,5 +426,5 @@ __all__ = [
     "build_validation_binding",
     "load_validation_evidence",
     "prepare_validated_speech",
-    "validation_state_for_voice",
+    "validation_verdict_for_voice",
 ]

@@ -21,7 +21,7 @@ from typing import Any, cast
 
 from speechrail.application.deadline import await_until
 from speechrail.application.render_receipts import (
-    observed_runtime_revision_for_synthesizer,
+    observed_runtime_revision_for_voice,
 )
 from speechrail.application.tts_delivery import (
     PcmOutputCounter,
@@ -37,6 +37,7 @@ from speechrail.domain.ports import (
     TranscriptionRequest,
 )
 from speechrail.domain.tts_errors import TtsBackendError
+from speechrail.domain.tts_execution import TtsExecutionPorts, VoiceRuntimeIdentity
 from speechrail.domain.voice_quality_metrics import compute_output_quality_metrics
 from speechrail.runtime.admission import AdmissionQueue
 from speechrail.runtime.cleanup import join_cleanup
@@ -175,6 +176,7 @@ class ValidationRuntime:
     admission: AdmissionQueue
     tts_ready: bool
     asr_ready: bool
+    tts_execution: TtsExecutionPorts
 
 
 def grade_clone_audio(wav_bytes: bytes) -> vq.VoiceQualityReport:
@@ -598,6 +600,7 @@ async def evict_quality_tts_if_supported(
 async def execute_candidate_validation(
     *,
     synthesizer: SpeechSynthesizer,
+    runtime_identity: VoiceRuntimeIdentity | None,
     transcriber: BatchTranscriber | None,
     governor: ResourceGovernor,
     admission: AdmissionQueue,
@@ -642,8 +645,8 @@ async def execute_candidate_validation(
         # Same-run binding: read the identity while the producing
         # reservation is still held, before the quality-phase eviction below
         # can retire this worker.
-        execution_revision = observed_runtime_revision_for_synthesizer(
-            synthesizer, candidate_voice_id
+        execution_revision = observed_runtime_revision_for_voice(
+            runtime_identity, candidate_voice_id
         )
     if not output_pcm:
         raise TTSDeliveryError("voice_validation_output_empty")

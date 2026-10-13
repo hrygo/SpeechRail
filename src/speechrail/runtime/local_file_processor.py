@@ -30,6 +30,7 @@ from speechrail.application.diarization import diarize_transcript
 from speechrail.application.tts_admission import tts_resource_key
 from speechrail.application.tts_delivery import TTSDeliveryError, iter_validated_audio
 from speechrail.application.voice_validation_gate import prepare_validated_speech
+from speechrail.backends.tts_execution_adapter import bind_tts_execution
 from speechrail.domain.alignment import AlignTextPort
 from speechrail.domain.diarization import DiarizationError
 from speechrail.domain.diarization.ports import StreamingActivityPort
@@ -40,14 +41,16 @@ from speechrail.domain.ports import (
     SpeechSynthesizer,
     TranscriptionRequest,
 )
+from speechrail.domain.transcription_requirements import TranscriptionRequirements
 from speechrail.domain.tts import (
     DEFAULT_VOICE_ID,
     VoiceRevisionConflictError,
     VoiceStoreUnavailableError,
-    get_voice_registry,
 )
 from speechrail.domain.tts_errors import TTS_PARAMETER_ERROR_CODES, TtsBackendError
+from speechrail.domain.tts_execution import TtsExecutionPorts
 from speechrail.domain.tts_request import ValidationPolicy, normalize_tts_language
+from speechrail.domain.voice_ports import ValidatedVoiceDirectory
 from speechrail.domain.voice_validation import VoiceValidationArtifact
 from speechrail.runtime.alignment_admission import (
     AlignmentAdmission,
@@ -92,6 +95,8 @@ class LocalFileJobProcessor:
         spool_dir: Path,
         batch_transcriber: BatchTranscriber | None = None,
         tts_synthesizer: SpeechSynthesizer | None = None,
+        tts_execution: TtsExecutionPorts | None = None,
+        voice_store: ValidatedVoiceDirectory | None = None,
         max_upload_bytes: int = 536_870_912,
         max_audio_seconds: int = 3_600,
         tts_sample_rate: int = 24_000,
@@ -114,7 +119,11 @@ class LocalFileJobProcessor:
             raise ValueError("at least one allowed input root is required")
         self._allowed_roots = tuple(root.resolve() for root in roots)
         self._batch_transcriber = batch_transcriber
+        if tts_synthesizer is not None and voice_store is None:
+            raise ValueError("TTS jobs require an explicit voice store")
         self._tts_synthesizer = tts_synthesizer
+        self._voice_store = voice_store
+        self._tts_execution = tts_execution or bind_tts_execution(tts_synthesizer)
         self._max_upload_bytes = max_upload_bytes
         self._max_audio_seconds = max_audio_seconds
         self._tts_sample_rate = tts_sample_rate
@@ -136,8 +145,8 @@ class LocalFileJobProcessor:
             return None
         voice = _optional_str(params.get("voice")) or DEFAULT_VOICE_ID
         try:
-            return tts_resource_key(self._tts_synthesizer, voice)
-        except (RuntimeError, ValueError, VoiceStoreUnavailableError):
+            return tts_resource_key(self._tts_execution.lanes, voice)
+        except RuntimeError, ValueError, VoiceStoreUnavailableError:
             # The processor will perform the authoritative voice validation
             # during synthesis; an uncertain scheduling hint must fall back to
             # the governor's conservative wildcard lane.
@@ -203,8 +212,11 @@ class LocalFileJobProcessor:
         # offline environment.  Timestamps therefore come from the independent
         # fixed-text aligner over the frozen transcript, exactly as the REST
         # batch route does it, and its absence is refused before any inference.
-        if timestamps and not diarize and self._text_aligner is None:
-            raise JobProcessingError("timestamp_alignment_unavailable")
+        requirements = TranscriptionRequirements(timestamps=timestamps, diarization=diarize)
+        if code := requirements.missing_alignment_error(
+            aligner_available=self._text_aligner is not None
+        ):
+            raise JobProcessingError(code)
         pcm = await self._decode_audio(input_path)
         try:
             request = TranscriptionRequest(
@@ -270,11 +282,10 @@ class LocalFileJobProcessor:
         content = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         return self._write_artifact(job.id, _TRANSCRIPT_FILENAME, content)
 
-    async def _synthesize(
-        self, job: JobRecord, input_path: Path, params: dict[str, object]
-    ) -> str:
+    async def _synthesize(self, job: JobRecord, input_path: Path, params: dict[str, object]) -> str:
         synthesizer = self._tts_synthesizer
-        if synthesizer is None:
+        voice_store = self._voice_store
+        if synthesizer is None or voice_store is None:
             raise JobProcessingError("job_backend_not_ready")
         text = self._read_text(input_path)
         voice = _optional_str(params.get("voice")) or DEFAULT_VOICE_ID
@@ -297,22 +308,20 @@ class LocalFileJobProcessor:
                 voice=voice,
                 output_format="pcm16",
                 speed=_coerce_speed(params.get("speed")),
-                language=normalize_tts_language(
-                    _optional_str(params.get("language")) or "auto"
-                ),
+                language=normalize_tts_language(_optional_str(params.get("language")) or "auto"),
                 instruction=_optional_str(params.get("instruction")),
                 seed=_coerce_seed(params.get("seed")),
                 validation_policy=validation_policy,
             )
-        except (ValueError, TtsBackendError):
+        except ValueError, TtsBackendError:
             raise JobProcessingError("job_input_invalid") from None
         try:
             request = await prepare_validated_speech(
                 request,
-                synthesizer=synthesizer,
+                preparer=self._tts_execution.preparer,
                 artifact=artifact,
                 capability_key=self._tts_capability_key,
-                registry=get_voice_registry(),
+                registry=voice_store,
             )
         except TtsBackendError as exc:
             if exc.public_code in _STRICT_VOICE_VALIDATION_ERROR_CODES:
@@ -320,7 +329,7 @@ class LocalFileJobProcessor:
             raise JobProcessingError("job_processor_failed") from None
         except VoiceRevisionConflictError:
             raise JobProcessingError("voice_revision_conflict") from None
-        except (KeyError, ValueError, VoiceStoreUnavailableError):
+        except KeyError, ValueError, VoiceStoreUnavailableError:
             raise JobProcessingError("job_input_invalid") from None
         pcm = bytearray()
         try:

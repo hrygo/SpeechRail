@@ -15,6 +15,7 @@ import pytest
 import speechrail.backends.qwen3_tts_worker as worker_module
 import speechrail.domain.tts as voices
 from speechrail.domain.ports import SpeechRequest
+from speechrail.infrastructure.voice_registry import FileVoiceRegistry as VoiceRegistry
 from speechrail.runtime.worker_protocol import ProtocolError
 from test_qwen3_tts import _chunk_frame, _worker
 
@@ -22,15 +23,15 @@ from test_qwen3_tts import _chunk_frame, _worker
 def test_parent_sends_the_leased_recipe_even_after_alias_changes(
     tmp_path: Path, monkeypatch
 ) -> None:
-    registry = voices.VoiceRegistry(tmp_path / "voices.json", tmp_path / "audio")
+    registry = VoiceRegistry.open(tmp_path / "voices.json", tmp_path / "audio")
     registry.create_custom_profile(name="test", instruction="old recipe", seed=11, voice_id="test")
-    monkeypatch.setattr(voices, "_GLOBAL_VOICE_REGISTRY", registry)
     worker, transport = _worker(
         tmp_path,
         [
             _chunk_frame("pending", 0, b"\0\0"),
             {"type": "completed", "request_id": "pending"},
         ],
+        voice_leases=registry,
     )
     original_lease = registry.lease_profile
 
@@ -72,9 +73,8 @@ def test_parent_sends_the_leased_recipe_even_after_alias_changes(
 
 
 def test_worker_does_not_reread_mutable_recipe_between_chunks(tmp_path: Path, monkeypatch) -> None:
-    registry = voices.VoiceRegistry(tmp_path / "voices.json", tmp_path / "audio")
+    registry = VoiceRegistry.open(tmp_path / "voices.json", tmp_path / "audio")
     registry.create_custom_profile(name="test", instruction="old recipe", seed=11, voice_id="test")
-    monkeypatch.setattr(voices, "_GLOBAL_VOICE_REGISTRY", registry)
     calls: list[dict[str, Any]] = []
     seeds: list[int] = []
     mlx = ModuleType("mlx")
@@ -107,7 +107,13 @@ def test_worker_does_not_reread_mutable_recipe_between_chunks(tmp_path: Path, mo
     engine._delivery_stats = Counter()
     monkeypatch.setattr(engine, "_to_pcm", lambda value: b"\0\0" * 10)
     chunks = list(
-        engine.synthesize("One sentence. " * 50, voice="test", speed=1.0, language="auto")
+        engine.synthesize(
+            "One sentence. " * 50,
+            voice="test",
+            speed=1.0,
+            language="auto",
+            profile=registry.get_profile("test"),
+        )
     )
     assert len(chunks) == len(calls) > 1
     assert {call["instruct"] for call in calls} == {"old recipe"}
@@ -149,8 +155,7 @@ def test_private_snapshot_cannot_fall_back_to_registry(monkeypatch) -> None:
     def forbidden(*args, **kwargs):
         raise AssertionError("second registry read")
 
-    monkeypatch.setattr(worker_module, "get_voice_profile", forbidden)
-    monkeypatch.setattr("speechrail.backends.qwen3_voice_binding.get_voice_profile", forbidden)
+    monkeypatch.setattr(worker_module, "get_system_voice_profile", forbidden)
     assert worker_module.generation_condition("voice_design", "test", profile=profile) == {
         "voice": None,
         "instruct": "leased",

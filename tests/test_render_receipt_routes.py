@@ -14,9 +14,9 @@ from speechrail.config import Settings
 from speechrail.domain.model_spec import required_spec_artifact
 from speechrail.domain.ports import AudioChunk, SpeechRequest
 from speechrail.domain.render_recipe import PRONUNCIATION_UNUSED
-from speechrail.domain.tts import VoiceRegistry
 from speechrail.domain.tts_pronunciation import PronunciationRegistry
 from speechrail.domain.tts_sampling import TtsSamplingObservation
+from speechrail.infrastructure.voice_registry import FileVoiceRegistry as VoiceRegistry
 
 _PCM = b"\x01\x00\x02\x00\x03\x00"
 
@@ -81,7 +81,7 @@ def _client(
     tts_key = required_spec_artifact("quality", "tts_custom_voice")
     base_key = required_spec_artifact("quality", "tts_base")
     assert asr_key is not None and tts_key is not None and base_key is not None
-    registry = VoiceRegistry(
+    registry = VoiceRegistry.open(
         storage_path=tmp_path / "custom_voices.json",
         voices_dir=tmp_path / "voices",
     )
@@ -93,10 +93,6 @@ def _client(
         duration_seconds=3.0,
     )
     assert profile.revision is not None
-    monkeypatch.setattr(
-        "speechrail.domain.tts._GLOBAL_VOICE_REGISTRY",
-        registry,
-    )
     synth = ReceiptSynthesizer(
         fail=fail,
         fail_after_first_chunk=fail_after_first_chunk,
@@ -131,6 +127,7 @@ def _client(
             tts_base_artifact_key=base_key,
         ),
         tts_synthesizer=synth,
+        voice_store=registry,
     )
     return TestClient(app), synth, profile.revision, pronunciation
 
@@ -683,10 +680,12 @@ def test_pcm_response_cancel_closes_backend_before_releasing_lane_or_receipt(
 
 
 @pytest.mark.parametrize("mode", ["start", "body", "cancel", "close-failed"])
-def test_pcm_send_failure_joins_prefetched_backend_and_isolates_failed_cleanup(
-    tmp_path: Path, monkeypatch, mode: str,
+@pytest.mark.parametrize("response_format", ["pcm", "mp3"])
+def test_stream_send_failure_joins_prefetched_backend_and_isolates_failed_cleanup(
+    tmp_path: Path, monkeypatch, mode: str, response_format: str,
 ) -> None:
     import asyncio
+    import contextlib
 
     import pytest
     from starlette.requests import ClientDisconnect
@@ -738,6 +737,15 @@ def test_pcm_send_failure_joins_prefetched_backend_and_isolates_failed_cleanup(
 
     monkeypatch.setattr(synth, "synthesize", synthesize)
 
+    if response_format == "mp3":
+        async def fake_encoder(source, *, pcm_counter, **kwargs):
+            async with contextlib.aclosing(source):
+                async for chunk in source:
+                    pcm_counter.accept(len(chunk))
+                    yield b"fake-encoded-frame"
+
+        monkeypatch.setattr("speechrail.http.routes.audio._stream_encode_container", fake_encoder)
+
     class SendFailureResponse(original_response):
         async def __call__(self, scope, receive, send):
             receipt_ids.append(self.headers["SpeechRail-Receipt-Id"])
@@ -754,7 +762,7 @@ def test_pcm_send_failure_joins_prefetched_backend_and_isolates_failed_cleanup(
 
     monkeypatch.setattr("speechrail.http.routes.audio.StreamingResponse", SendFailureResponse)
     payload = _payload()
-    payload["response_format"] = "pcm"
+    payload["response_format"] = response_format
     def request():
         return client.post(
             "/v1/audio/speech", json=payload,

@@ -180,8 +180,8 @@ def test_concurrent_validations_both_persist_their_record(
     # A fresh repository instance reads durable JSON/WAV, rather than relying
     # on either response snapshot or the original repository's memory.
     reopened = VoiceDesignRepository(
-        registry.storage_path.with_name("voice_design_candidates.json"),
-        registry.storage_path.with_name("voice_design_candidates"),
+        registry.artifact_path("voice_design_candidates.json"),
+        registry.artifact_path("voice_design_candidates"),
     )
     durable = reopened.get(candidate_id)
     assert {item.validation_id for item in durable.validations} == set(returned_ids)
@@ -326,8 +326,8 @@ def test_validation_rechecks_terminal_state_inside_the_write_transaction(
     assert response.json()["error"]["code"] == "voice_design_revision_conflict"
     assert response.headers["x-request-id"]
     repository = VoiceDesignRepository(
-        registry.storage_path.with_name("voice_design_candidates.json"),
-        registry.storage_path.with_name("voice_design_candidates"),
+        registry.artifact_path("voice_design_candidates.json"),
+        registry.artifact_path("voice_design_candidates"),
     )
     stored = repository.get(candidate_id)
     assert stored.state == terminal_state
@@ -364,8 +364,8 @@ def test_conflicting_machine_facts_for_one_validation_id_return_a_conflict(
     assert response.json()["error"]["code"] == "voice_design_revision_conflict"
     assert response.headers["x-request-id"]
     repository = VoiceDesignRepository(
-        registry.storage_path.with_name("voice_design_candidates.json"),
-        registry.storage_path.with_name("voice_design_candidates"),
+        registry.artifact_path("voice_design_candidates.json"),
+        registry.artifact_path("voice_design_candidates"),
     )
     assert len(repository.get(candidate_id).validations) == 1
     assert repository.get(candidate_id).validations[0].machine_status == "pass"
@@ -384,8 +384,8 @@ def test_the_validation_limit_refuses_instead_of_evicting_a_returned_record(
     validate_candidate(client, asr, candidate_id)
 
     repository = VoiceDesignRepository(
-        registry.storage_path.with_name("voice_design_candidates.json"),
-        registry.storage_path.with_name("voice_design_candidates"),
+        registry.artifact_path("voice_design_candidates.json"),
+        registry.artifact_path("voice_design_candidates"),
     )
     candidate = repository.get(candidate_id)
     template = candidate.validations[-1]
@@ -432,8 +432,8 @@ def test_inflight_validation_cannot_undo_a_completed_transition(
     first = validate_candidate(client, asr, candidate_id)["candidate"]["validations"][-1]
     human_review(client, candidate_id, validation_id=first["validation_id"])
     repository = VoiceDesignRepository(
-        registry.storage_path.with_name("voice_design_candidates.json"),
-        registry.storage_path.with_name("voice_design_candidates"),
+        registry.artifact_path("voice_design_candidates.json"),
+        registry.artifact_path("voice_design_candidates"),
     )
     assets_before = set(repository.assets_dir.rglob("*.wav"))
     original_transcribe = execution.transcribe_pcm
@@ -525,8 +525,8 @@ def test_two_repository_instances_compete_for_the_last_validation_slot(
     validate_candidate(client, asr, candidate_id)
     repositories = [
         VoiceDesignRepository(
-            registry.storage_path.with_name("voice_design_candidates.json"),
-            registry.storage_path.with_name("voice_design_candidates"),
+            registry.artifact_path("voice_design_candidates.json"),
+            registry.artifact_path("voice_design_candidates"),
         )
         for _ in range(2)
     ]
@@ -616,8 +616,8 @@ def test_validation_save_failure_only_rolls_back_the_new_asset(
     confirm_candidate(client, asr, candidate_id)
     validate_candidate(client, asr, candidate_id)
     repository = VoiceDesignRepository(
-        registry.storage_path.with_name("voice_design_candidates.json"),
-        registry.storage_path.with_name("voice_design_candidates"),
+        registry.artifact_path("voice_design_candidates.json"),
+        registry.artifact_path("voice_design_candidates"),
     )
     before = repository.get(candidate_id)
     template = before.validations[-1]
@@ -664,7 +664,7 @@ def test_machine_validation_refuses_a_conflicting_existing_audio_asset(
     confirm_candidate(client, asr, candidate_id)
     first = validate_candidate(client, asr, candidate_id)["candidate"]["validations"][-1]
     asset = (
-        registry.storage_path.with_name("voice_design_candidates")
+        registry.artifact_path("voice_design_candidates")
         / candidate_id
         / f"{first['validation_id']}.wav"
     )

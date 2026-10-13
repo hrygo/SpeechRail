@@ -2,6 +2,58 @@
 
 ## [Unreleased]
 
+## [3.8.2] - 2026-10-10
+
+### Fixed
+
+- TTS 资源回收失败被隔离，不再拖垮其他准入：空闲 reclamation 确认失败时
+  只隔离受影响的 TTS lane，后续对该 lane 的准入返回
+  `503 backend_reclamation_failed`（`retryable=false`），不再伪装成可退避
+  重试的队列已满；串行重计算策略下受阻的 ASR 准入同样明确拒绝。隔离需
+  操作者恢复 runtime 后解除，能力发现成功不证明隔离已解除。`/health` 的
+  `asr_state`/`tts_state`/`streaming_state` 与相关能力声明新增
+  `reclamation_failed` 状态；全部普通 TTS lane 被隔离时 `tts_ready`
+  如实为 false，不再报「可按需服务」。
+- 会议导出备份先校验再报告成功：备份不可读或不完整时如实报告，不再把
+  失败写成已完成。
+- 成品音频在事务完成前验证：published audio 校验失败时事务不落盘，
+  半成品不再记为发布成功。
+- minutes 对不可用会议拒绝入队；时间戳对齐在实际 ASR 工作开始前拒绝
+  不可用请求，不再先跑模型再失败。
+- 会话封存要求有界 drain 与存储证明齐备才进行；archive 确认不清除新
+  写入的 lease；transcript 保存在单一持久化 owner 下可恢复，中断后不丢
+  已保存正文。
+- render snapshot 保留服务执行身份，保存的制作配方与实际渲染事实一致。
+- 已删除的作品与被拒的配音候选有清理路径；配音冻结条件漂移时提供新
+  项目入口，不再留在不可用状态。
+- macOS 列表选择交互统一，修复历史会话与稿件切换卡顿（#341）。
+- 控制面与任务队列按观测值呈现状态，不再统一降级为未知。
+
+### Added
+
+- ASR 流式解码验收的聚焦诊断工具：`examples/perf/asr_focus_analysis.py`、
+  `examples/perf/asr_segment_error_diagnostics.py` 及配套回归测试，按错误
+  类型分布定位 streaming decode acceptance 问题；仅开发者工具，公共接口
+  行为不变。
+
+### Notes
+
+- 直接 WebSocket 调用方需处理新增的 `backend_reclamation_failed` 错误码：
+  不可退避重试，须等操作者恢复 runtime 后再请求；Realtime 契约 6.3.1
+  已声明该语义。
+- 移除随仓库分发的 `video-podcast` skill 与视频制作示例脚本；macOS
+  配音台等音频创作功能不受影响。
+- 内部重构（对外行为不变）：MeetingView 按阶段拆分、SessionStore 按 MA
+  域拆分、creator workflows 移入 feature owner、realtime session 按能力
+  归属、render 单一生周期 owner、voice store lease owner，typed voice
+  admission policy 与 discovery JSON 隔离。
+
+### 验收范围
+
+- 确定性回归使用 fake backend、合成输入与临时存储；版本一致性、契约
+  lint 与 CI 门禁随合并与发布 tag 执行。真实模型质量、性能与长时稳定性
+  不由上述回归证明；制品安装后的本机验收在发布后单独进行。
+
 ## [3.8.1] - 2026-10-07
 
 ### Added

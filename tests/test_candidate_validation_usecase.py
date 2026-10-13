@@ -22,6 +22,7 @@ from speechrail.application.voice_validation_execution import (
     ValidationRuntime,
     empty_synthesis,
 )
+from speechrail.backends.tts_execution_adapter import bind_tts_execution
 from speechrail.config.model_catalog import load_catalog
 from speechrail.config.selection import ActiveModelCatalog
 from speechrail.domain import voice_quality as vq
@@ -153,6 +154,7 @@ async def test_candidate_usecase_owns_binding_and_revision_commit(
             ),
             runtime=ValidationRuntime(
                 synthesizer=synthesizer,
+                tts_execution=bind_tts_execution(synthesizer),
                 transcriber=None,
                 governor=None,
                 admission=None,
