@@ -204,16 +204,16 @@ def segment_error_diagnostics(
             or start != cursor or end <= start
             or end - start > max_segment_ms * 24 + 1
             or not isinstance(text, str)
-            or preview is not None and not isinstance(preview, str)
+            or (preview is not None and not isinstance(preview, str))
         ):
             raise ValueError("invalid diagnostic segment coverage or budget")
-        if len(text) > 20_000 or preview is not None and len(preview) > 20_000:
+        if len(text) > 20_000 or (preview is not None and len(preview) > 20_000):
             raise ValueError("diagnostic text exceeds bounds")
         normalized = _characters(text)
         normalized_preview = _characters(preview) if preview is not None else None
         if (
             len(normalized) > _MAX_CHARACTERS
-            or normalized_preview is not None and len(normalized_preview) > _MAX_CHARACTERS
+            or (normalized_preview is not None and len(normalized_preview) > _MAX_CHARACTERS)
         ):
             raise ValueError("diagnostic text exceeds bounds")
         raw_segments.append(text)
