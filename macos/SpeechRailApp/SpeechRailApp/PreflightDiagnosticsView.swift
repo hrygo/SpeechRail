@@ -734,14 +734,14 @@ public struct PreflightDiagnosticsView: View {
         """
         _ = NSPasteboard.general.clearContents()
         reportCopySucceeded = NSPasteboard.general.setString(report, forType: .string)
-        withAnimation(reduceMotion ? nil : .easeOut(duration: SpeechRailDesignTokens.Motion.standardDuration)) {
+        withAnimation(SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.standardEaseOut, reduceMotion: reduceMotion)) {
             reportMessage = reportCopySucceeded ? "已复制脱敏诊断报告" : "复制失败，请重试"
         }
         // 回执是临时的：几秒后页脚的事实位要还给「上次诊断 … · 共 N 项」。
         Task {
             try? await Task.sleep(for: Self.reportReceiptDuration)
             guard reportMessage != nil else { return }
-            withAnimation(reduceMotion ? nil : .easeOut(duration: SpeechRailDesignTokens.Motion.standardDuration)) {
+            withAnimation(SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.standardEaseOut, reduceMotion: reduceMotion)) {
                 reportMessage = nil
             }
         }

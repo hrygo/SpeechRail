@@ -570,9 +570,9 @@ public struct AssistantView: View {
                     )
             }
         }
-        .frame(maxWidth: .infinity, minHeight: 460, maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, minHeight: SpeechRailDesignTokens.Layout.assistantWorkbenchMinimumHeight, maxHeight: .infinity, alignment: .topLeading)
         .animation(
-            reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.88),
+            SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.drawerSpring, reduceMotion: reduceMotion),
             value: isInspectorCollapsed
         )
     }
@@ -2860,7 +2860,7 @@ public struct AssistantView: View {
             Picker(
                 "",
                 selection: $inspectorTab.animation(
-                    reduceMotion ? nil : .easeInOut(duration: 0.12)
+                    SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.tabTransition, reduceMotion: reduceMotion)
                 )
             ) {
                 ForEach(InspectorTab.allCases) { tab in
@@ -4280,7 +4280,7 @@ public struct AssistantView: View {
             }
         }
         .padding(SpeechRailDesignTokens.Layout.cardInset)
-        .frame(width: 420)
+        .frame(width: SpeechRailDesignTokens.Layout.Sheet.compactWidth)
     }
 
     /// 「麦克风未授权」的唯一出口。`Privacy_Microphone` 这个锚点与音色克隆、字幕带用的是
@@ -4336,7 +4336,7 @@ public struct AssistantView: View {
             }
         }
         .padding(SpeechRailDesignTokens.Layout.cardInset)
-        .frame(width: 520)
+        .frame(width: SpeechRailDesignTokens.Layout.Sheet.formWidth)
     }
 
     private var configurationHelpSheet: some View {
@@ -4361,7 +4361,7 @@ public struct AssistantView: View {
             }
         }
         .padding(SpeechRailDesignTokens.Layout.cardInset)
-        .frame(width: 520)
+        .frame(width: SpeechRailDesignTokens.Layout.Sheet.formWidth)
     }
 
     // MARK: - 辅助面板响应式联动（接入中央 WindowLayoutContract）
@@ -4391,7 +4391,7 @@ public struct AssistantView: View {
         if reduceMotion {
             update()
         } else {
-            withAnimation(.spring(response: 0.30, dampingFraction: 0.88), update)
+            withAnimation(SpeechRailDesignTokens.Motion.interactiveSpring, update)
         }
     }
 
@@ -4400,7 +4400,7 @@ public struct AssistantView: View {
         if reduceMotion {
             update()
         } else {
-            withAnimation(.easeInOut(duration: 0.16), update)
+            withAnimation(SpeechRailDesignTokens.Motion.panelTransition, update)
         }
     }
 
@@ -4409,7 +4409,7 @@ public struct AssistantView: View {
         if reduceMotion {
             update()
         } else {
-            withAnimation(.easeInOut(duration: 0.16), update)
+            withAnimation(SpeechRailDesignTokens.Motion.panelTransition, update)
         }
     }
 }
@@ -4466,7 +4466,7 @@ struct InputLevelSheet: View {
             }
         }
         .padding(SpeechRailDesignTokens.Layout.cardInset)
-        .frame(width: 460)
+        .frame(width: SpeechRailDesignTokens.Layout.Sheet.regularWidth)
         .onAppear { start() }
         .onDisappear {
             task?.cancel()

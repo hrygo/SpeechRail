@@ -214,7 +214,7 @@ public struct ControlCenterView: View {
                 Text(route.title)
             } icon: {
                 Image(systemName: route.systemImage)
-                    .font(.system(size: SpeechRailDesignTokens.Icon.navigationSize, weight: .regular))
+                    .font(SpeechRailDesignTokens.Typography.navigationIcon)
                     .symbolRenderingMode(.monochrome)
                     .frame(
                         width: SpeechRailDesignTokens.Icon.navigationFrame,
@@ -279,7 +279,7 @@ public struct ControlCenterView: View {
         } label: {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 Image(systemName: AppRoute.overview.systemImage)
-                    .font(.system(size: SpeechRailDesignTokens.Icon.navigationSize, weight: .regular))
+                    .font(SpeechRailDesignTokens.Typography.navigationIcon)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .frame(
                         width: SpeechRailDesignTokens.Icon.navigationFrame,
@@ -338,7 +338,7 @@ public struct ControlCenterView: View {
                 Text(title)
             } icon: {
                 Image(systemName: systemImage)
-                    .font(.system(size: SpeechRailDesignTokens.Icon.navigationSize, weight: .regular))
+                    .font(SpeechRailDesignTokens.Typography.navigationIcon)
                     .frame(
                         width: SpeechRailDesignTokens.Icon.navigationFrame,
                         height: SpeechRailDesignTokens.Icon.navigationFrame

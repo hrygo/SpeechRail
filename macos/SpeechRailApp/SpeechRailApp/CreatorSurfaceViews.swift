@@ -66,11 +66,11 @@ public struct DubbingDeskView: View {
             }
             .frame(maxHeight: .infinity, alignment: .top)
             .animation(
-                reduceMotion ? nil : .easeOut(duration: SpeechRailDesignTokens.Motion.standardDuration),
+                SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.standardEaseOut, reduceMotion: reduceMotion),
                 value: model.lastCreatedWork?.id
             )
             .animation(
-                reduceMotion ? nil : .easeOut(duration: SpeechRailDesignTokens.Motion.standardDuration),
+                SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.standardEaseOut, reduceMotion: reduceMotion),
                 value: model.pendingDubbing == nil
             )
         }
@@ -120,8 +120,8 @@ public struct DubbingDeskView: View {
     // MARK: 文稿
 
     private static let scriptLineSpacing: CGFloat = 4
-    private static let voicePopoverWidth: CGFloat = 320
-    private static let voicePopoverHeight: CGFloat = 280
+    private static let voicePopoverWidth: CGFloat = SpeechRailDesignTokens.Layout.creatorVoicePopoverWidth
+    private static let voicePopoverHeight: CGFloat = SpeechRailDesignTokens.Layout.creatorVoicePopoverHeight
 
     /// 2026-09-15 用户复核 + 2026-09-16 三度、五度、六度校准（REDESIGN-SPEC §7.1）：
     /// 输入区不占满剩余高度。高度**跟随正文**：短文稿给下限 144pt（静止状态看得见
@@ -368,6 +368,8 @@ public struct DubbingDeskView: View {
             }
             .buttonStyle(.borderless)
             .disabled(!voice.available)
+            .help(isPreviewing ? "停止试听" : "试听样本")
+            .speechRailPointerCursor()
             .accessibilityLabel(isPreviewing ? "停止试听 \(voice.name)" : "试听 \(voice.name)")
         }
         .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
@@ -1126,7 +1128,7 @@ public struct VoiceDesignView: View {
                         } label: {
                             HStack(spacing: SpeechRailDesignTokens.Chip.labelSpacing) {
                                 Image(systemName: "plus")
-                                    .font(.system(size: SpeechRailDesignTokens.Chip.iconSize))
+                                    .font(SpeechRailDesignTokens.Typography.chipIcon)
                                     // 墨迹按稿的 8.66pt，布局框仍是稿的 13pt（`iconBox`）：
                                     // 只按墨迹改字号会让胶囊比稿窄约 3pt。
                                     .frame(

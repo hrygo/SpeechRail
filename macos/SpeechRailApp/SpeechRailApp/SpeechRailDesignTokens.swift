@@ -313,6 +313,27 @@ public enum SpeechRailDesignTokens {
         public static let personaEditorMinimumHeight: CGFloat = 140
         /// 语音输入电平表的条高（issue #90 收敛）。
         public static let inputLevelMeterHeight: CGFloat = 22
+        /// 能力与未管理制品行的图标容器方框 (32pt)。
+        public static let capabilityTileSize: CGFloat = 32
+        /// 语音助手工作台主区最小高度 (460pt)。
+        public static let assistantWorkbenchMinimumHeight: CGFloat = 460
+        /// 配音台音色选择弹出层的标准尺寸 (320 × 280 pt)。
+        public static let creatorVoicePopoverWidth: CGFloat = 320
+        public static let creatorVoicePopoverHeight: CGFloat = 280
+
+        /// 模态弹窗与工作区 Sheet 的标准宽度阶梯。
+        public enum Sheet {
+            /// 紧凑型弹层（重命名记录、快速确认）：420pt。
+            public static let compactWidth: CGFloat = 420
+            /// 详情/测试弹层（设备自检、快捷键帮助）：460pt。
+            public static let regularWidth: CGFloat = 460
+            /// 表单/引导弹层（角色创建、配置指引、读法标注）：520pt。
+            public static let formWidth: CGFloat = 520
+            /// 宽屏工作区弹层（计时试读）：560pt。
+            public static let wideWidth: CGFloat = 560
+            /// 重型返修工作台（配音返修）：720pt。
+            public static let prominentWidth: CGFloat = 720
+        }
     }
 
     /// Native macOS menus stay compact; custom menu-bar rows use the same
@@ -951,6 +972,8 @@ public enum SpeechRailDesignTokens {
         public static let container: CGFloat = 12
         /// 稿 `radius/control` / `radius/field`：控件圆角（叶面在容器给不出半径时也用它兜底）。
         public static let nested: CGFloat = 8
+        /// 紧凑标签、微型按钮、状态小胶囊与键帽的紧凑圆角 (4pt)。
+        public static let compact: CGFloat = 4
 
         /// 容器形状：声明自己的圆角，并把它发布给子层作为同心推导的基准。
         public static var containerShape: RoundedRectangle {
@@ -967,6 +990,11 @@ public enum SpeechRailDesignTokens {
         /// 逐项吻合；12pt continuous 是 29.2pt² / +10.0pt，两者不会混淆 —— §11.6 第五十一轮）。
         public static var controlShape: RoundedRectangle {
             RoundedRectangle(cornerRadius: nested, style: .continuous)
+        }
+
+        /// 紧凑微型元素形状：固定 `compact` (4pt)。
+        public static var compactShape: RoundedRectangle {
+            RoundedRectangle(cornerRadius: compact, style: .continuous)
         }
     }
 
@@ -1096,6 +1124,16 @@ public enum SpeechRailDesignTokens {
         public static let iconMediumSemibold: Font = .system(size: 15, weight: .semibold)
         /// 15pt 语义图标（常规字重）：模型组合的状态图标（issue #90 收敛）。
         public static let iconMedium: Font = .system(size: 15)
+        /// 侧栏导航与工作区切换图标字形（15pt regular）。
+        public static let navigationIcon: Font = .system(size: Icon.navigationSize, weight: .regular)
+        /// 状态横幅主图标字形（26pt semibold）。
+        public static let statusBannerIcon: Font = .system(size: Control.statusBannerIconSize, weight: .semibold)
+        /// 轻量通知条图标字形（16pt semibold）。
+        public static let noticeIcon: Font = .system(size: Notice.iconSize, weight: .semibold)
+        /// 标注胶囊图标字形（10pt regular）。
+        public static let chipIcon: Font = .system(size: Chip.iconSize)
+        /// 会话页面级空态主图标字形（28pt regular）。
+        public static let sessionEmptyIcon: Font = .system(size: Layout.sessionEmptyIconSize)
     }
 
     public enum Color {
@@ -1284,6 +1322,14 @@ public enum SpeechRailDesignTokens {
         public static let elevatedShadow = SwiftUI.Color.black.opacity(0.18)
         public static let interactionHover = Color.quaternaryFill.opacity(Interaction.hoverFillOpacity * 6)
         public static let interactionPressed = Color.quaternaryFill.opacity(Interaction.pressedFillOpacity * 6)
+
+        /// macOS 26 系统级 Liquid Glass / 浮层材质规范：
+        /// - 浮动窗口/模态层统一使用 `.regularMaterial`；
+        /// - 贴合屏幕的独立字幕控制条使用 `.thinMaterial`；
+        /// - 提词器大屏舞台的透光阅读底材使用 `.ultraThinMaterial`。
+        public static let elevatedMaterial: Material = .regularMaterial
+        public static let floatingToolbarMaterial: Material = .thinMaterial
+        public static let stageOverlayMaterial: Material = .ultraThinMaterial
     }
 
     public enum Navigation {
@@ -1302,9 +1348,34 @@ public enum SpeechRailDesignTokens {
         public static let reducedDuration: Double = 0
         public static let hoverDuration: Double = 0.14
         public static let pressDuration: Double = 0.12
+        /// 快速面板与弹层展开收起的标准时长（0.16s）。
+        public static let quickDuration: Double = 0.16
+
         public static let selectionFeedback = Animation.easeOut(duration: 0.14)
         public static let hoverFeedback = Animation.easeOut(duration: hoverDuration)
         public static let pressFeedback = Animation.easeOut(duration: pressDuration)
+
+        /// 会话抽屉与响应式面板展开/收起的标准交互弹簧动效（WWDC25 HIG 阻尼无振荡标准）。
+        public static let interactiveSpring = Animation.spring(response: 0.30, dampingFraction: 0.88)
+        /// 侧栏辅助区折叠与布局合同响应的稳定弹簧动效。
+        public static let drawerSpring = Animation.spring(response: 0.32, dampingFraction: 0.88)
+        /// 内心 OS 等高级抽屉展开的平滑平移曲线。
+        public static let smoothTransition = Animation.smooth(duration: 0.18)
+        /// 快捷面板显示/隐藏与 sheet 切换的标准渐变转场。
+        public static let panelTransition = Animation.easeInOut(duration: quickDuration)
+        /// 标准淡入淡出动画。
+        public static let standardEaseOut = Animation.easeOut(duration: standardDuration)
+        public static let standardEaseInOut = Animation.easeInOut(duration: standardDuration)
+        /// 选项卡与分段切换动画。
+        public static let tabTransition = Animation.easeInOut(duration: pressDuration)
+        /// 提词器舞台平滑滚动贝塞尔曲线（WWDC25 HIG 柔和减速标准）。
+        public static let stageScrollCurve: Animation = .timingCurve(0.2, 0.0, 0.1, 1.0, duration: 0.28)
+
+        /// 统一根据用户的辅助功能 Reduce Motion 偏好解析动画。
+        /// 当开启减弱动态效果时返回 `nil`，界面立刻切换不产生位移；未开启时返回指定的标准动效。
+        public static func resolved(_ animation: Animation?, reduceMotion: Bool) -> Animation? {
+            reduceMotion ? nil : animation
+        }
     }
 
     // MARK: 提词器（准备页与独立舞台窗口）
@@ -1478,21 +1549,35 @@ public extension View {
             .containerShape(SpeechRailDesignTokens.Corner.containerShape)
     }
 
-    /// 唯一焦点环：系统焦点色 + 一套线宽，形状跟随所在容器（§9：焦点色不随页面变化）。
-    func speechRailFocusRing(
+    /// 唯一焦点环：系统焦点色 + 规范线宽与平滑转场，形状支持自定义（默认为同心推导 `Corner.nestedShape`）。
+    func speechRailFocusRing<S: Shape>(
         _ isFocused: Bool,
+        in shape: S,
         inset: CGFloat = SpeechRailDesignTokens.Interaction.focusRingInset
     ) -> some View {
         overlay {
-            SpeechRailDesignTokens.Corner.nestedShape
+            shape
                 .stroke(
                     SpeechRailDesignTokens.Navigation.focusRing,
                     lineWidth: SpeechRailDesignTokens.Interaction.focusLineWidth
                 )
                 .padding(inset)
                 .opacity(isFocused ? 1 : 0)
+                .animation(SpeechRailDesignTokens.Motion.selectionFeedback, value: isFocused)
                 .allowsHitTesting(false)
         }
+    }
+
+    /// 唯一焦点环（默认同心叶面形状）。
+    func speechRailFocusRing(
+        _ isFocused: Bool,
+        inset: CGFloat = SpeechRailDesignTokens.Interaction.focusRingInset
+    ) -> some View {
+        speechRailFocusRing(
+            isFocused,
+            in: SpeechRailDesignTokens.Corner.nestedShape,
+            inset: inset
+        )
     }
 
     /// 非输入槽（状态 / 操作条等）：`surface/panel` 底色 + 控件圆角，不带输入槽的描边。
@@ -1563,7 +1648,10 @@ public struct SpeechRailSystemSurfaceModifier: ViewModifier {
         case .elevated:
             // Only window-level floating layers elevate (§5.2).
             content
-                .background(.regularMaterial, in: SpeechRailDesignTokens.Corner.containerShape)
+                .background(
+                    SpeechRailDesignTokens.Surface.elevatedMaterial,
+                    in: SpeechRailDesignTokens.Corner.containerShape
+                )
                 .containerShape(SpeechRailDesignTokens.Corner.containerShape)
                 .shadow(
                     color: SpeechRailDesignTokens.Surface.elevatedShadow,

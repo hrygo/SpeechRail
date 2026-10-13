@@ -297,7 +297,7 @@ public struct MeetingView: View {
         if reduceMotion {
             update()
         } else {
-            withAnimation(.spring(response: 0.30, dampingFraction: 0.88), update)
+            withAnimation(SpeechRailDesignTokens.Motion.interactiveSpring, update)
         }
     }
 }

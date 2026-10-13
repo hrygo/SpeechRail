@@ -58,7 +58,7 @@ public struct SessionEmptyState<Actions: View>: View {
     public var body: some View {
         VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
             Image(systemName: systemImage)
-                .font(.system(size: SpeechRailDesignTokens.Layout.sessionEmptyIconSize))
+                .font(SpeechRailDesignTokens.Typography.sessionEmptyIcon)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                 .accessibilityHidden(true)
 
@@ -223,7 +223,7 @@ public struct SessionOwnershipRow: View {
         } label: {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 Image(systemName: "mic")
-                    .font(.system(size: SpeechRailDesignTokens.Icon.navigationSize, weight: .regular))
+                    .font(SpeechRailDesignTokens.Typography.navigationIcon)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .frame(
                         width: SpeechRailDesignTokens.Icon.navigationFrame,
@@ -441,7 +441,7 @@ public struct SessionLibraryView: View {
         if reduceMotion {
             update()
         } else {
-            withAnimation(.spring(response: 0.30, dampingFraction: 0.88), update)
+            withAnimation(SpeechRailDesignTokens.Motion.interactiveSpring, update)
         }
     }
 

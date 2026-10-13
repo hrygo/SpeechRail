@@ -505,7 +505,7 @@ struct CaptionBandView: View {
                             .id(Self.partialAnchor)
                     }
                     Color.clear
-                        .frame(height: 1)
+                        .frame(height: SpeechRailDesignTokens.Spacing.hairline)
                         .id(Self.bottomAnchor)
                 }
             }
@@ -583,7 +583,7 @@ struct CaptionBandView: View {
         .padding(.vertical, SpeechRailDesignTokens.Layout.captionBandToolbarPaddingV)
         .background(
             RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Layout.captionBandToolbarCornerRadius)
-                .fill(.thinMaterial)
+                .fill(SpeechRailDesignTokens.Surface.floatingToolbarMaterial)
         )
         .padding(.horizontal, SpeechRailDesignTokens.Layout.captionBandToolbarPaddingH)
         .accessibilityIdentifier("caption-band-toolbar")

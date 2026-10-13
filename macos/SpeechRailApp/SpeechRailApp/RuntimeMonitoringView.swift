@@ -2103,7 +2103,7 @@ public struct RuntimeMonitoringView: View {
         """
         _ = NSPasteboard.general.clearContents()
         if NSPasteboard.general.setString(report, forType: .string) {
-            withAnimation(reduceMotion ? nil : .easeOut(duration: SpeechRailDesignTokens.Motion.standardDuration)) {
+            withAnimation(SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.standardEaseOut, reduceMotion: reduceMotion)) {
                 reportMessage = "已复制脱敏监控摘要"
             }
         } else {

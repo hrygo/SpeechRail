@@ -795,6 +795,6 @@ enum TeleprompterStageRecoveryPresentation {
 /// Reduce Motion 开启时舞台不做位移动画：阅读位置照常更新，但不滚动画面。
 enum TeleprompterStageMotionPolicy {
     static func scrollAnimation(reduceMotion: Bool) -> Animation? {
-        reduceMotion ? nil : .timingCurve(0.2, 0.0, 0.1, 1.0, duration: 0.28)
+        SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.stageScrollCurve, reduceMotion: reduceMotion)
     }
 }

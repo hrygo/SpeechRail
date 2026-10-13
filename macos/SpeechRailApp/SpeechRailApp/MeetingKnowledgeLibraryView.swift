@@ -1105,8 +1105,8 @@ struct MeetingKnowledgeLibraryView: View {
                         Text(snapshot.status.title)
                             .font(.caption)
                             .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
-                            .padding(.vertical, 2)
-                            .background(SpeechRailDesignTokens.Color.recessedField, in: .rect(cornerRadius: 4))
+                            .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
+                            .background(SpeechRailDesignTokens.Color.recessedField, in: SpeechRailDesignTokens.Corner.compactShape)
                     }
                 }
                 archiveOutcome
@@ -1582,7 +1582,7 @@ struct MeetingLibraryRowView: View {
                     .textSelection(.disabled)
             }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityDescription)
     }

@@ -50,7 +50,7 @@ extension MeetingView {
                             }
                             // 底边标记：量得出「离底部多远」，回看时才不会被抢滚动。
                             Color.clear
-                                .frame(height: 1)
+                                .frame(height: SpeechRailDesignTokens.Spacing.hairline)
                                 .background(
                                     GeometryReader { geo in
                                         Color.clear.preference(
