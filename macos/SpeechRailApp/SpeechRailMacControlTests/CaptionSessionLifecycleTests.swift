@@ -224,6 +224,8 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         try await h.emit(.attribution(itemID: "after", units: [
             .init(segmentUID: "unit-after", speaker: "A", timingQuality: "aligned")
         ], isFinal: true))
+        try await h.emit(.serverError(code: "control", message: "续接归属栅栏", requestID: nil))
+        try await h.settle { $0.session.lastFailure == "续接归属栅栏" }
         let saved = await h.session.waitForPendingSaves(recordID: id)
         XCTAssertTrue(saved.isComplete)
         let rows = try await h.store.lines(sessionID: id)
