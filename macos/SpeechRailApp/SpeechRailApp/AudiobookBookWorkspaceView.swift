@@ -381,7 +381,7 @@ public struct AudiobookBookWorkspaceView: View {
                         StatusPill(tone: .neutral, label: "待分析")
                     }
 
-                    Text("\(atom.sourceRange.scalarCount) 字")
+                    Text("\(atom.sourceRange.byteCount) 字节")
                         .font(SpeechRailDesignTokens.Typography.technical)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
 
