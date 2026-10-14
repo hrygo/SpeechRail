@@ -365,6 +365,7 @@ func executeTranscriptRecoverySQL(directory: URL, statement: String) throws {
     )
     let pointer = try XCTUnwrap(db)
     defer { sqlite3_close_v2(pointer) }
+    XCTAssertEqual(sqlite3_busy_timeout(pointer, 10_000), SQLITE_OK)
     XCTAssertEqual(sqlite3_exec(pointer, statement, nil, nil, nil), SQLITE_OK)
 }
 
