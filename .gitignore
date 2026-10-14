@@ -51,7 +51,13 @@ secrets/
 .DS_Store
 .idea/
 .vscode/
+
+# AI assistant and local tooling directories
+.claude/
+.claude.json
 .omo/
+.opencode/
+.superpowers/
 
 # Local inference artifacts must stay outside the repository.
 *.safetensors
@@ -61,7 +67,3 @@ secrets/
 *.mp3
 *.m4a
 *.flac
-
-# Local opencode tooling directory
-.opencode/
-.superpowers
