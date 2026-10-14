@@ -10,13 +10,33 @@ extension MeetingView {
         CardSurface {
             VStack(alignment: .leading, spacing: 0) {
                 CardHead(title: postTab.title, detail: postDetail) {
-                    Picker("", selection: $postTab) {
-                        ForEach(PostTab.allCases) { tab in
-                            Text(tab.title).tag(tab)
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                        Picker("", selection: $postTab) {
+                            ForEach(PostTab.allCases) { tab in
+                                Text(tab.title).tag(tab)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+
+                        if postTab == .minutes, let body = displayedMinutesBody, !body.isEmpty {
+                            Button {
+                                copyMinutesToPasteboard(body)
+                            } label: {
+                                Label(
+                                    copiedNotice ?? "复制全文",
+                                    systemImage: copiedNotice != nil ? "checkmark" : "doc.on.doc"
+                                )
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .speechRailPointerCursor()
+                            .help("复制纪要全文至剪贴板")
                         }
                     }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
+                }
+                if postTab == .transcript, !reviewLines.isEmpty {
+                    transcriptFilterBar
                 }
                 ScrollView(.vertical) {
                     Group {
@@ -54,9 +74,9 @@ extension MeetingView {
                     StatusBanner(
                         kind: .standard,
                         tone: .attention,
-                        title: "纪要要用对话模型 · 文字记录已经存好了",
+                        title: "生成纪要需配置对话模型 · 文字记录已完整保存",
                         message: reason,
-                        actionTitle: "去设置里填"
+                        actionTitle: "前往设置"
                     ) {
                         openSettings()
                     }
@@ -64,7 +84,7 @@ extension MeetingView {
                     StatusBanner(
                         kind: .standard,
                         tone: .attention,
-                        title: "纪要没整理出来 · 文字记录已经存好了",
+                        title: "未生成会议纪要 · 文字记录已完整保存",
                         message: reason,
                         actionTitle: "重新生成"
                     ) {
@@ -72,13 +92,26 @@ extension MeetingView {
                     }
                 }
             case .queued, .running:
-                // 这里只显示状态标题，不显示失败原因：`MinutesGenerator` 的状态机里
-                // 失败只走 `.failed(reason)`，`queued`/`running` 不带原因字段；
-                // 若"一直转圈"且无失败横幅，原因是 `failMinutes` 落库失败，
-                // 查日志分类 `minutes.generate`（P1-5），不是界面吞了错误。
-                Text(meeting.minutes.state.title)
-                    .font(SpeechRailDesignTokens.Typography.callout)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                // 这里显示状态标题与进度预期卡片：
+                // 明确告知文字记录已安全落库，缓解用户等待大模型生成的心理焦虑。
+                HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    ProgressView()
+                        .controlSize(.small)
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.hairline) {
+                        Text(meeting.minutes.state.title)
+                            .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                        Text("文字记录已全部安全封存。大语言模型正在提炼会议核心决议、讨论要点与待办事项…")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(SpeechRailDesignTokens.Spacing.sm)
+                .background(SpeechRailDesignTokens.Color.recessedField, in: SpeechRailDesignTokens.Corner.controlShape)
+                .overlay(
+                    SpeechRailDesignTokens.Corner.controlShape.strokeBorder(SpeechRailDesignTokens.Color.separator, lineWidth: 0.5)
+                )
                 // MC-32：任务在排队那一刻就固定了用哪套设置。用户中途改设置，
                 // 这一条**不跟着换**——换了等于同一任务前后用了两个端点，出了错无法归因。
                 if meeting.minutes.jobConfigDiffersFromCurrent {
@@ -142,7 +175,18 @@ extension MeetingView {
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
             if let body = displayedMinutesBody, !body.isEmpty {
-                Text(body)
+                HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    Text("共 \(body.count) 字")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    if let copiedNotice {
+                        Text(copiedNotice)
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.ready)
+                    }
+                    Spacer(minLength: 0)
+                }
+                Text(LocalizedStringKey(body))
                     .font(SpeechRailDesignTokens.Typography.body)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
@@ -150,6 +194,57 @@ extension MeetingView {
                 Text("这一版是空的。")
                     .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+            }
+        }
+    }
+
+    /// 文字记录搜索过滤栏。
+    private var transcriptFilterBar: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Image(systemName: "magnifyingglass")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+            TextField("按关键词或说话人筛选文字记录…", text: $transcriptSearchText)
+                .textFieldStyle(.plain)
+            if !transcriptSearchText.isEmpty {
+                Button {
+                    transcriptSearchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                }
+                .buttonStyle(.plain)
+                .speechRailPointerCursor()
+            }
+            Text("\(filteredReviewLines.count) / \(reviewLines.count) 段")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+        }
+        .speechRailSingleLineInput(.compact)
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.top, SpeechRailDesignTokens.Spacing.sm)
+    }
+
+    private var filteredReviewLines: [TranscriptLine] {
+        let keyword = transcriptSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !keyword.isEmpty else { return reviewLines }
+        return reviewLines.filter { line in
+            line.text.localizedCaseInsensitiveContains(keyword) ||
+            (line.speakerLabel.flatMap { reviewSpeakerNames[$0] ?? $0 }?.localizedCaseInsensitiveContains(keyword) ?? false)
+        }
+    }
+
+    /// 复制纪要全文至系统剪贴板。
+    func copyMinutesToPasteboard(_ text: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+        copiedNotice = "已复制全文"
+        Task {
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            if copiedNotice == "已复制全文" {
+                copiedNotice = nil
             }
         }
     }
@@ -197,8 +292,13 @@ extension MeetingView {
                 Text("这一场还没有文字记录。")
                     .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+            } else if filteredReviewLines.isEmpty {
+                Text("没有匹配「\(transcriptSearchText)」的记录。")
+                    .font(SpeechRailDesignTokens.Typography.callout)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    .padding(.vertical, SpeechRailDesignTokens.Spacing.md)
             }
-            ForEach(reviewLines) { line in
+            ForEach(filteredReviewLines) { line in
                 HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
                     Text(Self.timecode(line.tStart ?? 0))
                         .font(SpeechRailDesignTokens.Typography.technicalValue)

@@ -84,35 +84,47 @@ extension MeetingView {
                     inspectorRow("时长", SessionCoordinator.formatted(meeting.elapsed))
                     inspectorRow("文字记录", "\(meeting.storedLineCount) 段")
                     inspectorRow(
-                        "说话人",
+                        "发言人数",
                         meeting.labeling.labels.isEmpty
-                            ? "还没有"
+                            ? "暂未区分"
                             : "\(meeting.labeling.labels.count) 位"
                     )
                     inspectorRow("音频来源", meeting.selection?.label ?? "还没选")
-                    inspectorRow("说话人", diarizationFact)
-                    inspectorRow("整理", meeting.minutes.state.title)
-                    inspectorRow("保存位置", session.libraryURL.lastPathComponent)
+                    inspectorRow("发言人区分", diarizationFact)
+                    inspectorRow("整理", liveMinutesFact)
+                    inspectorRow("本地存储", "仅本机安全存盘")
                 }
                 if let failure = meeting.lastFailure {
-                    Text(failure)
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.top, SpeechRailDesignTokens.Spacing.micro)
+                    HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Image(systemName: "info.circle")
+                            .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                        Text(failure)
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.top, SpeechRailDesignTokens.Spacing.xs)
                 }
             }
             .padding(SpeechRailDesignTokens.Spacing.md)
         }
     }
 
-    /// 右栏那一行说的也是人话：不出现「分人」这类行话（用户 2026-09-19）。
+    /// 会中与会后整理状态：会中显示预期，会后显示实际进展。
+    private var liveMinutesFact: String {
+        if meeting.phase.isLive {
+            return "会后自动提炼"
+        }
+        return meeting.minutes.state.title
+    }
+
+    /// 右栏那一行说的是人话：区分未开启、实时检测与降级状态。
     private var diarizationFact: String {
         switch meeting.labeling.state {
-        case .off: "不标"
-        case .active: "会标出"
-        case .degraded: "中途停了"
-        case .unavailable: "没能标"
+        case .off: "未开启"
+        case .active: "实时识别中"
+        case .degraded: "仅转写正文（声纹降级）"
+        case .unavailable: "未就绪"
         }
     }
 
@@ -251,10 +263,11 @@ extension MeetingView {
                             Button {
                                 Task { await adoptMinutesVersion(version, sessionID: sessionID) }
                             } label: {
-                                Text("采用")
-                                    .font(SpeechRailDesignTokens.Typography.caption)
+                                Text("采用此版")
+                                    .font(SpeechRailDesignTokens.Typography.captionMedium)
                             }
-                            .buttonStyle(.link)
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
                             .speechRailPointerCursor()
                             .accessibilityLabel("采用第 \(version.version) 版作为当前纪要")
                         }

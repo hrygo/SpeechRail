@@ -133,15 +133,17 @@ public enum ControlCommand: String, Codable, CaseIterable, Sendable {
     case modelCatalog
     case modelStatus
     case modelPrepare
+    case mediaCapabilities
+    case mediaExport
     case operationStatus
     case operationCancel
 
     public var requiresConfirmation: Bool {
         switch self {
-        case .start, .stop, .restart, .profileApply, .profileRollback, .modelPrepare:
+        case .start, .stop, .restart, .profileApply, .profileRollback, .modelPrepare, .mediaExport:
             true
         case .status, .preflight, .profileList, .profileStatus, .modelCatalog, .modelStatus,
-             .operationStatus, .operationCancel:
+             .mediaCapabilities, .operationStatus, .operationCancel:
             false
         }
     }
@@ -149,10 +151,10 @@ public enum ControlCommand: String, Codable, CaseIterable, Sendable {
     public var isMutation: Bool {
         switch self {
         case .start, .stop, .restart, .profileApply, .profileRollback, .modelPrepare,
-             .operationCancel:
+             .mediaExport, .operationCancel:
             true
         case .status, .preflight, .profileList, .profileStatus, .modelCatalog, .modelStatus,
-             .operationStatus:
+             .mediaCapabilities, .operationStatus:
             false
         }
     }
@@ -168,6 +170,7 @@ public enum ControlResponseStatus: String, Codable, Sendable {
     case rolledBack = "rolled_back"
     case cancelled
     case failed
+    case unavailable
 }
 
 public enum OperationState: String, Codable, Sendable {
@@ -193,6 +196,8 @@ public enum ControlErrorCode: String, Codable, Sendable {
     case downloadFailed = "download_failed"
     case integrityMismatch = "integrity_mismatch"
     case insufficientDiskSpace = "insufficient_disk_space"
+    case codecUnavailable = "codec_unavailable"
+    case timeout = "timeout"
     case cancelled
     case unsupported
 }
@@ -203,6 +208,7 @@ public struct ControlRequest: Codable, Equatable, Sendable {
     public let command: ControlCommand
     public let selection: SpecSelection?
     public let operationID: String?
+    public let mediaRequestID: UUID?
     public let confirmation: Bool
 
     public init(
@@ -211,6 +217,7 @@ public struct ControlRequest: Codable, Equatable, Sendable {
         command: ControlCommand,
         selection: SpecSelection? = nil,
         operationID: String? = nil,
+        mediaRequestID: UUID? = nil,
         confirmation: Bool = false
     ) {
         self.schemaVersion = schemaVersion
@@ -218,6 +225,7 @@ public struct ControlRequest: Codable, Equatable, Sendable {
         self.command = command
         self.selection = selection
         self.operationID = operationID
+        self.mediaRequestID = mediaRequestID
         self.confirmation = confirmation
     }
 
@@ -236,6 +244,11 @@ public struct ControlRequest: Codable, Equatable, Sendable {
                 throw ControlProtocolError.profileUnsupported
             }
         }
+        if command == .mediaExport {
+            guard mediaRequestID != nil, selection == nil else {
+                throw ControlProtocolError.mediaRequestRequired
+            }
+        }
         if (command == .operationStatus || command == .operationCancel) && operationID == nil {
             throw ControlProtocolError.operationRequired
         }
@@ -248,6 +261,7 @@ public struct ControlRequest: Codable, Equatable, Sendable {
         case asrSpec = "asr_spec"
         case ttsSpec = "tts_spec"
         case operationID = "operation_id"
+        case mediaRequestID = "media_request_id"
         case confirmation
     }
 
@@ -264,6 +278,7 @@ public struct ControlRequest: Codable, Equatable, Sendable {
             selection = nil
         }
         operationID = try container.decodeIfPresent(String.self, forKey: .operationID)
+        mediaRequestID = try container.decodeIfPresent(UUID.self, forKey: .mediaRequestID)
         confirmation = try container.decode(Bool.self, forKey: .confirmation)
     }
 
@@ -275,6 +290,7 @@ public struct ControlRequest: Codable, Equatable, Sendable {
         try container.encodeIfPresent(selection?.asrSpec, forKey: .asrSpec)
         try container.encodeIfPresent(selection?.ttsSpec, forKey: .ttsSpec)
         try container.encodeIfPresent(operationID, forKey: .operationID)
+        try container.encodeIfPresent(mediaRequestID, forKey: .mediaRequestID)
         try container.encode(confirmation, forKey: .confirmation)
     }
 }
@@ -399,6 +415,7 @@ public struct OperationSnapshot: Codable, Equatable, Sendable {
     public let operationID: String
     public let command: ControlCommand
     public let selection: SpecSelection?
+    public let mediaRequestID: UUID?
     public let state: OperationState
     public let phase: String?
     public let progress: OperationProgressSnapshot?
@@ -409,6 +426,7 @@ public struct OperationSnapshot: Codable, Equatable, Sendable {
         operationID: String,
         command: ControlCommand,
         selection: SpecSelection? = nil,
+        mediaRequestID: UUID? = nil,
         state: OperationState,
         phase: String? = nil,
         progress: OperationProgressSnapshot? = nil,
@@ -418,6 +436,7 @@ public struct OperationSnapshot: Codable, Equatable, Sendable {
         self.operationID = operationID
         self.command = command
         self.selection = selection
+        self.mediaRequestID = mediaRequestID
         self.state = state
         self.phase = phase
         self.progress = progress
@@ -440,6 +459,7 @@ public struct ControlResponse: Codable, Equatable, Sendable {
     public let modelCatalog: ModelCatalogSnapshot?
     public let modelStatus: ModelStatusSnapshot?
     public let operation: OperationSnapshot?
+    public let media: MediaControlPayload?
 
     public init(
         requestID: UUID,
@@ -454,6 +474,7 @@ public struct ControlResponse: Codable, Equatable, Sendable {
         modelCatalog: ModelCatalogSnapshot? = nil,
         modelStatus: ModelStatusSnapshot? = nil,
         operation: OperationSnapshot? = nil,
+        media: MediaControlPayload? = nil,
         schemaVersion: Int = ControlConstants.schemaVersion
     ) {
         self.schemaVersion = schemaVersion
@@ -469,6 +490,7 @@ public struct ControlResponse: Codable, Equatable, Sendable {
         self.modelCatalog = modelCatalog
         self.modelStatus = modelStatus
         self.operation = operation
+        self.media = media
     }
 
     public static func failure(
@@ -499,6 +521,7 @@ public struct ControlResponse: Codable, Equatable, Sendable {
             modelCatalog: modelCatalog,
             modelStatus: modelStatus,
             operation: operation,
+            media: media,
             schemaVersion: schemaVersion
         )
     }
@@ -509,13 +532,14 @@ public enum ControlProtocolError: Error, Equatable, Sendable {
     case confirmationRequired
     case profileRequired
     case profileUnsupported
+    case mediaRequestRequired
     case operationRequired
     case invalidResponse
 
     public var errorCode: ControlErrorCode {
         switch self {
         case .unsupportedSchema, .confirmationRequired, .profileRequired, .profileUnsupported,
-             .operationRequired:
+             .mediaRequestRequired, .operationRequired:
             .invalidRequest
         case .invalidResponse:
             .commandFailed

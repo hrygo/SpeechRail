@@ -797,6 +797,8 @@ public final class EngineModel: EngineCapabilityReading {
             return .server(code: code)
         case .invalidURL, .requestFailed:
             return .connection
+        case .responseTooLarge:
+            return .invalidResponse
         }
     }
 
@@ -817,6 +819,8 @@ public final class EngineModel: EngineCapabilityReading {
             return "服务健康缓存已失效，请重新读取后重试。"
         case .invalidContract:
             return "服务返回的契约版本无法识别，请运行预检检查版本。"
+        case .responseTooLarge:
+            return "服务返回的响应超过安全体积上限，请运行预检检查服务状态。"
         case let .http(_, code, _, _, _):
             switch code {
             case "backend_not_ready":

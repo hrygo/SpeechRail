@@ -320,6 +320,9 @@ public enum SpeechRailDesignTokens {
         /// 配音台音色选择弹出层的标准尺寸 (320 × 280 pt)。
         public static let creatorVoicePopoverWidth: CGFloat = 320
         public static let creatorVoicePopoverHeight: CGFloat = 280
+        /// 有声书工坊底部听书播放控制栏高度 (64 pt) 与三栏工作台最小高度 (540 pt)。
+        public static let audiobookTransportBarHeight: CGFloat = 64
+        public static let audiobookWorkbenchMinimumHeight: CGFloat = 540
 
         /// 模态弹窗与工作区 Sheet 的标准宽度阶梯。
         public enum Sheet {

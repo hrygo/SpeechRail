@@ -44,7 +44,7 @@ final class SpeechRailAppUITests: XCTestCase {
         openControlCenter(in: app)
 
         let routeTitles = [
-            "配音台", "音色创作", "音色克隆", "音色库", "我的作品",
+            "配音台", "有声书工坊", "音色创作", "音色克隆", "音色库", "我的作品",
             "语音助手", "会议助手", "实时字幕", "AI 提词器",
             "服务状态", "运行监控", "模型组合", "诊断", "开发者文档"
         ]

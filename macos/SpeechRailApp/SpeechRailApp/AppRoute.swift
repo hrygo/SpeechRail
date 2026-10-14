@@ -37,6 +37,7 @@ public enum AppRouteGroup: String, CaseIterable, Sendable {
 
 public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
     case dubbing
+    case audiobook
     case voiceDesign
     case voiceClone
     case voiceLibrary
@@ -55,7 +56,7 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
 
     public var group: AppRouteGroup {
         switch self {
-        case .dubbing, .voiceDesign, .voiceClone, .voiceLibrary, .works:
+        case .dubbing, .audiobook, .voiceDesign, .voiceClone, .voiceLibrary, .works:
             .creator
         case .assistant, .meeting, .captions, .teleprompter:
             .session
@@ -68,6 +69,8 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
         switch self {
         case .dubbing:
             "配音台"
+        case .audiobook:
+            "有声书工坊"
         case .voiceDesign:
             "音色创作"
         case .voiceClone:
@@ -107,6 +110,8 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
         switch self {
         case .dubbing:
             "输入文稿、选择音色，直接生成可交付的语音。"
+        case .audiobook:
+            "导入 TXT 电子书，完成全书角色分析与配声确认后逐章制作、收听或导出。"
         case .voiceDesign:
             "用一句话描述你想要的音色，从真实预览里挑一个保存进音色库。"
         case .voiceClone:
@@ -144,6 +149,8 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
         switch self {
         case .dubbing:
             "waveform"
+        case .audiobook:
+            "books.vertical"
         case .voiceDesign:
             "sparkles"
         case .voiceClone:
@@ -177,6 +184,8 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
         switch self {
         case .dubbing:
             .init(key: "1", modifiers: .command)
+        case .audiobook:
+            .init(key: "b", modifiers: .commandShift)
         case .voiceDesign:
             .init(key: "2", modifiers: .command)
         case .voiceClone:
@@ -210,6 +219,8 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
         switch self {
         case .dubbing:
             "把保存的音色用于配音工作"
+        case .audiobook:
+            "把 TXT 电子书制作成多角色有声书"
         case .voiceDesign:
             "描述、试听并保存新的音色"
         case .voiceClone:

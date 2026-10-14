@@ -8,8 +8,26 @@ public protocol SharedAudioPlaybackDriver: AnyObject {
     var onProgress: (@MainActor (Double) -> Void)? { get set }
     var onLevel: (@MainActor (Float) -> Void)? { get set }
     func play(data: Data) throws
+    func play(fileURL: URL, startAt: TimeInterval, rate: Float) throws
+    func pause()
+    func resume() throws
+    func seek(to time: TimeInterval)
+    func setRate(_ rate: Float)
     func stop()
     func duration(for data: Data) -> TimeInterval?
+}
+
+public extension SharedAudioPlaybackDriver {
+    func play(fileURL: URL, startAt: TimeInterval, rate: Float) throws {
+        let data = try Data(contentsOf: fileURL)
+        try play(data: data)
+    }
+    func pause() {
+        stop()
+    }
+    func resume() throws {}
+    func seek(to time: TimeInterval) {}
+    func setRate(_ rate: Float) {}
 }
 
 extension AudioPlaybackController: SharedAudioPlaybackDriver {}
@@ -22,6 +40,7 @@ public enum PlaybackTarget: Equatable, Sendable {
     case pendingDubbing(String)
     case designReference(candidateID: String, revision: String)
     case designValidation(candidateID: String, revision: String, validationID: String)
+    case audiobook(bookID: UUID, chapterRevisionID: UUID, fragmentID: UUID)
 }
 
 /// One player and one captured identity across all creator features.
@@ -32,6 +51,7 @@ public final class SharedPlaybackOwner {
     public private(set) var isPlaying = false
     public private(set) var progress: Double = 0
     public private(set) var level: Float = 0
+    public private(set) var currentRate: Float = 1.0
     private let driver: any SharedAudioPlaybackDriver
     private var token: UUID?
     private var waveformEnvelopes: [String: [CGFloat]] = [:]
@@ -64,6 +84,7 @@ public final class SharedPlaybackOwner {
         let capturedToken = UUID()
         token = capturedToken
         self.target = target
+        self.currentRate = 1.0
         driver.onPlaybackFinished = { [weak self] success in
             guard let self, self.token == capturedToken else { return }
             self.clear()
@@ -84,6 +105,66 @@ public final class SharedPlaybackOwner {
             clear()
             throw error
         }
+    }
+
+    public func play(
+        fileURL: URL,
+        startAt: TimeInterval = 0,
+        rate: Float = 1.0,
+        target: PlaybackTarget,
+        completion: @escaping @MainActor (Bool) -> Void = { _ in }
+    ) throws {
+        stop()
+        let capturedToken = UUID()
+        token = capturedToken
+        self.target = target
+        let clampedRate = min(max(rate, AudiobookLimits.minPlaybackRate), AudiobookLimits.maxPlaybackRate)
+        self.currentRate = clampedRate
+        driver.onPlaybackFinished = { [weak self] success in
+            guard let self, self.token == capturedToken else { return }
+            self.clear()
+            completion(success)
+        }
+        driver.onProgress = { [weak self] progress in
+            guard let self, self.token == capturedToken else { return }
+            self.progress = progress
+        }
+        driver.onLevel = { [weak self] level in
+            guard let self, self.token == capturedToken else { return }
+            self.level = level
+        }
+        do {
+            try driver.play(fileURL: fileURL, startAt: max(0, startAt), rate: clampedRate)
+            isPlaying = driver.isPlaying
+        } catch {
+            clear()
+            throw error
+        }
+    }
+
+    public func pause() {
+        guard token != nil else { return }
+        driver.pause()
+        isPlaying = driver.isPlaying
+        level = 0
+    }
+
+    public func resume() throws {
+        guard token != nil else { return }
+        try driver.resume()
+        isPlaying = driver.isPlaying
+    }
+
+    public func seek(to time: TimeInterval) {
+        guard token != nil else { return }
+        driver.seek(to: max(0, time))
+    }
+
+    public func setRate(_ rate: Float) {
+        let clamped = min(max(rate, AudiobookLimits.minPlaybackRate), AudiobookLimits.maxPlaybackRate)
+        currentRate = clamped
+        guard token != nil else { return }
+        driver.setRate(clamped)
     }
 
     public func stop() {
@@ -142,7 +223,7 @@ public final class SharedPlaybackOwner {
 @MainActor
 @Observable
 public final class SpeechCreationAdmission {
-    public enum Owner: Sendable { case voice, dubbing }
+    public enum Owner: Sendable { case voice, dubbing, audiobook }
     public private(set) var owner: Owner?
     public var isBusy: Bool { owner != nil }
 

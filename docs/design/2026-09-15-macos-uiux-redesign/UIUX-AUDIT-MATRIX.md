@@ -43,11 +43,12 @@
 | automation | 用户当次授权后运行 XCUITest/UI 测试 | 前台真实流程和控件可发现性 |
 | unverified | 当前没有足够证据 | 不得推断为通过 |
 
-## 3. 当前 14 个路由
+## 3. 当前 15 个路由
 
 | 分组 | route | 页面实现 | 首屏任务 | 键盘入口（目标） | 当前证据 |
 |---|---|---|---|---|---|
 | 创作 | dubbing | DubbingDeskView | 输入文稿并生成语音 | ⌘1 | code |
+| 创作 | audiobook | AudiobookWorkshopView | 把 TXT 电子书制作成多角色有声书 | ⌘⇧B | code；shortcutSpec/unit |
 | 创作 | voiceDesign | VoiceDesignView | 描述、试听并保存音色 | ⌘2 | code |
 | 创作 | voiceClone | VoiceCloneView | 用录音注册可复用音色 | ⌘3 | code |
 | 创作 | voiceLibrary | VoiceLibraryView | 管理并试听音色 | ⌘4 | code |
@@ -66,11 +67,11 @@
 
 | 检查项 | 期望 | 当前状态 | 证据 |
 |---|---|---|---|
-| AppRoute.allCases | 14 项且顺序固定 | 已确认 | AppRoute.swift |
+| AppRoute.allCases | 15 项且顺序固定 | 已确认 | AppRoute.swift |
 | 侧栏三组 | creator/session/service 从同一事实源派生 | 已确认 | ControlCenterView.swift 调用 AppRoute.routes(in:) |
-| detailView | 14 项均有页面构造 | 已确认 | ControlCenterView.swift:349-382 |
+| detailView | 15 项均有页面构造 | 已确认 | ControlCenterView.swift |
 | Commands | 每项都有可发现菜单动作 | 已确认菜单项遍历 allCases | App.swift:604-617 |
-| route shortcut | 14 项均有不冲突快捷键 | 已确认 | AppRoute.shortcutSpec、静态契约脚本、Debug build |
+| route shortcut | 15 项均有不冲突快捷键 | 已确认 | AppRoute.shortcutSpec、静态契约脚本、Debug build |
 | 文档路由数量 | 不再出现旧 8/10/13 页当前表述 | 已确认（当前段） | active 设计系统与 REDESIGN-SPEC 当前段已同步；历史段保留历史事实 |
 | 14 个路由的页面身份与首屏 | 侧栏点击后页面身份、首屏用途和主动作可见 | 14/14 已逐页打开；本次只核对只读首屏，未启动生成、录音或采集 | 2026-09-22 CUA 前台人工走查；AX workspace-title 与页面控件树 |
 

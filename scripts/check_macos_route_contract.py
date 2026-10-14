@@ -3,7 +3,7 @@
 
 The sidebar groups, the keyboard shortcuts, the UI test route list and the
 design audit matrix are four hand-maintained surfaces that all describe the
-same 14 `AppRoute` pages. Adding or renaming a page can leave any one of them
+same 15 `AppRoute` pages. Adding or renaming a page can leave any one of them
 behind, and the app still builds and runs — the page just quietly loses its
 shortcut, its UI test or its audit row. Issue #79 tracks exactly that drift as
 its Phase 0 risk, and this check is the defense it wired into the quality gate.
@@ -35,6 +35,7 @@ MATRIX = ROOT / "docs" / "design" / "2026-09-15-macos-uiux-redesign" / "UIUX-AUD
 #: Registry order: route, shortcut key, shortcut modifiers.
 ROUTES: tuple[tuple[str, str, str], ...] = (
     ("dubbing", "1", "command"),
+    ("audiobook", "b", "commandShift"),
     ("voiceDesign", "2", "command"),
     ("voiceClone", "3", "command"),
     ("voiceLibrary", "4", "command"),
@@ -53,6 +54,7 @@ ROUTES: tuple[tuple[str, str, str], ...] = (
 #: The sidebar title each route must show, in registry order.
 UI_TITLES: tuple[str, ...] = (
     "配音台",
+    "有声书工坊",
     "音色创作",
     "音色克隆",
     "音色库",
@@ -139,8 +141,8 @@ def main() -> int:
             print(f"route contract check failed: {problem}", file=sys.stderr)
         return 1
     print(
-        "macOS route contract: 14 enum cases, 14 shortcut specs, 14 UI test entries, "
-        "14 matrix entries, one registry"
+        "macOS route contract: 15 enum cases, 15 shortcut specs, 15 UI test entries, "
+        "15 matrix entries, one registry"
     )
     return 0
 

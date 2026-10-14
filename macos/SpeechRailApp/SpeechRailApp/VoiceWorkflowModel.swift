@@ -1719,7 +1719,7 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
             true
         case let .http(statusCode, _, _, _, retryable):
             statusCode >= 500 || retryable
-        case .invalidURL, .invalidResponse, .notModifiedWithoutCache, .invalidContract:
+        case .invalidURL, .invalidResponse, .notModifiedWithoutCache, .invalidContract, .responseTooLarge:
             false
         }
     }
@@ -2125,15 +2125,22 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
             }
         }
         do {
-            let voices = try await requireCreatorCapability(voiceDirectoryClient).fetchVoices()
+            let existingByID = Dictionary(creatorVoices.map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
+            let rawVoices = try await requireCreatorCapability(voiceDirectoryClient).fetchVoices()
+            let voices = rawVoices
+                .map { voice -> CreatorVoice in
+                    guard let existing = existingByID[voice.id] else { return voice }
+                    return voice.mergingDetails(from: existing)
+                }
                 .sorted { lhs, rhs in
                     if lhs.isSystem != rhs.isSystem { return lhs.isSystem }
                     return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
-            }
+                }
             guard refreshGeneration == creatorVoiceRefreshGeneration else { return false }
             creatorVoices = voices
             creatorVoicesLoadState = .loaded
             creatorMessage = nil
+            loadMissingVoiceDetails(generation: refreshGeneration)
             return true
         } catch is CancellationError {
             guard refreshGeneration == creatorVoiceRefreshGeneration else { return false }
@@ -2208,6 +2215,32 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
             guard creatorVoiceDetailGeneration == generation else { return false }
             creatorVoiceDetailMessage = CreatorWorkflowErrors.message(for: error)
             return false
+        }
+    }
+
+    private func loadMissingVoiceDetails(generation: UInt64) {
+        let targets = creatorVoices.filter { voice in
+            !voice.isSystem
+                && voice.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && (voice.refText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        }
+        guard !targets.isEmpty else { return }
+
+        Task { [weak self] in
+            for target in targets {
+                guard let self else { return }
+                guard self.creatorVoiceRefreshGeneration == generation else { return }
+                do {
+                    let client = try requireCreatorCapability(self.voiceDirectoryClient)
+                    let detailed = try await client.fetchVoice(id: target.id)
+                    guard self.creatorVoiceRefreshGeneration == generation else { return }
+                    if let index = self.creatorVoices.firstIndex(where: { $0.id == target.id }) {
+                        self.creatorVoices[index] = detailed
+                    }
+                } catch {
+                    continue
+                }
+            }
         }
     }
 

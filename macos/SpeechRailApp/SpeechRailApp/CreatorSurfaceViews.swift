@@ -2673,6 +2673,8 @@ public struct VoiceLibraryView: View {
         return bySource.filter {
             $0.name.localizedCaseInsensitiveContains(query)
                 || $0.description.localizedCaseInsensitiveContains(query)
+                || ($0.refText?.localizedCaseInsensitiveContains(query) ?? false)
+                || ($0.preview?.text.localizedCaseInsensitiveContains(query) ?? false)
         }
     }
 
@@ -2681,14 +2683,27 @@ public struct VoiceLibraryView: View {
     /// description and length-only user-authored fields in its fixed-width,
     /// independently scrolling panel.
     private func voiceListDescription(for voice: CreatorVoice) -> String {
-        let fallback = "服务端已注册，当前档位\(voice.available ? "可用" : "不可用")。"
-        let normalized = voice.description.trimmingCharacters(in: .whitespacesAndNewlines)
         let maximumPreviewLength = SpeechRailDesignTokens.List.descriptionPreviewMaximumCharacters
-        guard normalized.count > maximumPreviewLength else {
-            return normalized.isEmpty ? fallback : normalized
+        let candidate: String = {
+            let desc = voice.description.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !desc.isEmpty { return desc }
+            if let ref = voice.refText?.trimmingCharacters(in: .whitespacesAndNewlines), !ref.isEmpty {
+                return ref
+            }
+            if let prev = voice.preview?.text.trimmingCharacters(in: .whitespacesAndNewlines), !prev.isEmpty {
+                return prev
+            }
+            let inst = voice.instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !inst.isEmpty { return inst }
+            let resolved = VoiceWorkflowModel.resolvedPreviewText(for: voice, text: nil)
+            if !resolved.isEmpty { return resolved }
+            return "服务端已注册，当前档位\(voice.available ? "可用" : "不可用")。"
+        }()
+        guard candidate.count > maximumPreviewLength else {
+            return candidate
         }
-        let end = normalized.index(normalized.startIndex, offsetBy: maximumPreviewLength)
-        return String(normalized[..<end]) + "…"
+        let end = candidate.index(candidate.startIndex, offsetBy: maximumPreviewLength)
+        return String(candidate[..<end]) + "…"
     }
 
     @ViewBuilder
@@ -2865,15 +2880,25 @@ public struct VoiceLibraryView: View {
     /// (REDESIGN-SPEC §7.3).
     @ViewBuilder
     private func voiceDescriptionSection(_ voice: CreatorVoice) -> some View {
-        if !voice.description.isEmpty {
+        let text: String = {
+            let desc = voice.description.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !desc.isEmpty { return desc }
+            if let ref = voice.refText?.trimmingCharacters(in: .whitespacesAndNewlines), !ref.isEmpty {
+                return ref
+            }
+            let inst = voice.instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !inst.isEmpty { return inst }
+            return ""
+        }()
+        if !text.isEmpty {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Text("描述")
+                Text(voice.mode == "clone" ? "参考文本" : "描述")
                     // 稿 `sideBody` 的字段标签是 `Caption / Medium`（10pt Medium）：与本段
                     // 同级的「试听文案」已经用这一档，原来这一处用 `caption`（10 Regular）
                     // 又比它轻一档，同一块面板里出现两种标签字重（§11.6 第五十四轮）。
                     .font(SpeechRailDesignTokens.Typography.captionMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                Text(voice.description)
+                Text(text)
                     .font(SpeechRailDesignTokens.Typography.body)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                     .fixedSize(horizontal: false, vertical: true)

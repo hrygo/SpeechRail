@@ -668,4 +668,29 @@ final class AgentCoreTests: XCTestCase {
             "anchor apple generic and certificate leaf[subject.OU] = \"TEAM123\" and identifier \"com.speechrail.desktop\""
         )
     }
+
+    func testMediaExportDeduplicatesSameRequestIDAndRejectsInvalidPayload() async throws {
+        let runner = BlockingRunner()
+        let store = AgentOperationStore(runner: runner)
+
+        // 缺少 mediaRequestID 的 mediaExport 请求直接拒绝
+        let missingIDResponse = await store.handle(
+            ControlRequest(command: .mediaExport, confirmation: true)
+        )
+        XCTAssertEqual(missingIDResponse.status, .failed)
+        XCTAssertEqual(missingIDResponse.errorCode, .invalidRequest)
+
+        let mediaReqID = UUID()
+        let firstAccepted = await store.handle(
+            ControlRequest(command: .mediaExport, mediaRequestID: mediaReqID, confirmation: true)
+        )
+        XCTAssertEqual(firstAccepted.status, .accepted)
+        let opID = try XCTUnwrap(firstAccepted.operation?.operationID)
+
+        // 相同 mediaRequestID 重复投递返回同一操作，不重复启动进程
+        let duplicateAccepted = await store.handle(
+            ControlRequest(command: .mediaExport, mediaRequestID: mediaReqID, confirmation: true)
+        )
+        XCTAssertEqual(duplicateAccepted.operation?.operationID, opID)
+    }
 }

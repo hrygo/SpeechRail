@@ -294,3 +294,8 @@ swift test --package-path macos/SpeechRailApp --filter ASRSessionReplaySamplerHa
 
 每次发布保存命令、时间、版本/commit、测试摘要、OpenAPI lint、设备/dtype、request ID 与
 未验证风险。命令退出码不能单独替代 API 响应或客户端行为证据。
+
+
+## 有声书工坊专项测试与验收交接
+
+有声书工坊（T01–T14）的 Python 媒体导出测试、13 个 SwiftPM 模块测试套件、Xcode 构建检查与桌面真机验收清单见 [有声书工坊测试与验收交接手册](audiobook-workshop-testing-handover.md)。

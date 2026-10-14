@@ -9,6 +9,8 @@ public final class AppNavigationState {
     public private(set) var requestedRoute: AppRoute?
     public private(set) var layoutTier: WindowLayoutTier = .expanded
     public private(set) var windowWidth: CGFloat = 1355
+    /// 有声书工坊前往「音色创作」或「音色库」时的固定返回上下文。
+    public var audiobookVoiceReturnContext: AudiobookVoiceReturnContext?
 
     public var layoutContract: WindowLayoutContract {
         WindowLayoutPolicy.contract(for: layoutTier)
@@ -18,6 +20,16 @@ public final class AppNavigationState {
 
     public func request(_ route: AppRoute) {
         requestedRoute = route
+    }
+
+    public func requestVoiceDesignForAudiobook(context: AudiobookVoiceReturnContext) {
+        audiobookVoiceReturnContext = context
+        requestedRoute = .voiceDesign
+    }
+
+    public func requestVoiceLibraryForAudiobook(context: AudiobookVoiceReturnContext) {
+        audiobookVoiceReturnContext = context
+        requestedRoute = .voiceLibrary
     }
 
     public func consumeRequestedRoute() -> AppRoute? {

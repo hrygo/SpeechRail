@@ -9,7 +9,22 @@ extension MeetingView {
     var libraryCard: some View {
         CardSurface {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                CardHead(title: "会议记录库") { EmptyView() }
+                CardHead(title: "会议记录库", detail: "最近会议") {
+                    Button {
+                        showsKnowledgeLibrary = true
+                    } label: {
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                            Text("全部知识库")
+                                .font(SpeechRailDesignTokens.Typography.captionMedium)
+                            Image(systemName: "chevron.right")
+                                .font(SpeechRailDesignTokens.Typography.chipIcon)
+                        }
+                        .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                    }
+                    .buttonStyle(.plain)
+                    .speechRailPointerCursor()
+                    .help("打开完整的会议知识库，包含跨会议问答、项目分类和未完成事项")
+                }
                 if recent.isEmpty {
                     Text("还没有会议记录。结束一场之后，它会出现在这里。")
                         .font(SpeechRailDesignTokens.Typography.caption)

@@ -43,6 +43,8 @@ enum CreatorWorkflowErrors {
             return "创作服务缓存已失效，请重新读取后重试"
         case .invalidContract:
             return "创作服务版本不匹配，请运行诊断后重试"
+        case .responseTooLarge:
+            return "创作服务返回的音频体积超过安全上限，请缩短单段内容后重试"
         case let .http(_, code, _, _, _):
             switch code {
             case "invalid_api_key":

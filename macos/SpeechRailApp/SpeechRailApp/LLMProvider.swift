@@ -594,6 +594,7 @@ public enum LLMModule: String, CaseIterable, Codable, Identifiable, Sendable {
     case assistant
     case minutes
     case teleprompter
+    case audiobook
 
     public var id: String { rawValue }
 
@@ -602,6 +603,7 @@ public enum LLMModule: String, CaseIterable, Codable, Identifiable, Sendable {
         case .assistant: "语音助手"
         case .minutes: "会议纪要"
         case .teleprompter: "AI 提词器"
+        case .audiobook: "有声书工坊"
         }
     }
 
@@ -610,12 +612,13 @@ public enum LLMModule: String, CaseIterable, Codable, Identifiable, Sendable {
         case .assistant: "语音助手与会议中的内心 OS，共用这一类对话能力。"
         case .minutes: "会后长任务，适合结构化输出能力更强的模型。"
         case .teleprompter: "主动点击才发送原稿，跟读和直播过程中不会调用。"
+        case .audiobook: "主动点击分析全书时才发送正文窗口，阅读或听书过程中不会调用。"
         }
     }
 
     public var requiredOperation: LLMOperation {
         switch self {
-        case .teleprompter: .chat
+        case .teleprompter, .audiobook: .chat
         case .assistant, .minutes: .responses
         }
     }
@@ -911,8 +914,8 @@ public enum LLMError: LocalizedError, Equatable {
             body.isEmpty ? "服务返回了 \(status)，请稍后重试。" : "服务返回了 \(status)：\(body)"
         case .usageLimitExceeded:
             "AI 服务的可用额度已经用尽，本次没有整理。原稿没有变化。"
-        case .notResponsesAPI: "这个服务没有 Responses API。"
-        case .notChatAPI: "这个服务没有 Chat Completions API。"
+        case .notResponsesAPI: "当前服务不支持 Responses 协议（可能仅支持 Chat Completions）。"
+        case .notChatAPI: "当前服务不支持 Chat Completions 协议。"
         case .thinkingControlUnavailable:
             "当前服务不支持所选的关闭推理方式。请检查模型的兼容模式。"
         case .unsupportedStructuredOutput: "这个服务不支持严格结构化输出。"

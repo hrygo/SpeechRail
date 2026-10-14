@@ -8,6 +8,7 @@ public final class AppModel {
     public let engine: EngineModel
     public let voiceWorkflow: VoiceWorkflowModel
     public let dubbingWorkflow: DubbingWorkflowModel
+    public let audiobookWorkflow: AudiobookWorkflowModel
     public let playback: SharedPlaybackOwner
     private let admission: SpeechCreationAdmission
     private let feedback: CreatorFeedback
@@ -28,6 +29,7 @@ public final class AppModel {
         audioPlaybackController: AudioPlaybackController = AudioPlaybackController(),
         workStore: CreativeWorkStore = CreativeWorkStore(),
         dubbingProjectStore: DubbingProjectStore? = nil,
+        audiobookDependencies: AudiobookDependencies = .unavailable,
         observabilityLocation: ObservabilityLocation = .default,
         registration: ControlAgentRegistration? = nil
     ) {
@@ -51,6 +53,11 @@ public final class AppModel {
             playback: playback, admission: admission, feedback: feedback,
             speechRenderClient: speechRenderClient, receiptClient: receiptClient,
             workStore: workStore, dubbingProjectStore: dubbingProjectStore)
+        self.audiobookWorkflow = AudiobookWorkflowModel(
+            dependencies: audiobookDependencies,
+            playbackOwner: playback,
+            admission: admission
+        )
     }
 
     public var service: ServiceSnapshot { engine.service }

@@ -150,34 +150,28 @@ extension MeetingView {
             return meeting.selection.map { [$0.label] } ?? []
         }
         var facts: [String] = []
-        // 来源摘要走 MA-10 的呈现门面：用户没勾麦克风时，那句话里**不会出现"麦克风"**
-        // （MC-03）。直接用 `selection.label` 会把麦克风带出来，等于谎报采集范围。
+        // 来源摘要走 MA-10 的呈现门面
         if meeting.selection != nil { facts.append(sourcePresentation.sourceSummary) }
-        // 「谁在说话」这件事只说**一句**：有编号就说几位，没有就说这一场标不标。
-        // 原来"还没有分人"与"分人已开"会同时出现（开着但一个编号都还没有时），
-        // 两句摆在一起自相矛盾，也是用户点名的那个看不懂的词（2026-09-19）。
-        if meeting.labeling.labels.isEmpty {
-            facts.append(meeting.labeling.isEnabled ? "还没标出谁在说话" : "不标出谁在说话")
-        } else {
-            facts.append("\(meeting.labeling.labels.count) 位说话人")
+        if !meeting.labeling.labels.isEmpty {
+            facts.append("\(meeting.labeling.labels.count) 位发言人")
         }
-        facts.append("\(meeting.storedLineCount) 段已存好")
+        facts.append("\(meeting.storedLineCount) 段对话已记录")
         if meeting.gapCount > 0 { facts.append("\(meeting.gapCount) 处补过静音") }
-        // 标题已经说了"麦克风已静音"时不重复；只有暂停把标题占掉时才在这里补一句，
-        // 否则"暂停 + 静音"两个开关叠在一起时，界面上会看不见后者的存在。
         if meeting.isMicrophoneMuted, meeting.isPaused { facts.append("麦克风已静音") }
         if meeting.reconnectedSources > 0 {
             facts.append("接回过 \(meeting.reconnectedSources) 次")
         }
-        // 电平、识别、保存是三件事，分开说（MC-74）。合成一句会让用户以为
-        // 看到电平就等于声音已经变成文字了。
-        if meeting.phase.isLive {
-            facts.append(sourcePresentation.levelCaption)
+        // 渐进式披露：仅当某条轴存在故障或降级时才在主状态带呈现警示，常态不无谓堆砌「正常」技术日志
+        for problem in axisProjection.problems {
+            switch problem.state {
+            case .degraded(let reason):
+                facts.append("\(problem.name)降级（\(reason)）")
+            case .failed(let reason):
+                facts.append("\(problem.name)异常（\(reason)）")
+            default:
+                break
+            }
         }
-        // MA-21：采集/识别/保存/索引/审阅各走各的轴，一条异常不掩盖另一条。
-        // 之前这些是临时拼进 facts 的，拼到最后最常见的后果就是
-        // "识别断了但界面写着正在录音"。
-        facts.append(contentsOf: axisProjection.factLines)
         return facts
     }
 }

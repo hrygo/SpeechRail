@@ -101,4 +101,10 @@ public enum WindowLayoutPolicy {
             }
         }
     }
+
+    public static let audiobookInlineCastColumnMinimumWidth: CGFloat = 1_120
+
+    public static func audiobookShowsInlineCastColumn(forWidth width: CGFloat) -> Bool {
+        width >= audiobookInlineCastColumnMinimumWidth
+    }
 }

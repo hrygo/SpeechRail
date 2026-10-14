@@ -11,6 +11,7 @@ public enum ServiceAPIClientError: Error, Equatable, Sendable {
     case requestFailed
     case requestTimedOut
     case notModifiedWithoutCache
+    case responseTooLarge(maximumBytes: Int)
     case invalidContract(String)
     case http(
         statusCode: Int,
@@ -217,7 +218,7 @@ public enum ServiceErrorCategory: Equatable, Sendable {
 public enum ServiceErrorClassifier {
     public static func category(for error: ServiceAPIClientError) -> ServiceErrorCategory {
         switch error {
-        case .invalidContract:
+        case .invalidContract, .responseTooLarge:
             .invalidContract
         case .http(_, let code, _, _, _):
             switch code {
