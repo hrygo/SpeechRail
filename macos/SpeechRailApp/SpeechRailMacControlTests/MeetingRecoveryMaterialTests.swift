@@ -293,6 +293,58 @@ final class SpeakerLabelingPersistenceTests: XCTestCase {
         XCTAssertNil(rows.first?.speakerLabel)
         XCTAssertNil(owner.attributedLabel(forLineID: "line"))
     }
+
+    /// Gap3（账本级）：`beginNewConnection` 只重置 uid 坐标系，不碰面板。
+    ///
+    /// 两个方向都要钉住：面板（标签/改名/计数/状态）保留是修"续接失忆"；
+    /// uid 表清空是防"旧坐标串写"——若只保留面板而不清空，
+    /// 旧 uid 的迟到修订会把旧行改写成新说话人。
+    func testBeginNewConnectionKeepsPanelButResetsUnitCoordinates() async throws {
+        let id = try await record(with: ["old", "new"])
+        let owner = SpeakerLabeling(coordinator: coordinator)
+        owner.begin(sessionID: id, enabled: true)
+        owner.register(
+            units: [.init(segmentUID: "unit", speaker: "A")], lineID: "old", ordinal: 1
+        )
+        await owner.apply(units: [.init(segmentUID: "unit", speaker: "A")])
+        await owner.rename(label: "A", to: "张三")
+        XCTAssertEqual(owner.labels, ["A"])
+        XCTAssertEqual(owner.displayNames["A"], "张三")
+
+        owner.beginNewConnection(sessionID: id)
+
+        // 面板保留：标签、改名、计数、状态都在。
+        XCTAssertEqual(owner.labels, ["A"])
+        XCTAssertEqual(owner.displayNames["A"], "张三")
+        XCTAssertEqual(owner.lineCounts["A"], 1)
+        XCTAssertEqual(owner.firstOrdinal["A"], 1)
+        XCTAssertEqual(owner.state, .active)
+        // uid 坐标系已清空：旧 uid 的迟到修订无处可写，旧行保持原值。
+        XCTAssertNil(owner.attributedLabel(forLineID: "old"))
+        await owner.apply(units: [.init(segmentUID: "unit", speaker: "B")])
+        let rows = try await store.lines(sessionID: id)
+        XCTAssertEqual(rows.map(\.speakerLabel), ["A", nil])
+        // 新 uid 照常写入：重置不断新写。
+        owner.register(
+            units: [.init(segmentUID: "unit-2", speaker: "B")], lineID: "new", ordinal: 2
+        )
+        await owner.apply(units: [.init(segmentUID: "unit-2", speaker: "B")])
+        let rowsAfter = try await store.lines(sessionID: id)
+        XCTAssertEqual(rowsAfter.map(\.speakerLabel), ["A", "B"])
+        XCTAssertEqual(owner.labels, ["A", "B"])
+    }
+
+    /// Gap3（账本级）：续接不治愈降级态，只是不擦除显示。
+    func testBeginNewConnectionDoesNotHealDegradedState() async throws {
+        let id = try await record(with: ["old"])
+        let owner = SpeakerLabeling(coordinator: coordinator)
+        owner.begin(sessionID: id, enabled: true)
+        owner.markDegraded(code: "diarization_overloaded", message: "过载停更")
+        owner.beginNewConnection(sessionID: id)
+        XCTAssertEqual(owner.state, .degraded)
+        XCTAssertEqual(owner.note, "过载停更")
+        XCTAssertTrue(owner.isEnabled)
+    }
 }
 
 actor SpeakerAttributionWriteGate {

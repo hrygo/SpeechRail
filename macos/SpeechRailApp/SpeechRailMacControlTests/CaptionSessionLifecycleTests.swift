@@ -156,6 +156,82 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         XCTAssertNotEqual(record?.state, .archived)
     }
 
+    /// Gap1（字幕侧）：分人单项不可用不拦整场。
+    ///
+    /// 与会议侧同构：建两条连接（第一条带分人被拒，第二条不带分人成功），
+    /// 库里记 `unavailable` + 人话，正文照常落库。
+    func testDiarizationUnavailableFallsBackAndKeepsCaptionRunning() async throws {
+        let h = try await makeHarness()
+        h.session.diarizationPreference = { true }
+        h.clients.failFirstDiarizedConnect(
+            RealtimeASRClient.Failure.serverError(
+                code: "backend_not_ready", message: "alignment unavailable"
+            )
+        )
+        let id = try await start(h)
+
+        let configurations = h.clients.madeConfigurations
+        XCTAssertEqual(configurations.count, 2, "降级只重试一次")
+        XCTAssertEqual(configurations.map(\.diarizationEnabled), [true, false])
+        XCTAssertNil(h.session.blocked, "分人单项不可用不得拦下整场")
+
+        try await h.emit(.completed(itemID: "A", transcript: "分人不可用时的字幕"))
+        try await h.settle { $0.session.lines.count == 1 }
+
+        let record = try await h.store.session(id: id)
+        XCTAssertEqual(record?.diarization, .unavailable)
+        XCTAssertEqual(record?.diarizationNote, "这场没有标出谁在说话；正文照常记录。")
+        XCTAssertEqual(h.session.labeling.state, .unavailable)
+    }
+
+    /// Gap3（字幕侧）：中断续接不清空说话人面板。
+    ///
+    /// 与会议侧同构：中断前标出的标签是本场的事实，`retry()` 续接后
+    /// 面板必须还在；新连接的归属照常写入（uid 重置不断新写），
+    /// 库里的分人态也不被续接改写。账本级的 uid 语义由
+    /// `SpeakerLabelingPersistenceTests` 钉住，这里只验端到端后果。
+    func testRetryKeepsSpeakerPanelAndAcceptsNewAttribution() async throws {
+        let h = try await makeHarness()
+        h.session.diarizationPreference = { true }
+        let id = try await start(h)
+
+        // 中断前标出一位说话人。
+        try await h.emit(.completed(itemID: "before", transcript: "中断前说的"))
+        try await h.settle { $0.session.lines.count == 1 }
+        try await h.emit(.attribution(itemID: "before", units: [
+            .init(segmentUID: "unit-before", speaker: "A", timingQuality: "aligned")
+        ], isFinal: true))
+        try await h.settle { !$0.session.labeling.labels.isEmpty }
+        XCTAssertEqual(h.session.labeling.labels, ["A"])
+
+        // 走生产中断→续接路径：连接断开，点"重新接上"。
+        try await h.emit(.closed(code: nil))
+        try await h.settle { $0.session.blocked != nil }
+        await h.session.retry()
+        try await h.settle {
+            $0.session.phase == .running && $0.session.blocked == nil
+                && $0.clients.all.count >= 2
+        }
+
+        // 面板保留，库里的分人态不被续接改写。
+        XCTAssertEqual(h.session.labeling.labels, ["A"])
+        let record = try await h.store.session(id: id)
+        XCTAssertEqual(record?.diarization, .active)
+
+        // 新连接的归属照常写入：旧行不动，新行标上。
+        try await h.emit(.completed(itemID: "after", transcript: "续接后说的"))
+        try await h.settle { $0.session.lines.count == 2 }
+        try await h.emit(.attribution(itemID: "after", units: [
+            .init(segmentUID: "unit-after", speaker: "A", timingQuality: "aligned")
+        ], isFinal: true))
+        let saved = await h.session.waitForPendingSaves(recordID: id)
+        XCTAssertTrue(saved.isComplete)
+        let rows = try await h.store.lines(sessionID: id)
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows.first { $0.text == "中断前说的" }?.speakerLabel, "A")
+        XCTAssertEqual(rows.first { $0.text == "续接后说的" }?.speakerLabel, "A")
+    }
+
     func testProtocolFailureCannotArchiveEmptyCaptionAsComplete() async throws {
         let h = try await makeHarness()
         let id = try await start(h)
@@ -844,18 +920,30 @@ private actor ControllableCaptionRealtimeClient: CaptionRealtimeClient {
     private var appendFails = false
     private var appendGate: ConnectGate?
     private var diarizationDrainFails = false
+    private var connectOnceFailure: Error?
     private let receiverGate: ConnectGate?
     private(set) var drainCount = 0
     private(set) var closeCount = 0
     private(set) var appendedByteCount = 0
     private(set) var appendedByteCountAtDrain = 0
 
-    init(receiverGate: ConnectGate? = nil) { self.receiverGate = receiverGate }
+    init(receiverGate: ConnectGate? = nil, initialConnectFailure: Error? = nil) {
+        self.receiverGate = receiverGate
+        self.connectOnceFailure = initialConnectFailure
+    }
     func events() async -> RealtimeEventStream<RealtimeASRClient.Event> {
         if let receiverGate { try? await receiverGate.wait() }
         return stream
     }
-    func connect() async throws {}
+    /// 让**下一次** `connect()` 抛错一次，之后恢复正常（Gap1 降级续跑用）。
+    func failConnectOnce(_ error: Error) { connectOnceFailure = error }
+    func connect() async throws {
+        if let failure = connectOnceFailure {
+            connectOnceFailure = nil
+            closeCount += 1
+            throw failure
+        }
+    }
     func failAppend(gate: ConnectGate? = nil) { appendFails = true; appendGate = gate }
     func failDiarizationDrain() { diarizationDrainFails = true }
     func append(_ pcm: Data) async throws {
@@ -899,18 +987,43 @@ private actor ControllableCaptionRealtimeClient: CaptionRealtimeClient {
 private final class CaptionClientRegistry: @unchecked Sendable {
     private let lock = NSLock()
     private var storage: [ControllableCaptionRealtimeClient] = []
+    private var configurations: [CaptionRealtimeClientConfiguration] = []
+    private var failFirstDiarizedConnectError: Error?
     private let receiverGateForFirst: ConnectGate?
 
     init(receiverGateForFirst: ConnectGate? = nil) { self.receiverGateForFirst = receiverGateForFirst }
 
     func make(_ configuration: CaptionRealtimeClientConfiguration) -> any CaptionRealtimeClient {
         lock.lock()
+        // 布防的失败经构造器一次带入：`Task { await client.failConnectOnce(...) }`
+        // 与随后 `connect()` 的执行顺序无保证，偶发布防失效、测试自以为在验降级
+        // 实际上首连成功了——断言全绿，验的却不是那一件事。
+        var initialFailure: Error?
+        if let error = failFirstDiarizedConnectError, configuration.diarizationEnabled {
+            failFirstDiarizedConnectError = nil
+            initialFailure = error
+        }
         let client = ControllableCaptionRealtimeClient(
-            receiverGate: storage.isEmpty ? receiverGateForFirst : nil
+            receiverGate: storage.isEmpty ? receiverGateForFirst : nil,
+            initialConnectFailure: initialFailure
         )
         storage.append(client)
+        configurations.append(configuration)
         lock.unlock()
         return client
+    }
+
+    /// 让接下来那条**带分人**的连接在 `connect()` 抛错一次，之后恢复正常。
+    func failFirstDiarizedConnect(_ error: Error) {
+        lock.lock()
+        failFirstDiarizedConnectError = error
+        lock.unlock()
+    }
+
+    var madeConfigurations: [CaptionRealtimeClientConfiguration] {
+        lock.lock()
+        defer { lock.unlock() }
+        return configurations
     }
 
     var all: [ControllableCaptionRealtimeClient] {

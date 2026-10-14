@@ -114,6 +114,20 @@ public final class SpeakerLabeling {
         state = enabled ? .active : .off
     }
 
+    /// 同场续接（新 epoch / 新连接）：只重置 uid 坐标系，保留面板显示。
+    ///
+    /// `segment_uid` 是服务端按连接生成的（`seg_{uuid4hex[:12]}`），跨连接无意义，
+    /// 所以 uid→行索引与已应用表必须随新连接清空，否则迟到修订会串写。
+    /// 但中断前已标出的标签/改名/计数是本场的事实，清空它们等于让面板“失忆”——
+    /// 用户看到的是“断了一下，之前标的人全没了”，直到新归属到达才逐个回来。
+    /// 降级态也不回退：续接不治愈 degraded/unavailable，只是不擦除显示。
+    public func beginNewConnection(sessionID: String) {
+        lifecycle = UUID()
+        self.sessionID = sessionID
+        lineByUnit = [:]
+        appliedByUnit = [:]
+    }
+
     /// 打开一场历史记录：只读回已经落库的显示名与出现过的标签，
     /// 不重建 uid 表（那时候修订早结束了）。
     public func load(sessionID: String, labels: [String], displayNames: [String: String]) {

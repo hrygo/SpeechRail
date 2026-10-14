@@ -184,6 +184,133 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         XCTAssertNotEqual(record?.state, .archived)
     }
 
+    /// Gap1：分人单项不可用（`diarization_not_available`）不拦整场。
+    ///
+    /// 用户开了分人、服务端却没有分人能力时，会议必须照常录下去：
+    /// 建两条连接（第一条带分人被拒，第二条不带分人成功），库里记
+    /// `unavailable` + 一句人话，正文照常落库。用户开关不被改写，
+    /// 下一场照样按开关请求分人。
+    func testDiarizationUnavailableFallsBackAndKeepsRecording() async throws {
+        let h = try await makeHarness()
+        let suite = "meeting-diarization-unavailable-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = SessionPreferences(defaults: defaults)
+        preferences.meetingDiarizationEnabled = true
+        h.session.preferences = { preferences }
+        h.clients.failFirstDiarizedConnect(
+            RealtimeASRClient.Failure.serverError(
+                code: "diarization_not_available", message: "no diarization engine"
+            )
+        )
+        await h.clients.openGate()
+        await h.session.start(selection: MeetingAudioSelection(usesMicrophone: true))
+        try await h.settle { $0.phase == .recording }
+        let id = try XCTUnwrap(h.session.sessionID)
+
+        // 两条连接：第一条带分人被拒，第二条不带分人成功。不许有第三条。
+        let configurations = h.clients.madeConfigurations
+        XCTAssertEqual(configurations.count, 2, "降级只重试一次")
+        XCTAssertEqual(configurations.map(\.diarizationEnabled), [true, false])
+        XCTAssertNil(h.session.blocked, "分人单项不可用不得拦下整场")
+
+        // 正文照常落库。
+        try await h.emit(.completed(itemID: "A", transcript: "分人不可用时的正文"))
+        try await h.settle { $0.session.lines.count == 1 }
+
+        // 库里记 unavailable + 人话，面板同态。
+        let record = try await h.store.session(id: id)
+        XCTAssertEqual(record?.diarization, .unavailable)
+        XCTAssertEqual(record?.diarizationNote, "这场没有标出谁在说话；正文照常记录。")
+        XCTAssertEqual(h.session.labeling.state, .unavailable)
+        XCTAssertEqual(
+            h.session.labeling.note, "这场没有标出谁在说话；正文照常记录。"
+        )
+
+        // 用户开关不被改写：下一场照样按开关请求分人。
+        XCTAssertTrue(preferences.meetingDiarizationEnabled)
+    }
+
+    /// Gap1 的反方向：分人降级重试若也失败，整场照样拦下。
+    ///
+    /// 第二次建连抛的是 transport 错误（真连不上），不是分人单项问题——
+    /// 此时不得留下空记录，也不得停在录制态。
+    func testDiarizationFallbackFailureStillBlocksTheMeeting() async throws {
+        let h = try await makeHarness()
+        let suite = "meeting-diarization-fallback-fail-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = SessionPreferences(defaults: defaults)
+        preferences.meetingDiarizationEnabled = true
+        h.session.preferences = { preferences }
+        // 首条带分人被拒；随后让闸门对接下来那次建连也失败——
+        // 第二条（不带分人）同样连不上，整场必须拦下。
+        h.clients.failFirstDiarizedConnect(
+            RealtimeASRClient.Failure.serverError(
+                code: "diarization_not_available", message: "no diarization engine"
+            )
+        )
+        await h.clients.gate.failNext(
+            RealtimeASRClient.Failure.transport("测试：服务没起来")
+        )
+        await h.clients.openGate()
+        await h.session.start(selection: MeetingAudioSelection(usesMicrophone: true))
+        try await h.settle { $0.session.blocked != nil }
+
+        XCTAssertEqual(h.clients.madeConfigurations.count, 2, "降级只重试一次，不许有第三条")
+        XCTAssertEqual(h.session.phase, .idle)
+        XCTAssertNil(h.session.sessionID)
+        let count = try await h.store.sessionCount()
+        XCTAssertEqual(count, 0, "失败的启动不得在库里留下空白记录")
+        XCTAssertNil(h.coordinator.occupancy)
+    }
+
+    /// Gap3：同场续接不清空说话人面板。
+    ///
+    /// 中断前已标出的标签与改名是本场的事实：续接后面板必须还在，
+    /// 只是 uid 坐标系已换代——旧连接的迟到修订写不到新行上。
+    func testResumeKeepsSpeakerPanelButResetsUnitCoordinates() async throws {
+        let h = try await makeHarness()
+        let suite = "meeting-resume-panel-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = SessionPreferences(defaults: defaults)
+        preferences.meetingDiarizationEnabled = true
+        h.session.preferences = { preferences }
+        let sessionID = try await startRecording(h)
+
+        // 中断前标出一位说话人并改名。
+        try await h.emit(.completed(itemID: "before", transcript: "中断前说的"))
+        try await h.settle { $0.session.lines.count == 1 }
+        try await h.emit(.attribution(itemID: "before", units: [
+            .init(segmentUID: "unit-before", speaker: "A", timingQuality: "aligned")
+        ], isFinal: true))
+        try await h.settle { !$0.session.labeling.labels.isEmpty }
+        await h.session.renameSpeaker(label: "A", to: "张三")
+        try await h.settle { $0.session.labeling.displayNames["A"] == "张三" }
+        XCTAssertEqual(h.session.labeling.labels, ["A"])
+
+        // 走生产重连路径。
+        h.power.fireSleep()
+        try await h.settle { $0.phase == .interrupted }
+        await h.session.continueAfterInterruption()
+        try await h.settle { $0.phase == .recording }
+        try await h.settle { await $0.clients.all.count >= 2 }
+
+        // 面板保留：标签、改名、计数都在。
+        XCTAssertEqual(h.session.labeling.labels, ["A"])
+        XCTAssertEqual(h.session.labeling.displayNames["A"], "张三")
+
+        // 新行从无归属起步（uid 重置的账本语义由
+        // `SpeakerLabelingPersistenceTests` 直接钉住，会话层只验后果）。
+        try await h.emit(.completed(itemID: "after", transcript: "续接后说的"))
+        try await h.settle { $0.session.lines.count == 2 }
+        let lines = try await h.store.lines(sessionID: sessionID)
+        XCTAssertEqual(lines.count, 2)
+        let afterLine = try XCTUnwrap(lines.first { $0.text == "续接后说的" })
+        XCTAssertNil(afterLine.speakerLabel)
+    }
+
     func testProtocolFailureCannotArchiveOrSummarizeAnEmptyMeeting() async throws {
         let h = try await makeHarness()
         let id = try await startRecording(h)
@@ -1818,11 +1945,16 @@ actor ControllableRealtimeClient: MeetingRealtimeClient {
     private var diarizationDrainFails = false
     private var drainDelay: Duration = .zero
     private var finishEventsWhenClosed = false
+    private var connectOnceFailure: Error?
 
-    init(gate: ConnectGate, receiverGate: ConnectGate? = nil) {
+    init(gate: ConnectGate, receiverGate: ConnectGate? = nil, initialConnectFailure: Error? = nil) {
         self.gate = gate
         self.receiverGate = receiverGate
+        self.connectOnceFailure = initialConnectFailure
     }
+
+    /// 让**下一次** `connect()` 抛错一次，之后恢复正常（Gap1 降级续跑用）。
+    func failConnectOnce(_ error: Error) { connectOnceFailure = error }
 
     /// **这条流必须是存下来的那一条**，不能每次 `events()` 现造一条：
     /// 现造的话测试往里塞的事件，生产 session 永远收不到，于是断言全绿、
@@ -1854,6 +1986,12 @@ actor ControllableRealtimeClient: MeetingRealtimeClient {
 
     func connect() async throws {
         connectCount += 1
+        if let failure = connectOnceFailure {
+            connectOnceFailure = nil
+            // 照抄生产契约：握手失败的连接自己收尾，不指望调用方补 `close()`。
+            closeCount += 1
+            throw failure
+        }
         do {
             try await gate.wait()
         } catch {
@@ -1908,6 +2046,10 @@ actor ControllableRealtimeClient: MeetingRealtimeClient {
 final class ClientRegistry: @unchecked Sendable {
     private let lock = NSLock()
     private var storage: [ControllableRealtimeClient] = []
+    private var configurations: [MeetingRealtimeClientConfiguration] = []
+    /// 首条连接按配置失败一次：Gap1 降级续跑用——带分人的首连被拒，
+    /// 不带分人的重连必须成功。只在 `failFirstDiarizedConnect` 布防后生效一次。
+    private var failFirstDiarizedConnectError: Error?
     private let receiverGateForFirst: ConnectGate?
     let gate = ConnectGate()
 
@@ -1915,12 +2057,39 @@ final class ClientRegistry: @unchecked Sendable {
 
     func make(_ configuration: MeetingRealtimeClientConfiguration) -> any MeetingRealtimeClient {
         lock.lock()
+        // 布防的失败经构造器一次带入：`Task { await client.failConnectOnce(...) }`
+        // 与随后 `connect()` 的执行顺序无保证，偶发布防失效、测试自以为在验降级
+        // 实际上首连成功了——断言全绿，验的却不是那一件事。
+        var initialFailure: Error?
+        if let error = failFirstDiarizedConnectError, configuration.diarizationEnabled {
+            failFirstDiarizedConnectError = nil
+            initialFailure = error
+        }
         let client = ControllableRealtimeClient(
-            gate: gate, receiverGate: storage.isEmpty ? receiverGateForFirst : nil
+            gate: gate,
+            receiverGate: storage.isEmpty ? receiverGateForFirst : nil,
+            initialConnectFailure: initialFailure
         )
         storage.append(client)
+        configurations.append(configuration)
         lock.unlock()
         return client
+    }
+
+    /// 让接下来那条**带分人**的连接在 `connect()` 抛错一次，之后恢复正常。
+    ///
+    /// 与 `failNextConnect` 的区别是刻意的：那个不看配置、连闸门一起设，
+    /// 验的是"建连失败整场拦下"；这个只拦带分人的那一条，验的是 Gap1 的
+    /// "分人单项不可用，重建不带分人的连接继续录"。
+    func failFirstDiarizedConnect(_ error: Error) {
+        lock.lock()
+        failFirstDiarizedConnectError = error
+        lock.unlock()
+    }
+
+    var madeConfigurations: [MeetingRealtimeClientConfiguration] {
+        lock.lock(); defer { lock.unlock() }
+        return configurations
     }
 
     var all: [ControllableRealtimeClient] {

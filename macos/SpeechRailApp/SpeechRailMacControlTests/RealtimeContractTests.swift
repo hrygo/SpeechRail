@@ -2028,6 +2028,243 @@ final class RealtimeContractTests: XCTestCase {
             return object["type"] as? String
         }
     }
+
+    /// Gap2：降级封存（`diarization.failed`）也是 drain 终态。
+    ///
+    /// 服务端 `_drain_and_finalize` 只发 done 或 failed 其中一个：finish 之后的
+    /// failed 必须放行 drain（继续 clear），同时原样透出 degraded 事件
+    /// （保留原始码，不改写成 `finalization_timeout`）。以前 failed 只发
+    /// degraded、不置 ack，drain 永远命中 8s 超时，会话层还误记原因。
+    func testDegradedFinalizationAcknowledgesDrainWithoutTimeout() async throws {
+        let transport = TestRealtimeASRTransport()
+        let client = RealtimeASRClient(diarizationEnabled: true, apiKey: "")
+        var events = await client.events().makeAsyncIterator()
+
+        try await client.connect(using: transport)
+        _ = await events.next()  // .configured
+        let drain = Task { try await client.drainAndClear(timeout: .seconds(2)) }
+        let eventID = try await drainCommitID(transport)
+        await transport.enqueue(.text(jsonText([
+            "type": "speechrail.input_audio_buffer.committed",
+            "commit_event_id": eventID, "accepted_samples": 0
+        ])))
+        // 等 finish 上线再发 failed：模拟服务端封存路径的真实时序。
+        for _ in 0..<100 {
+            if await sentEventTypes(transport).contains("speechrail.diarization.finish") { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(
+            await sentEventTypes(transport).contains("speechrail.diarization.finish"),
+            "drain 必须先发 finish，failed 才是它的终态回答"
+        )
+        await transport.enqueue(.text(jsonText([
+            "type": "speechrail.diarization.failed",
+            "task_id": "task-1",
+            "epoch": 0,
+            "utterance_id": "tail-item",
+            "transcript_revision": 0,
+            "metadata_revision": 0,
+            "error": ["code": "diarization_overloaded", "message": "overloaded"]
+        ])))
+        try await drain.value
+        let types = await sentEventTypes(transport)
+        XCTAssertTrue(
+            types.contains("input_audio_buffer.clear"),
+            "降级封存必须放行 drain 继续 clear，而不是超时关连接"
+        )
+        var sawDegraded = false
+        var sawFinished = false
+        for _ in 0..<10 {
+            guard let event = await events.next() else { break }
+            switch event.payload {
+            case .diarizationDegraded(let code, _):
+                XCTAssertEqual(code, "diarization_overloaded", "原始降级码必须原样透出")
+                sawDegraded = true
+            case .diarizationFinished:
+                sawFinished = true
+            default:
+                break
+            }
+            if sawDegraded && sawFinished { break }
+        }
+        XCTAssertTrue(sawDegraded, "降级原因必须透出给会话层记 degraded")
+        XCTAssertTrue(sawFinished, "封存终态必须透出 barrier 事件")
+        await client.close()
+    }
+
+    /// Gap2 的反方向：finish 之前的中途 degraded 不许提前结束 drain。
+    ///
+    /// 运行中的 `diarization.failed`（active→degraded）只是状态通知，
+    /// 不是封存回答：它只发 degraded、不发 finished，drain 仍要等真正的
+    /// done/failed 终态。否则中途一次过载就会让收尾跳过等待。
+    func testMidStreamDegradedDoesNotFinishDrainEarly() async throws {
+        let transport = TestRealtimeASRTransport()
+        let client = RealtimeASRClient(diarizationEnabled: true, apiKey: "")
+        var events = await client.events().makeAsyncIterator()
+
+        try await client.connect(using: transport)
+        _ = await events.next()  // .configured
+        await transport.enqueue(.text(jsonText([
+            "type": "speechrail.diarization.failed",
+            "task_id": "task-1",
+            "epoch": 0,
+            "utterance_id": "mid-item",
+            "transcript_revision": 0,
+            "metadata_revision": 0,
+            "error": ["code": "diarization_overloaded", "message": "overloaded"]
+        ])))
+        guard let degraded = await events.next(),
+              case .diarizationDegraded(let code, _) = degraded.payload else {
+            XCTFail("中途 degraded 必须透出")
+            await client.close()
+            return
+        }
+        XCTAssertEqual(code, "diarization_overloaded")
+
+        // 随后走完整 drain：必须等真正的 done 终态才放行。
+        let drain = Task { try await client.drainAndClear(timeout: .seconds(2)) }
+        let eventID = try await drainCommitID(transport)
+        await transport.enqueue(.text(jsonText([
+            "type": "speechrail.input_audio_buffer.committed",
+            "commit_event_id": eventID, "accepted_samples": 0
+        ])))
+        for _ in 0..<100 {
+            if await sentEventTypes(transport).contains("speechrail.diarization.finish") { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        await transport.enqueue(.text(jsonText([
+            "type": "speechrail.diarization.done",
+            "task_id": "task-1",
+            "epoch": 0,
+            "utterance_id": "tail-item",
+            "transcript_revision": 0,
+            "metadata_revision": 0,
+            "units": []
+        ])))
+        try await drain.value
+        XCTAssertTrue(await sentEventTypes(transport).contains("input_audio_buffer.clear"))
+        await client.close()
+    }
+
+    /// `diarization.done` 的归属是终版：`isFinal` 必须为 true。
+    ///
+    /// `Event.attribution` 的文档语义是"true 表示分人收口后的最后一份"——
+    /// 以前 done 分支误发 `false`，调用方无法区分"还会再改"与"已经收口"。
+    /// 顺序也一并钉住：终版归属先到，`diarizationFinished` 屏障随后。
+    func testDiarizationDoneEmitsFinalAttributionBeforeBarrier() async throws {
+        let transport = TestRealtimeASRTransport()
+        let client = RealtimeASRClient(diarizationEnabled: true, apiKey: "")
+        var events = await client.events().makeAsyncIterator()
+
+        try await client.connect(using: transport)
+        guard let configured = await events.next(),
+              case .configured = configured.payload else {
+            XCTFail("Expected the fake server configuration acknowledgement")
+            return
+        }
+        // item 先存在：completed 建终态正文，对齐建 uid 单元。
+        let transcript = "你好世界"
+        await transport.enqueue(.text(jsonText([
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "utterance-1",
+            "transcript": transcript
+        ])))
+        guard let completed = await events.next(),
+              case .completed = completed.payload else {
+            XCTFail("Expected the completed transcript")
+            await client.close()
+            return
+        }
+        await transport.enqueue(.text(jsonText(
+            alignmentDoneEvent(
+                taskID: "task-1",
+                transcriptRevision: 0,
+                metadataRevision: 0,
+                itemID: "utterance-1",
+                codepointEnd: 4,
+                units: [[
+                    "segment_uid": "segment-1",
+                    "text_start": 0,
+                    "text_end": 4,
+                    "audio_start_sample": 0,
+                    "audio_end_sample": 8,
+                    "timing_quality": "aligned",
+                    "granularity": "segment"
+                ]]
+            )
+        )))
+        guard let aligned = await events.next(),
+              case .attribution(_, let alignedUnits, let alignedFinal) = aligned.payload else {
+            XCTFail("Expected the alignment attribution")
+            await client.close()
+            return
+        }
+        XCTAssertEqual(alignedUnits.map(\.segmentUID), ["segment-1"])
+        XCTAssertFalse(alignedFinal, "对齐到达时分人还没收口")
+        XCTAssertNil(alignedUnits.first?.speaker, "分人到达之前归属为空")
+
+        try await client.finishDiarization()
+        await transport.enqueue(.text(jsonText([
+            "type": "speechrail.diarization.done",
+            "task_id": "task-1",
+            "epoch": 0,
+            "utterance_id": "utterance-1",
+            "transcript_revision": 0,
+            "metadata_revision": 0,
+            "units": [[
+                "speaker": "A",
+                "sample_span": ["start": 0, "end": 8]
+            ]]
+        ])))
+        guard let final = await events.next(),
+              case .attribution(let finalItemID, let finalUnits, let isFinal) = final.payload else {
+            XCTFail("Expected the final attribution")
+            await client.close()
+            return
+        }
+        XCTAssertEqual(finalItemID, "utterance-1")
+        XCTAssertEqual(finalUnits.count, 1)
+        XCTAssertEqual(finalUnits.first?.speaker, "A")
+        XCTAssertTrue(isFinal, "diarization.done 的归属是终版")
+        guard let barrier = await events.next(),
+              case .diarizationFinished = barrier.payload else {
+            XCTFail("Expected the session finish barrier after the final attribution")
+            await client.close()
+            return
+        }
+        await client.close()
+    }
+
+    /// Gap1 的判据：只有分人单项不可用的两个码才触发降级续跑。
+    ///
+    /// `diarization_not_available`（分人引擎不可用）与 `backend_not_ready`
+    /// （配置阶段含对齐器——分人的既有前置——缺失）返回码；其他 serverError /
+    /// transport / closed / timeout 一律不降级。`backend_not_ready` 名义上
+    /// 也可能覆盖整场问题（如 VAD 预检失败），但那时第二次建连同样被拒，
+    /// 降级路径自然收敛到整场拦下——见 `diarizationUnavailableCode` 的注释。
+    func testDiarizationUnavailableCodeOnlyMatchesSingleCapabilityFailures() {
+        XCTAssertEqual(
+            RealtimeASRClient.Failure.serverError(code: "diarization_not_available", message: "x")
+                .diarizationUnavailableCode,
+            "diarization_not_available"
+        )
+        XCTAssertEqual(
+            RealtimeASRClient.Failure.serverError(code: "backend_not_ready", message: "x")
+                .diarizationUnavailableCode,
+            "backend_not_ready"
+        )
+        XCTAssertNil(
+            RealtimeASRClient.Failure.serverError(code: "invalid_server_event", message: "x")
+                .diarizationUnavailableCode,
+            "协议回执不对不是分人单项问题，不得降级"
+        )
+        XCTAssertNil(
+            RealtimeASRClient.Failure.transport("x").diarizationUnavailableCode
+        )
+        XCTAssertNil(
+            RealtimeASRClient.Failure.drainTimedOut(.diarization).diarizationUnavailableCode
+        )
+    }
 }
 
 private enum RealtimeASRClientModelFixture {

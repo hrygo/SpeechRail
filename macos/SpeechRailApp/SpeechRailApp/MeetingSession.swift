@@ -242,7 +242,6 @@ public final class MeetingSession {
     )
     /// 已经补写过 `timing_quality` 的行；同一行只写一次。
     private var timingQualityApplied: Set<String> = []
-    private var diarizationDrained = false
     private var isStoppingIntentionally = false
     /// 本场第几个 epoch（一次 WS 连接 = 一个 epoch，§5.2 账本规则 1）。
     private var epoch = 0
@@ -616,23 +615,49 @@ public final class MeetingSession {
         }
         gapCount = 0
 
-        // 分人现在是任务级 opt-in：按用户开关声明，服务端不可用时如实回报失败。
+        // 分人是任务级 opt-in：按用户开关声明。服务端单项不可用
+        // （`diarization_not_available` / `backend_not_ready`）时不拦整场：
+        // 用同一轮 token 重建一条**不带分人**的连接，正文继续，
+        // 分人记 `unavailable`。其他错误仍整场拦下。
         let wantsDiarization = preferences?.meetingDiarizationEnabled ?? false
+        var diarizationUnavailableNote: String?
 
-        let client = dependencies.makeRealtimeClient(
-            MeetingRealtimeClientConfiguration(
-                port: port,
-                scenePreset: .meeting,
-                apiKey: serviceKey,
-                diarizationEnabled: wantsDiarization,
-                expectedASRRevision: binding?.asrModelRevision
+        func makeClient(diarizationEnabled: Bool) -> any MeetingRealtimeClient {
+            dependencies.makeRealtimeClient(
+                MeetingRealtimeClientConfiguration(
+                    port: port,
+                    scenePreset: .meeting,
+                    apiKey: serviceKey,
+                    diarizationEnabled: diarizationEnabled,
+                    expectedASRRevision: binding?.asrModelRevision
+                )
             )
-        )
+        }
+
+        var client = makeClient(diarizationEnabled: wantsDiarization)
+        var diarizationEffective = wantsDiarization
         do {
             try await client.connect()
         } catch {
-            await audio.stop()
-            throw Blocked(reason: .serviceNotReady(error.localizedDescription))
+            let unavailableCode = (error as? RealtimeASRClient.Failure)?.diarizationUnavailableCode
+            guard wantsDiarization, unavailableCode != nil,
+                  connectionGeneration.isCurrent(startToken) else {
+                await audio.stop()
+                throw Blocked(reason: .serviceNotReady(error.localizedDescription))
+            }
+            // 降级只重试一次：第二次失败就是真连不上，整场拦下。
+            client = makeClient(diarizationEnabled: false)
+            do {
+                try await client.connect()
+            } catch {
+                await audio.stop()
+                throw Blocked(reason: .serviceNotReady(error.localizedDescription))
+            }
+            diarizationEffective = false
+            diarizationUnavailableNote = Self.readableError(
+                code: "diarization_not_available",
+                message: error.localizedDescription
+            )
         }
         guard connectionGeneration.isCurrent(startToken) else {
             // 这一场已经被结束或被换掉了。只回收这一轮自己领到的采集与连接，
@@ -650,8 +675,9 @@ public final class MeetingSession {
                     kind: .meeting,
                     engineProfile: profile,
                     audioSource: selection.resolvedSource,
-                    diarization: wantsDiarization ? .active : .off,
-                    diarizationNote: nil,
+                    diarization: diarizationEffective ? .active
+                        : (diarizationUnavailableNote == nil ? .off : .unavailable),
+                    diarizationNote: diarizationUnavailableNote,
                     llmEndpoint: minutesConfiguration?.normalizedBaseURL,
                     llmModel: minutesConfiguration?.model,
                     // §4.1：标题可为空。空着照样开始，不把门槛加回去。
@@ -681,8 +707,20 @@ public final class MeetingSession {
             interruption = nil
             interruptedAt = nil
             interruptionNote = nil
+            // 续接时分人也可能单项不可用：正文继续，只把库里的分人态改成
+            // unavailable（只动那两列）。不降级时不动库——沿用建行时的态。
+            if let sessionID, let note = diarizationUnavailableNote {
+                await coordinator.updateSessionDiarization(
+                    id: sessionID, state: .unavailable, note: note
+                )
+            }
         }
-        configureLabeling(sessionID: sessionID, enabled: wantsDiarization)
+        configureLabeling(
+            sessionID: sessionID,
+            enabled: diarizationEffective,
+            isNewSession: isNewSession,
+            unavailableNote: diarizationUnavailableNote
+        )
 
         epoch += 1
         // 新一代从这里开始：此前任何仍在飞的回调都成了旧代。
@@ -699,7 +737,6 @@ public final class MeetingSession {
             captureTimelineOffsetSeconds: dependencies.clock.now().timeIntervalSince1970
         )
         partialText = nil
-        diarizationDrained = false
         isStoppingIntentionally = false
         isPaused = false
         // 静音状态与设备同生共死：`audio.start` 已经把闸门重置回"能说话"，这里的镜像跟上。
@@ -718,9 +755,27 @@ public final class MeetingSession {
         )
     }
 
-    private func configureLabeling(sessionID: String?, enabled: Bool) {
+    private func configureLabeling(
+        sessionID: String?,
+        enabled: Bool,
+        isNewSession: Bool,
+        unavailableNote: String? = nil
+    ) {
         guard let sessionID else { return }
-        labeling.begin(sessionID: sessionID, enabled: enabled)
+        if isNewSession {
+            labeling.begin(sessionID: sessionID, enabled: enabled)
+        } else {
+            // Gap3：续接只重置 uid 坐标系，面板上已标出的标签/改名/计数保留。
+            // 以前这里调 `begin`，中断前标的人会整屏消失，直到新归属到达。
+            // 账本若已 degraded/unavailable，续接不回退状态，只确保 uid 表已清空；
+            // 新归属到达时按当前态决定是否接纳。
+            labeling.beginNewConnection(sessionID: sessionID)
+        }
+        // Gap1：本轮建连已确认分人单项不可用——正文继续，面板给一句说明，
+        // 不留一个永远点不动的开关。
+        if let unavailableNote {
+            labeling.markUnavailable(note: unavailableNote)
+        }
     }
 
     /// 释放这一层的设备与连接。**幂等**，中断与结束两条路都走它。
@@ -991,7 +1046,9 @@ public final class MeetingSession {
         case .attribution(let itemID, let units, _):
             await applyAttribution(itemID: itemID, units: units, identity: identity)
         case .diarizationFinished:
-            diarizationDrained = true
+            // 分人收口屏障：drain 已在客户端内等齐，这里无需再记状态。
+            // 归属修订走 `.attribution`，降级走 `.diarizationDegraded`。
+            break
         case .auxiliaryIncomplete(_, let alignmentMissing, let diarizationMissing):
             if diarizationMissing, labeling.isEnabled {
                 labeling.markDegraded(

@@ -833,6 +833,9 @@ public actor RealtimeASRClient {
     public enum Failure: LocalizedError, Equatable, Sendable {
         case unsupportedModel(String)
         case transport(String)
+        /// 服务端在配置阶段返回的稳定错误（`session.update` 被拒）。
+        /// 保留 `code` 是为了让会话层区分“分人不可用，降级继续”与“服务不可用，整场拦下”。
+        case serverError(code: String, message: String)
         case closed(Int?)
         case drainTimedOut(RealtimeDrainStage)
 
@@ -842,6 +845,8 @@ public actor RealtimeASRClient {
                 "这个档位不支持流式模型 \(model)。"
             case .transport(let message):
                 "连不上语音服务：\(message)"
+            case .serverError(let code, let message):
+                "语音服务拒绝了当前配置（\(code)：\(message)）。"
             case .closed(let code):
                 code.map { "语音服务断开了连接（\($0)）。" } ?? "语音服务断开了连接。"
             case .drainTimedOut(let stage):
@@ -858,6 +863,23 @@ public actor RealtimeASRClient {
                     "语音服务没有在关闭期限内完成关闭。"
                 }
             }
+        }
+
+        /// 分人协商失败时返回服务端稳定码（Gap1 降级续跑的判据），其他错误返回 nil。
+        ///
+        /// 只认这两个码：`diarization_not_available`（分人引擎不可用）与
+        /// `backend_not_ready`（配置阶段含对齐器——分人的既有前置——缺失；
+        /// 本层不启用 TTS，所以 TTS 未就绪那一路到不了这里）。后者名义上也可能
+        /// 是整场问题（如 Silero VAD 预检失败），但那时第二次建连同样被拒，
+        /// 降级路径自然收敛到整场拦下——多一次建连，不多一次误判。
+        /// 其他 `serverError`（协议回执不对等）与 transport/closed/timeout
+        /// 都不是“分人单项不可用”，整场拦下。
+        public var diarizationUnavailableCode: String? {
+            if case .serverError(let code, _) = self,
+               code == "diarization_not_available" || code == "backend_not_ready" {
+                return code
+            }
+            return nil
         }
     }
 
@@ -1847,7 +1869,7 @@ public actor RealtimeASRClient {
                 generation: generation,
                 now: currentEventReceivedAt!
             ) {
-                await emit(attribution(itemID: itemID, isFinal: false))
+                await emit(attribution(itemID: itemID, isFinal: true))
             } else if await rejectItemStateLimitIfNeeded() {
                 return
             }
@@ -1870,6 +1892,14 @@ public actor RealtimeASRClient {
                     message: error?["message"] as? String ?? "说话人编号停止更新了。"
                 )
             )
+            // 服务端封存失败也是终态（`_drain_and_finalize` 只发 done 或 failed
+            // 其中一个）：drain 必须放行，否则降级封存永远命中 8s 超时，
+            // 还会被会话层误记为 `finalization_timeout`。
+            // 只认 finish 之后的 failed——中途的 degraded 不许提前结束 drain。
+            if finishSent {
+                diarizationAcknowledged = true
+                await emit(.diarizationFinished)
+            }
         case "speechrail.tts.started":
             guard
                 let started = TTSSessionStarted(object: object),
@@ -1984,12 +2014,13 @@ public actor RealtimeASRClient {
         case "error":
             let error = object["error"] as? [String: Any]
             let errorMessage = error?["message"] as? String ?? "语音服务返回了一个错误"
+            let errorCode = error?["code"] as? String ?? error?["type"] as? String ?? "unknown"
             if let expectedDrainCommitEventID,
                error?["event_id"] as? String == expectedDrainCommitEventID {
                 drainFailure = .transport(errorMessage)
             }
             if !configurationAcknowledged {
-                configurationFailure = .transport(errorMessage)
+                configurationFailure = .serverError(code: errorCode, message: errorMessage)
             }
             let requestID = error?["request_id"] as? String ?? object["request_id"] as? String
             if let requestID, requestID == activeTTSRequestID {
@@ -2048,7 +2079,7 @@ public actor RealtimeASRClient {
         guard !didClose else { return }
         let message = message ?? "语音服务事件顺序或身份无效，已关闭当前连接。"
         if !configurationAcknowledged {
-            configurationFailure = .transport(message)
+            configurationFailure = .serverError(code: code, message: message)
         }
         await emit(.serverError(code: code, message: message, requestID: nil))
         await finish(code: nil)
@@ -2279,7 +2310,7 @@ public actor RealtimeASRClient {
 
         let message = "语音事件积压超过本地安全上限，已关闭当前连接。"
         if !configurationAcknowledged {
-            configurationFailure = .transport(message)
+            configurationFailure = .serverError(code: "realtime_event_stream_overflow", message: message)
         }
         let terminalMetadata = RealtimeEventMetadata()
         let now = ContinuousClock().now

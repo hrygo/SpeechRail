@@ -257,8 +257,6 @@ public final class CaptionSession {
     private var timingQualityApplied: Set<String> = []
     /// 这一场是否协商过分人（决定了结束时要等 EOF 屏障）。
     private var diarizationActive = false
-    /// `speechrail.diarization.done` 是否已经到达。
-    private var diarizationDrained = false
 
     public init(
         coordinator: SessionCoordinator,
@@ -486,27 +484,47 @@ public final class CaptionSession {
 
         // 分人在**首个 PCM 之前**协商一次，之后改不了（契约 §Diarization 扩展）。
         // 是否可用的唯一事实来源是服务的能力声明：这里按用户开关原样请求，
-        // 不在本地按档位拦截，服务不支持时以稳定错误回应。
-        let diarizationEnabled = diarizationPreference()
-        diarizationActive = diarizationEnabled
-        diarizationDrained = false
+        // 不在本地按档位拦截。分人单项不可用时不拦整场：重建一条不带分人的
+        // 连接，正文继续，分人记 `unavailable`。
+        let diarizationRequested = diarizationPreference()
+        var diarizationUnavailableNote: String?
 
-        let client = dependencies.makeRealtimeClient(
-            CaptionRealtimeClientConfiguration(
-                port: port,
-                scenePreset: .caption,
-                diarizationEnabled: diarizationEnabled,
-                apiKey: apiKey,
-                expectedASRRevision: binding?.asrModelRevision
+        func makeClient(diarizationEnabled: Bool) -> any CaptionRealtimeClient {
+            dependencies.makeRealtimeClient(
+                CaptionRealtimeClientConfiguration(
+                    port: port,
+                    scenePreset: .caption,
+                    diarizationEnabled: diarizationEnabled,
+                    apiKey: apiKey,
+                    expectedASRRevision: binding?.asrModelRevision
+                )
             )
-        )
+        }
+
+        var client = makeClient(diarizationEnabled: diarizationRequested)
+        var diarizationEnabled = diarizationRequested
         do {
             try await client.connect()
         } catch {
-            source.stop()
-            self.source = nil
-            throw Blocked(.serviceNotReady(error.localizedDescription))
+            let unavailableCode = (error as? RealtimeASRClient.Failure)?.diarizationUnavailableCode
+            guard diarizationRequested, unavailableCode != nil else {
+                source.stop()
+                self.source = nil
+                throw Blocked(.serviceNotReady(error.localizedDescription))
+            }
+            // 降级只重试一次：第二次失败就是真连不上，整场拦下。
+            client = makeClient(diarizationEnabled: false)
+            do {
+                try await client.connect()
+            } catch {
+                source.stop()
+                self.source = nil
+                throw Blocked(.serviceNotReady(error.localizedDescription))
+            }
+            diarizationEnabled = false
+            diarizationUnavailableNote = "这场没有标出谁在说话；正文照常记录。"
         }
+        diarizationActive = diarizationEnabled
         self.client = client
 
         // 记录行在**采集真的起来之后**才建：麦克风没起来、服务连不上，都不该在记录库里
@@ -526,13 +544,17 @@ public final class CaptionSession {
                     kind: .captions,
                     engineProfile: profile,
                     audioSource: .microphone,
-                    diarization: diarizationEnabled ? .active : .off,
-                    diarizationNote: nil,
+                    diarization: diarizationEnabled ? .active
+                        : (diarizationUnavailableNote == nil ? .off : .unavailable),
+                    diarizationNote: diarizationUnavailableNote,
                     startedAt: startedAt
                 )
             )
             sessionID = record.id
             labeling.begin(sessionID: record.id, enabled: diarizationEnabled)
+            if let diarizationUnavailableNote {
+                labeling.markUnavailable(note: diarizationUnavailableNote)
+            }
             coordinator.sessionDidStartRecording(id: record.id)
         } catch {
             await client.close()
@@ -755,24 +777,52 @@ public final class CaptionSession {
         }
         // 续接是**新连接、新 epoch**（§6.5）：分人在新连接上要重新协商一次，
         // 否则这一段的归属会静默丢掉。
-        let client = dependencies.makeRealtimeClient(
-            CaptionRealtimeClientConfiguration(
-                port: port,
-                scenePreset: .caption,
-                diarizationEnabled: diarizationActive,
-                apiKey: apiKey,
-                expectedASRRevision: binding?.asrModelRevision
+        func makeClient(diarizationEnabled: Bool) -> any CaptionRealtimeClient {
+            dependencies.makeRealtimeClient(
+                CaptionRealtimeClientConfiguration(
+                    port: port,
+                    scenePreset: .caption,
+                    diarizationEnabled: diarizationEnabled,
+                    apiKey: apiKey,
+                    expectedASRRevision: binding?.asrModelRevision
+                )
             )
-        )
+        }
+        let diarizationRequested = diarizationActive
+        var client = makeClient(diarizationEnabled: diarizationRequested)
+        var diarizationUnavailableNote: String?
         do {
             try await client.connect()
         } catch {
-            source.stop()
-            self.source = nil
-            throw Blocked(.serviceNotReady(error.localizedDescription))
+            let unavailableCode = (error as? RealtimeASRClient.Failure)?.diarizationUnavailableCode
+            guard diarizationRequested, unavailableCode != nil else {
+                source.stop()
+                self.source = nil
+                throw Blocked(.serviceNotReady(error.localizedDescription))
+            }
+            client = makeClient(diarizationEnabled: false)
+            do {
+                try await client.connect()
+            } catch {
+                source.stop()
+                self.source = nil
+                throw Blocked(.serviceNotReady(error.localizedDescription))
+            }
+            diarizationActive = false
+            diarizationUnavailableNote = "这场没有标出谁在说话；正文照常记录。"
         }
         self.client = client
-        diarizationDrained = false
+        // Gap3：续接只重置 uid 坐标系，面板上已标出的标签/改名/计数保留。
+        // 以前这里不动账本——uid 表残留旧连接的坐标，迟到修订可能串写。
+        if let sessionID {
+            labeling.beginNewConnection(sessionID: sessionID)
+            if let diarizationUnavailableNote {
+                labeling.markUnavailable(note: diarizationUnavailableNote)
+                await coordinator.updateSessionDiarization(
+                    id: sessionID, state: .unavailable, note: diarizationUnavailableNote
+                )
+            }
+        }
         isStoppingIntentionally = false
         blocked = nil
         phase = .running
@@ -915,7 +965,8 @@ public final class CaptionSession {
         case .attribution(let itemID, let units, _):
             await applyAttribution(itemID: itemID, units: units, identity: identity)
         case .diarizationFinished:
-            diarizationDrained = true
+            // 分人收口屏障：drain 已在客户端内等齐，这里无需再记状态。
+            break
         case .auxiliaryIncomplete(_, let alignmentMissing, let diarizationMissing):
             if diarizationMissing, diarizationActive {
                 labeling.markDegraded(
