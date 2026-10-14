@@ -381,7 +381,8 @@ public struct AudiobookBookWorkspaceView: View {
                         StatusPill(tone: .neutral, label: "待分析")
                     }
 
-                    Text("\(atom.sourceRange.byteCount) 字节")
+                    let charCount = text.isEmpty ? max(1, Int(atom.sourceRange.byteCount / 3)) : text.count
+                    Text("\(charCount) 字")
                         .font(SpeechRailDesignTokens.Typography.technical)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
 
