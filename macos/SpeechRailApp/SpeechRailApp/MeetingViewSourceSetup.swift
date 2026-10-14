@@ -31,7 +31,7 @@ extension MeetingView {
         switch meeting.phase {
         case .idle:
             emptyState
-        case .archived:
+        case .archived, .processing:
             postMeeting
         default:
             liveTranscript
@@ -82,14 +82,19 @@ extension MeetingView {
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
                     SessionPanel { sourcesCard }
-                    SessionPanel { blockedSourcesCard }
+                    if sourceCandidates.isEmpty {
+                        SessionPanel { blockedSourcesCard }
+                    }
                 }
                 .padding(.top, SpeechRailDesignTokens.Spacing.sm)
             }
             .frame(maxHeight: .infinity)
         } label: {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Text("想连电脑里的声音一起记（可选）")
+                Image(systemName: "waveform.and.mic")
+                    .font(SpeechRailDesignTokens.Typography.navigationIcon)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                Text("音频拾音环境（可选配置）")
                     .font(SpeechRailDesignTokens.Typography.bodyMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 Text(sourceSummaryText)
@@ -106,8 +111,8 @@ extension MeetingView {
         var parts: [String] = []
         if usesMicrophone { parts.append("麦克风") }
         parts.append(contentsOf: systemApps.map(\.name))
-        guard !parts.isEmpty else { return "现在没有选任何来源" }
-        return "现在记：" + parts.joined(separator: " + ")
+        guard !parts.isEmpty else { return "未选任何来源" }
+        return "当前：" + parts.joined(separator: " + ")
     }
 
     /// 音频来源：麦克风一行、本机音频按 App 若干行，最后一行是「自动混音」——
@@ -156,8 +161,12 @@ extension MeetingView {
             Spacer(minLength: 0)
             SessionHairline()
             CardFoot(note: "来源列表只列正在出声或最近出过声的 App；列表为空时先去那个 App 里放一声。") {
-                Button("刷新列表") { refreshSources() }
-                    .speechRailButton(.secondary)
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Button("测试输入电平") { isCheckingInput = true }
+                        .speechRailButton(.secondary)
+                    Button("刷新列表") { refreshSources() }
+                        .speechRailButton(.secondary)
+                }
             }
         }
     }
@@ -262,16 +271,29 @@ extension MeetingView {
     /// 让用户重打一遍他没有能力消除的那个问题，是白添摩擦。
     private var titleField: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-            Text("标题")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            TextField("可以不填，之后在知识库里改也行", text: $titleDraft)
+            Text("主题")
+                .font(SpeechRailDesignTokens.Typography.callout)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            TextField("输入主题或直接回车开始（可留空）", text: $titleDraft)
                 .textFieldStyle(.plain)
-                .accessibilityLabel("这场会议的标题，可以留空")
-            Text("可以不填")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
+                .onSubmit {
+                    Task { await start() }
+                }
+                .accessibilityLabel("这场会议的标题，输入后可按回车直接开始，也可以留空")
+            Button {
+                Task { await start() }
+            } label: {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                    Text("开始")
+                        .font(SpeechRailDesignTokens.Typography.captionMedium)
+                    Image(systemName: "return")
+                        .font(SpeechRailDesignTokens.Typography.chipIcon)
+                }
+                .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+            }
+            .buttonStyle(.plain)
+            .speechRailPointerCursor()
+            .help("按回车或点击此按钮立即开始会议")
         }
         .speechRailSingleLineInput(.regular)
     }

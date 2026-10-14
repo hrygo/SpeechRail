@@ -833,6 +833,24 @@ public final class MeetingSession {
         return complete
     }
 
+    /// 会后开启新会议：把状态复位回准备状态，清除瞬态显示，保留已落盘的记录库。
+    public func resetForNewMeeting() {
+        guard phase == .archived || phase == .idle else { return }
+        phase = .idle
+        sessionID = nil
+        startedAt = nil
+        lines = []
+        partialText = nil
+        interruption = nil
+        interruptedAt = nil
+        interruptionNote = nil
+        gapCount = 0
+        lastFailure = nil
+        isPaused = false
+        isMicrophoneMuted = false
+        pendingTitle = nil
+    }
+
     private func resetKeepingLines() {
         phase = .idle
         sessionID = nil

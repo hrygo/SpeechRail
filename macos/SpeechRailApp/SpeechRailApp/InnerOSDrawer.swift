@@ -59,7 +59,7 @@ public struct InnerOSDrawer: View {
             sentencePicker(for: exchange)
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("内心 OS。会议中随时私下问它一句，只有你看得到：这里的提问与回答不会进入会议录音、文字记录或纪要。")
+        .accessibilityLabel("会中私聊。会议中随时私下向助手提问，仅你看得到：这里的提问与回答不会进入会议录音、文字记录或纪要。")
         .onChange(of: session.exchanges.count) { _, _ in
             if selectedExchangeID == nil { selectedExchangeID = session.exchanges.last?.id }
         }
@@ -76,10 +76,8 @@ public struct InnerOSDrawer: View {
                     Image(systemName: "eye.slash")
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         .accessibilityHidden(true)
-                    Text("内心 OS").font(SpeechRailDesignTokens.Typography.bodyMedium)
-                    // 「内心 OS」是这一版的叫法（沿用 Sona）；名字本身不解释用途，
-                    // 所以紧跟一句人话说明它**干什么**（用户 2026-09-19：界面要说人话）。
-                    Text("随时私下问它一句 · 只你可见")
+                    Text("会中私聊").font(SpeechRailDesignTokens.Typography.bodyMedium)
+                    Text("私下提问 · 仅你可见")
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                     Text("已问 \(session.askedCount) 次 · \(session.inMinutesCount) 条已写进纪要")
@@ -95,7 +93,7 @@ public struct InnerOSDrawer: View {
             }
             .buttonStyle(.plain)
             .speechRailPointerCursor()
-            .help("会议进行中随时问它一句话（比如「刚才那个数字是多少」）；答案只有你看得到，不会进会议音频、文字记录或纪要。")
+            .help("会议进行中随时向助手私下提问；答案只有你看得到，不会进入会议音频、文字记录或公开纪要。")
             .accessibilityValue(session.isExpanded ? "已展开" : "已收起")
             Button {
                 session.isExpanded.toggle()
@@ -103,7 +101,7 @@ public struct InnerOSDrawer: View {
                 Image(systemName: session.isExpanded ? "chevron.down" : "chevron.up")
             }
             .buttonStyle(.borderless)
-            .accessibilityLabel(session.isExpanded ? "收起内心 OS" : "展开内心 OS")
+            .accessibilityLabel(session.isExpanded ? "收起会中私聊" : "展开会中私聊")
             .speechRailPointerCursor()
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
@@ -114,13 +112,13 @@ public struct InnerOSDrawer: View {
 
     private var history: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-            Text("本场问过的")
+            Text("本场提问历史")
                 .font(SpeechRailDesignTokens.Typography.captionMedium)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                     if session.exchanges.isEmpty {
-                        Text("还没有问过。这里只有你能看到。")
+                        Text("还没有提问。提问与回答仅你可见，不会进入会议音频与文字记录。")
                             .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                     }
@@ -132,8 +130,7 @@ public struct InnerOSDrawer: View {
             }
             .frame(maxHeight: .infinity)
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                // 占位文案按稿：说清"它只看哪一份上下文"，也是这一栏与助手页的区别。
-                TextField("问点什么（它只看这一场的文字记录，不联网）", text: $question)
+                TextField("私下向助手提问（仅参考本场文字记录，不联网、不入公频）", text: $question)
                     .textFieldStyle(.plain)
                     .speechRailSingleLineInput(.regular)
                     .onSubmit { send() }
@@ -142,14 +139,13 @@ public struct InnerOSDrawer: View {
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                 } else {
-                    Button("问") { send() }
+                    Button("提问") { send() }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
                         .disabled(question.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
-            Text("追问接着上一问的上下文；回答不会进会议音频与文字记录，"
-                + "想让它写进纪要得点一下「写进纪要」。")
+            Text("追问基于本场对话上下文；回答仅供你个人参考，如需纳入可点击回答卡片中的「写进纪要」。")
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                 .fixedSize(horizontal: false, vertical: true)

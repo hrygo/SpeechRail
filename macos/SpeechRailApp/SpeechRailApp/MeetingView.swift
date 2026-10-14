@@ -56,6 +56,10 @@ public struct MeetingView: View {
     /// 采用哪一版时的冲突提示（MC-31）：两个窗口基于同一旧版改采用时，
     /// 后返回的那个不覆盖，改为提示刷新。
     @State var adoptConflictNotice: String?
+    /// 纪要一键复制反馈。
+    @State var copiedNotice: String?
+    /// 文字记录搜索过滤关键字。
+    @State var transcriptSearchText = ""
     /// 录制中打开「标注说话人」面板（稿 `screenMeetingRecording` 表头那一颗）。
     @State var isLabelingSpeakers = false
 
@@ -145,6 +149,15 @@ public struct MeetingView: View {
             // 页头动作逐态一屏（稿 `meetingShell` 的 `headActions` + 那一处共用的右栏收起）。
             // 空态这三件曾经一件都没有：设计稿的主按钮「开始会议」在界面上不存在，
             // 只能靠 ⌘⇧N 或菜单栏——同一页的受阻卡里反倒有一个「重试」能开始（2026-09-19 实测）。
+            if reviewRecord != nil {
+                PageActionButton(
+                    title: "返回会议主页",
+                    systemImage: "arrow.uturn.backward",
+                    helpText: "退出历史记录查看，回到会议助手主页"
+                ) {
+                    closeReview()
+                }
+            }
             if meeting.phase == .idle, meeting.blocked == nil {
                 SessionHeaderKeycap("⌘⇧N")
                 PageActionButton(
@@ -211,7 +224,15 @@ public struct MeetingView: View {
                     meeting.minutes.stop()
                 }
             } else if meeting.phase == .archived, meeting.sessionID != nil {
-                // 已归档（稿 `screenMeetingMinutes` 的页头两件）。
+                // 已归档（稿 `screenMeetingMinutes` 的页头三件）。
+                PageActionButton(
+                    title: "开启新会议",
+                    systemImage: "plus.circle",
+                    helpText: "完成当前会议整理，返回准备界面开启下一场会议"
+                ) {
+                    closeReview()
+                    meeting.resetForNewMeeting()
+                }
                 exportMenu(title: "导出…", helpText: "导出这一场：文字记录加已生成的纪要")
                 PageActionButton(
                     title: "重新生成纪要",

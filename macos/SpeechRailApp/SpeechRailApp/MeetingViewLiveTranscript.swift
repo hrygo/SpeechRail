@@ -13,7 +13,7 @@ extension MeetingView {
             VStack(alignment: .leading, spacing: 0) {
                 CardHead(
                     title: "实时记录",
-                    detail: meeting.labeling.isEnabled ? "点名字那一列就能改名，正文不会动" : nil
+                    detail: meeting.labeling.isEnabled ? "点击发言人标签可重命名或合并" : nil
                 ) {
                     // 稿 `screenMeetingRecording` 表头那一颗（`main.js:3642`）：会中人工标注的
                     // 入口必须看得见。点行上的标签是**第一条路**（就地改名 / 合并），这颗按钮是
@@ -100,25 +100,42 @@ extension MeetingView {
                     }
                     .safeAreaInset(edge: .bottom) {
                         if let banner = transcriptFollow.unseenBannerText {
-                            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                                Text(banner)
-                                    .font(SpeechRailDesignTokens.Typography.caption)
-                                Button("回到最新") {
-                                    transcriptFollow = transcriptFollow.jumpToLatest(
-                                        anchor: meeting.lines.last?.id
-                                    )
-                                    guard let last = meeting.lines.last else { return }
-                                    if reduceMotion {
+                            Button {
+                                transcriptFollow = transcriptFollow.jumpToLatest(
+                                    anchor: meeting.lines.last?.id
+                                )
+                                guard let last = meeting.lines.last else { return }
+                                if reduceMotion {
+                                    proxy.scrollTo(last.id, anchor: .bottom)
+                                } else {
+                                    withAnimation(SpeechRailDesignTokens.Motion.interactiveSpring) {
                                         proxy.scrollTo(last.id, anchor: .bottom)
-                                    } else {
-                                        withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
                                     }
                                 }
-                                .buttonStyle(.bordered)
-                                .keyboardShortcut(.defaultAction)
+                            } label: {
+                                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                                    Image(systemName: "arrow.down.circle.fill")
+                                        .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                                    Text(banner)
+                                        .font(SpeechRailDesignTokens.Typography.captionMedium)
+                                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                                    Text("回到最新")
+                                        .font(SpeechRailDesignTokens.Typography.caption)
+                                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                                }
+                                .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+                                .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+                                .background(SpeechRailDesignTokens.Surface.floatingToolbarMaterial, in: Capsule())
+                                .overlay(
+                                    Capsule().strokeBorder(SpeechRailDesignTokens.Color.separator, lineWidth: 0.5)
+                                )
+                                .shadow(color: Color.black.opacity(0.12), radius: 6, x: 0, y: 3)
                             }
-                            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-                            .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+                            .buttonStyle(.plain)
+                            .keyboardShortcut(.defaultAction)
+                            .speechRailPointerCursor()
+                            .padding(.bottom, SpeechRailDesignTokens.Spacing.sm)
+                            .accessibilityLabel("\(banner)，点击回到最新")
                         }
                     }
                 }
@@ -159,16 +176,17 @@ extension MeetingView {
 
     private func liveLine(_ line: MeetingSession.Line) -> some View {
         HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            // 没有对齐证据就不显示数字：那一列写着 00:12 时，
-            // 用户只会读成"这句话是 12 秒时说的"，而它其实是记录时刻。
-            Text(
-                TranscriptTimeWindow.timecodeColumn(
-                    observed: line.start,
-                    quality: line.timingQuality
-                )
+            let timecodeStr = TranscriptTimeWindow.timecodeColumn(
+                observed: line.start,
+                quality: line.timingQuality
             )
+            Text(timecodeStr)
                 .font(SpeechRailDesignTokens.Typography.technicalValue)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                .foregroundStyle(
+                    timecodeStr == "—"
+                        ? SpeechRailDesignTokens.Color.inkTertiary.opacity(0.4)
+                        : SpeechRailDesignTokens.Color.inkTertiary
+                )
                 .frame(
                     width: SpeechRailDesignTokens.Layout.sessionTimecodeColumnWidth,
                     alignment: .leading
@@ -187,7 +205,7 @@ extension MeetingView {
                         quality: line.timingQuality
                     )
                 )
-            speakerColumn(label: line.speakerLabel)
+            speakerColumn(for: line)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text(line.text)
                     .font(SpeechRailDesignTokens.Typography.body)
@@ -203,17 +221,30 @@ extension MeetingView {
         }
     }
 
-    /// 说话人列：**点它就能改名**（会中的轻量入口）。正文没有编辑入口——两者必须看出区别。
+    /// 说话人列：点它就能改名、标记为我或与其他说话人合并。未指定时展示轻量占位。
     @ViewBuilder
-    private func speakerColumn(label: String?) -> some View {
-        if let label {
+    private func speakerColumn(for line: MeetingSession.Line) -> some View {
+        if let label = line.speakerLabel {
             Menu {
-                ForEach(meeting.labeling.labels.filter { $0 != label }, id: \.self) { other in
-                    Button("与 \(other) 合并") {
-                        Task { await meeting.merge(label: label, into: other) }
+                Button {
+                    isLabelingSpeakers = true
+                } label: {
+                    Label("标注与重命名…", systemImage: "pencil")
+                }
+                Button {
+                    Task { await meeting.markAsMe(label: label) }
+                } label: {
+                    Label("标记为「我」", systemImage: "person.crop.circle.badge.checkmark")
+                }
+                let others = meeting.labeling.labels.filter { $0 != label }
+                if !others.isEmpty {
+                    Divider()
+                    ForEach(others, id: \.self) { other in
+                        Button("与 \(meeting.labeling.displayNames[other] ?? other) 合并") {
+                            Task { await meeting.merge(label: label, into: other) }
+                        }
                     }
                 }
-                Button("标记为「我」") { Task { await meeting.markAsMe(label: label) } }
             } label: {
                 SpeakerChip(
                     label: label,
@@ -227,6 +258,49 @@ extension MeetingView {
                 width: SpeechRailDesignTokens.Layout.sessionSpeakerColumnWidth,
                 alignment: .leading
             )
+            .help("点此修改说话人名字、标记为我或与其他说话人合并")
+        } else if meeting.labeling.isEnabled {
+            Menu {
+                Button {
+                    isLabelingSpeakers = true
+                } label: {
+                    Label("标注发言人…", systemImage: "pencil")
+                }
+                let existing = meeting.labeling.labels
+                if !existing.isEmpty {
+                    Divider()
+                    ForEach(existing, id: \.self) { other in
+                        Button("指定为 \(meeting.labeling.displayNames[other] ?? other)") {
+                            Task { await meeting.labeling.split(lineIDs: [line.id], to: other) }
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 2) {
+                    Image(systemName: "person.badge.plus")
+                        .font(SpeechRailDesignTokens.Typography.chipIcon)
+                    Text("未指定")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                }
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary.opacity(0.8))
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                .padding(.vertical, 2)
+                .background(
+                    SpeechRailDesignTokens.Surface.cardBackground,
+                    in: Capsule()
+                )
+                .overlay(
+                    Capsule().strokeBorder(SpeechRailDesignTokens.Color.separator.opacity(0.6), lineWidth: 0.5)
+                )
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .frame(
+                width: SpeechRailDesignTokens.Layout.sessionSpeakerColumnWidth,
+                alignment: .leading
+            )
+            .help("未检测出发言人归属，点击可手动指认或命名")
         } else {
             Color.clear.frame(
                 width: SpeechRailDesignTokens.Layout.sessionSpeakerColumnWidth,
@@ -244,13 +318,23 @@ extension MeetingView {
                     width: SpeechRailDesignTokens.Layout.sessionTimecodeColumnWidth,
                     alignment: .leading
                 )
-            Text(text)
-                .font(SpeechRailDesignTokens.Typography.body)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Text("正在识别…")
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+            HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Text(text)
+                    .font(SpeechRailDesignTokens.Typography.body)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                    Circle()
+                        .fill(SpeechRailDesignTokens.Color.rail)
+                        .frame(
+                            width: SpeechRailDesignTokens.Icon.liveIndicatorDotSize,
+                            height: SpeechRailDesignTokens.Icon.liveIndicatorDotSize
+                        )
+                    Text("正在识别…")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                }
+            }
             Spacer(minLength: 0)
         }
     }

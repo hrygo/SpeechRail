@@ -911,8 +911,8 @@ public enum LLMError: LocalizedError, Equatable {
             body.isEmpty ? "服务返回了 \(status)，请稍后重试。" : "服务返回了 \(status)：\(body)"
         case .usageLimitExceeded:
             "AI 服务的可用额度已经用尽，本次没有整理。原稿没有变化。"
-        case .notResponsesAPI: "这个服务没有 Responses API。"
-        case .notChatAPI: "这个服务没有 Chat Completions API。"
+        case .notResponsesAPI: "当前服务不支持 Responses 协议（可能仅支持 Chat Completions）。"
+        case .notChatAPI: "当前服务不支持 Chat Completions 协议。"
         case .thinkingControlUnavailable:
             "当前服务不支持所选的关闭推理方式。请检查模型的兼容模式。"
         case .unsupportedStructuredOutput: "这个服务不支持严格结构化输出。"

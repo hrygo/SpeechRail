@@ -122,6 +122,14 @@ public struct SpeakerLabelingPanel: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
+                if labeling.speakers.isEmpty {
+                    Text("当前尚未检测出独立的发言人。说话人区分需要持续的声纹特征积累；您也可以直接在左侧实时转录中点击「未指定」为句子指认发言人。")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+                }
+
                 ForEach(labeling.speakers) { speaker in
                     speakerRow(speaker)
                 }

@@ -982,8 +982,9 @@ public final class MinutesGenerator {
         if let llm = error as? LLMError {
             switch llm {
             case .refused(let reason): return "大模型没有给结果：\(reason)"
-            case .http(let status, _): return "大模型服务回了 \(status)。文字记录已经存好，可以重新生成。"
+            case .http(let status, _): return "大模型服务返回了 \(status)。文字记录已安全存盘，可重新生成。"
             case .notConfigured: return "还没有配置对话模型。"
+            case .notResponsesAPI: return "当前 AI 服务不支持 Responses 协议（可能仅支持 Chat Completions），请在设置中检查模型配置。"
             default: return llm.errorDescription ?? "整理没有完成。"
             }
         }
