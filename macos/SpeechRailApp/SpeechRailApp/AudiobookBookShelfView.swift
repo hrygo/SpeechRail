@@ -56,7 +56,7 @@ public struct AudiobookBookShelfView: View {
                 }
             }
             .pickerStyle(.segmented)
-            .frame(maxWidth: 360)
+            .frame(maxWidth: 360, alignment: .leading)
             .labelsHidden()
 
             Spacer()
@@ -164,6 +164,7 @@ public struct AudiobookBookShelfView: View {
                     }
                 }
             }
+            .padding(SpeechRailDesignTokens.Layout.cardInset)
         }
     }
 
@@ -229,6 +230,8 @@ public struct AudiobookBookShelfView: View {
         switch action {
         case .analyzeWholeBook, .resumeAnalysis:
             workflow.beginAnalysis(summary.id)
+        case .pauseAnalysis:
+            await workflow.pauseAnalysis()
         case .confirmSpeakers, .confirmCastAndVoices:
             workflow.workbenchTab = .preparation
         case .makeConfirmedChapters, .resumeProduction:

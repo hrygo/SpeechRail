@@ -217,6 +217,7 @@ private final class SpeechRailOpenAIResponseCapture: @unchecked Sendable {
         let statusCode: Int?
         let retryAfter: TimeInterval?
         let body: String
+        let rawData: Data?
         let isOversized: Bool
         let responseBytes: Int
         let choiceCount: Int?
@@ -230,6 +231,7 @@ private final class SpeechRailOpenAIResponseCapture: @unchecked Sendable {
     private var statusCode: Int?
     private var retryAfter: TimeInterval?
     private var body = ""
+    private var rawData: Data?
     private var isOversized = false
     private var responseBytes = 0
     private var choiceCount: Int?
@@ -245,6 +247,7 @@ private final class SpeechRailOpenAIResponseCapture: @unchecked Sendable {
         retryAfter = Self.retryAfter(from: response as? HTTPURLResponse)
         responseBytes = data?.count ?? 0
         isOversized = responseBytes > Self.maxResponseBytes
+        rawData = isOversized ? nil : data
         choiceCount = nil
         finishReason = nil
         promptTokens = nil
@@ -274,6 +277,7 @@ private final class SpeechRailOpenAIResponseCapture: @unchecked Sendable {
         retryAfter = nil
         self.responseBytes = max(0, responseBytes)
         isOversized = self.responseBytes > Self.maxResponseBytes
+        rawData = nil
         body = ""
         choiceCount = nil
         finishReason = nil
@@ -300,6 +304,7 @@ private final class SpeechRailOpenAIResponseCapture: @unchecked Sendable {
             statusCode: statusCode,
             retryAfter: retryAfter,
             body: body,
+            rawData: rawData,
             isOversized: isOversized,
             responseBytes: responseBytes,
             choiceCount: choiceCount,
@@ -1572,7 +1577,10 @@ public actor LLMProvider {
                 guard !snapshot.isOversized else {
                     throw LLMError.invalidStructuredResponse
                 }
-                _ = try LLMResponseValidation.text(from: Data(snapshot.body.utf8), operation: .chat)
+                _ = try LLMResponseValidation.text(
+                    from: snapshot.rawData ?? Data(snapshot.body.utf8),
+                    operation: .chat
+                )
                 let content = try Self.extractChatJSON(result, maxOutputTokens: maxOutputTokens)
                 emitProviderObservation(
                     kind: .providerResponse,

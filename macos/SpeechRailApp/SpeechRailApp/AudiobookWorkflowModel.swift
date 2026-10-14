@@ -45,6 +45,7 @@ public final class AudiobookWorkflowModel {
     public enum PrimaryBookAction: Equatable, Sendable {
         case analyzeWholeBook
         case resumeAnalysis
+        case pauseAnalysis
         case confirmSpeakers(count: Int)
         case confirmCastAndVoices
         case makeConfirmedChapters
@@ -58,6 +59,8 @@ public final class AudiobookWorkflowModel {
                 return "分析全书"
             case .resumeAnalysis:
                 return "继续分析全书"
+            case .pauseAnalysis:
+                return "暂停分析"
             case let .confirmSpeakers(count):
                 return "确认说话人后继续（\(count)）"
             case .confirmCastAndVoices:
@@ -77,6 +80,8 @@ public final class AudiobookWorkflowModel {
             switch self {
             case .analyzeWholeBook, .resumeAnalysis:
                 return "sparkles"
+            case .pauseAnalysis:
+                return "pause.circle"
             case .confirmSpeakers:
                 return "person.crop.circle.badge.questionmark"
             case .confirmCastAndVoices:
@@ -266,6 +271,9 @@ public final class AudiobookWorkflowModel {
     /// 严格唯一主动作推导：任何状态下只突出下一步最合理的动作。
     public func nextPrimaryAction(for summary: AudiobookBookSummary) -> PrimaryBookAction {
         let book = summary.book
+        if isAnalyzing && selectedBook?.id == book.id {
+            return .pauseAnalysis
+        }
         if isPausingProduction && selectedBook?.id == book.id {
             return .pauseProduction
         }
@@ -432,6 +440,9 @@ public final class AudiobookWorkflowModel {
         let snapshot = dependencies.resolveAnalysisSnapshot(analysisGeneration)
         isAnalyzing = true
         errorMessage = nil
+        if selectedBook?.id == targetID {
+            selectedBook?.analysisState = .running
+        }
 
         analysisTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -439,18 +450,20 @@ public final class AudiobookWorkflowModel {
                 let summary = try await pipeline.run(bookID: targetID, config: snapshot)
                 self.analysisSummary = summary
                 self.isAnalyzing = false
+                await self.autoAssignRecommendedVoices(for: targetID)
                 await self.refreshShelf()
                 if self.selectedBook?.id == targetID {
                     await self.openBook(targetID)
                 }
                 self.bannerMessage = "全书分析已完成（共 \(summary.completedWindows) 个窗口，待确认说话人 \(summary.unknownSpeakerCount) 处）。"
             } catch {
+                let failureDescription = error.localizedDescription
                 self.isAnalyzing = false
-                self.errorMessage = error.localizedDescription
                 await self.refreshShelf()
                 if self.selectedBook?.id == targetID {
                     await self.openBook(targetID)
                 }
+                self.errorMessage = failureDescription
             }
         }
     }
@@ -461,7 +474,54 @@ public final class AudiobookWorkflowModel {
         await pipeline.cancel(bookID: bookID)
         analysisTask?.cancel()
         isAnalyzing = false
+        await refreshShelf()
         await openBook(bookID)
+        bannerMessage = "全书分析已暂停，已完成的窗口检查点已保存。"
+    }
+
+    /// 根据全书角色声线线索与当前可用音色目录，为尚未配声的角色自动推荐并预绑定音色。
+    public func autoAssignRecommendedVoices(
+        for bookID: UUID? = nil,
+        availableVoices: [SafeVoiceEntry]? = nil
+    ) async {
+        let targetID = bookID ?? selectedBook?.id
+        guard let targetID, let store, let castController else { return }
+        let candidateVoices: [SafeVoiceEntry]
+        if let availableVoices, !availableVoices.isEmpty {
+            candidateVoices = availableVoices
+        } else if let fetched = (try? await dependencies.speechRenderer.fetchEffectiveCapabilities())?.voices,
+                  !fetched.isEmpty
+        {
+            candidateVoices = fetched
+        } else {
+            return
+        }
+
+        guard let chars = try? await store.characters(for: targetID),
+              let existing = try? await store.voiceBindings(for: targetID)
+        else { return }
+
+        let recommended = AudiobookCastRegistry.recommendVoiceBindings(
+            characters: chars,
+            availableVoices: candidateVoices,
+            existingBindings: existing
+        )
+
+        var newlyBoundCount = 0
+        for role in chars {
+            guard existing[role.id]?.isSynthesisReady != true,
+                  let binding = recommended[role.id]
+            else { continue }
+            if (try? await castController.bindVoice(bookID: targetID, roleID: role.id, binding: binding)) != nil {
+                newlyBoundCount += 1
+            }
+        }
+
+        if newlyBoundCount > 0, selectedBook?.id == targetID {
+            voiceBindings = (try? await store.voiceBindings(for: targetID)) ?? voiceBindings
+            selectedBook = (try? await store.book(id: targetID)) ?? selectedBook
+            await refreshChapterReadinessMap(for: targetID)
+        }
     }
 
     // MARK: - Cast, Speaker Resolution & Voice Round-Trip

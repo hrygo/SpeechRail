@@ -487,6 +487,14 @@ final class LLMProviderTests: XCTestCase {
         catch { XCTAssertEqual(error as? LLMError, .invalidStructuredResponse) }
     }
 
+    func testChatJSONAcceptsValidPayloadLargerThanFourKilobytes() async throws {
+        let content = "{\"items\":\"" + String(repeating: "有声书段落标注", count: 1_500) + "\"}"
+        XCTAssertGreaterThan(content.utf8.count, 10_000)
+        FakeTransport.reset([.init(status: 200, contentType: "application/json", body: try chatBody(content: content))])
+        let text = try await completeJSON()
+        XCTAssertEqual(text, content)
+    }
+
     func testChatJSONRejectsMissingUsageInvalidJSONRefusalAndToolCalls() async throws {
         for body in [try chatBody(tokens: nil), try chatBody(tokens: -1),
                      try chatBody(content: "not JSON"), try chatBody(refusal: "no"),

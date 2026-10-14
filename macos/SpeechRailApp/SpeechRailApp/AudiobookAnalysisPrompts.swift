@@ -231,7 +231,8 @@ public enum AudiobookAnalysisPrompts {
         ]
         let inputJSON = try canonicalJSONString(from: payload)
         let instructions = """
-        你是有声书工坊的全书人物提取器。请从 primary_atoms 中识别出场或发言的人物称呼、别称以及原文中的声线线索（仅当原文明确写出年龄/音色特征时记录，无证据时填 null）。
+        你是有声书工坊的全书人物提取器。请从 primary_atoms 中识别出场或发言的人物称呼、别称以及原文中的声线线索（如性别、年龄段与音色特征；仅当原文或对话称谓有依据时记录，无证据时填 null）。
+        注意：evidenceAtomIDs 只能引用 primary_atoms 中出现的 atomID，不得引用 leading_context 或 trailing_context 的 atomID。
         \(securityGuardrail)
         """
         let schemaJSON = try canonicalJSONString(from: extractionSchema)
@@ -273,8 +274,8 @@ public enum AudiobookAnalysisPrompts {
             "candidates": candidates.map { mention in
                 [
                     "surface_name": mention.surfaceName,
-                    "aliases": mention.aliases,
-                    "evidence_atom_ids": mention.evidenceAtomIDs.map(\.uuidString),
+                    "aliases": Array(mention.aliases.prefix(8)),
+                    "evidence_atom_ids": Array(mention.evidenceAtomIDs.prefix(4)).map(\.uuidString),
                     "voice_trait_evidence": mention.voiceTraitEvidence as Any
                 ]
             },
@@ -282,7 +283,7 @@ public enum AudiobookAnalysisPrompts {
         ]
         let inputJSON = try canonicalJSONString(from: payload)
         let instructions = """
-        你是有声书工坊的全书人物归并器。请根据候选称呼与证据，将指向同一人物的称呼归并为一个角色条目。
+        你是有声书工坊的全书人物归并器。请根据候选称呼与证据，将指向同一人物的称呼归并为一个角色条目，并在 evidenceSummary 中汇总该角色的性别、年龄段与声线特征线索。
         若存在同名不同人或称呼歧义无法确定，必须将 isCollisionUnresolved 设为 true 以便人工复核，禁止强行合并。
         \(securityGuardrail)
         """

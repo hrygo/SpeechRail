@@ -1,4 +1,5 @@
 import Foundation
+import SpeechRailControlKit
 import XCTest
 #if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
@@ -324,5 +325,96 @@ final class AudiobookAnalysisTests: XCTestCase {
         } catch let error as AudiobookAnalysisError {
             XCTAssertEqual(error, .configurationChangedDuringRun)
         }
+    }
+
+    func testVoiceTraitPreservationAndAutoVoiceRecommendation() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let text = """
+        第一章 雾港重逢
+        海风吹拂着木栈道。
+        “老周，这盏灯亮了一整夜。”林远低声说道。
+        “是啊，苏晴姑娘天没亮就来过了。”老周感叹道。
+        """
+        let txtURL = tempRoot.appendingPathComponent("traits.txt")
+        try Data(text.utf8).write(to: txtURL)
+        let preview = try await AudiobookTXTImporter.prepare(fileURL: txtURL, encoding: .utf8)
+        let bookID = try await store.importBook(preview)
+
+        let config = AudiobookAnalysisConfigSnapshot(
+            configuration: LLMConfiguration(baseURL: "http://127.0.0.1:8000/v1", model: "model-traits")
+        )
+        let client = ScriptedAnalysisClient(configurationDigest: config.configurationDigest)
+        let pipeline = AudiobookAnalysisPipeline(store: store) { _ in client }
+        let summary = try await pipeline.run(bookID: bookID, config: config)
+        XCTAssertTrue(summary.isAllWindowsValidated)
+
+        let characters = try await store.characters(for: bookID)
+        let linyuan = try XCTUnwrap(characters.first(where: { $0.displayName == "林远" }))
+        XCTAssertEqual(linyuan.primaryVoiceTraitSummary, "青年低沉嗓音")
+
+        let desc = SafeVoiceDescriptor(
+            voiceMode: "system",
+            locales: ["zh-CN"],
+            styleTags: [],
+            pitchBand: "unknown",
+            timbreFamily: "unknown",
+            baselinePace: "unknown",
+            sourceType: "system_preset",
+            metadataMethod: "declared_only"
+        )
+        let model = ConfiguredModelIdentity(
+            assurance: .configuredCatalog,
+            runtimeRevision: "qwen3-tts-v1",
+            catalogRevision: "qwen3-tts-v1"
+        )
+        let voices: [SafeVoiceEntry] = [
+            SafeVoiceEntry(
+                id: "uncle_fu",
+                name: "醇厚中文男声",
+                mode: "system",
+                available: true,
+                availabilityReason: .available,
+                voiceRevision: "v1",
+                voiceIdentityAssurance: .contentAddressed,
+                model: model,
+                descriptors: desc,
+                operations: [:],
+                productionReady: true
+            ),
+            SafeVoiceEntry(
+                id: "dylan",
+                name: "北京青年男声",
+                mode: "system",
+                available: true,
+                availabilityReason: .available,
+                voiceRevision: "v1",
+                voiceIdentityAssurance: .contentAddressed,
+                model: model,
+                descriptors: desc,
+                operations: [:],
+                productionReady: true
+            ),
+            SafeVoiceEntry(
+                id: "serena",
+                name: "温柔中文女声",
+                mode: "system",
+                available: true,
+                availabilityReason: .available,
+                voiceRevision: "v1",
+                voiceIdentityAssurance: .contentAddressed,
+                model: model,
+                descriptors: desc,
+                operations: [:],
+                productionReady: true
+            )
+        ]
+
+        let recommended = AudiobookCastRegistry.recommendVoiceBindings(
+            characters: characters,
+            availableVoices: voices
+        )
+        XCTAssertEqual(recommended.count, characters.count)
+        let assignedVoiceIDs = Set(recommended.values.map(\.voiceID))
+        XCTAssertEqual(assignedVoiceIDs.count, characters.count, "主要角色与旁白应优先分配互不相同的独立音色")
     }
 }

@@ -40,7 +40,7 @@ public struct AudiobookListeningView: View {
 
             HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
                 chapterOutlineColumn
-                    .frame(width: 248)
+                    .frame(width: SpeechRailDesignTokens.Layout.sessionListWidth)
 
                 followAlongTranscriptColumn
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -166,6 +166,8 @@ public struct AudiobookListeningView: View {
                                         )
                                         .frame(maxWidth: .infinity, alignment: .leading)
                                 }
+                                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                                .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
                             }
                             .overlay(
                                 RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.container)
@@ -176,7 +178,7 @@ public struct AudiobookListeningView: View {
                             )
                         }
                     }
-                    .padding(SpeechRailDesignTokens.Spacing.sm)
+                    .padding(SpeechRailDesignTokens.Spacing.md)
                 }
             }
         }

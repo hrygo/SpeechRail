@@ -304,4 +304,25 @@ final class AudiobookWorkflowTests: XCTestCase {
         XCTAssertEqual(workflow.voiceBindings[narrator.id]?.voiceID, "v-designed-narrator")
         XCTAssertTrue(workflow.voiceReturnBannerMessage?.contains("已将新音色绑定给角色") == true)
     }
+
+    func testBeginAnalysisFailurePreservesErrorMessageInsteadOfBeingClearedByOpenBook() async throws {
+        let (workflow, _) = makeWorkflow()
+        let txtURL = tempRoot.appendingPathComponent("unconfigured.txt")
+        try Data("第一章 夜雨\n雨声淅沥。\n".utf8).write(to: txtURL)
+
+        await workflow.prepareImport(fileURL: txtURL, encoding: .utf8)
+        await workflow.confirmImport()
+        let bookID = try XCTUnwrap(workflow.selectedBook?.id)
+
+        workflow.beginAnalysis(bookID)
+        // 等待异步分析任务完成报错回写
+        for _ in 0..<50 {
+            if !workflow.isAnalyzing { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        XCTAssertFalse(workflow.isAnalyzing)
+        XCTAssertNotNil(workflow.errorMessage, "openBook 不得清空分析失败后的错误提示")
+        XCTAssertTrue(workflow.errorMessage?.contains("AI") == true)
+    }
 }

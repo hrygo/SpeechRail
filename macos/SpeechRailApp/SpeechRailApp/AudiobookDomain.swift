@@ -273,11 +273,18 @@ public struct AudiobookCharacterEvidence: Codable, Equatable, Hashable, Sendable
     public let chapterID: UUID
     public let sourceRange: AudiobookSourceRange
     public let quoteExcerpt: String
+    public var voiceTraitSummary: String?
 
-    public init(chapterID: UUID, sourceRange: AudiobookSourceRange, quoteExcerpt: String) {
+    public init(
+        chapterID: UUID,
+        sourceRange: AudiobookSourceRange,
+        quoteExcerpt: String,
+        voiceTraitSummary: String? = nil
+    ) {
         self.chapterID = chapterID
         self.sourceRange = sourceRange
         self.quoteExcerpt = quoteExcerpt
+        self.voiceTraitSummary = voiceTraitSummary
     }
 }
 
@@ -292,6 +299,12 @@ public struct AudiobookCharacter: Codable, Equatable, Hashable, Sendable, Identi
     public var evidences: [AudiobookCharacterEvidence]
     public var firstAppearanceRange: AudiobookSourceRange?
     public var chapterIDs: [UUID]
+
+    public var primaryVoiceTraitSummary: String? {
+        evidences.compactMap(\.voiceTraitSummary)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first(where: { !$0.isEmpty })
+    }
 
     public init(
         id: UUID = UUID(),

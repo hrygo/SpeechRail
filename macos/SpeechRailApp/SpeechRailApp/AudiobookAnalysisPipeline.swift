@@ -79,186 +79,203 @@ public actor AudiobookAnalysisPipeline {
         book.analysisState = .running
         try await store.updateBook(book)
 
-        let source = try await store.sourceIndex(for: bookID)
-        let chapters = try await store.chapters(for: bookID)
-        let allAtoms = try await store.atoms(for: bookID)
-        let atomsByID = Dictionary(uniqueKeysWithValues: allAtoms.map { ($0.id, $0) })
+        do {
+            let source = try await store.sourceIndex(for: bookID)
+            let chapters = try await store.chapters(for: bookID)
+            let allAtoms = try await store.atoms(for: bookID)
+            let atomsByID = Dictionary(uniqueKeysWithValues: allAtoms.map { ($0.id, $0) })
 
-        let plannedWindows = try Self.planRootWindows(
-            bookID: bookID,
-            chapters: chapters,
-            atoms: allAtoms,
-            source: source,
-            policy: policy,
-            config: frozenSnapshot
-        )
-
-        let existingWindows = try await store.analysisWindows(for: bookID)
-        let existingAnnotations = try await store.annotations(for: bookID)
-        let annotationsByWindowID = Dictionary(grouping: existingAnnotations, by: \.windowID)
-
-        var reusedCheckpointCount = 0
-        var extractedMentions: [AudiobookExtractionResponse.Mention] = []
-        var rootCallCounters: [UUID: Int] = [:]
-
-        // Phase 1: Extraction across windows (skipping windows that already have matching valid checkpoints)
-        var windowsNeedingWork: [AudiobookAnalysisWindow] = []
-        for planned in plannedWindows {
-            try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
-            if let existing = existingWindows.first(where: {
-                $0.primaryAtomIDs == planned.primaryAtomIDs
-                    && $0.policyFingerprint == planned.policyFingerprint
-                    && $0.configurationDigest == planned.configurationDigest
-                    && $0.isCompleted
-            }),
-               let savedAnns = annotationsByWindowID[existing.id],
-               Self.validateWindowAnnotationsCoverPrimaryAtoms(
-                   primaryAtomIDs: existing.primaryAtomIDs,
-                   annotations: savedAnns
-               )
-            {
-                reusedCheckpointCount += 1
-            } else {
-                windowsNeedingWork.append(planned)
-                try await store.saveAnalysisWindow(planned)
-            }
-        }
-
-        for window in windowsNeedingWork {
-            try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
-            let primaryItems = try makePromptAtomItems(ids: window.primaryAtomIDs, atomsByID: atomsByID, source: source)
-            let leadingItems = try makePromptAtomItems(ids: window.leadingContextAtomIDs, atomsByID: atomsByID, source: source)
-            let trailingItems = try makePromptAtomItems(ids: window.trailingContextAtomIDs, atomsByID: atomsByID, source: source)
-
-            let mentions = try await executeExtractionWithSplitFallback(
-                rootWindowID: window.rootWindowID,
-                primaryItems: primaryItems,
-                leadingItems: leadingItems,
-                trailingItems: trailingItems,
-                client: client,
-                snapshot: frozenSnapshot,
+            let plannedWindows = try Self.planRootWindows(
                 bookID: bookID,
-                runGeneration: runGeneration,
-                callCounters: &rootCallCounters
-            )
-            extractedMentions.append(contentsOf: mentions)
-        }
-
-        // Phase 2: Bounded cast consolidation (32 candidates per batch)
-        var characters = try await store.characters(for: bookID)
-        if !characters.contains(where: \.isNarrator) {
-            let narrator = AudiobookCharacter(
-                bookID: bookID,
-                displayName: "旁白",
-                aliases: ["叙述"],
-                isNarrator: true,
-                isMajor: true,
-                chapterIDs: chapters.map(\.id)
-            )
-            characters.insert(narrator, at: 0)
-        }
-
-        var unresolvedCollisions = Set<String>()
-        let mentionBatches = AudiobookCastRegistry.batchMentions(
-            extractedMentions,
-            batchSize: policy.maxMergeCandidatesPerBatch
-        )
-        for batch in mentionBatches {
-            try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
-            let existingSummaries = AudiobookCastRegistry.selectCandidateSummariesForWindow(
-                characters: characters,
-                chapterID: chapters.first?.id ?? UUID(),
-                windowText: batch.map(\.surfaceName).joined(separator: " "),
-                policy: policy
-            )
-            let mergeRootID = UUID()
-            let mergePrompt = try AudiobookAnalysisPrompts.makeMergePrompt(
-                rootWindowID: mergeRootID,
-                candidates: batch,
-                existingCharacters: existingSummaries,
-                policy: policy
-            )
-            let rawMerge = try await client.complete(mergePrompt)
-            try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
-            let mergeResponse = try decodeMergeResponse(from: rawMerge, fallbackMentions: batch)
-            let outcome = AudiobookCastRegistry.applyMergeBatch(
-                bookID: bookID,
-                existingCharacters: characters,
-                batchMentions: batch,
-                mergeGroups: mergeResponse.groups,
-                atomsByID: atomsByID,
-                source: source
-            )
-            characters = outcome.characters
-            unresolvedCollisions.formUnion(outcome.unresolvedCollisionNames)
-        }
-        try await store.saveCharacters(bookID: bookID, characters: characters)
-
-        let narratorID = characters.first(where: \.isNarrator)?.id ?? UUID()
-
-        // Phase 3: Per-window speaker annotation with strict primary atom coverage and checkpoint commit
-        for var window in windowsNeedingWork {
-            try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
-            let primaryItems = try makePromptAtomItems(ids: window.primaryAtomIDs, atomsByID: atomsByID, source: source)
-            let leadingItems = try makePromptAtomItems(ids: window.leadingContextAtomIDs, atomsByID: atomsByID, source: source)
-            let trailingItems = try makePromptAtomItems(ids: window.trailingContextAtomIDs, atomsByID: atomsByID, source: source)
-            let windowText = primaryItems.map(\.text).joined(separator: "\n")
-            let candidateSummaries = AudiobookCastRegistry.selectCandidateSummariesForWindow(
-                characters: characters,
-                chapterID: window.chapterID,
-                windowText: windowText,
-                policy: policy
+                chapters: chapters,
+                atoms: allAtoms,
+                source: source,
+                policy: policy,
+                config: frozenSnapshot
             )
 
-            let annotations = try await executeAnnotationWithSplitFallback(
-                window: window,
-                primaryItems: primaryItems,
-                leadingItems: leadingItems,
-                trailingItems: trailingItems,
-                candidateSummaries: candidateSummaries,
-                characters: characters,
-                narratorID: narratorID,
-                atomsByID: atomsByID,
-                client: client,
-                snapshot: frozenSnapshot,
-                bookID: bookID,
-                runGeneration: runGeneration,
-                callCounters: &rootCallCounters
-            )
+            let existingWindows = try await store.analysisWindows(for: bookID)
+            let existingAnnotations = try await store.annotations(for: bookID)
+            let annotationsByWindowID = Dictionary(grouping: existingAnnotations, by: \.windowID)
 
-            guard Self.validateWindowAnnotationsCoverPrimaryAtoms(
-                primaryAtomIDs: window.primaryAtomIDs,
-                annotations: annotations
-            ) else {
-                book.analysisState = .failed
-                try await store.updateBook(book)
-                throw AudiobookAnalysisError.atomCoverageViolation("窗口 \(window.id) 标注未完整覆盖 primary atoms。")
+            var reusedCheckpointCount = 0
+            var extractedMentions: [AudiobookExtractionResponse.Mention] = []
+            var extractionCallCounters: [UUID: Int] = [:]
+            var annotationCallCounters: [UUID: Int] = [:]
+
+            // Phase 1: Extraction across windows (skipping windows that already have matching valid checkpoints)
+            var windowsNeedingWork: [AudiobookAnalysisWindow] = []
+            for planned in plannedWindows {
+                try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
+                if let existing = existingWindows.first(where: {
+                    $0.primaryAtomIDs == planned.primaryAtomIDs
+                        && $0.policyFingerprint == planned.policyFingerprint
+                        && $0.configurationDigest == planned.configurationDigest
+                        && $0.isCompleted
+                }),
+                   let savedAnns = annotationsByWindowID[existing.id],
+                   Self.validateWindowAnnotationsCoverPrimaryAtoms(
+                       primaryAtomIDs: existing.primaryAtomIDs,
+                       annotations: savedAnns
+                   )
+                {
+                    reusedCheckpointCount += 1
+                } else {
+                    windowsNeedingWork.append(planned)
+                    try await store.saveAnalysisWindow(planned)
+                }
             }
 
-            window.isCompleted = true
-            try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
-            try await store.saveAnnotations(bookID: bookID, annotations: annotations)
-            try await store.saveAnalysisWindow(window)
+            for window in windowsNeedingWork {
+                try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
+                let primaryItems = try makePromptAtomItems(ids: window.primaryAtomIDs, atomsByID: atomsByID, source: source)
+                let leadingItems = try makePromptAtomItems(ids: window.leadingContextAtomIDs, atomsByID: atomsByID, source: source)
+                let trailingItems = try makePromptAtomItems(ids: window.trailingContextAtomIDs, atomsByID: atomsByID, source: source)
+
+                let mentions = try await executeExtractionWithSplitFallback(
+                    rootWindowID: window.rootWindowID,
+                    primaryItems: primaryItems,
+                    leadingItems: leadingItems,
+                    trailingItems: trailingItems,
+                    client: client,
+                    snapshot: frozenSnapshot,
+                    bookID: bookID,
+                    runGeneration: runGeneration,
+                    callCounters: &extractionCallCounters
+                )
+                extractedMentions.append(contentsOf: mentions)
+            }
+
+            // Phase 2: Bounded cast consolidation (32 candidates per batch)
+            var characters = try await store.characters(for: bookID)
+            if !characters.contains(where: \.isNarrator) {
+                let narrator = AudiobookCharacter(
+                    bookID: bookID,
+                    displayName: "旁白",
+                    aliases: ["叙述"],
+                    isNarrator: true,
+                    isMajor: true,
+                    chapterIDs: chapters.map(\.id)
+                )
+                characters.insert(narrator, at: 0)
+            }
+
+            var unresolvedCollisions = Set<String>()
+            let mentionBatches = AudiobookCastRegistry.batchMentions(
+                extractedMentions,
+                batchSize: policy.maxMergeCandidatesPerBatch
+            )
+            for batch in mentionBatches {
+                try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
+                let existingSummaries = AudiobookCastRegistry.selectCandidateSummariesForWindow(
+                    characters: characters,
+                    chapterID: chapters.first?.id ?? UUID(),
+                    windowText: batch.map(\.surfaceName).joined(separator: " "),
+                    policy: policy
+                )
+                let mergeRootID = UUID()
+                let mergePrompt = try AudiobookAnalysisPrompts.makeMergePrompt(
+                    rootWindowID: mergeRootID,
+                    candidates: batch,
+                    existingCharacters: existingSummaries,
+                    policy: policy
+                )
+                let rawMerge = try await client.complete(mergePrompt)
+                try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
+                let mergeResponse = try decodeMergeResponse(from: rawMerge, fallbackMentions: batch)
+                let outcome = AudiobookCastRegistry.applyMergeBatch(
+                    bookID: bookID,
+                    existingCharacters: characters,
+                    batchMentions: batch,
+                    mergeGroups: mergeResponse.groups,
+                    atomsByID: atomsByID,
+                    source: source
+                )
+                characters = outcome.characters
+                unresolvedCollisions.formUnion(outcome.unresolvedCollisionNames)
+            }
+            try await store.saveCharacters(bookID: bookID, characters: characters)
+
+            let narratorID = characters.first(where: \.isNarrator)?.id ?? UUID()
+
+            // Phase 3: Per-window speaker annotation with strict primary atom coverage and checkpoint commit
+            for var window in windowsNeedingWork {
+                try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
+                let primaryItems = try makePromptAtomItems(ids: window.primaryAtomIDs, atomsByID: atomsByID, source: source)
+                let leadingItems = try makePromptAtomItems(ids: window.leadingContextAtomIDs, atomsByID: atomsByID, source: source)
+                let trailingItems = try makePromptAtomItems(ids: window.trailingContextAtomIDs, atomsByID: atomsByID, source: source)
+                let windowText = primaryItems.map(\.text).joined(separator: "\n")
+                let candidateSummaries = AudiobookCastRegistry.selectCandidateSummariesForWindow(
+                    characters: characters,
+                    chapterID: window.chapterID,
+                    windowText: windowText,
+                    policy: policy
+                )
+
+                let annotations = try await executeAnnotationWithSplitFallback(
+                    window: window,
+                    primaryItems: primaryItems,
+                    leadingItems: leadingItems,
+                    trailingItems: trailingItems,
+                    candidateSummaries: candidateSummaries,
+                    characters: characters,
+                    narratorID: narratorID,
+                    atomsByID: atomsByID,
+                    client: client,
+                    snapshot: frozenSnapshot,
+                    bookID: bookID,
+                    runGeneration: runGeneration,
+                    callCounters: &annotationCallCounters
+                )
+
+                guard Self.validateWindowAnnotationsCoverPrimaryAtoms(
+                    primaryAtomIDs: window.primaryAtomIDs,
+                    annotations: annotations
+                ) else {
+                    book.analysisState = .failed
+                    try await store.updateBook(book)
+                    throw AudiobookAnalysisError.atomCoverageViolation("窗口 \(window.id) 标注未完整覆盖 primary atoms。")
+                }
+
+                window.isCompleted = true
+                try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
+                try await store.saveAnnotations(bookID: bookID, annotations: annotations)
+                try await store.saveAnalysisWindow(window)
+            }
+
+            // Verify all windows for the book are completed and refresh character major/minor status
+            let finalAnnotations = try await store.annotations(for: bookID)
+            characters = AudiobookCastRegistry.refreshCharacterMajorStatusAndOrder(
+                characters: characters,
+                annotations: finalAnnotations
+            )
+            try await store.saveCharacters(bookID: bookID, characters: characters)
+
+            let unknownCount = finalAnnotations.filter { $0.assignment.isUnknown }.count
+            let completedWindowCount = reusedCheckpointCount + windowsNeedingWork.count
+            let isAllComplete = completedWindowCount == plannedWindows.count && !plannedWindows.isEmpty
+
+            book.analysisState = isAllComplete ? .allWindowsValidated : .paused
+            try await store.updateBook(book)
+
+            return AudiobookAnalysisSummary(
+                bookID: bookID,
+                totalWindows: plannedWindows.count,
+                completedWindows: completedWindowCount,
+                reusedCheckpointWindows: reusedCheckpointCount,
+                unknownSpeakerCount: unknownCount,
+                unresolvedCollisionCount: unresolvedCollisions.count,
+                analysisState: book.analysisState
+            )
+        } catch {
+            if var latestBook = try? await store.book(id: bookID) {
+                let isCancelError = (error as? AudiobookAnalysisError) == .cancelled
+                    || error is CancellationError
+                latestBook.analysisState = isCancelError ? .paused : .failed
+                try? await store.updateBook(latestBook)
+            }
+            throw error
         }
-
-        // Verify all windows for the book are completed
-        let finalAnnotations = try await store.annotations(for: bookID)
-        let unknownCount = finalAnnotations.filter { $0.assignment.isUnknown }.count
-        let completedWindowCount = reusedCheckpointCount + windowsNeedingWork.count
-        let isAllComplete = completedWindowCount == plannedWindows.count && !plannedWindows.isEmpty
-
-        book.analysisState = isAllComplete ? .allWindowsValidated : .paused
-        try await store.updateBook(book)
-
-        return AudiobookAnalysisSummary(
-            bookID: bookID,
-            totalWindows: plannedWindows.count,
-            completedWindows: completedWindowCount,
-            reusedCheckpointWindows: reusedCheckpointCount,
-            unknownSpeakerCount: unknownCount,
-            unresolvedCollisionCount: unresolvedCollisions.count,
-            analysisState: book.analysisState
-        )
     }
 
     // MARK: - Window Planning
@@ -613,15 +630,17 @@ public actor AudiobookAnalysisPipeline {
         from raw: String,
         allowedAtomIDs: Set<UUID>
     ) throws -> AudiobookExtractionResponse {
-        guard let data = raw.data(using: .utf8),
-              let decoded = try? JSONDecoder().decode(AudiobookExtractionResponse.self, from: data)
+        let cleaned = Self.stripMarkdownCodeFences(raw)
+        guard let data = cleaned.data(using: .utf8),
+              var decoded = try? JSONDecoder().decode(AudiobookExtractionResponse.self, from: data)
         else {
             throw AudiobookAnalysisError.invalidStructuredOutput("人物提取 JSON 解码失败。")
         }
-        for mention in decoded.mentions {
-            for atomID in mention.evidenceAtomIDs where !allowedAtomIDs.contains(atomID) {
-                throw AudiobookAnalysisError.invalidStructuredOutput("人物提取引用了不在当前主窗口内的 atomID。")
-            }
+        // 过滤掉模型误引用的上下文 atomID，保留合法的当前主窗口 atomID
+        decoded.mentions = decoded.mentions.map { mention in
+            var copy = mention
+            copy.evidenceAtomIDs = mention.evidenceAtomIDs.filter { allowedAtomIDs.contains($0) }
+            return copy
         }
         return decoded
     }
@@ -630,7 +649,8 @@ public actor AudiobookAnalysisPipeline {
         from raw: String,
         fallbackMentions: [AudiobookExtractionResponse.Mention]
     ) throws -> AudiobookMergeResponse {
-        guard let data = raw.data(using: .utf8),
+        let cleaned = Self.stripMarkdownCodeFences(raw)
+        guard let data = cleaned.data(using: .utf8),
               let decoded = try? JSONDecoder().decode(AudiobookMergeResponse.self, from: data)
         else {
             throw AudiobookAnalysisError.invalidStructuredOutput("角色归并 JSON 解码失败。")
@@ -658,31 +678,41 @@ public actor AudiobookAnalysisPipeline {
         narratorID: UUID,
         atomsByID: [UUID: AudiobookTextAtom]
     ) throws -> [AudiobookAnnotation] {
-        guard let data = raw.data(using: .utf8),
+        let cleaned = Self.stripMarkdownCodeFences(raw)
+        guard let data = cleaned.data(using: .utf8),
               let response = try? JSONDecoder().decode(AudiobookAnnotationResponse.self, from: data)
         else {
             throw AudiobookAnalysisError.invalidStructuredOutput("段落标注 JSON 解码失败。")
         }
 
-        let expectedIDs = primaryItems.map(\.atomID)
-        let returnedIDs = response.items.map(\.atomID)
-        guard returnedIDs == expectedIDs else {
-            throw AudiobookAnalysisError.atomCoverageViolation("返回的 atomID 序列与主窗口不一致（存在缺失、重复或乱序）。")
+        let expectedIDSet = Set(primaryItems.map(\.atomID))
+        var itemsByAtomID: [UUID: AudiobookAnnotationResponse.Item] = [:]
+        for item in response.items where expectedIDSet.contains(item.atomID) {
+            if itemsByAtomID[item.atomID] == nil {
+                itemsByAtomID[item.atomID] = item
+            }
+        }
+        guard !itemsByAtomID.isEmpty || primaryItems.isEmpty else {
+            throw AudiobookAnalysisError.atomCoverageViolation("返回的 atomID 序列与主窗口不匹配。")
         }
 
         let validRoleIDs = Set(characters.map(\.id))
         var annotations: [AudiobookAnnotation] = []
-        annotations.reserveCapacity(response.items.count)
+        annotations.reserveCapacity(primaryItems.count)
 
-        for item in response.items {
-            guard let atom = atomsByID[item.atomID] else {
-                throw AudiobookAnalysisError.atomCoverageViolation("未知的 atomID \(item.atomID)")
+        for primaryItem in primaryItems {
+            guard let atom = atomsByID[primaryItem.atomID] else {
+                throw AudiobookAnalysisError.atomCoverageViolation("未知的 atomID \(primaryItem.atomID)")
             }
 
             let assignment: AudiobookSpeakerAssignment
+            let evidence: String?
+
             if atom.kind == .heading {
                 assignment = .assigned(roleID: narratorID)
-            } else {
+                evidence = itemsByAtomID[primaryItem.atomID]?.evidence ?? "章节标题"
+            } else if let item = itemsByAtomID[primaryItem.atomID] {
+                evidence = item.evidence
                 switch item.speakerKind {
                 case .narrator:
                     assignment = .assigned(roleID: narratorID)
@@ -703,6 +733,14 @@ public actor AudiobookAnalysisPipeline {
                         candidateRoleIDs: validCandidates
                     )
                 }
+            } else if !Self.containsDirectDialogueQuote(in: primaryItem.text) {
+                // 纯叙述段若被模型省略，确定性归属给旁白，保持 100% 原文覆盖
+                assignment = .assigned(roleID: narratorID)
+                evidence = "纯叙述段默认归属旁白"
+            } else {
+                throw AudiobookAnalysisError.atomCoverageViolation(
+                    "返回的 atomID 序列遗漏了对白段落 \(primaryItem.atomID)。"
+                )
             }
 
             annotations.append(
@@ -714,7 +752,7 @@ public actor AudiobookAnalysisPipeline {
                     atomID: atom.id,
                     sourceRange: atom.sourceRange,
                     assignment: assignment,
-                    evidence: item.evidence,
+                    evidence: evidence,
                     userConfirmed: false,
                     annotationRevision: 1
                 )
@@ -722,6 +760,24 @@ public actor AudiobookAnalysisPipeline {
         }
 
         return annotations
+    }
+
+    private static func stripMarkdownCodeFences(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("```") else { return trimmed }
+        var lines = trimmed.components(separatedBy: .newlines)
+        if !lines.isEmpty, lines.first?.hasPrefix("```") == true {
+            lines.removeFirst()
+        }
+        if !lines.isEmpty, lines.last?.trimmingCharacters(in: .whitespaces).hasPrefix("```") == true {
+            lines.removeLast()
+        }
+        return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func containsDirectDialogueQuote(in text: String) -> Bool {
+        let quoteScalars: Set<UnicodeScalar> = ["“", "”", "「", "」", "『", "』", "\""]
+        return text.unicodeScalars.contains { quoteScalars.contains($0) }
     }
 
     public static func validateWindowAnnotationsCoverPrimaryAtoms(

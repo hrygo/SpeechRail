@@ -26,14 +26,14 @@ public struct AudiobookBookWorkspaceView: View {
 
                 HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
                     chapterSidebarColumn
-                        .frame(width: 248)
+                        .frame(width: SpeechRailDesignTokens.Layout.sessionListWidth)
 
                     centerStageColumn
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                     if showInlineCast {
                         castInspectorColumn
-                            .frame(width: 308)
+                            .speechRailInspectorColumn()
                     }
                 }
                 .frame(
@@ -120,6 +120,8 @@ public struct AudiobookBookWorkspaceView: View {
                         .accessibilityIdentifier("audiobook-workspace-primary-action")
                     }
                 }
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
             }
         }
     }
@@ -261,7 +263,7 @@ public struct AudiobookBookWorkspaceView: View {
                             atomRowView(atom: atom)
                         }
                     }
-                    .padding(SpeechRailDesignTokens.Spacing.sm)
+                    .padding(SpeechRailDesignTokens.Spacing.md)
                 }
 
                 SessionHairline()
@@ -309,7 +311,7 @@ public struct AudiobookBookWorkspaceView: View {
             }
             .speechRailButton(.secondary)
         }
-        .padding(SpeechRailDesignTokens.Spacing.sm)
+        .padding(SpeechRailDesignTokens.Spacing.md)
         .background(SpeechRailDesignTokens.Color.field)
     }
 
@@ -335,7 +337,8 @@ public struct AudiobookBookWorkspaceView: View {
             }
             .speechRailButton(.quiet)
         }
-        .padding(SpeechRailDesignTokens.Spacing.xs)
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
         .background(SpeechRailDesignTokens.Color.recessedField)
     }
 
@@ -378,7 +381,7 @@ public struct AudiobookBookWorkspaceView: View {
                         StatusPill(tone: .neutral, label: "待分析")
                     }
 
-                    Text("字节 [\(atom.sourceRange.lowerBound), \(atom.sourceRange.upperBound))")
+                    Text("\(atom.sourceRange.scalarCount) 字")
                         .font(SpeechRailDesignTokens.Typography.technical)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
 
@@ -437,6 +440,8 @@ public struct AudiobookBookWorkspaceView: View {
                     .clipShape(RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested))
                 }
             }
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
         }
     }
 
@@ -460,7 +465,8 @@ public struct AudiobookBookWorkspaceView: View {
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         Spacer()
                     }
-                    .padding(SpeechRailDesignTokens.Spacing.xs)
+                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                    .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
                     .background(SpeechRailDesignTokens.Color.recessedField)
                     SessionHairline()
                 }
@@ -486,7 +492,7 @@ public struct AudiobookBookWorkspaceView: View {
                                 fragmentRowView(fragment: fragment)
                             }
                         }
-                        .padding(SpeechRailDesignTokens.Spacing.sm)
+                        .padding(SpeechRailDesignTokens.Spacing.md)
                     }
                 }
 
@@ -624,6 +630,8 @@ public struct AudiobookBookWorkspaceView: View {
                     .disclosureGroupStyle(SpeechRailDisclosureGroupStyle())
                 }
             }
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
         }
     }
 
@@ -644,7 +652,7 @@ public struct AudiobookBookWorkspaceView: View {
                             characterCard(for: role)
                         }
                     }
-                    .padding(SpeechRailDesignTokens.Spacing.xs)
+                    .padding(SpeechRailDesignTokens.Spacing.sm)
                 }
 
                 SessionHairline()
@@ -653,9 +661,21 @@ public struct AudiobookBookWorkspaceView: View {
                         Button {
                             workflow.isShowingCastMergeSheet = true
                         } label: {
-                            Label("合并/拆分角色…", systemImage: "arrow.triangle.merge")
+                            Label("合并/拆分…", systemImage: "arrow.triangle.merge")
                         }
                         .speechRailButton(.secondary)
+
+                        Button {
+                            Task {
+                                let voices = appModel.safeVoiceCatalog?.data.filter {
+                                    $0.available && $0.productionReady != false
+                                }
+                                await workflow.autoAssignRecommendedVoices(availableVoices: voices)
+                            }
+                        } label: {
+                            Label("智能配声", systemImage: "wand.and.stars")
+                        }
+                        .speechRailButton(.quiet)
 
                         Spacer()
 
@@ -701,6 +721,13 @@ public struct AudiobookBookWorkspaceView: View {
                     Spacer()
                 }
 
+                if let trait = role.primaryVoiceTraitSummary {
+                    Text("声线线索：\(trait)")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .lineLimit(1)
+                }
+
                 if let firstEvidence = role.evidences.first {
                     Text("原文证据：「\(firstEvidence.quoteExcerpt)」")
                         .font(SpeechRailDesignTokens.Typography.caption)
@@ -711,14 +738,16 @@ public struct AudiobookBookWorkspaceView: View {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     Menu {
                         if availableVoices.isEmpty {
-                            Button("默认沉稳旁白（v-narrator）") {
-                                let b = AudiobookVoiceBinding(
-                                    roleID: role.id,
-                                    voiceID: "v-narrator",
-                                    voiceRevision: "v1",
-                                    modelRevision: "qwen3-tts-v1"
-                                )
-                                Task { await workflow.bindVoice(roleID: role.id, binding: b) }
+                            ForEach(Self.fallbackPresetChoices, id: \.id) { preset in
+                                Button("\(preset.name)（\(preset.id)）") {
+                                    let b = AudiobookVoiceBinding(
+                                        roleID: role.id,
+                                        voiceID: preset.id,
+                                        voiceRevision: "v1",
+                                        modelRevision: "qwen3-tts-v1"
+                                    )
+                                    Task { await workflow.bindVoice(roleID: role.id, binding: b) }
+                                }
                             }
                         } else {
                             ForEach(availableVoices) { voice in
@@ -766,8 +795,18 @@ public struct AudiobookBookWorkspaceView: View {
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 }
             }
+            .padding(SpeechRailDesignTokens.Spacing.md)
         }
     }
+
+    private static let fallbackPresetChoices: [(id: String, name: String)] = [
+        ("v-narrator", "默认沉稳旁白"),
+        ("uncle_fu", "醇厚中文男声"),
+        ("serena", "温柔中文女声"),
+        ("vivian", "明亮中文女声"),
+        ("dylan", "北京青年男声"),
+        ("eric", "成都活力男声")
+    ]
 
     // MARK: - Helpers
 
@@ -778,6 +817,8 @@ public struct AudiobookBookWorkspaceView: View {
         switch action {
         case .analyzeWholeBook, .resumeAnalysis:
             workflow.beginAnalysis(bookID)
+        case .pauseAnalysis:
+            Task { await workflow.pauseAnalysis() }
         case .confirmSpeakers:
             workflow.workbenchTab = .preparation
         case .confirmCastAndVoices:
@@ -793,7 +834,10 @@ public struct AudiobookBookWorkspaceView: View {
     }
 
     private func analysisStatusPill(for state: AudiobookAnalysisState) -> StatusPill {
-        switch state {
+        if workflow.isAnalyzing {
+            return StatusPill(tone: .attention, label: "正在分析全书…")
+        }
+        return switch state {
         case .notStarted:
             StatusPill(tone: .neutral, label: "待分析全书")
         case .running:

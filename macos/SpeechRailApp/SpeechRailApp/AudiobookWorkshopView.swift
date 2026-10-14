@@ -88,6 +88,9 @@ public struct AudiobookWorkshopView: View {
         }
         .task {
             await workflow.refreshShelf()
+            if appModel.safeVoiceCatalog == nil {
+                await appModel.refreshDiscovery()
+            }
         }
         .onDisappear {
             Task { await workflow.leaveWorkshop() }
@@ -253,6 +256,7 @@ struct AudiobookImportPreviewSheet: View {
                             .speechRailSelectableList()
                             .frame(minHeight: 220)
                         }
+                        .padding(SpeechRailDesignTokens.Spacing.sm)
                     }
                     .frame(width: 260)
 
@@ -269,6 +273,7 @@ struct AudiobookImportPreviewSheet: View {
                             }
                             .frame(minHeight: 220)
                         }
+                        .padding(SpeechRailDesignTokens.Spacing.md)
                     }
                 }
                 .onAppear {
@@ -389,6 +394,7 @@ struct AudiobookExportSheet: View {
                         }
                         .frame(minHeight: 180)
                     }
+                    .padding(SpeechRailDesignTokens.Spacing.sm)
                 }
             }
 
@@ -406,6 +412,7 @@ struct AudiobookExportSheet: View {
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         }
                     }
+                    .padding(SpeechRailDesignTokens.Spacing.md)
                 }
             }
 
@@ -598,6 +605,7 @@ struct AudiobookCastMergeSplitSheet: View {
                         .speechRailButton(.primary)
                     }
                 }
+                .padding(SpeechRailDesignTokens.Spacing.md)
             }
 
             CardSurface {
@@ -626,6 +634,7 @@ struct AudiobookCastMergeSplitSheet: View {
                         .disabled(splitNewRoleName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || workflow.selectedAtomIDs.isEmpty)
                     }
                 }
+                .padding(SpeechRailDesignTokens.Spacing.md)
             }
 
             HStack {
