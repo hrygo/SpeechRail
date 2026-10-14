@@ -417,4 +417,164 @@ final class AudiobookAnalysisTests: XCTestCase {
         let assignedVoiceIDs = Set(recommended.values.map(\.voiceID))
         XCTAssertEqual(assignedVoiceIDs.count, characters.count, "主要角色与旁白应优先分配互不相同的独立音色")
     }
+
+    func testShortIndexDialogueOnlyAnnotationSlidingSpeakerAndExtractionCache() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let text = """
+        第一章 雾港重逢
+        海风吹拂着木栈道，远处传来低沉的汽笛声。
+        “老周，这盏灯亮了一整夜。”林远低声说道。
+        夜雾渐渐浓重，灯影在海面上轻轻摇晃。
+        “是啊，阿远，北码头的船快靠岸了。”老周应道。
+        """
+        let txtURL = tempRoot.appendingPathComponent("optimized_pipeline.txt")
+        try Data(text.utf8).write(to: txtURL)
+        let preview = try await AudiobookTXTImporter.prepare(fileURL: txtURL, encoding: .utf8)
+        let bookID = try await store.importBook(preview)
+
+        // 使用较小窗口迫使同一章拆分为多个连续窗口，测试跨窗口说话人状态传递与阶段一缓存
+        var multiWindowPolicy = AudiobookAnalysisPolicy.standard
+        multiWindowPolicy.maxPrimaryAtoms = 3
+        multiWindowPolicy.minWindowScalars = 10
+
+        let config = AudiobookAnalysisConfigSnapshot(
+            configuration: LLMConfiguration(baseURL: "http://127.0.0.1:8000/v1", model: "model-opt")
+        )
+
+        final class OptimizedMockClient: AudiobookAnalysisClient, @unchecked Sendable {
+            let configurationDigest: String
+            private let lock = NSLock()
+            var extractionCallCount = 0
+            var mergePayloads: [String] = []
+            var annotationInputs: [String] = []
+            var shouldFailSecondWindow = true
+
+            init(configurationDigest: String) {
+                self.configurationDigest = configurationDigest
+            }
+
+            func complete(_ prompt: AudiobookAnalysisPrompt) async throws -> String {
+                switch prompt.stage {
+                case .extraction:
+                    lock.withLock { extractionCallCount += 1 }
+                    // 使用短序号 "1"、"2" 返回证据，且分别返回「林远（含别称阿远）」与独立「阿远」以测试本地别名预聚类
+                    return """
+                    {
+                      "schema_version": "audiobook.extract.v1",
+                      "mentions": [
+                        {
+                          "surfaceName": "林远",
+                          "aliases": ["阿远"],
+                          "evidenceAtomIDs": ["1", "2"],
+                          "voiceTraitEvidence": "青年清朗男声"
+                        },
+                        {
+                          "surfaceName": "阿远",
+                          "aliases": [],
+                          "evidenceAtomIDs": ["2"],
+                          "voiceTraitEvidence": null
+                        },
+                        {
+                          "surfaceName": "老周",
+                          "aliases": ["周叔"],
+                          "evidenceAtomIDs": ["2"],
+                          "voiceTraitEvidence": "苍老沙哑男声"
+                        }
+                      ]
+                    }
+                    """
+                case .castMerge:
+                    lock.withLock { mergePayloads.append(prompt.input) }
+                    return """
+                    {
+                      "schema_version": "audiobook.merge.v1",
+                      "groups": [
+                        {
+                          "canonicalName": "林远",
+                          "memberSurfaceNames": ["林远", "阿远"],
+                          "aliases": ["阿远"],
+                          "isCollisionUnresolved": false,
+                          "evidenceSummary": "青年清朗男声"
+                        },
+                        {
+                          "canonicalName": "老周",
+                          "memberSurfaceNames": ["老周", "周叔"],
+                          "aliases": ["周叔"],
+                          "isCollisionUnresolved": false,
+                          "evidenceSummary": "苍老沙哑男声"
+                        }
+                      ]
+                    }
+                    """
+                case .annotation:
+                    let (currentCount, failNow) = lock.withLock { () -> (Int, Bool) in
+                        annotationInputs.append(prompt.input)
+                        return (annotationInputs.count, shouldFailSecondWindow)
+                    }
+                    if currentCount >= 2 && failNow {
+                        throw AudiobookAnalysisError.invalidStructuredOutput("模拟第二窗口首次中断")
+                    }
+                    // 仅对含对白的短序号段落返回标注（使用短序号 "1".."3" 与短角色代号 "R1"），省略纯叙述段
+                    let data = Data(prompt.input.utf8)
+                    let obj = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+                    let dialogueIndices = (obj["target_dialogue_indices"] as? [Int]) ?? [2, 3]
+                    let itemsJSON = dialogueIndices.map { idx in
+                        """
+                        {
+                          "atomID": "\(idx)",
+                          "speakerKind": "character",
+                          "roleID": "R1",
+                          "candidateRoleIDs": ["R1"],
+                          "confidence": 0.96,
+                          "evidence": "短序号与短角色代号归属"
+                        }
+                        """
+                    }.joined(separator: ",")
+                    return """
+                    {
+                      "schema_version": "audiobook.annotate.v1",
+                      "items": [\(itemsJSON)]
+                    }
+                    """
+                }
+            }
+        }
+
+        let client = OptimizedMockClient(configurationDigest: config.configurationDigest)
+        let pipeline = AudiobookAnalysisPipeline(store: store, policy: multiWindowPolicy) { _ in client }
+
+        // 首次运行：第 1 个窗口完成检查点落盘，第 2 个窗口模拟失败
+        do {
+            _ = try await pipeline.run(bookID: bookID, config: config)
+            XCTFail("首次运行在第 2 窗口应抛出错误")
+        } catch {
+            // Expected
+        }
+        let firstPhase1Calls = client.extractionCallCount
+        XCTAssertEqual(firstPhase1Calls, 2, "两个窗口在首次运行时各执行 1 次提取")
+
+        // 第二次重跑：窗口 1 走持久化检查点跳过，窗口 2 命中阶段一内存提取缓存（extractionCallCount 不再增加）
+        client.shouldFailSecondWindow = false
+        let summary = try await pipeline.run(bookID: bookID, config: config)
+        XCTAssertTrue(summary.isAllWindowsValidated)
+        XCTAssertEqual(summary.reusedCheckpointWindows, 1)
+        XCTAssertEqual(client.extractionCallCount, firstPhase1Calls, "中断重跑应命中阶段一窗口提取缓存，不重复请求提取")
+
+        // 验证阶段二归并输入：阿远已被本地预聚类进林远，且注入了 evidence_excerpts
+        let mergeInput = try XCTUnwrap(client.mergePayloads.first)
+        XCTAssertTrue(mergeInput.contains("evidence_excerpts"), "归并提示词应包含原文微摘要 evidence_excerpts")
+        let mergeObj = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(mergeInput.utf8)) as? [String: Any])
+        let mergeCandidates = try XCTUnwrap(mergeObj["candidates"] as? [[String: Any]])
+        XCTAssertEqual(mergeCandidates.count, 2, "『阿远』与『林远』在本地预聚类后只剩『林远』与『老周』2 个归并候选")
+
+        // 验证阶段三跨窗口说话人状态传递：第 2 个窗口的 leading_context_readonly 中包含前序窗口已解析的 speaker
+        let secondWindowPromptInput = try XCTUnwrap(client.annotationInputs.last)
+        XCTAssertTrue(secondWindowPromptInput.contains("\"speaker\""), "后序窗口的 leading_context_readonly 应携带前序已解析说话人状态")
+
+        // 验证纯叙述段自动归属旁白，对白段通过短序号与 R1 归属角色，实现 100% 覆盖
+        let annotations = try await store.annotations(for: bookID)
+        let allAtoms = try await store.atoms(for: bookID).filter { $0.kind != .formatting }
+        XCTAssertEqual(annotations.count, allAtoms.count)
+        XCTAssertEqual(summary.unknownSpeakerCount, 0)
+    }
 }

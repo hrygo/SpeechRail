@@ -6,17 +6,26 @@ public struct AudiobookVoiceReturnContext: Codable, Equatable, Hashable, Sendabl
     public let roleID: UUID
     public let castRevisionID: UUID
     public let generation: Int
+    public let roleDisplayName: String?
+    public let suggestedInstruction: String?
+    public let suggestedReferenceText: String?
 
     public init(
         bookID: UUID,
         roleID: UUID,
         castRevisionID: UUID,
-        generation: Int
+        generation: Int,
+        roleDisplayName: String? = nil,
+        suggestedInstruction: String? = nil,
+        suggestedReferenceText: String? = nil
     ) {
         self.bookID = bookID
         self.roleID = roleID
         self.castRevisionID = castRevisionID
         self.generation = generation
+        self.roleDisplayName = roleDisplayName
+        self.suggestedInstruction = suggestedInstruction
+        self.suggestedReferenceText = suggestedReferenceText
     }
 }
 
@@ -387,11 +396,16 @@ public actor AudiobookCastController {
     ) async throws -> AudiobookVoiceReturnContext {
         let revisionID = try await currentCastRevisionID(for: bookID)
         let generation = currentGeneration(for: bookID)
+        let characters = try await store.characters(for: bookID)
+        let role = characters.first(where: { $0.id == roleID })
         return AudiobookVoiceReturnContext(
             bookID: bookID,
             roleID: roleID,
             castRevisionID: revisionID,
-            generation: generation
+            generation: generation,
+            roleDisplayName: role?.displayName,
+            suggestedInstruction: role?.recommendedVoiceDesignInstruction,
+            suggestedReferenceText: role?.recommendedVoiceDesignReferenceText
         )
     }
 

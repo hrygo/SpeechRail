@@ -323,6 +323,8 @@ public enum SpeechRailDesignTokens {
         /// 有声书工坊底部听书播放控制栏高度 (64 pt) 与三栏工作台最小高度 (540 pt)。
         public static let audiobookTransportBarHeight: CGFloat = 64
         public static let audiobookWorkbenchMinimumHeight: CGFloat = 540
+        /// 有声书剧本流正文最佳阅读行宽限制（黄金舒适阅读视线，防止宽屏极端拉伸留白）。
+        public static let audiobookScriptReadingMaximumWidth: CGFloat = 820
 
         /// 模态弹窗与工作区 Sheet 的标准宽度阶梯。
         public enum Sheet {

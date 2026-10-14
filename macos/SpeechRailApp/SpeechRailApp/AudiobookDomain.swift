@@ -13,7 +13,7 @@ public enum AudiobookLimits {
     public static let maxWindowPrimaryAtoms: Int = 256
     public static let maxWindowContextScalarsPerSide: Int = 500
     public static let maxCastSummaryScalars: Int = 4_000
-    public static let maxTotalPromptScalars: Int = 16_000
+    public static let maxTotalPromptScalars: Int = 64_000
     public static let minSplitWindowScalars: Int = 64
 
     public static let maxExtractionOutputTokens: Int = 4_000
@@ -304,6 +304,34 @@ public struct AudiobookCharacter: Codable, Equatable, Hashable, Sendable, Identi
         evidences.compactMap(\.voiceTraitSummary)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .first(where: { !$0.isEmpty })
+    }
+
+    /// 为 Qwen3-TTS VoiceDesign 自动生成的音色描述提示词（可直接预填到「音色创作」页）。
+    public var recommendedVoiceDesignInstruction: String {
+        if isNarrator {
+            if let trait = primaryVoiceTraitSummary {
+                return "有声书旁白：\(trait)，沉稳清晰、叙事感强、语速自然均匀。"
+            }
+            return "沉稳、清晰、富有叙事感与空间感的有声书旁白声线，语速均匀自然。"
+        }
+        if let trait = primaryVoiceTraitSummary {
+            return "角色「\(displayName)」：\(trait)，咬字清晰自然，贴合小说人物对白演绎。"
+        }
+        return "有声书角色「\(displayName)」专属声线，咬字清晰自然，富有人物表现力与戏剧层次。"
+    }
+
+    /// 为 Qwen3-TTS VoiceDesign 自动提取的角色代表性试听台词或参考文案。
+    public var recommendedVoiceDesignReferenceText: String {
+        if let firstQuote = evidences
+            .map({ $0.quoteExcerpt.trimmingCharacters(in: .whitespacesAndNewlines) })
+            .first(where: { !$0.isEmpty && $0 != displayName })
+        {
+            return String(firstQuote.prefix(100))
+        }
+        if isNarrator {
+            return "夜色渐深，远处的灯火在微风中轻轻摇曳，故事从这里缓缓展开。"
+        }
+        return "你好，我是\(displayName)，这句台词用于试听并确认我的专属角色声线。"
     }
 
     public init(

@@ -970,8 +970,12 @@ public struct VoiceDesignView: View {
             )
         }
         .task {
+            applyAudiobookVoiceReturnPresetIfNeeded()
             await model.refresh()
             await model.refreshCreatorVoices()
+        }
+        .onChange(of: navigation.audiobookVoiceReturnContext) { _, _ in
+            applyAudiobookVoiceReturnPresetIfNeeded()
         }
         .onDisappear {
             model.stopAudio()
@@ -999,6 +1003,19 @@ public struct VoiceDesignView: View {
         }
         identityConfirmed = false
         naturalnessConfirmed = false
+    }
+
+    private func applyAudiobookVoiceReturnPresetIfNeeded() {
+        guard let ctx = navigation.audiobookVoiceReturnContext else { return }
+        if let name = ctx.roleDisplayName, !name.isEmpty {
+            voiceName = name
+        }
+        if let instruction = ctx.suggestedInstruction, !instruction.isEmpty {
+            description = instruction
+        }
+        if let sample = ctx.suggestedReferenceText, !sample.isEmpty {
+            referenceText = sample
+        }
     }
 
     /// Three steps, not a form: describe the voice, keep the reference text and

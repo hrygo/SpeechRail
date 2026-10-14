@@ -138,4 +138,39 @@ final class AudiobookAnalysisPromptTests: XCTestCase {
             )
         )
     }
+
+    func testFullAtomWindowWithinTotalRequestBudget() throws {
+        let rootID = UUID()
+        // 256 atoms with ~12 characters each = ~3072 scalars (<= 4000 primary scalars)
+        let atoms = (0..<256).map { idx in
+            AudiobookPromptAtomItem(
+                atomID: UUID(),
+                kind: .body,
+                text: "第\(idx)段：行者喝道哪里走！"
+            )
+        }
+        let characterSummary = AudiobookPromptCharacterSummary(
+            roleID: UUID(),
+            canonicalName: "孙悟空",
+            aliases: ["行者", "大圣"],
+            evidenceNote: "齐天大圣"
+        )
+        let extractPrompt = try AudiobookAnalysisPrompts.makeExtractionPrompt(
+            rootWindowID: rootID,
+            primaryAtoms: atoms
+        )
+        XCTAssertLessThanOrEqual(
+            extractPrompt.totalRequestScalars,
+            AudiobookAnalysisPolicy.standard.maxFullRequestScalars
+        )
+        let annotatePrompt = try AudiobookAnalysisPrompts.makeAnnotationPrompt(
+            rootWindowID: rootID,
+            primaryAtoms: atoms,
+            candidateCharacters: [characterSummary]
+        )
+        XCTAssertLessThanOrEqual(
+            annotatePrompt.totalRequestScalars,
+            AudiobookAnalysisPolicy.standard.maxFullRequestScalars
+        )
+    }
 }

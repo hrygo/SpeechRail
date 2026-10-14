@@ -296,5 +296,15 @@ final class AudiobookCastTests: XCTestCase {
         )
         let saved = try await store.voiceBindings(for: fixture.bookID)
         XCTAssertEqual(saved[guardRole.id]?.voiceID, "shared-voice")
+
+        // 验证跳转「设计新音色」的返回上下文自动携带角色专属音色描述与试听台词
+        let returnCtx = try await controller.makeVoiceReturnContext(
+            bookID: fixture.bookID,
+            roleID: fixture.hero.id
+        )
+        XCTAssertEqual(returnCtx.roleDisplayName, fixture.hero.displayName)
+        XCTAssertNotNil(returnCtx.suggestedInstruction)
+        XCTAssertTrue(returnCtx.suggestedInstruction?.contains(fixture.hero.displayName) == true)
+        XCTAssertNotNil(returnCtx.suggestedReferenceText)
     }
 }

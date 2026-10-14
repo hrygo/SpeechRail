@@ -2053,8 +2053,9 @@ final class RealtimeContractTests: XCTestCase {
             if await sentEventTypes(transport).contains("speechrail.diarization.finish") { break }
             try await Task.sleep(for: .milliseconds(5))
         }
+        let finishSent = await sentEventTypes(transport).contains("speechrail.diarization.finish")
         XCTAssertTrue(
-            await sentEventTypes(transport).contains("speechrail.diarization.finish"),
+            finishSent,
             "drain 必须先发 finish，failed 才是它的终态回答"
         )
         await transport.enqueue(.text(jsonText([
@@ -2142,7 +2143,8 @@ final class RealtimeContractTests: XCTestCase {
             "units": []
         ])))
         try await drain.value
-        XCTAssertTrue(await sentEventTypes(transport).contains("input_audio_buffer.clear"))
+        let clearSent = await sentEventTypes(transport).contains("input_audio_buffer.clear")
+        XCTAssertTrue(clearSent)
         await client.close()
     }
 

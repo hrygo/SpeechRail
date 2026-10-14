@@ -16,10 +16,12 @@ public enum AudiobookCastRegistry {
         }
     }
 
-    /// 将提取阶段得到的 mentions 按最多 32 个一批分批，并限制单个角色的别称与证据 ID 数量防止撑爆单批上下文预算。
+    /// 将提取阶段得到的 mentions 按最多 32 个一批分批，执行本地确定性别名预聚类与证据摘录注入，并限制单个角色的别称与证据数量防止撑爆单批上下文预算。
     public static func batchMentions(
         _ mentions: [AudiobookExtractionResponse.Mention],
-        batchSize: Int = AudiobookLimits.maxCastMergeBatchSize
+        batchSize: Int = AudiobookLimits.maxCastMergeBatchSize,
+        atomsByID: [UUID: AudiobookTextAtom] = [:],
+        source: AudiobookSourceIndex? = nil
     ) -> [[AudiobookExtractionResponse.Mention]] {
         let clampedBatchSize = max(1, min(batchSize, AudiobookLimits.maxCastMergeBatchSize))
         var deduplicatedBySurface: [String: AudiobookExtractionResponse.Mention] = [:]
@@ -27,27 +29,17 @@ public enum AudiobookCastRegistry {
 
         for mention in mentions {
             let trimmed = mention.surfaceName.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { continue }
+            guard !trimmed.isEmpty, trimmed != "旁白" else { continue }
+            let cleanAliases = mention.aliases
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty && $0 != trimmed && $0 != "旁白" }
             if var existing = deduplicatedBySurface[trimmed] {
-                let mergedAliases = Array(Set(existing.aliases + mention.aliases)).sorted()
-                var mergedAtomIDs = existing.evidenceAtomIDs
-                for atomID in mention.evidenceAtomIDs where !mergedAtomIDs.contains(atomID) {
-                    if mergedAtomIDs.count >= 6 { break }
-                    mergedAtomIDs.append(atomID)
-                }
-                existing.aliases = Array(mergedAliases.prefix(12))
-                existing.evidenceAtomIDs = mergedAtomIDs
-                if existing.voiceTraitEvidence == nil,
-                   let trait = mention.voiceTraitEvidence?.trimmingCharacters(in: .whitespacesAndNewlines),
-                   !trait.isEmpty
-                {
-                    existing.voiceTraitEvidence = trait
-                }
+                existing = mergeMentionPair(primary: existing, secondary: mention, extraAliases: cleanAliases)
                 deduplicatedBySurface[trimmed] = existing
             } else {
                 var normalized = mention
                 normalized.surfaceName = trimmed
-                normalized.aliases = Array(Set(mention.aliases).sorted().prefix(12))
+                normalized.aliases = Array(Set(cleanAliases).sorted().prefix(12))
                 normalized.evidenceAtomIDs = Array(mention.evidenceAtomIDs.prefix(6))
                 if let trait = mention.voiceTraitEvidence?.trimmingCharacters(in: .whitespacesAndNewlines) {
                     normalized.voiceTraitEvidence = trait.isEmpty ? nil : trait
@@ -57,17 +49,98 @@ public enum AudiobookCastRegistry {
             }
         }
 
-        let orderedMentions = orderedKeys.compactMap { deduplicatedBySurface[$0] }
-        guard !orderedMentions.isEmpty else { return [] }
+        // 本地别名预聚类：若候选 B 的 surfaceName 已显式出现在候选 A 的 aliases 中（或反之），在送入大模型前直接本地合并
+        var clustered: [AudiobookExtractionResponse.Mention] = []
+        for key in orderedKeys {
+            guard let candidate = deduplicatedBySurface[key] else { continue }
+            if let matchIdx = clustered.firstIndex(where: { existing in
+                existing.aliases.contains(candidate.surfaceName)
+                    || candidate.aliases.contains(existing.surfaceName)
+            }) {
+                let mergedAliases = [candidate.surfaceName] + candidate.aliases
+                clustered[matchIdx] = mergeMentionPair(
+                    primary: clustered[matchIdx],
+                    secondary: candidate,
+                    extraAliases: mergedAliases
+                )
+            } else {
+                clustered.append(candidate)
+            }
+        }
+
+        // 注入原文微摘要（每个角色最多 2 条、每条不超过 60 字），让阶段二大模型基于真实语境判别同人或同名碰撞
+        if let source, !atomsByID.isEmpty {
+            clustered = clustered.map { mention in
+                var copy = mention
+                if copy.evidenceExcerpts.isEmpty {
+                    var excerpts: [String] = []
+                    for atomID in copy.evidenceAtomIDs {
+                        guard let atom = atomsByID[atomID],
+                              let rawText = try? source.text(in: atom.sourceRange)
+                        else { continue }
+                        let compact = rawText
+                            .replacingOccurrences(of: "\n", with: " ")
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !compact.isEmpty else { continue }
+                        let clipped = String(compact.prefix(60))
+                        if !excerpts.contains(clipped) {
+                            excerpts.append(clipped)
+                        }
+                        if excerpts.count >= 2 { break }
+                    }
+                    copy.evidenceExcerpts = excerpts
+                } else {
+                    copy.evidenceExcerpts = Array(copy.evidenceExcerpts.prefix(2))
+                }
+                return copy
+            }
+        }
+
+        guard !clustered.isEmpty else { return [] }
 
         var batches: [[AudiobookExtractionResponse.Mention]] = []
         var index = 0
-        while index < orderedMentions.count {
-            let end = min(orderedMentions.count, index + clampedBatchSize)
-            batches.append(Array(orderedMentions[index..<end]))
+        while index < clustered.count {
+            let end = min(clustered.count, index + clampedBatchSize)
+            batches.append(Array(clustered[index..<end]))
             index = end
         }
         return batches
+    }
+
+    private static func mergeMentionPair(
+        primary: AudiobookExtractionResponse.Mention,
+        secondary: AudiobookExtractionResponse.Mention,
+        extraAliases: [String]
+    ) -> AudiobookExtractionResponse.Mention {
+        var updated = primary
+        let combinedAliases = Set(primary.aliases + extraAliases)
+            .subtracting([primary.surfaceName, "旁白"])
+            .filter { !$0.isEmpty }
+            .sorted()
+        updated.aliases = Array(combinedAliases.prefix(12))
+
+        var mergedAtomIDs = primary.evidenceAtomIDs
+        for atomID in secondary.evidenceAtomIDs where !mergedAtomIDs.contains(atomID) {
+            if mergedAtomIDs.count >= 6 { break }
+            mergedAtomIDs.append(atomID)
+        }
+        updated.evidenceAtomIDs = mergedAtomIDs
+
+        if updated.voiceTraitEvidence == nil,
+           let trait = secondary.voiceTraitEvidence?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !trait.isEmpty
+        {
+            updated.voiceTraitEvidence = trait
+        }
+
+        var mergedExcerpts = primary.evidenceExcerpts
+        for excerpt in secondary.evidenceExcerpts where !mergedExcerpts.contains(excerpt) {
+            if mergedExcerpts.count >= 2 { break }
+            mergedExcerpts.append(excerpt)
+        }
+        updated.evidenceExcerpts = mergedExcerpts
+        return updated
     }
 
     /// 结合已有角色库与本批归并输出，更新全书角色表（保留稳定 role ID、旁白与声线特征摘要）。
@@ -94,9 +167,13 @@ public enum AudiobookCastRegistry {
         }
 
         var unresolvedCollisions = Set<String>()
-        let mentionsByName: [String: AudiobookExtractionResponse.Mention] = Dictionary(
-            uniqueKeysWithValues: batchMentions.map { ($0.surfaceName, $0) }
-        )
+        var mentionsByName: [String: AudiobookExtractionResponse.Mention] = [:]
+        for mention in batchMentions {
+            mentionsByName[mention.surfaceName] = mention
+            for alias in mention.aliases where mentionsByName[alias] == nil {
+                mentionsByName[alias] = mention
+            }
+        }
 
         for group in mergeGroups {
             let canonical = group.canonicalName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -127,6 +204,7 @@ public enum AudiobookCastRegistry {
             }()
 
             var evidences: [AudiobookCharacterEvidence] = []
+            var seenEvidenceAtomIDs = Set<UUID>()
             var chapterIDSet = Set<UUID>()
             var earliestRange: AudiobookSourceRange?
 
@@ -134,8 +212,9 @@ public enum AudiobookCastRegistry {
                 guard let mention = mentionsByName[name] else { continue }
                 let mentionTrait = mention.voiceTraitEvidence?.trimmingCharacters(in: .whitespacesAndNewlines)
                 let effectiveTrait = (mentionTrait?.isEmpty == false ? mentionTrait : nil) ?? groupTrait
-                for atomID in mention.evidenceAtomIDs {
+                for atomID in mention.evidenceAtomIDs where !seenEvidenceAtomIDs.contains(atomID) {
                     guard let atom = atomsByID[atomID] else { continue }
+                    seenEvidenceAtomIDs.insert(atomID)
                     chapterIDSet.insert(atom.chapterID)
                     if earliestRange == nil || atom.sourceRange < earliestRange! {
                         earliestRange = atom.sourceRange
@@ -214,7 +293,7 @@ public enum AudiobookCastRegistry {
         )
     }
 
-    /// 为单窗标注筛选候选角色摘要（不把全书庞大的角色库无上限塞入单次 prompt）。
+    /// 为单窗标注筛选候选角色摘要（不把全书庞大的角色库无上限塞入单次 prompt），并分配短代号 R1...Rk。
     public static func selectCandidateSummariesForWindow(
         characters: [AudiobookCharacter],
         chapterID: UUID,
@@ -249,16 +328,18 @@ public enum AudiobookCastRegistry {
             let traitPrefix = character.primaryVoiceTraitSummary.map { "[\($0)] " } ?? ""
             let rawExcerpt = character.evidences.first?.quoteExcerpt ?? ""
             let combinedNote = (traitPrefix + rawExcerpt).trimmingCharacters(in: .whitespacesAndNewlines)
+            let roleKey = "R\(selected.count + 1)"
             let summary = AudiobookPromptCharacterSummary(
                 roleID: character.id,
                 canonicalName: character.displayName,
                 aliases: Array(character.aliases.prefix(8)),
-                evidenceNote: combinedNote.isEmpty ? nil : String(combinedNote.prefix(60))
+                evidenceNote: combinedNote.isEmpty ? nil : String(combinedNote.prefix(60)),
+                roleKey: roleKey
             )
             let estimatedScalars = summary.canonicalName.unicodeScalars.count
                 + summary.aliases.joined(separator: ",").unicodeScalars.count
                 + (summary.evidenceNote?.unicodeScalars.count ?? 0)
-                + 64
+                + 72
             if accumulatedScalars + estimatedScalars > policy.maxCharacterSummaryScalars {
                 break
             }

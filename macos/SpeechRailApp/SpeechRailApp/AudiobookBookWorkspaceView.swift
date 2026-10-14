@@ -264,6 +264,8 @@ public struct AudiobookBookWorkspaceView: View {
                         }
                     }
                     .padding(SpeechRailDesignTokens.Spacing.md)
+                    .frame(maxWidth: SpeechRailDesignTokens.Layout.audiobookScriptReadingMaximumWidth, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
 
                 SessionHairline()
@@ -345,105 +347,127 @@ public struct AudiobookBookWorkspaceView: View {
     @ViewBuilder
     private func atomRowView(atom: AudiobookTextAtom) -> some View {
         let annotation = workflow.chapterAnnotations.first(where: { $0.atomID == atom.id })
-        let text = workflow.atomTextsByID[atom.id] ?? ""
+        let rawText = workflow.atomTextsByID[atom.id] ?? ""
+        let displayText = AudiobookSourceIndex.displayNormalizedText(rawText)
+        let isSelected = workflow.selectedAtomIDs.contains(atom.id)
         let isUnknown = annotation?.assignment.isUnknown == true
         let assignedRole = annotation?.assignment.roleID.flatMap { id in
             workflow.characters.first(where: { $0.id == id })
         }
 
-        CardSurface {
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Button {
-                        if workflow.selectedAtomIDs.contains(atom.id) {
-                            workflow.selectedAtomIDs.remove(atom.id)
-                        } else {
-                            workflow.selectedAtomIDs.insert(atom.id)
-                        }
-                    } label: {
-                        Image(
-                            systemName: workflow.selectedAtomIDs.contains(atom.id)
-                                ? "checkmark.square.fill"
-                                : "square"
-                        )
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    }
-                    .buttonStyle(.plain)
-
-                    if isUnknown {
-                        StatusPill(tone: .attention, label: "待确认说话人")
-                    } else if let role = assignedRole {
-                        AudiobookVoiceTag(
-                            name: role.displayName,
-                            detail: workflow.voiceBindings[role.id]?.voiceID ?? "未配声"
-                        )
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Button {
+                    if isSelected {
+                        workflow.selectedAtomIDs.remove(atom.id)
                     } else {
-                        StatusPill(tone: .neutral, label: "待分析")
+                        workflow.selectedAtomIDs.insert(atom.id)
                     }
+                } label: {
+                    Image(
+                        systemName: isSelected
+                            ? "checkmark.square.fill"
+                            : "square"
+                    )
+                    .foregroundStyle(
+                        isSelected
+                            ? SpeechRailDesignTokens.Color.rail
+                            : SpeechRailDesignTokens.Color.inkSecondary
+                    )
+                }
+                .buttonStyle(.plain)
 
-                    let charCount = text.isEmpty ? max(1, Int(atom.sourceRange.byteCount / 3)) : text.count
-                    Text("\(charCount) 字")
-                        .font(SpeechRailDesignTokens.Typography.technical)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                if isUnknown {
+                    StatusPill(tone: .attention, label: "待确认说话人")
+                } else if let role = assignedRole {
+                    AudiobookVoiceTag(
+                        name: role.displayName,
+                        detail: workflow.voiceBindings[role.id]?.voiceID ?? "未配声"
+                    )
+                } else {
+                    StatusPill(tone: .neutral, label: "待分析")
+                }
 
-                    Spacer()
+                let charCount = displayText.isEmpty ? max(1, Int(atom.sourceRange.byteCount / 3)) : displayText.count
+                Text("\(charCount) 字")
+                    .font(SpeechRailDesignTokens.Typography.technical)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
 
-                    Menu {
-                        ForEach(workflow.characters) { role in
-                            Button("指派给：\(role.displayName)") {
+                Spacer()
+
+                Menu {
+                    ForEach(workflow.characters) { role in
+                        Button("指派给：\(role.displayName)") {
+                            Task { await workflow.assignSpeaker(atomIDs: [atom.id], roleID: role.id) }
+                        }
+                    }
+                } label: {
+                    Label("改派说话人", systemImage: "person.crop.circle")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+            }
+
+            Text(displayText)
+                .font(
+                    atom.kind == .heading
+                        ? SpeechRailDesignTokens.Typography.sectionTitle
+                        : SpeechRailDesignTokens.Typography.body
+                )
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                .lineSpacing(4)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            if case let .unknown(reason, candidateRoleIDs) = annotation?.assignment {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                    Text("待确认原因：\(reason)")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Text("快捷确认：")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+
+                        let candidateRoles = candidateRoleIDs.compactMap { cid in
+                            workflow.characters.first(where: { $0.id == cid })
+                        }
+                        let buttonsToShow = candidateRoles.isEmpty ? Array(workflow.characters.prefix(3)) : candidateRoles
+
+                        ForEach(buttonsToShow) { role in
+                            Button(role.displayName) {
                                 Task { await workflow.assignSpeaker(atomIDs: [atom.id], roleID: role.id) }
                             }
-                        }
-                    } label: {
-                        Label("改派说话人", systemImage: "person.crop.circle")
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                    }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                }
-
-                Text(text)
-                    .font(
-                        atom.kind == .heading
-                            ? SpeechRailDesignTokens.Typography.sectionTitle
-                            : SpeechRailDesignTokens.Typography.body
-                    )
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                if case let .unknown(reason, candidateRoleIDs) = annotation?.assignment {
-                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                        Text("待确认原因：\(reason)")
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.attention)
-
-                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                            Text("快捷确认：")
-                                .font(SpeechRailDesignTokens.Typography.caption)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-
-                            let candidateRoles = candidateRoleIDs.compactMap { cid in
-                                workflow.characters.first(where: { $0.id == cid })
-                            }
-                            let buttonsToShow = candidateRoles.isEmpty ? Array(workflow.characters.prefix(3)) : candidateRoles
-
-                            ForEach(buttonsToShow) { role in
-                                Button(role.displayName) {
-                                    Task { await workflow.assignSpeaker(atomIDs: [atom.id], roleID: role.id) }
-                                }
-                                .speechRailButton(.secondary)
-                            }
+                            .speechRailButton(.secondary)
                         }
                     }
-                    .padding(SpeechRailDesignTokens.Spacing.xs)
-                    .background(SpeechRailDesignTokens.Color.attention.opacity(0.14))
-                    .clipShape(RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested))
                 }
+                .padding(SpeechRailDesignTokens.Spacing.xs)
+                .background(SpeechRailDesignTokens.Color.attention.opacity(0.14))
+                .clipShape(RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested))
             }
-            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-            .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
         }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        .background(
+            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested)
+                .fill(
+                    isSelected
+                        ? SpeechRailDesignTokens.Color.rail.opacity(0.10)
+                        : (isUnknown ? SpeechRailDesignTokens.Color.attention.opacity(0.06) : SpeechRailDesignTokens.Color.field)
+                )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested)
+                .strokeBorder(
+                    isSelected
+                        ? SpeechRailDesignTokens.Color.rail.opacity(0.4)
+                        : (isUnknown ? SpeechRailDesignTokens.Color.attention.opacity(0.3) : SpeechRailDesignTokens.Color.separator.opacity(0.5)),
+                    lineWidth: 1
+                )
+        )
     }
 
     // MARK: - Production & Candidate Repair Canvas
@@ -494,6 +518,8 @@ public struct AudiobookBookWorkspaceView: View {
                             }
                         }
                         .padding(SpeechRailDesignTokens.Spacing.md)
+                        .frame(maxWidth: SpeechRailDesignTokens.Layout.audiobookScriptReadingMaximumWidth, alignment: .leading)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
                     }
                 }
 
@@ -550,7 +576,8 @@ public struct AudiobookBookWorkspaceView: View {
     @ViewBuilder
     private func fragmentRowView(fragment: AudiobookFragment) -> some View {
         let role = workflow.characters.first(where: { $0.id == fragment.roleID })
-        let text = workflow.fragmentTextsByID[fragment.id] ?? ""
+        let rawText = workflow.fragmentTextsByID[fragment.id] ?? ""
+        let text = AudiobookSourceIndex.displayNormalizedText(rawText)
         let candidates = workflow.chapterCandidates
             .filter { $0.fragmentID == fragment.id }
             .sorted { $0.createdAt > $1.createdAt }

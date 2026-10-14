@@ -40,6 +40,8 @@ public actor AudiobookAnalysisPipeline {
     private let policy: AudiobookAnalysisPolicy
     private var cancelledBookIDs: Set<UUID> = []
     private var activeGenerationsByBook: [UUID: Int] = [:]
+    /// 阶段一提取结果缓存（按 windowID + policyFingerprint + configurationDigest 键控），暂停或阶段三中断重跑时免除重复提取。
+    private var extractionCacheByWindowKey: [String: [AudiobookExtractionResponse.Mention]] = [:]
 
     public init(
         store: AudiobookProjectStore,
@@ -102,6 +104,7 @@ public actor AudiobookAnalysisPipeline {
             var extractedMentions: [AudiobookExtractionResponse.Mention] = []
             var extractionCallCounters: [UUID: Int] = [:]
             var annotationCallCounters: [UUID: Int] = [:]
+            var validatedAnnotationsByWindowID: [UUID: [AudiobookAnnotation]] = [:]
 
             // Phase 1: Extraction across windows (skipping windows that already have matching valid checkpoints)
             var windowsNeedingWork: [AudiobookAnalysisWindow] = []
@@ -120,6 +123,7 @@ public actor AudiobookAnalysisPipeline {
                    )
                 {
                     reusedCheckpointCount += 1
+                    validatedAnnotationsByWindowID[planned.id] = savedAnns
                 } else {
                     windowsNeedingWork.append(planned)
                     try await store.saveAnalysisWindow(planned)
@@ -128,9 +132,28 @@ public actor AudiobookAnalysisPipeline {
 
             for window in windowsNeedingWork {
                 try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
-                let primaryItems = try makePromptAtomItems(ids: window.primaryAtomIDs, atomsByID: atomsByID, source: source)
-                let leadingItems = try makePromptAtomItems(ids: window.leadingContextAtomIDs, atomsByID: atomsByID, source: source)
-                let trailingItems = try makePromptAtomItems(ids: window.trailingContextAtomIDs, atomsByID: atomsByID, source: source)
+                let cacheKey = Self.extractionCacheKey(for: window)
+                if let cachedMentions = extractionCacheByWindowKey[cacheKey] {
+                    extractedMentions.append(contentsOf: cachedMentions)
+                    continue
+                }
+
+                let primaryItems = try makePromptAtomItems(
+                    ids: window.primaryAtomIDs,
+                    atomsByID: atomsByID,
+                    source: source,
+                    assignLocalIndices: true
+                )
+                let leadingItems = try makePromptAtomItems(
+                    ids: window.leadingContextAtomIDs,
+                    atomsByID: atomsByID,
+                    source: source
+                )
+                let trailingItems = try makePromptAtomItems(
+                    ids: window.trailingContextAtomIDs,
+                    atomsByID: atomsByID,
+                    source: source
+                )
 
                 let mentions = try await executeExtractionWithSplitFallback(
                     rootWindowID: window.rootWindowID,
@@ -143,10 +166,11 @@ public actor AudiobookAnalysisPipeline {
                     runGeneration: runGeneration,
                     callCounters: &extractionCallCounters
                 )
+                extractionCacheByWindowKey[cacheKey] = mentions
                 extractedMentions.append(contentsOf: mentions)
             }
 
-            // Phase 2: Bounded cast consolidation (32 candidates per batch)
+            // Phase 2: Bounded cast consolidation (32 candidates per batch, with local alias pre-clustering & source excerpts)
             var characters = try await store.characters(for: bookID)
             if !characters.contains(where: \.isNarrator) {
                 let narrator = AudiobookCharacter(
@@ -163,7 +187,9 @@ public actor AudiobookAnalysisPipeline {
             var unresolvedCollisions = Set<String>()
             let mentionBatches = AudiobookCastRegistry.batchMentions(
                 extractedMentions,
-                batchSize: policy.maxMergeCandidatesPerBatch
+                batchSize: policy.maxMergeCandidatesPerBatch,
+                atomsByID: atomsByID,
+                source: source
             )
             for batch in mentionBatches {
                 try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
@@ -197,13 +223,38 @@ public actor AudiobookAnalysisPipeline {
             try await store.saveCharacters(bookID: bookID, characters: characters)
 
             let narratorID = characters.first(where: \.isNarrator)?.id ?? UUID()
+            let roleNameByID = Dictionary(uniqueKeysWithValues: characters.map { ($0.id, $0.displayName) })
+
+            // 初始化跨窗口已解析说话人状态表（包含已复用的检查点窗口）
+            var resolvedSpeakerByAtomID: [UUID: String] = [:]
+            for savedAnns in validatedAnnotationsByWindowID.values {
+                for ann in savedAnns {
+                    if let roleID = ann.assignment.roleID, let name = roleNameByID[roleID] {
+                        resolvedSpeakerByAtomID[ann.atomID] = name
+                    }
+                }
+            }
 
             // Phase 3: Per-window speaker annotation with strict primary atom coverage and checkpoint commit
             for var window in windowsNeedingWork {
                 try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
-                let primaryItems = try makePromptAtomItems(ids: window.primaryAtomIDs, atomsByID: atomsByID, source: source)
-                let leadingItems = try makePromptAtomItems(ids: window.leadingContextAtomIDs, atomsByID: atomsByID, source: source)
-                let trailingItems = try makePromptAtomItems(ids: window.trailingContextAtomIDs, atomsByID: atomsByID, source: source)
+                let primaryItems = try makePromptAtomItems(
+                    ids: window.primaryAtomIDs,
+                    atomsByID: atomsByID,
+                    source: source,
+                    assignLocalIndices: true
+                )
+                let leadingItems = try makePromptAtomItems(
+                    ids: window.leadingContextAtomIDs,
+                    atomsByID: atomsByID,
+                    source: source,
+                    resolvedSpeakerByAtomID: resolvedSpeakerByAtomID
+                )
+                let trailingItems = try makePromptAtomItems(
+                    ids: window.trailingContextAtomIDs,
+                    atomsByID: atomsByID,
+                    source: source
+                )
                 let windowText = primaryItems.map(\.text).joined(separator: "\n")
                 let candidateSummaries = AudiobookCastRegistry.selectCandidateSummariesForWindow(
                     characters: characters,
@@ -220,6 +271,7 @@ public actor AudiobookAnalysisPipeline {
                     candidateSummaries: candidateSummaries,
                     characters: characters,
                     narratorID: narratorID,
+                    roleNameByID: roleNameByID,
                     atomsByID: atomsByID,
                     client: client,
                     snapshot: frozenSnapshot,
@@ -235,6 +287,12 @@ public actor AudiobookAnalysisPipeline {
                     book.analysisState = .failed
                     try await store.updateBook(book)
                     throw AudiobookAnalysisError.atomCoverageViolation("窗口 \(window.id) 标注未完整覆盖 primary atoms。")
+                }
+
+                for ann in annotations {
+                    if let roleID = ann.assignment.roleID, let name = roleNameByID[roleID] {
+                        resolvedSpeakerByAtomID[ann.atomID] = name
+                    }
                 }
 
                 window.isCompleted = true
@@ -397,7 +455,7 @@ public actor AudiobookAnalysisPipeline {
         do {
             let raw = try await client.complete(prompt)
             try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: snapshot)
-            let response = try decodeExtractionResponse(from: raw, allowedAtomIDs: Set(primaryItems.map(\.atomID)))
+            let response = try decodeExtractionResponse(from: raw, primaryItems: primaryItems)
             return response.mentions
         } catch let error as AudiobookAnalysisError {
             if case .cancelled = error { throw error }
@@ -453,8 +511,8 @@ public actor AudiobookAnalysisPipeline {
             )
         }
         let mid = primaryItems.count / 2
-        let left = Array(primaryItems[..<mid])
-        let right = Array(primaryItems[mid...])
+        let left = Self.reindexPromptAtomItems(Array(primaryItems[..<mid]))
+        let right = Self.reindexPromptAtomItems(Array(primaryItems[mid...]))
         let leftMentions = try await executeExtractionWithSplitFallback(
             rootWindowID: rootWindowID,
             primaryItems: left,
@@ -488,6 +546,7 @@ public actor AudiobookAnalysisPipeline {
         candidateSummaries: [AudiobookPromptCharacterSummary],
         characters: [AudiobookCharacter],
         narratorID: UUID,
+        roleNameByID: [UUID: String],
         atomsByID: [UUID: AudiobookTextAtom],
         client: any AudiobookAnalysisClient,
         snapshot: AudiobookAnalysisConfigSnapshot,
@@ -518,6 +577,7 @@ public actor AudiobookAnalysisPipeline {
                 from: raw,
                 window: window,
                 primaryItems: primaryItems,
+                candidateSummaries: candidateSummaries,
                 characters: characters,
                 narratorID: narratorID,
                 atomsByID: atomsByID
@@ -534,6 +594,7 @@ public actor AudiobookAnalysisPipeline {
                 candidateSummaries: candidateSummaries,
                 characters: characters,
                 narratorID: narratorID,
+                roleNameByID: roleNameByID,
                 atomsByID: atomsByID,
                 client: client,
                 snapshot: snapshot,
@@ -551,6 +612,7 @@ public actor AudiobookAnalysisPipeline {
                 candidateSummaries: candidateSummaries,
                 characters: characters,
                 narratorID: narratorID,
+                roleNameByID: roleNameByID,
                 atomsByID: atomsByID,
                 client: client,
                 snapshot: snapshot,
@@ -570,6 +632,7 @@ public actor AudiobookAnalysisPipeline {
         candidateSummaries: [AudiobookPromptCharacterSummary],
         characters: [AudiobookCharacter],
         narratorID: UUID,
+        roleNameByID: [UUID: String],
         atomsByID: [UUID: AudiobookTextAtom],
         client: any AudiobookAnalysisClient,
         snapshot: AudiobookAnalysisConfigSnapshot,
@@ -591,8 +654,8 @@ public actor AudiobookAnalysisPipeline {
             )
         }
         let mid = primaryItems.count / 2
-        let left = Array(primaryItems[..<mid])
-        let right = Array(primaryItems[mid...])
+        let left = Self.reindexPromptAtomItems(Array(primaryItems[..<mid]))
+        let right = Self.reindexPromptAtomItems(Array(primaryItems[mid...]))
         let leftAnns = try await executeAnnotationWithSplitFallback(
             window: window,
             primaryItems: left,
@@ -601,6 +664,7 @@ public actor AudiobookAnalysisPipeline {
             candidateSummaries: candidateSummaries,
             characters: characters,
             narratorID: narratorID,
+            roleNameByID: roleNameByID,
             atomsByID: atomsByID,
             client: client,
             snapshot: snapshot,
@@ -608,14 +672,29 @@ public actor AudiobookAnalysisPipeline {
             runGeneration: runGeneration,
             callCounters: &callCounters
         )
+
+        var leftSpeakersByAtom: [UUID: String] = [:]
+        for ann in leftAnns {
+            if let roleID = ann.assignment.roleID, let name = roleNameByID[roleID] {
+                leftSpeakersByAtom[ann.atomID] = name
+            }
+        }
+        let rightLeading = Array(left.suffix(2)).map { item -> AudiobookPromptAtomItem in
+            var copy = item
+            copy.localIndex = nil
+            copy.resolvedSpeakerName = leftSpeakersByAtom[item.atomID]
+            return copy
+        }
+
         let rightAnns = try await executeAnnotationWithSplitFallback(
             window: window,
             primaryItems: right,
-            leadingItems: Array(left.suffix(2)),
+            leadingItems: rightLeading,
             trailingItems: trailingItems,
             candidateSummaries: candidateSummaries,
             characters: characters,
             narratorID: narratorID,
+            roleNameByID: roleNameByID,
             atomsByID: atomsByID,
             client: client,
             snapshot: snapshot,
@@ -628,7 +707,7 @@ public actor AudiobookAnalysisPipeline {
 
     private func decodeExtractionResponse(
         from raw: String,
-        allowedAtomIDs: Set<UUID>
+        primaryItems: [AudiobookPromptAtomItem]
     ) throws -> AudiobookExtractionResponse {
         let cleaned = Self.stripMarkdownCodeFences(raw)
         guard let data = cleaned.data(using: .utf8),
@@ -636,10 +715,26 @@ public actor AudiobookAnalysisPipeline {
         else {
             throw AudiobookAnalysisError.invalidStructuredOutput("人物提取 JSON 解码失败。")
         }
-        // 过滤掉模型误引用的上下文 atomID，保留合法的当前主窗口 atomID
+
+        let atomIDByRef = Self.buildAtomLookupTable(for: primaryItems)
+        let allowedAtomIDs = Set(primaryItems.map(\.atomID))
+
+        // 支持完整 UUID 与短索引（如 "1"、"#2"），并过滤掉模型误引用的上下文 atomID
         decoded.mentions = decoded.mentions.map { mention in
             var copy = mention
-            copy.evidenceAtomIDs = mention.evidenceAtomIDs.filter { allowedAtomIDs.contains($0) }
+            var resolvedIDs: [UUID] = []
+            let rawTokens = !mention.evidenceAtomRefs.isEmpty
+                ? mention.evidenceAtomRefs
+                : mention.evidenceAtomIDs.map(\.uuidString)
+            for token in rawTokens {
+                if let resolved = Self.resolveAtomID(from: token, lookup: atomIDByRef, allowedAtomIDs: allowedAtomIDs),
+                   !resolvedIDs.contains(resolved)
+                {
+                    resolvedIDs.append(resolved)
+                }
+            }
+            copy.evidenceAtomIDs = resolvedIDs
+            copy.evidenceAtomRefs = resolvedIDs.map(\.uuidString)
             return copy
         }
         return decoded
@@ -674,6 +769,7 @@ public actor AudiobookAnalysisPipeline {
         from raw: String,
         window: AudiobookAnalysisWindow,
         primaryItems: [AudiobookPromptAtomItem],
+        candidateSummaries: [AudiobookPromptCharacterSummary],
         characters: [AudiobookCharacter],
         narratorID: UUID,
         atomsByID: [UUID: AudiobookTextAtom]
@@ -686,17 +782,46 @@ public actor AudiobookAnalysisPipeline {
         }
 
         let expectedIDSet = Set(primaryItems.map(\.atomID))
+        let atomIDByRef = Self.buildAtomLookupTable(for: primaryItems)
+        let roleIDByRef = Self.buildRoleLookupTable(
+            characters: characters,
+            candidateSummaries: candidateSummaries
+        )
+        let validRoleIDs = Set(characters.map(\.id))
+
         var itemsByAtomID: [UUID: AudiobookAnnotationResponse.Item] = [:]
-        for item in response.items where expectedIDSet.contains(item.atomID) {
-            if itemsByAtomID[item.atomID] == nil {
-                itemsByAtomID[item.atomID] = item
+        for item in response.items {
+            let rawToken = item.atomRef ?? item.atomID.uuidString
+            guard let resolvedAtomID = Self.resolveAtomID(
+                from: rawToken,
+                lookup: atomIDByRef,
+                allowedAtomIDs: expectedIDSet
+            ) else {
+                continue
+            }
+            if itemsByAtomID[resolvedAtomID] == nil {
+                var normalized = item
+                normalized.atomID = resolvedAtomID
+                if let rawRole = item.roleRef,
+                   let resolvedRole = Self.resolveRoleID(from: rawRole, lookup: roleIDByRef, validRoleIDs: validRoleIDs)
+                {
+                    normalized.roleID = resolvedRole
+                }
+                let resolvedCandidates = item.candidateRoleRefs.compactMap { ref in
+                    Self.resolveRoleID(from: ref, lookup: roleIDByRef, validRoleIDs: validRoleIDs)
+                }
+                if !resolvedCandidates.isEmpty {
+                    normalized.candidateRoleIDs = resolvedCandidates
+                }
+                itemsByAtomID[resolvedAtomID] = normalized
             }
         }
-        guard !itemsByAtomID.isEmpty || primaryItems.isEmpty else {
+
+        let hasAnyDialogueAtom = primaryItems.contains { $0.containsDirectDialogue && $0.kind != .heading }
+        guard !itemsByAtomID.isEmpty || primaryItems.isEmpty || !hasAnyDialogueAtom else {
             throw AudiobookAnalysisError.atomCoverageViolation("返回的 atomID 序列与主窗口不匹配。")
         }
 
-        let validRoleIDs = Set(characters.map(\.id))
         var annotations: [AudiobookAnnotation] = []
         annotations.reserveCapacity(primaryItems.count)
 
@@ -733,8 +858,8 @@ public actor AudiobookAnalysisPipeline {
                         candidateRoleIDs: validCandidates
                     )
                 }
-            } else if !Self.containsDirectDialogueQuote(in: primaryItem.text) {
-                // 纯叙述段若被模型省略，确定性归属给旁白，保持 100% 原文覆盖
+            } else if !primaryItem.containsDirectDialogue {
+                // 纯叙述段默认确定性归属给旁白，保持 100% 原文覆盖且节省大模型对白标注开销
                 assignment = .assigned(roleID: narratorID)
                 evidence = "纯叙述段默认归属旁白"
             } else {
@@ -762,6 +887,85 @@ public actor AudiobookAnalysisPipeline {
         return annotations
     }
 
+    // MARK: - Short Index & Role Key Resolution Helpers
+
+    private static func buildAtomLookupTable(
+        for primaryItems: [AudiobookPromptAtomItem]
+    ) -> [String: UUID] {
+        var table: [String: UUID] = [:]
+        for (offset, item) in primaryItems.enumerated() {
+            let uuidKey = item.atomID.uuidString.lowercased()
+            table[uuidKey] = item.atomID
+            let indexVal = item.localIndex ?? (offset + 1)
+            for aliasKey in ["\(indexVal)", "#\(indexVal)", "a\(indexVal)", "p\(indexVal)", "q\(indexVal)", "idx:\(indexVal)"] {
+                table[aliasKey] = item.atomID
+            }
+        }
+        return table
+    }
+
+    private static func resolveAtomID(
+        from rawToken: String,
+        lookup: [String: UUID],
+        allowedAtomIDs: Set<UUID>
+    ) -> UUID? {
+        let trimmed = rawToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let uuid = UUID(uuidString: trimmed), allowedAtomIDs.contains(uuid) {
+            return uuid
+        }
+        return lookup[trimmed.lowercased()]
+    }
+
+    private static func buildRoleLookupTable(
+        characters: [AudiobookCharacter],
+        candidateSummaries: [AudiobookPromptCharacterSummary]
+    ) -> [String: UUID] {
+        var table: [String: UUID] = [:]
+        for character in characters {
+            table[character.id.uuidString.lowercased()] = character.id
+            table[character.displayName.lowercased()] = character.id
+            for alias in character.aliases where !alias.isEmpty {
+                table[alias.lowercased()] = character.id
+            }
+        }
+        for (offset, summary) in candidateSummaries.enumerated() {
+            table[summary.roleID.uuidString.lowercased()] = summary.roleID
+            table[summary.canonicalName.lowercased()] = summary.roleID
+            let key = (summary.roleKey ?? "R\(offset + 1)").lowercased()
+            table[key] = summary.roleID
+            table["#\(key)"] = summary.roleID
+        }
+        return table
+    }
+
+    private static func resolveRoleID(
+        from rawToken: String,
+        lookup: [String: UUID],
+        validRoleIDs: Set<UUID>
+    ) -> UUID? {
+        let trimmed = rawToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let uuid = UUID(uuidString: trimmed), validRoleIDs.contains(uuid) {
+            return uuid
+        }
+        return lookup[trimmed.lowercased()]
+    }
+
+    private static func reindexPromptAtomItems(_ items: [AudiobookPromptAtomItem]) -> [AudiobookPromptAtomItem] {
+        items.enumerated().map { offset, item in
+            var copy = item
+            if copy.localIndex != nil {
+                copy.localIndex = offset + 1
+            }
+            return copy
+        }
+    }
+
+    private static func extractionCacheKey(for window: AudiobookAnalysisWindow) -> String {
+        "\(window.id.uuidString)|\(window.policyFingerprint)|\(window.configurationDigest)"
+    }
+
     private static func stripMarkdownCodeFences(_ text: String) -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("```") else { return trimmed }
@@ -773,11 +977,6 @@ public actor AudiobookAnalysisPipeline {
             lines.removeLast()
         }
         return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private static func containsDirectDialogueQuote(in text: String) -> Bool {
-        let quoteScalars: Set<UnicodeScalar> = ["“", "”", "「", "」", "『", "』", "\""]
-        return text.unicodeScalars.contains { quoteScalars.contains($0) }
     }
 
     public static func validateWindowAnnotationsCoverPrimaryAtoms(
@@ -813,14 +1012,22 @@ public actor AudiobookAnalysisPipeline {
     private func makePromptAtomItems(
         ids: [UUID],
         atomsByID: [UUID: AudiobookTextAtom],
-        source: AudiobookSourceIndex
+        source: AudiobookSourceIndex,
+        assignLocalIndices: Bool = false,
+        resolvedSpeakerByAtomID: [UUID: String] = [:]
     ) throws -> [AudiobookPromptAtomItem] {
-        try ids.map { id in
+        try ids.enumerated().map { offset, id in
             guard let atom = atomsByID[id] else {
                 throw AudiobookSourceError.unknownAtomID(id)
             }
             let text = try source.text(in: atom.sourceRange)
-            return AudiobookPromptAtomItem(atomID: atom.id, kind: atom.kind, text: text)
+            return AudiobookPromptAtomItem(
+                atomID: atom.id,
+                kind: atom.kind,
+                text: text,
+                localIndex: assignLocalIndices ? (offset + 1) : nil,
+                resolvedSpeakerName: resolvedSpeakerByAtomID[atom.id]
+            )
         }
     }
 

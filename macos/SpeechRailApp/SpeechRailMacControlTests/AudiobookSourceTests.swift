@@ -60,4 +60,130 @@ final class AudiobookSourceTests: XCTestCase {
         let explicitExclusion = AudiobookSourceRange(lowerBound: 12, upperBound: 15)
         XCTAssertNoThrow(try index.validateCoverage([first, secondWithHole], exclusions: [explicitExclusion]))
     }
+
+    func testHardWrappedNovelTextSegmentation() throws {
+        let sample = """
+話表齊天大聖到底是個妖猴，更不知官銜品從，也不較俸祿高低，但只註名便
+了。那齊天府下二司仙吏，早晚伏侍，只知日食三餐，夜眠一榻，無事牽縈，
+自由自在。
+"""
+        let utf8 = Data(sample.utf8)
+        let index = try AudiobookSourceIndex(utf8: utf8)
+        let chapter = AudiobookChapter(
+            bookID: UUID(),
+            sourceID: UUID(),
+            ordinal: 0,
+            title: "第五回",
+            sourceRange: index.wholeRange
+        )
+
+        let atoms = try index.buildAtoms(for: chapter, layoutProfile: .hardWrapped)
+        try index.validateCoverage(atoms.map(\.sourceRange), exclusions: [])
+
+        let nonFormattingAtoms = atoms.filter { $0.kind != .formatting }
+        XCTAssertEqual(nonFormattingAtoms.count, 2)
+
+        let text1 = try index.text(in: nonFormattingAtoms[0].sourceRange)
+        XCTAssertTrue(text1.contains("但只註名便\n了。"))
+        XCTAssertEqual(AudiobookSourceIndex.displayNormalizedText(text1), "話表齊天大聖到底是個妖猴，更不知官銜品從，也不較俸祿高低，但只註名便了。")
+
+        let text2 = try index.text(in: nonFormattingAtoms[1].sourceRange)
+        XCTAssertTrue(text2.contains("無事牽縈，\n自由自在。"))
+    }
+
+    func testInlineQuoteDoesNotSplitNonDialogue() throws {
+        let sample = "見三清稱個「老」字，逢四帝道個「陛下」。"
+        let utf8 = Data(sample.utf8)
+        let index = try AudiobookSourceIndex(utf8: utf8)
+        let chapter = AudiobookChapter(
+            bookID: UUID(),
+            sourceID: UUID(),
+            ordinal: 0,
+            title: "第五回",
+            sourceRange: index.wholeRange
+        )
+        let atoms = try index.buildAtoms(for: chapter)
+        try index.validateCoverage(atoms.map(\.sourceRange), exclusions: [])
+
+        let nonFormatting = atoms.filter { $0.kind != .formatting }
+        XCTAssertEqual(nonFormatting.count, 1)
+        XCTAssertEqual(try index.text(in: nonFormatting[0].sourceRange), sample)
+    }
+
+    func testRapidFireDialogueDoesNotMerge() throws {
+        let sample = """
+“你去？”
+“我去。”
+“何时走？”
+“现在。”
+"""
+        let utf8 = Data(sample.utf8)
+        let index = try AudiobookSourceIndex(utf8: utf8)
+        let chapter = AudiobookChapter(
+            bookID: UUID(),
+            sourceID: UUID(),
+            ordinal: 0,
+            title: "对白",
+            sourceRange: index.wholeRange
+        )
+        let atoms = try index.buildAtoms(for: chapter)
+        try index.validateCoverage(atoms.map(\.sourceRange), exclusions: [])
+
+        let nonFormatting = atoms.filter { $0.kind != .formatting }
+        XCTAssertEqual(nonFormatting.count, 4)
+        let texts = try nonFormatting.map { try index.text(in: $0.sourceRange).trimmingCharacters(in: .whitespacesAndNewlines) }
+        XCTAssertEqual(texts, ["“你去？”", "“我去。”", "“何时走？”", "“现在。”"])
+    }
+
+    func testDialogueIntroducedBySpeechVerbSplitsCleanly() throws {
+        let sample = "猴王道：「你知那三等人？」猿猴道：「乃是佛與仙。」"
+        let utf8 = Data(sample.utf8)
+        let index = try AudiobookSourceIndex(utf8: utf8)
+        let chapter = AudiobookChapter(
+            bookID: UUID(),
+            sourceID: UUID(),
+            ordinal: 0,
+            title: "第一回",
+            sourceRange: index.wholeRange
+        )
+        let atoms = try index.buildAtoms(for: chapter)
+        try index.validateCoverage(atoms.map(\.sourceRange), exclusions: [])
+
+        let nonFormatting = atoms.filter { $0.kind != .formatting }
+        XCTAssertEqual(nonFormatting.count, 4)
+        let texts = try nonFormatting.map { try index.text(in: $0.sourceRange) }
+        XCTAssertEqual(texts[0], "猴王道：")
+        XCTAssertEqual(texts[1], "「你知那三等人？」")
+        XCTAssertEqual(texts[2], "猿猴道：")
+        XCTAssertEqual(texts[3], "「乃是佛與仙。」")
+    }
+
+    func testNaturalLongParagraphSegmentation() throws {
+        let sample = "他推开门，冷风吹了进来。房间里空无一人，桌上留着一张纸条。他拿起来看了一眼，脸色微变。"
+        let utf8 = Data(sample.utf8)
+        let index = try AudiobookSourceIndex(utf8: utf8)
+        let chapter = AudiobookChapter(
+            bookID: UUID(),
+            sourceID: UUID(),
+            ordinal: 0,
+            title: "第1章",
+            sourceRange: index.wholeRange
+        )
+        let atoms = try index.buildAtoms(for: chapter)
+        try index.validateCoverage(atoms.map(\.sourceRange), exclusions: [])
+
+        let nonFormatting = atoms.filter { $0.kind != .formatting }
+        XCTAssertEqual(nonFormatting.count, 3)
+    }
+
+    func testDisplayNormalizedTextRemovesSoftLineBreaksBetweenCJK() throws {
+        let text1 = "但只註名便\n了。"
+        XCTAssertEqual(AudiobookSourceIndex.displayNormalizedText(text1), "但只註名便了。")
+
+        let text2 = "五方五老\r\n、普天星相"
+        XCTAssertEqual(AudiobookSourceIndex.displayNormalizedText(text2), "五方五老、普天星相")
+
+        let text3 = "Hello\nWorld"
+        XCTAssertEqual(AudiobookSourceIndex.displayNormalizedText(text3), "Hello World")
+    }
 }
