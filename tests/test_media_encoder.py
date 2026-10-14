@@ -96,7 +96,10 @@ def test_encode_300_chapters_uses_chapter_track_and_counts_real_frames(tmp_path:
 
     fake_ffmpeg = tmp_path / "ffmpeg"
     fake_ffmpeg.write_text("#!/bin/sh\n", encoding="utf-8")
-    tools = MediaToolchain(ffmpeg_path=fake_ffmpeg, encoders=frozenset({"aac", "libmp3lame", "pcm_s16le"}))
+    tools = MediaToolchain(
+        ffmpeg_path=fake_ffmpeg,
+        encoders=frozenset({"aac", "libmp3lame", "pcm_s16le"}),
+    )
 
     wav_bytes = _make_wav_bytes(2400)
     wav_sha = hashlib.sha256(wav_bytes).hexdigest()

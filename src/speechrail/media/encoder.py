@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import errno
 import json
+import re
 import shutil
 import struct
 import subprocess
@@ -96,7 +98,9 @@ class MediaProcessRunner(Protocol):
 
 
 class SubprocessMediaRunner:
-    """Executes fixed FFmpeg argv with bounded stdout progress reading and guaranteed child reaping."""
+    """Executes fixed FFmpeg argv with bounded stdout progress reading
+    and guaranteed child reaping.
+    """
 
     async def run(
         self,
@@ -139,7 +143,9 @@ class SubprocessMediaRunner:
                 now = time.monotonic()
                 if now - start_monotonic > total_timeout:
                     await _terminate_and_reap(process)
-                    raise MediaEncodeError("media export exceeded maximum duration", error_code="timeout")
+                    raise MediaEncodeError(
+                        "media export exceeded maximum duration", error_code="timeout"
+                    )
 
                 remaining_stall = max(0.05, no_progress_timeout - (now - last_progress_monotonic))
                 try:
@@ -147,10 +153,12 @@ class SubprocessMediaRunner:
                         process.stdout.readline(),
                         timeout=min(1.0, remaining_stall),
                     )
-                except TimeoutError:
+                except TimeoutError as exc:
                     if time.monotonic() - last_progress_monotonic >= no_progress_timeout:
                         await _terminate_and_reap(process)
-                        raise MediaEncodeError("media export stalled without progress", error_code="timeout")
+                        raise MediaEncodeError(
+                            "media export stalled without progress", error_code="timeout"
+                        ) from exc
                     if process.returncode is not None:
                         break
                     continue
@@ -168,8 +176,13 @@ class SubprocessMediaRunner:
             if return_code != 0:
                 stderr_text = stderr_tail.decode("utf-8", errors="replace").lower()
                 if "no space left on device" in stderr_text:
-                    raise MediaEncodeError("insufficient disk space during media export", error_code="insufficient_disk_space")
-                raise MediaEncodeError("ffmpeg exited with non-zero status", error_code="command_failed")
+                    raise MediaEncodeError(
+                        "insufficient disk space during media export",
+                        error_code="insufficient_disk_space",
+                    )
+                raise MediaEncodeError(
+                    "ffmpeg exited with non-zero status", error_code="command_failed"
+                )
             return return_code
         except asyncio.CancelledError:
             await _terminate_and_reap(process)
@@ -177,10 +190,8 @@ class SubprocessMediaRunner:
         finally:
             if not stderr_task.done():
                 stderr_task.cancel()
-                try:
+                with contextlib.suppress(BaseException):
                     await stderr_task
-                except BaseException:
-                    pass
 
 
 async def _terminate_and_reap(process: asyncio.subprocess.Process) -> None:
@@ -193,10 +204,8 @@ async def _terminate_and_reap(process: asyncio.subprocess.Process) -> None:
     try:
         await asyncio.wait_for(process.wait(), timeout=3.0)
     except TimeoutError:
-        try:
+        with contextlib.suppress(ProcessLookupError):
             process.kill()
-        except ProcessLookupError:
-            pass
         await process.wait()
 
 
@@ -240,17 +249,13 @@ def discover_media_toolchain(app_home: Path) -> MediaToolchain:
     return MediaToolchain(ffmpeg_path=ffmpeg_bin, encoders=frozenset(found))
 
 
-import re
-
-
 def escape_ffmetadata(value: str) -> str:
     """Escape special characters (`=`, `;`, `#`, `\\`, newline) per FFmetadata specification."""
     escaped = value.replace("\\", "\\\\")
     escaped = escaped.replace("=", "\\=")
     escaped = escaped.replace(";", "\\;")
     escaped = escaped.replace("#", "\\#")
-    escaped = escaped.replace("\r\n", "\\\n").replace("\r", "\\\n").replace("\n", "\\\n")
-    return escaped
+    return escaped.replace("\r\n", "\\\n").replace("\r", "\\\n").replace("\n", "\\\n")
 
 
 def read_wav_pcm16_frames(path: Path) -> int:
@@ -258,7 +263,10 @@ def read_wav_pcm16_frames(path: Path) -> int:
     with path.open("rb") as handle:
         header = handle.read(12)
         if len(header) < 12 or header[:4] != b"RIFF" or header[8:12] != b"WAVE":
-            raise MediaEncodeError("normalized WAV is missing RIFF/WAVE header", error_code="integrity_mismatch")
+            raise MediaEncodeError(
+                "normalized WAV is missing RIFF/WAVE header",
+                error_code="integrity_mismatch",
+            )
         channels = 1
         bits_per_sample = 16
         data_bytes = 0
@@ -271,9 +279,18 @@ def read_wav_pcm16_frames(path: Path) -> int:
             if chunk_id == b"fmt ":
                 fmt_body = handle.read(chunk_size)
                 if len(fmt_body) >= 16:
-                    _, channels, sample_rate, _, _, bits_per_sample = struct.unpack("<HHIIHH", fmt_body[:16])
-                    if sample_rate != SAMPLE_RATE_HZ or channels != CHANNELS or bits_per_sample != 16:
-                        raise MediaEncodeError("normalized WAV does not match 48kHz mono PCM16", error_code="integrity_mismatch")
+                    _, channels, sample_rate, _, _, bits_per_sample = struct.unpack(
+                        "<HHIIHH", fmt_body[:16]
+                    )
+                    if (
+                        sample_rate != SAMPLE_RATE_HZ
+                        or channels != CHANNELS
+                        or bits_per_sample != 16
+                    ):
+                        raise MediaEncodeError(
+                            "normalized WAV does not match 48kHz mono PCM16",
+                            error_code="integrity_mismatch",
+                        )
             elif chunk_id == b"data":
                 remaining = chunk_size
                 while remaining > 0:
@@ -290,7 +307,10 @@ def read_wav_pcm16_frames(path: Path) -> int:
 
     bytes_per_frame = max(1, channels * (bits_per_sample // 8))
     if data_bytes <= 0 or data_bytes % bytes_per_frame != 0:
-        raise MediaEncodeError("normalized WAV contains empty or misaligned PCM data", error_code="integrity_mismatch")
+        raise MediaEncodeError(
+            "normalized WAV contains empty or misaligned PCM data",
+            error_code="integrity_mismatch",
+        )
     return data_bytes // bytes_per_frame
 
 
@@ -312,10 +332,14 @@ async def encode(
     if manifest.profile == "chapter_mp3" and not tools.supports_mp3:
         raise MediaCodecUnavailableError("libmp3lame encoder is unavailable in managed ffmpeg")
 
-    resolved_home = (app_home or manifest.app_home)
-    if resolved_home is None:
-        raise MediaEncodeError("app_home is required for media export", error_code="invalid_request")
-    resolved_home = Path(resolved_home).resolve()
+    raw_home = app_home or manifest.app_home
+    if raw_home is None:
+        raise MediaEncodeError(
+            "app_home is required for media export",
+            error_code="invalid_request",
+        )
+    home_path = Path(raw_home)
+    resolved_home: Path = await asyncio.to_thread(home_path.resolve)
     audiobooks_root = resolved_home / "audiobooks"
     request_dir = audiobooks_root / "exports" / str(manifest.request_id)
     stage_dir = request_dir / "stage"
@@ -380,7 +404,8 @@ async def encode(
         output_sha256s: dict[str, str] = {}
 
         if manifest.profile == "m4b":
-            # Build safe concat list and FFmetadata with 1/48000 frame timebase and disable_chpl for 300+ chapter support
+            # Build safe concat list and FFmetadata with 1/48000 frame timebase
+            # and disable_chpl for 300+ chapter support
             concat_lines: list[str] = ["ffconcat version 1.0"]
             ffmeta_lines: list[str] = [
                 ";FFMETADATA1",
@@ -459,7 +484,10 @@ async def encode(
                 on_progress=on_progress,
             )
             if not m4b_abs.is_file() or m4b_abs.stat().st_size == 0:
-                raise MediaEncodeError("encoded M4B output is missing or empty", error_code="integrity_mismatch")
+                raise MediaEncodeError(
+                    "encoded M4B output is missing or empty",
+                    error_code="integrity_mismatch",
+                )
             relative_outputs.append(m4b_rel)
             output_sha256s[m4b_rel] = sha256_file_chunked(m4b_abs)
         else:
@@ -515,11 +543,15 @@ async def encode(
                     on_progress=on_progress,
                 )
                 if not mp3_abs.is_file() or mp3_abs.stat().st_size == 0:
-                    raise MediaEncodeError("encoded MP3 chapter output is missing or empty", error_code="integrity_mismatch")
+                    raise MediaEncodeError(
+                        "encoded MP3 chapter output is missing or empty",
+                        error_code="integrity_mismatch",
+                    )
                 relative_outputs.append(mp3_rel)
                 output_sha256s[mp3_rel] = sha256_file_chunked(mp3_abs)
 
-        # Clean intermediate normalized WAVs to save disk space while keeping final staged deliverables
+        # Clean intermediate normalized WAVs to save disk space while
+        # keeping final staged deliverables
         shutil.rmtree(norm_dir, ignore_errors=True)
 
         result = MediaExportResult(
@@ -539,8 +571,14 @@ async def encode(
     except OSError as exc:
         shutil.rmtree(stage_dir, ignore_errors=True)
         if exc.errno == errno.ENOSPC:
-            raise MediaEncodeError("insufficient disk space during media export", error_code="insufficient_disk_space") from exc
-        raise MediaEncodeError("filesystem error during media export", error_code="command_failed") from exc
+            raise MediaEncodeError(
+                "insufficient disk space during media export",
+                error_code="insufficient_disk_space",
+            ) from exc
+        raise MediaEncodeError(
+            "filesystem error during media export",
+            error_code="command_failed",
+        ) from exc
     except BaseException:
         shutil.rmtree(stage_dir, ignore_errors=True)
         raise

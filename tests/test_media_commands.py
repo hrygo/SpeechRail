@@ -95,5 +95,7 @@ def test_media_capabilities_and_export_cli_envelope(
     assert (export_dir / "result.json").is_file()
 
     # Verify CLI entrypoint rejects invalid UUID with machine JSON envelope
-    exit_code = main(["media", "export", "--request-id", "not-a-uuid", "--app-home", str(app_home), "--json"])
+    exit_code = main(
+        ["media", "export", "--request-id", "not-a-uuid", "--app-home", str(app_home), "--json"]
+    )
     assert exit_code == 1

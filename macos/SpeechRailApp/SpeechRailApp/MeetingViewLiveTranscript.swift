@@ -286,7 +286,7 @@ extension MeetingView {
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
                 .padding(.vertical, 2)
                 .background(
-                    SpeechRailDesignTokens.Surface.cardBackground,
+                    SpeechRailDesignTokens.Color.field,
                     in: Capsule()
                 )
                 .overlay(

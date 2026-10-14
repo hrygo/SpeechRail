@@ -71,12 +71,18 @@ def sha256_file_chunked(path: Path, *, chunk_size: int = IO_CHUNK_BYTES) -> str:
 
 def _reject_symlinks_on_chain(root: Path, target: Path) -> None:
     if root.is_symlink() or target.is_symlink():
-        raise MediaManifestError("symbolic links are not allowed in media inputs", error_code="invalid_request")
+        raise MediaManifestError(
+            "symbolic links are not allowed in media inputs",
+            error_code="invalid_request",
+        )
     current = target
     resolved_root = root.resolve()
     while True:
         if current.is_symlink():
-            raise MediaManifestError("symbolic links are not allowed in media inputs", error_code="invalid_request")
+            raise MediaManifestError(
+                "symbolic links are not allowed in media inputs",
+                error_code="invalid_request",
+            )
         if current == root or current == current.parent:
             break
         current = current.parent
@@ -84,10 +90,15 @@ def _reject_symlinks_on_chain(root: Path, target: Path) -> None:
     try:
         resolved_target.relative_to(resolved_root)
     except ValueError as exc:
-        raise MediaManifestError("input path escapes audiobooks root", error_code="invalid_request") from exc
+        raise MediaManifestError(
+            "input path escapes audiobooks root",
+            error_code="invalid_request",
+        ) from exc
 
 
-def _validate_owned_relative_path(relative_path: str, *, book_id: UUID, audiobooks_root: Path) -> Path:
+def _validate_owned_relative_path(
+    relative_path: str, *, book_id: UUID, audiobooks_root: Path
+) -> Path:
     if (
         not relative_path
         or "://" in relative_path
@@ -100,7 +111,10 @@ def _validate_owned_relative_path(relative_path: str, *, book_id: UUID, audioboo
 
     parts = relative_path.split("/")
     if any(part in {"", ".", ".."} or part.startswith("-") for part in parts):
-        raise MediaManifestError("path traversal or flag injection rejected", error_code="invalid_request")
+        raise MediaManifestError(
+            "path traversal or flag injection rejected",
+            error_code="invalid_request",
+        )
 
     expected_prefix = ("books", str(book_id), "audio")
     if tuple(parts[:3]) != expected_prefix or len(parts) != 4 or not parts[3].endswith(".wav"):
@@ -112,7 +126,10 @@ def _validate_owned_relative_path(relative_path: str, *, book_id: UUID, audioboo
     candidate_path = audiobooks_root.joinpath(*parts)
     _reject_symlinks_on_chain(audiobooks_root, candidate_path)
     if not candidate_path.is_file():
-        raise MediaManifestError("referenced audio fragment does not exist", error_code="integrity_mismatch")
+        raise MediaManifestError(
+            "referenced audio fragment does not exist",
+            error_code="integrity_mismatch",
+        )
     return candidate_path
 
 
@@ -123,18 +140,27 @@ def load_manifest(app_home: Path, request_id: UUID) -> MediaExportManifest:
 
     audiobooks_root = Path(app_home) / "audiobooks"
     if not audiobooks_root.exists():
-        raise MediaManifestError("audiobooks root directory is missing", error_code="invalid_request")
+        raise MediaManifestError(
+            "audiobooks root directory is missing",
+            error_code="invalid_request",
+        )
     _reject_symlinks_on_chain(audiobooks_root, audiobooks_root)
 
     request_dir = audiobooks_root / "exports" / str(request_id)
     request_file = request_dir / "request.json"
     _reject_symlinks_on_chain(audiobooks_root, request_file)
     if not request_file.is_file():
-        raise MediaManifestError("export request manifest does not exist", error_code="invalid_request")
+        raise MediaManifestError(
+            "export request manifest does not exist",
+            error_code="invalid_request",
+        )
 
     stat = request_file.stat()
     if stat.st_size > MAX_MANIFEST_BYTES:
-        raise MediaManifestError("export manifest exceeds 64 MiB limit", error_code="invalid_request")
+        raise MediaManifestError(
+            "export manifest exceeds 64 MiB limit",
+            error_code="invalid_request",
+        )
 
     raw_bytes = bytearray()
     with request_file.open("rb") as handle:
@@ -143,16 +169,25 @@ def load_manifest(app_home: Path, request_id: UUID) -> MediaExportManifest:
             if not chunk:
                 break
             if len(raw_bytes) + len(chunk) > MAX_MANIFEST_BYTES:
-                raise MediaManifestError("export manifest exceeds 64 MiB limit", error_code="invalid_request")
+                raise MediaManifestError(
+                    "export manifest exceeds 64 MiB limit",
+                    error_code="invalid_request",
+                )
             raw_bytes.extend(chunk)
 
     try:
         payload: dict[str, Any] = json.loads(raw_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise MediaManifestError("manifest is not valid UTF-8 JSON", error_code="invalid_request") from exc
+        raise MediaManifestError(
+            "manifest is not valid UTF-8 JSON",
+            error_code="invalid_request",
+        ) from exc
 
     if not isinstance(payload, dict) or payload.get("schema_version") != MANIFEST_SCHEMA_VERSION:
-        raise MediaManifestError("unsupported manifest schema_version", error_code="invalid_request")
+        raise MediaManifestError(
+            "unsupported manifest schema_version",
+            error_code="invalid_request",
+        )
 
     try:
         manifest_req_id = UUID(str(payload["request_id"]))
@@ -160,10 +195,16 @@ def load_manifest(app_home: Path, request_id: UUID) -> MediaExportManifest:
         source_id = UUID(str(payload["source_id"]))
         production_revision_id = UUID(str(payload["production_revision_id"]))
     except (KeyError, ValueError) as exc:
-        raise MediaManifestError("invalid UUID fields in manifest", error_code="invalid_request") from exc
+        raise MediaManifestError(
+            "invalid UUID fields in manifest",
+            error_code="invalid_request",
+        ) from exc
 
     if manifest_req_id != request_id:
-        raise MediaManifestError("manifest request_id does not match command request_id", error_code="invalid_request")
+        raise MediaManifestError(
+            "manifest request_id does not match command request_id",
+            error_code="invalid_request",
+        )
 
     profile = payload.get("profile")
     if profile not in {"m4b", "chapter_mp3"}:
@@ -173,31 +214,50 @@ def load_manifest(app_home: Path, request_id: UUID) -> MediaExportManifest:
     if not book_title:
         raise MediaManifestError("book_title must not be empty", error_code="invalid_request")
     raw_author = payload.get("author")
-    author = str(raw_author).strip() if isinstance(raw_author, str) and raw_author.strip() else None
+    author = (
+        str(raw_author).strip()
+        if isinstance(raw_author, str) and raw_author.strip()
+        else None
+    )
 
     raw_chapters = payload.get("chapters")
     if not isinstance(raw_chapters, list) or not raw_chapters:
-        raise MediaManifestError("manifest must contain at least one chapter", error_code="invalid_request")
+        raise MediaManifestError(
+            "manifest must contain at least one chapter",
+            error_code="invalid_request",
+        )
 
     chapters: list[MediaChapterEntry] = []
     for ch_obj in raw_chapters:
         if not isinstance(ch_obj, dict):
-            raise MediaManifestError("chapter entry must be an object", error_code="invalid_request")
+            raise MediaManifestError(
+                "chapter entry must be an object",
+                error_code="invalid_request",
+            )
         try:
             chapter_id = UUID(str(ch_obj["chapter_id"]))
             ordinal = int(ch_obj["ordinal"])
             title = str(ch_obj["title"]).strip() or f"Chapter {ordinal + 1}"
             raw_fragments = ch_obj["fragments"]
         except (KeyError, ValueError, TypeError) as exc:
-            raise MediaManifestError("invalid chapter fields", error_code="invalid_request") from exc
+            raise MediaManifestError(
+                "invalid chapter fields",
+                error_code="invalid_request",
+            ) from exc
 
         if not isinstance(raw_fragments, list) or not raw_fragments:
-            raise MediaManifestError("chapter must contain at least one fragment", error_code="invalid_request")
+            raise MediaManifestError(
+                "chapter must contain at least one fragment",
+                error_code="invalid_request",
+            )
 
         fragments: list[MediaFragmentEntry] = []
         for frag_obj in raw_fragments:
             if not isinstance(frag_obj, dict):
-                raise MediaManifestError("fragment entry must be an object", error_code="invalid_request")
+                raise MediaManifestError(
+                    "fragment entry must be an object",
+                    error_code="invalid_request",
+                )
             try:
                 fragment_id = UUID(str(frag_obj["fragment_id"]))
                 candidate_id = UUID(str(frag_obj["candidate_id"]))
@@ -207,10 +267,16 @@ def load_manifest(app_home: Path, request_id: UUID) -> MediaExportManifest:
                 frame_count = int(frag_obj["frame_count"])
                 sample_rate = int(frag_obj.get("sample_rate", 48_000))
             except (KeyError, ValueError, TypeError) as exc:
-                raise MediaManifestError("invalid fragment fields", error_code="invalid_request") from exc
+                raise MediaManifestError(
+                    "invalid fragment fields",
+                    error_code="invalid_request",
+                ) from exc
 
             if frame_count <= 0 or sample_rate <= 0:
-                raise MediaManifestError("fragment frame_count and sample_rate must be positive", error_code="invalid_request")
+                raise MediaManifestError(
+                    "fragment frame_count and sample_rate must be positive",
+                    error_code="invalid_request",
+                )
 
             resolved_wav = _validate_owned_relative_path(
                 rel_path,
