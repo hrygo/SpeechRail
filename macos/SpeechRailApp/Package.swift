@@ -188,6 +188,8 @@ let package = Package(
                 "SpeakerLabeling.swift",
                 "InnerOSSession.swift",
                 "MinutesGenerator.swift",
+                "AudiobookDomain.swift",
+                "AudiobookSourceIndex.swift",
             ]
         ),
         // 确定性回放 runner：只读仓库外 manifest，输出脱敏聚合结果。
