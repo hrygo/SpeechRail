@@ -147,6 +147,35 @@ struct SpeechRailApp: App {
 #else
         workStore = CreativeWorkStore()
 #endif
+        let aiRecorder = TeleprompterAIObservationRecorder(location: .default)
+        let aiObservationSink: TeleprompterAIObservationHandler = { aiRecorder.record($0) }
+        let llmProvider = LLMProvider(
+            observationHandler: TeleprompterProviderObservationAdapter.handler(to: aiObservationSink)
+        )
+        let coordinator = SessionCoordinator(store: SessionStore(), llmProvider: llmProvider)
+        let captionSession = CaptionSession(coordinator: coordinator)
+        let sessionPreferences = SessionPreferences()
+
+        let audiobookRootURL: URL
+#if DEBUG
+        if isUITest {
+            audiobookRootURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("speechrail-uitest-audiobooks-\(UUID().uuidString)", isDirectory: true)
+        } else {
+            audiobookRootURL = AudiobookProjectStore.defaultRootURL
+        }
+#else
+        audiobookRootURL = AudiobookProjectStore.defaultRootURL
+#endif
+        let audiobookDependencies = AudiobookProductionWiring.makeLiveDependencies(
+            rootURL: audiobookRootURL,
+            llmProvider: llmProvider,
+            preferences: sessionPreferences,
+            discoveryClient: discoveryClient,
+            renderClient: speechRenderClient,
+            controlTransport: transport
+        )
+
         let registration = isUITest || usesBundledXPCService ? nil : ControlAgentRegistration()
         let appModel = AppModel(
             transport: transport,
@@ -160,20 +189,10 @@ struct SpeechRailApp: App {
             voiceQualityClient: voiceQualityClient,
             receiptClient: receiptClient,
             workStore: workStore,
+            audiobookDependencies: audiobookDependencies,
             registration: registration
         )
         let navigationState = AppNavigationState()
-
-        // 会话层的三个件与它们的接线。**接线放在这里**：协调器只认"开始 / 停止采集"两个钩子，
-        // 不认识字幕、会议、助手各自的采集与连接（`TECHNICAL-DESIGN` §5.2）。
-        let aiRecorder = TeleprompterAIObservationRecorder(location: .default)
-        let aiObservationSink: TeleprompterAIObservationHandler = { aiRecorder.record($0) }
-        let llmProvider = LLMProvider(
-            observationHandler: TeleprompterProviderObservationAdapter.handler(to: aiObservationSink)
-        )
-        let coordinator = SessionCoordinator(store: SessionStore(), llmProvider: llmProvider)
-        let captionSession = CaptionSession(coordinator: coordinator)
-        let sessionPreferences = SessionPreferences()
         let teleprompterV2Store: TeleprompterV2Store
 #if DEBUG
         if isUITest {

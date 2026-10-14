@@ -2754,6 +2754,37 @@ final class ServiceContractTests: XCTestCase {
             guarantees: [:]
         )
     }
+
+    func testSpeechBodyStopsAtEightMiB() async throws {
+        let eightMiB = 8 * 1024 * 1024
+        let oversizedBody = Data(repeating: 0x55, count: eightMiB + 4_096)
+        ServiceAPIURLProtocolStub.state.reset(statusCode: 200, body: oversizedBody)
+        ServiceAPIURLProtocolStub.state.setContentType("audio/wav")
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ServiceAPIURLProtocolStub.self]
+        let client = ServiceAPIClient(
+            baseURL: URL(string: "https://speechrail.test")!,
+            session: URLSession(configuration: configuration),
+            apiKey: "test-key",
+            maximumResponseBytes: eightMiB
+        )
+
+        do {
+            _ = try await client.createSpeechRender(
+                text: "测试超限音频",
+                voiceID: "voice_demo",
+                speed: 1.0,
+                options: SpeechRailRequestOptions(
+                    expectedVoiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                    expectedModelRevision: "catalog-1"
+                )
+            )
+            XCTFail("超过 8 MiB 的音频流必须中断并报错")
+        } catch let error as ServiceAPIClientError {
+            XCTAssertEqual(error, .responseTooLarge(maximumBytes: eightMiB))
+        }
+    }
 }
 
 private final class ServiceAPIURLProtocolState: @unchecked Sendable {

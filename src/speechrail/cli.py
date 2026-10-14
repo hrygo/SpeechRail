@@ -291,6 +291,24 @@ def _parser() -> argparse.ArgumentParser:
                     "dependencies with this Python executable"
                 ),
             )
+
+    media = subcommands.add_parser(
+        "media", help="audiobook media capability inspection and streaming export"
+    )
+    media_commands = media.add_subparsers(dest="media_command", required=True)
+    media_cap = media_commands.add_parser("capabilities")
+    media_cap.add_argument("--app-home", type=Path, help="use this installed app home")
+    media_cap.add_argument(
+        "--json", action="store_true", help="emit one machine-readable JSON envelope"
+    )
+    media_export = media_commands.add_parser("export")
+    media_export.add_argument(
+        "--request-id", required=True, help="UUID of the export request manifest"
+    )
+    media_export.add_argument("--app-home", type=Path, help="use this installed app home")
+    media_export.add_argument(
+        "--json", action="store_true", help="emit JSONL progress and one result envelope"
+    )
     return parser
 
 
@@ -357,10 +375,15 @@ def _machine_command(args: argparse.Namespace) -> str:
         return f"model.{args.model_command}"
     if args.command == "agents":
         return f"agents.{args.agents_command}"
+    if args.command == "media":
+        return f"media.{args.media_command}"
     return str(args.command)
 
 
 def _machine_error_code(exc: BaseException) -> str:
+    explicit_code = getattr(exc, "error_code", None)
+    if isinstance(explicit_code, str) and explicit_code:
+        return explicit_code
     message = str(exc).lower()
     if "insufficient disk space" in message or "disk space" in message:
         return "insufficient_disk_space"
@@ -1596,6 +1619,37 @@ def _run_service(
     return None
 
 
+def _run_media(args: argparse.Namespace) -> int:
+    from uuid import UUID
+
+    from speechrail.media.commands import run_media_capabilities, run_media_export
+
+    app_home = (args.app_home or _default_app_home()).resolve()
+    machine_output = bool(getattr(args, "json", False))
+    if args.media_command == "capabilities":
+        payload = run_media_capabilities(app_home)
+        if machine_output:
+            _print_machine(payload)
+        else:
+            encoders = cast(list[str], payload["encoders"])
+            print(f"Media toolchain: {payload['status']} (encoders: {', '.join(encoders)})")
+        return 0
+    if args.media_command == "export":
+        request_id = UUID(str(args.request_id))
+
+        def _progress(event: dict[str, object]) -> None:
+            if machine_output:
+                _print_machine({"command": "media.export", "event": "progress", **event})
+
+        payload = run_media_export(app_home, request_id, on_progress=_progress)
+        if machine_output:
+            _print_machine(payload)
+        else:
+            print(f"Media export committed: {payload['request_id']}")
+        return 0
+    raise ServiceError("unknown media command")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the console command and return a shell-compatible exit status."""
     args = _parser().parse_args(list(argv) if argv is not None else None)
@@ -1627,6 +1681,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_setup(args)
         if args.command == "install":
             return _run_install(args)
+        if args.command == "media":
+            return _run_media(args)
         raise ServiceError("unknown command")
     except (ServiceError, RuntimeError, ValueError) as exc:
         if getattr(args, "json", False):

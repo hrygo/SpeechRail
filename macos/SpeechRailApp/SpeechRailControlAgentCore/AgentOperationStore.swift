@@ -6,6 +6,8 @@ public actor AgentOperationStore {
     private let journal: OperationJournal?
     private var activeMutation: String?
     private var operations: [String: OperationSnapshot] = [:]
+    private var operationIDByMediaRequestID: [UUID: String] = [:]
+    private var terminalMediaPayloads: [String: MediaControlPayload] = [:]
     private var journalWarning: String?
 
     public init(
@@ -17,23 +19,33 @@ public actor AgentOperationStore {
         if let journal {
             do {
                 if let entry = try journal.load() {
-                    if entry.operation.command == .modelPrepare {
+                    if entry.operation.command == .modelPrepare || entry.operation.command == .mediaExport {
                         switch entry.operation.state {
                         case .accepted, .running:
+                            let isMedia = entry.operation.command == .mediaExport
                             let interrupted = OperationSnapshot(
                                 operationID: entry.operation.operationID,
                                 command: entry.operation.command,
                                 selection: entry.operation.selection,
+                                mediaRequestID: entry.operation.mediaRequestID,
                                 state: .interrupted,
                                 phase: entry.operation.phase ?? "interrupted",
                                 progress: entry.operation.progress,
                                 errorCode: entry.operation.errorCode,
-                                message: "previous model preparation was interrupted; retry is required"
+                                message: isMedia
+                                    ? "previous media export was interrupted; retry is required"
+                                    : "previous model preparation was interrupted; retry is required"
                             )
                             operations[interrupted.operationID] = interrupted
+                            if let mediaReqID = interrupted.mediaRequestID {
+                                operationIDByMediaRequestID[mediaReqID] = interrupted.operationID
+                            }
                             try journal.save(interrupted)
                         case .interrupted:
                             operations[entry.operation.operationID] = entry.operation
+                            if let mediaReqID = entry.operation.mediaRequestID {
+                                operationIDByMediaRequestID[mediaReqID] = entry.operation.operationID
+                            }
                         case .committed, .failed, .cancelled:
                             try journal.clear()
                         }
@@ -72,6 +84,35 @@ public actor AgentOperationStore {
                 return .failure(for: request, code: .invalidRequest, message: "spec selection is required")
             }
             return await acceptMutation(request, command: .modelPrepare(selection))
+        case .mediaCapabilities:
+            return await execute(request, command: .mediaCapabilities)
+        case .mediaExport:
+            guard let mediaRequestID = request.mediaRequestID else {
+                return .failure(for: request, code: .invalidRequest, message: "media request id is required")
+            }
+            // Idempotent submission: if an operation for this mediaRequestID already exists, return it without launching a duplicate process.
+            if let existingOpID = operationIDByMediaRequestID[mediaRequestID],
+               let existingOp = operations[existingOpID],
+               existingOp.state != .interrupted
+            {
+                let status: ControlResponseStatus = switch existingOp.state {
+                case .accepted: .accepted
+                case .running: .running
+                case .committed: .committed
+                case .failed, .interrupted: .failed
+                case .cancelled: .cancelled
+                }
+                return ControlResponse(
+                    requestID: request.requestID,
+                    command: request.command,
+                    status: status,
+                    errorCode: existingOp.errorCode,
+                    message: existingOp.message,
+                    operation: existingOp,
+                    media: terminalMediaPayloads[existingOpID]
+                )
+            }
+            return await acceptMutation(request, command: .mediaExport(mediaRequestID))
         case .status:
             return await execute(request, command: .service(.status))
         case .start:
@@ -150,11 +191,15 @@ public actor AgentOperationStore {
             operationID: operationID,
             command: request.command,
             selection: Self.selection(for: command),
+            mediaRequestID: Self.mediaRequestID(for: command),
             state: .accepted,
             phase: "accepted"
         )
         let safeAccepted = OperationJournal.sanitized(accepted)
         operations[operationID] = safeAccepted
+        if let mediaReqID = safeAccepted.mediaRequestID {
+            operationIDByMediaRequestID[mediaReqID] = operationID
+        }
         activeMutation = operationID
         persist(safeAccepted)
         let runner = self.runner
@@ -225,10 +270,6 @@ public actor AgentOperationStore {
         progress: OperationProgressSnapshot
     ) {
         guard let current = operations[operationID] else { return }
-        // Progress is delivered through an unstructured callback task. The
-        // runner may therefore finish (or be cancelled) before that task is
-        // scheduled. Terminal snapshots are authoritative and must never be
-        // reopened by a late progress event.
         guard current.state == .accepted || current.state == .running,
               current.phase?.lowercased() != "cancelling"
         else { return }
@@ -236,6 +277,7 @@ public actor AgentOperationStore {
             operationID: current.operationID,
             command: current.command,
             selection: current.selection,
+            mediaRequestID: current.mediaRequestID,
             state: .running,
             phase: progress.phase ?? current.phase ?? "download",
             progress: progress,
@@ -258,8 +300,11 @@ public actor AgentOperationStore {
         let finalState: OperationState = cancellationRequested
             ? .cancelled
             : (succeeded ? .committed : .failed)
+        let cancelMsg = command == .mediaExport
+            ? "media export was cancelled"
+            : "model preparation was cancelled"
         let message = cancellationRequested
-            ? "model preparation was cancelled"
+            ? cancelMsg
             : (succeeded ? nil : (response?.message ?? result.message ?? "managed command failed"))
         let phase = cancellationRequested
             ? "cancelled"
@@ -270,12 +315,16 @@ public actor AgentOperationStore {
             operationID: operationID,
             command: command,
             selection: operations[operationID]?.selection,
+            mediaRequestID: operations[operationID]?.mediaRequestID,
             state: finalState,
             phase: phase,
             progress: response?.operation?.progress ?? operations[operationID]?.progress,
             errorCode: cancellationRequested ? .cancelled : (succeeded ? nil : (response?.errorCode ?? .commandFailed)),
             message: message
         )
+        if let mediaPayload = response?.media {
+            terminalMediaPayloads[operationID] = mediaPayload
+        }
         let safeSnapshot = OperationJournal.sanitized(snapshot)
         operations[operationID] = safeSnapshot
         persist(safeSnapshot)
@@ -303,7 +352,8 @@ public actor AgentOperationStore {
             status: status,
             errorCode: operation.errorCode,
             message: operation.message,
-            operation: operation
+            operation: operation,
+            media: terminalMediaPayloads[operationID]
         )
     }
 
@@ -311,7 +361,7 @@ public actor AgentOperationStore {
         guard let operationID = request.operationID, let operation = operations[operationID] else {
             return .failure(for: request, code: .invalidRequest, message: "operation is not available")
         }
-        guard operation.command == .modelPrepare else {
+        guard operation.command == .modelPrepare || operation.command == .mediaExport else {
             return .failure(
                 for: request,
                 code: .unsupported,
@@ -323,15 +373,27 @@ public actor AgentOperationStore {
                 requestID: request.requestID,
                 command: request.command,
                 status: operation.state == .cancelled ? .cancelled : .completed,
-                operation: operation
+                operation: operation,
+                media: terminalMediaPayloads[operationID]
             )
         }
+        // Ensure cancel only terminates the currently active matching operation
+        guard activeMutation == operationID else {
+            return .failure(
+                for: request,
+                code: .invalidRequest,
+                message: "operation is not the active running command"
+            )
+        }
+        let stoppingMsg = operation.command == .mediaExport
+            ? "stopping media export"
+            : "stopping model preparation"
         if operation.phase?.lowercased() == "cancelling" {
             return ControlResponse(
                 requestID: request.requestID,
                 command: request.command,
                 status: .running,
-                message: "stopping model preparation",
+                message: stoppingMsg,
                 operation: operation
             )
         }
@@ -341,17 +403,18 @@ public actor AgentOperationStore {
             return .failure(
                 for: request,
                 code: .unsupported,
-                message: "model operation cannot be cancelled"
+                message: "operation cannot be cancelled"
             )
         }
         let cancelling = OperationSnapshot(
             operationID: operation.operationID,
             command: operation.command,
             selection: operation.selection,
+            mediaRequestID: operation.mediaRequestID,
             state: .running,
             phase: "cancelling",
             progress: operation.progress,
-            message: "stopping model preparation"
+            message: stoppingMsg
         )
         let safeCancelling = OperationJournal.sanitized(cancelling)
         operations[operationID] = safeCancelling
@@ -360,7 +423,7 @@ public actor AgentOperationStore {
             requestID: request.requestID,
             command: request.command,
             status: .running,
-            message: "stopping model preparation",
+            message: stoppingMsg,
             operation: safeCancelling
         )
     }
@@ -378,22 +441,24 @@ public actor AgentOperationStore {
         case .runtimeMissing: "managed runtime is unavailable"
         case .launchFailed: "managed command could not be launched"
         case .invalidOutput: "managed command returned invalid output"
-        case .unsupported: "managed runtime does not support model control commands"
+        case .unsupported: "managed runtime does not support model or media control commands"
         }
     }
 
     private func persist(_ operation: OperationSnapshot) {
-        guard operation.command == .modelPrepare, let journal else { return }
+        guard operation.command == .modelPrepare || operation.command == .mediaExport,
+              let journal
+        else { return }
         do {
             try journal.save(operation)
             journalWarning = nil
         } catch {
-            journalWarning = "model operation recovery state could not be saved"
+            journalWarning = "operation recovery state could not be saved"
         }
     }
 
     private func clearJournalIfTerminal(_ operation: OperationSnapshot) {
-        guard operation.command == .modelPrepare,
+        guard operation.command == .modelPrepare || operation.command == .mediaExport,
               operation.state == .committed || operation.state == .failed || operation.state == .cancelled,
               let journal
         else { return }
@@ -401,7 +466,7 @@ public actor AgentOperationStore {
             try journal.clear()
             journalWarning = nil
         } catch {
-            journalWarning = "model operation recovery state could not be cleared"
+            journalWarning = "operation recovery state could not be cleared"
         }
     }
 
@@ -428,6 +493,7 @@ public actor AgentOperationStore {
             modelCatalog: response.modelCatalog,
             modelStatus: modelStatus,
             operation: response.operation,
+            media: response.media,
             schemaVersion: response.schemaVersion
         )
     }
@@ -448,6 +514,13 @@ public actor AgentOperationStore {
     nonisolated private static func selection(for command: ManagedCommand) -> SpecSelection? {
         switch command {
         case let .profileApply(selection), let .modelPrepare(selection): selection
+        default: nil
+        }
+    }
+
+    nonisolated private static func mediaRequestID(for command: ManagedCommand) -> UUID? {
+        switch command {
+        case let .mediaExport(id): id
         default: nil
         }
     }

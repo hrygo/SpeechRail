@@ -594,6 +594,7 @@ public enum LLMModule: String, CaseIterable, Codable, Identifiable, Sendable {
     case assistant
     case minutes
     case teleprompter
+    case audiobook
 
     public var id: String { rawValue }
 
@@ -602,6 +603,7 @@ public enum LLMModule: String, CaseIterable, Codable, Identifiable, Sendable {
         case .assistant: "语音助手"
         case .minutes: "会议纪要"
         case .teleprompter: "AI 提词器"
+        case .audiobook: "有声书工坊"
         }
     }
 
@@ -610,12 +612,13 @@ public enum LLMModule: String, CaseIterable, Codable, Identifiable, Sendable {
         case .assistant: "语音助手与会议中的内心 OS，共用这一类对话能力。"
         case .minutes: "会后长任务，适合结构化输出能力更强的模型。"
         case .teleprompter: "主动点击才发送原稿，跟读和直播过程中不会调用。"
+        case .audiobook: "主动点击分析全书时才发送正文窗口，阅读或听书过程中不会调用。"
         }
     }
 
     public var requiredOperation: LLMOperation {
         switch self {
-        case .teleprompter: .chat
+        case .teleprompter, .audiobook: .chat
         case .assistant, .minutes: .responses
         }
     }

@@ -105,6 +105,7 @@ public struct OperationJournal: Sendable {
             operationID: sanitizedIdentifier(operation.operationID) ?? "operation",
             command: operation.command,
             selection: operation.selection,
+            mediaRequestID: operation.mediaRequestID,
             state: operation.state,
             phase: sanitizedText(operation.phase),
             progress: progress,

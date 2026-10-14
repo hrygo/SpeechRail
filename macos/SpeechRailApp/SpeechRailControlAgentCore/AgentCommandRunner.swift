@@ -18,6 +18,8 @@ public enum ManagedCommand: Equatable, Sendable {
     case modelCatalog
     case modelStatus
     case modelPrepare(SpecSelection)
+    case mediaCapabilities
+    case mediaExport(UUID)
 
     public var controlCommand: ControlCommand {
         switch self {
@@ -36,6 +38,8 @@ public enum ManagedCommand: Equatable, Sendable {
         case .modelCatalog: .modelCatalog
         case .modelStatus: .modelStatus
         case .modelPrepare: .modelPrepare
+        case .mediaCapabilities: .mediaCapabilities
+        case .mediaExport: .mediaExport
         }
     }
 
@@ -72,6 +76,16 @@ public enum ManagedCommand: Equatable, Sendable {
                 "--asr-spec", selection.asrSpec.rawValue,
                 "--tts-spec", selection.ttsSpec.rawValue,
                 "--yes", "--app-home", home, "--json",
+            ]
+        case .mediaCapabilities:
+            return commandPrefix + [
+                "media", "capabilities", "--app-home", home, "--json",
+            ]
+        case let .mediaExport(requestID):
+            return commandPrefix + [
+                "media", "export",
+                "--request-id", requestID.uuidString.lowercased(),
+                "--app-home", home, "--json",
             ]
         }
     }
@@ -351,17 +365,21 @@ private enum ManagedCommandDiagnostics {
     private static let pathPattern = #"(?<![:\w])/[^\s"']+"#
 
     static func isUnsupportedModelCommand(_ data: Data, command: ManagedCommand) -> Bool {
-        guard command.controlCommand == .modelCatalog
-                || command.controlCommand == .modelStatus
-                || command.controlCommand == .modelPrepare,
+        let isModel = command.controlCommand == .modelCatalog
+            || command.controlCommand == .modelStatus
+            || command.controlCommand == .modelPrepare
+        let isMedia = command.controlCommand == .mediaCapabilities
+            || command.controlCommand == .mediaExport
+        guard isModel || isMedia,
               let output = String(data: data, encoding: .utf8)
         else {
             return false
         }
         let normalized = output.lowercased()
-        return (normalized.contains("invalid choice") && normalized.contains("model"))
-            || (normalized.contains("no such command") && normalized.contains("model"))
-            || normalized.contains("unrecognized arguments: model")
+        let token = isMedia ? "media" : "model"
+        return (normalized.contains("invalid choice") && normalized.contains(token))
+            || (normalized.contains("no such command") && normalized.contains(token))
+            || normalized.contains("unrecognized arguments: \(token)")
     }
 
     static func failureMessage(from data: Data) -> String {
@@ -423,6 +441,7 @@ private struct CLIEnvelope: Decodable {
     let diarization: [CLIArtifact]?
     let disk: CLIDisk?
     let preparedID: String?
+    let media: MediaControlPayload?
     let event: String?
 
     enum CodingKeys: String, CodingKey {
@@ -444,6 +463,7 @@ private struct CLIEnvelope: Decodable {
         case diarization
         case disk
         case preparedID = "prepared_id"
+        case media
         case event
     }
 }
@@ -551,7 +571,7 @@ private enum CLIOutputDecoder {
         _ data: Data,
         command: ManagedCommand
     ) throws -> OperationProgressSnapshot? {
-        guard command.controlCommand == .modelPrepare else {
+        guard command.controlCommand == .modelPrepare || command.controlCommand == .mediaExport else {
             return nil
         }
         guard let envelope = try? ControlWireCodec.decode(CLIProgressEnvelope.self, from: data) else {
@@ -594,7 +614,7 @@ private enum CLIOutputDecoder {
 
     static func decode(_ data: Data, command: ControlCommand) throws -> ControlResponse {
         let envelopeData: Data
-        if command == .modelPrepare {
+        if command == .modelPrepare || command == .mediaExport {
             let lines = data.split(whereSeparator: { $0 == 0x0A || $0 == 0x0D })
             envelopeData = lines.last.map { Data($0) } ?? data
         } else {
@@ -607,7 +627,7 @@ private enum CLIOutputDecoder {
         else {
             throw ManagedCommandError.invalidOutput
         }
-        if command == .modelPrepare {
+        if command == .modelPrepare || command == .mediaExport {
             guard envelope.event == "result" else {
                 throw ManagedCommandError.invalidOutput
             }
@@ -742,7 +762,8 @@ private enum CLIOutputDecoder {
                     errorCode: errorCode,
                     message: envelope.message
                 )
-            }
+            },
+            media: envelope.media
         )
     }
 
@@ -752,7 +773,7 @@ private enum CLIOutputDecoder {
         case .running: .running
         case .committed, .completed, .unchanged: .committed
         case .cancelled: .cancelled
-        case .ok, .rolledBack, .failed: .failed
+        case .ok, .rolledBack, .failed, .unavailable: .failed
         }
     }
 
@@ -782,6 +803,10 @@ private enum CLIOutputDecoder {
             "model.status"
         case .modelPrepare:
             "model.prepare"
+        case .mediaCapabilities:
+            "media.capabilities"
+        case .mediaExport:
+            "media.export"
         case .operationStatus:
             "operation.status"
         case .operationCancel:

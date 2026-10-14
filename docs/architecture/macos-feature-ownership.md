@@ -15,6 +15,7 @@ date: 2026-10-09
 | `EngineModel` | 健康、控制面、档位、模型、预检、监控、能力发现、各读取与操作代际 | control transport、diagnostics、discovery、registration |
 | `VoiceWorkflowModel` | 音色目录、详情、设计候选与发布、克隆注册与回读、音色编辑、输出检查、试听任务与缓存 | 对应窄客户端、`EngineCapabilityReading`、共享播放与生成准入 |
 | `DubbingWorkflowModel` | 固定待保存结果、作品库、配音项目、返修任务、采用与导出 | render/receipt 客户端、作品与项目 store、`CreatorVoiceReading`、能力读取与共享播放/准入 |
+| `AudiobookWorkflowModel` | 整书导入与分章、全书角色理解、角色音色绑定与试听门禁、流式章节合成、单段候选返修与撤销、沉浸收听、M4B/MP3 导出 | `AudiobookProjectStore`、窄 LLM/TTS/能力/导出依赖、`SharedPlaybackOwner` 与生成准入 |
 | `SharedPlaybackOwner` | 唯一播放器、播放 token 与 target、进度、电平、波形缓存 | 可注入播放 driver |
 | `SpeechCreationAdmission` | 音色试听与正式配音生成的互斥归属 | 无服务或存储依赖 |
 | `CreatorFeedback` | 创作页面共用的一条反馈文案 | 无服务或存储依赖 |

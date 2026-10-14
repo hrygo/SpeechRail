@@ -2007,4 +2007,10 @@ final class LLMProviderTests: XCTestCase {
         XCTAssertFalse(message.contains("skip"))
         XCTAssertFalse(message.contains("block"))
     }
+
+    func testAudiobookModuleUsesChatOperationAndPlainCopy() {
+        XCTAssertEqual(LLMModule.audiobook.title, "有声书工坊")
+        XCTAssertEqual(LLMModule.audiobook.requiredOperation, .chat)
+        XCTAssertTrue(LLMModule.audiobook.detail.contains("分析全书"))
+    }
 }

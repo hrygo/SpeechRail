@@ -87,6 +87,8 @@ PCM 计量、响应预取与关闭，以及编码和 ASGI adapter 的边界。
 [macOS 引擎与创作状态所有权](macos-feature-ownership.md) 定义引擎能力事实、
 音色与配音任务、共享播放身份和组合投影的依赖边界。
 
+[有声书工坊系统架构与边界合同](audiobook-workshop.md) 定义只读字节区间真源、`AudiobookAssetJournal` 崩溃恢复、有界 AI 角色理解、流式章节合成与受控 XPC 媒体导出边界。
+
 ## 🔑 核心架构原则
 
 > [!IMPORTANT]

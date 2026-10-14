@@ -90,4 +90,16 @@ final class WindowLayoutPolicyTests: XCTestCase {
         XCTAssertEqual(contract.sidebar, .visible)
         XCTAssertEqual(contract.inspector, .pageControlled)
     }
+
+    func testAudiobookInlineCastColumnThresholdAndRouteShortcut() {
+        XCTAssertFalse(WindowLayoutPolicy.audiobookShowsInlineCastColumn(forWidth: 1_119))
+        XCTAssertTrue(WindowLayoutPolicy.audiobookShowsInlineCastColumn(forWidth: 1_120))
+        XCTAssertEqual(AppRoute.audiobook.group, .creator)
+        XCTAssertEqual(AppRoute.audiobook.title, "有声书工坊")
+        XCTAssertEqual(
+            AppRoute.audiobook.shortcutSpec,
+            AppRouteShortcutSpec(key: "b", modifiers: .commandShift)
+        )
+        XCTAssertEqual(AppRoute.allCases.count, 15)
+    }
 }

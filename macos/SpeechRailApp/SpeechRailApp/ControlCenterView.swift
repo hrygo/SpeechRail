@@ -406,6 +406,8 @@ public struct ControlCenterView: View {
         switch route {
         case .dubbing:
             DubbingDeskView()
+        case .audiobook:
+            AudiobookWorkshopView()
         case .voiceDesign:
             VoiceDesignView()
         case .voiceClone:

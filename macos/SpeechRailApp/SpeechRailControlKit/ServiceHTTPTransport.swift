@@ -6,13 +6,18 @@ public protocol ServiceTransporting: Sendable {
 
 public final class ServiceHTTPTransport: @unchecked Sendable, ServiceTransporting {
     private let session: URLSession
+    private let maximumResponseBytes: Int?
 
-    public init(session: URLSession = .shared) {
+    public init(session: URLSession = .shared, maximumResponseBytes: Int? = nil) {
         self.session = session
+        self.maximumResponseBytes = maximumResponseBytes
     }
 
     public func execute(_ request: URLRequest) async throws -> ServiceRawHTTPResponse {
         do {
+            if let maximumResponseBytes {
+                return try await executeStreamingWithCap(request, maximumBytes: maximumResponseBytes)
+            }
             let (data, response) = try await session.data(for: request)
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw ServiceAPIClientError.invalidResponse
@@ -40,6 +45,47 @@ public final class ServiceHTTPTransport: @unchecked Sendable, ServiceTransportin
         } catch {
             throw ServiceAPIClientError.requestFailed
         }
+    }
+
+    private func executeStreamingWithCap(
+        _ request: URLRequest,
+        maximumBytes: Int
+    ) async throws -> ServiceRawHTTPResponse {
+        let (asyncBytes, response) = try await session.bytes(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            asyncBytes.task.cancel()
+            throw ServiceAPIClientError.invalidResponse
+        }
+        if httpResponse.expectedContentLength > 0,
+           httpResponse.expectedContentLength > Int64(maximumBytes)
+        {
+            asyncBytes.task.cancel()
+            throw ServiceAPIClientError.responseTooLarge(maximumBytes: maximumBytes)
+        }
+
+        var data = Data()
+        data.reserveCapacity(min(maximumBytes, 64 * 1024))
+        var iterator = asyncBytes.makeAsyncIterator()
+        while let byte = try await iterator.next() {
+            if data.count >= maximumBytes {
+                asyncBytes.task.cancel()
+                throw ServiceAPIClientError.responseTooLarge(maximumBytes: maximumBytes)
+            }
+            data.append(byte)
+        }
+
+        var headers: [String: String] = [:]
+        for (key, value) in httpResponse.allHeaderFields {
+            guard let key = key as? String else { continue }
+            headers[key] = String(describing: value)
+        }
+        return ServiceRawHTTPResponse(
+            data: data,
+            metadata: ServiceResponseDecoder.makeMetadata(
+                statusCode: httpResponse.statusCode,
+                headers: headers
+            )
+        )
     }
 }
 

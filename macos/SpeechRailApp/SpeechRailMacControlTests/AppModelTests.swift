@@ -199,6 +199,10 @@ private final class HeldWorkflowCapabilities: EngineCapabilityReading {
 private final class ScriptedSharedPlaybackDriver: SharedAudioPlaybackDriver {
     var isPlaying = false
     var failNextPlay = false
+    var playedFileURLs: [URL] = []
+    var lastStartAt: TimeInterval = 0
+    var lastRate: Float = 1.0
+    var lastSeekTime: TimeInterval?
     var onPlaybackFinished: (@MainActor (Bool) -> Void)?
     var onProgress: (@MainActor (Double) -> Void)?
     var onLevel: (@MainActor (Float) -> Void)?
@@ -206,6 +210,20 @@ private final class ScriptedSharedPlaybackDriver: SharedAudioPlaybackDriver {
         if failNextPlay { throw AudioPlaybackError.playbackFailed }
         isPlaying = true
     }
+    func play(fileURL: URL, startAt: TimeInterval, rate: Float) throws {
+        if failNextPlay { throw AudioPlaybackError.playbackFailed }
+        playedFileURLs.append(fileURL)
+        lastStartAt = startAt
+        lastRate = rate
+        isPlaying = true
+    }
+    func pause() { isPlaying = false }
+    func resume() throws {
+        if failNextPlay { throw AudioPlaybackError.playbackFailed }
+        isPlaying = true
+    }
+    func seek(to time: TimeInterval) { lastSeekTime = time }
+    func setRate(_ rate: Float) { lastRate = rate }
     func stop() { isPlaying = false }
     func duration(for data: Data) -> TimeInterval? { 1 }
 }
@@ -4904,5 +4922,40 @@ extension AppModelTests {
         XCTAssertTrue(
             CreatorVoicePickerState.resolve(loadState: .loaded, voices: []).suggestsCreatingVoice
         )
+    }
+
+    func testCreatorVoiceMergingDetailsPreservesRichFields() {
+        let summaryVoice = CreatorVoice(
+            id: "voice-1",
+            name: "莫里斯医生",
+            description: "",
+            available: true,
+            mode: "clone"
+        )
+        let detailedVoice = CreatorVoice(
+            id: "voice-1",
+            name: "莫里斯医生",
+            description: "请坐。诊所快关门了...",
+            instruction: "沉稳男医生",
+            seed: 42,
+            available: true,
+            mode: "clone",
+            refText: "请坐。诊所快关门了...",
+            durationSeconds: 12.5
+        )
+
+        let merged = summaryVoice.mergingDetails(from: detailedVoice)
+        XCTAssertEqual(merged.id, "voice-1")
+        XCTAssertEqual(merged.description, "请坐。诊所快关门了...")
+        XCTAssertEqual(merged.instruction, "沉稳男医生")
+        XCTAssertEqual(merged.seed, 42)
+        XCTAssertEqual(merged.refText, "请坐。诊所快关门了...")
+        XCTAssertEqual(merged.durationSeconds, 12.5)
+
+        // Different ID should not merge
+        let otherVoice = CreatorVoice(id: "voice-2", name: "其他")
+        let notMerged = summaryVoice.mergingDetails(from: otherVoice)
+        XCTAssertEqual(notMerged.description, "")
+        XCTAssertNil(notMerged.refText)
     }
 }

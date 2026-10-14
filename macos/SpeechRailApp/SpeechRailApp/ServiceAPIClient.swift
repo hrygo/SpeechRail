@@ -19,6 +19,8 @@ extension ServiceAPIClientError {
             "无法连接本机 SpeechRail 服务"
         case .requestTimedOut:
             "本机 SpeechRail 服务响应超时"
+        case let .responseTooLarge(maximumBytes):
+            "服务返回的音频超过单段上限（\(maximumBytes / (1024 * 1024)) MiB）"
         case .notModifiedWithoutCache, .invalidContract, .http:
             // Server detail can contain backend paths or implementation text.
             // Feature surfaces map stable error codes to user-facing copy.
@@ -50,22 +52,30 @@ public final class ServiceAPIClient: @unchecked Sendable {
     public init(
         port: Int = 8201,
         session: URLSession = .shared,
-        apiKey: String? = nil
+        apiKey: String? = nil,
+        maximumResponseBytes: Int? = nil
     ) {
         self.baseURL = URL(string: "http://127.0.0.1:\(port)")!
         let resolvedKey = apiKey ?? SpeechRailAPICredentialProvider.resolve()
-        self.transport = ServiceHTTPTransport(session: session)
+        self.transport = ServiceHTTPTransport(
+            session: session,
+            maximumResponseBytes: maximumResponseBytes
+        )
         self.requestBuilder = ServiceRequestBuilder(baseURL: self.baseURL, apiKey: resolvedKey)
     }
 
     public init(
         baseURL: URL,
         session: URLSession = .shared,
-        apiKey: String? = nil
+        apiKey: String? = nil,
+        maximumResponseBytes: Int? = nil
     ) {
         self.baseURL = baseURL
         let resolvedKey = apiKey ?? SpeechRailAPICredentialProvider.resolve()
-        self.transport = ServiceHTTPTransport(session: session)
+        self.transport = ServiceHTTPTransport(
+            session: session,
+            maximumResponseBytes: maximumResponseBytes
+        )
         self.requestBuilder = ServiceRequestBuilder(baseURL: baseURL, apiKey: resolvedKey)
     }
 

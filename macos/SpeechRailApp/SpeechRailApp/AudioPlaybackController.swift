@@ -31,6 +31,8 @@ public final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate {
         let nextPlayer = try AVAudioPlayer(data: data)
         nextPlayer.delegate = self
         nextPlayer.isMeteringEnabled = true
+        nextPlayer.enableRate = true
+        nextPlayer.rate = 1.0
         nextPlayer.prepareToPlay()
         guard nextPlayer.play() else {
             throw AudioPlaybackError.playbackFailed
@@ -39,6 +41,59 @@ public final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate {
         isPlaying = true
         updateProgressAndMeter()
         startProgressTask()
+    }
+
+    public func play(fileURL: URL, startAt: TimeInterval, rate: Float) throws {
+        stop()
+        let nextPlayer = try AVAudioPlayer(contentsOf: fileURL)
+        nextPlayer.delegate = self
+        nextPlayer.isMeteringEnabled = true
+        nextPlayer.enableRate = true
+        let clampedRate = min(max(rate, AudiobookLimits.minPlaybackRate), AudiobookLimits.maxPlaybackRate)
+        nextPlayer.rate = clampedRate
+        if startAt > 0, nextPlayer.duration > 0 {
+            nextPlayer.currentTime = min(startAt, max(0, nextPlayer.duration - 0.01))
+        }
+        nextPlayer.prepareToPlay()
+        guard nextPlayer.play() else {
+            throw AudioPlaybackError.playbackFailed
+        }
+        player = nextPlayer
+        isPlaying = true
+        updateProgressAndMeter()
+        startProgressTask()
+    }
+
+    public func pause() {
+        guard let player else { return }
+        stopProgressTask()
+        player.pause()
+        isPlaying = false
+        setLevel(0)
+    }
+
+    public func resume() throws {
+        guard let player else {
+            throw AudioPlaybackError.playbackFailed
+        }
+        guard player.play() else {
+            throw AudioPlaybackError.playbackFailed
+        }
+        isPlaying = true
+        updateProgressAndMeter()
+        startProgressTask()
+    }
+
+    public func seek(to time: TimeInterval) {
+        guard let player, player.duration > 0 else { return }
+        player.currentTime = min(max(0, time), max(0, player.duration - 0.01))
+        setProgress(min(max(player.currentTime / player.duration, 0), 1))
+    }
+
+    public func setRate(_ rate: Float) {
+        guard let player else { return }
+        player.enableRate = true
+        player.rate = min(max(rate, AudiobookLimits.minPlaybackRate), AudiobookLimits.maxPlaybackRate)
     }
 
     public func stop() {

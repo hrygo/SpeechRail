@@ -514,6 +514,36 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
         case productionReadyReason = "production_ready_reason"
         case preview
     }
+
+    public func mergingDetails(from existing: CreatorVoice) -> CreatorVoice {
+        guard existing.id == id else { return self }
+        return CreatorVoice(
+            id: id,
+            name: name,
+            description: description.isEmpty ? existing.description : description,
+            instruction: instruction.isEmpty ? existing.instruction : instruction,
+            seed: seed ?? existing.seed,
+            aliases: aliases.isEmpty ? existing.aliases : aliases,
+            isDefault: isDefault,
+            isSystem: isSystem,
+            createdAt: createdAt > 0 ? createdAt : existing.createdAt,
+            available: available,
+            variant: variant ?? existing.variant,
+            capabilities: capabilities,
+            mode: mode ?? existing.mode,
+            refText: refText ?? existing.refText,
+            durationSeconds: durationSeconds ?? existing.durationSeconds,
+            revision: revision ?? existing.revision,
+            revoked: revoked,
+            availabilityReason: availabilityReason ?? existing.availabilityReason,
+            quality: quality ?? existing.quality,
+            creation: creation ?? existing.creation,
+            streaming: streaming ?? existing.streaming,
+            preview: preview ?? existing.preview,
+            productionReady: productionReady ?? existing.productionReady,
+            productionReadyReason: productionReadyReason ?? existing.productionReadyReason
+        )
+    }
 }
 
 /// 一次人工听审的结论。机器验证不能替用户填写 `pass`。
