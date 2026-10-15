@@ -16,7 +16,7 @@ last_updated: 2026-09-06
 
 **Tech Stack:** Python 3.12、uv、FastAPI/WebSocket、现有 Qwen3 worker、NeMo CPU adapter、可选 CAM++、pytest。
 
-**Spec:** [SPK-E2E-1 SpeechRail 设计](../../architecture/speaker-diarization-e2e-design.md)，尤其第 3–7 节。本文使用的 proposed 类型/字段以该规格为准。
+**Spec:** [SPK-E2E-1 SpeechRail 设计](../../archive/architecture/speaker-diarization-e2e-design.md)，尤其第 3–7 节。本文使用的 proposed 类型/字段以该规格为准。
 
 ## 全局约束与执行方法
 

@@ -3,7 +3,7 @@
 日期：2026-09-21
 状态：源码方案与本轮 review follow-up 已实施；managed runtime Base clone smoke 已通过；正式质量 benchmark 未执行。
 
-调研结果：[VoiceDesign 与 Base 能力及使用方式调研](../../architecture/voice-design-base-practice-review-2026-09-21.md)。
+调研结果：[VoiceDesign 与 Base 能力及使用方式调研](../../audits/2026-09-21-voice-design-base-practice-review.md)。
 
 完整范围与验收基线：[SpeechRail 服务可靠性、完整 MCP 与配套 Skill 方案](../specs/2026-09-21-speechrail-mcp-complete-reliability-design.md)。本文件保留问题演进记录；后续实施范围以完整方案为准。
 

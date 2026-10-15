@@ -101,6 +101,11 @@ SpeechRail 是面向单人 Apple Silicon Mac 的本地共享 ASR/TTS 服务，�
 ## 文档与 Git 交付
 
 - 正式契约、架构与用户文档直接陈述系统职责、支持范围、约束及条件下的行为；标题按对象与内容命名（如“Realtime ASR/TTS 协议契约”），不以 `current-only`、“终态”、“最终版”、“收口”等演进标签定义产品、协议或文档身份。“任务终态”等具有明确领域含义的技术术语按原义使用。
+- **文档命名标准**：全仓 Markdown 文档命名严格统一收敛为三类规范格式（全小写、短横线分隔，禁止大驼峰或下划线混写）：
+  1. **常态领域规范 (Evergreen)**：`<domain>-<topic>[-<type>].md`（如 `audiobook-workshop.md`、`testing-acceptance.md`），用于 `architecture/`、`developers/`、`operations/`、`users/` 等，禁止随意添加日期前缀；
+  2. **时点事件与过程记录 (Point-in-time)**：`YYYY-MM-DD-<domain>-<event-type>.md`（如 `2026-10-15-audiobook-workshop-review.md`），用于 `audits/`、`plans/`、`implementation/`、`superpowers/`、`archive/` 等；
+  3. **架构决策记录 (ADR)**：`NNNN-<slug>.md`（四位数字，如 `0019-stateless-speech-plane.md`），专用于 `decisions/`；
+  4. **目录入口**：各目录根统一使用 `README.md` 作为唯一导航中心。
 - 文档的稳定性体现在语态、结构与内在逻辑：读者无需了解改造历史即可理解系统如何工作、何时接受或拒绝请求及责任归属。正文避免以“本版将……”“本轮新增……”“已移除旧……”等过程叙述代替行为规则；修正时检查完整语义，不能仅删除标签或替换词语。演进背景、变更前后与实施进度放入带日期的 ADR、CHANGELOG、计划或验收记录，历史事实保留原有时点。
 - 根 `README.md` 只保留价值、当前公共能力、快速开始和文档入口；实现细节、基准与操作步骤进入专业文档。修改任一语言版本的根 README 时，同步调整另一语言版本的对应内容，保持双语一致；除非用户明确要求，不因发布、接口或普通实现变化自动触发 README 更新或双语同步。
 - OpenAPI / WebSocket 行为变化必须同步契约、测试与用户文档；正式文档的 `version` / `date` 只在正文实质变化时更新；归档材料不改写成当前承诺。

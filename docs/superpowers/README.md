@@ -9,7 +9,7 @@
 ## 设计规格
 
 - [macOS 26 App 最佳实践整改](specs/2026-09-13-macos26-app-best-practices-remediation-design.md)（`approved`）
-- [OpenAI Realtime 交接设计](specs/2026-09-02-openai-realtime-handover-design.md)（`superseded`）
+- [OpenAI Realtime 交接设计](../archive/superpowers/specs/2026-09-02-openai-realtime-handover-design.md)（`superseded`）
 - [资源优化设计](specs/2026-09-02-resource-optimization-design.md)
 - [TTS 分段边界稳定性设计](specs/2026-09-05-tts-segment-boundary-stability-design.md)
 - [GitHub Actions 现代化设计](specs/2026-09-06-github-actions-modernization-design.md)

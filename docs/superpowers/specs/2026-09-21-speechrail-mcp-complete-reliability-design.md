@@ -44,7 +44,7 @@
 - MCP create_job 的 params 注释存在“存储并回显”和“尚未存储”的矛盾；实际服务存储并由 processor 消费部分字段，必须清理过时描述。
 - Speech job 使用文本文件 input_ref，不能把同步 synthesize 的 text 直接当成音频路径重试。
 
-证据详见[调研与本机复现报告](../../architecture/voice-design-base-practice-review-2026-09-21.md)及[问题方案记录](../plans/2026-09-21-voice-design-base-mcp-reliability.md)。
+证据详见[调研与本机复现报告](../../audits/2026-09-21-voice-design-base-practice-review.md)及[问题方案记录](../plans/2026-09-21-voice-design-base-mcp-reliability.md)。
 
 ## 3. 方案选择与责任边界
 
