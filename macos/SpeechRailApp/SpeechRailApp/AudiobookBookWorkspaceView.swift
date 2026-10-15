@@ -4,6 +4,8 @@ import SwiftUI
 public struct AudiobookBookWorkspaceView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(AppNavigationState.self) private var navigation
+    @AppStorage("speechrail.showDeveloperDetails") private var showAnalysisDeveloperDetails = false
+    @State private var isAnalysisDevSectionExpanded = false
 
     public var onImportTXT: () -> Void
 
@@ -24,6 +26,9 @@ public struct AudiobookBookWorkspaceView: View {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
                 topStatusAndPrimaryActionBar(showInlineCast: showInlineCast)
 
+                if workflow.isAnalyzing {
+                    analysisProgressRail
+                }
                 HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
                     chapterSidebarColumn
                         .frame(width: SpeechRailDesignTokens.Layout.sessionListWidth)
@@ -749,12 +754,13 @@ public struct AudiobookBookWorkspaceView: View {
                     Spacer()
                 }
 
-                if let trait = role.primaryVoiceTraitSummary {
-                    Text("声线线索：\(trait)")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .lineLimit(1)
-                }
+                let persona = role.resolvedVoicePersona(peers: workflow.characters)
+                let personaHeadline = role.primaryVoiceTraitSummary
+                    ?? "\(persona.ageGenderAnchor) · \(persona.pitchAndRegister)"
+                Text("声学画像：\(personaHeadline)")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .lineLimit(1)
 
                 if let firstEvidence = role.evidences.first {
                     Text("原文证据：「\(firstEvidence.quoteExcerpt)」")
@@ -791,8 +797,17 @@ public struct AudiobookBookWorkspaceView: View {
                             }
                         }
                     } label: {
+                        let boundDisplay: String? = binding.map { b in
+                            if let matched = availableVoices.first(where: { $0.id == b.voiceID }) {
+                                return "已绑：\(matched.name)"
+                            }
+                            if let preset = Self.fallbackPresetChoices.first(where: { $0.id == b.voiceID }) {
+                                return "已绑：\(preset.name)"
+                            }
+                            return "已绑：\(b.voiceID)"
+                        }
                         Label(
-                            binding.map { "已绑：\($0.voiceID)" } ?? "选择可用音色…",
+                            boundDisplay ?? "选择可用音色…",
                             systemImage: "waveform"
                         )
                     }
@@ -862,6 +877,9 @@ public struct AudiobookBookWorkspaceView: View {
     }
 
     private func analysisStatusPill(for state: AudiobookAnalysisState) -> StatusPill {
+        if workflow.isAnalyzing, let progress = workflow.analysisProgress {
+            return StatusPill(tone: .attention, label: analysisPillLabel(for: progress))
+        }
         if workflow.isAnalyzing {
             return StatusPill(tone: .attention, label: "正在分析全书…")
         }
@@ -876,6 +894,28 @@ public struct AudiobookBookWorkspaceView: View {
             StatusPill(tone: .critical, label: "分析需重试")
         case .allWindowsValidated:
             StatusPill(tone: .healthy, label: "全书分析已完成")
+        }
+    }
+
+    /// 顶栏胶囊的活文案：阶段人话 + n/N（用户语言，技术量进下面的轨道与开发者详情）。
+    private func analysisPillLabel(for progress: AudiobookAnalysisProgress) -> String {
+        AudiobookAnalysisProgressRailView.pillLabel(for: progress)
+    }
+
+    // MARK: - Analysis Progress Rail（确定性轨道：阶段 + n/N + 百分比 + 心跳）
+
+    @ViewBuilder
+    private var analysisProgressRail: some View {
+        if let progress = workflow.analysisProgress {
+            AudiobookAnalysisProgressRailView(
+                progress: progress,
+                tick: workflow.analysisClockTick,
+                eventCount: workflow.analysisEventBuffer.events.count,
+                showDeveloperDetails: showAnalysisDeveloperDetails,
+                isDeveloperSectionExpanded: $isAnalysisDevSectionExpanded
+            ) {
+                Task { await workflow.pauseAnalysis() }
+            }
         }
     }
 

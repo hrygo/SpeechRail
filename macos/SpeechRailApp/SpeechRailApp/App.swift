@@ -167,7 +167,7 @@ struct SpeechRailApp: App {
 #else
         audiobookRootURL = AudiobookProjectStore.defaultRootURL
 #endif
-        let audiobookDependencies = AudiobookProductionWiring.makeLiveDependencies(
+        let liveAudiobookDependencies = AudiobookProductionWiring.makeLiveDependencies(
             rootURL: audiobookRootURL,
             llmProvider: llmProvider,
             preferences: sessionPreferences,
@@ -175,6 +175,26 @@ struct SpeechRailApp: App {
             renderClient: speechRenderClient,
             controlTransport: transport
         )
+#if DEBUG
+        // 种子 UI fixture：确定性 fake 分析链路 + 逐调用延迟，让进度轨道
+        // 在真实界面里保持数秒可观测。仅隔离 temp 书，不碰用户存储、网络与模型。
+        let audiobookDependencies: AudiobookDependencies
+        if isUITest, ProcessInfo.processInfo.arguments.contains("--ui-test-seeded-audiobook-analysis") {
+            var seeded = liveAudiobookDependencies
+            let fixtureConfig = LLMConfiguration(baseURL: "http://127.0.0.1:1", model: "uitest-seeded")
+            seeded.resolveAnalysisSnapshot = { generation in
+                AudiobookAnalysisConfigSnapshot(configuration: fixtureConfig, generation: generation)
+            }
+            seeded.makeAnalysisClient = { snapshot in
+                UITestSeededAudiobookAnalysisClient(configurationDigest: snapshot.configurationDigest)
+            }
+            audiobookDependencies = seeded
+        } else {
+            audiobookDependencies = liveAudiobookDependencies
+        }
+#else
+        let audiobookDependencies = liveAudiobookDependencies
+#endif
 
         let registration = isUITest || usesBundledXPCService ? nil : ControlAgentRegistration()
         let appModel = AppModel(
@@ -456,6 +476,37 @@ struct SpeechRailApp: App {
             .appendingPathComponent("Teleprompter", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
     }
+
+    /// 种子有声书：3 章 3 窗 TXT（每章 1 窗），导入隔离书并打开工作台；
+    /// 不自动开始分析——UI 测试按真实用户路径点击主动作。
+    @MainActor
+    private static func seedUITestAudiobookBook(in workflow: AudiobookWorkflowModel) async {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SpeechRailUITests", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            return
+        }
+        var lines: [String] = []
+        for chapter in 1...3 {
+            lines.append("第\(chapter)章 种子回声")
+            lines.append("林远站在桥头望向远山。")
+            lines.append("“跟紧我。”他回头说道。")
+            lines.append("阿远点头，风穿过竹林。")
+            lines.append("")
+        }
+        let fileURL = directory.appendingPathComponent("seeded_analysis.txt")
+        do {
+            try Data(lines.joined(separator: "\n").utf8).write(to: fileURL)
+        } catch {
+            return
+        }
+        await workflow.refreshShelf()
+        await workflow.prepareImport(fileURL: fileURL, encoding: .utf8)
+        await workflow.confirmImport()
+    }
 #endif
 
     private static var hasBundledLocalXPCService: Bool {
@@ -529,6 +580,12 @@ struct SpeechRailApp: App {
                         resolvedConfiguration: preferences.resolvedLLMConfiguration(for: .minutes)
                     )
                     await model.refreshCreatorVoices()
+#if DEBUG
+                    // 种子 fixture：只在显式参数下导入隔离 3 章书；不自动分析。
+                    if ProcessInfo.processInfo.arguments.contains("--ui-test-seeded-audiobook-analysis") {
+                        await Self.seedUITestAudiobookBook(in: model.audiobookWorkflow)
+                    }
+#endif
                 }
         }
         .windowToolbarStyle(.unifiedCompact(showsTitle: false))
@@ -1552,6 +1609,69 @@ private actor UITestOperationState {
                 message: message
             )
         )
+    }
+}
+
+/// 种子有声书分析链路：确定性 fake 三阶段应答 + 逐调用延迟，让进度轨道
+/// 在真实界面里保持数秒可观测。只读 prompt 里的 atom/role ID，不碰网络与模型；
+/// 应答形状与 `AudiobookWorkflowTests.WorkflowLiveProgressClient` 一致。
+private final class UITestSeededAudiobookAnalysisClient: AudiobookAnalysisClient, @unchecked Sendable {
+    let configurationDigest: String
+
+    init(configurationDigest: String) {
+        self.configurationDigest = configurationDigest
+    }
+
+    func complete(_ prompt: AudiobookAnalysisPrompt) async throws -> String {
+        switch prompt.stage {
+        case .extraction:
+            // 3 窗 × 600ms：提取阶段足够 UI 测试抓到轨道与百分比。
+            try await Task.sleep(for: .milliseconds(600))
+            let atomIDs = Self.extractPrimaryAtomIDs(from: prompt.input)
+            let firstAtom = atomIDs.first.map { [$0] } ?? []
+            let resp = AudiobookExtractionResponse(mentions: [
+                .init(surfaceName: "林远", aliases: ["阿远"], evidenceAtomIDs: firstAtom, voiceTraitEvidence: "青年低沉嗓音"),
+            ])
+            return String(decoding: try JSONEncoder().encode(resp), as: UTF8.self)
+        case .castMerge:
+            try await Task.sleep(for: .milliseconds(400))
+            let resp = AudiobookMergeResponse(groups: [
+                .init(canonicalName: "林远", memberSurfaceNames: ["林远", "阿远"], aliases: ["阿远"], isCollisionUnresolved: false, evidenceSummary: "青年低沉嗓音"),
+            ])
+            return String(decoding: try JSONEncoder().encode(resp), as: UTF8.self)
+        case .annotation:
+            try await Task.sleep(for: .milliseconds(400))
+            let atomIDs = Self.extractPrimaryAtomIDs(from: prompt.input)
+            let roleIDs = Self.extractCandidateRoleIDs(from: prompt.input)
+            var items: [AudiobookAnnotationResponse.Item] = []
+            for (idx, atomID) in atomIDs.enumerated() {
+                if let roleID = roleIDs.first, idx % 2 == 1 {
+                    items.append(.init(atomID: atomID, speakerKind: .character, roleID: roleID, candidateRoleIDs: [roleID], confidence: 0.95, evidence: "林远开口说道"))
+                } else {
+                    items.append(.init(atomID: atomID, speakerKind: .narrator, roleID: nil, candidateRoleIDs: [], confidence: 0.99, evidence: "旁白叙述"))
+                }
+            }
+            let resp = AudiobookAnnotationResponse(items: items)
+            return String(decoding: try JSONEncoder().encode(resp), as: UTF8.self)
+        }
+    }
+
+    private static func extractPrimaryAtomIDs(from inputJSON: String) -> [UUID] {
+        guard let data = inputJSON.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return [] }
+        let list = (obj["primary_atoms_required"] as? [[String: Any]])
+            ?? (obj["primary_atoms"] as? [[String: Any]])
+            ?? []
+        return list.compactMap { ($0["atomID"] as? String).flatMap(UUID.init(uuidString:)) }
+    }
+
+    private static func extractCandidateRoleIDs(from inputJSON: String) -> [UUID] {
+        guard let data = inputJSON.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let list = obj["candidate_characters"] as? [[String: Any]]
+        else { return [] }
+        return list.compactMap { ($0["roleID"] as? String).flatMap(UUID.init(uuidString:)) }
     }
 }
 

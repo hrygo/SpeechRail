@@ -497,6 +497,60 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertFalse(app.menuButtons["更多操作"].exists)
     }
 
+    /// 进度轨道真实界面回归（种子 fixture）：点击「分析全书」→ 轨道出现且带
+    /// 实时百分比 → 终态「全书分析已完成」→ 轨道消失 → 主动作保持唯一。
+    ///
+    /// 前台执行需用户逐次明确授权；默认测试计划不跑它（见交接手册 §2.3）。
+    func testAudiobookAnalysisRailShowsLiveProgressAndCompletes() throws {
+        let app = launchSpeechRail(
+            arguments: [
+                "--ui-test",
+                "--ui-test-open-control-center",
+                "--ui-test-seeded-audiobook-analysis",
+            ],
+            windowSize: CGSize(width: 1280, height: 960)
+        )
+        openControlCenter(in: app)
+        app.buttons["有声书工坊"].clickWhenReady()
+
+        XCTAssertTrue(identifierElement("workspace-title", in: app).waitForExistence(timeout: 10))
+        try skipUnlessWorkspacePaneFits(app)
+
+        // 种子书已就位：唯一主动作是「分析全书」，点击它走真实用户路径。
+        let primaryAction = identifierElement("audiobook-workspace-primary-action", in: app)
+        XCTAssertTrue(primaryAction.waitForExistence(timeout: 20))
+        XCTAssertEqual(
+            app.descendants(matching: .button).matching(identifier: "audiobook-workspace-primary-action").count,
+            1,
+            "工作台主动作必须保持唯一入口"
+        )
+
+        primaryAction.clickWhenReady()
+
+        // 进度轨道出现，且带实时百分比（破除黑洞）。
+        let rail = identifierElement("audiobook-analysis-progress-rail", in: app)
+        XCTAssertTrue(rail.waitForExistence(timeout: 10), "分析开始后进度轨道应出现")
+        let percentText = rail.descendants(matching: .staticText).matching(
+            NSPredicate(format: "label CONTAINS %@", "%")
+        ).firstMatch
+        XCTAssertTrue(percentText.waitForExistence(timeout: 10), "轨道应显示实时百分比")
+
+        // 等待分析完成：终态胶囊出现，轨道消失。
+        let completed = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label CONTAINS %@", "全书分析已完成")
+        ).firstMatch
+        XCTAssertTrue(completed.waitForExistence(timeout: 60), "种子分析应在 60 秒内完成")
+        XCTAssertFalse(rail.exists, "分析完成后进度轨道应消失")
+
+        // 完成后主动作仍唯一（进入确认配声下一步）。
+        XCTAssertTrue(primaryAction.waitForExistence(timeout: 10))
+        XCTAssertEqual(
+            app.descendants(matching: .button).matching(identifier: "audiobook-workspace-primary-action").count,
+            1,
+            "分析完成后主动作仍必须唯一"
+        )
+    }
+
     private func launchSpeechRail(
         arguments: [String] = ["--ui-test", "--ui-test-open-control-center"],
         windowSize: CGSize? = nil

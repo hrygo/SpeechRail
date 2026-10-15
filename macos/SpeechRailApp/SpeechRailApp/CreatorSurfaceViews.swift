@@ -893,6 +893,7 @@ public struct VoiceDesignView: View {
     @State private var naturalnessConfirmed = false
     @State private var errorMessage: String? = nil
     @State private var showsAdvanced = false
+    @State private var appliedReturnContextKey: String? = nil
 
     private var candidates: [VoiceDesignCandidateSnapshot] {
         model.voiceDesignCandidates
@@ -929,10 +930,17 @@ public struct VoiceDesignView: View {
     private let acousticChips = [
         "磁性胸腔", "治愈温暖", "播音质感", "微醺叙事", "少年清冽", "知性温婉", "沙哑沉郁"
     ]
+
+    private var effectiveAcousticChips: [String] {
+        let custom = navigation.audiobookVoiceReturnContext?.suggestedAcousticChips ?? []
+        return Array(NSOrderedSet(array: custom + acousticChips).compactMap { $0 as? String })
+    }
+
     public init(showInspector: Binding<Bool> = .constant(false)) {}
 
     public var body: some View {
         PageScaffold(route: .voiceDesign) {
+            audiobookPersonaBanner
             promptCard
             voiceDesignFeedback
             candidateSection
@@ -992,6 +1000,31 @@ public struct VoiceDesignView: View {
             identityConfirmed = false
             naturalnessConfirmed = false
             pendingSave = nil
+            if let ctx = navigation.audiobookVoiceReturnContext,
+               let published = model.lastPublishedDesignedVoice
+            {
+                let safeEntry = model.safeVoiceCatalog?.data.first(where: { $0.id == published.id })
+                let capabilities = model.effectiveCapabilities
+                let resolvedModelRev = safeEntry?.model.catalogRevision
+                    ?? safeEntry?.model.runtimeRevision
+                    ?? capabilities?.models["tts_clone"]?.catalogRevision
+                    ?? capabilities?.models["tts"]?.catalogRevision
+                    ?? "qwen3-tts-v1"
+                let binding = AudiobookVoiceBinding(
+                    roleID: ctx.roleID,
+                    voiceID: published.id,
+                    voiceRevision: published.revision ?? safeEntry?.voiceRevision ?? "v1",
+                    modelRevision: resolvedModelRev,
+                    isSynthesisReady: true,
+                    callerSeed: model.lastPublishedDesignedSeed
+                )
+                Task {
+                    await model.audiobookWorkflow.completeVoiceRoundTrip(binding: binding, context: ctx)
+                    navigation.audiobookVoiceReturnContext = nil
+                    appliedReturnContextKey = nil
+                    navigation.request(.audiobook)
+                }
+            }
         }
     }
 
@@ -1006,7 +1039,13 @@ public struct VoiceDesignView: View {
     }
 
     private func applyAudiobookVoiceReturnPresetIfNeeded() {
-        guard let ctx = navigation.audiobookVoiceReturnContext else { return }
+        guard let ctx = navigation.audiobookVoiceReturnContext else {
+            appliedReturnContextKey = nil
+            return
+        }
+        let contextKey = "\(ctx.bookID.uuidString)-\(ctx.roleID.uuidString)-\(ctx.generation)"
+        guard appliedReturnContextKey != contextKey else { return }
+        appliedReturnContextKey = contextKey
         if let name = ctx.roleDisplayName, !name.isEmpty {
             voiceName = name
         }
@@ -1015,6 +1054,71 @@ public struct VoiceDesignView: View {
         }
         if let sample = ctx.suggestedReferenceText, !sample.isEmpty {
             referenceText = sample
+        }
+        showsAdvanced = true
+    }
+
+    @ViewBuilder
+    private var audiobookPersonaBanner: some View {
+        if let ctx = navigation.audiobookVoiceReturnContext {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    Image(systemName: "sparkles")
+                        .foregroundStyle(SpeechRailDesignTokens.Color.voice)
+                    VStack(alignment: .leading, spacing: 2) {
+                        let bookPart = ctx.bookTitle.map { "《\($0)》" } ?? "有声书"
+                        let rolePart = ctx.roleDisplayName ?? "当前角色"
+                        Text("正在为\(bookPart)角色「\(rolePart)」定制专属声线")
+                            .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                        if let trait = ctx.roleVoiceTraitSummary, !trait.isEmpty {
+                            Text("声学画像：\(trait) · 保存通过后将自动绑定并返回有声书工坊")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        }
+                    }
+                    Spacer()
+                    Button("退出角色绑定") {
+                        model.audiobookWorkflow.cancelVoiceRoundTrip()
+                        navigation.audiobookVoiceReturnContext = nil
+                        appliedReturnContextKey = nil
+                    }
+                    .speechRailButton(.quiet)
+
+                    Button("返回有声书工坊") {
+                        model.audiobookWorkflow.cancelVoiceRoundTrip()
+                        navigation.audiobookVoiceReturnContext = nil
+                        appliedReturnContextKey = nil
+                        navigation.request(.audiobook)
+                    }
+                    .speechRailButton(.secondary)
+                }
+
+                if ctx.suggestedReferenceTextCandidates.count > 1 {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Text("切换原书试听台词：")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        ForEach(Array(ctx.suggestedReferenceTextCandidates.enumerated()), id: \.offset) { index, quote in
+                            let isCurrent = referenceText == quote
+                            Button("原书台词 \(index + 1)") {
+                                referenceText = quote
+                                showsAdvanced = true
+                            }
+                            .buttonStyle(.plain)
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .speechRailKnurledCapsule(selected: isCurrent)
+                            .foregroundStyle(
+                                isCurrent
+                                    ? SpeechRailDesignTokens.Color.ink
+                                    : SpeechRailDesignTokens.Color.voice
+                            )
+                            .help(quote)
+                        }
+                    }
+                }
+            }
+            .padding(SpeechRailDesignTokens.Spacing.md)
+            .speechRailSurface(.panel)
         }
     }
 
@@ -1139,7 +1243,7 @@ public struct VoiceDesignView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 // 稿的 `chips` 容器是 `gap: 6`（4x 帧实测相邻 chip 363 → 370）。
                 HStack(spacing: SpeechRailDesignTokens.Chip.spacing) {
-                    ForEach(acousticChips, id: \.self) { chip in
+                    ForEach(effectiveAcousticChips, id: \.self) { chip in
                         Button {
                             appendChip(chip)
                         } label: {

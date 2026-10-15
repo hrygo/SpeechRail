@@ -1,7 +1,9 @@
 import Foundation
 import SpeechRailControlKit
 import XCTest
+#if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
+#endif
 
 final class AudiobookStoreTests: XCTestCase {
     private func makeTempRoot() throws -> URL {

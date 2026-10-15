@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+### Added
+
+- 有声书全书分析进度可观测：工作台顶部新增确定性进度轨道（当前步骤
+  3 步制、窗口计数、单调百分比、已用时间与心跳），书架卡片在分析中
+  显示实时百分比；拆窗重试、长时间等待（超 60 秒）与开发者诊断
+  （run、调用数、token、错误码）均有明确呈现，暂停/重跑不串扰。
+  进度事件为闭式 schema，只带序号、计数、耗时、token 数与低基数
+  错误码，不带原文、prompt、密钥、路径或实名。进度轨道抽成独立纯展示
+  视图（`AudiobookAnalysisProgressRailView`），工作台只做薄委托；轨道带
+  离屏视觉回归（`ImageRenderer`，不开窗口不抢前台），覆盖正常/三阶段/
+  重试/停滞/开发者展开五态与用户语言守卫。
+- 进度轨道 UI 可测试性：轨道根节点新增稳定无障碍标识
+  （`audiobook-analysis-progress-rail`）；Debug 版新增种子 fixture
+  （`--ui-test-seeded-audiobook-analysis`，隔离 3 章 TXT + 确定性 fake
+  分析链路 + 逐调用延迟，不碰用户存储、网络与模型），并附可直接运行的
+  XCUITest（`testAudiobookAnalysisRailShowsLiveProgressAndCompletes`）：
+  点击「分析全书」→ 轨道带实时百分比 → 终态回到「全书分析已完成」→
+  主动作保持唯一。该测试已随 `--test-unit` 构建验证 UITests target
+  编译链接通过；前台执行需用户逐次明确授权，默认不跑。
+
+### Fixed
+
+- Xcode 单测 target 恢复可构建：三个有声书测试文件的
+  `SpeechRailAppSupport` 引用加上 `SWIFT_PACKAGE` 守卫，与其余百余个
+  测试文件一致（此前 `xcodebuild test` 在该 target 上必然构建失败；
+  上游 CI 以 `swift test` 为权威单测路径，不受影响）。
+- 同步 `testVoiceDesignReturnPreservesBookAndRole` 断言与当前 banner 文案
+  （`已将新音色「voiceID」绑定给角色`）：此前实现已带 voiceID 而断言仍
+  期望不带 ID 的旧子串，导致全量套件 1 项失败；现全绿
+  （1485 XCTest + 519 swift-testing，0 失败）。
+
 ## [3.8.2] - 2026-10-10
 
 ### Fixed

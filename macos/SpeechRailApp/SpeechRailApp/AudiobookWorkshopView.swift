@@ -29,7 +29,7 @@ public struct AudiobookWorkshopView: View {
                         message: voiceMsg,
                         actionTitle: "知道了"
                     ) {
-                        workflow.bannerMessage = nil
+                        workflow.dismissVoiceReturnBanner()
                     }
                 }
 

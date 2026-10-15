@@ -146,7 +146,7 @@ public enum AudiobookAnalysisError: LocalizedError, Equatable, Sendable {
         case .badConfiguration(let detail):
             return detail
         case .inputBudgetExceeded(let actual, let maximum):
-            return "单次分析窗口总长度（\(actual) 字符）超过上限（\(maximum) 字符）。"
+            return "单次分析输入内容（\(actual) 字符）超过上限（\(maximum) 字符）。"
         case .primaryWindowTooLarge(let scalars, let atoms):
             return "分析主窗口（\(scalars) 字符 / \(atoms) 切分块）超出单窗预算。"
         case .invalidStructuredOutput(let reason):

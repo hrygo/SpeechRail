@@ -307,4 +307,208 @@ final class AudiobookCastTests: XCTestCase {
         XCTAssertTrue(returnCtx.suggestedInstruction?.contains(fixture.hero.displayName) == true)
         XCTAssertNotNil(returnCtx.suggestedReferenceText)
     }
+
+    func testSelectCandidateSummariesStrictlyRespectsPolicyScalarLimitWithManyCharacters() throws {
+        let bookID = UUID()
+        let chapterID = UUID()
+        // 构造 40 个各带详细声线线索与摘录的角色（模拟全书多角色场景，未裁剪时 32 角色 JSON 容易达到 5300+ 字符）
+        let range = AudiobookSourceRange(lowerBound: 0, upperBound: 10)
+        let characters = (0..<40).map { idx -> AudiobookCharacter in
+            AudiobookCharacter(
+                id: UUID(),
+                bookID: bookID,
+                displayName: "角色\(idx)",
+                aliases: ["别称\(idx)A", "别名\(idx)B"],
+                isNarrator: false,
+                isMajor: idx < 5,
+                evidences: [
+                    AudiobookCharacterEvidence(
+                        chapterID: chapterID,
+                        sourceRange: range,
+                        quoteExcerpt: "这是第\(idx)个角色的详细台词证据摘录，满面风霜，神态凄凉。",
+                        voiceTraitSummary: "中年沉稳，略带沙哑与沧桑感"
+                    )
+                ],
+                chapterIDs: [chapterID]
+            )
+        }
+
+        let policy = AudiobookAnalysisPolicy.standard
+        let selected = AudiobookCastRegistry.selectCandidateSummariesForWindow(
+            characters: characters,
+            chapterID: chapterID,
+            windowText: "角色0 说道：天色不早了。角色1 点头称是。",
+            policy: policy
+        )
+
+        // 验证返回的角色摘要严格不超过策略上限（4,000 字符）
+        let serializedCount = AudiobookPromptCharacterSummary.serializedScalarCount(for: selected)
+        XCTAssertLessThanOrEqual(
+            serializedCount,
+            policy.maxCharacterSummaryScalars,
+            "筛选出的候选角色摘要序列化长度（\(serializedCount)）不得超出策略上限（\(policy.maxCharacterSummaryScalars)）"
+        )
+        XCTAssertFalse(selected.isEmpty)
+        XCTAssertLessThanOrEqual(selected.count, policy.maxMergeCandidatesPerBatch)
+
+        // 验证高分提及的角色（角色0、角色1）优先包含在内
+        XCTAssertTrue(selected.contains { $0.canonicalName == "角色0" })
+        XCTAssertTrue(selected.contains { $0.canonicalName == "角色1" })
+
+        // 验证输入这些摘要构建 Annotation 与 Merge prompt 均不会触发 inputBudgetExceeded 异常
+        let primaryAtom = AudiobookPromptAtomItem(
+            atomID: UUID(),
+            kind: .body,
+            text: "旧历的年底毕竟最像年底。"
+        )
+        XCTAssertNoThrow(
+            try AudiobookAnalysisPrompts.makeAnnotationPrompt(
+                rootWindowID: UUID(),
+                primaryAtoms: [primaryAtom],
+                candidateCharacters: selected,
+                policy: policy
+            )
+        )
+
+        let mention = AudiobookExtractionResponse.Mention(
+            surfaceName: "新人物",
+            aliases: ["新别称"],
+            evidenceAtomIDs: [primaryAtom.atomID],
+            evidenceAtomRefs: ["1"],
+            voiceTraitEvidence: "青年清亮",
+            evidenceExcerpts: ["新人物快步走来。"]
+        )
+        XCTAssertNoThrow(
+            try AudiobookAnalysisPrompts.makeMergePrompt(
+                rootWindowID: UUID(),
+                candidates: [mention],
+                existingCharacters: selected,
+                policy: policy
+            )
+        )
+    }
+
+    func testClampSummariesToBudgetGuaranteesPromptAcceptance() throws {
+        let policy = AudiobookAnalysisPolicy.standard
+        // 构造明显超标的 35 个候选角色摘要（总长度 > 5000 字符）
+        let oversizedSummaries = (0..<35).map { idx in
+            AudiobookPromptCharacterSummary(
+                roleID: UUID(),
+                canonicalName: "登场角色名称\(idx)",
+                aliases: ["长别名代称A\(idx)", "长别名代称B\(idx)"],
+                evidenceNote: "[中年男子，声音低沉沧桑] 这是很长的一段人物原著台词与神态描写线索摘录\(idx)。",
+                roleKey: "R\(idx + 1)"
+            )
+        }
+        let rawCount = AudiobookPromptCharacterSummary.serializedScalarCount(for: oversizedSummaries)
+        XCTAssertGreaterThan(
+            rawCount,
+            policy.maxCharacterSummaryScalars,
+            "测试前置条件：原始摘要列表必须超出 4000 标量上限以触发裁剪逻辑"
+        )
+
+        let clamped = AudiobookCastRegistry.clampSummariesToBudget(
+            oversizedSummaries,
+            maxScalars: policy.maxCharacterSummaryScalars,
+            maxCandidates: policy.maxMergeCandidatesPerBatch
+        )
+        let clampedCount = AudiobookPromptCharacterSummary.serializedScalarCount(for: clamped)
+        XCTAssertLessThanOrEqual(clampedCount, policy.maxCharacterSummaryScalars)
+        XCTAssertFalse(clamped.isEmpty)
+
+        let atom = AudiobookPromptAtomItem(
+            atomID: UUID(),
+            kind: .body,
+            text: "林远举目远望。"
+        )
+        XCTAssertNoThrow(
+            try AudiobookAnalysisPrompts.makeAnnotationPrompt(
+                rootWindowID: UUID(),
+                primaryAtoms: [atom],
+                candidateCharacters: clamped,
+                policy: policy
+            )
+        )
+    }
+
+    func testAutoPersonaVoiceDesignInstructionAndAuditionScriptSelector() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let controller = AudiobookCastController(store: store)
+        let fixture = try await makeTwoChapterBook(store: store)
+
+        // 构造同书另一位男性角色（老周），测试六维声学画像 + 同性别对比去重 + 原书台词引号提纯与阿拉伯数字转换
+        var characters = try await store.characters(for: fixture.bookID)
+        let elderRole = AudiobookCharacter(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+            bookID: fixture.bookID,
+            displayName: "老周",
+            aliases: ["周掌柜"],
+            evidences: [
+                AudiobookCharacterEvidence(
+                    chapterID: fixture.chapterA.id,
+                    sourceRange: fixture.chapterA.sourceRange,
+                    quoteExcerpt: "老周放下烟袋，低声叹道：“这渡口我已经守了30年，今晚风浪急，你们千万别出船！”",
+                    voiceTraitSummary: "老年苍老沙哑、胸腔共鸣浑厚"
+                )
+            ],
+            primaryVoiceTraitSummary: "老年苍老沙哑、胸腔共鸣浑厚",
+            isNarrator: false,
+            isMajor: true,
+            chapterIDs: [fixture.chapterA.id]
+        )
+        characters.append(elderRole)
+        characters = AudiobookCastRegistry.enrichCharactersWithVoicePersonas(characters)
+        try await store.saveCharacters(bookID: fixture.bookID, characters: characters)
+
+        let ctxHero = try await controller.makeVoiceReturnContext(
+            bookID: fixture.bookID,
+            roleID: fixture.hero.id
+        )
+        let ctxElder = try await controller.makeVoiceReturnContext(
+            bookID: fixture.bookID,
+            roleID: elderRole.id
+        )
+
+        // 1. 验证六维声学画像编译出的指令包含成年基频守卫、归属语境（低声叹道 -> 舒缓沉着，不受引号内“风浪急”干扰）与同性别对比区分度
+        let heroInst = try XCTUnwrap(ctxHero.suggestedInstruction)
+        let elderInst = try XCTUnwrap(ctxElder.suggestedInstruction)
+        XCTAssertTrue(heroInst.contains("林远"))
+        XCTAssertTrue(elderInst.contains("老周"))
+        XCTAssertTrue(elderInst.contains("老年男性"))
+        XCTAssertTrue(elderInst.contains("老年苍老沙哑"))
+        XCTAssertTrue(elderInst.contains("语速舒缓沉着"), "引号外的“低声叹道”应主导语速推断，不受引号内“风浪急”干扰")
+        XCTAssertNotEqual(heroInst, elderInst)
+
+        // 2. 验证原书试听台词自动剥离引号外旁白（“老周放下烟袋，低声叹道：”被剥离）、将阿拉伯数字 30 转为中文“三十”，且严格落在 20–240 字门禁区间
+        let elderRef = try XCTUnwrap(ctxElder.suggestedReferenceText)
+        XCTAssertFalse(elderRef.contains("老周放下烟袋"), "应当剥离引号外的旁白动作描写")
+        XCTAssertFalse(elderRef.contains("30"), "阿拉伯数字应转换为汉字以避免转写数字校验误差")
+        XCTAssertTrue(elderRef.contains("三十"), "应保留转换后的中文数字“三十”")
+        XCTAssertGreaterThanOrEqual(elderRef.count, 20)
+        XCTAssertLessThanOrEqual(elderRef.count, 240)
+
+        // 3. 验证返回上下文携带原书多条候选试听台词与专属声学灵感标签
+        XCTAssertFalse(ctxElder.suggestedReferenceTextCandidates.isEmpty)
+        XCTAssertFalse(ctxElder.suggestedAcousticChips.isEmpty)
+        XCTAssertNotNil(ctxElder.bookTitle)
+
+        // 4. 验证年份、小数、百分比与夹叙夹议分裂引语的清洗拼接与标点收束
+        let splitQuoteSample = "“从1998年到现在，”苏晴轻声道，“海面风速已经涨了3.5倍，成活率不到50%，咱们必须立刻撤离！”"
+        let candidates = AudiobookAuditionScriptSelector.selectCandidates(
+            from: [splitQuoteSample],
+            roleName: "苏晴",
+            isNarrator: false,
+            maxCandidates: 2
+        )
+        let bestQuote = try XCTUnwrap(candidates.first)
+        XCTAssertEqual(bestQuote, "从一九九八年到现在，海面风速已经涨了三点五倍，成活率不到百分之五十，咱们必须立刻撤离！")
+        XCTAssertFalse(bestQuote.contains("苏晴轻声道"), "同段分裂引语中间的旁白提示应被剥离：\(bestQuote)")
+        XCTAssertFalse(bestQuote.contains("，，") || bestQuote.contains("，。"), "拼接与句尾收敛不得产生连续标点伪影：\(bestQuote)")
+
+        // 5. 验证角色改名后动态重算六维声学画像（无陈旧缓存冻结）
+        try await controller.renameCharacter(bookID: fixture.bookID, roleID: fixture.hero.id, newName: "林远船长", aliases: ["林船长"])
+        let ctxRenamed = try await controller.makeVoiceReturnContext(bookID: fixture.bookID, roleID: fixture.hero.id)
+        XCTAssertEqual(ctxRenamed.roleDisplayName, "林远船长")
+        XCTAssertTrue(ctxRenamed.suggestedInstruction?.contains("林远船长") == true)
+    }
 }

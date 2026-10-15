@@ -2,8 +2,8 @@
 title: "SpeechRail macOS App 有声书工坊开发说明"
 status: active
 audience: "macOS App 开发者、架构与测试工程师"
-version: "1.0.0"
-date: 2026-10-14
+version: "1.1.0"
+date: 2026-10-15
 ---
 
 # SpeechRail macOS App 有声书工坊开发说明
@@ -19,6 +19,8 @@ date: 2026-10-14
 - **`AudiobookTXTImporter.swift` & `AudiobookChapterPlanner.swift`**：流式编码探测（UTF-8 / BOM / UTF-16 / GB18030）、换行归一化为 `\n`、64 MiB 导入上限、流式 SHA-256，以及单遍扫描识别中英文章节标题、前记/序章合并、超长无标题长文在句末安全切分。
 - **`AudiobookStoreSchema.swift`、`AudiobookAssetJournal.swift`、`AudiobookProjectStore.swift`**：独立 `audiobooks/audiobooks.sqlite3`（WAL、`foreign_keys = ON`、`user_version = 1`）与文件事务日志。所有数据库先写、文件后删或文件先 staged、数据库切换后再清理的操作均通过 `asset_journal_entries` 保证崩溃可恢复。
 - **`AudiobookAnalysisPolicy.swift`、`AudiobookAnalysisPrompts.swift`、`AudiobookCastRegistry.swift`、`AudiobookAnalysisPipeline.swift`**：按 `LLMModule.audiobook` 解析专用/全局大模型配置；两级结构化 JSON 解析（章节窗口对话归属 + 跨章角色别名合并）；低置信度台词降级为 `needsConfirmation` 并默认回退旁白音色，绝不猜测说话人。
+- **`AudiobookAnalysisProgress.swift`**：分析进度观测的闭式事件（`AudiobookAnalysisEvent`）、快照投影（`AudiobookAnalysisProgress`）与有界诊断缓冲。事件只带序号、计数、耗时、token 数与低基数错误码，不带原文、prompt、转写、密钥、路径或实名；投影侧按 `runID` + 序号丢弃过期/跨 run 事件，百分比单调不回退。管线在规划、提取、归并、标注、拆窗重试与终态处发射事件；`LLMProvider` 观测经 `callDiagnostics` 汇入，runID 与 LLM 观测 sessionID 一串到底。
+- **`AudiobookAnalysisProgressRailView.swift`**：确定性进度轨道的纯展示视图（阶段 + n/N + 百分比 + 心跳 + 重试/停滞提示 + 开发者诊断折叠区）。输入只有不可变快照、时钟 tick、事件数与暂停回调，不读 `AppModel`，可经 `ImageRenderer` 离屏渲染做视觉回归；文案走同文件的纯函数（心跳三档阈值与 `AudiobookAnalysisProgressLimits` 一致），工作台只做薄委托。
 - **`AudiobookCastController.swift`**：角色重命名、合并/拆分、单条台词改派、音色匹配打分、一键试听样本生成，以及进入批量合成前的「旁白确认 + 必选角色确认 + 试听通过」门禁。
 - **`AudiobookFragmentPlanner.swift` & `AudiobookInvalidation.swift`**：在 280 UTF-8 字节上限内按句末/分句标点切分合成片段，并计算精确的 `(chapter, block, fragment)` 脏标记传播（改单句只标脏该句，改角色音色只标脏该角色所属片段，旁白与其他角色已生成的 WAV 原样复用）。
 - **`AudiobookDependencies.swift` & `AudiobookProductionController.swift`**：串行 TTS 合成队列、能力快照版本锁定 (`effective_capabilities_v1`)、8 MiB 单响应流式护栏、24 kHz → 48 kHz 确定性线性重采样、峰值与静音检测、原子 WAV 落盘与断点续作。

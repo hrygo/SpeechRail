@@ -129,6 +129,13 @@ public final class AudiobookWorkflowModel {
 
     public private(set) var analysisSummary: AudiobookAnalysisSummary?
     public private(set) var isAnalyzing: Bool = false
+    /// 当前分析 run 的 live 进度投影（事件流收敛结果）；非分析中为 nil。
+    public private(set) var analysisProgress: AudiobookAnalysisProgress?
+    /// 开发者详情用的最近事件缓冲（内存，不落盘）。
+    public private(set) var analysisEventBuffer = AudiobookAnalysisEventBuffer()
+    /// 进度投影的安装代次：每次 beginAnalysis 递增，旧 sink 的迟到事件按代次丢弃，
+    /// 防止暂停→重跑时上一次的 runEnded/窗口事件污染新投影。
+    private var analysisInstallEpoch: Int = 0
     public private(set) var isProducing: Bool = false
     public private(set) var isPausingProduction: Bool = false
     public private(set) var productionProgress: AudiobookProductionProgress?
@@ -443,13 +450,18 @@ public final class AudiobookWorkflowModel {
         if selectedBook?.id == targetID {
             selectedBook?.analysisState = .running
         }
+        installAnalysisProgressProjection(for: targetID, pipeline: pipeline)
+        let installEpoch = analysisInstallEpoch
+        let runSink = makeAnalysisProgressSink(for: targetID, installEpoch: installEpoch)
 
         analysisTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let summary = try await pipeline.run(bookID: targetID, config: snapshot)
+                let summary = try await pipeline.run(bookID: targetID, config: snapshot, progressSink: runSink)
+                guard self.analysisInstallEpoch == installEpoch else { return }
                 self.analysisSummary = summary
                 self.isAnalyzing = false
+                self.stopAnalysisClock()
                 await self.autoAssignRecommendedVoices(for: targetID)
                 await self.refreshShelf()
                 if self.selectedBook?.id == targetID {
@@ -457,8 +469,10 @@ public final class AudiobookWorkflowModel {
                 }
                 self.bannerMessage = "全书分析已完成（共 \(summary.completedWindows) 个窗口，待确认说话人 \(summary.unknownSpeakerCount) 处）。"
             } catch {
+                guard self.analysisInstallEpoch == installEpoch else { return }
                 let failureDescription = error.localizedDescription
                 self.isAnalyzing = false
+                self.stopAnalysisClock()
                 await self.refreshShelf()
                 if self.selectedBook?.id == targetID {
                     await self.openBook(targetID)
@@ -471,12 +485,83 @@ public final class AudiobookWorkflowModel {
     public func pauseAnalysis() async {
         guard let bookID = selectedBook?.id, let pipeline = analysisPipeline else { return }
         analysisGeneration += 1
+        analysisInstallEpoch += 1
         await pipeline.cancel(bookID: bookID)
         analysisTask?.cancel()
         isAnalyzing = false
+        stopAnalysisClock()
         await refreshShelf()
         await openBook(bookID)
         bannerMessage = "全书分析已暂停，已完成的窗口检查点已保存。"
+    }
+
+    // MARK: - Analysis Progress Projection
+
+    /// 进度事件收敛：run 外事件直接丢弃；首事件建快照，后续事件折叠。
+    /// 该回调运行在管线侧任意线程，经 Task 跳回 MainActor 后再写 @Observable 字段。
+    ///
+    /// sink 随 `run(bookID:config:progressSink:)` 一起传入，不经过先装后跑的两步调用，
+    /// 因此不存在安装竞态：run 发出的首个事件必然落到本次的投影上。
+    private func installAnalysisProgressProjection(for bookID: UUID, pipeline: AudiobookAnalysisPipeline) {
+        analysisInstallEpoch += 1
+        let installEpoch = analysisInstallEpoch
+        analysisProgress = nil
+        analysisEventBuffer.reset()
+        analysisClockTick = Date()
+        startAnalysisClock()
+        // 兼容兜底：旧路径（不传 sink 的 run）仍走 actor 上的安装值。
+        let sink = makeAnalysisProgressSink(for: bookID, installEpoch: installEpoch)
+        Task {
+            await pipeline.setProgressSink(sink)
+        }
+    }
+
+    private func makeAnalysisProgressSink(
+        for bookID: UUID,
+        installEpoch: Int
+    ) -> AudiobookAnalysisProgressSink {
+        AudiobookAnalysisProgressSink { [weak self] event in
+            guard event.bookID == bookID else { return }
+            Task { @MainActor [weak self] in
+                guard let self, self.analysisInstallEpoch == installEpoch else { return }
+                self.applyAnalysisEvent(event)
+            }
+        }
+    }
+
+    private func applyAnalysisEvent(_ event: AudiobookAnalysisEvent) {
+        analysisEventBuffer.append(event)
+        if var progress = analysisProgress {
+            progress.apply(event)
+            analysisProgress = progress
+        } else {
+            analysisProgress = AudiobookAnalysisProgress(firstEvent: event)
+        }
+        if event.kind == .runEnded {
+            stopAnalysisClock()
+        }
+    }
+
+    /// 分析时钟：每秒 tick 一次，仅用于渲染"已用/上次进展"相对时间，
+    /// 不轮询管线、不读库；分析结束/暂停即停。
+    public private(set) var analysisClockTick: Date = Date()
+    private var analysisClockTask: Task<Void, Never>?
+
+    private func startAnalysisClock() {
+        analysisClockTask?.cancel()
+        analysisClockTick = Date()
+        analysisClockTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled else { return }
+                self?.analysisClockTick = Date()
+            }
+        }
+    }
+
+    private func stopAnalysisClock() {
+        analysisClockTask?.cancel()
+        analysisClockTask = nil
     }
 
     /// 根据全书角色声线线索与当前可用音色目录，为尚未配声的角色自动推荐并预绑定音色。
@@ -653,6 +738,14 @@ public final class AudiobookWorkflowModel {
         return context
     }
 
+    public func cancelVoiceRoundTrip() {
+        pendingVoiceReturnContext = nil
+    }
+
+    public func dismissVoiceReturnBanner() {
+        voiceReturnBannerMessage = nil
+    }
+
     public func completeVoiceRoundTrip(
         binding: AudiobookVoiceBinding,
         context: AudiobookVoiceReturnContext? = nil
@@ -678,7 +771,7 @@ public final class AudiobookWorkflowModel {
             selectedBook = try await store.book(id: activeBookID)
             pendingVoiceReturnContext = nil
             let roleName = characters.first(where: { $0.id == targetContext.roleID })?.displayName ?? "当前角色"
-            voiceReturnBannerMessage = "已将新音色绑定给角色「\(roleName)」。"
+            voiceReturnBannerMessage = "已将新音色「\(binding.voiceID)」绑定给角色「\(roleName)」。"
             await refreshChapterReadinessMap(for: activeBookID)
             await refreshShelf()
         } catch {
