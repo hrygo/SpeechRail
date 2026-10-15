@@ -577,4 +577,89 @@ final class AudiobookAnalysisTests: XCTestCase {
         XCTAssertEqual(annotations.count, allAtoms.count)
         XCTAssertEqual(summary.unknownSpeakerCount, 0)
     }
+
+    func testInlineQuoteNarrativeGracefulFallbackWithoutCoverageViolation() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let text = """
+        第一章 年底
+        灰白色的沉重的晚云中间时时发出闪光，是四叔家正在“祝福”了。
+        “我真傻，真的，”祥林嫂抬起她没有神采的眼睛来。
+        """
+        let txtURL = tempRoot.appendingPathComponent("inline_quote_test.txt")
+        try Data(text.utf8).write(to: txtURL)
+        let preview = try await AudiobookTXTImporter.prepare(fileURL: txtURL, encoding: .utf8)
+        let bookID = try await store.importBook(preview)
+
+        let config = AudiobookAnalysisConfigSnapshot(
+            configuration: LLMConfiguration(baseURL: "http://127.0.0.1:8000/v1", model: "model-inline")
+        )
+
+        final class InlineQuoteClient: AudiobookAnalysisClient, @unchecked Sendable {
+            let configurationDigest: String
+            init(configurationDigest: String) { self.configurationDigest = configurationDigest }
+
+            func complete(_ prompt: AudiobookAnalysisPrompt) async throws -> String {
+                switch prompt.stage {
+                case .extraction:
+                    return """
+                    {
+                      "schema_version": "audiobook.extract.v1",
+                      "mentions": [
+                        { "surfaceName": "祥林嫂", "aliases": [], "evidenceAtomIDs": ["2"], "voiceTraitEvidence": "中年悲凉妇人" }
+                      ]
+                    }
+                    """
+                case .castMerge:
+                    return """
+                    {
+                      "schema_version": "audiobook.merge.v1",
+                      "groups": [
+                        { "canonicalName": "祥林嫂", "memberSurfaceNames": ["祥林嫂"], "aliases": [], "isCollisionUnresolved": false, "evidenceSummary": "中年悲凉妇人" }
+                      ]
+                    }
+                    """
+                case .annotation:
+                    // 模型只标注真正的对白（第 2 段），对包含“祝福”专有名词引用的第 1 段纯叙述完全不输出
+                    return """
+                    {
+                      "schema_version": "audiobook.annotate.v1",
+                      "items": [
+                        {
+                          "atomID": "2",
+                          "speakerKind": "character",
+                          "roleID": "R1",
+                          "candidateRoleIDs": ["R1"],
+                          "confidence": 0.98,
+                          "evidence": "祥林嫂独白"
+                        }
+                      ]
+                    }
+                    """
+                }
+            }
+        }
+
+        let client = InlineQuoteClient(configurationDigest: config.configurationDigest)
+        let pipeline = AudiobookAnalysisPipeline(store: store) { _ in client }
+
+        // 验证：即使第 1 段包含引号“祝福”且大模型未返回其标注，管线也绝不抛出 atomCoverageViolation 或耗尽重试
+        let summary = try await pipeline.run(bookID: bookID, config: config)
+        XCTAssertTrue(summary.isAllWindowsValidated)
+        XCTAssertEqual(summary.completedWindows, 1)
+
+        let annotations = try await store.annotations(for: bookID)
+        let readableAtoms = try await store.atoms(for: bookID).filter { $0.kind != .formatting }
+        XCTAssertEqual(annotations.count, readableAtoms.count)
+
+        // 验证第 1 段被安全判定为旁白，第 2 段指派给祥林嫂
+        let characters = try await store.characters(for: bookID)
+        let xianglin = try XCTUnwrap(characters.first(where: { $0.displayName == "祥林嫂" }))
+        let narrator = try XCTUnwrap(characters.first(where: { $0.isNarrator }))
+
+        let ann1 = annotations.first(where: { $0.sourceRange == readableAtoms[0].sourceRange })
+        let ann2 = annotations.first(where: { $0.sourceRange == readableAtoms[1].sourceRange })
+
+        XCTAssertEqual(ann1?.assignment.roleID, narrator.id)
+        XCTAssertEqual(ann2?.assignment.roleID, xianglin.id)
+    }
 }

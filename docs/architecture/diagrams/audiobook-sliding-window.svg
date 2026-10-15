@@ -1,0 +1,155 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 560" width="1160" height="560" role="img" aria-labelledby="window-title window-desc">
+  <title id="window-title">SpeechRail 有声书工坊滑动窗口规划与物理构成</title>
+  <desc id="window-desc">展示章节全量 Atoms 序列如何无重叠切分为互斥连续的根窗口，以及单个窗口内前置只读上下文、主分析区和后置预读上下文的物理布局与参数预算。</desc>
+
+  <defs>
+    <style>
+      <![CDATA[
+        text {
+          font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
+          -webkit-font-smoothing: antialiased;
+        }
+        .canvas-bg { fill: #f8f9fa; }
+        .card-panel { fill: #ffffff; stroke: #dcdce0; stroke-width: 1.5; filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.03)); rx: 12px; }
+        .window-box-0 { fill: #eff6ff; stroke: #93c5fd; stroke-width: 1.5; rx: 8px; }
+        .window-box-1 { fill: #faf5ff; stroke: #d8b4fe; stroke-width: 1.5; rx: 8px; }
+        .window-box-2 { fill: #ecfdf5; stroke: #86efac; stroke-width: 1.5; rx: 8px; }
+        .ctx-box { fill: #f8fafc; stroke: #94a3b8; stroke-width: 1.5; stroke-dasharray: 4 3; rx: 8px; }
+        .primary-zone { fill: #eff6ff; stroke: #0284c7; stroke-width: 2; rx: 8px; }
+        .badge-readonly { fill: #f1f5f9; stroke: #94a3b8; stroke-width: 1; rx: 4px; }
+        .badge-primary { fill: #dbeafe; stroke: #0284c7; stroke-width: 1; rx: 4px; }
+        .main-title { font-size: 20px; font-weight: 700; fill: #111827; }
+        .main-subtitle { font-size: 13px; font-weight: 400; fill: #4b5563; }
+        .section-title { font-size: 13.5px; font-weight: 600; fill: #1f2937; }
+        .atom-chip { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1; rx: 4px; }
+        .atom-text { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 10.5px; fill: #334155; text-anchor: middle; font-weight: 500; }
+        .mono-code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 10.5px; font-weight: 600; }
+        .body-bullet { font-size: 11.5px; font-weight: 400; fill: #334155; }
+        .body-bullet-primary { font-size: 11.5px; font-weight: 400; fill: #0c4a6e; }
+        .footnote { font-size: 10.5px; font-weight: 500; fill: #6b7280; }
+        .flow-arrow { fill: none; stroke: #0284c7; stroke-width: 1.8; stroke-linecap: round; }
+      ]]>
+    </style>
+    <marker id="arrow-down" markerWidth="8" markerHeight="8" refX="4" refY="6" orient="auto">
+      <path d="M1,1 L4,6 L7,1 Z" fill="#0284c7"/>
+    </marker>
+  </defs>
+
+  <!-- Canvas Background -->
+  <rect class="canvas-bg" width="1160" height="560" rx="12"/>
+
+  <!-- Header -->
+  <g transform="translate(40, 36)">
+    <text class="main-title" x="0" y="0">滑动窗口物理拓扑与有界上下文规划</text>
+    <text class="main-subtitle" x="0" y="22">互斥且连续规划 (planRootWindows) · 三段式物理结构 · 确定性哈希与秒级检查点映射</text>
+  </g>
+
+  <!-- Part 1: Full Chapter Atoms Stream & Windows Partitioning -->
+  <g transform="translate(40, 80)">
+    <rect class="card-panel" x="0" y="0" width="1080" height="165" rx="12"/>
+    <text class="section-title" x="24" y="28">全章 Atom 序列连续互斥切分（保证每个 Atom 有且仅有一次作为 Primary 分析）</text>
+
+    <!-- Atom stream bar (3 cards, width 328 each, total 1032px, gap 24px) -->
+    <g transform="translate(24, 46)">
+      <!-- Window 0 Atoms -->
+      <rect class="window-box-0" x="0" y="0" width="328" height="60" rx="8"/>
+      <text x="14" y="22" font-size="12" font-weight="700" fill="#1d4ed8">Window 0 (主分析区)</text>
+      <g transform="translate(14, 30)">
+        <rect class="atom-chip" x="0" y="0" width="56" height="20"/>
+        <text class="atom-text" x="28" y="14">Atom 1</text>
+        <rect class="atom-chip" x="62" y="0" width="56" height="20"/>
+        <text class="atom-text" x="90" y="14">Atom 2</text>
+        <text x="126" y="15" font-size="12" fill="#60a5fa" font-weight="700">···</text>
+        <rect class="atom-chip" x="148" y="0" width="60" height="20"/>
+        <text class="atom-text" x="178" y="14">Atom K</text>
+        <text x="218" y="14" font-size="11" font-weight="600" fill="#2563eb">≤4,000字</text>
+      </g>
+
+      <!-- Window 1 Atoms -->
+      <rect class="window-box-1" x="352" y="0" width="328" height="60" rx="8"/>
+      <text x="366" y="22" font-size="12" font-weight="700" fill="#6d28d9">Window 1 (主分析区)</text>
+      <g transform="translate(366, 30)">
+        <rect class="atom-chip" x="0" y="0" width="70" height="20"/>
+        <text class="atom-text" x="35" y="14">Atom K+1</text>
+        <text x="78" y="15" font-size="12" fill="#c084fc" font-weight="700">···</text>
+        <rect class="atom-chip" x="100" y="0" width="70" height="20"/>
+        <text class="atom-text" x="135" y="14">Atom M</text>
+        <text x="182" y="14" font-size="11" font-weight="600" fill="#7c3aed">≤256 Atoms</text>
+      </g>
+
+      <!-- Window 2 Atoms -->
+      <rect class="window-box-2" x="704" y="0" width="328" height="60" rx="8"/>
+      <text x="718" y="22" font-size="12" font-weight="700" fill="#047857">Window 2 (主分析区)</text>
+      <g transform="translate(718, 30)">
+        <rect class="atom-chip" x="0" y="0" width="72" height="20"/>
+        <text class="atom-text" x="36" y="14">Atom M+1</text>
+        <text x="80" y="15" font-size="12" fill="#34d399" font-weight="700">···</text>
+        <rect class="atom-chip" x="102" y="0" width="70" height="20"/>
+        <text class="atom-text" x="137" y="14">Atom N</text>
+        <text x="184" y="14" font-size="11" font-weight="600" fill="#059669">章末收尾</text>
+      </g>
+    </g>
+
+    <!-- Boundary Notes -->
+    <g transform="translate(24, 134)">
+      <text font-size="11" fill="#4b5563">• 规划硬约束：单窗主区字符 ≤4,000 字且 Atoms 数量 ≤256 个，避免大模型长上下文注意力稀释或输出截断</text>
+      <text font-size="11" fill="#4b5563" x="720">• 纯排版空白与分隔线（formatting）不计入主窗</text>
+    </g>
+  </g>
+
+  <!-- Flow Connector Down to Single Window Detail -->
+  <path class="flow-arrow" d="M 580 245 L 580 270" marker-end="url(#arrow-down)"/>
+
+  <!-- Part 2: Single Window Physical Composition -->
+  <g transform="translate(40, 276)">
+    <rect class="card-panel" x="0" y="0" width="1080" height="248" rx="12"/>
+    <text class="section-title" x="24" y="28">单个分析窗口的物理构成（三段式：前置只读上下文 + 核心主分析区 + 后置只读预读）</text>
+
+    <!-- Zone 1: Leading Context (Width: 236) -->
+    <g transform="translate(24, 44)">
+      <rect class="ctx-box" x="0" y="0" width="236" height="136" rx="8"/>
+      <!-- Badge -->
+      <rect class="badge-readonly" x="14" y="12" width="70" height="20"/>
+      <text x="22" y="26" font-size="10" font-weight="700" fill="#475569">READONLY</text>
+      <text x="14" y="48" font-size="12.5" font-weight="700" fill="#1f2937">leading_context</text>
+      <text class="body-bullet" x="14" y="68">• 预算：≤500 字符</text>
+      <text class="body-bullet" x="14" y="86">• 跨窗状态链注入：</text>
+      <rect x="14" y="93" width="135" height="20" rx="3" fill="#e0f2fe" stroke="#bae6fd" stroke-width="1"/>
+      <text class="mono-code" x="20" y="107" fill="#0284c7">"speaker": "祥林嫂"</text>
+      <text class="footnote" x="14" y="127">仅供背景推理 · 禁止输出标注</text>
+    </g>
+
+    <!-- Zone 2: Primary Required Area (Core, Width: 524) -->
+    <g transform="translate(278, 44)">
+      <rect class="primary-zone" x="0" y="0" width="524" height="136" rx="8"/>
+      <!-- Badge -->
+      <rect class="badge-primary" x="14" y="12" width="120" height="20"/>
+      <text x="22" y="26" font-size="10" font-weight="700" fill="#0369a1">PRIMARY REQUIRED</text>
+      <text x="14" y="48" font-size="13" font-weight="700" fill="#0c4a6e">primary_atoms_required（核心主分析与标注区）</text>
+      <text class="body-bullet-primary" x="14" y="68">• 严格预算：≤4,000 字符 · ≤256 个 Atoms（超限前提前截断成窗）</text>
+      <text class="body-bullet-primary" x="14" y="86">• 短整型索引：携带 "idx": 1...N，模型据此短号引用防 UUID 抄写幻觉</text>
+      <text class="body-bullet-primary" x="14" y="104">• 对白聚焦：带 target_dialogue_indices 提示引语位置（纯叙述自动旁白）</text>
+      <text font-size="11" font-weight="600" fill="#0284c7" x="14" y="124">✓ 100% 覆盖承诺：主区每个 Atom 必须且只能在当前窗口被确权标注</text>
+    </g>
+
+    <!-- Zone 3: Trailing Context (Width: 236) -->
+    <g transform="translate(820, 44)">
+      <rect class="ctx-box" x="0" y="0" width="236" height="136" rx="8"/>
+      <!-- Badge -->
+      <rect class="badge-readonly" x="14" y="12" width="70" height="20"/>
+      <text x="22" y="26" font-size="10" font-weight="700" fill="#475569">READONLY</text>
+      <text x="14" y="48" font-size="12.5" font-weight="700" fill="#1f2937">trailing_context</text>
+      <text class="body-bullet" x="14" y="68">• 预算：≤500 字符</text>
+      <text class="body-bullet" x="14" y="86">• 预读后文语境：</text>
+      <text class="body-bullet" x="22" y="102">防止窗口边界生硬截断长对白</text>
+      <text class="footnote" x="14" y="127">仅供背景推理 · 禁止输出标注</text>
+    </g>
+
+    <!-- Deterministic Window Key Footer -->
+    <g transform="translate(24, 194)">
+      <rect x="0" y="0" width="1032" height="36" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
+      <text font-family="SF Mono, monospace" font-size="11" font-weight="600" fill="#1e293b" x="14" y="22">windowID = SHA256(bookID | chapterID | primaryAtomIDs | policyFingerprint | configurationDigest)</text>
+      <text font-size="11" font-weight="600" fill="#059669" x="720" y="22">✓ 环境稳定 0ms 检查点秒级复用 · 配置变动安全失效</text>
+    </g>
+  </g>
+</svg>

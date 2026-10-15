@@ -328,10 +328,14 @@ public actor AudiobookProductionController {
         binding: AudiobookVoiceBinding,
         runGeneration: Int
     ) async throws -> AudiobookRenderCandidate {
+        let effectiveSpeed = min(
+            Double(AudiobookLimits.maxPlaybackRate),
+            max(Double(AudiobookLimits.minPlaybackRate), binding.allowedSpeed)
+        )
         let request = AudiobookRenderCallRequest(
             text: text,
             voiceID: binding.voiceID,
-            speed: policy.defaultSpeed,
+            speed: effectiveSpeed,
             expectedVoiceRevision: binding.voiceRevision,
             expectedModelRevision: binding.modelRevision,
             seed: binding.callerSeed
@@ -494,8 +498,12 @@ public actor AudiobookProductionController {
                     actual: actualVoiceRev
                 )
             }
-            if let actualModelRev = voice.model.catalogRevision ?? voice.model.runtimeRevision,
-               actualModelRev != binding.modelRevision
+            let voiceModelRev = voice.model.catalogRevision ?? voice.model.runtimeRevision
+            let slotModelRev = SpeechRailCapabilityRevisionSelector.ttsArtifactSlot(forVoiceMode: voice.mode)
+                .flatMap { capabilities.models[$0]?.catalogRevision }
+            if let actualModelRev = voiceModelRev,
+               actualModelRev != binding.modelRevision,
+               slotModelRev != binding.modelRevision
             {
                 throw AudiobookProductionError.capabilityRevisionMismatch(
                     voiceID: binding.voiceID,

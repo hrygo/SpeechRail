@@ -1,6 +1,8 @@
 import Foundation
 import XCTest
+#if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
+#endif
 
 final class AudiobookSourceTests: XCTestCase {
     func testScalarBoundariesAndLiteralReplacementCharacter() throws {

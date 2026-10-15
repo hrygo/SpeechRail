@@ -221,6 +221,10 @@ public final class AppModel {
 
     public var voiceDesignPublication: VoiceDesignPublicationSnapshot { voiceWorkflow.voiceDesignPublication }
 
+    public var lastPublishedDesignedVoice: CreatorVoice? { voiceWorkflow.lastPublishedDesignedVoice }
+
+    public var lastPublishedDesignedSeed: Int? { voiceWorkflow.lastPublishedDesignedSeed }
+
     public var isRegisteringVoice: Bool { voiceWorkflow.isRegisteringVoice }
 
     public var isCancellingVoiceDesignPublication: Bool { voiceWorkflow.isCancellingVoiceDesignPublication }

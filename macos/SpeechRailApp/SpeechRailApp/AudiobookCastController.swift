@@ -1,4 +1,5 @@
 import Foundation
+import SpeechRailControlKit
 
 /// T06：人物确认、配声绑定、音色设计往返身份与章节就绪度判定。
 public struct AudiobookVoiceReturnContext: Codable, Equatable, Hashable, Sendable {
@@ -6,26 +7,38 @@ public struct AudiobookVoiceReturnContext: Codable, Equatable, Hashable, Sendabl
     public let roleID: UUID
     public let castRevisionID: UUID
     public let generation: Int
+    public let bookTitle: String?
     public let roleDisplayName: String?
+    public let roleVoiceTraitSummary: String?
     public let suggestedInstruction: String?
     public let suggestedReferenceText: String?
+    public let suggestedReferenceTextCandidates: [String]
+    public let suggestedAcousticChips: [String]
 
     public init(
         bookID: UUID,
         roleID: UUID,
         castRevisionID: UUID,
         generation: Int,
+        bookTitle: String? = nil,
         roleDisplayName: String? = nil,
+        roleVoiceTraitSummary: String? = nil,
         suggestedInstruction: String? = nil,
-        suggestedReferenceText: String? = nil
+        suggestedReferenceText: String? = nil,
+        suggestedReferenceTextCandidates: [String] = [],
+        suggestedAcousticChips: [String] = []
     ) {
         self.bookID = bookID
         self.roleID = roleID
         self.castRevisionID = castRevisionID
         self.generation = generation
+        self.bookTitle = bookTitle
         self.roleDisplayName = roleDisplayName
+        self.roleVoiceTraitSummary = roleVoiceTraitSummary
         self.suggestedInstruction = suggestedInstruction
         self.suggestedReferenceText = suggestedReferenceText
+        self.suggestedReferenceTextCandidates = suggestedReferenceTextCandidates
+        self.suggestedAcousticChips = suggestedAcousticChips
     }
 }
 
@@ -157,15 +170,16 @@ public actor AudiobookCastController {
     ) async throws {
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        let characters = try await store.characters(for: bookID)
-        guard var target = characters.first(where: { $0.id == roleID }) else {
+        var characters = try await store.characters(for: bookID)
+        guard let idx = characters.firstIndex(where: { $0.id == roleID }) else {
             throw AudiobookCastError.characterNotFound(roleID)
         }
-        target.displayName = trimmed
+        characters[idx].displayName = trimmed
         if let aliases {
-            target.aliases = aliases
+            characters[idx].aliases = aliases
         }
-        try await store.upsertCharacter(target)
+        characters = AudiobookCastRegistry.enrichCharactersWithVoicePersonas(characters)
+        try await store.saveCharacters(bookID: bookID, characters: characters)
     }
 
     public func previewMergeImpact(
@@ -216,6 +230,7 @@ public actor AudiobookCastController {
         targetChar.chapterIDs = Array(Set(targetChar.chapterIDs + sourceChar.chapterIDs))
         characters[targetIndex] = targetChar
         characters.removeAll { $0.id == sourceRoleID }
+        characters = AudiobookCastRegistry.enrichCharactersWithVoicePersonas(characters)
 
         let allAnnotations = try await store.annotations(for: bookID)
         let reassigned = allAnnotations.compactMap { ann -> AudiobookAnnotation? in
@@ -262,10 +277,11 @@ public actor AudiobookCastController {
             chapterIDs: chapterIDs
         )
         characters.append(newRole)
+        characters = AudiobookCastRegistry.enrichCharactersWithVoicePersonas(characters)
         try await store.saveCharacters(bookID: bookID, characters: characters)
         try await assignRole(bookID: bookID, atomIDs: atomIDs, roleID: newRole.id)
         _ = bumpGeneration(for: bookID)
-        return newRole
+        return characters.first(where: { $0.id == newRole.id }) ?? newRole
     }
 
     // MARK: - Voice Binding, Cast Confirmation & Audition Gate
@@ -321,6 +337,56 @@ public actor AudiobookCastController {
         try await store.upsertCharacter(role)
     }
 
+    /// 按声部行当一键批量换绑次要角色音色（AC5：自动注入微语速/Seed 错位，且绝不覆盖核心主角或旁白的独占音色）。
+    @discardableResult
+    public func batchBindArchetypeVoice(
+        bookID: UUID,
+        archetype: AudiobookVoiceArchetype,
+        voice: SafeVoiceEntry
+    ) async throws -> Int {
+        guard voice.available, voice.productionReady != false else {
+            throw AudiobookCastError.voiceNotSynthesisReady(voiceID: voice.id)
+        }
+        let characters = try await store.characters(for: bookID)
+        let matchingMinors = characters.filter { role in
+            !role.isNarrator
+                && role.allowSharedMinorVoice
+                && role.inferredVoiceArchetype(peers: characters) == archetype
+        }
+        guard !matchingMinors.isEmpty else { return 0 }
+
+        let modelRev = voice.model.catalogRevision
+            ?? voice.model.runtimeRevision
+            ?? "qwen3-tts-v1"
+
+        for (slotIndex, role) in matchingMinors.enumerated() {
+            let (speed, seed) = AudiobookCastRegistry.computeMicroProsodyAndSeed(
+                for: role,
+                archetype: archetype,
+                voiceMode: voice.mode,
+                slotIndex: slotIndex
+            )
+            let binding = AudiobookVoiceBinding(
+                roleID: role.id,
+                voiceID: voice.id,
+                voiceRevision: voice.voiceRevision ?? "v1",
+                modelRevision: modelRev,
+                isSynthesisReady: true,
+                allowedSpeed: speed,
+                callerSeed: seed
+            )
+            try await store.saveVoiceBinding(bookID: bookID, binding: binding)
+        }
+
+        var book = try await store.book(id: bookID)
+        let newDigest = try await currentVoiceSetDigest(for: bookID)
+        if book.confirmedAuditionVoiceSetDigest != nil && book.confirmedAuditionVoiceSetDigest != newDigest {
+            book.confirmedAuditionVoiceSetDigest = nil
+            try await store.updateBook(book)
+        }
+        return matchingMinors.count
+    }
+
     public func currentCastRevisionID(for bookID: UUID) async throws -> UUID {
         let characters = try await store.characters(for: bookID)
         let sorted = characters.sorted { $0.id.uuidString < $1.id.uuidString }
@@ -363,7 +429,16 @@ public actor AudiobookCastController {
         }
         let characters = try await store.characters(for: bookID)
         let bindings = try await store.voiceBindings(for: bookID)
-        let unbound = characters.filter { bindings[$0.id]?.isSynthesisReady != true }.map(\.displayName)
+        let annotations = (try? await store.annotations(for: bookID)) ?? []
+        let speakingRoleIDs = Set(annotations.compactMap(\.assignment.roleID))
+
+        // AC6：当全书已生成对白归属标注时，仅要求旁白或有实际台词（dialogueAtomCount > 0）的角色必须绑定可合成音色；
+        // 0 台词仅提及背景人物豁免强制绑定，避免卡死确认门禁。
+        let unbound = characters.filter { role in
+            let requiresBinding = annotations.isEmpty ? true : (role.isNarrator || speakingRoleIDs.contains(role.id))
+            guard requiresBinding else { return false }
+            return bindings[role.id]?.isSynthesisReady != true
+        }.map(\.displayName)
         guard unbound.isEmpty else {
             throw AudiobookCastError.missingVoiceBindings(unboundRoleNames: unbound)
         }
@@ -396,16 +471,62 @@ public actor AudiobookCastController {
     ) async throws -> AudiobookVoiceReturnContext {
         let revisionID = try await currentCastRevisionID(for: bookID)
         let generation = currentGeneration(for: bookID)
+        let book = try? await store.book(id: bookID)
         let characters = try await store.characters(for: bookID)
         let role = characters.first(where: { $0.id == roleID })
+
+        var rawDialogueTexts: [String] = []
+        if let role,
+           let annotations = try? await store.annotations(for: bookID),
+           let source = try? await store.sourceIndex(for: bookID)
+        {
+            let roleAnns = annotations
+                .filter { $0.assignment.roleID == role.id }
+                .sorted { $0.sourceRange < $1.sourceRange }
+            for ann in roleAnns.prefix(24) {
+                if let text = try? source.text(in: ann.sourceRange) {
+                    rawDialogueTexts.append(text)
+                }
+            }
+        }
+        if let role {
+            rawDialogueTexts.append(contentsOf: role.evidences.map(\.quoteExcerpt))
+        }
+
+        let persona = role.map { AudiobookVoicePersona.infer(for: $0, peers: characters, recompute: true) }
+        let compiledInstruction = role.flatMap { r in
+            persona?.compiledVoiceDesignInstruction(roleName: r.displayName, isNarrator: r.isNarrator)
+        }
+        let scriptCandidates: [String] = {
+            guard let role else { return [] }
+            return AudiobookAuditionScriptSelector.selectCandidates(
+                from: rawDialogueTexts,
+                roleName: role.displayName,
+                aliases: role.aliases,
+                isNarrator: role.isNarrator,
+                maxCandidates: 3
+            )
+        }()
+        let traitSummary = role.flatMap { r -> String? in
+            if let explicit = r.primaryVoiceTraitSummary, !explicit.isEmpty {
+                return explicit
+            }
+            guard let p = persona else { return nil }
+            return "\(p.ageGenderAnchor) · \(p.pitchAndRegister)"
+        }
+
         return AudiobookVoiceReturnContext(
             bookID: bookID,
             roleID: roleID,
             castRevisionID: revisionID,
             generation: generation,
+            bookTitle: book?.title,
             roleDisplayName: role?.displayName,
-            suggestedInstruction: role?.recommendedVoiceDesignInstruction,
-            suggestedReferenceText: role?.recommendedVoiceDesignReferenceText
+            roleVoiceTraitSummary: traitSummary,
+            suggestedInstruction: compiledInstruction ?? role?.recommendedVoiceDesignInstruction,
+            suggestedReferenceText: scriptCandidates.first ?? role?.recommendedVoiceDesignReferenceText,
+            suggestedReferenceTextCandidates: scriptCandidates,
+            suggestedAcousticChips: persona?.customChips ?? []
         )
     }
 
