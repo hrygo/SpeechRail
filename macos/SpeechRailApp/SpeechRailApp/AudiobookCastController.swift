@@ -1,4 +1,5 @@
 import Foundation
+import SpeechRailControlKit
 
 /// T06：人物确认、配声绑定、音色设计往返身份与章节就绪度判定。
 public struct AudiobookVoiceReturnContext: Codable, Equatable, Hashable, Sendable {

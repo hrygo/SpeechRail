@@ -843,7 +843,10 @@ public struct DubbingDeskView: View {
     }
 
     private var availableVoices: [CreatorVoice] {
-        model.creatorVoices.filter { $0.available }
+        let active = model.creatorVoices.filter {
+            $0.available && VoiceCatalogStore.shared.isVoiceActiveForBook(voiceID: $0.id, currentBookID: nil)
+        }
+        return active.isEmpty ? model.creatorVoices.filter(\.available) : active
     }
 
     private var selectedVoice: CreatorVoice? {

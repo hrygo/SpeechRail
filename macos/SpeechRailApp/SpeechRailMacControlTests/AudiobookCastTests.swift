@@ -1,4 +1,5 @@
 import Foundation
+import SpeechRailControlKit
 import XCTest
 #if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
@@ -510,5 +511,432 @@ final class AudiobookCastTests: XCTestCase {
         let ctxRenamed = try await controller.makeVoiceReturnContext(bookID: fixture.bookID, roleID: fixture.hero.id)
         XCTAssertEqual(ctxRenamed.roleDisplayName, "林远船长")
         XCTAssertTrue(ctxRenamed.suggestedInstruction?.contains("林远船长") == true)
+    }
+
+    // MARK: - AC1–AC10: 大规模角色配音与 100+ 音色库分级管理验收测试套件
+
+    private func makeTestSafeVoice(
+        id: String,
+        name: String,
+        mode: String = "system",
+        styleTags: [String] = []
+    ) -> SafeVoiceEntry {
+        let desc = SafeVoiceDescriptor(
+            voiceMode: mode,
+            locales: ["zh-CN"],
+            styleTags: styleTags,
+            pitchBand: "unknown",
+            timbreFamily: "unknown",
+            baselinePace: "unknown",
+            sourceType: mode == "system" ? "system_preset" : "custom",
+            metadataMethod: "declared_only"
+        )
+        let model = ConfiguredModelIdentity(
+            assurance: .configuredCatalog,
+            runtimeRevision: "qwen3-tts-v1",
+            catalogRevision: "qwen3-tts-v1"
+        )
+        return SafeVoiceEntry(
+            id: id,
+            name: name,
+            mode: mode,
+            available: true,
+            availabilityReason: .available,
+            voiceRevision: "v1",
+            voiceIdentityAssurance: .contentAddressed,
+            model: model,
+            descriptors: desc,
+            operations: [:],
+            productionReady: true
+        )
+    }
+
+    func testAC1_ParetoAdaptiveRoleStratification() {
+        let bookID = UUID()
+        let chapterA = UUID()
+        let chapterB = UUID()
+        let windowID = UUID()
+
+        let narrator = AudiobookCharacter(bookID: bookID, displayName: "旁白", isNarrator: true, isMajor: true, allowSharedMinorVoice: false)
+        let leads = (1...3).map { i in
+            AudiobookCharacter(bookID: bookID, displayName: "主角_\(i)", isNarrator: false, isMajor: true, allowSharedMinorVoice: false, chapterIDs: [chapterA, chapterB])
+        }
+        let minors = (1...25).map { i in
+            AudiobookCharacter(bookID: bookID, displayName: "路人_\(i)", isNarrator: false, isMajor: true, allowSharedMinorVoice: false, chapterIDs: [chapterA, chapterB])
+        }
+        let silentRoles = (1...5).map { i in
+            AudiobookCharacter(bookID: bookID, displayName: "仅提及人物_\(i)", isNarrator: false, isMajor: true, allowSharedMinorVoice: false, chapterIDs: [chapterA])
+        }
+
+        var annotations: [AudiobookAnnotation] = []
+        var offset: Int64 = 0
+        for lead in leads {
+            for _ in 0..<20 {
+                annotations.append(
+                    AudiobookAnnotation(
+                        bookID: bookID,
+                        chapterID: chapterA,
+                        windowID: windowID,
+                        atomID: UUID(),
+                        sourceRange: AudiobookSourceRange(lowerBound: offset, upperBound: offset + 10),
+                        assignment: .assigned(roleID: lead.id)
+                    )
+                )
+                offset += 10
+            }
+        }
+        for minor in minors {
+            for ch in [chapterA, chapterB] {
+                annotations.append(
+                    AudiobookAnnotation(
+                        bookID: bookID,
+                        chapterID: ch,
+                        windowID: windowID,
+                        atomID: UUID(),
+                        sourceRange: AudiobookSourceRange(lowerBound: offset, upperBound: offset + 10),
+                        assignment: .assigned(roleID: minor.id)
+                    )
+                )
+                offset += 10
+            }
+        }
+
+        let allChars = [narrator] + leads + minors + silentRoles
+        let (updated, statsByID, _) = AudiobookCastRegistry.computeRoleDialogueStats(
+            characters: allChars,
+            annotations: annotations,
+            availableVoiceCount: 6
+        )
+        let roleByID = Dictionary(uniqueKeysWithValues: updated.map { ($0.id, $0) })
+
+        for lead in leads {
+            XCTAssertEqual(statsByID[lead.id]?.tier, .lead)
+            XCTAssertEqual(roleByID[lead.id]?.isMajor, true)
+            XCTAssertEqual(roleByID[lead.id]?.allowSharedMinorVoice, false)
+        }
+        for minor in minors {
+            XCTAssertEqual(roleByID[minor.id]?.isMajor, false)
+            XCTAssertEqual(roleByID[minor.id]?.allowSharedMinorVoice, true, "仅说 2 句话的配角在多角色场景下必须自动开启共享声线")
+        }
+        for silent in silentRoles {
+            XCTAssertEqual(statsByID[silent.id]?.tier, .ensemble)
+            XCTAssertEqual(statsByID[silent.id]?.requiresVoiceBinding, false)
+            XCTAssertEqual(roleByID[silent.id]?.allowSharedMinorVoice, true)
+        }
+    }
+
+    func testAC2_50RolesVs5VoicesDualPoolZeroDeadlockAndAC6_SilentRoleExemption() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let controller = AudiobookCastController(store: store)
+        let fixture = try await makeTwoChapterBook(store: store)
+
+        var characters = try await store.characters(for: fixture.bookID)
+        let leadFemale = AudiobookCharacter(
+            bookID: fixture.bookID,
+            displayName: "苏晴",
+            isNarrator: false,
+            isMajor: true,
+            allowSharedMinorVoice: false,
+            chapterIDs: [fixture.chapterA.id, fixture.chapterB.id]
+        )
+        characters.append(leadFemale)
+
+        var minors: [AudiobookCharacter] = []
+        for idx in 1...45 {
+            let m = AudiobookCharacter(
+                bookID: fixture.bookID,
+                displayName: idx % 2 == 0 ? "男配_\(idx)" : "女配_\(idx)",
+                isNarrator: false,
+                isMajor: false,
+                allowSharedMinorVoice: true,
+                chapterIDs: [fixture.chapterA.id]
+            )
+            minors.append(m)
+            characters.append(m)
+        }
+        // 新增 2 个 0 台词仅提及人物（测试 AC6）
+        let silent1 = AudiobookCharacter(bookID: fixture.bookID, displayName: "传说老祖甲", isNarrator: false, isMajor: false, allowSharedMinorVoice: true)
+        let silent2 = AudiobookCharacter(bookID: fixture.bookID, displayName: "传说老祖乙", isNarrator: false, isMajor: false, allowSharedMinorVoice: true)
+        characters.append(contentsOf: [silent1, silent2])
+
+        var annotations = try await store.annotations(for: fixture.bookID)
+        var offset: Int64 = 10_000
+        let winID = UUID()
+        for _ in 0..<15 {
+            annotations.append(.init(bookID: fixture.bookID, chapterID: fixture.chapterA.id, windowID: winID, atomID: UUID(), sourceRange: .init(lowerBound: offset, upperBound: offset + 10), assignment: .assigned(roleID: fixture.hero.id)))
+            offset += 10
+            annotations.append(.init(bookID: fixture.bookID, chapterID: fixture.chapterA.id, windowID: winID, atomID: UUID(), sourceRange: .init(lowerBound: offset, upperBound: offset + 10), assignment: .assigned(roleID: leadFemale.id)))
+            offset += 10
+        }
+        for m in minors {
+            annotations.append(.init(bookID: fixture.bookID, chapterID: fixture.chapterA.id, windowID: winID, atomID: UUID(), sourceRange: .init(lowerBound: offset, upperBound: offset + 10), assignment: .assigned(roleID: m.id)))
+            offset += 10
+        }
+
+        let voices: [SafeVoiceEntry] = [
+            makeTestSafeVoice(id: "v-narrator", name: "默认沉稳旁白", styleTags: ["旁白"]),
+            makeTestSafeVoice(id: "dylan", name: "北京青年男声", styleTags: ["青年", "男声"]),
+            makeTestSafeVoice(id: "vivian", name: "明亮青年女声", styleTags: ["青年", "女声"]),
+            makeTestSafeVoice(id: "uncle_fu", name: "醇厚中年男声", styleTags: ["中年", "男声"]),
+            makeTestSafeVoice(id: "serena", name: "成熟温柔女声", styleTags: ["中年", "女声"])
+        ]
+
+        let (stratifiedChars, _, _) = AudiobookCastRegistry.computeRoleDialogueStats(
+            characters: characters,
+            annotations: annotations,
+            availableVoiceCount: voices.count
+        )
+        try await store.saveCharacters(bookID: fixture.bookID, characters: stratifiedChars)
+        try await store.saveAnnotations(bookID: fixture.bookID, annotations: annotations)
+
+        let recommended = AudiobookCastRegistry.recommendVoiceBindings(
+            characters: stratifiedChars,
+            availableVoices: voices,
+            annotations: annotations,
+            bookID: fixture.bookID,
+            voiceMetadataByID: [:]
+        )
+
+        XCTAssertEqual(recommended.count, stratifiedChars.count, "全部 50 个角色均应生成推荐绑定")
+
+        // 逐个写入绑定（排除 2 个 0 台词人物以同时验证 AC6 门禁豁免）
+        for role in stratifiedChars where role.id != silent1.id && role.id != silent2.id {
+            let binding = try XCTUnwrap(recommended[role.id])
+            try await controller.bindVoice(bookID: fixture.bookID, roleID: role.id, binding: binding)
+        }
+
+        let exclusiveVoices: Set<String> = [
+            recommended[fixture.narrator.id]!.voiceID,
+            recommended[fixture.hero.id]!.voiceID,
+            recommended[leadFemale.id]!.voiceID
+        ]
+        XCTAssertEqual(exclusiveVoices.count, 3, "旁白与 2 名核心主角应各自独占不同音色")
+        for m in minors {
+            XCTAssertFalse(
+                exclusiveVoices.contains(recommended[m.id]!.voiceID),
+                "配角共享池绝不可侵占旁白或核心主角的独占音色"
+            )
+        }
+
+        // AC6：即使 silent1 与 silent2 未绑定音色，confirmCast 仍应顺利通过
+        var book = try await store.book(id: fixture.bookID)
+        book.analysisState = .allWindowsValidated
+        try await store.updateBook(book)
+        let castRev = try await controller.currentCastRevisionID(for: fixture.bookID)
+        try await controller.confirmCast(bookID: fixture.bookID, revisionID: castRev)
+    }
+
+    func testAC3_ScenePartnerGraphColoringAndAC4_MicroProsodyAndAC5_BatchArchetypeBinding() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let controller = AudiobookCastController(store: store)
+        let fixture = try await makeTwoChapterBook(store: store)
+
+        let partnerA = AudiobookCharacter(
+            bookID: fixture.bookID,
+            displayName: "张掌柜",
+            isNarrator: false,
+            isMajor: false,
+            allowSharedMinorVoice: true,
+            chapterIDs: [fixture.chapterA.id]
+        )
+        let partnerB = AudiobookCharacter(
+            bookID: fixture.bookID,
+            displayName: "李掌柜",
+            isNarrator: false,
+            isMajor: false,
+            allowSharedMinorVoice: true,
+            chapterIDs: [fixture.chapterA.id]
+        )
+        let partnerC = AudiobookCharacter(
+            bookID: fixture.bookID,
+            displayName: "王老汉",
+            isNarrator: false,
+            isMajor: false,
+            allowSharedMinorVoice: true,
+            chapterIDs: [fixture.chapterB.id]
+        )
+
+        var characters = try await store.characters(for: fixture.bookID)
+        characters.append(contentsOf: [partnerA, partnerB, partnerC])
+
+        var annotations = try await store.annotations(for: fixture.bookID)
+        let winID = UUID()
+        var offset: Int64 = 20_000
+        for _ in 0..<12 {
+            annotations.append(.init(bookID: fixture.bookID, chapterID: fixture.chapterA.id, windowID: winID, atomID: UUID(), sourceRange: .init(lowerBound: offset, upperBound: offset + 10), assignment: .assigned(roleID: fixture.hero.id)))
+            offset += 10
+        }
+        // 张掌柜与李掌柜在同一场戏紧邻交替对话 4 轮
+        for i in 0..<4 {
+            let speakerID = (i % 2 == 0) ? partnerA.id : partnerB.id
+            annotations.append(.init(bookID: fixture.bookID, chapterID: fixture.chapterA.id, windowID: winID, atomID: UUID(), sourceRange: .init(lowerBound: offset, upperBound: offset + 10), assignment: .assigned(roleID: speakerID)))
+            offset += 10
+        }
+        annotations.append(.init(bookID: fixture.bookID, chapterID: fixture.chapterB.id, windowID: winID, atomID: UUID(), sourceRange: .init(lowerBound: offset, upperBound: offset + 10), assignment: .assigned(roleID: partnerC.id)))
+
+        try await store.saveCharacters(bookID: fixture.bookID, characters: characters)
+        try await store.saveAnnotations(bookID: fixture.bookID, annotations: annotations)
+
+        let voices: [SafeVoiceEntry] = [
+            makeTestSafeVoice(id: "v-narrator", name: "旁白", styleTags: ["旁白"]),
+            makeTestSafeVoice(id: "dylan", name: "青年男声", styleTags: ["青年", "男声"]),
+            makeTestSafeVoice(id: "uncle_fu", name: "醇厚中年男声一号", styleTags: ["中年", "男声"]),
+            makeTestSafeVoice(id: "uncle_chen", name: "沧桑中年男声二号", styleTags: ["中年", "男声"])
+        ]
+
+        let recommended = AudiobookCastRegistry.recommendVoiceBindings(
+            characters: characters,
+            availableVoices: voices,
+            annotations: annotations,
+            bookID: fixture.bookID,
+            voiceMetadataByID: [:]
+        )
+
+        // AC3：同场紧邻交替对话的张掌柜与李掌柜绝不分配同一音色
+        XCTAssertNotEqual(
+            recommended[partnerA.id]?.voiceID,
+            recommended[partnerB.id]?.voiceID,
+            "同场紧邻对手戏的两个同声部配角必须分配不同音色"
+        )
+
+        // AC4：验证 system 音色微语速错位与 clone 音色确定性种子错位
+        let (sysSpeed0, sysSeed0) = AudiobookCastRegistry.computeMicroProsodyAndSeed(
+            for: partnerA, archetype: .matureMale, voiceMode: "system", slotIndex: 0
+        )
+        let (sysSpeed1, sysSeed1) = AudiobookCastRegistry.computeMicroProsodyAndSeed(
+            for: partnerB, archetype: .matureMale, voiceMode: "system", slotIndex: 1
+        )
+        XCTAssertNil(sysSeed0)
+        XCTAssertNil(sysSeed1)
+        XCTAssertNotEqual(sysSpeed0, sysSpeed1, "共用 system 音色的不同槽位配角应获得差异化微语速")
+
+        let (cloneSpeed0, cloneSeed0) = AudiobookCastRegistry.computeMicroProsodyAndSeed(
+            for: partnerA, archetype: .matureMale, voiceMode: "clone", slotIndex: 0
+        )
+        let (cloneSpeed1, cloneSeed1) = AudiobookCastRegistry.computeMicroProsodyAndSeed(
+            for: partnerB, archetype: .matureMale, voiceMode: "clone", slotIndex: 1
+        )
+        XCTAssertEqual(cloneSpeed0, 1.0)
+        XCTAssertEqual(cloneSpeed1, 1.0)
+        XCTAssertNotEqual(cloneSeed0, cloneSeed1, "共用 clone 音色的配角应获得不同确定性 callerSeed")
+
+        // AC5：按声部行当批量换绑，更新所有中老年男配角但绝不覆盖主角
+        for role in characters {
+            if let b = recommended[role.id] {
+                try await controller.bindVoice(bookID: fixture.bookID, roleID: role.id, binding: b)
+            }
+        }
+        let heroOriginalVoice = try await store.voiceBindings(for: fixture.bookID)[fixture.hero.id]?.voiceID
+        let newMatureVoice = makeTestSafeVoice(id: "master_zhao", name: "新中老年男配声线", styleTags: ["中年", "男声"])
+        let updatedCount = try await controller.batchBindArchetypeVoice(
+            bookID: fixture.bookID,
+            archetype: .matureMale,
+            voice: newMatureVoice
+        )
+        XCTAssertEqual(updatedCount, 3)
+        let updatedBindings = try await store.voiceBindings(for: fixture.bookID)
+        XCTAssertEqual(updatedBindings[partnerA.id]?.voiceID, "master_zhao")
+        XCTAssertEqual(updatedBindings[partnerB.id]?.voiceID, "master_zhao")
+        XCTAssertEqual(updatedBindings[partnerC.id]?.voiceID, "master_zhao")
+        XCTAssertEqual(updatedBindings[fixture.hero.id]?.voiceID, heroOriginalVoice, "核心主角音色绝不可被声部批量换绑覆盖")
+    }
+
+    func testAC7_AC8_AC9_AC10_100PlusVoiceScopeIsolationPromotionTaxonomyAndCollections() throws {
+        let catalogURL = tempRoot.appendingPathComponent("test_voice_catalog.json")
+        let catalogStore = VoiceCatalogStore(storageURL: catalogURL)
+
+        let bookA = UUID()
+        let bookB = UUID()
+        let roleHeroA = AudiobookCharacter(
+            bookID: bookA,
+            displayName: "林动",
+            isNarrator: false,
+            isMajor: true,
+            allowSharedMinorVoice: false
+        )
+
+        // AC7：注册《书籍 A》角色专用音色与《书籍 B》30 个角色专用音色
+        catalogStore.registerBookExclusiveVoice(
+            voiceID: "v_bookA_lindong",
+            bookID: bookA,
+            bookTitle: "武动乾坤",
+            roleID: roleHeroA.id,
+            roleName: "林动",
+            archetype: .youngMale
+        )
+
+        var voices: [SafeVoiceEntry] = [
+            makeTestSafeVoice(id: "v_bookA_lindong", name: "林动专属定制音色", mode: "clone", styleTags: ["青年", "男声"])
+        ]
+
+        for i in 1...30 {
+            let vid = "v_bookB_role_\(i)"
+            catalogStore.registerBookExclusiveVoice(
+                voiceID: vid,
+                bookID: bookB,
+                bookTitle: "他书B",
+                roleID: UUID(),
+                roleName: "他书角色_\(i)",
+                archetype: .youngMale
+            )
+            voices.append(makeTestSafeVoice(id: vid, name: "他书男主音色_\(i)", mode: "clone", styleTags: ["青年", "男声"]))
+        }
+
+        // AC9：构造 90 个通用音色（总计 121 个音色），验证 100% 确定性归入六大声部行当
+        let archetypeSamples: [(String, [String], AudiobookVoiceArchetype)] = [
+            ("旁白叙事者", ["旁白", "叙事"], .narrator),
+            ("阳光青年男声", ["青年", "男声"], .youngMale),
+            ("沧桑大叔男声", ["中年", "男声", "醇厚"], .matureMale),
+            ("清脆少女声线", ["青年", "女声", "少女"], .youngFemale),
+            ("成熟温婉女声", ["中年", "女声", "成熟"], .matureFemale),
+            ("活泼孩童群像", ["孩童", "中性"], .neutralEnsemble)
+        ]
+        for i in 0..<90 {
+            let sample = archetypeSamples[i % archetypeSamples.count]
+            let vid = "v_global_\(i)"
+            let v = makeTestSafeVoice(id: vid, name: "\(sample.0)_\(i)", mode: "system", styleTags: sample.1)
+            voices.append(v)
+            let resolved = AudiobookCastRegistry.resolveVoiceArchetype(
+                for: v,
+                metadata: catalogStore.metadata(for: vid)
+            )
+            XCTAssertEqual(resolved, sample.2, "100+ 音色必须准确自动归入六大声部行当")
+        }
+
+        // 验证《书籍 A》选角时：100% 隔离《书籍 B》的 30 个专用音色，且「林动」精准匹配其专属音色
+        for i in 1...30 {
+            XCTAssertFalse(
+                catalogStore.isVoiceActiveForBook(voiceID: "v_bookB_role_\(i)", currentBookID: bookA),
+                "其他书籍的专用音色不得出现在当前书活跃池中"
+            )
+        }
+        let bindingsA = AudiobookCastRegistry.recommendVoiceBindings(
+            characters: [roleHeroA],
+            availableVoices: voices,
+            bookID: bookA,
+            voiceMetadataByID: catalogStore.metadataByVoiceID
+        )
+        XCTAssertEqual(bindingsA[roleHeroA.id]?.voiceID, "v_bookA_lindong")
+
+        // AC8：将《书籍 B》专用音色一键晋升为全局通用音色后，对《书籍 A》与演播台立即可见
+        catalogStore.promoteToGlobalReusable(voiceID: "v_bookB_role_1")
+        XCTAssertTrue(catalogStore.isVoiceActiveForBook(voiceID: "v_bookB_role_1", currentBookID: bookA))
+        XCTAssertTrue(catalogStore.isVoiceActiveForBook(voiceID: "v_bookB_role_1", currentBookID: nil))
+        XCTAssertEqual(catalogStore.metadata(for: "v_bookB_role_1")?.originBookTitle, "他书B")
+
+        // AC10：创建剧团音色包并验证优先选角与归档隔离
+        let collection = catalogStore.createCollection(name: "古风仙侠剧团包", voiceIDs: ["v_global_1"])
+        catalogStore.archiveVoices(voiceIDs: ["v_global_7"])
+        XCTAssertFalse(catalogStore.isVoiceActiveForBook(voiceID: "v_global_7", currentBookID: bookA))
+
+        let newLead = AudiobookCharacter(bookID: bookB, displayName: "新书少年男主", isNarrator: false, isMajor: true, allowSharedMinorVoice: false)
+        let bindingsWithCollection = AudiobookCastRegistry.recommendVoiceBindings(
+            characters: [newLead],
+            availableVoices: voices.filter { !$0.id.hasPrefix("v_bookB_") },
+            bookID: bookB,
+            preferredCollectionID: collection.id,
+            voiceMetadataByID: catalogStore.metadataByVoiceID
+        )
+        XCTAssertEqual(bindingsWithCollection[newLead.id]?.voiceID, "v_global_1", "绑定剧团音色包后应优先从该合集中选角")
     }
 }
