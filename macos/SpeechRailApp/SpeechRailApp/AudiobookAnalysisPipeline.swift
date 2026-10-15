@@ -1228,4 +1228,280 @@ public actor AudiobookAnalysisPipeline {
             + String(chars[20..<32])
         return UUID(uuidString: formatted) ?? UUID()
     }
+
+    // MARK: - Secondary Targeted LLM Pass for Unknown Speakers
+
+    public struct SecondaryResolutionResult: Codable, Equatable, Sendable {
+        public let initialUnknownCount: Int
+        public let resolvedCount: Int
+        public let remainingUnknownCount: Int
+
+        public init(
+            initialUnknownCount: Int,
+            resolvedCount: Int,
+            remainingUnknownCount: Int
+        ) {
+            self.initialUnknownCount = initialUnknownCount
+            self.resolvedCount = resolvedCount
+            self.remainingUnknownCount = remainingUnknownCount
+        }
+    }
+
+    /// 对未确认（`unknown`）的说话人段落执行二次定向 LLM 消歧分析：
+    /// 利用全书已归并确认的完整角色列表（含别称与声线画像）以及未知段落前后的双向已确认说话人上下文，
+    /// 自动消解跨窗口断句或后文揭示身份的对白，并为仍需人工确认的段落收敛候选角色。
+    public func resolveUnknownSpeakers(
+        bookID: UUID,
+        config: AudiobookAnalysisConfigSnapshot
+    ) async throws -> SecondaryResolutionResult {
+        guard config.isConfigured else {
+            throw AudiobookAnalysisError.notConfigured
+        }
+        let allAnnotations = try await store.annotations(for: bookID)
+        let initialUnknowns = allAnnotations.filter { $0.assignment.isUnknown && !$0.userConfirmed }
+        guard !initialUnknowns.isEmpty else {
+            return SecondaryResolutionResult(initialUnknownCount: 0, resolvedCount: 0, remainingUnknownCount: 0)
+        }
+
+        let source = try await store.sourceIndex(for: bookID)
+        let chapters = try await store.chapters(for: bookID).sorted { $0.ordinal < $1.ordinal }
+        let allAtoms = try await store.atoms(for: bookID)
+        let atomsByID = Dictionary(uniqueKeysWithValues: allAtoms.map { ($0.id, $0) })
+        let atomsByChapter = Dictionary(grouping: allAtoms, by: \.chapterID)
+        let characters = try await store.characters(for: bookID)
+        let narratorID = characters.first(where: \.isNarrator)?.id ?? UUID()
+        let roleNameByID = Dictionary(uniqueKeysWithValues: characters.map { ($0.id, $0.displayName) })
+        let validRoleIDs = Set(characters.map(\.id))
+
+        var annotationsByAtomID = Dictionary(uniqueKeysWithValues: allAnnotations.map { ($0.atomID, $0) })
+        var resolvedSpeakerByAtomID: [UUID: String] = [:]
+        for ann in allAnnotations {
+            if let roleID = ann.assignment.roleID, let name = roleNameByID[roleID] {
+                resolvedSpeakerByAtomID[ann.atomID] = name
+            }
+        }
+
+        let client = try await clientFactory(config)
+        var updatedAnnotations: [AudiobookAnnotation] = []
+        var newlyResolvedCount = 0
+
+        for chapter in chapters {
+            let excludedSet = Set(chapter.excludedRanges)
+            let chapterAtoms = (atomsByChapter[chapter.id] ?? [])
+                .sorted { $0.ordinal < $1.ordinal }
+                .filter { $0.kind != .formatting && !excludedSet.contains($0.sourceRange) }
+            guard !chapterAtoms.isEmpty else { continue }
+
+            let unknownIndices = chapterAtoms.indices.filter { idx in
+                guard let ann = annotationsByAtomID[chapterAtoms[idx].id] else { return false }
+                return ann.assignment.isUnknown && !ann.userConfirmed
+            }
+            guard !unknownIndices.isEmpty else { continue }
+
+            // 将同章相邻（间距 <= 4 个段落且总跨度 <= 10 个段落）的未知对白聚合成紧凑上下文簇
+            var clusters: [(startIdx: Int, endIdx: Int)] = []
+            for uIdx in unknownIndices {
+                if var last = clusters.popLast() {
+                    let spanCount = uIdx - last.startIdx + 1
+                    if uIdx - last.endIdx <= 4 && spanCount <= 10 {
+                        last.endIdx = uIdx
+                        clusters.append(last)
+                        continue
+                    }
+                    clusters.append(last)
+                }
+                clusters.append((startIdx: uIdx, endIdx: uIdx))
+            }
+
+            for cluster in clusters {
+                let primarySlice = Array(chapterAtoms[cluster.startIdx...cluster.endIdx])
+                let primaryScalars = primarySlice.reduce(0) {
+                    $0 + ((try? source.text(in: $1.sourceRange).unicodeScalars.count) ?? 0)
+                }
+                guard primaryScalars <= policy.maxPrimaryScalars,
+                      primarySlice.count <= policy.maxPrimaryAtoms
+                else {
+                    continue
+                }
+
+                let leadingSlice = Self.selectContextAtoms(
+                    from: chapterAtoms,
+                    beforeIndex: cluster.startIdx,
+                    source: source,
+                    maxScalars: policy.maxContextScalarsPerSide
+                )
+                let trailingSlice = Self.selectTrailingContextAtoms(
+                    from: chapterAtoms,
+                    afterIndex: cluster.endIdx + 1,
+                    source: source,
+                    maxScalars: policy.maxContextScalarsPerSide
+                )
+
+                let primaryItems = try makePromptAtomItems(
+                    ids: primarySlice.map(\.id),
+                    atomsByID: atomsByID,
+                    source: source,
+                    assignLocalIndices: true,
+                    resolvedSpeakerByAtomID: resolvedSpeakerByAtomID
+                )
+                let leadingItems = try makePromptAtomItems(
+                    ids: leadingSlice.map(\.id),
+                    atomsByID: atomsByID,
+                    source: source,
+                    resolvedSpeakerByAtomID: resolvedSpeakerByAtomID
+                )
+                let trailingItems = try makePromptAtomItems(
+                    ids: trailingSlice.map(\.id),
+                    atomsByID: atomsByID,
+                    source: source,
+                    resolvedSpeakerByAtomID: resolvedSpeakerByAtomID
+                )
+
+                let combinedText = (leadingItems + primaryItems + trailingItems).map(\.text).joined(separator: "\n")
+                let candidateSummaries = AudiobookCastRegistry.selectCandidateSummariesForWindow(
+                    characters: characters,
+                    chapterID: chapter.id,
+                    windowText: combinedText,
+                    policy: policy
+                )
+                let safeCandidates = AudiobookCastRegistry.clampSummariesToBudget(
+                    candidateSummaries,
+                    maxScalars: policy.maxCharacterSummaryScalars,
+                    maxCandidates: policy.maxMergeCandidatesPerBatch
+                )
+
+                guard let prompt = try? AudiobookAnalysisPrompts.makeSecondaryUnknownResolutionPrompt(
+                    rootWindowID: UUID(),
+                    primaryAtoms: primaryItems,
+                    leadingContext: leadingItems,
+                    trailingContext: trailingItems,
+                    candidateCharacters: safeCandidates,
+                    policy: policy
+                ),
+                      let raw = try? await client.complete(prompt)
+                else {
+                    continue
+                }
+
+                let cleaned = Self.stripMarkdownCodeFences(raw)
+                guard let data = cleaned.data(using: .utf8),
+                      let response = try? JSONDecoder().decode(AudiobookAnnotationResponse.self, from: data)
+                else {
+                    continue
+                }
+
+                let expectedIDSet = Set(primaryItems.map(\.atomID))
+                let atomIDByRef = Self.buildAtomLookupTable(for: primaryItems)
+                let roleIDByRef = Self.buildRoleLookupTable(
+                    characters: characters,
+                    candidateSummaries: safeCandidates
+                )
+
+                for item in response.items {
+                    let rawToken = item.atomRef ?? item.atomID.uuidString
+                    guard let resolvedAtomID = Self.resolveAtomID(
+                        from: rawToken,
+                        lookup: atomIDByRef,
+                        allowedAtomIDs: expectedIDSet
+                    ),
+                          var existingAnn = annotationsByAtomID[resolvedAtomID],
+                          existingAnn.assignment.isUnknown,
+                          !existingAnn.userConfirmed
+                    else {
+                        continue
+                    }
+
+                    let resolvedRole: UUID? = {
+                        if let direct = item.roleID, validRoleIDs.contains(direct) {
+                            return direct
+                        }
+                        if let rawRole = item.roleRef {
+                            return Self.resolveRoleID(from: rawRole, lookup: roleIDByRef, validRoleIDs: validRoleIDs)
+                        }
+                        return nil
+                    }()
+                    let resolvedCandidates: [UUID] = {
+                        let mapped = item.candidateRoleRefs.compactMap {
+                            Self.resolveRoleID(from: $0, lookup: roleIDByRef, validRoleIDs: validRoleIDs)
+                        }
+                        let base = mapped.isEmpty ? item.candidateRoleIDs.filter { validRoleIDs.contains($0) } : mapped
+                        return Array(NSOrderedSet(array: base)) as? [UUID] ?? base
+                    }()
+
+                    switch item.speakerKind {
+                    case .narrator:
+                        guard item.confidence >= 0.65 else { continue }
+                        existingAnn.assignment = .assigned(roleID: narratorID)
+                        if let ev = item.evidence, !ev.isEmpty {
+                            existingAnn.evidence = ev
+                        }
+                        existingAnn.annotationRevision += 1
+                        annotationsByAtomID[resolvedAtomID] = existingAnn
+                        resolvedSpeakerByAtomID[resolvedAtomID] = roleNameByID[narratorID]
+                        updatedAnnotations.append(existingAnn)
+                        newlyResolvedCount += 1
+
+                    case .character:
+                        if let roleID = resolvedRole, item.confidence >= 0.60 {
+                            existingAnn.assignment = .assigned(roleID: roleID)
+                            if let ev = item.evidence, !ev.isEmpty {
+                                existingAnn.evidence = ev
+                            }
+                            existingAnn.annotationRevision += 1
+                            annotationsByAtomID[resolvedAtomID] = existingAnn
+                            resolvedSpeakerByAtomID[resolvedAtomID] = roleNameByID[roleID]
+                            updatedAnnotations.append(existingAnn)
+                            newlyResolvedCount += 1
+                        } else if !resolvedCandidates.isEmpty {
+                            existingAnn.assignment = .unknown(
+                                reason: item.evidence ?? existingAnn.evidence ?? "二次分析建议人工从候选角色中确认",
+                                candidateRoleIDs: resolvedCandidates
+                            )
+                            if let ev = item.evidence, !ev.isEmpty {
+                                existingAnn.evidence = ev
+                            }
+                            existingAnn.annotationRevision += 1
+                            annotationsByAtomID[resolvedAtomID] = existingAnn
+                            updatedAnnotations.append(existingAnn)
+                        }
+
+                    case .unknown:
+                        if !resolvedCandidates.isEmpty || item.evidence != nil {
+                            let existingCandidates: [UUID] = {
+                                if case let .unknown(_, cands) = existingAnn.assignment { return cands }
+                                return []
+                            }()
+                            existingAnn.assignment = .unknown(
+                                reason: item.evidence ?? existingAnn.evidence ?? "多角色对话需人工确认",
+                                candidateRoleIDs: resolvedCandidates.isEmpty ? existingCandidates : resolvedCandidates
+                            )
+                            if let ev = item.evidence, !ev.isEmpty {
+                                existingAnn.evidence = ev
+                            }
+                            existingAnn.annotationRevision += 1
+                            annotationsByAtomID[resolvedAtomID] = existingAnn
+                            updatedAnnotations.append(existingAnn)
+                        }
+                    }
+                }
+            }
+        }
+
+        if !updatedAnnotations.isEmpty {
+            try await store.saveAnnotations(bookID: bookID, annotations: updatedAnnotations)
+            let refreshedAnnotations = try await store.annotations(for: bookID)
+            let refreshedCharacters = AudiobookCastRegistry.refreshCharacterMajorStatusAndOrder(
+                characters: characters,
+                annotations: refreshedAnnotations
+            )
+            try await store.saveCharacters(bookID: bookID, characters: refreshedCharacters)
+        }
+
+        let remainingCount = max(0, initialUnknowns.count - newlyResolvedCount)
+        return SecondaryResolutionResult(
+            initialUnknownCount: initialUnknowns.count,
+            resolvedCount: newlyResolvedCount,
+            remainingUnknownCount: remainingCount
+        )
+    }
 }

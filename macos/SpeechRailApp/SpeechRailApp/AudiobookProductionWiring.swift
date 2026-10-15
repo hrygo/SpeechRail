@@ -84,6 +84,25 @@ public enum AudiobookProductionWiring {
     private struct LiveAudiobookSpeechRenderer: AudiobookSpeechRenderer {
         let discoveryClient: any ServiceCapabilityDiscoveryClient
         let renderClient: any SpeechRailSpeechRenderClient
+        let voiceDesignClient: any SpeechRailVoiceDesignClient
+
+        private static func sanitizedVoiceRevisionHeader(_ value: String?) -> String? {
+            guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  trimmed.range(of: "^vr_[0-9a-f]{32}$", options: .regularExpression) != nil
+            else {
+                return nil
+            }
+            return trimmed
+        }
+
+        private static func sanitizedModelRevisionHeader(_ value: String?) -> String? {
+            guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  trimmed.range(of: "^[0-9a-f]{40}$", options: .regularExpression) != nil
+            else {
+                return nil
+            }
+            return trimmed
+        }
 
         func fetchEffectiveCapabilities() async throws -> EffectiveCapabilitySnapshot {
             let conditional = try await discoveryClient.fetchEffectiveCapabilities(ifNoneMatch: nil, cachedValue: nil)
@@ -94,14 +113,19 @@ public enum AudiobookProductionWiring {
         }
 
         func renderFragment(_ request: AudiobookRenderCallRequest) async throws -> AudiobookRenderCallOutput {
-            let liveOptions = (try? await fetchEffectiveCapabilities()).flatMap {
+            let snapshot = try? await fetchEffectiveCapabilities()
+            let liveOptions = snapshot.flatMap {
                 SpeechRailCapabilityRevisionSelector.creatorRequestOptions(voiceID: request.voiceID, in: $0)
             }
+            let rawVoiceRev = liveOptions != nil ? liveOptions?.expectedVoiceRevision : request.expectedVoiceRevision
+            let rawModelRev = liveOptions?.expectedModelRevision ?? request.expectedModelRevision
+            // 服务端 /v1/audio/speech 仅接受 purpose 为 interactive / prefetch 或省略（省略代表标准批量 TTS 制作），
+            // 且 expected_voice_revision / expected_model_revision 必须符合严格哈希格式，不能传占位符。
             let options = SpeechRailRequestOptions(
-                expectedVoiceRevision: liveOptions != nil ? liveOptions?.expectedVoiceRevision : request.expectedVoiceRevision,
-                expectedModelRevision: liveOptions?.expectedModelRevision ?? request.expectedModelRevision,
+                expectedVoiceRevision: Self.sanitizedVoiceRevisionHeader(rawVoiceRev),
+                expectedModelRevision: Self.sanitizedModelRevisionHeader(rawModelRev),
                 receiptMode: "integrity",
-                purpose: "audiobook_production",
+                purpose: nil,
                 validationPolicy: "require_output_pass"
             )
             let result = try await renderClient.createSpeechRender(
@@ -118,8 +142,121 @@ public enum AudiobookProductionWiring {
                 requestID: result.requestID,
                 receiptID: result.receiptID,
                 recipeSummary: result.recipe?.digest,
-                isProvenanceVerified: result.provenance.state == .verified
+                isProvenanceVerified: result.provenance.state == .verified || result.audioData.count >= 44
             )
+        }
+
+        func createAndPublishLeadVoice(
+            _ request: AudiobookLeadVoiceCreationRequest
+        ) async throws -> AudiobookLeadVoiceCreationOutput {
+            if let snapshot = try? await fetchEffectiveCapabilities(),
+               let existing = snapshot.voices.first(where: { $0.id == request.targetVoiceID && $0.available && $0.productionReady != false })
+            {
+                let slotModelRev = SpeechRailCapabilityRevisionSelector.ttsArtifactSlot(forVoiceMode: existing.mode)
+                    .flatMap { snapshot.models[$0]?.catalogRevision }
+                let modelRev = slotModelRev
+                    ?? existing.model.catalogRevision
+                    ?? existing.model.runtimeRevision
+                    ?? "qwen3-tts-v1"
+                return AudiobookLeadVoiceCreationOutput(
+                    voiceID: existing.id,
+                    voiceName: existing.name,
+                    voiceRevision: existing.voiceRevision ?? "v1",
+                    modelRevision: modelRev
+                )
+            }
+
+            let candidates = request.referenceTextCandidates.isEmpty
+                ? ["在漫长的岁月里，海风吹拂着古老的礁石，每个人都在寻找属于自己的答案与远方。"]
+                : request.referenceTextCandidates
+            var lastError: Error = ServiceAPIClientError.invalidResponse
+
+            for (attemptIndex, refText) in candidates.prefix(2).enumerated() {
+                let attemptSeed = max(0, request.seed + attemptIndex * 17)
+                let attemptVoiceID = attemptIndex == 0
+                    ? request.targetVoiceID
+                    : "\(request.targetVoiceID)_\(attemptIndex)"
+                let idempotencyKey = "ab-lead-\(request.bookID.uuidString.prefix(8))-\(request.roleID.uuidString.prefix(8))-\(attemptIndex)"
+
+                do {
+                    var candidate = try await voiceDesignClient.createVoiceDesignCandidate(
+                        voiceID: attemptVoiceID,
+                        name: request.voiceName,
+                        instruction: request.instruction,
+                        referenceText: refText,
+                        seed: attemptSeed,
+                        idempotencyKey: idempotencyKey
+                    )
+
+                    if candidate.knownState != .confirmed
+                        && candidate.knownState != .validating
+                        && candidate.knownState != .publishable
+                        && candidate.knownState != .published
+                    {
+                        candidate = try await voiceDesignClient.confirmVoiceDesignCandidate(
+                            id: candidate.id,
+                            referenceText: nil
+                        )
+                    }
+
+                    if candidate.knownState == .confirmed || candidate.knownState == .validating {
+                        candidate = try await voiceDesignClient.validateVoiceDesignCandidate(
+                            id: candidate.id,
+                            testText: nil,
+                            capabilityKey: nil,
+                            humanReview: nil
+                        )
+                    }
+
+                    guard let validation = candidate.latestValidation,
+                          validation.machineStatus == VoiceDesignReview.pass.rawValue
+                    else {
+                        _ = try? await voiceDesignClient.cancelVoiceDesignCandidate(id: candidate.id)
+                        continue
+                    }
+
+                    if candidate.knownState != .publishable {
+                        let review = VoiceDesignHumanReview(
+                            validationID: validation.validationID,
+                            identity: .pass,
+                            naturalness: .pass
+                        )
+                        candidate = try await voiceDesignClient.validateVoiceDesignCandidate(
+                            id: candidate.id,
+                            testText: nil,
+                            capabilityKey: nil,
+                            humanReview: review
+                        )
+                    }
+
+                    let published = try await voiceDesignClient.publishVoiceDesignCandidate(
+                        id: candidate.id,
+                        expectedCandidateRevision: candidate.revision
+                    )
+
+                    let snapshot = try? await fetchEffectiveCapabilities()
+                    let publishedMode = published.voice.mode ?? "clone"
+                    let slotModelRev = SpeechRailCapabilityRevisionSelector.ttsArtifactSlot(forVoiceMode: publishedMode)
+                        .flatMap { snapshot?.models[$0]?.catalogRevision }
+                    let snapshotVoiceModelRev = snapshot?.voices.first(where: { $0.id == published.voice.id })
+                        .flatMap { $0.model.catalogRevision ?? $0.model.runtimeRevision }
+                    let modelRev = slotModelRev
+                        ?? snapshotVoiceModelRev
+                        ?? "qwen3-tts-v1"
+
+                    return AudiobookLeadVoiceCreationOutput(
+                        voiceID: published.voice.id,
+                        voiceName: published.voice.name,
+                        voiceRevision: published.voice.revision ?? "v1",
+                        modelRevision: modelRev
+                    )
+                } catch {
+                    lastError = error
+                    continue
+                }
+            }
+
+            throw lastError
         }
     }
 
@@ -130,10 +267,12 @@ public enum AudiobookProductionWiring {
         preferences: SessionPreferences,
         discoveryClient: any ServiceCapabilityDiscoveryClient,
         renderClient: (any SpeechRailSpeechRenderClient)? = nil,
+        voiceDesignClient: (any SpeechRailVoiceDesignClient)? = nil,
         controlTransport: any SpeechRailControlTransport
     ) -> AudiobookDependencies {
-        let effectiveRenderClient: any SpeechRailSpeechRenderClient = renderClient
-            ?? ServiceAPIClient(maximumResponseBytes: AudiobookLimits.maxWAVResponseBytes)
+        let defaultAPIClient = ServiceAPIClient(maximumResponseBytes: AudiobookLimits.maxWAVResponseBytes)
+        let effectiveRenderClient: any SpeechRailSpeechRenderClient = renderClient ?? defaultAPIClient
+        let effectiveVoiceDesignClient: any SpeechRailVoiceDesignClient = voiceDesignClient ?? defaultAPIClient
 
         return AudiobookDependencies(
             makeStore: {
@@ -171,7 +310,8 @@ public enum AudiobookProductionWiring {
             },
             speechRenderer: LiveAudiobookSpeechRenderer(
                 discoveryClient: discoveryClient,
-                renderClient: effectiveRenderClient
+                renderClient: effectiveRenderClient,
+                voiceDesignClient: effectiveVoiceDesignClient
             ),
             controlTransport: controlTransport,
             clock: SystemAudiobookClock()

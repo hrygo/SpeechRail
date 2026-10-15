@@ -256,6 +256,23 @@ def test_transcript_match_normalizes_itn_punctuation_and_case() -> None:
     assert transcript_match_score("温度是22.5℃", "温度是225℃") < 1.0
 
 
+def test_transcript_match_folds_traditional_chinese_reference() -> None:
+    # A reference quote from classic literature (e.g. Lu Xun 《彷徨》) may be in
+    # Traditional Chinese while local ASR transcribes into Simplified Chinese.
+    trad_ref = (
+        "談話是總不投機的了，於是不多久，我便一個人剩在書房里。"
+        "第二天我起得很遲，午飯之後，出去看了幾個本家和朋友；第三天也照樣。"
+        "他們也都沒有什麼大改變，單是老了些；家中卻一律忙，都在準備。"
+    )
+    simp_asr = (
+        "谈话是总不投机的了，于是不多久，我便一个人剩在书房里。"
+        "第二天我起得很迟，午饭之后出去看了几个本家和朋友。第三天也照样，"
+        "他们也都没有什么大改变，单是老了些。家中却一律忙，都在准备。"
+    )
+    assert transcript_match_score(trad_ref, simp_asr) == pytest.approx(1.0)
+    assert transcript_numbers_match(trad_ref, simp_asr) is True
+
+
 def test_transcript_match_equates_celsius_symbol_with_spoken_unit() -> None:
     # A TTS reads `℃` aloud, so a word-for-word synthesis comes back from the
     # ASR as 摄氏度. Notation alone must not cost the probe enough to sink the

@@ -1047,4 +1047,256 @@ final class AudiobookCastTests: XCTestCase {
         let elapsed = ContinuousClock.now - t0
         XCTAssertLessThan(elapsed, .seconds(2), "LLM 分析完成后的高频交互全链路耗时（\(elapsed)）必须保持亚秒级响应，严禁引发 UI 卡死")
     }
+
+    @MainActor
+    func testSecondaryUnknownResolutionAndLeadExclusiveVoiceSynthesisAndFastManualConfirmation() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let fixture = try await makeTwoChapterBook(store: store)
+        var book = try await store.book(id: fixture.bookID)
+        book.analysisState = .allWindowsValidated
+        try await store.updateBook(book)
+
+        let chapters = try await store.chapters(for: fixture.bookID).sorted { $0.ordinal < $1.ordinal }
+        let chapterAAtoms = try await store.atoms(for: fixture.bookID, chapterID: fixture.chapterA.id)
+            .filter { $0.kind != .formatting }
+            .sorted { $0.ordinal < $1.ordinal }
+
+        // 在第一章再增加一处 unknown 对白（共 2 处 unknown）
+        var currentAnns = try await store.annotations(for: fixture.bookID)
+        if let firstBodyAtom = chapterAAtoms.first(where: { $0.id != fixture.unknownAtomInA.id }) {
+            if let idx = currentAnns.firstIndex(where: { $0.atomID == firstBodyAtom.id }) {
+                currentAnns[idx].assignment = .unknown(reason: "跨窗省略主语", candidateRoleIDs: [])
+                try await store.saveAnnotations(bookID: fixture.bookID, annotations: [currentAnns[idx]])
+            }
+        }
+
+        final class SecondaryPassFakeClient: AudiobookAnalysisClient, @unchecked Sendable {
+            let configurationDigest: String
+            let heroID: UUID
+            let targetUnknownAtomID: UUID
+
+            init(configurationDigest: String, heroID: UUID, targetUnknownAtomID: UUID) {
+                self.configurationDigest = configurationDigest
+                self.heroID = heroID
+                self.targetUnknownAtomID = targetUnknownAtomID
+            }
+
+            func complete(_ prompt: AudiobookAnalysisPrompt) async throws -> String {
+                // 将第 1 处 unknown 消解给主角林远，将第 2 处保留 unknown 但补充林远为候选角色
+                let response = AudiobookAnnotationResponse(
+                    items: [
+                        .init(
+                            atomID: UUID(),
+                            atomRef: "1",
+                            speakerKind: .character,
+                            roleID: heroID,
+                            confidence: 0.92,
+                            evidence: "后文紧邻林远动作描写"
+                        ),
+                        .init(
+                            atomID: targetUnknownAtomID,
+                            atomRef: targetUnknownAtomID.uuidString,
+                            speakerKind: .unknown,
+                            roleID: nil,
+                            candidateRoleIDs: [heroID],
+                            confidence: 0.45,
+                            evidence: "双人对话轮次需人工确认"
+                        )
+                    ]
+                )
+                let data = try JSONEncoder().encode(response)
+                return String(decoding: data, as: UTF8.self)
+            }
+        }
+
+        final class LeadVoiceAndRenderFakeRenderer: AudiobookSpeechRenderer, @unchecked Sendable {
+            private let lock = NSLock()
+            var createdLeadRequests: [AudiobookLeadVoiceCreationRequest] = []
+            var publishedVoices: [SafeVoiceEntry]
+            var shouldFailRender: Bool = false
+
+            init(initialVoices: [SafeVoiceEntry]) {
+                self.publishedVoices = initialVoices
+            }
+
+            func fetchEffectiveCapabilities() async throws -> EffectiveCapabilitySnapshot {
+                let voices = lock.withLock { publishedVoices }
+                let model = ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    runtimeRevision: "qwen3-tts-v1",
+                    catalogRevision: "0123456789abcdef0123456789abcdef01234567"
+                )
+                return EffectiveCapabilitySnapshot(
+                    serviceInstanceEpoch: "epoch-lead",
+                    catalogRevision: "cat-lead",
+                    snapshotID: "snap-lead",
+                    profile: "quality",
+                    models: ["tts": model, "tts_clone": model],
+                    voices: voices,
+                    operations: [:],
+                    guarantees: [:]
+                )
+            }
+
+            func createAndPublishLeadVoice(
+                _ request: AudiobookLeadVoiceCreationRequest
+            ) async throws -> AudiobookLeadVoiceCreationOutput {
+                let model = ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    runtimeRevision: "qwen3-tts-v1",
+                    catalogRevision: "0123456789abcdef0123456789abcdef01234567"
+                )
+                let desc = SafeVoiceDescriptor(
+                    voiceMode: "clone",
+                    locales: ["zh-CN"],
+                    styleTags: [],
+                    pitchBand: "medium",
+                    timbreFamily: "warm",
+                    baselinePace: "moderate",
+                    sourceType: "designed_clone",
+                    metadataMethod: "declared_only"
+                )
+                let newEntry = SafeVoiceEntry(
+                    id: request.targetVoiceID,
+                    name: request.voiceName,
+                    mode: "clone",
+                    available: true,
+                    availabilityReason: .available,
+                    voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                    voiceIdentityAssurance: .contentAddressed,
+                    model: model,
+                    descriptors: desc,
+                    operations: [:],
+                    productionReady: true
+                )
+                lock.withLock {
+                    createdLeadRequests.append(request)
+                    publishedVoices.removeAll { $0.id == newEntry.id }
+                    publishedVoices.append(newEntry)
+                }
+                return AudiobookLeadVoiceCreationOutput(
+                    voiceID: newEntry.id,
+                    voiceName: newEntry.name,
+                    voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                    modelRevision: "0123456789abcdef0123456789abcdef01234567"
+                )
+            }
+
+            func renderFragment(_ request: AudiobookRenderCallRequest) async throws -> AudiobookRenderCallOutput {
+                let fail = lock.withLock { shouldFailRender }
+                if fail {
+                    throw ServiceAPIClientError.requestFailed
+                }
+                let pcmBytes = 4_800 * 2
+                var data = Data(capacity: 44 + pcmBytes)
+                data.append(contentsOf: "RIFF".utf8)
+                var riffSize = UInt32(36 + pcmBytes).littleEndian
+                data.append(Data(bytes: &riffSize, count: 4))
+                data.append(contentsOf: "WAVEfmt ".utf8)
+                var fmtChunkSize = UInt32(16).littleEndian
+                var audioFormat = UInt16(1).littleEndian
+                var numChannels = UInt16(1).littleEndian
+                var sampleRate = UInt32(48_000).littleEndian
+                var byteRate = UInt32(48_000 * 2).littleEndian
+                var blockAlign = UInt16(2).littleEndian
+                var bitsPerSample = UInt16(16).littleEndian
+                data.append(Data(bytes: &fmtChunkSize, count: 4))
+                data.append(Data(bytes: &audioFormat, count: 2))
+                data.append(Data(bytes: &numChannels, count: 2))
+                data.append(Data(bytes: &sampleRate, count: 4))
+                data.append(Data(bytes: &byteRate, count: 4))
+                data.append(Data(bytes: &blockAlign, count: 2))
+                data.append(Data(bytes: &bitsPerSample, count: 2))
+                data.append(contentsOf: "data".utf8)
+                var dataChunkSize = UInt32(pcmBytes).littleEndian
+                data.append(Data(bytes: &dataChunkSize, count: 4))
+                data.append(Data(repeating: 0, count: pcmBytes))
+                let pcmSHA = try AudioDigest.sha256HexOfPCM(in: data)
+                return AudiobookRenderCallOutput(
+                    wavData: data,
+                    voiceRevision: nil,
+                    modelRevision: request.expectedModelRevision,
+                    pcmSHA256: pcmSHA,
+                    requestID: "req-1",
+                    receiptID: nil,
+                    recipeSummary: "partial",
+                    isProvenanceVerified: true
+                )
+            }
+        }
+
+        let llmConfig = LLMConfiguration(baseURL: "http://127.0.0.1:11434/v1", model: "qwen3")
+        let snapshot = AudiobookAnalysisConfigSnapshot(configuration: llmConfig, generation: 1)
+        let fakeRenderer = LeadVoiceAndRenderFakeRenderer(
+            initialVoices: [
+                makeTestSafeVoice(id: "uncle_fu", name: "醇厚男声"),
+                makeTestSafeVoice(id: "vivian", name: "明亮女声")
+            ]
+        )
+
+        let deps = AudiobookDependencies(
+            makeStore: { store },
+            makeAnalysisClient: { snap in
+                SecondaryPassFakeClient(
+                    configurationDigest: snap.configurationDigest,
+                    heroID: fixture.hero.id,
+                    targetUnknownAtomID: fixture.unknownAtomInA.id
+                )
+            },
+            resolveAnalysisSnapshot: { _ in snapshot },
+            speechRenderer: fakeRenderer
+        )
+
+        let workflow = AudiobookWorkflowModel(dependencies: deps)
+        await workflow.openBook(fixture.bookID)
+        XCTAssertEqual(workflow.totalUnknownSpeakerCount, 2)
+        XCTAssertEqual(workflow.unknownCountByChapterID[fixture.chapterA.id], 2)
+
+        // 1. 执行 AI 二次复核未确认说话人：消解 1 处，剩余 1 处待人工确认并自动聚焦
+        await workflow.resolveUnknownSpeakersWithLLM(for: fixture.bookID)
+        XCTAssertEqual(workflow.totalUnknownSpeakerCount, 1)
+        XCTAssertEqual(workflow.focusedUnknownAtomID, fixture.unknownAtomInA.id)
+
+        // 2. 开启「仅看待确认对白」过滤并验证快捷候选角色与一键确认跳转
+        workflow.showOnlyUnknownAtomsInChapter = true
+        XCTAssertFalse(workflow.displayedChapterAtoms.isEmpty)
+        let remainingUnknown = try XCTUnwrap(workflow.unknownAnnotationsInSelectedChapter.first)
+        let quickCands = workflow.quickCandidateRoles(for: remainingUnknown)
+        XCTAssertTrue(quickCands.contains(where: { $0.id == fixture.hero.id }))
+
+        await workflow.assignSpeakerAndAdvanceToNextUnknown(
+            atomID: remainingUnknown.atomID,
+            roleID: fixture.hero.id
+        )
+        XCTAssertEqual(workflow.totalUnknownSpeakerCount, 0)
+        XCTAssertFalse(workflow.showOnlyUnknownAtomsInChapter, "全部确认完毕后应自动关闭仅看待确认过滤")
+
+        // 3. 为主要角色生成本书专属定制音色（不再只使用默认系统音色）
+        let createdLeadCount = await workflow.createExclusiveVoicesForLeadCharacters(for: fixture.bookID)
+        XCTAssertEqual(createdLeadCount, 2, "旁白与主角林远均应生成专属定制音色")
+        XCTAssertEqual(fakeRenderer.createdLeadRequests.count, 2)
+        let heroBinding = try XCTUnwrap(workflow.voiceBindings[fixture.hero.id])
+        XCTAssertTrue(heroBinding.voiceID.hasPrefix("ab_"), "主角应绑定新生成的本书专属音色 ID：\(heroBinding.voiceID)")
+        XCTAssertEqual(VoiceCatalogStore.shared.metadata(for: heroBinding.voiceID)?.scope, .bookExclusive)
+
+        // 4. 确认角色与试听后进入制作：验证制作失败时 errorMessage 不会被 openBook 清空，成功时正常产出章节版本
+        await workflow.confirmCastAndAudition()
+        XCTAssertEqual(workflow.workbenchTab, .production)
+
+        fakeRenderer.shouldFailRender = true
+        workflow.makeConfirmedChapters(chapterIDs: [chapters[0].id])
+        while workflow.isProducing {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertNotNil(workflow.errorMessage, "制作失败时必须保留错误提示，不能被 openBook 清空为 nil")
+
+        fakeRenderer.shouldFailRender = false
+        workflow.makeConfirmedChapters(chapterIDs: [chapters[0].id])
+        while workflow.isProducing {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertNil(workflow.errorMessage)
+        let updatedCh0 = try await store.chapters(for: fixture.bookID).first(where: { $0.id == chapters[0].id })
+        XCTAssertNotNil(updatedCh0?.currentChapterRevisionID, "制作完成后应自动发布初始章节版本")
+    }
 }

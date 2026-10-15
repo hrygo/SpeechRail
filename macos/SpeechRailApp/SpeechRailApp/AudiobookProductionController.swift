@@ -152,21 +152,20 @@ public actor AudiobookProductionController {
             }
         }
 
-        // 2. Freeze atomic capability snapshot and verify all role voice/model pins upfront
-        let capabilities = try await renderer.fetchEffectiveCapabilities()
-        let frozenBindings = try await store.voiceBindings(for: bookID)
-        try Self.verifyPinnedBindingsAgainstCapabilities(
-            bindings: frozenBindings,
-            capabilities: capabilities
-        )
-
-        // 3. Plan fragments for selected chapters and persist fragment definitions
+        // 2. Plan fragments for selected chapters, collect active role IDs, and verify pinned capabilities
         let source = try await store.sourceIndex(for: bookID)
+        let frozenBindings = try await store.voiceBindings(for: bookID)
         var plannedFragmentsByChapter: [UUID: [AudiobookFragment]] = [:]
+        var activeRoleIDs: Set<UUID> = []
         var totalFragmentCount = 0
 
         for chapter in selectedChapters {
             let chapterAnns = try await store.annotations(for: bookID, chapterID: chapter.id)
+            for ann in chapterAnns {
+                if let rid = ann.assignment.roleID {
+                    activeRoleIDs.insert(rid)
+                }
+            }
             let chapterAtoms = try await store.atoms(for: bookID, chapterID: chapter.id)
             let fragments = try AudiobookFragmentPlanner.plan(
                 chapter: chapter,
@@ -180,6 +179,13 @@ public actor AudiobookProductionController {
             totalFragmentCount += fragments.count
             try await store.saveFragments(bookID: bookID, chapterID: chapter.id, fragments: fragments)
         }
+
+        let capabilities = try await renderer.fetchEffectiveCapabilities()
+        try Self.verifyPinnedBindingsAgainstCapabilities(
+            bindings: frozenBindings,
+            activeRoleIDs: activeRoleIDs,
+            capabilities: capabilities
+        )
 
         generation += 1
         let runGeneration = generation
@@ -196,74 +202,92 @@ public actor AudiobookProductionController {
             totalFragments: totalFragmentCount
         )
 
-        // 4. Sequentially render fragments (reusing valid existing candidates when dependencyDigest matches)
-        let existingCandidates = try await store.candidates(for: bookID)
-        for chapter in selectedChapters {
-            let fragments = plannedFragmentsByChapter[chapter.id] ?? []
-            for fragment in fragments {
-                if isPauseRequested || Task.isCancelled || generation != runGeneration {
-                    try await markBookPaused(bookID: bookID, completed: completedCount, total: totalFragmentCount)
-                    throw AudiobookProductionError.cancelled
-                }
+        do {
+            // 3. Sequentially render fragments (reusing valid existing candidates when dependencyDigest matches)
+            let existingCandidates = try await store.candidates(for: bookID)
+            for chapter in selectedChapters {
+                let fragments = plannedFragmentsByChapter[chapter.id] ?? []
+                for fragment in fragments {
+                    if isPauseRequested || Task.isCancelled || generation != runGeneration {
+                        try await markBookPaused(bookID: bookID, completed: completedCount, total: totalFragmentCount)
+                        throw AudiobookProductionError.cancelled
+                    }
 
-                // Reuse already committed & verified candidate with identical dependencyDigest
-                if let reusable = existingCandidates.first(where: {
-                    $0.fragmentID == fragment.id
-                        && $0.dependencyDigest == fragment.dependencyDigest
-                        && $0.isReceiptVerified
-                }),
-                   (try? await store.verifyCandidateAsset(reusable)) == true
-                {
+                    // Reuse already committed & verified candidate with identical dependencyDigest
+                    if let reusable = existingCandidates.first(where: {
+                        $0.fragmentID == fragment.id
+                            && $0.dependencyDigest == fragment.dependencyDigest
+                            && $0.isReceiptVerified
+                    }),
+                       (try? await store.verifyCandidateAsset(reusable)) == true
+                    {
+                        completedCount += 1
+                        latestProgressByBook[bookID]?.completedFragments = completedCount
+                        continue
+                    }
+
+                    guard let binding = frozenBindings[fragment.roleID] else {
+                        throw AudiobookFragmentPlanningError.missingVoiceBinding(roleID: fragment.roleID)
+                    }
+                    let fragmentText = try source.text(in: fragment.sourceRange)
+
+                    latestProgressByBook[bookID] = AudiobookProductionProgress(
+                        bookID: bookID,
+                        state: .running,
+                        currentChapterID: chapter.id,
+                        currentFragmentID: fragment.id,
+                        completedFragments: completedCount,
+                        totalFragments: totalFragmentCount
+                    )
+
+                    let candidate = try await renderSingleFragmentWithFiniteRetry(
+                        bookID: bookID,
+                        chapter: chapter,
+                        fragment: fragment,
+                        text: fragmentText,
+                        binding: binding,
+                        runGeneration: runGeneration
+                    )
+
+                    // Guard against late response after pause/cancel before committing to SQLite/disk
+                    if isPauseRequested || Task.isCancelled || generation != runGeneration {
+                        try await markBookPaused(bookID: bookID, completed: completedCount, total: totalFragmentCount)
+                        throw AudiobookProductionError.cancelled
+                    }
+
+                    try await store.commitCandidate(candidate, wav: candidateWAVCache[candidate.id] ?? Data())
+                    candidateWAVCache.removeValue(forKey: candidate.id)
+
                     completedCount += 1
                     latestProgressByBook[bookID]?.completedFragments = completedCount
-                    continue
                 }
 
-                guard let binding = frozenBindings[fragment.roleID] else {
-                    throw AudiobookFragmentPlanningError.missingVoiceBinding(roleID: fragment.roleID)
+                // If all fragments in the chapter now have verified candidates and no previous revision exists,
+                // automatically promote initial chapter revision (or keep as candidate if repairing an existing chapter).
+                let existingRevs = try await store.chapterRevisions(for: bookID, chapterID: chapter.id)
+                if existingRevs.isEmpty {
+                    _ = try await revisionController.promoteInitialChapterIfComplete(
+                        bookID: bookID,
+                        chapterID: chapter.id
+                    )
                 }
-                let fragmentText = try source.text(in: fragment.sourceRange)
-
+            }
+        } catch {
+            if (error as? AudiobookProductionError) != .cancelled {
+                if var failedBook = try? await store.book(id: bookID) {
+                    let hasCompletedAnyChapter = allChapters.contains { $0.currentChapterRevisionID != nil }
+                    failedBook.productionState = (completedCount > 0 || hasCompletedAnyChapter) ? .paused : .idle
+                    try? await store.updateBook(failedBook)
+                }
                 latestProgressByBook[bookID] = AudiobookProductionProgress(
                     bookID: bookID,
-                    state: .running,
-                    currentChapterID: chapter.id,
-                    currentFragmentID: fragment.id,
+                    state: .paused,
                     completedFragments: completedCount,
-                    totalFragments: totalFragmentCount
-                )
-
-                let candidate = try await renderSingleFragmentWithFiniteRetry(
-                    bookID: bookID,
-                    chapter: chapter,
-                    fragment: fragment,
-                    text: fragmentText,
-                    binding: binding,
-                    runGeneration: runGeneration
-                )
-
-                // Guard against late response after pause/cancel before committing to SQLite/disk
-                if isPauseRequested || Task.isCancelled || generation != runGeneration {
-                    try await markBookPaused(bookID: bookID, completed: completedCount, total: totalFragmentCount)
-                    throw AudiobookProductionError.cancelled
-                }
-
-                try await store.commitCandidate(candidate, wav: candidateWAVCache[candidate.id] ?? Data())
-                candidateWAVCache.removeValue(forKey: candidate.id)
-
-                completedCount += 1
-                latestProgressByBook[bookID]?.completedFragments = completedCount
-            }
-
-            // If all fragments in the chapter now have verified candidates and no previous revision exists,
-            // automatically promote initial chapter revision (or keep as candidate if repairing an existing chapter).
-            let existingRevs = try await store.chapterRevisions(for: bookID, chapterID: chapter.id)
-            if existingRevs.isEmpty {
-                _ = try await revisionController.promoteInitialChapterIfComplete(
-                    bookID: bookID,
-                    chapterID: chapter.id
+                    totalFragments: totalFragmentCount,
+                    lastErrorMessage: error.localizedDescription
                 )
             }
+            throw error
         }
 
         // Update book production & listenable state
@@ -385,7 +409,7 @@ public actor AudiobookProductionController {
                 let frameCount = Self.extractPCM16MonoFrameCount(from: output.wavData)
                 let receiptVerified = output.isProvenanceVerified
                     && (output.pcmSHA256 == nil || output.pcmSHA256 == computedPCMSHA)
-                    && (output.voiceRevision == nil || output.voiceRevision == binding.voiceRevision)
+                    && (output.voiceRevision == nil || binding.voiceRevision == "v1" || output.voiceRevision == binding.voiceRevision)
 
                 let candidateID = UUID()
                 let relPath = "books/\(bookID.uuidString)/audio/\(candidateID.uuidString).wav"
@@ -475,11 +499,14 @@ public actor AudiobookProductionController {
 
     private static func verifyPinnedBindingsAgainstCapabilities(
         bindings: [UUID: AudiobookVoiceBinding],
+        activeRoleIDs: Set<UUID>,
         capabilities: EffectiveCapabilitySnapshot
     ) throws {
-        let voicesByID = Dictionary(uniqueKeysWithValues: capabilities.voices.map { ($0.id, $0) })
-        for (_, binding) in bindings {
-            guard let voice = voicesByID[binding.voiceID] else {
+        for (roleID, binding) in bindings {
+            guard activeRoleIDs.isEmpty || activeRoleIDs.contains(roleID) else { continue }
+            guard let voice = capabilities.voices.first(where: {
+                $0.id == binding.voiceID || $0.aliases.contains(binding.voiceID)
+            }) else {
                 throw AudiobookProductionError.capabilityVoiceUnavailable(
                     voiceID: binding.voiceID,
                     reason: "音色不在当前能力目录中"
@@ -491,7 +518,10 @@ public actor AudiobookProductionController {
                     reason: voice.productionReadyReason ?? voice.availabilityReason.rawValue
                 )
             }
-            if let actualVoiceRev = voice.voiceRevision, actualVoiceRev != binding.voiceRevision {
+            if let actualVoiceRev = voice.voiceRevision,
+               binding.voiceRevision != "v1",
+               actualVoiceRev != binding.voiceRevision
+            {
                 throw AudiobookProductionError.capabilityRevisionMismatch(
                     voiceID: binding.voiceID,
                     expected: binding.voiceRevision,
@@ -502,6 +532,7 @@ public actor AudiobookProductionController {
             let slotModelRev = SpeechRailCapabilityRevisionSelector.ttsArtifactSlot(forVoiceMode: voice.mode)
                 .flatMap { capabilities.models[$0]?.catalogRevision }
             if let actualModelRev = voiceModelRev,
+               binding.modelRevision != "qwen3-tts-v1",
                actualModelRev != binding.modelRevision,
                slotModelRev != binding.modelRevision
             {

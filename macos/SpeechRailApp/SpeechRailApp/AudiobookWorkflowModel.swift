@@ -191,6 +191,22 @@ public final class AudiobookWorkflowModel {
     public var selectedFragmentID: UUID?
     public var selectedAtomIDs: Set<UUID> = []
 
+    /// 全书各章节待确认说话人计数与有序定位索引（用于跨章/章内快速定位待确认位置）。
+    public private(set) var unknownCountByChapterID: [UUID: Int] = [:]
+    public private(set) var allUnknownAnnotations: [AudiobookAnnotation] = []
+    public var focusedUnknownAtomID: UUID?
+    public var showOnlyUnknownAtomsInChapter: Bool = false
+    public private(set) var isResolvingUnknownSpeakers: Bool = false
+
+    /// 主要角色专属音色自动/一键生成状态。
+    public private(set) var isCreatingLeadExclusiveVoices: Bool = false
+    public private(set) var leadVoiceCreationProgressText: String?
+
+    public static let builtInSystemVoiceIDs: Set<String> = [
+        "vivian", "serena", "uncle_fu", "ryan", "aiden",
+        "ono_anna", "sohee", "eric", "dylan"
+    ]
+
     public private(set) var analysisSummary: AudiobookAnalysisSummary?
     public private(set) var isAnalyzing: Bool = false
     /// 当前分析 run 的 live 进度投影（事件流收敛结果）；非分析中为 nil。
@@ -243,6 +259,7 @@ public final class AudiobookWorkflowModel {
 
     private var analysisTask: Task<Void, Never>?
     private var productionTask: Task<Void, Never>?
+    private var productionProgressPollTask: Task<Void, Never>?
     private var analysisGeneration: Int = 1
 
     public init(
@@ -329,9 +346,44 @@ public final class AudiobookWorkflowModel {
     }
 
     public var totalUnknownSpeakerCount: Int {
+        if !allUnknownAnnotations.isEmpty {
+            return allUnknownAnnotations.count
+        }
         guard let selectedBook else { return 0 }
         return shelfBooks.first(where: { $0.id == selectedBook.id })?.unknownSpeakerCount
             ?? unknownAnnotationsInSelectedChapter.count
+    }
+
+    /// 当开启「仅看待确认对白」时，仅保留本章未确认段落及其前后各 1 段紧邻上下文，方便用户一眼核对前后文并一键确认。
+    public var displayedChapterAtoms: [AudiobookTextAtom] {
+        guard showOnlyUnknownAtomsInChapter else { return chapterAtoms }
+        let unknownIDs = Set(unknownAnnotationsInSelectedChapter.map(\.atomID))
+        guard !unknownIDs.isEmpty else { return [] }
+        var includedIndices = Set<Int>()
+        for (idx, atom) in chapterAtoms.enumerated() where unknownIDs.contains(atom.id) {
+            if idx > 0 { includedIndices.insert(idx - 1) }
+            includedIndices.insert(idx)
+            if idx + 1 < chapterAtoms.count { includedIndices.insert(idx + 1) }
+        }
+        return chapterAtoms.enumerated().compactMap { idx, atom in
+            includedIndices.contains(idx) ? atom : nil
+        }
+    }
+
+    /// 当前聚焦的待确认说话人在全书待确认列表中的 1-based 序号。
+    public var currentUnknownSpeakerGlobalIndex: Int? {
+        guard !allUnknownAnnotations.isEmpty else { return nil }
+        if let focusedID = focusedUnknownAtomID,
+           let idx = allUnknownAnnotations.firstIndex(where: { $0.atomID == focusedID })
+        {
+            return idx + 1
+        }
+        if let firstInChapter = unknownAnnotationsInSelectedChapter.first,
+           let idx = allUnknownAnnotations.firstIndex(where: { $0.atomID == firstInChapter.atomID })
+        {
+            return idx + 1
+        }
+        return 1
     }
 
     public var isAuditionConfirmedForSelectedBook: Bool {
@@ -457,6 +509,7 @@ public final class AudiobookWorkflowModel {
             characters = loadedCharacters
             voiceBindings = loadedBindings
             exportRecords = loadedExports
+            rebuildUnknownSpeakerIndex(from: allAnnotations, chapters: loadedChapters)
             if selectedChapterID == nil || !chapters.contains(where: { $0.id == selectedChapterID }) {
                 isSuppressingChapterAutoReload = true
                 selectedChapterID = chapters.first?.id
@@ -478,6 +531,7 @@ public final class AudiobookWorkflowModel {
             if book.analysisState == .allWindowsValidated
                 && book.confirmedCastRevisionID != nil
                 && book.confirmedAuditionVoiceSetDigest != nil
+                && allUnknownAnnotations.isEmpty
             {
                 workbenchTab = .production
             } else {
@@ -536,20 +590,42 @@ public final class AudiobookWorkflowModel {
         analysisTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let summary = try await pipeline.run(bookID: targetID, config: snapshot, progressSink: runSink)
+                var summary = try await pipeline.run(bookID: targetID, config: snapshot, progressSink: runSink)
                 guard self.analysisInstallEpoch == installEpoch else { return }
+                var resolvedInSecondPass = 0
+                if summary.unknownSpeakerCount > 0 {
+                    self.isResolvingUnknownSpeakers = true
+                    if let secondPass = try? await pipeline.resolveUnknownSpeakers(bookID: targetID, config: snapshot) {
+                        resolvedInSecondPass = secondPass.resolvedCount
+                        summary.unknownSpeakerCount = secondPass.remainingUnknownCount
+                    }
+                    self.isResolvingUnknownSpeakers = false
+                }
                 self.analysisSummary = summary
                 self.isAnalyzing = false
                 self.stopAnalysisClock()
+                let createdLeadVoices = await self.createExclusiveVoicesForLeadCharacters(for: targetID, quietBanner: true)
                 await self.autoAssignRecommendedVoices(for: targetID)
                 await self.refreshShelf()
                 if self.selectedBook?.id == targetID {
                     await self.openBook(targetID)
+                    if summary.unknownSpeakerCount > 0 {
+                        await self.jumpToFirstUnknownSpeaker()
+                    }
                 }
-                self.bannerMessage = "全书分析已完成（共 \(summary.completedWindows) 个窗口，待确认说话人 \(summary.unknownSpeakerCount) 处）。"
+                var notes: [String] = ["全书分析已完成（共 \(summary.completedWindows) 个窗口"]
+                if resolvedInSecondPass > 0 {
+                    notes.append("AI 二次复核自动消解 \(resolvedInSecondPass) 处疑难对白")
+                }
+                if createdLeadVoices > 0 {
+                    notes.append("已为 \(createdLeadVoices) 名主要角色生成专属音色")
+                }
+                notes.append("剩余待人工确认 \(summary.unknownSpeakerCount) 处）")
+                self.bannerMessage = notes.joined(separator: "，") + "。"
             } catch {
                 guard self.analysisInstallEpoch == installEpoch else { return }
                 let failureDescription = error.localizedDescription
+                self.isResolvingUnknownSpeakers = false
                 self.isAnalyzing = false
                 self.stopAnalysisClock()
                 await self.refreshShelf()
@@ -856,9 +932,12 @@ public final class AudiobookWorkflowModel {
     // MARK: - Cast, Speaker Resolution & Voice Round-Trip
 
     public func assignSpeaker(atomIDs: [UUID], roleID: UUID) async {
-        guard let bookID = selectedBook?.id, let castController else { return }
+        guard let bookID = selectedBook?.id, let castController, let store else { return }
         do {
             try await castController.assignRole(bookID: bookID, atomIDs: atomIDs, roleID: roleID)
+            if let allAnns = try? await store.annotations(for: bookID) {
+                rebuildUnknownSpeakerIndex(from: allAnns, chapters: chapters)
+            }
             await reloadSelectedChapterDetails()
             await refreshChapterReadinessMap(for: bookID)
             await refreshShelf()
@@ -868,10 +947,342 @@ public final class AudiobookWorkflowModel {
         }
     }
 
+    /// 人工确认单处未知说话人后，自动定位到下一处待确认位置（若本章已无待确认则自动跨章跳转）。
+    public func assignSpeakerAndAdvanceToNextUnknown(atomID: UUID, roleID: UUID) async {
+        guard let bookID = selectedBook?.id, let castController, let store else { return }
+        let currentIdx = allUnknownAnnotations.firstIndex(where: { $0.atomID == atomID })
+        do {
+            try await castController.assignRole(bookID: bookID, atomIDs: [atomID], roleID: roleID)
+            if let allAnns = try? await store.annotations(for: bookID) {
+                rebuildUnknownSpeakerIndex(from: allAnns, chapters: chapters)
+            }
+            await reloadSelectedChapterDetails()
+            await refreshChapterReadinessMap(for: bookID)
+            await refreshShelf()
+
+            if !allUnknownAnnotations.isEmpty {
+                let nextIdx = min(currentIdx ?? 0, allUnknownAnnotations.count - 1)
+                let nextTarget = allUnknownAnnotations[nextIdx]
+                await focusUnknownAnnotation(nextTarget)
+                bannerMessage = "已确认该处说话人，已自动定位至下一处（剩余 \(allUnknownAnnotations.count) 处）。"
+            } else {
+                focusedUnknownAtomID = nil
+                showOnlyUnknownAtomsInChapter = false
+                bannerMessage = "全书所有待确认说话人已全部确认完毕！"
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// 为待确认段落提供最多 5 个一键归属候选角色（优先 LLM 推荐的 candidateRoleIDs，其次本章高频出场角色与旁白）。
+    public func quickCandidateRoles(for annotation: AudiobookAnnotation) -> [AudiobookCharacter] {
+        var result: [AudiobookCharacter] = []
+        var seen = Set<UUID>()
+        if case let .unknown(_, candidateIDs) = annotation.assignment {
+            for cid in candidateIDs {
+                if let role = charactersByID[cid], !seen.contains(cid) {
+                    result.append(role)
+                    seen.insert(cid)
+                }
+            }
+        }
+        for role in currentChapterCharacters where !role.isNarrator {
+            guard result.count < 4 else { break }
+            if !seen.contains(role.id) {
+                result.append(role)
+                seen.insert(role.id)
+            }
+        }
+        if let narrator = characters.first(where: \.isNarrator), !seen.contains(narrator.id) {
+            result.append(narrator)
+        }
+        return result
+    }
+
+    public func jumpToFirstUnknownSpeaker() async {
+        if let firstInChapter = unknownAnnotationsInSelectedChapter.first {
+            await focusUnknownAnnotation(firstInChapter)
+        } else if let firstGlobal = allUnknownAnnotations.first {
+            await focusUnknownAnnotation(firstGlobal)
+        }
+    }
+
+    public func jumpToNextUnknownSpeaker() async {
+        guard !allUnknownAnnotations.isEmpty else { return }
+        if let currentID = focusedUnknownAtomID,
+           let idx = allUnknownAnnotations.firstIndex(where: { $0.atomID == currentID })
+        {
+            let nextIdx = (idx + 1) % allUnknownAnnotations.count
+            await focusUnknownAnnotation(allUnknownAnnotations[nextIdx])
+        } else {
+            await jumpToFirstUnknownSpeaker()
+        }
+    }
+
+    public func jumpToPreviousUnknownSpeaker() async {
+        guard !allUnknownAnnotations.isEmpty else { return }
+        if let currentID = focusedUnknownAtomID,
+           let idx = allUnknownAnnotations.firstIndex(where: { $0.atomID == currentID })
+        {
+            let prevIdx = (idx - 1 + allUnknownAnnotations.count) % allUnknownAnnotations.count
+            await focusUnknownAnnotation(allUnknownAnnotations[prevIdx])
+        } else if let lastGlobal = allUnknownAnnotations.last {
+            await focusUnknownAnnotation(lastGlobal)
+        }
+    }
+
+    private func focusUnknownAnnotation(_ annotation: AudiobookAnnotation) async {
+        workbenchTab = .preparation
+        if selectedChapterID != annotation.chapterID {
+            isSuppressingChapterAutoReload = true
+            selectedChapterID = annotation.chapterID
+            isSuppressingChapterAutoReload = false
+            await reloadSelectedChapterDetails()
+        }
+        focusedUnknownAtomID = annotation.atomID
+        selectedAtomIDs = [annotation.atomID]
+    }
+
+    /// 对当前书中尚未确认的 `unknown` 说话人段落运行二次定向 LLM 消歧分析。
+    public func resolveUnknownSpeakersWithLLM(for bookID: UUID? = nil) async {
+        let targetID = bookID ?? selectedBook?.id
+        guard let targetID, let pipeline = analysisPipeline, let store else { return }
+        guard !isResolvingUnknownSpeakers else { return }
+        isResolvingUnknownSpeakers = true
+        errorMessage = nil
+        let snapshot = dependencies.resolveAnalysisSnapshot(analysisGeneration)
+        do {
+            let outcome = try await pipeline.resolveUnknownSpeakers(bookID: targetID, config: snapshot)
+            isResolvingUnknownSpeakers = false
+            if let allAnns = try? await store.annotations(for: targetID) {
+                rebuildUnknownSpeakerIndex(from: allAnns, chapters: chapters)
+            }
+            if selectedBook?.id == targetID {
+                characters = (try? await store.characters(for: targetID)) ?? characters
+                await reloadSelectedChapterDetails()
+                await refreshChapterReadinessMap(for: targetID)
+                await refreshShelf()
+                if outcome.remainingUnknownCount > 0 {
+                    await jumpToFirstUnknownSpeaker()
+                } else {
+                    focusedUnknownAtomID = nil
+                    showOnlyUnknownAtomsInChapter = false
+                }
+            }
+            if outcome.resolvedCount > 0 {
+                bannerMessage = "AI 二次复核已自动确认 \(outcome.resolvedCount) 处对白，剩余 \(outcome.remainingUnknownCount) 处需人工确认。"
+            } else if outcome.remainingUnknownCount > 0 {
+                bannerMessage = "AI 二次复核已完成，剩余 \(outcome.remainingUnknownCount) 处多角色歧义对白请通过上方定位栏人工一键确认。"
+            } else {
+                bannerMessage = "全书所有对白说话人均已确认完毕。"
+            }
+        } catch {
+            isResolvingUnknownSpeakers = false
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    // MARK: - Lead Character Exclusive Voice Creation (Issue 3)
+
+    /// 为主要角色（旁白与核心主角 `.lead`）自动创建并发布本书专属音色（基于六维声学人设指令与原书对白试听稿），避免仅使用默认系统音色。
+    @discardableResult
+    public func createExclusiveVoicesForLeadCharacters(
+        for bookID: UUID? = nil,
+        quietBanner: Bool = false
+    ) async -> Int {
+        let targetID = bookID ?? selectedBook?.id
+        guard let targetID, let store, let castController else { return 0 }
+        guard !isCreatingLeadExclusiveVoices else { return 0 }
+
+        guard let loadedChars = try? await store.characters(for: targetID),
+              let existingBindings = try? await store.voiceBindings(for: targetID)
+        else { return 0 }
+        let allAnnotations = (try? await store.annotations(for: targetID)) ?? []
+        let bookTitle = (try? await store.book(id: targetID).title) ?? selectedBook?.title ?? "有声书"
+
+        let (stratifiedChars, stats, _) = AudiobookCastRegistry.computeRoleDialogueStats(
+            characters: loadedChars,
+            annotations: allAnnotations
+        )
+
+        // 筛选出核心主要角色（旁白或 .lead / 非共享主角），且尚未绑定本书专属定制音色的角色（最多前 6 名主角）
+        let leadCandidates = stratifiedChars.filter { role in
+            let stat = stats[role.id]
+            let isLeadRole = role.isNarrator || stat?.tier == .lead || !role.allowSharedMinorVoice
+            let hasLines = role.isNarrator || (stat?.dialogueAtomCount ?? 0) > 0
+            guard isLeadRole && hasLines else { return false }
+            if let bound = existingBindings[role.id], bound.isSynthesisReady {
+                let isBuiltInDefault = Self.builtInSystemVoiceIDs.contains(bound.voiceID.lowercased())
+                let metaScope = VoiceCatalogStore.shared.metadata(for: bound.voiceID)?.scope
+                if !isBuiltInDefault && metaScope == .bookExclusive {
+                    return false
+                }
+            }
+            return true
+        }.prefix(6)
+
+        guard !leadCandidates.isEmpty else {
+            if !quietBanner {
+                bannerMessage = "当前主要角色均已绑定专属定制音色。"
+            }
+            return 0
+        }
+
+        isCreatingLeadExclusiveVoices = true
+        var createdCount = 0
+
+        for (idx, role) in leadCandidates.enumerated() {
+            leadVoiceCreationProgressText = "正在为「\(role.displayName)」创建专属音色 (\(idx + 1)/\(leadCandidates.count))…"
+            if let _ = await createExclusiveVoiceForRoleInternal(
+                bookID: targetID,
+                bookTitle: bookTitle,
+                role: role,
+                peers: stratifiedChars,
+                slotOffset: idx
+            ) {
+                createdCount += 1
+            }
+        }
+
+        leadVoiceCreationProgressText = nil
+        isCreatingLeadExclusiveVoices = false
+
+        // 为其余配角与群像角色执行双池智能配声
+        await autoAssignRecommendedVoices(for: targetID)
+
+        if selectedBook?.id == targetID {
+            voiceBindings = (try? await store.voiceBindings(for: targetID)) ?? voiceBindings
+            selectedBook = (try? await store.book(id: targetID)) ?? selectedBook
+            await refreshChapterReadinessMap(for: targetID)
+            await refreshShelf()
+        }
+
+        if !quietBanner {
+            if createdCount > 0 {
+                bannerMessage = "已为 \(createdCount) 名主要角色创建并绑定本书专属音色。"
+            } else {
+                errorMessage = "当前语音服务未开启音色设计（VoiceDesign）能力或生成未通过校验，已保留推荐音色。"
+            }
+        }
+        return createdCount
+    }
+
+    /// 为指定单个角色一键创建并绑定本书专属音色。
+    public func createExclusiveVoiceForRole(_ roleID: UUID) async {
+        guard let bookID = selectedBook?.id,
+              let store,
+              let role = charactersByID[roleID],
+              !isCreatingLeadExclusiveVoices
+        else { return }
+
+        isCreatingLeadExclusiveVoices = true
+        leadVoiceCreationProgressText = "正在为「\(role.displayName)」生成专属音色…"
+        errorMessage = nil
+        let bookTitle = selectedBook?.title ?? "有声书"
+
+        let created = await createExclusiveVoiceForRoleInternal(
+            bookID: bookID,
+            bookTitle: bookTitle,
+            role: role,
+            peers: characters,
+            slotOffset: 0
+        )
+
+        leadVoiceCreationProgressText = nil
+        isCreatingLeadExclusiveVoices = false
+
+        if let created {
+            voiceBindings = (try? await store.voiceBindings(for: bookID)) ?? voiceBindings
+            selectedBook = (try? await store.book(id: bookID)) ?? selectedBook
+            await refreshChapterReadinessMap(for: bookID)
+            await refreshShelf()
+            bannerMessage = "已为角色「\(role.displayName)」生成并绑定专属音色「\(created.voiceName)」。"
+        } else {
+            errorMessage = "未能为「\(role.displayName)」自动生成专属音色，可点击「微调新音色」前往工作台微调。"
+        }
+    }
+
+    private func createExclusiveVoiceForRoleInternal(
+        bookID: UUID,
+        bookTitle: String,
+        role: AudiobookCharacter,
+        peers: [AudiobookCharacter],
+        slotOffset: Int
+    ) async -> AudiobookLeadVoiceCreationOutput? {
+        guard let castController else { return nil }
+        guard let context = try? await castController.makeVoiceReturnContext(bookID: bookID, roleID: role.id) else {
+            return nil
+        }
+
+        let persona = AudiobookVoicePersona.infer(for: role, peers: peers, recompute: false)
+        let instruction = context.suggestedInstruction
+            ?? persona.compiledVoiceDesignInstruction(roleName: role.displayName, isNarrator: role.isNarrator)
+        var candidates = context.suggestedReferenceTextCandidates
+        if let primaryRef = context.suggestedReferenceText, !primaryRef.isEmpty, !candidates.contains(primaryRef) {
+            candidates.insert(primaryRef, at: 0)
+        }
+        if candidates.isEmpty {
+            candidates = AudiobookAuditionScriptSelector.selectCandidates(
+                from: role.evidences.map(\.quoteExcerpt),
+                roleName: role.displayName,
+                aliases: role.aliases,
+                isNarrator: role.isNarrator,
+                maxCandidates: 2
+            )
+        }
+
+        let bookPrefix = bookID.uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(6)
+        let rolePrefix = role.id.uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(6)
+        let targetVoiceID = "ab_\(bookPrefix)_\(rolePrefix)"
+        let voiceName = "\(bookTitle)·\(role.displayName)"
+        let seedHash = AudiobookDigest.sha256Hex(Data("\(bookID.uuidString)|\(role.id.uuidString)".utf8))
+        let baseSeed = (Int(seedHash.prefix(6), radix: 16) ?? 1024) + slotOffset * 31
+
+        let request = AudiobookLeadVoiceCreationRequest(
+            bookID: bookID,
+            roleID: role.id,
+            targetVoiceID: targetVoiceID,
+            voiceName: voiceName,
+            instruction: instruction,
+            referenceTextCandidates: candidates,
+            seed: baseSeed
+        )
+
+        guard let output = try? await dependencies.speechRenderer.createAndPublishLeadVoice(request) else {
+            return nil
+        }
+
+        let archetype = roleStatsByID[role.id]?.archetype ?? role.inferredVoiceArchetype(peers: peers)
+        VoiceCatalogStore.shared.registerBookExclusiveVoice(
+            voiceID: output.voiceID,
+            bookID: bookID,
+            bookTitle: bookTitle,
+            roleID: role.id,
+            roleName: role.displayName,
+            archetype: archetype
+        )
+
+        let binding = AudiobookVoiceBinding(
+            roleID: role.id,
+            voiceID: output.voiceID,
+            voiceRevision: output.voiceRevision,
+            modelRevision: output.modelRevision,
+            isSynthesisReady: true,
+            allowedSpeed: AudiobookLimits.defaultRenderSpeed,
+            callerSeed: nil
+        )
+        try? await castController.bindVoice(bookID: bookID, roleID: role.id, binding: binding)
+        return output
+    }
+
     public func undoLastSpeakerAssignment() async {
-        guard let bookID = selectedBook?.id, let castController else { return }
+        guard let bookID = selectedBook?.id, let castController, let store else { return }
         do {
             try await castController.undoLastAssignment(bookID: bookID)
+            if let allAnns = try? await store.annotations(for: bookID) {
+                rebuildUnknownSpeakerIndex(from: allAnns, chapters: chapters)
+            }
             await reloadSelectedChapterDetails()
             await refreshChapterReadinessMap(for: bookID)
             await refreshShelf()
@@ -902,6 +1313,9 @@ public final class AudiobookWorkflowModel {
             )
             characters = try await store.characters(for: bookID)
             selectedRoleID = intoTargetRoleID
+            if let allAnns = try? await store.annotations(for: bookID) {
+                rebuildUnknownSpeakerIndex(from: allAnns, chapters: chapters)
+            }
             await reloadSelectedChapterDetails()
             await refreshChapterReadinessMap(for: bookID)
             await refreshShelf()
@@ -922,6 +1336,9 @@ public final class AudiobookWorkflowModel {
             )
             characters = try await store.characters(for: bookID)
             selectedRoleID = newRole.id
+            if let allAnns = try? await store.annotations(for: bookID) {
+                rebuildUnknownSpeakerIndex(from: allAnns, chapters: chapters)
+            }
             await reloadSelectedChapterDetails()
             await refreshChapterReadinessMap(for: bookID)
             await refreshShelf()
@@ -959,6 +1376,22 @@ public final class AudiobookWorkflowModel {
         guard let bookID = selectedBook?.id, let castController, let store else { return }
         do {
             errorMessage = nil
+            // 若确认角色时仍存在未确认的说话人，先用确认后的完整角色表自动执行一次 AI 二次消歧
+            var resolvedBySecondPass = 0
+            if !allUnknownAnnotations.isEmpty, let pipeline = analysisPipeline {
+                isResolvingUnknownSpeakers = true
+                let snapshot = dependencies.resolveAnalysisSnapshot(analysisGeneration)
+                if let outcome = try? await pipeline.resolveUnknownSpeakers(bookID: bookID, config: snapshot) {
+                    resolvedBySecondPass = outcome.resolvedCount
+                }
+                isResolvingUnknownSpeakers = false
+                if let allAnns = try? await store.annotations(for: bookID) {
+                    rebuildUnknownSpeakerIndex(from: allAnns, chapters: chapters)
+                }
+                characters = (try? await store.characters(for: bookID)) ?? characters
+                await reloadSelectedChapterDetails()
+            }
+
             let castRev = try await castController.currentCastRevisionID(for: bookID)
             try await castController.confirmCast(bookID: bookID, revisionID: castRev)
             let voiceDigest = try await castController.currentVoiceSetDigest(for: bookID)
@@ -966,9 +1399,21 @@ public final class AudiobookWorkflowModel {
             selectedBook = try await store.book(id: bookID)
             await refreshChapterReadinessMap(for: bookID)
             await refreshShelf()
-            workbenchTab = .production
-            bannerMessage = "已确认全书人物与试听声音，可开始制作已确认章节。"
+
+            if !allUnknownAnnotations.isEmpty {
+                workbenchTab = .preparation
+                await jumpToFirstUnknownSpeaker()
+                if resolvedBySecondPass > 0 {
+                    bannerMessage = "已确认人物与声音，AI 二次复核消解了 \(resolvedBySecondPass) 处对白；剩余 \(allUnknownAnnotations.count) 处已为您定位，请点击候选角色芯片快速确认。"
+                } else {
+                    bannerMessage = "已确认人物与声音；全书仍有 \(allUnknownAnnotations.count) 处待确认说话人，已为您定位至第 1 处。"
+                }
+            } else {
+                workbenchTab = .production
+                bannerMessage = "已确认全书人物与试听声音，可开始制作已确认章节。"
+            }
         } catch {
+            isResolvingUnknownSpeakers = false
             errorMessage = error.localizedDescription
         }
     }
@@ -1054,19 +1499,37 @@ public final class AudiobookWorkflowModel {
             }
         }
         guard !targetChapterIDs.isEmpty else {
-            errorMessage = AudiobookProductionError.noReadyChaptersSelected.errorDescription
+            if !allUnknownAnnotations.isEmpty {
+                errorMessage = "当前仍有 \(allUnknownAnnotations.count) 处待确认说话人阻碍章节就绪，请先在「准备与角色」页快速确认说话人。"
+                Task { await jumpToFirstUnknownSpeaker() }
+            } else if !isAuditionConfirmedForSelectedBook {
+                errorMessage = AudiobookProductionError.castNotConfirmed.errorDescription
+                workbenchTab = .preparation
+            } else {
+                errorMessage = AudiobookProductionError.noReadyChaptersSelected.errorDescription
+            }
             return
         }
 
         productionTask?.cancel()
+        productionProgressPollTask?.cancel()
         isProducing = true
         isPausingProduction = false
         errorMessage = nil
+
+        productionProgressPollTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled, let self, self.isProducing else { return }
+                self.productionProgress = await productionController.progress(for: bookID)
+            }
+        }
 
         productionTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
                 try await productionController.start(bookID: bookID, chapterIDs: targetChapterIDs)
+                self.productionProgressPollTask?.cancel()
                 self.isProducing = false
                 self.isPausingProduction = false
                 self.productionProgress = await productionController.progress(for: bookID)
@@ -1074,18 +1537,22 @@ public final class AudiobookWorkflowModel {
                 await self.refreshShelf()
                 self.bannerMessage = "所选章节制作已完成，可立即进入听书或导出。"
             } catch let error as AudiobookProductionError where error == .cancelled {
+                self.productionProgressPollTask?.cancel()
                 self.isProducing = false
                 self.isPausingProduction = false
                 self.productionProgress = await productionController.progress(for: bookID)
                 await self.openBook(bookID)
                 await self.refreshShelf()
             } catch {
+                let failureDescription = error.localizedDescription
+                self.productionProgressPollTask?.cancel()
                 self.isProducing = false
                 self.isPausingProduction = false
                 self.productionProgress = await productionController.progress(for: bookID)
-                self.errorMessage = error.localizedDescription
                 await self.openBook(bookID)
                 await self.refreshShelf()
+                // 必须在 openBook 之后写入 errorMessage，防止被 openBook 内部的 errorMessage = nil 清空
+                self.errorMessage = failureDescription
             }
         }
     }
@@ -1093,6 +1560,7 @@ public final class AudiobookWorkflowModel {
     public func pauseProduction() async {
         guard let productionController else { return }
         isPausingProduction = true
+        productionProgressPollTask?.cancel()
         await productionController.pause()
         productionTask?.cancel()
         isProducing = false
@@ -1221,6 +1689,7 @@ public final class AudiobookWorkflowModel {
             await analysisPipeline?.cancel(bookID: bookID)
         }
         analysisTask?.cancel()
+        productionProgressPollTask?.cancel()
         await productionController?.shutdown()
         productionTask?.cancel()
         isAnalyzing = false
@@ -1229,6 +1698,32 @@ public final class AudiobookWorkflowModel {
     }
 
     // MARK: - Private Data Reload Helpers
+
+    private func rebuildUnknownSpeakerIndex(
+        from allAnnotations: [AudiobookAnnotation],
+        chapters: [AudiobookChapter]
+    ) {
+        let chapterOrdByID = Dictionary(uniqueKeysWithValues: chapters.map { ($0.id, $0.ordinal) })
+        var counts: [UUID: Int] = [:]
+        var unknowns: [AudiobookAnnotation] = []
+        for ann in allAnnotations where ann.assignment.isUnknown {
+            counts[ann.chapterID, default: 0] += 1
+            unknowns.append(ann)
+        }
+        unknowns.sort { lhs, rhs in
+            let lOrd = chapterOrdByID[lhs.chapterID] ?? 0
+            let rOrd = chapterOrdByID[rhs.chapterID] ?? 0
+            if lOrd != rOrd { return lOrd < rOrd }
+            return lhs.sourceRange < rhs.sourceRange
+        }
+        unknownCountByChapterID = counts
+        allUnknownAnnotations = unknowns
+        if let focused = focusedUnknownAtomID,
+           !unknowns.contains(where: { $0.atomID == focused })
+        {
+            focusedUnknownAtomID = unknowns.first?.atomID
+        }
+    }
 
     private func reloadSelectedChapterDetails() async {
         guard let store, let bookID = selectedBook?.id, let chapterID = selectedChapterID else {

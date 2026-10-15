@@ -487,6 +487,38 @@ def test_reference_confirmation_checks_numbers_without_changing_rejected_candida
     } == files_before
 
 
+def test_confirm_candidate_with_traditional_chinese_reference_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trad_ref = (
+        "談話是總不投機的了，於是不多久，我便一個人剩在書房里。"
+        "第二天我起得很遲，午飯之後，出去看了幾個本家和朋友；第三天也照樣。"
+        "他們也都沒有什麼大改變，單是老了些；家中卻一律忙，都在準備。"
+    )
+    simp_asr = (
+        "谈话是总不投机的了，于是不多久，我便一个人剩在书房里。"
+        "第二天我起得很迟，午饭之后出去看了几个本家和朋友。第三天也照样，"
+        "他们也都没有什么大改变，单是老了些。家中却一律忙，都在准备。"
+    )
+    client, registry, _synth, asr = make_client(tmp_path, monkeypatch)
+    candidate_id, _ = create_candidate(client, reference_text=trad_ref)
+    asr.text = simp_asr
+    repository = VoiceDesignRepository(
+        registry.artifact_path("voice_design_candidates.json"),
+        registry.artifact_path("voice_design_candidates"),
+    )
+
+    response = client.post(f"/v1/voice-designs/{candidate_id}/confirm", json={})
+    assert response.status_code == 200, response.text
+    confirmed = response.json()["candidate"]
+    assert confirmed["state"] == "confirmed"
+    assert confirmed["reference"]["quality"]["transcript_match"] == pytest.approx(1.0)
+    assert repository.get(candidate_id).quality["status"] == "pass"
+
+
+
+
 def test_workflow_does_not_repeat_the_pitch_algorithm(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

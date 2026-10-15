@@ -632,6 +632,61 @@ public enum AudiobookAnalysisPrompts {
         return prompt
     }
 
+    /// 针对初次全书分析或用户确认/合并角色后仍残留的 `unknown` 对白段落，携带双向已确认说话人上下文与完整剧组角色表执行二次归属消歧。
+    public static func makeSecondaryUnknownResolutionPrompt(
+        rootWindowID: UUID,
+        primaryAtoms: [AudiobookPromptAtomItem],
+        leadingContext: [AudiobookPromptAtomItem] = [],
+        trailingContext: [AudiobookPromptAtomItem] = [],
+        candidateCharacters: [AudiobookPromptCharacterSummary],
+        policy: AudiobookAnalysisPolicy = .standard
+    ) throws -> AudiobookAnalysisPrompt {
+        try validateWindowInputs(
+            primaryAtoms: primaryAtoms,
+            leadingContext: leadingContext,
+            trailingContext: trailingContext,
+            characterSummaries: candidateCharacters,
+            policy: policy
+        )
+
+        let unknownIndices = primaryAtoms.enumerated().compactMap { offset, item -> Int? in
+            guard item.resolvedSpeakerName == nil else { return nil }
+            return item.localIndex ?? (offset + 1)
+        }
+
+        var payload: [String: Any] = [
+            "task": "secondary_resolve_unknown_speakers",
+            "leading_context_readonly": leadingContext.map(encodeAtomItem),
+            "primary_atoms_required": primaryAtoms.map(encodeAtomItem),
+            "trailing_context_readonly": trailingContext.map(encodeAtomItem),
+            "candidate_characters": candidateCharacters.map(encodeCharacterSummary)
+        ]
+        if !unknownIndices.isEmpty {
+            payload["unresolved_unknown_indices"] = unknownIndices
+        }
+
+        let inputJSON = try canonicalJSONString(from: payload)
+        let instructions = """
+        你是有声书工坊的疑难对白二次说话人消歧器。全书角色表已确认完毕，请你重点针对 unresolved_unknown_indices（尚未确认说话人的对白段落）进行二次深度推理：
+        1. 请综合利用 leading_context_readonly（前文已确认说话人）、primary_atoms_required 中已确认段落的 speaker、以及 trailing_context_readonly（后文已确认说话人）构成的双向对话轮次（A-B-A-B 交替接话规律）、称谓代词、语气特征与 candidate_characters 中的别称/声线线索，尽可能将未知对白准确归属到具体角色（speakerKind="character" 并填写 roleID 或短代号如 "R1"）。
+        2. 若某段实为旁白叙述或内心旁白，可归属为 speakerKind="narrator"。
+        3. 仅当结合前后文双向语境与完整角色表后仍存在多角色高度歧义、确实无法断定时，才保留 speakerKind="unknown"，并在 candidateRoleIDs 中按可能性从高到低列出 1~3 名最可能的候选角色，同时在 evidence 中写明简短判断依据，供人工一键确认。
+        \(securityGuardrail)
+        """
+        let schemaJSON = try canonicalJSONString(from: annotationSchema)
+        let prompt = AudiobookAnalysisPrompt(
+            stage: .annotation,
+            instructions: instructions,
+            input: inputJSON,
+            schemaName: "audiobook_annotate",
+            schemaJSON: schemaJSON,
+            maxOutputTokens: policy.annotationMaxOutputTokens,
+            rootWindowID: rootWindowID
+        )
+        try validateTotalBudget(prompt: prompt, policy: policy)
+        return prompt
+    }
+
     // MARK: - Validation Helpers
 
     private static func validateWindowInputs(

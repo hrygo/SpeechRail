@@ -972,6 +972,18 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 creation = candidate.creation
                 revision = candidate.revision
             now = time.time()
+            updated_quality = candidate.quality
+            if isinstance(candidate.quality, dict) and isinstance(
+                candidate.quality.get("reference"), dict
+            ):
+                ref_dict = dict(candidate.quality["reference"])
+                ref_dict["transcript_match"] = score
+                ref_obj = vq.VoiceQualityReference.from_dict(ref_dict)
+                updated_quality = vq.make_quality_report(
+                    ref_obj,
+                    empty_synthesis(),
+                    transcript_match=score,
+                ).to_dict()
 
             def confirm(current: VoiceDesignCandidate) -> VoiceDesignCandidate:
                 if current.revision != candidate.revision or current.state != candidate.state:
@@ -984,6 +996,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                         "transcript_sha256": _hash_text(transcript),
                         "creation": creation,
                         "revision": revision,
+                        "quality": updated_quality,
                         "validations": [] if changed else current.validations,
                         "state": "confirmed",
                         "confirmed_at": now,

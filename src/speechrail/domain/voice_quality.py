@@ -26,9 +26,11 @@ caller (``None`` means "unavailable" and is skipped, never auto-passed).
 
 from __future__ import annotations
 
+import ctypes
 import math
 import re
 import struct
+import sys
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -40,6 +42,78 @@ from uuid import uuid4
 from speechrail.domain.itn import apply_light_itn, resolve_chinese_magnitudes
 
 POLICY_VERSION: Final[str] = "voice_quality_v1"
+
+
+def _init_cf_transform() -> tuple[Any, Any, int] | None:
+    if sys.platform != "darwin":
+        return None
+    try:
+        cf = ctypes.cdll.LoadLibrary(
+            "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+        )
+        cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+        cf.CFStringCreateWithCString.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_char_p,
+            ctypes.c_uint32,
+        ]
+        cf.CFStringCreateMutableCopy.restype = ctypes.c_void_p
+        cf.CFStringCreateMutableCopy.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_long,
+            ctypes.c_void_p,
+        ]
+        cf.CFStringTransform.restype = ctypes.c_bool
+        cf.CFStringTransform.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_bool,
+        ]
+        cf.CFStringGetCString.restype = ctypes.c_bool
+        cf.CFStringGetCString.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_char_p,
+            ctypes.c_long,
+            ctypes.c_uint32,
+        ]
+        cf.CFRelease.restype = None
+        cf.CFRelease.argtypes = [ctypes.c_void_p]
+        k_cf_string_encoding_utf8 = 0x08000100
+        trans_name = cf.CFStringCreateWithCString(
+            None, b"Traditional-Simplified", k_cf_string_encoding_utf8
+        )
+        return cf, trans_name, k_cf_string_encoding_utf8
+    except Exception:
+        return None
+
+
+_CF_TRANSFORM: Final = _init_cf_transform()
+
+
+def fold_traditional_chinese(text: str) -> str:
+    """Fold Traditional Chinese characters to Simplified Chinese on macOS."""
+    if not text or _CF_TRANSFORM is None:
+        return text
+    cf, trans_name, encoding = _CF_TRANSFORM
+    raw = text.encode("utf-8")
+    orig = cf.CFStringCreateWithCString(None, raw, encoding)
+    if not orig:
+        return text
+    mut = cf.CFStringCreateMutableCopy(None, 0, orig)
+    cf.CFRelease(orig)
+    if not mut:
+        return text
+    try:
+        if cf.CFStringTransform(mut, None, trans_name, False):
+            buf_len = max(len(raw) * 4 + 64, 256)
+            buf = ctypes.create_string_buffer(buf_len)
+            if cf.CFStringGetCString(mut, buf, buf_len, encoding):
+                return buf.value.decode("utf-8")
+        return text
+    finally:
+        cf.CFRelease(mut)
+
 
 _ACTIVE_THRESHOLD_DBFS: Final[float] = -45.0
 _ACTIVE_THRESHOLD_RMS: Final[float] = 10.0 ** (_ACTIVE_THRESHOLD_DBFS / 20.0)
@@ -696,11 +770,14 @@ def grade_reference_quality(
 
 def normalize_transcript_for_match(text: str) -> str:
     """Normalize ASR/reference text for bounded character-level comparison."""
+    # Fold Traditional Chinese to Simplified Chinese first so that literary,
+    # historical or regional reference scripts match local ASR transcripts.
+    folded = fold_traditional_chinese(text)
     # Magnitudes first: `二十二点五` is arithmetic that `apply_light_itn` only
     # resolves when a decimal marker is present, and `五千三百` has no marker at
     # all, so both would otherwise reach the digit table as characters. Runs with
     # no magnitude word (`三六九`, `二零二六`) are left alone and stay positional.
-    folded = resolve_chinese_magnitudes(text)
+    folded = resolve_chinese_magnitudes(folded)
     folded = _fold_digit_clarifiers(folded)
     for spoken, symbol in _TRANSCRIPT_SPOKEN_UNITS:
         folded = folded.replace(spoken, symbol)
@@ -912,6 +989,7 @@ __all__ = [
     "clipping_ratio",
     "duration_seconds",
     "estimated_snr_db",
+    "fold_traditional_chinese",
     "grade_reference_quality",
     "leading_trailing_silence_seconds",
     "make_quality_report",

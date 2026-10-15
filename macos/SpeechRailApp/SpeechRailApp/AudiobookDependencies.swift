@@ -74,9 +74,63 @@ public struct AudiobookRenderCallOutput: Equatable, Sendable {
     }
 }
 
+public struct AudiobookLeadVoiceCreationRequest: Equatable, Sendable {
+    public var bookID: UUID
+    public var roleID: UUID
+    public var targetVoiceID: String
+    public var voiceName: String
+    public var instruction: String
+    public var referenceTextCandidates: [String]
+    public var seed: Int
+
+    public init(
+        bookID: UUID,
+        roleID: UUID,
+        targetVoiceID: String,
+        voiceName: String,
+        instruction: String,
+        referenceTextCandidates: [String],
+        seed: Int
+    ) {
+        self.bookID = bookID
+        self.roleID = roleID
+        self.targetVoiceID = targetVoiceID
+        self.voiceName = voiceName
+        self.instruction = instruction
+        self.referenceTextCandidates = referenceTextCandidates
+        self.seed = seed
+    }
+}
+
+public struct AudiobookLeadVoiceCreationOutput: Equatable, Sendable {
+    public var voiceID: String
+    public var voiceName: String
+    public var voiceRevision: String
+    public var modelRevision: String
+
+    public init(
+        voiceID: String,
+        voiceName: String,
+        voiceRevision: String,
+        modelRevision: String
+    ) {
+        self.voiceID = voiceID
+        self.voiceName = voiceName
+        self.voiceRevision = voiceRevision
+        self.modelRevision = modelRevision
+    }
+}
+
 public protocol AudiobookSpeechRenderer: Sendable {
     func fetchEffectiveCapabilities() async throws -> EffectiveCapabilitySnapshot
     func renderFragment(_ request: AudiobookRenderCallRequest) async throws -> AudiobookRenderCallOutput
+    func createAndPublishLeadVoice(_ request: AudiobookLeadVoiceCreationRequest) async throws -> AudiobookLeadVoiceCreationOutput
+}
+
+public extension AudiobookSpeechRenderer {
+    func createAndPublishLeadVoice(_ request: AudiobookLeadVoiceCreationRequest) async throws -> AudiobookLeadVoiceCreationOutput {
+        throw ServiceAPIClientError.requestFailed
+    }
 }
 
 public struct UnavailableAudiobookSpeechRenderer: AudiobookSpeechRenderer {
