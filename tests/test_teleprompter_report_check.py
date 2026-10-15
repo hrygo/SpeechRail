@@ -20,7 +20,7 @@ self_check = _TOOL.self_check
 
 REPORT = (
     Path(__file__).resolve().parents[1]
-    / "docs/implementation/SpeechRail_AI_Teleprompter_Stage_Report_2026-09-28.md"
+    / "docs/implementation/2026-09-28-teleprompter-stage-report.md"
 )
 
 TABLE = "找出 3 个真缺陷（§2 第 41–43 条）\n\n### 4.3\n\n"
