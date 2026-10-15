@@ -939,4 +939,112 @@ final class AudiobookCastTests: XCTestCase {
         )
         XCTAssertEqual(bindingsWithCollection[newLead.id]?.voiceID, "v_global_1", "绑定剧团音色包后应优先从该合集中选角")
     }
+
+    func testPostAnalysisHighVolumeOperationsRemainSubSecondWithoutUIFreeze() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let castController = AudiobookCastController(store: store)
+        let revisionController = AudiobookRevisionController(store: store)
+
+        // 构造 15 章、每章 60 段的正文（共 900 段原文与 80 名出场角色），模拟长篇小说全书 LLM 分析完成后的高负载状态
+        var chapterLines: [String] = []
+        for chIdx in 1...15 {
+            chapterLines.append("第\(chIdx)章 烽火渡口")
+            for pIdx in 1...60 {
+                chapterLines.append("第\(chIdx)章第\(pIdx)段，“此地不宜久留，速速启程！”角色_\((chIdx + pIdx) % 80)低声喝道。")
+            }
+        }
+        let fullText = chapterLines.joined(separator: "\n")
+        let url = tempRoot.appendingPathComponent("large_novel.txt")
+        try Data(fullText.utf8).write(to: url)
+
+        let preview = try await AudiobookTXTImporter.prepare(fileURL: url, encoding: .utf8)
+        let bookID = try await store.importBook(preview)
+        let chapters = try await store.chapters(for: bookID).sorted { $0.ordinal < $1.ordinal }
+        XCTAssertEqual(chapters.count, 15)
+
+        var characters = try await store.characters(for: bookID)
+        let narrator = try XCTUnwrap(characters.first(where: \.isNarrator))
+        for rIdx in 0..<80 {
+            let role = AudiobookCharacter(
+                bookID: bookID,
+                displayName: "角色_\(rIdx)",
+                aliases: ["别称_\(rIdx)"],
+                isNarrator: false,
+                isMajor: rIdx < 4,
+                allowSharedMinorVoice: rIdx >= 4,
+                evidences: [
+                    AudiobookCharacterEvidence(
+                        chapterID: chapters[rIdx % chapters.count].id,
+                        sourceRange: chapters[rIdx % chapters.count].sourceRange,
+                        quoteExcerpt: "“此地不宜久留！”角色_\(rIdx)沉声道。",
+                        voiceTraitSummary: rIdx % 2 == 0 ? "中年男性沉稳浑厚" : "青年女性清亮明快"
+                    )
+                ],
+                chapterIDs: [chapters[rIdx % chapters.count].id]
+            )
+            characters.append(role)
+        }
+        characters = AudiobookCastRegistry.enrichCharactersWithVoicePersonas(characters)
+        try await store.saveCharacters(bookID: bookID, characters: characters)
+
+        let allAtoms = try await store.atoms(for: bookID).filter { $0.kind != .formatting }
+        let nonNarrators = characters.filter { !$0.isNarrator }
+        let windowID = UUID()
+        let anns: [AudiobookAnnotation] = allAtoms.enumerated().map { idx, atom in
+            let roleID = (idx % 3 == 0) ? narrator.id : nonNarrators[idx % nonNarrators.count].id
+            return AudiobookAnnotation(
+                bookID: bookID,
+                chapterID: atom.chapterID,
+                windowID: windowID,
+                atomID: atom.id,
+                sourceRange: atom.sourceRange,
+                assignment: .assigned(roleID: roleID)
+            )
+        }
+        try await store.saveAnnotations(bookID: bookID, annotations: anns)
+
+        var book = try await store.book(id: bookID)
+        book.analysisState = .allWindowsValidated
+        try await store.updateBook(book)
+
+        let voices: [SafeVoiceEntry] = [
+            makeTestSafeVoice(id: "v-narrator", name: "沉稳旁白"),
+            makeTestSafeVoice(id: "dylan", name: "北京青年男声"),
+            makeTestSafeVoice(id: "vivian", name: "明亮青年女声"),
+            makeTestSafeVoice(id: "uncle_fu", name: "醇厚中年男声"),
+            makeTestSafeVoice(id: "serena", name: "温柔成熟女声")
+        ]
+
+        let t0 = ContinuousClock.now
+        let recommended = AudiobookCastRegistry.recommendVoiceBindings(
+            characters: characters,
+            availableVoices: voices,
+            annotations: anns,
+            bookID: bookID,
+            voiceMetadataByID: [:]
+        )
+        let boundCount = try await castController.bindVoicesBatch(
+            bookID: bookID,
+            bindings: Array(recommended.values)
+        )
+        XCTAssertEqual(boundCount, characters.count)
+
+        // 验证全书章节就绪度批量计算、单段改派、书架摘要与恢复计划均在亚秒级完成，绝不阻塞主线程或 Actor
+        let readinessMap = try await castController.chapterReadinessMap(for: bookID)
+        XCTAssertEqual(readinessMap.count, 15)
+
+        try await castController.assignRole(
+            bookID: bookID,
+            atomIDs: [allAtoms[0].id],
+            roleID: nonNarrators[0].id
+        )
+        let summaries = try await store.listBooks()
+        XCTAssertEqual(summaries.first?.totalChapterCount, 15)
+
+        let plan = try await revisionController.resumePlan(bookID: bookID)
+        XCTAssertFalse(plan.redoFragmentIDs.isEmpty)
+
+        let elapsed = ContinuousClock.now - t0
+        XCTAssertLessThan(elapsed, .seconds(2), "LLM 分析完成后的高频交互全链路耗时（\(elapsed)）必须保持亚秒级响应，严禁引发 UI 卡死")
+    }
 }

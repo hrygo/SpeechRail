@@ -107,9 +107,11 @@ public final class AudiobookWorkflowModel {
     public private(set) var trashedBooks: [AudiobookTrashedBookEntry] = []
     public private(set) var selectedBook: AudiobookBook?
     public private(set) var chapters: [AudiobookChapter] = []
+    private var isSuppressingChapterAutoReload: Bool = false
+    private var hasRecoveredOnBootstrap: Bool = false
     public var selectedChapterID: UUID? {
         didSet {
-            if selectedChapterID != oldValue {
+            if selectedChapterID != oldValue && !isSuppressingChapterAutoReload {
                 Task { await reloadSelectedChapterDetails() }
             }
         }
@@ -132,16 +134,58 @@ public final class AudiobookWorkflowModel {
         }
     }
 
-    public private(set) var characters: [AudiobookCharacter] = []
+    public private(set) var characters: [AudiobookCharacter] = [] {
+        didSet {
+            charactersByID = Dictionary(uniqueKeysWithValues: characters.map { ($0.id, $0) })
+            rebuildMinorCharactersByArchetype()
+            rebuildSceneConflictCache()
+            rebuildChapterCharacterBuckets()
+        }
+    }
+    public private(set) var charactersByID: [UUID: AudiobookCharacter] = [:]
+    public private(set) var minorCharactersByArchetype: [AudiobookVoiceArchetype: [AudiobookCharacter]] = [:]
+    public private(set) var sceneConflictPartnersByRoleID: [UUID: [String]] = [:]
+    public private(set) var totalSceneVoiceConflictCount: Int = 0
+    public private(set) var currentChapterCharacters: [AudiobookCharacter] = []
+    public private(set) var remainingBookCharacters: [AudiobookCharacter] = []
     public var selectedRoleID: UUID?
     public var castFilterScope: CastFilterScope = .all
-    public private(set) var roleStatsByID: [UUID: AudiobookRoleDialogueStats] = [:]
-    public private(set) var voiceBindings: [UUID: AudiobookVoiceBinding] = [:]
+    public private(set) var roleStatsByID: [UUID: AudiobookRoleDialogueStats] = [:] {
+        didSet {
+            rebuildMinorCharactersByArchetype()
+            rebuildSceneConflictCache()
+        }
+    }
+    public private(set) var voiceBindings: [UUID: AudiobookVoiceBinding] = [:] {
+        didSet {
+            rebuildSceneConflictCache()
+        }
+    }
     public private(set) var chapterReadinessByID: [UUID: AudiobookChapterReadinessState] = [:]
     public private(set) var chapterAtoms: [AudiobookTextAtom] = []
-    public private(set) var chapterAnnotations: [AudiobookAnnotation] = []
+    public private(set) var chapterAnnotations: [AudiobookAnnotation] = [] {
+        didSet {
+            var map: [UUID: AudiobookAnnotation] = [:]
+            map.reserveCapacity(chapterAnnotations.count)
+            for ann in chapterAnnotations {
+                map[ann.atomID] = ann
+            }
+            chapterAnnotationsByAtomID = map
+            rebuildChapterCharacterBuckets()
+        }
+    }
+    public private(set) var chapterAnnotationsByAtomID: [UUID: AudiobookAnnotation] = [:]
     public private(set) var chapterFragments: [AudiobookFragment] = []
-    public private(set) var chapterCandidates: [AudiobookRenderCandidate] = []
+    public private(set) var chapterCandidates: [AudiobookRenderCandidate] = [] {
+        didSet {
+            var grouped = Dictionary(grouping: chapterCandidates, by: \.fragmentID)
+            for key in grouped.keys {
+                grouped[key]?.sort { $0.createdAt > $1.createdAt }
+            }
+            chapterCandidatesByFragmentID = grouped
+        }
+    }
+    public private(set) var chapterCandidatesByFragmentID: [UUID: [AudiobookRenderCandidate]] = [:]
     public private(set) var atomTextsByID: [UUID: String] = [:]
     public private(set) var fragmentTextsByID: [UUID: String] = [:]
     public var selectedFragmentID: UUID?
@@ -352,7 +396,10 @@ public final class AudiobookWorkflowModel {
         bootstrapIfPossible()
         guard let store else { return }
         do {
-            _ = try await store.recover()
+            if !hasRecoveredOnBootstrap {
+                hasRecoveredOnBootstrap = true
+                _ = try await store.recover()
+            }
             shelfBooks = try await store.listBooks()
             trashedBooks = try await store.listTrashedBooks()
             if let exp = exportController {
@@ -406,18 +453,24 @@ public final class AudiobookWorkflowModel {
             )
             selectedBook = book
             chapters = loadedChapters
-            characters = loadedCharacters
             roleStatsByID = computedStats
+            characters = loadedCharacters
             voiceBindings = loadedBindings
             exportRecords = loadedExports
             if selectedChapterID == nil || !chapters.contains(where: { $0.id == selectedChapterID }) {
+                isSuppressingChapterAutoReload = true
                 selectedChapterID = chapters.first?.id
+                isSuppressingChapterAutoReload = false
             }
             if selectedRoleID == nil {
                 selectedRoleID = characters.first?.id
             }
-            if let rev = revisionController {
+            let hasStartedProduction = book.productionState != .idle
+                || loadedChapters.contains(where: { $0.currentChapterRevisionID != nil || $0.previousChapterRevisionID != nil })
+            if hasStartedProduction, let rev = revisionController {
                 resumePlan = try? await rev.resumePlan(bookID: bookID)
+            } else {
+                resumePlan = nil
             }
             await reloadSelectedChapterDetails()
             await refreshChapterReadinessMap(for: bookID)
@@ -648,23 +701,85 @@ public final class AudiobookWorkflowModel {
             try? await store.saveCharacters(bookID: targetID, characters: updatedChars)
         }
 
-        var newlyBoundCount = 0
-        for role in updatedChars {
-            guard existing[role.id]?.isSynthesisReady != true,
-                  let binding = recommended[role.id]
-            else { continue }
-            if (try? await castController.bindVoice(bookID: targetID, roleID: role.id, binding: binding)) != nil {
-                newlyBoundCount += 1
-            }
+        let bindingsToApply = updatedChars.compactMap { role -> AudiobookVoiceBinding? in
+            guard existing[role.id]?.isSynthesisReady != true else { return nil }
+            return recommended[role.id]
+        }
+        if !bindingsToApply.isEmpty {
+            _ = try? await castController.bindVoicesBatch(bookID: targetID, bindings: bindingsToApply)
         }
 
         if selectedBook?.id == targetID {
-            characters = (try? await store.characters(for: targetID)) ?? updatedChars
             roleStatsByID = stats
+            characters = (try? await store.characters(for: targetID)) ?? updatedChars
             voiceBindings = (try? await store.voiceBindings(for: targetID)) ?? voiceBindings
             selectedBook = (try? await store.book(id: targetID)) ?? selectedBook
             await refreshChapterReadinessMap(for: targetID)
         }
+    }
+
+    private func rebuildMinorCharactersByArchetype() {
+        var grouped: [AudiobookVoiceArchetype: [AudiobookCharacter]] = [:]
+        for role in characters where !role.isNarrator && role.allowSharedMinorVoice {
+            let arch = roleStatsByID[role.id]?.archetype ?? role.inferredVoiceArchetype()
+            grouped[arch, default: []].append(role)
+        }
+        minorCharactersByArchetype = grouped
+    }
+
+    private func rebuildSceneConflictCache() {
+        guard !characters.isEmpty, !voiceBindings.isEmpty else {
+            sceneConflictPartnersByRoleID = [:]
+            totalSceneVoiceConflictCount = 0
+            return
+        }
+        var map: [UUID: [String]] = [:]
+        var count = 0
+        for role in characters {
+            guard let myVoiceID = voiceBindings[role.id]?.voiceID,
+                  let stat = roleStatsByID[role.id],
+                  !stat.scenePartnerRoleIDs.isEmpty
+            else { continue }
+            let partners = stat.scenePartnerRoleIDs.compactMap { partnerID -> String? in
+                guard voiceBindings[partnerID]?.voiceID == myVoiceID else { return nil }
+                return charactersByID[partnerID]?.displayName
+            }.sorted()
+            if !partners.isEmpty {
+                map[role.id] = partners
+                count += 1
+            }
+        }
+        sceneConflictPartnersByRoleID = map
+        totalSceneVoiceConflictCount = count
+    }
+
+    private func rebuildChapterCharacterBuckets() {
+        guard !characters.isEmpty else {
+            currentChapterCharacters = []
+            remainingBookCharacters = []
+            return
+        }
+        let chapterID = selectedChapterID
+        let chapterSpeakerIDs = Set(chapterAnnotations.compactMap(\.assignment.roleID))
+        var primary: [AudiobookCharacter] = []
+        var secondary: [AudiobookCharacter] = []
+        for role in characters {
+            let inChapter = role.isNarrator
+                || !role.allowSharedMinorVoice
+                || chapterSpeakerIDs.contains(role.id)
+                || (chapterID.map { role.chapterIDs.contains($0) } == true)
+            if inChapter && primary.count < 16 {
+                primary.append(role)
+            } else {
+                secondary.append(role)
+            }
+        }
+        if primary.isEmpty {
+            primary = Array(characters.prefix(16))
+            secondary = Array(characters.dropFirst(16))
+        }
+        currentChapterCharacters = primary
+        remainingBookCharacters = secondary
     }
 
     // MARK: - Stratified Cast Helpers & Batch Archetype Binding
@@ -695,20 +810,7 @@ public final class AudiobookWorkflowModel {
 
     /// 返回与指定角色在同一场戏直接交谈且绑定了相同 voiceID 的对手角色名称列表（用于实时同场撞音预警）。
     public func sceneConflictPartnerNames(for roleID: UUID) -> [String] {
-        guard let myVoiceID = voiceBindings[roleID]?.voiceID,
-              let stat = roleStatsByID[roleID],
-              !stat.scenePartnerRoleIDs.isEmpty
-        else { return [] }
-
-        return stat.scenePartnerRoleIDs.compactMap { partnerID -> String? in
-            guard voiceBindings[partnerID]?.voiceID == myVoiceID else { return nil }
-            return characters.first(where: { $0.id == partnerID })?.displayName
-        }.sorted()
-    }
-
-    /// 统计全书存在同场紧邻对手戏撞音的角色数量。
-    public var totalSceneVoiceConflictCount: Int {
-        characters.filter { !sceneConflictPartnerNames(for: $0.id).isEmpty }.count
+        sceneConflictPartnersByRoleID[roleID] ?? []
     }
 
     /// 按声部行当一键批量换绑配角音色（保护核心主角不被覆盖）。
@@ -1151,12 +1253,16 @@ public final class AudiobookWorkflowModel {
             let fragmentIDSet = Set(fragments.map(\.id))
 
             var atomMap: [UUID: String] = [:]
+            atomMap.reserveCapacity(atoms.count)
             for atom in atoms {
-                atomMap[atom.id] = (try? source.text(in: atom.sourceRange)) ?? ""
+                let raw = (try? source.text(in: atom.sourceRange)) ?? ""
+                atomMap[atom.id] = AudiobookSourceIndex.displayNormalizedText(raw)
             }
             var fragMap: [UUID: String] = [:]
+            fragMap.reserveCapacity(fragments.count)
             for frag in fragments {
-                fragMap[frag.id] = (try? source.text(in: frag.sourceRange)) ?? ""
+                let raw = (try? source.text(in: frag.sourceRange)) ?? ""
+                fragMap[frag.id] = AudiobookSourceIndex.displayNormalizedText(raw)
             }
 
             chapterAtoms = atoms
@@ -1175,12 +1281,8 @@ public final class AudiobookWorkflowModel {
 
     private func refreshChapterReadinessMap(for bookID: UUID) async {
         guard let castController else { return }
-        var map: [UUID: AudiobookChapterReadinessState] = [:]
-        for chapter in chapters {
-            if let state = try? await castController.chapterReadiness(bookID: bookID, chapterID: chapter.id) {
-                map[chapter.id] = state
-            }
+        if let map = try? await castController.chapterReadinessMap(for: bookID) {
+            chapterReadinessByID = map
         }
-        chapterReadinessByID = map
     }
 }

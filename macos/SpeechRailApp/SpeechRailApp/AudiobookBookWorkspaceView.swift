@@ -352,13 +352,12 @@ public struct AudiobookBookWorkspaceView: View {
 
     @ViewBuilder
     private func atomRowView(atom: AudiobookTextAtom) -> some View {
-        let annotation = workflow.chapterAnnotations.first(where: { $0.atomID == atom.id })
-        let rawText = workflow.atomTextsByID[atom.id] ?? ""
-        let displayText = AudiobookSourceIndex.displayNormalizedText(rawText)
+        let annotation = workflow.chapterAnnotationsByAtomID[atom.id]
+        let displayText = workflow.atomTextsByID[atom.id] ?? ""
         let isSelected = workflow.selectedAtomIDs.contains(atom.id)
         let isUnknown = annotation?.assignment.isUnknown == true
         let assignedRole = annotation?.assignment.roleID.flatMap { id in
-            workflow.characters.first(where: { $0.id == id })
+            workflow.charactersByID[id]
         }
 
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
@@ -402,9 +401,19 @@ public struct AudiobookBookWorkspaceView: View {
                 Spacer()
 
                 Menu {
-                    ForEach(workflow.characters) { role in
+                    ForEach(workflow.currentChapterCharacters) { role in
                         Button("指派给：\(role.displayName)") {
                             Task { await workflow.assignSpeaker(atomIDs: [atom.id], roleID: role.id) }
+                        }
+                    }
+                    if !workflow.remainingBookCharacters.isEmpty {
+                        Divider()
+                        Menu("更多全书角色（\(workflow.remainingBookCharacters.count)）") {
+                            ForEach(workflow.remainingBookCharacters) { role in
+                                Button("指派给：\(role.displayName)") {
+                                    Task { await workflow.assignSpeaker(atomIDs: [atom.id], roleID: role.id) }
+                                }
+                            }
                         }
                     }
                 } label: {
@@ -423,7 +432,6 @@ public struct AudiobookBookWorkspaceView: View {
                 )
                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 .lineSpacing(4)
-                .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             if case let .unknown(reason, candidateRoleIDs) = annotation?.assignment {
@@ -438,9 +446,9 @@ public struct AudiobookBookWorkspaceView: View {
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
 
                         let candidateRoles = candidateRoleIDs.compactMap { cid in
-                            workflow.characters.first(where: { $0.id == cid })
+                            workflow.charactersByID[cid]
                         }
-                        let buttonsToShow = candidateRoles.isEmpty ? Array(workflow.characters.prefix(3)) : candidateRoles
+                        let buttonsToShow = candidateRoles.isEmpty ? Array(workflow.currentChapterCharacters.prefix(3)) : candidateRoles
 
                         ForEach(buttonsToShow) { role in
                             Button(role.displayName) {
@@ -581,12 +589,9 @@ public struct AudiobookBookWorkspaceView: View {
 
     @ViewBuilder
     private func fragmentRowView(fragment: AudiobookFragment) -> some View {
-        let role = workflow.characters.first(where: { $0.id == fragment.roleID })
-        let rawText = workflow.fragmentTextsByID[fragment.id] ?? ""
-        let text = AudiobookSourceIndex.displayNormalizedText(rawText)
-        let candidates = workflow.chapterCandidates
-            .filter { $0.fragmentID == fragment.id }
-            .sorted { $0.createdAt > $1.createdAt }
+        let role = workflow.charactersByID[fragment.roleID]
+        let text = workflow.fragmentTextsByID[fragment.id] ?? ""
+        let candidates = workflow.chapterCandidatesByFragmentID[fragment.id] ?? []
         let matchingCandidate = candidates.first(where: { $0.dependencyDigest == fragment.dependencyDigest && $0.isReceiptVerified })
 
         CardSurface {
@@ -750,11 +755,7 @@ public struct AudiobookBookWorkspaceView: View {
                                     .youngMale, .matureMale, .youngFemale, .matureFemale, .neutralEnsemble
                                 ]
                                 ForEach(minorArchetypes) { archetype in
-                                    let matchingMinors = workflow.characters.filter {
-                                        !$0.isNarrator
-                                            && $0.allowSharedMinorVoice
-                                            && $0.inferredVoiceArchetype(peers: workflow.characters) == archetype
-                                    }
+                                    let matchingMinors = workflow.minorCharactersByArchetype[archetype] ?? []
                                     Menu("\(archetype.shortBadgeTitle)（\(matchingMinors.count) 人）") {
                                         let voicesToList = activeBookVoices.isEmpty ? allAvailableVoices : activeBookVoices
                                         if voicesToList.isEmpty {
@@ -818,7 +819,7 @@ public struct AudiobookBookWorkspaceView: View {
         let binding = workflow.voiceBindings[role.id]
         let stat = workflow.roleStatsByID[role.id]
         let tier = stat?.tier ?? (role.isNarrator ? .narrator : (role.allowSharedMinorVoice ? .supporting : .lead))
-        let archetype = stat?.archetype ?? role.inferredVoiceArchetype(peers: workflow.characters)
+        let archetype = stat?.archetype ?? role.inferredVoiceArchetype()
         let dialogueCount = stat?.dialogueAtomCount ?? 0
         let chapterCount = max(stat?.speakingChapterIDs.count ?? 0, role.chapterIDs.count)
         let conflictPartners = workflow.sceneConflictPartnerNames(for: role.id)
@@ -861,7 +862,7 @@ public struct AudiobookBookWorkspaceView: View {
                     Spacer()
                 }
 
-                let persona = role.resolvedVoicePersona(peers: workflow.characters)
+                let persona = role.resolvedVoicePersona()
                 let personaHeadline = role.primaryVoiceTraitSummary
                     ?? "\(persona.ageGenderAnchor) · \(persona.pitchAndRegister)"
                 Text("声学画像：\(personaHeadline)")
@@ -1215,8 +1216,9 @@ private struct AudiobookVoicePickerPopover: View {
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                             .padding(SpeechRailDesignTokens.Spacing.sm)
                     } else {
+                        let holdersMap = holdersByVoiceID
                         ForEach(filteredVoices) { voice in
-                            voiceRow(for: voice)
+                            voiceRow(for: voice, holdersMap: holdersMap)
                         }
                     }
                 }
@@ -1272,15 +1274,23 @@ private struct AudiobookVoicePickerPopover: View {
         .frame(width: 390)
     }
 
+    private var holdersByVoiceID: [String: [AudiobookCharacter]] {
+        let charsByID = Dictionary(uniqueKeysWithValues: allCharacters.map { ($0.id, $0) })
+        var grouped: [String: [AudiobookCharacter]] = [:]
+        for (rid, b) in allBindings where rid != role.id {
+            if let holder = charsByID[rid] {
+                grouped[b.voiceID, default: []].append(holder)
+            }
+        }
+        return grouped
+    }
+
     @ViewBuilder
-    private func voiceRow(for voice: SafeVoiceEntry) -> some View {
+    private func voiceRow(for voice: SafeVoiceEntry, holdersMap: [String: [AudiobookCharacter]]) -> some View {
         let meta = VoiceCatalogStore.shared.metadata(for: voice.id)
         let voiceArch = AudiobookCastRegistry.resolveVoiceArchetype(for: voice, metadata: meta)
         let isBoundToSelf = (currentBinding?.voiceID == voice.id)
-        let otherHolders = allBindings.compactMap { (rid, b) -> AudiobookCharacter? in
-            guard rid != role.id, b.voiceID == voice.id else { return nil }
-            return allCharacters.first(where: { $0.id == rid })
-        }
+        let otherHolders = holdersMap[voice.id] ?? []
         let lockedByExclusiveLead = otherHolders.first(where: { $0.isNarrator || !$0.allowSharedMinorVoice })
 
         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {

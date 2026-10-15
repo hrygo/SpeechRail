@@ -85,6 +85,9 @@ public actor AudiobookProjectStore {
     private let assetJournal: AudiobookAssetJournal
     private var simulatedCrashStage: AudiobookCommitCrashStage?
     private var simulateDiskFullOnWrite: Bool = false
+    private var cachedSourceIndices: [UUID: (sha256: String, index: AudiobookSourceIndex)] = [:]
+    private var cachedCharactersByBook: [UUID: [AudiobookCharacter]] = [:]
+    private var cachedAnnotationsByBook: [UUID: [AudiobookAnnotation]] = [:]
 
     public static var defaultRootURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -256,6 +259,9 @@ public actor AudiobookProjectStore {
         guard let book = try fetchBook(id: bookID) else {
             throw AudiobookStoreError.bookNotFound(bookID)
         }
+        if let cached = cachedSourceIndices[bookID], cached.sha256 == book.sourceSHA256 {
+            return cached.index
+        }
         let canonicalRel = "books/\(bookID.uuidString)/sources/\(book.sourceID.uuidString)-source.utf8"
         let url = try resolveOwnedURL(relativePath: canonicalRel)
         let data = try Data(contentsOf: url)
@@ -263,6 +269,7 @@ public actor AudiobookProjectStore {
         guard index.sourceSHA256 == book.sourceSHA256 else {
             throw AudiobookStoreError.storageUnavailable("正文文件校验值与项目记录不一致。")
         }
+        cachedSourceIndices[bookID] = (book.sourceSHA256, index)
         return index
     }
 
@@ -295,6 +302,7 @@ public actor AudiobookProjectStore {
                 [.text(AudiobookAnalysisState.notStarted.rawValue), .real(Date().timeIntervalSince1970), .text(bookID.uuidString)]
             )
         }
+        cachedAnnotationsByBook.removeValue(forKey: bookID)
     }
 
     public func atoms(for bookID: UUID, chapterID: UUID? = nil) async throws -> [AudiobookTextAtom] {
@@ -302,7 +310,12 @@ public actor AudiobookProjectStore {
     }
 
     public func characters(for bookID: UUID) async throws -> [AudiobookCharacter] {
-        try fetchCharacters(bookID: bookID)
+        if let cached = cachedCharactersByBook[bookID] {
+            return cached
+        }
+        let rows = try fetchCharacters(bookID: bookID)
+        cachedCharactersByBook[bookID] = rows
+        return rows
     }
 
     public func saveCharacters(bookID: UUID, characters: [AudiobookCharacter]) async throws {
@@ -312,12 +325,14 @@ public actor AudiobookProjectStore {
                 try upsertCharacterRow(character)
             }
         }
+        cachedCharactersByBook.removeValue(forKey: bookID)
     }
 
     public func upsertCharacter(_ character: AudiobookCharacter) async throws {
         try inTransaction {
             try upsertCharacterRow(character)
         }
+        cachedCharactersByBook.removeValue(forKey: character.bookID)
     }
 
     public func voiceBindings(for bookID: UUID) async throws -> [UUID: AudiobookVoiceBinding] {
@@ -327,6 +342,15 @@ public actor AudiobookProjectStore {
     public func saveVoiceBinding(bookID: UUID, binding: AudiobookVoiceBinding) async throws {
         try inTransaction {
             try upsertVoiceBindingRow(bookID: bookID, binding: binding)
+        }
+    }
+
+    public func saveVoiceBindings(bookID: UUID, bindings: [AudiobookVoiceBinding]) async throws {
+        guard !bindings.isEmpty else { return }
+        try inTransaction {
+            for binding in bindings {
+                try upsertVoiceBindingRow(bookID: bookID, binding: binding)
+            }
         }
     }
 
@@ -341,7 +365,18 @@ public actor AudiobookProjectStore {
     }
 
     public func annotations(for bookID: UUID, chapterID: UUID? = nil) async throws -> [AudiobookAnnotation] {
-        try fetchAnnotations(bookID: bookID, chapterID: chapterID)
+        if let cachedAll = cachedAnnotationsByBook[bookID] {
+            if let chapterID {
+                return cachedAll.filter { $0.chapterID == chapterID }
+            }
+            return cachedAll
+        }
+        if let chapterID {
+            return try fetchAnnotations(bookID: bookID, chapterID: chapterID)
+        }
+        let all = try fetchAnnotations(bookID: bookID, chapterID: nil)
+        cachedAnnotationsByBook[bookID] = all
+        return all
     }
 
     public func saveAnnotations(bookID: UUID, annotations: [AudiobookAnnotation]) async throws {
@@ -349,6 +384,27 @@ public actor AudiobookProjectStore {
             for annotation in annotations {
                 try upsertAnnotationRow(annotation)
             }
+        }
+        if var cached = cachedAnnotationsByBook[bookID], !annotations.isEmpty {
+            var indexByAtomID: [UUID: Int] = [:]
+            indexByAtomID.reserveCapacity(cached.count)
+            for (idx, item) in cached.enumerated() {
+                indexByAtomID[item.atomID] = idx
+            }
+            var didAppend = false
+            for ann in annotations {
+                if let existingIdx = indexByAtomID[ann.atomID] {
+                    cached[existingIdx] = ann
+                } else {
+                    cached.append(ann)
+                    indexByAtomID[ann.atomID] = cached.count - 1
+                    didAppend = true
+                }
+            }
+            if didAppend {
+                cached.sort { $0.sourceRange < $1.sourceRange }
+            }
+            cachedAnnotationsByBook[bookID] = cached
         }
     }
 
@@ -734,6 +790,9 @@ public actor AudiobookProjectStore {
         try inTransaction {
             try executePrepared("DELETE FROM books WHERE id = ?;", [.text(id.uuidString)])
         }
+        cachedSourceIndices.removeValue(forKey: id)
+        cachedCharactersByBook.removeValue(forKey: id)
+        cachedAnnotationsByBook.removeValue(forKey: id)
     }
 
     public func listTrashedBooks() async throws -> [AudiobookTrashedBookEntry] {
@@ -784,6 +843,9 @@ public actor AudiobookProjectStore {
         try inTransaction {
             try restoreBookSnapshot(snapshot)
         }
+        cachedSourceIndices.removeValue(forKey: id)
+        cachedCharactersByBook.removeValue(forKey: id)
+        cachedAnnotationsByBook.removeValue(forKey: id)
     }
 
     public func permanentlyDeleteTrashedBook(id: UUID) async throws {
@@ -1528,6 +1590,7 @@ public actor AudiobookProjectStore {
                allow_shared_minor_voice, evidences_json, first_lower_bound, first_upper_bound, chapter_ids_json
         FROM characters WHERE book_id = ? ORDER BY is_narrator DESC, is_major DESC, display_name ASC;
         """
+        let decoder = JSONDecoder()
         return try withPrepared(sql, [.text(bookID.uuidString)]) { stmt in
             var result: [AudiobookCharacter] = []
             while sqlite3_step(stmt) == SQLITE_ROW {
@@ -1536,9 +1599,9 @@ public actor AudiobookProjectStore {
                     let bStr = columnText(stmt, 1), let bID = UUID(uuidString: bStr),
                     let name = columnText(stmt, 2)
                 else { continue }
-                let aliases = (try? JSONDecoder().decode([String].self, from: Data((columnText(stmt, 3) ?? "[]").utf8))) ?? []
-                let evidences = (try? JSONDecoder().decode([AudiobookCharacterEvidence].self, from: Data((columnText(stmt, 7) ?? "[]").utf8))) ?? []
-                let chapterIDs = (try? JSONDecoder().decode([UUID].self, from: Data((columnText(stmt, 10) ?? "[]").utf8))) ?? []
+                let aliases = (try? decoder.decode([String].self, from: Data((columnText(stmt, 3) ?? "[]").utf8))) ?? []
+                let evidences = (try? decoder.decode([AudiobookCharacterEvidence].self, from: Data((columnText(stmt, 7) ?? "[]").utf8))) ?? []
+                let chapterIDs = (try? decoder.decode([UUID].self, from: Data((columnText(stmt, 10) ?? "[]").utf8))) ?? []
                 let firstRange: AudiobookSourceRange?
                 if !columnIsNull(stmt, 8), !columnIsNull(stmt, 9) {
                     firstRange = AudiobookSourceRange(lowerBound: columnInt(stmt, 8), upperBound: columnInt(stmt, 9))
@@ -1601,6 +1664,7 @@ public actor AudiobookProjectStore {
                policy_fingerprint, configuration_digest, generation, is_completed
         FROM analysis_windows WHERE book_id = ? ORDER BY ordinal ASC;
         """
+        let decoder = JSONDecoder()
         return try withPrepared(sql, [.text(bookID.uuidString)]) { stmt in
             var result: [AudiobookAnalysisWindow] = []
             while sqlite3_step(stmt) == SQLITE_ROW {
@@ -1612,9 +1676,9 @@ public actor AudiobookProjectStore {
                     let pFingerprint = columnText(stmt, 8),
                     let cfgDigest = columnText(stmt, 9)
                 else { continue }
-                let primaryIDs = (try? JSONDecoder().decode([UUID].self, from: Data((columnText(stmt, 5) ?? "[]").utf8))) ?? []
-                let leadingIDs = (try? JSONDecoder().decode([UUID].self, from: Data((columnText(stmt, 6) ?? "[]").utf8))) ?? []
-                let trailingIDs = (try? JSONDecoder().decode([UUID].self, from: Data((columnText(stmt, 7) ?? "[]").utf8))) ?? []
+                let primaryIDs = (try? decoder.decode([UUID].self, from: Data((columnText(stmt, 5) ?? "[]").utf8))) ?? []
+                let leadingIDs = (try? decoder.decode([UUID].self, from: Data((columnText(stmt, 6) ?? "[]").utf8))) ?? []
+                let trailingIDs = (try? decoder.decode([UUID].self, from: Data((columnText(stmt, 7) ?? "[]").utf8))) ?? []
                 result.append(
                     AudiobookAnalysisWindow(
                         id: id,
@@ -1654,6 +1718,7 @@ public actor AudiobookProjectStore {
             """
             args = [.text(bookID.uuidString)]
         }
+        let decoder = JSONDecoder()
         return try withPrepared(sql, args) { stmt in
             var result: [AudiobookAnnotation] = []
             while sqlite3_step(stmt) == SQLITE_ROW {
@@ -1664,7 +1729,7 @@ public actor AudiobookProjectStore {
                     let wStr = columnText(stmt, 3), let wID = UUID(uuidString: wStr),
                     let aStr = columnText(stmt, 4), let aID = UUID(uuidString: aStr),
                     let assignJSON = columnText(stmt, 7),
-                    let assignment = try? JSONDecoder().decode(AudiobookSpeakerAssignment.self, from: Data(assignJSON.utf8))
+                    let assignment = try? decoder.decode(AudiobookSpeakerAssignment.self, from: Data(assignJSON.utf8))
                 else { continue }
                 result.append(
                     AudiobookAnnotation(
@@ -1971,23 +2036,39 @@ public actor AudiobookProjectStore {
         }
     }
 
+    private func countRows(_ sql: String, _ args: [SQLValue]) throws -> Int {
+        try withPrepared(sql, args) { stmt in
+            guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+            return Int(sqlite3_column_int64(stmt, 0))
+        }
+    }
+
     private func buildSummary(for book: AudiobookBook) throws -> AudiobookBookSummary {
-        let chapters = try fetchChapters(bookID: book.id)
-        let completedChapterCount = chapters.filter { $0.currentChapterRevisionID != nil }.count
-        let annotations = try fetchAnnotations(bookID: book.id, chapterID: nil)
-        let unknownCount = annotations.filter { $0.assignment.isUnknown }.count
-        let characters = try fetchCharacters(bookID: book.id)
-        let windows = try fetchAnalysisWindows(bookID: book.id)
-        let completedWindowCount = windows.filter(\.isCompleted).count
+        let bArg: [SQLValue] = [.text(book.id.uuidString)]
+        let totalChapterCount = try countRows("SELECT COUNT(*) FROM chapters WHERE book_id = ?;", bArg)
+        let completedChapterCount = try countRows(
+            "SELECT COUNT(*) FROM chapters WHERE book_id = ? AND current_chapter_revision_id IS NOT NULL;",
+            bArg
+        )
+        let unknownCount = try countRows(
+            "SELECT COUNT(*) FROM annotations WHERE book_id = ? AND assignment_json LIKE '%\"unknown\"%';",
+            bArg
+        )
+        let characterCount = try countRows("SELECT COUNT(*) FROM characters WHERE book_id = ?;", bArg)
+        let totalWindowCount = try countRows("SELECT COUNT(*) FROM analysis_windows WHERE book_id = ?;", bArg)
+        let completedWindowCount = try countRows(
+            "SELECT COUNT(*) FROM analysis_windows WHERE book_id = ? AND is_completed != 0;",
+            bArg
+        )
         let bookmark = try fetchBookmark(bookID: book.id)
         return AudiobookBookSummary(
             book: book,
-            totalChapterCount: chapters.count,
+            totalChapterCount: totalChapterCount,
             completedChapterCount: completedChapterCount,
             unknownSpeakerCount: unknownCount,
-            characterCount: characters.count,
+            characterCount: characterCount,
             completedWindowCount: completedWindowCount,
-            totalWindowCount: windows.count,
+            totalWindowCount: totalWindowCount,
             bookmark: bookmark
         )
     }

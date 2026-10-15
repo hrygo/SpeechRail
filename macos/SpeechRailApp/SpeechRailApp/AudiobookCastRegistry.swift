@@ -551,7 +551,7 @@ public enum AudiobookCastRegistry {
             )
         }
 
-        let enriched = enrichCharactersWithVoicePersonas(updatedNarrators + updatedNonNarrators)
+        let enriched = enrichCharactersWithVoicePersonas(updatedNarrators + updatedNonNarrators, recompute: false)
         return (enriched, statsByRoleID, conflictWeights)
     }
 
@@ -570,11 +570,15 @@ public enum AudiobookCastRegistry {
 
     /// 为全书角色批量计算并注入对比去重后的六维声学画像（AudiobookVoicePersona）。
     public static func enrichCharactersWithVoicePersonas(
-        _ characters: [AudiobookCharacter]
+        _ characters: [AudiobookCharacter],
+        recompute: Bool = true
     ) -> [AudiobookCharacter] {
         characters.map { role in
             var copy = role
-            let persona = AudiobookVoicePersona.infer(for: copy, peers: characters, recompute: true)
+            if !recompute, copy.evidences.first?.voicePersona != nil {
+                return copy
+            }
+            let persona = AudiobookVoicePersona.infer(for: copy, peers: characters, recompute: recompute)
             if copy.evidences.isEmpty {
                 copy.evidences = [
                     AudiobookCharacterEvidence(

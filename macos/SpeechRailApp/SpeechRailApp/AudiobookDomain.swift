@@ -322,7 +322,7 @@ public struct AudiobookVoicePersona: Codable, Equatable, Hashable, Sendable {
         peers: [AudiobookCharacter] = [],
         recompute: Bool = false
     ) -> AudiobookVoicePersona {
-        if !recompute, peers.isEmpty, let explicit = character.evidences.compactMap(\.voicePersona).first {
+        if !recompute, let explicit = character.evidences.compactMap(\.voicePersona).first {
             return explicit
         }
 

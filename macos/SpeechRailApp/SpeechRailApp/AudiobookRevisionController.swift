@@ -332,6 +332,30 @@ public actor AudiobookRevisionController {
         let recovery = try await store.recover()
         let chapters = try await store.chapters(for: bookID).sorted { $0.ordinal < $1.ordinal }
         let candidates = try await store.candidates(for: bookID)
+        let candidatesByID = Dictionary(uniqueKeysWithValues: candidates.map { ($0.id, $0) })
+        let candidatesByFragmentID = Dictionary(grouping: candidates, by: \.fragmentID)
+
+        guard let source = try? await store.sourceIndex(for: bookID),
+              let bindings = try? await store.voiceBindings(for: bookID),
+              let allAnnotations = try? await store.annotations(for: bookID),
+              let allAtoms = try? await store.atoms(for: bookID)
+        else {
+            return AudiobookResumePlan(
+                bookID: bookID,
+                reusableFragmentIDs: [],
+                redoFragmentIDs: [],
+                damagedCandidateIDs: recovery.damagedCandidateIDs,
+                readyChapterIDs: [],
+                incompleteChapterIDs: chapters.map(\.id)
+            )
+        }
+
+        let annotationsByChapter = Dictionary(grouping: allAnnotations, by: \.chapterID)
+        let atomsByChapter = Dictionary(grouping: allAtoms, by: \.chapterID)
+        let existingFragmentsByChapter = Dictionary(
+            grouping: (try? await store.fragments(for: bookID)) ?? [],
+            by: \.chapterID
+        )
 
         var reusableIDs: [UUID] = []
         var redoIDs: [UUID] = []
@@ -339,17 +363,29 @@ public actor AudiobookRevisionController {
         var incompleteChapterIDs: [UUID] = []
 
         for chapter in chapters {
-            guard let plannedFragments = try? await currentPlannedFragments(bookID: bookID, chapter: chapter) else {
+            let chapterAnns = annotationsByChapter[chapter.id] ?? []
+            let chapterAtoms = atomsByChapter[chapter.id] ?? []
+            guard let plannedFragments = try? AudiobookFragmentPlanner.plan(
+                chapter: chapter,
+                annotations: chapterAnns,
+                bindings: bindings,
+                policy: policy,
+                source: source,
+                atoms: chapterAtoms
+            ) else {
                 incompleteChapterIDs.append(chapter.id)
                 continue
             }
 
+            if existingFragmentsByChapter[chapter.id] != plannedFragments {
+                try await store.saveFragments(bookID: bookID, chapterID: chapter.id, fragments: plannedFragments)
+            }
+
             var chapterAllReusable = true
             for fragment in plannedFragments {
-                try await store.saveFragments(bookID: bookID, chapterID: chapter.id, fragments: plannedFragments)
-                if let validCandidate = candidates.first(where: {
-                    $0.fragmentID == fragment.id
-                        && $0.dependencyDigest == fragment.dependencyDigest
+                let fragmentCandidates = candidatesByFragmentID[fragment.id] ?? []
+                if let validCandidate = fragmentCandidates.first(where: {
+                    $0.dependencyDigest == fragment.dependencyDigest
                         && $0.isReceiptVerified
                         && !recovery.damagedCandidateIDs.contains($0.id)
                 }),
@@ -363,7 +399,19 @@ public actor AudiobookRevisionController {
             }
 
             if chapterAllReusable,
-               (try? await currentChapter(bookID: bookID, chapterID: chapter.id)) != nil
+               let currentRevID = chapter.currentChapterRevisionID,
+               let revisions = try? await store.chapterRevisions(for: bookID, chapterID: chapter.id),
+               let revision = revisions.first(where: { $0.id == currentRevID }),
+               revision.orderedBindings.count == plannedFragments.count,
+               zip(revision.orderedBindings, plannedFragments).allSatisfy({ binding, planned in
+                   guard binding.sourceRange == planned.sourceRange,
+                         binding.dependencyDigest == planned.dependencyDigest,
+                         let cand = candidatesByID[binding.candidateID],
+                         cand.isReceiptVerified,
+                         !recovery.damagedCandidateIDs.contains(cand.id)
+                   else { return false }
+                   return true
+               })
             {
                 readyChapterIDs.append(chapter.id)
             } else {
@@ -399,7 +447,10 @@ public actor AudiobookRevisionController {
             source: source,
             atoms: atoms
         )
-        try await store.saveFragments(bookID: bookID, chapterID: chapter.id, fragments: planned)
+        let existing = (try? await store.fragments(for: bookID, chapterID: chapter.id)) ?? []
+        if existing != planned {
+            try await store.saveFragments(bookID: bookID, chapterID: chapter.id, fragments: planned)
+        }
         return planned
     }
 

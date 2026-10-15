@@ -359,6 +359,7 @@ public actor AudiobookCastController {
             ?? voice.model.runtimeRevision
             ?? "qwen3-tts-v1"
 
+        var newBindings: [AudiobookVoiceBinding] = []
         for (slotIndex, role) in matchingMinors.enumerated() {
             let (speed, seed) = AudiobookCastRegistry.computeMicroProsodyAndSeed(
                 for: role,
@@ -375,8 +376,9 @@ public actor AudiobookCastController {
                 allowedSpeed: speed,
                 callerSeed: seed
             )
-            try await store.saveVoiceBinding(bookID: bookID, binding: binding)
+            newBindings.append(binding)
         }
+        try await store.saveVoiceBindings(bookID: bookID, bindings: newBindings)
 
         var book = try await store.book(id: bookID)
         let newDigest = try await currentVoiceSetDigest(for: bookID)
@@ -385,6 +387,59 @@ public actor AudiobookCastController {
             try await store.updateBook(book)
         }
         return matchingMinors.count
+    }
+
+    /// 批量写入多角色音色绑定（单次加载角色表与单事务落库，消除自动配声时 O(R^2) 重复解码与事务风暴）。
+    @discardableResult
+    public func bindVoicesBatch(
+        bookID: UUID,
+        bindings: [AudiobookVoiceBinding]
+    ) async throws -> Int {
+        guard !bindings.isEmpty else { return 0 }
+        var characters = try await store.characters(for: bookID)
+        var charactersByID = Dictionary(uniqueKeysWithValues: characters.map { ($0.id, $0) })
+        var effectiveBindings = try await store.voiceBindings(for: bookID)
+        var accepted: [AudiobookVoiceBinding] = []
+        var charactersChanged = false
+
+        for binding in bindings where binding.isSynthesisReady {
+            guard var role = charactersByID[binding.roleID] else { continue }
+            if let conflictingEntry = effectiveBindings.first(where: { $0.key != binding.roleID && $0.value.voiceID == binding.voiceID }) {
+                guard var conflictingRole = charactersByID[conflictingEntry.key],
+                      !role.isNarrator,
+                      !conflictingRole.isNarrator
+                else {
+                    continue
+                }
+                if !role.allowSharedMinorVoice {
+                    role.allowSharedMinorVoice = true
+                    charactersByID[role.id] = role
+                    charactersChanged = true
+                }
+                if !conflictingRole.allowSharedMinorVoice {
+                    conflictingRole.allowSharedMinorVoice = true
+                    charactersByID[conflictingRole.id] = conflictingRole
+                    charactersChanged = true
+                }
+            }
+            effectiveBindings[binding.roleID] = binding
+            accepted.append(binding)
+        }
+
+        guard !accepted.isEmpty else { return 0 }
+        if charactersChanged {
+            characters = characters.map { charactersByID[$0.id] ?? $0 }
+            try await store.saveCharacters(bookID: bookID, characters: characters)
+        }
+        try await store.saveVoiceBindings(bookID: bookID, bindings: accepted)
+
+        var book = try await store.book(id: bookID)
+        let newDigest = try await currentVoiceSetDigest(for: bookID)
+        if book.confirmedAuditionVoiceSetDigest != nil && book.confirmedAuditionVoiceSetDigest != newDigest {
+            book.confirmedAuditionVoiceSetDigest = nil
+            try await store.updateBook(book)
+        }
+        return accepted.count
     }
 
     public func currentCastRevisionID(for bookID: UUID) async throws -> UUID {
@@ -580,5 +635,45 @@ public actor AudiobookCastController {
             return .chapterAudioReady
         }
         return .readyForProduction
+    }
+
+    /// 一次性计算全书所有章节的就绪状态（避免逐章循环重复解码全书 characters / chapters / voiceBindings 达 2*C 次）。
+    public func chapterReadinessMap(
+        for bookID: UUID
+    ) async throws -> [UUID: AudiobookChapterReadinessState] {
+        let book = try await store.book(id: bookID)
+        let chapters = try await store.chapters(for: bookID)
+        guard !chapters.isEmpty else { return [:] }
+
+        guard book.analysisState == .allWindowsValidated else {
+            return Dictionary(uniqueKeysWithValues: chapters.map { ($0.id, AudiobookChapterReadinessState.awaitingGlobalAnalysis) })
+        }
+
+        let expectedCastRev = try await currentCastRevisionID(for: bookID)
+        let expectedVoiceDigest = try await currentVoiceSetDigest(for: bookID)
+        guard book.confirmedCastRevisionID == expectedCastRev,
+              book.confirmedAuditionVoiceSetDigest == expectedVoiceDigest
+        else {
+            return Dictionary(uniqueKeysWithValues: chapters.map { ($0.id, AudiobookChapterReadinessState.awaitingCastConfirmation) })
+        }
+
+        let allAnnotations = try await store.annotations(for: bookID)
+        let annotationsByChapter = Dictionary(grouping: allAnnotations, by: \.chapterID)
+
+        var map: [UUID: AudiobookChapterReadinessState] = [:]
+        map.reserveCapacity(chapters.count)
+        for chapter in chapters {
+            let chapterAnnotations = annotationsByChapter[chapter.id] ?? []
+            if chapterAnnotations.isEmpty {
+                map[chapter.id] = .awaitingGlobalAnalysis
+            } else if chapterAnnotations.contains(where: { $0.assignment.isUnknown }) {
+                map[chapter.id] = .blockedByUnknownSpeakers
+            } else if chapter.currentChapterRevisionID != nil {
+                map[chapter.id] = .chapterAudioReady
+            } else {
+                map[chapter.id] = .readyForProduction
+            }
+        }
+        return map
     }
 }
