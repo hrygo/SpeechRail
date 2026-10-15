@@ -51,7 +51,7 @@ public struct AudiobookBookWorkspaceView: View {
             }
             .popover(isPresented: $bindableWorkflow.isCastInspectorPresented, arrowEdge: .trailing) {
                 castInspectorColumn
-                    .frame(width: 340, height: 560)
+                    .frame(width: SpeechRailDesignTokens.Layout.inspectorColumnWidth, height: 560)
                     .padding(SpeechRailDesignTokens.Spacing.sm)
             }
         }
@@ -102,9 +102,10 @@ public struct AudiobookBookWorkspaceView: View {
                         }
                     }
                     .pickerStyle(.segmented)
-                    .frame(width: 210)
+                    .fixedSize()
                     .labelsHidden()
                     .accessibilityIdentifier("audiobook-workbench-tab-picker")
+                    .accessibilityLabel("工作台子阶段")
 
                     if !showInlineCast {
                         Button {
@@ -181,7 +182,7 @@ public struct AudiobookBookWorkspaceView: View {
                                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                                         .frame(width: 28, alignment: .leading)
 
-                                    VStack(alignment: .leading, spacing: 2) {
+                                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
                                         Text(chapter.title)
                                             .font(SpeechRailDesignTokens.Typography.body)
                                             .foregroundStyle(SpeechRailDesignTokens.Color.ink)
@@ -305,7 +306,7 @@ public struct AudiobookBookWorkspaceView: View {
         HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
             Image(systemName: "ear.badge.checkmark")
                 .foregroundStyle(SpeechRailDesignTokens.Color.rail)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
                 Text("正式制作前请先试听并确认旁白与主要角色声音")
                     .font(SpeechRailDesignTokens.Typography.sectionTitle)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
@@ -431,7 +432,7 @@ public struct AudiobookBookWorkspaceView: View {
                         : SpeechRailDesignTokens.Typography.body
                 )
                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                .lineSpacing(4)
+                .lineSpacing(SpeechRailDesignTokens.Spacing.micro)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             if case let .unknown(reason, candidateRoleIDs) = annotation?.assignment {
@@ -460,13 +461,13 @@ public struct AudiobookBookWorkspaceView: View {
                 }
                 .padding(SpeechRailDesignTokens.Spacing.xs)
                 .background(SpeechRailDesignTokens.Color.attention.opacity(0.14))
-                .clipShape(RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested))
+                .clipShape(SpeechRailDesignTokens.Corner.nestedShape)
             }
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
         .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
         .background(
-            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested)
+            SpeechRailDesignTokens.Corner.nestedShape
                 .fill(
                     isSelected
                         ? SpeechRailDesignTokens.Color.rail.opacity(0.10)
@@ -474,7 +475,7 @@ public struct AudiobookBookWorkspaceView: View {
                 )
         )
         .overlay(
-            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested)
+            SpeechRailDesignTokens.Corner.nestedShape
                 .strokeBorder(
                     isSelected
                         ? SpeechRailDesignTokens.Color.rail.opacity(0.4)
@@ -829,7 +830,7 @@ public struct AudiobookBookWorkspaceView: View {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     SessionVoiceBadge(label: String(role.displayName.prefix(1)))
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
                         HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                             Text(role.displayName)
                                 .font(SpeechRailDesignTokens.Typography.sectionTitle)
@@ -888,7 +889,7 @@ public struct AudiobookBookWorkspaceView: View {
                             .lineLimit(2)
                     }
                     .padding(SpeechRailDesignTokens.Spacing.xs)
-                    .background(SpeechRailDesignTokens.Color.attention.opacity(0.12), in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested))
+                    .background(SpeechRailDesignTokens.Color.attention.opacity(0.12), in: SpeechRailDesignTokens.Corner.nestedShape)
                 }
 
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
@@ -1320,7 +1321,7 @@ private struct AudiobookVoicePickerPopover: View {
                 )
                 onSelectVoice(b)
             } label: {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
                     HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                         Text(voice.name)
                             .font(SpeechRailDesignTokens.Typography.bodyMedium)

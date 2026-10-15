@@ -170,10 +170,10 @@ public struct AudiobookListeningView: View {
                                 .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
                             }
                             .overlay(
-                                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.container)
+                                SpeechRailDesignTokens.Corner.containerShape
                                     .stroke(
                                         isActive ? SpeechRailDesignTokens.Color.rail : Color.clear,
-                                        lineWidth: isActive ? 1.5 : 0
+                                        lineWidth: isActive ? 1 : 0
                                     )
                             )
                         }
@@ -227,7 +227,7 @@ public struct AudiobookListeningView: View {
                 .keyboardShortcut(.rightArrow, modifiers: [])
                 .accessibilityIdentifier("audiobook-listening-skip-forward-15")
 
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
                     Text(timecodeSummary)
                         .font(SpeechRailDesignTokens.Typography.technical)
                         .foregroundStyle(SpeechRailDesignTokens.Color.ink)

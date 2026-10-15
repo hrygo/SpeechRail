@@ -132,9 +132,10 @@ public struct AudiobookWorkshopView: View {
                     Text("听书模式").tag(AudiobookWorkflowModel.SurfaceMode.listening)
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 180)
+                .fixedSize()
                 .labelsHidden()
                 .accessibilityIdentifier("audiobook-surface-mode-picker")
+                .accessibilityLabel("有声书视图模式")
 
                 PageActionButton(
                     title: "导出…",

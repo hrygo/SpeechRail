@@ -56,8 +56,9 @@ public struct AudiobookBookShelfView: View {
                 }
             }
             .pickerStyle(.segmented)
-            .frame(maxWidth: 360, alignment: .leading)
+            .fixedSize()
             .labelsHidden()
+            .accessibilityLabel("书架书籍筛选")
 
             Spacer()
 
