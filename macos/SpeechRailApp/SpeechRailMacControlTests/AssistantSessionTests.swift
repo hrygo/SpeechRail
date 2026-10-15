@@ -1934,6 +1934,14 @@ final class AssistantSessionTests: XCTestCase {
         // 测到的就不是"断线打断了正在生成的那一轮"这件事了。
         await waitUntil({ harness.session.blocked != nil }, message: "断线没有被处理")
         gate.release()
+        // `blocked` 只证明断线的同步段执行完：真正的收尾跑在 transportCloseEffect
+        // 里（关连接 → finalizeReply → 落库 → 投影 turns）。直接读库会和收尾
+        // 抢时间，读到半截（partial 行、无打断标记）。先等收尾投影出现再断言，
+        // 与打断测试的 turns 等待同一写法，不靠 sleep 碰运气。
+        await waitUntil(
+            { harness.session.turns.contains { $0.role == .assistant } },
+            message: "断线收尾没有落库"
+        )
 
         let lines = try await harness.store.lines(sessionID: sessionID, includePartial: true)
         let assistantLines = lines.filter { $0.role == .assistant }
