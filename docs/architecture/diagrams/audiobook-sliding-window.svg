@@ -11,29 +11,22 @@
         }
         .canvas-bg { fill: #f8f9fa; }
         .card-panel { fill: #ffffff; stroke: #dcdce0; stroke-width: 1.5; filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.03)); rx: 12px; }
-        
         .window-box-0 { fill: #eff6ff; stroke: #93c5fd; stroke-width: 1.5; rx: 8px; }
         .window-box-1 { fill: #faf5ff; stroke: #d8b4fe; stroke-width: 1.5; rx: 8px; }
         .window-box-2 { fill: #ecfdf5; stroke: #86efac; stroke-width: 1.5; rx: 8px; }
-        
         .ctx-box { fill: #f8fafc; stroke: #94a3b8; stroke-width: 1.5; stroke-dasharray: 4 3; rx: 8px; }
         .primary-zone { fill: #eff6ff; stroke: #0284c7; stroke-width: 2; rx: 8px; }
-        
         .badge-readonly { fill: #f1f5f9; stroke: #94a3b8; stroke-width: 1; rx: 4px; }
         .badge-primary { fill: #dbeafe; stroke: #0284c7; stroke-width: 1; rx: 4px; }
-        
         .main-title { font-size: 20px; font-weight: 700; fill: #111827; }
         .main-subtitle { font-size: 13px; font-weight: 400; fill: #4b5563; }
         .section-title { font-size: 13.5px; font-weight: 600; fill: #1f2937; }
-        
         .atom-chip { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1; rx: 4px; }
         .atom-text { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 10.5px; fill: #334155; text-anchor: middle; font-weight: 500; }
         .mono-code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 10.5px; font-weight: 600; }
-        
         .body-bullet { font-size: 11.5px; font-weight: 400; fill: #334155; }
         .body-bullet-primary { font-size: 11.5px; font-weight: 400; fill: #0c4a6e; }
         .footnote { font-size: 10.5px; font-weight: 500; fill: #6b7280; }
-        
         .flow-arrow { fill: none; stroke: #0284c7; stroke-width: 1.8; stroke-linecap: round; }
       ]]>
     </style>
