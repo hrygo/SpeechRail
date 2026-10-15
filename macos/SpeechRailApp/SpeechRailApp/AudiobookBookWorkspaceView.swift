@@ -564,7 +564,7 @@ public struct AudiobookBookWorkspaceView: View {
         )
         .overlay(
             SpeechRailDesignTokens.Corner.nestedShape
-                .strokeBorder(
+                .stroke(
                     isFocusedUnknown
                         ? SpeechRailDesignTokens.Color.attention
                         : (isSelected
