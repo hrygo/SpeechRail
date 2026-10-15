@@ -20,7 +20,7 @@ final class AudiobookCastTests: XCTestCase {
         }
     }
 
-    private func makeTwoChapterBook(store: AudiobookProjectStore) async throws -> (
+    private static func makeTwoChapterBook(store: AudiobookProjectStore, root: URL) async throws -> (
         bookID: UUID,
         chapterA: AudiobookChapter,
         chapterB: AudiobookChapter,
@@ -36,7 +36,7 @@ final class AudiobookCastTests: XCTestCase {
         林远走上甲板。
         “今天风平浪静。”林远笑道。
         """
-        let url = tempRoot.appendingPathComponent("two_chapters.txt")
+        let url = root.appendingPathComponent("two_chapters.txt")
         try Data(text.utf8).write(to: url)
         let preview = try await AudiobookTXTImporter.prepare(fileURL: url, encoding: .utf8)
         let bookID = try await store.importBook(preview)
@@ -103,7 +103,7 @@ final class AudiobookCastTests: XCTestCase {
     func testUnknownBlocksOnlyItsChapterAfterGlobalAnalysis() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
         let controller = AudiobookCastController(store: store)
-        let fixture = try await makeTwoChapterBook(store: store)
+        let fixture = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
 
         // 全书分析尚未完成时，两章均不可制作
         let initialA = try await controller.chapterReadiness(bookID: fixture.bookID, chapterID: fixture.chapterA.id)
@@ -164,7 +164,7 @@ final class AudiobookCastTests: XCTestCase {
     func testDesignedVoiceMustBecomeSynthesisReady() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
         let controller = AudiobookCastController(store: store)
-        let fixture = try await makeTwoChapterBook(store: store)
+        let fixture = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
 
         let designOnlyBinding = AudiobookVoiceBinding(
             roleID: fixture.hero.id,
@@ -189,8 +189,8 @@ final class AudiobookCastTests: XCTestCase {
     func testVoiceReturnCannotBindToAnotherBook() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
         let controller = AudiobookCastController(store: store)
-        let fixture1 = try await makeTwoChapterBook(store: store)
-        let fixture2 = try await makeTwoChapterBook(store: store)
+        let fixture1 = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
+        let fixture2 = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
 
         let returnContext = try await controller.makeVoiceReturnContext(
             bookID: fixture1.bookID,
@@ -233,7 +233,7 @@ final class AudiobookCastTests: XCTestCase {
     func testSharedMinorVoiceRequiresVisibleChoice() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
         let controller = AudiobookCastController(store: store)
-        let fixture = try await makeTwoChapterBook(store: store)
+        let fixture = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
 
         var characters = try await store.characters(for: fixture.bookID)
         let guardRole = AudiobookCharacter(
@@ -435,7 +435,7 @@ final class AudiobookCastTests: XCTestCase {
     func testAutoPersonaVoiceDesignInstructionAndAuditionScriptSelector() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
         let controller = AudiobookCastController(store: store)
-        let fixture = try await makeTwoChapterBook(store: store)
+        let fixture = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
 
         // 构造同书另一位男性角色（老周），测试六维声学画像 + 同性别对比去重 + 原书台词引号提纯与阿拉伯数字转换
         var characters = try await store.characters(for: fixture.bookID)
@@ -628,7 +628,7 @@ final class AudiobookCastTests: XCTestCase {
     func testAC2_50RolesVs5VoicesDualPoolZeroDeadlockAndAC6_SilentRoleExemption() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
         let controller = AudiobookCastController(store: store)
-        let fixture = try await makeTwoChapterBook(store: store)
+        let fixture = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
 
         var characters = try await store.characters(for: fixture.bookID)
         let leadFemale = AudiobookCharacter(
@@ -729,7 +729,7 @@ final class AudiobookCastTests: XCTestCase {
     func testAC3_ScenePartnerGraphColoringAndAC4_MicroProsodyAndAC5_BatchArchetypeBinding() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
         let controller = AudiobookCastController(store: store)
-        let fixture = try await makeTwoChapterBook(store: store)
+        let fixture = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
 
         let partnerA = AudiobookCharacter(
             bookID: fixture.bookID,
@@ -1051,7 +1051,7 @@ final class AudiobookCastTests: XCTestCase {
     @MainActor
     func testSecondaryUnknownResolutionAndLeadExclusiveVoiceSynthesisAndFastManualConfirmation() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
-        let fixture = try await makeTwoChapterBook(store: store)
+        let fixture = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
         var book = try await store.book(id: fixture.bookID)
         book.analysisState = .allWindowsValidated
         try await store.updateBook(book)

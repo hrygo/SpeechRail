@@ -42,7 +42,34 @@ final class AudiobookWorkflowTests: XCTestCase {
         func duration(for data: Data) -> TimeInterval? { 5.0 }
     }
 
+    @MainActor
+    private final class WorkflowLoadGate {
+        private(set) var isSuspended = false
+        private(set) var didResume = false
+        private var continuation: CheckedContinuation<Void, Never>?
+
+        func suspend() async {
+            await withCheckedContinuation { continuation in
+                self.continuation = continuation
+                isSuspended = true
+            }
+            didResume = true
+        }
+
+        func resume() {
+            continuation?.resume()
+            continuation = nil
+            isSuspended = false
+        }
+    }
+
     private final class WorkflowFakeRenderer: AudiobookSpeechRenderer, @unchecked Sendable {
+        private let beforeRender: (@Sendable () async -> Void)?
+
+        init(beforeRender: (@Sendable () async -> Void)? = nil) {
+            self.beforeRender = beforeRender
+        }
+
         func fetchEffectiveCapabilities() async throws -> EffectiveCapabilitySnapshot {
             let desc = SafeVoiceDescriptor(
                 voiceMode: "instruction",
@@ -86,6 +113,7 @@ final class AudiobookWorkflowTests: XCTestCase {
         }
 
         func renderFragment(_ request: AudiobookRenderCallRequest) async throws -> AudiobookRenderCallOutput {
+            await beforeRender?()
             let wav = Self.makeWAV(frameCount: 4_800)
             return AudiobookRenderCallOutput(
                 wavData: wav,
@@ -128,20 +156,45 @@ final class AudiobookWorkflowTests: XCTestCase {
         }
     }
 
+    private actor WorkflowRendererGate {
+        private var isSuspended = false
+        private var continuation: CheckedContinuation<Void, Never>?
+
+        func suspend() async {
+            await withCheckedContinuation { continuation in
+                self.continuation = continuation
+                isSuspended = true
+            }
+        }
+
+        func hasSuspended() -> Bool { isSuspended }
+
+        func resume() {
+            continuation?.resume()
+            continuation = nil
+            isSuspended = false
+        }
+    }
+
     private func makeWorkflow(
-        driver: FakeDriver = FakeDriver()
+        driver: FakeDriver = FakeDriver(),
+        renderer: WorkflowFakeRenderer = WorkflowFakeRenderer(),
+        store: AudiobookProjectStore? = nil
     ) -> (AudiobookWorkflowModel, FakeDriver) {
         let root = tempRoot!
         let config = LLMConfiguration(baseURL: "http://127.0.0.1:8000/v1", model: "test-model")
         let deps = AudiobookDependencies(
-            makeStore: { try AudiobookProjectStore(root: root) },
+            makeStore: {
+                if let store { return store }
+                return try AudiobookProjectStore(root: root)
+            },
             makeAnalysisClient: { snap in
                 throw AudiobookAnalysisError.notConfigured
             },
             resolveAnalysisSnapshot: { gen in
                 AudiobookAnalysisConfigSnapshot(configuration: config, generation: gen)
             },
-            speechRenderer: WorkflowFakeRenderer()
+            speechRenderer: renderer
         )
         let owner = SharedPlaybackOwner(driver: driver)
         let model = AudiobookWorkflowModel(
@@ -150,6 +203,48 @@ final class AudiobookWorkflowTests: XCTestCase {
             admission: SpeechCreationAdmission()
         )
         return (model, driver)
+    }
+
+    private func importBook(
+        into workflow: AudiobookWorkflowModel,
+        fileName: String,
+        text: String
+    ) async throws -> (bookID: UUID, chapterIDs: [UUID], roleIDs: [UUID]) {
+        let txtURL = tempRoot.appendingPathComponent(fileName)
+        try Data(text.utf8).write(to: txtURL)
+        await workflow.prepareImport(fileURL: txtURL, encoding: .utf8)
+        await workflow.confirmImport()
+
+        let bookID = try XCTUnwrap(workflow.selectedBook?.id)
+        return (
+            bookID,
+            workflow.chapters.map(\.id),
+            workflow.characters.map(\.id)
+        )
+    }
+
+    private func waitForSuspension(
+        _ gate: WorkflowLoadGate,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        for _ in 0..<1_000 {
+            if gate.isSuspended { return }
+            await Task.yield()
+        }
+        XCTFail("测试读取门未被触发", file: file, line: line)
+    }
+
+    private func waitForResume(
+        _ gate: WorkflowLoadGate,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        for _ in 0..<1_000 {
+            if gate.didResume { return }
+            await Task.yield()
+        }
+        XCTFail("测试读取门未恢复", file: file, line: line)
     }
 
     /// 跑通全书分析的最小 fake client（提取/归并/标注均返回合法结构化 JSON）。
@@ -227,6 +322,84 @@ final class AudiobookWorkflowTests: XCTestCase {
             playbackOwner: SharedPlaybackOwner(driver: FakeDriver()),
             admission: SpeechCreationAdmission()
         )
+    }
+
+    private func waitForRenderSuspension(
+        _ gate: WorkflowRendererGate,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        for _ in 0..<1_000 {
+            if await gate.hasSuspended() { return }
+            await Task.yield()
+        }
+        XCTFail("制作器未进入渲染等待点", file: file, line: line)
+    }
+
+    private func waitForProductionToFinish(
+        _ workflow: AudiobookWorkflowModel,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        for _ in 0..<1_000 {
+            if !workflow.isProducing { return }
+            await Task.yield()
+        }
+        XCTFail("有声书制作任务未结束", file: file, line: line)
+    }
+
+    private func markBookReadyForProduction(
+        _ bookID: UUID,
+        workflow: AudiobookWorkflowModel,
+        store: AudiobookProjectStore
+    ) async throws {
+        var book = try await store.book(id: bookID)
+        book.analysisState = .allWindowsValidated
+        try await store.updateBook(book)
+        let characters = try await store.characters(for: bookID)
+        let narrator = try XCTUnwrap(characters.first(where: { $0.isNarrator }))
+        let chapters = try await store.chapters(for: bookID)
+        for chapter in chapters {
+            let atoms = try await store.atoms(for: bookID, chapterID: chapter.id)
+                .filter { $0.kind != .formatting }
+            let annotations = atoms.map { atom in
+                AudiobookAnnotation(
+                    bookID: bookID,
+                    chapterID: chapter.id,
+                    windowID: UUID(),
+                    atomID: atom.id,
+                    sourceRange: atom.sourceRange,
+                    assignment: .assigned(roleID: narrator.id)
+                )
+            }
+            XCTAssertFalse(annotations.isEmpty, "制作夹具必须为章节准备可核验的标注")
+            try await store.saveAnnotations(bookID: bookID, annotations: annotations)
+            let storedAnnotations = try await store.annotations(for: bookID, chapterID: chapter.id)
+            XCTAssertEqual(storedAnnotations.count, annotations.count,
+                           "制作夹具必须通过工作流共用的 Store 持久化标注")
+        }
+
+        let readyBook = try await store.book(id: bookID)
+        XCTAssertEqual(readyBook.analysisState, .allWindowsValidated)
+
+        await workflow.openBook(bookID)
+        await workflow.bindVoice(
+            roleID: narrator.id,
+            binding: AudiobookVoiceBinding(
+                roleID: narrator.id,
+                voiceID: "v-narrator",
+                voiceRevision: "v1",
+                modelRevision: "qwen3-tts-v1"
+            )
+        )
+        await workflow.confirmCastAndAudition()
+        for chapter in chapters {
+            XCTAssertEqual(
+                workflow.chapterReadinessByID[chapter.id],
+                .readyForProduction,
+                "制作测试夹具必须在当前工作区发布可制作状态；错误：\(workflow.errorMessage ?? "无")"
+            )
+        }
     }
 
     /// 接线回归：beginAnalysis 必须在 run 启动前装好 sink，
@@ -345,6 +518,220 @@ final class AudiobookWorkflowTests: XCTestCase {
         )
         await workflow.confirmCastAndAudition()
         XCTAssertEqual(workflow.selectedBookPrimaryAction, .makeConfirmedChapters)
+    }
+
+    func testOpeningAnotherBookSelectsARoleFromThatBook() async throws {
+        let (workflow, _) = makeWorkflow()
+        let firstBook = try await importBook(
+            into: workflow,
+            fileName: "role_first_book.txt",
+            text: "第一章 甲书\n甲书正文。\n"
+        )
+        XCTAssertEqual(workflow.selectedRoleID, firstBook.roleIDs.first)
+
+        let secondBook = try await importBook(
+            into: workflow,
+            fileName: "role_second_book.txt",
+            text: "第一章 乙书\n乙书正文。\n"
+        )
+
+        XCTAssertEqual(workflow.selectedBook?.id, secondBook.bookID)
+        XCTAssertEqual(workflow.selectedRoleID.map { secondBook.roleIDs.contains($0) }, true,
+                        "切换书籍后，选中人物必须属于当前书籍")
+        XCTAssertNotEqual(firstBook.bookID, secondBook.bookID)
+    }
+
+    func testLatestBookOpenWinsWhenOlderResumeAndReadinessFinishLate() async throws {
+        let (workflow, _) = makeWorkflow()
+        let firstBook = try await importBook(
+            into: workflow,
+            fileName: "late_first_book.txt",
+            text: "第一章 旧书\n旧书正文。\n"
+        )
+        let secondBook = try await importBook(
+            into: workflow,
+            fileName: "late_second_book.txt",
+            text: "第一章 新书\n新书正文。\n"
+        )
+        let store = try AudiobookProjectStore(root: tempRoot)
+        var persistedFirstBook = try await store.book(id: firstBook.bookID)
+        persistedFirstBook.analysisState = .allWindowsValidated
+        persistedFirstBook.productionState = .paused
+        persistedFirstBook.confirmedCastRevisionID = UUID()
+        persistedFirstBook.confirmedAuditionVoiceSetDigest = "first-book-digest"
+        try await store.updateBook(persistedFirstBook)
+
+        let gate = WorkflowLoadGate()
+        workflow.loadCheckpointForTesting = { bookID, chapterID, checkpoint in
+            guard bookID == firstBook.bookID,
+                  chapterID == nil,
+                  checkpoint == .afterResumePlanRead
+            else { return }
+            await gate.suspend()
+        }
+
+        let olderOpen = Task { await workflow.openBook(firstBook.bookID) }
+        await waitForSuspension(gate)
+
+        await workflow.openBook(secondBook.bookID)
+        XCTAssertEqual(workflow.selectedBook?.id, secondBook.bookID)
+        XCTAssertEqual(workflow.workbenchTab, .preparation)
+        XCTAssertNil(workflow.resumePlan)
+        XCTAssertEqual(Set(workflow.chapterReadinessByID.keys), Set(secondBook.chapterIDs))
+
+        gate.resume()
+        await olderOpen.value
+
+        XCTAssertEqual(workflow.selectedBook?.id, secondBook.bookID)
+        XCTAssertEqual(workflow.workbenchTab, .preparation,
+                        "旧书迟到的工作台状态不能覆盖当前书籍")
+        XCTAssertNil(workflow.resumePlan, "旧书迟到的恢复计划不能覆盖当前书籍状态")
+        XCTAssertEqual(
+            Set(workflow.chapterReadinessByID.keys),
+            Set(secondBook.chapterIDs),
+            "旧书迟到的就绪状态不能替换当前书籍的章节状态"
+        )
+        XCTAssertEqual(workflow.selectedRoleID.map { secondBook.roleIDs.contains($0) }, true)
+    }
+
+    func testTrashingBookInvalidatesItsPendingOpenSnapshot() async throws {
+        let (workflow, _) = makeWorkflow()
+        let currentBook = try await importBook(
+            into: workflow,
+            fileName: "trash_pending_current.txt",
+            text: "第一章 当前书\n当前书正文。\n"
+        )
+        let targetBook = try await importBook(
+            into: workflow,
+            fileName: "trash_pending_target.txt",
+            text: "第一章 待打开书\n待打开书正文。\n"
+        )
+        await workflow.openBook(currentBook.bookID)
+
+        let gate = WorkflowLoadGate()
+        workflow.loadCheckpointForTesting = { bookID, chapterID, checkpoint in
+            guard bookID == targetBook.bookID,
+                  chapterID == targetBook.chapterIDs.first,
+                  checkpoint == .beforeChapterDetailsProjection
+            else { return }
+            await gate.suspend()
+        }
+
+        let pendingOpen = Task { await workflow.openBook(targetBook.bookID) }
+        await waitForSuspension(gate)
+        XCTAssertEqual(workflow.selectedBook?.id, currentBook.bookID,
+                       "快照暂停期间，当前工作区仍应属于原书")
+
+        await workflow.trashBook(targetBook.bookID)
+        XCTAssertTrue(workflow.trashedBooks.contains(where: { $0.id == targetBook.bookID }))
+        XCTAssertFalse(workflow.shelfBooks.contains(where: { $0.id == targetBook.bookID }))
+
+        gate.resume()
+        await pendingOpen.value
+
+        XCTAssertEqual(workflow.selectedBook?.id, currentBook.bookID,
+                       "已移入废纸篓的待打开快照不能重新进入工作区")
+        XCTAssertFalse(workflow.shelfBooks.contains(where: { $0.id == targetBook.bookID }))
+    }
+
+    func testLateChapterReadCannotReplaceTheNewBooksChapterContent() async throws {
+        let (workflow, _) = makeWorkflow()
+        let firstBook = try await importBook(
+            into: workflow,
+            fileName: "chapter_first_book.txt",
+            text: "第一章 旧书\n旧书第一章。\n第二章 旧书续篇\n旧书第二章。\n"
+        )
+        let secondBook = try await importBook(
+            into: workflow,
+            fileName: "chapter_second_book.txt",
+            text: "第一章 新书\n新书正文。\n"
+        )
+        XCTAssertEqual(firstBook.chapterIDs.count, 2)
+
+        await workflow.openBook(firstBook.bookID)
+        workflow.selectedAtomIDs = Set(workflow.chapterAtoms.map(\.id))
+        XCTAssertFalse(workflow.chapterAtoms.isEmpty)
+        let selectedOldChapterID = try XCTUnwrap(firstBook.chapterIDs.last)
+        let gate = WorkflowLoadGate()
+        workflow.loadCheckpointForTesting = { bookID, chapterID, checkpoint in
+            guard bookID == firstBook.bookID,
+                  chapterID == selectedOldChapterID,
+                  checkpoint == .beforeChapterDetailsProjection
+            else { return }
+            await gate.suspend()
+        }
+
+        workflow.selectedChapterID = selectedOldChapterID
+        XCTAssertTrue(workflow.chapterAtoms.isEmpty, "旧章节正文必须在新章节读取前清空")
+        XCTAssertTrue(workflow.atomTextsByID.isEmpty)
+        XCTAssertTrue(workflow.chapterAnnotationsByAtomID.isEmpty)
+        XCTAssertTrue(workflow.selectedAtomIDs.isEmpty, "不能把旧章节选区带到新章节")
+        XCTAssertTrue(workflow.isLoadingChapterDetails)
+        await waitForSuspension(gate)
+        XCTAssertTrue(workflow.chapterFragments.isEmpty)
+        XCTAssertTrue(workflow.isLoadingChapterDetails)
+        await workflow.openBook(secondBook.bookID)
+
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let expectedNewBookAtoms = try await store.atoms(
+            for: secondBook.bookID,
+            chapterID: try XCTUnwrap(secondBook.chapterIDs.first)
+        ).filter { $0.kind != .formatting }
+        XCTAssertEqual(Set(workflow.chapterAtoms.map(\.id)), Set(expectedNewBookAtoms.map(\.id)))
+        XCTAssertFalse(workflow.isLoadingChapterDetails)
+
+        gate.resume()
+        // didSet 启动的 reload 是独立任务；等它离开读取门后再核对投影。
+        await waitForResume(gate)
+
+        XCTAssertEqual(workflow.selectedBook?.id, secondBook.bookID)
+        XCTAssertEqual(workflow.selectedChapterID, secondBook.chapterIDs.first)
+        XCTAssertEqual(
+            Set(workflow.chapterAtoms.map(\.id)),
+            Set(expectedNewBookAtoms.map(\.id)),
+            "旧书迟到的章节读取不能覆盖新书内容"
+        )
+    }
+
+    func testProductionRunKeepsItsBookIdentityAndBlocksAnotherBooksStart() async throws {
+        let renderGate = WorkflowRendererGate()
+        let renderer = WorkflowFakeRenderer(beforeRender: { await renderGate.suspend() })
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, _) = makeWorkflow(renderer: renderer, store: store)
+        let firstBook = try await importBook(
+            into: workflow,
+            fileName: "production_first_book.txt",
+            text: "第一章 甲书\n甲书正文。\n"
+        )
+        try await markBookReadyForProduction(firstBook.bookID, workflow: workflow, store: store)
+
+        workflow.makeConfirmedChapters()
+        workflow.makeConfirmedChapters()
+        XCTAssertTrue(workflow.isProducing)
+        XCTAssertEqual(workflow.productionBookID, firstBook.bookID)
+        await waitForRenderSuspension(renderGate)
+
+        let secondBook = try await importBook(
+            into: workflow,
+            fileName: "production_second_book.txt",
+            text: "第一章 乙书\n乙书正文。\n"
+        )
+        try await markBookReadyForProduction(secondBook.bookID, workflow: workflow, store: store)
+
+        XCTAssertEqual(workflow.selectedBook?.id, secondBook.bookID)
+        XCTAssertEqual(workflow.selectedBookPrimaryAction, .makeConfirmedChapters)
+        XCTAssertTrue(workflow.isProductionBlocked(for: secondBook.bookID))
+        let firstBookSummary = try XCTUnwrap(workflow.shelfBooks.first(where: { $0.id == firstBook.bookID }))
+        XCTAssertEqual(workflow.nextPrimaryAction(for: firstBookSummary), .pauseProduction)
+        workflow.makeConfirmedChapters()
+        XCTAssertEqual(workflow.productionBookID, firstBook.bookID,
+                       "制作中的书籍归属不能被第二本书的点击替换")
+
+        await renderGate.resume()
+        await waitForProductionToFinish(workflow)
+        XCTAssertEqual(workflow.selectedBook?.id, secondBook.bookID,
+                       "第一本书的终态刷新不能把工作台切回旧书")
+        XCTAssertFalse(workflow.isProductionBlocked(for: secondBook.bookID))
     }
 
     func testRouteChangeKeepsProductionButReleasesListeningAndShutdownCheckpoints() async throws {

@@ -117,13 +117,24 @@ public struct AudiobookBookWorkspaceView: View {
                     }
 
                     if let primaryAction = workflow.selectedBookPrimaryAction {
+                        let productionStartBlocked = workflow.isProductionBlocked(for: book.id)
+                            && (primaryAction == .makeConfirmedChapters || primaryAction == .resumeProduction)
                         Button {
                             triggerPrimaryAction(primaryAction, bookID: book.id)
                         } label: {
-                            Label(primaryAction.title, systemImage: primaryAction.systemImage)
+                            Label(
+                                workflow.primaryActionTitle(primaryAction, for: book.id),
+                                systemImage: primaryAction.systemImage
+                            )
                         }
                         .speechRailButton(.primary)
-                        .disabled(primaryAction == .pauseProduction && workflow.isPausingProduction)
+                        .disabled(
+                            (primaryAction == .pauseProduction && workflow.isPausingProduction)
+                                || productionStartBlocked
+                        )
+                        .help(productionStartBlocked
+                              ? "另一部有声书正在制作，完成或暂停后即可开始此书。"
+                              : primaryAction.title)
                         .accessibilityIdentifier("audiobook-workspace-primary-action")
                     }
                 }
@@ -273,22 +284,27 @@ public struct AudiobookBookWorkspaceView: View {
                     SessionHairline()
                 }
 
-                ScrollViewReader { scrollProxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                            ForEach(workflow.displayedChapterAtoms) { atom in
-                                atomRowView(atom: atom)
-                                    .id(atom.id)
+                if workflow.isLoadingChapterDetails {
+                    ProgressView("正在读取本章…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ScrollViewReader { scrollProxy in
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                                ForEach(workflow.displayedChapterAtoms) { atom in
+                                    atomRowView(atom: atom)
+                                        .id(atom.id)
+                                }
                             }
+                            .padding(SpeechRailDesignTokens.Spacing.md)
+                            .frame(maxWidth: SpeechRailDesignTokens.Layout.audiobookScriptReadingMaximumWidth, alignment: .leading)
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
                         }
-                        .padding(SpeechRailDesignTokens.Spacing.md)
-                        .frame(maxWidth: SpeechRailDesignTokens.Layout.audiobookScriptReadingMaximumWidth, alignment: .leading)
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
-                    }
-                    .onChange(of: workflow.focusedUnknownAtomID) { _, newFocusedID in
-                        guard let targetID = newFocusedID else { return }
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            scrollProxy.scrollTo(targetID, anchor: .center)
+                        .onChange(of: workflow.focusedUnknownAtomID) { _, newFocusedID in
+                            guard let targetID = newFocusedID else { return }
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                scrollProxy.scrollTo(targetID, anchor: .center)
+                            }
                         }
                     }
                 }
@@ -581,7 +597,7 @@ public struct AudiobookBookWorkspaceView: View {
         SessionPanel {
             VStack(alignment: .leading, spacing: 0) {
                 SessionPanelHead(
-                    title: "章节合成片段与返修候选（共 \(workflow.chapterFragments.count) 个连续片段）",
+                    title: "章节音频（共 \(workflow.chapterFragments.count) 段）",
                     trailingDetail: productionHeaderSummary
                 )
                 SessionHairline()
@@ -601,7 +617,10 @@ public struct AudiobookBookWorkspaceView: View {
                     SessionHairline()
                 }
 
-                if workflow.chapterFragments.isEmpty {
+                if workflow.isLoadingChapterDetails {
+                    ProgressView("正在读取本章…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if workflow.chapterFragments.isEmpty {
                     SessionEmptyState(
                         systemImage: "waveform.path.ecg",
                         title: "当前章节尚未生成片段规划",
@@ -613,6 +632,7 @@ public struct AudiobookBookWorkspaceView: View {
                             }
                         }
                         .speechRailButton(.primary)
+                        .disabled(workflow.isProductionBusy || workflow.isLoadingChapterDetails)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
@@ -631,7 +651,9 @@ public struct AudiobookBookWorkspaceView: View {
                 SessionHairline()
                 SessionPanelActions {
                     HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        if workflow.isProducing {
+                        if workflow.isProducing,
+                           workflow.productionBookID == workflow.selectedBook?.id
+                        {
                             Button {
                                 Task { await workflow.pauseProduction() }
                             } label: {
@@ -645,9 +667,15 @@ public struct AudiobookBookWorkspaceView: View {
                                     workflow.makeConfirmedChapters(chapterIDs: [chID])
                                 }
                             } label: {
-                                Label("制作/更新本章", systemImage: "waveform.badge.plus")
+                                Label(
+                                    workflow.isSelectedBookBlockedByProduction
+                                        ? "另一部有声书正在制作"
+                                        : "制作/更新本章",
+                                    systemImage: "waveform.badge.plus"
+                                )
                             }
                             .speechRailButton(.primary)
+                            .disabled(workflow.isProductionBusy || workflow.isLoadingChapterDetails)
                         }
 
                         Button {
@@ -672,10 +700,16 @@ public struct AudiobookBookWorkspaceView: View {
     }
 
     private var productionHeaderSummary: String {
-        if let prog = workflow.productionProgress, workflow.isProducing {
+        if workflow.isSelectedBookBlockedByProduction {
+            return "另一部有声书正在制作"
+        }
+        if let prog = workflow.productionProgress,
+           workflow.isProducing,
+           workflow.productionBookID == workflow.selectedBook?.id
+        {
             return "正在制作 \(prog.completedFragments)/\(prog.totalFragments)"
         }
-        return "固定 speed=1.0 · 48kHz PCM16"
+        return "按章节顺序制作，已完成片段自动复用"
     }
 
     @ViewBuilder
@@ -790,13 +824,11 @@ public struct AudiobookBookWorkspaceView: View {
                 SessionHairline()
 
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        StatusPill(tone: .healthy, label: "核心 \(leadCount) 人")
-                        StatusPill(tone: .neutral, label: "配角群像 \(minorCount) 人")
-                        if conflictCount > 0 {
+                    if conflictCount > 0 {
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                             StatusPill(tone: .attention, label: "同场撞音 \(conflictCount) 处")
+                            Spacer()
                         }
-                        Spacer()
                     }
 
                     Picker(
@@ -949,15 +981,26 @@ public struct AudiobookBookWorkspaceView: View {
 
         CardSurface {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.xs) {
                     SessionVoiceBadge(label: String(role.displayName.prefix(1)))
                     VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
-                        HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                        HStack(alignment: .firstTextBaseline) {
                             Text(role.displayName)
                                 .font(SpeechRailDesignTokens.Typography.sectionTitle)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                                 .lineLimit(1)
+                                .truncationMode(.tail)
 
+                            Spacer()
+
+                            if !role.isNarrator {
+                                Text(dialogueCount > 0 ? "\(dialogueCount) 句 · \(max(1, chapterCount)) 章" : "仅提及 · 0 句")
+                                    .font(SpeechRailDesignTokens.Typography.technical)
+                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                            }
+                        }
+
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                             StatusPill(
                                 tone: (tier == .narrator || tier == .lead) ? .healthy : .neutral,
                                 label: tier.badgeTitle
@@ -974,13 +1017,8 @@ public struct AudiobookBookWorkspaceView: View {
                                     label: isCustomExclusiveVoice ? "专属定制" : "默认音色"
                                 )
                             }
-
-                            if !role.isNarrator {
-                                Text(dialogueCount > 0 ? "\(dialogueCount) 句 · \(max(1, chapterCount)) 章" : "仅提及 · 0 句")
-                                    .font(SpeechRailDesignTokens.Typography.technical)
-                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                            }
                         }
+
                         if !role.aliases.isEmpty {
                             Text("别称：\(role.aliases.joined(separator: "、"))")
                                 .font(SpeechRailDesignTokens.Typography.caption)
@@ -988,7 +1026,6 @@ public struct AudiobookBookWorkspaceView: View {
                                 .lineLimit(1)
                         }
                     }
-                    Spacer()
                 }
 
                 let persona = role.resolvedVoicePersona()
@@ -997,7 +1034,7 @@ public struct AudiobookBookWorkspaceView: View {
                 Text("声学画像：\(personaHeadline)")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .lineLimit(1)
+                    .lineLimit(2)
 
                 if let firstEvidence = role.evidences.first {
                     Text("原文证据：「\(firstEvidence.quoteExcerpt)」")
@@ -1038,9 +1075,22 @@ public struct AudiobookBookWorkspaceView: View {
                                 ? String(format: " · %.2fx", b.allowedSpeed)
                                 : ""
                             let scopePrefix = (voiceMeta?.scope == .bookExclusive) ? "📘 " : ""
-                            return "已绑：\(scopePrefix)\(baseName)\(speedSuffix)"
+                            return "\(scopePrefix)\(baseName)\(speedSuffix)"
                         }()
-                        Label(boundDisplay, systemImage: "waveform")
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                            Image(systemName: "waveform")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.voice)
+                            Text(boundDisplay)
+                                .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            Spacer(minLength: SpeechRailDesignTokens.Spacing.micro)
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        }
+                        .frame(maxWidth: .infinity)
                     }
                     .speechRailButton(.secondary)
                     .popover(
@@ -1080,22 +1130,28 @@ public struct AudiobookBookWorkspaceView: View {
                         )
                     }
 
-                    Button {
-                        Task { await workflow.createExclusiveVoiceForRole(role.id) }
+                    Menu {
+                        Button {
+                            Task { await workflow.createExclusiveVoiceForRole(role.id) }
+                        } label: {
+                            Label("AI 生成专属音色", systemImage: "sparkles")
+                        }
+                        .disabled(workflow.isCreatingLeadExclusiveVoices)
+
+                        Button {
+                            Task {
+                                if let ctx = await workflow.beginVoiceRoundTrip(for: role.id) {
+                                    navigation.requestVoiceDesignForAudiobook(context: ctx)
+                                }
+                            }
+                        } label: {
+                            Label("微调新音色…", systemImage: "slider.horizontal.3")
+                        }
                     } label: {
-                        Label("生成专属音色", systemImage: "sparkles")
+                        Label("专属定制…", systemImage: "sparkles")
                     }
                     .speechRailButton(.secondary)
-                    .disabled(workflow.isCreatingLeadExclusiveVoices)
-
-                    Button("微调新音色") {
-                        Task {
-                            if let ctx = await workflow.beginVoiceRoundTrip(for: role.id) {
-                                navigation.requestVoiceDesignForAudiobook(context: ctx)
-                            }
-                        }
-                    }
-                    .speechRailButton(.quiet)
+                    .fixedSize()
                 }
 
                 if !role.isNarrator {
@@ -1290,12 +1346,15 @@ private struct AudiobookVoicePickerPopover: View {
         }
     }
 
+    @State private var hoveredVoiceID: String?
+
     var body: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 Text("为「\(role.displayName)」选择音色")
                     .font(SpeechRailDesignTokens.Typography.sectionTitle)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    .lineLimit(1)
                 StatusPill(tone: .neutral, label: archetype.shortBadgeTitle)
                 Spacer()
                 Text("\(filteredVoices.count) 个可选")
@@ -1303,8 +1362,26 @@ private struct AudiobookVoicePickerPopover: View {
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
 
-            TextField("搜索音色名称、声部行当或关联角色…", text: $searchQuery)
-                .speechRailSingleLineInput()
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Image(systemName: "magnifyingglass")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                TextField("搜索音色名称、声部行当或关联角色…", text: $searchQuery)
+                    .textFieldStyle(.plain)
+                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                if !searchQuery.isEmpty {
+                    Button {
+                        searchQuery = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("清除搜索")
+                }
+            }
+            .speechRailSingleLineInput(.compact)
 
             Picker("音色范围", selection: $scopeFilter) {
                 ForEach(ScopeFilter.allCases) { item in
@@ -1317,7 +1394,7 @@ private struct AudiobookVoicePickerPopover: View {
             Divider()
 
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
                     if activeBookVoices.isEmpty {
                         ForEach(fallbackPresets, id: \.id) { preset in
                             Button {
@@ -1348,10 +1425,16 @@ private struct AudiobookVoicePickerPopover: View {
                             .buttonStyle(.plain)
                         }
                     } else if filteredVoices.isEmpty {
-                        Text("当前筛选条件下没有匹配音色，可切换至「全部」或设计新音色。")
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                            .padding(SpeechRailDesignTokens.Spacing.sm)
+                        VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                            Text("当前筛选条件下没有匹配音色")
+                                .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            Text("可切换至「全部」或设计新音色。")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, SpeechRailDesignTokens.Spacing.xl)
                     } else {
                         let holdersMap = holdersByVoiceID
                         ForEach(filteredVoices) { voice in
@@ -1360,7 +1443,7 @@ private struct AudiobookVoicePickerPopover: View {
                     }
                 }
             }
-            .frame(height: 240)
+            .frame(height: SpeechRailDesignTokens.Layout.creatorVoicePopoverHeight)
 
             if let b = currentBinding {
                 Divider()
@@ -1397,18 +1480,22 @@ private struct AudiobookVoicePickerPopover: View {
 
             Divider()
 
-            HStack {
-                Button {
-                    onDesignNewVoice()
-                } label: {
+            Button {
+                onDesignNewVoice()
+            } label: {
+                HStack {
                     Label("为「\(role.displayName)」AI 设计专属新音色…", systemImage: "sparkles")
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                 }
-                .speechRailButton(.secondary)
-                Spacer()
+                .frame(maxWidth: .infinity)
             }
+            .speechRailButton(.secondary)
         }
         .padding(SpeechRailDesignTokens.Spacing.md)
-        .frame(width: 390)
+        .frame(width: SpeechRailDesignTokens.Layout.Sheet.compactWidth)
     }
 
     private var holdersByVoiceID: [String: [AudiobookCharacter]] {
@@ -1429,6 +1516,7 @@ private struct AudiobookVoicePickerPopover: View {
         let isBoundToSelf = (currentBinding?.voiceID == voice.id)
         let otherHolders = holdersMap[voice.id] ?? []
         let lockedByExclusiveLead = otherHolders.first(where: { $0.isNarrator || !$0.allowSharedMinorVoice })
+        let isHovered = hoveredVoiceID == voice.id
 
         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
             Button {
@@ -1436,14 +1524,19 @@ private struct AudiobookVoicePickerPopover: View {
                 catalogRefreshTick += 1
             } label: {
                 Image(systemName: meta?.isFavorite == true ? "star.fill" : "star")
-                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
                     .foregroundStyle(
                         meta?.isFavorite == true
                             ? SpeechRailDesignTokens.Color.voice
                             : SpeechRailDesignTokens.Color.inkTertiary
                     )
+                    .frame(
+                        width: SpeechRailDesignTokens.Icon.navigationFrame,
+                        height: SpeechRailDesignTokens.Icon.navigationFrame
+                    )
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(meta?.isFavorite == true ? "取消收藏" : "收藏音色")
 
             Button {
                 let speed = currentBinding?.allowedSpeed ?? AudiobookLimits.defaultRenderSpeed
@@ -1467,14 +1560,13 @@ private struct AudiobookVoicePickerPopover: View {
                         if meta?.scope == .bookExclusive {
                             StatusPill(tone: .healthy, label: "本书专用")
                         }
+                        if isBoundToSelf {
+                            StatusPill(tone: .healthy, label: "当前绑定")
+                        }
                     }
 
                     HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                        if isBoundToSelf {
-                            Text("当前已绑")
-                                .font(SpeechRailDesignTokens.Typography.caption)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.ready)
-                        } else if let exclusiveHolder = lockedByExclusiveLead {
+                        if let exclusiveHolder = lockedByExclusiveLead {
                             Text("主角「\(exclusiveHolder.displayName)」独占")
                                 .font(SpeechRailDesignTokens.Typography.caption)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.attention)
@@ -1485,7 +1577,7 @@ private struct AudiobookVoicePickerPopover: View {
                         } else {
                             Text("空闲可用 · \(voice.mode == "system" ? "系统支持微变速" : "定制声线")")
                                 .font(SpeechRailDesignTokens.Typography.caption)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         }
                     }
                 }
@@ -1503,9 +1595,15 @@ private struct AudiobookVoicePickerPopover: View {
                         appModel.startVoicePreview(creatorVoice)
                     }
                 } label: {
-                    Image(systemName: isPreviewing ? "stop.circle.fill" : "play.circle")
+                    Image(systemName: isPreviewing ? "stop.circle.fill" : "play.circle.fill")
+                        .font(SpeechRailDesignTokens.Typography.statusIcon)
+                        .foregroundStyle(
+                            isPreviewing
+                                ? SpeechRailDesignTokens.Color.attention
+                                : SpeechRailDesignTokens.Color.voice
+                        )
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.plain)
                 .help(isPreviewing ? "停止试听" : "试听该音色")
             }
         }
@@ -1513,9 +1611,12 @@ private struct AudiobookVoicePickerPopover: View {
         .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
         .background(
             isBoundToSelf
-                ? SpeechRailDesignTokens.Color.rail.opacity(0.14)
-                : Color.clear,
+                ? SpeechRailDesignTokens.Color.rail.opacity(0.12)
+                : (isHovered ? SpeechRailDesignTokens.Color.recessedField : Color.clear),
             in: SpeechRailDesignTokens.Corner.controlShape
         )
+        .onHover { hovering in
+            hoveredVoiceID = hovering ? voice.id : nil
+        }
     }
 }

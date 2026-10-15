@@ -3,6 +3,7 @@ import SwiftUI
 /// T13：有声书工坊书架视图（筛选搜索、三态独立进度呈现、每本书严格唯一主动作、移入可恢复废纸篓）。
 public struct AudiobookBookShelfView: View {
     @Environment(AppModel.self) private var appModel
+    @State private var openingBookIDs: Set<UUID> = []
     let onImportTXT: () -> Void
 
     public init(onImportTXT: @escaping () -> Void) {
@@ -72,6 +73,9 @@ public struct AudiobookBookShelfView: View {
     @ViewBuilder
     private func bookCard(_ summary: AudiobookBookSummary) -> some View {
         let primaryAction = workflow.nextPrimaryAction(for: summary)
+        let isOpening = openingBookIDs.contains(summary.id)
+        let isBlockedByOtherProduction = workflow.isProductionBlocked(for: summary.id)
+            && (primaryAction == .makeConfirmedChapters || primaryAction == .resumeProduction)
 
         CardSurface {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
@@ -99,41 +103,72 @@ public struct AudiobookBookShelfView: View {
                     HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                         Button {
                             Task {
-                                await performPrimaryAction(primaryAction, for: summary)
+                                await withPendingBook(summary.id) {
+                                    await performPrimaryAction(primaryAction, for: summary)
+                                }
                             }
                         } label: {
-                            Label(primaryAction.title, systemImage: primaryAction.systemImage)
+                            Label(
+                                isOpening ? "正在打开…" : workflow.primaryActionTitle(primaryAction, for: summary.id),
+                                systemImage: primaryAction.systemImage
+                            )
                         }
                         .speechRailButton(.primary)
+                        .disabled(
+                            isOpening
+                                || isBlockedByOtherProduction
+                                || (primaryAction == .pauseProduction
+                                    && workflow.isPausingProduction
+                                    && workflow.productionBookID == summary.id)
+                        )
                         .accessibilityIdentifier("audiobook-card-primary-\(summary.id.uuidString)")
 
                         Button("打开工作台") {
-                            Task { await workflow.openBook(summary.id) }
+                            Task {
+                                await withPendingBook(summary.id) {
+                                    await workflow.openBook(summary.id)
+                                }
+                            }
                         }
                         .speechRailButton(.secondary)
+                        .disabled(isOpening)
 
                         Menu {
                             Button("进入工作台") {
-                                Task { await workflow.openBook(summary.id) }
+                                Task {
+                                    await withPendingBook(summary.id) {
+                                        await workflow.openBook(summary.id)
+                                    }
+                                }
                             }
+                            .disabled(isOpening)
                             if summary.completedChapterCount > 0 {
                                 Button("进入听书模式") {
                                     Task {
-                                        await workflow.openBook(summary.id)
-                                        await workflow.startListening()
+                                        await withPendingBook(summary.id) {
+                                            await workflow.openBook(summary.id)
+                                            guard workflow.selectedBook?.id == summary.id else { return }
+                                            await workflow.startListening()
+                                        }
                                     }
                                 }
+                                .disabled(isOpening)
                                 Button("导出有声书…") {
                                     Task {
-                                        await workflow.openBook(summary.id)
-                                        workflow.isShowingExportSheet = true
+                                        await withPendingBook(summary.id) {
+                                            await workflow.openBook(summary.id)
+                                            guard workflow.selectedBook?.id == summary.id else { return }
+                                            workflow.isShowingExportSheet = true
+                                        }
                                     }
                                 }
+                                .disabled(isOpening)
                             }
                             Divider()
                             Button("移入有声书废纸篓", role: .destructive) {
                                 Task { await workflow.trashBook(summary.id) }
                             }
+                            .disabled(isOpening)
                         } label: {
                             Image(systemName: "ellipsis.circle")
                                 .font(SpeechRailDesignTokens.Typography.body)
@@ -234,6 +269,7 @@ public struct AudiobookBookShelfView: View {
         for summary: AudiobookBookSummary
     ) async {
         await workflow.openBook(summary.id)
+        guard workflow.selectedBook?.id == summary.id else { return }
         switch action {
         case .analyzeWholeBook, .resumeAnalysis:
             workflow.beginAnalysis(summary.id)
@@ -249,5 +285,12 @@ public struct AudiobookBookShelfView: View {
         case .continueListening:
             await workflow.startListening()
         }
+    }
+
+    private func withPendingBook(_ bookID: UUID, operation: () async -> Void) async {
+        guard !openingBookIDs.contains(bookID) else { return }
+        openingBookIDs.insert(bookID)
+        defer { openingBookIDs.remove(bookID) }
+        await operation()
     }
 }

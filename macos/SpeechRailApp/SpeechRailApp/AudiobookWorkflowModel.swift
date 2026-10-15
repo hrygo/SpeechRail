@@ -2,6 +2,42 @@ import Foundation
 import Observation
 import SpeechRailControlKit
 
+private struct AudiobookChapterDetailsSnapshot: Sendable {
+    let chapterID: UUID?
+    let atoms: [AudiobookTextAtom]
+    let annotations: [AudiobookAnnotation]
+    let fragments: [AudiobookFragment]
+    let candidates: [AudiobookRenderCandidate]
+    let atomTextsByID: [UUID: String]
+    let fragmentTextsByID: [UUID: String]
+    let selectedFragmentID: UUID?
+
+    static let empty = AudiobookChapterDetailsSnapshot(
+        chapterID: nil,
+        atoms: [],
+        annotations: [],
+        fragments: [],
+        candidates: [],
+        atomTextsByID: [:],
+        fragmentTextsByID: [:],
+        selectedFragmentID: nil
+    )
+}
+
+private struct AudiobookBookWorkspaceSnapshot: Sendable {
+    let book: AudiobookBook
+    let chapters: [AudiobookChapter]
+    let characters: [AudiobookCharacter]
+    let roleStatsByID: [UUID: AudiobookRoleDialogueStats]
+    let voiceBindings: [UUID: AudiobookVoiceBinding]
+    let exportRecords: [AudiobookExportRecord]
+    let allAnnotations: [AudiobookAnnotation]
+    let resumePlan: AudiobookResumePlan?
+    let chapterReadinessByID: [UUID: AudiobookChapterReadinessState]
+    let chapterDetails: AudiobookChapterDetailsSnapshot
+    let workbenchTab: AudiobookWorkflowModel.WorkbenchTab
+}
+
 /// T13：有声书工坊唯一功能 Owner（管理书架、导入预览、全书分析、角色确认、逐章制作、返修版本、共享听书与导出状态，视图不持有长任务）。
 @MainActor
 @Observable
@@ -10,6 +46,11 @@ public final class AudiobookWorkflowModel {
         case shelf
         case workspace
         case listening
+    }
+
+    enum LoadCheckpoint: Equatable {
+        case afterResumePlanRead
+        case beforeChapterDetailsProjection
     }
 
     public enum WorkbenchTab: String, Codable, CaseIterable, Equatable, Sendable {
@@ -23,6 +64,10 @@ public final class AudiobookWorkflowModel {
             }
         }
     }
+
+    private let bookSelectionLoad = SpeechRailSelectionLoad<AudiobookBookWorkspaceSnapshot>()
+    private let chapterSelectionLoad = SpeechRailSelectionLoad<AudiobookChapterDetailsSnapshot>()
+    private let readinessSelectionLoad = SpeechRailSelectionLoad<[UUID: AudiobookChapterReadinessState]>()
 
     public enum ShelfFilter: String, CaseIterable, Equatable, Sendable, Identifiable {
         case all
@@ -70,7 +115,7 @@ public final class AudiobookWorkflowModel {
             case .resumeProduction:
                 return "继续制作"
             case .pauseProduction:
-                return "正在暂停…"
+                return "暂停制作"
             case .continueListening:
                 return "继续听"
             }
@@ -109,9 +154,14 @@ public final class AudiobookWorkflowModel {
     public private(set) var chapters: [AudiobookChapter] = []
     private var isSuppressingChapterAutoReload: Bool = false
     private var hasRecoveredOnBootstrap: Bool = false
+    public private(set) var isLoadingChapterDetails: Bool = false
     public var selectedChapterID: UUID? {
         didSet {
             if selectedChapterID != oldValue && !isSuppressingChapterAutoReload {
+                chapterSelectionLoad.reset()
+                applyChapterDetails(.empty)
+                selectedAtomIDs.removeAll()
+                isLoadingChapterDetails = selectedBook != nil && selectedChapterID != nil
                 Task { await reloadSelectedChapterDetails() }
             }
         }
@@ -218,6 +268,7 @@ public final class AudiobookWorkflowModel {
     private var analysisInstallEpoch: Int = 0
     public private(set) var isProducing: Bool = false
     public private(set) var isPausingProduction: Bool = false
+    public private(set) var productionBookID: UUID?
     public private(set) var productionProgress: AudiobookProductionProgress?
     public private(set) var resumePlan: AudiobookResumePlan?
     public private(set) var exportCapabilities: MediaCapabilitiesSnapshot = .init(
@@ -260,7 +311,10 @@ public final class AudiobookWorkflowModel {
     private var analysisTask: Task<Void, Never>?
     private var productionTask: Task<Void, Never>?
     private var productionProgressPollTask: Task<Void, Never>?
+    private var productionRunID: UUID?
     private var analysisGeneration: Int = 1
+    @ObservationIgnored
+    var loadCheckpointForTesting: (@MainActor (UUID, UUID?, LoadCheckpoint) async -> Void)?
 
     public init(
         dependencies: AudiobookDependencies = .unavailable,
@@ -391,16 +445,41 @@ public final class AudiobookWorkflowModel {
         return book.confirmedCastRevisionID != nil && book.confirmedAuditionVoiceSetDigest != nil
     }
 
+    public var isProductionBusy: Bool {
+        isProducing || isPausingProduction
+    }
+
+    public func isProductionBlocked(for bookID: UUID) -> Bool {
+        isProductionBusy && productionBookID != bookID
+    }
+
+    public var isSelectedBookBlockedByProduction: Bool {
+        guard let bookID = selectedBook?.id else { return false }
+        return isProductionBlocked(for: bookID)
+    }
+
+    public func primaryActionTitle(_ action: PrimaryBookAction, for bookID: UUID) -> String {
+        if action == .pauseProduction, isPausingProduction, productionBookID == bookID {
+            return "正在暂停…"
+        }
+        if isProductionBlocked(for: bookID),
+           (action == .makeConfirmedChapters || action == .resumeProduction)
+        {
+            return "另一部有声书正在制作"
+        }
+        return action.title
+    }
+
     /// 严格唯一主动作推导：任何状态下只突出下一步最合理的动作。
     public func nextPrimaryAction(for summary: AudiobookBookSummary) -> PrimaryBookAction {
         let book = summary.book
         if isAnalyzing && selectedBook?.id == book.id {
             return .pauseAnalysis
         }
-        if isPausingProduction && selectedBook?.id == book.id {
+        if isPausingProduction && productionBookID == book.id {
             return .pauseProduction
         }
-        if isProducing && selectedBook?.id == book.id {
+        if isProducing && productionBookID == book.id {
             return .pauseProduction
         }
         switch book.analysisState {
@@ -491,53 +570,57 @@ public final class AudiobookWorkflowModel {
     public func openBook(_ bookID: UUID) async {
         bootstrapIfPossible()
         guard let store else { return }
+        chapterSelectionLoad.reset()
+        readinessSelectionLoad.reset()
+        let preferredChapterID = selectedChapterID
+        let preferredFragmentID = selectedFragmentID
         do {
+            guard let snapshot = try await bookSelectionLoad.load(id: bookID.uuidString, operation: {
+                try await self.readBookWorkspaceSnapshot(
+                    bookID: bookID,
+                    preferredChapterID: preferredChapterID,
+                    preferredFragmentID: preferredFragmentID,
+                    store: store
+                )
+            }) else { return }
+
             errorMessage = nil
-            let book = try await store.book(id: bookID)
-            let loadedChapters = try await store.chapters(for: bookID).sorted { $0.ordinal < $1.ordinal }
-            let loadedCharacters = try await store.characters(for: bookID)
-            let loadedBindings = try await store.voiceBindings(for: bookID)
-            let loadedExports = try await store.exportRecords(for: bookID)
-            let allAnnotations = (try? await store.annotations(for: bookID)) ?? []
-            let (_, computedStats, _) = AudiobookCastRegistry.computeRoleDialogueStats(
-                characters: loadedCharacters,
-                annotations: allAnnotations
-            )
-            selectedBook = book
-            chapters = loadedChapters
-            roleStatsByID = computedStats
-            characters = loadedCharacters
-            voiceBindings = loadedBindings
-            exportRecords = loadedExports
-            rebuildUnknownSpeakerIndex(from: allAnnotations, chapters: loadedChapters)
-            if selectedChapterID == nil || !chapters.contains(where: { $0.id == selectedChapterID }) {
-                isSuppressingChapterAutoReload = true
-                selectedChapterID = chapters.first?.id
-                isSuppressingChapterAutoReload = false
-            }
-            if selectedRoleID == nil {
-                selectedRoleID = characters.first?.id
-            }
-            let hasStartedProduction = book.productionState != .idle
-                || loadedChapters.contains(where: { $0.currentChapterRevisionID != nil || $0.previousChapterRevisionID != nil })
-            if hasStartedProduction, let rev = revisionController {
-                resumePlan = try? await rev.resumePlan(bookID: bookID)
-            } else {
-                resumePlan = nil
-            }
-            await reloadSelectedChapterDetails()
-            await refreshChapterReadinessMap(for: bookID)
-            surfaceMode = .workspace
-            if book.analysisState == .allWindowsValidated
-                && book.confirmedCastRevisionID != nil
-                && book.confirmedAuditionVoiceSetDigest != nil
-                && allUnknownAnnotations.isEmpty
+            let latestChapterSelection = selectedBook?.id == bookID
+                ? selectedChapterID.flatMap { chapterID in
+                    snapshot.chapters.contains(where: { $0.id == chapterID }) ? chapterID : nil
+                }
+                : nil
+            let committedChapterID = latestChapterSelection ?? snapshot.chapterDetails.chapterID
+            let mustReloadChapterDetails = committedChapterID != snapshot.chapterDetails.chapterID
+            selectedBook = snapshot.book
+            chapters = snapshot.chapters
+            roleStatsByID = snapshot.roleStatsByID
+            characters = snapshot.characters
+            voiceBindings = snapshot.voiceBindings
+            exportRecords = snapshot.exportRecords
+            rebuildUnknownSpeakerIndex(from: snapshot.allAnnotations, chapters: snapshot.chapters)
+            if let currentRoleID = selectedRoleID,
+               !snapshot.characters.contains(where: { $0.id == currentRoleID })
             {
-                workbenchTab = .production
-            } else {
-                workbenchTab = .preparation
+                self.selectedRoleID = snapshot.characters.first?.id
+            } else if selectedRoleID == nil {
+                selectedRoleID = snapshot.characters.first?.id
+            }
+            isSuppressingChapterAutoReload = true
+            selectedChapterID = committedChapterID
+            isSuppressingChapterAutoReload = false
+            applyChapterDetails(mustReloadChapterDetails ? .empty : snapshot.chapterDetails)
+            isLoadingChapterDetails = mustReloadChapterDetails
+            resumePlan = snapshot.resumePlan
+            chapterReadinessByID = snapshot.chapterReadinessByID
+            selectedAtomIDs.removeAll()
+            surfaceMode = .workspace
+            workbenchTab = snapshot.workbenchTab
+            if mustReloadChapterDetails {
+                await reloadSelectedChapterDetails()
             }
         } catch {
+            guard bookSelectionLoad.requestedID == bookID.uuidString else { return }
             errorMessage = error.localizedDescription
         }
     }
@@ -545,6 +628,9 @@ public final class AudiobookWorkflowModel {
     public func trashBook(_ bookID: UUID) async {
         guard let store else { return }
         do {
+            if bookSelectionLoad.requestedID == bookID.uuidString {
+                bookSelectionLoad.reset()
+            }
             if selectedBook?.id == bookID {
                 await listeningController?.leaveWorkshop()
             }
@@ -1485,7 +1571,14 @@ public final class AudiobookWorkflowModel {
     // MARK: - Production & Revision Actions
 
     public func makeConfirmedChapters(chapterIDs: [UUID]? = nil) {
-        guard let bookID = selectedBook?.id, let productionController else { return }
+        guard let bookID = selectedBook?.id else { return }
+        guard !isProductionBusy, productionRunID == nil else {
+            if productionBookID != bookID {
+                errorMessage = "另一部有声书正在制作，请等待完成或暂停后再开始。"
+            }
+            return
+        }
+        guard let productionController else { return }
         let targetChapterIDs: [UUID]
         if let chapterIDs, !chapterIDs.isEmpty {
             targetChapterIDs = chapterIDs
@@ -1511,7 +1604,9 @@ public final class AudiobookWorkflowModel {
             return
         }
 
-        productionTask?.cancel()
+        let runID = UUID()
+        productionRunID = runID
+        productionBookID = bookID
         productionProgressPollTask?.cancel()
         isProducing = true
         isPausingProduction = false
@@ -1520,8 +1615,15 @@ public final class AudiobookWorkflowModel {
         productionProgressPollTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(250))
-                guard !Task.isCancelled, let self, self.isProducing else { return }
-                self.productionProgress = await productionController.progress(for: bookID)
+                guard !Task.isCancelled,
+                      let self,
+                      self.isProducing,
+                      self.productionRunID == runID,
+                      self.productionBookID == bookID
+                else { return }
+                let progress = await productionController.progress(for: bookID)
+                guard !Task.isCancelled, self.productionRunID == runID else { return }
+                self.productionProgress = progress
             }
         }
 
@@ -1529,47 +1631,66 @@ public final class AudiobookWorkflowModel {
             guard let self else { return }
             do {
                 try await productionController.start(bookID: bookID, chapterIDs: targetChapterIDs)
-                self.productionProgressPollTask?.cancel()
-                self.isProducing = false
-                self.isPausingProduction = false
-                self.productionProgress = await productionController.progress(for: bookID)
-                await self.openBook(bookID)
-                await self.refreshShelf()
-                self.bannerMessage = "所选章节制作已完成，可立即进入听书或导出。"
-            } catch let error as AudiobookProductionError where error == .cancelled {
-                self.productionProgressPollTask?.cancel()
-                self.isProducing = false
-                self.isPausingProduction = false
-                self.productionProgress = await productionController.progress(for: bookID)
-                await self.openBook(bookID)
-                await self.refreshShelf()
+                let progress = await productionController.progress(for: bookID)
+                guard self.productionRunID == runID else { return }
+                self.productionProgress = progress
+                await self.refreshProductionBook(bookID)
+                guard self.productionRunID == runID else { return }
+                self.finishProductionRun(runID)
+                if self.selectedBook?.id == bookID, self.surfaceMode == .workspace {
+                    self.bannerMessage = "所选章节制作已完成，可立即进入听书或导出。"
+                }
             } catch {
-                let failureDescription = error.localizedDescription
-                self.productionProgressPollTask?.cancel()
-                self.isProducing = false
-                self.isPausingProduction = false
-                self.productionProgress = await productionController.progress(for: bookID)
-                await self.openBook(bookID)
-                await self.refreshShelf()
-                // 必须在 openBook 之后写入 errorMessage，防止被 openBook 内部的 errorMessage = nil 清空
-                self.errorMessage = failureDescription
+                guard self.productionRunID == runID else { return }
+                let progress = await productionController.progress(for: bookID)
+                guard self.productionRunID == runID else { return }
+                self.productionProgress = progress
+                await self.refreshProductionBook(bookID)
+                guard self.productionRunID == runID else { return }
+                self.finishProductionRun(runID)
+                if (error as? AudiobookProductionError) != .cancelled,
+                   !(error is CancellationError)
+                {
+                    self.errorMessage = error.localizedDescription
+                }
             }
         }
     }
 
     public func pauseProduction() async {
-        guard let productionController else { return }
+        guard let productionController,
+              isProducing,
+              !isPausingProduction,
+              let bookID = productionBookID,
+              let runID = productionRunID
+        else { return }
         isPausingProduction = true
         productionProgressPollTask?.cancel()
         await productionController.pause()
-        productionTask?.cancel()
+        let task = productionTask
+        task?.cancel()
+        if let task { await task.value }
+        guard productionRunID == runID else { return }
+        productionProgress = await productionController.progress(for: bookID)
+        finishProductionRun(runID)
+        await refreshProductionBook(bookID)
+    }
+
+    private func finishProductionRun(_ runID: UUID) {
+        guard productionRunID == runID else { return }
+        productionProgressPollTask?.cancel()
+        productionProgressPollTask = nil
+        productionTask = nil
+        productionRunID = nil
+        productionBookID = nil
         isProducing = false
         isPausingProduction = false
-        if let bookID = selectedBook?.id {
-            productionProgress = await productionController.progress(for: bookID)
-            await openBook(bookID)
-            await refreshShelf()
-        }
+    }
+
+    private func refreshProductionBook(_ bookID: UUID) async {
+        await refreshShelf()
+        guard selectedBook?.id == bookID, surfaceMode == .workspace else { return }
+        await openBook(bookID)
     }
 
     public func adoptCandidate(_ candidateID: UUID) async {
@@ -1679,6 +1800,10 @@ public final class AudiobookWorkflowModel {
 
     /// 切换路由离开有声书工坊：制作队列继续在后台运行，但听书立即保存书签并释放共享播放器。
     public func leaveWorkshop() async {
+        bookSelectionLoad.reset()
+        chapterSelectionLoad.reset()
+        readinessSelectionLoad.reset()
+        isLoadingChapterDetails = false
         await listeningController?.leaveWorkshop()
     }
 
@@ -1689,15 +1814,141 @@ public final class AudiobookWorkflowModel {
             await analysisPipeline?.cancel(bookID: bookID)
         }
         analysisTask?.cancel()
+        productionRunID = nil
         productionProgressPollTask?.cancel()
         await productionController?.shutdown()
-        productionTask?.cancel()
+        let task = productionTask
+        task?.cancel()
+        if let task { await task.value }
+        productionProgressPollTask = nil
+        productionTask = nil
+        productionBookID = nil
         isAnalyzing = false
         isProducing = false
         isPausingProduction = false
     }
 
     // MARK: - Private Data Reload Helpers
+
+    private func readBookWorkspaceSnapshot(
+        bookID: UUID,
+        preferredChapterID: UUID?,
+        preferredFragmentID: UUID?,
+        store: AudiobookProjectStore
+    ) async throws -> AudiobookBookWorkspaceSnapshot {
+        let book = try await store.book(id: bookID)
+        let loadedChapters = try await store.chapters(for: bookID).sorted { $0.ordinal < $1.ordinal }
+        let loadedCharacters = try await store.characters(for: bookID)
+        let loadedBindings = try await store.voiceBindings(for: bookID)
+        let loadedExports = try await store.exportRecords(for: bookID)
+        let allAnnotations = (try? await store.annotations(for: bookID)) ?? []
+        let (_, computedStats, _) = AudiobookCastRegistry.computeRoleDialogueStats(
+            characters: loadedCharacters,
+            annotations: allAnnotations
+        )
+
+        let hasStartedProduction = book.productionState != .idle
+            || loadedChapters.contains(where: { $0.currentChapterRevisionID != nil || $0.previousChapterRevisionID != nil })
+        let loadedResumePlan: AudiobookResumePlan?
+        if hasStartedProduction, let revisionController {
+            loadedResumePlan = try? await revisionController.resumePlan(bookID: bookID)
+        } else {
+            loadedResumePlan = nil
+        }
+        await loadCheckpointForTesting?(bookID, nil, .afterResumePlanRead)
+
+        var readinessByID: [UUID: AudiobookChapterReadinessState] = [:]
+        if let castController {
+            readinessByID = (try? await castController.chapterReadinessMap(for: bookID)) ?? [:]
+        }
+
+        let selectedChapterID = preferredChapterID.flatMap { preferredID in
+            loadedChapters.contains(where: { $0.id == preferredID }) ? preferredID : nil
+        } ?? loadedChapters.first?.id
+        let chapterDetails = try await readChapterDetailsSnapshot(
+            bookID: bookID,
+            chapterID: selectedChapterID,
+            preferredFragmentID: preferredFragmentID,
+            store: store
+        )
+        let allUnknownAnnotations = allAnnotations.filter { $0.assignment.isUnknown }
+        let tab: WorkbenchTab = book.analysisState == .allWindowsValidated
+            && book.confirmedCastRevisionID != nil
+            && book.confirmedAuditionVoiceSetDigest != nil
+            && allUnknownAnnotations.isEmpty
+            ? .production
+            : .preparation
+
+        return AudiobookBookWorkspaceSnapshot(
+            book: book,
+            chapters: loadedChapters,
+            characters: loadedCharacters,
+            roleStatsByID: computedStats,
+            voiceBindings: loadedBindings,
+            exportRecords: loadedExports,
+            allAnnotations: allAnnotations,
+            resumePlan: loadedResumePlan,
+            chapterReadinessByID: readinessByID,
+            chapterDetails: chapterDetails,
+            workbenchTab: tab
+        )
+    }
+
+    private func readChapterDetailsSnapshot(
+        bookID: UUID,
+        chapterID: UUID?,
+        preferredFragmentID: UUID?,
+        store: AudiobookProjectStore
+    ) async throws -> AudiobookChapterDetailsSnapshot {
+        guard let chapterID else { return .empty }
+        let source = try await store.sourceIndex(for: bookID)
+        let atoms = try await store.atoms(for: bookID, chapterID: chapterID)
+            .filter { $0.kind != .formatting }
+            .sorted { $0.ordinal < $1.ordinal }
+        let annotations = try await store.annotations(for: bookID, chapterID: chapterID)
+            .sorted { $0.sourceRange < $1.sourceRange }
+        let fragments = try await store.fragments(for: bookID, chapterID: chapterID)
+            .sorted { $0.ordinal < $1.ordinal }
+        let allCandidates = try await store.candidates(for: bookID)
+        let fragmentIDSet = Set(fragments.map(\.id))
+
+        var atomMap: [UUID: String] = [:]
+        atomMap.reserveCapacity(atoms.count)
+        for atom in atoms {
+            let raw = (try? source.text(in: atom.sourceRange)) ?? ""
+            atomMap[atom.id] = AudiobookSourceIndex.displayNormalizedText(raw)
+        }
+
+        var fragmentMap: [UUID: String] = [:]
+        fragmentMap.reserveCapacity(fragments.count)
+        for fragment in fragments {
+            let raw = (try? source.text(in: fragment.sourceRange)) ?? ""
+            fragmentMap[fragment.id] = AudiobookSourceIndex.displayNormalizedText(raw)
+        }
+
+        await loadCheckpointForTesting?(bookID, chapterID, .beforeChapterDetailsProjection)
+        return AudiobookChapterDetailsSnapshot(
+            chapterID: chapterID,
+            atoms: atoms,
+            annotations: annotations,
+            fragments: fragments,
+            candidates: allCandidates.filter { fragmentIDSet.contains($0.fragmentID) },
+            atomTextsByID: atomMap,
+            fragmentTextsByID: fragmentMap,
+            selectedFragmentID: preferredFragmentID.flatMap { fragmentIDSet.contains($0) ? $0 : nil }
+                ?? fragments.first?.id
+        )
+    }
+
+    private func applyChapterDetails(_ snapshot: AudiobookChapterDetailsSnapshot) {
+        chapterAtoms = snapshot.atoms
+        chapterAnnotations = snapshot.annotations
+        chapterFragments = snapshot.fragments
+        chapterCandidates = snapshot.candidates
+        atomTextsByID = snapshot.atomTextsByID
+        fragmentTextsByID = snapshot.fragmentTextsByID
+        selectedFragmentID = snapshot.selectedFragmentID
+    }
 
     private func rebuildUnknownSpeakerIndex(
         from allAnnotations: [AudiobookAnnotation],
@@ -1727,57 +1978,43 @@ public final class AudiobookWorkflowModel {
 
     private func reloadSelectedChapterDetails() async {
         guard let store, let bookID = selectedBook?.id, let chapterID = selectedChapterID else {
-            chapterAtoms = []
-            chapterAnnotations = []
-            chapterFragments = []
-            chapterCandidates = []
-            atomTextsByID = [:]
-            fragmentTextsByID = [:]
+            chapterSelectionLoad.reset()
+            applyChapterDetails(.empty)
+            isLoadingChapterDetails = false
             return
         }
+        isLoadingChapterDetails = true
+        let preferredFragmentID = selectedFragmentID
         do {
-            let source = try await store.sourceIndex(for: bookID)
-            let atoms = try await store.atoms(for: bookID, chapterID: chapterID)
-                .filter { $0.kind != .formatting }
-                .sorted { $0.ordinal < $1.ordinal }
-            let annotations = try await store.annotations(for: bookID, chapterID: chapterID)
-                .sorted { $0.sourceRange < $1.sourceRange }
-            let fragments = try await store.fragments(for: bookID, chapterID: chapterID)
-                .sorted { $0.ordinal < $1.ordinal }
-            let allCandidates = try await store.candidates(for: bookID)
-            let fragmentIDSet = Set(fragments.map(\.id))
-
-            var atomMap: [UUID: String] = [:]
-            atomMap.reserveCapacity(atoms.count)
-            for atom in atoms {
-                let raw = (try? source.text(in: atom.sourceRange)) ?? ""
-                atomMap[atom.id] = AudiobookSourceIndex.displayNormalizedText(raw)
-            }
-            var fragMap: [UUID: String] = [:]
-            fragMap.reserveCapacity(fragments.count)
-            for frag in fragments {
-                let raw = (try? source.text(in: frag.sourceRange)) ?? ""
-                fragMap[frag.id] = AudiobookSourceIndex.displayNormalizedText(raw)
-            }
-
-            chapterAtoms = atoms
-            chapterAnnotations = annotations
-            chapterFragments = fragments
-            chapterCandidates = allCandidates.filter { fragmentIDSet.contains($0.fragmentID) }
-            atomTextsByID = atomMap
-            fragmentTextsByID = fragMap
-            if selectedFragmentID == nil || !fragmentIDSet.contains(selectedFragmentID!) {
-                selectedFragmentID = fragments.first?.id
-            }
+            guard let snapshot = try await chapterSelectionLoad.load(
+                id: "\(bookID.uuidString):\(chapterID.uuidString)",
+                operation: {
+                    try await self.readChapterDetailsSnapshot(
+                        bookID: bookID,
+                        chapterID: chapterID,
+                        preferredFragmentID: preferredFragmentID,
+                        store: store
+                    )
+                }
+            ) else { return }
+            guard selectedBook?.id == bookID, selectedChapterID == chapterID else { return }
+            applyChapterDetails(snapshot)
+            isLoadingChapterDetails = false
         } catch {
+            guard selectedBook?.id == bookID, selectedChapterID == chapterID else { return }
+            applyChapterDetails(.empty)
+            isLoadingChapterDetails = false
             errorMessage = error.localizedDescription
         }
     }
 
     private func refreshChapterReadinessMap(for bookID: UUID) async {
-        guard let castController else { return }
-        if let map = try? await castController.chapterReadinessMap(for: bookID) {
-            chapterReadinessByID = map
-        }
+        guard let castController, selectedBook?.id == bookID else { return }
+        guard let map = try? await readinessSelectionLoad.load(
+            id: bookID.uuidString,
+            operation: { try await castController.chapterReadinessMap(for: bookID) }
+        ) else { return }
+        guard selectedBook?.id == bookID else { return }
+        chapterReadinessByID = map
     }
 }

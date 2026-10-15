@@ -234,9 +234,12 @@ public actor AudiobookAnalysisPipeline {
             emitter.setMergeBatches(total: mentionBatches.count)
             for (batchIndex, batch) in mentionBatches.enumerated() {
                 try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
-                let existingSummaries = AudiobookCastRegistry.selectCandidateSummariesForWindow(
+                let batchEvidenceChapterIDs = Set(
+                    batch.flatMap(\.evidenceAtomIDs).compactMap { atomsByID[$0]?.chapterID }
+                )
+                let existingSummaries = AudiobookCastRegistry.selectCandidateSummariesForEvidence(
                     characters: characters,
-                    chapterID: chapters.first?.id ?? UUID(),
+                    chapterIDs: batchEvidenceChapterIDs,
                     windowText: batch.map(\.surfaceName).joined(separator: " "),
                     policy: policy
                 )
@@ -989,10 +992,9 @@ public actor AudiobookAnalysisPipeline {
                 assignment = .assigned(roleID: narratorID)
                 evidence = "纯叙述段默认归属旁白"
             } else {
-                // 边缘或弱引语段落（大模型经文学语境理解未显式指派独立说话人）：
-                // 自动安全回退为旁白，符合 Prompt“未确认角色自动归属旁白”承诺，避免阻断全书流水线。
-                assignment = .assigned(roleID: narratorID)
-                evidence = "模型未显式指派角色，自动归属旁白"
+                // 模型未返回直接对白标注时必须待确认，避免把遗漏静默归入旁白。
+                assignment = .unknown(reason: "模型未返回该段直接对白的标注，待确认", candidateRoleIDs: [])
+                evidence = nil
             }
 
             annotations.append(

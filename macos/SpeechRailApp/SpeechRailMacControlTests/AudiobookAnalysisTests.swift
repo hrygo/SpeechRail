@@ -292,6 +292,32 @@ final class AudiobookAnalysisTests: XCTestCase {
         XCTAssertEqual(thirdRun.reusedCheckpointWindows, 0)
     }
 
+    func testStandardPolicyRerunsLegacyV1Checkpoint() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let text = "第一章 启程\n林远背起行囊。\n“保重！”老周挥手道别。\n"
+        let txtURL = tempRoot.appendingPathComponent("legacy-policy.txt")
+        try Data(text.utf8).write(to: txtURL)
+        let preview = try await AudiobookTXTImporter.prepare(fileURL: txtURL, encoding: .utf8)
+        let bookID = try await store.importBook(preview)
+        let config = AudiobookAnalysisConfigSnapshot(
+            configuration: LLMConfiguration(baseURL: "http://127.0.0.1:8000/v1", model: "legacy-policy-model")
+        )
+
+        let legacyPolicy = AudiobookAnalysisPolicy(version: "audiobook_analysis_policy_v1")
+        let legacyClient = ScriptedAnalysisClient(configurationDigest: config.configurationDigest)
+        let legacyPipeline = AudiobookAnalysisPipeline(store: store, policy: legacyPolicy) { _ in legacyClient }
+        let legacyRun = try await legacyPipeline.run(bookID: bookID, config: config)
+        XCTAssertEqual(legacyRun.reusedCheckpointWindows, 0)
+        XCTAssertGreaterThan(legacyClient.prompts.count, 0)
+
+        let standardClient = ScriptedAnalysisClient(configurationDigest: config.configurationDigest)
+        let standardPipeline = AudiobookAnalysisPipeline(store: store, policy: .standard) { _ in standardClient }
+        let standardRun = try await standardPipeline.run(bookID: bookID, config: config)
+
+        XCTAssertEqual(standardRun.reusedCheckpointWindows, 0)
+        XCTAssertGreaterThan(standardClient.prompts.count, 0, "新策略必须重新分析旧策略创建的检查点")
+    }
+
     func testCancelRejectsLateAnalysisAndSettingsChangeNeverChangesInFlightProvider() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
         let text = "第一章 夜巡\n林远提灯前行。\n“跟紧我。”他说。\n"
@@ -661,5 +687,219 @@ final class AudiobookAnalysisTests: XCTestCase {
 
         XCTAssertEqual(ann1?.assignment.roleID, narrator.id)
         XCTAssertEqual(ann2?.assignment.roleID, xianglin.id)
+    }
+
+    func testOmittedDirectDialogueRemainsUnknownInsteadOfNarrator() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let text = """
+        第一章 夜谈
+        “你来了。”林远望向门口。
+        “我回来了。”阿远轻声回答。
+        """
+        let txtURL = tempRoot.appendingPathComponent("omitted_dialogue.txt")
+        try Data(text.utf8).write(to: txtURL)
+        let preview = try await AudiobookTXTImporter.prepare(fileURL: txtURL, encoding: .utf8)
+        let bookID = try await store.importBook(preview)
+        let config = AudiobookAnalysisConfigSnapshot(
+            configuration: LLMConfiguration(baseURL: "http://127.0.0.1:8000/v1", model: "model-omission")
+        )
+
+        final class OmittedDialogueClient: AudiobookAnalysisClient, @unchecked Sendable {
+            let configurationDigest: String
+            init(configurationDigest: String) { self.configurationDigest = configurationDigest }
+
+            func complete(_ prompt: AudiobookAnalysisPrompt) async throws -> String {
+                switch prompt.stage {
+                case .extraction:
+                    return """
+                    {
+                      "schema_version": "audiobook.extract.v1",
+                      "mentions": [
+                        { "surfaceName": "林远", "aliases": [], "evidenceAtomIDs": ["1"], "voiceTraitEvidence": "青年男声" }
+                      ]
+                    }
+                    """
+                case .castMerge:
+                    return """
+                    {
+                      "schema_version": "audiobook.merge.v1",
+                      "groups": [
+                        { "canonicalName": "林远", "memberSurfaceNames": ["林远"], "aliases": [], "isCollisionUnresolved": false, "evidenceSummary": "青年男声" }
+                      ]
+                    }
+                    """
+                case .annotation:
+                    let data = Data(prompt.input.utf8)
+                    let object = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+                    let dialogueIndices = object["target_dialogue_indices"] as? [Int] ?? []
+                    guard let firstDialogueIndex = dialogueIndices.first else {
+                        return """
+                        { "schema_version": "audiobook.annotate.v1", "items": [] }
+                        """
+                    }
+                    // 故意漏掉其余直接对白，模拟模型只返回部分标注。
+                    return """
+                    {
+                      "schema_version": "audiobook.annotate.v1",
+                      "items": [
+                        {
+                          "atomID": "\(firstDialogueIndex)",
+                          "speakerKind": "character",
+                          "roleID": "R1",
+                          "candidateRoleIDs": ["R1"],
+                          "confidence": 0.96,
+                          "evidence": "林远发言"
+                        }
+                      ]
+                    }
+                    """
+                }
+            }
+        }
+
+        let client = OmittedDialogueClient(configurationDigest: config.configurationDigest)
+        let pipeline = AudiobookAnalysisPipeline(store: store) { _ in client }
+        let summary = try await pipeline.run(bookID: bookID, config: config)
+        let annotations = try await store.annotations(for: bookID)
+        let source = try await store.sourceIndex(for: bookID)
+        let atoms = try await store.atoms(for: bookID)
+            .filter { $0.kind == .body }
+            .sorted { $0.sourceRange < $1.sourceRange }
+        let dialogueAtoms = try atoms.filter {
+            AudiobookPromptAtomItem.isDirectDialogue(in: try source.text(in: $0.sourceRange))
+        }
+        let omittedDialogue = try XCTUnwrap(dialogueAtoms.dropFirst().first)
+        let omittedAnnotation = try XCTUnwrap(annotations.first { $0.atomID == omittedDialogue.id })
+
+        XCTAssertTrue(summary.isAllWindowsValidated)
+        XCTAssertEqual(dialogueAtoms.count, 2)
+        XCTAssertTrue(
+            omittedAnnotation.assignment.isUnknown,
+            "模型漏标的直接对白必须进入待确认状态，不能静默改派旁白"
+        )
+        XCTAssertEqual(summary.unknownSpeakerCount, 1)
+    }
+
+    func testMergeBatchUsesEvidenceChapterWhenSelectingExistingCast() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let text = """
+        第一章 港口
+        灯塔照亮了空荡的码头。
+        第二章 重逢
+        阿远沿着岸边走去。
+        """
+        let txtURL = tempRoot.appendingPathComponent("merge_context.txt")
+        try Data(text.utf8).write(to: txtURL)
+        let preview = try await AudiobookTXTImporter.prepare(fileURL: txtURL, encoding: .utf8)
+        let bookID = try await store.importBook(preview)
+        let chapters = try await store.chapters(for: bookID)
+        XCTAssertEqual(chapters.count, 2)
+        let targetRole = AudiobookCharacter(
+            bookID: bookID,
+            displayName: "林远",
+            aliases: [],
+            isMajor: true,
+            chapterIDs: [chapters[1].id]
+        )
+        let firstChapterRoles = (0..<32).map { index in
+            AudiobookCharacter(
+                bookID: bookID,
+                displayName: String(format: "先行角色%02d", index),
+                isMajor: true,
+                chapterIDs: [chapters[0].id]
+            )
+        }
+        try await store.saveCharacters(bookID: bookID, characters: firstChapterRoles + [targetRole])
+
+        let config = AudiobookAnalysisConfigSnapshot(
+            configuration: LLMConfiguration(baseURL: "http://127.0.0.1:8000/v1", model: "model-merge-context")
+        )
+        final class MergeContextClient: AudiobookAnalysisClient, @unchecked Sendable {
+            let configurationDigest: String
+            init(configurationDigest: String) { self.configurationDigest = configurationDigest }
+
+            func complete(_ prompt: AudiobookAnalysisPrompt) async throws -> String {
+                switch prompt.stage {
+                case .extraction:
+                    let data = Data(prompt.input.utf8)
+                    let object = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+                    let atoms = object["primary_atoms"] as? [[String: Any]] ?? []
+                    guard let evidenceAtom = atoms.first(where: {
+                        ($0["text"] as? String)?.contains("阿远") == true
+                    }) else {
+                        return """
+                        { "schema_version": "audiobook.extract.v1", "mentions": [] }
+                        """
+                    }
+                    let atomRef = (evidenceAtom["idx"] as? Int).map { String($0) }
+                        ?? (evidenceAtom["atomID"] as? String ?? "1")
+                    return """
+                    {
+                      "schema_version": "audiobook.extract.v1",
+                      "mentions": [
+                        { "surfaceName": "阿远", "aliases": [], "evidenceAtomIDs": ["\(atomRef)"], "voiceTraitEvidence": "青年男声" }
+                      ]
+                    }
+                    """
+                case .castMerge:
+                    // The fake can only resolve the alias to the existing role when that role is present in context.
+                    let canonicalName = prompt.input.contains("林远") ? "林远" : "阿远"
+                    return """
+                    {
+                      "schema_version": "audiobook.merge.v1",
+                      "groups": [
+                        { "canonicalName": "\(canonicalName)", "memberSurfaceNames": ["阿远"], "aliases": [], "isCollisionUnresolved": false, "evidenceSummary": "青年男声" }
+                      ]
+                    }
+                    """
+                case .annotation:
+                    return """
+                    { "schema_version": "audiobook.annotate.v1", "items": [] }
+                    """
+                }
+            }
+        }
+
+        let client = MergeContextClient(configurationDigest: config.configurationDigest)
+        let pipeline = AudiobookAnalysisPipeline(store: store) { _ in client }
+        let summary = try await pipeline.run(bookID: bookID, config: config)
+        let characters = try await store.characters(for: bookID)
+        let sameIdentity = characters.filter {
+            !$0.isNarrator
+                && ($0.id == targetRole.id || $0.displayName == "阿远" || $0.aliases.contains("阿远"))
+        }
+
+        XCTAssertTrue(summary.isAllWindowsValidated)
+        XCTAssertEqual(
+            sameIdentity.map(\.id),
+            [targetRole.id],
+            "归并批次应看到目标证据章节中的既有角色，避免为同一人物新增重复角色"
+        )
+        XCTAssertTrue(try XCTUnwrap(sameIdentity.first).aliases.contains("阿远"))
+    }
+
+    func testExactNameMatchOutranksMultiChapterEvidenceOverlap() throws {
+        let bookID = UUID()
+        let evidenceChapters = Set([UUID(), UUID(), UUID()])
+        let broadChapterRole = AudiobookCharacter(
+            bookID: bookID,
+            displayName: "候选角色",
+            isMajor: true,
+            chapterIDs: Array(evidenceChapters)
+        )
+        let exactNameRole = AudiobookCharacter(
+            bookID: bookID,
+            displayName: "阿远",
+            chapterIDs: []
+        )
+
+        let selected = AudiobookCastRegistry.selectCandidateSummariesForEvidence(
+            characters: [broadChapterRole, exactNameRole],
+            chapterIDs: evidenceChapters,
+            windowText: "阿远",
+            policy: .standard
+        )
+
+        XCTAssertEqual(selected.first?.roleID, exactNameRole.id)
     }
 }

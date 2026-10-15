@@ -107,6 +107,27 @@ final class AudiobookImportTests: XCTestCase {
         XCTAssertEqual(try preview.sourceIndex.text(in: preview.chapters[0].sourceRange), plainText)
     }
 
+    func testChapterHeadingsWithoutWhitespaceBeforeTitleAreRecognized() throws {
+        let text = "第一章风起\n晨雾中的海岸很安静。\n第二章夜雨\n港口的灯火摇曳。"
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data(text.utf8), suggestedTitle: "海岸")
+
+        XCTAssertEqual(preview.chapters.map(\.title), ["第一章风起", "第二章夜雨"])
+        XCTAssertNoThrow(
+            try AudiobookChapterPlanner.validateChapterEdits(
+                preview.chapters,
+                source: preview.sourceIndex
+            )
+        )
+
+        let narrative = "第二章开始时，港口还笼罩在雾里。\n灯塔照亮了海面。"
+        let narrativePreview = try AudiobookTXTImporter.prepare(
+            rawData: Data(narrative.utf8),
+            suggestedTitle: "叙述"
+        )
+        XCTAssertEqual(narrativePreview.chapters.count, 1, "章标记后接普通句子时仍应保留为正文")
+        XCTAssertEqual(narrativePreview.chapters[0].title, "全文")
+    }
+
     func testChapterEditsAndExclusionsKeepCoverage() throws {
         let text = "序章 雾中灯塔\n海雾漫过栈桥。\n第1章 旧邮差\n他递来一封信。\n附言\n本书完。"
         let preview = try AudiobookTXTImporter.prepare(rawData: Data(text.utf8), suggestedTitle: "雾港")

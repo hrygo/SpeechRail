@@ -12,7 +12,8 @@ public struct AudiobookRenderPolicy: Codable, Equatable, Hashable, Sendable {
     public static let standard = AudiobookRenderPolicy()
 
     public init(
-        version: String = "audiobook_render_policy_v1",
+        // v2 stores actual policy-rate PCM; v1 candidates may contain mislabeled 24 kHz WAV.
+        version: String = "audiobook_render_policy_v2",
         targetFragmentScalars: Int = AudiobookLimits.targetFragmentScalars,
         maxFragmentScalars: Int = AudiobookLimits.maxFragmentScalars,
         defaultSpeed: Double = AudiobookLimits.defaultRenderSpeed,

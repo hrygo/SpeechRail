@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import SpeechRailControlKit
 
@@ -90,6 +91,8 @@ public actor AudiobookProductionController {
     private var inFlightTask: Task<AudiobookRenderCallOutput, Error>?
     private var inFlightFragmentID: UUID?
     private var isPauseRequested: Bool = false
+    private var isStartActive: Bool = false
+    private var activeBookID: UUID?
     private var latestProgressByBook: [UUID: AudiobookProductionProgress] = [:]
 
     public init(
@@ -118,6 +121,22 @@ public actor AudiobookProductionController {
         bookID: UUID,
         chapterIDs: [UUID]
     ) async throws {
+        // Actor methods are reentrant across `await`. Reserve the run before the first
+        // suspension so a second start cannot invalidate its generation or strand its lease.
+        guard !isStartActive else {
+            throw AudiobookProductionError.admissionBusy
+        }
+        isStartActive = true
+        activeBookID = bookID
+        defer {
+            isStartActive = false
+            activeBookID = nil
+            candidateWAVCache.removeAll()
+        }
+        generation += 1
+        let runGeneration = generation
+        isPauseRequested = false
+
         guard !chapterIDs.isEmpty else {
             throw AudiobookProductionError.noReadyChaptersSelected
         }
@@ -160,6 +179,7 @@ public actor AudiobookProductionController {
         var totalFragmentCount = 0
 
         for chapter in selectedChapters {
+            try checkRunIsActive(runGeneration)
             let chapterAnns = try await store.annotations(for: bookID, chapterID: chapter.id)
             for ann in chapterAnns {
                 if let rid = ann.assignment.roleID {
@@ -177,22 +197,24 @@ public actor AudiobookProductionController {
             )
             plannedFragmentsByChapter[chapter.id] = fragments
             totalFragmentCount += fragments.count
+            try checkRunIsActive(runGeneration)
             try await store.saveFragments(bookID: bookID, chapterID: chapter.id, fragments: fragments)
         }
 
         let capabilities = try await renderer.fetchEffectiveCapabilities()
+        try checkRunIsActive(runGeneration)
         try Self.verifyPinnedBindingsAgainstCapabilities(
             bindings: frozenBindings,
             activeRoleIDs: activeRoleIDs,
             capabilities: capabilities
         )
 
-        generation += 1
-        let runGeneration = generation
-        isPauseRequested = false
-
         book.productionState = .running
         try await store.updateBook(book)
+        if isPauseRequested || Task.isCancelled || generation != runGeneration {
+            try await markBookPaused(bookID: bookID, completed: 0, total: totalFragmentCount)
+            throw AudiobookProductionError.cancelled
+        }
 
         var completedCount = 0
         latestProgressByBook[bookID] = AudiobookProductionProgress(
@@ -313,6 +335,7 @@ public actor AudiobookProductionController {
     }
 
     public func pause() async {
+        guard let bookID = activeBookID else { return }
         isPauseRequested = true
         generation += 1
         let activeFrag = inFlightFragmentID
@@ -325,14 +348,13 @@ public actor AudiobookProductionController {
         await MainActor.run {
             admission.release(.audiobook)
         }
-        for (bookID, var prog) in latestProgressByBook {
-            prog.state = .paused
-            prog.unconfirmedRemoteStopFragmentID = activeFrag
-            latestProgressByBook[bookID] = prog
-            if var book = try? await store.book(id: bookID) {
-                book.productionState = .paused
-                try? await store.updateBook(book)
-            }
+        var progress = latestProgressByBook[bookID] ?? AudiobookProductionProgress(bookID: bookID, state: .paused)
+        progress.state = .paused
+        progress.unconfirmedRemoteStopFragmentID = activeFrag
+        latestProgressByBook[bookID] = progress
+        if var book = try? await store.book(id: bookID) {
+            book.productionState = .paused
+            try? await store.updateBook(book)
         }
     }
 
@@ -385,6 +407,10 @@ public actor AudiobookProductionController {
                 try await clock.sleep(seconds: 0.25 * Double(attempt))
                 continue
             }
+            if isPauseRequested || Task.isCancelled || generation != runGeneration {
+                await MainActor.run { admission.release(.audiobook) }
+                throw AudiobookProductionError.cancelled
+            }
 
             inFlightFragmentID = fragment.id
             let renderTask = Task<AudiobookRenderCallOutput, Error> { [renderer] in
@@ -404,12 +430,16 @@ public actor AudiobookProductionController {
                     throw AudiobookProductionError.cancelled
                 }
 
-                let fileSHA = AudiobookDigest.sha256Hex(output.wavData)
-                let computedPCMSHA = try AudioDigest.sha256HexOfPCM(in: output.wavData)
-                let frameCount = Self.extractPCM16MonoFrameCount(from: output.wavData)
+                // The service receipt describes the original PCM. Verify it before
+                // normalizing the local asset to the render policy's sample rate.
+                let receivedPCMSHA = try AudioDigest.sha256HexOfPCM(in: output.wavData)
                 let receiptVerified = output.isProvenanceVerified
-                    && (output.pcmSHA256 == nil || output.pcmSHA256 == computedPCMSHA)
+                    && (output.pcmSHA256 == nil || output.pcmSHA256 == receivedPCMSHA)
                     && (output.voiceRevision == nil || binding.voiceRevision == "v1" || output.voiceRevision == binding.voiceRevision)
+                let normalizedWAV = try Self.normalizePCM16MonoWAV(output.wavData, sampleRate: policy.sampleRate)
+                let fileSHA = AudiobookDigest.sha256Hex(normalizedWAV)
+                let computedPCMSHA = try AudioDigest.sha256HexOfPCM(in: normalizedWAV)
+                let frameCount = Self.extractPCM16MonoFrameCount(from: normalizedWAV)
 
                 let candidateID = UUID()
                 let relPath = "books/\(bookID.uuidString)/audio/\(candidateID.uuidString).wav"
@@ -432,7 +462,7 @@ public actor AudiobookProductionController {
                     isReceiptVerified: receiptVerified,
                     createdAt: clock.now()
                 )
-                candidateWAVCache[candidateID] = output.wavData
+                candidateWAVCache[candidateID] = normalizedWAV
                 return candidate
             } catch {
                 inFlightTask = nil
@@ -444,6 +474,9 @@ public actor AudiobookProductionController {
                 }
                 if isPauseRequested || Task.isCancelled || error is CancellationError || generation != runGeneration {
                     throw AudiobookProductionError.cancelled
+                }
+                if error is AudioNormalizationError || error is AudioDigest.Failure {
+                    throw error
                 }
 
                 if let apiError = error as? ServiceAPIClientError {
@@ -497,6 +530,12 @@ public actor AudiobookProductionController {
         )
     }
 
+    private func checkRunIsActive(_ runGeneration: Int) throws {
+        guard !isPauseRequested, !Task.isCancelled, generation == runGeneration else {
+            throw AudiobookProductionError.cancelled
+        }
+    }
+
     private static func verifyPinnedBindingsAgainstCapabilities(
         bindings: [UUID: AudiobookVoiceBinding],
         activeRoleIDs: Set<UUID>,
@@ -546,8 +585,115 @@ public actor AudiobookProductionController {
     }
 
     public static func extractPCM16MonoFrameCount(from wav: Data) -> Int64 {
-        guard wav.count >= 44 else { return 0 }
-        let pcmBytes = max(0, wav.count - 44)
-        return Int64(pcmBytes / 2)
+        guard let range = try? AudioDigest.pcmRange(in: wav), range.count.isMultiple(of: 2) else { return 0 }
+        return Int64(range.count / 2)
+    }
+
+    private enum AudioNormalizationError: LocalizedError {
+        case invalidPCM
+        case conversionFailed
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidPCM: "语音服务返回的音频格式无效，请重试。"
+            case .conversionFailed: "无法整理语音片段的音频格式，请重试。"
+            }
+        }
+    }
+
+    /// Decode the service's PCM16 mono contract and store a real policy-rate WAV.
+    /// RIFF chunks may contain metadata, so neither format nor PCM starts at a fixed offset.
+    private static func normalizePCM16MonoWAV(_ wav: Data, sampleRate: Int) throws -> Data {
+        guard wav.count >= 12, wav.count <= AudiobookLimits.maxWAVResponseBytes,
+              wav.prefix(4).elementsEqual("RIFF".utf8),
+              wav[8..<12].elementsEqual("WAVE".utf8), (1...192_000).contains(sampleRate)
+        else { throw AudioNormalizationError.invalidPCM }
+
+        func uint16(at offset: Int) -> Int {
+            Int(wav[offset]) | (Int(wav[offset + 1]) << 8)
+        }
+        func uint32(at offset: Int) -> Int {
+            uint16(at: offset) | (uint16(at: offset + 2) << 16)
+        }
+        var sourceRate: Int?
+        var cursor = 12
+        while cursor <= wav.count - 8 {
+            let size = uint32(at: cursor + 4)
+            let start = cursor + 8
+            guard size <= wav.count - start else { throw AudioNormalizationError.invalidPCM }
+            if wav[cursor..<cursor + 4].elementsEqual("fmt ".utf8) {
+                guard size >= 16, uint16(at: start) == 1, uint16(at: start + 2) == 1,
+                      uint16(at: start + 12) == 2, uint16(at: start + 14) == 16
+                else { throw AudioNormalizationError.invalidPCM }
+                sourceRate = uint32(at: start + 4)
+                break
+            }
+            cursor = start + size + size % 2
+        }
+        guard let sourceRate, (1...192_000).contains(sourceRate),
+              let range = try? AudioDigest.pcmRange(in: wav), !range.isEmpty,
+              range.count.isMultiple(of: 2)
+        else { throw AudioNormalizationError.invalidPCM }
+        if sourceRate == sampleRate { return wav }
+
+        let frameCount = range.count / 2
+        let scaledFrames = (Double(frameCount) * Double(sampleRate) / Double(sourceRate)).rounded()
+        // Bound the allocation before converting to an integer or asking AVFoundation
+        // for buffers. The 24→48 kHz contract needs at most twice the response budget.
+        guard scaledFrames.isFinite, scaledFrames > 0,
+              scaledFrames <= Double(AudiobookLimits.maxWAVResponseBytes)
+        else { throw AudioNormalizationError.invalidPCM }
+        let expectedFrames = Int(scaledFrames)
+        guard frameCount <= Int(UInt32.max), expectedFrames <= Int(UInt32.max) - 32,
+              let inputFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: Double(sourceRate), channels: 1, interleaved: true),
+              let outputFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: Double(sampleRate), channels: 1, interleaved: true),
+              let input = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: AVAudioFrameCount(frameCount)),
+              let output = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: AVAudioFrameCount(expectedFrames + 32)),
+              let converter = AVAudioConverter(from: inputFormat, to: outputFormat)
+        else { throw AudioNormalizationError.conversionFailed }
+        input.frameLength = AVAudioFrameCount(frameCount)
+        wav[range].withUnsafeBytes { bytes in
+            input.mutableAudioBufferList.pointee.mBuffers.mData?.copyMemory(from: bytes.baseAddress!, byteCount: bytes.count)
+        }
+        converter.primeMethod = .none
+        converter.sampleRateConverterQuality = AVAudioQuality.max.rawValue
+        var suppliedInput = false
+        var conversionError: NSError?
+        let status = converter.convert(to: output, error: &conversionError) { _, inputStatus in
+            if suppliedInput {
+                inputStatus.pointee = .endOfStream
+                return nil
+            }
+            suppliedInput = true
+            inputStatus.pointee = .haveData
+            return input
+        }
+        guard status != .error, conversionError == nil, expectedFrames > 0,
+              output.frameLength >= expectedFrames,
+              let samples = output.audioBufferList.pointee.mBuffers.mData
+        else { throw AudioNormalizationError.conversionFailed }
+        // A finite converter may drain filter-padding samples after end-of-stream.
+        // Keep the original duration rather than accumulating that tail per fragment.
+        let pcm = Data(bytes: samples, count: expectedFrames * 2)
+        guard pcm.count <= Int(UInt32.max) - 36 else { throw AudioNormalizationError.conversionFailed }
+        var result = Data()
+        func appendLE<T: FixedWidthInteger>(_ value: T) {
+            var littleEndian = value.littleEndian
+            withUnsafeBytes(of: &littleEndian) { result.append(contentsOf: $0) }
+        }
+        result.append(contentsOf: "RIFF".utf8)
+        appendLE(UInt32(36 + pcm.count))
+        result.append(contentsOf: "WAVEfmt ".utf8)
+        appendLE(UInt32(16))
+        appendLE(UInt16(1))
+        appendLE(UInt16(1))
+        appendLE(UInt32(sampleRate))
+        appendLE(UInt32(sampleRate * 2))
+        appendLE(UInt16(2))
+        appendLE(UInt16(16))
+        result.append(contentsOf: "data".utf8)
+        appendLE(UInt32(pcm.count))
+        result.append(pcm)
+        return result
     }
 }

@@ -142,7 +142,7 @@ public enum AudiobookProductionWiring {
                 requestID: result.requestID,
                 receiptID: result.receiptID,
                 recipeSummary: result.recipe?.digest,
-                isProvenanceVerified: result.provenance.state == .verified || result.audioData.count >= 44
+                isProvenanceVerified: result.provenance.state == .verified
             )
         }
 

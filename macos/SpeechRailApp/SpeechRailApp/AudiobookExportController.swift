@@ -77,6 +77,7 @@ public struct AudiobookPreparedExport: Codable, Equatable, Sendable {
     public let stageURL: URL
     public let expectedFrameCount: Int64
     public let expectedSampleRate: Int
+    public let expectedChapterFrameCounts: [UUID: Int64]
     public var verification: AudiobookMediaVerification?
 
     public init(
@@ -91,6 +92,7 @@ public struct AudiobookPreparedExport: Codable, Equatable, Sendable {
         stageURL: URL,
         expectedFrameCount: Int64,
         expectedSampleRate: Int = AudiobookLimits.intermediateSampleRate,
+        expectedChapterFrameCounts: [UUID: Int64] = [:],
         verification: AudiobookMediaVerification? = nil
     ) {
         self.requestID = requestID
@@ -104,6 +106,7 @@ public struct AudiobookPreparedExport: Codable, Equatable, Sendable {
         self.stageURL = stageURL
         self.expectedFrameCount = expectedFrameCount
         self.expectedSampleRate = expectedSampleRate
+        self.expectedChapterFrameCounts = expectedChapterFrameCounts
         self.verification = verification
     }
 }
@@ -146,12 +149,17 @@ public actor AudiobookExportController {
         AudiobookExportManifestPayload,
         URL
     ) async throws -> MediaExportResultSnapshot
+    typealias MediaVerifierHandler = @Sendable (
+        URL,
+        AudiobookPreparedExport
+    ) async throws -> AudiobookMediaVerification
 
     private let store: AudiobookProjectStore
     private let castController: AudiobookCastController
     private let revisionController: AudiobookRevisionController
     private let controlTransport: any SpeechRailControlTransport
     private let customStageEncoder: StageEncoderHandler?
+    private let mediaVerifier: MediaVerifierHandler
     private var cancelledRequestIDs: Set<UUID> = []
     private var activeOperationIDByRequest: [UUID: String] = [:]
 
@@ -167,6 +175,27 @@ public actor AudiobookExportController {
         self.revisionController = revisionController
         self.controlTransport = controlTransport
         self.customStageEncoder = customStageEncoder
+        self.mediaVerifier = { url, expected in
+            try await AudiobookMediaVerifier.verify(url: url, expected: expected)
+        }
+    }
+
+    /// Internal test seam for deterministic fake encoders. Production callers always use
+    /// `AudiobookMediaVerifier`, which fails closed when AVFoundation cannot inspect media.
+    init(
+        store: AudiobookProjectStore,
+        castController: AudiobookCastController,
+        revisionController: AudiobookRevisionController,
+        controlTransport: any SpeechRailControlTransport = UnavailableControlTransport(),
+        customStageEncoder: StageEncoderHandler? = nil,
+        mediaVerifier: @escaping MediaVerifierHandler
+    ) {
+        self.store = store
+        self.castController = castController
+        self.revisionController = revisionController
+        self.controlTransport = controlTransport
+        self.customStageEncoder = customStageEncoder
+        self.mediaVerifier = mediaVerifier
     }
 
     public func cancel(requestID: UUID) async {
@@ -216,6 +245,7 @@ public actor AudiobookExportController {
         var omittedChapters: [AudiobookOmittedChapterRecord] = []
         var manifestChapters: [AudiobookExportManifestPayload.ChapterItem] = []
         var chapterRevisionsMap: [UUID: UUID] = [:]
+        var sourceFramesByChapter: [UUID: [(Int64, Int)]] = [:]
         var totalFrames: Int64 = 0
 
         for chapter in allChapters {
@@ -271,6 +301,7 @@ public actor AudiobookExportController {
             }
 
             var fragmentItems: [AudiobookExportManifestPayload.FragmentItem] = []
+            var chapterFrames: [(Int64, Int)] = []
             for binding in validCurrentRev.orderedBindings {
                 guard let candidate = candidatesByID[binding.candidateID],
                       candidate.isReceiptVerified,
@@ -297,10 +328,11 @@ public actor AudiobookExportController {
                         sampleRate: candidate.sampleRate
                     )
                 )
-                totalFrames += candidate.frameCount
+                chapterFrames.append((candidate.frameCount, candidate.sampleRate))
             }
 
             guard !fragmentItems.isEmpty else { continue }
+            sourceFramesByChapter[chapter.id] = chapterFrames
             exportedChapters.append(chapter)
             chapterRevisionsMap[chapter.id] = validCurrentRev.id
             manifestChapters.append(
@@ -363,6 +395,53 @@ public actor AudiobookExportController {
             throw AudiobookExportError.exportCancelled
         }
 
+        let targetSampleRate = AudiobookLimits.intermediateSampleRate
+        guard stageResult.requestID == requestID,
+              stageResult.profile == profile.rawValue,
+              stageResult.sampleRate == targetSampleRate,
+              stageResult.chapterCount == manifestChapters.count,
+              stageResult.totalFrameCount > 0
+        else {
+            throw AudiobookExportError.verificationFailed("导出工具返回的任务、章节或采样信息与请求不一致。")
+        }
+        let expectedOutputPaths = Self.expectedStageOutputPaths(
+            requestID: requestID,
+            profile: profile,
+            chapters: manifestChapters
+        )
+        guard stageResult.relativeOutputs.count == expectedOutputPaths.count,
+              Set(stageResult.relativeOutputs) == Set(expectedOutputPaths),
+              Set(stageResult.outputSHA256s.keys) == Set(expectedOutputPaths),
+              stageResult.outputSHA256s.values.allSatisfy(Self.isSHA256Hex)
+        else {
+            throw AudiobookExportError.verificationFailed("导出工具返回的文件清单或 SHA-256 与请求不一致。")
+        }
+        let stageResultMediaSHA256 = try Self.mediaDigestFromStageResult(
+            stageResult,
+            profile: profile,
+            expectedOutputPaths: expectedOutputPaths
+        )
+        var expectedChapterFrameCounts: [UUID: Int64] = [:]
+        for chapter in exportedChapters {
+            let convertedFrames = try (sourceFramesByChapter[chapter.id] ?? []).reduce(Int64(0)) {
+                subtotal, fragment in
+                guard fragment.1 > 0 else {
+                    throw AudiobookExportError.verificationFailed("章节“\(chapter.title)”包含无效的源采样率。")
+                }
+                let scaledFrames = Double(fragment.0) * Double(targetSampleRate) / Double(fragment.1)
+                guard scaledFrames.isFinite, scaledFrames > 0, scaledFrames < Double(Int64.max) else {
+                    throw AudiobookExportError.verificationFailed("章节“\(chapter.title)”的预期时长无效。")
+                }
+                let fragmentFrames = Int64(scaledFrames.rounded())
+                return subtotal + fragmentFrames
+            }
+            expectedChapterFrameCounts[chapter.id] = convertedFrames
+            totalFrames += convertedFrames
+        }
+        guard stageResult.totalFrameCount == totalFrames else {
+            throw AudiobookExportError.verificationFailed("导出工具返回的总帧数与已选章节音频不一致。")
+        }
+
         let stageTargetURL: URL
         if profile == .m4b {
             stageTargetURL = exportReqDir
@@ -384,10 +463,14 @@ public actor AudiobookExportController {
             exportedChapters: exportedChapters,
             omittedChapters: omittedChapters,
             stageURL: stageTargetURL,
-            expectedFrameCount: stageResult.totalFrameCount > 0 ? stageResult.totalFrameCount : totalFrames,
-            expectedSampleRate: stageResult.sampleRate
+            expectedFrameCount: totalFrames,
+            expectedSampleRate: targetSampleRate,
+            expectedChapterFrameCounts: expectedChapterFrameCounts
         )
-        let verification = try await AudiobookMediaVerifier.verify(url: stageTargetURL, expected: prepared)
+        let verification = try await mediaVerifier(stageTargetURL, prepared)
+        guard verification.fileSHA256 == stageResultMediaSHA256 else {
+            throw AudiobookExportError.verificationFailed("实际媒体摘要与导出工具返回的 SHA-256 不一致。")
+        }
         prepared.verification = verification
         return prepared
     }
@@ -401,11 +484,14 @@ public actor AudiobookExportController {
             throw AudiobookExportError.exportCancelled
         }
 
-        let verification: AudiobookMediaVerification
-        if let existing = prepared.verification {
-            verification = existing
+        let preparedVerification: AudiobookMediaVerification
+        if let verification = prepared.verification {
+            preparedVerification = verification
         } else {
-            verification = try await AudiobookMediaVerifier.verify(url: prepared.stageURL, expected: prepared)
+            preparedVerification = try await mediaVerifier(prepared.stageURL, prepared)
+        }
+        if cancelledRequestIDs.contains(prepared.requestID) || Task.isCancelled {
+            throw AudiobookExportError.exportCancelled
         }
 
         let fm = FileManager.default
@@ -427,8 +513,9 @@ public actor AudiobookExportController {
             }
         }
 
+        let temporarySuffix = prepared.profile == .m4b ? "tmp.m4b" : "tmp"
         let siblingTemp = parentDir.appendingPathComponent(
-            ".\(standardizedDest.lastPathComponent).\(UUID().uuidString).tmp"
+            ".\(standardizedDest.lastPathComponent).\(UUID().uuidString).\(temporarySuffix)"
         )
         defer { try? fm.removeItem(at: siblingTemp) }
 
@@ -462,6 +549,16 @@ public actor AudiobookExportController {
             throw AudiobookExportError.exportCancelled
         }
 
+        // Verify the exact sibling copy that will be atomically installed. A cached stage
+        // verification can become stale between `prepare` and `commit`.
+        let verification = try await mediaVerifier(siblingTemp, prepared)
+        if cancelledRequestIDs.contains(prepared.requestID) || Task.isCancelled {
+            throw AudiobookExportError.exportCancelled
+        }
+        guard verification.fileSHA256 == preparedVerification.fileSHA256 else {
+            throw AudiobookExportError.verificationFailed("待提交媒体与 prepare 阶段校验的产物不一致。")
+        }
+
         // Re-verify overwrite target right before atomic swap
         if fm.fileExists(atPath: standardizedDest.path) {
             guard let consent = overwriteConsent else {
@@ -489,6 +586,53 @@ public actor AudiobookExportController {
             durationSeconds: verification.durationSeconds
         )
         try await store.saveExportRecord(exportRecord)
+    }
+
+    private static func expectedStageOutputPaths(
+        requestID: UUID,
+        profile: AudiobookExportProfile,
+        chapters: [AudiobookExportManifestPayload.ChapterItem]
+    ) -> [String] {
+        let stageRoot = "exports/\(requestID.uuidString.lowercased())/stage"
+        switch profile {
+        case .m4b:
+            return ["\(stageRoot)/book.m4b"]
+        case .chapterMP3:
+            return chapters.map { chapter in
+                "\(stageRoot)/chapters/\(String(format: "chapter_%04d.mp3", chapter.ordinal + 1))"
+            }
+        }
+    }
+
+    private static func mediaDigestFromStageResult(
+        _ result: MediaExportResultSnapshot,
+        profile: AudiobookExportProfile,
+        expectedOutputPaths: [String]
+    ) throws -> String {
+        switch profile {
+        case .m4b:
+            guard let path = expectedOutputPaths.first,
+                  let digest = result.outputSHA256s[path]
+            else {
+                throw AudiobookExportError.verificationFailed("导出工具未返回 M4B 媒体摘要。")
+            }
+            return digest
+        case .chapterMP3:
+            let entries = try expectedOutputPaths
+                .map { path -> String in
+                    guard let digest = result.outputSHA256s[path] else {
+                        throw AudiobookExportError.verificationFailed("导出工具未返回完整的分章 MP3 媒体摘要。")
+                    }
+                    return "\(URL(fileURLWithPath: path).lastPathComponent):\(digest)"
+                }
+            return AudiobookDigest.sha256Hex(Data(entries.joined(separator: "|").utf8))
+        }
+    }
+
+    private static func isSHA256Hex(_ value: String) -> Bool {
+        value.utf8.count == 64 && value.utf8.allSatisfy {
+            (48...57).contains($0) || (97...102).contains($0)
+        }
     }
 
     // MARK: - Private XPC Polling

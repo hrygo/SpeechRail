@@ -2,8 +2,8 @@
 title: "有声书工坊系统架构与边界合同"
 status: active
 audience: "系统架构师、核心开发者"
-version: "1.0.0"
-date: 2026-10-14
+version: "1.0.1"
+date: 2026-10-15
 ---
 
 # 有声书工坊系统架构与边界合同
@@ -45,13 +45,15 @@ graph LR
 
 ### 2.3 有界全书 AI 理解与低置信度护栏
 - 章节分析按固定窗口（上限 12,000 UTF-8 字节，跨窗重叠 2 段上下文）顺序或受控并发调用 `LLMModule.audiobook`，单响应上限 256 KiB，严格使用 `LLMJSONParser` 解析并校验 schema。
-- 说话人归属必须附带原文区间或显式上下文证据；置信度低于阈值 (`< 0.65`) 或缺少证据的对白自动标记为 `needsConfirmation` 并绑定旁白音色回退，不编造角色。
+- 说话人归属必须附带原文区间或显式上下文证据；低置信度、缺少证据或模型漏标的直接对白标记为 `unknown`，阻止对应章节制作，等待用户确认角色或明确选择旁白。纯叙述可以归旁白。
 
 ### 2.4 流式合成、48 kHz 主干采样率与精确脏传播
 - 每个 `AudiobookFragment` 的签名由 `(sourceId, byteRange, textSha256, characterId, voiceId, voiceRevisionId, speedMillis, capabilityRevision)` 共同决定。
-- TTS 响应流式读取受 8 MiB 硬上限保护；合成音频统一重采样并归一化为 **48 kHz 单声道 16-bit PCM WAV**，落盘后计算 `file_sha256`、`pcm_sha256`、峰值与静音比例。
+- TTS 响应流式读取受 8 MiB 硬上限保护；服务回执按原始 PCM 核验，本地制作音频按渲染策略转换为 **48 kHz 单声道 16-bit PCM WAV**，候选的帧数、`file_sha256` 与 `pcm_sha256` 均描述本地转换产物。
 - 修改单句、重派单段角色或更换某角色音色时，`AudiobookInvalidation` 只将签名变化的切片标为 `stale`，其余切片与章节保持 `ready`。
 
 ### 2.5 受控 XPC 媒体封装 (`speechrail media encode-audiobook`)
-- Swift 侧不直接拼装 shell 命令或调用外部 `ffmpeg`；`AudiobookExportController` 在导出前用 `AudiobookMediaVerifier` 逐一核对输入 WAV 的 SHA-256 与帧数，写出 `<app_home>/audiobooks/exports/<request_id>/request.json`。
-- `SpeechRailControlAgent` 仅允许白名单子命令 `["media", "encode-audiobook", "--app-home", ..., "--request-id", ..., "--format", "json"]`，Python `speechrail.media` 校验路径不越界、拒绝符号链接、复核输入 SHA-256，并在编码完成后用 `ffprobe` 与 Swift `AVURLAsset` 双重验证输出时长、音轨和章节数。
+- Swift 侧不直接拼装 shell 命令或调用外部 `ffmpeg`；`AudiobookExportController` 导出前核对已采用候选的资产 SHA-256，按候选帧数与采样率独立计算章节预期时长，并写出 `<app_home>/audiobooks/exports/<request_id>/request.json`。
+- `SpeechRailControlAgent` 仅允许白名单子命令 `["media", "encode-audiobook", "--app-home", ..., "--request-id", ..., "--format", "json"]`。Python `speechrail.media` 校验路径不越界、拒绝符号链接、复核输入 SHA-256，并以 `ffmpeg` 编码媒体和写入章节元数据。
+- `AudiobookMediaVerifier` 使用 `AVURLAsset` 读取实际音轨、编码与时长，不能读取时拒绝导出；分章 MP3 逐个核对文件名及章节时长。实际媒体 SHA-256 必须匹配编码结果清单；提交前重新验证目标旁的临时副本，并与准备阶段摘要一致后原子安装。
+- M4B 内部章节标记尚未由校验器独立读取；返回的 `chapterTitles` 来源于已选章节，不能作为容器内章节标记已核验的证据。

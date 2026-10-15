@@ -23,10 +23,11 @@ public struct AudiobookAnalysisPolicy: Codable, Equatable, Sendable {
     public var maxMergeCandidatesPerBatch: Int
     public var maxCallsPerRootWindow: Int
 
+    // v2 changes omitted direct-dialogue handling to unknown, so v1 annotation checkpoints must be rerun.
     public static let standard = AudiobookAnalysisPolicy()
 
     public init(
-        version: String = "audiobook_analysis_policy_v1",
+        version: String = "audiobook_analysis_policy_v2",
         maxPrimaryScalars: Int = AudiobookLimits.maxWindowPrimaryScalars,
         maxPrimaryAtoms: Int = AudiobookLimits.maxWindowPrimaryAtoms,
         minWindowScalars: Int = AudiobookLimits.minSplitWindowScalars,

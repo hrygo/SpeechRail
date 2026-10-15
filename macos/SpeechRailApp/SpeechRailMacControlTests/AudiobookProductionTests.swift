@@ -36,16 +36,22 @@ final class AudiobookProductionTests: XCTestCase {
     private final class ScriptedSpeechRenderer: AudiobookSpeechRenderer, @unchecked Sendable {
         private let lock = NSLock()
         var capabilities: EffectiveCapabilitySnapshot
+        let outputSampleRate: Int
         private(set) var requests: [AudiobookRenderCallRequest] = []
         var scriptedErrors: [Error] = []
+        var onCapabilitiesFetch: (@Sendable () async throws -> Void)?
         var onRenderStart: (@Sendable (AudiobookRenderCallRequest) async throws -> Void)?
 
-        init(capabilities: EffectiveCapabilitySnapshot) {
+        init(capabilities: EffectiveCapabilitySnapshot, outputSampleRate: Int = 48_000) {
             self.capabilities = capabilities
+            self.outputSampleRate = outputSampleRate
         }
 
         func fetchEffectiveCapabilities() async throws -> EffectiveCapabilitySnapshot {
-            capabilities
+            if let onCapabilitiesFetch {
+                try await onCapabilitiesFetch()
+            }
+            return capabilities
         }
 
         func renderFragment(_ request: AudiobookRenderCallRequest) async throws -> AudiobookRenderCallOutput {
@@ -61,7 +67,11 @@ final class AudiobookProductionTests: XCTestCase {
                 throw nextError
             }
 
-            let wav = Self.makePCM16MonoWAV(frameCount: 4_800, sampleValue: 1_024)
+            let wav = Self.makePCM16MonoWAV(
+                frameCount: outputSampleRate / 10,
+                sampleValue: 1_024,
+                sampleRate: outputSampleRate
+            )
             let pcmSHA = try AudioDigest.sha256HexOfPCM(in: wav)
             return AudiobookRenderCallOutput(
                 wavData: wav,
@@ -75,7 +85,11 @@ final class AudiobookProductionTests: XCTestCase {
             )
         }
 
-        static func makePCM16MonoWAV(frameCount: Int, sampleValue: Int16) -> Data {
+        static func makePCM16MonoWAV(
+            frameCount: Int,
+            sampleValue: Int16,
+            sampleRate: Int = 48_000
+        ) -> Data {
             let pcmByteCount = frameCount * 2
             let totalByteCount = 44 + pcmByteCount
             var data = Data(capacity: totalByteCount)
@@ -86,14 +100,14 @@ final class AudiobookProductionTests: XCTestCase {
             var fmtChunkSize = UInt32(16).littleEndian
             var audioFormat = UInt16(1).littleEndian
             var numChannels = UInt16(1).littleEndian
-            var sampleRate = UInt32(48_000).littleEndian
-            var byteRate = UInt32(48_000 * 2).littleEndian
+            var encodedSampleRate = UInt32(sampleRate).littleEndian
+            var byteRate = UInt32(sampleRate * 2).littleEndian
             var blockAlign = UInt16(2).littleEndian
             var bitsPerSample = UInt16(16).littleEndian
             data.append(Data(bytes: &fmtChunkSize, count: 4))
             data.append(Data(bytes: &audioFormat, count: 2))
             data.append(Data(bytes: &numChannels, count: 2))
-            data.append(Data(bytes: &sampleRate, count: 4))
+            data.append(Data(bytes: &encodedSampleRate, count: 4))
             data.append(Data(bytes: &byteRate, count: 4))
             data.append(Data(bytes: &blockAlign, count: 2))
             data.append(Data(bytes: &bitsPerSample, count: 2))
@@ -106,6 +120,26 @@ final class AudiobookProductionTests: XCTestCase {
                 data.append(sampleBytes)
             }
             return data
+        }
+    }
+
+    private actor AsyncGate {
+        private var isOpen = false
+        private var continuations: [CheckedContinuation<Void, Never>] = []
+
+        func wait() async {
+            guard !isOpen else { return }
+            await withCheckedContinuation { continuation in
+                continuations.append(continuation)
+            }
+        }
+
+        func open() {
+            guard !isOpen else { return }
+            isOpen = true
+            let waiting = continuations
+            continuations.removeAll()
+            waiting.forEach { $0.resume() }
         }
     }
 
@@ -163,6 +197,14 @@ final class AudiobookProductionTests: XCTestCase {
             operations: [:],
             guarantees: [:]
         )
+    }
+
+    private func wavSampleRate(_ wav: Data) -> Int {
+        guard wav.count >= 28 else { return 0 }
+        return Int(wav[24])
+            | (Int(wav[25]) << 8)
+            | (Int(wav[26]) << 16)
+            | (Int(wav[27]) << 24)
     }
 
     @MainActor
@@ -275,6 +317,11 @@ final class AudiobookProductionTests: XCTestCase {
         let finalBook = try await store.book(id: bookID)
         XCTAssertEqual(finalBook.productionState, .fullBookProduced)
         XCTAssertEqual(finalBook.listenableState, .fullBookListenable)
+
+        await production.shutdown()
+        let bookAfterShutdown = try await store.book(id: bookID)
+        XCTAssertEqual(bookAfterShutdown.productionState, .fullBookProduced,
+                       "无进行中任务时关闭制作器不得把已完成书籍改为暂停")
     }
 
     @MainActor
@@ -345,6 +392,285 @@ final class AudiobookProductionTests: XCTestCase {
         let candidatesAfterPause = try await store.candidates(for: bookID)
         XCTAssertTrue(candidatesAfterPause.isEmpty, "暂停后迟到的音频绝不能写入候选库或标记完成")
         XCTAssertFalse(admission.isBusy, "暂停后必须释放 creation admission 租约")
+    }
+
+    @MainActor
+    func testConcurrentStartDoesNotInvalidateFirstRunOrLeakAdmission() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let castController = AudiobookCastController(store: store)
+        let revisionController = AudiobookRevisionController(store: store)
+        let admission = SpeechCreationAdmission()
+        let renderer = ScriptedSpeechRenderer(capabilities: makeDefaultCapabilities())
+        let clock = FakeAudiobookClock()
+        let production = AudiobookProductionController(
+            store: store,
+            castController: castController,
+            revisionController: revisionController,
+            renderer: renderer,
+            admission: admission,
+            clock: clock
+        )
+
+        let text = "第一章 并发制作测试\n夜色渐浓。\n"
+        let url = tempRoot.appendingPathComponent("concurrent-start.txt")
+        try Data(text.utf8).write(to: url)
+        let preview = try await AudiobookTXTImporter.prepare(fileURL: url, encoding: .utf8)
+        let bookID = try await store.importBook(preview)
+        let chapter = try await store.chapters(for: bookID)[0]
+
+        var book = try await store.book(id: bookID)
+        book.analysisState = .allWindowsValidated
+        try await store.updateBook(book)
+
+        let narrator = try await store.characters(for: bookID)[0]
+        let atoms = try await store.atoms(for: bookID, chapterID: chapter.id).filter { $0.kind != .formatting }
+        let annotations = atoms.map { atom in
+            AudiobookAnnotation(
+                bookID: bookID,
+                chapterID: chapter.id,
+                windowID: UUID(),
+                atomID: atom.id,
+                sourceRange: atom.sourceRange,
+                assignment: .assigned(roleID: narrator.id)
+            )
+        }
+        try await store.saveAnnotations(bookID: bookID, annotations: annotations)
+        try await castController.bindVoice(
+            bookID: bookID,
+            roleID: narrator.id,
+            binding: AudiobookVoiceBinding(
+                roleID: narrator.id,
+                voiceID: "v-narrator",
+                voiceRevision: "rev-n1",
+                modelRevision: "qwen3-tts-v1"
+            )
+        )
+        let castRevisionID = try await castController.currentCastRevisionID(for: bookID)
+        try await castController.confirmCast(bookID: bookID, revisionID: castRevisionID)
+        let voiceSetDigest = try await castController.currentVoiceSetDigest(for: bookID)
+        try await castController.confirmAudition(bookID: bookID, voiceSetDigest: voiceSetDigest)
+
+        let renderStarted = AsyncGate()
+        let finishRender = AsyncGate()
+        renderer.onRenderStart = { _ in
+            await renderStarted.open()
+            await finishRender.wait()
+        }
+
+        let firstRun = Task {
+            try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+        }
+        await renderStarted.wait()
+
+        do {
+            try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+            XCTFail("已有制作运行时，第二次 start 必须稳定返回 busy")
+        } catch let error as AudiobookProductionError {
+            XCTAssertEqual(error, .admissionBusy)
+        }
+
+        await finishRender.open()
+        do {
+            try await firstRun.value
+        } catch {
+            XCTFail("第二次 start 不得使第一条制作失效：\(error)")
+        }
+
+        XCTAssertFalse(admission.isBusy, "拒绝并发 start 后，第一条任务完成仍须释放 creation admission")
+        let candidates = try await store.candidates(for: bookID)
+        let finalBook = try await store.book(id: bookID)
+        XCTAssertEqual(candidates.count, 1)
+        XCTAssertEqual(finalBook.productionState, .fullBookProduced)
+    }
+
+    @MainActor
+    func testPauseDuringPreflightIsNotClearedBeforeRenderingStarts() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let castController = AudiobookCastController(store: store)
+        let revisionController = AudiobookRevisionController(store: store)
+        let admission = SpeechCreationAdmission()
+        let renderer = ScriptedSpeechRenderer(capabilities: makeDefaultCapabilities())
+        let production = AudiobookProductionController(
+            store: store,
+            castController: castController,
+            revisionController: revisionController,
+            renderer: renderer,
+            admission: admission,
+            clock: FakeAudiobookClock()
+        )
+
+        let url = tempRoot.appendingPathComponent("pause-during-preflight.txt")
+        try Data("第一章 暂停测试\n夜色渐浓。\n".utf8).write(to: url)
+        let preview = try await AudiobookTXTImporter.prepare(fileURL: url, encoding: .utf8)
+        let bookID = try await store.importBook(preview)
+        let chapter = try await store.chapters(for: bookID)[0]
+        var book = try await store.book(id: bookID)
+        book.analysisState = .allWindowsValidated
+        try await store.updateBook(book)
+
+        let narrator = try await store.characters(for: bookID)[0]
+        let atoms = try await store.atoms(for: bookID, chapterID: chapter.id)
+            .filter { $0.kind != .formatting }
+        let annotations = atoms.map { atom in
+            AudiobookAnnotation(
+                bookID: bookID,
+                chapterID: chapter.id,
+                windowID: UUID(),
+                atomID: atom.id,
+                sourceRange: atom.sourceRange,
+                assignment: .assigned(roleID: narrator.id)
+            )
+        }
+        try await store.saveAnnotations(bookID: bookID, annotations: annotations)
+        try await castController.bindVoice(
+            bookID: bookID,
+            roleID: narrator.id,
+            binding: AudiobookVoiceBinding(
+                roleID: narrator.id,
+                voiceID: "v-narrator",
+                voiceRevision: "rev-n1",
+                modelRevision: "qwen3-tts-v1"
+            )
+        )
+        let castRevisionID = try await castController.currentCastRevisionID(for: bookID)
+        try await castController.confirmCast(bookID: bookID, revisionID: castRevisionID)
+        let voiceSetDigest = try await castController.currentVoiceSetDigest(for: bookID)
+        try await castController.confirmAudition(bookID: bookID, voiceSetDigest: voiceSetDigest)
+
+        let capabilitiesFetchStarted = AsyncGate()
+        let finishCapabilitiesFetch = AsyncGate()
+        renderer.onCapabilitiesFetch = {
+            await capabilitiesFetchStarted.open()
+            await finishCapabilitiesFetch.wait()
+        }
+        let productionRun = Task {
+            try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+        }
+        await capabilitiesFetchStarted.wait()
+        await production.pause()
+        await finishCapabilitiesFetch.open()
+
+        do {
+            try await productionRun.value
+            XCTFail("预检期间请求暂停后，启动流程不得清除暂停并开始渲染")
+        } catch let error as AudiobookProductionError {
+            XCTAssertEqual(error, .cancelled)
+        }
+        XCTAssertTrue(renderer.requests.isEmpty, "预检阶段暂停后不得提交语音渲染请求")
+        XCTAssertFalse(admission.isBusy, "预检阶段暂停不得留下 creation admission 租约")
+    }
+
+    @MainActor
+    func testProductionResamplesTwentyFourKRenderToPolicyRate() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let castController = AudiobookCastController(store: store)
+        let revisionController = AudiobookRevisionController(store: store)
+        let admission = SpeechCreationAdmission()
+        let renderer = ScriptedSpeechRenderer(
+            capabilities: makeDefaultCapabilities(),
+            outputSampleRate: 24_000
+        )
+        let production = AudiobookProductionController(
+            store: store,
+            castController: castController,
+            revisionController: revisionController,
+            renderer: renderer,
+            admission: admission,
+            clock: FakeAudiobookClock()
+        )
+
+        let url = tempRoot.appendingPathComponent("resample-24k.txt")
+        try Data("第一章 采样率测试\n测试正文。\n".utf8).write(to: url)
+        let preview = try await AudiobookTXTImporter.prepare(fileURL: url, encoding: .utf8)
+        let bookID = try await store.importBook(preview)
+        let chapter = try await store.chapters(for: bookID)[0]
+        var book = try await store.book(id: bookID)
+        book.analysisState = .allWindowsValidated
+        try await store.updateBook(book)
+
+        let narrator = try await store.characters(for: bookID)[0]
+        let atoms = try await store.atoms(for: bookID, chapterID: chapter.id)
+            .filter { $0.kind != .formatting }
+        let annotations = atoms.map { atom in
+            AudiobookAnnotation(
+                bookID: bookID,
+                chapterID: chapter.id,
+                windowID: UUID(),
+                atomID: atom.id,
+                sourceRange: atom.sourceRange,
+                assignment: .assigned(roleID: narrator.id)
+            )
+        }
+        try await store.saveAnnotations(bookID: bookID, annotations: annotations)
+        try await castController.bindVoice(
+            bookID: bookID,
+            roleID: narrator.id,
+            binding: AudiobookVoiceBinding(
+                roleID: narrator.id,
+                voiceID: "v-narrator",
+                voiceRevision: "rev-n1",
+                modelRevision: "qwen3-tts-v1"
+            )
+        )
+        let castRevisionID = try await castController.currentCastRevisionID(for: bookID)
+        try await castController.confirmCast(bookID: bookID, revisionID: castRevisionID)
+        let voiceSetDigest = try await castController.currentVoiceSetDigest(for: bookID)
+        try await castController.confirmAudition(bookID: bookID, voiceSetDigest: voiceSetDigest)
+
+        // Legacy policy stored the service's 24 kHz bytes while labelling them 48 kHz.
+        // A new production run must preserve that asset but render a corrected candidate.
+        let source = try await store.sourceIndex(for: bookID)
+        let bindings = try await store.voiceBindings(for: bookID)
+        let allAtoms = try await store.atoms(for: bookID, chapterID: chapter.id)
+        let legacyFragments = try AudiobookFragmentPlanner.plan(
+            chapter: chapter,
+            annotations: annotations,
+            bindings: bindings,
+            policy: AudiobookRenderPolicy(version: "audiobook_render_policy_v1"),
+            source: source,
+            atoms: allAtoms
+        )
+        let legacyWAV = ScriptedSpeechRenderer.makePCM16MonoWAV(
+            frameCount: 2_400,
+            sampleValue: 1_024,
+            sampleRate: 24_000
+        )
+        for fragment in legacyFragments {
+            let candidateID = UUID()
+            let candidate = AudiobookRenderCandidate(
+                id: candidateID,
+                bookID: bookID,
+                chapterID: chapter.id,
+                fragmentID: fragment.id,
+                taskID: UUID(),
+                generation: 0,
+                relativeAssetPath: "books/\(bookID.uuidString)/audio/\(candidateID.uuidString).wav",
+                fileSHA256: AudiobookDigest.sha256Hex(legacyWAV),
+                pcmSHA256: try AudioDigest.sha256HexOfPCM(in: legacyWAV),
+                frameCount: 2_400,
+                sampleRate: 48_000,
+                dependencyDigest: fragment.dependencyDigest,
+                requestID: "legacy-rate-metadata",
+                receiptDigest: nil,
+                recipeSummary: nil,
+                isReceiptVerified: true,
+                createdAt: Date()
+            )
+            try await store.commitCandidate(candidate, wav: legacyWAV)
+        }
+
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+        let candidates = try await store.candidates(for: bookID)
+        XCTAssertFalse(renderer.requests.isEmpty, "不能复用旧策略中采样率标记错误的候选")
+        let candidate = try XCTUnwrap(candidates.first { $0.requestID != "legacy-rate-metadata" })
+        let assetURL = try await store.resolveAssetFileURL(for: candidate)
+        let wav = try Data(contentsOf: assetURL)
+
+        XCTAssertEqual(wavSampleRate(wav), 48_000, "持久化 WAV 头和候选元数据必须都是真实 48 kHz")
+        XCTAssertEqual(candidate.sampleRate, 48_000)
+        XCTAssertEqual(candidate.frameCount, 4_800, "24 kHz 的 0.1 秒输入应重采样为 48 kHz 的 0.1 秒")
+        XCTAssertEqual(Double(candidate.frameCount) / Double(candidate.sampleRate), 0.1, accuracy: 0.001)
+        XCTAssertTrue(candidate.isReceiptVerified, "回执应按服务端原始 PCM 核验，再对重采样产物单独计算本地摘要")
     }
 
     @MainActor

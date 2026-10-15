@@ -301,10 +301,25 @@ public enum AudiobookCastRegistry {
         windowText: String,
         policy: AudiobookAnalysisPolicy = .standard
     ) -> [AudiobookPromptCharacterSummary] {
+        selectCandidateSummariesForEvidence(
+            characters: characters,
+            chapterIDs: [chapterID],
+            windowText: windowText,
+            policy: policy
+        )
+    }
+
+    /// 根据当前证据涉及的章节筛选角色，避免全书归并批次被无关章节的角色挤出候选上下文。
+    static func selectCandidateSummariesForEvidence(
+        characters: [AudiobookCharacter],
+        chapterIDs: Set<UUID>,
+        windowText: String,
+        policy: AudiobookAnalysisPolicy = .standard
+    ) -> [AudiobookPromptCharacterSummary] {
         let nonNarrators = characters.filter { !$0.isNarrator }
         let scored = nonNarrators.map { character -> (AudiobookCharacter, Int) in
             var score = 0
-            if character.chapterIDs.contains(chapterID) {
+            if !Set(character.chapterIDs).isDisjoint(with: chapterIDs) {
                 score += 50
             }
             if windowText.contains(character.displayName) {
