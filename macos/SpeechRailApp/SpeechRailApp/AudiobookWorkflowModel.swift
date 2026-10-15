@@ -114,8 +114,28 @@ public final class AudiobookWorkflowModel {
             }
         }
     }
+    public enum CastFilterScope: String, CaseIterable, Equatable, Sendable, Identifiable {
+        case all
+        case leads
+        case inCurrentChapter
+        case minorEnsemble
+
+        public var id: String { rawValue }
+
+        public var title: String {
+            switch self {
+            case .all: return "全部"
+            case .leads: return "核心主角"
+            case .inCurrentChapter: return "本章出场"
+            case .minorEnsemble: return "配角群像"
+            }
+        }
+    }
+
     public private(set) var characters: [AudiobookCharacter] = []
     public var selectedRoleID: UUID?
+    public var castFilterScope: CastFilterScope = .all
+    public private(set) var roleStatsByID: [UUID: AudiobookRoleDialogueStats] = [:]
     public private(set) var voiceBindings: [UUID: AudiobookVoiceBinding] = [:]
     public private(set) var chapterReadinessByID: [UUID: AudiobookChapterReadinessState] = [:]
     public private(set) var chapterAtoms: [AudiobookTextAtom] = []
@@ -379,9 +399,15 @@ public final class AudiobookWorkflowModel {
             let loadedCharacters = try await store.characters(for: bookID)
             let loadedBindings = try await store.voiceBindings(for: bookID)
             let loadedExports = try await store.exportRecords(for: bookID)
+            let allAnnotations = (try? await store.annotations(for: bookID)) ?? []
+            let (_, computedStats, _) = AudiobookCastRegistry.computeRoleDialogueStats(
+                characters: loadedCharacters,
+                annotations: allAnnotations
+            )
             selectedBook = book
             chapters = loadedChapters
             characters = loadedCharacters
+            roleStatsByID = computedStats
             voiceBindings = loadedBindings
             exportRecords = loadedExports
             if selectedChapterID == nil || !chapters.contains(where: { $0.id == selectedChapterID }) {
@@ -564,7 +590,7 @@ public final class AudiobookWorkflowModel {
         analysisClockTask = nil
     }
 
-    /// 根据全书角色声线线索与当前可用音色目录，为尚未配声的角色自动推荐并预绑定音色。
+    /// 根据全书角色声线线索与当前可用音色目录，为尚未配声的角色自动推荐并预绑定音色（含四级分层、双池隔离、同场图着色与微语速错位）。
     public func autoAssignRecommendedVoices(
         for bookID: UUID? = nil,
         availableVoices: [SafeVoiceEntry]? = nil
@@ -585,15 +611,45 @@ public final class AudiobookWorkflowModel {
         guard let chars = try? await store.characters(for: targetID),
               let existing = try? await store.voiceBindings(for: targetID)
         else { return }
+        let allAnnotations = (try? await store.annotations(for: targetID)) ?? []
 
-        let recommended = AudiobookCastRegistry.recommendVoiceBindings(
+        let (stratifiedChars, stats, _) = AudiobookCastRegistry.computeRoleDialogueStats(
             characters: chars,
-            availableVoices: candidateVoices,
-            existingBindings: existing
+            annotations: allAnnotations,
+            availableVoiceCount: candidateVoices.count
         )
 
+        let recommended = AudiobookCastRegistry.recommendVoiceBindings(
+            characters: stratifiedChars,
+            availableVoices: candidateVoices,
+            existingBindings: existing,
+            annotations: allAnnotations,
+            bookID: targetID
+        )
+
+        // 若某音色在推荐方案中被多个非旁白角色共用，自动确保持有该音色的角色均开启 allowSharedMinorVoice = true
+        var voiceUsageCount: [String: Int] = [:]
+        for (_, b) in recommended {
+            voiceUsageCount[b.voiceID, default: 0] += 1
+        }
+        var updatedChars = stratifiedChars
+        var didModifyCharFlags = (updatedChars != chars)
+        for idx in updatedChars.indices where !updatedChars[idx].isNarrator {
+            let rid = updatedChars[idx].id
+            if let rec = recommended[rid], (voiceUsageCount[rec.voiceID] ?? 0) > 1 {
+                if !updatedChars[idx].allowSharedMinorVoice {
+                    updatedChars[idx].isMajor = false
+                    updatedChars[idx].allowSharedMinorVoice = true
+                    didModifyCharFlags = true
+                }
+            }
+        }
+        if didModifyCharFlags {
+            try? await store.saveCharacters(bookID: targetID, characters: updatedChars)
+        }
+
         var newlyBoundCount = 0
-        for role in chars {
+        for role in updatedChars {
             guard existing[role.id]?.isSynthesisReady != true,
                   let binding = recommended[role.id]
             else { continue }
@@ -602,11 +658,97 @@ public final class AudiobookWorkflowModel {
             }
         }
 
-        if newlyBoundCount > 0, selectedBook?.id == targetID {
+        if selectedBook?.id == targetID {
+            characters = (try? await store.characters(for: targetID)) ?? updatedChars
+            roleStatsByID = stats
             voiceBindings = (try? await store.voiceBindings(for: targetID)) ?? voiceBindings
             selectedBook = (try? await store.book(id: targetID)) ?? selectedBook
             await refreshChapterReadinessMap(for: targetID)
         }
+    }
+
+    // MARK: - Stratified Cast Helpers & Batch Archetype Binding
+
+    public var filteredCharacters: [AudiobookCharacter] {
+        switch castFilterScope {
+        case .all:
+            return characters
+        case .leads:
+            return characters.filter { role in
+                role.isNarrator
+                    || roleStatsByID[role.id]?.tier == .lead
+                    || !role.allowSharedMinorVoice
+            }
+        case .inCurrentChapter:
+            guard let chapterID = selectedChapterID else { return characters }
+            let chapterSpeakerIDs = Set(chapterAnnotations.compactMap(\.assignment.roleID))
+            return characters.filter { role in
+                role.isNarrator
+                    || chapterSpeakerIDs.contains(role.id)
+                    || roleStatsByID[role.id]?.speakingChapterIDs.contains(chapterID) == true
+                    || role.chapterIDs.contains(chapterID)
+            }
+        case .minorEnsemble:
+            return characters.filter { !$0.isNarrator && $0.allowSharedMinorVoice }
+        }
+    }
+
+    /// 返回与指定角色在同一场戏直接交谈且绑定了相同 voiceID 的对手角色名称列表（用于实时同场撞音预警）。
+    public func sceneConflictPartnerNames(for roleID: UUID) -> [String] {
+        guard let myVoiceID = voiceBindings[roleID]?.voiceID,
+              let stat = roleStatsByID[roleID],
+              !stat.scenePartnerRoleIDs.isEmpty
+        else { return [] }
+
+        return stat.scenePartnerRoleIDs.compactMap { partnerID -> String? in
+            guard voiceBindings[partnerID]?.voiceID == myVoiceID else { return nil }
+            return characters.first(where: { $0.id == partnerID })?.displayName
+        }.sorted()
+    }
+
+    /// 统计全书存在同场紧邻对手戏撞音的角色数量。
+    public var totalSceneVoiceConflictCount: Int {
+        characters.filter { !sceneConflictPartnerNames(for: $0.id).isEmpty }.count
+    }
+
+    /// 按声部行当一键批量换绑配角音色（保护核心主角不被覆盖）。
+    public func batchBindArchetype(_ archetype: AudiobookVoiceArchetype, to voice: SafeVoiceEntry) async {
+        guard let bookID = selectedBook?.id, let castController, let store else { return }
+        do {
+            errorMessage = nil
+            let count = try await castController.batchBindArchetypeVoice(
+                bookID: bookID,
+                archetype: archetype,
+                voice: voice
+            )
+            voiceBindings = try await store.voiceBindings(for: bookID)
+            selectedBook = try await store.book(id: bookID)
+            await refreshChapterReadinessMap(for: bookID)
+            await refreshShelf()
+            if count > 0 {
+                bannerMessage = "已将 \(count) 名「\(archetype.shortBadgeTitle)」配角批量绑定为「\(voice.name)」，并自动配置微语速区分。"
+            } else {
+                bannerMessage = "当前没有属于「\(archetype.shortBadgeTitle)」且开启共享声线的次要角色。"
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// 调整单个角色已绑定音色的微语速档位。
+    public func updateRoleAllowedSpeed(roleID: UUID, speed: Double) async {
+        guard let existing = voiceBindings[roleID] else { return }
+        let clamped = min(Double(AudiobookLimits.maxPlaybackRate), max(Double(AudiobookLimits.minPlaybackRate), speed))
+        let updated = AudiobookVoiceBinding(
+            roleID: existing.roleID,
+            voiceID: existing.voiceID,
+            voiceRevision: existing.voiceRevision,
+            modelRevision: existing.modelRevision,
+            isSynthesisReady: existing.isSynthesisReady,
+            allowedSpeed: clamped,
+            callerSeed: existing.callerSeed
+        )
+        await bindVoice(roleID: roleID, binding: updated)
     }
 
     // MARK: - Cast, Speaker Resolution & Voice Round-Trip
