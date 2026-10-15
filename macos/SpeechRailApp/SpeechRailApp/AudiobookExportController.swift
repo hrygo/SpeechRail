@@ -467,7 +467,25 @@ public actor AudiobookExportController {
             expectedSampleRate: targetSampleRate,
             expectedChapterFrameCounts: expectedChapterFrameCounts
         )
-        let verification = try await mediaVerifier(stageTargetURL, prepared)
+        let verification: AudiobookMediaVerification
+        do {
+            verification = try await mediaVerifier(stageTargetURL, prepared)
+            if cancelledRequestIDs.contains(requestID) || Task.isCancelled {
+                throw AudiobookExportError.exportCancelled
+            }
+        } catch {
+            if error is CancellationError
+                || (error as? AudiobookExportError) == .exportCancelled
+                || cancelledRequestIDs.contains(requestID)
+                || Task.isCancelled
+            {
+                try? FileManager.default.removeItem(
+                    at: exportReqDir.appendingPathComponent("stage", isDirectory: true)
+                )
+                throw AudiobookExportError.exportCancelled
+            }
+            throw error
+        }
         guard verification.fileSHA256 == stageResultMediaSHA256 else {
             throw AudiobookExportError.verificationFailed("实际媒体摘要与导出工具返回的 SHA-256 不一致。")
         }

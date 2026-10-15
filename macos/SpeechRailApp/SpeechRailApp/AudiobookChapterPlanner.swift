@@ -1,5 +1,25 @@
 import Foundation
 
+public enum AudiobookChapterEditError: LocalizedError, Equatable, Sendable {
+    case chapterNotFound(UUID)
+    case firstChapterCannotMerge
+    case chapterIdentityMismatch
+    case chaptersAreNotContiguous
+
+    public var errorDescription: String? {
+        switch self {
+        case .chapterNotFound:
+            return "找不到要整理的章节，请刷新后重试。"
+        case .firstChapterCannotMerge:
+            return "第一章前面没有章节可合并。"
+        case .chapterIdentityMismatch:
+            return "只有同一本书、同一份原文中的相邻章节才能合并。"
+        case .chaptersAreNotContiguous:
+            return "所选章节与上一章之间存在正文间隔，无法合并。"
+        }
+    }
+}
+
 public enum AudiobookChapterPlanner {
     /// Plans initial chapters from canonical UTF-8 source index.
     /// Falls back to a single `"全文"` chapter when no reliable headings are detected.
@@ -202,8 +222,43 @@ public enum AudiobookChapterPlanner {
         chapterID: UUID,
         source: AudiobookSourceIndex
     ) throws -> [AudiobookChapter] {
-        // Kept as a compile-ready RED seam until merge behavior and persistence are wired.
-        chapters
+        guard let index = chapters.firstIndex(where: { $0.id == chapterID }) else {
+            throw AudiobookChapterEditError.chapterNotFound(chapterID)
+        }
+        guard index > chapters.startIndex else {
+            throw AudiobookChapterEditError.firstChapterCannotMerge
+        }
+
+        let previous = chapters[index - 1]
+        let selected = chapters[index]
+        guard previous.bookID == selected.bookID,
+              previous.sourceID == selected.sourceID
+        else {
+            throw AudiobookChapterEditError.chapterIdentityMismatch
+        }
+        guard previous.sourceRange.upperBound == selected.sourceRange.lowerBound else {
+            throw AudiobookChapterEditError.chaptersAreNotContiguous
+        }
+
+        let merged = AudiobookChapter(
+            id: previous.id,
+            bookID: previous.bookID,
+            sourceID: previous.sourceID,
+            ordinal: previous.ordinal,
+            title: previous.title,
+            sourceRange: AudiobookSourceRange(
+                lowerBound: previous.sourceRange.lowerBound,
+                upperBound: selected.sourceRange.upperBound
+            ),
+            excludedRanges: (previous.excludedRanges + selected.excludedRanges).sorted()
+        )
+        var updated = chapters
+        updated.replaceSubrange((index - 1)...index, with: [merged])
+        for position in updated.indices {
+            updated[position].ordinal = position
+        }
+        try validateChapterEdits(updated, source: source)
+        return updated
     }
 
     // MARK: - Private Helpers

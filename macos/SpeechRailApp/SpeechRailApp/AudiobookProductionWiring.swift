@@ -134,15 +134,14 @@ public enum AudiobookProductionWiring {
             }
             let rawVoiceRev = liveOptions != nil ? liveOptions?.expectedVoiceRevision : request.expectedVoiceRevision
             let rawModelRev = liveOptions?.expectedModelRevision ?? request.expectedModelRevision
-            // 仅当音色在能力快照中明确处于 productionReady == true 时启用严格输出门禁，
-            // 对历史已生成但未升级 reference 状态或自定义克隆音色不传 require_output_pass，防止 409/503 阻断正式合成。
-            let strictPolicy: String? = (matchedVoice?.productionReady == true) ? "require_output_pass" : nil
+            // 正式制作默认始终携带 require_output_pass（与配音台保持同一验收标准）；
+            // 仅当存量音色仍处于旧版 reference_validation_not_passed 且服务端返回 voice_not_production_ready 时降级重试。
             let primaryOptions = SpeechRailRequestOptions(
                 expectedVoiceRevision: Self.sanitizedVoiceRevisionHeader(rawVoiceRev),
                 expectedModelRevision: Self.sanitizedModelRevisionHeader(rawModelRev),
                 receiptMode: "integrity",
                 purpose: nil,
-                validationPolicy: strictPolicy
+                validationPolicy: "require_output_pass"
             )
             let result: SpeechRenderResult
             do {
@@ -152,8 +151,10 @@ public enum AudiobookProductionWiring {
                     speed: request.speed,
                     options: primaryOptions
                 )
-            } catch {
-                guard strictPolicy != nil else { throw error }
+            } catch let ServiceAPIClientError.remoteError(code, _, _)
+                where code == "voice_not_production_ready"
+                && matchedVoice?.productionReadyReason == "reference_validation_not_passed"
+            {
                 let fallbackOptions = SpeechRailRequestOptions(
                     expectedVoiceRevision: Self.sanitizedVoiceRevisionHeader(rawVoiceRev),
                     expectedModelRevision: Self.sanitizedModelRevisionHeader(rawModelRev),
@@ -184,7 +185,13 @@ public enum AudiobookProductionWiring {
             _ request: AudiobookLeadVoiceCreationRequest
         ) async throws -> AudiobookLeadVoiceCreationOutput {
             if let snapshot = try? await fetchEffectiveCapabilities(),
-               let existing = snapshot.voices.first(where: { $0.id == request.targetVoiceID && $0.available })
+               let existing = snapshot.voices.first(where: {
+                   $0.id == request.targetVoiceID
+                       && $0.available
+                       && ($0.productionReady != false
+                           || $0.productionReadyReason == "reference_validation_not_passed"
+                           || $0.productionReadyReason == "model_runtime_identity_unknown")
+               })
             {
                 let slotModelRev = SpeechRailCapabilityRevisionSelector.ttsArtifactSlot(forVoiceMode: existing.mode)
                     .flatMap { snapshot.models[$0]?.catalogRevision }

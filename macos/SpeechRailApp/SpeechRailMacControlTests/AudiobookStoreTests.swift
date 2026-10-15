@@ -181,20 +181,47 @@ final class AudiobookStoreTests: XCTestCase {
         let fixture = try await makeChapterEditFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
 
-        let pausedPreview = try AudiobookTXTImporter.prepare(
-            rawData: Data("第1章 雾港\n船灯渐远。\n".utf8),
-            suggestedTitle: "已暂停书"
-        )
-        let pausedBookID = try await fixture.store.importBook(pausedPreview)
+        func importBook(title: String) async throws -> UUID {
+            let preview = try AudiobookTXTImporter.prepare(
+                rawData: Data("第1章 雾港\n船灯渐远。\n".utf8),
+                suggestedTitle: title
+            )
+            return try await fixture.store.importBook(preview)
+        }
+
+        let activeBookID = try await importBook(title: "启动后已更新的制作任务")
+        let pausedBookID = try await importBook(title: "已暂停书")
+        let completedBookID = try await importBook(title: "已完成书")
+        let analysisBookID = try await importBook(title: "遗留分析任务")
 
         var interruptedBook = try await fixture.store.book(id: fixture.bookID)
         interruptedBook.productionState = .running
         try await fixture.store.updateBook(interruptedBook)
+        var liveBookBeforeOpen = try await fixture.store.book(id: activeBookID)
+        liveBookBeforeOpen.productionState = .running
+        try await fixture.store.updateBook(liveBookBeforeOpen)
         var alreadyPausedBook = try await fixture.store.book(id: pausedBookID)
         alreadyPausedBook.productionState = .paused
         try await fixture.store.updateBook(alreadyPausedBook)
+        var completedBook = try await fixture.store.book(id: completedBookID)
+        completedBook.productionState = .fullBookProduced
+        completedBook.listenableState = .fullBookListenable
+        try await fixture.store.updateBook(completedBook)
+        var interruptedAnalysis = try await fixture.store.book(id: analysisBookID)
+        interruptedAnalysis.analysisState = .running
+        try await fixture.store.updateBook(interruptedAnalysis)
 
         let reopenedStore = try AudiobookProjectStore(root: fixture.root)
+
+        // A same-actor update after initialization identifies a live run, even before first recovery.
+        var liveRun = try await reopenedStore.book(id: activeBookID)
+        let startupUpdatedAt = liveRun.updatedAt
+        liveRun.productionState = .running
+        try await reopenedStore.updateBook(liveRun)
+        let refreshedLiveRun = try await reopenedStore.book(id: activeBookID)
+        XCTAssertNotEqual(refreshedLiveRun.updatedAt, startupUpdatedAt,
+                          "夹具必须确认首次恢复前的本实例活动写入已更新启动快照时间戳")
+
         _ = try await reopenedStore.recover()
 
         let recoveredInterruptedBook = try await reopenedStore.book(id: fixture.bookID)
@@ -203,6 +230,16 @@ final class AudiobookStoreTests: XCTestCase {
         let recoveredAlreadyPausedBook = try await reopenedStore.book(id: pausedBookID)
         XCTAssertEqual(recoveredAlreadyPausedBook.productionState, .paused,
                        "恢复不能改写本来已暂停的书籍")
+        let recoveredCompletedBook = try await reopenedStore.book(id: completedBookID)
+        XCTAssertEqual(recoveredCompletedBook.productionState, .fullBookProduced,
+                       "恢复不能把已完成的制作误判为崩溃任务")
+        XCTAssertEqual(recoveredCompletedBook.listenableState, .fullBookListenable)
+        let recoveredInterruptedAnalysis = try await reopenedStore.book(id: analysisBookID)
+        XCTAssertEqual(recoveredInterruptedAnalysis.analysisState, .paused,
+                       "新 Store 首次恢复应把上进程遗留的全书分析任务安全暂停")
+        let recoveredLiveRun = try await reopenedStore.book(id: activeBookID)
+        XCTAssertEqual(recoveredLiveRun.productionState, .running,
+                       "首次恢复不能暂停 Store 初始化后已更新的活动制作任务")
 
         // Same Store actor's later shelf refresh/recovery must not mistake an active run for a crash.
         var activeBook = try await reopenedStore.book(id: fixture.bookID)
@@ -245,6 +282,141 @@ final class AudiobookStoreTests: XCTestCase {
                        "旁白章节关联必须写入持久化数据")
         let updatedBook = try await reopenedStore.book(id: fixture.bookID)
         XCTAssertEqual(updatedBook.analysisState, .notStarted)
+    }
+
+    func testSaveCharactersPreservesBindingsForRetainedRolesAndRemovesDeletedRoles() async throws {
+        let fixture = try await makeChapterEditFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let retainedRole = AudiobookCharacter(
+            bookID: fixture.bookID,
+            displayName: "林远",
+            isNarrator: false,
+            isMajor: true,
+            chapterIDs: [fixture.chapter.id]
+        )
+        let removedRole = AudiobookCharacter(
+            bookID: fixture.bookID,
+            displayName: "顾南",
+            isNarrator: false,
+            isMajor: true,
+            chapterIDs: [fixture.chapter.id]
+        )
+        try await fixture.store.saveCharacters(bookID: fixture.bookID, characters: [retainedRole, removedRole])
+
+        let narratorBinding = AudiobookVoiceBinding(
+            roleID: retainedRole.id,
+            voiceID: "v-narrator-retained",
+            voiceRevision: "narrator-r1",
+            modelRevision: "model-r1"
+        )
+        let removedRoleBinding = AudiobookVoiceBinding(
+            roleID: removedRole.id,
+            voiceID: "v-hero-removed",
+            voiceRevision: "hero-r1",
+            modelRevision: "model-r1"
+        )
+        try await fixture.store.saveVoiceBinding(bookID: fixture.bookID, binding: narratorBinding)
+        try await fixture.store.saveVoiceBinding(bookID: fixture.bookID, binding: removedRoleBinding)
+
+        let foreignRole = AudiobookCharacter(
+            bookID: UUID(),
+            displayName: "外书角色",
+            isNarrator: false
+        )
+        let duplicateRole = AudiobookCharacter(
+            id: retainedRole.id,
+            bookID: fixture.bookID,
+            displayName: "重复编号角色",
+            isNarrator: false
+        )
+        let charactersBeforeInvalidSaves = try await fixture.store.characters(for: fixture.bookID)
+        let bindingsBeforeInvalidSaves = try await fixture.store.voiceBindings(for: fixture.bookID)
+        for invalidCharacters in [[retainedRole, foreignRole], [retainedRole, duplicateRole]] {
+            var rejectionMessage: String?
+            do {
+                try await fixture.store.saveCharacters(bookID: fixture.bookID, characters: invalidCharacters)
+            } catch {
+                rejectionMessage = error.localizedDescription
+            }
+            XCTAssertNotNil(rejectionMessage, "跨书或重复编号的角色列表必须被拒绝")
+            let savedCharacters = try await fixture.store.characters(for: fixture.bookID)
+            let savedBindings = try await fixture.store.voiceBindings(for: fixture.bookID)
+            XCTAssertEqual(savedCharacters, charactersBeforeInvalidSaves, "拒绝无效角色列表后原角色数据不得变化")
+            XCTAssertEqual(savedBindings, bindingsBeforeInvalidSaves, "拒绝无效角色列表后音色绑定不得变化")
+        }
+
+        let updatedRetainedRole = AudiobookCharacter(
+            id: retainedRole.id,
+            bookID: retainedRole.bookID,
+            displayName: "更新后的角色",
+            aliases: retainedRole.aliases,
+            isNarrator: true,
+            isMajor: false,
+            allowSharedMinorVoice: true,
+            evidences: retainedRole.evidences,
+            firstAppearanceRange: retainedRole.firstAppearanceRange,
+            chapterIDs: retainedRole.chapterIDs
+        )
+        try await fixture.store.saveCharacters(bookID: fixture.bookID, characters: [updatedRetainedRole])
+
+        let reopenedStore = try AudiobookProjectStore(root: fixture.root)
+        let savedCharacters = try await reopenedStore.characters(for: fixture.bookID)
+        XCTAssertEqual(savedCharacters, [updatedRetainedRole], "保留角色的显示名与旁白属性更新必须持久化，已删除角色应消失")
+
+        let savedBindings = try await reopenedStore.voiceBindings(for: fixture.bookID)
+        XCTAssertEqual(savedBindings[retainedRole.id], narratorBinding, "保留角色的音色绑定不能因同步角色列表而丢失")
+        XCTAssertNil(savedBindings[removedRole.id], "已删除角色的音色绑定应随角色移除")
+    }
+
+    func testUpdateChaptersRejectsForeignBookAndSourceIdentityWithoutMutation() async throws {
+        let fixture = try await makeChapterEditFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let originalChapter = fixture.chapter
+        let invalidChapters = [
+            AudiobookChapter(
+                id: originalChapter.id,
+                bookID: UUID(),
+                sourceID: originalChapter.sourceID,
+                ordinal: originalChapter.ordinal,
+                title: "跨书章节",
+                sourceRange: originalChapter.sourceRange,
+                excludedRanges: originalChapter.excludedRanges
+            ),
+            AudiobookChapter(
+                id: originalChapter.id,
+                bookID: fixture.bookID,
+                sourceID: UUID(),
+                ordinal: originalChapter.ordinal,
+                title: "跨正文章节",
+                sourceRange: originalChapter.sourceRange,
+                excludedRanges: originalChapter.excludedRanges
+            ),
+        ]
+        let beforeBook = try await fixture.store.book(id: fixture.bookID)
+        let beforeChapters = try await fixture.store.chapters(for: fixture.bookID)
+        let beforeAtoms = try await fixture.store.atoms(for: fixture.bookID)
+        let beforeCharacters = try await fixture.store.characters(for: fixture.bookID)
+
+        for invalidChapter in invalidChapters {
+            var rejectionMessage: String?
+            do {
+                try await fixture.store.updateChapters(bookID: fixture.bookID, chapters: [invalidChapter])
+            } catch {
+                rejectionMessage = error.localizedDescription
+            }
+            XCTAssertTrue(rejectionMessage?.contains("章节") == true,
+                          "跨书或跨正文章节必须以中文错误拒绝；实际：\(rejectionMessage ?? "未拒绝")")
+            let afterBook = try await fixture.store.book(id: fixture.bookID)
+            let afterChapters = try await fixture.store.chapters(for: fixture.bookID)
+            let afterAtoms = try await fixture.store.atoms(for: fixture.bookID)
+            let afterCharacters = try await fixture.store.characters(for: fixture.bookID)
+            XCTAssertEqual(afterBook, beforeBook)
+            XCTAssertEqual(afterChapters, beforeChapters)
+            XCTAssertEqual(afterAtoms, beforeAtoms)
+            XCTAssertEqual(afterCharacters, beforeCharacters)
+        }
     }
 
     func testUpdateChaptersRejectsBooksWhoseAnalysisHasStartedWithoutChangingData() async throws {

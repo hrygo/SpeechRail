@@ -361,13 +361,20 @@ final class AudiobookProductionTests: XCTestCase {
         let admission = SpeechCreationAdmission()
         let renderer = ScriptedSpeechRenderer(capabilities: makeDefaultCapabilities())
         let clock = FakeAudiobookClock()
+        let candidateCommitted = AsyncGate()
+        let allowCommitToReturn = AsyncGate()
         let production = AudiobookProductionController(
             store: store,
             castController: castController,
             revisionController: revisionController,
             renderer: renderer,
             admission: admission,
-            clock: clock
+            clock: clock,
+            candidateCommitter: { candidate, wav in
+                try await store.commitCandidate(candidate, wav: wav)
+                await candidateCommitted.open()
+                await allowCommitToReturn.wait()
+            }
         )
 
         let text = "第一章 暂停测试\n第一段旁白。\n“第二段主角说话。”\n"
@@ -405,10 +412,15 @@ final class AudiobookProductionTests: XCTestCase {
         try await castController.confirmAudition(bookID: bookID, voiceSetDigest: voiceDigest)
 
         renderer.onRenderStart = { _ in
+            let cancellationReceived = AsyncGate()
             Task {
                 await production.pause()
             }
-            try? await Task.sleep(nanoseconds: 20_000_000)
+            await withTaskCancellationHandler {
+                await cancellationReceived.wait()
+            } onCancel: {
+                Task { await cancellationReceived.open() }
+            }
         }
 
         do {
@@ -434,6 +446,35 @@ final class AudiobookProductionTests: XCTestCase {
         let chapterAfterRepairPause = try await store.chapters(for: bookID)[0]
         XCTAssertTrue(candidatesAfterRepairPause.isEmpty)
         XCTAssertNil(chapterAfterRepairPause.currentChapterRevisionID)
+        XCTAssertFalse(admission.isBusy)
+
+        // Pause after a real durable commit has succeeded, before its await returns.
+        // The candidate is a valid recovery boundary; the old run must not report completion.
+        renderer.onRenderStart = nil
+        let repairTask = Task {
+            do {
+                try await production.regenerateFragment(bookID: bookID, chapterID: chapter.id, fragmentID: fragment.id)
+            } catch {
+                await candidateCommitted.open()
+                throw error
+            }
+            await candidateCommitted.open()
+        }
+        await candidateCommitted.wait()
+        await production.pause()
+        await allowCommitToReturn.open()
+        do {
+            try await repairTask.value
+            XCTFail("提交期间暂停后，旧重录任务不能继续报告完成")
+        } catch let error as AudiobookProductionError {
+            XCTAssertEqual(error, .cancelled)
+        }
+        let committedCandidates = try await store.candidates(for: bookID)
+        let bookAfterCommitPause = try await store.book(id: bookID)
+        let chapterAfterCommitPause = try await store.chapters(for: bookID)[0]
+        XCTAssertEqual(committedCandidates.count, 1, "已提交的有效候选应保留供恢复和试听")
+        XCTAssertEqual(bookAfterCommitPause.productionState, .paused)
+        XCTAssertNil(chapterAfterCommitPause.currentChapterRevisionID)
         XCTAssertFalse(admission.isBusy)
     }
 

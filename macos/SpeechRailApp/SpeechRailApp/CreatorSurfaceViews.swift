@@ -385,6 +385,9 @@ private struct DubbingDeskComposerView: View {
                 .buttonStyle(.borderless)
                 .padding(SpeechRailDesignTokens.Spacing.xs)
             }
+            .task {
+                await model.refreshCreatorVoices()
+            }
         }
     }
 
@@ -908,10 +911,11 @@ private struct DubbingDeskComposerView: View {
     }
 
     private var availableVoices: [CreatorVoice] {
-        let active = model.creatorVoices.filter {
-            $0.available && VoiceCatalogStore.shared.isVoiceActiveForBook(voiceID: $0.id, currentBookID: nil)
+        let metadataMap = VoiceCatalogStore.shared.metadataByVoiceID
+        let nonArchived = model.creatorVoices.filter {
+            $0.available && metadataMap[$0.id]?.scope != .archived
         }
-        return active.isEmpty ? model.creatorVoices.filter(\.available) : active
+        return nonArchived.isEmpty ? model.creatorVoices.filter(\.available) : nonArchived
     }
 
     private var selectedVoice: CreatorVoice? {

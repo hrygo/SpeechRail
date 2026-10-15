@@ -72,6 +72,14 @@ public struct AudiobookBookWorkspaceView: View {
                     chapterRenameTarget = nil
                 }
             }
+            .onChange(of: workflow.isCreatingLeadExclusiveVoices) { wasCreating, isCreating in
+                if wasCreating && !isCreating {
+                    Task {
+                        await appModel.engine.refreshDiscovery()
+                        _ = await appModel.refreshCreatorVoices()
+                    }
+                }
+            }
         }
     }
 

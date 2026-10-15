@@ -624,6 +624,19 @@ public actor AudiobookProductionController {
                     reason: voice.availabilityReason.rawValue
                 )
             }
+            if voice.productionReady == false {
+                let reason = voice.productionReadyReason ?? voice.availabilityReason.rawValue
+                let nonBlockingReasons: Set<String> = [
+                    "reference_validation_not_passed",
+                    "model_runtime_identity_unknown"
+                ]
+                if !nonBlockingReasons.contains(reason) {
+                    throw AudiobookProductionError.capabilityVoiceUnavailable(
+                        voiceID: binding.voiceID,
+                        reason: reason
+                    )
+                }
+            }
             if let actualVoiceRev = voice.voiceRevision,
                binding.voiceRevision != "v1",
                actualVoiceRev != binding.voiceRevision

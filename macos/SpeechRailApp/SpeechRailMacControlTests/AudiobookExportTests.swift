@@ -267,6 +267,20 @@ final class AudiobookExportTests: XCTestCase {
         }
     }
 
+    private actor PrepareVerificationGate {
+        let entered = AsyncGate()
+        let released = AsyncGate()
+        private(set) var requestID: UUID?
+        private(set) var stageURL: URL?
+
+        func waitInVerification(url: URL, requestID: UUID) async {
+            self.requestID = requestID
+            stageURL = url.deletingLastPathComponent()
+            await entered.open()
+            await released.wait()
+        }
+    }
+
     private func makePlayableAACFile(frameCount: AVAudioFrameCount, name: String) throws -> URL {
         let sampleRate = 48_000.0
         let format = try XCTUnwrap(
@@ -349,7 +363,17 @@ final class AudiobookExportTests: XCTestCase {
         _ chapters: [(title: String, frameCount: Int64)]
     ) async throws -> URL {
         let sampleRate: Int32 = 48_000
-        let totalFrameCount = chapters.reduce(Int64(0)) { $0 + $1.frameCount }
+        var totalFrameCount: Int64 = 0
+        for chapter in chapters {
+            guard chapter.frameCount > 0 else {
+                throw NSError(domain: "AudiobookExportTests", code: 3)
+            }
+            let (updatedTotal, overflow) = totalFrameCount.addingReportingOverflow(chapter.frameCount)
+            guard !overflow else {
+                throw NSError(domain: "AudiobookExportTests", code: 2)
+            }
+            totalFrameCount = updatedTotal
+        }
         guard totalFrameCount > 0, totalFrameCount <= Int64(AVAudioFrameCount.max) else {
             throw NSError(domain: "AudiobookExportTests", code: 2)
         }
@@ -357,69 +381,74 @@ final class AudiobookExportTests: XCTestCase {
             frameCount: AVAudioFrameCount(totalFrameCount),
             name: "chaptered-source"
         )
-        let sourceAsset = AVURLAsset(url: sourceURL)
-        let sourceTracks = try await sourceAsset.loadTracks(withMediaType: .audio)
-        let sourceTrack = try XCTUnwrap(sourceTracks.first)
-        let audioDescriptions = try await sourceTrack.load(.formatDescriptions)
-        let audioFormat = try XCTUnwrap(audioDescriptions.first)
-
-        var cursorFrame: Int64 = 0
-        let groups = try chapters.map { chapter -> AVTimedMetadataGroup in
-            guard chapter.frameCount > 0 else {
-                throw NSError(domain: "AudiobookExportTests", code: 3)
+        guard let searchPath = ProcessInfo.processInfo.environment["PATH"] else {
+            throw XCTSkip("PATH 未配置，跳过依赖 ffmpeg 的合成章节夹具。")
+        }
+        let ffmpegURL = searchPath
+            .split(separator: ":", omittingEmptySubsequences: false)
+            .map { component in
+                URL(fileURLWithPath: component.isEmpty ? "." : String(component))
+                    .appendingPathComponent("ffmpeg", isDirectory: false)
             }
-            let title = AVMutableMetadataItem()
-            title.identifier = .commonIdentifierTitle
-            title.value = chapter.title as NSString
-            title.extendedLanguageTag = "und"
-            let range = CMTimeRange(
-                start: CMTime(value: cursorFrame, timescale: sampleRate),
-                duration: CMTime(value: chapter.frameCount, timescale: sampleRate)
-            )
-            cursorFrame += chapter.frameCount
-            return AVTimedMetadataGroup(items: [title], timeRange: range)
-        }
-        let metadataFormat = try XCTUnwrap(groups.first?.copyFormatDescription())
-
-        let reader = try AVAssetReader(asset: sourceAsset)
-        let readerOutput = AVAssetReaderTrackOutput(track: sourceTrack, outputSettings: nil)
-        let sampleProvider = reader.outputProvider(for: readerOutput)
-
-        let mp4URL = tempRoot.appendingPathComponent("chaptered-output.mp4")
-        let writer = try AVAssetWriter(outputURL: mp4URL, fileType: .mp4)
-        let audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: nil, sourceFormatHint: audioFormat)
-        let metadataInput = AVAssetWriterInput(
-            mediaType: .metadata,
-            outputSettings: nil,
-            sourceFormatHint: metadataFormat
-        )
-        let chapterListAssociation = AVAssetTrack.AssociationType.chapterList.rawValue
-        guard audioInput.canAddTrackAssociation(withTrackOf: metadataInput, type: chapterListAssociation) else {
-            throw NSError(domain: "AudiobookExportTests", code: 4)
-        }
-        audioInput.addTrackAssociation(withTrackOf: metadataInput, type: chapterListAssociation)
-
-        let audioReceiver = writer.inputReceiver(for: audioInput)
-        let metadataReceiver = writer.inputMetadataReceiver(for: metadataInput)
-        try writer.start()
-        writer.startSession(atSourceTime: .zero)
-        try reader.start()
-
-        for group in groups {
-            try await metadataReceiver.append(group)
-        }
-        metadataReceiver.finish()
-        while let sample = try await sampleProvider.next() {
-            try await audioReceiver.append(sample)
-        }
-        audioReceiver.finish()
-        await writer.finishWriting()
-        guard writer.status == .completed else {
-            throw writer.error ?? NSError(domain: "AudiobookExportTests", code: 5)
+            .first { FileManager.default.isExecutableFile(atPath: $0.path) }
+        guard let ffmpegURL else {
+            throw XCTSkip("PATH 中未找到可执行的 ffmpeg；未下载工具，跳过合成章节夹具。")
         }
 
+        func escapeFFMetadataValue(_ value: String) -> String {
+            let normalized = value
+                .replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n")
+            var escaped = normalized.replacingOccurrences(of: "\\", with: "\\\\")
+            for character in ["=", ";", "#"] {
+                escaped = escaped.replacingOccurrences(of: character, with: "\\" + character)
+            }
+            return escaped.replacingOccurrences(of: "\n", with: "\\\n")
+        }
+
+        var metadataLines = [";FFMETADATA1"]
+        var cursorFrame: Int64 = 0
+        for chapter in chapters {
+            let (endFrame, overflow) = cursorFrame.addingReportingOverflow(chapter.frameCount)
+            guard !overflow else {
+                throw NSError(domain: "AudiobookExportTests", code: 2)
+            }
+            metadataLines.append(contentsOf: [
+                "[CHAPTER]",
+                "TIMEBASE=1/\(sampleRate)",
+                "START=\(cursorFrame)",
+                "END=\(endFrame)",
+                "title=\(escapeFFMetadataValue(chapter.title))"
+            ])
+            cursorFrame = endFrame
+        }
+
+        let metadataURL = tempRoot.appendingPathComponent("chaptered-source.ffmetadata")
+        try Data((metadataLines.joined(separator: "\n") + "\n").utf8).write(to: metadataURL, options: .atomic)
         let m4bURL = tempRoot.appendingPathComponent("chaptered-output.m4b")
-        try FileManager.default.moveItem(at: mp4URL, to: m4bURL)
+        let process = Process()
+        process.executableURL = ffmpegURL
+        process.arguments = [
+            "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+            "-i", sourceURL.path,
+            "-f", "ffmetadata", "-i", metadataURL.path,
+            "-map", "0:a:0", "-map_chapters", "1",
+            "-c:a", "copy",
+            "-movflags", "+faststart+disable_chpl",
+            m4bURL.path
+        ]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw NSError(
+                domain: "AudiobookExportTests",
+                code: 5,
+                userInfo: [NSLocalizedDescriptionKey: "ffmpeg 无法生成合成章节 M4B（退出码 \(process.terminationStatus)）。"]
+            )
+        }
         return m4bURL
     }
 
@@ -634,6 +663,77 @@ final class AudiobookExportTests: XCTestCase {
                 expectedFrameCount: 48_000
             )
         )
+    }
+
+    func testCancellationDuringPrepareVerificationRejectsPreparedAndCleansStage() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let castController = AudiobookCastController(store: store)
+        let revisionController = AudiobookRevisionController(store: store)
+        let fixture = try await makeTwoChapterExportFixture(
+            store: store,
+            revisionController: revisionController,
+            completeSecondChapter: true
+        )
+        for cancelTask in [false, true] {
+            let gate = PrepareVerificationGate()
+            let controller = AudiobookExportController(
+                store: store,
+                castController: castController,
+                revisionController: revisionController,
+                customStageEncoder: Self.fakeStageEncoder,
+                mediaVerifier: { url, expected in
+                    let verification = try Self.makeFakeMediaVerification(url: url, expected: expected)
+                    await gate.waitInVerification(url: url, requestID: expected.requestID)
+                    return verification
+                }
+            )
+            let task = Task {
+                try await controller.prepare(bookID: fixture.bookID, chapterIDs: nil, profile: .m4b)
+            }
+            await gate.entered.wait()
+            let requestID = await gate.requestID
+            if cancelTask {
+                task.cancel()
+            } else if let requestID {
+                await controller.cancel(requestID: requestID)
+            } else {
+                XCTFail("校验器必须收到导出请求编号")
+            }
+            await gate.released.open()
+            do {
+                _ = try await task.value
+                XCTFail("媒体校验期间取消后不能返回已准备好的导出")
+            } catch let error as AudiobookExportError {
+                XCTAssertEqual(error, .exportCancelled)
+            }
+            let stageURL = await gate.stageURL
+            XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(stageURL).path))
+        }
+    }
+
+    func testPrepareMapsVerifierCancellationToExportCancelled() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let revisionController = AudiobookRevisionController(store: store)
+        let controller = AudiobookExportController(
+            store: store,
+            castController: AudiobookCastController(store: store),
+            revisionController: revisionController,
+            customStageEncoder: Self.fakeStageEncoder,
+            mediaVerifier: { _, _ in throw CancellationError() }
+        )
+        let fixture = try await makeTwoChapterExportFixture(
+            store: store,
+            revisionController: revisionController,
+            completeSecondChapter: true
+        )
+        do {
+            _ = try await controller.prepare(bookID: fixture.bookID, chapterIDs: nil, profile: .m4b)
+            XCTFail("校验器取消必须停止准备导出")
+        } catch let error as AudiobookExportError {
+            XCTAssertEqual(error, .exportCancelled)
+        } catch {
+            XCTFail("应返回稳定的导出取消错误，实际：\(type(of: error))")
+        }
     }
 
     func testCancellationDuringCommitVerificationDoesNotInstallDestination() async throws {

@@ -104,7 +104,7 @@ def test_warn_reference_with_passed_output_validation_is_production_ready():
         validation_binding=binding, binding_required=True,
     )
     assert verdict.production_ready
-    assert verdict.production_ready_reason is None
+    assert verdict.production_ready_reason == "validated"
 
 
 def test_execution_gate_does_not_import_the_discovery_presenter():

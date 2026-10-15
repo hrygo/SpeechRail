@@ -736,6 +736,7 @@ final class AudiobookWorkflowTests: XCTestCase {
 
     func testAnalyzedChapterLayoutUpdateIsRejectedWithoutDestroyingAnnotations() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, _) = makeWorkflow(store: store)
         let text = "第一章 雾港\n海雾漫过栈桥。\n灯塔亮了。\n"
         let url = tempRoot.appendingPathComponent("analyzed_chapter_edit.txt")
         try Data(text.utf8).write(to: url)
@@ -760,6 +761,14 @@ final class AudiobookWorkflowTests: XCTestCase {
         var analyzedBook = try await store.book(id: bookID)
         analyzedBook.analysisState = .allWindowsValidated
         try await store.updateBook(analyzedBook)
+        await workflow.openBook(bookID)
+        XCTAssertFalse(workflow.canEditChapterStructure,
+                       "分析完成后工作流也应关闭拆分/合并入口")
+        workflow.selectedAtomIDs = [atom.id]
+        XCTAssertFalse(workflow.canSplitSelectedChapterBeforeSelectedAtom)
+        XCTAssertFalse(workflow.canMergeSelectedChapterWithPrevious)
+        XCTAssertTrue(workflow.canRenameSelectedChapter,
+                      "重命名只改标题，分析完成后仍可用")
 
         var editedChapters = try await store.chapters(for: bookID)
         editedChapters[0].title = "改名后的章节"
@@ -780,6 +789,61 @@ final class AudiobookWorkflowTests: XCTestCase {
         XCTAssertEqual(bookAfter.analysisState, .allWindowsValidated)
     }
 
+    func testWorkflowChapterSplitMergeKeepsSelectionAndCanonicalSource() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, _) = makeWorkflow(store: store)
+        let text = "开场第一段。\n继续第二段。\n最后第三段。"
+        let imported = try await importBook(
+            into: workflow,
+            fileName: "workflow_chapter_edits.txt",
+            text: text
+        )
+        let originalChapterID = try XCTUnwrap(imported.chapterIDs.first)
+        let originalChapter = try XCTUnwrap(workflow.chapters.first(where: { $0.id == originalChapterID }))
+        let sourceBefore = try await store.sourceIndex(for: imported.bookID)
+        let sourceTextBefore = try sourceBefore.text(in: sourceBefore.wholeRange)
+
+        XCTAssertTrue(workflow.canEditChapterStructure)
+        XCTAssertFalse(workflow.canMergeSelectedChapterWithPrevious)
+        let splitAtom = try XCTUnwrap(workflow.chapterAtoms.first(where: {
+            $0.kind != .formatting && $0.sourceRange.lowerBound > originalChapter.sourceRange.lowerBound
+        }))
+        workflow.selectedAtomIDs = [splitAtom.id]
+        XCTAssertTrue(workflow.canSplitSelectedChapterBeforeSelectedAtom,
+                      "选中一段章节中间的原文后，菜单应开放拆分")
+
+        await workflow.splitSelectedChapterBeforeSelectedAtom()
+
+        let splitChapters = try await store.chapters(for: imported.bookID)
+        let splitSelection = try XCTUnwrap(workflow.selectedChapterID)
+        XCTAssertEqual(splitChapters.count, 2)
+        XCTAssertEqual(splitSelection, splitChapters.last?.id,
+                       "拆分后工作台应定位到新章节，而不是沿用旧章节投影")
+        XCTAssertTrue(workflow.canMergeSelectedChapterWithPrevious)
+        let sourceAfterSplit = try await store.sourceIndex(for: imported.bookID)
+        XCTAssertEqual(try sourceAfterSplit.text(in: sourceAfterSplit.wholeRange), sourceTextBefore,
+                       "拆分只调整章节目录，规范化原文必须保持逐字不变")
+
+        await workflow.mergeSelectedChapterWithPrevious()
+
+        let mergedChapters = try await store.chapters(for: imported.bookID)
+        let mergedChapter = try XCTUnwrap(mergedChapters.first)
+        XCTAssertEqual(mergedChapters.count, 1)
+        XCTAssertEqual(mergedChapter.id, originalChapterID,
+                       "合并后保留上一章身份，避免章节选择跳到失效 ID")
+        XCTAssertEqual(workflow.selectedChapterID, originalChapterID)
+        let sourceAfterMerge = try await store.sourceIndex(for: imported.bookID)
+        XCTAssertEqual(try sourceAfterMerge.text(in: sourceAfterMerge.wholeRange), sourceTextBefore,
+                       "合并不能覆盖规范化原文")
+
+        await workflow.renameChapter(chapterID: originalChapterID, title: "整理后的章节")
+        let renamedChapters = try await store.chapters(for: imported.bookID)
+        XCTAssertEqual(renamedChapters.first?.title, "整理后的章节")
+        let sourceAfterRename = try await store.sourceIndex(for: imported.bookID)
+        XCTAssertEqual(try sourceAfterRename.text(in: sourceAfterRename.wholeRange), sourceTextBefore,
+                       "重命名不能改写规范化原文")
+    }
+
     func testSingleFragmentRerecordKeepsCurrentRevisionUntilExplicitAdoption() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
         let (workflow, _) = makeWorkflow(store: store)
@@ -790,6 +854,30 @@ final class AudiobookWorkflowTests: XCTestCase {
         )
         try await markBookReadyForProduction(imported.bookID, workflow: workflow, store: store)
         let chapterID = try XCTUnwrap(imported.chapterIDs.first)
+        let chapterForPlanning = try XCTUnwrap(workflow.chapters.first(where: { $0.id == chapterID }))
+        let sourceForPlanning = try await store.sourceIndex(for: imported.bookID)
+        let atomsForPlanning = try await store.atoms(for: imported.bookID, chapterID: chapterID)
+        let annotationsForPlanning = try await store.annotations(for: imported.bookID, chapterID: chapterID)
+        let bindingsForPlanning = try await store.voiceBindings(for: imported.bookID)
+        let plannedFragments = try AudiobookFragmentPlanner.plan(
+            chapter: chapterForPlanning,
+            annotations: annotationsForPlanning,
+            bindings: bindingsForPlanning,
+            policy: .standard,
+            source: sourceForPlanning,
+            atoms: atomsForPlanning
+        )
+        try await store.saveFragments(bookID: imported.bookID, chapterID: chapterID, fragments: plannedFragments)
+        await workflow.openBook(imported.bookID)
+        let fragmentBeforeFirstProduction = try XCTUnwrap(workflow.chapterFragments.first)
+        let candidatesBeforeFirstProduction = try await store.candidates(for: imported.bookID)
+        XCTAssertFalse(workflow.canRegenerateFragment(fragmentBeforeFirstProduction.id),
+                       "尚无已采用章节版本时不能进入单段重录")
+        workflow.regenerateFragment(fragmentID: fragmentBeforeFirstProduction.id)
+        XCTAssertFalse(workflow.isProducing, "首次制作前的重录操作不得启动生产请求")
+        XCTAssertNil(workflow.productionBookID)
+        let candidatesAfterRejectedRerecord = try await store.candidates(for: imported.bookID)
+        XCTAssertEqual(candidatesAfterRejectedRerecord.map(\.id), candidatesBeforeFirstProduction.map(\.id))
 
         workflow.makeConfirmedChapters(chapterIDs: [chapterID])
         await waitForProductionToFinish(workflow)
@@ -798,7 +886,23 @@ final class AudiobookWorkflowTests: XCTestCase {
         let originalChapter = try XCTUnwrap(initialChapters.first)
         let originalRevisionID = try XCTUnwrap(originalChapter.currentChapterRevisionID)
         let fragment = try XCTUnwrap(workflow.chapterFragments.first)
+        XCTAssertTrue(workflow.canRegenerateFragment(fragment.id),
+                      "首次制作并生成已采用章节版本后才开放单段重录")
         let originalCandidates = try await store.candidates(for: imported.bookID)
+        let originalSource = try await store.sourceIndex(for: imported.bookID)
+        let originalSourceText = try originalSource.text(in: originalSource.wholeRange)
+
+        await workflow.renameChapter(chapterID: chapterID, title: "渡口（修订标题）")
+        let chaptersAfterRename = try await store.chapters(for: imported.bookID)
+        let chapterAfterRename = try XCTUnwrap(chaptersAfterRename.first)
+        XCTAssertEqual(chapterAfterRename.title, "渡口（修订标题）")
+        XCTAssertEqual(chapterAfterRename.currentChapterRevisionID, originalRevisionID,
+                       "有音频后重命名不得改变当前采用版本")
+        let candidatesAfterRename = try await store.candidates(for: imported.bookID)
+        XCTAssertEqual(candidatesAfterRename.map(\.id), originalCandidates.map(\.id),
+                       "重命名不得删除或替换已有音频候选")
+        let sourceAfterRename = try await store.sourceIndex(for: imported.bookID)
+        XCTAssertEqual(try sourceAfterRename.text(in: sourceAfterRename.wholeRange), originalSourceText)
 
         workflow.regenerateFragment(fragmentID: fragment.id)
         await waitForProductionToFinish(workflow)

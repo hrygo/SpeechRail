@@ -88,6 +88,8 @@ public actor AudiobookProjectStore {
     private var cachedSourceIndices: [UUID: (sha256: String, index: AudiobookSourceIndex)] = [:]
     private var cachedCharactersByBook: [UUID: [AudiobookCharacter]] = [:]
     private var cachedAnnotationsByBook: [UUID: [AudiobookAnnotation]] = [:]
+    private var startupRunningBookUpdatedAt: [UUID: Double] = [:]
+    private var didApplyStartupRecovery = false
 
     public static var defaultRootURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -131,6 +133,7 @@ public actor AudiobookProjectStore {
         if existingVersion == 0 {
             try Self.execSQL(pointer, "PRAGMA user_version = \(AudiobookStoreSchema.currentUserVersion);")
         }
+        self.startupRunningBookUpdatedAt = try Self.queryStartupRunningBookUpdatedAt(pointer)
     }
 
     // MARK: - Fault Injection Hooks for Deterministic Tests
@@ -253,6 +256,9 @@ public actor AudiobookProjectStore {
         try inTransaction {
             try upsertBookRow(updated)
         }
+        // A write through this instance is current work, even if the wall clock
+        // happens to produce the same stored timestamp as the startup snapshot.
+        startupRunningBookUpdatedAt.removeValue(forKey: book.id)
     }
 
     public func sourceIndex(for bookID: UUID) async throws -> AudiobookSourceIndex {
@@ -278,6 +284,14 @@ public actor AudiobookProjectStore {
     }
 
     public func updateChapters(bookID: UUID, chapters: [AudiobookChapter]) async throws {
+        let book = try await self.book(id: bookID)
+        guard chapters.allSatisfy({ $0.bookID == bookID && $0.sourceID == book.sourceID }) else {
+            throw AudiobookStoreError.statementFailed("章节归属与当前书籍正文不一致，已拒绝保存。")
+        }
+        guard Set(chapters.map(\.id)).count == chapters.count else {
+            throw AudiobookStoreError.statementFailed("章节结构包含重复编号，已拒绝保存。")
+        }
+
         let source = try await sourceIndex(for: bookID)
         try AudiobookChapterPlanner.validateChapterEdits(chapters, source: source)
 
@@ -287,8 +301,19 @@ public actor AudiobookProjectStore {
         }
 
         try inTransaction {
-            try executePrepared("DELETE FROM analysis_windows WHERE book_id = ?;", [.text(bookID.uuidString)])
-            try executePrepared("DELETE FROM annotations WHERE book_id = ?;", [.text(bookID.uuidString)])
+            guard let currentBook = try fetchBook(id: bookID) else {
+                throw AudiobookStoreError.bookNotFound(bookID)
+            }
+            let hasArtifacts = try hasChapterStructureArtifacts(bookID: bookID)
+            guard currentBook.analysisState == .notStarted, !hasArtifacts else {
+                throw AudiobookStoreError.statementFailed(
+                    "章节结构已开始分析或存在分析、制作记录，不能重建；如需修改名称，请使用章节重命名。"
+                )
+            }
+            guard chapters.allSatisfy({ $0.bookID == bookID && $0.sourceID == currentBook.sourceID }) else {
+                throw AudiobookStoreError.statementFailed("章节归属与当前书籍正文不一致，已拒绝保存。")
+            }
+
             try executePrepared("DELETE FROM text_atoms WHERE book_id = ?;", [.text(bookID.uuidString)])
             try executePrepared("DELETE FROM chapters WHERE book_id = ?;", [.text(bookID.uuidString)])
             for chapter in chapters {
@@ -297,16 +322,40 @@ public actor AudiobookProjectStore {
             for atom in newAtoms {
                 try insertAtomRow(bookID: bookID, atom: atom)
             }
+            if var narrator = try fetchCharacters(bookID: bookID).first(where: \.isNarrator) {
+                narrator.chapterIDs = chapters.map(\.id)
+                try upsertCharacterRow(narrator)
+            }
             try executePrepared(
                 "UPDATE books SET analysis_state = ?, updated_at = ? WHERE id = ?;",
                 [.text(AudiobookAnalysisState.notStarted.rawValue), .real(Date().timeIntervalSince1970), .text(bookID.uuidString)]
             )
         }
+        cachedCharactersByBook.removeValue(forKey: bookID)
         cachedAnnotationsByBook.removeValue(forKey: bookID)
     }
 
     public func renameChapter(bookID: UUID, chapterID: UUID, title: String) async throws {
-        throw AudiobookStoreError.statementFailed("章节重命名暂未实现。")
+        let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedTitle.isEmpty else {
+            throw AudiobookStoreError.statementFailed("章节名称不能为空。")
+        }
+
+        try inTransaction {
+            guard try fetchBook(id: bookID) != nil else {
+                throw AudiobookStoreError.bookNotFound(bookID)
+            }
+            guard try countRows(
+                "SELECT COUNT(*) FROM chapters WHERE book_id = ? AND id = ?;",
+                [.text(bookID.uuidString), .text(chapterID.uuidString)]
+            ) > 0 else {
+                throw AudiobookStoreError.chapterNotFound(chapterID)
+            }
+            try executePrepared(
+                "UPDATE chapters SET title = ? WHERE book_id = ? AND id = ?;",
+                [.text(normalizedTitle), .text(bookID.uuidString), .text(chapterID.uuidString)]
+            )
+        }
     }
 
     public func atoms(for bookID: UUID, chapterID: UUID? = nil) async throws -> [AudiobookTextAtom] {
@@ -323,8 +372,18 @@ public actor AudiobookProjectStore {
     }
 
     public func saveCharacters(bookID: UUID, characters: [AudiobookCharacter]) async throws {
+        let retainedIDs = Set(characters.map(\.id))
+        guard characters.allSatisfy({ $0.bookID == bookID }), retainedIDs.count == characters.count else {
+            throw AudiobookStoreError.statementFailed("角色列表包含其他书籍的角色或重复角色。")
+        }
         try inTransaction {
-            try executePrepared("DELETE FROM characters WHERE book_id = ?;", [.text(bookID.uuidString)])
+            // Retained rows keep their voice bindings; only removed roles cascade-delete theirs.
+            for existing in try fetchCharacters(bookID: bookID) where !retainedIDs.contains(existing.id) {
+                try executePrepared(
+                    "DELETE FROM characters WHERE book_id = ? AND id = ?;",
+                    [.text(bookID.uuidString), .text(existing.id.uuidString)]
+                )
+            }
             for character in characters {
                 try upsertCharacterRow(character)
             }
@@ -608,6 +667,12 @@ public actor AudiobookProjectStore {
     }
 
     public func recover() async throws -> AudiobookRecoveryReport {
+        if !didApplyStartupRecovery {
+            try applyStartupRecovery()
+            didApplyStartupRecovery = true
+            startupRunningBookUpdatedAt.removeAll()
+        }
+
         var verifiedIDs: [UUID] = []
         var recoveredIDs: [UUID] = []
         var quarantinedPaths: [String] = []
@@ -723,6 +788,34 @@ public actor AudiobookProjectStore {
             preservedUnknownRelativePaths: preservedUnknownPaths,
             damagedCandidateIDs: damagedIDs
         )
+    }
+
+    private func applyStartupRecovery() throws {
+        guard !startupRunningBookUpdatedAt.isEmpty else { return }
+
+        try inTransaction {
+            for (bookID, startupUpdatedAt) in startupRunningBookUpdatedAt {
+                guard var book = try fetchBook(id: bookID),
+                      book.updatedAt.timeIntervalSince1970 == startupUpdatedAt
+                else {
+                    continue
+                }
+
+                var changed = false
+                if book.analysisState == .running {
+                    book.analysisState = .paused
+                    changed = true
+                }
+                if book.productionState == .running || book.productionState == .pausing {
+                    book.productionState = .paused
+                    changed = true
+                }
+                guard changed else { continue }
+
+                book.updatedAt = Date()
+                try upsertBookRow(book)
+            }
+        }
     }
 
     public func verifyCandidateAsset(_ candidate: AudiobookRenderCandidate) throws -> Bool {
@@ -976,6 +1069,34 @@ public actor AudiobookProjectStore {
         return sqlite3_column_int(stmt, 0)
     }
 
+    private static func queryStartupRunningBookUpdatedAt(_ pointer: OpaquePointer) throws -> [UUID: Double] {
+        let sql = """
+        SELECT id, updated_at
+        FROM books
+        WHERE analysis_state = '\(AudiobookAnalysisState.running.rawValue)'
+           OR production_state IN ('\(AudiobookProductionState.running.rawValue)', '\(AudiobookProductionState.pausing.rawValue)');
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(pointer, sql, -1, &stmt, nil) == SQLITE_OK,
+              let stmt
+        else {
+            throw AudiobookStoreError.statementFailed(String(cString: sqlite3_errmsg(pointer)))
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        var snapshots: [UUID: Double] = [:]
+        while true {
+            let result = sqlite3_step(stmt)
+            if result == SQLITE_DONE { break }
+            guard result == SQLITE_ROW else {
+                throw AudiobookStoreError.statementFailed(String(cString: sqlite3_errmsg(pointer)))
+            }
+            guard let idString = columnText(stmt, 0), let id = UUID(uuidString: idString) else { continue }
+            snapshots[id] = sqlite3_column_double(stmt, 1)
+        }
+        return snapshots
+    }
+
     private static func execSQL(_ pointer: OpaquePointer, _ sql: String) throws {
         var errMsg: UnsafeMutablePointer<CChar>?
         guard sqlite3_exec(pointer, sql, nil, nil, &errMsg) == SQLITE_OK else {
@@ -1167,6 +1288,7 @@ public actor AudiobookProjectStore {
         ON CONFLICT(book_id, id) DO UPDATE SET
             display_name = excluded.display_name,
             aliases_json = excluded.aliases_json,
+            is_narrator = excluded.is_narrator,
             is_major = excluded.is_major,
             allow_shared_minor_voice = excluded.allow_shared_minor_voice,
             evidences_json = excluded.evidences_json,
@@ -2045,6 +2167,30 @@ public actor AudiobookProjectStore {
             guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
             return Int(sqlite3_column_int64(stmt, 0))
         }
+    }
+
+    private func hasChapterStructureArtifacts(bookID: UUID) throws -> Bool {
+        guard assetJournal.pendingEntries(bookID: bookID).isEmpty else { return true }
+
+        let args: [SQLValue] = [.text(bookID.uuidString)]
+        let checks = [
+            "SELECT COUNT(*) FROM analysis_windows WHERE book_id = ?;",
+            "SELECT COUNT(*) FROM annotations WHERE book_id = ?;",
+            "SELECT COUNT(*) FROM fragments WHERE book_id = ?;",
+            "SELECT COUNT(*) FROM render_candidates WHERE book_id = ?;",
+            "SELECT COUNT(*) FROM chapter_revisions WHERE book_id = ?;",
+            "SELECT COUNT(*) FROM production_revisions WHERE book_id = ?;",
+            "SELECT COUNT(*) FROM bookmarks WHERE book_id = ?;",
+            "SELECT COUNT(*) FROM export_records WHERE book_id = ?;",
+            "SELECT COUNT(*) FROM chapters WHERE book_id = ? AND (current_chapter_revision_id IS NOT NULL OR previous_chapter_revision_id IS NOT NULL);",
+            "SELECT COUNT(*) FROM asset_transactions WHERE book_id = ? AND state != 'quarantined';",
+        ]
+        for sql in checks {
+            if try countRows(sql, args) > 0 {
+                return true
+            }
+        }
+        return false
     }
 
     private func buildSummary(for book: AudiobookBook) throws -> AudiobookBookSummary {
