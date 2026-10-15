@@ -1528,6 +1528,51 @@ public enum AudiobookVoiceArchetype: String, Codable, CaseIterable, Equatable, H
         case .neutralEnsemble: return "特色群像"
         }
     }
+
+    public var shortCode: String {
+        switch self {
+        case .narrator: return "nar"
+        case .youngMale: return "ym"
+        case .matureMale: return "mm"
+        case .youngFemale: return "yf"
+        case .matureFemale: return "mf"
+        case .neutralEnsemble: return "ne"
+        }
+    }
+
+    public func defaultScenarioInstruction(forBookTitle bookTitle: String) -> String {
+        switch self {
+        case .narrator:
+            return "有声书《\(bookTitle)》沉稳旁白声部：35岁成熟叙事者，中音区胸腔共鸣扎实，声音温润通透、吐字清晰从容，语速平稳舒展，具备文学作品的画面感与纵深感；严禁尖锐童音或机械朗读腔，录音室级干声。"
+        case .youngMale:
+            return "有声书《\(bookTitle)》青年男声群像行当：24岁成年青年男性，中音偏清朗，声线干净利落、富有朝气与少年锐气，咬字清晰自然，基频稳定在成年男声区间；严禁儿童稚嫩音，录音室级干声。"
+        case .matureMale:
+            return "有声书《\(bookTitle)》中老年男声群像行当：48岁沉稳中年男性，男中低音浑厚磁性，胸腔共鸣饱满，声线略带岁月沧桑与故事感，语速稳健有力；严禁高亢尖细，录音室级干声。"
+        case .youngFemale:
+            return "有声书《\(bookTitle)》青年女声群像行当：22岁成年青年女性，女中音偏清亮灵动，音色清澈柔和、富有生命力与表现力，气息自然流畅，基频稳定在成年女声区间；严禁刺耳幼童音，录音室级干声。"
+        case .matureFemale:
+            return "有声书《\(bookTitle)》成熟女声群像行当：38岁知性成熟女性，女中音温婉醇厚，声线端庄沉静、圆润有质感，语速从容舒缓，富有情感张力与包容感；录音室级干声。"
+        case .neutralEnsemble:
+            return "有声书《\(bookTitle)》特色与中性群像行当：清澈自然的少年或中性群像声线，中音区干净通透、辨识度高，语气生动自然、吐字轻快明晰，适合演绎书中的少年或特色配角群像；录音室级干声。"
+        }
+    }
+
+    public func defaultScenarioReferenceText(forBookTitle bookTitle: String) -> String {
+        switch self {
+        case .narrator:
+            return "夜色缓缓笼罩着远方的山峦与渡口，微风拂过寂静的街道，一段尘封已久的往事正随着灯火悄然展开。"
+        case .youngMale:
+            return "既然已经走到了这一步，无论前路有多少风雨险阻，我们都必须亲自去闯一闯，绝不半途而废！"
+        case .matureMale:
+            return "这世上的诸多变故，老夫早已见怪不怪了，你们且安心休整，明日天一亮咱们便按计划行事。"
+        case .youngFemale:
+            return "你看那边的星光多亮啊，只要大家还能并肩站在一起，再难熬的寒冬也一定会过去，迎来温暖的春天。"
+        case .matureFemale:
+            return "有些事情急不得，越是风浪大的时候，心里越要稳得住，先把眼前的线索理清楚再做决断也不迟。"
+        case .neutralEnsemble:
+            return "快看那边，远处的船队已经靠岸了，大家赶紧收拾好行囊过去看看，千万别错过了这次难得的机会！"
+        }
+    }
 }
 
 /// 单个角色的全书对白与出场统计投影。
@@ -1693,7 +1738,12 @@ public enum VoiceTaxonomyClassifier {
             [vidLower, label, gender ?? "", age ?? "", description ?? ""] + traits
         ).joined(separator: " ").lowercased()
 
-        // 1. 已知系统预置音色精确映射
+        // 1. 已知系统预置音色与六类群像专属音色 ID 精确映射
+        if vidLower.hasPrefix("ab_arch_") {
+            for arch in AudiobookVoiceArchetype.allCases where vidLower.hasSuffix("_\(arch.shortCode)") {
+                return arch
+            }
+        }
         if vidLower == "v-narrator" {
             return .narrator
         }
@@ -1915,6 +1965,30 @@ public final class VoiceCatalogStore: @unchecked Sendable {
         meta.originBookTitle = bookTitle
         meta.originRoleID = roleID
         meta.originRoleName = roleName
+        meta.archetypeOverride = archetype
+        meta.creationSource = .voiceDesign
+        meta.updatedAt = Date()
+        state.metadataByVoiceID[voiceID] = meta
+        persistLocked()
+        return meta
+    }
+
+    /// 在有声书分析后为六大声部行当自动创建的群像音色，注册为全局可复用且携带原书与声部标记。
+    @discardableResult
+    public func registerArchetypeEnsembleVoice(
+        voiceID: String,
+        bookID: UUID,
+        bookTitle: String?,
+        archetype: AudiobookVoiceArchetype
+    ) -> VoiceAssetMetadata {
+        lock.lock()
+        defer { lock.unlock() }
+        var meta = state.metadataByVoiceID[voiceID] ?? VoiceAssetMetadata(voiceID: voiceID)
+        meta.scope = .globalReusable
+        meta.originBookID = bookID
+        meta.originBookTitle = bookTitle
+        meta.originRoleID = nil
+        meta.originRoleName = archetype.shortBadgeTitle
         meta.archetypeOverride = archetype
         meta.creationSource = .voiceDesign
         meta.updatedAt = Date()

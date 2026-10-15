@@ -154,6 +154,8 @@ public final class AudiobookWorkflowModel {
     public private(set) var chapters: [AudiobookChapter] = []
     private var isSuppressingChapterAutoReload: Bool = false
     private var hasRecoveredOnBootstrap: Bool = false
+    @ObservationIgnored private var storeRecoveryTask: Task<Void, Error>?
+    @ObservationIgnored private var storeRecoveryRequestID: UUID?
     public private(set) var isLoadingChapterDetails: Bool = false
     public var selectedChapterID: UUID? {
         didSet {
@@ -248,9 +250,12 @@ public final class AudiobookWorkflowModel {
     public var showOnlyUnknownAtomsInChapter: Bool = false
     public private(set) var isResolvingUnknownSpeakers: Bool = false
 
-    /// 主要角色专属音色自动/一键生成状态。
+    /// 主要角色专属音色与六类群像音色自动/一键生成状态。
     public private(set) var isCreatingLeadExclusiveVoices: Bool = false
     public private(set) var leadVoiceCreationProgressText: String?
+
+    /// 当前从引擎实时拉取并缓存的全部可用音色目录（含系统预置、克隆音色、六类群像音色与本书专属音色）。
+    public private(set) var catalogVoices: [SafeVoiceEntry] = []
 
     public static let builtInSystemVoiceIDs: Set<String> = [
         "vivian", "serena", "uncle_fu", "ryan", "aiden",
@@ -269,7 +274,9 @@ public final class AudiobookWorkflowModel {
     public private(set) var isProducing: Bool = false
     public private(set) var isPausingProduction: Bool = false
     public private(set) var productionBookID: UUID?
+    public private(set) var productionFragmentID: UUID?
     public private(set) var productionProgress: AudiobookProductionProgress?
+    public private(set) var isEditingChapterLayout: Bool = false
     public private(set) var resumePlan: AudiobookResumePlan?
     public private(set) var exportCapabilities: MediaCapabilitiesSnapshot = .init(
         available: false,
@@ -449,6 +456,93 @@ public final class AudiobookWorkflowModel {
         isProducing || isPausingProduction
     }
 
+    public var canEditChapterStructure: Bool {
+        guard let book = selectedBook,
+              book.analysisState == .notStarted,
+              book.productionState == .idle,
+              book.currentProductionRevisionID == nil,
+              !isAnalyzing,
+              !isProductionBusy,
+              !isEditingChapterLayout,
+              !isLoadingChapterDetails
+        else { return false }
+        return true
+    }
+
+    public var canRenameSelectedChapter: Bool {
+        selectedBook != nil
+            && selectedChapterID.map { id in chapters.contains(where: { $0.id == id }) } == true
+            && !isAnalyzing
+            && !isProductionBusy
+            && !isEditingChapterLayout
+            && !isLoadingChapterDetails
+    }
+
+    public var chapterStructureEditingStatus: String {
+        guard let book = selectedBook else { return "请先打开一本书。" }
+        if isEditingChapterLayout { return "正在保存章节更改…" }
+        if isAnalyzing || book.analysisState != .notStarted {
+            return "全书分析开始后不能拆分或合并章节；请在分析前整理目录。"
+        }
+        if isProductionBusy || book.productionState != .idle || book.currentProductionRevisionID != nil {
+            return "已有制作任务或章节音频，不能调整章节范围；重命名仍会保留现有音频。"
+        }
+        if isLoadingChapterDetails { return "正在读取本章，请稍候。" }
+        return "拆分前先在原文勾选一个中间段落；合并会保留上一章名称。目录调整不会改写原文。"
+    }
+
+    public var canMergeSelectedChapterWithPrevious: Bool {
+        guard canEditChapterStructure,
+              let selectedChapterID,
+              let index = chapters.firstIndex(where: { $0.id == selectedChapterID }),
+              index > chapters.startIndex
+        else { return false }
+        return chapters[index - 1].sourceRange.upperBound == chapters[index].sourceRange.lowerBound
+    }
+
+    public var canSplitSelectedChapterBeforeSelectedAtom: Bool {
+        guard canEditChapterStructure,
+              selectedAtomIDs.count == 1,
+              let selectedChapterID,
+              let chapter = chapters.first(where: { $0.id == selectedChapterID }),
+              let atomID = selectedAtomIDs.first,
+              let atom = chapterAtoms.first(where: { $0.id == atomID }),
+              atom.kind != .formatting
+        else { return false }
+        return atom.sourceRange.lowerBound > chapter.sourceRange.lowerBound
+            && atom.sourceRange.lowerBound < chapter.sourceRange.upperBound
+    }
+
+    public func canRegenerateFragment(_ fragmentID: UUID) -> Bool {
+        guard !isProductionBusy,
+              productionRunID == nil,
+              !isAnalyzing,
+              !isEditingChapterLayout,
+              !isLoadingChapterDetails,
+              let book = selectedBook,
+              book.analysisState == .allWindowsValidated,
+              isAuditionConfirmedForSelectedBook,
+              let selectedChapterID,
+              let selectedChapter = chapters.first(where: { $0.id == selectedChapterID }),
+              selectedChapter.bookID == book.id,
+              selectedChapter.currentChapterRevisionID != nil,
+              let fragment = chapterFragments.first(where: { $0.id == fragmentID }),
+              fragment.bookID == book.id,
+              fragment.chapterID == selectedChapterID,
+              let readiness = chapterReadinessByID[selectedChapterID]
+        else { return false }
+        return readiness != .awaitingGlobalAnalysis
+            && readiness != .awaitingCastConfirmation
+            && readiness != .blockedByUnknownSpeakers
+            && readiness != .producing
+    }
+
+    public func isRegeneratingFragment(_ fragmentID: UUID) -> Bool {
+        isProducing
+            && productionBookID == selectedBook?.id
+            && productionFragmentID == fragmentID
+    }
+
     public func isProductionBlocked(for bookID: UUID) -> Bool {
         isProductionBusy && productionBookID != bookID
     }
@@ -523,18 +617,52 @@ public final class AudiobookWorkflowModel {
 
     // MARK: - Shelf & Import Lifecycle
 
+    private func recoverStoreIfNeeded(_ store: AudiobookProjectStore) async throws {
+        guard !hasRecoveredOnBootstrap else { return }
+
+        let requestID: UUID
+        let task: Task<Void, Error>
+        if let inFlight = storeRecoveryTask, let inFlightID = storeRecoveryRequestID {
+            requestID = inFlightID
+            task = inFlight
+        } else {
+            requestID = UUID()
+            let recoveryTask = Task<Void, Error> {
+                _ = try await store.recover()
+            }
+            storeRecoveryRequestID = requestID
+            storeRecoveryTask = recoveryTask
+            task = recoveryTask
+        }
+
+        do {
+            try await task.value
+            hasRecoveredOnBootstrap = true
+            if storeRecoveryRequestID == requestID {
+                storeRecoveryTask = nil
+                storeRecoveryRequestID = nil
+            }
+        } catch {
+            if storeRecoveryRequestID == requestID {
+                storeRecoveryTask = nil
+                storeRecoveryRequestID = nil
+            }
+            throw error
+        }
+    }
+
     public func refreshShelf() async {
         bootstrapIfPossible()
         guard let store else { return }
         do {
-            if !hasRecoveredOnBootstrap {
-                hasRecoveredOnBootstrap = true
-                _ = try await store.recover()
-            }
+            try await recoverStoreIfNeeded(store)
             shelfBooks = try await store.listBooks()
             trashedBooks = try await store.listTrashedBooks()
             if let exp = exportController {
                 exportCapabilities = await exp.checkCapabilities()
+            }
+            if catalogVoices.isEmpty {
+                _ = await refreshAvailableVoices()
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -616,6 +744,7 @@ public final class AudiobookWorkflowModel {
             selectedAtomIDs.removeAll()
             surfaceMode = .workspace
             workbenchTab = snapshot.workbenchTab
+            _ = await refreshAvailableVoices()
             if mustReloadChapterDetails {
                 await reloadSelectedChapterDetails()
             }
@@ -662,6 +791,10 @@ public final class AudiobookWorkflowModel {
     public func beginAnalysis(_ bookID: UUID? = nil) {
         let targetID = bookID ?? selectedBook?.id
         guard let targetID, let pipeline = analysisPipeline else { return }
+        guard !isEditingChapterLayout else {
+            errorMessage = "正在整理章节目录，请完成后再开始分析。"
+            return
+        }
         analysisTask?.cancel()
         let snapshot = dependencies.resolveAnalysisSnapshot(analysisGeneration)
         isAnalyzing = true
@@ -690,7 +823,9 @@ public final class AudiobookWorkflowModel {
                 self.analysisSummary = summary
                 self.isAnalyzing = false
                 self.stopAnalysisClock()
+                let createdArchetypeVoices = await self.ensureSixArchetypeVoicesForBook(for: targetID, quietBanner: true)
                 let createdLeadVoices = await self.createExclusiveVoicesForLeadCharacters(for: targetID, quietBanner: true)
+                _ = await self.refreshAvailableVoices()
                 await self.autoAssignRecommendedVoices(for: targetID)
                 await self.refreshShelf()
                 if self.selectedBook?.id == targetID {
@@ -702,6 +837,9 @@ public final class AudiobookWorkflowModel {
                 var notes: [String] = ["全书分析已完成（共 \(summary.completedWindows) 个窗口"]
                 if resolvedInSecondPass > 0 {
                     notes.append("AI 二次复核自动消解 \(resolvedInSecondPass) 处疑难对白")
+                }
+                if createdArchetypeVoices > 0 {
+                    notes.append("已补全 \(createdArchetypeVoices) 类小说群像音色")
                 }
                 if createdLeadVoices > 0 {
                     notes.append("已为 \(createdLeadVoices) 名主要角色生成专属音色")
@@ -805,6 +943,43 @@ public final class AudiobookWorkflowModel {
         analysisClockTask = nil
     }
 
+    /// 从后端能力快照刷新当前全部可用音色目录（包含自建/克隆/六类群像/专属音色与系统预置音色）。
+    @discardableResult
+    public func refreshAvailableVoices() async -> [SafeVoiceEntry] {
+        if let fetched = (try? await dependencies.speechRenderer.fetchEffectiveCapabilities())?.voices,
+           !fetched.isEmpty
+        {
+            catalogVoices = fetched.filter(\.available)
+        }
+        return catalogVoices
+    }
+
+    /// 合并外部传入的音色快照与工作坊缓存的音色目录，去重并按「本书专属 -> 六类群像/自建定制 -> 系统默认」排序，确保音色选择器不局限于 10 个系统默认音色。
+    public func mergedAvailableVoices(externalVoices: [SafeVoiceEntry] = []) -> [SafeVoiceEntry] {
+        var byID: [String: SafeVoiceEntry] = [:]
+        for voice in externalVoices where voice.available {
+            byID[voice.id] = voice
+        }
+        for voice in catalogVoices where voice.available {
+            byID[voice.id] = voice
+        }
+        let activeBookID = selectedBook?.id
+        let metadataMap = VoiceCatalogStore.shared.metadataByVoiceID
+        return byID.values.sorted { lhs, rhs in
+            let metaL = metadataMap[lhs.id]
+            let metaR = metadataMap[rhs.id]
+            let isBookExL = (metaL?.scope == .bookExclusive && metaL?.originBookID == activeBookID)
+            let isBookExR = (metaR?.scope == .bookExclusive && metaR?.originBookID == activeBookID)
+            if isBookExL != isBookExR { return isBookExL }
+
+            let isCustomL = !Self.builtInSystemVoiceIDs.contains(lhs.id.lowercased()) && lhs.id.lowercased() != "v-narrator"
+            let isCustomR = !Self.builtInSystemVoiceIDs.contains(rhs.id.lowercased()) && rhs.id.lowercased() != "v-narrator"
+            if isCustomL != isCustomR { return isCustomL }
+
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+        }
+    }
+
     /// 根据全书角色声线线索与当前可用音色目录，为尚未配声的角色自动推荐并预绑定音色（含四级分层、双池隔离、同场图着色与微语速错位）。
     public func autoAssignRecommendedVoices(
         for bookID: UUID? = nil,
@@ -812,14 +987,9 @@ public final class AudiobookWorkflowModel {
     ) async {
         let targetID = bookID ?? selectedBook?.id
         guard let targetID, let store, let castController else { return }
-        let candidateVoices: [SafeVoiceEntry]
-        if let availableVoices, !availableVoices.isEmpty {
-            candidateVoices = availableVoices
-        } else if let fetched = (try? await dependencies.speechRenderer.fetchEffectiveCapabilities())?.voices,
-                  !fetched.isEmpty
-        {
-            candidateVoices = fetched
-        } else {
+        let fetchedVoices = await refreshAvailableVoices()
+        let candidateVoices = mergedAvailableVoices(externalVoices: availableVoices ?? fetchedVoices)
+        guard !candidateVoices.isEmpty else {
             return
         }
 
@@ -1169,7 +1339,148 @@ public final class AudiobookWorkflowModel {
         }
     }
 
-    // MARK: - Lead Character Exclusive Voice Creation (Issue 3)
+    // MARK: - Six-Archetype Ensemble & Lead Character Voice Creation
+
+    /// 分析当前系统是否已存在满足本小说场景的完整六类群像音色（旁白叙事、青年男声、中老年男声、青年女声、成熟女声、特色群像），返回尚缺失的声部行当列表。
+    public func missingArchetypesForBook(
+        bookID: UUID? = nil,
+        availableVoices: [SafeVoiceEntry]? = nil
+    ) -> [AudiobookVoiceArchetype] {
+        let targetBookID = bookID ?? selectedBook?.id
+        let pool = mergedAvailableVoices(externalVoices: availableVoices ?? catalogVoices)
+        let metadataMap = VoiceCatalogStore.shared.metadataByVoiceID
+
+        var coveredArchetypes = Set<AudiobookVoiceArchetype>()
+        for voice in pool where voice.available {
+            let lowerID = voice.id.lowercased()
+            let isBuiltInDefault = Self.builtInSystemVoiceIDs.contains(lowerID) || lowerID == "v-narrator"
+            guard !isBuiltInDefault else { continue }
+            guard VoiceCatalogStore.shared.isVoiceActiveForBook(voiceID: voice.id, currentBookID: targetBookID) else {
+                continue
+            }
+            let meta = metadataMap[voice.id]
+            let arch = AudiobookCastRegistry.resolveVoiceArchetype(for: voice, metadata: meta)
+            coveredArchetypes.insert(arch)
+        }
+
+        return AudiobookVoiceArchetype.allCases.filter { !coveredArchetypes.contains($0) }
+    }
+
+    /// 检查当前系统是否已存在满足此小说场景的完整六类群像音色；若不完整，则结合小说角色特征与原书台词自动创建并发布缺失的群像音色。
+    @discardableResult
+    public func ensureSixArchetypeVoicesForBook(
+        for bookID: UUID? = nil,
+        quietBanner: Bool = false
+    ) async -> Int {
+        let targetID = bookID ?? selectedBook?.id
+        guard let targetID, let store else { return 0 }
+        guard !isCreatingLeadExclusiveVoices else { return 0 }
+
+        let currentVoices = await refreshAvailableVoices()
+        let missing = missingArchetypesForBook(bookID: targetID, availableVoices: currentVoices)
+        guard !missing.isEmpty else {
+            if !quietBanner {
+                bannerMessage = "当前系统已具备完整的六类群像音色。"
+            }
+            return 0
+        }
+
+        let loadedChars = (try? await store.characters(for: targetID)) ?? characters
+        let allAnnotations = (try? await store.annotations(for: targetID)) ?? []
+        let bookTitle = (try? await store.book(id: targetID).title) ?? selectedBook?.title ?? "有声书"
+        let (stratifiedChars, stats, _) = AudiobookCastRegistry.computeRoleDialogueStats(
+            characters: loadedChars,
+            annotations: allAnnotations,
+            availableVoiceCount: max(8, currentVoices.count)
+        )
+
+        isCreatingLeadExclusiveVoices = true
+        var createdCount = 0
+        let bookPrefix = targetID.uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(6)
+
+        for (idx, archetype) in missing.enumerated() {
+            leadVoiceCreationProgressText = "正在补全六类群像音色「\(archetype.shortBadgeTitle)」(\(idx + 1)/\(missing.count))…"
+
+            let matchingRoles = stratifiedChars.filter { role in
+                let roleArch = stats[role.id]?.archetype ?? role.inferredVoiceArchetype(peers: stratifiedChars)
+                return roleArch == archetype
+            }
+            let representativeRole = matchingRoles.first(where: { $0.allowSharedMinorVoice }) ?? matchingRoles.first
+
+            let instruction: String = {
+                let baseInstruction = archetype.defaultScenarioInstruction(forBookTitle: bookTitle)
+                guard let rep = representativeRole else { return baseInstruction }
+                let persona = AudiobookVoicePersona.infer(for: rep, peers: stratifiedChars, recompute: false)
+                if let summary = rep.primaryVoiceTraitSummary, !summary.isEmpty {
+                    return "\(baseInstruction) 契合书中「\(rep.displayName)」等角色特征（\(summary)，\(persona.timbreAndTexture)）。"
+                }
+                return baseInstruction
+            }()
+
+            var refCandidates: [String] = []
+            for role in matchingRoles.prefix(3) {
+                let roleQuotes = AudiobookAuditionScriptSelector.selectCandidates(
+                    from: role.evidences.map(\.quoteExcerpt),
+                    roleName: role.displayName,
+                    aliases: role.aliases,
+                    isNarrator: role.isNarrator,
+                    maxCandidates: 1
+                )
+                for quote in roleQuotes where !refCandidates.contains(quote) {
+                    refCandidates.append(quote)
+                }
+            }
+            let defaultRef = archetype.defaultScenarioReferenceText(forBookTitle: bookTitle)
+            if !refCandidates.contains(defaultRef) {
+                refCandidates.append(defaultRef)
+            }
+
+            let targetVoiceID = "ab_arch_\(bookPrefix)_\(archetype.shortCode)"
+            let voiceName = "\(bookTitle)·群像·\(archetype.shortBadgeTitle)"
+            let seedHash = AudiobookDigest.sha256Hex(Data("\(targetID.uuidString)|arch|\(archetype.rawValue)".utf8))
+            let baseSeed = (Int(seedHash.prefix(6), radix: 16) ?? 2048) + idx * 37
+
+            let request = AudiobookLeadVoiceCreationRequest(
+                bookID: targetID,
+                roleID: representativeRole?.id ?? targetID,
+                targetVoiceID: targetVoiceID,
+                voiceName: voiceName,
+                instruction: instruction,
+                referenceTextCandidates: refCandidates,
+                seed: baseSeed
+            )
+
+            if let output = try? await dependencies.speechRenderer.createAndPublishLeadVoice(request) {
+                VoiceCatalogStore.shared.registerArchetypeEnsembleVoice(
+                    voiceID: output.voiceID,
+                    bookID: targetID,
+                    bookTitle: bookTitle,
+                    archetype: archetype
+                )
+                createdCount += 1
+            }
+        }
+
+        leadVoiceCreationProgressText = nil
+        isCreatingLeadExclusiveVoices = false
+        _ = await refreshAvailableVoices()
+
+        if !quietBanner {
+            await autoAssignRecommendedVoices(for: targetID)
+            if selectedBook?.id == targetID {
+                voiceBindings = (try? await store.voiceBindings(for: targetID)) ?? voiceBindings
+                selectedBook = (try? await store.book(id: targetID)) ?? selectedBook
+                await refreshChapterReadinessMap(for: targetID)
+                await refreshShelf()
+            }
+            if createdCount > 0 {
+                bannerMessage = "已为《\(bookTitle)》创建并补全 \(createdCount) 类群像音色。"
+            } else {
+                errorMessage = "当前语音服务未开启音色设计（VoiceDesign）能力或生成未通过校验，未能自动创建缺失的群像音色。"
+            }
+        }
+        return createdCount
+    }
 
     /// 为主要角色（旁白与核心主角 `.lead`）自动创建并发布本书专属音色（基于六维声学人设指令与原书对白试听稿），避免仅使用默认系统音色。
     @discardableResult
@@ -1233,6 +1544,7 @@ public final class AudiobookWorkflowModel {
 
         leadVoiceCreationProgressText = nil
         isCreatingLeadExclusiveVoices = false
+        _ = await refreshAvailableVoices()
 
         // 为其余配角与群像角色执行双池智能配声
         await autoAssignRecommendedVoices(for: targetID)
@@ -1277,6 +1589,7 @@ public final class AudiobookWorkflowModel {
 
         leadVoiceCreationProgressText = nil
         isCreatingLeadExclusiveVoices = false
+        _ = await refreshAvailableVoices()
 
         if let created {
             voiceBindings = (try? await store.voiceBindings(for: bookID)) ?? voiceBindings
@@ -1556,6 +1869,7 @@ public final class AudiobookWorkflowModel {
                 activeBookID: activeBookID,
                 binding: binding
             )
+            _ = await refreshAvailableVoices()
             voiceBindings = try await store.voiceBindings(for: activeBookID)
             selectedBook = try await store.book(id: activeBookID)
             pendingVoiceReturnContext = nil
@@ -1570,20 +1884,176 @@ public final class AudiobookWorkflowModel {
 
     // MARK: - Production & Revision Actions
 
-    /// Test seam for the explicit per-fragment rerender workflow action.
+    public func renameChapter(chapterID: UUID, title: String) async {
+        guard canRenameSelectedChapter,
+              let bookID = selectedBook?.id,
+              let store,
+              chapters.contains(where: { $0.id == chapterID })
+        else { return }
+        let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedTitle.isEmpty else {
+            errorMessage = "章节名称不能为空。"
+            return
+        }
+
+        isEditingChapterLayout = true
+        errorMessage = nil
+        defer { isEditingChapterLayout = false }
+        do {
+            try await store.renameChapter(bookID: bookID, chapterID: chapterID, title: normalizedTitle)
+            if selectedBook?.id == bookID {
+                await openBook(bookID)
+            }
+            await refreshShelf()
+            if selectedBook?.id == bookID {
+                bannerMessage = "章节名称已更新，原文和已有音频保持不变。"
+            }
+        } catch {
+            if selectedBook?.id == bookID {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    public func splitSelectedChapterBeforeSelectedAtom() async {
+        guard canSplitSelectedChapterBeforeSelectedAtom,
+              let bookID = selectedBook?.id,
+              let chapterID = selectedChapterID,
+              let atomID = selectedAtomIDs.first,
+              let atom = chapterAtoms.first(where: { $0.id == atomID }),
+              let store
+        else {
+            errorMessage = chapterStructureEditingStatus
+            return
+        }
+
+        isEditingChapterLayout = true
+        errorMessage = nil
+        defer { isEditingChapterLayout = false }
+        do {
+            let latestChapters = try await store.chapters(for: bookID)
+            let source = try await store.sourceIndex(for: bookID)
+            guard let selectedIndex = latestChapters.firstIndex(where: { $0.id == chapterID }) else {
+                throw AudiobookChapterEditError.chapterNotFound(chapterID)
+            }
+            let updated = try AudiobookChapterPlanner.splitChapter(
+                latestChapters,
+                chapterID: chapterID,
+                atByteOffset: atom.sourceRange.lowerBound,
+                secondTitle: "新章节",
+                source: source
+            )
+            guard updated.count == latestChapters.count + 1,
+                  updated.indices.contains(selectedIndex + 1)
+            else {
+                throw AudiobookChapterEditError.chapterNotFound(chapterID)
+            }
+            let newChapterID = updated[selectedIndex + 1].id
+            try await store.updateChapters(bookID: bookID, chapters: updated)
+            if selectedBook?.id == bookID {
+                selectedAtomIDs.removeAll()
+                if selectedChapterID == chapterID {
+                    selectedChapterID = newChapterID
+                }
+                await openBook(bookID)
+            }
+            await refreshShelf()
+            if selectedBook?.id == bookID {
+                bannerMessage = "目录已拆分，规范化原文保持不变。请重新分析角色后继续制作。"
+            }
+        } catch {
+            if selectedBook?.id == bookID {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    public func mergeSelectedChapterWithPrevious() async {
+        guard canMergeSelectedChapterWithPrevious,
+              let bookID = selectedBook?.id,
+              let chapterID = selectedChapterID,
+              let store,
+              let selectedIndex = chapters.firstIndex(where: { $0.id == chapterID }),
+              selectedIndex > chapters.startIndex
+        else {
+            errorMessage = chapterStructureEditingStatus
+            return
+        }
+        let previousChapterID = chapters[selectedIndex - 1].id
+
+        isEditingChapterLayout = true
+        errorMessage = nil
+        defer { isEditingChapterLayout = false }
+        do {
+            let latestChapters = try await store.chapters(for: bookID)
+            let source = try await store.sourceIndex(for: bookID)
+            let updated = try AudiobookChapterPlanner.mergeChapterWithPrevious(
+                latestChapters,
+                chapterID: chapterID,
+                source: source
+            )
+            try await store.updateChapters(bookID: bookID, chapters: updated)
+            if selectedBook?.id == bookID {
+                selectedAtomIDs.removeAll()
+                if selectedChapterID == chapterID {
+                    selectedChapterID = previousChapterID
+                }
+                await openBook(bookID)
+            }
+            await refreshShelf()
+            if selectedBook?.id == bookID {
+                bannerMessage = "章节已合并，规范化原文保持不变。请重新分析角色后继续制作。"
+            }
+        } catch {
+            if selectedBook?.id == bookID {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
     public func regenerateFragment(fragmentID: UUID) {
-        // Kept as a compile-ready RED seam until the workflow lifecycle is wired.
+        guard let bookID = selectedBook?.id,
+              let chapterID = selectedChapterID,
+              let fragment = chapterFragments.first(where: { $0.id == fragmentID }),
+              fragment.bookID == bookID,
+              fragment.chapterID == chapterID
+        else {
+            errorMessage = "当前片段已不在所选章节中，请刷新后重试。"
+            return
+        }
+        guard !isProductionBusy, productionRunID == nil else {
+            errorMessage = productionBookID == bookID
+                ? "本书已有制作任务，请等待完成或暂停后再重录。"
+                : "另一部有声书正在制作，请等待完成或暂停后再重录。"
+            return
+        }
+        guard canRegenerateFragment(fragmentID) else {
+            if !isAuditionConfirmedForSelectedBook {
+                errorMessage = AudiobookProductionError.auditionNotConfirmed.errorDescription
+            } else if chapterReadinessByID[chapterID] == .blockedByUnknownSpeakers {
+                errorMessage = AudiobookProductionError.chapterBlockedByUnknownSpeakers(chapterID: chapterID).errorDescription
+            } else if chapters.first(where: { $0.id == chapterID })?.currentChapterRevisionID == nil {
+                errorMessage = "请先完成本章首次制作，再重录单段。"
+            } else {
+                errorMessage = "当前章节还未准备好重录，请先完成角色确认和声音试听。"
+            }
+            return
+        }
+        startProductionRun(bookID: bookID, chapterIDs: [chapterID], regeneratingFragmentID: fragmentID)
     }
 
     public func makeConfirmedChapters(chapterIDs: [UUID]? = nil) {
         guard let bookID = selectedBook?.id else { return }
+        guard !isEditingChapterLayout else {
+            errorMessage = "正在整理章节目录，请完成后再开始制作。"
+            return
+        }
         guard !isProductionBusy, productionRunID == nil else {
             if productionBookID != bookID {
                 errorMessage = "另一部有声书正在制作，请等待完成或暂停后再开始。"
             }
             return
         }
-        guard let productionController else { return }
         let targetChapterIDs: [UUID]
         if let chapterIDs, !chapterIDs.isEmpty {
             targetChapterIDs = chapterIDs
@@ -1609,9 +2079,35 @@ public final class AudiobookWorkflowModel {
             return
         }
 
+        startProductionRun(bookID: bookID, chapterIDs: targetChapterIDs)
+    }
+
+    private func startProductionRun(
+        bookID: UUID,
+        chapterIDs: [UUID],
+        regeneratingFragmentID: UUID? = nil
+    ) {
+        guard let productionController else { return }
+        guard !isEditingChapterLayout else {
+            errorMessage = "正在整理章节目录，请完成后再开始制作。"
+            return
+        }
+        guard !isProductionBusy, productionRunID == nil else {
+            if productionBookID != bookID {
+                errorMessage = "另一部有声书正在制作，请等待完成或暂停后再开始。"
+            }
+            return
+        }
+        guard !chapterIDs.isEmpty else {
+            errorMessage = AudiobookProductionError.noReadyChaptersSelected.errorDescription
+            return
+        }
+
         let runID = UUID()
         productionRunID = runID
         productionBookID = bookID
+        productionFragmentID = regeneratingFragmentID
+        productionProgress = nil
         productionProgressPollTask?.cancel()
         isProducing = true
         isPausingProduction = false
@@ -1635,7 +2131,18 @@ public final class AudiobookWorkflowModel {
         productionTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                try await productionController.start(bookID: bookID, chapterIDs: targetChapterIDs)
+                if let regeneratingFragmentID {
+                    guard chapterIDs.count == 1, let chapterID = chapterIDs.first else {
+                        throw AudiobookProductionError.noReadyChaptersSelected
+                    }
+                    try await productionController.regenerateFragment(
+                        bookID: bookID,
+                        chapterID: chapterID,
+                        fragmentID: regeneratingFragmentID
+                    )
+                } else {
+                    try await productionController.start(bookID: bookID, chapterIDs: chapterIDs)
+                }
                 let progress = await productionController.progress(for: bookID)
                 guard self.productionRunID == runID else { return }
                 self.productionProgress = progress
@@ -1643,7 +2150,9 @@ public final class AudiobookWorkflowModel {
                 guard self.productionRunID == runID else { return }
                 self.finishProductionRun(runID)
                 if self.selectedBook?.id == bookID, self.surfaceMode == .workspace {
-                    self.bannerMessage = "所选章节制作已完成，可立即进入听书或导出。"
+                    self.bannerMessage = regeneratingFragmentID == nil
+                        ? "所选章节制作已完成，可立即进入听书或导出。"
+                        : "本段新候选已生成；当前章节版本保持不变。请试听后选择“采用此候选”。"
                 }
             } catch {
                 guard self.productionRunID == runID else { return }
@@ -1688,6 +2197,7 @@ public final class AudiobookWorkflowModel {
         productionTask = nil
         productionRunID = nil
         productionBookID = nil
+        productionFragmentID = nil
         isProducing = false
         isPausingProduction = false
     }

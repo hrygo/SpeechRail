@@ -96,6 +96,17 @@ def test_independent_gates_remain_distinguishable(reference, output, scopes, run
     assert verdict.production_ready_reason == reason
 
 
+def test_warn_reference_with_passed_output_validation_is_production_ready():
+    profile, artifact, binding, evidence = _facts()
+    profile = replace(profile, quality={"status": "warn", "warnings": ["short_duration"]})
+    verdict = evaluate_voice_validation(
+        profile, artifact, evidence, runtime_identity_status="observed",
+        validation_binding=binding, binding_required=True,
+    )
+    assert verdict.production_ready
+    assert verdict.production_ready_reason is None
+
+
 def test_execution_gate_does_not_import_the_discovery_presenter():
     path = Path(__file__).parents[1] / "src/speechrail/application/voice_validation_gate.py"
     source = path.read_text()

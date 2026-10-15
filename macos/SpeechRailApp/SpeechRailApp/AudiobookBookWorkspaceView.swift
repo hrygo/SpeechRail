@@ -1,12 +1,22 @@
 import SpeechRailControlKit
 import SwiftUI
 
+private struct AudiobookChapterRenameTarget: Identifiable {
+    let bookID: UUID
+    let chapterID: UUID
+    let title: String
+
+    var id: UUID { chapterID }
+}
+
 /// T13：三栏有声书工作台视图（左：章节导航与就绪状态；中：准备与角色/制作与返修共享主画布；右：人物与配声检查器，窄窗口自适应收起为浮层）。
 public struct AudiobookBookWorkspaceView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(AppNavigationState.self) private var navigation
     @AppStorage("speechrail.showDeveloperDetails") private var showAnalysisDeveloperDetails = false
     @State private var isAnalysisDevSectionExpanded = false
+    @State private var chapterRenameTarget: AudiobookChapterRenameTarget?
+    @State private var chapterRenameDraft = ""
 
     public var onImportTXT: () -> Void
 
@@ -53,6 +63,14 @@ public struct AudiobookBookWorkspaceView: View {
                 castInspectorColumn
                     .frame(width: SpeechRailDesignTokens.Layout.inspectorColumnWidth, height: 560)
                     .padding(SpeechRailDesignTokens.Spacing.sm)
+            }
+            .sheet(item: $chapterRenameTarget) { target in
+                chapterRenameSheet(for: target)
+            }
+            .onChange(of: workflow.selectedBook?.id) { _, selectedBookID in
+                if chapterRenameTarget?.bookID != selectedBookID {
+                    chapterRenameTarget = nil
+                }
             }
         }
     }
@@ -130,11 +148,14 @@ public struct AudiobookBookWorkspaceView: View {
                         .speechRailButton(.primary)
                         .disabled(
                             (primaryAction == .pauseProduction && workflow.isPausingProduction)
+                                || workflow.isEditingChapterLayout
                                 || productionStartBlocked
                         )
-                        .help(productionStartBlocked
-                              ? "另一部有声书正在制作，完成或暂停后即可开始此书。"
-                              : primaryAction.title)
+                        .help(workflow.isEditingChapterLayout
+                              ? "正在整理章节目录，请完成后再继续。"
+                              : (productionStartBlocked
+                                  ? "另一部有声书正在制作，完成或暂停后即可开始此书。"
+                                  : primaryAction.title))
                         .accessibilityIdentifier("audiobook-workspace-primary-action")
                     }
                 }
@@ -177,6 +198,7 @@ public struct AudiobookBookWorkspaceView: View {
                     title: "章节列表（\(workflow.chapters.count)）",
                     trailingDetail: "\(workflow.chapters.filter { $0.currentChapterRevisionID != nil }.count) 章已成片"
                 )
+                chapterOrganizationMenu
                 SessionHairline()
 
                 ScrollView {
@@ -220,6 +242,7 @@ public struct AudiobookBookWorkspaceView: View {
                                 .contentShape(.interaction, Rectangle())
                             }
                             .buttonStyle(.plain)
+                            .disabled(workflow.isEditingChapterLayout)
                             .accessibilityIdentifier("audiobook-chapter-row-\(chapter.ordinal)")
                         }
                     }
@@ -244,6 +267,105 @@ public struct AudiobookBookWorkspaceView: View {
                 }
             }
         }
+    }
+
+    private var chapterOrganizationMenu: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+            Menu {
+                Button("重命名章节…", systemImage: "pencil") {
+                    guard let bookID = workflow.selectedBook?.id,
+                          let chapter = workflow.chapters.first(where: { $0.id == workflow.selectedChapterID })
+                    else { return }
+                    chapterRenameDraft = chapter.title
+                    chapterRenameTarget = AudiobookChapterRenameTarget(
+                        bookID: bookID,
+                        chapterID: chapter.id,
+                        title: chapter.title
+                    )
+                }
+                .disabled(!workflow.canRenameSelectedChapter)
+
+                Divider()
+
+                Button("在选中段落前拆分") {
+                    Task { await workflow.splitSelectedChapterBeforeSelectedAtom() }
+                }
+                .disabled(!workflow.canSplitSelectedChapterBeforeSelectedAtom)
+                .help(workflow.canEditChapterStructure
+                      ? "先在原文中仅勾选一个章节中间的正文段落；目录调整不会改写原文。"
+                      : workflow.chapterStructureEditingStatus)
+
+                Button("与上一章合并") {
+                    Task { await workflow.mergeSelectedChapterWithPrevious() }
+                }
+                .disabled(!workflow.canMergeSelectedChapterWithPrevious)
+                .help(workflow.canEditChapterStructure
+                      ? (workflow.selectedChapterID == workflow.chapters.first?.id
+                          ? "第一章前没有章节可合并。"
+                          : "将当前章并入上一章，保留上一章名称；原文不变。")
+                      : workflow.chapterStructureEditingStatus)
+            } label: {
+                Label("整理章节", systemImage: "list.bullet.indent")
+            }
+            .speechRailButton(.secondary)
+            .fixedSize()
+            .accessibilityIdentifier("audiobook-chapter-organization-menu")
+            .help(workflow.chapterStructureEditingStatus)
+
+            Text(workflow.chapterStructureEditingStatus)
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("audiobook-chapter-organization-status")
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+    }
+
+    private func chapterRenameSheet(for target: AudiobookChapterRenameTarget) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+            Text("重命名章节")
+                .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+
+            Text("只更改「\(target.title)」的章节名称，原文、分析记录和已有音频都会保留。")
+                .font(SpeechRailDesignTokens.Typography.body)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+
+            TextField("章节名称", text: $chapterRenameDraft)
+                .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("audiobook-chapter-rename-field")
+
+            HStack {
+                Spacer()
+                Button("取消") {
+                    chapterRenameTarget = nil
+                }
+                .speechRailButton(.secondary)
+                .keyboardShortcut(.cancelAction)
+
+                Button("保存") {
+                    guard target.bookID == workflow.selectedBook?.id else {
+                        chapterRenameTarget = nil
+                        return
+                    }
+                    let chapterID = target.chapterID
+                    let title = chapterRenameDraft
+                    chapterRenameTarget = nil
+                    Task { await workflow.renameChapter(chapterID: chapterID, title: title) }
+                }
+                .speechRailButton(.primary)
+                .keyboardShortcut(.defaultAction)
+                .disabled(
+                    target.bookID != workflow.selectedBook?.id
+                        || !workflow.canRenameSelectedChapter
+                        || chapterRenameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
+                .accessibilityIdentifier("audiobook-chapter-rename-save")
+            }
+        }
+        .padding(SpeechRailDesignTokens.Spacing.md)
+        .frame(minWidth: SpeechRailDesignTokens.Layout.Sheet.compactWidth)
     }
 
     // MARK: - Center Column: Shared Preparation / Production Canvas
@@ -436,6 +558,7 @@ public struct AudiobookBookWorkspaceView: View {
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
         .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
         .background(SpeechRailDesignTokens.Color.recessedField)
+        .disabled(workflow.isEditingChapterLayout)
     }
 
     @ViewBuilder
@@ -470,6 +593,8 @@ public struct AudiobookBookWorkspaceView: View {
                     )
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(isSelected ? "取消选中本段" : "选中本段")
+                .accessibilityValue(isSelected ? "已选" : "未选")
 
                 if isUnknown {
                     StatusPill(
@@ -589,6 +714,7 @@ public struct AudiobookBookWorkspaceView: View {
                     lineWidth: isFocusedUnknown ? 2 : 1
                 )
         )
+        .disabled(workflow.isEditingChapterLayout)
     }
 
     // MARK: - Production & Candidate Repair Canvas
@@ -632,7 +758,7 @@ public struct AudiobookBookWorkspaceView: View {
                             }
                         }
                         .speechRailButton(.primary)
-                        .disabled(workflow.isProductionBusy || workflow.isLoadingChapterDetails)
+                        .disabled(workflow.isProductionBusy || workflow.isLoadingChapterDetails || workflow.isEditingChapterLayout)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
@@ -675,7 +801,7 @@ public struct AudiobookBookWorkspaceView: View {
                                 )
                             }
                             .speechRailButton(.primary)
-                            .disabled(workflow.isProductionBusy || workflow.isLoadingChapterDetails)
+                            .disabled(workflow.isProductionBusy || workflow.isLoadingChapterDetails || workflow.isEditingChapterLayout)
                         }
 
                         Button {
@@ -752,6 +878,21 @@ public struct AudiobookBookWorkspaceView: View {
                         }
                         .speechRailButton(.quiet)
                     }
+
+                    Button {
+                        workflow.regenerateFragment(fragmentID: fragment.id)
+                    } label: {
+                        Label(
+                            workflow.isRegeneratingFragment(fragment.id) ? "正在重录…" : "重录本段",
+                            systemImage: "arrow.clockwise"
+                        )
+                    }
+                    .speechRailButton(.quiet)
+                    .disabled(!workflow.canRegenerateFragment(fragment.id))
+                    .help(workflow.chapters.first(where: { $0.id == fragment.chapterID })?.currentChapterRevisionID == nil
+                          ? "请先完成本章首次制作，再重录单段。"
+                          : "只为本段生成一个新候选，不会替换当前章节版本；试听后可在候选列表中选择采用。")
+                    .accessibilityIdentifier("audiobook-regenerate-fragment-\(fragment.ordinal)")
                 }
 
                 Text(text)
@@ -805,12 +946,16 @@ public struct AudiobookBookWorkspaceView: View {
 
     private var castInspectorColumn: some View {
         @Bindable var bindableWorkflow = workflow
-        let allAvailableVoices = appModel.safeVoiceCatalog?.data.filter {
-            $0.available && $0.productionReady != false
-        } ?? []
+        let allAvailableVoices = workflow.mergedAvailableVoices(
+            externalVoices: appModel.safeVoiceCatalog?.data ?? []
+        )
         let activeBookVoices = allAvailableVoices.filter {
             VoiceCatalogStore.shared.isVoiceActiveForBook(voiceID: $0.id, currentBookID: workflow.selectedBook?.id)
         }
+        let missingArchetypes = workflow.missingArchetypesForBook(
+            bookID: workflow.selectedBook?.id,
+            availableVoices: allAvailableVoices
+        )
         let leadCount = workflow.characters.filter { $0.isNarrator || !$0.allowSharedMinorVoice }.count
         let minorCount = max(0, workflow.characters.count - leadCount)
         let conflictCount = workflow.totalSceneVoiceConflictCount
@@ -824,9 +969,19 @@ public struct AudiobookBookWorkspaceView: View {
                 SessionHairline()
 
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    if conflictCount > 0 {
+                    if conflictCount > 0 || !missingArchetypes.isEmpty {
                         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                            StatusPill(tone: .attention, label: "同场撞音 \(conflictCount) 处")
+                            if conflictCount > 0 {
+                                StatusPill(tone: .attention, label: "同场撞音 \(conflictCount) 处")
+                            }
+                            if !missingArchetypes.isEmpty {
+                                StatusPill(
+                                    tone: .neutral,
+                                    label: "六类群像已备 \(6 - missingArchetypes.count)/6"
+                                )
+                            } else {
+                                StatusPill(tone: .healthy, label: "六类群像音色已齐备")
+                            }
                             Spacer()
                         }
                     }
@@ -918,11 +1073,26 @@ public struct AudiobookBookWorkspaceView: View {
 
                             Button {
                                 Task {
+                                    _ = await workflow.ensureSixArchetypeVoicesForBook()
+                                    await appModel.engine.refreshDiscovery()
+                                }
+                            } label: {
+                                Label("补全六类群像", systemImage: "person.3.fill")
+                            }
+                            .speechRailButton(.secondary)
+                            .disabled(workflow.isCreatingLeadExclusiveVoices)
+                            .help("检查当前系统是否具备满足本小说场景的六类群像音色，自动创建缺失的群像声部音色。")
+                            .accessibilityIdentifier("audiobook-ensure-six-archetype-voices-button")
+
+                            Button {
+                                Task {
+                                    _ = await workflow.ensureSixArchetypeVoicesForBook(quietBanner: true)
                                     _ = await workflow.createExclusiveVoicesForLeadCharacters()
+                                    await appModel.engine.refreshDiscovery()
                                 }
                             } label: {
                                 Label(
-                                    workflow.isCreatingLeadExclusiveVoices ? "生成专属音色中…" : "为主角生成专属音色",
+                                    workflow.isCreatingLeadExclusiveVoices ? "生成音色中…" : "为主角生成专属音色",
                                     systemImage: "person.wave.2.fill"
                                 )
                             }
@@ -934,9 +1104,9 @@ public struct AudiobookBookWorkspaceView: View {
                         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                             Button {
                                 Task {
-                                    let voices = appModel.safeVoiceCatalog?.data.filter {
-                                        $0.available && $0.productionReady != false
-                                    }
+                                    let voices = workflow.mergedAvailableVoices(
+                                        externalVoices: appModel.safeVoiceCatalog?.data ?? []
+                                    )
                                     await workflow.autoAssignRecommendedVoices(availableVoices: voices)
                                 }
                             } label: {
@@ -1108,6 +1278,7 @@ public struct AudiobookBookWorkspaceView: View {
                             role: role,
                             archetype: archetype,
                             currentBinding: binding,
+                            allVoices: allVoices,
                             activeBookVoices: activeBookVoices,
                             allCharacters: workflow.characters,
                             allBindings: workflow.voiceBindings,
@@ -1126,6 +1297,10 @@ public struct AudiobookBookWorkspaceView: View {
                                         navigation.requestVoiceDesignForAudiobook(context: ctx)
                                     }
                                 }
+                            },
+                            onRefreshVoices: {
+                                _ = await workflow.refreshAvailableVoices()
+                                await appModel.engine.refreshDiscovery()
                             }
                         )
                     }
@@ -1280,19 +1455,19 @@ private struct AudiobookVoicePickerPopover: View {
     @Environment(AppModel.self) private var appModel
 
     enum ScopeFilter: String, CaseIterable, Identifiable {
+        case all = "all"
         case matchedArchetype = "matched"
         case bookExclusive = "book_exclusive"
         case favorites = "favorites"
-        case all = "all"
 
         var id: String { rawValue }
 
         var title: String {
             switch self {
+            case .all: return "全部音色"
             case .matchedArchetype: return "智能匹配声部"
-            case .bookExclusive: return "本书专用"
+            case .bookExclusive: return "定制与群像"
             case .favorites: return "星标收藏"
-            case .all: return "全部"
             }
         }
     }
@@ -1300,6 +1475,7 @@ private struct AudiobookVoicePickerPopover: View {
     let role: AudiobookCharacter
     let archetype: AudiobookVoiceArchetype
     let currentBinding: AudiobookVoiceBinding?
+    let allVoices: [SafeVoiceEntry]
     let activeBookVoices: [SafeVoiceEntry]
     let allCharacters: [AudiobookCharacter]
     let allBindings: [UUID: AudiobookVoiceBinding]
@@ -1307,9 +1483,10 @@ private struct AudiobookVoicePickerPopover: View {
     let onSelectVoice: (AudiobookVoiceBinding) -> Void
     let onChangeSpeed: (Double) -> Void
     let onDesignNewVoice: () -> Void
+    let onRefreshVoices: () async -> Void
 
     @State private var searchQuery: String = ""
-    @State private var scopeFilter: ScopeFilter = .matchedArchetype
+    @State private var scopeFilter: ScopeFilter = .all
     @State private var catalogRefreshTick: Int = 0
 
     private static let microSpeedPresets: [Double] = [0.92, 0.96, 1.00, 1.04, 1.08]
@@ -1317,26 +1494,57 @@ private struct AudiobookVoicePickerPopover: View {
     private var filteredVoices: [SafeVoiceEntry] {
         _ = catalogRefreshTick
         let metadataMap = VoiceCatalogStore.shared.metadataByVoiceID
-        let byScope = activeBookVoices.filter { voice in
+        let sourcePool: [SafeVoiceEntry] = switch scopeFilter {
+        case .all, .favorites:
+            allVoices.isEmpty ? activeBookVoices : allVoices
+        case .matchedArchetype, .bookExclusive:
+            activeBookVoices.isEmpty ? allVoices : activeBookVoices
+        }
+
+        let byScope = sourcePool.filter { voice in
             let meta = metadataMap[voice.id]
             let voiceArch = AudiobookCastRegistry.resolveVoiceArchetype(for: voice, metadata: meta)
+            let isBuiltInDefault = AudiobookWorkflowModel.builtInSystemVoiceIDs.contains(voice.id.lowercased())
+                || voice.id.lowercased() == "v-narrator"
             switch scopeFilter {
+            case .all:
+                return true
             case .matchedArchetype:
                 return voiceArch == archetype
                     || meta?.originRoleID == role.id
                     || (meta?.scope == .bookExclusive && meta?.originBookID == role.bookID)
             case .bookExclusive:
-                return meta?.scope == .bookExclusive && meta?.originBookID == role.bookID
+                return !isBuiltInDefault
+                    || (meta?.scope == .bookExclusive && meta?.originBookID == role.bookID)
             case .favorites:
                 return meta?.isFavorite == true
-            case .all:
-                return true
             }
         }
-        let candidateList = (byScope.isEmpty && scopeFilter == .matchedArchetype) ? activeBookVoices : byScope
+        let candidateList = (byScope.isEmpty && scopeFilter == .matchedArchetype) ? sourcePool : byScope
+        let sortedCandidates = candidateList.sorted { lhs, rhs in
+            let metaL = metadataMap[lhs.id]
+            let metaR = metadataMap[rhs.id]
+            let roleMatchL = (metaL?.originRoleID == role.id)
+            let roleMatchR = (metaR?.originRoleID == role.id)
+            if roleMatchL != roleMatchR { return roleMatchL }
+
+            let bookMatchL = (metaL?.originBookID == role.bookID)
+            let bookMatchR = (metaR?.originBookID == role.bookID)
+            if bookMatchL != bookMatchR { return bookMatchL }
+
+            let archMatchL = (AudiobookCastRegistry.resolveVoiceArchetype(for: lhs, metadata: metaL) == archetype)
+            let archMatchR = (AudiobookCastRegistry.resolveVoiceArchetype(for: rhs, metadata: metaR) == archetype)
+            if archMatchL != archMatchR { return archMatchL }
+
+            let customL = !AudiobookWorkflowModel.builtInSystemVoiceIDs.contains(lhs.id.lowercased())
+            let customR = !AudiobookWorkflowModel.builtInSystemVoiceIDs.contains(rhs.id.lowercased())
+            if customL != customR { return customL }
+
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+        }
         let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty else { return candidateList }
-        return candidateList.filter { voice in
+        guard !q.isEmpty else { return sortedCandidates }
+        return sortedCandidates.filter { voice in
             let meta = metadataMap[voice.id]
             let arch = AudiobookCastRegistry.resolveVoiceArchetype(for: voice, metadata: meta)
             return voice.name.localizedCaseInsensitiveContains(q)
@@ -1395,7 +1603,7 @@ private struct AudiobookVoicePickerPopover: View {
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
-                    if activeBookVoices.isEmpty {
+                    if allVoices.isEmpty && activeBookVoices.isEmpty {
                         ForEach(fallbackPresets, id: \.id) { preset in
                             Button {
                                 let b = AudiobookVoiceBinding(
@@ -1429,7 +1637,7 @@ private struct AudiobookVoicePickerPopover: View {
                             Text("当前筛选条件下没有匹配音色")
                                 .font(SpeechRailDesignTokens.Typography.bodyMedium)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                            Text("可切换至「全部」或设计新音色。")
+                            Text("可切换至「全部音色」或设计新音色。")
                                 .font(SpeechRailDesignTokens.Typography.caption)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                         }
@@ -1496,6 +1704,9 @@ private struct AudiobookVoicePickerPopover: View {
         }
         .padding(SpeechRailDesignTokens.Spacing.md)
         .frame(width: SpeechRailDesignTokens.Layout.Sheet.compactWidth)
+        .task {
+            await onRefreshVoices()
+        }
     }
 
     private var holdersByVoiceID: [String: [AudiobookCharacter]] {

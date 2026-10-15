@@ -1167,7 +1167,8 @@ final class AudiobookCastTests: XCTestCase {
                     model: model,
                     descriptors: desc,
                     operations: [:],
-                    productionReady: true
+                    productionReady: false,
+                    productionReadyReason: "reference_validation_not_passed"
                 )
                 lock.withLock {
                     createdLeadRequests.append(request)
@@ -1271,15 +1272,23 @@ final class AudiobookCastTests: XCTestCase {
         XCTAssertEqual(workflow.totalUnknownSpeakerCount, 0)
         XCTAssertFalse(workflow.showOnlyUnknownAtomsInChapter, "全部确认完毕后应自动关闭仅看待确认过滤")
 
-        // 3. 为主要角色生成本书专属定制音色（不再只使用默认系统音色）
+        // 3. 检测并补全六类群像音色（旁白叙事、青年男声、中老年男声、青年女声、成熟女声、特色群像）
+        XCTAssertEqual(workflow.missingArchetypesForBook(bookID: fixture.bookID).count, 6)
+        let createdArchetypeCount = await workflow.ensureSixArchetypeVoicesForBook(for: fixture.bookID, quietBanner: true)
+        XCTAssertEqual(createdArchetypeCount, 6, "当系统仅存在默认音色时，应自动创建满足小说场景的完整六类群像音色")
+        XCTAssertTrue(workflow.missingArchetypesForBook(bookID: fixture.bookID).isEmpty)
+
+        // 4. 为主要角色生成本书专属定制音色（不再只使用默认系统音色），且合并后的可选音色列表包含全部六类群像音色与专属音色
         let createdLeadCount = await workflow.createExclusiveVoicesForLeadCharacters(for: fixture.bookID)
         XCTAssertEqual(createdLeadCount, 2, "旁白与主角林远均应生成专属定制音色")
-        XCTAssertEqual(fakeRenderer.createdLeadRequests.count, 2)
+        XCTAssertEqual(fakeRenderer.createdLeadRequests.count, 8)
+        let mergedVoices = workflow.mergedAvailableVoices()
+        XCTAssertEqual(mergedVoices.count, 10, "音色选择器应包含 2 个系统音色 + 6 个群像音色 + 2 个主角专属音色")
         let heroBinding = try XCTUnwrap(workflow.voiceBindings[fixture.hero.id])
         XCTAssertTrue(heroBinding.voiceID.hasPrefix("ab_"), "主角应绑定新生成的本书专属音色 ID：\(heroBinding.voiceID)")
         XCTAssertEqual(VoiceCatalogStore.shared.metadata(for: heroBinding.voiceID)?.scope, .bookExclusive)
 
-        // 4. 确认角色与试听后进入制作：验证制作失败时 errorMessage 不会被 openBook 清空，成功时正常产出章节版本
+        // 5. 确认角色与试听后进入制作：即使音色携带 reference_validation_not_passed 也能正常合成，且失败时 errorMessage 不会被清空
         await workflow.confirmCastAndAudition()
         XCTAssertEqual(workflow.workbenchTab, .production)
 

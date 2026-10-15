@@ -86,6 +86,7 @@ public actor AudiobookProductionController {
     private let admission: SpeechCreationAdmission
     private let clock: any AudiobookClock
     private let policy: AudiobookRenderPolicy
+    private let candidateCommitter: @Sendable (AudiobookRenderCandidate, Data) async throws -> Void
 
     private var generation: Int = 0
     private var inFlightTask: Task<AudiobookRenderCallOutput, Error>?
@@ -111,6 +112,31 @@ public actor AudiobookProductionController {
         self.admission = admission
         self.clock = clock
         self.policy = policy
+        self.candidateCommitter = { candidate, wav in
+            try await store.commitCandidate(candidate, wav: wav)
+        }
+    }
+
+    // Internal injection keeps persistence-boundary tests deterministic without
+    // allowing production callers to replace durable candidate commits.
+    init(
+        store: AudiobookProjectStore,
+        castController: AudiobookCastController,
+        revisionController: AudiobookRevisionController,
+        renderer: any AudiobookSpeechRenderer,
+        admission: SpeechCreationAdmission,
+        clock: any AudiobookClock = SystemAudiobookClock(),
+        policy: AudiobookRenderPolicy = .standard,
+        candidateCommitter: @escaping @Sendable (AudiobookRenderCandidate, Data) async throws -> Void
+    ) {
+        self.store = store
+        self.castController = castController
+        self.revisionController = revisionController
+        self.renderer = renderer
+        self.admission = admission
+        self.clock = clock
+        self.policy = policy
+        self.candidateCommitter = candidateCommitter
     }
 
     public func progress(for bookID: UUID) -> AudiobookProductionProgress? {
@@ -299,25 +325,31 @@ public actor AudiobookProductionController {
                         throw AudiobookProductionError.cancelled
                     }
 
-                    try await store.commitCandidate(candidate, wav: candidateWAVCache[candidate.id] ?? Data())
+                    try await candidateCommitter(candidate, candidateWAVCache[candidate.id] ?? Data())
                     candidateWAVCache.removeValue(forKey: candidate.id)
 
                     completedCount += 1
                     latestProgressByBook[bookID]?.completedFragments = completedCount
+                    try checkRunIsActive(runGeneration)
                 }
 
                 // If all fragments in the chapter now have verified candidates and no previous revision exists,
                 // automatically promote initial chapter revision (or keep as candidate if repairing an existing chapter).
                 let existingRevs = try await store.chapterRevisions(for: bookID, chapterID: chapter.id)
+                try checkRunIsActive(runGeneration)
                 if regeneratingFragmentID == nil, existingRevs.isEmpty {
                     _ = try await revisionController.promoteInitialChapterIfComplete(
                         bookID: bookID,
                         chapterID: chapter.id
                     )
+                    try checkRunIsActive(runGeneration)
                 }
             }
         } catch {
-            if (error as? AudiobookProductionError) != .cancelled {
+            if (error as? AudiobookProductionError) == .cancelled || error is CancellationError {
+                try await markBookPaused(bookID: bookID, completed: completedCount, total: totalFragmentCount)
+                throw AudiobookProductionError.cancelled
+            } else {
                 if var failedBook = try? await store.book(id: bookID) {
                     let hasCompletedAnyChapter = allChapters.contains { $0.currentChapterRevisionID != nil }
                     failedBook.productionState = (completedCount > 0 || hasCompletedAnyChapter) ? .paused : .idle
@@ -334,26 +366,39 @@ public actor AudiobookProductionController {
             throw error
         }
 
-        // Update book production & listenable state
-        let updatedChapters = try await store.chapters(for: bookID)
-        let readyChaptersCount = updatedChapters.filter { $0.currentChapterRevisionID != nil }.count
-        var finalBook = try await store.book(id: bookID)
-        if readyChaptersCount == updatedChapters.count && !updatedChapters.isEmpty {
-            finalBook.productionState = .fullBookProduced
-            finalBook.listenableState = .fullBookListenable
-        } else if readyChaptersCount > 0 {
-            finalBook.productionState = .partialChaptersReady
-            finalBook.listenableState = .partialChaptersListenable
-        } else {
-            finalBook.productionState = .allConfirmedChaptersProduced
+        do {
+            // A pause can arrive during persistence or chapter promotion, after rendering ends.
+            // Keep any committed assets, but never let the old run overwrite the paused state.
+            try checkRunIsActive(runGeneration)
+            let updatedChapters = try await store.chapters(for: bookID)
+            try checkRunIsActive(runGeneration)
+            let readyChaptersCount = updatedChapters.filter { $0.currentChapterRevisionID != nil }.count
+            var finalBook = try await store.book(id: bookID)
+            try checkRunIsActive(runGeneration)
+            if readyChaptersCount == updatedChapters.count && !updatedChapters.isEmpty {
+                finalBook.productionState = .fullBookProduced
+                finalBook.listenableState = .fullBookListenable
+            } else if readyChaptersCount > 0 {
+                finalBook.productionState = .partialChaptersReady
+                finalBook.listenableState = .partialChaptersListenable
+            } else {
+                finalBook.productionState = .allConfirmedChaptersProduced
+            }
+            try await store.updateBook(finalBook)
+            try checkRunIsActive(runGeneration)
+            latestProgressByBook[bookID] = AudiobookProductionProgress(
+                bookID: bookID,
+                state: finalBook.productionState,
+                completedFragments: completedCount,
+                totalFragments: totalFragmentCount
+            )
+        } catch {
+            if (error as? AudiobookProductionError) == .cancelled || error is CancellationError {
+                try await markBookPaused(bookID: bookID, completed: completedCount, total: totalFragmentCount)
+                throw AudiobookProductionError.cancelled
+            }
+            throw error
         }
-        try await store.updateBook(finalBook)
-        latestProgressByBook[bookID] = AudiobookProductionProgress(
-            bookID: bookID,
-            state: finalBook.productionState,
-            completedFragments: completedCount,
-            totalFragments: totalFragmentCount
-        )
     }
 
     public func pause() async {
@@ -573,10 +618,10 @@ public actor AudiobookProductionController {
                     reason: "音色不在当前能力目录中"
                 )
             }
-            guard voice.available, voice.productionReady != false else {
+            guard voice.available else {
                 throw AudiobookProductionError.capabilityVoiceUnavailable(
                     voiceID: binding.voiceID,
-                    reason: voice.productionReadyReason ?? voice.availabilityReason.rawValue
+                    reason: voice.availabilityReason.rawValue
                 )
             }
             if let actualVoiceRev = voice.voiceRevision,

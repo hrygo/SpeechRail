@@ -518,7 +518,7 @@ public enum AudiobookCastRegistry {
             var copy = role
             let count = dialogueCounts[role.id] ?? 0
             if let chapters = activeChaptersByRole[role.id], !chapters.isEmpty {
-                copy.chapterIDs = Array(Set(copy.chapterIDs).union(chapters))
+                copy.chapterIDs = Set(copy.chapterIDs).union(chapters).sorted { $0.uuidString < $1.uuidString }
             }
             let effectiveChapterCount = max(activeChaptersByRole[role.id]?.count ?? 0, copy.chapterIDs.count)
             let archetype = copy.inferredVoiceArchetype(peers: characters)
@@ -933,6 +933,9 @@ public enum AudiobookCastRegistry {
             let voiceArchetype = resolveVoiceArchetype(for: voice, metadata: meta)
             if voiceArchetype == stat.archetype {
                 score += 220
+                if meta?.creationSource == .voiceDesign || voiceIDLower.hasPrefix("ab_") {
+                    score += 180
+                }
             }
 
             let voiceGender = inferVoiceGender(voiceID: voiceIDLower, voiceMeta: voiceMeta)
