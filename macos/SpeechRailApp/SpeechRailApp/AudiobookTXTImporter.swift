@@ -113,6 +113,18 @@ public struct AudiobookImportPreview: Equatable, Sendable, Identifiable {
     public var canonicalByteCount: Int64 {
         sourceIndex.byteCount
     }
+
+    public func textPreview(for chapterID: UUID?, originalLayout: Bool = false) throws -> String {
+        let range = chapters.first(where: { $0.id == chapterID })?.sourceRange ?? sourceIndex.wholeRange
+        try sourceIndex.validateRangeBounds(range)
+        let startScalar = sourceIndex.scalarIndex(forByteOffset: range.lowerBound) ?? 0
+        let endScalar = min(sourceIndex.scalarCount, startScalar + AudiobookLimits.maxPreviewScalars)
+        let bounded = AudiobookSourceRange(
+            lowerBound: range.lowerBound,
+            upperBound: min(range.upperBound, sourceIndex.scalarByteOffsets[endScalar])
+        )
+        return try originalLayout ? sourceIndex.text(in: bounded) : sourceIndex.normalizedText(in: bounded)
+    }
 }
 
 public enum AudiobookTXTImporter {
@@ -205,7 +217,7 @@ public enum AudiobookTXTImporter {
         )
         let previewScalars = min(sourceIndex.scalarCount, AudiobookLimits.maxPreviewScalars)
         let previewEndByte = sourceIndex.scalarByteOffsets[previewScalars]
-        let previewText = try sourceIndex.text(
+        let previewText = try sourceIndex.normalizedText(
             in: AudiobookSourceRange(lowerBound: 0, upperBound: previewEndByte)
         )
 

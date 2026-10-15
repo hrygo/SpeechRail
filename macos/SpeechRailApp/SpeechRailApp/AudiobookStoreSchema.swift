@@ -42,6 +42,12 @@ public enum AudiobookStoreSchema {
         FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS production_checkpoints (
+        book_id TEXT PRIMARY KEY NOT NULL,
+        checkpoint_json TEXT NOT NULL,
+        FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+    );
+
     CREATE TABLE IF NOT EXISTS chapters (
         id TEXT NOT NULL,
         book_id TEXT NOT NULL,

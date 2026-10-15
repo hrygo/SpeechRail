@@ -9,6 +9,97 @@ private struct AudiobookChapterRenameTarget: Identifiable {
     var id: UUID { chapterID }
 }
 
+/// A small, independently ticking subtree keeps elapsed time out of the workspace's data flow.
+private struct AudiobookProductionProgressRail: View {
+    let progress: AudiobookProductionProgress
+    let chapterTitle: String?
+    let isBusy: Bool
+    let isPausing: Bool
+    let canResume: Bool
+    let onPause: () -> Void
+    let onResume: () -> Void
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            CardSurface {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                        Text(isPausing && isBusy ? "正在暂停制作…" : progress.statusTitle)
+                            .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                        Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+                        Text("已用 \(progress.elapsedSeconds(at: context.date)) 秒")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .monospacedDigit()
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        if isBusy {
+                            Button(isPausing ? "正在暂停…" : "暂停制作", systemImage: "pause.circle", action: onPause)
+                                .speechRailButton(.secondary)
+                                .disabled(isPausing)
+                                .accessibilityIdentifier("audiobook-production-pause")
+                        } else if progress.state == .paused || progress.state == .failed {
+                            Button("继续制作", systemImage: "play.circle", action: onResume)
+                                .speechRailButton(.secondary)
+                                .disabled(!canResume)
+                                .accessibilityIdentifier("audiobook-production-resume")
+                        }
+                    }
+                    if progress.totalFragments > 0 {
+                        ProgressView(value: progress.fraction)
+                            .tint(SpeechRailDesignTokens.Color.rail)
+                            .accessibilityLabel("制作进度")
+                            .accessibilityValue("\(Int(progress.fraction * 100))%，\(progress.savedFragmentsText)")
+                    } else if isBusy {
+                        ProgressView().controlSize(.small).accessibilityLabel(progress.statusTitle)
+                    }
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        if let chapterTitle {
+                            Text(chapterTitle).lineLimit(1)
+                        }
+                        Text(progress.savedFragmentsText).monospacedDigit()
+                        if progress.reusedFragments > 0 { Text("其中 \(progress.reusedFragments) 段已复用") }
+                        Spacer(minLength: 0)
+                        if progress.totalFragments > 0 {
+                            Text("\(Int(progress.fraction * 100))%").monospacedDigit()
+                        }
+                    }
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+
+                    if isPausing && isBusy {
+                        detail("正在停止当前请求，已保存的声音会保留。")
+                    } else if progress.state == .paused {
+                        detail("已保存的声音会保留。继续后会核对已有音频，接着完成本次任务。")
+                    } else if progress.retryAttempt > 0 && isBusy {
+                        detail("正在进行第 \(progress.retryAttempt) 次重试，已保存的声音不受影响。")
+                    } else if isBusy {
+                        detail("完成一段就保存，可随时暂停后继续。")
+                    }
+                    if let message = progress.lastErrorMessage {
+                        Text(message)
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                    }
+                    if progress.isStalled(at: context.date), !isPausing {
+                        StatusBanner(
+                            kind: .standard, tone: .attention, title: "这次等待较久",
+                            message: "当前步骤超过一分钟没有新进展。已保存的声音会保留，可以暂停后检查语音服务，再继续制作。"
+                        )
+                    }
+                }
+                .padding(SpeechRailDesignTokens.Spacing.sm)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("audiobook-production-progress-rail")
+    }
+
+    private func detail(_ text: String) -> some View {
+        Text(text)
+            .font(SpeechRailDesignTokens.Typography.caption)
+            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+    }
+}
+
 /// T13：三栏有声书工作台视图（左：章节导航与就绪状态；中：准备与角色/制作与返修共享主画布；右：人物与配声检查器，窄窗口自适应收起为浮层）。
 public struct AudiobookBookWorkspaceView: View {
     @Environment(AppModel.self) private var appModel
@@ -39,6 +130,18 @@ public struct AudiobookBookWorkspaceView: View {
 
                 if workflow.isAnalyzing {
                     analysisProgressRail
+                }
+                if let progress = workflow.selectedBookProductionProgress {
+                    AudiobookProductionProgressRail(
+                        progress: progress,
+                        chapterTitle: workflow.chapters.first(where: { $0.id == progress.currentChapterID })?.title,
+                        isBusy: workflow.isProductionBusy && workflow.productionBookID == progress.bookID,
+                        isPausing: workflow.isPausingProduction,
+                        canResume: !workflow.isProductionBusy && !workflow.isEditingChapterLayout
+                            && workflow.selectedBook?.productionState == .paused,
+                        onPause: { Task { await workflow.pauseProduction() } },
+                        onResume: { Task { await workflow.resumeProduction() } }
+                    )
                 }
                 HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
                     chapterSidebarColumn
@@ -754,6 +857,14 @@ public struct AudiobookBookWorkspaceView: View {
                 if workflow.isLoadingChapterDetails {
                     ProgressView("正在读取本章…")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if workflow.chapterFragments.isEmpty,
+                          workflow.isProducing, workflow.productionBookID == workflow.selectedBook?.id
+                {
+                    SessionEmptyState(
+                        systemImage: "waveform", title: "正在准备章节声音",
+                        message: "上方会持续显示制作进度，已完成的声音会逐段保存。"
+                    ) {}
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if workflow.chapterFragments.isEmpty {
                     SessionEmptyState(
                         systemImage: "waveform.path.ecg",
@@ -795,6 +906,12 @@ public struct AudiobookBookWorkspaceView: View {
                             }
                             .speechRailButton(.secondary)
                             .disabled(workflow.isPausingProduction)
+                        } else if workflow.selectedBook?.productionState == .paused {
+                            Button("继续制作", systemImage: "play.circle") {
+                                Task { await workflow.resumeProduction() }
+                            }
+                            .speechRailButton(.primary)
+                            .disabled(workflow.isProductionBusy || workflow.isEditingChapterLayout)
                         } else {
                             Button {
                                 if let chID = workflow.selectedChapterID {
@@ -837,11 +954,11 @@ public struct AudiobookBookWorkspaceView: View {
         if workflow.isSelectedBookBlockedByProduction {
             return "另一部有声书正在制作"
         }
-        if let prog = workflow.productionProgress,
+        if let prog = workflow.selectedBookProductionProgress,
            workflow.isProducing,
            workflow.productionBookID == workflow.selectedBook?.id
         {
-            return "正在制作 \(prog.completedFragments)/\(prog.totalFragments)"
+            return "\(prog.statusTitle) · \(prog.savedFragmentsText)"
         }
         return "按章节顺序制作，已完成片段自动复用"
     }
@@ -865,7 +982,11 @@ public struct AudiobookBookWorkspaceView: View {
                         detail: workflow.voiceBindings[fragment.roleID]?.voiceID ?? "未绑定"
                     )
 
-                    if let cand = matchingCandidate {
+                    if let progress = workflow.selectedBookProductionProgress,
+                       workflow.isProducing, progress.currentFragmentID == fragment.id
+                    {
+                        StatusPill(tone: .attention, label: progress.statusTitle)
+                    } else if let cand = matchingCandidate {
                         StatusPill(
                             tone: .healthy,
                             label: String(format: "已就绪 · %.1fs", cand.durationSeconds)
@@ -1380,9 +1501,12 @@ public struct AudiobookBookWorkspaceView: View {
             workflow.workbenchTab = .preparation
         case .confirmCastAndVoices:
             Task { await workflow.confirmCastAndAudition() }
-        case .makeConfirmedChapters, .resumeProduction:
+        case .makeConfirmedChapters:
             workflow.workbenchTab = .production
             workflow.makeConfirmedChapters()
+        case .resumeProduction:
+            workflow.workbenchTab = .production
+            Task { await workflow.resumeProduction() }
         case .pauseProduction:
             Task { await workflow.pauseProduction() }
         case .continueListening:

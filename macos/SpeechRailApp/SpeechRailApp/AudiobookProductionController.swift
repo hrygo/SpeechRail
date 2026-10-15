@@ -14,6 +14,7 @@ public enum AudiobookProductionError: LocalizedError, Equatable, Sendable {
     case capabilityRevisionMismatch(voiceID: String, expected: String, actual: String?)
     case unauthorizedService
     case transientRetriesExhausted(fragmentID: UUID, lastReason: String)
+    case checkpointNotSaved(reason: String)
     case pauseWithUnconfirmedRemoteStop(fragmentID: UUID)
     case cancelled
 
@@ -39,10 +40,28 @@ public enum AudiobookProductionError: LocalizedError, Equatable, Sendable {
             return "本机语音服务鉴权未通过，请检查服务连接。"
         case let .transientRetriesExhausted(_, reason):
             return "语音服务繁忙或暂态错误已达重试上限：\(reason)"
+        case let .checkpointNotSaved(reason):
+            return "制作已停止，但任务记录未能保存，重新打开后可能无法接着制作。请检查磁盘空间和作品库的写入权限：\(reason)"
         case .pauseWithUnconfirmedRemoteStop:
             return "制作已暂停；当前在途片段的服务端停止状态尚未确认，稍后继续时将自动核对。"
         case .cancelled:
             return "章节制作已暂停。"
+        }
+    }
+}
+
+public enum AudiobookProductionPhase: String, Codable, Sendable {
+    case preparing, checkingSavedAudio, rendering, waitingForService, saving, assemblingChapter, completed
+
+    public var title: String {
+        switch self {
+        case .preparing: "正在准备制作"
+        case .checkingSavedAudio: "正在核对已保存的声音"
+        case .rendering: "正在生成声音"
+        case .waitingForService: "语音服务暂忙，正在重试"
+        case .saving: "正在保存声音"
+        case .assemblingChapter: "正在整理章节音频"
+        case .completed: "本次制作已完成"
         }
     }
 }
@@ -56,6 +75,13 @@ public struct AudiobookProductionProgress: Codable, Equatable, Sendable {
     public var totalFragments: Int
     public var unconfirmedRemoteStopFragmentID: UUID?
     public var lastErrorMessage: String?
+    public var phase: AudiobookProductionPhase
+    public var currentChapterOrdinal: Int?
+    public var totalChapters: Int
+    public var reusedFragments: Int
+    public var retryAttempt: Int
+    public var startedAt: Date
+    public var updatedAt: Date
 
     public init(
         bookID: UUID,
@@ -65,7 +91,14 @@ public struct AudiobookProductionProgress: Codable, Equatable, Sendable {
         completedFragments: Int = 0,
         totalFragments: Int = 0,
         unconfirmedRemoteStopFragmentID: UUID? = nil,
-        lastErrorMessage: String? = nil
+        lastErrorMessage: String? = nil,
+        phase: AudiobookProductionPhase = .preparing,
+        currentChapterOrdinal: Int? = nil,
+        totalChapters: Int = 0,
+        reusedFragments: Int = 0,
+        retryAttempt: Int = 0,
+        startedAt: Date = Date(),
+        updatedAt: Date? = nil
     ) {
         self.bookID = bookID
         self.state = state
@@ -75,6 +108,58 @@ public struct AudiobookProductionProgress: Codable, Equatable, Sendable {
         self.totalFragments = totalFragments
         self.unconfirmedRemoteStopFragmentID = unconfirmedRemoteStopFragmentID
         self.lastErrorMessage = lastErrorMessage
+        self.phase = phase
+        self.currentChapterOrdinal = currentChapterOrdinal
+        self.totalChapters = totalChapters
+        self.reusedFragments = reusedFragments
+        self.retryAttempt = retryAttempt
+        self.startedAt = startedAt
+        self.updatedAt = updatedAt ?? startedAt
+    }
+
+    public var fraction: Double {
+        totalFragments > 0 ? min(1, max(0, Double(completedFragments) / Double(totalFragments))) : 0
+    }
+
+    public var statusTitle: String {
+        switch state {
+        case .pausing: "正在暂停制作…"
+        case .paused: "制作已暂停"
+        case .failed: "制作遇到问题"
+        default: phase.title
+        }
+    }
+
+    public var savedFragmentsText: String {
+        totalFragments > 0 ? "已保存 \(completedFragments)/\(totalFragments) 段" : "正在确认本次制作范围"
+    }
+
+    public func elapsedSeconds(at now: Date) -> Int {
+        let end = state == .running || state == .pausing ? now : updatedAt
+        return max(0, Int(end.timeIntervalSince(startedAt)))
+    }
+
+    public func isStalled(at now: Date) -> Bool {
+        state == .running && now.timeIntervalSince(updatedAt) >= 60
+    }
+
+    public var canResume: Bool {
+        state == .paused || state == .pausing || state == .running || state == .failed
+    }
+}
+
+/// Only task identity, counters and timestamps are durable; audio remains in the asset journal.
+public struct AudiobookProductionCheckpoint: Codable, Equatable, Sendable {
+    public let taskID: UUID
+    public let chapterIDs: [UUID]
+    public let regeneratingFragmentID: UUID?
+    public var progress: AudiobookProductionProgress
+
+    public init(taskID: UUID = UUID(), chapterIDs: [UUID], regeneratingFragmentID: UUID? = nil, progress: AudiobookProductionProgress) {
+        self.taskID = taskID
+        self.chapterIDs = chapterIDs
+        self.regeneratingFragmentID = regeneratingFragmentID
+        self.progress = progress
     }
 }
 
@@ -87,14 +172,17 @@ public actor AudiobookProductionController {
     private let clock: any AudiobookClock
     private let policy: AudiobookRenderPolicy
     private let candidateCommitter: @Sendable (AudiobookRenderCandidate, Data) async throws -> Void
+    private let completionCommitter: @Sendable (AudiobookProductionCheckpoint, AudiobookListenableState?) async throws -> Void
 
     private var generation: Int = 0
     private var inFlightTask: Task<AudiobookRenderCallOutput, Error>?
     private var inFlightFragmentID: UUID?
     private var isPauseRequested: Bool = false
     private var isStartActive: Bool = false
+    private var isCommittingCompletion: Bool = false
     private var activeBookID: UUID?
     private var latestProgressByBook: [UUID: AudiobookProductionProgress] = [:]
+    private var activeCheckpoint: AudiobookProductionCheckpoint?
 
     public init(
         store: AudiobookProjectStore,
@@ -115,10 +203,13 @@ public actor AudiobookProductionController {
         self.candidateCommitter = { candidate, wav in
             try await store.commitCandidate(candidate, wav: wav)
         }
+        self.completionCommitter = { checkpoint, listenableState in
+            try await store.saveProductionCheckpoint(checkpoint, listenableState: listenableState)
+        }
     }
 
     // Internal injection keeps persistence-boundary tests deterministic without
-    // allowing production callers to replace durable candidate commits.
+    // allowing production callers to replace durable commits.
     init(
         store: AudiobookProjectStore,
         castController: AudiobookCastController,
@@ -127,7 +218,8 @@ public actor AudiobookProductionController {
         admission: SpeechCreationAdmission,
         clock: any AudiobookClock = SystemAudiobookClock(),
         policy: AudiobookRenderPolicy = .standard,
-        candidateCommitter: @escaping @Sendable (AudiobookRenderCandidate, Data) async throws -> Void
+        candidateCommitter: @escaping @Sendable (AudiobookRenderCandidate, Data) async throws -> Void,
+        completionCommitter: (@Sendable (AudiobookProductionCheckpoint, AudiobookListenableState?) async throws -> Void)? = nil
     ) {
         self.store = store
         self.castController = castController
@@ -137,6 +229,9 @@ public actor AudiobookProductionController {
         self.clock = clock
         self.policy = policy
         self.candidateCommitter = candidateCommitter
+        self.completionCommitter = completionCommitter ?? { checkpoint, listenableState in
+            try await store.saveProductionCheckpoint(checkpoint, listenableState: listenableState)
+        }
     }
 
     public func progress(for bookID: UUID) -> AudiobookProductionProgress? {
@@ -146,22 +241,25 @@ public actor AudiobookProductionController {
     public func regenerateFragment(
         bookID: UUID,
         chapterID: UUID,
-        fragmentID: UUID
+        fragmentID: UUID,
+        resumingTaskID: UUID? = nil
     ) async throws {
-        try await produce(bookID: bookID, chapterIDs: [chapterID], regeneratingFragmentID: fragmentID)
+        try await produce(bookID: bookID, chapterIDs: [chapterID], regeneratingFragmentID: fragmentID, resumingTaskID: resumingTaskID)
     }
 
     public func start(
         bookID: UUID,
-        chapterIDs: [UUID]
+        chapterIDs: [UUID],
+        resumingTaskID: UUID? = nil
     ) async throws {
-        try await produce(bookID: bookID, chapterIDs: chapterIDs, regeneratingFragmentID: nil)
+        try await produce(bookID: bookID, chapterIDs: chapterIDs, regeneratingFragmentID: nil, resumingTaskID: resumingTaskID)
     }
 
     private func produce(
         bookID: UUID,
         chapterIDs: [UUID],
-        regeneratingFragmentID: UUID?
+        regeneratingFragmentID: UUID?,
+        resumingTaskID: UUID?
     ) async throws {
         // Actor methods are reentrant across `await`. Reserve the run before the first
         // suspension so a second start cannot invalidate its generation or strand its lease.
@@ -171,13 +269,52 @@ public actor AudiobookProductionController {
         isStartActive = true
         activeBookID = bookID
         defer {
+            isCommittingCompletion = false
             isStartActive = false
             activeBookID = nil
+            activeCheckpoint = nil
             candidateWAVCache.removeAll()
         }
         generation += 1
         let runGeneration = generation
         isPauseRequested = false
+        latestProgressByBook[bookID] = AudiobookProductionProgress(
+            bookID: bookID, state: .running, totalChapters: chapterIDs.count, startedAt: clock.now()
+        )
+
+        do {
+            try await performProduction(
+                bookID: bookID, chapterIDs: chapterIDs,
+                regeneratingFragmentID: regeneratingFragmentID, runGeneration: runGeneration,
+                taskID: resumingTaskID ?? UUID()
+            )
+        } catch {
+            let cancelled = isPauseRequested || Task.isCancelled
+                || error is CancellationError || (error as? AudiobookProductionError) == .cancelled
+            if activeCheckpoint != nil || cancelled {
+                if activeCheckpoint == nil, let progress = latestProgressByBook[bookID] {
+                    activeCheckpoint = .init(taskID: resumingTaskID ?? UUID(), chapterIDs: chapterIDs, regeneratingFragmentID: regeneratingFragmentID, progress: progress)
+                }
+                let progress = latestProgressByBook[bookID]
+                try await markBookPaused(bookID: bookID, completed: progress?.completedFragments ?? 0, total: progress?.totalFragments ?? 0)
+                if !cancelled {
+                    updateProgress(bookID) { $0.lastErrorMessage = error.localizedDescription }
+                }
+            } else {
+                updateProgress(bookID) {
+                    $0.state = .failed
+                    $0.lastErrorMessage = error.localizedDescription
+                }
+            }
+            if cancelled { throw AudiobookProductionError.cancelled }
+            throw error
+        }
+    }
+
+    private func performProduction(
+        bookID: UUID, chapterIDs: [UUID], regeneratingFragmentID: UUID?, runGeneration: Int, taskID: UUID
+    ) async throws {
+        try checkRunIsActive(runGeneration)
 
         guard !chapterIDs.isEmpty else {
             throw AudiobookProductionError.noReadyChaptersSelected
@@ -244,10 +381,20 @@ public actor AudiobookProductionController {
             plannedFragmentsByChapter[chapter.id] = selectedFragments
             activeRoleIDs.formUnion(selectedFragments.map(\.roleID))
             totalFragmentCount += selectedFragments.count
+            updateProgress(bookID) {
+                $0.currentChapterID = chapter.id
+                $0.currentChapterOrdinal = chapter.ordinal + 1
+                $0.totalFragments = totalFragmentCount
+            }
             try checkRunIsActive(runGeneration)
             try await store.saveFragments(bookID: bookID, chapterID: chapter.id, fragments: fragments)
         }
 
+        try checkRunIsActive(runGeneration)
+        if let progress = latestProgressByBook[bookID] {
+            activeCheckpoint = .init(taskID: taskID, chapterIDs: selectedChapters.map(\.id), regeneratingFragmentID: regeneratingFragmentID, progress: progress)
+            try await persistProgress(bookID)
+        }
         let capabilities = try await renderer.fetchEffectiveCapabilities()
         try checkRunIsActive(runGeneration)
         try Self.verifyPinnedBindingsAgainstCapabilities(
@@ -264,12 +411,8 @@ public actor AudiobookProductionController {
         }
 
         var completedCount = 0
-        latestProgressByBook[bookID] = AudiobookProductionProgress(
-            bookID: bookID,
-            state: .running,
-            completedFragments: 0,
-            totalFragments: totalFragmentCount
-        )
+        updateProgress(bookID) { $0.totalFragments = totalFragmentCount }
+        try await persistProgress(bookID)
 
         do {
             // 3. Sequentially render fragments (reusing valid existing candidates when dependencyDigest matches)
@@ -281,18 +424,29 @@ public actor AudiobookProductionController {
                         try await markBookPaused(bookID: bookID, completed: completedCount, total: totalFragmentCount)
                         throw AudiobookProductionError.cancelled
                     }
+                    updateProgress(bookID) {
+                        $0.phase = .checkingSavedAudio
+                        $0.currentChapterID = chapter.id
+                        $0.currentChapterOrdinal = chapter.ordinal + 1
+                        $0.currentFragmentID = fragment.id
+                        $0.retryAttempt = 0
+                    }
 
                     // Reuse already committed & verified candidate with identical dependencyDigest
-                    if regeneratingFragmentID == nil,
-                       let reusable = existingCandidates.first(where: {
+                    if let reusable = existingCandidates.first(where: {
                         $0.fragmentID == fragment.id
                             && $0.dependencyDigest == fragment.dependencyDigest
                             && $0.isReceiptVerified
+                            && (regeneratingFragmentID == nil || $0.taskID == taskID)
                     }),
                        (try? await store.verifyCandidateAsset(reusable)) == true
                     {
                         completedCount += 1
-                        latestProgressByBook[bookID]?.completedFragments = completedCount
+                        updateProgress(bookID) {
+                            $0.completedFragments = completedCount
+                            $0.reusedFragments += 1
+                        }
+                        try await persistProgress(bookID)
                         continue
                     }
 
@@ -301,14 +455,7 @@ public actor AudiobookProductionController {
                     }
                     let fragmentText = try source.text(in: fragment.sourceRange)
 
-                    latestProgressByBook[bookID] = AudiobookProductionProgress(
-                        bookID: bookID,
-                        state: .running,
-                        currentChapterID: chapter.id,
-                        currentFragmentID: fragment.id,
-                        completedFragments: completedCount,
-                        totalFragments: totalFragmentCount
-                    )
+                    updateProgress(bookID) { $0.phase = .rendering }
 
                     let candidate = try await renderSingleFragmentWithFiniteRetry(
                         bookID: bookID,
@@ -325,87 +472,77 @@ public actor AudiobookProductionController {
                         throw AudiobookProductionError.cancelled
                     }
 
+                    updateProgress(bookID) { $0.phase = .saving }
                     try await candidateCommitter(candidate, candidateWAVCache[candidate.id] ?? Data())
                     candidateWAVCache.removeValue(forKey: candidate.id)
 
                     completedCount += 1
-                    latestProgressByBook[bookID]?.completedFragments = completedCount
+                    updateProgress(bookID) { $0.completedFragments = completedCount }
                     try checkRunIsActive(runGeneration)
+                    try await persistProgress(bookID)
                 }
 
                 // If all fragments in the chapter now have verified candidates and no previous revision exists,
                 // automatically promote initial chapter revision (or keep as candidate if repairing an existing chapter).
+                updateProgress(bookID) { $0.phase = .assemblingChapter }
                 let existingRevs = try await store.chapterRevisions(for: bookID, chapterID: chapter.id)
                 try checkRunIsActive(runGeneration)
                 if regeneratingFragmentID == nil, existingRevs.isEmpty {
                     _ = try await revisionController.promoteInitialChapterIfComplete(
                         bookID: bookID,
-                        chapterID: chapter.id
+                        chapterID: chapter.id,
+                        updateBookProductionState: false
                     )
                     try checkRunIsActive(runGeneration)
                 }
             }
-        } catch {
-            if (error as? AudiobookProductionError) == .cancelled || error is CancellationError {
-                try await markBookPaused(bookID: bookID, completed: completedCount, total: totalFragmentCount)
-                throw AudiobookProductionError.cancelled
-            } else {
-                if var failedBook = try? await store.book(id: bookID) {
-                    let hasCompletedAnyChapter = allChapters.contains { $0.currentChapterRevisionID != nil }
-                    failedBook.productionState = (completedCount > 0 || hasCompletedAnyChapter) ? .paused : .idle
-                    try? await store.updateBook(failedBook)
-                }
-                latestProgressByBook[bookID] = AudiobookProductionProgress(
-                    bookID: bookID,
-                    state: .paused,
-                    completedFragments: completedCount,
-                    totalFragments: totalFragmentCount,
-                    lastErrorMessage: error.localizedDescription
-                )
-            }
-            throw error
         }
 
         do {
-            // A pause can arrive during persistence or chapter promotion, after rendering ends.
-            // Keep any committed assets, but never let the old run overwrite the paused state.
+            // Honor a pause during rendering or chapter publication before committing completion.
             try checkRunIsActive(runGeneration)
             let updatedChapters = try await store.chapters(for: bookID)
             try checkRunIsActive(runGeneration)
             let readyChaptersCount = updatedChapters.filter { $0.currentChapterRevisionID != nil }.count
-            var finalBook = try await store.book(id: bookID)
-            try checkRunIsActive(runGeneration)
+            let finalState: AudiobookProductionState
+            let listenableState: AudiobookListenableState?
             if readyChaptersCount == updatedChapters.count && !updatedChapters.isEmpty {
-                finalBook.productionState = .fullBookProduced
-                finalBook.listenableState = .fullBookListenable
+                finalState = .fullBookProduced
+                listenableState = .fullBookListenable
             } else if readyChaptersCount > 0 {
-                finalBook.productionState = .partialChaptersReady
-                finalBook.listenableState = .partialChaptersListenable
+                finalState = .partialChaptersReady
+                listenableState = .partialChaptersListenable
             } else {
-                finalBook.productionState = .allConfirmedChaptersProduced
+                finalState = .allConfirmedChaptersProduced
+                listenableState = nil
             }
-            try await store.updateBook(finalBook)
-            try checkRunIsActive(runGeneration)
-            latestProgressByBook[bookID] = AudiobookProductionProgress(
-                bookID: bookID,
-                state: finalBook.productionState,
-                completedFragments: completedCount,
-                totalFragments: totalFragmentCount
-            )
-        } catch {
-            if (error as? AudiobookProductionError) == .cancelled || error is CancellationError {
-                try await markBookPaused(bookID: bookID, completed: completedCount, total: totalFragmentCount)
-                throw AudiobookProductionError.cancelled
+            guard var checkpoint = activeCheckpoint, var progress = latestProgressByBook[bookID] else {
+                throw AudiobookProductionError.checkpointNotSaved(reason: "未找到当前制作记录。")
             }
-            throw error
+            progress.state = finalState
+            progress.phase = .completed
+            progress.completedFragments = completedCount
+            progress.totalFragments = totalFragmentCount
+            progress.currentFragmentID = nil
+            progress.updatedAt = clock.now()
+            checkpoint.progress = progress
+
+            // No render remains in flight. Let this final atomic save settle even if
+            // the parent is cancelled; a committed completion must not become paused.
+            isCommittingCompletion = true
+            try await completionCommitter(checkpoint, listenableState)
+            activeCheckpoint = checkpoint
+            latestProgressByBook[bookID] = progress
         }
     }
 
     public func pause() async {
-        guard let bookID = activeBookID else { return }
+        guard let bookID = activeBookID, !isCommittingCompletion else { return }
         isPauseRequested = true
         generation += 1
+        let pauseGeneration = generation
         let activeFrag = inFlightFragmentID
+        updateProgress(bookID) { $0.state = .pausing }
         inFlightTask?.cancel()
         if let task = inFlightTask {
             _ = try? await task.value
@@ -415,13 +552,16 @@ public actor AudiobookProductionController {
         await MainActor.run {
             admission.release(.audiobook)
         }
-        var progress = latestProgressByBook[bookID] ?? AudiobookProductionProgress(bookID: bookID, state: .paused)
-        progress.state = .paused
-        progress.unconfirmedRemoteStopFragmentID = activeFrag
-        latestProgressByBook[bookID] = progress
-        if var book = try? await store.book(id: bookID) {
-            book.productionState = .paused
-            try? await store.updateBook(book)
+        guard activeBookID == bookID, generation == pauseGeneration else { return }
+        updateProgress(bookID) {
+            $0.state = .paused
+            $0.unconfirmedRemoteStopFragmentID = activeFrag
+        }
+        // The owning run also persists its paused terminal before releasing its reservation.
+        do {
+            try await persistProgress(bookID)
+        } catch {
+            _ = recordCheckpointSaveFailure(bookID, error: error)
         }
     }
 
@@ -471,6 +611,10 @@ public actor AudiobookProductionController {
                     throw AudiobookProductionError.admissionBusy
                 }
                 attempt += 1
+                updateProgress(bookID) {
+                    $0.phase = .waitingForService
+                    $0.retryAttempt = attempt
+                }
                 try await clock.sleep(seconds: 0.25 * Double(attempt))
                 continue
             }
@@ -480,6 +624,7 @@ public actor AudiobookProductionController {
             }
 
             inFlightFragmentID = fragment.id
+            updateProgress(bookID) { $0.phase = .rendering }
             let renderTask = Task<AudiobookRenderCallOutput, Error> { [renderer] in
                 try await renderer.renderFragment(request)
             }
@@ -496,6 +641,7 @@ public actor AudiobookProductionController {
                 } else {
                     throw AudiobookProductionError.cancelled
                 }
+                updateProgress(bookID) { $0.retryAttempt = 0 }
 
                 // The service receipt describes the original PCM. Verify it before
                 // normalizing the local asset to the render policy's sample rate.
@@ -515,7 +661,7 @@ public actor AudiobookProductionController {
                     bookID: bookID,
                     chapterID: chapter.id,
                     fragmentID: fragment.id,
-                    taskID: UUID(),
+                    taskID: activeCheckpoint?.taskID ?? UUID(),
                     generation: runGeneration,
                     relativeAssetPath: relPath,
                     fileSHA256: fileSHA,
@@ -560,6 +706,10 @@ public actor AudiobookProductionController {
                     case .busy, .notReady, .connection:
                         if attempt < maxRetries {
                             attempt += 1
+                            updateProgress(bookID) {
+                                $0.phase = .waitingForService
+                                $0.retryAttempt = attempt
+                            }
                             try await clock.sleep(seconds: 0.5 * Double(attempt))
                             continue
                         }
@@ -574,6 +724,10 @@ public actor AudiobookProductionController {
 
                 if attempt < maxRetries {
                     attempt += 1
+                    updateProgress(bookID) {
+                        $0.phase = .waitingForService
+                        $0.retryAttempt = attempt
+                    }
                     try await clock.sleep(seconds: 0.5 * Double(attempt))
                     continue
                 }
@@ -586,15 +740,39 @@ public actor AudiobookProductionController {
     }
 
     private func markBookPaused(bookID: UUID, completed: Int, total: Int) async throws {
-        var book = try await store.book(id: bookID)
-        book.productionState = .paused
-        try await store.updateBook(book)
-        latestProgressByBook[bookID] = AudiobookProductionProgress(
-            bookID: bookID,
-            state: .paused,
-            completedFragments: completed,
-            totalFragments: total
-        )
+        updateProgress(bookID) {
+            $0.state = .paused
+            $0.completedFragments = completed
+            $0.totalFragments = total
+        }
+        do {
+            try await persistProgress(bookID)
+        } catch {
+            throw recordCheckpointSaveFailure(bookID, error: error)
+        }
+    }
+
+    private func recordCheckpointSaveFailure(_ bookID: UUID, error: any Error) -> AudiobookProductionError {
+        let failure = AudiobookProductionError.checkpointNotSaved(reason: error.localizedDescription)
+        updateProgress(bookID) {
+            $0.state = .failed
+            $0.lastErrorMessage = failure.localizedDescription
+        }
+        return failure
+    }
+
+    private func updateProgress(_ bookID: UUID, _ update: (inout AudiobookProductionProgress) -> Void) {
+        guard var progress = latestProgressByBook[bookID] else { return }
+        update(&progress)
+        progress.updatedAt = clock.now()
+        latestProgressByBook[bookID] = progress
+    }
+
+    private func persistProgress(_ bookID: UUID) async throws {
+        guard var checkpoint = activeCheckpoint, let progress = latestProgressByBook[bookID] else { return }
+        checkpoint.progress = progress
+        activeCheckpoint = checkpoint
+        try await store.saveProductionCheckpoint(checkpoint)
     }
 
     private func checkRunIsActive(_ runGeneration: Int) throws {

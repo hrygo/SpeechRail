@@ -2,7 +2,7 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.11.5"
+version: "0.11.6"
 date: 2026-10-15
 ---
 
@@ -1231,6 +1231,9 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 > 未安装 App）。三档色的对比度是按取值算出来的，尚未在真机两种外观下取样复核。
 
 ## 7. 变更流程
+
+有声书导入的「整理段落与章节」核对区沿用 `Layout.sidebarIdealWidth` 目录宽度；目录与正文滚动区共用 `Layout.audiobookImportPreviewHeight = 280`，不在页面重复声明几何常量。默认展示规整正文，原始排版通过系统复选框切换，章节目录支持键盘选择。
+
 新增组件先判断是否能由标准 SwiftUI 控件表达；确需定制时先补充 token 和可访问语义，
 再实现组件。token 变更必须同时更新本文件、对应 Swift 定义、组件测试和 macOS App
 视觉验收记录。不得在单页样式中创建只被一次使用的产品色、间距或圆角。

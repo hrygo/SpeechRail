@@ -6,6 +6,38 @@ import XCTest
 #endif
 
 final class AudiobookImportTests: XCTestCase {
+    func testWrappedAnthologyIsPreparedBeforeChapterPlanning() throws {
+        let body = "        河岸上的行人踏著晨霧前行，遠處的燈火還未熄滅，街道仍然十分\r\n安靜。他停下腳步，望向河面。\r\n\r\n"
+        let text = "著者：某人\r\n\r\n" + String(repeating: body, count: 10)
+            + "              江岸【1】     ──一個人的手記\r\n\r\n" + body
+            + "                                        夜行\r\n" + body
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data(text.utf8))
+
+        XCTAssertEqual(preview.chapters.map(\.title), ["开篇", "江岸【1】     ──一個人的手記", "夜行"])
+        XCTAssertTrue(preview.previewText.contains("十分安靜。"), "预览必须先连接段内的排版折行")
+        XCTAssertTrue(preview.previewText.contains("\n\n"), "自然段落边界必须保留")
+        XCTAssertFalse(preview.previewText.contains("\r"))
+        XCTAssertEqual(preview.originalBytes, Data(text.utf8))
+        XCTAssertEqual(preview.canonicalUTF8, Data(text.utf8))
+        XCTAssertNoThrow(try AudiobookChapterPlanner.validateChapterEdits(preview.chapters, source: preview.sourceIndex))
+    }
+
+    func testIsolatedNumberedSectionsArePlannedWithoutInventingMissingTitles() throws {
+        let text = "一\r\n\r\n第一部分的敘述，保留原有文字。\r\n\r\n二\r\n\r\n第二部分的敘述，也保留原有文字。"
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data(text.utf8))
+        XCTAssertEqual(preview.chapters.map(\.title), ["一", "二"])
+        XCTAssertEqual(try preview.sourceIndex.text(in: preview.sourceIndex.wholeRange), text)
+    }
+
+    func testPreparedPreviewPreservesDialoguePoetryAndParagraphs() throws {
+        let text = "第一章 晨行\r\n“你去？”\r\n“我去。”\r\n\r\n    山風吹古木\r\n    月色照長河\r\n\r\n下一段保留原本的段落。"
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data(text.utf8))
+        XCTAssertTrue(preview.previewText.contains("“你去？”\n\n“我去。”"))
+        XCTAssertTrue(preview.previewText.contains("山風吹古木\n\n月色照長河"))
+        XCTAssertTrue(preview.previewText.hasSuffix("下一段保留原本的段落。"))
+        XCTAssertEqual(preview.chapters.count, 1)
+    }
+
     func testStrictEncodingPreview() throws {
         let sampleText = "第1章 雾港\n“你也看见灯了？”他问。合法替换符：\u{FFFD}。\n"
 

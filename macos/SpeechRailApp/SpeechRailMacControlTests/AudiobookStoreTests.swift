@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import SpeechRailControlKit
 import XCTest
 #if SWIFT_PACKAGE
@@ -60,6 +61,65 @@ final class AudiobookStoreTests: XCTestCase {
             edited.title += "（改名）"
             return edited
         }
+    }
+
+    func testProductionCheckpointPreservesTaskScopeAndOmitsServiceErrorsAcrossRestore() async throws {
+        let fixture = try await makeChapterEditFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let progress = AudiobookProductionProgress(
+            bookID: fixture.bookID, state: .paused, completedFragments: 2, totalFragments: 5,
+            lastErrorMessage: "private-service-response-marker", phase: .saving,
+            startedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        let checkpoint = AudiobookProductionCheckpoint(
+            chapterIDs: [fixture.chapter.id], regeneratingFragmentID: UUID(), progress: progress
+        )
+        try await fixture.store.saveProductionCheckpoint(checkpoint)
+        let reopened = try AudiobookProjectStore(root: fixture.root)
+        let saved = try await reopened.productionCheckpoint(for: fixture.bookID)
+        XCTAssertEqual(saved?.taskID, checkpoint.taskID)
+        XCTAssertEqual(saved?.chapterIDs, checkpoint.chapterIDs)
+        XCTAssertEqual(saved?.regeneratingFragmentID, checkpoint.regeneratingFragmentID)
+        XCTAssertEqual(saved?.progress.completedFragments, 2)
+        XCTAssertNil(saved?.progress.lastErrorMessage, "服务错误正文不能进入持久化进度")
+        try await reopened.trashBook(id: fixture.bookID)
+        try await reopened.restoreTrashedBook(id: fixture.bookID)
+        let restored = try await reopened.productionCheckpoint(for: fixture.bookID)
+        XCTAssertEqual(restored, saved, "移入应用恢复区并恢复后仍须保留原任务范围")
+    }
+
+    func testCompletionCheckpointAndBookAvailabilityRollBackTogether() async throws {
+        let fixture = try await makeChapterEditFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let running = AudiobookProductionCheckpoint(
+            chapterIDs: [fixture.chapter.id],
+            progress: .init(bookID: fixture.bookID, state: .running, phase: .saving)
+        )
+        try await fixture.store.saveProductionCheckpoint(running)
+        let originalBook = try await fixture.store.book(id: fixture.bookID)
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(fixture.root.appendingPathComponent("library.sqlite3").path, &database), SQLITE_OK)
+        let handle = try XCTUnwrap(database)
+        defer { sqlite3_close(handle) }
+        XCTAssertEqual(sqlite3_exec(handle, """
+            CREATE TRIGGER reject_completion BEFORE INSERT ON production_checkpoints
+            WHEN json_extract(NEW.checkpoint_json, '$.progress.phase') = 'completed'
+            BEGIN SELECT RAISE(FAIL, 'simulated completion transaction failure'); END;
+            """, nil, nil, nil), SQLITE_OK)
+        var completed = running
+        completed.progress.state = .fullBookProduced
+        completed.progress.phase = .completed
+        do {
+            try await fixture.store.saveProductionCheckpoint(completed, listenableState: .fullBookListenable)
+            XCTFail("最终检查点写入失败必须回滚同事务的书籍状态")
+        } catch let error as AudiobookStoreError {
+            guard case .statementFailed = error else { return XCTFail("Unexpected error: \(error)") }
+        }
+        let restoredBook = try await fixture.store.book(id: fixture.bookID)
+        let restoredCheckpoint = try await fixture.store.productionCheckpoint(for: fixture.bookID)
+        XCTAssertEqual(restoredBook.productionState, originalBook.productionState)
+        XCTAssertEqual(restoredBook.listenableState, originalBook.listenableState)
+        XCTAssertEqual(restoredCheckpoint, running)
     }
 
     private func seedChapterEditArtifact(

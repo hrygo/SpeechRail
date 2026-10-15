@@ -32,14 +32,8 @@ public enum AudiobookChapterPlanner {
             return []
         }
 
-        let lines = try scanLines(in: source)
-        var headingLineIndices: [Int] = []
-
-        for (index, line) in lines.enumerated() {
-            if isChapterHeading(line.trimmedText) {
-                headingLineIndices.append(index)
-            }
-        }
+        let lines = source.paragraphs
+        let headingLineIndices = headingIndices(in: source)
 
         guard !headingLineIndices.isEmpty else {
             let whole = AudiobookChapter(
@@ -59,22 +53,18 @@ public enum AudiobookChapterPlanner {
         var ordinal = 0
 
         // If there is non-whitespace text before the first heading (e.g. preface/metadata), preserve it as its own leading chapter.
-        let firstHeadingStart = lines[headingLineIndices[0]].range.lowerBound
+        let firstHeadingStart = lines[headingLineIndices[0]].sourceRange.lowerBound
         if firstHeadingStart > 0 {
             let leadingRange = AudiobookSourceRange(lowerBound: 0, upperBound: firstHeadingStart)
             let leadingSlice = try source.text(in: leadingRange)
             if !leadingSlice.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let firstNonEmptyTitle = lines[0..<headingLineIndices[0]]
-                    .map(\.trimmedText)
-                    .first(where: { !$0.isEmpty }) ?? "前言"
-                let title = String(firstNonEmptyTitle.prefix(48))
                 chapters.append(
                     AudiobookChapter(
                         id: deterministicChapterID(bookID: bookID, sourceID: sourceID, range: leadingRange, ordinal: ordinal),
                         bookID: bookID,
                         sourceID: sourceID,
                         ordinal: ordinal,
-                        title: title,
+                        title: "开篇",
                         sourceRange: leadingRange,
                         excludedRanges: []
                     )
@@ -88,17 +78,17 @@ public enum AudiobookChapterPlanner {
             if pos == 0 && chapters.isEmpty {
                 startOffset = 0
             } else {
-                startOffset = lines[lineIdx].range.lowerBound
+                startOffset = lines[lineIdx].sourceRange.lowerBound
             }
             let endOffset: Int64
             if pos + 1 < headingLineIndices.count {
-                endOffset = lines[headingLineIndices[pos + 1]].range.lowerBound
+                endOffset = lines[headingLineIndices[pos + 1]].sourceRange.lowerBound
             } else {
                 endOffset = source.byteCount
             }
 
             let range = AudiobookSourceRange(lowerBound: startOffset, upperBound: endOffset)
-            let headingTitle = lines[lineIdx].trimmedText
+            let headingTitle = lines[lineIdx].text
             chapters.append(
                 AudiobookChapter(
                     id: deterministicChapterID(bookID: bookID, sourceID: sourceID, range: range, ordinal: ordinal),
@@ -263,71 +253,46 @@ public enum AudiobookChapterPlanner {
 
     // MARK: - Private Helpers
 
-    private struct LineSpan {
-        let range: AudiobookSourceRange
-        let trimmedText: String
+    private static func headingIndices(in source: AudiobookSourceIndex) -> [Int] {
+        let paragraphs = source.paragraphs
+        let explicit = paragraphs.indices.filter { AudiobookSourceIndex.isChapterHeading(paragraphs[$0].text) }
+        if !explicit.isEmpty { return explicit }
+
+        // Unnumbered anthology titles need both isolated typography and following prose.
+        // Several matching titles establish a document convention; a short prose line alone does not.
+        let named = paragraphs.indices.filter { index in
+            let paragraph = paragraphs[index]
+            guard paragraph.isIsolatedTitleCandidate, isStandaloneTitle(paragraph.text) else { return false }
+            let following = paragraphs.dropFirst(index + 1).prefix(2)
+            return following.contains { $0.text.unicodeScalars.count >= 16 }
+        }
+        if named.count >= 2 { return named }
+
+        // Bare section numbers are chapters only without a parent title convention.
+        let numbered = paragraphs.indices.filter {
+            paragraphs[$0].isIsolatedTitleCandidate && sectionNumber(paragraphs[$0].text) != nil
+        }
+        if numbered.count >= 2,
+           sectionNumber(paragraphs[numbered[0]].text) == 1,
+           zip(numbered, numbered.dropFirst()).allSatisfy({
+               sectionNumber(paragraphs[$0.1].text) == sectionNumber(paragraphs[$0.0].text).map { $0 + 1 }
+           }) { return numbered }
+        return []
     }
 
-    private static func scanLines(in source: AudiobookSourceIndex) throws -> [LineSpan] {
-        var lines: [LineSpan] = []
-        let data = source.utf8Data
-        var lineStart: Int64 = 0
-        var i = 0
-        let count = data.count
-
-        while i < count {
-            let byte = data[data.startIndex + i]
-            if byte == 0x0A {
-                let lineEnd = Int64(i + 1)
-                let range = AudiobookSourceRange(lowerBound: lineStart, upperBound: lineEnd)
-                let text = try source.text(in: range)
-                lines.append(LineSpan(range: range, trimmedText: text.trimmingCharacters(in: .whitespacesAndNewlines)))
-                lineStart = lineEnd
-                i += 1
-            } else if byte == 0x0D {
-                if i + 1 < count, data[data.startIndex + i + 1] == 0x0A {
-                    let lineEnd = Int64(i + 2)
-                    let range = AudiobookSourceRange(lowerBound: lineStart, upperBound: lineEnd)
-                    let text = try source.text(in: range)
-                    lines.append(LineSpan(range: range, trimmedText: text.trimmingCharacters(in: .whitespacesAndNewlines)))
-                    lineStart = lineEnd
-                    i += 2
-                } else {
-                    let lineEnd = Int64(i + 1)
-                    let range = AudiobookSourceRange(lowerBound: lineStart, upperBound: lineEnd)
-                    let text = try source.text(in: range)
-                    lines.append(LineSpan(range: range, trimmedText: text.trimmingCharacters(in: .whitespacesAndNewlines)))
-                    lineStart = lineEnd
-                    i += 1
-                }
-            } else {
-                i += 1
-            }
-        }
-
-        if lineStart < source.byteCount {
-            let range = AudiobookSourceRange(lowerBound: lineStart, upperBound: source.byteCount)
-            let text = try source.text(in: range)
-            lines.append(LineSpan(range: range, trimmedText: text.trimmingCharacters(in: .whitespacesAndNewlines)))
-        }
-        return lines
+    private static func isStandaloneTitle(_ text: String) -> Bool {
+        guard (2...48).contains(text.unicodeScalars.count),
+              let first = text.unicodeScalars.first, (0x3400...0x9FFF).contains(first.value),
+              !text.unicodeScalars.contains(where: { "，。！？；：、,.!?;:\"“”‘’「」『』《》".unicodeScalars.contains($0) }),
+              !["作者", "著者", "译者", "譯者", "出版", "版权所有", "版權所有"].contains(where: text.hasPrefix),
+              text.range(of: #"^[零〇一二三四五六七八九十百千万年月日0-9\s]+$"#, options: .regularExpression) == nil
+        else { return false }
+        return true
     }
 
-    private static func isChapterHeading(_ trimmed: String) -> Bool {
-        guard !trimmed.isEmpty, trimmed.unicodeScalars.count <= 48 else {
-            return false
-        }
-        let patterns = [
-            #"^第[零一二三四五六七八九十百千万0-9]+[章节回卷集部篇](\s+.*|[^\s，。！？；：,.!?;:]{1,40}|$)$"#,
-            #"^(序章|序言|楔子|引子|尾声|终章|后记|番外|附言)(\s+.*|$)"#,
-            #"^(Chapter|CHAPTER)\s+[0-9IVXLCDM]+(\s+.*|:.*|$)"#,
-        ]
-        for pattern in patterns {
-            if trimmed.range(of: pattern, options: .regularExpression) != nil {
-                return true
-            }
-        }
-        return false
+    private static func sectionNumber(_ text: String) -> Int? {
+        if let number = Int(text), (1...999).contains(number) { return number }
+        return ["一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10][text]
     }
 
     private static func computeNonExcludedSpans(

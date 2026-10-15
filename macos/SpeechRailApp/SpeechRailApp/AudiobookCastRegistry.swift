@@ -3,6 +3,35 @@ import SpeechRailControlKit
 
 /// T05：全书角色归并、候选批次筛选（每批最多 32 个候选）、声线特征保留与智能音色推荐匹配。
 public enum AudiobookCastRegistry {
+    static func castRevisionID(bookID: UUID, characters: [AudiobookCharacter]) -> UUID {
+        let sorted = characters.sorted { $0.id.uuidString < $1.id.uuidString }
+        let raw = sorted.map { "\($0.id.uuidString):\($0.isNarrator):\($0.allowSharedMinorVoice)" }
+            .joined(separator: "|")
+        let hex = AudiobookDigest.sha256Hex(Data("cast_rev|\(bookID.uuidString)|\(raw)".utf8))
+        let chars = Array(hex.prefix(32))
+        let uuidStr = String(chars[0..<8]) + "-"
+            + String(chars[8..<12]) + "-"
+            + String(chars[12..<16]) + "-"
+            + String(chars[16..<20]) + "-"
+            + String(chars[20..<32])
+        return UUID(uuidString: uuidStr) ?? UUID()
+    }
+
+    static func voiceSetDigest(
+        bookID: UUID,
+        characters: [AudiobookCharacter],
+        bindings: [UUID: AudiobookVoiceBinding]
+    ) -> String {
+        let parts = characters
+            .sorted { $0.id.uuidString < $1.id.uuidString }
+            .map { role -> String in
+                let digest = bindings[role.id]?.bindingDigest ?? "unbound"
+                return "\(role.id.uuidString):\(digest)"
+            }
+            .joined(separator: "|")
+        return AudiobookDigest.sha256Hex(Data("voice_set|\(bookID.uuidString)|\(parts)".utf8))
+    }
+
     public struct ConsolidationOutcome: Equatable, Sendable {
         public var characters: [AudiobookCharacter]
         public var unresolvedCollisionNames: Set<String>

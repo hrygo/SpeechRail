@@ -188,12 +188,14 @@ struct AudiobookImportPreviewSheet: View {
     @State private var selectedEncoding: AudiobookTextEncoding = .utf8
     @State private var editedTitle: String = ""
     @State private var editedAuthor: String = ""
+    @State private var selectedChapterID: UUID?
+    @State private var showsOriginalLayout = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
             SectionHeading(
-                title: "导入 TXT 预览与章节确认",
-                detail: "预览在本地完成，不会向外部 AI 发送任何正文；导入后同时保留原始字节与规范 UTF-8 原文。"
+                title: "整理段落与章节",
+                detail: "格式探测已完成。先核对整理后的段落和目录，确认后再进入角色分析。原始文件会完整保留，整理在本地完成。"
             )
 
             if let preview = workflow.importPreview {
@@ -222,25 +224,33 @@ struct AudiobookImportPreviewSheet: View {
                             }
                         }
                         .onChange(of: selectedEncoding) { _, newValue in
+                            guard newValue != preview.detectedEncoding else { return }
                             guard let url = workflow.importFileURL else { return }
                             Task { await workflow.prepareImport(fileURL: url, encoding: newValue) }
                         }
                     }
-                    .frame(width: 150)
+                    .fixedSize(horizontal: true, vertical: false)
                 }
 
                 HStack(spacing: SpeechRailDesignTokens.Spacing.md) {
                     StatusPill(tone: .healthy, label: "共 \(preview.chapters.count) 章")
+                    StatusPill(tone: .neutral, label: "\(preview.sourceIndex.paragraphs.count) 个段落")
                     StatusPill(tone: .neutral, label: "\(preview.scalarCount) 字符")
                     StatusPill(tone: .neutral, label: "编码：\(preview.detectedEncoding.rawValue.uppercased())")
                 }
 
+                Text(preview.sourceIndex.joinedLineBreakCount > 0
+                     ? "已连接 \(preview.sourceIndex.joinedLineBreakCount) 处排版折行，保留段落与独立对白。请选择章节核对正文。"
+                     : "已整理段落与目录。请选择章节核对正文，章节名称和划分可在工作台继续调整。")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+
                 HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
                     CardSurface {
                         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                            Text("识别到的章节边界（\(preview.chapters.count) 章）")
+                            Text("章节目录（\(preview.chapters.count) 章）")
                                 .font(SpeechRailDesignTokens.Typography.sectionTitle)
-                            List(preview.chapters) { chapter in
+                            List(preview.chapters, selection: $selectedChapterID) { chapter in
                                 HStack {
                                     Text("#\(chapter.ordinal + 1)")
                                         .font(SpeechRailDesignTokens.Typography.technical)
@@ -249,30 +259,31 @@ struct AudiobookImportPreviewSheet: View {
                                         .font(SpeechRailDesignTokens.Typography.body)
                                         .lineLimit(1)
                                     Spacer()
-                                    Text("\(chapter.sourceRange.byteCount) B")
-                                        .font(SpeechRailDesignTokens.Typography.technical)
-                                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                                 }
+                                .tag(chapter.id)
                             }
+                            .accessibilityLabel("选择章节核对整理结果")
                             .speechRailSelectableList()
-                            .frame(minHeight: 220)
+                            .frame(height: SpeechRailDesignTokens.Layout.audiobookImportPreviewHeight)
                         }
                         .padding(SpeechRailDesignTokens.Spacing.sm)
                     }
-                    .frame(width: 260)
+                    .frame(width: SpeechRailDesignTokens.Layout.sidebarIdealWidth)
 
                     CardSurface {
                         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                            Text("原文前段保真预览（未修改任何字符或换行）")
+                            Text(showsOriginalLayout ? "原始排版（节选）" : "整理后的正文（节选）")
                                 .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                            Toggle("查看原始排版", isOn: $showsOriginalLayout)
+                                .toggleStyle(.checkbox)
                             ScrollView {
-                                Text(preview.previewText)
+                                Text((try? preview.textPreview(for: selectedChapterID, originalLayout: showsOriginalLayout)) ?? preview.previewText)
                                     .font(SpeechRailDesignTokens.Typography.body)
                                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .textSelection(.enabled)
                             }
-                            .frame(minHeight: 220)
+                            .frame(height: SpeechRailDesignTokens.Layout.audiobookImportPreviewHeight)
                         }
                         .padding(SpeechRailDesignTokens.Spacing.md)
                     }
@@ -281,6 +292,11 @@ struct AudiobookImportPreviewSheet: View {
                     editedTitle = preview.title
                     editedAuthor = preview.author ?? ""
                     selectedEncoding = preview.detectedEncoding
+                    selectedChapterID = preview.chapters.first?.id
+                }
+                .onChange(of: preview.id) { _, _ in
+                    selectedEncoding = preview.detectedEncoding
+                    selectedChapterID = preview.chapters.first?.id
                 }
             }
 
@@ -293,7 +309,7 @@ struct AudiobookImportPreviewSheet: View {
 
                 Spacer()
 
-                Button("确认导入并进入工作台") {
+                Button("确认整理并导入") {
                     if var preview = workflow.importPreview {
                         let trimmedTitle = editedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
                         let trimmedAuthor = editedAuthor.trimmingCharacters(in: .whitespacesAndNewlines)

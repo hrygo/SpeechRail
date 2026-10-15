@@ -33,6 +33,7 @@ private struct AudiobookBookWorkspaceSnapshot: Sendable {
     let exportRecords: [AudiobookExportRecord]
     let allAnnotations: [AudiobookAnnotation]
     let resumePlan: AudiobookResumePlan?
+    let productionCheckpoint: AudiobookProductionCheckpoint?
     let chapterReadinessByID: [UUID: AudiobookChapterReadinessState]
     let chapterDetails: AudiobookChapterDetailsSnapshot
     let workbenchTab: AudiobookWorkflowModel.WorkbenchTab
@@ -276,6 +277,7 @@ public final class AudiobookWorkflowModel {
     public private(set) var productionBookID: UUID?
     public private(set) var productionFragmentID: UUID?
     public private(set) var productionProgress: AudiobookProductionProgress?
+    private var selectedProductionCheckpoint: AudiobookProductionCheckpoint?
     public private(set) var isEditingChapterLayout: Bool = false
     public private(set) var resumePlan: AudiobookResumePlan?
     public private(set) var exportCapabilities: MediaCapabilitiesSnapshot = .init(
@@ -454,6 +456,14 @@ public final class AudiobookWorkflowModel {
 
     public var isProductionBusy: Bool {
         isProducing || isPausingProduction
+    }
+
+    public var selectedBookProductionProgress: AudiobookProductionProgress? {
+        guard let book = selectedBook else { return nil }
+        if let productionProgress, productionProgress.bookID == book.id { return productionProgress }
+        var saved = selectedProductionCheckpoint?.progress
+        if book.productionState == .paused { saved?.state = .paused }
+        return saved
     }
 
     public var canEditChapterStructure: Bool {
@@ -740,6 +750,13 @@ public final class AudiobookWorkflowModel {
             applyChapterDetails(mustReloadChapterDetails ? .empty : snapshot.chapterDetails)
             isLoadingChapterDetails = mustReloadChapterDetails
             resumePlan = snapshot.resumePlan
+            selectedProductionCheckpoint = snapshot.productionCheckpoint
+            if !isProductionBusy {
+                productionProgress = snapshot.productionCheckpoint?.progress
+                if snapshot.book.productionState == .paused {
+                    productionProgress?.state = .paused
+                }
+            }
             chapterReadinessByID = snapshot.chapterReadinessByID
             selectedAtomIDs.removeAll()
             surfaceMode = .workspace
@@ -1792,9 +1809,10 @@ public final class AudiobookWorkflowModel {
             }
 
             let castRev = try await castController.currentCastRevisionID(for: bookID)
-            try await castController.confirmCast(bookID: bookID, revisionID: castRev)
             let voiceDigest = try await castController.currentVoiceSetDigest(for: bookID)
-            try await castController.confirmAudition(bookID: bookID, voiceSetDigest: voiceDigest)
+            try await castController.confirmCastAndAudition(
+                bookID: bookID, revisionID: castRev, voiceSetDigest: voiceDigest
+            )
             selectedBook = try await store.book(id: bookID)
             await refreshChapterReadinessMap(for: bookID)
             await refreshShelf()
@@ -2044,6 +2062,14 @@ public final class AudiobookWorkflowModel {
 
     public func makeConfirmedChapters(chapterIDs: [UUID]? = nil) {
         guard let bookID = selectedBook?.id else { return }
+        if chapterIDs == nil, selectedBook?.productionState == .paused,
+           let checkpoint = selectedProductionCheckpoint, checkpoint.progress.canResume
+        {
+            startProductionRun(bookID: bookID, chapterIDs: checkpoint.chapterIDs,
+                               regeneratingFragmentID: checkpoint.regeneratingFragmentID,
+                               resumingTaskID: checkpoint.taskID)
+            return
+        }
         guard !isEditingChapterLayout else {
             errorMessage = "正在整理章节目录，请完成后再开始制作。"
             return
@@ -2082,10 +2108,36 @@ public final class AudiobookWorkflowModel {
         startProductionRun(bookID: bookID, chapterIDs: targetChapterIDs)
     }
 
+    public func resumeProduction() async {
+        guard let bookID = selectedBook?.id, let store, !isProductionBusy else { return }
+        do {
+            let checkpoint = try await store.productionCheckpoint(for: bookID)
+            guard selectedBook?.id == bookID, !isProductionBusy else { return }
+            if let checkpoint, checkpoint.progress.canResume {
+                startProductionRun(
+                    bookID: bookID, chapterIDs: checkpoint.chapterIDs,
+                    regeneratingFragmentID: checkpoint.regeneratingFragmentID,
+                    resumingTaskID: checkpoint.taskID
+                )
+            } else {
+                // Books created before task checkpoints still resume via verified candidates.
+                let readyIDs = chapters.compactMap { chapter in
+                    let readiness = chapterReadinessByID[chapter.id]
+                    return readiness == .readyForProduction || readiness == .needsUpdate || readiness == .paused
+                        ? chapter.id : nil
+                }
+                makeConfirmedChapters(chapterIDs: readyIDs)
+            }
+        } catch {
+            if selectedBook?.id == bookID { errorMessage = error.localizedDescription }
+        }
+    }
+
     private func startProductionRun(
         bookID: UUID,
         chapterIDs: [UUID],
-        regeneratingFragmentID: UUID? = nil
+        regeneratingFragmentID: UUID? = nil,
+        resumingTaskID: UUID? = nil
     ) {
         guard let productionController else { return }
         guard !isEditingChapterLayout else {
@@ -2107,7 +2159,7 @@ public final class AudiobookWorkflowModel {
         productionRunID = runID
         productionBookID = bookID
         productionFragmentID = regeneratingFragmentID
-        productionProgress = nil
+        productionProgress = AudiobookProductionProgress(bookID: bookID, state: .running, totalChapters: chapterIDs.count)
         productionProgressPollTask?.cancel()
         isProducing = true
         isPausingProduction = false
@@ -2122,9 +2174,18 @@ public final class AudiobookWorkflowModel {
                       self.productionRunID == runID,
                       self.productionBookID == bookID
                 else { return }
+                let previous = self.productionProgress
                 let progress = await productionController.progress(for: bookID)
                 guard !Task.isCancelled, self.productionRunID == runID else { return }
-                self.productionProgress = progress
+                if let progress {
+                    self.productionProgress = progress
+                    if self.selectedBook?.id == bookID,
+                       (previous?.completedFragments != progress.completedFragments
+                        || previous?.totalFragments != progress.totalFragments)
+                    {
+                        await self.reloadSelectedChapterDetails()
+                    }
+                }
             }
         }
 
@@ -2138,29 +2199,26 @@ public final class AudiobookWorkflowModel {
                     try await productionController.regenerateFragment(
                         bookID: bookID,
                         chapterID: chapterID,
-                        fragmentID: regeneratingFragmentID
+                        fragmentID: regeneratingFragmentID,
+                        resumingTaskID: resumingTaskID
                     )
                 } else {
-                    try await productionController.start(bookID: bookID, chapterIDs: chapterIDs)
+                    try await productionController.start(bookID: bookID, chapterIDs: chapterIDs, resumingTaskID: resumingTaskID)
                 }
                 let progress = await productionController.progress(for: bookID)
-                guard self.productionRunID == runID else { return }
+                guard self.productionRunID == runID, !self.isPausingProduction else { return }
                 self.productionProgress = progress
                 await self.refreshProductionBook(bookID)
-                guard self.productionRunID == runID else { return }
+                guard self.productionRunID == runID, !self.isPausingProduction else { return }
                 self.finishProductionRun(runID)
-                if self.selectedBook?.id == bookID, self.surfaceMode == .workspace {
-                    self.bannerMessage = regeneratingFragmentID == nil
-                        ? "所选章节制作已完成，可立即进入听书或导出。"
-                        : "本段新候选已生成；当前章节版本保持不变。请试听后选择“采用此候选”。"
-                }
+                self.showProductionCompletionMessage(bookID: bookID, isFragmentRegeneration: regeneratingFragmentID != nil)
             } catch {
-                guard self.productionRunID == runID else { return }
+                guard self.productionRunID == runID, !self.isPausingProduction else { return }
                 let progress = await productionController.progress(for: bookID)
-                guard self.productionRunID == runID else { return }
+                guard self.productionRunID == runID, !self.isPausingProduction else { return }
                 self.productionProgress = progress
                 await self.refreshProductionBook(bookID)
-                guard self.productionRunID == runID else { return }
+                guard self.productionRunID == runID, !self.isPausingProduction else { return }
                 self.finishProductionRun(runID)
                 if (error as? AudiobookProductionError) != .cancelled,
                    !(error is CancellationError)
@@ -2178,16 +2236,40 @@ public final class AudiobookWorkflowModel {
               let bookID = productionBookID,
               let runID = productionRunID
         else { return }
+        let isFragmentRegeneration = productionFragmentID != nil
         isPausingProduction = true
         productionProgressPollTask?.cancel()
-        await productionController.pause()
+        productionProgress?.state = .pausing
         let task = productionTask
         task?.cancel()
+        await productionController.pause()
         if let task { await task.value }
         guard productionRunID == runID else { return }
-        productionProgress = await productionController.progress(for: bookID)
-        finishProductionRun(runID)
+        let finalProgress = await productionController.progress(for: bookID)
+        productionProgress = finalProgress
         await refreshProductionBook(bookID)
+        guard productionRunID == runID else { return }
+        finishProductionRun(runID)
+        switch finalProgress?.state {
+        case .failed:
+            bannerMessage = nil
+            errorMessage = finalProgress?.lastErrorMessage
+        case .paused:
+            if selectedBook?.id == bookID {
+                bannerMessage = "制作已暂停，已保存的声音会保留。点击“继续制作”即可接着完成。"
+            }
+        case .fullBookProduced, .partialChaptersReady, .allConfirmedChaptersProduced:
+            showProductionCompletionMessage(bookID: bookID, isFragmentRegeneration: isFragmentRegeneration)
+        default:
+            bannerMessage = nil
+        }
+    }
+
+    private func showProductionCompletionMessage(bookID: UUID, isFragmentRegeneration: Bool) {
+        guard selectedBook?.id == bookID, surfaceMode == .workspace else { return }
+        bannerMessage = isFragmentRegeneration
+            ? "本段新候选已生成；当前章节版本保持不变。请试听后选择“采用此候选”。"
+            : "所选章节制作已完成，可立即进入听书或导出。"
     }
 
     private func finishProductionRun(_ runID: UUID) {
@@ -2356,6 +2438,7 @@ public final class AudiobookWorkflowModel {
         let loadedCharacters = try await store.characters(for: bookID)
         let loadedBindings = try await store.voiceBindings(for: bookID)
         let loadedExports = try await store.exportRecords(for: bookID)
+        let loadedProductionCheckpoint = try await store.productionCheckpoint(for: bookID)
         let allAnnotations = (try? await store.annotations(for: bookID)) ?? []
         let (_, computedStats, _) = AudiobookCastRegistry.computeRoleDialogueStats(
             characters: loadedCharacters,
@@ -2403,6 +2486,7 @@ public final class AudiobookWorkflowModel {
             exportRecords: loadedExports,
             allAnnotations: allAnnotations,
             resumePlan: loadedResumePlan,
+            productionCheckpoint: loadedProductionCheckpoint,
             chapterReadinessByID: readinessByID,
             chapterDetails: chapterDetails,
             workbenchTab: tab

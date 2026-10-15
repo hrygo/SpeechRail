@@ -208,6 +208,150 @@ final class AudiobookProductionTests: XCTestCase {
     }
 
     @MainActor
+    func testPreparationPublishesProgressBeforeCapabilitiesReturn() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let cast = AudiobookCastController(store: store)
+        let renderer = ScriptedSpeechRenderer(capabilities: makeDefaultCapabilities())
+        let fetching = AsyncGate()
+        let allowFetch = AsyncGate()
+        renderer.onCapabilitiesFetch = {
+            await fetching.open()
+            await allowFetch.wait()
+        }
+        let url = tempRoot.appendingPathComponent("visible-preparation.txt")
+        try Data("第一章 准备\n风吹过港口。\n".utf8).write(to: url)
+        let preview = try await AudiobookTXTImporter.prepare(fileURL: url, encoding: .utf8)
+        let bookID = try await store.importBook(preview)
+        let chapter = try await store.chapters(for: bookID)[0]
+        let narrator = try await store.characters(for: bookID)[0]
+        var book = try await store.book(id: bookID)
+        book.analysisState = .allWindowsValidated
+        try await store.updateBook(book)
+        let atoms = try await store.atoms(for: bookID, chapterID: chapter.id).filter { $0.kind != .formatting }
+        try await store.saveAnnotations(bookID: bookID, annotations: atoms.map {
+            AudiobookAnnotation(bookID: bookID, chapterID: chapter.id, windowID: UUID(),
+                               atomID: $0.id, sourceRange: $0.sourceRange, assignment: .assigned(roleID: narrator.id))
+        })
+        try await cast.bindVoice(bookID: bookID, roleID: narrator.id, binding: .init(
+            roleID: narrator.id, voiceID: "v-narrator", voiceRevision: "rev-n1", modelRevision: "qwen3-tts-v1"
+        ))
+        let castRevision = try await cast.currentCastRevisionID(for: bookID)
+        try await cast.confirmCast(bookID: bookID, revisionID: castRevision)
+        let voiceDigest = try await cast.currentVoiceSetDigest(for: bookID)
+        try await cast.confirmAudition(bookID: bookID, voiceSetDigest: voiceDigest)
+        let production = AudiobookProductionController(
+            store: store, castController: cast, revisionController: AudiobookRevisionController(store: store),
+            renderer: renderer, admission: SpeechCreationAdmission()
+        )
+        let task = Task { try await production.start(bookID: bookID, chapterIDs: [chapter.id]) }
+        await fetching.wait()
+        let progress = await production.progress(for: bookID)
+        XCTAssertNotNil(progress, "等待能力检查时也必须有进度，不能直到第一段合成才出现")
+        XCTAssertEqual(progress?.state, .running)
+        XCTAssertEqual(progress?.phase, .preparing)
+        XCTAssertGreaterThan(progress?.totalFragments ?? 0, 0)
+        let checkpointBeforeRendering = try await store.productionCheckpoint(for: bookID)
+        XCTAssertEqual(checkpointBeforeRendering?.chapterIDs, [chapter.id])
+        XCTAssertEqual(checkpointBeforeRendering?.progress.totalFragments, progress?.totalFragments)
+        await allowFetch.open()
+        try await task.value
+        let reopened = try AudiobookProjectStore(root: tempRoot)
+        let saved = try await reopened.productionCheckpoint(for: bookID)
+        XCTAssertEqual(saved?.progress.phase, .completed)
+        XCTAssertEqual(saved?.progress.fraction, 1)
+    }
+
+    @MainActor
+    func testPauseAfterCompletionCommitKeepsCompletedState() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let cast = AudiobookCastController(store: store)
+        let renderer = ScriptedSpeechRenderer(capabilities: makeDefaultCapabilities())
+        let completionCommitted = AsyncGate()
+        let allowCommitToReturn = AsyncGate()
+        let production = AudiobookProductionController(
+            store: store, castController: cast, revisionController: AudiobookRevisionController(store: store),
+            renderer: renderer, admission: SpeechCreationAdmission(),
+            candidateCommitter: { candidate, wav in
+                try await store.commitCandidate(candidate, wav: wav)
+            },
+            completionCommitter: { checkpoint, listenableState in
+                try await store.saveProductionCheckpoint(checkpoint, listenableState: listenableState)
+                await completionCommitted.open()
+                await allowCommitToReturn.wait()
+            }
+        )
+        let url = tempRoot.appendingPathComponent("completed-commit-pause.txt")
+        try Data("第一章 渡口\n风吹过港口。\n".utf8).write(to: url)
+        let preview = try await AudiobookTXTImporter.prepare(fileURL: url, encoding: .utf8)
+        let bookID = try await store.importBook(preview)
+        let chapter = try await store.chapters(for: bookID)[0]
+        let narrator = try await store.characters(for: bookID)[0]
+        var book = try await store.book(id: bookID)
+        book.analysisState = .allWindowsValidated
+        try await store.updateBook(book)
+        let atoms = try await store.atoms(for: bookID, chapterID: chapter.id).filter { $0.kind != .formatting }
+        try await store.saveAnnotations(bookID: bookID, annotations: atoms.map {
+            AudiobookAnnotation(bookID: bookID, chapterID: chapter.id, windowID: UUID(),
+                               atomID: $0.id, sourceRange: $0.sourceRange, assignment: .assigned(roleID: narrator.id))
+        })
+        try await cast.bindVoice(bookID: bookID, roleID: narrator.id, binding: .init(
+            roleID: narrator.id, voiceID: "v-narrator", voiceRevision: "rev-n1", modelRevision: "qwen3-tts-v1"
+        ))
+        let castRevision = try await cast.currentCastRevisionID(for: bookID)
+        try await cast.confirmCast(bookID: bookID, revisionID: castRevision)
+        let voiceDigest = try await cast.currentVoiceSetDigest(for: bookID)
+        try await cast.confirmAudition(bookID: bookID, voiceSetDigest: voiceDigest)
+
+        let task = Task { try await production.start(bookID: bookID, chapterIDs: [chapter.id]) }
+        await completionCommitted.wait()
+        let committedBook = try await store.book(id: bookID)
+        XCTAssertEqual(committedBook.productionState, .fullBookProduced)
+        let progressBeforeSaveReturns = await production.progress(for: bookID)
+        XCTAssertEqual(progressBeforeSaveReturns?.state, .running)
+        XCTAssertNotEqual(progressBeforeSaveReturns?.phase, .completed,
+                          "控制器只在最终保存成功返回后发布完成进度")
+        // Workflow cancels its parent task before asking the controller to pause.
+        task.cancel()
+        await production.pause()
+        await allowCommitToReturn.open()
+        do {
+            try await task.value
+        } catch {
+            XCTFail("完成事务已提交，迟到的暂停不应把成功返回改成暂停：\(error)")
+        }
+
+        let finalBook = try await store.book(id: bookID)
+        let checkpoint = try await store.productionCheckpoint(for: bookID)
+        let finalProgress = await production.progress(for: bookID)
+        XCTAssertEqual(finalBook.productionState, .fullBookProduced)
+        XCTAssertEqual(finalBook.listenableState, .fullBookListenable)
+        XCTAssertEqual(checkpoint?.progress.state, .fullBookProduced)
+        XCTAssertEqual(checkpoint?.progress.phase, .completed)
+        XCTAssertEqual(finalProgress?.state, .fullBookProduced)
+        XCTAssertEqual(finalProgress?.phase, .completed)
+    }
+
+    func testProgressUsesSavedAudioCountsAndStopsElapsedTimeWhenPaused() {
+        let start = Date(timeIntervalSince1970: 100)
+        var progress = AudiobookProductionProgress(
+            bookID: UUID(), state: .running, completedFragments: 3, totalFragments: 8,
+            phase: .rendering, startedAt: start, updatedAt: start.addingTimeInterval(10)
+        )
+        XCTAssertEqual(progress.fraction, 0.375)
+        XCTAssertEqual(progress.savedFragmentsText, "已保存 3/8 段")
+        XCTAssertFalse(progress.isStalled(at: start.addingTimeInterval(69)))
+        XCTAssertTrue(progress.isStalled(at: start.addingTimeInterval(70)))
+        XCTAssertEqual(progress.elapsedSeconds(at: start.addingTimeInterval(80)), 80)
+        progress.state = .paused
+        XCTAssertEqual(progress.statusTitle, "制作已暂停")
+        XCTAssertEqual(progress.elapsedSeconds(at: start.addingTimeInterval(800)), 10)
+        XCTAssertFalse(progress.isStalled(at: start.addingTimeInterval(800)))
+        progress.totalFragments = 0
+        XCTAssertEqual(progress.fraction, 0)
+        XCTAssertEqual(progress.savedFragmentsText, "正在确认本次制作范围")
+    }
+
+    @MainActor
     func testFormalRenderRequiresAnalysisCastAuditionAndChapterReadiness() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
         let castController = AudiobookCastController(store: store)
@@ -476,6 +620,16 @@ final class AudiobookProductionTests: XCTestCase {
         XCTAssertEqual(bookAfterCommitPause.productionState, .paused)
         XCTAssertNil(chapterAfterCommitPause.currentChapterRevisionID)
         XCTAssertFalse(admission.isBusy)
+
+        let checkpoint = try await store.productionCheckpoint(for: bookID)
+        let savedTaskID = try XCTUnwrap(checkpoint?.taskID)
+        let requestCountBeforeResume = renderer.requests.count
+        try await production.regenerateFragment(bookID: bookID, chapterID: chapter.id,
+                                               fragmentID: fragment.id, resumingTaskID: savedTaskID)
+        XCTAssertEqual(renderer.requests.count, requestCountBeforeResume,
+                       "提交边界暂停后，续作应复用本次重录已经保存的候选")
+        let candidatesAfterResume = try await store.candidates(for: bookID)
+        XCTAssertEqual(candidatesAfterResume.map(\.id), committedCandidates.map(\.id))
     }
 
     @MainActor

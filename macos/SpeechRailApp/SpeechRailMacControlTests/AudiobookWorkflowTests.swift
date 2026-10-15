@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import SpeechRailControlKit
 import XCTest
 #if SWIFT_PACKAGE
@@ -158,16 +159,23 @@ final class AudiobookWorkflowTests: XCTestCase {
 
     private actor WorkflowRendererGate {
         private var isSuspended = false
+        private var wasCancelled = false
         private var continuation: CheckedContinuation<Void, Never>?
 
         func suspend() async {
-            await withCheckedContinuation { continuation in
-                self.continuation = continuation
-                isSuspended = true
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    self.continuation = continuation
+                    isSuspended = true
+                }
+            } onCancel: {
+                Task { await self.markCancelled() }
             }
         }
 
         func hasSuspended() -> Bool { isSuspended }
+        func hasBeenCancelled() -> Bool { wasCancelled }
+        private func markCancelled() { wasCancelled = true }
 
         func resume() {
             continuation?.resume()
@@ -520,6 +528,128 @@ final class AudiobookWorkflowTests: XCTestCase {
         XCTAssertEqual(workflow.selectedBookPrimaryAction, .makeConfirmedChapters)
     }
 
+    func testConfirmCastAndAuditionRollsBackWhenAuditionPersistenceFails() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, _) = makeWorkflow(store: store)
+        let imported = try await importBook(
+            into: workflow,
+            fileName: "confirmation-atomicity.txt",
+            text: "第一章 灯塔\n海雾漫过栈桥。\n灯塔的光照亮了归途。\n"
+        )
+        let importedCharacters = try await store.characters(for: imported.bookID)
+        let narrator = try XCTUnwrap(importedCharacters.first(where: \.isNarrator))
+        let chapters = try await store.chapters(for: imported.bookID)
+        for chapter in chapters {
+            let atoms = try await store.atoms(for: imported.bookID, chapterID: chapter.id)
+                .filter { $0.kind != .formatting }
+            let annotations = atoms.map { atom in
+                AudiobookAnnotation(
+                    bookID: imported.bookID,
+                    chapterID: chapter.id,
+                    windowID: UUID(),
+                    atomID: atom.id,
+                    sourceRange: atom.sourceRange,
+                    assignment: .assigned(roleID: narrator.id)
+                )
+            }
+            XCTAssertFalse(annotations.isEmpty, "确认回归必须包含已分析的对白归属")
+            try await store.saveAnnotations(bookID: imported.bookID, annotations: annotations)
+        }
+        var analyzedBook = try await store.book(id: imported.bookID)
+        analyzedBook.analysisState = .allWindowsValidated
+        try await store.updateBook(analyzedBook)
+
+        await workflow.openBook(imported.bookID)
+        await workflow.bindVoice(
+            roleID: narrator.id,
+            binding: AudiobookVoiceBinding(
+                roleID: narrator.id,
+                voiceID: "v-narrator",
+                voiceRevision: "v1",
+                modelRevision: "qwen3-tts-v1"
+            )
+        )
+        XCTAssertNil(workflow.errorMessage, "测试夹具必须先成功保存旁白绑定")
+
+        let originalBook = try await store.book(id: imported.bookID)
+        let originalCharacters = try await store.characters(for: imported.bookID)
+        let originalBindings = try await store.voiceBindings(for: imported.bookID)
+        let originalAnnotations = try await store.annotations(for: imported.bookID)
+        XCTAssertNil(originalBook.confirmedCastRevisionID)
+        XCTAssertNil(originalBook.confirmedAuditionVoiceSetDigest)
+
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(tempRoot.appendingPathComponent("library.sqlite3").path, &database), SQLITE_OK)
+        let handle = try XCTUnwrap(database)
+        defer { sqlite3_close(handle) }
+        let installTriggerSQL = """
+        CREATE TRIGGER injected_audition_failure_before_insert
+        BEFORE INSERT ON books
+        WHEN NEW.confirmed_audition_digest IS NOT NULL
+        BEGIN SELECT RAISE(ABORT, 'injected_confirmation_failure'); END;
+        CREATE TRIGGER injected_audition_failure_before_update
+        BEFORE UPDATE ON books
+        WHEN NEW.confirmed_audition_digest IS NOT NULL
+          AND NEW.confirmed_audition_digest IS NOT OLD.confirmed_audition_digest
+        BEGIN SELECT RAISE(ABORT, 'injected_confirmation_failure'); END;
+        """
+        XCTAssertEqual(sqlite3_exec(handle, installTriggerSQL, nil, nil, nil), SQLITE_OK,
+                       String(cString: sqlite3_errmsg(handle)))
+
+        await workflow.confirmCastAndAudition()
+
+        XCTAssertTrue(
+            workflow.errorMessage?.contains("injected_confirmation_failure") == true,
+            "第二次确认必须由注入的 SQLite 故障明确失败；实际：\(workflow.errorMessage ?? "无错误")"
+        )
+        let bookAfterFailure = try await store.book(id: imported.bookID)
+        XCTAssertEqual(
+            bookAfterFailure.confirmedCastRevisionID,
+            originalBook.confirmedCastRevisionID,
+            "试听写入失败后不得留下先行提交的角色确认；实际：\(String(describing: bookAfterFailure.confirmedCastRevisionID))"
+        )
+        XCTAssertEqual(bookAfterFailure.confirmedAuditionVoiceSetDigest, originalBook.confirmedAuditionVoiceSetDigest)
+        XCTAssertEqual(bookAfterFailure.updatedAt, originalBook.updatedAt,
+                       "复合确认失败必须回滚首次书籍写入的更新时间")
+        XCTAssertEqual(bookAfterFailure, originalBook, "两项确认必须在同一事务中原子提交")
+        let charactersAfterFailure = try await store.characters(for: imported.bookID)
+        let bindingsAfterFailure = try await store.voiceBindings(for: imported.bookID)
+        let annotationsAfterFailure = try await store.annotations(for: imported.bookID)
+        XCTAssertEqual(charactersAfterFailure, originalCharacters)
+        XCTAssertEqual(bindingsAfterFailure, originalBindings)
+        XCTAssertEqual(annotationsAfterFailure, originalAnnotations)
+
+        let reopenedStore = try AudiobookProjectStore(root: tempRoot)
+        let reopenedBookAfterFailure = try await reopenedStore.book(id: imported.bookID)
+        let reopenedCharactersAfterFailure = try await reopenedStore.characters(for: imported.bookID)
+        let reopenedBindingsAfterFailure = try await reopenedStore.voiceBindings(for: imported.bookID)
+        let reopenedAnnotationsAfterFailure = try await reopenedStore.annotations(for: imported.bookID)
+        XCTAssertEqual(reopenedBookAfterFailure, originalBook, "重开数据库后也不得留下半确认状态")
+        XCTAssertEqual(reopenedCharactersAfterFailure, originalCharacters)
+        XCTAssertEqual(reopenedBindingsAfterFailure, originalBindings)
+        XCTAssertEqual(reopenedAnnotationsAfterFailure, originalAnnotations)
+
+        let removeTriggerSQL = """
+        DROP TRIGGER injected_audition_failure_before_insert;
+        DROP TRIGGER injected_audition_failure_before_update;
+        """
+        XCTAssertEqual(sqlite3_exec(handle, removeTriggerSQL, nil, nil, nil), SQLITE_OK,
+                       String(cString: sqlite3_errmsg(handle)))
+        await workflow.confirmCastAndAudition()
+        XCTAssertNil(workflow.errorMessage, "移除故障后，同一工作流必须能重试确认")
+
+        let confirmedBook = try await store.book(id: imported.bookID)
+        let castController = AudiobookCastController(store: store)
+        let currentCastRevisionID = try await castController.currentCastRevisionID(for: imported.bookID)
+        let currentVoiceSetDigest = try await castController.currentVoiceSetDigest(for: imported.bookID)
+        XCTAssertEqual(confirmedBook.confirmedCastRevisionID, currentCastRevisionID)
+        XCTAssertEqual(confirmedBook.confirmedAuditionVoiceSetDigest, currentVoiceSetDigest)
+        for chapter in chapters {
+            XCTAssertEqual(workflow.chapterReadinessByID[chapter.id], .readyForProduction,
+                           "重试后角色确认和试听确认均应对当前章节生效")
+        }
+    }
+
     func testOpeningAnotherBookSelectsARoleFromThatBook() async throws {
         let (workflow, _) = makeWorkflow()
         let firstBook = try await importBook(
@@ -710,6 +840,13 @@ final class AudiobookWorkflowTests: XCTestCase {
         XCTAssertTrue(workflow.isProducing)
         XCTAssertEqual(workflow.productionBookID, firstBook.bookID)
         await waitForRenderSuspension(renderGate)
+        XCTAssertNotNil(workflow.productionProgress, "点击制作后立即有准备状态")
+        for _ in 0..<100 {
+            if workflow.productionProgress?.currentFragmentID != nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertNotNil(workflow.productionProgress?.currentFragmentID, "第一段仍在制作时就必须收到实时进度")
+        XCTAssertEqual(workflow.productionProgress?.phase, .rendering)
 
         let secondBook = try await importBook(
             into: workflow,
@@ -719,6 +856,9 @@ final class AudiobookWorkflowTests: XCTestCase {
         try await markBookReadyForProduction(secondBook.bookID, workflow: workflow, store: store)
 
         XCTAssertEqual(workflow.selectedBook?.id, secondBook.bookID)
+        XCTAssertEqual(workflow.productionProgress?.bookID, firstBook.bookID,
+                       "打开另一本书不能覆盖当前任务的实时快照")
+        XCTAssertNil(workflow.selectedBookProductionProgress)
         XCTAssertEqual(workflow.selectedBookPrimaryAction, .makeConfirmedChapters)
         XCTAssertTrue(workflow.isProductionBlocked(for: secondBook.bookID))
         let firstBookSummary = try XCTUnwrap(workflow.shelfBooks.first(where: { $0.id == firstBook.bookID }))
@@ -924,6 +1064,236 @@ final class AudiobookWorkflowTests: XCTestCase {
         let chapterAfterAdoption = try XCTUnwrap(chaptersAfterAdoption.first)
         XCTAssertNotEqual(chapterAfterAdoption.currentChapterRevisionID, originalRevisionID,
                           "只有用户显式采用后才切换当前章节版本")
+    }
+
+    func testPausedSingleFragmentContinuesAfterWorkflowReopensWithoutExpandingScope() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (initialWorkflow, _) = makeWorkflow(store: store)
+        let imported = try await importBook(
+            into: initialWorkflow, fileName: "resume-rerecord.txt",
+            text: "第一章 渡口\n风吹过港口。\n第二章 山路\n月亮照亮远山。\n"
+        )
+        try await markBookReadyForProduction(imported.bookID, workflow: initialWorkflow, store: store)
+        initialWorkflow.makeConfirmedChapters()
+        await waitForProductionToFinish(initialWorkflow)
+        let chaptersBefore = try await store.chapters(for: imported.bookID)
+        let candidatesBefore = try await store.candidates(for: imported.bookID)
+
+        let gate = WorkflowRendererGate()
+        let (pausedWorkflow, _) = makeWorkflow(
+            renderer: WorkflowFakeRenderer(beforeRender: { await gate.suspend() }), store: store
+        )
+        await pausedWorkflow.openBook(imported.bookID)
+        let target = try XCTUnwrap(pausedWorkflow.chapterFragments.first)
+        pausedWorkflow.regenerateFragment(fragmentID: target.id)
+        await waitForRenderSuspension(gate)
+        let pauseTask = Task { await pausedWorkflow.pauseProduction() }
+        for _ in 0..<1_000 {
+            if pausedWorkflow.isPausingProduction { break }
+            await Task.yield()
+        }
+        await gate.resume()
+        await pauseTask.value
+        XCTAssertEqual(pausedWorkflow.selectedBook?.productionState, .paused)
+
+        let reopenedStore = try AudiobookProjectStore(root: tempRoot)
+        let (reopenedWorkflow, _) = makeWorkflow(store: reopenedStore)
+        await reopenedWorkflow.refreshShelf()
+        await reopenedWorkflow.openBook(imported.bookID)
+        XCTAssertEqual(reopenedWorkflow.selectedBookPrimaryAction, .resumeProduction)
+        reopenedWorkflow.makeConfirmedChapters()
+        await waitForProductionToFinish(reopenedWorkflow)
+
+        let candidatesAfter = try await reopenedStore.candidates(for: imported.bookID)
+        let newCandidates = candidatesAfter.filter { candidate in
+            !candidatesBefore.contains(where: { $0.id == candidate.id })
+        }
+        XCTAssertEqual(newCandidates.count, 1, "继续单段重录必须生成一个新候选")
+        XCTAssertEqual(newCandidates.first?.fragmentID, target.id, "不能把续作扩大到其他片段或章节")
+        let chaptersAfter = try await reopenedStore.chapters(for: imported.bookID)
+        XCTAssertEqual(chaptersAfter.map(\.currentChapterRevisionID), chaptersBefore.map(\.currentChapterRevisionID),
+                       "续作重录仍须显式采用，不能替换正在使用的版本")
+        XCTAssertNil(reopenedWorkflow.errorMessage)
+    }
+
+    func testPreparationPauseReportsCheckpointWriteFailureInsteadOfSuccess() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, _) = makeWorkflow(store: store)
+        let imported = try await importBook(
+            into: workflow, fileName: "pause-checkpoint-failure.txt",
+            text: "第一章 渡口\n风吹过港口。\n第二章 山路\n月亮照亮远山。\n"
+        )
+        try await markBookReadyForProduction(imported.bookID, workflow: workflow, store: store)
+
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(tempRoot.appendingPathComponent("library.sqlite3").path, &database), SQLITE_OK)
+        let handle = try XCTUnwrap(database)
+        defer { sqlite3_close(handle) }
+        XCTAssertEqual(sqlite3_exec(handle, """
+            CREATE TRIGGER reject_checkpoint_write BEFORE INSERT ON production_checkpoints
+            BEGIN SELECT RAISE(FAIL, 'simulated checkpoint write failure'); END;
+            """, nil, nil, nil), SQLITE_OK)
+
+        workflow.makeConfirmedChapters(chapterIDs: [try XCTUnwrap(imported.chapterIDs.first)])
+        // Cancel before the MainActor production task reaches its first preparation await.
+        await workflow.pauseProduction()
+
+        XCTAssertFalse(workflow.isProductionBusy)
+        XCTAssertEqual(workflow.productionProgress?.state, .failed)
+        XCTAssertTrue(workflow.errorMessage?.contains("任务记录未能保存") == true,
+                      "任务范围未可靠保存时必须明确告知用户")
+        XCTAssertNil(workflow.bannerMessage, "存储失败不能显示暂停成功或可恢复的承诺")
+        let checkpoint = try await store.productionCheckpoint(for: imported.bookID)
+        XCTAssertNil(checkpoint)
+        XCTAssertEqual(workflow.selectedBook?.productionState, .idle)
+    }
+
+    func testPauseDuringCompletedProductionRefreshKeepsCompletionResult() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, _) = makeWorkflow(store: store)
+        let imported = try await importBook(
+            into: workflow, fileName: "completed-production-pause.txt",
+            text: "第一章 渡口\n风吹过港口。\n"
+        )
+        try await markBookReadyForProduction(imported.bookID, workflow: workflow, store: store)
+        var adoptedRevisionID: UUID?
+
+        for isFragmentRegeneration in [false, true] {
+            let gate = WorkflowLoadGate()
+            var shouldSuspend = true
+            workflow.loadCheckpointForTesting = { bookID, chapterID, checkpoint in
+                guard shouldSuspend, bookID == imported.bookID, chapterID == nil,
+                      checkpoint == .afterResumePlanRead else { return }
+                shouldSuspend = false
+                await gate.suspend()
+            }
+            if isFragmentRegeneration {
+                workflow.regenerateFragment(fragmentID: try XCTUnwrap(workflow.chapterFragments.first?.id))
+            } else {
+                workflow.makeConfirmedChapters()
+            }
+            await waitForSuspension(gate)
+            XCTAssertTrue(workflow.isProducing)
+            XCTAssertEqual(workflow.productionProgress?.phase, .completed)
+            let pauseTask = Task { await workflow.pauseProduction() }
+            for _ in 0..<1_000 {
+                if workflow.isPausingProduction { break }
+                await Task.yield()
+            }
+            gate.resume()
+            await pauseTask.value
+
+            XCTAssertEqual(workflow.selectedBook?.productionState, .fullBookProduced)
+            XCTAssertEqual(workflow.selectedBookProductionProgress?.phase, .completed)
+            XCTAssertFalse(workflow.bannerMessage?.contains("制作已暂停") == true,
+                           "已完成制作不能提示用户点击不存在的继续按钮")
+            if isFragmentRegeneration {
+                XCTAssertTrue(workflow.bannerMessage?.contains("采用此候选") == true,
+                              "单段重录完成后仍须引导试听和显式采用")
+                XCTAssertEqual(workflow.chapters.first?.currentChapterRevisionID, adoptedRevisionID)
+            } else {
+                XCTAssertTrue(workflow.bannerMessage?.contains("制作已完成") == true)
+                adoptedRevisionID = workflow.chapters.first?.currentChapterRevisionID
+                XCTAssertNotNil(adoptedRevisionID)
+            }
+        }
+    }
+
+    func testFinalCheckpointFailureRollsBackCompletionAndResumesSavedAudioAfterReopen() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, _) = makeWorkflow(store: store)
+        let imported = try await importBook(
+            into: workflow, fileName: "completion-transaction-failure.txt",
+            text: "第一章 渡口\n风吹过港口。\n"
+        )
+        try await markBookReadyForProduction(imported.bookID, workflow: workflow, store: store)
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(tempRoot.appendingPathComponent("library.sqlite3").path, &database), SQLITE_OK)
+        let handle = try XCTUnwrap(database)
+        defer { sqlite3_close(handle) }
+        // Reject both final completion and fallback pause saves, so reopening must
+        // recover the last running checkpoint after a persistent storage failure.
+        XCTAssertEqual(sqlite3_exec(handle, """
+            CREATE TRIGGER reject_completed_checkpoint BEFORE INSERT ON production_checkpoints
+            WHEN json_extract(NEW.checkpoint_json, '$.progress.phase') = 'completed'
+              OR json_extract(NEW.checkpoint_json, '$.progress.state') = 'paused'
+            BEGIN SELECT RAISE(FAIL, 'simulated final checkpoint failure'); END;
+            """, nil, nil, nil), SQLITE_OK)
+
+        workflow.makeConfirmedChapters()
+        await waitForProductionToFinish(workflow)
+        XCTAssertEqual(workflow.productionProgress?.state, .failed)
+        let interruptedBook = try await store.book(id: imported.bookID)
+        let interruptedCheckpoint = try await store.productionCheckpoint(for: imported.bookID)
+        XCTAssertEqual(interruptedBook.productionState, .running,
+                       "最终检查点未提交时，书籍不能单独提交完成状态")
+        XCTAssertEqual(interruptedBook.listenableState, .fullBookListenable,
+                       "已经发布的章节仍可收听，不随制作收尾失败而撤销")
+        XCTAssertEqual(interruptedCheckpoint?.progress.state, .running)
+        let savedCandidates = try await store.candidates(for: imported.bookID)
+        XCTAssertFalse(savedCandidates.isEmpty, "已提交片段不能随制作终态写入失败而丢失")
+
+        let reopenedStore = try AudiobookProjectStore(root: tempRoot)
+        _ = try await reopenedStore.recover()
+        let (reopened, _) = makeWorkflow(store: reopenedStore)
+        await reopened.refreshShelf()
+        await reopened.openBook(imported.bookID)
+        XCTAssertEqual(reopened.selectedBook?.productionState, .paused)
+        XCTAssertEqual(reopened.selectedBookProductionProgress?.state, .paused)
+        XCTAssertEqual(reopened.selectedBookPrimaryAction, .resumeProduction)
+
+        XCTAssertEqual(sqlite3_exec(handle, "DROP TRIGGER reject_completed_checkpoint;", nil, nil, nil), SQLITE_OK)
+        await reopened.resumeProduction()
+        await waitForProductionToFinish(reopened)
+        let completedBook = try await reopenedStore.book(id: imported.bookID)
+        let completedCheckpoint = try await reopenedStore.productionCheckpoint(for: imported.bookID)
+        let candidatesAfterResume = try await reopenedStore.candidates(for: imported.bookID)
+        XCTAssertEqual(completedBook.productionState, .fullBookProduced)
+        XCTAssertEqual(completedBook.listenableState, .fullBookListenable)
+        XCTAssertEqual(completedCheckpoint?.progress.state, completedBook.productionState)
+        XCTAssertEqual(completedCheckpoint?.progress.phase, .completed)
+        XCTAssertEqual(Set(candidatesAfterResume.map(\.id)), Set(savedCandidates.map(\.id)),
+                       "恢复只补齐制作收尾，应复用已经保存的音频")
+        XCTAssertNil(reopened.errorMessage)
+    }
+
+    func testShutdownPreservesSelectedChapterScopeForResume() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let gate = WorkflowRendererGate()
+        let (workflow, _) = makeWorkflow(renderer: WorkflowFakeRenderer(beforeRender: { await gate.suspend() }), store: store)
+        let imported = try await importBook(
+            into: workflow, fileName: "shutdown-production.txt",
+            text: "第一章 渡口\n风吹过港口。\n第二章 山路\n月亮照亮远山。\n"
+        )
+        try await markBookReadyForProduction(imported.bookID, workflow: workflow, store: store)
+        let targetChapterID = try XCTUnwrap(imported.chapterIDs.first)
+        workflow.makeConfirmedChapters(chapterIDs: [targetChapterID])
+        await waitForRenderSuspension(gate)
+        let shutdown = Task { await workflow.shutdown() }
+        for _ in 0..<1_000 {
+            if await gate.hasBeenCancelled() { break }
+            await Task.yield()
+        }
+        let cancelled = await gate.hasBeenCancelled()
+        XCTAssertTrue(cancelled, "退出应用必须取消在途制作请求")
+        await gate.resume()
+        await shutdown.value
+        XCTAssertFalse(workflow.isProducing)
+
+        let reopenedStore = try AudiobookProjectStore(root: tempRoot)
+        let (reopened, _) = makeWorkflow(store: reopenedStore)
+        await reopened.refreshShelf()
+        await reopened.openBook(imported.bookID)
+        XCTAssertEqual(reopened.selectedBookPrimaryAction, .resumeProduction)
+        reopened.makeConfirmedChapters()
+        await waitForProductionToFinish(reopened)
+        let candidates = try await reopenedStore.candidates(for: imported.bookID)
+        XCTAssertFalse(candidates.isEmpty)
+        XCTAssertTrue(candidates.allSatisfy { $0.chapterID == targetChapterID },
+                      "退出后继续不能把原来只选中的一章扩大为整本书")
+        let chapters = try await reopenedStore.chapters(for: imported.bookID)
+        XCTAssertNotNil(chapters.first?.currentChapterRevisionID)
+        XCTAssertNil(chapters.last?.currentChapterRevisionID)
     }
 
     func testRouteChangeKeepsProductionButReleasesListeningAndShutdownCheckpoints() async throws {
