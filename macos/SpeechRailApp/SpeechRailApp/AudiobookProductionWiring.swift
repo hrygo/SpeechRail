@@ -151,7 +151,7 @@ public enum AudiobookProductionWiring {
                     speed: request.speed,
                     options: primaryOptions
                 )
-            } catch let ServiceAPIClientError.remoteError(code, _, _)
+            } catch let ServiceAPIClientError.http(_, code, _, _, _)
                 where code == "voice_not_production_ready"
                 && matchedVoice?.productionReadyReason == "reference_validation_not_passed"
             {
