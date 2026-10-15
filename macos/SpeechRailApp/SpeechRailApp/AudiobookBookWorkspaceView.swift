@@ -1412,9 +1412,9 @@ public struct AudiobookBookWorkspaceView: View {
                             allCharacters: workflow.characters,
                             allBindings: workflow.voiceBindings,
                             fallbackPresets: Self.fallbackPresetChoices,
-                            onSelectVoice: { newBinding in
+                            onSelectVoice: { voiceID in
                                 activeVoicePickerRoleID = nil
-                                Task { await workflow.bindVoice(roleID: role.id, binding: newBinding) }
+                                Task { await workflow.bindVoice(roleID: role.id, voiceID: voiceID) }
                             },
                             onChangeSpeed: { newSpeed in
                                 Task { await workflow.updateRoleAllowedSpeed(roleID: role.id, speed: newSpeed) }
@@ -1612,7 +1612,7 @@ private struct AudiobookVoicePickerPopover: View {
     let allCharacters: [AudiobookCharacter]
     let allBindings: [UUID: AudiobookVoiceBinding]
     let fallbackPresets: [(id: String, name: String)]
-    let onSelectVoice: (AudiobookVoiceBinding) -> Void
+    let onSelectVoice: (String) -> Void
     let onChangeSpeed: (Double) -> Void
     let onDesignNewVoice: () -> Void
     let onRefreshVoices: () async -> Void
@@ -1738,14 +1738,7 @@ private struct AudiobookVoicePickerPopover: View {
                     if allVoices.isEmpty && activeBookVoices.isEmpty {
                         ForEach(fallbackPresets, id: \.id) { preset in
                             Button {
-                                let b = AudiobookVoiceBinding(
-                                    roleID: role.id,
-                                    voiceID: preset.id,
-                                    voiceRevision: "v1",
-                                    modelRevision: "qwen3-tts-v1",
-                                    allowedSpeed: currentBinding?.allowedSpeed ?? 1.0
-                                )
-                                onSelectVoice(b)
+                                onSelectVoice(preset.id)
                             } label: {
                                 HStack {
                                     Text(preset.name)
@@ -1882,16 +1875,7 @@ private struct AudiobookVoicePickerPopover: View {
             .accessibilityLabel(meta?.isFavorite == true ? "取消收藏" : "收藏音色")
 
             Button {
-                let speed = currentBinding?.allowedSpeed ?? AudiobookLimits.defaultRenderSpeed
-                let b = AudiobookVoiceBinding(
-                    roleID: role.id,
-                    voiceID: voice.id,
-                    voiceRevision: voice.voiceRevision ?? "v1",
-                    modelRevision: voice.model.catalogRevision ?? voice.model.runtimeRevision ?? "qwen3-tts-v1",
-                    isSynthesisReady: true,
-                    allowedSpeed: voice.mode.lowercased() == "clone" ? 1.0 : speed
-                )
-                onSelectVoice(b)
+                onSelectVoice(voice.id)
             } label: {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
                     HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {

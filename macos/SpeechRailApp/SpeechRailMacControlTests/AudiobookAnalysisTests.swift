@@ -191,6 +191,27 @@ final class AudiobookAnalysisTests: XCTestCase {
         XCTAssertEqual(seenPrimaryAtomIDs, expectedReadableIDs, "每个可读 primary atom 必须且只能被规划一次")
     }
 
+    func testAnalysisReceivesPreparedParagraphTextWithoutChangingSource() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let text = "第一章 夜行\r\n\r\n        他站在門邊，聽見了一陣腳步聲，便順著窗外的微弱燈光望\r\n向遠方。\r\n"
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data(text.utf8))
+        let bookID = try await store.importBook(preview)
+        let config = AudiobookAnalysisConfigSnapshot(
+            configuration: LLMConfiguration(baseURL: "http://127.0.0.1:8000/v1", model: "test-model")
+        )
+        let client = ScriptedAnalysisClient(configurationDigest: config.configurationDigest)
+        let pipeline = AudiobookAnalysisPipeline(store: store) { _ in client }
+        _ = try await pipeline.run(bookID: bookID, config: config)
+        let texts = try client.prompts.filter { $0.stage == .extraction }.flatMap { prompt -> [String] in
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(prompt.input.utf8)) as? [String: Any])
+            let items = (object["primary_atoms"] as? [[String: Any]]) ?? []
+            return items.compactMap { $0["text"] as? String }
+        }
+        XCTAssertTrue(texts.contains { $0.contains("望向遠方。") })
+        XCTAssertFalse(texts.contains { $0.contains("\r") })
+        XCTAssertEqual(preview.canonicalUTF8, Data(text.utf8))
+    }
+
     func testNestedQuotesAndAliasCollisionRemainReviewable() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
         let text = """
@@ -390,55 +411,56 @@ final class AudiobookAnalysisTests: XCTestCase {
         )
         let model = ConfiguredModelIdentity(
             assurance: .configuredCatalog,
-            runtimeRevision: "qwen3-tts-v1",
-            catalogRevision: "qwen3-tts-v1"
+            runtimeRevision: String(repeating: "a", count: 40),
+            catalogRevision: String(repeating: "a", count: 40)
         )
         let voices: [SafeVoiceEntry] = [
             SafeVoiceEntry(
                 id: "uncle_fu",
                 name: "醇厚中文男声",
-                mode: "system",
+                mode: "system", isSystem: true, isDefault: true,
                 available: true,
                 availabilityReason: .available,
-                voiceRevision: "v1",
+                voiceRevision: nil,
                 voiceIdentityAssurance: .contentAddressed,
                 model: model,
                 descriptors: desc,
-                operations: [:],
+                operations: ["http_speech": JSONValue(.object(["parameters": JSONValue(.object(["speed": JSONValue(.object(["status": JSONValue(.string("supported")), "minimum": JSONValue(.number(0.25)), "maximum": JSONValue(.number(4))]))]))]))],
                 productionReady: true
             ),
             SafeVoiceEntry(
                 id: "dylan",
                 name: "北京青年男声",
-                mode: "system",
+                mode: "system", isSystem: true, isDefault: true,
                 available: true,
                 availabilityReason: .available,
-                voiceRevision: "v1",
+                voiceRevision: nil,
                 voiceIdentityAssurance: .contentAddressed,
                 model: model,
                 descriptors: desc,
-                operations: [:],
+                operations: ["http_speech": JSONValue(.object(["parameters": JSONValue(.object(["speed": JSONValue(.object(["status": JSONValue(.string("supported")), "minimum": JSONValue(.number(0.25)), "maximum": JSONValue(.number(4))]))]))]))],
                 productionReady: true
             ),
             SafeVoiceEntry(
                 id: "serena",
                 name: "温柔中文女声",
-                mode: "system",
+                mode: "system", isSystem: true, isDefault: true,
                 available: true,
                 availabilityReason: .available,
-                voiceRevision: "v1",
+                voiceRevision: nil,
                 voiceIdentityAssurance: .contentAddressed,
                 model: model,
                 descriptors: desc,
-                operations: [:],
+                operations: ["http_speech": JSONValue(.object(["parameters": JSONValue(.object(["speed": JSONValue(.object(["status": JSONValue(.string("supported")), "minimum": JSONValue(.number(0.25)), "maximum": JSONValue(.number(4))]))]))]))],
                 productionReady: true
             )
         ]
 
         let recommended = AudiobookCastRegistry.recommendVoiceBindings(
-            characters: characters,
-            availableVoices: voices
-        )
+            characters: characters, annotations: [],
+            snapshot: EffectiveCapabilitySnapshot(serviceInstanceEpoch: "fixture", catalogRevision: "fixture", snapshotID: "fixture", profile: "fixture", models: ["tts": model], voices: voices, operations: [:], guarantees: [:]),
+            catalog: .init(), bookID: bookID, existingBindings: [:]
+        ).proposedBindings
         XCTAssertEqual(recommended.count, characters.count)
         let assignedVoiceIDs = Set(recommended.values.map(\.voiceID))
         XCTAssertEqual(assignedVoiceIDs.count, characters.count, "主要角色与旁白应优先分配互不相同的独立音色")

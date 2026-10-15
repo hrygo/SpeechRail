@@ -66,9 +66,18 @@ final class AudiobookWorkflowTests: XCTestCase {
 
     private final class WorkflowFakeRenderer: AudiobookSpeechRenderer, @unchecked Sendable {
         private let beforeRender: (@Sendable () async -> Void)?
+        private let leadLock = NSLock()
+        private var leadRequests = 0
+        var leadRequestCount: Int { leadLock.withLock { leadRequests } }
 
         init(beforeRender: (@Sendable () async -> Void)? = nil) {
             self.beforeRender = beforeRender
+        }
+
+        func createAndPublishLeadVoice(_ request: AudiobookLeadVoiceCreationRequest) async throws -> AudiobookLeadVoiceCreationOutput {
+            leadLock.withLock { leadRequests += 1 }
+            return .init(voiceID: "v-designed-narrator", voiceName: "设计旁白",
+                voiceRevision: "vr_0123456789abcdef0123456789abcdef", modelRevision: String(repeating: "a", count: 40))
         }
 
         func fetchEffectiveCapabilities() async throws -> EffectiveCapabilitySnapshot {
@@ -84,29 +93,33 @@ final class AudiobookWorkflowTests: XCTestCase {
             )
             let model = ConfiguredModelIdentity(
                 assurance: .configuredCatalog,
-                runtimeRevision: "qwen3-tts-v1",
-                catalogRevision: "qwen3-tts-v1"
+                runtimeRevision: String(repeating: "a", count: 40),
+                catalogRevision: String(repeating: "a", count: 40)
             )
             return EffectiveCapabilitySnapshot(
                 serviceInstanceEpoch: "e1",
                 catalogRevision: "c1",
                 snapshotID: "s1",
                 profile: "quality",
-                models: ["tts": model],
+                models: ["tts": model, "tts_clone": model],
                 voices: [
                     SafeVoiceEntry(
                         id: "v-narrator",
                         name: "旁白",
-                        mode: "instruction",
+                        mode: "system", isSystem: true, isDefault: true,
                         available: true,
                         availabilityReason: .available,
-                        voiceRevision: "v1",
+                        voiceRevision: "vr_0123456789abcdef0123456789abcdef",
                         voiceIdentityAssurance: .contentAddressed,
                         model: model,
                         descriptors: desc,
-                        operations: [:],
+                        operations: ["http_speech": JSONValue(.object(["parameters": JSONValue(.object(["speed": JSONValue(.object(["status": JSONValue(.string("supported")), "minimum": JSONValue(.number(0.25)), "maximum": JSONValue(.number(4))]))]))]))],
                         productionReady: true
-                    )
+                    ),
+                    SafeVoiceEntry(id: "v-designed-narrator", name: "设计旁白", mode: "clone", available: true,
+                        availabilityReason: .available, voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                        voiceIdentityAssurance: .contentAddressed, model: model, descriptors: desc,
+                        operations: ["http_speech": JSONValue(.object(["parameters": JSONValue(.object(["speed": JSONValue(.object(["status": JSONValue(.string("supported")), "values": JSONValue(.array([JSONValue(.number(1))]))]))]))]))], productionReady: true)
                 ],
                 operations: [:],
                 guarantees: [:]
@@ -396,8 +409,8 @@ final class AudiobookWorkflowTests: XCTestCase {
             binding: AudiobookVoiceBinding(
                 roleID: narrator.id,
                 voiceID: "v-narrator",
-                voiceRevision: "v1",
-                modelRevision: "qwen3-tts-v1"
+                voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                modelRevision: String(repeating: "a", count: 40)
             )
         )
         await workflow.confirmCastAndAudition()
@@ -520,8 +533,8 @@ final class AudiobookWorkflowTests: XCTestCase {
             binding: AudiobookVoiceBinding(
                 roleID: narrator.id,
                 voiceID: "v-narrator",
-                voiceRevision: "v1",
-                modelRevision: "qwen3-tts-v1"
+                voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                modelRevision: String(repeating: "a", count: 40)
             )
         )
         await workflow.confirmCastAndAudition()
@@ -565,8 +578,8 @@ final class AudiobookWorkflowTests: XCTestCase {
             binding: AudiobookVoiceBinding(
                 roleID: narrator.id,
                 voiceID: "v-narrator",
-                voiceRevision: "v1",
-                modelRevision: "qwen3-tts-v1"
+                voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                modelRevision: String(repeating: "a", count: 40)
             )
         )
         XCTAssertNil(workflow.errorMessage, "测试夹具必须先成功保存旁白绑定")
@@ -1326,7 +1339,7 @@ final class AudiobookWorkflowTests: XCTestCase {
         try await store.saveAnnotations(bookID: bookID, annotations: anns)
         await workflow.bindVoice(
             roleID: narrator.id,
-            binding: AudiobookVoiceBinding(roleID: narrator.id, voiceID: "v-narrator", voiceRevision: "v1", modelRevision: "qwen3-tts-v1")
+            binding: AudiobookVoiceBinding(roleID: narrator.id, voiceID: "v-narrator", voiceRevision: "vr_0123456789abcdef0123456789abcdef", modelRevision: String(repeating: "a", count: 40))
         )
         await workflow.confirmCastAndAudition()
 
@@ -1375,6 +1388,51 @@ final class AudiobookWorkflowTests: XCTestCase {
         XCTAssertFalse(workflow.isAnalyzing)
     }
 
+    func testManualVoiceSelectionUsesSnapshotIdentityAndRejectsMissingVoice() async throws {
+        let (workflow, _) = makeWorkflow()
+        let url = tempRoot.appendingPathComponent("manual.txt")
+        try Data("第一章 归来\n林远站在桥头。\n".utf8).write(to: url)
+        await workflow.prepareImport(fileURL: url, encoding: .utf8)
+        await workflow.confirmImport()
+        let narrator = try XCTUnwrap(workflow.characters.first)
+        await workflow.bindVoice(roleID: narrator.id, voiceID: "v-narrator")
+        let binding = try XCTUnwrap(workflow.voiceBindings[narrator.id])
+        XCTAssertEqual(binding.voiceRevision, "vr_0123456789abcdef0123456789abcdef")
+        XCTAssertEqual(binding.modelRevision, String(repeating: "a", count: 40))
+        await workflow.bindVoice(roleID: narrator.id, voiceID: "missing-preset")
+        XCTAssertEqual(workflow.voiceBindings[narrator.id], binding)
+        XCTAssertNotNil(workflow.errorMessage)
+    }
+
+    func testManualRenderSpeedUsesDeclaredDomainWithoutClamping() async throws {
+        let (workflow, _) = makeWorkflow()
+        let url = tempRoot.appendingPathComponent("speed.txt")
+        try Data("第一章 渡口\n夜色深沉。\n".utf8).write(to: url)
+        await workflow.prepareImport(fileURL: url, encoding: .utf8); await workflow.confirmImport()
+        let role = try XCTUnwrap(workflow.characters.first)
+        await workflow.bindVoice(roleID: role.id, voiceID: "v-narrator")
+        await workflow.updateRoleAllowedSpeed(roleID: role.id, speed: 3)
+        XCTAssertEqual(workflow.voiceBindings[role.id]?.allowedSpeed, 3)
+        for speed in [0.1, Double.nan] {
+            await workflow.updateRoleAllowedSpeed(roleID: role.id, speed: speed)
+            XCTAssertEqual(workflow.voiceBindings[role.id]?.allowedSpeed, 3)
+            XCTAssertNotNil(workflow.errorMessage)
+        }
+    }
+
+    func testAutomaticLeadCreationPreservesExistingSystemBinding() async throws {
+        let renderer = WorkflowFakeRenderer()
+        let (workflow, _) = makeWorkflow(renderer: renderer)
+        let imported = try await importBook(into: workflow, fileName: "protected.txt", text: "第一章 渡口\n夜色深沉。\n")
+        let role = try XCTUnwrap(workflow.characters.first)
+        await workflow.bindVoice(roleID: role.id, voiceID: "v-narrator")
+        let original = try XCTUnwrap(workflow.voiceBindings[role.id])
+        let count = await workflow.createExclusiveVoicesForLeadCharacters(for: imported.bookID)
+        XCTAssertEqual(count, 0)
+        XCTAssertEqual(renderer.leadRequestCount, 0, "自动补全不能生成并替换已有声音，即使新声音已就绪")
+        XCTAssertEqual(workflow.voiceBindings[role.id], original)
+    }
+
     func testVoiceDesignReturnPreservesBookAndRole() async throws {
         let (workflow, _) = makeWorkflow()
         let txtURL = tempRoot.appendingPathComponent("voice_return.txt")
@@ -1391,8 +1449,8 @@ final class AudiobookWorkflowTests: XCTestCase {
         let returnedBinding = AudiobookVoiceBinding(
             roleID: narrator.id,
             voiceID: "v-designed-narrator",
-            voiceRevision: "v1",
-            modelRevision: "qwen3-tts-v1",
+            voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+            modelRevision: String(repeating: "a", count: 40),
             isSynthesisReady: true
         )
         await workflow.completeVoiceRoundTrip(binding: returnedBinding, context: context)

@@ -11,7 +11,7 @@ public enum AudiobookProductionError: LocalizedError, Equatable, Sendable {
     case noReadyChaptersSelected
     case admissionBusy
     case capabilityVoiceUnavailable(voiceID: String, reason: String)
-    case capabilityRevisionMismatch(voiceID: String, expected: String, actual: String?)
+    case capabilityRevisionMismatch(voiceID: String, expected: String?, actual: String?)
     case unauthorizedService
     case transientRetriesExhausted(fragmentID: UUID, lastReason: String)
     case checkpointNotSaved(reason: String)
@@ -35,7 +35,7 @@ public enum AudiobookProductionError: LocalizedError, Equatable, Sendable {
         case let .capabilityVoiceUnavailable(voiceID, reason):
             return "角色绑定的音色「\(voiceID)」当前不可用于正式制作（\(reason)）。"
         case let .capabilityRevisionMismatch(voiceID, expected, _):
-            return "音色「\(voiceID)」或模型版本已发生变化（期望 \(expected)），请重新确认声音后再继续。"
+            return "音色「\(voiceID)」或模型版本已发生变化（期望 \(expected ?? "未声明")），请重新确认声音后再继续。"
         case .unauthorizedService:
             return "本机语音服务鉴权未通过，请检查服务连接。"
         case let .transientRetriesExhausted(_, reason):
@@ -170,6 +170,7 @@ public actor AudiobookProductionController {
     private let renderer: any AudiobookSpeechRenderer
     private let admission: SpeechCreationAdmission
     private let clock: any AudiobookClock
+    private let voiceCatalog: VoiceCatalogStore
     private let policy: AudiobookRenderPolicy
     private let candidateCommitter: @Sendable (AudiobookRenderCandidate, Data) async throws -> Void
     private let completionCommitter: @Sendable (AudiobookProductionCheckpoint, AudiobookListenableState?) async throws -> Void
@@ -191,7 +192,8 @@ public actor AudiobookProductionController {
         renderer: any AudiobookSpeechRenderer,
         admission: SpeechCreationAdmission,
         clock: any AudiobookClock = SystemAudiobookClock(),
-        policy: AudiobookRenderPolicy = .standard
+        policy: AudiobookRenderPolicy = .standard,
+        voiceCatalog: VoiceCatalogStore = VoiceCatalogStore()
     ) {
         self.store = store
         self.castController = castController
@@ -199,6 +201,7 @@ public actor AudiobookProductionController {
         self.renderer = renderer
         self.admission = admission
         self.clock = clock
+        self.voiceCatalog = voiceCatalog
         self.policy = policy
         self.candidateCommitter = { candidate, wav in
             try await store.commitCandidate(candidate, wav: wav)
@@ -218,6 +221,7 @@ public actor AudiobookProductionController {
         admission: SpeechCreationAdmission,
         clock: any AudiobookClock = SystemAudiobookClock(),
         policy: AudiobookRenderPolicy = .standard,
+        voiceCatalog: VoiceCatalogStore = VoiceCatalogStore(),
         candidateCommitter: @escaping @Sendable (AudiobookRenderCandidate, Data) async throws -> Void,
         completionCommitter: (@Sendable (AudiobookProductionCheckpoint, AudiobookListenableState?) async throws -> Void)? = nil
     ) {
@@ -227,6 +231,7 @@ public actor AudiobookProductionController {
         self.renderer = renderer
         self.admission = admission
         self.clock = clock
+        self.voiceCatalog = voiceCatalog
         self.policy = policy
         self.candidateCommitter = candidateCommitter
         self.completionCommitter = completionCommitter ?? { checkpoint, listenableState in
@@ -353,6 +358,8 @@ public actor AudiobookProductionController {
         // 2. Plan fragments for selected chapters, collect active role IDs, and verify pinned capabilities
         let source = try await store.sourceIndex(for: bookID)
         let frozenBindings = try await store.voiceBindings(for: bookID)
+        try AudiobookCastRegistry.validateBindingSet(characters: await store.characters(for: bookID), bindings: frozenBindings,
+            requiredRoleIDs: await store.requiredCastingRoleIDs(bookID: bookID))
         var plannedFragmentsByChapter: [UUID: [AudiobookFragment]] = [:]
         var activeRoleIDs: Set<UUID> = []
         var totalFragmentCount = 0
@@ -475,6 +482,9 @@ public actor AudiobookProductionController {
                     updateProgress(bookID) { $0.phase = .saving }
                     try await candidateCommitter(candidate, candidateWAVCache[candidate.id] ?? Data())
                     candidateWAVCache.removeValue(forKey: candidate.id)
+                    if let voice = capabilities.voices.first(where: { $0.id == binding.voiceID }), !voiceCatalog.snapshot().permits(voice, bookID: bookID) {
+                        throw AudiobookProductionError.capabilityVoiceUnavailable(voiceID: binding.voiceID, reason: "声音归属已变化，本段已保存为待复核候选。")
+                    }
 
                     completedCount += 1
                     updateProgress(bookID) { $0.completedFragments = completedCount }
@@ -581,11 +591,9 @@ public actor AudiobookProductionController {
         binding: AudiobookVoiceBinding,
         runGeneration: Int
     ) async throws -> AudiobookRenderCandidate {
-        let effectiveSpeed = min(
-            Double(AudiobookLimits.maxPlaybackRate),
-            max(Double(AudiobookLimits.minPlaybackRate), binding.allowedSpeed)
-        )
+        let effectiveSpeed = binding.allowedSpeed
         let request = AudiobookRenderCallRequest(
+            bookID: bookID,
             text: text,
             voiceID: binding.voiceID,
             speed: effectiveSpeed,
@@ -600,6 +608,12 @@ public actor AudiobookProductionController {
         while true {
             if isPauseRequested || Task.isCancelled || generation != runGeneration {
                 throw AudiobookProductionError.cancelled
+            }
+
+            let current = try await renderer.fetchEffectiveCapabilities()
+            try AudiobookCastRegistry.validateRenderBinding(binding, snapshot: current)
+            guard let voice = current.voices.first(where: { $0.id == binding.voiceID }), voiceCatalog.snapshot().permits(voice, bookID: bookID) else {
+                throw AudiobookProductionError.capabilityVoiceUnavailable(voiceID: binding.voiceID, reason: "声音归属已变化，请重新确认。")
             }
 
             // Acquire single-lane creation admission for this fragment
@@ -646,9 +660,12 @@ public actor AudiobookProductionController {
                 // The service receipt describes the original PCM. Verify it before
                 // normalizing the local asset to the render policy's sample rate.
                 let receivedPCMSHA = try AudioDigest.sha256HexOfPCM(in: output.wavData)
-                let receiptVerified = output.isProvenanceVerified
+                let scopeStillValid = voiceCatalog.snapshot().permits(voice, bookID: bookID)
+                let receiptVerified = scopeStillValid && output.isProvenanceVerified
                     && (output.pcmSHA256 == nil || output.pcmSHA256 == receivedPCMSHA)
-                    && (output.voiceRevision == nil || binding.voiceRevision == "v1" || output.voiceRevision == binding.voiceRevision)
+                    && output.voiceRevision == binding.voiceRevision
+                    && output.modelRevision == binding.modelRevision
+                    && output.pcmSHA256 != nil
                 let normalizedWAV = try Self.normalizePCM16MonoWAV(output.wavData, sampleRate: policy.sampleRate)
                 let fileSHA = AudiobookDigest.sha256Hex(normalizedWAV)
                 let computedPCMSHA = try AudioDigest.sha256HexOfPCM(in: normalizedWAV)
@@ -704,6 +721,7 @@ public actor AudiobookProductionController {
                             actual: nil
                         )
                     case .busy, .notReady, .connection:
+                        if case let .http(_, _, _, _, retryable) = apiError, !retryable { throw apiError }
                         if attempt < maxRetries {
                             attempt += 1
                             updateProgress(bookID) {
@@ -788,57 +806,7 @@ public actor AudiobookProductionController {
     ) throws {
         for (roleID, binding) in bindings {
             guard activeRoleIDs.isEmpty || activeRoleIDs.contains(roleID) else { continue }
-            guard let voice = capabilities.voices.first(where: {
-                $0.id == binding.voiceID || $0.aliases.contains(binding.voiceID)
-            }) else {
-                throw AudiobookProductionError.capabilityVoiceUnavailable(
-                    voiceID: binding.voiceID,
-                    reason: "音色不在当前能力目录中"
-                )
-            }
-            guard voice.available else {
-                throw AudiobookProductionError.capabilityVoiceUnavailable(
-                    voiceID: binding.voiceID,
-                    reason: voice.availabilityReason.rawValue
-                )
-            }
-            if voice.productionReady == false {
-                let reason = voice.productionReadyReason ?? voice.availabilityReason.rawValue
-                let nonBlockingReasons: Set<String> = [
-                    "reference_validation_not_passed",
-                    "model_runtime_identity_unknown"
-                ]
-                if !nonBlockingReasons.contains(reason) {
-                    throw AudiobookProductionError.capabilityVoiceUnavailable(
-                        voiceID: binding.voiceID,
-                        reason: reason
-                    )
-                }
-            }
-            if let actualVoiceRev = voice.voiceRevision,
-               binding.voiceRevision != "v1",
-               actualVoiceRev != binding.voiceRevision
-            {
-                throw AudiobookProductionError.capabilityRevisionMismatch(
-                    voiceID: binding.voiceID,
-                    expected: binding.voiceRevision,
-                    actual: actualVoiceRev
-                )
-            }
-            let voiceModelRev = voice.model.catalogRevision ?? voice.model.runtimeRevision
-            let slotModelRev = SpeechRailCapabilityRevisionSelector.ttsArtifactSlot(forVoiceMode: voice.mode)
-                .flatMap { capabilities.models[$0]?.catalogRevision }
-            if let actualModelRev = voiceModelRev,
-               binding.modelRevision != "qwen3-tts-v1",
-               actualModelRev != binding.modelRevision,
-               slotModelRev != binding.modelRevision
-            {
-                throw AudiobookProductionError.capabilityRevisionMismatch(
-                    voiceID: binding.voiceID,
-                    expected: binding.modelRevision,
-                    actual: actualModelRev
-                )
-            }
+            try AudiobookCastRegistry.validateRenderBinding(binding, snapshot: capabilities)
         }
     }
 

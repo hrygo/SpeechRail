@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.10"
-date: 2026-10-10
+version: "3.3.11"
+date: 2026-10-15
 ---
 
 # SpeechRail 测试与验收
@@ -43,6 +43,22 @@ GitHub Actions 使用同一套锁定依赖门禁：`quality` 运行 Ruff、Mypy�
 音色的流程、并发和路由测试使用 fake backend；仅显式导入 `voice_test_fixtures` 的模块会自动启用音高 fixture，每个用例后恢复真实函数，避免每次状态机断言都重复执行昂贵的自相关计算。真实音高估计仍由专门的声学门禁测试验证，输入质量和流程安全断言继续执行；这些流程测试不代表真实模型质量验收。
 
 版本 tag release 还会并行构建 unsigned arm64 DMG。发布前核对 tag、App bundle 版本、App 架构、DMG 可挂载内容和 wheel/DMG checksum；最终 Release 资产为 wheel、`SpeechRail-<version>-macOS-arm64.dmg` 和 `SHA256SUMS`。GitHub 上生成的 DMG 不做 Developer ID、notarization 或 staple，因此不能替代本机正式分发验收。
+
+### 有声书外置小说语料回归
+
+常规 `AudiobookImportTests`、`AudiobookSourceTests` 使用小型虚构文本，验证漏章、合集层级、重复标题、重复正文确认和 CRLF 预算，不依赖真实小说，可在 CI 中运行。`tests/test_audiobook_corpus_runner.py` 仅验证工具的启用与跳过策略，也不读取小说、不调用 Swift 或模型。
+
+五本完整小说保留在仓库外。仓库仅维护回归代码和 `scripts/audiobook_text_corpus_manifest.json` 中的文件名、SHA-256、大小与章节期望，不包含小说正文，不自动下载语料。完整解析回归由 Python 入口显式启用：
+
+```sh
+python3 scripts/check_audiobook_text_corpus.py --run \
+  --corpus /path/outside-repository/novel-corpus \
+  --output-directory /path/outside-repository/empty-results
+```
+
+也可设置 `SPEECHRAIL_RUN_AUDIOBOOK_CORPUS=1` 与 `SPEECHRAIL_AUDIOBOOK_CORPUS_DIR`。未启用、目录不可用或五本文件不完整时，入口输出 `status=skipped` 并返回 0；`CI` 或 `GITHUB_ACTIONS` 为真时无条件跳过，即使传入 `--run`。真实语料回归不接入 CI。完整文件的指纹与清单不一致、输入在验证期间改变或构建失败时返回 2，回归断言失败返回 1。
+
+`AudiobookTextCorpusTool` 经 Swift Package 引用生产 `SpeechRailAppSupport`，对五本书各执行八种编码/换行组合；核对预先记录的目录顺序、重复提示、字节保真、完整来源覆盖、字符顺序和 160 scalar 上限。编码变体仅在内存生成。统计与日志写入仓库外，不输出书稿全文，不访问 AI/TTS、用户作品库或前台 UI；此结果不代表语音质量或性能验收。
 
 ### AI 提词器变异验证（**按需触发，不进常规门禁**）
 

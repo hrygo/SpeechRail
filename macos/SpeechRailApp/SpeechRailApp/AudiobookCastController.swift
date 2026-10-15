@@ -7,6 +7,7 @@ public struct AudiobookVoiceReturnContext: Codable, Equatable, Hashable, Sendabl
     public let roleID: UUID
     public let castRevisionID: UUID
     public let generation: Int
+    public let voiceSetDigest: String?
     public let bookTitle: String?
     public let roleDisplayName: String?
     public let roleVoiceTraitSummary: String?
@@ -20,6 +21,7 @@ public struct AudiobookVoiceReturnContext: Codable, Equatable, Hashable, Sendabl
         roleID: UUID,
         castRevisionID: UUID,
         generation: Int,
+        voiceSetDigest: String? = nil,
         bookTitle: String? = nil,
         roleDisplayName: String? = nil,
         roleVoiceTraitSummary: String? = nil,
@@ -32,6 +34,7 @@ public struct AudiobookVoiceReturnContext: Codable, Equatable, Hashable, Sendabl
         self.roleID = roleID
         self.castRevisionID = castRevisionID
         self.generation = generation
+        self.voiceSetDigest = voiceSetDigest
         self.bookTitle = bookTitle
         self.roleDisplayName = roleDisplayName
         self.roleVoiceTraitSummary = roleVoiceTraitSummary
@@ -68,6 +71,7 @@ public enum AudiobookCastError: LocalizedError, Equatable, Sendable {
     case castRevisionMismatch
     case auditionDigestMismatch
     case staleVoiceReturnContext
+    case invalidCastingPlan(reason: String)
     case nothingToUndo
 
     public var errorDescription: String? {
@@ -90,6 +94,8 @@ public enum AudiobookCastError: LocalizedError, Equatable, Sendable {
             return "角色配声已发生变更，请先试听更新后的角色声音再确认。"
         case .staleVoiceReturnContext:
             return "当前书籍或角色版本已变更，新音色已保存在音色库中，未自动改动当前角色。"
+        case .invalidCastingPlan:
+            return "配声方案不可应用，请刷新后处理声音归属、参数或角色冲突。"
         case .nothingToUndo:
             return "没有可撤销的说话人归属修改。"
         }
@@ -103,12 +109,18 @@ public actor AudiobookCastController {
     }
 
     private let store: AudiobookProjectStore
+    private let capabilityProvider: (@Sendable () async throws -> EffectiveCapabilitySnapshot)?
+    private let voiceCatalog: VoiceCatalogStore
     private var undoStacksByBook: [UUID: [AssignmentUndoSnapshot]] = [:]
     private var currentGenerationsByBook: [UUID: Int] = [:]
     private var mutationWaitersByBook: [UUID: [CheckedContinuation<Void, Never>]] = [:]
 
-    public init(store: AudiobookProjectStore) {
+    public init(store: AudiobookProjectStore,
+                capabilityProvider: (@Sendable () async throws -> EffectiveCapabilitySnapshot)? = nil,
+                voiceCatalog: VoiceCatalogStore = VoiceCatalogStore()) {
         self.store = store
+        self.capabilityProvider = capabilityProvider
+        self.voiceCatalog = voiceCatalog
     }
 
     public func currentGeneration(for bookID: UUID) -> Int {
@@ -352,30 +364,57 @@ public actor AudiobookCastController {
     private func bindVoiceUnderMutation(
         bookID: UUID,
         roleID: UUID,
-        binding: AudiobookVoiceBinding
+        binding: AudiobookVoiceBinding,
+        onlyIfUnbound: Bool = false,
+        expectedVoiceSetDigest: String? = nil
     ) async throws {
-        guard binding.isSynthesisReady else {
-            throw AudiobookCastError.voiceNotSynthesisReady(voiceID: binding.voiceID)
-        }
-        let characters = try await store.characters(for: bookID)
-        guard let role = characters.first(where: { $0.id == roleID }) else {
-            throw AudiobookCastError.characterNotFound(roleID)
-        }
+        guard binding.roleID == roleID else { throw AudiobookCastError.characterNotFound(roleID) }
+        _ = try await bindBatchUnderMutation(bookID: bookID, bindings: [binding], onlyIfUnbound: onlyIfUnbound, expectedVoiceSetDigest: expectedVoiceSetDigest)
+    }
 
-        let existingBindings = try await store.voiceBindings(for: bookID)
-        if let conflictingEntry = existingBindings.first(where: { $0.key != roleID && $0.value.voiceID == binding.voiceID }) {
-            let conflictingRole = characters.first(where: { $0.id == conflictingEntry.key })
-            let allowed = (!role.isNarrator && role.allowSharedMinorVoice)
-                && (conflictingRole.map { !$0.isNarrator && $0.allowSharedMinorVoice } ?? false)
-            if !allowed {
-                throw AudiobookCastError.duplicateVoiceRequiresSharedMinorConsent(
-                    voiceID: binding.voiceID,
-                    conflictingRoleID: conflictingEntry.key
-                )
+    public func applyCastingPlan(bookID: UUID, plan: AudiobookCastingPlan, acknowledgedIssueIDs: Set<UUID>) async throws {
+        await acquireMutation(for: bookID)
+        defer { releaseMutation(for: bookID) }
+        try await applyUnderMutation(bookID: bookID, plan: plan, acknowledgedIssueIDs: acknowledgedIssueIDs)
+    }
+
+    private func applyUnderMutation(bookID: UUID, plan: AudiobookCastingPlan, acknowledgedIssueIDs: Set<UUID>) async throws {
+        try Task.checkCancellation()
+        guard plan.bookID == bookID, plan.isApplicable,
+              plan.requiredAcknowledgements.isSubset(of: acknowledgedIssueIDs) else {
+            throw AudiobookCastError.invalidCastingPlan(reason: "unacknowledged_or_blocking_issues")
+        }
+        guard let capabilityProvider else { throw AudiobookCastError.invalidCastingPlan(reason: "capability_unavailable") }
+        let current = try await capabilityProvider()
+        guard current.snapshotID == plan.snapshotID, voiceCatalog.snapshot().revision == plan.voiceCatalogRevision else {
+            throw AudiobookCastError.invalidCastingPlan(reason: "capability_or_catalog_changed")
+        }
+        for (id, binding) in plan.proposedBindings where plan.affectedRoleIDs.contains(id) {
+            try AudiobookCastRegistry.validateRenderBinding(binding, snapshot: current)
+            guard let voice = current.voices.first(where: { $0.id == binding.voiceID }), voiceCatalog.snapshot().permits(voice, bookID: bookID) else {
+                throw AudiobookCastError.invalidCastingPlan(reason: "voice_scope_changed")
             }
         }
+        try Task.checkCancellation()
+        try await store.saveCastingPlan(bookID: bookID, plan: plan)
+    }
 
-        try await store.saveCastVoiceBindings(bookID: bookID, bindings: [binding])
+    private func bindBatchUnderMutation(bookID: UUID, bindings: [AudiobookVoiceBinding], onlyIfUnbound: Bool = false, expectedVoiceSetDigest: String? = nil) async throws -> Int {
+        guard !bindings.isEmpty else { return 0 }
+        if let unready = bindings.first(where: { !$0.isSynthesisReady }) {
+            throw AudiobookCastError.voiceNotSynthesisReady(voiceID: unready.voiceID)
+        }
+        let characters = try await store.characters(for: bookID)
+        var proposed = try await store.voiceBindings(for: bookID)
+        guard Set(bindings.map(\.roleID)).count == bindings.count else { throw AudiobookCastError.invalidCastingPlan(reason: "duplicate_role") }
+        for binding in bindings { proposed[binding.roleID] = binding }
+        try AudiobookCastRegistry.validateBindingSet(characters: characters, bindings: proposed,
+            requiredRoleIDs: await store.requiredCastingRoleIDs(bookID: bookID))
+        guard let capabilityProvider else { throw AudiobookCastError.invalidCastingPlan(reason: "capability_unavailable") }
+        let snapshot = try await capabilityProvider()
+        let plan = try await store.manualCastingPlan(bookID: bookID, bindings: bindings, snapshot: snapshot, catalog: voiceCatalog.snapshot(), onlyIfUnbound: onlyIfUnbound, expectedVoiceSetDigest: expectedVoiceSetDigest)
+        try await applyUnderMutation(bookID: bookID, plan: plan, acknowledgedIssueIDs: [])
+        return bindings.count
     }
 
     public func setAllowSharedMinorVoice(
@@ -390,105 +429,44 @@ public actor AudiobookCastController {
         guard var role = characters.first(where: { $0.id == roleID }) else {
             throw AudiobookCastError.characterNotFound(roleID)
         }
+        guard !role.isNarrator || !allowed else {
+            throw AudiobookCastError.invalidCastingPlan(reason: "narrator_must_remain_exclusive")
+        }
         role.isMajor = !allowed
         role.allowSharedMinorVoice = allowed
+        try AudiobookCastRegistry.validateBindingSet(
+            characters: characters.map { $0.id == roleID ? role : $0 }, bindings: try await store.voiceBindings(for: bookID),
+            requiredRoleIDs: await store.requiredCastingRoleIDs(bookID: bookID)
+        )
         try await store.upsertCharacter(role)
     }
 
-    /// 按声部行当一键批量换绑次要角色音色（AC5：自动注入微语速/Seed 错位，且绝不覆盖核心主角或旁白的独占音色）。
+    /// Only unbound shared roles participate by default. Existing choices remain protected.
     @discardableResult
-    public func batchBindArchetypeVoice(
-        bookID: UUID,
-        archetype: AudiobookVoiceArchetype,
-        voice: SafeVoiceEntry
-    ) async throws -> Int {
+    public func batchBindArchetypeVoice(bookID: UUID, archetype: AudiobookVoiceArchetype, voice: SafeVoiceEntry) async throws -> Int {
         await acquireMutation(for: bookID)
         defer { releaseMutation(for: bookID) }
         try Task.checkCancellation()
-        guard voice.available else {
-            throw AudiobookCastError.voiceNotSynthesisReady(voiceID: voice.id)
-        }
-        let characters = try await store.characters(for: bookID)
-        let matchingMinors = characters.filter { role in
-            !role.isNarrator
-                && role.allowSharedMinorVoice
-                && role.inferredVoiceArchetype(peers: characters) == archetype
-        }
-        guard !matchingMinors.isEmpty else { return 0 }
-
-        let modelRev = voice.model.catalogRevision
-            ?? voice.model.runtimeRevision
-            ?? "qwen3-tts-v1"
-
-        var newBindings: [AudiobookVoiceBinding] = []
-        for (slotIndex, role) in matchingMinors.enumerated() {
-            let (speed, seed) = AudiobookCastRegistry.computeMicroProsodyAndSeed(
-                for: role,
-                archetype: archetype,
-                voiceMode: voice.mode,
-                slotIndex: slotIndex
-            )
-            let binding = AudiobookVoiceBinding(
-                roleID: role.id,
-                voiceID: voice.id,
-                voiceRevision: voice.voiceRevision ?? "v1",
-                modelRevision: modelRev,
-                isSynthesisReady: true,
-                allowedSpeed: speed,
-                callerSeed: seed
-            )
-            newBindings.append(binding)
-        }
-        try await store.saveCastVoiceBindings(bookID: bookID, bindings: newBindings)
-        return matchingMinors.count
+        let characters = try await store.characters(for: bookID), existing = try await store.voiceBindings(for: bookID)
+        let matching = characters.filter { !$0.isNarrator && !$0.isMajor && $0.allowSharedMinorVoice
+            && existing[$0.id] == nil && $0.inferredVoiceArchetype(peers: characters) == archetype }
+        guard !matching.isEmpty else { return 0 }
+        guard let capabilityProvider else { throw AudiobookCastError.invalidCastingPlan(reason: "capability_unavailable") }
+        let snapshot = try await capabilityProvider()
+        guard let current = snapshot.voices.first(where: { $0.id == voice.id }), current.voiceRevision == voice.voiceRevision, current.mode == voice.mode,
+              let options = SpeechRailCapabilityRevisionSelector.creatorRequestOptions(voiceID: voice.id, in: snapshot),
+              let model = options.expectedModelRevision else { throw AudiobookCastError.voiceNotSynthesisReady(voiceID: voice.id) }
+        return try await bindBatchUnderMutation(bookID: bookID, bindings: matching.map {
+            AudiobookVoiceBinding(roleID: $0.id, voiceID: voice.id, voiceRevision: options.expectedVoiceRevision, modelRevision: model)
+        })
     }
 
-    /// 批量写入多角色音色绑定（单次加载角色表与单事务落库，消除自动配声时 O(R^2) 重复解码与事务风暴）。
     @discardableResult
-    public func bindVoicesBatch(
-        bookID: UUID,
-        bindings: [AudiobookVoiceBinding]
-    ) async throws -> Int {
+    public func bindVoicesBatch(bookID: UUID, bindings: [AudiobookVoiceBinding]) async throws -> Int {
         await acquireMutation(for: bookID)
         defer { releaseMutation(for: bookID) }
         try Task.checkCancellation()
-        guard !bindings.isEmpty else { return 0 }
-        let characters = try await store.characters(for: bookID)
-        var charactersByID = Dictionary(uniqueKeysWithValues: characters.map { ($0.id, $0) })
-        var effectiveBindings = try await store.voiceBindings(for: bookID)
-        var accepted: [AudiobookVoiceBinding] = []
-
-        for binding in bindings where binding.isSynthesisReady {
-            guard var role = charactersByID[binding.roleID] else { continue }
-            if let conflictingEntry = effectiveBindings.first(where: { $0.key != binding.roleID && $0.value.voiceID == binding.voiceID }) {
-                guard var conflictingRole = charactersByID[conflictingEntry.key],
-                      !role.isNarrator,
-                      !conflictingRole.isNarrator
-                else {
-                    continue
-                }
-                if !role.allowSharedMinorVoice {
-                    role.allowSharedMinorVoice = true
-                    charactersByID[role.id] = role
-                }
-                if !conflictingRole.allowSharedMinorVoice {
-                    conflictingRole.allowSharedMinorVoice = true
-                    charactersByID[conflictingRole.id] = conflictingRole
-                }
-            }
-            effectiveBindings[binding.roleID] = binding
-            accepted.append(binding)
-        }
-
-        guard !accepted.isEmpty else { return 0 }
-        let updatedCharacters = characters.compactMap { original -> AudiobookCharacter? in
-            guard let updated = charactersByID[original.id], updated != original else { return nil }
-            return updated
-        }
-        try await store.saveCastVoiceBindings(
-            bookID: bookID, bindings: accepted, updatingCharacters: updatedCharacters
-        )
-        return accepted.count
+        return try await bindBatchUnderMutation(bookID: bookID, bindings: bindings)
     }
 
     public func currentCastRevisionID(for bookID: UUID) async throws -> UUID {
@@ -542,6 +520,7 @@ public actor AudiobookCastController {
         roleID: UUID
     ) async throws -> AudiobookVoiceReturnContext {
         let revisionID = try await currentCastRevisionID(for: bookID)
+        let voiceSetDigest = try await currentVoiceSetDigest(for: bookID)
         let generation = currentGeneration(for: bookID)
         let book = try? await store.book(id: bookID)
         let characters = try await store.characters(for: bookID)
@@ -592,6 +571,7 @@ public actor AudiobookCastController {
             roleID: roleID,
             castRevisionID: revisionID,
             generation: generation,
+            voiceSetDigest: voiceSetDigest,
             bookTitle: book?.title,
             roleDisplayName: role?.displayName,
             roleVoiceTraitSummary: traitSummary,
@@ -605,21 +585,25 @@ public actor AudiobookCastController {
     public func completeVoiceReturn(
         context: AudiobookVoiceReturnContext,
         activeBookID: UUID,
-        binding: AudiobookVoiceBinding
+        binding: AudiobookVoiceBinding,
+        onlyIfUnbound: Bool = false
     ) async throws {
         await acquireMutation(for: activeBookID)
         defer { releaseMutation(for: activeBookID) }
         try Task.checkCancellation()
         let currentRevision = try await currentCastRevisionID(for: activeBookID)
         let currentGen = currentGeneration(for: activeBookID)
+        let voiceSetDigest = try await currentVoiceSetDigest(for: activeBookID)
         guard context.bookID == activeBookID,
               context.castRevisionID == currentRevision,
               context.generation == currentGen,
+              context.voiceSetDigest == voiceSetDigest,
               context.roleID == binding.roleID
         else {
             throw AudiobookCastError.staleVoiceReturnContext
         }
-        try await bindVoiceUnderMutation(bookID: activeBookID, roleID: context.roleID, binding: binding)
+        try await bindVoiceUnderMutation(bookID: activeBookID, roleID: context.roleID, binding: binding,
+            onlyIfUnbound: onlyIfUnbound, expectedVoiceSetDigest: voiceSetDigest)
     }
 
     // MARK: - Chapter Readiness Evaluation

@@ -1149,7 +1149,7 @@ public actor AudiobookAnalysisPipeline {
             guard let atom = atomsByID[id] else {
                 throw AudiobookSourceError.unknownAtomID(id)
             }
-            let text = try source.text(in: atom.sourceRange)
+            let text = try source.normalizedText(in: atom.sourceRange)
             return AudiobookPromptAtomItem(
                 atomID: atom.id,
                 kind: atom.kind,

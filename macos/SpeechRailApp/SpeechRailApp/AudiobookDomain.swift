@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import SpeechRailControlKit
 
 // MARK: - Centralized Default Budgets & Limits
 
@@ -956,6 +957,12 @@ public struct AudiobookCharacter: Codable, Equatable, Hashable, Sendable, Identi
     public var evidences: [AudiobookCharacterEvidence]
     public var firstAppearanceRange: AudiobookSourceRange?
     public var chapterIDs: [UUID]
+    public var voicePolicy: AudiobookRoleVoicePolicy?
+    public var manualTier: AudiobookRoleTier?
+
+    public var effectiveVoicePolicy: AudiobookRoleVoicePolicy {
+        voicePolicy ?? .init(sharingPolicy: isNarrator || !allowSharedMinorVoice ? .exclusive : .automatic)
+    }
 
     public var primaryVoiceTraitSummary: String? {
         evidences.compactMap(\.voiceTraitSummary)
@@ -1009,8 +1016,12 @@ public struct AudiobookCharacter: Codable, Equatable, Hashable, Sendable, Identi
         allowSharedMinorVoice: Bool = false,
         evidences: [AudiobookCharacterEvidence] = [],
         firstAppearanceRange: AudiobookSourceRange? = nil,
-        chapterIDs: [UUID] = []
+        chapterIDs: [UUID] = [],
+        voicePolicy: AudiobookRoleVoicePolicy? = nil,
+        manualTier: AudiobookRoleTier? = nil
     ) {
+        self.voicePolicy = voicePolicy
+        self.manualTier = manualTier
         self.id = id
         self.bookID = bookID
         self.displayName = displayName
@@ -1071,7 +1082,7 @@ public struct AudiobookCharacter: Codable, Equatable, Hashable, Sendable, Identi
 public struct AudiobookVoiceBinding: Codable, Equatable, Hashable, Sendable {
     public let roleID: UUID
     public let voiceID: String
-    public let voiceRevision: String
+    public let voiceRevision: String?
     public let modelRevision: String
     public let isSynthesisReady: Bool
     public let allowedSpeed: Double
@@ -1080,7 +1091,7 @@ public struct AudiobookVoiceBinding: Codable, Equatable, Hashable, Sendable {
     public init(
         roleID: UUID,
         voiceID: String,
-        voiceRevision: String,
+        voiceRevision: String?,
         modelRevision: String,
         isSynthesisReady: Bool = true,
         allowedSpeed: Double = AudiobookLimits.defaultRenderSpeed,
@@ -1097,7 +1108,7 @@ public struct AudiobookVoiceBinding: Codable, Equatable, Hashable, Sendable {
 
     public var bindingDigest: String {
         let seedPart = callerSeed.map(String.init) ?? "nil"
-        let canonical = "\(roleID.uuidString)|\(voiceID)|\(voiceRevision)|\(modelRevision)|\(isSynthesisReady)|\(String(format: "%.3f", allowedSpeed))|\(seedPart)"
+        let canonical = "\(roleID.uuidString)|\(voiceID)|\(voiceRevision ?? "<absent>")|\(modelRevision)|\(isSynthesisReady)|\(String(format: "%.3f", allowedSpeed))|\(seedPart)"
         return AudiobookDigest.sha256Hex(Data(canonical.utf8))
     }
 }
@@ -1611,6 +1622,148 @@ public struct AudiobookRoleDialogueStats: Codable, Equatable, Hashable, Sendable
     }
 }
 
+public enum VoiceCatalogLoadState: String, Codable, Sendable {
+    case ready, missing, unreadable, unsupportedSchema
+}
+
+/// One immutable read, including preferences; load failures are never an empty success.
+public struct VoiceCatalogSnapshot: Equatable, Sendable {
+    public let state: VoiceCatalogStore.PersistedState
+    public let loadState: VoiceCatalogLoadState
+    public init(state: VoiceCatalogStore.PersistedState = .init(), loadState: VoiceCatalogLoadState = .ready) {
+        self.state = state
+        self.loadState = state.metadataByVoiceID.allSatisfy { $0.key == $0.value.voiceID } ? loadState : .unreadable
+    }
+    public var revision: String {
+        AudiobookCastingDigest.hash([
+            loadState.rawValue,
+            AudiobookCastingDigest.hash(state.metadataByVoiceID),
+            AudiobookCastingDigest.hash(state.collections.sorted { $0.id.uuidString < $1.id.uuidString }),
+            state.preferredCollectionIDByBookID.map { "\($0.key)|\($0.value)" }.sorted().joined(separator: ",")
+        ])
+    }
+    public func permits(_ voice: SafeVoiceEntry, bookID: UUID) -> Bool {
+        guard loadState == .ready || loadState == .missing else { return false }
+        guard let metadata = state.metadataByVoiceID[voice.id] else {
+            return voice.mode == "system" && voice.isSystem == true && voice.isDefault == true
+        }
+        guard metadata.voiceID == voice.id else { return false }
+        switch metadata.scope {
+        case .archived: return false
+        case .bookExclusive: return metadata.originBookID == bookID
+        case .globalReusable: return true
+        }
+    }
+}
+
+public struct AudiobookRoleVoicePolicy: Codable, Equatable, Hashable, Sendable {
+    public enum SharingPolicy: String, Codable, Sendable { case automatic, exclusive, sharedMinor }
+    public enum BindingOrigin: String, Codable, Sendable { case manual, acceptedRecommendation, automatic, legacyUnknown }
+    public var sharingPolicy: SharingPolicy
+    public var bindingOrigin: BindingOrigin
+    public var isLocked: Bool
+    public init(sharingPolicy: SharingPolicy, bindingOrigin: BindingOrigin = .automatic, isLocked: Bool = false) {
+        self.sharingPolicy = sharingPolicy
+        self.bindingOrigin = bindingOrigin
+        self.isLocked = isLocked
+    }
+}
+
+public struct AudiobookCastingIssue: Equatable, Sendable, Identifiable {
+    public enum Severity: String, Sendable { case error, warning, info }
+    public enum Code: String, Sendable {
+        case noEligibleVoices, catalogUnavailable, voiceNotProductionReady, unsupportedRenderParameter
+        case insufficientVoiceCapacity, lockedBindingConflict, castRevisionChanged, capabilityChanged
+        case unresolvedSpeaker, searchBudgetExceeded, voiceIdentityUnknown, voiceScopeUnavailable, sharedSceneRisk, sharedVoiceConsentRequired
+    }
+    public let code: Code
+    public let roleIDs: [UUID]
+    public let voiceIDs: [String]
+    public let isBlocking: Bool
+    public let severity: Severity
+    public let nextAction: String
+    /// Acknowledgements are bound to the entire proposal, not just the same role pair.
+    public var id: UUID { AudiobookCastingDigest.uuid("\(contextDigest)|\(code.rawValue)|\(roleIDs)|\(voiceIDs)") }
+    var contextDigest: String = ""
+    public init(code: Code, roleIDs: [UUID] = [], voiceIDs: [String] = [], isBlocking: Bool = true, severity: Severity? = nil, nextAction: String) {
+        self.code = code
+        self.roleIDs = roleIDs.sorted { $0.uuidString < $1.uuidString }
+        self.voiceIDs = voiceIDs.sorted()
+        self.isBlocking = isBlocking
+        self.severity = isBlocking ? .error : (severity ?? .warning)
+        self.nextAction = nextAction
+    }
+}
+
+public struct AudiobookCastingPlan: Equatable, Sendable {
+    public let bookID: UUID
+    public let localInputDigest: String
+    public let snapshot: EffectiveCapabilitySnapshot
+    public let catalog: VoiceCatalogSnapshot
+    public let expectedCastRevisionID: UUID
+    public let proposedBindings: [UUID: AudiobookVoiceBinding]
+    public let proposedPolicies: [UUID: AudiobookRoleVoicePolicy]
+    public let unresolvedRoleIDs: Set<UUID>
+    public let affectedRoleIDs: Set<UUID>
+    public internal(set) var affectedFragmentIDs: Set<UUID>
+    public let narratorVoiceCount: Int
+    public let exclusiveVoiceCount: Int
+    public let sharedVoiceCount: Int
+    public let eligibleVoiceCount: Int
+    var requiresCompleteCast: Bool = true
+    var sourceContextDigest: String?
+    var rawIssues: [AudiobookCastingIssue]
+    public var snapshotID: String { snapshot.snapshotID }
+    public var voiceCatalogRevision: String { catalog.revision }
+    public var inputDigest: String {
+        AudiobookCastingDigest.hash([
+            "casting-p0-v1", localInputDigest, sourceContextDigest ?? "<unattached>",
+            AudiobookCastingDigest.hash(snapshot), catalog.revision,
+            AudiobookCastingDigest.hash(proposedBindings.values.sorted { $0.roleID.uuidString < $1.roleID.uuidString }),
+            proposedPolicies.map { "\($0.key)|\($0.value.sharingPolicy)|\($0.value.bindingOrigin)|\($0.value.isLocked)" }.sorted().joined(separator: ",")
+        ])
+    }
+    public var issues: [AudiobookCastingIssue] {
+        let digest = inputDigest
+        return rawIssues.map { issue in var copy = issue; copy.contextDigest = digest; return copy }
+    }
+    public var requiredAcknowledgements: Set<UUID> { Set(issues.filter { !$0.isBlocking && $0.severity == .warning }.map(\.id)) }
+    public var isApplicable: Bool { unresolvedRoleIDs.isEmpty && !rawIssues.contains(where: \.isBlocking) }
+}
+
+/// Canonical unordered input records. JSON preserves field boundaries and missing identity.
+enum AudiobookCastingDigest {
+    static func hash<T: Encodable>(_ value: T) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.nonConformingFloatEncodingStrategy = .convertToString(positiveInfinity: "Infinity", negativeInfinity: "-Infinity", nan: "NaN")
+        guard let data = try? encoder.encode(value), let object = try? JSONSerialization.jsonObject(with: data, options: .fragmentsAllowed) else {
+            return AudiobookDigest.sha256Hex(Data("invalid_input".utf8))
+        }
+        func canonical(_ object: Any) -> Any {
+            if let array = object as? [Any] {
+                return array.map { item -> (Any, Data) in
+                    let normalized = canonical(item)
+                    let encoded = (try? JSONSerialization.data(withJSONObject: normalized, options: [.sortedKeys, .fragmentsAllowed])) ?? Data()
+                    return (normalized, encoded)
+                }.sorted { $0.1.lexicographicallyPrecedes($1.1) }.map { $0.0 }
+            }
+            if let dictionary = object as? [String: Any] { return dictionary.mapValues(canonical) }
+            return object
+        }
+        let encoded = (try? JSONSerialization.data(withJSONObject: canonical(object), options: [.sortedKeys, .fragmentsAllowed])) ?? data
+        return AudiobookDigest.sha256Hex(encoded)
+    }
+    static func local(characters: [AudiobookCharacter], annotations: [AudiobookAnnotation], bindings: [UUID: AudiobookVoiceBinding]) -> String {
+        hash([hash(characters), hash(annotations), hash(Array(bindings.values))])
+    }
+    static func uuid(_ value: String) -> UUID {
+        let hex = String(AudiobookDigest.sha256Hex(Data(value.utf8)).prefix(32))
+        let i = Array(hex)
+        return UUID(uuidString: "\(String(i[0..<8]))-\(String(i[8..<12]))-\(String(i[12..<16]))-\(String(i[16..<20]))-\(String(i[20..<32]))")!
+    }
+}
+
 /// 音色资产的三层可见性作用域（彻底解决单书角色专用音色污染全局列表的问题）。
 public enum VoiceAssetScope: String, Codable, CaseIterable, Equatable, Hashable, Sendable {
     /// 全局通用音色（系统预置音色、通用自建音色、或从单书晋升入库的精品音色，对所有书籍与演播台可见）。
@@ -1894,6 +2047,7 @@ public final class VoiceCatalogStore: @unchecked Sendable {
     private let storageURL: URL?
     private let lock = NSLock()
     private var state: PersistedState
+    private var loadState: VoiceCatalogLoadState = .ready
 
     public static func defaultStorageURL() -> URL? {
         guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
@@ -1906,13 +2060,37 @@ public final class VoiceCatalogStore: @unchecked Sendable {
 
     public init(storageURL: URL? = nil) {
         self.storageURL = storageURL
-        if let url = storageURL,
-           let data = try? Data(contentsOf: url),
-           let decoded = try? JSONDecoder().decode(PersistedState.self, from: data)
-        {
-            self.state = decoded
-        } else {
-            self.state = PersistedState()
+        self.state = PersistedState()
+        reloadLocked()
+    }
+
+    private func reloadLocked() {
+        guard let storageURL else { return }
+        do {
+            let data = try Data(contentsOf: storageURL)
+            if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any], object["schema_version"] != nil {
+                loadState = .unsupportedSchema
+                return
+            }
+            let decoded = try JSONDecoder().decode(PersistedState.self, from: data)
+            guard decoded.metadataByVoiceID.allSatisfy({ $0.key == $0.value.voiceID }) else {
+                loadState = .unreadable
+                state = PersistedState()
+                return
+            }
+            state = decoded
+            loadState = .ready
+        } catch {
+            let nsError = error as NSError
+            loadState = nsError.domain == NSCocoaErrorDomain && nsError.code == NSFileReadNoSuchFileError ? .missing : .unreadable
+            state = PersistedState()
+        }
+    }
+
+    public func snapshot() -> VoiceCatalogSnapshot {
+        lock.withLock {
+            reloadLocked()
+            return VoiceCatalogSnapshot(state: state, loadState: loadState)
         }
     }
 
@@ -1973,7 +2151,7 @@ public final class VoiceCatalogStore: @unchecked Sendable {
         return meta
     }
 
-    /// 在有声书分析后为六大声部行当自动创建的群像音色，注册为全局可复用且携带原书与声部标记。
+    /// 在有声书分析后为六大声部行当自动创建的群像音色，注册为本书专用并携带原书与声部标记。
     @discardableResult
     public func registerArchetypeEnsembleVoice(
         voiceID: String,
@@ -1984,7 +2162,7 @@ public final class VoiceCatalogStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         var meta = state.metadataByVoiceID[voiceID] ?? VoiceAssetMetadata(voiceID: voiceID)
-        meta.scope = .globalReusable
+        meta.scope = .bookExclusive
         meta.originBookID = bookID
         meta.originBookTitle = bookTitle
         meta.originRoleID = nil
@@ -2117,14 +2295,14 @@ public final class VoiceCatalogStore: @unchecked Sendable {
             return true
         case .bookExclusive:
             guard let currentBookID else { return false }
-            return meta.originBookID == nil || meta.originBookID == currentBookID
+            return meta.originBookID == currentBookID
         case .archived:
             return false
         }
     }
 
     private func persistLocked() {
-        guard let url = storageURL else { return }
+        guard loadState != .unreadable, loadState != .unsupportedSchema, let url = storageURL else { return }
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         if let data = try? JSONEncoder().encode(state) {
             try? data.write(to: url, options: .atomic)

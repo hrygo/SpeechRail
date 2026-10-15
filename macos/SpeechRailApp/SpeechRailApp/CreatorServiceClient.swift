@@ -1023,7 +1023,7 @@ public extension SpeechRailSpeechRenderClient {
                 text: text,
                 voiceID: voiceID,
                 speed: speed,
-                options: options
+                options: options.withValidationPolicy("require_output_pass")
             ),
             planID: nil,
             voiceRevision: nil

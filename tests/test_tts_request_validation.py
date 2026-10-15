@@ -69,3 +69,13 @@ def test_validation_returns_canonical_language_for_voice_design() -> None:
 
     assert result.language == "english"
     assert result.speed == 1.25
+
+
+def test_base_clone_rejects_caller_seed() -> None:
+    with pytest.raises(TtsParameterError) as exc_info:
+        validate_tts_parameters(
+            model_variant="base", is_clone=True, speed=1.0,
+            language="zh", instruction=None, seed=101,
+        )
+    assert exc_info.value.code == "clone_seed_unsupported"
+    assert exc_info.value.param == "seed"

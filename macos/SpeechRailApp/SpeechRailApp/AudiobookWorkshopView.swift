@@ -245,6 +245,20 @@ struct AudiobookImportPreviewSheet: View {
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
 
+                if let repeated = preview.repeatedContentWarnings.first {
+                    NoticeBar(
+                        tone: .warning,
+                        message: "发现 \(preview.repeatedContentWarnings.count) 组重复正文。内容已完整保留，请核对后确认。",
+                        actionTitle: "查看重复位置"
+                    ) { selectedChapterID = repeated.chapterIDs.last }
+                    Toggle("我已核对，保留重复内容继续导入", isOn: Binding(
+                        get: { workflow.importPreview?.hasConfirmedRepeatedContent == true },
+                        set: { workflow.importPreview?.hasConfirmedRepeatedContent = $0 }
+                    ))
+                    .toggleStyle(.checkbox)
+                    .accessibilityIdentifier("audiobook-confirm-repeated-content")
+                }
+
                 HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
                     CardSurface {
                         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
@@ -258,6 +272,9 @@ struct AudiobookImportPreviewSheet: View {
                                     Text(chapter.title)
                                         .font(SpeechRailDesignTokens.Typography.body)
                                         .lineLimit(1)
+                                    if preview.repeatedContentWarnings.contains(where: { $0.chapterIDs.contains(chapter.id) }) {
+                                        StatusPill(tone: .attention, label: "内容重复")
+                                    }
                                     Spacer()
                                 }
                                 .tag(chapter.id)
@@ -322,6 +339,7 @@ struct AudiobookImportPreviewSheet: View {
                 .speechRailButton(.primary)
                 .keyboardShortcut(.defaultAction)
                 .accessibilityIdentifier("audiobook-confirm-import-button")
+                .disabled(workflow.importPreview?.canConfirmImport != true)
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.gutter)

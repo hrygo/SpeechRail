@@ -340,7 +340,8 @@ public final class AudiobookWorkflowModel {
         guard store == nil else { return }
         guard let createdStore = try? dependencies.makeStore() else { return }
         self.store = createdStore
-        let cast = AudiobookCastController(store: createdStore)
+        let renderer = dependencies.speechRenderer
+        let cast = AudiobookCastController(store: createdStore, capabilityProvider: { try await renderer.fetchEffectiveCapabilities() }, voiceCatalog: dependencies.voiceCatalog)
         let rev = AudiobookRevisionController(store: createdStore)
         let prod = AudiobookProductionController(
             store: createdStore,
@@ -348,7 +349,8 @@ public final class AudiobookWorkflowModel {
             revisionController: rev,
             renderer: dependencies.speechRenderer,
             admission: admission,
-            clock: dependencies.clock
+            clock: dependencies.clock,
+            voiceCatalog: dependencies.voiceCatalog
         )
         let exp = AudiobookExportController(
             store: createdStore,
@@ -694,6 +696,10 @@ public final class AudiobookWorkflowModel {
     public func confirmImport() async {
         bootstrapIfPossible()
         guard let store, let preview = importPreview else { return }
+        guard preview.canConfirmImport else {
+            errorMessage = "请先核对重复内容，并确认保留后再导入。"
+            return
+        }
         do {
             let bookID = try await store.importBook(preview)
             isShowingImportSheet = false
@@ -981,7 +987,7 @@ public final class AudiobookWorkflowModel {
             byID[voice.id] = voice
         }
         let activeBookID = selectedBook?.id
-        let metadataMap = VoiceCatalogStore.shared.metadataByVoiceID
+        let metadataMap = dependencies.voiceCatalog.metadataByVoiceID
         return byID.values.sorted { lhs, rhs in
             let metaL = metadataMap[lhs.id]
             let metaR = metadataMap[rhs.id]
@@ -997,74 +1003,45 @@ public final class AudiobookWorkflowModel {
         }
     }
 
-    /// 根据全书角色声线线索与当前可用音色目录，为尚未配声的角色自动推荐并预绑定音色（含四级分层、双池隔离、同场图着色与微语速错位）。
+    /// 为尚未配声的角色生成方案；保留已有绑定，共享风险须另行确认，默认不启用微语速。
+    public private(set) var pendingCastingPlan: AudiobookCastingPlan?
+
     public func autoAssignRecommendedVoices(
         for bookID: UUID? = nil,
         availableVoices: [SafeVoiceEntry]? = nil
     ) async {
         let targetID = bookID ?? selectedBook?.id
         guard let targetID, let store, let castController else { return }
-        let fetchedVoices = await refreshAvailableVoices()
-        let candidateVoices = mergedAvailableVoices(externalVoices: availableVoices ?? fetchedVoices)
-        guard !candidateVoices.isEmpty else {
-            return
-        }
-
-        guard let chars = try? await store.characters(for: targetID),
-              let existing = try? await store.voiceBindings(for: targetID)
-        else { return }
-        let allAnnotations = (try? await store.annotations(for: targetID)) ?? []
-
-        let (stratifiedChars, stats, _) = AudiobookCastRegistry.computeRoleDialogueStats(
-            characters: chars,
-            annotations: allAnnotations,
-            availableVoiceCount: candidateVoices.count
-        )
-
-        let recommended = AudiobookCastRegistry.recommendVoiceBindings(
-            characters: stratifiedChars,
-            availableVoices: candidateVoices,
-            existingBindings: existing,
-            annotations: allAnnotations,
-            bookID: targetID
-        )
-
-        // 若某音色在推荐方案中被多个非旁白角色共用，自动确保持有该音色的角色均开启 allowSharedMinorVoice = true
-        var voiceUsageCount: [String: Int] = [:]
-        for (_, b) in recommended {
-            voiceUsageCount[b.voiceID, default: 0] += 1
-        }
-        var updatedChars = stratifiedChars
-        var didModifyCharFlags = (updatedChars != chars)
-        for idx in updatedChars.indices where !updatedChars[idx].isNarrator {
-            let rid = updatedChars[idx].id
-            if let rec = recommended[rid], (voiceUsageCount[rec.voiceID] ?? 0) > 1 {
-                if !updatedChars[idx].allowSharedMinorVoice {
-                    updatedChars[idx].isMajor = false
-                    updatedChars[idx].allowSharedMinorVoice = true
-                    didModifyCharFlags = true
-                }
+        do {
+            let snapshot = try await dependencies.speechRenderer.fetchEffectiveCapabilities()
+            let catalog = dependencies.voiceCatalog.snapshot()
+            let plan = try await store.prepareCastingPlan(bookID: targetID, snapshot: snapshot, catalog: catalog)
+            pendingCastingPlan = plan
+            guard plan.isApplicable, plan.requiredAcknowledgements.isEmpty else {
+                errorMessage = (plan.issues.first(where: \.isBlocking) ?? plan.issues.first(where: { $0.severity == .warning }))?.nextAction ?? "请先处理尚未完成的选角。"
+                return
             }
-        }
-        if didModifyCharFlags {
-            try? await store.saveCharacters(bookID: targetID, characters: updatedChars)
-        }
+            try await castController.applyCastingPlan(bookID: targetID, plan: plan, acknowledgedIssueIDs: [])
+            if selectedBook?.id == targetID {
+                characters = try await store.characters(for: targetID)
+                voiceBindings = try await store.voiceBindings(for: targetID)
+                selectedBook = try await store.book(id: targetID)
+                let annotations = try await store.annotations(for: targetID)
+                roleStatsByID = AudiobookCastRegistry.computeRoleDialogueStats(
+                    characters: characters, annotations: annotations, availableVoiceCount: plan.eligibleVoiceCount
+                ).statsByRoleID
+                await refreshChapterReadinessMap(for: targetID)
+            }
+        } catch { errorMessage = "配声方案未应用，请刷新后重新确认。" }
+    }
 
-        let bindingsToApply = updatedChars.compactMap { role -> AudiobookVoiceBinding? in
-            guard existing[role.id]?.isSynthesisReady != true else { return nil }
-            return recommended[role.id]
-        }
-        if !bindingsToApply.isEmpty {
-            _ = try? await castController.bindVoicesBatch(bookID: targetID, bindings: bindingsToApply)
-        }
-
-        if selectedBook?.id == targetID {
-            roleStatsByID = stats
-            characters = (try? await store.characters(for: targetID)) ?? updatedChars
-            voiceBindings = (try? await store.voiceBindings(for: targetID)) ?? voiceBindings
-            selectedBook = (try? await store.book(id: targetID)) ?? selectedBook
-            await refreshChapterReadinessMap(for: targetID)
-        }
+    public func applyPendingCastingPlan(acknowledgedIssueIDs: Set<UUID>) async {
+        guard let plan = pendingCastingPlan, let castController else { return }
+        do {
+            try await castController.applyCastingPlan(bookID: plan.bookID, plan: plan, acknowledgedIssueIDs: acknowledgedIssueIDs)
+            pendingCastingPlan = nil
+            await openBook(plan.bookID)
+        } catch { errorMessage = "配声方案已失效或仍需确认，请重新推荐。" }
     }
 
     private func rebuildMinorCharactersByArchetype() {
@@ -1162,7 +1139,7 @@ public final class AudiobookWorkflowModel {
         sceneConflictPartnersByRoleID[roleID] ?? []
     }
 
-    /// 按声部行当一键批量换绑配角音色（保护核心主角不被覆盖）。
+    /// 按声部行当补全尚未配声的配角。
     public func batchBindArchetype(_ archetype: AudiobookVoiceArchetype, to voice: SafeVoiceEntry) async {
         guard let bookID = selectedBook?.id, let castController, let store else { return }
         do {
@@ -1177,9 +1154,9 @@ public final class AudiobookWorkflowModel {
             await refreshChapterReadinessMap(for: bookID)
             await refreshShelf()
             if count > 0 {
-                bannerMessage = "已将 \(count) 名「\(archetype.shortBadgeTitle)」配角批量绑定为「\(voice.name)」，并自动配置微语速区分。"
+                bannerMessage = "已为 \(count) 名未配声的「\(archetype.shortBadgeTitle)」配角选择「\(voice.name)」。"
             } else {
-                bannerMessage = "当前没有属于「\(archetype.shortBadgeTitle)」且开启共享声线的次要角色。"
+                bannerMessage = "当前没有需要补全「\(archetype.shortBadgeTitle)」声音的次要角色。"
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -1189,14 +1166,13 @@ public final class AudiobookWorkflowModel {
     /// 调整单个角色已绑定音色的微语速档位。
     public func updateRoleAllowedSpeed(roleID: UUID, speed: Double) async {
         guard let existing = voiceBindings[roleID] else { return }
-        let clamped = min(Double(AudiobookLimits.maxPlaybackRate), max(Double(AudiobookLimits.minPlaybackRate), speed))
         let updated = AudiobookVoiceBinding(
             roleID: existing.roleID,
             voiceID: existing.voiceID,
             voiceRevision: existing.voiceRevision,
             modelRevision: existing.modelRevision,
             isSynthesisReady: existing.isSynthesisReady,
-            allowedSpeed: clamped,
+            allowedSpeed: speed,
             callerSeed: existing.callerSeed
         )
         await bindVoice(roleID: roleID, binding: updated)
@@ -1365,14 +1341,14 @@ public final class AudiobookWorkflowModel {
     ) -> [AudiobookVoiceArchetype] {
         let targetBookID = bookID ?? selectedBook?.id
         let pool = mergedAvailableVoices(externalVoices: availableVoices ?? catalogVoices)
-        let metadataMap = VoiceCatalogStore.shared.metadataByVoiceID
+        let metadataMap = dependencies.voiceCatalog.metadataByVoiceID
 
         var coveredArchetypes = Set<AudiobookVoiceArchetype>()
         for voice in pool where voice.available {
             let lowerID = voice.id.lowercased()
             let isBuiltInDefault = Self.builtInSystemVoiceIDs.contains(lowerID) || lowerID == "v-narrator"
             guard !isBuiltInDefault else { continue }
-            guard VoiceCatalogStore.shared.isVoiceActiveForBook(voiceID: voice.id, currentBookID: targetBookID) else {
+            guard dependencies.voiceCatalog.isVoiceActiveForBook(voiceID: voice.id, currentBookID: targetBookID) else {
                 continue
             }
             let meta = metadataMap[voice.id]
@@ -1468,7 +1444,7 @@ public final class AudiobookWorkflowModel {
             )
 
             if let output = try? await dependencies.speechRenderer.createAndPublishLeadVoice(request) {
-                VoiceCatalogStore.shared.registerArchetypeEnsembleVoice(
+                dependencies.voiceCatalog.registerArchetypeEnsembleVoice(
                     voiceID: output.voiceID,
                     bookID: targetID,
                     bookTitle: bookTitle,
@@ -1506,7 +1482,7 @@ public final class AudiobookWorkflowModel {
         quietBanner: Bool = false
     ) async -> Int {
         let targetID = bookID ?? selectedBook?.id
-        guard let targetID, let store, let castController else { return 0 }
+        guard let targetID, let store, castController != nil else { return 0 }
         guard !isCreatingLeadExclusiveVoices else { return 0 }
 
         guard let loadedChars = try? await store.characters(for: targetID),
@@ -1520,25 +1496,18 @@ public final class AudiobookWorkflowModel {
             annotations: allAnnotations
         )
 
-        // 筛选出核心主要角色（旁白或 .lead / 非共享主角），且尚未绑定本书专属定制音色的角色（最多前 6 名主角）
+        // 自动补全只处理没有绑定的角色；已有声音即使待复核也由用户明确处理。
         let leadCandidates = stratifiedChars.filter { role in
             let stat = stats[role.id]
             let isLeadRole = role.isNarrator || stat?.tier == .lead || !role.allowSharedMinorVoice
             let hasLines = role.isNarrator || (stat?.dialogueAtomCount ?? 0) > 0
             guard isLeadRole && hasLines else { return false }
-            if let bound = existingBindings[role.id], bound.isSynthesisReady {
-                let isBuiltInDefault = Self.builtInSystemVoiceIDs.contains(bound.voiceID.lowercased())
-                let metaScope = VoiceCatalogStore.shared.metadata(for: bound.voiceID)?.scope
-                if !isBuiltInDefault && metaScope == .bookExclusive {
-                    return false
-                }
-            }
-            return true
+            return existingBindings[role.id] == nil
         }.prefix(6)
 
         guard !leadCandidates.isEmpty else {
             if !quietBanner {
-                bannerMessage = "当前主要角色均已绑定专属定制音色。"
+                bannerMessage = "主要角色已有声音；如需更换，请选择对应角色。"
             }
             return 0
         }
@@ -1553,7 +1522,8 @@ public final class AudiobookWorkflowModel {
                 bookTitle: bookTitle,
                 role: role,
                 peers: stratifiedChars,
-                slotOffset: idx
+                slotOffset: idx,
+                onlyIfUnbound: true
             ) {
                 createdCount += 1
             }
@@ -1624,7 +1594,8 @@ public final class AudiobookWorkflowModel {
         bookTitle: String,
         role: AudiobookCharacter,
         peers: [AudiobookCharacter],
-        slotOffset: Int
+        slotOffset: Int,
+        onlyIfUnbound: Bool = false
     ) async -> AudiobookLeadVoiceCreationOutput? {
         guard let castController else { return nil }
         guard let context = try? await castController.makeVoiceReturnContext(bookID: bookID, roleID: role.id) else {
@@ -1670,7 +1641,7 @@ public final class AudiobookWorkflowModel {
         }
 
         let archetype = roleStatsByID[role.id]?.archetype ?? role.inferredVoiceArchetype(peers: peers)
-        VoiceCatalogStore.shared.registerBookExclusiveVoice(
+        dependencies.voiceCatalog.registerBookExclusiveVoice(
             voiceID: output.voiceID,
             bookID: bookID,
             bookTitle: bookTitle,
@@ -1688,7 +1659,12 @@ public final class AudiobookWorkflowModel {
             allowedSpeed: AudiobookLimits.defaultRenderSpeed,
             callerSeed: nil
         )
-        try? await castController.bindVoice(bookID: bookID, roleID: role.id, binding: binding)
+        do {
+            try await castController.completeVoiceReturn(context: context, activeBookID: bookID, binding: binding, onlyIfUnbound: onlyIfUnbound)
+        } catch {
+            errorMessage = error.localizedDescription
+            return nil
+        }
         return output
     }
 
@@ -1762,6 +1738,27 @@ public final class AudiobookWorkflowModel {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    /// A new, explicit selection resolves identity from one full snapshot. Frozen bindings use the overload below.
+    public func bindVoice(roleID: UUID, voiceID: String) async {
+        guard let bookID = selectedBook?.id else { return }
+        do {
+            let snapshot = try await dependencies.speechRenderer.fetchEffectiveCapabilities()
+            guard selectedBook?.id == bookID,
+                  let voice = snapshot.voices.first(where: { $0.id == voiceID }),
+                  let options = SpeechRailCapabilityRevisionSelector.creatorRequestOptions(voiceID: voice.id, in: snapshot),
+                  let modelRevision = options.expectedModelRevision else { throw ServiceAPIClientError.invalidContract("voice_identity_unknown") }
+            let old = voiceBindings[roleID]
+            let binding: AudiobookVoiceBinding
+            if let old, old.voiceID == voice.id, (try? AudiobookCastRegistry.validateRenderBinding(old, snapshot: snapshot)) != nil {
+                binding = old
+            } else {
+                binding = AudiobookVoiceBinding(roleID: roleID, voiceID: voice.id,
+                    voiceRevision: options.expectedVoiceRevision, modelRevision: modelRevision)
+            }
+            await bindVoice(roleID: roleID, binding: binding)
+        } catch { errorMessage = "所选声音当前不可用于制作，请刷新声音列表后重新选择。" }
     }
 
     public func bindVoice(roleID: UUID, binding: AudiobookVoiceBinding) async {
@@ -1866,7 +1863,7 @@ public final class AudiobookWorkflowModel {
         let roleArchetype = matchedRole?.inferredVoiceArchetype(peers: characters) ?? .neutralEnsemble
 
         // AC7：在有声书工坊中为特定角色设计并发布的音色，默认注册为该书剧组专用音色（.bookExclusive），隔离跨书全局列表污染
-        VoiceCatalogStore.shared.registerBookExclusiveVoice(
+        dependencies.voiceCatalog.registerBookExclusiveVoice(
             voiceID: binding.voiceID,
             bookID: targetContext.bookID,
             bookTitle: targetContext.bookTitle ?? selectedBook?.title,
@@ -2514,15 +2511,13 @@ public final class AudiobookWorkflowModel {
         var atomMap: [UUID: String] = [:]
         atomMap.reserveCapacity(atoms.count)
         for atom in atoms {
-            let raw = (try? source.text(in: atom.sourceRange)) ?? ""
-            atomMap[atom.id] = AudiobookSourceIndex.displayNormalizedText(raw)
+            atomMap[atom.id] = (try? source.normalizedText(in: atom.sourceRange)) ?? ""
         }
 
         var fragmentMap: [UUID: String] = [:]
         fragmentMap.reserveCapacity(fragments.count)
         for fragment in fragments {
-            let raw = (try? source.text(in: fragment.sourceRange)) ?? ""
-            fragmentMap[fragment.id] = AudiobookSourceIndex.displayNormalizedText(raw)
+            fragmentMap[fragment.id] = (try? source.normalizedText(in: fragment.sourceRange)) ?? ""
         }
 
         await loadCheckpointForTesting?(bookID, chapterID, .beforeChapterDetailsProjection)

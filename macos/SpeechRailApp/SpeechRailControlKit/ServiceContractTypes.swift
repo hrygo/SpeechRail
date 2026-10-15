@@ -645,6 +645,8 @@ public struct SafeVoiceEntry: Codable, Equatable, Sendable, Identifiable {
     public let name: String
     public let aliases: [String]
     public let mode: String
+    public let isSystem: Bool?
+    public let isDefault: Bool?
     public let available: Bool
     public let availabilityReason: SafeVoiceAvailabilityReason
     public let variant: String?
@@ -672,6 +674,8 @@ public struct SafeVoiceEntry: Codable, Equatable, Sendable, Identifiable {
         name: String,
         aliases: [String] = [],
         mode: String,
+        isSystem: Bool? = nil,
+        isDefault: Bool? = nil,
         available: Bool,
         availabilityReason: SafeVoiceAvailabilityReason,
         variant: String? = nil,
@@ -691,6 +695,8 @@ public struct SafeVoiceEntry: Codable, Equatable, Sendable, Identifiable {
         self.name = name
         self.aliases = aliases
         self.mode = mode
+        self.isSystem = isSystem
+        self.isDefault = isDefault
         self.available = available
         self.availabilityReason = availabilityReason
         self.variant = variant
@@ -712,6 +718,8 @@ public struct SafeVoiceEntry: Codable, Equatable, Sendable, Identifiable {
         case name
         case aliases
         case mode
+        case isSystem = "is_system"
+        case isDefault = "is_default"
         case available
         case availabilityReason = "availability_reason"
         case variant
@@ -735,6 +743,8 @@ public struct SafeVoiceEntry: Codable, Equatable, Sendable, Identifiable {
             name: try container.decode(String.self, forKey: .name),
             aliases: try container.decodeIfPresent([String].self, forKey: .aliases) ?? [],
             mode: try container.decode(String.self, forKey: .mode),
+            isSystem: try container.decodeIfPresent(Bool.self, forKey: .isSystem),
+            isDefault: try container.decodeIfPresent(Bool.self, forKey: .isDefault),
             available: try container.decode(Bool.self, forKey: .available),
             availabilityReason: try container.decode(
                 SafeVoiceAvailabilityReason.self,
@@ -1296,6 +1306,7 @@ public struct SpeechRequest: Codable, Equatable, Sendable {
 }
 
 public struct SpeechRailRequestOptions: Equatable, Sendable {
+    public let callerSeed: Int?
     public let expectedVoiceRevision: String?
     public let expectedModelRevision: String?
     public let pronunciationSet: String?
@@ -1310,6 +1321,7 @@ public struct SpeechRailRequestOptions: Equatable, Sendable {
     public let validationPolicy: String?
 
     public init(
+        callerSeed: Int? = nil,
         expectedVoiceRevision: String? = nil,
         expectedModelRevision: String? = nil,
         pronunciationSet: String? = nil,
@@ -1320,6 +1332,7 @@ public struct SpeechRailRequestOptions: Equatable, Sendable {
         languageOverride: String? = nil,
         validationPolicy: String? = nil
     ) {
+        self.callerSeed = callerSeed
         self.expectedVoiceRevision = expectedVoiceRevision
         self.expectedModelRevision = expectedModelRevision
         self.pronunciationSet = pronunciationSet
@@ -1333,6 +1346,7 @@ public struct SpeechRailRequestOptions: Equatable, Sendable {
 
     public var headers: [String: String] {
         var result: [String: String] = [:]
+        if let callerSeed { result["SpeechRail-Seed"] = String(callerSeed) }
         if let expectedVoiceRevision {
             result["SpeechRail-Expected-Voice-Revision"] = expectedVoiceRevision
         }
@@ -1369,6 +1383,7 @@ public struct SpeechRailRequestOptions: Equatable, Sendable {
     /// how a SpeechRail extension silently disappears from one call path.
     public func with(languageOverride: String? = nil) -> SpeechRailRequestOptions {
         SpeechRailRequestOptions(
+            callerSeed: callerSeed,
             expectedVoiceRevision: expectedVoiceRevision,
             expectedModelRevision: expectedModelRevision,
             pronunciationSet: pronunciationSet,
@@ -1386,6 +1401,7 @@ public struct SpeechRailRequestOptions: Equatable, Sendable {
     /// hand-rebuilt options struct is how that guarantee silently disappears.
     public func withValidationPolicy(_ policy: String?) -> SpeechRailRequestOptions {
         SpeechRailRequestOptions(
+            callerSeed: callerSeed,
             expectedVoiceRevision: expectedVoiceRevision,
             expectedModelRevision: expectedModelRevision,
             pronunciationSet: pronunciationSet,
@@ -1406,6 +1422,7 @@ public struct SpeechRailRequestOptions: Equatable, Sendable {
     /// rebuilding the options by hand.
     public func withInteractivePurpose() -> SpeechRailRequestOptions {
         SpeechRailRequestOptions(
+            callerSeed: callerSeed,
             expectedVoiceRevision: expectedVoiceRevision,
             expectedModelRevision: expectedModelRevision,
             pronunciationSet: pronunciationSet,
@@ -1422,6 +1439,7 @@ public struct SpeechRailRequestOptions: Equatable, Sendable {
     /// (`SpeechRail-Receipt-Mode: integrity`), preserving every other field.
     public func withReceiptModeIntegrity() -> SpeechRailRequestOptions {
         SpeechRailRequestOptions(
+            callerSeed: callerSeed,
             expectedVoiceRevision: expectedVoiceRevision,
             expectedModelRevision: expectedModelRevision,
             pronunciationSet: pronunciationSet,

@@ -33,7 +33,22 @@ public enum AudiobookChapterPlanner {
         }
 
         let lines = source.paragraphs
-        let headingLineIndices = headingIndices(in: source)
+        let proposed = headingIndices(in: source)
+        var headingLineIndices: [Int] = []
+        for index in proposed {
+            if let previous = headingLineIndices.last,
+               titleKey(lines[previous].text) == titleKey(lines[index].text) {
+                let gap = AudiobookSourceRange(
+                    lowerBound: lines[previous].sourceRange.upperBound,
+                    upperBound: lines[index].sourceRange.lowerBound
+                )
+                let separators = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "-─—_=*·•"))
+                if try source.text(in: gap).unicodeScalars.allSatisfy({ separators.contains($0) }) {
+                    continue
+                }
+            }
+            headingLineIndices.append(index)
+        }
 
         guard !headingLineIndices.isEmpty else {
             let whole = AudiobookChapter(
@@ -256,17 +271,28 @@ public enum AudiobookChapterPlanner {
     private static func headingIndices(in source: AudiobookSourceIndex) -> [Int] {
         let paragraphs = source.paragraphs
         let explicit = paragraphs.indices.filter { AudiobookSourceIndex.isChapterHeading(paragraphs[$0].text) }
-        if !explicit.isEmpty { return explicit }
 
         // Unnumbered anthology titles need both isolated typography and following prose.
         // Several matching titles establish a document convention; a short prose line alone does not.
         let named = paragraphs.indices.filter { index in
             let paragraph = paragraphs[index]
             guard paragraph.isIsolatedTitleCandidate, isStandaloneTitle(paragraph.text) else { return false }
-            let following = paragraphs.dropFirst(index + 1).prefix(2)
-            return following.contains { $0.text.unicodeScalars.count >= 16 }
+            var bodyIndex = index + 1
+            if bodyIndex < paragraphs.count,
+               sectionNumber(paragraphs[bodyIndex].text) != nil || AudiobookSourceIndex.isChapterHeading(paragraphs[bodyIndex].text) {
+                bodyIndex += 1
+            }
+            guard bodyIndex < paragraphs.count else { return false }
+            let following = paragraphs[bodyIndex]
+            if following.isIsolatedTitleCandidate && isStandaloneTitle(following.text) { return false }
+            return following.text.unicodeScalars.count >= 16
+                || (following.text.unicodeScalars.count >= 4 && following.text.first.map { "“「『\"".contains($0) } == true)
         }
-        if named.count >= 2 { return named }
+        // Round-numbered novels keep their explicit structure. In anthologies,
+        // story titles are parents of the numbered chapters inside each story.
+        let hasRoundStructure = explicit.contains { paragraphs[$0].text.range(of: #"^第[^\s]+回"#, options: .regularExpression) != nil }
+        if named.count >= 2 && !hasRoundStructure { return named }
+        if !explicit.isEmpty { return explicit }
 
         // Bare section numbers are chapters only without a parent title convention.
         let numbered = paragraphs.indices.filter {
@@ -281,13 +307,22 @@ public enum AudiobookChapterPlanner {
     }
 
     private static func isStandaloneTitle(_ text: String) -> Bool {
-        guard (2...48).contains(text.unicodeScalars.count),
+        let primary = text.components(separatedBy: "──")[0]
+            .replacingOccurrences(of: #"[〔【\[][0-9０-９]+[〕】\]]"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+        guard (1...16).contains(primary.unicodeScalars.count), text.unicodeScalars.count <= 48,
               let first = text.unicodeScalars.first, (0x3400...0x9FFF).contains(first.value),
-              !text.unicodeScalars.contains(where: { "，。！？；：、,.!?;:\"“”‘’「」『』《》".unicodeScalars.contains($0) }),
-              !["作者", "著者", "译者", "譯者", "出版", "版权所有", "版權所有"].contains(where: text.hasPrefix),
-              text.range(of: #"^[零〇一二三四五六七八九十百千万年月日0-9\s]+$"#, options: .regularExpression) == nil
+              text.rangeOfCharacter(from: CharacterSet(charactersIn: "。！？；：，,.!?;:")) == nil,
+              !primary.unicodeScalars.contains(where: { CharacterSet.punctuationCharacters.contains($0) }),
+              !AudiobookSourceIndex.isChapterHeading(text),
+              !["作者", "著者", "译者", "譯者", "出版", "版权所有", "版權所有", "注释", "注釋"].contains(where: text.hasPrefix),
+              text.range(of: #"^[零〇○一二三四五六七八九十百千万年月日0-9\s]+$"#, options: .regularExpression) == nil
         else { return false }
         return true
+    }
+
+    private static func titleKey(_ title: String) -> String {
+        title.filter { !$0.isWhitespace }
     }
 
     private static func sectionNumber(_ text: String) -> Int? {

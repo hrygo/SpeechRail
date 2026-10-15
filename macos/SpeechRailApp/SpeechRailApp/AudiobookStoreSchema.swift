@@ -1,7 +1,7 @@
 import Foundation
 
 public enum AudiobookStoreSchema {
-    public static let currentUserVersion: Int32 = 1
+    public static let currentUserVersion: Int32 = 3
 
     public static let createTablesSQL: String = """
     PRAGMA journal_mode = WAL;
@@ -91,6 +91,8 @@ public enum AudiobookStoreSchema {
         first_lower_bound INTEGER,
         first_upper_bound INTEGER,
         chapter_ids_json TEXT NOT NULL,
+        voice_policy_json TEXT,
+        manual_tier TEXT,
         PRIMARY KEY (book_id, id),
         FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
     );
@@ -99,12 +101,14 @@ public enum AudiobookStoreSchema {
         book_id TEXT NOT NULL,
         role_id TEXT NOT NULL,
         voice_id TEXT NOT NULL,
-        voice_revision TEXT NOT NULL,
+        voice_revision TEXT,
         model_revision TEXT NOT NULL,
         is_synthesis_ready INTEGER NOT NULL,
         allowed_speed REAL NOT NULL,
         caller_seed INTEGER,
         binding_digest TEXT NOT NULL,
+        actual_voice_revision TEXT,
+        actual_model_revision TEXT,
         PRIMARY KEY (book_id, role_id),
         FOREIGN KEY (book_id, role_id) REFERENCES characters(book_id, id) ON DELETE CASCADE
     );

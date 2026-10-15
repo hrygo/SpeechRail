@@ -2,7 +2,7 @@
 title: "有声书工坊（Audiobook Workshop）测试与验收交接手册"
 status: active
 audience: "QA 测试团队、客户端验收工程师、发布门禁负责人"
-version: "1.2.0"
+version: "1.3.0"
 date: 2026-10-15
 ---
 
@@ -21,6 +21,18 @@ date: 2026-10-15
 | Git 差异格式与空白检查 | `git diff --check` | **PASS**（无尾随空格或冲突标记） |
 
 ## 2. 自动化测试清单与执行命令
+
+### P0 选角定向验收
+
+大规模选角的八项 P0 使用以下范围，事实与限制单独记录在 [P0 定向验收记录](../audits/2026-10-15-audiobook-mass-casting-p0-acceptance.md)。这组证据不代表本手册其他全量、真实声音或 UI 项目已执行。
+
+```bash
+swift test --package-path macos/SpeechRailApp --filter 'ServiceContractTests|Audiobook(Cast|Store|Production|Workflow|Invalidation)Tests'
+uv run --no-sync pytest --no-cov tests/test_tts_request_validation.py
+git diff --check
+```
+
+测试显式注入内存或临时 `VoiceCatalogStore`，所有 Store root 位于临时目录；真实请求构造使用 URL transport 替身。迁移仅打开合成 schema 1 副本，比较全表记录、外键与历史引用，并注入失败验证回滚；不读取默认作品库。目录隔离的既有夹具问题与修正范围见专项记录。App 构建、前台 UI 自动化、模型和运行态操作须按对应授权执行。
 
 ### 2.1 Python 媒体导出套件（T11）
 
@@ -119,4 +131,4 @@ bash scripts/macos_app_build.sh --configuration Debug --test-unit
 - **复现阶段**：（Python 媒体测试 / SwiftPM 某 Suite / Xcode 构建 / 真机 UI 走查）
 - **复现命令与日志摘要**：附上完整终端输出或截图
 - **书稿样本特征**：编码格式、文件大小、章节数（切勿在公开 Issue 中上传受版权保护的完整商业书稿）
-- **独立回滚边界**：有声书工坊的数据独立存储在 `<app_home>/audiobooks/`（`audiobooks.sqlite3` 及 `books/`、`exports/` 子目录），不影响配音台 (`dubbing/`)、音色库 (`voices/`) 或会议记录 (`sessions/`)。
+- **独立回滚边界**：作品数据位于 `<app_home>/audiobooks/`（`library.sqlite3` 及作品、导出子目录）；共享音色目录单独备份与恢复，不能连带覆盖其他创作记录。schema 2 的回退实现须保留可空声音 revision；发生迁移后写入时，不以迁移前备份覆盖新作品。计算逻辑回退仍保留候选隔离、严格准入与原子保存，历史音频和章节版本继续保留。

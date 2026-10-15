@@ -54,6 +54,12 @@ public enum AudiobookImportError: Error, Equatable, Sendable, LocalizedError {
     }
 }
 
+public struct AudiobookRepeatedContentWarning: Equatable, Sendable, Identifiable {
+    public let id: UUID
+    public let title: String
+    public let chapterIDs: [UUID]
+}
+
 public struct AudiobookImportPreview: Equatable, Sendable, Identifiable {
     public let id: UUID
     public let bookID: UUID
@@ -69,6 +75,12 @@ public struct AudiobookImportPreview: Equatable, Sendable, Identifiable {
     public let requiresEncodingConfirmation: Bool
     public let previewText: String
     public var chapters: [AudiobookChapter]
+    public let repeatedContentWarnings: [AudiobookRepeatedContentWarning]
+    public var hasConfirmedRepeatedContent: Bool
+
+    public var canConfirmImport: Bool {
+        repeatedContentWarnings.isEmpty || hasConfirmedRepeatedContent
+    }
 
     public init(
         id: UUID = UUID(),
@@ -84,7 +96,9 @@ public struct AudiobookImportPreview: Equatable, Sendable, Identifiable {
         candidateEncodings: [AudiobookTextEncoding],
         requiresEncodingConfirmation: Bool = false,
         previewText: String,
-        chapters: [AudiobookChapter]
+        chapters: [AudiobookChapter],
+        repeatedContentWarnings: [AudiobookRepeatedContentWarning] = [],
+        hasConfirmedRepeatedContent: Bool = false
     ) {
         self.id = id
         self.bookID = bookID
@@ -100,6 +114,8 @@ public struct AudiobookImportPreview: Equatable, Sendable, Identifiable {
         self.requiresEncodingConfirmation = requiresEncodingConfirmation
         self.previewText = previewText
         self.chapters = chapters
+        self.repeatedContentWarnings = repeatedContentWarnings
+        self.hasConfirmedRepeatedContent = hasConfirmedRepeatedContent
     }
 
     public var sourceSHA256: String {
@@ -195,7 +211,7 @@ public enum AudiobookTXTImporter {
             canonicalString = detection.decodedText
         }
 
-        guard !canonicalString.isEmpty else {
+        guard canonicalString.unicodeScalars.contains(where: { !CharacterSet.whitespacesAndNewlines.contains($0) }) else {
             throw AudiobookImportError.emptyFile
         }
 
@@ -234,8 +250,24 @@ public enum AudiobookTXTImporter {
             candidateEncodings: candidates,
             requiresEncodingConfirmation: false,
             previewText: previewText,
-            chapters: plannedChapters
+            chapters: plannedChapters,
+            repeatedContentWarnings: try repeatedContentWarnings(in: plannedChapters, source: sourceIndex)
         )
+    }
+
+    private static func repeatedContentWarnings(
+        in chapters: [AudiobookChapter], source: AudiobookSourceIndex
+    ) throws -> [AudiobookRepeatedContentWarning] {
+        var groups: [String: [AudiobookChapter]] = [:]
+        for chapter in chapters {
+            let text = try source.normalizedText(in: chapter.sourceRange)
+            guard text.unicodeScalars.count > chapter.title.unicodeScalars.count + 8 else { continue }
+            let key = AudiobookDigest.sha256Hex(Data(text.utf8))
+            groups[key, default: []].append(chapter)
+        }
+        return groups.values.filter { $0.count > 1 }.sorted { $0[0].ordinal < $1[0].ordinal }.map {
+            AudiobookRepeatedContentWarning(id: $0[0].id, title: $0[0].title, chapterIDs: $0.map(\.id))
+        }
     }
 
     // MARK: - Strict Decoding
