@@ -897,8 +897,22 @@ public final class AudiobookWorkflowModel {
               let store
         else { return }
 
+        let matchedRole = characters.first(where: { $0.id == targetContext.roleID })
+        let roleName = targetContext.roleDisplayName ?? matchedRole?.displayName ?? "当前角色"
+        let roleArchetype = matchedRole?.inferredVoiceArchetype(peers: characters) ?? .neutralEnsemble
+
+        // AC7：在有声书工坊中为特定角色设计并发布的音色，默认注册为该书剧组专用音色（.bookExclusive），隔离跨书全局列表污染
+        VoiceCatalogStore.shared.registerBookExclusiveVoice(
+            voiceID: binding.voiceID,
+            bookID: targetContext.bookID,
+            bookTitle: targetContext.bookTitle ?? selectedBook?.title,
+            roleID: targetContext.roleID,
+            roleName: roleName,
+            archetype: roleArchetype
+        )
+
         guard let activeBookID = selectedBook?.id else {
-            voiceReturnBannerMessage = "新音色已保存到音色库；重新打开对应书籍后可手动选择绑定。"
+            voiceReturnBannerMessage = "新音色已保存到本书专用音色库；重新打开对应书籍后可手动选择绑定。"
             pendingVoiceReturnContext = nil
             return
         }
@@ -912,8 +926,7 @@ public final class AudiobookWorkflowModel {
             voiceBindings = try await store.voiceBindings(for: activeBookID)
             selectedBook = try await store.book(id: activeBookID)
             pendingVoiceReturnContext = nil
-            let roleName = characters.first(where: { $0.id == targetContext.roleID })?.displayName ?? "当前角色"
-            voiceReturnBannerMessage = "已将新音色「\(binding.voiceID)」绑定给角色「\(roleName)」。"
+            voiceReturnBannerMessage = "已将本书专用新音色「\(binding.voiceID)」绑定给角色「\(roleName)」。"
             await refreshChapterReadinessMap(for: activeBookID)
             await refreshShelf()
         } catch {

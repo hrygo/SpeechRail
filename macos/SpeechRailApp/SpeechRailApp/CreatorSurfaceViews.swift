@@ -2387,6 +2387,9 @@ public struct VoiceLibraryView: View {
     @State private var showInspector = true
     @State private var searchText = ""
     @State private var sourceFilter = VoiceSourceFilter.all
+    @State private var scopeFilter = VoiceScopeFilter.activeGlobal
+    @State private var selectedArchetype: AudiobookVoiceArchetype? = nil
+    @State private var catalogRefreshTick: Int = 0
     @State private var selectionNotice: String?
     @State private var pendingDeleteVoice: CreatorVoice?
     @State private var isConfirmingDeletion = false
@@ -2408,6 +2411,25 @@ public struct VoiceLibraryView: View {
             case .all: "全部"
             case .system: "系统"
             case .custom: "我的"
+            }
+        }
+    }
+
+    /// 100+ 音色库四级作用域筛选（默认隐藏已归档音色，支持一键切换查看剧组专用与星标收藏）。
+    private enum VoiceScopeFilter: String, CaseIterable, Identifiable {
+        case activeGlobal
+        case favorites
+        case bookExclusive
+        case archived
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .activeGlobal: "通用活跃"
+            case .favorites: "星标收藏"
+            case .bookExclusive: "剧组专用"
+            case .archived: "已归档"
             }
         }
     }
@@ -2593,7 +2615,7 @@ public struct VoiceLibraryView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    /// The list is the page: a source filter, the result count, then the system
+    /// The list is the page: a source filter, scope & archetype taxonomy bar, the result count, then the system
     /// `List` that owns row selection for the inspector (REDESIGN-SPEC §7.3).
     private var voiceLibraryList: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
@@ -2608,6 +2630,16 @@ public struct VoiceLibraryView: View {
                 .fixedSize()
                 .accessibilityLabel("按来源筛选音色")
 
+                Picker("作用域", selection: $scopeFilter) {
+                    ForEach(VoiceScopeFilter.allCases) { scope in
+                        Text(scope.title).tag(scope)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .accessibilityLabel("按作用域筛选音色")
+
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
 
                 Text(countText)
@@ -2616,13 +2648,29 @@ public struct VoiceLibraryView: View {
                     .monospacedDigit()
             }
 
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Button("全部声部") {
+                        selectedArchetype = nil
+                    }
+                    .speechRailButton(selectedArchetype == nil ? .primary : .quiet)
+
+                    ForEach(AudiobookVoiceArchetype.allCases) { archetype in
+                        Button(archetype.shortBadgeTitle) {
+                            selectedArchetype = (selectedArchetype == archetype) ? nil : archetype
+                        }
+                        .speechRailButton(selectedArchetype == archetype ? .primary : .quiet)
+                    }
+                }
+            }
+
             statusBanners
 
             if filteredVoices.isEmpty {
                 ContentUnavailableView {
                     Label("没有匹配的音色", systemImage: "magnifyingglass")
                 } description: {
-                    Text("换个关键词，或把来源筛选切回「全部」。")
+                    Text("换个关键词，或把来源与声部筛选切回「全部」。")
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -2673,13 +2721,37 @@ public struct VoiceLibraryView: View {
         return cloned > 0 ? "\(total) 个音色 · \(cloned) 个来自复刻" : "\(total) 个音色"
     }
 
-    /// One row: name, source badge, one line of description, the availability
+    /// One row: name, source badge, archetype & scope badges, one line of description, the availability
     /// note, and the inline preview. Everything heavier lives in the inspector
     /// (REDESIGN-SPEC §7.3).
     private func voiceLibraryRow(_ voice: CreatorVoice) -> some View {
+        _ = catalogRefreshTick
         let isPlaying = model.playingVoiceID == voice.id && model.isAudioPlaying
         let isPreviewing = model.previewingVoiceID == voice.id
+        let meta = VoiceCatalogStore.shared.metadata(for: voice.id)
+        let archetype = VoiceTaxonomyClassifier.resolveArchetype(
+            voiceID: voice.id,
+            traits: [voice.instruction],
+            description: voice.description,
+            label: voice.name,
+            metadata: meta
+        )
         return HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Button {
+                VoiceCatalogStore.shared.toggleFavorite(voiceID: voice.id)
+                catalogRefreshTick += 1
+            } label: {
+                Image(systemName: meta?.isFavorite == true ? "star.fill" : "star")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(
+                        meta?.isFavorite == true
+                            ? SpeechRailDesignTokens.Color.voice
+                            : SpeechRailDesignTokens.Color.inkTertiary
+                    )
+            }
+            .buttonStyle(.plain)
+            .help(meta?.isFavorite == true ? "取消星标收藏" : "星标收藏音色")
+
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     Text(voice.name)
@@ -2689,6 +2761,13 @@ public struct VoiceLibraryView: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
                     sourceBadge(voice)
+                    StatusPill(tone: .neutral, label: archetype.shortBadgeTitle)
+                    if meta?.scope == .bookExclusive {
+                        let bookLabel = meta?.originBookTitle.map { "剧组：\($0)" } ?? "剧组专用"
+                        StatusPill(tone: .healthy, label: bookLabel)
+                    } else if meta?.scope == .archived {
+                        StatusPill(tone: .neutral, label: "已归档")
+                    }
                 }
                 Text(voiceListDescription(for: voice))
                     // 副行是 `Callout`（脚本 `row/sub`）：4x 帧实测该行 ink 10.75pt ≈ 12pt，
@@ -2729,6 +2808,37 @@ public struct VoiceLibraryView: View {
                     : "\(voice.name)\(isPlaying ? "停止试听" : "试听")"
             )
 
+        }
+        .contextMenu {
+            Button(meta?.isFavorite == true ? "取消星标收藏" : "设为星标收藏") {
+                VoiceCatalogStore.shared.toggleFavorite(voiceID: voice.id)
+                catalogRefreshTick += 1
+            }
+            Menu("设置声部行当") {
+                ForEach(AudiobookVoiceArchetype.allCases) { arch in
+                    Button(arch.title) {
+                        VoiceCatalogStore.shared.setArchetypeOverride(arch, for: voice.id)
+                        catalogRefreshTick += 1
+                    }
+                }
+            }
+            if meta?.scope == .bookExclusive {
+                Button("⬆️ 晋升为全局通用音色") {
+                    _ = VoiceCatalogStore.shared.promoteToGlobalReusable(voiceID: voice.id)
+                    catalogRefreshTick += 1
+                }
+            }
+            if meta?.scope == .archived {
+                Button("恢复为活跃音色") {
+                    VoiceCatalogStore.shared.unarchiveVoices(voiceIDs: [voice.id])
+                    catalogRefreshTick += 1
+                }
+            } else if !voice.isSystem {
+                Button("归档该音色（从选角器隐藏）") {
+                    VoiceCatalogStore.shared.archiveVoices(voiceIDs: [voice.id])
+                    catalogRefreshTick += 1
+                }
+            }
         }
         // 稿 `row` 是 padX 16 / padY 12。行内边距由行自己给、`listRowInsets` 清零，
         // 行高由 `pageRowMinimumHeight` 钉住：4x 帧实测三页行距 64.00 = 行框 63 + 1pt hairline，
@@ -2782,20 +2892,52 @@ public struct VoiceLibraryView: View {
     }
 
     private var filteredVoices: [CreatorVoice] {
-        let bySource = model.creatorVoices.filter { voice in
-            switch sourceFilter {
+        _ = catalogRefreshTick
+        let metadataMap = VoiceCatalogStore.shared.metadataByVoiceID
+        let bySourceAndScope = model.creatorVoices.filter { voice in
+            let matchesSource: Bool = switch sourceFilter {
             case .all: true
             case .system: voice.isSystem
             case .custom: !voice.isSystem
             }
+            guard matchesSource else { return false }
+
+            let meta = metadataMap[voice.id]
+            let scope = meta?.scope ?? .globalReusable
+            let matchesScope: Bool = switch scopeFilter {
+            case .activeGlobal:
+                scope != .archived
+            case .favorites:
+                meta?.isFavorite == true && scope != .archived
+            case .bookExclusive:
+                scope == .bookExclusive
+            case .archived:
+                scope == .archived
+            }
+            guard matchesScope else { return false }
+
+            if let selectedArchetype {
+                let arch = VoiceTaxonomyClassifier.resolveArchetype(
+                    voiceID: voice.id,
+                    traits: [voice.instruction],
+                    description: voice.description,
+                    label: voice.name,
+                    metadata: meta
+                )
+                guard arch == selectedArchetype else { return false }
+            }
+            return true
         }
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return bySource }
-        return bySource.filter {
-            $0.name.localizedCaseInsensitiveContains(query)
-                || $0.description.localizedCaseInsensitiveContains(query)
-                || ($0.refText?.localizedCaseInsensitiveContains(query) ?? false)
-                || ($0.preview?.text.localizedCaseInsensitiveContains(query) ?? false)
+        guard !query.isEmpty else { return bySourceAndScope }
+        return bySourceAndScope.filter { voice in
+            let meta = metadataMap[voice.id]
+            return voice.name.localizedCaseInsensitiveContains(query)
+                || voice.description.localizedCaseInsensitiveContains(query)
+                || (voice.refText?.localizedCaseInsensitiveContains(query) ?? false)
+                || (voice.preview?.text.localizedCaseInsensitiveContains(query) ?? false)
+                || (meta?.originBookTitle?.localizedCaseInsensitiveContains(query) == true)
+                || (meta?.originRoleName?.localizedCaseInsensitiveContains(query) == true)
         }
     }
 
