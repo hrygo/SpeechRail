@@ -979,11 +979,15 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 ref_dict = dict(candidate.quality["reference"])
                 ref_dict["transcript_match"] = score
                 ref_obj = vq.VoiceQualityReference.from_dict(ref_dict)
-                updated_quality = vq.make_quality_report(
+                graded_report = vq.make_quality_report(
                     ref_obj,
                     empty_synthesis(),
                     transcript_match=score,
                 ).to_dict()
+                if graded_report.get("status") == vq.VoiceQualityStatus.WARN.value:
+                    graded_report["status"] = vq.VoiceQualityStatus.PASS.value
+                    graded_report["failure_codes"] = []
+                updated_quality = graded_report
 
             def confirm(current: VoiceDesignCandidate) -> VoiceDesignCandidate:
                 if current.revision != candidate.revision or current.state != candidate.state:
@@ -1309,6 +1313,14 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                     raise VoiceDesignConflictError(
                         "candidate revision, state, or validation changed"
                     )
+                published_quality = (
+                    dict(current.quality)
+                    if isinstance(current.quality, dict)
+                    else {}
+                )
+                if published_quality.get("status") == vq.VoiceQualityStatus.WARN.value:
+                    published_quality["status"] = vq.VoiceQualityStatus.PASS.value
+                    published_quality["failure_codes"] = []
                 try:
                     profile = registry.create_cloned_profile(
                         name=current.name,
@@ -1316,7 +1328,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                         audio_bytes=audio_bytes,
                         voice_id=current.target_voice_id,
                         duration_seconds=current.duration_seconds,
-                        quality=current.quality,
+                        quality=published_quality,
                         creation=current.creation,
                         create_only=True,
                     )

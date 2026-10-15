@@ -305,6 +305,10 @@ public actor AudiobookProjectStore {
         cachedAnnotationsByBook.removeValue(forKey: bookID)
     }
 
+    public func renameChapter(bookID: UUID, chapterID: UUID, title: String) async throws {
+        throw AudiobookStoreError.statementFailed("章节重命名暂未实现。")
+    }
+
     public func atoms(for bookID: UUID, chapterID: UUID? = nil) async throws -> [AudiobookTextAtom] {
         try fetchAtoms(bookID: bookID, chapterID: chapterID)
     }

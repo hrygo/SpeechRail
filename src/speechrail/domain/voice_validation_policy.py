@@ -204,8 +204,9 @@ def evaluate_voice_validation(
         isinstance(validated_for, list)
         and OUTPUT_VALIDATION_SCOPE in validated_for
     )
+    reference_accepted = reference["status"] in {"pass", "warn"}
     production_ready = profile.mode != "clone" or (
-        reference["status"] == "pass"
+        reference_accepted
         and synthesis["status"] == "pass"
         and output_validated
         and not stale
@@ -218,7 +219,7 @@ def evaluate_voice_validation(
         reason = "validated"
     elif profile.mode != "clone":
         reason = "not_a_reference_conditioned_voice"
-    elif reference["status"] != "pass":
+    elif not reference_accepted:
         reason = "reference_validation_not_passed"
     elif synthesis["status"] == "pass" and not output_validated:
         reason = "output_validation_scope_missing"

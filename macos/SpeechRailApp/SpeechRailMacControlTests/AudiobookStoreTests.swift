@@ -6,11 +6,136 @@ import XCTest
 #endif
 
 final class AudiobookStoreTests: XCTestCase {
+    private struct ChapterEditFixture {
+        let root: URL
+        let store: AudiobookProjectStore
+        let bookID: UUID
+        let chapter: AudiobookChapter
+        let atom: AudiobookTextAtom
+        let narrator: AudiobookCharacter
+    }
+
+    private enum ChapterEditArtifact: String, CaseIterable {
+        case analysisWindow
+        case annotation
+        case fragment
+        case renderCandidate
+        case chapterRevision
+    }
+
     private func makeTempRoot() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("AudiobookStoreTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
+    }
+
+    private func makeChapterEditFixture() async throws -> ChapterEditFixture {
+        let root = try makeTempRoot()
+        let store = try AudiobookProjectStore(root: root)
+        let preview = try AudiobookTXTImporter.prepare(
+            rawData: Data("第1章 灯塔\n海雾在午夜漫过栈桥。\n".utf8),
+            suggestedTitle: "章节编辑夹具"
+        )
+        let bookID = try await store.importBook(preview)
+        let chapters = try await store.chapters(for: bookID)
+        let chapter = try XCTUnwrap(chapters.first)
+        let atoms = try await store.atoms(for: bookID, chapterID: chapter.id)
+        let atom = try XCTUnwrap(atoms.first(where: { $0.kind != .formatting }))
+        let characters = try await store.characters(for: bookID)
+        let narrator = try XCTUnwrap(characters.first(where: { $0.isNarrator }))
+        return ChapterEditFixture(
+            root: root,
+            store: store,
+            bookID: bookID,
+            chapter: chapter,
+            atom: atom,
+            narrator: narrator
+        )
+    }
+
+    private func changedTitles(_ chapters: [AudiobookChapter]) -> [AudiobookChapter] {
+        chapters.map { chapter in
+            var edited = chapter
+            edited.title += "（改名）"
+            return edited
+        }
+    }
+
+    private func seedChapterEditArtifact(
+        _ artifact: ChapterEditArtifact,
+        fixture: ChapterEditFixture
+    ) async throws {
+        let chapter = fixture.chapter
+        let atom = fixture.atom
+        let store = fixture.store
+
+        switch artifact {
+        case .analysisWindow:
+            try await store.saveAnalysisWindow(
+                AudiobookAnalysisWindow(
+                    bookID: fixture.bookID,
+                    chapterID: chapter.id,
+                    ordinal: 0,
+                    primaryAtomIDs: [atom.id],
+                    policyFingerprint: "test-policy",
+                    configurationDigest: "test-config",
+                    isCompleted: true
+                )
+            )
+        case .annotation:
+            try await store.saveAnnotations(
+                bookID: fixture.bookID,
+                annotations: [
+                    AudiobookAnnotation(
+                        bookID: fixture.bookID,
+                        chapterID: chapter.id,
+                        windowID: UUID(),
+                        atomID: atom.id,
+                        sourceRange: atom.sourceRange,
+                        assignment: .assigned(roleID: fixture.narrator.id)
+                    ),
+                ]
+            )
+        case .fragment:
+            let fragment = AudiobookFragment(
+                bookID: fixture.bookID,
+                chapterID: chapter.id,
+                ordinal: 0,
+                roleID: fixture.narrator.id,
+                sourceRange: atom.sourceRange,
+                atomIDs: [atom.id],
+                localAssignmentDigest: "test-assignment",
+                voiceBindingDigest: "test-binding",
+                policyDigest: "test-policy",
+                dependencyDigest: "test-dependency"
+            )
+            try await store.saveFragments(bookID: fixture.bookID, chapterID: chapter.id, fragments: [fragment])
+        case .renderCandidate:
+            let wav = Self.makeDeterministicWAV(pcmSamples: Array(repeating: 1200, count: 480))
+            let candidate = AudiobookRenderCandidate(
+                bookID: fixture.bookID,
+                chapterID: chapter.id,
+                fragmentID: UUID(),
+                generation: 1,
+                relativeAssetPath: "books/\(fixture.bookID.uuidString)/audio/chapter-edit-guard.wav",
+                fileSHA256: AudiobookDigest.sha256Hex(wav),
+                pcmSHA256: try AudioDigest.sha256HexOfPCM(in: wav),
+                frameCount: 480,
+                dependencyDigest: "test-dependency"
+            )
+            try await store.commitCandidate(candidate, wav: wav)
+        case .chapterRevision:
+            let revision = AudiobookChapterRevision(
+                bookID: fixture.bookID,
+                chapterID: chapter.id,
+                sourceID: chapter.sourceID,
+                revisionNumber: 1,
+                orderedBindings: [],
+                totalFrameCount: 0
+            )
+            try await store.saveChapterRevision(revision, makeCurrent: true)
+        }
     }
 
     static func makeDeterministicWAV(pcmSamples: [Int16], sampleRate: Int = 48_000) -> Data {
@@ -50,6 +175,322 @@ final class AudiobookStoreTests: XCTestCase {
         withUnsafeBytes(of: &ds) { wav.append(contentsOf: $0) }
         wav.append(pcmData)
         return wav
+    }
+
+    func testFirstRecoveryOnNewStorePausesPriorRunningBooksOnlyOnce() async throws {
+        let fixture = try await makeChapterEditFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let pausedPreview = try AudiobookTXTImporter.prepare(
+            rawData: Data("第1章 雾港\n船灯渐远。\n".utf8),
+            suggestedTitle: "已暂停书"
+        )
+        let pausedBookID = try await fixture.store.importBook(pausedPreview)
+
+        var interruptedBook = try await fixture.store.book(id: fixture.bookID)
+        interruptedBook.productionState = .running
+        try await fixture.store.updateBook(interruptedBook)
+        var alreadyPausedBook = try await fixture.store.book(id: pausedBookID)
+        alreadyPausedBook.productionState = .paused
+        try await fixture.store.updateBook(alreadyPausedBook)
+
+        let reopenedStore = try AudiobookProjectStore(root: fixture.root)
+        _ = try await reopenedStore.recover()
+
+        let recoveredInterruptedBook = try await reopenedStore.book(id: fixture.bookID)
+        XCTAssertEqual(recoveredInterruptedBook.productionState, .paused,
+                       "新 Store 首次恢复应把上进程遗留的 running 任务安全暂停")
+        let recoveredAlreadyPausedBook = try await reopenedStore.book(id: pausedBookID)
+        XCTAssertEqual(recoveredAlreadyPausedBook.productionState, .paused,
+                       "恢复不能改写本来已暂停的书籍")
+
+        // Same Store actor's later shelf refresh/recovery must not mistake an active run for a crash.
+        var activeBook = try await reopenedStore.book(id: fixture.bookID)
+        activeBook.productionState = .running
+        try await reopenedStore.updateBook(activeBook)
+        _ = try await reopenedStore.recover()
+
+        let activeBookAfterRepeatedRecovery = try await reopenedStore.book(id: fixture.bookID)
+        XCTAssertEqual(activeBookAfterRepeatedRecovery.productionState, .running,
+                       "同一 Store 的后续恢复调用不能暂停当前进程中的制作任务")
+    }
+
+    func testInitialChapterStructureEditSynchronizesNarratorChapterIDs() async throws {
+        let fixture = try await makeChapterEditFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let replacementChapter = AudiobookChapter(
+            id: UUID(),
+            bookID: fixture.chapter.bookID,
+            sourceID: fixture.chapter.sourceID,
+            ordinal: fixture.chapter.ordinal,
+            title: "人工确认的章节名",
+            sourceRange: fixture.chapter.sourceRange,
+            excludedRanges: fixture.chapter.excludedRanges
+        )
+
+        try await fixture.store.updateChapters(bookID: fixture.bookID, chapters: [replacementChapter])
+
+        let storedChapters = try await fixture.store.chapters(for: fixture.bookID)
+        XCTAssertEqual(storedChapters, [replacementChapter])
+        let cachedCharacters = try await fixture.store.characters(for: fixture.bookID)
+        let cachedNarrator = try XCTUnwrap(cachedCharacters.first(where: { $0.isNarrator }))
+        XCTAssertEqual(cachedNarrator.chapterIDs, [replacementChapter.id],
+                       "首次编辑章节结构后旁白出场章节必须立即同步")
+
+        let reopenedStore = try AudiobookProjectStore(root: fixture.root)
+        let persistedCharacters = try await reopenedStore.characters(for: fixture.bookID)
+        let persistedNarrator = try XCTUnwrap(persistedCharacters.first(where: { $0.isNarrator }))
+        XCTAssertEqual(persistedNarrator.chapterIDs, [replacementChapter.id],
+                       "旁白章节关联必须写入持久化数据")
+        let updatedBook = try await reopenedStore.book(id: fixture.bookID)
+        XCTAssertEqual(updatedBook.analysisState, .notStarted)
+    }
+
+    func testUpdateChaptersRejectsBooksWhoseAnalysisHasStartedWithoutChangingData() async throws {
+        let fixture = try await makeChapterEditFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        var book = try await fixture.store.book(id: fixture.bookID)
+        book.analysisState = .paused
+        try await fixture.store.updateBook(book)
+        let beforeBook = try await fixture.store.book(id: fixture.bookID)
+        let beforeChapters = try await fixture.store.chapters(for: fixture.bookID)
+        let beforeAtoms = try await fixture.store.atoms(for: fixture.bookID)
+
+        var rejectionMessage: String?
+        do {
+            try await fixture.store.updateChapters(
+                bookID: fixture.bookID,
+                chapters: changedTitles(beforeChapters)
+            )
+        } catch {
+            rejectionMessage = error.localizedDescription
+        }
+
+        XCTAssertTrue(rejectionMessage?.contains("章节结构") == true,
+                      "拒绝原因应使用明确中文说明章节结构已锁定；实际：\(rejectionMessage ?? "未拒绝")")
+        let afterBook = try await fixture.store.book(id: fixture.bookID)
+        let afterChapters = try await fixture.store.chapters(for: fixture.bookID)
+        let afterAtoms = try await fixture.store.atoms(for: fixture.bookID)
+        XCTAssertEqual(afterBook, beforeBook)
+        XCTAssertEqual(afterChapters, beforeChapters)
+        XCTAssertEqual(afterAtoms, beforeAtoms)
+    }
+
+    func testUpdateChaptersRejectsWhenAnyPersistentAnalysisOrProductionArtifactExists() async throws {
+        for artifact in ChapterEditArtifact.allCases {
+            let fixture = try await makeChapterEditFixture()
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            try await seedChapterEditArtifact(artifact, fixture: fixture)
+
+            let beforeBook = try await fixture.store.book(id: fixture.bookID)
+            let beforeChapters = try await fixture.store.chapters(for: fixture.bookID)
+            let beforeAtoms = try await fixture.store.atoms(for: fixture.bookID)
+            let beforeWindows = try await fixture.store.analysisWindows(for: fixture.bookID)
+            let beforeAnnotations = try await fixture.store.annotations(for: fixture.bookID)
+            let beforeFragments = try await fixture.store.fragments(for: fixture.bookID)
+            let beforeCandidates = try await fixture.store.candidates(for: fixture.bookID)
+            let beforeRevisions = try await fixture.store.chapterRevisions(
+                for: fixture.bookID,
+                chapterID: fixture.chapter.id
+            )
+
+            var rejectionMessage: String?
+            do {
+                try await fixture.store.updateChapters(
+                    bookID: fixture.bookID,
+                    chapters: changedTitles(beforeChapters)
+                )
+            } catch {
+                rejectionMessage = error.localizedDescription
+            }
+
+            XCTAssertTrue(rejectionMessage?.contains("章节结构") == true,
+                          "存在 \(artifact.rawValue) 时应明确拒绝章节结构编辑；实际：\(rejectionMessage ?? "未拒绝")")
+            let afterBook = try await fixture.store.book(id: fixture.bookID)
+            let afterChapters = try await fixture.store.chapters(for: fixture.bookID)
+            let afterAtoms = try await fixture.store.atoms(for: fixture.bookID)
+            let afterWindows = try await fixture.store.analysisWindows(for: fixture.bookID)
+            let afterAnnotations = try await fixture.store.annotations(for: fixture.bookID)
+            let afterFragments = try await fixture.store.fragments(for: fixture.bookID)
+            let afterCandidates = try await fixture.store.candidates(for: fixture.bookID)
+            let afterRevisions = try await fixture.store.chapterRevisions(
+                for: fixture.bookID,
+                chapterID: fixture.chapter.id
+            )
+            XCTAssertEqual(afterBook, beforeBook)
+            XCTAssertEqual(afterChapters, beforeChapters)
+            XCTAssertEqual(afterAtoms, beforeAtoms)
+            XCTAssertEqual(afterWindows, beforeWindows)
+            XCTAssertEqual(afterAnnotations, beforeAnnotations)
+            XCTAssertEqual(afterFragments, beforeFragments)
+            XCTAssertEqual(afterCandidates, beforeCandidates)
+            XCTAssertEqual(
+                afterRevisions,
+                beforeRevisions
+            )
+        }
+    }
+
+    func testRenameChapterPreservesAnalysisAnnotationsCandidatesAndEveryRevision() async throws {
+        let fixture = try await makeChapterEditFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let window = AudiobookAnalysisWindow(
+            bookID: fixture.bookID,
+            chapterID: fixture.chapter.id,
+            ordinal: 0,
+            primaryAtomIDs: [fixture.atom.id],
+            policyFingerprint: "rename-policy",
+            configurationDigest: "rename-config",
+            isCompleted: true
+        )
+        try await fixture.store.saveAnalysisWindow(window)
+        let annotation = AudiobookAnnotation(
+            bookID: fixture.bookID,
+            chapterID: fixture.chapter.id,
+            windowID: window.id,
+            atomID: fixture.atom.id,
+            sourceRange: fixture.atom.sourceRange,
+            assignment: .assigned(roleID: fixture.narrator.id),
+            evidence: "原始标注证据"
+        )
+        try await fixture.store.saveAnnotations(bookID: fixture.bookID, annotations: [annotation])
+
+        let fragment = AudiobookFragment(
+            bookID: fixture.bookID,
+            chapterID: fixture.chapter.id,
+            ordinal: 0,
+            roleID: fixture.narrator.id,
+            sourceRange: fixture.atom.sourceRange,
+            atomIDs: [fixture.atom.id],
+            localAssignmentDigest: "rename-assignment",
+            voiceBindingDigest: "rename-binding",
+            policyDigest: "rename-policy",
+            dependencyDigest: "rename-dependency"
+        )
+        try await fixture.store.saveFragments(
+            bookID: fixture.bookID,
+            chapterID: fixture.chapter.id,
+            fragments: [fragment]
+        )
+
+        let wav = Self.makeDeterministicWAV(pcmSamples: Array(repeating: 700, count: 480))
+        let candidate = AudiobookRenderCandidate(
+            bookID: fixture.bookID,
+            chapterID: fixture.chapter.id,
+            fragmentID: fragment.id,
+            generation: 1,
+            relativeAssetPath: "books/\(fixture.bookID.uuidString)/audio/rename-preserved.wav",
+            fileSHA256: AudiobookDigest.sha256Hex(wav),
+            pcmSHA256: try AudioDigest.sha256HexOfPCM(in: wav),
+            frameCount: 480,
+            dependencyDigest: fragment.dependencyDigest
+        )
+        try await fixture.store.commitCandidate(candidate, wav: wav)
+
+        let binding = AudiobookFragmentCandidateBinding(
+            fragmentID: fragment.id,
+            candidateID: candidate.id,
+            sourceRange: fragment.sourceRange,
+            dependencyDigest: candidate.dependencyDigest
+        )
+        let firstRevision = AudiobookChapterRevision(
+            bookID: fixture.bookID,
+            chapterID: fixture.chapter.id,
+            sourceID: fixture.chapter.sourceID,
+            revisionNumber: 1,
+            orderedBindings: [binding],
+            totalFrameCount: candidate.frameCount
+        )
+        try await fixture.store.saveChapterRevision(firstRevision, makeCurrent: true)
+        let secondRevision = AudiobookChapterRevision(
+            bookID: fixture.bookID,
+            chapterID: fixture.chapter.id,
+            sourceID: fixture.chapter.sourceID,
+            revisionNumber: 2,
+            orderedBindings: [binding],
+            totalFrameCount: candidate.frameCount
+        )
+        try await fixture.store.saveChapterRevision(secondRevision, makeCurrent: true)
+
+        var book = try await fixture.store.book(id: fixture.bookID)
+        book.analysisState = .allWindowsValidated
+        book.productionState = .partialChaptersReady
+        book.listenableState = .partialChaptersListenable
+        book.confirmedCastRevisionID = UUID()
+        book.confirmedAuditionVoiceSetDigest = "rename-voice-digest"
+        try await fixture.store.updateBook(book)
+        let productionRevision = AudiobookProductionRevision(
+            bookID: fixture.bookID,
+            sourceID: fixture.chapter.sourceID,
+            chapterRevisionIDsByChapter: [fixture.chapter.id: secondRevision.id]
+        )
+        try await fixture.store.saveProductionRevision(productionRevision)
+        let bookmark = AudiobookBookmark(
+            bookID: fixture.bookID,
+            chapterID: fixture.chapter.id,
+            chapterRevisionID: secondRevision.id,
+            fragmentID: fragment.id,
+            sourceAnchorRange: fixture.atom.sourceRange,
+            fragmentOffsetSeconds: 0.25
+        )
+        try await fixture.store.saveBookmark(bookmark)
+
+        let chaptersBeforeRename = try await fixture.store.chapters(for: fixture.bookID)
+        let chapterBefore = try XCTUnwrap(chaptersBeforeRename.first)
+        let bookBefore = try await fixture.store.book(id: fixture.bookID)
+        let charactersBefore = try await fixture.store.characters(for: fixture.bookID)
+        let windowsBefore = try await fixture.store.analysisWindows(for: fixture.bookID)
+        let annotationsBefore = try await fixture.store.annotations(for: fixture.bookID)
+        let fragmentsBefore = try await fixture.store.fragments(for: fixture.bookID)
+        let candidatesBefore = try await fixture.store.candidates(for: fixture.bookID)
+        let chapterRevisionsBefore = try await fixture.store.chapterRevisions(
+            for: fixture.bookID,
+            chapterID: fixture.chapter.id
+        )
+        let productionRevisionsBefore = try await fixture.store.productionRevisions(for: fixture.bookID)
+        let bookmarkBefore = try await fixture.store.bookmark(for: fixture.bookID)
+
+        let renamedTitle = "人工重命名章节"
+        try await fixture.store.renameChapter(
+            bookID: fixture.bookID,
+            chapterID: fixture.chapter.id,
+            title: renamedTitle
+        )
+
+        var expectedChapter = chapterBefore
+        expectedChapter.title = renamedTitle
+        let chaptersAfterRename = try await fixture.store.chapters(for: fixture.bookID)
+        let chapterAfter = try XCTUnwrap(chaptersAfterRename.first)
+        let bookAfter = try await fixture.store.book(id: fixture.bookID)
+        let charactersAfter = try await fixture.store.characters(for: fixture.bookID)
+        let windowsAfter = try await fixture.store.analysisWindows(for: fixture.bookID)
+        let annotationsAfter = try await fixture.store.annotations(for: fixture.bookID)
+        let fragmentsAfter = try await fixture.store.fragments(for: fixture.bookID)
+        let candidatesAfter = try await fixture.store.candidates(for: fixture.bookID)
+        let chapterRevisionsAfter = try await fixture.store.chapterRevisions(
+            for: fixture.bookID,
+            chapterID: fixture.chapter.id
+        )
+        let productionRevisionsAfter = try await fixture.store.productionRevisions(for: fixture.bookID)
+        let bookmarkAfter = try await fixture.store.bookmark(for: fixture.bookID)
+        XCTAssertEqual(chapterAfter, expectedChapter,
+                       "重命名只能改变标题，章节身份、源区间和修订指针必须保留")
+        XCTAssertEqual(bookAfter, bookBefore)
+        XCTAssertEqual(charactersAfter, charactersBefore)
+        XCTAssertEqual(windowsAfter, windowsBefore)
+        XCTAssertEqual(annotationsAfter, annotationsBefore)
+        XCTAssertEqual(fragmentsAfter, fragmentsBefore)
+        XCTAssertEqual(candidatesAfter, candidatesBefore)
+        XCTAssertEqual(chapterRevisionsAfter, chapterRevisionsBefore)
+        XCTAssertEqual(productionRevisionsAfter, productionRevisionsBefore)
+        XCTAssertEqual(bookmarkAfter, bookmarkBefore)
+        XCTAssertEqual(chapterRevisionsBefore.map(\.id).sorted { $0.uuidString < $1.uuidString },
+                       [firstRevision.id, secondRevision.id].sorted { $0.uuidString < $1.uuidString })
+        let candidateStillValid = try await fixture.store.verifyCandidateAsset(candidate)
+        XCTAssertTrue(candidateStillValid, "章节重命名不能删除或改写已提交的 WAV 资产")
     }
 
     func testAssetCommitRecoversEveryCrashBoundary() async throws {

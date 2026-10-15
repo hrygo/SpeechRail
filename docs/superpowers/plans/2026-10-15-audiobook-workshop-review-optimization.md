@@ -96,3 +96,64 @@
 - 2026-10-15：工作流测试夹具改为与工作流共用同一 Store actor，避免跨实例标注缓存造成假失败；制作终态延至刷新后同步提交，原有 Cast 集成回归恢复。
 - 2026-10-15 15:25:13：Audiobook 模块回归 105 项、1 项人工关键帧导出跳过、0 失败；目标覆盖检查通过。隔离 Debug App 两次构建通过，第二次包含制作收尾修正，临时 DerivedData 已清理；没有安装、启动或 UI 自动化。
 - 2026-10-15：用户确认工作台人物卡片/音色选择器并行布局差异来自另一任务，要求保留并纳入编译验证。
+
+## 遗留修复实施（2026-10-15）
+
+用户要求按审查发现继续执行修复。Task 1–5 保留已完成证据；新增任务只处理审查记录中的遗留项。沿用已有工作区和未提交差异，按文件所有权并行，不自动提交。现有授权覆盖直接实施，不重复等待方案确认。
+
+实施裁定：目录拆分/合并仅开放给尚未开始分析、没有制作资产的书籍；已制作作品可重命名章节，但不通过重新分章删除其标注、候选或版本。该限制保护既有作品；若后续支持制作后改目录，应另设计版本映射和撤销流程。
+
+### Task 6: 校验 M4B 容器实际章节
+
+**Files:** `AudiobookMediaVerifier.swift`、`AudiobookExportTests.swift`。
+
+**Interfaces:** `verify(url:expected:)` 以 AVFoundation 读取实际章节元数据；对比所选章节的数量、顺序、标题及按独立帧数计算的起止位置，不能用输入投影代替容器证据。
+
+- [x] 写合成媒体回归：无章节、标题/数量/时序不符被拒绝，真实多章节 AAC 容器通过；先看 RED。
+- [ ] 实施读取与 fail-closed 验证，保留 codec/时长/摘要校验及 MP3 行为。
+- [ ] 运行 Export 测试并记录 GREEN。
+
+### Task 7: 恢复中断制作状态并保护章节资产
+
+**Files:** `AudiobookProjectStore.swift`、`AudiobookStoreTests.swift`。
+
+**Interfaces:** 首次启动恢复只处理打开作品库时遗留的 `.running`，重复资产核查不改变本进程活动制作；`renameChapter(bookID:chapterID:title:)` 只修改标题，`updateChapters(bookID:chapters:)` 对已分析或已有制作资产的书籍拒绝破坏性重分章。
+
+- [x] 写恢复回归：重开库后 running→paused，完成状态不变，同一实例后续活动不被重复 recover 暂停；先看 RED。
+- [x] 写目录回归：重命名保留片段/采用版本，初始重分章保留原文覆盖，已分析/已有资产时拒绝重分章。
+- [ ] 实施事务化状态/目录操作，保持 schemaVersion 和真实库不变。
+- [ ] 运行 Store / Import 相关回归并记录 GREEN。
+
+### Task 8: 单段重新生成且显式采用
+
+**Files:** `AudiobookProductionController.swift`、`AudiobookProductionTests.swift`。
+
+**Interfaces:** `regenerateFragment(bookID:chapterID:fragmentID:) async throws` 复用正式制作门禁、冻结音色、租约、暂停、音频正规化和提交机制，只生成目标片段的新候选，不自动更换章节已采用版本。
+
+- [x] 写回归：同依赖的已完成片段仍会生成新候选；其他片段不发请求；当前采用版本不变；无效目标/并发/取消不写错误候选；先看 RED。
+- [x] 把单段模式接入同一制作生命周期，保持普通制作的复用与首次自动采用。
+- [x] 运行 Production / Revision 相关回归并记录 GREEN。
+
+### Task 9: 接入章节整理与重录操作
+
+**Files:** `AudiobookWorkflowModel.swift`、`AudiobookBookWorkspaceView.swift`、`AudiobookChapterPlanner.swift`、`AudiobookWorkflowTests.swift`、`AudiobookImportTests.swift`。
+
+**Interfaces:** 章节列表的“整理章节”次级菜单提供重命名、与上一章合并、在选中段落前拆分；拆分选择正文已有段落，不暴露字节区间。片段提供“重录本段”，共享制作互斥，完成后显示新候选，必须显式“采用此候选”。
+
+- [ ] 写工作流回归：菜单能力门禁、章节操作保持选中身份与完整正文、重录不切回其他书、不自动采用。
+- [ ] 实施原生菜单/输入弹窗和清晰提示，复用现有 Token 与候选比较区域，保留用户确认的并行布局。
+- [ ] 运行 Workflow / Import 相关回归并记录 GREEN。
+
+### Task 10: 集成验证与记录
+
+**Files:** 本计划、审查记录、架构文档、用户指南。
+
+- [ ] 复核修改路径的图谱 coverage 和直接源码；执行一次独立只读交叉审查。
+- [ ] 运行 `swift test --package-path macos/SpeechRailApp --filter Audiobook`、测试目标覆盖检查、`git diff --check`，必要时隔离 Debug 构建。
+- [ ] 更新遗留项状态、当前真实支持范围、证据与回退边界，保留未提交状态。
+
+### 遗留修复验证记录
+
+- 2026-10-15 15:32:41：Production / Revision 10 项、0 失败；单段重录先以旧复用行为复现 RED，再接入目标片段模式。追加暂停与并发断言后，15:40:23 的 Production 6 项、0 失败。
+- 2026-10-15 15:40:23：Store / Export / Import / Workflow / Production 共 44 项，46 处断言失败（其中 rename 占位抛错为 1 处 unexpected）。运行时复现缺失/不符章节被放行、遗留 running 未恢复、旁白章节关联未更新、分析或资产存在时重建目录会丢历史，以及缺少合并和 Workflow 重录入口。各临时占位仅用于得到可执行 RED，交付前必须全部替换。
+- 2026-10-15：独立并行任务将上一轮改动纳入 `faa1fabd`，本轮继续在此基线上实施；共享暂存区另被并行任务批量更新，本轮不操作 index、提交或回退他人差异。

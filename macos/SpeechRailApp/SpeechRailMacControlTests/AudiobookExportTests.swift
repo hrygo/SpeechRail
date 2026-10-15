@@ -267,7 +267,7 @@ final class AudiobookExportTests: XCTestCase {
         }
     }
 
-    private func makePlayableSingleChapterM4B(frameCount: AVAudioFrameCount) async throws -> URL {
+    private func makePlayableAACFile(frameCount: AVAudioFrameCount, name: String) throws -> URL {
         let sampleRate = 48_000.0
         let format = try XCTUnwrap(
             AVAudioFormat(
@@ -277,7 +277,7 @@ final class AudiobookExportTests: XCTestCase {
                 interleaved: true
             )
         )
-        let wavURL = tempRoot.appendingPathComponent("single-chapter-source.wav")
+        let wavURL = tempRoot.appendingPathComponent("\(name)-source.wav")
         do {
             let audioFile = try AVAudioFile(
                 forWriting: wavURL,
@@ -294,7 +294,7 @@ final class AudiobookExportTests: XCTestCase {
             try audioFile.write(from: buffer)
         }
 
-        let m4aURL = tempRoot.appendingPathComponent("single-chapter.m4a")
+        let m4aURL = tempRoot.appendingPathComponent("\(name).m4a")
         do {
             let inputFile = try AVAudioFile(
                 forReading: wavURL,
@@ -335,9 +335,151 @@ final class AudiobookExportTests: XCTestCase {
             }
         }
 
-        let m4bURL = tempRoot.appendingPathComponent("single-chapter.m4b")
+        return m4aURL
+    }
+
+    private func makePlayableM4BWithoutChapterMetadata(frameCount: AVAudioFrameCount) throws -> URL {
+        let m4aURL = try makePlayableAACFile(frameCount: frameCount, name: "unmarked")
+        let m4bURL = tempRoot.appendingPathComponent("unmarked.m4b")
         try FileManager.default.moveItem(at: m4aURL, to: m4bURL)
         return m4bURL
+    }
+
+    private func makePlayableM4BWithChapters(
+        _ chapters: [(title: String, frameCount: Int64)]
+    ) async throws -> URL {
+        let sampleRate: Int32 = 48_000
+        let totalFrameCount = chapters.reduce(Int64(0)) { $0 + $1.frameCount }
+        guard totalFrameCount > 0, totalFrameCount <= Int64(AVAudioFrameCount.max) else {
+            throw NSError(domain: "AudiobookExportTests", code: 2)
+        }
+        let sourceURL = try makePlayableAACFile(
+            frameCount: AVAudioFrameCount(totalFrameCount),
+            name: "chaptered-source"
+        )
+        let sourceAsset = AVURLAsset(url: sourceURL)
+        let sourceTracks = try await sourceAsset.loadTracks(withMediaType: .audio)
+        let sourceTrack = try XCTUnwrap(sourceTracks.first)
+        let audioDescriptions = try await sourceTrack.load(.formatDescriptions)
+        let audioFormat = try XCTUnwrap(audioDescriptions.first)
+
+        var cursorFrame: Int64 = 0
+        let groups = try chapters.map { chapter -> AVTimedMetadataGroup in
+            guard chapter.frameCount > 0 else {
+                throw NSError(domain: "AudiobookExportTests", code: 3)
+            }
+            let title = AVMutableMetadataItem()
+            title.identifier = .commonIdentifierTitle
+            title.value = chapter.title as NSString
+            title.extendedLanguageTag = "und"
+            let range = CMTimeRange(
+                start: CMTime(value: cursorFrame, timescale: sampleRate),
+                duration: CMTime(value: chapter.frameCount, timescale: sampleRate)
+            )
+            cursorFrame += chapter.frameCount
+            return AVTimedMetadataGroup(items: [title], timeRange: range)
+        }
+        let metadataFormat = try XCTUnwrap(groups.first?.copyFormatDescription())
+
+        let reader = try AVAssetReader(asset: sourceAsset)
+        let readerOutput = AVAssetReaderTrackOutput(track: sourceTrack, outputSettings: nil)
+        let sampleProvider = reader.outputProvider(for: readerOutput)
+
+        let mp4URL = tempRoot.appendingPathComponent("chaptered-output.mp4")
+        let writer = try AVAssetWriter(outputURL: mp4URL, fileType: .mp4)
+        let audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: nil, sourceFormatHint: audioFormat)
+        let metadataInput = AVAssetWriterInput(
+            mediaType: .metadata,
+            outputSettings: nil,
+            sourceFormatHint: metadataFormat
+        )
+        let chapterListAssociation = AVAssetTrack.AssociationType.chapterList.rawValue
+        guard audioInput.canAddTrackAssociation(withTrackOf: metadataInput, type: chapterListAssociation) else {
+            throw NSError(domain: "AudiobookExportTests", code: 4)
+        }
+        audioInput.addTrackAssociation(withTrackOf: metadataInput, type: chapterListAssociation)
+
+        let audioReceiver = writer.inputReceiver(for: audioInput)
+        let metadataReceiver = writer.inputMetadataReceiver(for: metadataInput)
+        try writer.start()
+        writer.startSession(atSourceTime: .zero)
+        try reader.start()
+
+        for group in groups {
+            try await metadataReceiver.append(group)
+        }
+        metadataReceiver.finish()
+        while let sample = try await sampleProvider.next() {
+            try await audioReceiver.append(sample)
+        }
+        audioReceiver.finish()
+        await writer.finishWriting()
+        guard writer.status == .completed else {
+            throw writer.error ?? NSError(domain: "AudiobookExportTests", code: 5)
+        }
+
+        let m4bURL = tempRoot.appendingPathComponent("chaptered-output.m4b")
+        try FileManager.default.moveItem(at: mp4URL, to: m4bURL)
+        return m4bURL
+    }
+
+    private func makeTestChapters(bookID: UUID, titles: [String]) -> [AudiobookChapter] {
+        let sourceID = UUID()
+        return titles.enumerated().map { index, title in
+            AudiobookChapter(
+                bookID: bookID,
+                sourceID: sourceID,
+                ordinal: index,
+                title: title,
+                sourceRange: AudiobookSourceRange(lowerBound: Int64(index), upperBound: Int64(index + 1))
+            )
+        }
+    }
+
+    private func makeExpectedM4B(
+        mediaURL: URL,
+        chapters: [AudiobookChapter],
+        chapterFrameCounts: [Int64],
+        expectedFrameCount: Int64? = nil
+    ) -> AudiobookPreparedExport {
+        var expectedChapterFrameCounts: [UUID: Int64] = [:]
+        for (chapter, frameCount) in zip(chapters, chapterFrameCounts) {
+            expectedChapterFrameCounts[chapter.id] = frameCount
+        }
+        let totalFrames = chapterFrameCounts.reduce(Int64(0), +)
+        return AudiobookPreparedExport(
+            requestID: UUID(),
+            bookID: chapters[0].bookID,
+            productionRevisionID: UUID(),
+            profile: .m4b,
+            bookTitle: "测试书",
+            author: nil,
+            exportedChapters: chapters,
+            omittedChapters: [],
+            stageURL: mediaURL,
+            expectedFrameCount: expectedFrameCount ?? totalFrames,
+            expectedSampleRate: 48_000,
+            expectedChapterFrameCounts: expectedChapterFrameCounts
+        )
+    }
+
+    private func assertMediaVerificationFails(
+        url: URL,
+        expected: AudiobookPreparedExport,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        do {
+            _ = try await AudiobookMediaVerifier.verify(url: url, expected: expected)
+            XCTFail("M4B 章节或时长与预期不符时必须拒绝", file: file, line: line)
+        } catch let error as AudiobookExportError {
+            guard case .verificationFailed = error else {
+                XCTFail("应返回 verificationFailed，实际为：\(error)", file: file, line: line)
+                return
+            }
+        } catch {
+            XCTFail("应返回 AudiobookExportError，实际为：\(error)", file: file, line: line)
+        }
     }
 
     func testMediaVerifierRejectsNonPlayableM4BAndMP3Bundle() async throws {
@@ -408,60 +550,90 @@ final class AudiobookExportTests: XCTestCase {
         }
     }
 
-    func testMediaVerifierAcceptsPlayableSingleChapterM4BAndRejectsDurationMismatch() async throws {
-        let frameCount: AVAudioFrameCount = 48_000
-        let mediaURL = try await makePlayableSingleChapterM4B(frameCount: frameCount)
+    func testMediaVerifierRejectsPlayableM4BWithoutChapterMetadata() async throws {
+        let mediaURL = try makePlayableM4BWithoutChapterMetadata(frameCount: 48_000)
         let bookID = UUID()
-        let chapter = AudiobookChapter(
-            bookID: bookID,
-            sourceID: UUID(),
-            ordinal: 0,
-            title: "第一章",
-            sourceRange: AudiobookSourceRange(lowerBound: 0, upperBound: 1)
+        let chapters = makeTestChapters(bookID: bookID, titles: ["第一章"])
+        let expected = makeExpectedM4B(
+            mediaURL: mediaURL,
+            chapters: chapters,
+            chapterFrameCounts: [48_000]
         )
-        let expected = AudiobookPreparedExport(
-            requestID: UUID(),
-            bookID: bookID,
-            productionRevisionID: UUID(),
-            profile: .m4b,
-            bookTitle: "测试书",
-            author: nil,
-            exportedChapters: [chapter],
-            omittedChapters: [],
-            stageURL: mediaURL,
-            expectedFrameCount: Int64(frameCount),
-            expectedSampleRate: 48_000,
-            expectedChapterFrameCounts: [chapter.id: Int64(frameCount)]
+
+        await assertMediaVerificationFails(url: mediaURL, expected: expected)
+    }
+
+    func testMediaVerifierReadsRealM4BChapterMarkersAndRejectsMismatches() async throws {
+        let titles = ["第一章", "第二章"]
+        let chapterFrames: [Int64] = [48_000, 48_000]
+        let mediaURL = try await makePlayableM4BWithChapters(
+            zip(titles, chapterFrames).map { (title: $0.0, frameCount: $0.1) }
+        )
+        let bookID = UUID()
+        let chapters = makeTestChapters(bookID: bookID, titles: titles)
+        let expected = makeExpectedM4B(
+            mediaURL: mediaURL,
+            chapters: chapters,
+            chapterFrameCounts: chapterFrames
         )
 
         let verification = try await AudiobookMediaVerifier.verify(url: mediaURL, expected: expected)
         XCTAssertEqual(verification.codec, "aac")
-        XCTAssertEqual(verification.frameCount, Int64(frameCount))
-        XCTAssertEqual(verification.chapterTitles, [chapter.title])
-        XCTAssertEqual(verification.durationSeconds, 1, accuracy: 0.1)
+        XCTAssertEqual(verification.frameCount, 96_000)
+        XCTAssertEqual(verification.chapterTitles, titles)
+        XCTAssertEqual(verification.durationSeconds, 2, accuracy: 0.1)
 
-        let wrongDuration = AudiobookPreparedExport(
-            requestID: expected.requestID,
-            bookID: expected.bookID,
-            productionRevisionID: expected.productionRevisionID,
-            profile: expected.profile,
-            bookTitle: expected.bookTitle,
-            author: expected.author,
-            exportedChapters: expected.exportedChapters,
-            omittedChapters: expected.omittedChapters,
-            stageURL: expected.stageURL,
-            expectedFrameCount: 24_000,
-            expectedSampleRate: expected.expectedSampleRate,
-            expectedChapterFrameCounts: expected.expectedChapterFrameCounts
+        var wrongTitles = chapters
+        wrongTitles[0].title = "错误标题"
+        await assertMediaVerificationFails(
+            url: mediaURL,
+            expected: makeExpectedM4B(
+                mediaURL: mediaURL,
+                chapters: wrongTitles,
+                chapterFrameCounts: chapterFrames
+            )
         )
-        do {
-            _ = try await AudiobookMediaVerifier.verify(url: mediaURL, expected: wrongDuration)
-            XCTFail("单章 M4B 的实际时长偏离预期时必须拒绝")
-        } catch let error as AudiobookExportError {
-            guard case .verificationFailed = error else {
-                return XCTFail("应返回 verificationFailed，实际为：\(error)")
-            }
-        }
+
+        var wrongOrder = chapters
+        wrongOrder[0].title = titles[1]
+        wrongOrder[1].title = titles[0]
+        await assertMediaVerificationFails(
+            url: mediaURL,
+            expected: makeExpectedM4B(
+                mediaURL: mediaURL,
+                chapters: wrongOrder,
+                chapterFrameCounts: chapterFrames
+            )
+        )
+
+        await assertMediaVerificationFails(
+            url: mediaURL,
+            expected: makeExpectedM4B(
+                mediaURL: mediaURL,
+                chapters: chapters,
+                chapterFrameCounts: [36_000, 60_000]
+            )
+        )
+
+        let mergedChapter = makeTestChapters(bookID: bookID, titles: ["合并章节"])
+        await assertMediaVerificationFails(
+            url: mediaURL,
+            expected: makeExpectedM4B(
+                mediaURL: mediaURL,
+                chapters: mergedChapter,
+                chapterFrameCounts: [96_000]
+            )
+        )
+
+        await assertMediaVerificationFails(
+            url: mediaURL,
+            expected: makeExpectedM4B(
+                mediaURL: mediaURL,
+                chapters: chapters,
+                chapterFrameCounts: chapterFrames,
+                expectedFrameCount: 48_000
+            )
+        )
     }
 
     func testCancellationDuringCommitVerificationDoesNotInstallDestination() async throws {

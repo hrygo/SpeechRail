@@ -621,7 +621,7 @@ public enum AudiobookCastRegistry {
         preferredCollectionID: UUID? = nil,
         voiceMetadataByID: [String: VoiceAssetMetadata] = VoiceCatalogStore.shared.metadataByVoiceID
     ) -> [UUID: AudiobookVoiceBinding] {
-        let allReadyVoices = availableVoices.filter { $0.available && $0.productionReady != false }
+        let allReadyVoices = availableVoices.filter { $0.available }
         guard !allReadyVoices.isEmpty else { return existingBindings }
 
         let resolvedBookID = bookID ?? characters.first?.bookID

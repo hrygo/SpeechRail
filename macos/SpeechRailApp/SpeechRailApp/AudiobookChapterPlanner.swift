@@ -196,6 +196,16 @@ public enum AudiobookChapterPlanner {
         return updated
     }
 
+    /// Merges `chapterID` with its immediately preceding chapter while preserving source coverage.
+    public static func mergeChapterWithPrevious(
+        _ chapters: [AudiobookChapter],
+        chapterID: UUID,
+        source: AudiobookSourceIndex
+    ) throws -> [AudiobookChapter] {
+        // Kept as a compile-ready RED seam until merge behavior and persistence are wired.
+        chapters
+    }
+
     // MARK: - Private Helpers
 
     private struct LineSpan {

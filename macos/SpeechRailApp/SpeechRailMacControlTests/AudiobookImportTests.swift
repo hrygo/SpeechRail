@@ -150,4 +150,33 @@ final class AudiobookImportTests: XCTestCase {
         )
         XCTAssertThrowsError(try AudiobookChapterPlanner.validateChapterEdits(brokenChapters, source: preview.sourceIndex))
     }
+
+    func testSplitAndMergeChapterBoundariesPreserveCanonicalSource() throws {
+        let text = "第一句。\n第二句。\n第三句。"
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data(text.utf8), suggestedTitle: "分章")
+        let originalChapter = try XCTUnwrap(preview.chapters.first)
+        let splitMarker = try XCTUnwrap(Data(text.utf8).range(of: Data("第二句".utf8)))
+
+        let split = try AudiobookChapterPlanner.splitChapter(
+            preview.chapters,
+            chapterID: originalChapter.id,
+            atByteOffset: Int64(splitMarker.lowerBound),
+            secondTitle: "第二部分",
+            source: preview.sourceIndex
+        )
+        XCTAssertEqual(split.count, 2)
+        XCTAssertNoThrow(try AudiobookChapterPlanner.validateChapterEdits(split, source: preview.sourceIndex))
+
+        let merged = try AudiobookChapterPlanner.mergeChapterWithPrevious(
+            split,
+            chapterID: try XCTUnwrap(split.last?.id),
+            source: preview.sourceIndex
+        )
+        XCTAssertEqual(merged.count, 1, "合并相邻章节应得到一个目录项")
+        XCTAssertEqual(merged.first?.id, originalChapter.id, "合并应稳定保留上一章身份")
+        XCTAssertEqual(merged.first?.sourceRange, originalChapter.sourceRange)
+        XCTAssertEqual(try preview.sourceIndex.text(in: preview.sourceIndex.wholeRange), text,
+                       "拆分与合并只调整章节区间，不得改写规范化原文")
+        XCTAssertNoThrow(try AudiobookChapterPlanner.validateChapterEdits(merged, source: preview.sourceIndex))
+    }
 }

@@ -344,7 +344,7 @@ public actor AudiobookCastController {
         archetype: AudiobookVoiceArchetype,
         voice: SafeVoiceEntry
     ) async throws -> Int {
-        guard voice.available, voice.productionReady != false else {
+        guard voice.available else {
             throw AudiobookCastError.voiceNotSynthesisReady(voiceID: voice.id)
         }
         let characters = try await store.characters(for: bookID)

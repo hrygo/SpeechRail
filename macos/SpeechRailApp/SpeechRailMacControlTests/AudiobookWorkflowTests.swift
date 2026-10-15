@@ -734,6 +734,94 @@ final class AudiobookWorkflowTests: XCTestCase {
         XCTAssertFalse(workflow.isProductionBlocked(for: secondBook.bookID))
     }
 
+    func testAnalyzedChapterLayoutUpdateIsRejectedWithoutDestroyingAnnotations() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let text = "第一章 雾港\n海雾漫过栈桥。\n灯塔亮了。\n"
+        let url = tempRoot.appendingPathComponent("analyzed_chapter_edit.txt")
+        try Data(text.utf8).write(to: url)
+        let preview = try await AudiobookTXTImporter.prepare(fileURL: url, encoding: .utf8)
+        let bookID = try await store.importBook(preview)
+        let importedChapters = try await store.chapters(for: bookID)
+        let chapter = try XCTUnwrap(importedChapters.first)
+        let importedCharacters = try await store.characters(for: bookID)
+        let narrator = try XCTUnwrap(importedCharacters.first(where: \.isNarrator))
+        let importedAtoms = try await store.atoms(for: bookID, chapterID: chapter.id)
+        let atom = try XCTUnwrap(importedAtoms.first(where: { $0.kind != .formatting }))
+        let annotation = AudiobookAnnotation(
+            bookID: bookID,
+            chapterID: chapter.id,
+            windowID: UUID(),
+            atomID: atom.id,
+            sourceRange: atom.sourceRange,
+            assignment: .assigned(roleID: narrator.id),
+            userConfirmed: true
+        )
+        try await store.saveAnnotations(bookID: bookID, annotations: [annotation])
+        var analyzedBook = try await store.book(id: bookID)
+        analyzedBook.analysisState = .allWindowsValidated
+        try await store.updateBook(analyzedBook)
+
+        var editedChapters = try await store.chapters(for: bookID)
+        editedChapters[0].title = "改名后的章节"
+        do {
+            try await store.updateChapters(bookID: bookID, chapters: editedChapters)
+            XCTFail("分析完成后不能通过重建目录静默清空分析与返修历史")
+        } catch {
+            // Expected: analyzed books require the non-destructive chapter-edit path.
+        }
+
+        let chaptersAfter = try await store.chapters(for: bookID)
+        let annotationsAfter = try await store.annotations(for: bookID, chapterID: chapter.id)
+        let sourceAfter = try await store.sourceIndex(for: bookID)
+        let bookAfter = try await store.book(id: bookID)
+        XCTAssertEqual(chaptersAfter.first?.title, chapter.title)
+        XCTAssertEqual(annotationsAfter, [annotation])
+        XCTAssertEqual(try sourceAfter.text(in: sourceAfter.wholeRange), text)
+        XCTAssertEqual(bookAfter.analysisState, .allWindowsValidated)
+    }
+
+    func testSingleFragmentRerecordKeepsCurrentRevisionUntilExplicitAdoption() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, _) = makeWorkflow(store: store)
+        let imported = try await importBook(
+            into: workflow,
+            fileName: "single_fragment_rerecord.txt",
+            text: "第一章 渡口\n风声紧迫。\n“快上船！”林远喊道。\n"
+        )
+        try await markBookReadyForProduction(imported.bookID, workflow: workflow, store: store)
+        let chapterID = try XCTUnwrap(imported.chapterIDs.first)
+
+        workflow.makeConfirmedChapters(chapterIDs: [chapterID])
+        await waitForProductionToFinish(workflow)
+
+        let initialChapters = try await store.chapters(for: imported.bookID)
+        let originalChapter = try XCTUnwrap(initialChapters.first)
+        let originalRevisionID = try XCTUnwrap(originalChapter.currentChapterRevisionID)
+        let fragment = try XCTUnwrap(workflow.chapterFragments.first)
+        let originalCandidates = try await store.candidates(for: imported.bookID)
+
+        workflow.regenerateFragment(fragmentID: fragment.id)
+        await waitForProductionToFinish(workflow)
+
+        let rerecordedCandidates = try await store.candidates(for: imported.bookID)
+        XCTAssertEqual(rerecordedCandidates.count, originalCandidates.count + 1,
+                       "独立重录必须生成一个同依赖的新候选，而不是复用旧音频")
+        let chaptersBeforeAdoption = try await store.chapters(for: imported.bookID)
+        let chapterBeforeAdoption = try XCTUnwrap(chaptersBeforeAdoption.first)
+        XCTAssertEqual(chapterBeforeAdoption.currentChapterRevisionID, originalRevisionID,
+                       "生成新候选不能自动替换用户正在采用的章节版本")
+
+        let newCandidate = try XCTUnwrap(rerecordedCandidates.first { candidate in
+            candidate.fragmentID == fragment.id && candidate.id != originalCandidates.first(where: { $0.fragmentID == fragment.id })?.id
+        })
+        XCTAssertEqual(newCandidate.dependencyDigest, fragment.dependencyDigest)
+        await workflow.adoptCandidate(newCandidate.id)
+        let chaptersAfterAdoption = try await store.chapters(for: imported.bookID)
+        let chapterAfterAdoption = try XCTUnwrap(chaptersAfterAdoption.first)
+        XCTAssertNotEqual(chapterAfterAdoption.currentChapterRevisionID, originalRevisionID,
+                          "只有用户显式采用后才切换当前章节版本")
+    }
+
     func testRouteChangeKeepsProductionButReleasesListeningAndShutdownCheckpoints() async throws {
         let (workflow, driver) = makeWorkflow()
         let store = try AudiobookProjectStore(root: tempRoot)

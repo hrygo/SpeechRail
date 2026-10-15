@@ -2,7 +2,7 @@
 title: "有声书工坊系统架构与边界合同"
 status: active
 audience: "系统架构师、核心开发者"
-version: "1.0.1"
+version: "1.1.0"
 date: 2026-10-15
 ---
 
@@ -34,14 +34,13 @@ graph LR
 ## 2. 核心架构不变量
 
 ### 2.1 规范化只读原文与 UTF-8 字节区间真源
-- 导入时将任意支持编码流式转码为只读 `<app_home>/audiobooks/books/<book_id>/source/source.txt`（LF 换行、UTF-8 标量校验、最大 64 MiB）。
-- `chapters`、`paragraphs`、`blocks`、`speaker_evidences`、`fragments` 全部只存 `source.txt` 上的半开 UTF-8 字节区间 `[startByte, endByte)` 与 `text_sha256`，由 `AudiobookSourceIndex` 按需切片读取，杜绝正本与数据库文本漂移。
+- 导入时将支持编码规范化为只读 `<app_home>/audiobooks/books/<book_id>/sources/<source_id>-source.utf8`（LF 换行、UTF-8 标量校验、最大 64 MiB）。
+- 章节、文本原子、标注与片段通过规范化原文上的半开 UTF-8 字节区间定位。`AudiobookSourceIndex` 持有原文 `Data` 与标量起点索引，按区间切片；加载时复核书籍原文 SHA-256。
 
 ### 2.2 SQLite + `AudiobookAssetJournal` 崩溃恢复合同
-- 数据库位于 `<app_home>/audiobooks/audiobooks.sqlite3`，开启 `PRAGMA journal_mode = WAL` 与 `PRAGMA foreign_keys = ON`。
-- 合成新 WAV、切换采用候选或清理废弃候选时，必须先写入 `asset_journal_entries`：
-  - 启动恢复 (`reconcileOnLaunch`) 自动清理 `staged` 临时文件并删除无数据库行引用的孤儿 WAV；
-  - 当前 `adopted_candidate_id` 与 `revision_history` 引用的全部历史 WAV 受外键与引用集合双重保护，清理操作绝不误删可撤销资产。
+- 数据库位于 `<app_home>/audiobooks/library.sqlite3`，开启 `PRAGMA journal_mode = WAL` 与 `PRAGMA foreign_keys = ON`。
+- 候选 WAV 提交通过 sidecar 日志和 SQLite `asset_transactions` 登记。`recover()` 核对暂存与最终文件，补齐可恢复的候选提交，隔离已知损坏文件，并报告损坏的已登记候选。
+- 未知音频保留并报告；当前与历史章节版本引用的候选保留，恢复不通过删除孤儿 WAV 猜测用户意图。
 
 ### 2.3 有界全书 AI 理解与低置信度护栏
 - 章节分析按固定窗口（上限 12,000 UTF-8 字节，跨窗重叠 2 段上下文）顺序或受控并发调用 `LLMModule.audiobook`，单响应上限 256 KiB，严格使用 `LLMJSONParser` 解析并校验 schema。
@@ -51,6 +50,7 @@ graph LR
 - 每个 `AudiobookFragment` 的签名由 `(sourceId, byteRange, textSha256, characterId, voiceId, voiceRevisionId, speedMillis, capabilityRevision)` 共同决定。
 - TTS 响应流式读取受 8 MiB 硬上限保护；服务回执按原始 PCM 核验，本地制作音频按渲染策略转换为 **48 kHz 单声道 16-bit PCM WAV**，候选的帧数、`file_sha256` 与 `pcm_sha256` 均描述本地转换产物。
 - 修改单句、重派单段角色或更换某角色音色时，`AudiobookInvalidation` 只将签名变化的切片标为 `stale`，其余切片与章节保持 `ready`。
+- 单段重录使用同一制作门禁与生命周期，跳过目标片段的候选复用，只生成一个新候选。新候选不自动替换当前章节版本，采用与撤销由 `AudiobookRevisionController` 完成。
 
 ### 2.5 受控 XPC 媒体封装 (`speechrail media encode-audiobook`)
 - Swift 侧不直接拼装 shell 命令或调用外部 `ffmpeg`；`AudiobookExportController` 导出前核对已采用候选的资产 SHA-256，按候选帧数与采样率独立计算章节预期时长，并写出 `<app_home>/audiobooks/exports/<request_id>/request.json`。

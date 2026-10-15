@@ -318,6 +318,35 @@ final class AudiobookProductionTests: XCTestCase {
         XCTAssertEqual(finalBook.productionState, .fullBookProduced)
         XCTAssertEqual(finalBook.listenableState, .fullBookListenable)
 
+        let fragments = try await store.fragments(for: bookID, chapterID: chapter.id)
+        let heroFragment = try XCTUnwrap(fragments.first { $0.roleID == hero.id })
+        let originalChapter = try await store.chapters(for: bookID)[0]
+        let originalRevisionID = try XCTUnwrap(originalChapter.currentChapterRevisionID)
+        let originalCandidates = try await store.candidates(for: bookID)
+
+        try await production.regenerateFragment(bookID: bookID, chapterID: chapter.id, fragmentID: heroFragment.id)
+
+        XCTAssertEqual(renderer.requests.count, 3, "重录必须生成一个新候选，不能直接复用相同依赖的旧音频")
+        XCTAssertEqual(renderer.requests.last?.voiceID, "v-hero", "只重录目标角色片段")
+        let repairedCandidates = try await store.candidates(for: bookID)
+        XCTAssertEqual(repairedCandidates.count, originalCandidates.count + 1)
+        XCTAssertEqual(repairedCandidates.filter { $0.fragmentID == heroFragment.id }.count, 2)
+        let chapterAfterRepair = try await store.chapters(for: bookID)[0]
+        XCTAssertEqual(chapterAfterRepair.currentChapterRevisionID, originalRevisionID,
+                       "新候选必须由用户显式采用，重录本身不切换章节版本")
+        for original in originalCandidates {
+            let assetPreserved = try await store.verifyCandidateAsset(original)
+            XCTAssertTrue(assetPreserved)
+        }
+
+        do {
+            try await production.regenerateFragment(bookID: bookID, chapterID: chapter.id, fragmentID: UUID())
+            XCTFail("无效片段不能退化为整章制作")
+        } catch let error as AudiobookRevisionError {
+            guard case .fragmentNotFound = error else { return XCTFail("应拒绝无效片段，实际为：\(error)") }
+        }
+        XCTAssertEqual(renderer.requests.count, 3)
+
         await production.shutdown()
         let bookAfterShutdown = try await store.book(id: bookID)
         XCTAssertEqual(bookAfterShutdown.productionState, .fullBookProduced,
@@ -392,6 +421,20 @@ final class AudiobookProductionTests: XCTestCase {
         let candidatesAfterPause = try await store.candidates(for: bookID)
         XCTAssertTrue(candidatesAfterPause.isEmpty, "暂停后迟到的音频绝不能写入候选库或标记完成")
         XCTAssertFalse(admission.isBusy, "暂停后必须释放 creation admission 租约")
+
+        let fragments = try await store.fragments(for: bookID, chapterID: chapter.id)
+        let fragment = try XCTUnwrap(fragments.first)
+        do {
+            try await production.regenerateFragment(bookID: bookID, chapterID: chapter.id, fragmentID: fragment.id)
+            XCTFail("重录也必须遵循暂停，不能提交迟到候选")
+        } catch let error as AudiobookProductionError {
+            XCTAssertEqual(error, .cancelled)
+        }
+        let candidatesAfterRepairPause = try await store.candidates(for: bookID)
+        let chapterAfterRepairPause = try await store.chapters(for: bookID)[0]
+        XCTAssertTrue(candidatesAfterRepairPause.isEmpty)
+        XCTAssertNil(chapterAfterRepairPause.currentChapterRevisionID)
+        XCTAssertFalse(admission.isBusy)
     }
 
     @MainActor
@@ -465,6 +508,14 @@ final class AudiobookProductionTests: XCTestCase {
         do {
             try await production.start(bookID: bookID, chapterIDs: [chapter.id])
             XCTFail("已有制作运行时，第二次 start 必须稳定返回 busy")
+        } catch let error as AudiobookProductionError {
+            XCTAssertEqual(error, .admissionBusy)
+        }
+
+        do {
+            let fragment = try await store.fragments(for: bookID, chapterID: chapter.id)[0]
+            try await production.regenerateFragment(bookID: bookID, chapterID: chapter.id, fragmentID: fragment.id)
+            XCTFail("正式制作期间不能并行重录片段")
         } catch let error as AudiobookProductionError {
             XCTAssertEqual(error, .admissionBusy)
         }

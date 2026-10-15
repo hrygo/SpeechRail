@@ -1570,6 +1570,11 @@ public final class AudiobookWorkflowModel {
 
     // MARK: - Production & Revision Actions
 
+    /// Test seam for the explicit per-fragment rerender workflow action.
+    public func regenerateFragment(fragmentID: UUID) {
+        // Kept as a compile-ready RED seam until the workflow lifecycle is wired.
+    }
+
     public func makeConfirmedChapters(chapterIDs: [UUID]? = nil) {
         guard let bookID = selectedBook?.id else { return }
         guard !isProductionBusy, productionRunID == nil else {

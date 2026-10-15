@@ -117,9 +117,25 @@ public actor AudiobookProductionController {
         latestProgressByBook[bookID]
     }
 
+    public func regenerateFragment(
+        bookID: UUID,
+        chapterID: UUID,
+        fragmentID: UUID
+    ) async throws {
+        try await produce(bookID: bookID, chapterIDs: [chapterID], regeneratingFragmentID: fragmentID)
+    }
+
     public func start(
         bookID: UUID,
         chapterIDs: [UUID]
+    ) async throws {
+        try await produce(bookID: bookID, chapterIDs: chapterIDs, regeneratingFragmentID: nil)
+    }
+
+    private func produce(
+        bookID: UUID,
+        chapterIDs: [UUID],
+        regeneratingFragmentID: UUID?
     ) async throws {
         // Actor methods are reentrant across `await`. Reserve the run before the first
         // suspension so a second start cannot invalidate its generation or strand its lease.
@@ -181,11 +197,6 @@ public actor AudiobookProductionController {
         for chapter in selectedChapters {
             try checkRunIsActive(runGeneration)
             let chapterAnns = try await store.annotations(for: bookID, chapterID: chapter.id)
-            for ann in chapterAnns {
-                if let rid = ann.assignment.roleID {
-                    activeRoleIDs.insert(rid)
-                }
-            }
             let chapterAtoms = try await store.atoms(for: bookID, chapterID: chapter.id)
             let fragments = try AudiobookFragmentPlanner.plan(
                 chapter: chapter,
@@ -195,8 +206,18 @@ public actor AudiobookProductionController {
                 source: source,
                 atoms: chapterAtoms
             )
-            plannedFragmentsByChapter[chapter.id] = fragments
-            totalFragmentCount += fragments.count
+            let selectedFragments: [AudiobookFragment]
+            if let regeneratingFragmentID {
+                guard let target = fragments.first(where: { $0.id == regeneratingFragmentID }) else {
+                    throw AudiobookRevisionError.fragmentNotFound(regeneratingFragmentID)
+                }
+                selectedFragments = [target]
+            } else {
+                selectedFragments = fragments
+            }
+            plannedFragmentsByChapter[chapter.id] = selectedFragments
+            activeRoleIDs.formUnion(selectedFragments.map(\.roleID))
+            totalFragmentCount += selectedFragments.count
             try checkRunIsActive(runGeneration)
             try await store.saveFragments(bookID: bookID, chapterID: chapter.id, fragments: fragments)
         }
@@ -236,7 +257,8 @@ public actor AudiobookProductionController {
                     }
 
                     // Reuse already committed & verified candidate with identical dependencyDigest
-                    if let reusable = existingCandidates.first(where: {
+                    if regeneratingFragmentID == nil,
+                       let reusable = existingCandidates.first(where: {
                         $0.fragmentID == fragment.id
                             && $0.dependencyDigest == fragment.dependencyDigest
                             && $0.isReceiptVerified
@@ -287,7 +309,7 @@ public actor AudiobookProductionController {
                 // If all fragments in the chapter now have verified candidates and no previous revision exists,
                 // automatically promote initial chapter revision (or keep as candidate if repairing an existing chapter).
                 let existingRevs = try await store.chapterRevisions(for: bookID, chapterID: chapter.id)
-                if existingRevs.isEmpty {
+                if regeneratingFragmentID == nil, existingRevs.isEmpty {
                     _ = try await revisionController.promoteInitialChapterIfComplete(
                         bookID: bookID,
                         chapterID: chapter.id
