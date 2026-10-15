@@ -152,6 +152,152 @@ final class AudiobookWorkflowTests: XCTestCase {
         return (model, driver)
     }
 
+    /// 跑通全书分析的最小 fake client（提取/归并/标注均返回合法结构化 JSON）。
+    private final class WorkflowLiveProgressClient: AudiobookAnalysisClient, @unchecked Sendable {
+        let configurationDigest: String
+
+        init(configurationDigest: String) {
+            self.configurationDigest = configurationDigest
+        }
+
+        func complete(_ prompt: AudiobookAnalysisPrompt) async throws -> String {
+            switch prompt.stage {
+            case .extraction:
+                let atomIDs = Self.extractPrimaryAtomIDs(from: prompt.input)
+                let firstAtom = atomIDs.first.map { [$0] } ?? []
+                let resp = AudiobookExtractionResponse(mentions: [
+                    .init(surfaceName: "林远", aliases: ["阿远"], evidenceAtomIDs: firstAtom, voiceTraitEvidence: "青年低沉嗓音"),
+                ])
+                return String(decoding: try JSONEncoder().encode(resp), as: UTF8.self)
+            case .castMerge:
+                let resp = AudiobookMergeResponse(groups: [
+                    .init(canonicalName: "林远", memberSurfaceNames: ["林远", "阿远"], aliases: ["阿远"], isCollisionUnresolved: false, evidenceSummary: "青年低沉嗓音"),
+                ])
+                return String(decoding: try JSONEncoder().encode(resp), as: UTF8.self)
+            case .annotation:
+                let atomIDs = Self.extractPrimaryAtomIDs(from: prompt.input)
+                let roleIDs = Self.extractCandidateRoleIDs(from: prompt.input)
+                var items: [AudiobookAnnotationResponse.Item] = []
+                for (idx, atomID) in atomIDs.enumerated() {
+                    if let roleID = roleIDs.first, idx % 2 == 1 {
+                        items.append(.init(atomID: atomID, speakerKind: .character, roleID: roleID, candidateRoleIDs: [roleID], confidence: 0.95, evidence: "林远开口说道"))
+                    } else {
+                        items.append(.init(atomID: atomID, speakerKind: .narrator, roleID: nil, candidateRoleIDs: [], confidence: 0.99, evidence: "旁白叙述"))
+                    }
+                }
+                let resp = AudiobookAnnotationResponse(items: items)
+                return String(decoding: try JSONEncoder().encode(resp), as: UTF8.self)
+            }
+        }
+
+        private static func extractPrimaryAtomIDs(from inputJSON: String) -> [UUID] {
+            guard let data = inputJSON.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return [] }
+            let list = (obj["primary_atoms_required"] as? [[String: Any]])
+                ?? (obj["primary_atoms"] as? [[String: Any]])
+                ?? []
+            return list.compactMap { ($0["atomID"] as? String).flatMap(UUID.init(uuidString:)) }
+        }
+
+        private static func extractCandidateRoleIDs(from inputJSON: String) -> [UUID] {
+            guard let data = inputJSON.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let list = obj["candidate_characters"] as? [[String: Any]]
+            else { return [] }
+            return list.compactMap { ($0["roleID"] as? String).flatMap(UUID.init(uuidString:)) }
+        }
+    }
+
+    private func makeWorkingWorkflow() -> AudiobookWorkflowModel {
+        let root = tempRoot!
+        let config = LLMConfiguration(baseURL: "http://127.0.0.1:8000/v1", model: "test-model")
+        let deps = AudiobookDependencies(
+            makeStore: { try AudiobookProjectStore(root: root) },
+            makeAnalysisClient: { snap in
+                WorkflowLiveProgressClient(configurationDigest: snap.configurationDigest)
+            },
+            resolveAnalysisSnapshot: { gen in
+                AudiobookAnalysisConfigSnapshot(configuration: config, generation: gen)
+            },
+            speechRenderer: WorkflowFakeRenderer()
+        )
+        return AudiobookWorkflowModel(
+            dependencies: deps,
+            playbackOwner: SharedPlaybackOwner(driver: FakeDriver()),
+            admission: SpeechCreationAdmission()
+        )
+    }
+
+    /// 接线回归：beginAnalysis 必须在 run 启动前装好 sink，
+    /// 首个 planned 事件不得丢失，终态必须收敛为 completed。
+    func testBeginAnalysisDeliversLiveProgressBeforeCompletion() async throws {
+        let workflow = makeWorkingWorkflow()
+        let txtURL = tempRoot.appendingPathComponent("live_progress.txt")
+        try Data("第一章 归来\n林远站在桥头。\n“跟紧我。”他回头说道。\n".utf8).write(to: txtURL)
+
+        await workflow.prepareImport(fileURL: txtURL, encoding: .utf8)
+        await workflow.confirmImport()
+        let bookID = try XCTUnwrap(workflow.selectedBook?.id)
+
+        workflow.beginAnalysis(bookID)
+        XCTAssertTrue(workflow.isAnalyzing)
+        for _ in 0..<200 {
+            if !workflow.isAnalyzing, workflow.analysisProgress?.outcome != nil { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        XCTAssertFalse(workflow.isAnalyzing)
+        let progress = try XCTUnwrap(workflow.analysisProgress)
+        XCTAssertEqual(progress.outcome, .completed)
+        XCTAssertEqual(progress.fraction, 1.0, accuracy: 0.0001)
+        let events = workflow.analysisEventBuffer.events
+        XCTAssertEqual(events.first?.kind, .planned)
+        XCTAssertEqual(events.last?.kind, .runEnded)
+        let runID = try XCTUnwrap(events.first?.runID)
+        XCTAssertTrue(events.allSatisfy { $0.runID == runID })
+    }
+
+    /// 代次隔离回归：暂停→重跑时旧 run 的迟到事件不得污染新投影，
+    /// 缓冲里只保留新 run 的事件且 runID 唯一。
+    func testPauseThenResumeKeepsOnlyNewRunEvents() async throws {
+        let workflow = makeWorkingWorkflow()
+        let txtURL = tempRoot.appendingPathComponent("pause_resume.txt")
+        // 足够多的段落，保证第一次 begin 后暂停时 run 还没跑完。
+        var lines = ["第一章 代次隔离"]
+        for index in 0..<40 {
+            lines.append("林远沿着石阶第\(index)次登高远望。")
+            lines.append("“跟紧我。”他回头说道。")
+        }
+        try Data(lines.joined(separator: "\n").utf8).write(to: txtURL)
+
+        await workflow.prepareImport(fileURL: txtURL, encoding: .utf8)
+        await workflow.confirmImport()
+        let bookID = try XCTUnwrap(workflow.selectedBook?.id)
+
+        workflow.beginAnalysis(bookID)
+        XCTAssertTrue(workflow.isAnalyzing)
+        await workflow.pauseAnalysis()
+        XCTAssertFalse(workflow.isAnalyzing)
+
+        // 重跑到完成：旧 run 的事件（包括可能的 runEnded）不得混入。
+        workflow.beginAnalysis(bookID)
+        for _ in 0..<400 {
+            if !workflow.isAnalyzing, workflow.analysisProgress?.outcome != nil { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        XCTAssertFalse(workflow.isAnalyzing)
+        let progress = try XCTUnwrap(workflow.analysisProgress)
+        XCTAssertEqual(progress.outcome, .completed)
+        let events = workflow.analysisEventBuffer.events
+        XCTAssertFalse(events.isEmpty)
+        XCTAssertEqual(events.first?.kind, .planned)
+        XCTAssertEqual(events.last?.kind, .runEnded)
+        let runID = try XCTUnwrap(events.first?.runID)
+        XCTAssertTrue(events.allSatisfy { $0.runID == runID }, "缓冲不得混入旧 run 事件")
+    }
+
     func testWorkflowOnlyShowsNextValidAction() async throws {
         let (workflow, _) = makeWorkflow()
         let txtURL = tempRoot.appendingPathComponent("book.txt")
@@ -302,7 +448,7 @@ final class AudiobookWorkflowTests: XCTestCase {
         )
         await workflow.completeVoiceRoundTrip(binding: returnedBinding, context: context)
         XCTAssertEqual(workflow.voiceBindings[narrator.id]?.voiceID, "v-designed-narrator")
-        XCTAssertTrue(workflow.voiceReturnBannerMessage?.contains("已将新音色绑定给角色") == true)
+        XCTAssertTrue(workflow.voiceReturnBannerMessage?.contains("已将本书专用新音色「v-designed-narrator」绑定给角色") == true)
     }
 
     func testBeginAnalysisFailurePreservesErrorMessageInsteadOfBeingClearedByOpenBook() async throws {
@@ -324,5 +470,47 @@ final class AudiobookWorkflowTests: XCTestCase {
         XCTAssertFalse(workflow.isAnalyzing)
         XCTAssertNotNil(workflow.errorMessage, "openBook 不得清空分析失败后的错误提示")
         XCTAssertTrue(workflow.errorMessage?.contains("AI") == true)
+    }
+
+    /// 种子 fixture 契约锁：UI 测试的种子 TXT 必须经真实导入产出 3 章，
+    /// 且真实规划器必须产出 3 窗（每章 1 窗）。文本与
+    /// `SpeechRailApp.seedUITestAudiobookBook` 逐字一致，两边任一漂移
+    /// 这里先红——前台授权跑 T05d 前的最后一道静态门。
+    func testSeededFixtureTextYieldsThreeChaptersAndThreeWindows() async throws {
+        let (workflow, _) = makeWorkflow()
+        var lines: [String] = []
+        for chapter in 1...3 {
+            lines.append("第\(chapter)章 种子回声")
+            lines.append("林远站在桥头望向远山。")
+            lines.append("“跟紧我。”他回头说道。")
+            lines.append("阿远点头，风穿过竹林。")
+            lines.append("")
+        }
+        let txtURL = tempRoot.appendingPathComponent("seed_contract.txt")
+        try Data(lines.joined(separator: "\n").utf8).write(to: txtURL)
+
+        await workflow.prepareImport(fileURL: txtURL, encoding: .utf8)
+        let preview = try XCTUnwrap(workflow.importPreview)
+        XCTAssertEqual(preview.chapters.count, 3, "种子文本必须被识别为 3 章")
+        await workflow.confirmImport()
+        let bookID = try XCTUnwrap(workflow.selectedBook?.id)
+        XCTAssertEqual(workflow.chapters.count, 3, "导入后工作台应有 3 章")
+
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let chapters = try await store.chapters(for: bookID)
+        let atoms = try await store.atoms(for: bookID)
+        let source = try await store.sourceIndex(for: bookID)
+        let config = LLMConfiguration(baseURL: "http://127.0.0.1:8000/v1", model: "test-model")
+        let snapshot = AudiobookAnalysisConfigSnapshot(configuration: config, generation: 1)
+        let windows = try AudiobookAnalysisPipeline.planRootWindows(
+            bookID: bookID,
+            chapters: chapters,
+            atoms: atoms,
+            source: source,
+            policy: .standard,
+            config: snapshot
+        )
+        XCTAssertEqual(windows.count, 3, "种子书必须规划为 3 窗（每章 1 窗）")
+        XCTAssertEqual(Set(windows.map(\.chapterID)).count, 3, "3 窗应分属 3 个不同章节")
     }
 }

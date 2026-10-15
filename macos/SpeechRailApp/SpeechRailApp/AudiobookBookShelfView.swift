@@ -170,16 +170,22 @@ public struct AudiobookBookShelfView: View {
 
     @ViewBuilder
     private func analysisStatePill(_ summary: AudiobookBookSummary) -> some View {
-        switch summary.book.analysisState {
-        case .notStarted:
+        // 分析进行中优先用 live 投影（跑途中百分比也会跳），否则回退到 DB 快照口径
+        if workflow.isAnalyzing,
+           workflow.selectedBook?.id == summary.id,
+           let progress = workflow.analysisProgress,
+           progress.totalWindows > 0
+        {
+            StatusPill(tone: .attention, label: "分析中 \(Int(progress.fraction * 100))%")
+        } else if summary.book.analysisState == .notStarted {
             StatusPill(tone: .neutral, label: "分析：未开始")
-        case .running:
+        } else if summary.book.analysisState == .running {
             StatusPill(tone: .attention, label: "分析中 \(summary.completedWindowCount)/\(max(1, summary.totalWindowCount))")
-        case .paused:
+        } else if summary.book.analysisState == .paused {
             StatusPill(tone: .attention, label: "分析：已暂停")
-        case .failed:
+        } else if summary.book.analysisState == .failed {
             StatusPill(tone: .critical, label: "分析：需处理")
-        case .allWindowsValidated:
+        } else {
             StatusPill(tone: .healthy, label: "全书分析已完成")
         }
     }

@@ -173,4 +173,27 @@ final class AudiobookAnalysisPromptTests: XCTestCase {
             AudiobookAnalysisPolicy.standard.maxFullRequestScalars
         )
     }
+
+    func testDirectDialogueLinguisticHeuristics() {
+        // 1. 标准行首对白 -> 识别为直接引语
+        XCTAssertTrue(AudiobookPromptAtomItem.isDirectDialogue(in: "“我真傻，真的，”"))
+        XCTAssertTrue(AudiobookPromptAtomItem.isDirectDialogue(in: "「今晚风浪不小，大家守好船舵！」"))
+        XCTAssertTrue(AudiobookPromptAtomItem.isDirectDialogue(in: "『快跟上！』"))
+
+        // 2. 说话动词/冒号引导对白 -> 识别为直接引语
+        XCTAssertTrue(AudiobookPromptAtomItem.isDirectDialogue(in: "林远低声说道：“北码头的船快靠岸了。”"))
+        XCTAssertTrue(AudiobookPromptAtomItem.isDirectDialogue(in: "老周高声提醒道:「大家注意安全！」"))
+        XCTAssertTrue(AudiobookPromptAtomItem.isDirectDialogue(in: "祥林嫂问道：“阿毛如果还在，也有这么大了么？”"))
+        XCTAssertTrue(AudiobookPromptAtomItem.isDirectDialogue(in: "掌柜：“今天没有空房了。”"))
+
+        // 3. 句中专有名词/短语引用（<= 4 字，无终结标点，非行首无说话动词） -> 判定为词级引用而非独立对白
+        XCTAssertFalse(AudiobookPromptAtomItem.isDirectDialogue(in: "是四叔家正在“祝福”了﹔"))
+        XCTAssertFalse(AudiobookPromptAtomItem.isDirectDialogue(in: "見三清稱個「老」字，逢四帝道個「陛下」。"))
+        XCTAssertFalse(AudiobookPromptAtomItem.isDirectDialogue(in: "所谓的“精英”阶层总有偏见。"))
+        XCTAssertFalse(AudiobookPromptAtomItem.isDirectDialogue(in: "这里提到的“阿Q”精神广为人知。"))
+
+        // 4. 纯叙述文本 -> 判定为非对白
+        XCTAssertFalse(AudiobookPromptAtomItem.isDirectDialogue(in: "灰白色的沉重的晚云中间时时发出闪光。"))
+        XCTAssertFalse(AudiobookPromptAtomItem.isDirectDialogue(in: "著者：鲁迅"))
+    }
 }

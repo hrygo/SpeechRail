@@ -224,6 +224,8 @@ let package = Package(
                 "AudiobookAssetJournal.swift",
                 "AudiobookProjectStore.swift",
                 "AudiobookAnalysisPolicy.swift",
+                "AudiobookAnalysisProgress.swift",
+                "AudiobookAnalysisProgressRailView.swift",
                 "AudiobookAnalysisPrompts.swift",
                 "AudiobookCastRegistry.swift",
                 "AudiobookAnalysisPipeline.swift",

@@ -10,6 +10,9 @@ public struct AudiobookAnalysisPrompt: Codable, Equatable, Sendable {
     public var schemaJSON: String
     public var maxOutputTokens: Int
     public var rootWindowID: UUID
+    /// 本次分析 run 的关联 ID（管线写入，live 链路用它做 LLM 观测的 sessionID；
+    /// 只做观测关联，不发给大模型）。
+    public var observationSessionID: String?
 
     public init(
         stage: AudiobookAnalysisStage,
@@ -18,7 +21,8 @@ public struct AudiobookAnalysisPrompt: Codable, Equatable, Sendable {
         schemaName: String,
         schemaJSON: String,
         maxOutputTokens: Int,
-        rootWindowID: UUID
+        rootWindowID: UUID,
+        observationSessionID: String? = nil
     ) {
         self.stage = stage
         self.instructions = instructions
@@ -27,6 +31,7 @@ public struct AudiobookAnalysisPrompt: Codable, Equatable, Sendable {
         self.schemaJSON = schemaJSON
         self.maxOutputTokens = maxOutputTokens
         self.rootWindowID = rootWindowID
+        self.observationSessionID = observationSessionID
     }
 
     public var totalRequestScalars: Int {
@@ -44,7 +49,13 @@ public struct AudiobookAnalysisPrompt: Codable, Equatable, Sendable {
 
 public protocol AudiobookAnalysisClient: Sendable {
     var configurationDigest: String { get }
+    /// 单次 LLM 调用的诊断回执（耗时 / token / 错误码）；fake 后端返回 nil。
+    var callDiagnostics: AudiobookAnalysisCallDiagnosticsCollector? { get }
     func complete(_ prompt: AudiobookAnalysisPrompt) async throws -> String
+}
+
+public extension AudiobookAnalysisClient {
+    var callDiagnostics: AudiobookAnalysisCallDiagnosticsCollector? { nil }
 }
 
 public struct AudiobookPromptAtomItem: Codable, Equatable, Sendable {
@@ -71,12 +82,94 @@ public struct AudiobookPromptAtomItem: Codable, Equatable, Sendable {
     }
 
     public var containsDirectDialogue: Bool {
-        Self.containsDirectDialogueQuote(in: text)
+        Self.isDirectDialogue(in: text)
+    }
+
+    /// 判定一段正文文本是否包含应当独立由角色发声的直接引语对白（与分词启发式规则一致，排除句中词级短引用/专有名词/篇名强调）。
+    public static func isDirectDialogue(in text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        let openingQuotes: Set<UnicodeScalar> = ["“", "「", "『", "\""]
+        let closingQuotes: Set<UnicodeScalar> = ["”", "」", "』", "\""]
+        let sentenceTerminals: Set<UnicodeScalar> = ["。", "！", "？", "!", "?", "…"]
+        let speechVerbs: Set<UnicodeScalar> = [
+            "说", "道", "问", "曰", "喊", "叫", "答", "云", "喝", "笑", "叹", "哭", "骂", "嗔", "喃", "嚷"
+        ]
+
+        let scalars = Array(trimmed.unicodeScalars)
+        guard let firstScalar = scalars.first else { return false }
+
+        // 1. 行首开引号：属于标准对话轮次（Dialogue Turn）
+        if openingQuotes.contains(firstScalar) {
+            return true
+        }
+
+        // 2. 扫描文本中的所有引号对，分析引号的结构语境
+        var i = 0
+        while i < scalars.count {
+            let sc = scalars[i]
+            if openingQuotes.contains(sc) {
+                let openIndex = i
+
+                // 2.1 检查开引号前是否有说话引导动词或冒号（如 说：、道：、问：、笑道：、“:”、“：”）
+                var checkIdx = openIndex - 1
+                while checkIdx >= 0 && CharacterSet.whitespaces.contains(scalars[checkIdx]) {
+                    checkIdx -= 1
+                }
+                if checkIdx >= 0 {
+                    let prevSc = scalars[checkIdx]
+                    if prevSc == ":" || prevSc == "：" || speechVerbs.contains(prevSc) {
+                        return true
+                    }
+                    if checkIdx - 1 >= 0 {
+                        let prevPrevSc = scalars[checkIdx - 1]
+                        if prevSc == "道" && speechVerbs.contains(prevPrevSc) {
+                            return true
+                        }
+                    }
+                }
+
+                // 2.2 扫描到配对闭引号，检查引语内部特征
+                var closeIndex = -1
+                var quoteLength = 0
+                var hasTerminal = false
+                var peek = openIndex + 1
+                while peek < scalars.count && quoteLength < 200 {
+                    let pSc = scalars[peek]
+                    if closingQuotes.contains(pSc) {
+                        closeIndex = peek
+                        break
+                    }
+                    if sentenceTerminals.contains(pSc) {
+                        hasTerminal = true
+                    }
+                    quoteLength += 1
+                    peek += 1
+                }
+
+                if closeIndex > openIndex {
+                    // 引号内含完整句终标点且长度达到语义句（>= 4 字），视为直接引语
+                    if hasTerminal && quoteLength >= 4 {
+                        return true
+                    }
+                    // 长引语（>= 10 字）视为直接引语
+                    if quoteLength >= 10 {
+                        return true
+                    }
+                }
+
+                i = closeIndex > openIndex ? closeIndex + 1 : openIndex + 1
+            } else {
+                i += 1
+            }
+        }
+
+        return false
     }
 
     public static func containsDirectDialogueQuote(in text: String) -> Bool {
-        let quoteScalars: Set<UnicodeScalar> = ["“", "”", "「", "」", "『", "』", "\""]
-        return text.unicodeScalars.contains { quoteScalars.contains($0) }
+        isDirectDialogue(in: text)
     }
 }
 
@@ -100,6 +193,37 @@ public struct AudiobookPromptCharacterSummary: Codable, Equatable, Sendable {
         self.aliases = aliases
         self.evidenceNote = evidenceNote
         self.roleKey = roleKey
+    }
+
+    public func encodeDictionary() -> [String: Any] {
+        var dict: [String: Any] = [
+            "roleID": roleID.uuidString,
+            "canonicalName": canonicalName,
+            "aliases": aliases
+        ]
+        if let roleKey = roleKey, !roleKey.isEmpty {
+            dict["roleKey"] = roleKey
+        }
+        if let evidenceNote = evidenceNote {
+            dict["evidenceNote"] = evidenceNote
+        }
+        return dict
+    }
+
+    public static func canonicalJSONString(from summaries: [AudiobookPromptCharacterSummary]) throws -> String {
+        let object = summaries.map { $0.encodeDictionary() }
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    public static func serializedScalarCount(for summaries: [AudiobookPromptCharacterSummary]) -> Int {
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: summaries.map { $0.encodeDictionary() },
+            options: [.sortedKeys]
+        ) else {
+            return Int.max
+        }
+        return String(decoding: data, as: UTF8.self).unicodeScalars.count
     }
 }
 
@@ -380,7 +504,7 @@ public enum AudiobookAnalysisPrompts {
         ]
         let inputJSON = try canonicalJSONString(from: payload)
         let instructions = """
-        你是有声书工坊的全书人物提取器。请从 primary_atoms 中识别出场或发言的人物称呼、别称以及原文中的声线线索（如性别、年龄段与音色特征；仅当原文或对话称谓有依据时记录，无证据时填 null）。
+        你是有声书工坊的全书人物提取器。请从 primary_atoms 中识别出场或发言的人物称呼、别称以及原文中的声学人设线索（voiceTraitEvidence：综合性别年龄段、音高音区、音色质感/颗粒度、说话语速与情绪气场，如“28岁青年男性，中低音胸腔共鸣，声线温润微哑，语速沉稳克制”；仅当原文描写或称谓语境有依据时提炼，无依据填 null）。
         注意：evidenceAtomIDs 只能引用 primary_atoms 中出现的 atomID 或短序号 idx（如 "1"、"2"），不得引用 leading_context 或 trailing_context。
         \(securityGuardrail)
         """
@@ -436,7 +560,7 @@ public enum AudiobookAnalysisPrompts {
         ]
         let inputJSON = try canonicalJSONString(from: payload)
         let instructions = """
-        你是有声书工坊的全书人物归并器。请结合候选称呼、别称、声线线索与原文摘录（evidence_excerpts），将指向同一人物的称呼归并为一个角色条目，并在 evidenceSummary 中汇总该角色的性别、年龄段与声线特征线索。
+        你是有声书工坊的全书人物归并器。请结合候选称呼、别称、声线线索与原文摘录（evidence_excerpts），将指向同一人物的称呼归并为一个角色条目，并在 evidenceSummary 中汇总该角色的五维声学画像（性别与实龄锚点、音区共鸣、音色颗粒度、语速停连、情绪气质，供 TTS 音色设计直接使用）。
         若存在同名不同人或称呼歧义无法确定，必须将 isCollisionUnresolved 设为 true 以便人工复核，禁止强行合并。
         \(securityGuardrail)
         """
@@ -580,18 +704,7 @@ public enum AudiobookAnalysisPrompts {
     }
 
     private static func encodeCharacterSummary(_ summary: AudiobookPromptCharacterSummary) -> [String: Any] {
-        var dict: [String: Any] = [
-            "roleID": summary.roleID.uuidString,
-            "canonicalName": summary.canonicalName,
-            "aliases": summary.aliases
-        ]
-        if let roleKey = summary.roleKey, !roleKey.isEmpty {
-            dict["roleKey"] = roleKey
-        }
-        if let evidenceNote = summary.evidenceNote {
-            dict["evidenceNote"] = evidenceNote
-        }
-        return dict
+        summary.encodeDictionary()
     }
 
     private static func canonicalJSONString(from object: Any) throws -> String {

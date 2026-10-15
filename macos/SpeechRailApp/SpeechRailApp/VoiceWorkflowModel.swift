@@ -107,6 +107,8 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
     public private(set) var voiceDesignErrorMessage: String?
     public private(set) var voiceDesignSuccessMessage: String?
     public private(set) var voiceDesignPublication = VoiceDesignPublicationSnapshot()
+    public private(set) var lastPublishedDesignedVoice: CreatorVoice?
+    public private(set) var lastPublishedDesignedSeed: Int?
     public private(set) var isRegisteringVoice = false
     public var isCancellingVoiceDesignPublication: Bool {
         voiceDesignPublication.phase == .cancelling
@@ -389,6 +391,8 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
         voiceDesignPublicationGeneration &+= 1
         let generation = voiceDesignPublicationGeneration
         voiceDesignPublicationRetryStep = nil
+        lastPublishedDesignedVoice = nil
+        lastPublishedDesignedSeed = nil
         voiceDesignPublication = VoiceDesignPublicationSnapshot(phase: .creatingCandidate)
         voiceDesignErrorMessage = nil
         voiceDesignSuccessMessage = nil
@@ -1278,25 +1282,22 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
         context: VoiceDesignPublicationContext,
         generation: UInt64
     ) async {
-        let isCurrentGeneration = generation == voiceDesignPublicationGeneration
-        if isCurrentGeneration {
-            voiceDesignSavedSlots.insert(context.slot)
-            voiceDesignSuccessMessage = "“\(voice.name)” 已完成复核并保存到音色库，可以开始使用。"
-            voiceDesignSavingSlot = nil
-            voiceDesignPublicationRetryStep = nil
-            voiceDesignPublicationContext = nil
-            voiceDesignPublication.phase = .published
-            voiceDesignPublication.message = nil
-        }
-
-        // A completed server request can arrive after the user dismisses the
-        // workflow. Refresh shared catalog state, but never let that old result
-        // write into a newer publication flow or its candidate slot.
+        // 先刷新共享能力快照与音色列表，再切换为 .published，使监听 .published 的有声书回绑逻辑能立即读取最新 modelRevision
         let refreshed = await refreshCapabilitySet()
         await refreshCreatorVoices()
-        if generation == voiceDesignPublicationGeneration, !refreshed {
-            voiceDesignPublication.message = "音色已保存，但服务状态尚未刷新；请重新读取后再进行下一次修改。"
-        }
+
+        guard generation == voiceDesignPublicationGeneration else { return }
+        voiceDesignSavedSlots.insert(context.slot)
+        voiceDesignSuccessMessage = "“\(voice.name)” 已完成复核并保存到音色库，可以开始使用。"
+        voiceDesignSavingSlot = nil
+        voiceDesignPublicationRetryStep = nil
+        voiceDesignPublicationContext = nil
+        lastPublishedDesignedVoice = voice
+        lastPublishedDesignedSeed = context.seed
+        voiceDesignPublication.phase = .published
+        voiceDesignPublication.message = refreshed
+            ? nil
+            : "音色已保存，但服务状态尚未刷新；请重新读取后再进行下一次修改。"
     }
 
     private func failVoiceDesignPublication(

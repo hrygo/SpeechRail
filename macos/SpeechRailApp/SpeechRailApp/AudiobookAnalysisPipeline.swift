@@ -38,6 +38,7 @@ public actor AudiobookAnalysisPipeline {
     private let store: AudiobookProjectStore
     private let clientFactory: ClientFactory
     private let policy: AudiobookAnalysisPolicy
+    private var progressSink: AudiobookAnalysisProgressSink
     private var cancelledBookIDs: Set<UUID> = []
     private var activeGenerationsByBook: [UUID: Int] = [:]
     /// 阶段一提取结果缓存（按 windowID + policyFingerprint + configurationDigest 键控），暂停或阶段三中断重跑时免除重复提取。
@@ -46,10 +47,12 @@ public actor AudiobookAnalysisPipeline {
     public init(
         store: AudiobookProjectStore,
         policy: AudiobookAnalysisPolicy = .standard,
+        progressSink: AudiobookAnalysisProgressSink = .ignored,
         clientFactory: @escaping ClientFactory
     ) {
         self.store = store
         self.policy = policy
+        self.progressSink = progressSink
         self.clientFactory = clientFactory
     }
 
@@ -58,9 +61,20 @@ public actor AudiobookAnalysisPipeline {
         activeGenerationsByBook[bookID, default: 1] += 1
     }
 
+    /// 安装本次 run 的进度投递目标。管线一次只跑一个 run，
+    /// 每次 `beginAnalysis` 都重新安装，不会有跨 run 串扰。
+    ///
+    /// 注意：安装与 `run()` 是两次 actor 调用，必然存在竞态窗口；
+    /// 生产调用方应使用 `run(bookID:config:progressSink:)` 把 sink 随 run 一起传入。
+    /// 该方法仅保留给需要先装后跑的调用方。
+    public func setProgressSink(_ sink: AudiobookAnalysisProgressSink) {
+        progressSink = sink
+    }
+
     public func run(
         bookID: UUID,
-        config: AudiobookAnalysisConfigSnapshot
+        config: AudiobookAnalysisConfigSnapshot,
+        progressSink: AudiobookAnalysisProgressSink? = nil
     ) async throws -> AudiobookAnalysisSummary {
         guard config.isConfigured else {
             throw AudiobookAnalysisError.notConfigured
@@ -80,6 +94,16 @@ public actor AudiobookAnalysisPipeline {
         var book = try await store.book(id: bookID)
         book.analysisState = .running
         try await store.updateBook(book)
+
+        let emitter = AudiobookAnalysisEventEmitter(
+            runID: UUID().uuidString,
+            bookID: bookID,
+            sink: progressSink ?? self.progressSink
+        )
+        emitter.setPlan(totalWindows: 0, reusedCheckpointWindows: 0, maxAttempts: policy.maxCallsPerRootWindow)
+        let chapterOrdinalByID = Dictionary(
+            uniqueKeysWithValues: (try? await store.chapters(for: bookID))?.map { ($0.id, $0.ordinal + 1) } ?? []
+        )
 
         do {
             let source = try await store.sourceIndex(for: bookID)
@@ -129,15 +153,26 @@ public actor AudiobookAnalysisPipeline {
                     try await store.saveAnalysisWindow(planned)
                 }
             }
+            emitter.setPlan(
+                totalWindows: plannedWindows.count,
+                reusedCheckpointWindows: reusedCheckpointCount,
+                maxAttempts: policy.maxCallsPerRootWindow
+            )
+            emitter.emit(.planned)
 
             for window in windowsNeedingWork {
                 try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
+                emitter.setCurrentWindow(
+                    chapterOrdinal: chapterOrdinalByID[window.chapterID] ?? 1,
+                    windowOrdinal: window.ordinal + 1
+                )
                 let cacheKey = Self.extractionCacheKey(for: window)
                 if let cachedMentions = extractionCacheByWindowKey[cacheKey] {
                     extractedMentions.append(contentsOf: cachedMentions)
+                    emitter.noteExtracted()
+                    emitter.emit(.windowExtracted)
                     continue
                 }
-
                 let primaryItems = try makePromptAtomItems(
                     ids: window.primaryAtomIDs,
                     atomsByID: atomsByID,
@@ -164,10 +199,15 @@ public actor AudiobookAnalysisPipeline {
                     snapshot: frozenSnapshot,
                     bookID: bookID,
                     runGeneration: runGeneration,
-                    callCounters: &extractionCallCounters
+                    callCounters: &extractionCallCounters,
+                    emitter: emitter,
+                    diagnostics: client.callDiagnostics
                 )
+                emitter.emitLLMCalls(client.callDiagnostics?.takeAll())
                 extractionCacheByWindowKey[cacheKey] = mentions
                 extractedMentions.append(contentsOf: mentions)
+                emitter.noteExtracted()
+                emitter.emit(.windowExtracted)
             }
 
             // Phase 2: Bounded cast consolidation (32 candidates per batch, with local alias pre-clustering & source excerpts)
@@ -191,7 +231,8 @@ public actor AudiobookAnalysisPipeline {
                 atomsByID: atomsByID,
                 source: source
             )
-            for batch in mentionBatches {
+            emitter.setMergeBatches(total: mentionBatches.count)
+            for (batchIndex, batch) in mentionBatches.enumerated() {
                 try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
                 let existingSummaries = AudiobookCastRegistry.selectCandidateSummariesForWindow(
                     characters: characters,
@@ -199,14 +240,30 @@ public actor AudiobookAnalysisPipeline {
                     windowText: batch.map(\.surfaceName).joined(separator: " "),
                     policy: policy
                 )
+                let safeExistingSummaries = AudiobookCastRegistry.clampSummariesToBudget(
+                    existingSummaries,
+                    maxScalars: policy.maxCharacterSummaryScalars,
+                    maxCandidates: policy.maxMergeCandidatesPerBatch
+                )
                 let mergeRootID = UUID()
-                let mergePrompt = try AudiobookAnalysisPrompts.makeMergePrompt(
+                var mergePrompt = try AudiobookAnalysisPrompts.makeMergePrompt(
                     rootWindowID: mergeRootID,
                     candidates: batch,
-                    existingCharacters: existingSummaries,
+                    existingCharacters: safeExistingSummaries,
                     policy: policy
                 )
-                let rawMerge = try await client.complete(mergePrompt)
+                // run 关联：把本次 runID 写进 prompt，供 live 链路做 LLM 观测 sessionID。
+                mergePrompt.observationSessionID = emitter.runID
+                // awaitingLLM 不是窗口口径：归并阶段的等待由随后的 castBatchMerged 与
+                // 心跳表达，避免 attempt 计数在 batch 之间串扰。
+                let rawMerge: String
+                do {
+                    rawMerge = try await client.complete(mergePrompt)
+                } catch {
+                    emitter.emitLLMCalls(client.callDiagnostics?.takeAll())
+                    throw error
+                }
+                emitter.emitLLMCalls(client.callDiagnostics?.takeAll())
                 try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
                 let mergeResponse = try decodeMergeResponse(from: rawMerge, fallbackMentions: batch)
                 let outcome = AudiobookCastRegistry.applyMergeBatch(
@@ -219,6 +276,9 @@ public actor AudiobookAnalysisPipeline {
                 )
                 characters = outcome.characters
                 unresolvedCollisions.formUnion(outcome.unresolvedCollisionNames)
+                _ = batchIndex
+                emitter.noteBatchMerged()
+                emitter.emit(.castBatchMerged)
             }
             try await store.saveCharacters(bookID: bookID, characters: characters)
 
@@ -238,6 +298,10 @@ public actor AudiobookAnalysisPipeline {
             // Phase 3: Per-window speaker annotation with strict primary atom coverage and checkpoint commit
             for var window in windowsNeedingWork {
                 try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
+                emitter.setCurrentWindow(
+                    chapterOrdinal: chapterOrdinalByID[window.chapterID] ?? 1,
+                    windowOrdinal: window.ordinal + 1
+                )
                 let primaryItems = try makePromptAtomItems(
                     ids: window.primaryAtomIDs,
                     atomsByID: atomsByID,
@@ -277,8 +341,11 @@ public actor AudiobookAnalysisPipeline {
                     snapshot: frozenSnapshot,
                     bookID: bookID,
                     runGeneration: runGeneration,
-                    callCounters: &annotationCallCounters
+                    callCounters: &annotationCallCounters,
+                    emitter: emitter,
+                    diagnostics: client.callDiagnostics
                 )
+                emitter.emitLLMCalls(client.callDiagnostics?.takeAll())
 
                 guard Self.validateWindowAnnotationsCoverPrimaryAtoms(
                     primaryAtomIDs: window.primaryAtomIDs,
@@ -299,6 +366,8 @@ public actor AudiobookAnalysisPipeline {
                 try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
                 try await store.saveAnnotations(bookID: bookID, annotations: annotations)
                 try await store.saveAnalysisWindow(window)
+                emitter.noteAnnotated()
+                emitter.emit(.windowAnnotated)
             }
 
             // Verify all windows for the book are completed and refresh character major/minor status
@@ -316,6 +385,7 @@ public actor AudiobookAnalysisPipeline {
             book.analysisState = isAllComplete ? .allWindowsValidated : .paused
             try await store.updateBook(book)
 
+            emitter.emitRunEnded(outcome: .completed)
             return AudiobookAnalysisSummary(
                 bookID: bookID,
                 totalWindows: plannedWindows.count,
@@ -331,6 +401,10 @@ public actor AudiobookAnalysisPipeline {
                     || error is CancellationError
                 latestBook.analysisState = isCancelError ? .paused : .failed
                 try? await store.updateBook(latestBook)
+                emitter.emitRunEnded(
+                    outcome: isCancelError ? .cancelled : .failed,
+                    errorCode: AudiobookAnalysisErrorCode.code(for: error)
+                )
             }
             throw error
         }
@@ -435,7 +509,9 @@ public actor AudiobookAnalysisPipeline {
         snapshot: AudiobookAnalysisConfigSnapshot,
         bookID: UUID,
         runGeneration: Int,
-        callCounters: inout [UUID: Int]
+        callCounters: inout [UUID: Int],
+        emitter: AudiobookAnalysisEventEmitter?,
+        diagnostics: AudiobookAnalysisCallDiagnosticsCollector?
     ) async throws -> [AudiobookExtractionResponse.Mention] {
         try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: snapshot)
         let usedCalls = callCounters[rootWindowID, default: 0]
@@ -443,21 +519,29 @@ public actor AudiobookAnalysisPipeline {
             throw AudiobookAnalysisError.rootCallBudgetExhausted(rootWindowID: rootWindowID)
         }
         callCounters[rootWindowID] = usedCalls + 1
+        let attempt = usedCalls + 1
+        emitter?.emit(.awaitingLLM, attempt: attempt)
 
-        let prompt = try AudiobookAnalysisPrompts.makeExtractionPrompt(
+        var prompt = try AudiobookAnalysisPrompts.makeExtractionPrompt(
             rootWindowID: rootWindowID,
             primaryAtoms: primaryItems,
             leadingContext: leadingItems,
             trailingContext: trailingItems,
             policy: policy
         )
+        // run 关联：把本次 runID 写进 prompt，供 live 链路做 LLM 观测 sessionID。
+        prompt.observationSessionID = emitter?.runID
 
         do {
             let raw = try await client.complete(prompt)
+            emitter?.emitLLMCalls(diagnostics?.takeAll())
             try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: snapshot)
             let response = try decodeExtractionResponse(from: raw, primaryItems: primaryItems)
             return response.mentions
         } catch let error as AudiobookAnalysisError {
+            // 失败调用的诊断回执（错误码）在进入拆窗重试前必须先发射，
+            // 否则 takeAll 永远取不到失败回执，开发者详情的"上次错误码"恒为空。
+            emitter?.emitLLMCalls(diagnostics?.takeAll())
             if case .cancelled = error { throw error }
             if case .configurationChangedDuringRun = error { throw error }
             return try await splitOrFailExtraction(
@@ -470,9 +554,13 @@ public actor AudiobookAnalysisPipeline {
                 snapshot: snapshot,
                 bookID: bookID,
                 runGeneration: runGeneration,
-                callCounters: &callCounters
+                callCounters: &callCounters,
+                emitter: emitter,
+                diagnostics: diagnostics
             )
         } catch {
+            // 非 AnalysisError 同样先发射诊断回执再拆窗。
+            emitter?.emitLLMCalls(diagnostics?.takeAll())
             return try await splitOrFailExtraction(
                 error: error,
                 rootWindowID: rootWindowID,
@@ -483,7 +571,9 @@ public actor AudiobookAnalysisPipeline {
                 snapshot: snapshot,
                 bookID: bookID,
                 runGeneration: runGeneration,
-                callCounters: &callCounters
+                callCounters: &callCounters,
+                emitter: emitter,
+                diagnostics: diagnostics
             )
         }
     }
@@ -498,7 +588,9 @@ public actor AudiobookAnalysisPipeline {
         snapshot: AudiobookAnalysisConfigSnapshot,
         bookID: UUID,
         runGeneration: Int,
-        callCounters: inout [UUID: Int]
+        callCounters: inout [UUID: Int],
+        emitter: AudiobookAnalysisEventEmitter?,
+        diagnostics: AudiobookAnalysisCallDiagnosticsCollector?
     ) async throws -> [AudiobookExtractionResponse.Mention] {
         let totalScalars = primaryItems.reduce(0) { $0 + $1.text.unicodeScalars.count }
         guard primaryItems.count > 1,
@@ -510,6 +602,7 @@ public actor AudiobookAnalysisPipeline {
                 reason: error.localizedDescription
             )
         }
+        emitter?.emit(.retryingSplit, attempt: (callCounters[rootWindowID] ?? 0) + 1)
         let mid = primaryItems.count / 2
         let left = Self.reindexPromptAtomItems(Array(primaryItems[..<mid]))
         let right = Self.reindexPromptAtomItems(Array(primaryItems[mid...]))
@@ -522,7 +615,9 @@ public actor AudiobookAnalysisPipeline {
             snapshot: snapshot,
             bookID: bookID,
             runGeneration: runGeneration,
-            callCounters: &callCounters
+            callCounters: &callCounters,
+            emitter: emitter,
+            diagnostics: diagnostics
         )
         let rightMentions = try await executeExtractionWithSplitFallback(
             rootWindowID: rootWindowID,
@@ -533,7 +628,9 @@ public actor AudiobookAnalysisPipeline {
             snapshot: snapshot,
             bookID: bookID,
             runGeneration: runGeneration,
-            callCounters: &callCounters
+            callCounters: &callCounters,
+            emitter: emitter,
+            diagnostics: diagnostics
         )
         return leftMentions + rightMentions
     }
@@ -552,7 +649,9 @@ public actor AudiobookAnalysisPipeline {
         snapshot: AudiobookAnalysisConfigSnapshot,
         bookID: UUID,
         runGeneration: Int,
-        callCounters: inout [UUID: Int]
+        callCounters: inout [UUID: Int],
+        emitter: AudiobookAnalysisEventEmitter?,
+        diagnostics: AudiobookAnalysisCallDiagnosticsCollector?
     ) async throws -> [AudiobookAnnotation] {
         try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: snapshot)
         let usedCalls = callCounters[window.rootWindowID, default: 0]
@@ -560,18 +659,29 @@ public actor AudiobookAnalysisPipeline {
             throw AudiobookAnalysisError.rootCallBudgetExhausted(rootWindowID: window.rootWindowID)
         }
         callCounters[window.rootWindowID] = usedCalls + 1
+        let attempt = usedCalls + 1
+        emitter?.emit(.awaitingLLM, attempt: attempt)
 
-        let prompt = try AudiobookAnalysisPrompts.makeAnnotationPrompt(
+        let safeCandidates = AudiobookCastRegistry.clampSummariesToBudget(
+            candidateSummaries,
+            maxScalars: policy.maxCharacterSummaryScalars,
+            maxCandidates: policy.maxMergeCandidatesPerBatch
+        )
+
+        var prompt = try AudiobookAnalysisPrompts.makeAnnotationPrompt(
             rootWindowID: window.rootWindowID,
             primaryAtoms: primaryItems,
             leadingContext: leadingItems,
             trailingContext: trailingItems,
-            candidateCharacters: candidateSummaries,
+            candidateCharacters: safeCandidates,
             policy: policy
         )
+        // run 关联：把本次 runID 写进 prompt，供 live 链路做 LLM 观测 sessionID。
+        prompt.observationSessionID = emitter?.runID
 
         do {
             let raw = try await client.complete(prompt)
+            emitter?.emitLLMCalls(diagnostics?.takeAll())
             try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: snapshot)
             return try decodeAndValidateAnnotations(
                 from: raw,
@@ -583,6 +693,9 @@ public actor AudiobookAnalysisPipeline {
                 atomsByID: atomsByID
             )
         } catch let error as AudiobookAnalysisError {
+            // 失败调用的诊断回执（错误码）在进入拆窗重试前必须先发射，
+            // 否则 takeAll 永远取不到失败回执，开发者详情的"上次错误码"恒为空。
+            emitter?.emitLLMCalls(diagnostics?.takeAll())
             if case .cancelled = error { throw error }
             if case .configurationChangedDuringRun = error { throw error }
             return try await splitOrFailAnnotation(
@@ -600,9 +713,13 @@ public actor AudiobookAnalysisPipeline {
                 snapshot: snapshot,
                 bookID: bookID,
                 runGeneration: runGeneration,
-                callCounters: &callCounters
+                callCounters: &callCounters,
+                emitter: emitter,
+                diagnostics: diagnostics
             )
         } catch {
+            // 非 AnalysisError 同样先发射诊断回执再拆窗。
+            emitter?.emitLLMCalls(diagnostics?.takeAll())
             return try await splitOrFailAnnotation(
                 error: error,
                 window: window,
@@ -618,7 +735,9 @@ public actor AudiobookAnalysisPipeline {
                 snapshot: snapshot,
                 bookID: bookID,
                 runGeneration: runGeneration,
-                callCounters: &callCounters
+                callCounters: &callCounters,
+                emitter: emitter,
+                diagnostics: diagnostics
             )
         }
     }
@@ -638,7 +757,9 @@ public actor AudiobookAnalysisPipeline {
         snapshot: AudiobookAnalysisConfigSnapshot,
         bookID: UUID,
         runGeneration: Int,
-        callCounters: inout [UUID: Int]
+        callCounters: inout [UUID: Int],
+        emitter: AudiobookAnalysisEventEmitter?,
+        diagnostics: AudiobookAnalysisCallDiagnosticsCollector?
     ) async throws -> [AudiobookAnnotation] {
         let totalScalars = primaryItems.reduce(0) { $0 + $1.text.unicodeScalars.count }
         guard primaryItems.count > 1,
@@ -653,6 +774,7 @@ public actor AudiobookAnalysisPipeline {
                 reason: error.localizedDescription
             )
         }
+        emitter?.emit(.retryingSplit, attempt: (callCounters[window.rootWindowID] ?? 0) + 1)
         let mid = primaryItems.count / 2
         let left = Self.reindexPromptAtomItems(Array(primaryItems[..<mid]))
         let right = Self.reindexPromptAtomItems(Array(primaryItems[mid...]))
@@ -670,7 +792,9 @@ public actor AudiobookAnalysisPipeline {
             snapshot: snapshot,
             bookID: bookID,
             runGeneration: runGeneration,
-            callCounters: &callCounters
+            callCounters: &callCounters,
+            emitter: emitter,
+            diagnostics: diagnostics
         )
 
         var leftSpeakersByAtom: [UUID: String] = [:]
@@ -700,7 +824,9 @@ public actor AudiobookAnalysisPipeline {
             snapshot: snapshot,
             bookID: bookID,
             runGeneration: runGeneration,
-            callCounters: &callCounters
+            callCounters: &callCounters,
+            emitter: emitter,
+            diagnostics: diagnostics
         )
         return leftAnns + rightAnns
     }
@@ -863,9 +989,10 @@ public actor AudiobookAnalysisPipeline {
                 assignment = .assigned(roleID: narratorID)
                 evidence = "纯叙述段默认归属旁白"
             } else {
-                throw AudiobookAnalysisError.atomCoverageViolation(
-                    "返回的 atomID 序列遗漏了对白段落 \(primaryItem.atomID)。"
-                )
+                // 边缘或弱引语段落（大模型经文学语境理解未显式指派独立说话人）：
+                // 自动安全回退为旁白，符合 Prompt“未确认角色自动归属旁白”承诺，避免阻断全书流水线。
+                assignment = .assigned(roleID: narratorID)
+                evidence = "模型未显式指派角色，自动归属旁白"
             }
 
             annotations.append(

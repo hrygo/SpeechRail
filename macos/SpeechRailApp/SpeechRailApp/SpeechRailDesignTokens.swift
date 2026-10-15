@@ -171,6 +171,10 @@ public enum SpeechRailDesignTokens {
         public static let serviceCapabilityPillWidth: CGFloat = 96
         /// 服务状态运行信息：标签列固定，取值右对齐（Figma `infoRow` 的 120）。
         public static let serviceRuntimeLabelWidth: CGFloat = 120
+        /// 有声书分析诊断（开发者详情）：标签列固定最小宽，取值吸收余量。
+        /// 标签最长为四字中文（"复用检查点"按 5 字取整），caption 字号下约 68pt，
+        /// 取 72 对齐 4pt 网格。
+        public static let audiobookAnalysisDevRowLabelWidth: CGFloat = 72
         public static let diagnosticsEmptyListMinimumHeight: CGFloat = 180
         public static let diagnosticsEmptyDetailMinimumHeight: CGFloat = 300
         public static let monitoringEmptyMinimumHeight: CGFloat = 220
