@@ -107,8 +107,8 @@
     <text class="mono-text" x="892" y="48">单窗 ≤4,000字 / ≤256 Atoms 预算</text>
   </g>
 
-  <!-- Flow down to Main Stage Container (with occlusion badge to eliminate line-text collision) -->
-  <path class="flow-line-primary" d="M 600 154 L 600 196" marker-end="url(#arrow-blue)"/>
+  <!-- Flow from planRootWindows (Card 4) down and across into Phase 1 of LLM Pipeline -->
+  <path class="flow-line-primary" d="M 1035 154 V 175 H 233 V 196" marker-end="url(#arrow-blue)"/>
   <rect class="step-badge-blue" x="515" y="163" width="170" height="24"/>
   <text class="step-badge-text-blue" x="600" y="179">进入有界受控流水线</text>
 
@@ -220,8 +220,8 @@
     </g>
   </g>
 
-  <!-- Flow down to Persistence (with green validation badge to eliminate line-text collision) -->
-  <path class="flow-line-primary" d="M 600 596 L 600 638" marker-end="url(#arrow-blue)"/>
+  <!-- Flow from Phase 3 (Annotation) down and across into Persistence -->
+  <path class="flow-line-primary" d="M 967 596 V 617 H 600 V 638" marker-end="url(#arrow-blue)"/>
   <rect class="step-badge-green" x="445" y="605" width="310" height="24"/>
   <text class="step-badge-text-green" x="600" y="621">逐窗覆盖性校验通过 (Cover Primary Atoms)</text>
 

@@ -34,38 +34,87 @@ date: 2026-10-15
 ### 1.2 端到端数据流拓扑
 
 ```mermaid
-graph TD
-    subgraph L1["1. 音色资产目录层 (VoiceCatalogStore)"]
-        VC[SafeVoiceCatalog<br/>全量可用音色] --> SF{作用域与状态过滤<br/>isVoiceActiveForBook}
-        SF -->|".globalReusable"| Pool[当前书籍活跃音色池 M]
-        SF -->|".bookExclusive (originBookID == current)"| Pool
-        SF -->|".bookExclusive (other book) / .archived"| Drop[跨书隔离与冷备隐藏]
-        Pool --> TC[VoiceTaxonomyClassifier<br/>六大声部行当自动归类]
+flowchart TB
+    %% -----------------------------------------------------------
+    %% 1. 输入与前置建模层
+    %% -----------------------------------------------------------
+    subgraph S1["1. 双源输入与建模预处理 (Inputs & Preprocessing)"]
+        direction LR
+
+        subgraph S1_Voice["音色资产目录层 (VoiceCatalogStore)"]
+            direction TB
+            VC["SafeVoiceCatalog<br/>全量可用音色"]
+            SF(["作用域过滤守卫<br/>isVoiceActiveForBook"])
+            Pool["当前书籍活跃音色池 (M)<br/>全局通用 + 本书专属"]
+            Drop[/"跨书隔离 / 归档冷备"/]
+            TC["VoiceTaxonomyClassifier<br/>六大声部行当自动归类"]
+
+            VC --> SF
+            SF -->|"满足作用域"| Pool
+            SF -.->|"他书专属 / 已归档"| Drop
+            Pool --> TC
+        end
+
+        subgraph S1_Cast["角色分层与冲突建模 (AudiobookCastRegistry)"]
+            direction TB
+            Ann["全书 Annotations & Characters<br/>对白标注与角色定义"]
+            Stats["对白统计与独占预算 K<br/>computeRoleDialogueStats"]
+            Tiers["帕累托四级角色分层<br/>.narrator / .lead / .supporting / .ensemble"]
+            Graph[("同场对话冲突图 G=(V,E,w)<br/>buildSceneConflictGraph<br/>同章共现+10 / 紧邻对话≤6块+100")]
+
+            Ann --> Stats
+            Stats --> Tiers
+            Ann --> Graph
+        end
     end
 
-    subgraph L2["2. 角色帕累托分层与冲突建模 (AudiobookCastRegistry)"]
-        Ann[全书 Annotations + Characters] --> Stats[computeRoleDialogueStats<br/>帕累托 75% + 音色预算 K]
-        Stats --> Tiers["四级角色分层<br/>.narrator / .lead / .supporting / .ensemble"]
-        Ann --> Graph["buildSceneConflictGraph<br/>同章共现(+10) + 紧邻对话 ≤6 块(+100)"]
+    %% -----------------------------------------------------------
+    %% 2. 双池智能选角分配层
+    %% -----------------------------------------------------------
+    subgraph S2["2. 两阶段智能选角分配引擎 (recommendVoiceBindings)"]
+        direction LR
+
+        subgraph S2_Exclusive["阶段一：核心主角独占分配 (Exclusive Phase)"]
+            direction TB
+            ExAlloc["独占池打分与择优指派<br/>本角专用(+500) / 首选包(+28) / 声部契合<br/>产出: exclusiveLockedVoiceIDs"]
+        end
+
+        subgraph S2_Shared["阶段二：配角共享图着色分配 (Shared Phase)"]
+            direction TB
+            SharedPool["构建配角共享候选池<br/>activeVoices 扣除 exclusiveLockedVoiceIDs"]
+            WP["Welsh-Powell 加权度降序着色<br/>声部匹配 - 同场对手戏排斥 - 复用均衡"]
+            SharedPool --> WP
+        end
+
+        ExAlloc -->|"扣除已锁独占音色"| SharedPool
     end
 
-    subgraph L3["3. 双池分配与图着色器 (recommendVoiceBindings)"]
-        Tiers -->|".narrator + .lead"| ExAlloc[阶段一：独占池择优分配<br/>本角专用+500 / 首选包+28]
-        ExAlloc --> ExLock[锁定独占音色集合<br/>exclusiveLockedVoiceIDs]
-        TC --> ExAlloc
-        TC --> SharedPool[阶段二：构建配角共享池<br/>activeVoices - exclusiveLockedVoiceIDs]
-        ExLock --> SharedPool
-        Tiers -->|".supporting + .ensemble"| WP[Welsh-Powell 加权度降序着色<br/>声部匹配 - 同场排斥 - 复用惩罚]
-        Graph --> WP
-        SharedPool --> WP
-    end
+    %% 输入层 -> 选角层连线
+    TC -->|"活跃音色画像"| ExAlloc
+    Tiers -->|".narrator + .lead"| ExAlloc
+    Tiers -->|".supporting + .ensemble"| WP
+    Graph -->|"冲突排斥权重 w"| WP
 
-    subgraph L4["4. 微韵律注入与合成透传 (Production Pipeline)"]
-        WP --> Prosody["computeMicroProsodyAndSeed<br/>system: 0.94x~1.06x | clone: 1.0x + Seed"]
-        ExAlloc --> Bindings[AudiobookVoiceBinding 字典]
-        Prosody --> Bindings
-        Bindings --> Digest[AudiobookFragmentPlanner<br/>dependencyDigest 含 allowedSpeed/callerSeed]
-        Digest --> TTS[AudiobookProductionController<br/>透传 effectiveSpeed 与 callerSeed]
+    %% -----------------------------------------------------------
+    %% 3. 微韵律注入与合成透传层
+    %% -----------------------------------------------------------
+    subgraph S3["3. 微韵律注入与合成透传 (Production Pipeline)"]
+        direction TB
+
+        subgraph S3_Assembly["绑定参数分化与映射装配"]
+            direction LR
+            Prosody["模式感知微韵律与种子分化<br/>system: 0.92~1.08x 微语速 | clone: 1.0x 锁定 + 种子"]
+            Bindings["AudiobookVoiceBinding 字典<br/>全书角色音色与微调参数绑定映射表"]
+            Prosody -->|"共享微调绑定"| Bindings
+        end
+
+        Digest["分片规划器 (缓存指纹注入)<br/>AudiobookFragmentPlanner · dependencyDigest"]
+        TTS["合成控制器 (音频生成透传)<br/>AudiobookProductionController · effectiveSpeed & callerSeed"]
+
+        WP -->|"共享角色选角"| Prosody
+        ExAlloc -->|"独占基准绑定 (1.0x 无种子)"| Bindings
+        Bindings --> Digest
+        Digest --> TTS
     end
 ```
 
