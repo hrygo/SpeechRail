@@ -1232,26 +1232,27 @@ public struct AudiobookBookWorkspaceView: View {
 
                         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                             Button {
-                                Task {
-                                    let voices = workflow.mergedAvailableVoices(
-                                        externalVoices: appModel.safeVoiceCatalog?.data ?? []
-                                    )
-                                    await workflow.autoAssignRecommendedVoices(availableVoices: voices)
-                                }
+                                Task { await workflow.previewRecommendedVoices() }
                             } label: {
-                                Label("智能配声", systemImage: "wand.and.stars")
+                                Label("推荐声音", systemImage: "wand.and.stars")
                             }
                             .speechRailButton(.secondary)
                             .accessibilityIdentifier("audiobook-smart-assign-voices-button")
 
                             Spacer()
 
+                            Button("撤销上次配声") { Task { await workflow.undoLastCastingChange() } }
+                                .speechRailButton(.quiet)
+
                             Button {
                                 Task { await workflow.confirmCastAndAudition() }
                             } label: {
                                 Label("确认配声", systemImage: "checkmark.circle")
                             }
-                            .speechRailButton(.primary)
+                            .speechRailButton(workflow.pendingCastingPlan == nil ? .primary : .secondary)
+                        }
+                        if let plan = workflow.pendingCastingPlan {
+                            AudiobookCastingReview(workflow: workflow).id(plan.inputDigest)
                         }
                     }
                 }
@@ -1274,7 +1275,7 @@ public struct AudiobookBookWorkspaceView: View {
         let conflictPartners = workflow.sceneConflictPartnerNames(for: role.id)
         let voiceMeta = binding.flatMap { VoiceCatalogStore.shared.metadata(for: $0.voiceID) }
         let isCustomExclusiveVoice = binding.map {
-            voiceMeta?.scope == .bookExclusive
+            voiceMeta?.visibilityScope == .bookExclusive
                 || !AudiobookWorkflowModel.builtInSystemVoiceIDs.contains($0.voiceID.lowercased())
         } ?? false
 
@@ -1373,7 +1374,7 @@ public struct AudiobookBookWorkspaceView: View {
                             let speedSuffix = abs(b.allowedSpeed - 1.0) > 0.005
                                 ? String(format: " · %.2fx", b.allowedSpeed)
                                 : ""
-                            let scopePrefix = (voiceMeta?.scope == .bookExclusive) ? "📘 " : ""
+                            let scopePrefix = (voiceMeta?.visibilityScope == .bookExclusive) ? "📘 " : ""
                             return "\(scopePrefix)\(baseName)\(speedSuffix)"
                         }()
                         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
@@ -1581,7 +1582,80 @@ public struct AudiobookBookWorkspaceView: View {
     }
 }
 
-// MARK: - 100+ 音色分层搜索试听选择器 Popover（解决 B8 平铺 Menu 崩溃）
+private struct AudiobookCastingReview: View {
+    @Bindable var workflow: AudiobookWorkflowModel
+    @State private var acknowledgements: Set<UUID> = []
+
+    var body: some View {
+        if let plan = workflow.pendingCastingPlan, let recommendation = workflow.castingRecommendation {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                Text("本次将调整 \(recommendation.affectedRoleIDs.count) 个角色、\(recommendation.affectedFragmentIDs.count) 个片段的配声。")
+                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                Text("已采用的音频和历史候选会保留。")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                if workflow.castingPlanNeedsRefresh {
+                    Text("声音目录已变化，请重新推荐。")
+                        .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                }
+                ForEach(plan.issues) { issue in
+                    if issue.isBlocking {
+                        Text(issue.nextAction).foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                    } else if issue.severity == .warning {
+                        Toggle(issue.nextAction, isOn: Binding(get: { acknowledgements.contains(issue.id) }, set: {
+                            if $0 { acknowledgements.insert(issue.id) } else { acknowledgements.remove(issue.id) }
+                        })).toggleStyle(.checkbox)
+                    }
+                }
+                DisclosureGroup("试听与分配说明") {
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                        ForEach(workflow.characters.filter { recommendation.affectedRoleIDs.contains($0.id) }) { role in
+                            Text("\(role.displayName)：\((recommendation.reasonsByRoleID[role.id] ?? []).joined(separator: "；"))")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                        }
+                        Menu("选择角色准备试听") {
+                            ForEach(workflow.characters.filter { plan.proposedBindings[$0.id] != nil }) { role in
+                                Button("\(role.displayName) · 同文对比") {
+                                    var voices = [plan.proposedBindings[role.id]?.voiceID, workflow.voiceBindings[role.id]?.voiceID].compactMap { $0 }
+                                    if voices.count < 2 {
+                                        voices += plan.snapshot.voices.filter { plan.catalog.permits($0, bookID: plan.bookID) && !voices.contains($0.id) }.prefix(1).map(\.id)
+                                    }
+                                    Task { await workflow.prepareCastingAudition(kind: .sameTextComparison, roleID: role.id, comparisonVoiceIDs: voices) }
+                                }
+                                if !role.isNarrator {
+                                    Button("\(role.displayName) · 相邻对白") {
+                                        Task { await workflow.prepareCastingAudition(kind: .dialogueComparison, roleID: role.id) }
+                                    }
+                                }
+                            }
+                        }
+                        if let audition = workflow.castingAudition {
+                            ForEach(Array(audition.items.enumerated()), id: \.offset) { index, item in
+                                Button("试听 \(index + 1) · \(plan.snapshot.voices.first { $0.id == item.voiceID }?.name ?? "所选声音")") {
+                                    Task { await workflow.playCastingAudition(itemIndex: index) }
+                                }.speechRailButton(.secondary)
+                            }
+                        }
+                        Button("使用基础推荐重新生成方案") {
+                            Task { await workflow.previewRecommendedVoices(strategy: .baseline) }
+                        }.speechRailButton(.quiet)
+                    }
+                }
+                HStack {
+                    Button("重新推荐") { Task { await workflow.previewRecommendedVoices() } }
+                        .speechRailButton(.secondary)
+                    Spacer()
+                    Button("应用配声方案") { Task { await workflow.applyPendingCastingPlan(acknowledgedIssueIDs: acknowledgements) } }
+                        .speechRailButton(.primary)
+                        .disabled(!recommendation.isApplicable || workflow.castingPlanNeedsRefresh || !plan.requiredAcknowledgements.isSubset(of: acknowledgements))
+                }
+            }
+            .padding(SpeechRailDesignTokens.Spacing.sm)
+        }
+    }
+}
+
+// MARK: - 音色搜索与试听选择器
 
 private struct AudiobookVoicePickerPopover: View {
     @Environment(AppModel.self) private var appModel
@@ -1590,16 +1664,14 @@ private struct AudiobookVoicePickerPopover: View {
         case all = "all"
         case matchedArchetype = "matched"
         case bookExclusive = "book_exclusive"
-        case favorites = "favorites"
 
         var id: String { rawValue }
 
         var title: String {
             switch self {
-            case .all: return "全部音色"
+            case .all: return "本书可用"
             case .matchedArchetype: return "智能匹配声部"
             case .bookExclusive: return "定制与群像"
-            case .favorites: return "星标收藏"
             }
         }
     }
@@ -1619,41 +1691,34 @@ private struct AudiobookVoicePickerPopover: View {
 
     @State private var searchQuery: String = ""
     @State private var scopeFilter: ScopeFilter = .all
+    @State private var favoritesOnly = false
     @State private var catalogRefreshTick: Int = 0
+    @State private var catalogSaveError: String?
 
     private static let microSpeedPresets: [Double] = [0.92, 0.96, 1.00, 1.04, 1.08]
 
     private var filteredVoices: [SafeVoiceEntry] {
         _ = catalogRefreshTick
-        let metadataMap = VoiceCatalogStore.shared.metadataByVoiceID
-        let sourcePool: [SafeVoiceEntry] = switch scopeFilter {
-        case .all, .favorites:
-            allVoices.isEmpty ? activeBookVoices : allVoices
-        case .matchedArchetype, .bookExclusive:
-            activeBookVoices.isEmpty ? allVoices : activeBookVoices
-        }
+        let catalog = VoiceCatalogStore.shared.snapshot()
+        let metadataMap = catalog.state.metadataByVoiceID
+        let sourcePool = allVoices.filter { $0.available && catalog.permits($0, bookID: role.bookID) }
 
         let byScope = sourcePool.filter { voice in
             let meta = metadataMap[voice.id]
             let voiceArch = AudiobookCastRegistry.resolveVoiceArchetype(for: voice, metadata: meta)
-            let isBuiltInDefault = AudiobookWorkflowModel.builtInSystemVoiceIDs.contains(voice.id.lowercased())
-                || voice.id.lowercased() == "v-narrator"
+            guard !favoritesOnly || meta?.isFavorite == true else { return false }
             switch scopeFilter {
             case .all:
                 return true
             case .matchedArchetype:
                 return voiceArch == archetype
                     || meta?.originRoleID == role.id
-                    || (meta?.scope == .bookExclusive && meta?.originBookID == role.bookID)
+                    || (meta?.visibilityScope == .bookExclusive && meta?.originBookID == role.bookID)
             case .bookExclusive:
-                return !isBuiltInDefault
-                    || (meta?.scope == .bookExclusive && meta?.originBookID == role.bookID)
-            case .favorites:
-                return meta?.isFavorite == true
+                return meta?.visibilityScope == .bookExclusive && meta?.originBookID == role.bookID
             }
         }
-        let candidateList = (byScope.isEmpty && scopeFilter == .matchedArchetype) ? sourcePool : byScope
-        let sortedCandidates = candidateList.sorted { lhs, rhs in
+        let sortedCandidates = byScope.sorted { lhs, rhs in
             let metaL = metadataMap[lhs.id]
             let metaR = metadataMap[rhs.id]
             let roleMatchL = (metaL?.originRoleID == role.id)
@@ -1731,38 +1796,21 @@ private struct AudiobookVoicePickerPopover: View {
             .pickerStyle(.segmented)
             .labelsHidden()
 
+            Toggle("仅收藏", isOn: $favoritesOnly).toggleStyle(.checkbox)
+            if let catalogSaveError {
+                Text(catalogSaveError).font(SpeechRailDesignTokens.Typography.caption).foregroundStyle(SpeechRailDesignTokens.Color.critical)
+            }
+
             Divider()
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
-                    if allVoices.isEmpty && activeBookVoices.isEmpty {
-                        ForEach(fallbackPresets, id: \.id) { preset in
-                            Button {
-                                onSelectVoice(preset.id)
-                            } label: {
-                                HStack {
-                                    Text(preset.name)
-                                        .font(SpeechRailDesignTokens.Typography.bodyMedium)
-                                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                                    Text("(\(preset.id))")
-                                        .font(SpeechRailDesignTokens.Typography.caption)
-                                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                                    Spacer()
-                                    if currentBinding?.voiceID == preset.id {
-                                        StatusPill(tone: .healthy, label: "当前绑定")
-                                    }
-                                }
-                                .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
-                                .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    } else if filteredVoices.isEmpty {
+                    if filteredVoices.isEmpty {
                         VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                             Text("当前筛选条件下没有匹配音色")
                                 .font(SpeechRailDesignTokens.Typography.bodyMedium)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                            Text("可切换至「全部音色」或设计新音色。")
+                            Text("可切换至「本书可用」、刷新声音或设计新声音。")
                                 .font(SpeechRailDesignTokens.Typography.caption)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                         }
@@ -1795,16 +1843,15 @@ private struct AudiobookVoicePickerPopover: View {
                 }
 
                 if let meta = VoiceCatalogStore.shared.metadata(for: b.voiceID),
-                   meta.scope == .bookExclusive
+                   meta.visibilityScope == .bookExclusive
                 {
                     HStack {
                         Text("📘 本书专属音色")
                             .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         Spacer()
-                        Button("⬆️ 晋升为全局通用音色") {
-                            _ = VoiceCatalogStore.shared.promoteToGlobalReusable(voiceID: b.voiceID)
-                            catalogRefreshTick += 1
+                        Button("设为通用声音") {
+                            saveCatalogChange { _ = try VoiceCatalogStore.shared.promoteToGlobalReusable(voiceID: b.voiceID) }
                         }
                         .speechRailButton(.quiet)
                     }
@@ -1832,6 +1879,14 @@ private struct AudiobookVoicePickerPopover: View {
         .task {
             await onRefreshVoices()
         }
+        .onReceive(NotificationCenter.default.publisher(for: VoiceCatalogStore.didChange, object: VoiceCatalogStore.shared)) { _ in
+            catalogRefreshTick += 1
+        }
+    }
+
+    private func saveCatalogChange(_ action: () throws -> Void) {
+        do { try action(); catalogRefreshTick += 1; catalogSaveError = nil }
+        catch { catalogSaveError = error.localizedDescription }
     }
 
     private var holdersByVoiceID: [String: [AudiobookCharacter]] {
@@ -1851,13 +1906,12 @@ private struct AudiobookVoicePickerPopover: View {
         let voiceArch = AudiobookCastRegistry.resolveVoiceArchetype(for: voice, metadata: meta)
         let isBoundToSelf = (currentBinding?.voiceID == voice.id)
         let otherHolders = holdersMap[voice.id] ?? []
-        let lockedByExclusiveLead = otherHolders.first(where: { $0.isNarrator || !$0.allowSharedMinorVoice })
+        let lockedByExclusiveLead = otherHolders.first(where: { $0.isNarrator || $0.effectiveVoicePolicy.sharingPolicy != .sharedMinor })
         let isHovered = hoveredVoiceID == voice.id
 
         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
             Button {
-                VoiceCatalogStore.shared.toggleFavorite(voiceID: voice.id)
-                catalogRefreshTick += 1
+                saveCatalogChange { _ = try VoiceCatalogStore.shared.toggleFavorite(voiceID: voice.id) }
             } label: {
                 Image(systemName: meta?.isFavorite == true ? "star.fill" : "star")
                     .font(SpeechRailDesignTokens.Typography.bodyMedium)
@@ -1884,7 +1938,7 @@ private struct AudiobookVoicePickerPopover: View {
                             .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                             .lineLimit(1)
                         StatusPill(tone: .neutral, label: voiceArch.shortBadgeTitle)
-                        if meta?.scope == .bookExclusive {
+                        if meta?.visibilityScope == .bookExclusive {
                             StatusPill(tone: .healthy, label: "本书专用")
                         }
                         if isBoundToSelf {

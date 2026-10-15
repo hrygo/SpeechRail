@@ -90,6 +90,7 @@ public actor AudiobookProjectStore {
     private var cachedAnnotationsByBook: [UUID: [AudiobookAnnotation]] = [:]
     private var startupRunningBookUpdatedAt: [UUID: Double] = [:]
     private var didApplyStartupRecovery = false
+    private var castingScoreCache = AudiobookCastingScoreCache()
 
     public static var defaultRootURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -135,6 +136,15 @@ public actor AudiobookProjectStore {
             }
             if existingVersion > 0 && existingVersion < 3 {
                 try Self.migrateRolePolicies(pointer, root: standardizedRoot)
+            }
+            if existingVersion > 0 && existingVersion < 4 {
+                try Self.backupDatabase(pointer, root: standardizedRoot, version: 3)
+                try Self.execSQL(pointer, "BEGIN IMMEDIATE;")
+                do {
+                    try Self.execSQL(pointer, AudiobookStoreSchema.registrationIntentsSQL)
+                    try Self.execSQL(pointer, AudiobookStoreSchema.castingRevisionsSQL)
+                    try Self.execSQL(pointer, "PRAGMA user_version = 4; COMMIT;")
+                } catch { try? Self.execSQL(pointer, "ROLLBACK;"); throw error }
             }
             try Self.execSQL(pointer, AudiobookStoreSchema.createTablesSQL)
             if existingVersion == 0 {
@@ -196,6 +206,8 @@ public actor AudiobookProjectStore {
             try execSQL(db, """
                 ALTER TABLE characters ADD COLUMN voice_policy_json TEXT;
                 ALTER TABLE characters ADD COLUMN manual_tier TEXT;
+                ALTER TABLE characters ADD COLUMN voice_traits_json TEXT;
+                ALTER TABLE characters ADD COLUMN required_voice_traits_json TEXT;
                 ALTER TABLE voice_bindings ADD COLUMN actual_voice_revision TEXT;
                 ALTER TABLE voice_bindings ADD COLUMN actual_model_revision TEXT;
                 UPDATE characters SET voice_policy_json = json_object(
@@ -384,7 +396,9 @@ public actor AudiobookProjectStore {
             """, [.text(durable.progress.bookID.uuidString), .text(json)])
     }
 
-    public func sourceIndex(for bookID: UUID) async throws -> AudiobookSourceIndex {
+    public func sourceIndex(for bookID: UUID) async throws -> AudiobookSourceIndex { try readSourceIndex(bookID: bookID) }
+
+    private func readSourceIndex(bookID: UUID) throws -> AudiobookSourceIndex {
         guard let book = try fetchBook(id: bookID) else {
             throw AudiobookStoreError.bookNotFound(bookID)
         }
@@ -562,13 +576,15 @@ public actor AudiobookProjectStore {
     }
 
     /// Read all local planning inputs without actor suspension; attach source and scene revisions.
-    public func prepareCastingPlan(bookID: UUID, snapshot: EffectiveCapabilitySnapshot, catalog: VoiceCatalogSnapshot) throws -> AudiobookCastingPlan {
+    public func prepareCastingPlan(bookID: UUID, snapshot: EffectiveCapabilitySnapshot, catalog: VoiceCatalogSnapshot, strategy: AudiobookCastingStrategy = .sceneAware) throws -> AudiobookCastingPlan {
         let characters = try fetchCharacters(bookID: bookID)
         let annotations = try fetchAnnotations(bookID: bookID, chapterID: nil)
         let bindings = try fetchVoiceBindings(bookID: bookID)
         var plan = AudiobookCastRegistry.makeCastingPlan(characters: characters, annotations: annotations,
             snapshot: snapshot, catalog: catalog, bookID: bookID, existingBindings: bindings,
-            requiredRoleIDs: try requiredCastingRoleIDs(bookID: bookID, characters: characters, annotations: annotations))
+            requiredRoleIDs: try requiredCastingRoleIDs(bookID: bookID, characters: characters, annotations: annotations),
+            source: try readSourceIndex(bookID: bookID), atoms: try fetchAtoms(bookID: bookID, chapterID: nil), strategy: strategy, cachedScores: castingScoreCache)
+        castingScoreCache = plan.cachedScores
         plan.sourceContextDigest = try castingSourceContext(bookID: bookID)
         plan.affectedFragmentIDs = Set(try fetchFragments(bookID: bookID, chapterID: nil).filter { plan.affectedRoleIDs.contains($0.roleID) }.map(\.id))
         if !plan.unresolvedRoleIDs.isEmpty { return plan }
@@ -592,19 +608,168 @@ public actor AudiobookProjectStore {
         guard Set(updates.map(\.roleID)).count == updates.count else { throw AudiobookCastError.invalidCastingPlan(reason: "duplicate_role") }
         var proposed = existing
         for binding in updates { proposed[binding.roleID] = binding }
-        let changed = Set(updates.map(\.roleID))
+        let changed = Set(updates.filter { existing[$0.roleID] != $0 }.map(\.roleID))
         let policies = Dictionary(uniqueKeysWithValues: characters.map { role in (role.id, AudiobookRoleVoicePolicy(
-            sharingPolicy: role.isNarrator || role.isMajor || !role.allowSharedMinorVoice ? .exclusive : .sharedMinor,
-            bindingOrigin: changed.contains(role.id) ? .manual : .legacyUnknown, isLocked: !changed.contains(role.id))) })
+            sharingPolicy: role.voicePolicy?.sharingPolicy ?? (role.isNarrator || !role.allowSharedMinorVoice ? .exclusive : .sharedMinor),
+            bindingOrigin: changed.contains(role.id) ? .manual : (role.voicePolicy?.bindingOrigin ?? .legacyUnknown), isLocked: true)) })
         var plan = AudiobookCastingPlan(bookID: bookID,
             localInputDigest: AudiobookCastingDigest.local(characters: characters, annotations: annotations, bindings: existing),
             snapshot: snapshot, catalog: catalog, expectedCastRevisionID: AudiobookCastRegistry.castRevisionID(bookID: bookID, characters: characters),
             proposedBindings: proposed, proposedPolicies: policies, unresolvedRoleIDs: [], affectedRoleIDs: changed,
             affectedFragmentIDs: Set(try fetchFragments(bookID: bookID, chapterID: nil).filter { changed.contains($0.roleID) }.map(\.id)),
             narratorVoiceCount: 0, exclusiveVoiceCount: 0, sharedVoiceCount: 0, eligibleVoiceCount: snapshot.voices.count, rawIssues: [])
+        plan.allowsLockedReplacement = true
         plan.requiresCompleteCast = false
         plan.sourceContextDigest = try castingSourceContext(bookID: bookID)
         return plan
+    }
+
+    public func prepareVoiceReplacement(bookID: UUID, bindings: [AudiobookVoiceBinding], snapshot: EffectiveCapabilitySnapshot, catalog: VoiceCatalogSnapshot) throws -> AudiobookCastingPlan {
+        var plan = try manualCastingPlan(bookID: bookID, bindings: bindings, snapshot: snapshot, catalog: catalog)
+        if !plan.affectedRoleIDs.isEmpty {
+            plan.rawIssues.append(.init(code: .bindingReplacementConsentRequired, roleIDs: Array(plan.affectedRoleIDs), isBlocking: false,
+                nextAction: "请确认更换的角色和受影响片段；已采用音频会保留。"))
+        }
+        return plan
+    }
+    private func castingStateDigest(characters: [AudiobookCharacter], bindings: [UUID: AudiobookVoiceBinding]) -> String {
+        AudiobookCastingDigest.hash([AudiobookCastingDigest.hash(Array(bindings.values)),
+            AudiobookCastingDigest.hash(characters.map { AudiobookCastingPolicySnapshot(roleID: $0.id, policy: $0.voicePolicy, allowSharedMinorVoice: $0.allowSharedMinorVoice) })])
+    }
+
+    private func appendCastingRevision(bookID: UUID, previousBindings: [UUID: AudiobookVoiceBinding],
+        previousCharacters: [AudiobookCharacter], updatedCharacters: [AudiobookCharacter], bindings: [UUID: AudiobookVoiceBinding],
+        affectedRoleIDs: Set<UUID>, undoingRevisionID: UUID? = nil) throws {
+        let revisionID = UUID()
+        let record = AudiobookCastingUndoRecord(id: revisionID, bookID: bookID, previousBindings: previousBindings,
+            previousPolicies: previousCharacters.map { .init(roleID: $0.id, policy: $0.voicePolicy, allowSharedMinorVoice: $0.allowSharedMinorVoice) },
+            affectedRoleIDs: affectedRoleIDs, afterDigest: castingStateDigest(characters: updatedCharacters, bindings: bindings))
+        try executePrepared("INSERT INTO casting_revisions (id, book_id, restores_revision_id, record_json, created_at) VALUES (?, ?, ?, ?, ?);",
+            [.text(revisionID.uuidString), .text(bookID.uuidString), .text(undoingRevisionID?.uuidString),
+             .text(String(decoding: try JSONEncoder().encode(record), as: UTF8.self)), .real(Date().timeIntervalSince1970)])
+        if let originalID = undoingRevisionID {
+            try executePrepared("UPDATE casting_revisions SET undone_by = ? WHERE id = ? AND undone_by IS NULL;", [.text(revisionID.uuidString), .text(originalID.uuidString)])
+            guard let pointer = handle.pointer, sqlite3_changes(pointer) == 1 else { throw AudiobookCastError.castRevisionMismatch }
+        }
+    }
+
+    /// A policy edit is an atomic casting revision even when the role is not bound yet.
+    func saveManualSharingPolicy(bookID: UUID, roleID: UUID, allowed: Bool) throws {
+        try Task.checkCancellation()
+        try inTransaction {
+            guard var book = try fetchBook(id: bookID) else { throw AudiobookStoreError.bookNotFound(bookID) }
+            let original = try fetchCharacters(bookID: bookID)
+            guard let index = original.firstIndex(where: { $0.id == roleID }) else { throw AudiobookCastError.characterNotFound(roleID) }
+            guard !original[index].isNarrator || !allowed else {
+                throw AudiobookCastError.invalidCastingPlan(reason: "narrator_must_remain_exclusive")
+            }
+            var updated = original
+            updated[index].voicePolicy = .init(sharingPolicy: allowed ? .sharedMinor : .exclusive, bindingOrigin: .manual, isLocked: true)
+            updated[index].allowSharedMinorVoice = allowed
+            guard updated != original else { return }
+            let bindings = try fetchVoiceBindings(bookID: bookID)
+            let annotations = try fetchAnnotations(bookID: bookID, chapterID: nil)
+            try AudiobookCastRegistry.validateBindingSet(characters: updated, bindings: bindings,
+                requiredRoleIDs: requiredCastingRoleIDs(bookID: bookID, characters: updated, annotations: annotations))
+            try upsertCharacterRow(updated[index])
+            try appendCastingRevision(bookID: bookID, previousBindings: bindings, previousCharacters: original,
+                updatedCharacters: updated, bindings: bindings, affectedRoleIDs: [roleID])
+            book.confirmedCastRevisionID = nil
+            book.confirmedAuditionVoiceSetDigest = nil
+            book.updatedAt = Date()
+            try upsertBookRow(book)
+            try Task.checkCancellation()
+        }
+        cachedCharactersByBook.removeValue(forKey: bookID)
+        startupRunningBookUpdatedAt.removeValue(forKey: bookID)
+    }
+
+    public func prepareCastingUndo(bookID: UUID, snapshot: EffectiveCapabilitySnapshot, catalog: VoiceCatalogSnapshot) throws -> AudiobookCastingPlan {
+        let record: AudiobookCastingUndoRecord? = try withPrepared("SELECT record_json FROM casting_revisions WHERE book_id = ? AND undone_by IS NULL AND restores_revision_id IS NULL ORDER BY sequence DESC LIMIT 1;", [.text(bookID.uuidString)]) { stmt in
+            guard sqlite3_step(stmt) == SQLITE_ROW, let json = columnText(stmt, 0) else { return nil }
+            return try JSONDecoder().decode(AudiobookCastingUndoRecord.self, from: Data(json.utf8))
+        }
+        guard let record else { throw AudiobookCastError.nothingToUndo }
+        let characters = try fetchCharacters(bookID: bookID), annotations = try fetchAnnotations(bookID: bookID, chapterID: nil)
+        let current = try fetchVoiceBindings(bookID: bookID)
+        guard castingStateDigest(characters: characters, bindings: current) == record.afterDigest else { throw AudiobookCastError.castRevisionMismatch }
+        var restored = current
+        for id in record.affectedRoleIDs { restored[id] = record.previousBindings[id] }
+        let previous = Dictionary(uniqueKeysWithValues: record.previousPolicies.map { ($0.roleID, $0) })
+        let policies = Dictionary(uniqueKeysWithValues: characters.map { role in
+            (role.id, previous[role.id]?.policy ?? .init(sharingPolicy: role.isNarrator || previous[role.id]?.allowSharedMinorVoice != true ? .exclusive : .sharedMinor,
+                bindingOrigin: .legacyUnknown, isLocked: true))
+        })
+        var plan = AudiobookCastingPlan(bookID: bookID, localInputDigest: AudiobookCastingDigest.local(characters: characters, annotations: annotations, bindings: current),
+            snapshot: snapshot, catalog: catalog, expectedCastRevisionID: AudiobookCastRegistry.castRevisionID(bookID: bookID, characters: characters),
+            proposedBindings: restored, proposedPolicies: policies, unresolvedRoleIDs: [], affectedRoleIDs: record.affectedRoleIDs,
+            affectedFragmentIDs: Set(try fetchFragments(bookID: bookID, chapterID: nil).filter { record.affectedRoleIDs.contains($0.roleID) }.map(\.id)),
+            narratorVoiceCount: 0, exclusiveVoiceCount: 0, sharedVoiceCount: 0, eligibleVoiceCount: snapshot.voices.count, rawIssues: [])
+        plan.requiresCompleteCast = false; plan.allowsLockedReplacement = true; plan.undoingRevisionID = record.id
+        plan.restoringRolePolicies = previous; plan.sourceContextDigest = try castingSourceContext(bookID: bookID)
+        return plan
+    }
+    private func refreshBindingDependencies(bookID: UUID, changedRoles: Set<UUID>) throws {
+        guard !changedRoles.isEmpty else { return }
+        let bindings = try fetchVoiceBindings(bookID: bookID), chapters = try fetchChapters(bookID: bookID)
+        let source = try readSourceIndex(bookID: bookID)
+        for fragment in try fetchFragments(bookID: bookID, chapterID: nil) where changedRoles.contains(fragment.roleID) {
+            guard let chapter = chapters.first(where: { $0.id == fragment.chapterID }) else { throw AudiobookStoreError.chapterNotFound(fragment.chapterID) }
+            let voiceDigest = bindings[fragment.roleID]?.bindingDigest ?? "unbound"
+            let dependency = AudiobookDigest.sha256Hex(Data(["frag_dep_v2", AudiobookDigest.sha256Hex(Data(try source.text(in: fragment.sourceRange).utf8)),
+                chapter.sourceID.uuidString, "\(fragment.sourceRange.lowerBound)-\(fragment.sourceRange.upperBound)", fragment.localAssignmentDigest, voiceDigest, fragment.policyDigest].joined(separator: "|").utf8))
+            try upsertFragmentRow(.init(id: fragment.id, bookID: bookID, chapterID: fragment.chapterID, ordinal: fragment.ordinal, roleID: fragment.roleID,
+                sourceRange: fragment.sourceRange, atomIDs: fragment.atomIDs, localAssignmentDigest: fragment.localAssignmentDigest,
+                voiceBindingDigest: voiceDigest, policyDigest: fragment.policyDigest, dependencyDigest: dependency))
+        }
+    }
+
+    public func saveVoiceRegistrationIntent(_ intent: AudiobookVoiceRegistrationIntent) throws {
+        let encoded = try JSONEncoder().encode(intent)
+        guard encoded.count <= 8192, intent.voiceID.utf8.count <= 128, !intent.voiceID.isEmpty,
+              intent.expectedVoiceSetDigest.utf8.count == 64,
+              intent.bookTitle?.unicodeScalars.count ?? 0 <= 160, intent.roleName?.unicodeScalars.count ?? 0 <= 160,
+              [.voiceDesign, .instantClone, .imported].contains(intent.creationSource),
+              intent.binding.map({ $0.roleID == intent.roleID && $0.voiceID == intent.voiceID }) ?? (intent.roleID == nil) else {
+            throw AudiobookCastError.invalidCastingPlan(reason: "invalid_registration_intent")
+        }
+        try inTransaction {
+            if let old = try fetchVoiceRegistrationIntents(bookID: intent.bookID, includeCompleted: true).first(where: { $0.id == intent.id }) {
+                guard old.contentDigest == intent.contentDigest else { throw VoiceCatalogError.revisionChanged }
+                return
+            }
+            try executePrepared("""
+                INSERT INTO voice_registration_intents (id, book_id, role_id, voice_id, target_metadata_digest,
+                    expected_cast_revision_id, expected_voice_set_digest, phase, intent_json, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """, [.text(intent.id.uuidString), .text(intent.bookID.uuidString), .text(intent.roleID?.uuidString), .text(intent.voiceID),
+                    .text(intent.targetMetadataDigest), .text(intent.expectedCastRevisionID.uuidString), .text(intent.expectedVoiceSetDigest),
+                    .text(intent.phase.rawValue), .text(String(decoding: encoded, as: UTF8.self)), .real(Date().timeIntervalSince1970)])
+        }
+    }
+    public func voiceRegistrationIntents(bookID: UUID, includeCompleted: Bool = false) throws -> [AudiobookVoiceRegistrationIntent] {
+        try fetchVoiceRegistrationIntents(bookID: bookID, includeCompleted: includeCompleted)
+    }
+    private func fetchVoiceRegistrationIntents(bookID: UUID, includeCompleted: Bool) throws -> [AudiobookVoiceRegistrationIntent] {
+        try withPrepared("SELECT intent_json, phase FROM voice_registration_intents WHERE book_id = ? ORDER BY id;", [.text(bookID.uuidString)]) { stmt in
+            var result: [AudiobookVoiceRegistrationIntent] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                guard let json = columnText(stmt, 0), let phase = columnText(stmt, 1).flatMap(AudiobookVoiceRegistrationIntent.Phase.init(rawValue:)) else {
+                    throw AudiobookStoreError.storageUnavailable("invalid_registration_intent")
+                }
+                var intent = try JSONDecoder().decode(AudiobookVoiceRegistrationIntent.self, from: Data(json.utf8)); intent.phase = phase
+                if includeCompleted || phase != .completed { result.append(intent) }
+            }
+            return result
+        }
+    }
+    public func advanceVoiceRegistration(id: UUID, from: AudiobookVoiceRegistrationIntent.Phase, to: AudiobookVoiceRegistrationIntent.Phase) throws {
+        try inTransaction { try advanceVoiceRegistrationRow(id: id, from: from, to: to) }
+    }
+    private func advanceVoiceRegistrationRow(id: UUID, from: AudiobookVoiceRegistrationIntent.Phase, to: AudiobookVoiceRegistrationIntent.Phase) throws {
+        try executePrepared("UPDATE voice_registration_intents SET phase = ?, updated_at = ? WHERE id = ? AND phase = ?;",
+            [.text(to.rawValue), .real(Date().timeIntervalSince1970), .text(id.uuidString), .text(from.rawValue)])
+        guard let pointer = handle.pointer, sqlite3_changes(pointer) == 1 else { throw VoiceCatalogError.revisionChanged }
     }
 
     private func castingSourceContext(bookID: UUID) throws -> String {
@@ -642,7 +807,15 @@ public actor AudiobookProjectStore {
     }
 
     /// All local checks, policy changes, bindings and confirmation invalidation share one SQLite transaction.
-    public func saveCastingPlan(bookID: UUID, plan: AudiobookCastingPlan) throws {
+    public func validateCastingPlanInput(_ plan: AudiobookCastingPlan) throws {
+        guard plan.localInputDigest == AudiobookCastingDigest.local(characters: try fetchCharacters(bookID: plan.bookID),
+            annotations: try fetchAnnotations(bookID: plan.bookID, chapterID: nil), bindings: try fetchVoiceBindings(bookID: plan.bookID)),
+              plan.sourceContextDigest == (try castingSourceContext(bookID: plan.bookID)) else {
+            throw AudiobookCastError.castRevisionMismatch
+        }
+    }
+
+    public func saveCastingPlan(bookID: UUID, plan: AudiobookCastingPlan, registrationIntentID: UUID? = nil) throws {
         try Task.checkCancellation()
         guard plan.bookID == bookID, plan.isApplicable else { throw AudiobookCastError.invalidCastingPlan(reason: "blocking_issues") }
         try inTransaction {
@@ -658,18 +831,24 @@ public actor AudiobookProjectStore {
             for index in updated.indices {
                 let role = updated[index]
                 guard let policy = plan.proposedPolicies[role.id] else { throw AudiobookCastError.invalidCastingPlan(reason: "missing_policy") }
-                if policy.isLocked, plan.proposedBindings[role.id] != existing[role.id] {
+                if role.voicePolicy?.isLocked == true, !plan.allowsLockedReplacement, plan.proposedBindings[role.id] != existing[role.id] {
                     throw AudiobookCastError.invalidCastingPlan(reason: "locked_binding_changed")
                 }
-                if role.isNarrator || role.isMajor && !role.allowSharedMinorVoice {
+                if role.isNarrator || role.voicePolicy?.sharingPolicy == .exclusive && !plan.allowsLockedReplacement {
                     guard policy.sharingPolicy != .sharedMinor else { throw AudiobookCastError.invalidCastingPlan(reason: "exclusive_policy_changed") }
                 }
                 if plan.proposedBindings[role.id] != nil, policy != role.voicePolicy {
                     updated[index].voicePolicy = policy
                 }
-                if plan.proposedBindings[role.id] != nil, !policy.isLocked {
+                if plan.proposedBindings[role.id] != nil {
                     updated[index].allowSharedMinorVoice = policy.sharingPolicy == .sharedMinor
                     updated[index].voicePolicy = policy
+                }
+            }
+            for index in updated.indices {
+                if let previous = plan.restoringRolePolicies[updated[index].id] {
+                    updated[index].voicePolicy = previous.policy
+                    updated[index].allowSharedMinorVoice = previous.allowSharedMinorVoice
                 }
             }
             try AudiobookCastRegistry.validateBindingSet(characters: updated, bindings: plan.proposedBindings,
@@ -679,6 +858,10 @@ public actor AudiobookProjectStore {
                 try AudiobookCastRegistry.validateRenderBinding(binding, snapshot: plan.snapshot)
                 guard let voice = plan.snapshot.voices.first(where: { $0.id == binding.voiceID }), plan.catalog.permits(voice, bookID: bookID) else {
                     throw AudiobookCastError.invalidCastingPlan(reason: "voice_scope_changed")
+                }
+                guard let role = updated.first(where: { $0.id == roleID }),
+                      AudiobookCastRegistry.matchesRequiredTraits(role: role, voice: voice, metadata: plan.catalog.state.metadataByVoiceID[voice.id]) else {
+                    throw AudiobookCastError.invalidCastingPlan(reason: "required_voice_traits_mismatch")
                 }
             }
             if plan.requiresCompleteCast {
@@ -696,6 +879,26 @@ public actor AudiobookProjectStore {
             for binding in plan.proposedBindings.values.sorted(by: { $0.roleID.uuidString < $1.roleID.uuidString }) where binding != existing[binding.roleID] {
                 try Task.checkCancellation()
                 try upsertVoiceBindingRow(bookID: bookID, binding: binding)
+            }
+            let changedBindings = Set(existing.keys).union(plan.proposedBindings.keys).filter { existing[$0] != plan.proposedBindings[$0] }
+            for id in changedBindings where plan.proposedBindings[id] == nil {
+                guard plan.undoingRevisionID != nil else { throw AudiobookCastError.invalidCastingPlan(reason: "binding_removal_requires_undo") }
+                try executePrepared("DELETE FROM voice_bindings WHERE book_id = ? AND role_id = ?;", [.text(bookID.uuidString), .text(id.uuidString)])
+            }
+            try refreshBindingDependencies(bookID: bookID, changedRoles: Set(changedBindings))
+            let changedPolicies = Set(updated.filter { role in original.first(where: { $0.id == role.id })?.voicePolicy != role.voicePolicy
+                || original.first(where: { $0.id == role.id })?.allowSharedMinorVoice != role.allowSharedMinorVoice }.map(\.id))
+            if !changedBindings.isEmpty || !changedPolicies.isEmpty {
+                try appendCastingRevision(bookID: bookID, previousBindings: existing, previousCharacters: original,
+                    updatedCharacters: updated, bindings: plan.proposedBindings,
+                    affectedRoleIDs: Set(changedBindings).union(changedPolicies), undoingRevisionID: plan.undoingRevisionID)
+            }
+            if let registrationIntentID {
+                guard let intent = try fetchVoiceRegistrationIntents(bookID: bookID, includeCompleted: true).first(where: { $0.id == registrationIntentID }),
+                      intent.phase == .catalogPersisted, let binding = intent.binding, plan.proposedBindings[binding.roleID] == binding else {
+                    throw AudiobookCastError.invalidCastingPlan(reason: "registration_intent_changed")
+                }
+                try advanceVoiceRegistrationRow(id: registrationIntentID, from: .catalogPersisted, to: .bindingCommitted)
             }
             try Task.checkCancellation()
             guard var book = try fetchBook(id: bookID) else { throw AudiobookStoreError.bookNotFound(bookID) }
@@ -1869,8 +2072,8 @@ public actor AudiobookProjectStore {
         let sql = """
         INSERT INTO characters (
             id, book_id, display_name, aliases_json, is_narrator, is_major,
-            allow_shared_minor_voice, evidences_json, first_lower_bound, first_upper_bound, chapter_ids_json, voice_policy_json, manual_tier
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            allow_shared_minor_voice, evidences_json, first_lower_bound, first_upper_bound, chapter_ids_json, voice_policy_json, manual_tier, voice_traits_json, required_voice_traits_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(book_id, id) DO UPDATE SET
             display_name = excluded.display_name,
             aliases_json = excluded.aliases_json,
@@ -1882,7 +2085,9 @@ public actor AudiobookProjectStore {
             first_upper_bound = excluded.first_upper_bound,
             chapter_ids_json = excluded.chapter_ids_json,
             voice_policy_json = excluded.voice_policy_json,
-            manual_tier = excluded.manual_tier;
+            manual_tier = excluded.manual_tier,
+            voice_traits_json = excluded.voice_traits_json,
+            required_voice_traits_json = excluded.required_voice_traits_json;
         """
         try executePrepared(sql, [
             .text(character.id.uuidString),
@@ -1898,6 +2103,8 @@ public actor AudiobookProjectStore {
             .text(chapterIDsJSON),
             .text(try character.voicePolicy.map { String(data: try JSONEncoder().encode($0), encoding: .utf8)! }),
             .text(character.manualTier?.rawValue),
+            .text(try character.voiceTraitsOverride.map { String(decoding: try JSONEncoder().encode($0), as: UTF8.self) }),
+            .text(try character.requiredVoiceTraits.map { String(decoding: try JSONEncoder().encode($0), as: UTF8.self) }),
         ])
     }
 
@@ -2303,7 +2510,7 @@ public actor AudiobookProjectStore {
     private func fetchCharacters(bookID: UUID) throws -> [AudiobookCharacter] {
         let sql = """
         SELECT id, book_id, display_name, aliases_json, is_narrator, is_major,
-               allow_shared_minor_voice, evidences_json, first_lower_bound, first_upper_bound, chapter_ids_json, voice_policy_json, manual_tier
+               allow_shared_minor_voice, evidences_json, first_lower_bound, first_upper_bound, chapter_ids_json, voice_policy_json, manual_tier, voice_traits_json, required_voice_traits_json
         FROM characters WHERE book_id = ? ORDER BY is_narrator DESC, is_major DESC, display_name ASC;
         """
         let decoder = JSONDecoder()
@@ -2337,7 +2544,9 @@ public actor AudiobookProjectStore {
                         firstAppearanceRange: firstRange,
                         chapterIDs: chapterIDs,
                         voicePolicy: try columnText(stmt, 11).map { try decoder.decode(AudiobookRoleVoicePolicy.self, from: Data($0.utf8)) },
-                        manualTier: columnText(stmt, 12).flatMap(AudiobookRoleTier.init(rawValue:))
+                        manualTier: columnText(stmt, 12).flatMap(AudiobookRoleTier.init(rawValue:)),
+                        voiceTraitsOverride: try columnText(stmt, 13).map { try decoder.decode(AudiobookVoiceTraits.self, from: Data($0.utf8)) },
+                        requiredVoiceTraits: try columnText(stmt, 14).map { try decoder.decode(AudiobookVoiceTraits.self, from: Data($0.utf8)) }
                     )
                 )
             }

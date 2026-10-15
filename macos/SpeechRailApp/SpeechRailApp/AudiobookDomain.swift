@@ -959,6 +959,8 @@ public struct AudiobookCharacter: Codable, Equatable, Hashable, Sendable, Identi
     public var chapterIDs: [UUID]
     public var voicePolicy: AudiobookRoleVoicePolicy?
     public var manualTier: AudiobookRoleTier?
+    public var voiceTraitsOverride: AudiobookVoiceTraits?
+    public var requiredVoiceTraits: AudiobookVoiceTraits?
 
     public var effectiveVoicePolicy: AudiobookRoleVoicePolicy {
         voicePolicy ?? .init(sharingPolicy: isNarrator || !allowSharedMinorVoice ? .exclusive : .automatic)
@@ -997,13 +999,14 @@ public struct AudiobookCharacter: Codable, Equatable, Hashable, Sendable, Identi
     /// 根据角色六维声学画像与原书线索，确定性推导角色的六大标准声部行当。
     public func inferredVoiceArchetype(peers: [AudiobookCharacter] = []) -> AudiobookVoiceArchetype {
         if isNarrator { return .narrator }
-        let persona = resolvedVoicePersona(peers: peers)
-        return VoiceTaxonomyClassifier.inferCharacterArchetype(
-            isNarrator: isNarrator,
-            displayName: displayName,
-            ageGenderAnchor: persona.ageGenderAnchor,
-            voiceQualities: "\(persona.pitchAndRegister) \(persona.timbreAndTexture) \(persona.pacingAndDiction)"
-        )
+        let profile = VoiceTaxonomyClassifier.resolveTraits(description: primaryVoiceTraitSummary ?? "", override: voiceTraitsOverride)
+        let mature = ["middleAged", "elder"].contains(profile.age.value)
+        if profile.age.value == "child" { return .neutralEnsemble }
+        switch profile.gender.value {
+        case "male": return mature ? .matureMale : .youngMale
+        case "female": return mature ? .matureFemale : .youngFemale
+        default: return .neutralEnsemble
+        }
     }
 
     public init(
@@ -1018,8 +1021,12 @@ public struct AudiobookCharacter: Codable, Equatable, Hashable, Sendable, Identi
         firstAppearanceRange: AudiobookSourceRange? = nil,
         chapterIDs: [UUID] = [],
         voicePolicy: AudiobookRoleVoicePolicy? = nil,
-        manualTier: AudiobookRoleTier? = nil
+        manualTier: AudiobookRoleTier? = nil,
+        voiceTraitsOverride: AudiobookVoiceTraits? = nil,
+        requiredVoiceTraits: AudiobookVoiceTraits? = nil
     ) {
+        self.voiceTraitsOverride = voiceTraitsOverride
+        self.requiredVoiceTraits = requiredVoiceTraits
         self.voicePolicy = voicePolicy
         self.manualTier = manualTier
         self.id = id
@@ -1590,6 +1597,8 @@ public enum AudiobookVoiceArchetype: String, Codable, CaseIterable, Equatable, H
 public struct AudiobookRoleDialogueStats: Codable, Equatable, Hashable, Sendable {
     public var roleID: UUID
     public var dialogueAtomCount: Int
+    public var dialogueScalarCount: Int = 0
+    public var statisticsRevision: String = "dialogue-stats-v2"
     public var speakingChapterIDs: Set<UUID>
     public var tier: AudiobookRoleTier
     public var archetype: AudiobookVoiceArchetype
@@ -1622,6 +1631,38 @@ public struct AudiobookRoleDialogueStats: Codable, Equatable, Hashable, Sendable
     }
 }
 
+public struct AudiobookVoiceAttribute: Codable, Equatable, Hashable, Sendable {
+    public enum Source: String, Codable, Sendable { case manual, service, textInference, unknown }
+    public var value: String
+    public var source: Source
+    public var confidence: Double
+    public init(value: String = "unknown", source: Source = .unknown, confidence: Double = 0) {
+        self.value = value
+        self.source = source
+        self.confidence = confidence.isFinite ? min(1, max(0, confidence)) : 0
+    }
+}
+
+/// Independent perceived attributes; unknown is a fact, not a random demographic default.
+public struct AudiobookVoiceTraits: Codable, Equatable, Hashable, Sendable {
+    public var gender = AudiobookVoiceAttribute()
+    public var age = AudiobookVoiceAttribute()
+    public var pitch = AudiobookVoiceAttribute()
+    public var texture = AudiobookVoiceAttribute()
+    public var locale = AudiobookVoiceAttribute()
+    public var pacing = AudiobookVoiceAttribute()
+    public init() {}
+}
+
+public struct AudiobookCastingScene: Equatable, Sendable {
+    public var chapterID: UUID
+    public var sourceRange: AudiobookSourceRange
+    public var isConfirmed: Bool
+    public init(chapterID: UUID, sourceRange: AudiobookSourceRange, isConfirmed: Bool = true) {
+        self.chapterID = chapterID; self.sourceRange = sourceRange; self.isConfirmed = isConfirmed
+    }
+}
+
 public enum VoiceCatalogLoadState: String, Codable, Sendable {
     case ready, missing, unreadable, unsupportedSchema
 }
@@ -1648,8 +1689,9 @@ public struct VoiceCatalogSnapshot: Equatable, Sendable {
             return voice.mode == "system" && voice.isSystem == true && voice.isDefault == true
         }
         guard metadata.voiceID == voice.id else { return false }
-        switch metadata.scope {
-        case .archived: return false
+        guard metadata.lifecycleState == .active else { return false }
+        switch metadata.visibilityScope {
+        case .unknown: return voice.mode == "system" && voice.isSystem == true && voice.isDefault == true && metadata.creationSource == nil && metadata.originBookID == nil
         case .bookExclusive: return metadata.originBookID == bookID
         case .globalReusable: return true
         }
@@ -1673,7 +1715,7 @@ public struct AudiobookCastingIssue: Equatable, Sendable, Identifiable {
     public enum Severity: String, Sendable { case error, warning, info }
     public enum Code: String, Sendable {
         case noEligibleVoices, catalogUnavailable, voiceNotProductionReady, unsupportedRenderParameter
-        case insufficientVoiceCapacity, lockedBindingConflict, castRevisionChanged, capabilityChanged
+        case bindingReplacementConsentRequired, insufficientVoiceCapacity, lockedBindingConflict, castRevisionChanged, capabilityChanged
         case unresolvedSpeaker, searchBudgetExceeded, voiceIdentityUnknown, voiceScopeUnavailable, sharedSceneRisk, sharedVoiceConsentRequired
     }
     public let code: Code
@@ -1710,6 +1752,13 @@ public struct AudiobookCastingPlan: Equatable, Sendable {
     public let exclusiveVoiceCount: Int
     public let sharedVoiceCount: Int
     public let eligibleVoiceCount: Int
+    public internal(set) var strategy: AudiobookCastingStrategy = .sceneAware
+    public internal(set) var evaluatedCandidates: Int = 0
+    public internal(set) var scoredCombinations: Int = 0
+    var cachedScores = AudiobookCastingScoreCache()
+    var undoingRevisionID: UUID?
+    var restoringRolePolicies: [UUID: AudiobookCastingPolicySnapshot] = [:]
+    var allowsLockedReplacement = false
     var requiresCompleteCast: Bool = true
     var sourceContextDigest: String?
     var rawIssues: [AudiobookCastingIssue]
@@ -1717,7 +1766,7 @@ public struct AudiobookCastingPlan: Equatable, Sendable {
     public var voiceCatalogRevision: String { catalog.revision }
     public var inputDigest: String {
         AudiobookCastingDigest.hash([
-            "casting-p0-v1", localInputDigest, sourceContextDigest ?? "<unattached>",
+            "casting-p1-v1:\(strategy.rawValue)", localInputDigest, sourceContextDigest ?? "<unattached>",
             AudiobookCastingDigest.hash(snapshot), catalog.revision,
             AudiobookCastingDigest.hash(proposedBindings.values.sorted { $0.roleID.uuidString < $1.roleID.uuidString }),
             proposedPolicies.map { "\($0.key)|\($0.value.sharingPolicy)|\($0.value.bindingOrigin)|\($0.value.isLocked)" }.sorted().joined(separator: ",")
@@ -1771,18 +1820,20 @@ public enum VoiceAssetScope: String, Codable, CaseIterable, Equatable, Hashable,
     /// 书籍剧组专用音色（在有声书工坊中为特定角色设计生成，默认仅在该书选角池置顶显示，不污染其他书籍与演播台）。
     case bookExclusive = "book_exclusive"
     /// 归档音色（完结项目或低频音色，默认从活跃选角器中隐藏，但保留 ID 供历史工程重合成使用）。
-    case archived = "archived"
+    case unknown = "unknown"
 
     public var title: String {
         switch self {
         case .globalReusable: return "全局通用"
         case .bookExclusive: return "剧组专用"
-        case .archived: return "已归档"
+        case .unknown: return "归属待确认"
         }
     }
 }
 
 /// 音色创建来源分类（用于 100+ 音色库分面检索）。
+public enum VoiceAssetLifecycleState: String, Codable, Equatable, Hashable, Sendable { case active, archived }
+
 public enum VoiceCreationSource: String, Codable, CaseIterable, Equatable, Hashable, Sendable {
     /// 系统内置标准音色（支持 0.5x~2.0x 连续变速）。
     case systemPreset = "system_preset"
@@ -1790,12 +1841,16 @@ public enum VoiceCreationSource: String, Codable, CaseIterable, Equatable, Hasha
     case voiceDesign = "voice_design"
     /// 通过参考音频克隆的音色（Instant / Zero-Shot Clone）。
     case instantClone = "instant_clone"
+    case imported = "imported"
+    case unknown = "unknown"
 
     public var title: String {
         switch self {
         case .systemPreset: return "系统预置"
         case .voiceDesign: return "AI 声学设计"
         case .instantClone: return "参考音频克隆"
+        case .imported: return "导入"
+        case .unknown: return "来源待确认"
         }
     }
 }
@@ -1803,26 +1858,31 @@ public enum VoiceCreationSource: String, Codable, CaseIterable, Equatable, Hasha
 /// 单个音色在客户端侧的增强分类与归属元数据（持久化于 Application Support/SpeechRail/voice_catalog_metadata.json）。
 public struct VoiceAssetMetadata: Codable, Equatable, Hashable, Sendable {
     public var voiceID: String
-    public var scope: VoiceAssetScope
+    public var visibilityScope: VoiceAssetScope
+    public var lifecycleState: VoiceAssetLifecycleState
     public var originBookID: UUID?
     public var originBookTitle: String?
     public var originRoleID: UUID?
     public var originRoleName: String?
     public var archetypeOverride: AudiobookVoiceArchetype?
+    public var voiceTraits: AudiobookVoiceTraits?
     public var creationSource: VoiceCreationSource?
     public var isFavorite: Bool
     public var customTags: [String]
     public var collectionIDs: Set<UUID>
+    public var createdAt: Date? = Date()
     public var updatedAt: Date
 
     public init(
         voiceID: String,
-        scope: VoiceAssetScope = .globalReusable,
+        visibilityScope: VoiceAssetScope = .unknown,
+        lifecycleState: VoiceAssetLifecycleState = .active,
         originBookID: UUID? = nil,
         originBookTitle: String? = nil,
         originRoleID: UUID? = nil,
         originRoleName: String? = nil,
         archetypeOverride: AudiobookVoiceArchetype? = nil,
+        voiceTraits: AudiobookVoiceTraits? = nil,
         creationSource: VoiceCreationSource? = nil,
         isFavorite: Bool = false,
         customTags: [String] = [],
@@ -1830,12 +1890,14 @@ public struct VoiceAssetMetadata: Codable, Equatable, Hashable, Sendable {
         updatedAt: Date = Date()
     ) {
         self.voiceID = voiceID
-        self.scope = scope
+        self.visibilityScope = visibilityScope
+        self.lifecycleState = lifecycleState
         self.originBookID = originBookID
         self.originBookTitle = originBookTitle
         self.originRoleID = originRoleID
         self.originRoleName = originRoleName
         self.archetypeOverride = archetypeOverride
+        self.voiceTraits = voiceTraits
         self.creationSource = creationSource
         self.isFavorite = isFavorite
         self.customTags = customTags
@@ -1870,120 +1932,82 @@ public struct VoiceCollection: Codable, Equatable, Hashable, Identifiable, Senda
     }
 }
 
-/// 100+ 音色自动声学分面推导器（确保所有历史存量与新增音色 100% 具备六大声部行当与来源分面）。
+/// 从明确元数据和描述提取独立属性；没有依据的属性保留 unknown。
 public enum VoiceTaxonomyClassifier {
-    /// 结合音色原始声学字段与本地扩展元数据，确定性推导其六大声部行当。
-    public static func resolveArchetype(
-        voiceID: String = "",
-        gender: String? = nil,
-        age: String? = nil,
-        traits: [String] = [],
-        description: String? = nil,
-        label: String,
-        metadata: VoiceAssetMetadata? = nil
-    ) -> AudiobookVoiceArchetype {
-        if let override = metadata?.archetypeOverride {
-            return override
+    public static func resolveTraits(for voice: SafeVoiceEntry, metadata: VoiceAssetMetadata? = nil) -> AudiobookVoiceTraits {
+        var explicit = metadata?.voiceTraits ?? .init()
+        func service(_ value: String) -> AudiobookVoiceAttribute { .init(value: value, source: .service, confidence: 1) }
+        if explicit.pitch.source == .unknown, ["low", "middle", "high"].contains(voice.descriptors.pitchBand) {
+            explicit.pitch = service(voice.descriptors.pitchBand)
         }
-
-        let vidLower = voiceID.lowercased()
-        let combined = (
-            [vidLower, label, gender ?? "", age ?? "", description ?? ""] + traits
-        ).joined(separator: " ").lowercased()
-
-        // 1. 已知系统预置音色与六类群像专属音色 ID 精确映射
-        if vidLower.hasPrefix("ab_arch_") {
-            for arch in AudiobookVoiceArchetype.allCases where vidLower.hasSuffix("_\(arch.shortCode)") {
-                return arch
-            }
+        if explicit.texture.source == .unknown, !["", "unknown"].contains(voice.descriptors.timbreFamily) {
+            explicit.texture = service(voice.descriptors.timbreFamily)
         }
-        if vidLower == "v-narrator" {
-            return .narrator
+        if explicit.pacing.source == .unknown, !["", "unknown"].contains(voice.descriptors.baselinePace) {
+            explicit.pacing = service(voice.descriptors.baselinePace)
         }
-        if vidLower == "uncle_fu" {
-            return .matureMale
+        if explicit.locale.source == .unknown, let locale = voice.descriptors.locales.first(where: { !["", "unknown"].contains($0) }) {
+            explicit.locale = service(locale.lowercased().split(whereSeparator: { $0 == "-" || $0 == "_" }).first.map(String.init) ?? locale)
         }
-        if vidLower == "dylan" || vidLower == "eric" || vidLower == "ryan" || vidLower == "aiden" {
-            return .youngMale
-        }
-        if vidLower == "vivian" || vidLower == "ono_anna" || vidLower == "sohee" {
-            return .youngFemale
-        }
-        if vidLower == "serena" {
-            return combined.contains("少女") || combined.contains("young") ? .youngFemale : .matureFemale
-        }
-
-        // 2. 若明确标记为旁白/叙事且不属于特定非旁白角色专用音色
-        let isNarratorKeyword = combined.contains("旁白")
-            || combined.contains("叙事")
-            || combined.contains("播讲")
-            || combined.contains("narrator")
-            || combined.contains("storytelling")
-        if isNarratorKeyword && metadata?.originRoleID == nil {
-            return .narrator
-        }
-
-        // 3. 孩童 / 中性群像优先判定
-        let isChildOrNeutral = combined.contains("孩")
-            || combined.contains("童")
-            || combined.contains("child")
-            || combined.contains("kid")
-            || combined.contains("neutral")
-            || combined.contains("中性")
-        if isChildOrNeutral {
-            return .neutralEnsemble
-        }
-
-        // 4. 性别与年龄段联合判定
-        let isFemale = combined.contains("female")
-            || combined.contains("woman")
-            || combined.contains("girl")
-            || combined.contains("女")
-            || combined.contains("姐")
-            || combined.contains("姨")
-            || combined.contains("奶")
-            || combined.contains("婆")
-            || combined.contains("妇")
-            || combined.contains("娘")
-        let isMale = combined.contains("male")
-            || combined.contains("man")
-            || combined.contains("boy")
-            || combined.contains("男")
-            || combined.contains("叔")
-            || combined.contains("爷")
-            || combined.contains("兄")
-            || combined.contains("伯")
-            || combined.contains("掌柜")
-            || combined.contains("汉")
-        let isMatureOrElder = combined.contains("elder")
-            || combined.contains("old")
-            || combined.contains("middle")
-            || combined.contains("mature")
-            || combined.contains("senior")
-            || combined.contains("老")
-            || combined.contains("中年")
-            || combined.contains("成熟")
-            || combined.contains("沉稳")
-            || combined.contains("沧桑")
-            || combined.contains("浑厚")
-            || combined.contains("醇厚")
-            || combined.contains("沙哑")
-            || combined.contains("叔")
-            || combined.contains("爷")
-            || combined.contains("婶")
-            || combined.contains("婆")
-            || combined.contains("掌柜")
-
-        if isFemale && !isMale {
-            return isMatureOrElder ? .matureFemale : .youngFemale
-        }
-        if isMale && !isFemale {
-            return isMatureOrElder ? .matureMale : .youngMale
-        }
-        return .neutralEnsemble
+        return resolveTraits(description: ([voice.name] + voice.descriptors.styleTags).joined(separator: " "), override: explicit)
     }
 
-    /// 推导音色创建来源分面。
+    /// 结合音色原始声学字段与本地扩展元数据，确定性推导其六大声部行当。
+    public static func resolveTraits(description: String, override manual: AudiobookVoiceTraits? = nil) -> AudiobookVoiceTraits {
+        let text = description.lowercased()
+        let englishWords = Set(text.split { !$0.isLetter }.map(String.init))
+        func any(_ words: [String]) -> Bool {
+            words.contains { word in
+                if word.unicodeScalars.allSatisfy({ $0.isASCII }) {
+                    return word.contains(" ") ? text.contains(word) : englishWords.contains(word)
+                }
+                return text.contains(word)
+            }
+        }
+        func attribute(_ value: String?) -> AudiobookVoiceAttribute {
+            value.map { .init(value: $0, source: .textInference, confidence: 0.7) } ?? .init()
+        }
+        var result = AudiobookVoiceTraits()
+        let female = any(["female", "woman", "girl", "女", "奶奶", "婆婆"])
+        let male = any(["male", "man", "boy", "男", "大叔", "爷爷"])
+        result.gender = attribute(any(["neutral", "中性"]) ? "neutral" : (female != male ? (female ? "female" : "male") : nil))
+        result.age = attribute(any(["child", "kid", "童", "孩"]) ? "child" :
+            (any(["elder", "elderly", "senior", "老年", "奶奶", "爷爷", "沧桑"]) ? "elder" :
+            (any(["middle", "mature", "中年", "成熟", "大叔"]) ? "middleAged" :
+            (any(["young", "青年", "少年", "少女"]) ? "young" : nil))))
+        result.pitch = attribute(any(["low", "低音", "低沉"]) ? "low" : (any(["high", "高音"]) ? "high" : (any(["middle pitch", "中音"]) ? "middle" : nil)))
+        let textures = ["柔和", "醇厚", "沙哑", "清澈", "清脆", "warm", "hoarse", "bright"].filter { any([$0]) }
+        result.texture = attribute(textures.isEmpty ? nil : textures.sorted().joined(separator: ","))
+        result.locale = attribute(any(["中文", "普通话", "mandarin", "zh"]) ? "zh" : (any(["english", "英语", "en"]) ? "en" : nil))
+        result.pacing = attribute(any(["清晰", "clear"]) ? "clear" : (any(["舒缓", "slow"]) ? "slow" : (any(["轻快", "fast"]) ? "fast" : nil)))
+        if let manual {
+            if manual.gender.source == .manual || manual.gender.source == .service { result.gender = manual.gender }
+            if manual.age.source == .manual || manual.age.source == .service { result.age = manual.age }
+            if manual.pitch.source == .manual || manual.pitch.source == .service { result.pitch = manual.pitch }
+            if manual.texture.source == .manual || manual.texture.source == .service { result.texture = manual.texture }
+            if manual.locale.source == .manual || manual.locale.source == .service { result.locale = manual.locale }
+            if manual.pacing.source == .manual || manual.pacing.source == .service { result.pacing = manual.pacing }
+        }
+        return result
+    }
+
+    public static func resolveArchetype(
+        voiceID: String = "", gender: String? = nil, age: String? = nil, traits: [String] = [],
+        description: String? = nil, label: String, metadata: VoiceAssetMetadata? = nil
+    ) -> AudiobookVoiceArchetype {
+        if let override = metadata?.archetypeOverride { return override }
+        let text = ([gender ?? "", age ?? "", description ?? "", label] + traits).joined(separator: " ")
+        let profile = resolveTraits(description: text, override: metadata?.voiceTraits)
+        if text.contains("旁白") || text.contains("叙事") || text.lowercased().contains("narrator") { return .narrator }
+        if profile.age.value == "child" { return .neutralEnsemble }
+        let mature = ["middleAged", "elder"].contains(profile.age.value)
+        switch profile.gender.value {
+        case "male": return mature ? .matureMale : .youngMale
+        case "female": return mature ? .matureFemale : .youngFemale
+        default: return .neutralEnsemble
+        }
+    }
+
     public static func resolveCreationSource(
         mode: String,
         description: String?,
@@ -1996,11 +2020,7 @@ public enum VoiceTaxonomyClassifier {
         if lowerMode == "system" || lowerMode == "preset" {
             return .systemPreset
         }
-        let desc = (description ?? "").lowercased()
-        if desc.contains("voicedesign") || desc.contains("声学画像") || desc.contains("ai设计") || desc.contains("角色「") || metadata?.originRoleID != nil {
-            return .voiceDesign
-        }
-        return .instantClone
+        return .unknown
     }
 
     /// 根据角色人设推导角色的声部行当。
@@ -2025,287 +2045,352 @@ public enum VoiceTaxonomyClassifier {
 }
 
 /// 持久化管理 100+ 音色的作用域（全局通用 / 书籍专用 / 归档）、星标与剧团合集。
+public enum VoiceCatalogError: LocalizedError, Equatable, Sendable {
+    case unavailable, unknownVoice, scopeConfirmationRequired, revisionChanged, ownershipConflict
+    public var errorDescription: String? {
+        switch self {
+        case .unavailable: return "声音目录暂时无法保存，请检查目录或恢复副本后重试。"
+        case .unknownVoice: return "找不到此声音的归属记录。"
+        case .scopeConfirmationRequired: return "请先确认此声音的可用范围，再恢复使用。"
+        case .revisionChanged: return "声音目录已变化，请刷新后重试。"
+        case .ownershipConflict: return "此声音已有其他归属，原记录已保留，请重新确认。"
+        }
+    }
+}
+
 public final class VoiceCatalogStore: @unchecked Sendable {
     public static let shared = VoiceCatalogStore(storageURL: defaultStorageURL())
-
+    public static let didChange = Notification.Name("SpeechRail.voiceCatalog.didChange")
     public struct PersistedState: Codable, Equatable, Sendable {
         public var metadataByVoiceID: [String: VoiceAssetMetadata]
         public var collections: [VoiceCollection]
         public var preferredCollectionIDByBookID: [UUID: UUID]
-
-        public init(
-            metadataByVoiceID: [String: VoiceAssetMetadata] = [:],
-            collections: [VoiceCollection] = [],
-            preferredCollectionIDByBookID: [UUID: UUID] = [:]
-        ) {
-            self.metadataByVoiceID = metadataByVoiceID
-            self.collections = collections
-            self.preferredCollectionIDByBookID = preferredCollectionIDByBookID
+        public init(metadataByVoiceID: [String: VoiceAssetMetadata] = [:], collections: [VoiceCollection] = [], preferredCollectionIDByBookID: [UUID: UUID] = [:]) {
+            self.metadataByVoiceID = metadataByVoiceID; self.collections = collections; self.preferredCollectionIDByBookID = preferredCollectionIDByBookID
         }
     }
-
     private let storageURL: URL?
+    private let writeAtomically: @Sendable (Data, URL) throws -> Void
     private let lock = NSLock()
-    private var state: PersistedState
+    private var state = PersistedState()
     private var loadState: VoiceCatalogLoadState = .ready
-
+    private var revision = 0
+    private var originalDocument: [String: Any] = [:]
+    private var needsMigration = false
     public static func defaultStorageURL() -> URL? {
-        guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-            return nil
-        }
-        return appSupport
-            .appendingPathComponent("SpeechRail", isDirectory: true)
-            .appendingPathComponent("voice_catalog_metadata.json")
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("SpeechRail", isDirectory: true).appendingPathComponent("voice_catalog_metadata.json")
     }
-
-    public init(storageURL: URL? = nil) {
-        self.storageURL = storageURL
-        self.state = PersistedState()
-        reloadLocked()
+    public convenience init(storageURL: URL? = nil) {
+        self.init(storageURL: storageURL, writeAtomically: { try $0.write(to: $1, options: .atomic) })
     }
-
+    init(storageURL: URL?, writeAtomically: @escaping @Sendable (Data, URL) throws -> Void) {
+        self.storageURL = storageURL; self.writeAtomically = writeAtomically; reloadLocked()
+    }
     private func reloadLocked() {
         guard let storageURL else { return }
         do {
             let data = try Data(contentsOf: storageURL)
-            if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any], object["schema_version"] != nil {
-                loadState = .unsupportedSchema
-                return
+            guard let document = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw VoiceCatalogError.unavailable }
+            let version = (document["schemaVersion"] ?? document["schema_version"]) as? Int
+            if let version, version != 2 { loadState = .unsupportedSchema; return }
+            var content = version == nil ? document : (document["state"] as? [String: Any] ?? [:])
+            if version == nil {
+                guard var metadata = content["metadataByVoiceID"] as? [String: [String: Any]] else { throw VoiceCatalogError.unavailable }
+                for (id, var record) in metadata {
+                    let oldScope = record.removeValue(forKey: "scope") as? String
+                    if oldScope == "archived" {
+                        record["visibilityScope"] = "unknown"; record["lifecycleState"] = "archived"
+                    } else {
+                        record["visibilityScope"] = oldScope ?? record["visibilityScope"] ?? "unknown"
+                        record["lifecycleState"] = record["lifecycleState"] ?? "active"
+                    }
+                    metadata[id] = record
+                }
+                content["metadataByVoiceID"] = metadata
             }
-            let decoded = try JSONDecoder().decode(PersistedState.self, from: data)
-            guard decoded.metadataByVoiceID.allSatisfy({ $0.key == $0.value.voiceID }) else {
-                loadState = .unreadable
-                state = PersistedState()
-                return
-            }
-            state = decoded
-            loadState = .ready
+            let decoded = try JSONDecoder().decode(PersistedState.self, from: JSONSerialization.data(withJSONObject: content))
+            guard decoded.metadataByVoiceID.allSatisfy({ $0.key == $0.value.voiceID }) else { throw VoiceCatalogError.unavailable }
+            state = decoded; revision = document["revision"] as? Int ?? 0
+            originalDocument = document; needsMigration = version == nil; loadState = .ready
         } catch {
-            let nsError = error as NSError
-            loadState = nsError.domain == NSCocoaErrorDomain && nsError.code == NSFileReadNoSuchFileError ? .missing : .unreadable
-            state = PersistedState()
+            let error = error as NSError
+            loadState = error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError ? .missing : .unreadable
         }
     }
+    public func snapshot() -> VoiceCatalogSnapshot { lock.withLock { reloadLocked(); return .init(state: state, loadState: loadState) } }
+    public var metadataByVoiceID: [String: VoiceAssetMetadata] { snapshot().state.metadataByVoiceID }
+    public var collections: [VoiceCollection] { snapshot().state.collections }
+    public func metadata(for voiceID: String) -> VoiceAssetMetadata? { snapshot().state.metadataByVoiceID[voiceID] }
+    public func preferredCollectionID(for bookID: UUID) -> UUID? { snapshot().state.preferredCollectionIDByBookID[bookID] }
 
-    public func snapshot() -> VoiceCatalogSnapshot {
-        lock.withLock {
+    /// Publish only after atomic persistence. One process serializes writes; no cross-store transaction is implied.
+    private func mutate<T>(_ body: (inout PersistedState) throws -> T) throws -> T {
+        lock.lock()
+        do {
             reloadLocked()
-            return VoiceCatalogSnapshot(state: state, loadState: loadState)
+            guard loadState == .ready || loadState == .missing else { throw VoiceCatalogError.unavailable }
+            var proposed = state
+            let result = try body(&proposed)
+            guard proposed.metadataByVoiceID.allSatisfy({ $0.key == $0.value.voiceID }) else { throw VoiceCatalogError.unavailable }
+            let changed = proposed != state || needsMigration
+            if changed {
+                if let url = storageURL {
+                    let encoded = try JSONEncoder().encode(proposed)
+                    var content = try JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+                    let oldContent = (originalDocument["state"] as? [String: Any]) ?? originalDocument
+                    // Preserve unknown top-level and record fields while allowing known optional fields to be cleared.
+                    let known = Set(["voiceID", "scope", "visibilityScope", "lifecycleState", "originBookID", "originBookTitle", "originRoleID", "originRoleName", "archetypeOverride", "voiceTraits", "creationSource", "isFavorite", "customTags", "collectionIDs", "createdAt", "updatedAt"])
+                    let oldMeta = oldContent["metadataByVoiceID"] as? [String: [String: Any]] ?? [:]
+                    var newMeta = content["metadataByVoiceID"] as? [String: [String: Any]] ?? [:]
+                    func retainingNestedFields(_ new: Any, previous: Any?) -> Any {
+                        guard let proposed = new as? [String: Any], var saved = previous as? [String: Any] else { return new }
+                        for (key, value) in proposed { saved[key] = retainingNestedFields(value, previous: saved[key]) }
+                        return saved
+                    }
+                    for (id, record) in newMeta {
+                        var preserved = oldMeta[id]?.filter { !known.contains($0.key) } ?? [:]
+                        preserved.merge(record) { _, new in new }
+                        if let traits = record["voiceTraits"] { preserved["voiceTraits"] = retainingNestedFields(traits, previous: oldMeta[id]?["voiceTraits"]) }
+                        newMeta[id] = preserved
+                    }
+                    for (key, value) in oldContent where !["metadataByVoiceID", "collections", "preferredCollectionIDByBookID"].contains(key) { content[key] = value }
+                    let oldCollections = oldContent["collections"] as? [[String: Any]] ?? []
+                    var newCollections = content["collections"] as? [[String: Any]] ?? []
+                    let collectionKeys = Set(["id", "name", "iconSystemName", "description", "voiceIDs", "createdAt"])
+                    for index in newCollections.indices {
+                        let id = newCollections[index]["id"] as? String
+                        var preserved = oldCollections.first { ($0["id"] as? String) == id }?.filter { !collectionKeys.contains($0.key) } ?? [:]
+                        preserved.merge(newCollections[index]) { _, new in new }; newCollections[index] = preserved
+                    }
+                    content["collections"] = newCollections
+                    content["metadataByVoiceID"] = newMeta
+                    var envelope = originalDocument.filter { !["schema_version", "metadataByVoiceID", "collections", "preferredCollectionIDByBookID"].contains($0.key) }
+                    envelope["schemaVersion"] = 2; envelope["revision"] = revision + 1; envelope["state"] = content
+                    let data = try JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys])
+                    try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    if needsMigration, FileManager.default.fileExists(atPath: url.path) {
+                        let backup = url.deletingLastPathComponent().appendingPathComponent(url.lastPathComponent + ".legacy." + UUID().uuidString + ".backup")
+                        try FileManager.default.copyItem(at: url, to: backup)
+                    }
+                    try writeAtomically(data, url)
+                    originalDocument = envelope
+                }
+                state = proposed; revision += 1; needsMigration = false; loadState = .ready
+            }
+            lock.unlock()
+            if changed { NotificationCenter.default.post(name: Self.didChange, object: self) }
+            return result
+        } catch { lock.unlock(); throw error }
+    }
+    public func setPreferredCollectionID(_ collectionID: UUID?, for bookID: UUID) throws {
+        try mutate { state in
+            if let collectionID, !state.collections.contains(where: { $0.id == collectionID }) { throw VoiceCatalogError.unknownVoice }
+            state.preferredCollectionIDByBookID[bookID] = collectionID
         }
     }
-
-    public var metadataByVoiceID: [String: VoiceAssetMetadata] {
-        lock.lock()
-        defer { lock.unlock() }
-        return state.metadataByVoiceID
-    }
-
-    public var collections: [VoiceCollection] {
-        lock.lock()
-        defer { lock.unlock() }
-        return state.collections
-    }
-
-    public func metadata(for voiceID: String) -> VoiceAssetMetadata? {
-        lock.lock()
-        defer { lock.unlock() }
-        return state.metadataByVoiceID[voiceID]
-    }
-
-    public func preferredCollectionID(for bookID: UUID) -> UUID? {
-        lock.lock()
-        defer { lock.unlock() }
-        return state.preferredCollectionIDByBookID[bookID]
-    }
-
-    public func setPreferredCollectionID(_ collectionID: UUID?, for bookID: UUID) {
-        lock.lock()
-        defer { lock.unlock() }
-        state.preferredCollectionIDByBookID[bookID] = collectionID
-        persistLocked()
-    }
-
-    /// 在有声书中为特定角色设计新音色后，自动注册为该书专用音色（.bookExclusive）。
     @discardableResult
-    public func registerBookExclusiveVoice(
-        voiceID: String,
-        bookID: UUID,
-        bookTitle: String?,
-        roleID: UUID,
-        roleName: String?,
-        archetype: AudiobookVoiceArchetype
-    ) -> VoiceAssetMetadata {
-        lock.lock()
-        defer { lock.unlock() }
-        var meta = state.metadataByVoiceID[voiceID] ?? VoiceAssetMetadata(voiceID: voiceID)
-        meta.scope = .bookExclusive
-        meta.originBookID = bookID
-        meta.originBookTitle = bookTitle
-        meta.originRoleID = roleID
-        meta.originRoleName = roleName
-        meta.archetypeOverride = archetype
-        meta.creationSource = .voiceDesign
-        meta.updatedAt = Date()
-        state.metadataByVoiceID[voiceID] = meta
-        persistLocked()
-        return meta
+    public func registerBookExclusiveVoice(voiceID: String, bookID: UUID, bookTitle: String?, roleID: UUID?, roleName: String?, archetype: AudiobookVoiceArchetype?, creationSource: VoiceCreationSource = .voiceDesign) throws -> VoiceAssetMetadata {
+        try mutate { state in
+            if let old = state.metadataByVoiceID[voiceID] {
+                guard old.originBookID == bookID, old.originRoleID == roleID, old.creationSource == creationSource else { throw VoiceCatalogError.ownershipConflict }
+                return old // Recovery must preserve later promotion, archival, favorites and collections.
+            }
+            let meta = VoiceAssetMetadata(voiceID: voiceID, visibilityScope: .bookExclusive, originBookID: bookID,
+                originBookTitle: bookTitle, originRoleID: roleID, originRoleName: roleName, archetypeOverride: archetype, creationSource: creationSource)
+            state.metadataByVoiceID[voiceID] = meta; return meta
+        }
     }
-
-    /// 在有声书分析后为六大声部行当自动创建的群像音色，注册为本书专用并携带原书与声部标记。
     @discardableResult
-    public func registerArchetypeEnsembleVoice(
-        voiceID: String,
-        bookID: UUID,
-        bookTitle: String?,
-        archetype: AudiobookVoiceArchetype
-    ) -> VoiceAssetMetadata {
-        lock.lock()
-        defer { lock.unlock() }
-        var meta = state.metadataByVoiceID[voiceID] ?? VoiceAssetMetadata(voiceID: voiceID)
-        meta.scope = .bookExclusive
-        meta.originBookID = bookID
-        meta.originBookTitle = bookTitle
-        meta.originRoleID = nil
-        meta.originRoleName = archetype.shortBadgeTitle
-        meta.archetypeOverride = archetype
-        meta.creationSource = .voiceDesign
-        meta.updatedAt = Date()
-        state.metadataByVoiceID[voiceID] = meta
-        persistLocked()
-        return meta
+    public func registerArchetypeEnsembleVoice(voiceID: String, bookID: UUID, bookTitle: String?, archetype: AudiobookVoiceArchetype) throws -> VoiceAssetMetadata {
+        try registerBookExclusiveVoice(voiceID: voiceID, bookID: bookID, bookTitle: bookTitle, roleID: nil, roleName: nil, archetype: archetype, creationSource: .voiceDesign)
     }
-
-    /// 将单书内表现优异的专用音色一键晋升为全局通用音色（.globalReusable），同时保留原书溯源标签。
     @discardableResult
-    public func promoteToGlobalReusable(voiceID: String) -> VoiceAssetMetadata {
-        lock.lock()
-        defer { lock.unlock() }
-        var meta = state.metadataByVoiceID[voiceID] ?? VoiceAssetMetadata(voiceID: voiceID)
-        meta.scope = .globalReusable
-        meta.updatedAt = Date()
-        state.metadataByVoiceID[voiceID] = meta
-        persistLocked()
-        return meta
-    }
-
-    /// 批量归档指定音色（从活跃选角池隐藏，但不破坏历史工程重合成）。
-    public func archiveVoices(voiceIDs: Set<String>) {
-        lock.lock()
-        defer { lock.unlock() }
-        let now = Date()
-        for id in voiceIDs {
-            var meta = state.metadataByVoiceID[id] ?? VoiceAssetMetadata(voiceID: id)
-            meta.scope = .archived
-            meta.updatedAt = now
-            state.metadataByVoiceID[id] = meta
+    public func registerGlobalVoice(voiceID: String, creationSource: VoiceCreationSource) throws -> VoiceAssetMetadata {
+        try mutate { state in
+            var meta = state.metadataByVoiceID[voiceID] ?? .init(voiceID: voiceID)
+            guard meta.originBookID == nil, meta.visibilityScope != .bookExclusive,
+                  meta.creationSource == nil || meta.creationSource == .unknown || meta.creationSource == creationSource else {
+                throw VoiceCatalogError.ownershipConflict
+            }
+            if meta.visibilityScope != .globalReusable || meta.creationSource != creationSource {
+                meta.visibilityScope = .globalReusable; meta.creationSource = creationSource; meta.updatedAt = Date()
+                state.metadataByVoiceID[voiceID] = meta
+            }
+            return meta
         }
-        persistLocked()
     }
-
-    /// 将已归档音色恢复为活跃音色。
-    public func unarchiveVoices(voiceIDs: Set<String>) {
-        lock.lock()
-        defer { lock.unlock() }
-        let now = Date()
-        for id in voiceIDs {
-            var meta = state.metadataByVoiceID[id] ?? VoiceAssetMetadata(voiceID: id)
-            meta.scope = meta.originBookID != nil ? .bookExclusive : .globalReusable
-            meta.updatedAt = now
-            state.metadataByVoiceID[id] = meta
-        }
-        persistLocked()
-    }
-
-    /// 按整本书籍一键归档所有未晋升的剧组专用音色。
-    public func archiveBookExclusiveVoices(bookID: UUID) {
-        lock.lock()
-        defer { lock.unlock() }
-        let now = Date()
-        for (id, var meta) in state.metadataByVoiceID where meta.originBookID == bookID && meta.scope == .bookExclusive {
-            meta.scope = .archived
-            meta.updatedAt = now
-            state.metadataByVoiceID[id] = meta
-        }
-        persistLocked()
-    }
-
-    /// 切换星标收藏状态。
     @discardableResult
-    public func toggleFavorite(voiceID: String) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        var meta = state.metadataByVoiceID[voiceID] ?? VoiceAssetMetadata(voiceID: voiceID)
-        meta.isFavorite.toggle()
-        meta.updatedAt = Date()
-        state.metadataByVoiceID[voiceID] = meta
-        persistLocked()
-        return meta.isFavorite
+    public func promoteToGlobalReusable(voiceID: String) throws -> VoiceAssetMetadata {
+        try mutate { state in
+            var meta = state.metadataByVoiceID[voiceID] ?? .init(voiceID: voiceID)
+            meta.visibilityScope = .globalReusable; meta.updatedAt = Date(); state.metadataByVoiceID[voiceID] = meta; return meta
+        }
     }
-
-    /// 手动指定或修正某个音色的声部行当。
-    public func setArchetypeOverride(_ archetype: AudiobookVoiceArchetype?, for voiceID: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        var meta = state.metadataByVoiceID[voiceID] ?? VoiceAssetMetadata(voiceID: voiceID)
-        meta.archetypeOverride = archetype
-        meta.updatedAt = Date()
-        state.metadataByVoiceID[voiceID] = meta
-        persistLocked()
+    public func archiveVoices(voiceIDs: Set<String>) throws {
+        try mutate { state in
+            for id in voiceIDs {
+                var meta = state.metadataByVoiceID[id] ?? .init(voiceID: id)
+                meta.lifecycleState = .archived; meta.updatedAt = Date(); state.metadataByVoiceID[id] = meta
+            }
+        }
     }
-
-    /// 创建自定义剧团音色包（VoiceCollection）。
+    public func unarchiveVoices(voiceIDs: Set<String>) throws {
+        try mutate { state in
+            for id in voiceIDs {
+                guard var meta = state.metadataByVoiceID[id] else { throw VoiceCatalogError.unknownVoice }
+                guard meta.visibilityScope != .unknown, meta.visibilityScope != .bookExclusive || meta.originBookID != nil else { throw VoiceCatalogError.scopeConfirmationRequired }
+                meta.lifecycleState = .active; meta.updatedAt = Date(); state.metadataByVoiceID[id] = meta
+            }
+        }
+    }
+    public func archiveBookExclusiveVoices(bookID: UUID) throws {
+        try archiveVoices(voiceIDs: Set(snapshot().state.metadataByVoiceID.filter { $0.value.originBookID == bookID && $0.value.visibilityScope == .bookExclusive }.keys))
+    }
     @discardableResult
-    public func createCollection(name: String, description: String = "", voiceIDs: Set<String> = []) -> VoiceCollection {
-        lock.lock()
-        defer { lock.unlock() }
-        let collection = VoiceCollection(name: name, description: description, voiceIDs: voiceIDs)
-        state.collections.append(collection)
-        for vid in voiceIDs {
-            var meta = state.metadataByVoiceID[vid] ?? VoiceAssetMetadata(voiceID: vid)
-            meta.collectionIDs.insert(collection.id)
-            state.metadataByVoiceID[vid] = meta
+    public func toggleFavorite(voiceID: String) throws -> Bool {
+        try mutate { state in
+            var meta = state.metadataByVoiceID[voiceID] ?? .init(voiceID: voiceID)
+            meta.isFavorite.toggle(); meta.updatedAt = Date(); state.metadataByVoiceID[voiceID] = meta; return meta.isFavorite
         }
-        persistLocked()
-        return collection
     }
-
-    /// 将一批音色加入指定剧团音色包。
-    public func addVoices(_ voiceIDs: Set<String>, toCollection collectionID: UUID) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard let idx = state.collections.firstIndex(where: { $0.id == collectionID }) else { return }
-        state.collections[idx].voiceIDs.formUnion(voiceIDs)
-        for vid in voiceIDs {
-            var meta = state.metadataByVoiceID[vid] ?? VoiceAssetMetadata(voiceID: vid)
-            meta.collectionIDs.insert(collectionID)
-            state.metadataByVoiceID[vid] = meta
+    public func setArchetypeOverride(_ archetype: AudiobookVoiceArchetype?, for voiceID: String) throws {
+        try mutate { state in
+            var meta = state.metadataByVoiceID[voiceID] ?? .init(voiceID: voiceID)
+            meta.archetypeOverride = archetype; meta.updatedAt = Date(); state.metadataByVoiceID[voiceID] = meta
         }
-        persistLocked()
     }
-
-    /// 判断音色在指定有声书上下文中是否属于活跃可选音色（隔离其他书籍专用音色与已归档音色）。
+    public func setVoiceTraits(_ traits: AudiobookVoiceTraits, for voiceID: String) throws {
+        try mutate { state in
+            var meta = state.metadataByVoiceID[voiceID] ?? .init(voiceID: voiceID)
+            meta.voiceTraits = traits; meta.updatedAt = Date(); state.metadataByVoiceID[voiceID] = meta
+        }
+    }
+    @discardableResult
+    public func createCollection(name: String, description: String = "", voiceIDs: Set<String> = []) throws -> VoiceCollection {
+        try mutate { state in
+            let collection = VoiceCollection(name: name, description: description, voiceIDs: voiceIDs)
+            state.collections.append(collection)
+            for id in voiceIDs { var meta = state.metadataByVoiceID[id] ?? .init(voiceID: id); meta.collectionIDs.insert(collection.id); state.metadataByVoiceID[id] = meta }
+            return collection
+        }
+    }
+    public func addVoices(_ voiceIDs: Set<String>, toCollection collectionID: UUID) throws {
+        try mutate { state in
+            guard let index = state.collections.firstIndex(where: { $0.id == collectionID }) else { throw VoiceCatalogError.unknownVoice }
+            state.collections[index].voiceIDs.formUnion(voiceIDs)
+            for id in voiceIDs { var meta = state.metadataByVoiceID[id] ?? .init(voiceID: id); meta.collectionIDs.insert(collectionID); state.metadataByVoiceID[id] = meta }
+        }
+    }
     public func isVoiceActiveForBook(voiceID: String, currentBookID: UUID?) -> Bool {
-        lock.lock()
-        let meta = state.metadataByVoiceID[voiceID]
-        lock.unlock()
+        let snapshot = snapshot()
+        guard snapshot.loadState == .ready || snapshot.loadState == .missing,
+              let meta = snapshot.state.metadataByVoiceID[voiceID], meta.lifecycleState == .active else { return false }
+        return meta.visibilityScope == .globalReusable || (meta.visibilityScope == .bookExclusive && currentBookID != nil && meta.originBookID == currentBookID)
+    }
+}
 
-        guard let meta else { return true }
-        switch meta.scope {
-        case .globalReusable:
-            return true
-        case .bookExclusive:
-            guard let currentBookID else { return false }
-            return meta.originBookID == currentBookID
-        case .archived:
-            return false
-        }
+
+public enum AudiobookRegistrationCrashStage: String, CaseIterable, Sendable {
+    case afterIntentRegistered, afterCatalogPersisted, afterCatalogStage, afterBindingCommitted
+}
+
+/// Bounded metadata only: no manuscript, prompt, reference text or audio enters the journal.
+public struct AudiobookVoiceRegistrationIntent: Codable, Equatable, Sendable, Identifiable {
+    public enum Phase: String, Codable, Sendable { case registered, catalogPersisted, bindingCommitted, completed, needsReview }
+    public let id: UUID
+    public let bookID: UUID
+    public let roleID: UUID?
+    public let voiceID: String
+    public let bookTitle: String?
+    public let roleName: String?
+    public let archetype: AudiobookVoiceArchetype?
+    public let creationSource: VoiceCreationSource
+    public let binding: AudiobookVoiceBinding?
+    public let expectedCastRevisionID: UUID
+    public let expectedVoiceSetDigest: String
+    public let expectedCatalogRevision: String
+    public let onlyIfUnbound: Bool
+    public var phase: Phase
+    public var targetMetadataDigest: String {
+        AudiobookCastingDigest.hash([bookID.uuidString, roleID?.uuidString ?? "", voiceID, creationSource.rawValue, archetype?.rawValue ?? ""])
+    }
+    public var contentDigest: String {
+        AudiobookCastingDigest.hash([targetMetadataDigest, expectedCastRevisionID.uuidString, expectedVoiceSetDigest,
+            binding?.bindingDigest ?? "catalog-only", String(onlyIfUnbound)])
+    }
+}
+
+
+struct AudiobookCastingPolicySnapshot: Codable, Equatable, Sendable {
+    let roleID: UUID
+    let policy: AudiobookRoleVoicePolicy?
+    let allowSharedMinorVoice: Bool
+}
+struct AudiobookCastingUndoRecord: Codable, Equatable, Sendable {
+    let id: UUID
+    let bookID: UUID
+    let previousBindings: [UUID: AudiobookVoiceBinding]
+    let previousPolicies: [AudiobookCastingPolicySnapshot]
+    let affectedRoleIDs: Set<UUID>
+    let afterDigest: String
+}
+public struct AudiobookCastingRecommendation: Equatable, Sendable {
+    public let planDigest: String
+    public let isApplicable: Bool
+    public let affectedRoleIDs: Set<UUID>
+    public let affectedFragmentIDs: Set<UUID>
+    public let reasonsByRoleID: [UUID: [String]]
+    public let recoveryActions: [String]
+    public init(plan: AudiobookCastingPlan) {
+        planDigest = plan.inputDigest; isApplicable = plan.isApplicable
+        affectedRoleIDs = plan.affectedRoleIDs; affectedFragmentIDs = plan.affectedFragmentIDs
+        reasonsByRoleID = Dictionary(uniqueKeysWithValues: plan.affectedRoleIDs.map { role in
+            let policy = plan.proposedPolicies[role]
+            return (role, [policy?.sharingPolicy == .exclusive ? "为此角色单独保留声音" : "按同场关系分配共用声音", "符合本书可用范围和制作条件"])
+        })
+        recoveryActions = Array(Set(plan.issues.filter { $0.isBlocking || $0.severity == .warning }.map(\.nextAction))).sorted()
+    }
+}
+public struct AudiobookCastingAudition: Equatable, Sendable {
+    public enum Kind: String, Sendable { case sameTextComparison, dialogueComparison }
+    public struct Item: Equatable, Sendable {
+        public let roleID: UUID
+        public let voiceID: String
+        public let sourceRange: AudiobookSourceRange
+        public let text: String
+        public let binding: AudiobookVoiceBinding
+    }
+    public let kind: Kind
+    public let items: [Item]
+    public let planDigest: String
+}
+
+
+final class VoiceCatalogObservation: @unchecked Sendable {
+    private let token: NSObjectProtocol
+    init(catalog: VoiceCatalogStore, changed: @escaping @Sendable () -> Void) {
+        token = NotificationCenter.default.addObserver(forName: VoiceCatalogStore.didChange, object: catalog, queue: nil) { _ in changed() }
+    }
+    deinit { NotificationCenter.default.removeObserver(token) }
+}
+
+public extension VoiceCatalogSnapshot {
+    func permitsSurface(_ voice: CreatorVoice, bookID: UUID?) -> Bool {
+        permitsSurface(voiceID: voice.id,
+            isDefaultSystemPreset: voice.mode == "system" && voice.isSystem && voice.isDefault, bookID: bookID)
     }
 
-    private func persistLocked() {
-        guard loadState != .unreadable, loadState != .unsupportedSchema, let url = storageURL else { return }
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if let data = try? JSONEncoder().encode(state) {
-            try? data.write(to: url, options: .atomic)
-        }
+    func permitsSurface(_ voice: SafeVoiceEntry, bookID: UUID?) -> Bool {
+        permitsSurface(voiceID: voice.id,
+            isDefaultSystemPreset: voice.mode == "system" && voice.isSystem == true && voice.isDefault == true, bookID: bookID)
+    }
+
+    private func permitsSurface(voiceID: String, isDefaultSystemPreset: Bool, bookID: UUID?) -> Bool {
+        guard loadState == .ready || loadState == .missing else { return false }
+        guard let meta = state.metadataByVoiceID[voiceID] else { return isDefaultSystemPreset }
+        guard meta.voiceID == voiceID, meta.lifecycleState == .active else { return false }
+        if meta.visibilityScope == .unknown { return isDefaultSystemPreset && meta.creationSource == nil && meta.originBookID == nil }
+        return meta.visibilityScope == .globalReusable || (meta.visibilityScope == .bookExclusive && bookID != nil && meta.originBookID == bookID)
     }
 }

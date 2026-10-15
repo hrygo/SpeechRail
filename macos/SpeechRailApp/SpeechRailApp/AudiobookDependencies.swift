@@ -127,10 +127,14 @@ public struct AudiobookLeadVoiceCreationOutput: Equatable, Sendable {
 public protocol AudiobookSpeechRenderer: Sendable {
     func fetchEffectiveCapabilities() async throws -> EffectiveCapabilitySnapshot
     func renderFragment(_ request: AudiobookRenderCallRequest) async throws -> AudiobookRenderCallOutput
+    func renderAudition(_ request: AudiobookRenderCallRequest) async throws -> Data
     func createAndPublishLeadVoice(_ request: AudiobookLeadVoiceCreationRequest) async throws -> AudiobookLeadVoiceCreationOutput
 }
 
 public extension AudiobookSpeechRenderer {
+    func renderAudition(_ request: AudiobookRenderCallRequest) async throws -> Data {
+        throw ServiceAPIClientError.requestFailed
+    }
     func createAndPublishLeadVoice(_ request: AudiobookLeadVoiceCreationRequest) async throws -> AudiobookLeadVoiceCreationOutput {
         throw ServiceAPIClientError.requestFailed
     }

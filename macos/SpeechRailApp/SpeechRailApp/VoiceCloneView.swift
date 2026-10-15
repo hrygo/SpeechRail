@@ -21,6 +21,7 @@ public struct VoiceCloneView: View {
     @State private var isPlayingTake = false
     @State private var didAdoptScriptForSpokenText = false
     @State private var inputDeviceName: String?
+    @State private var catalogSaveError: String?
     @FocusState private var isSpokenTextFocused: Bool
 
     public init() {}
@@ -66,6 +67,24 @@ public struct VoiceCloneView: View {
         }
         .onChange(of: model.isAudioPlaying) { _, isPlaying in
             if !isPlaying { isPlayingTake = false }
+        }
+        .onChange(of: model.lastRegisteredCloneVoice?.id) { _, voiceID in
+            guard let voiceID else { return }
+            if let context = navigation.audiobookVoiceReturnContext {
+                Task {
+                    await model.audiobookWorkflow.completeVoiceRoundTrip(voiceID: voiceID, creationSource: .instantClone, context: context)
+                    navigation.audiobookVoiceReturnContext = nil
+                    navigation.request(.audiobook)
+                }
+            } else {
+                do { try VoiceCatalogStore.shared.registerGlobalVoice(voiceID: voiceID, creationSource: .instantClone) }
+                catch { catalogSaveError = error.localizedDescription }
+            }
+        }
+        .alert("声音目录未保存", isPresented: Binding(get: { catalogSaveError != nil }, set: { if !$0 { catalogSaveError = nil } })) {
+            Button("知道了", role: .cancel) { catalogSaveError = nil }
+        } message: {
+            Text(catalogSaveError ?? "请稍后重试。")
         }
         .onDisappear {
             model.stopAudio()

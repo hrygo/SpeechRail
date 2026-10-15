@@ -2,7 +2,7 @@
 title: "有声书工坊（Audiobook Workshop）测试与验收交接手册"
 status: active
 audience: "QA 测试团队、客户端验收工程师、发布门禁负责人"
-version: "1.3.0"
+version: "1.4.0"
 date: 2026-10-15
 ---
 
@@ -33,6 +33,21 @@ git diff --check
 ```
 
 测试显式注入内存或临时 `VoiceCatalogStore`，所有 Store root 位于临时目录；真实请求构造使用 URL transport 替身。迁移仅打开合成 schema 1 副本，比较全表记录、外键与历史引用，并注入失败验证回滚；不读取默认作品库。目录隔离的既有夹具问题与修正范围见专项记录。App 构建、前台 UI 自动化、模型和运行态操作须按对应授权执行。
+
+### S3～S5 离线选角验收
+
+确定性范围另含配声撤销、目录生命周期及试听适配器，见 [S3～S5 离线验收记录](../audits/2026-10-15-audiobook-mass-casting-p1-acceptance.md)：
+
+```bash
+swift test --package-path macos/SpeechRailApp --filter 'ServiceContractTests|Audiobook(Cast|Store|Production|Workflow|Invalidation|Revision)Tests'
+uv run --no-sync pytest --no-cov tests/test_tts_request_validation.py
+scripts/macos_app_build.sh --configuration Debug
+git diff --check
+```
+
+迁移夹具覆盖 SQLite schema 1/2/3→4 和无版本 JSON→schema 2；核对旧记录、NULL 身份、WAV/PCM 摘要、采用版本引用、失败回滚与迁移后新增作品。目录错误不得发布保存成功；未来版本或损坏文件保留，创建时点未知不补造。返回 journal 在四个中断边界重复恢复，期间改选受保护。
+
+200 角色×500 声音检查的是组合评分和缓存失效次数，201×500 验证在评分前明确耗尽预算并保留原绑定，加权匹配另有工作预算；这些检查不代表毫秒级界面性能或取消延迟。共享开关的重启后独立撤销、重复设置不占历史，以及非默认系统声音缺少目录记录时不能进入全局候选，也由同组测试覆盖。相同原文/对白试听由 fake renderer 和 URL transport 验证，不能证明真实听感。App 编译只验证源码可构建；AC-Q-01/02/03 分别记录为 `not_evaluated`，真实模型、窗口、键盘、VoiceOver 和外观走查须另行授权。
 
 ### 2.1 Python 媒体导出套件（T11）
 
@@ -131,4 +146,4 @@ bash scripts/macos_app_build.sh --configuration Debug --test-unit
 - **复现阶段**：（Python 媒体测试 / SwiftPM 某 Suite / Xcode 构建 / 真机 UI 走查）
 - **复现命令与日志摘要**：附上完整终端输出或截图
 - **书稿样本特征**：编码格式、文件大小、章节数（切勿在公开 Issue 中上传受版权保护的完整商业书稿）
-- **独立回滚边界**：作品数据位于 `<app_home>/audiobooks/`（`library.sqlite3` 及作品、导出子目录）；共享音色目录单独备份与恢复，不能连带覆盖其他创作记录。schema 2 的回退实现须保留可空声音 revision；发生迁移后写入时，不以迁移前备份覆盖新作品。计算逻辑回退仍保留候选隔离、严格准入与原子保存，历史音频和章节版本继续保留。
+- **独立回滚边界**：作品数据位于 `<app_home>/audiobooks/`（`library.sqlite3` 及作品、导出子目录）；共享音色目录单独备份与恢复，不能连带覆盖其他创作记录。回退实现须支持 SQLite schema 4 和目录 schema 2，保留可空声音 revision、政策、登记意图与配声修订；发生迁移后写入时，不以迁移前备份覆盖新作品。可切回 `baseline`，仍保留候选隔离、严格准入与原子保存，历史音频和章节版本继续保留。

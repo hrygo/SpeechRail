@@ -225,7 +225,7 @@ final class AudiobookProductionTests: XCTestCase {
         try await cast.confirmAudition(bookID: bookID, voiceSetDigest: cast.currentVoiceSetDigest(for: bookID))
         let previous = AudiobookChapterRevision(bookID: bookID, chapterID: chapter.id, sourceID: chapter.sourceID, revisionNumber: 1, orderedBindings: [], totalFrameCount: 0)
         try await store.saveChapterRevision(previous, makeCurrent: true)
-        renderer.onRenderStart = { request in catalog.archiveVoices(voiceIDs: [request.voiceID]) }
+        renderer.onRenderStart = { request in do { try catalog.archiveVoices(voiceIDs: [request.voiceID]) } catch { XCTFail("临时目录归档失败") } }
         let production = AudiobookProductionController(store: store, castController: cast,
             revisionController: AudiobookRevisionController(store: store), renderer: renderer,
             admission: SpeechCreationAdmission(), clock: FakeAudiobookClock(), voiceCatalog: catalog)

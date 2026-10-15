@@ -138,6 +138,21 @@ public enum AudiobookProductionWiring {
             )
         }
 
+        func renderAudition(_ request: AudiobookRenderCallRequest) async throws -> Data {
+            let snapshot = try await fetchEffectiveCapabilities()
+            let binding = AudiobookVoiceBinding(roleID: UUID(), voiceID: request.voiceID,
+                voiceRevision: request.expectedVoiceRevision, modelRevision: request.expectedModelRevision,
+                allowedSpeed: request.speed, callerSeed: request.seed)
+            try AudiobookCastRegistry.validateRenderBinding(binding, snapshot: snapshot, requireProductionReady: false)
+            guard let voice = snapshot.voices.first(where: { $0.id == request.voiceID }),
+                  voiceCatalog.snapshot().permits(voice, bookID: request.bookID ?? UUID(uuidString: "00000000-0000-0000-0000-000000000000")!) else {
+                throw ServiceAPIClientError.invalidContract("voice_scope_changed")
+            }
+            return try await renderClient.createSpeech(text: request.text, voiceID: request.voiceID, speed: request.speed,
+                options: .init(callerSeed: request.seed, expectedVoiceRevision: request.expectedVoiceRevision,
+                    expectedModelRevision: request.expectedModelRevision, validationPolicy: "allow_unverified"))
+        }
+
         private static func leadVoiceOutput(voiceID: String, snapshot: EffectiveCapabilitySnapshot) throws -> AudiobookLeadVoiceCreationOutput {
             guard let voice = snapshot.voices.first(where: { $0.id == voiceID }),
                   let revision = voice.voiceRevision,

@@ -543,6 +543,19 @@ final class ServiceContractTests: XCTestCase {
     }
 
     @MainActor
+    func testAudiobookAuditionUsesPreviewPolicyAndPreservesPins() async throws {
+        let (renderer, root) = try makeAudiobookRenderer()
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = try await renderer.renderAudition(.init(text: "试听原文", voiceID: "system", speed: 1,
+            expectedVoiceRevision: "vr_0123456789abcdef0123456789abcdef", expectedModelRevision: String(repeating: "a", count: 40), seed: 42))
+        let request = try XCTUnwrap(ServiceAPIURLProtocolStub.state.recordedRequests().last { $0.url?.path == "/v1/audio/speech" })
+        XCTAssertEqual(request.value(forHTTPHeaderField: "SpeechRail-Validation-Policy"), "allow_unverified")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "SpeechRail-Seed"), "42")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "SpeechRail-Expected-Voice-Revision"), "vr_0123456789abcdef0123456789abcdef")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "SpeechRail-Expected-Model-Revision"), String(repeating: "a", count: 40))
+    }
+
+    @MainActor
     func testExistingCloneSeedRequiresReconfirmationWithoutSending() async throws {
         let (renderer, root) = try makeAudiobookRenderer(mode: "clone")
         defer { try? FileManager.default.removeItem(at: root) }

@@ -165,13 +165,12 @@ public enum AudiobookFragmentPlanner {
             let atomIDs = group.map(\.atomID)
             let binding = bindings[roleID]!
 
-            let localAssignmentCanonical = group
-                .map { "\($0.sourceRange.lowerBound)-\($0.sourceRange.upperBound):\($0.roleID.uuidString)" }
-                .joined(separator: ",")
+            let localAssignmentCanonical = "\(range.lowerBound)-\(range.upperBound):\(roleID.uuidString)"
             let localAssignmentDigest = AudiobookDigest.sha256Hex(Data(localAssignmentCanonical.utf8))
             let voiceBindingDigest = binding.bindingDigest
             let dependencyCanonical = [
-                "frag_dep_v1",
+                "frag_dep_v2",
+                source.flatMap { try? $0.text(in: range) }.map { AudiobookDigest.sha256Hex(Data($0.utf8)) } ?? "source-unavailable",
                 "\(chapter.sourceID.uuidString)",
                 "\(range.lowerBound)-\(range.upperBound)",
                 localAssignmentDigest,

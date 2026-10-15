@@ -1,6 +1,6 @@
 # 有声书大规模选角分阶段实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: 使用 `executing-plans` 逐任务执行，步骤用复选框记录。2026-10-15 用户授权实施 S0～S2 及 P0 定向验收；保留已有未提交改动，迁移仅用临时副本，不操作真实用户库、不改变运行态、不提交或安装。S3～S5 保持计划状态，不从本文推导额外授权。
+> **For agentic workers:** REQUIRED SUB-SKILL: 使用 `executing-plans` 逐任务执行，步骤用复选框记录。2026-10-15 用户先授权 S0～S2，随后授权 S3～S5 可离线完成的实施、定向验收和文档；保留已有未提交与并行改动，迁移仅用临时副本，不操作真实用户库、不改变运行态、不提交或安装。真实模型与 UI 验收另行授权，本文不扩大授权。
 
 **Goal:** 先消除种子、候选隔离、准入、容量与批量写入的 P0 风险，再建立稳定选角、可恢复音色资产管理和独立的听感验收。
 
@@ -8,9 +8,9 @@
 
 **Tech Stack:** Apple Silicon macOS 26.0、现有 Swift 6 工具链、SwiftUI/Foundation、SQLite、JSON、XCTest；Python `>=3.14,<3.15` 的现有 fake-backend 契约测试。P0 不引入模型、求解器或向量数据库依赖。
 
-**Spec:** [有声书工坊大规模角色选角与音色资产规范](../../developers/audiobook-mass-casting-spec.md)，version `2.0.1`。阅读时同时核对 `contracts/openapi.yaml`、`src/speechrail/domain/tts_request.py`、`docs/developers/testing-acceptance.md` 和 macOS 设计系统。
+**Spec:** [有声书工坊大规模角色选角与音色资产规范](../../developers/audiobook-mass-casting-spec.md)，version `2.1.0`。阅读时同时核对 `contracts/openapi.yaml`、`src/speechrail/domain/tts_request.py`、`docs/developers/testing-acceptance.md` 和 macOS 设计系统。
 
-**状态（2026-10-15）:** S0～S2 已完成。独立审查提出的五项问题已逐项复现并修复；最终定向验收为 Swift 209 项、Python 9 项零失败，S3～S5 未实施。实际命令、数量、迁移恢复及早期夹具目录隔离问题见 [P0 定向验收记录](../../audits/2026-10-15-audiobook-mass-casting-p0-acceptance.md)。以下基线表记录实施前静态事实，不能代替验收结果。
+**状态（2026-10-15）:** S0～S2 已完成，证据及早期夹具目录隔离问题见 [P0 定向验收记录](../../audits/2026-10-15-audiobook-mass-casting-p0-acceptance.md)。S3、S4 和 S5 Task 10 的离线部分已完成，最终回归为 Swift 264 项、Python 9 项零失败、零跳过，Debug App 隔离编译通过；独立审查四项 Important 均已修复并回归，见 [离线验收记录](../../audits/2026-10-15-audiobook-mass-casting-p1-acceptance.md)。Task 11 的 AC-Q-01/02/03 均为 `not_evaluated`。以下基线表保留实施前静态事实。
 
 ## Global Constraints
 
@@ -183,21 +183,22 @@ git diff --check
 
 **Interfaces:** 落实 `AudiobookRoleVoicePolicy(sharingPolicy, bindingOrigin, isLocked)`；来源事实与预期值分别存储。数据库在 S1 schema 2 的基础上进入 schema 3，增加政策与事实字段，保留全部原始记录和作品引用；旧来源统一 `legacyUnknown`，不猜测用户意图。依赖摘要使用有效输出语义，不使用一次性 snapshotID 作全量失效键。
 
-- [ ] 建立 schema 2 夹具，添加 `testLegacyPolicyMigratesAsLockedUnknown`、`testPolicyMigrationKeepsUnknownIdentity` 和 `testPolicyMigrationInterruptionRecovers`，覆盖旧占位身份待确认、system 合法缺失、未知政策冻结、迁移中断和重启恢复；先测失败再实施 schema 3 迁移。
-- [ ] 在临时副本完成前后角色/绑定/候选/章节版本计数与引用核验；未知身份不被填成假值。
-- [ ] 测试新增无关声音、修改标签、原文重分块时已确认绑定零改动；声音/参数真实变化只失效受影响片段。
+- [x] 建立 schema 2 夹具，添加 `testLegacyPolicyMigratesAsLockedUnknown`、`testPolicyMigrationKeepsUnknownIdentity` 和 `testPolicyMigrationInterruptionRecovers`，覆盖旧占位身份待确认、system 合法缺失、未知政策冻结、迁移中断和重启恢复；先测失败再实施 schema 3 迁移。
+- [x] 在临时副本完成前后角色/绑定/候选/章节版本计数与引用核验；未知身份不被填成假值。
+- [x] 测试新增无关声音、修改标签、原文重分块时已确认绑定零改动；声音/参数真实变化只失效受影响片段。
 
 ### Task 7：统计、画像与有界场景规划
 
-**Files:** 从大文件提取 `VoiceTaxonomyClassifier` 到待创建的 `macos/SpeechRailApp/SpeechRailApp/VoiceTaxonomyClassifier.swift`；新建 `AudiobookSceneConflictGraph.swift`、`AudiobookCastingPlanner.swift`。调整 `AudiobookDomain.swift`、`AudiobookCastRegistry.swift` 和调用方；新增/调整相应 `AudiobookCastTests.swift`，必要时创建 `AudiobookCastingPlannerTests.swift`。新文件同步 SwiftPM 与 Xcode 的既有注册方式，不生成第三方 checkout。
+**Files:** 在已注册的 `AudiobookDomain.swift`、`AudiobookCastRegistry.swift` 中定义独立画像、场景图和纯分配器，并调整调用方与 `AudiobookCastTests.swift`。项目使用手工文件注册，而项目设置 skill 禁止手工新增 PBX 文件引用，因此保留现有注册；代价是文件较大，后续提取须先确定工程注册方式。
 
 **Interfaces:** Registry 保留 S2 的完整快照规划入口，委托纯计算 planner。场景图的边独立保存 `directDialogue / sceneCoPresence / chapterCoPresence` 与稳定来源；画像六维独立、带 source/confidence。planner 的策略显式区分 `baseline` 与 `sceneAware`，两者共用 P0 候选/锁定校验。
 
-- [ ] 添加 `testRechunkingPreservesDialogueScalarCount`、`testNarrationDistanceDoesNotCreateDirectDialogue`、`testDifferentScenesKeepDistinctEdges`、`testDuplicateWindowsDoNotDoubleCountEdges` 和 `testWeakEdgesNeverBecomeDirectDialogue`，用具体原文区间断言统计与边类型；人工层级不被计算覆盖。
-- [ ] 添加 `testVoiceTaxonomyKeepsIndependentUnknownAttributes` 和 `testManualVoiceTraitsOverrideInference`，使用男童/女童/老年女性/中性/无描述及中英混合描述的标注夹具；断言未知保留和人工覆盖，不以每个条目都有枚举值当准确。
-- [ ] 添加 `testScenePlannerSolvesKnownColorableFixture`、`testTwoVoicesCannotResolveDialogueTriangle` 和 `testSearchBudgetDoesNotRelaxLockedBindings`；比较基础评分与 DSATUR 候选排序＋局部修复。已知可着色小图零直接冲突，两色三角返回可解释结果，冻结项零改动；预算上限为 100000 个局部变更候选。
-- [ ] 用 200 角色×500 声音纯计算夹具验证基础画像评分至多 100000 个组合，复用缓存不改变结果；不凭该检查报告毫秒级性能或真实模型吞吐。
-- [ ] 定向运行 Cast/Store/Invalidation 与新增 Planner 测试，按需用包装脚本编译注册后的 target；不运行 UI 自动化。
+- [x] 添加 `testRechunkingPreservesDialogueScalarCount`、`testNarrationDistanceDoesNotCreateDirectDialogue`、`testDifferentScenesKeepDistinctEdges`、`testDuplicateWindowsDoNotDoubleCountEdges` 和 `testWeakEdgesNeverBecomeDirectDialogue`，用具体原文区间断言统计与边类型；人工层级不被计算覆盖。
+- [x] 添加 `testVoiceTaxonomyKeepsIndependentUnknownAttributes` 和 `testManualVoiceTraitsOverrideInference`，使用男童/女童/老年女性/中性/无描述及中英混合描述的标注夹具；断言未知保留和人工覆盖，不以每个条目都有枚举值当准确。
+- [x] 添加 `testScenePlannerSolvesKnownColorableFixture`、`testTwoVoicesCannotResolveDialogueTriangle` 和 `testSearchBudgetDoesNotRelaxLockedBindings`；比较基础评分与 DSATUR 候选排序＋局部修复。已知可着色小图零直接冲突，两色三角返回可解释结果，冻结项零改动；预算上限为 100000 个局部变更候选。
+- [x] 用 200 角色×500 声音纯计算夹具验证基础画像评分至多 100000 个组合，复用缓存不改变结果；不凭该检查报告毫秒级性能或真实模型吞吐。
+- [x] 全局评分矩阵限制为 100000 个组合，201×500 在构建前明确报告预算耗尽并保持原绑定；加权匹配另有 20000000 次工作预算及内层取消检查，不能将预算耗尽解释为无解。
+- [x] 定向运行 Cast/Store/Invalidation 与新增 Planner 测试，按需用包装脚本编译注册后的 target；不运行 UI 自动化。
 
 **S3 验收:** AC-P1-01～04/08 通过；同一输入结果稳定，锁定与 P0 守卫保持；迁移副本完整性与失败恢复有证据。正式用户库迁移仍受后续授权与备份条件约束。
 
@@ -211,9 +212,9 @@ git diff --check
 
 **Interfaces:** 目录 envelope 使用 `schemaVersion=2`，分离 `visibilityScope` 与 `lifecycleState`；对外 `VoiceCatalogSnapshot` 接口沿用 S2。mutator 失败可抛出，只有持久化成功后递增 revision 并发布通知；保留单进程串行写，不增加数据库或多实例架构。
 
-- [ ] 添加 `testPromoteArchiveRestoreKeepsGlobalScope`、`testArchivedLegacyOriginIsNotEnoughToInferScope`、`testWriteFailureDoesNotPublishSuccess` 和 `testUnreadableCatalogPreservesUnknownRecords`。
-- [ ] 先测失败，再实施版本化读取、旧数据迁移、原子保存及恢复点；旧归档记录无法证明归档前 scope 时保持 archived/unknown，待显式确认。
-- [ ] 验证迁移和恢复重启后的属性、合集和来源完整；未来 schema 被拒绝且原文件保留，不以重建空文件修复。
+- [x] 添加 `testPromoteArchiveRestoreKeepsGlobalScope`、`testArchivedLegacyOriginIsNotEnoughToInferScope`、`testWriteFailureDoesNotPublishSuccess` 和 `testUnreadableCatalogPreservesUnknownRecords`。
+- [x] 先测失败，再实施版本化读取、旧数据迁移、原子保存及恢复点；旧归档记录无法证明归档前 scope 时保持 archived/unknown，待显式确认。
+- [x] 验证迁移和恢复重启后的属性、合集和来源完整；未来 schema 被拒绝且原文件保留，不以重建空文件修复。
 
 ### Task 9：设计/克隆返回与跨 Store 意图恢复
 
@@ -221,10 +222,10 @@ git diff --check
 
 **Interfaces:** SQLite 从 S3 的 schema 3 进入 schema 4，登记 `voice_registration_intents`（操作 ID、book/role/voice ID、有界且不含书稿/prompt 的目标元数据及其摘要、预期修订和阶段）；目录先持久化 bookExclusive，再提交绑定并完成意图。恢复幂等处理未完成意图，校验修订以免覆盖其他操作，不删除声音或自动晋升全局；设计与克隆保存各自真实来源。
 
-- [ ] 添加参数化 `testVoiceRegistrationRecoversAtEveryCommitBoundary`，依次在意图登记、目录写入、绑定提交前后注入故障；重复恢复不重复绑定、不泄漏资产、不删除其他任务的新记录。
-- [ ] 验证本书角色/群像定制默认书籍专用；晋升只由显式用户动作触发。配音台与其他书籍读取同一目录政策，目录变化后投影刷新。
-- [ ] 验证归档不破坏历史播放和引用；恢复后可见范围正确，继续制作仍须重新满足当前生产准入。
-- [ ] 运行目录、Cast、Store、Workflow 定向回归；核对迁移前后一致性清单及无真实目录访问。
+- [x] 添加参数化 `testVoiceRegistrationRecoversAtEveryCommitBoundary`，依次在意图登记、目录写入、绑定提交前后注入故障；重复恢复不重复绑定、不泄漏资产、不删除其他任务的新记录。
+- [x] 验证本书角色/群像定制默认书籍专用；晋升只由显式用户动作触发。配音台与其他书籍读取同一目录政策，目录变化后投影刷新。
+- [x] 验证归档不破坏历史播放和引用；恢复后可见范围正确，继续制作仍须重新满足当前生产准入。
+- [x] 运行目录、Cast、Store、Workflow 定向回归；核对迁移前后一致性清单及无真实目录访问。
 
 **S4 验收:** AC-P1-06/07 全部通过；跨 Store 每个故障点可恢复，内存成功与磁盘成功一致，旧未知事实保留。目录修订变化不得触发无关片段全量重做。
 
@@ -238,9 +239,10 @@ git diff --check
 
 **Interfaces:** 消费 Plan 的 issues、影响集合和目录通知；相同文本试听与对手戏试听分别建模。批量 apply 的确认绑定 plan 身份及已接受问题 ID，撤销通过新修订恢复旧政策，不删除音频或覆盖已采用版本。
 
-- [ ] 添加 `testRecommendationExplainsEmptyPoolAndRecovery`、`testStaleRecommendationCannotApply`、`testBatchImpactAndUndoPreserveAdoptedVersion` 和 `testCatalogChangesRefreshProjection` 的纯投影/控制器回归；再调整页面，默认只呈现完成当前任务的少量动作。
-- [ ] 保留一个清楚的主动作和搜索范围；收藏独立于作用域；高级画像和技术诊断渐进披露，不新增一排所有维度的首屏筛选。
-- [ ] 定向测试 Workflow/Revision/Invalidation；获实施构建授权时使用 `scripts/macos_app_build.sh --configuration Debug`。未获逐次授权不启动前台 UI 自动化。
+- [x] 添加 `testRecommendationExplainsEmptyPoolAndRecovery`、`testStaleRecommendationCannotApply`、`testBatchImpactAndUndoPreserveAdoptedVersion` 和 `testCatalogChangesRefreshProjection` 的纯投影/控制器回归；再调整页面，默认只呈现完成当前任务的少量动作。
+- [x] 保留一个清楚的主动作和搜索范围；收藏独立于作用域；高级画像和技术诊断渐进披露，不新增一排所有维度的首屏筛选。
+- [x] 定向测试 Workflow/Revision/Invalidation；获实施构建授权时使用 `scripts/macos_app_build.sh --configuration Debug`。未获逐次授权不启动前台 UI 自动化。
+- [x] 将角色共享开关纳入配声修订，验证重启后独立撤销、重复设置不占历史与未绑定角色撤销；配音台/声音库共用完整声音身份守卫，拒绝无归属的非默认系统声音。
 
 ### Task 11：冻结试验并验证角色辨识与微语速
 

@@ -96,6 +96,7 @@ private struct DubbingDeskComposerView: View {
     @AppStorage("speechrail.creator.defaultSpeed") private var defaultSpeed: Double = 1.0
     @State private var isVoicePickerPresented = false
     @State private var selectionNotice: String?
+    @State private var catalogRefreshTick = 0
     @State private var exportDocument = WAVFileDocument(data: Data())
     @State private var exportFileName = "SpeechRail-配音"
     @State private var isExporting = false
@@ -173,6 +174,9 @@ private struct DubbingDeskComposerView: View {
         }
         .onChange(of: selectedVoiceID) { _, _ in
             normalizeSelectedVoiceSettings()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: VoiceCatalogStore.didChange, object: VoiceCatalogStore.shared)) { _ in
+            catalogRefreshTick += 1
         }
         .onDisappear {
             model.cancelVoicePreview()
@@ -911,11 +915,11 @@ private struct DubbingDeskComposerView: View {
     }
 
     private var availableVoices: [CreatorVoice] {
-        let metadataMap = VoiceCatalogStore.shared.metadataByVoiceID
-        let nonArchived = model.creatorVoices.filter {
-            $0.available && metadataMap[$0.id]?.scope != .archived
+        _ = catalogRefreshTick
+        let catalog = VoiceCatalogStore.shared.snapshot()
+        return model.creatorVoices.filter {
+            $0.available && catalog.permitsSurface($0, bookID: nil)
         }
-        return nonArchived.isEmpty ? model.creatorVoices.filter(\.available) : nonArchived
     }
 
     private var selectedVoice: CreatorVoice? {
@@ -1075,27 +1079,15 @@ public struct VoiceDesignView: View {
             if let ctx = navigation.audiobookVoiceReturnContext,
                let published = model.lastPublishedDesignedVoice
             {
-                let safeEntry = model.safeVoiceCatalog?.data.first(where: { $0.id == published.id })
-                let capabilities = model.effectiveCapabilities
-                let resolvedModelRev = safeEntry?.model.catalogRevision
-                    ?? safeEntry?.model.runtimeRevision
-                    ?? capabilities?.models["tts_clone"]?.catalogRevision
-                    ?? capabilities?.models["tts"]?.catalogRevision
-                    ?? "qwen3-tts-v1"
-                let binding = AudiobookVoiceBinding(
-                    roleID: ctx.roleID,
-                    voiceID: published.id,
-                    voiceRevision: published.revision ?? safeEntry?.voiceRevision ?? "v1",
-                    modelRevision: resolvedModelRev,
-                    isSynthesisReady: true,
-                    callerSeed: model.lastPublishedDesignedSeed
-                )
                 Task {
-                    await model.audiobookWorkflow.completeVoiceRoundTrip(binding: binding, context: ctx)
+                    await model.audiobookWorkflow.completeVoiceRoundTrip(voiceID: published.id, creationSource: .voiceDesign, context: ctx)
                     navigation.audiobookVoiceReturnContext = nil
                     appliedReturnContextKey = nil
                     navigation.request(.audiobook)
                 }
+            } else if let published = model.lastPublishedDesignedVoice {
+                do { try VoiceCatalogStore.shared.registerGlobalVoice(voiceID: published.id, creationSource: .voiceDesign) }
+                catch { errorMessage = "声音已创建，但目录保存失败：\(error.localizedDescription)" }
             }
         }
     }
@@ -2460,6 +2452,7 @@ public struct VoiceLibraryView: View {
     @State private var searchText = ""
     @State private var sourceFilter = VoiceSourceFilter.all
     @State private var scopeFilter = VoiceScopeFilter.activeGlobal
+    @State private var favoritesOnly = false
     @State private var selectedArchetype: AudiobookVoiceArchetype? = nil
     @State private var catalogRefreshTick: Int = 0
     @State private var selectionNotice: String?
@@ -2490,18 +2483,18 @@ public struct VoiceLibraryView: View {
     /// 100+ 音色库四级作用域筛选（默认隐藏已归档音色，支持一键切换查看剧组专用与星标收藏）。
     private enum VoiceScopeFilter: String, CaseIterable, Identifiable {
         case activeGlobal
-        case favorites
         case bookExclusive
         case archived
+        case unknown
 
         var id: String { rawValue }
 
         var title: String {
             switch self {
             case .activeGlobal: "通用活跃"
-            case .favorites: "星标收藏"
             case .bookExclusive: "剧组专用"
             case .archived: "已归档"
+            case .unknown: "待确认"
             }
         }
     }
@@ -2591,6 +2584,9 @@ public struct VoiceLibraryView: View {
         .task {
             await model.refreshCreatorVoices()
             syncSelectedVoice()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: VoiceCatalogStore.didChange, object: VoiceCatalogStore.shared)) { _ in
+            catalogRefreshTick += 1
         }
         .task(id: selectedVoiceID) {
             guard let selectedVoiceID else { return }
@@ -2712,6 +2708,9 @@ public struct VoiceLibraryView: View {
                 .fixedSize()
                 .accessibilityLabel("按作用域筛选音色")
 
+                Toggle("仅收藏", isOn: $favoritesOnly)
+                    .toggleStyle(.checkbox)
+
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
 
                 Text(countText)
@@ -2796,6 +2795,11 @@ public struct VoiceLibraryView: View {
     /// One row: name, source badge, archetype & scope badges, one line of description, the availability
     /// note, and the inline preview. Everything heavier lives in the inspector
     /// (REDESIGN-SPEC §7.3).
+    private func saveCatalogChange(_ action: () throws -> Void) {
+        do { try action(); catalogRefreshTick += 1; selectionNotice = nil }
+        catch { selectionNotice = error.localizedDescription }
+    }
+
     private func voiceLibraryRow(_ voice: CreatorVoice) -> some View {
         _ = catalogRefreshTick
         let isPlaying = model.playingVoiceID == voice.id && model.isAudioPlaying
@@ -2810,8 +2814,7 @@ public struct VoiceLibraryView: View {
         )
         return HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
             Button {
-                VoiceCatalogStore.shared.toggleFavorite(voiceID: voice.id)
-                catalogRefreshTick += 1
+                saveCatalogChange { _ = try VoiceCatalogStore.shared.toggleFavorite(voiceID: voice.id) }
             } label: {
                 Image(systemName: meta?.isFavorite == true ? "star.fill" : "star")
                     .font(SpeechRailDesignTokens.Typography.caption)
@@ -2834,10 +2837,11 @@ public struct VoiceLibraryView: View {
                         .truncationMode(.tail)
                     sourceBadge(voice)
                     StatusPill(tone: .neutral, label: archetype.shortBadgeTitle)
-                    if meta?.scope == .bookExclusive {
+                    if meta?.visibilityScope == .bookExclusive {
                         let bookLabel = meta?.originBookTitle.map { "剧组：\($0)" } ?? "剧组专用"
                         StatusPill(tone: .healthy, label: bookLabel)
-                    } else if meta?.scope == .archived {
+                    }
+                    if meta?.lifecycleState == .archived {
                         StatusPill(tone: .neutral, label: "已归档")
                     }
                 }
@@ -2883,32 +2887,27 @@ public struct VoiceLibraryView: View {
         }
         .contextMenu {
             Button(meta?.isFavorite == true ? "取消星标收藏" : "设为星标收藏") {
-                VoiceCatalogStore.shared.toggleFavorite(voiceID: voice.id)
-                catalogRefreshTick += 1
+                saveCatalogChange { _ = try VoiceCatalogStore.shared.toggleFavorite(voiceID: voice.id) }
             }
             Menu("设置声部行当") {
                 ForEach(AudiobookVoiceArchetype.allCases) { arch in
                     Button(arch.title) {
-                        VoiceCatalogStore.shared.setArchetypeOverride(arch, for: voice.id)
-                        catalogRefreshTick += 1
+                        saveCatalogChange { try VoiceCatalogStore.shared.setArchetypeOverride(arch, for: voice.id) }
                     }
                 }
             }
-            if meta?.scope == .bookExclusive {
-                Button("⬆️ 晋升为全局通用音色") {
-                    _ = VoiceCatalogStore.shared.promoteToGlobalReusable(voiceID: voice.id)
-                    catalogRefreshTick += 1
+            if !voice.isSystem, meta?.visibilityScope != .globalReusable {
+                Button("设为通用声音") {
+                    saveCatalogChange { _ = try VoiceCatalogStore.shared.promoteToGlobalReusable(voiceID: voice.id) }
                 }
             }
-            if meta?.scope == .archived {
+            if meta?.lifecycleState == .archived {
                 Button("恢复为活跃音色") {
-                    VoiceCatalogStore.shared.unarchiveVoices(voiceIDs: [voice.id])
-                    catalogRefreshTick += 1
+                    saveCatalogChange { try VoiceCatalogStore.shared.unarchiveVoices(voiceIDs: [voice.id]) }
                 }
             } else if !voice.isSystem {
                 Button("归档该音色（从选角器隐藏）") {
-                    VoiceCatalogStore.shared.archiveVoices(voiceIDs: [voice.id])
-                    catalogRefreshTick += 1
+                    saveCatalogChange { try VoiceCatalogStore.shared.archiveVoices(voiceIDs: [voice.id]) }
                 }
             }
         }
@@ -2965,7 +2964,8 @@ public struct VoiceLibraryView: View {
 
     private var filteredVoices: [CreatorVoice] {
         _ = catalogRefreshTick
-        let metadataMap = VoiceCatalogStore.shared.metadataByVoiceID
+        let catalog = VoiceCatalogStore.shared.snapshot()
+        let metadataMap = catalog.state.metadataByVoiceID
         let bySourceAndScope = model.creatorVoices.filter { voice in
             let matchesSource: Bool = switch sourceFilter {
             case .all: true
@@ -2975,18 +2975,20 @@ public struct VoiceLibraryView: View {
             guard matchesSource else { return false }
 
             let meta = metadataMap[voice.id]
-            let scope = meta?.scope ?? .globalReusable
+            let isDefaultSystemPreset = voice.mode == "system" && voice.isSystem && voice.isDefault
+            let scope = meta?.visibilityScope ?? (isDefaultSystemPreset ? .globalReusable : .unknown)
+            let active = meta?.lifecycleState != .archived
             let matchesScope: Bool = switch scopeFilter {
             case .activeGlobal:
-                scope != .archived
-            case .favorites:
-                meta?.isFavorite == true && scope != .archived
+                active && catalog.permitsSurface(voice, bookID: nil)
             case .bookExclusive:
-                scope == .bookExclusive
+                active && scope == .bookExclusive
             case .archived:
-                scope == .archived
+                !active
+            case .unknown:
+                active && scope == .unknown && !isDefaultSystemPreset
             }
-            guard matchesScope else { return false }
+            guard matchesScope, !favoritesOnly || meta?.isFavorite == true else { return false }
 
             if let selectedArchetype {
                 let arch = VoiceTaxonomyClassifier.resolveArchetype(
