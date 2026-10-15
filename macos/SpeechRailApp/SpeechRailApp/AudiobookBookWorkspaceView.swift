@@ -1,3 +1,4 @@
+import SpeechRailControlKit
 import SwiftUI
 
 /// T13：三栏有声书工作台视图（左：章节导航与就绪状态；中：准备与角色/制作与返修共享主画布；右：人物与配声检查器，窄窗口自适应收起为浮层）。
@@ -1325,7 +1326,7 @@ private struct AudiobookVoicePickerPopover: View {
                         if isBoundToSelf {
                             Text("当前已绑")
                                 .font(SpeechRailDesignTokens.Typography.caption)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.healthy)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.ready)
                         } else if let exclusiveHolder = lockedByExclusiveLead {
                             Text("主角「\(exclusiveHolder.displayName)」独占")
                                 .font(SpeechRailDesignTokens.Typography.caption)

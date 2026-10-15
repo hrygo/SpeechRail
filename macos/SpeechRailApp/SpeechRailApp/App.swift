@@ -178,8 +178,9 @@ struct SpeechRailApp: App {
 #if DEBUG
         // 种子 UI fixture：确定性 fake 分析链路 + 逐调用延迟，让进度轨道
         // 在真实界面里保持数秒可观测。仅隔离 temp 书，不碰用户存储、网络与模型。
+        // 门控与启动导入共用 Self.isSeededAudiobookAnalysisUITest，避免单参数误触。
         let audiobookDependencies: AudiobookDependencies
-        if isUITest, ProcessInfo.processInfo.arguments.contains("--ui-test-seeded-audiobook-analysis") {
+        if Self.isSeededAudiobookAnalysisUITest {
             var seeded = liveAudiobookDependencies
             let fixtureConfig = LLMConfiguration(baseURL: "http://127.0.0.1:1", model: "uitest-seeded")
             seeded.resolveAnalysisSnapshot = { generation in
@@ -477,18 +478,39 @@ struct SpeechRailApp: App {
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
     }
 
+    /// 种子 fixture 双门：只有同时带 `--ui-test` 与种子参数才启用。
+    /// 依赖覆盖与启动导入共用它——单带种子参数时两边都不动，
+    /// 避免把种子书误导入真实用户存储。
+    private static var isSeededAudiobookAnalysisUITest: Bool {
+        let args = ProcessInfo.processInfo.arguments
+        return args.contains("--ui-test")
+            && args.contains("--ui-test-seeded-audiobook-analysis")
+    }
+
+    /// 种子只播一次：窗口内容重现时 `.task` 可能再跑，不重复导入。
+    @MainActor
+    private static var didSeedUITestAudiobookBook = false
+
     /// 种子有声书：3 章 3 窗 TXT（每章 1 窗），导入隔离书并打开工作台；
     /// 不自动开始分析——UI 测试按真实用户路径点击主动作。
+    /// 失败时 assertion 可见：静默 return 会让 UI 测试死在远处的"主动作未出现"。
     @MainActor
     private static func seedUITestAudiobookBook(in workflow: AudiobookWorkflowModel) async {
+        guard !didSeedUITestAudiobookBook else { return }
+        didSeedUITestAudiobookBook = true
+        do {
+            try await seedUITestAudiobookBookThrowing(in: workflow)
+        } catch {
+            assertionFailure("种子有声书 fixture 导入失败：\(error)")
+        }
+    }
+
+    @MainActor
+    private static func seedUITestAudiobookBookThrowing(in workflow: AudiobookWorkflowModel) async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("SpeechRailUITests", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        } catch {
-            return
-        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         var lines: [String] = []
         for chapter in 1...3 {
             lines.append("第\(chapter)章 种子回声")
@@ -498,14 +520,16 @@ struct SpeechRailApp: App {
             lines.append("")
         }
         let fileURL = directory.appendingPathComponent("seeded_analysis.txt")
-        do {
-            try Data(lines.joined(separator: "\n").utf8).write(to: fileURL)
-        } catch {
-            return
-        }
+        try Data(lines.joined(separator: "\n").utf8).write(to: fileURL)
         await workflow.refreshShelf()
         await workflow.prepareImport(fileURL: fileURL, encoding: .utf8)
+        guard workflow.importPreview != nil else {
+            throw UITestAudiobookSeedError("prepareImport 未产出预览：\(workflow.errorMessage ?? "未知错误")")
+        }
         await workflow.confirmImport()
+        guard workflow.selectedBook != nil else {
+            throw UITestAudiobookSeedError("confirmImport 未选中书籍：\(workflow.errorMessage ?? "未知错误")")
+        }
     }
 #endif
 
@@ -581,8 +605,8 @@ struct SpeechRailApp: App {
                     )
                     await model.refreshCreatorVoices()
 #if DEBUG
-                    // 种子 fixture：只在显式参数下导入隔离 3 章书；不自动分析。
-                    if ProcessInfo.processInfo.arguments.contains("--ui-test-seeded-audiobook-analysis") {
+                    // 种子 fixture：双门通过后导入隔离 3 章书；不自动分析。
+                    if Self.isSeededAudiobookAnalysisUITest {
                         await Self.seedUITestAudiobookBook(in: model.audiobookWorkflow)
                     }
 #endif
@@ -1610,6 +1634,17 @@ private actor UITestOperationState {
             )
         )
     }
+}
+
+/// 种子 fixture 导入失败：只带不含原文的技术原因，进 assertion 不进 UI。
+private struct UITestAudiobookSeedError: LocalizedError, Sendable {
+    let detail: String
+
+    init(_ detail: String) {
+        self.detail = detail
+    }
+
+    var errorDescription: String? { detail }
 }
 
 /// 种子有声书分析链路：确定性 fake 三阶段应答 + 逐调用延迟，让进度轨道

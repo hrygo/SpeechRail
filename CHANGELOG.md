@@ -20,7 +20,8 @@
   XCUITest（`testAudiobookAnalysisRailShowsLiveProgressAndCompletes`）：
   点击「分析全书」→ 轨道带实时百分比 → 终态回到「全书分析已完成」→
   主动作保持唯一。该测试已随 `--test-unit` 构建验证 UITests target
-  编译链接通过；前台执行需用户逐次明确授权，默认不跑。
+  编译链接通过（该入口默认跳过整个 UI target，只做编译验证）；
+  前台执行需用户逐次明确授权。
 
 ### Fixed
 

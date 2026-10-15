@@ -1,0 +1,251 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" width="1200" height="760" role="img" aria-labelledby="pipeline-title pipeline-desc">
+  <title id="pipeline-title">SpeechRail 有声书大模型全流程分析流水线架构</title>
+  <desc id="pipeline-desc">规范化只读真源与分层原子化切分后，进入动态滑动窗口规划，按三阶段有界流水线（逐窗提取、角色归并、逐段标注）逐步处理，通过覆盖性校验后事务性持久化到 SQLite WAL 检查点。</desc>
+
+  <defs>
+    <style>
+      <![CDATA[
+        text {
+          font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
+          -webkit-font-smoothing: antialiased;
+        }
+        .canvas-bg { fill: #f8f9fa; }
+        .node-card { fill: #ffffff; stroke: #dcdce0; stroke-width: 1.5; filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.04)); }
+        .container-box { fill: #ffffff; stroke: #c5d2e0; stroke-width: 1.5; rx: 12px; }
+        .container-header { fill: #f1f3f5; }
+        
+        .stage-card-1 { fill: #f0f7ff; stroke: #93c5fd; stroke-width: 1.5; }
+        .stage-card-2 { fill: #fffbeb; stroke: #fde68a; stroke-width: 1.5; }
+        .stage-card-3 { fill: #f0fdf4; stroke: #86efac; stroke-width: 1.5; }
+        
+        .flow-line { fill: none; stroke: #94a3b8; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+        .flow-line-primary { fill: none; stroke: #0284c7; stroke-width: 2; stroke-linecap: round; }
+        
+        .badge-1 { fill: #e0f2fe; stroke: #0284c7; stroke-width: 1; rx: 4px; }
+        .badge-2 { fill: #fef3c7; stroke: #d97706; stroke-width: 1; rx: 4px; }
+        .badge-3 { fill: #dcfce7; stroke: #059669; stroke-width: 1; rx: 4px; }
+        
+        .badge-text-1 { fill: #0369a1; font-size: 10px; font-weight: 700; letter-spacing: 0.5px; }
+        .badge-text-2 { fill: #b45309; font-size: 10px; font-weight: 700; letter-spacing: 0.5px; }
+        .badge-text-3 { fill: #047857; font-size: 10px; font-weight: 700; letter-spacing: 0.5px; }
+        
+        .main-title { font-size: 22px; font-weight: 700; fill: #111827; letter-spacing: -0.4px; }
+        .main-subtitle { font-size: 13px; font-weight: 400; fill: #4b5563; }
+        
+        .node-title { font-size: 14px; font-weight: 600; fill: #111827; }
+        .node-subtitle { font-size: 11px; font-weight: 400; fill: #4b5563; }
+        .mono-text { font-family: "SF Mono", Menlo, Monaco, Consolas, monospace; font-size: 11px; font-weight: 500; fill: #334155; }
+        
+        .stage-title { font-size: 15px; font-weight: 700; }
+        .stage-title-1 { fill: #0c4a6e; }
+        .stage-title-2 { fill: #78350f; }
+        .stage-title-3 { fill: #064e3b; }
+        
+        .stage-desc { font-size: 11.5px; font-weight: 400; fill: #334155; }
+        
+        .chip-tag { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1; rx: 4px; }
+        .chip-text { font-size: 10.5px; font-weight: 600; fill: #475569; text-anchor: middle; }
+        
+        .step-label { font-size: 10px; font-weight: 600; fill: #64748b; text-anchor: middle; }
+        .step-pill { fill: #f8fafc; stroke: #cbd5e1; stroke-width: 1; rx: 4px; }
+
+        .step-badge-blue { fill: #f0f9ff; stroke: #0284c7; stroke-width: 1.2; rx: 12px; }
+        .step-badge-green { fill: #f0fdf4; stroke: #059669; stroke-width: 1.2; rx: 12px; }
+        .step-badge-text-blue { font-size: 11px; font-weight: 600; fill: #0284c7; text-anchor: middle; }
+        .step-badge-text-green { font-size: 11px; font-weight: 600; fill: #047857; text-anchor: middle; }
+      ]]>
+    </style>
+
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M1,1 L6,4 L1,7 Z" fill="#94a3b8"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M1,1 L6,4 L1,7 Z" fill="#0284c7"/>
+    </marker>
+  </defs>
+
+  <!-- Background canvas -->
+  <rect class="canvas-bg" width="1200" height="760" rx="12"/>
+
+  <!-- Top Header -->
+  <g transform="translate(40, 36)">
+    <text class="main-title" x="0" y="0">有声书大模型全流程分析流水线拓扑</text>
+    <text class="main-subtitle" x="0" y="22">规范化只读真源 · 动态滑动窗口规划 · 三阶段有界分析 · 递归二分与优雅降级 · SQLite WAL 秒级检查点</text>
+  </g>
+
+  <!-- Row 1: Ingestion & Atomization (4 symmetrical cards, 250px each, 40px gaps, 1120px total span) -->
+  <g transform="translate(40, 84)">
+    <!-- Box 1: TXT -->
+    <rect class="node-card" x="0" y="0" width="250" height="70" rx="8"/>
+    <rect x="8" y="10" width="4" height="50" rx="2" fill="#94a3b8"/>
+    <text class="node-title" x="22" y="28">原始小说 TXT</text>
+    <text class="node-subtitle" x="22" y="48">单篇 / 短篇 / 百万字长篇原著</text>
+
+    <!-- Arrow 1 -> 2 -->
+    <path class="flow-line" d="M 250 35 L 290 35" marker-end="url(#arrow)"/>
+    <text class="step-label" x="270" y="26">转码校验</text>
+
+    <!-- Box 2: Source.txt -->
+    <rect class="node-card" x="290" y="0" width="250" height="70" rx="8"/>
+    <rect x="298" y="10" width="4" height="50" rx="2" fill="#0284c7"/>
+    <text class="node-title" x="312" y="28">只读真源 source.txt</text>
+    <text class="mono-text" x="312" y="48">UTF-8 标量 · [start, end) 字节</text>
+
+    <!-- Arrow 2 -> 3 -->
+    <path class="flow-line" d="M 540 35 L 580 35" marker-end="url(#arrow)"/>
+    <text class="step-label" x="560" y="26">分层切分</text>
+
+    <!-- Box 3: Atoms -->
+    <rect class="node-card" x="580" y="0" width="250" height="70" rx="8"/>
+    <rect x="588" y="10" width="4" height="50" rx="2" fill="#059669"/>
+    <text class="node-title" x="602" y="28">TextAtom 语义单元流</text>
+    <text class="mono-text" x="602" y="48">40~120字 · 上限 160字 (maxAtom)</text>
+
+    <!-- Arrow 3 -> 4 -->
+    <path class="flow-line" d="M 830 35 L 870 35" marker-end="url(#arrow)"/>
+    <text class="step-label" x="850" y="26">滑动规划</text>
+
+    <!-- Box 4: Window Planning -->
+    <rect class="node-card" x="870" y="0" width="250" height="70" rx="8"/>
+    <rect x="878" y="10" width="4" height="50" rx="2" fill="#7c3aed"/>
+    <text class="node-title" x="892" y="28">planRootWindows</text>
+    <text class="mono-text" x="892" y="48">单窗 ≤4,000字 / ≤256 Atoms 预算</text>
+  </g>
+
+  <!-- Flow down to Main Stage Container (with occlusion badge to eliminate line-text collision) -->
+  <path class="flow-line-primary" d="M 600 154 L 600 196" marker-end="url(#arrow-blue)"/>
+  <rect class="step-badge-blue" x="515" y="163" width="170" height="24"/>
+  <text class="step-badge-text-blue" x="600" y="179">进入有界受控流水线</text>
+
+  <!-- Big Middle Container: 3-Phase Bounded Pipeline -->
+  <g transform="translate(40, 196)">
+    <rect class="container-box" x="0" y="0" width="1120" height="400" rx="12"/>
+    
+    <!-- Container Header -->
+    <path d="M 0 12 Q 0 0 12 0 L 1108 0 Q 1120 0 1120 12 L 1120 40 L 0 40 Z" fill="#f1f3f5"/>
+    <circle cx="20" cy="20" r="4.5" fill="#ef4444"/>
+    <circle cx="34" cy="20" r="4.5" fill="#f59e0b"/>
+    <circle cx="48" cy="20" r="4.5" fill="#10b981"/>
+    <text x="68" y="24" font-size="13" font-weight="600" fill="#1f2937">三阶段大模型语义分析管线 (Three-Phase Pipeline)</text>
+    <text x="920" y="24" font-size="11" font-weight="500" fill="#6b7280">预算硬边界 · 会话级缓存 · 优雅旁白回退</text>
+
+    <!-- Phase 1 Card: Extraction -->
+    <g transform="translate(24, 54)">
+      <rect class="stage-card-1" x="0" y="0" width="338" height="326" rx="8"/>
+      <!-- Header Badge -->
+      <rect class="badge-1" x="18" y="16" width="115" height="22" rx="4"/>
+      <text class="badge-text-1" x="24" y="31">PHASE 1: 逐窗提取</text>
+      <text class="stage-title stage-title-1" x="18" y="62">人物与声线线索抽取</text>
+      <text class="mono-text" x="18" y="82" fill="#0284c7">audiobook_extract (v1)</text>
+
+      <line x1="18" y1="94" x2="320" y2="94" stroke="#bfdbfe" stroke-width="1"/>
+
+      <!-- Features (Strict line spacing) -->
+      <text class="stage-desc" x="18" y="118">• 目标：逐窗发现所有人物称呼、别称与原文依据</text>
+      <text class="stage-desc" x="18" y="140">• 原文提炼 voiceTraitEvidence 声线人设线索</text>
+      <text class="stage-desc" x="18" y="162">• 短索引防幻觉：支持 "idx": 1 短整型序号引用</text>
+      <text class="stage-desc" x="18" y="184">• 内存级提取缓存：按 windowKey 免除重算</text>
+      <text class="stage-desc" x="18" y="206">• 阶段三中断重跑时：阶段一 0 次重复调用</text>
+
+      <!-- Pill tags -->
+      <g transform="translate(18, 274)">
+        <rect class="chip-tag" x="0" y="0" width="94" height="26" rx="4"/>
+        <text class="chip-text" x="47" y="17">Token ≤ 4,000</text>
+        <rect class="chip-tag" x="102" y="0" width="94" height="26" rx="4"/>
+        <text class="chip-text" x="149" y="17">短索引 1...N</text>
+        <rect class="chip-tag" x="204" y="0" width="98" height="26" rx="4"/>
+        <text class="chip-text" x="253" y="17">windowKey 缓存</text>
+      </g>
+    </g>
+
+    <!-- Arrow Phase 1 -> Phase 2 -->
+    <path class="flow-line" d="M 362 217 L 388 217" marker-end="url(#arrow)"/>
+    <text class="step-label" x="375" y="207">聚合</text>
+
+    <!-- Phase 2 Card: Merge -->
+    <g transform="translate(388, 54)">
+      <rect class="stage-card-2" x="0" y="0" width="344" height="326" rx="8"/>
+      <!-- Header Badge -->
+      <rect class="badge-2" x="18" y="16" width="115" height="22" rx="4"/>
+      <text class="badge-text-2" x="24" y="31">PHASE 2: 角色归并</text>
+      <text class="stage-title stage-title-2" x="18" y="62">画像融合与冲突排查</text>
+      <text class="mono-text" x="18" y="82" fill="#d97706">audiobook_merge (v1)</text>
+
+      <line x1="18" y1="94" x2="326" y2="94" stroke="#fde68a" stroke-width="1"/>
+
+      <!-- Features (Strict line spacing) -->
+      <text class="stage-desc" x="18" y="118">• 受控分批：严格按 32 候选/批 送入大模型</text>
+      <text class="stage-desc" x="18" y="140">• 本地预聚类：别名互包含候选送模前合并</text>
+      <text class="stage-desc" x="18" y="162">• 原文微摘要：附带 ≤2 条、≤60 字原文消歧</text>
+      <text class="stage-desc" x="18" y="184">• 人设立体化：沉淀五维声学画像摘要</text>
+      <text class="stage-desc" x="18" y="206">• 消歧兜底：冲突标记 isCollisionUnresolved</text>
+
+      <!-- Pill tags -->
+      <g transform="translate(18, 274)">
+        <rect class="chip-tag" x="0" y="0" width="90" height="26" rx="4"/>
+        <text class="chip-text" x="45" y="17">32 候选/批</text>
+        <rect class="chip-tag" x="98" y="0" width="98" height="26" rx="4"/>
+        <text class="chip-text" x="147" y="17">微摘要 ≤60字</text>
+        <rect class="chip-tag" x="204" y="0" width="104" height="26" rx="4"/>
+        <text class="chip-text" x="256" y="17">五维声学画像</text>
+      </g>
+    </g>
+
+    <!-- Arrow Phase 2 -> Phase 3 -->
+    <path class="flow-line" d="M 732 217 L 758 217" marker-end="url(#arrow)"/>
+    <text class="step-label" x="745" y="207">下发</text>
+
+    <!-- Phase 3 Card: Annotation -->
+    <g transform="translate(758, 54)">
+      <rect class="stage-card-3" x="0" y="0" width="338" height="326" rx="8"/>
+      <!-- Header Badge -->
+      <rect class="badge-3" x="18" y="16" width="115" height="22" rx="4"/>
+      <text class="badge-text-3" x="24" y="31">PHASE 3: 精确定向</text>
+      <text class="stage-title stage-title-3" x="18" y="62">逐窗说话人判定标注</text>
+      <text class="mono-text" x="18" y="82" fill="#059669">audiobook_annotate (v1)</text>
+
+      <line x1="18" y1="94" x2="320" y2="94" stroke="#86efac" stroke-width="1"/>
+
+      <!-- Features (Strict line spacing) -->
+      <text class="stage-desc" x="18" y="118">• 定向标注：仅标直接引语，纯叙述省 70% Token</text>
+      <text class="stage-desc" x="18" y="140">• 跨窗状态链：平滑传递前窗末尾 speaker 身份</text>
+      <text class="stage-desc" x="18" y="162">• 候选裁剪：动态选拔相关角色 ≤4,000 字符</text>
+      <text class="stage-desc" x="18" y="184">• 优雅回退：未明确角色弱引语自动归属旁白</text>
+      <text class="stage-desc" x="18" y="206">• 二分容错：超时/截断递归二分，单窗 ≤4 次</text>
+
+      <!-- Pill tags -->
+      <g transform="translate(18, 274)">
+        <rect class="chip-tag" x="0" y="0" width="94" height="26" rx="4"/>
+        <text class="chip-text" x="47" y="17">Token ≤ 6,000</text>
+        <rect class="chip-tag" x="102" y="0" width="94" height="26" rx="4"/>
+        <text class="chip-text" x="149" y="17">状态链 speaker</text>
+        <rect class="chip-tag" x="204" y="0" width="98" height="26" rx="4"/>
+        <text class="chip-text" x="253" y="17">旁白优雅回退</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- Flow down to Persistence (with green validation badge to eliminate line-text collision) -->
+  <path class="flow-line-primary" d="M 600 596 L 600 638" marker-end="url(#arrow-blue)"/>
+  <rect class="step-badge-green" x="445" y="605" width="310" height="24"/>
+  <text class="step-badge-text-green" x="600" y="621">逐窗覆盖性校验通过 (Cover Primary Atoms)</text>
+
+  <!-- Bottom Stage: Persistence -->
+  <g transform="translate(40, 638)">
+    <rect class="node-card" x="0" y="0" width="1120" height="84" rx="8"/>
+    <rect x="8" y="12" width="4" height="60" rx="2" fill="#0284c7"/>
+
+    <g transform="translate(24, 22)">
+      <text class="node-title" x="0" y="0">SQLite WAL 检查点持久化 (library.sqlite3)</text>
+      <text class="mono-text" x="0" y="24">事务持久化：annotations (assignment_json) · analysis_windows (is_completed = 1) · characters</text>
+      <text class="node-subtitle" x="0" y="44">支持随时暂停、断网续跑、崩溃秒级复用 · 已完成窗口比对 (primaryAtomIDs, policyFingerprint, configDigest) 0ms 复用</text>
+    </g>
+
+    <!-- Status pill -->
+    <g transform="translate(930, 26)">
+      <rect x="0" y="0" width="166" height="32" rx="16" fill="#e0f2fe" stroke="#38bdf8" stroke-width="1"/>
+      <circle cx="16" cy="16" r="4.5" fill="#0284c7"/>
+      <text x="28" y="20.5" font-size="11" font-weight="700" fill="#0369a1">0ms 零开销断点恢复</text>
+    </g>
+  </g>
+</svg>

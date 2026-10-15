@@ -448,7 +448,7 @@ final class AudiobookWorkflowTests: XCTestCase {
         )
         await workflow.completeVoiceRoundTrip(binding: returnedBinding, context: context)
         XCTAssertEqual(workflow.voiceBindings[narrator.id]?.voiceID, "v-designed-narrator")
-        XCTAssertTrue(workflow.voiceReturnBannerMessage?.contains("已将新音色「v-designed-narrator」绑定给角色") == true)
+        XCTAssertTrue(workflow.voiceReturnBannerMessage?.contains("已将本书专用新音色「v-designed-narrator」绑定给角色") == true)
     }
 
     func testBeginAnalysisFailurePreservesErrorMessageInsteadOfBeingClearedByOpenBook() async throws {
@@ -470,5 +470,47 @@ final class AudiobookWorkflowTests: XCTestCase {
         XCTAssertFalse(workflow.isAnalyzing)
         XCTAssertNotNil(workflow.errorMessage, "openBook 不得清空分析失败后的错误提示")
         XCTAssertTrue(workflow.errorMessage?.contains("AI") == true)
+    }
+
+    /// 种子 fixture 契约锁：UI 测试的种子 TXT 必须经真实导入产出 3 章，
+    /// 且真实规划器必须产出 3 窗（每章 1 窗）。文本与
+    /// `SpeechRailApp.seedUITestAudiobookBook` 逐字一致，两边任一漂移
+    /// 这里先红——前台授权跑 T05d 前的最后一道静态门。
+    func testSeededFixtureTextYieldsThreeChaptersAndThreeWindows() async throws {
+        let (workflow, _) = makeWorkflow()
+        var lines: [String] = []
+        for chapter in 1...3 {
+            lines.append("第\(chapter)章 种子回声")
+            lines.append("林远站在桥头望向远山。")
+            lines.append("“跟紧我。”他回头说道。")
+            lines.append("阿远点头，风穿过竹林。")
+            lines.append("")
+        }
+        let txtURL = tempRoot.appendingPathComponent("seed_contract.txt")
+        try Data(lines.joined(separator: "\n").utf8).write(to: txtURL)
+
+        await workflow.prepareImport(fileURL: txtURL, encoding: .utf8)
+        let preview = try XCTUnwrap(workflow.importPreview)
+        XCTAssertEqual(preview.chapters.count, 3, "种子文本必须被识别为 3 章")
+        await workflow.confirmImport()
+        let bookID = try XCTUnwrap(workflow.selectedBook?.id)
+        XCTAssertEqual(workflow.chapters.count, 3, "导入后工作台应有 3 章")
+
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let chapters = try await store.chapters(for: bookID)
+        let atoms = try await store.atoms(for: bookID)
+        let source = try await store.sourceIndex(for: bookID)
+        let config = LLMConfiguration(baseURL: "http://127.0.0.1:8000/v1", model: "test-model")
+        let snapshot = AudiobookAnalysisConfigSnapshot(configuration: config, generation: 1)
+        let windows = try AudiobookAnalysisPipeline.planRootWindows(
+            bookID: bookID,
+            chapters: chapters,
+            atoms: atoms,
+            source: source,
+            policy: .standard,
+            config: snapshot
+        )
+        XCTAssertEqual(windows.count, 3, "种子书必须规划为 3 窗（每章 1 窗）")
+        XCTAssertEqual(Set(windows.map(\.chapterID)).count, 3, "3 窗应分属 3 个不同章节")
     }
 }
