@@ -35,11 +35,10 @@ MATRIX = ROOT / "docs" / "design" / "2026-09-15-macos-uiux-redesign" / "UIUX-AUD
 #: Registry order: route, shortcut key, shortcut modifiers.
 ROUTES: tuple[tuple[str, str, str], ...] = (
     ("dubbing", "1", "command"),
-    ("audiobook", "b", "commandShift"),
     ("voiceDesign", "2", "command"),
     ("voiceClone", "3", "command"),
     ("voiceLibrary", "4", "command"),
-    ("works", "5", "command"),
+    ("audiobook", "5", "command"),
     ("assistant", "6", "command"),
     ("meeting", "7", "command"),
     ("captions", "8", "command"),
@@ -54,11 +53,10 @@ ROUTES: tuple[tuple[str, str, str], ...] = (
 #: The sidebar title each route must show, in registry order.
 UI_TITLES: tuple[str, ...] = (
     "配音台",
-    "有声书工坊",
     "音色创作",
     "音色克隆",
     "音色库",
-    "我的作品",
+    "有声书工坊",
     "语音助手",
     "会议助手",
     "实时字幕",
@@ -141,8 +139,8 @@ def main() -> int:
             print(f"route contract check failed: {problem}", file=sys.stderr)
         return 1
     print(
-        "macOS route contract: 15 enum cases, 15 shortcut specs, 15 UI test entries, "
-        "15 matrix entries, one registry"
+        "macOS route contract: 14 enum cases, 14 shortcut specs, 14 UI test entries, "
+        "14 matrix entries, one registry"
     )
     return 0
 

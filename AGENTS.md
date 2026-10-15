@@ -45,7 +45,7 @@ SpeechRail 是面向单人 Apple Silicon Mac 的本地共享 ASR/TTS 服务，�
 - REST、Realtime、MCP 和 macOS 控制面的具体接口以各自契约和文档为准，不在本文件维护端点清单。
 - Realtime 只承载 OpenAI Realtime 的 ASR/TTS 子集与 SpeechRail 命名空间扩展，不承载 LLM response、tool call、播放、会议或应用级打断策略。
 - `speechrail-mcp` 是无状态 REST 代理，支持其文档声明的传输方式；不导入 FastAPI 应用、不加载模型，Realtime 仍直接使用 `/v1/realtime`。
-- `macos/SpeechRailApp` 是 SwiftUI 控制面，通过受约束的 XPC 委托现有 Python CLI 和唯一的 `com.speechrail` user `LaunchAgent`；不加载模型、不直接执行 `launchctl`。它面向本机用户分为三组：创作（配音台、音色设计与克隆、音色库、我的作品）、会话（语音助手、会议助手、实时字幕、AI 提词器）和引擎（服务状态、运行监控、模型组合、诊断、开发者文档）。采集与播放只在会话功能启用期间存在，离开功能即释放；PCM 不落盘，记录只落本机 SQLite 的文字。唯一的落盘例外是运维人员显式打开的限时 ASR 排障录音（`SPEECHRAIL_ASR_DEBUG_CAPTURE_UNTIL`，见安全与隐私），默认关闭、到期自动停。
+- `macos/SpeechRailApp` 是 SwiftUI 控制面，通过受约束的 XPC 委托现有 Python CLI 和唯一的 `com.speechrail` user `LaunchAgent`；不加载模型、不直接执行 `launchctl`。它面向本机用户分为三组：创作（配音台、音色设计与克隆、音色库、有声书工坊）、会话（语音助手、会议助手、实时字幕、AI 提词器）和引擎（服务状态、运行监控、模型组合、诊断、开发者文档）。采集与播放只在会话功能启用期间存在，离开功能即释放；PCM 不落盘，记录只落本机 SQLite 的文字。唯一的落盘例外是运维人员显式打开的限时 ASR 排障录音（`SPEECHRAIL_ASR_DEBUG_CAPTURE_UNTIL`，见安全与隐私），默认关闭、到期自动停。
 
 ## 项目约束
 

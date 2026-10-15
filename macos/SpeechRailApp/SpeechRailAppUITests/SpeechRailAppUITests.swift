@@ -44,7 +44,7 @@ final class SpeechRailAppUITests: XCTestCase {
         openControlCenter(in: app)
 
         let routeTitles = [
-            "配音台", "有声书工坊", "音色创作", "音色克隆", "音色库", "我的作品",
+            "配音台", "音色创作", "音色克隆", "音色库", "有声书工坊",
             "语音助手", "会议助手", "实时字幕", "AI 提词器",
             "服务状态", "运行监控", "模型组合", "诊断", "开发者文档"
         ]
@@ -434,16 +434,17 @@ final class SpeechRailAppUITests: XCTestCase {
             "--ui-test", "--ui-test-open-control-center", "--ui-test-empty-works"
         ])
         openControlCenter(in: app)
-        app.buttons["我的作品"].clickWhenReady()
+        app.buttons["配音台"].clickWhenReady()
+        app.buttons["作品"].clickWhenReady()
         XCTAssertTrue(app.staticTexts["还没有作品"].waitForExistence(timeout: 10))
         XCTAssertFalse(identifierElement("work-row", in: app).exists)
-        app.buttons["去配音台"].clickWhenReady()
+        app.buttons["去制作"].clickWhenReady()
         let title = identifierElement("workspace-title", in: app)
         XCTAssertTrue(title.waitForExistence(timeout: 10))
         let navigated = NSPredicate(format: "label == %@", "配音台")
         expectation(for: navigated, evaluatedWith: title)
         waitForExpectations(timeout: 10)
-        app.buttons["我的作品"].clickWhenReady()
+        app.buttons["作品"].clickWhenReady()
         XCTAssertTrue(app.staticTexts["还没有作品"].waitForExistence(timeout: 10))
         XCTAssertFalse(identifierElement("work-row", in: app).exists)
     }
@@ -451,7 +452,8 @@ final class SpeechRailAppUITests: XCTestCase {
     func testWorksViewExposesSelectionAndExportActions() throws {
         let app = launchSpeechRail(windowSize: CGSize(width: 1280, height: 960))
         openControlCenter(in: app)
-        app.buttons["我的作品"].clickWhenReady()
+        app.buttons["配音台"].clickWhenReady()
+        app.buttons["作品"].clickWhenReady()
 
         XCTAssertTrue(
             app.staticTexts["本机生成过的音频都留在这里，可随时播放、导出或删除。"]

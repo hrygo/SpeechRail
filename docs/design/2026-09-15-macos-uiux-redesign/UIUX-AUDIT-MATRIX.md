@@ -43,16 +43,15 @@
 | automation | 用户当次授权后运行 XCUITest/UI 测试 | 前台真实流程和控件可发现性 |
 | unverified | 当前没有足够证据 | 不得推断为通过 |
 
-## 3. 当前 15 个路由
+## 3. 当前 14 个路由
 
 | 分组 | route | 页面实现 | 首屏任务 | 键盘入口（目标） | 当前证据 |
 |---|---|---|---|---|---|
-| 创作 | dubbing | DubbingDeskView | 输入文稿并生成语音 | ⌘1 | code |
-| 创作 | audiobook | AudiobookWorkshopView | 把 TXT 电子书制作成多角色有声书 | ⌘⇧B | code；shortcutSpec/unit |
+| 创作 | dubbing | DubbingDeskView | 输入文稿生成语音或管理作品 | ⌘1 | code |
 | 创作 | voiceDesign | VoiceDesignView | 描述、试听并保存音色 | ⌘2 | code |
 | 创作 | voiceClone | VoiceCloneView | 用录音注册可复用音色 | ⌘3 | code |
 | 创作 | voiceLibrary | VoiceLibraryView | 管理并试听音色 | ⌘4 | code |
-| 创作 | works | WorksView | 回看、播放、导出或删除作品 | ⌘5 | code |
+| 创作 | audiobook | AudiobookWorkshopView | 把 TXT 电子书制作成多角色有声书 | ⌘5 | code；shortcutSpec/unit |
 | 会话 | assistant | AssistantView | 开始、进行或回看语音对话 | ⌘6 | code |
 | 会话 | meeting | MeetingView | 记录会议并整理纪要 | ⌘7 | code |
 | 会话 | captions | SessionLibraryView(kind: .captions) | 开始或回看实时字幕 | ⌘8 | code |
@@ -112,11 +111,11 @@
 
 | 页面 | ready/empty | loading/in-flight | blocked/error | success/partial | 主动作证据 |
 |---|---|---|---|---|---|
-| 配音台 | 空文稿、已有文稿 | 生成中 | 服务不可用、输入无效 | 结果条、可播放/导出 | code；桌面未验证 |
+| 配音台 | 空文稿、已有文稿/空作品 | 生成中、导出中 | 服务不可用、输入无效 | 结果条、可播放/导出、作品管理 | code；桌面未验证 |
 | 音色创作 | 描述为空、候选为空 | 生成候选、试听中 | 能力不可用、服务异常 | 候选可保存、部分候选 | code；桌面未验证 |
 | 音色克隆 | 无录音、待录音 | 录音/注册中 | 麦克风拒绝、校验失败 | 音色已注册 | code；桌面未验证 |
 | 音色库 | 空列表、有音色 | 试听中、删除确认 | 试听失败、加载失败 | 试听完成、删除完成 | code；桌面未验证 |
-| 我的作品 | 空列表、有作品 | 播放/导出中 | 文件不可用、导出失败 | 播放完成、导出完成 | code；桌面未验证 |
+| 有声书工坊 | 空书架、有项目 | 分析中、合成中 | 文本异常、模型超预算 | 章节可导出、逐段返修 | code；桌面未验证 |
 
 ### 5.2 会话
 

@@ -98,8 +98,8 @@ final class WindowLayoutPolicyTests: XCTestCase {
         XCTAssertEqual(AppRoute.audiobook.title, "有声书工坊")
         XCTAssertEqual(
             AppRoute.audiobook.shortcutSpec,
-            AppRouteShortcutSpec(key: "b", modifiers: .commandShift)
+            AppRouteShortcutSpec(key: "5", modifiers: .command)
         )
-        XCTAssertEqual(AppRoute.allCases.count, 15)
+        XCTAssertEqual(AppRoute.allCases.count, 14)
     }
 }

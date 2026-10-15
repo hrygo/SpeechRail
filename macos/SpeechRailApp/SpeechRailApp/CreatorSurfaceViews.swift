@@ -19,8 +19,6 @@ public struct CreatorSurfaceView: View {
             VoiceDesignView()
         case .voiceLibrary:
             VoiceLibraryView()
-        case .works:
-            WorksView()
         default:
             EmptyView()
         }
@@ -29,14 +27,67 @@ public struct CreatorSurfaceView: View {
 
 // MARK: - 配音台 (Dubbing Desk)
 
+public enum DubbingDeskTab: String, CaseIterable, Identifiable, Sendable {
+    case compose = "compose"
+    case works = "works"
+
+    public var id: String { rawValue }
+    public var title: String {
+        switch self {
+        case .compose: "制作"
+        case .works: "作品"
+        }
+    }
+}
+
 public struct DubbingDeskView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @SceneStorage("speechrail.dubbing.activeTab") private var activeTab: DubbingDeskTab = .compose
+    @SceneStorage("speechrail.dubbing.text") private var dubbingText = "在星际航行的漫长岁月里，人类学会了倾听寂静。每当脉冲信号穿越猎户座悬臂，控制台都会闪烁起熟悉的琥珀色微光。"
+    @SceneStorage("speechrail.dubbing.voiceID") private var selectedVoiceID = ""
+
+    public init() {}
+
+    public var body: some View {
+        Group {
+            switch activeTab {
+            case .compose:
+                DubbingDeskComposerView(
+                    activeTab: $activeTab,
+                    dubbingText: $dubbingText,
+                    selectedVoiceID: $selectedVoiceID
+                )
+            case .works:
+                WorksView(
+                    activeTab: $activeTab,
+                    onNewDubbing: { script, voiceID in
+                        dubbingText = script
+                        selectedVoiceID = voiceID
+                        withAnimation(
+                            SpeechRailDesignTokens.Motion.resolved(
+                                SpeechRailDesignTokens.Motion.tabTransition,
+                                reduceMotion: reduceMotion
+                            )
+                        ) {
+                            activeTab = .compose
+                        }
+                    }
+                )
+            }
+        }
+    }
+}
+
+private struct DubbingDeskComposerView: View {
+    @Environment(AppModel.self) private var model
     @Environment(AppNavigationState.self) private var navigation
+    @Binding var activeTab: DubbingDeskTab
+    @Binding var dubbingText: String
+    @Binding var selectedVoiceID: String
     /// 开发者详情是全 App 的一个偏好（View ▸ 显示/隐藏开发者详情 ⌘⌥I），
     /// 页面直接绑定它，不再各写一条「显示开发者详情」菜单项（§6.2）。
     @AppStorage("speechrail.showDeveloperDetails") private var showInspector = false
-    @SceneStorage("speechrail.dubbing.text") private var dubbingText = "在星际航行的漫长岁月里，人类学会了倾听寂静。每当脉冲信号穿越猎户座悬臂，控制台都会闪烁起熟悉的琥珀色微光。"
-    @SceneStorage("speechrail.dubbing.voiceID") private var selectedVoiceID = ""
     /// `0` means "this window has no opinion yet", so the Settings default
     /// applies until the user moves the control in this window
     /// (REDESIGN-SPEC §7.10).
@@ -53,9 +104,7 @@ public struct DubbingDeskView: View {
     @FocusState private var isScriptFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    public init() {}
-
-    public var body: some View {
+    var body: some View {
         PageScaffold(route: .dubbing, layout: .content) {
             // 输入卡 / 控制条 / 结果条之间是页面级「块与块」：帧实测 19–20pt
             // （原先用 sm=12，比稿紧 8pt；REDESIGN-SPEC §5.6 / §11.6 第十七轮）。
@@ -73,6 +122,20 @@ public struct DubbingDeskView: View {
                 SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.standardEaseOut, reduceMotion: reduceMotion),
                 value: model.pendingDubbing == nil
             )
+        } trailing: {
+            Picker("视图模式", selection: $activeTab) {
+                Text("制作").tag(DubbingDeskTab.compose)
+                if model.works.isEmpty {
+                    Text("作品").tag(DubbingDeskTab.works)
+                } else {
+                    Text("作品 (\(model.works.count))").tag(DubbingDeskTab.works)
+                }
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            .labelsHidden()
+            .accessibilityLabel("配音台视图模式")
+            .accessibilityIdentifier("dubbing-surface-tab-picker")
         }
         // 头部（页面身份）由窗口组合根 `ControlCenterView` 声明；这一页没有头部动作：
         // 「生成语音」（⌘⏎）在正文里紧挨文稿，D9 之后也没有「服务状态」入口（§6.2）。
@@ -599,10 +662,12 @@ public struct DubbingDeskView: View {
                 // 4x 帧上它是纯文字 + `›`，与左边三颗白底按钮明显不同族。
                 // 应用此前用默认样式的 `Button`，离屏实渲出来是第四颗边框按钮。
                 Button {
-                    navigation.request(.works)
+                    withAnimation(SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.tabTransition, reduceMotion: reduceMotion)) {
+                        activeTab = .works
+                    }
                 } label: {
                     HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                        Text("查看我的作品")
+                        Text("在作品库中查看")
                         SpeechRailButtonIcon(
                             .next,
                             size: SpeechRailDesignTokens.Icon.compactButtonIconSize
@@ -620,7 +685,7 @@ public struct DubbingDeskView: View {
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
                 .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
                 .contentShape(Rectangle())
-                .accessibilityLabel("查看我的作品")
+                .accessibilityLabel("在作品库中查看")
             }
 
             if let playbackMessage = model.workPlaybackMessage {
@@ -3599,7 +3664,10 @@ private struct SavedWorkReceiptDetails: View {
 public struct WorksView: View {
     @Environment(AppModel.self) private var model
     @Environment(AppNavigationState.self) private var navigation
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("speechrail.showDeveloperDetails") private var showDeveloperDetails = false
+    @Binding var activeTab: DubbingDeskTab
+    var onNewDubbing: ((String, String) -> Void)?
     @State private var selectedWorkID: String?
     @State private var showInspector = true
     @State private var searchText = ""
@@ -3649,31 +3717,53 @@ public struct WorksView: View {
         }
     }
 
-    public init() {}
+    public init(
+        activeTab: Binding<DubbingDeskTab> = .constant(.works),
+        onNewDubbing: ((String, String) -> Void)? = nil
+    ) {
+        self._activeTab = activeTab
+        self.onNewDubbing = onNewDubbing
+    }
 
     public var body: some View {
-        PageScaffold(route: .works, layout: .content) {
+        PageScaffold(route: .dubbing, layout: .content) {
             worksBody
         } trailing: {
-            Menu("配音项目") {
-                ForEach(model.dubbingProjects) { project in
-                    Button(project.title) { savedDubbingProject = project }
-                }
-                Divider()
-                Button("重新读取") { model.refreshDubbingProjects() }
-            }
-            Menu("已删除作品") {
-                if let summary = model.deletedWorksSummary {
-                    Text("\(summary.count) 件，占用 \(ByteCountFormatter.string(fromByteCount: summary.byteCount, countStyle: .file))")
-                    Button("移入系统废纸篓…", role: .destructive) {
-                        isConfirmingRecoveryTrash = true
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                Picker("视图模式", selection: $activeTab) {
+                    Text("制作").tag(DubbingDeskTab.compose)
+                    if model.works.isEmpty {
+                        Text("作品").tag(DubbingDeskTab.works)
+                    } else {
+                        Text("作品 (\(model.works.count))").tag(DubbingDeskTab.works)
                     }
-                    .disabled(summary.count == 0)
                 }
-                if let message = model.deletedWorksMessage { Text(message) }
-                Button("重新读取") { model.refreshDeletedWorks() }
+                .pickerStyle(.segmented)
+                .fixedSize()
+                .labelsHidden()
+                .accessibilityLabel("配音台视图模式")
+                .accessibilityIdentifier("dubbing-surface-tab-picker")
+
+                Menu("配音项目") {
+                    ForEach(model.dubbingProjects) { project in
+                        Button(project.title) { savedDubbingProject = project }
+                    }
+                    Divider()
+                    Button("重新读取") { model.refreshDubbingProjects() }
+                }
+                Menu("已删除作品") {
+                    if let summary = model.deletedWorksSummary {
+                        Text("\(summary.count) 件，占用 \(ByteCountFormatter.string(fromByteCount: summary.byteCount, countStyle: .file))")
+                        Button("移入系统废纸篓…", role: .destructive) {
+                            isConfirmingRecoveryTrash = true
+                        }
+                        .disabled(summary.count == 0)
+                    }
+                    if let message = model.deletedWorksMessage { Text(message) }
+                    Button("重新读取") { model.refreshDeletedWorks() }
+                }
+                worksInspectorToggle
             }
-            worksInspectorToggle
         }
         .focusedSceneValue(
             \.selectedWorkCommand,
@@ -3813,13 +3903,22 @@ public struct WorksView: View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
             worksFeedbackSection
             ContentUnavailableView {
-                Label("还没有作品", systemImage: AppRoute.works.systemImage)
+                Label("还没有作品", systemImage: AppRoute.dubbing.systemImage)
             } description: {
                 Text("在配音台生成一段音频后，作品会保存在这里。")
             } actions: {
-                Button("去配音台") {
-                    navigation.request(.dubbing)
+                Button("去制作") {
+                    withAnimation(
+                        SpeechRailDesignTokens.Motion.resolved(
+                            SpeechRailDesignTokens.Motion.tabTransition,
+                            reduceMotion: reduceMotion
+                        )
+                    ) {
+                        activeTab = .compose
+                    }
                 }
+                .accessibilityLabel("去制作")
+                .accessibilityIdentifier("works-go-to-compose-button")
                 .speechRailButton(.primary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -3854,7 +3953,7 @@ public struct WorksView: View {
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
-        .frame(width: 400, alignment: .leading)
+        .frame(width: SpeechRailDesignTokens.Layout.Sheet.compactWidth, alignment: .leading)
     }
 
     @ViewBuilder
@@ -3875,7 +3974,7 @@ public struct WorksView: View {
         } else {
             ContentUnavailableView(
                 "请选择一个作品",
-                systemImage: AppRoute.works.systemImage,
+                systemImage: AppRoute.dubbing.systemImage,
                 description: Text("选择列表中的作品后，这里会显示文稿、音频和参数。")
             )
             // 与音色库同一条列宽声明（见 `speechRailInspectorColumn()`）。
@@ -3967,6 +4066,15 @@ public struct WorksView: View {
                 prepareExport(for: work)
             }
             .speechRailButton(.primary)
+
+            if let onNewDubbing {
+                Button {
+                    onNewDubbing(work.scriptText, work.voiceID)
+                } label: {
+                    SpeechRailButtonLabel("以此文稿新建配音", icon: .sparkles)
+                }
+                .speechRailButton(.secondary)
+            }
 
             HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                 // 没有配方摘要的作品点了也一定被拒：入口按事实出现，不做无效动作。

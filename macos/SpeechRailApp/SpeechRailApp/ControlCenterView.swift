@@ -406,16 +406,14 @@ public struct ControlCenterView: View {
         switch route {
         case .dubbing:
             DubbingDeskView()
-        case .audiobook:
-            AudiobookWorkshopView()
         case .voiceDesign:
             VoiceDesignView()
         case .voiceClone:
             VoiceCloneView()
         case .voiceLibrary:
             VoiceLibraryView()
-        case .works:
-            WorksView()
+        case .audiobook:
+            AudiobookWorkshopView()
         case .assistant:
             // 助手页本身就是那一块产品页（§6.1 的五种态在同一页上）；
             // 记录库在它的右栏「记录」标签里，不再是另一页。

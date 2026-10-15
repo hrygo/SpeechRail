@@ -37,11 +37,10 @@ public enum AppRouteGroup: String, CaseIterable, Sendable {
 
 public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
     case dubbing
-    case audiobook
     case voiceDesign
     case voiceClone
     case voiceLibrary
-    case works
+    case audiobook
     case assistant
     case meeting
     case captions
@@ -56,7 +55,7 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
 
     public var group: AppRouteGroup {
         switch self {
-        case .dubbing, .audiobook, .voiceDesign, .voiceClone, .voiceLibrary, .works:
+        case .dubbing, .voiceDesign, .voiceClone, .voiceLibrary, .audiobook:
             .creator
         case .assistant, .meeting, .captions, .teleprompter:
             .session
@@ -69,16 +68,14 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
         switch self {
         case .dubbing:
             "配音台"
-        case .audiobook:
-            "有声书工坊"
         case .voiceDesign:
             "音色创作"
         case .voiceClone:
             "音色克隆"
         case .voiceLibrary:
             "音色库"
-        case .works:
-            "我的作品"
+        case .audiobook:
+            "有声书工坊"
         case .assistant:
             "语音助手"
         case .meeting:
@@ -109,17 +106,15 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
     public var pageSubtitle: String {
         switch self {
         case .dubbing:
-            "输入文稿、选择音色，直接生成可交付的语音。"
-        case .audiobook:
-            "导入 TXT 电子书，完成全书角色分析与配声确认后逐章制作、收听或导出。"
+            "输入文稿并选择音色生成语音，或在此管理与返修历史配音作品。"
         case .voiceDesign:
             "用一句话描述你想要的音色，从真实预览里挑一个保存进音色库。"
         case .voiceClone:
             "读一段提词稿，用你自己的声音注册一个可复用的音色。"
         case .voiceLibrary:
             "管理系统音色，以及用参考音频复刻出来的音色。"
-        case .works:
-            "本机生成过的音频都留在这里，可随时播放、导出或删除。"
+        case .audiobook:
+            "导入 TXT 电子书，完成全书角色分析与配声确认后逐章制作、收听或导出。"
         case .assistant:
             "用这台 Mac 的语音能力对话：你说、它听、它答。原始音频不留存。"
         case .meeting:
@@ -149,16 +144,14 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
         switch self {
         case .dubbing:
             "waveform"
-        case .audiobook:
-            "books.vertical"
         case .voiceDesign:
             "sparkles"
         case .voiceClone:
             "mic"
         case .voiceLibrary:
             "square.stack"
-        case .works:
-            "folder"
+        case .audiobook:
+            "books.vertical"
         case .assistant:
             "bubble.left"
         case .meeting:
@@ -184,15 +177,13 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
         switch self {
         case .dubbing:
             .init(key: "1", modifiers: .command)
-        case .audiobook:
-            .init(key: "b", modifiers: .commandShift)
         case .voiceDesign:
             .init(key: "2", modifiers: .command)
         case .voiceClone:
             .init(key: "3", modifiers: .command)
         case .voiceLibrary:
             .init(key: "4", modifiers: .command)
-        case .works:
+        case .audiobook:
             .init(key: "5", modifiers: .command)
         case .assistant:
             .init(key: "6", modifiers: .command)
@@ -219,16 +210,14 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
         switch self {
         case .dubbing:
             "把保存的音色用于配音工作"
-        case .audiobook:
-            "把 TXT 电子书制作成多角色有声书"
         case .voiceDesign:
             "描述、试听并保存新的音色"
         case .voiceClone:
             "用自己的录音复刻一个音色"
         case .voiceLibrary:
             "管理可复用的已保存音色"
-        case .works:
-            "回看 SpeechRail 创作的作品"
+        case .audiobook:
+            "把 TXT 电子书制作成多角色有声书"
         case .assistant:
             "和这台 Mac 上的语音助手对话"
         case .meeting:

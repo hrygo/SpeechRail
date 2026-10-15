@@ -100,8 +100,8 @@ does not load models and does not replace the user-level `com.speechrail`
 LaunchAgent; it drives the existing Python CLI through a constrained XPC
 delegate. It is organized into three groups:
 
-- **Create** — dubbing desk, voice design, voice cloning, voice library, and
-  local works.
+- **Create** — dubbing desk (with composer and works management), voice design,
+  voice cloning, voice library, and audiobook workshop.
 - **Sessions** — voice assistant, meeting assistant, live captions, and the
   AI teleprompter.
 - **Engine** — service status, runtime monitoring, model combinations,

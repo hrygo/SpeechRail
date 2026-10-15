@@ -578,13 +578,13 @@ struct SpeechRailHelpView: View {
             "文件",
             [
                 Entry(shortcut: "⌘N", title: "新建配音文稿", detail: "跳到配音台并开始一段新文稿。"),
-                Entry(shortcut: "⌘E", title: "导出选中作品", detail: "导出「我的作品」中选中的那条音频。"),
+                Entry(shortcut: "⌘E", title: "导出选中作品", detail: "导出配音台中选中的作品音频。"),
             ]
         ),
         (
             "页面",
             [
-                Entry(shortcut: "⌘1–⌘5", title: "配音台 / 音色创作 / 音色克隆 / 音色库 / 我的作品", detail: "创作页之间切换。"),
+                Entry(shortcut: "⌘1–⌘5", title: "配音台 / 音色创作 / 音色克隆 / 音色库 / 有声书工坊", detail: "创作页之间切换。"),
                 Entry(shortcut: "⌘6–⌘8", title: "语音助手 / 会议助手 / 实时字幕", detail: "会话页之间切换。"),
                 Entry(shortcut: "⌘⇧T", title: "AI 提词器", detail: "打开稿件准备与提词舞台。"),
                 Entry(shortcut: "⌘9 / ⌘0", title: "服务状态 / 运行监控", detail: "查看服务与运行资源。"),
