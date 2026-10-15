@@ -38,6 +38,37 @@ final class AudiobookImportTests: XCTestCase {
         XCTAssertEqual(preview.chapters.count, 1)
     }
 
+    func testCoverTitleDoesNotBorrowBodyFromFollowingChapterTitle() throws {
+        let body = "        他推開門，走進晨霧中，街道盡頭的行人正向河岸走去。\r\n\r\n"
+        let text = "                        遠行集\r\n\r\n"
+            + "                        江岸\r\n\r\n" + body
+            + "                        夜行\r\n\r\n" + body
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data(text.utf8))
+        XCTAssertEqual(preview.chapters.map(\.title), ["开篇", "江岸", "夜行"])
+        XCTAssertNoThrow(try AudiobookChapterPlanner.validateChapterEdits(preview.chapters, source: preview.sourceIndex))
+    }
+
+    func testWhitespaceOnlyTextIsRejectedBeforeImport() throws {
+        for text in [" ", "\r\n\t  \r\n", "　　\n\n"] {
+            XCTAssertThrowsError(try AudiobookTXTImporter.prepare(rawData: Data(text.utf8))) {
+                XCTAssertEqual($0 as? AudiobookImportError, .emptyFile)
+            }
+        }
+    }
+
+    func testChapterPreviewSwitchesBetweenPreparedAndOriginalLayout() throws {
+        let text = "第一章 晨行\r\n前一章的內容。\r\n\r\n第二章 夜行\r\n\r\n        他走在河邊，望著遠處的燈火，靜靜地等候著遠方傳來的消\r\n息。\r\n"
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data(text.utf8))
+        let chapter = try XCTUnwrap(preview.chapters.last)
+        let prepared = try preview.textPreview(for: chapter.id)
+        let original = try preview.textPreview(for: chapter.id, originalLayout: true)
+        XCTAssertTrue(prepared.hasPrefix("第二章 夜行\n\n"))
+        XCTAssertTrue(prepared.contains("消息。"))
+        XCTAssertFalse(prepared.contains("前一章"))
+        XCTAssertTrue(original.contains("消\r\n息。"))
+        XCTAssertEqual(Data(original.utf8), preview.sourceIndex.utf8Data.subdata(in: Int(chapter.sourceRange.lowerBound)..<Int(chapter.sourceRange.upperBound)))
+    }
+
     func testStrictEncodingPreview() throws {
         let sampleText = "第1章 雾港\n“你也看见灯了？”他问。合法替换符：\u{FFFD}。\n"
 
@@ -210,5 +241,140 @@ final class AudiobookImportTests: XCTestCase {
         XCTAssertEqual(try preview.sourceIndex.text(in: preview.sourceIndex.wholeRange), text,
                        "拆分与合并只调整章节区间，不得改写规范化原文")
         XCTAssertNoThrow(try AudiobookChapterPlanner.validateChapterEdits(merged, source: preview.sourceIndex))
+    }
+
+    func testCircleZeroRoundHeadingsAreRecognizedIndividually() throws {
+        let body = "這是一段足夠長的虛構正文，用來確認獨立回目會成為目錄標題並保留正文。"
+        for title in ["第一○回", "第二○回", "第一○○回"] {
+            let text = "\(title)\r\n\r\n\(body)"
+            let preview = try AudiobookTXTImporter.prepare(rawData: Data(text.utf8))
+
+            XCTAssertEqual(preview.chapters.map(\.title), [title], "应识别回目 \(title)")
+            XCTAssertTrue(try preview.sourceIndex.normalizedText(in: preview.chapters[0].sourceRange).contains(body))
+            XCTAssertNoThrow(try AudiobookChapterPlanner.validateChapterEdits(preview.chapters, source: preview.sourceIndex))
+        }
+    }
+
+    func testAnthologyTitlesStayTopLevelAroundInternalChapters() throws {
+        let text = "雨\r\n\r\n第一章 雨夜\r\n河岸上的燈火映著長街，行人沿著石橋慢慢走去。\r\n\r\n"
+            + "第二章 轉晴\r\n清晨的雨停了，屋簷下仍有水珠落下。\r\n\r\n"
+            + "風\r\n\r\n第一章 遠行\r\n山路盡頭傳來車聲，旅人回頭望了一眼。\r\n\r\n"
+            + "第二章 歸來\r\n天色漸暗，他終於看見熟悉的窗燈。"
+        let raw = Data(text.utf8)
+        let preview = try AudiobookTXTImporter.prepare(rawData: raw)
+
+        XCTAssertEqual(preview.chapters.map(\.title), ["雨", "風"])
+        XCTAssertEqual(preview.originalBytes, raw)
+        XCTAssertEqual(try preview.sourceIndex.text(in: preview.sourceIndex.wholeRange), text)
+        XCTAssertTrue(preview.previewText.contains("河岸上的燈火"))
+        XCTAssertTrue(preview.previewText.contains("熟悉的窗燈"))
+        XCTAssertNoThrow(try AudiobookChapterPlanner.validateChapterEdits(preview.chapters, source: preview.sourceIndex))
+    }
+
+    func testAnthologyStoryCanStartWithShortDialogue() throws {
+        let text = "雨\n\n“橋那邊有人嗎？”\n\n她沿著河岸尋找，遠處的燈光仍在濃霧中閃爍。\n\n風\n\n旅人走過石橋，看見遠處的燈火依舊明亮。"
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data(text.utf8))
+        XCTAssertEqual(preview.chapters.map(\.title), ["雨", "風"])
+        XCTAssertEqual(preview.canonicalUTF8, Data(text.utf8))
+    }
+
+    func testNarrativeWithDashesIsNotAnAnthologySubtitle() throws {
+        let text = "雨\n\n她沿著河岸尋找，遠處的燈光仍在濃霧中閃爍。\n\n旅人──遠方歸客──點了點頭，但是沒有開口。\n\n另一位行人慢慢走近，手中的燈光映著石橋。\n\n風\n\n旅人走過石橋，看見遠處的燈火依舊明亮。"
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data(text.utf8))
+        XCTAssertEqual(preview.chapters.map(\.title), ["雨", "風"])
+        XCTAssertEqual(preview.canonicalUTF8, Data(text.utf8))
+    }
+
+    func testRoundHeadingEmbeddedAfterPreviousTextSplitsWithoutAbsorbingBody() throws {
+        let firstTitle = "第十二回　前回對仗標題"
+        let secondTitle = "第十三回　虛構對仗標題　另一標題"
+        let body = "話說今夜江岸起了薄霧，遠處的燈火照著石橋，行人沿河慢慢走去。"
+        let text = "\(firstTitle)\r\n前回正文仍留在原章。\r\n\r\n下回分解。\(secondTitle)　\(body)"
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data(text.utf8))
+
+        guard preview.chapters.count == 2, let secondChapter = preview.chapters.last else {
+            XCTFail("应从粘连正文中切出第二回，实际目录：\(preview.chapters.map(\.title))")
+            return
+        }
+        XCTAssertEqual(preview.chapters.map(\.title), [firstTitle, secondTitle])
+        XCTAssertTrue(preview.previewText.contains(body))
+        XCTAssertFalse(secondChapter.title.contains("話說"))
+        XCTAssertTrue(try preview.sourceIndex.normalizedText(in: secondChapter.sourceRange).contains(body))
+        XCTAssertNoThrow(try AudiobookChapterPlanner.validateChapterEdits(preview.chapters, source: preview.sourceIndex))
+    }
+
+    func testProseOpeningSplitAcrossPhysicalLinesStaysOutOfRoundTitle() throws {
+        for newline in ["\n", "\r\n", "\r"] {
+            for (opening, remainder) in [("話", "說"), ("卻", "說"), ("话", "说")] {
+                let title = "第三十一回　山窗夜話　遠客歸舟"
+                let body = "\(opening)\(remainder)旅人走過石橋，看見遠處的燈火依舊明亮。"
+                let text = "\(title)　\(opening)\(newline)\(remainder)旅人走過石橋，看見遠處的燈火依舊明亮。"
+                let preview = try AudiobookTXTImporter.prepare(rawData: Data(text.utf8))
+
+                XCTAssertEqual(preview.chapters.map(\.title), [title])
+                XCTAssertTrue(preview.previewText.contains(body))
+                XCTAssertEqual(preview.canonicalUTF8, Data(text.utf8))
+                XCTAssertNoThrow(try preview.sourceIndex.validateCoverage(preview.chapters.map(\.sourceRange), exclusions: []))
+            }
+        }
+    }
+
+    func testNarrativeReferenceBeginningWithRoundNumberDoesNotCreateChapter() throws {
+        let text = "第四回中主人公繼續趕路隨後走進一座燈火昏暗的城門"
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data(text.utf8))
+
+        XCTAssertEqual(preview.chapters.map(\.title), ["全文"])
+        XCTAssertEqual(try preview.sourceIndex.text(in: preview.sourceIndex.wholeRange), text)
+    }
+
+    func testRepeatedRoundTitleSeparatedOnlyByDashHasOneDirectoryEntryAndFullCoverage() throws {
+        let title = "第十四回　虛構回目"
+        let text = "\(title)\r\n—\r\n\(title)\r\n山路上的旅人走過長橋，遠處的燈火仍然明亮。"
+        let raw = Data(text.utf8)
+        let preview = try AudiobookTXTImporter.prepare(rawData: raw)
+
+        XCTAssertEqual(preview.chapters.map(\.title), [title])
+        XCTAssertEqual(preview.originalBytes, raw)
+        XCTAssertEqual(try preview.sourceIndex.text(in: preview.sourceIndex.wholeRange), text)
+        XCTAssertNoThrow(try preview.sourceIndex.validateCoverage(preview.chapters.map(\.sourceRange), exclusions: []))
+    }
+
+    func testRepeatedWholeChapterTextRemainsFullyCoveredAndReadable() throws {
+        let chapter = "第十五回　完整虛構回目\r\n山路上的旅人走過長橋，遠處的燈火仍然明亮。"
+        let text = "\(chapter)\r\n\r\n\(chapter)"
+        let raw = Data(text.utf8)
+        let preview = try AudiobookTXTImporter.prepare(rawData: raw)
+        let normalized = try preview.sourceIndex.normalizedText(in: preview.sourceIndex.wholeRange)
+
+        XCTAssertEqual(preview.originalBytes, raw)
+        XCTAssertEqual(preview.canonicalUTF8, raw)
+        XCTAssertEqual(try preview.sourceIndex.text(in: preview.sourceIndex.wholeRange), text)
+        XCTAssertEqual(normalized.components(separatedBy: "山路上的旅人").count - 1, 2)
+        XCTAssertNoThrow(try preview.sourceIndex.validateCoverage(preview.chapters.map(\.sourceRange), exclusions: []))
+    }
+
+    func testRepeatedContentRequiresExplicitConfirmationWithoutRemovingEitherCopy() throws {
+        let chapter = "第十五回　雨夜歸舟\r\n山路上的旅人走過長橋，遠處的燈火仍然明亮。"
+        let raw = Data("\(chapter)\r\n\r\n\(chapter)".utf8)
+        var preview = try AudiobookTXTImporter.prepare(rawData: raw)
+
+        XCTAssertEqual(preview.chapters.count, 2)
+        XCTAssertEqual(preview.repeatedContentWarnings.count, 1)
+        XCTAssertEqual(preview.repeatedContentWarnings.first?.chapterIDs, preview.chapters.map(\.id))
+        XCTAssertFalse(preview.canConfirmImport)
+        preview.hasConfirmedRepeatedContent = true
+        XCTAssertTrue(preview.canConfirmImport)
+        XCTAssertEqual(preview.originalBytes, raw)
+        XCTAssertEqual(preview.canonicalUTF8, raw)
+        XCTAssertEqual(preview.chapters.count, 2)
+    }
+
+    func testSameTitleWithDifferentBodyIsNotReportedAsRepeatedContent() throws {
+        let text = "第十五回　雨夜歸舟\n山路上的旅人走過長橋，遠處的燈火仍然明亮。\n\n"
+            + "第十五回　雨夜歸舟\n翌日村人打開門窗，河面上的霧氣已經漸漸散去。"
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data(text.utf8))
+        XCTAssertEqual(preview.chapters.count, 2)
+        XCTAssertTrue(preview.repeatedContentWarnings.isEmpty)
+        XCTAssertTrue(preview.canConfirmImport)
     }
 }

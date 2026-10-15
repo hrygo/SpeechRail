@@ -694,6 +694,10 @@ public final class AudiobookWorkflowModel {
     public func confirmImport() async {
         bootstrapIfPossible()
         guard let store, let preview = importPreview else { return }
+        guard preview.canConfirmImport else {
+            errorMessage = "请先核对重复内容，并确认保留后再导入。"
+            return
+        }
         do {
             let bookID = try await store.importBook(preview)
             isShowingImportSheet = false
@@ -2514,15 +2518,13 @@ public final class AudiobookWorkflowModel {
         var atomMap: [UUID: String] = [:]
         atomMap.reserveCapacity(atoms.count)
         for atom in atoms {
-            let raw = (try? source.text(in: atom.sourceRange)) ?? ""
-            atomMap[atom.id] = AudiobookSourceIndex.displayNormalizedText(raw)
+            atomMap[atom.id] = (try? source.normalizedText(in: atom.sourceRange)) ?? ""
         }
 
         var fragmentMap: [UUID: String] = [:]
         fragmentMap.reserveCapacity(fragments.count)
         for fragment in fragments {
-            let raw = (try? source.text(in: fragment.sourceRange)) ?? ""
-            fragmentMap[fragment.id] = AudiobookSourceIndex.displayNormalizedText(raw)
+            fragmentMap[fragment.id] = (try? source.normalizedText(in: fragment.sourceRange)) ?? ""
         }
 
         await loadCheckpointForTesting?(bookID, chapterID, .beforeChapterDetailsProjection)

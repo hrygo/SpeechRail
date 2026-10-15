@@ -204,4 +204,31 @@ final class AudiobookSourceTests: XCTestCase {
         try source.validateCoverage(atoms.map(\.sourceRange), exclusions: [])
         XCTAssertFalse(try atoms.contains { try source.text(in: $0.sourceRange).trimmingCharacters(in: .whitespacesAndNewlines) == "向遠方。" })
     }
+
+    func testCRLFAfterSentenceBoundaryKeepsEveryAtomWithinScalarBudget() throws {
+        let cases: [(text: String, budget: Int)] = [
+            (String(repeating: "甲", count: 158) + "。\r\n乙", 160),
+            ("甲乙。\r\n丙", 4),
+        ]
+
+        for (text, budget) in cases {
+            let source = try AudiobookSourceIndex(utf8: Data(text.utf8))
+            let chapter = AudiobookChapter(
+                bookID: UUID(),
+                sourceID: UUID(),
+                ordinal: 0,
+                title: "全文",
+                sourceRange: source.wholeRange
+            )
+            let atoms = try source.buildAtoms(for: chapter, maxAtomScalars: budget)
+
+            try source.validateCoverage(atoms.map(\.sourceRange), exclusions: [])
+            for atom in atoms {
+                let start = try XCTUnwrap(source.scalarIndex(forByteOffset: atom.sourceRange.lowerBound))
+                let end = try XCTUnwrap(source.scalarIndex(forByteOffset: atom.sourceRange.upperBound))
+                XCTAssertLessThanOrEqual(end - start, budget, "预算 \(budget) 不应被 CRLF 越过")
+            }
+            XCTAssertEqual(try atoms.map { try source.text(in: $0.sourceRange) }.joined(), text)
+        }
+    }
 }
