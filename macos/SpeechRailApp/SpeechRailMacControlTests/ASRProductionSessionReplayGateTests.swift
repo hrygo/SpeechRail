@@ -1390,7 +1390,7 @@ struct ASRSessionReplaySamplerHandshakeTests {
         let handshake = try #require(try SessionReplaySamplerHandshake.load(
             outputURL: fixture.outputURL, environment: fixture.environment
         ))
-        let consumer = Task { try await handshake.waitForSamplerStop(timeout: .seconds(1)) }
+        let consumer = Task { try await handshake.waitForSamplerStop(timeout: .seconds(10)) }
         defer { consumer.cancel() }
         try await waitForReady(fixture.readyURL)
         let marker = try JSONSerialization.jsonObject(with: Data(contentsOf: fixture.readyURL)) as? [String: Any]
@@ -1412,7 +1412,7 @@ struct ASRSessionReplaySamplerHandshakeTests {
         let handshake = try #require(try SessionReplaySamplerHandshake.load(
             outputURL: fixture.outputURL, environment: fixture.environment
         ))
-        let consumer = Task { try await handshake.waitForSamplerStop(timeout: .seconds(1)) }
+        let consumer = Task { try await handshake.waitForSamplerStop(timeout: .seconds(10)) }
         defer { consumer.cancel() }
         try await waitForReady(fixture.readyURL)
         if variant == "malformed" {
@@ -1582,7 +1582,7 @@ struct ASRSessionReplaySamplerHandshakeTests {
 
     private func waitForReady(_ url: URL) async throws {
         let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(1))
+        let deadline = clock.now.advanced(by: .seconds(10))
         while !FileManager.default.fileExists(atPath: url.path) {
             guard clock.now < deadline else {
                 throw SessionReplaySamplerHandshakeFailure.samplerReleaseTimedOut

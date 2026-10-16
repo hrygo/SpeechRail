@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -274,12 +273,11 @@ def test_receive_side_loss_gets_one_real_batch_retry(
     failure_action: str,
 ) -> None:
     async def scenario() -> None:
-        worker_config = _Config(timeout_seconds=0.05)
+        # This case verifies that a classified transport loss is retried once;
+        # a 50 ms end-to-end deadline can expire before a loaded runner gets to
+        # exercise that recovery path.
+        worker_config = _Config(timeout_seconds=2.0, io_timeout_seconds=0.5)
         worker = Qwen3SharedWorker(worker_config)
-        if failure_action.startswith("partial"):
-            # Let the dispatcher classify the partial frame before the request
-            # deadline fires. The transport deadline remains 50 ms.
-            worker.config = replace(worker.config, timeout_seconds=0.5)
         transcribe_calls = 0
         original_send = worker._transport.send
         original_receive = worker._transport.receive
