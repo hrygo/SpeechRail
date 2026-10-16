@@ -585,6 +585,42 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
                 voiceDesignPublicationContext = context
                 voiceDesignPublication.candidateID = candidate.id
                 voiceDesignPublication.candidateRevision = candidate.revision
+
+                if candidate.knownState == .failed {
+                    let message = candidate.latestValidation.map(Self.voiceDesignValidationMessage)
+                        ?? "当前候选未通过验证；请重新生成候选。"
+                    failVoiceDesignPublication(
+                        message,
+                        retryStep: .regenerateCandidate,
+                        generation: generation
+                    )
+                    return
+                }
+                if candidate.knownState == .cancelled {
+                    failVoiceDesignPublication(
+                        "当前候选已被取消；请重新生成候选。",
+                        retryStep: .regenerateCandidate,
+                        generation: generation
+                    )
+                    return
+                }
+                if candidate.knownState == .published {
+                    await reconcilePublishedVoiceDesignCandidate(
+                        candidate,
+                        context: context,
+                        generation: generation
+                    )
+                    return
+                }
+                if context.autoPublish, candidate.knownState == .publishable, candidate.publishable, let validation = candidate.latestValidation {
+                    context.validationID = validation.validationID
+                    voiceDesignPublicationContext = context
+                    voiceDesignPublication.validationID = validation.validationID
+                    voiceDesignPublication.phase = .publishing
+                    await self.publishVoiceDesignCandidate(context, generation: generation)
+                    return
+                }
+
                 if context.autoPublish {
                     // 自动串联：读取参考音频 -> 确认参考文案 -> 机器复验 -> 提交人工审核与发布入库
                     let refAudio = try await requireCreatorCapability(voiceDesignClient).fetchVoiceDesignReferenceAudio(

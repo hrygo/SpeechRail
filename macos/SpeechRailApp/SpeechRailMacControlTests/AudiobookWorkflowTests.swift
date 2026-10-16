@@ -72,8 +72,13 @@ final class AudiobookWorkflowTests: XCTestCase {
         private var capturedAuditions: [AudiobookRenderCallRequest] = []
         var auditionRequests: [AudiobookRenderCallRequest] { leadLock.withLock { capturedAuditions } }
 
+        var auditionRenderHandler: (@Sendable (AudiobookRenderCallRequest) async throws -> Data)?
+
         func renderAudition(_ request: AudiobookRenderCallRequest) async throws -> Data {
             leadLock.withLock { capturedAuditions.append(request) }
+            if let handler = auditionRenderHandler {
+                return try await handler(request)
+            }
             return Self.makeWAV(frameCount: 4_800)
         }
 
@@ -343,6 +348,68 @@ final class AudiobookWorkflowTests: XCTestCase {
         try catalog.archiveVoices(voiceIDs: ["v-designed-narrator"])
         await workflow.playCastingAudition(itemIndex: 1)
         XCTAssertEqual(renderer.auditionRequests.count, 2, "变更后的目录不能继续旧试听")
+    }
+
+    func testSavedRoleAuditionSucceedsWithoutPendingCastingPlan() async throws {
+        let renderer = WorkflowFakeRenderer(), catalog = VoiceCatalogStore()
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, driver) = makeWorkflow(renderer: renderer, store: store, catalog: catalog)
+        _ = try await importBook(into: workflow, fileName: "audition_saved.txt", text: "第一章\n海风拂过窗前，远处传来了熟悉的钟声。")
+        let role = try XCTUnwrap(workflow.characters.first)
+
+        await workflow.bindVoice(roleID: role.id, voiceID: "v-narrator")
+        XCTAssertNil(workflow.pendingCastingPlan, "已保存绑定后不存在待决选角方案")
+        XCTAssertNotNil(workflow.voiceBindings[role.id])
+
+        await workflow.prepareCastingAudition(kind: .sameTextComparison, roleID: role.id, comparisonVoiceIDs: ["v-narrator"])
+        let audition = try XCTUnwrap(workflow.castingAudition)
+        XCTAssertEqual(audition.items.count, 1)
+        XCTAssertEqual(audition.items[0].voiceID, "v-narrator")
+
+        await workflow.playCastingAudition(itemIndex: 0)
+        XCTAssertEqual(renderer.auditionRequests.count, 1)
+        XCTAssertTrue(driver.isPlaying)
+        XCTAssertNil(workflow.errorMessage)
+    }
+
+    func testStopAuditionPlaybackPreventsLateResultsFromStarting() async throws {
+        let renderer = WorkflowFakeRenderer(), catalog = VoiceCatalogStore()
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, driver) = makeWorkflow(renderer: renderer, store: store, catalog: catalog)
+        _ = try await importBook(into: workflow, fileName: "audition_stop.txt", text: "第一章\n海风拂过窗前，远处传来了熟悉的钟声。")
+        let role = try XCTUnwrap(workflow.characters.first)
+
+        await workflow.bindVoice(roleID: role.id, voiceID: "v-narrator")
+        await workflow.prepareCastingAudition(kind: .sameTextComparison, roleID: role.id, comparisonVoiceIDs: ["v-narrator"])
+        XCTAssertNotNil(workflow.castingAudition)
+
+        final class StartGate: @unchecked Sendable {
+            private let lock = NSLock()
+            private var started = false
+            var isStarted: Bool { lock.withLock { started } }
+            func markStarted() { lock.withLock { started = true } }
+        }
+        let gate = StartGate()
+        renderer.auditionRenderHandler = { _ in
+            gate.markStarted()
+            try? await Task.sleep(for: .milliseconds(50))
+            return WorkflowFakeRenderer.makeWAV(frameCount: 4_800)
+        }
+
+        let playTask = Task {
+            await workflow.playCastingAudition(itemIndex: 0)
+        }
+
+        for _ in 0..<100 {
+            if gate.isStarted { break }
+            try? await Task.sleep(for: .milliseconds(2))
+        }
+
+        workflow.stopAuditionPlayback()
+        await playTask.value
+
+        XCTAssertFalse(driver.isPlaying, "停止试听后迟到结果不得播放")
+        XCTAssertNil(workflow.errorMessage, "主动停止试听不应报告错误")
     }
 
     func testDialogueAuditionUsesOrderedAdjacentSourceWithoutChangingAssignments() async throws {

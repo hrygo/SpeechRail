@@ -1408,6 +1408,38 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.lastPublishedDesignedVoice?.name, "自动发布测试音色")
     }
 
+    func testAutoPublishIdempotentlyReturnsFailedCandidateRecoversToRegenerate() async {
+        let creator = VoiceDesignWorkflowCreatorClient()
+        await creator.setNextCandidateState("failed")
+        let model = makeVoiceModel(
+            transport: ClosureControlTransport { request in
+                ControlResponse(
+                    requestID: request.requestID,
+                    command: request.command,
+                    status: .completed
+                )
+            },
+            voiceDirectoryClient: creator,
+            voiceDesignClient: creator
+        )
+        let preview = VoiceDesignCandidateSnapshot(
+            slot: "1",
+            seed: 101,
+            title: "候选 1",
+            instructionSnapshot: "温暖、清晰、自然",
+            referenceTextSnapshot: "这是一段用于验证失败恢复的测试参考文案。",
+            status: .ready,
+            audioData: Data([1, 2, 3])
+        )
+
+        model.startVoiceDesignPublication(preview, name: "失败候选恢复测试", autoPublish: true)
+        await waitForVoiceDesignPhase(.failed, snapshot: { model.voiceDesignPublication })
+
+        XCTAssertEqual(model.voiceDesignPublicationRetryActionTitle, "重新生成候选")
+        let events = await creator.events()
+        XCTAssertEqual(events, ["create"])
+    }
+
     func testFailedVoiceDesignCancellationRetainsCandidateForRetry() async {
         let creator = VoiceDesignWorkflowCreatorClient()
         let model = makeVoiceModel(

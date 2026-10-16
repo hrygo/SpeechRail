@@ -349,6 +349,7 @@ public final class AudiobookWorkflowModel {
     public private(set) var castingPlanNeedsRefresh = false
     public var castingRecommendation: AudiobookCastingRecommendation? { pendingCastingPlan.map(AudiobookCastingRecommendation.init) }
     public private(set) var castingAudition: AudiobookCastingAudition?
+    private var auditionPlaybackGeneration: UInt64 = 0
 
     private var analysisTask: Task<Void, Never>?
     private var productionTask: Task<Void, Never>?
@@ -1111,24 +1112,44 @@ public final class AudiobookWorkflowModel {
     }
 
     public func prepareCastingAudition(kind: AudiobookCastingAudition.Kind, roleID: UUID, comparisonVoiceIDs: [String] = []) async {
-        guard let plan = pendingCastingPlan, selectedBook?.id == plan.bookID, let store else { return }
+        guard let book = selectedBook, let store else { return }
+        let plan = pendingCastingPlan
+        guard plan == nil || plan?.bookID == book.id else { return }
         do {
-            try await store.validateCastingPlanInput(plan)
-            guard dependencies.voiceCatalog.snapshot().revision == plan.voiceCatalogRevision else { throw AudiobookCastError.castRevisionMismatch }
-            let source = try await store.sourceIndex(for: plan.bookID)
-            let annotations = try await store.annotations(for: plan.bookID).sorted { $0.sourceRange < $1.sourceRange }
-            let atoms = try await store.atoms(for: plan.bookID)
-            let roles = try await store.characters(for: plan.bookID)
+            let targetBookID = book.id
+            let effectiveSnapshot: EffectiveCapabilitySnapshot
+            let effectiveCatalog: VoiceCatalogSnapshot
+            let effectiveBindings: [UUID: AudiobookVoiceBinding]
+            let planDigest: String
+
+            if let plan {
+                try await store.validateCastingPlanInput(plan)
+                guard dependencies.voiceCatalog.snapshot().revision == plan.voiceCatalogRevision else { throw AudiobookCastError.castRevisionMismatch }
+                effectiveSnapshot = plan.snapshot
+                effectiveCatalog = plan.catalog
+                effectiveBindings = plan.proposedBindings
+                planDigest = plan.inputDigest
+            } else {
+                effectiveSnapshot = try await dependencies.speechRenderer.fetchEffectiveCapabilities()
+                effectiveCatalog = dependencies.voiceCatalog.snapshot()
+                effectiveBindings = voiceBindings
+                planDigest = "saved-bindings-\(targetBookID.uuidString)"
+            }
+
+            let source = try await store.sourceIndex(for: targetBookID)
+            let annotations = try await store.annotations(for: targetBookID).sorted { $0.sourceRange < $1.sourceRange }
+            let atoms = try await store.atoms(for: targetBookID)
+            let roles = try await store.characters(for: targetBookID)
             func item(roleID: UUID, voiceID: String, range: AudiobookSourceRange) throws -> AudiobookCastingAudition.Item {
                 guard let start = source.scalarIndex(forByteOffset: range.lowerBound),
                       let end = source.scalarIndex(forByteOffset: range.upperBound), end > start,
-                      let voice = plan.snapshot.voices.first(where: { $0.id == voiceID }), plan.catalog.permits(voice, bookID: plan.bookID),
-                      let options = SpeechRailCapabilityRevisionSelector.creatorRequestOptions(voiceID: voiceID, in: plan.snapshot),
+                      let voice = effectiveSnapshot.voices.first(where: { $0.id == voiceID }), effectiveCatalog.permits(voice, bookID: targetBookID),
+                      let options = SpeechRailCapabilityRevisionSelector.creatorRequestOptions(voiceID: voiceID, in: effectiveSnapshot),
                       let model = options.expectedModelRevision else { throw ServiceAPIClientError.invalidContract("audition_unavailable") }
                 let excerpt = AudiobookSourceRange(lowerBound: range.lowerBound, upperBound: source.scalarByteOffsets[min(end, start + 240)])
-                let binding = plan.proposedBindings[roleID].flatMap { $0.voiceID == voiceID ? $0 : nil }
+                let binding = effectiveBindings[roleID].flatMap { $0.voiceID == voiceID ? $0 : nil }
                     ?? .init(roleID: roleID, voiceID: voiceID, voiceRevision: options.expectedVoiceRevision, modelRevision: model)
-                try AudiobookCastRegistry.validateRenderBinding(binding, snapshot: plan.snapshot, requireProductionReady: false)
+                try AudiobookCastRegistry.validateRenderBinding(binding, snapshot: effectiveSnapshot, requireProductionReady: false)
                 return .init(roleID: roleID, voiceID: voiceID, sourceRange: excerpt, text: try source.text(in: excerpt), binding: binding)
             }
             let items: [AudiobookCastingAudition.Item]
@@ -1136,9 +1157,10 @@ public final class AudiobookWorkflowModel {
             case .sameTextComparison:
                 let range = annotations.first { $0.assignment.roleID == roleID }?.sourceRange
                     ?? (roles.first { $0.id == roleID }?.isNarrator == true ? atoms.first { $0.kind == .body }?.sourceRange : nil)
+                    ?? atoms.first?.sourceRange
                 guard let range else { throw ServiceAPIClientError.invalidContract("audition_source_missing") }
                 var seen: Set<String> = []
-                let voiceIDs = (comparisonVoiceIDs.isEmpty ? [plan.proposedBindings[roleID]?.voiceID].compactMap { $0 } : comparisonVoiceIDs)
+                let voiceIDs = (comparisonVoiceIDs.isEmpty ? [effectiveBindings[roleID]?.voiceID].compactMap { $0 } : comparisonVoiceIDs)
                     .filter { seen.insert($0).inserted }.prefix(4)
                 guard !voiceIDs.isEmpty else { throw ServiceAPIClientError.invalidContract("audition_voice_missing") }
                 items = try voiceIDs.map { try item(roleID: roleID, voiceID: $0, range: range) }
@@ -1157,12 +1179,15 @@ public final class AudiobookWorkflowModel {
                 }
                 guard pair.count == 2 else { throw ServiceAPIClientError.invalidContract("audition_dialogue_missing") }
                 items = try pair.map { row in
-                    guard let role = row.assignment.roleID, let voice = plan.proposedBindings[role]?.voiceID else { throw ServiceAPIClientError.invalidContract("audition_voice_missing") }
+                    guard let role = row.assignment.roleID, let voice = effectiveBindings[role]?.voiceID else { throw ServiceAPIClientError.invalidContract("audition_voice_missing") }
                     return try item(roleID: role, voiceID: voice, range: row.sourceRange)
                 }
             }
-            guard selectedBook?.id == plan.bookID, pendingCastingPlan?.inputDigest == plan.inputDigest else { return }
-            castingAudition = .init(kind: kind, items: items, planDigest: plan.inputDigest)
+            guard selectedBook?.id == targetBookID else { return }
+            if let plan = pendingCastingPlan {
+                guard plan.inputDigest == planDigest else { return }
+            }
+            castingAudition = .init(kind: kind, items: items, planDigest: planDigest)
             errorMessage = nil
         } catch {
             castingAudition = nil
@@ -1171,27 +1196,69 @@ public final class AudiobookWorkflowModel {
     }
 
     public func playCastingAudition(itemIndex: Int) async {
-        guard let audition = castingAudition, let plan = pendingCastingPlan, let store,
-              audition.items.indices.contains(itemIndex), selectedBook?.id == plan.bookID, audition.planDigest == plan.inputDigest else { return }
+        auditionPlaybackGeneration &+= 1
+        let generation = auditionPlaybackGeneration
+        guard let audition = castingAudition, let store, let book = selectedBook,
+              audition.items.indices.contains(itemIndex) else { return }
+        let plan = pendingCastingPlan
+        if let plan {
+            guard book.id == plan.bookID, audition.planDigest == plan.inputDigest else { return }
+        } else {
+            guard audition.planDigest == "saved-bindings-\(book.id.uuidString)" else { return }
+        }
         do {
-            try await store.validateCastingPlanInput(plan)
+            if let plan {
+                try await store.validateCastingPlanInput(plan)
+                guard dependencies.voiceCatalog.snapshot().revision == plan.voiceCatalogRevision else { throw AudiobookCastError.castRevisionMismatch }
+            }
+            guard auditionPlaybackGeneration == generation else { return }
             let item = audition.items[itemIndex], binding = item.binding
             let snapshot = try await dependencies.speechRenderer.fetchEffectiveCapabilities()
-            guard dependencies.voiceCatalog.snapshot().revision == plan.voiceCatalogRevision else { throw AudiobookCastError.castRevisionMismatch }
+            if let plan {
+                guard dependencies.voiceCatalog.snapshot().revision == plan.voiceCatalogRevision else { throw AudiobookCastError.castRevisionMismatch }
+            }
             try AudiobookCastRegistry.validateRenderBinding(binding, snapshot: snapshot, requireProductionReady: false)
-            let data = try await dependencies.speechRenderer.renderAudition(.init(bookID: plan.bookID, text: item.text, voiceID: binding.voiceID,
-                speed: binding.allowedSpeed, expectedVoiceRevision: binding.voiceRevision, expectedModelRevision: binding.modelRevision, seed: binding.callerSeed))
+            guard auditionPlaybackGeneration == generation else { return }
+            let data = try await dependencies.speechRenderer.renderAudition(.init(
+                bookID: book.id,
+                text: item.text,
+                voiceID: binding.voiceID,
+                speed: binding.allowedSpeed,
+                expectedVoiceRevision: binding.voiceRevision,
+                expectedModelRevision: binding.modelRevision,
+                seed: binding.callerSeed
+            ))
             try Task.checkCancellation()
-            try await store.validateCastingPlanInput(plan)
-            guard selectedBook?.id == plan.bookID, pendingCastingPlan?.inputDigest == plan.inputDigest,
-                  dependencies.voiceCatalog.snapshot().revision == plan.voiceCatalogRevision else { throw AudiobookCastError.castRevisionMismatch }
+            guard auditionPlaybackGeneration == generation else { return }
+            if let plan {
+                try await store.validateCastingPlanInput(plan)
+                guard selectedBook?.id == plan.bookID, pendingCastingPlan?.inputDigest == plan.inputDigest,
+                      dependencies.voiceCatalog.snapshot().revision == plan.voiceCatalogRevision else { throw AudiobookCastError.castRevisionMismatch }
+            }
             try playbackOwner.play(data: data, target: .dubbingCandidate("casting-audition:\(audition.planDigest):\(itemIndex)"))
             errorMessage = nil
-        } catch { errorMessage = "试听未完成，声音或配声方案可能已变化，请刷新后重试。" }
+        } catch is CancellationError {
+            // 用户主动取消，不展示报错
+        } catch {
+            guard auditionPlaybackGeneration == generation else { return }
+            errorMessage = "试听未完成，声音或配声方案可能已变化，请刷新后重试。"
+        }
     }
 
     public func stopAuditionPlayback() {
+        auditionPlaybackGeneration &+= 1
         playbackOwner.stop()
+    }
+
+    public func isAuditionPlaying(for roleID: UUID) -> Bool {
+        guard playbackOwner.isPlaying, let target = playbackOwner.target else { return false }
+        switch target {
+        case .dubbingCandidate(let tag):
+            guard let audition = castingAudition else { return false }
+            return audition.items.contains(where: { $0.roleID == roleID && tag.hasPrefix("casting-audition:\(audition.planDigest):") })
+        default:
+            return false
+        }
     }
 
     public func autoAssignRecommendedVoices(

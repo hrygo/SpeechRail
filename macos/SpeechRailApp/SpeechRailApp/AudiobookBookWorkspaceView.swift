@@ -1510,20 +1510,15 @@ public struct AudiobookBookWorkspaceView: View {
 
                     // 试听按钮
                     if let b = binding {
-                        let isAuditioning = auditionPreviewRoleID == role.id
+                        let isAuditioning = workflow.isAuditionPlaying(for: role.id)
+                            || (auditionPreviewRoleID == role.id && (appModel.previewingVoiceID == b.voiceID || appModel.playingVoiceID == b.voiceID))
                         let isLoading = auditionLoadingRoleID == role.id
                         Button {
-                            if isAuditioning {
+                            if isAuditioning || isLoading {
                                 auditionPreviewRoleID = nil
                                 auditionLoadingRoleID = nil
                                 appModel.cancelVoicePreview()
                                 workflow.stopAuditionPlayback()
-                            } else if isLoading {
-                                auditionLoadingRoleID = nil
-                                workflow.stopAuditionPlayback()
-                            } else if let creatorVoice = appModel.creatorVoices.first(where: { $0.id == b.voiceID }) {
-                                auditionPreviewRoleID = role.id
-                                appModel.startVoicePreview(creatorVoice)
                             } else {
                                 auditionLoadingRoleID = role.id
                                 Task {
@@ -1537,6 +1532,9 @@ public struct AudiobookBookWorkspaceView: View {
                                         if workflow.errorMessage != nil {
                                             auditionPreviewRoleID = nil
                                         }
+                                    } else if let creatorVoice = appModel.creatorVoices.first(where: { $0.id == b.voiceID }) {
+                                        auditionPreviewRoleID = role.id
+                                        appModel.startVoicePreview(creatorVoice)
                                     } else {
                                         auditionPreviewRoleID = nil
                                     }
