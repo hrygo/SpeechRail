@@ -79,6 +79,8 @@ public struct MeetingView: View {
     @State var transcriptFollow = TranscriptFollowState()
     @State var transcriptScrollPosition = ScrollPosition(edge: .bottom)
     @State var transcriptUserScrollActive = false
+    @State var transcriptVisibleLineIDs: [String] = []
+    @State var transcriptCopyMessage: String?
 
     enum PostTab: String, CaseIterable, Identifiable {
         case minutes

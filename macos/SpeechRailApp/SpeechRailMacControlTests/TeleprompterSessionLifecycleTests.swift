@@ -26,10 +26,10 @@ private final class FakeTeleprompterAudioSource: AudioChunkSource, @unchecked Se
     private let lock = NSLock()
     private var startCountStorage = 0
     private var stopCountStorage = 0
-    private var continuation: AsyncStream<AudioChunk>.Continuation?
+    private var continuation: AudioChunkStream.Continuation?
     var startFailure: (any Error)?
 
-    func start() async throws -> AsyncStream<AudioChunk> {
+    func start() async throws -> AudioChunkStream {
         let failure: (any Error)? = withLock {
             startCountStorage += 1
             defer { startFailure = nil }
@@ -38,17 +38,12 @@ private final class FakeTeleprompterAudioSource: AudioChunkSource, @unchecked Se
         if let failure {
             throw failure
         }
-        return withLock {
-            var capturedContinuation: AsyncStream<AudioChunk>.Continuation?
-            let stream = AsyncStream<AudioChunk> { continuation in
-                capturedContinuation = continuation
-            }
-            continuation = capturedContinuation
-            return stream
-        }
+        let pair = AudioChunkStream.makeStream()
+        withLock { continuation = pair.continuation }
+        return pair.stream
     }
 
-    func stop() {
+    func stop() async {
         let continuation = withLock {
             stopCountStorage += 1
             let continuation = self.continuation

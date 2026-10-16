@@ -229,11 +229,11 @@ final class AssistantEndRoutingTests: XCTestCase {
 
 /// 纯文字路径的占位音频源：若被误用会立刻计数，测试据此断言“没碰设备”。
 private final class FakeTextOnlyAudio: AudioChunkSource, @unchecked Sendable {
-    func start() async throws -> AsyncStream<AudioChunk> {
+    func start() async throws -> AudioChunkStream {
         throw NSError(domain: "AssistantEndRoutingTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "纯文字不应启动采集"])
     }
 
-    func stop() {}
+    func stop() async {}
 }
 
 @MainActor

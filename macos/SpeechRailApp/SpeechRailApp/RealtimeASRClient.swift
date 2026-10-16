@@ -147,6 +147,7 @@ struct RealtimeEventState: Sendable {
     private var retiredUntil: [String: ContinuousClock.Instant] = [:]
     private var retiredOrder: [String] = []
     private var pendingExpiry: [ExpiredItem] = []
+    private var pendingRetirement: [String] = []
     private var auxiliaryExpected = false
     private var lastLimitViolation: LimitViolation?
 
@@ -164,6 +165,7 @@ struct RealtimeEventState: Sendable {
         items.removeAll(keepingCapacity: true)
         retiredUntil.removeAll(keepingCapacity: true)
         retiredOrder.removeAll(keepingCapacity: true)
+        pendingRetirement.removeAll(keepingCapacity: true)
         pendingExpiry.removeAll(keepingCapacity: true)
         lastLimitViolation = nil
         self.auxiliaryExpected = auxiliaryExpected
@@ -177,6 +179,7 @@ struct RealtimeEventState: Sendable {
         items.removeAll(keepingCapacity: false)
         retiredUntil.removeAll(keepingCapacity: false)
         retiredOrder.removeAll(keepingCapacity: false)
+        pendingRetirement.removeAll(keepingCapacity: false)
         pendingExpiry.removeAll(keepingCapacity: false)
         lastLimitViolation = nil
     }
@@ -199,6 +202,11 @@ struct RealtimeEventState: Sendable {
             }
             return false
         }
+    }
+
+    mutating func takeRetired() -> [String] {
+        defer { pendingRetirement.removeAll(keepingCapacity: true) }
+        return pendingRetirement
     }
 
     mutating func takeExpired() -> [ExpiredItem] {
@@ -728,6 +736,7 @@ struct RealtimeEventState: Sendable {
             return
         }
         itemOrder.removeAll { $0 == itemID }
+        pendingRetirement.append(itemID)
         if auxiliaryExpected {
             pendingExpiry.append(ExpiredItem(itemID: itemID, snapshot: snapshot(item)))
         }
@@ -1026,6 +1035,8 @@ public actor RealtimeASRClient {
             alignmentMissing: Bool,
             diarizationMissing: Bool
         )
+        /// Internal lifecycle notification after the existing auxiliary acceptance window retires.
+        case itemRetired(itemID: String)
         case closed(code: Int?)
     }
 
@@ -2218,6 +2229,11 @@ public actor RealtimeASRClient {
                     diarizationMissing: expired.snapshot.diarizationSpans.isEmpty
                 )
             )
+            if didClose { return }
+        }
+        // The actor drains once per frame/prune; at most the existing 128-item window retires together.
+        for itemID in eventState.takeRetired() {
+            await emit(.itemRetired(itemID: itemID))
             if didClose { return }
         }
     }

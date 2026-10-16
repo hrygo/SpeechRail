@@ -1,5 +1,21 @@
 import SwiftUI
 
+/// Only this small status subtree subscribes to metering and the session clock.
+struct MeetingActivityStatusBar<Trailing: View>: View {
+    let meeting: MeetingSession
+    let session: SessionCoordinator
+    let title: String
+    let tone: StatusTone
+    let facts: [String]
+    @ViewBuilder let trailing: () -> Trailing
+    var body: some View {
+        SessionStatusBar(title: title, tone: tone, facts: facts,
+            elapsed: meeting.phase.isLive || meeting.phase == .processing ? session.elapsed : nil,
+            level: meeting.phase.isLive ? meeting.level : nil, trailing: trailing)
+            .accessibilityHint(SessionActivityPolicy.levelDescription(meeting.level, active: meeting.phase.isLive))
+    }
+}
+
 // `MeetingView` 的状态带：相位标题、语气、来源与六条轴的事实行（MA-10 / MA-21）。
 // 纯搬移自主文件；跨文件共用的是主文件里的 `@State` 与 `body` 调用的入口。
 
@@ -48,12 +64,11 @@ extension MeetingView {
     }
 
     var statusBar: some View {
-        SessionStatusBar(
+        MeetingActivityStatusBar(
+            meeting: meeting, session: session,
             title: pageStatusPresentation.title,
             tone: pageStatusPresentation.tone,
-            facts: pageStatusPresentation.facts,
-            elapsed: meeting.phase.isLive || meeting.phase == .processing ? session.elapsed : nil,
-            level: meeting.phase.isLive ? meeting.level : nil
+            facts: pageStatusPresentation.facts
         ) {
             if meeting.phase.isLive {
                 Button(meeting.isPaused ? "继续录" : "暂停一下") {

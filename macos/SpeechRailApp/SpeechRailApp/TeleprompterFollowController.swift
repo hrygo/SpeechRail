@@ -156,6 +156,8 @@ public struct TeleprompterFollowController: Sendable {
     private var eventIDs: [String] = []
     private var history: [String] = []
     private var script: TeleprompterAligner.Script?
+    private var scriptVersionID: String?
+    private var scriptDigest: String?
     private var scriptSegments: [TeleprompterSegment] = []
     private let policy: TeleprompterFollowPolicy
     private let aligner: TeleprompterAligner
@@ -195,12 +197,13 @@ public struct TeleprompterFollowController: Sendable {
         itemID: String,
         delta: String,
         segments: [TeleprompterSegment],
+        preparedScript: PreparedTeleprompterScript? = nil,
         eventID: String? = nil
     ) {
         guard acceptEvent(eventID) else { return }
         guard !itemID.isEmpty, !retired.contains(itemID) else { return }
         guard mode == .following else { retire(itemID); return }
-        prepare(segments)
+        prepare(segments, prepared: preparedScript)
         guard let script else { return }
         var item = item(for: itemID)
         guard item.sequence > finalizedSequence else { retire(itemID); return }
@@ -230,6 +233,7 @@ public struct TeleprompterFollowController: Sendable {
         revision: Int,
         text: String,
         segments: [TeleprompterSegment],
+        preparedScript: PreparedTeleprompterScript? = nil,
         eventID: String? = nil,
         stablePrefixCodepoints: Int? = nil,
         sampleSpan: RealtimeASRClient.RealtimeSampleSpan? = nil
@@ -237,7 +241,7 @@ public struct TeleprompterFollowController: Sendable {
         guard acceptEvent(eventID) else { return }
         guard revision > 0, !itemID.isEmpty, !retired.contains(itemID) else { return }
         guard mode == .following else { retire(itemID); return }
-        prepare(segments)
+        prepare(segments, prepared: preparedScript)
         guard let script else { return }
         var item = item(for: itemID)
         guard item.sequence > finalizedSequence, revision > item.snapshotRevision else { return }
@@ -339,12 +343,13 @@ public struct TeleprompterFollowController: Sendable {
         itemID: String,
         transcript: String,
         segments: [TeleprompterSegment],
+        preparedScript: PreparedTeleprompterScript? = nil,
         eventID: String? = nil
     ) {
         guard acceptEvent(eventID) else { return }
         guard !itemID.isEmpty, !retired.contains(itemID) else { return }
         guard mode == .following else { retire(itemID); return }
-        prepare(segments)
+        prepare(segments, prepared: preparedScript)
         guard let script else { return }
         let item = item(for: itemID)
         guard item.sequence > finalizedSequence else { retire(itemID); return }
@@ -517,7 +522,14 @@ public struct TeleprompterFollowController: Sendable {
         return item
     }
 
-    private mutating func prepare(_ segments: [TeleprompterSegment]) {
+    private mutating func prepare(_ segments: [TeleprompterSegment], prepared: PreparedTeleprompterScript?) {
+        if let prepared {
+            guard scriptVersionID != prepared.versionID || scriptDigest != prepared.segmentDigest else { return }
+            script = prepared.script; scriptVersionID = prepared.versionID; scriptDigest = prepared.segmentDigest
+            scriptSegments = []; history = []
+            return
+        }
+        scriptVersionID = nil; scriptDigest = nil
         guard script == nil || scriptSegments != segments else { return }
         scriptSegments = segments
         script = .init(segments: segments)
@@ -648,6 +660,7 @@ public struct TeleprompterRealtimeFollowAdapter: Sendable {
         _ event: RealtimeASRClient.Event,
         metadata: RealtimeEventMetadata,
         segments: [TeleprompterSegment],
+        preparedScript: PreparedTeleprompterScript? = nil,
         to controller: inout TeleprompterFollowController
     ) -> TeleprompterRealtimeFollowOutcome {
         switch event {
@@ -660,6 +673,7 @@ public struct TeleprompterRealtimeFollowAdapter: Sendable {
                 itemID: itemID,
                 delta: delta,
                 segments: segments,
+                preparedScript: preparedScript,
                 eventID: metadata.eventID
             )
             return controller.position != previousPosition || controller.partialPreview != previousPreview
@@ -674,6 +688,7 @@ public struct TeleprompterRealtimeFollowAdapter: Sendable {
                 revision: revision,
                 text: text,
                 segments: segments,
+                preparedScript: preparedScript,
                 eventID: metadata.eventID,
                 stablePrefixCodepoints: evidence.stablePrefixCodepoints,
                 sampleSpan: evidence.sampleSpan
@@ -691,6 +706,7 @@ public struct TeleprompterRealtimeFollowAdapter: Sendable {
                 itemID: itemID,
                 transcript: transcript,
                 segments: segments,
+                preparedScript: preparedScript,
                 eventID: metadata.eventID
             )
             // 同位确认不移动视口：committed 推进即实际确认，不能再用

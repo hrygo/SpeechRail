@@ -174,7 +174,11 @@ public final class CaptionSession {
     public private(set) var phase: Phase = .idle
     public private(set) var blocked: BlockReason?
     /// 本次会话已定稿的行（内存镜像；权威在库里，这里只给浮层与导出用）。
-    public private(set) var lines: [Line] = []
+    public let transcriptPresentation = TranscriptPresentation<Line>()
+    public private(set) var lines: [Line] {
+        get { transcriptPresentation.rows }
+        set { transcriptPresentation.reset(newValue) }
+    }
     /// 未定稿的增量累加结果。`nil` 表示这一轮还没开始出字。
     public private(set) var partialText: String?
     /// 采集的真实电平 0…1（浮层页脚那几根柱子读它）。
@@ -240,7 +244,7 @@ public final class CaptionSession {
     private var isStoppingIntentionally = false
     private var currentOrdinal = 0
     /// `(connection, generation, itemID)` → 已落库的行，防止迟到辅助结果串写。
-    private var lineByItem: [TranscriptPreviewLedger.ItemIdentity: (lineID: String, ordinal: Int)] = [:]
+    private var lineByItem = LiveTranscriptItemIndex()
     private var pendingAttributions = TranscriptAttributionBuffer()
     private var admissionLedger = TranscriptAdmissionLedger()
     @ObservationIgnored private lazy var inputPersistence = TranscriptPersistenceQueue(
@@ -474,7 +478,7 @@ public final class CaptionSession {
 
         let source = audioSourceFactory()
         self.source = source
-        let stream: AsyncStream<AudioChunk>
+        let stream: AudioChunkStream
         do {
             stream = try await source.start()
         } catch {
@@ -508,7 +512,7 @@ public final class CaptionSession {
         } catch {
             let unavailableCode = (error as? RealtimeASRClient.Failure)?.diarizationUnavailableCode
             guard diarizationRequested, unavailableCode != nil else {
-                source.stop()
+                await source.stop()
                 self.source = nil
                 throw Blocked(.serviceNotReady(error.localizedDescription))
             }
@@ -517,7 +521,7 @@ public final class CaptionSession {
             do {
                 try await client.connect()
             } catch {
-                source.stop()
+                await source.stop()
                 self.source = nil
                 throw Blocked(.serviceNotReady(error.localizedDescription))
             }
@@ -535,7 +539,7 @@ public final class CaptionSession {
         partialText = nil
         terminalCount = 0
         currentOrdinal = 0
-        lineByItem = [:]
+        lineByItem = .init()
         timingQualityApplied = []
         isStoppingIntentionally = false
         do {
@@ -558,7 +562,7 @@ public final class CaptionSession {
             coordinator.sessionDidStartRecording(id: record.id)
         } catch {
             await client.close()
-            source.stop()
+            await source.stop()
             self.source = nil
             self.client = nil
             throw Blocked(.storeUnavailable(error.localizedDescription))
@@ -577,15 +581,31 @@ public final class CaptionSession {
     private var stopCaptureTask: Task<Void, Never>?
     private var isClosingCaptureTransport = false
 
-    public func stopCapture() async {
-        if let stopCaptureTask { return await stopCaptureTask.value }
-        let task = Task { @MainActor in await self.performStopCapture() }
+    public func stopCapture() async { await beginCaptureStop(preservingRecord: false).value }
+
+    private func beginCaptureStop(preservingRecord: Bool) -> Task<Void, Never> {
+        if let stopCaptureTask { return stopCaptureTask }
+        let task = Task { @MainActor in
+            defer { self.stopCaptureTask = nil }
+            await self.performStopCapture(preservingRecord: preservingRecord)
+        }
         stopCaptureTask = task
-        await task.value
-        stopCaptureTask = nil
+        return task
     }
 
-    private func performStopCapture() async {
+    private func audioStreamFailed(_ error: any Error, identity: TranscriptPreviewLedger.Identity) {
+        guard isCurrent(identity) else { return }
+        let failure = (error as? AudioStreamError) ?? AudioStreamError(reason: .sourceLost)
+        lastFailure = failure.localizedDescription
+        if failure.reason != .sourceLost, let sessionID {
+            coordinator.recordCaptureCompletionFailure(recordID: sessionID,
+                failure: .init(stage: .capture, message: failure.localizedDescription))
+        }
+        guard !isStoppingIntentionally, stopCaptureTask == nil else { return }
+        _ = beginCaptureStop(preservingRecord: true)
+    }
+
+    private func performStopCapture(preservingRecord: Bool) async {
         let deadline = SessionDrainDeadline(timeout: dependencies.drainTimeout)
         let endingRecordID = sessionID
         if let endingRecordID {
@@ -598,7 +618,7 @@ public final class CaptionSession {
         isClosingCaptureTransport = false
         phase = .ending
         isStoppingIntentionally = true
-        source?.stop()
+        await source?.stop()
         source = nil
         // `stop()` closes the source stream but does not retract chunks it has
         // already buffered. Upload those before committing the server-side tail.
@@ -644,7 +664,7 @@ public final class CaptionSession {
                     lastFailure = coordinator.captureCompletionFailure(recordID: endingRecordID)?.message
                         ?? deadline.failure?.message ?? "本场收尾尚未确认完整。"
                 }
-                if coordinator.activeSessionID == endingRecordID, coordinator.occupancy?.kind == .captions {
+                if !preservingRecord, coordinator.activeSessionID == endingRecordID, coordinator.occupancy?.kind == .captions {
                     coordinator.abandonOccupancy()
                 }
             }
@@ -658,8 +678,17 @@ public final class CaptionSession {
             client = nil
             diarizationActive = false
             isClosingCaptureTransport = false
-            resetToIdleKeepingLines()
-            setBandVisible(false)
+            if preservingRecord {
+                isStoppingIntentionally = false
+                level = 0; phase = .paused
+                blocked = .streamFailed(lastFailure ?? "音频来源已中断，可以重新接上。")
+                if coordinator.occupancy?.kind == .captions {
+                    _ = await coordinator.markInterruption(.sourceLost, atOrdinal: currentOrdinal)
+                }
+            } else {
+                resetToIdleKeepingLines()
+                setBandVisible(false)
+            }
         }
     }
 
@@ -697,7 +726,7 @@ public final class CaptionSession {
     public func pause() async {
         guard phase == .running else { return }
         isStoppingIntentionally = true
-        source?.stop()
+        await source?.stop()
         source = nil
         await uploadPump?.value
         uploadPump = nil
@@ -760,7 +789,7 @@ public final class CaptionSession {
     private func restartPipeline() async throws {
         // 续接是"新 epoch"，不是"再叠一路"：上一次留下的采集件先还回去，
         // 否则旧的引擎会一直被持着（用户裁决：功能离开就释放）。
-        source?.stop()
+        await source?.stop()
         source = nil
         let binding = await realtimeCapabilityBindingProvider?()
         if realtimeCapabilityBindingProvider != nil, binding == nil {
@@ -768,7 +797,7 @@ public final class CaptionSession {
         }
         let source = audioSourceFactory()
         self.source = source
-        let stream: AsyncStream<AudioChunk>
+        let stream: AudioChunkStream
         do {
             stream = try await source.start()
         } catch {
@@ -796,7 +825,7 @@ public final class CaptionSession {
         } catch {
             let unavailableCode = (error as? RealtimeASRClient.Failure)?.diarizationUnavailableCode
             guard diarizationRequested, unavailableCode != nil else {
-                source.stop()
+                await source.stop()
                 self.source = nil
                 throw Blocked(.serviceNotReady(error.localizedDescription))
             }
@@ -804,7 +833,7 @@ public final class CaptionSession {
             do {
                 try await client.connect()
             } catch {
-                source.stop()
+                await source.stop()
                 self.source = nil
                 throw Blocked(.serviceNotReady(error.localizedDescription))
             }
@@ -847,15 +876,20 @@ public final class CaptionSession {
     }
 
     private func startPump(
-        stream: AsyncStream<AudioChunk>,
+        stream: AudioChunkStream,
         client: any CaptionRealtimeClient,
         identity: TranscriptPreviewLedger.Identity
     ) {
         uploadPump?.cancel()
         uploadPump = Task { [weak self] in
-            for await chunk in stream {
-                guard let self, self.isCurrent(identity) else { return }
-                await self.upload(chunk, to: client, identity: identity)
+            do {
+                for try await chunk in stream {
+                    guard let self, self.isCurrent(identity) else { return }
+                    await self.upload(chunk, to: client, identity: identity)
+                }
+                if !Task.isCancelled { self?.audioStreamFailed(AudioStreamError(reason: .sourceLost), identity: identity) }
+            } catch {
+                if !(error is CancellationError) { self?.audioStreamFailed(error, identity: identity) }
             }
         }
 
@@ -967,6 +1001,9 @@ public final class CaptionSession {
         case .diarizationFinished:
             // 分人收口屏障：drain 已在客户端内等齐，这里无需再记状态。
             break
+        case .itemRetired(let itemID):
+            let key = TranscriptPreviewLedger.ItemIdentity(identity: identity, itemID: itemID)
+            if let entry = lineByItem.retire(key), let recordID = sessionID { retireLiveLine(recordID: recordID, lineID: entry.lineID) }
         case .alignmentFailed(_, let code, _):
             lastFailure = labeling.recordAlignmentFailure(code: code)
             if diarizationActive, let sessionID, let note = labeling.note {
@@ -1070,13 +1107,10 @@ public final class CaptionSession {
             }
             guard self.sessionID == recordID, self.previewIdentity == identity else { return }
             if savedTiming { self.timingQualityApplied.insert(lineID) }
-            self.lines = self.lines.map { existing in
-                guard existing.id == lineID else { return existing }
-                var updated = existing
+            self.transcriptPresentation.update(id: lineID) { updated in
                 if confirmedLabels.contains(lineID) {
                     updated.speakerLabel = owner.attributedLabel(forLineID: lineID)
                 }
-                return updated
             }
         }
         if accepted {
@@ -1123,6 +1157,19 @@ public final class CaptionSession {
         }
     }
 
+    private func retireLiveLine(recordID: String, lineID: String) {
+        let owner = labeling
+        let accepted = inputPersistence.enqueueProjection(recordID: recordID, lineID: lineID, unitCount: 0, coalescing: false) { [weak self, owner] in
+            owner.retireLine(lineID)
+            self?.timingQualityApplied.remove(lineID)
+        }
+        if !accepted {
+            owner.retireLine(lineID); timingQualityApplied.remove(lineID)
+            lastFailure = "辅助信息清理积压，已保留正文；请结束后检查记录。"
+        }
+    }
+    var liveTranscriptLookupCount: Int { lineByItem.count }
+
     private func didSaveTranscript(_ command: TranscriptPersistenceQueue.Command, ordinal: Int) async {
         if sessionID == command.sessionID, !command.formal,
            lastFailure?.contains("正在保留恢复内容") == true {
@@ -1132,17 +1179,19 @@ public final class CaptionSession {
             connection: command.connection, generation: command.generation
         )
         let itemIdentity = TranscriptPreviewLedger.ItemIdentity(identity: identity, itemID: command.itemID)
+        defer {
+            if lineByItem.isRetired(itemIdentity), command.formal {
+                retireLiveLine(recordID: command.sessionID, lineID: command.lineID)
+            }
+        }
         // 行已经在了。对齐/分人结果到达时按 `utterance_id` 找回这一行。
         if sessionID == command.sessionID, command.formal {
             lineByItem[itemIdentity] = (lineID: command.lineID, ordinal: ordinal)
             currentOrdinal = max(currentOrdinal, ordinal)
-            if !lines.contains(where: { $0.id == command.lineID }) {
-                lines.append(Line(
+            transcriptPresentation.apply(Line(
                     id: command.lineID, ordinal: ordinal, text: command.text,
                     start: command.tStart, end: command.tEnd, speakerLabel: command.speakerLabel
                 ))
-                lines.sort { $0.ordinal < $1.ordinal }
-            }
         }
         guard let payload = pendingAttributions.take(recordID: command.sessionID, identity: itemIdentity),
               command.formal else { return }
@@ -1201,7 +1250,7 @@ public final class CaptionSession {
     /// 中途断了：停采集、停连接、**写一条中断区间**（不重放 PCM），会话与记录都留着。
     /// 用户点「重新接上」就是新 epoch——序号与水位不重置（§6.5）。
     private func enterInterrupted(_ reason: BlockReason) async {
-        source?.stop()
+        await source?.stop()
         source = nil
         uploadPump?.cancel()
         uploadPump = nil

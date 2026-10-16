@@ -7,7 +7,6 @@ import Synchronization
 /// storage is preallocated; the real-time callback never allocates or waits on
 /// a lock. When the ring is full, newest samples are dropped so unread samples
 /// remain contiguous in time.
-@available(macOS 15.0, *)
 public final class AudioSampleRing: @unchecked Sendable {
     private let storage: UnsafeMutablePointer<Float>
     private let capacity: Int
@@ -18,6 +17,8 @@ public final class AudioSampleRing: @unchecked Sendable {
     /// 实时回调内只做无锁累加；换算（native sample rate → 时间）与上报离开回调。
     /// 与 `accepted` 严格互斥：同一份样本要么被接纳，要么被计数为丢弃。
     private let droppedSamples = Atomic<Int>(0)
+    private let timeline = AudioCaptureTimeline()
+    internal var allocatedBytes: Int { capacity * MemoryLayout<Float>.stride + AudioCaptureTimeline.storageBytes }
 
     public init(capacity: Int) {
         var size = 2
@@ -40,6 +41,15 @@ public final class AudioSampleRing: @unchecked Sendable {
         let read = readIndex.load(ordering: .relaxed)
         let write = writeIndex.load(ordering: .acquiring)
         return min(write &- read, capacity - 1)
+    }
+
+    @inline(__always)
+    internal func beginCapture(uptimeNanoseconds: UInt64) -> Bool {
+        timeline.begin(position: writeIndex.load(ordering: .relaxed), uptime: uptimeNanoseconds)
+    }
+
+    internal func oldestCaptureUptimeNanoseconds(sampleRate: Double) -> UInt64? {
+        timeline.uptime(at: readIndex.load(ordering: .relaxed), samplesPerSecond: sampleRate)
     }
 
     /// Test and non-realtime convenience API. The audio callback uses the
@@ -156,11 +166,13 @@ public final class AudioSampleRing: @unchecked Sendable {
     internal func discardPending() {
         let write = writeIndex.load(ordering: .acquiring)
         readIndex.store(write, ordering: .releasing)
+        timeline.discard(through: write)
     }
 
     /// Resets both cursors after the producer has been stopped.
     internal func reset() {
         readIndex.store(0, ordering: .relaxed)
         writeIndex.store(0, ordering: .relaxed)
+        timeline.reset()
     }
 }

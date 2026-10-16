@@ -1207,7 +1207,7 @@ final class LLMProviderTests: XCTestCase {
             }
             XCTAssertTrue(detail.contains("首个有效正文"), "失败原因应指明首正文超时，实际 \(detail)")
         }
-        let expired = await timer.expired
+        let expired = timer.expired
         XCTAssertTrue(expired, "超限后 expired 旗必须立起，供读取循环在下一字节处抛同错")
     }
 
@@ -1222,11 +1222,11 @@ final class LLMProviderTests: XCTestCase {
         )
         // 50ms 后 noteText：stall 重新展期 200ms；再睡 100ms 仍未到期。
         try await Task.sleep(for: .milliseconds(50))
-        await timer.noteText()
+        try timer.advance(events: [.text], now: .now)
         try await Task.sleep(for: .milliseconds(100))
-        let expired = await timer.expired
+        let expired = timer.expired
         XCTAssertFalse(expired, "见正文后停滞 deadline 应被重置，不应误杀合法推理等待")
-        let seen = await timer.firstTextSeen
+        let seen = timer.firstTextSeen
         XCTAssertTrue(seen, "noteText 后 firstTextSeen 必须为真，首正文 deadline 永久解除")
     }
 
@@ -1239,7 +1239,7 @@ final class LLMProviderTests: XCTestCase {
         )
         // 必须立即返回（不抛错）：若此处抛超限，就是"无 deadline 误杀"。
         try await timer.waitForExpiry()
-        let expired = await timer.expired
+        let expired = timer.expired
         XCTAssertFalse(expired, "无 deadline 时不得立超限旗")
     }
 
@@ -1390,11 +1390,11 @@ final class LLMProviderTests: XCTestCase {
         )
         // 50ms 后来一次推理进展：停滞展期 200ms；再睡 100ms 仍未到期。
         try await Task.sleep(for: .milliseconds(50))
-        await timer.noteProgress()
+        try timer.advance(events: [.reasoning], now: .now)
         try await Task.sleep(for: .milliseconds(100))
-        let expired = await timer.expired
+        let expired = timer.expired
         XCTAssertFalse(expired, "推理进展应展期停滞 deadline，不误杀合法等待")
-        let seen = await timer.firstTextSeen
+        let seen = timer.firstTextSeen
         XCTAssertFalse(seen, "推理进展不得算首正文，首正文 deadline 仍有效")
         // 首正文 deadline 到达仍超限：推理不能无限延长正文等待。
         try await Task.sleep(for: .milliseconds(250))

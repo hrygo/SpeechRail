@@ -81,6 +81,7 @@ public final class SpeakerLabeling {
 
     /// `segment_uid` → 库里的行 id。修订事件靠它找行。
     private var lineByUnit: [String: String] = [:]
+    private var unitsByLine: [String: Set<String>] = [:]
     /// `segment_uid` → 已经写进库的那个标签（去重：同一个归属不重复写库）。
     private var appliedByUnit: [String: String] = [:]
     private var lifecycle = UUID()
@@ -110,6 +111,7 @@ public final class SpeakerLabeling {
         lineCounts = [:]
         firstOrdinal = [:]
         lineByUnit = [:]
+        unitsByLine = [:]
         appliedByUnit = [:]
         mergedInto = [:]
         note = nil
@@ -128,6 +130,7 @@ public final class SpeakerLabeling {
         lifecycle = UUID()
         self.sessionID = sessionID
         lineByUnit = [:]
+        unitsByLine = [:]
         appliedByUnit = [:]
     }
 
@@ -136,6 +139,7 @@ public final class SpeakerLabeling {
     public func load(sessionID: String, labels: [String], displayNames: [String: String]) {
         lifecycle = UUID()
         lineByUnit = [:]
+        unitsByLine = [:]
         appliedByUnit = [:]
         self.sessionID = sessionID
         self.labels = labels
@@ -146,6 +150,7 @@ public final class SpeakerLabeling {
         lifecycle = UUID()
         sessionID = nil
         lineByUnit = [:]
+        unitsByLine = [:]
         appliedByUnit = [:]
     }
 
@@ -169,7 +174,9 @@ public final class SpeakerLabeling {
             if lineByUnit[unit.segmentUID] != lineID {
                 appliedByUnit.removeValue(forKey: unit.segmentUID)
             }
+            if let previous = lineByUnit[unit.segmentUID], previous != lineID { unitsByLine[previous]?.remove(unit.segmentUID) }
             lineByUnit[unit.segmentUID] = lineID
+            unitsByLine[lineID, default: []].insert(unit.segmentUID)
             guard let speaker = unit.speaker, !speaker.isEmpty else { continue }
             if label == nil { label = speaker }
             observe(label: speaker, ordinal: ordinal)
@@ -247,11 +254,19 @@ public final class SpeakerLabeling {
     ///
     /// 修订事件到达时用它在内存里刷新 chip：库里那一行已经改过了，界面不该等到重开才跟上。
     public func attributedLabel(forLineID lineID: String) -> String? {
-        for (uid, id) in lineByUnit where id == lineID {
+        for uid in unitsByLine[lineID] ?? [] {
             if let label = appliedByUnit[uid] { return label }
         }
         return nil
     }
+
+    /// Called after accepted attribution writes leave the shared persistence owner.
+    func retireLine(_ lineID: String) {
+        for unit in unitsByLine.removeValue(forKey: lineID) ?? [] {
+            if lineByUnit[unit] == lineID { lineByUnit.removeValue(forKey: unit); appliedByUnit.removeValue(forKey: unit) }
+        }
+    }
+    var liveUnitCount: Int { lineByUnit.count }
 
     /// 一次 active→degraded：标签停更、已给出的保留（§9 第 12 行）。
     public func markDegraded(code: String, message: String) {

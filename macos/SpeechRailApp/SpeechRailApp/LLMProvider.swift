@@ -940,8 +940,8 @@ public enum LLMError: LocalizedError, Equatable {
 ///
 /// 只有 `response.completed` 算成功；`[DONE]` 与 EOF 都只是**传输**结束。
 /// `responseID` 由第一个带身份的事件定下来，之后别的响应的终态一律不认。
-struct LLMResponseStreamState {
-    private enum Terminal {
+struct LLMResponseStreamState: Sendable {
+    private enum Terminal: Sendable {
         case awaiting
         case completed
         case failed
@@ -991,202 +991,104 @@ enum AssistantLLMStreamBudget {
     static let maxTotalTextScalars = 16_384
 }
 
-/// V07:流读取与 deadline 计时的赛跑（非隔离 helper，供 actor 内调用）。
-///
-/// 读取保持原同步 consume 循环；计时器只读进度。任一 deadline 到达即抛
-/// `streamBudgetExceeded`，已收正文由调用方保留。`onDelta` 经 @Sendable
-/// 参数跨隔离域传递，不在 actor 上下文内联闭包。
-private enum StreamRace {
-    fileprivate static func run(
-        bytes: URLSession.AsyncBytes,
-        decoder: inout ResponsesEventStreamDecoder,
-        onDelta: @Sendable @escaping (String) -> Void,
-        timer: StreamTimer
-    ) async throws {
-        // decoder 是值类型：赛跑期间所有权移交读取任务，结束时交还。
-        // inout 跨任务传递被禁止，故用返回盒（终态/用量由调用方从返回的
-        // decoder 读取，与原顺序循环语义一致）。
-        // 结算语义与 `RealtimeASRClient.withStageTimeout` 同构：`group.next()`
-        // 按完成顺序返回，只取一次——先完成者胜出；defer 取消另一方。
-        // 计时器任务永不正常返回（deadline 到达即抛；读取已失败时可取消地停放，
-        // 让读取任务的错误获胜），因此不存在"哨兵被误认为成功"的路径。
-        final class DecoderBox: @unchecked Sendable {
-            var value: ResponsesEventStreamDecoder
-            init(_ v: ResponsesEventStreamDecoder) { value = v }
-        }
-        /// 赛跑结果：只有读取任务返回值；计时器任务只抛错（deadline 到达）
-        /// 或被取消（读取已获胜），永不返回值——因此无需 seed 同一性比较。
-        enum RaceResult: Sendable {
-            case finished(DecoderBox)
-            case timerFired
-            /// 计时器认输：无 deadline 可等，或读取已失败。
-            /// 永不抛错——调用方继续等读取任务的结果，绝不伪造超限。
-            case timerConceded
-        }
-        let finishedDecoder = try await withThrowingTaskGroup(of: RaceResult.self) { group in
-            let seed = DecoderBox(decoder)
-            group.addTask {
-                var local = seed.value
-                do {
-                    for try await byte in bytes {
-                        if await timer.expired {
-                            throw LLMError.streamBudgetExceeded(await timer.expiryReason)
-                        }
-                        if try local.consume(byte, onDelta: { text in
-                            onDelta(text)
-                            // 空串是纯进展信号（M1/V15 推理阶段）：只展期停滞
-                            // deadline，不算首正文。非空正文走 noteText，
-                            // 同时解除首正文 deadline 并展期停滞。
-                            if text.isEmpty {
-                                Task { await timer.noteProgress() }
-                            } else {
-                                Task { await timer.noteText() }
-                            }
-                        }) { break }
-                    }
-                    try local.finish(onDelta: { text in
-                        onDelta(text)
-                        if text.isEmpty {
-                            Task { await timer.noteProgress() }
-                        } else {
-                            Task { await timer.noteText() }
-                        }
-                    })
-                    if await timer.expired {
-                        throw LLMError.streamBudgetExceeded(await timer.expiryReason)
-                    }
-                    return .finished(DecoderBox(local))
-                } catch {
-                    // 读取任务先立失败旗：计时器随后退出等待，不再覆盖失败原因。
-                    await timer.noteFailure()
-                    // V07:读取中途的取消同样单独成类，不记成传输失败。
-                    if error is CancellationError || (error as? URLError)?.code == .cancelled {
-                        throw LLMError.cancelled
-                    }
-                    throw error
-                }
-            }
-            group.addTask {
-                do {
-                    try await timer.waitForExpiry()
-                } catch {
-                    // deadline 到达：expired 旗已立，抛超限错误获胜；
-                    // 非超限错误（理论上不应发生）直接透出。
-                    if await timer.expired {
-                        return .timerFired
-                    }
-                    throw error
-                }
-                // waitForExpiry 正常返回只发生在两种情形：
-                // 无 deadline 可等，或读取已失败（failed 旗）。
-                // 两种情形下本任务都认输：返回永不抛错的 conceded，
-                // 调用方继续等读取任务的结果，绝不伪造超限。
-                // 注意：认输后若直接返回，`group.next()` 会先取到 conceded
-                // 而不是读取任务的结果——因此此处可取消地停放，等 defer 取消
-                // 或外层取消；停放被取消时抛 CancellationError 也不覆盖
-                // 读取任务的错误（见下方的 next 循环）。
-                do {
-                    try await Task.sleep(for: .seconds(3_600))
-                } catch {
-                    return .timerConceded
-                }
-                return .timerConceded
-            }
-            defer { group.cancelAll() }
-            // 循环结算：`.timerConceded`（计时器认输）不是终态，继续等
-            // 读取任务的结果；`.timerFired`/`.finished`/任务抛错才是终态。
-            // 认输任务已返回，不再占用 group；读取任务仍在运行（或已结束），
-            // 下一次 next 必为其结果——不会无界等待。
-            while true {
-                guard let winner = try await group.next() else {
-                    throw LLMError.transport("请求没有完成")
-                }
-                switch winner {
-                case .finished(let box):
-                    return box.value
-                case .timerFired:
-                    throw LLMError.streamBudgetExceeded(await timer.expiryReason)
-                case .timerConceded:
-                    continue
-                }
-            }
-        }
-        decoder = finishedDecoder
+struct StreamReadResult: Sendable {
+    let state: LLMResponseStreamState
+    let byteCount: Int
+    let usageData: Data?
+    var usage: [String: Any]? {
+        guard let usageData else { return nil }
+        return (try? JSONSerialization.jsonObject(with: usageData)) as? [String: Any]
     }
 }
 
-/// V07:流进度与 deadline 计时（actor 隔离，供赛跑双方共享）。
-/// internal 以便定向回归验证 deadline 状态机（首正文/停滞/心跳语义）；
-/// 不进入公共 API，仅同模块测试可见。
-actor StreamTimer {
-    private let firstDeadline: ContinuousClock.Instant?
-    private let stallTimeout: Duration?
-    private var stallDeadline: ContinuousClock.Instant?
-    private(set) var expired = false
-    private(set) var expiryReason = ""
-    private(set) var firstTextSeen = false
-    private var failed = false
-
-    init(
-        firstDeadline: ContinuousClock.Instant?,
-        stallTimeout: Duration?,
-        initialStall: ContinuousClock.Instant?
-    ) {
-        self.firstDeadline = firstDeadline
-        self.stallTimeout = stallTimeout
-        self.stallDeadline = initialStall
+/// The reader owns the decoder; the deadline waiter owns no transport buffers.
+/// Both are drained before the run returns, and either path closes the actual URLSession task.
+enum StreamRace {
+    private enum Result: Sendable {
+        case finished(StreamReadResult)
+        case timerFired(String)
+        case timerConceded
     }
 
-    func noteText() {
-        firstTextSeen = true
-        if let stallTimeout {
-            stallDeadline = ContinuousClock.now.advanced(by: stallTimeout)
-        }
-    }
-
-    /// M1/V15:合法推理进展——重置停滞 deadline，但不解除首正文 deadline。
-    /// reasoning 阶段证明连接与模型活着，但正文尚未开始；首正文 deadline
-    /// 仍按原预算执行，不因推理无限延长。
-    func noteProgress() {
-        if let stallTimeout {
-            stallDeadline = ContinuousClock.now.advanced(by: stallTimeout)
-        }
-    }
-
-    /// 读取任务失败时立旗：计时器随后退出等待，不再覆盖失败原因。
-    func noteFailure() {
-        failed = true
-    }
-
-    /// 计时器任务主体：任一 deadline 到达即立旗并抛错。
-    /// 无 deadline 可等时直接返回（由调用方结算读取任务）。
-    /// 读取任务已失败时直接返回，不覆盖其错误。
-    func waitForExpiry() async throws {
-        while true {
-            if failed { return }
-            let now = ContinuousClock.now
-            if let firstDeadline, !firstTextSeen, now >= firstDeadline {
-                expired = true
-                expiryReason = "首个有效正文超时未到达"
-                throw LLMError.streamBudgetExceeded(expiryReason)
+    @concurrent
+    static func run<Bytes: AsyncSequence & Sendable>(
+        bytes: Bytes,
+        onDelta: @Sendable @escaping (String) throws -> Void,
+        timer: StreamTimer,
+        cancelTransport: @Sendable @escaping () -> Void,
+        work: StreamRunWork = StreamRunWork()
+    ) async throws -> StreamReadResult where Bytes.Element == UInt8 {
+        let cancellation = StreamTransportCancellation(cancelTransport)
+        return try await withTaskCancellationHandler {
+            try await withThrowingTaskGroup(of: Result.self) { group in
+                group.addTask {
+                    work.begin()
+                    defer { work.end() }
+                    var decoder = ResponsesEventStreamDecoder()
+                    do {
+                        for try await byte in bytes {
+                            if decoder.isEventBoundary(byte) {
+                                let receivedAt = ContinuousClock.now
+                                try Task.checkCancellation()
+                                var deltas: [String] = []
+                                let terminal = try AppPerformanceMetrics.shared.measure(.llmEvent) {
+                                    try decoder.consume(byte, onDelta: { deltas.append($0) })
+                                }
+                                try timer.advance(events: deltas.map { $0.isEmpty ? .reasoning : .text },
+                                    now: receivedAt, terminal: terminal)
+                                for delta in deltas { try onDelta(delta) }
+                                if terminal { break }
+                            } else {
+                                _ = try decoder.consume(byte, onDelta: onDelta)
+                            }
+                        }
+                        try Task.checkCancellation()
+                        if !decoder.state.isFinished {
+                            let receivedAt = ContinuousClock.now
+                            var deltas: [String] = []
+                            let previousEvents = decoder.eventCount
+                            try decoder.finish(onDelta: { deltas.append($0) })
+                            if decoder.eventCount != previousEvents {
+                                try timer.advance(events: deltas.map { $0.isEmpty ? .reasoning : .text },
+                                    now: receivedAt, terminal: decoder.state.isFinished)
+                            }
+                            for delta in deltas { try onDelta(delta) }
+                        }
+                        guard decoder.state.isFinished else { throw LLMError.streamEndedEarly }
+                        let usage = try decoder.usage.map { try JSONSerialization.data(withJSONObject: $0) }
+                        return .finished(.init(state: decoder.state, byteCount: decoder.byteCount, usageData: usage))
+                    } catch {
+                        timer.stop()
+                        if error is CancellationError || (error as? URLError)?.code == .cancelled { throw LLMError.cancelled }
+                        throw error
+                    }
+                }
+                group.addTask {
+                    work.begin()
+                    defer { work.end() }
+                    do { try await timer.waitForExpiry() }
+                    catch { return .timerFired(timer.expiryReason) }
+                    return .timerConceded
+                }
+                defer {
+                    cancellation.cancel()
+                    timer.stop()
+                    group.cancelAll()
+                }
+                while let result = try await group.next() {
+                    switch result {
+                    case .finished(let result):
+                        if Task.isCancelled { throw LLMError.cancelled }
+                        return result
+                    case .timerFired(let reason): throw LLMError.streamBudgetExceeded(reason)
+                    case .timerConceded: continue
+                    }
+                }
+                throw LLMError.cancelled
             }
-            if firstTextSeen, let stall = stallDeadline, now >= stall {
-                expired = true
-                expiryReason = "正文停滞超时未推进"
-                throw LLMError.streamBudgetExceeded(expiryReason)
-            }
-            let nextWake: ContinuousClock.Instant?
-            if !firstTextSeen {
-                nextWake = firstDeadline
-            } else {
-                nextWake = stallDeadline
-            }
-            guard let wake = nextWake else {
-                return  // 无 deadline 可等：计时器退出，等读取任务收尾。
-            }
-            let delay = max(.milliseconds(50), wake - now)
-            try? await Task.sleep(for: delay)
-            if Task.isCancelled || failed { return }
+        } onCancel: {
+            cancellation.cancel()
+            timer.stop()
         }
     }
 }
@@ -1198,6 +1100,11 @@ struct ResponsesEventStreamDecoder {
     private(set) var state = LLMResponseStreamState()
     private(set) var usage: [String: Any]?
     private(set) var byteCount = 0
+    private(set) var eventCount = 0
+
+    func isEventBoundary(_ byte: UInt8) -> Bool {
+        byte == 0x0A && lineBytes.isEmpty && !dataLines.isEmpty
+    }
     /// 整轮累计正文 scalar（含 delta 与 refusal delta）。V07d 有界计数，
     /// 超限由调用方显式失败，已收前缀保留。
     private(set) var totalTextScalars = 0
@@ -1205,7 +1112,7 @@ struct ResponsesEventStreamDecoder {
     /// 收到一个字节。返回 `true` 表示本轮已收束，调用方应停止读取。
     mutating func consume(
         _ byte: UInt8,
-        onDelta: @Sendable (String) -> Void
+        onDelta: (String) throws -> Void
     ) throws -> Bool {
         byteCount += 1
         guard byte != 0x0D else { return false }  // CRLF
@@ -1223,13 +1130,14 @@ struct ResponsesEventStreamDecoder {
     }
 
     /// 流结束（EOF）：把没落下的行与最后一个事件一并结算。
-    mutating func finish(onDelta: @Sendable (String) -> Void) throws {
+    mutating func finish(onDelta: (String) throws -> Void) throws {
         if !lineBytes.isEmpty {
             let line = String(decoding: lineBytes, as: UTF8.self)
             lineBytes.removeAll(keepingCapacity: true)
             if try handle(line: line, onDelta: onDelta) { return }
         }
         guard !state.isFinished, !dataLines.isEmpty else { return }
+        eventCount += 1
         for object in try Self.parseEvent(dataLines) {
             if try apply(object, onDelta: onDelta) { return }
         }
@@ -1239,10 +1147,11 @@ struct ResponsesEventStreamDecoder {
 
     private mutating func handle(
         line: String,
-        onDelta: @Sendable (String) -> Void
+        onDelta: (String) throws -> Void
     ) throws -> Bool {
         if line.isEmpty {
             guard !state.isFinished else { return true }
+            if !dataLines.isEmpty { eventCount += 1 }
             for object in try Self.parseEvent(dataLines) {
                 if try apply(object, onDelta: onDelta) { return true }
             }
@@ -1264,7 +1173,7 @@ struct ResponsesEventStreamDecoder {
 
     private mutating func apply(
         _ object: [String: Any],
-        onDelta: @Sendable (String) -> Void
+        onDelta: (String) throws -> Void
     ) throws -> Bool {
         var state = self.state
         var usage = self.usage
@@ -1317,15 +1226,14 @@ struct ResponsesEventStreamDecoder {
         state: inout LLMResponseStreamState,
         usage: inout [String: Any]?,
         totalTextScalars: inout Int,
-        onDelta: @Sendable (String) -> Void
+        onDelta: (String) throws -> Void
     ) throws -> Bool {
-        final class Counter: @unchecked Sendable { var value = 0 }
-        let counter = Counter()
+        var count = 0
         let finished = try handle(object, state: &state, usage: &usage, onDelta: {
-            counter.value += $0.unicodeScalars.count
-            onDelta($0)
+            count += $0.unicodeScalars.count
+            try onDelta($0)
         })
-        totalTextScalars += counter.value
+        totalTextScalars += count
         guard totalTextScalars <= AssistantLLMStreamBudget.maxTotalTextScalars else {
             throw LLMError.streamBudgetExceeded(
                 "累计正文超过 \(AssistantLLMStreamBudget.maxTotalTextScalars) scalars"
@@ -1339,7 +1247,7 @@ struct ResponsesEventStreamDecoder {
         _ object: [String: Any],
         state: inout LLMResponseStreamState,
         usage: inout [String: Any]?,
-        onDelta: @Sendable (String) -> Void
+        onDelta: (String) throws -> Void
     ) throws -> Bool {
         guard let type = object["type"] as? String else {
             throw LLMError.malformedStreamEvent
@@ -1353,12 +1261,12 @@ struct ResponsesEventStreamDecoder {
         switch type {
         case "response.output_text.delta", "response.refusal.delta":
             // refusal 的正文也要朗读，但它本身不是成功终态。
-            if let delta = object["delta"] as? String { onDelta(delta) }
+            if let delta = object["delta"] as? String { try onDelta(delta) }
         case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
             // M1/V15:合法推理阶段是有效进展，不是停滞——推进 deadline 计时，
             // 但不产生正文、不朗读、不落库。未知 reasoning 事件走 default
             // 忽略，不延长等待（fail-closed）。
-            onDelta("")
+            try onDelta("")
         case "response.completed":
             state.complete()
             return true
@@ -1421,29 +1329,26 @@ public actor LLMProvider {
         maxOutputTokens: Int? = nil,
         instructions: String? = nil
     ) -> AsyncThrowingStream<String, Error> {
-        AsyncThrowingStream { continuation in
-            let task = Task {
-                do {
-                    // V07:首正文 deadline——只有心跳/注释而无有效正文时显式失败，
-                    // 不无限延长回答；合法推理阶段的首个 delta 到达即解除。
-                    // 停滞 deadline 由 runStream 内有效正文推进重置。
-                    try await self.runStream(
-                        configuration: configuration,
-                        messages: messages,
-                        apiKey: apiKey,
-                        maxOutputTokens: maxOutputTokens,
-                        instructions: instructions,
-                        firstTextTimeout: AssistantLLMStreamBudget.firstTextTimeout,
-                        stallTimeout: AssistantLLMStreamBudget.textStallTimeout,
-                        onDelta: { continuation.yield($0) }
-                    )
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
+        let delivery = LLMStreamDelivery()
+        let task = Task {
+            do {
+                try await self.runStream(
+                    configuration: configuration,
+                    messages: messages,
+                    apiKey: apiKey,
+                    maxOutputTokens: maxOutputTokens,
+                    instructions: instructions,
+                    firstTextTimeout: AssistantLLMStreamBudget.firstTextTimeout,
+                    stallTimeout: AssistantLLMStreamBudget.textStallTimeout,
+                    onDelta: { try delivery.yield($0) }
+                )
+                delivery.finish()
+            } catch {
+                delivery.finish(throwing: error)
             }
-            continuation.onTermination = { _ in task.cancel() }
         }
+        delivery.cancelWhenTerminated { task.cancel() }
+        return delivery.stream
     }
 
     /// 一次性补全（内心 OS 与纪要都用它）。`store=false`：不用服务端会话状态。
@@ -2070,7 +1975,7 @@ public actor LLMProvider {
         instructions: String?,
         firstTextTimeout: Duration? = nil,
         stallTimeout: Duration? = nil,
-        onDelta: @Sendable @escaping (String) -> Void
+        onDelta: @Sendable @escaping (String) throws -> Void
     ) async throws {
         let observationContext = LLMRequestContext()
         let controlKey = thinkingKey(configuration, operation: .responses)
@@ -2178,36 +2083,29 @@ public actor LLMProvider {
                 streamAttempt = attempt
                 break
             }
-            // V07:非 2xx 错误 body 累加有上限——超限截断并标记，不无界积压。
-            // `AsyncBytes.lines` 按行切分：超长无换行 body 是一整行，`+=` 整行
-            // 追加会越过上限，因此逐行检查累加后是否超限并截断到上限。
-            var body = ""
+            var bodyBytes = Data()
             var bodyTruncated = false
             do {
-                for try await line in result.0.lines {
-                    body += line
-                    if body.utf8.count > AssistantLLMStreamBudget.maxErrorBodyBytes {
-                        body = String(body.prefix(AssistantLLMStreamBudget.maxErrorBodyBytes))
+                defer { result.0.task.cancel() }
+                for try await byte in result.0 {
+                    guard bodyBytes.count < AssistantLLMStreamBudget.maxErrorBodyBytes else {
                         bodyTruncated = true
                         break
                     }
+                    bodyBytes.append(byte)
                 }
             } catch {
-                let failure = LLMError.transport(error.localizedDescription)
+                let failure: LLMError = error is CancellationError || (error as? URLError)?.code == .cancelled
+                    ? .cancelled : .transport(error.localizedDescription)
                 emitProviderObservation(
-                    kind: .providerFailed,
-                    context: observationContext,
-                    configuration: configuration,
-                    startedAt: providerStartedAt,
-                    snapshot: responseCapture.snapshot(),
-                    transportAttempt: attempt,
-                    includeThinkingControl: includeThinkingControl,
-                    outcome: "failed",
-                    errorCode: LLMObservability.errorCode(for: failure),
-                    operation: .responses
+                    kind: .providerFailed, context: observationContext, configuration: configuration,
+                    startedAt: providerStartedAt, snapshot: responseCapture.snapshot(), transportAttempt: attempt,
+                    includeThinkingControl: includeThinkingControl, outcome: "failed",
+                    errorCode: LLMObservability.errorCode(for: failure), operation: .responses
                 )
                 throw failure
             }
+            let body = String(decoding: bodyBytes, as: UTF8.self)
             responseCapture.record(response: response, data: Data(body.utf8))
             let failure: LLMError
             do {
@@ -2254,26 +2152,22 @@ public actor LLMProvider {
             throw failure
         }
         do {
-            // V07:读取与计时器赛跑。读取保持原同步 consume 循环；计时器
-            // 只读 actor 进度，到达即立旗并抛错；读取在下一字节/收尾处抛同错。
-            // 关键：先结算读取任务（它的错误优先），计时器无 deadline 时直接
-            // 返回哨兵，随后仍等读取收尾——不把"无 deadline"当成功。
-            var decoder = ResponsesEventStreamDecoder()
+            // Progress is evaluated only at complete SSE events; the independent timer can cancel a stalled read.
             let timer = StreamTimer(
                 firstDeadline: firstTextTimeout.map { ContinuousClock.now.advanced(by: $0) },
                 stallTimeout: stallTimeout,
                 initialStall: stallTimeout.map { ContinuousClock.now.advanced(by: $0) }
             )
-            try await StreamRace.run(
+            let result = try await StreamRace.run(
                 bytes: bytes,
-                decoder: &decoder,
                 onDelta: onDelta,
-                timer: timer
+                timer: timer,
+                cancelTransport: { bytes.task.cancel() }
             )
             // `[DONE]` 与 EOF 都只是传输结束，不是模型的成功终态。
-            guard decoder.state.isFinished else { throw LLMError.streamEndedEarly }
-            streamResponseBytes = decoder.byteCount
-            streamUsage = decoder.usage
+            guard result.state.isFinished else { throw LLMError.streamEndedEarly }
+            streamResponseBytes = result.byteCount
+            streamUsage = result.usage
             streamResponseCapture.recordStreaming(
                 response: streamResponse,
                 responseBytes: streamResponseBytes,

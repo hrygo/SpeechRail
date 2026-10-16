@@ -8,8 +8,7 @@ import Synchronization
 //
 // 这个文件**同时编进 App 与 `SpeechRailCaptureHelper` 两个 target**（见 `Package.swift`
 // 与 `project.pbxproj` 的 Sources）：它是唯一一份 tap 实现，helper 只是它的宿主进程。
-// 因此它**不能引用 App 侧的任何类型**（`AudioChunkSource`、`AudioChunk` 都不在这里出现），
-// 出口只有一条很窄的约定：24 kHz / 单声道 / PCM16 的 `Data` + 0…1 的电平。
+// 它只引用 App/helper 共享的音频 DTO；不依赖会话或 UI owner。
 //
 // 四条硬约束（与 `MicrophoneCapture` 同源）：
 //
@@ -39,6 +38,7 @@ final class InterleavedFloatRing: @unchecked Sendable {
     /// M3/V08:累计丢样数（tap 回调侧 ring 满时容纳不下的 samples）。
     /// 与 `AudioSampleRing.droppedSampleCount` 同一语义：无锁累加，上报离开回调。
     private let droppedSamples = Atomic<Int>(0)
+    private let timeline = AudioCaptureTimeline()
 
     init(capacity: Int, channels: Int = 1) {
         precondition(channels > 0)
@@ -53,6 +53,13 @@ final class InterleavedFloatRing: @unchecked Sendable {
     deinit {
         storage.deinitialize(count: capacity)
         storage.deallocate()
+    }
+
+    @inline(__always) func beginCapture(uptime: UInt64) -> Bool {
+        timeline.begin(position: writeIndex.load(ordering: .relaxed), uptime: uptime)
+    }
+    func oldestCaptureUptime(samplesPerSecond: Double) -> UInt64? {
+        timeline.uptime(at: readIndex.load(ordering: .relaxed), samplesPerSecond: samplesPerSecond)
     }
 
     /// 可供写入的**连续**空间（回绕处截断）。返回 `nil` 表示已满。
@@ -88,6 +95,8 @@ final class InterleavedFloatRing: @unchecked Sendable {
         droppedSamples.add(count, ordering: .relaxed)
     }
 
+    var availableSampleCount: Int { writeIndex.load(ordering: .acquiring) &- readIndex.load(ordering: .relaxed) }
+
     /// 可供读取的**连续**区间（回绕处截断）。返回 `nil` 表示已空。
     @inline(__always)
     func readableSpan() -> (pointer: UnsafePointer<Float>, count: Int)? {
@@ -111,6 +120,7 @@ final class InterleavedFloatRing: @unchecked Sendable {
     func reset() {
         readIndex.store(0, ordering: .relaxed)
         writeIndex.store(0, ordering: .relaxed)
+        timeline.reset()
     }
 }
 
@@ -182,17 +192,24 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
     private let stateLock = NSLock()
     private var isRunning = false
     private var tapChannels = 2
-    private var onChunk: (@Sendable (Data, Double) -> Void)?
+    private var tapSampleRate = 48_000.0
+    private var onChunk: (@Sendable (AudioChunk) -> Void)?
+    private var onStopped: (@Sendable (AudioStreamError) -> Void)?
+    private let captureEpoch: UUID, sourceID: UUID
+    private var sequence: UInt64 = 0
+    private var pendingUptime: UInt64?
 
-    public init(configuration: Configuration) {
-        self.configuration = configuration
+
+    public init(configuration: Configuration, captureEpoch: UUID = UUID(), sourceID: UUID = UUID()) {
+        self.configuration = configuration; self.captureEpoch = captureEpoch; self.sourceID = sourceID
     }
 
     /// 建立 tap、aggregate device 与 IOProc，并开始交付 PCM。
     ///
     /// **这是一个阻塞调用**：里面全是 CoreAudio 的同步接口，必须离开主线程等
     /// （`TECHNICAL-DESIGN` §5.13；本机音色克隆那条路冷启动实测最坏阻塞 36.3 秒）。
-    public func start(onChunk: @escaping @Sendable (Data, Double) -> Void) throws {
+    public func start(onChunk: @escaping @Sendable (AudioChunk) -> Void,
+                      onStopped: (@Sendable (AudioStreamError) -> Void)? = nil) throws {
         guard !configuration.bundleIDs.isEmpty else { throw Failure.noBundleIdentifiers }
 
         let description = CATapDescription()
@@ -232,6 +249,7 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
             outputFormat = output
             converter = createdConverter
             tapChannels = Int(input.channelCount)
+            tapSampleRate = input.sampleRate
 
             // 环里最多留 1 秒：再多只说明下游卡住，丢掉比堆积好。
             ring = InterleavedFloatRing(
@@ -245,43 +263,38 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
         }
 
         self.onChunk = onChunk
+        self.onStopped = onStopped
+        sequence = 0; pendingUptime = nil
         pending.removeAll(keepingCapacity: true)
         scratch = [Float](repeating: 0, count: 4096)
-        isRunning = true
+        stateLock.withLock { isRunning = true }
         startDrainTimer()
     }
 
     /// 停采集并释放全部设备。**幂等**：没起来过、已经停过都能再调一次。
-    public func stop() {
-        stateLock.lock()
-        isRunning = false
-        stateLock.unlock()
-
-        drainTimer?.cancel()
-        drainTimer = nil
+    public func stop(drainPending: Bool = false) {
         drainQueue.sync { [self] in
-            if aggregateDeviceID != 0 {
-                if let ioProcID {
-                    AudioDeviceStop(aggregateDeviceID, ioProcID)
-                    AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
+            drainTimer?.setEventHandler {}; drainTimer?.cancel(); drainTimer = nil
+            if aggregateDeviceID != 0, let ioProcID {
+                AudioDeviceStop(aggregateDeviceID, ioProcID)
+                AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
+            }
+            if drainPending, isRunningCapture {
+                while let ring, ring.availableSampleCount > 0, isRunningCapture {
+                    let previous = ring.availableSampleCount
+                    drain()
+                    if ring.availableSampleCount >= previous { break }
                 }
-                // 设备先停、IOProc 先销毁，再拆 aggregate device：顺序反了会拿到半路的回调。
-                AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
+                if isRunningCapture { flushChunks(level: 0, flushPartial: true) }
             }
-            if tapID != 0 {
-                AudioHardwareDestroyProcessTap(tapID)
-            }
+            stateLock.withLock { isRunning = false }
+            if aggregateDeviceID != 0 { AudioHardwareDestroyAggregateDevice(aggregateDeviceID) }
+            if tapID != 0 { AudioHardwareDestroyProcessTap(tapID) }
         }
-        ioProcID = nil
-        aggregateDeviceID = 0
-        tapID = 0
-        ring?.reset()
-        ring = nil
-        converter = nil
-        inputFormat = nil
-        outputFormat = nil
-        onChunk = nil
-        pending.removeAll(keepingCapacity: true)
+        ioProcID = nil; aggregateDeviceID = 0; tapID = 0
+        ring?.reset(); ring = nil; converter = nil; inputFormat = nil; outputFormat = nil
+        onChunk = nil; onStopped = nil; pendingUptime = nil
+        pending.removeAll(keepingCapacity: false); scratch.removeAll(keepingCapacity: false)
     }
 
     /// 采集是否真的在出样本。会话提交前用它判"宁可没开始，也不要一条空记录"（§3.5）。
@@ -339,6 +352,15 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
 
     private func receive(_ bufferList: UnsafePointer<AudioBufferList>) {
         guard let ring else { return }
+        let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: bufferList))
+        let bytes = buffers.reduce(0) { $0 + Int($1.mDataByteSize) }
+        let samples = bytes / MemoryLayout<Float>.size
+        let duration = UInt64(Double(samples) / Double(tapChannels) / tapSampleRate * 1_000_000_000)
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard ring.beginCapture(uptime: now > duration ? now - duration : 0) else {
+            ring.recordDroppedSamples(bytes / MemoryLayout<Float>.size)
+            return
+        }
         Self.copyInputToRing(bufferList, into: ring, channels: tapChannels)
     }
 
@@ -446,11 +468,15 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
         guard running, let ring, let converter, let inputFormat, let outputFormat else { return }
 
         let channels = Int(inputFormat.channelCount)
+        guard ring.droppedSampleCount == 0 else { failOnDrain(.droppedSamples); return }
         var peak: Float = 0
+        let oldest = ring.oldestCaptureUptime(samplesPerSecond: inputFormat.sampleRate * Double(channels))
+        if pending.isEmpty { pendingUptime = oldest }
+        var remaining = max(1, Int(inputFormat.sampleRate / 10)) * channels
 
         // 输入：把这一轮能读到的连续区间全部吃进转换器（可能回绕几次）。
-        while let span = ring.readableSpan() {
-            let frames = span.count / channels
+        while remaining > 0, let span = ring.readableSpan() {
+            let frames = min(span.count, remaining) / channels
             guard frames > 0 else { ring.commitRead(span.count); continue }
             let needed = frames * channels
             if scratch.count < needed { scratch = [Float](repeating: 0, count: needed) }
@@ -461,7 +487,9 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
                 if magnitude > peak { peak = magnitude }
             }
             ring.commitRead(needed)
+            remaining -= needed
             appendToConverter(frames: frames, channels: channels, converter: converter, inputFormat: inputFormat)
+            guard isRunningCapture else { return }
         }
 
         _ = outputFormat
@@ -503,19 +531,43 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
             status.pointee = .haveData
             return buffer
         }
-        if conversionError != nil { return }
+        if conversionError != nil { failOnDrain(.sourceLost); return }
         guard output.frameLength > 0, let int16 = output.int16ChannelData else { return }
+        let byteCount = Int(output.frameLength) * 2
+        guard byteCount <= 24_000 - pending.count else { failOnDrain(.overflow); return }
         pending.append(UnsafeBufferPointer(start: int16[0], count: Int(output.frameLength)))
     }
 
-    private func flushChunks(level: Double) {
-        let bytesPerChunk = Int(Self.sampleRate * Self.chunkDuration) * MemoryLayout<Int16>.size
-        let emit = onChunk
-        while pending.count >= bytesPerChunk {
-            let chunk = pending.prefix(bytesPerChunk)
-            pending.removeFirst(bytesPerChunk)
-            emit?(Data(chunk), level)
+    private func flushChunks(level: Double, flushPartial: Bool = false) {
+        let bytesPerChunk = 1_920
+        var offset = 0
+        while pending.count - offset >= bytesPerChunk || (flushPartial && pending.count > offset) {
+            let take = min(bytesPerChunk, pending.count - offset)
+            guard let pendingUptime else { failOnDrain(.sourceLost); return }
+            sequence &+= 1
+            let uptime = pendingUptime + UInt64(offset / 2) * 1_000_000_000 / 24_000
+            let stamp = AudioCaptureStamp(captureEpoch: captureEpoch, sourceID: sourceID,
+                sourceSequence: sequence, capturedUptimeNanoseconds: uptime)
+            onChunk?(.init(pcm: Data(pending[offset..<(offset + take)]), level: level, capturedAt: stamp.capturedInstant,
+                sequenceNumber: Int(exactly: sequence), droppedSamplesBefore: ring?.droppedSampleCount,
+                captureStamp: stamp))
+            offset += take
         }
+        if offset > 0 {
+            pending.removeFirst(offset)
+            pendingUptime = pendingUptime.map { $0 + UInt64(offset / 2) * 1_000_000_000 / 24_000 }
+        }
+    }
+
+    private func failOnDrain(_ reason: AudioStreamTermination) {
+        let first = stateLock.withLock { () -> Bool in
+            guard isRunning else { return false }; isRunning = false; return true
+        }
+        guard first else { return }
+        drainTimer?.setEventHandler {}; drainTimer?.cancel(); drainTimer = nil
+        pending.removeAll(keepingCapacity: false)
+        onStopped?(AudioStreamError(reason: reason, captureEpoch: captureEpoch, sourceID: sourceID,
+            droppedSamples: reason == .droppedSamples ? UInt64(max(0, ring?.droppedSampleCount ?? 0)) : nil))
     }
 
     static func bundleIDsIncludingHelpers(

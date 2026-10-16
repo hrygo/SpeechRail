@@ -19,6 +19,17 @@ extension MeetingView {
                     // `labeling.state` 三种（没开 / 不支持 / 在用）面板自己会说话，所以按钮常在；
                     // 会话还没建起来时不给（那时没有可标注的行）。
                     if meeting.sessionID != nil {
+                        Button("复制全部文字", systemImage: "doc.on.doc") {
+                            Task {
+                                do {
+                                    let text = try await meeting.completeTranscriptText()
+                                    NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
+                                } catch { transcriptCopyMessage = "文字暂时未能复制，请重试。" }
+                            }
+                        }
+                        .speechRailButton(.quiet)
+                    }
+                    if meeting.sessionID != nil {
                         Button {
                             isLabelingSpeakers = true
                         } label: {
@@ -34,6 +45,14 @@ extension MeetingView {
                 Group {
                     ScrollView(.vertical) {
                         LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                            if meeting.transcriptPresentation.hasEarlier {
+                                Button(meeting.transcriptPresentation.isLoadingPage ? "正在读取…" : "载入更早记录") {
+                                    Task { await loadEarlierTranscript(before: meeting.lines.first?.ordinal) }
+                                }
+                                .speechRailButton(.quiet)
+                                .disabled(meeting.transcriptPresentation.isLoadingPage)
+                            }
+                            if let transcriptCopyMessage { Text(transcriptCopyMessage).font(SpeechRailDesignTokens.Typography.caption) }
                             if meeting.lines.isEmpty, meeting.partialText == nil {
                                 Text("这一场还没有说到能定稿的句子。")
                                     .font(SpeechRailDesignTokens.Typography.callout)
@@ -41,12 +60,18 @@ extension MeetingView {
                                     .padding(.vertical, SpeechRailDesignTokens.Spacing.lg)
                             }
                             ForEach(meeting.lines) { line in
+                                if let before = meeting.transcriptPresentation.gapBefore(id: line.id) {
+                                    Button("查看这之前的记录") { Task { await loadEarlierTranscript(before: before) } }
+                                        .speechRailButton(.quiet)
+                                        .disabled(meeting.transcriptPresentation.isLoadingPage)
+                                }
                                 liveLine(line).id(line.id)
                             }
                             if let partial = meeting.partialText, !partial.isEmpty {
                                 partialLine(partial)
                             }
                         }
+                        .scrollTargetLayout()
                         .padding(SpeechRailDesignTokens.Spacing.md)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -54,6 +79,17 @@ extension MeetingView {
                     .defaultScrollAnchor(
                         transcriptFollow.isPinnedToBottom ? .bottom : nil, for: .sizeChanges
                     )
+                    .onScrollTargetVisibilityChange(idType: String.self) { ids in
+                        transcriptVisibleLineIDs = ids
+                        if !transcriptFollow.isPinnedToBottom {
+                            meeting.transcriptPresentation.beginHistory(anchorID: firstVisibleTranscriptID)
+                            meeting.transcriptPresentation.setScrollAnchor(firstVisibleTranscriptID)
+                        }
+                    }
+                    .onChange(of: transcriptFollow.isPinnedToBottom) { _, pinned in
+                        if pinned { meeting.transcriptPresentation.returnToLatest() }
+                        else { meeting.transcriptPresentation.beginHistory(anchorID: firstVisibleTranscriptID) }
+                    }
                     .onScrollPhaseChange { oldPhase, phase, context in
                         let wasUserScroll = oldPhase == .interacting || oldPhase == .decelerating
                         let isUserScroll = phase == .interacting || phase == .decelerating
@@ -80,7 +116,7 @@ extension MeetingView {
                         guard updated != transcriptFollow else { return }
                         transcriptFollow = updated
                     }
-                    .onChange(of: meeting.lines.count) { oldCount, newCount in
+                    .onChange(of: meeting.transcriptPresentation.arrivalCount) { oldCount, newCount in
                         // 用户正在回看时，新句子一条都不许抢滚动（MA-10）。
                         let arrived = transcriptFollow.anchoring(meeting.lines.last?.id)
                             .contentArrived(lineCount: newCount - oldCount)
@@ -93,6 +129,7 @@ extension MeetingView {
                     .safeAreaInset(edge: .bottom) {
                         if let banner = transcriptFollow.unseenBannerText {
                             Button {
+                                meeting.transcriptPresentation.returnToLatest()
                                 transcriptFollow = transcriptFollow.jumpToLatest(
                                     anchor: meeting.lines.last?.id
                                 )
@@ -130,6 +167,18 @@ extension MeetingView {
                 }
             }
         }
+    }
+
+    private var firstVisibleTranscriptID: String? {
+        let ids = Set(transcriptVisibleLineIDs)
+        return meeting.lines.first { ids.contains($0.id) }?.id
+    }
+    private func loadEarlierTranscript(before: Int?) async {
+        meeting.transcriptPresentation.beginHistory(anchorID: firstVisibleTranscriptID)
+        transcriptFollow.isPinnedToBottom = false
+        let anchor = meeting.transcriptPresentation.scrollAnchorID
+        await meeting.loadTranscriptPage(beforeOrdinal: before)
+        if let anchor { transcriptScrollPosition.scrollTo(id: anchor, anchor: .top) }
     }
 
     private func scrollTranscriptToBottom() {

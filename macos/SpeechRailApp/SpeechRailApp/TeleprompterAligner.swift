@@ -82,6 +82,22 @@ public struct TeleprompterAligner: Sendable {
             }
         }
 
+        /// Lower bound over token end positions preserves the original anchor predicate,
+        /// including several spoken alias tokens with one displayed UTF-16 range.
+        func anchorSearch(_ anchor: Position) -> (index: Int, comparisons: Int) {
+            var lower = 0, upper = tokens.count, comparisons = 0
+            while lower < upper {
+                let middle = lower + (upper - lower) / 2
+                let position = tokens[middle].position
+                comparisons += 1
+                if position.segmentIndex < anchor.segmentIndex ||
+                    (position.segmentIndex == anchor.segmentIndex && position.utf16Offset < anchor.utf16Offset) {
+                    lower = middle + 1
+                } else { upper = middle }
+            }
+            return (lower < tokens.count ? lower : max(0, tokens.count - 1), comparisons)
+        }
+
         /// Builds the matchable token stream for one segment.
         ///
         /// A confirmed alias contributes the tokens of what the reader will *say*,
@@ -168,10 +184,7 @@ public struct TeleprompterAligner: Sendable {
         let input = Array(input.suffix(72))
         let none = Match(position: nil, confidence: 0, matchedCount: 0)
         guard !input.isEmpty, !script.tokens.isEmpty else { return none }
-        let anchorIndex = script.tokens.firstIndex {
-            $0.position.segmentIndex > anchor.segmentIndex ||
-            ($0.position.segmentIndex == anchor.segmentIndex && $0.position.utf16Offset >= anchor.utf16Offset)
-        } ?? script.tokens.count - 1
+        let anchorIndex = script.anchorSearch(anchor).index
         let lower = max(0, anchorIndex - configuration.lookBehindTokens)
         let upper = min(script.tokens.count, anchorIndex + configuration.lookAheadTokens)
         let window = Array(script.tokens[lower..<upper])

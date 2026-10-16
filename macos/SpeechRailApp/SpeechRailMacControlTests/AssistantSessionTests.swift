@@ -360,7 +360,7 @@ final class AssistantSessionTests: XCTestCase {
         private var _enqueuedEpochs: [Int] = []
         private let startFailure: Error?
         private let autoStartCapture: Bool
-        private var captureContinuation: AsyncStream<AudioChunk>.Continuation?
+        private var captureContinuation: AudioChunkStream.Continuation?
 
         var onPlaybackDrained: (@MainActor () -> Void)?
         var onPlaybackBufferRendered: (@MainActor (Int, Int, UUID) -> Void)?
@@ -396,17 +396,17 @@ final class AssistantSessionTests: XCTestCase {
 
         func configure(mode: AssistantMode) {}
 
-        func start() async throws -> AsyncStream<AudioChunk> {
+        func start() async throws -> AudioChunkStream {
             lock.withLock { _startCount += 1 }
             if let startFailure { throw startFailure }
             // The production source always closes its stream on stop, even when
             // the test never injects any audio.
-            let (stream, continuation) = AsyncStream<AudioChunk>.makeStream()
+            let (stream, continuation) = AudioChunkStream.makeStream()
             lock.withLock { captureContinuation = continuation }
             return stream
         }
 
-        func stop() {
+        func stop() async {
             let continuation = lock.withLock {
                 _stopCount += 1
                 let continuation = captureContinuation
@@ -418,7 +418,7 @@ final class AssistantSessionTests: XCTestCase {
 
         /// 往采集流里塞一块音频，验证上行确实发生了。
         func emitCapture(_ chunk: AudioChunk) {
-            lock.withLock { captureContinuation }?.yield(chunk)
+            lock.withLock { captureContinuation }?.offer(chunk)
         }
 
         @discardableResult

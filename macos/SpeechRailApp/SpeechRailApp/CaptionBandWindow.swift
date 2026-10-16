@@ -179,7 +179,8 @@ struct CaptionBandMetrics: Equatable {
                 availableWidth: textAvailableWidth(contentWidth: width, isPartial: true)
             )
         }
-        for line in lines.reversed() where rows < limit {
+        for line in lines.reversed() {
+            if rows >= limit { break }
             rows += visualRowCount(
                 for: line.text,
                 fontSize: fontSize,

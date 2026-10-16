@@ -81,24 +81,22 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
         qos: .userInitiated
     )
     private let stateLock = NSLock()
-    private let ring = AudioSampleRing(capacity: AudioEngineSession.ringCapacity)
-    /// M3/V08:已发出的 AudioChunk 块序号（serial queue 上递增）。
-    private var emittedChunkSequence = 0
+    private var captureDrain: AudioCaptureDrain?
+    private var captureEpoch = UUID()
+    private let captureSourceID = UUID()
     private let playbackFormat: AVAudioFormat?
 
     private var mode: AssistantMode = .duplex
+    private var stopTask: Task<Void, Never>?
     private var stopped = false
     private var started = false
-    private var continuation: AsyncStream<AudioChunk>.Continuation?
+    private var continuation: AudioChunkStream.Continuation?
 
     // AVAudioEngine objects and conversion buffers are owned by `queue`.
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayerNode?
-    private var converter: AVAudioConverter?
-    private var conversionInputBuffer: AVAudioPCMBuffer?
-    private var conversionOutputBuffer: AVAudioPCMBuffer?
+
     private var configurationObserver: NSObjectProtocol?
-    private var drainTimer: DispatchSourceTimer?
 
     private var playbackGeneration = 0
     private var pendingBuffers = 0
@@ -143,25 +141,20 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
         }
     }
 
-    func start() async throws -> AsyncStream<AudioChunk> {
+    func start() async throws -> AudioChunkStream {
         guard await MicrophoneCapture.requestPermission() else {
             throw Failure.permissionDenied
         }
-        let canStart = stateLock.withLock { !stopped && !started }
+        let canStart = stateLock.withLock { () -> Bool in
+            guard !stopped && !started else { return false }; started = true; return true
+        }
         guard canStart else {
             throw Failure.engineFailed("一个音频会话实例只能启动一次。")
         }
 
-        let (stream, continuation) = AsyncStream<AudioChunk>.makeStream(
-            bufferingPolicy: .bufferingNewest(64)
-        )
+        let (stream, continuation) = AudioChunkStream.makeStream(
+            sourceID: captureSourceID, onTermination: { [weak self] _ in self?.requestStop() })
         stateLock.withLock { self.continuation = continuation }
-        ring.reset()
-        // M3/V08:新采集期开始，块序号从 0 重计（与 ring 游标同一生命周期）。
-        // 注意：serial queue 上执行，与 drainAudioOnQueue 同队列，无竞争。
-        queue.async { [weak self] in
-            self?.emittedChunkSequence = 0
-        }
 
         do {
             try await withCheckedThrowingContinuation { (result: CheckedContinuation<Void, Error>) in
@@ -179,36 +172,54 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
                     }
                 }
             }
-        } catch {
-            stateLock.withLock { self.continuation = nil }
-            continuation.finish()
-            throw error
-        }
+        } catch { await stop(); throw error }
 
         let canDrain = stateLock.withLock { !stopped && started }
         guard canDrain else {
-            continuation.finish()
+            await stop()
             throw Failure.engineFailed("音频会话在启动时被取消。")
         }
-        startDraining(into: continuation)
         return stream
     }
 
-    func stop() {
-        let continuation = stateLock.withLock {
-            stopped = true
-            started = false
-            playbackGeneration += 1
-            pendingBuffers = 0
-            let continuation = self.continuation
-            self.continuation = nil
-            return continuation
+    func requestStop() {
+        let result = stateLock.withLock { () -> (Bool, AudioChunkStream.Continuation?) in
+            guard !stopped else { return (false, nil) }
+            stopped = true; started = false; playbackGeneration += 1; pendingBuffers = 0
+            let continuation = self.continuation; self.continuation = nil
+            return (true, continuation)
         }
-        continuation?.finish()
-        queue.async { [weak self] in
-            self?.tearDownEngineOnQueue(cancelDrainTimer: true)
-        }
+        guard result.0 else { return }
+        result.1?.finish(.cancelled)
+        queue.async { [weak self] in self?.tearDownEngineOnQueue(cancelDrainTimer: true) }
     }
+
+    func stop() async {
+        let task = stateLock.withLock { () -> Task<Void, Never> in
+            if let stopTask { return stopTask }
+            stopped = true; started = false; playbackGeneration += 1; pendingBuffers = 0
+            let task = Task { [self] in await performStop() }
+            stopTask = task
+            return task
+        }
+        await task.value
+    }
+
+    private func performStop() async {
+        let old: AudioCaptureDrain? = await withCheckedContinuation { done in
+            queue.async { [self] in
+                let old = captureDrain
+                tearDownEngineOnQueue(cancelDrainTimer: false)
+                captureDrain = nil
+                done.resume(returning: old)
+            }
+        }
+        await old?.stop(drainPending: true)
+        stateLock.withLock { continuation }?.finish(.completed)
+        stateLock.withLock { continuation = nil }
+    }
+
+    deinit { requestStop() }
 
     @discardableResult
     func enqueuePlayback(_ pcm: Data, epoch: Int, chunkID: UUID) async -> Bool {
@@ -257,7 +268,7 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
                     return
                 }
                 if reservation.resetCapture {
-                    self.ring.discardPending()
+                    self.captureDrain?.discardPending()
                 }
                 // M0d：用 `.dataPlayedBack`（计入下游处理与设备延迟）记 played。
                 // 单次 schedule 只选一种 completion 类型，不假设同一块回调两次；
@@ -292,79 +303,13 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
                     return
                 }
                 if resetCapture {
-                    self.ring.discardPending()
+                    self.captureDrain?.discardPending()
                 }
                 self.player?.stop()
                 self.player?.reset()
                 done.resume()
             }
         }
-    }
-
-    private func startDraining(into continuation: AsyncStream<AudioChunk>.Continuation) {
-        queue.async { [weak self] in
-            guard let self,
-                  self.stateLock.withLock({ !self.stopped && self.started })
-            else { return }
-
-            let timer = DispatchSource.makeTimerSource(queue: self.queue)
-            timer.schedule(
-                deadline: .now() + Self.chunkDuration,
-                repeating: Self.chunkDuration
-            )
-            timer.setEventHandler { [weak self] in
-                self?.drainAudioOnQueue(into: continuation)
-            }
-            self.drainTimer = timer
-            timer.resume()
-        }
-    }
-
-    private func drainAudioOnQueue(into continuation: AsyncStream<AudioChunk>.Continuation) {
-        guard stateLock.withLock({ !stopped && started }),
-              let converter,
-              let inputBuffer = conversionInputBuffer,
-              let outputBuffer = conversionOutputBuffer,
-              let inputSamples = inputBuffer.floatChannelData?[0]
-        else { return }
-
-        let frameCount = ring.read(into: inputSamples, maxCount: Int(inputBuffer.frameCapacity))
-        guard frameCount > 0 else { return }
-        inputBuffer.frameLength = AVAudioFrameCount(frameCount)
-        outputBuffer.frameLength = 0
-
-        var supplied = false
-        var conversionError: NSError?
-        let status = converter.convert(to: outputBuffer, error: &conversionError) { _, outStatus in
-            if supplied {
-                outStatus.pointee = .noDataNow
-                return nil
-            }
-            supplied = true
-            outStatus.pointee = .haveData
-            return inputBuffer
-        }
-        guard status != .error,
-              outputBuffer.frameLength > 0,
-              let samples = outputBuffer.int16ChannelData?[0]
-        else { return }
-
-        let byteCount = Int(outputBuffer.frameLength) * MemoryLayout<Int16>.size
-        let data = Data(bytes: samples, count: byteCount)
-        let level = data.withUnsafeBytes { raw in
-            AudioLevel.peak(raw.bindMemory(to: Int16.self))
-        }
-        // M3/V08:drain 逐块发序号 + 丢样快照。serial queue 上递增，无需原子。
-        emittedChunkSequence &+= 1
-        continuation.yield(
-            AudioChunk(
-                pcm: data,
-                level: level,
-                capturedAt: ContinuousClock.now,
-                sequenceNumber: emittedChunkSequence,
-                droppedSamplesBefore: ring.droppedSampleCount
-            )
-        )
     }
 
     /// Builds the graph only on the serial audio queue. In duplex mode voice
@@ -395,44 +340,17 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
 
         let inputFormat = input.inputFormat(forBus: 0)
         guard inputFormat.sampleRate > 0 else { throw Failure.unsupportedInput }
-        guard let converterInputFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: inputFormat.sampleRate,
-            channels: 1,
-            interleaved: false
-        ),
-        let converter = AVAudioConverter(from: converterInputFormat, to: Self.captureFormat)
-        else {
-            throw Failure.converterUnavailable
-        }
-
-        let inputFrameCapacity = AVAudioFrameCount(
-            max(1_024, Int((inputFormat.sampleRate * 0.1).rounded()))
-        )
-        let outputFrameCapacity = AVAudioFrameCount(
-            max(
-                1_024,
-                Int(ceil(Double(inputFrameCapacity) * Self.captureSampleRate / inputFormat.sampleRate)) + 64
-            )
-        )
-        guard let conversionInputBuffer = AVAudioPCMBuffer(
-            pcmFormat: converterInputFormat,
-            frameCapacity: inputFrameCapacity
-        ),
-        let conversionOutputBuffer = AVAudioPCMBuffer(
-            pcmFormat: Self.captureFormat,
-            frameCapacity: outputFrameCapacity
-        )
-        else {
-            throw Failure.converterUnavailable
-        }
-
+        guard let continuation = stateLock.withLock({ self.continuation }) else { throw CancellationError() }
+        captureEpoch = UUID()
+        let captureDrain = try AudioCaptureDrain(inputSampleRate: inputFormat.sampleRate,
+            ringCapacity: Self.ringCapacity, epoch: captureEpoch, sourceID: captureSourceID,
+            continuation: continuation, onFailure: { [weak self] _ in self?.requestStop() })
+        self.captureDrain = captureDrain
         let player = AVAudioPlayerNode()
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: playbackFormat)
-        input.installTap(onBus: 0, bufferSize: inputFrameCapacity, format: inputFormat) { [weak self] buffer, _ in
-            guard let self else { return }
-            Self.copyInputToRing(buffer, into: self.ring)
+        input.installTap(onBus: 0, bufferSize: 2_048, format: inputFormat) { buffer, _ in
+            captureDrain.copyInput(buffer)
         }
         engine.prepare()
         do {
@@ -447,96 +365,14 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
 
         self.engine = engine
         self.player = player
-        self.converter = converter
-        self.conversionInputBuffer = conversionInputBuffer
-        self.conversionOutputBuffer = conversionOutputBuffer
         player.play()
         installConfigurationObserver(for: engine)
     }
 
-    private static let captureFormat = AVAudioFormat(
-        commonFormat: .pcmFormatInt16,
-        sampleRate: captureSampleRate,
-        channels: 1,
-        interleaved: true
-    )!
-
-    /// Copies and mixes the native input buffer into the preallocated ring.
-    /// This function runs on the audio callback and deliberately does no
-    /// allocation, locking, conversion or UI/network work.
+    /// Kept as the tested callback downmix boundary; production also records capture-time metadata.
     @inline(__always)
     static func copyInputToRing(_ buffer: AVAudioPCMBuffer, into ring: AudioSampleRing) {
-        let frameCount = Int(buffer.frameLength)
-        let channels = Int(buffer.format.channelCount)
-        guard frameCount > 0, channels > 0 else { return }
-        let stride = buffer.stride
-        var consumed = 0
-        while consumed < frameCount, let destination = ring.writableSpan() {
-            let accepted = min(frameCount - consumed, destination.count)
-            if let source = buffer.floatChannelData {
-                copyFloatChannels(source, channels: channels, stride: stride,
-                                  startFrame: consumed, frames: accepted, to: destination.pointer)
-            } else if let source = buffer.int16ChannelData {
-                copyInt16Channels(source, channels: channels, stride: stride,
-                                  startFrame: consumed, frames: accepted, to: destination.pointer)
-            } else if let source = buffer.int32ChannelData {
-                copyInt32Channels(source, channels: channels, stride: stride,
-                                  startFrame: consumed, frames: accepted, to: destination.pointer)
-            } else { return }
-            ring.commitWrite(accepted)
-            consumed += accepted
-        }
-        // M3/V08:span 为 nil 提前退出时，剩余帧是因 ring 满而丢弃的样本——计数，
-        // 不静默吞掉。调用方据此判定输入完整性。
-        let remainder = frameCount - consumed
-        if remainder > 0 {
-            ring.recordDroppedSamples(remainder)
-        }
-    }
-
-    @inline(__always)
-    private static func copyFloatChannels(
-        _ source: UnsafePointer<UnsafeMutablePointer<Float>>,
-        channels: Int, stride: Int, startFrame: Int, frames: Int,
-        to destination: UnsafeMutablePointer<Float>
-    ) {
-        let scale = 1 / Float(channels)
-        for frame in 0..<frames {
-            var sample: Float = 0
-            let offset = (startFrame + frame) * stride
-            for channel in 0..<channels { sample += Float(source[channel][offset]) }
-            destination[frame] = Float(sample) * scale
-        }
-    }
-
-    @inline(__always)
-    private static func copyInt16Channels(
-        _ source: UnsafePointer<UnsafeMutablePointer<Int16>>,
-        channels: Int, stride: Int, startFrame: Int, frames: Int,
-        to destination: UnsafeMutablePointer<Float>
-    ) {
-        let scale = 1 / Float(channels) / 32_768
-        for frame in 0..<frames {
-            var sample: Int64 = 0
-            let offset = (startFrame + frame) * stride
-            for channel in 0..<channels { sample += Int64(source[channel][offset]) }
-            destination[frame] = Float(sample) * scale
-        }
-    }
-
-    @inline(__always)
-    private static func copyInt32Channels(
-        _ source: UnsafePointer<UnsafeMutablePointer<Int32>>,
-        channels: Int, stride: Int, startFrame: Int, frames: Int,
-        to destination: UnsafeMutablePointer<Float>
-    ) {
-        let scale = 1 / Float(channels) / 2_147_483_648
-        for frame in 0..<frames {
-            var sample: Int64 = 0
-            let offset = (startFrame + frame) * stride
-            for channel in 0..<channels { sample += Int64(source[channel][offset]) }
-            destination[frame] = Float(sample) * scale
-        }
+        AudioCaptureDrain.copyInputToRing(buffer, into: ring)
     }
 
     private func installConfigurationObserver(for engine: AVAudioEngine) {
@@ -561,44 +397,17 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
             pendingBuffers = 0
             return (playbackGeneration, playbackInvalidatedHandler)
         }
-        tearDownEngineOnQueue(cancelDrainTimer: false)
-        do {
-            try startEngineOnQueue()
-            // 恢复成功也要通知：这一轮的缓冲已经被丢掉了，上层必须把账本归零，
-            // 不能因为"重建成功了"就当这一轮还会在新引擎上继续播。
-            Task { @MainActor in
-                await invalidationHandler?(
-                    AssistantAudioInvalidation(deviceGeneration: generation, recovered: true, message: nil)
-                )
-            }
-        } catch {
-            let message = error.localizedDescription
-            let (continuation, handler) = stateLock.withLock {
-                started = false
-                pendingBuffers = 0
-                let continuation = self.continuation
-                self.continuation = nil
-                return (continuation, failureHandler)
-            }
-            cancelDrainTimerOnQueue()
-            continuation?.finish()
-            Task { @MainActor in
-                await invalidationHandler?(
-                    AssistantAudioInvalidation(
-                        deviceGeneration: generation,
-                        recovered: false,
-                        message: message
-                    )
-                )
-                handler?("音频设备切换后无法恢复：\(message)")
-            }
+        stateLock.withLock { continuation }?.finish(.sourceLost)
+        tearDownEngineOnQueue(cancelDrainTimer: true)
+        stateLock.withLock { started = false }
+        Task { @MainActor in
+            await invalidationHandler?(AssistantAudioInvalidation(deviceGeneration: generation,
+                recovered: false, message: "音频设备已切换，请重试语音。"))
         }
     }
 
     private func tearDownEngineOnQueue(cancelDrainTimer: Bool) {
-        if cancelDrainTimer {
-            cancelDrainTimerOnQueue()
-        }
+        if cancelDrainTimer { captureDrain?.requestStop() }
         if let configurationObserver {
             NotificationCenter.default.removeObserver(configurationObserver)
             self.configurationObserver = nil
@@ -614,17 +423,6 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
         }
         engine = nil
         player = nil
-        converter = nil
-        conversionInputBuffer = nil
-        conversionOutputBuffer = nil
-        ring.reset()
-    }
-
-    private func cancelDrainTimerOnQueue() {
-        guard let drainTimer else { return }
-        drainTimer.setEventHandler {}
-        drainTimer.cancel()
-        self.drainTimer = nil
     }
 
     private func cancelPlaybackReservation(generation: Int) {
@@ -655,7 +453,7 @@ final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
         guard let drained = handlers.drained else { return }
         queue.async { [weak self] in
             if handlers.discardCapture {
-                self?.ring.discardPending()
+                self?.captureDrain?.discardPending()
             }
             Task { @MainActor in drained() }
         }

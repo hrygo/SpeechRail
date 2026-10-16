@@ -100,6 +100,10 @@ public final class AudioSourceCoordinator {
     private var microphone: MicrophoneCapture?
     private var system: SystemAudioCapture?
     private var mixer: StreamMixer?
+    private let microphoneSlotID = UUID(), systemSlotID = UUID()
+    private var observerTask: Task<Void, Never>?
+    private var systemSourceGeneration = UUID()
+    private var captureGeneration = UUID()
     private var currentSource: SessionAudioSource = .microphone
     /// 麦克风这一路被用户静音了没有（会中「我暂时不说」）。
     ///
@@ -121,21 +125,26 @@ public final class AudioSourceCoordinator {
     /// 不建记录（§3.5「宁可没开始，也不要一条空记录」）。
     ///
     /// 只有一路来源时**不经过混音器**：直接把它那条流交出去，少一层缓冲、少 40 ms 延迟。
-    public func start(selection: Selection) async throws -> AsyncStream<AudioChunk> {
+    public func start(selection: Selection) async throws -> AudioChunkStream {
         await stop()
         guard !selection.isEmpty else { throw Blocked(reason: .noSourceSelected) }
         isTearingDown = false
+        let generation = UUID(); captureGeneration = generation
 
-        var streams: [(label: String, stream: AsyncStream<AudioChunk>)] = []
+        var streams: [(sourceID: UUID, stream: AudioChunkStream)] = []
 
         if selection.usesMicrophone {
             let capture = MicrophoneCapture()
+            microphone = capture
             do {
-                streams.append(("麦克风", gate(microphone: try await capture.start())))
+                streams.append((microphoneSlotID, gate(microphone: try await capture.start())))
+                guard generation == captureGeneration, !isTearingDown else { throw CancellationError() }
             } catch {
+                await capture.stop()
+                if microphone === capture { microphone = nil }
+                if error is CancellationError { throw error }
                 throw Blocked(reason: Self.blockReason(forMicrophone: error))
             }
-            microphone = capture
         }
 
         if !selection.systemApps.isEmpty {
@@ -145,17 +154,21 @@ public final class AudioSourceCoordinator {
                     label: selection.systemApps.map(\.name).joined(separator: "、")
                 )
             )
+            system = capture
             do {
-                streams.append(("本机音频", watch(system: try await capture.start())))
+                streams.append((systemSlotID, watch(system: try await capture.start())))
+                guard generation == captureGeneration, !isTearingDown else { throw CancellationError() }
             } catch {
+                await capture.stop()
+                if error is CancellationError { throw error }
                 // 本机音频起不来 = 受阻（**不静默降级**成只录麦克风）：用户明确勾了它，
                 // 只录一半还说得像成功，比明确拒绝更糟（§9 第 4 / 19 行）。
                 await release()
                 throw Blocked(reason: .systemAudioUnavailable(error.localizedDescription))
             }
-            system = capture
         }
 
+        guard generation == captureGeneration, !isTearingDown else { throw CancellationError() }
         activeSelection = selection
         currentSource = selection.resolvedSource
         systemAudioStopReason = nil
@@ -172,9 +185,14 @@ public final class AudioSourceCoordinator {
             return only
         }
 
-        let mixer = StreamMixer(sources: streams.map(\.stream))
+        let mixer = StreamMixer()
         self.mixer = mixer
         let mixed = await mixer.start()
+        guard generation == captureGeneration, !isTearingDown else { await mixer.stop(); throw CancellationError() }
+        for source in streams {
+            try await mixer.attach(sourceID: source.sourceID, stream: source.stream)
+            guard generation == captureGeneration, !isTearingDown else { await mixer.stop(); throw CancellationError() }
+        }
         observe(mixer)
         return mixed
     }
@@ -186,7 +204,10 @@ public final class AudioSourceCoordinator {
     @discardableResult
     public func restartSystemAudio() async -> Bool {
         guard let selection = activeSelection, !selection.systemApps.isEmpty else { return false }
-        system?.stop()
+        let generation = captureGeneration
+        systemSourceGeneration = UUID()
+        await mixer?.retire(sourceID: systemSlotID)
+        await system?.stop()
         system = nil
         let capture = SystemAudioCapture(
             selection: .init(
@@ -196,10 +217,11 @@ public final class AudioSourceCoordinator {
         )
         do {
             let stream = watch(system: try await capture.start())
+            guard generation == captureGeneration, !isTearingDown else { await capture.stop(); return false }
             system = capture
             systemAudioStopReason = nil
             if let mixer {
-                await mixer.attach(stream)
+                try await mixer.attach(sourceID: systemSlotID, stream: stream)
             }
             return true
         } catch {
@@ -210,6 +232,7 @@ public final class AudioSourceCoordinator {
 
     /// 停止采集并释放**全部**设备。幂等。
     public func stop() async {
+        captureGeneration = UUID()
         isTearingDown = true
         if let system { systemAudioStopReason = system.stopReason }
         await release()
@@ -231,51 +254,42 @@ public final class AudioSourceCoordinator {
     /// 块长不变，所以下游的栅格、时间轴与分人链路都不需要知道这件事。
     ///
     /// 电平一并归零：静音时状态带上的电平柱应当落下去，而不是继续显示"房间里很吵"。
-    private func gate(microphone stream: AsyncStream<AudioChunk>) -> AsyncStream<AudioChunk> {
-        let (out, continuation) = AsyncStream<AudioChunk>.makeStream(bufferingPolicy: .unbounded)
-        Task { @MainActor [weak self] in
-            for await chunk in stream {
-                guard let self else { break }
-                if self.isMicrophoneMuted {
-                    continuation.yield(AudioChunk(pcm: Data(count: chunk.pcm.count), level: 0))
-                } else {
-                    continuation.yield(chunk)
-                }
-            }
-            continuation.finish()
+    private func gate(microphone stream: AudioChunkStream) -> AudioChunkStream {
+        stream.mapChunks { [weak self] chunk in
+            await self?.isMicrophoneMuted == true ? chunk.muted() : chunk
         }
-        return out
     }
 
-    /// 包一层观察者：这一路**自己在没有 teardown 的情况下结束**才算断了。
-    ///
-    /// 不这样做的话，来源退出只表现为"混音器少了一路"——用户会安静地丢掉对方的声音，
-    /// 而库里既没有中断区间也没有任何解释（§5.6 明确要求它是"查得到的事实"）。
-    private func watch(system stream: AsyncStream<AudioChunk>) -> AsyncStream<AudioChunk> {
-        let (out, continuation) = AsyncStream<AudioChunk>.makeStream(bufferingPolicy: .unbounded)
-        Task { @MainActor [weak self] in
-            for await chunk in stream { continuation.yield(chunk) }
-            continuation.finish()
-            guard let self, !self.isTearingDown, self.activeSelection != nil else { return }
-            let reason = self.system?.stopReason ?? "来源 App 退出了。"
-            self.systemAudioStopReason = reason
-            self.onSystemAudioLost?(reason)
+    private func watch(system stream: AudioChunkStream) -> AudioChunkStream {
+        let generation = systemSourceGeneration
+        return stream.observingCompletion { [weak self] termination in
+            await self?.systemStreamEnded(termination, generation: generation)
         }
-        return out
+    }
+
+    private func systemStreamEnded(_ termination: AudioStreamTermination, generation: UUID) {
+        guard generation == systemSourceGeneration, termination == .sourceLost || termination == .completed,
+              !isTearingDown, activeSelection != nil else { return }
+        let reason = system?.stopReason ?? "来源 App 退出了。"
+        systemAudioStopReason = reason
+        onSystemAudioLost?(reason)
     }
 
     private func release() async {
-        await mixer?.stop()
-        mixer = nil
-        microphone?.stop()
+        let observer = observerTask; observerTask = nil
+        observer?.cancel(); await observer?.value
+        await microphone?.stop()
         microphone = nil
-        system?.stop()
+        await system?.stop()
         system = nil
+        await mixer?.stop(drainPending: true)
+        mixer = nil
     }
 
     /// 把混音器的缺口计数与电平搬回主线程状态（界面上要显示的那两个数）。
     private func observe(_ mixer: StreamMixer) {
-        Task { [weak self] in
+        observerTask?.cancel()
+        observerTask = Task { [weak self] in
             while let self, !Task.isCancelled {
                 guard self.mixer === mixer else { return }
                 let snapshot = await mixer.snapshot()
@@ -291,146 +305,6 @@ public final class AudioSourceCoordinator {
             return .microphoneDenied
         }
         return .engineFailed(error.localizedDescription)
-    }
-}
-
-// MARK: - 合流
-
-/// 把若干路 24 kHz / 单声道 / PCM16 合成**一条**同样格式的流。
-///
-/// 时钟由它自己定：每 40 ms 从每一路的抖动缓冲里取 960 帧，缺的补静音。于是输出
-/// 严格等间隔、没有一路能把整条流拖慢；某一路上游卡住只表现为**缺口数 +1**。
-///
-/// 这是"混音在 host time 域完成"的可实现版本：单机场景下各路都是同一块声卡出来的，
-/// 用统一的 40 ms 栅格对齐就等于按同一时基合流，而不会因为拼包把两路错开半句。
-actor StreamMixer {
-    struct Snapshot: Sendable {
-        var level: Double
-        var gaps: Int
-    }
-
-    /// 合流用的只有 wire 这一个采样率，不在这里复制第二份假设。
-    private static let sampleRate = MicrophoneCapture.sampleRate
-    /// 一路最多留 400 ms：再多只说明它比时钟快，丢掉比无限堆积好。
-    private static let maximumBufferedBytes = Int(sampleRate) * 2 * 4 / 10
-    private static let bytesPerChunk = Int(sampleRate) * 2 * 40 / 1000
-
-    private let sources: [AsyncStream<AudioChunk>]
-    private var buffers: [Data]
-    private var ingestTasks: [Task<Void, Never>] = []
-    private var ticker: Task<Void, Never>?
-    private var continuation: AsyncStream<AudioChunk>.Continuation?
-    private var level: Double = 0
-    private var gaps = 0
-
-    init(sources: [AsyncStream<AudioChunk>]) {
-        self.sources = sources
-        self.buffers = Array(repeating: Data(), count: sources.count)
-    }
-
-    /// 起飞之后**再加一路**：来源 App 退出又回来时换的是这一路，别的路不受影响。
-    func attach(_ stream: AsyncStream<AudioChunk>) {
-        let index = buffers.count
-        buffers.append(Data())
-        ingestTasks.append(
-            Task { [weak self] in
-                for await chunk in stream {
-                    await self?.ingest(index: index, chunk: chunk)
-                }
-                await self?.retire(index: index)
-            }
-        )
-    }
-
-    func start() -> AsyncStream<AudioChunk> {
-        let (stream, continuation) = AsyncStream<AudioChunk>.makeStream(bufferingPolicy: .unbounded)
-        self.continuation = continuation
-
-        for (index, source) in sources.enumerated() {
-            ingestTasks.append(
-                Task { [weak self] in
-                    for await chunk in source {
-                        await self?.ingest(index: index, chunk: chunk)
-                    }
-                    // 这一路结束了：不再补静音，只把这一路从合流里摘掉。
-                    await self?.retire(index: index)
-                }
-            )
-        }
-        ticker = Task { [weak self] in
-            let interval = Duration.milliseconds(40)
-            var next = ContinuousClock.now
-            while !Task.isCancelled {
-                next = next.advanced(by: interval)
-                await self?.tick()
-                try? await Task.sleep(until: next, clock: .continuous)
-            }
-        }
-        return stream
-    }
-
-    func stop() {
-        ticker?.cancel()
-        ticker = nil
-        for task in ingestTasks { task.cancel() }
-        ingestTasks.removeAll()
-        continuation?.finish()
-        continuation = nil
-        buffers = Array(repeating: Data(), count: buffers.count)
-    }
-
-    func snapshot() -> Snapshot {
-        Snapshot(level: level, gaps: gaps)
-    }
-
-    private func ingest(index: Int, chunk: AudioChunk) {
-        guard buffers.indices.contains(index) else { return }
-        buffers[index].append(chunk.pcm)
-        if buffers[index].count > Self.maximumBufferedBytes {
-            buffers[index].removeFirst(buffers[index].count - Self.maximumBufferedBytes)
-        }
-    }
-
-    private func retire(index: Int) {
-        guard buffers.indices.contains(index) else { return }
-        buffers[index].removeAll()
-    }
-
-    private func tick() {
-        guard let continuation else { return }
-        var mixed = [Int32](repeating: 0, count: Self.bytesPerChunk / 2)
-        var served = 0
-        var didGap = false
-
-        for index in buffers.indices {
-            guard buffers[index].count >= Self.bytesPerChunk else {
-                if !buffers[index].isEmpty { didGap = true }
-                continue
-            }
-            served += 1
-            let chunk = buffers[index].prefix(Self.bytesPerChunk)
-            buffers[index].removeFirst(Self.bytesPerChunk)
-            chunk.withUnsafeBytes { raw in
-                let samples = raw.bindMemory(to: Int16.self)
-                for position in 0..<mixed.count {
-                    mixed[position] += Int32(samples[position])
-                }
-            }
-        }
-
-        // 一路都没出样本：这一块**不产出**（产出就等于凭空写 40 ms 静音进转录）。
-        guard served > 0 else { return }
-        if didGap { gaps += 1 }
-
-        var pcm = Data(capacity: Self.bytesPerChunk)
-        var peak: Int32 = 0
-        for value in mixed {
-            let clamped = Int32(min(max(value, -32_768), 32_767))
-            if abs(clamped) > peak { peak = abs(clamped) }
-            withUnsafeBytes(of: Int16(clamped).littleEndian) { pcm.append(contentsOf: $0) }
-        }
-        level = peak == 0 ? 0 : AudioLevel.normalized(decibels: 20 * log10(Double(peak) / 32_768))
-        continuation.yield(AudioChunk(pcm: pcm, level: level))
     }
 }
 

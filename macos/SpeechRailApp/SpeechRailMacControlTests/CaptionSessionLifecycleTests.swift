@@ -940,25 +940,22 @@ final class CaptionSessionLifecycleTests: XCTestCase {
 
 private final class ControllableCaptionAudioSource: AudioChunkSource, @unchecked Sendable {
     private let lock = NSLock()
-    private var continuation: AsyncStream<AudioChunk>.Continuation?
+    private var continuation: AudioChunkStream.Continuation?
 
-    func start() async throws -> AsyncStream<AudioChunk> {
-        let pair = AsyncStream<AudioChunk>.makeStream()
+    func start() async throws -> AudioChunkStream {
+        let pair = AudioChunkStream.makeStream()
         setContinuation(pair.continuation)
         return pair.stream
     }
 
-    private func setContinuation(_ value: AsyncStream<AudioChunk>.Continuation) {
+    private func setContinuation(_ value: AudioChunkStream.Continuation) {
         lock.lock()
         continuation = value
         lock.unlock()
     }
 
-    func stop() {
-        lock.lock()
-        let current = continuation
-        continuation = nil
-        lock.unlock()
+    func stop() async {
+        let current = lock.withLock { let current = continuation; continuation = nil; return current }
         current?.finish()
     }
 
@@ -966,7 +963,7 @@ private final class ControllableCaptionAudioSource: AudioChunkSource, @unchecked
         lock.lock()
         let current = continuation
         lock.unlock()
-        current?.yield(chunk)
+        current?.offer(chunk)
     }
 }
 

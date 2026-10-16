@@ -14,9 +14,9 @@ import Foundation
 //
 //   1. **线上格式固定 24 kHz / 单声道 / PCM16**。原生层归一是结构性的：契约规定
 //      "首个 PCM 之后不得改格式"，只要出口永远是这一种，客户端就不可能违反它。
-//   2. **实时回调里不做阻塞、不分配、不做 I/O**（§5.13）。回调只把转换后的字节写进
-//      预分配的环形缓冲；取数据由一条 drain 任务按 40 ms 拉走。
-//   3. **PCM 不落盘**。这里没有任何写文件的路径——缓存只在内存里，容量上限就是 1 秒。
+//   2. **实时回调里不做阻塞、不分配、不做 I/O**（§5.13）。回调只把 native Float 样本写进
+//      预分配环形缓冲；格式转换由独立 serial drain 完成。
+//   3. **PCM 不落盘**。这里没有任何写文件的路径——缓存只在内存里，各层容量固定且有独立上限。
 
 /// 电平的唯一一条曲线：dBFS → 0…1。取 -60 dBFS 为底、0 dBFS 为顶——
 /// 语音的可用动态基本落在这 60 dB 里。
@@ -41,35 +41,6 @@ public enum AudioLevel {
     }
 }
 
-/// 一块下游要用的音频：24 kHz / 单声道 / PCM16，外加这一块的真实电平（0…1）。
-public struct AudioChunk: Sendable {
-    public var pcm: Data
-    public var level: Double
-    /// Optional source-side evidence. File/tap test sources may omit it.
-    public var capturedAt: ContinuousClock.Instant?
-    /// M3/V08:来源侧块序号（单调递增）。uploader 据此发现 `bufferingNewest`
-    /// 替换掉的块——序号跳跃即丢块证据，残缺语音不得当成完整意图回答。
-    /// 旧调用点不填时为 nil：表示"无序号证据"，不得当成"序号连续"。
-    public var sequenceNumber: Int?
-    /// M3/V08:本块之前来源侧累计丢弃的样本数快照（ring 满等原因）。
-    /// uploader 对比相邻两块的快照差即可得到块间丢样数，无需跨线程读 ring。
-    public var droppedSamplesBefore: Int?
-
-    public init(
-        pcm: Data,
-        level: Double,
-        capturedAt: ContinuousClock.Instant? = nil,
-        sequenceNumber: Int? = nil,
-        droppedSamplesBefore: Int? = nil
-    ) {
-        self.pcm = pcm
-        self.level = level
-        self.capturedAt = capturedAt
-        self.sequenceNumber = sequenceNumber
-        self.droppedSamplesBefore = droppedSamplesBefore
-    }
-}
-
 /// 一路音频来源。字幕与会议都只认这个接口：于是麦克风、本机音频（阶段 6 的 tap）、
 /// 以及核对用的文件源，在会话层看起来是同一种东西（`TECHNICAL-DESIGN` §5.4
 /// `AudioSourceCoordinator` 的形状；阶段 3 只有麦克风与验证用的文件源）。
@@ -77,8 +48,8 @@ public struct AudioChunk: Sendable {
 /// 出口格式是接口的一部分：**永远 24 kHz / 单声道 / PCM16**。契约规定"首个 PCM 之后不得改
 /// 格式"，把归一放在来源这一侧，客户端就不可能违反它。
 public protocol AudioChunkSource: Sendable {
-    func start() async throws -> AsyncStream<AudioChunk>
-    func stop()
+    func start() async throws -> AudioChunkStream
+    func stop() async
 }
 
 /// 麦克风采集。一个实例对应一次会话的采集期，停了就释放设备（用户裁决：按功能启用、离开释放）。
@@ -105,18 +76,13 @@ public final class MicrophoneCapture: AudioChunkSource, @unchecked Sendable {
     public static let chunkDuration: TimeInterval = 0.1
 
     private let queue = DispatchQueue(label: "com.speechrail.app.session.capture", qos: .userInitiated)
-    /// 一秒的 24 kHz 单声道 PCM16 = 48,000 字节。**上限按字节算**，不是按采样点数：
-    /// 写成 `Int(sampleRate)` 会得到半秒（一个采样两字节），与"容量上限就是 1 秒"对不上。
-    private static let ringCapacityBytes = Int(sampleRate) * MemoryLayout<Int16>.size
-    private let ring = PCMRing(capacity: MicrophoneCapture.ringCapacityBytes)
     private var engine: AVAudioEngine?
-    private var converter: AVAudioConverter?
-    private var drainTask: Task<Void, Never>?
-    private var continuation: AsyncStream<AudioChunk>.Continuation?
-    /// `start()` 等在 `engine.start()` 上时**不持有调用方的 actor**（它是个 nonisolated
-    /// 异步函数），等待期间 `stop()` 完全可能从另一个上下文插进来，所以这一位用锁保护。
+    private var drain: AudioCaptureDrain?
     private let stateLock = NSLock()
+    private var stopTask: Task<Void, Never>?
     private var stopped = false
+    private var continuation: AudioChunkStream.Continuation?
+    private let captureEpoch = UUID(), sourceID = UUID()
 
     public init() {}
 
@@ -175,250 +141,87 @@ public final class MicrophoneCapture: AudioChunkSource, @unchecked Sendable {
         }
     }
 
-    /// 开始采集。返回的流在 `stop()` 之后自然结束。
-    ///
-    /// `engine.start()` 是阻塞的 CoreAudio 调用（本机实测最坏 36 秒的那一类），所以它跑在
-    /// 采集队列上，调用点 `await` 的是结果而不是主线程。
-    public func start() async throws -> AsyncStream<AudioChunk> {
+    /// CoreAudio startup and teardown stay on the owned serial queue.
+    public func start() async throws -> AudioChunkStream {
         guard await Self.requestPermission() else { throw Failure.permissionDenied }
-        // 一个实例只服务一次采集期（文件头第 2 条）。停过之后再开始是编程错误：拆卸已经排在
-        // 这条串行队列上，就算引擎又起来了也会被拆掉——那会交出一个"看着活着、其实没有引擎"
-        // 的对象。宁可在这里拒绝。
         guard !isStopped else { throw Failure.engineFailed("这个采集件已经停过了，一次会话一个实例。") }
-
-        let (stream, continuation) = AsyncStream<AudioChunk>.makeStream(bufferingPolicy: .bufferingNewest(64))
-        self.continuation = continuation
-        ring.reset()
-
+        let pair = AudioChunkStream.makeStream(epoch: captureEpoch, sourceID: sourceID,
+            onTermination: { [weak self] _ in self?.requestStop() })
+        stateLock.withLock { continuation = pair.continuation }
         do {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, Error>) in
                 queue.async { [self] in
-                    do {
-                        try startEngine()
-                        continuation.resume()
-                    } catch {
-                        continuation.resume(throwing: error)
-                    }
+                    do { try startEngine(into: pair.continuation); done.resume() }
+                    catch { tearDownEngine(); done.resume(throwing: error) }
                 }
             }
+            guard !isStopped else { throw CancellationError() }
+            return pair.stream
         } catch {
-            self.continuation = nil
-            continuation.finish()
+            await stop()
             throw error
         }
-        // 等引擎起来的这段时间里用户可能已经按了停（`stop()` 的拆卸排在同一条串行队列上，
-        // 会在这之后跑）。这时**不能**把这一路当成活的交出去：设备已经拆了，返回一条活的流
-        // 只会在下游留下一个永远不出字的会话。宁可在这里失败，让调用点如实报受阻。
-        guard !isStopped else {
-            self.continuation = nil
-            continuation.finish()
-            throw Failure.engineFailed("采集在开始的过程中被取消。")
-        }
-        startDraining(into: continuation)
-        return stream
     }
 
-    /// 停止采集并**立刻释放设备**（引擎与 tap 都拆掉；不是挂起）。
-    public func stop() {
-        markStopped(true)
-        drainTask?.cancel()
-        drainTask = nil
-        continuation?.finish()
-        continuation = nil
-        queue.async { [self] in
-            engine?.inputNode.removeTap(onBus: 0)
-            engine?.stop()
-            engine = nil
-            converter = nil
-            ring.reset()
+    deinit { requestStop() }
+
+    /// Synchronous fail-safe only. Normal owners await stop to observe actual device/drain teardown.
+    public func requestStop() {
+        let change = stateLock.withLock { () -> (Bool, AudioChunkStream.Continuation?) in
+            guard !stopped else { return (false, nil) }
+            stopped = true
+            return (true, continuation)
         }
+        guard change.0 else { return }
+        change.1?.finish(.cancelled)
+        queue.async { [weak self] in self?.tearDownEngine() }
     }
 
-    private func markStopped(_ value: Bool) {
-        stateLock.lock()
-        stopped = value
-        stateLock.unlock()
+    public func stop() async {
+        let task = stateLock.withLock { () -> Task<Void, Never> in
+            if let stopTask { return stopTask }
+            stopped = true
+            let task = Task { [self] in await performStop() }
+            stopTask = task
+            return task
+        }
+        await task.value
     }
 
-    private var isStopped: Bool {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return stopped
+    private func performStop() async {
+        let oldDrain: AudioCaptureDrain? = await withCheckedContinuation { done in
+            queue.async { [self] in
+                tearDownEngine(cancelDrain: false)
+                let old = drain; drain = nil
+                done.resume(returning: old)
+            }
+        }
+        await oldDrain?.stop(drainPending: true)
+        stateLock.withLock { continuation }?.finish(.completed)
+        stateLock.withLock { continuation = nil }
     }
 
-    // MARK: - 引擎（只在采集队列上碰）
+    private var isStopped: Bool { stateLock.withLock { stopped } }
 
-    private func startEngine() throws {
-        let engine = AVAudioEngine()
-        let input = engine.inputNode
-        let inputFormat = input.inputFormat(forBus: 0)
-        guard inputFormat.sampleRate > 0 else {
-            throw Failure.engineFailed("输入设备没有可用的采样率")
-        }
-        guard
-            let outputFormat = AVAudioFormat(
-                commonFormat: .pcmFormatInt16,
-                sampleRate: Self.sampleRate,
-                channels: 1,
-                interleaved: true
-            ),
-            let converter = AVAudioConverter(from: inputFormat, to: outputFormat)
-        else {
-            throw Failure.converterUnavailable
-        }
-        self.converter = converter
-        self.engine = engine
+    private func tearDownEngine(cancelDrain: Bool = true) {
+        if cancelDrain { drain?.requestStop() }
+        if let engine { engine.inputNode.removeTap(onBus: 0); engine.stop() }
+        engine = nil
+    }
 
-        // 回调在音频线程上：这里只有一次转换 + 一次环形缓冲写入。
-        input.installTap(onBus: 0, bufferSize: 2_048, format: inputFormat) { [weak self] buffer, _ in
-            guard let self, let converted = Self.convert(buffer, using: converter, to: outputFormat) else { return }
-            // 电平在这里不算：它由取数据的一方按块算一次（`PCMRing.drain`），
-            // 音频回调里只做一次转换和一次拷贝。
-            ring.write(converted)
+    private func startEngine(into continuation: AudioChunkStream.Continuation) throws {
+        guard !isStopped else { throw CancellationError() }
+        let engine = AVAudioEngine(), input = engine.inputNode
+        let format = input.inputFormat(forBus: 0)
+        guard format.sampleRate > 0 else { throw Failure.engineFailed("输入设备没有可用的采样率") }
+        let drain = try AudioCaptureDrain(inputSampleRate: format.sampleRate, epoch: captureEpoch, sourceID: sourceID,
+            continuation: continuation, onFailure: { [weak self] _ in self?.requestStop() })
+        self.engine = engine; self.drain = drain
+        input.installTap(onBus: 0, bufferSize: 2_048, format: format) { buffer, _ in
+            drain.copyInput(buffer)
         }
         engine.prepare()
-        do {
-            try engine.start()
-        } catch {
-            input.removeTap(onBus: 0)
-            self.engine = nil
-            self.converter = nil
-            throw Failure.engineFailed(error.localizedDescription)
-        }
-    }
-
-    /// 取数据的一方**直接拿着这条流的 continuation**，不再回头读那个会被 `stop()` 置空的
-    /// 属性：一条在后台跑的 drain 任务与主线程上的 `stop()` 读同一块内存是没有意义的竞争。
-    private func startDraining(into continuation: AsyncStream<AudioChunk>.Continuation) {
-        drainTask?.cancel()
-        drainTask = Task { [weak self] in
-            let interval = Self.chunkDuration
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(interval))
-                guard let self, !Task.isCancelled else { return }
-                guard let chunk = self.ring.drain() else { continue }
-                continuation.yield(
-                    AudioChunk(
-                        pcm: chunk.pcm,
-                        level: chunk.level,
-                        capturedAt: ContinuousClock().now
-                    )
-                )
-            }
-        }
-    }
-
-    // MARK: - 格式转换
-
-    /// 输入格式 → 24 kHz 单声道 PCM16。转换器是有状态的，所以每个会话只建一个。
-    nonisolated static func convert(
-        _ buffer: AVAudioPCMBuffer,
-        using converter: AVAudioConverter,
-        to outputFormat: AVAudioFormat
-    ) -> Data? {
-        let ratio = outputFormat.sampleRate / converter.inputFormat.sampleRate
-        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 64
-        guard let output = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: capacity) else {
-            return nil
-        }
-        var supplied = false
-        var conversionError: NSError?
-        let status = converter.convert(to: output, error: &conversionError) { _, outStatus in
-            if supplied {
-                outStatus.pointee = .noDataNow
-                return nil
-            }
-            supplied = true
-            outStatus.pointee = .haveData
-            return buffer
-        }
-        guard status != .error, output.frameLength > 0, let samples = output.int16ChannelData?[0] else {
-            return nil
-        }
-        let count = Int(output.frameLength)
-        return Data(bytes: samples, count: count * MemoryLayout<Int16>.size)
-    }
-}
-
-// MARK: - 环形缓冲
-
-/// 预分配的字节环形缓冲：音频回调只 memcpy，取数据的一方按块拉走。
-///
-/// 容量上限就是 1 秒。写满时**丢最旧的字节**——丢了就是真的没录上，这一点与
-/// `TECHNICAL-DESIGN` §5.2 第 3 条（断线不重放 PCM）是同一条口径：不假装音频还在，
-/// 也不做"回源补全"。（不额外计数：这个数今天没有消费者，写一个没人读的计数器
-/// 比不写更容易被误当成"已经有监控了"。）
-private final class PCMRing: @unchecked Sendable {
-    private let lock = NSLock()
-    private var storage: [UInt8]
-    private var readIndex = 0
-    private var writeIndex = 0
-    private var count = 0
-    private let capacity: Int
-
-    init(capacity: Int) {
-        self.capacity = capacity
-        self.storage = [UInt8](repeating: 0, count: capacity)
-    }
-
-    func reset() {
-        lock.lock()
-        readIndex = 0
-        writeIndex = 0
-        count = 0
-        lock.unlock()
-    }
-
-    func write(_ data: Data) {
-        guard !data.isEmpty else { return }
-        lock.lock()
-        defer { lock.unlock() }
-        // 音频回调里只有"一两次 memcpy"：逐字节写 3,200 个字节在实时线程上是白给的开销。
-        data.withUnsafeBytes { raw in
-            guard let base = raw.baseAddress else { return }
-            var offset = 0
-            while offset < raw.count {
-                // 一次最多填到环形缓冲的末尾，绕回的那一段留给下一轮。
-                let run = min(capacity - writeIndex, raw.count - offset)
-                storage.withUnsafeMutableBytes { destination in
-                    destination.baseAddress?.advanced(by: writeIndex)
-                        .copyMemory(from: base.advanced(by: offset), byteCount: run)
-                }
-                writeIndex = (writeIndex + run) % capacity
-                offset += run
-                // 写满时丢掉最旧的那几个字节：读指针跟着往前推，写指针不回头。
-                let overflow = count + run - capacity
-                if overflow > 0 {
-                    count = capacity
-                    readIndex = (readIndex + overflow) % capacity
-                } else {
-                    count += run
-                }
-            }
-        }
-    }
-
-    /// 取走当前全部可用字节；不足一块也照取（晚一块比多等一块好：字幕要的是及时）。
-    func drain() -> AudioChunk? {
-        lock.lock()
-        defer { lock.unlock() }
-        guard count > 0 else { return nil }
-        var out = [UInt8]()
-        out.reserveCapacity(count)
-        for _ in 0..<count {
-            out.append(storage[readIndex])
-            readIndex = (readIndex + 1) % capacity
-        }
-        let taken = count
-        count = 0
-        let data = Data(out)
-        let level = taken > 0 ? Self.peakLevel(data) : 0
-        return AudioChunk(pcm: data, level: level)
-    }
-
-    private static func peakLevel(_ data: Data) -> Double {
-        data.withUnsafeBytes { raw in
-            AudioLevel.peak(raw.bindMemory(to: Int16.self))
-        }
+        do { try engine.start() }
+        catch { throw Failure.engineFailed(error.localizedDescription) }
     }
 }
