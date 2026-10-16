@@ -1325,6 +1325,49 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(events.suffix(3), ["review", "candidate.get", "publish"])
     }
 
+    func testVoiceDesignAutoPublicationChainsFullPipeline() async {
+        let creator = VoiceDesignWorkflowCreatorClient()
+        let model = makeVoiceModel(
+            transport: ClosureControlTransport { request in
+                ControlResponse(
+                    requestID: request.requestID,
+                    command: request.command,
+                    status: .completed
+                )
+            },
+            voiceDirectoryClient: creator,
+            voiceDesignClient: creator
+        )
+        let preview = VoiceDesignCandidateSnapshot(
+            slot: "A",
+            seed: 42,
+            title: "候选 A",
+            instructionSnapshot: "温和自然的小说旁白女声",
+            referenceTextSnapshot: "春风吹过麦浪，微风带来了一丝清香，阳光洒向金色的田野。",
+            status: .ready,
+            audioData: Data([0, 1, 2])
+        )
+
+        model.startVoiceDesignPublication(preview, name: "自动发布测试音色", autoPublish: true)
+        await waitForVoiceDesignPhase(.published, snapshot: { model.voiceDesignPublication })
+
+        let events = await creator.events()
+        XCTAssertEqual(
+            events,
+            [
+                "create",
+                "reference.audio",
+                "confirm",
+                "validate",
+                "validation.audio",
+                "accept",
+                "candidate.get",
+                "publish",
+            ]
+        )
+        XCTAssertEqual(model.lastPublishedDesignedVoice?.name, "自动发布测试音色")
+    }
+
     func testFailedVoiceDesignCancellationRetainsCandidateForRetry() async {
         let creator = VoiceDesignWorkflowCreatorClient()
         let model = makeVoiceModel(
@@ -2235,9 +2278,12 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailVoiceDirectoryClient, 
         id: String,
         testText: String?,
         capabilityKey: String?,
-        humanReview: VoiceDesignHumanReview?
+        humanReview: VoiceDesignHumanReview?,
+        automatedAcceptance: Bool
     ) async throws -> VoiceDesignCandidate {
-        if humanReview == nil {
+        if automatedAcceptance {
+            recordedEvents.append("accept")
+        } else if humanReview == nil {
             recordedEvents.append("validate")
         } else {
             recordedEvents.append("review")
@@ -2245,7 +2291,7 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailVoiceDirectoryClient, 
         guard let existingCandidate = currentCandidate else {
             throw ServiceAPIClientError.requestFailed
         }
-        if shouldFailNextValidationTerminally, humanReview == nil {
+        if shouldFailNextValidationTerminally, humanReview == nil, !automatedAcceptance {
             shouldFailNextValidationTerminally = false
             let validation = VoiceDesignValidation(
                 validationID: validationID,
@@ -2272,7 +2318,7 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailVoiceDirectoryClient, 
             currentCandidate = terminal
             return terminal
         }
-        if shouldFailNextValidation, humanReview == nil {
+        if shouldFailNextValidation, humanReview == nil, !automatedAcceptance {
             shouldFailNextValidation = false
             currentCandidate = makeCandidate(
                 voiceID: existingCandidate.targetVoiceID,
@@ -2289,13 +2335,15 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailVoiceDirectoryClient, 
                 retryable: true
             )
         }
+        let isPass = automatedAcceptance || (humanReview?.identity == .pass && humanReview?.naturalness == .pass)
         let validation = VoiceDesignValidation(
             validationID: validationID,
             candidateRevision: candidateRevision,
-            status: humanReview == nil ? "warn" : "pass",
+            status: isPass ? "pass" : "warn",
             machineStatus: "pass",
             identityStatus: humanReview?.identity ?? .notReviewed,
             naturalnessStatus: humanReview?.naturalness ?? .notReviewed,
+            automatedAcceptance: automatedAcceptance,
             failureCodes: [],
             capabilityKey: "reference.render",
             modelArtifact: "tts-1.7b-base-bf16",
@@ -2307,9 +2355,9 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailVoiceDirectoryClient, 
         let updated = makeCandidate(
             voiceID: existingCandidate.targetVoiceID,
             name: existingCandidate.name,
-            state: humanReview == nil ? "validating" : "publishable",
+            state: isPass ? "publishable" : "validating",
             validations: [validation],
-            publishable: humanReview != nil
+            publishable: isPass
         )
         currentCandidate = updated
         return updated

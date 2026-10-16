@@ -412,6 +412,7 @@ struct VoiceDesignPublicationContext: Equatable, Sendable {
     var candidateID: String?
     var candidateRevision: String?
     var validationID: String?
+    var autoPublish: Bool = false
 }
 
 enum VoiceDesignPublicationRetryStep: Equatable {

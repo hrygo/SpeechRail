@@ -339,9 +339,10 @@ public final class AppModel {
 
     public func startVoiceDesignPublication(
         _ candidate: VoiceDesignCandidateSnapshot,
-        name: String
+        name: String,
+        autoPublish: Bool = false
     ) {
-        voiceWorkflow.startVoiceDesignPublication(candidate, name: name)
+        voiceWorkflow.startVoiceDesignPublication(candidate, name: name, autoPublish: autoPublish)
     }
 
     public func confirmVoiceDesignReference() {

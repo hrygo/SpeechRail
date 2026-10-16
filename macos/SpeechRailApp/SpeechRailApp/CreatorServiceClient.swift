@@ -641,6 +641,7 @@ public struct VoiceDesignValidation: Codable, Equatable, Identifiable, Sendable 
     public let machineStatus: String
     public let identityStatus: VoiceDesignReview
     public let naturalnessStatus: VoiceDesignReview
+    public let automatedAcceptance: Bool
     public let failureCodes: [String]
     public let capabilityKey: String
     public let modelArtifact: String
@@ -658,6 +659,7 @@ public struct VoiceDesignValidation: Codable, Equatable, Identifiable, Sendable 
         machineStatus: String,
         identityStatus: VoiceDesignReview,
         naturalnessStatus: VoiceDesignReview,
+        automatedAcceptance: Bool = false,
         failureCodes: [String],
         capabilityKey: String,
         modelArtifact: String,
@@ -672,6 +674,7 @@ public struct VoiceDesignValidation: Codable, Equatable, Identifiable, Sendable 
         self.machineStatus = machineStatus
         self.identityStatus = identityStatus
         self.naturalnessStatus = naturalnessStatus
+        self.automatedAcceptance = automatedAcceptance
         self.failureCodes = failureCodes
         self.capabilityKey = capabilityKey
         self.modelArtifact = modelArtifact
@@ -681,6 +684,24 @@ public struct VoiceDesignValidation: Codable, Equatable, Identifiable, Sendable 
         self.updatedAt = updatedAt
     }
 
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.validationID = try container.decode(String.self, forKey: .validationID)
+        self.candidateRevision = try container.decode(String.self, forKey: .candidateRevision)
+        self.status = try container.decode(String.self, forKey: .status)
+        self.machineStatus = try container.decode(String.self, forKey: .machineStatus)
+        self.identityStatus = try container.decode(VoiceDesignReview.self, forKey: .identityStatus)
+        self.naturalnessStatus = try container.decode(VoiceDesignReview.self, forKey: .naturalnessStatus)
+        self.automatedAcceptance = try container.decodeIfPresent(Bool.self, forKey: .automatedAcceptance) ?? false
+        self.failureCodes = try container.decode([String].self, forKey: .failureCodes)
+        self.capabilityKey = try container.decode(String.self, forKey: .capabilityKey)
+        self.modelArtifact = try container.decode(String.self, forKey: .modelArtifact)
+        self.modelCatalogRevision = try container.decode(String.self, forKey: .modelCatalogRevision)
+        self.transcriptMatch = try container.decodeIfPresent(Double.self, forKey: .transcriptMatch)
+        self.createdAt = try container.decode(Double.self, forKey: .createdAt)
+        self.updatedAt = try container.decode(Double.self, forKey: .updatedAt)
+    }
+
     enum CodingKeys: String, CodingKey {
         case validationID = "validation_id"
         case candidateRevision = "candidate_revision"
@@ -688,6 +709,7 @@ public struct VoiceDesignValidation: Codable, Equatable, Identifiable, Sendable 
         case machineStatus = "machine_status"
         case identityStatus = "identity_status"
         case naturalnessStatus = "naturalness_status"
+        case automatedAcceptance = "automated_acceptance"
         case failureCodes = "failure_codes"
         case capabilityKey = "capability_key"
         case modelArtifact = "model_artifact"
@@ -926,7 +948,8 @@ public protocol SpeechRailVoiceDesignClient: Sendable {
         id: String,
         testText: String?,
         capabilityKey: String?,
-        humanReview: VoiceDesignHumanReview?
+        humanReview: VoiceDesignHumanReview?,
+        automatedAcceptance: Bool
     ) async throws -> VoiceDesignCandidate
     func fetchVoiceDesignCandidates() async throws -> [VoiceDesignCandidate]
     func fetchVoiceDesignCandidate(id: String) async throws -> VoiceDesignCandidate

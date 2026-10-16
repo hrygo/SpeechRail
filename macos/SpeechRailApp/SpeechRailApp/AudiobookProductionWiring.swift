@@ -213,7 +213,8 @@ public enum AudiobookProductionWiring {
                             id: candidate.id,
                             testText: validationTestText,
                             capabilityKey: nil,
-                            humanReview: nil
+                            humanReview: nil,
+                            automatedAcceptance: false
                         )
                     }
 
@@ -225,16 +226,12 @@ public enum AudiobookProductionWiring {
                     }
 
                     if candidate.knownState != .publishable {
-                        let review = VoiceDesignHumanReview(
-                            validationID: validation.validationID,
-                            identity: .pass,
-                            naturalness: .pass
-                        )
                         candidate = try await voiceDesignClient.validateVoiceDesignCandidate(
                             id: candidate.id,
                             testText: nil,
                             capabilityKey: nil,
-                            humanReview: review
+                            humanReview: nil,
+                            automatedAcceptance: true
                         )
                     }
 

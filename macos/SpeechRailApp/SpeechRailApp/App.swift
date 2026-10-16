@@ -1169,9 +1169,14 @@ private struct UITestCreatorClient: SpeechRailVoiceDirectoryClient, SpeechRailSp
         id: String,
         testText: String?,
         capabilityKey: String?,
-        humanReview: VoiceDesignHumanReview?
+        humanReview: VoiceDesignHumanReview?,
+        automatedAcceptance: Bool
     ) async throws -> VoiceDesignCandidate {
-        try await voiceDesignStore.validate(id: id, humanReview: humanReview)
+        try await voiceDesignStore.validate(
+            id: id,
+            humanReview: humanReview,
+            automatedAcceptance: automatedAcceptance
+        )
     }
 
     func publishVoiceDesignCandidate(
@@ -1504,14 +1509,15 @@ private actor UITestVoiceDesignStore {
 
     func validate(
         id: String,
-        humanReview: VoiceDesignHumanReview?
+        humanReview: VoiceDesignHumanReview?,
+        automatedAcceptance: Bool
     ) throws -> VoiceDesignCandidate {
         guard var entry = entries[id] else { throw ServiceAPIClientError.invalidResponse }
-        let reviewed = humanReview != nil
+        let passed = automatedAcceptance || humanReview != nil
         let validation = VoiceDesignValidation(
             validationID: "vv_" + String(format: "%024x", nextID),
             candidateRevision: entry.revision,
-            status: reviewed ? "pass" : "warn",
+            status: passed ? "pass" : "warn",
             machineStatus: "pass",
             identityStatus: humanReview?.identity ?? .notReviewed,
             naturalnessStatus: humanReview?.naturalness ?? .notReviewed,
@@ -1525,8 +1531,8 @@ private actor UITestVoiceDesignStore {
         )
         nextID += 1
         entry.validations = [validation]
-        entry.publishable = reviewed
-        entry.state = reviewed ? "publishable" : "validating"
+        entry.publishable = passed
+        entry.state = passed ? "publishable" : "validating"
         entries[id] = entry
         return candidate(for: id)
     }

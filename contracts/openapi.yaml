@@ -3297,6 +3297,12 @@ components:
           oneOf:
             - $ref: '#/components/schemas/VoiceDesignHumanReview'
             - type: 'null'
+        automated_acceptance:
+          type: boolean
+          default: false
+          description: >-
+            Accept the current machine validation automatically when it passes.
+            Mutually exclusive with human_review.
     VoiceDesignPublishRequest:
       type: object
       additionalProperties: false
@@ -3315,6 +3321,7 @@ components:
         - machine_status
         - identity_status
         - naturalness_status
+        - automated_acceptance
         - failure_codes
         - transcript_numbers_match
         - validation_policy_revision
@@ -3336,7 +3343,8 @@ components:
           enum: [pass, warn, reject]
           description: >-
             Overall verdict. It can only become pass when the machine gate and
-            the explicit human identity/naturalness review both pass.
+            the explicit human identity/naturalness review both pass, or when
+            automated_acceptance is recorded for a passing machine validation.
         machine_status:
           type: string
           enum: [pass, warn, reject]
@@ -3344,6 +3352,9 @@ components:
           $ref: '#/components/schemas/VoiceDesignReview'
         naturalness_status:
           $ref: '#/components/schemas/VoiceDesignReview'
+        automated_acceptance:
+          type: boolean
+          description: Whether this validation record was accepted via automated machine pass.
         failure_codes:
           type: array
           items:

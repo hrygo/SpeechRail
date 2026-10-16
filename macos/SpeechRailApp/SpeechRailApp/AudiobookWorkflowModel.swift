@@ -867,10 +867,13 @@ public final class AudiobookWorkflowModel {
                 _ = await self.refreshAvailableVoices()
                 await self.autoAssignRecommendedVoices(for: targetID)
                 await self.refreshShelf()
+                var autoConfirmSucceeded = false
                 if self.selectedBook?.id == targetID {
                     await self.openBook(targetID)
                     if summary.unknownSpeakerCount > 0 {
                         await self.jumpToFirstUnknownSpeaker()
+                    } else {
+                        autoConfirmSucceeded = await self.confirmCastAndAudition()
                     }
                 }
                 var notes: [String] = ["全书分析已完成（共 \(summary.completedWindows) 个窗口"]
@@ -883,8 +886,18 @@ public final class AudiobookWorkflowModel {
                 if createdLeadVoices > 0 {
                     notes.append("已为 \(createdLeadVoices) 名主要角色生成专属音色")
                 }
-                notes.append("剩余待人工确认 \(summary.unknownSpeakerCount) 处）")
-                self.bannerMessage = notes.joined(separator: "，") + "。"
+                if summary.unknownSpeakerCount == 0 {
+                    if autoConfirmSucceeded && (self.selectedBook?.confirmedAuditionVoiceSetDigest != nil) {
+                        notes.append("角色与音色已自动锁定，可直接开始制作章节）")
+                    } else {
+                        notes.append("配声完成但自动锁定未确认，请在右侧检查声音）")
+                    }
+                } else {
+                    notes.append("剩余待人工确认 \(summary.unknownSpeakerCount) 处）")
+                }
+                if self.errorMessage == nil {
+                    self.bannerMessage = notes.joined(separator: "，") + "。"
+                }
             } catch {
                 guard self.analysisInstallEpoch == installEpoch else { return }
                 let failureDescription = error.localizedDescription
@@ -1904,8 +1917,9 @@ public final class AudiobookWorkflowModel {
         }
     }
 
-    public func confirmCastAndAudition() async {
-        guard let bookID = selectedBook?.id, let castController, let store else { return }
+    @discardableResult
+    public func confirmCastAndAudition() async -> Bool {
+        guard let bookID = selectedBook?.id, let castController, let store else { return false }
         do {
             errorMessage = nil
             // 若确认角色时仍存在未确认的说话人，先用确认后的完整角色表自动执行一次 AI 二次消歧
@@ -1945,9 +1959,11 @@ public final class AudiobookWorkflowModel {
                 workbenchTab = .production
                 bannerMessage = "已确认全书人物与试听声音，可开始制作已确认章节。"
             }
+            return true
         } catch {
             isResolvingUnknownSpeakers = false
             errorMessage = error.localizedDescription
+            return false
         }
     }
 

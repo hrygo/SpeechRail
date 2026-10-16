@@ -779,13 +779,57 @@ public struct VoiceCloneView: View {
             )
         }
         if let voice = model.lastRegisteredCloneVoice {
-            StatusBanner(
-                tone: .healthy,
-                title: "音色已注册",
-                message: "「\(voice.name)」已写进本机音色库。先检查配音效果，通过后就能正式制作。",
-                actionTitle: "前往音色库检查",
-                action: { navigation.request(.voiceLibrary) }
-            )
+            let checkState = model.voiceOutputCheck
+            if checkState.voiceID == voice.id {
+                switch checkState {
+                case .running:
+                    StatusBanner(
+                        tone: .attention,
+                        title: "正在检查配音效果…",
+                        message: "已为「\(voice.name)」启动后台质量探针，正在验证输出自然度与合成指标。"
+                    )
+                case .passed:
+                    StatusBanner(
+                        tone: .healthy,
+                        title: "可正式制作",
+                        message: "「\(voice.name)」已通过配音质量验收并入库，可直接用于有声书制作。",
+                        actionTitle: "前往音色库查看",
+                        action: { navigation.request(.voiceLibrary) }
+                    )
+                case .passedNotPersisted:
+                    StatusBanner(
+                        tone: .attention,
+                        title: "验收结果未保存",
+                        message: "「\(voice.name)」质量探针已通过，但验收记录未落盘，请重试以满足正式制作门禁。",
+                        actionTitle: "重新检查",
+                        action: { Task { await model.checkVoiceOutput(voiceID: voice.id) } }
+                    )
+                case let .failed(_, _, message), let .error(_, _, message):
+                    StatusBanner(
+                        tone: .critical,
+                        title: "配音效果检查未通过",
+                        message: "「\(voice.name)」未达到正式制作要求：\(message)",
+                        actionTitle: "重新检查",
+                        action: { Task { await model.checkVoiceOutput(voiceID: voice.id) } }
+                    )
+                case .idle:
+                    StatusBanner(
+                        tone: .attention,
+                        title: "等待检查配音效果",
+                        message: "「\(voice.name)」已注册，正在等待执行配音效果检查。",
+                        actionTitle: "立即检查",
+                        action: { Task { await model.checkVoiceOutput(voiceID: voice.id) } }
+                    )
+                }
+            } else {
+                StatusBanner(
+                    tone: .healthy,
+                    title: "音色已注册",
+                    message: "「\(voice.name)」已写进本机音色库。后台正在检查配音效果，通过后即可正式制作。",
+                    actionTitle: "前往音色库检查",
+                    action: { navigation.request(.voiceLibrary) }
+                )
+            }
         }
         cloneCapabilityBanner
     }
