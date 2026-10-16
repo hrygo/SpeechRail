@@ -1174,7 +1174,7 @@ wheels = [
 
 [[package]]
 name = "speechrail"
-version = "3.11.0"
+version = "3.11.1"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
