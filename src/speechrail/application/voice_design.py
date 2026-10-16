@@ -40,7 +40,14 @@ _MAX_VALIDATIONS_PER_CANDIDATE = 32
 # derived status and the timestamps belong to the stored record, not to the
 # freshly computed one.
 _VALIDATION_REVIEW_FIELDS = frozenset(
-    {"identity_status", "naturalness_status", "automated_acceptance", "status", "created_at", "updated_at"}
+    {
+        "identity_status",
+        "naturalness_status",
+        "automated_acceptance",
+        "status",
+        "created_at",
+        "updated_at",
+    }
 )
 # VoiceDesign text fidelity is versioned on its own.  v1 compared the whole
 # transcript by edit distance, which passes a misread digit inside an otherwise
