@@ -32,6 +32,7 @@ public struct SpeakerMatchingPolicy: Codable, Sendable {
               matchMarginMin.isFinite, (0...2).contains(matchMarginMin),
               (1500...60000).contains(minimumNewVoiceMs), (2000...60000).contains(minimumUpdateVoiceMs),
               candidateRetentionMs == 60000,
+              certifiedMaxSpeakers.map({ (5...32).contains($0) }) ?? true,
               modelSnapshot == "7eab74f3463c736418d0eb10296261ae581146c9",
               calibrationDigest.count == 64,
               calibrationDigest.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) })
@@ -148,6 +149,7 @@ public struct SessionSpeakerMatcher: Sendable {
             costs.append(rowCosts)
         }
         let assignment = minimumAssignment(costs)
+        let identityCapacity = policy.certifiedMaxSpeakers ?? 32
         var result: [String: SpeakerMatch] = [:]
         var usedCandidates: Set<Int> = []
         for (row, cluster) in clusters.enumerated() {
@@ -160,6 +162,10 @@ public struct SessionSpeakerMatcher: Sendable {
             guard !ambiguous[row], cluster.anchors.isEmpty,
                   distances[row].min().map({ $0 > policy.matchDistanceMax }) ?? true else {
                 result[cluster.id] = SpeakerMatch(slot: nil, reason: "identity_uncertain"); continue
+            }
+            guard identities.count < identityCapacity else {
+                result[cluster.id] = SpeakerMatch(slot: nil, reason: "speaker_capacity")
+                continue
             }
             let matches = candidates.indices.filter { !usedCandidates.contains($0)
                 && distance(cluster.centroid, candidates[$0].vector) <= policy.matchDistanceMax }
@@ -187,7 +193,8 @@ public struct SessionSpeakerMatcher: Sendable {
             candidates[candidateIndex].support = union(candidates[candidateIndex].support
                 + clipped(cluster.uniqueVoice, after: retiredBefore))
             let support = candidates[candidateIndex].support
-            if duration(support) >= policy.minimumNewVoiceMs * 16, identities.count < 32 {
+            if duration(support) >= policy.minimumNewVoiceMs * 16,
+               identities.count < identityCapacity {
                 sequence += 1
                 let slot = identities.count
                 identities.append(Identity(representatives: [Prototype(vector: cluster.centroid,
@@ -197,7 +204,7 @@ public struct SessionSpeakerMatcher: Sendable {
                 result[cluster.id] = SpeakerMatch(slot: slot, reason: nil)
             } else {
                 result[cluster.id] = SpeakerMatch(slot: nil,
-                    reason: identities.count == 32 ? "speaker_capacity" : "identity_uncertain")
+                    reason: identities.count >= identityCapacity ? "speaker_capacity" : "identity_uncertain")
             }
         }
         candidates.removeAll { $0.support.isEmpty }

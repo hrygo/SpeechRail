@@ -1,6 +1,7 @@
 import Foundation
 import SpeechRailControlKit
 import XCTest
+import Testing
 #if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
 #endif
@@ -2312,6 +2313,110 @@ final class ControllableAudioSource: MeetingAudioSource {
         continuation?.offer(chunk)
     }
 
+    func fail(_ reason: AudioStreamTermination) {
+        continuation?.finish(AudioStreamError(reason: reason))
+        continuation = nil
+    }
+
+}
+
+/// Exercises the window protocol through the same source-failure and drain
+/// owners changed by the App lifecycle work, rather than testing either alone.
+@MainActor
+struct MeetingWindowMergeRegressionTests {
+    @Test(arguments: [AudioStreamTermination.sourceLost, .droppedSamples])
+    func sourceFailureSavesWindowTailAndDynamicSpeakerWithoutReleasingRecord(
+        reason: AudioStreamTermination
+    ) async throws {
+        try await withHarness { h in
+            let id = try #require(h.session.sessionID)
+            let client = try #require(h.clients.all.last)
+            let sealed = try TranscriptWindowLedgerTests().fixture("window-sealed-r6")
+            let capacity = try JSONDecoder().decode(SpeechRailDiarizationCapacity.self,
+                from: Data(#"{"enabled":true,"backend":"meeting_dynamic","max_speakers":8,"system_cap":32}"#.utf8))
+            await client.setDrainEvents([
+                .diarizationConfigured(capacity, serverSessionID: "merge-drain"),
+                .transcriptionWindow(sealed),
+                .attribution(itemID: "item-1", units: [
+                    .init(segmentUID: "tail-unit", speaker: "S5", timingQuality: "aligned")
+                ], isFinal: true),
+                .diarizationFinished
+            ])
+            h.audio.emit(AudioChunk(pcm: Data([0, 1]), level: 0.2))
+            h.audio.emit(AudioChunk(pcm: Data([2, 3]), level: 0.3))
+            // Failure closes an untrusted source queue immediately. Drain only
+            // covers PCM already accepted by the transport before that failure.
+            try await h.settle { _ in await client.appendedByteCount == 4 }
+            h.audio.fail(reason)
+            try await h.settle { $0.phase == .interrupted }
+
+            let rows = try await h.store.lines(sessionID: id)
+            let row = try #require(rows.first)
+            #expect(rows.count == 1)
+            #expect(row.text == sealed.finalUnits?.first?.text)
+            #expect(row.speakerLabel?.hasSuffix(":S5") == true)
+            let uploadedAtDrain = await client.appendedByteCountAtDrain
+            let uploaded = await client.appendedByteCount
+            #expect(uploadedAtDrain == 4)
+            #expect(uploaded == 4)
+            #expect(h.session.windowCapture?.queue.savedThrough == 96_000)
+            #expect(h.coordinator.activeSessionID == id)
+            #expect(h.coordinator.occupancy?.kind == .meeting)
+            #expect(try await h.store.session(id: id)?.state != .archived)
+            #expect(h.coordinator.captureCompletionFailure(recordID: id)?.stage
+                == (reason == .droppedSamples ? .capture : nil))
+        }
+    }
+
+    @Test func interruptedWindowSaveFailureKeepsRecoveryAndRetriesExactlyOnce() async throws {
+        try await withHarness { h in
+            let id = try #require(h.session.sessionID)
+            let client = try #require(h.clients.all.last)
+            let sealed = try TranscriptWindowLedgerTests().fixture("window-sealed-r6")
+            try await h.store.execute("CREATE TEMP TRIGGER reject_window BEFORE INSERT ON line WHEN NEW.status = 'final' BEGIN SELECT RAISE(ABORT,'injected'); END;")
+            await client.setDrainEvents([.transcriptionWindow(sealed)])
+            h.audio.fail(.sourceLost)
+            try await h.settle { $0.phase == .interrupted }
+
+            #expect(h.coordinator.activeSessionID == id)
+            #expect(h.coordinator.occupancy?.kind == .meeting)
+            let text = try #require(sealed.finalUnits?.first?.text)
+            #expect(h.session.unsavedTranscriptText(recordID: id).contains(text))
+            #expect(try await h.store.lines(sessionID: id).isEmpty)
+            try await h.store.execute("DROP TRIGGER reject_window;")
+            #expect(await h.session.retryPendingSaves(recordID: id))
+            #expect(await h.session.retryPendingSaves(recordID: id))
+            #expect(try await h.store.lines(sessionID: id).count == 1)
+            #expect(h.session.pendingSaveRecordIDs.isEmpty)
+            #expect(h.coordinator.captureCompletionFailure(recordID: id) != nil,
+                "Saving a retry cannot manufacture a successful protocol drain")
+        }
+    }
+
+    private func withHarness(
+        _ body: @MainActor (MeetingSessionLifecycleTests.Harness) async throws -> Void
+    ) async throws {
+        let h = try await MeetingSessionLifecycleTests.Harness.make(
+            revisionWindowEnabled: true, dynamicDiarizationEnabled: true)
+        let suite = "meeting-window-merge-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = SessionPreferences(defaults: defaults)
+        preferences.meetingDiarizationEnabled = true
+        h.session.preferences = { preferences }
+        await h.clients.openGate()
+        await h.session.start(selection: MeetingAudioSelection(usesMicrophone: true))
+        try await h.settle { $0.phase == .recording }
+        await h.clients.all.last?.finishEventsOnClose()
+        do { try await body(h) }
+        catch {
+            await h.session.stopCapture()
+            await h.store.close()
+            throw error
+        }
+        await h.session.stopCapture()
+        await h.store.close()
+    }
 }
 
 private struct DelayedMeetingArchiveWriter: SessionArchiveWriting {

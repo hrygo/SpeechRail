@@ -92,8 +92,23 @@ struct CaptionBandContent: Equatable, Sendable {
     }
     let rows: [Row]
 
-    init(lines: [CaptionSession.Line], windowUnits: [TranscriptWindowUnit]?, partialText: String?) {
+    init(
+        lines: [CaptionSession.Line],
+        pendingCommands: [TranscriptPersistenceQueue.Command] = [],
+        activeRecordID: String? = nil,
+        windowUnits: [TranscriptWindowUnit]?,
+        partialText: String?
+    ) {
         var rows = lines.map { Row(id: .final($0.id), text: $0.text, isPartial: false) }
+        var visibleLineIDs = Set(lines.map(\.id))
+        for command in pendingCommands {
+            guard let activeRecordID,
+                  command.sessionID == activeRecordID,
+                  command.formal,
+                  visibleLineIDs.insert(command.lineID).inserted
+            else { continue }
+            rows.append(Row(id: .final(command.lineID), text: command.text, isPartial: false))
+        }
         if let windowUnits {
             rows += windowUnits.map { Row(id: .window($0.unitID), text: $0.text, isPartial: true) }
         } else if let partialText, !partialText.isEmpty {
@@ -291,7 +306,16 @@ public final class CaptionSession {
         return windowCapture?.statusText ?? windowFallbackNote
     }
     var bandContent: CaptionBandContent {
-        CaptionBandContent(lines: lines, windowUnits: windowCapture?.visibleUnits, partialText: partialText)
+        let pendingCommands = sessionID.map { recordID in
+            inputPersistence.unsettledInputs(sessionID: recordID).map { $0.command }
+        } ?? []
+        return CaptionBandContent(
+            lines: lines,
+            pendingCommands: pendingCommands,
+            activeRecordID: sessionID,
+            windowUnits: windowCapture?.visibleUnits,
+            partialText: partialText
+        )
     }
 
     private func beginWindowCapture(enabled: Bool, identity: TranscriptPreviewLedger.Identity, captureStartedAt: Date) {

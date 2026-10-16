@@ -94,6 +94,25 @@ do {
     require(full["overflow"]?.slot == nil && full["overflow"]?.reason == "speaker_capacity", "capacity never aliases speaker")
     require(capacity.identityCount == 32, "fixed identity cap")
 
+    var certifiedPolicy = policy
+    certifiedPolicy.certifiedMaxSpeakers = 5
+    certifiedPolicy.validationDigest = String(repeating: "b", count: 64)
+    var certified = try SessionSpeakerMatcher(policy:certifiedPolicy)
+    for index in 0..<5 {
+        let value = try certified.assign(
+            [cluster("speaker",index,index*32000,(index+1)*32000)], through:(index+1)*32000)
+        require(value["speaker"]?.slot == index, "certified identity allocation")
+    }
+    let knownAtCapacity = try certified.assign(
+        [cluster("known",4,160000,192000)], through:192000)
+    require(knownAtCapacity["known"]?.slot == 4, "certified capacity preserves known identities")
+    let beyondCertifiedCapacity = try certified.assign(
+        [cluster("sixth",5,192000,224000)], through:224000)
+    require(beyondCertifiedCapacity["sixth"]?.slot == nil
+        && beyondCertifiedCapacity["sixth"]?.reason == "speaker_capacity",
+        "certified capacity leaves excess speakers unknown")
+    require(certified.identityCount == 5, "certified capacity never creates an extra identity")
+
     var collision = try SessionSpeakerMatcher(policy:policy)
     _ = try collision.assign([cluster("anchor",0,0,32000)], through:32000)
     let collisions = try collision.assign([cluster("one",0,32000,64000),cluster("two",0,32000,64000)], through:64000)

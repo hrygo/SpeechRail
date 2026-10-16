@@ -84,7 +84,10 @@ public final class SystemAudioCapture: AudioChunkSource, @unchecked Sendable {
         guard accepted else { connection.invalidate(); throw CancellationError() }
         connection.resume()
         do {
-            try await XPCReplyLatch.perform(timeout: .seconds(45)) { [self] latch in
+            try await XPCReplyLatch.perform(
+                timeout: .seconds(45),
+                timeoutError: Failure.cannotReceiveAudio("采集服务未按时确认。")
+            ) { [self] latch in
                 sendStart(epoch: epoch, latch: latch)
             }
             guard withState({ !$0.stopped && $0.epoch == epoch }) else { throw CancellationError() }
@@ -129,7 +132,10 @@ public final class SystemAudioCapture: AudioChunkSource, @unchecked Sendable {
                 guard let self else { return }
                 var confirmed = false
                 do {
-                    try await XPCReplyLatch.perform(timeout: .seconds(2)) { [self] latch in sendStop(latch: latch) }
+                    try await XPCReplyLatch.perform(
+                        timeout: .seconds(2),
+                        timeoutError: Failure.cannotReceiveAudio("采集服务未按时确认。")
+                    ) { [self] latch in sendStop(latch: latch) }
                     confirmed = true
                 } catch { }
                 let pair = withState { value in
@@ -201,44 +207,5 @@ public final class SystemAudioCapture: AudioChunkSource, @unchecked Sendable {
                   error.captureEpoch == self.epoch else { owner?.receiveStopped(epoch: self.epoch, reason: .sourceLost); return }
             owner?.receiveStopped(epoch: self.epoch, reason: error.reason, evidence: error)
         }
-    }
-}
-
-/// One terminal reply, including cancellation/timeout before attachment. No unowned continuation survives shutdown.
-private final class XPCReplyLatch: Sendable {
-    private struct State {
-        var continuation: CheckedContinuation<Void, any Error>?
-        var result: Result<Void, any Error>?
-    }
-    private let state = Mutex(State())
-    func resolve(_ result: Result<Void, any Error>) {
-        let waiter = state.withLock { value -> CheckedContinuation<Void, any Error>? in
-            guard value.result == nil else { return nil }
-            value.result = result; defer { value.continuation = nil }; return value.continuation
-        }
-        waiter?.resume(with: result)
-    }
-    private func value() async throws {
-        try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { waiter in
-                let result = state.withLock { value -> Result<Void, any Error>? in
-                    if let result = value.result { return result }
-                    value.continuation = waiter; return nil
-                }
-                if let result { waiter.resume(with: result) }
-            }
-        } onCancel: { self.resolve(.failure(CancellationError())) }
-    }
-    static func perform(timeout: Duration, request: @Sendable (XPCReplyLatch) -> Void) async throws {
-        let latch = XPCReplyLatch()
-        let deadline = Task {
-            do { try await Task.sleep(for: timeout); latch.resolve(.failure(SystemAudioCapture.Failure.cannotReceiveAudio("采集服务未按时确认。"))) }
-            catch { }
-        }
-        request(latch)
-        let result: Result<Void, any Error>
-        do { try await latch.value(); result = .success(()) } catch { result = .failure(error) }
-        deadline.cancel(); await deadline.value
-        try result.get()
     }
 }

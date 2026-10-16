@@ -1,5 +1,7 @@
 import AVFoundation
 import CoreAudio
+import Synchronization
+import Testing
 import XCTest
 
 #if SWIFT_PACKAGE
@@ -269,38 +271,81 @@ final class AudioCaptureBoundaryTests: XCTestCase {
     }
 }
 
-final class CaptureStartDeadlineTests: XCTestCase {
-    func testUnresponsiveHelperHasBoundedStart() async {
-        do {
-            try await CaptureStartContinuation.wait(timeout: .milliseconds(5)) { _ in }
-            XCTFail("An unresponsive helper must not keep preparing forever")
-        } catch {
-            XCTAssertTrue(error is CaptureStartTimeout)
-        }
-    }
+private enum XPCReplyLatchTestError: Error, Equatable {
+    case timedOut
+    case lateReply
+}
 
-    func testCanceledStartDoesNotAwaitTheRemoteReply() async {
+@Suite(.timeLimit(.minutes(1)))
+struct XPCReplyLatchTests {
+    @Test func testPreCancelledRequestDoesNotSendStart() async {
+        let sent = Mutex(false)
         let task = Task {
-            try await CaptureStartContinuation.wait(timeout: .seconds(60)) { _ in }
+            withUnsafeCurrentTask { $0?.cancel() }
+            try await XPCReplyLatch.perform(timeout: .seconds(1), timeoutError: XPCReplyLatchTestError.timedOut) { _ in
+                sent.withLock { $0 = true }
+            }
         }
+
+        do {
+            try await task.value
+            Issue.record("A canceled start must fail")
+        } catch {
+            #expect(error is CancellationError)
+        }
+        #expect(sent.withLock { $0 } == false)
+    }
+
+    @Test func testCancellationWinsAndIgnoresLateSuccessReply() async throws {
+        let (requests, requestContinuation) = AsyncStream<XPCReplyLatch>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let task = Task {
+            try await XPCReplyLatch.perform(timeout: .seconds(5), timeoutError: XPCReplyLatchTestError.timedOut) {
+                _ = requestContinuation.yield($0)
+            }
+        }
+        var iterator = requests.makeAsyncIterator()
+        let lateReply = try #require(await iterator.next())
+        requestContinuation.finish()
         task.cancel()
-        do { try await task.value; XCTFail("Canceled start must finish") }
-        catch { XCTAssertTrue(error is CancellationError) }
+
+        do {
+            try await task.value
+            Issue.record("Cancellation must win before the remote reply")
+        } catch {
+            #expect(error is CancellationError)
+        }
+        lateReply.resolve(.success(()))
     }
 
-    func testCompletionBeforeAttachAndDuplicateRepliesResumeOnlyOnce() async throws {
-        let once = CaptureStartContinuation()
-        once.resume(returning: ())
-        once.resume(throwing: CaptureStartTimeout())
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            once.attach(continuation)
+    @Test func testTimeoutWinsAndIgnoresLateSuccessReply() async throws {
+        let (requests, requestContinuation) = AsyncStream<XPCReplyLatch>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let task = Task {
+            try await XPCReplyLatch.perform(timeout: .milliseconds(20), timeoutError: XPCReplyLatchTestError.timedOut) {
+                _ = requestContinuation.yield($0)
+            }
         }
-        try await CaptureStartContinuation.wait(timeout: .milliseconds(50)) { once in
-            once.resume(returning: ())
-            once.resume(throwing: CaptureStartTimeout())
+        var iterator = requests.makeAsyncIterator()
+        let lateReply = try #require(await iterator.next())
+        requestContinuation.finish()
+
+        do {
+            try await task.value
+            Issue.record("An unresponsive helper must time out")
+        } catch {
+            #expect(error as? XPCReplyLatchTestError == .timedOut)
         }
+        lateReply.resolve(.success(()))
     }
 
+    @Test func testFirstReplyWinsWhenSuccessArrivesBeforeTimeout() async throws {
+        try await XPCReplyLatch.perform(timeout: .seconds(1), timeoutError: XPCReplyLatchTestError.timedOut) { latch in
+            latch.resolve(.success(()))
+            latch.resolve(.failure(XPCReplyLatchTestError.lateReply))
+        }
+    }
+}
+
+final class CaptureHelperOwnershipTests: XCTestCase {
     func testOperationWatchdogCannotWinAfterSuccessfulCompletion() {
         let gate = CaptureOperationGate()
         XCTAssertTrue(gate.claim())

@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 
 // `CaptureHelper` 的双向 XPC 约定（`TECHNICAL-DESIGN` §3.2）。
 //
@@ -78,64 +79,70 @@ public enum CaptureHelperInterfaces {
     }
 }
 
-struct CaptureStartTimeout: LocalizedError {
-    var errorDescription: String? {
-        "本机音频准备超时，尚未开始记录。请重试；若仍失败，请查看系统录音权限与音频设备。"
+/// One XPC reply, cancellation or deadline wins once, even when a reply arrives late.
+/// The caller supplies its timeout error so this shared app/helper source has no dependency on the App target.
+final class XPCReplyLatch: Sendable {
+    private struct State {
+        var continuation: CheckedContinuation<Void, any Error>?
+        var result: Result<Void, any Error>?
     }
-}
+    private let state = Mutex(State())
 
-/// XPC replies, cancellation and a deadline compete for exactly one outcome.
-/// Cancellation can arrive before the continuation is attached.
-final class CaptureStartContinuation: @unchecked Sendable {
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<Void, Error>?
-    private var result: Result<Void, Error>?
-
-    func attach(_ continuation: CheckedContinuation<Void, Error>) {
-        lock.lock()
-        if let result {
-            lock.unlock()
-            continuation.resume(with: result)
-        } else {
-            self.continuation = continuation
-            lock.unlock()
+    func resolve(_ result: Result<Void, any Error>) {
+        let waiter = state.withLock { value -> CheckedContinuation<Void, any Error>? in
+            guard value.result == nil else { return nil }
+            value.result = result
+            defer { value.continuation = nil }
+            return value.continuation
         }
+        waiter?.resume(with: result)
     }
 
-    func resume(returning value: Void) { complete(.success(value)) }
-    func resume(throwing error: Error) { complete(.failure(error)) }
-
-    private func complete(_ value: Result<Void, Error>) {
-        lock.lock()
-        guard result == nil else { lock.unlock(); return }
-        result = value
-        let continuation = self.continuation
-        self.continuation = nil
-        lock.unlock()
-        continuation?.resume(with: value)
-    }
-
-    static func wait(
-        timeout: Duration = .seconds(45),
-        start: (CaptureStartContinuation) -> Void
-    ) async throws {
-        let once = CaptureStartContinuation()
-        let timer = Task {
-            do {
-                try await Task.sleep(for: timeout)
-                once.resume(throwing: CaptureStartTimeout())
-            } catch { /* Successful start or cancellation owns the outcome. */ }
-        }
-        defer { timer.cancel() }
+    private func value() async throws {
         try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                once.attach(continuation)
-                if Task.isCancelled { once.resume(throwing: CancellationError()) }
-                else { start(once) }
+            try await withCheckedThrowingContinuation { waiter in
+                let result = state.withLock { value -> Result<Void, any Error>? in
+                    if let result = value.result { return result }
+                    value.continuation = waiter
+                    return nil
+                }
+                if let result { waiter.resume(with: result) }
             }
         } onCancel: {
-            once.resume(throwing: CancellationError())
+            self.resolve(.failure(CancellationError()))
         }
+    }
+
+    static func perform(
+        timeout: Duration,
+        timeoutError: any Error,
+        request: @Sendable (XPCReplyLatch) -> Void
+    ) async throws {
+        let latch = XPCReplyLatch()
+        let deadline = Task {
+            do {
+                try await Task.sleep(for: timeout)
+                latch.resolve(.failure(timeoutError))
+            } catch { }
+        }
+        do {
+            try Task.checkCancellation()
+        } catch {
+            deadline.cancel()
+            await deadline.value
+            throw error
+        }
+        request(latch)
+        let result: Result<Void, any Error>
+        do {
+            try await latch.value()
+            result = .success(())
+        } catch {
+            result = .failure(error)
+        }
+        deadline.cancel()
+        await deadline.value
+        try result.get()
     }
 }
 

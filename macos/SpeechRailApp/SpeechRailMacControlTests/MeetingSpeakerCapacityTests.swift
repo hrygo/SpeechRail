@@ -1,11 +1,48 @@
 import Foundation
 import Testing
+import Synchronization
 import SpeechRailControlKit
 #if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
 #endif
 
 struct MeetingSpeakerCapacityTests {
+    @MainActor @Test func dynamicReplayAndLineRetirementPreserveStoredIdentity() async throws {
+        let (store, record, _) = try await TranscriptWindowPersistenceTests().fixture()
+        let writes = Mutex(0)
+        let labeling = SpeakerLabeling(coordinator: SessionCoordinator(store: store), attachLabel: { lineID, label in
+            writes.withLock { $0 += 1 }
+            try await store.attachSpeakerLabel(lineID: lineID, label: label)
+        })
+        let capacity = try JSONDecoder().decode(SpeechRailDiarizationCapacity.self,
+            from: Data(#"{"enabled":true,"backend":"meeting_dynamic","max_speakers":8,"system_cap":32}"#.utf8))
+        labeling.begin(sessionID: record, enabled: true)
+        labeling.configureCapacity(capacity, recordID: record, generation: 1,
+            serverSessionID: "first", inputEpoch: 0)
+        var labels: [String] = []
+        for (index, lineID) in ["before-retirement", "after-retirement"].enumerated() {
+            _ = try await store.appendLine(LineDraft(sessionID: record, role: .speaker,
+                text: "合成分人回归", source: .microphone, status: .final), id: lineID)
+            let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit-\(index)", speaker: "S5")]
+            let label = try #require(labeling.register(units: units, lineID: lineID, ordinal: index + 1))
+            labels.append(label)
+            await labeling.apply(units: units)
+            await labeling.apply(units: units)
+            #expect(writes.withLock { $0 } == index + 1, "A repeated attribution must not write twice")
+            labeling.retireLine(lineID)
+            #expect(labeling.liveUnitCount == 0)
+        }
+        #expect(labels[0] == labels[1], "Retiring line indexes must preserve the session speaker scope")
+        #expect(try await store.lines(sessionID: record).map(\.speakerLabel) == labels.map(Optional.some))
+        labeling.beginNewConnection(sessionID: record)
+        labeling.configureCapacity(capacity, recordID: record, generation: 2,
+            serverSessionID: "reconnected", inputEpoch: 0)
+        let next = labeling.register(units: [.init(segmentUID: "unit-0", speaker: "S5")],
+            lineID: "new-connection", ordinal: 3)
+        #expect(next != labels[0], "Reused server labels on a new connection must not inherit identity")
+        await store.close()
+    }
+
     @Test func historicalScopeOrdinalsRemainStableAcrossSearchFiltering() {
         let first = "d" + String(repeating:"a",count:32) + ":S1"
         let next = "d" + String(repeating:"b",count:32) + ":S1"

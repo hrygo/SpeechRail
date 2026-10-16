@@ -48,6 +48,23 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         XCTAssertNotEqual(corrected, CaptionBandContent(lines: [line], windowUnits: nil, partialText: "半句继续增长"))
     }
 
+    func testBandContentExcludesPendingSavesFromAnotherRecord() {
+        let now = Date()
+        let otherRecord = TranscriptPersistenceQueue.Command(
+            sessionID: "other-record", connection: 1, itemID: "other-item",
+            text: "其他记录的待保存文字", formal: true, observedAt: now
+        )
+        let activeRecord = TranscriptPersistenceQueue.Command(
+            sessionID: "active-record", connection: 1, itemID: "active-item",
+            text: "当前记录的待保存文字", formal: true, observedAt: now
+        )
+        let content = CaptionBandContent(
+            lines: [], pendingCommands: [otherRecord, activeRecord], activeRecordID: "active-record",
+            windowUnits: nil, partialText: nil
+        )
+        XCTAssertEqual(content.rows.map(\.text), ["当前记录的待保存文字"])
+    }
+
     override func tearDown() async throws {
         if let harness {
             if harness.coordinator.occupancy != nil {
@@ -443,12 +460,19 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         let h = try await makeHarness(saveLine: { try await gate.save($0, id: $1) })
         await gate.attach(h.store)
         let id = try await start(h)
-        try await h.emit(.completed(itemID: "item", transcript: "字幕定稿只到一次。"))
+        let transcript = "字幕定稿只到一次。"
+        try await h.emit(.completed(itemID: "item", transcript: transcript))
         try await h.settle { _ in await gate.entered }
+        XCTAssertEqual(h.session.bandContent.rows.map(\.text), [transcript],
+            "保存 ACK 前，正式转写仍应留在浮层正文中")
+        let rowsBeforeAck = try await h.store.lines(sessionID: id)
+        XCTAssertTrue(rowsBeforeAck.isEmpty, "gate 仍阻塞时尚未收到保存 ACK")
         await gate.release(failing: true)
         try await h.settle { !$0.session.saveFailures(recordID: id).isEmpty }
+        XCTAssertEqual(h.session.bandContent.rows.map(\.text), [transcript],
+            "保存失败后，恢复中的正文也不能从浮层消失")
         let command = try XCTUnwrap(h.session.pendingSaveCommands(recordID: id).first)
-        XCTAssertEqual(command.text, "字幕定稿只到一次。")
+        XCTAssertEqual(command.text, transcript)
         XCTAssertEqual(command.role, .speaker)
         await gate.release()
         let recovered = await h.session.retryPendingSaves(recordID: id)
@@ -456,10 +480,42 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         let rows = try await h.store.lines(sessionID: id)
         XCTAssertEqual(rows.count, 1)
         XCTAssertEqual(rows.first?.id, command.lineID)
+        XCTAssertEqual(h.session.bandContent.rows.map(\.text), [transcript],
+            "保存 ACK 后正文应从待保存预览转为唯一一条正式行")
+        XCTAssertEqual(h.session.bandContent.rows.map(\.isPartial), [false])
         let attempts = await gate.attempts
         XCTAssertEqual(attempts.map(\.id), [command.lineID, command.lineID])
         XCTAssertEqual(try XCTUnwrap(rows.first?.createdAt).timeIntervalSince1970,
                        command.observedAt.timeIntervalSince1970, accuracy: 0.000001)
+    }
+
+    func testPendingFinalCaptionsRemainBesideTheNextLivePartial() async throws {
+        let gate = TranscriptPersistenceGate()
+        let h = try await makeHarness(saveLine: { try await gate.save($0, id: $1) })
+        await gate.attach(h.store)
+        let id = try await start(h)
+        try await h.emit(.completed(itemID: "first", transcript: "第一条待保存字幕。"))
+        try await h.settle { _ in await gate.entered }
+        try await h.emit(.completed(itemID: "second", transcript: "第二条待保存字幕。"))
+        try await h.emit(.partialSnapshot(itemID: "next", revision: 1, text: "下一句正在识别"))
+        try await h.settle {
+            $0.session.pendingSaveCommands(recordID: id).count == 2
+                && $0.session.partialText == "下一句正在识别"
+        }
+
+        XCTAssertEqual(h.session.bandContent.rows.map(\.text), [
+            "第一条待保存字幕。", "第二条待保存字幕。", "下一句正在识别"
+        ])
+        XCTAssertEqual(h.session.bandContent.rows.map(\.isPartial), [false, false, true])
+
+        await gate.release()
+        let saved = await h.session.waitForPendingSaves(recordID: id)
+        XCTAssertTrue(saved.isComplete)
+        XCTAssertEqual(h.session.bandContent.rows.map(\.text), [
+            "第一条待保存字幕。", "第二条待保存字幕。", "下一句正在识别"
+        ])
+        let rows = try await h.store.lines(sessionID: id)
+        XCTAssertEqual(rows.map(\.text), ["第一条待保存字幕。", "第二条待保存字幕。"])
     }
 
     func testPendingCaptionSaveConsumesControlAndCachesEarlyAttribution() async throws {
@@ -567,6 +623,10 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         try await h.settle { _ in await gate.entered }
         try await h.emit(.completed(itemID: "rejected", transcript: "拒绝的字幕预览"))
         try await h.settle { $0.session.admissionRecovery(recordID: id) != nil }
+        XCTAssertEqual(h.session.bandContent.rows.map(\.text), [
+            "已接纳的字幕正文", "拒绝的字幕预览"
+        ], "pending queue reaches capacity without hiding its accepted line or rejected preview")
+        XCTAssertEqual(h.session.bandContent.rows.map(\.isPartial), [false, true])
         await gate.release(failing: true)
         try await h.settle { !$0.session.saveFailures(recordID: id).isEmpty }
         let failedID = try XCTUnwrap(h.session.pendingSaveCommands(recordID: id).first?.lineID)
