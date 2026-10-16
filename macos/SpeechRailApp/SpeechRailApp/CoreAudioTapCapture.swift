@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import CoreAudio
 import Foundation
@@ -23,9 +24,8 @@ import Synchronization
 //   `CATapDescription.bundleIDs` → `AudioHardwareCreateProcessTap`
 //   → 私有 aggregate device（tap 作为它的输入流）→ `AudioDeviceCreateIOProcID` → start。
 //
-// **未验证**（`TECHNICAL-DESIGN` §12 第 1、2 条）：本机没有真机跑过这一条路径。
-// 授权弹窗的实际触发点、`bundleIDs` 的限定是否真按 App 生效、以及
-// `isProcessRestoreEnabled`（来源 App 重启后自动接回）都只是 SDK 标注语义。
+// bundleIDs 按实际音频进程精确匹配；浏览器等 App 的声音可能来自内嵌 helper。
+// 来源 App 重启后的 `isProcessRestoreEnabled` 行为仍只有 SDK 标注语义。
 // 这里把"接回"如实实现成**尽力而为**：tap 建立时就打开该开关，之后不再假装知道它生效了。
 
 /// 单生产者 / 单消费者环形缓冲：实时回调写、drain 线程读。容量按完整帧对齐。
@@ -196,7 +196,7 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
         guard !configuration.bundleIDs.isEmpty else { throw Failure.noBundleIdentifiers }
 
         let description = CATapDescription()
-        description.bundleIDs = configuration.bundleIDs
+        description.bundleIDs = Self.bundleIDsIncludingHelpers(configuration.bundleIDs)
         description.isMono = false
         description.isMixdown = true
         description.isExclusive = false
@@ -516,6 +516,38 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
             pending.removeFirst(bytesPerChunk)
             emit?(Data(chunk), level)
         }
+    }
+
+    static func bundleIDsIncludingHelpers(
+        _ selected: [String], applicationURLs: [URL]? = nil
+    ) -> [String] {
+        var identifiers = Set(selected)
+        let roots = applicationURLs ?? selected.flatMap { identifier in
+            NSRunningApplication.runningApplications(withBundleIdentifier: identifier).compactMap(\.bundleURL)
+        }
+        for candidate in roots {
+            let root = candidate.resolvingSymlinksInPath().standardizedFileURL
+            guard let identifier = Bundle(url: root)?.bundleIdentifier,
+                  selected.contains(identifier) else { continue }
+            let contents = root.appendingPathComponent("Contents", isDirectory: true)
+            guard let entries = FileManager.default.enumerator(
+                at: contents, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
+            ) else { continue }
+            for case let entry as URL in entries {
+                // Only bundles physically inside the selected App belong to this source.
+                // Do not infer ownership from a bundle-ID prefix or follow external links.
+                let resolved = entry.resolvingSymlinksInPath().standardizedFileURL
+                guard resolved.path.hasPrefix(root.path + "/") else {
+                    entries.skipDescendants()
+                    continue
+                }
+                guard ["app", "xpc", "appex"].contains(entry.pathExtension),
+                      let helperID = Bundle(url: resolved)?.bundleIdentifier,
+                      !helperID.isEmpty else { continue }
+                identifiers.insert(helperID)
+            }
+        }
+        return identifiers.sorted()
     }
 
     // MARK: - 读属性

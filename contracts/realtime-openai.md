@@ -1,6 +1,6 @@
 # SpeechRail Realtime ASR/TTS 协议契约
 
-> 契约版本：`6.3.2`；生效日期：2026-10-07。唯一机器 schema 是
+> 契约版本：`6.3.2`；生效日期：2026-10-16。唯一机器 schema 是
 > [`realtime-events.schema.json`](realtime-events.schema.json)，字段责任表是
 > [`realtime-field-matrix.json`](realtime-field-matrix.json)。
 
@@ -253,11 +253,17 @@ hypothesis 可修订，使用 `speechrail.transcription.hypothesis`：
 span 或匿名 speaker units。旧 epoch、旧 revision 或不完整降级的回包必须丢弃。Diarization 只输出
 session 内匿名 label，不保存声纹、embedding 或跨会话身份。
 
+归属事件的身份取自对应 ASR final 冻结的 item，不使用后来正在接收音频的 item。
+每个 `speechrail.diarization.updated` 只包含该 `utterance_id` 的 units；多个已完成 item 的
+修订分别发送。`speechrail.diarization.done` 是会话收尾屏障，只携带最后一个已完成 item 的
+快照；更早 item 的修订必须已通过 `updated` 发出，不能把整场 units 挂到最后一个 item。
+没有已完成 item 时，`done` 的 units 为空。
+
 `session.speechrail.alignment.enabled` 与 `session.speechrail.diarization.enabled` 各自独立生效：
 开启 alignment 即为本连接保留受界限的 PCM 并在每个 ASR final 后运行固定文本对齐，即使
 diarization 关闭；关闭 alignment 则不保留 PCM，即使 diarization 开启。两者都只能在首个音频
-帧之前改变。`speechrail.diarization.finish` 必须先等齐当前 item 尚在进行的对齐任务，再封存
-归属账本，因此已 frozen 的文本不会出现“有 final 无归属”的封存结果；等待超过
+帧之前改变。`speechrail.diarization.finish` 必须先等齐已冻结 item 尚在进行的对齐任务，再封存
+归属账本，并等待归属事件消费者发送完封存前的修订，最后发送会话终态。等待超过
 `realtime_diarization_drain_deadline_seconds` 时按 `finalization_timeout` 降级。
 
 对齐只有 `granularity` 一个会话级旋钮。对齐器精度由 active profile 在进程启动时固定，
@@ -297,6 +303,22 @@ diarization 关闭；关闭 alignment 则不保留 PCM，即使 diarization 开�
 `granularity` 取 `segment` / `word` / `character`：中文按对齐器返回的汉字边界、英文按词边界；
 没有对应粒度证据时必须报 `unsupported` 而不是把 phrase 均分伪装成 character。对齐失败发
 `speechrail.alignment.failed`（独立状态，绝不用空 units 冒充成功）；ASR final 仍成功。
+
+供应商时间网格可能使某些 token 的起止落到同一个样本。在 `segment` 粒度，有相邻的
+正时长单元时将这些 token 的原文范围与时间点并入相邻 segment，仍严格校验文本覆盖、
+时间单调和冻结音频边界。全部 token 都没有正时长，或请求 `word` / `character` 而出现
+这种时间分辨率不足时，返回 `alignment_time_resolution_insufficient`，不均分或虚构时间。
+
+Qwen3 适配器从已加载模型配置读取时间格点宽度。原始时间全部有限、非负且单调时，若尾部
+结束点恰好是冻结音频边界最近的格点，仅将这个格点与实际音频边界相交，最多调整半格；
+区间内部的时间不移动。非最近格点、非格点越界、倒序与重叠仍交给严格校验拒绝。所有公开
+时间范围均留在原冻结 PCM 范围内，格点处理不会增加模型能提供的时间精度。
+
+失败的 `error.code` 区分 `text_mismatch`、`invalid_alignment`、`alignment_out_of_bounds`、
+`alignment_not_monotonic`、`granularity_unsupported`、`alignment_time_resolution_insufficient`、
+`alignment_pcm_mismatch`、`alignment_pcm_overflow`、`alignment_timeout`、`alignment_overloaded`、
+`alignment_worker_failed`、`alignment_unavailable`、`alignment_stale` 与兜底 `alignment_failed`。
+`error.message` 是按类别生成的安全说明，不携带转写正文、音频、模型路径或异常正文。
 
 ### 5.3 TTS
 

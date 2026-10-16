@@ -1,11 +1,9 @@
 import SwiftUI
 
 // `MeetingView` 的录制中实现：转录流、中断行、说话人列，以及会中标注说话人的面板。
-// 纯搬移自主文件；滚动测量的两个 preference key 与会后正文共用的 `timecode` 也在这里。
+// 纯搬移自主文件；录制中转录与会后正文共用的 `timecode` 也在这里。
 
 extension MeetingView {
-    /// 转录滚动区的命名坐标系，量底边位置用。
-    private static let transcriptSpace = "meeting.transcript"
     // MARK: - 录制中：转录流
 
     var liveTranscript: some View {
@@ -33,7 +31,7 @@ extension MeetingView {
                 if meeting.phase == .interrupted, let at = meeting.interruptedElapsed {
                     interruptionRow(at)
                 }
-                ScrollViewReader { proxy in
+                Group {
                     ScrollView(.vertical) {
                         LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
                             if meeting.lines.isEmpty, meeting.partialText == nil {
@@ -48,55 +46,49 @@ extension MeetingView {
                             if let partial = meeting.partialText, !partial.isEmpty {
                                 partialLine(partial)
                             }
-                            // 底边标记：量得出「离底部多远」，回看时才不会被抢滚动。
-                            Color.clear
-                                .frame(height: SpeechRailDesignTokens.Spacing.hairline)
-                                .background(
-                                    GeometryReader { geo in
-                                        Color.clear.preference(
-                                            key: TranscriptBottomMarkerKey.self,
-                                            value: geo.frame(in: .named(Self.transcriptSpace)).maxY
-                                        )
-                                    }
-                                )
                         }
                         .padding(SpeechRailDesignTokens.Spacing.md)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .coordinateSpace(name: Self.transcriptSpace)
-                    .background(
-                        GeometryReader { geo in
-                            Color.clear.preference(
-                                key: TranscriptViewportHeightKey.self,
-                                value: geo.size.height
-                            )
-                        }
+                    .scrollPosition($transcriptScrollPosition)
+                    .defaultScrollAnchor(
+                        transcriptFollow.isPinnedToBottom ? .bottom : nil, for: .sizeChanges
                     )
-                    .onPreferenceChange(TranscriptBottomMarkerKey.self) { y in
-                        transcriptBottomMarkerY = y
+                    .onScrollPhaseChange { oldPhase, phase, context in
+                        let wasUserScroll = oldPhase == .interacting || oldPhase == .decelerating
+                        let isUserScroll = phase == .interacting || phase == .decelerating
+                        transcriptUserScrollActive = isUserScroll
+                        guard wasUserScroll || isUserScroll else { return }
+                        let proximity = TranscriptFollowState.scrollProximity(
+                            contentBottomY: Double(context.geometry.contentSize.height),
+                            viewportBottomY: Double(context.geometry.visibleRect.maxY)
+                        )
+                        let updated = transcriptFollow.geometryChanged(
+                            to: proximity, isUserInitiated: true
+                        )
+                        if updated != transcriptFollow { transcriptFollow = updated }
                     }
-                    .onPreferenceChange(TranscriptViewportHeightKey.self) { h in
-                        transcriptViewportHeight = h
+                    .onScrollGeometryChange(for: TranscriptFollowState.ScrollProximity.self) { geometry in
+                        TranscriptFollowState.scrollProximity(
+                            contentBottomY: Double(geometry.contentSize.height),
+                            viewportBottomY: Double(geometry.visibleRect.maxY)
+                        )
+                    } action: { _, proximity in
+                        let updated = transcriptFollow.geometryChanged(
+                            to: proximity, isUserInitiated: transcriptUserScrollActive
+                        )
+                        guard updated != transcriptFollow else { return }
+                        transcriptFollow = updated
                     }
                     .onChange(of: meeting.lines.count) { oldCount, newCount in
                         // 用户正在回看时，新句子一条都不许抢滚动（MA-10）。
                         let arrived = transcriptFollow.anchoring(meeting.lines.last?.id)
                             .contentArrived(lineCount: newCount - oldCount)
-                        transcriptFollow = arrived.state
-                        guard case .follow = arrived.decision,
-                              let last = meeting.lines.last else { return }
-                        if reduceMotion {
-                            proxy.scrollTo(last.id, anchor: .bottom)
-                        } else {
-                            withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                        if transcriptFollow != arrived.state {
+                            transcriptFollow = arrived.state
                         }
-                    }
-                    .onChange(of: transcriptBottomMarkerY) { _, _ in
-                        guard transcriptViewportHeight > 0 else { return }
-                        let distance = transcriptViewportHeight - transcriptBottomMarkerY
-                        transcriptFollow = transcriptFollow.userScrolled(
-                            toBottomWithin: Double(distance)
-                        )
+                        guard case .follow = arrived.decision else { return }
+                        scrollTranscriptToBottom()
                     }
                     .safeAreaInset(edge: .bottom) {
                         if let banner = transcriptFollow.unseenBannerText {
@@ -104,14 +96,7 @@ extension MeetingView {
                                 transcriptFollow = transcriptFollow.jumpToLatest(
                                     anchor: meeting.lines.last?.id
                                 )
-                                guard let last = meeting.lines.last else { return }
-                                if reduceMotion {
-                                    proxy.scrollTo(last.id, anchor: .bottom)
-                                } else {
-                                    withAnimation(SpeechRailDesignTokens.Motion.interactiveSpring) {
-                                        proxy.scrollTo(last.id, anchor: .bottom)
-                                    }
-                                }
+                                scrollTranscriptToBottom()
                             } label: {
                                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                                     Image(systemName: "arrow.down.circle.fill")
@@ -143,6 +128,16 @@ extension MeetingView {
                 if !recoveryLines.isEmpty {
                     recoverySection
                 }
+            }
+        }
+    }
+
+    private func scrollTranscriptToBottom() {
+        if reduceMotion {
+            transcriptScrollPosition.scrollTo(edge: .bottom)
+        } else {
+            withAnimation(SpeechRailDesignTokens.Motion.interactiveSpring) {
+                transcriptScrollPosition.scrollTo(edge: .bottom)
             }
         }
     }
@@ -341,21 +336,5 @@ extension MeetingView {
     static func timecode(_ seconds: TimeInterval) -> String {
         let total = max(0, Int(seconds.rounded()))
         return String(format: "%02d:%02d", total / 60, total % 60)
-    }
-}
-
-/// 内容底边在滚动坐标系里的 Y。仅用于「离底部多远」的判定。
-private struct TranscriptBottomMarkerKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
-/// 转录滚动视口的高度。
-private struct TranscriptViewportHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
     }
 }

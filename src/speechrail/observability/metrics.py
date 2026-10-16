@@ -12,6 +12,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from speechrail.observability.alignment import normalize_alignment_failure
+
 HTTP_DURATION_BUCKETS: tuple[float, ...] = (
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0
 )
@@ -236,6 +238,10 @@ class Metrics:
         self._describe(
             "speechrail_asr_alignment_events_total",
             "Optional ASR alignment capture and fallback events by bounded label",
+        )
+        self._describe(
+            "speechrail_asr_alignment_failures_total",
+            "Fixed text alignment failures by a bounded reason label",
         )
         self._describe(
             "speechrail_realtime_sessions_total",
@@ -482,6 +488,13 @@ class Metrics:
         if event not in _ALIGNMENT_EVENTS:
             raise ValueError(f"unsupported alignment event: {event}")
         self.inc("speechrail_asr_alignment_events_total", event=event)
+
+    def record_alignment_failure(self, reason: str) -> None:
+        """Count a failed span without allowing untrusted reasons into labels."""
+        self.inc(
+            "speechrail_asr_alignment_failures_total",
+            reason=normalize_alignment_failure(reason),
+        )
 
     def record_tts_delivery_event(self, event: str, *, amount: int = 1) -> None:
         """Record one bounded TTS delivery event emitted by the worker adapter."""

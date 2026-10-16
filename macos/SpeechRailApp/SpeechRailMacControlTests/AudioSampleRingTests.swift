@@ -192,6 +192,63 @@ final class AudioCaptureBoundaryTests: XCTestCase {
         }
     }
 
+    func testTapIncludesHelpersEmbeddedInSelectedApplication() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = directory.appendingPathComponent("Browser.app")
+        try makeApplication(browser, bundleID: "test.browser")
+        try makeApplication(browser.appendingPathComponent("Contents/Frameworks/Browser Helper.app"),
+                            bundleID: "test.browser.helper")
+        try makeApplication(directory.appendingPathComponent("Other.app"), bundleID: "test.other")
+
+        XCTAssertEqual(
+            CoreAudioTapCapture.bundleIDsIncludingHelpers(["test.browser"], applicationURLs: [browser]),
+            ["test.browser", "test.browser.helper"]
+        )
+    }
+
+    func testTapRejectsUnselectedApplicationAndHelperSymlinkEscapes() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = directory.appendingPathComponent("Browser.app")
+        let other = directory.appendingPathComponent("Other.app")
+        try makeApplication(browser, bundleID: "test.browser")
+        try makeApplication(other, bundleID: "test.other")
+        try FileManager.default.createSymbolicLink(
+            at: browser.appendingPathComponent("Contents/Other.app"), withDestinationURL: other
+        )
+
+        XCTAssertEqual(
+            CoreAudioTapCapture.bundleIDsIncludingHelpers(["test.browser"], applicationURLs: [other, browser]),
+            ["test.browser"]
+        )
+    }
+
+    func testTapDeduplicatesHelperIdentitiesBeforeAnyHelperStarts() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = directory.appendingPathComponent("Browser.app")
+        try makeApplication(browser, bundleID: "test.browser")
+        for name in ["Renderer", "Audio"] {
+            try makeApplication(browser.appendingPathComponent("Contents/Frameworks/\(name).app"),
+                                bundleID: "test.browser.helper")
+        }
+        XCTAssertEqual(
+            CoreAudioTapCapture.bundleIDsIncludingHelpers(["test.browser", "test.browser"], applicationURLs: [browser]),
+            ["test.browser", "test.browser.helper"]
+        )
+        XCTAssertEqual(CoreAudioTapCapture.bundleIDsIncludingHelpers(["test.missing"], applicationURLs: []),
+                       ["test.missing"])
+    }
+
+    private func makeApplication(_ url: URL, bundleID: String) throws {
+        let contents = url.appendingPathComponent("Contents")
+        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+        let plist: [String: String] = ["CFBundleIdentifier": bundleID, "CFBundlePackageType": "APPL"]
+        try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+            .write(to: contents.appendingPathComponent("Info.plist"))
+    }
+
     private func makeBuffer(channels: Int, interleaved: Bool, capacity: UInt32 = 4) throws -> AVAudioPCMBuffer {
         let layout = try XCTUnwrap(AVAudioChannelLayout(layoutTag:
             kAudioChannelLayoutTag_DiscreteInOrder | UInt32(channels)))

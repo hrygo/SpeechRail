@@ -76,6 +76,8 @@ public final class SpeakerLabeling {
     public private(set) var state: State = .off
     /// 降级的可读原因（面板上原话显示，也是 `session.diarization_note` 的内容）。
     public private(set) var note: String?
+    /// 用于诊断的稳定错误码；面板继续显示可读说明。
+    public private(set) var diagnosticCode: String?
 
     /// `segment_uid` → 库里的行 id。修订事件靠它找行。
     private var lineByUnit: [String: String] = [:]
@@ -111,6 +113,7 @@ public final class SpeakerLabeling {
         appliedByUnit = [:]
         mergedInto = [:]
         note = nil
+        diagnosticCode = nil
         state = enabled ? .active : .off
     }
 
@@ -252,9 +255,47 @@ public final class SpeakerLabeling {
 
     /// 一次 active→degraded：标签停更、已给出的保留（§9 第 12 行）。
     public func markDegraded(code: String, message: String) {
-        guard state == .active else { return }
+        guard state == .active
+            || (state == .degraded && diagnosticCode == "auxiliary_window_expired"
+                && code != "auxiliary_window_expired") else { return }
         state = .degraded
+        diagnosticCode = code
         note = message.isEmpty ? "说话人编号停止更新了（\(code)），正文照常记录。" : message
+    }
+
+    /// 对齐失败只影响辅助标注，保留正文及后续可用归属；不展示后端异常正文。
+    @discardableResult
+    public func recordAlignmentFailure(code: String) -> String {
+        let diagnostic: (code: String, detail: String)
+        switch code {
+        case "text_mismatch":
+            diagnostic = (code, "部分文字未能匹配到录音中的位置")
+        case "alignment_timeout":
+            diagnostic = (code, "部分文字的时间标注超时")
+        case "alignment_overloaded":
+            diagnostic = (code, "时间标注正忙，部分文字未能完成标注")
+        case "alignment_pcm_overflow", "alignment_pcm_mismatch":
+            diagnostic = (code, "部分录音未能完整用于时间标注")
+        case "invalid_alignment", "alignment_out_of_bounds", "alignment_not_monotonic":
+            diagnostic = (code, "部分文字的时间位置不可靠")
+        case "alignment_time_resolution_insufficient", "granularity_unsupported":
+            diagnostic = (code, "这段录音无法提供足够精确的文字位置")
+        case "alignment_stale":
+            diagnostic = (code, "部分文字的辅助标注已过期")
+        case "alignment_unavailable", "alignment_worker_failed", "alignment_failed":
+            diagnostic = (code, "部分文字的时间标注暂不可用")
+        default:
+            diagnostic = ("alignment_failed", "部分文字的时间标注暂不可用")
+        }
+        let message = diagnostic.detail + (isEnabled
+            ? "，这部分暂时无法区分说话人；正文已经保留。"
+            : "；正文已经保留。")
+        if isEnabled {
+            markDegraded(code: diagnostic.code, message: message)
+            return note ?? message
+        }
+        diagnosticCode = diagnostic.code
+        return message
     }
 
     /// 服务或历史记录说这场标不了说话人：**不给一个永远点不动的开关**，只给一句说明

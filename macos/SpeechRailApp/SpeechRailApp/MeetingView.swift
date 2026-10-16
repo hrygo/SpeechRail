@@ -77,10 +77,8 @@ public struct MeetingView: View {
 
     /// 转录流的粘底状态（MA-10）：用户离开底部后不许被新句子拽走。
     @State var transcriptFollow = TranscriptFollowState()
-
-    /// 内容底边在滚动坐标里的位置，用来算「离底部多远」。
-    @State var transcriptBottomMarkerY: CGFloat = 0
-    @State var transcriptViewportHeight: CGFloat = 0
+    @State var transcriptScrollPosition = ScrollPosition(edge: .bottom)
+    @State var transcriptUserScrollActive = false
 
     enum PostTab: String, CaseIterable, Identifiable {
         case minutes

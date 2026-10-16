@@ -834,6 +834,18 @@ PCM 样本数，再 clear/close。空/重复提交也返回回执，不重复文
 只开启 alignment 时同样会保留受界限 PCM 并在 ASR final 之后发出
 `speechrail.alignment.done/failed`，不必同时开启分人。
 
+归属更新始终携带该段 ASR final 冻结的 `utterance_id` 与文本 revision，每个事件只包含该段
+units。结束分人时，服务先发送全部已接纳段的归属修订，再发会话终态；`diarization.done`
+只带最后完成段的快照，较早段的归属由先前 `diarization.updated` 保留。
+
+`segment` 对齐可将模型时间网格上没有独立时长的 token 合并进相邻有效 segment，完整保留
+正文。Qwen3 的尾部结束点若恰好落在音频边界最近的模型格点，可在适配层以实际 PCM 边界
+截断，调整量不超过半格；其它越界、倒序和重叠仍失败，公开时间不会越出冻结音频。
+全部 token 都没有正时长，或 `word` / `character` 请求无法提供该精度时，以
+`alignment_time_resolution_insufficient` 失败，不伪造时间。其它失败通过稳定 `error.code`
+区分文本不匹配、时间越界、PCM 不完整、worker 故障、超时与负载，详见
+[Realtime 对齐与分人契约](../../contracts/realtime-openai.md#52-alignment-与-diarization)。
+
 ### 6.4 增量 TTS
 
 ```text

@@ -719,6 +719,29 @@ class RealtimeAsrOwner:
                 finally:
                     self._vad_raw_buffer.extend(unscored)
 
+    async def _feed_speech_admission_pcm(self, pcm16: bytes, *, in_commit: bool = False) -> None:
+        """Keep VAD frames, retained leftovers and the resampler tail in order."""
+        assert self._speech_admission is not None and self._vad is not None
+        self._vad_raw_buffer.extend(pcm16)
+        while len(self._vad_raw_buffer) >= 1024:
+            frame = bytes(self._vad_raw_buffer[:1024])
+            del self._vad_raw_buffer[:1024]
+            frame_start_sample = self._vad_sample_cursor
+            self._vad_sample_cursor += 512
+            prob = self._vad.score_frame(frame)
+            if self._shadow_vad is not None:
+                with contextlib.suppress(Exception):
+                    shadow_prob = self._shadow_vad.score_frame(frame)
+                    self._ports.metrics.record_vad_shadow(
+                        primary_speech=prob >= self._vad.threshold,
+                        shadow_speech=shadow_prob >= self._shadow_vad.threshold,
+                    )
+            decisions = self._speech_admission.push(
+                frame, start_sample=frame_start_sample, probability=prob,
+            )
+            for dec in decisions:
+                await self._handle_admission_decision(dec, in_commit=in_commit)
+
     async def append(self, event: dict[str, Any]) -> None:
         if self._asr_input_error is not None:
             raise RealtimeAdapterError(
@@ -765,27 +788,7 @@ class RealtimeAsrOwner:
 
         # 1. SpeechAdmission path (server_vad with admission enabled)
         if self._speech_admission is not None and self._vad is not None:
-            self._vad_raw_buffer.extend(kernel_audio)
-            while len(self._vad_raw_buffer) >= 1024:
-                frame = bytes(self._vad_raw_buffer[:1024])
-                del self._vad_raw_buffer[:1024]
-                frame_start_sample = self._vad_sample_cursor
-                self._vad_sample_cursor += 512
-                prob = self._vad.score_frame(frame)
-                if self._shadow_vad is not None:
-                    with contextlib.suppress(Exception):
-                        shadow_prob = self._shadow_vad.score_frame(frame)
-                        self._ports.metrics.record_vad_shadow(
-                            primary_speech=prob >= self._vad.threshold,
-                            shadow_speech=shadow_prob >= self._shadow_vad.threshold,
-                        )
-                decisions = self._speech_admission.push(
-                    frame,
-                    start_sample=frame_start_sample,
-                    probability=prob,
-                )
-                for dec in decisions:
-                    await self._handle_admission_decision(dec)
+            await self._feed_speech_admission_pcm(kernel_audio)
             return
 
         # 2. Legacy / manual path (unaltered behavior)
@@ -1022,14 +1025,23 @@ class RealtimeAsrOwner:
             kernel_span = self._kernel_timeline.accept(tail)
             if self.auxiliary.diarization_active:
                 await self.auxiliary.append(tail)
-            if self._asr is None and self._vad is None and self._speech_admission is None:
+            if self._speech_admission is not None and self._vad is not None:
+                # A fractional resampler tail follows the VAD's buffered
+                # sub-frame. Sending it straight to ASR reverses their order
+                # and lets finish() freeze an end cursor excluding the tail.
+                # It can also complete a 512-sample frame, which must be scored.
+                await self._feed_speech_admission_pcm(tail, in_commit=True)
+            elif self._asr is None and self._vad is None and self._speech_admission is None:
                 # A one-sample manual packet may live entirely in the
                 # resampler's interpolation tail. It is admitted input too.
                 self._item_start_kernel = kernel_span.start
                 self._turn_has_admitted_speech = True
                 self._mark_admitted_started(self._item_start_sample)
                 await self._ensure_asr_for_turn()
-            if self._asr is not None and self._turn_has_admitted_speech:
+            if (
+                self._speech_admission is None
+                and self._asr is not None and self._turn_has_admitted_speech
+            ):
                 await self._feed_admitted_pcm(tail, kernel_span.start, in_commit=True)
 
         # If speech admission is active, flush any remaining sub-frame leftover.

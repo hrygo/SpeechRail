@@ -156,6 +156,61 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         XCTAssertNotEqual(record?.state, .archived)
     }
 
+    func testAlignmentFailureKeepsItsReasonAndTextAfterAuxiliaryExpiry() async throws {
+        let h = try await makeHarness()
+        h.session.diarizationPreference = { true }
+        let id = try await start(h)
+        try await h.emit(.completed(itemID: "aligned-item", transcript: "保留的字幕正文"))
+        try await h.settle { $0.session.lines.count == 1 }
+        try await h.emit(.attribution(itemID: "aligned-item", units: [
+            .init(segmentUID: "before-failure", speaker: "A", timingQuality: "aligned")
+        ], isFinal: true))
+        try await h.settle { $0.session.lines.first?.speakerLabel == "A" }
+        try await h.emit(.alignmentFailed(
+            itemID: "aligned-item", code: "alignment_timeout", message: "private backend detail"
+        ))
+        try await h.settle { $0.session.labeling.state == .degraded }
+        let reason = try XCTUnwrap(h.session.labeling.note)
+        XCTAssertEqual(h.session.labeling.diagnosticCode, "alignment_timeout")
+        XCTAssertFalse(reason.contains("private backend detail"))
+        XCTAssertTrue(reason.contains("超时"))
+
+        try await h.emit(.auxiliaryIncomplete(
+            itemID: "aligned-item", alignmentMissing: true, diarizationMissing: true
+        ))
+        try await h.settle { $0.session.lastFailure != nil }
+        XCTAssertEqual(h.session.labeling.note, reason)
+        XCTAssertEqual(h.session.labeling.diagnosticCode, "alignment_timeout")
+        XCTAssertEqual(h.session.lastFailure, reason)
+        let record = try await h.store.session(id: id)
+        XCTAssertEqual(record?.diarizationNote, reason)
+        XCTAssertEqual(h.session.lines.map(\.text), ["保留的字幕正文"])
+        XCTAssertEqual(h.session.phase, .running)
+        XCTAssertEqual(h.session.lines.first?.speakerLabel, "A")
+        try await h.emit(.completed(itemID: "next-item", transcript: "后续仍能分人"))
+        try await h.emit(.attribution(itemID: "next-item", units: [
+            .init(segmentUID: "after-failure", speaker: "B", timingQuality: "aligned")
+        ], isFinal: true))
+        try await h.settle { $0.session.lines.last?.speakerLabel == "B" }
+        XCTAssertEqual(h.session.labeling.labels, ["A", "B"])
+    }
+
+    func testAlignmentFailureWithoutDiarizationIsNotReplacedByWindowExpiry() async throws {
+        let h = try await makeHarness()
+        h.session.diarizationPreference = { false }
+        _ = try await start(h)
+        try await h.emit(.alignmentFailed(itemID: "A", code: "text_mismatch", message: ""))
+        try await h.settle { $0.session.lastFailure != nil }
+        let reason = h.session.lastFailure
+        try await h.emit(.auxiliaryIncomplete(
+            itemID: "A", alignmentMissing: true, diarizationMissing: false
+        ))
+        try await h.emit(.completed(itemID: "B", transcript: "仍在继续"))
+        try await h.settle { $0.session.lines.count == 1 }
+        XCTAssertEqual(h.session.lastFailure, reason)
+        XCTAssertEqual(h.session.labeling.state, .off)
+    }
+
     /// Gap1（字幕侧）：分人单项不可用不拦整场。
     ///
     /// 与会议侧同构：建两条连接（第一条带分人被拒，第二条不带分人成功），

@@ -84,8 +84,11 @@ class DiarizationSession:
         await self.start()
         start_sample = self._accepted_samples
         samples = len(pcm16) // 2
+        # Reserve the timeline before crossing the async activity boundary.
+        # ActivitySession.append may publish an update and then await before
+        # returning; the pump must already observe the matching accepted end.
+        self._accepted_samples += samples
         if self._activity_terminated:
-            self._accepted_samples += samples
             return
         try:
             await asyncio.wait_for(
@@ -93,12 +96,9 @@ class DiarizationSession:
                 timeout=self._activity_backlog_seconds,
             )
         except TimeoutError:
-            self._accepted_samples += samples
             self._activity_terminated = True
             await self._degrade("diarization_backlog_exceeded")
             await self._activity.cancel()
-        else:
-            self._accepted_samples += samples
 
     async def register_completed(self, item_id: str, units: tuple[TextUnit, ...]) -> None:
         if len(units) > 4096:

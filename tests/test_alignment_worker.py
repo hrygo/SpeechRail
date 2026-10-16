@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import math
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -113,6 +114,41 @@ def test_alignment_worker_serves_fixed_text_and_rejects_asr_frames(tmp_path: Pat
     assert read_frame(output) is None
 
 
+def test_alignment_worker_preserves_collapsed_and_invalid_vendor_times(
+    tmp_path: Path,
+) -> None:
+    """The application validator needs the original vendor timestamps to diagnose them."""
+
+    class InvalidTimelineEngine(_FakeEngine):
+        def align_text(
+            self, audio: bytes, *, text: str, language: str
+        ) -> list[dict[str, object]]:
+            return [
+                {"text": "zero", "start": 0.1, "end": 0.1},
+                {"text": "reverse", "start": 0.4, "end": 0.3},
+                {"text": "nonfinite", "start": math.nan, "end": math.inf},
+            ]
+
+    model_dir = tmp_path / "aligner"
+    frames = (
+        _start_frame(model_dir)
+        + _align_frame()
+        + encode_frame({"version": PROTOCOL_VERSION, "type": "shutdown"})
+    )
+
+    output = _run_serve(frames, InvalidTimelineEngine(), model_dir)
+
+    ready = read_frame(output)
+    result = read_frame(output)
+    assert ready is not None and ready["type"] == "ready"
+    assert result is not None and result["type"] == "align_result"
+    assert [token["text"] for token in result["tokens"]] == ["zero", "reverse", "nonfinite"]
+    assert result["tokens"][0]["start"] == result["tokens"][0]["end"]
+    assert result["tokens"][1]["start"] > result["tokens"][1]["end"]
+    assert math.isnan(result["tokens"][2]["start"])
+    assert math.isinf(result["tokens"][2]["end"])
+
+
 def test_alignment_worker_rejects_a_mismatched_start(tmp_path: Path) -> None:
     output = _run_serve(_start_frame(tmp_path / "other"), _FakeEngine(), tmp_path / "aligner")
 
@@ -200,6 +236,7 @@ def _install_fake_aligner_runtime(
     runtime = ModuleType("mlx_qwen3_asr")
     runtime.ForcedAligner = FakeAligner  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "mlx_qwen3_asr", runtime)
+    monkeypatch.setattr(alignment_worker_module, "_timestamp_quantum_seconds", lambda _: 0.08)
     return calls
 
 
@@ -362,6 +399,34 @@ def test_alignment_client_returns_validated_raw_tokens(tmp_path: Path) -> None:
     assert tokens == (("你", 0.0, 0.5),)
     assert worker.ready is True
     assert len(process.requests) == 1
+
+
+def test_invalid_vendor_output_keeps_its_failure_category_across_worker_frames(
+    tmp_path: Path,
+) -> None:
+    class InvalidOutputEngine(_FakeEngine):
+        def align_text(
+            self, audio: bytes, *, text: str, language: str
+        ) -> list[dict[str, object]]:
+            raise alignment_worker_module.InvalidAlignmentOutputError("invalid_alignment")
+
+    model_dir = tmp_path / "aligner"
+    output = _run_serve(_start_frame(model_dir) + _align_frame(), InvalidOutputEngine(), model_dir)
+    read_frame(output)
+    frame = read_frame(output)
+    assert frame is not None and frame["code"] == "invalid_alignment"
+
+    class InvalidOutputProcess(_FakeProcess):
+        async def exchange(self, payload, binary_payload=None, *, handshake=False):
+            if payload.get("type") == "start":
+                return await super().exchange(payload, handshake=handshake)
+            return {**frame, "request_id": payload["request_id"]}
+
+    process = InvalidOutputProcess()
+    worker = Qwen3AlignmentWorker(_config(tmp_path), process=process)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="invalid_alignment"):
+        asyncio.run(worker.align_text(b"\x00\x00" * 16, text="fixture", language="en"))
+    assert worker.pending_requests == 0
 
 
 def test_alignment_client_fails_fast_when_the_queue_is_full(tmp_path: Path) -> None:

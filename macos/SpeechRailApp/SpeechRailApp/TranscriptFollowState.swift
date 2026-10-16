@@ -9,9 +9,18 @@ import Foundation
 /// 跟随时正常跟随；离开后保持原位，并告诉他"下面有 n 条新的"，
 /// 由他决定什么时候回去。回看优先于"看起来很实时"。
 public struct TranscriptFollowState: Hashable, Sendable {
-    /// 距底部小于这个距离（pt）就算"还在底部"。
-    /// 给一点容差：拖动条不可能精确停在 0。
+    /// 贴底判定的中心距离（pt）；拖动条无法精确停在 0。
     public static let bottomTolerance: Double = 24
+    /// 吸收阈值附近的小幅几何抖动；未读提示引起的视口变化由离散状态处理。
+    private static let thresholdHysteresis: Double = 2
+
+    /// 离底部的离散区间。中间带保留前一状态，避免阈值附近的小幅几何变化
+    /// 反复切换跟随状态和未读提示。
+    public enum ScrollProximity: Hashable, Sendable {
+        case atBottom
+        case thresholdBand
+        case awayFromBottom
+    }
 
     /// 是否跟着底部走。
     public var isPinnedToBottom: Bool
@@ -37,17 +46,59 @@ public struct TranscriptFollowState: Hashable, Sendable {
         case hold
     }
 
+    /// 将内容底边和可见视口底边转换为离散距离区间。
+    /// 内容短于视口时距离归零，仍视为贴底。
+    public static func scrollProximity(
+        contentBottomY: Double,
+        viewportBottomY: Double
+    ) -> ScrollProximity {
+        proximity(forDistanceFromBottom: max(0, contentBottomY - viewportBottomY))
+    }
+
     /// 用户滚动后的新状态。`distanceFromBottom` 是内容底边到视口底边的距离。
     public func userScrolled(toBottomWithin distanceFromBottom: Double) -> TranscriptFollowState {
-        var next = self
-        if distanceFromBottom <= Self.bottomTolerance {
-            // 回到底部：跟随恢复，未读清零，重新记住锚点由调用方填。
-            next.isPinnedToBottom = true
-            next.unseenCount = 0
-        } else {
-            next.isPinnedToBottom = false
+        userScrolled(to: Self.proximity(forDistanceFromBottom: max(0, distanceFromBottom)))
+    }
+
+    /// 使用内容与视口的底边坐标更新跟随状态。
+    public func userScrolled(
+        contentBottomY: Double,
+        viewportBottomY: Double
+    ) -> TranscriptFollowState {
+        userScrolled(to: Self.scrollProximity(
+            contentBottomY: contentBottomY,
+            viewportBottomY: viewportBottomY
+        ))
+    }
+
+    /// 内容增长、窗口变化和程序滚动不代表用户要离开底部。
+    public func geometryChanged(
+        to proximity: ScrollProximity, isUserInitiated: Bool
+    ) -> TranscriptFollowState {
+        guard isUserInitiated else { return self }
+        return userScrolled(to: proximity)
+    }
+
+    /// 消费离散滚动区间。阈值带内保持原状态，避免视口波动造成横幅闪烁。
+    public func userScrolled(to proximity: ScrollProximity) -> TranscriptFollowState {
+        switch proximity {
+        case .atBottom:
+            guard !isPinnedToBottom else { return self }
+            return TranscriptFollowState(
+                isPinnedToBottom: true,
+                unseenCount: 0,
+                pinnedAnchor: pinnedAnchor
+            )
+        case .awayFromBottom:
+            guard isPinnedToBottom else { return self }
+            return TranscriptFollowState(
+                isPinnedToBottom: false,
+                unseenCount: unseenCount,
+                pinnedAnchor: pinnedAnchor
+            )
+        case .thresholdBand:
+            return self
         }
-        return next
     }
 
     /// 记住当前贴底时最后一条的 id，作为滚动锚点。
@@ -84,5 +135,15 @@ public struct TranscriptFollowState: Hashable, Sendable {
     public var unseenBannerText: String? {
         guard unseenCount > 0 else { return nil }
         return unseenCount == 1 ? "下面有 1 条新的" : "下面有 \(unseenCount) 条新的"
+    }
+
+    private static func proximity(forDistanceFromBottom distance: Double) -> ScrollProximity {
+        if distance <= bottomTolerance - thresholdHysteresis {
+            return .atBottom
+        }
+        if distance > bottomTolerance + thresholdHysteresis {
+            return .awayFromBottom
+        }
+        return .thresholdBand
     }
 }
