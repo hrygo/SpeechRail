@@ -12,6 +12,7 @@ public final class SpeechRailSelectionLoad<Value: Sendable> {
  public private(set) var isLoading = false
  public private(set) var failure: String?
  private var generation = UUID()
+ var requestGeneration: UUID { generation }
 
  public init() {}
 

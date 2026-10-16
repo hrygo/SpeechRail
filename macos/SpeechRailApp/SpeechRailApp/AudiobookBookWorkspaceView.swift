@@ -1,6 +1,29 @@
 import SpeechRailControlKit
 import SwiftUI
 
+/// Terminal dates are frozen; no clock is owned by the workflow or its parent workspace.
+struct AudiobookAnalysisTimedRail: View {
+    let progress: AudiobookAnalysisProgress
+    let stoppedAt: Date?
+    let eventCount: Int
+    let showDeveloperDetails: Bool
+    @Binding var isDeveloperSectionExpanded: Bool
+    let onPause: () -> Void
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var visible = false
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1,
+            paused: !SessionActivityPolicy.shouldTick(active: stoppedAt == nil, visible: visible, foreground: scenePhase == .active))) { context in
+            AudiobookAnalysisProgressRailView(progress: progress,
+                tick: SessionActivityPolicy.displayDate(now: context.date, stoppedAt: stoppedAt),
+                eventCount: eventCount, showDeveloperDetails: showDeveloperDetails,
+                isDeveloperSectionExpanded: $isDeveloperSectionExpanded, onPause: onPause)
+        }
+        .onAppear { visible = true }
+        .onDisappear { visible = false }
+    }
+}
+
 private struct AudiobookChapterRenameTarget: Identifiable {
     let bookID: UUID
     let chapterID: UUID
@@ -11,6 +34,8 @@ private struct AudiobookChapterRenameTarget: Identifiable {
 
 /// A small, independently ticking subtree keeps elapsed time out of the workspace's data flow.
 private struct AudiobookProductionProgressRail: View {
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var visible = false
     let progress: AudiobookProductionProgress
     let chapterTitle: String?
     let isBusy: Bool
@@ -20,7 +45,7 @@ private struct AudiobookProductionProgressRail: View {
     let onResume: () -> Void
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
+        TimelineView(.animation(minimumInterval: 1, paused: !SessionActivityPolicy.shouldTick(active: isBusy, visible: visible, foreground: scenePhase == .active))) { context in
             CardSurface {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                     HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
@@ -91,6 +116,8 @@ private struct AudiobookProductionProgressRail: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("audiobook-production-progress-rail")
+        .onAppear { visible = true }
+        .onDisappear { visible = false }
     }
 
     private func detail(_ text: String) -> some View {
@@ -1098,7 +1125,7 @@ public struct AudiobookBookWorkspaceView: View {
             externalVoices: appModel.safeVoiceCatalog?.data ?? []
         )
         let activeBookVoices = allAvailableVoices.filter {
-            VoiceCatalogStore.shared.isVoiceActiveForBook(voiceID: $0.id, currentBookID: workflow.selectedBook?.id)
+            appModel.voiceCatalogModel.snapshot.isVoiceActiveForBook(voiceID: $0.id, currentBookID: workflow.selectedBook?.id)
         }
         let missingArchetypes = workflow.missingArchetypesForBook(
             bookID: workflow.selectedBook?.id,
@@ -1384,7 +1411,7 @@ public struct AudiobookBookWorkspaceView: View {
         let archetype = stat?.archetype ?? role.inferredVoiceArchetype()
         let dialogueCount = stat?.dialogueAtomCount ?? 0
         let conflictPartners = workflow.sceneConflictPartnerNames(for: role.id)
-        let voiceMeta = binding.flatMap { VoiceCatalogStore.shared.metadata(for: $0.voiceID) }
+        let voiceMeta = binding.flatMap { appModel.voiceCatalogModel.metadata(for: $0.voiceID) }
         let isCustomExclusiveVoice = binding.map {
             voiceMeta?.visibilityScope == .bookExclusive
                 || !AudiobookWorkflowModel.builtInSystemVoiceIDs.contains($0.voiceID.lowercased())
@@ -1761,9 +1788,9 @@ public struct AudiobookBookWorkspaceView: View {
     @ViewBuilder
     private var analysisProgressRail: some View {
         if let progress = workflow.analysisProgress {
-            AudiobookAnalysisProgressRailView(
+            AudiobookAnalysisTimedRail(
                 progress: progress,
-                tick: workflow.analysisClockTick,
+                stoppedAt: workflow.analysisClockStoppedAt,
                 eventCount: workflow.analysisEventBuffer.events.count,
                 showDeveloperDetails: showAnalysisDeveloperDetails,
                 isDeveloperSectionExpanded: $isAnalysisDevSectionExpanded
@@ -1907,14 +1934,12 @@ private struct AudiobookVoicePickerPopover: View {
     @State private var searchQuery: String = ""
     @State private var scopeFilter: ScopeFilter = .all
     @State private var favoritesOnly = false
-    @State private var catalogRefreshTick: Int = 0
     @State private var catalogSaveError: String?
 
     private static let microSpeedPresets: [Double] = [0.92, 0.96, 1.00, 1.04, 1.08]
 
     private var filteredVoices: [SafeVoiceEntry] {
-        _ = catalogRefreshTick
-        let catalog = VoiceCatalogStore.shared.snapshot()
+        let catalog = appModel.voiceCatalogModel.snapshot
         let metadataMap = catalog.state.metadataByVoiceID
         let sourcePool = allVoices.filter { $0.available && catalog.permits($0, bookID: role.bookID) }
 
@@ -2057,7 +2082,7 @@ private struct AudiobookVoicePickerPopover: View {
                     Spacer()
                 }
 
-                if let meta = VoiceCatalogStore.shared.metadata(for: b.voiceID),
+                if let meta = appModel.voiceCatalogModel.metadata(for: b.voiceID),
                    meta.visibilityScope == .bookExclusive
                 {
                     HStack {
@@ -2066,7 +2091,7 @@ private struct AudiobookVoicePickerPopover: View {
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         Spacer()
                         Button("设为通用声音") {
-                            saveCatalogChange { _ = try VoiceCatalogStore.shared.promoteToGlobalReusable(voiceID: b.voiceID) }
+                            saveCatalogChange { _ = try await appModel.voiceCatalogModel.store.promoteToGlobalReusable(voiceID: b.voiceID) }
                         }
                         .speechRailButton(.quiet)
                     }
@@ -2094,14 +2119,16 @@ private struct AudiobookVoicePickerPopover: View {
         .task {
             await onRefreshVoices()
         }
-        .onReceive(NotificationCenter.default.publisher(for: VoiceCatalogStore.didChange, object: VoiceCatalogStore.shared)) { _ in
-            catalogRefreshTick += 1
-        }
     }
 
-    private func saveCatalogChange(_ action: () throws -> Void) {
-        do { try action(); catalogRefreshTick += 1; catalogSaveError = nil }
-        catch { catalogSaveError = error.localizedDescription }
+    private func saveCatalogChange(_ action: @escaping @MainActor () async throws -> Void) {
+        Task {
+            do {
+                try await action()
+                await appModel.voiceCatalogModel.refresh()
+                catalogSaveError = nil
+            } catch { catalogSaveError = error.localizedDescription }
+        }
     }
 
     private var holdersByVoiceID: [String: [AudiobookCharacter]] {
@@ -2117,7 +2144,7 @@ private struct AudiobookVoicePickerPopover: View {
 
     @ViewBuilder
     private func voiceRow(for voice: SafeVoiceEntry, holdersMap: [String: [AudiobookCharacter]]) -> some View {
-        let meta = VoiceCatalogStore.shared.metadata(for: voice.id)
+        let meta = appModel.voiceCatalogModel.metadata(for: voice.id)
         let voiceArch = AudiobookCastRegistry.resolveVoiceArchetype(for: voice, metadata: meta)
         let isBoundToSelf = (currentBinding?.voiceID == voice.id)
         let otherHolders = holdersMap[voice.id] ?? []
@@ -2126,7 +2153,7 @@ private struct AudiobookVoicePickerPopover: View {
 
         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
             Button {
-                saveCatalogChange { _ = try VoiceCatalogStore.shared.toggleFavorite(voiceID: voice.id) }
+                saveCatalogChange { _ = try await appModel.voiceCatalogModel.store.toggleFavorite(voiceID: voice.id) }
             } label: {
                 Image(systemName: meta?.isFavorite == true ? "star.fill" : "star")
                     .font(SpeechRailDesignTokens.Typography.bodyMedium)

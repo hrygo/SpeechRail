@@ -1,5 +1,6 @@
 import XCTest
 import Observation
+import Synchronization
 import SpeechRailControlKit
 
 #if SWIFT_PACKAGE
@@ -8,6 +9,106 @@ import SpeechRailControlKit
 
 @MainActor
 final class WorkflowOwnershipTests: XCTestCase {
+    private func dubbingFixture(removeInterceptor: CreativeWorkFileOperations.RemoveInterceptor? = nil) async throws
+        -> (DubbingWorkflowModel, ScriptedSharedPlaybackDriver, DubbingProjectStore, CreativeWorkStore, DubbingCandidate, URL) {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let projects = DubbingProjectStore(directory: directory.appendingPathComponent("projects"),
+            fileOperations: CreativeWorkFileOperations(removeInterceptor: removeInterceptor))
+        let works = CreativeWorkStore(directory: directory.appendingPathComponent("works"))
+        let provenance = RenderProvenanceSnapshot(state: .verified, reason: nil,
+            recipe: RenderRecipeSnapshot(state: .complete, missingFields: [], digest: "recipe", voiceID: "fixture"))
+        let project = DubbingProject(id: "fixture", title: "fixture", scriptText: "synthetic", recipe: provenance,
+            segments: [.init(id: "segment", text: "synthetic")])
+        _ = try await projects.save(project, operationID: UUID())
+        let candidate = DubbingCandidate(id: "candidate", segmentID: "segment", text: "synthetic",
+            audioFileName: "candidate.wav", provenance: provenance)
+        let savedCandidate = try await projects.addCandidate(candidate, audioData: silentPreviewWAV(marker: 0), toProject: project.id, operationID: UUID()).value
+        _ = try await projects.adopt(candidateID: candidate.id, inSegment: "segment", ofProject: project.id, operationID: UUID())
+        let driver = ScriptedSharedPlaybackDriver()
+        let model = DubbingWorkflowModel(capabilities: ImmediateWorkflowCapabilities(), voices: EmptyWorkflowVoiceDirectory(),
+            playback: SharedPlaybackOwner(driver: driver), admission: SpeechCreationAdmission(), feedback: CreatorFeedback(),
+            workStore: works, dubbingProjectStore: projects)
+        let opened = await model.openDubbingProject(project.id)
+        XCTAssertTrue(opened)
+        return (model, driver, projects, works, savedCandidate, directory)
+    }
+
+    func testCandidatePlaybackDriverFailureRemainsVisible() async throws {
+        let (model, driver, _, _, candidate, _) = try await dubbingFixture()
+        driver.failNextPlay = true
+        await model.playDubbingCandidate(candidate)
+        XCTAssertEqual(driver.filePlayAttempts, 1)
+        XCTAssertEqual(model.dubbingMessage, "这个候选的音频无法播放，请重新生成这一段。")
+        XCTAssertFalse(model.isAudioPlaying)
+    }
+
+    func testWorkPlaybackDriverFailureRemainsVisible() async throws {
+        let (model, driver, _, works, _, _) = try await dubbingFixture()
+        let work = CreativeWork(id: "work", title: "fixture", scriptText: "synthetic", voiceID: "fixture",
+            voiceName: "fixture", audioFileName: "work.wav")
+        _ = try await works.save(work, audioData: silentPreviewWAV(marker: 0), operationID: UUID())
+        driver.failNextPlay = true
+        await model.playWork(work)
+        XCTAssertEqual(driver.filePlayAttempts, 1)
+        XCTAssertEqual(model.workPlaybackMessage, "作品音频暂时不可用，请重新生成或确认本机作品文件仍在。")
+        XCTAssertFalse(model.isAudioPlaying)
+    }
+
+    func testCommittedExportSurvivesCleanupFailureAndRetryDoesNotRecopy() async throws {
+        let rejectCleanup = Mutex(false), cleanupAttempts = Mutex(0)
+        let (model, _, projects, _, _, directory) = try await dubbingFixture(removeInterceptor: { url in
+            guard url.lastPathComponent.hasPrefix("speechrail-export-") else { return }
+            cleanupAttempts.withLock { $0 += 1 }
+            if rejectCleanup.withLock({ $0 }) { throw CocoaError(.fileWriteNoPermission) }
+        })
+        await model.prepareDubbingExport()
+        let prepared = try XCTUnwrap(model.preparedDubbingExport)
+        addTeardownBlock { try? await projects.releaseExport(leaseID: prepared.leaseID) }
+        rejectCleanup.withLock { $0 = true }
+        let destination = directory.appendingPathComponent("destination")
+        let saved = await model.writeDubbingExport(to: destination)
+        XCTAssertTrue(saved, "Both target files committed; temporary cleanup failure must not undo that result")
+        XCTAssertTrue(model.dubbingMessage?.contains("已保存") == true)
+        XCTAssertTrue(model.dubbingMessage?.contains("清理") == true)
+        XCTAssertGreaterThan(cleanupAttempts.withLock { $0 }, 0)
+        let targetAudio = destination.appendingPathComponent(prepared.audioFileName)
+        let targetScript = destination.appendingPathComponent(prepared.scriptFileName)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: targetScript.path))
+        let userEdit = Data("preserve destination after committed export".utf8)
+        try userEdit.write(to: targetAudio)
+        rejectCleanup.withLock { $0 = false }
+        let retried = await model.writeDubbingExport(to: destination)
+        XCTAssertTrue(retried, "A committed export retry only retries its retained cleanup")
+        XCTAssertEqual(try Data(contentsOf: targetAudio), userEdit)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.audioURL.path))
+        await model.prepareDubbingExport()
+        XCTAssertNotNil(model.preparedDubbingExport, "The single lease must become available again")
+        await model.discardDubbingExport()
+    }
+
+    func testDiscardRetainsFailedCleanupLeaseForExplicitRetry() async throws {
+        let rejectCleanup = Mutex(false)
+        let (model, _, projects, _, _, _) = try await dubbingFixture(removeInterceptor: { url in
+            if url.lastPathComponent.hasPrefix("speechrail-export-"), rejectCleanup.withLock({ $0 }) {
+                throw CocoaError(.fileWriteNoPermission)
+            }
+        })
+        await model.prepareDubbingExport()
+        let prepared = try XCTUnwrap(model.preparedDubbingExport)
+        addTeardownBlock { try? await projects.releaseExport(leaseID: prepared.leaseID) }
+        rejectCleanup.withLock { $0 = true }
+        await model.discardDubbingExport()
+        XCTAssertNil(model.preparedDubbingExport)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: prepared.audioURL.path))
+        rejectCleanup.withLock { $0 = false }
+        await model.discardDubbingExport()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.audioURL.path))
+        await model.prepareDubbingExport()
+        XCTAssertNotNil(model.preparedDubbingExport)
+        await model.discardDubbingExport()
+    }
+
     func testEngineObservationsNeedOnlyEnginePorts() async {
         let health = HealthProbeScript()
         await health.setSnapshot(HealthSnapshot(jobSpoolReady: true))
@@ -26,7 +127,7 @@ final class WorkflowOwnershipTests: XCTestCase {
         XCTAssertNil(engine.capabilityFacade.speechRequestOptions(for: "unobserved"))
     }
 
-    func testPlaybackUsesCapturedIdentityAndRejectsAllOldCallbacks() throws {
+    func testPlaybackUsesCapturedIdentityAndRejectsAllOldCallbacks() async throws {
         let driver = ScriptedSharedPlaybackDriver()
         let playback = SharedPlaybackOwner(driver: driver)
         var voiceFinished: [Bool] = []
@@ -53,7 +154,7 @@ final class WorkflowOwnershipTests: XCTestCase {
         XCTAssertEqual(playback.level, 0)
     }
 
-    func testPlaybackStopAndFailureRevokeCapturedCompletion() throws {
+    func testPlaybackStopAndFailureRevokeCapturedCompletion() async throws {
         let driver = ScriptedSharedPlaybackDriver()
         let playback = SharedPlaybackOwner(driver: driver)
         var completed = false
@@ -71,7 +172,7 @@ final class WorkflowOwnershipTests: XCTestCase {
         XCTAssertFalse(completed)
     }
 
-    func testCreationAdmissionCannotBeReleasedByAnotherFeature() {
+    func testCreationAdmissionCannotBeReleasedByAnotherFeature() async {
         let admission = SpeechCreationAdmission()
         XCTAssertTrue(admission.acquire(.voice))
         XCTAssertFalse(admission.acquire(.dubbing))
@@ -130,7 +231,7 @@ final class WorkflowOwnershipTests: XCTestCase {
         XCTAssertEqual(pending.scriptText, "固定文稿。")
         XCTAssertEqual(pending.voiceID, voice.id)
         XCTAssertEqual(pending.speed, 1.2)
-        let saved = try XCTUnwrap(model.savePendingDubbing())
+        let saved = try await XCTUnwrapAsync(await model.savePendingDubbing())
         XCTAssertEqual(saved.id, pending.workID)
         XCTAssertNotNil(saved.provenance.audioFileSHA256)
         XCTAssertEqual(
@@ -138,8 +239,8 @@ final class WorkflowOwnershipTests: XCTestCase {
             pending.provenance.withAudioFileSHA256(saved.provenance.audioFileSHA256)
         )
         XCTAssertEqual(saved.scriptText, pending.scriptText)
-        XCTAssertNil(model.savePendingDubbing())
-        XCTAssertEqual(try store.list().count, 1)
+        try await XCTAssertNilAsync(await model.savePendingDubbing())
+        try await XCTAssertEqualAsync(try await store.list().count, 1)
     }
 
     func testCompositionObservesChildStateWithoutCopyingIt() async throws {
@@ -200,6 +301,7 @@ private final class ScriptedSharedPlaybackDriver: SharedAudioPlaybackDriver {
     var isPlaying = false
     var failNextPlay = false
     var playedFileURLs: [URL] = []
+    var filePlayAttempts = 0
     var lastStartAt: TimeInterval = 0
     var lastRate: Float = 1.0
     var lastSeekTime: TimeInterval?
@@ -211,6 +313,7 @@ private final class ScriptedSharedPlaybackDriver: SharedAudioPlaybackDriver {
         isPlaying = true
     }
     func play(fileURL: URL, startAt: TimeInterval, rate: Float) throws {
+        filePlayAttempts += 1
         if failNextPlay { throw AudioPlaybackError.playbackFailed }
         playedFileURLs.append(fileURL)
         lastStartAt = startAt
@@ -304,7 +407,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.jobQueueSummary, "未读取", "旧快照不能冒充这次的读取事实")
     }
 
-    func testCapabilityFacadeFailsClosedWhenSnapshotIsStale() {
+    func testCapabilityFacadeFailsClosedWhenSnapshotIsStale() async {
         let facade = AppCapabilityFacade(
             snapshot: Self.capabilitySnapshot(
                 previewStatus: "supported",
@@ -318,7 +421,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(facade.speechRequestOptions(for: "voice-1"))
     }
 
-    func testCapabilityFacadeDistinguishesUnknownFromUnsupportedOperations() {
+    func testCapabilityFacadeDistinguishesUnknownFromUnsupportedOperations() async {
         let unsupported = AppCapabilityFacade(
             snapshot: Self.capabilitySnapshot(
                 previewStatus: "unsupported",
@@ -338,7 +441,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(unknown.voiceDesignCreationAvailability, .unknown)
     }
 
-    func testRealtimeBindingUsesASRAndSelectedVoiceModelRevisions() {
+    func testRealtimeBindingUsesASRAndSelectedVoiceModelRevisions() async {
         let voice = SafeVoiceEntry(
             id: "voice-1",
             name: "测试音色",
@@ -431,7 +534,7 @@ final class AppModelTests: XCTestCase {
     /// 回归线上故障：助手选 clone 音色时 App 发的是 voice 条目自带的 model 号，
     /// 服务端按 mode 取 `tts_clone` 制品比对，永不对等，每次都 409
     /// `model_revision_conflict`。system 音色走 `tts` 槽位不受影响。
-    func testRealtimeBindingForCloneVoicePinsCloneSlotRevision() {
+    func testRealtimeBindingForCloneVoicePinsCloneSlotRevision() async {
         let voice = SafeVoiceEntry(
             id: "wom-clone-1",
             name: "克隆音色",
@@ -513,7 +616,7 @@ final class AppModelTests: XCTestCase {
 
     /// 未知 mode 不猜制品：binding 直接 fail-closed，而不是拿一个服务端
     /// 永远比不上的号去建连。
-    func testRealtimeBindingRejectsUnknownVoiceMode() {
+    func testRealtimeBindingRejectsUnknownVoiceMode() async {
         let voice = SafeVoiceEntry(
             id: "voice-unknown-mode",
             name: "未知模式音色",
@@ -583,7 +686,7 @@ final class AppModelTests: XCTestCase {
 
     /// instruction 音色没有 runtime 合成角色：Realtime 建连不为它 pin 任何制品号，
     /// 即使快照里有 voice_design 槽位也直接 fail-closed。
-    func testRealtimeBindingRejectsInstructionVoiceMode() {
+    func testRealtimeBindingRejectsInstructionVoiceMode() async {
         let voice = SafeVoiceEntry(
             id: "voice-instruction-1",
             name: "设计音色",
@@ -658,7 +761,7 @@ final class AppModelTests: XCTestCase {
     /// 契约里 `voice_revision` 可空（"legacy voices remain null"），所以系统预置音色
     /// 仍然要能进入实时对讲：缺版本号只是**不带 pin**，不是不可用。
     /// 回归这个缺陷——它曾让所有系统预置音色一律报「语音服务未就绪」。
-    func testRealtimeBindingAcceptsLegacyVoiceWithoutRevision() {
+    func testRealtimeBindingAcceptsLegacyVoiceWithoutRevision() async {
         let binding = AppCapabilityFacade(
             snapshot: Self.snapshot(voice: Self.voice(voiceRevision: nil)),
             discoveryState: .loaded
@@ -678,7 +781,7 @@ final class AppModelTests: XCTestCase {
 
     /// 放宽的是**音色版本号**这一个可空字段。模型 catalog pin 缺失仍然 fail-closed：
     /// 那说明服务没有发布这个音色用的模型身份，不能靠猜。
-    func testRealtimeBindingStillRequiresVoiceModelCatalogRevision() {
+    func testRealtimeBindingStillRequiresVoiceModelCatalogRevision() async {
         // pin 取的是快照顶层按 mode 分槽的制品号（system→tts），
         // 所以“没发布模型身份”复现为顶层 tts 槽位缺 catalogRevision。
         let voice = Self.voice(voiceRevision: nil)
@@ -717,7 +820,7 @@ final class AppModelTests: XCTestCase {
 
     /// 音色级 operation 的声明就是「列了这个键」，`parameters` 只是可选的参数说明。
     /// 少列参数说明不该把整个音色判成不可用。
-    func testRealtimeBindingAcceptsDeclaredOperationWithoutParameterList() {
+    func testRealtimeBindingAcceptsDeclaredOperationWithoutParameterList() async {
         let facade = AppCapabilityFacade(
             snapshot: Self.snapshot(
                 voice: Self.voice(voiceRevision: nil, declaresParameters: false)
@@ -733,7 +836,7 @@ final class AppModelTests: XCTestCase {
     }
 
     /// 反过来：服务**没有**为这个音色声明实时朗读时，仍然必须拦住。
-    func testRealtimeBindingRejectsVoiceWithoutDeclaredRealtimeSpeech() {
+    func testRealtimeBindingRejectsVoiceWithoutDeclaredRealtimeSpeech() async {
         let facade = AppCapabilityFacade(
             snapshot: Self.snapshot(
                 voice: Self.voice(
@@ -839,7 +942,7 @@ final class AppModelTests: XCTestCase {
         )
     }
 
-    func testPreviewLanguageMapsVoicesToServiceLanguageNames() {
+    func testPreviewLanguageMapsVoicesToServiceLanguageNames() async {
         XCTAssertEqual(AppModel.previewLanguage(forVoiceID: "ryan"), .english)
         XCTAssertEqual(AppModel.previewLanguage(forVoiceID: "aiden"), .english)
         XCTAssertEqual(AppModel.previewLanguage(forVoiceID: "ono_anna"), .japanese)
@@ -848,7 +951,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(AppModel.previewLanguage(forVoiceID: "some_custom_voice"), .chinese)
     }
 
-    func testDefaultPreviewTextMatchesVoiceLanguage() {
+    func testDefaultPreviewTextMatchesVoiceLanguage() async {
         let english = AppModel.defaultPreviewText(forVoiceID: "ryan")
         XCTAssertTrue(english.contains("SpeechRail voice preview"), "english voice gets english text: \(english)")
         let japanese = AppModel.defaultPreviewText(forVoiceID: "ono_anna")
@@ -858,7 +961,7 @@ final class AppModelTests: XCTestCase {
     }
 
     /// 助手等没有试听文案输入的入口会走 nil 分支：英语/日语/韩语音色不能被中文硬读。
-    func testPreviewTextFallsBackToVoiceLanguageWhenCallerSuppliesNone() {
+    func testPreviewTextFallsBackToVoiceLanguageWhenCallerSuppliesNone() async {
         for voiceID in ["ryan", "aiden"] {
             let resolved = AppModel.resolvedPreviewText(forVoiceID: voiceID, text: nil)
             XCTAssertFalse(
@@ -878,7 +981,7 @@ final class AppModelTests: XCTestCase {
     }
 
     /// 用户显式改写的文案优先于语种默认值。
-    func testPreviewTextKeepsCallerSuppliedWording() {
+    func testPreviewTextKeepsCallerSuppliedWording() async {
         let custom = "  自定义试听文案  "
         XCTAssertEqual(
             AppModel.resolvedPreviewText(forVoiceID: "ryan", text: custom),
@@ -887,7 +990,7 @@ final class AppModelTests: XCTestCase {
     }
 
     /// 服务端声明的示例文案是唯一事实源，本地映射只是缺失时的兜底。
-    func testServerDeclaredPreviewWinsOverTheLocalFallback() {
+    func testServerDeclaredPreviewWinsOverTheLocalFallback() async {
         // serena 本地兜底是中文；服务端声明英文时必须用服务端文案，
         // 否则又会退回"按音色 ID 猜语种"的老路。
         let voice = CreatorVoice(
@@ -907,7 +1010,7 @@ final class AppModelTests: XCTestCase {
     }
 
     /// 用户改过文案时既不覆盖文案，也不继承 preset 的语言。
-    func testUserWordingBeatsServerPreviewText() {
+    func testUserWordingBeatsServerPreviewText() async {
         let voice = CreatorVoice(
             id: "ryan",
             name: "动感英语男声",
@@ -922,7 +1025,7 @@ final class AppModelTests: XCTestCase {
     }
 
     /// 服务端没有声明示例时退回本地兜底，而不是不显示任何文案。
-    func testMissingServerPreviewFallsBackLocally() {
+    func testMissingServerPreviewFallsBackLocally() async {
         let voice = CreatorVoice(id: "ono_anna", name: "轻快日语女声")
 
         XCTAssertEqual(
@@ -1136,7 +1239,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.voiceOutputCheck, .idle)
     }
 
-    func testVoiceCloneQualityDiagnosticGuidanceMapping() {
+    func testVoiceCloneQualityDiagnosticGuidanceMapping() async {
         // AC-3.1: SNR / Noise
         let noiseGuidance = VoiceWorkflowModel.cloneQualityDiagnosticMessage(for: "audio snr too low (12dB)")
         XCTAssertTrue(noiseGuidance.contains("环境噪音偏高，建议在安静环境下录制"))
@@ -2827,7 +2930,7 @@ extension AppModelTests {
     }
 
     /// 同身份可命中；文本 / 语言 / 音色 revision / 模型 epoch 任一变化都不误命中。
-    func testPreviewCacheKeySeparatesEveryIdentityDimension() {
+    func testPreviewCacheKeySeparatesEveryIdentityDimension() async {
         let base = Self.previewKey()
 
         XCTAssertEqual(base, Self.previewKey(), "同一次请求应当命中")
@@ -2850,7 +2953,7 @@ extension AppModelTests {
     }
 
     /// 系统音色没有 revision 时用 catalog epoch 隔离，而不是编一个假 revision。
-    func testPreviewCacheKeyUsesCatalogEpochForSystemVoices() {
+    func testPreviewCacheKeyUsesCatalogEpochForSystemVoices() async {
         let key = AppModel.previewCacheKey(
             voice: CreatorVoice(id: "ryan", name: "动感英语男声", available: true),
             options: SpeechRailRequestOptions(),
@@ -2865,7 +2968,7 @@ extension AppModelTests {
     }
 
     /// 已撤销音色换版后，即使文案与语速相同也不是同一次请求。
-    func testPreviewCacheKeyTracksTheRevisionTheServerWillPin() {
+    func testPreviewCacheKeyTracksTheRevisionTheServerWillPin() async {
         let voice = CreatorVoice(
             id: "clone_voice",
             name: "克隆音色",
@@ -2899,7 +3002,7 @@ extension AppModelTests {
     }
 
     /// 只缓存非空结果；超出上限时按写入顺序淘汰最旧条目。
-    func testPreviewAudioCacheRejectsEmptyAndEvictsOldest() {
+    func testPreviewAudioCacheRejectsEmptyAndEvictsOldest() async {
         var cache = VoicePreviewAudioCache(byteLimit: 10)
         let first = Self.previewKey(input: "一")
         let second = Self.previewKey(input: "二")
@@ -3219,16 +3322,18 @@ private struct SavedReceiptClient: SpeechRailReceiptClient {
 /// 写盘失败的 FileManager，用来验证"保存失败仍保留 pending、可重试"。
 /// Fails the first index write and then behaves normally, so a retry has to
 /// travel through the same recovery path a real disk-full retry would.
-private final class FailOnceIndexWriteGate {
-    private var remainingFailures = 1
+private final class FailOnceIndexWriteGate: Sendable {
+    private let remainingFailures = Mutex(1)
 
     func makeOperations() -> CreativeWorkFileOperations {
         CreativeWorkFileOperations(writeInterceptor: { [self] url, _ in
-            guard remainingFailures > 0, url.lastPathComponent == "works.json" else {
-                return
+            guard url.lastPathComponent == "works.json" else { return }
+            let fail = remainingFailures.withLock { count in
+                guard count > 0 else { return false }
+                count -= 1
+                return true
             }
-            remainingFailures -= 1
-            throw CocoaError(.fileWriteOutOfSpace)
+            if fail { throw CocoaError(.fileWriteOutOfSpace) }
         })
     }
 }
@@ -3345,40 +3450,39 @@ extension AppModelTests {
         )
     }
 
-    func testWorkDeletionMovesItsAudioToTrashAndKeepsFailedTransfersVisibleForRetry() throws {
+    func testWorkDeletionMovesItsAudioToTrashAndKeepsFailedTransfersVisibleForRetry() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
-        var failing = true
-        var moved = 0
+        let trashProbe = Mutex((failing: true, moved: 0))
         let store = CreativeWorkStore(
             directory: directory,
             fileOperations: CreativeWorkFileOperations(trashHandler: { url in
-                if failing { throw CocoaError(.fileWriteNoPermission) }
+                if trashProbe.withLock({ $0.failing }) { throw CocoaError(.fileWriteNoPermission) }
                 try FileManager.default.removeItem(at: url)
-                moved += 1
+                trashProbe.withLock { $0.moved += 1 }
             })
         )
         let model = makeRenderModel(store: store, creator: ScriptedRenderClient(audio: silentPreviewWAV(marker: 0x20))).dubbingWorkflow
-        let work = try store.save(
+        let work = try await store.save(
             Self.dubbingWork(script: "待删除的作品。", provenance: .legacyUnknown),
             audioData: silentPreviewWAV(marker: 0x20)
-        )
-        model.refreshWorks()
-        XCTAssertTrue(model.deleteWork(work), "列表删除成功与废纸篓转移失败应分别报告")
+        , operationID: UUID()).value
+        await model.refreshWorks()
+        try await XCTAssertTrueAsync(await model.deleteWork(work), "列表删除成功与废纸篓转移失败应分别报告")
         XCTAssertTrue(model.works.isEmpty)
         XCTAssertEqual(model.deletedWorksSummary?.count, 1)
         XCTAssertTrue(model.workActionMessage?.contains("尚未完成") == true)
-        failing = false
-        XCTAssertTrue(model.trashDeletedWorks())
-        XCTAssertEqual(moved, 1)
+        trashProbe.withLock { $0.failing = false }
+        try await XCTAssertTrueAsync(await model.trashDeletedWorks())
+        XCTAssertEqual(trashProbe.withLock { $0.moved }, 1)
         XCTAssertEqual(model.deletedWorksSummary?.count, 0)
         XCTAssertTrue(model.workActionMessage?.contains("废纸篓") == true)
-        let next = try store.save(
+        let next = try await store.save(
             Self.dubbingWork(script: "下一件待删除作品。", provenance: .legacyUnknown),
             audioData: silentPreviewWAV(marker: 0x20)
-        )
-        XCTAssertTrue(model.deleteWork(next))
-        XCTAssertEqual(moved, 2)
+        , operationID: UUID()).value
+        try await XCTAssertTrueAsync(await model.deleteWork(next))
+        XCTAssertEqual(trashProbe.withLock { $0.moved }, 2)
         XCTAssertEqual(model.deletedWorksSummary?.count, 0)
     }
 
@@ -3429,7 +3533,7 @@ extension AppModelTests {
 
         // 拒绝后既不能有待保存音频，也不能落一条作品。
         XCTAssertNil(model.pendingDubbing, "被拒绝的正式制作不得留下待保存音频")
-        XCTAssertEqual(try store.list().count, 0, "被拒绝的正式制作不得落库")
+        try await XCTAssertEqualAsync(try await store.list().count, 0, "被拒绝的正式制作不得落库")
         // 拒绝必须以一条明确的用户可见提示结束，而不是静默。
         XCTAssertNotNil(model.creatorMessage, "被拒绝时必须给出明确提示")
     }
@@ -3459,7 +3563,7 @@ extension AppModelTests {
             voice: Self.renderVoice(),
             speed: 1.0
         )
-        let saved = try XCTUnwrap(model.savePendingDubbing())
+        let saved = try await XCTUnwrapAsync(await model.savePendingDubbing())
         guard case .savedWork(let slotted) = model.dubbingDeskSlot else {
             return XCTFail("保存后结果位应是已保存的成品")
         }
@@ -3505,23 +3609,23 @@ extension AppModelTests {
         let pending = try XCTUnwrap(model.pendingDubbing)
 
         // 生成本身不写库；播放与导出也只读内存。
-        XCTAssertEqual(try store.list().count, 0, "生成不自动入库")
+        try await XCTAssertEqualAsync(try await store.list().count, 0, "生成不自动入库")
         model.playPendingDubbing()
-        XCTAssertEqual(try store.list().count, 0, "播放不自动入库")
+        try await XCTAssertEqualAsync(try await store.list().count, 0, "播放不自动入库")
 
         // 显式保存：恰好一条。
-        let saved = try XCTUnwrap(model.savePendingDubbing())
-        XCTAssertEqual(try store.list().count, 1)
+        let saved = try await XCTUnwrapAsync(await model.savePendingDubbing())
+        try await XCTAssertEqualAsync(try await store.list().count, 1)
         XCTAssertNil(model.pendingDubbing, "保存成功后清空待保存状态")
         XCTAssertEqual(saved.id, pending.workID, "作品 ID 必须是生成时冻结的幂等键")
 
         // 再次点击保存（双击）：待保存状态已清空，因此是空操作，不新增作品。
-        XCTAssertNil(model.savePendingDubbing())
-        XCTAssertEqual(try store.list().count, 1)
+        try await XCTAssertNilAsync(await model.savePendingDubbing())
+        try await XCTAssertEqualAsync(try await store.list().count, 1)
 
         // 存储层按 id 去重：同一个 workID 重复写入仍是同一条，不会变成两份。
-        try store.save(saved, audioData: audio)
-        let works = try store.list()
+        try await store.save(saved, audioData: audio, operationID: UUID()).value
+        let works = try await store.list()
         XCTAssertEqual(works.count, 1, "同一次生成重复保存只应有一条作品")
         XCTAssertEqual(works.first?.id, saved.id, "幂等键必须落在同一条作品上")
     }
@@ -3542,7 +3646,7 @@ extension AppModelTests {
             speed: 1.0
         )
         let pending = try XCTUnwrap(model.pendingDubbing)
-        let work = try XCTUnwrap(model.savePendingDubbing())
+        let work = try await XCTUnwrapAsync(await model.savePendingDubbing())
 
         XCTAssertEqual(work.id, pending.workID)
         XCTAssertEqual(work.voiceID, pending.voiceID)
@@ -3552,7 +3656,7 @@ extension AppModelTests {
         XCTAssertEqual(work.renderRevision, pending.renderRevision)
         XCTAssertEqual(work.scriptText, pending.scriptText, "文稿两端空白应已归一")
 
-        let written = try store.loadAudio(for: work)
+        let written = try await store.loadAudio(for: work)
         XCTAssertEqual(written, pending.audioData, "保存的字节必须就是试听的那段")
         XCTAssertEqual(written, audio)
 
@@ -3628,7 +3732,7 @@ extension AppModelTests {
             speed: 1.0
         )
         let pending = try XCTUnwrap(model.pendingDubbing)
-        let work = try XCTUnwrap(model.savePendingDubbing())
+        let work = try await XCTUnwrapAsync(await model.savePendingDubbing())
 
         XCTAssertNil(
             pending.provenance.audioFileSHA256,
@@ -3641,7 +3745,7 @@ extension AppModelTests {
         XCTAssertNotNil(work.provenance.audioFileSHA256, "提交后必须记录真实文件摘要")
 
         // 重新打开作品库：配方与追溯状态仍然可读，不依赖服务还在运行。
-        let reopened = try XCTUnwrap(CreativeWorkStore(directory: directory).list().first)
+        let reopened = try await XCTUnwrapAsync(await CreativeWorkStore(directory: directory).list().first)
         XCTAssertEqual(reopened.provenance.recipe, recipe)
         XCTAssertEqual(reopened.provenance.state, .verified)
         XCTAssertEqual(reopened.provenance.audioFileSHA256, work.provenance.audioFileSHA256)
@@ -3664,7 +3768,7 @@ extension AppModelTests {
         )
         let queried = try await queryModel.lookupWorkReceipt(reopened)
         XCTAssertEqual(queried.status, .cancelled)
-        XCTAssertEqual(try store.list().first?.provenance, reopened.provenance)
+        try await XCTAssertEqualAsync(try await store.list().first?.provenance, reopened.provenance)
     }
 
     /// 回执拿不到时音频照常保存，追溯状态照实标为不可用，绝不补造身份。
@@ -3691,14 +3795,14 @@ extension AppModelTests {
             voice: Self.renderVoice(),
             speed: 1.0
         )
-        let work = try XCTUnwrap(model.savePendingDubbing())
+        let work = try await XCTUnwrapAsync(await model.savePendingDubbing())
 
         XCTAssertNil(work.provenance.recipe)
         XCTAssertNil(work.provenance.planSHA256)
         XCTAssertNil(work.planID)
         XCTAssertEqual(work.provenance.state, .unavailable)
         XCTAssertEqual(work.provenance.reason, "receipt_unavailable")
-        XCTAssertEqual(try store.loadAudio(for: work), audio, "追溯不完整不等于丢掉音频")
+        try await XCTAssertEqualAsync(try await store.loadAudio(for: work), audio, "追溯不完整不等于丢掉音频")
     }
 
     /// #189：服务端摘要与本地 data 摘要对不上时，音频保留、
@@ -3730,11 +3834,11 @@ extension AppModelTests {
             voice: Self.renderVoice(),
             speed: 1.0
         )
-        let work = try XCTUnwrap(model.savePendingDubbing())
+        let work = try await XCTUnwrapAsync(await model.savePendingDubbing())
 
         XCTAssertEqual(work.provenance.state, .partial)
         XCTAssertEqual(work.provenance.reason, "audio_digest_mismatch")
-        XCTAssertEqual(try store.loadAudio(for: work), audio, "摘要不匹配不等于丢掉音频")
+        try await XCTAssertEqualAsync(try await store.loadAudio(for: work), audio, "摘要不匹配不等于丢掉音频")
     }
 
     /// 保存失败必须保留 pending 以便重试，且不得留下半条作品。
@@ -3758,18 +3862,18 @@ extension AppModelTests {
         )
         let pending = try XCTUnwrap(model.pendingDubbing)
 
-        XCTAssertNil(model.savePendingDubbing(), "写盘失败时返回 nil")
+        try await XCTAssertNilAsync(await model.savePendingDubbing(), "写盘失败时返回 nil")
         XCTAssertEqual(model.pendingDubbing, pending, "失败后必须还能重试")
         XCTAssertNotNil(model.creatorMessage)
 
         // 同一个 AppModel、同一个待保存结果重试：不重新生成，也不换作品标识。
-        let committed = try XCTUnwrap(model.savePendingDubbing())
+        let committed = try await XCTUnwrapAsync(await model.savePendingDubbing())
         XCTAssertNil(model.pendingDubbing, "保存成功后待保存结果才被清空")
         XCTAssertEqual(committed.id, pending.workID)
-        XCTAssertEqual(try failing.list().map(\.id), [pending.workID], "同一次生成只落一条")
-        XCTAssertEqual(try failing.loadAudio(for: committed), pending.audioData)
-        XCTAssertNil(model.savePendingDubbing(), "没有待保存内容时不再写盘")
-        XCTAssertEqual(try failing.list().count, 1)
+        try await XCTAssertEqualAsync(try await failing.list().map(\.id), [pending.workID], "同一次生成只落一条")
+        try await XCTAssertEqualAsync(try await failing.loadAudio(for: committed), pending.audioData)
+        try await XCTAssertNilAsync(await model.savePendingDubbing(), "没有待保存内容时不再写盘")
+        try await XCTAssertEqualAsync(try await failing.list().count, 1)
     }
 
     /// 未保存的结果不会被下一次生成静默顶掉；只有显式放弃才会丢弃。
@@ -3941,7 +4045,7 @@ extension AppModelTests {
         recipeDigest: String?,
         title: String? = nil,
         workID: String = "work_dubbing_source"
-    ) throws -> CreativeWork {
+    ) async throws -> CreativeWork {
         var work = Self.dubbingWork(
             script: script,
             provenance: RenderProvenanceSnapshot(
@@ -3969,27 +4073,27 @@ extension AppModelTests {
                 provenance: work.provenance
             )
         }
-        return try store.save(work, audioData: silentPreviewWAV(marker: 0x44))
+        return try await store.save(work, audioData: silentPreviewWAV(marker: 0x44), operationID: UUID()).value
     }
 
     /// 打开段落项目只拆文稿，不搬走原作品音频，也不产生任何候选。
-    func testOpeningDubbingProjectSplitsScriptWithoutTouchingSourceAudio() throws {
+    func testOpeningDubbingProjectSplitsScriptWithoutTouchingSourceAudio() async throws {
         let creator = ScriptedRenderClient(audio: silentPreviewWAV(marker: 0x50))
         let (model, works, projects) = makeDubbingModel(creator: creator, recipeDigest: "digest-1")
-        let work = try saveSourceWork(
+        let work = try await saveSourceWork(
             into: works,
             script: "第一段正文。\n第二段正文。",
             recipeDigest: "digest-1"
         )
-        let sourceAudio = try works.loadAudio(for: work)
+        let sourceAudio = try await works.loadAudio(for: work)
 
-        let project = try XCTUnwrap(model.startDubbingProject(for: work))
+        let project = try await XCTUnwrapAsync(await model.startDubbingProject(for: work))
 
         XCTAssertEqual(project.segments.map(\.text), ["第一段正文。", "第二段正文。"])
         XCTAssertEqual(model.dubbingCandidates, [], "打开项目不生成任何候选")
-        XCTAssertNil(model.dubbingExportBundle)
-        XCTAssertEqual(try works.loadAudio(for: work), sourceAudio, "原作品音频原地不动")
-        XCTAssertEqual(try projects.list().count, 1)
+        XCTAssertNil(model.preparedDubbingExport)
+        try await XCTAssertEqualAsync(try await works.loadAudio(for: work), sourceAudio, "原作品音频原地不动")
+        try await XCTAssertEqualAsync(try await projects.list().count, 1)
     }
 
     /// 版本漂移拒绝旧项目采用；显式建立新项目后可继续生成与采用。
@@ -4013,29 +4117,29 @@ extension AppModelTests {
                 )
             )
         )
-        try works.save(work, audioData: silentPreviewWAV(marker: 0x10))
-        let original = try XCTUnwrap(model.startDubbingProject(for: work))
-        let storedOriginal = try XCTUnwrap(projects.list().first { $0.id == original.id })
+        try await works.save(work, audioData: silentPreviewWAV(marker: 0x10), operationID: UUID()).value
+        let original = try await XCTUnwrapAsync(await model.startDubbingProject(for: work))
+        let storedOriginal = try await XCTUnwrapAsync(await projects.list().first { $0.id == original.id })
         XCTAssertNotNil(model.dubbingConditionsMessage, "入口立即提示可确认的模型版本漂移")
         let segment = try XCTUnwrap(original.segments.first)
         model.startDubbingSegmentRedo(segment.id)
         try await waitUntilDubbing { model.dubbingBusySegmentID == nil && !model.dubbingCandidates.isEmpty }
         let changed = try XCTUnwrap(model.dubbingCandidates.first)
-        XCTAssertFalse(model.adoptDubbingCandidate(changed))
+        try await XCTAssertFalseAsync(await model.adoptDubbingCandidate(changed))
         XCTAssertFalse(model.dubbingMessage?.contains("重新生成") == true)
-        XCTAssertTrue(model.rebuildDubbingProject(using: changed))
+        try await XCTAssertTrueAsync(await model.rebuildDubbingProject(using: changed))
         let rebuilt = try XCTUnwrap(model.dubbingProject)
         XCTAssertNotEqual(rebuilt.id, original.id)
         XCTAssertEqual(rebuilt.recipe.recipe?.digest, "current-digest")
         XCTAssertTrue(model.dubbingCandidates.isEmpty)
         XCTAssertTrue(rebuilt.segments.allSatisfy { $0.acceptedCandidateID == nil })
-        XCTAssertEqual(try projects.list().first { $0.id == original.id }, storedOriginal)
-        XCTAssertEqual(try projects.loadAudio(for: changed), silentPreviewWAV(marker: 0x61))
+        try await XCTAssertEqualAsync(try await projects.list().first { $0.id == original.id }, storedOriginal)
+        try await XCTAssertEqualAsync(try await projects.loadAudio(for: changed), silentPreviewWAV(marker: 0x61))
 
         model.startDubbingSegmentRedo(try XCTUnwrap(rebuilt.segments.first).id)
         try await waitUntilDubbing { model.dubbingBusySegmentID == nil && !model.dubbingCandidates.isEmpty }
-        XCTAssertTrue(model.adoptDubbingCandidate(try XCTUnwrap(model.dubbingCandidates.first)))
-        XCTAssertEqual(try projects.list().first { $0.id == original.id }, storedOriginal)
+        try await XCTAssertTrueAsync(await model.adoptDubbingCandidate(try XCTUnwrap(model.dubbingCandidates.first)))
+        try await XCTAssertEqualAsync(try await projects.list().first { $0.id == original.id }, storedOriginal)
     }
 
     /// 清理与项目重开保留采用；完整导出只确认当时的选择。
@@ -4047,55 +4151,55 @@ extension AppModelTests {
         )
         let (model, works, projects) = makeDubbingModel(creator: creator, recipeDigest: "digest-1")
         await model.refreshCreatorVoices()
-        let work = try saveSourceWork(into: works, script: "第一段正文。", recipeDigest: "digest-1")
-        let project = try XCTUnwrap(model.startDubbingProject(for: work))
+        let work = try await saveSourceWork(into: works, script: "第一段正文。", recipeDigest: "digest-1")
+        let project = try await XCTUnwrapAsync(await model.startDubbingProject(for: work))
         let segment = try XCTUnwrap(project.segments.first)
         model.startDubbingSegmentRedo(segment.id)
         try await waitUntilDubbing { model.dubbingBusySegmentID == nil && model.dubbingCandidates.count == 1 }
         let adopted = try XCTUnwrap(model.dubbingCandidates.first)
-        XCTAssertTrue(model.adoptDubbingCandidate(adopted))
+        try await XCTAssertTrueAsync(await model.adoptDubbingCandidate(adopted))
         model.startDubbingSegmentRedo(segment.id)
         try await waitUntilDubbing { model.dubbingBusySegmentID == nil && model.dubbingCandidates.count == 2 }
         XCTAssertEqual(model.unusedDubbingCandidateCount, 1)
-        XCTAssertFalse(model.deleteDubbingCandidate(adopted))
-        XCTAssertTrue(model.discardUnusedDubbingCandidates())
+        try await XCTAssertFalseAsync(await model.deleteDubbingCandidate(adopted))
+        try await XCTAssertTrueAsync(await model.discardUnusedDubbingCandidates())
         XCTAssertEqual(model.dubbingCandidates.map(\.id), [adopted.id])
         XCTAssertTrue(model.dubbingHasUnexportedAdoptions)
-        model.prepareDubbingExport()
+        await model.prepareDubbingExport()
         let output = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: output) }
-        XCTAssertTrue(model.writeDubbingExport(to: output))
+        try await XCTAssertTrueAsync(await model.writeDubbingExport(to: output))
         XCTAssertFalse(model.dubbingHasUnexportedAdoptions)
 
         model.closeDubbingProject()
-        XCTAssertTrue(model.openDubbingProject(project.id))
+        try await XCTAssertTrueAsync(await model.openDubbingProject(project.id))
         XCTAssertEqual(model.dubbingCandidates.map(\.id), [adopted.id])
         XCTAssertTrue(model.dubbingHasUnexportedAdoptions, "再次打开不猜测此前是否已在用户目录导出")
-        XCTAssertFalse(model.deleteCurrentDubbingProject())
-        XCTAssertTrue(model.undoDubbingAdoption(inSegment: segment.id))
-        XCTAssertTrue(model.deleteCurrentDubbingProject())
+        try await XCTAssertFalseAsync(await model.deleteCurrentDubbingProject())
+        try await XCTAssertTrueAsync(await model.undoDubbingAdoption(inSegment: segment.id))
+        try await XCTAssertTrueAsync(await model.deleteCurrentDubbingProject())
         XCTAssertNil(model.dubbingProject)
-        XCTAssertTrue(try projects.list().isEmpty)
-        XCTAssertEqual(try works.list().map(\.id), [work.id], "清理项目不删除原作品")
+        try await XCTAssertTrueAsync(try await projects.list().isEmpty)
+        try await XCTAssertEqualAsync(try await works.list().map(\.id), [work.id], "清理项目不删除原作品")
     }
 
-    func testSavedProjectRemainsAccessibleWhenTheOriginalWorkLibraryIsEmpty() throws {
+    func testSavedProjectRemainsAccessibleWhenTheOriginalWorkLibraryIsEmpty() async throws {
         let creator = DubbingRenderClient(
             audio: silentPreviewWAV(marker: 0x60),
             recipe: Self.dubbingRecipe(digest: "digest-1"),
             voice: Self.dubbingVoice()
         )
         let (model, works, projects) = makeDubbingModel(creator: creator, recipeDigest: "digest-1")
-        let work = try saveSourceWork(into: works, script: "仍要继续返修的正文。", recipeDigest: "digest-1")
-        let project = try XCTUnwrap(model.startDubbingProject(for: work))
-        let persisted = try XCTUnwrap(try projects.list().first)
+        let work = try await saveSourceWork(into: works, script: "仍要继续返修的正文。", recipeDigest: "digest-1")
+        let project = try await XCTUnwrapAsync(await model.startDubbingProject(for: work))
+        let persisted = try await XCTUnwrapAsync(try await projects.list().first)
         model.closeDubbingProject()
-        try works.delete(work)
-        model.refreshWorks()
-        model.refreshDubbingProjects()
+        try await works.delete(work, operationID: UUID()).value
+        await model.refreshWorks()
+        await model.refreshDubbingProjects()
         XCTAssertTrue(model.works.isEmpty)
         XCTAssertEqual(model.dubbingProjects.map(\.id), [project.id])
-        XCTAssertTrue(model.openDubbingProject(project.id))
+        try await XCTAssertTrueAsync(await model.openDubbingProject(project.id))
         XCTAssertEqual(model.dubbingProject, persisted)
     }
 
@@ -4109,12 +4213,12 @@ extension AppModelTests {
         )
         let (model, works, projects) = makeDubbingModel(creator: creator, recipeDigest: "digest-1")
         await model.refreshCreatorVoices()
-        let work = try saveSourceWork(
+        let work = try await saveSourceWork(
             into: works,
             script: "第一段正文。\n第二段正文。",
             recipeDigest: "digest-1"
         )
-        let project = try XCTUnwrap(model.startDubbingProject(for: work))
+        let project = try await XCTUnwrapAsync(await model.startDubbingProject(for: work))
         let secondSegment = try XCTUnwrap(project.segments.last)
 
         model.startDubbingSegmentRedo(secondSegment.id)
@@ -4124,7 +4228,7 @@ extension AppModelTests {
         XCTAssertEqual(calls.map(\.text), ["第二段正文。"], "只重做被点中的那一段")
         let candidate = try XCTUnwrap(model.dubbingCandidates.first)
         XCTAssertEqual(candidate.segmentID, secondSegment.id)
-        let reopened = try XCTUnwrap(projects.candidates(forProject: project.id).first)
+        let reopened = try await XCTUnwrapAsync(await projects.candidates(forProject: project.id).first)
         XCTAssertEqual(reopened.provenance.requestID, "req-segment")
         XCTAssertEqual(reopened.provenance.receiptID, "rr_0123456789abcdef0123456789abcdef")
         XCTAssertEqual(reopened.provenance.receiptStatus, .completed)
@@ -4162,8 +4266,8 @@ extension AppModelTests {
                 pcmSHA256: "pcm_sha_source"
             )
         )
-        let saved = try works.save(work, audioData: silentPreviewWAV(marker: 0x44))
-        let project = try XCTUnwrap(model.startDubbingProject(for: saved))
+        let saved = try await works.save(work, audioData: silentPreviewWAV(marker: 0x44), operationID: UUID()).value
+        let project = try await XCTUnwrapAsync(await model.startDubbingProject(for: saved))
         let secondSegment = try XCTUnwrap(project.segments.last)
 
         model.startDubbingSegmentRedo(secondSegment.id)
@@ -4175,7 +4279,7 @@ extension AppModelTests {
         XCTAssertEqual(calls.map(\.speed), [1.25], "重做必须沿用原作品记录下来的语速")
         // 语速对得上，摘要才可能对上；采用不应被「制作条件不一致」挡住。
         let candidate = try XCTUnwrap(model.dubbingCandidates.first)
-        XCTAssertTrue(model.adoptDubbingCandidate(candidate), "语速一致时候选应当可采用")
+        try await XCTAssertTrueAsync(await model.adoptDubbingCandidate(candidate), "语速一致时候选应当可采用")
     }
 
     /// 采用后可以撤销回到上一版；撤销只改引用，已保存的音频一个都不删。
@@ -4188,49 +4292,49 @@ extension AppModelTests {
         )
         let (model, works, projects) = makeDubbingModel(creator: creator, recipeDigest: "digest-1")
         await model.refreshCreatorVoices()
-        let work = try saveSourceWork(
+        let work = try await saveSourceWork(
             into: works,
             script: "只有一段正文。",
             recipeDigest: "digest-1"
         )
-        let project = try XCTUnwrap(model.startDubbingProject(for: work))
+        let project = try await XCTUnwrapAsync(await model.startDubbingProject(for: work))
         let segment = try XCTUnwrap(project.segments.first)
 
         model.startDubbingSegmentRedo(segment.id)
         try await waitUntilDubbing { model.dubbingBusySegmentID == nil && !model.dubbingCandidates.isEmpty }
         let first = try XCTUnwrap(model.dubbingCandidates.first)
-        XCTAssertTrue(model.adoptDubbingCandidate(first))
+        try await XCTAssertTrueAsync(await model.adoptDubbingCandidate(first))
 
         model.startDubbingSegmentRedo(segment.id)
         try await waitUntilDubbing { model.dubbingCandidates.count == 2 }
         let second = try XCTUnwrap(
             model.dubbingCandidates.first(where: { $0.id != first.id })
         )
-        XCTAssertTrue(model.adoptDubbingCandidate(second))
+        try await XCTAssertTrueAsync(await model.adoptDubbingCandidate(second))
         XCTAssertEqual(
             model.dubbingProject?.segments.first?.acceptedCandidateID,
             second.id
         )
 
-        XCTAssertTrue(model.undoDubbingAdoption(inSegment: segment.id))
+        try await XCTAssertTrueAsync(await model.undoDubbingAdoption(inSegment: segment.id))
         XCTAssertEqual(
             model.dubbingProject?.segments.first?.acceptedCandidateID,
             first.id,
             "撤销回到上一版，而不是清空"
         )
-        XCTAssertEqual(
-            try projects.candidates(forProject: project.id).count,
+        try await XCTAssertEqualAsync(
+            try await projects.candidates(forProject: project.id).count,
             2,
             "撤销不删除任何候选音频"
         )
         // 采用过两次，就有两步历史：第二次撤销回到"最初没有采用任何候选"。
-        XCTAssertTrue(
-            model.undoDubbingAdoption(inSegment: segment.id),
+        try await XCTAssertTrueAsync(
+            await model.undoDubbingAdoption(inSegment: segment.id),
             "还有一步历史时继续回退"
         )
         XCTAssertNil(model.dubbingProject?.segments.first?.acceptedCandidateID)
-        XCTAssertFalse(
-            model.undoDubbingAdoption(inSegment: segment.id),
+        try await XCTAssertFalseAsync(
+            await model.undoDubbingAdoption(inSegment: segment.id),
             "没有更早的历史时不再回退"
         )
         XCTAssertEqual(
@@ -4250,25 +4354,25 @@ extension AppModelTests {
         )
         let (model, works, _) = makeDubbingModel(creator: creator, recipeDigest: "digest-1")
         await model.refreshCreatorVoices()
-        let work = try saveSourceWork(
+        let work = try await saveSourceWork(
             into: works,
             script: "第一段正文。\n第二段正文。",
             recipeDigest: "digest-1"
         )
-        let project = try XCTUnwrap(model.startDubbingProject(for: work))
+        let project = try await XCTUnwrapAsync(await model.startDubbingProject(for: work))
         let first = try XCTUnwrap(project.segments.first)
         let second = try XCTUnwrap(project.segments.last)
 
-        model.prepareDubbingExport()
-        XCTAssertNil(model.dubbingExportBundle, "有段落没采用版本时不导出半成品")
+        await model.prepareDubbingExport()
+        XCTAssertNil(model.preparedDubbingExport, "有段落没采用版本时不导出半成品")
         XCTAssertNotNil(model.dubbingMessage)
 
         model.startDubbingSegmentRedo(first.id)
         try await waitUntilDubbing { model.dubbingCandidates.count == 1 }
-        XCTAssertTrue(model.adoptDubbingCandidate(try XCTUnwrap(model.dubbingCandidates.first)))
-        model.prepareDubbingExport()
+        try await XCTAssertTrueAsync(await model.adoptDubbingCandidate(try XCTUnwrap(model.dubbingCandidates.first)))
+        await model.prepareDubbingExport()
         XCTAssertNil(
-            model.dubbingExportBundle,
+            model.preparedDubbingExport,
             "还有段落没有采用版本时仍然拒绝导出"
         )
 
@@ -4277,16 +4381,16 @@ extension AppModelTests {
         let secondCandidate = try XCTUnwrap(
             model.dubbingCandidates.first(where: { $0.segmentID == second.id })
         )
-        XCTAssertTrue(model.adoptDubbingCandidate(secondCandidate))
+        try await XCTAssertTrueAsync(await model.adoptDubbingCandidate(secondCandidate))
 
-        model.prepareDubbingExport()
-        let bundle = try XCTUnwrap(model.dubbingExportBundle)
-        XCTAssertEqual(bundle.script, "第一段正文。\n第二段正文。")
+        await model.prepareDubbingExport()
+        let bundle = try XCTUnwrap(model.preparedDubbingExport)
+        XCTAssertEqual(try String(contentsOf: bundle.scriptURL, encoding: .utf8), "第一段正文。\n第二段正文。")
 
         let target = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("speechrail-export-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: target) }
-        XCTAssertTrue(model.writeDubbingExport(to: target))
+        try await XCTAssertTrueAsync(await model.writeDubbingExport(to: target))
         let wav = try Data(contentsOf: target.appendingPathComponent(bundle.audioFileName))
         let script = try String(
             contentsOf: target.appendingPathComponent(bundle.scriptFileName),
@@ -4301,7 +4405,7 @@ extension AppModelTests {
             Array(pcm.prefix(2_400)),
             Array(try DubbingAudioExport.clip(fromWAV: silentPreviewWAV(marker: 0x80, frames: 1_200)).pcm)
         )
-        XCTAssertNil(model.dubbingExportBundle, "写盘后清空待导出内容")
+        XCTAssertNil(model.preparedDubbingExport, "写盘后清空待导出内容")
     }
 
     /// 成品文件名必须是用户在目录里**看得见**的名字。
@@ -4319,21 +4423,21 @@ extension AppModelTests {
             )
             let (model, works, _) = makeDubbingModel(creator: creator, recipeDigest: "digest-1")
             await model.refreshCreatorVoices()
-            let work = try saveSourceWork(
+            let work = try await saveSourceWork(
                 into: works,
                 script: "只有一段。",
                 recipeDigest: "digest-1",
                 title: title
             )
-            let project = try XCTUnwrap(model.startDubbingProject(for: work))
+            let project = try await XCTUnwrapAsync(await model.startDubbingProject(for: work))
             let segment = try XCTUnwrap(project.segments.first)
             model.startDubbingSegmentRedo(segment.id)
             try await waitUntilDubbing {
                 model.dubbingBusySegmentID == nil && !model.dubbingCandidates.isEmpty
             }
-            XCTAssertTrue(model.adoptDubbingCandidate(try XCTUnwrap(model.dubbingCandidates.first)))
-            model.prepareDubbingExport()
-            return try XCTUnwrap(model.dubbingExportBundle).baseName
+            try await XCTAssertTrueAsync(await model.adoptDubbingCandidate(try XCTUnwrap(model.dubbingCandidates.first)))
+            await model.prepareDubbingExport()
+            return try XCTUnwrap(model.preparedDubbingExport).baseName
         }
 
         for title in [
@@ -4373,20 +4477,20 @@ extension AppModelTests {
         )
         let (model, works, _) = makeDubbingModel(creator: creator, recipeDigest: "digest-1")
         await model.refreshCreatorVoices()
-        let work = try saveSourceWork(
+        let work = try await saveSourceWork(
             into: works,
             script: "只有一段。",
             recipeDigest: "digest-1"
         )
-        let project = try XCTUnwrap(model.startDubbingProject(for: work))
+        let project = try await XCTUnwrapAsync(await model.startDubbingProject(for: work))
         let segment = try XCTUnwrap(project.segments.first)
         model.startDubbingSegmentRedo(segment.id)
         try await waitUntilDubbing {
             model.dubbingBusySegmentID == nil && !model.dubbingCandidates.isEmpty
         }
-        XCTAssertTrue(model.adoptDubbingCandidate(try XCTUnwrap(model.dubbingCandidates.first)))
-        model.prepareDubbingExport()
-        let bundle = try XCTUnwrap(model.dubbingExportBundle)
+        try await XCTAssertTrueAsync(await model.adoptDubbingCandidate(try XCTUnwrap(model.dubbingCandidates.first)))
+        await model.prepareDubbingExport()
+        let bundle = try XCTUnwrap(model.preparedDubbingExport)
 
         let target = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("speechrail-export-\(UUID().uuidString)", isDirectory: true)
@@ -4397,14 +4501,14 @@ extension AppModelTests {
             withIntermediateDirectories: true
         )
 
-        XCTAssertFalse(model.writeDubbingExport(to: target))
+        try await XCTAssertFalseAsync(await model.writeDubbingExport(to: target))
         XCTAssertEqual(
             model.dubbingMessage,
             "已写入 \(bundle.audioFileName)，但正文没能写入：目标位置可能被占用或空间不足。",
             "失败发生在第二步时必须说清楚音频已经落地了"
         )
         XCTAssertNotNil(
-            model.dubbingExportBundle,
+            model.preparedDubbingExport,
             "写了一半也要保留待导出内容，让用户可以换个位置重试"
         )
         XCTAssertTrue(
@@ -4432,12 +4536,12 @@ extension AppModelTests {
             model.creatorVoices.contains { $0.id == recipe.voiceID },
             "前置条件：配方里的音色当前可用，配方缺失才是唯一的拒绝理由"
         )
-        let work = try saveSourceWork(
+        let work = try await saveSourceWork(
             into: works,
             script: "一段没有配方摘要的正文。",
             recipeDigest: nil
         )
-        let project = try XCTUnwrap(model.startDubbingProject(for: work))
+        let project = try await XCTUnwrapAsync(await model.startDubbingProject(for: work))
         let segment = try XCTUnwrap(project.segments.first)
 
         model.startDubbingSegmentRedo(segment.id)
@@ -4471,12 +4575,12 @@ extension AppModelTests {
         )
         let (model, works, _) = makeDubbingModel(creator: creator, recipeDigest: "digest-1")
         await model.refreshCreatorVoices()
-        let work = try saveSourceWork(
+        let work = try await saveSourceWork(
             into: works,
             script: "第一段正文。\n第二段正文。",
             recipeDigest: "digest-1"
         )
-        let project = try XCTUnwrap(model.startDubbingProject(for: work))
+        let project = try await XCTUnwrapAsync(await model.startDubbingProject(for: work))
         let first = try XCTUnwrap(project.segments.first)
         let second = try XCTUnwrap(project.segments.last)
 
@@ -4517,12 +4621,12 @@ extension AppModelTests {
         )
         let (model, works, _) = makeDubbingModel(creator: creator, recipeDigest: "digest-1")
         await model.refreshCreatorVoices()
-        let work = try saveSourceWork(
+        let work = try await saveSourceWork(
             into: works,
             script: "一段正文。",
             recipeDigest: "digest-1"
         )
-        let project = try XCTUnwrap(model.startDubbingProject(for: work))
+        let project = try await XCTUnwrapAsync(await model.startDubbingProject(for: work))
         let segment = try XCTUnwrap(project.segments.first)
 
         model.startDubbingSegmentRedo(segment.id)
@@ -4551,7 +4655,7 @@ extension AppModelTests {
         )
         let (model, works, _) = makeDubbingModel(creator: creator, recipeDigest: "digest-1")
         // 刻意不调用 refreshCreatorVoices()：这就是列表尚未读到的状态。
-        let work = try works.save(
+        let work = try await works.save(
             Self.dubbingWork(
                 script: "一段正文。",
                 provenance: RenderProvenanceSnapshot(
@@ -4563,8 +4667,8 @@ extension AppModelTests {
                 )
             ),
             audioData: silentPreviewWAV(marker: 0x44)
-        )
-        let project = try XCTUnwrap(model.startDubbingProject(for: work))
+        , operationID: UUID()).value
+        let project = try await XCTUnwrapAsync(await model.startDubbingProject(for: work))
         let segment = try XCTUnwrap(project.segments.first)
 
         model.startDubbingSegmentRedo(segment.id)
@@ -4610,12 +4714,12 @@ extension AppModelTests {
         )
         let (model, works, projects) = makeDubbingModel(creator: creator, recipeDigest: "digest-1")
         await model.refreshCreatorVoices()
-        let staleWork = try saveSourceWork(
+        let staleWork = try await saveSourceWork(
             into: works,
             script: "只有一段正文。",
             recipeDigest: "digest-1"
         )
-        let staleProject = try XCTUnwrap(model.startDubbingProject(for: staleWork))
+        let staleProject = try await XCTUnwrapAsync(await model.startDubbingProject(for: staleWork))
         let staleSegment = try XCTUnwrap(staleProject.segments.first)
         model.startDubbingSegmentRedo(staleSegment.id)
         // 有界轮询到渲染真的挂住为止：闸门是协作式的，抢跑会测不到交错。
@@ -4625,13 +4729,13 @@ extension AppModelTests {
         model.closeDubbingProject()
 
         // 新项目立刻接上第二次重做，并挂在自己的闸门上。
-        let liveWork = try saveSourceWork(
+        let liveWork = try await saveSourceWork(
             into: works,
             script: "新的一段正文。",
             recipeDigest: "digest-1",
             workID: "work_dubbing_live"
         )
-        let liveProject = try XCTUnwrap(model.startDubbingProject(for: liveWork))
+        let liveProject = try await XCTUnwrapAsync(await model.startDubbingProject(for: liveWork))
         let liveSegment = try XCTUnwrap(liveProject.segments.first)
         model.startDubbingSegmentRedo(liveSegment.id)
         try await waitUntilDubbingAsync { await creator.renderCalls.count == 2 }
@@ -4647,8 +4751,8 @@ extension AppModelTests {
             "上一代重做的收尾不得把新一代的在途状态清成 nil"
         )
         XCTAssertEqual(model.dubbingProject?.id, liveProject.id, "项目没有被旧任务换掉")
-        XCTAssertTrue(
-            try projects.candidates(forProject: staleProject.id).isEmpty,
+        try await XCTAssertTrueAsync(
+            try await projects.candidates(forProject: staleProject.id).isEmpty,
             "旧项目的候选一个都不该留下"
         )
 
@@ -4677,24 +4781,24 @@ extension AppModelTests {
         )
         let (model, works, _) = makeDubbingModel(creator: creator, recipeDigest: "digest-1")
         await model.refreshCreatorVoices()
-        let staleWork = try saveSourceWork(
+        let staleWork = try await saveSourceWork(
             into: works,
             script: "只有一段正文。",
             recipeDigest: "digest-1"
         )
-        let staleProject = try XCTUnwrap(model.startDubbingProject(for: staleWork))
+        let staleProject = try await XCTUnwrapAsync(await model.startDubbingProject(for: staleWork))
         model.startDubbingSegmentRedo(try XCTUnwrap(staleProject.segments.first).id)
         try await waitUntilDubbingAsync { await creator.renderCalls.count == 1 }
 
         model.closeDubbingProject()
 
-        let liveWork = try saveSourceWork(
+        let liveWork = try await saveSourceWork(
             into: works,
             script: "新的一段正文。",
             recipeDigest: "digest-1",
             workID: "work_dubbing_live"
         )
-        let liveProject = try XCTUnwrap(model.startDubbingProject(for: liveWork))
+        let liveProject = try await XCTUnwrapAsync(await model.startDubbingProject(for: liveWork))
         let liveSegment = try XCTUnwrap(liveProject.segments.first)
         model.startDubbingSegmentRedo(liveSegment.id)
         try await waitUntilDubbingAsync { await creator.renderCalls.count == 2 }
@@ -4721,7 +4825,7 @@ extension AppModelTests {
     /// 「请检查磁盘权限和可用空间」，而真正的磁盘满/没权限——它不走
     /// `DubbingProjectError`，以 `CocoaError` 原样冒出来——反而落到笼统的
     /// 「段落操作失败，请重试」。两边的成因与文案正好错位。
-    func testDubbingErrorsNameTheCauseTheUserCanActuallyActOn() {
+    func testDubbingErrorsNameTheCauseTheUserCanActuallyActOn() async {
         // 数据不自洽：重试无用，要重新生成这一段。不得提磁盘。
         let dataFault = AppModel.dubbingErrorMessage(for: DubbingProjectError.invalidIdentifier)
         XCTAssertFalse(
@@ -4757,7 +4861,7 @@ extension AppModelTests {
     /// 旧实现是 `dubbingProjectVoiceName ?? "原音色"`，而 nil 有四种来源。
     /// 最糟的是"不在列表里"：副标题刚承诺一个音色，第一次返修就被
     /// `startDubbingSegmentRedo` 拒绝，用户看到自相矛盾。
-    func testTheSegmentRedoSubtitleNeverClaimsAVoiceItDoesNotHave() {
+    func testTheSegmentRedoSubtitleNeverClaimsAVoiceItDoesNotHave() async {
         let library = [CreatorVoice(id: "voice-1", name: "沉稳男声", available: true)]
 
         // 查到了：说是哪一个。
@@ -4878,7 +4982,7 @@ extension AppModelTests {
 extension AppModelTests {
     /// 「去处理」必须把人送到真正有那个动作的页面：这条映射原先把三步都指回
     /// 服务状态——选档位与准备模型其实在模型组合页（#210）。
-    func testEveryReadinessStepLandsOnThePageThatOwnsTheAction() {
+    func testEveryReadinessStepLandsOnThePageThatOwnsTheAction() async {
         XCTAssertEqual(
             FirstResultReadiness.Step.serviceReachable.ownerRoute,
             .overview,
@@ -4902,7 +5006,7 @@ extension AppModelTests {
     }
 
     /// 落在用户已经在的那一页时不给按钮：点了不动的按钮比没有按钮更糟。
-    func testOnlyStepsThatNeedAnotherPageGetADestinationButton() {
+    func testOnlyStepsThatNeedAnotherPageGetADestinationButton() async {
         for step in FirstResultReadiness.Step.allCases {
             XCTAssertEqual(
                 step.needsDestination(awayFrom: .overview),
@@ -4943,7 +5047,7 @@ extension AppModelTests {
     }
 
     /// 正面证据齐了才算就绪：探针通过本身不构成任何一步的满足。
-    func testFirstResultIsReadyOnlyWhenEveryStepHasPositiveEvidence() {
+    func testFirstResultIsReadyOnlyWhenEveryStepHasPositiveEvidence() async {
         XCTAssertTrue(readiness(voices: [availableVoice]).isReady)
 
         XCTAssertFalse(
@@ -4958,7 +5062,7 @@ extension AppModelTests {
     }
 
     /// 服务探针成功不等于第一条真实结果可用：模型与音色仍要各自有正面证据。
-    func testHealthyProbeAloneNeverReportsReady() {
+    func testHealthyProbeAloneNeverReportsReady() async {
         let projection = readiness(voices: [])
 
         XCTAssertFalse(projection.isReady)
@@ -4969,7 +5073,7 @@ extension AppModelTests {
     }
 
     /// 还没读到状态不等于失败：未知的步骤单独标出，不混进确定缺口里。
-    func testUnknownStepsAreNotReportedAsKnownBlockers() {
+    func testUnknownStepsAreNotReportedAsKnownBlockers() async {
         let projection = readiness(
             hasHealth: false,
             voices: [],
@@ -4986,7 +5090,7 @@ extension AppModelTests {
     }
 
     /// 每一处缺口都要说清下一步动作，且不承诺 App 会替用户完成它。
-    func testEveryBlockerNamesTheNextActionForTheUser() {
+    func testEveryBlockerNamesTheNextActionForTheUser() async {
         let projection = readiness(
             healthFailure: .connection,
             hasProfile: false,
@@ -5019,7 +5123,7 @@ extension AppModelTests {
 
     /// 模型状态还没读到时是未知，不是缺口：`modelAvailability` 的初始值就是
     /// `.unknown`，每个用户在首次读取完成前都停在这里。
-    func testUnknownModelAvailabilityIsNotReportedAsAKnownBlocker() {
+    func testUnknownModelAvailabilityIsNotReportedAsAKnownBlocker() async {
         let projection = readiness(
             modelAvailability: .unknown,
             voices: [availableVoice]
@@ -5037,7 +5141,7 @@ extension AppModelTests {
     }
 
     /// 档位在这台机器上根本跑不了：这是确定的缺口，且必须给出可执行的下一步。
-    func testUnsupportedMachineIsAKnownBlockerWithItsOwnNextAction() {
+    func testUnsupportedMachineIsAKnownBlockerWithItsOwnNextAction() async {
         let projection = readiness(
             modelAvailability: .unsupported,
             voices: [availableVoice]
@@ -5059,7 +5163,7 @@ extension AppModelTests {
     }
 
     /// 音色列表读到了、但当前一个都不能用：这是确定的缺口，不是未知。
-    func testLoadedButUnavailableVoicesAreAKnownBlocker() {
+    func testLoadedButUnavailableVoicesAreAKnownBlocker() async {
         let unavailable = CreatorVoice(
             id: "design-1",
             name: "设计音色",
@@ -5077,7 +5181,7 @@ extension AppModelTests {
     /// 这一步与模型状态同理——把它算成已确认的缺口，等于催用户去修一个他还没有
     /// 资格判断的东西。默认参数下 `discoveryState` 恒为 `.loaded`，所以这条分支
     /// 必须显式把状态改成未加载才走得到。
-    func testVoiceAvailabilityIsUnknownUntilCapabilityDiscoveryIsLoaded() {
+    func testVoiceAvailabilityIsUnknownUntilCapabilityDiscoveryIsLoaded() async {
         let projection = readiness(
             voices: [],
             voicesLoadState: .loaded,
@@ -5101,7 +5205,7 @@ extension AppModelTests {
     /// 这两种状态此前落进 `default` 分支，于是 App 一启动就告诉用户
     /// 「还没有可用于配音的音色，先在『音色库』里准备一个」——用户可能明明有，
     /// 却被推去重新做一个。这与「未知不得混进确定缺口」是同一条纪律。
-    func testAnUnreadVoiceListIsNotReportedAsHavingNoVoices() {
+    func testAnUnreadVoiceListIsNotReportedAsHavingNoVoices() async {
         for state in [CreatorVoicesLoadState.unknown, .loading] {
             let projection = readiness(voices: [], voicesLoadState: state)
 
@@ -5124,7 +5228,7 @@ extension AppModelTests {
     }
 
     /// 全是未知时不显示这张卡：有标题、有分隔线、没有任何一行的空壳没有意义。
-    func testTheReadinessCardOnlyAppearsWhenThereIsSomethingToDo() {
+    func testTheReadinessCardOnlyAppearsWhenThereIsSomethingToDo() async {
         let allUnknown = readiness(
             hasHealth: false,
             modelAvailability: .unknown,
@@ -5154,7 +5258,7 @@ extension AppModelTests {
     /// `refreshCreatorVoices()` 的 catch 分支会 `creatorVoices = []` 并置 `.failed`。
     /// 旧实现只问 `availableVoices.isEmpty`，于是这三种状态拿到同一句话，
     /// 并把用户送去「音色创作」——解决不了一次读取失败。
-    func testTheVoicePickerNeverCallsAnUnreadListHavingNoVoices() {
+    func testTheVoicePickerNeverCallsAnUnreadListHavingNoVoices() async {
         let usable = [CreatorVoice(id: "v1", name: "可用音色", available: true)]
         let unusable = [CreatorVoice(id: "v2", name: "停用音色", available: false)]
 
@@ -5201,7 +5305,7 @@ extension AppModelTests {
         )
     }
 
-    func testCreatorVoiceMergingDetailsPreservesRichFields() {
+    func testCreatorVoiceMergingDetailsPreservesRichFields() async {
         let summaryVoice = CreatorVoice(
             id: "voice-1",
             name: "莫里斯医生",

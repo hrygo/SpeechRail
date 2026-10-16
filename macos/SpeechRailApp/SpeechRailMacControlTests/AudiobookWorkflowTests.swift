@@ -2,12 +2,19 @@ import Foundation
 import SQLite3
 import SpeechRailControlKit
 import XCTest
+import Synchronization
 #if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
 #endif
 
 @MainActor
 final class AudiobookWorkflowTests: XCTestCase {
+    private final class WorkCounter: Sendable {
+        let value = Mutex(0)
+        func increment() -> Int { value.withLock { $0 += 1; return $0 } }
+        var count: Int { value.withLock { $0 } }
+    }
+
     nonisolated(unsafe) private var tempRoot: URL!
 
     override func setUpWithError() throws {
@@ -289,7 +296,7 @@ final class AudiobookWorkflowTests: XCTestCase {
         let catalog = VoiceCatalogStore()
         let (workflow, _) = makeWorkflow(catalog: catalog)
         _ = try await importBook(into: workflow, fileName: "empty.txt", text: "第一章\n海风吹来。")
-        try catalog.archiveVoices(voiceIDs: ["v-narrator", "v-designed-narrator"])
+        try await catalog.archiveVoices(voiceIDs: ["v-narrator", "v-designed-narrator"])
         await workflow.previewRecommendedVoices()
         XCTAssertFalse(workflow.castingRecommendation?.isApplicable ?? true)
         XCTAssertFalse(workflow.castingRecommendation?.recoveryActions.isEmpty ?? true)
@@ -302,7 +309,7 @@ final class AudiobookWorkflowTests: XCTestCase {
         _ = try await importBook(into: workflow, fileName: "stale.txt", text: "第一章\n海风吹来。")
         await workflow.previewRecommendedVoices()
         XCTAssertNotNil(workflow.pendingCastingPlan)
-        try catalog.archiveVoices(voiceIDs: ["v-narrator"])
+        try await catalog.archiveVoices(voiceIDs: ["v-narrator"])
         await workflow.applyPendingCastingPlan(acknowledgedIssueIDs: [])
         XCTAssertTrue(workflow.voiceBindings.isEmpty)
         XCTAssertNotNil(workflow.errorMessage)
@@ -314,8 +321,8 @@ final class AudiobookWorkflowTests: XCTestCase {
         _ = try await importBook(into: workflow, fileName: "refresh.txt", text: "第一章\n海风吹来。")
         _ = await workflow.refreshAvailableVoices()
         let before = workflow.voiceCatalogRevision
-        try catalog.archiveVoices(voiceIDs: ["v-narrator"])
-        for _ in 0..<100 { if workflow.voiceCatalogRevision != before { break }; await Task.yield() }
+        try await catalog.archiveVoices(voiceIDs: ["v-narrator"])
+        await workflow.voiceCatalogModel.refresh()
         XCTAssertNotEqual(workflow.voiceCatalogRevision, before)
         XCTAssertFalse(workflow.mergedAvailableVoices().contains { $0.id == "v-narrator" })
     }
@@ -326,7 +333,7 @@ final class AudiobookWorkflowTests: XCTestCase {
         let (workflow, driver) = makeWorkflow(renderer: renderer, store: store, catalog: catalog)
         let imported = try await importBook(into: workflow, fileName: "audition.txt", text: "第一章\n海风拂过窗前，远处传来了熟悉的钟声。")
         let role = try XCTUnwrap(workflow.characters.first)
-        try catalog.registerBookExclusiveVoice(voiceID: "v-designed-narrator", bookID: imported.bookID,
+        try await catalog.registerBookExclusiveVoice(voiceID: "v-designed-narrator", bookID: imported.bookID,
             bookTitle: nil, roleID: role.id, roleName: nil, archetype: nil, creationSource: .instantClone)
         await workflow.previewRecommendedVoices()
         await workflow.prepareCastingAudition(kind: .sameTextComparison, roleID: role.id,
@@ -345,7 +352,7 @@ final class AudiobookWorkflowTests: XCTestCase {
         let bindings = try await store.voiceBindings(for: imported.bookID)
         XCTAssertTrue(candidates.isEmpty)
         XCTAssertTrue(bindings.isEmpty)
-        try catalog.archiveVoices(voiceIDs: ["v-designed-narrator"])
+        try await catalog.archiveVoices(voiceIDs: ["v-designed-narrator"])
         await workflow.playCastingAudition(itemIndex: 1)
         XCTAssertEqual(renderer.auditionRequests.count, 2, "变更后的目录不能继续旧试听")
     }
@@ -450,7 +457,7 @@ final class AudiobookWorkflowTests: XCTestCase {
 
     func testSavedAuditionDoesNotStartAfterVoiceIsArchived() async throws {
         try await assertSavedAuditionInvalidatedBy { _, catalog in
-            try catalog.archiveVoices(voiceIDs: ["v-narrator"])
+            try await catalog.archiveVoices(voiceIDs: ["v-narrator"])
         }
     }
 
@@ -535,7 +542,7 @@ final class AudiobookWorkflowTests: XCTestCase {
         let annotations = zip(spoken, roles).map { atom, role in AudiobookAnnotation(bookID: imported.bookID,
             chapterID: chapter.id, windowID: UUID(), atomID: atom.id, sourceRange: atom.sourceRange, assignment: .assigned(roleID: role.id)) }
         try await store.saveAnnotations(bookID: imported.bookID, annotations: annotations)
-        try catalog.registerBookExclusiveVoice(voiceID: "v-designed-narrator", bookID: imported.bookID,
+        try await catalog.registerBookExclusiveVoice(voiceID: "v-designed-narrator", bookID: imported.bookID,
             bookTitle: nil, roleID: roles[1].id, roleName: nil, archetype: nil, creationSource: .instantClone)
         await workflow.openBook(imported.bookID)
         await workflow.previewVoiceReplacement(zip(roles, ["v-narrator", "v-designed-narrator"]).map { role, id in
@@ -561,8 +568,10 @@ final class AudiobookWorkflowTests: XCTestCase {
         XCTAssertNil(binding.callerSeed)
         XCTAssertEqual(binding.voiceRevision, "vr_0123456789abcdef0123456789abcdef")
         XCTAssertEqual(binding.modelRevision, String(repeating: "a", count: 40))
-        XCTAssertEqual(catalog.metadata(for: binding.voiceID)?.creationSource, .instantClone)
-        XCTAssertEqual(catalog.metadata(for: binding.voiceID)?.originBookID, imported.bookID)
+        let catalogActual1 = await catalog.metadata(for: binding.voiceID)?.creationSource
+        XCTAssertEqual(catalogActual1, .instantClone)
+        let catalogActual2 = await catalog.metadata(for: binding.voiceID)?.originBookID
+        XCTAssertEqual(catalogActual2, imported.bookID)
     }
 
     private func importBook(
@@ -1023,7 +1032,58 @@ final class AudiobookWorkflowTests: XCTestCase {
         XCTAssertNotEqual(firstBook.bookID, secondBook.bookID)
     }
 
-    func testLatestBookOpenWinsWhenOlderResumeAndReadinessFinishLate() async throws {
+    func testStaleWorkspaceRetriesOnceAndContinuousChangesStop() async throws {
+        for continuousChanges in [false, true] {
+            let store = try AudiobookProjectStore(root: tempRoot.appendingPathComponent(UUID().uuidString))
+            let (workflow, _) = makeWorkflow(store: store)
+            let imported = try await importBook(into: workflow, fileName: UUID().uuidString + ".txt", text: "第一章\n海风吹来。\n")
+            let reads = WorkCounter()
+            let reader = AudiobookWorkspaceReader(store: store, readBoundary: { _ in
+                let count = reads.increment()
+                if continuousChanges || count <= 2 {
+                    var book = try await store.book(id: imported.bookID)
+                    book.title = "boundary-\(count)"
+                    try await store.updateBook(book)
+                }
+            })
+            workflow.replaceWorkspaceReaderForTesting(reader)
+            workflow.workspaceRefreshDelay = .zero
+            await workflow.openBook(imported.bookID)
+            let pending = try XCTUnwrap(workflow.pendingWorkspaceRefreshForTesting)
+            await pending.value
+            XCTAssertNil(workflow.pendingWorkspaceRefreshForTesting)
+            XCTAssertEqual(reads.count, continuousChanges ? 4 : 3)
+            if continuousChanges {
+                XCTAssertNotNil(workflow.errorMessage, "Repeated changes stop after one owner retry")
+            } else {
+                XCTAssertEqual(workflow.selectedBook?.title, "boundary-2")
+                XCTAssertNil(workflow.errorMessage)
+            }
+            await workflow.shutdown()
+        }
+    }
+
+    func testLeavingWorkshopCancelsDeferredWorkspaceRefresh() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, _) = makeWorkflow(store: store)
+        let imported = try await importBook(into: workflow, fileName: "deferred-stop.txt", text: "第一章\n海风吹来。\n")
+        let reads = WorkCounter()
+        workflow.replaceWorkspaceReaderForTesting(AudiobookWorkspaceReader(store: store, readBoundary: { _ in
+            _ = reads.increment()
+            var book = try await store.book(id: imported.bookID)
+            book.title += "."
+            try await store.updateBook(book)
+        }))
+        workflow.workspaceRefreshDelay = .seconds(60)
+        await workflow.openBook(imported.bookID)
+        let pending = try XCTUnwrap(workflow.pendingWorkspaceRefreshForTesting)
+        await workflow.leaveWorkshop()
+        await pending.value
+        XCTAssertEqual(reads.count, 2)
+        XCTAssertNil(workflow.pendingWorkspaceRefreshForTesting)
+    }
+
+    func testLatestBookOpenWinsWhenOlderWorkspacePublishesLate() async throws {
         let (workflow, _) = makeWorkflow()
         let firstBook = try await importBook(
             into: workflow,
@@ -1047,7 +1107,7 @@ final class AudiobookWorkflowTests: XCTestCase {
         workflow.loadCheckpointForTesting = { bookID, chapterID, checkpoint in
             guard bookID == firstBook.bookID,
                   chapterID == nil,
-                  checkpoint == .afterResumePlanRead
+                  checkpoint == .beforeBookWorkspacePublication
             else { return }
             await gate.suspend()
         }
@@ -1094,7 +1154,7 @@ final class AudiobookWorkflowTests: XCTestCase {
         workflow.loadCheckpointForTesting = { bookID, chapterID, checkpoint in
             guard bookID == targetBook.bookID,
                   chapterID == targetBook.chapterIDs.first,
-                  checkpoint == .beforeChapterDetailsProjection
+                  checkpoint == .beforeChapterDetailsPublication
             else { return }
             await gate.suspend()
         }
@@ -1138,7 +1198,7 @@ final class AudiobookWorkflowTests: XCTestCase {
         workflow.loadCheckpointForTesting = { bookID, chapterID, checkpoint in
             guard bookID == firstBook.bookID,
                   chapterID == selectedOldChapterID,
-                  checkpoint == .beforeChapterDetailsProjection
+                  checkpoint == .beforeChapterDetailsPublication
             else { return }
             await gate.suspend()
         }
@@ -1468,6 +1528,30 @@ final class AudiobookWorkflowTests: XCTestCase {
         XCTAssertNil(reopenedWorkflow.errorMessage)
     }
 
+    func testFinalProductionRefreshPublishesCandidatesWithoutDependingOnIntermediateProgress() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, _) = makeWorkflow(store: store)
+        let imported = try await importBook(into: workflow, fileName: "final-refresh.txt", text: "第一章 渡口\n海风吹来。\n灯光亮起。\n")
+        try await markBookReadyForProduction(imported.bookID, workflow: workflow, store: store)
+        let gate = WorkflowLoadGate()
+        workflow.loadCheckpointForTesting = { bookID, chapterID, checkpoint in
+            if bookID == imported.bookID, chapterID == nil, checkpoint == .beforeBookWorkspacePublication {
+                await gate.suspend()
+            }
+        }
+        workflow.makeConfirmedChapters()
+        await waitForSuspension(gate)
+        let saved = try await store.candidates(for: imported.bookID)
+        XCTAssertFalse(saved.isEmpty)
+        XCTAssertTrue(workflow.isProducing, "Final publication belongs to the production owner")
+        gate.resume()
+        await waitForProductionToFinish(workflow)
+        XCTAssertEqual(Set(workflow.chapterCandidates.map(\.id)), Set(saved.map(\.id)))
+        XCTAssertEqual(workflow.productionProgress?.phase, .completed)
+        XCTAssertNil(workflow.errorMessage)
+        await workflow.shutdown()
+    }
+
     func testPreparationPauseReportsCheckpointWriteFailureInsteadOfSuccess() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
         let (workflow, _) = makeWorkflow(store: store)
@@ -1515,7 +1599,7 @@ final class AudiobookWorkflowTests: XCTestCase {
             var shouldSuspend = true
             workflow.loadCheckpointForTesting = { bookID, chapterID, checkpoint in
                 guard shouldSuspend, bookID == imported.bookID, chapterID == nil,
-                      checkpoint == .afterResumePlanRead else { return }
+                      checkpoint == .beforeBookWorkspacePublication else { return }
                 shouldSuspend = false
                 await gate.suspend()
             }

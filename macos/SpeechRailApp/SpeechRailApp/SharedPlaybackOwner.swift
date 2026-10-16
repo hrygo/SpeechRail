@@ -19,8 +19,7 @@ public protocol SharedAudioPlaybackDriver: AnyObject {
 
 public extension SharedAudioPlaybackDriver {
     func play(fileURL: URL, startAt: TimeInterval, rate: Float) throws {
-        let data = try Data(contentsOf: fileURL)
-        try play(data: data)
+        throw AudioPlaybackError.playbackFailed
     }
     func pause() {
         stop()
@@ -53,11 +52,17 @@ public final class SharedPlaybackOwner {
     public private(set) var level: Float = 0
     public private(set) var currentRate: Float = 1.0
     private let driver: any SharedAudioPlaybackDriver
+    private var requestID = UUID()
+    public func beginPlaybackRequest() -> UUID { requestID = UUID(); return requestID }
+    public func isCurrentPlaybackRequest(_ id: UUID) -> Bool { requestID == id }
     private var token: UUID?
-    private var waveformEnvelopes: [String: [CGFloat]] = [:]
+    @ObservationIgnored private let waveformLoader: WaveformEnvelopeLoader
+    @ObservationIgnored private var waveformRequestID = UUID()
+    private var visibleWaveform: (key: WaveformKey, levels: [CGFloat])?
 
-    public init(driver: any SharedAudioPlaybackDriver = AudioPlaybackController()) {
+    public init(driver: any SharedAudioPlaybackDriver = AudioPlaybackController(), waveformLoader: WaveformEnvelopeLoader = WaveformEnvelopeLoader()) {
         self.driver = driver
+        self.waveformLoader = waveformLoader
     }
 
     public var playingWorkID: String? {
@@ -78,9 +83,12 @@ public final class SharedPlaybackOwner {
     public func play(
         data: Data,
         target: PlaybackTarget,
+        requestID: UUID? = nil,
         completion: @escaping @MainActor (Bool) -> Void = { _ in }
     ) throws {
-        stop()
+        guard requestID == nil || self.requestID == requestID else { return }
+        if requestID == nil { self.requestID = UUID() }
+        stopCurrentPlayback()
         let capturedToken = UUID()
         token = capturedToken
         self.target = target
@@ -112,9 +120,12 @@ public final class SharedPlaybackOwner {
         startAt: TimeInterval = 0,
         rate: Float = 1.0,
         target: PlaybackTarget,
+        requestID: UUID? = nil,
         completion: @escaping @MainActor (Bool) -> Void = { _ in }
     ) throws {
-        stop()
+        guard requestID == nil || self.requestID == requestID else { return }
+        if requestID == nil { self.requestID = UUID() }
+        stopCurrentPlayback()
         let capturedToken = UUID()
         token = capturedToken
         self.target = target
@@ -168,6 +179,11 @@ public final class SharedPlaybackOwner {
     }
 
     public func stop() {
+        requestID = UUID()
+        stopCurrentPlayback()
+    }
+
+    private func stopCurrentPlayback() {
         // Revoke identity before stop can emit callbacks.
         clear()
         driver.stop()
@@ -191,31 +207,25 @@ public final class SharedPlaybackOwner {
     }
 
     public func waveformEnvelope(kind: String, id: String) -> [CGFloat]? {
-        waveformEnvelopes["\(kind):\(id)"]
+        visibleWaveform?.key.assetID == "\(kind):\(id)" ? visibleWaveform?.levels : nil
     }
 
-    func waveformEnvelope(key: String) -> [CGFloat]? {
-        waveformEnvelopes[key]
-    }
-
-    public func cacheEnvelope(
-        kind: String,
-        id: String,
-        compute: @escaping @Sendable (Int) -> [CGFloat]?
-    ) {
-        cacheEnvelope(key: "\(kind):\(id)", compute: compute)
-    }
-
-    func cacheEnvelope(
-        key: String,
-        compute: @escaping @Sendable (Int) -> [CGFloat]?
-    ) {
-        guard waveformEnvelopes[key] == nil else { return }
-        let buckets = SpeechRailDesignTokens.Waveform.envelopeBuckets
-        Task.detached(priority: .utility) { [weak self] in
-            guard let levels = compute(buckets) else { return }
-            await MainActor.run { self?.waveformEnvelopes[key] = levels }
+    /// The view's .task owns this call and awaits physical cleanup on cancellation.
+    /// Only one small UI projection is retained in addition to the loader's bounded LRU.
+    public func prepareWaveform(key: WaveformKey, fileURL: URL) async {
+        let request = UUID(); waveformRequestID = request
+        visibleWaveform = nil
+        let levels: [Double]
+        switch await waveformLoader.acquire(key: key, fileURL: fileURL) {
+        case let .ready(value): levels = value
+        case let .pending(leaseID):
+            do { levels = try await waveformLoader.result(leaseID: leaseID) }
+            catch { await waveformLoader.release(leaseID: leaseID); return }
+            await waveformLoader.release(leaseID: leaseID)
+        case .deferred, .failed: return
         }
+        guard !Task.isCancelled, waveformRequestID == request else { return }
+        visibleWaveform = (key, levels.map { CGFloat($0) })
     }
 }
 

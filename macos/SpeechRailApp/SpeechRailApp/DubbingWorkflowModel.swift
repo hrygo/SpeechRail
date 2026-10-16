@@ -22,12 +22,8 @@ public final class DubbingWorkflowModel {
     private func speechRequestOptions(for voiceID: String) async throws -> SpeechRailRequestOptions {
         try await capabilities.speechRequestOptions(for: voiceID)
     }
-    public func stopAudio() { playback.stop() }
+    public func stopAudio() { playbackRequestGeneration &+= 1; playback.stop() }
     private func clearPlaybackState() { playback.stop() }
-    private static func envelopeKey(kind: String, id: String) -> String { "\(kind):\(id)" }
-    private func cacheEnvelope(key: String, compute: @escaping @Sendable (Int) -> [CGFloat]?) {
-        playback.cacheEnvelope(key: key, compute: compute)
-    }
     public func audioDuration(for data: Data) -> TimeInterval? { playback.duration(for: data) }
 
     public init(
@@ -53,7 +49,6 @@ public final class DubbingWorkflowModel {
             directory: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
                 .appendingPathComponent("SpeechRail/DubbingProjects", isDirectory: true)
         )
-        self.works = (try? workStore.list()) ?? []
     }
     private let speechRenderClient: (any SpeechRailSpeechRenderClient)?
     private let voices: any CreatorVoiceReading
@@ -68,6 +63,13 @@ public final class DubbingWorkflowModel {
             } else {
                 self.creatorMessage = "音频播放失败，请重试。"
             }
+        }
+    }
+    private func playDubbingAudio(fileURL: URL, target: PlaybackTarget, requestID: UUID) throws {
+        try playback.play(fileURL: fileURL, target: target, requestID: requestID) { [weak self] success in
+            guard let self, !success else { return }
+            if case .work = target { self.workPlaybackMessage = "作品播放失败，请重新试听或重新生成。" }
+            else { self.creatorMessage = "音频播放失败，请重试。" }
         }
     }
     /// 一次配音生成的待保存结果：音频只在内存，身份已固定。
@@ -169,7 +171,14 @@ public final class DubbingWorkflowModel {
     /// 正在重做的段落 ID。同一时间只允许一段在飞，避免两次生成互相覆盖状态。
     public private(set) var dubbingBusySegmentID: String?
     public private(set) var dubbingMessage: String?
-    public private(set) var dubbingExportBundle: DubbingExportBundle?
+    public private(set) var preparedDubbingExport: PreparedDubbingExport?
+    private let exportWriter = DubbingExportWriter()
+    private var exportCopyTask: Task<ExportCopyReceipt, Error>?
+    private var exportCleanupTask: Task<Void, Never>?
+    private var exportCleanupLease: PreparedDubbingExport?
+    private var completedExportCopy: (leaseID: UUID, receipt: ExportCopyReceipt)?
+    private var exportGeneration = UUID()
+    public private(set) var isPreparingDubbingExport = false
     private var dubbingExportPreparedSelection: [String]?
     private var dubbingExportedSelection: [String]?
     public private(set) var worksMessage: String?
@@ -180,6 +189,26 @@ public final class DubbingWorkflowModel {
     private let receiptClient: (any SpeechRailReceiptClient)?
     private let workStore: CreativeWorkStore
     private let dubbingProjectStore: DubbingProjectStore
+    public private(set) var lastStoreReceipt: StoreCommitReceipt?
+
+    private enum StoreOwner { case works, projects }
+
+    private func performStoreWrite<Value: Sendable>(
+        in owner: StoreOwner, _ operation: (UUID) async throws -> StoreWriteResult<Value>
+    ) async throws -> Value {
+        let operationID = UUID()
+        do {
+            let result = try await operation(operationID)
+            lastStoreReceipt = result.receipt
+            return result.value
+        } catch {
+            switch owner {
+            case .works: lastStoreReceipt = await workStore.receipt(operationID: operationID)
+            case .projects: lastStoreReceipt = await dubbingProjectStore.receipt(operationID: operationID)
+            }
+            throw error
+        }
+    }
     /// 拥有 `dubbingRedoTask` 句柄的那一代任务。取消或重新开始都会推进它，
     /// 使旧任务的收尾无法清空新任务的句柄。
     ///
@@ -194,17 +223,17 @@ public final class DubbingWorkflowModel {
     private var dubbingRedoGeneration: UInt64 = 0
     private var dubbingRedoTask: Task<Void, Never>?
     private var synthesisTask: Task<Void, Never>?
+    private var playbackRequestGeneration: UInt64 = 0
 
     /// 作品详情面板选中的作品：把它的包络先算出来（命中缓存立即返回）。
-    /// 读文件是同步的本机小 I/O（与 `playWork` 同量级），解码放到主线程之外。
-    public func prepareWaveform(for work: CreativeWork) {
-        let key = Self.envelopeKey(kind: "work", id: work.id)
-        guard playback.waveformEnvelope(key: key) == nil,
-              let url = try? workStore.audioURL(for: work)
+    /// URL 来自已验证的库快照；解码在后台执行。
+    public func prepareWaveform(for work: CreativeWork) async {
+        guard let identity = work.provenance.audioFileSHA256, !identity.isEmpty,
+              let url = cachedWorkAudioURLs[work.id]
         else { return }
-        cacheEnvelope(key: key) { buckets in
-            AudioEnvelope.levels(forAudioFileAt: url, buckets: buckets)
-        }
+        let key = WaveformKey(assetID: "work:\(work.id)", revision: String(work.renderRevision),
+            fileIdentity: identity, bucketCount: SpeechRailDesignTokens.Waveform.envelopeBuckets)
+        await playback.prepareWaveform(key: key, fileURL: url)
     }
 
     public func lookupWorkReceipt(_ work: CreativeWork) async throws -> RenderReceipt {
@@ -212,23 +241,33 @@ public final class DubbingWorkflowModel {
         return try await SavedRenderReceiptLookup.fetch(snapshot: work.provenance, client: receiptClient)
     }
 
-    public func refreshWorks() {
+    private var libraryGeneration: UInt64 = 0
+    private var cachedWorkAudioURLs: [String: URL] = [:]
+
+    public func loadLibrary() async {
+        libraryGeneration &+= 1
+        let generation = libraryGeneration
         do {
-            works = try workStore.list()
+            let snapshot = try await workStore.librarySnapshot()
+            guard libraryGeneration == generation else { return }
+            works = snapshot.works
+            cachedWorkAudioURLs = snapshot.audioURLsByID
             worksMessage = nil
         } catch {
-            works = []
+            guard libraryGeneration == generation else { return }
             worksMessage = "作品历史暂时不可用"
         }
-        refreshDeletedWorks()
+        await refreshDeletedWorks()
     }
+
+    public func refreshWorks() async { await loadLibrary() }
 
     public private(set) var deletedWorksSummary: CreativeWorkRecoverySummary?
     public private(set) var deletedWorksMessage: String?
 
-    public func refreshDeletedWorks() {
+    public func refreshDeletedWorks() async {
         do {
-            deletedWorksSummary = try workStore.deletedWorksSummary()
+            deletedWorksSummary = try await workStore.deletedWorksSummary()
             deletedWorksMessage = nil
         } catch {
             deletedWorksSummary = nil
@@ -237,44 +276,50 @@ public final class DubbingWorkflowModel {
     }
 
     @discardableResult
-    public func trashDeletedWorks() -> Bool {
+    public func trashDeletedWorks() async -> Bool {
         do {
-            let count = try workStore.trashDeletedWorks()
-            refreshDeletedWorks()
+            let count = try await performStoreWrite(in: .works) { operationID in
+                try await self.workStore.trashDeletedWorks(operationID: operationID)
+            }
+            await refreshDeletedWorks()
             workActionMessage = "已将 \(count) 件已删除作品移入系统废纸篓；清空废纸篓后才会永久移除。"
             return true
         } catch {
-            refreshDeletedWorks()
+            await refreshDeletedWorks()
             workActionMessage = "音频转移尚未完成；剩余内容仍在本机恢复区，请重新读取后重试。"
             return false
         }
     }
 
-    public func loadWorkAudio(_ work: CreativeWork) throws -> Data {
-        try workStore.loadAudio(for: work)
+    public func loadWorkAudio(_ work: CreativeWork) async throws -> Data {
+        try await workStore.loadAudio(for: work)
     }
 
     /// Where a saved work's audio lives, for reveal-in-Finder and export.
     public func workAudioURL(_ work: CreativeWork) -> URL? {
-        try? workStore.audioURL(for: work)
+        cachedWorkAudioURLs[work.id]
     }
 
     /// Deletes a saved work, then transfers its recoverable transaction to Trash.
     /// The caller must still confirm because the work disappears from the list.
     @discardableResult
-    public func deleteWork(_ work: CreativeWork) -> Bool {
+    public func deleteWork(_ work: CreativeWork) async -> Bool {
         if playingWorkID == work.id {
             stopAudio()
         }
         do {
-            let transactionID = try workStore.delete(work)
+            let transactionID = try await performStoreWrite(in: .works) { operationID in
+                try await self.workStore.delete(work, operationID: operationID)
+            }
             works.removeAll { $0.id == work.id }
-            if let refreshed = try? workStore.list() { works = refreshed }
+            await loadLibrary()
             worksMessage = nil
             workPlaybackMessage = nil
             do {
                 if let transactionID {
-                    try workStore.trashDeletedWorks(transactionIDs: [transactionID])
+                    try await performStoreWrite(in: .works) { operationID in
+                try await self.workStore.trashDeletedWorks(transactionIDs: [transactionID], operationID: operationID)
+            }
                 }
                 workActionMessage = transactionID == nil
                     ? "作品已不在列表中；仍待转移的音频可在「已删除作品」中重试。"
@@ -282,7 +327,7 @@ public final class DubbingWorkflowModel {
             } catch {
                 workActionMessage = "作品已从列表删除，音频转移尚未完成；请在「已删除作品」中重试。"
             }
-            refreshDeletedWorks()
+            await refreshDeletedWorks()
             if lastCreatedWork?.id == work.id {
                 lastCreatedWork = nil
             }
@@ -296,10 +341,14 @@ public final class DubbingWorkflowModel {
 
     /// Renames a saved work. The audio file is not moved or rewritten.
     @discardableResult
-    public func renameWork(_ work: CreativeWork, title: String) -> Bool {
+    public func renameWork(_ work: CreativeWork, title: String) async -> Bool {
         do {
-            let updated = try workStore.rename(work, title: title)
-            works = try workStore.list()
+            let updated = try await performStoreWrite(in: .works) { operationID in
+                try await self.workStore.rename(work, title: title, operationID: operationID)
+            }
+            let snapshot = try await workStore.librarySnapshot()
+            works = snapshot.works
+            cachedWorkAudioURLs = snapshot.audioURLsByID
             worksMessage = nil
             workActionMessage = "作品已重命名为“\(updated.title)”。"
             return true
@@ -348,7 +397,7 @@ public final class DubbingWorkflowModel {
     /// 幂等：`workID` 在生成时就冻结了，所以双击、重试、以及"写入成功但列表刷新
     /// 失败后再点一次"都只会得到同一条作品，而不是每次多一条。
     @discardableResult
-    public func savePendingDubbing() -> CreativeWork? {
+    public func savePendingDubbing() async -> CreativeWork? {
         guard let pending = pendingDubbing else { return nil }
         let work = CreativeWork(
             id: pending.workID,
@@ -365,19 +414,28 @@ public final class DubbingWorkflowModel {
         )
         let committed: CreativeWork
         do {
-            committed = try workStore.save(work, audioData: pending.audioData)
+            committed = try await performStoreWrite(in: .works) { operationID in
+                try await self.workStore.save(work, audioData: pending.audioData, operationID: operationID)
+            }
         } catch {
-            creatorMessage = "作品保存失败，请检查磁盘权限和可用空间后重试"
+            await loadLibrary()
+            creatorMessage = lastStoreReceipt?.committed == true
+                ? "作品索引已保存，但音频完整性尚未通过核验；请保留文件并打开诊断。"
+                : "作品保存失败，请检查磁盘权限和可用空间后重试"
             return nil
         }
         do {
-            works = try workStore.list()
+            let snapshot = try await workStore.librarySnapshot()
+            works = snapshot.works
+            cachedWorkAudioURLs = snapshot.audioURLsByID
             worksMessage = nil
         } catch {
             worksMessage = "作品已保存，但作品列表暂时无法刷新"
         }
-        pendingDubbing = nil
-        lastCreatedWork = committed
+        if pendingDubbing?.renderID == pending.renderID {
+            pendingDubbing = nil
+            lastCreatedWork = committed
+        }
         return committed
     }
 
@@ -412,69 +470,102 @@ public final class DubbingWorkflowModel {
         return dubbingCandidates.filter { !project.isUsingCandidate($0.id) }.count
     }
 
-    public func refreshDubbingProjects() {
-        do { dubbingProjects = try dubbingProjectStore.list() }
-        catch { dubbingMessage = Self.dubbingErrorMessage(for: error) }
+    private var projectListGeneration: UInt64 = 0
+    public func refreshDubbingProjects() async {
+        projectListGeneration &+= 1
+        let request = projectListGeneration, generation = dubbingRedoGeneration
+        do {
+            let projects = try await dubbingProjectStore.list()
+            guard request == projectListGeneration else { return }
+            dubbingProjects = projects
+        } catch {
+            guard request == projectListGeneration, generation == dubbingRedoGeneration else { return }
+            dubbingMessage = Self.dubbingErrorMessage(for: error)
+        }
     }
 
     @discardableResult
-    public func openDubbingProject(_ id: String) -> Bool {
+    public func openDubbingProject(_ id: String) async -> Bool {
         closeDubbingProject()
+        let generation = dubbingRedoGeneration
         do {
-            guard let project = try dubbingProjectStore.list().first(where: { $0.id == id }) else {
+            guard let project = try await dubbingProjectStore.list().first(where: { $0.id == id }) else {
                 throw DubbingProjectError.candidateNotFound
             }
-            let candidates = try dubbingProjectStore.candidates(forProject: id)
+            let candidates = try await dubbingProjectStore.candidates(forProject: id)
+            guard generation == dubbingRedoGeneration else { return false }
             dubbingProject = project
             dubbingCandidates = candidates
-            refreshDubbingProjects()
+            await refreshDubbingProjects()
             return true
         } catch {
+            guard generation == dubbingRedoGeneration else { return false }
             dubbingMessage = Self.dubbingErrorMessage(for: error)
             return false
         }
     }
 
     @discardableResult
-    public func deleteDubbingCandidate(_ candidate: DubbingCandidate) -> Bool {
+    public func deleteDubbingCandidate(_ candidate: DubbingCandidate) async -> Bool {
         guard let project = dubbingProject, dubbingBusySegmentID == nil else { return false }
+        let generation = dubbingRedoGeneration
         do {
-            try dubbingProjectStore.deleteCandidate(candidate.id, fromProject: project.id)
+            try await performStoreWrite(in: .projects) { operationID in
+                try await self.dubbingProjectStore.deleteCandidate(candidate.id, fromProject: project.id, operationID: operationID)
+            }
+            guard generation == dubbingRedoGeneration, dubbingProject?.id == project.id else { return true }
             if playingDubbingCandidateID == candidate.id { stopAudio() }
-            dubbingCandidates = try dubbingProjectStore.candidates(forProject: project.id)
+            let candidates = try await dubbingProjectStore.candidates(forProject: project.id)
+            guard generation == dubbingRedoGeneration, dubbingProject?.id == project.id else { return true }
+            dubbingCandidates = candidates
             dubbingMessage = "已删除这个未采用候选及其音频。"
             return true
         } catch {
+            guard generation == dubbingRedoGeneration else { return false }
             dubbingMessage = Self.dubbingErrorMessage(for: error)
             return false
         }
     }
 
     @discardableResult
-    public func discardUnusedDubbingCandidates() -> Bool {
+    public func discardUnusedDubbingCandidates() async -> Bool {
         guard let project = dubbingProject, dubbingBusySegmentID == nil else { return false }
+        let generation = dubbingRedoGeneration
         do {
-            let count = try dubbingProjectStore.discardUnusedCandidates(inProject: project.id)
+            let count = try await performStoreWrite(in: .projects) { operationID in
+                try await self.dubbingProjectStore.discardUnusedCandidates(inProject: project.id, operationID: operationID)
+            }
+            guard generation == dubbingRedoGeneration, dubbingProject?.id == project.id else { return true }
             if let id = playingDubbingCandidateID, !project.isUsingCandidate(id) { stopAudio() }
-            dubbingCandidates = try dubbingProjectStore.candidates(forProject: project.id)
+            let candidates = try await dubbingProjectStore.candidates(forProject: project.id)
+            guard generation == dubbingRedoGeneration, dubbingProject?.id == project.id else { return true }
+            dubbingCandidates = candidates
             dubbingMessage = "已清理 \(count) 个未采用候选及其音频，采用和撤销记录已保留。"
             return true
         } catch {
+            guard generation == dubbingRedoGeneration else { return false }
             dubbingMessage = Self.dubbingErrorMessage(for: error)
             return false
         }
     }
 
     @discardableResult
-    public func deleteCurrentDubbingProject() -> Bool {
+    public func deleteCurrentDubbingProject() async -> Bool {
         guard let project = dubbingProject, dubbingBusySegmentID == nil else { return false }
+        let generation = dubbingRedoGeneration
         do {
-            try dubbingProjectStore.deleteProject(project.id)
+            try await performStoreWrite(in: .projects) { operationID in
+                try await self.dubbingProjectStore.deleteProject(project.id, operationID: operationID)
+            }
+            guard generation == dubbingRedoGeneration, dubbingProject?.id == project.id else { return true }
             closeDubbingProject()
-            refreshDubbingProjects()
+            let publicationGeneration = dubbingRedoGeneration
+            await refreshDubbingProjects()
+            guard publicationGeneration == dubbingRedoGeneration else { return true }
             dubbingMessage = "已删除项目及候选音频，原作品仍保留。"
             return true
         } catch {
+            guard generation == dubbingRedoGeneration else { return false }
             dubbingMessage = Self.dubbingErrorMessage(for: error)
             return false
         }
@@ -499,23 +590,31 @@ public final class DubbingWorkflowModel {
     }
 
     @discardableResult
-    public func rebuildDubbingProject(using candidate: DubbingCandidate) -> Bool {
+    public func rebuildDubbingProject(using candidate: DubbingCandidate) async -> Bool {
         guard let project = dubbingProject else { return false }
         guard dubbingBusySegmentID == nil else {
             dubbingMessage = "请先完成或取消正在进行的重做，再建立新项目。"
             return false
         }
+        let generation = dubbingRedoGeneration
         do {
-            let rebuilt = try dubbingProjectStore.rebuild(
-                projectID: project.id, usingCandidateID: candidate.id
+            let rebuilt = try await performStoreWrite(in: .projects) { operationID in
+                try await self.dubbingProjectStore.rebuild(
+                projectID: project.id, usingCandidateID: candidate.id,
+                operationID: operationID
             )
+            }
+            guard generation == dubbingRedoGeneration, dubbingProject?.id == project.id else { return true }
             closeDubbingProject()
             dubbingProject = rebuilt
             dubbingCandidates = []
-            refreshDubbingProjects()
+            let publicationGeneration = dubbingRedoGeneration
+            await refreshDubbingProjects()
+            guard publicationGeneration == dubbingRedoGeneration else { return true }
             dubbingMessage = "已按这次生成的制作条件建立新项目。各段需要重新生成和采用，旧项目和音频已保留。"
             return true
         } catch {
+            guard generation == dubbingRedoGeneration else { return false }
             dubbingMessage = Self.dubbingErrorMessage(for: error)
             return false
         }
@@ -526,8 +625,9 @@ public final class DubbingWorkflowModel {
     /// 原作品音频原地不动：项目只记录"每段现在用哪个候选"，导出时才按段落顺序拼装。
     /// 段落边界只来自文稿本身——没有可靠时序，就不推断某段在音频里的位置。
     @discardableResult
-    public func startDubbingProject(for work: CreativeWork) -> DubbingProject? {
+    public func startDubbingProject(for work: CreativeWork) async -> DubbingProject? {
         closeDubbingProject()
+        let generation = dubbingRedoGeneration
         let texts = DubbingSegmentPlanner.segments(from: work.scriptText)
         guard !texts.isEmpty else {
             dubbingMessage = "这件作品的文稿是空的，无法按段落返修。"
@@ -546,13 +646,19 @@ public final class DubbingWorkflowModel {
             }
         )
         do {
-            let committed = try dubbingProjectStore.save(project)
+            let committed = try await performStoreWrite(in: .projects) { operationID in
+                try await self.dubbingProjectStore.save(project, operationID: operationID)
+            }
+            let candidates = try await dubbingProjectStore.candidates(forProject: committed.id)
+            guard generation == dubbingRedoGeneration else { return committed }
             dubbingProject = committed
-            dubbingCandidates = try dubbingProjectStore.candidates(forProject: committed.id)
-            refreshDubbingProjects()
+            dubbingCandidates = candidates
+            await refreshDubbingProjects()
+            guard generation == dubbingRedoGeneration else { return committed }
             dubbingMessage = nil
             return committed
         } catch {
+            guard generation == dubbingRedoGeneration else { return nil }
             dubbingMessage = "无法建立段落项目，请检查磁盘权限和可用空间后重试。"
             return nil
         }
@@ -567,13 +673,9 @@ public final class DubbingWorkflowModel {
         dubbingCandidates = []
         dubbingBusySegmentID = nil
         dubbingMessage = nil
-        dubbingExportBundle = nil
-        dubbingExportPreparedSelection = nil
+        _ = beginDiscardDubbingExport()
         dubbingExportedSelection = nil
-        if playingDubbingCandidateID != nil {
-            stopAudio()
-        }
-
+        stopAudio()
     }
 
     /// 当前项目用到的音色。查不到、没记录、不在列表里是三件事，各自照实说——
@@ -682,12 +784,17 @@ public final class DubbingWorkflowModel {
                 ),
                 durationSeconds: playback.duration(for: render.audioData)
             )
-            _ = try dubbingProjectStore.addCandidate(
+            _ = try await performStoreWrite(in: .projects) { operationID in
+                try await self.dubbingProjectStore.addCandidate(
                 candidate,
                 audioData: render.audioData,
-                toProject: project.id
+                toProject: project.id,
+                operationID: operationID
             )
-            dubbingCandidates = try dubbingProjectStore.candidates(forProject: project.id)
+            }
+            let candidates = try await dubbingProjectStore.candidates(forProject: project.id)
+            guard generation == dubbingRedoGeneration, dubbingProject?.id == project.id else { return }
+            dubbingCandidates = candidates
             let position = (project.segments.firstIndex { $0.id == segmentID } ?? 0) + 1
             dubbingMessage = "第 \(position) 段已生成新版本，试听满意后再采用。"
         } catch is CancellationError {
@@ -709,13 +816,18 @@ public final class DubbingWorkflowModel {
     }
 
     /// 试听一个候选。播放的是候选自己的音频，不动任何采用关系。
-    public func playDubbingCandidate(_ candidate: DubbingCandidate) {
+    public func playDubbingCandidate(_ candidate: DubbingCandidate) async {
+        playbackRequestGeneration &+= 1
+        let generation = playbackRequestGeneration
+        let request = playback.beginPlaybackRequest()
         do {
-            let data = try dubbingProjectStore.loadAudio(for: candidate)
-            try playDubbingAudio(data: data, target: .dubbingCandidate(candidate.id))
+            let url = try await dubbingProjectStore.audioURL(for: candidate)
+            guard generation == playbackRequestGeneration, playback.isCurrentPlaybackRequest(request) else { return }
+            try playDubbingAudio(fileURL: url, target: .dubbingCandidate(candidate.id), requestID: request)
 
             workPlaybackMessage = nil
         } catch {
+            guard playback.isCurrentPlaybackRequest(request) else { return }
             clearPlaybackState()
 
             dubbingMessage = "这个候选的音频无法播放，请重新生成这一段。"
@@ -724,19 +836,26 @@ public final class DubbingWorkflowModel {
 
     /// 采用一个候选：只改引用，旧音频不删除，撤销可以回到上一版。
     @discardableResult
-    public func adoptDubbingCandidate(_ candidate: DubbingCandidate) -> Bool {
+    public func adoptDubbingCandidate(_ candidate: DubbingCandidate) async -> Bool {
         guard let project = dubbingProject else { return false }
+        let generation = dubbingRedoGeneration
         do {
-            let updated = try dubbingProjectStore.adopt(
+            let updated = try await performStoreWrite(in: .projects) { operationID in
+                try await self.dubbingProjectStore.adopt(
                 candidateID: candidate.id,
                 inSegment: candidate.segmentID,
-                ofProject: project.id
+                ofProject: project.id,
+                operationID: operationID
             )
+            }
+            let candidates = try await dubbingProjectStore.candidates(forProject: project.id)
+            guard generation == dubbingRedoGeneration, dubbingProject?.id == project.id else { return true }
             dubbingProject = updated
-            dubbingCandidates = try dubbingProjectStore.candidates(forProject: project.id)
+            dubbingCandidates = candidates
             dubbingMessage = "已采用这一段的新版本。"
             return true
         } catch {
+            guard generation == dubbingRedoGeneration else { return false }
             dubbingMessage = Self.dubbingErrorMessage(for: error)
             return false
         }
@@ -744,16 +863,22 @@ public final class DubbingWorkflowModel {
 
     /// 撤销一步采用。没有可撤销的历史时不改变当前采用项。
     @discardableResult
-    public func undoDubbingAdoption(inSegment segmentID: String) -> Bool {
+    public func undoDubbingAdoption(inSegment segmentID: String) async -> Bool {
         guard let project = dubbingProject else { return false }
         let previous = project.segments.first { $0.id == segmentID }?.acceptedCandidateID
+        let generation = dubbingRedoGeneration
         do {
-            let updated = try dubbingProjectStore.undoAdoption(
+            let updated = try await performStoreWrite(in: .projects) { operationID in
+                try await self.dubbingProjectStore.undoAdoption(
                 inSegment: segmentID,
-                ofProject: project.id
+                ofProject: project.id,
+                operationID: operationID
             )
+            }
+            let candidates = try await dubbingProjectStore.candidates(forProject: project.id)
+            guard generation == dubbingRedoGeneration, dubbingProject?.id == project.id else { return true }
             dubbingProject = updated
-            dubbingCandidates = try dubbingProjectStore.candidates(forProject: project.id)
+            dubbingCandidates = candidates
             guard updated.segments.first(where: { $0.id == segmentID })?.acceptedCandidateID
                 != previous
             else {
@@ -763,6 +888,7 @@ public final class DubbingWorkflowModel {
             dubbingMessage = "已回到上一个版本。"
             return true
         } catch {
+            guard generation == dubbingRedoGeneration else { return false }
             dubbingMessage = Self.dubbingErrorMessage(for: error)
             return false
         }
@@ -771,76 +897,121 @@ public final class DubbingWorkflowModel {
     /// 准备导出成品。音频与正文出自同一次采用决策，因此必然一一对应。
     ///
     /// 还有段落没采用版本时直接拒绝：宁可不出货，也不导出与正文对不上的音频。
-    public func prepareDubbingExport() {
-        guard let project = dubbingProject else { return }
+    public func prepareDubbingExport() async {
+        guard let project = dubbingProject, !isPreparingDubbingExport, exportCopyTask == nil else { return }
+        isPreparingDubbingExport = true
+        defer { isPreparingDubbingExport = false }
+        await discardDubbingExport()
+        guard !Task.isCancelled, dubbingProject?.id == project.id else { return }
+        guard exportCleanupLease == nil else {
+            dubbingMessage = "导出临时文件尚未清理，请重试清理后再导出。"
+            return
+        }
+        completedExportCopy = nil
+        let generation = UUID(); exportGeneration = generation
+        let selection = dubbingSelection
         do {
-            guard let exported = try dubbingProjectStore.export(projectID: project.id) else {
-                dubbingMessage = "还有段落没有采用版本，全部采用后才能导出成品。"
+            let prepared = try await dubbingProjectStore.prepareExport(projectID: project.id)
+            guard generation == exportGeneration, !Task.isCancelled, dubbingProject?.id == project.id, selection == dubbingSelection else {
+                exportCleanupLease = prepared
+                await startDubbingExportCleanup()?.value
                 return
             }
-            dubbingExportBundle = DubbingExportBundle(
-                baseName: Self.exportBaseName(for: project.title),
-                audio: exported.audio,
-                script: exported.script
-            )
-            dubbingExportPreparedSelection = dubbingSelection
+            preparedDubbingExport = prepared
+            dubbingExportPreparedSelection = selection
             dubbingMessage = nil
         } catch {
-            dubbingMessage = Self.dubbingErrorMessage(for: error)
+            guard generation == exportGeneration else { return }
+            dubbingMessage = (error as? DubbingExportError)?.errorDescription ?? Self.dubbingErrorMessage(for: error)
         }
     }
 
-    /// 把准备好的成品写到用户选定的目录：一份 WAV，一份对应正文。
     @discardableResult
-    public func writeDubbingExport(to directory: URL) -> Bool {
-        guard let bundle = dubbingExportBundle else { return false }
+    public func writeDubbingExport(to directory: URL) async -> Bool {
+        // A saved export retries only its retained cleanup; target files may already have been edited.
+        if let cleanup = exportCleanupLease, let committed = completedExportCopy,
+           committed.leaseID == cleanup.leaseID, committed.receipt.audioCommitted, committed.receipt.scriptCommitted {
+            let generation = exportGeneration
+            await startDubbingExportCleanup()?.value
+            if generation == exportGeneration { reportSavedDubbingExport(cleanup) }
+            return true
+        }
+        guard let prepared = preparedDubbingExport, exportCopyTask == nil else { return false }
+        let generation = exportGeneration
+        let task = Task { [exportWriter] in
+            try await exportWriter.copyPrepared(prepared,
+                audioDestination: directory.appendingPathComponent(prepared.audioFileName),
+                scriptDestination: directory.appendingPathComponent(prepared.scriptFileName))
+        }
+        exportCopyTask = task
         do {
-            try FileManager.default.createDirectory(
-                at: directory,
-                withIntermediateDirectories: true
-            )
-            try bundle.audio.write(
-                to: directory.appendingPathComponent(bundle.audioFileName),
-                options: .atomic
-            )
+            let receipt = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+            guard generation == exportGeneration else { return false }
+            exportCopyTask = nil
+            completedExportCopy = (prepared.leaseID, receipt)
+            dubbingExportedSelection = dubbingExportPreparedSelection
+            preparedDubbingExport = nil; dubbingExportPreparedSelection = nil
+            exportCleanupLease = prepared
+            await startDubbingExportCleanup()?.value
+            if generation == exportGeneration { reportSavedDubbingExport(prepared) }
+            return true
         } catch {
-            dubbingMessage = "导出失败，请确认目标位置可写后重试。"
+            guard generation == exportGeneration else { return false }
+            exportCopyTask = nil
+            if let failure = error as? ExportCopyFailure, failure.receipt.audioCommitted {
+                dubbingMessage = failure.receipt.scriptCommitted
+                    ? "两份文件已保存，但保存位置的同步未确认，请检查文件后重试。"
+                    : "已写入 \(prepared.audioFileName)，但正文没能写入：目标位置可能被占用或空间不足。"
+                // A partial commit retains its immutable lease for an explicit retry.
+            } else {
+                await discardDubbingExport()
+                let message = error is CancellationError || (error as? ExportCopyFailure)?.cancelled == true
+                    ? "已取消导出。" : "导出失败，请确认目标位置可写后重试。"
+                dubbingMessage = exportCleanupLease == nil ? message : message + "导出临时文件尚未清理，请重试清理。"
+            }
             return false
         }
-        do {
-            try Data(bundle.script.utf8).write(
-                to: directory.appendingPathComponent(bundle.scriptFileName),
-                options: .atomic
-            )
-        } catch {
-            // 音频已经落地、正文没有。照实说：用户需要知道目标目录里现在有一份
-            // 没有对应文案的成品，而不是被引导去检查一个其实可写的目录。
-            dubbingMessage = "已写入 \(bundle.audioFileName)，但正文没能写入：目标位置可能被占用或空间不足。"
-            return false
+    }
+
+    public func discardDubbingExport() async {
+        let cleanup = beginDiscardDubbingExport()
+        await cleanup?.value
+    }
+    private func beginDiscardDubbingExport() -> Task<Void, Never>? {
+        exportGeneration = UUID()
+        let copy = exportCopyTask
+        copy?.cancel(); exportCopyTask = nil
+        if let prepared = preparedDubbingExport {
+            exportCleanupLease = prepared
+            preparedDubbingExport = nil; dubbingExportPreparedSelection = nil
         }
-        dubbingExportedSelection = dubbingExportPreparedSelection
-        dubbingExportPreparedSelection = nil
-        dubbingExportBundle = nil
-        dubbingMessage = "已导出 \(bundle.audioFileName) 和 \(bundle.scriptFileName)。"
-        return true
+        return startDubbingExportCleanup(after: copy)
     }
 
-    /// 放弃这次导出准备。用户改了主意时清空，避免下一次导出写出一份旧的成品。
-    public func discardDubbingExport() {
-        dubbingExportBundle = nil
-        dubbingExportPreparedSelection = nil
+    private func reportSavedDubbingExport(_ prepared: PreparedDubbingExport) {
+        dubbingMessage = exportCleanupLease?.leaseID == prepared.leaseID
+            ? "两份文件已保存，但导出临时文件尚未清理，请重试清理。"
+            : "已导出 \(prepared.audioFileName) 和 \(prepared.scriptFileName)。"
     }
 
-    private static func exportBaseName(for title: String) -> String {
-        let invalidCharacters = CharacterSet(charactersIn: "/\\:*?\"<>|\n\r")
-        let cleaned = title
-            .components(separatedBy: invalidCharacters)
-            .joined(separator: "-")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        // 以点开头的名字在 macOS 上是隐藏文件：导出明明报了成功，用户在自己选的
-        // 目录里却什么都看不到。去掉前导点，名字仍然是可认的。
-        let visible = cleaned.drop(while: { $0 == "." })
-        return visible.isEmpty ? "SpeechRail-配音" : String(visible.prefix(80))
+    /// One cleanup owns the single lease until removal succeeds; closing a page never loses its retry handle.
+    private func startDubbingExportCleanup(after copy: Task<ExportCopyReceipt, Error>? = nil) -> Task<Void, Never>? {
+        if let exportCleanupTask { return exportCleanupTask }
+        guard let prepared = exportCleanupLease else { return nil }
+        let store = dubbingProjectStore
+        let generation = exportGeneration
+        let task = Task { [weak self] in
+            _ = try? await copy?.value
+            do {
+                try await store.releaseExport(leaseID: prepared.leaseID)
+                if self?.exportCleanupLease?.leaseID == prepared.leaseID { self?.exportCleanupLease = nil }
+            } catch {
+                if self?.exportGeneration == generation { self?.dubbingMessage = "导出临时文件尚未清理，请重试或打开诊断。" }
+            }
+            self?.exportCleanupTask = nil
+        }
+        exportCleanupTask = task
+        return task
     }
 
     /// 段落返修的错误归属。文案提到的成因必须与用户实际能修的方向一致——
@@ -968,7 +1139,7 @@ public final class DubbingWorkflowModel {
                 voiceRevision: render.voiceRevision,
                 planID: render.planID,
                 speed: speed,
-                renderRevision: (try? workStore.nextRenderRevision(
+                renderRevision: (try? await workStore.nextRenderRevision(
                     scriptText: scriptText,
                     voiceID: voice.id
                )) ?? 1,
@@ -1004,29 +1175,26 @@ public final class DubbingWorkflowModel {
         }
     }
 
-    public func playWork(_ work: CreativeWork) {
+    public func playWork(_ work: CreativeWork) async {
         if playingWorkID == work.id, isAudioPlaying {
             stopAudio()
             return
         }
+        playbackRequestGeneration &+= 1
+        let generation = playbackRequestGeneration
+        let request = playback.beginPlaybackRequest()
         do {
-            let data = try workStore.loadAudio(for: work)
-            do {
-                try playDubbingAudio(data: data, target: .work(work.id))
-            } catch {
-                clearPlaybackState()
-                throw error
-            }
+            let url = try await workStore.audioURL(for: work)
+            guard generation == playbackRequestGeneration, playback.isCurrentPlaybackRequest(request) else { return }
+            try playDubbingAudio(fileURL: url, target: .work(work.id), requestID: request)
 
             // 播放控制器只有一个，动手播作品就说明音色试听已经结束：留下旧的
             // playingVoiceID 会让音色库显示一个并不在响的“停止试听”状态
             // (REDESIGN-SPEC §7.1：全 App 同一时刻只有一个声音)。
 
             workPlaybackMessage = nil
-            cacheEnvelope(key: Self.envelopeKey(kind: "work", id: work.id)) { buckets in
-                AudioEnvelope.levels(forAudioData: data, buckets: buckets)
-            }
         } catch {
+            guard playback.isCurrentPlaybackRequest(request) else { return }
             workPlaybackMessage = "作品音频暂时不可用，请重新生成或确认本机作品文件仍在。"
         }
     }

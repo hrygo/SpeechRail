@@ -7,18 +7,25 @@ import XCTest
 #endif
 
 final class AudiobookCastTests: XCTestCase {
-    func testExplicitGlobalRegistrationPreservesSourceAndRejectsBookPromotion() throws {
+    func testExplicitGlobalRegistrationPreservesSourceAndRejectsBookPromotion() async throws {
         let catalog = VoiceCatalogStore()
-        try catalog.toggleFavorite(voiceID: "global-clone")
-        try catalog.registerGlobalVoice(voiceID: "global-clone", creationSource: .instantClone)
-        try catalog.registerGlobalVoice(voiceID: "global-clone", creationSource: .instantClone)
-        XCTAssertEqual(catalog.metadata(for: "global-clone")?.visibilityScope, .globalReusable)
-        XCTAssertEqual(catalog.metadata(for: "global-clone")?.creationSource, .instantClone)
-        XCTAssertEqual(catalog.metadata(for: "global-clone")?.isFavorite, true)
-        try catalog.registerBookExclusiveVoice(voiceID: "book-only", bookID: UUID(), bookTitle: nil,
+        try await catalog.toggleFavorite(voiceID: "global-clone")
+        try await catalog.registerGlobalVoice(voiceID: "global-clone", creationSource: .instantClone)
+        try await catalog.registerGlobalVoice(voiceID: "global-clone", creationSource: .instantClone)
+        let catalogActual1 = await catalog.metadata(for: "global-clone")?.visibilityScope
+        XCTAssertEqual(catalogActual1, .globalReusable)
+        let catalogActual2 = await catalog.metadata(for: "global-clone")?.creationSource
+        XCTAssertEqual(catalogActual2, .instantClone)
+        let catalogActual3 = await catalog.metadata(for: "global-clone")?.isFavorite
+        XCTAssertEqual(catalogActual3, true)
+        try await catalog.registerBookExclusiveVoice(voiceID: "book-only", bookID: UUID(), bookTitle: nil,
             roleID: nil, roleName: nil, archetype: nil, creationSource: .voiceDesign)
-        XCTAssertThrowsError(try catalog.registerGlobalVoice(voiceID: "book-only", creationSource: .voiceDesign))
-        XCTAssertEqual(catalog.metadata(for: "book-only")?.visibilityScope, .bookExclusive)
+        do {
+            _ = try await catalog.registerGlobalVoice(voiceID: "book-only", creationSource: .voiceDesign)
+            XCTFail("Expected catalog operation to fail")
+        } catch {}
+        let catalogActual4 = await catalog.metadata(for: "book-only")?.visibilityScope
+        XCTAssertEqual(catalogActual4, .bookExclusive)
     }
     private func makeTestCastController(store: AudiobookProjectStore) -> AudiobookCastController {
         let ids = ["custom", "custom-voice-1", "draft-designed-voice", "dylan", "fault-archetype-voice", "fault-fixture-hero", "fault-fixture-narrator", "fault-replacement-hero", "fault-shared-pool-voice", "master_zhao", "one", "other-book", "serena", "shared-voice", "split-hero", "split-narrator", "test-source-exclusive-voice", "test-target-exclusive-voice", "uncle_chen", "uncle_fu", "v", "v-narrator", "v_bookA_lindong", "v_bookB_role_1", "v_global_7", "vivian", "voice-hero", "voice-narrator"]
@@ -269,20 +276,24 @@ final class AudiobookCastTests: XCTestCase {
         XCTAssertFalse(plan.hasUnavoidableSceneConflicts)
     }
 
-    func testAtomicWriteFailureDoesNotNotifyOrReplaceState() throws {
+    func testAtomicWriteFailureDoesNotNotifyOrReplaceState() async throws {
         final class Probe: @unchecked Sendable {
             let lock = NSLock(); var count = 0
             func increment() { lock.withLock { count += 1 } }
         }
         let url = tempRoot.appendingPathComponent("write-failure.json")
-        try VoiceCatalogStore(storageURL: url).toggleFavorite(voiceID: "retained")
+        try await VoiceCatalogStore(storageURL: url).toggleFavorite(voiceID: "retained")
         let original = try Data(contentsOf: url)
         let catalog = VoiceCatalogStore(storageURL: url, writeAtomically: { _, _ in throw VoiceCatalogError.unavailable })
-        let before = catalog.snapshot(), probe = Probe()
+        let before = await catalog.refresh(), probe = Probe()
         let observer = NotificationCenter.default.addObserver(forName: VoiceCatalogStore.didChange, object: catalog, queue: nil) { _ in probe.increment() }
         defer { NotificationCenter.default.removeObserver(observer) }
-        XCTAssertThrowsError(try catalog.toggleFavorite(voiceID: "new"))
-        XCTAssertEqual(catalog.snapshot(), before)
+        do {
+            _ = try await catalog.toggleFavorite(voiceID: "new")
+            XCTFail("Expected catalog operation to fail")
+        } catch {}
+        let catalogActual5 = await catalog.refresh()
+        XCTAssertEqual(catalogActual5, before)
         XCTAssertEqual(try Data(contentsOf: url), original)
         XCTAssertEqual(probe.lock.withLock { probe.count }, 0)
     }
@@ -298,41 +309,53 @@ final class AudiobookCastTests: XCTestCase {
         XCTAssertEqual(cache.evaluationCount, 100_000)
     }
 
-    func testPromoteArchiveRestoreKeepsGlobalScope() throws {
+    func testPromoteArchiveRestoreKeepsGlobalScope() async throws {
         let url = tempRoot.appendingPathComponent("lifecycle.json"), book = UUID()
         let catalog = VoiceCatalogStore(storageURL: url)
-        try catalog.registerBookExclusiveVoice(voiceID: "voice", bookID: book, bookTitle: "夹具", roleID: UUID(), roleName: "甲", archetype: .youngMale)
-        try catalog.promoteToGlobalReusable(voiceID: "voice")
-        try catalog.archiveVoices(voiceIDs: ["voice"])
-        try catalog.unarchiveVoices(voiceIDs: ["voice"])
+        try await catalog.registerBookExclusiveVoice(voiceID: "voice", bookID: book, bookTitle: "夹具", roleID: UUID(), roleName: "甲", archetype: .youngMale)
+        try await catalog.promoteToGlobalReusable(voiceID: "voice")
+        try await catalog.archiveVoices(voiceIDs: ["voice"])
+        try await catalog.unarchiveVoices(voiceIDs: ["voice"])
         let restarted = VoiceCatalogStore(storageURL: url)
-        XCTAssertEqual(restarted.metadata(for: "voice")?.visibilityScope, .globalReusable)
-        XCTAssertTrue(restarted.isVoiceActiveForBook(voiceID: "voice", currentBookID: UUID()))
+        _ = await restarted.refresh()
+        let catalogActual6 = await restarted.metadata(for: "voice")?.visibilityScope
+        XCTAssertEqual(catalogActual6, .globalReusable)
+        let catalogActual7 = await restarted.isVoiceActiveForBook(voiceID: "voice", currentBookID: UUID())
+        XCTAssertTrue(catalogActual7)
     }
 
-    func testArchivedLegacyOriginIsNotEnoughToInferScope() throws {
+    func testArchivedLegacyOriginIsNotEnoughToInferScope() async throws {
         let url = tempRoot.appendingPathComponent("old-catalog.json")
         let document: [String: Any] = ["metadataByVoiceID": ["old": ["voiceID": "old", "scope": "archived", "originBookID": UUID().uuidString,
             "isFavorite": false, "customTags": [], "collectionIDs": [], "updatedAt": 0]], "collections": [], "preferredCollectionIDByBookID": []]
         let original = try JSONSerialization.data(withJSONObject: document)
         try original.write(to: url)
         let catalog = VoiceCatalogStore(storageURL: url)
-        XCTAssertThrowsError(try catalog.unarchiveVoices(voiceIDs: ["old"]))
-        XCTAssertFalse(catalog.isVoiceActiveForBook(voiceID: "old", currentBookID: nil))
+        do {
+            _ = try await catalog.unarchiveVoices(voiceIDs: ["old"])
+            XCTFail("Expected catalog operation to fail")
+        } catch {}
+        let catalogActual8 = await catalog.isVoiceActiveForBook(voiceID: "old", currentBookID: nil)
+        XCTAssertFalse(catalogActual8)
         XCTAssertEqual(try Data(contentsOf: url), original)
     }
 
-    func testWriteFailureDoesNotPublishSuccess() throws {
+    func testWriteFailureDoesNotPublishSuccess() async throws {
         let url = tempRoot.appendingPathComponent("catalog-is-directory", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         let catalog = VoiceCatalogStore(storageURL: url)
-        let before = catalog.snapshot()
-        XCTAssertThrowsError(try catalog.toggleFavorite(voiceID: "new"))
-        XCTAssertEqual(catalog.snapshot(), before)
-        XCTAssertNil(catalog.metadata(for: "new"))
+        let before = await catalog.refresh()
+        do {
+            _ = try await catalog.toggleFavorite(voiceID: "new")
+            XCTFail("Expected catalog operation to fail")
+        } catch {}
+        let catalogActual9 = await catalog.refresh()
+        XCTAssertEqual(catalogActual9, before)
+        let catalogActual10 = await catalog.metadata(for: "new")
+        XCTAssertNil(catalogActual10)
     }
 
-    func testCatalogMigrationPreservesCollectionsAndUnknownFieldsOnRestart() throws {
+    func testCatalogMigrationPreservesCollectionsAndUnknownFieldsOnRestart() async throws {
         let url = tempRoot.appendingPathComponent("migration-catalog.json"), book = UUID(), collection = VoiceCollection(name: "夹具剧团", voiceIDs: ["voice"])
         let state = VoiceCatalogStore.PersistedState(metadataByVoiceID: ["voice": .init(voiceID: "voice", visibilityScope: .globalReusable, collectionIDs: [collection.id])], collections: [collection], preferredCollectionIDByBookID: [book: collection.id])
         var raw = try JSONSerialization.jsonObject(with: JSONEncoder().encode(state)) as! [String: Any]
@@ -351,12 +374,17 @@ final class AudiobookCastTests: XCTestCase {
         raw["collections"] = collections
         try JSONSerialization.data(withJSONObject: raw).write(to: url)
         let catalog = VoiceCatalogStore(storageURL: url)
-        try catalog.toggleFavorite(voiceID: "voice")
+        try await catalog.toggleFavorite(voiceID: "voice")
         let restarted = VoiceCatalogStore(storageURL: url)
-        XCTAssertEqual(restarted.collections, [collection])
-        XCTAssertEqual(restarted.preferredCollectionID(for: book), collection.id)
-        XCTAssertTrue(restarted.metadata(for: "voice")?.isFavorite == true)
-        XCTAssertNil(restarted.metadata(for: "voice")?.createdAt, "旧文件没有提供的创建时点保持未知")
+        _ = await restarted.refresh()
+        let catalogActual11 = await restarted.collections
+        XCTAssertEqual(catalogActual11, [collection])
+        let catalogActual12 = await restarted.preferredCollectionID(for: book)
+        XCTAssertEqual(catalogActual12, collection.id)
+        let catalogActual13 = await restarted.metadata(for: "voice")?.isFavorite == true
+        XCTAssertTrue(catalogActual13)
+        let catalogActual14 = await restarted.metadata(for: "voice")?.createdAt
+        XCTAssertNil(catalogActual14, "旧文件没有提供的创建时点保持未知")
         let envelope = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
         XCTAssertEqual(envelope["schemaVersion"] as? Int, 2)
         let saved = envelope["state"] as! [String: Any]
@@ -368,13 +396,17 @@ final class AudiobookCastTests: XCTestCase {
         XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: tempRoot.path).contains { $0.contains("migration-catalog.json.legacy.") })
     }
 
-    func testUnreadableCatalogPreservesUnknownRecords() throws {
+    func testUnreadableCatalogPreservesUnknownRecords() async throws {
         let url = tempRoot.appendingPathComponent("unknown-catalog.json")
         let data = Data("{\"schemaVersion\":999,\"unrecognized\":{\"keep\":true}}".utf8)
         try data.write(to: url)
         let catalog = VoiceCatalogStore(storageURL: url)
-        XCTAssertEqual(catalog.snapshot().loadState, .unsupportedSchema)
-        XCTAssertThrowsError(try catalog.toggleFavorite(voiceID: "new"))
+        let catalogActual15 = await catalog.refresh().loadState
+        XCTAssertEqual(catalogActual15, .unsupportedSchema)
+        do {
+            _ = try await catalog.toggleFavorite(voiceID: "new")
+            XCTFail("Expected catalog operation to fail")
+        } catch {}
         XCTAssertEqual(try Data(contentsOf: url), data)
     }
 
@@ -417,15 +449,19 @@ final class AudiobookCastTests: XCTestCase {
         XCTAssertFalse(missingOrigin.permits(voice, bookID: book))
     }
 
-    func testCatalogReadFailureIsNotEmptyCatalog() throws {
+    func testCatalogReadFailureIsNotEmptyCatalog() async throws {
         let url = tempRoot.appendingPathComponent("catalog.json")
-        XCTAssertEqual(VoiceCatalogStore(storageURL: url).snapshot().loadState, .missing)
+        let catalogActual16 = await VoiceCatalogStore(storageURL: url).refresh().loadState
+        XCTAssertEqual(catalogActual16, .missing)
         try Data("broken json".utf8).write(to: url)
-        XCTAssertEqual(VoiceCatalogStore(storageURL: url).snapshot().loadState, .unreadable)
+        let catalogActual17 = await VoiceCatalogStore(storageURL: url).refresh().loadState
+        XCTAssertEqual(catalogActual17, .unreadable)
         try Data(#"{"schema_version":99}"#.utf8).write(to: url)
-        XCTAssertEqual(VoiceCatalogStore(storageURL: url).snapshot().loadState, .unsupportedSchema)
+        let catalogActual18 = await VoiceCatalogStore(storageURL: url).refresh().loadState
+        XCTAssertEqual(catalogActual18, .unsupportedSchema)
         try JSONEncoder().encode(VoiceCatalogStore.PersistedState()).write(to: url)
-        XCTAssertEqual(VoiceCatalogStore(storageURL: url).snapshot().loadState, .ready)
+        let catalogActual19 = await VoiceCatalogStore(storageURL: url).refresh().loadState
+        XCTAssertEqual(catalogActual19, .ready)
     }
 
     func testAliasesDoNotIncreaseVoiceCapacity() {
@@ -458,7 +494,7 @@ final class AudiobookCastTests: XCTestCase {
         XCTAssertFalse(catalog.permits(voices[0], bookID: UUID()))
     }
 
-    func testCatalogIdentityMismatchFailsClosedAndChangesRevision() throws {
+    func testCatalogIdentityMismatchFailsClosedAndChangesRevision() async throws {
         let voice = makeTestSafeVoice(id: "A", name: "A", mode: "clone"), book = UUID()
         let metadata = VoiceAssetMetadata(voiceID: "B", visibilityScope: .bookExclusive, originBookID: book)
         let mismatched = VoiceCatalogSnapshot(state: .init(metadataByVoiceID: ["A": metadata]))
@@ -468,7 +504,7 @@ final class AudiobookCastTests: XCTestCase {
         let url = tempRoot.appendingPathComponent("mismatched.json")
         let data = try JSONEncoder().encode(mismatched.state)
         try data.write(to: url)
-        let loaded = VoiceCatalogStore(storageURL: url).snapshot()
+        let loaded = await VoiceCatalogStore(storageURL: url).refresh()
         XCTAssertEqual(loaded.loadState, .unreadable)
         XCTAssertFalse(loaded.permits(voice, bookID: book))
         XCTAssertEqual(try Data(contentsOf: url), data, "拒绝读取不能覆盖未知记录")
@@ -597,11 +633,12 @@ final class AudiobookCastTests: XCTestCase {
         XCTAssertEqual(Set(first.issues.map(\.id)), Set(second.issues.map(\.id)))
     }
 
-    func testNewEnsembleVoiceRemainsScopedToItsBook() throws {
+    func testNewEnsembleVoiceRemainsScopedToItsBook() async throws {
         let catalog = VoiceCatalogStore(), book = UUID()
-        let metadata = try catalog.registerArchetypeEnsembleVoice(voiceID: "ensemble", bookID: book, bookTitle: "夹具", archetype: .youngMale)
+        let metadata = try await catalog.registerArchetypeEnsembleVoice(voiceID: "ensemble", bookID: book, bookTitle: "夹具", archetype: .youngMale)
         XCTAssertEqual(metadata.visibilityScope, .bookExclusive)
-        XCTAssertFalse(catalog.snapshot().permits(makeTestSafeVoice(id: "ensemble", name: "群像", mode: "clone"), bookID: UUID()))
+        let catalogActual20 = await catalog.refresh().permits(makeTestSafeVoice(id: "ensemble", name: "群像", mode: "clone"), bookID: UUID())
+        XCTAssertFalse(catalogActual20)
     }
 
     func testBatchConflictNeverEnablesSharing() async throws {
@@ -662,7 +699,7 @@ final class AudiobookCastTests: XCTestCase {
         XCTAssertTrue(result.issues.contains { $0.code == .searchBudgetExceeded })
     }
 
-    func testClonePolicyOmitsCallerSeed() {
+    func testClonePolicyOmitsCallerSeed() async {
         let role = AudiobookCharacter(bookID: UUID(), displayName: "配角")
         for slot in 0..<8 {
             let policy = AudiobookCastRegistry.computeMicroProsodyAndSeed(
@@ -2489,7 +2526,7 @@ final class AudiobookCastTests: XCTestCase {
         XCTAssertEqual(updatedBindings[fixture.hero.id]?.voiceID, heroOriginalVoice, "核心主角音色绝不可被声部批量换绑覆盖")
     }
 
-    func testAC7_AC8_AC9_AC10_100PlusVoiceScopeIsolationPromotionTaxonomyAndCollections() throws {
+    func testAC7_AC8_AC9_AC10_100PlusVoiceScopeIsolationPromotionTaxonomyAndCollections() async throws {
         let catalogURL = tempRoot.appendingPathComponent("test_voice_catalog.json")
         let catalogStore = VoiceCatalogStore(storageURL: catalogURL)
 
@@ -2504,7 +2541,7 @@ final class AudiobookCastTests: XCTestCase {
         )
 
         // AC7：注册《书籍 A》角色专用音色与《书籍 B》30 个角色专用音色
-        try catalogStore.registerBookExclusiveVoice(
+        try await catalogStore.registerBookExclusiveVoice(
             voiceID: "v_bookA_lindong",
             bookID: bookA,
             bookTitle: "武动乾坤",
@@ -2519,7 +2556,7 @@ final class AudiobookCastTests: XCTestCase {
 
         for i in 1...30 {
             let vid = "v_bookB_role_\(i)"
-            try catalogStore.registerBookExclusiveVoice(
+            try await catalogStore.registerBookExclusiveVoice(
                 voiceID: vid,
                 bookID: bookB,
                 bookTitle: "他书B",
@@ -2546,15 +2583,15 @@ final class AudiobookCastTests: XCTestCase {
             voices.append(v)
             let resolved = AudiobookCastRegistry.resolveVoiceArchetype(
                 for: v,
-                metadata: catalogStore.metadata(for: vid)
+                metadata: await catalogStore.metadata(for: vid)
             )
             XCTAssertEqual(resolved, sample.2, "100+ 音色必须准确自动归入六大声部行当")
         }
 
         // 验证《书籍 A》选角时：100% 隔离《书籍 B》的 30 个专用音色，且「林动」精准匹配其专属音色
         for i in 1...30 {
-            XCTAssertFalse(
-                catalogStore.isVoiceActiveForBook(voiceID: "v_bookB_role_\(i)", currentBookID: bookA),
+            let catalogActual21 = await catalogStore.isVoiceActiveForBook(voiceID: "v_bookB_role_\(i)", currentBookID: bookA)
+            XCTAssertFalse(catalogActual21,
                 "其他书籍的专用音色不得出现在当前书活跃池中"
             )
         }
@@ -2562,20 +2599,24 @@ final class AudiobookCastTests: XCTestCase {
             characters: [AudiobookCharacter(bookID: bookA, displayName: "旁白", isNarrator: true), roleHeroA],
             availableVoices: voices,
             bookID: bookA,
-            voiceMetadataByID: catalogStore.metadataByVoiceID
+            voiceMetadataByID: await catalogStore.metadataByVoiceID
         )
         XCTAssertEqual(bindingsA[roleHeroA.id]?.voiceID, "v_bookA_lindong")
 
         // AC8：将《书籍 B》专用音色一键晋升为全局通用音色后，对《书籍 A》与演播台立即可见
-        try catalogStore.promoteToGlobalReusable(voiceID: "v_bookB_role_1")
-        XCTAssertTrue(catalogStore.isVoiceActiveForBook(voiceID: "v_bookB_role_1", currentBookID: bookA))
-        XCTAssertTrue(catalogStore.isVoiceActiveForBook(voiceID: "v_bookB_role_1", currentBookID: nil))
-        XCTAssertEqual(catalogStore.metadata(for: "v_bookB_role_1")?.originBookTitle, "他书B")
+        try await catalogStore.promoteToGlobalReusable(voiceID: "v_bookB_role_1")
+        let catalogActual22 = await catalogStore.isVoiceActiveForBook(voiceID: "v_bookB_role_1", currentBookID: bookA)
+        XCTAssertTrue(catalogActual22)
+        let catalogActual23 = await catalogStore.isVoiceActiveForBook(voiceID: "v_bookB_role_1", currentBookID: nil)
+        XCTAssertTrue(catalogActual23)
+        let catalogActual24 = await catalogStore.metadata(for: "v_bookB_role_1")?.originBookTitle
+        XCTAssertEqual(catalogActual24, "他书B")
 
         // AC10：创建剧团音色包并验证优先选角与归档隔离
-        let collection = try catalogStore.createCollection(name: "古风仙侠剧团包", voiceIDs: ["v_global_1"])
-        try catalogStore.archiveVoices(voiceIDs: ["v_global_7"])
-        XCTAssertFalse(catalogStore.isVoiceActiveForBook(voiceID: "v_global_7", currentBookID: bookA))
+        let collection = try await catalogStore.createCollection(name: "古风仙侠剧团包", voiceIDs: ["v_global_1"])
+        try await catalogStore.archiveVoices(voiceIDs: ["v_global_7"])
+        let catalogActual25 = await catalogStore.isVoiceActiveForBook(voiceID: "v_global_7", currentBookID: bookA)
+        XCTAssertFalse(catalogActual25)
 
         let newLead = AudiobookCharacter(bookID: bookB, displayName: "新书少年男主", isNarrator: false, isMajor: true, allowSharedMinorVoice: false)
         let bindingsWithCollection = recommendTestBindings(
@@ -2583,7 +2624,7 @@ final class AudiobookCastTests: XCTestCase {
             availableVoices: voices.filter { !$0.id.hasPrefix("v_bookB_") },
             bookID: bookB,
             preferredCollectionID: collection.id,
-            voiceMetadataByID: catalogStore.metadataByVoiceID
+            voiceMetadataByID: await catalogStore.metadataByVoiceID
         )
         XCTAssertEqual(bindingsWithCollection[newLead.id]?.voiceID, "v_global_1", "绑定剧团音色包后应优先从该合集中选角")
     }
@@ -2932,7 +2973,8 @@ final class AudiobookCastTests: XCTestCase {
         XCTAssertEqual(mergedVoices.count, 10, "选择器保留已生成资产供后续检查")
         let heroBinding = try XCTUnwrap(workflow.voiceBindings[fixture.hero.id])
         XCTAssertFalse(heroBinding.voiceID.hasPrefix("ab_"), "新增声音不能自动覆盖已有绑定")
-        XCTAssertNil(deps.voiceCatalog.metadata(for: heroBinding.voiceID), "原系统预设仍保持原来的选择")
+        let originalVoiceMetadata = await deps.voiceCatalog.metadata(for: heroBinding.voiceID)
+        XCTAssertNil(originalVoiceMetadata, "原系统预设仍保持原来的选择")
 
         // 5. 确认合法的系统配声后进入制作；新增的未验收声音不参与正式制作。
         await workflow.confirmCastAndAudition()

@@ -88,9 +88,26 @@ public actor AudiobookProjectStore {
     private var cachedSourceIndices: [UUID: (sha256: String, index: AudiobookSourceIndex)] = [:]
     private var cachedCharactersByBook: [UUID: [AudiobookCharacter]] = [:]
     private var cachedAnnotationsByBook: [UUID: [AudiobookAnnotation]] = [:]
+    private var cachedBookOrder: [UUID] = []
     private var startupRunningBookUpdatedAt: [UUID: Double] = [:]
     private var didApplyStartupRecovery = false
     private var castingScoreCache = AudiobookCastingScoreCache()
+
+    // The foreground book and a concurrently producing book can share the store without unbounded retained indexes.
+    private func touchBookCache(_ bookID: UUID) {
+        cachedBookOrder.removeAll { $0 == bookID }
+        cachedBookOrder.append(bookID)
+        while cachedBookOrder.count > 2 {
+            let old = cachedBookOrder.removeFirst()
+            cachedSourceIndices.removeValue(forKey: old)
+            cachedCharactersByBook.removeValue(forKey: old)
+            cachedAnnotationsByBook.removeValue(forKey: old)
+        }
+    }
+
+    func workspaceStoreCacheCounts() -> (sourceIndices: Int, characters: Int, annotations: Int) {
+        (cachedSourceIndices.count, cachedCharactersByBook.count, cachedAnnotationsByBook.count)
+    }
 
     public static var defaultRootURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -396,9 +413,106 @@ public actor AudiobookProjectStore {
             """, [.text(durable.progress.bookID.uuidString), .text(json)])
     }
 
+    /// A synchronous read transaction cannot be interleaved with this actor's writers.
+    func loadWorkspaceInput(bookID: UUID, chapterID: UUID?) throws -> AudiobookWorkspaceInput {
+        try AppPerformanceMetrics.shared.measure(.workspaceRead) {
+            try inReadTransaction {
+                try Task.checkCancellation()
+                guard let book = try fetchBook(id: bookID) else { throw AudiobookStoreError.bookNotFound(bookID) }
+                let chapters = try fetchChapters(bookID: bookID)
+                let selectedID = chapterID.flatMap { id in chapters.contains(where: { $0.id == id }) ? id : nil } ?? chapters.first?.id
+                let source = try readSourceIndex(bookID: bookID)
+                let chapter = try chapterWorkspaceInput(bookID: bookID, chapterID: selectedID, source: source)
+                let characters = try fetchCharacters(bookID: bookID)
+                let bindings = try fetchVoiceBindings(bookID: bookID)
+                let exports = try fetchExportRecords(bookID: bookID)
+                let checkpoint = try productionCheckpoint(for: bookID)
+                let annotations = try fetchAnnotations(bookID: bookID, chapterID: nil)
+                cachedCharactersByBook[bookID] = characters
+                cachedAnnotationsByBook[bookID] = annotations
+                let digest = AudiobookCastingDigest.hash([
+                    AudiobookCastingDigest.hash(book), AudiobookCastingDigest.hash(chapters),
+                    AudiobookCastingDigest.hash(characters), AudiobookCastingDigest.hash(bindings.values.sorted { $0.roleID.uuidString < $1.roleID.uuidString }),
+                    AudiobookCastingDigest.hash(exports), AudiobookCastingDigest.hash(checkpoint),
+                    AudiobookCastingDigest.hash(annotations), chapter.revision.contentDigest
+                ])
+                try Task.checkCancellation()
+                return .init(book: book, chapters: chapters, characters: characters, bindings: bindings, exports: exports,
+                    checkpoint: checkpoint, annotations: annotations, chapter: chapter, changeToken: try workspaceChangeToken(),
+                    revision: .init(sourceSHA: book.sourceSHA256, contentDigest: digest))
+            }
+        }
+    }
+
+    func loadChapterWorkspaceInput(bookID: UUID, chapterID: UUID?) throws -> AudiobookChapterWorkspaceInput {
+        try AppPerformanceMetrics.shared.measure(.workspaceRead) {
+            try inReadTransaction {
+                try Task.checkCancellation()
+                if let chapterID, try !fetchChapters(bookID: bookID).contains(where: { $0.id == chapterID }) {
+                    throw AudiobookStoreError.chapterNotFound(chapterID)
+                }
+                return try chapterWorkspaceInput(bookID: bookID, chapterID: chapterID, source: readSourceIndex(bookID: bookID))
+            }
+        }
+    }
+
+    private func chapterWorkspaceInput(bookID: UUID, chapterID: UUID?, source: AudiobookSourceIndex) throws -> AudiobookChapterWorkspaceInput {
+        let atoms = try chapterID.map { try fetchAtoms(bookID: bookID, chapterID: $0).filter { $0.kind != .formatting } } ?? []
+        let annotations = try chapterID.map { try fetchAnnotations(bookID: bookID, chapterID: $0) } ?? []
+        let fragments = try chapterID.map { try fetchFragments(bookID: bookID, chapterID: $0) } ?? []
+        var work = AudiobookWorkspaceReadWork()
+        let candidates = try fetchWorkspaceCandidates(bookID: bookID, fragmentIDs: fragments.map(\.id), work: &work)
+        let digest = AudiobookCastingDigest.hash([
+            chapterID?.uuidString ?? "", source.sourceSHA256, AudiobookCastingDigest.hash(atoms),
+            AudiobookCastingDigest.hash(annotations), AudiobookCastingDigest.hash(fragments), AudiobookCastingDigest.hash(candidates)
+        ])
+        return .init(bookID: bookID, chapterID: chapterID, source: source, atoms: atoms, annotations: annotations,
+            fragments: fragments, candidates: candidates, revision: .init(sourceSHA: source.sourceSHA256, contentDigest: digest), work: work, changeToken: try workspaceChangeToken())
+    }
+
+    private func fetchWorkspaceCandidates(bookID: UUID, fragmentIDs: [UUID], work: inout AudiobookWorkspaceReadWork) throws -> [AudiobookRenderCandidate] {
+        var candidates: [AudiobookRenderCandidate] = []
+        for start in stride(from: 0, to: fragmentIDs.count, by: 500) {
+            try Task.checkCancellation()
+            let ids = fragmentIDs[start..<min(start + 500, fragmentIDs.count)]
+            let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
+            let sql = """
+                SELECT id, book_id, chapter_id, fragment_id, task_id, generation,
+                       relative_asset_path, file_sha256, pcm_sha256, frame_count, sample_rate,
+                       dependency_digest, request_id, receipt_digest, recipe_summary, is_receipt_verified, created_at
+                FROM render_candidates WHERE book_id = ? AND fragment_id IN (\(placeholders)) ORDER BY created_at DESC;
+                """
+            work.candidateQueries += 1
+            let args: [SQLValue] = [.text(bookID.uuidString)] + ids.map { .text($0.uuidString) }
+            try withPrepared(sql, args) { statement in
+                var status = sqlite3_step(statement)
+                while status == SQLITE_ROW {
+                    if work.candidateRowsRead.isMultiple(of: 128) { try Task.checkCancellation() }
+                    work.candidateRowsRead += 1
+                    if let candidate = Self.decodeCandidateRow(statement) { candidates.append(candidate) }
+                    status = sqlite3_step(statement)
+                }
+                guard status == SQLITE_DONE else {
+                    throw AudiobookStoreError.statementFailed(String(cString: sqlite3_errmsg(try requireHandle())))
+                }
+                work.candidateVMSteps += Int(sqlite3_stmt_status(statement, SQLITE_STMTSTATUS_VM_STEP, 0))
+                work.candidateFullScanSteps += Int(sqlite3_stmt_status(statement, SQLITE_STMTSTATUS_FULLSCAN_STEP, 0))
+            }
+        }
+        return candidates.sorted { $0.createdAt == $1.createdAt ? $0.id.uuidString < $1.id.uuidString : $0.createdAt > $1.createdAt }
+    }
+
+    /// Cheap wakeup token; chapter content revision still decides whether projection changes.
+    func workspaceChangeToken() throws -> AudiobookWorkspaceChangeToken {
+        let pointer = try requireHandle()
+        let externalVersion = try countRows("PRAGMA data_version;", [])
+        return .init(localChanges: sqlite3_total_changes64(pointer), externalVersion: externalVersion)
+    }
+
     public func sourceIndex(for bookID: UUID) async throws -> AudiobookSourceIndex { try readSourceIndex(bookID: bookID) }
 
     private func readSourceIndex(bookID: UUID) throws -> AudiobookSourceIndex {
+        touchBookCache(bookID)
         guard let book = try fetchBook(id: bookID) else {
             throw AudiobookStoreError.bookNotFound(bookID)
         }
@@ -500,6 +614,7 @@ public actor AudiobookProjectStore {
     }
 
     public func characters(for bookID: UUID) async throws -> [AudiobookCharacter] {
+        touchBookCache(bookID)
         if let cached = cachedCharactersByBook[bookID] {
             return cached
         }
@@ -1023,6 +1138,7 @@ public actor AudiobookProjectStore {
     }
 
     public func annotations(for bookID: UUID, chapterID: UUID? = nil) async throws -> [AudiobookAnnotation] {
+        touchBookCache(bookID)
         if let cachedAll = cachedAnnotationsByBook[bookID] {
             if let chapterID {
                 return cachedAll.filter { $0.chapterID == chapterID }
@@ -1892,6 +2008,19 @@ public actor AudiobookProjectStore {
             let detail = errMsg.map { String(cString: $0) } ?? String(cString: sqlite3_errmsg(pointer))
             sqlite3_free(errMsg)
             throw AudiobookStoreError.statementFailed(detail)
+        }
+    }
+
+    private func inReadTransaction<T>(_ block: () throws -> T) throws -> T {
+        let pointer = try requireHandle()
+        try Self.execSQL(pointer, "BEGIN DEFERRED TRANSACTION;")
+        do {
+            let result = try block()
+            try Self.execSQL(pointer, "COMMIT TRANSACTION;")
+            return result
+        } catch {
+            try? Self.execSQL(pointer, "ROLLBACK TRANSACTION;")
+            throw error
         }
     }
 

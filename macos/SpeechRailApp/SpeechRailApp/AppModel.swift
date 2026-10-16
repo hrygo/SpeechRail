@@ -60,6 +60,8 @@ public final class AppModel {
         )
     }
 
+    public var voiceCatalogModel: VoiceCatalogModel { audiobookWorkflow.voiceCatalogModel }
+
     public var service: ServiceSnapshot { engine.service }
 
     public var serviceConnectionHost: String? { engine.serviceConnectionHost }
@@ -203,7 +205,7 @@ public final class AppModel {
 
     public var playingDubbingCandidateID: String? { playback.playingDubbingCandidateID }
 
-    public var dubbingExportBundle: DubbingExportBundle? { dubbingWorkflow.dubbingExportBundle }
+    public var preparedDubbingExport: PreparedDubbingExport? { dubbingWorkflow.preparedDubbingExport }
 
     public var isCreatingVoicePreview: Bool { voiceWorkflow.isCreatingVoicePreview }
 
@@ -472,13 +474,15 @@ public final class AppModel {
 
     public func waveformEnvelope(forWorkID id: String) -> [CGFloat]? { playback.waveformEnvelope(kind: "work", id: id) }
 
-    public func prepareWaveform(for work: CreativeWork) {
-        dubbingWorkflow.prepareWaveform(for: work)
+    public func prepareWaveform(for work: CreativeWork) async {
+        await dubbingWorkflow.prepareWaveform(for: work)
     }
 
     @discardableResult
     public func refreshCreatorVoices() async -> Bool {
-        await voiceWorkflow.refreshCreatorVoices()
+        await voiceCatalogModel.startObserving()
+        await voiceCatalogModel.refresh()
+        return await voiceWorkflow.refreshCreatorVoices()
     }
 
     @discardableResult
@@ -495,25 +499,25 @@ public final class AppModel {
         try await dubbingWorkflow.lookupWorkReceipt(work)
     }
 
-    public func refreshWorks() {
-        dubbingWorkflow.refreshWorks()
+    public func refreshWorks() async {
+        await dubbingWorkflow.refreshWorks()
     }
 
     public var deletedWorksSummary: CreativeWorkRecoverySummary? { dubbingWorkflow.deletedWorksSummary }
 
     public var deletedWorksMessage: String? { dubbingWorkflow.deletedWorksMessage }
 
-    public func refreshDeletedWorks() {
-        dubbingWorkflow.refreshDeletedWorks()
+    public func refreshDeletedWorks() async {
+        await dubbingWorkflow.refreshDeletedWorks()
     }
 
     @discardableResult
-    public func trashDeletedWorks() -> Bool {
-        dubbingWorkflow.trashDeletedWorks()
+    public func trashDeletedWorks() async -> Bool {
+        await dubbingWorkflow.trashDeletedWorks()
     }
 
-    public func loadWorkAudio(_ work: CreativeWork) throws -> Data {
-        try dubbingWorkflow.loadWorkAudio(work)
+    public func loadWorkAudio(_ work: CreativeWork) async throws -> Data {
+        try await dubbingWorkflow.loadWorkAudio(work)
     }
 
     public func workAudioURL(_ work: CreativeWork) -> URL? {
@@ -521,13 +525,13 @@ public final class AppModel {
     }
 
     @discardableResult
-    public func deleteWork(_ work: CreativeWork) -> Bool {
-        dubbingWorkflow.deleteWork(work)
+    public func deleteWork(_ work: CreativeWork) async -> Bool {
+        await dubbingWorkflow.deleteWork(work)
     }
 
     @discardableResult
-    public func renameWork(_ work: CreativeWork, title: String) -> Bool {
-        dubbingWorkflow.renameWork(work, title: title)
+    public func renameWork(_ work: CreativeWork, title: String) async -> Bool {
+        await dubbingWorkflow.renameWork(work, title: title)
     }
 
     public static func previewLanguage(forVoiceID voiceID: String) -> VoicePreviewLanguage {
@@ -567,8 +571,8 @@ public final class AppModel {
     }
 
     @discardableResult
-    public func savePendingDubbing() -> CreativeWork? {
-        dubbingWorkflow.savePendingDubbing()
+    public func savePendingDubbing() async -> CreativeWork? {
+        await dubbingWorkflow.savePendingDubbing()
     }
 
     public func playPendingDubbing() {
@@ -579,40 +583,40 @@ public final class AppModel {
 
     public var unusedDubbingCandidateCount: Int { dubbingWorkflow.unusedDubbingCandidateCount }
 
-    public func refreshDubbingProjects() {
-        dubbingWorkflow.refreshDubbingProjects()
+    public func refreshDubbingProjects() async {
+        await dubbingWorkflow.refreshDubbingProjects()
     }
 
     @discardableResult
-    public func openDubbingProject(_ id: String) -> Bool {
-        dubbingWorkflow.openDubbingProject(id)
+    public func openDubbingProject(_ id: String) async -> Bool {
+        await dubbingWorkflow.openDubbingProject(id)
     }
 
     @discardableResult
-    public func deleteDubbingCandidate(_ candidate: DubbingCandidate) -> Bool {
-        dubbingWorkflow.deleteDubbingCandidate(candidate)
+    public func deleteDubbingCandidate(_ candidate: DubbingCandidate) async -> Bool {
+        await dubbingWorkflow.deleteDubbingCandidate(candidate)
     }
 
     @discardableResult
-    public func discardUnusedDubbingCandidates() -> Bool {
-        dubbingWorkflow.discardUnusedDubbingCandidates()
+    public func discardUnusedDubbingCandidates() async -> Bool {
+        await dubbingWorkflow.discardUnusedDubbingCandidates()
     }
 
     @discardableResult
-    public func deleteCurrentDubbingProject() -> Bool {
-        dubbingWorkflow.deleteCurrentDubbingProject()
+    public func deleteCurrentDubbingProject() async -> Bool {
+        await dubbingWorkflow.deleteCurrentDubbingProject()
     }
 
     public var dubbingConditionsMessage: String? { dubbingWorkflow.dubbingConditionsMessage }
 
     @discardableResult
-    public func rebuildDubbingProject(using candidate: DubbingCandidate) -> Bool {
-        dubbingWorkflow.rebuildDubbingProject(using: candidate)
+    public func rebuildDubbingProject(using candidate: DubbingCandidate) async -> Bool {
+        await dubbingWorkflow.rebuildDubbingProject(using: candidate)
     }
 
     @discardableResult
-    public func startDubbingProject(for work: CreativeWork) -> DubbingProject? {
-        dubbingWorkflow.startDubbingProject(for: work)
+    public func startDubbingProject(for work: CreativeWork) async -> DubbingProject? {
+        await dubbingWorkflow.startDubbingProject(for: work)
     }
 
     public func closeDubbingProject() {
@@ -629,31 +633,31 @@ public final class AppModel {
         dubbingWorkflow.cancelDubbingSegmentRedo()
     }
 
-    public func playDubbingCandidate(_ candidate: DubbingCandidate) {
-        dubbingWorkflow.playDubbingCandidate(candidate)
+    public func playDubbingCandidate(_ candidate: DubbingCandidate) async {
+        await dubbingWorkflow.playDubbingCandidate(candidate)
     }
 
     @discardableResult
-    public func adoptDubbingCandidate(_ candidate: DubbingCandidate) -> Bool {
-        dubbingWorkflow.adoptDubbingCandidate(candidate)
+    public func adoptDubbingCandidate(_ candidate: DubbingCandidate) async -> Bool {
+        await dubbingWorkflow.adoptDubbingCandidate(candidate)
     }
 
     @discardableResult
-    public func undoDubbingAdoption(inSegment segmentID: String) -> Bool {
-        dubbingWorkflow.undoDubbingAdoption(inSegment: segmentID)
+    public func undoDubbingAdoption(inSegment segmentID: String) async -> Bool {
+        await dubbingWorkflow.undoDubbingAdoption(inSegment: segmentID)
     }
 
-    public func prepareDubbingExport() {
-        dubbingWorkflow.prepareDubbingExport()
+    public func prepareDubbingExport() async {
+        await dubbingWorkflow.prepareDubbingExport()
     }
 
     @discardableResult
-    public func writeDubbingExport(to directory: URL) -> Bool {
-        dubbingWorkflow.writeDubbingExport(to: directory)
+    public func writeDubbingExport(to directory: URL) async -> Bool {
+        await dubbingWorkflow.writeDubbingExport(to: directory)
     }
 
-    public func discardDubbingExport() {
-        dubbingWorkflow.discardDubbingExport()
+    public func discardDubbingExport() async {
+        await dubbingWorkflow.discardDubbingExport()
     }
 
     static func dubbingErrorMessage(for error: Error) -> String {
@@ -677,8 +681,8 @@ public final class AppModel {
         voiceWorkflow.clearLastRegisteredCloneVoice()
     }
 
-    public func playWork(_ work: CreativeWork) {
-        dubbingWorkflow.playWork(work)
+    public func playWork(_ work: CreativeWork) async {
+        await dubbingWorkflow.playWork(work)
     }
 
     public func refreshDiscovery() async {

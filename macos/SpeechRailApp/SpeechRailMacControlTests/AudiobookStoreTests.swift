@@ -220,6 +220,7 @@ final class AudiobookStoreTests: XCTestCase {
             } catch {}
             let reopened = try AudiobookProjectStore(root: root)
             let restartedCatalog = VoiceCatalogStore(storageURL: catalogURL)
+            _ = await restartedCatalog.refresh()
             let restarted = AudiobookCastController(store: reopened, capabilityProvider: { snapshot }, voiceCatalog: restartedCatalog)
             try await restarted.recoverVoiceRegistrations(bookID: book)
             try await restarted.recoverVoiceRegistrations(bookID: book)
@@ -228,11 +229,12 @@ final class AudiobookStoreTests: XCTestCase {
             let intents = try await reopened.voiceRegistrationIntents(bookID: book, includeCompleted: true)
             XCTAssertEqual(intents.count, 1)
             XCTAssertEqual(intents.first?.phase, .completed)
-            let meta = restartedCatalog.metadata(for: "v1")
+            let meta = await restartedCatalog.metadata(for: "v1")
             XCTAssertEqual(meta?.creationSource, .instantClone)
             XCTAssertEqual(meta?.visibilityScope, .bookExclusive)
             XCTAssertEqual(meta?.originBookID, book)
-            XCTAssertFalse(restartedCatalog.isVoiceActiveForBook(voiceID: "v1", currentBookID: UUID()))
+            let catalogActual1 = await restartedCatalog.isVoiceActiveForBook(voiceID: "v1", currentBookID: UUID())
+            XCTAssertFalse(catalogActual1)
             XCTAssertTrue(try sqlite(root, sql: "PRAGMA foreign_key_check;").isEmpty)
         }
     }
@@ -256,7 +258,8 @@ final class AudiobookStoreTests: XCTestCase {
         XCTAssertEqual(saved[role.id], newer)
         let intents = try await store.voiceRegistrationIntents(bookID: book, includeCompleted: true)
         XCTAssertEqual(intents.first?.phase, .needsReview)
-        XCTAssertEqual(catalog.metadata(for: "v1")?.visibilityScope, .bookExclusive)
+        let catalogActual2 = await catalog.metadata(for: "v1")?.visibilityScope
+        XCTAssertEqual(catalogActual2, .bookExclusive)
     }
 
     func testBatchImpactAndUndoPreserveAdoptedVersion() async throws {
@@ -285,7 +288,7 @@ final class AudiobookStoreTests: XCTestCase {
         let first = AudiobookVoiceBinding(roleID: narrator.id, voiceID: "v0", voiceRevision: nil, modelRevision: String(repeating: "a", count: 40))
         try await controller.bindVoice(bookID: book, roleID: narrator.id, binding: first)
         let second = AudiobookVoiceBinding(roleID: narrator.id, voiceID: "v1", voiceRevision: nil, modelRevision: String(repeating: "a", count: 40))
-        let plan = try await store.prepareVoiceReplacement(bookID: book, bindings: [second], snapshot: snapshot, catalog: catalog.snapshot())
+        let plan = try await store.prepareVoiceReplacement(bookID: book, bindings: [second], snapshot: snapshot, catalog: await catalog.refresh())
         XCTAssertEqual(plan.affectedRoleIDs, [narrator.id])
         XCTAssertFalse(plan.affectedFragmentIDs.isEmpty)
         do { _ = try await controller.bindVoicesBatch(bookID: book, bindings: [second]); XCTFail("默认批量入口不可覆盖既有配声") } catch {}
@@ -365,7 +368,7 @@ final class AudiobookStoreTests: XCTestCase {
         try await store.saveCharacters(bookID: book, characters: roles)
         let binding = AudiobookVoiceBinding(roleID: roles[index].id, voiceID: "v1", voiceRevision: nil, modelRevision: String(repeating: "a", count: 40))
         let catalog = VoiceCatalogStore()
-        let plan = try await store.prepareVoiceReplacement(bookID: book, bindings: [binding], snapshot: snapshot, catalog: catalog.snapshot())
+        let plan = try await store.prepareVoiceReplacement(bookID: book, bindings: [binding], snapshot: snapshot, catalog: await catalog.refresh())
         let controller = AudiobookCastController(store: store, capabilityProvider: { snapshot }, voiceCatalog: catalog)
         do { try await controller.applyCastingPlan(bookID: book, plan: plan, acknowledgedIssueIDs: plan.requiredAcknowledgements); XCTFail("必需画像条件不能被手工入口绕过") } catch {}
         let bindings = try await store.voiceBindings(for: book)
@@ -404,8 +407,8 @@ final class AudiobookStoreTests: XCTestCase {
         let (store, root, book, snapshot) = try await makeCastingFixture()
         defer { try? FileManager.default.removeItem(at: root) }
         let catalog = VoiceCatalogStore()
-        let plan = try await store.prepareCastingPlan(bookID: book, snapshot: snapshot, catalog: catalog.snapshot())
-        try catalog.archiveVoices(voiceIDs: [try XCTUnwrap(plan.proposedBindings.values.first?.voiceID)])
+        let plan = try await store.prepareCastingPlan(bookID: book, snapshot: snapshot, catalog: await catalog.refresh())
+        try await catalog.archiveVoices(voiceIDs: [try XCTUnwrap(plan.proposedBindings.values.first?.voiceID)])
         let controller = AudiobookCastController(store: store, capabilityProvider: { snapshot }, voiceCatalog: catalog)
         do { try await controller.applyCastingPlan(bookID: book, plan: plan, acknowledgedIssueIDs: plan.requiredAcknowledgements); XCTFail("catalog changed") } catch {}
         let bindings = try await store.voiceBindings(for: book)

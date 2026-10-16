@@ -387,12 +387,13 @@ public actor AudiobookCastController {
         }
         guard let capabilityProvider else { throw AudiobookCastError.invalidCastingPlan(reason: "capability_unavailable") }
         let current = try await capabilityProvider()
-        guard current.snapshotID == plan.snapshotID, voiceCatalog.snapshot().revision == plan.voiceCatalogRevision else {
+        let catalog = await voiceCatalog.refresh()
+        guard current.snapshotID == plan.snapshotID, catalog.revision == plan.voiceCatalogRevision else {
             throw AudiobookCastError.invalidCastingPlan(reason: "capability_or_catalog_changed")
         }
         for (id, binding) in plan.proposedBindings where plan.affectedRoleIDs.contains(id) {
             try AudiobookCastRegistry.validateRenderBinding(binding, snapshot: current)
-            guard let voice = current.voices.first(where: { $0.id == binding.voiceID }), voiceCatalog.snapshot().permits(voice, bookID: bookID) else {
+            guard let voice = current.voices.first(where: { $0.id == binding.voiceID }), catalog.permits(voice, bookID: bookID) else {
                 throw AudiobookCastError.invalidCastingPlan(reason: "voice_scope_changed")
             }
         }
@@ -413,7 +414,7 @@ public actor AudiobookCastController {
             requiredRoleIDs: await store.requiredCastingRoleIDs(bookID: bookID))
         guard let capabilityProvider else { throw AudiobookCastError.invalidCastingPlan(reason: "capability_unavailable") }
         let snapshot = try await capabilityProvider()
-        let plan = try await store.manualCastingPlan(bookID: bookID, bindings: bindings, snapshot: snapshot, catalog: voiceCatalog.snapshot(), onlyIfUnbound: onlyIfUnbound, expectedVoiceSetDigest: expectedVoiceSetDigest)
+        let plan = try await store.manualCastingPlan(bookID: bookID, bindings: bindings, snapshot: snapshot, catalog: (await voiceCatalog.refresh()), onlyIfUnbound: onlyIfUnbound, expectedVoiceSetDigest: expectedVoiceSetDigest)
         try await applyUnderMutation(bookID: bookID, plan: plan, acknowledgedIssueIDs: [])
         return bindings.count
     }
@@ -461,7 +462,7 @@ public actor AudiobookCastController {
         defer { releaseMutation(for: bookID) }
         guard let capabilityProvider else { throw AudiobookCastError.invalidCastingPlan(reason: "capability_unavailable") }
         let snapshot = try await capabilityProvider()
-        let plan = try await store.prepareCastingUndo(bookID: bookID, snapshot: snapshot, catalog: voiceCatalog.snapshot())
+        let plan = try await store.prepareCastingUndo(bookID: bookID, snapshot: snapshot, catalog: (await voiceCatalog.refresh()))
         try await applyUnderMutation(bookID: bookID, plan: plan, acknowledgedIssueIDs: [])
     }
 
@@ -616,7 +617,7 @@ public actor AudiobookCastController {
         let intent = AudiobookVoiceRegistrationIntent(id: id, bookID: context.bookID, roleID: context.roleID, voiceID: binding.voiceID,
             bookTitle: context.bookTitle.map { String($0.prefix(160)) }, roleName: context.roleDisplayName.map { String($0.prefix(160)) },
             archetype: nil, creationSource: creationSource, binding: binding, expectedCastRevisionID: context.castRevisionID,
-            expectedVoiceSetDigest: digest, expectedCatalogRevision: voiceCatalog.snapshot().revision, onlyIfUnbound: onlyIfUnbound, phase: .registered)
+            expectedVoiceSetDigest: digest, expectedCatalogRevision: (await voiceCatalog.refresh()).revision, onlyIfUnbound: onlyIfUnbound, phase: .registered)
         try await store.saveVoiceRegistrationIntent(intent)
         try registrationBoundary(.afterIntentRegistered)
         let canApply = activeBookID == context.bookID && currentGeneration(for: context.bookID) == context.generation
@@ -630,7 +631,7 @@ public actor AudiobookCastController {
         let intent = AudiobookVoiceRegistrationIntent(id: AudiobookCastingDigest.uuid("ensemble-registration-v1|\(bookID)|\(voiceID)"),
             bookID: bookID, roleID: nil, voiceID: voiceID, bookTitle: bookTitle.map { String($0.prefix(160)) }, roleName: nil,
             archetype: archetype, creationSource: .voiceDesign, binding: nil, expectedCastRevisionID: try await currentCastRevisionID(for: bookID),
-            expectedVoiceSetDigest: digest, expectedCatalogRevision: voiceCatalog.snapshot().revision, onlyIfUnbound: true, phase: .registered)
+            expectedVoiceSetDigest: digest, expectedCatalogRevision: (await voiceCatalog.refresh()).revision, onlyIfUnbound: true, phase: .registered)
         try await store.saveVoiceRegistrationIntent(intent)
         try registrationBoundary(.afterIntentRegistered)
         try await recoverRegistration(intent)
@@ -653,7 +654,7 @@ public actor AudiobookCastController {
         if intent.phase == .completed || intent.phase == .needsReview { return }
         if intent.phase == .registered {
             do {
-                try voiceCatalog.registerBookExclusiveVoice(voiceID: intent.voiceID, bookID: intent.bookID, bookTitle: intent.bookTitle,
+                try await voiceCatalog.registerBookExclusiveVoice(voiceID: intent.voiceID, bookID: intent.bookID, bookTitle: intent.bookTitle,
                     roleID: intent.roleID, roleName: intent.roleName, archetype: intent.archetype, creationSource: intent.creationSource)
             } catch VoiceCatalogError.ownershipConflict {
                 try await store.advanceVoiceRegistration(id: intent.id, from: .registered, to: .needsReview)
@@ -674,7 +675,7 @@ public actor AudiobookCastController {
                 guard let capabilityProvider else { throw AudiobookCastError.invalidCastingPlan(reason: "capability_unavailable") }
                 let snapshot = try await capabilityProvider()
                 let plan = try await store.manualCastingPlan(bookID: intent.bookID, bindings: [binding], snapshot: snapshot,
-                    catalog: voiceCatalog.snapshot(), onlyIfUnbound: intent.onlyIfUnbound, expectedVoiceSetDigest: intent.expectedVoiceSetDigest)
+                    catalog: (await voiceCatalog.refresh()), onlyIfUnbound: intent.onlyIfUnbound, expectedVoiceSetDigest: intent.expectedVoiceSetDigest)
                 try await applyUnderMutation(bookID: intent.bookID, plan: plan, acknowledgedIssueIDs: [], registrationIntentID: intent.id)
                 intent.phase = .bindingCommitted
             } else {

@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import SpeechRailControlKit
 import XCTest
 #if SWIFT_PACKAGE
@@ -60,7 +61,7 @@ final class CreativeWorkStoreTests: XCTestCase {
         }
     }
 
-    func testSuccessfulSaveRefusesDamagedPublishedAudioAndKeepsRecoveryJournal() throws {
+    func testSuccessfulSaveRefusesDamagedPublishedAudioAndKeepsRecoveryJournal() async throws {
         let root = try XCTUnwrap(directory)
         let work = makeWork(id: "work_damaged")
         let store = CreativeWorkStore(
@@ -71,10 +72,10 @@ final class CreativeWorkStoreTests: XCTestCase {
                 }
             })
         )
-        XCTAssertThrowsError(try store.save(work, audioData: Data("original".utf8))) { error in
+        await XCTAssertThrowsErrorAsync(try await store.save(work, audioData: Data("original".utf8), operationID: UUID()).value) { error in
             XCTAssertEqual(error.localizedDescription, CreativeWorkStoreError.recoveryRequired.localizedDescription)
         }
-        XCTAssertThrowsError(try CreativeWorkStore(directory: root).list()) { error in
+        await XCTAssertThrowsErrorAsync(try await CreativeWorkStore(directory: root).list()) { error in
             XCTAssertEqual(error.localizedDescription, CreativeWorkStoreError.recoveryRequired.localizedDescription)
         }
     }
@@ -104,7 +105,7 @@ final class CreativeWorkStoreTests: XCTestCase {
         )
     }
 
-    func testRenderIdentityRoundTripsThroughTheIndex() throws {
+    func testRenderIdentityRoundTripsThroughTheIndex() async throws {
         let store = CreativeWorkStore(directory: directory)
         let work = makeWork(
             id: "work_a",
@@ -112,9 +113,9 @@ final class CreativeWorkStoreTests: XCTestCase {
             planID: "plan_0123456789abcdef0123456789abcdef",
             renderRevision: 3
         )
-        try store.save(work, audioData: Data([1, 2, 3, 4]))
+        try await store.save(work, audioData: Data([1, 2, 3, 4]), operationID: UUID()).value
 
-        let loaded = try XCTUnwrap(try store.list().first)
+        let loaded = try await XCTUnwrapAsync(try await store.list().first)
 
         XCTAssertEqual(loaded.voiceRevision, "rev_7")
         XCTAssertEqual(loaded.planID, "plan_0123456789abcdef0123456789abcdef")
@@ -123,7 +124,7 @@ final class CreativeWorkStoreTests: XCTestCase {
     }
 
     /// 老 `works.json` 没有身份字段：必须原样读出来，而且**不回写磁盘**。
-    func testLegacyRecordWithoutIdentityFieldsStillLoads() throws {
+    func testLegacyRecordWithoutIdentityFieldsStillLoads() async throws {
         try FileManager.default.createDirectory(
             at: directory,
             withIntermediateDirectories: true
@@ -147,7 +148,7 @@ final class CreativeWorkStoreTests: XCTestCase {
         try Data(legacy.utf8).write(to: indexURL)
 
         let store = CreativeWorkStore(directory: directory)
-        let loaded = try XCTUnwrap(try store.list().first)
+        let loaded = try await XCTUnwrapAsync(try await store.list().first)
 
         XCTAssertEqual(loaded.id, "work_legacy")
         XCTAssertNil(loaded.voiceRevision, "老记录没有捕捉到音色 revision，读成 nil 而不是猜一个")
@@ -163,10 +164,10 @@ final class CreativeWorkStoreTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: indexURL), Data(legacy.utf8), "只读不落盘")
     }
 
-    func testNewRenderAppendsWithoutRewritingExistingProjects() throws {
+    func testNewRenderAppendsWithoutRewritingExistingProjects() async throws {
         let store = CreativeWorkStore(directory: directory)
         let first = makeWork(id: "work_first", voiceRevision: "rev_1", planID: "plan_first")
-        try store.save(first, audioData: Data([1, 2, 3, 4]))
+        try await store.save(first, audioData: Data([1, 2, 3, 4]), operationID: UUID()).value
 
         // 全局默认（音色/档位）变了之后又做了一次同一份文稿：
         // 新作品带新的 plan 与 revision，旧作品一个字都不许改。
@@ -174,14 +175,14 @@ final class CreativeWorkStoreTests: XCTestCase {
             id: "work_second",
             voiceRevision: "rev_2",
             planID: "plan_second",
-            renderRevision: try store.nextRenderRevision(
+            renderRevision: try await store.nextRenderRevision(
                 scriptText: first.scriptText,
                 voiceID: first.voiceID
             )
         )
-        try store.save(second, audioData: Data([5, 6, 7, 8]))
+        try await store.save(second, audioData: Data([5, 6, 7, 8]), operationID: UUID()).value
 
-        let works = try store.list()
+        let works = try await store.list()
         XCTAssertEqual(works.count, 2, "两次显式制作是两条记录，不是就地覆盖")
         let reloadedFirst = try XCTUnwrap(works.first { $0.id == "work_first" })
         XCTAssertEqual(reloadedFirst.voiceRevision, "rev_1")
@@ -192,13 +193,13 @@ final class CreativeWorkStoreTests: XCTestCase {
         XCTAssertEqual(reloadedSecond.renderRevision, 2, "重做一次就是新的 render revision")
     }
 
-    func testRenameKeepsTheRenderIdentityOfTheProject() throws {
+    func testRenameKeepsTheRenderIdentityOfTheProject() async throws {
         let store = CreativeWorkStore(directory: directory)
         let work = makeWork(id: "work_rename", voiceRevision: "rev_9", planID: "plan_9", renderRevision: 4)
-        try store.save(work, audioData: Data([9, 9, 9, 9]))
+        try await store.save(work, audioData: Data([9, 9, 9, 9]), operationID: UUID()).value
 
-        let renamed = try store.rename(work, title: "新名字")
-        let reloaded = try XCTUnwrap(try store.list().first)
+        let renamed = try await store.rename(work, title: "新名字", operationID: UUID()).value
+        let reloaded = try await XCTUnwrapAsync(try await store.list().first)
 
         XCTAssertEqual(renamed.title, "新名字")
         XCTAssertEqual(reloaded.voiceRevision, "rev_9")
@@ -207,21 +208,21 @@ final class CreativeWorkStoreTests: XCTestCase {
         XCTAssertEqual(reloaded.audioFileName, work.audioFileName, "改名不动音频文件")
     }
 
-    func testNextRenderRevisionOnlyCountsTheSameScriptAndVoice() throws {
+    func testNextRenderRevisionOnlyCountsTheSameScriptAndVoice() async throws {
         let store = CreativeWorkStore(directory: directory)
-        try store.save(
+        try await store.save(
             makeWork(id: "work_a", script: "甲", voiceID: "voice_a", renderRevision: 2),
             audioData: Data([1, 2])
-        )
-        try store.save(
+        , operationID: UUID()).value
+        try await store.save(
             makeWork(id: "work_b", script: "乙", voiceID: "voice_a"),
             audioData: Data([1, 2])
-        )
+        , operationID: UUID()).value
 
-        XCTAssertEqual(try store.nextRenderRevision(scriptText: "甲", voiceID: "voice_a"), 3)
-        XCTAssertEqual(try store.nextRenderRevision(scriptText: "乙", voiceID: "voice_a"), 2)
-        XCTAssertEqual(
-            try store.nextRenderRevision(scriptText: "甲", voiceID: "voice_b"),
+        try await XCTAssertEqualAsync(try await store.nextRenderRevision(scriptText: "甲", voiceID: "voice_a"), 3)
+        try await XCTAssertEqualAsync(try await store.nextRenderRevision(scriptText: "乙", voiceID: "voice_a"), 2)
+        try await XCTAssertEqualAsync(
+            try await store.nextRenderRevision(scriptText: "甲", voiceID: "voice_b"),
             1,
             "换音色就是另一条制作线，从第 1 次重新数"
         )
@@ -229,11 +230,11 @@ final class CreativeWorkStoreTests: XCTestCase {
 
     // MARK: - Recoverable persistence
 
-    func testSavingTheSameResultTwiceKeepsTheOriginalCreationDate() throws {
+    func testSavingTheSameResultTwiceKeepsTheOriginalCreationDate() async throws {
         let store = CreativeWorkStore(directory: directory)
         let audio = Data([1, 2, 3, 4])
         let first = makeWork(id: "work_same")
-        try store.save(first, audioData: audio)
+        try await store.save(first, audioData: audio, operationID: UUID()).value
 
         let retry = CreativeWork(
             id: first.id,
@@ -249,33 +250,33 @@ final class CreativeWorkStoreTests: XCTestCase {
             audioFileName: first.audioFileName
         )
 
-        let committed = try store.save(retry, audioData: audio)
+        let committed = try await store.save(retry, audioData: audio, operationID: UUID()).value
 
         assertSameWork(committed, first, audio: audio)
-        assertSameWorks(try store.list(), [first])
+        assertSameWorks(try await store.list(), [first])
     }
 
-    func testReusingAWorkIDForDifferentAudioPreservesTheOriginalWork() throws {
+    func testReusingAWorkIDForDifferentAudioPreservesTheOriginalWork() async throws {
         let store = CreativeWorkStore(directory: directory)
         let original = makeWork(id: "work_conflict")
-        try store.save(original, audioData: Data([1, 2, 3, 4]))
+        try await store.save(original, audioData: Data([1, 2, 3, 4]), operationID: UUID()).value
 
-        XCTAssertThrowsError(
-            try store.save(original, audioData: Data([9, 9, 9, 9]))
+        await XCTAssertThrowsErrorAsync(
+            try await store.save(original, audioData: Data([9, 9, 9, 9]), operationID: UUID()).value
         ) { error in
             XCTAssertEqual(error as? CreativeWorkStoreError, .workConflict)
         }
 
-        assertSameWorks(try store.list(), [original])
-        XCTAssertEqual(try store.loadAudio(for: original), Data([1, 2, 3, 4]))
+        assertSameWorks(try await store.list(), [original])
+        try await XCTAssertEqualAsync(try await store.loadAudio(for: original), Data([1, 2, 3, 4]))
     }
 
-    func testIndexWriteFailureBeforeCommitLeavesTheOriginalWorkIntact() throws {
+    func testIndexWriteFailureBeforeCommitLeavesTheOriginalWorkIntact() async throws {
         let original = makeWork(id: "work_existing")
-        try CreativeWorkStore(directory: directory).save(
+        try await CreativeWorkStore(directory: directory).save(
             original,
             audioData: Data([1, 2, 3, 4])
-        )
+        , operationID: UUID()).value
         let failing = CreativeWorkFileOperations(
             writeInterceptor: { url, _ in
                 if url.lastPathComponent == "works.json" {
@@ -286,10 +287,10 @@ final class CreativeWorkStoreTests: XCTestCase {
         let store = CreativeWorkStore(directory: directory, fileOperations: failing)
         let added = makeWork(id: "work_added", script: "第二份文稿")
 
-        XCTAssertThrowsError(try store.save(added, audioData: Data([5, 6, 7, 8])))
+        await XCTAssertThrowsErrorAsync(try await store.save(added, audioData: Data([5, 6, 7, 8]), operationID: UUID()).value)
 
-        assertSameWorks(try store.list(), [original])
-        XCTAssertEqual(try store.loadAudio(for: original), Data([1, 2, 3, 4]))
+        assertSameWorks(try await store.list(), [original])
+        try await XCTAssertEqualAsync(try await store.loadAudio(for: original), Data([1, 2, 3, 4]))
         XCTAssertFalse(
             FileManager.default.fileExists(
                 atPath: directory.appendingPathComponent("work_added.wav").path
@@ -304,7 +305,7 @@ final class CreativeWorkStoreTests: XCTestCase {
     /// `audioFileName == "\(work.id).wav"`，所以 id 一旦能带路径分隔符或点号，
     /// 落盘位置就跟着跑到作品目录外面去。字符集、长度上限、不许点号这三条性质
     /// 必须分别被钉住，不能只测「整体拒绝某个恶意串」——那无法区分是哪一条在起作用。
-    func testAWorkWhoseIDCouldEscapeTheLibraryDirectoryIsRefused() throws {
+    func testAWorkWhoseIDCouldEscapeTheLibraryDirectoryIsRefused() async throws {
         // 库放在测试自己拥有的子目录里，「目录外」也留在测试沙箱内——
         // 直接拿系统临时目录当基准会跨用例互相污染。
         let library = directory.appendingPathComponent("library", isDirectory: true)
@@ -321,8 +322,8 @@ final class CreativeWorkStoreTests: XCTestCase {
 
         for hostileID in hostileIDs {
             let work = makeWork(id: hostileID)
-            XCTAssertThrowsError(
-                try store.save(work, audioData: Data([1, 2, 3, 4])),
+            await XCTAssertThrowsErrorAsync(
+                try await store.save(work, audioData: Data([1, 2, 3, 4]), operationID: UUID()).value,
                 "标识符 \(hostileID) 必须被拒绝"
             ) { error in
                 XCTAssertEqual(
@@ -332,20 +333,20 @@ final class CreativeWorkStoreTests: XCTestCase {
                 )
             }
             // 其余入口用的是同一个守卫，但各有各的调用点，逐个钉住。
-            XCTAssertThrowsError(
-                try store.rename(work, title: "改名"),
+            await XCTAssertThrowsErrorAsync(
+                try await store.rename(work, title: "改名", operationID: UUID()).value,
                 "rename 必须拒绝 \(hostileID)"
             ) { error in
                 XCTAssertEqual(error as? CreativeWorkStoreError, .invalidWorkID)
             }
-            XCTAssertThrowsError(
-                try store.loadAudio(for: work),
+            await XCTAssertThrowsErrorAsync(
+                try await store.loadAudio(for: work),
                 "loadAudio 必须拒绝 \(hostileID)"
             ) { error in
                 XCTAssertEqual(error as? CreativeWorkStoreError, .invalidWorkID)
             }
-            XCTAssertThrowsError(
-                try store.delete(work),
+            await XCTAssertThrowsErrorAsync(
+                try await store.delete(work, operationID: UUID()).value,
                 "delete 必须拒绝 \(hostileID)"
             ) { error in
                 XCTAssertEqual(error as? CreativeWorkStoreError, .invalidWorkID)
@@ -356,14 +357,14 @@ final class CreativeWorkStoreTests: XCTestCase {
             FileManager.default.fileExists(atPath: outside.path),
             "恶意标识符不得在作品目录外留下任何文件"
         )
-        XCTAssertEqual(try store.list(), [], "被拒绝的作品不得进入索引")
+        try await XCTAssertEqualAsync(try await store.list(), [], "被拒绝的作品不得进入索引")
     }
 
     /// 覆盖同一条作品的既有音频若是符号链接，不得顺着它读写。
-    func testSavingOverASymlinkedAudioIsRefused() throws {
+    func testSavingOverASymlinkedAudioIsRefused() async throws {
         let work = makeWork(id: "work_symlink")
         let store = CreativeWorkStore(directory: directory)
-        try store.save(work, audioData: Data([1, 2, 3, 4]))
+        try await store.save(work, audioData: Data([1, 2, 3, 4]), operationID: UUID()).value
 
         let audioURL = directory.appendingPathComponent(work.audioFileName)
         let target = directory.appendingPathComponent("elsewhere.wav")
@@ -371,8 +372,8 @@ final class CreativeWorkStoreTests: XCTestCase {
         try FileManager.default.removeItem(at: audioURL)
         try FileManager.default.createSymbolicLink(at: audioURL, withDestinationURL: target)
 
-        XCTAssertThrowsError(
-            try store.save(work, audioData: Data([5, 6, 7, 8]))
+        await XCTAssertThrowsErrorAsync(
+            try await store.save(work, audioData: Data([5, 6, 7, 8]), operationID: UUID()).value
         ) { error in
             XCTAssertEqual(error as? CreativeWorkStoreError, .audioUnavailable)
         }
@@ -384,21 +385,21 @@ final class CreativeWorkStoreTests: XCTestCase {
     }
 
     /// 标题是用户之后唯一会看到的标识：空标题或纯空白不得写进索引。
-    func testRenamingToABlankTitleIsRefused() throws {
+    func testRenamingToABlankTitleIsRefused() async throws {
         let store = CreativeWorkStore(directory: directory)
         let work = makeWork(id: "work_blank_title")
-        try store.save(work, audioData: Data([1, 2, 3, 4]))
+        try await store.save(work, audioData: Data([1, 2, 3, 4]), operationID: UUID()).value
 
         for blank in ["", "   ", "\n\t "] {
-            XCTAssertThrowsError(
-                try store.rename(work, title: blank),
+            await XCTAssertThrowsErrorAsync(
+                try await store.rename(work, title: blank, operationID: UUID()).value,
                 "标题 \(blank.debugDescription) 必须被拒绝"
             ) { error in
                 XCTAssertEqual(error as? CreativeWorkStoreError, .invalidTitle)
             }
         }
-        XCTAssertEqual(
-            try store.list().first?.title,
+        try await XCTAssertEqualAsync(
+            try await store.list().first?.title,
             work.title,
             "被拒绝的改名不得改变已保存的标题"
         )
@@ -410,7 +411,7 @@ final class CreativeWorkStoreTests: XCTestCase {
     /// 同样是拼进路径的。放它过去，一个合法 `id` 配一个 `../../escaped.wav`
     /// 就能把音频写到作品目录之外——这正是 #161 那条防线要挡的事，
     /// 但守卫落在第二个字段上。
-    func testAudioFileNameMustBeDerivedFromTheWorkID() throws {
+    func testAudioFileNameMustBeDerivedFromTheWorkID() async throws {
         let outside = directory.deletingLastPathComponent()
             .appendingPathComponent("escaped-\(UUID().uuidString).wav")
         let store = CreativeWorkStore(directory: directory)
@@ -421,13 +422,13 @@ final class CreativeWorkStoreTests: XCTestCase {
             "绝对名字.wav",
         ] {
             let work = makeWork(id: "work_\(UUID().uuidString)", audioFileName: hostileName)
-            XCTAssertThrowsError(
-                try store.save(work, audioData: Data([1, 2, 3, 4])),
+            await XCTAssertThrowsErrorAsync(
+                try await store.save(work, audioData: Data([1, 2, 3, 4]), operationID: UUID()).value,
                 "音频文件名 \(hostileName) 必须被拒绝"
             ) { error in
                 XCTAssertEqual(error as? CreativeWorkStoreError, .invalidWorkID)
             }
-            XCTAssertEqual(try store.list(), [], "被拒绝的作品不得进入索引")
+            try await XCTAssertEqualAsync(try await store.list(), [], "被拒绝的作品不得进入索引")
         }
         XCTAssertFalse(
             FileManager.default.fileExists(atPath: outside.path),
@@ -436,14 +437,14 @@ final class CreativeWorkStoreTests: XCTestCase {
     }
 
     /// 空音频不得进入索引：作品一旦列出来就必须真的有声音可放。
-    func testSavingEmptyAudioIsRefused() throws {
+    func testSavingEmptyAudioIsRefused() async throws {
         let store = CreativeWorkStore(directory: directory)
         let work = makeWork(id: "work_empty_audio")
 
-        XCTAssertThrowsError(try store.save(work, audioData: Data())) { error in
+        await XCTAssertThrowsErrorAsync(try await store.save(work, audioData: Data(), operationID: UUID()).value) { error in
             XCTAssertEqual(error as? CreativeWorkStoreError, .audioUnavailable)
         }
-        XCTAssertEqual(try store.list(), [])
+        try await XCTAssertEqualAsync(try await store.list(), [])
         XCTAssertFalse(
             FileManager.default.fileExists(
                 atPath: directory.appendingPathComponent(work.audioFileName).path
@@ -453,32 +454,32 @@ final class CreativeWorkStoreTests: XCTestCase {
     }
 
     /// 磁盘上变成 0 字节的音频读回来时必须报不可用，而不是把空数据交给播放器。
-    func testLoadingAZeroByteAudioReportsItAsUnavailable() throws {
+    func testLoadingAZeroByteAudioReportsItAsUnavailable() async throws {
         let store = CreativeWorkStore(directory: directory)
         let work = makeWork(id: "work_truncated_audio")
-        try store.save(work, audioData: Data([1, 2, 3, 4]))
+        try await store.save(work, audioData: Data([1, 2, 3, 4]), operationID: UUID()).value
         try Data().write(to: directory.appendingPathComponent(work.audioFileName))
 
-        XCTAssertThrowsError(try store.loadAudio(for: work)) { error in
+        await XCTAssertThrowsErrorAsync(try await store.loadAudio(for: work)) { error in
             XCTAssertEqual(error as? CreativeWorkStoreError, .audioUnavailable)
         }
     }
 
     /// 改名同样要收敛长度：作品列表与导出的文件名都按这个上限渲染。
-    func testRenamingClampsAnOverlongTitle() throws {
+    func testRenamingClampsAnOverlongTitle() async throws {
         let store = CreativeWorkStore(directory: directory)
         let work = makeWork(id: "work_long_title")
-        try store.save(work, audioData: Data([1, 2, 3, 4]))
+        try await store.save(work, audioData: Data([1, 2, 3, 4]), operationID: UUID()).value
         let overlong = String(repeating: "长", count: CreativeWork.titleMaximumLength + 40)
 
-        let renamed = try store.rename(work, title: overlong)
+        let renamed = try await store.rename(work, title: overlong, operationID: UUID()).value
 
         XCTAssertEqual(
             renamed.title.count,
             CreativeWork.titleMaximumLength + CreativeWork.titleEllipsis.count,
             "超长标题必须收敛到上限，而不是原样写进索引"
         )
-        XCTAssertEqual(try store.list().first?.title, renamed.title)
+        try await XCTAssertEqualAsync(try await store.list().first?.title, renamed.title)
     }
 
     /// 改名必须按标识符定位到**那一条**，而不是按它在索引里的位置。
@@ -487,22 +488,22 @@ final class CreativeWorkStoreTests: XCTestCase {
     /// 「取 ID 匹配的那条」结果必然相同——把
     /// `works.firstIndex(where: { $0.id == work.id })` 改成永远取第 0 条，
     /// 全量 535 条测试仍然全绿。库里只有一件时，第 0 条永远是正确答案。
-    func testRenamingOneWorkLeavesTheOtherWorksUntouched() throws {
+    func testRenamingOneWorkLeavesTheOtherWorksUntouched() async throws {
         let store = CreativeWorkStore(directory: directory)
         let first = makeWork(id: "work_rename_first", script: "第一件文稿")
         let second = makeWork(id: "work_rename_second", script: "第二件文稿")
         let third = makeWork(id: "work_rename_third", script: "第三件文稿")
-        try store.save(first, audioData: Data([1, 2, 3, 4]))
-        try store.save(second, audioData: Data([5, 6, 7, 8]))
-        try store.save(third, audioData: Data([9, 10, 11, 12]))
+        try await store.save(first, audioData: Data([1, 2, 3, 4]), operationID: UUID()).value
+        try await store.save(second, audioData: Data([5, 6, 7, 8]), operationID: UUID()).value
+        try await store.save(third, audioData: Data([9, 10, 11, 12]), operationID: UUID()).value
 
         // 改中间那一件：按位置取的实现会错改第一件。
-        let renamed = try store.rename(second, title: "只改这一件")
+        let renamed = try await store.rename(second, title: "只改这一件", operationID: UUID()).value
 
         XCTAssertEqual(renamed.id, second.id, "改名结果必须是被点中的那一件")
         XCTAssertEqual(renamed.title, "只改这一件")
         let titlesByID = Dictionary(
-            uniqueKeysWithValues: try store.list().map { ($0.id, $0.title) }
+            uniqueKeysWithValues: try await store.list().map { ($0.id, $0.title) }
         )
         XCTAssertEqual(
             titlesByID["work_rename_first"],
@@ -523,7 +524,7 @@ final class CreativeWorkStoreTests: XCTestCase {
     /// 老作品读作 `legacyUnknown`、摘要为 nil，重做必然被拒。入口若照旧出现，
     /// 用户会打开弹层、点下重做、读到一句「无法安全地只重做其中一段」——
     /// 一个点下去一定失败的动作。
-    func testSegmentRedoIsOfferedOnlyWhenTheRecipeCanProveTheConditions() {
+    func testSegmentRedoIsOfferedOnlyWhenTheRecipeCanProveTheConditions() async {
         XCTAssertFalse(
             RenderProvenanceSnapshot.legacyUnknown.supportsSegmentRedo,
             "老作品没有配方摘要，不该出现段落返修入口"
@@ -568,12 +569,12 @@ final class CreativeWorkStoreTests: XCTestCase {
     /// 「失败之后紧接着读一次库」量到的是**恢复之后**的状态——分不清是立即回滚了，
     /// 还是留下了残局、等下次打开才被清掉。实测把 `rollbackUncommittedMutationUnlocked`
     /// 整段删掉，25 条测试依然全绿，原因就在这里。
-    func testAFailedCommitLeavesNothingBehindBeforeTheLibraryIsReopened() throws {
+    func testAFailedCommitLeavesNothingBehindBeforeTheLibraryIsReopened() async throws {
         let original = makeWork(id: "work_existing")
-        try CreativeWorkStore(directory: directory).save(
+        try await CreativeWorkStore(directory: directory).save(
             original,
             audioData: Data([1, 2, 3, 4])
-        )
+        , operationID: UUID()).value
         let failing = CreativeWorkFileOperations(
             writeInterceptor: { url, _ in
                 if url.lastPathComponent == "works.json" {
@@ -583,8 +584,8 @@ final class CreativeWorkStoreTests: XCTestCase {
         )
         let store = CreativeWorkStore(directory: directory, fileOperations: failing)
 
-        XCTAssertThrowsError(
-            try store.save(makeWork(id: "work_added"), audioData: Data([5, 6, 7, 8]))
+        await XCTAssertThrowsErrorAsync(
+            try await store.save(makeWork(id: "work_added"), audioData: Data([5, 6, 7, 8]), operationID: UUID()).value
         )
 
         // 到这里为止没有任何调用触碰过作品库，磁盘就是失败瞬间的真实状态。
@@ -614,15 +615,16 @@ final class CreativeWorkStoreTests: XCTestCase {
     /// 真实进程退出不执行任何 `catch`：若索引已经提交、而 journal 还只在页缓存里，
     /// 下次打开就少了判定「这次提交到底成没成」的唯一依据，只能 fail-closed
     /// 让用户自己进目录删文件。fsync 的顺序本身就是契约，必须被钉住。
-    func testTheJournalReachesDiskBeforeTheIndexIsCommitted() throws {
-        var synced: [URL] = []
+    func testTheJournalReachesDiskBeforeTheIndexIsCommitted() async throws {
+        let syncedProbe = Mutex<[URL]>([])
         let recording = CreativeWorkFileOperations(
-            syncInterceptor: { url in synced.append(url) }
+            syncInterceptor: { url in syncedProbe.withLock { $0.append(url) } }
         )
         let store = CreativeWorkStore(directory: directory, fileOperations: recording)
 
-        try store.save(makeWork(id: "work_sync_order"), audioData: Data([1, 2, 3]))
+        try await store.save(makeWork(id: "work_sync_order"), audioData: Data([1, 2, 3]), operationID: UUID()).value
 
+        let synced = syncedProbe.withLock { $0 }
         func position(where predicate: (URL) -> Bool) -> Int? {
             synced.firstIndex(where: predicate)
         }
@@ -648,12 +650,12 @@ final class CreativeWorkStoreTests: XCTestCase {
         )
     }
 
-    func testRestartRecoversAnUncommittedSaveWithoutPublishingOrphanAudio() throws {
+    func testRestartRecoversAnUncommittedSaveWithoutPublishingOrphanAudio() async throws {
         let original = makeWork(id: "work_before_crash")
-        try CreativeWorkStore(directory: directory).save(
+        try await CreativeWorkStore(directory: directory).save(
             original,
             audioData: Data([1, 2, 3, 4])
-        )
+        , operationID: UUID()).value
         let interrupting = CreativeWorkFileOperations(
             moveInterceptor: { _, destination in
                 if destination.lastPathComponent == "work_after_crash.wav" {
@@ -666,11 +668,11 @@ final class CreativeWorkStoreTests: XCTestCase {
             fileOperations: interrupting
         )
 
-        XCTAssertThrowsError(
-            try crashingStore.save(
+        await XCTAssertThrowsErrorAsync(
+            try await crashingStore.save(
                 makeWork(id: "work_after_crash", script: "中断前生成"),
                 audioData: Data([5, 6, 7, 8])
-            )
+            , operationID: UUID()).value
         ) { error in
             XCTAssertEqual(
                 error as? CreativeWorkTransactionInterruption,
@@ -679,7 +681,7 @@ final class CreativeWorkStoreTests: XCTestCase {
         }
 
         let reopened = CreativeWorkStore(directory: directory)
-        assertSameWorks(try reopened.list(), [original])
+        assertSameWorks(try await reopened.list(), [original])
         XCTAssertFalse(
             FileManager.default.fileExists(
                 atPath: directory.appendingPathComponent("work_after_crash.wav").path
@@ -687,12 +689,12 @@ final class CreativeWorkStoreTests: XCTestCase {
         )
     }
 
-    func testRestartRemovesAudioThatWasPublishedBeforeTheIndexCommit() throws {
+    func testRestartRemovesAudioThatWasPublishedBeforeTheIndexCommit() async throws {
         let original = makeWork(id: "work_before_audio_sync_crash")
-        try CreativeWorkStore(directory: directory).save(
+        try await CreativeWorkStore(directory: directory).save(
             original,
             audioData: Data([1, 2, 3, 4])
-        )
+        , operationID: UUID()).value
         let interrupting = CreativeWorkFileOperations(
             syncInterceptor: { url in
                 if url.lastPathComponent == "work_audio_sync_crash.wav" {
@@ -705,11 +707,11 @@ final class CreativeWorkStoreTests: XCTestCase {
             fileOperations: interrupting
         )
 
-        XCTAssertThrowsError(
-            try crashingStore.save(
+        await XCTAssertThrowsErrorAsync(
+            try await crashingStore.save(
                 makeWork(id: "work_audio_sync_crash", script: "音频已发布"),
                 audioData: Data([5, 6, 7, 8])
-            )
+            , operationID: UUID()).value
         ) { error in
             XCTAssertEqual(
                 error as? CreativeWorkTransactionInterruption,
@@ -724,7 +726,7 @@ final class CreativeWorkStoreTests: XCTestCase {
         )
 
         let reopened = CreativeWorkStore(directory: directory)
-        assertSameWorks(try reopened.list(), [original])
+        assertSameWorks(try await reopened.list(), [original])
         XCTAssertFalse(
             FileManager.default.fileExists(
                 atPath: directory.appendingPathComponent("work_audio_sync_crash.wav").path
@@ -733,7 +735,7 @@ final class CreativeWorkStoreTests: XCTestCase {
         )
     }
 
-    func testRestartKeepsASaveWhoseIndexCommitAlreadySucceeded() throws {
+    func testRestartKeepsASaveWhoseIndexCommitAlreadySucceeded() async throws {
         let interrupting = CreativeWorkFileOperations(
             syncInterceptor: { url in
                 if url.lastPathComponent == "works.json" {
@@ -747,8 +749,8 @@ final class CreativeWorkStoreTests: XCTestCase {
         )
         let work = makeWork(id: "work_committed")
 
-        XCTAssertThrowsError(
-            try crashingStore.save(work, audioData: Data([7, 7, 7, 7]))
+        await XCTAssertThrowsErrorAsync(
+            try await crashingStore.save(work, audioData: Data([7, 7, 7, 7]), operationID: UUID()).value
         ) { error in
             XCTAssertEqual(
                 error as? CreativeWorkTransactionInterruption,
@@ -757,15 +759,15 @@ final class CreativeWorkStoreTests: XCTestCase {
         }
 
         let reopened = CreativeWorkStore(directory: directory)
-        assertSameWorks(try reopened.list(), [work])
-        XCTAssertEqual(try reopened.loadAudio(for: work), Data([7, 7, 7, 7]))
+        assertSameWorks(try await reopened.list(), [work])
+        try await XCTAssertEqualAsync(try await reopened.loadAudio(for: work), Data([7, 7, 7, 7]))
     }
 
-    func testDeleteFailureBeforeIndexCommitKeepsTheWorkAndItsAudio() throws {
+    func testDeleteFailureBeforeIndexCommitKeepsTheWorkAndItsAudio() async throws {
         let store = CreativeWorkStore(directory: directory)
         let work = makeWork(id: "work_delete_failure")
         let audio = Data([3, 1, 4])
-        try store.save(work, audioData: audio)
+        try await store.save(work, audioData: audio, operationID: UUID()).value
         let failing = CreativeWorkFileOperations(
             writeInterceptor: { url, _ in
                 if url.lastPathComponent == "works.json" {
@@ -775,13 +777,13 @@ final class CreativeWorkStoreTests: XCTestCase {
         )
         let failingStore = CreativeWorkStore(directory: directory, fileOperations: failing)
 
-        XCTAssertThrowsError(try failingStore.delete(work))
+        await XCTAssertThrowsErrorAsync(try await failingStore.delete(work, operationID: UUID()).value)
 
-        assertSameWorks(try store.list(), [work])
-        XCTAssertEqual(try store.loadAudio(for: work), audio)
+        assertSameWorks(try await store.list(), [work])
+        try await XCTAssertEqualAsync(try await store.loadAudio(for: work), audio)
     }
 
-    func testDeletedWorksAreVisibleAndCanMoveToTrashWithoutTouchingActiveWorks() throws {
+    func testDeletedWorksAreVisibleAndCanMoveToTrashWithoutTouchingActiveWorks() async throws {
         let trash = directory.appendingPathComponent("test-trash")
         let store = CreativeWorkStore(
             directory: directory,
@@ -792,81 +794,82 @@ final class CreativeWorkStoreTests: XCTestCase {
         )
         let removed = makeWork(id: "work_removed")
         let retained = makeWork(id: "work_retained")
-        try store.save(removed, audioData: Data([1, 2, 3]))
-        try store.save(retained, audioData: Data([4, 5]))
-        let transactionID = try XCTUnwrap(try store.delete(removed))
-        XCTAssertEqual(try store.deletedWorksSummary().count, 1)
-        XCTAssertGreaterThanOrEqual(try store.deletedWorksSummary().byteCount, 3)
-        XCTAssertEqual(try store.trashDeletedWorks(transactionIDs: [transactionID]), 1)
-        XCTAssertEqual(try store.deletedWorksSummary().count, 0)
+        try await store.save(removed, audioData: Data([1, 2, 3]), operationID: UUID()).value
+        try await store.save(retained, audioData: Data([4, 5]), operationID: UUID()).value
+        let transactionID = try await XCTUnwrapAsync(try await store.delete(removed, operationID: UUID()).value)
+        try await XCTAssertEqualAsync(try await store.deletedWorksSummary().count, 1)
+        let deletedBytes = try await store.deletedWorksSummary().byteCount
+        XCTAssertGreaterThanOrEqual(deletedBytes, 3)
+        try await XCTAssertEqualAsync(try await store.trashDeletedWorks(transactionIDs: [transactionID], operationID: UUID()).value, 1)
+        try await XCTAssertEqualAsync(try await store.deletedWorksSummary().count, 0)
         XCTAssertEqual(try Data(contentsOf: trash.appendingPathComponent(transactionID)
             .appendingPathComponent(removed.audioFileName)), Data([1, 2, 3]))
-        XCTAssertEqual(try store.loadAudio(for: retained), Data([4, 5]))
-        XCTAssertEqual(try store.list().map(\.id), [retained.id])
-        XCTAssertEqual(try store.trashDeletedWorks(transactionIDs: [transactionID]), 0)
+        try await XCTAssertEqualAsync(try await store.loadAudio(for: retained), Data([4, 5]))
+        try await XCTAssertEqualAsync(try await store.list().map(\.id), [retained.id])
+        try await XCTAssertEqualAsync(try await store.trashDeletedWorks(transactionIDs: [transactionID], operationID: UUID()).value, 0)
     }
 
-    func testTrashFailurePreservesDeletedAudioAndAllowsRetry() throws {
+    func testTrashFailurePreservesDeletedAudioAndAllowsRetry() async throws {
         let work = makeWork(id: "work_trash_failure")
         let store = CreativeWorkStore(directory: directory)
-        try store.save(work, audioData: Data([1, 2]))
-        try store.delete(work)
+        try await store.save(work, audioData: Data([1, 2]), operationID: UUID()).value
+        try await store.delete(work, operationID: UUID()).value
         let failing = CreativeWorkStore(
             directory: directory,
             fileOperations: CreativeWorkFileOperations(trashHandler: { _ in
                 throw CocoaError(.fileWriteNoPermission)
             })
         )
-        XCTAssertThrowsError(try failing.trashDeletedWorks())
-        XCTAssertEqual(try store.deletedWorksSummary().count, 1)
-        XCTAssertTrue(try store.list().isEmpty)
+        await XCTAssertThrowsErrorAsync(try await failing.trashDeletedWorks(operationID: UUID()).value)
+        try await XCTAssertEqualAsync(try await store.deletedWorksSummary().count, 1)
+        try await XCTAssertTrueAsync(try await store.list().isEmpty)
         let retried = CreativeWorkStore(
             directory: directory,
             fileOperations: CreativeWorkFileOperations(trashHandler: { url in
                 try FileManager.default.removeItem(at: url)
             })
         )
-        XCTAssertEqual(try retried.trashDeletedWorks(), 1)
+        try await XCTAssertEqualAsync(try await retried.trashDeletedWorks(operationID: UUID()).value, 1)
     }
 
-    func testTrashRefusesChangedAudioAndForeignFilesBeforeMovingAnyEntry() throws {
+    func testTrashRefusesChangedAudioAndForeignFilesBeforeMovingAnyEntry() async throws {
         let work = makeWork(id: "work_changed_recovery")
-        var moved: [URL] = []
+        let movedProbe = Mutex<[URL]>([])
         let store = CreativeWorkStore(
             directory: directory,
-            fileOperations: CreativeWorkFileOperations(trashHandler: { moved.append($0) })
+            fileOperations: CreativeWorkFileOperations(trashHandler: { url in movedProbe.withLock { $0.append(url) } })
         )
-        try store.save(work, audioData: Data([1, 2]))
-        let id = try XCTUnwrap(try store.delete(work))
+        try await store.save(work, audioData: Data([1, 2]), operationID: UUID()).value
+        let id = try await XCTUnwrapAsync(try await store.delete(work, operationID: UUID()).value)
         let entry = directory.appendingPathComponent(".recovery").appendingPathComponent(id)
         let audio = entry.appendingPathComponent(work.audioFileName)
         try Data([9, 9]).write(to: audio)
-        XCTAssertThrowsError(try store.trashDeletedWorks())
-        XCTAssertTrue(moved.isEmpty)
+        await XCTAssertThrowsErrorAsync(try await store.trashDeletedWorks(operationID: UUID()).value)
+        XCTAssertTrue(movedProbe.withLock { $0.isEmpty })
         try Data([1, 2]).write(to: audio)
         let foreign = entry.appendingPathComponent(".foreign")
         try Data([7]).write(to: foreign)
-        XCTAssertThrowsError(try store.trashDeletedWorks())
-        XCTAssertTrue(moved.isEmpty)
+        await XCTAssertThrowsErrorAsync(try await store.trashDeletedWorks(operationID: UUID()).value)
+        XCTAssertTrue(movedProbe.withLock { $0.isEmpty })
         XCTAssertEqual(try Data(contentsOf: foreign), Data([7]))
     }
 
-    func testRecoverySummaryAndTrashRefuseSymbolicLinkRoots() throws {
+    func testRecoverySummaryAndTrashRefuseSymbolicLinkRoots() async throws {
         let store = CreativeWorkStore(directory: directory)
-        try store.save(makeWork(id: "work_active"), audioData: Data([1]))
+        try await store.save(makeWork(id: "work_active"), audioData: Data([1]), operationID: UUID()).value
         let foreign = directory.appendingPathComponent("foreign")
         try FileManager.default.createDirectory(at: foreign, withIntermediateDirectories: true)
         try FileManager.default.createSymbolicLink(
             at: directory.appendingPathComponent(".recovery"), withDestinationURL: foreign
         )
-        XCTAssertThrowsError(try store.deletedWorksSummary())
-        XCTAssertThrowsError(try store.trashDeletedWorks())
+        await XCTAssertThrowsErrorAsync(try await store.deletedWorksSummary())
+        await XCTAssertThrowsErrorAsync(try await store.trashDeletedWorks(operationID: UUID()).value)
         XCTAssertTrue(FileManager.default.fileExists(atPath: foreign.path))
     }
 
-    func testCommittedDeleteDoesNotMoveAudioThatChangedBeforeRecovery() throws {
+    func testCommittedDeleteDoesNotMoveAudioThatChangedBeforeRecovery() async throws {
         let work = makeWork(id: "work_changed_after_commit")
-        try CreativeWorkStore(directory: directory).save(work, audioData: Data([1, 2]))
+        try await CreativeWorkStore(directory: directory).save(work, audioData: Data([1, 2]), operationID: UUID()).value
         let audio = directory.appendingPathComponent(work.audioFileName)
         let store = CreativeWorkStore(
             directory: directory,
@@ -876,16 +879,16 @@ final class CreativeWorkStoreTests: XCTestCase {
                 }
             })
         )
-        try store.delete(work)
-        XCTAssertThrowsError(try CreativeWorkStore(directory: directory).list())
+        try await store.delete(work, operationID: UUID()).value
+        await XCTAssertThrowsErrorAsync(try await CreativeWorkStore(directory: directory).list())
         XCTAssertEqual(try Data(contentsOf: audio), Data([9, 9]),
                        "未确认归属的新字节必须原地保留")
     }
 
-    func testRestartCompletesADeleteWhoseIndexCommitAlreadySucceeded() throws {
+    func testRestartCompletesADeleteWhoseIndexCommitAlreadySucceeded() async throws {
         let work = makeWork(id: "work_delete_committed")
         let audio = Data([2, 7, 1, 8])
-        try CreativeWorkStore(directory: directory).save(work, audioData: audio)
+        try await CreativeWorkStore(directory: directory).save(work, audioData: audio, operationID: UUID()).value
 
         // 新建一个中断实例：删除的索引提交后会模拟进程退出，音频尚未隔离。
         let deleteInterrupting = CreativeWorkFileOperations(
@@ -899,7 +902,7 @@ final class CreativeWorkStoreTests: XCTestCase {
             directory: directory,
             fileOperations: deleteInterrupting
         )
-        XCTAssertThrowsError(try deletingStore.delete(work)) { error in
+        await XCTAssertThrowsErrorAsync(try await deletingStore.delete(work, operationID: UUID()).value) { error in
             XCTAssertEqual(
                 error as? CreativeWorkTransactionInterruption,
                 .simulatedProcessExit
@@ -907,7 +910,7 @@ final class CreativeWorkStoreTests: XCTestCase {
         }
 
         let reopened = CreativeWorkStore(directory: directory)
-        XCTAssertTrue(try reopened.list().isEmpty)
+        try await XCTAssertTrueAsync(try await reopened.list().isEmpty)
         XCTAssertFalse(
             FileManager.default.fileExists(
                 atPath: directory.appendingPathComponent(work.audioFileName).path
@@ -927,9 +930,9 @@ final class CreativeWorkStoreTests: XCTestCase {
     /// 恢复分两步：先把作品目录里的音频移进事务目录，再把整个事务目录搬进
     /// `.recovery`。第一步完成后进程退出、且期间有同名新音频落盘时，
     /// 第二次恢复会同时看到两个文件——这时必须保住先隔离的那一个。
-    func testRecoveryDoesNotOverwriteAnAlreadyPreservedAudioFile() throws {
+    func testRecoveryDoesNotOverwriteAnAlreadyPreservedAudioFile() async throws {
         let work = makeWork(id: "work_preserved_exists")
-        try CreativeWorkStore(directory: directory).save(work, audioData: Data([1, 1, 1, 1]))
+        try await CreativeWorkStore(directory: directory).save(work, audioData: Data([1, 1, 1, 1]), operationID: UUID()).value
 
         let deleteInterrupting = CreativeWorkFileOperations(
             syncInterceptor: { url in
@@ -938,12 +941,8 @@ final class CreativeWorkStoreTests: XCTestCase {
                 }
             }
         )
-        XCTAssertThrowsError(
-            try CreativeWorkStore(
-                directory: directory,
-                fileOperations: deleteInterrupting
-            ).delete(work)
-        )
+        let interruptedDelete = CreativeWorkStore(directory: directory, fileOperations: deleteInterrupting)
+        await XCTAssertThrowsErrorAsync(try await interruptedDelete.delete(work, operationID: UUID()).value)
 
         let transactions = directory.appendingPathComponent(".transactions", isDirectory: true)
         let transactionDirectory = try XCTUnwrap(
@@ -961,7 +960,7 @@ final class CreativeWorkStoreTests: XCTestCase {
         )
 
         let reopened = CreativeWorkStore(directory: directory)
-        XCTAssertTrue(try reopened.list().isEmpty)
+        try await XCTAssertTrueAsync(try await reopened.list().isEmpty)
 
         let recovered = directory
             .appendingPathComponent(".recovery", isDirectory: true)
@@ -978,9 +977,9 @@ final class CreativeWorkStoreTests: XCTestCase {
     ///
     /// 两者都通过格式校验，但描述的不是同一个事务时，恢复会把文件搬进
     /// 另一个目录，让真正的事务目录留在原地。
-    func testRecoveryRefusesAJournalThatDoesNotBelongToItsTransactionDirectory() throws {
+    func testRecoveryRefusesAJournalThatDoesNotBelongToItsTransactionDirectory() async throws {
         let work = makeWork(id: "work_journal_mismatch")
-        try CreativeWorkStore(directory: directory).save(work, audioData: Data([3, 3, 3, 3]))
+        try await CreativeWorkStore(directory: directory).save(work, audioData: Data([3, 3, 3, 3]), operationID: UUID()).value
 
         let deleteInterrupting = CreativeWorkFileOperations(
             syncInterceptor: { url in
@@ -989,12 +988,8 @@ final class CreativeWorkStoreTests: XCTestCase {
                 }
             }
         )
-        XCTAssertThrowsError(
-            try CreativeWorkStore(
-                directory: directory,
-                fileOperations: deleteInterrupting
-            ).delete(work)
-        )
+        let interruptedDelete = CreativeWorkStore(directory: directory, fileOperations: deleteInterrupting)
+        await XCTAssertThrowsErrorAsync(try await interruptedDelete.delete(work, operationID: UUID()).value)
 
         let transactions = directory.appendingPathComponent(".transactions", isDirectory: true)
         let transactionDirectory = try XCTUnwrap(
@@ -1013,7 +1008,7 @@ final class CreativeWorkStoreTests: XCTestCase {
             .write(to: journalURL, atomically: true, encoding: .utf8)
 
         let reopened = CreativeWorkStore(directory: directory)
-        XCTAssertThrowsError(try reopened.list()) { error in
+        await XCTAssertThrowsErrorAsync(try await reopened.list()) { error in
             XCTAssertEqual(
                 error as? CreativeWorkStoreError,
                 .recoveryRequired,
@@ -1022,10 +1017,10 @@ final class CreativeWorkStoreTests: XCTestCase {
         }
     }
 
-    func testRenameFailureBeforeIndexCommitKeepsTheOriginalTitle() throws {
+    func testRenameFailureBeforeIndexCommitKeepsTheOriginalTitle() async throws {
         let store = CreativeWorkStore(directory: directory)
         let work = makeWork(id: "work_rename_failure")
-        try store.save(work, audioData: Data([4, 4, 4, 4]))
+        try await store.save(work, audioData: Data([4, 4, 4, 4]), operationID: UUID()).value
         let failing = CreativeWorkFileOperations(
             writeInterceptor: { url, _ in
                 if url.lastPathComponent == "works.json" {
@@ -1035,16 +1030,16 @@ final class CreativeWorkStoreTests: XCTestCase {
         )
         let failingStore = CreativeWorkStore(directory: directory, fileOperations: failing)
 
-        XCTAssertThrowsError(try failingStore.rename(work, title: "不会写进去"))
+        await XCTAssertThrowsErrorAsync(try await failingStore.rename(work, title: "不会写进去", operationID: UUID()).value)
 
-        assertSameWorks(try store.list(), [work])
-        XCTAssertEqual(try store.loadAudio(for: work), Data([4, 4, 4, 4]))
+        assertSameWorks(try await store.list(), [work])
+        try await XCTAssertEqualAsync(try await store.loadAudio(for: work), Data([4, 4, 4, 4]))
     }
 
-    func testRestartKeepsARenameWhoseIndexCommitAlreadySucceeded() throws {
+    func testRestartKeepsARenameWhoseIndexCommitAlreadySucceeded() async throws {
         let store = CreativeWorkStore(directory: directory)
         let work = makeWork(id: "work_rename_committed")
-        try store.save(work, audioData: Data([5, 6, 7, 8]))
+        try await store.save(work, audioData: Data([5, 6, 7, 8]), operationID: UUID()).value
         let interrupting = CreativeWorkFileOperations(
             syncInterceptor: { url in
                 if url.lastPathComponent == "works.json" {
@@ -1057,20 +1052,20 @@ final class CreativeWorkStoreTests: XCTestCase {
             fileOperations: interrupting
         )
 
-        XCTAssertThrowsError(try interruptedStore.rename(work, title: "重启后仍保留"))
+        await XCTAssertThrowsErrorAsync(try await interruptedStore.rename(work, title: "重启后仍保留", operationID: UUID()).value)
 
         let reopened = CreativeWorkStore(directory: directory)
-        let reloaded = try XCTUnwrap(try reopened.list().first)
+        let reloaded = try await XCTUnwrapAsync(try await reopened.list().first)
         XCTAssertEqual(reloaded.title, "重启后仍保留")
-        XCTAssertEqual(try reopened.loadAudio(for: reloaded), Data([5, 6, 7, 8]))
-        XCTAssertEqual(try reopened.list(), [reloaded], "恢复必须幂等")
+        try await XCTAssertEqualAsync(try await reopened.loadAudio(for: reloaded), Data([5, 6, 7, 8]))
+        try await XCTAssertEqualAsync(try await reopened.list(), [reloaded], "恢复必须幂等")
     }
 
-    func testUnknownPendingJournalFailsClosedWithoutTouchingUserFiles() throws {
+    func testUnknownPendingJournalFailsClosedWithoutTouchingUserFiles() async throws {
         let store = CreativeWorkStore(directory: directory)
         let work = makeWork(id: "work_with_bad_journal")
         let audio = Data([8, 8, 8, 8])
-        try store.save(work, audioData: audio)
+        try await store.save(work, audioData: audio, operationID: UUID()).value
         let transactionDirectory = directory
             .appendingPathComponent(".transactions", isDirectory: true)
             .appendingPathComponent(String(repeating: "a", count: 32), isDirectory: true)
@@ -1083,14 +1078,14 @@ final class CreativeWorkStoreTests: XCTestCase {
         )
 
         let reopened = CreativeWorkStore(directory: directory)
-        XCTAssertThrowsError(try reopened.list()) { error in
+        await XCTAssertThrowsErrorAsync(try await reopened.list()) { error in
             XCTAssertEqual(error as? CreativeWorkStoreError, .recoveryRequired)
         }
         XCTAssertTrue(FileManager.default.fileExists(atPath: transactionDirectory.path))
         XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent(work.audioFileName)), audio)
     }
 
-    func testAnUnindexedAudioFileIsNeverAdoptedOrOverwritten() throws {
+    func testAnUnindexedAudioFileIsNeverAdoptedOrOverwritten() async throws {
         try FileManager.default.createDirectory(
             at: directory,
             withIntermediateDirectories: true
@@ -1101,22 +1096,22 @@ final class CreativeWorkStoreTests: XCTestCase {
         let work = makeWork(id: "work_orphan")
 
         let store = CreativeWorkStore(directory: directory)
-        XCTAssertThrowsError(try store.save(work, audioData: Data([1, 2, 3]))) { error in
+        await XCTAssertThrowsErrorAsync(try await store.save(work, audioData: Data([1, 2, 3]), operationID: UUID()).value) { error in
             XCTAssertEqual(error as? CreativeWorkStoreError, .workConflict)
         }
 
         XCTAssertEqual(try Data(contentsOf: orphanURL), orphanAudio)
-        XCTAssertTrue(try store.list().isEmpty, "未知音频不能被猜成一条作品")
+        try await XCTAssertTrueAsync(try await store.list().isEmpty, "未知音频不能被猜成一条作品")
     }
 
-    func testDeletingAnAlreadyCommittedWorkIsIdempotent() throws {
+    func testDeletingAnAlreadyCommittedWorkIsIdempotent() async throws {
         let store = CreativeWorkStore(directory: directory)
         let work = makeWork(id: "work_delete_twice")
-        try store.save(work, audioData: Data([1, 3, 5, 7]))
+        try await store.save(work, audioData: Data([1, 3, 5, 7]), operationID: UUID()).value
 
-        try store.delete(work)
-        XCTAssertNoThrow(try store.delete(work))
-        XCTAssertTrue(try store.list().isEmpty)
+        try await store.delete(work, operationID: UUID()).value
+        await XCTAssertNoThrowAsync(try await store.delete(work, operationID: UUID()).value)
+        try await XCTAssertTrueAsync(try await store.list().isEmpty)
     }
 
     /// 删除必须按标识符定位到**那一条**，而不是按它在索引里的位置。
@@ -1125,19 +1120,19 @@ final class CreativeWorkStoreTests: XCTestCase {
     /// （`else { return }`，不是抛错），所以「删错」不会有任何提示——
     /// 用户点的是第二件，消失的是第一件。库里只有一件时，第 0 条永远
     /// 是正确答案，于是既有删除用例全都测不到这一条。
-    func testDeletingOneWorkLeavesTheOtherWorksAndTheirAudioIntact() throws {
+    func testDeletingOneWorkLeavesTheOtherWorksAndTheirAudioIntact() async throws {
         let store = CreativeWorkStore(directory: directory)
         let first = makeWork(id: "work_delete_first", script: "第一件文稿")
         let second = makeWork(id: "work_delete_second", script: "第二件文稿")
         let third = makeWork(id: "work_delete_third", script: "第三件文稿")
-        try store.save(first, audioData: Data([1, 2, 3, 4]))
-        try store.save(second, audioData: Data([5, 6, 7, 8]))
-        try store.save(third, audioData: Data([9, 10, 11, 12]))
+        try await store.save(first, audioData: Data([1, 2, 3, 4]), operationID: UUID()).value
+        try await store.save(second, audioData: Data([5, 6, 7, 8]), operationID: UUID()).value
+        try await store.save(third, audioData: Data([9, 10, 11, 12]), operationID: UUID()).value
 
         // 删中间那一件：按位置取的实现会删掉第一件。
-        try store.delete(second)
+        try await store.delete(second, operationID: UUID()).value
 
-        let remaining = try store.list()
+        let remaining = try await store.list()
         XCTAssertEqual(
             remaining.map(\.id),
             [first.id, third.id],
@@ -1151,14 +1146,14 @@ final class CreativeWorkStoreTests: XCTestCase {
         )
         // 幸存的两件连音频都要在：按位置取的实现会把第一件的音频也移走。
         for survivor in [first, third] {
-            XCTAssertNoThrow(
-                try store.loadAudio(for: survivor),
+            await XCTAssertNoThrowAsync(
+                try await store.loadAudio(for: survivor),
                 "\(survivor.id) 的音频不得被误删"
             )
         }
     }
 
-    func testASavedAudioSymlinkIsNeverFollowedAsUserAudio() throws {
+    func testASavedAudioSymlinkIsNeverFollowedAsUserAudio() async throws {
         let outsideURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("speechrail-outside-\(UUID().uuidString).wav")
         let outsideAudio = Data([6, 6, 6, 6])
@@ -1181,16 +1176,16 @@ final class CreativeWorkStoreTests: XCTestCase {
         )
 
         let store = CreativeWorkStore(directory: directory)
-        XCTAssertThrowsError(try store.loadAudio(for: work)) { error in
+        await XCTAssertThrowsErrorAsync(try await store.loadAudio(for: work)) { error in
             XCTAssertEqual(error as? CreativeWorkStoreError, .audioUnavailable)
         }
         XCTAssertEqual(try Data(contentsOf: outsideURL), outsideAudio)
     }
 
-    func testStagedAudioWriteFailureLeavesTheLibraryUntouched() throws {
+    func testStagedAudioWriteFailureLeavesTheLibraryUntouched() async throws {
         let original = makeWork(id: "work_before_enospc")
         let audio = Data([1, 2, 3, 4])
-        try CreativeWorkStore(directory: directory).save(original, audioData: audio)
+        try await CreativeWorkStore(directory: directory).save(original, audioData: audio, operationID: UUID()).value
         let outOfSpace = CreativeWorkFileOperations(
             writeInterceptor: { url, _ in
                 if url.lastPathComponent == "staged.wav" {
@@ -1201,9 +1196,9 @@ final class CreativeWorkStoreTests: XCTestCase {
         let failingStore = CreativeWorkStore(directory: directory, fileOperations: outOfSpace)
         let added = makeWork(id: "work_after_enospc", script: "磁盘满时生成")
 
-        XCTAssertThrowsError(try failingStore.save(added, audioData: Data([5, 6, 7, 8])))
+        await XCTAssertThrowsErrorAsync(try await failingStore.save(added, audioData: Data([5, 6, 7, 8]), operationID: UUID()).value)
 
-        assertSameWorks(try CreativeWorkStore(directory: directory).list(), [original])
+        assertSameWorks(try await CreativeWorkStore(directory: directory).list(), [original])
         XCTAssertEqual(
             try Data(contentsOf: directory.appendingPathComponent(original.audioFileName)),
             audio
@@ -1216,12 +1211,12 @@ final class CreativeWorkStoreTests: XCTestCase {
         )
     }
 
-    func testJournalWriteFailureLeavesTheLibraryUntouched() throws {
+    func testJournalWriteFailureLeavesTheLibraryUntouched() async throws {
         let original = makeWork(id: "work_before_journal_failure")
-        try CreativeWorkStore(directory: directory).save(
+        try await CreativeWorkStore(directory: directory).save(
             original,
             audioData: Data([1, 2, 3, 4])
-        )
+        , operationID: UUID()).value
         let journalFailing = CreativeWorkFileOperations(
             writeInterceptor: { url, _ in
                 if url.lastPathComponent == "journal.json" {
@@ -1235,9 +1230,9 @@ final class CreativeWorkStoreTests: XCTestCase {
         )
         let added = makeWork(id: "work_after_journal_failure", script: "回执写不进去")
 
-        XCTAssertThrowsError(try failingStore.save(added, audioData: Data([5, 6, 7, 8])))
+        await XCTAssertThrowsErrorAsync(try await failingStore.save(added, audioData: Data([5, 6, 7, 8]), operationID: UUID()).value)
 
-        assertSameWorks(try CreativeWorkStore(directory: directory).list(), [original])
+        assertSameWorks(try await CreativeWorkStore(directory: directory).list(), [original])
         XCTAssertFalse(
             FileManager.default.fileExists(
                 atPath: directory.appendingPathComponent(added.audioFileName).path
@@ -1246,7 +1241,7 @@ final class CreativeWorkStoreTests: XCTestCase {
         )
     }
 
-    func testACorruptedIndexIsNotReadAsAnEmptyLibrary() throws {
+    func testACorruptedIndexIsNotReadAsAnEmptyLibrary() async throws {
         try FileManager.default.createDirectory(
             at: directory,
             withIntermediateDirectories: true
@@ -1256,17 +1251,17 @@ final class CreativeWorkStoreTests: XCTestCase {
         try corrupted.write(to: indexURL)
 
         let store = CreativeWorkStore(directory: directory)
-        XCTAssertThrowsError(try store.list()) { error in
+        await XCTAssertThrowsErrorAsync(try await store.list()) { error in
             XCTAssertEqual(error as? CreativeWorkStoreError, .storageUnavailable)
         }
         XCTAssertEqual(try Data(contentsOf: indexURL), corrupted, "坏索引必须原样保留")
     }
 
-    func testAFutureJournalSchemaFailsClosedWithoutTouchingUserFiles() throws {
+    func testAFutureJournalSchemaFailsClosedWithoutTouchingUserFiles() async throws {
         let store = CreativeWorkStore(directory: directory)
         let work = makeWork(id: "work_future_journal")
         let audio = Data([8, 8, 8, 8])
-        try store.save(work, audioData: audio)
+        try await store.save(work, audioData: audio, operationID: UUID()).value
         let transactionID = String(repeating: "b", count: 32)
         let transactionDirectory = directory
             .appendingPathComponent(".transactions", isDirectory: true)
@@ -1289,7 +1284,7 @@ final class CreativeWorkStoreTests: XCTestCase {
         try Data(futureJournal.utf8).write(to: journalURL)
 
         let reopened = CreativeWorkStore(directory: directory)
-        XCTAssertThrowsError(try reopened.list()) { error in
+        await XCTAssertThrowsErrorAsync(try await reopened.list()) { error in
             XCTAssertEqual(error as? CreativeWorkStoreError, .recoveryRequired)
         }
         XCTAssertTrue(FileManager.default.fileExists(atPath: journalURL.path))
@@ -1300,11 +1295,11 @@ final class CreativeWorkStoreTests: XCTestCase {
         )
     }
 
-    func testTwoPendingTransactionsFailClosedUntilOneIsResolved() throws {
+    func testTwoPendingTransactionsFailClosedUntilOneIsResolved() async throws {
         let store = CreativeWorkStore(directory: directory)
         let work = makeWork(id: "work_two_transactions")
         let audio = Data([3, 5, 7])
-        try store.save(work, audioData: audio)
+        try await store.save(work, audioData: audio, operationID: UUID()).value
         let transactionsDirectory = directory.appendingPathComponent(
             ".transactions",
             isDirectory: true
@@ -1334,7 +1329,7 @@ final class CreativeWorkStoreTests: XCTestCase {
         }
 
         let reopened = CreativeWorkStore(directory: directory)
-        XCTAssertThrowsError(try reopened.list()) { error in
+        await XCTAssertThrowsErrorAsync(try await reopened.list()) { error in
             XCTAssertEqual(
                 error as? CreativeWorkStoreError,
                 .recoveryRequired,
@@ -1344,7 +1339,7 @@ final class CreativeWorkStoreTests: XCTestCase {
 
         try FileManager.default.removeItem(at: digests[1].1)
         let afterResolving = CreativeWorkStore(directory: directory)
-        XCTAssertThrowsError(try afterResolving.list()) { error in
+        await XCTAssertThrowsErrorAsync(try await afterResolving.list()) { error in
             XCTAssertEqual(error as? CreativeWorkStoreError, .recoveryRequired)
         }
         XCTAssertEqual(
@@ -1354,10 +1349,10 @@ final class CreativeWorkStoreTests: XCTestCase {
         )
     }
 
-    func testRestartNeverQuarantinesAnAudioSymlinkLeftAtTheManagedPath() throws {
+    func testRestartNeverQuarantinesAnAudioSymlinkLeftAtTheManagedPath() async throws {
         let work = makeWork(id: "work_delete_symlink")
         let audio = Data([4, 2, 6])
-        try CreativeWorkStore(directory: directory).save(work, audioData: audio)
+        try await CreativeWorkStore(directory: directory).save(work, audioData: audio, operationID: UUID()).value
         let interrupting = CreativeWorkFileOperations(
             syncInterceptor: { url in
                 if url.lastPathComponent == "works.json" {
@@ -1369,7 +1364,7 @@ final class CreativeWorkStoreTests: XCTestCase {
             directory: directory,
             fileOperations: interrupting
         )
-        XCTAssertThrowsError(try deletingStore.delete(work))
+        await XCTAssertThrowsErrorAsync(try await deletingStore.delete(work, operationID: UUID()).value)
 
         let outsideURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("speechrail-outside-delete-\(UUID().uuidString).wav")
@@ -1381,7 +1376,7 @@ final class CreativeWorkStoreTests: XCTestCase {
         try FileManager.default.createSymbolicLink(at: audioURL, withDestinationURL: outsideURL)
 
         let reopened = CreativeWorkStore(directory: directory)
-        XCTAssertThrowsError(try reopened.list()) { error in
+        await XCTAssertThrowsErrorAsync(try await reopened.list()) { error in
             XCTAssertEqual(error as? CreativeWorkStoreError, .recoveryRequired)
         }
         XCTAssertEqual(try Data(contentsOf: outsideURL), outsideAudio, "不能移动或删除库外文件")

@@ -482,7 +482,7 @@ public actor AudiobookProductionController {
                     updateProgress(bookID) { $0.phase = .saving }
                     try await candidateCommitter(candidate, candidateWAVCache[candidate.id] ?? Data())
                     candidateWAVCache.removeValue(forKey: candidate.id)
-                    if let voice = capabilities.voices.first(where: { $0.id == binding.voiceID }), !voiceCatalog.snapshot().permits(voice, bookID: bookID) {
+                    if let voice = capabilities.voices.first(where: { $0.id == binding.voiceID }), !(await voiceCatalog.refresh()).permits(voice, bookID: bookID) {
                         throw AudiobookProductionError.capabilityVoiceUnavailable(voiceID: binding.voiceID, reason: "声音归属已变化，本段已保存为待复核候选。")
                     }
 
@@ -612,7 +612,7 @@ public actor AudiobookProductionController {
 
             let current = try await renderer.fetchEffectiveCapabilities()
             try AudiobookCastRegistry.validateRenderBinding(binding, snapshot: current)
-            guard let voice = current.voices.first(where: { $0.id == binding.voiceID }), voiceCatalog.snapshot().permits(voice, bookID: bookID) else {
+            guard let voice = current.voices.first(where: { $0.id == binding.voiceID }), (await voiceCatalog.refresh()).permits(voice, bookID: bookID) else {
                 throw AudiobookProductionError.capabilityVoiceUnavailable(voiceID: binding.voiceID, reason: "声音归属已变化，请重新确认。")
             }
 
@@ -660,7 +660,7 @@ public actor AudiobookProductionController {
                 // The service receipt describes the original PCM. Verify it before
                 // normalizing the local asset to the render policy's sample rate.
                 let receivedPCMSHA = try AudioDigest.sha256HexOfPCM(in: output.wavData)
-                let scopeStillValid = voiceCatalog.snapshot().permits(voice, bookID: bookID)
+                let scopeStillValid = (await voiceCatalog.refresh()).permits(voice, bookID: bookID)
                 let receiptVerified = scopeStillValid && output.isProvenanceVerified
                     && (output.pcmSHA256 == nil || output.pcmSHA256 == receivedPCMSHA)
                     && output.voiceRevision == binding.voiceRevision

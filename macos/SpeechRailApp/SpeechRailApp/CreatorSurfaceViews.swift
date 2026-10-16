@@ -96,7 +96,6 @@ private struct DubbingDeskComposerView: View {
     @AppStorage("speechrail.creator.defaultSpeed") private var defaultSpeed: Double = 1.0
     @State private var isVoicePickerPresented = false
     @State private var selectionNotice: String?
-    @State private var catalogRefreshTick = 0
     @State private var exportDocument = WAVFileDocument(data: Data())
     @State private var exportFileName = "SpeechRail-配音"
     @State private var isExporting = false
@@ -174,9 +173,6 @@ private struct DubbingDeskComposerView: View {
         }
         .onChange(of: selectedVoiceID) { _, _ in
             normalizeSelectedVoiceSettings()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: VoiceCatalogStore.didChange, object: VoiceCatalogStore.shared)) { _ in
-            catalogRefreshTick += 1
         }
         .onDisappear {
             model.cancelVoicePreview()
@@ -640,7 +636,7 @@ private struct DubbingDeskComposerView: View {
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
 
                 Button {
-                    model.playWork(work)
+                    Task { await model.playWork(work) }
                 } label: {
                     SpeechRailButtonLabel(
                         isPlaying(work) ? "停止" : "播放",
@@ -806,9 +802,12 @@ private struct DubbingDeskComposerView: View {
     }
 
     private func savePending() {
-        exportMessage = nil
-        if model.savePendingDubbing() != nil {
-            saveNotice = "已保存到作品库。"
+        Task {
+            exportMessage = nil
+            if await model.savePendingDubbing() != nil {
+                saveNotice = "已保存到作品库。"
+            }
+
         }
     }
 
@@ -881,13 +880,16 @@ private struct DubbingDeskComposerView: View {
     }
 
     private func prepareExport(for work: CreativeWork) {
-        do {
-            exportDocument = WAVFileDocument(data: try model.loadWorkAudio(work))
-            exportFileName = work.exportBaseName
-            exportMessage = nil
-            isExporting = true
-        } catch {
-            exportMessage = "导出失败：作品音频暂时不可用。"
+        Task {
+            do {
+                exportDocument = WAVFileDocument(data: try await model.loadWorkAudio(work))
+                exportFileName = work.exportBaseName
+                exportMessage = nil
+                isExporting = true
+            } catch {
+                exportMessage = "导出失败：作品音频暂时不可用。"
+            }
+
         }
     }
 
@@ -915,8 +917,7 @@ private struct DubbingDeskComposerView: View {
     }
 
     private var availableVoices: [CreatorVoice] {
-        _ = catalogRefreshTick
-        let catalog = VoiceCatalogStore.shared.snapshot()
+        let catalog = model.voiceCatalogModel.snapshot
         return model.creatorVoices.filter {
             $0.available && catalog.permitsSurface($0, bookID: nil)
         }
@@ -1086,8 +1087,12 @@ public struct VoiceDesignView: View {
                     navigation.request(.audiobook)
                 }
             } else if let published = model.lastPublishedDesignedVoice {
-                do { try VoiceCatalogStore.shared.registerGlobalVoice(voiceID: published.id, creationSource: .voiceDesign) }
-                catch { errorMessage = "声音已创建，但目录保存失败：\(error.localizedDescription)" }
+                Task {
+                    do {
+                        try await model.voiceCatalogModel.store.registerGlobalVoice(voiceID: published.id, creationSource: .voiceDesign)
+                        await model.voiceCatalogModel.refresh()
+                    } catch { errorMessage = "声音已创建，但目录保存失败：\(error.localizedDescription)" }
+                }
             }
         }
     }
@@ -2454,7 +2459,6 @@ public struct VoiceLibraryView: View {
     @State private var scopeFilter = VoiceScopeFilter.activeGlobal
     @State private var favoritesOnly = false
     @State private var selectedArchetype: AudiobookVoiceArchetype? = nil
-    @State private var catalogRefreshTick: Int = 0
     @State private var selectionNotice: String?
     @State private var pendingDeleteVoice: CreatorVoice?
     @State private var isConfirmingDeletion = false
@@ -2584,9 +2588,6 @@ public struct VoiceLibraryView: View {
         .task {
             await model.refreshCreatorVoices()
             syncSelectedVoice()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: VoiceCatalogStore.didChange, object: VoiceCatalogStore.shared)) { _ in
-            catalogRefreshTick += 1
         }
         .task(id: selectedVoiceID) {
             guard let selectedVoiceID else { return }
@@ -2795,16 +2796,20 @@ public struct VoiceLibraryView: View {
     /// One row: name, source badge, archetype & scope badges, one line of description, the availability
     /// note, and the inline preview. Everything heavier lives in the inspector
     /// (REDESIGN-SPEC §7.3).
-    private func saveCatalogChange(_ action: () throws -> Void) {
-        do { try action(); catalogRefreshTick += 1; selectionNotice = nil }
-        catch { selectionNotice = error.localizedDescription }
+    private func saveCatalogChange(_ action: @escaping @MainActor () async throws -> Void) {
+        Task {
+            do {
+                try await action()
+                await model.voiceCatalogModel.refresh()
+                selectionNotice = nil
+            } catch { selectionNotice = error.localizedDescription }
+        }
     }
 
     private func voiceLibraryRow(_ voice: CreatorVoice) -> some View {
-        _ = catalogRefreshTick
         let isPlaying = model.playingVoiceID == voice.id && model.isAudioPlaying
         let isPreviewing = model.previewingVoiceID == voice.id
-        let meta = VoiceCatalogStore.shared.metadata(for: voice.id)
+        let meta = model.voiceCatalogModel.metadata(for: voice.id)
         let archetype = VoiceTaxonomyClassifier.resolveArchetype(
             voiceID: voice.id,
             traits: [voice.instruction],
@@ -2814,7 +2819,7 @@ public struct VoiceLibraryView: View {
         )
         return HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
             Button {
-                saveCatalogChange { _ = try VoiceCatalogStore.shared.toggleFavorite(voiceID: voice.id) }
+                saveCatalogChange { _ = try await model.voiceCatalogModel.store.toggleFavorite(voiceID: voice.id) }
             } label: {
                 Image(systemName: meta?.isFavorite == true ? "star.fill" : "star")
                     .font(SpeechRailDesignTokens.Typography.caption)
@@ -2887,27 +2892,27 @@ public struct VoiceLibraryView: View {
         }
         .contextMenu {
             Button(meta?.isFavorite == true ? "取消星标收藏" : "设为星标收藏") {
-                saveCatalogChange { _ = try VoiceCatalogStore.shared.toggleFavorite(voiceID: voice.id) }
+                saveCatalogChange { _ = try await model.voiceCatalogModel.store.toggleFavorite(voiceID: voice.id) }
             }
             Menu("设置声部行当") {
                 ForEach(AudiobookVoiceArchetype.allCases) { arch in
                     Button(arch.title) {
-                        saveCatalogChange { try VoiceCatalogStore.shared.setArchetypeOverride(arch, for: voice.id) }
+                        saveCatalogChange { try await model.voiceCatalogModel.store.setArchetypeOverride(arch, for: voice.id) }
                     }
                 }
             }
             if !voice.isSystem, meta?.visibilityScope != .globalReusable {
                 Button("设为通用声音") {
-                    saveCatalogChange { _ = try VoiceCatalogStore.shared.promoteToGlobalReusable(voiceID: voice.id) }
+                    saveCatalogChange { _ = try await model.voiceCatalogModel.store.promoteToGlobalReusable(voiceID: voice.id) }
                 }
             }
             if meta?.lifecycleState == .archived {
                 Button("恢复为活跃音色") {
-                    saveCatalogChange { try VoiceCatalogStore.shared.unarchiveVoices(voiceIDs: [voice.id]) }
+                    saveCatalogChange { try await model.voiceCatalogModel.store.unarchiveVoices(voiceIDs: [voice.id]) }
                 }
             } else if !voice.isSystem {
                 Button("归档该音色（从选角器隐藏）") {
-                    saveCatalogChange { try VoiceCatalogStore.shared.archiveVoices(voiceIDs: [voice.id]) }
+                    saveCatalogChange { try await model.voiceCatalogModel.store.archiveVoices(voiceIDs: [voice.id]) }
                 }
             }
         }
@@ -2963,8 +2968,7 @@ public struct VoiceLibraryView: View {
     }
 
     private var filteredVoices: [CreatorVoice] {
-        _ = catalogRefreshTick
-        let catalog = VoiceCatalogStore.shared.snapshot()
+        let catalog = model.voiceCatalogModel.snapshot
         let metadataMap = catalog.state.metadataByVoiceID
         let bySourceAndScope = model.creatorVoices.filter { voice in
             let matchesSource: Bool = switch sourceFilter {
@@ -3160,8 +3164,7 @@ public struct VoiceLibraryView: View {
                 WaveformBars(
                     pattern: SpeechRailDesignTokens.Waveform.libraryPreview,
                     isPlaying: isPlaying,
-                    // 试听过的音色画它自己的包络与真实进度；没试听过则退回稿的
-                    // 固定图形（那时确实还没有音频可画，§11.6 第五十七轮）。
+                    // 内存试听不为绘制波形落盘；使用占位轮廓与真实播放进度。
                     levels: model.waveformEnvelope(forVoiceID: voice.id),
                     progress: isPlaying ? model.playbackProgress : nil
                 )
@@ -3755,7 +3758,7 @@ public struct WorksView: View {
                         Button(project.title) { savedDubbingProject = project }
                     }
                     Divider()
-                    Button("重新读取") { model.refreshDubbingProjects() }
+                    Button("重新读取") { Task { await model.refreshDubbingProjects() } }
                 }
                 Menu("已删除作品") {
                     if let summary = model.deletedWorksSummary {
@@ -3766,7 +3769,7 @@ public struct WorksView: View {
                         .disabled(summary.count == 0)
                     }
                     if let message = model.deletedWorksMessage { Text(message) }
-                    Button("重新读取") { model.refreshDeletedWorks() }
+                    Button("重新读取") { Task { await model.refreshDeletedWorks() } }
                 }
                 worksInspectorToggle
             }
@@ -3793,8 +3796,10 @@ public struct WorksView: View {
                 Button("删除“\(work.displayTitle)”", role: .destructive) {
                     let workToDelete = work
                     pendingDeleteWork = nil
-                    if model.deleteWork(workToDelete), selectedWorkID == workToDelete.id {
-                        selectedWorkID = model.works.first?.id
+                    Task {
+                        if await model.deleteWork(workToDelete), selectedWorkID == workToDelete.id {
+                            selectedWorkID = model.works.first?.id
+                        }
                     }
                 }
             }
@@ -3809,7 +3814,7 @@ public struct WorksView: View {
             isPresented: $isConfirmingRecoveryTrash,
             titleVisibility: .visible
         ) {
-            Button("移入系统废纸篓", role: .destructive) { model.trashDeletedWorks() }
+            Button("移入系统废纸篓", role: .destructive) { Task { await model.trashDeletedWorks() } }
             Button("取消", role: .cancel) {}
         } message: {
             Text("将转移本机恢复区中的已删除作品及音频。当前作品与配音项目保留；清空系统废纸篓后才会永久移除。")
@@ -3837,8 +3842,8 @@ public struct WorksView: View {
             }
         }
         .task {
-            model.refreshWorks()
-            model.refreshDubbingProjects()
+            await model.refreshWorks()
+            await model.refreshDubbingProjects()
             if selectedWorkID == nil {
                 selectedWorkID = model.works.first?.id
             }
@@ -3874,7 +3879,7 @@ public struct WorksView: View {
                 message: message,
                 actionTitle: "重新加载"
             ) {
-                model.refreshWorks()
+                Task { await model.refreshWorks() }
             }
         }
 
@@ -3995,7 +4000,7 @@ public struct WorksView: View {
         let playing = isPlaying(work)
         return HStack(spacing: SpeechRailDesignTokens.Inspector.previewGap) {
             Button {
-                model.playWork(work)
+                Task { await model.playWork(work) }
             } label: {
                 RowActionGlyph(playing ? .stop : .play)
             }
@@ -4014,8 +4019,8 @@ public struct WorksView: View {
         .speechRailInspectorPreviewPanel()
         // 选中哪一条作品就先把那一条的包络算好（命中缓存立即返回），于是「点开详情
         // 就能看见这段音频的形状」，不必先播一遍（§11.6 第五十七轮）。
-        .task(id: work.id) {
-            model.prepareWaveform(for: work)
+        .task(id: "\(work.id):\(work.renderRevision):\(work.provenance.audioFileSHA256 ?? "")") {
+            await model.prepareWaveform(for: work)
         }
     }
 
@@ -4181,7 +4186,7 @@ public struct WorksView: View {
                     .accessibilityLabel("作品列表")
                     .onKeyPress(.space) {
                         guard let work = selectedWork else { return .ignored }
-                        model.playWork(work)
+                        Task { await model.playWork(work) }
                         return .handled
                     }
                     Divider()
@@ -4262,7 +4267,7 @@ public struct WorksView: View {
 
             HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Button {
-                    model.playWork(work)
+                    Task { await model.playWork(work) }
                 } label: {
                     RowActionGlyph(isPlaying ? .stop : .play)
                 }
@@ -4316,7 +4321,7 @@ public struct WorksView: View {
     @ViewBuilder
     private func workContextMenu(_ work: CreativeWork) -> some View {
         Button {
-            model.playWork(work)
+            Task { await model.playWork(work) }
         } label: {
             Label(
                 isPlaying(work) ? "停止试听" : "试听",
@@ -4400,10 +4405,13 @@ public struct WorksView: View {
     }
 
     private func commitRename() {
-        guard let work = renamingWork else { return }
-        if model.renameWork(work, title: renameText) {
-            renamingWork = nil
-            isRenaming = false
+        Task {
+            guard let work = renamingWork else { return }
+            if await model.renameWork(work, title: renameText) {
+                renamingWork = nil
+                isRenaming = false
+            }
+
         }
     }
 
@@ -4418,13 +4426,16 @@ public struct WorksView: View {
     }
 
     private func prepareExport(for work: CreativeWork) {
-        do {
-            exportDocument = WAVFileDocument(data: try model.loadWorkAudio(work))
-            exportFileName = work.exportBaseName
-            exportMessage = nil
-            isExporting = true
-        } catch {
-            exportMessage = "导出失败：作品音频暂时不可用，请重新生成或重试。"
+        Task {
+            do {
+                exportDocument = WAVFileDocument(data: try await model.loadWorkAudio(work))
+                exportFileName = work.exportBaseName
+                exportMessage = nil
+                isExporting = true
+            } catch {
+                exportMessage = "导出失败：作品音频暂时不可用，请重新生成或重试。"
+            }
+
         }
     }
 }
@@ -4493,18 +4504,18 @@ private struct DubbingProjectSheet: View {
             height: SpeechRailDesignTokens.Layout.creatorDubbingSheetHeight
         )
         .task {
-            model.refreshDubbingProjects()
+            await model.refreshDubbingProjects()
             if let work {
-                model.startDubbingProject(for: work)
+                await model.startDubbingProject(for: work)
             } else if let projectID {
-                model.openDubbingProject(projectID)
+                await model.openDubbingProject(projectID)
             }
         }
         .onDisappear {
             // 关闭编辑保留项目；在途重做的落地结果不会写进下一个项目。
             model.closeDubbingProject()
         }
-        .onChange(of: model.dubbingExportBundle) { _, bundle in
+        .onChange(of: model.preparedDubbingExport) { _, bundle in
             guard bundle != nil else { return }
             chooseExportDirectory()
         }
@@ -4518,7 +4529,7 @@ private struct DubbingProjectSheet: View {
         ) {
             Button("建立新项目") {
                 if let candidate = rebuildCandidate {
-                    model.rebuildDubbingProject(using: candidate)
+                    Task { await model.rebuildDubbingProject(using: candidate) }
                 }
                 rebuildCandidate = nil
             }
@@ -4624,7 +4635,7 @@ private struct DubbingProjectSheet: View {
 
                     if isAdopted {
                         Button("撤销采用") {
-                            model.undoDubbingAdoption(inSegment: segment.id)
+                            Task { await model.undoDubbingAdoption(inSegment: segment.id) }
                         }
                         .speechRailButton(.secondary)
                         .disabled(isBusy)
@@ -4654,7 +4665,7 @@ private struct DubbingProjectSheet: View {
         let isPlaying = model.playingDubbingCandidateID == candidate.id
         return HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
             Button {
-                model.playDubbingCandidate(candidate)
+                Task { await model.playDubbingCandidate(candidate) }
             } label: {
                 RowActionGlyph(isPlaying ? .stop : .play)
             }
@@ -4686,7 +4697,7 @@ private struct DubbingProjectSheet: View {
                     .disabled(model.dubbingBusySegmentID != nil)
                 default:
                     Button("采用") {
-                        model.adoptDubbingCandidate(candidate)
+                        Task { await model.adoptDubbingCandidate(candidate) }
                     }
                     .speechRailButton(.secondary)
                 }
@@ -4713,7 +4724,7 @@ private struct DubbingProjectSheet: View {
             }
             HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                 Button("导出成品…") {
-                    model.prepareDubbingExport()
+                    Task { await model.prepareDubbingExport() }
                 }
                 .speechRailButton(.primary)
                 .disabled(model.dubbingProject == nil)
@@ -4721,7 +4732,7 @@ private struct DubbingProjectSheet: View {
                 Menu("项目") {
                     Menu("打开已有项目") {
                         ForEach(model.dubbingProjects) { project in
-                            Button(project.title) { model.openDubbingProject(project.id) }
+                            Button(project.title) { Task { await model.openDubbingProject(project.id) } }
                         }
                     }
                     .disabled(model.dubbingBusySegmentID != nil)
@@ -4770,25 +4781,27 @@ private struct DubbingProjectSheet: View {
         switch cleanupAction {
         case .candidate(let candidate):
             Button("删除候选音频", role: .destructive) {
-                model.deleteDubbingCandidate(candidate)
+                Task { await model.deleteDubbingCandidate(candidate) }
                 cleanupAction = nil
             }
         case .unused:
             Button("清理未采用候选", role: .destructive) {
-                model.discardUnusedDubbingCandidates()
+                Task { await model.discardUnusedDubbingCandidates() }
                 cleanupAction = nil
             }
         case .project:
             Button("删除项目及候选音频", role: .destructive) {
-                model.deleteCurrentDubbingProject()
+                Task { await model.deleteCurrentDubbingProject() }
                 cleanupAction = nil
             }
         case .close:
             Button("保留项目并关闭") { cleanupAction = nil; dismiss() }
             if model.unusedDubbingCandidateCount > 0 {
                 Button("清理未采用候选并关闭", role: .destructive) {
-                    if model.discardUnusedDubbingCandidates() { dismiss() }
-                    cleanupAction = nil
+                    Task {
+                        if await model.discardUnusedDubbingCandidates() { dismiss() }
+                        cleanupAction = nil
+                    }
                 }
                 .disabled(model.dubbingBusySegmentID != nil)
             }
@@ -4807,10 +4820,10 @@ private struct DubbingProjectSheet: View {
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let directory = panel.url else {
             // 用户改主意了：清掉待导出内容，下次按需重新准备。
-            model.discardDubbingExport()
+            Task { await model.discardDubbingExport() }
             return
         }
-        model.writeDubbingExport(to: directory)
+        Task { await model.writeDubbingExport(to: directory) }
     }
 
     private func candidates(for segmentID: String) -> [DubbingCandidate] {

@@ -33,10 +33,6 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
     }
     public func stopAudio() { playback.stop() }
     private func clearPlaybackState() { playback.stop() }
-    private static func envelopeKey(kind: String, id: String) -> String { "\(kind):\(id)" }
-    private func cacheEnvelope(key: String, compute: @escaping @Sendable (Int) -> [CGFloat]?) {
-        playback.cacheEnvelope(key: key, compute: compute)
-    }
     public func audioDuration(for data: Data) -> TimeInterval? { playback.duration(for: data) }
 
     public init(
@@ -2028,9 +2024,6 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
             do {
                 try playVoiceAudio(data: cachedData, voiceID: voice.id)
 
-                cacheEnvelope(key: Self.envelopeKey(kind: "voice", id: voice.id)) { buckets in
-                    AudioEnvelope.levels(forAudioData: cachedData, buckets: buckets)
-                }
             } catch {
                 clearPlaybackState()
                 creatorMessage = "音频播放失败，请重试。"
@@ -2066,10 +2059,6 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
                 throw error
             }
 
-            // 顺手将真实音频包络算出来，让声波呈现当前真实声音的轮廓
-            cacheEnvelope(key: Self.envelopeKey(kind: "voice", id: voice.id)) { buckets in
-                AudioEnvelope.levels(forAudioData: data, buckets: buckets)
-            }
         } catch is CancellationError {
             return
         } catch {

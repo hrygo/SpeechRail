@@ -275,8 +275,35 @@ public struct CreativeWorkRecoverySummary: Equatable, Sendable {
     public let byteCount: Int64
 }
 
-@MainActor
-public final class CreativeWorkStore {
+public actor CreativeWorkStore {
+    private var commitHistory = StoreCommitHistory()
+    private var activeOperationID: UUID?
+    private var observedIndexDigest: String?
+    public var receiptHistoryCount: Int { commitHistory.count }
+    public func receipt(operationID: UUID) -> StoreCommitReceipt? { commitHistory.receipt(operationID: operationID) }
+
+    private func withWriteReceipt<Value: Sendable>(operationID: UUID, _ body: () throws -> Value) throws -> StoreWriteResult<Value> {
+        try Task.checkCancellation()
+        activeOperationID = operationID
+        observedIndexDigest = nil
+        commitHistory.remove(operationID: operationID)
+        defer { activeOperationID = nil; observedIndexDigest = nil }
+        return try AppPerformanceMetrics.shared.measure(.storeCommit) {
+            let value = try body()
+            guard let receipt = commitHistory.receipt(operationID: operationID), receipt.committed else {
+                throw CreativeWorkStoreError.recoveryRequired
+            }
+            return .init(value: value, receipt: receipt)
+        }
+    }
+
+    private func recordIndexCommit(_ digest: String) {
+        observedIndexDigest = digest
+        if let operationID = activeOperationID {
+            commitHistory.record(.init(operationID: operationID, committed: true, indexDigest: digest))
+        }
+    }
+
     private let operations: CreativeWorkFileOperations
     private let directory: URL
     private let indexURL: URL
@@ -304,7 +331,7 @@ public final class CreativeWorkStore {
     init(
         directory: URL,
         fileManager: FileManager = .default,
-        fileOperations: CreativeWorkFileOperations
+        fileOperations: sending CreativeWorkFileOperations
     ) {
         self.operations = fileOperations
         self.directory = directory
@@ -323,99 +350,103 @@ public final class CreativeWorkStore {
     }
 
     @discardableResult
-    public func save(_ work: CreativeWork, audioData: Data) throws -> CreativeWork {
-        guard Self.isSafeIdentifier(work.id),
-              work.audioFileName == "\(work.id).wav"
-        else {
-            throw CreativeWorkStoreError.invalidWorkID
-        }
-        guard !audioData.isEmpty else {
-            throw CreativeWorkStoreError.audioUnavailable
-        }
-        return try withRecoveredLibrary {
-            var works = try readIndexUnlocked()
-            let audioURL = directory.appendingPathComponent(
-                work.audioFileName,
-                isDirectory: false
-            )
-            if let existing = works.first(where: { $0.id == work.id }) {
-                guard !operations.isSymbolicLink(at: audioURL) else {
-                    throw CreativeWorkStoreError.audioUnavailable
+    public func save(_ work: CreativeWork, audioData: Data, operationID: UUID) throws -> StoreWriteResult<CreativeWork> {
+        try withWriteReceipt(operationID: operationID) {
+            guard Self.isSafeIdentifier(work.id),
+                  work.audioFileName == "\(work.id).wav"
+            else {
+                throw CreativeWorkStoreError.invalidWorkID
+            }
+            guard !audioData.isEmpty else {
+                throw CreativeWorkStoreError.audioUnavailable
+            }
+            return try withRecoveredLibrary {
+                var works = try readIndexUnlocked()
+                let audioURL = directory.appendingPathComponent(
+                    work.audioFileName,
+                    isDirectory: false
+                )
+                if let existing = works.first(where: { $0.id == work.id }) {
+                    guard !operations.isSymbolicLink(at: audioURL) else {
+                        throw CreativeWorkStoreError.audioUnavailable
+                    }
+                    let existingAudio = try operations.read(from: audioURL)
+                    guard sameResult(existing, work, existingAudio: existingAudio, audioData: audioData)
+                    else {
+                        throw CreativeWorkStoreError.workConflict
+                    }
+                    return existing
                 }
-                let existingAudio = try operations.read(from: audioURL)
-                guard sameResult(existing, work, existingAudio: existingAudio, audioData: audioData)
-                else {
+                guard !operations.fileExists(at: audioURL) else {
+                    // No index entry proves ownership. Never overwrite or adopt it.
                     throw CreativeWorkStoreError.workConflict
                 }
-                return existing
-            }
-            guard !operations.fileExists(at: audioURL) else {
-                // No index entry proves ownership. Never overwrite or adopt it.
-                throw CreativeWorkStoreError.workConflict
-            }
 
-            // The stored bytes are the file, so their digest belongs in the
-            // record the library commits — not in what the caller handed over.
-            let audioDigest = CreativeWorkTransaction.digest(audioData)
-            let committed = work.withProvenance(
-                work.provenance.withAudioFileSHA256(audioDigest)
-            )
-            works.append(committed)
-            try commitIndexMutationUnlocked(
-                works: works,
-                operation: .save,
-                work: committed,
-                audioSHA256: audioDigest
-            ) { transactionDirectory in
-                let stagedURL = transactionDirectory
-                    .appendingPathComponent("staged.wav", isDirectory: false)
-                try self.operations.write(audioData, to: stagedURL)
-                try self.operations.synchronize(at: stagedURL)
-                try self.operations.move(from: stagedURL, to: audioURL)
-                try self.operations.synchronize(at: audioURL)
+                // The stored bytes are the file, so their digest belongs in the
+                // record the library commits — not in what the caller handed over.
+                let audioDigest = CreativeWorkTransaction.digest(audioData)
+                let committed = work.withProvenance(
+                    work.provenance.withAudioFileSHA256(audioDigest)
+                )
+                works.append(committed)
+                try commitIndexMutationUnlocked(
+                    works: works,
+                    operation: .save,
+                    work: committed,
+                    audioSHA256: audioDigest
+                ) { transactionDirectory in
+                    let stagedURL = transactionDirectory
+                        .appendingPathComponent("staged.wav", isDirectory: false)
+                    try self.operations.write(audioData, to: stagedURL)
+                    try self.operations.synchronize(at: stagedURL)
+                    try self.operations.move(from: stagedURL, to: audioURL)
+                    try self.operations.synchronize(at: audioURL)
+                }
+                return committed
             }
-            return committed
         }
     }
 
     /// Removes the work from the index first, then moves its audio into a managed
     /// recovery area. An interrupted delete is completed on the next open.
     @discardableResult
-    public func delete(_ work: CreativeWork) throws -> String? {
-        guard Self.isSafeIdentifier(work.id),
-              work.audioFileName == "\(work.id).wav"
-        else {
-            throw CreativeWorkStoreError.invalidWorkID
-        }
-        return try withRecoveredLibrary {
-            var works = try readIndexUnlocked()
-            guard let index = works.firstIndex(where: { $0.id == work.id }) else { return nil }
-            let existing = works.remove(at: index)
-            let audioURL = directory.appendingPathComponent(
-                existing.audioFileName,
-                isDirectory: false
-            )
-            guard !operations.isSymbolicLink(at: audioURL) else {
-                throw CreativeWorkStoreError.audioUnavailable
+    public func delete(_ work: CreativeWork, operationID: UUID) throws -> StoreWriteResult<String?> {
+        try withWriteReceipt(operationID: operationID) {
+            guard Self.isSafeIdentifier(work.id),
+                  work.audioFileName == "\(work.id).wav"
+            else {
+                throw CreativeWorkStoreError.invalidWorkID
             }
-            let audioDigest = operations.fileExists(at: audioURL)
-                ? CreativeWorkTransaction.digest(try operations.read(from: audioURL))
-                : nil
-            try commitIndexMutationUnlocked(
-                works: works,
-                operation: .delete,
-                work: existing,
-                audioSHA256: audioDigest
-            )
-            // The index commit is the user-visible deletion. Quarantine work is
-            // recovery work and must never be reported as a failed deletion.
-            if let journal = try pendingJournalUnlocked(),
-               journal.operation == .delete
-            {
-                try? completeCommittedDeleteUnlocked(journal)
-                return journal.transactionID
+            return try withRecoveredLibrary {
+                var works = try readIndexUnlocked()
+                guard let index = works.firstIndex(where: { $0.id == work.id }) else { return nil }
+                let existing = works.remove(at: index)
+                let audioURL = directory.appendingPathComponent(
+                    existing.audioFileName,
+                    isDirectory: false
+                )
+                guard !operations.isSymbolicLink(at: audioURL) else {
+                    throw CreativeWorkStoreError.audioUnavailable
+                }
+                let audioDigest = operations.fileExists(at: audioURL)
+                    ? CreativeWorkTransaction.digest(try operations.read(from: audioURL))
+                    : nil
+                try commitIndexMutationUnlocked(
+                    works: works,
+                    operation: .delete,
+                    work: existing,
+                    audioSHA256: audioDigest
+                )
+                // The index commit is the user-visible deletion. Quarantine work is
+                // recovery work and must never be reported as a failed deletion.
+                if let journal = try pendingJournalUnlocked(),
+                   journal.operation == .delete
+                {
+                    try? completeCommittedDeleteUnlocked(journal)
+                    return journal.transactionID
+                }
+                return nil
             }
-            return nil
         }
     }
 
@@ -432,15 +463,17 @@ public final class CreativeWorkStore {
     /// Transfer only journal-owned deleted assets. All selected entries are
     /// validated before the first move; failure leaves remaining entries retryable.
     @discardableResult
-    public func trashDeletedWorks(transactionIDs: Set<String>? = nil) throws -> Int {
-        try withRecoveredLibrary {
-            let entries = try recoveryEntriesUnlocked(validateAudio: true)
-                .filter { transactionIDs?.contains($0.url.lastPathComponent) ?? true }
-            for entry in entries {
-                try operations.trash(at: entry.url)
-                try operations.synchronize(at: recoveryDirectory)
+    public func trashDeletedWorks(transactionIDs: Set<String>? = nil, operationID: UUID) throws -> StoreWriteResult<Int> {
+        try withWriteReceipt(operationID: operationID) {
+            try withRecoveredLibrary {
+                let entries = try recoveryEntriesUnlocked(validateAudio: true)
+                    .filter { transactionIDs?.contains($0.url.lastPathComponent) ?? true }
+                for entry in entries {
+                    try operations.trash(at: entry.url)
+                    try operations.synchronize(at: recoveryDirectory)
+                }
+                return entries.count
             }
-            return entries.count
         }
     }
 
@@ -483,59 +516,67 @@ public final class CreativeWorkStore {
     /// Renames a work without touching its audio: the file keeps the
     /// identifier-based name, so a rename never moves bytes on disk.
     @discardableResult
-    public func rename(_ work: CreativeWork, title: String) throws -> CreativeWork {
-        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            throw CreativeWorkStoreError.invalidTitle
-        }
-        return try withRecoveredLibrary {
-            var works = try readIndexUnlocked()
-            guard let index = works.firstIndex(where: { $0.id == work.id }) else {
-                throw CreativeWorkStoreError.invalidWorkID
+    public func rename(_ work: CreativeWork, title: String, operationID: UUID) throws -> StoreWriteResult<CreativeWork> {
+        try withWriteReceipt(operationID: operationID) {
+            let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                throw CreativeWorkStoreError.invalidTitle
             }
-            let existing = works[index]
-            let updated = CreativeWork(
-                id: existing.id,
-                title: CreativeWork.clampedTitle(trimmed),
-                scriptText: existing.scriptText,
-                voiceID: existing.voiceID,
-                voiceName: existing.voiceName,
-                voiceRevision: existing.voiceRevision,
-                planID: existing.planID,
-                renderRevision: existing.renderRevision,
-                createdAt: existing.createdAt,
-                durationSeconds: existing.durationSeconds,
-                audioFileName: existing.audioFileName,
-                provenance: existing.provenance
-            )
-            works[index] = updated
-            try commitIndexMutationUnlocked(
-                works: works,
-                operation: .rename,
-                work: updated,
-                audioSHA256: nil
-            )
-            return updated
+            return try withRecoveredLibrary {
+                var works = try readIndexUnlocked()
+                guard let index = works.firstIndex(where: { $0.id == work.id }) else {
+                    throw CreativeWorkStoreError.invalidWorkID
+                }
+                let existing = works[index]
+                let updated = CreativeWork(
+                    id: existing.id,
+                    title: CreativeWork.clampedTitle(trimmed),
+                    scriptText: existing.scriptText,
+                    voiceID: existing.voiceID,
+                    voiceName: existing.voiceName,
+                    voiceRevision: existing.voiceRevision,
+                    planID: existing.planID,
+                    renderRevision: existing.renderRevision,
+                    createdAt: existing.createdAt,
+                    durationSeconds: existing.durationSeconds,
+                    audioFileName: existing.audioFileName,
+                    provenance: existing.provenance
+                )
+                works[index] = updated
+                try commitIndexMutationUnlocked(
+                    works: works,
+                    operation: .rename,
+                    work: updated,
+                    audioSHA256: nil
+                )
+                return updated
+            }
         }
     }
 
-    /// Absolute location of a saved work's audio, without reading it.
+    /// Snapshot URLs are validated once on the store executor; view bodies only read this immutable value.
+    func librarySnapshot() throws -> CreativeWorkLibrarySnapshot {
+        try withRecoveredLibrary {
+            let works = try readIndexUnlocked()
+            var urls: [String: URL] = [:]
+            for work in works { urls[work.id] = try? audioURLUnlocked(for: work) }
+            return .init(works: works, audioURLsByID: urls)
+        }
+    }
+
     public func audioURL(for work: CreativeWork) throws -> URL {
-        guard Self.isSafeIdentifier(work.id),
-              work.audioFileName == "\(work.id).wav"
-        else {
+        try withRecoveredLibrary { try audioURLUnlocked(for: work) }
+    }
+
+    private func audioURLUnlocked(for work: CreativeWork) throws -> URL {
+        guard Self.isSafeIdentifier(work.id), work.audioFileName == "\(work.id).wav" else {
             throw CreativeWorkStoreError.invalidWorkID
         }
-        let audioURL = directory.appendingPathComponent(work.audioFileName, isDirectory: false)
-        return try withRecoveredLibrary {
-            guard !operations.isSymbolicLink(at: audioURL) else {
-                throw CreativeWorkStoreError.audioUnavailable
-            }
-            guard operations.fileExists(at: audioURL) else {
-                throw CreativeWorkStoreError.audioUnavailable
-            }
-            return audioURL
+        let url = directory.appendingPathComponent(work.audioFileName, isDirectory: false)
+        guard !operations.isSymbolicLink(at: url), operations.fileExists(at: url) else {
+            throw CreativeWorkStoreError.audioUnavailable
         }
+        return url
     }
 
     /// 同一份文稿 + 同一个音色的下一次制作编号。
@@ -580,7 +621,21 @@ public final class CreativeWorkStore {
             let lock = try operations.acquireExclusiveLock(at: lockURL)
             defer { operations.releaseExclusiveLock(lock) }
             try recoverPendingTransactionsUnlocked()
-            return try body()
+            do {
+                let value = try body()
+                if activeOperationID != nil {
+                    let digest = try observedIndexDigest ?? indexDataUnlocked().map(CreativeWorkTransaction.digest)
+                        ?? CreativeWorkTransaction.digest(Data())
+                    recordIndexCommit(digest)
+                }
+                return value
+            } catch {
+                if let operationID = activeOperationID,
+                   commitHistory.receipt(operationID: operationID) == nil, let digest = observedIndexDigest {
+                    commitHistory.record(.init(operationID: operationID, committed: false, indexDigest: digest))
+                }
+                throw error
+            }
         } catch let error as CreativeWorkStoreError {
             throw error
         } catch let error as CreativeWorkTransactionInterruption {
@@ -591,12 +646,16 @@ public final class CreativeWorkStore {
     }
 
     private func readIndexUnlocked() throws -> [CreativeWork] {
-        guard operations.fileExists(at: indexURL) else { return [] }
+        guard operations.fileExists(at: indexURL) else {
+            if activeOperationID != nil { observedIndexDigest = CreativeWorkTransaction.digest(Data()) }
+            return []
+        }
         guard !operations.isSymbolicLink(at: indexURL) else {
             throw CreativeWorkStoreError.storageUnavailable
         }
         do {
             let data = try operations.read(from: indexURL)
+            if activeOperationID != nil { observedIndexDigest = CreativeWorkTransaction.digest(data) }
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             return try decoder.decode([CreativeWork].self, from: data)
@@ -687,6 +746,7 @@ public final class CreativeWorkStore {
                 )
                 throw CreativeWorkStoreError.storageUnavailable
             }
+            recordIndexCommit(journal.committedIndexSHA256)
             if operation == .save,
                !CreativeWorkTransaction.publishedAudioMatches(
                 at: directory.appendingPathComponent(journal.audioFileName),
@@ -916,11 +976,11 @@ enum CreativeWorkTransactionInterruption: Error, Equatable {
 /// Narrow file boundary for the works library. Tests inject failures at real
 /// transaction steps instead of replacing `FileManager` wholesale.
 struct CreativeWorkFileOperations {
-    typealias WriteInterceptor = (URL, Data) throws -> Void
-    typealias MoveInterceptor = (URL, URL) throws -> Void
-    typealias SyncInterceptor = (URL) throws -> Void
-    typealias RemoveInterceptor = (URL) throws -> Void
-    typealias TrashHandler = (URL) throws -> Void
+    typealias WriteInterceptor = @Sendable (URL, Data) throws -> Void
+    typealias MoveInterceptor = @Sendable (URL, URL) throws -> Void
+    typealias SyncInterceptor = @Sendable (URL) throws -> Void
+    typealias RemoveInterceptor = @Sendable (URL) throws -> Void
+    typealias TrashHandler = @Sendable (URL) throws -> Void
 
     private let fileManager: FileManager
     private let writeInterceptor: WriteInterceptor?
