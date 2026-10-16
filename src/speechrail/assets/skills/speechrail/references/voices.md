@@ -10,9 +10,17 @@ There are four distinct creation routes:
    `voice_design_task_required`. Treat it as a stored draft, not a deliverable.
 3. `design_voice` creates a private VoiceDesign candidate. Call
    `confirm_voice_design` to fix its transcript, `validate_voice_design` with a
-   different Base test text, attach identity/naturalness review only after human
-   audition, then call `publish_voice_design`. Candidate generation and machine
-   validation do not publish a production voice.
+   different Base test text, then choose one acceptance path. Attach
+   identity/naturalness review only after human audition using
+   `validate_voice_design`. For REST clients, `POST
+   /v1/voice-designs/{candidate_id}/validate` also accepts
+   `{"automated_acceptance": true}` to accept the latest stored machine result
+   when it passes the current gates. The MCP `validate_voice_design` tool does
+   not expose this argument. Automated acceptance does not record a human
+   audition and cannot override a human warning or rejection attached to that
+   validation. Then call `publish_voice_design`.
+   Candidate generation and machine validation do not publish a production
+   voice.
 4. `clone_voice` registers a user-provided local reference recording through
    the reference-audio gate. A gate pass proves the reference, not synthesis.
 
@@ -98,6 +106,15 @@ The design lane carries its own admission rules on top of this:
   one the service reports `voice_design_machine_validation_required`, and the
   fix is `validate_voice_design` with a Base test text different from the
   reference — never a manual override.
+- A current revision needs at least one complete passing validation to publish;
+  the validation must have explicit human identity and naturalness passes or a
+  REST automated acceptance. Publication may use any current passing
+  validation. A later machine-validation failure does not revoke a different
+  still-eligible passing validation. A human warning or rejection makes the
+  reviewed validation ineligible; another current eligible pass may still
+  permit publication. Automated acceptance leaves identity/naturalness as
+  `not_reviewed`; it cannot replace a warning or rejection attached to that
+  validation.
 - Machine validation is judged on similarity **and** numbers
   (`transcript_numbers_match`); a high-similarity read that gets a number
   wrong is still a reject. Human audition may sharpen a machine conclusion

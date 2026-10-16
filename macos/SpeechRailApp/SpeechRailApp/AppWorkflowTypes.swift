@@ -412,6 +412,7 @@ struct VoiceDesignPublicationContext: Equatable, Sendable {
     var candidateID: String?
     var candidateRevision: String?
     var validationID: String?
+    var autoPublish: Bool = false
 }
 
 enum VoiceDesignPublicationRetryStep: Equatable {
@@ -419,6 +420,8 @@ enum VoiceDesignPublicationRetryStep: Equatable {
     case loadReferenceAudio
     case confirmReference
     case validate
+    /// 旧机器验证已被服务拒绝，重试必须生成新的复验结果。
+    case revalidate
     case loadValidationAudio
     case submitReview
     case publish

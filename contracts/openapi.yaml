@@ -658,20 +658,29 @@ paths:
     post:
       operationId: validateVoiceDesignCandidate
       tags: [speech]
-      summary: Re-create the candidate with Base, or record a human audition
+      summary: Validate with Base, record a human audition, or accept a machine pass
       description: |
-        Two mutually exclusive modes.
+        Three mutually exclusive modes.
 
-        Machine mode (`test_text`) synthesizes brand-new text through the Base
-        role with the private candidate reference and adds acoustic, transcript
-        and runtime-identity evidence. The test text must differ from the
-        reference text; when it is omitted the server substitutes a controlled
-        test text. Machine metrics never mark identity or naturalness as
-        reviewed.
+        Machine mode (no `human_review` or `automated_acceptance`) synthesizes
+        brand-new text through the Base role with the private candidate
+        reference and adds acoustic, transcript and runtime-identity evidence.
+        The test text must differ from the reference text; when it is omitted
+        the server substitutes a controlled test text. Machine metrics never
+        mark identity or naturalness as reviewed.
 
         Human mode (`human_review`) attaches an explicit audition verdict to an
         existing machine result. It is refused unless that result already passed
         the machine gate for the current candidate revision.
+
+        Automated acceptance mode (`automated_acceptance=true`) accepts the
+        latest stored machine result only when it passes the current policy,
+        candidate revision, selected capability and runtime-identity gates. It
+        does not record an identity or naturalness audition and cannot override
+        a human warning or rejection attached to that validation. An existing
+        explicit human pass remains valid. Do not combine this mode with `test_text` or
+        `human_review`; conflicting modes return the standard 422
+        `validation_error` envelope.
 
         Concurrent results are merged into the latest candidate under the store
         transaction lock. Every successful result retains its validation ID,
@@ -713,8 +722,11 @@ paths:
         '409':
           description: >-
             Candidate state/revision or validation identity conflict, a human
-            review without a passing machine validation, the 32-record limit,
-            or validation_audio_unavailable for a conflicting audio asset
+            review without a passing machine validation, automated acceptance
+            for a validation with a human warning or rejection
+            (voice_design_review_mode_conflict), an action against a failed
+            terminal candidate (voice_design_state_conflict), the 32-record limit, or
+            validation_audio_unavailable for a conflicting audio asset
           content:
             application/json:
               schema:
@@ -722,7 +734,9 @@ paths:
         '422':
           description: >-
             Invalid request; includes test_text_matches_reference when the test
-            text is not distinct from the reference text
+            text is not distinct from the reference text, and conflicting
+            validation modes when automated_acceptance is combined with
+            test_text or human_review
           content:
             application/json:
               schema:
@@ -746,9 +760,17 @@ paths:
       tags: [speech]
       summary: Publish a validated candidate as an immutable voice revision
       description: |
-        Requires a confirmed reference plus at least one complete pass for the
+        Requires a confirmed reference plus at least one complete passing
+        validation for the
         current candidate revision: machine acoustic/transcript/runtime gate and
-        an explicit human identity and naturalness pass.
+        either an explicit human identity and naturalness pass or automated
+        acceptance recorded on that validation. Publication can use any current
+        passing validation. A later machine-validation failure does not revoke a
+        different still-eligible passing validation. A human warning or rejection
+        makes the reviewed validation ineligible; another current eligible pass
+        may still permit publication. Automated acceptance does not claim a human
+        identity or naturalness audition and cannot override a warning or
+        rejection attached to that validation.
 
         Publication is create-only inside the voice store lock. A duplicate
         publish of the same candidate returns the existing voice, and a target
@@ -3297,6 +3319,14 @@ components:
           oneOf:
             - $ref: '#/components/schemas/VoiceDesignHumanReview'
             - type: 'null'
+        automated_acceptance:
+          type: boolean
+          default: false
+          description: >-
+            Accept the latest stored machine validation automatically when it
+            passes all current gates. Does not record a human audition and is
+            mutually exclusive with test_text and human_review; combined modes
+            return the standard 422 validation_error envelope.
     VoiceDesignPublishRequest:
       type: object
       additionalProperties: false
@@ -3315,6 +3345,7 @@ components:
         - machine_status
         - identity_status
         - naturalness_status
+        - automated_acceptance
         - failure_codes
         - transcript_numbers_match
         - validation_policy_revision
@@ -3336,7 +3367,9 @@ components:
           enum: [pass, warn, reject]
           description: >-
             Overall verdict. It can only become pass when the machine gate and
-            the explicit human identity/naturalness review both pass.
+            the explicit human identity/naturalness review both pass, or when
+            automated_acceptance is recorded for a passing machine validation
+            without an existing human warning or rejection.
         machine_status:
           type: string
           enum: [pass, warn, reject]
@@ -3344,6 +3377,11 @@ components:
           $ref: '#/components/schemas/VoiceDesignReview'
         naturalness_status:
           $ref: '#/components/schemas/VoiceDesignReview'
+        automated_acceptance:
+          type: boolean
+          description: >-
+            Whether this record was accepted via an automated machine pass;
+            this does not mark identity or naturalness as human-reviewed.
         failure_codes:
           type: array
           items:

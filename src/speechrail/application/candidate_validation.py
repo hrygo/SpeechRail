@@ -120,6 +120,86 @@ def apply_human_review(
     return repository.update(candidate.candidate_id, apply)
 
 
+def apply_automated_acceptance(
+    repository: VoiceDesignRepository,
+    candidate: VoiceDesignCandidate,
+    *,
+    capability_key: str,
+) -> VoiceDesignCandidate:
+    if not candidate.validations:
+        raise VoiceDesignActionError(
+            "voice_design_validation_not_found",
+            "Validation result was not found for this candidate",
+            status_code=404,
+        )
+    validation = candidate.validations[-1]
+    if validation.candidate_revision != candidate.revision:
+        raise VoiceDesignActionError(
+            "voice_design_revision_conflict",
+            "Validation belongs to an older candidate revision",
+            status_code=409,
+        )
+    if (
+        not candidate.has_current_machine_pass(
+            validation.validation_id, capability_key=capability_key
+        )
+        or validation.runtime_fingerprint is None
+    ):
+        raise VoiceDesignActionError(
+            "voice_design_machine_validation_required",
+            "Automated acceptance can only follow a passing Base validation under the current "
+            "text-fidelity policy for this candidate revision",
+            status_code=409,
+        )
+    if validation.has_adverse_human_review():
+        raise VoiceDesignActionError(
+            "voice_design_review_mode_conflict",
+            "Automated acceptance cannot override an existing human warning or rejection",
+            status_code=409,
+        )
+    now = time.time()
+
+    def apply(current: VoiceDesignCandidate) -> VoiceDesignCandidate:
+        current.require_validation_writable(expected_revision=candidate.revision)
+        if not current.validations:
+            raise VoiceDesignConflictError("validation record changed")
+        latest = current.validations[-1]
+        if latest.validation_id != validation.validation_id:
+            raise VoiceDesignConflictError("validation record changed")
+        if (
+            not current.has_current_machine_pass(
+                latest.validation_id, capability_key=capability_key
+            )
+            or latest.runtime_fingerprint is None
+        ):
+            raise VoiceDesignConflictError("validation record changed")
+        if latest.has_adverse_human_review():
+            raise VoiceDesignActionError(
+                "voice_design_review_mode_conflict",
+                "Automated acceptance cannot override an existing human warning or rejection",
+                status_code=409,
+            )
+        accepted = latest.model_copy(
+            update={
+                "automated_acceptance": True,
+                "status": "pass",
+                "updated_at": max(latest.updated_at, now),
+            }
+        )
+        merged = current.model_copy(
+            update={
+                "validations": [
+                    accepted if item.validation_id == accepted.validation_id else item
+                    for item in current.validations
+                ],
+                "updated_at": max(current.updated_at, accepted.updated_at),
+            }
+        )
+        return merged.model_copy(update={"state": review_state_for(merged)})
+
+    return repository.update(candidate.candidate_id, apply)
+
+
 async def validate_candidate(
     *,
     repository: VoiceDesignRepository,
@@ -130,6 +210,7 @@ async def validate_candidate(
     requested_capability_key: str | None,
     test_text: str | None,
     human_review: CandidateHumanReview | None,
+    automated_acceptance: bool = False,
     expires_at: float,
 ) -> VoiceDesignCandidate:
     candidate = repository.get(candidate_id)
@@ -146,10 +227,24 @@ async def validate_candidate(
             "VoiceDesign validation must be observed for the currently selected render capability",
             status_code=422,
         )
+    if human_review is not None and automated_acceptance:
+        raise VoiceDesignActionError(
+            "voice_design_review_mode_conflict",
+            "human_review and automated_acceptance are mutually exclusive",
+            status_code=422,
+        )
+    if automated_acceptance and test_text is not None:
+        raise VoiceDesignActionError(
+            "voice_design_review_mode_conflict",
+            "test_text and automated_acceptance are mutually exclusive",
+            status_code=422,
+        )
     if human_review is not None:
         return apply_human_review(
             repository, candidate, human_review, capability_key=capability_key
         )
+    if automated_acceptance:
+        return apply_automated_acceptance(repository, candidate, capability_key=capability_key)
 
     normalized_text = (
         normalize_tts_text(test_text)

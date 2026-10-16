@@ -254,9 +254,19 @@ final class AudiobookCastTests: XCTestCase {
         let plan = AudiobookCastRegistry.makeCastingPlan(characters: roles, annotations: annotations, snapshot: p0Snapshot(voices),
             catalog: .init(), bookID: book, existingBindings: [:], requiredRoleIDs: nil)
         XCTAssertTrue(plan.isApplicable)
+        XCTAssertTrue(plan.hasUnavoidableSceneConflicts)
         let risks = plan.issues.filter { $0.code == .sharedSceneRisk }
         XCTAssertFalse(risks.isEmpty)
         XCTAssertTrue(risks.allSatisfy { $0.severity == .warning && plan.requiredAcknowledgements.contains($0.id) })
+    }
+
+    func testUnavoidableSceneConflictsClearsWhenPoolSufficient() throws {
+        let book = UUID(), (roles, annotations) = p0Roles(bookID: book, count: 4)
+        let voices = (0..<4).map { makeTestSafeVoice(id: "sufficient-v\($0)", name: "声音\($0)") }
+        let plan = AudiobookCastRegistry.makeCastingPlan(characters: roles, annotations: annotations, snapshot: p0Snapshot(voices),
+            catalog: .init(), bookID: book, existingBindings: [:], requiredRoleIDs: nil)
+        XCTAssertTrue(plan.isApplicable)
+        XCTAssertFalse(plan.hasUnavoidableSceneConflicts)
     }
 
     func testAtomicWriteFailureDoesNotNotifyOrReplaceState() throws {

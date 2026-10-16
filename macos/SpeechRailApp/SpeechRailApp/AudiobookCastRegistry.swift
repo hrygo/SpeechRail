@@ -754,6 +754,7 @@ public enum AudiobookCastRegistry {
             sharedVoiceCount: sharedVoices.count, eligibleVoiceCount: voices.count, rawIssues: issues
         )
         plan.strategy = strategy; plan.evaluatedCandidates = evaluations
+        plan.hasUnavoidableSceneConflicts = issues.contains(where: { $0.code == .sharedSceneRisk })
         plan.scoredCombinations = cache.evaluationCount - initialScoreCount; plan.cachedScores = cache
         return plan
     }

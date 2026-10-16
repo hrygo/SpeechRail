@@ -255,6 +255,33 @@ public final class AudiobookWorkflowModel {
     public private(set) var isCreatingLeadExclusiveVoices: Bool = false
     public private(set) var leadVoiceCreationProgressText: String?
 
+    public struct LeadVoiceCreationSummary: Sendable, Equatable {
+        public var attemptedCount: Int
+        public var succeededCount: Int
+        public var fallbacks: [(roleID: UUID, roleName: String, fallbackArchetypeName: String)]
+
+        public init(
+            attemptedCount: Int = 0,
+            succeededCount: Int = 0,
+            fallbacks: [(roleID: UUID, roleName: String, fallbackArchetypeName: String)] = []
+        ) {
+            self.attemptedCount = attemptedCount
+            self.succeededCount = succeededCount
+            self.fallbacks = fallbacks
+        }
+
+        public static func == (lhs: LeadVoiceCreationSummary, rhs: LeadVoiceCreationSummary) -> Bool {
+            lhs.attemptedCount == rhs.attemptedCount &&
+            lhs.succeededCount == rhs.succeededCount &&
+            lhs.fallbacks.map(\.roleID) == rhs.fallbacks.map(\.roleID)
+        }
+    }
+
+    /// 最近一次主要角色专属音色生成的统计摘要与优雅降级记录。
+    public private(set) var lastLeadVoiceCreationSummary: LeadVoiceCreationSummary?
+    /// 自动回退为群像音色的角色集合（用于展示重试标识）。
+    public private(set) var fallbackRoleIDs: Set<UUID> = []
+
     /// 当前从引擎实时拉取并缓存的全部可用音色目录（含系统预置、克隆音色、六类群像音色与本书专属音色）。
     public private(set) var catalogVoices: [SafeVoiceEntry] = []
 
@@ -322,6 +349,8 @@ public final class AudiobookWorkflowModel {
     public private(set) var castingPlanNeedsRefresh = false
     public var castingRecommendation: AudiobookCastingRecommendation? { pendingCastingPlan.map(AudiobookCastingRecommendation.init) }
     public private(set) var castingAudition: AudiobookCastingAudition?
+    private var auditionPlaybackGeneration: UInt64 = 0
+    private var castingAuditionCatalogRevision: String?
 
     private var analysisTask: Task<Void, Never>?
     private var productionTask: Task<Void, Never>?
@@ -349,7 +378,7 @@ public final class AudiobookWorkflowModel {
     private func catalogDidChange() {
         voiceCatalogRevision = dependencies.voiceCatalog.snapshot().revision
         castingPlanNeedsRefresh = pendingCastingPlan?.voiceCatalogRevision != voiceCatalogRevision
-        castingAudition = nil
+        invalidateCastingAudition()
     }
 
     private func bootstrapIfPossible() {
@@ -730,6 +759,11 @@ public final class AudiobookWorkflowModel {
     public func openBook(_ bookID: UUID) async {
         bootstrapIfPossible()
         guard let store else { return }
+        invalidateCastingAudition()
+        if let plan = pendingCastingPlan, plan.bookID != bookID {
+            pendingCastingPlan = nil
+            castingPlanNeedsRefresh = false
+        }
         chapterSelectionLoad.reset()
         readinessSelectionLoad.reset()
         let preferredChapterID = selectedChapterID
@@ -800,6 +834,7 @@ public final class AudiobookWorkflowModel {
                 bookSelectionLoad.reset()
             }
             if selectedBook?.id == bookID {
+                invalidateCastingAudition()
                 await listeningController?.leaveWorkshop()
             }
             try await store.trashBook(id: bookID)
@@ -867,10 +902,13 @@ public final class AudiobookWorkflowModel {
                 _ = await self.refreshAvailableVoices()
                 await self.autoAssignRecommendedVoices(for: targetID)
                 await self.refreshShelf()
+                var autoConfirmSucceeded = false
                 if self.selectedBook?.id == targetID {
                     await self.openBook(targetID)
                     if summary.unknownSpeakerCount > 0 {
                         await self.jumpToFirstUnknownSpeaker()
+                    } else {
+                        autoConfirmSucceeded = await self.confirmCastAndAudition()
                     }
                 }
                 var notes: [String] = ["全书分析已完成（共 \(summary.completedWindows) 个窗口"]
@@ -880,11 +918,33 @@ public final class AudiobookWorkflowModel {
                 if createdArchetypeVoices > 0 {
                     notes.append("已补全 \(createdArchetypeVoices) 类小说群像音色")
                 }
-                if createdLeadVoices > 0 {
+                if let leadSummary = self.lastLeadVoiceCreationSummary, leadSummary.attemptedCount > 0 {
+                    if leadSummary.fallbacks.isEmpty {
+                        notes.append("已为 \(leadSummary.succeededCount) 名主要角色生成专属音色")
+                    } else if leadSummary.succeededCount > 0 {
+                        let names = leadSummary.fallbacks.map(\.roleName).joined(separator: "、")
+                        let firstArchetype = (leadSummary.fallbacks.first?.fallbackArchetypeName ?? "群像") + "群像音色"
+                        notes.append("已为 \(leadSummary.succeededCount) 名主角生成专属音色，\(leadSummary.fallbacks.count) 名角色（\(names)）已回退为\(firstArchetype)")
+                    } else {
+                        let names = leadSummary.fallbacks.map(\.roleName).joined(separator: "、")
+                        let firstArchetype = (leadSummary.fallbacks.first?.fallbackArchetypeName ?? "群像") + "群像音色"
+                        notes.append("\(leadSummary.fallbacks.count) 名角色（\(names)）已回退为\(firstArchetype)")
+                    }
+                } else if createdLeadVoices > 0 {
                     notes.append("已为 \(createdLeadVoices) 名主要角色生成专属音色")
                 }
-                notes.append("剩余待人工确认 \(summary.unknownSpeakerCount) 处）")
-                self.bannerMessage = notes.joined(separator: "，") + "。"
+                if summary.unknownSpeakerCount == 0 {
+                    if autoConfirmSucceeded && (self.selectedBook?.confirmedAuditionVoiceSetDigest != nil) {
+                        notes.append("角色与音色已自动锁定，可直接开始制作章节）")
+                    } else {
+                        notes.append("配声完成但自动锁定未确认，请在右侧检查声音）")
+                    }
+                } else {
+                    notes.append("剩余待人工确认 \(summary.unknownSpeakerCount) 处）")
+                }
+                if self.errorMessage == nil {
+                    self.bannerMessage = notes.joined(separator: "，") + "。"
+                }
             } catch {
                 guard self.analysisInstallEpoch == installEpoch else { return }
                 let failureDescription = error.localizedDescription
@@ -1033,7 +1093,9 @@ public final class AudiobookWorkflowModel {
             guard selectedBook?.id == bookID else { return }
             let plan = try await store.prepareCastingPlan(bookID: bookID, snapshot: snapshot, catalog: dependencies.voiceCatalog.snapshot(), strategy: strategy)
             guard selectedBook?.id == bookID else { return }
-            pendingCastingPlan = plan; castingPlanNeedsRefresh = false; castingAudition = nil
+            invalidateCastingAudition()
+            pendingCastingPlan = plan
+            castingPlanNeedsRefresh = false
             errorMessage = plan.issues.first(where: \.isBlocking)?.nextAction
         } catch { errorMessage = error.localizedDescription }
     }
@@ -1044,7 +1106,9 @@ public final class AudiobookWorkflowModel {
             let snapshot = try await dependencies.speechRenderer.fetchEffectiveCapabilities()
             let plan = try await store.prepareVoiceReplacement(bookID: bookID, bindings: bindings, snapshot: snapshot, catalog: dependencies.voiceCatalog.snapshot())
             guard selectedBook?.id == bookID else { return }
-            pendingCastingPlan = plan; castingPlanNeedsRefresh = false; castingAudition = nil
+            invalidateCastingAudition()
+            pendingCastingPlan = plan
+            castingPlanNeedsRefresh = false
         } catch { errorMessage = error.localizedDescription }
     }
 
@@ -1059,24 +1123,48 @@ public final class AudiobookWorkflowModel {
     }
 
     public func prepareCastingAudition(kind: AudiobookCastingAudition.Kind, roleID: UUID, comparisonVoiceIDs: [String] = []) async {
-        guard let plan = pendingCastingPlan, selectedBook?.id == plan.bookID, let store else { return }
+        guard let book = selectedBook, let store else { return }
+        let plan = pendingCastingPlan
+        guard plan == nil || plan?.bookID == book.id else { return }
+        invalidateCastingAudition()
+        let generation = auditionPlaybackGeneration
+        let catalogRevision = dependencies.voiceCatalog.snapshot().revision
+        let savedBindings = voiceBindings
         do {
-            try await store.validateCastingPlanInput(plan)
-            guard dependencies.voiceCatalog.snapshot().revision == plan.voiceCatalogRevision else { throw AudiobookCastError.castRevisionMismatch }
-            let source = try await store.sourceIndex(for: plan.bookID)
-            let annotations = try await store.annotations(for: plan.bookID).sorted { $0.sourceRange < $1.sourceRange }
-            let atoms = try await store.atoms(for: plan.bookID)
-            let roles = try await store.characters(for: plan.bookID)
+            let targetBookID = book.id
+            let effectiveSnapshot: EffectiveCapabilitySnapshot
+            let effectiveCatalog: VoiceCatalogSnapshot
+            let effectiveBindings: [UUID: AudiobookVoiceBinding]
+            let planDigest: String
+
+            if let plan {
+                try await store.validateCastingPlanInput(plan)
+                guard dependencies.voiceCatalog.snapshot().revision == plan.voiceCatalogRevision else { throw AudiobookCastError.castRevisionMismatch }
+                effectiveSnapshot = plan.snapshot
+                effectiveCatalog = plan.catalog
+                effectiveBindings = plan.proposedBindings
+                planDigest = plan.inputDigest
+            } else {
+                effectiveSnapshot = try await dependencies.speechRenderer.fetchEffectiveCapabilities()
+                effectiveCatalog = dependencies.voiceCatalog.snapshot()
+                effectiveBindings = savedBindings
+                planDigest = "saved-bindings-\(targetBookID.uuidString)"
+            }
+
+            let source = try await store.sourceIndex(for: targetBookID)
+            let annotations = try await store.annotations(for: targetBookID).sorted { $0.sourceRange < $1.sourceRange }
+            let atoms = try await store.atoms(for: targetBookID)
+            let roles = try await store.characters(for: targetBookID)
             func item(roleID: UUID, voiceID: String, range: AudiobookSourceRange) throws -> AudiobookCastingAudition.Item {
                 guard let start = source.scalarIndex(forByteOffset: range.lowerBound),
                       let end = source.scalarIndex(forByteOffset: range.upperBound), end > start,
-                      let voice = plan.snapshot.voices.first(where: { $0.id == voiceID }), plan.catalog.permits(voice, bookID: plan.bookID),
-                      let options = SpeechRailCapabilityRevisionSelector.creatorRequestOptions(voiceID: voiceID, in: plan.snapshot),
+                      let voice = effectiveSnapshot.voices.first(where: { $0.id == voiceID }), effectiveCatalog.permits(voice, bookID: targetBookID),
+                      let options = SpeechRailCapabilityRevisionSelector.creatorRequestOptions(voiceID: voiceID, in: effectiveSnapshot),
                       let model = options.expectedModelRevision else { throw ServiceAPIClientError.invalidContract("audition_unavailable") }
                 let excerpt = AudiobookSourceRange(lowerBound: range.lowerBound, upperBound: source.scalarByteOffsets[min(end, start + 240)])
-                let binding = plan.proposedBindings[roleID].flatMap { $0.voiceID == voiceID ? $0 : nil }
+                let binding = effectiveBindings[roleID].flatMap { $0.voiceID == voiceID ? $0 : nil }
                     ?? .init(roleID: roleID, voiceID: voiceID, voiceRevision: options.expectedVoiceRevision, modelRevision: model)
-                try AudiobookCastRegistry.validateRenderBinding(binding, snapshot: plan.snapshot, requireProductionReady: false)
+                try AudiobookCastRegistry.validateRenderBinding(binding, snapshot: effectiveSnapshot, requireProductionReady: false)
                 return .init(roleID: roleID, voiceID: voiceID, sourceRange: excerpt, text: try source.text(in: excerpt), binding: binding)
             }
             let items: [AudiobookCastingAudition.Item]
@@ -1084,9 +1172,10 @@ public final class AudiobookWorkflowModel {
             case .sameTextComparison:
                 let range = annotations.first { $0.assignment.roleID == roleID }?.sourceRange
                     ?? (roles.first { $0.id == roleID }?.isNarrator == true ? atoms.first { $0.kind == .body }?.sourceRange : nil)
+                    ?? atoms.first?.sourceRange
                 guard let range else { throw ServiceAPIClientError.invalidContract("audition_source_missing") }
                 var seen: Set<String> = []
-                let voiceIDs = (comparisonVoiceIDs.isEmpty ? [plan.proposedBindings[roleID]?.voiceID].compactMap { $0 } : comparisonVoiceIDs)
+                let voiceIDs = (comparisonVoiceIDs.isEmpty ? [effectiveBindings[roleID]?.voiceID].compactMap { $0 } : comparisonVoiceIDs)
                     .filter { seen.insert($0).inserted }.prefix(4)
                 guard !voiceIDs.isEmpty else { throw ServiceAPIClientError.invalidContract("audition_voice_missing") }
                 items = try voiceIDs.map { try item(roleID: roleID, voiceID: $0, range: range) }
@@ -1105,37 +1194,106 @@ public final class AudiobookWorkflowModel {
                 }
                 guard pair.count == 2 else { throw ServiceAPIClientError.invalidContract("audition_dialogue_missing") }
                 items = try pair.map { row in
-                    guard let role = row.assignment.roleID, let voice = plan.proposedBindings[role]?.voiceID else { throw ServiceAPIClientError.invalidContract("audition_voice_missing") }
+                    guard let role = row.assignment.roleID, let voice = effectiveBindings[role]?.voiceID else { throw ServiceAPIClientError.invalidContract("audition_voice_missing") }
                     return try item(roleID: role, voiceID: voice, range: row.sourceRange)
                 }
             }
-            guard selectedBook?.id == plan.bookID, pendingCastingPlan?.inputDigest == plan.inputDigest else { return }
-            castingAudition = .init(kind: kind, items: items, planDigest: plan.inputDigest)
+            guard auditionPlaybackGeneration == generation,
+                  selectedBook?.id == targetBookID,
+                  pendingCastingPlan?.inputDigest == plan?.inputDigest,
+                  dependencies.voiceCatalog.snapshot().revision == catalogRevision,
+                  plan != nil || voiceBindings == savedBindings else { return }
+            castingAudition = .init(kind: kind, items: items, planDigest: planDigest)
+            castingAuditionCatalogRevision = catalogRevision
             errorMessage = nil
         } catch {
+            guard auditionPlaybackGeneration == generation, selectedBook?.id == book.id else { return }
             castingAudition = nil
             errorMessage = "暂时无法准备这段试听，请确认角色对白和可用声音后重新推荐。"
         }
     }
 
     public func playCastingAudition(itemIndex: Int) async {
-        guard let audition = castingAudition, let plan = pendingCastingPlan, let store,
-              audition.items.indices.contains(itemIndex), selectedBook?.id == plan.bookID, audition.planDigest == plan.inputDigest else { return }
+        auditionPlaybackGeneration &+= 1
+        let generation = auditionPlaybackGeneration
+        guard let audition = castingAudition, let store, let book = selectedBook,
+              audition.items.indices.contains(itemIndex) else { return }
+        guard dependencies.voiceCatalog.snapshot().revision == castingAuditionCatalogRevision else {
+            invalidateCastingAudition()
+            return
+        }
+        let catalogRevision = castingAuditionCatalogRevision
+        let plan = pendingCastingPlan
+        if let plan {
+            guard book.id == plan.bookID, audition.planDigest == plan.inputDigest else { return }
+        } else {
+            guard audition.planDigest == "saved-bindings-\(book.id.uuidString)" else { return }
+        }
         do {
-            try await store.validateCastingPlanInput(plan)
+            if let plan {
+                try await store.validateCastingPlanInput(plan)
+                guard dependencies.voiceCatalog.snapshot().revision == plan.voiceCatalogRevision else { throw AudiobookCastError.castRevisionMismatch }
+            }
+            guard auditionPlaybackGeneration == generation, castingAudition == audition else { return }
             let item = audition.items[itemIndex], binding = item.binding
             let snapshot = try await dependencies.speechRenderer.fetchEffectiveCapabilities()
-            guard dependencies.voiceCatalog.snapshot().revision == plan.voiceCatalogRevision else { throw AudiobookCastError.castRevisionMismatch }
+            if let plan {
+                guard dependencies.voiceCatalog.snapshot().revision == plan.voiceCatalogRevision else { throw AudiobookCastError.castRevisionMismatch }
+            }
             try AudiobookCastRegistry.validateRenderBinding(binding, snapshot: snapshot, requireProductionReady: false)
-            let data = try await dependencies.speechRenderer.renderAudition(.init(bookID: plan.bookID, text: item.text, voiceID: binding.voiceID,
-                speed: binding.allowedSpeed, expectedVoiceRevision: binding.voiceRevision, expectedModelRevision: binding.modelRevision, seed: binding.callerSeed))
+            guard auditionPlaybackGeneration == generation, castingAudition == audition else { return }
+            let data = try await dependencies.speechRenderer.renderAudition(.init(
+                bookID: book.id,
+                text: item.text,
+                voiceID: binding.voiceID,
+                speed: binding.allowedSpeed,
+                expectedVoiceRevision: binding.voiceRevision,
+                expectedModelRevision: binding.modelRevision,
+                seed: binding.callerSeed
+            ))
             try Task.checkCancellation()
-            try await store.validateCastingPlanInput(plan)
-            guard selectedBook?.id == plan.bookID, pendingCastingPlan?.inputDigest == plan.inputDigest,
-                  dependencies.voiceCatalog.snapshot().revision == plan.voiceCatalogRevision else { throw AudiobookCastError.castRevisionMismatch }
+            guard auditionPlaybackGeneration == generation, castingAudition == audition,
+                  selectedBook?.id == book.id,
+                  dependencies.voiceCatalog.snapshot().revision == catalogRevision else { return }
+            if let plan {
+                try await store.validateCastingPlanInput(plan)
+                guard selectedBook?.id == plan.bookID, pendingCastingPlan?.inputDigest == plan.inputDigest,
+                      dependencies.voiceCatalog.snapshot().revision == plan.voiceCatalogRevision else { throw AudiobookCastError.castRevisionMismatch }
+            }
+            guard auditionPlaybackGeneration == generation, castingAudition == audition else { return }
             try playbackOwner.play(data: data, target: .dubbingCandidate("casting-audition:\(audition.planDigest):\(itemIndex)"))
             errorMessage = nil
-        } catch { errorMessage = "试听未完成，声音或配声方案可能已变化，请刷新后重试。" }
+        } catch is CancellationError {
+            // 用户主动取消，不展示报错
+        } catch {
+            guard auditionPlaybackGeneration == generation else { return }
+            errorMessage = "试听未完成，声音或配声方案可能已变化，请刷新后重试。"
+        }
+    }
+
+    public func stopAuditionPlayback() {
+        auditionPlaybackGeneration &+= 1
+        if case let .dubbingCandidate(tag) = playbackOwner.target,
+           tag.hasPrefix("casting-audition:") {
+            playbackOwner.stop()
+        }
+    }
+
+    private func invalidateCastingAudition() {
+        stopAuditionPlayback()
+        castingAudition = nil
+        castingAuditionCatalogRevision = nil
+    }
+
+    public func isAuditionPlaying(for roleID: UUID) -> Bool {
+        guard playbackOwner.isPlaying, let target = playbackOwner.target else { return false }
+        switch target {
+        case .dubbingCandidate(let tag):
+            guard let audition = castingAudition else { return false }
+            return audition.items.contains(where: { $0.roleID == roleID && tag.hasPrefix("casting-audition:\(audition.planDigest):") })
+        default:
+            return false
+        }
     }
 
     public func autoAssignRecommendedVoices(
@@ -1322,7 +1480,18 @@ public final class AudiobookWorkflowModel {
             await reloadSelectedChapterDetails()
             await refreshChapterReadinessMap(for: bookID)
             await refreshShelf()
-            bannerMessage = "已更新 \(atomIDs.count) 处段落的说话人归属。"
+            if allUnknownAnnotations.isEmpty {
+                focusedUnknownAtomID = nil
+                showOnlyUnknownAtomsInChapter = false
+                let autoConfirmed = await confirmCastAndAudition(switchToProduction: false)
+                if autoConfirmed && isAuditionConfirmedForSelectedBook {
+                    bannerMessage = "全部台词已确认完毕，角色与音色已自动锁定，可直接开始制作章节。"
+                } else {
+                    bannerMessage = "已更新 \(atomIDs.count) 处段落的说话人归属。全书待确认说话人已全部确认完毕！"
+                }
+            } else {
+                bannerMessage = "已更新 \(atomIDs.count) 处段落的说话人归属。"
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -1349,7 +1518,12 @@ public final class AudiobookWorkflowModel {
             } else {
                 focusedUnknownAtomID = nil
                 showOnlyUnknownAtomsInChapter = false
-                bannerMessage = "全书所有待确认说话人已全部确认完毕！"
+                let autoConfirmed = await confirmCastAndAudition(switchToProduction: false)
+                if autoConfirmed && isAuditionConfirmedForSelectedBook {
+                    bannerMessage = "全部台词已确认完毕，角色与音色已自动锁定，可直接开始制作章节。"
+                } else {
+                    bannerMessage = "全书所有待确认说话人已全部确认完毕！"
+                }
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -1449,6 +1623,11 @@ public final class AudiobookWorkflowModel {
                 } else {
                     focusedUnknownAtomID = nil
                     showOnlyUnknownAtomsInChapter = false
+                    let autoConfirmed = await confirmCastAndAudition(switchToProduction: false)
+                    if autoConfirmed && isAuditionConfirmedForSelectedBook {
+                        bannerMessage = "全部台词已确认完毕，角色与音色已自动锁定，可直接开始制作章节。"
+                        return
+                    }
                 }
             }
             if outcome.resolvedCount > 0 {
@@ -1642,6 +1821,7 @@ public final class AudiobookWorkflowModel {
 
         isCreatingLeadExclusiveVoices = true
         var createdCount = 0
+        var fallbackRoles: [(roleID: UUID, roleName: String, fallbackArchetypeName: String)] = []
 
         for (idx, role) in leadCandidates.enumerated() {
             leadVoiceCreationProgressText = "正在为「\(role.displayName)」创建专属音色 (\(idx + 1)/\(leadCandidates.count))…"
@@ -1654,8 +1834,19 @@ public final class AudiobookWorkflowModel {
                 onlyIfUnbound: true
             ) {
                 createdCount += 1
+                fallbackRoleIDs.remove(role.id)
+            } else {
+                let archetype = roleStatsByID[role.id]?.archetype ?? role.inferredVoiceArchetype(peers: stratifiedChars)
+                fallbackRoles.append((roleID: role.id, roleName: role.displayName, fallbackArchetypeName: archetype.shortBadgeTitle))
+                fallbackRoleIDs.insert(role.id)
             }
         }
+
+        lastLeadVoiceCreationSummary = LeadVoiceCreationSummary(
+            attemptedCount: leadCandidates.count,
+            succeededCount: createdCount,
+            fallbacks: fallbackRoles
+        )
 
         leadVoiceCreationProgressText = nil
         isCreatingLeadExclusiveVoices = false
@@ -1672,8 +1863,16 @@ public final class AudiobookWorkflowModel {
         }
 
         if !quietBanner {
-            if createdCount > 0 {
-                bannerMessage = "已为 \(createdCount) 名主要角色创建并绑定本书专属音色。"
+            if createdCount > 0 && fallbackRoles.isEmpty {
+                bannerMessage = "已为 \(createdCount) 名主要角色生成专属音色。"
+            } else if !fallbackRoles.isEmpty {
+                let names = fallbackRoles.map(\.roleName).joined(separator: "、")
+                let archetypeName = (fallbackRoles.first?.fallbackArchetypeName ?? "群像") + "群像音色"
+                if createdCount > 0 {
+                    bannerMessage = "已为 \(createdCount) 名主角生成专属音色，\(fallbackRoles.count) 名角色（\(names)）已回退为\(archetypeName)。"
+                } else {
+                    bannerMessage = "\(fallbackRoles.count) 名角色（\(names)）专属音色生成未通过，已回退为\(archetypeName)。"
+                }
             } else {
                 errorMessage = "当前语音服务未开启音色设计（VoiceDesign）能力或生成未通过校验，已保留推荐音色。"
             }
@@ -1707,6 +1906,7 @@ public final class AudiobookWorkflowModel {
         _ = await refreshAvailableVoices()
 
         if let created {
+            fallbackRoleIDs.remove(roleID)
             voiceBindings = (try? await store.voiceBindings(for: bookID)) ?? voiceBindings
             selectedBook = (try? await store.book(id: bookID)) ?? selectedBook
             await refreshChapterReadinessMap(for: bookID)
@@ -1768,7 +1968,6 @@ public final class AudiobookWorkflowModel {
             return nil
         }
 
-        let archetype = roleStatsByID[role.id]?.archetype ?? role.inferredVoiceArchetype(peers: peers)
         let binding = AudiobookVoiceBinding(
             roleID: role.id,
             voiceID: output.voiceID,
@@ -1882,6 +2081,7 @@ public final class AudiobookWorkflowModel {
 
     public func bindVoice(roleID: UUID, binding: AudiobookVoiceBinding) async {
         guard let bookID = selectedBook?.id, let castController, let store else { return }
+        invalidateCastingAudition()
         do {
             errorMessage = nil
             try await castController.bindVoice(bookID: bookID, roleID: roleID, binding: binding)
@@ -1904,8 +2104,9 @@ public final class AudiobookWorkflowModel {
         }
     }
 
-    public func confirmCastAndAudition() async {
-        guard let bookID = selectedBook?.id, let castController, let store else { return }
+    @discardableResult
+    public func confirmCastAndAudition(switchToProduction: Bool = true) async -> Bool {
+        guard let bookID = selectedBook?.id, let castController, let store else { return false }
         do {
             errorMessage = nil
             // 若确认角色时仍存在未确认的说话人，先用确认后的完整角色表自动执行一次 AI 二次消歧
@@ -1942,12 +2143,16 @@ public final class AudiobookWorkflowModel {
                     bannerMessage = "已确认人物与声音；全书仍有 \(allUnknownAnnotations.count) 处待确认说话人，已为您定位至第 1 处。"
                 }
             } else {
-                workbenchTab = .production
+                if switchToProduction {
+                    workbenchTab = .production
+                }
                 bannerMessage = "已确认全书人物与试听声音，可开始制作已确认章节。"
             }
+            return true
         } catch {
             isResolvingUnknownSpeakers = false
             errorMessage = error.localizedDescription
+            return false
         }
     }
 
@@ -2516,6 +2721,7 @@ public final class AudiobookWorkflowModel {
 
     /// 切换路由离开有声书工坊：制作队列继续在后台运行，但听书立即保存书签并释放共享播放器。
     public func leaveWorkshop() async {
+        invalidateCastingAudition()
         bookSelectionLoad.reset()
         chapterSelectionLoad.reset()
         readinessSelectionLoad.reset()
@@ -2525,6 +2731,7 @@ public final class AudiobookWorkflowModel {
 
     /// 应用退出或停止：保存听书书签，优雅暂停在途分析与制作并持久化检查点。
     public func shutdown() async {
+        invalidateCastingAudition()
         await listeningController?.leaveWorkshop()
         if let bookID = selectedBook?.id {
             await analysisPipeline?.cancel(bookID: bookID)

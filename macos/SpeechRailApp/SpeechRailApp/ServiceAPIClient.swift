@@ -598,14 +598,23 @@ public final class ServiceAPIClient: @unchecked Sendable {
         id: String,
         testText: String?,
         capabilityKey: String?,
-        humanReview: VoiceDesignHumanReview?
+        mode: VoiceDesignValidationMode
     ) async throws -> VoiceDesignCandidate {
+        let (humanReview, automatedAcceptance): (VoiceDesignHumanReview?, Bool) = switch mode {
+        case .validationOnly:
+            (nil, false)
+        case .automatedAcceptance:
+            (nil, true)
+        case let .manualReview(review):
+            (review, false)
+        }
         let response: VoiceDesignCandidateEnvelope = try await postJSON(
             path: try voiceDesignPath(id: id) + "/validate",
             body: VoiceDesignValidateRequestBody(
                 testText: testText,
                 capabilityKey: capabilityKey,
-                humanReview: humanReview
+                humanReview: humanReview,
+                automatedAcceptance: automatedAcceptance
             )
         )
         return response.candidate
@@ -1263,11 +1272,13 @@ private struct VoiceDesignValidateRequestBody: Encodable {
     let testText: String?
     let capabilityKey: String?
     let humanReview: VoiceDesignHumanReview?
+    let automatedAcceptance: Bool
 
     enum CodingKeys: String, CodingKey {
         case testText = "test_text"
         case capabilityKey = "capability_key"
         case humanReview = "human_review"
+        case automatedAcceptance = "automated_acceptance"
     }
 }
 

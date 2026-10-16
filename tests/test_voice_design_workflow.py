@@ -17,6 +17,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from speechrail.app import create_app
+from speechrail.application.candidate_validation import (
+    VoiceDesignActionError,
+    apply_automated_acceptance,
+)
 from speechrail.application.voice_design import (
     VoiceDesignRepository,
 )
@@ -689,6 +693,322 @@ def test_candidate_lifecycle_publishes_only_after_base_and_human_review(
     assert again.status_code == 200, again.text
     assert again.json()["candidate"]["state"] == "published"
     assert len(list((tmp_path / "voices").glob("*.wav"))) == 1
+
+
+def test_automated_acceptance_publishes_machine_pass_without_fabricating_human_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _registry, _synth, asr = make_client(tmp_path, monkeypatch)
+    candidate_id, _ = create_candidate(client)
+    confirm_candidate(client, asr, candidate_id)
+    machine = validate_candidate(client, asr, candidate_id)["candidate"]
+    assert machine["validations"][-1]["machine_status"] == "pass"
+
+    accepted = client.post(
+        f"/v1/voice-designs/{candidate_id}/validate",
+        json={"automated_acceptance": True},
+    )
+
+    assert accepted.status_code == 200, accepted.text
+    candidate = accepted.json()["candidate"]
+    validation = candidate["validations"][-1]
+    assert candidate["state"] == "publishable"
+    assert candidate["publishable"] is True
+    assert validation["status"] == "pass"
+    assert validation["automated_acceptance"] is True
+    assert validation["identity_status"] == "not_reviewed"
+    assert validation["naturalness_status"] == "not_reviewed"
+
+    published = client.post(f"/v1/voice-designs/{candidate_id}/publish", json={})
+    assert published.status_code == 201, published.text
+    assert published.json()["candidate"]["state"] == "published"
+    assert VOICE_ID in published_voice_ids(client)
+
+
+def test_automated_acceptance_preserves_existing_human_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _registry, _synth, asr = make_client(tmp_path, monkeypatch)
+    candidate_id, _ = create_candidate(client)
+    confirm_candidate(client, asr, candidate_id)
+    machine = validate_candidate(client, asr, candidate_id)["candidate"]
+    validation_id = machine["validations"][-1]["validation_id"]
+    reviewed = human_review(client, candidate_id, validation_id=validation_id)["candidate"]
+    assert reviewed["publishable"] is True
+
+    accepted = client.post(
+        f"/v1/voice-designs/{candidate_id}/validate",
+        json={"automated_acceptance": True},
+    )
+
+    assert accepted.status_code == 200, accepted.text
+    record = accepted.json()["candidate"]["validations"][-1]
+    assert record["automated_acceptance"] is True
+    assert record["identity_status"] == "pass"
+    assert record["naturalness_status"] == "pass"
+    assert accepted.json()["candidate"]["publishable"] is True
+
+
+def test_automated_acceptance_rejects_a_machine_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _registry, _synth, asr = make_client(tmp_path, monkeypatch)
+    candidate_id, _ = create_candidate(client)
+    confirm_candidate(client, asr, candidate_id)
+    failed = validate_candidate(
+        client,
+        asr,
+        candidate_id,
+        transcript="完全无关的另一句话，与测试文本没有任何关系。",
+    )["candidate"]
+    assert failed["validations"][-1]["machine_status"] == "reject"
+
+    accepted = client.post(
+        f"/v1/voice-designs/{candidate_id}/validate",
+        json={"automated_acceptance": True},
+    )
+    published = client.post(f"/v1/voice-designs/{candidate_id}/publish", json={})
+
+    assert accepted.status_code == 409
+    assert accepted.json()["error"]["code"] == "voice_design_state_conflict"
+    assert published.status_code == 409
+    assert VOICE_ID not in published_voice_ids(client)
+
+
+def test_automated_acceptance_rejects_a_retired_validation_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, registry, _synth, asr = make_client(tmp_path, monkeypatch)
+    candidate_id, _ = create_candidate(client)
+    confirm_candidate(client, asr, candidate_id)
+    machine = validate_candidate(client, asr, candidate_id)["candidate"]
+    repository = VoiceDesignRepository(
+        registry.artifact_path("voice_design_candidates.json"),
+        registry.artifact_path("voice_design_candidates"),
+    )
+
+    repository.update(
+        candidate_id,
+        lambda current: current.model_copy(
+            update={
+                "validations": [
+                    current.validations[-1].model_copy(
+                        update={"validation_policy_revision": "voice_design_text_fidelity_v1"}
+                    )
+                ],
+                "state": "validating",
+            }
+        ),
+    )
+
+    accepted = client.post(
+        f"/v1/voice-designs/{candidate_id}/validate",
+        json={"automated_acceptance": True},
+    )
+    published = client.post(f"/v1/voice-designs/{candidate_id}/publish", json={})
+
+    assert machine["validations"][-1]["machine_status"] == "pass"
+    assert accepted.status_code == 409
+    assert accepted.json()["error"]["code"] == "voice_design_machine_validation_required"
+    assert published.status_code == 409
+
+
+def test_automated_acceptance_rejects_a_validation_for_an_old_candidate_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, registry, _synth, asr = make_client(tmp_path, monkeypatch)
+    candidate_id, _ = create_candidate(client)
+    confirm_candidate(client, asr, candidate_id)
+    machine = validate_candidate(client, asr, candidate_id)["candidate"]
+    repository = VoiceDesignRepository(
+        registry.artifact_path("voice_design_candidates.json"),
+        registry.artifact_path("voice_design_candidates"),
+    )
+    stale_revision = "vr_" + "f" * 32
+    if stale_revision == machine["revision"]:
+        stale_revision = "vr_" + "e" * 32
+    repository.update(
+        candidate_id,
+        lambda current: current.model_copy(update={"revision": stale_revision}),
+    )
+
+    accepted = client.post(
+        f"/v1/voice-designs/{candidate_id}/validate",
+        json={"automated_acceptance": True},
+    )
+    published = client.post(f"/v1/voice-designs/{candidate_id}/publish", json={})
+
+    assert accepted.status_code == 409
+    assert accepted.json()["error"]["code"] == "voice_design_revision_conflict"
+    assert published.status_code == 409
+
+
+def test_automated_acceptance_rejects_conflicting_request_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _registry, _synth, asr = make_client(tmp_path, monkeypatch)
+    candidate_id, _ = create_candidate(client)
+    confirm_candidate(client, asr, candidate_id)
+    machine = validate_candidate(client, asr, candidate_id)["candidate"]
+
+    response = client.post(
+        f"/v1/voice-designs/{candidate_id}/validate",
+        json={
+            "automated_acceptance": True,
+            "human_review": {
+                "validation_id": machine["validations"][-1]["validation_id"],
+                "identity": "pass",
+                "naturalness": "pass",
+            },
+        },
+    )
+
+    assert response.status_code == 422
+
+    machine_mode = client.post(
+        f"/v1/voice-designs/{candidate_id}/validate",
+        json={"automated_acceptance": True, "test_text": SECOND_TEST_TEXT},
+    )
+    assert machine_mode.status_code == 422
+    assert machine_mode.json()["error"]["code"] == "validation_error"
+    assert machine_mode.json()["error"]["request_id"]
+
+
+@pytest.mark.parametrize(
+    ("identity_review", "expected_state"),
+    [("warn", "validating"), ("reject", "failed")],
+)
+def test_automated_acceptance_cannot_override_a_human_warning_or_rejection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    identity_review: str,
+    expected_state: str,
+) -> None:
+    client, _registry, _synth, asr = make_client(tmp_path, monkeypatch)
+    candidate_id, _ = create_candidate(client)
+    confirm_candidate(client, asr, candidate_id)
+    machine = validate_candidate(client, asr, candidate_id)["candidate"]
+    validation_id = machine["validations"][-1]["validation_id"]
+    warned = human_review(
+        client,
+        candidate_id,
+        validation_id=validation_id,
+        identity=identity_review,
+    )["candidate"]
+    assert warned["state"] == expected_state
+
+    accepted = client.post(
+        f"/v1/voice-designs/{candidate_id}/validate",
+        json={"automated_acceptance": True},
+    )
+    published = client.post(f"/v1/voice-designs/{candidate_id}/publish", json={})
+
+    assert accepted.status_code == 409
+    assert accepted.json()["error"]["code"] == (
+        "voice_design_review_mode_conflict"
+        if identity_review == "warn"
+        else "voice_design_state_conflict"
+    )
+    assert published.status_code == 409
+    assert VOICE_ID not in published_voice_ids(client)
+
+
+def test_automated_acceptance_rechecks_human_verdict_under_repository_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, registry, _synth, asr = make_client(tmp_path, monkeypatch)
+    candidate_id, _ = create_candidate(client)
+    confirm_candidate(client, asr, candidate_id)
+    validate_candidate(client, asr, candidate_id)
+    repository = VoiceDesignRepository(
+        registry.artifact_path("voice_design_candidates.json"),
+        registry.artifact_path("voice_design_candidates"),
+    )
+    stale_candidate = repository.get(candidate_id)
+    capability_key = stale_candidate.validations[-1].capability_key
+
+    repository.update(
+        candidate_id,
+        lambda current: current.model_copy(
+            update={
+                "validations": [
+                    current.validations[-1].model_copy(
+                        update={
+                            "identity_status": "warn",
+                            "naturalness_status": "pass",
+                            "status": "warn",
+                        }
+                    )
+                ],
+                "state": "validating",
+            }
+        ),
+    )
+
+    with pytest.raises(VoiceDesignActionError) as error:
+        apply_automated_acceptance(
+            repository,
+            stale_candidate,
+            capability_key=capability_key,
+        )
+
+    assert error.value.code == "voice_design_review_mode_conflict"
+    assert repository.get(candidate_id).validations[-1].identity_status == "warn"
+
+
+@pytest.mark.parametrize(
+    ("identity_status", "naturalness_status"),
+    [("warn", "pass"), ("pass", "reject"), ("reject", "not_reviewed")],
+)
+def test_persisted_automated_acceptance_with_human_warning_or_rejection_is_not_publishable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    identity_status: str,
+    naturalness_status: str,
+) -> None:
+    client, registry, _synth, asr = make_client(tmp_path, monkeypatch)
+    candidate_id, _ = create_candidate(client)
+    confirm_candidate(client, asr, candidate_id)
+    validate_candidate(client, asr, candidate_id)
+    repository = VoiceDesignRepository(
+        registry.artifact_path("voice_design_candidates.json"),
+        registry.artifact_path("voice_design_candidates"),
+    )
+    repository.update(
+        candidate_id,
+        lambda current: current.model_copy(
+            update={
+                "validations": [
+                    current.validations[-1].model_copy(
+                        update={
+                            "automated_acceptance": True,
+                            "identity_status": identity_status,
+                            "naturalness_status": naturalness_status,
+                            "status": "pass",
+                        }
+                    )
+                ],
+                "state": "publishable",
+            }
+        ),
+    )
+
+    stored = repository.get(candidate_id)
+    public = client.get(f"/v1/voice-designs/{candidate_id}").json()["candidate"]
+    published = client.post(f"/v1/voice-designs/{candidate_id}/publish", json={})
+
+    assert stored.passing_validation() is None
+    assert public["publishable"] is False
+    assert published.status_code == 409
+    assert published.json()["error"]["code"] == "voice_design_validation_required"
+    assert VOICE_ID not in published_voice_ids(client)
 
 
 def test_publish_requires_exact_candidate_revision(

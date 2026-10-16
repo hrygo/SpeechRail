@@ -1804,7 +1804,7 @@ public struct VoiceDesignView: View {
             return
         }
         errorMessage = nil
-        model.startVoiceDesignPublication(candidate, name: name)
+        model.startVoiceDesignPublication(candidate, name: name, autoPublish: true)
     }
 }
 
@@ -2065,7 +2065,7 @@ private struct VoiceCandidateSaveSheet: View {
             Text("保存候选 \(candidate.slot) 为音色")
                 .font(SpeechRailDesignTokens.Typography.sectionTitle)
 
-            Text("先试听服务保存的候选参考音频，再听复验输出并确认。只有当前版本的两项复核都完成后，才能发布到音色库。")
+            Text("保存后将在后台自动串联文本确认、Base 合成验收并发布入库，无需逐步手动操作。")
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)

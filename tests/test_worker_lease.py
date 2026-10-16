@@ -377,7 +377,10 @@ def test_evictor_resets_idle_timer_after_close() -> None:
         await evictor.start()
         try:
             # Wait for first eviction
-            await asyncio.sleep(0.06)
+            for _ in range(200):
+                if worker.close_count == 1:
+                    break
+                await asyncio.sleep(0.005)
             assert worker.close_count == 1
 
             # Simulate worker being restarted by a new request.

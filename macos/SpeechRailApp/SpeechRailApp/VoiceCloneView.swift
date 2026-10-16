@@ -753,6 +753,10 @@ public struct VoiceCloneView: View {
         }
     }
 
+    static func cloneQualityDiagnosticMessage(for message: String) -> String {
+        VoiceWorkflowModel.cloneQualityDiagnosticMessage(for: message)
+    }
+
     @ViewBuilder
     private var feedback: some View {
         if let message = model.cloneMessage ?? model.recording.message {
@@ -779,13 +783,70 @@ public struct VoiceCloneView: View {
             )
         }
         if let voice = model.lastRegisteredCloneVoice {
-            StatusBanner(
-                tone: .healthy,
-                title: "音色已注册",
-                message: "「\(voice.name)」已写进本机音色库。先检查配音效果，通过后就能正式制作。",
-                actionTitle: "前往音色库检查",
-                action: { navigation.request(.voiceLibrary) }
-            )
+            let checkState = model.voiceOutputCheck
+            if checkState.voiceID == voice.id {
+                switch checkState {
+                case .running:
+                    StatusBanner(
+                        tone: .attention,
+                        title: "正在检查配音效果…",
+                        message: "正在检查「\(voice.name)」的读音与音频是否完整，完成后会显示结果。"
+                    )
+                case .passed:
+                    StatusBanner(
+                        tone: .healthy,
+                        title: "本次检查已通过",
+                        message: "「\(voice.name)」的检查结果已保存。前往音色库查看当前可用状态，再用于制作。",
+                        actionTitle: "前往音色库查看",
+                        action: { navigation.request(.voiceLibrary) }
+                    )
+                case .passedNotPersisted:
+                    StatusBanner(
+                        tone: .attention,
+                        title: "验收结果未保存",
+                        message: "「\(voice.name)」本次检查已通过，但结果尚未保存，请重新检查。",
+                        actionTitle: "重新检查",
+                        action: { Task { await model.checkVoiceOutput(voiceID: voice.id) } }
+                    )
+                case let .failed(_, _, message), let .error(_, _, message):
+                    let guidance = Self.cloneQualityDiagnosticMessage(for: message)
+                    let fullMessage = guidance.isEmpty
+                        ? "「\(voice.name)」未达到正式制作要求：\(message)"
+                        : "「\(voice.name)」未达到正式制作要求：\(message)。排障建议：\(guidance)"
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        StatusBanner(
+                            tone: .critical,
+                            title: "配音效果检查未通过",
+                            message: fullMessage,
+                            actionTitle: "重新检查",
+                            action: { Task { await model.checkVoiceOutput(voiceID: voice.id) } }
+                        )
+                        HStack {
+                            Spacer()
+                            Button("重新录制音频") {
+                                model.clearLastRegisteredCloneVoice()
+                            }
+                            .speechRailButton(.secondary)
+                        }
+                    }
+                case .idle:
+                    StatusBanner(
+                        tone: .attention,
+                        title: "等待检查配音效果",
+                        message: "「\(voice.name)」已注册，正在等待执行配音效果检查。",
+                        actionTitle: "立即检查",
+                        action: { Task { await model.checkVoiceOutput(voiceID: voice.id) } }
+                    )
+                }
+            } else {
+                StatusBanner(
+                    tone: .healthy,
+                    title: "音色已注册",
+                    message: "「\(voice.name)」已写进本机音色库。后台正在检查配音效果，通过后即可正式制作。",
+                    actionTitle: "前往音色库检查",
+                    action: { navigation.request(.voiceLibrary) }
+                )
+            }
         }
         cloneCapabilityBanner
     }

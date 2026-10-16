@@ -339,9 +339,10 @@ public final class AppModel {
 
     public func startVoiceDesignPublication(
         _ candidate: VoiceDesignCandidateSnapshot,
-        name: String
+        name: String,
+        autoPublish: Bool = false
     ) {
-        voiceWorkflow.startVoiceDesignPublication(candidate, name: name)
+        voiceWorkflow.startVoiceDesignPublication(candidate, name: name, autoPublish: autoPublish)
     }
 
     public func confirmVoiceDesignReference() {
@@ -670,6 +671,10 @@ public final class AppModel {
     @discardableResult
     public func checkVoiceOutput(voiceID: String) async -> VoiceOutputCheckState {
         await voiceWorkflow.checkVoiceOutput(voiceID: voiceID)
+    }
+
+    public func clearLastRegisteredCloneVoice() {
+        voiceWorkflow.clearLastRegisteredCloneVoice()
     }
 
     public func playWork(_ work: CreativeWork) {

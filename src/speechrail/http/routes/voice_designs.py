@@ -16,11 +16,11 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 
 from speechrail.application.candidate_validation import CandidateHumanReview
 from speechrail.application.candidate_validation import (
@@ -166,7 +166,7 @@ class VoiceDesignHumanReview(BaseModel):
 
 
 class VoiceDesignValidateRequest(BaseModel):
-    """Run Base new-text validation or attach a human review to its result."""
+    """Run Base validation, attach human review, or accept a passing result."""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -176,6 +176,17 @@ class VoiceDesignValidateRequest(BaseModel):
         pattern=r"^(fast|quality|reference)\.render$",
     )
     human_review: VoiceDesignHumanReview | None = None
+    automated_acceptance: bool = False
+
+    @model_validator(mode="after")
+    def _validate_acceptance_modes(self) -> Self:
+        if self.automated_acceptance and (
+            self.test_text is not None or self.human_review is not None
+        ):
+            raise ValueError(
+                "automated_acceptance cannot be combined with test_text or human_review"
+            )
+        return self
 
 
 class VoiceDesignPublishRequest(BaseModel):
@@ -1108,6 +1119,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                     if body.human_review is not None
                     else None
                 ),
+                automated_acceptance=body.automated_acceptance,
                 expires_at=asyncio.get_running_loop().time()
                 + services.settings.request_timeout_seconds,
             )

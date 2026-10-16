@@ -104,6 +104,7 @@ private struct AudiobookProductionProgressRail: View {
 public struct AudiobookBookWorkspaceView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(AppNavigationState.self) private var navigation
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("speechrail.showDeveloperDetails") private var showAnalysisDeveloperDetails = false
     @State private var isAnalysisDevSectionExpanded = false
     @State private var chapterRenameTarget: AudiobookChapterRenameTarget?
@@ -171,6 +172,8 @@ public struct AudiobookBookWorkspaceView: View {
                 chapterRenameSheet(for: target)
             }
             .onChange(of: workflow.selectedBook?.id) { _, selectedBookID in
+                cancelRoleAudition()
+                expandedRoleIDs.removeAll()
                 if chapterRenameTarget?.bookID != selectedBookID {
                     chapterRenameTarget = nil
                 }
@@ -183,6 +186,7 @@ public struct AudiobookBookWorkspaceView: View {
                     }
                 }
             }
+            .onDisappear { cancelRoleAudition() }
         }
     }
 
@@ -505,13 +509,6 @@ public struct AudiobookBookWorkspaceView: View {
                     SessionHairline()
                 }
 
-                if !workflow.isAuditionConfirmedForSelectedBook,
-                   workflow.selectedBook?.analysisState == .allWindowsValidated
-                {
-                    auditionGateBanner
-                    SessionHairline()
-                }
-
                 if !workflow.selectedAtomIDs.isEmpty {
                     batchSpeakerAssignmentBar
                     SessionHairline()
@@ -553,16 +550,6 @@ public struct AudiobookBookWorkspaceView: View {
                         .speechRailButton(.quiet)
 
                         Spacer()
-
-                        if workflow.selectedBook?.analysisState == .allWindowsValidated {
-                            Button {
-                                Task { await workflow.confirmCastAndAudition() }
-                            } label: {
-                                Label("确认全书角色与试听声音", systemImage: "checkmark.seal")
-                            }
-                            .speechRailButton(.primary)
-                            .accessibilityIdentifier("audiobook-confirm-cast-audition-button")
-                        }
                     }
                 }
             }
@@ -1072,6 +1059,38 @@ public struct AudiobookBookWorkspaceView: View {
     // MARK: - Right Column: Cast & Voice Binding Inspector
 
     @State private var activeVoicePickerRoleID: UUID?
+    @State private var expandedRoleIDs: Set<UUID> = []
+    @State private var auditionPreviewRoleID: UUID?
+    @State private var auditionLoadingRoleID: UUID?
+    @State private var auditionRequestID: UUID?
+
+    private static let castMinorArchetypes: [AudiobookVoiceArchetype] = [
+        .youngMale, .matureMale, .youngFemale, .matureFemale, .neutralEnsemble
+    ]
+
+    private var isAllCastExpanded: Bool {
+        !workflow.characters.isEmpty && expandedRoleIDs.count >= workflow.characters.count
+    }
+
+    private func toggleAllCastExpansion() {
+        withAnimation(SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.panelTransition, reduceMotion: reduceMotion)) {
+            if isAllCastExpanded {
+                expandedRoleIDs.removeAll()
+            } else {
+                expandedRoleIDs = Set(workflow.characters.map(\.id))
+            }
+        }
+    }
+
+    private func cancelRoleAudition() {
+        auditionRequestID = nil
+        auditionLoadingRoleID = nil
+        if auditionPreviewRoleID != nil {
+            appModel.cancelVoicePreview()
+        }
+        auditionPreviewRoleID = nil
+        workflow.stopAuditionPlayback()
+    }
 
     private var castInspectorColumn: some View {
         @Bindable var bindableWorkflow = workflow
@@ -1091,10 +1110,22 @@ public struct AudiobookBookWorkspaceView: View {
 
         return SessionPanel {
             VStack(alignment: .leading, spacing: 0) {
-                SessionPanelHead(
-                    title: "人物与声音（\(workflow.characters.count)）",
-                    trailingDetail: "核心 \(leadCount) · 配角 \(minorCount)"
-                )
+                HStack(alignment: .center, spacing: 0) {
+                    SessionPanelHead(
+                        title: "人物与声音（\(workflow.characters.count)）",
+                        trailingDetail: "核心 \(leadCount) · 配角 \(minorCount)"
+                    )
+                    Spacer(minLength: 0)
+                    Button {
+                        toggleAllCastExpansion()
+                    } label: {
+                        Text(isAllCastExpanded ? "全部收起" : "全部展开")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                    }
+                    .speechRailButton(.secondary)
+                    .padding(.trailing, SpeechRailDesignTokens.Spacing.md)
+                    .accessibilityIdentifier("audiobook-cast-toggle-all-expansion-button")
+                }
                 SessionHairline()
 
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
@@ -1147,116 +1178,197 @@ public struct AudiobookBookWorkspaceView: View {
                 }
 
                 SessionHairline()
-                SessionPanelActions {
-                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        if let progressText = workflow.leadVoiceCreationProgressText,
-                           workflow.isCreatingLeadExclusiveVoices
-                        {
-                            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                                ProgressView()
-                                    .controlSize(.small)
-                                Text(progressText)
-                                    .font(SpeechRailDesignTokens.Typography.caption)
-                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                                Spacer()
-                            }
-                        }
+                castInspectorActions(activeBookVoices: activeBookVoices, allAvailableVoices: allAvailableVoices)
+            }
+        }
+    }
 
-                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                            Button {
-                                workflow.isShowingCastMergeSheet = true
-                            } label: {
-                                Label("合并/拆分…", systemImage: "arrow.triangle.merge")
-                            }
-                            .speechRailButton(.secondary)
+    @ViewBuilder
+    private var unavoidableConflictsAlert: some View {
+        if workflow.pendingCastingPlan?.hasUnavoidableSceneConflicts == true {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(SpeechRailDesignTokens.Typography.callout)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                    .accessibilityHidden(true)
+                Text("当前音色数量不足以完全避开同场角色撞音，建议在「更多整理…」中点击「补全六类群像」扩展音色库。")
+                    .font(SpeechRailDesignTokens.Typography.callout)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                Spacer(minLength: 0)
+            }
+            .padding(SpeechRailDesignTokens.Spacing.sm)
+            .background(
+                SpeechRailDesignTokens.Corner.controlShape
+                    .fill(SpeechRailDesignTokens.Surface.attentionTint)
+            )
+            .overlay(
+                SpeechRailDesignTokens.Corner.controlShape
+                    .stroke(SpeechRailDesignTokens.Color.attention.opacity(0.4), lineWidth: 1)
+            )
+        }
+    }
 
-                            Menu {
-                                let minorArchetypes: [AudiobookVoiceArchetype] = [
-                                    .youngMale, .matureMale, .youngFemale, .matureFemale, .neutralEnsemble
-                                ]
-                                ForEach(minorArchetypes) { archetype in
-                                    let matchingMinors = workflow.minorCharactersByArchetype[archetype] ?? []
-                                    Menu("\(archetype.shortBadgeTitle)（\(matchingMinors.count) 人）") {
-                                        let voicesToList = activeBookVoices.isEmpty ? allAvailableVoices : activeBookVoices
-                                        if voicesToList.isEmpty {
-                                            Text("当前无可用合成音色")
-                                        } else {
-                                            ForEach(voicesToList) { voice in
-                                                Button("批量绑定：\(voice.name)") {
-                                                    Task {
-                                                        await workflow.batchBindArchetype(archetype, to: voice)
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    .disabled(matchingMinors.isEmpty)
-                                }
-                            } label: {
-                                Label("声部批量配音…", systemImage: "person.3.sequence")
-                            }
-                            .menuStyle(.borderlessButton)
-                            .fixedSize()
+    @ViewBuilder
+    private var leadVoiceCreationProgressView: some View {
+        if let progressText = workflow.leadVoiceCreationProgressText,
+           workflow.isCreatingLeadExclusiveVoices
+        {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                ProgressView()
+                    .controlSize(.small)
+                Text(progressText)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Spacer()
+            }
+        }
+    }
 
-                            Spacer()
+    @ViewBuilder
+    private var primaryCastingActionButton: some View {
+        if workflow.isAuditionConfirmedForSelectedBook {
+            Button {
+                workflow.workbenchTab = .production
+            } label: {
+                Label("开始制作章节", systemImage: "play.circle.fill")
+            }
+            .speechRailButton(.primary)
+            .accessibilityIdentifier("audiobook-start-production-action-button")
+        } else {
+            Button {
+                Task {
+                    _ = await workflow.ensureSixArchetypeVoicesForBook(quietBanner: true)
+                    _ = await workflow.createExclusiveVoicesForLeadCharacters(quietBanner: true)
+                    _ = await workflow.refreshAvailableVoices()
+                    await workflow.autoAssignRecommendedVoices()
+                }
+            } label: {
+                Label("一键智能配声", systemImage: "wand.and.stars")
+            }
+            .speechRailButton(.primary)
+            .disabled(workflow.isCreatingLeadExclusiveVoices)
+            .accessibilityIdentifier("audiobook-smart-assign-voices-button")
+        }
+    }
 
-                            Button {
-                                Task {
-                                    _ = await workflow.ensureSixArchetypeVoicesForBook()
-                                    await appModel.engine.refreshDiscovery()
-                                }
-                            } label: {
-                                Label("补全六类群像", systemImage: "person.3.fill")
-                            }
-                            .speechRailButton(.secondary)
-                            .disabled(workflow.isCreatingLeadExclusiveVoices)
-                            .help("检查当前系统是否具备满足本小说场景的六类群像音色，自动创建缺失的群像声部音色。")
-                            .accessibilityIdentifier("audiobook-ensure-six-archetype-voices-button")
+    @ViewBuilder
+    private func castInspectorActions(
+        activeBookVoices: [SafeVoiceEntry],
+        allAvailableVoices: [SafeVoiceEntry]
+    ) -> some View {
+        SessionPanelActions {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                unavoidableConflictsAlert
+                leadVoiceCreationProgressView
 
-                            Button {
-                                Task {
-                                    _ = await workflow.ensureSixArchetypeVoicesForBook(quietBanner: true)
-                                    _ = await workflow.createExclusiveVoicesForLeadCharacters()
-                                    await appModel.engine.refreshDiscovery()
-                                }
-                            } label: {
-                                Label(
-                                    workflow.isCreatingLeadExclusiveVoices ? "生成音色中…" : "为主角生成专属音色",
-                                    systemImage: "person.wave.2.fill"
-                                )
-                            }
-                            .speechRailButton(.secondary)
-                            .disabled(workflow.isCreatingLeadExclusiveVoices)
-                            .accessibilityIdentifier("audiobook-create-lead-exclusive-voices-button")
-                        }
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    castMoreMenu(activeBookVoices: activeBookVoices, allAvailableVoices: allAvailableVoices)
+                    Spacer()
+                    primaryCastingActionButton
+                }
 
-                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                            Button {
-                                Task { await workflow.previewRecommendedVoices() }
-                            } label: {
-                                Label("推荐声音", systemImage: "wand.and.stars")
-                            }
-                            .speechRailButton(.secondary)
-                            .accessibilityIdentifier("audiobook-smart-assign-voices-button")
+                if let plan = workflow.pendingCastingPlan {
+                    AudiobookCastingReview(workflow: workflow).id(plan.inputDigest)
+                }
+            }
+        }
+    }
 
-                            Spacer()
+    @ViewBuilder
+    private func castMoreMenu(
+        activeBookVoices: [SafeVoiceEntry],
+        allAvailableVoices: [SafeVoiceEntry]
+    ) -> some View {
+        Menu {
+            Button {
+                Task {
+                    _ = await workflow.ensureSixArchetypeVoicesForBook()
+                    await appModel.engine.refreshDiscovery()
+                }
+            } label: {
+                Label("补全六类群像", systemImage: "person.3.fill")
+            }
+            .disabled(workflow.isCreatingLeadExclusiveVoices)
 
-                            Button("撤销上次配声") { Task { await workflow.undoLastCastingChange() } }
-                                .speechRailButton(.quiet)
+            Button {
+                Task {
+                    _ = await workflow.ensureSixArchetypeVoicesForBook(quietBanner: true)
+                    _ = await workflow.createExclusiveVoicesForLeadCharacters()
+                    await appModel.engine.refreshDiscovery()
+                }
+            } label: {
+                Label(
+                    workflow.isCreatingLeadExclusiveVoices ? "生成音色中…" : "为主角生成专属音色",
+                    systemImage: "person.wave.2.fill"
+                )
+            }
+            .disabled(workflow.isCreatingLeadExclusiveVoices)
 
-                            Button {
-                                Task { await workflow.confirmCastAndAudition() }
-                            } label: {
-                                Label("确认配声", systemImage: "checkmark.circle")
-                            }
-                            .speechRailButton(workflow.pendingCastingPlan == nil ? .primary : .secondary)
-                        }
-                        if let plan = workflow.pendingCastingPlan {
-                            AudiobookCastingReview(workflow: workflow).id(plan.inputDigest)
+            castArchetypeBatchMenu(activeBookVoices: activeBookVoices, allAvailableVoices: allAvailableVoices)
+
+            Button {
+                workflow.isShowingCastMergeSheet = true
+            } label: {
+                Label("合并/拆分角色…", systemImage: "arrow.triangle.merge")
+            }
+
+            Divider()
+
+            Button {
+                toggleAllCastExpansion()
+            } label: {
+                Label(
+                    isAllCastExpanded ? "全部收起角色卡片" : "全部展开角色卡片",
+                    systemImage: isAllCastExpanded ? "chevron.up.circle" : "chevron.down.circle"
+                )
+            }
+
+            Button {
+                Task { await workflow.undoLastCastingChange() }
+            } label: {
+                Label("撤销上次配声", systemImage: "arrow.uturn.backward")
+            }
+        } label: {
+            Label("更多整理…", systemImage: "ellipsis.circle")
+        }
+        .speechRailButton(.secondary)
+        .accessibilityIdentifier("audiobook-cast-more-menu")
+    }
+
+    @ViewBuilder
+    private func castArchetypeSubmenu(
+        archetype: AudiobookVoiceArchetype,
+        voices: [SafeVoiceEntry]
+    ) -> some View {
+        let matchingMinors = workflow.minorCharactersByArchetype[archetype] ?? []
+        Menu("\(archetype.shortBadgeTitle)（\(matchingMinors.count) 人）") {
+            if voices.isEmpty {
+                Text("当前无可用合成音色")
+            } else {
+                ForEach(voices) { voice in
+                    Button("批量绑定：\(voice.name)") {
+                        Task {
+                            await workflow.batchBindArchetype(archetype, to: voice)
                         }
                     }
                 }
             }
+        }
+        .disabled(matchingMinors.isEmpty)
+    }
+
+    @ViewBuilder
+    private func castArchetypeBatchMenu(
+        activeBookVoices: [SafeVoiceEntry],
+        allAvailableVoices: [SafeVoiceEntry]
+    ) -> some View {
+        let voicesToList = activeBookVoices.isEmpty ? allAvailableVoices : activeBookVoices
+        Menu {
+            ForEach(Self.castMinorArchetypes) { archetype in
+                castArchetypeSubmenu(archetype: archetype, voices: voicesToList)
+            }
+        } label: {
+            Label("按声部批量配音…", systemImage: "person.3.sequence")
         }
     }
 
@@ -1271,7 +1383,6 @@ public struct AudiobookBookWorkspaceView: View {
         let tier = stat?.tier ?? (role.isNarrator ? .narrator : (role.allowSharedMinorVoice ? .supporting : .lead))
         let archetype = stat?.archetype ?? role.inferredVoiceArchetype()
         let dialogueCount = stat?.dialogueAtomCount ?? 0
-        let chapterCount = max(stat?.speakingChapterIDs.count ?? 0, role.chapterIDs.count)
         let conflictPartners = workflow.sceneConflictPartnerNames(for: role.id)
         let voiceMeta = binding.flatMap { VoiceCatalogStore.shared.metadata(for: $0.voiceID) }
         let isCustomExclusiveVoice = binding.map {
@@ -1279,28 +1390,24 @@ public struct AudiobookBookWorkspaceView: View {
                 || !AudiobookWorkflowModel.builtInSystemVoiceIDs.contains($0.voiceID.lowercased())
         } ?? false
 
+        let isSelected = workflow.selectedRoleID == role.id
+        let hasConflict = !conflictPartners.isEmpty
+        let isExpanded = isSelected || hasConflict || expandedRoleIDs.contains(role.id)
+
         CardSurface {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                // 默认紧凑行：角色名 + 定位/声部标签 + 音色胶囊 + 试听 + 展开/折叠
+                HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.xs) {
                     SessionVoiceBadge(label: String(role.displayName.prefix(1)))
-                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
-                        HStack(alignment: .firstTextBaseline) {
+
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                        HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.xs) {
                             Text(role.displayName)
                                 .font(SpeechRailDesignTokens.Typography.sectionTitle)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                                 .lineLimit(1)
                                 .truncationMode(.tail)
 
-                            Spacer()
-
-                            if !role.isNarrator {
-                                Text(dialogueCount > 0 ? "\(dialogueCount) 句 · \(max(1, chapterCount)) 章" : "仅提及 · 0 句")
-                                    .font(SpeechRailDesignTokens.Typography.technical)
-                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                            }
-                        }
-
-                        HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                             StatusPill(
                                 tone: (tier == .narrator || tier == .lead) ? .healthy : .neutral,
                                 label: tier.badgeTitle
@@ -1317,6 +1424,14 @@ public struct AudiobookBookWorkspaceView: View {
                                     label: isCustomExclusiveVoice ? "专属定制" : "默认音色"
                                 )
                             }
+
+                            Spacer(minLength: 0)
+
+                            if !role.isNarrator {
+                                Text(dialogueCount > 0 ? "\(dialogueCount) 句" : "0 句")
+                                    .font(SpeechRailDesignTokens.Typography.technical)
+                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                            }
                         }
 
                         if !role.aliases.isEmpty {
@@ -1328,35 +1443,7 @@ public struct AudiobookBookWorkspaceView: View {
                     }
                 }
 
-                let persona = role.resolvedVoicePersona()
-                let personaHeadline = role.primaryVoiceTraitSummary
-                    ?? "\(persona.ageGenderAnchor) · \(persona.pitchAndRegister)"
-                Text("声学画像：\(personaHeadline)")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .lineLimit(2)
-
-                if let firstEvidence = role.evidences.first {
-                    Text("原文证据：「\(firstEvidence.quoteExcerpt)」")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .lineLimit(2)
-                }
-
-                if !conflictPartners.isEmpty {
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.attention)
-                        Text("与同场对话角色「\(conflictPartners.joined(separator: "、"))」共用同一声线，建议点击智能配声或更换音色")
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.attention)
-                            .lineLimit(2)
-                    }
-                    .padding(SpeechRailDesignTokens.Spacing.xs)
-                    .background(SpeechRailDesignTokens.Color.attention.opacity(0.12), in: SpeechRailDesignTokens.Corner.nestedShape)
-                }
-
+                // 音色选择胶囊 + 试听按钮 + 展开/折叠切换
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     Button {
                         activeVoicePickerRoleID = (activeVoicePickerRoleID == role.id) ? nil : role.id
@@ -1435,46 +1522,174 @@ public struct AudiobookBookWorkspaceView: View {
                         )
                     }
 
-                    Menu {
+                    // 试听按钮
+                    if let b = binding {
+                        let isAuditioning = workflow.isAuditionPlaying(for: role.id)
+                            || (auditionPreviewRoleID == role.id && (appModel.previewingVoiceID == b.voiceID || appModel.playingVoiceID == b.voiceID))
+                        let isLoading = auditionLoadingRoleID == role.id
                         Button {
-                            Task { await workflow.createExclusiveVoiceForRole(role.id) }
-                        } label: {
-                            Label("AI 生成专属音色", systemImage: "sparkles")
-                        }
-                        .disabled(workflow.isCreatingLeadExclusiveVoices)
-
-                        Button {
-                            Task {
-                                if let ctx = await workflow.beginVoiceRoundTrip(for: role.id) {
-                                    navigation.requestVoiceDesignForAudiobook(context: ctx)
+                            if isAuditioning || isLoading {
+                                cancelRoleAudition()
+                            } else {
+                                cancelRoleAudition()
+                                let requestID = UUID()
+                                auditionRequestID = requestID
+                                auditionLoadingRoleID = role.id
+                                Task {
+                                    defer {
+                                        if auditionRequestID == requestID {
+                                            auditionLoadingRoleID = nil
+                                        }
+                                    }
+                                    await workflow.prepareCastingAudition(kind: .sameTextComparison, roleID: role.id, comparisonVoiceIDs: [b.voiceID])
+                                    guard auditionRequestID == requestID else { return }
+                                    if workflow.castingAudition != nil && workflow.errorMessage == nil {
+                                        auditionPreviewRoleID = role.id
+                                        await workflow.playCastingAudition(itemIndex: 0)
+                                        guard auditionRequestID == requestID else { return }
+                                        if workflow.errorMessage != nil {
+                                            auditionPreviewRoleID = nil
+                                        }
+                                    } else if workflow.errorMessage != nil,
+                                              let creatorVoice = appModel.creatorVoices.first(where: { $0.id == b.voiceID }) {
+                                        auditionPreviewRoleID = role.id
+                                        appModel.startVoicePreview(creatorVoice)
+                                    } else {
+                                        auditionPreviewRoleID = nil
+                                    }
                                 }
                             }
                         } label: {
-                            Label("微调新音色…", systemImage: "slider.horizontal.3")
+                            if isLoading {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .frame(width: SpeechRailDesignTokens.Control.statusIconSize, height: SpeechRailDesignTokens.Control.statusIconSize)
+                            } else {
+                                Image(systemName: isAuditioning ? "stop.circle.fill" : "play.circle.fill")
+                                    .font(SpeechRailDesignTokens.Typography.statusIcon)
+                                    .foregroundStyle(
+                                        isAuditioning
+                                            ? SpeechRailDesignTokens.Color.attention
+                                            : SpeechRailDesignTokens.Color.voice
+                                    )
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .help(isLoading ? "取消试听" : (isAuditioning ? "停止试听" : "试听当前音色"))
+                        .accessibilityLabel(isLoading ? "取消试听" : (isAuditioning ? "停止试听" : "试听角色音色"))
+                    }
+
+                    // 展开/折叠按钮
+                    Button {
+                        withAnimation(SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.panelTransition, reduceMotion: reduceMotion)) {
+                            if expandedRoleIDs.contains(role.id) {
+                                expandedRoleIDs.remove(role.id)
+                            } else {
+                                expandedRoleIDs.insert(role.id)
+                            }
                         }
                     } label: {
-                        Label("专属定制…", systemImage: "sparkles")
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                     }
-                    .speechRailButton(.secondary)
-                    .fixedSize()
+                    .speechRailButton(.quiet)
+                    .accessibilityLabel(isExpanded ? "收起详情" : "展开详情")
                 }
 
-                if !role.isNarrator {
-                    Toggle(
-                        "允许与次要角色共用同一声线",
-                        isOn: Binding(
-                            get: { role.allowSharedMinorVoice },
-                            set: { allowed in
-                                Task { await workflow.toggleSharedMinorVoice(roleID: role.id, allowed: allowed) }
+                // 同场冲突告警：始终警示或在展开时展示
+                if hasConflict {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                        Text("与同场角色「\(conflictPartners.joined(separator: "、"))」共用声线，建议更换")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                            .lineLimit(2)
+                    }
+                    .padding(SpeechRailDesignTokens.Spacing.xs)
+                    .background(SpeechRailDesignTokens.Color.attention.opacity(0.12), in: SpeechRailDesignTokens.Corner.nestedShape)
+                }
+
+                // 渐进式披露：声学画像、原文证据、专属定制菜单与次要共用开关
+                if isExpanded {
+                    Divider()
+
+                    let persona = role.resolvedVoicePersona()
+                    let personaHeadline = role.primaryVoiceTraitSummary
+                        ?? "\(persona.ageGenderAnchor) · \(persona.pitchAndRegister)"
+                    Text("声学画像：\(personaHeadline)")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .lineLimit(2)
+
+                    if let firstEvidence = role.evidences.first {
+                        Text("原文证据：「\(firstEvidence.quoteExcerpt)」")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            .lineLimit(2)
+                    }
+
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Menu {
+                            Button {
+                                Task { await workflow.createExclusiveVoiceForRole(role.id) }
+                            } label: {
+                                Label("AI 生成专属音色", systemImage: "sparkles")
                             }
-                        )
-                    )
-                    .toggleStyle(.checkbox)
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            .disabled(workflow.isCreatingLeadExclusiveVoices)
+
+                            Button {
+                                Task {
+                                    if let ctx = await workflow.beginVoiceRoundTrip(for: role.id) {
+                                        navigation.requestVoiceDesignForAudiobook(context: ctx)
+                                    }
+                                }
+                            } label: {
+                                Label("微调新音色…", systemImage: "slider.horizontal.3")
+                            }
+                        } label: {
+                            Label("专属定制…", systemImage: "sparkles")
+                        }
+                        .speechRailButton(.secondary)
+                        .fixedSize()
+
+                        if workflow.fallbackRoleIDs.contains(role.id) {
+                            Button {
+                                Task { await workflow.createExclusiveVoiceForRole(role.id) }
+                            } label: {
+                                Label("重试专属音色", systemImage: "arrow.clockwise")
+                            }
+                            .speechRailButton(.secondary)
+                            .disabled(workflow.isCreatingLeadExclusiveVoices)
+                            .help("此前专属音色生成超时或未通过，当前已回退至群像音色，可点击重试。")
+                        }
+
+                        Spacer()
+
+                        if !role.isNarrator {
+                            Toggle(
+                                "允许与次要角色共用同一声线",
+                                isOn: Binding(
+                                    get: { role.allowSharedMinorVoice },
+                                    set: { allowed in
+                                        Task { await workflow.toggleSharedMinorVoice(roleID: role.id, allowed: allowed) }
+                                    }
+                                )
+                            )
+                            .toggleStyle(.checkbox)
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        }
+                    }
                 }
             }
             .padding(SpeechRailDesignTokens.Spacing.md)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                workflow.selectedRoleID = role.id
+            }
         }
     }
 

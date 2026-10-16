@@ -1752,6 +1752,7 @@ public struct AudiobookCastingPlan: Equatable, Sendable {
     public let exclusiveVoiceCount: Int
     public let sharedVoiceCount: Int
     public let eligibleVoiceCount: Int
+    public internal(set) var hasUnavoidableSceneConflicts: Bool = false
     public internal(set) var strategy: AudiobookCastingStrategy = .sceneAware
     public internal(set) var evaluatedCandidates: Int = 0
     public internal(set) var scoredCombinations: Int = 0

@@ -40,7 +40,14 @@ _MAX_VALIDATIONS_PER_CANDIDATE = 32
 # derived status and the timestamps belong to the stored record, not to the
 # freshly computed one.
 _VALIDATION_REVIEW_FIELDS = frozenset(
-    {"identity_status", "naturalness_status", "status", "created_at", "updated_at"}
+    {
+        "identity_status",
+        "naturalness_status",
+        "automated_acceptance",
+        "status",
+        "created_at",
+        "updated_at",
+    }
 )
 # VoiceDesign text fidelity is versioned on its own.  v1 compared the whole
 # transcript by edit distance, which passes a misread digit inside an otherwise
@@ -108,6 +115,7 @@ class VoiceDesignValidation(BaseModel):
     machine_status: Literal["pass", "warn", "reject"]
     identity_status: VoiceDesignReview = "not_reviewed"
     naturalness_status: VoiceDesignReview = "not_reviewed"
+    automated_acceptance: bool = False
     failure_codes: list[str] = Field(default_factory=list, max_length=32)
     # ``None`` for records stored before the exact-number gate existed: those
     # records never compared numbers, so absence is not evidence of a match.
@@ -128,6 +136,14 @@ class VoiceDesignValidation(BaseModel):
     transcript_match: float | None = Field(default=None, ge=0.0, le=1.0)
     created_at: float = Field(ge=0.0)
     updated_at: float = Field(ge=0.0)
+
+    def has_adverse_human_review(self) -> bool:
+        """Whether an explicit human warning or rejection blocks auto acceptance."""
+
+        return self.identity_status in {"warn", "reject"} or self.naturalness_status in {
+            "warn",
+            "reject",
+        }
 
 
 class VoiceDesignCandidate(BaseModel):
@@ -209,8 +225,10 @@ class VoiceDesignCandidate(BaseModel):
             for item in self.validations
             if item.candidate_revision == self.revision
             and item.status == "pass"
-            and item.identity_status == "pass"
-            and item.naturalness_status == "pass"
+            and (
+                (item.identity_status == "pass" and item.naturalness_status == "pass")
+                or (item.automated_acceptance is True and not item.has_adverse_human_review())
+            )
             and item.validation_policy_revision == VOICE_DESIGN_VALIDATION_POLICY_REVISION
             and item.transcript_numbers_match is True
             and (capability_key is None or item.capability_key == capability_key)
@@ -853,6 +871,7 @@ class VoiceDesignRepository:
                     "machine_status": item.machine_status,
                     "identity_status": item.identity_status,
                     "naturalness_status": item.naturalness_status,
+                    "automated_acceptance": item.automated_acceptance,
                     "failure_codes": list(item.failure_codes),
                     "transcript_numbers_match": item.transcript_numbers_match,
                     "validation_policy_revision": item.validation_policy_revision,

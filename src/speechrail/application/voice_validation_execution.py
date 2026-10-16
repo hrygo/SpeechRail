@@ -164,6 +164,7 @@ class CandidateValidationResult:
     transcript: str | None
     transcript_match: float | None
     evidence: SameRunEvidence
+    automated_acceptance: bool = False
 
 
 @dataclass(frozen=True)

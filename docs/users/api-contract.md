@@ -2,8 +2,8 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.16.5"
-date: 2026-10-07
+version: "3.16.6"
+date: 2026-10-16
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -935,13 +935,24 @@ seed 为 0..2^32−1 的整数，默认 42。当前仅支持 `language=zh`，不
 等价口语数字可正常通过。
 编辑参考文本会产生新的 candidate revision 并清除旧验证，不能复用旧证据。
 
-### 3. Base 复验与人工听审 (`POST /v1/voice-designs/{candidate_id}/validate`)
+### 3. Base 复验、人工听审与自动接受 (`POST /v1/voice-designs/{candidate_id}/validate`)
 
-机器模式必须使用不同于参考文本的 `test_text`（省略时服务选择受控文本），并由目标
-Base 角色重新合成、质检、转写且绑定 runtime identity。机器数值不会把
-identity/naturalness 标为通过。人工模式在机器通过后通过 `human_review` 附加实际听审结论；
-不能由自动指标代替。人工复核必须把 `human_review.validation_id` 绑定到刚刚试听的机器复验；
-只提交与当前 candidate revision 匹配的验证 ID，不能把另一轮输出的听审结果挪用过来。
+验证接口有三种互斥模式。**机器模式**（不传 `human_review` 与
+`automated_acceptance`）使用不同于参考文本的 `test_text`（省略时服务选择受控文本），由目标
+Base 角色重新合成、质检、转写并绑定 runtime identity。机器数值不会把
+identity/naturalness 标为通过。**人工模式**在机器通过后通过 `human_review` 附加实际听审结论；
+人工复核必须把 `human_review.validation_id` 绑定到刚刚试听的机器复验，只提交与当前 candidate
+revision 匹配的验证 ID，不能把另一轮输出的听审结果挪用过来。
+
+**自动接受模式**仅限 REST `POST /v1/voice-designs/{candidate_id}/validate`，请求发送
+`{"automated_acceptance": true}`，只接受当前 candidate revision 上最新一条通过当前文本保真策略、当前能力和
+runtime identity 门禁的机器验证。MCP 的 `validate_voice_design` 工具不暴露此参数。它不会填写或伪造
+identity/naturalness 人审结论，也不能覆盖该验证记录已有的人工 `warn` 或 `reject`；已有明确的人审
+`pass` 仍然有效。自动接受不能与 `test_text` 或 `human_review` 同时提交；组合模式返回 422。
+若待接受的验证记录已有人工 `warn` 或 `reject`，自动接受返回
+`409 voice_design_review_mode_conflict`；若候选当前已处于终态 `failed`，则返回
+`409 voice_design_state_conflict`。人工警告或拒绝会使对应验证记录失去发布资格；当前 revision 上若仍有其他
+符合门禁的通过记录，候选仍可发布。
 
 机器可懂度同时看相似度和数字。字符编辑距离抓不住「念错数字」：把 `500` 念成 `900` 只造成一处
 替换，相似度仍高于 `pass` 门槛，而听到的数字是错的。因此每条 validation 额外给出
@@ -990,7 +1001,9 @@ SpeechRail-Expected-Candidate-Revision: vr_0123456789abcdef0123456789abcdef
 
 ### 5. 发布 (`POST /v1/voice-designs/{candidate_id}/publish`)
 
-只有当前 revision 同时具备完整机器通过和人工 identity/naturalness 通过时才能发布。
+只有当前 revision 至少存在一条完整通过验证，并且该验证同时满足以下一条才能发布：identity 与 naturalness 都有明确的
+人工通过结论，或该验证已通过 `automated_acceptance` 自动接受。发布可使用当前 revision 上任意一条仍有效的通过验证；后续机器复验失败不会撤销另一条仍有效的通过记录。人工 `warn` 或 `reject` 会使被审验证记录失去资格；若还有其他符合门禁的通过记录，候选仍可发布。
+自动接受只表示机器门禁通过，不代表有人听审，也不能覆盖该验证记录已有的人工警告或拒绝。
 发布写入的输出证据 probe set 为 `voice_design_base_v2`；v1 时期的 `voice_design_base_v1`
 证据不再作为严格合成（`require_output_pass`）的准入依据，但记录本身保留可查，这类音色需要
 重新跑一次 quality-run 才能恢复严格准入。
