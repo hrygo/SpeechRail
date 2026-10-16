@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.11"
-date: 2026-10-15
+version: "3.3.12"
+date: 2026-10-16
 ---
 
 # SpeechRail 测试与验收
@@ -33,6 +33,8 @@ bash scripts/macos_app_build.sh --configuration Debug
 `macos_app_build.sh` 在创建构建产物前也执行测试清单检查，避免新增 SwiftPM 测试未加入
 Xcode 单测 target 却得到本地 App 构建成功。SwiftPM 测试、App target 构建和 Xcode 测试清单
 是不同检查；PR #341 的差异分析与证据见 [本地与 GitHub CI 一致性](ci-local-parity.md)。
+
+包含 Swift Testing 的定向运行显式传 `--enable-swift-testing`，并核对输出中实际发现的 suite 与用例数；退出码 0 或只有 XCTest 汇总不能证明新 suite 已执行。App 性能回归按[性能观测与回归](macos-app-performance.md)检查容量、操作次数、保存回执和取消到实际退出，不用 CI 墙钟或一次 CPU 读数作性能结论。真实音频/模型基准和接管前台的 UI 自动化分别取得相应授权；纯模型锚点测试不代替实际滚动、选择和复制交互。
 
 GitHub Actions 使用同一套锁定依赖门禁：`quality` 运行 Ruff、Mypy、版本一致性、OpenAPI lint、OpenAPI 路径对齐、MCP 工具面（`tools/list` / `resources/list` / 文档 / skill manifest）对齐、分人契约回归和差异空白检查；`test` 在 `macos-26` 的 Python 3.14.7 环境中构建一次 wheel。`scripts/ci_python_gate.sh` 让非 wheel 测试与构建并行，随后通过 `SPEECHRAIL_WHEEL_PATH` 让 wheel 测试消费该制品；两段 coverage 合并后仍强制 80% 门槛，任一段失败均阻止 artifact 上传。`swift-tests` 和 `macos-app` 使用独立的 `macos-26` arm64 runner，分别执行完整 SwiftPM 测试及 Xcode App 构建，不运行 UI 自动化或重复执行 Xcode 测试。`Gate Summary` 必须等待并验证每个选中的 job；被选中的检查意外 skip 也会失败。`package` 下载已测 wheel，只做压缩包、Darwin CoreML native worker 和 checksum 校验后上传，避免重复同步依赖和构建。普通 CI 与 tag Release 的 `package` 都使用 `macos-26`。Ubuntu 仅承载平台无关的 Quality Gates，不代表产品运行支持。CI workflow 同时支持普通 push/PR 和 Release workflow 的 `workflow_call`，Release 不重复维护 Python 检查命令。
 

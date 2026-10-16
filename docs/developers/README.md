@@ -2,8 +2,8 @@
 title: "SpeechRail 开发者文档中心"
 status: active
 audience: "核心开发者、开源贡献者"
-version: "2.3.1"
-date: 2026-09-30
+version: "2.3.2"
+date: 2026-10-16
 ---
 
 # 🛠️ SpeechRail 开发者文档
@@ -41,6 +41,7 @@ graph TD
     当前规格绑定、任务/计划解析、打断与终态、无 legacy 的公共边界；改公共契约前先读它。
 15. **[✅ Issue #95 交付认证与证据索引](issue-95-certification.md)**：本轮运行态认证的实测结果、反例、
     未通过门与仍需人工裁定的决策点（关闭 Issue 前的事实来源）。
+16. **[macOS App 性能观测与回归](macos-app-performance.md)**：存储与计算执行域、有限音频/转写/波形流水线、取消回收，以及真实性能与交互验收口径。
 
 ---
 

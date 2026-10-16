@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail macOS App AI 提词器"
 status: active
-version: "0.7.2"
-date: 2026-10-05
+version: "0.7.3"
+date: 2026-10-16
 ---
 
 # SpeechRail macOS App AI 提词器
@@ -54,6 +54,8 @@ App 内场景到 Realtime ASR 策略的唯一映射是 `ASRScenePreset`（`macos
 | `TeleprompterReplayEvaluator.swift` / `TeleprompterReplayTool` | 确定性回放评估器与 CLI：用生产跟随路径重放带版本记录的语料，只输出脱敏聚合 |
 
 `SessionCoordinator` 只负责设备占用。提词器调用 `sessionDidStartRecording(id: nil)`，因此可参与共享麦克风占用而不写入会话记录库；停止时由 coordinator 释放占用，提词器自己的 `TeleprompterRunState` 只保存稿件进度。
+
+正式跟随与语音试读共用 PreparedTeleprompterScript 的当前版本缓存；同版本 ASR 更新复用冻结 token，anchor 二分遵循原有 token.end 比较关系，后续匹配窗口与 DP 不变。换版本清除旧缓存，过期回调不得推进新稿。采集的 overflow、staleInput 或 droppedSamples 停止语音推进并等待采集与既有 draining，保留当前阅读位置；手动提词仍可使用。性能计数与取消回归见[性能观测与回归](macos-app-performance.md)，实际跟随延迟仍由授权素材验收。
 
 ## 回放素材怎么写
 

@@ -2,13 +2,15 @@
 title: "SpeechRail macOS App 有声书工坊开发说明"
 status: active
 audience: "macOS App 开发者、架构与测试工程师"
-version: "1.6.0"
-date: 2026-10-15
+version: "1.6.1"
+date: 2026-10-16
 ---
 
 # SpeechRail macOS App 有声书工坊开发说明
 
 本文档说明 macOS App 中「有声书工坊 (`AppRoute.audiobookWorkshop`)」的源码边界、存储模型、全书理解管线、角色与音色确认门禁、流式章节合成、返修/撤销以及 M4B/MP3 导出与 XPC 桥接。
+
+工作区从存储 actor 的一致输入生成，统计与正文投影通过 @concurrent 入口执行；每个选择域最多一个执行请求与一个最新等待请求。界面保留当前书与两个章节投影，存储缓存各最多两本书；制作终态单独可靠刷新。分析经过时间由局部 TimelineView 订阅，在功能隐藏或不活跃时暂停。具体容量、取消与回归口径见[性能观测与回归](macos-app-performance.md)。
 
 ## 1. 模块组成与文件清单
 

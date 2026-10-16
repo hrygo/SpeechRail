@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail macOS App 开发与测试"
 status: active
-version: "0.6.10"
-date: 2026-10-09
+version: "0.6.11"
+date: 2026-10-16
 ---
 
 # SpeechRail macOS App 开发与测试
@@ -10,6 +10,8 @@ date: 2026-10-09
 界面开发必须先遵循 [macOS App 设计系统与 Token](macos-app-design-system.md)。该文档规定
 macOS 26-only 的特性优先级、服务侧独立 target 的边界，以及 SwiftUI 页面可使用的统一
 token；新页面不得自行定义颜色、间距、圆角和字体层级。
+
+存储、计算和采集的执行域与容量遵循[性能观测与回归](macos-app-performance.md)：MainActor 只发布有限快照；作品存储与导出由 actor 执行，文件播放用已验证 URL；采集 stop 等待实际回收，CaptureHelper 与 App 的内部 XPC 变更成套构建和回退。确定性回归、App 编译、实际性能与交互核验分别记录。
 
 ## 工具链
 

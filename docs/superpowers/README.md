@@ -8,6 +8,7 @@
 
 ## 设计规格
 
+- [SpeechRail App 性能与资源治理设计](specs/2026-10-16-app-performance-design.md)（`active`；代码与确定性集成完成，实际性能与交互待验收）
 - [macOS 26 App 最佳实践整改](specs/2026-09-13-macos26-app-best-practices-remediation-design.md)（`approved`）
 - [OpenAI Realtime 交接设计](../archive/superpowers/specs/2026-09-02-openai-realtime-handover-design.md)（`superseded`）
 - [资源优化设计](specs/2026-09-02-resource-optimization-design.md)
@@ -23,6 +24,7 @@
 
 ## 实施计划
 
+- [SpeechRail App 性能治理实施计划](plans/2026-10-16-app-performance-implementation-plan.md)（A 层完成；覆盖 App、采集与播放，B/C 层及服务侧条件排查见待办）
 - [Wheel 本地安装器计划](plans/2026-09-01-wheel-local-installer.md)
 - [OpenAI Realtime 交接计划](plans/2026-09-02-openai-realtime-handover.md)（`superseded`）
 - [资源优化计划](plans/2026-09-02-resource-optimization.md)
