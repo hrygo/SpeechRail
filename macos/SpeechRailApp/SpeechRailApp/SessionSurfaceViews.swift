@@ -333,6 +333,17 @@ public struct SessionLibraryView: View {
                         finishIncomplete: { await caption.endIncompleteRecord($0) }
                     )
                 }
+                if kind == .captions, let failure = caption.completionFailure {
+                    StatusBanner(
+                        kind: .standard,
+                        tone: .attention,
+                        title: "字幕收尾尚未确认",
+                        message: failure.message
+                    )
+                    .help("结束确认阶段：\(failure.stage.rawValue)"
+                        + (caption.completionDiagnosticCode.map { "；诊断代码：\($0)" } ?? ""))
+                    .accessibilityIdentifier("caption-completion-failure")
+                }
 
                 if let loadFailure {
                     StatusBanner(
@@ -565,7 +576,7 @@ public struct SessionLibraryView: View {
                 tone: .healthy,
                 title: "现在就可以开始字幕",
                 message: "只靠语音识别，不用配大模型。开始后字幕带贴在屏幕底部，SpeechRail 不必在前台。",
-                hint: "页头的「开始字幕」或 ⌘⇧L 都能开始；再按一次 ⌘⇧L 结束并保存。"
+                hint: "⌘⇧L 可开始、暂停或继续；点击字幕带的 ✕ 结束并保存。"
                     + "字幕带不抢焦点，所以 esc 不会关掉它。"
             ) {
                 Button("字幕设置") { openSettings() }

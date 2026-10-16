@@ -161,8 +161,7 @@ struct CaptionBandMetrics: Equatable {
     /// 行数是**从最新一句往回数**的：屏幕上留得下几行就先满足最新的那几句，
     /// 上面被顶掉的旧句交给滚动。
     static func current(
-        lines: [CaptionSession.Line],
-        partialText: String?,
+        content: CaptionBandContent,
         blocked: CaptionSession.BlockReason?,
         fontSize: CaptionBandFontSize,
         isHovering: Bool,
@@ -172,19 +171,11 @@ struct CaptionBandMetrics: Equatable {
         let width = contentWidth > 0 ? contentWidth : layout.captionBandDefaultWidth
         let limit = layout.captionBandMaximumLineCount
         var rows = 0
-        if let partial = partialText, !partial.isEmpty {
-            rows += visualRowCount(
-                for: partial,
-                fontSize: fontSize,
-                availableWidth: textAvailableWidth(contentWidth: width, isPartial: true)
-            )
-        }
-        for line in lines.reversed() {
-            if rows >= limit { break }
+        for line in content.rows.reversed() where rows < limit {
             rows += visualRowCount(
                 for: line.text,
                 fontSize: fontSize,
-                availableWidth: textAvailableWidth(contentWidth: width, isPartial: false)
+                availableWidth: textAvailableWidth(contentWidth: width, isPartial: line.isPartial)
             )
         }
         let blockedHeight = blocked.map {
@@ -433,8 +424,9 @@ struct CaptionBandView: View {
     @AppStorage(SpeechRailDesignTokens.CaptionBand.pinnedDefaultsKey)
     private var isPinned = false
     @State private var isHovering = false
-    @State private var isFollowing = true
-    @State private var scrollProxy: ScrollViewProxy?
+    @State private var transcriptFollow = TranscriptFollowState()
+    @State private var userScrollActive = false
+    @State private var scrollPosition = ScrollPosition(edge: .bottom)
     @State private var showsSaveRecovery = false
     /// 自己量出来的内容宽度：宽度参与折行，所以高度得跟着它变。
     @State private var contentWidth: CGFloat = 0
@@ -443,9 +435,7 @@ struct CaptionBandView: View {
         CaptionBandFontSize(rawValue: fontSizeRaw) ?? .standard
     }
 
-    private var rows: [CaptionSession.Line] {
-        session.lines
-    }
+    private var content: CaptionBandContent { session.bandContent }
 
     private var effectiveContentWidth: CGFloat {
         contentWidth > 0 ? contentWidth : SpeechRailDesignTokens.Layout.captionBandDefaultWidth
@@ -453,8 +443,7 @@ struct CaptionBandView: View {
 
     private var metrics: CaptionBandMetrics {
         CaptionBandMetrics.current(
-            lines: rows,
-            partialText: session.partialText,
+            content: content,
             blocked: session.blocked,
             fontSize: fontSize,
             isHovering: isHovering,
@@ -469,7 +458,7 @@ struct CaptionBandView: View {
             }
             if let blocked = session.blocked {
                 blockedRow(blocked)
-                if !rows.isEmpty { linesScroll }
+                if !content.rows.isEmpty { linesScroll }
             } else {
                 linesScroll
             }
@@ -494,42 +483,40 @@ struct CaptionBandView: View {
     // MARK: 字幕行
 
     private var linesScroll: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.vertical) {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(rows) { line in
-                        lineRow(text: line.text, isPartial: false)
-                            .id(line.id)
-                    }
-                    if let capture = session.windowCapture {
-                        ForEach(capture.visibleUnits, id: \.unitID) { unit in
-                            lineRow(text: unit.text, isPartial: true).id(unit.unitID)
-                        }
-                    } else if let partial = session.partialText, !partial.isEmpty {
-                        lineRow(text: partial, isPartial: true)
-                            .id(Self.partialAnchor)
-                    }
-                    Color.clear
-                        .frame(height: SpeechRailDesignTokens.Spacing.hairline)
-                        .id(Self.bottomAnchor)
+        ScrollView(.vertical) {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(content.rows) { line in
+                    lineRow(text: line.text, isPartial: line.isPartial)
+                        .id(line.id)
                 }
             }
-            .scrollIndicators(.never)
-            .onScrollGeometryChange(for: Bool.self) { geometry in
-                // 「贴着底」= 内容底边已经在可视区里（留一点余量给惯性）。
-                geometry.contentOffset.y + geometry.containerSize.height
-                    >= geometry.contentSize.height - SpeechRailDesignTokens.CaptionBand.followThreshold
-            } action: { _, atBottom in
-                isFollowing = atBottom
-            }
-            .onAppear { scrollProxy = proxy }
-            .onChange(of: session.lines.count) { _, _ in scrollToLatestIfFollowing() }
-            .onChange(of: session.partialText) { _, _ in scrollToLatestIfFollowing() }
         }
+        .scrollIndicators(.never)
+        .scrollPosition($scrollPosition)
+        .defaultScrollAnchor(.bottom, for: .initialOffset)
+        .defaultScrollAnchor(transcriptFollow.isPinnedToBottom ? .bottom : nil, for: .sizeChanges)
+        .onScrollPhaseChange { oldPhase, phase, context in
+            let wasUserScroll = oldPhase == .interacting || oldPhase == .decelerating
+            let isUserScroll = phase == .interacting || phase == .decelerating
+            userScrollActive = isUserScroll
+            guard wasUserScroll || isUserScroll else { return }
+            updateFollowing(
+                contentBottomY: context.geometry.contentSize.height,
+                viewportBottomY: context.geometry.visibleRect.maxY,
+                isUserInitiated: true
+            )
+        }
+        .onScrollGeometryChange(for: TranscriptFollowState.ScrollProximity.self) { geometry in
+            TranscriptFollowState.scrollProximity(
+                contentBottomY: Double(geometry.contentSize.height),
+                viewportBottomY: Double(geometry.visibleRect.maxY)
+            )
+        } action: { _, proximity in
+            let updated = transcriptFollow.geometryChanged(to: proximity, isUserInitiated: userScrollActive)
+            if updated != transcriptFollow { transcriptFollow = updated }
+        }
+        .onChange(of: content) { _, _ in scrollToLatestIfFollowing() }
     }
-
-    private static let partialAnchor = "caption-band-partial"
-    private static let bottomAnchor = "caption-band-bottom"
 
     private func lineRow(text: String, isPartial: Bool) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.xs) {
@@ -669,9 +656,9 @@ struct CaptionBandView: View {
                         .frame(width: SpeechRailDesignTokens.Layout.inspectorColumnWidth)
                     }
             }
-            if !isFollowing {
+            if !transcriptFollow.isPinnedToBottom {
                 Button {
-                    isFollowing = true
+                    transcriptFollow = transcriptFollow.jumpToLatest(anchor: nil)
                     scrollToLatest()
                 } label: {
                     HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
@@ -798,12 +785,20 @@ struct CaptionBandView: View {
     }
 
     private func scrollToLatestIfFollowing() {
-        guard isFollowing else { return }
+        guard transcriptFollow.isPinnedToBottom else { return }
         scrollToLatest()
     }
 
     /// 跟随态下把视图滚到底：新行出现时用户已经在看最新那一句，不该还要自己滚。
     private func scrollToLatest() {
-        scrollProxy?.scrollTo(Self.bottomAnchor, anchor: .bottom)
+        scrollPosition.scrollTo(edge: .bottom)
+    }
+
+    private func updateFollowing(contentBottomY: CGFloat, viewportBottomY: CGFloat, isUserInitiated: Bool) {
+        let proximity = TranscriptFollowState.scrollProximity(
+            contentBottomY: Double(contentBottomY), viewportBottomY: Double(viewportBottomY)
+        )
+        let updated = transcriptFollow.geometryChanged(to: proximity, isUserInitiated: isUserInitiated)
+        if updated != transcriptFollow { transcriptFollow = updated }
     }
 }

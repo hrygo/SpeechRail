@@ -116,6 +116,104 @@ struct TranscriptWindowPersistenceTests {
 
 
 @MainActor struct TranscriptWindowCaptureTests {
+    @Test func idleSnapshotsDoNotWriteEmptyCheckpointsOrChangeSavedStatus() async throws {
+        var writes = 0
+        let capture = TranscriptWindowCapture(recordID: "record",
+            identity: .init(connection: 1, generation: 1), source: .microphone,
+            offsetSeconds: 0, observedAt: Date(timeIntervalSince1970: 100), save: { command in
+                writes += 1
+                return WindowSaveAck(transactionID: command.id, lineOrdinals: [:], savedThrough: 0)
+            })
+        var json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(
+            TranscriptWindowLedgerTests().fixture("window-updated-r2"))) as? [String: Any])
+        json["units"] = []
+        for revision in 2...12 {
+            json["window_revision"] = revision
+            let event = try JSONDecoder().decode(TranscriptWindowEvent.self,
+                from: JSONSerialization.data(withJSONObject: json))
+            #expect(capture.apply(event, observedAt: Date(timeIntervalSince1970: Double(revision * 3))) == .snapshot)
+            #expect(capture.statusText == "已保存")
+            #expect(capture.queue.isComplete)
+            await capture.queue.waitUntilSettled()
+        }
+        capture.retainTail()
+        await capture.queue.waitUntilSettled()
+        #expect(writes == 0)
+    }
+
+    @Test func silenceSealAdvancesSaveBarrierWithoutFlashingTextSaveStatus() async throws {
+        var unblock: CheckedContinuation<Void, Never>?
+        let capture = TranscriptWindowCapture(recordID: "record",
+            identity: .init(connection: 1, generation: 1), source: .microphone,
+            offsetSeconds: 0, observedAt: Date(timeIntervalSince1970: 100), save: { command in
+                await withCheckedContinuation { unblock = $0 }
+                guard case .sealed(let batch) = command else { throw CancellationError() }
+                return WindowSaveAck(transactionID: batch.transactionID,
+                    lineOrdinals: [:], savedThrough: batch.savedThrough)
+            })
+        var json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(
+            TranscriptWindowLedgerTests().fixture("window-sealed-r6"))) as? [String: Any])
+        json["final_units"] = []
+        json["coverage"] = [["span": ["start": 0, "end": 96000],
+            "outcome": "silence", "reason": "vad_not_admitted"]]
+        let event = try JSONDecoder().decode(TranscriptWindowEvent.self,
+            from: JSONSerialization.data(withJSONObject: json))
+        #expect(capture.apply(event, observedAt: Date(timeIntervalSince1970: 100)) == .seal)
+        #expect(capture.statusText == "已保存")
+        while unblock == nil { await Task.yield() }
+        #expect(capture.statusText == "已保存")
+        #expect(capture.queue.savedThrough == 0)
+        unblock?.resume()
+        try await capture.waitSaved(through: 96000)
+        #expect(capture.queue.savedThrough == 96000)
+        #expect(capture.statusText == "已保存")
+    }
+
+    @Test func unchangedPreviewDoesNotResaveButCorrectionAndTailRemovalDo() async throws {
+        let (store, session, _) = try await TranscriptWindowPersistenceTests().fixture()
+        var checkpoints: [WindowCheckpointCommand] = []
+        let capture = TranscriptWindowCapture(recordID: session,
+            identity: .init(connection: 1, generation: 1), source: .microphone,
+            offsetSeconds: 0, observedAt: Date(timeIntervalSince1970: 100), save: { command in
+                guard case .checkpoint(let checkpoint) = command else { throw CancellationError() }
+                checkpoints.append(checkpoint)
+                try await store.saveWindowCheckpoint(checkpoint)
+                return WindowSaveAck(transactionID: checkpoint.id, lineOrdinals: [:], savedThrough: 0)
+            })
+        var json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(
+            TranscriptWindowLedgerTests().fixture("window-updated-r2"))) as? [String: Any])
+        for revision in 2...4 {
+            json["window_revision"] = revision
+            let event = try JSONDecoder().decode(TranscriptWindowEvent.self,
+                from: JSONSerialization.data(withJSONObject: json))
+            #expect(capture.apply(event, observedAt: Date(timeIntervalSince1970: Double(revision * 3))) == .snapshot)
+            await capture.queue.waitUntilSettled()
+        }
+        capture.retainTail()
+        await capture.queue.waitUntilSettled()
+        #expect(checkpoints.count == 1)
+        var units = try #require(json["units"] as? [[String: Any]])
+        units[0]["text"] = "回溯修正后的测试文字"
+        units[0]["text_revision"] = 2
+        json["units"] = units
+        json["window_revision"] = 5
+        let corrected = try JSONDecoder().decode(TranscriptWindowEvent.self,
+            from: JSONSerialization.data(withJSONObject: json))
+        #expect(capture.apply(corrected, observedAt: Date(timeIntervalSince1970: 20)) == .snapshot)
+        await capture.queue.waitUntilSettled()
+        #expect(checkpoints.count == 2)
+        #expect(try await store.lines(sessionID: session, includePartial: true).first?.text == "回溯修正后的测试文字")
+        json["units"] = []
+        json["window_revision"] = 6
+        let empty = try JSONDecoder().decode(TranscriptWindowEvent.self,
+            from: JSONSerialization.data(withJSONObject: json))
+        #expect(capture.apply(empty, observedAt: Date(timeIntervalSince1970: 23)) == .snapshot)
+        await capture.queue.waitUntilSettled()
+        #expect(checkpoints.count == 3)
+        #expect(try await store.lines(sessionID: session, includePartial: true).isEmpty)
+        await store.close()
+    }
+
     @Test func lagStatusChangesWithoutReplacingVisibleTextOrReusingRevision() async throws {
         let capture = TranscriptWindowCapture(recordID: "record",
             identity: .init(connection: 1, generation: 1), source: .microphone,

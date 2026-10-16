@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import SpeechRailControlKit
 
 public enum ASRSegmentCloseReason: String, Sendable {
@@ -838,6 +839,7 @@ public actor RealtimeASRClient {
     /// 流式转写的线上格式。当前 SpeechRail transcription session 固定使用
     /// 24 kHz / 单声道 / PCM16；原生层归一到这个格式，服务端再重采样到 16 kHz 内核。
     public static let sampleRate: Double = 24_000
+    private static let protocolLogger = Logger(subsystem: "com.speechrail.desktop", category: "realtime.protocol")
 
     public enum Failure: LocalizedError, Equatable, Sendable {
         case unsupportedModel(String)
@@ -1695,7 +1697,11 @@ public actor RealtimeASRClient {
                       Self.contractInteger(object["window_revision"]) == ledger.revision,
                       Self.contractInteger(object["sealed_through_sample"]) == ledger.sealedThrough,
                       Self.contractInteger(object["failed_items_count"]) == ledger.failedItemsCount
-                else { await rejectProtocolEvent(code: "invalid_window_receipt"); return }
+                else {
+                    Self.protocolLogger.error("window_receipt_mismatch accepted=\(self.expectedDrainSamples) receipt_revision=\(Self.contractInteger(object["window_revision"]) ?? -1) ledger_revision=\(self.protocolWindowLedger?.revision ?? -1) receipt_sealed=\(Self.contractInteger(object["sealed_through_sample"]) ?? -1) ledger_sealed=\(self.protocolWindowLedger?.sealedThrough ?? -1) receipt_failed=\(Self.contractInteger(object["failed_items_count"]) ?? -1) ledger_failed=\(self.protocolWindowLedger?.failedItemsCount ?? -1)")
+                    await rejectProtocolEvent(code: "invalid_window_receipt")
+                    return
+                }
             }
             drainReceiptReceived = true
         case "speechrail.transcription.window.updated", "speechrail.transcription.window.sealed",
@@ -2164,6 +2170,8 @@ public actor RealtimeASRClient {
 
     private func rejectProtocolEvent(code: String, message: String? = nil) async {
         guard !didClose else { return }
+        // Only stable local codes and numeric frontiers enter diagnostics.
+        Self.protocolLogger.error("realtime_protocol_event_rejected code=\(code, privacy: .public) sequence=\(self.currentEventMetadata?.sequence ?? -1) window_revision=\(self.protocolWindowLedger?.revision ?? -1) sealed_through=\(self.protocolWindowLedger?.sealedThrough ?? -1)")
         let message = message ?? "语音服务事件顺序或身份无效，已关闭当前连接。"
         if !configurationAcknowledged {
             configurationFailure = .serverError(code: code, message: message)

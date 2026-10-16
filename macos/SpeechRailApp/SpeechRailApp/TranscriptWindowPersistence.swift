@@ -150,6 +150,16 @@ public final class TranscriptWindowPersistenceQueue {
                 + (c.checkpoint?.text.unicodeScalars.count ?? 0)
             case .checkpoint(let c): c.text.unicodeScalars.count }
         }
+        /// Silence still advances the save barrier, but it does not save any text.
+        var changesText: Bool {
+            switch self {
+            case .sealed(let batch):
+                batch.rows.contains { !$0.line.text.isEmpty }
+                    || batch.checkpoint.map { ($0.expectedText ?? "") != $0.text } == true
+            case .checkpoint(let checkpoint):
+                (checkpoint.expectedText ?? "") != checkpoint.text
+            }
+        }
     }
     public enum Admission: Equatable { case accepted, duplicate, capacityExceeded, throttled, invalidIdentity }
     public struct Failure: Sendable {
@@ -254,7 +264,8 @@ public final class TranscriptWindowCapture {
     public var statusText: String {
         if incomplete || queue.failure != nil || queue.rejectionCount > 0 { return "部分内容未完成" }
         if fallingBehind { return "识别稍慢，正在追赶" }
-        if !confirmed.isEmpty || !queue.pending.isEmpty { return "文字已确认，正在保存" }
+        if confirmed.values.contains(where: { $0.contains { !$0.text.isEmpty } })
+            || queue.ownedCommands.contains(where: \.changesText) { return "文字已确认，正在保存" }
         if isDraining && !ledger.units.isEmpty { return "正在确认文字" }
         if !ledger.units.isEmpty { return "正在识别" }
         return "已保存"
@@ -305,14 +316,14 @@ public final class TranscriptWindowCapture {
         // This clock measures the actual App projection, not socket receipt time.
         lastUICommitAt = ContinuousClock().now
         let tail = ledger.units.map(\.text).filter { !$0.isEmpty }.joined(separator: " ")
-        if admission == .snapshot {
+        if admission == .snapshot, tail != (checkpointText ?? "") {
             let cp = checkpoint(text: tail)
             let accepted = queue.checkpoint(cp, now: now.timeIntervalSince1970)
             if accepted == .accepted { checkpointText = tail.isEmpty ? nil : tail }
             if accepted == .capacityExceeded || accepted == .invalidIdentity {
                 retainRefused(.checkpoint(cp))
             }
-        } else if let tx = event.transactionID {
+        } else if admission != .snapshot, let tx = event.transactionID {
             var rows: [SealedWindowCommand.Row] = []
             for unit in event.finalUnits ?? [] {
                 guard let item = unit.itemID else { continue }
@@ -327,10 +338,9 @@ public final class TranscriptWindowCapture {
             let batch = SealedWindowCommand(transactionID: tx, sessionID: recordID, rows: rows,
                 savedThrough: event.sealedThroughSample, checkpoint: checkpoint(text: tail))
             let accepted = queue.enqueue(.sealed(batch))
-            confirmed[tx] = event.finalUnits ?? []
+            if let units = event.finalUnits, !units.isEmpty { confirmed[tx] = units }
             if accepted == .accepted {
                 checkpointText = tail.isEmpty ? nil : tail
-                confirmed[tx] = event.finalUnits ?? []
             } else if accepted != .duplicate {
                 // One refused transaction is retained in addition to the bounded
                 // queue. The caller must stop input before accepting more events.
@@ -355,6 +365,7 @@ public final class TranscriptWindowCapture {
         // checkpoint would cross its unsaved CAS parent and reorder recovery.
         guard blockedCommand == nil else { return }
         let tail = ledger.units.map(\.text).filter { !$0.isEmpty }.joined(separator: " ")
+        guard tail != (checkpointText ?? "") else { return }
         let cp = checkpoint(text: tail)
         let accepted = queue.checkpoint(cp, now: 0, force: true)
         if accepted == .accepted { checkpointText = tail.isEmpty ? nil : tail }

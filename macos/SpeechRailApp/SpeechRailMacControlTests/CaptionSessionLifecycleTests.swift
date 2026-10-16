@@ -9,6 +9,45 @@ import XCTest
 final class CaptionSessionLifecycleTests: XCTestCase {
     private var harness: Harness?
 
+    func testBandContentIncludesWindowTextAndChangesForSameUnitCorrection() throws {
+        let event = try TranscriptWindowLedgerTests().fixture("window-updated-r2")
+        let first = CaptionBandContent(lines: [], windowUnits: event.units, partialText: "旧半句")
+        XCTAssertEqual(first.rows.map(\.text), ["合成测试。"])
+        XCTAssertTrue(try XCTUnwrap(first.rows.first).isPartial)
+
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(event)) as? [String: Any])
+        var units = try XCTUnwrap(json["units"] as? [[String: Any]])
+        units[0]["text"] = "同一句回溯后变长，需要继续保持末行可见。"
+        units[0]["text_revision"] = 2
+        json["units"] = units
+        let corrected = try JSONDecoder().decode(TranscriptWindowEvent.self,
+            from: JSONSerialization.data(withJSONObject: json))
+        let next = CaptionBandContent(lines: [], windowUnits: corrected.units, partialText: nil)
+        XCTAssertEqual(first.rows.map(\.id), next.rows.map(\.id))
+        XCTAssertNotEqual(first, next, "同一单元字数变化也必须触发末行跟随和高度重算")
+
+        units[0]["text_revision"] = 3
+        json["units"] = units
+        let heartbeat = try JSONDecoder().decode(TranscriptWindowEvent.self,
+            from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertEqual(next, CaptionBandContent(lines: [], windowUnits: heartbeat.units, partialText: nil),
+            "没有文字变化的协议修订不应触发滚动")
+        XCTAssertTrue(CaptionBandContent(lines: [], windowUnits: [], partialText: "旧半句").rows.isEmpty)
+    }
+
+    func testBandContentTracksSameCountFinalCorrectionAndLegacyPartial() {
+        var line = CaptionSession.Line(id: "line", ordinal: 1, text: "合成定稿", start: nil,
+            end: nil, speakerLabel: nil)
+        let first = CaptionBandContent(lines: [line], windowUnits: nil, partialText: "正在增长的半句")
+        XCTAssertEqual(first.rows.map(\.text), ["合成定稿", "正在增长的半句"])
+        XCTAssertEqual(first.rows.map(\.isPartial), [false, true])
+        line.text = "修正后更长的合成定稿"
+        let corrected = CaptionBandContent(lines: [line], windowUnits: nil, partialText: "正在增长的半句")
+        XCTAssertEqual(first.rows.map(\.id), corrected.rows.map(\.id))
+        XCTAssertNotEqual(first, corrected)
+        XCTAssertNotEqual(corrected, CaptionBandContent(lines: [line], windowUnits: nil, partialText: "半句继续增长"))
+    }
+
     override func tearDown() async throws {
         if let harness {
             if harness.coordinator.occupancy != nil {
@@ -330,6 +369,39 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         XCTAssertNil(h.coordinator.lastFinalizedSessionID)
         XCTAssertNil(h.coordinator.occupancy)
         XCTAssertNotNil(h.session.lastFailure)
+    }
+
+    func testWindowProtocolFailureCannotClaimSavedAfterBandCloses() async throws {
+        let h = try await makeHarness(revisionWindowEnabled: true)
+        let id = try await start(h)
+        try await h.emit(.transcriptionWindow(try TranscriptWindowLedgerTests().fixture("window-sealed-r6")))
+        try await h.settle { $0.session.lines.count == 1 }
+        let client = try XCTUnwrap(h.clients.all.last)
+        await client.setDrainEvents([.serverError(code: "invalid_window_receipt",
+            message: "语音事件未通过检查。", requestID: nil)])
+        await client.failDrain()
+        await h.session.finish()
+        XCTAssertEqual(h.session.phase, .idle)
+        let record = try await h.store.session(id: id)
+        XCTAssertNotEqual(record?.state, .archived)
+        XCTAssertEqual(h.session.transcriptionStatusText, "字幕收尾尚未确认")
+        XCTAssertEqual(h.session.completionDiagnosticCode, "invalid_window_receipt")
+        _ = try await start(h)
+        XCTAssertNil(h.session.completionDiagnosticCode)
+    }
+
+    func testArchiveFailureCannotClaimSavedAfterBandCloses() async throws {
+        let h = try await makeHarness(revisionWindowEnabled: true)
+        let id = try await start(h)
+        try await h.emit(.transcriptionWindow(try TranscriptWindowLedgerTests().fixture("window-sealed-r6")))
+        try await h.settle { $0.session.lines.count == 1 }
+        try await h.store.execute("CREATE TEMP TRIGGER reject_caption_archive BEFORE UPDATE OF state ON session WHEN NEW.state = 'archived' BEGIN SELECT RAISE(ABORT, 'injected'); END;")
+        await h.session.finish()
+        XCTAssertEqual(h.session.phase, .idle)
+        let record = try await h.store.session(id: id)
+        XCTAssertNotEqual(record?.state, .archived)
+        XCTAssertNotNil(h.coordinator.pendingSeals[id])
+        XCTAssertEqual(h.session.transcriptionStatusText, "字幕收尾尚未确认")
     }
 
     func testReceiverDeadlineCannotSealCaptionAndLateBufferedFinalIsDiscarded() async throws {
