@@ -137,6 +137,14 @@ class VoiceDesignValidation(BaseModel):
     created_at: float = Field(ge=0.0)
     updated_at: float = Field(ge=0.0)
 
+    def has_adverse_human_review(self) -> bool:
+        """Whether an explicit human warning or rejection blocks auto acceptance."""
+
+        return self.identity_status in {"warn", "reject"} or self.naturalness_status in {
+            "warn",
+            "reject",
+        }
+
 
 class VoiceDesignCandidate(BaseModel):
     """Private candidate state; API projections never expose text or paths."""
@@ -219,7 +227,7 @@ class VoiceDesignCandidate(BaseModel):
             and item.status == "pass"
             and (
                 (item.identity_status == "pass" and item.naturalness_status == "pass")
-                or item.automated_acceptance is True
+                or (item.automated_acceptance is True and not item.has_adverse_human_review())
             )
             and item.validation_policy_revision == VOICE_DESIGN_VALIDATION_POLICY_REVISION
             and item.transcript_numbers_match is True

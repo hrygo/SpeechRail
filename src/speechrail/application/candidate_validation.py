@@ -151,6 +151,12 @@ def apply_automated_acceptance(
             "text-fidelity policy for this candidate revision",
             status_code=409,
         )
+    if validation.has_adverse_human_review():
+        raise VoiceDesignActionError(
+            "voice_design_review_mode_conflict",
+            "Automated acceptance cannot override an existing human warning or rejection",
+            status_code=409,
+        )
     now = time.time()
 
     def apply(current: VoiceDesignCandidate) -> VoiceDesignCandidate:
@@ -167,6 +173,12 @@ def apply_automated_acceptance(
             or latest.runtime_fingerprint is None
         ):
             raise VoiceDesignConflictError("validation record changed")
+        if latest.has_adverse_human_review():
+            raise VoiceDesignActionError(
+                "voice_design_review_mode_conflict",
+                "Automated acceptance cannot override an existing human warning or rejection",
+                status_code=409,
+            )
         accepted = latest.model_copy(
             update={
                 "automated_acceptance": True,
@@ -221,14 +233,18 @@ async def validate_candidate(
             "human_review and automated_acceptance are mutually exclusive",
             status_code=422,
         )
+    if automated_acceptance and test_text is not None:
+        raise VoiceDesignActionError(
+            "voice_design_review_mode_conflict",
+            "test_text and automated_acceptance are mutually exclusive",
+            status_code=422,
+        )
     if human_review is not None:
         return apply_human_review(
             repository, candidate, human_review, capability_key=capability_key
         )
     if automated_acceptance:
-        return apply_automated_acceptance(
-            repository, candidate, capability_key=capability_key
-        )
+        return apply_automated_acceptance(repository, candidate, capability_key=capability_key)
 
     normalized_text = (
         normalize_tts_text(test_text)

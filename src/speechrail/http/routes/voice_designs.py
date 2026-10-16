@@ -166,7 +166,7 @@ class VoiceDesignHumanReview(BaseModel):
 
 
 class VoiceDesignValidateRequest(BaseModel):
-    """Run Base new-text validation or attach a human review to its result."""
+    """Run Base validation, attach human review, or accept a passing result."""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -180,8 +180,12 @@ class VoiceDesignValidateRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_acceptance_modes(self) -> Self:
-        if self.automated_acceptance and self.human_review is not None:
-            raise ValueError("automated_acceptance and human_review are mutually exclusive")
+        if self.automated_acceptance and (
+            self.test_text is not None or self.human_review is not None
+        ):
+            raise ValueError(
+                "automated_acceptance cannot be combined with test_text or human_review"
+            )
         return self
 
 
