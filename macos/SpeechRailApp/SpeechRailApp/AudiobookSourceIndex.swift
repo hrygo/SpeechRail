@@ -594,7 +594,10 @@ public struct AudiobookSourceIndex: Sendable, Equatable {
     }
 
     private static func joinParagraphLines(_ text: String) -> String {
-        let standard = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        let standard = text
+            .replacingOccurrences(of: "\u{FFFD}", with: "")
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
         let lines = standard.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         var result = ""
         for line in lines {

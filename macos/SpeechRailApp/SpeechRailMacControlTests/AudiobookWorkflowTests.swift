@@ -2072,4 +2072,114 @@ final class AudiobookWorkflowTests: XCTestCase {
         )
         XCTAssertNil(workflow.errorMessage)
     }
+
+    func testAC13_to_AC15_SilentRoleFoldingDefaultScopeAndLegacyOneClickAutoCast() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let renderer = WorkflowFakeRenderer()
+        renderer.leadVoiceCreationHandler = { req, count in
+            .init(
+                voiceID: "v-archetype-\(count)",
+                voiceName: req.voiceName,
+                voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                modelRevision: String(repeating: "a", count: 40)
+            )
+        }
+        let (workflow, _) = makeWorkflow(renderer: renderer, store: store)
+        let txtURL = tempRoot.appendingPathComponent("ac13_15_test.txt")
+        var lines: [String] = ["第一章 七星鲁王宫"]
+        for i in 1...40 {
+            lines.append("“第\(i)句对白，准备下墓。”")
+        }
+        try Data(lines.joined(separator: "\n").utf8).write(to: txtURL)
+
+        // AC-1.4: Default filter scope is .inCurrentChapter and order matches spec
+        XCTAssertEqual(workflow.castFilterScope, AudiobookWorkflowModel.CastFilterScope.inCurrentChapter)
+        XCTAssertEqual(
+            AudiobookWorkflowModel.CastFilterScope.allCases,
+            [.inCurrentChapter, .leads, .minorEnsemble, .all]
+        )
+
+        await workflow.prepareImport(fileURL: txtURL, encoding: .utf8)
+        await workflow.confirmImport()
+        let bookID = try XCTUnwrap(workflow.selectedBook?.id)
+
+        let chapters = try await store.chapters(for: bookID)
+        let chapter = try XCTUnwrap(chapters.first)
+        let atoms = try await store.atoms(for: bookID, chapterID: chapter.id)
+            .filter { $0.kind != .formatting }
+
+        var characters = try await store.characters(for: bookID)
+        let narrator = try XCTUnwrap(characters.first(where: \.isNarrator))
+
+        // Simulate a legacy unstratified book where 10 roles were all saved with isMajor=true, allowSharedMinorVoice=false
+        var customRoles: [AudiobookCharacter] = []
+        for idx in 1...10 {
+            let role = AudiobookCharacter(
+                bookID: bookID,
+                displayName: "测试人物_\(idx)",
+                isNarrator: false,
+                isMajor: true,
+                allowSharedMinorVoice: false,
+                chapterIDs: [chapter.id]
+            )
+            customRoles.append(role)
+            characters.append(role)
+        }
+        try await store.saveCharacters(bookID: bookID, characters: characters)
+
+        // Role 1 gets 10 lines, Role 2 gets 8 lines, Roles 3..7 get 1 line each, Roles 8..10 get 0 lines (silent mentions)
+        var annotations: [AudiobookAnnotation] = []
+        let winID = UUID()
+        var atomCursor = 0
+        func assignLines(_ count: Int, to roleID: UUID) {
+            for _ in 0..<count where atomCursor < atoms.count {
+                let atom = atoms[atomCursor]
+                atomCursor += 1
+                annotations.append(
+                    AudiobookAnnotation(
+                        bookID: bookID,
+                        chapterID: chapter.id,
+                        windowID: winID,
+                        atomID: atom.id,
+                        sourceRange: atom.sourceRange,
+                        assignment: .assigned(roleID: roleID)
+                    )
+                )
+            }
+        }
+        assignLines(5, to: narrator.id)
+        assignLines(10, to: customRoles[0].id)
+        assignLines(8, to: customRoles[1].id)
+        for idx in 2...6 {
+            assignLines(1, to: customRoles[idx].id)
+        }
+        while atomCursor < atoms.count {
+            assignLines(1, to: narrator.id)
+        }
+        try await store.saveAnnotations(bookID: bookID, annotations: annotations)
+
+        var book = try await store.book(id: bookID)
+        book.analysisState = .allWindowsValidated
+        try await store.updateBook(book)
+
+        await workflow.leaveWorkshop()
+        await workflow.openBook(bookID)
+
+        // AC-1.3: Silent characters (Roles 8..10 with 0 lines) are hidden by default and counted in silentCharacterCount
+        XCTAssertEqual(workflow.silentCharacterCount, 3)
+        XCTAssertFalse(workflow.showSilentCharacters)
+        workflow.castFilterScope = .all
+        XCTAssertEqual(workflow.filteredCharacters.count, 8, "AC-1.3: 默认隐藏 3 个 0 句台词人物，仅展示旁白 + 7 个有台词角色")
+        workflow.showSilentCharacters = true
+        XCTAssertEqual(workflow.filteredCharacters.count, 11, "AC-1.3: 开启显示无对白人物后展示全部 11 个角色")
+        workflow.showSilentCharacters = false
+
+        // AC-1.5: Legacy unstratified book is automatically healed and one-click autoAssignRecommendedVoices() succeeds immediately
+        _ = await workflow.ensureSixArchetypeVoicesForBook(for: bookID, quietBanner: true)
+        _ = await workflow.refreshAvailableVoices()
+        await workflow.autoAssignRecommendedVoices(for: bookID)
+        XCTAssertNil(workflow.errorMessage, "AC-1.5: 一键智能配声不应因历史全员核心角色而报独立音色不足")
+        XCTAssertNil(workflow.pendingCastingPlan, "AC-1.5: 无阻断冲突的智能配声应直接生效，不卡在二次确认弹窗")
+        XCTAssertGreaterThanOrEqual(workflow.voiceBindings.count, 8, "AC-1.5: 所有有台词角色均已自动绑定音色")
+    }
 }

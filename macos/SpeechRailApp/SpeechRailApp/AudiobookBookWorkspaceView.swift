@@ -134,8 +134,11 @@ public struct AudiobookBookWorkspaceView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("speechrail.showDeveloperDetails") private var showAnalysisDeveloperDetails = false
     @State private var isAnalysisDevSectionExpanded = false
+    @State private var isChapterSidebarCollapsed = false
     @State private var chapterRenameTarget: AudiobookChapterRenameTarget?
     @State private var chapterRenameDraft = ""
+    @State private var isAIPrivacyPresented = false
+    @State private var hoveredAtomID: UUID?
 
     public var onImportTXT: () -> Void
 
@@ -172,8 +175,10 @@ public struct AudiobookBookWorkspaceView: View {
                     )
                 }
                 HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
-                    chapterSidebarColumn
-                        .frame(width: SpeechRailDesignTokens.Layout.sessionListWidth)
+                    if !isChapterSidebarCollapsed {
+                        chapterSidebarColumn
+                            .frame(width: SpeechRailDesignTokens.Layout.sidebarIdealWidth)
+                    }
 
                     centerStageColumn
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -189,6 +194,10 @@ public struct AudiobookBookWorkspaceView: View {
                     maxHeight: .infinity,
                     alignment: .topLeading
                 )
+
+                if shouldShowWorkspaceTransport {
+                    workspaceTransportBar
+                }
             }
             .popover(isPresented: $bindableWorkflow.isCastInspectorPresented, arrowEdge: .trailing) {
                 castInspectorColumn
@@ -226,6 +235,17 @@ public struct AudiobookBookWorkspaceView: View {
                 HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.md) {
                     VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                            Button {
+                                withAnimation(SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.panelTransition, reduceMotion: reduceMotion)) {
+                                    isChapterSidebarCollapsed.toggle()
+                                }
+                            } label: {
+                                Image(systemName: "sidebar.left")
+                            }
+                            .speechRailButton(.quiet)
+                            .help(isChapterSidebarCollapsed ? "展开章节目录" : "收起章节目录，扩大原文校对区")
+                            .accessibilityIdentifier("audiobook-toggle-chapter-sidebar")
+
                             Text(book.title)
                                 .font(SpeechRailDesignTokens.Typography.sectionTitle)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
@@ -243,9 +263,26 @@ public struct AudiobookBookWorkspaceView: View {
                                     label: "待确认说话人 \(workflow.totalUnknownSpeakerCount) 处"
                                 )
                             }
+                            if workflow.currentAnalysisConfigSnapshot.isConfigured {
+                                Button {
+                                    isAIPrivacyPresented.toggle()
+                                } label: {
+                                    Label("AI 与隐私", systemImage: "info.circle")
+                                        .labelStyle(.titleAndIcon)
+                                }
+                                .speechRailButton(.quiet)
+                                .popover(isPresented: $isAIPrivacyPresented, arrowEdge: .bottom) {
+                                    aiPrivacyDetails
+                                        .frame(width: SpeechRailDesignTokens.Layout.inspectorColumnWidth)
+                                        .padding(SpeechRailDesignTokens.Spacing.md)
+                                }
+                                .accessibilityIdentifier("audiobook-ai-privacy-disclosure")
+                            }
                         }
 
-                        aiProviderDisclosureLine
+                        if !workflow.currentAnalysisConfigSnapshot.isConfigured {
+                            aiProviderDisclosureLine
+                        }
                     }
 
                     Spacer()
@@ -271,7 +308,7 @@ public struct AudiobookBookWorkspaceView: View {
                         Button {
                             workflow.isCastInspectorPresented.toggle()
                         } label: {
-                            Label("人物与声音（\(workflow.characters.count)）", systemImage: "person.2.wave.2")
+                            Label("人物与声音（\(workflow.activeSpeakingCharacters.count)）", systemImage: "person.2.wave.2")
                         }
                         .speechRailButton(.secondary)
                     }
@@ -308,6 +345,30 @@ public struct AudiobookBookWorkspaceView: View {
     }
 
     @ViewBuilder
+    private var aiProviderCompactPill: some View {
+        let snapshot = workflow.currentAnalysisConfigSnapshot
+        if snapshot.isConfigured {
+            HStack(spacing: 4) {
+                Image(systemName: "sparkles")
+                    .font(.caption2)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Text(snapshot.model)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(SpeechRailDesignTokens.Color.recessedField)
+            )
+            .help("AI 分析服务：\(snapshot.model)（\(snapshot.normalizedBaseURL)）· 仅点击「分析全书」时按窗口发送正文，只返回角色与归属标注。")
+            .accessibilityIdentifier("audiobook-global-analysis-service-summary")
+        }
+    }
+
+    @ViewBuilder
     private var aiProviderDisclosureLine: some View {
         let snapshot = workflow.currentAnalysisConfigSnapshot
         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
@@ -328,6 +389,88 @@ public struct AudiobookBookWorkspaceView: View {
                 }
                 .speechRailButton(.quiet)
             }
+        }
+    }
+
+    private var aiPrivacyDetails: some View {
+        let snapshot = workflow.currentAnalysisConfigSnapshot
+        return VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Text("AI 分析与隐私")
+                .font(SpeechRailDesignTokens.Typography.sectionTitle)
+            Text("服务：\(snapshot.model)")
+                .font(SpeechRailDesignTokens.Typography.body)
+            Text("地址：\(snapshot.normalizedBaseURL)")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .textSelection(.enabled)
+            Text("只有点击“分析全书”或“AI 智能复核”时，所需正文才会按窗口发送给此服务；服务返回角色与说话人归属标注。原始书稿保留在本机。")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var shouldShowWorkspaceTransport: Bool {
+        guard let chapterID = workflow.selectedChapterID else { return false }
+        let activeForChapter = workflow.listeningController?.activePlayback?.chapterID == chapterID
+        return activeForChapter || workflow.chapterReadinessByID[chapterID] == .chapterAudioReady
+    }
+
+    @ViewBuilder
+    private var workspaceTransportBar: some View {
+        if let listening = workflow.listeningController,
+           let bookID = workflow.selectedBook?.id,
+           let chapterID = workflow.selectedChapterID {
+            @Bindable var controller = listening
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                Text(workflow.chapters.first(where: { $0.id == chapterID })?.title ?? "本章播放")
+                    .font(SpeechRailDesignTokens.Typography.caption.weight(.medium))
+                    .lineLimit(1)
+                Text("\(Int(controller.chapterElapsedSeconds) / 60):\(String(format: "%02d", Int(controller.chapterElapsedSeconds) % 60)) / \(Int(controller.chapterTotalDurationSeconds) / 60):\(String(format: "%02d", Int(controller.chapterTotalDurationSeconds) % 60))")
+                    .font(SpeechRailDesignTokens.Typography.technical)
+                    .monospacedDigit()
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+                Button {
+                    Task {
+                        if controller.isPlaying {
+                            await controller.pause()
+                        } else if controller.activePlayback != nil {
+                            try? await controller.resume()
+                        } else {
+                            try? await controller.play(bookID: bookID, chapterID: chapterID)
+                        }
+                    }
+                } label: {
+                    Image(systemName: controller.isPlaying ? "pause.fill" : "play.fill")
+                }
+                .speechRailButton(.primary)
+                .help(controller.isPlaying ? "暂停播放" : "播放本章")
+                Button("−15 秒", systemImage: "gobackward.15") {
+                    Task { try? await controller.skip(seconds: -15) }
+                }
+                .speechRailButton(.quiet)
+                Button("+15 秒", systemImage: "goforward.15") {
+                    Task { try? await controller.skip(seconds: 15) }
+                }
+                .speechRailButton(.quiet)
+                Menu {
+                    ForEach([0.75, 1.0, 1.25, 1.5, 1.75, 2.0], id: \.self) { rate in
+                        Button("\(rate.formatted())×") {
+                            Task { await controller.setRate(Float(rate)) }
+                        }
+                    }
+                } label: {
+                    Text("\(controller.playbackRate, specifier: "%.2g")×")
+                }
+                .speechRailButton(.secondary)
+                .accessibilityLabel("播放速度")
+            }
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+            .background(SpeechRailDesignTokens.Color.recessedField)
+            .clipShape(SpeechRailDesignTokens.Corner.containerShape)
+            .accessibilityIdentifier("audiobook-workspace-mini-transport")
         }
     }
 
@@ -364,7 +507,9 @@ public struct AudiobookBookWorkspaceView: View {
                                             .lineLimit(1)
 
                                         HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                                            chapterReadinessBadge(for: readiness)
+                                            if readiness != .awaitingCastConfirmation {
+                                                chapterReadinessBadge(for: readiness)
+                                            }
                                             if let unknownCount = workflow.unknownCountByChapterID[chapter.id], unknownCount > 0 {
                                                 StatusPill(tone: .attention, label: "待确认 \(unknownCount)")
                                             }
@@ -391,22 +536,6 @@ public struct AudiobookBookWorkspaceView: View {
                     .padding(SpeechRailDesignTokens.Spacing.xs)
                 }
 
-                if workflow.totalUnknownSpeakerCount > 0 {
-                    SessionHairline()
-                    SessionPanelActions {
-                        Button {
-                            Task { await workflow.jumpToNextUnknownSpeaker() }
-                        } label: {
-                            Label(
-                                "快速定位下一处待确认（全书 \(workflow.totalUnknownSpeakerCount) 处）",
-                                systemImage: "scope"
-                            )
-                            .frame(maxWidth: .infinity)
-                        }
-                        .speechRailButton(.secondary)
-                        .accessibilityIdentifier("audiobook-jump-next-unknown-button")
-                    }
-                }
             }
         }
     }
@@ -454,11 +583,13 @@ public struct AudiobookBookWorkspaceView: View {
             .accessibilityIdentifier("audiobook-chapter-organization-menu")
             .help(workflow.chapterStructureEditingStatus)
 
-            Text(workflow.chapterStructureEditingStatus)
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityIdentifier("audiobook-chapter-organization-status")
+            if workflow.canEditChapterStructure {
+                Text(workflow.chapterStructureEditingStatus)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("audiobook-chapter-organization-status")
+            }
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
         .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
@@ -526,9 +657,10 @@ public struct AudiobookBookWorkspaceView: View {
         SessionPanel {
             VStack(alignment: .leading, spacing: 0) {
                 SessionPanelHead(
-                    title: "原文与说话人归属（只读保真原文，AI 不改写一字）",
-                    trailingDetail: "共 \(workflow.chapterAtoms.count) 段 · 本章待确认 \(workflow.unknownAnnotationsInSelectedChapter.count) 处 · 全书待确认 \(workflow.totalUnknownSpeakerCount) 处"
+                    title: "原文与说话人归属",
+                    trailingDetail: "共 \(workflow.chapterAtoms.count) 段 · 本章待确认 \(workflow.unknownAnnotationsInSelectedChapter.count) 处 · 全书 \(workflow.totalUnknownSpeakerCount) 处"
                 )
+                .help("只读保真原文，AI 仅标注说话人归属，不改写一字")
                 SessionHairline()
 
                 if workflow.totalUnknownSpeakerCount > 0 {
@@ -536,7 +668,7 @@ public struct AudiobookBookWorkspaceView: View {
                     SessionHairline()
                 }
 
-                if !workflow.selectedAtomIDs.isEmpty {
+                if workflow.selectedAtomIDs.count > 1 {
                     batchSpeakerAssignmentBar
                     SessionHairline()
                 }
@@ -548,8 +680,9 @@ public struct AudiobookBookWorkspaceView: View {
                     ScrollViewReader { scrollProxy in
                         ScrollView {
                             LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                                ForEach(workflow.displayedChapterAtoms) { atom in
-                                    atomRowView(atom: atom)
+                                ForEach(Array(workflow.displayedChapterAtoms.enumerated()), id: \.element.id) { index, atom in
+                                    let previousAtom = index > 0 ? workflow.displayedChapterAtoms[index - 1] : nil
+                                    atomRowView(atom: atom, previousAtom: previousAtom)
                                         .id(atom.id)
                                 }
                             }
@@ -589,9 +722,10 @@ public struct AudiobookBookWorkspaceView: View {
                 .foregroundStyle(SpeechRailDesignTokens.Color.attention)
 
             let currentIndex = workflow.currentUnknownSpeakerGlobalIndex ?? 1
-            Text("待确认定位：第 \(currentIndex) / \(workflow.totalUnknownSpeakerCount) 处（本章 \(workflow.unknownAnnotationsInSelectedChapter.count) 处）")
-                .font(SpeechRailDesignTokens.Typography.caption)
+            Text("待确认 \(currentIndex)/\(workflow.totalUnknownSpeakerCount)（本章 \(workflow.unknownAnnotationsInSelectedChapter.count) 处）")
+                .font(SpeechRailDesignTokens.Typography.caption.weight(.medium))
                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                .fixedSize(horizontal: true, vertical: false)
 
             Button {
                 Task { await workflow.jumpToPreviousUnknownSpeaker() }
@@ -599,6 +733,7 @@ public struct AudiobookBookWorkspaceView: View {
                 Label("上一处", systemImage: "chevron.up")
             }
             .speechRailButton(.secondary)
+            .fixedSize(horizontal: true, vertical: false)
 
             Button {
                 Task { await workflow.jumpToNextUnknownSpeaker() }
@@ -606,29 +741,33 @@ public struct AudiobookBookWorkspaceView: View {
                 Label("下一处", systemImage: "chevron.down")
             }
             .speechRailButton(.secondary)
+            .fixedSize(horizontal: true, vertical: false)
 
             Button {
                 workflow.showOnlyUnknownAtomsInChapter.toggle()
             } label: {
                 Label(
-                    workflow.showOnlyUnknownAtomsInChapter ? "显示全部段落" : "仅看待确认对白",
+                    workflow.showOnlyUnknownAtomsInChapter ? "显示整章" : "仅看待确认",
                     systemImage: workflow.showOnlyUnknownAtomsInChapter ? "list.bullet" : "line.3.horizontal.decrease.circle"
                 )
             }
             .speechRailButton(workflow.showOnlyUnknownAtomsInChapter ? .primary : .quiet)
+            .fixedSize(horizontal: true, vertical: false)
 
-            Spacer()
+            Spacer(minLength: 4)
 
             Button {
                 Task { await workflow.resolveUnknownSpeakersWithLLM() }
             } label: {
                 Label(
-                    workflow.isResolvingUnknownSpeakers ? "AI 二次复核中…" : "AI 二次复核未确认台词",
+                    workflow.isResolvingUnknownSpeakers ? "AI 复核中…" : "AI 智能复核",
                     systemImage: "sparkles"
                 )
             }
             .speechRailButton(.secondary)
+            .fixedSize(horizontal: true, vertical: false)
             .disabled(workflow.isResolvingUnknownSpeakers || workflow.isAnalyzing)
+            .help("结合整章最新人物名册与上下文，让 AI 复核本章剩余未确认台词")
             .accessibilityIdentifier("audiobook-secondary-resolve-unknown-button")
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
@@ -660,25 +799,53 @@ public struct AudiobookBookWorkspaceView: View {
 
     private var batchSpeakerAssignmentBar: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-            Text("已选 \(workflow.selectedAtomIDs.count) 段原文：")
+            Text("已选 \(workflow.selectedAtomIDs.count) 段：")
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .fixedSize(horizontal: true, vertical: false)
 
-            ForEach(workflow.characters.prefix(4)) { role in
-                Button("归属给「\(role.displayName)」") {
-                    let ids = Array(workflow.selectedAtomIDs)
-                    workflow.selectedAtomIDs.removeAll()
-                    Task { await workflow.assignSpeaker(atomIDs: ids, roleID: role.id) }
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    ForEach(workflow.currentChapterCharacters.prefix(3)) { role in
+                        Button("归属「\(role.displayName)」") {
+                            let ids = Array(workflow.selectedAtomIDs)
+                            workflow.selectedAtomIDs.removeAll()
+                            Task { await workflow.assignSpeaker(atomIDs: ids, roleID: role.id) }
+                        }
+                        .speechRailButton(.secondary)
+                        .fixedSize(horizontal: true, vertical: false)
+                    }
+                    if let narrator = workflow.currentChapterCharacters.first(where: \.isNarrator) {
+                        Button("旁白") {
+                            let ids = Array(workflow.selectedAtomIDs)
+                            workflow.selectedAtomIDs.removeAll()
+                            Task { await workflow.assignSpeaker(atomIDs: ids, roleID: narrator.id) }
+                        }
+                        .speechRailButton(.secondary)
+                        .fixedSize(horizontal: true, vertical: false)
+                    }
+                    if workflow.currentChapterCharacters.count > 3 {
+                        Menu("更多角色…") {
+                            ForEach(workflow.currentChapterCharacters.dropFirst(3).filter { !$0.isNarrator }) { role in
+                                Button(role.displayName) {
+                                    let ids = Array(workflow.selectedAtomIDs)
+                                    workflow.selectedAtomIDs.removeAll()
+                                    Task { await workflow.assignSpeaker(atomIDs: ids, roleID: role.id) }
+                                }
+                            }
+                        }
+                        .speechRailButton(.secondary)
+                    }
                 }
-                .speechRailButton(.secondary)
             }
 
-            Spacer()
+            Spacer(minLength: 4)
 
             Button("取消多选") {
                 workflow.selectedAtomIDs.removeAll()
             }
             .speechRailButton(.quiet)
+            .fixedSize(horizontal: true, vertical: false)
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
         .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
@@ -687,91 +854,107 @@ public struct AudiobookBookWorkspaceView: View {
     }
 
     @ViewBuilder
-    private func atomRowView(atom: AudiobookTextAtom) -> some View {
+    private func atomRowView(atom: AudiobookTextAtom, previousAtom: AudiobookTextAtom?) -> some View {
         let annotation = workflow.chapterAnnotationsByAtomID[atom.id]
         let displayText = workflow.atomTextsByID[atom.id] ?? ""
         let isSelected = workflow.selectedAtomIDs.contains(atom.id)
         let isUnknown = annotation?.assignment.isUnknown == true
         let isFocusedUnknown = isUnknown && (workflow.focusedUnknownAtomID == atom.id)
+        let previousAnnotation = previousAtom.flatMap { workflow.chapterAnnotationsByAtomID[$0.id] }
+        let previousRoleID = previousAnnotation?.assignment.roleID
+        let currentRoleID = annotation?.assignment.roleID
+        let repeatsPreviousSpeaker = currentRoleID != nil
+            && currentRoleID == previousRoleID
+            && previousAnnotation?.assignment.isUnknown != true
+        let isHovered = hoveredAtomID == atom.id
+        let showsSpeakerLabel = !repeatsPreviousSpeaker || isSelected || isFocusedUnknown
         let assignedRole = annotation?.assignment.roleID.flatMap { id in
             workflow.charactersByID[id]
         }
+        let showsHeaderControls = showsSpeakerLabel
+            || isHovered
+            || isSelected
+            || isUnknown
+            || annotation == nil
+            || (assignedRole?.isNarrator == false)
 
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Button {
-                    if isSelected {
-                        workflow.selectedAtomIDs.remove(atom.id)
-                    } else {
-                        workflow.selectedAtomIDs.insert(atom.id)
+            if showsHeaderControls {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Button {
+                        if isSelected {
+                            workflow.selectedAtomIDs.remove(atom.id)
+                        } else {
+                            workflow.selectedAtomIDs.insert(atom.id)
+                        }
+                    } label: {
+                        Image(
+                            systemName: isSelected
+                                ? "checkmark.square.fill"
+                                : "square"
+                        )
+                        .foregroundStyle(
+                            isSelected
+                                ? SpeechRailDesignTokens.Color.rail
+                                : SpeechRailDesignTokens.Color.inkSecondary
+                        )
                     }
-                } label: {
-                    Image(
-                        systemName: isSelected
-                            ? "checkmark.square.fill"
-                            : "square"
-                    )
-                    .foregroundStyle(
-                        isSelected
-                            ? SpeechRailDesignTokens.Color.rail
-                            : SpeechRailDesignTokens.Color.inkSecondary
-                    )
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(isSelected ? "取消选中本段" : "选中本段")
-                .accessibilityValue(isSelected ? "已选" : "未选")
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(isSelected ? "取消选中本段" : "选中本段")
+                    .accessibilityValue(isSelected ? "已选" : "未选")
 
-                if isUnknown {
-                    StatusPill(
-                        tone: .attention,
-                        label: isFocusedUnknown ? "当前定位 · 待确认说话人" : "待确认说话人"
-                    )
-                } else if let role = assignedRole {
-                    AudiobookVoiceTag(
-                        name: role.displayName,
-                        detail: workflow.voiceBindings[role.id]?.voiceID ?? "未配声"
-                    )
-                } else {
-                    StatusPill(tone: .neutral, label: "待分析")
-                }
+                    if isUnknown {
+                        StatusPill(
+                            tone: .attention,
+                            label: isFocusedUnknown ? "当前定位 · 待确认说话人" : "待确认说话人"
+                        )
+                    } else if let role = assignedRole, showsSpeakerLabel || isHovered || isSelected {
+                        AudiobookVoiceTag(
+                            name: role.displayName,
+                            detail: workflow.voiceBindings[role.id]?.voiceID ?? "未配声"
+                        )
+                    } else if annotation == nil {
+                        StatusPill(tone: .neutral, label: "待分析")
+                    }
 
-                let charCount = displayText.isEmpty ? max(1, Int(atom.sourceRange.byteCount / 3)) : displayText.count
-                Text("\(charCount) 字")
-                    .font(SpeechRailDesignTokens.Typography.technical)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    let charCount = displayText.isEmpty ? max(1, Int(atom.sourceRange.byteCount / 3)) : displayText.count
+                    Text("\(charCount) 字")
+                        .font(SpeechRailDesignTokens.Typography.technical)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
 
-                Spacer()
+                    Spacer()
 
-                Menu {
-                    ForEach(workflow.currentChapterCharacters) { role in
-                        Button("指派给：\(role.displayName)") {
-                            if isUnknown {
-                                Task { await workflow.assignSpeakerAndAdvanceToNextUnknown(atomID: atom.id, roleID: role.id) }
-                            } else {
-                                Task { await workflow.assignSpeaker(atomIDs: [atom.id], roleID: role.id) }
+                    Menu {
+                        ForEach(workflow.currentChapterCharacters) { role in
+                            Button("指派给：\(role.displayName)") {
+                                if isUnknown {
+                                    Task { await workflow.assignSpeakerAndAdvanceToNextUnknown(atomID: atom.id, roleID: role.id) }
+                                } else {
+                                    Task { await workflow.assignSpeaker(atomIDs: [atom.id], roleID: role.id) }
+                                }
                             }
                         }
-                    }
-                    if !workflow.remainingBookCharacters.isEmpty {
-                        Divider()
-                        Menu("更多全书角色（\(workflow.remainingBookCharacters.count)）") {
-                            ForEach(workflow.remainingBookCharacters) { role in
-                                Button("指派给：\(role.displayName)") {
-                                    if isUnknown {
-                                        Task { await workflow.assignSpeakerAndAdvanceToNextUnknown(atomID: atom.id, roleID: role.id) }
-                                    } else {
-                                        Task { await workflow.assignSpeaker(atomIDs: [atom.id], roleID: role.id) }
+                        if !workflow.remainingBookCharacters.isEmpty {
+                            Divider()
+                            Menu("更多全书角色（\(workflow.remainingBookCharacters.count)）") {
+                                ForEach(workflow.remainingBookCharacters) { role in
+                                    Button("指派给：\(role.displayName)") {
+                                        if isUnknown {
+                                            Task { await workflow.assignSpeakerAndAdvanceToNextUnknown(atomID: atom.id, roleID: role.id) }
+                                        } else {
+                                            Task { await workflow.assignSpeaker(atomIDs: [atom.id], roleID: role.id) }
+                                        }
                                     }
                                 }
                             }
                         }
+                    } label: {
+                        Label("改派说话人", systemImage: "person.crop.circle")
+                            .font(SpeechRailDesignTokens.Typography.caption)
                     }
-                } label: {
-                    Label("改派说话人", systemImage: "person.crop.circle")
-                        .font(SpeechRailDesignTokens.Typography.caption)
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
                 }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
             }
 
             Text(displayText)
@@ -792,22 +975,37 @@ public struct AudiobookBookWorkspaceView: View {
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.attention)
 
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    VStack(alignment: .leading, spacing: 6) {
                         Text("一键确认并跳至下一处：")
                             .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
 
-                        ForEach(quickRoles) { role in
-                            Button {
-                                Task { await workflow.assignSpeakerAndAdvanceToNextUnknown(atomID: atom.id, roleID: role.id) }
-                            } label: {
-                                if candidateSet.contains(role.id) {
-                                    Label(role.displayName, systemImage: "sparkles")
-                                } else {
-                                    Text(role.displayName)
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                                ForEach(Array(quickRoles.prefix(5).enumerated()), id: \.element.id) { index, role in
+                                    Button {
+                                        Task { await workflow.assignSpeakerAndAdvanceToNextUnknown(atomID: atom.id, roleID: role.id) }
+                                    } label: {
+                                        if candidateSet.contains(role.id) {
+                                            Label("\(index + 1)  \(role.displayName)", systemImage: "sparkles")
+                                                .lineLimit(1)
+                                                .fixedSize(horizontal: true, vertical: false)
+                                        } else {
+                                            Text("\(index + 1)  \(role.displayName)")
+                                                .lineLimit(1)
+                                                .fixedSize(horizontal: true, vertical: false)
+                                        }
+                                    }
+                                    .speechRailButton(candidateSet.contains(role.id) ? .primary : .secondary)
+                                    .fixedSize(horizontal: true, vertical: false)
+                                    .keyboardShortcut(
+                                        KeyEquivalent(Character(String(index + 1))),
+                                        modifiers: []
+                                    )
+                                    .disabled(!isFocusedUnknown)
+                                    .help("归属给「\(role.displayName)」并自动跳至下一处待确认")
                                 }
                             }
-                            .speechRailButton(candidateSet.contains(role.id) ? .primary : .secondary)
                         }
                     }
                 }
@@ -819,26 +1017,29 @@ public struct AudiobookBookWorkspaceView: View {
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
         .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
         .background(
-            SpeechRailDesignTokens.Corner.nestedShape
-                .fill(
-                    isFocusedUnknown
-                        ? SpeechRailDesignTokens.Color.attention.opacity(0.14)
-                        : (isSelected
-                            ? SpeechRailDesignTokens.Color.rail.opacity(0.10)
-                            : (isUnknown ? SpeechRailDesignTokens.Color.attention.opacity(0.06) : SpeechRailDesignTokens.Color.field))
-                )
+            isFocusedUnknown
+                ? SpeechRailDesignTokens.Color.attention.opacity(0.14)
+                : (isSelected ? SpeechRailDesignTokens.Color.rail.opacity(0.10) : Color.clear)
         )
-        .overlay(
-            SpeechRailDesignTokens.Corner.nestedShape
-                .stroke(
-                    isFocusedUnknown
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(
+                    isUnknown
                         ? SpeechRailDesignTokens.Color.attention
                         : (isSelected
-                            ? SpeechRailDesignTokens.Color.rail.opacity(0.4)
-                            : (isUnknown ? SpeechRailDesignTokens.Color.attention.opacity(0.3) : SpeechRailDesignTokens.Color.separator.opacity(0.5))),
-                    lineWidth: isFocusedUnknown ? 2 : 1
+                            ? SpeechRailDesignTokens.Color.rail
+                            : (assignedRole == nil ? SpeechRailDesignTokens.Color.separator : SpeechRailDesignTokens.Color.ready))
                 )
-        )
+                .frame(width: SpeechRailDesignTokens.Spacing.tiny)
+                .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
+        }
+        .onHover { hovering in
+            if hovering {
+                hoveredAtomID = atom.id
+            } else if hoveredAtomID == atom.id {
+                hoveredAtomID = nil
+            }
+        }
         .disabled(workflow.isEditingChapterLayout)
     }
 
@@ -1131,15 +1332,17 @@ public struct AudiobookBookWorkspaceView: View {
             bookID: workflow.selectedBook?.id,
             availableVoices: allAvailableVoices
         )
-        let leadCount = workflow.characters.filter { $0.isNarrator || !$0.allowSharedMinorVoice }.count
-        let minorCount = max(0, workflow.characters.count - leadCount)
+        let leadCount = workflow.leadCharacterCount
+        let minorCount = workflow.minorCharacterCount
+        let silentCount = workflow.silentCharacterCount
+        let activeCount = workflow.activeSpeakingCharacters.count
         let conflictCount = workflow.totalSceneVoiceConflictCount
 
         return SessionPanel {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(alignment: .center, spacing: 0) {
                     SessionPanelHead(
-                        title: "人物与声音（\(workflow.characters.count)）",
+                        title: "人物与声音（\(activeCount)）",
                         trailingDetail: "核心 \(leadCount) · 配角 \(minorCount)"
                     )
                     Spacer(minLength: 0)
@@ -1156,20 +1359,30 @@ public struct AudiobookBookWorkspaceView: View {
                 SessionHairline()
 
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    if conflictCount > 0 || !missingArchetypes.isEmpty {
-                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                            if conflictCount > 0 {
-                                StatusPill(tone: .attention, label: "同场撞音 \(conflictCount) 处")
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        if conflictCount > 0 {
+                            StatusPill(tone: .attention, label: "同场撞音 \(conflictCount) 处")
+                        }
+                        if !missingArchetypes.isEmpty {
+                            StatusPill(
+                                tone: .neutral,
+                                label: "六类群像已备 \(6 - missingArchetypes.count)/6"
+                            )
+                        } else {
+                            StatusPill(tone: .healthy, label: "六类群像音色已齐备")
+                        }
+                        Spacer(minLength: 0)
+                        if silentCount > 0 {
+                            Button {
+                                workflow.showSilentCharacters.toggle()
+                            } label: {
+                                Text(workflow.showSilentCharacters ? "隐藏 \(silentCount) 个无对白人物" : "已折叠 \(silentCount) 个无对白人物")
+                                    .font(SpeechRailDesignTokens.Typography.caption)
+                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                             }
-                            if !missingArchetypes.isEmpty {
-                                StatusPill(
-                                    tone: .neutral,
-                                    label: "六类群像已备 \(6 - missingArchetypes.count)/6"
-                                )
-                            } else {
-                                StatusPill(tone: .healthy, label: "六类群像音色已齐备")
-                            }
-                            Spacer()
+                            .buttonStyle(.plain)
+                            .help("仅在旁白中提及、全书无直接开口台词（0 句）的人物默认折叠，无需分配独立声音")
+                            .accessibilityIdentifier("audiobook-cast-toggle-silent-characters")
                         }
                     }
 
@@ -1267,13 +1480,14 @@ public struct AudiobookBookWorkspaceView: View {
                     _ = await workflow.ensureSixArchetypeVoicesForBook(quietBanner: true)
                     _ = await workflow.createExclusiveVoicesForLeadCharacters(quietBanner: true)
                     _ = await workflow.refreshAvailableVoices()
-                    await workflow.autoAssignRecommendedVoices()
+                    await workflow.autoAssignRecommendedVoices(consentsToSharedMinorVoices: true)
                 }
             } label: {
-                Label("一键智能配声", systemImage: "wand.and.stars")
+                Label("智能配声（配角可共享）", systemImage: "wand.and.stars")
             }
             .speechRailButton(.primary)
             .disabled(workflow.isCreatingLeadExclusiveVoices)
+            .help("同意配角与群像角色共享相近声线；涉及同场角色撞音时仍需检查并单独确认。")
             .accessibilityIdentifier("audiobook-smart-assign-voices-button")
         }
     }
@@ -1294,7 +1508,7 @@ public struct AudiobookBookWorkspaceView: View {
                     primaryCastingActionButton
                 }
 
-                if let plan = workflow.pendingCastingPlan {
+                if let plan = workflow.pendingCastingPlan, !plan.isApplicable {
                     AudiobookCastingReview(workflow: workflow).id(plan.inputDigest)
                 }
             }
@@ -1337,6 +1551,19 @@ public struct AudiobookBookWorkspaceView: View {
                 workflow.isShowingCastMergeSheet = true
             } label: {
                 Label("合并/拆分角色…", systemImage: "arrow.triangle.merge")
+            }
+
+            if workflow.silentCharacterCount > 0 {
+                Button {
+                    workflow.showSilentCharacters.toggle()
+                } label: {
+                    Label(
+                        workflow.showSilentCharacters
+                            ? "隐藏 0 句无对白人物（\(workflow.silentCharacterCount)）"
+                            : "显示 0 句无对白人物（\(workflow.silentCharacterCount)）",
+                        systemImage: workflow.showSilentCharacters ? "eye.slash" : "eye"
+                    )
+                }
             }
 
             Divider()
@@ -1437,12 +1664,9 @@ public struct AudiobookBookWorkspaceView: View {
 
                             StatusPill(
                                 tone: (tier == .narrator || tier == .lead) ? .healthy : .neutral,
-                                label: tier.badgeTitle
-                            )
-
-                            StatusPill(
-                                tone: .neutral,
-                                label: archetype.shortBadgeTitle
+                                label: tier == .narrator
+                                    ? "旁白"
+                                    : (tier == .lead ? "主角 · \(archetype.shortBadgeTitle)" : archetype.shortBadgeTitle)
                             )
 
                             if binding != nil {
@@ -1803,9 +2027,9 @@ public struct AudiobookBookWorkspaceView: View {
     private func chapterReadinessBadge(for state: AudiobookChapterReadinessState) -> StatusPill {
         switch state {
         case .awaitingGlobalAnalysis:
-            StatusPill(tone: .neutral, label: "待全书分析")
+            StatusPill(tone: .neutral, label: "待分析")
         case .awaitingCastConfirmation:
-            StatusPill(tone: .neutral, label: "待确认配声")
+            StatusPill(tone: .neutral, label: "待配声")
         case .blockedByUnknownSpeakers:
             StatusPill(tone: .attention, label: "待确认说话人")
         case .readyForProduction:

@@ -133,19 +133,19 @@ public final class AudiobookWorkflowModel {
         }
     }
     public enum CastFilterScope: String, CaseIterable, Equatable, Sendable, Identifiable {
-        case all
-        case leads
         case inCurrentChapter
+        case leads
         case minorEnsemble
+        case all
 
         public var id: String { rawValue }
 
         public var title: String {
             switch self {
-            case .all: return "全部"
-            case .leads: return "核心主角"
             case .inCurrentChapter: return "本章出场"
+            case .leads: return "核心主角"
             case .minorEnsemble: return "配角群像"
+            case .all: return "全部"
             }
         }
     }
@@ -165,7 +165,8 @@ public final class AudiobookWorkflowModel {
     public private(set) var currentChapterCharacters: [AudiobookCharacter] = []
     public private(set) var remainingBookCharacters: [AudiobookCharacter] = []
     public var selectedRoleID: UUID?
-    public var castFilterScope: CastFilterScope = .all
+    public var castFilterScope: CastFilterScope = .inCurrentChapter
+    public var showSilentCharacters: Bool = false
     public private(set) var roleStatsByID: [UUID: AudiobookRoleDialogueStats] = [:] {
         didSet {
             rebuildMinorCharactersByArchetype()
@@ -772,6 +773,7 @@ public final class AudiobookWorkflowModel {
             roleStatsByID = snapshot.roleStatsByID
             characters = snapshot.characters
             voiceBindings = snapshot.voiceBindings
+            await normalizeLegacyUnstratifiedCharactersIfNeeded(bookID: bookID)
             exportRecords = snapshot.exportRecords
             unknownSpeakerProjectionGeneration &+= 1
             applyUnknownSpeakerIndex(snapshot.unknownSpeakers)
@@ -1303,22 +1305,88 @@ public final class AudiobookWorkflowModel {
         }
     }
 
+    /// 当检测到存量已分析书籍因早期版本将全部非旁白角色置为 `isMajor == true && !allowSharedMinorVoice` 时，自动按对白分布修复主次分层，解除配声容量死锁。
+    private func normalizeLegacyUnstratifiedCharactersIfNeeded(
+        bookID: UUID,
+        availableVoiceCount: Int? = nil
+    ) async {
+        guard let store else { return }
+        let loaded: [AudiobookCharacter]
+        let annotations: [AudiobookAnnotation]
+        do {
+            loaded = try await store.characters(for: bookID)
+            annotations = try await store.annotations(for: bookID)
+        } catch {
+            if selectedBook?.id == bookID {
+                errorMessage = "无法读取存量角色分层，已保留原有数据。请重试打开此书。"
+            }
+            return
+        }
+        let nonNarrators = loaded.filter { !$0.isNarrator }
+        guard nonNarrators.count > 6,
+              nonNarrators.allSatisfy({ $0.isMajor && !$0.allowSharedMinorVoice && $0.voicePolicy == nil && $0.manualTier == nil }),
+              !annotations.isEmpty
+        else { return }
+        let effectiveVoiceCount = availableVoiceCount ?? (catalogVoices.isEmpty ? 6 : catalogVoices.count)
+        let stratified = AudiobookCastRegistry.refreshCharacterMajorStatusAndOrder(
+            characters: loaded,
+            annotations: annotations,
+            availableVoiceCount: effectiveVoiceCount
+        )
+        guard stratified != loaded else { return }
+        do {
+            try await store.saveCharacters(bookID: bookID, characters: stratified)
+        } catch {
+            if selectedBook?.id == bookID {
+                errorMessage = "存量角色分层修复未能保存，原有数据仍保留。请重试智能配声。"
+            }
+            return
+        }
+        if selectedBook?.id == bookID {
+            characters = stratified
+        }
+    }
+
     public func autoAssignRecommendedVoices(
         for bookID: UUID? = nil,
-        availableVoices: [SafeVoiceEntry]? = nil
+        availableVoices: [SafeVoiceEntry]? = nil,
+        consentsToSharedMinorVoices: Bool = true
     ) async {
         let targetID = bookID ?? selectedBook?.id
         guard let targetID, let store, let castController else { return }
         do {
             let snapshot = try await dependencies.speechRenderer.fetchEffectiveCapabilities()
+            await normalizeLegacyUnstratifiedCharactersIfNeeded(
+                bookID: targetID,
+                availableVoiceCount: snapshot.voices.filter(\.available).count
+            )
             let catalog = try await voiceCatalogModel.requireFreshSnapshot()
             let plan = try await store.prepareCastingPlan(bookID: targetID, snapshot: snapshot, catalog: catalog)
-            pendingCastingPlan = plan
-            guard plan.isApplicable, plan.requiredAcknowledgements.isEmpty else {
+            guard plan.isApplicable else {
+                pendingCastingPlan = plan
                 errorMessage = (plan.issues.first(where: \.isBlocking) ?? plan.issues.first(where: { $0.severity == .warning }))?.nextAction ?? "请先处理尚未完成的选角。"
                 return
             }
-            try await castController.applyCastingPlan(bookID: targetID, plan: plan, acknowledgedIssueIDs: [])
+            let sharedVoiceConsentIDs = Set(
+                plan.issues
+                    .filter { $0.code == .sharedVoiceConsentRequired }
+                    .map(\.id)
+            )
+            let acknowledgedIssueIDs = consentsToSharedMinorVoices
+                ? plan.requiredAcknowledgements.union(sharedVoiceConsentIDs)
+                : []
+            guard plan.requiredAcknowledgements.isSubset(of: acknowledgedIssueIDs) else {
+                pendingCastingPlan = plan
+                errorMessage = "智能配声建议需要你检查并确认共享音色或同场角色风险后，才会写入。"
+                return
+            }
+            try await castController.applyCastingPlan(
+                bookID: targetID,
+                plan: plan,
+                acknowledgedIssueIDs: acknowledgedIssueIDs
+            )
+            pendingCastingPlan = nil
+            errorMessage = nil
             if selectedBook?.id == targetID {
                 let loadedCharacters = try await store.characters(for: targetID)
                 let loadedBindings = try await store.voiceBindings(for: targetID)
@@ -1333,6 +1401,9 @@ public final class AudiobookWorkflowModel {
                 selectedBook = loadedBook
                 roleStatsByID = stats
                 await refreshChapterReadinessMap(for: targetID)
+                if totalUnknownSpeakerCount == 0 {
+                    _ = await confirmCastAndAudition(switchToProduction: false)
+                }
             }
         } catch { errorMessage = "配声方案未应用，请刷新后重新确认。" }
     }
@@ -1346,9 +1417,45 @@ public final class AudiobookWorkflowModel {
         } catch { errorMessage = "配声方案已失效或仍需确认，请重新推荐。" }
     }
 
+    public func resolvedRoleTier(for role: AudiobookCharacter) -> AudiobookRoleTier {
+        if role.isNarrator { return .narrator }
+        if let manual = role.manualTier { return manual }
+        if let statTier = roleStatsByID[role.id]?.tier { return statTier }
+        return role.allowSharedMinorVoice ? .supporting : (role.isMajor ? .lead : .ensemble)
+    }
+
+    public func isSilentCharacter(_ role: AudiobookCharacter) -> Bool {
+        guard !role.isNarrator else { return false }
+        guard selectedBook?.analysisState == .allWindowsValidated,
+              let stat = roleStatsByID[role.id]
+        else { return false }
+        return stat.dialogueAtomCount == 0
+    }
+
+    public var activeSpeakingCharacters: [AudiobookCharacter] {
+        characters.filter { !isSilentCharacter($0) }
+    }
+
+    public var silentCharacterCount: Int {
+        max(0, characters.count - activeSpeakingCharacters.count)
+    }
+
+    public var leadCharacterCount: Int {
+        activeSpeakingCharacters.filter { role in
+            let tier = resolvedRoleTier(for: role)
+            return tier == .narrator || tier == .lead
+        }.count
+    }
+
+    public var minorCharacterCount: Int {
+        max(0, activeSpeakingCharacters.count - leadCharacterCount)
+    }
+
     private func rebuildMinorCharactersByArchetype() {
         var grouped: [AudiobookVoiceArchetype: [AudiobookCharacter]] = [:]
-        for role in characters where !role.isNarrator && role.allowSharedMinorVoice {
+        for role in characters where !role.isNarrator && !isSilentCharacter(role) {
+            let tier = resolvedRoleTier(for: role)
+            guard role.allowSharedMinorVoice || tier == .supporting || tier == .ensemble else { continue }
             let arch = roleStatsByID[role.id]?.archetype ?? role.inferredVoiceArchetype()
             grouped[arch, default: []].append(role)
         }
@@ -1389,13 +1496,16 @@ public final class AudiobookWorkflowModel {
         }
         let chapterID = selectedChapterID
         let chapterSpeakerIDs = Set(chapterAnnotations.compactMap(\.assignment.roleID))
+        let speakingPool = activeSpeakingCharacters
         var primary: [AudiobookCharacter] = []
         var secondary: [AudiobookCharacter] = []
-        for role in characters {
+        for role in speakingPool {
+            let tier = resolvedRoleTier(for: role)
             let inChapter = role.isNarrator
-                || !role.allowSharedMinorVoice
                 || chapterSpeakerIDs.contains(role.id)
-                || (chapterID.map { role.chapterIDs.contains($0) } == true)
+                || (chapterID.map { roleStatsByID[role.id]?.speakingChapterIDs.contains($0) == true } == true)
+                || (roleStatsByID.isEmpty && chapterID.map { role.chapterIDs.contains($0) } == true)
+                || tier == .lead
             if inChapter && primary.count < 16 {
                 primary.append(role)
             } else {
@@ -1403,8 +1513,8 @@ public final class AudiobookWorkflowModel {
             }
         }
         if primary.isEmpty {
-            primary = Array(characters.prefix(16))
-            secondary = Array(characters.dropFirst(16))
+            primary = Array(speakingPool.prefix(16))
+            secondary = Array(speakingPool.dropFirst(16))
         }
         currentChapterCharacters = primary
         remainingBookCharacters = secondary
@@ -1413,26 +1523,31 @@ public final class AudiobookWorkflowModel {
     // MARK: - Stratified Cast Helpers & Batch Archetype Binding
 
     public var filteredCharacters: [AudiobookCharacter] {
+        let basePool = showSilentCharacters ? characters : activeSpeakingCharacters
         switch castFilterScope {
-        case .all:
-            return characters
-        case .leads:
-            return characters.filter { role in
-                role.isNarrator
-                    || roleStatsByID[role.id]?.tier == .lead
-                    || !role.allowSharedMinorVoice
-            }
         case .inCurrentChapter:
-            guard let chapterID = selectedChapterID else { return characters }
+            guard let chapterID = selectedChapterID else { return basePool }
             let chapterSpeakerIDs = Set(chapterAnnotations.compactMap(\.assignment.roleID))
-            return characters.filter { role in
+            let inChapter = basePool.filter { role in
                 role.isNarrator
                     || chapterSpeakerIDs.contains(role.id)
                     || roleStatsByID[role.id]?.speakingChapterIDs.contains(chapterID) == true
-                    || role.chapterIDs.contains(chapterID)
+                    || (roleStatsByID.isEmpty && role.chapterIDs.contains(chapterID))
+            }
+            return inChapter.isEmpty ? basePool : inChapter
+        case .leads:
+            return basePool.filter { role in
+                let tier = resolvedRoleTier(for: role)
+                return role.isNarrator || tier == .lead
             }
         case .minorEnsemble:
-            return characters.filter { !$0.isNarrator && $0.allowSharedMinorVoice }
+            return basePool.filter { role in
+                guard !role.isNarrator else { return false }
+                let tier = resolvedRoleTier(for: role)
+                return tier == .supporting || tier == .ensemble || role.allowSharedMinorVoice
+            }
+        case .all:
+            return basePool
         }
     }
 

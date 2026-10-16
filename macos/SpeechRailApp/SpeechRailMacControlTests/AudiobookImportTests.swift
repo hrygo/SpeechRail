@@ -77,6 +77,9 @@ final class AudiobookImportTests: XCTestCase {
         let utf8Preview = try AudiobookTXTImporter.prepare(rawData: utf8Data, suggestedTitle: "雾港来信")
         XCTAssertEqual(utf8Preview.detectedEncoding, .utf8)
         XCTAssertEqual(try utf8Preview.sourceIndex.text(in: utf8Preview.sourceIndex.wholeRange), sampleText)
+        XCTAssertFalse(try utf8Preview.sourceIndex.normalizedText(in: utf8Preview.sourceIndex.wholeRange).contains("\u{FFFD}"))
+        XCTAssertEqual(utf8Preview.originalBytes, utf8Data, "显示投影净化不能改动原始输入字节")
+        XCTAssertEqual(utf8Preview.canonicalUTF8, utf8Data, "显示投影净化不能改动规范原文")
 
         // 2. Valid UTF-16 LE with BOM
         var utf16LEData = Data([0xFF, 0xFE])

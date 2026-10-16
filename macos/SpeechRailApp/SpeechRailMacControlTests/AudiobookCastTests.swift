@@ -2996,4 +2996,106 @@ final class AudiobookCastTests: XCTestCase {
         let updatedCh0 = try await store.chapters(for: fixture.bookID).first(where: { $0.id == chapters[0].id })
         XCTAssertNil(updatedCh0?.currentChapterRevisionID, "缺少实际声音身份的候选必须留待复核，不能自动采用")
     }
+
+    @MainActor
+    func testAC11_to_AC12_NewlyExtractedCharactersDefaultToEnsembleAndAutoStratify() throws {
+        let bookID = UUID()
+        let ch1 = UUID()
+        let narrator = AudiobookCharacter(bookID: bookID, displayName: "旁白", isNarrator: true, isMajor: true, allowSharedMinorVoice: false)
+
+        // AC-1.1: Newly extracted characters via applyMergeBatch must default to isMajor == false, allowSharedMinorVoice == true
+        let sampleText = "“这是什么？”“小心脚下。”石碑记载鲁殇王。"
+        let sourceIndex = try AudiobookSourceIndex(utf8: Data(sampleText.utf8))
+        let sampleAtom = AudiobookTextAtom(
+            chapterID: ch1,
+            ordinal: 0,
+            sourceRange: sourceIndex.wholeRange,
+            kind: .body
+        )
+        let outcome = AudiobookCastRegistry.applyMergeBatch(
+            bookID: bookID,
+            existingCharacters: [narrator],
+            batchMentions: [
+                AudiobookExtractionResponse.Mention(surfaceName: "吴邪", aliases: ["我"], evidenceAtomIDs: [sampleAtom.id], voiceTraitEvidence: "青年男声"),
+                AudiobookExtractionResponse.Mention(surfaceName: "三叔", aliases: ["吴三省"], evidenceAtomIDs: [sampleAtom.id], voiceTraitEvidence: "中年男声"),
+                AudiobookExtractionResponse.Mention(surfaceName: "鲁殇王", aliases: [], evidenceAtomIDs: [sampleAtom.id], voiceTraitEvidence: nil),
+            ],
+            mergeGroups: [
+                AudiobookMergeResponse.Group(canonicalName: "吴邪", memberSurfaceNames: ["吴邪"], aliases: ["我"], isCollisionUnresolved: false, evidenceSummary: "青年男声"),
+                AudiobookMergeResponse.Group(canonicalName: "三叔", memberSurfaceNames: ["三叔"], aliases: ["吴三省"], isCollisionUnresolved: false, evidenceSummary: "中年男声"),
+                AudiobookMergeResponse.Group(canonicalName: "鲁殇王", memberSurfaceNames: ["鲁殇王"], aliases: [], isCollisionUnresolved: false, evidenceSummary: nil),
+            ],
+            atomsByID: [sampleAtom.id: sampleAtom],
+            source: sourceIndex
+        )
+        let extractedNonNarrators = outcome.characters.filter { !$0.isNarrator }
+        XCTAssertEqual(extractedNonNarrators.count, 3)
+        for role in extractedNonNarrators {
+            XCTAssertFalse(role.isMajor, "AC-1.1: 新提取角色默认不应标记为 isMajor=true")
+            XCTAssertTrue(role.allowSharedMinorVoice, "AC-1.1: 新提取角色默认应允许共享群像音色")
+        }
+
+        // AC-1.2: 1-line and 0-line characters are excluded from automatic .lead, and automatic .lead count is capped
+        var roles: [AudiobookCharacter] = [narrator]
+        var annotations: [AudiobookAnnotation] = []
+        var offset: Int64 = 0
+        let winID = UUID()
+
+        for idx in 1...12 {
+            // Simulate legacy unstratified characters (isMajor=true, allowSharedMinorVoice=false)
+            let role = AudiobookCharacter(
+                bookID: bookID,
+                displayName: "角色\(idx)",
+                isNarrator: false,
+                isMajor: true,
+                allowSharedMinorVoice: false,
+                chapterIDs: [ch1]
+            )
+            roles.append(role)
+            let lineCount: Int
+            if idx <= 3 {
+                lineCount = 15 - idx * 2 // 13, 11, 9 lines -> core leads
+            } else if idx <= 9 {
+                lineCount = 1 // 1 line -> ensemble, never lead
+            } else {
+                lineCount = 0 // 0 lines -> silent mention
+            }
+            for _ in 0..<lineCount {
+                let range = AudiobookSourceRange(lowerBound: offset, upperBound: offset + 12)
+                offset += 12
+                annotations.append(
+                    AudiobookAnnotation(
+                        bookID: bookID,
+                        chapterID: ch1,
+                        windowID: winID,
+                        atomID: UUID(),
+                        sourceRange: range,
+                        assignment: .assigned(roleID: role.id)
+                    )
+                )
+            }
+        }
+
+        let (_, statsByID, _) = AudiobookCastRegistry.computeRoleDialogueStats(
+            characters: roles,
+            annotations: annotations,
+            availableVoiceCount: 6
+        )
+        let autoLeads = roles.filter { !$0.isNarrator && statsByID[$0.id]?.tier == .lead }
+        XCTAssertLessThanOrEqual(autoLeads.count, 4, "AC-1.2: 6 个可用音色下自动核心主角数不超过 4")
+        for role in roles where !role.isNarrator {
+            let stat = try XCTUnwrap(statsByID[role.id])
+            if stat.dialogueAtomCount <= 1 {
+                XCTAssertEqual(stat.tier, .ensemble, "AC-1.2: 0 句或 1 句台词的角色必须归为群像 (.ensemble)")
+            }
+        }
+
+        let refreshed = AudiobookCastRegistry.refreshCharacterMajorStatusAndOrder(
+            characters: roles,
+            annotations: annotations,
+            availableVoiceCount: 6
+        )
+        let refreshedMajorNonNarrators = refreshed.filter { !$0.isNarrator && $0.isMajor }
+        XCTAssertEqual(refreshedMajorNonNarrators.count, 3, "AC-1.1/1.2: 仅高频主角标为 isMajor=true，低频角色自动标为 allowSharedMinorVoice=true")
+    }
 }

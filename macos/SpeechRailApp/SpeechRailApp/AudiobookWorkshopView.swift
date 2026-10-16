@@ -145,25 +145,25 @@ public struct AudiobookWorkshopView: View {
                     workflow.isShowingExportSheet = true
                 }
                 .accessibilityIdentifier("audiobook-export-toolbar-button")
-            }
+            } else {
+                PageActionButton(
+                    title: "导入 TXT…",
+                    systemImage: "doc.badge.plus",
+                    helpText: "选择本地 TXT 电子书并预览编码与章节边界"
+                ) {
+                    presentOpenTXTPanel()
+                }
+                .accessibilityIdentifier("audiobook-import-txt-button")
 
-            PageActionButton(
-                title: "导入 TXT…",
-                systemImage: "doc.badge.plus",
-                helpText: "选择本地 TXT 电子书并预览编码与章节边界"
-            ) {
-                presentOpenTXTPanel()
+                PageActionButton(
+                    title: "废纸篓（\(workflow.trashedBooks.count)）",
+                    systemImage: "trash",
+                    helpText: "查看或恢复已移入有声书废纸篓的项目"
+                ) {
+                    workflow.isShowingTrashSheet = true
+                }
+                .accessibilityIdentifier("audiobook-trash-button")
             }
-            .accessibilityIdentifier("audiobook-import-txt-button")
-
-            PageActionButton(
-                title: "废纸篓（\(workflow.trashedBooks.count)）",
-                systemImage: "trash",
-                helpText: "查看或恢复已移入有声书废纸篓的项目"
-            ) {
-                workflow.isShowingTrashSheet = true
-            }
-            .accessibilityIdentifier("audiobook-trash-button")
         }
     }
 

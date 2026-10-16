@@ -306,8 +306,8 @@ public enum AudiobookCastRegistry {
                     displayName: canonical,
                     aliases: aliases,
                     isNarrator: false,
-                    isMajor: chapterIDSet.count >= 1,
-                    allowSharedMinorVoice: false,
+                    isMajor: false,
+                    allowSharedMinorVoice: true,
                     evidences: Array(evidences.prefix(16)),
                     firstAppearanceRange: earliestRange,
                     chapterIDs: Array(chapterIDSet)
@@ -499,8 +499,12 @@ public enum AudiobookCastRegistry {
             volume($0.id) == volume($1.id) ? $0.id.uuidString < $1.id.uuidString : volume($0.id) > volume($1.id)
         }
         let total = ranked.reduce(0) { $0 + volume($1.id) }
+        let maxLeadRoles = max(1, min(8, availableVoiceCount > 0 ? max(3, availableVoiceCount - 2) : 6))
         var front = 0, leads: Set<UUID> = []
-        for role in ranked where front < Int(ceil(Double(total) * 0.75)) {
+        for role in ranked where front < Int(ceil(Double(total) * 0.75)) && leads.count < maxLeadRoles {
+            if ranked.count > maxLeadRoles && (counts[role.id] ?? 0) <= 1 && !leads.isEmpty {
+                break
+            }
             leads.insert(role.id); front += volume(role.id)
         }
         var stats: [UUID: AudiobookRoleDialogueStats] = [:]
@@ -524,11 +528,47 @@ public enum AudiobookCastRegistry {
         annotations: [AudiobookAnnotation],
         availableVoiceCount: Int = 8
     ) -> [AudiobookCharacter] {
-        computeRoleDialogueStats(
+        let statsByID = computeRoleDialogueStats(
             characters: characters,
             annotations: annotations,
             availableVoiceCount: availableVoiceCount
-        ).updatedCharacters
+        ).statsByRoleID
+
+        let updated = characters.map { role -> AudiobookCharacter in
+            var copy = role
+            guard !copy.isNarrator else {
+                copy.isMajor = true
+                copy.allowSharedMinorVoice = false
+                return copy
+            }
+            guard copy.manualTier == nil, copy.voicePolicy == nil else {
+                return copy
+            }
+            let tier = statsByID[copy.id]?.tier ?? .ensemble
+            let isLead = (tier == .lead)
+            copy.isMajor = isLead
+            copy.allowSharedMinorVoice = !isLead
+            return copy
+        }
+
+        return updated.sorted { lhs, rhs in
+            if lhs.isNarrator != rhs.isNarrator { return lhs.isNarrator }
+            let tierL = statsByID[lhs.id]?.tier ?? (lhs.isMajor ? .lead : .ensemble)
+            let tierR = statsByID[rhs.id]?.tier ?? (rhs.isMajor ? .lead : .ensemble)
+            func rank(_ tier: AudiobookRoleTier) -> Int {
+                switch tier {
+                case .narrator: return 0
+                case .lead: return 1
+                case .supporting: return 2
+                case .ensemble: return 3
+                }
+            }
+            if rank(tierL) != rank(tierR) { return rank(tierL) < rank(tierR) }
+            let countL = statsByID[lhs.id]?.dialogueAtomCount ?? 0
+            let countR = statsByID[rhs.id]?.dialogueAtomCount ?? 0
+            if countL != countR { return countL > countR }
+            return lhs.displayName.localizedStandardCompare(rhs.displayName) == .orderedAscending
+        }
     }
 
     /// 为全书角色批量计算并注入对比去重后的六维声学画像（AudiobookVoicePersona）。
