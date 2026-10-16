@@ -494,6 +494,28 @@ def run_preflight(
             )
         )
 
+    if settings.diarization_dynamic_enabled:
+        from speechrail.backends.diarization.meeting import read_matching_policy
+        from speechrail.service.diarization_assets import inspect_meeting_dynamic_assets
+
+        directory = settings.diarization_dynamic_model_dir
+        checks.append(_check("meeting_diarization_snapshot",
+            directory is not None and inspect_meeting_dynamic_assets(directory),
+            "meeting diarization requires the complete pinned local artifact"))
+        policy_ok = False
+        if settings.diarization_dynamic_policy_path is not None:
+            try:
+                read_matching_policy(settings.diarization_dynamic_policy_path)
+                policy_ok = True
+            except (OSError, ValueError, TypeError):
+                pass
+        checks.append(_check("meeting_diarization_policy", policy_ok,
+            "meeting diarization requires an explicit calibrated matching policy"))
+        checks.append(_check("meeting_diarization_runtime",
+            settings.diarization_worker_path.is_file()
+            and os.access(settings.diarization_worker_path, os.X_OK),
+            "meeting diarization requires the local protocol-v2 worker"))
+
     # The aligner is a diarization-only asset driven by its own setting:
     # combinations that do not opt into diarization leave it unset (None) and
     # must not fail preflight for its absence.

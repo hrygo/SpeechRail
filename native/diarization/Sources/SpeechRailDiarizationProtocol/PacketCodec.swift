@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 public enum PacketCodecError: Error, Equatable {
     case invalidPacket
@@ -9,6 +10,23 @@ public enum DiarizationPacketCodec {
     public static let protocolVersion = 1
     public static let maxHeaderBytes = 64 * 1024
     public static let maxPayloadBytes = 4 * 1024 * 1024
+
+    public static func nonnegativeInteger(_ value: Any?, maximum: Int = 9_007_199_254_740_991) throws -> Int {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID(),
+              !["f", "d"].contains(String(cString: number.objCType)),
+              number.doubleValue >= 0, number.doubleValue <= Double(maximum) else {
+            throw PacketCodecError.invalidPacket
+        }
+        return number.intValue
+    }
+
+    public static func boolean(_ value: Any?) throws -> Bool {
+        guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else {
+            throw PacketCodecError.invalidPacket
+        }
+        return number.boolValue
+    }
 
     public static func encode(header: [String: Any], payload: Data = Data()) throws -> Data {
         let headerData = try JSONSerialization.data(withJSONObject: header, options: [.sortedKeys])

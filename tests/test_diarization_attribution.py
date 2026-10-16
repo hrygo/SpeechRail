@@ -44,6 +44,40 @@ def test_overlap_is_not_a_probability_distribution() -> None:
     assert support + support == 2.0
 
 
+def test_replacement_clips_a_crossing_frame_without_losing_the_stable_prefix() -> None:
+    ledger = AttributionLedger(accepted_samples=lambda: 30 * 16000, label_mode="meeting_dynamic")
+    ledger.apply(
+        _update(
+            step=1,
+            start=0,
+            end=20 * 16000,
+            frames=(ActivityFrame(SampleSpan(0, 20 * 16000), None, frozenset({4})),),
+            processed=20 * 16000,
+            stable=10 * 16000,
+        )
+    )
+    (first,) = ledger.register(
+        "item", (TextUnit("crossing", 0, 1, SampleSpan(9 * 16000, 11 * 16000)),)
+    )
+    assert first.speaker == "S5" and first.state == "provisional"
+    changed = ledger.apply(
+        _update(
+            step=2,
+            start=10 * 16000,
+            end=30 * 16000,
+            frames=(ActivityFrame(SampleSpan(10 * 16000, 30 * 16000), None, frozenset({4})),),
+            processed=30 * 16000,
+            stable=20 * 16000,
+        )
+    )
+    assert len(changed) == 1
+    assert changed[0].state == "final" and changed[0].speaker == "S5"
+    (before,) = ledger.register(
+        "late-fixed-text", (TextUnit("prefix", 0, 1, SampleSpan(0, 10 * 16000)),)
+    )
+    assert before.speaker == "S5" and before.state == "final"
+
+
 def test_duplicate_activity_step_is_idempotent_but_conflict_fails() -> None:
     ledger = AttributionLedger(accepted_samples=lambda: 1600)
     update = _update(
@@ -180,3 +214,27 @@ def test_session_labels_are_stable_anonymous_a_through_d() -> None:
 
     assert [item.speaker for item in assigned] == ["A", "B", "C", "D"]
     assert all(item.state == "final" for item in assigned)
+
+
+def test_compaction_retains_only_bounded_recent_activity_and_rejects_late_rewrite():
+    from speechrail.domain.audio_timeline import SampleSpan
+    from speechrail.domain.diarization.attribution import AttributionLedger
+    from speechrail.domain.diarization.types import ActivityFrame, ActivityUpdate
+
+    accepted = 7200 * 16000
+    ledger = AttributionLedger(accepted_samples=lambda: accepted)
+    for step in range(720):
+        start, end = step * 160000, (step + 1) * 160000
+        ledger.apply(
+            ActivityUpdate(
+                epoch="long",
+                step_id=step,
+                replace_span=SampleSpan(start, end),
+                frames=(ActivityFrame(SampleSpan(start, end), (0.9, 0.0, 0.0, 0.0), (0,)),),
+                processed_through=end,
+                stable_through=end,
+            )
+        )
+        ledger.compact(max(0, end - 60 * 16000))
+    assert ledger.retained_counts["frames"] <= 6
+    assert ledger.retained_counts["steps"] <= 64

@@ -389,6 +389,19 @@ def asr_operations(asr_capabilities: Mapping[str, Any] | None) -> dict[str, Any]
         "realtime_transcription": {
             "status": "supported" if served else "unsupported",
             "reason": reason,
+            "diarization_backends": facts.get("diarization_backends", {}),
+            "revision_window": {
+                "status": "supported" if served and all(facts.get(key) is True for key in (
+                    "revision_window_enabled", "window_decode_ready", "word_alignment_ready"
+                )) else "unsupported",
+                "reason": None if served and all(facts.get(key) is True for key in (
+                    "revision_window_enabled", "window_decode_ready", "word_alignment_ready"
+                )) else reason or "revision_window_not_ready",
+                "modes": ["revision_window_v1"],
+                "scenes": ["meeting", "caption"],
+                "limits": {"max_decode_ms": 30000, "pcm_budget_bytes": 16777216,
+                    "max_units": 32, "max_event_bytes": 262144},
+            },
             "input": {
                 "formats": [str(value) for value in realtime_formats]
                 if isinstance(realtime_formats, (list, tuple))

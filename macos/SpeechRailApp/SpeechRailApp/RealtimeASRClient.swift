@@ -864,6 +864,8 @@ public actor RealtimeASRClient {
                     "语音服务没有在关闭期限内确认提交。"
                 case .terminalItems:
                     "最后一段语音没有在关闭期限内完成转写。"
+                case .persistence:
+                    "文字已确认，但没有在关闭期限内保存完成。"
                 case .diarization:
                     "说话人归属没有在关闭期限内完成收口。"
                 case .clear:
@@ -889,6 +891,11 @@ public actor RealtimeASRClient {
                 return code
             }
             return nil
+        }
+
+        public var revisionWindowUnavailable: Bool {
+            if case .serverError(let code, _) = self { return code == "unsupported_operation" }
+            return false
         }
     }
 
@@ -975,6 +982,8 @@ public actor RealtimeASRClient {
         case ready(model: String)
         /// `session.updated`：配置生效，可以开始喂 PCM。
         case configured
+        case diarizationConfigured(SpeechRailDiarizationCapacity, serverSessionID: String)
+        case transcriptionWindow(TranscriptWindowEvent)
         /// 官方 append-only partial（内存态）。它是增量，调用点自己累加。
         case partial(itemID: String, delta: String)
         /// 可修订 partial 的最新全文（`speechrail.transcription.hypothesis`）。
@@ -1054,8 +1063,12 @@ public actor RealtimeASRClient {
     private let threshold: Double
     /// 分人开关（每场一次，**首个 PCM 之前**协商，之后改不了）。
     private let diarizationEnabled: Bool
+    private let diarizationBackend: SpeechRailDiarizationBackend?
     /// `session.speechrail.task`（会话层语义标签）。
     private let sessionTask: SpeechRailSessionUpdate.Task
+    private let windowScene: SpeechRailWindowScene?
+    private var protocolWindowLedger: TranscriptWindowLedger?
+    private var protocolWindowBinding: TranscriptWindowLedger.Binding?
     private let asrPolicy: SpeechRailASRPolicy
     private let expectedASRRevision: String?
     /// 当前 caller-owned TTS voice 的 revision。随 voice 一起在连接内更新。
@@ -1121,8 +1134,10 @@ public actor RealtimeASRClient {
         language: String? = nil,
         keywords: [String]? = nil,
         scenePreset: ASRScenePreset = .caption,
+        windowScene: SpeechRailWindowScene? = nil,
         threshold: Double? = nil,
         diarizationEnabled: Bool = false,
+        diarizationBackend: SpeechRailDiarizationBackend? = nil,
         voice: String? = nil,
         apiKey: String? = nil,
         session: URLSession = .shared,
@@ -1150,8 +1165,10 @@ public actor RealtimeASRClient {
         self.prefixPaddingMilliseconds = scenePreset.prefixPaddingMilliseconds
         self.threshold = threshold ?? scenePreset.threshold
         self.diarizationEnabled = diarizationEnabled
+        self.diarizationBackend = diarizationBackend
         self.sessionTask = scenePreset.task
         self.asrPolicy = scenePreset.policy
+        self.windowScene = windowScene
         self.expectedASRRevision = expectedASRRevision
         self.expectedTTSRevision = expectedTTSRevision
         self.expectedVoiceRevision = expectedVoiceRevision
@@ -1185,6 +1202,10 @@ public actor RealtimeASRClient {
         guard self.transport == nil else { return }
         guard !didClose else { throw Failure.closed(closeCode) }
         connectionGeneration = UUID()
+        let windowBinding = TranscriptWindowLedger.Binding(recordID: connectionGeneration.uuidString,
+            connectionID: connectionGeneration, generation: 0)
+        protocolWindowBinding = windowBinding
+        protocolWindowLedger = windowScene == nil ? nil : TranscriptWindowLedger(binding: windowBinding)
         eventState.reset(
             generation: connectionGeneration,
             auxiliaryExpected: diarizationEnabled
@@ -1260,6 +1281,11 @@ public actor RealtimeASRClient {
     /// Wait for the server to retire all preceding input, even when an older
     /// transcript terminal arrives before this barrier or input is already empty.
     public func drainAndClear(timeout: Duration = .seconds(8)) async throws {
+        try await drainAndClear(timeout: timeout, beforeAuxiliary: { _ in })
+    }
+
+    public func drainAndClear(timeout: Duration,
+        beforeAuxiliary: @escaping @Sendable (Int) async throws -> Void) async throws {
         guard expectedDrainCommitEventID == nil else {
             throw Failure.transport("音频会话正在收尾。")
         }
@@ -1277,6 +1303,10 @@ public actor RealtimeASRClient {
                 ])
             }
             try await waitForDeclaredItems(timeout: timeout)
+            let persistedSampleTarget = uploadedSampleCount
+            try await withStageTimeout(stage: .persistence, timeout: timeout) {
+                try await beforeAuxiliary(persistedSampleTarget)
+            }
             if diarizationEnabled {
                 try await withStageTimeout(stage: .diarization, timeout: timeout) {
                     try await self.finishDiarization()
@@ -1448,7 +1478,9 @@ public actor RealtimeASRClient {
                 granularity: diarizationEnabled ? "segment" : nil
             ),
             diarizationEnabled: diarizationEnabled,
-            asrPolicy: asrPolicy,
+            diarizationBackend: diarizationBackend,
+            asrPolicy: windowScene == nil ? asrPolicy : nil,
+            windowScene: windowScene,
             expectedASRRevision: expectedASRRevision
         ).jsonObject
     }
@@ -1602,11 +1634,24 @@ public actor RealtimeASRClient {
                 await rejectProtocolEvent(code: "invalid_server_event")
                 return
             }
+            if let diarizationBackend, diarizationEnabled {
+                guard let session = object["session"] as? [String: Any], let id = session["id"] as? String,
+                      let ext = session["speechrail"] as? [String: Any], let value = ext["diarization"],
+                      let data = try? JSONSerialization.data(withJSONObject: value),
+                      let capacity = try? JSONDecoder().decode(SpeechRailDiarizationCapacity.self, from:data),
+                      capacity.isValid, capacity.enabled, capacity.backend == diarizationBackend else {
+                    await rejectProtocolEvent(code:"invalid_diarization_capability"); return
+                }
+                await emit(.diarizationConfigured(capacity,serverSessionID:id))
+            }
             await emit(.configured)
             if !didClose {
                 configurationAcknowledged = true
             }
         case "conversation.item.input_audio_transcription.delta":
+            guard windowScene == nil else {
+                await rejectProtocolEvent(code: "mixed_transcription_modes"); return
+            }
             let itemID = object["item_id"] as? String ?? ""
             guard !itemID.isEmpty else {
                 await rejectProtocolEvent(code: "invalid_server_event")
@@ -1645,8 +1690,33 @@ public actor RealtimeASRClient {
                 await rejectProtocolEvent(code: "invalid_commit_receipt")
                 return
             }
+            if windowScene != nil {
+                guard let ledger = protocolWindowLedger,
+                      Self.contractInteger(object["window_revision"]) == ledger.revision,
+                      Self.contractInteger(object["sealed_through_sample"]) == ledger.sealedThrough,
+                      Self.contractInteger(object["failed_items_count"]) == ledger.failedItemsCount
+                else { await rejectProtocolEvent(code: "invalid_window_receipt"); return }
+            }
             drainReceiptReceived = true
+        case "speechrail.transcription.window.updated", "speechrail.transcription.window.sealed",
+             "speechrail.transcription.window.failed":
+            guard windowScene != nil, let binding = protocolWindowBinding,
+                  let data = try? JSONSerialization.data(withJSONObject: object),
+                  let event = try? JSONDecoder().decode(TranscriptWindowEvent.self, from: data),
+                  var ledger = protocolWindowLedger else {
+                await rejectProtocolEvent(code: "invalid_transcription_window"); return
+            }
+            let admission = ledger.apply(event, binding: binding)
+            guard admission != .rejected else {
+                await rejectProtocolEvent(code: "invalid_transcription_window"); return
+            }
+            if admission == .duplicate { break }
+            protocolWindowLedger = ledger
+            await emit(.transcriptionWindow(event))
         case "speechrail.transcription.hypothesis":
+            guard windowScene == nil else {
+                await rejectProtocolEvent(code: "mixed_transcription_modes"); return
+            }
             // 官方 `delta` 是可证明的稳定前缀；hypothesis 是**可改写全文**。两者分开解码，
             // 调用点用整段替换而不是追加（契约 §5.1）。
             let itemID = object["utterance_id"] as? String ?? ""
@@ -1745,6 +1815,9 @@ public actor RealtimeASRClient {
             let itemID = object["item_id"] as? String ?? ""
             let transcript = object["transcript"] as? String ?? ""
             guard !itemID.isEmpty else { break }
+            if windowScene != nil && protocolWindowLedger?.matchesTerminal(itemID: itemID, text: transcript) != true {
+                await rejectProtocolEvent(code: "window_terminal_mismatch"); return
+            }
             guard eventState.complete(
                     itemID: itemID,
                     transcript: transcript,
@@ -1759,6 +1832,9 @@ public actor RealtimeASRClient {
             await emit(.completed(itemID: itemID, transcript: transcript))
         case "conversation.item.input_audio_transcription.failed":
             let itemID = object["item_id"] as? String ?? ""
+            if windowScene != nil && protocolWindowLedger?.matchesFailure(itemID:itemID) != true {
+                await rejectProtocolEvent(code:"window_terminal_mismatch"); return
+            }
             guard !itemID.isEmpty,
                   eventState.failText(
                     itemID: itemID,
@@ -2247,6 +2323,15 @@ public actor RealtimeASRClient {
     }
 
     private func acceptsASRPolicyEcho(_ object: [String: Any]) -> Bool {
+        if let windowScene {
+            guard let session = object["session"] as? [String: Any],
+                  let speechrail = session["speechrail"] as? [String: Any], speechrail["asr"] == nil,
+                  let window = speechrail["window"] as? [String: Any],
+                  let data = try? JSONSerialization.data(withJSONObject: window),
+                  let config = try? JSONDecoder().decode(SpeechRailWindowConfiguration.self, from: data)
+            else { return false }
+            return config.scene == windowScene && config.isValid
+        }
         guard let session = object["session"] as? [String: Any],
               let speechrail = session["speechrail"] as? [String: Any],
               let policy = speechrail["asr"] as? [String: Any],

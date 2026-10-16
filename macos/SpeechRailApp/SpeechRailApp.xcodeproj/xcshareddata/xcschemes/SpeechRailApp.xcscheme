@@ -34,8 +34,6 @@
                ReferencedContainer = "container:SpeechRailApp.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
-         <!-- 本机音频的采集服务是 App 内嵌的 XPC service：它的二进制必须先编出来，
-              才能被 App 的 Embed 阶段装进 Contents/XPCServices。 -->
          <BuildActionEntry
             buildForTesting = "YES"
             buildForRunning = "YES"
@@ -57,9 +55,16 @@
       selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
       shouldUseLaunchSchemeArgsEnv = "YES">
+      <TestPlans>
+         <TestPlanReference
+            default = "YES"
+            reference = "container:SpeechRailApp.xctestplan">
+         </TestPlanReference>
+      </TestPlans>
       <Testables>
          <TestableReference
-            skipped = "NO">
+            skipped = "NO"
+            useTestSelectionWhitelist = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "A20000000000000000000005"
@@ -69,7 +74,8 @@
             </BuildableReference>
          </TestableReference>
          <TestableReference
-            skipped = "NO">
+            skipped = "NO"
+            useTestSelectionWhitelist = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "A20000000000000000000006"
@@ -79,12 +85,6 @@
             </BuildableReference>
          </TestableReference>
       </Testables>
-      <TestPlans>
-         <TestPlanReference
-            reference = "container:SpeechRailApp.xctestplan"
-            default = "YES">
-         </TestPlanReference>
-      </TestPlans>
    </TestAction>
    <LaunchAction
       buildConfiguration = "Debug"
@@ -113,14 +113,12 @@
       savedToolIdentifier = ""
       useCustomWorkingDirectory = "NO"
       debugDocumentVersioning = "YES">
-      <BuildableReference
-         BuildableIdentifier = "primary"
-         BlueprintIdentifier = "A20000000000000000000001"
-         BuildableName = "SpeechRail.app"
-         BlueprintName = "SpeechRailApp"
-         ReferencedContainer = "container:SpeechRailApp.xcodeproj">
-      </BuildableReference>
    </ProfileAction>
-   <AnalyzeAction buildConfiguration = "Debug"/>
-   <ArchiveAction buildConfiguration = "Distribution" revealArchiveInOrganizer = "YES"/>
+   <AnalyzeAction
+      buildConfiguration = "Debug">
+   </AnalyzeAction>
+   <ArchiveAction
+      buildConfiguration = "Distribution"
+      revealArchiveInOrganizer = "YES">
+   </ArchiveAction>
 </Scheme>

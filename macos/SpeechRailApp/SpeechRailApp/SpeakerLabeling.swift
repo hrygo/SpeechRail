@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SpeechRailControlKit
 
 // 分人归属的账本。**会议与字幕共用这一个**（`SESSIONS-SPEC` §14.3：同一套会话内匿名标签、
 // 同一处改名、同一套降级话术），所以它既不认识会议也不认识字幕，只认识"归属"这件事。
@@ -48,8 +49,34 @@ public final class SpeakerLabeling {
         }
     }
 
-    /// 服务端固定上限（契约：最多四名匿名说话人）。
-    public static let maxSpeakers = 4
+    public private(set) var maxSpeakers = 4
+    private var scopeBinding: SpeakerScopeBinding?
+
+    public func configureCapacity(_ capacity: SpeechRailDiarizationCapacity, recordID: String,
+        generation: Int, serverSessionID: String, inputEpoch: Int) {
+        guard capacity.isValid, recordID == sessionID, let maximum = capacity.maxSpeakers else { return }
+        maxSpeakers = maximum
+        if capacity.backend != .meetingDynamic { scopeBinding = nil; return }
+        if let scope = scopeBinding, scope.recordID == recordID,
+           scope.connectionGeneration == generation, scope.serverSessionID == serverSessionID,
+           scope.inputEpoch == inputEpoch { return }
+        scopeBinding = SpeakerScopeBinding(recordID:recordID,
+            connectionGeneration:generation,serverSessionID:serverSessionID,inputEpoch:inputEpoch)
+    }
+
+    private func localLabel(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        guard var scope = scopeBinding else { return raw }
+        do {
+            let label = try scope.serverLabel(raw,capacity:maxSpeakers)
+            scopeBinding = scope
+            return label
+        } catch SpeakerScopeBinding.Failure.capacityExceeded {
+            diagnosticCode = "speaker_capacity"
+            note = "已达到本次录音的说话人数上限，新增说话人暂未确认。"
+            return nil
+        } catch { return nil }
+    }
 
     private let coordinator: SessionCoordinator
     private let attachLabel: @MainActor (String, String?) async throws -> Void
@@ -105,6 +132,7 @@ public final class SpeakerLabeling {
     /// 新会话开始：账本归零（**不跨会话**——§14.3 的边界：不做跨会话身份）。
     public func begin(sessionID: String, enabled: Bool) {
         lifecycle = UUID()
+        scopeBinding = nil; maxSpeakers = 4
         self.sessionID = sessionID
         labels = []
         displayNames = [:]
@@ -128,6 +156,7 @@ public final class SpeakerLabeling {
     /// 降级态也不回退：续接不治愈 degraded/unavailable，只是不擦除显示。
     public func beginNewConnection(sessionID: String) {
         lifecycle = UUID()
+        scopeBinding = nil; maxSpeakers = 4
         self.sessionID = sessionID
         lineByUnit = [:]
         unitsByLine = [:]
@@ -177,7 +206,7 @@ public final class SpeakerLabeling {
             if let previous = lineByUnit[unit.segmentUID], previous != lineID { unitsByLine[previous]?.remove(unit.segmentUID) }
             lineByUnit[unit.segmentUID] = lineID
             unitsByLine[lineID, default: []].insert(unit.segmentUID)
-            guard let speaker = unit.speaker, !speaker.isEmpty else { continue }
+            guard let speaker = localLabel(unit.speaker), !speaker.isEmpty else { continue }
             if label == nil { label = speaker }
             observe(label: speaker, ordinal: ordinal)
         }
@@ -210,7 +239,7 @@ public final class SpeakerLabeling {
             lifecycle: lifecycle,
             targets: isEnabled ? units.compactMap { unit in
                 guard let targetLineID = lineID ?? lineByUnit[unit.segmentUID] else { return nil }
-                return AttributionTarget(unitID: unit.segmentUID, lineID: targetLineID, label: unit.speaker)
+                return AttributionTarget(unitID: unit.segmentUID, lineID: targetLineID, label: localLabel(unit.speaker))
             } : []
         )
     }
@@ -354,17 +383,29 @@ public final class SpeakerLabeling {
     /// 与另一个标签合并。两个标签的行都保留可见，正文一个字不动。
     public func merge(label: String, into target: String) async {
         guard label != target else { return }
-        let name = displayNames[target] ?? target
+        let name = displayText(for: target)
         await rename(label: label, to: name)
         mergedInto[label] = target
     }
 
     /// 从某一位拆出若干行（选一段区间）。这是**唯一**会改 `line.speaker_label` 的用户动作。
     ///
-    /// 新标签取一个没用过的字母；四位上限内没有空位时沿用最后一个，不悄悄造第五个。
+    /// 显式目标必须是已有标签；新标签按本段确认的容量分配，满额时保留原归属。
     public func split(lineIDs: [String], to label: String? = nil) async {
         guard !lineIDs.isEmpty, let sessionID else { return }
-        let target = label ?? nextAvailableLabel()
+        if let label, !labels.contains(label) {
+            let legacyLabel = label.utf8.count == 1 && label.utf8.first.map {
+                $0 >= 65 && Int($0 - 65) < min(maxSpeakers,26)
+            } == true
+            guard scopeBinding == nil && legacyLabel else {
+                note = "请选择已有说话人，或使用「拆出」创建新说话人。"
+                return
+            }
+        }
+        guard let target = label ?? nextAvailableLabel() else {
+            note = "本段的说话人数量已达上限，无法继续拆出；原有归属已保留。"
+            return
+        }
         for lineID in lineIDs {
             do {
                 try await coordinator.attachSpeakerLabel(lineID: lineID, label: target)
@@ -390,13 +431,18 @@ public final class SpeakerLabeling {
         }
     }
 
-    private func nextAvailableLabel() -> String {
+    private func nextAvailableLabel() -> String? {
         let used = Set(labels)
-        for code in 0..<Self.maxSpeakers {
+        if var scope = scopeBinding {
+            let label = try? scope.allocateUserLabel(existing:used,capacity:maxSpeakers)
+            scopeBinding = scope
+            return label
+        }
+        for code in 0..<min(maxSpeakers,26) {
             let candidate = String(UnicodeScalar(UInt8(65 + code)))
             if !used.contains(candidate) { return candidate }
         }
-        return labels.last ?? "A"
+        return nil
     }
 
     // MARK: - 呈现
@@ -416,14 +462,31 @@ public final class SpeakerLabeling {
     }
 
     /// 行内 chip 上的那一个词：有显示名给显示名，没有给「说话人 A」。
-    public nonisolated static func chipText(label: String, displayName: String?) -> String {
-        guard let displayName, !displayName.isEmpty else { return "说话人 \(label)" }
+    public nonisolated static func chipText(label: String, displayName: String?, ordinal: Int? = nil) -> String {
+        guard let displayName, !displayName.isEmpty else {
+            if label.first == "d", let tail = label.split(separator:":").last,
+               tail.first == "S" || tail.first == "U", Int(tail.dropFirst()) != nil {
+                return ordinal.map { "说话人 \($0)" } ?? "未命名说话人"
+            }
+            return "说话人 \(label)"
+        }
         return displayName
+    }
+
+    public func displayText(for label: String) -> String {
+        Self.chipText(label:label, displayName:displayNames[label],
+            ordinal:labels.firstIndex(of:label).map { $0 + 1 })
+    }
+
+    public nonisolated static func displayOrdinals(for labels: [String]) -> [String: Int] {
+        var ordinals: [String: Int] = [:]
+        for label in labels where ordinals[label] == nil { ordinals[label] = ordinals.count + 1 }
+        return ordinals
     }
 
     /// 记录库那一行的说话人摘要：「张三、李四」。
     public var summaryText: String? {
         guard !labels.isEmpty else { return nil }
-        return labels.map { Self.chipText(label: $0, displayName: displayNames[$0]) }.joined(separator: "、")
+        return labels.map { displayText(for:$0) }.joined(separator: "、")
     }
 }

@@ -15,6 +15,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from speechrail.runtime.cleanup import join_cleanup
+
 MAX_IPC_PAYLOAD_BYTES = 4 * 1024 * 1024
 _MAX_HEADER_BYTES = 64 * 1024
 _PROTOCOL_VERSION = 1
@@ -68,12 +70,17 @@ class CoreMLWorkerProcess:
 
     executable: Path
     model_path: Path
+    protocol_version: int = _PROTOCOL_VERSION
+    backend: str = "sortformer"
+    policy_path: Path | None = None
+    calibration_policies_path: Path | None = None
     process: asyncio.subprocess.Process | None = None
     _reader: asyncio.StreamReader | None = None
     _writer: asyncio.StreamWriter | None = None
     _lock: asyncio.Lock | None = None
     _stderr_tail: bytearray = field(default_factory=bytearray)
     _stderr_task: asyncio.Task[None] | None = None
+    _close_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         if self.process is not None and self.process.returncode is None:
@@ -82,12 +89,21 @@ class CoreMLWorkerProcess:
             await self.close()
         if not self.executable.is_file() or not self.model_path.is_dir():
             raise RuntimeError("CoreML diarization worker or compiled model is unavailable")
+        self._close_task = None
+        extra: list[str] = []
+        if self.backend == "meeting_dynamic":
+            if self.protocol_version != 2 or self.policy_path is None:
+                raise RuntimeError("dynamic diarization requires explicit protocol and policy")
+            extra = ["--backend", self.backend, "--policy", str(self.policy_path)]
+            if self.calibration_policies_path is not None:
+                extra += ["--calibration-policies", str(self.calibration_policies_path)]
         process = await asyncio.create_subprocess_exec(
             str(self.executable),
             "--model",
             str(self.model_path),
             "--protocol-version",
-            str(_PROTOCOL_VERSION),
+            str(self.protocol_version),
+            *extra,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -104,7 +120,14 @@ class CoreMLWorkerProcess:
             self._drain_stderr(process.stderr), name="coreml-diarization-stderr-drain"
         )
         response, _ = await self.request({"operation": "preflight"})
-        if response.get("ok") is not True:
+        if response.get("ok") is not True or (
+            self.backend == "meeting_dynamic"
+            and (
+                response.get("backend") != self.backend
+                or response.get("sdk_revision") != "5c19d5e12320e22bbfb7a1877b089d2665a69add"
+                or response.get("model_revision") != "7eab74f3463c736418d0eb10296261ae581146c9"
+            )
+        ):
             await self.close()
             raise RuntimeError("CoreML diarization worker preflight failed")
 
@@ -113,7 +136,7 @@ class CoreMLWorkerProcess:
     ) -> tuple[dict[str, object], bytes]:
         if self._writer is None or self._reader is None or self._lock is None:
             raise RuntimeError("CoreML diarization worker is not running")
-        packet_header = {"protocol_version": _PROTOCOL_VERSION, **header}
+        packet_header = {**header, "protocol_version": self.protocol_version}
         packet = encode_message(packet_header, audio)
         try:
             async with self._lock:
@@ -129,7 +152,10 @@ class CoreMLWorkerProcess:
         ) as exc:
             await self._yield_stderr_drain()
             raise RuntimeError(self._failure_summary()) from exc
-        if response.get("protocol_version") != _PROTOCOL_VERSION:
+        if (
+            type(response.get("protocol_version")) is not int
+            or response.get("protocol_version") != self.protocol_version
+        ):
             raise RuntimeError("CoreML diarization IPC protocol mismatch")
         return response, payload
 
@@ -141,7 +167,7 @@ class CoreMLWorkerProcess:
                 self._stderr_tail.extend(chunk)
                 if len(self._stderr_tail) > _STDERR_TAIL_BYTES:
                     del self._stderr_tail[: len(self._stderr_tail) - _STDERR_TAIL_BYTES]
-        except (asyncio.CancelledError, ValueError):
+        except asyncio.CancelledError, ValueError:
             pass
 
     async def _yield_stderr_drain(self) -> None:
@@ -162,6 +188,15 @@ class CoreMLWorkerProcess:
         )
 
     async def close(self) -> None:
+        if self._close_task is None or (
+            self._close_task.done() and self._close_task.exception() is not None
+        ):
+            self._close_task = asyncio.create_task(
+                self._close_once(), name="diarization-worker-close"
+            )
+        await join_cleanup(self._close_task)
+
+    async def _close_once(self) -> None:
         process = self.process
         writer = self._writer
         stderr_task = self._stderr_task
@@ -172,10 +207,11 @@ class CoreMLWorkerProcess:
                 with contextlib.suppress(Exception):
                     writer.write(
                         encode_message(
-                            {"protocol_version": _PROTOCOL_VERSION, "operation": "cancel"}
+                            {"protocol_version": self.protocol_version, "operation": "cancel"}
                         )
                     )
-                    await writer.drain()
+                    async with asyncio.timeout(0.5):
+                        await writer.drain()
                 writer.close()
             if process.returncode is None:
                 try:
@@ -186,18 +222,21 @@ class CoreMLWorkerProcess:
                         await asyncio.wait_for(process.wait(), timeout=2)
                     except TimeoutError:
                         process.kill()
-                        await process.wait()
+                        await asyncio.wait_for(process.wait(), timeout=10)
             if writer is not None:
                 with contextlib.suppress(Exception):
-                    await writer.wait_closed()
+                    async with asyncio.timeout(2):
+                        await writer.wait_closed()
             if stderr_task is not None:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await stderr_task
+                    async with asyncio.timeout(2):
+                        await stderr_task
         finally:
             # The supervisor keeps ownership until the exact child has exited.
             # Only then can a new session acquire a worker lease.
-            self.process = None
-            self._writer = None
-            self._reader = None
-            self._lock = None
-            self._stderr_task = None
+            if process.returncode is not None:
+                self.process = None
+                self._writer = None
+                self._reader = None
+                self._lock = None
+                self._stderr_task = None

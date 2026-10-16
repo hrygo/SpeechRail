@@ -2169,8 +2169,9 @@ public final class AssistantSession {
         // 不许把上一条连接的识别结果、播放账本或终态写进新会话。
         guard connection == connectionToken else { return }
         switch envelope.payload {
-        case .ready, .configured, .attribution, .alignmentFailed, .diarizationDegraded,
-             .diarizationFinished, .auxiliaryIncomplete, .itemRetired:
+        case .ready, .configured, .diarizationConfigured, .transcriptionWindow, .attribution,
+             .alignmentFailed, .diarizationDegraded, .diarizationFinished, .auxiliaryIncomplete,
+             .itemRetired:
             break
         case .partial(let itemID, let delta):
             // M0a：空/纯空白 delta 无副作用：不记 observed、不触发打断、

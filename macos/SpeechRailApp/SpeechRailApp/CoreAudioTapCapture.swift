@@ -154,6 +154,32 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
         case converterUnavailable
         case noBundleIdentifiers
 
+        var diagnosticStage: String {
+            switch self {
+            case .tapFailed: "tap_create"
+            case .aggregateDeviceFailed: "aggregate_create"
+            case .deviceStartFailed: "device_start"
+            case .formatUnavailable: "format"
+            case .converterUnavailable: "converter"
+            case .noBundleIdentifiers: "selection"
+            }
+        }
+
+        var diagnosticError: NSError {
+            let code: Int
+            switch self {
+            case .tapFailed(let status), .aggregateDeviceFailed(let status),
+                    .deviceStartFailed(let status): code = Int(status)
+            case .formatUnavailable: code = 1
+            case .converterUnavailable: code = 2
+            case .noBundleIdentifiers: code = 3
+            }
+            return NSError(domain: "com.speechrail.capture", code: code, userInfo: [
+                NSLocalizedDescriptionKey: errorDescription ?? "本机音频准备失败。",
+                "stage": diagnosticStage,
+            ])
+        }
+
         public var errorDescription: String? {
             switch self {
             case .tapFailed(let status):
@@ -258,7 +284,8 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
             try createAggregateDevice(tapUID: try Self.readTapUID(tapID: createdTap))
             try startIOProc()
         } catch {
-            stop()
+            // Cleanup may itself block in CoreAudio. Do not hide the original
+            // start failure behind it or release the callback owner prematurely.
             throw error
         }
 
@@ -313,7 +340,8 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
             kAudioAggregateDeviceUIDKey: aggregateUID,
             kAudioAggregateDeviceIsPrivateKey: true,
             kAudioAggregateDeviceIsStackedKey: false,
-            // tap 是它的输入流：不自动起，由我们显式 start，免得设备在没人听的时候也在跑。
+            // SDK: nonzero makes AudioDeviceStart wait for a tap's first audio.
+            // Do not add that wait; this helper explicitly owns start/stop.
             kAudioAggregateDeviceTapAutoStartKey: false,
             kAudioAggregateDeviceTapListKey: [
                 [

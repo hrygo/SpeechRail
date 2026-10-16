@@ -77,3 +77,140 @@ public enum CaptureHelperInterfaces {
         return interface
     }
 }
+
+struct CaptureStartTimeout: LocalizedError {
+    var errorDescription: String? {
+        "本机音频准备超时，尚未开始记录。请重试；若仍失败，请查看系统录音权限与音频设备。"
+    }
+}
+
+/// XPC replies, cancellation and a deadline compete for exactly one outcome.
+/// Cancellation can arrive before the continuation is attached.
+final class CaptureStartContinuation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var result: Result<Void, Error>?
+
+    func attach(_ continuation: CheckedContinuation<Void, Error>) {
+        lock.lock()
+        if let result {
+            lock.unlock()
+            continuation.resume(with: result)
+        } else {
+            self.continuation = continuation
+            lock.unlock()
+        }
+    }
+
+    func resume(returning value: Void) { complete(.success(value)) }
+    func resume(throwing error: Error) { complete(.failure(error)) }
+
+    private func complete(_ value: Result<Void, Error>) {
+        lock.lock()
+        guard result == nil else { lock.unlock(); return }
+        result = value
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(with: value)
+    }
+
+    static func wait(
+        timeout: Duration = .seconds(45),
+        start: (CaptureStartContinuation) -> Void
+    ) async throws {
+        let once = CaptureStartContinuation()
+        let timer = Task {
+            do {
+                try await Task.sleep(for: timeout)
+                once.resume(throwing: CaptureStartTimeout())
+            } catch { /* Successful start or cancellation owns the outcome. */ }
+        }
+        defer { timer.cancel() }
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                once.attach(continuation)
+                if Task.isCancelled { once.resume(throwing: CancellationError()) }
+                else { start(once) }
+            }
+        } onCancel: {
+            once.resume(throwing: CancellationError())
+        }
+    }
+}
+
+/// The helper's watchdog runs outside its possibly blocked CoreAudio queue.
+final class CaptureOperationGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var claimed = false
+
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !claimed else { return false }
+        claimed = true
+        return true
+    }
+}
+
+/// Connection acceptance may race with queued starts or old invalidation
+/// callbacks. An old connection can clean up only the capture it owns.
+final class CaptureConnectionOwnership: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: UUID?
+    private var active: UUID?
+    private var activeConnectionValid = false
+
+    func attach() -> UUID {
+        lock.lock()
+        defer { lock.unlock() }
+        let owner = UUID()
+        current = owner
+        return owner
+    }
+
+    func isCurrent(_ owner: UUID) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return current == owner
+    }
+
+    /// A live owner must stop or invalidate before a different connection can
+    /// start. Replacing a live stream would trigger its automatic reconnect.
+    func acceptStart(_ owner: UUID) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return current == owner && (active == nil || active == owner || !activeConnectionValid)
+    }
+
+    func activate(_ owner: UUID) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard current == owner,
+              active == nil || active == owner || !activeConnectionValid else { return false }
+        active = owner
+        activeConnectionValid = true
+        return true
+    }
+
+    func invalidate(_ owner: UUID) {
+        lock.lock()
+        defer { lock.unlock() }
+        if current == owner { current = nil }
+        if active == owner { activeConnectionValid = false }
+    }
+
+    func ownsCapture(_ owner: UUID) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return active == owner
+    }
+
+    // The serial capture lifecycle calls this only after releasing its capture.
+    func clearActive() {
+        lock.lock()
+        active = nil
+        activeConnectionValid = false
+        lock.unlock()
+    }
+}

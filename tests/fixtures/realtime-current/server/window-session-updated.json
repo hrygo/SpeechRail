@@ -1,0 +1,47 @@
+{
+  "type": "session.updated",
+  "session": {
+    "id": "sess-window",
+    "type": "transcription",
+    "audio": {
+      "input": {
+        "format": {
+          "type": "audio/pcm",
+          "rate": 24000
+        },
+        "transcription": {
+          "model": "speechrail/qwen3-asr-1.7b"
+        },
+        "turn_detection": null
+      }
+    },
+    "speechrail": {
+      "task": "caption",
+      "tts": {
+        "enabled": false
+      },
+      "alignment": {
+        "enabled": false
+      },
+      "diarization": {
+        "enabled": false
+      },
+      "window": {
+        "mode": "revision_window_v1",
+        "scene": "caption",
+        "policy": {
+          "preview_interval_ms": 500,
+          "owned_ms": 4000,
+          "review_grace_ms": 8000,
+          "left_context_ms": 2000,
+          "max_decode_ms": 14000,
+          "pcm_budget_bytes": 16777216,
+          "finalization_budget_ms": 5000
+        }
+      }
+    }
+  },
+  "event_id": "evt-window-response",
+  "session_id": "sess-window",
+  "sequence": 0
+}

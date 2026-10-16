@@ -31,12 +31,16 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         makeRealtimeClient: (@Sendable (MeetingRealtimeClientConfiguration) -> any MeetingRealtimeClient)? = nil,
         drainTimeout: Duration = .seconds(12),
         receiverGateForFirst: ConnectGate? = nil,
-        archiveDelay: Duration = .zero
+        archiveDelay: Duration = .zero,
+        revisionWindowEnabled: Bool = false,
+        dynamicDiarizationEnabled: Bool = false
     ) async throws -> Harness {
         let harness = try await Harness.make(
             saveLine: saveLine, attachSpeakerLabel: attachSpeakerLabel,
             configuration: configuration, makeRealtimeClient: makeRealtimeClient,
-            drainTimeout: drainTimeout, receiverGateForFirst: receiverGateForFirst, archiveDelay: archiveDelay
+            drainTimeout: drainTimeout, receiverGateForFirst: receiverGateForFirst, archiveDelay: archiveDelay,
+            revisionWindowEnabled:revisionWindowEnabled,
+            dynamicDiarizationEnabled:dynamicDiarizationEnabled
         )
         self.harness = harness
         return harness
@@ -255,6 +259,88 @@ final class MeetingSessionLifecycleTests: XCTestCase {
     /// 建两条连接（第一条带分人被拒，第二条不带分人成功），库里记
     /// `unavailable` + 一句人话，正文照常落库。用户开关不被改写，
     /// 下一场照样按开关请求分人。
+    func testWindowUnavailableFallsBackBeforeAudioAndKeepsDiarization() async throws {
+        let h = try await makeHarness(revisionWindowEnabled:true)
+        let preferences = SessionPreferences(defaults:UserDefaults(suiteName:UUID().uuidString)!)
+        preferences.meetingDiarizationEnabled = true
+        h.session.preferences = { preferences }
+        h.clients.failFirstDiarizedConnect(RealtimeASRClient.Failure.serverError(
+            code:"unsupported_operation",message:"revision window unavailable"))
+        await h.clients.openGate()
+        await h.session.start(selection:MeetingAudioSelection(usesMicrophone:true))
+        try await h.settle { $0.phase == .recording }
+        XCTAssertEqual(h.clients.madeConfigurations.count,2)
+        XCTAssertEqual(h.clients.madeConfigurations.map(\.windowScene),[.meeting,nil])
+        XCTAssertTrue(h.clients.madeConfigurations.allSatisfy(\.diarizationEnabled))
+        XCTAssertNotNil(h.session.transcriptionStatusText)
+        XCTAssertNil(h.session.windowCapture)
+    }
+
+    func testExperimentalDiarizationDoesNotReplaceExistingBackendByDefault() async throws {
+        let h = try await makeHarness()
+        let preferences = SessionPreferences(defaults:UserDefaults(suiteName:UUID().uuidString)!)
+        preferences.meetingDiarizationEnabled = true
+        h.session.preferences = { preferences }
+        await h.clients.openGate()
+        await h.session.start(selection:MeetingAudioSelection(usesMicrophone:true))
+        try await h.settle { $0.phase == .recording }
+        XCTAssertTrue(h.clients.madeConfigurations[0].diarizationEnabled)
+        XCTAssertNil(h.clients.madeConfigurations[0].diarizationBackend)
+    }
+
+    func testWindowSealWithoutPreviewPersistsOnceAndDrainsBeforeArchive() async throws {
+        let h = try await makeHarness(revisionWindowEnabled:true)
+        let id = try await startRecording(h)
+        let client = try XCTUnwrap(h.clients.all.last)
+        await client.finishEventsOnClose()
+        let sealed = try TranscriptWindowLedgerTests().fixture("window-sealed-r6")
+        try await h.emit(.transcriptionWindow(sealed))
+        try await h.emit(.transcriptionWindow(try TranscriptWindowLedgerTests().fixture("window-sealed-replay")))
+        try await h.emit(.completed(itemID:"item-1",transcript:sealed.finalUnits![0].text))
+        try await h.settle { $0.session.lines.count == 1 }
+        let savedBeforeFinish = try await h.store.lines(sessionID:id)
+        XCTAssertEqual(savedBeforeFinish.count,1)
+        await h.session.finishAndSummarize()
+        XCTAssertEqual(h.session.windowCapture?.queue.savedThrough,96000)
+        let savedAfterFinish = try await h.store.lines(sessionID:id)
+        XCTAssertEqual(savedAfterFinish.count,1)
+        XCTAssertNil(h.coordinator.captureCompletionFailure(recordID:id))
+    }
+
+    func testWindowStoreFailureRemainsRecoverableAndCannotArchiveAsSaved() async throws {
+        let h = try await makeHarness(revisionWindowEnabled:true)
+        let id = try await startRecording(h)
+        let client = try XCTUnwrap(h.clients.all.last)
+        await client.finishEventsOnClose()
+        try await h.store.execute("CREATE TEMP TRIGGER reject_window BEFORE INSERT ON line WHEN NEW.status = 'final' BEGIN SELECT RAISE(ABORT,'injected'); END;")
+        try await h.emit(.transcriptionWindow(try TranscriptWindowLedgerTests().fixture("window-sealed-r6")))
+        try await h.settle { $0.session.windowCapture?.queue.failure != nil }
+        await h.session.finishAndSummarize()
+        XCTAssertNotEqual(h.session.phase,.archived)
+        XCTAssertEqual(h.session.transcriptionStatusText,"部分内容未完成")
+        XCTAssertFalse(h.session.windowCapture?.recoveryCommands.isEmpty ?? true)
+        try await h.store.execute("DROP TRIGGER reject_window;")
+        let retried = await h.session.retryPendingSaves(recordID:id)
+        XCTAssertTrue(retried)
+        let savedAfterRetry = try await h.store.lines(sessionID:id)
+        XCTAssertEqual(savedAfterRetry.count,1)
+    }
+
+    func testDynamicBackendRequiresItsOwnOptInAndNeverSubstitutesFourSlots() async throws {
+        let h = try await makeHarness(dynamicDiarizationEnabled:true)
+        let preferences = SessionPreferences(defaults:UserDefaults(suiteName:UUID().uuidString)!)
+        preferences.meetingDiarizationEnabled = true
+        h.session.preferences = { preferences }
+        h.clients.failFirstDiarizedConnect(RealtimeASRClient.Failure.serverError(
+            code:"diarization_not_available",message:"not certified"))
+        await h.clients.openGate()
+        await h.session.start(selection:MeetingAudioSelection(usesMicrophone:true))
+        try await h.settle { $0.phase == .recording }
+        XCTAssertEqual(h.clients.madeConfigurations.map(\.diarizationBackend),[.meetingDynamic,nil])
+        XCTAssertEqual(h.clients.madeConfigurations.map(\.diarizationEnabled),[true,false])
+        XCTAssertEqual(h.session.labeling.state,.unavailable)
+    }
+
     func testDiarizationUnavailableFallsBackAndKeepsRecording() async throws {
         let h = try await makeHarness()
         let suite = "meeting-diarization-unavailable-\(UUID().uuidString)"
@@ -1415,7 +1501,9 @@ extension MeetingSessionLifecycleTests {
             makeRealtimeClient: (@Sendable (MeetingRealtimeClientConfiguration) -> any MeetingRealtimeClient)? = nil,
             drainTimeout: Duration = .seconds(12),
             receiverGateForFirst: ConnectGate? = nil,
-            archiveDelay: Duration = .zero
+            archiveDelay: Duration = .zero,
+            revisionWindowEnabled: Bool = false,
+            dynamicDiarizationEnabled: Bool = false
         ) async throws -> Harness {
             let directory = FileManager.default.temporaryDirectory
                 .appendingPathComponent("meeting-lifecycle-\(UUID().uuidString)", isDirectory: true)
@@ -1440,7 +1528,9 @@ extension MeetingSessionLifecycleTests {
                 persistenceConfiguration: configuration,
                 saveLine: saveLine,
                 attachSpeakerLabel: attachSpeakerLabel,
-                drainTimeout: drainTimeout
+                drainTimeout: drainTimeout,
+                revisionWindowEnabled:revisionWindowEnabled,
+                dynamicDiarizationEnabled:dynamicDiarizationEnabled
             )
             let session = MeetingSession(coordinator: coordinator, dependencies: dependencies)
             coordinator.starter = { _ in try await session.beginCapture() }
@@ -2004,6 +2094,7 @@ actor ControllableRealtimeClient: MeetingRealtimeClient {
     private(set) var appendedByteCount = 0
     private(set) var appendedByteCountAtDrain = 0
     private var drainEvents: [RealtimeASRClient.Event] = []
+    private var windowSealedThrough = 0
     private var drainFails = false
     private var appendFails = false
     private var appendGate: ConnectGate?
@@ -2036,6 +2127,9 @@ actor ControllableRealtimeClient: MeetingRealtimeClient {
 
     /// 按真实 wire 顺序投一条服务端事件。
     func emit(_ payload: RealtimeASRClient.Event) async {
+        if case .transcriptionWindow(let window) = payload {
+            windowSealedThrough = window.sealedThroughSample
+        }
         await stream.yield(
             RealtimeEventEnvelope(metadata: RealtimeEventMetadata(), payload: payload)
         )
@@ -2088,6 +2182,9 @@ actor ControllableRealtimeClient: MeetingRealtimeClient {
     func delayDrain(_ delay: Duration) { drainDelay = delay }
 
     func drainAndClear(timeout: Duration) async throws {
+        try await drainAndClear(timeout:timeout,beforeAuxiliary:{ _ in })
+    }
+    func drainAndClear(timeout: Duration, beforeAuxiliary: @escaping @Sendable (Int) async throws -> Void) async throws {
         drainCount += 1
         try await Task.sleep(for: drainDelay)
         appendedByteCountAtDrain = appendedByteCount
@@ -2096,6 +2193,7 @@ actor ControllableRealtimeClient: MeetingRealtimeClient {
         for event in events {
             await emit(event)
         }
+        try await beforeAuxiliary(windowSealedThrough)
         if diarizationDrainFails { throw RealtimeASRClient.Failure.drainTimedOut(.diarization) }
         if drainFails { throw URLError(.timedOut) }
     }

@@ -21,6 +21,7 @@ from speechrail.domain.audio_timeline import RationalResampler
 
 try:
     from .asr_quality import character_error_metrics, punctuation_error_metrics
+    from .asr_window_evidence import ASRWindowEvidence, PublicASRError, WindowEvidenceError
     from .bench_realtime import get
     from .benchmark_http import validate_base_url
     from .benchmark_manifest import load_manifest
@@ -30,6 +31,11 @@ except ImportError:  # pragma: no cover - direct CLI imports
     from asr_quality import (  # type: ignore[no-redef]
         character_error_metrics,
         punctuation_error_metrics,
+    )
+    from asr_window_evidence import (  # type: ignore[no-redef]
+        ASRWindowEvidence,
+        PublicASRError,
+        WindowEvidenceError,
     )
     from bench_realtime import get  # type: ignore[no-redef]
     from benchmark_http import validate_base_url  # type: ignore[no-redef]
@@ -45,7 +51,10 @@ class ASREvidence:
     """Correlate terminals by item and order text by the frozen input range."""
 
     def __init__(
-        self, *, require_boundaries: bool, resource_only: bool = False,
+        self,
+        *,
+        require_boundaries: bool,
+        resource_only: bool = False,
     ) -> None:
         self.resource_only = resource_only
         self.require_boundaries = require_boundaries or resource_only
@@ -62,6 +71,8 @@ class ASREvidence:
 
     def consume(self, event: object, received_at: float) -> None:
         kind = get("type", event)
+        if str(kind).startswith("speechrail.transcription.window."):
+            raise ValueError("revision window events require the window evidence auditor")
         if kind in {"error", "conversation.item.input_audio_transcription.failed"}:
             raise RuntimeError("public ASR request failed")
         if kind == "speechrail.transcription.segment_closed":
@@ -86,8 +97,10 @@ class ASREvidence:
                 # inflated revision statistics.
                 return
             previous = self.previews.get(item, "")
-            text = str(get("text", event) or "") if kind.endswith("hypothesis") else (
-                previous + str(get("delta", event) or "")
+            text = (
+                str(get("text", event) or "")
+                if kind.endswith("hypothesis")
+                else (previous + str(get("delta", event) or ""))
             )
             self.preview_count += 1
             common = 0
@@ -124,7 +137,10 @@ class ASREvidence:
             self.receipt_at = received_at
 
     def score(
-        self, reference: str | None, *, expected_wire_samples: int,
+        self,
+        reference: str | None,
+        *,
+        expected_wire_samples: int,
         effective_max_segment_ms: int | None = None,
         punctuation_reference_text: str | None = None,
         punctuation_reference_kind: str | None = None,
@@ -164,7 +180,8 @@ class ASREvidence:
             "revised_characters": self.revised_characters,
             "sample_coverage_gate": "pass" if self.require_boundaries else "unset",
             "segment_budget_gate": (
-                "pass" if self.require_boundaries and effective_max_segment_ms is not None
+                "pass"
+                if self.require_boundaries and effective_max_segment_ms is not None
                 else "unset"
             ),
         }
@@ -222,18 +239,21 @@ def _session_update(language: str, policy: dict[str, object] | None) -> dict[str
         "type": "session.update",
         "session": {
             "type": "transcription",
-            "audio": {"input": {
-                "format": {"type": "audio/pcm", "rate": 24000},
-                "transcription": {"model": "whisper-1", "language": language},
-                "turn_detection": "manual",
-            }},
+            "audio": {
+                "input": {
+                    "format": {"type": "audio/pcm", "rate": 24000},
+                    "transcription": {"model": "whisper-1", "language": language},
+                    "turn_detection": "manual",
+                }
+            },
             "speechrail": extensions,
         },
     }
 
 
 def _validated_policy_echo(
-    configured: object, requested: dict[str, object],
+    configured: object,
+    requested: dict[str, object],
 ) -> dict[str, object]:
     # Legacy baselines do not request this extension and must remain runnable
     # with their installed runtime. Candidate policies use its own validator.
@@ -244,14 +264,18 @@ def _validated_policy_echo(
     echo = {
         key: get(key, effective)
         for key in (
-            "preview_interval_ms", "max_segment_ms", "effective_max_segment_ms",
-            "finalization", "final_deadline_ms", "rollback_tokens",
+            "preview_interval_ms",
+            "max_segment_ms",
+            "effective_max_segment_ms",
+            "finalization",
+            "final_deadline_ms",
+            "rollback_tokens",
         )
     }
     # Decode the reply with the same strict integer and enum contract as requests.
-    echoed_policy = ASRPolicy.from_mapping({
-        key: value for key, value in echo.items() if key != "effective_max_segment_ms"
-    })
+    echoed_policy = ASRPolicy.from_mapping(
+        {key: value for key, value in echo.items() if key != "effective_max_segment_ms"}
+    )
     if (
         echoed_policy.preview_interval_ms != policy.preview_interval_ms
         or echoed_policy.max_segment_ms != policy.max_segment_ms
@@ -289,10 +313,15 @@ def _observed_policy_echo(configured: object) -> dict[str, object]:
 
 
 def _timing_metrics(
-    evidence: ASREvidence, *, started: float,
-    last_upload_started: float | None, last_upload_completed: float | None,
-    playback_wait_completed: float, committed_at: float,
-    commit_send_completed: float, wire_samples: int,
+    evidence: ASREvidence,
+    *,
+    started: float,
+    last_upload_started: float | None,
+    last_upload_completed: float | None,
+    playback_wait_completed: float,
+    committed_at: float,
+    commit_send_completed: float,
+    wire_samples: int,
 ) -> dict[str, object]:
     """Record client timestamps; signed differences do not imply acoustic latency."""
     if type(wire_samples) is not int or wire_samples <= 0:
@@ -309,29 +338,32 @@ def _timing_metrics(
         "receipt_received": evidence.receipt_at,
     }.items():
         if (
-            isinstance(value, bool) or not isinstance(value, (int, float))
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
             or not math.isfinite(value)
         ):
             raise ValueError("incomplete or invalid ASR timing observations")
         timestamps[name] = float(value)
     ordered = [
-        timestamps[name] for name in (
-            "started", "last_upload_started", "last_upload_completed",
-            "playback_wait_completed", "commit_send_started", "commit_send_completed",
+        timestamps[name]
+        for name in (
+            "started",
+            "last_upload_started",
+            "last_upload_completed",
+            "playback_wait_completed",
+            "commit_send_started",
+            "commit_send_completed",
         )
     ]
     terminal = timestamps["last_terminal_received"]
     receipt = timestamps["receipt_received"]
-    if (
-        ordered != sorted(ordered)
-        or not started <= terminal <= receipt
-        or receipt < committed_at
-    ):
+    if ordered != sorted(ordered) or not started <= terminal <= receipt or receipt < committed_at:
         raise ValueError("invalid ASR timing order")
     preview = evidence.first_preview_at
     if preview is not None:
         if (
-            isinstance(preview, bool) or not isinstance(preview, (int, float))
+            isinstance(preview, bool)
+            or not isinstance(preview, (int, float))
             or not math.isfinite(preview)
         ):
             raise ValueError("invalid ASR timing preview")
@@ -339,10 +371,12 @@ def _timing_metrics(
             raise ValueError("invalid ASR timing order")
     offsets: dict[str, object] = {
         name + "_seconds": value - started
-        for name, value in timestamps.items() if name != "started"
+        for name, value in timestamps.items()
+        if name != "started"
     }
     offsets.update(
-        clock="monotonic", origin="paced_playback_start",
+        clock="monotonic",
+        origin="paced_playback_start",
         nominal_playback_end_seconds=wire_samples / 24000,
         acoustic_speech_end="not_observed",
     )
@@ -357,10 +391,17 @@ def _timing_metrics(
 
 
 def _run_asr(
-    client: OpenAI, wire: bytes, *, language: str, reference: str | None,
-    policy: dict[str, object] | None, resource_only: bool = False,
+    client: OpenAI,
+    wire: bytes,
+    *,
+    language: str,
+    reference: str | None,
+    policy: dict[str, object] | None,
+    resource_only: bool = False,
     punctuation_reference_text: str | None = None,
     punctuation_reference_kind: str | None = None,
+    window_request: dict[str, object] | None = None,
+    annotations: dict[str, Any] | None = None,
 ) -> dict[str, object]:
     if not wire or len(wire) % 2:
         raise ValueError("ASR benchmark requires nonempty PCM16 wire audio")
@@ -378,9 +419,13 @@ def _run_asr(
 
     reader = threading.Thread(target=receive, daemon=True)
     reader.start()
-    evidence = ASREvidence(
-        require_boundaries=policy is not None,
-        resource_only=resource_only,
+    evidence = (
+        ASRWindowEvidence()
+        if window_request is not None
+        else ASREvidence(
+            require_boundaries=policy is not None,
+            resource_only=resource_only,
+        )
     )
 
     def next_event(deadline: float) -> tuple[float, object]:
@@ -388,7 +433,7 @@ def _run_asr(
             if errors:
                 raise RuntimeError("ASR transport ended before its input barrier")
             try:
-                return events.get(timeout=min(.1, max(.001, deadline - time.monotonic())))
+                return events.get(timeout=min(0.1, max(0.001, deadline - time.monotonic())))
             except queue.Empty:
                 continue
         raise TimeoutError("ASR benchmark stage deadline expired")
@@ -398,8 +443,7 @@ def _run_asr(
         while True:
             _, event = next_event(deadline)
             if get("type", event) == "error":
-                code = str(get("code", get("error", event)) or "unknown")[:64]
-                raise RuntimeError(f"ASR configuration rejected: {code}")
+                raise PublicASRError(get("error", event), stage="configuration")
             if get("type", event) == kind:
                 return event
 
@@ -418,9 +462,33 @@ def _run_asr(
 
     try:
         wait_kind("session.created")
-        conn.send(_session_update(language, policy))
+        update = _session_update(language, policy)
+        if window_request is not None:
+            if (
+                policy is not None
+                or set(window_request) != {"mode", "scene"}
+                or (
+                    window_request["mode"] != "revision_window_v1"
+                    or window_request["scene"] not in {"meeting", "caption"}
+                )
+            ):
+                raise ValueError("invalid or mixed window benchmark request")
+            update["session"]["speechrail"]["window"] = window_request
+            update["session"]["speechrail"]["task"] = (
+                "caption" if window_request["scene"] == "caption" else "transcription"
+            )
+        conn.send(update)
         configured = wait_kind("session.updated")
-        if policy is not None:
+        if window_request is not None:
+            effective = get("window", get("speechrail", get("session", configured)))
+            if any(get(key, effective) != value for key, value in window_request.items()):
+                raise ValueError("window benchmark policy echo differs from request")
+            echo = {
+                "mode": get("mode", effective),
+                "scene": get("scene", effective),
+                "policy": get("policy", effective),
+            }
+        elif policy is not None:
             echo = _validated_policy_echo(configured, policy)
         elif resource_only:
             echo = _observed_policy_echo(configured)
@@ -434,7 +502,7 @@ def _run_asr(
             consume_available()
             packet = {
                 "type": "input_audio_buffer.append",
-                "audio": base64.b64encode(wire[offset:offset + 4800]).decode(),
+                "audio": base64.b64encode(wire[offset : offset + 4800]).decode(),
             }
             last_upload_started = time.monotonic()
             conn.send(packet)
@@ -443,7 +511,8 @@ def _run_asr(
         playback_wait_completed = time.monotonic()
         consume_available()
         commit = {
-            "type": "input_audio_buffer.commit", "event_id": "benchmark-final",
+            "type": "input_audio_buffer.commit",
+            "event_id": "benchmark-final",
             "speechrail": {"request_receipt": True},
         }
         committed_at = time.monotonic()
@@ -453,23 +522,45 @@ def _run_asr(
         while evidence.receipt_at is None:
             received_at, event = next_event(deadline)
             evidence.consume(event, received_at)
-        evidence_result = evidence.score(
-            reference, expected_wire_samples=len(wire) // 2,
-            effective_max_segment_ms=(
-                int(echo["effective_max_segment_ms"]) if echo is not None else None
-            ),
-            punctuation_reference_text=punctuation_reference_text,
-            punctuation_reference_kind=punctuation_reference_kind,
+        evidence_result = (
+            evidence.score(
+                reference,
+                expected_wire_samples=len(wire) // 2,
+                language=language,
+                annotations=annotations,
+            )
+            if isinstance(evidence, ASRWindowEvidence)
+            else evidence.score(
+                reference,
+                expected_wire_samples=len(wire) // 2,
+                effective_max_segment_ms=(
+                    int(echo["effective_max_segment_ms"]) if echo is not None else None
+                ),
+                punctuation_reference_text=punctuation_reference_text,
+                punctuation_reference_kind=punctuation_reference_kind,
+            )
+        )
+        timing = (
+            _timing_metrics(
+                evidence,
+                started=started,
+                last_upload_started=last_upload_started,
+                last_upload_completed=last_upload_completed,
+                playback_wait_completed=playback_wait_completed,
+                committed_at=committed_at,
+                commit_send_completed=commit_send_completed,
+                wire_samples=len(wire) // 2,
+            )
+            if evidence.last_terminal_at is not None
+            else {
+                "last_terminal_received": "not_observed",
+                "barrier_seconds": evidence.receipt_at - committed_at,
+                "acoustic_speech_end": "not_observed",
+            }
         )
         result: dict[str, object] = {
             "audio_seconds": len(wire) / 48000,
-            **_timing_metrics(
-                evidence, started=started, last_upload_started=last_upload_started,
-                last_upload_completed=last_upload_completed,
-                playback_wait_completed=playback_wait_completed,
-                committed_at=committed_at, commit_send_completed=commit_send_completed,
-                wire_samples=len(wire) // 2,
-            ),
+            **timing,
             "last_upload_sample_span": {"start": offset // 2, "end": len(wire) // 2},
             "effective_policy": echo,
         }
@@ -487,8 +578,14 @@ def _run_asr(
 
 
 def run_manifest_asr_benchmark(
-    manifest: Path, *, profile: str, output: Path, sessions: int,
-    warmup: bool, app_home: Path | None, base_url: str,
+    manifest: Path,
+    *,
+    profile: str,
+    output: Path,
+    sessions: int,
+    warmup: bool,
+    app_home: Path | None,
+    base_url: str,
     resource_only: bool = False,
     fixture_ids: Sequence[str] | None = None,
 ) -> dict[str, object]:
@@ -500,13 +597,15 @@ def run_manifest_asr_benchmark(
     if manifest_bytes is not None and manifest.read_bytes() != manifest_bytes:
         raise ValueError("ASR manifest changed during fixture selection")
     fixtures = [fixture for fixture in loaded.fixtures if fixture.kind == "asr"]
+    known_fixture_ids = {fixture.id for fixture in fixtures}
     if not fixtures:
         raise ValueError("ASR-only evidence requires at least one ASR fixture")
     selection = None
     if fixture_ids is not None:
         if (
             not isinstance(fixture_ids, Sequence)
-            or isinstance(fixture_ids, (str, bytes)) or not fixture_ids
+            or isinstance(fixture_ids, (str, bytes))
+            or not fixture_ids
             or any(not isinstance(value, str) for value in fixture_ids)
         ):
             raise ValueError("ASR fixture selection must be a nonempty list of IDs")
@@ -526,9 +625,21 @@ def run_manifest_asr_benchmark(
         }
     if not resource_only and any(fixture.reference_text is None for fixture in fixtures):
         raise ValueError("ASR-only evidence requires external human references")
-    policy = json.loads(
-        manifest_bytes if manifest_bytes is not None else manifest.read_text()
-    ).get("asr_policy")
+    metadata = json.loads(manifest_bytes if manifest_bytes is not None else manifest.read_text())
+    policy = metadata.get("asr_policy")
+    window_request = metadata.get("window_request")
+    annotations = metadata.get("human_annotations", {})
+    if not isinstance(annotations, dict) or any(
+        not isinstance(key, str) or not isinstance(value, dict)
+        for key, value in annotations.items()
+    ):
+        raise ValueError("human_annotations must be keyed by fixture ID")
+    if not annotations.keys() <= known_fixture_ids:
+        raise ValueError("human_annotations contains an unknown fixture ID")
+    if annotations and window_request is None:
+        raise ValueError("human_annotations require revision-window evidence")
+    if window_request is not None and not isinstance(window_request, dict):
+        raise ValueError("window_request must be an object")
     if policy is not None and not isinstance(policy, dict):
         raise ValueError("asr_policy must be an object")
     output = validate_output_path(output)
@@ -537,12 +648,18 @@ def run_manifest_asr_benchmark(
         first = fixtures[0]
         wire, _ = _wire_audio(first.path)
         _run_asr(
-            client, wire, language=first.language,
-            reference=first.reference_text, policy=policy, resource_only=resource_only,
+            client,
+            wire,
+            language=first.language,
+            reference=first.reference_text,
+            policy=policy,
+            resource_only=resource_only,
             punctuation_reference_text=first.punctuation_reference_text,
             punctuation_reference_kind=first.punctuation_reference_kind,
+            **({"window_request": window_request} if window_request is not None else {}),
+            **({"annotations": annotations[first.id]} if first.id in annotations else {}),
         )
-    monitor = ProcessResourceMonitor(interval_seconds=.25)
+    monitor = ProcessResourceMonitor(interval_seconds=0.25)
     monitor.start()
     results = []
     failure: Exception | None = None
@@ -551,26 +668,62 @@ def run_manifest_asr_benchmark(
             for fixture in fixtures:
                 wire, _ = _wire_audio(fixture.path)
                 result = _run_asr(
-                    client, wire, language=fixture.language,
-                    reference=fixture.reference_text, policy=policy,
+                    client,
+                    wire,
+                    language=fixture.language,
+                    reference=fixture.reference_text,
+                    policy=policy,
                     resource_only=resource_only,
                     punctuation_reference_text=fixture.punctuation_reference_text,
                     punctuation_reference_kind=fixture.punctuation_reference_kind,
+                    **({"window_request": window_request} if window_request is not None else {}),
+                    **(
+                        {"annotations": annotations[fixture.id]}
+                        if fixture.id in annotations
+                        else {}
+                    ),
                 )
                 if selection is not None:
                     result["wire_pcm_sha256"] = hashlib.sha256(wire).hexdigest()
+                if fixture.reference_text is not None:
+                    result["reference_text_sha256"] = hashlib.sha256(
+                        fixture.reference_text.encode()
+                    ).hexdigest()
+                if fixture.id in annotations:
+                    result["human_annotation_sha256"] = hashlib.sha256(
+                        json.dumps(
+                            annotations[fixture.id],
+                            sort_keys=True,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ).encode()
+                    ).hexdigest()
                 results.append({"id": fixture.id, "repeat": repeat + 1, **result})
     except Exception as exc:
         failure = exc
     finally:
         resources = _normalise_resources(monitor.stop())
     payload = {
-        "schema_version": 2, "tool": "speechrail-bench-realtime-asr",
-        "evidence_mode": "real", "profile": profile,
-        "warmup_completed": warmup, "sessions": results, "resources": resources,
+        "schema_version": 1 if window_request is not None else 2,
+        "tool": "speechrail-asr-window-benchmark"
+        if window_request is not None
+        else "speechrail-bench-realtime-asr",
+        "evidence_mode": "real",
+        "profile": profile,
+        "model_identity": dict(loaded.model_identity),
+        "warmup_completed": warmup,
+        "sessions": results,
+        "resources": resources,
         "measurement_completed": failure is None,
         "failure_kind": type(failure).__name__ if failure is not None else None,
-        "scene_business_gate": "unset", "baseline_comparison_gate": "unset",
+        "failure_code": failure.code
+        if isinstance(failure, (PublicASRError, WindowEvidenceError))
+        else None,
+        "failure_stage": failure.stage
+        if isinstance(failure, (PublicASRError, WindowEvidenceError))
+        else None,
+        "scene_business_gate": "unset",
+        "baseline_comparison_gate": "unset",
         "timing_definitions": {
             "first_preview_seconds": "first preview receive minus paced playback start",
             "last_upload_to_last_terminal_seconds": (

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
+from speechrail.application.asr_window_boundaries import WindowBoundaryReview
 from speechrail.application.realtime_asr import RealtimeAsrOwner, RealtimeAsrPorts
 from speechrail.application.realtime_auxiliary import RealtimeAuxiliaryOwner, RealtimeAuxiliaryPorts
 from speechrail.application.realtime_state import RealtimeConfiguration
@@ -21,6 +22,7 @@ from speechrail.compatibility.openai_realtime import (
     session_updated,
 )
 from speechrail.config.selection import active_model_catalog
+from speechrail.domain.alignment import AlignTextPort
 from speechrail.domain.asr_policy import resolve_effective_max_segment_ms
 from speechrail.runtime.cleanup import join_cleanup
 
@@ -69,7 +71,22 @@ class OpenAIRealtimeSession:
         )
         self._asr_owner = RealtimeAsrOwner(
             ports=RealtimeAsrPorts(
-                services.realtime_asr_factory, services.governor, services.metrics
+                services.realtime_asr_factory,
+                services.governor,
+                services.metrics,
+                services.window_asr_factory,
+                (
+                    lambda decoder: WindowBoundaryReview(
+                        decoder=decoder,
+                        aligner=cast(AlignTextPort, services.text_aligner),
+                        admission=services.alignment_admission,
+                        governor=services.governor,
+                        metrics=services.metrics,
+                    )
+                )
+                if services.text_aligner is not None
+                else None,
+                pcm_budget=services.pcm_budget,
             ),
             settings=self._settings,
             session_id=session_id,
@@ -79,13 +96,17 @@ class OpenAIRealtimeSession:
         )
         self._auxiliary_owner = RealtimeAuxiliaryOwner(
             ports=RealtimeAuxiliaryPorts(
-                aligner=services.text_aligner,
+                aligner=cast(AlignTextPort, services.text_aligner),
                 engine=services.diarization_engine,
                 alignment_admission=services.alignment_admission,
                 diarization_admission=services.diarization_admission,
                 metrics=services.metrics,
                 ready=lambda: services.diarization_ready,
                 status_message=lambda: str(services.diarization_status["message"]),
+                engine_for_backend=services.diarization_engine_for,
+                backend_ready=lambda backend: bool(
+                    services.diarization_backend_status(backend)["ready"]
+                ),
             ),
             settings=self._settings,
             session_id=session_id,
@@ -205,8 +226,13 @@ class OpenAIRealtimeSession:
             "tts_enabled": bool(self._config.get("tts_enabled", False)),
             "alignment_enabled": bool(self._config.get("alignment_enabled", False)),
             "diarization_enabled": bool(self._auxiliary_owner.diarization_enabled),
+            "diarization_backend": self._config.get("diarization_backend"),
+            "diarization_max_speakers": self._services.diarization_backend_status(
+                str(self._config.get("diarization_backend", "sortformer"))
+            )["max_speakers"],
             "endpointing": endpointing if isinstance(endpointing, dict) else None,
             "expected_asr_revision": (expected_asr if isinstance(expected_asr, str) else None),
+            "window_scene": self._config.get("window_scene"),
             "asr_policy": self._asr_owner.policy(),
             "effective_max_segment_ms": self._asr_owner.effective_segment_ms(),
             "request_timeout_ms": int(self._settings.request_timeout_seconds * 1000),
@@ -215,9 +241,22 @@ class OpenAIRealtimeSession:
     async def _update_session(self, event: dict[str, Any]) -> None:
         from speechrail.compatibility.openai_realtime import apply_session_update
 
+        session_request = event.get("session")
+        extension = session_request.get("speechrail") if isinstance(session_request, dict) else None
+        audio = session_request.get("audio") if isinstance(session_request, dict) else None
+        audio_input = audio.get("input") if isinstance(audio, dict) else None
+        nested_extension = audio_input.get("speechrail") if isinstance(audio_input, dict) else None
+        requested_window = any(
+            isinstance(value, dict) and "window" in value for value in (extension, nested_extension)
+        )
         _updated, candidate = apply_session_update(
             event,
             session_id=self._session_id,
+            revision_window_ready=(
+                self._settings.asr_revision_windows_enabled
+                if requested_window
+                else self._services.revision_window_ready
+            ),
             asr_model=self._settings.model_id,
             registered_asr=self._registered_asr,
             current_config=self._config,
@@ -225,10 +264,23 @@ class OpenAIRealtimeSession:
             service_max_segment_ms=(self._settings.max_realtime_buffer_bytes or 8_388_608) // 64,
             capability_max_segment_ms=8_000 if self._auxiliary_owner.diarization_enabled else None,
         )
+        if (
+            candidate.get("window_scene") != self._config.get("window_scene")
+            and self._asr_owner.accepted_samples > 0
+        ):
+            raise RealtimeAdapterError(
+                "invalid_state", "window mode is frozen after the first input"
+            )
         if candidate.get("asr_policy") != self._asr_owner.policy() and self._asr_owner.policy_busy:
             raise RealtimeAdapterError(
                 "invalid_state", "ASR policy cannot change while input is retained"
             )
+        if candidate.get("window_scene") is not None:
+            await self._services.prepare_revision_window()
+            if not self._services.revision_window_ready:
+                raise RealtimeAdapterError(
+                    "unsupported_operation", "revision window dependencies are not ready"
+                )
         # The caller opts in to stateless incremental TTS; SpeechRail never
         # infers an assistant mode.
         if candidate.get("tts_explicit"):
@@ -271,6 +323,12 @@ class OpenAIRealtimeSession:
                     )
 
         requested_diarization = self._auxiliary_owner.diarization_enabled
+        requested_backend = str(candidate.get("diarization_backend", "sortformer"))
+        if self._asr_owner.accepted_samples > 0 and requested_backend != self._config.get(
+            "diarization_backend", "sortformer"
+        ):
+            raise RealtimeAdapterError("invalid_state", "diarization backend is frozen after input")
+        backend_engine = self._services.diarization_engine_for(requested_backend)
         if candidate.get("diarization_explicit"):
             requested_diarization = bool(candidate.get("diarization_enabled", False))
             if requested_diarization != self._auxiliary_owner.diarization_enabled:
@@ -280,11 +338,9 @@ class OpenAIRealtimeSession:
                         "diarization can only be enabled before the first audio",
                     )
                 if requested_diarization and (
-                    not self._services.diarization_ready
-                    or self._services.diarization_engine is None
-                    or not bool(
-                        getattr(self._services.diarization_engine, "supports_stream", False)
-                    )
+                    not self._services.diarization_backend_status(requested_backend)["ready"]
+                    or backend_engine is None
+                    or not bool(getattr(backend_engine, "supports_stream", False))
                     or self._services.text_aligner is None
                 ):
                     raise RealtimeAdapterError(
@@ -310,7 +366,9 @@ class OpenAIRealtimeSession:
         await self._auxiliary_owner.configure(
             alignment=requested_alignment,
             diarization=requested_diarization,
+            backend=requested_backend,
         )
         self._asr_owner.apply_endpointing(endpointing)
+        await self._asr_owner.configure_window(candidate)
         self._protocol_config.replace(candidate)
         await self._send(session_updated(session_id=self._session_id, **self._session_fields()))

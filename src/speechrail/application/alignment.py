@@ -71,6 +71,18 @@ class FixedTextAligner:
         self._client = client
         self._worker_lease = worker_lease
 
+    @property
+    def word_alignment_ready(self) -> bool:
+        identity = getattr(self._client, "identity", None)
+        return (getattr(self._client, "ready", False) is True and isinstance(identity, dict)
+                and "word" in identity.get("granularities", ()))
+
+    async def prepare(self) -> None:
+        async with self._worker_lease() if self._worker_lease else nullcontext():
+            start = getattr(self._client, "start", None)
+            if start is not None:
+                await start()
+
     async def align(self, request: AlignmentRequest) -> AlignmentResult:
         stage = "admission"
         try:

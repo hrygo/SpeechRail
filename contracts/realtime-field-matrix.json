@@ -361,6 +361,166 @@
       "adapter": "TtsAudioWindow, independently of worker transport and caller playback",
       "positive_case": "client_tts_start",
       "reject_case": "missing_tts_audio_window"
+    },
+    {
+      "path": "session.speechrail.window.mode",
+      "validator": "schema:window_request.mode",
+      "task_request": "WindowIdentity/WindowLedger",
+      "adapter": "strict window negotiation and atomic transaction projection",
+      "positive_case": "window_session_update",
+      "reject_case": "window_mixed_policy"
+    },
+    {
+      "path": "session.speechrail.window.scene",
+      "validator": "schema:window_request.scene",
+      "task_request": "WindowIdentity/WindowLedger",
+      "adapter": "strict window negotiation and atomic transaction projection",
+      "positive_case": "window_session_update",
+      "reject_case": null
+    },
+    {
+      "path": "session.speechrail.window.policy",
+      "validator": "schema:window_policy",
+      "task_request": "WindowIdentity/WindowLedger",
+      "adapter": "strict window negotiation and atomic transaction projection",
+      "positive_case": "window_session_updated",
+      "reject_case": null
+    },
+    {
+      "path": "input_epoch",
+      "validator": "schema:server_window_updated.input_epoch",
+      "task_request": "WindowIdentity/WindowLedger",
+      "adapter": "strict window negotiation and atomic transaction projection",
+      "positive_case": "window_updated_r2",
+      "reject_case": "window_bool_epoch"
+    },
+    {
+      "path": "window_id",
+      "validator": "schema:server_window_updated.window_id",
+      "task_request": "WindowIdentity/WindowLedger",
+      "adapter": "strict window negotiation and atomic transaction projection",
+      "positive_case": "window_updated_r2",
+      "reject_case": null
+    },
+    {
+      "path": "window_revision",
+      "validator": "schema:server_window_updated.window_revision",
+      "task_request": "WindowIdentity/WindowLedger",
+      "adapter": "strict window negotiation and atomic transaction projection",
+      "positive_case": "window_updated_r5",
+      "reject_case": null
+    },
+    {
+      "path": "audio_span",
+      "validator": "schema:server_window_updated.audio_span",
+      "task_request": "WindowIdentity/WindowLedger",
+      "adapter": "strict window negotiation and atomic transaction projection",
+      "positive_case": "window_updated_r5",
+      "reject_case": null
+    },
+    {
+      "path": "sealed_through_sample",
+      "validator": "schema:server_window_sealed.sealed_through_sample",
+      "task_request": "WindowIdentity/WindowLedger",
+      "adapter": "strict window negotiation and atomic transaction projection",
+      "positive_case": "window_sealed_r6",
+      "reject_case": null
+    },
+    {
+      "path": "transaction_id",
+      "validator": "schema:server_window_sealed.transaction_id",
+      "task_request": "WindowIdentity/WindowLedger",
+      "adapter": "strict window negotiation and atomic transaction projection",
+      "positive_case": "window_sealed_r6",
+      "reject_case": null
+    },
+    {
+      "path": "closed_span",
+      "validator": "schema:server_window_sealed.closed_span",
+      "task_request": "WindowIdentity/WindowLedger",
+      "adapter": "strict window negotiation and atomic transaction projection",
+      "positive_case": "window_sealed_r6",
+      "reject_case": null
+    },
+    {
+      "path": "final_units",
+      "validator": "schema:server_window_sealed.final_units",
+      "task_request": "WindowIdentity/WindowLedger",
+      "adapter": "strict window negotiation and atomic transaction projection",
+      "positive_case": "window_sealed_r6",
+      "reject_case": null
+    },
+    {
+      "path": "remaining_units",
+      "validator": "schema:server_window_sealed.remaining_units",
+      "task_request": "WindowIdentity/WindowLedger",
+      "adapter": "strict window negotiation and atomic transaction projection",
+      "positive_case": "window_sealed_r6",
+      "reject_case": null
+    },
+    {
+      "path": "coverage",
+      "validator": "schema:server_window_sealed.coverage",
+      "task_request": "WindowIdentity/WindowLedger",
+      "adapter": "strict window negotiation and atomic transaction projection",
+      "positive_case": "window_sealed_r6",
+      "reject_case": null
+    },
+    {
+      "path": "failed_items",
+      "validator": "schema:server_window_failed.failed_items",
+      "task_request": "WindowIdentity/WindowLedger",
+      "adapter": "strict window negotiation and atomic transaction projection",
+      "positive_case": "window_failed_r7",
+      "reject_case": null
+    },
+    {
+      "path": "units[].unit_id",
+      "validator": "schema:window_unit.unit_id",
+      "task_request": "WindowIdentity/WindowLedger",
+      "adapter": "strict window negotiation and atomic transaction projection",
+      "positive_case": "window_updated_r2",
+      "reject_case": null
+    },
+    {
+      "path": "units[].text_revision",
+      "validator": "schema:window_unit.text_revision",
+      "task_request": "WindowIdentity/WindowLedger",
+      "adapter": "strict window negotiation and atomic transaction projection",
+      "positive_case": "window_updated_r2",
+      "reject_case": null
+    },
+    {
+      "path": "units[].owned_span",
+      "validator": "schema:window_unit.owned_span",
+      "task_request": "WindowIdentity/WindowLedger",
+      "adapter": "strict window negotiation and atomic transaction projection",
+      "positive_case": "window_updated_r2",
+      "reject_case": null
+    },
+    {
+      "path": "units[].state",
+      "validator": "schema:window_unit.state",
+      "task_request": "WindowIdentity/WindowLedger",
+      "adapter": "strict window negotiation and atomic transaction projection",
+      "positive_case": "window_updated_r2",
+      "reject_case": null
+    },
+    {
+      "path": "final_units[].review_scope",
+      "validator": "schema:window_final_unit.review_scope",
+      "task_request": "WindowIdentity/WindowLedger",
+      "adapter": "strict window negotiation and atomic transaction projection",
+      "positive_case": "window_sealed_r6",
+      "reject_case": null
+    },
+    {
+      "path": "falling_behind",
+      "validator": "schema:server_window_updated.falling_behind",
+      "task_request": "AsrWindowCoordinator",
+      "adapter": "Caption progress warning with a distinct snapshot revision",
+      "positive_case": "window_updated_r2",
+      "reject_case": null
     }
   ]
 }

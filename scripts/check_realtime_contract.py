@@ -24,11 +24,22 @@ def _load(path: Path) -> dict[str, Any]:
 
 
 def _path_exists(value: object, dotted: str) -> bool:
-    current = value
+    values = [value]
     for component in dotted.split("."):
-        if not isinstance(current, dict) or component not in current:
-            return False
-        current = current[component]
+        array = component.endswith("[]")
+        key = component[:-2] if array else component
+        children = []
+        for current in values:
+            if not isinstance(current, dict) or key not in current:
+                return False
+            child = current[key]
+            if array:
+                if not isinstance(child, list) or not child:
+                    return False
+                children.extend(child)
+            else:
+                children.append(child)
+        values = children
     return True
 
 

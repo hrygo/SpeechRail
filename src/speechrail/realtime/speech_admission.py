@@ -108,6 +108,15 @@ class SpeechAdmission:
         """Exit threshold: an active utterance yields below this probability."""
         return self._stop_threshold
 
+    @property
+    def retained_from_sample(self) -> int:
+        """Earliest sample that may still be admitted, including failed onset."""
+        retained = [sample for sample, _ in self._prefix_ring]
+        retained.extend(sample for sample, _ in self._candidate_frames)
+        if self._leftover_pcm:
+            retained.append(self._leftover_sample_offset)
+        return min(retained, default=self._last_emitted_sample)
+
     def reset(self, *, next_sample: int = 0) -> None:
         """Reset internal buffers and state machine to IDLE."""
         self._prefix_ring.clear()
@@ -249,6 +258,8 @@ class SpeechAdmission:
                 if self._hangover_count >= self._stop_frames:
                     decisions.append(self._close_active(frame_end_sample))
 
+        if self._state in ("IDLE", "CANDIDATE"):
+            self._last_emitted_sample = max(self._last_emitted_sample, frame_end_sample)
         return decisions
 
     def _activate(self, frame: bytes, *, sample_offset: int) -> list[AdmissionDecision]:

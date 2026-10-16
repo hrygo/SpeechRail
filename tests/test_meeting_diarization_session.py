@@ -1,0 +1,174 @@
+"""Rolling activity uses no model or device in deterministic tests."""
+
+import asyncio
+
+import pytest
+
+from speechrail.backends.diarization.meeting import MeetingActivitySession
+from speechrail.domain.diarization.types import DiarizationError
+from speechrail.domain.resource_limits import GovernorLimits
+from speechrail.runtime.resource_governor import ResourceGovernor
+
+
+class Worker:
+    def __init__(self):
+        self.calls = []
+        self.closed = False
+        self.gate = None
+        self.entered = asyncio.Event()
+
+    async def start(self):
+        pass
+
+    async def request(self, header, pcm):
+        self.calls.append((header.copy(), len(pcm)))
+        self.entered.set()
+        if self.gate:
+            await self.gate.wait()
+        end = header["audio_start"] + header["audio_samples"]
+        return {
+            "protocol_version": 2,
+            "backend": "meeting_dynamic",
+            "epoch": header["epoch"],
+            "ok": True,
+            "processed_through": end,
+            "stable_through": end
+            if header["final"]
+            else max(header["previous_stable"], end - 160000),
+            "frames": [{"start": header["previous_stable"], "end": end, "active_slots": [4]}],
+        }, b""
+
+    async def close(self):
+        self.closed = True
+        if self.gate:
+            self.gate.set()
+
+
+@pytest.mark.anyio
+async def test_windows_10_20_30_40_and_one_sample_tail():
+    worker = Worker()
+    governor = ResourceGovernor(GovernorLimits(2, 1, 8), allow_heavy_overlap=False)
+    from speechrail.observability.metrics import Metrics
+
+
+    metrics = Metrics()
+    session = MeetingActivitySession(
+        worker=worker, epoch="epoch", governor=governor, metrics=metrics
+    )
+
+    async def consume():
+        return [u async for u in session.updates()]
+
+    reader = asyncio.create_task(consume())
+    await session.append(start_sample=0, pcm16=bytes(640001 * 2))
+    await session.finish(through_sample=640001)
+    updates = await reader
+    assert [count // 2 for _, count in worker.calls] == [160000, 320000, 480000, 480000, 480000]
+    assert updates[-1].stable_through == 640001
+    assert all(frame.scores is None for u in updates for frame in u.frames)
+    assert worker.closed, "finish must reap the child before acknowledging the barrier"
+    assert session.ring.charged_bytes == 0
+    snapshot = metrics.read_state()
+    assert snapshot.histograms["speechrail_diarization_phase_seconds"]
+    assert snapshot.gauge_total("speechrail_diarization_watermark_lag_samples") == 0
+    await session.cancel()
+    assert session.ring.active_borrows == 0 and worker.closed
+
+
+@pytest.mark.anyio
+async def test_append_does_not_wait_for_model_and_cancel_reaps_before_lease_release():
+    worker = Worker()
+    worker.gate = asyncio.Event()
+    governor = ResourceGovernor(GovernorLimits(2, 1, 8), allow_heavy_overlap=False)
+    session = MeetingActivitySession(worker=worker, epoch="epoch", governor=governor)
+    await session.append(start_sample=0, pcm16=bytes(320000))
+    await worker.entered.wait()
+    await asyncio.wait_for(session.append(start_sample=160000, pcm16=bytes(320000)), 0.1)
+    assert governor.snapshot().active_asr == 1
+    await session.cancel()
+    assert worker.closed and governor.snapshot().active_asr == 0
+
+
+@pytest.mark.anyio
+async def test_malformed_dynamic_frame_cannot_invent_a_score_or_advance_watermark():
+    worker = Worker()
+    governor = ResourceGovernor(GovernorLimits(2, 1, 8))
+    session = MeetingActivitySession(worker=worker, epoch="epoch", governor=governor)
+    from speechrail.domain.audio_timeline import SampleSpan
+
+    with pytest.raises(ValueError):
+        session._parse(
+            {
+                "ok": True,
+                "backend": "meeting_dynamic",
+                "protocol_version": 2,
+                "epoch": "epoch",
+                "processed_through": 160000,
+                "stable_through": 0,
+                "frames": [{"start": 0, "end": 160000, "active_slots": [32]}],
+            },
+            SampleSpan(0, 160000),
+            False,
+        )
+    assert session._stable == 0
+
+
+@pytest.mark.anyio
+async def test_invalid_native_state_counts_cannot_certify_unbounded_retention():
+    from speechrail.domain.audio_timeline import SampleSpan
+
+    worker = Worker()
+    session = MeetingActivitySession(
+        worker=worker, epoch="epoch", governor=ResourceGovernor(GovernorLimits(2, 1, 8))
+    )
+    response, _ = await worker.request(
+        {
+            "audio_start": 0,
+            "audio_samples": 160000,
+            "previous_stable": 0,
+            "epoch": "epoch",
+            "final": False,
+        },
+        b"",
+    )
+    response["diagnostics"] = {"identities": 33, "prototypes": 96, "candidates": 0}
+    with pytest.raises(ValueError, match="capacity"):
+        session._parse(response, SampleSpan(0, 160000), False)
+    assert session._step == 0 and session._stable == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "reported,expected", [("infer", "infer"), ("load", "load"), ("/private/untrusted", "protocol")]
+)
+async def test_native_failure_keeps_a_bounded_diagnostic_stage(reported, expected):
+    from speechrail.observability.metrics import Metrics
+
+    class FailedWorker(Worker):
+        async def request(self, header, pcm):
+            return {
+                "protocol_version": 2,
+                "backend": "meeting_dynamic",
+                "ok": False,
+                "diagnostic_stage": reported,
+                "error": "untrusted error details",
+            }, b""
+
+    metrics = Metrics()
+    worker = FailedWorker()
+    session = MeetingActivitySession(
+        worker=worker,
+        epoch="epoch",
+        metrics=metrics,
+        governor=ResourceGovernor(GovernorLimits(2, 1, 8)),
+    )
+    await session.append(start_sample=0, pcm16=bytes(320000))
+    try:
+        with pytest.raises(DiarizationError, match="meeting activity failed") as failure:
+            await anext(session.updates())
+        assert failure.value.code == "model_not_ready"
+        labels = metrics.read_state().counters["speechrail_diarization_failures_total"]
+        assert labels == {(("stage", expected),): 1.0}
+        assert worker.closed
+    finally:
+        await session.cancel()

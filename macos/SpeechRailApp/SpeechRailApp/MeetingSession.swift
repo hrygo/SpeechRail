@@ -230,6 +230,37 @@ public final class MeetingSession {
     /// 修订文本与输入区间按连接及 item 归属；final 到达时刻不参与声学时间。
     private var previewLedger = TranscriptPreviewLedger()
     private var previewIdentity: TranscriptPreviewLedger.Identity?
+    public private(set) var windowCapture: TranscriptWindowCapture?
+    private var retiredWindowCaptures: [TranscriptWindowCapture] = []
+    private var windowFallbackNote: String?
+    public var transcriptionStatusText: String? { windowCapture?.statusText ?? windowFallbackNote }
+
+    private func beginWindowCapture(enabled: Bool, identity: TranscriptPreviewLedger.Identity, captureStartedAt: Date) {
+        if let previous = windowCapture {
+            previous.retainTail()
+            retiredWindowCaptures.removeAll { $0.queue.isComplete }
+            retiredWindowCaptures.append(previous)
+        }
+        windowCapture = nil
+        guard enabled, let recordID = sessionID else { return }
+        let coordinator = coordinator
+        windowCapture = TranscriptWindowCapture(recordID: recordID, identity: identity,
+            source: lineSource, offsetSeconds: captureStartedAt.timeIntervalSince(startedAt ?? captureStartedAt),
+            observedAt: captureStartedAt, save: { command in
+                switch command {
+                case .sealed(let batch): return try await coordinator.appendSealedWindow(batch)
+                case .checkpoint(let checkpoint):
+                    try await coordinator.saveWindowCheckpoint(checkpoint)
+                    return WindowSaveAck(transactionID: checkpoint.id, lineOrdinals: [:], savedThrough: 0)
+                }
+            }, didSave: { [weak self] command, ordinal in
+                await self?.didSaveTranscript(command, ordinal: ordinal)
+                if self?.windowCapture?.identity == identity {
+                    let text = self?.windowCapture?.visibleText ?? ""
+                    self?.partialText = text.isEmpty ? nil : text
+                }
+            })
+    }
     /// `(connection, generation, itemID)` → 已落库行，避免迟到归属命中新连接复用的 item ID。
     private var lineByItem = LiveTranscriptItemIndex()
     private var pendingAttributions = TranscriptAttributionBuffer()
@@ -281,26 +312,41 @@ public final class MeetingSession {
 
     // MARK: - 入口
 
+    private var allWindowCaptures: [TranscriptWindowCapture] {
+        retiredWindowCaptures + [windowCapture].compactMap { $0 }
+    }
     public var pendingSaveRecordIDs: [String] {
-        let pending = inputPersistence.outstandingRecordIDs
-        return pending + admissionLedger.recordIDs.filter { !pending.contains($0) }
+        Array(Set(inputPersistence.outstandingRecordIDs + admissionLedger.recordIDs
+            + allWindowCaptures.filter { !$0.queue.isComplete || $0.blockedCommand != nil }.map(\.recordID))).sorted()
     }
 
     public func pendingSaveCommands(recordID: String) -> [TranscriptPersistenceQueue.Command] {
         inputPersistence.unsettledInputs(sessionID: recordID).map(\.command)
+            + allWindowCaptures.filter { $0.recordID == recordID }.flatMap(\.recoveryCommands)
     }
 
     public func saveFailures(recordID: String) -> [TranscriptPersistenceQueue.Failure] {
-        inputPersistence.failures(sessionID: recordID)
+        inputPersistence.failures(sessionID: recordID) + allWindowCaptures
+            .filter { $0.recordID == recordID && ($0.queue.failure != nil || $0.blockedCommand != nil) }
+            .flatMap { capture in capture.recoveryCommands.map {
+                TranscriptPersistenceQueue.Failure(command: $0, message: "文字尚未保存，可重试保存。")
+            } }
     }
 
     public func waitForPendingSaves(recordID: String) async -> TranscriptPersistenceQueue.DrainReport {
+        let captures = allWindowCaptures.filter { $0.recordID == recordID }
+        for capture in captures { await capture.queue.waitUntilSettled() }
         let saved = await inputPersistence.waitUntilSettled(sessionID: recordID)
-        return admissionLedger.report(recordID: recordID, saved: saved)
+        let combined = TranscriptPersistenceQueue.DrainReport(
+            pendingCommands: saved.pendingCommands + captures.flatMap(\.recoveryCommands),
+            failures: saveFailures(recordID: recordID),
+            admissionRejections: saved.admissionRejections + captures.reduce(0) { $0 + $1.queue.rejectionCount })
+        return admissionLedger.report(recordID: recordID, saved: combined)
     }
 
     @discardableResult
     public func retryPendingSaves(recordID: String) async -> Bool {
+        for capture in allWindowCaptures where capture.recordID == recordID { await capture.retryPending() }
         for failure in saveFailures(recordID: recordID) {
             inputPersistence.retry(sessionID: recordID, lineID: failure.command.lineID)
         }
@@ -480,7 +526,7 @@ public final class MeetingSession {
     public func finishIncompleteCapture() async -> Bool {
         guard phase == .processing, let id = sessionID,
               coordinator.captureCompletionFailure(recordID: id) != nil else { return false }
-        let deadline = SessionDrainDeadline(timeout: dependencies.drainTimeout)
+        let deadline = SessionDrainDeadline(timeout: windowCapture == nil ? dependencies.drainTimeout : .seconds(30))
         let saved = await deadline.wait(stage: .persistence) {
             let report = await self.waitForPendingSaves(recordID: id)
             guard report.isComplete else {
@@ -576,6 +622,10 @@ public final class MeetingSession {
     // MARK: - 生命周期
 
     private func startPipeline(isNewSession: Bool) async throws {
+        retiredWindowCaptures.removeAll { $0.queue.isComplete }
+        guard allWindowCaptures.filter({ !$0.queue.isComplete }).count < 8 else {
+            throw Blocked(reason:.streamFailed("请先保存或保留之前未保存的文字，再开始新一段。"))
+        }
         guard releaseCaptureTask == nil, captureDeadline?.hasPending(.capture) != true else {
             throw Blocked(reason: .streamFailed("上一次采集仍在释放，请稍后重试。"))
         }
@@ -626,6 +676,12 @@ public final class MeetingSession {
         let wantsDiarization = preferences?.meetingDiarizationEnabled ?? false
         var diarizationUnavailableNote: String?
 
+        var windowEnabled = dependencies.revisionWindowEnabled
+            ?? UserDefaults.standard.bool(forKey: "speechrail.meetingRevisionWindowEnabled")
+        let dynamicDiarization = dependencies.dynamicDiarizationEnabled
+            ?? UserDefaults.standard.bool(forKey: "speechrail.meetingDynamicDiarizationEnabled")
+        windowFallbackNote = nil
+
         func makeClient(diarizationEnabled: Bool) -> any MeetingRealtimeClient {
             dependencies.makeRealtimeClient(
                 MeetingRealtimeClientConfiguration(
@@ -633,35 +689,36 @@ public final class MeetingSession {
                     scenePreset: .meeting,
                     apiKey: serviceKey,
                     diarizationEnabled: diarizationEnabled,
-                    expectedASRRevision: binding?.asrModelRevision
+                    expectedASRRevision: binding?.asrModelRevision,
+                    windowScene: windowEnabled ? .meeting : nil,
+                    diarizationBackend: diarizationEnabled && dynamicDiarization ? .meetingDynamic : nil
                 )
             )
         }
 
-        var client = makeClient(diarizationEnabled: wantsDiarization)
         var diarizationEffective = wantsDiarization
-        do {
-            try await client.connect()
-        } catch {
-            let unavailableCode = (error as? RealtimeASRClient.Failure)?.diarizationUnavailableCode
-            guard wantsDiarization, unavailableCode != nil,
-                  connectionGeneration.isCurrent(startToken) else {
-                await audio.stop()
-                throw Blocked(reason: .serviceNotReady(error.localizedDescription))
-            }
-            // 降级只重试一次：第二次失败就是真连不上，整场拦下。
-            client = makeClient(diarizationEnabled: false)
+        var client = makeClient(diarizationEnabled:diarizationEffective)
+        while true {
             do {
                 try await client.connect()
+                break
             } catch {
-                await audio.stop()
-                throw Blocked(reason: .serviceNotReady(error.localizedDescription))
+                await client.close()
+                let failure = error as? RealtimeASRClient.Failure
+                guard connectionGeneration.isCurrent(startToken) else { await audio.stop(); return }
+                if windowEnabled, failure?.revisionWindowUnavailable == true {
+                    windowEnabled = false
+                    windowFallbackNote = "当前服务暂不支持回溯修正，已使用标准转写继续记录。"
+                } else if diarizationEffective, failure?.diarizationUnavailableCode != nil {
+                    diarizationEffective = false
+                    diarizationUnavailableNote = Self.readableError(
+                        code:"diarization_not_available",message:error.localizedDescription)
+                } else {
+                    await audio.stop()
+                    throw Blocked(reason:.serviceNotReady(error.localizedDescription))
+                }
+                client = makeClient(diarizationEnabled:diarizationEffective)
             }
-            diarizationEffective = false
-            diarizationUnavailableNote = Self.readableError(
-                code: "diarization_not_available",
-                message: error.localizedDescription
-            )
         }
         guard connectionGeneration.isCurrent(startToken) else {
             // 这一场已经被结束或被换掉了。只回收这一轮自己领到的采集与连接，
@@ -740,6 +797,7 @@ public final class MeetingSession {
             identity: previewIdentity,
             captureTimelineOffsetSeconds: dependencies.clock.now().timeIntervalSince1970
         )
+        beginWindowCapture(enabled: windowEnabled, identity: previewIdentity, captureStartedAt: dependencies.clock.now())
         partialText = nil
         isStoppingIntentionally = false
         isPaused = false
@@ -799,12 +857,13 @@ public final class MeetingSession {
     }
 
     private func performReleaseCapture(drain: Bool, preservingRecord: Bool) async -> Bool {
-        let deadline = SessionDrainDeadline(timeout: dependencies.drainTimeout)
+        let deadline = SessionDrainDeadline(timeout: windowCapture == nil ? dependencies.drainTimeout : .seconds(30))
         captureDeadline = deadline
         let endingRecordID = sessionID
         if let endingRecordID {
             coordinator.recordCaptureCompletionDeadline(recordID: endingRecordID, deadline: deadline)
         }
+        let endingWindow = windowCapture
         let endingClient = client
         let endingUploader = uploadPump
         let endingPump = pump
@@ -830,7 +889,12 @@ public final class MeetingSession {
         if let endingClient {
             if shouldDrain {
                 let succeeded = await deadline.wait(stage: .protocolDrain) {
-                    do { try await endingClient.drainAndClear(timeout: .seconds(8)) }
+                    do {
+                        try await endingClient.drainAndClear(timeout: endingWindow == nil ? .seconds(8) : .seconds(30),
+                            beforeAuxiliary: { sample in
+                                if let endingWindow { try await endingWindow.waitSaved(through: sample) }
+                            })
+                    }
                     catch {
                         if self.connectionGeneration == retirementGeneration, self.sessionID == endingRecordID {
                             await self.markDiarizationDrainFailureIfNeeded(error)
@@ -852,6 +916,7 @@ public final class MeetingSession {
                 deadline.retain(stage: .receiver) { await endingPump.value }
             }
         }
+        if !shouldDrain || deadline.failure != nil { endingWindow?.retainTail() }
         var complete = drain && deadline.failure == nil
         if let endingRecordID, let failure = deadline.failure {
             coordinator.recordCaptureCompletionFailure(recordID: endingRecordID, failure: failure)
@@ -1003,7 +1068,22 @@ public final class MeetingSession {
              .ttsAudio(_, _, _), .ttsEnded(_, _, _, _, _):
             // 会议会话不接线 TTS：增量 utterance 属于助手那一层。
             break
+        case .diarizationConfigured(let capacity, let serverSessionID):
+            if let recordID = sessionID {
+                labeling.configureCapacity(capacity, recordID:recordID,
+                    generation:identity.generation,serverSessionID:serverSessionID,inputEpoch:0)
+            }
+        case .transcriptionWindow(let event):
+            guard let capture = windowCapture, capture.identity == identity else { return }
+            let admission = capture.apply(event, observedAt: Date())
+            let text = capture.visibleText
+            partialText = text.isEmpty ? nil : text
+            if admission == .rejected || capture.queue.rejectionCount > 0 {
+                lastFailure = "部分文字尚未保存，已暂停接收新的修订。请保留恢复内容。"
+                Task { @MainActor in await self.enterInterruption(.serviceLost, note: self.lastFailure) }
+            }
         case .partial(let itemID, let delta):
+            guard windowCapture == nil else { return }
             _ = previewLedger.acceptDelta(
                 identity: identity,
                 itemID: itemID,
@@ -1012,6 +1092,7 @@ public final class MeetingSession {
             )
             partialText = previewLedger.visiblePartial
         case .partialSnapshot(let itemID, let revision, let text, _):
+            guard windowCapture == nil else { return }
             _ = previewLedger.acceptSnapshot(
                 identity: identity,
                 itemID: itemID,
@@ -1021,6 +1102,7 @@ public final class MeetingSession {
             )
             partialText = previewLedger.visiblePartial
         case .segmentClosed(let itemID, let sampleSpan, let reason, let commitEventID):
+            guard windowCapture == nil else { return }
             guard let closeReason = TranscriptPreviewLedger.SegmentCloseReason(
                 rawValue: reason.rawValue
             ) else { return }
@@ -1033,6 +1115,7 @@ public final class MeetingSession {
                 eventID: envelope.metadata.eventID
             )
         case .completed(let itemID, let transcript):
+            guard windowCapture == nil else { return }
             let outcome = previewLedger.resolveCommit(
                 identity: identity,
                 itemID: itemID,
@@ -1042,6 +1125,7 @@ public final class MeetingSession {
             guard case .commit(let committed) = outcome else { return }
             await commit(committed)
         case .failed(let itemID, let code, let message):
+            guard windowCapture == nil else { return }
             lastFailure = "\(code)：\(message)"
             let recoveryNote = previewLedger.recoveryNote(identity: identity, itemID: itemID)
             let boundary = previewLedger.boundary(identity: identity, itemID: itemID)
@@ -1418,6 +1502,7 @@ public final class MeetingSession {
         if let note { lastFailure = note }
         interruptionNote = note
         isStoppingIntentionally = true
+        windowCapture?.retainTail()
         await releaseCapture(drain: drain, preservingRecord: true)
         isStoppingIntentionally = false
         guard phase.isLive else { return }

@@ -9,9 +9,20 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from speechrail.domain.asr_policy import ASRPolicy
+from speechrail.domain.asr_window import WindowDecodeRequest, WindowDecodeResult, WindowIdentity
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
 from speechrail.domain.diarization.ports import StreamingActivityPort
 from speechrail.domain.tts_request import ValidationPolicy
+
+
+class WindowAsrSession(Protocol):
+    async def decode(self, request: WindowDecodeRequest) -> WindowDecodeResult: ...
+
+    async def close(self) -> None: ...
+
+
+class WindowAsrFactory(Protocol):
+    def create(self, *, identity: WindowIdentity) -> WindowAsrSession: ...
 
 
 class TranscriptionRequest(BaseModel):

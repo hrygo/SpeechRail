@@ -194,6 +194,40 @@ def test_activity_backlog_deadline_degrades_without_blocking_canonical_audio() -
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("failure", ["pcm_budget", "backend_failure"])
+def test_activity_admission_failure_preserves_text_and_canonical_timeline(failure: str) -> None:
+    from speechrail.domain.diarization.types import DiarizationError
+    from speechrail.runtime.window_pcm import PcmBudgetExceededError
+
+    class RefusedActivity(_FakeActivitySession):
+        async def append(self, *, start_sample: int, pcm16: bytes) -> None:
+            if failure == "pcm_budget":
+                raise PcmBudgetExceededError("exhausted")
+            raise DiarizationError("unavailable", code="worker_error")
+
+    async def scenario() -> None:
+        activity = RefusedActivity()
+        session: DiarizationSession
+        ledger = AttributionLedger(accepted_samples=lambda: session.accepted_samples)
+        session = DiarizationSession(activity=activity, ledger=ledger)
+        await session.append(b"\0\0" * 16000)
+        await session.append(b"\0\0" * 800)
+        await session.register_completed("text", (TextUnit("unit", 0, 2, SampleSpan(0, 16800)),))
+        done = await session.finish("finish")
+        events = [event async for event in session.events()]
+        assert done.status == "degraded"
+        assert session.accepted_samples == 16800
+        assert activity.cancelled
+        assert [event.reason for event in events if isinstance(event, StatusChanged)] == [
+            "audio_expired" if failure == "pcm_budget" else "model_not_ready"
+        ]
+        updates = [event for event in events if isinstance(event, ItemAttributionUpdated)]
+        assert updates[-1].attributions[0].state == "final"
+        assert updates[-1].attributions[0].speaker is None
+
+    asyncio.run(scenario())
+
+
 def test_activity_update_cannot_outrun_the_accepted_sample_watermark() -> None:
     class _InterleavingActivity(_FakeActivitySession):
         def __init__(self) -> None:

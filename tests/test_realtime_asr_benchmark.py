@@ -27,7 +27,8 @@ from speechrail.compatibility.openai_realtime import apply_session_update
 
 def boundary(item, start, end):
     return {
-        "type": "speechrail.transcription.segment_closed", "item_id": item,
+        "type": "speechrail.transcription.segment_closed",
+        "item_id": item,
         "sample_span": {"start": start, "end": end},
     }
 
@@ -35,14 +36,16 @@ def boundary(item, start, end):
 def terminal(item, text):
     return {
         "type": "conversation.item.input_audio_transcription.completed",
-        "item_id": item, "transcript": text,
+        "item_id": item,
+        "transcript": text,
     }
 
 
 def receipt(samples):
     return {
         "type": "speechrail.input_audio_buffer.committed",
-        "commit_event_id": "benchmark-final", "accepted_samples": samples,
+        "commit_event_id": "benchmark-final",
+        "accepted_samples": samples,
     }
 
 
@@ -131,11 +134,15 @@ def test_segment_budget_allows_only_one_wire_sample_of_resampler_rounding(tail_s
     if tail_samples > 1:
         with pytest.raises(ValueError, match="segment budget"):
             evidence.score(
-                None, expected_wire_samples=end, effective_max_segment_ms=20_000,
+                None,
+                expected_wire_samples=end,
+                effective_max_segment_ms=20_000,
             )
         return
     result = evidence.score(
-        None, expected_wire_samples=end, effective_max_segment_ms=20_000,
+        None,
+        expected_wire_samples=end,
+        effective_max_segment_ms=20_000,
     )
     assert result["segment_budget_gate"] == "pass"
 
@@ -152,18 +159,30 @@ def test_duplicate_terminal_and_terminal_before_boundary_fail():
 
 def test_legacy_delta_mirror_does_not_inflate_snapshot_revision_statistics():
     evidence = ASREvidence(require_boundaries=False)
-    evidence.consume({
-        "type": "speechrail.transcription.hypothesis",
-        "utterance_id": "item", "text": "old",
-    }, 1)
-    evidence.consume({
-        "type": "conversation.item.input_audio_transcription.delta",
-        "item_id": "item", "delta": "old",
-    }, 2)
-    evidence.consume({
-        "type": "speechrail.transcription.hypothesis",
-        "utterance_id": "item", "text": "new",
-    }, 3)
+    evidence.consume(
+        {
+            "type": "speechrail.transcription.hypothesis",
+            "utterance_id": "item",
+            "text": "old",
+        },
+        1,
+    )
+    evidence.consume(
+        {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "item_id": "item",
+            "delta": "old",
+        },
+        2,
+    )
+    evidence.consume(
+        {
+            "type": "speechrail.transcription.hypothesis",
+            "utterance_id": "item",
+            "text": "new",
+        },
+        3,
+    )
     assert evidence.preview_count == 2
     assert evidence.revised_characters == 3
     assert evidence.previews["item"] == "new"
@@ -181,13 +200,22 @@ def test_wire_resampling_preserves_source_duration_and_tail(tmp_path: Path):
     assert wire == (1000).to_bytes(2, "little", signed=True) * 24000
 
 
-@pytest.mark.parametrize("policy", [None, {
-    "preview_interval_ms": 500, "max_segment_ms": 8000, "finalization": "full_segment",
-}])
+@pytest.mark.parametrize(
+    "policy",
+    [
+        None,
+        {
+            "preview_interval_ms": 500,
+            "max_segment_ms": 8000,
+            "finalization": "full_segment",
+        },
+    ],
+)
 def test_benchmark_session_update_matches_production_contract(policy):
     _, config = apply_session_update(
         _session_update("zh", policy),
-        session_id="test", asr_model="speechrail/qwen3-asr-1.7b",
+        session_id="test",
+        asr_model="speechrail/qwen3-asr-1.7b",
         registered_asr=frozenset({"speechrail/qwen3-asr-1.7b"}),
         request_timeout_ms=120000,
     )
@@ -195,19 +223,24 @@ def test_benchmark_session_update_matches_production_contract(policy):
     assert config["asr_policy"].max_segment_ms == (8000 if policy else 20000)
 
 
-@pytest.mark.parametrize("override", [
-    {"preview_interval_ms": True},
-    {"preview_interval_ms": 600},
-    {"effective_max_segment_ms": 8001},
-    {"effective_max_segment_ms": 999},
-    {"final_deadline_ms": None},
-    {"final_deadline_ms": 5000},
-    {"finalization": "streaming_finalize"},
-])
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"preview_interval_ms": True},
+        {"preview_interval_ms": 600},
+        {"effective_max_segment_ms": 8001},
+        {"effective_max_segment_ms": 999},
+        {"final_deadline_ms": None},
+        {"final_deadline_ms": 5000},
+        {"finalization": "streaming_finalize"},
+    ],
+)
 def test_policy_echo_cannot_silently_change_the_measured_preset(override):
     requested = {
-        "preview_interval_ms": 500, "max_segment_ms": 8000,
-        "finalization": "full_segment", "final_deadline_ms": 10000,
+        "preview_interval_ms": 500,
+        "max_segment_ms": 8000,
+        "finalization": "full_segment",
+        "final_deadline_ms": 10000,
     }
     echo = {**requested, "rollback_tokens": 5, "effective_max_segment_ms": 4000, **override}
     with pytest.raises(ValueError):
@@ -216,28 +249,38 @@ def test_policy_echo_cannot_silently_change_the_measured_preset(override):
 
 def test_policy_echo_records_a_valid_effective_resource_budget():
     requested = {
-        "preview_interval_ms": 500, "max_segment_ms": 8000,
+        "preview_interval_ms": 500,
+        "max_segment_ms": 8000,
         "finalization": "full_segment",
     }
     echo = {
-        **requested, "rollback_tokens": 5,
-        "effective_max_segment_ms": 4000, "final_deadline_ms": 120000,
+        **requested,
+        "rollback_tokens": 5,
+        "effective_max_segment_ms": 4000,
+        "final_deadline_ms": 120000,
     }
-    assert _validated_policy_echo(
-        {"session": {"speechrail": {"asr": echo}}}, requested,
-    ) == echo
+    assert (
+        _validated_policy_echo(
+            {"session": {"speechrail": {"asr": echo}}},
+            requested,
+        )
+        == echo
+    )
 
 
 @pytest.mark.parametrize("rollback", [0, 5, 20, 32])
 def test_policy_echo_records_the_measured_rollback_budget(rollback):
     requested = {
-        "preview_interval_ms": 500, "max_segment_ms": 8000,
-        "finalization": "streaming_finalize", "rollback_tokens": rollback,
+        "preview_interval_ms": 500,
+        "max_segment_ms": 8000,
+        "finalization": "streaming_finalize",
+        "rollback_tokens": rollback,
     }
     echo = {**requested, "effective_max_segment_ms": 8000, "final_deadline_ms": 120000}
 
     observed = _validated_policy_echo(
-        {"session": {"speechrail": {"asr": echo}}}, requested,
+        {"session": {"speechrail": {"asr": echo}}},
+        requested,
     )
 
     assert observed["rollback_tokens"] == rollback
@@ -246,7 +289,8 @@ def test_policy_echo_records_the_measured_rollback_budget(rollback):
 @pytest.mark.parametrize("rollback", ["missing", None, False, -1, 33, 6])
 def test_policy_echo_rejects_missing_malformed_or_changed_default_rollback(rollback):
     requested = {
-        "preview_interval_ms": 500, "max_segment_ms": 8000,
+        "preview_interval_ms": 500,
+        "max_segment_ms": 8000,
         "finalization": "streaming_finalize",
     }
     echo = {**requested, "effective_max_segment_ms": 8000, "final_deadline_ms": 120000}
@@ -260,8 +304,13 @@ def test_policy_echo_rejects_missing_malformed_or_changed_default_rollback(rollb
 def test_benchmark_rejects_remote_origin_before_loading_audio_or_credentials(tmp_path):
     with pytest.raises(ValueError, match="loopback"):
         run_manifest_asr_benchmark(
-            tmp_path / "unused.json", profile="quality", output=tmp_path / "new.json",
-            sessions=1, warmup=True, app_home=None, base_url="https://remote.example/v1",
+            tmp_path / "unused.json",
+            profile="quality",
+            output=tmp_path / "new.json",
+            sessions=1,
+            warmup=True,
+            app_home=None,
+            base_url="https://remote.example/v1",
         )
 
 
@@ -269,11 +318,20 @@ def _reference_free_manifest(tmp_path: Path) -> Path:
     audio = tmp_path / "meeting.wav"
     audio.write_bytes(b"not decoded by manifest validation")
     manifest = tmp_path / "meeting.json"
-    manifest.write_text(json.dumps({
-        "fixtures": [{
-            "id": "meeting-01", "kind": "asr", "path": str(audio), "language": "zh",
-        }],
-    }))
+    manifest.write_text(
+        json.dumps(
+            {
+                "fixtures": [
+                    {
+                        "id": "meeting-01",
+                        "kind": "asr",
+                        "path": str(audio),
+                        "language": "zh",
+                    }
+                ],
+            }
+        )
+    )
     return manifest
 
 
@@ -281,19 +339,45 @@ def test_manifest_without_references_remains_strict_by_default(tmp_path: Path):
     manifest = _reference_free_manifest(tmp_path)
     with pytest.raises(ValueError, match="human references"):
         run_manifest_asr_benchmark(
-            manifest, profile="quality", output=tmp_path / "strict.json",
-            sessions=1, warmup=False, app_home=None, base_url="http://127.0.0.1:8201/v1",
+            manifest,
+            profile="quality",
+            output=tmp_path / "strict.json",
+            sessions=1,
+            warmup=False,
+            app_home=None,
+            base_url="http://127.0.0.1:8201/v1",
+        )
+
+
+def test_manifest_rejects_annotations_for_an_unknown_fixture_before_connecting(tmp_path: Path):
+    manifest = _reference_free_manifest(tmp_path)
+    metadata = json.loads(manifest.read_text())
+    metadata["window_request"] = {"mode": "revision_window_v1", "scene": "caption"}
+    metadata["human_annotations"] = {"typo-fixture": {"kind": "independent_human_annotation"}}
+    manifest.write_text(json.dumps(metadata))
+    with pytest.raises(ValueError, match="unknown fixture"):
+        run_manifest_asr_benchmark(
+            manifest,
+            profile="quality",
+            output=tmp_path / "result.json",
+            sessions=1,
+            warmup=False,
+            app_home=None,
+            base_url="http://127.0.0.1:8201/v1",
+            resource_only=True,
         )
 
 
 def test_resource_only_evidence_keeps_spans_and_skips_all_quality_scores(monkeypatch):
     evidence = ASREvidence(require_boundaries=False, resource_only=True)
     monkeypatch.setattr(
-        asr_benchmark, "character_error_metrics",
+        asr_benchmark,
+        "character_error_metrics",
         lambda *_args, **_kwargs: pytest.fail("resource-only mode must not calculate CER"),
     )
     monkeypatch.setattr(
-        asr_benchmark, "punctuation_error_metrics",
+        asr_benchmark,
+        "punctuation_error_metrics",
         lambda *_args, **_kwargs: pytest.fail(
             "resource-only mode must not calculate punctuation metrics"
         ),
@@ -339,7 +423,8 @@ def test_resource_only_evidence_still_rejects_failed_terminal():
 
 
 def test_resource_only_manifest_keeps_resources_without_quality_claims(
-    monkeypatch, tmp_path: Path,
+    monkeypatch,
+    tmp_path: Path,
 ):
     manifest = _reference_free_manifest(tmp_path)
     output = tmp_path / "resource-only.json"
@@ -356,15 +441,27 @@ def test_resource_only_manifest_keeps_resources_without_quality_claims(
             return {"fake_resource_sample": True}
 
     def fake_run(
-        _client, wire, *, language, reference, policy, resource_only,
-        punctuation_reference_text, punctuation_reference_kind,
+        _client,
+        wire,
+        *,
+        language,
+        reference,
+        policy,
+        resource_only,
+        punctuation_reference_text,
+        punctuation_reference_kind,
     ):
-        calls.append({
-            "wire": wire, "language": language, "reference": reference,
-            "policy": policy, "resource_only": resource_only,
-            "punctuation_reference_text": punctuation_reference_text,
-            "punctuation_reference_kind": punctuation_reference_kind,
-        })
+        calls.append(
+            {
+                "wire": wire,
+                "language": language,
+                "reference": reference,
+                "policy": policy,
+                "resource_only": resource_only,
+                "punctuation_reference_text": punctuation_reference_text,
+                "punctuation_reference_kind": punctuation_reference_kind,
+            }
+        )
         return {
             "effective_policy": {
                 "preview_interval_ms": 1_000,
@@ -398,16 +495,27 @@ def test_resource_only_manifest_keeps_resources_without_quality_claims(
     )
 
     payload = run_manifest_asr_benchmark(
-        manifest, profile="quality", output=output, sessions=1, warmup=False,
-        app_home=None, base_url="http://127.0.0.1:8201/v1", resource_only=True,
+        manifest,
+        profile="quality",
+        output=output,
+        sessions=1,
+        warmup=False,
+        app_home=None,
+        base_url="http://127.0.0.1:8201/v1",
+        resource_only=True,
     )
 
-    assert calls == [{
-        "wire": b"\x00" * 9_600, "language": "zh", "reference": None,
-        "policy": None, "resource_only": True,
-        "punctuation_reference_text": None,
-        "punctuation_reference_kind": None,
-    }]
+    assert calls == [
+        {
+            "wire": b"\x00" * 9_600,
+            "language": "zh",
+            "reference": None,
+            "policy": None,
+            "resource_only": True,
+            "punctuation_reference_text": None,
+            "punctuation_reference_kind": None,
+        }
+    ]
     assert payload["evidence_mode"] == "real"
     assert payload["measurement_mode"] == "resource_only"
     assert payload["quality_gate"] == "unset"
@@ -420,24 +528,31 @@ def test_resource_only_manifest_keeps_resources_without_quality_claims(
 
 
 def test_realtime_manifest_passes_punctuation_gold_to_local_quality_runner(
-    monkeypatch, tmp_path: Path,
+    monkeypatch,
+    tmp_path: Path,
 ):
     audio = tmp_path / "reading.wav"
     audio.write_bytes(b"fixture")
     manifest = tmp_path / "reading.json"
     reference = "hello world"
     punctuation_gold = "Hello, world."
-    manifest.write_text(json.dumps({
-        "fixtures": [{
-            "id": "reading-01",
-            "kind": "asr",
-            "path": str(audio),
-            "language": "en",
-            "reference_text": reference,
-            "punctuation_reference_text": punctuation_gold,
-            "punctuation_reference_kind": "human_reading_prompt",
-        }],
-    }))
+    manifest.write_text(
+        json.dumps(
+            {
+                "fixtures": [
+                    {
+                        "id": "reading-01",
+                        "kind": "asr",
+                        "path": str(audio),
+                        "language": "en",
+                        "reference_text": reference,
+                        "punctuation_reference_text": punctuation_gold,
+                        "punctuation_reference_kind": "human_reading_prompt",
+                    }
+                ],
+            }
+        )
+    )
     output = tmp_path / "punctuation-result.json"
     calls = []
 
@@ -452,15 +567,24 @@ def test_realtime_manifest_passes_punctuation_gold_to_local_quality_runner(
             return {"fake_resource_sample": True}
 
     def fake_run(
-        _client, wire, *, language, reference, policy, resource_only,
-        punctuation_reference_text, punctuation_reference_kind,
+        _client,
+        wire,
+        *,
+        language,
+        reference,
+        policy,
+        resource_only,
+        punctuation_reference_text,
+        punctuation_reference_kind,
     ):
-        calls.append({
-            "reference": reference,
-            "punctuation_reference_text": punctuation_reference_text,
-            "punctuation_reference_kind": punctuation_reference_kind,
-            "resource_only": resource_only,
-        })
+        calls.append(
+            {
+                "reference": reference,
+                "punctuation_reference_text": punctuation_reference_text,
+                "punctuation_reference_kind": punctuation_reference_kind,
+                "resource_only": resource_only,
+            }
+        )
         return {
             "audio_seconds": len(wire) / 48_000,
             "effective_policy": None,
@@ -487,16 +611,23 @@ def test_realtime_manifest_passes_punctuation_gold_to_local_quality_runner(
     )
 
     payload = run_manifest_asr_benchmark(
-        manifest, profile="quality", output=output, sessions=1, warmup=False,
-        app_home=None, base_url="http://127.0.0.1:8201/v1",
+        manifest,
+        profile="quality",
+        output=output,
+        sessions=1,
+        warmup=False,
+        app_home=None,
+        base_url="http://127.0.0.1:8201/v1",
     )
 
-    assert calls == [{
-        "reference": reference,
-        "punctuation_reference_text": punctuation_gold,
-        "punctuation_reference_kind": "human_reading_prompt",
-        "resource_only": False,
-    }]
+    assert calls == [
+        {
+            "reference": reference,
+            "punctuation_reference_text": punctuation_gold,
+            "punctuation_reference_kind": "human_reading_prompt",
+            "resource_only": False,
+        }
+    ]
     assert payload["sessions"][0]["quality_metrics"]["punctuation_metrics"]["f1"] == 0.5
     encoded = json.dumps(payload, ensure_ascii=False)
     assert reference not in encoded
@@ -505,7 +636,8 @@ def test_realtime_manifest_passes_punctuation_gold_to_local_quality_runner(
 
 @pytest.mark.parametrize("continuous_previews", [False, True])
 def test_resource_only_asr_run_keeps_pacing_policy_echo_and_exact_barrier(
-    monkeypatch, continuous_previews,
+    monkeypatch,
+    continuous_previews,
 ):
     wire_samples = 9_600 if continuous_previews else 4_800
     preview_batch_received = threading.Event()
@@ -529,21 +661,23 @@ def test_resource_only_asr_run_keeps_pacing_policy_echo_and_exact_barrier(
         def send(self, event):
             self.sent.append(event)
             if event["type"] == "session.update":
-                self.inbound.put({
-                    "type": "session.updated",
-                    "session": {
-                        "speechrail": {
-                            "asr": {
-                                "preview_interval_ms": 1_000,
-                                "max_segment_ms": 20_000,
-                                "effective_max_segment_ms": 10_000,
-                                "finalization": "full_segment",
-                                "final_deadline_ms": 120_000,
-                                "rollback_tokens": 5,
+                self.inbound.put(
+                    {
+                        "type": "session.updated",
+                        "session": {
+                            "speechrail": {
+                                "asr": {
+                                    "preview_interval_ms": 1_000,
+                                    "max_segment_ms": 20_000,
+                                    "effective_max_segment_ms": 10_000,
+                                    "finalization": "full_segment",
+                                    "final_deadline_ms": 120_000,
+                                    "rollback_tokens": 5,
+                                },
                             },
                         },
-                    },
-                })
+                    }
+                )
             elif event["type"] == "input_audio_buffer.append" and continuous_previews:
                 # More than the receiver's total queue capacity across four
                 # paced packets. Evidence must be consumed during upload.
@@ -551,11 +685,14 @@ def test_resource_only_asr_run_keeps_pacing_policy_echo_and_exact_barrier(
                     assert len(consumed_previews) >= self.append_count * 300 - 1
                 self.append_count += 1
                 for index in range(300):
-                    self.inbound.put({
-                        "type": "speechrail.transcription.hypothesis",
-                        "utterance_id": "first", "text": "PRIVATE_PREVIEW",
-                        "batch_end": index == 299,
-                    })
+                    self.inbound.put(
+                        {
+                            "type": "speechrail.transcription.hypothesis",
+                            "utterance_id": "first",
+                            "text": "PRIVATE_PREVIEW",
+                            "batch_end": index == 299,
+                        }
+                    )
             elif event["type"] == "input_audio_buffer.commit":
                 for result in (
                     boundary("first", 0, 2_400),
@@ -602,13 +739,15 @@ def test_resource_only_asr_run_keeps_pacing_policy_echo_and_exact_barrier(
     wire = b"\x01\x02" * wire_samples
 
     result = asr_benchmark._run_asr(
-        FakeClient(), wire, language="zh", reference=None, policy=None, resource_only=True,
+        FakeClient(),
+        wire,
+        language="zh",
+        reference=None,
+        policy=None,
+        resource_only=True,
     )
 
-    appends = [
-        event for event in connection.sent
-        if event["type"] == "input_audio_buffer.append"
-    ]
+    appends = [event for event in connection.sent if event["type"] == "input_audio_buffer.append"]
     assert [len(base64.b64decode(event["audio"])) for event in appends] == (
         [4_800] * (len(wire) // 4_800)
     )
@@ -634,12 +773,16 @@ def test_cli_resource_only_requires_asr_manifest(monkeypatch, capsys, tmp_path: 
         lambda *_args, **_kwargs: pytest.fail("resource-only must not run the PCM/TTS benchmark"),
     )
 
-    result = realtime_json_cli.main([
-        "unused.pcm",
-        "--profile", "quality",
-        "--output", str(tmp_path / "unused.json"),
-        "--asr-resource-only",
-    ])
+    result = realtime_json_cli.main(
+        [
+            "unused.pcm",
+            "--profile",
+            "quality",
+            "--output",
+            str(tmp_path / "unused.json"),
+            "--asr-resource-only",
+        ]
+    )
 
     assert result == 2
     assert "--asr-manifest" in capsys.readouterr().err
@@ -654,12 +797,17 @@ def test_cli_resource_only_dispatches_to_manifest_runner(monkeypatch, capsys, tm
 
     monkeypatch.setattr(asr_benchmark, "run_manifest_asr_benchmark", fake_manifest)
 
-    result = realtime_json_cli.main([
-        "--asr-manifest", str(tmp_path / "manifest.json"),
-        "--asr-resource-only",
-        "--profile", "quality",
-        "--output", str(tmp_path / "resource-only.json"),
-    ])
+    result = realtime_json_cli.main(
+        [
+            "--asr-manifest",
+            str(tmp_path / "manifest.json"),
+            "--asr-resource-only",
+            "--profile",
+            "quality",
+            "--output",
+            str(tmp_path / "resource-only.json"),
+        ]
+    )
 
     assert result == 0
     assert calls[0][1]["resource_only"] is True

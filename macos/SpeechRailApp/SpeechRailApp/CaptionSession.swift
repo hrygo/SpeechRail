@@ -2,13 +2,13 @@ import Foundation
 import Observation
 import SpeechRailControlKit
 
-public protocol CaptionRealtimeClient: Sendable {
+public protocol CaptionRealtimeClient: RealtimeTextDrainClient {
     func events() async -> RealtimeEventStream<RealtimeASRClient.Event>
     func connect() async throws
     func append(_ pcm: Data) async throws
-    func drainAndClear(timeout: Duration) async throws
     func close() async
 }
+
 
 extension RealtimeASRClient: CaptionRealtimeClient {}
 
@@ -18,19 +18,22 @@ public struct CaptionRealtimeClientConfiguration: Sendable, Equatable {
     public var diarizationEnabled: Bool
     public var apiKey: String?
     public var expectedASRRevision: String?
+    public var windowScene: SpeechRailWindowScene?
 
     public init(
         port: Int,
         scenePreset: ASRScenePreset = .caption,
         diarizationEnabled: Bool,
         apiKey: String?,
-        expectedASRRevision: String?
+        expectedASRRevision: String?,
+        windowScene: SpeechRailWindowScene? = nil
     ) {
         self.port = port
         self.scenePreset = scenePreset
         self.diarizationEnabled = diarizationEnabled
         self.apiKey = apiKey
         self.expectedASRRevision = expectedASRRevision
+        self.windowScene = windowScene
     }
 }
 
@@ -41,6 +44,7 @@ public struct CaptionSessionDependencies: Sendable {
     public var saveLine: (@Sendable (LineDraft, String) async throws -> Int)?
     public var attachSpeakerLabel: (@Sendable (String, String?) async throws -> Void)?
     public var drainTimeout: Duration
+    public var revisionWindowEnabled: Bool?
 
     public init(
         makeRealtimeClient: @escaping @Sendable
@@ -48,13 +52,15 @@ public struct CaptionSessionDependencies: Sendable {
         persistenceConfiguration: TranscriptPersistenceQueue.Configuration = .init(),
         saveLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
         attachSpeakerLabel: (@Sendable (String, String?) async throws -> Void)? = nil,
-        drainTimeout: Duration = .seconds(12)
+        drainTimeout: Duration = .seconds(12),
+        revisionWindowEnabled: Bool? = nil
     ) {
         self.makeRealtimeClient = makeRealtimeClient
         self.persistenceConfiguration = persistenceConfiguration
         self.saveLine = saveLine
         self.attachSpeakerLabel = attachSpeakerLabel
         self.drainTimeout = drainTimeout
+        self.revisionWindowEnabled = revisionWindowEnabled
     }
 
     public static func production() -> Self {
@@ -62,6 +68,7 @@ public struct CaptionSessionDependencies: Sendable {
             RealtimeASRClient(
                 port: configuration.port,
                 scenePreset: configuration.scenePreset,
+                windowScene: configuration.windowScene,
                 diarizationEnabled: configuration.diarizationEnabled,
                 apiKey: configuration.apiKey,
                 expectedASRRevision: configuration.expectedASRRevision
@@ -238,6 +245,37 @@ public final class CaptionSession {
     private var nextConnectionID = 0
     private var sessionGeneration = 0
     private var previewIdentity: TranscriptPreviewLedger.Identity?
+    public private(set) var windowCapture: TranscriptWindowCapture?
+    private var retiredWindowCaptures: [TranscriptWindowCapture] = []
+    private var windowFallbackNote: String?
+    public var transcriptionStatusText: String? { windowCapture?.statusText ?? windowFallbackNote }
+
+    private func beginWindowCapture(enabled: Bool, identity: TranscriptPreviewLedger.Identity, captureStartedAt: Date) {
+        if let previous = windowCapture {
+            previous.retainTail()
+            retiredWindowCaptures.removeAll { $0.queue.isComplete }
+            retiredWindowCaptures.append(previous)
+        }
+        windowCapture = nil
+        guard enabled, let recordID = sessionID else { return }
+        let coordinator = coordinator
+        windowCapture = TranscriptWindowCapture(recordID: recordID, identity: identity,
+            source: .microphone, offsetSeconds: captureStartedAt.timeIntervalSince(sessionStartedAt ?? captureStartedAt),
+            observedAt: captureStartedAt, save: { command in
+                switch command {
+                case .sealed(let batch): return try await coordinator.appendSealedWindow(batch)
+                case .checkpoint(let checkpoint):
+                    try await coordinator.saveWindowCheckpoint(checkpoint)
+                    return WindowSaveAck(transactionID: checkpoint.id, lineOrdinals: [:], savedThrough: 0)
+                }
+            }, didSave: { [weak self] command, ordinal in
+                await self?.didSaveTranscript(command, ordinal: ordinal)
+                if self?.windowCapture?.identity == identity {
+                    let text = self?.windowCapture?.visibleText ?? ""
+                    self?.partialText = text.isEmpty ? nil : text
+                }
+            })
+    }
     private var previewLedger = TranscriptPreviewLedger()
     /// 终态事件计数：收尾时用来判断"最后半句到底回来了没有"。
     private var terminalCount = 0
@@ -294,26 +332,41 @@ public final class CaptionSession {
         }
     }
 
+    private var allWindowCaptures: [TranscriptWindowCapture] {
+        retiredWindowCaptures + [windowCapture].compactMap { $0 }
+    }
     public var pendingSaveRecordIDs: [String] {
-        let pending = inputPersistence.outstandingRecordIDs
-        return pending + admissionLedger.recordIDs.filter { !pending.contains($0) }
+        Array(Set(inputPersistence.outstandingRecordIDs + admissionLedger.recordIDs
+            + allWindowCaptures.filter { !$0.queue.isComplete || $0.blockedCommand != nil }.map(\.recordID))).sorted()
     }
 
     public func pendingSaveCommands(recordID: String) -> [TranscriptPersistenceQueue.Command] {
         inputPersistence.unsettledInputs(sessionID: recordID).map(\.command)
+            + allWindowCaptures.filter { $0.recordID == recordID }.flatMap(\.recoveryCommands)
     }
 
     public func saveFailures(recordID: String) -> [TranscriptPersistenceQueue.Failure] {
-        inputPersistence.failures(sessionID: recordID)
+        inputPersistence.failures(sessionID: recordID) + allWindowCaptures
+            .filter { $0.recordID == recordID && ($0.queue.failure != nil || $0.blockedCommand != nil) }
+            .flatMap { capture in capture.recoveryCommands.map {
+                TranscriptPersistenceQueue.Failure(command: $0, message: "文字尚未保存，可重试保存。")
+            } }
     }
 
     public func waitForPendingSaves(recordID: String) async -> TranscriptPersistenceQueue.DrainReport {
+        let captures = allWindowCaptures.filter { $0.recordID == recordID }
+        for capture in captures { await capture.queue.waitUntilSettled() }
         let saved = await inputPersistence.waitUntilSettled(sessionID: recordID)
-        return admissionLedger.report(recordID: recordID, saved: saved)
+        let combined = TranscriptPersistenceQueue.DrainReport(
+            pendingCommands: saved.pendingCommands + captures.flatMap(\.recoveryCommands),
+            failures: saveFailures(recordID: recordID),
+            admissionRejections: saved.admissionRejections + captures.reduce(0) { $0 + $1.queue.rejectionCount })
+        return admissionLedger.report(recordID: recordID, saved: combined)
     }
 
     @discardableResult
     public func retryPendingSaves(recordID: String) async -> Bool {
+        for capture in allWindowCaptures where capture.recordID == recordID { await capture.retryPending() }
         for failure in saveFailures(recordID: recordID) {
             inputPersistence.retry(sessionID: recordID, lineID: failure.command.lineID)
         }
@@ -458,6 +511,10 @@ public final class CaptionSession {
     /// 每一步失败都把已经拿到的资源还回去（来源、连接），不留给下一个人收拾；
     /// 库里那一行只在采集与服务都起来之后才建（§5.3.1：不留空记录）。
     private func startPipeline() async throws {
+        retiredWindowCaptures.removeAll { $0.queue.isComplete }
+        guard allWindowCaptures.filter({ !$0.queue.isComplete }).count < 8 else {
+            throw Blocked(.streamFailed("请先保存或保留之前未保存的文字，再开始新一段。"))
+        }
         let binding = await realtimeCapabilityBindingProvider?()
         if realtimeCapabilityBindingProvider != nil, binding == nil {
             throw Blocked(.serviceNotReady("当前服务未确认实时语音识别能力，请刷新服务信息后重试。"))
@@ -493,6 +550,10 @@ public final class CaptionSession {
         let diarizationRequested = diarizationPreference()
         var diarizationUnavailableNote: String?
 
+        var windowEnabled = dependencies.revisionWindowEnabled
+            ?? UserDefaults.standard.bool(forKey: "speechrail.captionRevisionWindowEnabled")
+        windowFallbackNote = nil
+
         func makeClient(diarizationEnabled: Bool) -> any CaptionRealtimeClient {
             dependencies.makeRealtimeClient(
                 CaptionRealtimeClientConfiguration(
@@ -500,33 +561,34 @@ public final class CaptionSession {
                     scenePreset: .caption,
                     diarizationEnabled: diarizationEnabled,
                     apiKey: apiKey,
-                    expectedASRRevision: binding?.asrModelRevision
+                    expectedASRRevision: binding?.asrModelRevision,
+                    windowScene: windowEnabled ? .caption : nil
                 )
             )
         }
 
-        var client = makeClient(diarizationEnabled: diarizationRequested)
         var diarizationEnabled = diarizationRequested
-        do {
-            try await client.connect()
-        } catch {
-            let unavailableCode = (error as? RealtimeASRClient.Failure)?.diarizationUnavailableCode
-            guard diarizationRequested, unavailableCode != nil else {
-                await source.stop()
-                self.source = nil
-                throw Blocked(.serviceNotReady(error.localizedDescription))
-            }
-            // 降级只重试一次：第二次失败就是真连不上，整场拦下。
-            client = makeClient(diarizationEnabled: false)
+        var client = makeClient(diarizationEnabled: diarizationEnabled)
+        while true {
             do {
                 try await client.connect()
+                break
             } catch {
-                await source.stop()
-                self.source = nil
-                throw Blocked(.serviceNotReady(error.localizedDescription))
+                await client.close()
+                let failure = error as? RealtimeASRClient.Failure
+                if windowEnabled, failure?.revisionWindowUnavailable == true {
+                    windowEnabled = false
+                    windowFallbackNote = "当前服务暂不支持回溯修正，已使用标准转写继续记录。"
+                } else if diarizationEnabled, failure?.diarizationUnavailableCode != nil {
+                    diarizationEnabled = false
+                    diarizationUnavailableNote = "这场没有标出谁在说话；正文照常记录。"
+                } else {
+                    await source.stop()
+                    self.source = nil
+                    throw Blocked(.serviceNotReady(error.localizedDescription))
+                }
+                client = makeClient(diarizationEnabled: diarizationEnabled)
             }
-            diarizationEnabled = false
-            diarizationUnavailableNote = "这场没有标出谁在说话；正文照常记录。"
         }
         diarizationActive = diarizationEnabled
         self.client = client
@@ -571,6 +633,7 @@ public final class CaptionSession {
         phase = .running
         sessionGeneration &+= 1
         let identity = beginPreviewGeneration(captureStartedAt: startedAt)
+        beginWindowCapture(enabled: windowEnabled, identity: identity, captureStartedAt: Date())
         startPump(stream: stream, client: client, identity: identity)
     }
 
@@ -606,12 +669,13 @@ public final class CaptionSession {
     }
 
     private func performStopCapture(preservingRecord: Bool) async {
-        let deadline = SessionDrainDeadline(timeout: dependencies.drainTimeout)
+        let deadline = SessionDrainDeadline(timeout: windowCapture == nil ? dependencies.drainTimeout : .seconds(30))
         let endingRecordID = sessionID
         if let endingRecordID {
             coordinator.recordCaptureCompletionDeadline(recordID: endingRecordID, deadline: deadline)
         }
         let endingIdentity = previewIdentity
+        let endingWindow = windowCapture
         let endingClient = client
         let endingUploader = uploadPump
         let endingPump = pump
@@ -627,7 +691,12 @@ public final class CaptionSession {
         }
         if let endingClient {
             await deadline.wait(stage: .protocolDrain) {
-                do { try await endingClient.drainAndClear(timeout: .seconds(8)) }
+                do {
+                        try await endingClient.drainAndClear(timeout: endingWindow == nil ? .seconds(8) : .seconds(30),
+                            beforeAuxiliary: { sample in
+                                if let endingWindow { try await endingWindow.waitSaved(through: sample) }
+                            })
+                    }
                 catch {
                     if self.previewIdentity == endingIdentity, self.sessionID == endingRecordID {
                         await self.markDiarizationDrainFailureIfNeeded(error)
@@ -643,6 +712,7 @@ public final class CaptionSession {
         if let endingPump {
             await deadline.wait(stage: .receiver) { await endingPump.value }
         }
+        if deadline.failure != nil { endingWindow?.retainTail() }
         var complete = deadline.failure == nil
         if let endingRecordID, let failure = deadline.failure {
             coordinator.recordCaptureCompletionFailure(recordID: endingRecordID, failure: failure)
@@ -732,9 +802,14 @@ public final class CaptionSession {
         uploadPump = nil
         if let client {
             do {
-                try await client.drainAndClear(timeout: .seconds(8))
+                let endingWindow = windowCapture
+                try await client.drainAndClear(timeout:endingWindow == nil ? .seconds(8) : .seconds(30),
+                    beforeAuxiliary: { sample in
+                        if let endingWindow { try await endingWindow.waitSaved(through:sample) }
+                    })
             } catch {
                 lastFailure = error.localizedDescription
+                windowCapture?.retainTail()
                 await markDiarizationDrainFailureIfNeeded(error)
                 if let sessionID {
                     coordinator.recordCaptureCompletionFailure(recordID: sessionID, failure: .init(
@@ -749,7 +824,7 @@ public final class CaptionSession {
         client = nil
         previewIdentity = nil
         level = 0
-        // 未定稿的那一句不写成半截行：库里的行只认定稿（§15 的 `status` 取值域）。
+        // 未定稿尾文只作为 partial 恢复材料，不升级为正式行。
         partialText = nil
         phase = .paused
         isStoppingIntentionally = false
@@ -787,6 +862,10 @@ public final class CaptionSession {
     }
 
     private func restartPipeline() async throws {
+        retiredWindowCaptures.removeAll { $0.queue.isComplete }
+        guard allWindowCaptures.filter({ !$0.queue.isComplete }).count < 8 else {
+            throw Blocked(.streamFailed("请先保存或保留之前未保存的文字，再重新接上。"))
+        }
         // 续接是"新 epoch"，不是"再叠一路"：上一次留下的采集件先还回去，
         // 否则旧的引擎会一直被持着（用户裁决：功能离开就释放）。
         await source?.stop()
@@ -806,6 +885,10 @@ public final class CaptionSession {
         }
         // 续接是**新连接、新 epoch**（§6.5）：分人在新连接上要重新协商一次，
         // 否则这一段的归属会静默丢掉。
+        var windowEnabled = dependencies.revisionWindowEnabled
+            ?? UserDefaults.standard.bool(forKey: "speechrail.captionRevisionWindowEnabled")
+        windowFallbackNote = nil
+
         func makeClient(diarizationEnabled: Bool) -> any CaptionRealtimeClient {
             dependencies.makeRealtimeClient(
                 CaptionRealtimeClientConfiguration(
@@ -813,33 +896,37 @@ public final class CaptionSession {
                     scenePreset: .caption,
                     diarizationEnabled: diarizationEnabled,
                     apiKey: apiKey,
-                    expectedASRRevision: binding?.asrModelRevision
+                    expectedASRRevision: binding?.asrModelRevision,
+                    windowScene: windowEnabled ? .caption : nil
                 )
             )
         }
         let diarizationRequested = diarizationActive
-        var client = makeClient(diarizationEnabled: diarizationRequested)
+        var diarizationEnabled = diarizationRequested
+        var client = makeClient(diarizationEnabled: diarizationEnabled)
         var diarizationUnavailableNote: String?
-        do {
-            try await client.connect()
-        } catch {
-            let unavailableCode = (error as? RealtimeASRClient.Failure)?.diarizationUnavailableCode
-            guard diarizationRequested, unavailableCode != nil else {
-                await source.stop()
-                self.source = nil
-                throw Blocked(.serviceNotReady(error.localizedDescription))
-            }
-            client = makeClient(diarizationEnabled: false)
+        while true {
             do {
                 try await client.connect()
+                break
             } catch {
-                await source.stop()
-                self.source = nil
-                throw Blocked(.serviceNotReady(error.localizedDescription))
+                await client.close()
+                let failure = error as? RealtimeASRClient.Failure
+                if windowEnabled, failure?.revisionWindowUnavailable == true {
+                    windowEnabled = false
+                    windowFallbackNote = "当前服务暂不支持回溯修正，已使用标准转写继续记录。"
+                } else if diarizationEnabled, failure?.diarizationUnavailableCode != nil {
+                    diarizationEnabled = false
+                    diarizationUnavailableNote = "这场没有标出谁在说话；正文照常记录。"
+                } else {
+                    await source.stop()
+                    self.source = nil
+                    throw Blocked(.serviceNotReady(error.localizedDescription))
+                }
+                client = makeClient(diarizationEnabled: diarizationEnabled)
             }
-            diarizationActive = false
-            diarizationUnavailableNote = "这场没有标出谁在说话；正文照常记录。"
         }
+        diarizationActive = diarizationEnabled
         self.client = client
         // Gap3：续接只重置 uid 坐标系，面板上已标出的标签/改名/计数保留。
         // 以前这里不动账本——uid 表残留旧连接的坐标，迟到修订可能串写。
@@ -856,6 +943,7 @@ public final class CaptionSession {
         blocked = nil
         phase = .running
         let identity = beginPreviewGeneration(captureStartedAt: Date())
+        beginWindowCapture(enabled: windowEnabled, identity: identity, captureStartedAt: Date())
         startPump(stream: stream, client: client, identity: identity)
     }
 
@@ -941,7 +1029,22 @@ public final class CaptionSession {
              .ttsAudio(_, _, _), .ttsEnded(_, _, _, _, _):
             // 字幕会话不接线 TTS：增量 utterance 属于助手那一层。
             break
+        case .diarizationConfigured(let capacity, let serverSessionID):
+            if let recordID = sessionID {
+                labeling.configureCapacity(capacity, recordID:recordID,
+                    generation:identity.generation,serverSessionID:serverSessionID,inputEpoch:0)
+            }
+        case .transcriptionWindow(let event):
+            guard let capture = windowCapture, capture.identity == identity else { return }
+            let admission = capture.apply(event, observedAt: Date())
+            let text = capture.visibleText
+            partialText = text.isEmpty ? nil : text
+            if admission == .rejected || capture.queue.rejectionCount > 0 {
+                lastFailure = "部分文字尚未保存，已暂停接收新的修订。请保留恢复内容。"
+                Task { @MainActor in await self.enterInterrupted(.streamFailed(self.lastFailure ?? "保存队列已满")) }
+            }
         case .partial(let itemID, let delta):
+            guard windowCapture == nil else { return }
             _ = previewLedger.acceptDelta(
                 identity: identity,
                 itemID: itemID,
@@ -950,6 +1053,7 @@ public final class CaptionSession {
             )
             partialText = previewLedger.visiblePartial
         case .partialSnapshot(let itemID, let revision, let text, _):
+            guard windowCapture == nil else { return }
             _ = previewLedger.acceptSnapshot(
                 identity: identity,
                 itemID: itemID,
@@ -959,6 +1063,7 @@ public final class CaptionSession {
             )
             partialText = previewLedger.visiblePartial
         case .segmentClosed(let itemID, let sampleSpan, let reason, let commitEventID):
+            guard windowCapture == nil else { return }
             guard let closeReason = TranscriptPreviewLedger.SegmentCloseReason(
                 rawValue: reason.rawValue
             ) else { return }
@@ -971,6 +1076,7 @@ public final class CaptionSession {
                 eventID: envelope.metadata.eventID
             )
         case .completed(let itemID, let transcript):
+            guard windowCapture == nil else { return }
             terminalCount += 1
             let outcome = previewLedger.resolveCommit(
                 identity: identity,
@@ -981,6 +1087,7 @@ public final class CaptionSession {
             guard case .commit(let committed) = outcome else { return }
             await commit(committed)
         case .failed(let itemID, let code, let message):
+            guard windowCapture == nil else { return }
             terminalCount += 1
             lastFailure = "\(code)：\(message)"
             let recoveryNote = previewLedger.recoveryNote(
@@ -1251,6 +1358,7 @@ public final class CaptionSession {
     /// 用户点「重新接上」就是新 epoch——序号与水位不重置（§6.5）。
     private func enterInterrupted(_ reason: BlockReason) async {
         await source?.stop()
+        windowCapture?.retainTail()
         source = nil
         uploadPump?.cancel()
         uploadPump = nil

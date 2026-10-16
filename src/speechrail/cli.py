@@ -164,9 +164,7 @@ def _parser() -> argparse.ArgumentParser:
         "--app-home", type=Path, help="managed app home used for automatic API-key discovery"
     )
 
-    setup = subcommands.add_parser(
-        "setup", help="choose and apply independent ASR and TTS specs"
-    )
+    setup = subcommands.add_parser("setup", help="choose and apply independent ASR and TTS specs")
     _add_spec_arguments(setup, with_auto=False)
     setup.add_argument("--app-home", type=Path, help="use this installed app home")
     setup.add_argument("--yes", action="store_true", help="apply without an interactive prompt")
@@ -231,6 +229,11 @@ def _parser() -> argparse.ArgumentParser:
     prepare.add_argument(
         "--json", action="store_true", help="emit JSONL progress and one result envelope"
     )
+    prepare_diarization = model_commands.add_parser("prepare-diarization")
+    prepare_diarization.add_argument("--backend", required=True, choices=("meeting_dynamic",))
+    prepare_diarization.add_argument("--app-home", type=Path)
+    prepare_diarization.add_argument("--yes", action="store_true")
+    prepare_diarization.add_argument("--json", action="store_true")
 
     agents = subcommands.add_parser(
         "agents", help="install and inspect the SpeechRail MCP + skill agent integration"
@@ -614,9 +617,7 @@ def _run_profile(args: argparse.Namespace) -> int:
                 managed_python=managed_python,
             )
         return _print_apply_result(
-            profile_commands.apply_profile(
-                args.asr_spec, args.tts_spec, app_home=app_home
-            ),
+            profile_commands.apply_profile(args.asr_spec, args.tts_spec, app_home=app_home),
             machine_output=machine_output,
         )
     if args.profile_command == "rollback":
@@ -659,6 +660,36 @@ def _run_model(args: argparse.Namespace) -> int:
 
     app_home = (args.app_home or _default_app_home()).resolve()
     machine_output = bool(getattr(args, "json", False))
+    if args.model_command == "prepare-diarization":
+        if not _confirm(args.yes):
+            if machine_output:
+                _print_machine(
+                    {
+                        "command": "model.prepare-diarization",
+                        "event": "result",
+                        "status": "cancelled",
+                        "error_code": "confirmation_required",
+                    }
+                )
+            else:
+                print("Cancelled.")
+            return 1
+        managed_python = _managed_runtime_for_mutation(app_home)
+        if managed_python is not None:
+            preparation_args: tuple[str, ...] = (
+                "model", "prepare-diarization", "--backend", args.backend, "--yes"
+            )
+            if machine_output:
+                preparation_args += ("--json",)
+            return _delegate_managed_command(
+                preparation_args, app_home, managed_python=managed_python
+            )
+        payload = model_commands.prepare_meeting_diarization_payload(app_home)
+        if machine_output:
+            _print_machine(payload)
+        else:
+            print("Meeting diarization assets verified; activation and restart are separate.")
+        return 0
     if args.model_command == "catalog":
         payload = model_commands.model_catalog_payload(catalog=load_catalog())
         if machine_output:
@@ -817,10 +848,7 @@ def _run_setup(args: argparse.Namespace) -> int:
     if explicit:
         print(f"Selected specs: ASR={asr_spec}, TTS={tts_spec}")
     else:
-        print(
-            "Recommended specs by physical memory: "
-            f"ASR={recommended_asr}, TTS={recommended_tts}"
-        )
+        print(f"Recommended specs by physical memory: ASR={recommended_asr}, TTS={recommended_tts}")
     profiles = {item.id: item for item in profile_commands.list_profiles()}
     asr_summary = profiles.get(asr_spec)
     tts_summary = profiles.get(tts_spec)
@@ -946,7 +974,7 @@ def _reported_service_version(base_url: str, *, app_home: Path | None) -> str | 
     try:
         with urlopen(Request(f"{base_url}/health", headers=headers), timeout=5.0) as response:
             payload = json.loads(response.read().decode("utf-8"))
-    except (HTTPError, URLError, OSError, ValueError):
+    except HTTPError, URLError, OSError, ValueError:
         return None
     reported = payload.get("version") if isinstance(payload, dict) else None
     return reported if isinstance(reported, str) else None
@@ -978,12 +1006,7 @@ def _describe_install_event(event: dict[str, object]) -> str | None:
     target = artifact if isinstance(artifact, str) else event.get("file")
     done = event.get("bytes")
     expected = event.get("expected_bytes")
-    if (
-        phase == "download"
-        and isinstance(done, int)
-        and isinstance(expected, int)
-        and expected > 0
-    ):
+    if phase == "download" and isinstance(done, int) and isinstance(expected, int) and expected > 0:
         # One line per 10%: a chunk-by-chunk log would bury the interesting phases.
         percent = min(max(done, 0), expected) * 10 // expected * 10
         reported = expected * percent // 100
@@ -1021,7 +1044,7 @@ def _install_download_plan(
                 runtime_lock=runtime_lock,
             )
         )
-    except (KeyError, ModelStoreError, OSError, ValueError):
+    except KeyError, ModelStoreError, OSError, ValueError:
         return None
     keys = (
         required_spec_artifact(asr_spec, "asr"),  # type: ignore[arg-type]
@@ -1030,9 +1053,7 @@ def _install_download_plan(
     )
     artifacts_by_key = {artifact.key: artifact for artifact in catalog.artifacts}
     pending = tuple(
-        key
-        for key in keys
-        if key is not None and key not in covered and key in artifacts_by_key
+        key for key in keys if key is not None and key not in covered and key in artifacts_by_key
     )
     size = sum(item.size for key in pending for item in artifacts_by_key[key].files)
     return pending, size
@@ -1124,8 +1145,7 @@ def _run_install(args: argparse.Namespace) -> int:
         else:
             pending, pending_bytes = plan
             print(
-                f"Models: downloading {', '.join(pending)} "
-                f"(up to {_format_bytes(pending_bytes)})."
+                f"Models: downloading {', '.join(pending)} (up to {_format_bytes(pending_bytes)})."
             )
     if not _confirm(args.yes):
         if machine_output:
@@ -1191,7 +1211,7 @@ def _run_install(args: argparse.Namespace) -> int:
         if "to be stopped" in str(exc):
             raise ServiceError(
                 "install must not replace a running service; stop it first: "
-                f"{installed_cli} service stop --app-home \"{app_home}\""
+                f'{installed_cli} service stop --app-home "{app_home}"'
             ) from exc
         if "different managed selection is already configured" in str(exc):
             raise ServiceError(
@@ -1220,9 +1240,7 @@ def _run_install(args: argparse.Namespace) -> int:
             # release answers `/health` with that older string while executing
             # the new code, so readiness alone reports a broken install as a
             # success. Compare identities and fail closed instead.
-            reported_version = _reported_service_version(
-                base_url, app_home=result.app_home
-            )
+            reported_version = _reported_service_version(base_url, app_home=result.app_home)
             if reported_version is not None and reported_version != _package_version():
                 version_mismatch = reported_version
     if machine_output:
@@ -1251,8 +1269,7 @@ def _run_install(args: argparse.Namespace) -> int:
         return 1 if version_mismatch is not None else 0
     if version_mismatch is not None:
         print(
-            f"Installed {wheel.name}, but the running service reports version "
-            f"{version_mismatch}."
+            f"Installed {wheel.name}, but the running service reports version {version_mismatch}."
         )
         print(
             "The installed code and the version it advertises disagree, so this "
@@ -1283,8 +1300,7 @@ def _run_install(args: argparse.Namespace) -> int:
         print("The service is installed but not started.")
         print(f'Start it: "{runtime_cli}" service start --app-home "{result.app_home}"')
     print(
-        f'Service CLI: "{runtime_cli}" service <status|start|stop> '
-        f'--app-home "{result.app_home}"'
+        f'Service CLI: "{runtime_cli}" service <status|start|stop> --app-home "{result.app_home}"'
     )
     print(f"Change profile later: double-click {setup_launcher_path(result.app_home)}")
     return 0
@@ -1304,9 +1320,7 @@ def _diagnostic_base_url(value: str) -> str:
     return value.rstrip("/")
 
 
-def _diagnostic_json(
-    url: str, *, timeout: float, app_home: Path | None = None
-) -> object:
+def _diagnostic_json(url: str, *, timeout: float, app_home: Path | None = None) -> object:
     if timeout <= 0:
         raise ServiceError("diagnose timeout must be positive")
     headers = {"Accept": "application/json"}
@@ -1328,9 +1342,7 @@ def _diagnostic_json(
         ) from exc
 
 
-def _diagnostic_snapshot(
-    health: object, models: object, voices: object
-) -> dict[str, object]:
+def _diagnostic_snapshot(health: object, models: object, voices: object) -> dict[str, object]:
     if not isinstance(health, dict):
         raise ServiceError("diagnose received an invalid health payload")
     raw_models = models.get("data") if isinstance(models, dict) else None
@@ -1349,8 +1361,7 @@ def _diagnostic_snapshot(
             available_voice_count += 1
 
     readiness = {
-        name: health.get(f"{name}_ready") is True
-        for name in ("asr", "tts", "diarization")
+        name: health.get(f"{name}_ready") is True for name in ("asr", "tts", "diarization")
     }
     recovery: list[str] = []
     if not readiness["asr"] or not readiness["tts"]:
@@ -1362,10 +1373,7 @@ def _diagnostic_snapshot(
         "status": health.get("status"),
         "profile": health.get("profile"),
         "readiness": readiness,
-        "worker_state": {
-            name: health.get(f"{name}_state")
-            for name in ("asr", "tts", "streaming")
-        },
+        "worker_state": {name: health.get(f"{name}_state") for name in ("asr", "tts", "streaming")},
         "tts_lifecycle": health.get("tts_lifecycle")
         if isinstance(health.get("tts_lifecycle"), dict)
         else None,
@@ -1391,15 +1399,9 @@ def _diagnostic_snapshot(
 
 def _run_diagnose(args: argparse.Namespace) -> int:
     base_url = _diagnostic_base_url(args.base_url)
-    health = _diagnostic_json(
-        f"{base_url}/health", timeout=args.timeout, app_home=args.app_home
-    )
-    models = _diagnostic_json(
-        f"{base_url}/v1/models", timeout=args.timeout, app_home=args.app_home
-    )
-    voices = _diagnostic_json(
-        f"{base_url}/v1/voices", timeout=args.timeout, app_home=args.app_home
-    )
+    health = _diagnostic_json(f"{base_url}/health", timeout=args.timeout, app_home=args.app_home)
+    models = _diagnostic_json(f"{base_url}/v1/models", timeout=args.timeout, app_home=args.app_home)
+    voices = _diagnostic_json(f"{base_url}/v1/voices", timeout=args.timeout, app_home=args.app_home)
     print(json.dumps(_diagnostic_snapshot(health, models, voices), sort_keys=True))
     return 0
 
@@ -1443,7 +1445,7 @@ def _managed_service_python(app_home: Path) -> Path | None:
     try:
         if _venv_roots(candidate) & _venv_roots(Path(sys.executable)):
             return None
-    except (OSError, RuntimeError):
+    except OSError, RuntimeError:
         return None
     return candidate
 
@@ -1509,12 +1511,8 @@ def _managed_runtime_for_mutation(app_home: Path) -> Path | None:
     managed_python = _managed_service_python(app_home)
     if managed_python is not None:
         return managed_python
-    if (
-        (layout.current_runtime.exists() or layout.current_runtime.is_symlink())
-        and (
-            not layout.current_python.is_file()
-            or not os.access(layout.current_python, os.X_OK)
-        )
+    if (layout.current_runtime.exists() or layout.current_runtime.is_symlink()) and (
+        not layout.current_python.is_file() or not os.access(layout.current_python, os.X_OK)
     ):
         raise ServiceError("managed runtime Python is missing or not executable")
     return None
@@ -1549,10 +1547,7 @@ def _run_service(
         result = run_preflight(
             layout,
             require_tts=not asr_only,
-            host_python=(
-                host_python
-                or (managed_python if managed_python.is_file() else None)
-            ),
+            host_python=(host_python or (managed_python if managed_python.is_file() else None)),
         )
         if json_output:
             _print_machine_preflight(result)
@@ -1591,10 +1586,10 @@ def _run_service(
         if json_output:
             state = "unknown"
             lowered = status_output.lower()
-            if (
-                "state = running" in lowered
-                or status_output.strip().lower() in {"running", "active"}
-            ):
+            if "state = running" in lowered or status_output.strip().lower() in {
+                "running",
+                "active",
+            }:
                 state = "running"
             elif "state = stopped" in lowered or "state = exited" in lowered:
                 state = "stopped"

@@ -1,6 +1,6 @@
 # SpeechRail Realtime ASR/TTS 协议契约
 
-> 契约版本：`6.3.2`；生效日期：2026-10-16。唯一机器 schema 是
+> 契约版本：`6.5.0`；生效日期：2026-10-16。唯一机器 schema 是
 > [`realtime-events.schema.json`](realtime-events.schema.json)，字段责任表是
 > [`realtime-field-matrix.json`](realtime-field-matrix.json)。
 
@@ -433,3 +433,85 @@ swift test --package-path macos/SpeechRailApp --filter RealtimeContractTests
 
 schema 与共享 fixture 同时由 Python、Swift 和脚本读取。契约、测试与实现必须同批更新；HTTP
 OpenAPI 不复制 WebSocket schema。MCP 仍是 REST proxy，不转发 `/v1/realtime` WebSocket handle。
+
+
+## Revision window transcription
+
+A transcription session opts in before audio with
+`session.speechrail.window={"mode":"revision_window_v1","scene":"meeting"|"caption"}`.
+`window` and `asr` are mutually exclusive. The server echoes `window.policy` only
+when the feature, shared-worker window IPC, and word alignment are ready. A
+missing prerequisite rejects negotiation before capture. Clients cannot override
+the effective window budgets. The feature is disabled by default.
+
+| Scene | Owned input | Review grace | Left context | Maximum decode | Preview cadence | Finalization budget |
+| --- | --- | --- | --- | --- | --- | --- |
+| meeting | 20 s | 2 s | 2 s | 24 s | 1500 ms | 15 s |
+| caption | 4 s | 8 s | 2 s | 14 s | 500 ms | 5 s |
+
+All public spans are half-open 24 kHz samples. Internally each raw 16 kHz sample
+enters a continuous RAM ring once, before speech admission. Pre-roll decisions
+reference this ring. The silence frontier cannot pass speech-admission retained
+input or unscored VAD leftovers. `silence/vad_not_admitted` describes admission,
+not human-annotated acoustic truth.
+
+`window.updated` carries the complete mutable `units`, including deletions.
+The identity `(session_id,input_epoch,window_id)` stays fixed within an input
+epoch. `window_revision` increases for any changed complete snapshot; a client
+may skip snapshots and must reject older ones. Each unit has an independent
+`text_revision`. There are no stable partial-prefix promises in this mode.
+The optional boolean `falling_behind` is present on server snapshots and
+transactions. For captions it becomes true after three observations, at least
+500 ms apart, of admitted speech without a displayed preview for at least 2 s
+of accepted audio. It clears when previews or terminal coverage catch up. This
+is an input-progress warning, not a human word-timing measurement. A status
+change has a new window revision even when the text stays unchanged. Captions
+finish one pending owned-block preview before the context review is due; they
+do not wait through the review grace to display the last words of a block.
+
+`speechrail.transcription.window.sealed` and `.failed` carry `transaction_id`,
+`closed_span`, `sealed_through_sample`, `remaining_units`, and continuous
+`coverage`; `.sealed` carries `final_units`, while `.failed` carries only `failed_items` with
+`recovery_text` and a bounded reason. The closed interval starts at the preceding
+frontier. No transaction may cut an owned word/unit or rewrite sealed text.
+Empty reviewed text still has coverage. Clients apply a whole transaction
+atomically, then persist a frozen batch with its local record/connection binding.
+Official `segment_closed` and one `completed` or `failed` follow each item in the
+transaction. They mirror the transaction and must not create duplicate rows.
+
+The optional commit receipt follows all frozen window transactions and item
+terminals. In this mode it additionally requires `window_revision`,
+`sealed_through_sample`, and `failed_items_count`. It confirms retirement of
+accepted audio, including explicitly failed coverage; database acknowledgment and
+auxiliary speaker finalization are separate barriers. A failed event delivery
+cannot yield a success receipt. A lost receipt never authorizes speculative clear.
+
+Window limits are 32 mutable units, 8192 Unicode code points per unit, 32768 total
+code points, 256 KiB per event, identifiers of 1–128 code points, and a 16 MiB PCM
+copy reservation. Integers reject booleans, fractions and unsafe values. Recent
+64 fingerprints support duplicate detection within one connection; reconnect does
+not resume the old window. Contextual cropping requires complete word evidence;
+ambiguous boundaries permit one prefix-free owned-only review under the same
+deadline. Failure retains recovery text instead of fabricating timestamps.
+
+## 匿名分人后端与容量
+
+`session.speechrail.diarization` 接受 `enabled` 和可选 `backend`，后者仅支持
+`sortformer`、`meeting_dynamic`；省略时为既有 `sortformer`。输入开始后不能更换后端。
+同一次捕获仅运行所选的一种分人后端；分人不可用不会改写已确认的文字。
+
+回显包含 `enabled/backend/max_speakers/system_cap`。能力发现对每个后端分别返回
+`ready/reason/max_speakers/system_cap`，并与本地制品、对齐能力和实际准备状态一致。
+`system_cap` 是工程身份容量，不能作为准确率证明。`meeting_dynamic` 容量为 32；
+`max_speakers` 是独立质量验收通过的人数上限，未认证时为 null、生产 not-ready。
+服务不会在请求中下载制品，也不会用四槽结果冒充多人识别成功。
+
+动态活动使用私有 v2 IPC，Python 严格将全场 slot n 映射为 `S(n+1)`，不按到达顺序重新编号。
+标签只在分人 session 内有效，不表示真实身份。App 为记录、连接与输入代次绑定新的本地 scope，
+界面按首次出现显示「说话人 1、2……」，不展示内部键。重连后的 S1 不能关联到旧人的保存行。
+原型与音频只保留在有界 RAM；不保存声纹库或跨会话身份。
+
+未知活动原因限定为 `identity_uncertain/speaker_capacity/activity_gap/audio_expired/model_not_ready`。
+对齐缺失、身份不确定和后台故障分别诊断；未知不能当作正确识别，也不能默认归给第一位说话人。
+关闭等待结束不等于原生计算已停止；实际 child 回收未确认时保持资源所有权并隔离后续准入，
+由操作者恢复服务，不循环重试。

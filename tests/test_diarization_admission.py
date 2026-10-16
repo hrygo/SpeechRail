@@ -38,3 +38,25 @@ def test_diarization_admission_rejects_a_second_session_and_releases_after_close
         assert admission.active == 0
 
     asyncio.run(scenario())
+
+
+def test_unconfirmed_cleanup_remains_owned_after_context_exit() -> None:
+    import weakref
+
+    class Owner:
+        pass
+
+    async def scenario() -> None:
+        admission = DiarizationAdmission()
+        owner = Owner()
+        reference = weakref.ref(owner)
+        async with admission.reserve():
+            admission.quarantine(owner)
+        del owner
+        assert reference() is not None
+        assert admission.active == 1 and admission.quarantined
+        with pytest.raises(DiarizationAdmissionFullError):
+            async with admission.reserve():
+                pytest.fail("unreaped child cannot be replaced")
+
+    asyncio.run(scenario())

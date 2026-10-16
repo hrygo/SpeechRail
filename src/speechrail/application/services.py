@@ -14,6 +14,7 @@ from speechrail.application.render_receipts import RenderReceiptRegistry
 from speechrail.application.tts_stream import TtsStreamService
 from speechrail.application.tts_timings import TtsTimingRegistry
 from speechrail.backends.diarization.coreml import CoreMLSortformerEngine
+from speechrail.backends.diarization.meeting import MeetingDiarizationEngine
 from speechrail.backends.model_identity import inspect_model, is_observed_runtime_revision
 from speechrail.backends.qwen3_alignment import Qwen3AlignmentConfig, Qwen3AlignmentWorker
 from speechrail.backends.qwen3_native import (
@@ -34,6 +35,7 @@ from speechrail.backends.qwen3_tts import (
     Qwen3TtsWorker,
     TtsModelVariant,
 )
+from speechrail.backends.qwen3_window import NativeWindowAsrFactory
 from speechrail.backends.tts_execution_adapter import bind_tts_execution
 from speechrail.config import Settings
 from speechrail.config.model_catalog import ModelRole
@@ -48,6 +50,7 @@ from speechrail.domain.ports import (
     RealtimeAsrFactory,
     SpeechSynthesizer,
     TranscriptionRequest,
+    WindowAsrFactory,
 )
 from speechrail.domain.tts_execution import TtsExecutionPorts
 from speechrail.domain.tts_routing import TtsExecutionMode, tts_capability_key
@@ -67,8 +70,9 @@ from speechrail.runtime.model_budget import (
     detect_system_memory_bytes,
 )
 from speechrail.runtime.registry import VOICE_DESIGN_ROLE, engine_variant_for_role
-from speechrail.runtime.resource_governor import ResourceGovernor
+from speechrail.runtime.resource_governor import ResourceGovernor, WorkClass
 from speechrail.runtime.resource_observability import service_physical_footprint
+from speechrail.runtime.window_pcm import PcmBudget
 from speechrail.runtime.worker_lease import EvictableWorker, WorkerIdleEvictor, WorkerLeaseLock
 
 Transcribe = Callable[[bytes, str | None, str, bool], Awaitable[TranscriptResult]]
@@ -129,10 +133,16 @@ def _declared_footprint(
         raise ValueError("tts_worker_count must be positive")
     return ComponentFootprint(
         asr_bytes=_bytes(asr_enabled, settings.asr_resident_bytes),
-        tts_bytes=_bytes(
-            tts_enabled, settings.tts_resident_bytes * tts_worker_count
+        tts_bytes=_bytes(tts_enabled, settings.tts_resident_bytes * tts_worker_count),
+        diarization_bytes=_bytes(
+            diarization_enabled,
+            max(
+                settings.diarization_resident_bytes,
+                settings.diarization_dynamic_resident_bytes
+                if settings.diarization_dynamic_enabled
+                else 0,
+            ),
         ),
-        diarization_bytes=_bytes(diarization_enabled, settings.diarization_resident_bytes),
         service_bytes=_SERVICE_OVERHEAD_BYTES,
         shared_dependency_bytes=settings.shared_resident_bytes,
         active_peak_bytes=settings.active_peak_resident_bytes,
@@ -165,7 +175,12 @@ def _undeclared_composed_components(
         (
             "diarization",
             diarization_from_settings and diarization_enabled,
-            settings.diarization_resident_bytes,
+            max(
+                settings.diarization_resident_bytes,
+                settings.diarization_dynamic_resident_bytes
+                if settings.diarization_dynamic_enabled
+                else 0,
+            ),
         ),
     )
     return tuple(name for name, composed, declared in pairs if composed and declared <= 0)
@@ -255,6 +270,7 @@ class AppOverrides:
     transcribe: Transcribe | None = None
     batch_transcriber: BatchTranscriber | None = None
     realtime_asr_factory: RealtimeAsrFactory | None = None
+    window_asr_factory: WindowAsrFactory | None = None
     diarization_engine: DiarizationEngine | None = None
     text_aligner: AlignTextPort | None = None
     tts_synthesizer: SpeechSynthesizer | None = None
@@ -283,12 +299,65 @@ class AppServices:
     governor: ResourceGovernor
     lifecycle: RuntimeLifecycle
     text_aligner: AlignTextPort | None = None
+    window_asr_factory: WindowAsrFactory | None = None
     alignment_admission: AlignmentAdmission = field(default_factory=AlignmentAdmission)
     diarization_admission: DiarizationAdmission = field(default_factory=DiarizationAdmission)
     metrics: Metrics = field(default_factory=Metrics)
     render_receipts: RenderReceiptRegistry = field(default_factory=RenderReceiptRegistry)
     tts_timings: TtsTimingRegistry = field(default_factory=TtsTimingRegistry)
     tts_streams: TtsStreamService | None = None
+    diarization_backends: dict[str, DiarizationEngine] = field(default_factory=dict)
+    pcm_budget: PcmBudget = field(default_factory=PcmBudget)
+
+    def diarization_engine_for(self, backend: str) -> DiarizationEngine | None:
+        return (
+            self.diarization_engine
+            if backend == "sortformer"
+            else self.diarization_backends.get(backend)
+        )
+
+    def diarization_backend_status(self, backend: str) -> dict[str, object]:
+        if backend == "sortformer":
+            return {
+                **self.diarization_status,
+                "backend": backend,
+                "max_speakers": 4,
+                "system_cap": 4,
+            }
+        engine = self.diarization_engine_for(backend)
+        readiness = getattr(engine, "readiness", None)
+        ready = (isinstance(readiness, DiarizationReadiness) and readiness.ready
+                 and self.text_aligner is not None)
+        return {
+            "configured": engine is not None,
+            "ready": ready,
+            "backend": backend,
+            "system_cap": 32,
+            "max_speakers": getattr(engine, "max_speakers", None),
+            "code": None if ready else "diarization_not_available",
+            "message": "meeting diarization is ready"
+            if ready
+            else "meeting diarization is not certified or configured",
+        }
+
+    @property
+    def revision_window_ready(self) -> bool:
+        return (self.settings.asr_revision_windows_enabled
+                and getattr(self.window_asr_factory, "ready", False) is True
+                and getattr(self.text_aligner, "word_alignment_ready", False) is True)
+
+    async def prepare_revision_window(self) -> None:
+        if not self.settings.asr_revision_windows_enabled or self.window_asr_factory is None:
+            return
+        # Cold loading uses the same fail-closed compute lane as recognition.
+        async with self.governor.reserve(WorkClass.REALTIME_ASR,
+                                        deadline=self.settings.request_timeout_seconds):
+            prepare = getattr(self.window_asr_factory, "prepare", None)
+            if prepare is not None:
+                await prepare()
+            prepare = getattr(self.text_aligner, "prepare", None)
+            if prepare is not None:
+                await prepare()
 
     @property
     def asr_ready(self) -> bool:
@@ -368,7 +437,12 @@ class AppServices:
             ),
             "diarization": declared_bytes(
                 diarization_enabled,
-                settings.diarization_resident_bytes,
+                max(
+                    settings.diarization_resident_bytes,
+                    settings.diarization_dynamic_resident_bytes
+                    if settings.diarization_dynamic_enabled
+                    else 0,
+                ),
             ),
         }
         declared_footprint = (
@@ -746,7 +820,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         transcribe is not None or batch_transcriber is not None or realtime_asr_factory is not None
     )
     tts_enabled = tts_synthesizer is not None
-    diarization_enabled = diarization_engine is not None
+    diarization_enabled = diarization_engine is not None or settings.diarization_dynamic_enabled
     tts_worker_count = _resident_tts_worker_count(tts_synthesizer)
     allow_heavy_overlap, policy_reason = _heavy_overlap_policy(
         settings,
@@ -941,12 +1015,23 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         poll_seconds=settings.job_poll_seconds,
         max_job_attempts=settings.max_job_attempts,
     )
+    pcm_budget = PcmBudget()
+    diarization_backends: dict[str, DiarizationEngine] = {}
+    if (settings.diarization_dynamic_enabled and settings.diarization_dynamic_model_dir is not None
+            and settings.diarization_dynamic_policy_path is not None):
+        diarization_backends["meeting_dynamic"] = MeetingDiarizationEngine(
+            model_dir=settings.diarization_dynamic_model_dir,
+            policy_path=settings.diarization_dynamic_policy_path,
+            executable=settings.diarization_worker_path, governor=governor, pcm_budget=pcm_budget,
+            metrics=metrics)
     return AppServices(
         settings=settings,
         transcribe=transcribe,
         batch_transcriber=batch_transcriber,
         realtime_asr_factory=realtime_asr_factory,
         diarization_engine=diarization_engine,
+        diarization_backends=diarization_backends,
+        pcm_budget=pcm_budget,
         tts_synthesizer=tts_synthesizer,
         tts_execution=tts_execution,
         voice_store=voice_store,
@@ -959,6 +1044,12 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         governor=governor,
         lifecycle=lifecycle,
         text_aligner=text_aligner,
+        window_asr_factory=(
+            overrides.window_asr_factory
+            or (
+                NativeWindowAsrFactory(shared_owner, governor) if shared_owner is not None else None
+            )
+        ),
         diarization_admission=diarization_admission,
         alignment_admission=alignment_admission,
         metrics=metrics,

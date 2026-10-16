@@ -229,9 +229,14 @@ extension MeetingView {
     private var filteredReviewLines: [TranscriptLine] {
         let keyword = transcriptSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !keyword.isEmpty else { return reviewLines }
+        let ordinals = SpeakerLabeling.displayOrdinals(for: reviewLines.compactMap(\.speakerLabel))
         return reviewLines.filter { line in
-            line.text.localizedCaseInsensitiveContains(keyword) ||
-            (line.speakerLabel.flatMap { reviewSpeakerNames[$0] ?? $0 }?.localizedCaseInsensitiveContains(keyword) ?? false)
+            let speakerMatches = line.speakerLabel.map { label in
+                SpeakerLabeling.chipText(label: label, displayName: reviewSpeakerNames[label],
+                                         ordinal: ordinals[label])
+                    .localizedCaseInsensitiveContains(keyword)
+            } ?? false
+            return line.text.localizedCaseInsensitiveContains(keyword) || speakerMatches
         }
     }
 
@@ -287,7 +292,8 @@ extension MeetingView {
     }
 
     private var transcriptBody: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+        let ordinals = SpeakerLabeling.displayOrdinals(for: reviewLines.compactMap(\.speakerLabel))
+        return VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
             if reviewLines.isEmpty {
                 Text("这一场还没有文字记录。")
                     .font(SpeechRailDesignTokens.Typography.callout)
@@ -311,7 +317,7 @@ extension MeetingView {
                         Text(
                             SpeakerLabeling.chipText(
                                 label: label,
-                                displayName: reviewSpeakerNames[label]
+                                displayName: reviewSpeakerNames[label], ordinal: ordinals[label]
                             )
                         )
                         .font(SpeechRailDesignTokens.Typography.caption)

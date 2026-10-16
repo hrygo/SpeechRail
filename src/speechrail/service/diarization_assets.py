@@ -446,3 +446,70 @@ __all__ = [
     "inspect_diarization_assets",
     "prepare_diarization_assets",
 ]
+
+
+MEETING_MODEL_REVISION = '7eab74f3463c736418d0eb10296261ae581146c9'
+MEETING_MODEL_REPOSITORY = 'FluidInference/speaker-diarization-coreml'
+MEETING_MODEL_FILES: dict[str, tuple[int, str]] = {
+    'Embedding.mlmodelc/analytics/coremldata.bin': (243, '8d6706436639b53830b4dbe8aaf9c9a843f7f582d63e16f3cb8bb7c6ccd58682'),
+    'Embedding.mlmodelc/coremldata.bin': (704, '4a705bac27d151d9642f37609296042a15602a42253039e0921dc9e75da7e004'),
+    'Embedding.mlmodelc/metadata.json': (2818, '1854371eb6b438fb8aeac96afb45c999af7902581c06afdfcd7ff3cb1ce66be5'),
+    'Embedding.mlmodelc/model.mil': (78432, '22fa958aef72a561c21f874a07cbdcd30fdf40ee961c0bc2fb67c119273b46d3'),
+    'Embedding.mlmodelc/weights/weight.bin': (13412288, '99356b2985b8d43880a657024d941d450b38820451ccff903f76ed4e52d1868b'),
+    'FBank.mlmodelc/analytics/coremldata.bin': (243, '0e8bd3a8b82ac123580989f490e4d9245127c535857630b543311268accc3f0a'),
+    'FBank.mlmodelc/coremldata.bin': (853, '57ac436bb0671cbb5527a339134d695f752eb77f7a18966b93c6835335595759'),
+    'FBank.mlmodelc/metadata.json': (3409, '2623785f5d186893b82d01e84aa33a7704ef763c3309e02055f22dc9d871ce9a'),
+    'FBank.mlmodelc/model.mil': (15667, '27aaeb21569e81bdbe2eef87789f50a37cfea800039bd134448a9417de2f30ed'),
+    'FBank.mlmodelc/weights/weight.bin': (1776896, '9e83fdd3ea78064b078069e4d9141603c61c47a27fd19e7e3142ff7476f8db36'),
+    'NOTICE.md': (4247, 'd8e53d399c5345cabc4763732ba096e7e18ff42c861d57b73edb73b0c9ce9356'),
+    'PROVENANCE.md': (3377, '0032bc1b7d01b6af2bb6eb8548a39c9a28fe5c1909f74166bc2ea2eb1cc27df6'),
+    'PldaRho.mlmodelc/analytics/coremldata.bin': (243, '8940ea6044dbcbefa22da8cc41e0b485e1fb5ed89aecaf37c6e0c483a97ddcd7'),
+    'PldaRho.mlmodelc/coremldata.bin': (763, '4d9741477f721c79b09fcdfe455110c4b7d4272e2de3496bf1729d966d3ee418'),
+    'PldaRho.mlmodelc/metadata.json': (2749, 'b314cf25a93e46b4076883a6f5a2f8848b73c3851bd9d36074d067f35a1c7945'),
+    'PldaRho.mlmodelc/model.mil': (7613, '83aee2e5310d19b5f202aea97d07a0e12102556d1b32ef3ed08b36f7f9725041'),
+    'PldaRho.mlmodelc/weights/weight.bin': (200192, '80f7d229202636d372428c90596f11a91545f07da77259f07153aaf225914a36'),
+    'Segmentation.mlmodelc/analytics/coremldata.bin': (243, '64265f8e7ad41a5f68d630c15288c2499cca5892ad49e20096819cdeac004cdb'),
+    'Segmentation.mlmodelc/coremldata.bin': (812, 'ea51481b8bd3e496ad3cf16f066ddaa37f20e8772eaac76b3393c28de20e06bc'),
+    'Segmentation.mlmodelc/metadata.json': (3410, '88dbf0b07208fe142e1729c2b4c974ad3599fcb2ae5d5f18fce782b225384124'),
+    'Segmentation.mlmodelc/model.mil': (43063, 'd37e4ce30b406a6b34f765f769b9baed3178cc0c2b2e299c641daa43a052dd3f'),
+    'Segmentation.mlmodelc/weights/weight.bin': (5959360, 'c3189a64946c75bc24fcb98afe89ad78c52bdbadfdf65e857fb1b81e2cc9fbb2'),
+    'plda-parameters.json': (89416, '38ee28d4269c076cef254ee760bbd811f0738a92e0f01f9699ad372828c5de8f'),
+    'provenance.json': (10048, '0353430db062715c411ba32e66cb435b9caee2662bccdb298f9e5d1bae760872'),
+}
+
+
+def inspect_meeting_dynamic_assets(root: Path, *, files: dict[str, tuple[int, str]] | None = None) -> bool:
+    """Verify only local bytes; this function never prepares, loads or downloads."""
+    expected = MEETING_MODEL_FILES if files is None else files
+    if _inspect_directory(root, expected)[0] != "verified":
+        return False
+    try:
+        import base64
+        import json
+        import math
+        import struct
+        tensors = json.loads((root / "plda-parameters.json").read_text())["tensors"]
+        raw = base64.b64decode(tensors["psi"]["data_base64"], validate=True)
+        if not raw or len(raw) % 4:
+            return False
+        values = struct.unpack("<" + "f" * (len(raw) // 4), raw)
+        return all(math.isfinite(value) and value > 0 for value in values)
+    except (KeyError, TypeError, ValueError, OSError):
+        return False
+
+
+def prepare_meeting_dynamic_assets(base: Path, *,
+    fetch: Callable[[str], Iterator[bytes]] | None = None,
+    files: dict[str, tuple[int, str]] | None = None,
+    progress: ProgressCallback | None = None) -> Path:
+    """Explicit preparation, same verified staging/publish chain as Sortformer."""
+    if not base.is_absolute() or base.is_symlink():
+        raise DiarizationAssetError("invalid meeting diarization preparation directory")
+    locked = MEETING_MODEL_FILES if files is None else files
+    name = "meeting-dynamic-" + MEETING_MODEL_REVISION
+    if fetch is not None:
+        return _publish_bundle(base=base, name=name, files=locked, fetch=fetch, progress=progress)
+    with httpx.Client(timeout=60, follow_redirects=True) as client:
+        return _publish_bundle(base=base, name=name, files=locked,
+            fetch=_huggingface_fetch(client, repository=MEETING_MODEL_REPOSITORY,
+                revision=MEETING_MODEL_REVISION, prefix=""), progress=progress)

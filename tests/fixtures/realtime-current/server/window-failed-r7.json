@@ -1,0 +1,42 @@
+{
+  "session_id": "sess-window",
+  "event_id": "evt-window-failed",
+  "sequence": 4,
+  "input_epoch": 0,
+  "window_id": "window-0",
+  "window_revision": 7,
+  "audio_span": {
+    "start": 96000,
+    "end": 192000
+  },
+  "sealed_through_sample": 192000,
+  "type": "speechrail.transcription.window.failed",
+  "transaction_id": "tx-2",
+  "closed_span": {
+    "start": 96000,
+    "end": 192000
+  },
+  "failed_items": [
+    {
+      "item_id": "item-2",
+      "owned_span": {
+        "start": 96000,
+        "end": 192000
+      },
+      "recovery_text": "合成恢复文字",
+      "reason": "decode_failed"
+    }
+  ],
+  "remaining_units": [],
+  "coverage": [
+    {
+      "span": {
+        "start": 96000,
+        "end": 192000
+      },
+      "outcome": "failed",
+      "item_id": "item-2",
+      "reason": "decode_failed"
+    }
+  ]
+}

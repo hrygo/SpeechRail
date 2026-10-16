@@ -2,7 +2,7 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.16.6"
+version: "3.17.0"
 date: 2026-10-16
 ---
 
@@ -19,6 +19,20 @@ date: 2026-10-16
 详见[有效能力快照与安全目录](effective-capabilities.md)。
 
 ## 1. 模型身份与别名映射
+
+会议与字幕可在输入前显式协商近期文字回溯：
+`session.speechrail.window={"mode":"revision_window_v1","scene":"meeting"|"caption"}`，
+与旧 `asr` 策略互斥。服务能力开关默认关闭；协商成功才采用完整窗口快照、封存事务和窗口水位，
+缺依赖时在采集前拒绝。客户端应说明降级范围后创建标准转写连接，不能在同一连接混用两种事件。
+完整事件、容量与采样率规则见[Realtime 窗口契约](../../contracts/realtime-openai.md#revision-window-transcription)。
+字幕快照的 `falling_behind` 表示已接收语音连续落后，客户端应提示正在追赶。
+块尾预览不等待后续上下文复核；正式文字仍按封存与保存屏障确认。
+
+分人以 `session.speechrail.diarization.backend` 单独选择。省略为既有 `sortformer`；
+`meeting_dynamic` 只有本地制品、对齐和独立质量认证均就绪时可用。
+`max_speakers=null` 表示尚未认证，`system_cap=32` 不代表可准确识别 32 人。
+分人不可用时可以明确选择继续记录文字；后台归属不能改变已经封存的正文。
+ASR 文字终态、数据库保存确认和说话人收尾是三个独立屏障。
 
 SpeechRail 对外暴露 Canonical（规范）模型名与 OpenAI 标准别名（Alias）：
 

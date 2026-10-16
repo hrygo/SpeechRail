@@ -268,3 +268,113 @@ final class AudioCaptureBoundaryTests: XCTestCase {
         return result
     }
 }
+
+final class CaptureStartDeadlineTests: XCTestCase {
+    func testUnresponsiveHelperHasBoundedStart() async {
+        do {
+            try await CaptureStartContinuation.wait(timeout: .milliseconds(5)) { _ in }
+            XCTFail("An unresponsive helper must not keep preparing forever")
+        } catch {
+            XCTAssertTrue(error is CaptureStartTimeout)
+        }
+    }
+
+    func testCanceledStartDoesNotAwaitTheRemoteReply() async {
+        let task = Task {
+            try await CaptureStartContinuation.wait(timeout: .seconds(60)) { _ in }
+        }
+        task.cancel()
+        do { try await task.value; XCTFail("Canceled start must finish") }
+        catch { XCTAssertTrue(error is CancellationError) }
+    }
+
+    func testCompletionBeforeAttachAndDuplicateRepliesResumeOnlyOnce() async throws {
+        let once = CaptureStartContinuation()
+        once.resume(returning: ())
+        once.resume(throwing: CaptureStartTimeout())
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            once.attach(continuation)
+        }
+        try await CaptureStartContinuation.wait(timeout: .milliseconds(50)) { once in
+            once.resume(returning: ())
+            once.resume(throwing: CaptureStartTimeout())
+        }
+    }
+
+    func testOperationWatchdogCannotWinAfterSuccessfulCompletion() {
+        let gate = CaptureOperationGate()
+        XCTAssertTrue(gate.claim())
+        XCTAssertFalse(gate.claim())
+    }
+
+    func testOldConnectionInvalidationCannotStopNewCapture() {
+        let ownership = CaptureConnectionOwnership()
+        let old = ownership.attach()
+        XCTAssertTrue(ownership.activate(old))
+        ownership.invalidate(old)
+        let fresh = ownership.attach()
+        XCTAssertTrue(ownership.acceptStart(fresh))
+        // The accepted start reaps the invalidated owner's hardware first.
+        ownership.clearActive()
+        XCTAssertTrue(ownership.activate(fresh))
+        ownership.invalidate(old)
+        XCTAssertFalse(ownership.ownsCapture(old))
+        XCTAssertTrue(ownership.isCurrent(fresh))
+        XCTAssertTrue(ownership.ownsCapture(fresh))
+    }
+
+    func testInvalidatedOrSupersededConnectionCannotStart() {
+        let ownership = CaptureConnectionOwnership()
+        let old = ownership.attach()
+        let fresh = ownership.attach()
+        XCTAssertFalse(ownership.activate(old))
+        XCTAssertTrue(ownership.activate(fresh))
+        ownership.invalidate(fresh)
+        XCTAssertFalse(ownership.isCurrent(fresh))
+        // The matching invalidation still owns cleanup of its active capture.
+        XCTAssertTrue(ownership.ownsCapture(fresh))
+        ownership.clearActive()
+        XCTAssertFalse(ownership.activate(fresh))
+        XCTAssertFalse(ownership.ownsCapture(fresh))
+    }
+
+    func testNewConnectionCannotReplaceLiveCapture() {
+        let ownership = CaptureConnectionOwnership()
+        let first = ownership.attach()
+        XCTAssertTrue(ownership.activate(first))
+        XCTAssertTrue(ownership.acceptStart(first))
+        let second = ownership.attach()
+        XCTAssertFalse(ownership.acceptStart(second))
+        XCTAssertFalse(ownership.activate(second))
+        XCTAssertTrue(ownership.ownsCapture(first))
+        ownership.invalidate(first)
+        XCTAssertTrue(ownership.acceptStart(second))
+        ownership.clearActive()
+        XCTAssertTrue(ownership.activate(second))
+        ownership.invalidate(first)
+        XCTAssertTrue(ownership.ownsCapture(second))
+    }
+
+    func testSupersededStartCannotPublishAfterNativeCleanup() {
+        let ownership = CaptureConnectionOwnership()
+        let first = ownership.attach()
+        XCTAssertTrue(ownership.activate(first))
+        ownership.invalidate(first)
+        let second = ownership.attach()
+        XCTAssertTrue(ownership.acceptStart(second))
+        let third = ownership.attach()
+        ownership.clearActive()
+        XCTAssertFalse(ownership.activate(second))
+        XCTAssertFalse(ownership.acceptStart(second))
+        XCTAssertTrue(ownership.acceptStart(third))
+        XCTAssertTrue(ownership.activate(third))
+    }
+
+    func testCaptureStartFailureKeepsTheRealOSStatusAcrossXPC() {
+        let error = CoreAudioTapCapture.Failure.deviceStartFailed(268451843).diagnosticError
+        XCTAssertEqual(error.code, 268451843)
+        XCTAssertEqual(error.userInfo["stage"] as? String, "device_start")
+        XCTAssertTrue(error.localizedDescription.contains("268451843"))
+        XCTAssertFalse(error.localizedDescription.contains("CoreAudioTapCapture.Failure error"))
+    }
+}

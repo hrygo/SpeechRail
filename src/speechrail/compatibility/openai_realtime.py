@@ -21,6 +21,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from speechrail.domain.asr_policy import ASRPolicy, resolve_effective_max_segment_ms
+from speechrail.domain.asr_window import WINDOW_MODE, WindowPolicy
 from speechrail.domain.ports import SegmentCloseReason
 from speechrail.domain.tts_stream import (
     DEFAULT_TTS_STREAM_LIMITS,
@@ -478,6 +479,9 @@ def session_payload(
     asr_policy: ASRPolicy | None = None,
     effective_max_segment_ms: int | None = None,
     request_timeout_ms: int | None = None,
+    window_scene: str | None = None,
+    diarization_backend: str | None = None,
+    diarization_max_speakers: int | None = None,
 ) -> dict[str, object]:
     """Render the single current ``session`` object shared by create/update.
 
@@ -503,11 +507,20 @@ def session_payload(
         "alignment": {"enabled": bool(alignment_enabled)},
         "diarization": {"enabled": bool(diarization_enabled)},
     }
+    if diarization_backend is not None:
+        speechrail["diarization"] = {"enabled": bool(diarization_enabled),
+            "backend": diarization_backend, "max_speakers": diarization_max_speakers,
+            "system_cap": 32 if diarization_backend == "meeting_dynamic" else 4}
     if endpointing is not None:
         speechrail["endpointing"] = dict(endpointing)
     if expected_asr_revision is not None:
         speechrail["expected_asr_revision"] = expected_asr_revision
-    if asr_policy is not None:
+    if window_scene is not None:
+        speechrail["window"] = {
+            "mode": WINDOW_MODE, "scene": window_scene,
+            "policy": WindowPolicy.for_scene(window_scene).to_wire_dict(),
+        }
+    elif asr_policy is not None:
         speechrail["asr"] = asr_policy.to_wire_dict(
             effective_max_segment_ms=(
                 effective_max_segment_ms
@@ -1039,6 +1052,7 @@ _SESSION_SPEECHRAIL_FIELDS: frozenset[str] = frozenset(
     {
         "task",
         "asr",
+        "window",
         "tts",
         "alignment",
         "diarization",
@@ -1144,6 +1158,7 @@ def apply_session_update(
     service_max_segment_ms: int | None = None,
     capability_max_segment_ms: int | None = None,
     decoder_max_segment_ms: int = 30_000,
+    revision_window_ready: bool = False,
 ) -> tuple[dict[str, object], dict[str, Any]]:
     """Validate the single ``session.update`` event and return its config.
 
@@ -1232,6 +1247,30 @@ def apply_session_update(
             "invalid_event", "session.speechrail.task must be a supported task"
         )
 
+    window_scene = (current_config or {}).get("window_scene")
+    if "window" in speechrail_obj:
+        raw_window = speechrail_obj["window"]
+        if (not isinstance(raw_window, dict) or set(raw_window) != {"mode", "scene"}
+                or raw_window.get("mode") != WINDOW_MODE
+                or raw_window.get("scene") not in ("meeting", "caption")):
+            raise RealtimeAdapterError(
+                "invalid_event", "window requires supported mode and scene only"
+            )
+        window_scene = raw_window["scene"]
+    if window_scene is not None:
+        if "asr" in speechrail_obj:
+            raise RealtimeAdapterError("invalid_event", "window and asr are mutually exclusive")
+        if not revision_window_ready:
+            raise RealtimeAdapterError(
+                "unsupported_operation", "revision window dependencies are not ready"
+            )
+        if keywords and (len(keywords) > 32 or sum(map(len, keywords)) > 512):
+            raise RealtimeAdapterError(
+                "invalid_event", "window keywords exceed the supported budget"
+            )
+        if prompt and len(prompt) > 512:
+            raise RealtimeAdapterError("prompt_too_long", "window context exceeds 512 codepoints")
+
     try:
         raw_asr_policy = speechrail_obj.get("asr")
         if "asr" in speechrail_obj:
@@ -1277,6 +1316,9 @@ def apply_session_update(
     config["model"] = resolved_asr or asr_model
     config["task"] = str(task)
     config["asr_policy"] = asr_policy
+    if window_scene is not None:
+        config["window_scene"] = window_scene
+        config["window_policy"] = WindowPolicy.for_scene(window_scene)
     config["effective_max_segment_ms"] = effective_max_segment_ms
     config["language"] = language
     config["prompt"] = prompt or ""
@@ -1332,14 +1374,20 @@ def apply_session_update(
     diarization_explicit = False
     if "diarization" in speechrail_obj:
         raw_diarization = speechrail_obj["diarization"]
-        if not isinstance(raw_diarization, dict) or set(raw_diarization) != {"enabled"}:
+        if (not isinstance(raw_diarization, dict) or "enabled" not in raw_diarization
+                or set(raw_diarization) - {"enabled", "backend"}):
             raise RealtimeAdapterError(
                 "invalid_event",
-                "session.speechrail.diarization requires boolean enabled only",
+                "session.speechrail.diarization requires boolean enabled and optional backend",
             )
         config["diarization_enabled"] = _boolean_field(
             raw_diarization["enabled"], label="speechrail.diarization.enabled"
         )
+        backend = raw_diarization.get("backend", config.get("diarization_backend", "sortformer"))
+        if not isinstance(backend, str) or backend not in {"sortformer", "meeting_dynamic"}:
+            raise RealtimeAdapterError("invalid_event", "unsupported diarization backend")
+        if "backend" in raw_diarization or "diarization_backend" in config:
+            config["diarization_backend"] = backend
         diarization_explicit = True
     config["diarization_explicit"] = diarization_explicit
 
@@ -1369,6 +1417,7 @@ def apply_session_update(
         asr_policy=asr_policy,
         effective_max_segment_ms=effective_max_segment_ms,
         request_timeout_ms=request_timeout_ms,
+        window_scene=window_scene,
     )
     return response, config
 

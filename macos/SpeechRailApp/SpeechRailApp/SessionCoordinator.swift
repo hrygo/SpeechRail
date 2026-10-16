@@ -1612,6 +1612,16 @@ public final class SessionCoordinator {
         return ordinal
     }
 
+    public func appendSealedWindow(_ command: SealedWindowCommand) async throws -> WindowSaveAck {
+        let ack = try await store.appendSealedWindow(command)
+        if !command.rows.isEmpty { noteLineAppended() }
+        return ack
+    }
+
+    public func saveWindowCheckpoint(_ command: WindowCheckpointCommand) async throws {
+        try await store.saveWindowCheckpoint(command)
+    }
+
     /// 助手单轮回复的收尾（D08）。**不推进水位**：这一行在生成开始时就建好了，
     /// 收尾只是把同一行改成定稿，不是一次新的追加。
     @discardableResult

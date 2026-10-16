@@ -122,6 +122,7 @@ class ResourceGovernor:
         self._active_tts = 0
         self._active_tts_lanes: dict[str | None, int] = {}
         self._quarantined_tts_lanes: set[str | None] = set()
+        self._asr_quarantined = False
         self._quarantine_notify_task: asyncio.Task[None] | None = None
         self._realtime_waiters: deque[_Waiter] = deque()
         self._batch_waiters: deque[_Waiter] = deque()
@@ -227,6 +228,14 @@ class ResourceGovernor:
         """
         key = self._normalize_resource_key(WorkClass.REALTIME_TTS, resource_key)
         self._quarantined_tts_lanes.add(key)
+        self._wake_quarantined_waiters()
+
+    def quarantine_asr_lane(self) -> None:
+        """Fail closed after unconfirmed native cleanup; restart releases isolation."""
+        self._asr_quarantined = True
+        self._wake_quarantined_waiters()
+
+    def _wake_quarantined_waiters(self) -> None:
         if (self._realtime_waiters or self._batch_waiters) and (
             self._quarantine_notify_task is None or self._quarantine_notify_task.done()
         ):
@@ -239,6 +248,10 @@ class ResourceGovernor:
             self._condition.notify_all()
 
     def _quarantine_blocks(self, work_class: WorkClass, resource_key: str | None) -> bool:
+        if self._asr_quarantined and (
+            not self._allow_heavy_overlap or not self._is_tts(work_class)
+        ):
+            return True
         if not self._quarantined_tts_lanes:
             return False
         if not self._allow_heavy_overlap:
