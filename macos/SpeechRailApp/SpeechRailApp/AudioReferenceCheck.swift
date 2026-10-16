@@ -101,8 +101,11 @@ enum AudioReferenceCheck {
         var totalSamples = 0
         var peak: Double = 0
         var decodedFrames: AVAudioFramePosition = 0
+        let buckets = SpeechRailDesignTokens.Waveform.envelopeBuckets
+        var envelopePeaks = [Float](repeating: 0, count: buckets)
 
         while decodedFrames < file.length {
+            guard !Task.isCancelled else { return nil }
             do {
                 try file.read(into: buffer, frameCount: AVAudioFrameCount(windowFrames))
             } catch {
@@ -117,6 +120,12 @@ enum AudioReferenceCheck {
                 if magnitude > peak { peak = magnitude }
                 if magnitude >= 0.99 { clippedSamples += 1 }
                 sumSquares += Double(samples[index]) * Double(samples[index])
+                var framePeak: Float = 0
+                for channel in 0..<Int(format.channelCount) where channels[channel][index].isFinite {
+                    framePeak = max(framePeak, abs(channels[channel][index]))
+                }
+                let bucket = min(buckets - 1, Int(Double(decodedFrames + AVAudioFramePosition(index)) * Double(buckets) / Double(file.length)))
+                envelopePeaks[bucket] = max(envelopePeaks[bucket], framePeak)
             }
             windowPowers.append(sumSquares / Double(frames))
             totalSamples += frames
@@ -160,6 +169,7 @@ enum AudioReferenceCheck {
             speechActiveRatio: speechActiveRatio,
             clippingRatio: clippingRatio
         )
+        let maximumEnvelopePeak = envelopePeaks.max() ?? 0
         return AudioReferenceAnalysis(
             duration: duration,
             peakDecibels: peakDecibels,
@@ -169,10 +179,7 @@ enum AudioReferenceCheck {
             leadingSilence: Double(leadingSilenceWindows) * windowSeconds,
             trailingSilence: Double(trailingSilenceWindows) * windowSeconds,
             verdict: verdict,
-            envelope: AudioEnvelope.levels(
-                forAudioFileAt: url,
-                buckets: SpeechRailDesignTokens.Waveform.envelopeBuckets
-            ) ?? []
+            envelope: envelopePeaks.map { CGFloat(maximumEnvelopePeak > 0 ? $0 / maximumEnvelopePeak : 0) }
         )
     }
 

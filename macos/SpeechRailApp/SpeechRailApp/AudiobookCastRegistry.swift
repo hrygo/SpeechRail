@@ -435,24 +435,64 @@ public enum AudiobookCastRegistry {
         characters: [AudiobookCharacter], annotations: [AudiobookAnnotation], availableVoiceCount: Int = 8,
         source: AudiobookSourceIndex? = nil, atoms: [AudiobookTextAtom] = [], scenes: [AudiobookCastingScene] = []
     ) -> (updatedCharacters: [AudiobookCharacter], statsByRoleID: [UUID: AudiobookRoleDialogueStats], conflictWeights: [UUID: [UUID: Int]]) {
+        var work = AudiobookRoleStatsWork()
+        return computeRoleDialogueStats(characters: characters, annotations: annotations, availableVoiceCount: availableVoiceCount,
+            source: source, atoms: atoms, scenes: scenes, work: &work, checkCancellation: {})
+    }
+
+    static func computeRoleDialogueStats(
+        characters: [AudiobookCharacter], annotations: [AudiobookAnnotation], availableVoiceCount: Int = 8,
+        source: AudiobookSourceIndex? = nil, atoms: [AudiobookTextAtom] = [], scenes: [AudiobookCastingScene] = [],
+        work: inout AudiobookRoleStatsWork, checkCancellation: () throws -> Void = {}
+    ) rethrows -> (updatedCharacters: [AudiobookCharacter], statsByRoleID: [UUID: AudiobookRoleDialogueStats], conflictWeights: [UUID: [UUID: Int]]) {
         let graph = AudiobookSceneConflictGraph.build(characters: characters, annotations: annotations, atoms: atoms, scenes: scenes)
         var counts: [UUID: Int] = [:], scalars: [UUID: Int] = [:], chapters: [UUID: Set<UUID>] = [:]
-        let unique = Dictionary(grouping: annotations, by: { "\($0.chapterID)|\($0.sourceRange.lowerBound)|\($0.sourceRange.upperBound)|\($0.assignment.roleID?.uuidString ?? "unknown")" }).values.compactMap(\.first)
-        for annotation in unique {
-            guard let role = annotation.assignment.roleID else { continue }
+        struct AnnotationKey: Hashable {
+            let chapterID: UUID
+            let range: AudiobookSourceRange
+            let roleID: UUID?
+        }
+        var seen: Set<AnnotationKey> = []
+        var rangesByRole: [UUID: [AudiobookSourceRange]] = [:]
+        try checkCancellation()
+        for annotation in annotations {
+            if work.annotationVisits.isMultiple(of: 128) { try checkCancellation() }
+            work.annotationVisits += 1
+            guard seen.insert(.init(chapterID: annotation.chapterID, range: annotation.sourceRange,
+                roleID: annotation.assignment.roleID)).inserted,
+                let role = annotation.assignment.roleID else { continue }
             counts[role, default: 0] += 1
             chapters[role, default: []].insert(annotation.chapterID)
+            if source != nil { rangesByRole[role, default: []].append(annotation.sourceRange) }
         }
-        // Union source intervals before counting; repeated windows and overlapping retries cannot inflate text volume.
-        for role in characters {
-            let ranges = unique.filter { $0.assignment.roleID == role.id }.map(\.sourceRange).sorted()
-            var merged: [AudiobookSourceRange] = []
-            for range in ranges {
-                if let last = merged.last, range.lowerBound <= last.upperBound {
-                    merged[merged.count - 1] = .init(lowerBound: last.lowerBound, upperBound: max(last.upperBound, range.upperBound))
-                } else { merged.append(range) }
+        // Each role only visits its own ranges. Counting uses source offsets without allocating excerpts.
+        if let source {
+            for role in characters {
+                try checkCancellation()
+                let ranges = (rangesByRole[role.id] ?? []).sorted()
+                var merged: [AudiobookSourceRange] = []
+                for range in ranges {
+                    if work.rangeVisits.isMultiple(of: 128) { try checkCancellation() }
+                    work.rangeVisits += 1
+                    if let last = merged.last, range.lowerBound <= last.upperBound {
+                        merged[merged.count - 1] = .init(lowerBound: last.lowerBound, upperBound: max(last.upperBound, range.upperBound))
+                    } else { merged.append(range) }
+                }
+                scalars[role.id] = merged.reduce(0) { $0 + ((try? source.scalarCount(in: $1)) ?? 0) }
             }
-            if let source { scalars[role.id] = merged.reduce(0) { $0 + ((try? source.text(in: $1).unicodeScalars.count) ?? 0) } }
+        }
+        var directPartners: [UUID: Set<UUID>] = [:], chapterPartners: [UUID: Set<UUID>] = [:]
+        for edge in graph.edges {
+            if work.edgeVisits.isMultiple(of: 128) { try checkCancellation() }
+            work.edgeVisits += 1
+            if edge.kind == .directDialogue {
+                directPartners[edge.roleA, default: []].insert(edge.roleB)
+                directPartners[edge.roleB, default: []].insert(edge.roleA)
+            }
+            if edge.kind == .chapterCoPresence {
+                chapterPartners[edge.roleA, default: []].insert(edge.roleB)
+                chapterPartners[edge.roleB, default: []].insert(edge.roleA)
+            }
         }
         func volume(_ id: UUID) -> Int { source == nil ? (counts[id] ?? 0) : (scalars[id] ?? 0) }
         let ranked = characters.filter { !$0.isNarrator && volume($0.id) > 0 }.sorted {
@@ -471,11 +511,8 @@ public enum AudiobookCastRegistry {
                 archetype: role.inferredVoiceArchetype(peers: characters))
             item.dialogueScalarCount = scalars[role.id] ?? 0
             item.statisticsRevision = source == nil ? "dialogue-stats-v2:source-unavailable" : "dialogue-stats-v2:unicode-scalars"
-            for edge in graph.edges where edge.roleA == role.id || edge.roleB == role.id {
-                let other = edge.roleA == role.id ? edge.roleB : edge.roleA
-                if edge.kind == .directDialogue { item.scenePartnerRoleIDs.insert(other) }
-                if edge.kind == .chapterCoPresence { item.sameChapterRoleIDs.insert(other) }
-            }
+            item.scenePartnerRoleIDs = directPartners[role.id] ?? []
+            item.sameChapterRoleIDs = chapterPartners[role.id] ?? []
             stats[role.id] = item
         }
         return (characters, stats, graph.weights)

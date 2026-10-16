@@ -1664,18 +1664,26 @@ public struct AudiobookCastingScene: Equatable, Sendable {
 }
 
 public enum VoiceCatalogLoadState: String, Codable, Sendable {
-    case ready, missing, unreadable, unsupportedSchema
+    case loading, ready, missing, unreadable, unsupportedSchema
 }
 
 /// One immutable read, including preferences; load failures are never an empty success.
 public struct VoiceCatalogSnapshot: Equatable, Sendable {
     public let state: VoiceCatalogStore.PersistedState
     public let loadState: VoiceCatalogLoadState
+    public let revision: String
     public init(state: VoiceCatalogStore.PersistedState = .init(), loadState: VoiceCatalogLoadState = .ready) {
+        self.init(state: state, loadState: loadState, makeRevision: Self.makeRevision)
+    }
+    init(
+        state: VoiceCatalogStore.PersistedState, loadState: VoiceCatalogLoadState,
+        makeRevision: @Sendable (VoiceCatalogStore.PersistedState, VoiceCatalogLoadState) -> String
+    ) {
         self.state = state
         self.loadState = state.metadataByVoiceID.allSatisfy { $0.key == $0.value.voiceID } ? loadState : .unreadable
+        self.revision = makeRevision(state, self.loadState)
     }
-    public var revision: String {
+    private static func makeRevision(_ state: VoiceCatalogStore.PersistedState, _ loadState: VoiceCatalogLoadState) -> String {
         AudiobookCastingDigest.hash([
             loadState.rawValue,
             AudiobookCastingDigest.hash(state.metadataByVoiceID),
@@ -2059,7 +2067,7 @@ public enum VoiceCatalogError: LocalizedError, Equatable, Sendable {
     }
 }
 
-public final class VoiceCatalogStore: @unchecked Sendable {
+public actor VoiceCatalogStore {
     public static let shared = VoiceCatalogStore(storageURL: defaultStorageURL())
     public static let didChange = Notification.Name("SpeechRail.voiceCatalog.didChange")
     public struct PersistedState: Codable, Equatable, Sendable {
@@ -2070,11 +2078,13 @@ public final class VoiceCatalogStore: @unchecked Sendable {
             self.metadataByVoiceID = metadataByVoiceID; self.collections = collections; self.preferredCollectionIDByBookID = preferredCollectionIDByBookID
         }
     }
-    private let storageURL: URL?
+    nonisolated let storageURL: URL?
     private let writeAtomically: @Sendable (Data, URL) throws -> Void
-    private let lock = NSLock()
+    private let readContents: @Sendable (URL) throws -> Data
+    private let metrics: AppPerformanceMetrics
+    private var cachedSnapshot = VoiceCatalogSnapshot(loadState: .loading)
     private var state = PersistedState()
-    private var loadState: VoiceCatalogLoadState = .ready
+    private var loadState: VoiceCatalogLoadState = .loading
     private var revision = 0
     private var originalDocument: [String: Any] = [:]
     private var needsMigration = false
@@ -2082,16 +2092,29 @@ public final class VoiceCatalogStore: @unchecked Sendable {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
             .appendingPathComponent("SpeechRail", isDirectory: true).appendingPathComponent("voice_catalog_metadata.json")
     }
-    public convenience init(storageURL: URL? = nil) {
-        self.init(storageURL: storageURL, writeAtomically: { try $0.write(to: $1, options: .atomic) })
+    public init(storageURL: URL? = nil) {
+        self.init(storageURL: storageURL, readContents: { try Data(contentsOf: $0) })
     }
-    init(storageURL: URL?, writeAtomically: @escaping @Sendable (Data, URL) throws -> Void) {
-        self.storageURL = storageURL; self.writeAtomically = writeAtomically; reloadLocked()
+    init(
+        storageURL: URL?,
+        readContents: @escaping @Sendable (URL) throws -> Data = { try Data(contentsOf: $0) },
+        writeAtomically: @escaping @Sendable (Data, URL) throws -> Void = { try $0.write(to: $1, options: .atomic) },
+        metrics: AppPerformanceMetrics = .shared
+    ) {
+        self.storageURL = storageURL
+        self.readContents = readContents
+        self.writeAtomically = writeAtomically
+        self.metrics = metrics
+        if storageURL == nil {
+            loadState = .ready
+            cachedSnapshot = .init(state: state, loadState: .ready)
+        }
     }
-    private func reloadLocked() {
+    private func reloadFromDisk() {
         guard let storageURL else { return }
+        defer { cachedSnapshot = .init(state: state, loadState: loadState) }
         do {
-            let data = try Data(contentsOf: storageURL)
+            let data = try readContents(storageURL)
             guard let document = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw VoiceCatalogError.unavailable }
             let version = (document["schemaVersion"] ?? document["schema_version"]) as? Int
             if let version, version != 2 { loadState = .unsupportedSchema; return }
@@ -2117,9 +2140,22 @@ public final class VoiceCatalogStore: @unchecked Sendable {
         } catch {
             let error = error as NSError
             loadState = error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError ? .missing : .unreadable
+            if loadState == .missing {
+                state = .init(); revision = 0; originalDocument = [:]; needsMigration = false
+            }
         }
     }
-    public func snapshot() -> VoiceCatalogSnapshot { lock.withLock { reloadLocked(); return .init(state: state, loadState: loadState) } }
+    /// Explicit I/O boundary. Rendering uses VoiceCatalogModel's immutable snapshot.
+    public func refresh() -> VoiceCatalogSnapshot {
+        do {
+            return try metrics.measure(.catalogRefresh) {
+                reloadFromDisk()
+                guard loadState == .ready || loadState == .missing else { throw VoiceCatalogError.unavailable }
+                return cachedSnapshot
+            }
+        } catch { return cachedSnapshot }
+    }
+    public func snapshot() -> VoiceCatalogSnapshot { cachedSnapshot }
     public var metadataByVoiceID: [String: VoiceAssetMetadata] { snapshot().state.metadataByVoiceID }
     public var collections: [VoiceCollection] { snapshot().state.collections }
     public func metadata(for voiceID: String) -> VoiceAssetMetadata? { snapshot().state.metadataByVoiceID[voiceID] }
@@ -2127,9 +2163,8 @@ public final class VoiceCatalogStore: @unchecked Sendable {
 
     /// Publish only after atomic persistence. One process serializes writes; no cross-store transaction is implied.
     private func mutate<T>(_ body: (inout PersistedState) throws -> T) throws -> T {
-        lock.lock()
         do {
-            reloadLocked()
+            _ = refresh()
             guard loadState == .ready || loadState == .missing else { throw VoiceCatalogError.unavailable }
             var proposed = state
             let result = try body(&proposed)
@@ -2178,11 +2213,11 @@ public final class VoiceCatalogStore: @unchecked Sendable {
                     originalDocument = envelope
                 }
                 state = proposed; revision += 1; needsMigration = false; loadState = .ready
+                cachedSnapshot = .init(state: state, loadState: .ready)
             }
-            lock.unlock()
             if changed { NotificationCenter.default.post(name: Self.didChange, object: self) }
             return result
-        } catch { lock.unlock(); throw error }
+        } catch { throw error }
     }
     public func setPreferredCollectionID(_ collectionID: UUID?, for bookID: UUID) throws {
         try mutate { state in
@@ -2246,7 +2281,14 @@ public final class VoiceCatalogStore: @unchecked Sendable {
         }
     }
     public func archiveBookExclusiveVoices(bookID: UUID) throws {
-        try archiveVoices(voiceIDs: Set(snapshot().state.metadataByVoiceID.filter { $0.value.originBookID == bookID && $0.value.visibilityScope == .bookExclusive }.keys))
+        try mutate { state in
+            for (id, var metadata) in state.metadataByVoiceID
+            where metadata.originBookID == bookID && metadata.visibilityScope == .bookExclusive {
+                metadata.lifecycleState = .archived
+                metadata.updatedAt = Date()
+                state.metadataByVoiceID[id] = metadata
+            }
+        }
     }
     @discardableResult
     public func toggleFavorite(voiceID: String) throws -> Bool {
@@ -2284,10 +2326,7 @@ public final class VoiceCatalogStore: @unchecked Sendable {
         }
     }
     public func isVoiceActiveForBook(voiceID: String, currentBookID: UUID?) -> Bool {
-        let snapshot = snapshot()
-        guard snapshot.loadState == .ready || snapshot.loadState == .missing,
-              let meta = snapshot.state.metadataByVoiceID[voiceID], meta.lifecycleState == .active else { return false }
-        return meta.visibilityScope == .globalReusable || (meta.visibilityScope == .bookExclusive && currentBookID != nil && meta.originBookID == currentBookID)
+        cachedSnapshot.isVoiceActiveForBook(voiceID: voiceID, currentBookID: currentBookID)
     }
 }
 
@@ -2368,15 +2407,14 @@ public struct AudiobookCastingAudition: Equatable, Sendable {
 }
 
 
-final class VoiceCatalogObservation: @unchecked Sendable {
-    private let token: NSObjectProtocol
-    init(catalog: VoiceCatalogStore, changed: @escaping @Sendable () -> Void) {
-        token = NotificationCenter.default.addObserver(forName: VoiceCatalogStore.didChange, object: catalog, queue: nil) { _ in changed() }
-    }
-    deinit { NotificationCenter.default.removeObserver(token) }
-}
-
 public extension VoiceCatalogSnapshot {
+    func isVoiceActiveForBook(voiceID: String, currentBookID: UUID?) -> Bool {
+        guard loadState == .ready || loadState == .missing,
+              let metadata = state.metadataByVoiceID[voiceID], metadata.lifecycleState == .active else { return false }
+        return metadata.visibilityScope == .globalReusable
+            || (metadata.visibilityScope == .bookExclusive && currentBookID != nil && metadata.originBookID == currentBookID)
+    }
+
     func permitsSurface(_ voice: CreatorVoice, bookID: UUID?) -> Bool {
         permitsSurface(voiceID: voice.id,
             isDefaultSystemPreset: voice.mode == "system" && voice.isSystem && voice.isDefault, bookID: bookID)

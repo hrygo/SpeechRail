@@ -8,6 +8,9 @@ struct SpeechRailApp: App {
     static let helpWindowID = "speechrail-help"
 
     @State private var model: AppModel
+#if DEBUG
+    private let uiTestWorkStore: CreativeWorkStore?
+#endif
     @State private var navigation: AppNavigationState
     /// 会话层的地基：所有权状态机 + 记录库（`SESSIONS-SPEC` §12 阶段 1 / 2）。
     /// 它**不随 App 启动占用任何设备**——空闲时没有麦克风、没有系统录音 tap、没有音频引擎
@@ -133,19 +136,15 @@ struct SpeechRailApp: App {
         // A UI fixture must never read or mutate the user's Application Support works.
         // Both populated and empty scenarios receive their own per-launch directory.
         if isUITest {
-            do {
-                workStore = try Self.makeUITestWorkStore(
-                    empty: ProcessInfo.processInfo.arguments.contains("--ui-test-empty-works")
-                )
-            } catch {
-                // Fail closed instead of silently falling back to real user storage.
-                fatalError("Unable to initialize isolated UI test works")
-            }
+            workStore = Self.makeUITestWorkStore()
         } else {
             workStore = CreativeWorkStore()
         }
 #else
         workStore = CreativeWorkStore()
+#endif
+#if DEBUG
+        self.uiTestWorkStore = isUITest ? workStore : nil
 #endif
         let aiRecorder = TeleprompterAIObservationRecorder(location: .default)
         let aiObservationSink: TeleprompterAIObservationHandler = { aiRecorder.record($0) }
@@ -453,22 +452,22 @@ struct SpeechRailApp: App {
     }
 
 #if DEBUG
-    @MainActor
-    private static func makeUITestWorkStore(empty: Bool) throws -> CreativeWorkStore {
+    private static func makeUITestWorkStore() -> CreativeWorkStore {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("SpeechRailUITests", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let store = CreativeWorkStore(directory: directory)
-        if !empty {
-            let work = CreativeWork(
-                id: "ui-test-work", title: "测试作品", scriptText: "测试文稿。",
-                voiceID: "serena", voiceName: "测试音色",
-                createdAt: Date(timeIntervalSince1970: 0), durationSeconds: 3,
-                audioFileName: "ui-test-work.wav"
-            )
-            try store.save(work, audioData: UITestAudioFactory.silentWAV)
-        }
-        return store
+        return CreativeWorkStore(directory: directory)
+    }
+
+    private static func seedUITestWorks(in store: CreativeWorkStore) async throws {
+        guard !ProcessInfo.processInfo.arguments.contains("--ui-test-empty-works") else { return }
+        let work = CreativeWork(
+            id: "ui-test-work", title: "测试作品", scriptText: "测试文稿。",
+            voiceID: "serena", voiceName: "测试音色",
+            createdAt: Date(timeIntervalSince1970: 0), durationSeconds: 3,
+            audioFileName: "ui-test-work.wav"
+        )
+        _ = try await store.save(work, audioData: UITestAudioFactory.silentWAV, operationID: UUID())
     }
 
     @MainActor
@@ -598,6 +597,13 @@ struct SpeechRailApp: App {
                 .environment(meeting)
                 .environment(preferences)
                 .task {
+#if DEBUG
+                    if let store = uiTestWorkStore {
+                        do { try await Self.seedUITestWorks(in: store) }
+                        catch { assertionFailure("Unable to seed isolated UI test works") }
+                    }
+#endif
+                    await model.refreshWorks()
                     await session.openStore()
                     // 启动时回收：① 上次没正常结束的会话已经封存（`openStore` 里做）；
                     // ② 卡在 `queued` / 租约过期的纪要在这里重新排一次（§5.8）。

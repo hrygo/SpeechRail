@@ -241,22 +241,6 @@ public enum DubbingSegmentPlanner {
     }
 }
 
-/// 一次导出的成品：音频与正文必须一一对应，所以打包在一起交给上层写出。
-public struct DubbingExportBundle: Equatable, Sendable {
-    public let baseName: String
-    public let audio: Data
-    public let script: String
-
-    public init(baseName: String, audio: Data, script: String) {
-        self.baseName = baseName
-        self.audio = audio
-        self.script = script
-    }
-
-    public var scriptFileName: String { "\(baseName).txt" }
-    public var audioFileName: String { "\(baseName).wav" }
-}
-
 /// 落盘的一条项目记录：项目本身加上它拥有的全部候选。
 ///
 /// 候选音频存在同目录的 `<candidateID>.wav`。索引是唯一的逻辑提交点：
@@ -310,21 +294,53 @@ private struct DubbingProjectJournal: Codable {
 ///
 /// 提交规则与作品库一致：`projects.json` 的原子替换是唯一逻辑提交点，
 /// journal 只用于重启后判定旧状态还是新状态。
-@MainActor
-public final class DubbingProjectStore {
+public actor DubbingProjectStore {
+    private var commitHistory = StoreCommitHistory()
+    private var activeExportLease: (id: UUID, directory: URL)?
+    private var activeOperationID: UUID?
+    private var observedIndexDigest: String?
+    public var receiptHistoryCount: Int { commitHistory.count }
+    public func receipt(operationID: UUID) -> StoreCommitReceipt? { commitHistory.receipt(operationID: operationID) }
+
+    private func withWriteReceipt<Value: Sendable>(operationID: UUID, _ body: () throws -> Value) throws -> StoreWriteResult<Value> {
+        try Task.checkCancellation()
+        activeOperationID = operationID
+        observedIndexDigest = nil
+        commitHistory.remove(operationID: operationID)
+        defer { activeOperationID = nil; observedIndexDigest = nil }
+        return try AppPerformanceMetrics.shared.measure(.storeCommit) {
+            let value = try body()
+            guard let receipt = commitHistory.receipt(operationID: operationID), receipt.committed else {
+                throw DubbingProjectError.cleanupRequired
+            }
+            return .init(value: value, receipt: receipt)
+        }
+    }
+
+    private func recordIndexCommit(_ digest: String) {
+        observedIndexDigest = digest
+        if let operationID = activeOperationID {
+            commitHistory.record(.init(operationID: operationID, committed: true, indexDigest: digest))
+        }
+    }
+
     private let operations: CreativeWorkFileOperations
     private let directory: URL
     private let indexURL: URL
     private let lockURL: URL
     private let transactionsDirectory: URL
 
-    public convenience init(directory: URL) {
+    deinit {
+        if let lease = activeExportLease { try? FileManager.default.removeItem(at: lease.directory) }
+    }
+
+    public init(directory: URL) {
         self.init(directory: directory, fileOperations: CreativeWorkFileOperations())
     }
 
     init(
         directory: URL,
-        fileOperations: CreativeWorkFileOperations
+        fileOperations: sending CreativeWorkFileOperations
     ) {
         self.operations = fileOperations
         self.directory = directory
@@ -346,103 +362,113 @@ public final class DubbingProjectStore {
         }
     }
 
-    public func deleteCandidate(_ candidateID: String, fromProject projectID: String) throws {
-        try withRecoveredLibrary {
-            var records = try readRecordsUnlocked()
-            guard let index = records.firstIndex(where: { $0.project.id == projectID }) else {
-                throw DubbingProjectError.candidateNotFound
+    public func deleteCandidate(_ candidateID: String, fromProject projectID: String, operationID: UUID) throws -> StoreWriteResult<Void> {
+        try withWriteReceipt(operationID: operationID) {
+            try withRecoveredLibrary {
+                var records = try readRecordsUnlocked()
+                guard let index = records.firstIndex(where: { $0.project.id == projectID }) else {
+                    throw DubbingProjectError.candidateNotFound
+                }
+                // Recovery completes any committed cleanup before this lookup.
+                // A retry therefore confirms that the candidate is already gone.
+                guard let candidate = records[index].candidates.first(where: { $0.id == candidateID }) else {
+                    return
+                }
+                guard !records[index].project.isUsingCandidate(candidateID) else {
+                    throw DubbingProjectError.candidateInUse
+                }
+                records[index].candidates.removeAll { $0.id == candidateID }
+                try commitDeletionUnlocked(records: records, removing: [candidate])
             }
-            // Recovery completes any committed cleanup before this lookup.
-            // A retry therefore confirms that the candidate is already gone.
-            guard let candidate = records[index].candidates.first(where: { $0.id == candidateID }) else {
-                return
-            }
-            guard !records[index].project.isUsingCandidate(candidateID) else {
-                throw DubbingProjectError.candidateInUse
-            }
-            records[index].candidates.removeAll { $0.id == candidateID }
-            try commitDeletionUnlocked(records: records, removing: [candidate])
         }
     }
 
     @discardableResult
-    public func discardUnusedCandidates(inProject projectID: String) throws -> Int {
-        try withRecoveredLibrary {
-            var records = try readRecordsUnlocked()
-            guard let index = records.firstIndex(where: { $0.project.id == projectID }) else {
-                throw DubbingProjectError.candidateNotFound
+    public func discardUnusedCandidates(inProject projectID: String, operationID: UUID) throws -> StoreWriteResult<Int> {
+        try withWriteReceipt(operationID: operationID) {
+            try withRecoveredLibrary {
+                var records = try readRecordsUnlocked()
+                guard let index = records.firstIndex(where: { $0.project.id == projectID }) else {
+                    throw DubbingProjectError.candidateNotFound
+                }
+                let project = records[index].project
+                let unused = records[index].candidates.filter { !project.isUsingCandidate($0.id) }
+                guard !unused.isEmpty else { return 0 }
+                let ids = Set(unused.map(\.id))
+                records[index].candidates.removeAll { ids.contains($0.id) }
+                try commitDeletionUnlocked(records: records, removing: unused)
+                return unused.count
             }
-            let project = records[index].project
-            let unused = records[index].candidates.filter { !project.isUsingCandidate($0.id) }
-            guard !unused.isEmpty else { return 0 }
-            let ids = Set(unused.map(\.id))
-            records[index].candidates.removeAll { ids.contains($0.id) }
-            try commitDeletionUnlocked(records: records, removing: unused)
-            return unused.count
         }
     }
 
-    public func deleteProject(_ projectID: String) throws {
-        try withRecoveredLibrary {
-            var records = try readRecordsUnlocked()
-            guard let index = records.firstIndex(where: { $0.project.id == projectID }) else {
-                return
+    public func deleteProject(_ projectID: String, operationID: UUID) throws -> StoreWriteResult<Void> {
+        try withWriteReceipt(operationID: operationID) {
+            try withRecoveredLibrary {
+                var records = try readRecordsUnlocked()
+                guard let index = records.firstIndex(where: { $0.project.id == projectID }) else {
+                    return
+                }
+                guard records[index].project.segments.allSatisfy({ $0.acceptedCandidateID == nil }) else {
+                    throw DubbingProjectError.projectHasAdoptedCandidates
+                }
+                let candidates = records.remove(at: index).candidates
+                try commitDeletionUnlocked(records: records, removing: candidates)
             }
-            guard records[index].project.segments.allSatisfy({ $0.acceptedCandidateID == nil }) else {
-                throw DubbingProjectError.projectHasAdoptedCandidates
-            }
-            let candidates = records.remove(at: index).candidates
-            try commitDeletionUnlocked(records: records, removing: candidates)
         }
     }
 
     /// 以已观察到的完整候选配方创建新项目；旧项目、候选和采用关系原样保留。
     @discardableResult
-    public func rebuild(projectID: String, usingCandidateID candidateID: String) throws -> DubbingProject {
-        try withRecoveredLibrary {
-            var records = try readRecordsUnlocked()
-            guard let original = records.first(where: { $0.project.id == projectID }),
-                  let candidate = original.candidates.first(where: { $0.id == candidateID }) else {
-                throw DubbingProjectError.candidateNotFound
-            }
-            guard original.project.segments.contains(where: {
-                $0.id == candidate.segmentID && $0.text == candidate.text
-            }) else { throw DubbingProjectError.candidateTextChanged }
-            guard let recipe = candidate.provenance.recipe,
-                  recipe.state == .complete, recipe.digest != nil,
-                  recipe.missingFields?.isEmpty == true else {
-                throw DubbingProjectError.candidateRecipeMissing
-            }
-            let id = "dub_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-            let texts = DubbingSegmentPlanner.segments(from: original.project.scriptText)
-            guard !texts.isEmpty else { throw DubbingProjectError.segmentNotFound }
-            let project = DubbingProject(
-                id: id, title: original.project.title, scriptText: original.project.scriptText,
-                recipe: candidate.provenance,
-                segments: texts.enumerated().map {
-                    DubbingSegment(id: "\(id)_s\($0.offset + 1)", text: $0.element)
+    public func rebuild(projectID: String, usingCandidateID candidateID: String, operationID: UUID) throws -> StoreWriteResult<DubbingProject> {
+        try withWriteReceipt(operationID: operationID) {
+            try withRecoveredLibrary {
+                var records = try readRecordsUnlocked()
+                guard let original = records.first(where: { $0.project.id == projectID }),
+                      let candidate = original.candidates.first(where: { $0.id == candidateID }) else {
+                    throw DubbingProjectError.candidateNotFound
                 }
-            )
-            records.append(DubbingProjectRecord(project: project, candidates: []))
-            try commitUnlocked(records: records, operation: "rebuild")
-            return project
+                guard original.project.segments.contains(where: {
+                    $0.id == candidate.segmentID && $0.text == candidate.text
+                }) else { throw DubbingProjectError.candidateTextChanged }
+                guard let recipe = candidate.provenance.recipe,
+                      recipe.state == .complete, recipe.digest != nil,
+                      recipe.missingFields?.isEmpty == true else {
+                    throw DubbingProjectError.candidateRecipeMissing
+                }
+                let id = "dub_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+                let texts = DubbingSegmentPlanner.segments(from: original.project.scriptText)
+                guard !texts.isEmpty else { throw DubbingProjectError.segmentNotFound }
+                let project = DubbingProject(
+                    id: id, title: original.project.title, scriptText: original.project.scriptText,
+                    recipe: candidate.provenance,
+                    segments: texts.enumerated().map {
+                        DubbingSegment(id: "\(id)_s\($0.offset + 1)", text: $0.element)
+                    }
+                )
+                records.append(DubbingProjectRecord(project: project, candidates: []))
+                try commitUnlocked(records: records, operation: "rebuild")
+                return project
+            }
         }
     }
 
     @discardableResult
-    public func save(_ project: DubbingProject) throws -> DubbingProject {
-        guard Self.isSafeIdentifier(project.id) else {
-            throw DubbingProjectError.invalidIdentifier
-        }
-        return try withRecoveredLibrary {
-            var records = try readRecordsUnlocked()
-            if let index = records.firstIndex(where: { $0.project.id == project.id }) {
-                records[index].project = project
-            } else {
-                records.append(DubbingProjectRecord(project: project, candidates: []))
+    public func save(_ project: DubbingProject, operationID: UUID) throws -> StoreWriteResult<DubbingProject> {
+        try withWriteReceipt(operationID: operationID) {
+            guard Self.isSafeIdentifier(project.id) else {
+                throw DubbingProjectError.invalidIdentifier
             }
-            try commitUnlocked(records: records, operation: "project")
-            return project
+            return try withRecoveredLibrary {
+                var records = try readRecordsUnlocked()
+                if let index = records.firstIndex(where: { $0.project.id == project.id }) {
+                    records[index].project = project
+                } else {
+                    records.append(DubbingProjectRecord(project: project, candidates: []))
+                }
+                try commitUnlocked(records: records, operation: "project")
+                return project
+            }
         }
     }
 
@@ -451,73 +477,76 @@ public final class DubbingProjectStore {
     public func addCandidate(
         _ candidate: DubbingCandidate,
         audioData: Data,
-        toProject projectID: String
-    ) throws -> DubbingCandidate {
-        guard Self.isSafeIdentifier(candidate.id),
-              Self.isSafeIdentifier(candidate.segmentID),
-              Self.isSafeIdentifier(projectID),
-              candidate.audioFileName == "\(candidate.id).wav",
-              !audioData.isEmpty
-        else {
-            throw DubbingProjectError.invalidIdentifier
-        }
-        return try withRecoveredLibrary {
-            var records = try readRecordsUnlocked()
-            guard let index = records.firstIndex(where: { $0.project.id == projectID }) else {
-                throw DubbingProjectError.candidateNotFound
+        toProject projectID: String,
+        operationID: UUID
+    ) throws -> StoreWriteResult<DubbingCandidate> {
+        try withWriteReceipt(operationID: operationID) {
+            guard Self.isSafeIdentifier(candidate.id),
+                  Self.isSafeIdentifier(candidate.segmentID),
+                  Self.isSafeIdentifier(projectID),
+                  candidate.audioFileName == "\(candidate.id).wav",
+                  !audioData.isEmpty
+            else {
+                throw DubbingProjectError.invalidIdentifier
             }
-            guard records[index].project.segments.contains(
-                where: { $0.id == candidate.segmentID }
-            ) else {
-                throw DubbingProjectError.segmentNotFound
-            }
-            let audioURL = directory.appendingPathComponent(
-                candidate.audioFileName,
-                isDirectory: false
-            )
-            guard !operations.isSymbolicLink(at: audioURL) else {
-                throw DubbingProjectError.candidateNotAdoptable
-            }
-            if let existing = records[index].candidates.first(where: {
-                $0.id == candidate.id
-            }) {
-                // 重试同一次生成：返回原候选，不重写音频或采用关系。
-                guard existing.provenance.audioFileSHA256
-                    == CreativeWorkTransaction.digest(audioData)
-                else {
+            return try withRecoveredLibrary {
+                var records = try readRecordsUnlocked()
+                guard let index = records.firstIndex(where: { $0.project.id == projectID }) else {
+                    throw DubbingProjectError.candidateNotFound
+                }
+                guard records[index].project.segments.contains(
+                    where: { $0.id == candidate.segmentID }
+                ) else {
+                    throw DubbingProjectError.segmentNotFound
+                }
+                let audioURL = directory.appendingPathComponent(
+                    candidate.audioFileName,
+                    isDirectory: false
+                )
+                guard !operations.isSymbolicLink(at: audioURL) else {
                     throw DubbingProjectError.candidateNotAdoptable
                 }
-                return existing
+                if let existing = records[index].candidates.first(where: {
+                    $0.id == candidate.id
+                }) {
+                    // 重试同一次生成：返回原候选，不重写音频或采用关系。
+                    guard existing.provenance.audioFileSHA256
+                        == CreativeWorkTransaction.digest(audioData)
+                    else {
+                        throw DubbingProjectError.candidateNotAdoptable
+                    }
+                    return existing
+                }
+                guard !operations.fileExists(at: audioURL) else {
+                    // 没有索引能证明归属的文件不认领、不覆盖。
+                    throw DubbingProjectError.candidateNotAdoptable
+                }
+                let digest = CreativeWorkTransaction.digest(audioData)
+                let committed = DubbingCandidate(
+                    id: candidate.id,
+                    segmentID: candidate.segmentID,
+                    text: candidate.text,
+                    audioFileName: candidate.audioFileName,
+                    provenance: candidate.provenance.withAudioFileSHA256(digest),
+                    createdAt: candidate.createdAt,
+                    durationSeconds: candidate.durationSeconds
+                )
+                records[index].candidates.append(committed)
+                try commitUnlocked(
+                    records: records,
+                    operation: "candidate",
+                    publishedAudioFileName: committed.audioFileName,
+                    publishedAudioSHA256: digest
+                ) { transactionDirectory in
+                    let staged = transactionDirectory
+                        .appendingPathComponent("staged.wav", isDirectory: false)
+                    try self.operations.write(audioData, to: staged)
+                    try self.operations.synchronize(at: staged)
+                    try self.operations.move(from: staged, to: audioURL)
+                    try self.operations.synchronize(at: audioURL)
+                }
+                return committed
             }
-            guard !operations.fileExists(at: audioURL) else {
-                // 没有索引能证明归属的文件不认领、不覆盖。
-                throw DubbingProjectError.candidateNotAdoptable
-            }
-            let digest = CreativeWorkTransaction.digest(audioData)
-            let committed = DubbingCandidate(
-                id: candidate.id,
-                segmentID: candidate.segmentID,
-                text: candidate.text,
-                audioFileName: candidate.audioFileName,
-                provenance: candidate.provenance.withAudioFileSHA256(digest),
-                createdAt: candidate.createdAt,
-                durationSeconds: candidate.durationSeconds
-            )
-            records[index].candidates.append(committed)
-            try commitUnlocked(
-                records: records,
-                operation: "candidate",
-                publishedAudioFileName: committed.audioFileName,
-                publishedAudioSHA256: digest
-            ) { transactionDirectory in
-                let staged = transactionDirectory
-                    .appendingPathComponent("staged.wav", isDirectory: false)
-                try self.operations.write(audioData, to: staged)
-                try self.operations.synchronize(at: staged)
-                try self.operations.move(from: staged, to: audioURL)
-                try self.operations.synchronize(at: audioURL)
-            }
-            return committed
         }
     }
 
@@ -526,34 +555,37 @@ public final class DubbingProjectStore {
     public func adopt(
         candidateID: String,
         inSegment segmentID: String,
-        ofProject projectID: String
-    ) throws -> DubbingProject {
-        try withRecoveredLibrary {
-            var records = try readRecordsUnlocked()
-            guard let index = records.firstIndex(where: { $0.project.id == projectID }) else {
-                throw DubbingProjectError.candidateNotFound
+        ofProject projectID: String,
+        operationID: UUID
+    ) throws -> StoreWriteResult<DubbingProject> {
+        try withWriteReceipt(operationID: operationID) {
+            try withRecoveredLibrary {
+                var records = try readRecordsUnlocked()
+                guard let index = records.firstIndex(where: { $0.project.id == projectID }) else {
+                    throw DubbingProjectError.candidateNotFound
+                }
+                guard let segmentIndex = records[index].project.segments.firstIndex(where: {
+                    $0.id == segmentID
+                }) else {
+                    throw DubbingProjectError.segmentNotFound
+                }
+                guard let candidate = records[index].candidates.first(where: {
+                    $0.id == candidateID
+                }) else {
+                    throw DubbingProjectError.candidateNotFound
+                }
+                if let rejection = records[index].project.rejection(for: candidate) {
+                    throw rejection
+                }
+                var segment = records[index].project.segments[segmentIndex]
+                if segment.acceptedCandidateID != candidateID {
+                    segment.adoptionHistory.append(segment.acceptedCandidateID)
+                    segment.acceptedCandidateID = candidateID
+                }
+                records[index].project.segments[segmentIndex] = segment
+                try commitUnlocked(records: records, operation: "adopt")
+                return records[index].project
             }
-            guard let segmentIndex = records[index].project.segments.firstIndex(where: {
-                $0.id == segmentID
-            }) else {
-                throw DubbingProjectError.segmentNotFound
-            }
-            guard let candidate = records[index].candidates.first(where: {
-                $0.id == candidateID
-            }) else {
-                throw DubbingProjectError.candidateNotFound
-            }
-            if let rejection = records[index].project.rejection(for: candidate) {
-                throw rejection
-            }
-            var segment = records[index].project.segments[segmentIndex]
-            if segment.acceptedCandidateID != candidateID {
-                segment.adoptionHistory.append(segment.acceptedCandidateID)
-                segment.acceptedCandidateID = candidateID
-            }
-            records[index].project.segments[segmentIndex] = segment
-            try commitUnlocked(records: records, operation: "adopt")
-            return records[index].project
         }
     }
 
@@ -561,23 +593,40 @@ public final class DubbingProjectStore {
     @discardableResult
     public func undoAdoption(
         inSegment segmentID: String,
-        ofProject projectID: String
-    ) throws -> DubbingProject {
-        try withRecoveredLibrary {
-            var records = try readRecordsUnlocked()
-            guard let index = records.firstIndex(where: { $0.project.id == projectID }) else {
-                throw DubbingProjectError.candidateNotFound
-            }
-            guard let segmentIndex = records[index].project.segments.firstIndex(where: {
-                $0.id == segmentID
-            }) else {
-                throw DubbingProjectError.segmentNotFound
-            }
-            guard records[index].project.segments[segmentIndex].undoAdoption() else {
+        ofProject projectID: String,
+        operationID: UUID
+    ) throws -> StoreWriteResult<DubbingProject> {
+        try withWriteReceipt(operationID: operationID) {
+            try withRecoveredLibrary {
+                var records = try readRecordsUnlocked()
+                guard let index = records.firstIndex(where: { $0.project.id == projectID }) else {
+                    throw DubbingProjectError.candidateNotFound
+                }
+                guard let segmentIndex = records[index].project.segments.firstIndex(where: {
+                    $0.id == segmentID
+                }) else {
+                    throw DubbingProjectError.segmentNotFound
+                }
+                guard records[index].project.segments[segmentIndex].undoAdoption() else {
+                    return records[index].project
+                }
+                try commitUnlocked(records: records, operation: "undo_adoption")
                 return records[index].project
             }
-            try commitUnlocked(records: records, operation: "undo_adoption")
-            return records[index].project
+        }
+    }
+
+    public func audioURL(for candidate: DubbingCandidate) throws -> URL {
+        try withRecoveredLibrary {
+            let owned = try readRecordsUnlocked().lazy.flatMap(\.candidates).first { $0.id == candidate.id }
+            guard let owned, owned == candidate, Self.isSafeAudioFileName(owned.audioFileName) else {
+                throw DubbingProjectError.candidateNotFound
+            }
+            let url = directory.appendingPathComponent(owned.audioFileName)
+            guard !operations.isSymbolicLink(at: url), try operations.fileSize(at: url) > 0 else {
+                throw DubbingProjectError.candidateNotAdoptable
+            }
+            return url
         }
     }
 
@@ -603,36 +652,59 @@ public final class DubbingProjectStore {
         }
     }
 
-    /// 导出成品：音频只由被采用的候选拼成，正文只由这些候选对应的段落组成。
-    ///
-    /// 只要有一段没有采用候选，就返回 nil 而不是导出半成品。
-    public func export(projectID: String) throws -> (audio: Data, script: String)? {
-        try withRecoveredLibrary {
+    public func prepareExport(projectID: String) throws -> PreparedDubbingExport {
+        try Task.checkCancellation()
+        guard activeExportLease == nil else { throw DubbingExportError.exportBusy }
+        return try withRecoveredLibrary {
             let record = try recordUnlocked(projectID: projectID)
-            var clips: [DubbingAudioClip] = []
+            let byID = Dictionary(record.candidates.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            var inputs: [URL] = []
             for segment in record.project.segments {
-                guard let acceptedID = segment.acceptedCandidateID,
-                      let candidate = record.candidates.first(where: { $0.id == acceptedID }),
-                      record.project.isValid(candidate)
-                else {
-                    return nil
-                }
-                let audioURL = directory.appendingPathComponent(
-                    candidate.audioFileName,
-                    isDirectory: false
-                )
-                guard !operations.isSymbolicLink(at: audioURL) else {
-                    throw DubbingProjectError.candidateNotAdoptable
-                }
-                let wav = try operations.read(from: audioURL)
-                clips.append(try DubbingAudioExport.clip(fromWAV: wav))
+                guard let id = segment.acceptedCandidateID, let candidate = byID[id],
+                      candidate.segmentID == segment.id, candidate.text == segment.text,
+                      let digest = record.project.recipe.recipe?.digest,
+                      digest == candidate.provenance.recipe?.digest else { throw DubbingExportError.incompleteProject }
+                guard Self.isSafeAudioFileName(candidate.audioFileName) else { throw DubbingProjectError.invalidIdentifier }
+                let url = directory.appendingPathComponent(candidate.audioFileName)
+                guard !operations.isSymbolicLink(at: url) else { throw DubbingProjectError.candidateNotAdoptable }
+                inputs.append(url)
             }
-            guard !clips.isEmpty else { return nil }
-            return (
-                audio: try DubbingAudioExport.makeWAV(from: clips),
-                script: record.project.adoptedScript
-            )
+            guard !inputs.isEmpty else { throw DubbingExportError.incompleteProject }
+            let id = UUID(), temp = FileManager.default.temporaryDirectory.appendingPathComponent("speechrail-export-\(id.uuidString)")
+            try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
+            var succeeded = false
+            defer { if !succeeded { try? FileManager.default.removeItem(at: temp) } }
+            let audio = temp.appendingPathComponent("audio.wav"), script = temp.appendingPathComponent("script.txt")
+            let bytes = try DubbingStreamingWAV.write(inputs: inputs, output: audio)
+            guard FileManager.default.createFile(atPath: script.path, contents: nil) else { throw DubbingExportError.invalidDestination }
+            let handle = try FileHandle(forWritingTo: script); defer { try? handle.close() }
+            for (index, segment) in record.project.segments.enumerated() {
+                try Task.checkCancellation()
+                if index > 0 { try handle.write(contentsOf: Data([10])) }
+                // Each source segment is already bounded by the render contract.
+                let text = Data(segment.text.utf8)
+                for offset in stride(from: 0, to: text.count, by: DubbingStreamingWAV.chunkBytes) {
+                    try handle.write(contentsOf: text[offset..<min(text.count, offset + DubbingStreamingWAV.chunkBytes)])
+                }
+            }
+            try handle.synchronize()
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]; encoder.dateEncodingStrategy = .iso8601
+            let revision = CreativeWorkTransaction.digest(try encoder.encode(record))
+            activeExportLease = (id, temp); succeeded = true
+            return .init(leaseID: id, audioURL: audio, scriptURL: script, sourceRevision: revision,
+                         audioBytes: bytes, baseName: Self.exportBaseName(for: record.project.title))
         }
+    }
+    public func releaseExport(leaseID: UUID) throws {
+        guard let lease = activeExportLease, lease.id == leaseID else { return }
+        try operations.remove(at: lease.directory)
+        activeExportLease = nil
+    }
+    static func exportBaseName(for title: String) -> String {
+        let invalid = CharacterSet(charactersIn: "/\\:*?\"<>|\n\r")
+        let cleaned = title.components(separatedBy: invalid).joined(separator: "-").trimmingCharacters(in: .whitespacesAndNewlines)
+        let visible = cleaned.drop(while: { $0 == "." })
+        return visible.isEmpty ? "SpeechRail-配音" : String(visible.prefix(80))
     }
 
     // MARK: - 事务
@@ -643,7 +715,25 @@ public final class DubbingProjectStore {
             let lock = try operations.acquireExclusiveLock(at: lockURL)
             defer { operations.releaseExclusiveLock(lock) }
             try recoverUnlocked()
-            return try body()
+            do {
+                let value = try body()
+                if activeOperationID != nil {
+                    let digest = try observedIndexDigest ?? indexDataUnlocked().map(CreativeWorkTransaction.digest)
+                        ?? CreativeWorkTransaction.digest(Data())
+                    recordIndexCommit(digest)
+                }
+                return value
+            } catch {
+                if let operationID = activeOperationID,
+                   commitHistory.receipt(operationID: operationID) == nil, let digest = observedIndexDigest {
+                    commitHistory.record(.init(operationID: operationID, committed: false, indexDigest: digest))
+                }
+                throw error
+            }
+        } catch let error as DubbingExportError {
+            throw error
+        } catch let error as CancellationError {
+            throw error
         } catch let error as DubbingProjectError {
             throw error
         } catch let error as CreativeWorkTransactionInterruption {
@@ -663,17 +753,19 @@ public final class DubbingProjectStore {
     }
 
     private func readRecordsUnlocked() throws -> [DubbingProjectRecord] {
-        guard operations.fileExists(at: indexURL) else { return [] }
+        guard operations.fileExists(at: indexURL) else {
+            if activeOperationID != nil { observedIndexDigest = CreativeWorkTransaction.digest(Data()) }
+            return []
+        }
         guard !operations.isSymbolicLink(at: indexURL) else {
             throw DubbingProjectError.invalidIdentifier
         }
         do {
+            let data = try operations.read(from: indexURL)
+            if activeOperationID != nil { observedIndexDigest = CreativeWorkTransaction.digest(data) }
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
-            return try decoder.decode(
-                [DubbingProjectRecord].self,
-                from: operations.read(from: indexURL)
-            )
+            return try decoder.decode([DubbingProjectRecord].self, from: data)
         } catch {
             // 坏索引不能当空库：原文件保留，交给上层报告。
             throw DubbingProjectError.invalidIdentifier
@@ -774,6 +866,7 @@ public final class DubbingProjectStore {
                 try? rollbackUnlocked(journal: journal, transactionDirectory: transactionDirectory)
                 throw DubbingProjectError.invalidIdentifier
             }
+            recordIndexCommit(journal.committedIndexSHA256)
             try validateCommittedAudio(journal)
             try completeCommittedDeletion(journal)
             try? removeTransactionDirectoryUnlocked(transactionDirectory)

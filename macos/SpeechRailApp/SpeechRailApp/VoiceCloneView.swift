@@ -77,8 +77,12 @@ public struct VoiceCloneView: View {
                     navigation.request(.audiobook)
                 }
             } else {
-                do { try VoiceCatalogStore.shared.registerGlobalVoice(voiceID: voiceID, creationSource: .instantClone) }
-                catch { catalogSaveError = error.localizedDescription }
+                Task {
+                    do {
+                        try await model.voiceCatalogModel.store.registerGlobalVoice(voiceID: voiceID, creationSource: .instantClone)
+                        await model.voiceCatalogModel.refresh()
+                    } catch { catalogSaveError = error.localizedDescription }
+                }
             }
         }
         .alert("声音目录未保存", isPresented: Binding(get: { catalogSaveError != nil }, set: { if !$0 { catalogSaveError = nil } })) {

@@ -115,7 +115,7 @@ public enum AudiobookProductionWiring {
             )
             try AudiobookCastRegistry.validateRenderBinding(binding, snapshot: snapshot)
             guard let voice = snapshot.voices.first(where: { $0.id == request.voiceID }),
-                  voiceCatalog.snapshot().permits(voice, bookID: request.bookID ?? UUID(uuidString: "00000000-0000-0000-0000-000000000000")!) else {
+                  (await voiceCatalog.refresh()).permits(voice, bookID: request.bookID ?? UUID(uuidString: "00000000-0000-0000-0000-000000000000")!) else {
                 throw ServiceAPIClientError.invalidContract("voice_scope_changed")
             }
             let result = try await renderClient.createSpeechRender(
@@ -145,7 +145,7 @@ public enum AudiobookProductionWiring {
                 allowedSpeed: request.speed, callerSeed: request.seed)
             try AudiobookCastRegistry.validateRenderBinding(binding, snapshot: snapshot, requireProductionReady: false)
             guard let voice = snapshot.voices.first(where: { $0.id == request.voiceID }),
-                  voiceCatalog.snapshot().permits(voice, bookID: request.bookID ?? UUID(uuidString: "00000000-0000-0000-0000-000000000000")!) else {
+                  (await voiceCatalog.refresh()).permits(voice, bookID: request.bookID ?? UUID(uuidString: "00000000-0000-0000-0000-000000000000")!) else {
                 throw ServiceAPIClientError.invalidContract("voice_scope_changed")
             }
             return try await renderClient.createSpeech(text: request.text, voiceID: request.voiceID, speed: request.speed,
