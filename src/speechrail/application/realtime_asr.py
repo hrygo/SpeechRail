@@ -1118,8 +1118,12 @@ class RealtimeAsrOwner:
                         "commit_event_id": commit_event_id,
                         "accepted_samples": barrier.accepted_samples,
                         "window_revision": receipt.window_revision,
-                        "sealed_through_sample": self._to_wire_sample(
-                            receipt.sealed_through_sample
+                        # Flushing 24 kHz input can round the 16 kHz kernel
+                        # frontier up by one wire sample. Match the emitted
+                        # window frontier and the frozen input, not that pad.
+                        "sealed_through_sample": min(
+                            barrier.accepted_samples,
+                            self._to_wire_sample(receipt.sealed_through_sample),
                         ),
                         "failed_items_count": receipt.failed_items_count,
                     }

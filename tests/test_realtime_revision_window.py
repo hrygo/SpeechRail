@@ -194,6 +194,16 @@ def test_window_route_owns_raw_resampler_tail_exactly_once(samples, packet):
             assert reviews[0].pcm16 == expected
             assert reviews[0].input_span.end == len(expected) // 2
             assert len([e for e in events if e["type"].endswith("completed")]) == 1
+            receipt = next(
+                e for e in events if e["type"] == "speechrail.input_audio_buffer.committed"
+            )
+            assert receipt["accepted_samples"] == samples
+            assert receipt["sealed_through_sample"] == samples
+            window_events = [
+                e for e in events if str(e["type"]).startswith("speechrail.transcription.window.")
+            ]
+            assert receipt["sealed_through_sample"] == window_events[-1]["sealed_through_sample"]
+            assert receipt["window_revision"] == window_events[-1]["window_revision"]
             validator = Draft202012Validator(
                 json.loads(
                     (

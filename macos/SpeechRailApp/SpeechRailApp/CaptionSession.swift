@@ -77,6 +77,32 @@ public struct CaptionSessionDependencies: Sendable {
     }
 }
 
+/// Rendering and scroll invalidation share the text actually visible in the band.
+/// Wire revisions without a text change must not create another scroll request.
+struct CaptionBandContent: Equatable, Sendable {
+    struct Row: Identifiable, Equatable, Sendable {
+        enum ID: Hashable, Sendable {
+            case final(String)
+            case window(String)
+            case partial
+        }
+        let id: ID
+        let text: String
+        let isPartial: Bool
+    }
+    let rows: [Row]
+
+    init(lines: [CaptionSession.Line], windowUnits: [TranscriptWindowUnit]?, partialText: String?) {
+        var rows = lines.map { Row(id: .final($0.id), text: $0.text, isPartial: false) }
+        if let windowUnits {
+            rows += windowUnits.map { Row(id: .window($0.unitID), text: $0.text, isPartial: true) }
+        } else if let partialText, !partialText.isEmpty {
+            rows.append(Row(id: .partial, text: partialText, isPartial: true))
+        }
+        self.rows = rows.filter { !$0.text.isEmpty }
+    }
+}
+
 // 实时字幕的会话层（`SESSIONS-SPEC` §6.3、`TECHNICAL-DESIGN` §5.7）。
 //
 // **它不认识 AppKit，也不认识窗口。** 浮层由 `CaptionBandWindowController` 负责；这里只说
@@ -248,7 +274,25 @@ public final class CaptionSession {
     public private(set) var windowCapture: TranscriptWindowCapture?
     private var retiredWindowCaptures: [TranscriptWindowCapture] = []
     private var windowFallbackNote: String?
-    public var transcriptionStatusText: String? { windowCapture?.statusText ?? windowFallbackNote }
+    private var completionRecordID: String?
+    public private(set) var completionDiagnosticCode: String?
+    public var completionFailure: SessionDrainFailure? {
+        guard let completionRecordID else { return nil }
+        if let failure = coordinator.captureCompletionFailure(recordID: completionRecordID) { return failure }
+        if let pending = coordinator.pendingSeals[completionRecordID],
+           pending.failureReason != nil || coordinator.activeSessionID != completionRecordID {
+            return SessionDrainFailure(stage: .seal,
+                message: pending.failureReason ?? "记录尚未确认封存，请保留已有文字。")
+        }
+        return nil
+    }
+    public var transcriptionStatusText: String? {
+        if completionFailure != nil { return "字幕收尾尚未确认" }
+        return windowCapture?.statusText ?? windowFallbackNote
+    }
+    var bandContent: CaptionBandContent {
+        CaptionBandContent(lines: lines, windowUnits: windowCapture?.visibleUnits, partialText: partialText)
+    }
 
     private func beginWindowCapture(enabled: Bool, identity: TranscriptPreviewLedger.Identity, captureStartedAt: Date) {
         if let previous = windowCapture {
@@ -491,6 +535,8 @@ public final class CaptionSession {
         phase = .preparing
         blocked = nil
         lastFailure = nil
+        completionRecordID = nil
+        completionDiagnosticCode = nil
         do {
             guard admissionLedger.canStartNewRecord else {
                 throw Blocked(.storeUnavailable("未保存的恢复记录已达到上限，请先复制恢复内容。"))
@@ -671,6 +717,7 @@ public final class CaptionSession {
     private func performStopCapture(preservingRecord: Bool) async {
         let deadline = SessionDrainDeadline(timeout: windowCapture == nil ? dependencies.drainTimeout : .seconds(30))
         let endingRecordID = sessionID
+        completionRecordID = endingRecordID
         if let endingRecordID {
             coordinator.recordCaptureCompletionDeadline(recordID: endingRecordID, deadline: deadline)
         }
@@ -1142,6 +1189,7 @@ public final class CaptionSession {
             }
         case .serverError(let code, let message, let requestID):
             if phase == .ending, requestID == nil, let sessionID {
+                completionDiagnosticCode = code
                 coordinator.recordCaptureCompletionFailure(recordID: sessionID, failure: .init(
                     stage: .protocolDrain, message: message
                 ))
