@@ -8,7 +8,14 @@ from pathlib import Path
 def main() -> None:
     root = Path(__file__).resolve().parents[1]
     package = root / "macos" / "SpeechRailApp"
-    source = package / "SpeechRailApp" / "LLMProvider.swift"
+    sources = [
+        package / "SpeechRailApp" / filename
+        for filename in (
+            "LLMProvider.swift",
+            "LLMStreamDelivery.swift",
+            "AppPerformanceMetrics.swift",
+        )
+    ]
     # Build only the SDK dependency. No SpeechRail preparation/prompts target is
     # passed to the compiler, so a reverse dependency is a real compilation error.
     subprocess.run(
@@ -31,7 +38,7 @@ def main() -> None:
             str(binary_path),
             "-I",
             str(binary_path / "Modules"),
-            str(source),
+            *(str(source) for source in sources),
         ],
         check=True,
     )
