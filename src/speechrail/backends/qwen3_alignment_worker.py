@@ -223,6 +223,7 @@ def serve(
         "device": identity.device,
         "dtype": identity.dtype,
         "model_loaded": True,
+        "granularities": ["word", "character", "segment"],
     }
     ready.update(_ready_identity_fields(identity))
     write_frame(output_stream, ready)

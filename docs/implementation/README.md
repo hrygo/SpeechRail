@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 实施与交付记录索引"
 status: active
-version: "1.0.0"
-date: 2026-10-15
+version: "1.0.1"
+date: 2026-10-16
 ---
 
 # 🛠️ 实施与交付记录中心 (Implementation & Delivery)
@@ -28,6 +28,7 @@ date: 2026-10-15
 
 ### 2. 专项 Issue 闭环计划与交付报告
 针对具体 Issue 的端到端闭环计划、执行跟踪与交付记录：
+- **会议与字幕窗口**：[2026-10-16 实施及验收记录](2026-10-16-meeting-caption-acceptance.md)，区分确定性回归、真实模型回放、UI 阻塞与 no-go 启用门。
 - **Issue #238（闭环与对齐）**：`2026-10-06-issue-238-solid-loop-plan.md`、`2026-10-07-issue-238-final-acceptance.md`、`2026-10-07-issue-238-alignment-audit.md`。
 - **Issue #336（ASR 验收）**：`2026-10-07-issue-336-asr-acceptance.md`。
 - **语音助手交付**：`2026-10-04-voice-assistant-acceptance-ledger.md`、`2026-10-04-voice-assistant-implementation-report.md`。

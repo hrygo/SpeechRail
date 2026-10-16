@@ -93,7 +93,7 @@ class AuxiliaryIngress(Protocol):
     async def append(self, pcm16: bytes) -> None: ...
     async def cancel_alignment_tasks(self) -> None: ...
     async def reset(self) -> None: ...
-    def start_alignment(self, result: FrozenTranscript) -> None: ...
+    def start_alignment(self, result: FrozenTranscript) -> asyncio.Task[None] | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +105,8 @@ class RealtimeAuxiliaryPorts:
     metrics: Metrics
     ready: Callable[[], bool]
     status_message: Callable[[], str]
+    engine_for_backend: Callable[[str], DiarizationEngine | None] | None = None
+    backend_ready: Callable[[str], bool] | None = None
 
 
 class RealtimeAuxiliaryOwner:
@@ -138,6 +140,7 @@ class RealtimeAuxiliaryOwner:
         self._alignment_tasks: set[asyncio.Task[None]] = set()
         self._alignment_enabled = False
         self._diarization_enabled = False
+        self._diarization_backend = "sortformer"
 
         self._ledger: AttributionLedger | None = None
         self._diarization_phase = "active"
@@ -150,6 +153,7 @@ class RealtimeAuxiliaryOwner:
         self._wire_span_by_unit: dict[str, SampleSpan] = {}
         self._speaker_by_unit: dict[str, str | None] = {}
         self._identity_by_unit: dict[str, _DiarizationItemIdentity] = {}
+        self._final_unit_ids: set[str] = set()
         self._latest_diarization_identity: _DiarizationItemIdentity | None = None
 
     @property
@@ -176,7 +180,13 @@ class RealtimeAuxiliaryOwner:
     def degraded_reason(self) -> str | None:
         return self._degraded_reason
 
-    async def configure(self, *, alignment: bool, diarization: bool) -> None:
+    async def configure(
+        self, *, alignment: bool, diarization: bool, backend: str = "sortformer"
+    ) -> None:
+        if self._diarization is not None and backend != self._diarization_backend:
+            raise RealtimeAdapterError("invalid_state", "active diarization backend is frozen")
+        previous_backend = self._diarization_backend
+        self._diarization_backend = backend
         previous = self._diarization_enabled
         self._diarization_enabled = diarization
         if diarization:
@@ -185,6 +195,7 @@ class RealtimeAuxiliaryOwner:
             except BaseException:
                 await self._close_diarization()
                 self._diarization_enabled = previous
+                self._diarization_backend = previous_backend
                 raise
         else:
             await self._close_diarization()
@@ -206,6 +217,7 @@ class RealtimeAuxiliaryOwner:
         self._wire_span_by_unit.clear()
         self._speaker_by_unit.clear()
         self._identity_by_unit.clear()
+        self._final_unit_ids.clear()
         self._latest_diarization_identity = None
         self._metadata_revision = 0
         self._degraded_reason = None
@@ -219,7 +231,7 @@ class RealtimeAuxiliaryOwner:
         await self._cancel_alignment_tasks()
         await self._close_diarization()
 
-    def start_alignment(self, result: FrozenTranscript) -> None:
+    def start_alignment(self, result: FrozenTranscript) -> asyncio.Task[None]:
         task = asyncio.create_task(
             self._finish_alignment(
                 task_id=result.task_id,
@@ -239,6 +251,7 @@ class RealtimeAuxiliaryOwner:
         )
         self._alignment_tasks.add(task)
         task.add_done_callback(self._alignment_tasks.discard)
+        return task
 
     def _alignment_granularity(self) -> AlignmentGranularity:
         """Return the requested alignment granularity, defaulting to segments.
@@ -306,8 +319,10 @@ class RealtimeAuxiliaryOwner:
                 self._ports.metrics.record_alignment_event("fixed_text_stale")
                 self._ports.metrics.record_alignment_failure("alignment_stale")
                 log_alignment_failure(
-                    code="alignment_stale", stage="realtime",
-                    audio_samples=len(pcm16) // 2, text_characters=len(transcript),
+                    code="alignment_stale",
+                    stage="realtime",
+                    audio_samples=len(pcm16) // 2,
+                    text_characters=len(transcript),
                     expected_audio_samples=item_end_kernel - item_start_kernel,
                     span_start_sample=item_start_kernel,
                     transcript_revision=transcript_revision,
@@ -367,8 +382,10 @@ class RealtimeAuxiliaryOwner:
                 self._ports.metrics.record_alignment_event("fixed_text_unavailable")
                 self._ports.metrics.record_alignment_failure(failure)
                 log_alignment_failure(
-                    code=failure, stage="realtime",
-                    audio_samples=len(pcm16) // 2, text_characters=len(transcript),
+                    code=failure,
+                    stage="realtime",
+                    audio_samples=len(pcm16) // 2,
+                    text_characters=len(transcript),
                     expected_audio_samples=item_end_kernel - item_start_kernel,
                     span_start_sample=item_start_kernel,
                     transcript_revision=transcript_revision,
@@ -408,11 +425,14 @@ class RealtimeAuxiliaryOwner:
             self._ports.metrics.record_alignment_event("fixed_text_unavailable")
             self._ports.metrics.record_alignment_failure("alignment_failed")
             log_alignment_failure(
-                code="alignment_failed", stage="realtime",
-                audio_samples=len(pcm16) // 2, text_characters=len(transcript),
+                code="alignment_failed",
+                stage="realtime",
+                audio_samples=len(pcm16) // 2,
+                text_characters=len(transcript),
                 expected_audio_samples=item_end_kernel - item_start_kernel,
                 span_start_sample=item_start_kernel,
-                transcript_revision=transcript_revision, exception=exc,
+                transcript_revision=transcript_revision,
+                exception=exc,
             )
             with contextlib.suppress(Exception):
                 await self._send(
@@ -649,6 +669,8 @@ class RealtimeAuxiliaryOwner:
             if identity is None:
                 continue
             self._speaker_by_unit[attribution.unit_id] = attribution.speaker
+            if attribution.state == "final":
+                self._final_unit_ids.add(attribution.unit_id)
             grouped.setdefault(identity, []).append(attribution)
 
         for identity in sorted(
@@ -673,6 +695,19 @@ class RealtimeAuxiliaryOwner:
                 )
                 if sequence is not None:
                     self._last_update_sequence = sequence
+
+        before = max(0, self._ledger.stable_through - 60 * 16000)
+        retired = [
+            uid
+            for uid in self._final_unit_ids
+            if uid in self._units_by_id and self._units_by_id[uid].end_sample <= before
+        ]
+        for uid in retired:
+            self._units_by_id.pop(uid, None)
+            self._wire_span_by_unit.pop(uid, None)
+            self._speaker_by_unit.pop(uid, None)
+            self._identity_by_unit.pop(uid, None)
+            self._final_unit_ids.discard(uid)
 
     def _finalization_identity(self) -> _DiarizationItemIdentity:
         """Return the last immutable item, or the live identity for an empty session."""
@@ -822,8 +857,17 @@ class RealtimeAuxiliaryOwner:
             return
         if not self._diarization_enabled:
             return
-        engine = self._diarization_engine
-        if not self._ports.ready() or engine is None:
+        engine = (
+            self._ports.engine_for_backend(self._diarization_backend)
+            if self._ports.engine_for_backend
+            else self._diarization_engine
+        )
+        ready = (
+            self._ports.backend_ready(self._diarization_backend)
+            if self._ports.backend_ready
+            else self._ports.ready()
+        )
+        if not ready or engine is None:
             raise RealtimeAdapterError(
                 "diarization_not_available",
                 self._ports.status_message(),
@@ -833,7 +877,8 @@ class RealtimeAuxiliaryOwner:
             holder: dict[str, DiarizationSession] = {}
             epoch = f"rt-{uuid4().hex}"
             self._ledger = AttributionLedger(
-                accepted_samples=lambda: holder["session"].accepted_samples
+                accepted_samples=lambda: holder["session"].accepted_samples,
+                label_mode=self._diarization_backend,
             )
             self._diarization = DiarizationSession(
                 activity=engine.open(epoch=epoch), ledger=self._ledger
@@ -848,8 +893,16 @@ class RealtimeAuxiliaryOwner:
 
     async def _close_diarization(self) -> None:
         if self._diarization is not None:
-            with contextlib.suppress(Exception):
+            try:
                 await self._diarization.cancel()
+            except Exception:
+                # Returning from the socket must not free ownership of an
+                # unconfirmed native child. The service singleton retains it
+                # and its presence lease until operator recovery/restart.
+                self._ports.diarization_admission.quarantine(
+                    (self._diarization, self._diarization_resources)
+                )
+                self._diarization_resources = None
             self._diarization = None
         if self._diarization_events is not None:
             self._diarization_events.cancel()

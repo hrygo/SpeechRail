@@ -17,14 +17,25 @@ class DiarizationError(ValueError):
 @dataclass(frozen=True, slots=True)
 class ActivityFrame:
     span: SampleSpan
-    scores: tuple[float, float, float, float]
+    scores: tuple[float, ...] | None
     active_slots: frozenset[int]
+    reason: str | None = None
 
     def __post_init__(self) -> None:
-        if any(not math.isfinite(score) or not 0 <= score <= 1 for score in self.scores):
+        if self.reason not in {None, "identity_uncertain", "speaker_capacity", "activity_gap",
+                               "audio_expired", "model_not_ready"}:
+            raise ValueError("unknown activity reason")
+        if self.scores is not None and (not 1 <= len(self.scores) <= 32 or any(
+            not math.isfinite(score) or not 0 <= score <= 1 for score in self.scores
+        )):
             raise ValueError("activity scores must be finite values in [0, 1]")
-        if any(slot not in range(4) for slot in self.active_slots):
-            raise ValueError("activity slots must be in [0, 3]")
+        if any(
+            type(slot) is not int
+            or not 0 <= slot < 32
+            or (self.scores is not None and slot >= len(self.scores))
+            for slot in self.active_slots
+        ):
+            raise ValueError("activity slots must be in [0, 31] and match score dimensions")
 
 
 @dataclass(frozen=True, slots=True)

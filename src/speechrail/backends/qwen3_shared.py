@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from speechrail.backends.model_identity import observed_runtime_revision
-from speechrail.runtime.asr_mode import AsrModeGate, AsrModeScheduler
+from speechrail.runtime.asr_mode import AsrModeBusy, AsrModeGate, AsrModeScheduler
 from speechrail.runtime.worker_process import (
     AsyncFramedWorkerProcess,
     WorkerProcessSpec,
@@ -117,6 +117,8 @@ class Qwen3SharedWorker:
         self._transport = AsyncFramedWorkerProcess(config.worker_spec())
         self._start_lock = asyncio.Lock()
         self._ready = False
+        self._capabilities: frozenset[str] = frozenset()
+        self._window_owner: object | None = None
         self._identity: tuple[str, str] | None = None
         self._runtime_revision: str | None = None
         # The gate/scheduler lifetime belongs to the owner across worker restarts.
@@ -206,11 +208,33 @@ class Qwen3SharedWorker:
 
         return dict(self._metrics)
 
+    @property
+    def supports_window_decode(self) -> bool:
+        return self.ready and "window_decode_v1" in self._capabilities
+
+    def reserve_window_owner(self) -> object:
+        if (
+            self._window_owner is not None
+            or self._sessions
+            or self._requests
+            or self.mode_gate.active_count
+        ):
+            raise AsrModeBusy("ASR input owner is busy")
+        self._window_owner = object()
+        return self._window_owner
+
+    def release_window_owner(self, owner: object) -> None:
+        if self._window_owner is not owner:
+            raise ValueError("invalid ASR window owner")
+        self._window_owner = None
+
     def register_session(self, session_id: str) -> asyncio.Queue[dict[str, object]]:
         """注册一个有界 streaming 队列。"""
 
         if not isinstance(session_id, str) or not session_id:
             raise ValueError("session_id must be a non-empty string")
+        if self._window_owner is not None:
+            raise AsrModeBusy("ASR input owner is busy")
         if session_id in self._sessions:
             raise ValueError("session_already_registered")
         if len(self._sessions) >= self.max_sessions:
@@ -274,6 +298,10 @@ class Qwen3SharedWorker:
             self._ready = True
             self._identity = (self.config.device, self.config.dtype)
             self._runtime_revision = observed_runtime_revision(ready)
+            capabilities = ready.get("capabilities", [])
+            self._capabilities = frozenset(capabilities) if isinstance(capabilities, list) and all(
+                isinstance(value, str) for value in capabilities
+            ) else frozenset()
             self.last_active = time.monotonic()
             self._dispatcher = asyncio.create_task(
                 self._dispatch_loop(generation),

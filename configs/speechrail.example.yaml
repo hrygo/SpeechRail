@@ -31,7 +31,7 @@ diarization:
   # Task opt-in: diarization is not a spec tier. Omit both keys below to leave
   # diarization OFF (neither the CoreML bundle nor the aligner is provisioned).
   # One external FluidAudio CoreML FP16 bundle and the wheel-installed worker.
-  # No NeMo/CAM++, provider switch, model download, or precision fallback exists.
+  # The Sortformer adapter never downloads models or changes precision on requests.
   coreml_model_path: /absolute/path/outside/SpeechRail/SortformerNvidiaLow_v2.1.mlmodelc
   # Provisioning pairs a directory you prepared (aligner-q8 or aligner-bf16) with
   # the task that opts into diarization.
@@ -42,6 +42,12 @@ diarization:
   max_groups: 64
   group_ttl_seconds: 900
   similarity_threshold: 0.8
+  dynamic_enabled: false
+  # dynamic_model_dir: /absolute/path/outside/SpeechRail/meeting-dynamic-snapshot
+  # dynamic_policy_path: /absolute/path/outside/SpeechRail/matching-policy.json
+  dynamic_resident_bytes: 0
+
+asr_revision_windows_enabled: false
 
 security:
   api_key_env: SPEECHRAIL_API_KEY

@@ -253,27 +253,7 @@ public actor SessionStore: SessionArchiveWriting {
     public func appendLine(_ draft: LineDraft, id: String = UUID().uuidString) throws -> Int {
         try execute("BEGIN IMMEDIATE;")
         do {
-            let ordinal: Int
-            if let existing = try storedLine(id: id) {
-                guard existing.sessionID == draft.sessionID,
-                      existing.role == draft.role, existing.text == draft.text,
-                      existing.source == draft.source, existing.status == draft.status,
-                      existing.speakerLabel == draft.speakerLabel,
-                      existing.tStart == draft.tStart, existing.tEnd == draft.tEnd,
-                      existing.isInterrupted == draft.isInterrupted,
-                      existing.isDeviceSwitch == draft.isDeviceSwitch,
-                      existing.timingQuality == draft.timingQuality,
-                      draft.createdAt.map({
-                          abs(existing.createdAt.timeIntervalSince($0)) <= 0.000001
-                      }) ?? true
-                else { throw SessionStoreError.statementFailed("固定行身份与已存字段冲突") }
-                ordinal = existing.ordinal
-            } else {
-                ordinal = try insertLine(draft, id: id)
-            }
-            if draft.status == .final {
-                try ensureLineIndexWork(sessionID: draft.sessionID, id: id)
-            }
+            let ordinal = try appendLineInTransaction(draft, id: id)
             try execute("COMMIT;")
             return ordinal
         } catch {
@@ -282,7 +262,33 @@ public actor SessionStore: SessionArchiveWriting {
         }
     }
 
-    private func storedLine(id: String) throws -> TranscriptLine? {
+    /// Shared frozen-field validation; caller owns the surrounding transaction.
+    func appendLineInTransaction(_ draft: LineDraft, id: String) throws -> Int {
+        let ordinal: Int
+        if let existing = try storedLine(id: id) {
+            guard existing.sessionID == draft.sessionID,
+                  existing.role == draft.role, existing.text == draft.text,
+                  existing.source == draft.source, existing.status == draft.status,
+                  existing.speakerLabel == draft.speakerLabel,
+                  existing.tStart == draft.tStart, existing.tEnd == draft.tEnd,
+                  existing.isInterrupted == draft.isInterrupted,
+                  existing.isDeviceSwitch == draft.isDeviceSwitch,
+                  existing.timingQuality == draft.timingQuality,
+                  draft.createdAt.map({
+                      abs(existing.createdAt.timeIntervalSince($0)) <= 0.000001
+                  }) ?? true
+            else { throw SessionStoreError.statementFailed("固定行身份与已存字段冲突") }
+            ordinal = existing.ordinal
+        } else {
+            ordinal = try insertLine(draft, id: id)
+        }
+        if draft.status == .final {
+            try ensureLineIndexWork(sessionID: draft.sessionID, id: id)
+        }
+        return ordinal
+    }
+
+    func storedLine(id: String) throws -> TranscriptLine? {
         try withStatement("""
         SELECT id, session_id, ordinal, role, speaker_label, text, t_start, t_end, source, status,
                interrupted, device_switch, starred, timing_quality, created_at

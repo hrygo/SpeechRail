@@ -35,7 +35,7 @@ def _characters(text: str) -> str:
 def character_error_metrics(reference: str, hypothesis: str) -> dict[str, object]:
     """Linear-space edit distance; punctuation needs a separate annotated set."""
     expected, actual = _characters(reference), _characters(hypothesis)
-    if not expected or max(len(expected), len(actual)) > 10_000:
+    if max(len(expected), len(actual)) > 10_000:
         raise ValueError("ASR quality text exceeds the scoring bounds")
     previous = list(range(len(actual) + 1))
     for row, left in enumerate(expected, 1):
@@ -52,7 +52,7 @@ def character_error_metrics(reference: str, hypothesis: str) -> dict[str, object
         "reference_characters": len(expected),
         "hypothesis_characters": len(actual),
         "character_errors": errors,
-        "cer": errors / len(expected),
+        "cer": errors / len(expected) if expected else None,
         "normalization": "NFKC_casefold_letters_numbers_marks",
         "punctuation_gate": "unset",
     }

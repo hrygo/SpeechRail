@@ -11,7 +11,8 @@ extension MeetingView {
             VStack(alignment: .leading, spacing: 0) {
                 CardHead(
                     title: "实时记录",
-                    detail: meeting.labeling.isEnabled ? "点击发言人标签可重命名或合并" : nil
+                    detail: meeting.transcriptionStatusText
+                        ?? (meeting.labeling.isEnabled ? "点击发言人标签可重命名或合并" : nil)
                 ) {
                     // 稿 `screenMeetingRecording` 表头那一颗（`main.js:3642`）：会中人工标注的
                     // 入口必须看得见。点行上的标签是**第一条路**（就地改名 / 合并），这颗按钮是
@@ -67,7 +68,11 @@ extension MeetingView {
                                 }
                                 liveLine(line).id(line.id)
                             }
-                            if let partial = meeting.partialText, !partial.isEmpty {
+                            if let capture = meeting.windowCapture {
+                                ForEach(capture.visibleUnits, id: \.unitID) { unit in
+                                    partialLine(unit.text)
+                                }
+                            } else if let partial = meeting.partialText, !partial.isEmpty {
                                 partialLine(partial)
                             }
                         }
@@ -284,7 +289,7 @@ extension MeetingView {
                 if !others.isEmpty {
                     Divider()
                     ForEach(others, id: \.self) { other in
-                        Button("与 \(meeting.labeling.displayNames[other] ?? other) 合并") {
+                        Button("与 \(meeting.labeling.displayText(for:other)) 合并") {
                             Task { await meeting.merge(label: label, into: other) }
                         }
                     }
@@ -292,7 +297,7 @@ extension MeetingView {
             } label: {
                 SpeakerChip(
                     label: label,
-                    displayName: meeting.labeling.displayNames[label]
+                    displayName: meeting.labeling.displayText(for:label)
                 )
             }
             .menuStyle(.borderlessButton)
@@ -314,7 +319,7 @@ extension MeetingView {
                 if !existing.isEmpty {
                     Divider()
                     ForEach(existing, id: \.self) { other in
-                        Button("指定为 \(meeting.labeling.displayNames[other] ?? other)") {
+                        Button("指定为 \(meeting.labeling.displayText(for:other))") {
                             Task { await meeting.labeling.split(lineIDs: [line.id], to: other) }
                         }
                     }

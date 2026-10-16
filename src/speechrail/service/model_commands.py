@@ -106,9 +106,7 @@ def model_catalog_payload(*, catalog: ModelCatalog | None = None) -> dict[str, o
             }
         )
 
-    profiles = [
-        _profile_payload(tier, artifacts_by_key) for tier in _SPEC_ORDER
-    ]
+    profiles = [_profile_payload(tier, artifacts_by_key) for tier in _SPEC_ORDER]
     # 「这一档要用的文件」还包括一份不在目录里的 CoreML 分人资产 (它是 CoreML
     # bundle, 有自己的 manifest, 不走 prepare_models)。分人是任务 opt-in, 不再
     # 绑定档位, 用 required_by=["diarization"] 标记它可按任务准备。
@@ -123,9 +121,7 @@ def model_catalog_payload(*, catalog: ModelCatalog | None = None) -> dict[str, o
     }
 
 
-def _profile_payload(
-    tier: str, artifacts_by_key: Mapping[str, ModelArtifact]
-) -> dict[str, object]:
+def _profile_payload(tier: str, artifacts_by_key: Mapping[str, ModelArtifact]) -> dict[str, object]:
     """Build one spec-tier row from its explicit role bindings."""
     # ModelCatalog exposes immutable Pydantic models; keep this helper private so
     # the public payload stays a plain, path-free mapping.
@@ -155,9 +151,7 @@ def _model_bytes(models_root: Path) -> int:
     total = 0
     for current, directories, files in os.walk(models_root, followlinks=False):
         current_path = Path(current)
-        directories[:] = [
-            name for name in directories if not (current_path / name).is_symlink()
-        ]
+        directories[:] = [name for name in directories if not (current_path / name).is_symlink()]
         for name in files:
             path = current_path / name
             if path.is_symlink():
@@ -275,6 +269,24 @@ def model_status_payload(
     }
 
 
+def prepare_meeting_diarization_payload(app_home: Path) -> dict[str, object]:
+    """Provision locked auxiliary bytes without selection/config/runtime mutations."""
+    from speechrail.service.diarization_assets import (
+        MEETING_MODEL_REVISION,
+        prepare_meeting_dynamic_assets,
+    )
+
+    prepare_meeting_dynamic_assets(app_home / "diarization")
+    return {
+        "command": "model.prepare-diarization",
+        "event": "result",
+        "status": "verified",
+        "backend": "meeting_dynamic",
+        "model_revision": MEETING_MODEL_REVISION,
+        "enabled": False,
+    }
+
+
 async def prepare_selected_models(
     asr_spec: str,
     tts_spec: str,
@@ -314,5 +326,6 @@ async def prepare_selected_models(
 __all__ = [
     "model_catalog_payload",
     "model_status_payload",
+    "prepare_meeting_diarization_payload",
     "prepare_selected_models",
 ]

@@ -16,6 +16,11 @@ from uuid import uuid4
 from starlette.websockets import WebSocketDisconnect
 
 from speechrail.application.asr_turn_coordinator import AsrTurnCoordinator
+from speechrail.application.asr_window_coordinator import (
+    AsrWindowCoordinator,
+    Review,
+    WindowReceipt,
+)
 from speechrail.application.realtime_auxiliary import AuxiliaryIngress
 from speechrail.application.realtime_state import AsrIdentity, FrozenTranscript
 from speechrail.compatibility.openai_realtime import (
@@ -30,6 +35,7 @@ from speechrail.compatibility.openai_realtime import (
 )
 from speechrail.config import Settings
 from speechrail.domain.asr_policy import ASRPolicy, resolve_effective_max_segment_ms
+from speechrail.domain.asr_window import FinalWindowUnit, WindowIdentity, WindowPolicy
 from speechrail.domain.audio_timeline import (
     RateMap,
     RationalResampler,
@@ -42,6 +48,8 @@ from speechrail.domain.ports import (
     RealtimeAsrSession,
     RealtimeTranscriptionOptions,
     SegmentCloseReason,
+    WindowAsrFactory,
+    WindowAsrSession,
 )
 from speechrail.observability.metrics import Metrics
 from speechrail.realtime.speech_admission import AdmissionDecision, SpeechAdmission
@@ -56,6 +64,7 @@ from speechrail.runtime.resource_governor import (
     WorkClass,
     WorkPurpose,
 )
+from speechrail.runtime.window_pcm import PcmBudget
 
 logger = logging.getLogger(__name__)
 
@@ -98,10 +107,20 @@ class _AsrInputBarrier:
 
 
 @dataclass(frozen=True, slots=True)
+class _WindowInputBarrier:
+    generation: int
+    accepted_samples: int
+    future: asyncio.Future[WindowReceipt]
+
+
+@dataclass(frozen=True, slots=True)
 class RealtimeAsrPorts:
     factory: RealtimeAsrFactory | None
     governor: ResourceGovernor
     metrics: Metrics
+    window_factory: WindowAsrFactory | None = None
+    boundary_review: Callable[[WindowAsrSession], Review] | None = None
+    pcm_budget: PcmBudget | None = None
 
 
 @dataclass(slots=True)
@@ -128,6 +147,8 @@ class RealtimeAsrOwner:
         config: Callable[[], Mapping[str, Any]],
     ) -> None:
         self._ports = ports
+        self._session_id = session_id
+        self._window: AsrWindowCoordinator | None = None
         self._settings = settings
         self._send = send
         self._task_id = task_id
@@ -226,18 +247,135 @@ class RealtimeAsrOwner:
     @property
     def policy_busy(self) -> bool:
         return bool(
-            self._asr is not None
+            self._window is not None
+            or self._asr is not None
             or (self._asr_lane is not None and self._asr_lane.busy)
             or self._vad_raw_buffer
         )
 
     async def wait_finals(self) -> None:
+        if self._window is not None:
+            await asyncio.shield(self._window.freeze())
         await self._await_asr_finals()
+
+    async def configure_window(self, candidate: Mapping[str, Any]) -> None:
+        scene = candidate.get("window_scene")
+        if scene not in ("meeting", "caption") or self._window is not None:
+            return
+        if self._ports.window_factory is None:
+            raise RealtimeAdapterError("backend_not_ready", "revision windows are not configured")
+        identity = WindowIdentity(self._session_id, self._wire_epoch, "window_" + uuid4().hex)
+        generation = self._asr_generation
+
+        async def final(
+            unit: FinalWindowUnit, pcm16: bytes, reason: str | None = None
+        ) -> asyncio.Task[None] | None:
+            return self.auxiliary.start_alignment(
+                FrozenTranscript(
+                    self._task_id,
+                    identity.input_epoch,
+                    generation,
+                    unit.item_id,
+                    unit.text,
+                    unit.text_revision,
+                    self._to_wire_sample(unit.owned_span.start),
+                    self._to_wire_sample(unit.owned_span.end),
+                    unit.owned_span.start,
+                    unit.owned_span.end,
+                    pcm16,
+                    False,
+                    reason,
+                )
+            )
+
+        async def unavailable(unit: FinalWindowUnit, reason: str) -> None:
+            self.auxiliary.start_alignment(
+                FrozenTranscript(
+                    self._task_id,
+                    identity.input_epoch,
+                    generation,
+                    unit.item_id,
+                    unit.text,
+                    unit.text_revision,
+                    self._to_wire_sample(unit.owned_span.start),
+                    self._to_wire_sample(unit.owned_span.end),
+                    unit.owned_span.start,
+                    unit.owned_span.end,
+                    b"",
+                    False,
+                    reason,
+                )
+            )
+
+        decoder = self._ports.window_factory.create(identity=identity)
+        boundary_review = (
+            self._ports.boundary_review(decoder) if self._ports.boundary_review else None
+        )
+        self._window = AsrWindowCoordinator(
+            identity=identity,
+            policy=WindowPolicy.for_scene(scene),
+            scene=scene,
+            decoder=decoder,
+            send=self._send,
+            review=boundary_review,
+            on_final=final,
+            on_auxiliary_unavailable=unavailable,
+            language=candidate.get("language"),
+            context=str(candidate.get("prompt") or ""),
+            start_sample=self._kernel_timeline.accepted_samples,
+            pcm_budget=self._ports.pcm_budget,
+            metrics=self._ports.metrics,
+            to_wire_sample=lambda sample: min(self.accepted_samples, self._to_wire_sample(sample)),
+        )
+
+    def _window_silence_frontier(self) -> None:
+        if self._window is not None and self._speech_admission is not None:
+            frontier = min(
+                self._speech_admission.retained_from_sample,
+                self._vad_sample_cursor
+                if self._vad_raw_buffer
+                else self._kernel_timeline.accepted_samples,
+            )
+            self._window.silence_before(frontier)
+
+    async def _freeze_window(self) -> _WindowInputBarrier:
+        assert self._window is not None
+        tail = self._resampler.flush()
+        if tail:
+            span = self._kernel_timeline.accept(tail)
+            await self._window.append(span.start, tail)
+            if self.auxiliary.diarization_active:
+                await self.auxiliary.append(tail)
+            if self._speech_admission is not None:
+                await self._feed_speech_admission_pcm(tail, in_commit=True)
+            else:
+                self._window.admit(span)
+        if self._speech_admission is not None:
+            if self._vad_raw_buffer:
+                remainder = bytes(self._vad_raw_buffer)
+                self._vad_raw_buffer.clear()
+                decisions = self._speech_admission.push(
+                    remainder, start_sample=self._vad_sample_cursor, probability=0.0
+                )
+                self._vad_sample_cursor += len(remainder) // 2
+                for dec in decisions:
+                    await self._handle_admission_decision(dec, in_commit=True)
+            for dec in self._speech_admission.finish():
+                await self._handle_admission_decision(dec, in_commit=True)
+            # A commit seals every accepted sample, including unadmitted pre-roll.
+            # A subsequent utterance must begin at the new input frontier.
+            self._speech_admission.reset(next_sample=self._kernel_timeline.accepted_samples)
+        return _WindowInputBarrier(
+            self._asr_generation, self.accepted_samples, self._window.freeze()
+        )
 
     async def begin_close(self) -> None:
         self._closing = True
         self._asr_generation += 1
         self._asr_debug_tap.close()
+        if self._window is not None:
+            await self._window.close()
+            self._window = None
         if self._asr_lane is not None:
             await self._asr_lane.close()
             self._asr_lane = None
@@ -669,6 +807,12 @@ class RealtimeAsrOwner:
     async def _handle_admission_decision(
         self, dec: AdmissionDecision, *, in_commit: bool = False
     ) -> None:
+        if self._window is not None:
+            if dec.kind == "audio":
+                self._window.admit(SampleSpan(dec.start_sample, dec.end_sample))
+            elif dec.kind == "end":
+                self._window.close_block("vad")
+            return
         if dec.kind == "start":
             self._turn_generation += 1
             self._turn_has_admitted_speech = True
@@ -737,7 +881,9 @@ class RealtimeAsrOwner:
                         shadow_speech=shadow_prob >= self._shadow_vad.threshold,
                     )
             decisions = self._speech_admission.push(
-                frame, start_sample=frame_start_sample, probability=prob,
+                frame,
+                start_sample=frame_start_sample,
+                probability=prob,
             )
             for dec in decisions:
                 await self._handle_admission_decision(dec, in_commit=in_commit)
@@ -765,7 +911,7 @@ class RealtimeAsrOwner:
                 "buffer_too_large", "audio buffer exceeds the configured limit"
             )
 
-        if self._asr_factory is None:
+        if self._asr_factory is None and self._window is None:
             raise RealtimeAdapterError("backend_not_ready", "streaming ASR backend is not ready")
 
         await self.auxiliary.ensure_diarization()
@@ -774,6 +920,8 @@ class RealtimeAsrOwner:
         self._input_generation += 1
         kernel_audio = self._resampler.process(audio)
         kernel_span = self._kernel_timeline.accept(kernel_audio)
+        if self._window is not None:
+            await self._window.append(kernel_span.start, kernel_audio)
         # Accepted input may belong to the next item. Only admitted PCM
         # advances the current item's end, including across a packet boundary
         # at which the old item has already filled its segment budget.
@@ -784,6 +932,14 @@ class RealtimeAsrOwner:
                 self._item_start_kernel = kernel_span.start
                 if self._vad is not None:
                     self._item_start_sample = self._to_wire_sample(kernel_span.start)
+            return
+
+        if self._window is not None:
+            if self._speech_admission is not None and self._vad is not None:
+                await self._feed_speech_admission_pcm(kernel_audio)
+                self._window_silence_frontier()
+            else:
+                self._window.admit(kernel_span)
             return
 
         # 1. SpeechAdmission path (server_vad with admission enabled)
@@ -867,9 +1023,11 @@ class RealtimeAsrOwner:
         reason: str,
         *,
         commit_event_id: str | None,
-    ) -> _AsrInputBarrier:
+    ) -> _AsrInputBarrier | _WindowInputBarrier:
         """Freeze input in FIFO order; model finalization does not hold this lock."""
         async with self._commit_lock:
+            if self._window is not None:
+                return await self._freeze_window()
             if self._asr_input_error is not None:
                 raise RealtimeAdapterError(
                     self._asr_input_error, "the input barrier contains rejected audio"
@@ -944,11 +1102,29 @@ class RealtimeAsrOwner:
 
     async def complete_commit(
         self,
-        barrier: _AsrInputBarrier,
+        barrier: _AsrInputBarrier | _WindowInputBarrier,
         *,
         commit_event_id: str | None,
         request_receipt: bool,
     ) -> None:
+        if isinstance(barrier, _WindowInputBarrier):
+            receipt = await asyncio.shield(barrier.future)
+            if barrier.generation != self._asr_generation:
+                raise RealtimeAdapterError("invalid_state", "the window input barrier was cleared")
+            if request_receipt:
+                await self._send(
+                    {
+                        "type": "speechrail.input_audio_buffer.committed",
+                        "commit_event_id": commit_event_id,
+                        "accepted_samples": barrier.accepted_samples,
+                        "window_revision": receipt.window_revision,
+                        "sealed_through_sample": self._to_wire_sample(
+                            receipt.sealed_through_sample
+                        ),
+                        "failed_items_count": receipt.failed_items_count,
+                    }
+                )
+            return
         try:
             results = await asyncio.gather(*(asyncio.shield(t) for t, _ in barrier.finals))
         except asyncio.CancelledError:
@@ -1040,7 +1216,8 @@ class RealtimeAsrOwner:
                 await self._ensure_asr_for_turn()
             if (
                 self._speech_admission is None
-                and self._asr is not None and self._turn_has_admitted_speech
+                and self._asr is not None
+                and self._turn_has_admitted_speech
             ):
                 await self._feed_admitted_pcm(tail, kernel_span.start, in_commit=True)
 
@@ -1248,6 +1425,10 @@ class RealtimeAsrOwner:
         self._current_item_id = self._new_item_id()
 
     async def clear(self) -> None:
+        if self._window is not None:
+            await self._window.close()
+            self._window = None
+            self._wire_epoch += 1
         # Only unfrozen input is discarded without a terminal. A boundary
         # already published to the caller creates an obligation to finish
         # that item, even when its inference is canceled by clear.
@@ -1324,6 +1505,7 @@ class RealtimeAsrOwner:
         self._item_end_kernel = self._kernel_timeline.accepted_samples
         self._reset_turn_observability()
         self._current_item_id = self._new_item_id()
+        await self.configure_window(self._config)
 
     def _completed_event(
         self, *, transcript: str, commit_event_id: str | None = None

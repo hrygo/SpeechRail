@@ -86,7 +86,19 @@ public protocol MeetingAudioSource: AnyObject {
 ///
 /// 会议只用 ASR 子集，所以这里**不含**任何 TTS 成员——把 TTS 写进协议
 /// 就是给会议链路凭空加一个它永远不会用的依赖。
-public protocol MeetingRealtimeClient: Sendable {
+public protocol RealtimeTextDrainClient: Sendable {
+    func drainAndClear(timeout: Duration) async throws
+    func drainAndClear(timeout: Duration, beforeAuxiliary: @escaping @Sendable (Int) async throws -> Void) async throws
+}
+
+extension RealtimeTextDrainClient {
+    public func drainAndClear(timeout: Duration, beforeAuxiliary: @escaping @Sendable (Int) async throws -> Void) async throws {
+        try await drainAndClear(timeout: timeout)
+        try await beforeAuxiliary(0)
+    }
+}
+
+public protocol MeetingRealtimeClient: RealtimeTextDrainClient {
     func events() async -> RealtimeEventStream<RealtimeASRClient.Event>
     func connect() async throws
     func append(_ pcm: Data) async throws
@@ -98,9 +110,9 @@ public protocol MeetingRealtimeClient: Sendable {
     /// 按下的暂停，等不到静音边界，前后的两段会被并成同一句。切完这一刀，
     /// 之后 append 的音频自然落进新 buffer，不会和暂停前那句黏在一起。
     func flushPendingUtterance() async throws
-    func drainAndClear(timeout: Duration) async throws
     func close() async
 }
+
 
 extension RealtimeASRClient: MeetingRealtimeClient {}
 
@@ -112,19 +124,25 @@ public struct MeetingRealtimeClientConfiguration: Sendable, Equatable {
     public var apiKey: String?
     public var diarizationEnabled: Bool
     public var expectedASRRevision: String?
+    public var windowScene: SpeechRailWindowScene?
+    public var diarizationBackend: SpeechRailDiarizationBackend?
 
     public init(
         port: Int,
         scenePreset: ASRScenePreset = .meeting,
         apiKey: String?,
         diarizationEnabled: Bool,
-        expectedASRRevision: String?
+        expectedASRRevision: String?,
+        windowScene: SpeechRailWindowScene? = nil,
+        diarizationBackend: SpeechRailDiarizationBackend? = nil
     ) {
         self.port = port
         self.scenePreset = scenePreset
         self.apiKey = apiKey
         self.diarizationEnabled = diarizationEnabled
         self.expectedASRRevision = expectedASRRevision
+        self.windowScene = windowScene
+        self.diarizationBackend = diarizationBackend
     }
 }
 
@@ -160,6 +178,8 @@ public struct MeetingSessionDependencies: Sendable {
     public var saveLine: (@Sendable (LineDraft, String) async throws -> Int)?
     public var attachSpeakerLabel: (@Sendable (String, String?) async throws -> Void)?
     public var drainTimeout: Duration
+    public var revisionWindowEnabled: Bool?
+    public var dynamicDiarizationEnabled: Bool?
 
     public init(
         makeAudioSource: @escaping @MainActor () -> any MeetingAudioSource,
@@ -169,7 +189,9 @@ public struct MeetingSessionDependencies: Sendable {
         persistenceConfiguration: TranscriptPersistenceQueue.Configuration = .init(),
         saveLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
         attachSpeakerLabel: (@Sendable (String, String?) async throws -> Void)? = nil,
-        drainTimeout: Duration = .seconds(12)
+        drainTimeout: Duration = .seconds(12),
+        revisionWindowEnabled: Bool? = nil,
+        dynamicDiarizationEnabled: Bool? = nil
     ) {
         self.makeAudioSource = makeAudioSource
         self.makeRealtimeClient = makeRealtimeClient
@@ -179,6 +201,8 @@ public struct MeetingSessionDependencies: Sendable {
         self.saveLine = saveLine
         self.attachSpeakerLabel = attachSpeakerLabel
         self.drainTimeout = drainTimeout
+        self.revisionWindowEnabled = revisionWindowEnabled
+        self.dynamicDiarizationEnabled = dynamicDiarizationEnabled
     }
 
 }

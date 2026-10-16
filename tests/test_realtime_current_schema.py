@@ -21,6 +21,17 @@ FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "realtime-current"
 MANIFEST_PATH = FIXTURE_ROOT / "manifest.json"
 
 
+def test_contract_checker_validates_every_array_member_and_refuses_empty_evidence():
+    import runpy
+
+    root = Path(__file__).resolve().parents[1]
+    exists = runpy.run_path(str(root / "scripts/check_realtime_contract.py"))["_path_exists"]
+    assert exists({"units": [{"unit_id": "one"}, {"unit_id": "two"}]}, "units[].unit_id")
+    assert not exists({"units": [{"unit_id": "one"}, {}]}, "units[].unit_id")
+    assert not exists({"units": []}, "units[].unit_id")
+    assert not exists({"units": {"unit_id": "one"}}, "units[].unit_id")
+
+
 def _load(path: Path) -> dict[str, Any]:
     with path.open(encoding="utf-8") as handle:
         payload = json.load(handle)
@@ -120,9 +131,7 @@ def test_asr_policy_and_segment_boundary_fields_are_in_the_public_matrix() -> No
 
 def test_segment_closed_schema_rejects_commit_id_for_non_client_close() -> None:
     validator = Draft202012Validator(_load(SCHEMA_PATH))
-    fixture = _load(
-        FIXTURE_ROOT / "server" / "transcription-segment-closed.json"
-    )
+    fixture = _load(FIXTURE_ROOT / "server" / "transcription-segment-closed.json")
     fixture["reason"] = "vad"
 
     assert list(validator.iter_errors(fixture))
@@ -130,9 +139,7 @@ def test_segment_closed_schema_rejects_commit_id_for_non_client_close() -> None:
 
 def test_asr_policy_schema_rejects_non_integer_and_unknown_wire_values() -> None:
     validator = Draft202012Validator(_load(SCHEMA_PATH))
-    fixture = _load(
-        FIXTURE_ROOT / "client" / "session-update-asr-policy.json"
-    )
+    fixture = _load(FIXTURE_ROOT / "client" / "session-update-asr-policy.json")
     for field, value in (
         ("preview_interval_ms", 800.5),
         ("finalization", "vendor_default"),
@@ -153,12 +160,26 @@ def test_server_session_responses_require_effective_asr_policy_echo() -> None:
 
 
 def _path_exists(value: object, dotted: str) -> bool:
-    current = value
-    for component in dotted.split("."):
-        if not isinstance(current, dict) or component not in current:
+    components = dotted.split(".")
+
+    def walk(current: object, index: int) -> bool:
+        if index == len(components):
+            return True
+        component = components[index]
+        is_array = component.endswith("[]")
+        key = component[:-2] if is_array else component
+        if not isinstance(current, dict) or key not in current:
             return False
-        current = current[component]
-    return True
+        child = current[key]
+        if is_array:
+            return (
+                isinstance(child, list)
+                and bool(child)
+                and all(walk(item, index + 1) for item in child)
+            )
+        return walk(child, index + 1)
+
+    return walk(value, 0)
 
 
 @pytest.mark.parametrize(
@@ -180,12 +201,20 @@ def test_removed_event_types_are_absent_from_schema(removed_event: str) -> None:
 def test_optional_commit_receipt_wire_schema() -> None:
     validator = Draft202012Validator(_load(SCHEMA_PATH))
     for requested in (True, False):
-        validator.validate({"type": "input_audio_buffer.commit", "event_id": "barrier",
-                            "speechrail": {"request_receipt": requested}})
+        validator.validate(
+            {
+                "type": "input_audio_buffer.commit",
+                "event_id": "barrier",
+                "speechrail": {"request_receipt": requested},
+            }
+        )
     receipt = {
-        "type": "speechrail.input_audio_buffer.committed", "event_id": "evt_1",
-        "session_id": "sess_1", "sequence": 1,
-        "commit_event_id": "barrier", "accepted_samples": 24000,
+        "type": "speechrail.input_audio_buffer.committed",
+        "event_id": "evt_1",
+        "session_id": "sess_1",
+        "sequence": 1,
+        "commit_event_id": "barrier",
+        "accepted_samples": 24000,
     }
     validator.validate(receipt)
     for invalid in (-1, True, "24000", 1.5):

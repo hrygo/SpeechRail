@@ -45,7 +45,9 @@ extension MeetingSessionDependencies {
                 RealtimeASRClient(
                     port: configuration.port,
                     scenePreset: configuration.scenePreset,
-                    diarizationEnabled: configuration.diarizationEnabled,
+                    windowScene: configuration.windowScene,
+                diarizationEnabled: configuration.diarizationEnabled,
+                    diarizationBackend: configuration.diarizationBackend,
                     apiKey: configuration.apiKey,
                     expectedASRRevision: configuration.expectedASRRevision
                 )

@@ -90,6 +90,15 @@
     },
     {
       "$ref": "#/$defs/client_tts_audio_ack"
+    },
+    {
+      "$ref": "#/$defs/server_window_updated"
+    },
+    {
+      "$ref": "#/$defs/server_window_sealed"
+    },
+    {
+      "$ref": "#/$defs/server_window_failed"
     }
   ],
   "$defs": {
@@ -348,6 +357,12 @@
       "properties": {
         "enabled": {
           "type": "boolean"
+        },
+        "backend": {
+          "enum": [
+            "sortformer",
+            "meeting_dynamic"
+          ]
         }
       }
     },
@@ -393,15 +408,23 @@
         },
         "expected_asr_revision": {
           "$ref": "#/$defs/revision"
+        },
+        "window": {
+          "$ref": "#/$defs/window_request"
         }
+      },
+      "not": {
+        "required": [
+          "asr",
+          "window"
+        ]
       }
     },
     "speechrail_session_response": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "task",
-        "asr"
+        "task"
       ],
       "properties": {
         "task": {
@@ -432,15 +455,36 @@
           "$ref": "#/$defs/alignment_options"
         },
         "diarization": {
-          "$ref": "#/$defs/diarization_options"
+          "$ref": "#/$defs/diarization_effective"
         },
         "endpointing": {
           "$ref": "#/$defs/endpointing"
         },
         "expected_asr_revision": {
           "$ref": "#/$defs/revision"
+        },
+        "window": {
+          "$ref": "#/$defs/window_response"
         }
-      }
+      },
+      "not": {
+        "required": [
+          "asr",
+          "window"
+        ]
+      },
+      "oneOf": [
+        {
+          "required": [
+            "asr"
+          ]
+        },
+        {
+          "required": [
+            "window"
+          ]
+        }
+      ]
     },
     "session": {
       "type": "object",
@@ -1677,12 +1721,40 @@
             "accepted_samples": {
               "type": "integer",
               "minimum": 0
+            },
+            "window_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "sealed_through_sample": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "failed_items_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
             }
           },
           "required": [
             "commit_event_id",
             "accepted_samples"
           ]
+        },
+        {
+          "if": {
+            "required": [
+              "window_revision"
+            ]
+          },
+          "then": {
+            "required": [
+              "sealed_through_sample",
+              "failed_items_count"
+            ]
+          }
         }
       ],
       "unevaluatedProperties": false
@@ -1712,6 +1784,473 @@
         "sample_offset"
       ],
       "additionalProperties": false
+    },
+    "window_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "const": "revision_window_v1"
+        },
+        "scene": {
+          "enum": [
+            "meeting",
+            "caption"
+          ]
+        }
+      },
+      "required": [
+        "mode",
+        "scene"
+      ]
+    },
+    "window_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "preview_interval_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30000
+        },
+        "owned_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30000
+        },
+        "review_grace_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 30000
+        },
+        "left_context_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 30000
+        },
+        "max_decode_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30000
+        },
+        "pcm_budget_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216
+        },
+        "finalization_budget_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30000
+        }
+      },
+      "required": [
+        "preview_interval_ms",
+        "owned_ms",
+        "review_grace_ms",
+        "left_context_ms",
+        "max_decode_ms",
+        "pcm_budget_bytes",
+        "finalization_budget_ms"
+      ]
+    },
+    "window_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "const": "revision_window_v1"
+        },
+        "scene": {
+          "enum": [
+            "meeting",
+            "caption"
+          ]
+        },
+        "policy": {
+          "$ref": "#/$defs/window_policy"
+        }
+      },
+      "required": [
+        "mode",
+        "scene",
+        "policy"
+      ]
+    },
+    "window_unit": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "unit_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "text_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "owned_span": {
+          "$ref": "#/$defs/sample_span"
+        },
+        "state": {
+          "enum": [
+            "preview",
+            "reviewed"
+          ]
+        }
+      },
+      "required": [
+        "unit_id",
+        "text",
+        "text_revision",
+        "owned_span",
+        "state"
+      ]
+    },
+    "window_final_unit": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "unit_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "text_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "owned_span": {
+          "$ref": "#/$defs/sample_span"
+        },
+        "state": {
+          "const": "reviewed"
+        },
+        "item_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "review_scope": {
+          "enum": [
+            "contextual",
+            "owned_only"
+          ]
+        }
+      },
+      "required": [
+        "unit_id",
+        "text",
+        "text_revision",
+        "owned_span",
+        "state",
+        "item_id",
+        "review_scope"
+      ]
+    },
+    "window_failed_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "item_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "owned_span": {
+          "$ref": "#/$defs/sample_span"
+        },
+        "recovery_text": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "item_id",
+        "owned_span",
+        "recovery_text",
+        "reason"
+      ]
+    },
+    "window_coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "span": {
+          "$ref": "#/$defs/sample_span"
+        },
+        "outcome": {
+          "enum": [
+            "speech",
+            "silence",
+            "failed"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "item_id": {
+          "$ref": "#/$defs/identifier"
+        }
+      },
+      "required": [
+        "span",
+        "outcome"
+      ]
+    },
+    "server_window_updated": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/server_base"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "speechrail.transcription.window.updated"
+            },
+            "input_epoch": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "window_id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "window_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "audio_span": {
+              "$ref": "#/$defs/sample_span"
+            },
+            "sealed_through_sample": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "units": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "$ref": "#/$defs/window_unit"
+              }
+            },
+            "falling_behind": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "type",
+            "input_epoch",
+            "window_id",
+            "window_revision",
+            "audio_span",
+            "sealed_through_sample",
+            "units"
+          ]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "server_window_sealed": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/server_base"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "speechrail.transcription.window.sealed"
+            },
+            "input_epoch": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "window_id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "window_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "audio_span": {
+              "$ref": "#/$defs/sample_span"
+            },
+            "sealed_through_sample": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "transaction_id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "closed_span": {
+              "$ref": "#/$defs/sample_span"
+            },
+            "remaining_units": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "$ref": "#/$defs/window_unit"
+              }
+            },
+            "coverage": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "$ref": "#/$defs/window_coverage"
+              }
+            },
+            "final_units": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "$ref": "#/$defs/window_final_unit"
+              }
+            },
+            "falling_behind": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "type",
+            "input_epoch",
+            "window_id",
+            "window_revision",
+            "audio_span",
+            "sealed_through_sample",
+            "transaction_id",
+            "closed_span",
+            "remaining_units",
+            "coverage",
+            "final_units"
+          ]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "server_window_failed": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/server_base"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "speechrail.transcription.window.failed"
+            },
+            "input_epoch": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "window_id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "window_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "audio_span": {
+              "$ref": "#/$defs/sample_span"
+            },
+            "sealed_through_sample": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "transaction_id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "closed_span": {
+              "$ref": "#/$defs/sample_span"
+            },
+            "remaining_units": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "$ref": "#/$defs/window_unit"
+              }
+            },
+            "coverage": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "$ref": "#/$defs/window_coverage"
+              }
+            },
+            "failed_items": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "$ref": "#/$defs/window_failed_item"
+              }
+            },
+            "falling_behind": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "type",
+            "input_epoch",
+            "window_id",
+            "window_revision",
+            "audio_span",
+            "sealed_through_sample",
+            "transaction_id",
+            "closed_span",
+            "remaining_units",
+            "coverage",
+            "failed_items"
+          ]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "diarization_effective": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "backend": {
+          "enum": [
+            "sortformer",
+            "meeting_dynamic"
+          ]
+        },
+        "max_speakers": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "maximum": 32
+        },
+        "system_cap": {
+          "enum": [
+            4,
+            32
+          ]
+        }
+      }
     }
   }
 }

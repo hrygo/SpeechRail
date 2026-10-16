@@ -5,12 +5,13 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import hashlib
 import math
 import os
 import sys
 import traceback
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import BinaryIO, Final, Protocol
@@ -30,6 +31,14 @@ from speechrail.backends.qwen3_stream_decoder import (
     StreamingDecodeState,
 )
 from speechrail.domain.asr_policy import ASRPolicy
+from speechrail.domain.asr_window import (
+    WindowDecodeRequest,
+    WindowDecodeResult,
+    WindowIdentity,
+    require_identifier,
+    require_integer,
+)
+from speechrail.domain.audio_timeline import SampleSpan
 from speechrail.runtime.limits import MAX_PCM_BYTES
 from speechrail.runtime.worker_protocol import (
     MAX_FRAME_BYTES,
@@ -296,6 +305,10 @@ class WorkerEngine(Protocol):
 
     def has_session(self, session_id: str) -> bool: ...
 
+    def decode_window(self, request: WindowDecodeRequest) -> WindowDecodeResult: ...
+
+    def close_window(self, identity: WindowIdentity) -> None: ...
+
 
 class ASRBufferOverflowError(RuntimeError):
     """An append would exceed the session's effective PCM budget."""
@@ -315,6 +328,92 @@ class _BufferedASRSession:
 
 
 EngineFactory = Callable[[Path, str, str, int], WorkerEngine]
+
+
+@dataclass(slots=True)
+class _WindowPreview:
+    origin: int
+    end: int
+    language: str
+    context: str
+    pcm_digest: bytes
+    decoder_state: StreamingDecodeState
+
+
+def _window_identity(frame: Mapping[str, object]) -> WindowIdentity:
+    return WindowIdentity(require_identifier(frame.get("session_id")),
+        require_integer(frame.get("input_epoch")), require_identifier(frame.get("window_id")))
+
+
+def _handle_window(frame: dict[str, object], output: BinaryIO, engine: WorkerEngine) -> None:
+    request_id = frame.get("request_id")
+    kind = frame.get("type")
+    try:
+        allowed = {"version", "type", "request_id", "session_id", "input_epoch", "window_id"}
+        if kind == "window.decode":
+            allowed |= {"attempt_id", "kind", "start_sample", "end_sample", "sample_rate",
+                        "channels", "sample_width_bytes", "language", "context", "_binary"}
+        if set(frame) - allowed or type(frame.get("version")) is not int:
+            raise ValueError("invalid window frame fields")
+        require_identifier(request_id)
+        identity = _window_identity(frame)
+        if kind == "window.close":
+            engine.close_window(identity)
+            write_frame(output, {"version": PROTOCOL_VERSION, "type": "window.closed",
+                "request_id": request_id, **asdict(identity)})
+            return
+        if (
+            type(frame.get("sample_rate")) is not int
+            or frame.get("sample_rate") != 16000
+            or type(frame.get("channels")) is not int
+            or frame.get("channels") != 1
+            or type(frame.get("sample_width_bytes")) is not int
+            or frame.get("sample_width_bytes") != 2
+        ):
+            raise ValueError("invalid window PCM format")
+        decode_kind = frame.get("kind")
+        if decode_kind not in ("preview", "review"):
+            raise ValueError("invalid window decode kind")
+        language = frame.get("language")
+        context = frame.get("context")
+        if (
+            not isinstance(language, str)
+            or language.strip().lower() not in LANGUAGES
+            or not isinstance(context, str)
+        ):
+            raise ValueError("invalid window language or context")
+        pcm = frame.get("_binary")
+        if not isinstance(pcm, bytes):
+            raise ValueError("window requires binary PCM")
+        request = WindowDecodeRequest(
+            identity,
+            require_identifier(frame.get("attempt_id")),
+            decode_kind,
+            SampleSpan(
+                require_integer(frame.get("start_sample")), require_integer(frame.get("end_sample"))
+            ),
+            pcm,
+            language,
+            context,
+        )
+        result = engine.decode_window(request)
+        if (result.identity != request.identity or result.attempt_id != request.attempt_id
+                or result.input_span != request.input_span):
+            raise ValueError("window engine returned a different attempt")
+        write_frame(output, {"version": PROTOCOL_VERSION, "type": "window.result",
+            "request_id": request_id, **asdict(identity), "attempt_id": result.attempt_id,
+            "start_sample": result.input_span.start, "end_sample": result.input_span.end,
+            "text": result.text, "language": result.language, "complete": result.complete})
+    except Exception:
+        # Do not expose vendor errors that may embed text, keywords or paths.
+        error: dict[str, object] = {
+            "version": PROTOCOL_VERSION,
+            "type": "error",
+            "code": "window_decode_failed",
+        }
+        if isinstance(request_id, str) and 1 <= len(request_id) <= 128:
+            error["request_id"] = request_id
+        write_frame(output, error)
 
 
 def _decode_request(frame: dict[str, object]) -> tuple[str, bytes, str, str, bool]:
@@ -840,6 +939,10 @@ def serve(
         "model_loaded": True,
     }
     ready.update(_ready_identity_fields(identity))
+    if callable(getattr(engine, "decode_window", None)) and callable(
+        getattr(engine, "close_window", None)
+    ):
+        ready["capabilities"] = ["window_decode_v1"]
     write_frame(
         output_stream,
         ready,
@@ -862,7 +965,11 @@ def serve(
             )
             return
         kind = frame.get("type")
-        if kind == "transcribe":
+        if kind in ("window.decode", "window.close"):
+            _handle_window(frame, output_stream, engine)
+            if kind == "window.close":
+                _clear_metal_cache()
+        elif kind == "transcribe":
             _handle_transcribe(frame, output_stream, engine, identity)
             _clear_metal_cache()
         elif kind == "session.open":
@@ -993,6 +1100,8 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         )
         self._decoder: BoundQwen3Decoder | None = None
         self._streaming_states: dict[str, _BufferedASRSession] = {}
+        self._window_identity: WindowIdentity | None = None
+        self._window_preview: _WindowPreview | None = None
         _clear_metal_cache()
 
     def transcribe(
@@ -1032,6 +1141,8 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         asr_policy: ASRPolicy | None = None,
         effective_max_segment_ms: int | None = None,
     ) -> None:
+        if getattr(self, "_window_identity", None) is not None:
+            raise RuntimeError("ASR window input owner is busy")
         if not session_id:
             raise ValueError("session_id is required")
         if session_id in self._streaming_states:
@@ -1167,6 +1278,65 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
 
     def close_session(self, session_id: str) -> None:
         self._streaming_states.pop(session_id, None)
+
+    def decode_window(self, request: WindowDecodeRequest) -> WindowDecodeResult:
+        if self._streaming_states:
+            raise RuntimeError("ASR streaming input owner is busy")
+        current = getattr(self, "_window_identity", None)
+        if current is not None and current != request.identity:
+            raise RuntimeError("ASR window input owner is busy")
+        language = request.language or "auto"
+        if language.strip().lower() not in LANGUAGES:
+            raise ValueError("unsupported window language")
+        self._window_identity = request.identity
+        import numpy as np
+
+        waveform = np.frombuffer(request.pcm16, dtype="<i2").astype(np.float32)
+        waveform /= np.float32(32768)
+        budget = _dynamic_budget(request.input_span.length / ASR_SAMPLE_RATE, self._max_new_tokens)
+        if request.kind == "review":
+            self._window_preview = None
+            kwargs: dict[str, object] = {"context": request.context, "max_new_tokens": budget}
+            if language not in {"", "auto"}:
+                kwargs["language"] = language
+            final = self._session.transcribe((waveform, ASR_SAMPLE_RATE), **kwargs)
+            _require_complete_final(final)
+            text = getattr(final, "text", None)
+            detected_language = getattr(final, "language", None)
+            complete = True
+        else:
+            old = getattr(self, "_window_preview", None)
+            reusable = (
+                old is not None
+                and old.origin == request.input_span.start
+                and old.end <= request.input_span.end
+                and old.language == language
+                and old.context == request.context
+                and hashlib.sha256(memoryview(request.pcm16)[: (old.end - old.origin) * 2]).digest()
+                == old.pcm_digest
+            )
+            state = old.decoder_state if reusable and old is not None else StreamingDecodeState()
+            preview = self._bound_decoder().decode(waveform, state, language=language,
+                context=request.context, sample_watermark=request.input_span.length,
+                rollback_tokens=5, max_new_tokens=budget)
+            self._window_preview = _WindowPreview(request.input_span.start, request.input_span.end,
+                language, request.context, hashlib.sha256(request.pcm16).digest(), state)
+            text = preview.text
+            detected_language = preview.language
+            complete = False
+        if not isinstance(text, str) or (
+            detected_language is not None and not isinstance(detected_language, str)
+        ):
+            raise ValueError("invalid vendor window result")
+        return WindowDecodeResult(request.identity, request.attempt_id, request.input_span,
+            text.strip(), detected_language, complete)
+
+    def close_window(self, identity: WindowIdentity) -> None:
+        current = getattr(self, "_window_identity", None)
+        if current is not None and current != identity:
+            raise ValueError("cannot close another window identity")
+        self._window_preview = None
+        self._window_identity = None
 
     def active_session_count(self) -> int:
         return len(self._streaming_states)

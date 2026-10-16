@@ -153,7 +153,7 @@ public struct SpeakerLabelingPanel: View {
     private func speakerRow(_ speaker: SpeakerLabeling.Speaker) -> some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                SpeakerChip(label: speaker.label, displayName: speaker.displayName)
+                SpeakerChip(label: speaker.label, displayName: labeling.displayText(for:speaker.label))
                 StatusPill(tone: speaker.displayName == nil ? .attention : .neutral, label: speaker.status)
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
                 Text("\(speaker.lineCount) 段")
@@ -166,7 +166,7 @@ public struct SpeakerLabelingPanel: View {
                     RowActionGlyph(.edit)
                 }
                 .speechRailButton(.quiet)
-                .accessibilityLabel("改 \(SpeakerLabeling.chipText(label: speaker.label, displayName: speaker.displayName)) 的名字")
+                .accessibilityLabel("改 \(labeling.displayText(for:speaker.label)) 的名字")
             }
 
             if editingLabel == speaker.label {
@@ -181,7 +181,7 @@ public struct SpeakerLabelingPanel: View {
 
                     let others = labeling.speakers.filter { $0.label != speaker.label }
                     if let target = others.first {
-                        Button("与 \(target.label) 合并") {
+                        Button("与 \(labeling.displayText(for:target.label)) 合并") {
                             Task { await labeling.merge(label: speaker.label, into: target.label) }
                         }
                         .buttonStyle(.link)

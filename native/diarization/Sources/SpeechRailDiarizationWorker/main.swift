@@ -68,7 +68,10 @@ private final class StreamingWorker {
         // or exposed in the public timebase.
         self.finalizationPaddingSamples =
             config.chunkRightContext * config.subsamplingFactor * config.melStride
-        self.diarizer = SortformerDiarizer(config: config, timelineConfig: .sortformerDefault)
+        var timelineConfig = DiarizerTimelineConfig.sortformerDefault
+        timelineConfig.maxStoredFrames = Int(ceil(60 / Double(timelineConfig.frameDurationSeconds)))
+        timelineConfig.storeSegments = false
+        self.diarizer = SortformerDiarizer(config: config, timelineConfig: timelineConfig)
         let modelConfig = MLModelConfiguration()
         modelConfig.computeUnits = .all
         // The v3/fp16 artifact is already compiled.  Do not call compileModel.
@@ -87,7 +90,7 @@ private final class StreamingWorker {
         acceptedSamples += samples.count
         diarizer.addAudio(samples)
         while try diarizer.process() != nil {}
-        return snapshot(finished: false)
+        return try snapshot(finished: false)
     }
 
     func finish(through: Int) throws -> [String: Any] {
@@ -95,25 +98,28 @@ private final class StreamingWorker {
         diarizer.addAudio([Float](repeating: 0, count: finalizationPaddingSamples))
         while try diarizer.process() != nil {}
         _ = try diarizer.finalizeSession()
-        return snapshot(finished: true)
+        return try snapshot(finished: true)
     }
 
     func poll(through: Int) throws -> [String: Any] {
         guard through <= acceptedSamples else { throw WorkerError.invalidRequest }
-        return snapshot(finished: false)
+        return try snapshot(finished: false)
     }
 
-    private func snapshot(finished: Bool) -> [String: Any] {
+    private func snapshot(finished: Bool) throws -> [String: Any] {
         let timeline = diarizer.timeline
         let frameSamples = Int((timeline.config.frameDurationSeconds * 16000).rounded())
         let totalFrames = timeline.numFinalizedFrames
         let predictions = timeline.finalizedPredictions
         var frames: [[String: Any]] = []
+        let cursor = try RetainedFrameCursor(totalFrames: totalFrames,
+            retainedFrames: predictions.count / 4, emittedFrames: emittedFrames)
         if emittedFrames < totalFrames {
-            for frame in emittedFrames..<totalFrames {
+            for localFrame in cursor.localRange {
+                let frame = cursor.absoluteStart + localFrame - cursor.localRange.lowerBound
                 let start = frame * frameSamples
                 guard start < acceptedSamples else { break }
-                let base = frame * 4
+                let base = localFrame * 4
                 guard base + 4 <= predictions.count else { break }
                 frames.append([
                     "start": start,
@@ -142,6 +148,46 @@ private func argument(named name: String) -> String? {
         return nil
     }
     return CommandLine.arguments[index + 1]
+}
+
+if argument(named: "--protocol-version") == "2" {
+    var diagnosticStage = "load"
+    do {
+        guard argument(named: "--backend") == "meeting_dynamic",
+              let modelPath = argument(named: "--model"), let policyPath = argument(named: "--policy")
+        else { throw MeetingWorkerError.invalidRequest }
+        let worker = try MeetingDiarizationWorker(modelDirectory:modelPath,policyPath:policyPath,
+            calibrationPoliciesPath:argument(named:"--calibration-policies"))
+        diagnosticStage = "protocol"
+        while let (header,payload) = try readPacket() {
+            guard try DiarizationPacketCodec.nonnegativeInteger(header["protocol_version"]) == 2,
+                  let operation = header["operation"] as? String else { throw MeetingWorkerError.invalidRequest }
+            if operation == "preflight" {
+                try writePacket(["protocol_version":2,"backend":"meeting_dynamic","ok":true,
+                    "sdk_revision":"5c19d5e12320e22bbfb7a1877b089d2665a69add",
+                    "model_revision":"7eab74f3463c736418d0eb10296261ae581146c9"])
+            } else if operation == "cancel" {
+                try writePacket(["protocol_version":2,"backend":"meeting_dynamic","ok":true]); exit(0)
+            } else if operation == "infer" {
+                let start = try DiarizationPacketCodec.nonnegativeInteger(header["audio_start"])
+                let count = try DiarizationPacketCodec.nonnegativeInteger(header["audio_samples"], maximum: 480000)
+                let previous = try DiarizationPacketCodec.nonnegativeInteger(header["previous_stable"])
+                let final = try DiarizationPacketCodec.boolean(header["final"])
+                guard count > 0, count * 2 == payload.count,
+                      let epoch = header["epoch"] as? String, epoch.utf8.count <= 128
+                else { throw MeetingWorkerError.invalidRequest }
+                diagnosticStage = "infer"
+                let result = try await worker.infer(payload,start:start,previousStable:previous,final:final,epoch:epoch)
+                try writePacket(result,worker.calibrationPayload)
+                diagnosticStage = "protocol"
+            } else { throw MeetingWorkerError.invalidRequest }
+        }
+        exit(0)
+    } catch {
+        try? writePacket(["protocol_version":2,"backend":"meeting_dynamic","ok":false,
+            "error":"model_not_ready","diagnostic_stage":diagnosticStage])
+        exit(1)
+    }
 }
 
 guard argument(named: "--protocol-version") == String(protocolVersion),
@@ -187,6 +233,9 @@ do {
         }
         try writePacket(response)
     }
+} catch RetainedFrameCursor.CursorError.activityGap {
+    try? writePacket(["protocol_version": protocolVersion, "ok": false, "error": "activity_gap"])
+    exit(1)
 } catch {
     try? writePacket([
         "protocol_version": protocolVersion,

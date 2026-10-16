@@ -2,8 +2,8 @@
 title: "转录保存命令、原子确认与恢复合同"
 status: active
 audience: "macOS App 开发者、会话数据层维护者"
-version: "0.1.7"
-date: 2026-10-07
+version: "0.2.0"
+date: 2026-10-16
 ---
 
 # 转录保存命令、原子确认与恢复合同
@@ -16,6 +16,24 @@ R07 PR #330 已合入 main（`c997f7b0`）：Store 原子确认、共享命令�
 R08 PR #331 已合入 `cb77d296`，293 项联合 XCTest 与最终 head 必要 CI 通过，完整消费/封存联合门已完成；证据性质与关闭依据见[最终矩阵](../implementation/2026-10-07-issue-238-final-acceptance.md)。
 
 ## 所有权与边界
+
+### 近期文字窗口
+
+`TranscriptWindowCapture` 在采集开始时绑定 record、connection、generation 与 wire window 身份。
+完整快照原子替换近期预览；sealed/failed 事务被冻结成 `SealedWindowCommand`，不以当前选择的记录
+重建保存目标。已确认文字在 Store ack 前仍由 capture 持有；接收回执不表示数据库已保存。
+
+`SessionStore.appendSealedWindow` 在一个 `BEGIN IMMEDIATE` 事务内写入固定正文行、初始 `asr`
+revision、索引 outbox 和剩余尾文检查点。完整重放先核对所有行与初始 revision，再识别为已保存，
+不让已退休检查点的旧 CAS 父版本阻止成功重试。部分已存在、正文冲突、revision/outbox/检查点任一步失败，
+整个新批次回滚。检查点只允许本记录的 `partial`、相同 source/role 与预期父文字；不能覆盖正式行。
+SQLite schema 保持 v13，正式行与可恢复尾文沿用既有 `final/partial` 表示。
+
+`TranscriptWindowPersistenceQueue` 只有一个写入 owner，活动命令也计入 32 条、262144 code point
+总容量。只合并尚未执行的连续检查点，最短检查点间隔为 2 秒；正式批次保持 FIFO。失败命令、活动命令
+和一条被拒绝的冻结命令都保留恢复副本，超限后停止接纳新输入；重试顺序不能越过尚未保存的 CAS 父版本。
+正常停止先停采集、等待文字终态与 Store ack，再有限等待辅助归属，最后封存来源。写盘或收尾失败必须显示
+「部分内容未完成」并提供重试/复制恢复文字，不能显示已保存或 ended。
 
 ASR 客户端、Preview Ledger 和 Assembler 定义识别事实；保存 owner 消费已经归约的正文，
 不反向修改识别终态、revision、segment boundary 或 clear 协议。#245 的识别重构已由用户确认实施完成；本包仍聚焦保存与收尾，不修改识别语义。
@@ -123,6 +141,11 @@ partial 不进入正式索引；schema v13 不改动，不重建或降级用户�
 才更新当前 chip；nil 修订仍能清除此前标签，不把接纳时尚未保存解释为无标签可清除。
 
 ## 关闭与封存
+
+窗口终态的接纳与磁盘确认分别计量。终态进入有界内存队列后，界面显示“文字已确认，正在保存”；
+只有 SQLite 事务提交并返回 Store ack 后才承诺持久化。事务尚未提交时进程崩溃可能丢失该批文字，
+包括从未显示过预览的短句；已有 partial 检查点只能恢复其实际覆盖的文字，不能证明所有待保存终态已落盘。
+保存失败时的队列重试和复制恢复适用于仍存活的 App，不能解释为跨进程的服务重放协议。
 
 feature 关闭时等待事件消费任务以及已接纳命令真正 settled；
 保存失败或接纳拒绝会撤销对应目标的保存证明，阻止 Coordinator 自动归档。

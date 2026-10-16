@@ -209,8 +209,10 @@ def test_worker_close_targets_one_pid_cancel_then_terminate_then_kill(monkeypatc
             calls.append("kill")
 
     async def timed_out(awaitable, *, timeout: float):  # noqa: ASYNC109
-        assert timeout == 2
-        calls.append("wait_for")
+        assert timeout in (2, 10)
+        calls.append(f"wait_for:{timeout}")
+        if timeout == 10:
+            return await awaitable
         awaitable.close()
         raise TimeoutError
 
@@ -225,10 +227,11 @@ def test_worker_close_targets_one_pid_cancel_then_terminate_then_kill(monkeypatc
         "write:cancel",
         "drain",
         "writer.close",
-        "wait_for",
+        "wait_for:2",
         "terminate",
-        "wait_for",
+        "wait_for:2",
         "kill",
+        "wait_for:10",
         "wait",
         "writer.wait_closed",
     ]

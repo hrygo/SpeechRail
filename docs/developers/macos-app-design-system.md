@@ -2,8 +2,8 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.11.7"
-date: 2026-10-15
+version: "0.11.8"
+date: 2026-10-16
 ---
 
 # SpeechRail macOS App 设计系统与 Token
@@ -478,6 +478,20 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
   因为重试同一步必然被服务拒绝。
 
 ## 5. 验收清单
+
+会议和字幕的近期文字状态统一为「正在识别／正在确认文字／文字已确认，正在保存／已保存／部分内容未完成」。
+说话人待确认与未识别独立呈现；内部 scope、模型阈值和协议键仅进入开发者详情。
+同一次捕获的服务匿名标签与人工拆出的标签共同使用人数容量；新增标签达到容量时明确提示，
+既有标签仍保持原身份，不能循环复用或把新说话人并到最后一个标签。
+预览使用稳定 unit 身份，只替换发生变化的近期文字；音量变化不能触发全文重建。
+用户回看或选择文字时不抢回底部，只有明确跟随状态才自动滚动。
+默认复制可见文字，正式导出与纪要依赖已保存的正式记录；失败尾文明确标为待恢复内容。
+
+窗口实验开关 `speechrail.meetingRevisionWindowEnabled`、`speechrail.captionRevisionWindowEnabled`
+与多人实验开关 `speechrail.meetingDynamicDiarizationEnabled` 独立、默认关闭，在每次开始前冻结。
+未启用实验能力时保留标准转写与既有分人路径；显式请求多人但后端未就绪时说明「先记录文字」，
+不把既有四槽能力呈现成多人验收成功。历史与实时说话人均按本记录首次出现顺序显示匿名序号，
+重连后的相同裸标签不能合并旧身份。
 
 - [x] App target 的最低系统版本为 macOS 26.0，并使用系统 Liquid Glass 结构能力（2026-09-13 Debug build 已验证）。
 - [x] App 未通过自绘根背景阻断 scroll edge effect；玻璃只用于窗口/导航层，内容和 Inspector 使用统一内容表面（2026-09-13 代码审查已验证）。

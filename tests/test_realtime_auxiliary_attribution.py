@@ -151,6 +151,22 @@ class _Harness:
         return len(self.events)
 
 
+def test_failed_close_retains_owner_and_admission_until_runtime_recovery():
+    async def scenario():
+        harness = _Harness(_LateFirstAligner())
+        await harness.owner.configure(alignment=False, diarization=True)
+
+        async def failed_cancel():
+            raise RuntimeError("injected child reap failure")
+
+        harness.engine.sessions[0].cancel = failed_cancel
+        await harness.owner.close()
+        admission = harness.owner._ports.diarization_admission
+        assert admission.active == 1 and admission.quarantined
+
+    asyncio.run(scenario())
+
+
 def _frozen(
     *,
     epoch: int,

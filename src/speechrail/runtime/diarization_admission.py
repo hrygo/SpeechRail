@@ -20,6 +20,17 @@ class DiarizationAdmission:
 
     def __init__(self) -> None:
         self._active = 0
+        self._quarantined_owner: object | None = None
+
+    @property
+    def quarantined(self) -> bool:
+        return self._quarantined_owner is not None
+
+    def quarantine(self, owner: object) -> None:
+        """Keep the unreaped singleton and its resources alive until restart."""
+        if self._quarantined_owner is None:
+            self._quarantined_owner = owner
+        self._active = 1
 
     @property
     def active(self) -> int:
@@ -33,4 +44,4 @@ class DiarizationAdmission:
         try:
             yield
         finally:
-            self._active = 0
+            self._active = int(self.quarantined)

@@ -279,6 +279,53 @@
       "file": "invalid/missing-tts-audio-window.json",
       "valid": false,
       "rejection": "TTS requires an explicit bounded PCM consumption window"
+    },
+    {
+      "name": "window_updated_r2",
+      "file": "server/window-updated-r2.json",
+      "valid": true
+    },
+    {
+      "name": "window_updated_r5",
+      "file": "server/window-updated-r5.json",
+      "valid": true
+    },
+    {
+      "name": "window_sealed_r6",
+      "file": "server/window-sealed-r6.json",
+      "valid": true
+    },
+    {
+      "name": "window_sealed_replay",
+      "file": "server/window-sealed-replay.json",
+      "valid": true
+    },
+    {
+      "name": "window_failed_r7",
+      "file": "server/window-failed-r7.json",
+      "valid": true
+    },
+    {
+      "name": "window_session_update",
+      "file": "client/window-session-update.json",
+      "valid": true
+    },
+    {
+      "name": "window_mixed_policy",
+      "file": "invalid/window-mixed-policy.json",
+      "valid": false,
+      "rejection": "invalid revision window contract"
+    },
+    {
+      "name": "window_bool_epoch",
+      "file": "invalid/window-bool-epoch.json",
+      "valid": false,
+      "rejection": "invalid revision window contract"
+    },
+    {
+      "name": "window_session_updated",
+      "file": "server/window-session-updated.json",
+      "valid": true
     }
   ]
 }

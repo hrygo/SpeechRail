@@ -119,7 +119,9 @@ public struct SpeechRailSessionUpdate: Sendable {
     public let ttsEnabled: Bool
     public let alignment: Alignment
     public let diarizationEnabled: Bool
+    public let diarizationBackend: SpeechRailDiarizationBackend?
     public let asrPolicy: SpeechRailASRPolicy?
+    public let windowScene: SpeechRailWindowScene?
     /// ASR identity belongs to the connection. Voice and TTS model identity
     /// belong exclusively to `SpeechRailTTSStart`, which identifies a voice.
     public let expectedASRRevision: String?
@@ -135,7 +137,9 @@ public struct SpeechRailSessionUpdate: Sendable {
         ttsEnabled: Bool = false,
         alignment: Alignment = Alignment(enabled: false),
         diarizationEnabled: Bool = false,
+        diarizationBackend: SpeechRailDiarizationBackend? = nil,
         asrPolicy: SpeechRailASRPolicy? = nil,
+        windowScene: SpeechRailWindowScene? = nil,
         expectedASRRevision: String? = nil,
         eventID: String = "evt_session_update"
     ) {
@@ -150,7 +154,9 @@ public struct SpeechRailSessionUpdate: Sendable {
         self.ttsEnabled = ttsEnabled
         self.alignment = alignment
         self.diarizationEnabled = diarizationEnabled
+        self.diarizationBackend = diarizationBackend
         self.asrPolicy = asrPolicy
+        self.windowScene = windowScene
         self.expectedASRRevision = expectedASRRevision
     }
 
@@ -169,7 +175,12 @@ public struct SpeechRailSessionUpdate: Sendable {
             "diarization": ["enabled": diarizationEnabled]
         ]
         if let endpointing { speechrail["endpointing"] = endpointing.jsonObject }
-        if let asrPolicy { speechrail["asr"] = asrPolicy.jsonObject }
+        if let diarizationBackend {
+            speechrail["diarization"] = ["enabled": diarizationEnabled, "backend": diarizationBackend.rawValue]
+        }
+        if let windowScene {
+            speechrail["window"] = ["mode": "revision_window_v1", "scene": windowScene.rawValue]
+        } else if let asrPolicy { speechrail["asr"] = asrPolicy.jsonObject }
         if let expectedASRRevision { speechrail["expected_asr_revision"] = expectedASRRevision }
         return [
             "type": "session.update",
@@ -567,6 +578,7 @@ public struct RealtimeCloseBarrier: Equatable, Sendable {
 public enum RealtimeDrainStage: String, Equatable, Sendable {
     case commit
     case terminalItems = "terminal_items"
+    case persistence
     case diarization
     case clear
     case close
@@ -880,5 +892,125 @@ public struct TTSAudioPosition: Equatable, Sendable {
     /// 这一块之后的下一个 sample offset（mono PCM16：一个样本两个字节）。
     public func nextSampleOffset(pcmBytes: Int) -> Int {
         sampleOffset + pcmBytes / MemoryLayout<Int16>.size
+    }
+}
+
+
+public enum SpeechRailWindowScene: String, Codable, Sendable { case meeting, caption }
+
+public struct SpeechRailWindowPolicy: Codable, Sendable, Equatable {
+    public let previewIntervalMilliseconds: Int
+    public let ownedMilliseconds: Int
+    public let reviewGraceMilliseconds: Int
+    public let leftContextMilliseconds: Int
+    public let maxDecodeMilliseconds: Int
+    public let pcmBudgetBytes: Int
+    public let finalizationBudgetMilliseconds: Int
+    enum CodingKeys: String, CodingKey {
+        case previewIntervalMilliseconds = "preview_interval_ms", ownedMilliseconds = "owned_ms"
+        case reviewGraceMilliseconds = "review_grace_ms", leftContextMilliseconds = "left_context_ms"
+        case maxDecodeMilliseconds = "max_decode_ms", pcmBudgetBytes = "pcm_budget_bytes"
+        case finalizationBudgetMilliseconds = "finalization_budget_ms"
+    }
+    public func matches(_ scene: SpeechRailWindowScene) -> Bool {
+        previewIntervalMilliseconds == (scene == .meeting ? 1500 : 500)
+        && ownedMilliseconds == (scene == .meeting ? 20000 : 4000)
+        && reviewGraceMilliseconds == (scene == .meeting ? 2000 : 8000)
+        && leftContextMilliseconds == 2000
+        && maxDecodeMilliseconds == (scene == .meeting ? 24000 : 14000)
+        && pcmBudgetBytes == 16 * 1024 * 1024
+        && finalizationBudgetMilliseconds == (scene == .meeting ? 15000 : 5000)
+    }
+}
+public struct SpeechRailWindowConfiguration: Codable, Sendable, Equatable {
+    public let mode: String
+    public let scene: SpeechRailWindowScene
+    public let policy: SpeechRailWindowPolicy
+    public var isValid: Bool { mode == "revision_window_v1" && policy.matches(scene) }
+}
+
+public struct TranscriptWindowSpan: Codable, Sendable, Equatable, Hashable {
+    public let start: Int
+    public let end: Int
+    public init(start: Int, end: Int) { self.start = start; self.end = end }
+    public var isValid: Bool { start >= 0 && end >= start && end <= 9_007_199_254_740_991 }
+    public func contains(_ other: Self) -> Bool { start <= other.start && other.end <= end }
+}
+public struct TranscriptWindowUnit: Codable, Sendable, Equatable {
+    public enum State: String, Codable, Sendable { case preview, reviewed }
+    public enum ReviewScope: String, Codable, Sendable { case contextual, ownedOnly = "owned_only" }
+    public let unitID: String
+    public let text: String
+    public let textRevision: Int
+    public let ownedSpan: TranscriptWindowSpan
+    public let state: State
+    public let itemID: String?
+    public let reviewScope: ReviewScope?
+    enum CodingKeys: String, CodingKey {
+        case unitID = "unit_id", text, textRevision = "text_revision", ownedSpan = "owned_span", state
+        case itemID = "item_id", reviewScope = "review_scope"
+    }
+}
+public struct TranscriptWindowFailedItem: Codable, Sendable, Equatable {
+    public let itemID: String
+    public let ownedSpan: TranscriptWindowSpan
+    public let recoveryText: String
+    public let reason: String
+    enum CodingKeys: String, CodingKey {
+        case itemID = "item_id", ownedSpan = "owned_span", recoveryText = "recovery_text", reason
+    }
+}
+public struct TranscriptWindowCoverage: Codable, Sendable, Equatable {
+    public enum Outcome: String, Codable, Sendable { case speech, silence, failed }
+    public let span: TranscriptWindowSpan
+    public let outcome: Outcome
+    public let itemID: String?
+    public let reason: String?
+    enum CodingKeys: String, CodingKey { case span, outcome, itemID = "item_id", reason }
+}
+/// Complete mutable snapshots and complete terminal transactions share an identity.
+/// Local record/connection ownership is supplied separately, never inferred from the wire.
+public struct TranscriptWindowEvent: Codable, Sendable, Equatable {
+    public enum Kind: String, Codable, Sendable {
+        case updated = "speechrail.transcription.window.updated"
+        case sealed = "speechrail.transcription.window.sealed"
+        case failed = "speechrail.transcription.window.failed"
+    }
+    public let type: Kind
+    public let sessionID: String
+    public let inputEpoch: Int
+    public let windowID: String
+    public let windowRevision: Int
+    public let audioSpan: TranscriptWindowSpan
+    public let sealedThroughSample: Int
+    public let fallingBehind: Bool?
+    public let units: [TranscriptWindowUnit]?
+    public let transactionID: String?
+    public let closedSpan: TranscriptWindowSpan?
+    public let finalUnits: [TranscriptWindowUnit]?
+    public let failedItems: [TranscriptWindowFailedItem]?
+    public let remainingUnits: [TranscriptWindowUnit]?
+    public let coverage: [TranscriptWindowCoverage]?
+    enum CodingKeys: String, CodingKey {
+        case type, sessionID = "session_id", inputEpoch = "input_epoch", windowID = "window_id"
+        case windowRevision = "window_revision", audioSpan = "audio_span"
+        case sealedThroughSample = "sealed_through_sample", units, transactionID = "transaction_id"
+        case fallingBehind = "falling_behind"
+        case closedSpan = "closed_span", finalUnits = "final_units", failedItems = "failed_items"
+        case remainingUnits = "remaining_units", coverage
+    }
+}
+
+
+public enum SpeechRailDiarizationBackend: String, Codable, Sendable { case sortformer, meetingDynamic = "meeting_dynamic" }
+public struct SpeechRailDiarizationCapacity: Codable, Sendable, Equatable {
+    public let enabled: Bool
+    public let backend: SpeechRailDiarizationBackend
+    public let maxSpeakers: Int?
+    public let systemCap: Int
+    enum CodingKeys: String, CodingKey { case enabled, backend; case maxSpeakers = "max_speakers", systemCap = "system_cap" }
+    public var isValid: Bool {
+        systemCap == (backend == .meetingDynamic ? 32 : 4)
+            && maxSpeakers.map { (1...systemCap).contains($0) } == true
     }
 }

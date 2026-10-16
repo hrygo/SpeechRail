@@ -6,6 +6,7 @@ SpeechRail's local ASR/TTS/Realtime streaming runtime with sub-millisecond overh
 
 from __future__ import annotations
 
+import math
 import threading
 from collections import Counter
 from collections.abc import Mapping
@@ -15,31 +16,76 @@ from typing import Any
 from speechrail.observability.alignment import normalize_alignment_failure
 
 HTTP_DURATION_BUCKETS: tuple[float, ...] = (
-    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.5,
+    5.0,
+    10.0,
+    30.0,
+    60.0,
 )
-ASR_DURATION_BUCKETS: tuple[float, ...] = (
-    0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0
-)
-RTF_BUCKETS: tuple[float, ...] = (
-    0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.8, 1.0, 1.5, 2.0
-)
-TTS_DURATION_BUCKETS: tuple[float, ...] = (
-    0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0
-)
-TTFA_BUCKETS: tuple[float, ...] = (
-    0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 1.0, 2.0
-)
+ASR_DURATION_BUCKETS: tuple[float, ...] = (0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0)
+RTF_BUCKETS: tuple[float, ...] = (0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.8, 1.0, 1.5, 2.0)
+TTS_DURATION_BUCKETS: tuple[float, ...] = (0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0)
+TTFA_BUCKETS: tuple[float, ...] = (0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 1.0, 2.0)
 REALTIME_TURN_DURATION_BUCKETS: tuple[float, ...] = (
-    0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.0,
+    5.0,
+    10.0,
+    30.0,
 )
 REALTIME_PHASE_BUCKETS: tuple[float, ...] = (
-    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0
+    0.001,
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.0,
+    5.0,
 )
 GOVERNOR_WAIT_BUCKETS: tuple[float, ...] = (
-    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0
+    0.001,
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.0,
+    5.0,
+    10.0,
+    30.0,
 )
 GOVERNOR_SERVICE_BUCKETS: tuple[float, ...] = (
-    0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0
+    0.01,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.0,
+    5.0,
+    10.0,
+    30.0,
+    60.0,
+    120.0,
 )
 _GOVERNOR_PURPOSES = frozenset(
     {"default", "interactive", "prefetch", "voice_creation", "quality_validation"}
@@ -244,6 +290,35 @@ class Metrics:
             "Fixed text alignment failures by a bounded reason label",
         )
         self._describe(
+            "speechrail_diarization_phase_seconds", "Diarization phase duration in seconds"
+        )
+        self._describe(
+            "speechrail_diarization_failures_total", "Diarization failures by bounded stage"
+        )
+        self._describe(
+            "speechrail_diarization_watermark_lag_samples", "Diarization pending stable samples"
+        )
+        self._describe("speechrail_diarization_retained_pcm_bytes", "Diarization charged PCM bytes")
+        self._describe(
+            "speechrail_diarization_retained_state", "Diarization anonymous retained state counts"
+        )
+        for name, description in {
+            "capture_backlog_samples": "Unprocessed ASR window input at 16 kHz",
+            "retained_pcm_bytes": "Charged window PCM bytes including outstanding borrows",
+            "mutable_units": "Mutable ASR window units",
+            "pending_closed": "Closed ASR blocks waiting for review",
+            "falling_behind": "Caption display progress has sustained lag",
+        }.items():
+            self._describe("speechrail_asr_window_" + name, description)
+        self._describe(
+            "speechrail_asr_window_failures_total",
+            "Failed window reviews by bounded phase and reason",
+        )
+        self._describe(
+            "speechrail_asr_window_fallbacks_total",
+            "Owned-only boundary fallbacks by bounded reason",
+        )
+        self._describe(
             "speechrail_realtime_sessions_total",
             "Total WebSocket realtime sessions opened",
         )
@@ -346,8 +421,7 @@ class Metrics:
         """Legacy snapshot representation."""
         with self._lock:
             return {
-                f"{name}:{outcome}": val
-                for (name, outcome), val in self._legacy_counters.items()
+                f"{name}:{outcome}": val for (name, outcome), val in self._legacy_counters.items()
             }
 
     def read_state(self) -> MetricsState:
@@ -482,6 +556,72 @@ class Metrics:
 
     def record_ttfa(self, ttfa_sec: float) -> None:
         self.observe("speechrail_tts_ttfa_seconds", ttfa_sec, TTFA_BUCKETS)
+
+    def record_diarization_phase(self, phase: str, duration: float) -> None:
+        if (
+            phase not in {"wait", "load", "infer", "close"}
+            or not math.isfinite(duration)
+            or duration < 0
+        ):
+            raise ValueError("invalid diarization diagnostic phase")
+        self.observe(
+            "speechrail_diarization_phase_seconds", duration, GOVERNOR_SERVICE_BUCKETS, phase=phase
+        )
+
+    def record_diarization_failure(self, stage: str) -> None:
+        if stage not in {"load", "infer", "protocol", "close"}:
+            raise ValueError("invalid diarization diagnostic stage")
+        self.inc("speechrail_diarization_failures_total", stage=stage)
+
+    def record_diarization_state(
+        self, *, lag: int, pcm_bytes: int, counts: Mapping[str, int]
+    ) -> None:
+        self.set_gauge("speechrail_diarization_watermark_lag_samples", lag)
+        self.set_gauge("speechrail_diarization_retained_pcm_bytes", pcm_bytes)
+        for kind, count in counts.items():
+            self.set_gauge("speechrail_diarization_retained_state", count, kind=kind)
+
+    def record_asr_window_state(self, scene: str, **values: int) -> None:
+        limits = {
+            "capture_backlog_samples": 320000,
+            "retained_pcm_bytes": 16777216,
+            "mutable_units": 32,
+            "pending_closed": 32,
+            "falling_behind": 1,
+        }
+        if (
+            scene not in {"meeting", "caption"}
+            or set(values) != set(limits)
+            or any(
+                type(value) is not int or not 0 <= value <= limits[key]
+                for key, value in values.items()
+            )
+        ):
+            raise ValueError("invalid ASR window diagnostic state")
+        for key, value in values.items():
+            self.set_gauge("speechrail_asr_window_" + key, value, scene=scene)
+
+    def record_asr_window_failure(self, stage: str, reason: str) -> None:
+        if stage not in {"queue", "decode", "boundary", "ledger"} or reason not in {
+            "timeout",
+            "invalid_evidence",
+            "runtime_error",
+        }:
+            raise ValueError("invalid window failure diagnostic")
+        self.inc("speechrail_asr_window_failures_total", stage=stage, reason=reason)
+
+    def record_asr_window_fallback(self, reason: str) -> None:
+        if reason not in {
+            "word_alignment_unavailable",
+            "alignment_text_coverage",
+            "alignment_timestamp_grid",
+            "word_crosses_owned_boundary",
+            "owned_words_missing",
+            "granularity_unsupported",
+            "alignment_time_resolution_insufficient",
+        }:
+            reason = "alignment_unavailable"
+        self.inc("speechrail_asr_window_fallbacks_total", reason=reason)
 
     def record_alignment_event(self, event: str) -> None:
         """Record an optional alignment path without session or text labels."""
@@ -830,26 +970,18 @@ class Metrics:
         return {
             "active_requests": {
                 "realtime": (
-                    getattr(governor_snapshot, "active_realtime", 0)
-                    if governor_snapshot
-                    else 0
+                    getattr(governor_snapshot, "active_realtime", 0) if governor_snapshot else 0
                 ),
                 "batch": (
-                    getattr(governor_snapshot, "active_batch", 0)
-                    if governor_snapshot
-                    else 0
+                    getattr(governor_snapshot, "active_batch", 0) if governor_snapshot else 0
                 ),
             },
             "pending_requests": {
                 "realtime": (
-                    getattr(governor_snapshot, "pending_realtime", 0)
-                    if governor_snapshot
-                    else 0
+                    getattr(governor_snapshot, "pending_realtime", 0) if governor_snapshot else 0
                 ),
                 "batch": (
-                    getattr(governor_snapshot, "pending_batch", 0)
-                    if governor_snapshot
-                    else 0
+                    getattr(governor_snapshot, "pending_batch", 0) if governor_snapshot else 0
                 ),
             },
             "workers": dict(worker_states or {}),
@@ -861,9 +993,7 @@ class Metrics:
         }
 
 
-def _append_resource_prometheus(
-    lines: list[str], resources: Mapping[str, Any] | None
-) -> None:
+def _append_resource_prometheus(lines: list[str], resources: Mapping[str, Any] | None) -> None:
     """Append fixed-name resource gauges without exposing free-form labels."""
 
     if not resources:

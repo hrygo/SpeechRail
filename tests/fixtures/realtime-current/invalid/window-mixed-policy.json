@@ -1,0 +1,26 @@
+{
+  "type": "session.update",
+  "event_id": "evt-window-request",
+  "session": {
+    "type": "transcription",
+    "audio": {
+      "input": {
+        "format": {
+          "type": "audio/pcm",
+          "rate": 24000
+        },
+        "transcription": {
+          "model": "speechrail/qwen3-asr-1.7b"
+        }
+      }
+    },
+    "speechrail": {
+      "task": "caption",
+      "window": {
+        "mode": "revision_window_v1",
+        "scene": "caption"
+      },
+      "asr": {}
+    }
+  }
+}

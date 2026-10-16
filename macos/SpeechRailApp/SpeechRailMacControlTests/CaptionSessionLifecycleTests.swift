@@ -28,7 +28,8 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         configuration: TranscriptPersistenceQueue.Configuration = .init(),
         makeRealtimeClient: (@Sendable (CaptionRealtimeClientConfiguration) -> any CaptionRealtimeClient)? = nil,
         drainTimeout: Duration = .seconds(12),
-        receiverGateForFirst: ConnectGate? = nil
+        receiverGateForFirst: ConnectGate? = nil,
+        revisionWindowEnabled: Bool = false
     ) async throws -> Harness {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("caption-lifecycle-\(UUID().uuidString)", isDirectory: true)
@@ -53,7 +54,8 @@ final class CaptionSessionLifecycleTests: XCTestCase {
             persistenceConfiguration: configuration,
             saveLine: saveLine,
             attachSpeakerLabel: attachSpeakerLabel,
-            drainTimeout: drainTimeout
+            drainTimeout: drainTimeout,
+            revisionWindowEnabled:revisionWindowEnabled
         )
         let session = CaptionSession(
             coordinator: coordinator,
@@ -93,6 +95,21 @@ final class CaptionSessionLifecycleTests: XCTestCase {
             harness.session.sessionID,
             harness.session.blocked?.detail ?? harness.session.lastFailure ?? "没有建立字幕记录"
         )
+    }
+
+    func testWindowSealWithoutPreviewPersistsOnceAndCompletesStoreBarrier() async throws {
+        let h = try await makeHarness(revisionWindowEnabled:true)
+        let id = try await start(h)
+        let sealed = try TranscriptWindowLedgerTests().fixture("window-sealed-r6")
+        try await h.emit(.transcriptionWindow(sealed))
+        try await h.emit(.transcriptionWindow(try TranscriptWindowLedgerTests().fixture("window-sealed-replay")))
+        try await h.emit(.completed(itemID:"item-1",transcript:sealed.finalUnits![0].text))
+        try await h.settle { $0.session.lines.count == 1 }
+        await h.session.finish()
+        XCTAssertEqual(h.session.windowCapture?.queue.savedThrough,96000)
+        let saved = try await h.store.lines(sessionID:id)
+        XCTAssertEqual(saved.count,1)
+        XCTAssertNil(h.coordinator.captureCompletionFailure(recordID:id))
     }
 
     func testLateUploadFailureCannotPolluteTheNextRecord() async throws {
@@ -215,6 +232,19 @@ final class CaptionSessionLifecycleTests: XCTestCase {
     ///
     /// 与会议侧同构：建两条连接（第一条带分人被拒，第二条不带分人成功），
     /// 库里记 `unavailable` + 人话，正文照常落库。
+    func testWindowUnavailableFallsBackBeforeAudioAndKeepsCaptionRunning() async throws {
+        let h = try await makeHarness(revisionWindowEnabled:true)
+        h.session.diarizationPreference = { true }
+        h.clients.failFirstDiarizedConnect(RealtimeASRClient.Failure.serverError(
+            code:"unsupported_operation",message:"revision window unavailable"))
+        _ = try await start(h)
+        XCTAssertEqual(h.clients.madeConfigurations.count,2)
+        XCTAssertEqual(h.clients.madeConfigurations.map(\.windowScene),[.caption,nil])
+        XCTAssertTrue(h.clients.madeConfigurations.allSatisfy(\.diarizationEnabled))
+        XCTAssertNotNil(h.session.transcriptionStatusText)
+        XCTAssertNil(h.session.windowCapture)
+    }
+
     func testDiarizationUnavailableFallsBackAndKeepsCaptionRunning() async throws {
         let h = try await makeHarness()
         h.session.diarizationPreference = { true }
@@ -970,6 +1000,7 @@ private final class ControllableCaptionAudioSource: AudioChunkSource, @unchecked
 private actor ControllableCaptionRealtimeClient: CaptionRealtimeClient {
     private let stream = RealtimeEventStream<RealtimeASRClient.Event>()
     private var drainEvents: [RealtimeASRClient.Event] = []
+    private var windowSealedThrough = 0
     private var drainFails = false
     private var appendFails = false
     private var appendGate: ConnectGate?
@@ -1012,6 +1043,9 @@ private actor ControllableCaptionRealtimeClient: CaptionRealtimeClient {
     func failDrain() { drainFails = true }
 
     func drainAndClear(timeout: Duration) async throws {
+        try await drainAndClear(timeout:timeout,beforeAuxiliary:{ _ in })
+    }
+    func drainAndClear(timeout: Duration, beforeAuxiliary: @escaping @Sendable (Int) async throws -> Void) async throws {
         drainCount += 1
         appendedByteCountAtDrain = appendedByteCount
         let events = drainEvents
@@ -1019,6 +1053,7 @@ private actor ControllableCaptionRealtimeClient: CaptionRealtimeClient {
         for event in events {
             await emit(event)
         }
+        try await beforeAuxiliary(windowSealedThrough)
         if diarizationDrainFails { throw RealtimeASRClient.Failure.drainTimedOut(.diarization) }
         if drainFails { throw URLError(.timedOut) }
     }
@@ -1029,6 +1064,9 @@ private actor ControllableCaptionRealtimeClient: CaptionRealtimeClient {
     }
 
     func emit(_ payload: RealtimeASRClient.Event) async {
+        if case .transcriptionWindow(let window) = payload {
+            windowSealedThrough = window.sealedThroughSample
+        }
         _ = await stream.yield(
             RealtimeEventEnvelope(
                 metadata: RealtimeEventMetadata(),

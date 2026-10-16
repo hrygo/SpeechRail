@@ -1,0 +1,44 @@
+{
+  "session_id": "sess-window",
+  "event_id": "evt-window-sealed",
+  "sequence": 3,
+  "input_epoch": 0,
+  "window_id": "window-0",
+  "window_revision": 6,
+  "audio_span": {
+    "start": 0,
+    "end": 96000
+  },
+  "sealed_through_sample": 96000,
+  "type": "speechrail.transcription.window.sealed",
+  "transaction_id": "tx-1",
+  "closed_span": {
+    "start": 0,
+    "end": 96000
+  },
+  "final_units": [
+    {
+      "unit_id": "unit-1",
+      "text": "修正后的合成测试。",
+      "text_revision": 2,
+      "owned_span": {
+        "start": 0,
+        "end": 96000
+      },
+      "state": "reviewed",
+      "item_id": "item-1",
+      "review_scope": "contextual"
+    }
+  ],
+  "remaining_units": [],
+  "coverage": [
+    {
+      "span": {
+        "start": 0,
+        "end": 96000
+      },
+      "outcome": "speech",
+      "item_id": "item-1"
+    }
+  ]
+}

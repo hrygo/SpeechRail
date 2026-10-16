@@ -1,0 +1,26 @@
+{
+  "session_id": "sess-window",
+  "event_id": "evt-window-r5",
+  "sequence": 2,
+  "input_epoch": 0,
+  "window_id": "window-0",
+  "window_revision": 5,
+  "audio_span": {
+    "start": 0,
+    "end": 96000
+  },
+  "sealed_through_sample": 0,
+  "type": "speechrail.transcription.window.updated",
+  "units": [
+    {
+      "unit_id": "unit-1",
+      "text": "修正后的合成测试。",
+      "text_revision": 2,
+      "owned_span": {
+        "start": 0,
+        "end": 96000
+      },
+      "state": "preview"
+    }
+  ]
+}

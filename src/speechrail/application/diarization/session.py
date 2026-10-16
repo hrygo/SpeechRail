@@ -10,7 +10,8 @@ from dataclasses import dataclass
 
 from speechrail.domain.diarization.attribution import AttributionLedger
 from speechrail.domain.diarization.ports import ActivitySession
-from speechrail.domain.diarization.types import Attribution, TextUnit
+from speechrail.domain.diarization.types import Attribution, DiarizationError, TextUnit
+from speechrail.runtime.window_pcm import PcmBudgetExceededError
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +100,12 @@ class DiarizationSession:
             self._activity_terminated = True
             await self._degrade("diarization_backlog_exceeded")
             await self._activity.cancel()
+        except (PcmBudgetExceededError, DiarizationError) as exc:
+            self._activity_terminated = True
+            await self._degrade(
+                "audio_expired" if isinstance(exc, PcmBudgetExceededError) else "model_not_ready"
+            )
+            await self._activity.cancel()
 
     async def register_completed(self, item_id: str, units: tuple[TextUnit, ...]) -> None:
         if len(units) > 4096:
@@ -170,6 +177,11 @@ class DiarizationSession:
                 changed = self._ledger.apply(update)
                 if changed:
                     await self._emit(ItemAttributionUpdated("", changed, self._next_sequence()))
+                before = max(0, update.processed_through - 60 * 16000)
+                expired = self._ledger.expire_before(before)
+                if expired:
+                    await self._emit(ItemAttributionUpdated("", expired, self._next_sequence()))
+                self._ledger.compact(min(before, update.stable_through))
         except (ValueError, RuntimeError) as exc:
             del exc
             await self._degrade("diarization_invalid_output")

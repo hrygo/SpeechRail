@@ -42,6 +42,14 @@ def create_capability_router(services: AppServices) -> APIRouter:
             "max_upload_bytes": services.settings.max_upload_bytes,
             "max_audio_seconds": services.settings.max_audio_seconds,
             "alignment_available": services.text_aligner is not None,
+            "diarization_backends": {
+                backend: services.diarization_backend_status(backend)
+                for backend in ("sortformer", "meeting_dynamic")
+            },
+            "revision_window_enabled": services.settings.asr_revision_windows_enabled,
+            "window_decode_ready": getattr(services.window_asr_factory, "ready", False) is True,
+            "word_alignment_ready": getattr(services.text_aligner, "word_alignment_ready", False)
+            is True,
             "jobs_available": services.job_repository is not None,
             "realtime_formats": ("pcm16",),
             "realtime_pcm_sample_rate": 24_000,

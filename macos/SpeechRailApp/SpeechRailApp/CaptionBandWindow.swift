@@ -501,7 +501,11 @@ struct CaptionBandView: View {
                         lineRow(text: line.text, isPartial: false)
                             .id(line.id)
                     }
-                    if let partial = session.partialText, !partial.isEmpty {
+                    if let capture = session.windowCapture {
+                        ForEach(capture.visibleUnits, id: \.unitID) { unit in
+                            lineRow(text: unit.text, isPartial: true).id(unit.unitID)
+                        }
+                    } else if let partial = session.partialText, !partial.isEmpty {
                         lineRow(text: partial, isPartial: true)
                             .id(Self.partialAnchor)
                     }
@@ -641,7 +645,7 @@ struct CaptionBandView: View {
 
     private var footer: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-            Text(footerHint)
+            Text(session.transcriptionStatusText ?? footerHint)
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                 // 一行到底：页脚的高度是按一行算进窗口高度的，折行会把内容顶出窗口。

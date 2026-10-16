@@ -76,10 +76,15 @@ class Settings(BaseSettings):
     tts_top_p: float = Field(default=0.95, gt=0.0, le=1.0)
     tts_warmup_on_start: bool = True
     realtime_asr_backend: Literal["disabled", "native"] = "disabled"
+    asr_revision_windows_enabled: bool = False
     qwen3_streaming_chunk_duration_ms: int = 1_000
     qwen3_streaming_max_context_sec: float = Field(default=12.64, gt=0, le=60)
     qwen3_streaming_max_new_tokens: int = Field(default=256, ge=32, le=2048)
     qwen3_aligner_model_dir: Path | None = None
+    diarization_dynamic_enabled: bool = False
+    diarization_dynamic_model_dir: Path | None = None
+    diarization_dynamic_policy_path: Path | None = None
+    diarization_dynamic_resident_bytes: int = Field(default=0, ge=0, le=(1 << 40))
     diarization_coreml_model_path: Path | None = None
     diarization_worker_path: Path = Field(default_factory=bundled_diarization_worker_path)
     job_spool_dir: Path | None = None
@@ -219,6 +224,8 @@ class Settings(BaseSettings):
         return path
 
     @field_validator(
+        "diarization_dynamic_model_dir",
+        "diarization_dynamic_policy_path",
         "diarization_coreml_model_path",
         "diarization_worker_path",
         "qwen3_aligner_model_dir",
