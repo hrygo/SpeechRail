@@ -60,10 +60,10 @@ struct DubbingExportStreamingTests {
         let original = Data("existing".utf8); try original.write(to: destination)
         let task = Task { try await writer.copyPrepared(prepared, audioDestination: destination,
             scriptDestination: directory.appendingPathComponent("saved.txt")) }
-        while !gate.entered.withLock({ $0 }) { await Task.yield() }
-        #expect(!gate.wasMainThread.withLock { $0 })
-        task.cancel(); gate.release.signal()
+        gate.onEntry { task.cancel() }
         do { _ = try await task.value; Issue.record("cancelled copy published") } catch {}
+        #expect(task.isCancelled)
+        #expect(!gate.wasMainThread.withLock { $0 })
         #expect(try Data(contentsOf: destination) == original)
         #expect(await writer.activeFileHandles == 0)
         #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).allSatisfy { !$0.hasPrefix(".speechrail-export-") })
@@ -146,11 +146,15 @@ struct DubbingExportStreamingTests {
     }
 }
 private final class ExportCopyGate: Sendable {
-    let entered = Mutex(false), wasMainThread = Mutex(false)
+    private let action = Mutex<(@MainActor @Sendable () -> Void)?>(nil)
+    @MainActor func onEntry(_ body: @escaping @MainActor @Sendable () -> Void) { action.withLock { $0 = body } }
+    let wasMainThread = Mutex(false)
     let release = DispatchSemaphore(value: 0)
     func block() throws {
-        wasMainThread.withLock { $0 = Thread.isMainThread }; entered.withLock { $0 = true }
+        wasMainThread.withLock { $0 = Thread.isMainThread }
         if Thread.isMainThread { throw DubbingExportError.invalidWAV }
+        guard let action = action.withLock({ value in defer { value = nil }; return value }) else { throw DubbingExportError.invalidWAV }
+        DispatchQueue.main.async { action(); self.release.signal() }
         release.wait()
     }
 }

@@ -14,13 +14,18 @@ struct CreativeStoreConcurrencyTests {
     }
 
     private final class Gate: Sendable {
-        let entered = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        private let action = Mutex<(@MainActor @Sendable () -> Void)?>(nil)
+        @MainActor func onEntry(_ body: @escaping @MainActor @Sendable () -> Void) {
+            action.withLock { $0 = body }
+        }
         let release = DispatchSemaphore(value: 0)
         let mainThread = Mutex(false)
         func block() throws {
             let main = Thread.isMainThread
             mainThread.withLock { $0 = main }
-            entered.continuation.yield(())
+            guard let action = action.withLock({ value in defer { value = nil }; return value }) else { throw CocoaError(.featureUnsupported) }
+            // The release path must not need the cooperative executor blocked below.
+            DispatchQueue.main.async { action(); self.release.signal() }
             // The old MainActor implementation must fail instead of deadlocking the test runner.
             if main { throw CocoaError(.featureUnsupported) }
             release.wait()
@@ -40,13 +45,11 @@ struct CreativeStoreConcurrencyTests {
             if url.lastPathComponent == "works.json" { try gate.block() }
         }))
         let write = Task { try await store.save(item, audioData: Data([1, 2]), operationID: UUID()) }
-        var entered = gate.entered.stream.makeAsyncIterator()
-        _ = await entered.next()
-        let heartbeat = Task { @MainActor in 1 }
-        #expect(await heartbeat.value == 1)
-        #expect(!gate.mainThread.withLock { $0 })
-        gate.release.signal()
+        let heartbeat = Mutex(false)
+        gate.onEntry { heartbeat.withLock { $0 = true } }
         let saved = try await write.value
+        #expect(heartbeat.withLock { $0 })
+        #expect(!gate.mainThread.withLock { $0 })
         #expect(saved.receipt.committed)
         #expect(saved.value.id == item.id)
     }
@@ -59,11 +62,9 @@ struct CreativeStoreConcurrencyTests {
             if url.lastPathComponent == "works.json" { try gate.block() }
         }))
         let write = Task { try await store.save(item, audioData: Data([3, 4]), operationID: id) }
-        var entered = gate.entered.stream.makeAsyncIterator()
-        _ = await entered.next()
-        write.cancel()
-        gate.release.signal()
+        gate.onEntry { write.cancel() }
         let saved = try await write.value
+        #expect(write.isCancelled)
         #expect(saved.receipt.operationID == id)
         #expect(saved.receipt.committed)
         #expect(await store.receipt(operationID: id) == saved.receipt)
@@ -139,12 +140,10 @@ struct CreativeStoreConcurrencyTests {
             if url.lastPathComponent == "projects.json" { try gate.block() }
         }))
         let write = Task { try await store.save(item, operationID: id) }
-        var entered = gate.entered.stream.makeAsyncIterator()
-        _ = await entered.next()
-        #expect(!gate.mainThread.withLock { $0 })
-        write.cancel()
-        gate.release.signal()
+        gate.onEntry { write.cancel() }
         let result = try await write.value
+        #expect(!gate.mainThread.withLock { $0 })
+        #expect(write.isCancelled)
         #expect(result.receipt.committed)
         #expect(await store.receipt(operationID: id) == result.receipt)
         #expect(try await store.list().map(\.id) == [item.id])
@@ -167,12 +166,9 @@ struct CreativeStoreConcurrencyTests {
         )
         let source = work("source")
         let opening = Task { await model.startDubbingProject(for: source) }
-        var entered = gate.entered.stream.makeAsyncIterator()
-        _ = await entered.next()
-        model.closeDubbingProject()
-        opening.cancel()
-        gate.release.signal()
+        gate.onEntry { model.closeDubbingProject(); opening.cancel() }
         let committed = try #require(await opening.value)
+        #expect(opening.isCancelled)
         #expect(model.dubbingProject == nil)
         #expect(model.dubbingWorkflow.lastStoreReceipt?.committed == true)
         #expect(try await projects.list().map(\.id) == [committed.id])
