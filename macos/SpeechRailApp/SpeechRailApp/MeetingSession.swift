@@ -121,7 +121,11 @@ public final class MeetingSession {
     public private(set) var phase: Phase = .idle
     public private(set) var blocked: BlockReason?
     /// 本场转录（已定稿的行）。
-    public private(set) var lines: [Line] = []
+    public let transcriptPresentation = TranscriptPresentation<Line>()
+    public private(set) var lines: [Line] {
+        get { transcriptPresentation.rows }
+        set { transcriptPresentation.reset(newValue) }
+    }
     /// 正在识别的那一句（未定稿，只进内存，**不进库**）。
     public private(set) var partialText: String?
     public private(set) var level: Double = 0
@@ -227,7 +231,7 @@ public final class MeetingSession {
     private var previewLedger = TranscriptPreviewLedger()
     private var previewIdentity: TranscriptPreviewLedger.Identity?
     /// `(connection, generation, itemID)` → 已落库行，避免迟到归属命中新连接复用的 item ID。
-    private var lineByItem: [TranscriptPreviewLedger.ItemIdentity: (lineID: String, ordinal: Int)] = [:]
+    private var lineByItem = LiveTranscriptItemIndex()
     private var pendingAttributions = TranscriptAttributionBuffer()
     private var admissionLedger = TranscriptAdmissionLedger()
     @ObservationIgnored private lazy var inputPersistence = TranscriptPersistenceQueue(
@@ -607,7 +611,7 @@ public final class MeetingSession {
             }
         }
 
-        let stream: AsyncStream<AudioChunk>
+        let stream: AudioChunkStream
         do {
             stream = try await audio.start(selection: selection)
         } catch {
@@ -697,7 +701,7 @@ public final class MeetingSession {
             startedAt = record.startedAt
             lines = []
             currentOrdinal = 0
-            lineByItem = [:]
+            lineByItem = .init()
             timingQualityApplied = []
             epoch = 0
             coordinator.sessionDidStartRecording(id: record.id)
@@ -779,21 +783,22 @@ public final class MeetingSession {
     }
 
     /// 释放这一层的设备与连接。**幂等**，中断与结束两条路都走它。
+    private var sourceTerminationTask: Task<Void, Never>?
     private var releaseCaptureTask: Task<Bool, Never>?
     private var captureDeadline: SessionDrainDeadline?
     private var isClosingCaptureTransport = false
 
     @discardableResult
-    private func releaseCapture(drain: Bool = false) async -> Bool {
+    private func releaseCapture(drain: Bool = false, preservingRecord: Bool = false) async -> Bool {
         if let releaseCaptureTask { return await releaseCaptureTask.value }
-        let task = Task { @MainActor in await self.performReleaseCapture(drain: drain) }
+        let task = Task { @MainActor in await self.performReleaseCapture(drain: drain, preservingRecord: preservingRecord) }
         releaseCaptureTask = task
         let result = await task.value
         releaseCaptureTask = nil
         return result
     }
 
-    private func performReleaseCapture(drain: Bool) async -> Bool {
+    private func performReleaseCapture(drain: Bool, preservingRecord: Bool) async -> Bool {
         let deadline = SessionDrainDeadline(timeout: dependencies.drainTimeout)
         captureDeadline = deadline
         let endingRecordID = sessionID
@@ -868,7 +873,7 @@ public final class MeetingSession {
                     lastFailure = coordinator.captureCompletionFailure(recordID: endingRecordID)?.message
                         ?? deadline.failure?.message ?? "本场收尾尚未确认完整。"
                 }
-                if coordinator.activeSessionID == endingRecordID, coordinator.occupancy?.kind == .meeting {
+                if !preservingRecord, coordinator.activeSessionID == endingRecordID, coordinator.occupancy?.kind == .meeting {
                     coordinator.abandonOccupancy()
                 }
             }
@@ -930,20 +935,22 @@ public final class MeetingSession {
     // MARK: - 上行 / 下行
 
     private func startPump(
-        stream: AsyncStream<AudioChunk>,
+        stream: AudioChunkStream,
         client: any MeetingRealtimeClient,
         generation token: Int,
         previewIdentity: TranscriptPreviewLedger.Identity
     ) {
         uploadPump?.cancel()
         uploadPump = Task { [weak self] in
-            for await chunk in stream {
-                guard let self else { return }
-                guard self.isCurrent(token) else { return }
-                await self.upload(chunk, to: client, generation: token)
+            do {
+                for try await chunk in stream {
+                    guard let self, self.isCurrent(token) else { return }
+                    await self.upload(chunk, to: client, generation: token)
+                }
+                if !Task.isCancelled { self?.audioStreamFailed(AudioStreamError(reason: .sourceLost), generation: token) }
+            } catch {
+                if !(error is CancellationError) { self?.audioStreamFailed(error, generation: token) }
             }
-            guard let self, self.isCurrent(token) else { return }
-            await self.captureStreamEnded()
         }
 
         pump?.cancel()
@@ -1045,6 +1052,9 @@ public final class MeetingSession {
             }
         case .attribution(let itemID, let units, _):
             await applyAttribution(itemID: itemID, units: units, identity: identity)
+        case .itemRetired(let itemID):
+            let key = TranscriptPreviewLedger.ItemIdentity(identity: identity, itemID: itemID)
+            if let entry = lineByItem.retire(key), let recordID = sessionID { retireLiveLine(recordID: recordID, lineID: entry.lineID) }
         case .diarizationFinished:
             // 分人收口屏障：drain 已在客户端内等齐，这里无需再记状态。
             // 归属修订走 `.attribution`，降级走 `.diarizationDegraded`。
@@ -1121,7 +1131,7 @@ public final class MeetingSession {
             }
             return
         }
-        let line = lines.first { $0.id == entry.lineID }
+        let line = transcriptPresentation.line(id: entry.lineID)
         enqueueAttribution(
             recordID: sessionID, identity: identity, lineID: entry.lineID, ordinal: entry.ordinal,
             units: units, labelsEnabled: labeling.isEnabled,
@@ -1172,9 +1182,7 @@ public final class MeetingSession {
             }
             guard self.sessionID == recordID, self.previewIdentity == identity else { return }
             if savedTiming != nil { self.timingQualityApplied.insert(lineID) }
-            self.lines = self.lines.map { existing in
-                guard existing.id == lineID else { return existing }
-                var updated = existing
+            self.transcriptPresentation.update(id: lineID) { updated in
                 if confirmedLabels.contains(lineID) {
                     updated.speakerLabel = owner.attributedLabel(forLineID: lineID)
                 }
@@ -1183,7 +1191,6 @@ public final class MeetingSession {
                     updated.end = savedTiming.upperBound
                     updated.timingQuality = .aligned
                 }
-                return updated
             }
         }
         if accepted {
@@ -1240,6 +1247,19 @@ public final class MeetingSession {
         return admission
     }
 
+    private func retireLiveLine(recordID: String, lineID: String) {
+        let owner = labeling
+        let accepted = inputPersistence.enqueueProjection(recordID: recordID, lineID: lineID, unitCount: 0, coalescing: false) { [weak self, owner] in
+            owner.retireLine(lineID)
+            self?.timingQualityApplied.remove(lineID)
+        }
+        if !accepted {
+            owner.retireLine(lineID); timingQualityApplied.remove(lineID)
+            lastFailure = "辅助信息清理积压，已保留正文；请结束后检查记录。"
+        }
+    }
+    var liveTranscriptLookupCount: Int { lineByItem.count }
+
     private func didSaveTranscript(_ command: TranscriptPersistenceQueue.Command, ordinal: Int) async {
         if sessionID == command.sessionID, !command.formal,
            lastFailure?.contains("正在保留恢复内容") == true {
@@ -1249,13 +1269,16 @@ public final class MeetingSession {
             connection: command.connection, generation: command.generation
         )
         let itemIdentity = TranscriptPreviewLedger.ItemIdentity(identity: identity, itemID: command.itemID)
+        defer {
+            if lineByItem.isRetired(itemIdentity), command.formal {
+                retireLiveLine(recordID: command.sessionID, lineID: command.lineID)
+            }
+        }
         // 行已经在了。对齐/分人结果到达时按 `utterance_id` 找回这一行。
         if sessionID == command.sessionID, command.formal {
             lineByItem[itemIdentity] = (lineID: command.lineID, ordinal: ordinal)
             currentOrdinal = max(currentOrdinal, ordinal)
-            if !lines.contains(where: { $0.id == command.lineID }) {
-                lines.append(
-                    Line(
+            transcriptPresentation.apply(Line(
                         id: command.lineID,
                         ordinal: ordinal,
                         text: command.text,
@@ -1265,10 +1288,7 @@ public final class MeetingSession {
                         source: command.source,
                         isDeviceSwitch: command.isDeviceSwitch,
                         timingQuality: command.timingQuality
-                    )
-                )
-                lines.sort { $0.ordinal < $1.ordinal }
-            }
+                    ))
         }
         guard let payload = pendingAttributions.take(recordID: command.sessionID, identity: itemIdentity),
               command.formal else { return }
@@ -1360,9 +1380,19 @@ public final class MeetingSession {
 
     /// 采集流自己结束了：设备被拔、引擎停了这一类。**不是来源 App 退出**
     /// （那一类在 `handleSystemAudioLost` 里，会自动接回）。它需要人决定怎么继续。
-    private func captureStreamEnded() async {
-        guard !isStoppingIntentionally, phase.isLive else { return }
-        await enterInterruption(.sourceLost, note: "音频来源停下来了（设备被拔或引擎停了）。")
+    private func audioStreamFailed(_ error: any Error, generation token: Int) {
+        guard isCurrent(token) else { return }
+        let failure = (error as? AudioStreamError) ?? AudioStreamError(reason: .sourceLost)
+        if failure.reason != .sourceLost, let sessionID {
+            coordinator.recordCaptureCompletionFailure(recordID: sessionID,
+                failure: .init(stage: .capture, message: failure.localizedDescription))
+        }
+        guard !isStoppingIntentionally, phase.isLive, sourceTerminationTask == nil else { return }
+        sourceTerminationTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.sourceTerminationTask = nil }
+            await self.enterInterruption(.sourceLost, note: failure.localizedDescription, drain: true)
+        }
     }
 
     /// 本机音频那一路断了自己接回来。**这是唯一会自动接回的一类**（§9 第 9 行）：
@@ -1383,13 +1413,14 @@ public final class MeetingSession {
         }
     }
 
-    private func enterInterruption(_ reason: SessionInterruptionReason, note: String? = nil) async {
+    private func enterInterruption(_ reason: SessionInterruptionReason, note: String? = nil, drain: Bool = false) async {
         guard phase.isLive else { return }
         if let note { lastFailure = note }
         interruptionNote = note
         isStoppingIntentionally = true
-        await releaseCapture()
+        await releaseCapture(drain: drain, preservingRecord: true)
         isStoppingIntentionally = false
+        guard phase.isLive else { return }
         _ = await coordinator.markInterruption(reason, atOrdinal: currentOrdinal)
         interruption = reason
         interruptedAt = dependencies.clock.now()
@@ -1422,6 +1453,23 @@ public final class MeetingSession {
     /// 把一段行从某位说话人拆出来（唯一会改归属列的用户动作）。
     public func split(lineIDs: [String], to label: String?) async {
         await labeling.split(lineIDs: lineIDs, to: label)
+    }
+
+    public func loadTranscriptPage(beforeOrdinal: Int? = nil) async {
+        guard let recordID = sessionID else { return }
+        do {
+            try await transcriptPresentation.requestPage(beforeOrdinal: beforeOrdinal ?? lines.first?.ordinal) { [coordinator] before in
+                let page = try await coordinator.linesPage(sessionID: recordID, beforeOrdinal: before)
+                return .init(rows: page.rows.map { row in
+                    Line(id: row.id, ordinal: row.ordinal, text: row.text, start: row.tStart ?? 0, end: row.tEnd ?? 0,
+                         speakerLabel: row.speakerLabel, source: row.source, isDeviceSwitch: row.isDeviceSwitch, timingQuality: row.timingQuality)
+                }, nextBeforeOrdinal: page.nextBeforeOrdinal)
+            }
+        } catch { lastFailure = "较早的记录暂时未能读入，请重试。" }
+    }
+    public func completeTranscriptText() async throws -> String {
+        guard let sessionID else { return "" }
+        return try await coordinator.linesRange(sessionID: sessionID, ordinals: 1...Int.max).map(\.text).joined(separator: "\n")
     }
 
     // MARK: - 小工具

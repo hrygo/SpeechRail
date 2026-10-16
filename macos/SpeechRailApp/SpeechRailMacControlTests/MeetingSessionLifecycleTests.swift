@@ -2184,13 +2184,13 @@ final class ControllableAudioSource: MeetingAudioSource {
     private(set) var resolvedSource: SessionAudioSource = .microphone
     var onSystemAudioLost: (@MainActor (String) -> Void)?
     var startError: Error?
-    private var continuation: AsyncStream<AudioChunk>.Continuation?
+    private var continuation: AudioChunkStream.Continuation?
 
-    func start(selection: MeetingAudioSelection) async throws -> AsyncStream<AudioChunk> {
+    func start(selection: MeetingAudioSelection) async throws -> AudioChunkStream {
         startCount += 1
         if let startError { throw startError }
         resolvedSource = selection.resolvedSource
-        let pair = AsyncStream<AudioChunk>.makeStream()
+        let pair = AudioChunkStream.makeStream()
         continuation = pair.continuation
         return pair.stream
     }
@@ -2211,7 +2211,7 @@ final class ControllableAudioSource: MeetingAudioSource {
 
     /// 往采集流里塞一块音频。
     func emit(_ chunk: AudioChunk) {
-        continuation?.yield(chunk)
+        continuation?.offer(chunk)
     }
 
 }

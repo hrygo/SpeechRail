@@ -386,6 +386,8 @@ public final class AssistantSession {
     /// 有证据即输入不完整，不得当成完整意图回答（由调用方判定）。
     private var lastUploadedChunkSequence: Int?
     private var lastChunkDroppedBefore: Int?
+    private var audioInputIsIncomplete = false
+    @ObservationIgnored private var activeAudioStream: AudioChunkStream?
     private(set) var uploadedChunksSkipped: Int = 0
     private(set) var uploadedSamplesDropped: Int = 0
     /// M3/V08c:上一次回答资格生效时的丢证据水位。语音 final 落库后对比水位差：
@@ -524,7 +526,7 @@ public final class AssistantSession {
     }
     /// 正在跑的这一轮回复（D08）。`nil` 表示此刻没有助手回复在生成或待收尾。
     /// 它的 `id` 就是库里那一行的 id，也是界面 `Turn.id`——全程不变。
-    private var currentReply: AssistantReplyState?
+    @ObservationIgnored private var currentReply: AssistantReplyState?
     /// VA-04：finalization claim 登记表，以 replyID 为键。
     /// 第一个 await 前登记，局部 isFinalized 不再作为唯一 once 证据；
     /// 迟到收尾按 ID 认领自己的记录，不清新轮状态。
@@ -1116,10 +1118,10 @@ public final class AssistantSession {
         if let client { await client.close() }
         client = nil
         if let audioSession {
-            audioSession.stop()
+            await audioSession.stop()
             self.audioSession = nil
         } else {
-            source?.stop()
+            await source?.stop()
         }
         source = nil
         stopPumpTasks()
@@ -1240,17 +1242,17 @@ public final class AssistantSession {
         let source = audioSourceFactory()
         let audioSession = source as? any AssistantAudioSession
         audioSession?.configure(mode: mode)
-        let stream: AsyncStream<AudioChunk>
+        let stream: AudioChunkStream
         do {
             stream = try await source.start()
         } catch {
-            source.stop()
+            await source.stop()
             throw Blocked(Self.blockReason(for: error))
         }
         do {
             try requireLive(token)
         } catch {
-            source.stop()
+            await source.stop()
             throw error
         }
 
@@ -1270,7 +1272,7 @@ public final class AssistantSession {
         do {
             try await client.connect()
         } catch {
-            source.stop()
+            await source.stop()
             throw Blocked(.serviceNotReady(error.localizedDescription))
         }
         let connection = connectionToken &+ 1
@@ -1294,7 +1296,7 @@ public final class AssistantSession {
             try requireLive(token)
         } catch {
             // 晚到的连接：只关掉它自己，不碰当前会话的设备与状态。
-            source.stop()
+            await source.stop()
             await client.close()
             throw error
         }
@@ -1392,7 +1394,7 @@ public final class AssistantSession {
             do {
                 try await player.start()
             } catch {
-                source.stop()
+                await source.stop()
                 await client.close()
                 throw Blocked(.serviceNotReady("播放通道没起来：\(error.localizedDescription)"))
             }
@@ -1408,7 +1410,7 @@ public final class AssistantSession {
             do {
                 try requireLive(token)
             } catch {
-                source.stop()
+                await source.stop()
                 await player.stop()
                 await client.close()
                 throw error
@@ -1461,7 +1463,7 @@ public final class AssistantSession {
 
     /// 一次启动/重连里"语音通道"那部分的产物。
     private struct VoiceTransport {
-        var stream: AsyncStream<AudioChunk>
+        var stream: AudioChunkStream
         var client: any AssistantRealtimeClient
         var profile: String
         var configuration: LLMConfiguration
@@ -1586,9 +1588,9 @@ public final class AssistantSession {
         client: any AssistantRealtimeClient
     ) async {
         if let audioSession {
-            audioSession.stop()
+            await audioSession.stop()
         } else {
-            source?.stop()
+            await source?.stop()
         }
         await client.close()
     }
@@ -1597,15 +1599,36 @@ public final class AssistantSession {
     private var stopCaptureTask: Task<Void, Never>?
     private var isClosingCaptureTransport = false
 
-    public func stopCapture() async {
-        if let stopCaptureTask { return await stopCaptureTask.value }
-        let task = Task { @MainActor in await self.performStopCapture() }
+    public func stopCapture() async { await beginCaptureStop(preservingRecord: false).value }
+
+    private func beginCaptureStop(preservingRecord: Bool) -> Task<Void, Never> {
+        if let stopCaptureTask { return stopCaptureTask }
+        let task = Task { @MainActor in
+            defer { self.stopCaptureTask = nil }
+            await self.performStopCapture(preservingRecord: preservingRecord)
+        }
         stopCaptureTask = task
-        await task.value
-        stopCaptureTask = nil
+        return task
     }
 
-    private func performStopCapture() async {
+    private func audioStreamFailed(_ error: any Error, connection: Int) {
+        guard connection == connectionToken else { return }
+        audioInputIsIncomplete = true
+        let failure = (error as? AudioStreamError) ?? AudioStreamError(reason: .sourceLost)
+        lastFailure = failure.localizedDescription
+        if let dropped = failure.droppedSamples { uploadedSamplesDropped += Int(clamping: dropped) }
+        if let expected = failure.expectedSequence, let received = failure.receivedSequence, received > expected {
+            uploadedChunksSkipped += Int(clamping: received - expected)
+        }
+        if failure.reason != .sourceLost, let sessionID {
+            coordinator.recordCaptureCompletionFailure(recordID: sessionID,
+                failure: .init(stage: .capture, message: failure.localizedDescription))
+        }
+        guard !isStoppingIntentionally, stopCaptureTask == nil else { return }
+        _ = beginCaptureStop(preservingRecord: true)
+    }
+
+    private func performStopCapture(preservingRecord: Bool) async {
         let deadline = SessionDrainDeadline(timeout: dependencies.drainTimeout)
         isClosingCaptureTransport = false
         phase = .ending
@@ -1631,8 +1654,8 @@ public final class AssistantSession {
         retryTask = nil
         isStoppingIntentionally = true
         // Device release does not wait for transport, receiver or storage IO.
-        if let audioSession { audioSession.stop() }
-        else { source?.stop() }
+        if let audioSession { await audioSession.stop() }
+        else { await source?.stop() }
         audioSession = nil
         source = nil
         if let playback {
@@ -1720,7 +1743,7 @@ public final class AssistantSession {
             }
             retainPendingSeal(id: endingSession, reason: lastFailure ?? "部分输入尚未保存。")
             // 归还本场设备但不封存；coordinator 的 stopper 返回后也不能误宣称保存齐全。
-            if coordinator.activeSessionID == endingSession, coordinator.occupancy?.kind == .assistant {
+            if !preservingRecord, coordinator.activeSessionID == endingSession, coordinator.occupancy?.kind == .assistant {
                 coordinator.abandonOccupancy()
             }
         }
@@ -1737,7 +1760,15 @@ public final class AssistantSession {
             let seal = await coordinator.sealSessionReporting(id: recordID, reason: .user)
             recordSealResult(seal, targetID: recordID)
         }
-        resetToIdleKeepingTurns()
+        if preservingRecord {
+            isStoppingIntentionally = false
+            level = 0
+            blocked = .streamFailed(lastFailure ?? "音频来源已中断，请重试语音。")
+            phase = .paused
+            if coordinator.activeSessionID == endingSession, coordinator.occupancy?.kind == .assistant {
+                _ = await coordinator.markInterruption(.sourceLost, atOrdinal: currentOrdinal)
+            }
+        } else { resetToIdleKeepingTurns() }
     }
 
     /// VA-03/A47：封存失败后的重试出口。成功后清空 pendingSeal 并发布成功 ID。
@@ -1996,18 +2027,24 @@ public final class AssistantSession {
     // MARK: - 采集 → 上行
 
     private func startPump(
-        stream: AsyncStream<AudioChunk>,
+        stream: AudioChunkStream,
         client: any AssistantRealtimeClient,
         connection: Int
     ) {
         // VA-02：uploader / receiver 可分别停止。receiver 是唯一的顺序事件消费者，
         // 只做轻量归约与身份校验；取消的远端等待由独立 effect 持有，不占用 receiver。
         stopPumpTasks()
+        audioInputIsIncomplete = false
+        activeAudioStream = stream
         uploaderTask = Task { [weak self] in
-            for await chunk in stream {
-                guard let self else { return }
-                guard connection == self.connectionToken else { return }
-                await self.upload(chunk, to: client, connection: connection)
+            do {
+                for try await chunk in stream {
+                    guard let self, connection == self.connectionToken else { return }
+                    await self.upload(chunk, to: client, connection: connection)
+                }
+                if !Task.isCancelled { self?.audioStreamFailed(AudioStreamError(reason: .sourceLost), connection: connection) }
+            } catch {
+                if !(error is CancellationError) { self?.audioStreamFailed(error, connection: connection) }
             }
         }
         receiverTask = Task { [weak self] in
@@ -2120,7 +2157,7 @@ public final class AssistantSession {
         guard connection == connectionToken else { return }
         switch envelope.payload {
         case .ready, .configured, .attribution, .alignmentFailed, .diarizationDegraded,
-             .diarizationFinished, .auxiliaryIncomplete:
+             .diarizationFinished, .auxiliaryIncomplete, .itemRetired:
             break
         case .partial(let itemID, let delta):
             // M0a：空/纯空白 delta 无副作用：不记 observed、不触发打断、
@@ -2454,6 +2491,9 @@ public final class AssistantSession {
         // 键盘无采集链路，不受此门影响。水位无论放行与否都推进到当前，
         // 避免同一批证据挡住后续所有轮次。
         if command.source == .microphone {
+            guard !audioInputIsIncomplete, activeAudioStream?.snapshot.termination == nil else {
+                lastFailure = "刚才那句没能完整收录，请重试语音。"; return
+            }
             let skippedDelta = uploadedChunksSkipped - lastAnsweredChunksSkipped
             let droppedDelta = uploadedSamplesDropped - lastAnsweredSamplesDropped
             lastAnsweredChunksSkipped = uploadedChunksSkipped
@@ -3018,6 +3058,11 @@ public final class AssistantSession {
         phase = .thinking
         streamingReply = ""
         var reply = ""
+        let preview = LLMTextPreview { [weak self] text in
+            guard let self, self.replyGeneration == generation else { return }
+            self.streamingReply = text
+        }
+        defer { preview.stop() }
         // M0e：默认确认后朗读——流式循环不再开嗓，不再需要开嗓门闩与
         // 增量可用标志；朗读统一走完整终态后的确认计划。
         do {
@@ -3032,9 +3077,9 @@ public final class AssistantSession {
                 instructions: context.instructions
             ) {
                 try Task.checkCancellation()
-                guard generation == replyGeneration else { return }
+                guard generation == replyGeneration else { await preview.cancel(); return }
                 reply += delta
-                streamingReply = reply
+                preview.submit(reply)
                 // 同一轮只有一个身份：流式正文、库里那一行、界面那一行都挂在它下面（D08）。
                 // 这一句的时刻按**开始回答**算，不是按它说完算：生成要几秒，
                 // 用结束时刻会让时间码落在那一句之后（稿行右侧那个 `14:02:16`）。
@@ -3046,7 +3091,10 @@ public final class AssistantSession {
                 // 只做预览与落库，不开嗓、不喂增量；朗读等完整终态后走确认计划。
                 continue
             }
+            try Task.checkCancellation()
+            await preview.finish()
         } catch is CancellationError {
+            await preview.cancel()
             // 取消不是失败：谁按下停止，谁负责收尾（`interruptCurrentReply` /
             // `stopCapture`）。这一路只把界面上的流式文本收掉。
             if generation == replyGeneration {
@@ -3054,6 +3102,7 @@ public final class AssistantSession {
             }
             return
         } catch let error as LLMError where error == .cancelled {
+            await preview.cancel()
             // V07:provider 侧取消（`URLSession` 取消映射的 `.cancelled`）同样不是失败，
             // 与原生 `CancellationError` 同一语义：只收界面文本，不记失败、不走失败收尾。
             // 若落到下面的通用失败分支，"用户按了取消"会被记成一次回答失败。
@@ -3062,6 +3111,7 @@ public final class AssistantSession {
             }
             return
         } catch {
+            await preview.finish()
             guard generation == replyGeneration else { return }
             let message = "这一次没有回答出来：\(error.localizedDescription)"
             // D06：provider 失败必须走**同一个回复收尾**。以前这里只改文案就返回，
@@ -3201,7 +3251,7 @@ public final class AssistantSession {
                     self.transportCloseEffectID = nil
                 }
             }
-            if let closedAudio { closedAudio.stop() } else { closedSource?.stop() }
+            if let closedAudio { await closedAudio.stop() } else { await closedSource?.stop() }
             await closedPlayback?.stop()
             await closedClient.close()
             if let reply { await self.finalizeReply(.interrupted, reply: reply) }
@@ -3262,10 +3312,10 @@ public final class AssistantSession {
         ttsStream?.invalidate()
         ttsStream = nil
         if let audioSession {
-            audioSession.stop()
+            await audioSession.stop()
             self.audioSession = nil
         } else {
-            source?.stop()
+            await source?.stop()
         }
         source = nil
         await closingPlayback?.stop()

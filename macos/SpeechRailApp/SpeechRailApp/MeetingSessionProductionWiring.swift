@@ -10,7 +10,7 @@ import Foundation
 extension AudioSourceCoordinator: MeetingAudioSource {
     /// 把协议边界的纯值选择还原成采集层自己的 `Selection`。字段一一对应，
     /// 没有丢信息——**用户勾了什么，采集层就拿什么**。
-    public func start(selection meetingSelection: MeetingAudioSelection) async throws -> AsyncStream<AudioChunk> {
+    public func start(selection meetingSelection: MeetingAudioSelection) async throws -> AudioChunkStream {
         try await start(
             selection: Selection(
                 usesMicrophone: meetingSelection.usesMicrophone,

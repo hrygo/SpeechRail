@@ -115,6 +115,7 @@ public final class TeleprompterSession {
     public private(set) var speechTrialEvidence: TeleprompterSpeechTrialEvidence?
     private var isSpeechTrialRequested = false
     private var trialPump: Task<Void, Never>?
+    private var trialUploadPump: Task<Void, Never>?
     private var trialStartedAt: ContinuousClock.Instant?
     private var trialRecognizedUnits = 0
     private var trialMatchedUnits = 0
@@ -253,6 +254,10 @@ public final class TeleprompterSession {
     private var source: AudioChunkSource?
     private var client: (any TeleprompterRealtimeClientProtocol)?
     private var pump: Task<Void, Never>?
+    private var uploadPump: Task<Void, Never>?
+    private var sourceTerminationTask: Task<Void, Never>?
+    @ObservationIgnored private var scriptCache = TeleprompterScriptCache()
+    var scriptPreparationCount: Int { scriptCache.prepareCount }
     private var followController = TeleprompterFollowController()
     private let followAdapter = TeleprompterRealtimeFollowAdapter()
     private var isStoppingIntentionally = false
@@ -564,6 +569,7 @@ public final class TeleprompterSession {
         self.document = document
         pendingVersion = nil
         currentSegmentIndex = 0
+        scriptCache.clear()
         followController = TeleprompterFollowController()
         syncFollowState()
         phase = .ready
@@ -709,6 +715,7 @@ public final class TeleprompterSession {
         self.document = document
         self.pendingVersion = nil
         currentSegmentIndex = 0
+        scriptCache.clear()
         followController = TeleprompterFollowController()
         syncFollowState()
         phase = .ready
@@ -1808,6 +1815,7 @@ public final class TeleprompterSession {
             if clockTask == nil { startRunClock() }
             saveProgress()
         } catch is CancellationError {
+            if let voiceStopTask { await voiceStopTask.value }
             if voiceLifecycle.isCurrent(token), voiceLifecycle.state == .starting {
                 _ = voiceLifecycle.markStartFailed(
                     token: token,
@@ -1860,6 +1868,7 @@ public final class TeleprompterSession {
             throw Blocked(reason: .noActiveVersion)
         }
         let generation = voiceLifecycle.generation
+        _ = try scriptCache.prepare(versionID: activeVersion.id, segments: activeVersion.segments)
         runningVersion = activeVersion
         invalidateAnalysis()
         phase = .preparing
@@ -2096,20 +2105,22 @@ public final class TeleprompterSession {
         isStoppingIntentionally = true
         defer { isStoppingIntentionally = false }
         lastVoiceStopFailure = nil
-        source?.stop()
-        source = nil
+        let deadline = SessionDrainDeadline(timeout: .seconds(12))
+        let source = self.source, client = self.client
+        let uploaders = [uploadPump, trialUploadPump].compactMap { $0 }
+        let receivers = [pump, trialPump].compactMap { $0 }
+        await deadline.wait(stage: .capture, cleanup: true) { await source?.stop() }
+        self.source = nil
+        for task in uploaders { await deadline.wait(stage: .upload) { await task.value } }
         if let client {
-            do {
-                try await client.drainAndClear(timeout: .seconds(8))
-            } catch {
-                lastVoiceStopFailure = error.localizedDescription
-                lastFailure = error.localizedDescription
-            }
-            await client.close()
+            await deadline.wait(stage: .protocolDrain) { try await client.drainAndClear(timeout: .seconds(8)) }
+            await deadline.wait(stage: .transportClose, cleanup: true) { await client.close() }
         }
-        client = nil
-        pump?.cancel()
-        pump = nil
+        for task in receivers { await deadline.wait(stage: .receiver) { await task.value } }
+        if let failure = deadline.failure { lastVoiceStopFailure = failure.message; lastFailure = failure.message }
+        self.client = nil
+        for task in uploaders + receivers { task.cancel() }
+        uploadPump = nil; trialUploadPump = nil; pump = nil; trialPump = nil
         partialText = nil
         // 试读收尾：不写进度、不碰跟读状态、不动阅读位置，只把证据定下来。
         if speechTrialStage.isActive || isSpeechTrialRequested {
@@ -2172,7 +2183,8 @@ public final class TeleprompterSession {
             throw Blocked(reason: .noActiveVersion)
         }
         do {
-            try await startSpeechTrialPipeline(segments: activeVersion.segments)
+            let prepared = try scriptCache.prepare(versionID: activeVersion.id, segments: activeVersion.segments)
+            try await startSpeechTrialPipeline(prepared: prepared)
             speechTrialStage = .listening
         } catch {
             let reason = Self.blockReason(for: error)
@@ -2185,7 +2197,7 @@ public final class TeleprompterSession {
     /// 与 `startPipeline(generation:)` 共用同一套能力校验、client 构造与
     /// 显式语言／术语配置——试读要验证的正是这条真实链路，用另一条构造路径
     /// 等于什么也没验证。区别只是不接管跟读状态。
-    private func startSpeechTrialPipeline(segments: [TeleprompterSegment]) async throws {
+    private func startSpeechTrialPipeline(prepared: PreparedTeleprompterScript) async throws {
         let binding = await realtimeCapabilityBindingProvider?()
         if realtimeCapabilityBindingProvider != nil, binding == nil {
             throw Blocked(reason: .serviceNotReady("当前服务未确认实时语音识别能力，请刷新服务信息后重试。"))
@@ -2211,7 +2223,7 @@ public final class TeleprompterSession {
         }
 
         let source = audioSourceFactory()
-        let stream: AsyncStream<AudioChunk>
+        let stream: AudioChunkStream
         do {
             stream = try await source.start()
         } catch {
@@ -2224,36 +2236,33 @@ public final class TeleprompterSession {
         self.source = source
         self.trialGeneration = generation
         self.trialStartedAt = ContinuousClock().now
-        startSpeechTrialPump(stream: stream, client: client, segments: segments, generation: generation)
+        startSpeechTrialPump(stream: stream, client: client, prepared: prepared, generation: generation)
     }
 
     private func startSpeechTrialPump(
-        stream: AsyncStream<AudioChunk>,
+        stream: AudioChunkStream,
         client: any TeleprompterRealtimeClientProtocol,
-        segments: [TeleprompterSegment],
+        prepared: PreparedTeleprompterScript,
         generation: UUID
     ) {
+        trialUploadPump?.cancel()
+        trialUploadPump = Task { [weak self] in
+            do {
+                for try await chunk in stream {
+                    guard let self else { return }
+                    await self.uploadTrialChunk(chunk, to: client, generation: generation)
+                }
+                if !Task.isCancelled { self?.audioStreamFailed(AudioStreamError(reason: .sourceLost), trial: generation) }
+            } catch {
+                if !(error is CancellationError) { self?.audioStreamFailed(error, trial: generation) }
+            }
+        }
         trialPump?.cancel()
         trialPump = Task { [weak self] in
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask { [weak self] in
-                    for await chunk in stream {
-                        guard let self else { return }
-                        await self.uploadTrialChunk(chunk, to: client, generation: generation)
-                    }
-                }
-                group.addTask { [weak self] in
-                    let events = await client.events()
-                    for await envelope in events {
-                        guard let self else { return }
-                        await self.handleTrialEvent(
-                            envelope,
-                            segments: segments,
-                            generation: generation
-                        )
-                    }
-                }
-                await group.waitForAll()
+            let events = await client.events()
+            for await envelope in events {
+                guard let self else { return }
+                await self.handleTrialEvent(envelope, prepared: prepared, generation: generation)
             }
         }
     }
@@ -2279,10 +2288,10 @@ public final class TeleprompterSession {
     /// 什么都没听到区分开，否则界面只能说「试过了」，说不上证明了什么。
     private func handleTrialEvent(
         _ envelope: RealtimeEventEnvelope<RealtimeASRClient.Event>,
-        segments: [TeleprompterSegment],
+        prepared: PreparedTeleprompterScript,
         generation: UUID
     ) async {
-        guard isCurrentTrial(generation), !isStoppingIntentionally else { return }
+        guard isCurrentTrial(generation), !isStoppingIntentionally, activeVersion?.id == prepared.versionID else { return }
         let text: String
         switch envelope.payload {
         case .partial(_, let delta):
@@ -2306,8 +2315,8 @@ public final class TeleprompterSession {
         guard !units.isEmpty else { return }
         trialRecognizedUnits += units.count
         let match = TeleprompterAligner().locate(
-            transcript: text,
-            segments: segments,
+            tokens: Array(units.map(\.value)),
+            script: prepared.script,
             anchor: .init(segmentIndex: 0, utf16Offset: 0)
         )
         trialMatchedUnits += match.matchedCount
@@ -2380,7 +2389,7 @@ public final class TeleprompterSession {
 
         let source = audioSourceFactory()
         self.source = source
-        let stream: AsyncStream<AudioChunk>
+        let stream: AudioChunkStream
         do {
             stream = try await source.start()
         } catch {
@@ -2389,7 +2398,7 @@ public final class TeleprompterSession {
             throw Blocked(reason: Self.blockReason(for: error))
         }
         guard generation == voiceLifecycle.generation else {
-            source.stop()
+            await source.stop()
             await client.close()
             throw CancellationError()
         }
@@ -2409,28 +2418,51 @@ public final class TeleprompterSession {
     }
 
     private func startPump(
-        stream: AsyncStream<AudioChunk>,
+        stream: AudioChunkStream,
         client: any TeleprompterRealtimeClientProtocol
     ) {
-        pump?.cancel()
+        uploadPump?.cancel()
         let generation = voiceLifecycle.generation
-        pump = Task { [weak self] in
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask { [weak self] in
-                    for await chunk in stream {
-                        guard let self else { return }
-                        await self.upload(chunk, to: client, generation: generation)
-                    }
+        uploadPump = Task { [weak self] in
+            do {
+                for try await chunk in stream {
+                    guard let self else { return }
+                    await self.upload(chunk, to: client, generation: generation)
                 }
-                group.addTask { [weak self] in
-                    let events = await client.events()
-                    for await envelope in events {
-                        guard let self else { return }
-                        await self.handle(envelope, generation: generation)
-                    }
-                }
-                await group.waitForAll()
+                if !Task.isCancelled { self?.audioStreamFailed(AudioStreamError(reason: .sourceLost), voice: generation) }
+            } catch {
+                if !(error is CancellationError) { self?.audioStreamFailed(error, voice: generation) }
             }
+        }
+        pump?.cancel()
+        pump = Task { [weak self] in
+            let events = await client.events()
+            for await envelope in events {
+                guard let self else { return }
+                await self.handle(envelope, generation: generation)
+            }
+        }
+    }
+
+    private func audioStreamFailed(_ error: any Error, trial: UUID? = nil, voice: UUID? = nil) {
+        guard !isStoppingIntentionally, sourceTerminationTask == nil else { return }
+        if let trial { guard isCurrentTrial(trial) else { return } }
+        if let voice { guard voiceLifecycle.acceptsVoiceEvents(token: voice) else { return } }
+        let failure = (error as? AudioStreamError) ?? AudioStreamError(reason: .sourceLost)
+        let message = failure.localizedDescription
+        // Stop movement immediately; the still-matching receiver may consume its bounded drain.
+        followController.enterManual(); syncFollowState(); lastFailure = message
+        sourceTerminationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.sourceTerminationTask = nil }
+            if self.coordinator.occupancy?.kind == .teleprompter { await self.coordinator.stopCapture() }
+            else { await self.stopCapture() }
+            if trial != nil { self.speechTrialStage = .failed(message) }
+            else {
+                _ = self.voiceLifecycle.invalidateAfterFailure(reason: message)
+                self.phase = .manual; self.blocked = .streamFailed(message)
+            }
+            self.lastFailure = message
         }
     }
 
@@ -2477,11 +2509,12 @@ public final class TeleprompterSession {
             // Item boundaries do not themselves prove a script position.
             break
         case .partial(_, _), .partialSnapshot(_, _, _, _):
-            guard !isResuming, let activeVersion else { return }
+            guard !isResuming, let activeVersion, scriptCache.current?.versionID == activeVersion.id else { return }
             _ = followAdapter.apply(
                 envelope.payload,
                 metadata: envelope.metadata,
                 segments: activeVersion.segments,
+                preparedScript: scriptCache.current,
                 to: &followController
             )
             // 当前 wire 没有 `speech_started`：第一次收到识别结果就是"听到了"。
@@ -2489,11 +2522,12 @@ public final class TeleprompterSession {
             syncFollowState()
             didAlign = true
         case .completed(_, _):
-            guard !isResuming, let activeVersion else { return }
+            guard !isResuming, let activeVersion, scriptCache.current?.versionID == activeVersion.id else { return }
             let outcome = followAdapter.apply(
                 envelope.payload,
                 metadata: envelope.metadata,
                 segments: activeVersion.segments,
+                preparedScript: scriptCache.current,
                 to: &followController
             )
             syncFollowState()
@@ -2540,7 +2574,7 @@ public final class TeleprompterSession {
     }
 
     private func enterManual(_ reason: BlockReason) async {
-        source?.stop()
+        await source?.stop()
         source = nil
         await client?.close()
         client = nil

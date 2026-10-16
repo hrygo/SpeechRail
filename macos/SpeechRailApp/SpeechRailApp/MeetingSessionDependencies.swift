@@ -76,7 +76,7 @@ public protocol MeetingAudioSource: AnyObject {
     var gapCount: Int { get }
     var resolvedSource: SessionAudioSource { get }
     var onSystemAudioLost: (@MainActor (String) -> Void)? { get set }
-    func start(selection: MeetingAudioSelection) async throws -> AsyncStream<AudioChunk>
+    func start(selection: MeetingAudioSelection) async throws -> AudioChunkStream
     func stop() async
     func setMicrophoneMuted(_ muted: Bool)
     func restartSystemAudio() async -> Bool

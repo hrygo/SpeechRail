@@ -184,10 +184,10 @@ final class MeetingAudioSourceForTests: MeetingAudioSource {
     private(set) var stopCount = 0
     private(set) var muted = false
 
-    func start(selection: MeetingAudioSelection) async throws -> AsyncStream<AudioChunk> {
+    func start(selection: MeetingAudioSelection) async throws -> AudioChunkStream {
         startCount += 1
         resolvedSource = selection.usesMicrophone ? .microphone : .system
-        return AsyncStream { $0.finish() }
+        let pair = AudioChunkStream.makeStream(); pair.continuation.finish(); return pair.stream
     }
 
     func stop() async { stopCount += 1 }

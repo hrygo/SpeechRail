@@ -4479,7 +4479,7 @@ struct InputLevelSheet: View {
             let capture = MicrophoneCapture()
             do {
                 let stream = try await capture.start()
-                for await chunk in stream {
+                for try await chunk in stream {
                     if Task.isCancelled { break }
                     level = chunk.level
                 }
@@ -4487,7 +4487,7 @@ struct InputLevelSheet: View {
                 failure = (error as? LocalizedError)?.errorDescription
                     ?? "拿不到麦克风：\(error.localizedDescription)"
             }
-            capture.stop()
+            await capture.stop()
         }
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 
 // App 侧的 `CaptureHelper` 客户端（`TECHNICAL-DESIGN` §5.4 的"本机音频"一路）。
 //
@@ -43,192 +44,201 @@ public final class SystemAudioCapture: AudioChunkSource, @unchecked Sendable {
         }
     }
 
+    private struct State {
+        var connection: NSXPCConnection?
+        var continuation: AudioChunkStream.Continuation?
+        var stopTask: Task<Void, Never>?
+        var epoch: UUID?
+        var stopReason: String?
+        var stopped = false, stopping = false
+        var cleanupConfirmed: Bool?
+    }
     private let selection: Selection
+    // NSXPCConnection is an ObjC proxy boundary. All ownership stays behind this existing unchecked adapter's lock.
     private let lock = NSLock()
-    private var connection: NSXPCConnection?
-    private var continuation: AsyncStream<AudioChunk>.Continuation?
-    /// 采集**自己停下来**的原因（来源 App 全退、设备被拔…）。`nil` = 用户让它停的。
-    public private(set) var stopReason: String?
+    private var state = State()
+    private func withState<Result>(_ body: (inout State) -> Result) -> Result { lock.withLock { body(&state) } }
+    public var stopReason: String? { withState { $0.stopReason } }
+    /// nil: no stop requested; false: bounded RPC timed out, helper cleanup is unconfirmed.
+    public var cleanupConfirmed: Bool? { withState { $0.cleanupConfirmed } }
 
-    public init(selection: Selection) {
-        self.selection = selection
-    }
+    public init(selection: Selection) { self.selection = selection }
+    deinit { requestStop(immediate: true) }
 
-    deinit {
-        stop()
-    }
-
-    public func start() async throws -> AsyncStream<AudioChunk> {
-        let (stream, continuation) = AsyncStream<AudioChunk>.makeStream(bufferingPolicy: .unbounded)
-        adopt(continuation)
-
+    public func start() async throws -> AudioChunkStream {
+        let epoch = UUID()
+        let pair = AudioChunkStream.makeStream(epoch: epoch,
+            onDequeue: { [weak self] chunk in self?.acknowledge(chunk) },
+            onTermination: { [weak self] _ in self?.requestStop() })
         let connection = NSXPCConnection(serviceName: CaptureHelperConstants.serviceName)
-        connection.remoteObjectInterface = NSXPCInterface(with: SpeechRailCaptureHelperProtocol.self)
-        connection.exportedInterface = NSXPCInterface(
-            with: SpeechRailCaptureHelperClientProtocol.self
-        )
-        connection.exportedObject = Receiver(owner: self)
-        connection.invalidationHandler = { [weak self] in
-            self?.receiveStopped(reason: "采集服务退出了。")
+        connection.remoteObjectInterface = CaptureHelperInterfaces.helper()
+        connection.exportedInterface = CaptureHelperInterfaces.client()
+        connection.exportedObject = Receiver(owner: self, epoch: epoch)
+        connection.invalidationHandler = { [weak self] in self?.receiveStopped(epoch: epoch, reason: .sourceLost) }
+        connection.interruptionHandler = { [weak self] in self?.receiveStopped(epoch: epoch, reason: .sourceLost) }
+        let accepted = withState { value in
+            guard !value.stopped, value.connection == nil else { return false }
+            value.connection = connection; value.continuation = pair.continuation; value.epoch = epoch
+            return true
         }
-        connection.interruptionHandler = { [weak self] in
-            self?.receiveStopped(reason: "采集服务中断了。")
-        }
+        guard accepted else { connection.invalidate(); throw CancellationError() }
         connection.resume()
-        attach(connection)
-
         do {
-            try await requestStart(on: connection)
-        } catch {
-            stop()
-            throw error
-        }
-        return stream
-    }
-
-    public func stop() {
-        let (connection, continuation) = detach()
-
-        continuation?.finish()
-        guard let connection else { return }
-        // `stop` 的 reply 故意不等：App 退出路径上不允许被一个不响应的 helper 挂住。
-        // 连接一作废，helper 的 `invalidationHandler` 会替我们收尾（幂等）。
-        (connection.remoteObjectProxyWithErrorHandler { _ in } as? SpeechRailCaptureHelperProtocol)?
-            .stop {}
-        connection.invalidate()
-    }
-
-    private func requestStart(on connection: NSXPCConnection) async throws {
-        // 连接错误回调与 `start` 的 reply 都可能到，所以用一次性闸门包住续体：
-        // 两次 `resume` 会直接把 App 打崩。
-        let once = OnceContinuation(continuation: nil)
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            once.attach(continuation)
-            let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
-                once.resume(throwing: Failure.helperUnavailable(error.localizedDescription))
-            }) as? SpeechRailCaptureHelperProtocol
-            guard let proxy else {
-                once.resume(throwing: Failure.helperUnavailable("拿不到采集服务的代理。"))
-                return
+            try await XPCReplyLatch.perform(timeout: .seconds(45)) { [self] latch in
+                sendStart(epoch: epoch, latch: latch)
             }
-            proxy.start(
-                bundleIDs: selection.bundleIDs,
-                deviceUID: selection.deviceUID,
-                label: selection.label
-            ) { error in
-                if let error {
-                    once.resume(
-                        throwing: Failure.helperUnavailable(error.localizedDescription)
-                    )
-                } else {
-                    once.resume(returning: ())
+            guard withState({ !$0.stopped && $0.epoch == epoch }) else { throw CancellationError() }
+            return pair.stream
+        } catch { await stop(); throw error }
+    }
+
+    private func sendStart(epoch: UUID, latch: XPCReplyLatch) {
+        guard let connection = withState({ $0.connection }) else { latch.resolve(.failure(CancellationError())); return }
+        let proxy = connection.remoteObjectProxyWithErrorHandler { error in latch.resolve(.failure(error)) } as? SpeechRailCaptureHelperProtocol
+        guard let proxy else { latch.resolve(.failure(Failure.helperUnavailable("拿不到采集服务的代理。"))); return }
+        proxy.start(bundleIDs: selection.bundleIDs, deviceUID: selection.deviceUID, label: selection.label, epoch: epoch.uuidString) { error in
+            if let error { latch.resolve(.failure(error)) } else { latch.resolve(.success(())) }
+        }
+    }
+
+    public func requestStop(immediate: Bool = false) {
+        if immediate {
+            let pair = withState { value in
+                let pair = (value.connection, value.continuation)
+                value.stopped = true; value.connection = nil; value.continuation = nil; value.epoch = nil
+                return pair
+            }
+            pair.1?.finish(.cancelled); pair.0?.invalidate()
+        } else { _ = beginStop(graceful: false) }
+    }
+
+    private func sendStop(latch: XPCReplyLatch) {
+        guard let connection = withState({ $0.connection }) else { latch.resolve(.success(())); return }
+        let proxy = connection.remoteObjectProxyWithErrorHandler { error in latch.resolve(.failure(error)) } as? SpeechRailCaptureHelperProtocol
+        guard let proxy else { latch.resolve(.failure(CancellationError())); return }
+        proxy.stop { latch.resolve(.success(())) }
+    }
+
+    private func beginStop(graceful: Bool) -> Task<Void, Never>? {
+        withState { value in
+            if let task = value.stopTask { return task }
+            guard !value.stopped else { return nil }
+            value.stopping = true
+            if !graceful { value.stopped = true }
+            let task = Task { [weak self] in
+                guard let self else { return }
+                var confirmed = false
+                do {
+                    try await XPCReplyLatch.perform(timeout: .seconds(2)) { [self] latch in sendStop(latch: latch) }
+                    confirmed = true
+                } catch { }
+                let pair = withState { value in
+                    let pair = (value.connection, value.continuation)
+                    value.stopped = true; value.connection = nil; value.continuation = nil; value.epoch = nil
+                    value.cleanupConfirmed = confirmed
+                    if !confirmed { value.stopReason = "采集服务未确认释放，连接已关闭。" }
+                    return pair
                 }
+                pair.1?.finish(graceful ? (confirmed ? .completed : .staleInput) : .cancelled)
+                pair.0?.invalidate()
             }
+            value.stopTask = task
+            return task
         }
     }
 
-    fileprivate func deliver(pcm: Data, level: Double) {
-        let continuation = currentContinuation()
-        continuation?.yield(AudioChunk(pcm: pcm, level: level))
+    public func stop() async {
+        let task = beginStop(graceful: true)
+        await task?.value
+        withState { $0.stopTask = nil }
     }
 
-    fileprivate func receiveStopped(reason: String) {
-        let (_, continuation) = fail(reason: reason)
-        continuation?.finish()
+    private func acknowledge(_ chunk: AudioChunk) {
+        guard let stamp = chunk.captureStamp else { return }
+        let connection = withState { $0.epoch == stamp.captureEpoch && !$0.stopped ? $0.connection : nil }
+        guard let connection else { return }
+        let proxy = connection.remoteObjectProxyWithErrorHandler { [weak self] _ in self?.receiveStopped(epoch: stamp.captureEpoch, reason: .sourceLost) } as? SpeechRailCaptureHelperProtocol
+        proxy?.acknowledge(epoch: stamp.captureEpoch.uuidString, throughSequence: stamp.sourceSequence)
     }
 
-    // 锁只用在这几个**同步**的小函数里：`start()` 是 async，而
-    // `NSLock.lock()` 在异步上下文里被标成不可用（`noasync`），
-    // 在 async 函数体里直接加锁会被编译器拒掉。
-
-    private func adopt(_ continuation: AsyncStream<AudioChunk>.Continuation) {
-        lock.lock()
-        self.continuation = continuation
-        stopReason = nil
-        lock.unlock()
+    fileprivate func deliver(pcm: Data, level: Double, epoch: UUID, sourceID: String, sequence: UInt64,
+                             capturedUptimeNanoseconds: UInt64, droppedSamplesBefore: UInt64) {
+        let continuation = withState { $0.epoch == epoch && !$0.stopped ? $0.continuation : nil }
+        guard let continuation else { return }
+        guard let sourceID = UUID(uuidString: sourceID), !pcm.isEmpty, pcm.count <= 1_920, pcm.count.isMultiple(of: 2),
+              level.isFinite, (0...1).contains(level), sequence <= UInt64(Int.max), droppedSamplesBefore <= UInt64(Int.max) else {
+            receiveStopped(epoch: epoch, reason: .sourceLost); return
+        }
+        continuation.offer(.init(pcm: pcm, level: level, sequenceNumber: Int(sequence), droppedSamplesBefore: Int(droppedSamplesBefore),
+            captureStamp: .init(captureEpoch: epoch, sourceID: sourceID, sourceSequence: sequence,
+                capturedUptimeNanoseconds: capturedUptimeNanoseconds)))
     }
 
-    private func attach(_ connection: NSXPCConnection) {
-        lock.lock()
-        self.connection = connection
-        lock.unlock()
+    fileprivate func receiveStopped(epoch: UUID, reason: AudioStreamTermination, evidence: AudioStreamError? = nil) {
+        let continuation = withState { value -> AudioChunkStream.Continuation? in
+            guard value.epoch == epoch, !value.stopped else { return nil }
+            if reason != .completed { value.stopReason = AudioStreamError(reason: reason).localizedDescription }
+            return value.continuation
+        }
+        let normalCompletion = withState { $0.stopping && reason == .completed }
+        if let evidence, !normalCompletion { continuation?.finish(evidence) }
+        else { continuation?.finish(normalCompletion ? .completed : (reason == .completed || reason == .cancelled ? .sourceLost : reason)) }
     }
 
-    private func detach() -> (NSXPCConnection?, AsyncStream<AudioChunk>.Continuation?) {
-        lock.lock()
-        defer { lock.unlock() }
-        let pair = (connection, continuation)
-        connection = nil
-        continuation = nil
-        return pair
-    }
-
-    private func currentContinuation() -> AsyncStream<AudioChunk>.Continuation? {
-        lock.lock()
-        defer { lock.unlock() }
-        return continuation
-    }
-
-    private func fail(
-        reason: String
-    ) -> (NSXPCConnection?, AsyncStream<AudioChunk>.Continuation?) {
-        lock.lock()
-        defer { lock.unlock() }
-        let pair = (connection, continuation)
-        if continuation != nil { stopReason = reason }
-        continuation = nil
-        return pair
-    }
-
-    /// 上行回调的落地对象。XPC 要求 `exportedObject` 是 `NSObject`。
     private final class Receiver: NSObject, SpeechRailCaptureHelperClientProtocol {
         private weak var owner: SystemAudioCapture?
-
-        init(owner: SystemAudioCapture) {
-            self.owner = owner
+        private let epoch: UUID
+        init(owner: SystemAudioCapture, epoch: UUID) { self.owner = owner; self.epoch = epoch }
+        func deliver(pcm: Data, level: Double, epoch: String, sourceID: String, sequence: UInt64,
+                     capturedUptimeNanoseconds: UInt64, droppedSamplesBefore: UInt64) {
+            guard UUID(uuidString: epoch) == self.epoch else { return }
+            owner?.deliver(pcm: pcm, level: level, epoch: self.epoch, sourceID: sourceID, sequence: sequence,
+                capturedUptimeNanoseconds: capturedUptimeNanoseconds, droppedSamplesBefore: droppedSamplesBefore)
         }
-
-        func deliver(pcm: Data, level: Double) {
-            owner?.deliver(pcm: pcm, level: level)
-        }
-
-        func captureStopped(reason: String) {
-            owner?.receiveStopped(reason: reason)
+        func captureStopped(epoch: String, evidence: Data) {
+            guard UUID(uuidString: epoch) == self.epoch else { return }
+            guard evidence.count <= 1_024, let error = try? JSONDecoder().decode(AudioStreamError.self, from: evidence),
+                  error.captureEpoch == self.epoch else { owner?.receiveStopped(epoch: self.epoch, reason: .sourceLost); return }
+            owner?.receiveStopped(epoch: self.epoch, reason: error.reason, evidence: error)
         }
     }
 }
 
-/// 只允许第一次 `resume` 生效的续体闸门（XPC 的两条回调路径会竞争）。
-private final class OnceContinuation: @unchecked Sendable {
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<Void, Error>?
-    private var finished = false
-
-    init(continuation: CheckedContinuation<Void, Error>?) {
-        self.continuation = continuation
+/// One terminal reply, including cancellation/timeout before attachment. No unowned continuation survives shutdown.
+private final class XPCReplyLatch: Sendable {
+    private struct State {
+        var continuation: CheckedContinuation<Void, any Error>?
+        var result: Result<Void, any Error>?
     }
-
-    func attach(_ continuation: CheckedContinuation<Void, Error>) {
-        lock.lock()
-        self.continuation = continuation
-        lock.unlock()
+    private let state = Mutex(State())
+    func resolve(_ result: Result<Void, any Error>) {
+        let waiter = state.withLock { value -> CheckedContinuation<Void, any Error>? in
+            guard value.result == nil else { return nil }
+            value.result = result; defer { value.continuation = nil }; return value.continuation
+        }
+        waiter?.resume(with: result)
     }
-
-    func resume(returning value: Void) {
-        lock.lock()
-        guard !finished, let continuation else { lock.unlock(); return }
-        finished = true
-        self.continuation = nil
-        lock.unlock()
-        continuation.resume(returning: value)
+    private func value() async throws {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { waiter in
+                let result = state.withLock { value -> Result<Void, any Error>? in
+                    if let result = value.result { return result }
+                    value.continuation = waiter; return nil
+                }
+                if let result { waiter.resume(with: result) }
+            }
+        } onCancel: { self.resolve(.failure(CancellationError())) }
     }
-
-    func resume(throwing error: Error) {
-        lock.lock()
-        guard !finished, let continuation else { lock.unlock(); return }
-        finished = true
-        self.continuation = nil
-        lock.unlock()
-        continuation.resume(throwing: error)
+    static func perform(timeout: Duration, request: @Sendable (XPCReplyLatch) -> Void) async throws {
+        let latch = XPCReplyLatch()
+        let deadline = Task {
+            do { try await Task.sleep(for: timeout); latch.resolve(.failure(SystemAudioCapture.Failure.cannotReceiveAudio("采集服务未按时确认。"))) }
+            catch { }
+        }
+        request(latch)
+        let result: Result<Void, any Error>
+        do { try await latch.value(); result = .success(()) } catch { result = .failure(error) }
+        deadline.cancel(); await deadline.value
+        try result.get()
     }
 }

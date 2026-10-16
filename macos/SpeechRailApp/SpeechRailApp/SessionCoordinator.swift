@@ -833,6 +833,13 @@ public final class SessionCoordinator {
         try await store.lines(sessionID: sessionID, includePartial: includePartial)
     }
 
+    public func linesPage(sessionID: String, beforeOrdinal: Int?, limit: Int = 200) async throws -> TranscriptPage {
+        try await store.linesPage(sessionID: sessionID, beforeOrdinal: beforeOrdinal, limit: limit)
+    }
+    public func linesRange(sessionID: String, ordinals: ClosedRange<Int>) async throws -> [TranscriptLine] {
+        try await store.linesRange(sessionID: sessionID, ordinals: ordinals)
+    }
+
     public func speakerNames(sessionID: String) async throws -> [String: String] {
         try await store.speakerNames(sessionID: sessionID)
     }

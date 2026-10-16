@@ -324,22 +324,20 @@ struct SessionReplayStorage {
 
 final class SessionReplayCaptureSource: AudioChunkSource, @unchecked Sendable {
     private let lock = NSLock()
-    private var continuation: AsyncStream<AudioChunk>.Continuation?
+    private var continuation: AudioChunkStream.Continuation?
     private var hasStarted = false
     private var hasStopped = false
 
-    func start() async throws -> AsyncStream<AudioChunk> {
-        AsyncStream(bufferingPolicy: .bufferingOldest(128)) { continuation in
-            lock.withLock {
-                self.continuation = continuation
-                hasStarted = true
-                hasStopped = false
-            }
+    func start() async throws -> AudioChunkStream {
+        let pair = AudioChunkStream.makeStream()
+        lock.withLock {
+            continuation = pair.continuation; hasStarted = true; hasStopped = false
         }
+        return pair.stream
     }
 
-    func stop() {
-        let active = lock.withLock { () -> AsyncStream<AudioChunk>.Continuation? in
+    func stop() async {
+        let active = lock.withLock { () -> AudioChunkStream.Continuation? in
             let active = continuation
             continuation = nil
             hasStopped = true
@@ -354,7 +352,7 @@ final class SessionReplayCaptureSource: AudioChunkSource, @unchecked Sendable {
 
     func yield(_ chunk: AudioChunk) -> Bool {
         guard let active = lock.withLock({ continuation }) else { return false }
-        if case .enqueued = active.yield(chunk) { return true }
+        if case .accepted = active.offer(chunk) { return true }
         return false
     }
 }
@@ -370,11 +368,11 @@ final class SessionReplayMeetingSource: MeetingAudioSource {
         self.capture = capture
     }
 
-    func start(selection: MeetingAudioSelection) async throws -> AsyncStream<AudioChunk> {
+    func start(selection: MeetingAudioSelection) async throws -> AudioChunkStream {
         try await capture.start()
     }
 
-    func stop() async { capture.stop() }
+    func stop() async { await capture.stop() }
     func setMicrophoneMuted(_ muted: Bool) {}
     func restartSystemAudio() async -> Bool { false }
 }

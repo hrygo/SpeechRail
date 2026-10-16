@@ -1840,6 +1840,48 @@ public actor SessionStore: SessionArchiveWriting {
         }
     }
 
+    public func linesPage(sessionID: String, beforeOrdinal: Int?, limit: Int = 200) throws -> TranscriptPage {
+        let limit = max(1, min(200, limit))
+        let sql = """
+        SELECT id, session_id, ordinal, role, speaker_label, text, t_start, t_end, source, status,
+               interrupted, device_switch, starred, timing_quality, created_at
+        FROM line WHERE session_id = ? AND status = 'final' \(beforeOrdinal == nil ? "" : "AND ordinal < ?")
+        ORDER BY ordinal DESC LIMIT ?;
+        """
+        return try withStatement(sql) { statement in
+            bind(statement, 1, sessionID)
+            if let beforeOrdinal { bind(statement, 2, beforeOrdinal) }
+            bind(statement, beforeOrdinal == nil ? 2 : 3, limit + 1)
+            var rows: [TranscriptLine] = []
+            while try step(statement) == SQLITE_ROW { rows.append(Self.transcriptLine(from: statement)) }
+            let hasMore = rows.count > limit
+            if hasMore { rows.removeLast() }
+            rows.reverse()
+            return .init(rows: rows, nextBeforeOrdinal: hasMore ? rows.first?.ordinal : nil)
+        }
+    }
+    public func linesRange(sessionID: String, ordinals: ClosedRange<Int>) throws -> [TranscriptLine] {
+        let sql = """
+        SELECT id, session_id, ordinal, role, speaker_label, text, t_start, t_end, source, status,
+               interrupted, device_switch, starred, timing_quality, created_at
+        FROM line WHERE session_id = ? AND status = 'final' AND ordinal >= ? AND ordinal <= ? ORDER BY ordinal ASC;
+        """
+        return try withStatement(sql) { statement in
+            bind(statement, 1, sessionID); bind(statement, 2, ordinals.lowerBound); bind(statement, 3, ordinals.upperBound)
+            var rows: [TranscriptLine] = []
+            while try step(statement) == SQLITE_ROW { rows.append(Self.transcriptLine(from: statement)) }
+            return rows
+        }
+    }
+    func transcriptPageQueryPlan() throws -> String {
+        try withStatement("EXPLAIN QUERY PLAN SELECT id FROM line WHERE session_id = ? AND status = 'final' AND ordinal < ? ORDER BY ordinal DESC LIMIT 201;") { statement in
+            bind(statement, 1, "fixture"); bind(statement, 2, 1_000)
+            var rows: [String] = []
+            while try step(statement) == SQLITE_ROW { rows.append(columnText(statement, 3) ?? "") }
+            return rows.joined(separator: "\n")
+        }
+    }
+
     /// v1 检索用 `LIKE`（§6.5）。个人量级几万行仍是毫秒级；FTS5 留作实测变慢之后的一次迁移。
     public func searchLines(query: String, kind: SessionKind? = nil, limit: Int = 200) throws -> [TranscriptLine] {
         let pattern = "%" + query

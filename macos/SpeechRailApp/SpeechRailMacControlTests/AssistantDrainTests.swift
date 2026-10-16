@@ -149,15 +149,15 @@ final class AssistantDrainTests: XCTestCase {
         var onPlaybackBufferRendered: (@MainActor (Int, Int, UUID) -> Void)?
         var onFailure: (@MainActor (String) -> Void)?
         var onPlaybackInvalidated: (@MainActor (AssistantAudioInvalidation) async -> Void)?
-        private var capture: AsyncStream<AudioChunk>.Continuation?
+        private var capture: AudioChunkStream.Continuation?
         func configure(mode: AssistantMode) {}
-        func start() async throws -> AsyncStream<AudioChunk> {
-            let pair = AsyncStream<AudioChunk>.makeStream()
+        func start() async throws -> AudioChunkStream {
+            let pair = AudioChunkStream.makeStream()
             capture = pair.continuation
             return pair.stream
         }
-        func emit(_ chunk: AudioChunk) { capture?.yield(chunk) }
-        func stop() { capture?.finish(); capture = nil }
+        func emit(_ chunk: AudioChunk) { capture?.offer(chunk) }
+        func stop() async { capture?.finish(); capture = nil }
         @discardableResult
         func enqueuePlayback(_ pcm: Data, epoch: Int, chunkID: UUID) async -> Bool { true }
         func stopPlayback() async {}
