@@ -960,14 +960,13 @@ final class AssistantCancelReceiveTests: XCTestCase {
         XCTAssertEqual(session.uploadedSamplesDropped, 0, "无 ring 丢样时丢样计数必须为零")
     }
 
-    /// V08c:语音 final 落库时若自上次回答以来丢证据超阈值，不回答，转请重说；
-    /// 键盘来源不受此门影响；水位推进后后续轮次不受同一批证据阻挡。
+    /// 断裂采集必须停止；只有显式重建语音来源后才能回答下一句。
     func testBrokenVoiceInputAsksForRepeatInsteadOfAnswering() async throws {
         let harness = try await makeVoiceHarness(llmScripts: [.deltas(["回答"])])
         defer { cleanup(harness) }
         try await harness.coordinator.begin(.assistant)
         await harness.clients()[0].emit(.configured)
-        // 先制造断裂证据：序号跳跃 3 块（超 1 块阈值）。
+        // 序号跳跃触发明确的采集中断。
         for seq in [0, 10, 11] {
             harness.audio.emitCapture(
                 AudioChunk(
@@ -984,16 +983,21 @@ final class AssistantCancelReceiveTests: XCTestCase {
         )
         await harness.clients()[0].emit(.completed(itemID: "q-broken", transcript: "断裂的问题"))
         await waitUntil(
-            { harness.session.lastFailure?.contains("没能完整收录") == true },
-            message: "断裂语音 final 应转请重说，不回答"
+            { harness.session.phase == .paused },
+            message: "断裂采集必须完成释放并暂停"
         )
         let streamCountAfterBroken = await harness.llm.streamCount
         XCTAssertEqual(streamCountAfterBroken, 0, "断裂输入不得把问题发送给 provider")
-        // 同一批证据水位已推进：下一句完整语音应正常回答。
-        await harness.clients()[0].emit(.completed(itemID: "q-whole", transcript: "完整的问题"))
+        let recordID = harness.session.sessionID
+        await harness.session.retry()
+        XCTAssertEqual(harness.session.sessionID, recordID, "重试语音保留同一场记录")
+        await harness.clients().last!.emit(.configured)
+        harness.audio.emitCapture(AudioChunk(pcm: Data([1, 2, 3, 4]), level: 0.5,
+                                             sequenceNumber: 0, droppedSamplesBefore: 0))
+        await harness.clients().last!.emit(.completed(itemID: "q-whole", transcript: "完整的问题"))
         await waitUntil(
             { harness.session.turns.contains { $0.role == .assistant } },
-            message: "水位推进后完整语音应正常回答"
+            message: "显式重建采集后完整语音应正常回答"
         )
     }
 
@@ -1017,7 +1021,10 @@ final class AssistantCancelReceiveTests: XCTestCase {
             { harness.session.uploadedChunksSkipped >= 9 },
             message: "序号 0→10 应累计跳过 9 块"
         )
+        await waitUntil({ harness.session.phase == .paused }, message: "等待故障采集释放")
+        let recordID = harness.session.sessionID
         _ = await harness.session.ask(typed: "键盘问题")
+        XCTAssertEqual(harness.session.sessionID, recordID)
         await waitUntil(
             { harness.session.turns.contains { $0.role == .assistant && $0.text.contains("键盘回答") } },
             message: "键盘问题不受语音完整性门影响，应正常回答"
@@ -1088,7 +1095,7 @@ final class AssistantCancelReceiveTests: XCTestCase {
         XCTAssertEqual(assistantLines, 30, "SQLite 助手答必须全保留")
     }
 
-    /// V08b:ring 丢样快照差必须累计；快照回退（新采集期）不倒扣。
+    /// 首个丢样立即终止来源，后续快照不能覆盖或倒扣失败证据。
     func testUploadDroppedSamplesAreCounted() async throws {
         let harness = try await makeVoiceHarness(llmScripts: [])
         defer { cleanup(harness) }
@@ -1101,14 +1108,14 @@ final class AssistantCancelReceiveTests: XCTestCase {
             AudioChunk(pcm: Data([1, 2, 3, 4]), level: 0.5, sequenceNumber: 1, droppedSamplesBefore: 160)
         )
         await waitUntil(
-            { session.uploadedSamplesDropped == 60 },
-            message: "丢样快照 100→160 应累计 60 样本"
+            { session.uploadedSamplesDropped == 100 },
+            message: "首次丢样即终止，保留首个失败的 100 样本证据"
         )
-        // 新采集期快照归零：不倒扣，只更新基线。
+        // 已终止来源不能被后续归零快照重新激活。
         harness.audio.emitCapture(
             AudioChunk(pcm: Data([1, 2, 3, 4]), level: 0.5, sequenceNumber: 0, droppedSamplesBefore: 0)
         )
         try? await Task.sleep(for: .milliseconds(50))
-        XCTAssertEqual(session.uploadedSamplesDropped, 60, "快照回退不得倒扣已累计的丢样数")
+        XCTAssertEqual(session.uploadedSamplesDropped, 100, "快照回退不得倒扣已累计的丢样数")
     }
 }

@@ -8,27 +8,36 @@ import Testing
 private final class WaveformScanProbe: Sendable {
     private struct State {
         var started = 0
+        var nextIndex = 0
         var active = 0
         var peak = 0
-        var gates: [Int: DispatchSemaphore] = [:]
+        var gates: [Int: CheckedContinuation<Void, Never>] = [:]
     }
     private let state = Mutex(State())
     var started: Int { state.withLock { $0.started } }
     var peak: Int { state.withLock { $0.peak } }
-    func scan(_ url: URL, _ buckets: Int) throws -> [Double] {
-        let (index, gate) = state.withLock { value in
-            value.started += 1; value.active += 1; value.peak = max(value.peak, value.active)
-            let gate = DispatchSemaphore(value: 0)
-            value.gates[value.started] = gate
-            return (value.started, gate)
-        }
+    func scan(_ url: URL, _ buckets: Int) async throws -> [Double] {
+        let index = state.withLock { value in value.nextIndex += 1; return value.nextIndex }
         defer { state.withLock { $0.active -= 1; $0.gates.removeValue(forKey: index) } }
-        gate.wait() // Deliberately ignores cancellation until the real reader exits.
+        // Suspend without occupying a cooperative executor thread. Cancellation
+        // remains unobserved until the simulated physical reader is released.
+        await withCheckedContinuation { continuation in
+            state.withLock { value in
+                value.gates[index] = continuation
+                value.started += 1; value.active += 1
+                value.peak = max(value.peak, value.active)
+            }
+        }
         try Task.checkCancellation()
         return Array(repeating: 0.5, count: buckets)
     }
-    func open(_ index: Int) { state.withLock { $0.gates[index] }?.signal() }
-    func openAll() { state.withLock { Array($0.gates.values) }.forEach { $0.signal() } }
+    func open(_ index: Int) { state.withLock { $0.gates.removeValue(forKey: index) }?.resume() }
+    func openAll() {
+        let gates = state.withLock { value in
+            let gates = Array(value.gates.values); value.gates.removeAll(); return gates
+        }
+        gates.forEach { $0.resume() }
+    }
 }
 
 @Suite(.timeLimit(.minutes(1)))
@@ -41,15 +50,17 @@ struct WaveformEnvelopeLoaderTests {
         guard case let .pending(id) = request else { Issue.record("Expected pending lease"); throw WaveformLoadError.invalidLease }
         return id
     }
-    private func wait(_ condition: @Sendable () async -> Bool) async throws {
-        let end = ContinuousClock.now + .seconds(3)
+    private func wait(sourceLocation: SourceLocation = #_sourceLocation, _ condition: @Sendable () async -> Bool) async throws {
+        // Full-suite MainActor work can delay scheduling for several seconds.
+        // This is a liveness bound, not a waveform performance assertion.
+        let end = ContinuousClock.now + .seconds(15)
         while !(await condition()), ContinuousClock.now < end { try await Task.sleep(for: .milliseconds(1)) }
-        try #require(await condition())
+        try #require(await condition(), sourceLocation: sourceLocation)
     }
 
     @Test func testSameKeyHasOnePhysicalScan() async throws {
         let probe = WaveformScanProbe(); defer { probe.openAll() }
-        let loader = WaveformEnvelopeLoader(scanner: { try probe.scan($0, $1) })
+        let loader = WaveformEnvelopeLoader(scanner: { try await probe.scan($0, $1) })
         let first = try lease(await loader.acquire(key: key(), fileURL: url))
         let second = try lease(await loader.acquire(key: key(), fileURL: url))
         try await wait { probe.started == 1 }
@@ -65,7 +76,7 @@ struct WaveformEnvelopeLoaderTests {
 
     @Test func testOneActiveAndEightPendingLimit() async throws {
         let probe = WaveformScanProbe(); defer { probe.openAll() }
-        let loader = WaveformEnvelopeLoader(scanner: { try probe.scan($0, $1) })
+        let loader = WaveformEnvelopeLoader(scanner: { try await probe.scan($0, $1) })
         let active = try lease(await loader.acquire(key: key("active"), fileURL: url))
         try await wait { probe.started == 1 }
         var queued: [UUID] = []
@@ -88,7 +99,7 @@ struct WaveformEnvelopeLoaderTests {
 
     @Test func testLastOwnerReleaseCancelsScanAndKeepsSlotUntilRealExit() async throws {
         let probe = WaveformScanProbe(); defer { probe.openAll() }
-        let loader = WaveformEnvelopeLoader(scanner: { try probe.scan($0, $1) })
+        let loader = WaveformEnvelopeLoader(scanner: { try await probe.scan($0, $1) })
         let old = try lease(await loader.acquire(key: key(revision: "old"), fileURL: url))
         try await wait { probe.started == 1 }
         let release = Task { await loader.release(leaseID: old) }
@@ -109,7 +120,7 @@ struct WaveformEnvelopeLoaderTests {
 
     @Test func testCancelledWaiterCanReleaseWhilePhysicalReaderIsBlocked() async throws {
         let probe = WaveformScanProbe(); defer { probe.openAll() }
-        let loader = WaveformEnvelopeLoader(scanner: { try probe.scan($0, $1) })
+        let loader = WaveformEnvelopeLoader(scanner: { try await probe.scan($0, $1) })
         let id = try lease(await loader.acquire(key: key(), fileURL: url))
         try await wait { probe.started == 1 }
         let waiter = Task { try await loader.result(leaseID: id) }
@@ -173,7 +184,7 @@ struct WaveformEnvelopeLoaderTests {
 
     @Test func testLeaseNotificationMetadataIsBoundedAndReleasedOwnersDoNotCancelOtherOwners() async throws {
         let probe = WaveformScanProbe(); defer { probe.openAll() }
-        let loader = WaveformEnvelopeLoader(scanner: { try probe.scan($0, $1) })
+        let loader = WaveformEnvelopeLoader(scanner: { try await probe.scan($0, $1) })
         var ids: [UUID] = []
         for _ in 0..<256 { ids.append(try lease(await loader.acquire(key: key(), fileURL: url))) }
         guard case .deferred = await loader.acquire(key: key(), fileURL: url) else { Issue.record("Unbounded owners"); return }
@@ -189,7 +200,7 @@ struct WaveformEnvelopeLoaderTests {
 
     @Test @MainActor func testViewCancellationDrainsAndOldRevisionCannotPublishOverNewSelection() async throws {
         let probe = WaveformScanProbe(); defer { probe.openAll() }
-        let loader = WaveformEnvelopeLoader(scanner: { try probe.scan($0, $1) })
+        let loader = WaveformEnvelopeLoader(scanner: { try await probe.scan($0, $1) })
         let owner = SharedPlaybackOwner(driver: WaveformPlaybackStub(), waveformLoader: loader)
         let old = Task { await owner.prepareWaveform(key: key("work:item", revision: "old"), fileURL: url) }
         try await wait { probe.started == 1 }
