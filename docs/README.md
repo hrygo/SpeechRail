@@ -42,7 +42,7 @@ date: 2026-09-27
 | 🏛️ **架构师 / 技术决策** | 架构拓扑、进程隔离、Speech Plane、私有 IPC、状态机、ADR | [🏛️ 总体架构设计](architecture/architecture.md) <br/> [🎙️ 无状态 Speech Plane 设计](superpowers/specs/2026-09-20-stateless-speech-plane-caller-orchestration-design.md) <br/> [📜 架构决策记录 (ADR)](decisions/README.md) <br/> [👥 分人整洁架构](superpowers/specs/2026-09-08-diarization-clean-architecture-design.md) |
 | 🔌 **API 用户 / 客户端集成** | REST / WebSocket 契约、SDK 接入、MCP/Agent 集成、音色库、错误码 | [🔌 客户端与 SDK 接入指南](users/integrations.md) <br/> [🤖 MCP 主流 Agent 集成指南](users/mcp-agent-integration.md) <br/> [📡 公共 API 契约手册](users/api-contract.md) <br/> [⚡ OpenAI Realtime 协议规范](../contracts/realtime-openai.md) <br/> [🧾 Realtime 事件 Schema](../contracts/realtime-events.schema.json) |
 | 📦 **本机用户 / 自部署** | 发布制品说明、安装顺序、首次验证、升级与卸载 | [📦 SpeechRail 安装与首次使用](users/installing-speechrail.md) |
-| 🛠️ **核心开发者 / 贡献者** | 5分钟启动、代码分层、测试金字塔、Worker 扩展 | [🛠️ 开发者开发指南](developers/development-guide.md) <br/> [🧪 测试与质量验收规范](developers/testing-acceptance.md) |
+| 🛠️ **核心开发者 / 贡献者** | 5分钟启动、代码分层、测试金字塔、Worker 扩展 | [🛠️ 开发者开发指南](developers/development-guide.md) <br/> [🧪 测试与质量验收规范](developers/testing-acceptance.md) <br/> [🔍 审计与专项审查记录](audits/README.md) |
 | 📦 **运维工程师 / SRE** | LaunchAgent 常驻、Wheel 发布、排障决策树、监控 | [📖 运维操作手册 (Runbook)](operations/operations-runbook.md) <br/> [🚀 运行时部署方案](operations/runtime-deployment.md) <br/> [🔒 安全与可观测性](operations/security-observability.md) |
 
 </div>
@@ -103,6 +103,26 @@ flowchart TD
 | **实时流式 (Realtime)** | 契约可用 | `WS /v1/realtime` | 无状态 ASR/TTS 子集与 `speechrail.*` 扩展；服务端提供 VAD 事实，调用方负责 LLM、队列、播放和 barge-in，并显式提交 `speechrail.tts.*` | Python 契约/回归与 Native 纯测试；真实模型/音频质量需单独验收 |
 | **说话人分离 (Diarization)** | 可选，需显式供给 sortformer/aligner 且资源就绪 | 文件 `diarized_json`；Realtime 显式 opt-in | 私有 CoreML Sortformer FP16 worker + 独立 aligner；仅输出匿名 session-scoped label | [能力诊断与验收](operations/capability-quality-acceptance.md)；真实质量与长期资源行为需独立实测 |
 | **macOS 常驻运维服务** | 流程可用，按安装态验收 | `speechrail service` CLI | 用户级 LaunchAgent 管理、状态检查和受控回滚 | 确定性测试与安装态证据分开记录 |
+
+---
+
+## 📝 文档命名规范 (Naming Conventions)
+
+为保证文档中心的高度可预测性与整洁度，所有 Markdown 文件严格统一为以下规范格式（全小写、中划线分隔，禁止大驼峰或下划线混写）：
+
+1. **常态领域规范 (Evergreen)**：`<domain>-<topic>[-<type>].md`
+   - 适用目录：`architecture/`、`developers/`、`operations/`、`users/`、`product/` 等常驻规范目录。
+   - 代表系统的当前事实与长期规则，**禁止随意添加日期前缀**。
+   - 示例：`audiobook-workshop.md`、`testing-acceptance.md`、`security-observability.md`。
+2. **时点事件与过程记录 (Point-in-time)**：`YYYY-MM-DD-<domain>-<event-type>.md`
+   - 适用目录：`audits/`、`plans/`、`implementation/`、`superpowers/`、`archive/` 等时效/过程目录。
+   - 代表特定时点的缺陷排查、审计复盘、执行计划、走查指南或验收凭证，**必须携带标准日期前缀**。
+   - 示例：`2026-10-15-audiobook-workshop-review.md`、`2026-10-03-teleprompter-user-journey-plan.md`。
+3. **架构决策记录 (ADR)**：`NNNN-<slug>.md`
+   - 适用目录：`decisions/`。
+   - 四位数字编号序列，用于长期不可逆决策的技术选型追溯。
+   - 示例：`0019-stateless-speech-plane-caller-orchestration.md`。
+4. **目录入口**：各子目录根统一使用 `README.md` 作为该目录的唯一 Hub 导航。
 
 ---
 

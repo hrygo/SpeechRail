@@ -5,6 +5,20 @@ import XCTest
 #endif
 
 final class AudiobookInvalidationTests: XCTestCase {
+    func testRechunkingKeepsEffectiveFragmentDependency() throws {
+        let source = try AudiobookSourceIndex(utf8: Data("abcdefgh".utf8))
+        let book = UUID(), role = UUID()
+        let chapter = AudiobookChapter(bookID: book, sourceID: UUID(), ordinal: 0, title: "夹具", sourceRange: .init(lowerBound: 0, upperBound: 8))
+        func annotation(_ lower: Int64, _ upper: Int64) -> AudiobookAnnotation {
+            .init(bookID: book, chapterID: chapter.id, windowID: UUID(), atomID: UUID(), sourceRange: .init(lowerBound: lower, upperBound: upper), assignment: .assigned(roleID: role))
+        }
+        let binding = AudiobookVoiceBinding(roleID: role, voiceID: "voice", voiceRevision: nil, modelRevision: "model")
+        let whole = try AudiobookFragmentPlanner.plan(chapter: chapter, annotations: [annotation(0, 8)], bindings: [role: binding], source: source)
+        let split = try AudiobookFragmentPlanner.plan(chapter: chapter, annotations: [annotation(0, 4), annotation(4, 8)], bindings: [role: binding], source: source)
+        XCTAssertEqual(whole.first?.dependencyDigest, split.first?.dependencyDigest)
+        XCTAssertEqual(whole.first?.id, split.first?.id)
+    }
+
     func testCoalescingNeverCrossesSpeakerBoundary() throws {
         let text = "夜风吹过长街。林远停下脚步。“有人跟在后面。”“别回头，继续走。”老周低声答道。"
         let utf8 = Data(text.utf8)

@@ -9,16 +9,27 @@ import XCTest
 /// A render fixture has no directory, clone, quality or design requirements.
 private struct AudioOnlyRenderPort: SpeechRailSpeechRenderClient {
     let audio: Data?
+    var expectedOptions: SpeechRailRequestOptions? = nil
 
     func createSpeech(
         text: String, voiceID: String, speed: Double, options: SpeechRailRequestOptions
     ) async throws -> Data {
         guard let audio else { throw CancellationError() }
+        if let expectedOptions { XCTAssertEqual(options, expectedOptions) }
         return audio
     }
 }
 
 final class ServiceContractTests: XCTestCase {
+    func testProtocolDefaultRenderForcesStrictPolicyAndKeepsFrozenOptions() async throws {
+        let input = SpeechRailRequestOptions(callerSeed: 42, expectedVoiceRevision: "vr_0123456789abcdef0123456789abcdef",
+            expectedModelRevision: String(repeating: "a", count: 40), validationPolicy: "allow_unvalidated")
+        let client = AudioOnlyRenderPort(audio: Data([1]), expectedOptions: input.withValidationPolicy("require_output_pass"))
+        let result = try await client.createSpeechRender(text: "测试", voiceID: "v", speed: 1, options: input)
+        XCTAssertEqual(result.provenance.state, .unavailable)
+        XCTAssertNil(result.voiceRevision)
+    }
+
     func testAudioOnlyRenderPortPreservesBytesAndUnknownIdentity() async throws {
         let audio = Data([0, 1, 2, 3])
         let client: any SpeechRailSpeechRenderClient = AudioOnlyRenderPort(audio: audio)
@@ -456,6 +467,168 @@ final class ServiceContractTests: XCTestCase {
         XCTAssertNil(headers["SpeechRail-Language"])
         XCTAssertNil(headers["SpeechRail-Validation-Policy"])
         XCTAssertTrue(headers.isEmpty)
+    }
+
+    func testCallerSeedTravelsAsHeaderAndSurvivesOptionCopies() async throws {
+        let original = SpeechRailRequestOptions(callerSeed: 4_294_967_295)
+        for options in [original, original.with(languageOverride: "zh"),
+                        original.withValidationPolicy("require_output_pass"), original.withInteractivePurpose(),
+                        original.withReceiptModeIntegrity()] {
+            XCTAssertEqual(options.headers["SpeechRail-Seed"], "4294967295")
+        }
+        let client = makeHTTPClient(statusCode: 200, body: Data(repeating: 0, count: 64))
+        ServiceAPIURLProtocolStub.state.setContentType("audio/wav")
+        _ = try await client.createSpeechRender(text: "测试", voiceID: "system", speed: 1, options: original)
+        let request = try XCTUnwrap(ServiceAPIURLProtocolStub.state.recordedRequests().first)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "SpeechRail-Seed"), "4294967295")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "SpeechRail-Validation-Policy"), "require_output_pass")
+        let body = try XCTUnwrap(ServiceAPIURLProtocolStub.state.recordedBodies().first ?? nil)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertNil(json["seed"])
+    }
+
+    func testSeedBoundsRejectInvalidValues() async throws {
+        let client = makeHTTPClient(statusCode: 200, body: Data())
+        for seed in [-1, 4_294_967_296] {
+            do {
+                _ = try await client.createSpeechRender(
+                    text: "测试", voiceID: "system", speed: 1, options: .init(callerSeed: seed)
+                )
+                XCTFail("Invalid seed reached transport")
+            } catch {
+                XCTAssertEqual(error as? ServiceAPIClientError, .invalidContract("caller_seed_out_of_range"))
+            }
+        }
+        XCTAssertTrue(ServiceAPIURLProtocolStub.state.recordedRequests().isEmpty)
+    }
+
+    func testMissingReceiptKeepsActualIdentityUnknown() async throws {
+        let client = makeHTTPClient(statusCode: 200, body: Data(repeating: 0, count: 100))
+        ServiceAPIURLProtocolStub.state.setContentType("audio/wav")
+        let result = try await client.createSpeechRender(
+            text: "测试", voiceID: "system", speed: 1,
+            options: .init(expectedVoiceRevision: "vr_0123456789abcdef0123456789abcdef")
+        )
+        XCTAssertNil(result.voiceRevision)
+        XCTAssertEqual(result.provenance.state, .unavailable)
+    }
+
+    @MainActor
+    private func makeAudiobookRenderer(voiceRevision: String? = "vr_0123456789abcdef0123456789abcdef", mode: String = "system") throws
+        -> (any AudiobookSpeechRenderer, URL) {
+        let client = makeHTTPClient(statusCode: 200, body: Data(repeating: 0, count: 100))
+        ServiceAPIURLProtocolStub.state.setContentType("audio/wav")
+        let model = ConfiguredModelIdentity(assurance: .configuredCatalog, catalogRevision: String(repeating: "a", count: 40))
+        let operation = try JSONDecoder().decode(JSONValue.self, from: Data(#"{"parameters":{"speed":{"status":"supported","minimum":0.25,"maximum":4},"seed":{"status":"supported","minimum":0,"maximum":4294967295}}}"#.utf8))
+        let voice = SafeVoiceEntry(
+            id: "system", name: "测试预设", mode: mode, isSystem: mode == "system", isDefault: mode == "system", available: true, availabilityReason: .available,
+            voiceRevision: voiceRevision, voiceIdentityAssurance: .contentAddressed, model: model,
+            descriptors: Self.testDescriptor, operations: ["http_speech": operation], productionReady: true
+        )
+        let snapshot = EffectiveCapabilitySnapshot(
+            serviceInstanceEpoch: "fixture", catalogRevision: "fixture", snapshotID: "fixture", profile: "fixture",
+            models: ["tts": model, "tts_clone": model], voices: [voice], operations: [:], guarantees: [:]
+        )
+        ServiceAPIURLProtocolStub.state.setRoute(
+            pathContains: "/capabilities", statusCode: 200, body: try JSONEncoder().encode(snapshot)
+        )
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "CastingP0-\(UUID().uuidString)"))
+        let dependencies = AudiobookProductionWiring.makeLiveDependencies(
+            rootURL: root, llmProvider: LLMProvider(), preferences: SessionPreferences(defaults: defaults),
+            discoveryClient: client, renderClient: client, voiceDesignClient: client,
+            controlTransport: ClosureControlTransport { _ in throw ServiceAPIClientError.invalidResponse }, voiceCatalog: VoiceCatalogStore()
+        )
+        return (dependencies.speechRenderer, root)
+    }
+
+    @MainActor
+    func testAudiobookAuditionUsesPreviewPolicyAndPreservesPins() async throws {
+        let (renderer, root) = try makeAudiobookRenderer()
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = try await renderer.renderAudition(.init(text: "试听原文", voiceID: "system", speed: 1,
+            expectedVoiceRevision: "vr_0123456789abcdef0123456789abcdef", expectedModelRevision: String(repeating: "a", count: 40), seed: 42))
+        let request = try XCTUnwrap(ServiceAPIURLProtocolStub.state.recordedRequests().last { $0.url?.path == "/v1/audio/speech" })
+        XCTAssertEqual(request.value(forHTTPHeaderField: "SpeechRail-Validation-Policy"), "allow_unverified")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "SpeechRail-Seed"), "42")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "SpeechRail-Expected-Voice-Revision"), "vr_0123456789abcdef0123456789abcdef")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "SpeechRail-Expected-Model-Revision"), String(repeating: "a", count: 40))
+    }
+
+    @MainActor
+    func testExistingCloneSeedRequiresReconfirmationWithoutSending() async throws {
+        let (renderer, root) = try makeAudiobookRenderer(mode: "clone")
+        defer { try? FileManager.default.removeItem(at: root) }
+        do {
+            _ = try await renderer.renderFragment(.init(text: "测试", voiceID: "system",
+                expectedVoiceRevision: "vr_0123456789abcdef0123456789abcdef", expectedModelRevision: String(repeating: "a", count: 40), seed: 101))
+            XCTFail("legacy clone seed must require reconfirmation")
+        } catch { XCTAssertEqual(error as? ServiceAPIClientError, .invalidContract("voice_parameters_require_reconfirmation")) }
+        XCTAssertFalse(ServiceAPIURLProtocolStub.state.recordedRequests().contains { $0.url?.path == "/v1/audio/speech" })
+    }
+
+    @MainActor
+    func testCustomVoiceMissingRevisionBlocksBeforeTransport() async throws {
+        let (renderer, root) = try makeAudiobookRenderer(voiceRevision: nil, mode: "clone")
+        defer { try? FileManager.default.removeItem(at: root) }
+        do {
+            _ = try await renderer.renderFragment(.init(text: "测试", voiceID: "system", expectedVoiceRevision: nil, expectedModelRevision: String(repeating: "a", count: 40)))
+            XCTFail("custom identity is required")
+        } catch { XCTAssertEqual(error as? ServiceAPIClientError, .invalidContract("voice_identity_unknown")) }
+        XCTAssertFalse(ServiceAPIURLProtocolStub.state.recordedRequests().contains { $0.url?.path == "/v1/audio/speech" })
+    }
+
+    @MainActor
+    func testAudiobookRenderCarriesSupportedSeedToWire() async throws {
+        let (renderer, root) = try makeAudiobookRenderer()
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = try await renderer.renderFragment(.init(
+            text: "测试", voiceID: "system", expectedVoiceRevision: "vr_0123456789abcdef0123456789abcdef",
+            expectedModelRevision: String(repeating: "a", count: 40), seed: 7
+        ))
+        let request = try XCTUnwrap(ServiceAPIURLProtocolStub.state.recordedRequests().first { $0.url?.path == "/v1/audio/speech" })
+        XCTAssertEqual(request.value(forHTTPHeaderField: "SpeechRail-Seed"), "7")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "SpeechRail-Validation-Policy"), "require_output_pass")
+    }
+
+    @MainActor
+    func testRenderRejectsRevisionDriftInsteadOfRepinning() async throws {
+        let (renderer, root) = try makeAudiobookRenderer()
+        defer { try? FileManager.default.removeItem(at: root) }
+        do {
+            _ = try await renderer.renderFragment(.init(
+                text: "测试", voiceID: "system", expectedVoiceRevision: "vr_ffffffffffffffffffffffffffffffff",
+                expectedModelRevision: String(repeating: "a", count: 40)
+            ))
+            XCTFail("Drift must require a new casting decision")
+        } catch {}
+        XCTAssertFalse(ServiceAPIURLProtocolStub.state.recordedRequests().contains { $0.url?.path == "/v1/audio/speech" })
+    }
+
+    @MainActor
+    func testSystemVoiceMayOmitVoiceRevision() async throws {
+        let (renderer, root) = try makeAudiobookRenderer(voiceRevision: nil)
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = try await renderer.renderFragment(.init(
+            text: "测试", voiceID: "system", expectedVoiceRevision: nil,
+            expectedModelRevision: String(repeating: "a", count: 40)
+        ))
+        let request = try XCTUnwrap(ServiceAPIURLProtocolStub.state.recordedRequests().first { $0.url?.path == "/v1/audio/speech" })
+        XCTAssertNil(request.value(forHTTPHeaderField: "SpeechRail-Expected-Voice-Revision"))
+    }
+
+    @MainActor
+    func testWAVLengthDoesNotVerifyProvenance() async throws {
+        let (renderer, root) = try makeAudiobookRenderer()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let output = try await renderer.renderFragment(.init(
+            text: "测试", voiceID: "system", expectedVoiceRevision: "vr_0123456789abcdef0123456789abcdef",
+            expectedModelRevision: String(repeating: "a", count: 40)
+        ))
+        XCTAssertGreaterThan(output.wavData.count, 44)
+        XCTAssertFalse(output.isProvenanceVerified)
+        XCTAssertNil(output.voiceRevision)
+        XCTAssertNil(output.modelRevision)
     }
 
     func testLanguageAndPolicyTravelAsSpeechrailHeaders() {

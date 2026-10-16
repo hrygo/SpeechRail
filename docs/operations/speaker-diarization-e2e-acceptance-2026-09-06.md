@@ -16,7 +16,7 @@ tags: [speechrail, diarization, e2e, acceptance, spk-e2e-1]
 
 > 验收日期：2026-09-06<br>
 > 责任团队：SpeechRail Core Team, Sona Core Team<br>
-> 设计规格：[SpeechRail 端到端设计](../architecture/speaker-diarization-e2e-design.md) 与 [Sona 端到端设计](../../../sona/docs/architecture/speaker-diarization-e2e-design.md)<br>
+> 设计规格：[SpeechRail 端到端设计](../archive/architecture/speaker-diarization-e2e-design.md) 与 [Sona 端到端设计](../../../sona/docs/architecture/speaker-diarization-e2e-design.md)<br>
 > 实施计划：[SpeechRail R0–R5 实施计划](../superpowers/plans/2026-09-05-speaker-diarization-e2e.md) 与 [Sona S0–S4 实施计划](../../../sona/docs/superpowers/plans/2026-09-05-speaker-diarization-e2e.md)<br>
 > 关联报告：Sona 侧 [2026-09-06 联合验收报告](../../../sona/docs/operations/speaker-diarization-e2e-acceptance-2026-09-06.md)
 

@@ -94,7 +94,7 @@ helper/CLI 执行，符合现有安全边界。
 - 只有数据样本足够时才绘制趋势；没有数据时显示“等待采样”，不生成虚假分数或百分比。
 
 完整的文字原型、各状态文案和交互确认见
-[`docs/design/speechrail-management-prototypes.md`](../../design/speechrail-management-prototypes.md)。
+[`docs/design/archive/speechrail-management-prototypes.md`](../../design/archive/speechrail-management-prototypes.md)。
 
 ## 5. 模型管理
 

@@ -8,6 +8,8 @@
 - [性能基准归档索引](performance/README.md)：历次版本 ASR/TTS/Realtime 基准与资源监控报告及其跨版本趋势（最新基线见 v2.0.3 报告）。
 - [Realtime legacy 批量协议契约](realtime-legacy-contract.md)：已退役的
   `/v1/realtime/legacy` 与 `/asr` 端点协议，v1.0.0 移除端点后归档。
+- [OpenAI 契约对标历史审查 (openai-conformance-audit.md)](openai-conformance-audit.md)：v1.2.0 时期的历史对标报告，已被 `contracts/realtime-openai.md` 替代。
+- [历史运维与迁移说明 (operations/)](operations/)：包含早期架构演进时期的迁移操作手册与运行态评估报告。
 
 ## 当前替代入口
 

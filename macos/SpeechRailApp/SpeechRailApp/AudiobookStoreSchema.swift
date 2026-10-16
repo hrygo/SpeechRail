@@ -1,7 +1,37 @@
 import Foundation
 
 public enum AudiobookStoreSchema {
-    public static let currentUserVersion: Int32 = 1
+    public static let currentUserVersion: Int32 = 4
+
+    public static let registrationIntentsSQL: String = """
+    CREATE TABLE voice_registration_intents (
+        id TEXT PRIMARY KEY NOT NULL,
+        book_id TEXT NOT NULL,
+        role_id TEXT,
+        voice_id TEXT NOT NULL,
+        target_metadata_digest TEXT NOT NULL,
+        expected_cast_revision_id TEXT NOT NULL,
+        expected_voice_set_digest TEXT NOT NULL,
+        phase TEXT NOT NULL,
+        intent_json TEXT NOT NULL,
+        updated_at REAL NOT NULL,
+        FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+    );
+
+    """
+
+    public static let castingRevisionsSQL: String = """
+    CREATE TABLE casting_revisions (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT UNIQUE NOT NULL,
+        book_id TEXT NOT NULL,
+        restores_revision_id TEXT,
+        undone_by TEXT,
+        record_json TEXT NOT NULL,
+        created_at REAL NOT NULL,
+        FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+    );
+    """
 
     public static let createTablesSQL: String = """
     PRAGMA journal_mode = WAL;
@@ -39,6 +69,37 @@ public enum AudiobookStoreSchema {
         canonical_rel_path TEXT NOT NULL,
         created_at REAL NOT NULL,
         PRIMARY KEY (book_id, id),
+        FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS casting_revisions (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT UNIQUE NOT NULL,
+        book_id TEXT NOT NULL,
+        restores_revision_id TEXT,
+        undone_by TEXT,
+        record_json TEXT NOT NULL,
+        created_at REAL NOT NULL,
+        FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS voice_registration_intents (
+        id TEXT PRIMARY KEY NOT NULL,
+        book_id TEXT NOT NULL,
+        role_id TEXT,
+        voice_id TEXT NOT NULL,
+        target_metadata_digest TEXT NOT NULL,
+        expected_cast_revision_id TEXT NOT NULL,
+        expected_voice_set_digest TEXT NOT NULL,
+        phase TEXT NOT NULL,
+        intent_json TEXT NOT NULL,
+        updated_at REAL NOT NULL,
+        FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS production_checkpoints (
+        book_id TEXT PRIMARY KEY NOT NULL,
+        checkpoint_json TEXT NOT NULL,
         FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
     );
 
@@ -85,6 +146,10 @@ public enum AudiobookStoreSchema {
         first_lower_bound INTEGER,
         first_upper_bound INTEGER,
         chapter_ids_json TEXT NOT NULL,
+        voice_policy_json TEXT,
+        manual_tier TEXT,
+        voice_traits_json TEXT,
+        required_voice_traits_json TEXT,
         PRIMARY KEY (book_id, id),
         FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
     );
@@ -93,12 +158,14 @@ public enum AudiobookStoreSchema {
         book_id TEXT NOT NULL,
         role_id TEXT NOT NULL,
         voice_id TEXT NOT NULL,
-        voice_revision TEXT NOT NULL,
+        voice_revision TEXT,
         model_revision TEXT NOT NULL,
         is_synthesis_ready INTEGER NOT NULL,
         allowed_speed REAL NOT NULL,
         caller_seed INTEGER,
         binding_digest TEXT NOT NULL,
+        actual_voice_revision TEXT,
+        actual_model_revision TEXT,
         PRIMARY KEY (book_id, role_id),
         FOREIGN KEY (book_id, role_id) REFERENCES characters(book_id, id) ON DELETE CASCADE
     );

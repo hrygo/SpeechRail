@@ -25,7 +25,7 @@
 
 管理控制台、运行监控和模型下载的逐页文字原型、普通用户/开发者双层信息和交互确认见：
 
-[`speechrail-management-prototypes.md`](./speechrail-management-prototypes.md)
+[`archive/speechrail-management-prototypes.md`](./archive/speechrail-management-prototypes.md)
 
 ## 本次补充设计
 

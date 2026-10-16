@@ -3,6 +3,35 @@ import SpeechRailControlKit
 
 /// T05：全书角色归并、候选批次筛选（每批最多 32 个候选）、声线特征保留与智能音色推荐匹配。
 public enum AudiobookCastRegistry {
+    static func castRevisionID(bookID: UUID, characters: [AudiobookCharacter]) -> UUID {
+        let sorted = characters.sorted { $0.id.uuidString < $1.id.uuidString }
+        let raw = sorted.map { "\($0.id.uuidString):\($0.isNarrator):\($0.allowSharedMinorVoice):\(AudiobookCastingDigest.hash($0.voicePolicy))" }
+            .joined(separator: "|")
+        let hex = AudiobookDigest.sha256Hex(Data("cast_rev|\(bookID.uuidString)|\(raw)".utf8))
+        let chars = Array(hex.prefix(32))
+        let uuidStr = String(chars[0..<8]) + "-"
+            + String(chars[8..<12]) + "-"
+            + String(chars[12..<16]) + "-"
+            + String(chars[16..<20]) + "-"
+            + String(chars[20..<32])
+        return UUID(uuidString: uuidStr) ?? UUID()
+    }
+
+    static func voiceSetDigest(
+        bookID: UUID,
+        characters: [AudiobookCharacter],
+        bindings: [UUID: AudiobookVoiceBinding]
+    ) -> String {
+        let parts = characters
+            .sorted { $0.id.uuidString < $1.id.uuidString }
+            .map { role -> String in
+                let digest = bindings[role.id]?.bindingDigest ?? "unbound"
+                return "\(role.id.uuidString):\(digest)"
+            }
+            .joined(separator: "|")
+        return AudiobookDigest.sha256Hex(Data("voice_set|\(bookID.uuidString)|\(parts)".utf8))
+    }
+
     public struct ConsolidationOutcome: Equatable, Sendable {
         public var characters: [AudiobookCharacter]
         public var unresolvedCollisionNames: Set<String>
@@ -403,171 +432,53 @@ public enum AudiobookCastRegistry {
 
     /// 计算全书角色的对白频次、跨章分布、四级分层（旁白/主角/配角/群像）以及同场对话冲突图权重。
     public static func computeRoleDialogueStats(
-        characters: [AudiobookCharacter],
-        annotations: [AudiobookAnnotation],
-        availableVoiceCount: Int = 8
-    ) -> (
-        updatedCharacters: [AudiobookCharacter],
-        statsByRoleID: [UUID: AudiobookRoleDialogueStats],
-        conflictWeights: [UUID: [UUID: Int]]
-    ) {
-        guard !characters.isEmpty else { return ([], [:], [:]) }
-
-        var dialogueCounts: [UUID: Int] = [:]
-        var activeChaptersByRole: [UUID: Set<UUID>] = [:]
-        var scenePartnersByRole: [UUID: Set<UUID>] = [:]
-        var sameChapterByRole: [UUID: Set<UUID>] = [:]
-        var conflictWeights: [UUID: [UUID: Int]] = [:]
-
-        let narratorIDs = Set(characters.filter(\.isNarrator).map(\.id))
-        let sortedAnnotations = annotations.sorted {
-            if $0.chapterID != $1.chapterID {
-                return $0.chapterID.uuidString < $1.chapterID.uuidString
+        characters: [AudiobookCharacter], annotations: [AudiobookAnnotation], availableVoiceCount: Int = 8,
+        source: AudiobookSourceIndex? = nil, atoms: [AudiobookTextAtom] = [], scenes: [AudiobookCastingScene] = []
+    ) -> (updatedCharacters: [AudiobookCharacter], statsByRoleID: [UUID: AudiobookRoleDialogueStats], conflictWeights: [UUID: [UUID: Int]]) {
+        let graph = AudiobookSceneConflictGraph.build(characters: characters, annotations: annotations, atoms: atoms, scenes: scenes)
+        var counts: [UUID: Int] = [:], scalars: [UUID: Int] = [:], chapters: [UUID: Set<UUID>] = [:]
+        let unique = Dictionary(grouping: annotations, by: { "\($0.chapterID)|\($0.sourceRange.lowerBound)|\($0.sourceRange.upperBound)|\($0.assignment.roleID?.uuidString ?? "unknown")" }).values.compactMap(\.first)
+        for annotation in unique {
+            guard let role = annotation.assignment.roleID else { continue }
+            counts[role, default: 0] += 1
+            chapters[role, default: []].insert(annotation.chapterID)
+        }
+        // Union source intervals before counting; repeated windows and overlapping retries cannot inflate text volume.
+        for role in characters {
+            let ranges = unique.filter { $0.assignment.roleID == role.id }.map(\.sourceRange).sorted()
+            var merged: [AudiobookSourceRange] = []
+            for range in ranges {
+                if let last = merged.last, range.lowerBound <= last.upperBound {
+                    merged[merged.count - 1] = .init(lowerBound: last.lowerBound, upperBound: max(last.upperBound, range.upperBound))
+                } else { merged.append(range) }
             }
-            return $0.sourceRange < $1.sourceRange
+            if let source { scalars[role.id] = merged.reduce(0) { $0 + ((try? source.text(in: $1).unicodeScalars.count) ?? 0) } }
         }
-
-        for ann in sortedAnnotations {
-            if let roleID = ann.assignment.roleID {
-                dialogueCounts[roleID, default: 0] += 1
-                activeChaptersByRole[roleID, default: []].insert(ann.chapterID)
+        func volume(_ id: UUID) -> Int { source == nil ? (counts[id] ?? 0) : (scalars[id] ?? 0) }
+        let ranked = characters.filter { !$0.isNarrator && volume($0.id) > 0 }.sorted {
+            volume($0.id) == volume($1.id) ? $0.id.uuidString < $1.id.uuidString : volume($0.id) > volume($1.id)
+        }
+        let total = ranked.reduce(0) { $0 + volume($1.id) }
+        var front = 0, leads: Set<UUID> = []
+        for role in ranked where front < Int(ceil(Double(total) * 0.75)) {
+            leads.insert(role.id); front += volume(role.id)
+        }
+        var stats: [UUID: AudiobookRoleDialogueStats] = [:]
+        for role in characters {
+            let inferred: AudiobookRoleTier = role.isNarrator ? .narrator : (leads.contains(role.id) ? .lead : ((chapters[role.id]?.count ?? 0) > 1 ? .supporting : .ensemble))
+            var item = AudiobookRoleDialogueStats(roleID: role.id, dialogueAtomCount: counts[role.id] ?? 0,
+                speakingChapterIDs: chapters[role.id] ?? [], tier: role.manualTier ?? inferred,
+                archetype: role.inferredVoiceArchetype(peers: characters))
+            item.dialogueScalarCount = scalars[role.id] ?? 0
+            item.statisticsRevision = source == nil ? "dialogue-stats-v2:source-unavailable" : "dialogue-stats-v2:unicode-scalars"
+            for edge in graph.edges where edge.roleA == role.id || edge.roleB == role.id {
+                let other = edge.roleA == role.id ? edge.roleB : edge.roleA
+                if edge.kind == .directDialogue { item.scenePartnerRoleIDs.insert(other) }
+                if edge.kind == .chapterCoPresence { item.sameChapterRoleIDs.insert(other) }
             }
+            stats[role.id] = item
         }
-
-        // 构建同章与同场（相邻 6 个对白块以内）共现排斥图 G = (V, E)
-        let nonNarratorAnns = sortedAnnotations.filter { ann in
-            guard let rid = ann.assignment.roleID else { return false }
-            return !narratorIDs.contains(rid)
-        }
-        let annsByChapter = Dictionary(grouping: nonNarratorAnns, by: \.chapterID)
-
-        for (_, chapterAnns) in annsByChapter {
-            let uniqueRoles = Array(Set(chapterAnns.compactMap(\.assignment.roleID)))
-            for i in 0..<uniqueRoles.count {
-                for j in (i + 1)..<uniqueRoles.count {
-                    let rA = uniqueRoles[i]
-                    let rB = uniqueRoles[j]
-                    sameChapterByRole[rA, default: []].insert(rB)
-                    sameChapterByRole[rB, default: []].insert(rA)
-                    conflictWeights[rA, default: [:]][rB] = max(conflictWeights[rA]?[rB] ?? 0, 180)
-                    conflictWeights[rB, default: [:]][rA] = max(conflictWeights[rB]?[rA] ?? 0, 180)
-                }
-            }
-
-            for i in 0..<chapterAnns.count {
-                guard let roleA = chapterAnns[i].assignment.roleID else { continue }
-                let upper = min(chapterAnns.count, i + 7)
-                for j in (i + 1)..<upper {
-                    guard let roleB = chapterAnns[j].assignment.roleID, roleA != roleB else { continue }
-                    scenePartnersByRole[roleA, default: []].insert(roleB)
-                    scenePartnersByRole[roleB, default: []].insert(roleA)
-                    let updatedWeight = min(1800, (conflictWeights[roleA]?[roleB] ?? 0) + 600)
-                    conflictWeights[roleA, default: [:]][roleB] = updatedWeight
-                    conflictWeights[roleB, default: [:]][roleA] = updatedWeight
-                }
-            }
-        }
-
-        let narrators = characters.filter(\.isNarrator)
-        let nonNarrators = characters.filter { !$0.isNarrator }
-        let speakingNonNarrators = nonNarrators.filter { (dialogueCounts[$0.id] ?? 0) > 0 }
-        let totalNonNarratorDialogue = speakingNonNarrators.reduce(0) { $0 + (dialogueCounts[$1.id] ?? 0) }
-
-        let effectiveVoiceCount = max(2, availableVoiceCount)
-        let kLead: Int = {
-            if speakingNonNarrators.count <= max(1, effectiveVoiceCount - 1) {
-                return speakingNonNarrators.count
-            }
-            let reservedSharedPool = min(6, max(1, (effectiveVoiceCount - 1) / 2))
-            return min(8, max(1, effectiveVoiceCount - 1 - reservedSharedPool))
-        }()
-
-        let sortedNonNarrators = nonNarrators.sorted { lhs, rhs in
-            let countL = dialogueCounts[lhs.id] ?? 0
-            let countR = dialogueCounts[rhs.id] ?? 0
-            if countL != countR { return countL > countR }
-            let chL = activeChaptersByRole[lhs.id]?.count ?? lhs.chapterIDs.count
-            let chR = activeChaptersByRole[rhs.id]?.count ?? rhs.chapterIDs.count
-            if chL != chR { return chL > chR }
-            return lhs.displayName < rhs.displayName
-        }
-
-        var rankByRoleID: [UUID: Int] = [:]
-        for (idx, role) in sortedNonNarrators.enumerated() {
-            rankByRoleID[role.id] = idx
-        }
-
-        var statsByRoleID: [UUID: AudiobookRoleDialogueStats] = [:]
-        var updatedNarrators: [AudiobookCharacter] = []
-
-        for var narrator in narrators {
-            narrator.isMajor = true
-            narrator.allowSharedMinorVoice = false
-            updatedNarrators.append(narrator)
-            statsByRoleID[narrator.id] = AudiobookRoleDialogueStats(
-                roleID: narrator.id,
-                dialogueAtomCount: dialogueCounts[narrator.id] ?? 0,
-                speakingChapterIDs: activeChaptersByRole[narrator.id] ?? Set(narrator.chapterIDs),
-                tier: .narrator,
-                archetype: .narrator
-            )
-        }
-
-        var updatedNonNarrators: [AudiobookCharacter] = []
-        for role in sortedNonNarrators {
-            var copy = role
-            let count = dialogueCounts[role.id] ?? 0
-            if let chapters = activeChaptersByRole[role.id], !chapters.isEmpty {
-                copy.chapterIDs = Set(copy.chapterIDs).union(chapters).sorted { $0.uuidString < $1.uuidString }
-            }
-            let effectiveChapterCount = max(activeChaptersByRole[role.id]?.count ?? 0, copy.chapterIDs.count)
-            let archetype = copy.inferredVoiceArchetype(peers: characters)
-
-            let tier: AudiobookRoleTier
-            if annotations.isEmpty {
-                // 若尚未产生对白归属标注，尊重角色当前显式设置的 isMajor / allowSharedMinorVoice
-                tier = copy.isMajor ? .lead : (effectiveChapterCount >= 2 ? .supporting : .ensemble)
-            } else if nonNarrators.count <= 4 {
-                let isMajorRole = count >= 2 || effectiveChapterCount >= 2
-                copy.isMajor = isMajorRole
-                copy.allowSharedMinorVoice = !isMajorRole
-                tier = isMajorRole ? .lead : .ensemble
-            } else {
-                let rank = rankByRoleID[copy.id] ?? Int.max
-                let dialogueShare = Double(count) / Double(max(1, totalNonNarratorDialogue))
-                let qualifiesAsLead = count > 0
-                    && rank < kLead
-                    && (count >= 4 || dialogueShare >= 0.08 || speakingNonNarrators.count <= max(1, effectiveVoiceCount - 1))
-
-                if qualifiesAsLead {
-                    tier = .lead
-                    copy.isMajor = true
-                    copy.allowSharedMinorVoice = false
-                } else if count >= 3 || effectiveChapterCount >= 2 {
-                    tier = .supporting
-                    copy.isMajor = false
-                    copy.allowSharedMinorVoice = true
-                } else {
-                    tier = .ensemble
-                    copy.isMajor = false
-                    copy.allowSharedMinorVoice = true
-                }
-            }
-
-            updatedNonNarrators.append(copy)
-            statsByRoleID[copy.id] = AudiobookRoleDialogueStats(
-                roleID: copy.id,
-                dialogueAtomCount: count,
-                speakingChapterIDs: activeChaptersByRole[copy.id] ?? Set(copy.chapterIDs),
-                tier: tier,
-                archetype: archetype,
-                scenePartnerRoleIDs: scenePartnersByRole[copy.id] ?? [],
-                sameChapterRoleIDs: sameChapterByRole[copy.id] ?? []
-            )
-        }
-
-        let enriched = enrichCharactersWithVoicePersonas(updatedNarrators + updatedNonNarrators, recompute: false)
-        return (enriched, statsByRoleID, conflictWeights)
+        return (characters, stats, graph.weights)
     }
 
     /// 全书分析后根据帕累托对白分布与跨章共现更新主次角色标记及排序（旁白置顶，核心主角独占，配角与群像默认允许共享声线池）。
@@ -611,229 +522,414 @@ public enum AudiobookCastRegistry {
         }
     }
 
-    /// 基于角色称谓、六维声学画像、音色作用域隔离（排除其他书籍专用音色与归档音色）、双池物理隔离、同场对话冲突图着色与微语速/Seed 分化，生成全书配声绑定。
+    /// Pure planning: scope, readiness and identity are hard constraints; no writes or global reads.
     public static func recommendVoiceBindings(
         characters: [AudiobookCharacter],
-        availableVoices: [SafeVoiceEntry],
-        existingBindings: [UUID: AudiobookVoiceBinding] = [:],
-        annotations: [AudiobookAnnotation] = [],
-        bookID: UUID? = nil,
-        preferredCollectionID: UUID? = nil,
-        voiceMetadataByID: [String: VoiceAssetMetadata] = VoiceCatalogStore.shared.metadataByVoiceID
-    ) -> [UUID: AudiobookVoiceBinding] {
-        let allReadyVoices = availableVoices.filter { $0.available }
-        guard !allReadyVoices.isEmpty else { return existingBindings }
+        annotations: [AudiobookAnnotation],
+        snapshot: EffectiveCapabilitySnapshot,
+        catalog: VoiceCatalogSnapshot,
+        bookID: UUID,
+        existingBindings: [UUID: AudiobookVoiceBinding],
+        strategy: AudiobookCastingStrategy = .sceneAware
+    ) -> AudiobookCastingPlan {
+        makeCastingPlan(characters: characters, annotations: annotations, snapshot: snapshot,
+            catalog: catalog, bookID: bookID, existingBindings: existingBindings, requiredRoleIDs: nil, strategy: strategy)
+    }
 
-        let resolvedBookID = bookID ?? characters.first?.bookID
-        let resolvedCollectionID = preferredCollectionID
-            ?? resolvedBookID.flatMap { VoiceCatalogStore.shared.preferredCollectionID(for: $0) }
-
-        // 步骤 0：音色作用域过滤（剔除其他书籍专用音色与已归档音色，解决 B6）
-        let scopedVoices = allReadyVoices.filter { voice in
-            guard let meta = voiceMetadataByID[voice.id] else { return true }
-            switch meta.scope {
-            case .globalReusable:
-                return true
-            case .bookExclusive:
-                guard let resolvedBookID else { return false }
-                return meta.originBookID == nil || meta.originBookID == resolvedBookID
-            case .archived:
-                return false
+    /// Store may narrow the required set only after checking complete source annotations.
+    static func makeCastingPlan(
+        characters: [AudiobookCharacter], annotations: [AudiobookAnnotation], snapshot: EffectiveCapabilitySnapshot,
+        catalog: VoiceCatalogSnapshot, bookID: UUID, existingBindings: [UUID: AudiobookVoiceBinding], requiredRoleIDs: Set<UUID>?,
+        source: AudiobookSourceIndex? = nil, atoms: [AudiobookTextAtom] = [], strategy: AudiobookCastingStrategy = .sceneAware, cachedScores: AudiobookCastingScoreCache = .init()
+    ) -> AudiobookCastingPlan {
+        var issues: [AudiobookCastingIssue] = []
+        let speaking = Set(annotations.compactMap(\.assignment.roleID))
+        let active = characters.filter { role in
+            if let requiredRoleIDs { return role.isNarrator || requiredRoleIDs.contains(role.id) }
+            return role.isNarrator || existingBindings[role.id] != nil || annotations.isEmpty || speaking.contains(role.id)
+        }
+        let sortedRoles = active.sorted { $0.id.uuidString < $1.id.uuidString }
+        var bindings = existingBindings
+        var policies: [UUID: AudiobookRoleVoicePolicy] = [:]
+        for role in characters {
+            policies[role.id] = role.voicePolicy ?? .init(
+                sharingPolicy: role.isNarrator || role.isMajor || (existingBindings[role.id] != nil && !role.allowSharedMinorVoice) ? .exclusive : (existingBindings[role.id] != nil && role.allowSharedMinorVoice ? .sharedMinor : .automatic),
+                bindingOrigin: existingBindings[role.id] != nil ? .legacyUnknown : .automatic,
+                isLocked: existingBindings[role.id] != nil
+            )
+        }
+        var voices: [SafeVoiceEntry] = []
+        if catalog.loadState == .unreadable || catalog.loadState == .unsupportedSchema {
+            issues.append(.init(code: .catalogUnavailable, nextAction: "请修复或恢复音色目录后重新推荐。"))
+        } else {
+            let groups = Dictionary(grouping: snapshot.voices, by: \.id)
+            for id in groups.keys.sorted() {
+                guard let group = groups[id], let voice = group.first else { continue }
+                guard group.allSatisfy({ $0 == voice }) else {
+                    issues.append(.init(code: .voiceIdentityUnknown, voiceIDs: [id], isBlocking: false, severity: .info, nextAction: "此声音存在冲突的身份记录，请重新检查声音目录。"))
+                    continue
+                }
+                guard catalog.permits(voice, bookID: bookID) else {
+                    let missingOrigin = catalog.state.metadataByVoiceID[id] == nil
+                        || (catalog.state.metadataByVoiceID[id]?.visibilityScope == .bookExclusive && catalog.state.metadataByVoiceID[id]?.originBookID == nil)
+                    issues.append(.init(code: missingOrigin ? .voiceIdentityUnknown : .voiceScopeUnavailable, voiceIDs: [id], isBlocking: false, severity: .info,
+                        nextAction: missingOrigin ? "请确认此声音的书籍归属后重新推荐。" : "此声音已归档或属于其他书籍，请选择本书可用的声音。"))
+                    continue
+                }
+                guard voice.available, voice.productionReady == true, voice.operations["http_speech"] != nil else {
+                    issues.append(.init(code: .voiceNotProductionReady, voiceIDs: [id], isBlocking: false, severity: .info, nextAction: "此声音尚不能用于正式制作，请检查声音后重新推荐。"))
+                    continue
+                }
+                let proposed = AudiobookVoiceBinding(
+                    roleID: bookID, voiceID: voice.id, voiceRevision: voice.voiceRevision,
+                    modelRevision: SpeechRailCapabilityRevisionSelector.creatorRequestOptions(voiceID: voice.id, in: snapshot)?.expectedModelRevision ?? ""
+                )
+                do {
+                    try validateRenderBinding(proposed, snapshot: snapshot)
+                    voices.append(voice)
+                } catch {
+                    let parameterFailure: Bool
+                    if case let ServiceAPIClientError.invalidContract(reason) = error {
+                        parameterFailure = reason == "unsupported_render_speed" || reason == "unsupported_caller_seed" || reason == "voice_parameters_require_reconfirmation"
+                    } else { parameterFailure = false }
+                    issues.append(.init(code: parameterFailure ? .unsupportedRenderParameter : .voiceIdentityUnknown,
+                        voiceIDs: [id], isBlocking: false, severity: .info,
+                        nextAction: parameterFailure ? "此声音尚未声明支持制作参数，请重新检查后再选择。" : "请重新核实此声音与模型的版本身份。"))
+                }
             }
         }
-        let readyVoices = scopedVoices.isEmpty ? allReadyVoices : scopedVoices
-
-        // 步骤 1：计算四级分层与同场对白冲突图
-        let (stratifiedCharacters, statsByRoleID, conflictWeights) = computeRoleDialogueStats(
-            characters: characters,
-            annotations: annotations,
-            availableVoiceCount: readyVoices.count
+        let eligibleIDs = Set(voices.map(\.id))
+        if voices.isEmpty, !active.isEmpty {
+            issues.append(.init(code: .noEligibleVoices, roleIDs: active.map(\.id), nextAction: "请确认本书有可用且已通过验收的声音及其归属。"))
+        }
+        if characters.filter(\.isNarrator).count != 1 || Set(characters.map(\.id)).count != characters.count
+            || characters.contains(where: { $0.bookID != bookID }) {
+            issues.append(.init(code: .lockedBindingConflict, nextAction: "请保留一位旁白并修正重复或跨书角色。"))
+        }
+        // Keep work bounded, including the baseline co-occurrence scoring pass.
+        let grouped = Dictionary(grouping: annotations, by: \.chapterID)
+        let graphCost = grouped.values.reduce(0) { total, rows in
+            let n = Set(rows.compactMap(\.assignment.roleID)).count
+            return total + n * n + rows.count * 7
+        }
+        let scoreMatrixExceedsBudget = !voices.isEmpty && sortedRoles.count > 100_000 / voices.count
+        if Task.isCancelled || characters.count > 2_000 || graphCost > 2_000_000 || scoreMatrixExceedsBudget {
+            issues.append(.init(code: .searchBudgetExceeded, nextAction: "推荐已停止；请缩小范围后重试，已有配声保持不变。"))
+        }
+        let duplicateGroups = Dictionary(grouping: sortedRoles.compactMap { role -> (AudiobookCharacter, AudiobookVoiceBinding)? in
+            bindings[role.id].map { (role, $0) }
+        }, by: { $0.1.voiceID })
+        for group in duplicateGroups.values {
+            if group.count > 1 && group.contains(where: { policies[$0.0.id]?.sharingPolicy != .sharedMinor }) {
+                issues.append(.init(code: .lockedBindingConflict, roleIDs: group.map { $0.0.id }, voiceIDs: [group[0].1.voiceID], nextAction: "请明确调整独占声音，现有绑定不会自动降级为共享。"))
+            }
+        }
+        for role in sortedRoles {
+            guard let binding = existingBindings[role.id] else { continue }
+            if !eligibleIDs.contains(binding.voiceID) || (try? validateRenderBinding(binding, snapshot: snapshot)) == nil {
+                issues.append(.init(code: .voiceIdentityUnknown, roleIDs: [role.id], voiceIDs: [binding.voiceID], nextAction: "请重新确认此角色的声音和制作参数；旧作品已保留。"))
+            }
+            if role.isNarrator { policies[role.id]?.sharingPolicy = .exclusive }
+        }
+        var cache = cachedScores
+        let initialScoreCount = cache.evaluationCount
+        var scored: [UUID: [String: Int]] = [:]
+        var evaluations = 0
+        if !issues.contains(where: \.isBlocking) {
+            let (_, stats, _) = computeRoleDialogueStats(characters: characters, annotations: annotations, availableVoiceCount: voices.count, source: source, atoms: atoms)
+            let graph = AudiobookSceneConflictGraph.build(characters: characters, annotations: annotations, atoms: atoms)
+            let weights = graph.weights
+            let voiceRevisions = Dictionary(uniqueKeysWithValues: voices.map { voice in
+                (voice.id, AudiobookCastingDigest.hash([AudiobookCastingDigest.hash(voice), AudiobookCastingDigest.hash(catalog.state.metadataByVoiceID[voice.id]), catalog.state.preferredCollectionIDByBookID[bookID]?.uuidString ?? ""]))
+            })
+            let voiceProfiles = Dictionary(uniqueKeysWithValues: voices.map { ($0.id, VoiceTaxonomyClassifier.resolveTraits(for: $0, metadata: catalog.state.metadataByVoiceID[$0.id])) })
+            scoring: for role in sortedRoles {
+                let desired = VoiceTaxonomyClassifier.resolveTraits(description: role.primaryVoiceTraitSummary ?? "", override: role.voiceTraitsOverride)
+                let roleRevision = AudiobookCastingDigest.hash([role.primaryVoiceTraitSummary ?? "", role.displayName, AudiobookCastingDigest.hash(role.voiceTraitsOverride)])
+                for voice in voices {
+                    if Task.isCancelled {
+                        issues.append(.init(code: .searchBudgetExceeded, nextAction: "推荐已取消，已有配声保持不变。"))
+                        break scoring
+                    }
+                    let meta = catalog.state.metadataByVoiceID[voice.id]
+                    scored[role.id, default: [:]][voice.id] = cache.score(role: role.id, voice: voice.id, roleRevision: roleRevision, voiceRevision: voiceRevisions[voice.id]!) {
+                        preferenceScore(role: role, voice: voice, metadata: meta, preferredCollectionID: catalog.state.preferredCollectionIDByBookID[bookID], desiredTraits: desired, actualTraits: voiceProfiles[voice.id])
+                    }
+                }
+            }
+            let pinnedExclusive = Set(sortedRoles.filter { existingBindings[$0.id] != nil && policies[$0.id]?.sharingPolicy == .exclusive }.compactMap { existingBindings[$0.id]?.voiceID })
+            let pinnedShared = Set(sortedRoles.filter { existingBindings[$0.id] != nil && policies[$0.id]?.sharingPolicy != .exclusive }.compactMap { existingBindings[$0.id]?.voiceID })
+            let unbound = sortedRoles.filter { existingBindings[$0.id] == nil }
+            let hardExclusive = unbound.filter { policies[$0.id]?.sharingPolicy == .exclusive }
+            let automatic = unbound.filter { policies[$0.id]?.sharingPolicy != .exclusive }.sorted {
+                let l = stats[$0.id]?.dialogueScalarCount ?? 0, r = stats[$1.id]?.dialogueScalarCount ?? 0
+                return l == r ? $0.id.uuidString < $1.id.uuidString : l > r
+            }
+            let remaining = voices.count - pinnedExclusive.count - pinnedShared.count
+            let allFit = hardExclusive.count + automatic.count <= remaining
+            let sharedTarget = allFit ? pinnedShared.count : max(pinnedShared.count, min(2, voices.count - pinnedExclusive.count - hardExclusive.count))
+            let autoExclusiveCount = allFit ? automatic.count : max(0, remaining - hardExclusive.count - max(0, sharedTarget - pinnedShared.count))
+            let exclusive = hardExclusive + automatic.prefix(autoExclusiveCount)
+            let shared = Array(automatic.dropFirst(autoExclusiveCount))
+            let free = voices.filter { !pinnedExclusive.contains($0.id) && !pinnedShared.contains($0.id) }
+            var candidates: [UUID: [String]] = [:]
+            for role in exclusive {
+                let allowed = free.filter { matchesRequiredTraits(role: role, voice: $0, metadata: catalog.state.metadataByVoiceID[$0.id]) }
+                candidates[role.id] = allowed.sorted {
+                    let l = scored[role.id]?[$0.id] ?? 0, r = scored[role.id]?[$1.id] ?? 0
+                    return l == r ? $0.id < $1.id : l > r
+                }.map(\.id)
+            }
+            let matchingResult = Result { try maximumWeightExclusiveMatching(roleIDs: exclusive.map(\.id), candidates: candidates, scores: scored) }
+            if case let .success(matching) = matchingResult,
+               shared.isEmpty || sharedTarget > 0 {
+                for role in exclusive {
+                    if let voice = voices.first(where: { $0.id == matching[role.id] }) {
+                        bindings[role.id] = binding(roleID: role.id, voice: voice, snapshot: snapshot)
+                        policies[role.id]?.sharingPolicy = .exclusive
+                    }
+                }
+                let activeIDs = Set(sortedRoles.map(\.id))
+                let taken = Set(bindings.filter { activeIDs.contains($0.key) && policies[$0.key]?.sharingPolicy == .exclusive }.values.map(\.voiceID))
+                let sharedPool = voices.filter { pinnedShared.contains($0.id) }
+                    + voices.filter { !taken.contains($0.id) && !pinnedShared.contains($0.id) }.prefix(max(0, sharedTarget - pinnedShared.count))
+                let sharedIDs = shared.map(\.id)
+                let frozen = Dictionary(uniqueKeysWithValues: bindings.filter { activeIDs.contains($0.key) }.map { ($0.key, $0.value.voiceID) })
+                do {
+                    let outcome = try AudiobookCastingPlanner.assign(roleIDs: sharedIDs,
+                        candidates: Dictionary(uniqueKeysWithValues: shared.map { role in (role.id, sharedPool.filter { matchesRequiredTraits(role: role, voice: $0, metadata: catalog.state.metadataByVoiceID[$0.id]) }.map(\.id)) }), graph: graph,
+                        frozen: frozen, strategy: strategy, scores: scored,
+                        volumes: stats.mapValues { max(1, $0.dialogueScalarCount) })
+                    evaluations = outcome.evaluatedCandidates
+                    if outcome.status == .budgetExceeded {
+                        issues.append(.init(code: .searchBudgetExceeded, nextAction: "场景推荐预算已耗尽，请缩小范围或切回基础推荐。"))
+                    }
+                    for role in shared {
+                        if let voice = sharedPool.first(where: { $0.id == outcome.assignments[role.id] }) {
+                            bindings[role.id] = binding(roleID: role.id, voice: voice, snapshot: snapshot)
+                            policies[role.id]?.sharingPolicy = .sharedMinor
+                        }
+                    }
+                } catch {
+                    issues.append(.init(code: .searchBudgetExceeded, nextAction: "推荐已取消，已有配声保持不变。"))
+                }
+                let newlyShared = shared.filter { bindings[$0.id] != nil }
+                if !newlyShared.isEmpty {
+                    issues.append(.init(code: .sharedVoiceConsentRequired, roleIDs: newlyShared.map(\.id),
+                        voiceIDs: Array(Set(newlyShared.compactMap { bindings[$0.id]?.voiceID })), isBlocking: false,
+                        nextAction: "这些角色拟共用声音，请试听并明确接受，或为角色分别选择声音。"))
+                }
+                for role in sortedRoles {
+                    for neighbor in (weights[role.id] ?? [:]).keys.sorted(by: { $0.uuidString < $1.uuidString }) where role.id.uuidString < neighbor.uuidString {
+                        if let mine = bindings[role.id], mine.voiceID == bindings[neighbor]?.voiceID {
+                            issues.append(.init(code: .sharedSceneRisk, roleIDs: [role.id, neighbor], voiceIDs: [mine.voiceID], isBlocking: false, nextAction: "这些角色在同章使用同一声音，请试听后明确确认，或增加声音。"))
+                        }
+                    }
+                }
+            } else {
+                let exhausted: Bool
+                if case let .failure(error) = matchingResult { exhausted = error is CancellationError || error as? ExclusiveMatchingError == .budgetExceeded }
+                else { exhausted = false }
+                issues.append(.init(code: exhausted ? .searchBudgetExceeded : .insufficientVoiceCapacity, roleIDs: unbound.map(\.id),
+                    nextAction: exhausted ? "推荐预算已耗尽，请缩小范围后重新规划。" : "当前候选不能同时满足旁白、独占与共享要求，请增加声音或明确调整角色政策。"))
+            }
+        }
+        let unresolved = Set(active.filter { bindings[$0.id] == nil }.map(\.id))
+        if !unresolved.isEmpty && !issues.contains(where: \.isBlocking) {
+            issues.append(.init(code: .insufficientVoiceCapacity, roleIDs: Array(unresolved), nextAction: "部分角色没有合法候选，请调整候选范围。"))
+        }
+        let narratorVoices = Set(sortedRoles.filter(\.isNarrator).compactMap { bindings[$0.id]?.voiceID })
+        let exclusiveVoices = Set(sortedRoles.filter { !$0.isNarrator && policies[$0.id]?.sharingPolicy == .exclusive }.compactMap { bindings[$0.id]?.voiceID })
+        let sharedVoices = Set(sortedRoles.filter { policies[$0.id]?.sharingPolicy == .sharedMinor }.compactMap { bindings[$0.id]?.voiceID })
+        for id in bindings.keys where existingBindings[id] == nil {
+            policies[id]?.bindingOrigin = .acceptedRecommendation
+            policies[id]?.isLocked = true
+        }
+        var plan = AudiobookCastingPlan(
+            bookID: bookID, localInputDigest: AudiobookCastingDigest.local(characters: characters, annotations: annotations, bindings: existingBindings),
+            snapshot: snapshot, catalog: catalog, expectedCastRevisionID: castRevisionID(bookID: bookID, characters: characters),
+            proposedBindings: bindings, proposedPolicies: policies, unresolvedRoleIDs: unresolved,
+            affectedRoleIDs: Set(bindings.keys.filter { bindings[$0] != existingBindings[$0] }), affectedFragmentIDs: [],
+            narratorVoiceCount: narratorVoices.count, exclusiveVoiceCount: exclusiveVoices.count,
+            sharedVoiceCount: sharedVoices.count, eligibleVoiceCount: voices.count, rawIssues: issues
         )
+        plan.strategy = strategy; plan.evaluatedCandidates = evaluations
+        plan.scoredCombinations = cache.evaluationCount - initialScoreCount; plan.cachedScores = cache
+        return plan
+    }
 
-        var result = existingBindings
-        var exclusiveUsedVoiceIDs = Set<String>()
-        var sharedUsedVoiceIDs = Set<String>()
-        var usageCountByVoiceID: [String: Int] = [:]
+    private static func binding(roleID: UUID, voice: SafeVoiceEntry, snapshot: EffectiveCapabilitySnapshot) -> AudiobookVoiceBinding {
+        AudiobookVoiceBinding(roleID: roleID, voiceID: voice.id, voiceRevision: voice.voiceRevision,
+            modelRevision: SpeechRailCapabilityRevisionSelector.creatorRequestOptions(voiceID: voice.id, in: snapshot)?.expectedModelRevision ?? "")
+    }
 
-        for role in stratifiedCharacters {
-            if let existing = result[role.id], existing.isSynthesisReady {
-                usageCountByVoiceID[existing.voiceID, default: 0] += 1
-                if role.isNarrator || !role.allowSharedMinorVoice {
-                    exclusiveUsedVoiceIDs.insert(existing.voiceID)
-                } else {
-                    sharedUsedVoiceIDs.insert(existing.voiceID)
+    /// Augmenting paths reserve constrained roles before a weighted choice can consume their only voice.
+    enum ExclusiveMatchingError: Error, Equatable { case infeasible, budgetExceeded }
+
+    static func maximumExclusiveMatching(roleIDs: [UUID], candidates: [UUID: [String]], visitBudget: Int = 100_000) throws -> [UUID: String] {
+        var owner: [String: UUID] = [:]
+        var visits = 0
+        func augment(_ role: UUID, seen: inout Set<String>) throws -> Bool {
+            // Prefer a free slot before displacing a whole alternating path.
+            for voice in candidates[role] ?? [] {
+                visits += 1
+                try Task.checkCancellation()
+                if visits > visitBudget { throw ExclusiveMatchingError.budgetExceeded }
+                if !seen.contains(voice), owner[voice] == nil { seen.insert(voice); owner[voice] = role; return true }
+            }
+            for voice in candidates[role] ?? [] {
+                visits += 1
+                try Task.checkCancellation()
+                if visits > visitBudget { throw ExclusiveMatchingError.budgetExceeded }
+                guard seen.insert(voice).inserted else { continue }
+                if let prior = owner[voice], try augment(prior, seen: &seen) { owner[voice] = role; return true }
+            }
+            return false
+        }
+        for role in roleIDs.sorted(by: {
+            let l = candidates[$0]?.count ?? 0, r = candidates[$1]?.count ?? 0
+            return l == r ? $0.uuidString < $1.uuidString : l < r
+        }) {
+            var seen: Set<String> = []
+            if try !augment(role, seen: &seen) { throw ExclusiveMatchingError.infeasible }
+        }
+        return Dictionary(uniqueKeysWithValues: owner.map { ($0.value, $0.key) })
+    }
+
+    static func maximumWeightExclusiveMatching(roleIDs: [UUID], candidates: [UUID: [String]], scores: [UUID: [String: Int]], workBudget: Int = 20_000_000) throws -> [UUID: String] {
+        _ = try maximumExclusiveMatching(roleIDs: roleIDs, candidates: candidates)
+        let roles = roleIDs.sorted { $0.uuidString < $1.uuidString }
+        let voices = Set(candidates.values.flatMap { $0 }).sorted()
+        guard !roles.isEmpty else { return [:] }
+        let n = roles.count, m = voices.count, infinity = 1_000_000_000
+        let limit = max(0, min(20_000_000, workBudget))
+        var work = 0
+        func consumeWork() throws {
+            try Task.checkCancellation()
+            guard work < limit else { throw ExclusiveMatchingError.budgetExceeded }
+            work += 1
+        }
+        let allowed = candidates.mapValues(Set.init)
+        guard m == 0 || n <= 100_000 / m else { throw ExclusiveMatchingError.budgetExceeded }
+        let costs = try roles.map { role in try voices.map { voice in
+            try consumeWork()
+            return allowed[role]?.contains(voice) == true ? -(scores[role]?[voice] ?? 0) : infinity / 2
+        } }
+        var u = [Int](repeating: 0, count: n + 1), v = [Int](repeating: 0, count: m + 1)
+        var owner = [Int](repeating: 0, count: m + 1), way = owner
+        for i in 1...n {
+            try Task.checkCancellation()
+            owner[0] = i
+            var column = 0, minimum = [Int](repeating: infinity, count: m + 1), used = [Bool](repeating: false, count: m + 1)
+            repeat {
+                used[column] = true
+                let row = owner[column]
+                var delta = infinity, next = 0
+                for j in 1...m where !used[j] {
+                    try consumeWork()
+                    let cost = costs[row - 1][j - 1]
+                    let reduced = cost - u[row] - v[j]
+                    if reduced < minimum[j] { minimum[j] = reduced; way[j] = column }
+                    if minimum[j] < delta { delta = minimum[j]; next = j }
                 }
-            }
-        }
-
-        // 步骤 2：独占池与共享池双池容量规划（确保当存在配角时，配角共享池至少留有可用音色，消除 B2 绑定死锁）
-        var unboundExclusive = stratifiedCharacters.filter {
-            result[$0.id]?.isSynthesisReady != true && ($0.isNarrator || !$0.allowSharedMinorVoice)
-        }
-        var unboundShared = stratifiedCharacters.filter {
-            result[$0.id]?.isSynthesisReady != true && (!$0.isNarrator && $0.allowSharedMinorVoice)
-        }
-
-        if !unboundShared.isEmpty && readyVoices.count >= 2 {
-            let minSharedVoices = min(4, max(1, readyVoices.count / 3))
-            let maxExclusiveCapacity = max(1, readyVoices.count - exclusiveUsedVoiceIDs.count - minSharedVoices)
-            if unboundExclusive.count > maxExclusiveCapacity {
-                let overflow = unboundExclusive.suffix(from: maxExclusiveCapacity)
-                unboundExclusive = Array(unboundExclusive.prefix(maxExclusiveCapacity))
-                for var demoted in overflow {
-                    demoted.isMajor = false
-                    demoted.allowSharedMinorVoice = true
-                    unboundShared.append(demoted)
+                for j in 0...m {
+                    try consumeWork()
+                    if used[j] { u[owner[j]] += delta; v[j] -= delta } else { minimum[j] -= delta }
                 }
-            }
+                column = next
+            } while owner[column] != 0
+            repeat { let previous = way[column]; owner[column] = owner[previous]; column = previous } while column != 0
         }
-
-        // 步骤 3：为旁白与核心主角分配独占音色
-        for character in unboundExclusive {
-            let stat = statsByRoleID[character.id] ?? AudiobookRoleDialogueStats(
-                roleID: character.id,
-                tier: character.isNarrator ? .narrator : .lead,
-                archetype: character.inferredVoiceArchetype(peers: stratifiedCharacters)
-            )
-            let unusedVoices = readyVoices.filter {
-                !exclusiveUsedVoiceIDs.contains($0.id) && !sharedUsedVoiceIDs.contains($0.id)
-            }
-            let nonExclusiveVoices = readyVoices.filter { !exclusiveUsedVoiceIDs.contains($0.id) }
-            let candidatePool = !unusedVoices.isEmpty
-                ? unusedVoices
-                : (!nonExclusiveVoices.isEmpty ? nonExclusiveVoices : readyVoices)
-
-            guard let chosen = selectBestVoice(
-                for: character,
-                stat: stat,
-                candidates: candidatePool,
-                bookID: resolvedBookID,
-                preferredCollectionID: resolvedCollectionID,
-                voiceMetadataByID: voiceMetadataByID,
-                currentBindings: result,
-                conflictWeights: conflictWeights,
-                usageCountByVoiceID: usageCountByVoiceID
-            ) else { continue }
-
-            let modelRev = chosen.model.catalogRevision
-                ?? chosen.model.runtimeRevision
-                ?? "qwen3-tts-v1"
-            let binding = AudiobookVoiceBinding(
-                roleID: character.id,
-                voiceID: chosen.id,
-                voiceRevision: chosen.voiceRevision ?? "v1",
-                modelRevision: modelRev,
-                isSynthesisReady: true,
-                allowedSpeed: AudiobookLimits.defaultRenderSpeed,
-                callerSeed: nil
-            )
-            result[character.id] = binding
-            exclusiveUsedVoiceIDs.insert(chosen.id)
-            usageCountByVoiceID[chosen.id, default: 0] += 1
+        var result: [UUID: String] = [:]
+        for j in 1...m where owner[j] > 0 {
+            let role = roles[owner[j] - 1], voice = voices[j - 1]
+            guard allowed[role]?.contains(voice) == true else { throw ExclusiveMatchingError.infeasible }
+            result[role] = voice
         }
-
-        // 步骤 4：构建配角共享池（严格剔除 exclusiveUsedVoiceIDs）并执行 Welsh-Powell 同场防撞色图着色
-        let nonExclusivePool = readyVoices.filter { !exclusiveUsedVoiceIDs.contains($0.id) }
-        let sharedPool = nonExclusivePool.isEmpty ? readyVoices : nonExclusivePool
-
-        let orderedShared = unboundShared.sorted { lhs, rhs in
-            let statL = statsByRoleID[lhs.id] ?? AudiobookRoleDialogueStats(roleID: lhs.id)
-            let statR = statsByRoleID[rhs.id] ?? AudiobookRoleDialogueStats(roleID: rhs.id)
-            let speaksL = statL.dialogueAtomCount > 0
-            let speaksR = statR.dialogueAtomCount > 0
-            if speaksL != speaksR { return speaksL && !speaksR }
-            if statL.scenePartnerRoleIDs.count != statR.scenePartnerRoleIDs.count {
-                return statL.scenePartnerRoleIDs.count > statR.scenePartnerRoleIDs.count
-            }
-            if statL.dialogueAtomCount != statR.dialogueAtomCount {
-                return statL.dialogueAtomCount > statR.dialogueAtomCount
-            }
-            return lhs.displayName < rhs.displayName
-        }
-
-        var sharedSlotIndexByVoiceID: [String: Int] = [:]
-        for role in stratifiedCharacters where !role.isNarrator && role.allowSharedMinorVoice {
-            if let existing = existingBindings[role.id], existing.isSynthesisReady {
-                sharedSlotIndexByVoiceID[existing.voiceID, default: 0] += 1
-            }
-        }
-
-        for character in orderedShared {
-            let stat = statsByRoleID[character.id] ?? AudiobookRoleDialogueStats(
-                roleID: character.id,
-                tier: .supporting,
-                archetype: character.inferredVoiceArchetype(peers: stratifiedCharacters)
-            )
-            guard let chosen = selectBestVoice(
-                for: character,
-                stat: stat,
-                candidates: sharedPool,
-                bookID: resolvedBookID,
-                preferredCollectionID: resolvedCollectionID,
-                voiceMetadataByID: voiceMetadataByID,
-                currentBindings: result,
-                conflictWeights: conflictWeights,
-                usageCountByVoiceID: usageCountByVoiceID
-            ) else { continue }
-
-            let slotIndex = sharedSlotIndexByVoiceID[chosen.id, default: 0]
-            sharedSlotIndexByVoiceID[chosen.id] = slotIndex + 1
-
-            let (microSpeed, seed) = computeMicroProsodyAndSeed(
-                for: character,
-                archetype: stat.archetype,
-                voiceMode: chosen.mode,
-                slotIndex: slotIndex
-            )
-
-            let modelRev = chosen.model.catalogRevision
-                ?? chosen.model.runtimeRevision
-                ?? "qwen3-tts-v1"
-            let binding = AudiobookVoiceBinding(
-                roleID: character.id,
-                voiceID: chosen.id,
-                voiceRevision: chosen.voiceRevision ?? "v1",
-                modelRevision: modelRev,
-                isSynthesisReady: true,
-                allowedSpeed: microSpeed,
-                callerSeed: seed
-            )
-            result[character.id] = binding
-            sharedUsedVoiceIDs.insert(chosen.id)
-            usageCountByVoiceID[chosen.id, default: 0] += 1
-        }
-
         return result
     }
 
-    /// 模式感知微韵律与确定性种子错位算法（算法 D）：
-    /// - system / preset 音色：按角色声部与槽位分配 0.92x ~ 1.08x 微语速错位；
-    /// - clone / instruction 音色：严格锁定 speed = 1.0，分配确定性种子 [101, 202, 303, 404]。
+    /// Shared by manual, batch and plan commits. Consent must already be explicit on every role.
+    static func validateBindingSet(characters: [AudiobookCharacter], bindings: [UUID: AudiobookVoiceBinding], requiredRoleIDs: Set<UUID>? = nil) throws {
+        let roles = Dictionary(uniqueKeysWithValues: characters.map { ($0.id, $0) })
+        for id in bindings.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
+            guard let binding = bindings[id] else { continue }
+            guard id == binding.roleID, roles[id] != nil else { throw AudiobookCastError.characterNotFound(id) }
+            if requiredRoleIDs?.contains(id) == false { continue }
+            guard binding.isSynthesisReady else { throw AudiobookCastError.voiceNotSynthesisReady(voiceID: binding.voiceID) }
+            guard binding.allowedSpeed.isFinite, binding.allowedSpeed > 0,
+                  binding.callerSeed.map({ (0...4_294_967_295).contains($0) }) ?? true else {
+                throw AudiobookCastError.invalidCastingPlan(reason: "unsupported_render_parameter")
+            }
+        }
+        let groups = Dictionary(grouping: bindings.values.filter { requiredRoleIDs?.contains($0.roleID) ?? true }, by: \.voiceID)
+        for voiceID in groups.keys.sorted() {
+            guard let group = groups[voiceID], group.count > 1 else { continue }
+            for binding in group.sorted(by: { $0.roleID.uuidString < $1.roleID.uuidString }) {
+                guard let role = roles[binding.roleID], !role.isNarrator,
+                      role.voicePolicy.map({ $0.sharingPolicy == .sharedMinor }) ?? (!role.isMajor && role.allowSharedMinorVoice) else {
+                    throw AudiobookCastError.duplicateVoiceRequiresSharedMinorConsent(voiceID: binding.voiceID, conflictingRoleID: binding.roleID)
+                }
+            }
+        }
+    }
+
+    /// Validate the frozen binding against one capability snapshot before each new render.
+    public static func validateRenderBinding(
+        _ binding: AudiobookVoiceBinding, snapshot: EffectiveCapabilitySnapshot
+    ) throws {
+        try validateRenderBinding(binding, snapshot: snapshot, requireProductionReady: true)
+    }
+
+    static func validateRenderBinding(
+        _ binding: AudiobookVoiceBinding, snapshot: EffectiveCapabilitySnapshot, requireProductionReady: Bool
+    ) throws {
+        guard let voice = snapshot.voices.first(where: { $0.id == binding.voiceID }),
+              voice.available, !requireProductionReady || voice.productionReady == true,
+              let options = SpeechRailCapabilityRevisionSelector.creatorRequestOptions(voiceID: voice.id, in: snapshot)
+        else { throw ServiceAPIClientError.invalidContract("voice_not_production_ready") }
+        guard options.expectedVoiceRevision == binding.voiceRevision,
+              options.expectedModelRevision == binding.modelRevision
+        else { throw ServiceAPIClientError.invalidContract("casting_identity_changed") }
+        guard binding.modelRevision.range(of: "^[0-9a-f]{40}$", options: .regularExpression) != nil,
+              (voice.mode == "system" && binding.voiceRevision == nil)
+                || binding.voiceRevision?.range(of: "^vr_[0-9a-f]{32}$", options: .regularExpression) != nil
+        else { throw ServiceAPIClientError.invalidContract("voice_identity_unknown") }
+        if voice.mode == "clone", binding.callerSeed != nil || binding.allowedSpeed != 1 {
+            throw ServiceAPIClientError.invalidContract("voice_parameters_require_reconfirmation")
+        }
+        guard supportsParameter("speed", value: binding.allowedSpeed, voice: voice) else {
+            throw ServiceAPIClientError.invalidContract("unsupported_render_speed")
+        }
+        if let seed = binding.callerSeed {
+            guard (0...4_294_967_295).contains(seed), supportsParameter("seed", value: Double(seed), voice: voice) else {
+                throw ServiceAPIClientError.invalidContract("unsupported_caller_seed")
+            }
+        }
+    }
+
+    public static func supportsParameter(_ name: String, value: Double, voice: SafeVoiceEntry) -> Bool {
+        guard value.isFinite,
+              case let .object(operation) = voice.operations["http_speech"]?.storage,
+              case let .object(parameters) = operation["parameters"]?.storage,
+              case let .object(parameter) = parameters[name]?.storage,
+              parameter["status"]?.stringValue == "supported" else { return false }
+        if case let .array(values) = parameter["values"]?.storage {
+            return values.contains { $0.doubleValue == value }
+        }
+        guard let minimum = parameter["minimum"]?.doubleValue,
+              let maximum = parameter["maximum"]?.doubleValue else { return false }
+        return minimum <= value && value <= maximum
+    }
+
+    /// New recommendations use neutral, contract-safe controls until audition accepts a change.
     public static func computeMicroProsodyAndSeed(
         for character: AudiobookCharacter,
         archetype: AudiobookVoiceArchetype,
         voiceMode: String,
         slotIndex: Int
     ) -> (allowedSpeed: Double, callerSeed: Int?) {
-        let lowerMode = voiceMode.lowercased()
-        if lowerMode == "clone" || lowerMode == "instruction" {
-            let seeds = [101, 202, 303, 404]
-            return (AudiobookLimits.defaultRenderSpeed, seeds[max(0, slotIndex) % seeds.count])
-        }
-
-        let persona = character.resolvedVoicePersona()
-        let combined = "\(persona.ageGenderAnchor) \(persona.pacingAndDiction) \(character.primaryVoiceTraitSummary ?? "")".lowercased()
-
-        if combined.contains("老") || combined.contains("舒缓") || combined.contains("沉着") || archetype == .matureMale || archetype == .matureFemale {
-            let speeds = [1.00, 0.94, 0.97, 0.92, 1.03]
-            return (speeds[max(0, slotIndex) % speeds.count], nil)
-        }
-        if combined.contains("少年") || combined.contains("少女") || combined.contains("干脆") || combined.contains("利落") || combined.contains("急促") {
-            let speeds = [1.00, 1.05, 0.97, 1.08, 1.03]
-            return (speeds[max(0, slotIndex) % speeds.count], nil)
-        }
-        let speeds = [1.00, 0.96, 1.04, 0.93, 1.06]
-        return (speeds[max(0, slotIndex) % speeds.count], nil)
+        (AudiobookLimits.defaultRenderSpeed, nil)
     }
 
     /// 辅助方法：解析 SafeVoiceEntry 的声部行当。
@@ -848,190 +944,225 @@ public enum AudiobookCastRegistry {
             traits: voice.descriptors.styleTags + voice.aliases,
             description: voice.name,
             label: voice.name,
-            metadata: metadata ?? VoiceCatalogStore.shared.metadata(for: voice.id)
+            metadata: metadata
         )
     }
 
-    private static func selectBestVoice(
-        for character: AudiobookCharacter,
-        stat: AudiobookRoleDialogueStats,
-        candidates: [SafeVoiceEntry],
-        bookID: UUID?,
-        preferredCollectionID: UUID?,
-        voiceMetadataByID: [String: VoiceAssetMetadata],
-        currentBindings: [UUID: AudiobookVoiceBinding],
-        conflictWeights: [UUID: [UUID: Int]],
-        usageCountByVoiceID: [String: Int]
-    ) -> SafeVoiceEntry? {
-        let profileText = (
-            [character.displayName]
-                + character.aliases
-                + character.evidences.compactMap(\.voiceTraitSummary)
-                + character.evidences.map(\.quoteExcerpt)
-        ).joined(separator: " ").lowercased()
+    static func matchesRequiredTraits(role: AudiobookCharacter, voice: SafeVoiceEntry, metadata: VoiceAssetMetadata?) -> Bool {
+        guard let required = role.requiredVoiceTraits else { return true }
+        let actual = VoiceTaxonomyClassifier.resolveTraits(for: voice, metadata: metadata)
+        return [(required.gender, actual.gender), (required.age, actual.age), (required.pitch, actual.pitch), (required.texture, actual.texture), (required.locale, actual.locale), (required.pacing, actual.pacing)]
+            .allSatisfy { expected, observed in expected.value == "unknown" || expected.value == observed.value }
+    }
 
-        let inferredGender = inferGender(from: profileText, isNarrator: character.isNarrator)
-        let isMatureOrElder = containsAny(
-            in: profileText,
-            keywords: ["老", "爷", "叔", "伯", "掌柜", "师父", "长老", "深沉", "低沉", "醇厚", "苍老", "稳重", "中年", "老年"]
-        )
-        let isBrightOrLively = containsAny(
-            in: profileText,
-            keywords: ["清亮", "清脆", "活泼", "少女", "明快", "轻快", "少年", "阳光", "笑"]
-        )
-        let neighbors = conflictWeights[character.id] ?? [:]
+    static func preferenceScore(role: AudiobookCharacter, voice: SafeVoiceEntry, metadata: VoiceAssetMetadata?, preferredCollectionID: UUID?, desiredTraits: AudiobookVoiceTraits? = nil, actualTraits: AudiobookVoiceTraits? = nil) -> Int {
+        let desired = desiredTraits ?? VoiceTaxonomyClassifier.resolveTraits(description: role.primaryVoiceTraitSummary ?? "", override: role.voiceTraitsOverride)
+        let actual = actualTraits ?? VoiceTaxonomyClassifier.resolveTraits(for: voice, metadata: metadata)
+        var score = 0
+        for (left, right) in [(desired.gender, actual.gender), (desired.age, actual.age), (desired.pitch, actual.pitch), (desired.texture, actual.texture), (desired.locale, actual.locale), (desired.pacing, actual.pacing)] {
+            if left.value != "unknown" && right.value != "unknown" { score += left.value == right.value ? 80 : -80 }
+        }
+        if metadata?.originRoleID == role.id { score += 500 }
+        if let preferredCollectionID, metadata?.collectionIDs.contains(preferredCollectionID) == true { score += 120 }
+        if metadata?.isFavorite == true { score += 40 }
+        if role.isNarrator && (voice.name.contains("旁白") || voice.name.lowercased().contains("narrator")) { score += 500 }
+        return score
+    }
 
-        let scored = candidates.map { voice -> (SafeVoiceEntry, Int) in
-            var score = 0
-            let voiceIDLower = voice.id.lowercased()
-            let voiceNameLower = voice.name.lowercased()
-            let voiceMeta = ([voiceIDLower, voiceNameLower] + voice.aliases.map { $0.lowercased() } + voice.descriptors.styleTags.map { $0.lowercased() })
-                .joined(separator: " ")
-            let meta = voiceMetadataByID[voice.id]
+}
 
-            // 1. 专属角色音色与名称呼应加分（AC7）
-            if let meta {
-                if meta.originRoleID == character.id {
-                    score += 500
-                } else if let bookID, meta.originBookID == bookID && meta.originRoleID == nil {
-                    score += 160
-                }
-                if let preferredCollectionID, meta.collectionIDs.contains(preferredCollectionID) {
-                    score += 120
-                }
-                if meta.isFavorite {
-                    score += 40
+
+/// Edge types retain independent provenance; weak repetition never upgrades a relation.
+public struct AudiobookSceneConflictGraph: Equatable, Sendable {
+    public enum Kind: String, Codable, Hashable, Sendable { case directDialogue, sceneCoPresence, chapterCoPresence }
+    public struct Edge: Equatable, Sendable {
+        public let roleA: UUID
+        public let roleB: UUID
+        public let kind: Kind
+        public var sourceIDs: Set<String>
+        public init(roleA: UUID, roleB: UUID, kind: Kind, sourceIDs: Set<String>) {
+            let sorted = [roleA, roleB].sorted { $0.uuidString < $1.uuidString }
+            self.roleA = sorted[0]; self.roleB = sorted[1]; self.kind = kind; self.sourceIDs = sourceIDs
+        }
+    }
+    public let edges: [Edge]
+    public init(edges: [Edge]) {
+        var merged: [String: Edge] = [:]
+        for edge in edges where edge.roleA != edge.roleB {
+            let key = "\(edge.roleA)|\(edge.roleB)|\(edge.kind.rawValue)"
+            if var old = merged[key] { old.sourceIDs.formUnion(edge.sourceIDs); merged[key] = old }
+            else { merged[key] = edge }
+        }
+        self.edges = merged.keys.sorted().compactMap { merged[$0] }
+    }
+    public var weights: [UUID: [UUID: Int]] {
+        var result: [UUID: [UUID: Int]] = [:]
+        for edge in edges {
+            let base = edge.kind == .directDialogue ? 600 : (edge.kind == .sceneCoPresence ? 120 : 30)
+            let weight = base * min(3, edge.sourceIDs.count)
+            result[edge.roleA, default: [:]][edge.roleB, default: 0] += weight
+            result[edge.roleB, default: [:]][edge.roleA, default: 0] += weight
+        }
+        return result
+    }
+    public static func build(characters: [AudiobookCharacter], annotations: [AudiobookAnnotation], atoms: [AudiobookTextAtom] = [], scenes: [AudiobookCastingScene] = []) -> Self {
+        let narrator = Set(characters.filter(\.isNarrator).map(\.id))
+        let valid = Set(characters.map(\.id))
+        let unique = Dictionary(grouping: annotations, by: { "\($0.chapterID)|\($0.sourceRange.lowerBound)|\($0.sourceRange.upperBound)|\($0.assignment.roleID?.uuidString ?? "unknown")" }).values.compactMap(\.first)
+        var edges: [Edge] = []
+        for (chapter, rows) in Dictionary(grouping: unique, by: \.chapterID) {
+            let ordered = rows.sorted { $0.sourceRange < $1.sourceRange }
+            let chapterRoles = Set(ordered.compactMap(\.assignment.roleID)).subtracting(narrator).intersection(valid).sorted { $0.uuidString < $1.uuidString }
+            for (index, role) in chapterRoles.enumerated() {
+                for other in chapterRoles.dropFirst(index + 1) {
+                    edges.append(.init(roleA: role, roleB: other, kind: .chapterCoPresence, sourceIDs: ["chapter-v1|\(chapter)"]))
                 }
             }
-
-            if character.isNarrator {
-                if voiceMeta.contains("narrator") || voiceMeta.contains("旁白") {
-                    score += 500
+            let confirmed = scenes.filter { $0.chapterID == chapter && $0.isConfirmed }
+            func sceneKey(_ annotation: AudiobookAnnotation) -> String? {
+                let matches = confirmed.filter { $0.sourceRange.lowerBound <= annotation.sourceRange.lowerBound && $0.sourceRange.upperBound >= annotation.sourceRange.upperBound }
+                guard matches.count == 1, let scene = matches.first else { return nil }
+                return "scene-v1|\(chapter)|\(scene.sourceRange.lowerBound)|\(scene.sourceRange.upperBound)"
+            }
+            let chapterAtoms = atoms.filter { $0.chapterID == chapter }.sorted { $0.sourceRange < $1.sourceRange }
+            func position(_ annotation: AudiobookAnnotation, fallback: Int) -> Int {
+                chapterAtoms.firstIndex { $0.sourceRange.lowerBound <= annotation.sourceRange.lowerBound && $0.sourceRange.upperBound > annotation.sourceRange.lowerBound } ?? fallback
+            }
+            var previous: (AudiobookAnnotation, Int)?
+            for (index, row) in ordered.enumerated() {
+                guard let role = row.assignment.roleID, valid.contains(role), !narrator.contains(role) else { continue }
+                let pos = position(row, fallback: index)
+                if let (prior, priorPosition) = previous, let other = prior.assignment.roleID, role != other {
+                    let leftScene = sceneKey(prior), rightScene = sceneKey(row)
+                    let sameScene = !confirmed.isEmpty ? (leftScene != nil && leftScene == rightScene) : pos - priorPosition <= 6
+                    if sameScene {
+                        let source = "direct-v2|\(chapter)|\(prior.sourceRange.lowerBound)-\(prior.sourceRange.upperBound)|\(row.sourceRange.lowerBound)-\(row.sourceRange.upperBound)"
+                        edges.append(.init(roleA: role, roleB: other, kind: .directDialogue, sourceIDs: [source]))
+                        edges.append(.init(roleA: role, roleB: other, kind: .sceneCoPresence, sourceIDs: [leftScene ?? "inferred-window-v2|\(source)"]))
+                    }
                 }
-                if voiceIDLower == "uncle_fu" {
-                    score += 240
-                } else if voiceIDLower == "serena" {
-                    score += 220
-                }
-            } else {
-                for nameToken in ([character.displayName] + character.aliases) where !nameToken.isEmpty {
-                    let lowerToken = nameToken.lowercased()
-                    if voiceMeta.contains(lowerToken) {
-                        score += 500
+                previous = (row, pos)
+            }
+            for scene in confirmed {
+                let roles = Set(ordered.filter { $0.sourceRange.lowerBound >= scene.sourceRange.lowerBound && $0.sourceRange.upperBound <= scene.sourceRange.upperBound }.compactMap(\.assignment.roleID)).subtracting(narrator).intersection(valid).sorted { $0.uuidString < $1.uuidString }
+                for (i, role) in roles.enumerated() {
+                    for other in roles.dropFirst(i + 1) {
+                        edges.append(.init(roleA: role, roleB: other, kind: .sceneCoPresence, sourceIDs: ["confirmed-scene-v1|\(chapter)|\(scene.sourceRange.lowerBound)|\(scene.sourceRange.upperBound)"]))
                     }
                 }
             }
+        }
+        return .init(edges: edges)
+    }
+}
 
-            // 2. 语种亲和度（优先中文音色）
-            if voice.descriptors.locales.contains(where: { $0.lowercased().hasPrefix("zh") })
-                || ["serena", "vivian", "uncle_fu", "dylan", "eric"].contains(voiceIDLower)
-            {
-                score += 100
-            }
-
-            // 3. 声部行当、性别与年龄特质匹配
-            let voiceArchetype = resolveVoiceArchetype(for: voice, metadata: meta)
-            if voiceArchetype == stat.archetype {
-                score += 220
-                if meta?.creationSource == .voiceDesign || voiceIDLower.hasPrefix("ab_") {
-                    score += 180
+public enum AudiobookCastingStrategy: String, Codable, Sendable { case baseline, sceneAware }
+public enum AudiobookCastingPlanner {
+    public enum Status: String, Sendable { case solved, residualConflicts, provenInsufficient, budgetExceeded }
+    public struct Outcome: Equatable, Sendable {
+        public let assignments: [UUID: String]
+        public let residualDirectPairs: [AudiobookSceneConflictGraph.Edge]
+        public let status: Status
+        public let evaluatedCandidates: Int
+    }
+    /// Bounded list coloring; frozen choices are never touched by greedy or repair passes.
+    public static func assign(roleIDs: [UUID], candidates: [UUID: [String]], graph: AudiobookSceneConflictGraph,
+        frozen: [UUID: String] = [:], strategy: AudiobookCastingStrategy = .sceneAware, budget: Int = 100_000,
+        scores: [UUID: [String: Int]] = [:], volumes: [UUID: Int] = [:]) throws -> Outcome {
+        let roles = Set(roleIDs).sorted { $0.uuidString < $1.uuidString }
+        var choices: [UUID: [String]] = [:]
+        for role in roles { choices[role] = Array(Set(candidates[role] ?? [])).sorted() }
+        guard frozen.allSatisfy({ !roles.contains($0.key) || choices[$0.key]?.contains($0.value) == true }) else {
+            throw AudiobookCastError.invalidCastingPlan(reason: "locked_binding_outside_candidates")
+        }
+        let limit = max(0, min(100_000, budget))
+        var evaluated = 0, exhausted = false
+        let direct = graph.edges.filter { $0.kind == .directDialogue }
+        let weights = graph.weights
+        func conflicts(_ map: [UUID: String]) -> [AudiobookSceneConflictGraph.Edge] {
+            direct.filter { edge in map[edge.roleA] != nil && map[edge.roleA] == map[edge.roleB] }
+        }
+        func next(_ map: [UUID: String]) -> UUID? {
+            roles.filter { map[$0] == nil }.sorted { a, b in
+                let countA = choices[a]?.count ?? 0, countB = choices[b]?.count ?? 0
+                if countA != countB { return countA < countB }
+                if strategy == .sceneAware {
+                    func saturation(_ role: UUID) -> Int { Set((weights[role] ?? [:]).keys.compactMap { map[$0] }).count }
+                    let sa = saturation(a), sb = saturation(b)
+                    if sa != sb { return sa > sb }
+                    let wa = (weights[a] ?? [:]).values.reduce(0, +), wb = (weights[b] ?? [:]).values.reduce(0, +)
+                    if wa != wb { return wa > wb }
                 }
+                if volumes[a, default: 0] != volumes[b, default: 0] { return volumes[a, default: 0] > volumes[b, default: 0] }
+                return a.uuidString < b.uuidString
+            }.first
+        }
+        func cost(_ role: UUID, _ voice: String, _ map: [UUID: String]) -> (Int, Int, Int, Int) {
+            let strong = direct.filter { ($0.roleA == role && map[$0.roleB] == voice) || ($0.roleB == role && map[$0.roleA] == voice) }.count
+            let weak = (weights[role] ?? [:]).filter { map[$0.key] == voice }.values.reduce(0, +)
+            let load = map.filter { $0.value == voice }.keys.reduce(0) { $0 + max(1, volumes[$1, default: 1]) }
+            return (strong, weak, -(scores[role]?[voice] ?? 0), load)
+        }
+        func ordered(_ role: UUID, _ map: [UUID: String]) -> [String] {
+            var ranked: [(String, (Int, Int, Int, Int))] = []
+            for voice in choices[role] ?? [] {
+                guard evaluated < limit else { exhausted = true; break }
+                evaluated += 1
+                ranked.append((voice, cost(role, voice, map)))
             }
-
-            let voiceGender = inferVoiceGender(voiceID: voiceIDLower, voiceMeta: voiceMeta)
-            if inferredGender != .unknown && voiceGender == inferredGender {
-                score += 180
-            } else if inferredGender != .unknown && voiceGender != .unknown && voiceGender != inferredGender {
-                score -= 300
-            }
-
-            if inferredGender == .female {
-                if isBrightOrLively && (voiceIDLower == "vivian" || voiceMeta.contains("明亮") || voiceMeta.contains("清脆")) {
-                    score += 60
-                } else if !isBrightOrLively && (voiceIDLower == "serena" || voiceMeta.contains("温柔") || voiceMeta.contains("柔和")) {
-                    score += 60
+            return ranked.sorted { $0.1 == $1.1 ? $0.0 < $1.0 : $0.1 < $1.1 }.map(\.0)
+        }
+        var greedy = frozen
+        while let role = next(greedy) {
+            try Task.checkCancellation()
+            guard let voice = ordered(role, greedy).first else { break }
+            greedy[role] = voice
+            if exhausted { break }
+        }
+        var best = greedy
+        if strategy == .sceneAware && !conflicts(best).isEmpty && !exhausted {
+            var search = frozen
+            func solve() throws -> Bool {
+                try Task.checkCancellation()
+                if !conflicts(search).isEmpty { return false }
+                guard let role = next(search) else { best = search; return true }
+                for voice in ordered(role, search) {
+                    if exhausted { return false }
+                    search[role] = voice
+                    if try solve() { return true }
+                    search.removeValue(forKey: role)
+                    if exhausted { return false }
                 }
-            } else if inferredGender == .male {
-                if isMatureOrElder && (voiceIDLower == "uncle_fu" || voiceMeta.contains("醇厚") || voiceMeta.contains("稳重")) {
-                    score += 80
-                } else if !isMatureOrElder && (voiceIDLower == "dylan" || voiceIDLower == "eric" || voiceMeta.contains("青年") || voiceMeta.contains("活力")) {
-                    score += 70
-                }
+                return false
             }
+            _ = try solve()
+        }
+        let residual = conflicts(best)
+        let complete = roles.allSatisfy { best[$0] != nil }
+        let status: Status = exhausted ? .budgetExceeded : (!complete ? .provenInsufficient : (residual.isEmpty ? .solved : (strategy == .sceneAware ? .provenInsufficient : .residualConflicts)))
+        return .init(assignments: best, residualDirectPairs: residual, status: status, evaluatedCandidates: evaluated)
+    }
+}
 
-            // 4. 同场/同章对话冲突图着色惩罚（AC3：同场紧邻对手戏立扣 >= 600 分）
-            var conflictPenalty = 0
-            for (neighborRoleID, weight) in neighbors {
-                if let neighborBinding = currentBindings[neighborRoleID],
-                   neighborBinding.voiceID == voice.id
-                {
-                    conflictPenalty += weight
-                }
+/// Cache keys separate role and voice semantics from catalogue-wide presentation revisions.
+public struct AudiobookCastingScoreCache: Equatable, Sendable {
+    private var values: [String: Int] = [:]
+    public private(set) var evaluationCount = 0
+    public init() {}
+    public mutating func score(role: UUID, voice: String, roleRevision: String, voiceRevision: String, compute: () -> Int) -> Int {
+        let key = "\(role)|\(voice)|\(roleRevision)|\(voiceRevision)"
+        if let cached = values[key] { return cached }
+        let value = compute(); evaluationCount += 1
+        if values.count >= 200_000 { values.removeAll(keepingCapacity: true) }
+        values[key] = value; return value
+    }
+    public mutating func scores(roleIDs: [UUID], voiceIDs: [String], roleRevision: String, voiceRevision: String, compute: (UUID, String) -> Int) -> [UUID: [String: Int]] {
+        var result: [UUID: [String: Int]] = [:]
+        for role in Set(roleIDs).sorted(by: { $0.uuidString < $1.uuidString }) {
+            for voice in Set(voiceIDs).sorted() {
+                result[role, default: [:]][voice] = score(role: role, voice: voice, roleRevision: roleRevision, voiceRevision: voiceRevision) { compute(role, voice) }
             }
-            score -= conflictPenalty
-
-            // 5. 音色互斥加成与负载均衡惩罚
-            let usageCount = usageCountByVoiceID[voice.id] ?? 0
-            if usageCount == 0 {
-                score += 140
-            } else {
-                score -= usageCount * 35
-            }
-
-            return (voice, score)
         }
-        .sorted { lhs, rhs in
-            if lhs.1 != rhs.1 { return lhs.1 > rhs.1 }
-            return lhs.0.id < rhs.0.id
-        }
-
-        return scored.first?.0
-    }
-
-    private enum InferredGender {
-        case male
-        case female
-        case unknown
-    }
-
-    private static func inferGender(from text: String, isNarrator: Bool) -> InferredGender {
-        if isNarrator { return .unknown }
-        let femaleHits = countMatches(
-            in: text,
-            keywords: ["女", "姐", "妹", "娘", "姑", "婆", "妇", "嫂", "她", "小姐", "夫人", "少女", "晴", "雪", "瑶", "琳", "婷", "芳", "清亮女声", "女声"]
-        )
-        let maleHits = countMatches(
-            in: text,
-            keywords: ["男", "哥", "弟", "爷", "叔", "伯", "掌柜", "公子", "先生", "少年", "青年", "老汉", "老周", "林远", "男声", "低沉"]
-        )
-        if femaleHits > maleHits { return .female }
-        if maleHits > femaleHits { return .male }
-        return .unknown
-    }
-
-    private static func inferVoiceGender(voiceID: String, voiceMeta: String) -> InferredGender {
-        if ["serena", "vivian", "ono_anna", "sohee"].contains(voiceID)
-            || voiceMeta.contains("女")
-            || voiceMeta.contains("female")
-        {
-            return .female
-        }
-        if ["uncle_fu", "dylan", "eric", "ryan", "aiden"].contains(voiceID)
-            || voiceMeta.contains("男")
-            || voiceMeta.contains("male")
-        {
-            return .male
-        }
-        return .unknown
-    }
-
-    private static func containsAny(in text: String, keywords: [String]) -> Bool {
-        keywords.contains { text.contains($0) }
-    }
-
-    private static func countMatches(in text: String, keywords: [String]) -> Int {
-        keywords.reduce(0) { acc, kw in
-            acc + (text.contains(kw) ? 1 : 0)
-        }
+        return result
     }
 }

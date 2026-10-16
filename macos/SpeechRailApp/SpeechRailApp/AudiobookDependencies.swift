@@ -19,21 +19,24 @@ public struct SystemAudiobookClock: AudiobookClock {
 }
 
 public struct AudiobookRenderCallRequest: Equatable, Sendable {
+    public var bookID: UUID?
     public var text: String
     public var voiceID: String
     public var speed: Double
-    public var expectedVoiceRevision: String
+    public var expectedVoiceRevision: String?
     public var expectedModelRevision: String
     public var seed: Int?
 
     public init(
+        bookID: UUID? = nil,
         text: String,
         voiceID: String,
         speed: Double = AudiobookLimits.defaultRenderSpeed,
-        expectedVoiceRevision: String,
+        expectedVoiceRevision: String?,
         expectedModelRevision: String,
         seed: Int? = nil
     ) {
+        self.bookID = bookID
         self.text = text
         self.voiceID = voiceID
         self.speed = speed
@@ -61,7 +64,7 @@ public struct AudiobookRenderCallOutput: Equatable, Sendable {
         requestID: String? = nil,
         receiptID: String? = nil,
         recipeSummary: String? = nil,
-        isProvenanceVerified: Bool = true
+        isProvenanceVerified: Bool = false
     ) {
         self.wavData = wavData
         self.voiceRevision = voiceRevision
@@ -124,10 +127,14 @@ public struct AudiobookLeadVoiceCreationOutput: Equatable, Sendable {
 public protocol AudiobookSpeechRenderer: Sendable {
     func fetchEffectiveCapabilities() async throws -> EffectiveCapabilitySnapshot
     func renderFragment(_ request: AudiobookRenderCallRequest) async throws -> AudiobookRenderCallOutput
+    func renderAudition(_ request: AudiobookRenderCallRequest) async throws -> Data
     func createAndPublishLeadVoice(_ request: AudiobookLeadVoiceCreationRequest) async throws -> AudiobookLeadVoiceCreationOutput
 }
 
 public extension AudiobookSpeechRenderer {
+    func renderAudition(_ request: AudiobookRenderCallRequest) async throws -> Data {
+        throw ServiceAPIClientError.requestFailed
+    }
     func createAndPublishLeadVoice(_ request: AudiobookLeadVoiceCreationRequest) async throws -> AudiobookLeadVoiceCreationOutput {
         throw ServiceAPIClientError.requestFailed
     }
@@ -169,6 +176,7 @@ public struct AudiobookDependencies: Sendable {
     public var speechRenderer: any AudiobookSpeechRenderer
     public var controlTransport: any SpeechRailControlTransport
     public var clock: any AudiobookClock
+    public var voiceCatalog: VoiceCatalogStore
 
     public init(
         makeStore: @escaping StoreFactory,
@@ -176,7 +184,8 @@ public struct AudiobookDependencies: Sendable {
         resolveAnalysisSnapshot: @escaping @MainActor @Sendable (Int) -> AudiobookAnalysisConfigSnapshot,
         speechRenderer: any AudiobookSpeechRenderer,
         controlTransport: any SpeechRailControlTransport = UnavailableControlTransport(),
-        clock: any AudiobookClock = SystemAudiobookClock()
+        clock: any AudiobookClock = SystemAudiobookClock(),
+        voiceCatalog: VoiceCatalogStore = VoiceCatalogStore()
     ) {
         self.makeStore = makeStore
         self.makeAnalysisClient = makeAnalysisClient
@@ -184,6 +193,7 @@ public struct AudiobookDependencies: Sendable {
         self.speechRenderer = speechRenderer
         self.controlTransport = controlTransport
         self.clock = clock
+        self.voiceCatalog = voiceCatalog
     }
 
     public static var unavailable: AudiobookDependencies {

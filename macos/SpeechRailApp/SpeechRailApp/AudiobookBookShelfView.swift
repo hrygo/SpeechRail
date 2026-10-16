@@ -228,7 +228,14 @@ public struct AudiobookBookShelfView: View {
 
     @ViewBuilder
     private func productionStatePill(_ summary: AudiobookBookSummary) -> some View {
-        switch summary.book.productionState {
+        if workflow.isProductionBusy, workflow.productionBookID == summary.id,
+           let progress = workflow.productionProgress
+        {
+            StatusPill(tone: .attention, label: workflow.isPausingProduction
+                       ? "正在暂停制作"
+                       : (progress.totalFragments > 0 ? "制作中 \(Int(progress.fraction * 100))% · \(progress.savedFragmentsText)" : progress.statusTitle))
+        } else {
+            switch summary.book.productionState {
         case .idle:
             StatusPill(tone: .neutral, label: "制作：待开始")
         case .running:
@@ -247,6 +254,7 @@ public struct AudiobookBookShelfView: View {
             StatusPill(tone: .healthy, label: "全书制作完成")
         case .failed:
             StatusPill(tone: .critical, label: "制作：需处理")
+        }
         }
     }
 
@@ -277,9 +285,12 @@ public struct AudiobookBookShelfView: View {
             await workflow.pauseAnalysis()
         case .confirmSpeakers, .confirmCastAndVoices:
             workflow.workbenchTab = .preparation
-        case .makeConfirmedChapters, .resumeProduction:
+        case .makeConfirmedChapters:
             workflow.workbenchTab = .production
             workflow.makeConfirmedChapters()
+        case .resumeProduction:
+            workflow.workbenchTab = .production
+            await workflow.resumeProduction()
         case .pauseProduction:
             await workflow.pauseProduction()
         case .continueListening:

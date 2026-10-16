@@ -1,6 +1,14 @@
 import CryptoKit
 import Foundation
 
+/// A logical reading paragraph. Its byte range still addresses the unchanged source.
+public struct AudiobookParagraph: Sendable, Equatable {
+    public let sourceRange: AudiobookSourceRange
+    public let text: String
+    public let physicalLineCount: Int
+    public let isIsolatedTitleCandidate: Bool
+}
+
 public struct AudiobookSourceIndex: Sendable, Equatable {
     public enum TextLayoutProfile: String, Codable, Sendable, Equatable {
         case hardWrapped
@@ -12,6 +20,9 @@ public struct AudiobookSourceIndex: Sendable, Equatable {
     /// Sorted UTF-8 byte offsets of every Unicode scalar start, plus `byteCount` at the end.
     public let scalarByteOffsets: [Int64]
     public let layoutProfile: TextLayoutProfile
+    public let paragraphs: [AudiobookParagraph]
+    public let joinedLineBreakCount: Int
+    private let paragraphStartOffsets: Set<Int64>
 
     public init(utf8: Data) throws {
         var decoder = UTF8()
@@ -45,7 +56,12 @@ public struct AudiobookSourceIndex: Sendable, Equatable {
         self.utf8Data = utf8
         self.sourceSHA256 = AudiobookDigest.sha256Hex(utf8)
         self.scalarByteOffsets = offsets
-        self.layoutProfile = Self.detectLayoutProfile(utf8Data: utf8, scalarByteOffsets: offsets)
+        let profile = Self.detectLayoutProfile(utf8Data: utf8, scalarByteOffsets: offsets)
+        self.layoutProfile = profile
+        let paragraphs = Self.prepareParagraphs(utf8: utf8, profile: profile)
+        self.paragraphs = paragraphs
+        self.joinedLineBreakCount = paragraphs.reduce(0) { $0 + max(0, $1.physicalLineCount - 1) }
+        self.paragraphStartOffsets = Set(paragraphs.dropFirst().map { $0.sourceRange.lowerBound })
     }
 
     public var byteCount: Int64 {
@@ -117,6 +133,33 @@ public struct AudiobookSourceIndex: Sendable, Equatable {
         let start = utf8Data.startIndex + Int(range.lowerBound)
         let end = utf8Data.startIndex + Int(range.upperBound)
         return String(decoding: utf8Data[start..<end], as: UTF8.self)
+    }
+
+    /// Reading projection only: canonical bytes, hashes, ranges and atom IDs remain source based.
+    public func normalizedText(in range: AudiobookSourceRange) throws -> String {
+        try validateRangeBounds(range)
+        // Binary search keeps fragment/atom projections independent of whole-book paragraph count.
+        var lower = 0
+        var upper = paragraphs.count
+        while lower < upper {
+            let middle = (lower + upper) / 2
+            if paragraphs[middle].sourceRange.upperBound <= range.lowerBound {
+                lower = middle + 1
+            } else {
+                upper = middle
+            }
+        }
+        var parts: [String] = []
+        for paragraph in paragraphs[lower...] {
+            if paragraph.sourceRange.lowerBound >= range.upperBound { break }
+            let intersection = AudiobookSourceRange(
+                lowerBound: max(range.lowerBound, paragraph.sourceRange.lowerBound),
+                upperBound: min(range.upperBound, paragraph.sourceRange.upperBound)
+            )
+            let normalized = Self.joinParagraphLines(try text(in: intersection))
+            if !normalized.isEmpty { parts.append(normalized) }
+        }
+        return parts.joined(separator: "\n\n")
     }
 
     public func validateCoverage(
@@ -292,19 +335,21 @@ public struct AudiobookSourceIndex: Sendable, Equatable {
                     }
                     return false
                 }()
+                let isParagraphEnd = paragraphStartOffsets.contains(scalarByteOffsets[nextScalarIdx])
 
                 let isSentenceBoundary = Self.sentenceTerminalScalars.contains(scalar) && !insideDialogueQuote
                 let reachedMaxScalars = currentAtomLength >= effectiveMaxScalars
 
-                if isHardLineBreakEnd || isDialogueClosingQuoteBoundary || isSentenceBoundary || reachedMaxScalars || nextScalarIdx == endScalarIdx {
+                if isHardLineBreakEnd || isParagraphEnd || isDialogueClosingQuoteBoundary || isSentenceBoundary || reachedMaxScalars || nextScalarIdx == endScalarIdx {
                     // Absorb immediately following whitespace/closing punctuation on the same line if room permits
                     var finalEndScalarIdx = nextScalarIdx
-                    if !isHardLineBreakEnd && !reachedMaxScalars {
+                    if !isHardLineBreakEnd && !isParagraphEnd && !reachedMaxScalars {
                         while finalEndScalarIdx < endScalarIdx,
                               (finalEndScalarIdx - atomStartScalarIdx) < effectiveMaxScalars
                         {
                             let peek = scalarAt(scalarIndex: finalEndScalarIdx)
                             if peek == "\r" && finalEndScalarIdx + 1 < endScalarIdx && scalarAt(scalarIndex: finalEndScalarIdx + 1) == "\n" {
+                                guard finalEndScalarIdx + 2 - atomStartScalarIdx <= effectiveMaxScalars else { break }
                                 if isHardLineBreak(at: finalEndScalarIdx, atomStartScalarIdx: atomStartScalarIdx, endScalarIdx: endScalarIdx, layoutProfile: effectiveProfile) {
                                     finalEndScalarIdx += 2
                                     isFirstLineInChapter = false
@@ -379,33 +424,186 @@ public struct AudiobookSourceIndex: Sendable, Equatable {
     /// Normalizes soft line breaks within a sentence for comfortable reading display,
     /// without mutating the underlying canonical byte range or source index.
     public static func displayNormalizedText(_ text: String) -> String {
-        guard text.unicodeScalars.contains(where: { $0 == "\n" || $0 == "\r" }) else {
-            return text
-        }
-        let standard = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
-        var result = ""
-        result.reserveCapacity(standard.count)
-        let scalars = Array(standard.unicodeScalars)
-        for i in 0..<scalars.count {
-            let sc = scalars[i]
-            if sc == "\n" {
-                let prev = i > 0 ? scalars[i - 1] : nil
-                let next = i + 1 < scalars.count ? scalars[i + 1] : nil
-                if let p = prev, let n = next {
-                    let isPrevCJK = isCJK(p)
-                    let isNextCJK = isCJK(n)
-                    if isPrevCJK && isNextCJK {
-                        continue
-                    } else if CharacterSet.whitespaces.contains(p) || CharacterSet.whitespaces.contains(n) {
-                        continue
-                    } else {
-                        result.append(" ")
-                        continue
-                    }
-                }
+        prepareParagraphs(utf8: Data(text.utf8), profile: .hardWrapped)
+            .map(\.text).joined(separator: "\n\n")
+    }
+
+    private struct PhysicalLine {
+        let start: Int64
+        let text: String
+        let indentationCount: Int
+        let indented: Bool
+        let continuesOnNextLine: Bool
+    }
+
+    private static func prepareParagraphs(utf8: Data, profile: TextLayoutProfile) -> [AudiobookParagraph] {
+        var lines: [PhysicalLine] = []
+        var start = 0
+        var cursor = 0
+        while cursor < utf8.count {
+            if utf8[cursor] != 0x0A && utf8[cursor] != 0x0D {
+                cursor += 1
                 continue
             }
-            result.append(String(sc))
+            let end = cursor
+            if utf8[cursor] == 0x0D && cursor + 1 < utf8.count && utf8[cursor + 1] == 0x0A {
+                cursor += 1
+            }
+            lines.append(contentsOf: splitPhysicalLine(utf8: utf8, start: start, end: end))
+            cursor += 1
+            start = cursor
+        }
+        if start < utf8.count { lines.append(contentsOf: splitPhysicalLine(utf8: utf8, start: start, end: utf8.count)) }
+
+        var paragraphs: [AudiobookParagraph] = []
+        var group: [PhysicalLine] = []
+        var groupStart: Int64 = 0
+        var firstLineIndex = 0
+        var previousLineIndex: Int?
+
+        func appendParagraph(end: Int64) {
+            guard let first = group.first else { return }
+            let nextIndex = firstLineIndex + 1
+            let centeredAboveBody = nextIndex < lines.count
+                && first.indentationCount >= lines[nextIndex].indentationCount + 16
+                && lines[nextIndex].text.unicodeScalars.count >= 22
+            let isolated = group.count == 1
+                && (firstLineIndex == 0 || lines[firstLineIndex - 1].text.isEmpty)
+                && (nextIndex == lines.count || lines[nextIndex].text.isEmpty || centeredAboveBody)
+            paragraphs.append(AudiobookParagraph(
+                sourceRange: AudiobookSourceRange(lowerBound: groupStart, upperBound: end),
+                text: joinParagraphLines(group.map(\.text).joined(separator: "\n")),
+                physicalLineCount: group.count,
+                isIsolatedTitleCandidate: isolated
+            ))
+        }
+
+        for (index, line) in lines.enumerated() where !line.text.isEmpty {
+            if let previousLineIndex, let previous = group.last {
+                let blankSeparated = index > previousLineIndex + 1
+                let interruptedLongLine = previous.text.unicodeScalars.count >= 22
+                    && previous.text.unicodeScalars.last.map {
+                        !sentenceTerminalScalars.contains($0) && !closingQuoteScalars.contains($0)
+                    } == true
+                let hangingPunctuation = line.text.unicodeScalars.first.map { hangingPunctuationScalars.contains($0) } == true
+                let mayContinue = previous.continuesOnNextLine || profile == .hardWrapped || interruptedLongLine || hangingPunctuation
+                let centeredLineEnds = previous.indentationCount >= line.indentationCount + 16
+                    && previous.text.unicodeScalars.count <= 48
+                let startsParagraph = blankSeparated || !mayContinue || line.indented
+                    || centeredLineEnds
+                    || isChapterHeading(previous.text)
+                    || isChapterHeading(line.text)
+                    || isIndependentDialogue(previous: previous.text, next: line.text)
+                    || isVersePair(previous.text, line.text)
+                if startsParagraph {
+                    appendParagraph(end: line.start)
+                    group.removeAll(keepingCapacity: true)
+                    groupStart = line.start
+                }
+            }
+            if group.isEmpty { firstLineIndex = index }
+            group.append(line)
+            previousLineIndex = index
+        }
+        appendParagraph(end: Int64(utf8.count))
+        return paragraphs
+    }
+
+    private static func physicalLine(
+        utf8: Data, start: Int, end: Int, continuesOnNextLine: Bool = false
+    ) -> PhysicalLine {
+        let raw = String(decoding: utf8[start..<end], as: UTF8.self)
+        let indentation = raw.unicodeScalars.prefix { CharacterSet.whitespaces.contains($0) }
+        return PhysicalLine(
+            start: Int64(start),
+            text: raw.trimmingCharacters(in: .whitespaces),
+            indentationCount: indentation.count,
+            indented: indentation.count >= 2 || indentation.contains("\t") || indentation.contains("\u{3000}"),
+            continuesOnNextLine: continuesOnNextLine
+        )
+    }
+
+    private static let numberedHeadingPrefix = try! NSRegularExpression(
+        pattern: #"第[零〇○一二三四五六七八九十百千万0-9]+[章节節回卷集部篇]"#
+    )
+    private static let proseOpening = try! NSRegularExpression(
+        pattern: #"話說|话说|卻說|却说|且說|且说|話表|话表"#
+    )
+    private static let wrappedProseOpening = try! NSRegularExpression(pattern: #"\s+([話话卻却且])\s*$"#)
+
+    /// Virtual line boundaries address the original bytes, including when a
+    /// printed chapter heading was glued to the preceding or following prose.
+    private static func splitPhysicalLine(utf8: Data, start: Int, end: Int) -> [PhysicalLine] {
+        let raw = String(decoding: utf8[start..<end], as: UTF8.self)
+        guard raw.contains("第") else { return [physicalLine(utf8: utf8, start: start, end: end)] }
+        var cuts: Set<Int> = [start, end]
+        var continuationStart: Int?
+        for match in numberedHeadingPrefix.matches(in: raw, range: NSRange(raw.startIndex..., in: raw)) {
+            guard let prefix = Range(match.range, in: raw) else { continue }
+            let before = raw[..<prefix.lowerBound].trimmingCharacters(in: .whitespaces)
+            let atStart = before.isEmpty
+            guard atStart || before.last.map({ "。！？!?".contains($0) }) == true else { continue }
+            let afterPrefix = raw[prefix.upperBound...]
+            // Embedded numbered references need the typography of a round title.
+            if !atStart && (raw[prefix].last != "回" || afterPrefix.first?.isWhitespace != true) { continue }
+            var headingEnd = raw.endIndex
+            let tailRange = NSRange(prefix.upperBound..<raw.endIndex, in: raw)
+            if let opening = proseOpening.firstMatch(in: raw, range: tailRange),
+               let body = Range(opening.range, in: raw),
+               raw[prefix.upperBound..<body.lowerBound].trimmingCharacters(in: .whitespaces).count >= 2 {
+                headingEnd = body.lowerBound
+            } else if let opening = wrappedProseOpening.firstMatch(in: raw, range: tailRange),
+                      let body = Range(opening.range(at: 1), in: raw),
+                      raw[prefix.upperBound..<body.lowerBound].trimmingCharacters(in: .whitespaces).count >= 2 {
+                var nextLineStart = end
+                if nextLineStart < utf8.count && utf8[nextLineStart] == 0x0D { nextLineStart += 1 }
+                if nextLineStart < utf8.count && utf8[nextLineStart] == 0x0A { nextLineStart += 1 }
+                let next = String(decoding: utf8[nextLineStart..<min(utf8.count, nextLineStart + 24)], as: UTF8.self)
+                    .trimmingCharacters(in: .whitespaces)
+                if next.first == "說" || next.first == "说" {
+                    headingEnd = body.lowerBound
+                    continuationStart = start + raw[..<headingEnd].utf8.count
+                }
+            }
+            let title = String(raw[prefix.lowerBound..<headingEnd]).trimmingCharacters(in: .whitespaces)
+            guard isChapterHeading(title) else { continue }
+            cuts.insert(start + raw[..<prefix.lowerBound].utf8.count)
+            if headingEnd < raw.endIndex { cuts.insert(start + raw[..<headingEnd].utf8.count) }
+        }
+        let ordered = cuts.sorted()
+        return zip(ordered, ordered.dropFirst()).map {
+            physicalLine(utf8: utf8, start: $0, end: $1, continuesOnNextLine: $0 == continuationStart)
+        }
+    }
+
+    private static func isIndependentDialogue(previous: String, next: String) -> Bool {
+        guard let first = next.unicodeScalars.first, openingQuoteScalars.contains(first),
+              let last = previous.unicodeScalars.last else { return false }
+        return sentenceTerminalScalars.contains(last) || closingQuoteScalars.contains(last)
+            || last == "，" || last == ","
+    }
+
+    private static func isVersePair(_ previous: String, _ next: String) -> Bool {
+        let left = previous.unicodeScalars
+        let right = next.unicodeScalars
+        guard [5, 7, 14].contains(left.count), left.count == right.count,
+              left.allSatisfy({ (0x3400...0x9FFF).contains($0.value) }),
+              right.allSatisfy({ (0x3400...0x9FFF).contains($0.value) })
+        else { return false }
+        return true
+    }
+
+    private static func joinParagraphLines(_ text: String) -> String {
+        let standard = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        let lines = standard.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        var result = ""
+        for line in lines {
+            if let last = result.unicodeScalars.last, let first = line.unicodeScalars.first,
+               !isCJK(last), !isCJK(first),
+               !closingTrailScalars.contains(first), !openingQuoteScalars.contains(last) {
+                result.append(" ")
+            }
+            result.append(line)
         }
         return result
     }
@@ -420,6 +618,20 @@ public struct AudiobookSourceIndex: Sendable, Equatable {
     }
 
     // MARK: - Private Helpers
+
+    static func isChapterHeading(_ trimmed: String) -> Bool {
+        guard !trimmed.isEmpty, trimmed.unicodeScalars.count <= 48 else { return false }
+        if let match = numberedHeadingPrefix.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed)),
+           match.range.location == 0, let range = Range(match.range, in: trimmed),
+           let next = trimmed[range.upperBound...].first, !next.isWhitespace,
+           "中里裏内內的是".contains(next) { return false }
+        let patterns = [
+            #"^第[零〇○一二三四五六七八九十百千万0-9]+[章节節回卷集部篇](\s+.*|[^\s，。！？；：,.!?;:]{1,40}|$)$"#,
+            #"^(序章|序言|楔子|引子|尾声|终章|后记|番外|附言)(\s+.*|$)"#,
+            #"^(Chapter|CHAPTER)\s+[0-9IVXLCDM]+(\s+.*|:.*|$)"#,
+        ]
+        return patterns.contains { trimmed.range(of: $0, options: .regularExpression) != nil }
+    }
 
     private static func detectLayoutProfile(
         utf8Data: Data,
@@ -615,6 +827,12 @@ public struct AudiobookSourceIndex: Sendable, Equatable {
 
         if nextScalarIdx >= endScalarIdx {
             return true
+        }
+
+        if layoutProfile == self.layoutProfile {
+            return paragraphStartOffsets.contains(scalarByteOffsets[nextScalarIdx])
+                || scalarAt(scalarIndex: nextScalarIdx) == "\n"
+                || scalarAt(scalarIndex: nextScalarIdx) == "\r"
         }
 
         var peekIdx = nextScalarIdx

@@ -1,443 +1,338 @@
 ---
-title: "有声书工坊大规模角色配音与 100+ 音色库分级架构规范"
+title: "有声书工坊大规模角色选角与音色资产规范"
 status: active
-audience: "系统架构师、macOS 客户端核心开发者、QA 验收工程师"
-version: "1.1.0"
+audience: "系统架构师、macOS 客户端开发者、QA 验收工程师"
+version: "2.1.0"
 date: 2026-10-15
 ---
 
-# 有声书工坊大规模角色配音与 100+ 音色库分级架构规范
+# 有声书工坊大规模角色选角与音色资产规范
 
-本文档规范 SpeechRail 有声书工坊（Audiobook Workshop）在长篇多人小说（单书 50～200+ 出场角色）场景下的**自适应四级角色分层、主配角双池音色分配、带权同场对话冲突图着色、模式感知微韵律分化**，以及当用户音色资产突破 **100～500+** 时的**三层作用域隔离、六维声部行当分面分类、剧团音色包与智能选角交互架构**。
+本文规定长篇多人小说中全书角色建模、独占与共享声音分配、同场对白冲突处理，以及 100～500+ 音色资产的可见范围、生命周期和选角交互。角色规模以 50～200+ 为设计场景，数量本身不构成质量或性能验收结论。
 
----
+本文是目标行为与验收依据，不代表相关功能均已实现。当前实现差异、阶段顺序、执行证据和回退步骤见[分阶段实施计划](../superpowers/plans/2026-10-15-audiobook-mass-casting.md)。公共参数和错误仍以 [OpenAPI](../../contracts/openapi.yaml) 为准；本规范不为服务新增种子、SSML、表达控制或其他未声明能力。
 
-## 1. 核心设计原则与架构不变量
+## 1. 边界与不变量
 
-### 1.1 六大核心不变量
-
-1. **主角独占与配角共享物理隔离（Dual-Pool Isolation）**：
-   全书可用音色在逻辑上严格切分为「旁白与核心主角独占池（Exclusive Pool）」与「配角行当共享池（Shared Repertory Pool）」。凡被旁白或核心主角（`allowSharedMinorVoice == false`）锁定的音色，除非全书可用音色总数低于主角人数，否则严禁分配给任何配角或群演，从根源消除主配角撞声与 `.duplicateVoiceRequiresSharedMinorConsent` 绑定死锁。
-2. **帕累托自适应主次分层（Pareto-Bounded Cast Stratification）**：
-   角色主次层级不采用固定句数硬编码，而是由全书已归属对白的帕累托分布（前 75% 累计对白量）与当前可用音色池预算 $K = \min(6, \max(1, M - 2))$ 联合决定，确保在音色受限环境下优先保障高频核心主角的声线独占。
-3. **同场对手戏零撞音优先（Scene Co-occurrence Repulsion）**：
-   共享音色池内的配角分配必须受同场对话共现图 $G = (V, E, w)$ 约束。在同一章节相邻 $\le 6$ 个原文块（Atom）内发生交替对话的角色对拥有最高排斥权重，着色器优先为其指派不同音色。
-4. **模式感知微韵律与声纹保真守卫（Mode-Aware Micro-Prosody Guard）**：
-   当多个配角共用同一音色时，韵律分化严格遵循音色底层合成模式契约：
-   - **`system` 预设音色**：允许在 `[0.92, 1.08]` 安全区间内施加确定性微语速偏移与固定随机种子；
-   - **`clone` / `design` 克隆与设计音色**：语速强制锁定为 `1.0`（防止声纹畸变或触发服务端参数拒绝），仅通过确定性采样种子（`callerSeed`）在呼吸、停顿与微语调上产生可复现分化。
-5. **零台词背景人物门禁豁免（Silent Role Gate Exemption）**：
-   在大模型阶段一/二被提取进角色表、但在阶段三全书对白归属中实际发声块数 `dialogueAtomCount == 0` 的“仅提及人物”，自动归入 `.ensemble` 层级并豁免 `confirmCast` 强制配声门禁。
-6. **跨书专用音色作用域隔离（Book-Scoped Voice Isolation）**：
-   从某本书角色卡片跳转「AI 设计新音色」或「录音克隆」生成的角色定制音色，默认绑定 `VoiceAssetScope.bookExclusive` 与来源 `originBookID` / `originRoleID`。该音色在所属书籍内享有最高自动匹配优先级，对其他书籍及演播台默认隐藏，直至用户显式执行「晋升为全局通用音色」。
-
-### 1.2 端到端数据流拓扑
+1. **职责归属**：角色分析、选角、试听确认、书籍状态与影响范围属于 macOS App；服务端只负责能力发现、准入和 ASR/TTS。沿用单服务、单 worker 与现有资源治理，不复制模型进程增加选角或制作吞吐。
+2. **能力事实一致**：一次规划使用同一份 `effective_capabilities_v1` 的音色、操作参数、模型身份和准入事实。`available` 只表示可路由，不能代替 `production_ready`；未知值不能默认成功。
+3. **作用域严格过滤**：他书专用、已归档和归属未知的自定义音色不能自动进入本书候选池。过滤结果为空时报告原因，不回退到未过滤目录。
+4. **独占约束优先**：旁白和人工明确要求独占的角色不与其他角色复用同一声音。资源不足或既有锁定冲突必须显式报告，不能自动改成共享、跳过失败角色或部分落库。
+5. **角色身份稳定**：已确认声音、人工锁定及其版本受保护。新增无关音色、输入重排和统计刷新不自动改绑；更换前展示受影响角色与片段，生成候选后显式采用。
+6. **原文与作品保护**：沿用只读 UTF-8 原文、字节区间和局部失效机制。选角、归档、撤销或迁移不删除历史音频、候选和已采用版本。
+7. **可解释的有限求解**：分配器返回方案、未解决项和原因。启发式未找到方案、预算耗尽和已证明无解是不同结果；不能把有限罚分或算法名称当作零冲突保证。
+8. **证据分层**：确定性测试证明逻辑与请求合同；真实模型测试证明指定环境和素材下的输出；人工听评证明指定样本的听感。三者不得互相替代。
 
 ```mermaid
-flowchart TB
-    %% -----------------------------------------------------------
-    %% 1. 输入与前置建模层
-    %% -----------------------------------------------------------
-    subgraph S1["1. 双源输入与建模预处理 (Inputs & Preprocessing)"]
-        direction LR
-
-        subgraph S1_Voice["音色资产目录层 (VoiceCatalogStore)"]
-            direction TB
-            VC["SafeVoiceCatalog<br/>全量可用音色"]
-            SF(["作用域过滤守卫<br/>isVoiceActiveForBook"])
-            Pool["当前书籍活跃音色池 (M)<br/>全局通用 + 本书专属"]
-            Drop[/"跨书隔离 / 归档冷备"/]
-            TC["VoiceTaxonomyClassifier<br/>六大声部行当自动归类"]
-
-            VC --> SF
-            SF -->|"满足作用域"| Pool
-            SF -.->|"他书专属 / 已归档"| Drop
-            Pool --> TC
-        end
-
-        subgraph S1_Cast["角色分层与冲突建模 (AudiobookCastRegistry)"]
-            direction TB
-            Ann["全书 Annotations & Characters<br/>对白标注与角色定义"]
-            Stats["对白统计与独占预算 K<br/>computeRoleDialogueStats"]
-            Tiers["帕累托四级角色分层<br/>.narrator / .lead / .supporting / .ensemble"]
-            Graph[("同场对话冲突图 G=(V,E,w)<br/>buildSceneConflictGraph<br/>同章共现+10 / 紧邻对话≤6块+100")]
-
-            Ann --> Stats
-            Stats --> Tiers
-            Ann --> Graph
-        end
-    end
-
-    %% -----------------------------------------------------------
-    %% 2. 双池智能选角分配层
-    %% -----------------------------------------------------------
-    subgraph S2["2. 两阶段智能选角分配引擎 (recommendVoiceBindings)"]
-        direction LR
-
-        subgraph S2_Exclusive["阶段一：核心主角独占分配 (Exclusive Phase)"]
-            direction TB
-            ExAlloc["独占池打分与择优指派<br/>本角专用(+500) / 首选包(+28) / 声部契合<br/>产出: exclusiveLockedVoiceIDs"]
-        end
-
-        subgraph S2_Shared["阶段二：配角共享图着色分配 (Shared Phase)"]
-            direction TB
-            SharedPool["构建配角共享候选池<br/>activeVoices 扣除 exclusiveLockedVoiceIDs"]
-            WP["Welsh-Powell 加权度降序着色<br/>声部匹配 - 同场对手戏排斥 - 复用均衡"]
-            SharedPool --> WP
-        end
-
-        ExAlloc -->|"扣除已锁独占音色"| SharedPool
-    end
-
-    %% 输入层 -> 选角层连线
-    TC -->|"活跃音色画像"| ExAlloc
-    Tiers -->|".narrator + .lead"| ExAlloc
-    Tiers -->|".supporting + .ensemble"| WP
-    Graph -->|"冲突排斥权重 w"| WP
-
-    %% -----------------------------------------------------------
-    %% 3. 微韵律注入与合成透传层
-    %% -----------------------------------------------------------
-    subgraph S3["3. 微韵律注入与合成透传 (Production Pipeline)"]
-        direction TB
-
-        subgraph S3_Assembly["绑定参数分化与映射装配"]
-            direction LR
-            Prosody["模式感知微韵律与种子分化<br/>system: 0.92~1.08x 微语速 | clone: 1.0x 锁定 + 种子"]
-            Bindings["AudiobookVoiceBinding 字典<br/>全书角色音色与微调参数绑定映射表"]
-            Prosody -->|"共享微调绑定"| Bindings
-        end
-
-        Digest["分片规划器 (缓存指纹注入)<br/>AudiobookFragmentPlanner · dependencyDigest"]
-        TTS["合成控制器 (音频生成透传)<br/>AudiobookProductionController · effectiveSpeed & callerSeed"]
-
-        WP -->|"共享角色选角"| Prosody
-        ExAlloc -->|"独占基准绑定 (1.0x 无种子)"| Bindings
-        Bindings --> Digest
-        Digest --> TTS
-    end
+flowchart LR
+    A[能力与目录快照] --> B[合法候选池]
+    C[角色与原文标注] --> D[统计与冲突图]
+    B --> E[锁定与容量检查]
+    D --> E
+    E --> F[独占匹配与共享分配]
+    F --> G[方案预览与试听确认]
+    G --> H[原子应用与局部失效]
+    H --> I[片段准入复核与严格合成]
 ```
 
----
+## 2. 领域模型与数据权威
 
-## 2. 领域模型与持久化规范（`AudiobookDomain.swift`）
+下列模型为实施接口要求；现有类型、字段和存储差异在计划中逐项处理，不通过保留旧别名掩盖差异。迁移必须保留既有作品和未知事实。
 
-### 2.1 四级角色分层模型（`AudiobookRoleTier` & `AudiobookRoleDialogueStats`）
+### 2.1 人物重要程度与声音政策
 
-| 枚举值 | 中文名称 | 声线独占策略 | 典型角色特征 | 合成确认门禁 (`confirmCast`) |
-| :--- | :--- | :--- | :--- | :--- |
-| `.narrator` | 旁白 | **强制独占** (`isMajor = true`, `allowSharedMinorVoice = false`) | 全书叙述者 | 必须绑定可合成音色 |
-| `.lead` | 核心主角 | **强制独占** (`isMajor = true`, `allowSharedMinorVoice = false`) | 处于全书累计 75% 对白帕累托前沿且在独占预算 $K$ 内 | 必须绑定可合成音色 |
-| `.supporting` | 重要配角 | **共享池防撞色复用** (`isMajor = false`, `allowSharedMinorVoice = true`) | 有多轮对话或跨章登场，但超出独占预算或未达主角阈值 | 只要 `dialogueAtomCount > 0` 即须绑定 |
-| `.ensemble` | 龙套群演 | **声部基准池共享** (`isMajor = false`, `allowSharedMinorVoice = true`) | 单章仅 1 句台词的路人，或 `dialogueAtomCount == 0` 的仅提及人物 | `dialogueAtomCount == 0` 时**自动豁免门禁** |
+`AudiobookRoleTier` 保留 `.narrator / .lead / .supporting / .ensemble`，表达叙事重要程度；声音预算不改变人物在故事中的身份。
 
-`AudiobookRoleDialogueStats` 结构体的精确字段契约如下：
+| 对象 | 必需信息 | 规则 |
+| :--- | :--- | :--- |
+| `AudiobookRoleDialogueStats` | `roleID`、`dialogueAtomCount`、`dialogueScalarCount`、实际发声章节/场景集合、`tier`、统计修订号 | 发声与仅被提及分开统计；文本量按 Unicode scalar 计数，不使用 UTF-8 字节数除以 3 |
+| `AudiobookRoleVoicePolicy` | `sharingPolicy`、`bindingOrigin`、`isLocked` | `sharingPolicy` 为 `automatic / exclusive / sharedMinor`；来源为 `manual / acceptedRecommendation / automatic / legacyUnknown` |
+| `AudiobookVoiceBinding` | 角色、canonical voice ID、真实版本、有效参数、绑定修订号 | 人工确认的绑定受保护；服务未提供的身份字段保持未知，不补 `v1` 或模型名称 |
 
-```swift
-public struct AudiobookRoleDialogueStats: Codable, Hashable, Sendable {
-    public var roleID: UUID
-    public var dialogueAtomCount: Int   // 全书归属给该角色的非格式化 Atom 总数
-    public var dialogueCharCount: Int   // 估算对白总字数（按 UTF-8 字节数 / 3 折算下限）
-    public var chapterCount: Int        // 实际发生对白或登场的去重章节数
-    public var dialogueShare: Double    // 占全书非旁白总对白句数的比例 [0.0, 1.0]
-    public var tier: AudiobookRoleTier  // 自适应推导的四级角色层级
+旁白始终独占。`automatic` 允许在预算内提出独占或共享建议，但共享必须在方案中明确展示并经用户接受；`exclusive` 不因批量分配而改变。`isLocked` 保护范围不受全书角色总数限制。
 
-    /// 旁白或拥有至少 1 句对白的角色必须绑定音色；0 台词背景人物豁免
-    public var requiresVoiceBinding: Bool {
-        tier == .narrator || dialogueAtomCount > 0
-    }
-}
-```
+迁移无法区分人工与自动来源的既有绑定标为 `legacyUnknown` 并冻结，待用户主动调整；不能根据频次、姓名或旧布尔值伪造其决策来源。
 
-### 2.2 六大标准声部行当（`AudiobookVoiceArchetype`）
+### 2.2 六维声音画像与快捷行当
 
-为解决 100+ 音色与数十名配角的快速匹配问题，系统将角色人设与音色资产统一映射到正交的六大标准声部行当：
+底层画像采用独立字段；快捷行当是其展示投影，不承担完整语义，也不把旁白职业等同于年龄或性别。
 
-| 枚举值 (`rawValue`) | 界面标题 (`title`) | 紧凑徽标 (`shortBadgeTitle`) | 性别维 | 年龄维 | 典型声学特征与适用行当 |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| `.youngMale` (`young_male`) | 青年男声 | 青年男 | 男 (`male`) | 青年 | 清亮、阳光、少年、公子、侍卫、年轻侠客 |
-| `.matureMale` (`mature_male`) | 沉稳中年男声 | 中年男 | 男 (`male`) | 中年 | 浑厚、中低音、沉稳、掌柜、将军、父亲、旁白 |
-| `.elderMale` (`elder_male`) | 苍老老者男声 | 老年男 | 男 (`male`) | 老年 | 沙哑、苍老、低沉、老叟、族长、长老、老掌柜 |
-| `.youngFemale` (`young_female`) | 清亮青年女声 | 青年女 | 女 (`female`) | 青年 | 清脆、明快、甜美、少女、小姐、丫鬟、女侠 |
-| `.matureFemale` (`mature_female`) | 成熟温柔女声 | 成熟女 | 女 (`female`) | 中年 | 温婉、知性、柔和、母亲、夫人、掌门师姐、女旁白 |
-| `.elderOrChild` (`elder_or_child`) | 慈祥老妪与童声 | 老幼特型 | 中性/特型 | 老妪/幼童 | 慈祥老妇、婆婆、祖母、男童、女童、孩童 |
-
-同性别兜底关系（`isSameGenderGroup`）：
-- 男性组：`{.youngMale, .matureMale, .elderMale}`；
-- 女性组：`{.youngFemale, .matureFemale, .elderOrChild}`。
-
-### 2.3 100+ 音色三层作用域与扩展元数据（`VoiceAssetScope` & `VoiceAssetMetadata`）
-
-在不破坏后端 `SafeVoiceEntry` / `CreatorVoice` 协议的前提下，客户端通过 `VoiceCatalogStore` 维护每个 `voiceID` 的生命周期作用域与分类元数据：
-
-```swift
-public enum VoiceAssetScope: String, Codable, Sendable, CaseIterable, Identifiable {
-    case globalReusable = "global_reusable" // 全局通用常备音色
-    case bookExclusive  = "book_exclusive"  // 特定书籍剧组专用音色
-    case archived       = "archived"        // 已归档冷备音色
-}
-
-public enum VoiceCreationSource: String, Codable, Sendable, CaseIterable {
-    case systemBuiltIn  = "system_builtin"  // 系统内置预设音色
-    case voiceDesign    = "voice_design"    // AI 音色设计生成
-    case voiceClone     = "voice_clone"     // 参考音频克隆生成
-    case externalImport = "external_import" // 外部导入
-}
-
-public struct VoiceAssetMetadata: Codable, Hashable, Sendable, Identifiable {
-    public var id: String { voiceID }
-    public var voiceID: String
-    public var scope: VoiceAssetScope
-    public var originBookID: UUID?
-    public var originBookTitle: String?
-    public var originRoleID: UUID?
-    public var originRoleName: String?
-    public var archetypeOverride: AudiobookVoiceArchetype?
-    public var customTags: [String]
-    public var isFavorite: Bool
-    public var creationSource: VoiceCreationSource
-    public var createdAt: Date
-}
-```
-
-### 2.4 剧团音色包与本地持久化契约（`VoiceCollection` & `VoiceCatalogStore`）
-
-`VoiceCatalogStore` 采用 `@unchecked Sendable` + `NSLock` 线程安全封装，持久化路径为：
-- **生产默认路径**：`~/Library/Application Support/SpeechRail/voice_catalog_metadata_v1.json`（原子写入 `.atomic`）；
-- **测试隔离注入**：支持通过 `VoiceCatalogStore(storageURL:)` 注入临时目录 URL，确保单元测试 100% 隔离且零污染用户真实配置。
-
-首次初始化时自动注入 3 个内置剧团音色包（`isBuiltIn = true`）：
-1. **经典旁白与主角包**（`id: 00000000-0000-0000-0000-000000000101`）：适用于长篇小说旁白与男女主角核心声线；
-2. **古风仙侠剧团包**（`id: 00000000-0000-0000-0000-000000000102`）：适用于武侠、仙侠、历史题材的多行当常备音色组；
-3. **现代都市剧团包**（`id: 00000000-0000-0000-0000-000000000103`）：适用于现代悬疑、职场、言情题材的多行当常备音色组。
-
-**跨书可见性过滤守卫（`isVoiceActiveForBook`）**：
-```swift
-public func isVoiceActiveForBook(voiceID: String, currentBookID: UUID?) -> Bool {
-    guard let meta = metadata(for: voiceID) else {
-        return true // 未登记扩展元数据的系统/存量音色默认视为 .globalReusable
-    }
-    switch meta.scope {
-    case .globalReusable:
-        return true
-    case .bookExclusive:
-        guard let currentBookID, let originBookID = meta.originBookID else {
-            return false
-        }
-        return currentBookID == originBookID
-    case .archived:
-        return false
-    }
-}
-```
-
----
-
-## 3. 核心算法与数学模型规范
-
-### 3.1 六维声部行当双向推导算法（`VoiceTaxonomyClassifier`）
-
-#### 3.1.1 音色资产声部自动分类（`classify(voice:metadata:)`）
-按以下四级优先级确定任意 `SafeVoiceEntry` 的声部行当：
-1. **人工显式指定优先**：若 `metadata?.archetypeOverride != nil`，直接返回该行当；
-2. **描述符结构化字段（`SafeVoiceDescriptor`）结合文本语料融合判定**：
-   将 `voice.id`、`voice.name`、`voice.descriptors.styleTags`、`voice.descriptors.pitchBand`、`voice.descriptors.timbreFamily` 与 `metadata?.customTags` 拼接为小写检索语料 `corpus`；
-3. **性别与年龄段特征词典匹配**：
-   - **老幼特型（`.elderOrChild`）**：命中 `童 / 小孩 / 正太 / 萝莉 / child / kid / boy / girl` 或（女性且命中 `老妇 / 老太 / 婆婆 / 奶奶 / 姥姥 / 慈祥老`）；
-   - **女性分支**：命中 `女 / 姐 / 妹 / 娘 / 妇 / 婆 / 姑 / 嫂 / 姨 / 妃 / 婢 / 丫鬟 / female / woman /vivian / serena / cherry / chelsie / momo / maia`：
-     - 若同时命中 `成熟 / 温婉 / 御姐 / 知性 / 中年 / 夫人 / 母亲 / 沉稳 / 低沉 / 磁性 / serena` 或 `pitchBand == "low"` $\rightarrow$ **`.matureFemale`**；
-     - 否则 $\rightarrow$ **`.youngFemale`**；
-   - **男性分支**：命中男性词表（`男 / 哥 / 叔 / 爷 / 伯 / 公子 / 少侠 / 老汉 / 老叟 / 老者 / 掌柜 / 将军 / 大叔 / male / man / dylan / ethan / ryan / aiden / uncle`）：
-     - 若命中 `老 / 叟 / 爷 / 苍老 / 沙哑 / 鹤发 / 长老 / 老者 / elder / old` $\rightarrow$ **`.elderMale`**；
-     - 若命中 `中年 / 大叔 / 沉稳 / 浑厚 / 低沉 / 磁性 / 掌柜 / 将军 / 父亲 / 旁白 / uncle / mature` 或 `pitchBand == "low"` $\rightarrow$ **`.matureMale`**；
-     - 否则 $\rightarrow$ **`.youngMale`**；
-4. **未知标签确定性散列兜底**：
-   若自定义克隆音色未携带任何性别或年龄关键词，基于 `voice.id` 的 UTF-8 字节模运算在 `.matureMale`、`.youngMale`、`.youngFemale`、`.matureFemale` 之间稳定映射，保证分类结果 100% 确定且无随机漂移。
-
-#### 3.1.2 角色声部行当推导（`AudiobookCharacter.inferredVoiceArchetype(peers:)`）
-复用 `AudiobookCastRegistry.inferVoicePersona(for:peers:)` 提取出的六维声学画像（`AudiobookVoicePersona`），将 `(gender, ageBand)` 确定性映射至 `AudiobookVoiceArchetype`：
-- `ageBand == .child` $\rightarrow$ `.elderOrChild`；
-- `gender == .female`：`.elder` $\rightarrow$ `.elderOrChild`，`.middleAged` $\rightarrow$ `.matureFemale`，其余 $\rightarrow$ `.youngFemale`；
-- `gender == .male`：`.elder` $\rightarrow$ `.elderMale`，`.middleAged` $\rightarrow$ `.matureMale`，其余 $\rightarrow$ `.youngMale`；
-- `gender == .neutral`：`.elder` $\rightarrow$ `.elderMale`，`.young` $\rightarrow$ `.youngMale`，其余（含默认旁白）$\rightarrow$ `.matureMale`。
-
----
-
-### 3.2 帕累托自适应四级角色分层算法（`computeRoleDialogueStats`）
-
-输入：`characters: [AudiobookCharacter]`、`annotations: [AudiobookAnnotation]`、`availableVoiceCount: Int`（当前可见且 `productionReady` 的音色数 $M$）。
-
-#### 步骤 1：统计全书已归属对白分布
-遍历 `annotations`，若 `assignment.roleID == r.id`，累加该角色的发声块数 `atomCounts[r.id] += 1`、估算字符数 `charCounts[r.id] += max(1, byteCount / 3)` 及登场章节集合 `chapterSets[r.id]`。记非旁白角色总发声块数为：
-$$T_{\text{dialogue}} = \sum_{r \notin \text{narrator}} \text{atomCounts}[r]$$
-
-#### 步骤 2：计算主角独占预算 $K$ 与帕累托阈值
-- 当非旁白角色总数 $N_{\text{nonNarrator}} \le 4$ 时，属于少角色短篇，允许全部有台词角色独占（$K = N_{\text{nonNarrator}}$）；
-- 当 $N_{\text{nonNarrator}} > 4$ 时，为确保配角共享池至少留有 2 个可轮转音色（当 $M \ge 3$ 时），核心主角独占名额上限为：
-  $$K = \min\left(6,\ \max(1, M - 2)\right)$$
-- 成为核心主角的最低台词句数门槛为：
-  $$C_{\min} = \max\left(3,\ \lceil 0.08 \times T_{\text{dialogue}} \rceil\right)$$
-
-#### 步骤 3：四级层级判定与共享标志同步
-按 `atomCounts[r]` 降序（同句数按登场章节数及姓名稳定排序）扫描非旁白角色，维护累计对白占比 $S_{\text{cum}}$：
-
-1. **`.ensemble`（龙套群演 / 0 台词背景人物）**：
-   满足 `atomCounts[r] == 0`，或（$N_{\text{nonNarrator}} > 6$ 且 `atomCounts[r] <= 1` 且登场章节数 $\le 1$）。
-   - 自动设置：`isMajor = false`，`allowSharedMinorVoice = true`。
-2. **`.lead`（核心主角）**：
-   已入选主角数 $< K$，且满足以下任一条件：
-   - $N_{\text{nonNarrator}} \le 4$ 且 `atomCounts[r] > 0`；
-   - 全书对白量排名第 1 的第一主角；
-   - 入选前累计对白占比 $S_{\text{cum}} < 0.75$ 且 `atomCounts[r] >= C_min`；
-   - `atomCounts[r] >= 6` 且跨 $\ge 2$ 章登场。
-   - 自动设置：`isMajor = true`，`allowSharedMinorVoice = false`。
-3. **`.supporting`（重要配角）**：
-   其余所有有台词角色。
-   - 自动设置：`isMajor = false`，`allowSharedMinorVoice = true`。
-
-> **人工锁定保护规则**：若全书非旁白角色数 $\le 6$ 且用户已显式将某有台词角色设为 `isMajor == true && allowSharedMinorVoice == false`，分层器保留其 `.lead` 独占身份。
-
----
-
-### 3.3 带权同场对话冲突图与双池 Welsh-Powell 着色算法
-
-#### 3.3.1 同场对话冲突图构建（`buildSceneConflictGraph`）
-定义无向带权图 $G = (V, E, w)$，顶点集 $V$ 为全书非旁白角色：
-1. **同章共现弱边（$+10$）**：在同一 `chapterID` 内出现过的任意两个非旁白角色 $(u, v)$，边权累加 $10$；
-2. **同场紧邻对话强边（$+100$）**：将每章内的非旁白已归属标注按 `sourceRange.lowerBound` 升序排列为序列 $a_1, a_2, \dots, a_m$。对任意 $1 \le i < j \le \min(m, i + 6)$：
-   若 $\text{role}(a_i) \ne \text{role}(a_j)$，令边权：
-   $$w(\text{role}(a_i), \text{role}(a_j)) \mathrel{+}= 100$$
-
-#### 3.3.2 双池隔离与多因子着色打分（`recommendVoiceBindings`）
-
-1. **阶段一（独占池分配）**：
-   按 `.narrator` $\rightarrow$ `.lead`（台词量降序）遍历核心角色。候选池为 `activeVoices`。优先从尚未被占用的 `unusedVoices` 中选取最高分音色，并将选中音色加入 `exclusiveLockedVoiceIDs`。
-2. **阶段二（配角共享池 Welsh-Powell 着色）**：
-   构建配角共享池：
-   $$\mathcal{P}_{\text{shared}} = \{ v \in \text{activeVoices} \mid v.\text{id} \notin \text{exclusiveLockedVoiceIDs} \}$$
-   （仅当 $\mathcal{P}_{\text{shared}} = \varnothing$，即全书可用音色总数 $M$ 小于等于核心主角数时，才回退至 `activeVoices`）。
-   将所有 `.supporting` 与 `.ensemble` 角色按冲突图加权度 $\deg_w(r) = \sum_{u} w(r, u)$ 与对白句数降序排列，依次对每个候选音色 $v \in \mathcal{P}_{\text{shared}}$ 计算综合得分：
-
-| 评分维度 | 计算公式 / 条件 | 分值权重 | 设计目的 |
-| :--- | :--- | :--- | :--- |
-| **基础六维声学匹配分** | `scoreVoiceForCharacter(voice:character:peers:)` | $-80 \sim +180$ | 匹配性别、年龄段、音调高低、音色质地与语速倾向 |
-| **本书本角色专用音色** | `meta.scope == .bookExclusive && meta.originBookID == bookID && meta.originRoleID == role.id` | **$+500$** | 用户专为该角色设计/克隆的声线以绝对优先级绑定回本角色 |
-| **同书专用音色加成** | `meta.scope == .bookExclusive && meta.originBookID == bookID` | $+35$ | 本书剧组内定制的音色优先于外部通用音色 |
-| **首选剧团音色包加成** | `preferredVoiceIDs.contains(v.id)` | $+28$ | 优先采用本书绑定的剧团音色包（如「古风仙侠剧团包」） |
-| **星标常用音色加成** | `meta.isFavorite == true` | $+10$ | 适度向用户收藏的高品质常备音色倾斜 |
-| **声部行当精确命中** | `voiceArchetype == roleArchetype` | $+45$ | 确保青年男/中年男/老者/青年女/成熟女行当对位 |
-| **同性别跨龄行当兼容** | `voiceArchetype.isSameGenderGroup(as: roleArchetype)` | $+15$ | 当目标年龄段无空闲音色时，优先同性别邻近声部 |
-| **跨性别行当强排斥** | `!voiceArchetype.isSameGenderGroup(as: roleArchetype)` | **$-120$** | 严防男角配女声或女角配男声 |
-| **同场紧邻对手戏冲突惩罚** | 存在已绑音色 $v$ 的邻居 $u$ 且 $w(r, u) \ge 100$ | **$-600 \times \min(5, \lfloor w(r, u)/100 \rfloor)$** | 强制同场交替对话的对手戏角色错开音色 |
-| **同章非紧邻共现惩罚** | 存在已绑音色 $v$ 的邻居 $u$ 且 $10 \le w(r, u) < 100$ | $-120$ | 尽量减少同一章节内不同配角撞音 |
-| **全局复用负载均衡惩罚** | `usageCount = voiceUsageCounts[v.id, default: 0]` | **$-35 \times \text{usageCount}$** | 将多个配角均匀分散到共享池的多个同声部音色中 |
-
----
-
-### 3.4 模式感知微韵律与确定性种子分化算法（`computeMicroProsodyAndSeed`）
-
-当角色 $r$ 作为共享音色 $v$ 的第 $k$ 位使用者（$k = \text{slotIndex} \ge 0$）时：
-
-1. **若 $r$ 为核心主角/旁白（`!isSharedMinor`）或首位使用者（$k = 0$）**：
-   $$\text{allowedSpeed} = 1.0,\quad \text{callerSeed} = \text{nil}$$
-2. **若 $k \ge 1$ 且 `v.mode.lowercased() == "system"`**：
-   - 计算 `SHA256("\(r.id.uuidString):\(k)")` 的首字节 $d_0$ 与次字节 $d_1$；
-   - 从预设微语速表 $\mathcal{S} = [0.94, 1.06, 0.96, 1.04, 0.92, 1.08]$ 中按索引 $(k - 1 + d_0) \bmod 6$ 选取基准微语速 $s_{\text{base}}$；
-   - 叠加角色人设语速倾向修正：若人设含 `慢 / 缓 / 迟滞 / 从容` 则 $-0.02$；若含 `快 / 急 / 利落 / 干脆` 则 $+0.02$；
-   - 钳制并四舍五入至两位小数：
-     $$\text{allowedSpeed} = \text{round}_{0.01}\left(\min(1.08, \max(0.92, s_{\text{base}} + \Delta_{\text{pace}}))\right)$$
-   - 分配确定性种子：
-     $$\text{callerSeed} = 100 + ((k \times 97 + d_1) \bmod 899)$$
-3. **若 $k \ge 1$ 且 `v.mode.lowercased() != "system"`（即 `clone` / `design` 模式）**：
-   - 严格锁定语速防止声纹失真：
-     $$\text{allowedSpeed} = 1.0$$
-   - 从克隆安全种子表 $\mathcal{C} = [101, 202, 303, 404]$ 中按 $(k - 1) \bmod 4$ 分配 `callerSeed`。
-
-**合成管线与脏标记联动契约**：
-- `AudiobookFragmentPlanner` 在计算每个合成片段的 `dependencyDigest` 时，将 `binding.allowedSpeed` 与 `binding.callerSeed` 纳入 SHA-256 摘要输入；
-- `AudiobookProductionController.renderSingleFragmentWithFiniteRetry` 读取 `let effectiveSpeed = binding.allowedSpeed`，连同 `binding.callerSeed` 一并填入 `AudiobookSynthesizeRequest`，并把实际合成语速写入 `AudiobookCandidate.speed` 审计字段。
-
----
-
-## 4. 控制器与工作台交互规范
-
-### 4.1 配声控制器扩展契约（`AudiobookCastController.swift`）
-
-1. **`confirmCast(bookID:revisionID:)` 零台词门禁豁免**：
-   - 读取全书 `annotations`，统计每个 `roleID` 的实际发声块数 `dialogueCounts[roleID]`；
-   - 仅收集满足 `(role.isNarrator || dialogueCounts[role.id, default: 0] > 0)` 且 `bindings[role.id] == nil` 的角色进入 `missing` 数组；
-   - 若 `missing.isEmpty`，门禁顺利通过，不再因 0 台词背景角色未配声而阻断章节合成。
-2. **`batchBindArchetypeVoice(...)` 按声部行当一键批量配声**：
-   ```swift
-   public func batchBindArchetypeVoice(
-       bookID: UUID,
-       archetype: AudiobookVoiceArchetype,
-       voice: SafeVoiceEntry,
-       onlyMinorRoles: Bool = true,
-       onlyUnbound: Bool = false
-   ) async throws -> Int
-   ```
-   - 筛选满足 `role.inferredVoiceArchetype(peers: characters) == archetype` 的非旁白角色；
-   - 当 `onlyMinorRoles == true` 时自动跳过 `tier == .lead` 的核心主角，防止误覆盖主角独占声线；
-   - 自动将目标配角的 `allowSharedMinorVoice` 置为 `true`，并为第 $2\dots N$ 个角色调用 `computeMicroProsodyAndSeed` 注入微语速与种子分化，单次事务写回 `characters` 与 `voiceBindings`。
-
-### 4.2 有声书工作台选角与筛选交互（`AudiobookBookWorkspaceView.swift` & `AudiobookWorkflowModel.swift`）
-
-1. **右侧角色检查器顶栏统计与五维筛选（`CastFilterScope`）**：
-   - 实时计算并展示 `主角独占 X · 配角共享 Y · 同场撞音 Z`；
-   - 支持五维过滤：`全部 (.all)`、`核心主角 (.majorOnly)`、`本章登场 (.currentChapter)`、`未配声 (.unboundOnly)`、`同场冲突 (.conflictsOnly)`；
-   - 提供「按行当批量配声」下拉菜单，按六大声部行当显示配角人数，支持一键将某音色赋给某行当的「未配声配角」或「全部配角」。
-2. **智能选角浮层（`AudiobookVoicePickerPopover`）**：
-   - 取代原生扁平 `Menu`，内置关键词实时搜索框、四级范围胶囊（`智能推荐 / 星标收藏 / 本书专用 / 全部活跃`）与六大声部行当过滤胶囊（打开时默认定位到当前角色的推断声部）；
-   - 每行清晰展示音色占用状态（`当前已绑` / `主角「XXX」独占` / `配角共享 ×N` / `空闲可用`）及行内试听按钮；
-   - 底部提供 `0.92x ~ 1.08x` 微语速滑块（`system` 模式激活，`clone` 模式显示固定 `1.00x` 声纹保真说明）及跳转「AI 设计新音色 / 录音克隆」入口。
-3. **设计/克隆新音色返回自动归入 `.bookExclusive`**：
-   - `AudiobookWorkflowModel.completeVoiceRoundTrip` 在完成音色绑定后，自动调用 `VoiceCatalogStore.shared.registerBookExclusiveVoice(...)` 记录 `originBookID`、`originBookTitle`、`originRoleID`、`originRoleName` 与推断声部行当。
-
-### 4.3 全局音色库与演播台分面管理（`CreatorSurfaceViews.swift`）
-
-1. **`VoiceLibraryView`（音色库）**：
-   - 顶部第一层为四级作用域分段导航：`通用活跃 (.activeReusable)`、`星标收藏 (.favorites)`、`剧组专用 (.bookExclusive)`、`已归档 (.archived)`（各自带实时数量徽标）；
-   - 顶部第二层为六大声部行当胶囊过滤栏（`全部声部` + `AudiobookVoiceArchetype.allCases`）；
-   - 音色卡片头部展示星标收藏开关、声部行当胶囊与 `《书名·角色名》专用` 溯源徽标；
-   - 卡片上下文菜单提供完整生命周期动作：`晋升为全局通用音色`（将剧组专用音色开放给全书架与演播台复用）、`设置声部行当`（手动覆盖自动分类）、`归档音色 / 恢复音色`。
-2. **`DubbingDeskView`（演播台）**：
-   - 演播台音色选择器自动通过 `VoiceCatalogStore.shared.isVoiceActiveForBook(voiceID:currentBookID: nil)` 过滤掉单书专用音色与归档音色，并将星标收藏音色置顶排列。
-
----
-
-## 5. 代码模块映射与自动化验收规范（AC1～AC10）
-
-### 5.1 源文件职责映射
-
-| 源文件路径 | 核心类型与函数 |
+| 维度 | 表达与未知处理 |
 | :--- | :--- |
-| `macos/SpeechRailApp/SpeechRailApp/AudiobookDomain.swift` | `AudiobookRoleTier`, `AudiobookVoiceArchetype`, `AudiobookRoleDialogueStats`, `VoiceAssetScope`, `VoiceCreationSource`, `VoiceAssetMetadata`, `VoiceCollection`, `VoiceTaxonomyClassifier`, `VoiceCatalogStore`, `AudiobookCharacter.inferredVoiceArchetype(peers:)` |
-| `macos/SpeechRailApp/SpeechRailApp/AudiobookCastRegistry.swift` | `computeRoleDialogueStats`, `refreshCharacterMajorStatusAndOrder`, `buildSceneConflictGraph`, `recommendVoiceBindings`, `resolveVoiceArchetype`, `computeMicroProsodyAndSeed` |
-| `macos/SpeechRailApp/SpeechRailApp/AudiobookCastController.swift` | `confirmCast`（0 台词角色门禁豁免）, `batchBindArchetypeVoice` |
-| `macos/SpeechRailApp/SpeechRailApp/AudiobookProductionController.swift` | `renderSingleFragmentWithFiniteRetry`（透传 `binding.allowedSpeed` 与 `binding.callerSeed`） |
-| `macos/SpeechRailApp/SpeechRailApp/AudiobookWorkflowModel.swift` | `CastFilterScope`, `roleStatsByID`, `filteredCharacters`, `sceneConflictPartnerNames(for:)`, `batchBindArchetype`, `updateRoleAllowedSpeed`, `completeVoiceRoundTrip`（自动注册 `.bookExclusive`） |
-| `macos/SpeechRailApp/SpeechRailApp/AudiobookBookWorkspaceView.swift` | 剧组统计与五维筛选条、行当批量配声菜单、同场撞音预警条、`AudiobookVoicePickerPopover` |
-| `macos/SpeechRailApp/SpeechRailApp/CreatorSurfaceViews.swift` | `VoiceLibraryView`（四级作用域 Tab + 六大声部胶囊 + 星标/晋升/归档）、`DubbingDeskView`（通用活跃音色过滤） |
-| `macos/SpeechRailApp/SpeechRailMacControlTests/AudiobookCastTests.swift` | `AC1～AC10` 自动化验收测试套件 |
+| 声线性别感 | `male / female / neutral / unknown`，不推定人的真实身份 |
+| 年龄感 | `child / young / middleAged / elder / unknown`，童声与老年声分开 |
+| 音高 | `low / middle / high / unknown` |
+| 音色质地 | 可多选的受控标签与人工补充标签 |
+| 语种与口音 | 独立的语言/地区标签；能力支持与听感亲和度分开 |
+| 语速与咬字倾向 | 人设偏好；不等于后端允许修改的参数 |
 
-### 5.2 自动化验收测试矩阵（AC1～AC10）
+各推导值记录 `source`（人工、服务结构化描述、文本推导或未知）和 `confidence`。人工覆盖优先，文本词典只作推导依据；未知音色不按 ID 散列到性别或年龄，也不把中性、男童、女童统一视为女性。ID 仅用于相同分数时的稳定排序。
 
-所有验收项均已固化在 `AudiobookCastTests.swift` 中，可通过以下命令执行确定性回归验证：
+角色的 `voiceTraitsOverride` 表达人工画像，`requiredVoiceTraits` 表达必需条件；后者也约束手工换绑与撤销。服务明确提供的语种、音高、质地和语速倾向作为结构化来源；描述中的年龄和性别仅为带置信度的文本推导，姓名或职业不能代替这些证据。
 
-```bash
-swift test --package-path macos/SpeechRailApp --filter AudiobookCastTests
-```
+角色与音色使用同一画像语义。画像不完整时保留未知并降低自动推荐置信度，提供试听和修正入口；不能以强制归入某个枚举作为分类准确率验收。
 
-| 验收编号 | 验收场景（GIVEN / WHEN） | 强制断言判据（THEN） | 对应测试方法 |
+### 2.3 音色作用域、来源与生命周期
+
+`VoiceAssetMetadata` 至少维护以下相互独立的信息：
+
+- `visibilityScope`：`globalReusable / bookExclusive / unknown`；`bookExclusive` 必须有有效 `originBookID`，不能因来源缺失而对所有书籍开放。
+- `lifecycleState`：`active / archived`；归档和恢复只改变此字段。
+- `originBookID / originRoleID` 及可选展示名称：记录来源；晋升全局后仍保留，但不据此重新推导可见范围。
+- `creationSource`：系统预设、设计、克隆或导入的实际来源；克隆返回不能统一记为设计。
+- 六维画像及覆盖、标签、收藏、`collectionIDs`、创建/更新时点与元数据修订号。
+
+元数据未登记时，只有快照明确识别的系统预设可按全局通用处理。自定义音色的缺失、损坏或未知归属需要用户确认；目录读取失败与合法空目录必须区分。
+
+目录字典 key 必须与条目的 canonical voice ID 一致；不一致属于语义损坏，拒绝准入且保留原文件。目录修订摘要包含 key 与记录，不能只对记录值计算。
+
+`VoiceCollection` 表达可复用的剧团音色包及书籍偏好。包成员资格、收藏和本角色专用来源均属于候选排序偏好，不能突破可见范围、归档、准入或人工锁定规则。内置包仅提供可核实的成员或推荐条件，不展示空包为已经配齐的声音资源。
+
+### 2.4 规划输入、输出与一致性
+
+`VoiceCatalogStore` 提供一次性 `VoiceCatalogSnapshot`：元数据、合集、书籍偏好、`revision` 与 `loadState`。`loadState` 区分 `ready / missing / unreadable / unsupportedSchema`，不跨次读取拼接事实。
+
+`recommendVoiceBindings` 的目标返回值为 `AudiobookCastingPlan`，不再仅返回绑定字典：
+
+| 字段 | 合同 |
+| :--- | :--- |
+| `localInputDigest`、`inputDigest` | 前者覆盖角色、标注和既有绑定，供 Store 事务重算；后者再包含 Store 附加的原文/章节上下文摘要、策略版本及能力/目录语义身份 |
+| `snapshotID`、`voiceCatalogRevision`、`expectedCastRevisionID` | 规划时的事实身份及提交前比较依据；本地音色目录修订与服务模型 catalog revision 分开 |
+| `proposedBindings`、`proposedPolicies` | 包含保留项与拟变更项的完整可评审方案 |
+| `issues`、`unresolvedRoleIDs` | 结构化原因、`error / warning / info` 严重度、涉及对象与下一步；issue ID 由完整方案摘要、规范化原因及对象身份确定，不把错误藏成缺失字典项 |
+| `requiredAcknowledgements` | 新增共享提议及可接受的残余风险 ID；接受记录绑定到 inputDigest，方案变化后不得沿用 |
+| `affectedRoleIDs / affectedFragmentIDs` | 相对既有状态计算的影响范围 |
+| `isApplicable` | 所有必需角色已覆盖、硬约束通过且无阻断问题；不等于已保存或试听通过 |
+
+客户端问题码至少区分 `noEligibleVoices`、`catalogUnavailable`、`voiceNotProductionReady`、`unsupportedRenderParameter`、`insufficientVoiceCapacity`、`lockedBindingConflict`、`castRevisionChanged`、`capabilityChanged`、`unresolvedSpeaker`、`searchBudgetExceeded`、`voiceIdentityUnknown`。这些是 App 内部结果，不新增 REST 错误码。
+
+纯 Registry 输入不含原文与章节；提交方案必须经 Store 在同一 actor 中附加来源摘要和影响片段，并在保存事务内重新比较。未附加的计算结果不能直接提交。未采用候选的排除原因为 `info`，不要求接受风险；缺失合法容量等问题仍为阻断，新增共享提议及可接受的残余共享风险进入 `requiredAcknowledgements`。
+
+## 3. 能力、参数与正式制作
+
+### 3.1 合法候选池
+
+对每个 canonical voice ID，依次检查：
+
+1. 本书上下文与目录来源可解释；音色处于 active 且对本书可见。
+2. 快照声明 `available == true`、存在 `operations.http_speech`、`productionReady == true`，且绑定模型身份可核实。
+3. `voice.operations.http_speech.parameters` 声明拟用参数受支持且值合法。`unknown`、缺失和 `unsupported` 不当作支持。
+4. 不侵占旁白或人工独占声音，不违反锁定与用户明确的必需画像条件。
+
+候选池只计 canonical ID，alias 不增加容量。音色尚不能正式制作时仍可按服务声明进行试听或输出检查；冷态下提供“重新检查并继续”，不造成永久禁用入口。正式请求仍由服务端严格准入，不能靠前次快照绕过。
+
+### 3.2 参数矩阵
+
+| 实际合成路径 | `speed` | caller seed | 表达控制 |
 | :--- | :--- | :--- | :--- |
-| **AC1** | 全书含 1 旁白、3 高频主角（各 20 句台词）、25 个仅说 2 句台词的配角及 5 个 0 台词背景人物，可用音色数 $M = 6$ | 仅旁白与 3 名高频主角 `tier == .lead && isMajor == true && allowSharedMinorVoice == false`；25 名 2 句配角与 5 名 0 台词人物全部自动标为 `isMajor == false && allowSharedMinorVoice == true` | `testAC1_ParetoAdaptiveRoleStratification` |
-| **AC2** | 全书含 50 名角色（1 旁白 + 2 主角 + 45 配角 + 2 零台词人物），可用音色库仅有 5 个音色 | 全部 50 名角色 100% 生成推荐绑定，逐一调用 `bindVoice` 零 `.duplicateVoiceRequiresSharedMinorConsent` 异常；旁白与 2 名主角各自独占 1 个不同音色，配角共享池零侵占主角独占音色 | `testAC2_50RolesVs5VoicesDualPoolZeroDeadlockAndAC6_SilentRoleExemption` |
-| **AC3** | 同章内配角「张掌柜」与「李掌柜」（同为 `.matureMale`）在相邻段落交替对话 12 次，共享池有 $\ge 2$ 个可用音色 | 经冲突图着色后，「张掌柜」与「李掌柜」分配到的 `voiceID` 严格不相等（`bindingA.voiceID != bindingB.voiceID`） | `testAC3_ScenePartnerGraphColoringAndAC4_MicroProsodyAndAC5_BatchArchetypeBinding` |
-| **AC4** | 多个配角共用同一 `system` 音色，另有多个配角共用同一 `clone` 音色 | 共用 `system` 音色的后续配角获得差异化 `allowedSpeed`（落在 `[0.92, 1.08]` 且 $\ne 1.0$）；共用 `clone` 音色的配角 `allowedSpeed` 严格等于 `1.0` 且 `callerSeed` 互不相同 | `testAC3_ScenePartnerGraphColoringAndAC4_MicroProsodyAndAC5_BatchArchetypeBinding` |
-| **AC5** | 全书存在多名 `.matureMale` 配角与属于 `.matureMale` 的核心主角 | 调用 `batchBindArchetypeVoice(archetype: .matureMale, onlyMinorRoles: true)` 后，所有中老年男配角全部换绑至目标音色并开启共享，核心主角保持原独占音色不被覆盖 | `testAC3_ScenePartnerGraphColoringAndAC4_MicroProsodyAndAC5_BatchArchetypeBinding` |
-| **AC6** | 全书所有有对白归属（`dialogueAtomCount > 0`）的角色均已绑定音色，仅剩 2 名 `dialogueAtomCount == 0` 的仅提及人物未绑定 | 调用 `confirmCast` 正常通过，不抛出 `.missingVoiceBindings` 错误 | `testAC2_50RolesVs5VoicesDualPoolZeroDeadlockAndAC6_SilentRoleExemption` |
-| **AC7** | 音色库共 120 个音色（含《书籍 A》40 个专用音色、《书籍 B》30 个专用音色、50 个全局通用音色） | 在《书籍 A》选角时，《书籍 B》的 30 个专用音色被 `isVoiceActiveForBook` 100% 隔离；且《书籍 A》内为角色「林远」定制的专用音色以最高优先级自动绑定回「林远」 | `testAC7_AC8_AC9_AC10_100PlusVoiceScopeIsolationPromotionTaxonomyAndCollections` |
-| **AC8** | 某音色初始为《书籍 A》专用音色（`scope == .bookExclusive`），执行 `promoteToGlobalReusable` | 该音色 `scope` 更新为 `.globalReusable`（同时保留 `originBookID` 与 `originBookTitle` 溯源字段），并立即对《书籍 B》和全局通用池可见 | `testAC7_AC8_AC9_AC10_100PlusVoiceScopeIsolationPromotionTaxonomyAndCollections` |
-| **AC9** | 120 个混合中英文描述与 `system/clone` 模式的音色列表 | 每个音色均被 `VoiceTaxonomyClassifier.classify` 确定性归入六大 `AudiobookVoiceArchetype` 之一，且支持 `archetypeOverride` 手动覆盖 | `testAC7_AC8_AC9_AC10_100PlusVoiceScopeIsolationPromotionTaxonomyAndCollections` |
-| **AC10** | 创建剧团音色包并设为本书 `preferredCollectionID`；将旧书专用音色批量归档（`archiveVoices`） | `recommendVoiceBindings` 优先选用首选剧团包内的音色；已归档音色（`scope == .archived`）从所有书籍的活跃选角池中 100% 隐藏，调用 `restoreVoices` 后立即恢复 | `testAC7_AC8_AC9_AC10_100PlusVoiceScopeIsolationPromotionTaxonomyAndCollections` |
+| 可服务的 system/custom_voice | 默认 `1.0`；仅使用快照声明的合法值 | 默认 `nil`；声明支持时才可发送 `0...4294967295` | 仅使用明确支持的控制，不据模型家族推断 |
+| Base clone，包括由设计样本发布为 clone 的音色 | `1.0` | 必须 `nil`；服务拒绝 `clone_seed_unsupported` | 不发送克隆路径禁止的 instructions 或表达参数 |
+| 仅用于设计任务的 design/instruction 候选 | 不作为正式书籍合成音色 | 不推定支持 | 经现有设计、验证、发布流程形成可合成资产后重新获取快照 |
+
+`[0.92, 1.08]` 是待质量验收的产品试验范围，不是声纹安全保证。默认关闭自动微语速分化；仅在支持该控制且对应听评门通过后，对用户接受的绑定启用。种子用于可复现采样，不承担新角色声纹生成，也不承诺种子互异等于听感可分。
+
+需要 caller seed 时，`AudiobookVoiceBinding → AudiobookRenderCallRequest → SpeechRailRequestOptions → SpeechRail-Seed` 必须完整透传；不得放入 OpenAI 请求 body。所有复制请求选项的 helper 必须保留种子及其他选项。重试复用相同参数；不通过换种子、换声音或放宽验收策略重试确定性拒绝。
+
+若支持路径需要自动提出种子建议，可从 book ID、role ID、固定声音身份与参数策略版本的规范化摘要推导 32-bit 值，接受后固定保存；不按共享槽位重新编号，不要求种子无碰撞，不宣称跨模型或运行时版本逐字节可复现。
+
+### 3.3 冻结身份、回执与缓存
+
+- 正式制作始终使用 `require_output_pass`。试听允许 `allow_unverified`；两条路径显式区分，不能用旧验收原因触发宽松重试。
+- 从权威能力快照解析服务实际比对的模型 artifact revision。system 没有 voice revision 且契约允许省略时，header 省略；自定义声音缺少必需 revision 时阻断。不得制造通用 `v1`、`qwen3-tts-v1` 或空值替代真实身份。
+- 请求冻结预期 voice/model revision。快照或服务报告版本变化时返回待重新确认，不用最新版本静默替换旧 pin。
+- 每个片段准入前重新核对本书可见范围、相关能力和固定身份。目录或能力变化后停止新增不合法请求；已完成候选保留并标记待复核，不把跨 Store 检查视为服务端与本地数据库的联合事务。
+- 请求预期值与实际回执事实分开记录。回执缺失或不匹配时标为追溯不完整；不能用请求的 model revision 或 WAV 长度证明实际身份和 provenance 已验证。
+- `dependencyDigest` 包含原文内容摘要/区间、角色归属、绑定身份、实际请求参数（含种子）、渲染策略版本和影响输出的能力语义。只改变无关目录项或一次性 `snapshotID` 不使全部片段失效。
+- 缓存复用还须验证候选回执和媒体资产；摘要一致不代替媒体校验。参数或版本变更只使相关片段待重做，旧音频与采用历史保留。
+
+## 4. 统计、容量与独占分配
+
+### 4.1 稳定统计与人物分层
+
+旁白单独统计。对白量采用非格式化原文的 Unicode scalar 总量，`dialogueAtomCount` 仅作诊断和短角色辅助条件；只拆分同一台词不应改变其对白总量。可按已校准的语言规则估计发声时长，但在校准前不能标为实测时长。
+
+自动人物重要程度可使用按对白文本量排序后的累计 75% 前沿与跨章/跨场景覆盖；75% 是产品启发式，不是统计定律。人工层级优先；与用户确认有关的层级变化只提出建议，不自动覆盖。仅提及与实际发声章节分开维护。
+
+### 4.2 容量不变量
+
+令 `M` 为通过 §3.1 的唯一声音数，`R` 为旁白独占占用，`K` 为其他独占占用（含人工锁定），`S` 为共享池预留：
+
+$$R + K + S \le M$$
+
+当全部发声角色可以独占时，`S=0`；否则共享池目标预留两个声音，容量不足时可提出一个声音的共享方案，但必须展示残余冲突。自动独占预算最多使用扣除 `R`、人工独占与共享预留后的剩余容量，允许为零，不强制保留一个自动独占名额。
+
+例如 `M=6、R=1、S=2` 时，其他独占占用最多为三；`M=2、R=1` 且有多个发声角色时，可提出一个共享声音的方案；`M=1、R=1` 且有其他发声角色时返回容量不足，不能侵占旁白声音。少角色分支遵守同一不变量。
+
+总量检查是必要条件。独占角色拥有不同候选集合时，先进行最大匹配可行性检查，再做最大权重一对一分配，避免贪心先占用另一角色唯一合法声音。人工锁定作为预分配；其冲突不由自动降级解决。
+
+评分矩阵最多包含 `100000` 个角色/合法声音组合，构建前检查总量，缓存命中不放宽矩阵大小。加权匹配另有 `20000000` 次成本单元及势更新工作预算，并在矩阵构建和内层循环检查取消。超过任一预算时返回 `searchBudgetExceeded`，保留已有绑定，提示缩小候选范围；不能把资源预算耗尽报告为容量不足或已证明无解。此边界与共享分配的局部搜索预算分别计量。
+
+### 4.3 零台词确认门禁
+
+只有全书分析完整、标注覆盖有效，且不存在尚待确认的直接对白归属时，`dialogueAtomCount == 0` 的仅提及角色才豁免配声。旁白和实际发声角色仍须有可合成绑定。
+
+分析未完成、标注缺失和角色归属 unknown 不能解释成零台词。沿用章节级未知说话人门禁；其他符合既有制作条件的章节是否可继续，以工坊工作流合同为准，不由选角器另造全书阻断政策。
+
+## 5. 同场冲突与共享分配
+
+### 5.1 有类型的边与来源距离
+
+`AudiobookSceneConflictGraph` 分别保存：
+
+- `directDialogue`：直接交替对白及其次数、原文距离；最高排斥优先级。
+- `sceneCoPresence`：同一场景内共同发声的角色关系。
+- `chapterCoPresence`：同章弱关联，不因跨章累计而变为直接对手戏。
+
+场景可由经确认的文本场景投影提供；缺少场景时使用保守的原文距离规则。后备窗口为同章内相距不超过六个原文 Atom，计算时保留旁白与格式块的原始位置，不先压缩成纯对白序列。该关系标记为推导并保留规则版本，不能冒充已确认场景。
+
+各类边分别归一化或封顶，冲突类型与权重分开。长章节、重复窗口和标注重试不能无界放大权重；同一原文关系按稳定来源身份去重。
+
+### 5.2 分配策略与失败语义
+
+在独占预分配后，对共享角色执行带候选集合的确定性分配：
+
+1. 先满足作用域、准入、独占、锁定和显式必需画像条件。
+2. 优先处理合法候选最少、已着色邻居不同声音数最多的角色，再按直接对白权重、发声量和稳定 role ID 排序。
+3. 在合法候选中优先减少直接对白冲突，其次减少其他共现冲突，再考虑既有绑定改动、人设匹配和共享负载。专用来源、首选包与收藏只在允许的候选中起作用。
+4. 在连通分量内进行有界局部重分配，保留迄今有效的最佳方案。默认每次规划最多评估 `100000` 个局部变更候选，取消立即终止；预算进入策略版本，结果记录实际评估数。
+5. 若仍有直接对白共享，明确列出角色对、原因和可选动作。无阻断问题的残余共享只有在用户显式接受后才能进入制作；锁定冲突、候选空集和准入失败不能通过接受听感风险绕过。
+
+DSATUR 是候选排序方法，不是固定颜色数下的可行性证明。三角色两两对话、共享池只有两种声音时不能宣称零冲突；有限搜索失败也不能标记为已证明无解。
+
+负载优先按预计发声文本量/时长分摊，不只数角色。只有 Store 核实完整分析、文本覆盖及说话人归属后，零台词人物才不消耗发声预算；旧绑定保留，独占约束在其重新发声时恢复校验。无法证实零台词时不能释放其已选声音的占用。不同 voice ID 也可能听感接近，图分配结果仍需试听验证，不引入持久化声纹或 embedding 库来宣称可分。
+
+## 6. 绑定应用、持久化与恢复
+
+### 6.1 可评审方案与原子应用
+
+`AudiobookCastController` 先验证完整方案和绑定到方案身份的风险接受记录，随后通过 `AudiobookProjectStore` 单事务重算 `localInputDigest` 并提交角色政策、绑定、确认失效和局部脏标记。提交前比较 cast revision、目录 revision 与最新能力快照；快照变化须重新验证，未经用户确认不能悄悄替换声音或参数。
+
+批量绑定默认只处理未配声、未锁定角色。更新全部角色须展示准确角色清单和片段影响，再显式接受。任何一项违反独占、锁定或版本约束时整批不提交，不自动把冲突双方的 `allowSharedMinorVoice` 改为 true，也不只保存其中可写的部分。
+
+跨数据库和目录 JSON 的设计/克隆返回使用可恢复的操作意图：先登记目标书籍、角色、voice ID 和操作身份，再幂等写入书籍专用元数据、验证其持久化，最后提交绑定。任一步失败可恢复，未知自定义资产不进入全局自动候选；不得删除用户已生成资产来补偿事务。
+
+SQLite 的 `voice_registration_intents` 保存 `registered → catalogPersisted → bindingCommitted → completed` 阶段。目标记录的归属与真实来源必须一致；绑定提交和 `bindingCommitted` 更新同属一个事务。重启可重复恢复；角色或绑定集合已变化时进入 `needsReview`，保留书籍专用资产，提示用户重新选择。恢复不会撤销期间的推广、归档或收藏，不能将跨 Store 恢复视为联合事务。
+
+### 6.2 目录持久化
+
+单实例目录可以继续使用 JSON。存储入口由 `VoiceCatalogStore.defaultStorageURL()` 管理；测试必须注入独立临时目录。
+
+- envelope 使用 `schemaVersion=2`、内容修订和 `state`；读取失败、未来版本、缺失文件和合法空目录分别表示。
+- 写入先构建完整新状态，编码和校验成功后原子替换；持久化成功后才发布内存成功状态与目录变更通知。
+- 保存错误必须向调用方报告；原子文件替换不等于目录与 SQLite 已联合提交，也不保证数据语义有效。
+- 恢复音色保留其原可见范围。收藏和归档不改变既有作品引用；归档只影响新增自动选角，不删除资产，也不使历史版本不能播放。
+- 本角色设计/克隆资产默认书籍专用；晋升全局必须由用户显式操作。推广后的来源字段不能再次决定可见范围。
+- 旧无版本 JSON 在首次成功修改时保存独立原文件副本，再写入 envelope；未知字段及合集保留。创建时点缺失时保持未知。归档且范围未知的旧声音须先显式确认范围，恢复动作本身不猜测。
+
+### 6.3 迁移与回退
+
+迁移使用真实 schema 检查、仓库外一致性备份和临时副本演练；不得对正在写入的 SQLite 主文件直接复制而忽略 WAL。未知字段和无法解释的记录保留并报告，不以清空目录、猜测归属或删除绑定恢复成功。
+
+旧 `archived` 无法确定归档前是否已晋升时，保持 archived 且可见范围 unknown，待用户确认；旧枚举只迁移可证实的画像分量。数据库与目录分别记录迁移版本及恢复依据，失败时不提交半迁移状态。
+
+SQLite `user_version=4`：schema 2→3 增加角色政策、人工层级、画像和可空的实际身份事实列；schema 3→4 增加登记意图与配声修订。每次升级先通过 SQLite backup API 保存含 WAL 已提交页的一致性副本，再在事务内推进版本。未知的实际身份仍为 NULL，不能从请求预期值回填。未来版本拒绝写入。数据库副本不包含音频文件，恢复核验须同时保留作品资产目录和历史引用。
+
+优先回退为支持新 schema、保留 P0 守卫的基础分配器。退回旧 App 或旧数据格式需要核验可读性和后续写入；已有新作品或编辑时，不用旧备份覆盖它们。安装、服务和用户真实数据操作依照专项授权执行，文档计划本身不执行这些动作。
+
+### 6.4 配声修订与撤销
+
+`casting_revisions` 保存变更前绑定、政策、受影响角色及变更后状态摘要。撤销在当前能力与目录守卫下新增恢复修订，同时标记被撤销修订；不删除修订、候选或音频。当前状态已被其他操作改变时拒绝旧撤销。绑定或参数变化只重算相关片段依赖；采用版本继续引用原候选，不自动采用新音频。
+
+角色共享政策开关与其修订、确认失效在同一事务提交；角色尚未配声时也能撤销政策变化。重复设置相同政策不新增修订。撤销最新政策修改保留先前绑定，随后仍可撤销上一项配声。
+
+片段依赖使用 `frag_dep_v2` 的来源内容、区间及有效角色归属，不包含 atom 分块身份。旧摘要在重新规划时按新语义核对，不能据旧摘要声称可以复用，也不直接删除旧候选或采用版本。
+
+## 7. 交互合同
+
+- 首屏围绕“推荐声音、试听、确认”组织，每本书保持一个清楚的主动作。默认显示本书可用候选，收藏为独立筛选，不与作用域混作互斥分类。
+- 搜索明确当前书籍和范围；高级画像、合集、来源和诊断渐进披露。空列表说明过滤原因并提供恢复筛选或检查声音入口，不放宽隔离。
+- 每个推荐显示少量可理解的理由、占用状态及未解决项，例如“适合这个角色”“与同场角色使用不同声音”；算法分数、模型和协议细节进入开发者详情。
+- 试听支持相同文本比较候选和真实对手戏比较声音。片段忠实保留原文，不为增加情绪改写书稿或附加未经支持的 TTS instructions。
+- 试听冻结方案摘要、原文区间、声音身份与实际参数，单条最多 240 Unicode scalar，同文对比最多四个候选。目录、角色、来源或绑定变化后重新准备；试听只交给共享播放器，不登记正式音频候选或自动确认质量。正式制作仍走严格渲染入口。
+- 批量应用前展示影响；撤销恢复此前绑定并只使相关候选待复核，不删除新旧音频。已采用版本不自动替换。
+- 复用 [设计系统](macos-app-design-system.md) 与 `SpeechRailDesignTokens.swift`；保持键盘、VoiceOver、焦点、外观和 Reduce Motion 支持。未获当前用户逐次明确授权，不接管前台进行 UI 自动化。
+
+## 8. 验收矩阵
+
+所有项目均为实施验收要求；是否通过及其时间、环境、命令和证据记录在计划或专项验收记录，不由本表推定。确定性验收使用 fake backend、合成文本与临时存储，不下载模型、不联网、不操作真实作品库。
+
+### 8.1 P0：参数、隔离、容量与提交
+
+| 编号 | 场景 | 必须满足的结果 |
+| :--- | :--- | :--- |
+| AC-P0-01 | system 支持种子、clone 不支持；种子上下界及非法值；选项复制与重试 | 支持路径的 header 精确透传；clone 始终 speed=1、无 seed；body 无 seed；非法值显式拒绝；重试不变参数；正式路径始终严格 |
+| AC-P0-02 | 本书池为空、全部他书专用/归档、origin 缺失、目录损坏、available=true 但 productionReady=false/nil | 不泄漏到未过滤池；不自动声明可制作；区分具体原因并提供可恢复动作 |
+| AC-P0-03 | M=0/1/2/3/5/6；少角色；人工锁定；独占角色仅有部分重叠候选 | 计入旁白，遵守 R+K+S≤M；不虚增容量；可行小例得到合法独占匹配；不可行时报告原因，不抢旁白声音 |
+| AC-P0-04 | 批量方案混入独占冲突、锁定改绑或缺失角色 | 整批零提交；不自动开启共享；旁白和人工独占政策保持；原绑定与作品不变 |
+| AC-P0-05 | 零台词、标注缺失、分析未完成、未知直接对白 | 只有完整分析中的真实零台词角色豁免；分析和说话人门禁继续生效 |
+| AC-P0-06 | 模型/音色 revision 漂移、system 合法缺少 voice revision、回执缺失/不匹配 | 合法省略可工作；其余未知或漂移明确报告；不替换 pin、不伪造实际身份，不以 WAV 大小证明 provenance |
+| AC-P0-07 | 规划后角色/目录变化、提交期间故障、取消 | 过期方案不提交；事务无半成品；恢复保留已有音频、版本与并行编辑 |
+| AC-P0-08 | 相同输入重排、重复规划、预算耗尽及取消 | 合法性不变；稳定输入身份给出稳定结果；终止有界，未找到不冒充无解；无模型或 UI 副作用 |
+
+### 8.2 P1：稳定分配、资产与交互
+
+| 编号 | 场景 | 必须满足的结果 |
+| :--- | :--- | :--- |
+| AC-P1-01 | 同台词改分块、新增无关音色、200+ 人物、人工锁定 | 文本量统计稳定；已确认绑定零改动；层级不因音色预算被静默改写；旧来源未知绑定受保护 |
+| AC-P1-02 | 大段旁白隔开的对白、同章不同场、重复窗口、十章弱共现 | 正确使用原文位置；边类型不升级；来源去重，弱边不冒充直接对白 |
+| AC-P1-03 | 已知可着色夹具、两色三角、带预分配的受限候选 | 前者零直接冲突；后者显式残余冲突/可证明不足；启发式未找到单列；不突破硬约束 |
+| AC-P1-04 | 男童、女童、老年女性、中性、无描述及中英描述 | 属性独立，未知保留；无随机人口属性分配；人工覆盖有效；报告带标注夹具的准确性而非仅枚举覆盖 |
+| AC-P1-05 | 批量更换、撤销、局部失效与目录变更通知 | 默认只改未绑定；锁定受保护；影响范围准确；界面及时刷新；只有受影响片段失效，历史版本可播放 |
+| AC-P1-06 | 晋升→归档→恢复、跨书/配音台过滤、设计和克隆返回 | 全局身份不退回书籍专用；来源正确；跨书隔离；返回流程故障可恢复且不泄漏新资产 |
+| AC-P1-07 | schema 迁移、未来版本、损坏文件、写入失败和恢复重启 | 原数据可恢复；不公布虚假保存成功；未知记录保留；迁移失败无半状态，回退不覆盖新增作品 |
+| AC-P1-08 | 200 角色×500 音色的合成夹具、超界输入与局部目录改动 | 基础匹配至多 100000 个组合评分；超界保持原绑定并报告预算耗尽；加权匹配与局部搜索各有预算及取消检查；缓存按相关修订失效，不添加模型或向量数据库依赖 |
+
+### 8.3 真实质量与体验门
+
+本节需后续明确授权真实模型/质量验收；UI 自动化还须当前用户逐次授权。没有执行时记录 `not_evaluated`，不阻塞已独立通过的逻辑修复交付，但不开放未验收的自动微语速功能。
+
+| 编号 | 方法与范围 | 通过条件 |
+| :--- | :--- | :--- |
+| AC-Q-01 | 冻结至少 20 段合成/获授权文本场景，覆盖核心角色、近似声线和至少 10 组直接对手戏；至少 3 位听众盲听 | 总体角色辨识率≥90%，每组对手戏≥80%；报告每组样本量与区间。样本不足标未验收，不推广为全书/全音色库保证 |
+| AC-Q-02 | 相同声音、文本、模型制品与输出链，对照 speed=1.0 和候选微语速；先冻结试验清单与判据 | 人工逐条无新增漏读、复读或角色串线；5 分自然度评分的配对差值 95% 区间下界≥−0.2；未达到或统计不足时保持默认关闭。阈值是产品门槛，不是行业安全标准 |
+| AC-Q-03 | 已授权的实际界面走查与必要的定向自动化 | 搜索范围、空列表恢复、试听、批量预览、撤销、键盘/VoiceOver/Reduce Motion 可用；明确记录未覆盖平台设置与场景 |
+
+文字忠实度可用 CER 辅助诊断，但不替代人工检查和声音辨识。测量前冻结模型/制品、策略、素材和方法身份；原始音频、完整书稿及评分材料存于仓库外，报告仅给脱敏摘要。更改判据后必须重新测量，不能按已有结果调整阈值并宣称通过。
+
+### 8.4 与既有 AC1～AC10 的追踪
+
+| 既有编号 | 对应验收 | 判据变化 |
+| :--- | :--- | :--- |
+| AC1 | AC-P0-03、AC-P1-01 | 人物重要程度与声音容量分离，旁白纳入预算 |
+| AC2 | AC-P0-02～04 | 覆盖所有实际发声角色；不能为了凑齐 100% 绑定放宽独占 |
+| AC3 | AC-P1-02～03、AC-Q-01 | 区分可着色、未找到与资源不足；声音 ID 不代替听感 |
+| AC4 | AC-P0-01、AC-Q-02 | 克隆种子必须省略；取消循环种子互异和微语速必然安全的断言 |
+| AC5 | AC-P0-04、AC-P1-05 | 完整方案校验、影响预览、原子应用与撤销 |
+| AC6 | AC-P0-05 | 豁免依赖完整分析与有效归属 |
+| AC7 | AC-P0-02、AC-P1-06 | 空候选和缺失元数据同样执行隔离 |
+| AC8 | AC-P1-06～07 | 晋升、归档、恢复和故障恢复组成完整生命周期 |
+| AC9 | AC-P1-04 | 验收画像语义与准确性，未知不强行归类 |
+| AC10 | AC-P1-06～08 | 合集偏好不越权；恢复、通知与缓存一致 |
+
+既有测试方法需要逐项核对并改写；同名测试或先前通过报告不能证明已满足本规范。
+
+## 9. 模块职责与实施边界
+
+| 文件/模块 | 职责 |
+| :--- | :--- |
+| `AudiobookDomain.swift` | 角色政策、绑定、规划结果及目录元数据领域类型；画像/算法较大时按计划拆分 |
+| `AudiobookCastRegistry.swift` | 规划入口、统计与候选检查的编排；不做磁盘写入 |
+| `AudiobookCastController.swift` / `AudiobookProjectStore.swift` | 用户意图、完整方案校验、原子提交、确认与恢复 |
+| `AudiobookStoreSchema.swift` | 绑定政策与身份事实迁移；不静默改写既有作品 |
+| `AudiobookProductionWiring.swift` / `ServiceAPIClient.swift` / `ServiceContractTypes.swift` | 真实能力、冻结请求、参数 header、严格准入和回执事实 |
+| `AudiobookProductionController.swift` / `AudiobookDependencies.swift` | 制作生命周期、有限重试和请求/结果载体 |
+| `AudiobookFragmentPlanner.swift` / `AudiobookInvalidation.swift` | 依赖摘要、缓存验证与局部失效 |
+| `AudiobookWorkflowModel.swift` / `AudiobookBookWorkspaceView.swift` / `CreatorSurfaceViews.swift` | 可观察投影、试听、推荐理由、搜索、影响预览与撤销 |
+| `AudiobookCastTests.swift` / `AudiobookStoreTests.swift` / `AudiobookProductionTests.swift` / `ServiceContractTests.swift` 等 | 确定性与 wire contract 证据；质量门另记 |
+
+## 10. 资料依据与适用限度
+
+以下资料核实于 2026-10-15。算法、标准和论文提供设计依据，不证明 SpeechRail 已具备对应能力或已达到其报告结果。
+
+- [Qwen3-TTS 官方说明](https://github.com/QwenLM/Qwen3-TTS#voice-design-then-clone)：设计参考音频后通过克隆复用，是长篇稳定角色声音的可选路径；实际准入仍取本服务契约。
+- [MLX Random](https://ml-explore.github.io/mlx/build/html/python/random.html)：种子与 PRNG 控制采样；不提供不同种子必定产生可辨角色的保证。
+- [NetworkX greedy coloring](https://networkx.org/documentation/stable/reference/algorithms/generated/networkx.algorithms.coloring.greedy_color.html)：动态饱和度排序的算法参考；不要求引入 Python 依赖，也不承诺固定候选池最优解。
+- [W3C SSML 1.1 voice](https://www.w3.org/TR/speech-synthesis/#S3.2.1)：独立声音特征、必需条件与偏好排序的建模参考；不表示 SpeechRail 接受 SSML。
+- [Deep Dubbing](https://arxiv.org/html/2509.15845v1)：角色音色匹配与上下文韵律分别建模的研究参考；不据此增加模型、改写原文或发送未支持参数。
+- [Apple Searching](https://developer.apple.com/design/human-interface-guidelines/searching)：搜索范围与筛选的交互依据；具体控件遵循本项目设计系统。
+- [ITU-T P.808](https://www.itu.int/rec/T-REC-P.808-202106-I/en)：主观听评的试验设计参考；§8.3 的产品阈值不是该标准规定的认证阈值。

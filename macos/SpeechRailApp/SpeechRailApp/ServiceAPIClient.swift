@@ -209,7 +209,10 @@ public final class ServiceAPIClient: @unchecked Sendable {
         _ request: SpeechRequest,
         options: SpeechRailRequestOptions = SpeechRailRequestOptions()
     ) async throws -> SpeechAudioResponse {
-        try await postAudio(
+        if let seed = options.callerSeed, !(0...4_294_967_295).contains(seed) {
+            throw ServiceAPIClientError.invalidContract("caller_seed_out_of_range")
+        }
+        return try await postAudio(
             path: "/v1/audio/speech",
             body: request,
             accept: Self.audioAcceptHeader(for: request.responseFormat),
@@ -265,6 +268,7 @@ public final class ServiceAPIClient: @unchecked Sendable {
             // deliverable from an unverified clone voice. Every other option
             // is carried over from the caller.
             options: SpeechRailRequestOptions(
+                callerSeed: options.callerSeed,
                 expectedVoiceRevision: options.expectedVoiceRevision,
                 expectedModelRevision: options.expectedModelRevision,
                 pronunciationSet: options.pronunciationSet,
@@ -276,7 +280,7 @@ public final class ServiceAPIClient: @unchecked Sendable {
                 validationPolicy: "require_output_pass"
             )
         )
-        var voiceRevision = options.expectedVoiceRevision
+        var voiceRevision: String?
         var planID: String?
         var planSHA256: String?
         var pcmSHA256: String?
@@ -296,7 +300,7 @@ public final class ServiceAPIClient: @unchecked Sendable {
                 requestID = receipt.requestID
                 receiptStatus = receipt.status
                 receiptCompletedAt = receipt.completedAt
-                voiceRevision = receipt.voiceRevision ?? voiceRevision
+                voiceRevision = receipt.voiceRevision
                 planID = receipt.planID
                 planSHA256 = receipt.planSHA256
                 pcmSHA256 = receipt.pcmSHA256

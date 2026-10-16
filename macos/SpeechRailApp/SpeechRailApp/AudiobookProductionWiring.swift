@@ -85,24 +85,7 @@ public enum AudiobookProductionWiring {
         let discoveryClient: any ServiceCapabilityDiscoveryClient
         let renderClient: any SpeechRailSpeechRenderClient
         let voiceDesignClient: any SpeechRailVoiceDesignClient
-
-        private static func sanitizedVoiceRevisionHeader(_ value: String?) -> String? {
-            guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  trimmed.range(of: "^vr_[0-9a-f]{32}$", options: .regularExpression) != nil
-            else {
-                return nil
-            }
-            return trimmed
-        }
-
-        private static func sanitizedModelRevisionHeader(_ value: String?) -> String? {
-            guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  trimmed.range(of: "^[0-9a-f]{40}$", options: .regularExpression) != nil
-            else {
-                return nil
-            }
-            return trimmed
-        }
+        let voiceCatalog: VoiceCatalogStore
 
         func fetchEffectiveCapabilities() async throws -> EffectiveCapabilitySnapshot {
             let conditional = try await discoveryClient.fetchEffectiveCapabilities(ifNoneMatch: nil, cachedValue: nil)
@@ -125,86 +108,66 @@ public enum AudiobookProductionWiring {
         }
 
         func renderFragment(_ request: AudiobookRenderCallRequest) async throws -> AudiobookRenderCallOutput {
-            let snapshot = try? await fetchEffectiveCapabilities()
-            let matchedVoice = snapshot?.voices.first(where: {
-                $0.id == request.voiceID || $0.aliases.contains(request.voiceID)
-            })
-            let liveOptions = snapshot.flatMap {
-                SpeechRailCapabilityRevisionSelector.creatorRequestOptions(voiceID: request.voiceID, in: $0)
-            }
-            let rawVoiceRev = liveOptions != nil ? liveOptions?.expectedVoiceRevision : request.expectedVoiceRevision
-            let rawModelRev = liveOptions?.expectedModelRevision ?? request.expectedModelRevision
-            // 正式制作默认始终携带 require_output_pass（与配音台保持同一验收标准）；
-            // 仅当存量音色仍处于旧版 reference_validation_not_passed 且服务端返回 voice_not_production_ready 时降级重试。
-            let primaryOptions = SpeechRailRequestOptions(
-                expectedVoiceRevision: Self.sanitizedVoiceRevisionHeader(rawVoiceRev),
-                expectedModelRevision: Self.sanitizedModelRevisionHeader(rawModelRev),
-                receiptMode: "integrity",
-                purpose: nil,
-                validationPolicy: "require_output_pass"
+            let snapshot = try await fetchEffectiveCapabilities()
+            let binding = AudiobookVoiceBinding(
+                roleID: UUID(), voiceID: request.voiceID, voiceRevision: request.expectedVoiceRevision,
+                modelRevision: request.expectedModelRevision, allowedSpeed: request.speed, callerSeed: request.seed
             )
-            let result: SpeechRenderResult
-            do {
-                result = try await renderClient.createSpeechRender(
-                    text: request.text,
-                    voiceID: request.voiceID,
-                    speed: request.speed,
-                    options: primaryOptions
-                )
-            } catch let ServiceAPIClientError.http(_, code, _, _, _)
-                where code == "voice_not_production_ready"
-                && matchedVoice?.productionReadyReason == "reference_validation_not_passed"
-            {
-                let fallbackOptions = SpeechRailRequestOptions(
-                    expectedVoiceRevision: Self.sanitizedVoiceRevisionHeader(rawVoiceRev),
-                    expectedModelRevision: Self.sanitizedModelRevisionHeader(rawModelRev),
-                    receiptMode: "integrity",
-                    purpose: nil,
-                    validationPolicy: nil
-                )
-                result = try await renderClient.createSpeechRender(
-                    text: request.text,
-                    voiceID: request.voiceID,
-                    speed: request.speed,
-                    options: fallbackOptions
-                )
+            try AudiobookCastRegistry.validateRenderBinding(binding, snapshot: snapshot)
+            guard let voice = snapshot.voices.first(where: { $0.id == request.voiceID }),
+                  voiceCatalog.snapshot().permits(voice, bookID: request.bookID ?? UUID(uuidString: "00000000-0000-0000-0000-000000000000")!) else {
+                throw ServiceAPIClientError.invalidContract("voice_scope_changed")
             }
+            let result = try await renderClient.createSpeechRender(
+                text: request.text, voiceID: request.voiceID, speed: request.speed,
+                options: SpeechRailRequestOptions(
+                    callerSeed: request.seed, expectedVoiceRevision: request.expectedVoiceRevision,
+                    expectedModelRevision: request.expectedModelRevision, receiptMode: "integrity",
+                    validationPolicy: "require_output_pass"
+                )
+            )
             return AudiobookRenderCallOutput(
                 wavData: result.audioData,
                 voiceRevision: result.voiceRevision,
-                modelRevision: request.expectedModelRevision,
+                modelRevision: result.recipe?.modelArtifactRevision,
                 pcmSHA256: result.pcmSHA256,
                 requestID: result.requestID,
                 receiptID: result.receiptID,
                 recipeSummary: result.recipe?.digest,
-                isProvenanceVerified: result.provenance.state == .verified || result.audioData.count >= 44
+                isProvenanceVerified: result.provenance.state == .verified
             )
+        }
+
+        func renderAudition(_ request: AudiobookRenderCallRequest) async throws -> Data {
+            let snapshot = try await fetchEffectiveCapabilities()
+            let binding = AudiobookVoiceBinding(roleID: UUID(), voiceID: request.voiceID,
+                voiceRevision: request.expectedVoiceRevision, modelRevision: request.expectedModelRevision,
+                allowedSpeed: request.speed, callerSeed: request.seed)
+            try AudiobookCastRegistry.validateRenderBinding(binding, snapshot: snapshot, requireProductionReady: false)
+            guard let voice = snapshot.voices.first(where: { $0.id == request.voiceID }),
+                  voiceCatalog.snapshot().permits(voice, bookID: request.bookID ?? UUID(uuidString: "00000000-0000-0000-0000-000000000000")!) else {
+                throw ServiceAPIClientError.invalidContract("voice_scope_changed")
+            }
+            return try await renderClient.createSpeech(text: request.text, voiceID: request.voiceID, speed: request.speed,
+                options: .init(callerSeed: request.seed, expectedVoiceRevision: request.expectedVoiceRevision,
+                    expectedModelRevision: request.expectedModelRevision, validationPolicy: "allow_unverified"))
+        }
+
+        private static func leadVoiceOutput(voiceID: String, snapshot: EffectiveCapabilitySnapshot) throws -> AudiobookLeadVoiceCreationOutput {
+            guard let voice = snapshot.voices.first(where: { $0.id == voiceID }),
+                  let revision = voice.voiceRevision,
+                  let model = SpeechRailCapabilityRevisionSelector.creatorRequestOptions(voiceID: voiceID, in: snapshot)?.expectedModelRevision else {
+                throw ServiceAPIClientError.invalidContract("voice_identity_unknown")
+            }
+            try AudiobookCastRegistry.validateRenderBinding(.init(roleID: UUID(), voiceID: voiceID, voiceRevision: revision, modelRevision: model), snapshot: snapshot)
+            return AudiobookLeadVoiceCreationOutput(voiceID: voice.id, voiceName: voice.name, voiceRevision: revision, modelRevision: model)
         }
 
         func createAndPublishLeadVoice(
             _ request: AudiobookLeadVoiceCreationRequest
         ) async throws -> AudiobookLeadVoiceCreationOutput {
-            if let snapshot = try? await fetchEffectiveCapabilities(),
-               let existing = snapshot.voices.first(where: {
-                   $0.id == request.targetVoiceID
-                       && $0.available
-                       && ($0.productionReady != false
-                           || $0.productionReadyReason == "reference_validation_not_passed"
-                           || $0.productionReadyReason == "model_runtime_identity_unknown")
-               })
-            {
-                let slotModelRev = SpeechRailCapabilityRevisionSelector.ttsArtifactSlot(forVoiceMode: existing.mode)
-                    .flatMap { snapshot.models[$0]?.catalogRevision }
-                let modelRev = slotModelRev
-                    ?? existing.model.catalogRevision
-                    ?? existing.model.runtimeRevision
-                    ?? "qwen3-tts-v1"
-                return AudiobookLeadVoiceCreationOutput(
-                    voiceID: existing.id,
-                    voiceName: existing.name,
-                    voiceRevision: existing.voiceRevision ?? "v1",
-                    modelRevision: modelRev
-                )
+            if let snapshot = try? await fetchEffectiveCapabilities(), snapshot.voices.contains(where: { $0.id == request.targetVoiceID }) {
+                return try Self.leadVoiceOutput(voiceID: request.targetVoiceID, snapshot: snapshot)
             }
 
             let rawCandidates = request.referenceTextCandidates.isEmpty
@@ -280,22 +243,10 @@ public enum AudiobookProductionWiring {
                         expectedCandidateRevision: candidate.revision
                     )
 
-                    let snapshot = try? await fetchEffectiveCapabilities()
-                    let publishedMode = published.voice.mode ?? "clone"
-                    let slotModelRev = SpeechRailCapabilityRevisionSelector.ttsArtifactSlot(forVoiceMode: publishedMode)
-                        .flatMap { snapshot?.models[$0]?.catalogRevision }
-                    let snapshotVoiceModelRev = snapshot?.voices.first(where: { $0.id == published.voice.id })
-                        .flatMap { $0.model.catalogRevision ?? $0.model.runtimeRevision }
-                    let modelRev = slotModelRev
-                        ?? snapshotVoiceModelRev
-                        ?? "qwen3-tts-v1"
-
-                    return AudiobookLeadVoiceCreationOutput(
-                        voiceID: published.voice.id,
-                        voiceName: published.voice.name,
-                        voiceRevision: published.voice.revision ?? "v1",
-                        modelRevision: modelRev
-                    )
+                    let snapshot = try await fetchEffectiveCapabilities()
+                    let output = try Self.leadVoiceOutput(voiceID: published.voice.id, snapshot: snapshot)
+                    guard output.voiceRevision == published.voice.revision else { throw ServiceAPIClientError.invalidContract("casting_identity_changed") }
+                    return output
                 } catch {
                     lastError = error
                     continue
@@ -314,11 +265,14 @@ public enum AudiobookProductionWiring {
         discoveryClient: any ServiceCapabilityDiscoveryClient,
         renderClient: (any SpeechRailSpeechRenderClient)? = nil,
         voiceDesignClient: (any SpeechRailVoiceDesignClient)? = nil,
-        controlTransport: any SpeechRailControlTransport
+        controlTransport: any SpeechRailControlTransport,
+        voiceCatalog: VoiceCatalogStore? = nil
     ) -> AudiobookDependencies {
-        let defaultAPIClient = ServiceAPIClient(maximumResponseBytes: AudiobookLimits.maxWAVResponseBytes)
-        let effectiveRenderClient: any SpeechRailSpeechRenderClient = renderClient ?? defaultAPIClient
-        let effectiveVoiceDesignClient: any SpeechRailVoiceDesignClient = voiceDesignClient ?? defaultAPIClient
+        let effectiveCatalog = voiceCatalog ?? .shared
+        let defaultAPIClient = (renderClient == nil || voiceDesignClient == nil)
+            ? ServiceAPIClient(maximumResponseBytes: AudiobookLimits.maxWAVResponseBytes) : nil
+        let effectiveRenderClient: any SpeechRailSpeechRenderClient = renderClient ?? defaultAPIClient!
+        let effectiveVoiceDesignClient: any SpeechRailVoiceDesignClient = voiceDesignClient ?? defaultAPIClient!
 
         return AudiobookDependencies(
             makeStore: {
@@ -357,10 +311,12 @@ public enum AudiobookProductionWiring {
             speechRenderer: LiveAudiobookSpeechRenderer(
                 discoveryClient: discoveryClient,
                 renderClient: effectiveRenderClient,
-                voiceDesignClient: effectiveVoiceDesignClient
+                voiceDesignClient: effectiveVoiceDesignClient,
+                voiceCatalog: effectiveCatalog
             ),
             controlTransport: controlTransport,
-            clock: SystemAudiobookClock()
+            clock: SystemAudiobookClock(),
+            voiceCatalog: effectiveCatalog
         )
     }
 }

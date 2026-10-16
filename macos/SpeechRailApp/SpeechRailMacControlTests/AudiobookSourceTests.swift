@@ -188,4 +188,47 @@ final class AudiobookSourceTests: XCTestCase {
         let text3 = "Hello\nWorld"
         XCTAssertEqual(AudiobookSourceIndex.displayNormalizedText(text3), "Hello World")
     }
+
+    func testPreparedParagraphRangesCoverCRLFAndPreserveSpeakerBoundaries() throws {
+        let text = "\r\n    他站在門邊，聽見了一陣腳步聲，便順著窗外的微弱燈光望\r\n向遠方。\r\n\r\n    “誰在那裡？”\r\n    “是我。”\r\n\r\n"
+        let source = try AudiobookSourceIndex(utf8: Data(text.utf8))
+        XCTAssertEqual(source.paragraphs.count, 3)
+        XCTAssertEqual(source.joinedLineBreakCount, 1)
+        try source.validateCoverage(source.paragraphs.map(\.sourceRange), exclusions: [])
+        XCTAssertEqual(try source.normalizedText(in: source.wholeRange), "他站在門邊，聽見了一陣腳步聲，便順著窗外的微弱燈光望向遠方。\n\n“誰在那裡？”\n\n“是我。”")
+        let marker = try XCTUnwrap(source.utf8Data.range(of: Data("望".utf8)))
+        let end = try XCTUnwrap(source.utf8Data.range(of: Data("向遠方。".utf8)))
+        XCTAssertEqual(try source.normalizedText(in: .init(lowerBound: Int64(marker.lowerBound), upperBound: Int64(end.upperBound))), "望向遠方。")
+        let chapter = AudiobookChapter(bookID: UUID(), sourceID: UUID(), ordinal: 0, title: "全文", sourceRange: source.wholeRange)
+        let atoms = try source.buildAtoms(for: chapter)
+        try source.validateCoverage(atoms.map(\.sourceRange), exclusions: [])
+        XCTAssertFalse(try atoms.contains { try source.text(in: $0.sourceRange).trimmingCharacters(in: .whitespacesAndNewlines) == "向遠方。" })
+    }
+
+    func testCRLFAfterSentenceBoundaryKeepsEveryAtomWithinScalarBudget() throws {
+        let cases: [(text: String, budget: Int)] = [
+            (String(repeating: "甲", count: 158) + "。\r\n乙", 160),
+            ("甲乙。\r\n丙", 4),
+        ]
+
+        for (text, budget) in cases {
+            let source = try AudiobookSourceIndex(utf8: Data(text.utf8))
+            let chapter = AudiobookChapter(
+                bookID: UUID(),
+                sourceID: UUID(),
+                ordinal: 0,
+                title: "全文",
+                sourceRange: source.wholeRange
+            )
+            let atoms = try source.buildAtoms(for: chapter, maxAtomScalars: budget)
+
+            try source.validateCoverage(atoms.map(\.sourceRange), exclusions: [])
+            for atom in atoms {
+                let start = try XCTUnwrap(source.scalarIndex(forByteOffset: atom.sourceRange.lowerBound))
+                let end = try XCTUnwrap(source.scalarIndex(forByteOffset: atom.sourceRange.upperBound))
+                XCTAssertLessThanOrEqual(end - start, budget, "预算 \(budget) 不应被 CRLF 越过")
+            }
+            XCTAssertEqual(try atoms.map { try source.text(in: $0.sourceRange) }.joined(), text)
+        }
+    }
 }

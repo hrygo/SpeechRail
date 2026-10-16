@@ -115,33 +115,51 @@ final class AudiobookAcceptanceTests: XCTestCase {
 
         func fetchEffectiveCapabilities() async throws -> EffectiveCapabilitySnapshot {
             let desc = SafeVoiceDescriptor(
-                voiceMode: "instruction",
+                voiceMode: "system",
                 locales: ["zh-CN"],
                 styleTags: [],
                 pitchBand: "unknown",
                 timbreFamily: "unknown",
                 baselinePace: "unknown",
-                sourceType: "instruction_profile",
+                sourceType: "system_preset",
                 metadataMethod: "declared_only"
             )
             let model = ConfiguredModelIdentity(
                 assurance: .configuredCatalog,
-                runtimeRevision: "qwen3-tts-v1",
-                catalogRevision: "qwen3-tts-v1"
+                runtimeRevision: String(repeating: "a", count: 40),
+                catalogRevision: String(repeating: "a", count: 40)
             )
-            let voices = ["v-narrator", "v-linyuan", "v-suqing"].map { id in
-                SafeVoiceEntry(
+            let speechOperation = JSONValue(.object([
+                "parameters": JSONValue(.object([
+                    "speed": JSONValue(.object([
+                        "status": JSONValue(.string("supported")),
+                        "minimum": JSONValue(.number(0.25)),
+                        "maximum": JSONValue(.number(4))
+                    ]))
+                ]))
+            ]))
+            let voices = try ["v-narrator", "v-linyuan", "v-suqing"].map { id in
+                let voice = SafeVoiceEntry(
                     id: id,
                     name: id,
-                    mode: "instruction",
+                    mode: "system",
                     available: true,
                     availabilityReason: .available,
-                    voiceRevision: "rev-1",
+                    voiceRevision: "vr_0123456789abcdef0123456789abcdef",
                     voiceIdentityAssurance: .contentAddressed,
                     model: model,
                     descriptors: desc,
-                    operations: [:],
+                    operations: ["http_speech": speechOperation],
                     productionReady: true
+                )
+                // 使用服务线协议声明系统预设身份，夹具不依赖成员构造器的参数清单。
+                var payload = try XCTUnwrap(
+                    JSONSerialization.jsonObject(with: JSONEncoder().encode(voice)) as? [String: Any]
+                )
+                payload["is_system"] = true
+                payload["is_default"] = true
+                return try JSONDecoder().decode(
+                    SafeVoiceEntry.self, from: JSONSerialization.data(withJSONObject: payload)
                 )
             }
             return EffectiveCapabilitySnapshot(
@@ -212,10 +230,10 @@ final class AudiobookAcceptanceTests: XCTestCase {
         let tempRoot = try makeTempRoot()
         defer { try? FileManager.default.removeItem(at: tempRoot) }
         let store = try AudiobookProjectStore(root: tempRoot)
+        let renderer = EndToEndRenderer()
         let castController = AudiobookCastController(store: store)
         let revisionController = AudiobookRevisionController(store: store)
         let admission = SpeechCreationAdmission()
-        let renderer = EndToEndRenderer()
         let productionController = AudiobookProductionController(
             store: store,
             castController: castController,
@@ -259,22 +277,40 @@ final class AudiobookAcceptanceTests: XCTestCase {
         let narrator = try XCTUnwrap(characters.first(where: \.isNarrator))
         let linyuan = try XCTUnwrap(characters.first(where: { $0.displayName == "林远" }))
         let suqing = try XCTUnwrap(characters.first(where: { $0.displayName == "苏晴" }))
+        let capabilities = try await renderer.fetchEffectiveCapabilities()
 
-        try await castController.bindVoice(
-            bookID: bookID,
-            roleID: narrator.id,
-            binding: AudiobookVoiceBinding(roleID: narrator.id, voiceID: "v-narrator", voiceRevision: "rev-1", modelRevision: "qwen3-tts-v1")
+        func binding(roleID: UUID, voiceID: String) throws -> AudiobookVoiceBinding {
+            let options = try XCTUnwrap(
+                SpeechRailCapabilityRevisionSelector.creatorRequestOptions(voiceID: voiceID, in: capabilities)
+            )
+            return AudiobookVoiceBinding(
+                roleID: roleID,
+                voiceID: voiceID,
+                voiceRevision: try XCTUnwrap(options.expectedVoiceRevision),
+                modelRevision: try XCTUnwrap(options.expectedModelRevision)
+            )
+        }
+
+        // 经应用装配入口注入 fake 能力提供者，避免测试自行复制控制器的依赖接线。
+        let workflow = AudiobookWorkflowModel(
+            dependencies: AudiobookDependencies(
+                makeStore: { store },
+                makeAnalysisClient: { snapshot in
+                    EndToEndAnalysisClient(configurationDigest: snapshot.configurationDigest)
+                },
+                resolveAnalysisSnapshot: { _ in config },
+                speechRenderer: renderer
+            ),
+            admission: admission
         )
-        try await castController.bindVoice(
-            bookID: bookID,
-            roleID: linyuan.id,
-            binding: AudiobookVoiceBinding(roleID: linyuan.id, voiceID: "v-linyuan", voiceRevision: "rev-1", modelRevision: "qwen3-tts-v1")
-        )
-        try await castController.bindVoice(
-            bookID: bookID,
-            roleID: suqing.id,
-            binding: AudiobookVoiceBinding(roleID: suqing.id, voiceID: "v-suqing", voiceRevision: "rev-1", modelRevision: "qwen3-tts-v1")
-        )
+        await workflow.openBook(bookID)
+        XCTAssertNil(workflow.errorMessage)
+        for (roleID, voiceID) in [(narrator.id, "v-narrator"), (linyuan.id, "v-linyuan"), (suqing.id, "v-suqing")] {
+            await workflow.bindVoice(roleID: roleID, binding: try binding(roleID: roleID, voiceID: voiceID))
+            XCTAssertNil(workflow.errorMessage)
+            XCTAssertEqual(workflow.voiceBindings[roleID]?.voiceID, voiceID)
+        }
+        await workflow.shutdown()
         let castRev = try await castController.currentCastRevisionID(for: bookID)
         try await castController.confirmCast(bookID: bookID, revisionID: castRev)
         let voiceDigest = try await castController.currentVoiceSetDigest(for: bookID)
@@ -312,6 +348,17 @@ final class AudiobookAcceptanceTests: XCTestCase {
         XCTAssertEqual(bookAfterFull.productionState, .fullBookProduced)
         XCTAssertEqual(bookAfterFull.listenableState, .fullBookListenable)
         XCTAssertNotNil(bookAfterFull.currentProductionRevisionID)
+
+        XCTAssertFalse(renderer.renderedRequests.isEmpty)
+        for request in renderer.renderedRequests {
+            let options = try XCTUnwrap(
+                SpeechRailCapabilityRevisionSelector.creatorRequestOptions(voiceID: request.voiceID, in: capabilities)
+            )
+            XCTAssertEqual(request.expectedVoiceRevision, options.expectedVoiceRevision)
+            XCTAssertEqual(request.expectedModelRevision, options.expectedModelRevision)
+            XCTAssertEqual(request.speed, AudiobookLimits.defaultRenderSpeed)
+            XCTAssertNil(request.seed)
+        }
 
         // 5. 重启恢复计划：全部片段均可复用，无需重做
         let resumePlan = try await revisionController.resumePlan(bookID: bookID)

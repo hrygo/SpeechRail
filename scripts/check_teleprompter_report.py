@@ -56,7 +56,7 @@ import re
 import sys
 from pathlib import Path
 
-REPORT = Path("docs/implementation/SpeechRail_AI_Teleprompter_Stage_Report_2026-09-28.md")
+REPORT = Path("docs/implementation/2026-09-28-teleprompter-stage-report.md")
 REPLACEMENT_CHAR = "�"
 
 _CLAIM_RE = re.compile(r"找出 (\d+) 个真缺陷.*?第 (\d+)[–-](\d+) 条")

@@ -68,15 +68,21 @@ public actor AudiobookRevisionController {
     }
 
     /// 首次制作完成某章全部片段且尚无历史版本时，自动组装并发布初始章节版本。
+    /// 制作队列持有任务状态时仅发布版本与可收听状态，制作终态由队列随检查点提交。
     public func promoteInitialChapterIfComplete(
         bookID: UUID,
-        chapterID: UUID
+        chapterID: UUID,
+        updateBookProductionState: Bool = true
     ) async throws -> AudiobookChapterRevision? {
         let chapters = try await store.chapters(for: bookID)
         guard let chapter = chapters.first(where: { $0.id == chapterID }) else {
             throw AudiobookStoreError.chapterNotFound(chapterID)
         }
-        let fragments = try await currentPlannedFragments(bookID: bookID, chapter: chapter)
+        let existingRevs = try await store.chapterRevisions(for: bookID, chapterID: chapterID)
+        if let current = existingRevs.first(where: { $0.id == chapter.currentChapterRevisionID }) {
+            return current
+        }
+        let fragments = try await currentPlannedFragments(bookID: bookID, chapter: chapter, persist: false)
         let candidates = try await store.candidates(for: bookID)
 
         var orderedBindings: [AudiobookFragmentCandidateBinding] = []
@@ -106,7 +112,6 @@ public actor AudiobookRevisionController {
             totalFrames += matching.frameCount
         }
 
-        let existingRevs = try await store.chapterRevisions(for: bookID, chapterID: chapterID)
         let nextRevNumber = (existingRevs.map(\.revisionNumber).max() ?? 0) + 1
         let revision = AudiobookChapterRevision(
             bookID: bookID,
@@ -117,9 +122,10 @@ public actor AudiobookRevisionController {
             totalFrameCount: totalFrames,
             sampleRate: policy.sampleRate
         )
-        try await store.saveChapterRevision(revision, makeCurrent: true)
-        try await refreshBookProductionRevisionIfApplicable(bookID: bookID)
-        return revision
+        return try await store.publishChapterRevision(
+            revision, publication: .initial, policy: policy,
+            updateBookProductionState: updateBookProductionState
+        )
     }
 
     /// 显式采用某个返修候选：校验 expectedRevisionID 与当前 dependencyDigest，幂等防重复。
@@ -158,7 +164,7 @@ public actor AudiobookRevisionController {
             )
         }
 
-        let currentFragments = try await currentPlannedFragments(bookID: bookID, chapter: chapter)
+        let currentFragments = try await currentPlannedFragments(bookID: bookID, chapter: chapter, persist: false)
         guard let targetFragment = currentFragments.first(where: { $0.id == targetCandidate.fragmentID }) else {
             throw AudiobookRevisionError.fragmentNotFound(targetCandidate.fragmentID)
         }
@@ -232,19 +238,20 @@ public actor AudiobookRevisionController {
             totalFrameCount: totalFrames,
             sampleRate: policy.sampleRate
         )
-        try await store.saveChapterRevision(newRevision, makeCurrent: true)
-        try await refreshBookProductionRevisionIfApplicable(bookID: bookID)
+        _ = try await store.publishChapterRevision(
+            newRevision, publication: .adoption(candidateID: candidateID, expectedRevisionID: expectedRevisionID),
+            policy: policy
+        )
     }
 
     public func undoAdoption(
         bookID: UUID,
         chapterID: UUID
     ) async throws {
-        var chapters = try await store.chapters(for: bookID)
-        guard let index = chapters.firstIndex(where: { $0.id == chapterID }) else {
+        let chapters = try await store.chapters(for: bookID)
+        guard let chapter = chapters.first(where: { $0.id == chapterID }) else {
             throw AudiobookStoreError.chapterNotFound(chapterID)
         }
-        let chapter = chapters[index]
         guard let previousID = chapter.previousChapterRevisionID else {
             throw AudiobookRevisionError.noPreviousChapterRevisionToUndo(chapterID: chapterID)
         }
@@ -253,12 +260,9 @@ public actor AudiobookRevisionController {
             throw AudiobookRevisionError.noPreviousChapterRevisionToUndo(chapterID: chapterID)
         }
 
-        var updatedChapter = chapter
-        updatedChapter.currentChapterRevisionID = previousRev.id
-        updatedChapter.previousChapterRevisionID = nil
-        chapters[index] = updatedChapter
-        try await store.saveChapterRevision(previousRev, makeCurrent: true)
-        try await refreshBookProductionRevisionIfApplicable(bookID: bookID)
+        _ = try await store.publishChapterRevision(
+            previousRev, publication: .undo(expectedRevisionID: chapter.currentChapterRevisionID), policy: policy
+        )
     }
 
     /// 返回当前语义依然有效的章节版本；若某章已发生说话人/声音变更导致当前版本失效，返回 nil（历史版本通过 `previousListenableChapter` 读取并显示“之前的版本”）。
@@ -433,7 +437,8 @@ public actor AudiobookRevisionController {
 
     private func currentPlannedFragments(
         bookID: UUID,
-        chapter: AudiobookChapter
+        chapter: AudiobookChapter,
+        persist: Bool = true
     ) async throws -> [AudiobookFragment] {
         let source = try await store.sourceIndex(for: bookID)
         let annotations = try await store.annotations(for: bookID, chapterID: chapter.id)
@@ -447,52 +452,12 @@ public actor AudiobookRevisionController {
             source: source,
             atoms: atoms
         )
-        let existing = (try? await store.fragments(for: bookID, chapterID: chapter.id)) ?? []
-        if existing != planned {
-            try await store.saveFragments(bookID: bookID, chapterID: chapter.id, fragments: planned)
+        if persist {
+            let existing = try await store.fragments(for: bookID, chapterID: chapter.id)
+            if existing != planned {
+                try await store.saveFragments(bookID: bookID, chapterID: chapter.id, fragments: planned)
+            }
         }
         return planned
-    }
-
-    private func refreshBookProductionRevisionIfApplicable(bookID: UUID) async throws {
-        let chapters = try await store.chapters(for: bookID).sorted { $0.ordinal < $1.ordinal }
-        guard !chapters.isEmpty else { return }
-
-        var currentMap: [UUID: UUID] = [:]
-        for chapter in chapters {
-            if let validRev = try await currentChapter(bookID: bookID, chapterID: chapter.id) {
-                currentMap[chapter.id] = validRev.id
-            }
-        }
-
-        var book = try await store.book(id: bookID)
-        if currentMap.count == chapters.count {
-            let prodRev = AudiobookProductionRevision(
-                bookID: bookID,
-                sourceID: book.sourceID,
-                chapterRevisionIDsByChapter: currentMap
-            )
-            try await store.saveProductionRevision(prodRev, makeCurrent: true)
-            book = try await store.book(id: bookID)
-            book.productionState = .fullBookProduced
-            book.listenableState = .fullBookListenable
-            try await store.updateBook(book)
-        } else if !currentMap.isEmpty {
-            book.currentProductionRevisionID = nil
-            book.productionState = .partialChaptersReady
-            book.listenableState = .partialChaptersListenable
-            try await store.updateBook(book)
-        } else {
-            book.currentProductionRevisionID = nil
-            var hasPrevious = false
-            for chapter in chapters {
-                if (try? await previousListenableChapter(bookID: bookID, chapterID: chapter.id)) != nil {
-                    hasPrevious = true
-                    break
-                }
-            }
-            book.listenableState = hasPrevious ? .previousRevisionAvailable : .noneAvailable
-            try await store.updateBook(book)
-        }
     }
 }

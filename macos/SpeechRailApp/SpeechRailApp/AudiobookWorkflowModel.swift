@@ -33,6 +33,7 @@ private struct AudiobookBookWorkspaceSnapshot: Sendable {
     let exportRecords: [AudiobookExportRecord]
     let allAnnotations: [AudiobookAnnotation]
     let resumePlan: AudiobookResumePlan?
+    let productionCheckpoint: AudiobookProductionCheckpoint?
     let chapterReadinessByID: [UUID: AudiobookChapterReadinessState]
     let chapterDetails: AudiobookChapterDetailsSnapshot
     let workbenchTab: AudiobookWorkflowModel.WorkbenchTab
@@ -276,6 +277,7 @@ public final class AudiobookWorkflowModel {
     public private(set) var productionBookID: UUID?
     public private(set) var productionFragmentID: UUID?
     public private(set) var productionProgress: AudiobookProductionProgress?
+    private var selectedProductionCheckpoint: AudiobookProductionCheckpoint?
     public private(set) var isEditingChapterLayout: Bool = false
     public private(set) var resumePlan: AudiobookResumePlan?
     public private(set) var exportCapabilities: MediaCapabilitiesSnapshot = .init(
@@ -315,6 +317,12 @@ public final class AudiobookWorkflowModel {
     private var productionController: AudiobookProductionController?
     private var exportController: AudiobookExportController?
 
+    @ObservationIgnored private var catalogObservation: VoiceCatalogObservation?
+    public private(set) var voiceCatalogRevision: String = ""
+    public private(set) var castingPlanNeedsRefresh = false
+    public var castingRecommendation: AudiobookCastingRecommendation? { pendingCastingPlan.map(AudiobookCastingRecommendation.init) }
+    public private(set) var castingAudition: AudiobookCastingAudition?
+
     private var analysisTask: Task<Void, Never>?
     private var productionTask: Task<Void, Never>?
     private var productionProgressPollTask: Task<Void, Never>?
@@ -332,13 +340,24 @@ public final class AudiobookWorkflowModel {
         self.playbackOwner = playbackOwner
         self.admission = admission
         bootstrapIfPossible()
+        voiceCatalogRevision = dependencies.voiceCatalog.snapshot().revision
+        catalogObservation = VoiceCatalogObservation(catalog: dependencies.voiceCatalog) { [weak self] in
+            Task { @MainActor in self?.catalogDidChange() }
+        }
+    }
+
+    private func catalogDidChange() {
+        voiceCatalogRevision = dependencies.voiceCatalog.snapshot().revision
+        castingPlanNeedsRefresh = pendingCastingPlan?.voiceCatalogRevision != voiceCatalogRevision
+        castingAudition = nil
     }
 
     private func bootstrapIfPossible() {
         guard store == nil else { return }
         guard let createdStore = try? dependencies.makeStore() else { return }
         self.store = createdStore
-        let cast = AudiobookCastController(store: createdStore)
+        let renderer = dependencies.speechRenderer
+        let cast = AudiobookCastController(store: createdStore, capabilityProvider: { try await renderer.fetchEffectiveCapabilities() }, voiceCatalog: dependencies.voiceCatalog)
         let rev = AudiobookRevisionController(store: createdStore)
         let prod = AudiobookProductionController(
             store: createdStore,
@@ -346,7 +365,8 @@ public final class AudiobookWorkflowModel {
             revisionController: rev,
             renderer: dependencies.speechRenderer,
             admission: admission,
-            clock: dependencies.clock
+            clock: dependencies.clock,
+            voiceCatalog: dependencies.voiceCatalog
         )
         let exp = AudiobookExportController(
             store: createdStore,
@@ -454,6 +474,14 @@ public final class AudiobookWorkflowModel {
 
     public var isProductionBusy: Bool {
         isProducing || isPausingProduction
+    }
+
+    public var selectedBookProductionProgress: AudiobookProductionProgress? {
+        guard let book = selectedBook else { return nil }
+        if let productionProgress, productionProgress.bookID == book.id { return productionProgress }
+        var saved = selectedProductionCheckpoint?.progress
+        if book.productionState == .paused { saved?.state = .paused }
+        return saved
     }
 
     public var canEditChapterStructure: Bool {
@@ -684,6 +712,10 @@ public final class AudiobookWorkflowModel {
     public func confirmImport() async {
         bootstrapIfPossible()
         guard let store, let preview = importPreview else { return }
+        guard preview.canConfirmImport else {
+            errorMessage = "请先核对重复内容，并确认保留后再导入。"
+            return
+        }
         do {
             let bookID = try await store.importBook(preview)
             isShowingImportSheet = false
@@ -740,6 +772,13 @@ public final class AudiobookWorkflowModel {
             applyChapterDetails(mustReloadChapterDetails ? .empty : snapshot.chapterDetails)
             isLoadingChapterDetails = mustReloadChapterDetails
             resumePlan = snapshot.resumePlan
+            selectedProductionCheckpoint = snapshot.productionCheckpoint
+            if !isProductionBusy {
+                productionProgress = snapshot.productionCheckpoint?.progress
+                if snapshot.book.productionState == .paused {
+                    productionProgress?.state = .paused
+                }
+            }
             chapterReadinessByID = snapshot.chapterReadinessByID
             selectedAtomIDs.removeAll()
             surfaceMode = .workspace
@@ -964,12 +1003,16 @@ public final class AudiobookWorkflowModel {
             byID[voice.id] = voice
         }
         let activeBookID = selectedBook?.id
-        let metadataMap = VoiceCatalogStore.shared.metadataByVoiceID
-        return byID.values.sorted { lhs, rhs in
+        let catalog = dependencies.voiceCatalog.snapshot()
+        let metadataMap = catalog.state.metadataByVoiceID
+        return byID.values.filter { voice in
+            if let activeBookID { return catalog.permits(voice, bookID: activeBookID) }
+            return catalog.permitsSurface(voice, bookID: nil)
+        }.sorted { lhs, rhs in
             let metaL = metadataMap[lhs.id]
             let metaR = metadataMap[rhs.id]
-            let isBookExL = (metaL?.scope == .bookExclusive && metaL?.originBookID == activeBookID)
-            let isBookExR = (metaR?.scope == .bookExclusive && metaR?.originBookID == activeBookID)
+            let isBookExL = (metaL?.visibilityScope == .bookExclusive && metaL?.originBookID == activeBookID)
+            let isBookExR = (metaR?.visibilityScope == .bookExclusive && metaR?.originBookID == activeBookID)
             if isBookExL != isBookExR { return isBookExL }
 
             let isCustomL = !Self.builtInSystemVoiceIDs.contains(lhs.id.lowercased()) && lhs.id.lowercased() != "v-narrator"
@@ -980,74 +1023,157 @@ public final class AudiobookWorkflowModel {
         }
     }
 
-    /// 根据全书角色声线线索与当前可用音色目录，为尚未配声的角色自动推荐并预绑定音色（含四级分层、双池隔离、同场图着色与微语速错位）。
+    /// 为尚未配声的角色生成方案；保留已有绑定，共享风险须另行确认，默认不启用微语速。
+    public private(set) var pendingCastingPlan: AudiobookCastingPlan?
+
+    public func previewRecommendedVoices(strategy: AudiobookCastingStrategy = .sceneAware) async {
+        guard let bookID = selectedBook?.id, let store else { return }
+        do {
+            let snapshot = try await dependencies.speechRenderer.fetchEffectiveCapabilities()
+            guard selectedBook?.id == bookID else { return }
+            let plan = try await store.prepareCastingPlan(bookID: bookID, snapshot: snapshot, catalog: dependencies.voiceCatalog.snapshot(), strategy: strategy)
+            guard selectedBook?.id == bookID else { return }
+            pendingCastingPlan = plan; castingPlanNeedsRefresh = false; castingAudition = nil
+            errorMessage = plan.issues.first(where: \.isBlocking)?.nextAction
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    public func previewVoiceReplacement(_ bindings: [AudiobookVoiceBinding]) async {
+        guard let bookID = selectedBook?.id, let store else { return }
+        do {
+            let snapshot = try await dependencies.speechRenderer.fetchEffectiveCapabilities()
+            let plan = try await store.prepareVoiceReplacement(bookID: bookID, bindings: bindings, snapshot: snapshot, catalog: dependencies.voiceCatalog.snapshot())
+            guard selectedBook?.id == bookID else { return }
+            pendingCastingPlan = plan; castingPlanNeedsRefresh = false; castingAudition = nil
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    public func undoLastCastingChange() async {
+        guard let bookID = selectedBook?.id, let castController else { return }
+        do {
+            try await castController.undoLastCastingChange(bookID: bookID)
+            pendingCastingPlan = nil; castingAudition = nil
+            await openBook(bookID)
+            bannerMessage = "已恢复上次配声；已采用音频和历史候选均已保留。"
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    public func prepareCastingAudition(kind: AudiobookCastingAudition.Kind, roleID: UUID, comparisonVoiceIDs: [String] = []) async {
+        guard let plan = pendingCastingPlan, selectedBook?.id == plan.bookID, let store else { return }
+        do {
+            try await store.validateCastingPlanInput(plan)
+            guard dependencies.voiceCatalog.snapshot().revision == plan.voiceCatalogRevision else { throw AudiobookCastError.castRevisionMismatch }
+            let source = try await store.sourceIndex(for: plan.bookID)
+            let annotations = try await store.annotations(for: plan.bookID).sorted { $0.sourceRange < $1.sourceRange }
+            let atoms = try await store.atoms(for: plan.bookID)
+            let roles = try await store.characters(for: plan.bookID)
+            func item(roleID: UUID, voiceID: String, range: AudiobookSourceRange) throws -> AudiobookCastingAudition.Item {
+                guard let start = source.scalarIndex(forByteOffset: range.lowerBound),
+                      let end = source.scalarIndex(forByteOffset: range.upperBound), end > start,
+                      let voice = plan.snapshot.voices.first(where: { $0.id == voiceID }), plan.catalog.permits(voice, bookID: plan.bookID),
+                      let options = SpeechRailCapabilityRevisionSelector.creatorRequestOptions(voiceID: voiceID, in: plan.snapshot),
+                      let model = options.expectedModelRevision else { throw ServiceAPIClientError.invalidContract("audition_unavailable") }
+                let excerpt = AudiobookSourceRange(lowerBound: range.lowerBound, upperBound: source.scalarByteOffsets[min(end, start + 240)])
+                let binding = plan.proposedBindings[roleID].flatMap { $0.voiceID == voiceID ? $0 : nil }
+                    ?? .init(roleID: roleID, voiceID: voiceID, voiceRevision: options.expectedVoiceRevision, modelRevision: model)
+                try AudiobookCastRegistry.validateRenderBinding(binding, snapshot: plan.snapshot, requireProductionReady: false)
+                return .init(roleID: roleID, voiceID: voiceID, sourceRange: excerpt, text: try source.text(in: excerpt), binding: binding)
+            }
+            let items: [AudiobookCastingAudition.Item]
+            switch kind {
+            case .sameTextComparison:
+                let range = annotations.first { $0.assignment.roleID == roleID }?.sourceRange
+                    ?? (roles.first { $0.id == roleID }?.isNarrator == true ? atoms.first { $0.kind == .body }?.sourceRange : nil)
+                guard let range else { throw ServiceAPIClientError.invalidContract("audition_source_missing") }
+                var seen: Set<String> = []
+                let voiceIDs = (comparisonVoiceIDs.isEmpty ? [plan.proposedBindings[roleID]?.voiceID].compactMap { $0 } : comparisonVoiceIDs)
+                    .filter { seen.insert($0).inserted }.prefix(4)
+                guard !voiceIDs.isEmpty else { throw ServiceAPIClientError.invalidContract("audition_voice_missing") }
+                items = try voiceIDs.map { try item(roleID: roleID, voiceID: $0, range: range) }
+            case .dialogueComparison:
+                let narratorIDs = Set(roles.filter(\.isNarrator).map(\.id))
+                let spoken = annotations.filter { row in row.assignment.roleID.map { !narratorIDs.contains($0) } ?? false }
+                let graph = AudiobookSceneConflictGraph.build(characters: roles, annotations: annotations, atoms: atoms)
+                var pair: [AudiobookAnnotation] = []
+                for (left, right) in zip(spoken, spoken.dropFirst()) {
+                    guard left.chapterID == right.chapterID, let a = left.assignment.roleID, let b = right.assignment.roleID,
+                          a != b, a == roleID || b == roleID,
+                          graph.edges.contains(where: { $0.kind == .directDialogue && Set([$0.roleA, $0.roleB]) == Set([a, b]) }),
+                          let posA = atoms.firstIndex(where: { $0.id == left.atomID }), let posB = atoms.firstIndex(where: { $0.id == right.atomID }),
+                          abs(posB - posA) <= 6 else { continue }
+                    pair = [left, right]; break
+                }
+                guard pair.count == 2 else { throw ServiceAPIClientError.invalidContract("audition_dialogue_missing") }
+                items = try pair.map { row in
+                    guard let role = row.assignment.roleID, let voice = plan.proposedBindings[role]?.voiceID else { throw ServiceAPIClientError.invalidContract("audition_voice_missing") }
+                    return try item(roleID: role, voiceID: voice, range: row.sourceRange)
+                }
+            }
+            guard selectedBook?.id == plan.bookID, pendingCastingPlan?.inputDigest == plan.inputDigest else { return }
+            castingAudition = .init(kind: kind, items: items, planDigest: plan.inputDigest)
+            errorMessage = nil
+        } catch {
+            castingAudition = nil
+            errorMessage = "暂时无法准备这段试听，请确认角色对白和可用声音后重新推荐。"
+        }
+    }
+
+    public func playCastingAudition(itemIndex: Int) async {
+        guard let audition = castingAudition, let plan = pendingCastingPlan, let store,
+              audition.items.indices.contains(itemIndex), selectedBook?.id == plan.bookID, audition.planDigest == plan.inputDigest else { return }
+        do {
+            try await store.validateCastingPlanInput(plan)
+            let item = audition.items[itemIndex], binding = item.binding
+            let snapshot = try await dependencies.speechRenderer.fetchEffectiveCapabilities()
+            guard dependencies.voiceCatalog.snapshot().revision == plan.voiceCatalogRevision else { throw AudiobookCastError.castRevisionMismatch }
+            try AudiobookCastRegistry.validateRenderBinding(binding, snapshot: snapshot, requireProductionReady: false)
+            let data = try await dependencies.speechRenderer.renderAudition(.init(bookID: plan.bookID, text: item.text, voiceID: binding.voiceID,
+                speed: binding.allowedSpeed, expectedVoiceRevision: binding.voiceRevision, expectedModelRevision: binding.modelRevision, seed: binding.callerSeed))
+            try Task.checkCancellation()
+            try await store.validateCastingPlanInput(plan)
+            guard selectedBook?.id == plan.bookID, pendingCastingPlan?.inputDigest == plan.inputDigest,
+                  dependencies.voiceCatalog.snapshot().revision == plan.voiceCatalogRevision else { throw AudiobookCastError.castRevisionMismatch }
+            try playbackOwner.play(data: data, target: .dubbingCandidate("casting-audition:\(audition.planDigest):\(itemIndex)"))
+            errorMessage = nil
+        } catch { errorMessage = "试听未完成，声音或配声方案可能已变化，请刷新后重试。" }
+    }
+
     public func autoAssignRecommendedVoices(
         for bookID: UUID? = nil,
         availableVoices: [SafeVoiceEntry]? = nil
     ) async {
         let targetID = bookID ?? selectedBook?.id
         guard let targetID, let store, let castController else { return }
-        let fetchedVoices = await refreshAvailableVoices()
-        let candidateVoices = mergedAvailableVoices(externalVoices: availableVoices ?? fetchedVoices)
-        guard !candidateVoices.isEmpty else {
-            return
-        }
-
-        guard let chars = try? await store.characters(for: targetID),
-              let existing = try? await store.voiceBindings(for: targetID)
-        else { return }
-        let allAnnotations = (try? await store.annotations(for: targetID)) ?? []
-
-        let (stratifiedChars, stats, _) = AudiobookCastRegistry.computeRoleDialogueStats(
-            characters: chars,
-            annotations: allAnnotations,
-            availableVoiceCount: candidateVoices.count
-        )
-
-        let recommended = AudiobookCastRegistry.recommendVoiceBindings(
-            characters: stratifiedChars,
-            availableVoices: candidateVoices,
-            existingBindings: existing,
-            annotations: allAnnotations,
-            bookID: targetID
-        )
-
-        // 若某音色在推荐方案中被多个非旁白角色共用，自动确保持有该音色的角色均开启 allowSharedMinorVoice = true
-        var voiceUsageCount: [String: Int] = [:]
-        for (_, b) in recommended {
-            voiceUsageCount[b.voiceID, default: 0] += 1
-        }
-        var updatedChars = stratifiedChars
-        var didModifyCharFlags = (updatedChars != chars)
-        for idx in updatedChars.indices where !updatedChars[idx].isNarrator {
-            let rid = updatedChars[idx].id
-            if let rec = recommended[rid], (voiceUsageCount[rec.voiceID] ?? 0) > 1 {
-                if !updatedChars[idx].allowSharedMinorVoice {
-                    updatedChars[idx].isMajor = false
-                    updatedChars[idx].allowSharedMinorVoice = true
-                    didModifyCharFlags = true
-                }
+        do {
+            let snapshot = try await dependencies.speechRenderer.fetchEffectiveCapabilities()
+            let catalog = dependencies.voiceCatalog.snapshot()
+            let plan = try await store.prepareCastingPlan(bookID: targetID, snapshot: snapshot, catalog: catalog)
+            pendingCastingPlan = plan
+            guard plan.isApplicable, plan.requiredAcknowledgements.isEmpty else {
+                errorMessage = (plan.issues.first(where: \.isBlocking) ?? plan.issues.first(where: { $0.severity == .warning }))?.nextAction ?? "请先处理尚未完成的选角。"
+                return
             }
-        }
-        if didModifyCharFlags {
-            try? await store.saveCharacters(bookID: targetID, characters: updatedChars)
-        }
+            try await castController.applyCastingPlan(bookID: targetID, plan: plan, acknowledgedIssueIDs: [])
+            if selectedBook?.id == targetID {
+                characters = try await store.characters(for: targetID)
+                voiceBindings = try await store.voiceBindings(for: targetID)
+                selectedBook = try await store.book(id: targetID)
+                let annotations = try await store.annotations(for: targetID)
+                roleStatsByID = AudiobookCastRegistry.computeRoleDialogueStats(
+                    characters: characters, annotations: annotations, availableVoiceCount: plan.eligibleVoiceCount
+                ).statsByRoleID
+                await refreshChapterReadinessMap(for: targetID)
+            }
+        } catch { errorMessage = "配声方案未应用，请刷新后重新确认。" }
+    }
 
-        let bindingsToApply = updatedChars.compactMap { role -> AudiobookVoiceBinding? in
-            guard existing[role.id]?.isSynthesisReady != true else { return nil }
-            return recommended[role.id]
-        }
-        if !bindingsToApply.isEmpty {
-            _ = try? await castController.bindVoicesBatch(bookID: targetID, bindings: bindingsToApply)
-        }
-
-        if selectedBook?.id == targetID {
-            roleStatsByID = stats
-            characters = (try? await store.characters(for: targetID)) ?? updatedChars
-            voiceBindings = (try? await store.voiceBindings(for: targetID)) ?? voiceBindings
-            selectedBook = (try? await store.book(id: targetID)) ?? selectedBook
-            await refreshChapterReadinessMap(for: targetID)
-        }
+    public func applyPendingCastingPlan(acknowledgedIssueIDs: Set<UUID>) async {
+        guard let plan = pendingCastingPlan, let castController, selectedBook?.id == plan.bookID else { errorMessage = "请先重新推荐声音。"; return }
+        do {
+            try await castController.applyCastingPlan(bookID: plan.bookID, plan: plan, acknowledgedIssueIDs: acknowledgedIssueIDs)
+            pendingCastingPlan = nil
+            await openBook(plan.bookID)
+        } catch { errorMessage = "配声方案已失效或仍需确认，请重新推荐。" }
     }
 
     private func rebuildMinorCharactersByArchetype() {
@@ -1145,7 +1271,7 @@ public final class AudiobookWorkflowModel {
         sceneConflictPartnersByRoleID[roleID] ?? []
     }
 
-    /// 按声部行当一键批量换绑配角音色（保护核心主角不被覆盖）。
+    /// 按声部行当补全尚未配声的配角。
     public func batchBindArchetype(_ archetype: AudiobookVoiceArchetype, to voice: SafeVoiceEntry) async {
         guard let bookID = selectedBook?.id, let castController, let store else { return }
         do {
@@ -1160,9 +1286,9 @@ public final class AudiobookWorkflowModel {
             await refreshChapterReadinessMap(for: bookID)
             await refreshShelf()
             if count > 0 {
-                bannerMessage = "已将 \(count) 名「\(archetype.shortBadgeTitle)」配角批量绑定为「\(voice.name)」，并自动配置微语速区分。"
+                bannerMessage = "已为 \(count) 名未配声的「\(archetype.shortBadgeTitle)」配角选择「\(voice.name)」。"
             } else {
-                bannerMessage = "当前没有属于「\(archetype.shortBadgeTitle)」且开启共享声线的次要角色。"
+                bannerMessage = "当前没有需要补全「\(archetype.shortBadgeTitle)」声音的次要角色。"
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -1172,14 +1298,13 @@ public final class AudiobookWorkflowModel {
     /// 调整单个角色已绑定音色的微语速档位。
     public func updateRoleAllowedSpeed(roleID: UUID, speed: Double) async {
         guard let existing = voiceBindings[roleID] else { return }
-        let clamped = min(Double(AudiobookLimits.maxPlaybackRate), max(Double(AudiobookLimits.minPlaybackRate), speed))
         let updated = AudiobookVoiceBinding(
             roleID: existing.roleID,
             voiceID: existing.voiceID,
             voiceRevision: existing.voiceRevision,
             modelRevision: existing.modelRevision,
             isSynthesisReady: existing.isSynthesisReady,
-            allowedSpeed: clamped,
+            allowedSpeed: speed,
             callerSeed: existing.callerSeed
         )
         await bindVoice(roleID: roleID, binding: updated)
@@ -1348,14 +1473,14 @@ public final class AudiobookWorkflowModel {
     ) -> [AudiobookVoiceArchetype] {
         let targetBookID = bookID ?? selectedBook?.id
         let pool = mergedAvailableVoices(externalVoices: availableVoices ?? catalogVoices)
-        let metadataMap = VoiceCatalogStore.shared.metadataByVoiceID
+        let metadataMap = dependencies.voiceCatalog.metadataByVoiceID
 
         var coveredArchetypes = Set<AudiobookVoiceArchetype>()
         for voice in pool where voice.available {
             let lowerID = voice.id.lowercased()
             let isBuiltInDefault = Self.builtInSystemVoiceIDs.contains(lowerID) || lowerID == "v-narrator"
             guard !isBuiltInDefault else { continue }
-            guard VoiceCatalogStore.shared.isVoiceActiveForBook(voiceID: voice.id, currentBookID: targetBookID) else {
+            guard dependencies.voiceCatalog.isVoiceActiveForBook(voiceID: voice.id, currentBookID: targetBookID) else {
                 continue
             }
             let meta = metadataMap[voice.id]
@@ -1373,7 +1498,7 @@ public final class AudiobookWorkflowModel {
         quietBanner: Bool = false
     ) async -> Int {
         let targetID = bookID ?? selectedBook?.id
-        guard let targetID, let store else { return 0 }
+        guard let targetID, let store, let castController else { return 0 }
         guard !isCreatingLeadExclusiveVoices else { return 0 }
 
         let currentVoices = await refreshAvailableVoices()
@@ -1451,13 +1576,9 @@ public final class AudiobookWorkflowModel {
             )
 
             if let output = try? await dependencies.speechRenderer.createAndPublishLeadVoice(request) {
-                VoiceCatalogStore.shared.registerArchetypeEnsembleVoice(
-                    voiceID: output.voiceID,
-                    bookID: targetID,
-                    bookTitle: bookTitle,
-                    archetype: archetype
-                )
+                do { try await castController.registerEnsembleAsset(bookID: targetID, voiceID: output.voiceID, bookTitle: bookTitle, archetype: archetype)
                 createdCount += 1
+                } catch { errorMessage = error.localizedDescription }
             }
         }
 
@@ -1489,7 +1610,7 @@ public final class AudiobookWorkflowModel {
         quietBanner: Bool = false
     ) async -> Int {
         let targetID = bookID ?? selectedBook?.id
-        guard let targetID, let store, let castController else { return 0 }
+        guard let targetID, let store, castController != nil else { return 0 }
         guard !isCreatingLeadExclusiveVoices else { return 0 }
 
         guard let loadedChars = try? await store.characters(for: targetID),
@@ -1503,25 +1624,18 @@ public final class AudiobookWorkflowModel {
             annotations: allAnnotations
         )
 
-        // 筛选出核心主要角色（旁白或 .lead / 非共享主角），且尚未绑定本书专属定制音色的角色（最多前 6 名主角）
+        // 自动补全只处理没有绑定的角色；已有声音即使待复核也由用户明确处理。
         let leadCandidates = stratifiedChars.filter { role in
             let stat = stats[role.id]
             let isLeadRole = role.isNarrator || stat?.tier == .lead || !role.allowSharedMinorVoice
             let hasLines = role.isNarrator || (stat?.dialogueAtomCount ?? 0) > 0
             guard isLeadRole && hasLines else { return false }
-            if let bound = existingBindings[role.id], bound.isSynthesisReady {
-                let isBuiltInDefault = Self.builtInSystemVoiceIDs.contains(bound.voiceID.lowercased())
-                let metaScope = VoiceCatalogStore.shared.metadata(for: bound.voiceID)?.scope
-                if !isBuiltInDefault && metaScope == .bookExclusive {
-                    return false
-                }
-            }
-            return true
+            return existingBindings[role.id] == nil
         }.prefix(6)
 
         guard !leadCandidates.isEmpty else {
             if !quietBanner {
-                bannerMessage = "当前主要角色均已绑定专属定制音色。"
+                bannerMessage = "主要角色已有声音；如需更换，请选择对应角色。"
             }
             return 0
         }
@@ -1536,7 +1650,8 @@ public final class AudiobookWorkflowModel {
                 bookTitle: bookTitle,
                 role: role,
                 peers: stratifiedChars,
-                slotOffset: idx
+                slotOffset: idx,
+                onlyIfUnbound: true
             ) {
                 createdCount += 1
             }
@@ -1607,7 +1722,8 @@ public final class AudiobookWorkflowModel {
         bookTitle: String,
         role: AudiobookCharacter,
         peers: [AudiobookCharacter],
-        slotOffset: Int
+        slotOffset: Int,
+        onlyIfUnbound: Bool = false
     ) async -> AudiobookLeadVoiceCreationOutput? {
         guard let castController else { return nil }
         guard let context = try? await castController.makeVoiceReturnContext(bookID: bookID, roleID: role.id) else {
@@ -1653,15 +1769,6 @@ public final class AudiobookWorkflowModel {
         }
 
         let archetype = roleStatsByID[role.id]?.archetype ?? role.inferredVoiceArchetype(peers: peers)
-        VoiceCatalogStore.shared.registerBookExclusiveVoice(
-            voiceID: output.voiceID,
-            bookID: bookID,
-            bookTitle: bookTitle,
-            roleID: role.id,
-            roleName: role.displayName,
-            archetype: archetype
-        )
-
         let binding = AudiobookVoiceBinding(
             roleID: role.id,
             voiceID: output.voiceID,
@@ -1671,7 +1778,12 @@ public final class AudiobookWorkflowModel {
             allowedSpeed: AudiobookLimits.defaultRenderSpeed,
             callerSeed: nil
         )
-        try? await castController.bindVoice(bookID: bookID, roleID: role.id, binding: binding)
+        do {
+            try await castController.registerVoiceReturn(context: context, activeBookID: bookID, binding: binding, creationSource: .voiceDesign, onlyIfUnbound: onlyIfUnbound)
+        } catch {
+            errorMessage = error.localizedDescription
+            return nil
+        }
         return output
     }
 
@@ -1747,6 +1859,27 @@ public final class AudiobookWorkflowModel {
         }
     }
 
+    /// A new, explicit selection resolves identity from one full snapshot. Frozen bindings use the overload below.
+    public func bindVoice(roleID: UUID, voiceID: String) async {
+        guard let bookID = selectedBook?.id else { return }
+        do {
+            let snapshot = try await dependencies.speechRenderer.fetchEffectiveCapabilities()
+            guard selectedBook?.id == bookID,
+                  let voice = snapshot.voices.first(where: { $0.id == voiceID }),
+                  let options = SpeechRailCapabilityRevisionSelector.creatorRequestOptions(voiceID: voice.id, in: snapshot),
+                  let modelRevision = options.expectedModelRevision else { throw ServiceAPIClientError.invalidContract("voice_identity_unknown") }
+            let old = voiceBindings[roleID]
+            let binding: AudiobookVoiceBinding
+            if let old, old.voiceID == voice.id, (try? AudiobookCastRegistry.validateRenderBinding(old, snapshot: snapshot)) != nil {
+                binding = old
+            } else {
+                binding = AudiobookVoiceBinding(roleID: roleID, voiceID: voice.id,
+                    voiceRevision: options.expectedVoiceRevision, modelRevision: modelRevision)
+            }
+            await bindVoice(roleID: roleID, binding: binding)
+        } catch { errorMessage = "所选声音当前不可用于制作，请刷新声音列表后重新选择。" }
+    }
+
     public func bindVoice(roleID: UUID, binding: AudiobookVoiceBinding) async {
         guard let bookID = selectedBook?.id, let castController, let store else { return }
         do {
@@ -1792,9 +1925,10 @@ public final class AudiobookWorkflowModel {
             }
 
             let castRev = try await castController.currentCastRevisionID(for: bookID)
-            try await castController.confirmCast(bookID: bookID, revisionID: castRev)
             let voiceDigest = try await castController.currentVoiceSetDigest(for: bookID)
-            try await castController.confirmAudition(bookID: bookID, voiceSetDigest: voiceDigest)
+            try await castController.confirmCastAndAudition(
+                bookID: bookID, revisionID: castRev, voiceSetDigest: voiceDigest
+            )
             selectedBook = try await store.book(id: bookID)
             await refreshChapterReadinessMap(for: bookID)
             await refreshShelf()
@@ -1835,8 +1969,25 @@ public final class AudiobookWorkflowModel {
     }
 
     public func completeVoiceRoundTrip(
+        voiceID: String, creationSource: VoiceCreationSource, context: AudiobookVoiceReturnContext? = nil
+    ) async {
+        guard let targetContext = context ?? pendingVoiceReturnContext else { return }
+        do {
+            let snapshot = try await dependencies.speechRenderer.fetchEffectiveCapabilities()
+            guard let voice = snapshot.voices.first(where: { $0.id == voiceID }),
+                  let options = SpeechRailCapabilityRevisionSelector.creatorRequestOptions(voiceID: voiceID, in: snapshot),
+                  let model = options.expectedModelRevision else { throw ServiceAPIClientError.invalidContract("voice_identity_unknown") }
+            let binding = AudiobookVoiceBinding(roleID: targetContext.roleID, voiceID: voice.id,
+                voiceRevision: options.expectedVoiceRevision, modelRevision: model)
+            try AudiobookCastRegistry.validateRenderBinding(binding, snapshot: snapshot)
+            await completeVoiceRoundTrip(binding: binding, context: targetContext, creationSource: creationSource)
+        } catch { voiceReturnBannerMessage = "新声音暂时未完成登记，请刷新声音列表后重新选择。" }
+    }
+
+    public func completeVoiceRoundTrip(
         binding: AudiobookVoiceBinding,
-        context: AudiobookVoiceReturnContext? = nil
+        context: AudiobookVoiceReturnContext? = nil,
+        creationSource: VoiceCreationSource = .voiceDesign
     ) async {
         guard let targetContext = context ?? pendingVoiceReturnContext,
               let castController,
@@ -1845,35 +1996,21 @@ public final class AudiobookWorkflowModel {
 
         let matchedRole = characters.first(where: { $0.id == targetContext.roleID })
         let roleName = targetContext.roleDisplayName ?? matchedRole?.displayName ?? "当前角色"
-        let roleArchetype = matchedRole?.inferredVoiceArchetype(peers: characters) ?? .neutralEnsemble
-
-        // AC7：在有声书工坊中为特定角色设计并发布的音色，默认注册为该书剧组专用音色（.bookExclusive），隔离跨书全局列表污染
-        VoiceCatalogStore.shared.registerBookExclusiveVoice(
-            voiceID: binding.voiceID,
-            bookID: targetContext.bookID,
-            bookTitle: targetContext.bookTitle ?? selectedBook?.title,
-            roleID: targetContext.roleID,
-            roleName: roleName,
-            archetype: roleArchetype
-        )
 
         guard let activeBookID = selectedBook?.id else {
-            voiceReturnBannerMessage = "新音色已保存到本书专用音色库；重新打开对应书籍后可手动选择绑定。"
-            pendingVoiceReturnContext = nil
+            voiceReturnBannerMessage = "请重新打开对应书籍后登记新声音。"
             return
         }
 
         do {
-            try await castController.completeVoiceReturn(
-                context: targetContext,
-                activeBookID: activeBookID,
-                binding: binding
-            )
+            try await castController.registerVoiceReturn(context: targetContext, activeBookID: activeBookID, binding: binding, creationSource: creationSource)
             _ = await refreshAvailableVoices()
             voiceBindings = try await store.voiceBindings(for: activeBookID)
             selectedBook = try await store.book(id: activeBookID)
             pendingVoiceReturnContext = nil
-            voiceReturnBannerMessage = "已将本书专用新音色「\(binding.voiceID)」绑定给角色「\(roleName)」。"
+            voiceReturnBannerMessage = voiceBindings[targetContext.roleID] == binding
+                ? "已为角色「\(roleName)」配上本书专用的新声音。"
+                : "新声音已登记为本书专用；角色选择已变化，请在选角器中确认是否使用。"
             await refreshChapterReadinessMap(for: activeBookID)
             await refreshShelf()
         } catch {
@@ -2044,6 +2181,14 @@ public final class AudiobookWorkflowModel {
 
     public func makeConfirmedChapters(chapterIDs: [UUID]? = nil) {
         guard let bookID = selectedBook?.id else { return }
+        if chapterIDs == nil, selectedBook?.productionState == .paused,
+           let checkpoint = selectedProductionCheckpoint, checkpoint.progress.canResume
+        {
+            startProductionRun(bookID: bookID, chapterIDs: checkpoint.chapterIDs,
+                               regeneratingFragmentID: checkpoint.regeneratingFragmentID,
+                               resumingTaskID: checkpoint.taskID)
+            return
+        }
         guard !isEditingChapterLayout else {
             errorMessage = "正在整理章节目录，请完成后再开始制作。"
             return
@@ -2082,10 +2227,36 @@ public final class AudiobookWorkflowModel {
         startProductionRun(bookID: bookID, chapterIDs: targetChapterIDs)
     }
 
+    public func resumeProduction() async {
+        guard let bookID = selectedBook?.id, let store, !isProductionBusy else { return }
+        do {
+            let checkpoint = try await store.productionCheckpoint(for: bookID)
+            guard selectedBook?.id == bookID, !isProductionBusy else { return }
+            if let checkpoint, checkpoint.progress.canResume {
+                startProductionRun(
+                    bookID: bookID, chapterIDs: checkpoint.chapterIDs,
+                    regeneratingFragmentID: checkpoint.regeneratingFragmentID,
+                    resumingTaskID: checkpoint.taskID
+                )
+            } else {
+                // Books created before task checkpoints still resume via verified candidates.
+                let readyIDs = chapters.compactMap { chapter in
+                    let readiness = chapterReadinessByID[chapter.id]
+                    return readiness == .readyForProduction || readiness == .needsUpdate || readiness == .paused
+                        ? chapter.id : nil
+                }
+                makeConfirmedChapters(chapterIDs: readyIDs)
+            }
+        } catch {
+            if selectedBook?.id == bookID { errorMessage = error.localizedDescription }
+        }
+    }
+
     private func startProductionRun(
         bookID: UUID,
         chapterIDs: [UUID],
-        regeneratingFragmentID: UUID? = nil
+        regeneratingFragmentID: UUID? = nil,
+        resumingTaskID: UUID? = nil
     ) {
         guard let productionController else { return }
         guard !isEditingChapterLayout else {
@@ -2107,7 +2278,7 @@ public final class AudiobookWorkflowModel {
         productionRunID = runID
         productionBookID = bookID
         productionFragmentID = regeneratingFragmentID
-        productionProgress = nil
+        productionProgress = AudiobookProductionProgress(bookID: bookID, state: .running, totalChapters: chapterIDs.count)
         productionProgressPollTask?.cancel()
         isProducing = true
         isPausingProduction = false
@@ -2122,9 +2293,18 @@ public final class AudiobookWorkflowModel {
                       self.productionRunID == runID,
                       self.productionBookID == bookID
                 else { return }
+                let previous = self.productionProgress
                 let progress = await productionController.progress(for: bookID)
                 guard !Task.isCancelled, self.productionRunID == runID else { return }
-                self.productionProgress = progress
+                if let progress {
+                    self.productionProgress = progress
+                    if self.selectedBook?.id == bookID,
+                       (previous?.completedFragments != progress.completedFragments
+                        || previous?.totalFragments != progress.totalFragments)
+                    {
+                        await self.reloadSelectedChapterDetails()
+                    }
+                }
             }
         }
 
@@ -2138,29 +2318,26 @@ public final class AudiobookWorkflowModel {
                     try await productionController.regenerateFragment(
                         bookID: bookID,
                         chapterID: chapterID,
-                        fragmentID: regeneratingFragmentID
+                        fragmentID: regeneratingFragmentID,
+                        resumingTaskID: resumingTaskID
                     )
                 } else {
-                    try await productionController.start(bookID: bookID, chapterIDs: chapterIDs)
+                    try await productionController.start(bookID: bookID, chapterIDs: chapterIDs, resumingTaskID: resumingTaskID)
                 }
                 let progress = await productionController.progress(for: bookID)
-                guard self.productionRunID == runID else { return }
+                guard self.productionRunID == runID, !self.isPausingProduction else { return }
                 self.productionProgress = progress
                 await self.refreshProductionBook(bookID)
-                guard self.productionRunID == runID else { return }
+                guard self.productionRunID == runID, !self.isPausingProduction else { return }
                 self.finishProductionRun(runID)
-                if self.selectedBook?.id == bookID, self.surfaceMode == .workspace {
-                    self.bannerMessage = regeneratingFragmentID == nil
-                        ? "所选章节制作已完成，可立即进入听书或导出。"
-                        : "本段新候选已生成；当前章节版本保持不变。请试听后选择“采用此候选”。"
-                }
+                self.showProductionCompletionMessage(bookID: bookID, isFragmentRegeneration: regeneratingFragmentID != nil)
             } catch {
-                guard self.productionRunID == runID else { return }
+                guard self.productionRunID == runID, !self.isPausingProduction else { return }
                 let progress = await productionController.progress(for: bookID)
-                guard self.productionRunID == runID else { return }
+                guard self.productionRunID == runID, !self.isPausingProduction else { return }
                 self.productionProgress = progress
                 await self.refreshProductionBook(bookID)
-                guard self.productionRunID == runID else { return }
+                guard self.productionRunID == runID, !self.isPausingProduction else { return }
                 self.finishProductionRun(runID)
                 if (error as? AudiobookProductionError) != .cancelled,
                    !(error is CancellationError)
@@ -2178,16 +2355,40 @@ public final class AudiobookWorkflowModel {
               let bookID = productionBookID,
               let runID = productionRunID
         else { return }
+        let isFragmentRegeneration = productionFragmentID != nil
         isPausingProduction = true
         productionProgressPollTask?.cancel()
-        await productionController.pause()
+        productionProgress?.state = .pausing
         let task = productionTask
         task?.cancel()
+        await productionController.pause()
         if let task { await task.value }
         guard productionRunID == runID else { return }
-        productionProgress = await productionController.progress(for: bookID)
-        finishProductionRun(runID)
+        let finalProgress = await productionController.progress(for: bookID)
+        productionProgress = finalProgress
         await refreshProductionBook(bookID)
+        guard productionRunID == runID else { return }
+        finishProductionRun(runID)
+        switch finalProgress?.state {
+        case .failed:
+            bannerMessage = nil
+            errorMessage = finalProgress?.lastErrorMessage
+        case .paused:
+            if selectedBook?.id == bookID {
+                bannerMessage = "制作已暂停，已保存的声音会保留。点击“继续制作”即可接着完成。"
+            }
+        case .fullBookProduced, .partialChaptersReady, .allConfirmedChaptersProduced:
+            showProductionCompletionMessage(bookID: bookID, isFragmentRegeneration: isFragmentRegeneration)
+        default:
+            bannerMessage = nil
+        }
+    }
+
+    private func showProductionCompletionMessage(bookID: UUID, isFragmentRegeneration: Bool) {
+        guard selectedBook?.id == bookID, surfaceMode == .workspace else { return }
+        bannerMessage = isFragmentRegeneration
+            ? "本段新候选已生成；当前章节版本保持不变。请试听后选择“采用此候选”。"
+            : "所选章节制作已完成，可立即进入听书或导出。"
     }
 
     private func finishProductionRun(_ runID: UUID) {
@@ -2351,11 +2552,13 @@ public final class AudiobookWorkflowModel {
         preferredFragmentID: UUID?,
         store: AudiobookProjectStore
     ) async throws -> AudiobookBookWorkspaceSnapshot {
+        try await castController?.recoverVoiceRegistrations(bookID: bookID)
         let book = try await store.book(id: bookID)
         let loadedChapters = try await store.chapters(for: bookID).sorted { $0.ordinal < $1.ordinal }
         let loadedCharacters = try await store.characters(for: bookID)
         let loadedBindings = try await store.voiceBindings(for: bookID)
         let loadedExports = try await store.exportRecords(for: bookID)
+        let loadedProductionCheckpoint = try await store.productionCheckpoint(for: bookID)
         let allAnnotations = (try? await store.annotations(for: bookID)) ?? []
         let (_, computedStats, _) = AudiobookCastRegistry.computeRoleDialogueStats(
             characters: loadedCharacters,
@@ -2403,6 +2606,7 @@ public final class AudiobookWorkflowModel {
             exportRecords: loadedExports,
             allAnnotations: allAnnotations,
             resumePlan: loadedResumePlan,
+            productionCheckpoint: loadedProductionCheckpoint,
             chapterReadinessByID: readinessByID,
             chapterDetails: chapterDetails,
             workbenchTab: tab
@@ -2430,15 +2634,13 @@ public final class AudiobookWorkflowModel {
         var atomMap: [UUID: String] = [:]
         atomMap.reserveCapacity(atoms.count)
         for atom in atoms {
-            let raw = (try? source.text(in: atom.sourceRange)) ?? ""
-            atomMap[atom.id] = AudiobookSourceIndex.displayNormalizedText(raw)
+            atomMap[atom.id] = (try? source.normalizedText(in: atom.sourceRange)) ?? ""
         }
 
         var fragmentMap: [UUID: String] = [:]
         fragmentMap.reserveCapacity(fragments.count)
         for fragment in fragments {
-            let raw = (try? source.text(in: fragment.sourceRange)) ?? ""
-            fragmentMap[fragment.id] = AudiobookSourceIndex.displayNormalizedText(raw)
+            fragmentMap[fragment.id] = (try? source.normalizedText(in: fragment.sourceRange)) ?? ""
         }
 
         await loadCheckpointForTesting?(bookID, chapterID, .beforeChapterDetailsProjection)

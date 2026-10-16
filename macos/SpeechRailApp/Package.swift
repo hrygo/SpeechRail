@@ -11,6 +11,7 @@ let package = Package(
         .executable(name: "SpeechRailControlAgent", targets: ["SpeechRailControlAgent"]),
         .executable(name: "teleprompter-replay", targets: ["TeleprompterReplayTool"]),
         .executable(name: "assistant-replay", targets: ["AssistantReplayTool"]),
+        .executable(name: "audiobook-text-corpus", targets: ["AudiobookTextCorpusTool"]),
     ],
     dependencies: [
         .package(url: "https://github.com/MacPaw/OpenAI.git", exact: "0.5.1"),
@@ -255,6 +256,12 @@ let package = Package(
             name: "AssistantReplayTool",
             dependencies: ["SpeechRailAppSupport"],
             path: "AssistantReplayTool"
+        ),
+        // Local opt-in corpus regression; no novel data is bundled with this target.
+        .executableTarget(
+            name: "AudiobookTextCorpusTool",
+            dependencies: ["SpeechRailAppSupport"],
+            path: "AudiobookTextCorpusTool"
         ),
         .testTarget(
             name: "SpeechRailMacControlTests",

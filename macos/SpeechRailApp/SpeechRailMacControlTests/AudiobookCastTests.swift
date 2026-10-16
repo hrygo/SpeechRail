@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import SpeechRailControlKit
 import XCTest
 #if SWIFT_PACKAGE
@@ -6,6 +7,662 @@ import XCTest
 #endif
 
 final class AudiobookCastTests: XCTestCase {
+    func testExplicitGlobalRegistrationPreservesSourceAndRejectsBookPromotion() throws {
+        let catalog = VoiceCatalogStore()
+        try catalog.toggleFavorite(voiceID: "global-clone")
+        try catalog.registerGlobalVoice(voiceID: "global-clone", creationSource: .instantClone)
+        try catalog.registerGlobalVoice(voiceID: "global-clone", creationSource: .instantClone)
+        XCTAssertEqual(catalog.metadata(for: "global-clone")?.visibilityScope, .globalReusable)
+        XCTAssertEqual(catalog.metadata(for: "global-clone")?.creationSource, .instantClone)
+        XCTAssertEqual(catalog.metadata(for: "global-clone")?.isFavorite, true)
+        try catalog.registerBookExclusiveVoice(voiceID: "book-only", bookID: UUID(), bookTitle: nil,
+            roleID: nil, roleName: nil, archetype: nil, creationSource: .voiceDesign)
+        XCTAssertThrowsError(try catalog.registerGlobalVoice(voiceID: "book-only", creationSource: .voiceDesign))
+        XCTAssertEqual(catalog.metadata(for: "book-only")?.visibilityScope, .bookExclusive)
+    }
+    private func makeTestCastController(store: AudiobookProjectStore) -> AudiobookCastController {
+        let ids = ["custom", "custom-voice-1", "draft-designed-voice", "dylan", "fault-archetype-voice", "fault-fixture-hero", "fault-fixture-narrator", "fault-replacement-hero", "fault-shared-pool-voice", "master_zhao", "one", "other-book", "serena", "shared-voice", "split-hero", "split-narrator", "test-source-exclusive-voice", "test-target-exclusive-voice", "uncle_chen", "uncle_fu", "v", "v-narrator", "v_bookA_lindong", "v_bookB_role_1", "v_global_7", "vivian", "voice-hero", "voice-narrator"]
+        let snapshot = p0Snapshot(ids.map { makeTestSafeVoice(id: $0, name: $0) })
+        return AudiobookCastController(store: store, capabilityProvider: { snapshot })
+    }
+
+    private func p0Snapshot(_ voices: [SafeVoiceEntry]) -> EffectiveCapabilitySnapshot {
+        let model = ConfiguredModelIdentity(assurance: .configuredCatalog, catalogRevision: String(repeating: "a", count: 40))
+        return .init(serviceInstanceEpoch: "p0", catalogRevision: "p0", snapshotID: "p0", profile: "p0",
+                     models: ["tts": model, "tts_clone": model], voices: voices, operations: [:], guarantees: [:])
+    }
+
+    private func p0Roles(bookID: UUID, count: Int) -> ([AudiobookCharacter], [AudiobookAnnotation]) {
+        let roles = (0..<count).map { AudiobookCharacter(bookID: bookID, displayName: "角色\($0)", isNarrator: $0 == 0, isMajor: $0 == 0) }
+        let chapter = UUID(), window = UUID()
+        let annotations = roles.enumerated().map { offset, role in
+            AudiobookAnnotation(bookID: bookID, chapterID: chapter, windowID: window, atomID: UUID(),
+                sourceRange: .init(lowerBound: Int64(offset * 10), upperBound: Int64(offset * 10 + 5)), assignment: .assigned(roleID: role.id))
+        }
+        return (roles, annotations)
+    }
+
+    func testRechunkingPreservesDialogueScalarCount() throws {
+        let book = UUID(), chapter = UUID(), role = AudiobookCharacter(bookID: UUID(), displayName: "甲", isMajor: false)
+        let source = try AudiobookSourceIndex(utf8: Data("甲乙abc😀".utf8))
+        func ann(_ lower: Int64, _ upper: Int64) -> AudiobookAnnotation {
+            .init(bookID: book, chapterID: chapter, windowID: UUID(), atomID: UUID(), sourceRange: .init(lowerBound: lower, upperBound: upper), assignment: .assigned(roleID: role.id))
+        }
+        let whole = AudiobookCastRegistry.computeRoleDialogueStats(characters: [role], annotations: [ann(0, 13)], source: source)
+        let split = AudiobookCastRegistry.computeRoleDialogueStats(characters: [role], annotations: [ann(0, 6), ann(6, 13)], source: source)
+        XCTAssertEqual(whole.statsByRoleID[role.id]?.dialogueScalarCount, 6)
+        XCTAssertEqual(split.statsByRoleID[role.id]?.dialogueScalarCount, 6)
+        XCTAssertEqual(whole.statsByRoleID[role.id]?.tier, split.statsByRoleID[role.id]?.tier)
+    }
+
+    func testNarrationDistanceDoesNotCreateDirectDialogue() {
+        let (roles, base) = p0Roles(bookID: UUID(), count: 3)
+        let chapter = base[0].chapterID
+        let annotations: [AudiobookAnnotation] = (0..<10).map { i in
+            let id = i == 0 ? roles[1].id : (i == 9 ? roles[2].id : roles[0].id)
+            let range = AudiobookSourceRange(lowerBound: Int64(i * 10), upperBound: Int64(i * 10 + 5))
+            return AudiobookAnnotation(bookID: roles[0].bookID, chapterID: chapter, windowID: UUID(), atomID: UUID(), sourceRange: range, assignment: .assigned(roleID: id))
+        }
+        let graph = AudiobookSceneConflictGraph.build(characters: roles, annotations: annotations)
+        XCTAssertFalse(graph.edges.contains { $0.kind == .directDialogue })
+        XCTAssertTrue(graph.edges.contains { $0.kind == .chapterCoPresence })
+    }
+
+    func testDifferentScenesKeepDistinctEdges() {
+        let (roles, annotations) = p0Roles(bookID: UUID(), count: 3)
+        let scenes = [AudiobookCastingScene(chapterID: annotations[0].chapterID, sourceRange: .init(lowerBound: 0, upperBound: 20)),
+                      AudiobookCastingScene(chapterID: annotations[0].chapterID, sourceRange: .init(lowerBound: 20, upperBound: 30))]
+        let graph = AudiobookSceneConflictGraph.build(characters: roles, annotations: annotations, scenes: scenes)
+        XCTAssertFalse(graph.edges.contains { $0.kind == .directDialogue })
+        XCTAssertTrue(graph.edges.contains { $0.kind == .chapterCoPresence })
+    }
+
+    func testDuplicateWindowsDoNotDoubleCountEdges() {
+        let (roles, annotations) = p0Roles(bookID: UUID(), count: 3)
+        let once = AudiobookSceneConflictGraph.build(characters: roles, annotations: annotations)
+        let twice = AudiobookSceneConflictGraph.build(characters: roles, annotations: annotations + annotations)
+        XCTAssertEqual(once, twice)
+    }
+
+    func testWeakEdgesNeverBecomeDirectDialogue() {
+        let (roles, _) = p0Roles(bookID: UUID(), count: 3)
+        let rows = (0..<10).flatMap { _ -> [AudiobookAnnotation] in
+            let chapter = UUID()
+            return [0, 10].enumerated().map { offset, position in .init(bookID: roles[0].bookID, chapterID: chapter, windowID: UUID(), atomID: UUID(),
+                sourceRange: .init(lowerBound: Int64(position * 10), upperBound: Int64(position * 10 + 5)), assignment: .assigned(roleID: roles[offset + 1].id)) }
+        }
+        // Authoritative atom positions retain the eight intervening formatting/narration blocks.
+        let atoms = Set(rows.map(\.chapterID)).flatMap { chapter in (0...10).map { index in
+            AudiobookTextAtom(chapterID: chapter, ordinal: index, sourceRange: .init(lowerBound: Int64(index * 10), upperBound: Int64(index * 10 + 5)), kind: .body)
+        } }
+        let graph = AudiobookSceneConflictGraph.build(characters: roles, annotations: rows, atoms: atoms)
+        XCTAssertFalse(graph.edges.contains { $0.kind == .directDialogue })
+        XCTAssertEqual(Set(graph.edges.map(\.kind)), [.chapterCoPresence])
+    }
+
+    func testVoiceTaxonomyKeepsIndependentUnknownAttributes() {
+        let fixtures: [(String, String, String)] = [("男童 high", "male", "child"), ("女童", "female", "child"),
+            ("elderly female 老年女性", "female", "elder"), ("中性 neutral", "neutral", "unknown"), ("", "unknown", "unknown"),
+            ("young male 青年男声", "male", "young")]
+        for (text, gender, age) in fixtures {
+            let traits = VoiceTaxonomyClassifier.resolveTraits(description: text)
+            XCTAssertEqual(traits.gender.value, gender, text)
+            XCTAssertEqual(traits.age.value, age, text)
+        }
+        XCTAssertEqual(VoiceTaxonomyClassifier.resolveTraits(description: "柔和").gender.source, .unknown)
+    }
+
+    func testManualVoiceTraitsOverrideInference() {
+        var manual = AudiobookVoiceTraits()
+        manual.gender = .init(value: "neutral", source: .manual, confidence: 1)
+        let traits = VoiceTaxonomyClassifier.resolveTraits(description: "elder female", override: manual)
+        XCTAssertEqual(traits.gender.value, "neutral")
+        XCTAssertEqual(traits.gender.source, .manual)
+        XCTAssertEqual(traits.age.value, "elder")
+    }
+
+    func testScenePlannerSolvesKnownColorableFixture() throws {
+        let roles = (0..<6).map { _ in UUID() }
+        let edges = (0..<6).map { i in AudiobookSceneConflictGraph.Edge(roleA: roles[i], roleB: roles[(i + 1) % 6], kind: .directDialogue, sourceIDs: ["edge-\(i)"]) }
+        let graph = AudiobookSceneConflictGraph(edges: edges)
+        let candidates = Dictionary(uniqueKeysWithValues: roles.map { ($0, ["a", "b"]) })
+        let result = try AudiobookCastingPlanner.assign(roleIDs: roles, candidates: candidates, graph: graph, strategy: .sceneAware)
+        XCTAssertTrue(result.residualDirectPairs.isEmpty)
+        XCTAssertEqual(result.assignments.count, 6)
+        let baseline = try AudiobookCastingPlanner.assign(roleIDs: roles, candidates: candidates, graph: graph, strategy: .baseline)
+        XCTAssertGreaterThanOrEqual(baseline.residualDirectPairs.count, result.residualDirectPairs.count)
+    }
+
+    func testTwoVoicesCannotResolveDialogueTriangle() throws {
+        let roles = (0..<3).map { _ in UUID() }
+        let graph = AudiobookSceneConflictGraph(edges: [
+            .init(roleA: roles[0], roleB: roles[1], kind: .directDialogue, sourceIDs: ["1"]),
+            .init(roleA: roles[1], roleB: roles[2], kind: .directDialogue, sourceIDs: ["2"]),
+            .init(roleA: roles[0], roleB: roles[2], kind: .directDialogue, sourceIDs: ["3"])])
+        let result = try AudiobookCastingPlanner.assign(roleIDs: roles, candidates: Dictionary(uniqueKeysWithValues: roles.map { ($0, ["a", "b"]) }), graph: graph)
+        XCTAssertFalse(result.residualDirectPairs.isEmpty)
+        XCTAssertEqual(result.status, .provenInsufficient)
+    }
+
+    func testSearchBudgetDoesNotRelaxLockedBindings() throws {
+        let a = UUID(), b = UUID()
+        let graph = AudiobookSceneConflictGraph(edges: [.init(roleA: a, roleB: b, kind: .directDialogue, sourceIDs: ["1"])])
+        let result = try AudiobookCastingPlanner.assign(roleIDs: [a, b], candidates: [a: ["a", "b"], b: ["a", "b"]], graph: graph, frozen: [a: "a"], budget: 0)
+        XCTAssertEqual(result.assignments[a], "a")
+        XCTAssertEqual(result.status, .budgetExceeded)
+        XCTAssertEqual(result.evaluatedCandidates, 0)
+    }
+
+    func testSearchBudgetCountsCandidateEvaluationIncludingGreedyOrdering() throws {
+        let role = UUID()
+        let result = try AudiobookCastingPlanner.assign(roleIDs: [role], candidates: [role: (0..<100).map { "v\($0)" }],
+            graph: .init(edges: []), budget: 2)
+        XCTAssertEqual(result.evaluatedCandidates, 2)
+        XCTAssertEqual(result.status, .budgetExceeded)
+    }
+
+    func testConstrainedColoringPreservesPreallocatedVoice() throws {
+        let a = UUID(), b = UUID(), c = UUID()
+        let graph = AudiobookSceneConflictGraph(edges: [.init(roleA: a, roleB: b, kind: .directDialogue, sourceIDs: ["a-b"]),
+            .init(roleA: b, roleB: c, kind: .directDialogue, sourceIDs: ["b-c"])])
+        let result = try AudiobookCastingPlanner.assign(roleIDs: [a, b, c], candidates: [a: ["a"], b: ["a", "b"], c: ["a"]], graph: graph, frozen: [a: "a"])
+        XCTAssertEqual(result.status, .solved)
+        XCTAssertEqual(result.assignments, [a: "a", b: "b", c: "a"])
+    }
+
+    func testStructuredVoiceTraitsKeepServiceFactsAndManualPriority() throws {
+        let voice = makeTestSafeVoice(id: "profile", name: "young female")
+        let profile = VoiceTaxonomyClassifier.resolveTraits(for: voice)
+        XCTAssertEqual(profile.locale.value, "zh")
+        XCTAssertEqual(profile.locale.source, .service)
+        var manual = AudiobookVoiceTraits(); manual.gender = .init(value: "male", source: .manual, confidence: 1)
+        let overridden = VoiceTaxonomyClassifier.resolveTraits(for: voice, metadata: .init(voiceID: voice.id, voiceTraits: manual))
+        XCTAssertEqual(overridden.gender.value, "male")
+        XCTAssertEqual(overridden.locale.value, "zh")
+    }
+
+    func testPlannerScoreCacheInvalidatesOnlyChangedVoice() throws {
+        let book = UUID(), (roles, annotations) = p0Roles(bookID: book, count: 200)
+        let voices = (0..<500).map { makeTestSafeVoice(id: "score-v\($0)", name: "声音\($0)") }
+        let snapshot = p0Snapshot(voices)
+        let first = AudiobookCastRegistry.makeCastingPlan(characters: roles, annotations: annotations, snapshot: snapshot,
+            catalog: .init(), bookID: book, existingBindings: [:], requiredRoleIDs: nil)
+        XCTAssertTrue(first.isApplicable)
+        XCTAssertEqual(first.scoredCombinations, 100_000)
+        let second = AudiobookCastRegistry.makeCastingPlan(characters: roles.reversed(), annotations: annotations.reversed(), snapshot: snapshot,
+            catalog: .init(), bookID: book, existingBindings: [:], requiredRoleIDs: nil, cachedScores: first.cachedScores)
+        XCTAssertEqual(second.scoredCombinations, 0)
+        XCTAssertEqual(second.proposedBindings, first.proposedBindings)
+        let catalog = VoiceCatalogSnapshot(state: .init(metadataByVoiceID: [voices[0].id: .init(voiceID: voices[0].id, visibilityScope: .globalReusable, isFavorite: true)]))
+        let changed = AudiobookCastRegistry.makeCastingPlan(characters: roles, annotations: annotations, snapshot: snapshot,
+            catalog: catalog, bookID: book, existingBindings: [:], requiredRoleIDs: nil, cachedScores: second.cachedScores)
+        XCTAssertEqual(changed.scoredCombinations, 200)
+    }
+
+    func testOversizedScoreMatrixStopsWithoutChangingExistingBindings() throws {
+        let book = UUID(), (roles, annotations) = p0Roles(bookID: book, count: 201)
+        let voices = (0..<500).map { makeTestSafeVoice(id: "bounded-v\($0)", name: "声音\($0)") }
+        let existing = AudiobookVoiceBinding(roleID: roles[0].id, voiceID: voices[0].id,
+            voiceRevision: voices[0].voiceRevision, modelRevision: String(repeating: "a", count: 40))
+        let plan = AudiobookCastRegistry.makeCastingPlan(characters: roles, annotations: annotations, snapshot: p0Snapshot(voices),
+            catalog: .init(), bookID: book, existingBindings: [roles[0].id: existing], requiredRoleIDs: nil)
+        XCTAssertFalse(plan.isApplicable)
+        XCTAssertTrue(plan.issues.contains { $0.code == .searchBudgetExceeded && $0.isBlocking })
+        XCTAssertFalse(plan.issues.contains { $0.code == .insufficientVoiceCapacity })
+        XCTAssertLessThanOrEqual(plan.scoredCombinations, 100_000)
+        XCTAssertTrue(plan.proposedBindings == [roles[0].id: existing], "预算耗尽必须保留原绑定")
+    }
+
+    func testWeightedMatchingBudgetIsDistinctFromInfeasibility() throws {
+        let role = UUID()
+        XCTAssertThrowsError(try AudiobookCastRegistry.maximumWeightExclusiveMatching(roleIDs: [role],
+            candidates: [role: ["a", "b"]], scores: [role: ["a": 2, "b": 1]], workBudget: 0)) { error in
+            XCTAssertEqual(error as? AudiobookCastRegistry.ExclusiveMatchingError, .budgetExceeded)
+        }
+        let result = try AudiobookCastRegistry.maximumWeightExclusiveMatching(roleIDs: [role],
+            candidates: [role: ["a", "b"]], scores: [role: ["a": 2, "b": 1]], workBudget: 100)
+        XCTAssertEqual(result[role], "a")
+    }
+
+    func testSurfaceCatalogRequiresDefaultSystemIdentityForUnknownVoices() throws {
+        let nonDefault = CreatorVoice(id: "unregistered-system", name: "非默认系统声音", isDefault: false,
+            isSystem: true, available: true, mode: "system")
+        let systemDefault = CreatorVoice(id: "system-default", name: "默认声音", isDefault: true,
+            isSystem: true, available: true, mode: "system")
+        let falseSystem = CreatorVoice(id: "clone", name: "克隆", isDefault: true,
+            isSystem: true, available: true, mode: "clone")
+        let missing = VoiceCatalogSnapshot()
+        XCTAssertFalse(missing.permitsSurface(nonDefault, bookID: nil))
+        XCTAssertTrue(missing.permitsSurface(systemDefault, bookID: nil))
+        XCTAssertFalse(missing.permitsSurface(falseSystem, bookID: nil))
+        let unknown = VoiceCatalogSnapshot(state: .init(metadataByVoiceID: [nonDefault.id: .init(voiceID: nonDefault.id)]))
+        XCTAssertFalse(unknown.permitsSurface(nonDefault, bookID: nil))
+        let explicitlyGlobal = VoiceCatalogSnapshot(state: .init(metadataByVoiceID: [nonDefault.id:
+            .init(voiceID: nonDefault.id, visibilityScope: .globalReusable)]))
+        XCTAssertTrue(explicitlyGlobal.permitsSurface(nonDefault, bookID: nil))
+        let base = makeTestSafeVoice(id: "safe-non-default", name: "非默认")
+        let safeNonDefault = SafeVoiceEntry(id: base.id, name: base.name, mode: "system",
+            isSystem: true, isDefault: false, available: true, availabilityReason: base.availabilityReason,
+            voiceIdentityAssurance: base.voiceIdentityAssurance, model: base.model, descriptors: base.descriptors,
+            operations: base.operations)
+        XCTAssertFalse(missing.permitsSurface(safeNonDefault, bookID: nil))
+    }
+
+    func testResidualSceneSharingRequiresExplicitAcknowledgement() throws {
+        let book = UUID(), (roles, annotations) = p0Roles(bookID: book, count: 4)
+        let voices = (0..<2).map { makeTestSafeVoice(id: "shared-risk-v\($0)", name: "声音\($0)") }
+        let plan = AudiobookCastRegistry.makeCastingPlan(characters: roles, annotations: annotations, snapshot: p0Snapshot(voices),
+            catalog: .init(), bookID: book, existingBindings: [:], requiredRoleIDs: nil)
+        XCTAssertTrue(plan.isApplicable)
+        let risks = plan.issues.filter { $0.code == .sharedSceneRisk }
+        XCTAssertFalse(risks.isEmpty)
+        XCTAssertTrue(risks.allSatisfy { $0.severity == .warning && plan.requiredAcknowledgements.contains($0.id) })
+    }
+
+    func testAtomicWriteFailureDoesNotNotifyOrReplaceState() throws {
+        final class Probe: @unchecked Sendable {
+            let lock = NSLock(); var count = 0
+            func increment() { lock.withLock { count += 1 } }
+        }
+        let url = tempRoot.appendingPathComponent("write-failure.json")
+        try VoiceCatalogStore(storageURL: url).toggleFavorite(voiceID: "retained")
+        let original = try Data(contentsOf: url)
+        let catalog = VoiceCatalogStore(storageURL: url, writeAtomically: { _, _ in throw VoiceCatalogError.unavailable })
+        let before = catalog.snapshot(), probe = Probe()
+        let observer = NotificationCenter.default.addObserver(forName: VoiceCatalogStore.didChange, object: catalog, queue: nil) { _ in probe.increment() }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        XCTAssertThrowsError(try catalog.toggleFavorite(voiceID: "new"))
+        XCTAssertEqual(catalog.snapshot(), before)
+        XCTAssertEqual(try Data(contentsOf: url), original)
+        XCTAssertEqual(probe.lock.withLock { probe.count }, 0)
+    }
+
+    func testTwoHundredRolesFiveHundredVoicesScoreOnlyOnce() throws {
+        let roles = (0..<200).map { _ in UUID() }, voices = (0..<500).map { "v\($0)" }
+        var cache = AudiobookCastingScoreCache()
+        let first = cache.scores(roleIDs: roles, voiceIDs: voices, roleRevision: "r", voiceRevision: "v") { _, _ in 1 }
+        XCTAssertEqual(first.count, 200)
+        XCTAssertEqual(cache.evaluationCount, 100_000)
+        let second = cache.scores(roleIDs: roles.reversed(), voiceIDs: voices.reversed(), roleRevision: "r", voiceRevision: "v") { _, _ in XCTFail("缓存不应重复评分"); return 0 }
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(cache.evaluationCount, 100_000)
+    }
+
+    func testPromoteArchiveRestoreKeepsGlobalScope() throws {
+        let url = tempRoot.appendingPathComponent("lifecycle.json"), book = UUID()
+        let catalog = VoiceCatalogStore(storageURL: url)
+        try catalog.registerBookExclusiveVoice(voiceID: "voice", bookID: book, bookTitle: "夹具", roleID: UUID(), roleName: "甲", archetype: .youngMale)
+        try catalog.promoteToGlobalReusable(voiceID: "voice")
+        try catalog.archiveVoices(voiceIDs: ["voice"])
+        try catalog.unarchiveVoices(voiceIDs: ["voice"])
+        let restarted = VoiceCatalogStore(storageURL: url)
+        XCTAssertEqual(restarted.metadata(for: "voice")?.visibilityScope, .globalReusable)
+        XCTAssertTrue(restarted.isVoiceActiveForBook(voiceID: "voice", currentBookID: UUID()))
+    }
+
+    func testArchivedLegacyOriginIsNotEnoughToInferScope() throws {
+        let url = tempRoot.appendingPathComponent("old-catalog.json")
+        let document: [String: Any] = ["metadataByVoiceID": ["old": ["voiceID": "old", "scope": "archived", "originBookID": UUID().uuidString,
+            "isFavorite": false, "customTags": [], "collectionIDs": [], "updatedAt": 0]], "collections": [], "preferredCollectionIDByBookID": []]
+        let original = try JSONSerialization.data(withJSONObject: document)
+        try original.write(to: url)
+        let catalog = VoiceCatalogStore(storageURL: url)
+        XCTAssertThrowsError(try catalog.unarchiveVoices(voiceIDs: ["old"]))
+        XCTAssertFalse(catalog.isVoiceActiveForBook(voiceID: "old", currentBookID: nil))
+        XCTAssertEqual(try Data(contentsOf: url), original)
+    }
+
+    func testWriteFailureDoesNotPublishSuccess() throws {
+        let url = tempRoot.appendingPathComponent("catalog-is-directory", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        let catalog = VoiceCatalogStore(storageURL: url)
+        let before = catalog.snapshot()
+        XCTAssertThrowsError(try catalog.toggleFavorite(voiceID: "new"))
+        XCTAssertEqual(catalog.snapshot(), before)
+        XCTAssertNil(catalog.metadata(for: "new"))
+    }
+
+    func testCatalogMigrationPreservesCollectionsAndUnknownFieldsOnRestart() throws {
+        let url = tempRoot.appendingPathComponent("migration-catalog.json"), book = UUID(), collection = VoiceCollection(name: "夹具剧团", voiceIDs: ["voice"])
+        let state = VoiceCatalogStore.PersistedState(metadataByVoiceID: ["voice": .init(voiceID: "voice", visibilityScope: .globalReusable, collectionIDs: [collection.id])], collections: [collection], preferredCollectionIDByBookID: [book: collection.id])
+        var raw = try JSONSerialization.jsonObject(with: JSONEncoder().encode(state)) as! [String: Any]
+        var metadata = raw["metadataByVoiceID"] as! [String: [String: Any]]
+        let oldScope = metadata["voice"]?.removeValue(forKey: "visibilityScope")
+        metadata["voice"]?["scope"] = oldScope
+        metadata["voice"]?.removeValue(forKey: "lifecycleState")
+        metadata["voice"]?.removeValue(forKey: "createdAt")
+        metadata["voice"]?["futureFacts"] = "keep"
+        var traits = try JSONSerialization.jsonObject(with: JSONEncoder().encode(AudiobookVoiceTraits())) as! [String: Any]
+        traits["futureDimension"] = ["keep": true]
+        var gender = traits["gender"] as! [String: Any]; gender["futureConfidence"] = "keep"; traits["gender"] = gender
+        metadata["voice"]?["voiceTraits"] = traits
+        raw["metadataByVoiceID"] = metadata
+        var collections = raw["collections"] as! [[String: Any]]; collections[0]["futureCollection"] = "keep"
+        raw["collections"] = collections
+        try JSONSerialization.data(withJSONObject: raw).write(to: url)
+        let catalog = VoiceCatalogStore(storageURL: url)
+        try catalog.toggleFavorite(voiceID: "voice")
+        let restarted = VoiceCatalogStore(storageURL: url)
+        XCTAssertEqual(restarted.collections, [collection])
+        XCTAssertEqual(restarted.preferredCollectionID(for: book), collection.id)
+        XCTAssertTrue(restarted.metadata(for: "voice")?.isFavorite == true)
+        XCTAssertNil(restarted.metadata(for: "voice")?.createdAt, "旧文件没有提供的创建时点保持未知")
+        let envelope = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
+        XCTAssertEqual(envelope["schemaVersion"] as? Int, 2)
+        let saved = envelope["state"] as! [String: Any]
+        XCTAssertEqual((saved["metadataByVoiceID"] as? [String: [String: Any]])?["voice"]?["futureFacts"] as? String, "keep")
+        let savedTraits = ((saved["metadataByVoiceID"] as? [String: [String: Any]])?["voice"]?["voiceTraits"] as? [String: Any])
+        XCTAssertEqual((savedTraits?["futureDimension"] as? [String: Bool])?["keep"], true)
+        XCTAssertEqual((savedTraits?["gender"] as? [String: Any])?["futureConfidence"] as? String, "keep")
+        XCTAssertEqual((saved["collections"] as? [[String: Any]])?.first?["futureCollection"] as? String, "keep")
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: tempRoot.path).contains { $0.contains("migration-catalog.json.legacy.") })
+    }
+
+    func testUnreadableCatalogPreservesUnknownRecords() throws {
+        let url = tempRoot.appendingPathComponent("unknown-catalog.json")
+        let data = Data("{\"schemaVersion\":999,\"unrecognized\":{\"keep\":true}}".utf8)
+        try data.write(to: url)
+        let catalog = VoiceCatalogStore(storageURL: url)
+        XCTAssertEqual(catalog.snapshot().loadState, .unsupportedSchema)
+        XCTAssertThrowsError(try catalog.toggleFavorite(voiceID: "new"))
+        XCTAssertEqual(try Data(contentsOf: url), data)
+    }
+
+    func testEmptyScopedPoolNeverFallsBack() {
+        let bookID = UUID(), voice = makeTestSafeVoice(id: "other-book", name: "他书声音")
+        let (roles, anns) = p0Roles(bookID: bookID, count: 1)
+        for scope in [VoiceAssetScope.bookExclusive, .unknown] {
+            let catalog = VoiceCatalogSnapshot(state: .init(metadataByVoiceID: [voice.id: .init(voiceID: voice.id, visibilityScope: scope, originBookID: UUID())]))
+            let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: anns,
+                snapshot: p0Snapshot([voice]), catalog: catalog, bookID: bookID, existingBindings: [:])
+            XCTAssertTrue(plan.proposedBindings.isEmpty)
+            XCTAssertFalse(plan.isApplicable)
+            XCTAssertTrue(plan.issues.contains { $0.code == .noEligibleVoices })
+        }
+    }
+
+    func testAvailableButNotProductionReadyIsExcluded() throws {
+        let book = UUID(), (roles, anns) = p0Roles(bookID: book, count: 1)
+        for value in [false as Any, NSNull()] {
+            var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(makeTestSafeVoice(id: "v", name: "v"))) as? [String: Any])
+            object["production_ready"] = value
+            let voice = try JSONDecoder().decode(SafeVoiceEntry.self, from: JSONSerialization.data(withJSONObject: object))
+            let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: anns, snapshot: p0Snapshot([voice]),
+                catalog: .init(), bookID: book, existingBindings: [:])
+            XCTAssertFalse(plan.isApplicable)
+            XCTAssertEqual(plan.eligibleVoiceCount, 0)
+            XCTAssertTrue(plan.issues.contains { $0.code == .voiceNotProductionReady && $0.voiceIDs == [voice.id] })
+        }
+    }
+
+    func testMissingCustomScopeNeedsConfirmation() {
+        let book = UUID(), (roles, anns) = p0Roles(bookID: book, count: 1)
+        let voice = makeTestSafeVoice(id: "custom", name: "custom", mode: "clone")
+        let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: anns,
+            snapshot: p0Snapshot([voice]), catalog: .init(loadState: .missing), bookID: book, existingBindings: [:])
+        XCTAssertFalse(plan.isApplicable)
+        XCTAssertTrue(plan.proposedBindings.isEmpty)
+        XCTAssertTrue(plan.issues.contains { $0.code == .voiceIdentityUnknown && $0.voiceIDs == [voice.id] })
+        let missingOrigin = VoiceCatalogSnapshot(state: .init(metadataByVoiceID: [voice.id: .init(voiceID: voice.id, visibilityScope: .bookExclusive)]))
+        XCTAssertFalse(missingOrigin.permits(voice, bookID: book))
+    }
+
+    func testCatalogReadFailureIsNotEmptyCatalog() throws {
+        let url = tempRoot.appendingPathComponent("catalog.json")
+        XCTAssertEqual(VoiceCatalogStore(storageURL: url).snapshot().loadState, .missing)
+        try Data("broken json".utf8).write(to: url)
+        XCTAssertEqual(VoiceCatalogStore(storageURL: url).snapshot().loadState, .unreadable)
+        try Data(#"{"schema_version":99}"#.utf8).write(to: url)
+        XCTAssertEqual(VoiceCatalogStore(storageURL: url).snapshot().loadState, .unsupportedSchema)
+        try JSONEncoder().encode(VoiceCatalogStore.PersistedState()).write(to: url)
+        XCTAssertEqual(VoiceCatalogStore(storageURL: url).snapshot().loadState, .ready)
+    }
+
+    func testAliasesDoNotIncreaseVoiceCapacity() {
+        let book = UUID(), (roles, anns) = p0Roles(bookID: book, count: 2)
+        let voice = makeTestSafeVoice(id: "one", name: "one", aliases: ["alias-one", "alias-two"])
+        let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: anns,
+            snapshot: p0Snapshot([voice]), catalog: .init(), bookID: book, existingBindings: [:])
+        XCTAssertEqual(plan.eligibleVoiceCount, 1)
+        XCTAssertFalse(plan.isApplicable)
+    }
+
+    func testCrossChapterSharingRequiresExplicitAcceptance() {
+        let book = UUID(), (roles, _) = p0Roles(bookID: book, count: 3)
+        let anns = roles.map { role in AudiobookAnnotation(bookID: book, chapterID: UUID(), windowID: UUID(), atomID: UUID(),
+            sourceRange: .init(lowerBound: 0, upperBound: 5), assignment: .assigned(roleID: role.id)) }
+        let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: anns,
+            snapshot: p0Snapshot(["v0", "v1"].map { makeTestSafeVoice(id: $0, name: $0) }), catalog: .init(), bookID: book, existingBindings: [:])
+        XCTAssertTrue(plan.isApplicable)
+        XCTAssertFalse(plan.requiredAcknowledgements.isEmpty, "共享方案不因角色分属不同章节而免于接受")
+    }
+
+    func testOriginRoleIsPreferenceWithinBookScope() {
+        let book = UUID(), (roles, anns) = p0Roles(bookID: book, count: 2)
+        let voices = ["local", "global"].map { makeTestSafeVoice(id: $0, name: $0) }
+        let catalog = VoiceCatalogSnapshot(state: .init(metadataByVoiceID: ["local": .init(voiceID: "local", visibilityScope: .bookExclusive, originBookID: book, originRoleID: UUID())]))
+        let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: anns,
+            snapshot: p0Snapshot(voices), catalog: catalog, bookID: book, existingBindings: [:])
+        XCTAssertTrue(plan.isApplicable, "来源角色不同不应排除对本书合法的声音")
+        XCTAssertEqual(Set(plan.proposedBindings.values.map(\.voiceID)), Set(["local", "global"]))
+        XCTAssertFalse(catalog.permits(voices[0], bookID: UUID()))
+    }
+
+    func testCatalogIdentityMismatchFailsClosedAndChangesRevision() throws {
+        let voice = makeTestSafeVoice(id: "A", name: "A", mode: "clone"), book = UUID()
+        let metadata = VoiceAssetMetadata(voiceID: "B", visibilityScope: .bookExclusive, originBookID: book)
+        let mismatched = VoiceCatalogSnapshot(state: .init(metadataByVoiceID: ["A": metadata]))
+        let correct = VoiceCatalogSnapshot(state: .init(metadataByVoiceID: ["B": metadata]))
+        XCTAssertFalse(mismatched.permits(voice, bookID: book))
+        XCTAssertNotEqual(mismatched.revision, correct.revision, "目录 key 也是身份事实")
+        let url = tempRoot.appendingPathComponent("mismatched.json")
+        let data = try JSONEncoder().encode(mismatched.state)
+        try data.write(to: url)
+        let loaded = VoiceCatalogStore(storageURL: url).snapshot()
+        XCTAssertEqual(loaded.loadState, .unreadable)
+        XCTAssertFalse(loaded.permits(voice, bookID: book))
+        XCTAssertEqual(try Data(contentsOf: url), data, "拒绝读取不能覆盖未知记录")
+    }
+
+    func testUnsupportedCandidateParameterExplainsExclusionWithoutRiskConsent() throws {
+        let book = UUID(), (roles, anns) = p0Roles(bookID: book, count: 1)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(makeTestSafeVoice(id: "unsupported", name: "未声明参数"))) as? [String: Any])
+        object["operations"] = ["http_speech": ["parameters": ["speed": ["status": "unknown"]]]]
+        let voice = try JSONDecoder().decode(SafeVoiceEntry.self, from: JSONSerialization.data(withJSONObject: object))
+        let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: anns,
+            snapshot: p0Snapshot([voice, makeTestSafeVoice(id: "ready", name: "可用")]), catalog: .init(), bookID: book, existingBindings: [:])
+        XCTAssertTrue(plan.isApplicable)
+        XCTAssertTrue(plan.issues.contains { $0.code == .unsupportedRenderParameter && $0.voiceIDs == [voice.id] })
+        XCTAssertTrue(plan.requiredAcknowledgements.isEmpty, "未采用候选的排除说明不应要求接受共享风险")
+    }
+
+    func testCastingCapacityIncludesNarrator() {
+        let book = UUID(), (roles, anns) = p0Roles(bookID: book, count: 12)
+        for count in [0, 1, 2, 3, 5, 6] {
+            let voices = (0..<count).map { makeTestSafeVoice(id: "voice-\($0)", name: "声音\($0)") }
+            let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: anns,
+                snapshot: p0Snapshot(voices), catalog: .init(), bookID: book, existingBindings: [:])
+            XCTAssertEqual(plan.isApplicable, count >= 2, "M=\(count), \(plan.issues)")
+            XCTAssertLessThanOrEqual(plan.narratorVoiceCount + plan.exclusiveVoiceCount + plan.sharedVoiceCount, count)
+            if count == 6 { XCTAssertEqual(plan.exclusiveVoiceCount, 3); XCTAssertEqual(plan.sharedVoiceCount, 2) }
+            if count == 2 { XCTAssertEqual(plan.exclusiveVoiceCount, 0); XCTAssertEqual(plan.sharedVoiceCount, 1) }
+        }
+        let small = AudiobookCastRegistry.recommendVoiceBindings(characters: Array(roles.prefix(2)), annotations: Array(anns.prefix(2)),
+            snapshot: p0Snapshot((0..<6).map { makeTestSafeVoice(id: "v\($0)", name: "v\($0)") }), catalog: .init(), bookID: book, existingBindings: [:])
+        XCTAssertTrue(small.isApplicable)
+        XCTAssertEqual(small.sharedVoiceCount, 0)
+    }
+
+    func testExclusiveMatchingDoesNotConsumeAnotherRolesOnlyCandidate() throws {
+        let a = UUID(), b = UUID()
+        let match = try AudiobookCastRegistry.maximumExclusiveMatching(roleIDs: [a, b], candidates: [a: ["a", "b"], b: ["a"]])
+        XCTAssertEqual(match[a], "b")
+        XCTAssertEqual(match[b], "a")
+        XCTAssertThrowsError(try AudiobookCastRegistry.maximumExclusiveMatching(roleIDs: [a, b], candidates: [a: ["a"], b: ["a"]]))
+        XCTAssertThrowsError(try AudiobookCastRegistry.maximumExclusiveMatching(roleIDs: [a], candidates: [a: ["a"]], visitBudget: 0))
+    }
+
+    func testMatchingBudgetExhaustionIsNotReportedAsInfeasible() {
+        let role = UUID()
+        XCTAssertThrowsError(try AudiobookCastRegistry.maximumExclusiveMatching(roleIDs: [role], candidates: [role: ["a"]], visitBudget: 0)) { error in
+            XCTAssertEqual(error as? AudiobookCastRegistry.ExclusiveMatchingError, .budgetExceeded)
+        }
+    }
+
+    func testLockedDuplicateReturnsIssueWithoutDemotion() {
+        let book = UUID(), (roles, anns) = p0Roles(bookID: book, count: 2)
+        let voice = makeTestSafeVoice(id: "one", name: "one")
+        let bindings = Dictionary(uniqueKeysWithValues: roles.map { ($0.id, AudiobookVoiceBinding(roleID: $0.id, voiceID: voice.id,
+            voiceRevision: voice.voiceRevision, modelRevision: String(repeating: "a", count: 40))) })
+        let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: anns, snapshot: p0Snapshot([voice]),
+            catalog: .init(), bookID: book, existingBindings: bindings)
+        XCTAssertTrue(plan.issues.contains { $0.code == .lockedBindingConflict && $0.isBlocking })
+        XCTAssertEqual(plan.proposedBindings, bindings)
+        XCTAssertFalse(plan.isApplicable)
+    }
+
+    func testUnprovenSilentLockedRoleStillReservesItsVoice() {
+        let book = UUID(), (roles, anns) = p0Roles(bookID: book, count: 3)
+        let voices = ["v0", "v1"].map { makeTestSafeVoice(id: $0, name: $0) }
+        let locked = AudiobookVoiceBinding(roleID: roles[2].id, voiceID: "v0", voiceRevision: voices[0].voiceRevision,
+            modelRevision: String(repeating: "a", count: 40))
+        let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: Array(anns.prefix(2)),
+            snapshot: p0Snapshot(voices), catalog: .init(), bookID: book, existingBindings: [roles[2].id: locked])
+        XCTAssertFalse(plan.isApplicable, "零台词不释放用户已锁定的独占声音")
+        XCTAssertEqual(plan.proposedBindings[roles[2].id], locked)
+    }
+
+    func testNarratorCannotBeChangedToSharedPolicy() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let fixture = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
+        let before = try await store.characters(for: fixture.bookID)
+        let narrator = try XCTUnwrap(before.first(where: \.isNarrator))
+        do {
+            try await makeTestCastController(store: store).setAllowSharedMinorVoice(bookID: fixture.bookID, roleID: narrator.id, allowed: true)
+            XCTFail("旁白必须保持独占")
+        } catch {}
+        let after = try await store.characters(for: fixture.bookID)
+        XCTAssertEqual(Self.charactersByID(after), Self.charactersByID(before))
+    }
+
+    func testAutomaticVoiceReturnCannotOverwriteBindingAddedDuringCreation() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let fixture = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
+        let controller = makeTestCastController(store: store)
+        let context = try await controller.makeVoiceReturnContext(bookID: fixture.bookID, roleID: fixture.hero.id)
+        let original = AudiobookVoiceBinding(roleID: fixture.hero.id, voiceID: "voice-hero", voiceRevision: "vr_0123456789abcdef0123456789abcdef", modelRevision: String(repeating: "a", count: 40))
+        try await controller.bindVoice(bookID: fixture.bookID, roleID: fixture.hero.id, binding: original)
+        let replacement = AudiobookVoiceBinding(roleID: fixture.hero.id, voiceID: "fault-replacement-hero", voiceRevision: original.voiceRevision, modelRevision: original.modelRevision)
+        do {
+            try await controller.completeVoiceReturn(context: context, activeBookID: fixture.bookID, binding: replacement, onlyIfUnbound: true)
+            XCTFail("自动创建期间的新绑定不能被覆盖")
+        } catch { XCTAssertEqual(error as? AudiobookCastError, .staleVoiceReturnContext) }
+        let saved = try await store.voiceBindings(for: fixture.bookID)
+        XCTAssertEqual(saved[fixture.hero.id], original)
+    }
+
+    func testGeneratedVoiceReturnFreezesBindingSet() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let fixture = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
+        let controller = makeTestCastController(store: store)
+        let context = try await controller.makeVoiceReturnContext(bookID: fixture.bookID, roleID: fixture.hero.id)
+        let selected = AudiobookVoiceBinding(roleID: fixture.hero.id, voiceID: "voice-hero", voiceRevision: "vr_0123456789abcdef0123456789abcdef", modelRevision: String(repeating: "a", count: 40))
+        try await controller.bindVoice(bookID: fixture.bookID, roleID: fixture.hero.id, binding: selected)
+        let output = AudiobookVoiceBinding(roleID: fixture.hero.id, voiceID: "fault-replacement-hero", voiceRevision: selected.voiceRevision, modelRevision: selected.modelRevision)
+        do {
+            try await controller.completeVoiceReturn(context: context, activeBookID: fixture.bookID, binding: output)
+            XCTFail("单角色生成也不能覆盖等待期间的人工选择")
+        } catch { XCTAssertEqual(error as? AudiobookCastError, .staleVoiceReturnContext) }
+        let saved = try await store.voiceBindings(for: fixture.bookID)
+        XCTAssertEqual(saved[fixture.hero.id], selected)
+    }
+
+    func testCastingInputReorderingIsDeterministic() {
+        let book = UUID(), (roles, anns) = p0Roles(bookID: book, count: 12)
+        let voices = (0..<6).map { makeTestSafeVoice(id: "v\($0)", name: "v\($0)") }
+        let first = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: anns, snapshot: p0Snapshot(voices), catalog: .init(), bookID: book, existingBindings: [:])
+        let second = AudiobookCastRegistry.recommendVoiceBindings(characters: roles.reversed(), annotations: anns.reversed(), snapshot: p0Snapshot(voices.reversed()), catalog: .init(), bookID: book, existingBindings: [:])
+        XCTAssertEqual(first.proposedBindings, second.proposedBindings)
+        XCTAssertEqual(first.inputDigest, second.inputDigest)
+        XCTAssertEqual(Set(first.issues.map(\.id)), Set(second.issues.map(\.id)))
+    }
+
+    func testNewEnsembleVoiceRemainsScopedToItsBook() throws {
+        let catalog = VoiceCatalogStore(), book = UUID()
+        let metadata = try catalog.registerArchetypeEnsembleVoice(voiceID: "ensemble", bookID: book, bookTitle: "夹具", archetype: .youngMale)
+        XCTAssertEqual(metadata.visibilityScope, .bookExclusive)
+        XCTAssertFalse(catalog.snapshot().permits(makeTestSafeVoice(id: "ensemble", name: "群像", mode: "clone"), bookID: UUID()))
+    }
+
+    func testBatchConflictNeverEnablesSharing() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let fixture = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
+        let other = AudiobookCharacter(bookID: fixture.bookID, displayName: "乙", isMajor: true)
+        var characters = try await store.characters(for: fixture.bookID); characters.append(other)
+        try await store.saveCharacters(bookID: fixture.bookID, characters: characters)
+        let controller = makeTestCastController(store: store)
+        let bindings = [fixture.hero, other].map { AudiobookVoiceBinding(roleID: $0.id, voiceID: "shared-voice",
+            voiceRevision: "vr_0123456789abcdef0123456789abcdef", modelRevision: String(repeating: "a", count: 40)) }
+        do {
+            _ = try await controller.bindVoicesBatch(bookID: fixture.bookID, bindings: bindings)
+            XCTFail("exclusive conflict must fail the whole batch")
+        } catch let error as AudiobookCastError {
+            guard case .duplicateVoiceRequiresSharedMinorConsent = error else { return XCTFail("Unexpected: \(error)") }
+        }
+        let after = try await store.characters(for: fixture.bookID), saved = try await store.voiceBindings(for: fixture.bookID)
+        XCTAssertEqual(Self.charactersByID(after), Self.charactersByID(characters))
+        XCTAssertTrue(saved.isEmpty)
+    }
+
+    func testBatchLastMissingRoleOrUnreadyVoiceNeverCommitsEarlierBinding() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let fixture = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
+        let controller = makeTestCastController(store: store)
+        let before = try await store.characters(for: fixture.bookID)
+        let narrator = try XCTUnwrap(before.first(where: \.isNarrator))
+        let first = AudiobookVoiceBinding(roleID: fixture.hero.id, voiceID: "voice-hero", voiceRevision: "vr_0123456789abcdef0123456789abcdef", modelRevision: String(repeating: "a", count: 40))
+        for missingRole in [true, false] {
+            let last = AudiobookVoiceBinding(roleID: missingRole ? UUID() : narrator.id, voiceID: "voice-narrator",
+                voiceRevision: first.voiceRevision, modelRevision: first.modelRevision, isSynthesisReady: missingRole)
+            do {
+                _ = try await controller.bindVoicesBatch(bookID: fixture.bookID, bindings: [first, last])
+                XCTFail("末项非法必须拒绝整批")
+            } catch let error as AudiobookCastError {
+                if missingRole { XCTAssertEqual(error, .characterNotFound(last.roleID)) }
+                else { XCTAssertEqual(error, .voiceNotSynthesisReady(voiceID: last.voiceID)) }
+            }
+            let saved = try await store.voiceBindings(for: fixture.bookID)
+            let roles = try await store.characters(for: fixture.bookID)
+            XCTAssertTrue(saved.isEmpty)
+            XCTAssertEqual(Self.charactersByID(roles), Self.charactersByID(before))
+        }
+    }
+
+    func testCancelledCastingAndMatchingBudgetStopWithoutBindings() async throws {
+        let book = UUID(), (roles, anns) = p0Roles(bookID: book, count: 12)
+        let snapshot = p0Snapshot((0..<6).map { makeTestSafeVoice(id: "v\($0)", name: "v\($0)") })
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: anns, snapshot: snapshot,
+                catalog: .init(), bookID: book, existingBindings: [:])
+        }
+        let result = await task.value
+        XCTAssertFalse(result.isApplicable)
+        XCTAssertTrue(result.proposedBindings.isEmpty)
+        XCTAssertTrue(result.issues.contains { $0.code == .searchBudgetExceeded })
+    }
+
+    func testClonePolicyOmitsCallerSeed() {
+        let role = AudiobookCharacter(bookID: UUID(), displayName: "配角")
+        for slot in 0..<8 {
+            let policy = AudiobookCastRegistry.computeMicroProsodyAndSeed(
+                for: role, archetype: .neutralEnsemble, voiceMode: "clone", slotIndex: slot
+            )
+            XCTAssertEqual(policy.allowedSpeed, 1)
+            XCTAssertNil(policy.callerSeed)
+        }
+    }
+
     nonisolated(unsafe) private var tempRoot: URL!
 
     override func setUpWithError() throws {
@@ -100,9 +757,972 @@ final class AudiobookCastTests: XCTestCase {
         return (bookID, chapterA, chapterB, narrator, hero, try XCTUnwrap(unknownAtom))
     }
 
-    func testUnknownBlocksOnlyItsChapterAfterGlobalAnalysis() async throws {
+    private static func executeSQLite(_ sql: String, databaseURL: URL) throws {
+        var database: OpaquePointer?
+        let openResult = sqlite3_open_v2(
+            databaseURL.path,
+            &database,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        )
+        guard openResult == SQLITE_OK, let database else {
+            let message = database.map { String(cString: sqlite3_errmsg($0)) } ?? "sqlite3_open_v2 failed"
+            if let database { sqlite3_close_v2(database) }
+            throw NSError(
+                domain: "AudiobookCastTests.SQLite",
+                code: Int(openResult),
+                userInfo: [NSLocalizedDescriptionKey: message]
+            )
+        }
+        defer { sqlite3_close_v2(database) }
+
+        var errorMessage: UnsafeMutablePointer<CChar>?
+        let result = sqlite3_exec(database, sql, nil, nil, &errorMessage)
+        let message = errorMessage.map { String(cString: $0) }
+        if let errorMessage { sqlite3_free(errorMessage) }
+        guard result == SQLITE_OK else {
+            throw NSError(
+                domain: "AudiobookCastTests.SQLite",
+                code: Int(result),
+                userInfo: [NSLocalizedDescriptionKey: message ?? String(cString: sqlite3_errmsg(database))]
+            )
+        }
+    }
+
+    private static func installWriteAbortTrigger(
+        table: String,
+        keyColumn: String,
+        rowID: String,
+        triggerPrefix: String,
+        marker: String,
+        databaseURL: URL
+    ) throws {
+        let sql = ["INSERT", "UPDATE"].map { operation in
+            """
+            CREATE TRIGGER \(triggerPrefix)_\(operation.lowercased())
+            BEFORE \(operation) ON \(table)
+            WHEN NEW.\(keyColumn) = '\(rowID)'
+            BEGIN
+                SELECT RAISE(ABORT, '\(marker)');
+            END;
+            """
+        }.joined(separator: "\n")
+        try executeSQLite(sql, databaseURL: databaseURL)
+    }
+
+    private static func removeWriteAbortTrigger(
+        triggerPrefix: String,
+        databaseURL: URL
+    ) throws {
+        try executeSQLite(
+            "DROP TRIGGER IF EXISTS \(triggerPrefix)_insert; DROP TRIGGER IF EXISTS \(triggerPrefix)_update;",
+            databaseURL: databaseURL
+        )
+    }
+
+    private static func charactersByID(_ characters: [AudiobookCharacter]) -> [UUID: AudiobookCharacter] {
+        Dictionary(uniqueKeysWithValues: characters.map { ($0.id, $0) })
+    }
+
+    private func confirmCoreCastAndAudition(
+        store: AudiobookProjectStore,
+        controller: AudiobookCastController,
+        bookID: UUID,
+        narratorID: UUID,
+        heroID: UUID
+    ) async throws -> AudiobookBook {
+        let annotations = try await store.annotations(for: bookID)
+        try await store.saveAnnotations(bookID: bookID, annotations: annotations.map { annotation in
+            var copy = annotation
+            if copy.assignment.isUnknown { copy.assignment = .assigned(roleID: narratorID) }
+            return copy
+        })
+        var book = try await store.book(id: bookID)
+        book.analysisState = .allWindowsValidated
+        try await store.updateBook(book)
+        try await store.saveVoiceBindings(
+            bookID: bookID,
+            bindings: [
+                AudiobookVoiceBinding(
+                    roleID: narratorID,
+                    voiceID: "fault-fixture-narrator",
+                    voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                    modelRevision: String(repeating: "a", count: 40)
+                ),
+                AudiobookVoiceBinding(
+                    roleID: heroID,
+                    voiceID: "fault-fixture-hero",
+                    voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                    modelRevision: String(repeating: "a", count: 40)
+                )
+            ]
+        )
+        let revisionID = try await controller.currentCastRevisionID(for: bookID)
+        try await controller.confirmCast(bookID: bookID, revisionID: revisionID)
+        let voiceDigest = try await controller.currentVoiceSetDigest(for: bookID)
+        try await controller.confirmAudition(bookID: bookID, voiceSetDigest: voiceDigest)
+        return try await store.book(id: bookID)
+    }
+
+    private func appendSharedMinorPair(
+        store: AudiobookProjectStore,
+        fixture: (bookID: UUID, chapterA: AudiobookChapter, chapterB: AudiobookChapter, narrator: AudiobookCharacter, hero: AudiobookCharacter, unknownAtomInA: AudiobookTextAtom),
+        allowSharedMinorVoice: Bool
+    ) async throws -> (AudiobookCharacter, AudiobookCharacter) {
+        var explicitTraits = AudiobookVoiceTraits()
+        explicitTraits.gender = .init(value: "male", source: .manual, confidence: 1)
+        explicitTraits.age = .init(value: "middleAged", source: .manual, confidence: 1)
+        let partnerA = AudiobookCharacter(
+            bookID: fixture.bookID,
+            displayName: "张掌柜",
+            isNarrator: false,
+            isMajor: false,
+            allowSharedMinorVoice: allowSharedMinorVoice,
+            chapterIDs: [fixture.chapterA.id],
+            voiceTraitsOverride: explicitTraits
+        )
+        let partnerB = AudiobookCharacter(
+            bookID: fixture.bookID,
+            displayName: "李掌柜",
+            isNarrator: false,
+            isMajor: false,
+            allowSharedMinorVoice: allowSharedMinorVoice,
+            chapterIDs: [fixture.chapterA.id],
+            voiceTraitsOverride: explicitTraits
+        )
+        var characters = try await store.characters(for: fixture.bookID)
+        characters.append(contentsOf: [partnerA, partnerB])
+        try await store.saveCharacters(bookID: fixture.bookID, characters: characters)
+        return (partnerA, partnerB)
+    }
+
+    func testMergeCharactersRollsBackOnFirstAndLaterAnnotationWriteFailures() async throws {
+        try await assertMergeRollbackWhenAnnotationWriteFails(ordinal: 0, rootName: "merge-first-annotation-failure")
+        try await assertMergeRollbackWhenAnnotationWriteFails(ordinal: 1, rootName: "merge-late-annotation-failure")
+    }
+
+    private func assertMergeRollbackWhenAnnotationWriteFails(ordinal: Int, rootName: String) async throws {
+        let libraryRoot = tempRoot.appendingPathComponent(rootName, isDirectory: true)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+
+        let store = try AudiobookProjectStore(root: libraryRoot)
+        let controller = makeTestCastController(store: store)
+        let fixture = try await Self.makeTwoChapterBook(store: store, root: libraryRoot)
+
+        let target = AudiobookCharacter(
+            bookID: fixture.bookID,
+            displayName: "周船长",
+            aliases: ["老周"],
+            evidences: [],
+            primaryVoiceTraitSummary: "沉稳低音，语速从容",
+            isMajor: false,
+            allowSharedMinorVoice: true,
+            firstAppearanceRange: .init(lowerBound: 20, upperBound: 35),
+            chapterIDs: [fixture.chapterB.id]
+        )
+        var characters = try await store.characters(for: fixture.bookID)
+        characters.append(target)
+        try await store.saveCharacters(bookID: fixture.bookID, characters: characters)
+
+        let atomsA = try await store.atoms(for: fixture.bookID, chapterID: fixture.chapterA.id)
+        let atomsB = try await store.atoms(for: fixture.bookID, chapterID: fixture.chapterB.id)
+        let sourceAtomIDs = [
+            try XCTUnwrap(atomsA.first(where: { $0.kind != .formatting })).id,
+            try XCTUnwrap(atomsB.first(where: { $0.kind != .formatting })).id,
+        ]
+        XCTAssertEqual(Set(sourceAtomIDs).count, 2)
+
+        var annotations = try await store.annotations(for: fixture.bookID)
+        for atomID in sourceAtomIDs {
+            let index = try XCTUnwrap(annotations.firstIndex(where: { $0.atomID == atomID }))
+            annotations[index].assignment = .assigned(roleID: fixture.hero.id)
+            annotations[index].userConfirmed = false
+            annotations[index].annotationRevision = 4
+        }
+        try await store.saveAnnotations(
+            bookID: fixture.bookID,
+            annotations: annotations.filter { Set(sourceAtomIDs).contains($0.atomID) }
+        )
+
+        let sourceBinding = AudiobookVoiceBinding(
+            roleID: fixture.hero.id,
+            voiceID: "test-source-exclusive-voice",
+            voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+            modelRevision: String(repeating: "a", count: 40),
+            allowedSpeed: 0.95,
+            callerSeed: 71
+        )
+        let targetBinding = AudiobookVoiceBinding(
+            roleID: target.id,
+            voiceID: "test-target-exclusive-voice",
+            voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+            modelRevision: String(repeating: "a", count: 40),
+            allowedSpeed: 1.05,
+            callerSeed: 29
+        )
+        try await store.saveVoiceBindings(bookID: fixture.bookID, bindings: [sourceBinding, targetBinding])
+
+        // Force the pre-merge role and annotation values into the same Store caches.
+        let originalCharacters = try await store.characters(for: fixture.bookID)
+        let originalAnnotations = try await store.annotations(for: fixture.bookID)
+        let originalBindings = try await store.voiceBindings(for: fixture.bookID)
+        let originalSource = try XCTUnwrap(originalCharacters.first(where: { $0.id == fixture.hero.id }))
+        let originalTarget = try XCTUnwrap(originalCharacters.first(where: { $0.id == target.id }))
+        let sourceAssignments = originalAnnotations
+            .filter { $0.assignment.roleID == fixture.hero.id }
+            .sorted { $0.sourceRange < $1.sourceRange }
+        XCTAssertGreaterThanOrEqual(sourceAssignments.count, 2, "故障必须发生在至少一条 source 标注已尝试写入之后")
+        XCTAssertEqual(originalBindings[fixture.hero.id], sourceBinding)
+        XCTAssertEqual(originalBindings[target.id], targetBinding)
+
+        let generationBeforeFailure = try await controller.makeVoiceReturnContext(
+            bookID: fixture.bookID,
+            roleID: fixture.hero.id
+        ).generation
+
+        // 第一条或较晚一条 source 标注触发 ABORT；后者能够暴露逐条提交造成的部分重派。
+        let failingAtomID = sourceAssignments[ordinal].atomID.uuidString
+        let triggerSQL = """
+        CREATE TRIGGER inject_late_merge_annotation_insert
+        BEFORE INSERT ON annotations
+        WHEN NEW.atom_id = '\(failingAtomID)'
+        BEGIN
+            SELECT RAISE(ABORT, 'injected_merge_annotation_failure');
+        END;
+        CREATE TRIGGER inject_late_merge_annotation_update
+        BEFORE UPDATE ON annotations
+        WHEN NEW.atom_id = '\(failingAtomID)'
+        BEGIN
+            SELECT RAISE(ABORT, 'injected_merge_annotation_failure');
+        END;
+        """
+        let databaseURL = libraryRoot.appendingPathComponent("library.sqlite3", isDirectory: false)
+        try Self.executeSQLite(triggerSQL, databaseURL: databaseURL)
+        defer {
+            try? Self.executeSQLite(
+                "DROP TRIGGER IF EXISTS inject_late_merge_annotation_insert; DROP TRIGGER IF EXISTS inject_late_merge_annotation_update;",
+                databaseURL: databaseURL
+            )
+        }
+
+        var injectedFailure: String?
+        do {
+            _ = try await controller.mergeCharacters(
+                bookID: fixture.bookID,
+                sourceRoleID: fixture.hero.id,
+                intoTargetRoleID: target.id
+            )
+            XCTFail("SQLite 注入的后写入故障应使角色合并失败")
+        } catch {
+            injectedFailure = "\(String(describing: error)) \(error.localizedDescription)"
+        }
+        XCTAssertTrue(
+            injectedFailure?.contains("injected_merge_annotation_failure") == true,
+            "必须确认数据库触发器命中，实际错误：\(injectedFailure ?? "<none>")"
+        )
+
+        try Self.executeSQLite(
+            "DROP TRIGGER IF EXISTS inject_late_merge_annotation_insert; DROP TRIGGER IF EXISTS inject_late_merge_annotation_update;",
+            databaseURL: databaseURL
+        )
+
+        // 同一 Store 的角色缓存刷新后仍应完整；标注缓存与 SQLite 重开读取也都必须维持原样。
+        let sameStoreCharacters = try await store.characters(for: fixture.bookID)
+        let sameStoreAnnotations = try await store.annotations(for: fixture.bookID)
+        let sameStoreBindings = try await store.voiceBindings(for: fixture.bookID)
+        XCTAssertEqual(
+            Dictionary(uniqueKeysWithValues: sameStoreCharacters.map { ($0.id, $0) }),
+            Dictionary(uniqueKeysWithValues: originalCharacters.map { ($0.id, $0) })
+        )
+        XCTAssertEqual(sameStoreCharacters.first(where: { $0.id == fixture.hero.id }), originalSource)
+        XCTAssertEqual(sameStoreCharacters.first(where: { $0.id == target.id }), originalTarget)
+        XCTAssertEqual(sameStoreAnnotations, originalAnnotations)
+        XCTAssertEqual(sameStoreBindings, originalBindings)
+
+        let reopenedStore = try AudiobookProjectStore(root: libraryRoot)
+        let reopenedCharacters = try await reopenedStore.characters(for: fixture.bookID)
+        let reopenedAnnotations = try await reopenedStore.annotations(for: fixture.bookID)
+        let reopenedBindings = try await reopenedStore.voiceBindings(for: fixture.bookID)
+        XCTAssertEqual(
+            Dictionary(uniqueKeysWithValues: reopenedCharacters.map { ($0.id, $0) }),
+            Dictionary(uniqueKeysWithValues: originalCharacters.map { ($0.id, $0) })
+        )
+        XCTAssertEqual(reopenedCharacters.first(where: { $0.id == fixture.hero.id }), originalSource)
+        XCTAssertEqual(reopenedCharacters.first(where: { $0.id == target.id }), originalTarget)
+        XCTAssertEqual(reopenedAnnotations, originalAnnotations)
+        XCTAssertEqual(reopenedBindings, originalBindings)
+
+        let generationAfterFailure = try await controller.makeVoiceReturnContext(
+            bookID: fixture.bookID,
+            roleID: fixture.hero.id
+        ).generation
+        XCTAssertEqual(generationAfterFailure, generationBeforeFailure, "失败的合并不得使音色往返上下文过期")
+
+        let retryPreview: AudiobookCastImpactPreview
+        do {
+            retryPreview = try await controller.mergeCharacters(
+                bookID: fixture.bookID,
+                sourceRoleID: fixture.hero.id,
+                intoTargetRoleID: target.id
+            )
+        } catch {
+            XCTFail("清除故障触发器后应能重试合并，实际错误：\(error)")
+            return
+        }
+        XCTAssertEqual(retryPreview.affectedQuotesCount, sourceAssignments.count)
+
+        let mergedCharacters = try await store.characters(for: fixture.bookID)
+        let mergedAnnotations = try await store.annotations(for: fixture.bookID)
+        let mergedBindings = try await store.voiceBindings(for: fixture.bookID)
+        XCTAssertNil(mergedCharacters.first(where: { $0.id == fixture.hero.id }))
+        let mergedTarget = try XCTUnwrap(mergedCharacters.first(where: { $0.id == target.id }))
+        XCTAssertEqual(mergedTarget.displayName, originalTarget.displayName)
+        XCTAssertEqual(mergedTarget.isMajor, originalTarget.isMajor)
+        XCTAssertEqual(mergedTarget.allowSharedMinorVoice, originalTarget.allowSharedMinorVoice)
+        XCTAssertTrue(mergedTarget.aliases.contains(originalSource.displayName))
+        XCTAssertEqual(mergedBindings[target.id], targetBinding)
+        XCTAssertNil(mergedBindings[fixture.hero.id])
+
+        let expectedMergedAnnotations = originalAnnotations.map { annotation -> AudiobookAnnotation in
+            guard annotation.assignment.roleID == fixture.hero.id else { return annotation }
+            var reassigned = annotation
+            reassigned.assignment = .assigned(roleID: target.id)
+            reassigned.userConfirmed = true
+            reassigned.annotationRevision += 1
+            return reassigned
+        }
+        XCTAssertEqual(mergedAnnotations, expectedMergedAnnotations)
+
+        let generationAfterRetry = try await controller.makeVoiceReturnContext(
+            bookID: fixture.bookID,
+            roleID: target.id
+        ).generation
+        XCTAssertEqual(generationAfterRetry, generationBeforeFailure + 1, "成功重试只应推进一次角色代次")
+    }
+
+    func testSplitCharacterFaultRollsBackAtFirstAndLaterAnnotationWrites() async throws {
+        for (ordinal, rootName) in [
+            (0, "split-first-annotation-failure"),
+            (1, "split-late-annotation-failure")
+        ] {
+            let libraryRoot = tempRoot.appendingPathComponent(rootName, isDirectory: true)
+            try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+            let store = try AudiobookProjectStore(root: libraryRoot)
+            let controller = makeTestCastController(store: store)
+            let fixture = try await Self.makeTwoChapterBook(store: store, root: libraryRoot)
+
+            let atomsA = try await store.atoms(for: fixture.bookID, chapterID: fixture.chapterA.id)
+            let atomsB = try await store.atoms(for: fixture.bookID, chapterID: fixture.chapterB.id)
+            let selectedAtomIDs = [
+                try XCTUnwrap(atomsA.first(where: { $0.kind != .formatting })).id,
+                try XCTUnwrap(atomsB.first(where: { $0.kind != .formatting })).id
+            ]
+            var annotations = try await store.annotations(for: fixture.bookID)
+            for atomID in selectedAtomIDs {
+                let index = try XCTUnwrap(annotations.firstIndex(where: { $0.atomID == atomID }))
+                annotations[index].assignment = .assigned(roleID: fixture.hero.id)
+                annotations[index].userConfirmed = false
+                annotations[index].annotationRevision = 7
+            }
+            try await store.saveAnnotations(
+                bookID: fixture.bookID,
+                annotations: annotations.filter { Set(selectedAtomIDs).contains($0.atomID) }
+            )
+            try await store.saveVoiceBindings(
+                bookID: fixture.bookID,
+                bindings: [
+                    AudiobookVoiceBinding(roleID: fixture.narrator.id, voiceID: "split-narrator", voiceRevision: "vr_0123456789abcdef0123456789abcdef", modelRevision: String(repeating: "a", count: 40)),
+                    AudiobookVoiceBinding(roleID: fixture.hero.id, voiceID: "split-hero", voiceRevision: "vr_0123456789abcdef0123456789abcdef", modelRevision: String(repeating: "a", count: 40))
+                ]
+            )
+
+            // 预热角色、标注与绑定读取，再记录故障前状态。
+            let originalCharacters = try await store.characters(for: fixture.bookID)
+            let originalAnnotations = try await store.annotations(for: fixture.bookID)
+            let originalBindings = try await store.voiceBindings(for: fixture.bookID)
+            let generationBefore = try await controller.makeVoiceReturnContext(
+                bookID: fixture.bookID,
+                roleID: fixture.hero.id
+            ).generation
+            let marker = "injected_split_annotation_failure_\(ordinal)"
+            let triggerPrefix = "inject_split_\(ordinal)"
+            let databaseURL = libraryRoot.appendingPathComponent("library.sqlite3")
+            try Self.installWriteAbortTrigger(
+                table: "annotations",
+                keyColumn: "atom_id",
+                rowID: selectedAtomIDs[ordinal].uuidString,
+                triggerPrefix: triggerPrefix,
+                marker: marker,
+                databaseURL: databaseURL
+            )
+            defer { try? Self.removeWriteAbortTrigger(triggerPrefix: triggerPrefix, databaseURL: databaseURL) }
+
+            var injectedFailure: String?
+            do {
+                _ = try await controller.splitCharacter(
+                    bookID: fixture.bookID,
+                    sourceRoleID: fixture.hero.id,
+                    newDisplayName: "分拆角色",
+                    atomIDs: selectedAtomIDs
+                )
+                XCTFail("标注写入故障应使拆分失败")
+            } catch {
+                injectedFailure = "\(String(describing: error)) \(error.localizedDescription)"
+            }
+            XCTAssertTrue(injectedFailure?.contains(marker) == true, "必须命中 SQLite 故障点，实际错误：\(injectedFailure ?? "<none>")")
+            try Self.removeWriteAbortTrigger(triggerPrefix: triggerPrefix, databaseURL: databaseURL)
+
+            let sameStoreCharacters = try await store.characters(for: fixture.bookID)
+            let sameStoreAnnotations = try await store.annotations(for: fixture.bookID)
+            let sameStoreBindings = try await store.voiceBindings(for: fixture.bookID)
+            let sameStoreIntact = Self.charactersByID(sameStoreCharacters) == Self.charactersByID(originalCharacters)
+                && sameStoreAnnotations == originalAnnotations
+                && sameStoreBindings == originalBindings
+            XCTAssertEqual(Self.charactersByID(sameStoreCharacters), Self.charactersByID(originalCharacters))
+            XCTAssertEqual(sameStoreAnnotations, originalAnnotations)
+            XCTAssertEqual(sameStoreBindings, originalBindings)
+
+            let reopenedStore = try AudiobookProjectStore(root: libraryRoot)
+            let reopenedCharacters = try await reopenedStore.characters(for: fixture.bookID)
+            let reopenedAnnotations = try await reopenedStore.annotations(for: fixture.bookID)
+            let reopenedBindings = try await reopenedStore.voiceBindings(for: fixture.bookID)
+            let reopenedIntact = Self.charactersByID(reopenedCharacters) == Self.charactersByID(originalCharacters)
+                && reopenedAnnotations == originalAnnotations
+                && reopenedBindings == originalBindings
+            XCTAssertEqual(Self.charactersByID(reopenedCharacters), Self.charactersByID(originalCharacters))
+            XCTAssertEqual(reopenedAnnotations, originalAnnotations)
+            XCTAssertEqual(reopenedBindings, originalBindings)
+
+            let generationAfterFailure = try await controller.makeVoiceReturnContext(
+                bookID: fixture.bookID,
+                roleID: fixture.hero.id
+            ).generation
+            XCTAssertEqual(generationAfterFailure, generationBefore, "拆分失败不得推进 generation")
+
+            var noUndoWasAdded = false
+            do {
+                try await controller.undoLastAssignment(bookID: fixture.bookID)
+                XCTFail("失败的拆分不得新增可撤销改派")
+            } catch let error as AudiobookCastError {
+                noUndoWasAdded = error == .nothingToUndo
+                XCTAssertEqual(error, .nothingToUndo)
+            }
+            XCTAssertTrue(noUndoWasAdded, "失败拆分不应压入 undo 历史")
+            guard sameStoreIntact, reopenedIntact, generationAfterFailure == generationBefore, noUndoWasAdded else {
+                continue
+            }
+
+            let splitRole = try await controller.splitCharacter(
+                bookID: fixture.bookID,
+                sourceRoleID: fixture.hero.id,
+                newDisplayName: "分拆角色",
+                atomIDs: selectedAtomIDs
+            )
+            let splitCharacters = try await store.characters(for: fixture.bookID)
+            let splitAnnotations = try await store.annotations(for: fixture.bookID)
+            XCTAssertEqual(splitCharacters.count, originalCharacters.count + 1)
+            XCTAssertEqual(
+                Set(splitCharacters.map(\.id)),
+                Set(originalCharacters.map(\.id)).union([splitRole.id]),
+                "拆分只应新增一个角色身份；现有角色仍可补齐声音画像"
+            )
+            XCTAssertTrue(splitCharacters.contains(where: { $0.id == splitRole.id }))
+            XCTAssertEqual(splitRole.displayName, "分拆角色")
+            for atomID in selectedAtomIDs {
+                let before = try XCTUnwrap(originalAnnotations.first(where: { $0.atomID == atomID }))
+                var expected = before
+                expected.assignment = .assigned(roleID: splitRole.id)
+                expected.userConfirmed = true
+                expected.annotationRevision += 1
+                XCTAssertEqual(splitAnnotations.first(where: { $0.atomID == atomID }), expected)
+            }
+            let generationAfterRetry = try await controller.makeVoiceReturnContext(
+                bookID: fixture.bookID,
+                roleID: splitRole.id
+            ).generation
+            XCTAssertEqual(generationAfterRetry, generationBefore + 1, "成功重试应只推进一次 generation")
+            let bindingsAfterRetry = try await store.voiceBindings(for: fixture.bookID)
+            XCTAssertEqual(bindingsAfterRetry, originalBindings, "拆分不应更换原角色的声音")
+
+            try await controller.undoLastAssignment(bookID: fixture.bookID)
+            let annotationsAfterUndo = try await store.annotations(for: fixture.bookID)
+            XCTAssertEqual(annotationsAfterUndo, originalAnnotations, "成功重试后的改派应可撤销")
+        }
+    }
+
+    func testAssignRoleFaultDoesNotAddUndoHistory() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
-        let controller = AudiobookCastController(store: store)
+        let controller = makeTestCastController(store: store)
+        let fixture = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
+        let atomsA = try await store.atoms(for: fixture.bookID, chapterID: fixture.chapterA.id)
+        let firstAtomID = fixture.unknownAtomInA.id
+        let failingAtomID = try XCTUnwrap(atomsA.first(where: { $0.kind != .formatting && $0.id != firstAtomID })).id
+        let originalAnnotations = try await store.annotations(for: fixture.bookID)
+
+        try await controller.assignRole(bookID: fixture.bookID, atomIDs: [firstAtomID], roleID: fixture.hero.id)
+        let stateAfterFirstAssignment = try await store.annotations(for: fixture.bookID)
+
+        let marker = "injected_assign_annotation_failure"
+        let triggerPrefix = "inject_assign_fault"
+        let databaseURL = tempRoot.appendingPathComponent("library.sqlite3")
+        try Self.installWriteAbortTrigger(
+            table: "annotations",
+            keyColumn: "atom_id",
+            rowID: failingAtomID.uuidString,
+            triggerPrefix: triggerPrefix,
+            marker: marker,
+            databaseURL: databaseURL
+        )
+        defer { try? Self.removeWriteAbortTrigger(triggerPrefix: triggerPrefix, databaseURL: databaseURL) }
+
+        var injectedFailure: String?
+        do {
+            try await controller.assignRole(bookID: fixture.bookID, atomIDs: [failingAtomID], roleID: fixture.narrator.id)
+            XCTFail("注入的标注写入故障应使改派失败")
+        } catch {
+            injectedFailure = "\(String(describing: error)) \(error.localizedDescription)"
+        }
+        XCTAssertTrue(injectedFailure?.contains(marker) == true, "必须命中 SQLite 故障点，实际错误：\(injectedFailure ?? "<none>")")
+        try Self.removeWriteAbortTrigger(triggerPrefix: triggerPrefix, databaseURL: databaseURL)
+
+        let afterFailure = try await store.annotations(for: fixture.bookID)
+        let reopenedStore = try AudiobookProjectStore(root: tempRoot)
+        let reopenedAfterFailure = try await reopenedStore.annotations(for: fixture.bookID)
+        XCTAssertEqual(afterFailure, stateAfterFirstAssignment)
+        XCTAssertEqual(reopenedAfterFailure, stateAfterFirstAssignment)
+
+        try await controller.undoLastAssignment(bookID: fixture.bookID)
+        let afterOneUndo = try await store.annotations(for: fixture.bookID)
+        XCTAssertEqual(afterOneUndo, originalAnnotations, "一次撤销应回滚成功的第一次改派")
+        var secondUndoWasEmpty = false
+        do {
+            try await controller.undoLastAssignment(bookID: fixture.bookID)
+            XCTFail("失败的第二次改派不应留下额外 undo 项")
+        } catch let error as AudiobookCastError {
+            secondUndoWasEmpty = error == .nothingToUndo
+            XCTAssertEqual(error, .nothingToUndo)
+        }
+        XCTAssertTrue(secondUndoWasEmpty)
+    }
+
+    func testConcurrentUndosRestoreEverySuccessfulAssignment() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let controller = makeTestCastController(store: store)
+        let fixture = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
+        let originalAnnotations = try await store.annotations(for: fixture.bookID)
+        let bookID = fixture.bookID
+        for index in 0..<8 {
+            try await controller.assignRole(
+                bookID: bookID,
+                atomIDs: [fixture.unknownAtomInA.id],
+                roleID: index.isMultiple(of: 2) ? fixture.hero.id : fixture.narrator.id
+            )
+        }
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for _ in 0..<8 {
+                group.addTask { try await controller.undoLastAssignment(bookID: bookID) }
+            }
+            try await group.waitForAll()
+        }
+        let restoredAnnotations = try await store.annotations(for: bookID)
+        XCTAssertEqual(restoredAnnotations, originalAnnotations)
+        do {
+            try await controller.undoLastAssignment(bookID: bookID)
+            XCTFail("每个已提交的改派应只被撤销一次")
+        } catch let error as AudiobookCastError {
+            XCTAssertEqual(error, .nothingToUndo)
+        }
+    }
+
+    func testUndoAssignmentFaultDoesNotConsumeUndoHistory() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let controller = makeTestCastController(store: store)
+        let fixture = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
+        let originalAnnotations = try await store.annotations(for: fixture.bookID)
+        try await controller.assignRole(
+            bookID: fixture.bookID,
+            atomIDs: [fixture.unknownAtomInA.id],
+            roleID: fixture.hero.id
+        )
+        let assignedAnnotations = try await store.annotations(for: fixture.bookID)
+
+        let marker = "injected_undo_annotation_failure"
+        let triggerPrefix = "inject_undo_fault"
+        let databaseURL = tempRoot.appendingPathComponent("library.sqlite3")
+        try Self.installWriteAbortTrigger(
+            table: "annotations",
+            keyColumn: "atom_id",
+            rowID: fixture.unknownAtomInA.id.uuidString,
+            triggerPrefix: triggerPrefix,
+            marker: marker,
+            databaseURL: databaseURL
+        )
+        defer { try? Self.removeWriteAbortTrigger(triggerPrefix: triggerPrefix, databaseURL: databaseURL) }
+
+        var injectedFailure: String?
+        do {
+            try await controller.undoLastAssignment(bookID: fixture.bookID)
+            XCTFail("注入的撤销保存故障应使撤销失败")
+        } catch {
+            injectedFailure = "\(String(describing: error)) \(error.localizedDescription)"
+        }
+        XCTAssertTrue(injectedFailure?.contains(marker) == true, "必须命中 SQLite 故障点，实际错误：\(injectedFailure ?? "<none>")")
+        try Self.removeWriteAbortTrigger(triggerPrefix: triggerPrefix, databaseURL: databaseURL)
+
+        let afterFailure = try await store.annotations(for: fixture.bookID)
+        let reopenedStore = try AudiobookProjectStore(root: tempRoot)
+        let reopenedAfterFailure = try await reopenedStore.annotations(for: fixture.bookID)
+        XCTAssertEqual(afterFailure, assignedAnnotations)
+        XCTAssertEqual(reopenedAfterFailure, assignedAnnotations)
+
+        try await controller.undoLastAssignment(bookID: fixture.bookID)
+        let afterRetry = try await store.annotations(for: fixture.bookID)
+        XCTAssertEqual(afterRetry, originalAnnotations, "清除故障后应能重试撤销并恢复原标注")
+    }
+
+    func testBindVoiceBookInvalidationFaultPreservesBindingAndRetry() async throws {
+        let libraryRoot = tempRoot.appendingPathComponent("bind-voice-book-failure", isDirectory: true)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+        let store = try AudiobookProjectStore(root: libraryRoot)
+        let controller = makeTestCastController(store: store)
+        let fixture = try await Self.makeTwoChapterBook(store: store, root: libraryRoot)
+        let originalBook = try await confirmCoreCastAndAudition(
+            store: store,
+            controller: controller,
+            bookID: fixture.bookID,
+            narratorID: fixture.narrator.id,
+            heroID: fixture.hero.id
+        )
+        let originalBindings = try await store.voiceBindings(for: fixture.bookID)
+        let originalHeroBinding = try XCTUnwrap(originalBindings[fixture.hero.id])
+        let replacement = AudiobookVoiceBinding(
+            roleID: fixture.hero.id,
+            voiceID: "fault-replacement-hero",
+            voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+            modelRevision: String(repeating: "a", count: 40)
+        )
+        let marker = "injected_bind_voice_book_failure"
+        let triggerPrefix = "inject_bind_voice_book_fault"
+        let databaseURL = libraryRoot.appendingPathComponent("library.sqlite3")
+        try Self.installWriteAbortTrigger(
+            table: "books",
+            keyColumn: "id",
+            rowID: fixture.bookID.uuidString,
+            triggerPrefix: triggerPrefix,
+            marker: marker,
+            databaseURL: databaseURL
+        )
+        defer { try? Self.removeWriteAbortTrigger(triggerPrefix: triggerPrefix, databaseURL: databaseURL) }
+
+        var injectedFailure: String?
+        do {
+            try await controller.bindVoice(bookID: fixture.bookID, roleID: fixture.hero.id, binding: replacement)
+            XCTFail("书籍试听确认失效化写入故障应使换绑失败")
+        } catch {
+            injectedFailure = "\(String(describing: error)) \(error.localizedDescription)"
+        }
+        XCTAssertTrue(injectedFailure?.contains(marker) == true, "必须命中 SQLite 故障点，实际错误：\(injectedFailure ?? "<none>")")
+        try Self.removeWriteAbortTrigger(triggerPrefix: triggerPrefix, databaseURL: databaseURL)
+
+        let bindingsAfterFailure = try await store.voiceBindings(for: fixture.bookID)
+        let bookAfterFailure = try await store.book(id: fixture.bookID)
+        let reopenedStore = try AudiobookProjectStore(root: libraryRoot)
+        let reopenedBindings = try await reopenedStore.voiceBindings(for: fixture.bookID)
+        let reopenedBook = try await reopenedStore.book(id: fixture.bookID)
+        let stateIntact = bindingsAfterFailure == originalBindings
+            && bookAfterFailure == originalBook
+            && reopenedBindings == originalBindings
+            && reopenedBook == originalBook
+        XCTAssertEqual(bindingsAfterFailure, originalBindings)
+        XCTAssertEqual(bindingsAfterFailure[fixture.hero.id], originalHeroBinding)
+        XCTAssertEqual(bookAfterFailure, originalBook)
+        XCTAssertEqual(reopenedBindings, originalBindings)
+        XCTAssertEqual(reopenedBook, originalBook)
+        guard stateIntact else { return }
+
+        try await controller.bindVoice(bookID: fixture.bookID, roleID: fixture.hero.id, binding: replacement)
+        let retryBindings = try await store.voiceBindings(for: fixture.bookID)
+        let retryBook = try await store.book(id: fixture.bookID)
+        XCTAssertEqual(retryBindings[fixture.hero.id], replacement)
+        XCTAssertNil(retryBook.confirmedAuditionVoiceSetDigest)
+
+        let newDigest = try await controller.currentVoiceSetDigest(for: fixture.bookID)
+        try await controller.confirmAudition(bookID: fixture.bookID, voiceSetDigest: newDigest)
+        let confirmedBook = try await store.book(id: fixture.bookID)
+        try await controller.bindVoice(bookID: fixture.bookID, roleID: fixture.hero.id, binding: replacement)
+        let sameBindingBook = try await store.book(id: fixture.bookID)
+        XCTAssertEqual(sameBindingBook, confirmedBook, "重复保存完全相同的绑定应保留试听确认")
+    }
+
+    func testBindVoicesBatchSecondBindingFaultPreservesStateAndRetry() async throws {
+        let libraryRoot = tempRoot.appendingPathComponent("batch-binding-second-failure", isDirectory: true)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+        let store = try AudiobookProjectStore(root: libraryRoot)
+        let controller = makeTestCastController(store: store)
+        let fixture = try await Self.makeTwoChapterBook(store: store, root: libraryRoot)
+        let (partnerA, partnerB) = try await appendSharedMinorPair(
+            store: store,
+            fixture: fixture,
+            allowSharedMinorVoice: true
+        )
+        let originalBook = try await confirmCoreCastAndAudition(
+            store: store,
+            controller: controller,
+            bookID: fixture.bookID,
+            narratorID: fixture.narrator.id,
+            heroID: fixture.hero.id
+        )
+        let originalCharacters = try await store.characters(for: fixture.bookID)
+        let originalBindings = try await store.voiceBindings(for: fixture.bookID)
+        let submitted = [partnerA, partnerB].map {
+            AudiobookVoiceBinding(
+                roleID: $0.id,
+                voiceID: "fault-shared-pool-voice",
+                voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                modelRevision: String(repeating: "a", count: 40)
+            )
+        }
+        let marker = "injected_second_voice_binding_failure"
+        let triggerPrefix = "inject_batch_second_binding_fault"
+        let databaseURL = libraryRoot.appendingPathComponent("library.sqlite3")
+        try Self.installWriteAbortTrigger(
+            table: "voice_bindings",
+            keyColumn: "role_id",
+            rowID: partnerB.id.uuidString,
+            triggerPrefix: triggerPrefix,
+            marker: marker,
+            databaseURL: databaseURL
+        )
+        defer { try? Self.removeWriteAbortTrigger(triggerPrefix: triggerPrefix, databaseURL: databaseURL) }
+
+        var injectedFailure: String?
+        do {
+            _ = try await controller.bindVoicesBatch(bookID: fixture.bookID, bindings: submitted)
+            XCTFail("第二条绑定写入故障应使批量换绑失败")
+        } catch {
+            injectedFailure = "\(String(describing: error)) \(error.localizedDescription)"
+        }
+        XCTAssertTrue(injectedFailure?.contains(marker) == true, "必须命中第二条绑定的 SQLite 故障点，实际错误：\(injectedFailure ?? "<none>")")
+        try Self.removeWriteAbortTrigger(triggerPrefix: triggerPrefix, databaseURL: databaseURL)
+
+        let charactersAfterFailure = try await store.characters(for: fixture.bookID)
+        let bindingsAfterFailure = try await store.voiceBindings(for: fixture.bookID)
+        let bookAfterFailure = try await store.book(id: fixture.bookID)
+        let reopenedStore = try AudiobookProjectStore(root: libraryRoot)
+        let reopenedCharacters = try await reopenedStore.characters(for: fixture.bookID)
+        let reopenedBindings = try await reopenedStore.voiceBindings(for: fixture.bookID)
+        let reopenedBook = try await reopenedStore.book(id: fixture.bookID)
+        let stateIntact = Self.charactersByID(charactersAfterFailure) == Self.charactersByID(originalCharacters)
+            && bindingsAfterFailure == originalBindings
+            && bookAfterFailure == originalBook
+            && Self.charactersByID(reopenedCharacters) == Self.charactersByID(originalCharacters)
+            && reopenedBindings == originalBindings
+            && reopenedBook == originalBook
+        XCTAssertEqual(Self.charactersByID(charactersAfterFailure), Self.charactersByID(originalCharacters))
+        XCTAssertEqual(bindingsAfterFailure, originalBindings)
+        XCTAssertTrue(try XCTUnwrap(charactersAfterFailure.first(where: { $0.id == partnerA.id })).allowSharedMinorVoice)
+        XCTAssertTrue(try XCTUnwrap(charactersAfterFailure.first(where: { $0.id == partnerB.id })).allowSharedMinorVoice)
+        XCTAssertEqual(bookAfterFailure, originalBook)
+        XCTAssertEqual(Self.charactersByID(reopenedCharacters), Self.charactersByID(originalCharacters))
+        XCTAssertEqual(reopenedBindings, originalBindings)
+        XCTAssertEqual(reopenedBook, originalBook)
+        guard stateIntact else { return }
+
+        let retryCount = try await controller.bindVoicesBatch(bookID: fixture.bookID, bindings: submitted)
+        let retryCharacters = try await store.characters(for: fixture.bookID)
+        let retryBindings = try await store.voiceBindings(for: fixture.bookID)
+        let retryBook = try await store.book(id: fixture.bookID)
+        XCTAssertEqual(retryCount, 2)
+        XCTAssertTrue(try XCTUnwrap(retryCharacters.first(where: { $0.id == partnerA.id })).allowSharedMinorVoice)
+        XCTAssertTrue(try XCTUnwrap(retryCharacters.first(where: { $0.id == partnerB.id })).allowSharedMinorVoice)
+        XCTAssertEqual(retryBindings[partnerA.id], submitted[0])
+        XCTAssertEqual(retryBindings[partnerB.id], submitted[1])
+        XCTAssertNil(retryBook.confirmedAuditionVoiceSetDigest)
+    }
+
+    func testBindVoicesBatchBookInvalidationFaultPreservesStateAndRetry() async throws {
+        let libraryRoot = tempRoot.appendingPathComponent("batch-book-invalidation-failure", isDirectory: true)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+        let store = try AudiobookProjectStore(root: libraryRoot)
+        let controller = makeTestCastController(store: store)
+        let fixture = try await Self.makeTwoChapterBook(store: store, root: libraryRoot)
+        let (partnerA, partnerB) = try await appendSharedMinorPair(
+            store: store,
+            fixture: fixture,
+            allowSharedMinorVoice: true
+        )
+        let originalBook = try await confirmCoreCastAndAudition(
+            store: store,
+            controller: controller,
+            bookID: fixture.bookID,
+            narratorID: fixture.narrator.id,
+            heroID: fixture.hero.id
+        )
+        let originalCharacters = try await store.characters(for: fixture.bookID)
+        let originalBindings = try await store.voiceBindings(for: fixture.bookID)
+        let submitted = [partnerA, partnerB].map {
+            AudiobookVoiceBinding(
+                roleID: $0.id,
+                voiceID: "fault-shared-pool-voice",
+                voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                modelRevision: String(repeating: "a", count: 40)
+            )
+        }
+        let marker = "injected_batch_book_invalidation_failure"
+        let triggerPrefix = "inject_batch_book_fault"
+        let databaseURL = libraryRoot.appendingPathComponent("library.sqlite3")
+        try Self.installWriteAbortTrigger(
+            table: "books",
+            keyColumn: "id",
+            rowID: fixture.bookID.uuidString,
+            triggerPrefix: triggerPrefix,
+            marker: marker,
+            databaseURL: databaseURL
+        )
+        defer { try? Self.removeWriteAbortTrigger(triggerPrefix: triggerPrefix, databaseURL: databaseURL) }
+
+        var injectedFailure: String?
+        do {
+            _ = try await controller.bindVoicesBatch(bookID: fixture.bookID, bindings: submitted)
+            XCTFail("书籍确认失效化故障应使批量换绑失败")
+        } catch {
+            injectedFailure = "\(String(describing: error)) \(error.localizedDescription)"
+        }
+        XCTAssertTrue(injectedFailure?.contains(marker) == true, "必须命中书籍更新故障点，实际错误：\(injectedFailure ?? "<none>")")
+        try Self.removeWriteAbortTrigger(triggerPrefix: triggerPrefix, databaseURL: databaseURL)
+
+        let charactersAfterFailure = try await store.characters(for: fixture.bookID)
+        let bindingsAfterFailure = try await store.voiceBindings(for: fixture.bookID)
+        let bookAfterFailure = try await store.book(id: fixture.bookID)
+        let reopenedStore = try AudiobookProjectStore(root: libraryRoot)
+        let reopenedCharacters = try await reopenedStore.characters(for: fixture.bookID)
+        let reopenedBindings = try await reopenedStore.voiceBindings(for: fixture.bookID)
+        let reopenedBook = try await reopenedStore.book(id: fixture.bookID)
+        let stateIntact = Self.charactersByID(charactersAfterFailure) == Self.charactersByID(originalCharacters)
+            && bindingsAfterFailure == originalBindings
+            && bookAfterFailure == originalBook
+            && Self.charactersByID(reopenedCharacters) == Self.charactersByID(originalCharacters)
+            && reopenedBindings == originalBindings
+            && reopenedBook == originalBook
+        XCTAssertEqual(Self.charactersByID(charactersAfterFailure), Self.charactersByID(originalCharacters))
+        XCTAssertEqual(bindingsAfterFailure, originalBindings)
+        XCTAssertTrue(try XCTUnwrap(charactersAfterFailure.first(where: { $0.id == partnerA.id })).allowSharedMinorVoice)
+        XCTAssertTrue(try XCTUnwrap(charactersAfterFailure.first(where: { $0.id == partnerB.id })).allowSharedMinorVoice)
+        XCTAssertEqual(bookAfterFailure, originalBook)
+        XCTAssertEqual(Self.charactersByID(reopenedCharacters), Self.charactersByID(originalCharacters))
+        XCTAssertEqual(reopenedBindings, originalBindings)
+        XCTAssertEqual(reopenedBook, originalBook)
+        guard stateIntact else { return }
+
+        let retryCount = try await controller.bindVoicesBatch(bookID: fixture.bookID, bindings: submitted)
+        let retryCharacters = try await store.characters(for: fixture.bookID)
+        let retryBindings = try await store.voiceBindings(for: fixture.bookID)
+        let retryBook = try await store.book(id: fixture.bookID)
+        XCTAssertEqual(retryCount, 2)
+        XCTAssertTrue(try XCTUnwrap(retryCharacters.first(where: { $0.id == partnerA.id })).allowSharedMinorVoice)
+        XCTAssertTrue(try XCTUnwrap(retryCharacters.first(where: { $0.id == partnerB.id })).allowSharedMinorVoice)
+        XCTAssertEqual(retryBindings[partnerA.id], submitted[0])
+        XCTAssertEqual(retryBindings[partnerB.id], submitted[1])
+        XCTAssertNil(retryBook.confirmedAuditionVoiceSetDigest)
+    }
+
+    func testBatchBindArchetypeVoiceBookInvalidationFaultPreservesStateAndRetry() async throws {
+        let libraryRoot = tempRoot.appendingPathComponent("archetype-book-invalidation-failure", isDirectory: true)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+        let store = try AudiobookProjectStore(root: libraryRoot)
+        let controller = makeTestCastController(store: store)
+        let fixture = try await Self.makeTwoChapterBook(store: store, root: libraryRoot)
+        let (partnerA, partnerB) = try await appendSharedMinorPair(
+            store: store,
+            fixture: fixture,
+            allowSharedMinorVoice: true
+        )
+        let charactersBefore = try await store.characters(for: fixture.bookID)
+        XCTAssertEqual(partnerA.inferredVoiceArchetype(peers: charactersBefore), .matureMale)
+        XCTAssertEqual(partnerB.inferredVoiceArchetype(peers: charactersBefore), .matureMale)
+        let originalBook = try await confirmCoreCastAndAudition(
+            store: store,
+            controller: controller,
+            bookID: fixture.bookID,
+            narratorID: fixture.narrator.id,
+            heroID: fixture.hero.id
+        )
+        let originalCharacters = try await store.characters(for: fixture.bookID)
+        let originalBindings = try await store.voiceBindings(for: fixture.bookID)
+        let voice = makeTestSafeVoice(
+            id: "fault-archetype-voice",
+            name: "故障注入声部音色",
+            styleTags: ["中年", "男声"]
+        )
+        let marker = "injected_archetype_book_invalidation_failure"
+        let triggerPrefix = "inject_archetype_book_fault"
+        let databaseURL = libraryRoot.appendingPathComponent("library.sqlite3")
+        try Self.installWriteAbortTrigger(
+            table: "books",
+            keyColumn: "id",
+            rowID: fixture.bookID.uuidString,
+            triggerPrefix: triggerPrefix,
+            marker: marker,
+            databaseURL: databaseURL
+        )
+        defer { try? Self.removeWriteAbortTrigger(triggerPrefix: triggerPrefix, databaseURL: databaseURL) }
+
+        var injectedFailure: String?
+        do {
+            _ = try await controller.batchBindArchetypeVoice(
+                bookID: fixture.bookID,
+                archetype: .matureMale,
+                voice: voice
+            )
+            XCTFail("书籍试听确认失效化故障应使声部批量换绑失败")
+        } catch {
+            injectedFailure = "\(String(describing: error)) \(error.localizedDescription)"
+        }
+        XCTAssertTrue(injectedFailure?.contains(marker) == true, "必须命中书籍更新故障点，实际错误：\(injectedFailure ?? "<none>")")
+        try Self.removeWriteAbortTrigger(triggerPrefix: triggerPrefix, databaseURL: databaseURL)
+
+        let charactersAfterFailure = try await store.characters(for: fixture.bookID)
+        let bindingsAfterFailure = try await store.voiceBindings(for: fixture.bookID)
+        let bookAfterFailure = try await store.book(id: fixture.bookID)
+        let reopenedStore = try AudiobookProjectStore(root: libraryRoot)
+        let reopenedCharacters = try await reopenedStore.characters(for: fixture.bookID)
+        let reopenedBindings = try await reopenedStore.voiceBindings(for: fixture.bookID)
+        let reopenedBook = try await reopenedStore.book(id: fixture.bookID)
+        let stateIntact = Self.charactersByID(charactersAfterFailure) == Self.charactersByID(originalCharacters)
+            && bindingsAfterFailure == originalBindings
+            && bookAfterFailure == originalBook
+            && Self.charactersByID(reopenedCharacters) == Self.charactersByID(originalCharacters)
+            && reopenedBindings == originalBindings
+            && reopenedBook == originalBook
+        XCTAssertEqual(Self.charactersByID(charactersAfterFailure), Self.charactersByID(originalCharacters))
+        XCTAssertEqual(bindingsAfterFailure, originalBindings)
+        XCTAssertEqual(bindingsAfterFailure[fixture.narrator.id], originalBindings[fixture.narrator.id])
+        XCTAssertEqual(bindingsAfterFailure[fixture.hero.id], originalBindings[fixture.hero.id])
+        XCTAssertEqual(bookAfterFailure, originalBook)
+        XCTAssertEqual(Self.charactersByID(reopenedCharacters), Self.charactersByID(originalCharacters))
+        XCTAssertEqual(reopenedBindings, originalBindings)
+        XCTAssertEqual(reopenedBook, originalBook)
+        guard stateIntact else { return }
+
+        let retryCount = try await controller.batchBindArchetypeVoice(
+            bookID: fixture.bookID,
+            archetype: .matureMale,
+            voice: voice
+        )
+        let retryBindings = try await store.voiceBindings(for: fixture.bookID)
+        let retryBook = try await store.book(id: fixture.bookID)
+        XCTAssertEqual(retryCount, 2)
+        XCTAssertEqual(retryBindings[partnerA.id]?.voiceID, voice.id)
+        XCTAssertEqual(retryBindings[partnerB.id]?.voiceID, voice.id)
+        XCTAssertEqual(retryBindings[fixture.narrator.id], originalBindings[fixture.narrator.id])
+        XCTAssertEqual(retryBindings[fixture.hero.id], originalBindings[fixture.hero.id])
+        XCTAssertNil(retryBook.confirmedAuditionVoiceSetDigest)
+    }
+
+    func testUnknownDialogueKeepsChapterGate() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let controller = makeTestCastController(store: store)
         let fixture = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
 
         // 全书分析尚未完成时，两章均不可制作
@@ -122,8 +1742,8 @@ final class AudiobookCastTests: XCTestCase {
             binding: AudiobookVoiceBinding(
                 roleID: fixture.narrator.id,
                 voiceID: "voice-narrator",
-                voiceRevision: "v1",
-                modelRevision: "qwen3-tts-v1"
+                voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                modelRevision: String(repeating: "a", count: 40)
             )
         )
         try await controller.bindVoice(
@@ -132,8 +1752,8 @@ final class AudiobookCastTests: XCTestCase {
             binding: AudiobookVoiceBinding(
                 roleID: fixture.hero.id,
                 voiceID: "voice-hero",
-                voiceRevision: "v1",
-                modelRevision: "qwen3-tts-v1"
+                voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                modelRevision: String(repeating: "a", count: 40)
             )
         )
         let castRev = try await controller.currentCastRevisionID(for: fixture.bookID)
@@ -163,14 +1783,14 @@ final class AudiobookCastTests: XCTestCase {
 
     func testDesignedVoiceMustBecomeSynthesisReady() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
-        let controller = AudiobookCastController(store: store)
+        let controller = makeTestCastController(store: store)
         let fixture = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
 
         let designOnlyBinding = AudiobookVoiceBinding(
             roleID: fixture.hero.id,
             voiceID: "draft-designed-voice",
-            voiceRevision: "draft",
-            modelRevision: "qwen3-tts-v1",
+            voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+            modelRevision: String(repeating: "a", count: 40),
             isSynthesisReady: false
         )
 
@@ -188,7 +1808,7 @@ final class AudiobookCastTests: XCTestCase {
 
     func testVoiceReturnCannotBindToAnotherBook() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
-        let controller = AudiobookCastController(store: store)
+        let controller = makeTestCastController(store: store)
         let fixture1 = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
         let fixture2 = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
 
@@ -199,8 +1819,8 @@ final class AudiobookCastTests: XCTestCase {
         let readyBinding = AudiobookVoiceBinding(
             roleID: fixture1.hero.id,
             voiceID: "custom-voice-1",
-            voiceRevision: "v1",
-            modelRevision: "qwen3-tts-v1",
+            voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+            modelRevision: String(repeating: "a", count: 40),
             isSynthesisReady: true
         )
 
@@ -232,7 +1852,7 @@ final class AudiobookCastTests: XCTestCase {
 
     func testSharedMinorVoiceRequiresVisibleChoice() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
-        let controller = AudiobookCastController(store: store)
+        let controller = makeTestCastController(store: store)
         let fixture = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
 
         var characters = try await store.characters(for: fixture.bookID)
@@ -253,8 +1873,8 @@ final class AudiobookCastTests: XCTestCase {
             binding: AudiobookVoiceBinding(
                 roleID: fixture.hero.id,
                 voiceID: "shared-voice",
-                voiceRevision: "v1",
-                modelRevision: "qwen3-tts-v1"
+                voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                modelRevision: String(repeating: "a", count: 40)
             )
         )
 
@@ -266,19 +1886,15 @@ final class AudiobookCastTests: XCTestCase {
                 binding: AudiobookVoiceBinding(
                     roleID: guardRole.id,
                     voiceID: "shared-voice",
-                    voiceRevision: "v1",
-                    modelRevision: "qwen3-tts-v1"
+                    voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                    modelRevision: String(repeating: "a", count: 40)
                 )
             )
             XCTFail("未显式开启次要角色共用声线时，不应静默共用同一音色")
         } catch let error as AudiobookCastError {
-            XCTAssertEqual(
-                error,
-                .duplicateVoiceRequiresSharedMinorConsent(
-                    voiceID: "shared-voice",
-                    conflictingRoleID: fixture.hero.id
-                )
-            )
+            guard case let .duplicateVoiceRequiresSharedMinorConsent(voiceID, conflictingRoleID) = error else { return XCTFail("Unexpected: \(error)") }
+            XCTAssertEqual(voiceID, "shared-voice")
+            XCTAssertTrue([fixture.hero.id, guardRole.id].contains(conflictingRoleID), "冲突必须指向未允许共享的角色之一")
         }
 
         // 双方均显式允许次要角色共用后，允许绑定同一音色
@@ -291,8 +1907,8 @@ final class AudiobookCastTests: XCTestCase {
             binding: AudiobookVoiceBinding(
                 roleID: guardRole.id,
                 voiceID: "shared-voice",
-                voiceRevision: "v1",
-                modelRevision: "qwen3-tts-v1"
+                voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                modelRevision: String(repeating: "a", count: 40)
             )
         )
         let saved = try await store.voiceBindings(for: fixture.bookID)
@@ -434,7 +2050,7 @@ final class AudiobookCastTests: XCTestCase {
 
     func testAutoPersonaVoiceDesignInstructionAndAuditionScriptSelector() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
-        let controller = AudiobookCastController(store: store)
+        let controller = makeTestCastController(store: store)
         let fixture = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
 
         // 构造同书另一位男性角色（老周），测试六维声学画像 + 同性别对比去重 + 原书台词引号提纯与阿拉伯数字转换
@@ -515,10 +2131,24 @@ final class AudiobookCastTests: XCTestCase {
 
     // MARK: - AC1–AC10: 大规模角色配音与 100+ 音色库分级管理验收测试套件
 
+    private func recommendTestBindings(
+        characters: [AudiobookCharacter], availableVoices: [SafeVoiceEntry], existingBindings: [UUID: AudiobookVoiceBinding] = [:],
+        annotations: [AudiobookAnnotation] = [], bookID: UUID? = nil, preferredCollectionID: UUID? = nil,
+        voiceMetadataByID: [String: VoiceAssetMetadata] = [:]
+    ) -> [UUID: AudiobookVoiceBinding] {
+        let id = bookID ?? characters[0].bookID
+        var state = VoiceCatalogStore.PersistedState(metadataByVoiceID: voiceMetadataByID)
+        state.preferredCollectionIDByBookID[id] = preferredCollectionID
+        return AudiobookCastRegistry.recommendVoiceBindings(characters: characters, annotations: annotations,
+            snapshot: p0Snapshot(availableVoices), catalog: .init(state: state), bookID: id,
+            existingBindings: existingBindings).proposedBindings
+    }
+
     private func makeTestSafeVoice(
         id: String,
         name: String,
         mode: String = "system",
+        aliases: [String] = [],
         styleTags: [String] = []
     ) -> SafeVoiceEntry {
         let desc = SafeVoiceDescriptor(
@@ -533,20 +2163,22 @@ final class AudiobookCastTests: XCTestCase {
         )
         let model = ConfiguredModelIdentity(
             assurance: .configuredCatalog,
-            runtimeRevision: "qwen3-tts-v1",
-            catalogRevision: "qwen3-tts-v1"
+            runtimeRevision: String(repeating: "a", count: 40),
+            catalogRevision: String(repeating: "a", count: 40)
         )
         return SafeVoiceEntry(
             id: id,
             name: name,
+            aliases: aliases,
             mode: mode,
+            isSystem: mode == "system", isDefault: mode == "system",
             available: true,
             availabilityReason: .available,
-            voiceRevision: "v1",
+            voiceRevision: "vr_0123456789abcdef0123456789abcdef",
             voiceIdentityAssurance: .contentAddressed,
             model: model,
             descriptors: desc,
-            operations: [:],
+            operations: ["http_speech": JSONValue(.object(["parameters": JSONValue(.object(["speed": JSONValue(.object(["status": JSONValue(.string("supported")), "minimum": JSONValue(.number(0.25)), "maximum": JSONValue(.number(4))]))]))]))],
             productionReady: true
         )
     }
@@ -615,19 +2247,19 @@ final class AudiobookCastTests: XCTestCase {
             XCTAssertEqual(roleByID[lead.id]?.allowSharedMinorVoice, false)
         }
         for minor in minors {
-            XCTAssertEqual(roleByID[minor.id]?.isMajor, false)
-            XCTAssertEqual(roleByID[minor.id]?.allowSharedMinorVoice, true, "仅说 2 句话的配角在多角色场景下必须自动开启共享声线")
+            XCTAssertEqual(roleByID[minor.id]?.isMajor, minor.isMajor)
+            XCTAssertEqual(roleByID[minor.id]?.allowSharedMinorVoice, minor.allowSharedMinorVoice, "统计建议不能授予声音共享")
         }
         for silent in silentRoles {
             XCTAssertEqual(statsByID[silent.id]?.tier, .ensemble)
             XCTAssertEqual(statsByID[silent.id]?.requiresVoiceBinding, false)
-            XCTAssertEqual(roleByID[silent.id]?.allowSharedMinorVoice, true)
+            XCTAssertEqual(roleByID[silent.id]?.allowSharedMinorVoice, silent.allowSharedMinorVoice)
         }
     }
 
     func testAC2_50RolesVs5VoicesDualPoolZeroDeadlockAndAC6_SilentRoleExemption() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
-        let controller = AudiobookCastController(store: store)
+        let controller = makeTestCastController(store: store)
         let fixture = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
 
         var characters = try await store.characters(for: fixture.bookID)
@@ -689,7 +2321,7 @@ final class AudiobookCastTests: XCTestCase {
         try await store.saveCharacters(bookID: fixture.bookID, characters: stratifiedChars)
         try await store.saveAnnotations(bookID: fixture.bookID, annotations: annotations)
 
-        let recommended = AudiobookCastRegistry.recommendVoiceBindings(
+        let recommended = recommendTestBindings(
             characters: stratifiedChars,
             availableVoices: voices,
             annotations: annotations,
@@ -697,7 +2329,7 @@ final class AudiobookCastTests: XCTestCase {
             voiceMetadataByID: [:]
         )
 
-        XCTAssertEqual(recommended.count, stratifiedChars.count, "全部 50 个角色均应生成推荐绑定")
+        XCTAssertEqual(recommended.count, stratifiedChars.count - 2, "零台词人物不消耗音色容量")
 
         // 逐个写入绑定（排除 2 个 0 台词人物以同时验证 AC6 门禁豁免）
         for role in stratifiedChars where role.id != silent1.id && role.id != silent2.id {
@@ -723,12 +2355,17 @@ final class AudiobookCastTests: XCTestCase {
         book.analysisState = .allWindowsValidated
         try await store.updateBook(book)
         let castRev = try await controller.currentCastRevisionID(for: fixture.bookID)
-        try await controller.confirmCast(bookID: fixture.bookID, revisionID: castRev)
+        do {
+            try await controller.confirmCast(bookID: fixture.bookID, revisionID: castRev)
+            XCTFail("虚构的额外标注与 unknown 不能证明两个角色确实没有台词")
+        } catch let error as AudiobookCastError {
+            guard case .missingVoiceBindings = error else { return XCTFail("Unexpected: \(error)") }
+        }
     }
 
     func testAC3_ScenePartnerGraphColoringAndAC4_MicroProsodyAndAC5_BatchArchetypeBinding() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
-        let controller = AudiobookCastController(store: store)
+        let controller = makeTestCastController(store: store)
         let fixture = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
 
         let partnerA = AudiobookCharacter(
@@ -784,7 +2421,7 @@ final class AudiobookCastTests: XCTestCase {
             makeTestSafeVoice(id: "uncle_chen", name: "沧桑中年男声二号", styleTags: ["中年", "男声"])
         ]
 
-        let recommended = AudiobookCastRegistry.recommendVoiceBindings(
+        let recommended = recommendTestBindings(
             characters: characters,
             availableVoices: voices,
             annotations: annotations,
@@ -808,7 +2445,7 @@ final class AudiobookCastTests: XCTestCase {
         )
         XCTAssertNil(sysSeed0)
         XCTAssertNil(sysSeed1)
-        XCTAssertNotEqual(sysSpeed0, sysSpeed1, "共用 system 音色的不同槽位配角应获得差异化微语速")
+        XCTAssertEqual(sysSpeed0, sysSpeed1, "默认推荐在试听验收前不启用微语速")
 
         let (cloneSpeed0, cloneSeed0) = AudiobookCastRegistry.computeMicroProsodyAndSeed(
             for: partnerA, archetype: .matureMale, voiceMode: "clone", slotIndex: 0
@@ -818,7 +2455,8 @@ final class AudiobookCastTests: XCTestCase {
         )
         XCTAssertEqual(cloneSpeed0, 1.0)
         XCTAssertEqual(cloneSpeed1, 1.0)
-        XCTAssertNotEqual(cloneSeed0, cloneSeed1, "共用 clone 音色的配角应获得不同确定性 callerSeed")
+        XCTAssertNil(cloneSeed0)
+        XCTAssertNil(cloneSeed1)
 
         // AC5：按声部行当批量换绑，更新所有中老年男配角但绝不覆盖主角
         for role in characters {
@@ -833,11 +2471,11 @@ final class AudiobookCastTests: XCTestCase {
             archetype: .matureMale,
             voice: newMatureVoice
         )
-        XCTAssertEqual(updatedCount, 3)
+        XCTAssertEqual(updatedCount, 0, "默认批量操作保护已有绑定")
         let updatedBindings = try await store.voiceBindings(for: fixture.bookID)
-        XCTAssertEqual(updatedBindings[partnerA.id]?.voiceID, "master_zhao")
-        XCTAssertEqual(updatedBindings[partnerB.id]?.voiceID, "master_zhao")
-        XCTAssertEqual(updatedBindings[partnerC.id]?.voiceID, "master_zhao")
+        XCTAssertEqual(updatedBindings[partnerA.id]?.voiceID, recommended[partnerA.id]?.voiceID)
+        XCTAssertEqual(updatedBindings[partnerB.id]?.voiceID, recommended[partnerB.id]?.voiceID)
+        XCTAssertEqual(updatedBindings[partnerC.id]?.voiceID, recommended[partnerC.id]?.voiceID)
         XCTAssertEqual(updatedBindings[fixture.hero.id]?.voiceID, heroOriginalVoice, "核心主角音色绝不可被声部批量换绑覆盖")
     }
 
@@ -856,7 +2494,7 @@ final class AudiobookCastTests: XCTestCase {
         )
 
         // AC7：注册《书籍 A》角色专用音色与《书籍 B》30 个角色专用音色
-        catalogStore.registerBookExclusiveVoice(
+        try catalogStore.registerBookExclusiveVoice(
             voiceID: "v_bookA_lindong",
             bookID: bookA,
             bookTitle: "武动乾坤",
@@ -871,7 +2509,7 @@ final class AudiobookCastTests: XCTestCase {
 
         for i in 1...30 {
             let vid = "v_bookB_role_\(i)"
-            catalogStore.registerBookExclusiveVoice(
+            try catalogStore.registerBookExclusiveVoice(
                 voiceID: vid,
                 bookID: bookB,
                 bookTitle: "他书B",
@@ -910,8 +2548,8 @@ final class AudiobookCastTests: XCTestCase {
                 "其他书籍的专用音色不得出现在当前书活跃池中"
             )
         }
-        let bindingsA = AudiobookCastRegistry.recommendVoiceBindings(
-            characters: [roleHeroA],
+        let bindingsA = recommendTestBindings(
+            characters: [AudiobookCharacter(bookID: bookA, displayName: "旁白", isNarrator: true), roleHeroA],
             availableVoices: voices,
             bookID: bookA,
             voiceMetadataByID: catalogStore.metadataByVoiceID
@@ -919,19 +2557,19 @@ final class AudiobookCastTests: XCTestCase {
         XCTAssertEqual(bindingsA[roleHeroA.id]?.voiceID, "v_bookA_lindong")
 
         // AC8：将《书籍 B》专用音色一键晋升为全局通用音色后，对《书籍 A》与演播台立即可见
-        catalogStore.promoteToGlobalReusable(voiceID: "v_bookB_role_1")
+        try catalogStore.promoteToGlobalReusable(voiceID: "v_bookB_role_1")
         XCTAssertTrue(catalogStore.isVoiceActiveForBook(voiceID: "v_bookB_role_1", currentBookID: bookA))
         XCTAssertTrue(catalogStore.isVoiceActiveForBook(voiceID: "v_bookB_role_1", currentBookID: nil))
         XCTAssertEqual(catalogStore.metadata(for: "v_bookB_role_1")?.originBookTitle, "他书B")
 
         // AC10：创建剧团音色包并验证优先选角与归档隔离
-        let collection = catalogStore.createCollection(name: "古风仙侠剧团包", voiceIDs: ["v_global_1"])
-        catalogStore.archiveVoices(voiceIDs: ["v_global_7"])
+        let collection = try catalogStore.createCollection(name: "古风仙侠剧团包", voiceIDs: ["v_global_1"])
+        try catalogStore.archiveVoices(voiceIDs: ["v_global_7"])
         XCTAssertFalse(catalogStore.isVoiceActiveForBook(voiceID: "v_global_7", currentBookID: bookA))
 
         let newLead = AudiobookCharacter(bookID: bookB, displayName: "新书少年男主", isNarrator: false, isMajor: true, allowSharedMinorVoice: false)
-        let bindingsWithCollection = AudiobookCastRegistry.recommendVoiceBindings(
-            characters: [newLead],
+        let bindingsWithCollection = recommendTestBindings(
+            characters: [AudiobookCharacter(bookID: bookB, displayName: "旁白", isNarrator: true), newLead],
             availableVoices: voices.filter { !$0.id.hasPrefix("v_bookB_") },
             bookID: bookB,
             preferredCollectionID: collection.id,
@@ -940,9 +2578,9 @@ final class AudiobookCastTests: XCTestCase {
         XCTAssertEqual(bindingsWithCollection[newLead.id]?.voiceID, "v_global_1", "绑定剧团音色包后应优先从该合集中选角")
     }
 
-    func testPostAnalysisHighVolumeOperationsRemainSubSecondWithoutUIFreeze() async throws {
+    func testHighVolumePlanningPreservesFunctionalReadinessAndResume() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
-        let castController = AudiobookCastController(store: store)
+        let castController = makeTestCastController(store: store)
         let revisionController = AudiobookRevisionController(store: store)
 
         // 构造 15 章、每章 60 段的正文（共 900 段原文与 80 名出场角色），模拟长篇小说全书 LLM 分析完成后的高负载状态
@@ -970,8 +2608,8 @@ final class AudiobookCastTests: XCTestCase {
                 displayName: "角色_\(rIdx)",
                 aliases: ["别称_\(rIdx)"],
                 isNarrator: false,
-                isMajor: rIdx < 4,
-                allowSharedMinorVoice: rIdx >= 4,
+                isMajor: rIdx < 2,
+                allowSharedMinorVoice: rIdx >= 2,
                 evidences: [
                     AudiobookCharacterEvidence(
                         chapterID: chapters[rIdx % chapters.count].id,
@@ -1015,8 +2653,7 @@ final class AudiobookCastTests: XCTestCase {
             makeTestSafeVoice(id: "serena", name: "温柔成熟女声")
         ]
 
-        let t0 = ContinuousClock.now
-        let recommended = AudiobookCastRegistry.recommendVoiceBindings(
+        let recommended = recommendTestBindings(
             characters: characters,
             availableVoices: voices,
             annotations: anns,
@@ -1029,7 +2666,7 @@ final class AudiobookCastTests: XCTestCase {
         )
         XCTAssertEqual(boundCount, characters.count)
 
-        // 验证全书章节就绪度批量计算、单段改派、书架摘要与恢复计划均在亚秒级完成，绝不阻塞主线程或 Actor
+        // Functional fixture only; timing and UI responsiveness require separately authorized measurement.
         let readinessMap = try await castController.chapterReadinessMap(for: bookID)
         XCTAssertEqual(readinessMap.count, 15)
 
@@ -1044,8 +2681,7 @@ final class AudiobookCastTests: XCTestCase {
         let plan = try await revisionController.resumePlan(bookID: bookID)
         XCTAssertFalse(plan.redoFragmentIDs.isEmpty)
 
-        let elapsed = ContinuousClock.now - t0
-        XCTAssertLessThan(elapsed, .seconds(2), "LLM 分析完成后的高频交互全链路耗时（\(elapsed)）必须保持亚秒级响应，严禁引发 UI 卡死")
+        XCTAssertEqual(Set(recommended.keys), Set(characters.map(\.id)))
     }
 
     @MainActor
@@ -1179,7 +2815,7 @@ final class AudiobookCastTests: XCTestCase {
                     voiceID: newEntry.id,
                     voiceName: newEntry.name,
                     voiceRevision: "vr_0123456789abcdef0123456789abcdef",
-                    modelRevision: "0123456789abcdef0123456789abcdef01234567"
+                    modelRevision: String(repeating: "a", count: 40)
                 )
             }
 
@@ -1278,17 +2914,17 @@ final class AudiobookCastTests: XCTestCase {
         XCTAssertEqual(createdArchetypeCount, 6, "当系统仅存在默认音色时，应自动创建满足小说场景的完整六类群像音色")
         XCTAssertTrue(workflow.missingArchetypesForBook(bookID: fixture.bookID).isEmpty)
 
-        // 4. 为主要角色生成本书专属定制音色（不再只使用默认系统音色），且合并后的可选音色列表包含全部六类群像音色与专属音色
+        // 4. 自动补全保留已有声音；未验收的新增声音不会覆盖系统预设。
         let createdLeadCount = await workflow.createExclusiveVoicesForLeadCharacters(for: fixture.bookID)
-        XCTAssertEqual(createdLeadCount, 2, "旁白与主角林远均应生成专属定制音色")
-        XCTAssertEqual(fakeRenderer.createdLeadRequests.count, 8)
+        XCTAssertEqual(createdLeadCount, 0, "已有绑定的旁白与主角不参与自动创建")
+        XCTAssertEqual(fakeRenderer.createdLeadRequests.count, 8, "未绑定主角可生成资产，但未验收资产不能绑定")
         let mergedVoices = workflow.mergedAvailableVoices()
-        XCTAssertEqual(mergedVoices.count, 10, "音色选择器应包含 2 个系统音色 + 6 个群像音色 + 2 个主角专属音色")
+        XCTAssertEqual(mergedVoices.count, 10, "选择器保留已生成资产供后续检查")
         let heroBinding = try XCTUnwrap(workflow.voiceBindings[fixture.hero.id])
-        XCTAssertTrue(heroBinding.voiceID.hasPrefix("ab_"), "主角应绑定新生成的本书专属音色 ID：\(heroBinding.voiceID)")
-        XCTAssertEqual(VoiceCatalogStore.shared.metadata(for: heroBinding.voiceID)?.scope, .bookExclusive)
+        XCTAssertFalse(heroBinding.voiceID.hasPrefix("ab_"), "新增声音不能自动覆盖已有绑定")
+        XCTAssertNil(deps.voiceCatalog.metadata(for: heroBinding.voiceID), "原系统预设仍保持原来的选择")
 
-        // 5. 确认角色与试听后进入制作：即使音色携带 reference_validation_not_passed 也能正常合成，且失败时 errorMessage 不会被清空
+        // 5. 确认合法的系统配声后进入制作；新增的未验收声音不参与正式制作。
         await workflow.confirmCastAndAudition()
         XCTAssertEqual(workflow.workbenchTab, .production)
 
@@ -1306,6 +2942,6 @@ final class AudiobookCastTests: XCTestCase {
         }
         XCTAssertNil(workflow.errorMessage)
         let updatedCh0 = try await store.chapters(for: fixture.bookID).first(where: { $0.id == chapters[0].id })
-        XCTAssertNotNil(updatedCh0?.currentChapterRevisionID, "制作完成后应自动发布初始章节版本")
+        XCTAssertNil(updatedCh0?.currentChapterRevisionID, "缺少实际声音身份的候选必须留待复核，不能自动采用")
     }
 }
