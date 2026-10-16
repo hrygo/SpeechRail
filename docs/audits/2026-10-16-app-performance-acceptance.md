@@ -65,6 +65,8 @@ Python 首次准备环境触发可选 native worker 打包编译，已主动中�
 
 额外的全套单线程压力运行不记为通过：它现在能在约 15 秒内退出，但 sampler 握手与 ACK 的短期限测试出现 11 个超时问题。该运行用于死锁归因，不替代 CI 的常规调度配置；常规完整回归和最终 head 的 CI 分别核验。
 
+run `38905021569` 不再死锁，Swift 在约 10 分钟内结束，只剩 `testGracefulDrainWaitsForTheLastDequeueAcknowledgement` 的真实时钟 ACK 过期失败，其余检查通过。该用例改用既有可注入时钟冻结时间，单独验证“最后一个 ACK 到达前不能完成”；生产 1 秒期限不变，显式推进时间的过期、迟到 ACK、重复 ACK 与旧 epoch 用例保留。修复后全部 616 个 Swift Testing 用例 / 55 suites 通过，受限线程池下 8 个 credit policy 用例通过。
+
 助手修复及后续存储/导出夹具修复后的常规完整 `swift test --package-path macos/SpeechRailApp` 退出 0：1,733 个 XCTest（1 个既有 skip）、616 个 Swift Testing 用例 / 55 suites，0 failures。远端门禁以 PR 最终 head 的检查状态为准。
 
 #369、#371、#373 保持开放；真实性能、硬件/XPC、长时稳定性与交互验收仍未完成。源码回退还须覆盖以上 CI 修复与相应测试；仅撤销最初两个性能提交不足以完整回退本 PR。

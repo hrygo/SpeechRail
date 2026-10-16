@@ -28,7 +28,9 @@ struct CaptureDeliveryWindowTests {
     }
 
     @Test func testGracefulDrainWaitsForTheLastDequeueAcknowledgement() async throws {
-        let window = CaptureDeliveryWindow(), epoch = UUID(), drained = Mutex(false)
+        // Test dequeue ownership independently of wall-clock scheduling. Deadline
+        // expiry is covered by the explicit clock-advancement tests in this suite.
+        let window = CaptureDeliveryWindow(now: { 10 }), epoch = UUID(), drained = Mutex(false)
         window.begin(epoch: epoch)
         #expect(window.offer(sequence: 1, bytes: 1_920))
         #expect(window.offer(sequence: 2, bytes: 1_920))
