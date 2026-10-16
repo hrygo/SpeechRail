@@ -790,13 +790,13 @@ public struct VoiceCloneView: View {
                     StatusBanner(
                         tone: .attention,
                         title: "正在检查配音效果…",
-                        message: "已为「\(voice.name)」启动后台质量探针，正在验证输出自然度与合成指标。"
+                        message: "正在检查「\(voice.name)」的读音与音频是否完整，完成后会显示结果。"
                     )
                 case .passed:
                     StatusBanner(
                         tone: .healthy,
-                        title: "可正式制作",
-                        message: "「\(voice.name)」已通过配音质量验收并入库，可直接用于有声书制作。",
+                        title: "本次检查已通过",
+                        message: "「\(voice.name)」的检查结果已保存。前往音色库查看当前可用状态，再用于制作。",
                         actionTitle: "前往音色库查看",
                         action: { navigation.request(.voiceLibrary) }
                     )
@@ -804,7 +804,7 @@ public struct VoiceCloneView: View {
                     StatusBanner(
                         tone: .attention,
                         title: "验收结果未保存",
-                        message: "「\(voice.name)」质量探针已通过，但验收记录未落盘，请重试以满足正式制作门禁。",
+                        message: "「\(voice.name)」本次检查已通过，但结果尚未保存，请重新检查。",
                         actionTitle: "重新检查",
                         action: { Task { await model.checkVoiceOutput(voiceID: voice.id) } }
                     )
