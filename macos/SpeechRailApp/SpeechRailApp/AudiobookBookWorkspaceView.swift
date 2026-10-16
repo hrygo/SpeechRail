@@ -104,6 +104,7 @@ private struct AudiobookProductionProgressRail: View {
 public struct AudiobookBookWorkspaceView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(AppNavigationState.self) private var navigation
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("speechrail.showDeveloperDetails") private var showAnalysisDeveloperDetails = false
     @State private var isAnalysisDevSectionExpanded = false
     @State private var chapterRenameTarget: AudiobookChapterRenameTarget?
@@ -171,6 +172,8 @@ public struct AudiobookBookWorkspaceView: View {
                 chapterRenameSheet(for: target)
             }
             .onChange(of: workflow.selectedBook?.id) { _, selectedBookID in
+                cancelRoleAudition()
+                expandedRoleIDs.removeAll()
                 if chapterRenameTarget?.bookID != selectedBookID {
                     chapterRenameTarget = nil
                 }
@@ -183,6 +186,7 @@ public struct AudiobookBookWorkspaceView: View {
                     }
                 }
             }
+            .onDisappear { cancelRoleAudition() }
         }
     }
 
@@ -1058,6 +1062,7 @@ public struct AudiobookBookWorkspaceView: View {
     @State private var expandedRoleIDs: Set<UUID> = []
     @State private var auditionPreviewRoleID: UUID?
     @State private var auditionLoadingRoleID: UUID?
+    @State private var auditionRequestID: UUID?
 
     private static let castMinorArchetypes: [AudiobookVoiceArchetype] = [
         .youngMale, .matureMale, .youngFemale, .matureFemale, .neutralEnsemble
@@ -1068,13 +1073,23 @@ public struct AudiobookBookWorkspaceView: View {
     }
 
     private func toggleAllCastExpansion() {
-        withAnimation(.easeInOut(duration: 0.15)) {
+        withAnimation(SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.panelTransition, reduceMotion: reduceMotion)) {
             if isAllCastExpanded {
                 expandedRoleIDs.removeAll()
             } else {
                 expandedRoleIDs = Set(workflow.characters.map(\.id))
             }
         }
+    }
+
+    private func cancelRoleAudition() {
+        auditionRequestID = nil
+        auditionLoadingRoleID = nil
+        if auditionPreviewRoleID != nil {
+            appModel.cancelVoicePreview()
+        }
+        auditionPreviewRoleID = nil
+        workflow.stopAuditionPlayback()
     }
 
     private var castInspectorColumn: some View {
@@ -1368,7 +1383,6 @@ public struct AudiobookBookWorkspaceView: View {
         let tier = stat?.tier ?? (role.isNarrator ? .narrator : (role.allowSharedMinorVoice ? .supporting : .lead))
         let archetype = stat?.archetype ?? role.inferredVoiceArchetype()
         let dialogueCount = stat?.dialogueAtomCount ?? 0
-        let chapterCount = max(stat?.speakingChapterIDs.count ?? 0, role.chapterIDs.count)
         let conflictPartners = workflow.sceneConflictPartnerNames(for: role.id)
         let voiceMeta = binding.flatMap { VoiceCatalogStore.shared.metadata(for: $0.voiceID) }
         let isCustomExclusiveVoice = binding.map {
@@ -1515,24 +1529,29 @@ public struct AudiobookBookWorkspaceView: View {
                         let isLoading = auditionLoadingRoleID == role.id
                         Button {
                             if isAuditioning || isLoading {
-                                auditionPreviewRoleID = nil
-                                auditionLoadingRoleID = nil
-                                appModel.cancelVoicePreview()
-                                workflow.stopAuditionPlayback()
+                                cancelRoleAudition()
                             } else {
+                                cancelRoleAudition()
+                                let requestID = UUID()
+                                auditionRequestID = requestID
                                 auditionLoadingRoleID = role.id
                                 Task {
-                                    var comparisonVoices = [b.voiceID]
-                                    await workflow.prepareCastingAudition(kind: .sameTextComparison, roleID: role.id, comparisonVoiceIDs: comparisonVoices)
-                                    guard auditionLoadingRoleID == role.id else { return }
-                                    auditionLoadingRoleID = nil
+                                    defer {
+                                        if auditionRequestID == requestID {
+                                            auditionLoadingRoleID = nil
+                                        }
+                                    }
+                                    await workflow.prepareCastingAudition(kind: .sameTextComparison, roleID: role.id, comparisonVoiceIDs: [b.voiceID])
+                                    guard auditionRequestID == requestID else { return }
                                     if workflow.castingAudition != nil && workflow.errorMessage == nil {
                                         auditionPreviewRoleID = role.id
                                         await workflow.playCastingAudition(itemIndex: 0)
+                                        guard auditionRequestID == requestID else { return }
                                         if workflow.errorMessage != nil {
                                             auditionPreviewRoleID = nil
                                         }
-                                    } else if let creatorVoice = appModel.creatorVoices.first(where: { $0.id == b.voiceID }) {
+                                    } else if workflow.errorMessage != nil,
+                                              let creatorVoice = appModel.creatorVoices.first(where: { $0.id == b.voiceID }) {
                                         auditionPreviewRoleID = role.id
                                         appModel.startVoicePreview(creatorVoice)
                                     } else {
@@ -1544,7 +1563,7 @@ public struct AudiobookBookWorkspaceView: View {
                             if isLoading {
                                 ProgressView()
                                     .controlSize(.small)
-                                    .frame(width: 16, height: 16)
+                                    .frame(width: SpeechRailDesignTokens.Control.statusIconSize, height: SpeechRailDesignTokens.Control.statusIconSize)
                             } else {
                                 Image(systemName: isAuditioning ? "stop.circle.fill" : "play.circle.fill")
                                     .font(SpeechRailDesignTokens.Typography.statusIcon)
@@ -1556,14 +1575,13 @@ public struct AudiobookBookWorkspaceView: View {
                             }
                         }
                         .buttonStyle(.plain)
-                        .disabled(isLoading)
-                        .help(isAuditioning ? "停止试听" : (isLoading ? "正在生成试听音频…" : "试听当前音色"))
-                        .accessibilityLabel(isAuditioning ? "停止试听" : (isLoading ? "正在生成试听音频…" : "试听角色音色"))
+                        .help(isLoading ? "取消试听" : (isAuditioning ? "停止试听" : "试听当前音色"))
+                        .accessibilityLabel(isLoading ? "取消试听" : (isAuditioning ? "停止试听" : "试听角色音色"))
                     }
 
                     // 展开/折叠按钮
                     Button {
-                        withAnimation(.easeInOut(duration: 0.15)) {
+                        withAnimation(SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.panelTransition, reduceMotion: reduceMotion)) {
                             if expandedRoleIDs.contains(role.id) {
                                 expandedRoleIDs.remove(role.id)
                             } else {

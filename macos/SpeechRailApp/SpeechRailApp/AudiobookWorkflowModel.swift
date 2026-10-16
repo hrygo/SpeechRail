@@ -350,6 +350,7 @@ public final class AudiobookWorkflowModel {
     public var castingRecommendation: AudiobookCastingRecommendation? { pendingCastingPlan.map(AudiobookCastingRecommendation.init) }
     public private(set) var castingAudition: AudiobookCastingAudition?
     private var auditionPlaybackGeneration: UInt64 = 0
+    private var castingAuditionCatalogRevision: String?
 
     private var analysisTask: Task<Void, Never>?
     private var productionTask: Task<Void, Never>?
@@ -377,7 +378,7 @@ public final class AudiobookWorkflowModel {
     private func catalogDidChange() {
         voiceCatalogRevision = dependencies.voiceCatalog.snapshot().revision
         castingPlanNeedsRefresh = pendingCastingPlan?.voiceCatalogRevision != voiceCatalogRevision
-        castingAudition = nil
+        invalidateCastingAudition()
     }
 
     private func bootstrapIfPossible() {
@@ -758,6 +759,11 @@ public final class AudiobookWorkflowModel {
     public func openBook(_ bookID: UUID) async {
         bootstrapIfPossible()
         guard let store else { return }
+        invalidateCastingAudition()
+        if let plan = pendingCastingPlan, plan.bookID != bookID {
+            pendingCastingPlan = nil
+            castingPlanNeedsRefresh = false
+        }
         chapterSelectionLoad.reset()
         readinessSelectionLoad.reset()
         let preferredChapterID = selectedChapterID
@@ -828,6 +834,7 @@ public final class AudiobookWorkflowModel {
                 bookSelectionLoad.reset()
             }
             if selectedBook?.id == bookID {
+                invalidateCastingAudition()
                 await listeningController?.leaveWorkshop()
             }
             try await store.trashBook(id: bookID)
@@ -1086,7 +1093,9 @@ public final class AudiobookWorkflowModel {
             guard selectedBook?.id == bookID else { return }
             let plan = try await store.prepareCastingPlan(bookID: bookID, snapshot: snapshot, catalog: dependencies.voiceCatalog.snapshot(), strategy: strategy)
             guard selectedBook?.id == bookID else { return }
-            pendingCastingPlan = plan; castingPlanNeedsRefresh = false; castingAudition = nil
+            invalidateCastingAudition()
+            pendingCastingPlan = plan
+            castingPlanNeedsRefresh = false
             errorMessage = plan.issues.first(where: \.isBlocking)?.nextAction
         } catch { errorMessage = error.localizedDescription }
     }
@@ -1097,7 +1106,9 @@ public final class AudiobookWorkflowModel {
             let snapshot = try await dependencies.speechRenderer.fetchEffectiveCapabilities()
             let plan = try await store.prepareVoiceReplacement(bookID: bookID, bindings: bindings, snapshot: snapshot, catalog: dependencies.voiceCatalog.snapshot())
             guard selectedBook?.id == bookID else { return }
-            pendingCastingPlan = plan; castingPlanNeedsRefresh = false; castingAudition = nil
+            invalidateCastingAudition()
+            pendingCastingPlan = plan
+            castingPlanNeedsRefresh = false
         } catch { errorMessage = error.localizedDescription }
     }
 
@@ -1115,6 +1126,10 @@ public final class AudiobookWorkflowModel {
         guard let book = selectedBook, let store else { return }
         let plan = pendingCastingPlan
         guard plan == nil || plan?.bookID == book.id else { return }
+        invalidateCastingAudition()
+        let generation = auditionPlaybackGeneration
+        let catalogRevision = dependencies.voiceCatalog.snapshot().revision
+        let savedBindings = voiceBindings
         do {
             let targetBookID = book.id
             let effectiveSnapshot: EffectiveCapabilitySnapshot
@@ -1132,7 +1147,7 @@ public final class AudiobookWorkflowModel {
             } else {
                 effectiveSnapshot = try await dependencies.speechRenderer.fetchEffectiveCapabilities()
                 effectiveCatalog = dependencies.voiceCatalog.snapshot()
-                effectiveBindings = voiceBindings
+                effectiveBindings = savedBindings
                 planDigest = "saved-bindings-\(targetBookID.uuidString)"
             }
 
@@ -1183,13 +1198,16 @@ public final class AudiobookWorkflowModel {
                     return try item(roleID: role, voiceID: voice, range: row.sourceRange)
                 }
             }
-            guard selectedBook?.id == targetBookID else { return }
-            if let plan = pendingCastingPlan {
-                guard plan.inputDigest == planDigest else { return }
-            }
+            guard auditionPlaybackGeneration == generation,
+                  selectedBook?.id == targetBookID,
+                  pendingCastingPlan?.inputDigest == plan?.inputDigest,
+                  dependencies.voiceCatalog.snapshot().revision == catalogRevision,
+                  plan != nil || voiceBindings == savedBindings else { return }
             castingAudition = .init(kind: kind, items: items, planDigest: planDigest)
+            castingAuditionCatalogRevision = catalogRevision
             errorMessage = nil
         } catch {
+            guard auditionPlaybackGeneration == generation, selectedBook?.id == book.id else { return }
             castingAudition = nil
             errorMessage = "暂时无法准备这段试听，请确认角色对白和可用声音后重新推荐。"
         }
@@ -1200,6 +1218,11 @@ public final class AudiobookWorkflowModel {
         let generation = auditionPlaybackGeneration
         guard let audition = castingAudition, let store, let book = selectedBook,
               audition.items.indices.contains(itemIndex) else { return }
+        guard dependencies.voiceCatalog.snapshot().revision == castingAuditionCatalogRevision else {
+            invalidateCastingAudition()
+            return
+        }
+        let catalogRevision = castingAuditionCatalogRevision
         let plan = pendingCastingPlan
         if let plan {
             guard book.id == plan.bookID, audition.planDigest == plan.inputDigest else { return }
@@ -1211,14 +1234,14 @@ public final class AudiobookWorkflowModel {
                 try await store.validateCastingPlanInput(plan)
                 guard dependencies.voiceCatalog.snapshot().revision == plan.voiceCatalogRevision else { throw AudiobookCastError.castRevisionMismatch }
             }
-            guard auditionPlaybackGeneration == generation else { return }
+            guard auditionPlaybackGeneration == generation, castingAudition == audition else { return }
             let item = audition.items[itemIndex], binding = item.binding
             let snapshot = try await dependencies.speechRenderer.fetchEffectiveCapabilities()
             if let plan {
                 guard dependencies.voiceCatalog.snapshot().revision == plan.voiceCatalogRevision else { throw AudiobookCastError.castRevisionMismatch }
             }
             try AudiobookCastRegistry.validateRenderBinding(binding, snapshot: snapshot, requireProductionReady: false)
-            guard auditionPlaybackGeneration == generation else { return }
+            guard auditionPlaybackGeneration == generation, castingAudition == audition else { return }
             let data = try await dependencies.speechRenderer.renderAudition(.init(
                 bookID: book.id,
                 text: item.text,
@@ -1229,12 +1252,15 @@ public final class AudiobookWorkflowModel {
                 seed: binding.callerSeed
             ))
             try Task.checkCancellation()
-            guard auditionPlaybackGeneration == generation else { return }
+            guard auditionPlaybackGeneration == generation, castingAudition == audition,
+                  selectedBook?.id == book.id,
+                  dependencies.voiceCatalog.snapshot().revision == catalogRevision else { return }
             if let plan {
                 try await store.validateCastingPlanInput(plan)
                 guard selectedBook?.id == plan.bookID, pendingCastingPlan?.inputDigest == plan.inputDigest,
                       dependencies.voiceCatalog.snapshot().revision == plan.voiceCatalogRevision else { throw AudiobookCastError.castRevisionMismatch }
             }
+            guard auditionPlaybackGeneration == generation, castingAudition == audition else { return }
             try playbackOwner.play(data: data, target: .dubbingCandidate("casting-audition:\(audition.planDigest):\(itemIndex)"))
             errorMessage = nil
         } catch is CancellationError {
@@ -1247,7 +1273,16 @@ public final class AudiobookWorkflowModel {
 
     public func stopAuditionPlayback() {
         auditionPlaybackGeneration &+= 1
-        playbackOwner.stop()
+        if case let .dubbingCandidate(tag) = playbackOwner.target,
+           tag.hasPrefix("casting-audition:") {
+            playbackOwner.stop()
+        }
+    }
+
+    private func invalidateCastingAudition() {
+        stopAuditionPlayback()
+        castingAudition = nil
+        castingAuditionCatalogRevision = nil
     }
 
     public func isAuditionPlaying(for roleID: UUID) -> Bool {
@@ -2046,6 +2081,7 @@ public final class AudiobookWorkflowModel {
 
     public func bindVoice(roleID: UUID, binding: AudiobookVoiceBinding) async {
         guard let bookID = selectedBook?.id, let castController, let store else { return }
+        invalidateCastingAudition()
         do {
             errorMessage = nil
             try await castController.bindVoice(bookID: bookID, roleID: roleID, binding: binding)
@@ -2685,6 +2721,7 @@ public final class AudiobookWorkflowModel {
 
     /// 切换路由离开有声书工坊：制作队列继续在后台运行，但听书立即保存书签并释放共享播放器。
     public func leaveWorkshop() async {
+        invalidateCastingAudition()
         bookSelectionLoad.reset()
         chapterSelectionLoad.reset()
         readinessSelectionLoad.reset()
@@ -2694,6 +2731,7 @@ public final class AudiobookWorkflowModel {
 
     /// 应用退出或停止：保存听书书签，优雅暂停在途分析与制作并持久化检查点。
     public func shutdown() async {
+        invalidateCastingAudition()
         await listeningController?.leaveWorkshop()
         if let bookID = selectedBook?.id {
             await analysisPipeline?.cancel(bookID: bookID)
