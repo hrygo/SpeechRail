@@ -991,7 +991,7 @@ public final class MeetingSession {
     ) async {
         guard identity == previewIdentity else { return }
         switch envelope.payload {
-        case .ready, .configured, .alignmentFailed,
+        case .ready, .configured,
              .ttsStarted(_, _, _), .ttsTextAccepted(_, _, _, _),
              .ttsAudio(_, _, _), .ttsEnded(_, _, _, _, _):
             // 会议会话不接线 TTS：增量 utterance 属于助手那一层。
@@ -1049,6 +1049,11 @@ public final class MeetingSession {
             // 分人收口屏障：drain 已在客户端内等齐，这里无需再记状态。
             // 归属修订走 `.attribution`，降级走 `.diarizationDegraded`。
             break
+        case .alignmentFailed(_, let code, _):
+            lastFailure = labeling.recordAlignmentFailure(code: code)
+            if labeling.isEnabled, let sessionID, let note = labeling.note {
+                await coordinator.updateSessionDiarization(id: sessionID, state: .degraded, note: note)
+            }
         case .auxiliaryIncomplete(_, let alignmentMissing, let diarizationMissing):
             if diarizationMissing, labeling.isEnabled {
                 labeling.markDegraded(
@@ -1063,7 +1068,9 @@ public final class MeetingSession {
                     )
                 }
             }
-            if alignmentMissing || diarizationMissing {
+            if labeling.diagnosticCode != nil {
+                if let note = labeling.note { lastFailure = note }
+            } else if alignmentMissing || diarizationMissing {
                 lastFailure = "部分辅助信息未能及时到达，已保留转写内容。"
             }
         case .diarizationDegraded(let code, let message):

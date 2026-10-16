@@ -21,6 +21,10 @@ ALIGNMENT_GRANULARITIES: tuple[AlignmentGranularity, ...] = (
 )
 
 
+class InvalidAlignmentOutputError(ValueError):
+    """An aligner returned token fields that cannot represent valid output."""
+
+
 @dataclass(frozen=True, slots=True)
 class AlignmentUnit:
     """One immutable text unit mapped onto the session sample axis."""
@@ -106,4 +110,5 @@ __all__ = [
     "AlignmentRequest",
     "AlignmentResult",
     "AlignmentUnit",
+    "InvalidAlignmentOutputError",
 ]

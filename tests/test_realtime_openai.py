@@ -2209,9 +2209,9 @@ def test_late_alignment_registers_units_to_its_original_item() -> None:
         session = OpenAIRealtimeSession(services, session_id="late-item-register", send=send)
         register_units = session._auxiliary_owner._register_units
 
-        async def record_units(item_id, units) -> None:
-            registration_items.append(item_id)
-            await register_units(item_id, units)
+        async def record_units(identity, units) -> None:
+            registration_items.append(identity.item_id)
+            await register_units(identity, units)
 
         session._auxiliary_owner._register_units = record_units
         await session.start()
@@ -2315,7 +2315,11 @@ def test_late_alignment_registers_units_to_its_original_item() -> None:
     assert len(completed) == 2
     assert aligned_items == {str(event["item_id"]) for event in completed}
     assert set(registration_items) == aligned_items
-    assert len(done["units"]) == 2
+    updates = [event for event in events if event["type"] == "speechrail.diarization.updated"]
+    assert {str(event["utterance_id"]) for event in updates} == aligned_items
+    assert all(events.index(update) < events.index(done) for update in updates)
+    assert done["utterance_id"] == completed[-1]["item_id"]
+    assert len(done["units"]) == 1
     assert current_state_after_late_alignment == current_state_before_late_alignment
 
 
@@ -2381,9 +2385,9 @@ def test_clear_discards_an_alignment_result_that_returns_late() -> None:
         session = OpenAIRealtimeSession(services, session_id="clear-late-alignment", send=send)
         register_units = session._auxiliary_owner._register_units
 
-        async def record_units(item_id, units) -> None:
-            registration_items.append(item_id)
-            await register_units(item_id, units)
+        async def record_units(identity, units) -> None:
+            registration_items.append(identity.item_id)
+            await register_units(identity, units)
 
         session._auxiliary_owner._register_units = record_units
         await session.start()

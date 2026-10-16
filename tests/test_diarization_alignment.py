@@ -177,7 +177,7 @@ def test_fixed_text_aligner_returns_only_validated_units() -> None:
     assert covered == request.text
 
 
-def test_fixed_text_aligner_reports_unavailable_instead_of_empty_success() -> None:
+def test_fixed_text_aligner_reports_worker_failure_instead_of_empty_success() -> None:
     class BrokenClient:
         async def align_text(
             self, pcm: bytes, *, text: str, language: str | None
@@ -187,5 +187,5 @@ def test_fixed_text_aligner_reports_unavailable_instead_of_empty_success() -> No
     result = asyncio.run(FixedTextAligner(BrokenClient()).align(_request()))
 
     assert result.status == "failed"
-    assert result.failure == "alignment_unavailable"
+    assert result.failure == "alignment_worker_failed"
     assert result.units == ()

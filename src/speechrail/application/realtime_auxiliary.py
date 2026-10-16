@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import logging
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
@@ -45,6 +44,11 @@ from speechrail.domain.diarization.timeline import AttributionUnit
 from speechrail.domain.ports import (
     DiarizationEngine,
 )
+from speechrail.observability.alignment import (
+    alignment_failure_message,
+    log_alignment_failure,
+    normalize_alignment_failure,
+)
 from speechrail.observability.metrics import Metrics
 from speechrail.runtime.alignment_admission import AlignmentAdmission, AlignmentAdmissionFullError
 from speechrail.runtime.diarization_admission import (
@@ -52,9 +56,20 @@ from speechrail.runtime.diarization_admission import (
     DiarizationAdmissionFullError,
 )
 
-logger = logging.getLogger(__name__)
-
 _MAX_UPDATES_PER_EVENT = 256
+
+
+@dataclass(frozen=True, slots=True)
+class _DiarizationItemIdentity:
+    """Immutable attribution owner copied from one frozen ASR transcript."""
+
+    task_id: str
+    epoch: int
+    generation: int
+    item_id: str
+    transcript_revision: int
+    item_start_wire: int
+    item_end_wire: int
 
 
 class AsrFinalSource(Protocol):
@@ -134,6 +149,8 @@ class RealtimeAuxiliaryOwner:
         self._units_by_id: dict[str, AttributionUnit] = {}
         self._wire_span_by_unit: dict[str, SampleSpan] = {}
         self._speaker_by_unit: dict[str, str | None] = {}
+        self._identity_by_unit: dict[str, _DiarizationItemIdentity] = {}
+        self._latest_diarization_identity: _DiarizationItemIdentity | None = None
 
     @property
     def _config(self) -> Mapping[str, Any]:
@@ -188,6 +205,15 @@ class RealtimeAuxiliaryOwner:
         self._units_by_id.clear()
         self._wire_span_by_unit.clear()
         self._speaker_by_unit.clear()
+        self._identity_by_unit.clear()
+        self._latest_diarization_identity = None
+        self._metadata_revision = 0
+        self._degraded_reason = None
+        self._status_sent = False
+        self._diarization_phase = "active"
+        self._finalization_id = None
+        self._finalized_payload = None
+        self._last_update_sequence = 0
 
     async def close(self) -> None:
         await self._cancel_alignment_tasks()
@@ -278,6 +304,14 @@ class RealtimeAuxiliaryOwner:
                 or generation != self._input.identity.generation
             ):
                 self._ports.metrics.record_alignment_event("fixed_text_stale")
+                self._ports.metrics.record_alignment_failure("alignment_stale")
+                log_alignment_failure(
+                    code="alignment_stale", stage="realtime",
+                    audio_samples=len(pcm16) // 2, text_characters=len(transcript),
+                    expected_audio_samples=item_end_kernel - item_start_kernel,
+                    span_start_sample=item_start_kernel,
+                    transcript_revision=transcript_revision,
+                )
                 # Still terminal: a client that enabled alignment must never
                 # wait forever for an event that cannot arrive.
                 await self._send(
@@ -329,7 +363,16 @@ class RealtimeAuxiliaryOwner:
                     )
                 )
             else:
+                failure = normalize_alignment_failure(failure or "alignment_unavailable")
                 self._ports.metrics.record_alignment_event("fixed_text_unavailable")
+                self._ports.metrics.record_alignment_failure(failure)
+                log_alignment_failure(
+                    code=failure, stage="realtime",
+                    audio_samples=len(pcm16) // 2, text_characters=len(transcript),
+                    expected_audio_samples=item_end_kernel - item_start_kernel,
+                    span_start_sample=item_start_kernel,
+                    transcript_revision=transcript_revision,
+                )
                 await self._send(
                     alignment_failed(
                         task_id=task_id,
@@ -337,8 +380,8 @@ class RealtimeAuxiliaryOwner:
                         utterance_id=item_id,
                         transcript_revision=transcript_revision,
                         metadata_revision=self._metadata_revision,
-                        code=failure or "alignment_unavailable",
-                        message="fixed-text alignment failed",
+                        code=failure,
+                        message=alignment_failure_message(failure),
                     )
                 )
             # The connection ledger owns completed items, including those whose
@@ -347,11 +390,30 @@ class RealtimeAuxiliaryOwner:
                 self._metadata_revision += 1
                 if self._diarization is not None:
                     self._wire_span_by_unit.update(wire_spans)
-                await self._register_units(item_id, units)
+                await self._register_units(
+                    _DiarizationItemIdentity(
+                        task_id=task_id,
+                        epoch=epoch,
+                        generation=generation,
+                        item_id=item_id,
+                        transcript_revision=transcript_revision,
+                        item_start_wire=item_start_wire,
+                        item_end_wire=item_end_wire,
+                    ),
+                    units,
+                )
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.exception("realtime alignment task failed")
+        except Exception as exc:
+            self._ports.metrics.record_alignment_event("fixed_text_unavailable")
+            self._ports.metrics.record_alignment_failure("alignment_failed")
+            log_alignment_failure(
+                code="alignment_failed", stage="realtime",
+                audio_samples=len(pcm16) // 2, text_characters=len(transcript),
+                expected_audio_samples=item_end_kernel - item_start_kernel,
+                span_start_sample=item_start_kernel,
+                transcript_revision=transcript_revision, exception=exc,
+            )
             with contextlib.suppress(Exception):
                 await self._send(
                     alignment_failed(
@@ -361,7 +423,7 @@ class RealtimeAuxiliaryOwner:
                         transcript_revision=transcript_revision,
                         metadata_revision=self._metadata_revision,
                         code="alignment_failed",
-                        message="fixed-text alignment failed",
+                        message=alignment_failure_message("alignment_failed"),
                     )
                 )
 
@@ -396,8 +458,10 @@ class RealtimeAuxiliaryOwner:
             # The retained pin is bounded; overflow fails loudly instead of
             # aligning a truncated span and pretending the timestamps are exact.
             return unavailable("alignment_pcm_overflow")
-        if aligner is None or len(pcm16) // 2 != item_samples:
+        if aligner is None:
             return unavailable("alignment_unavailable")
+        if len(pcm16) % 2 or len(pcm16) // 2 != item_samples:
+            return unavailable("alignment_pcm_mismatch")
         alignment_epoch = (
             self._diarization_epoch or f"{self._session_id}:{self._input.identity.epoch}"
         )
@@ -502,16 +566,34 @@ class RealtimeAuxiliaryOwner:
             )
         return rendered
 
-    async def _register_units(self, item_id: str, units: tuple[AttributionUnit, ...]) -> None:
+    async def _register_units(
+        self,
+        identity: _DiarizationItemIdentity,
+        units: tuple[AttributionUnit, ...],
+    ) -> None:
         """Register immutable text units; actor events carry only speaker revisions."""
         if self._diarization is None or not units:
             return
         for unit in units:
             self._units_by_id[unit.segment_uid] = unit
             self._speaker_by_unit.setdefault(unit.segment_uid, None)
+            self._identity_by_unit[unit.segment_uid] = identity
+        latest = self._latest_diarization_identity
+        if latest is None or (
+            identity.item_end_wire,
+            identity.item_start_wire,
+            identity.item_id,
+            identity.transcript_revision,
+        ) > (
+            latest.item_end_wire,
+            latest.item_start_wire,
+            latest.item_id,
+            latest.transcript_revision,
+        ):
+            self._latest_diarization_identity = identity
         try:
             await self._diarization.register_completed(
-                item_id,
+                identity.item_id,
                 tuple(
                     TextUnit(
                         id=unit.segment_uid,
@@ -533,12 +615,20 @@ class RealtimeAuxiliaryOwner:
                 DiarizationError(str(exc), code="diarization_invalid_output")
             )
 
-    def _diarization_units_payload(self) -> list[dict[str, object]]:
+    def _diarization_units_payload(
+        self,
+        identity: _DiarizationItemIdentity | None = None,
+    ) -> list[dict[str, object]]:
         """Project immutable unit spans onto the 24 kHz public sample axis."""
 
         payload: list[dict[str, object]] = []
         for unit in sorted(
-            self._units_by_id.values(), key=lambda item: (item.start_sample, item.segment_uid)
+            (
+                unit
+                for unit_id, unit in self._units_by_id.items()
+                if identity is None or self._identity_by_unit.get(unit_id) == identity
+            ),
+            key=lambda item: (item.start_sample, item.segment_uid),
         ):
             wire_span = self._wire_span_by_unit[unit.segment_uid]
             payload.append(
@@ -550,30 +640,54 @@ class RealtimeAuxiliaryOwner:
         return payload
 
     async def _send_diarization_updates(self, attributions: tuple[Attribution, ...]) -> None:
-        """Project domain speaker revisions into the current extension DTO."""
+        """Project speaker revisions into updates owned by their frozen ASR items."""
         if self._ledger is None or not attributions:
             return
+        grouped: dict[_DiarizationItemIdentity, list[Attribution]] = {}
         for attribution in attributions:
-            if attribution.unit_id in self._units_by_id:
-                self._speaker_by_unit[attribution.unit_id] = attribution.speaker
-        units = self._diarization_units_payload()
-        if not units:
-            return
-        self._metadata_revision += 1
-        for start in range(0, len(units), _MAX_UPDATES_PER_EVENT):
-            chunk = units[start : start + _MAX_UPDATES_PER_EVENT]
-            sequence = await self._send(
-                diarization_updated(
-                    task_id=self._task_id,
-                    epoch=self._input.identity.epoch,
-                    utterance_id=self._input.identity.item_id,
-                    transcript_revision=self._input.identity.transcript_revision,
-                    metadata_revision=self._metadata_revision,
-                    units=chunk,
+            identity = self._identity_by_unit.get(attribution.unit_id)
+            if identity is None:
+                continue
+            self._speaker_by_unit[attribution.unit_id] = attribution.speaker
+            grouped.setdefault(identity, []).append(attribution)
+
+        for identity in sorted(
+            grouped,
+            key=lambda item: (item.item_start_wire, item.item_end_wire, item.item_id),
+        ):
+            units = self._diarization_units_payload(identity)
+            if not units:
+                continue
+            self._metadata_revision += 1
+            for start in range(0, len(units), _MAX_UPDATES_PER_EVENT):
+                chunk = units[start : start + _MAX_UPDATES_PER_EVENT]
+                sequence = await self._send(
+                    diarization_updated(
+                        task_id=identity.task_id,
+                        epoch=identity.epoch,
+                        utterance_id=identity.item_id,
+                        transcript_revision=identity.transcript_revision,
+                        metadata_revision=self._metadata_revision,
+                        units=chunk,
+                    )
                 )
-            )
-            if sequence is not None:
-                self._last_update_sequence = sequence
+                if sequence is not None:
+                    self._last_update_sequence = sequence
+
+    def _finalization_identity(self) -> _DiarizationItemIdentity:
+        """Return the last immutable item, or the live identity for an empty session."""
+        if self._latest_diarization_identity is not None:
+            return self._latest_diarization_identity
+        identity = self._input.identity
+        return _DiarizationItemIdentity(
+            task_id=self._task_id,
+            epoch=identity.epoch,
+            generation=identity.generation,
+            item_id=identity.item_id,
+            transcript_revision=identity.transcript_revision,
+            item_start_wire=0,
+            item_end_wire=0,
+        )
 
     def _mark_degraded(self, reason: str) -> None:
         if self._degraded_reason is None:
@@ -589,12 +703,13 @@ class RealtimeAuxiliaryOwner:
         self._mark_degraded(reason)
         if not self._status_sent:
             self._status_sent = True
+            identity = self._finalization_identity()
             await self._send(
                 diarization_failed(
-                    task_id=self._task_id,
-                    epoch=self._input.identity.epoch,
-                    utterance_id=self._input.identity.item_id,
-                    transcript_revision=self._input.identity.transcript_revision,
+                    task_id=identity.task_id,
+                    epoch=identity.epoch,
+                    utterance_id=identity.item_id,
+                    transcript_revision=identity.transcript_revision,
                     metadata_revision=self._metadata_revision,
                     code=reason,
                     message="streaming diarization failed",
@@ -637,16 +752,18 @@ class RealtimeAuxiliaryOwner:
                 await self._wait_for_pending_alignment()
                 if self._diarization is not None:
                     done = await self._diarization.finish(self._finalization_id)
+                    await self._wait_for_diarization_events()
         except TimeoutError:
             self._mark_degraded("finalization_timeout")
             if not self._status_sent:
                 self._status_sent = True
+                identity = self._finalization_identity()
                 await self._send(
                     diarization_failed(
-                        task_id=self._task_id,
-                        epoch=self._input.identity.epoch,
-                        utterance_id=self._input.identity.item_id,
-                        transcript_revision=self._input.identity.transcript_revision,
+                        task_id=identity.task_id,
+                        epoch=identity.epoch,
+                        utterance_id=identity.item_id,
+                        transcript_revision=identity.transcript_revision,
                         metadata_revision=self._metadata_revision,
                         code="finalization_timeout",
                         message="streaming diarization finalization timed out",
@@ -654,21 +771,22 @@ class RealtimeAuxiliaryOwner:
                 )
         if done is not None and done.status == "degraded" and self._degraded_reason is None:
             self._mark_degraded("finalization_incomplete")
+        identity = self._finalization_identity()
         if self._degraded_reason is None:
             payload = diarization_done_event(
-                task_id=self._task_id,
-                epoch=self._input.identity.epoch,
-                utterance_id=self._input.identity.item_id,
-                transcript_revision=self._input.identity.transcript_revision,
+                task_id=identity.task_id,
+                epoch=identity.epoch,
+                utterance_id=identity.item_id,
+                transcript_revision=identity.transcript_revision,
                 metadata_revision=self._metadata_revision,
-                units=self._diarization_units_payload(),
+                units=self._diarization_units_payload(identity),
             )
         else:
             payload = diarization_failed(
-                task_id=self._task_id,
-                epoch=self._input.identity.epoch,
-                utterance_id=self._input.identity.item_id,
-                transcript_revision=self._input.identity.transcript_revision,
+                task_id=identity.task_id,
+                epoch=identity.epoch,
+                utterance_id=identity.item_id,
+                transcript_revision=identity.transcript_revision,
                 metadata_revision=self._metadata_revision,
                 code=self._degraded_reason,
                 message="streaming diarization finalization did not complete",
@@ -676,6 +794,17 @@ class RealtimeAuxiliaryOwner:
         self._finalized_payload = payload
         self._diarization_phase = "finalized"
         await self._send(payload)
+
+    async def _wait_for_diarization_events(self) -> None:
+        """Make the terminal barrier follow every activity event queued before it."""
+        task = self._diarization_events
+        if task is None:
+            return
+        try:
+            await task
+        finally:
+            if task.done() and self._diarization_events is task:
+                self._diarization_events = None
 
     async def _wait_for_pending_alignment(self) -> None:
         """Drain every frozen-text alignment task before closing the ledger."""

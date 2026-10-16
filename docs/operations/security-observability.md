@@ -2,7 +2,7 @@
 title: "SpeechRail 安全与可观测性"
 status: active
 version: "3.1.5"
-date: 2026-09-30
+date: 2026-10-16
 ---
 
 # SpeechRail 安全与可观测性
@@ -99,6 +99,29 @@ partial、直接进入 final（不是 0 ms）；`failed`、`cancelled`、`send_f
 秒数。客户端屏幕出现时刻必须由 App/调用方独立埋点，服务端 `_send` 完成不能冒充该事件；
 该指标不记录 session、request、文本或任何音频内容。冷/热模型、`chunk_duration_ms`、
 VAD/manual、排队时间与样本数必须在任何性能对比中并列说明。
+
+### 固定文本对齐故障
+
+`speechrail_asr_alignment_events_total{event}` 区分完成、不可用、准入溢出和过期结果；
+`speechrail_asr_alignment_failures_total{reason}` 按协议中的稳定错误码累计失败原因。
+未知 adapter 原因归一为 `alignment_failed`，不会成为自由文本标签。两个指标都不携带
+item、会话、request ID 或转写内容；累计值在服务重启后归零。
+
+`speechrail.log` 中的 `fixed_text_alignment_failed` 记录 `code`、`stage`、实际音频样本数
+`audio_samples`、冻结范围预期样本数 `expected_audio_samples`（该阶段未知时为 `-1`）、
+原文字符数、冻结 span 起点、文本 revision、token 数、零时长 token 数、相对音频起点的
+`timestamp_min_start_sample` / `timestamp_max_end_sample` 和允许列表中的
+异常类型。`stage=initialize` 表示 worker 初始化失败，`stage=admission` 表示 worker 租约不可用，
+`stage=validation` 表示供应商输出未通过
+文本或时间校验，`stage=worker` 表示 worker 调用失败，`stage=realtime` 表示该失败已投影为
+辅助事件；同一失败可能经过多个阶段。时间范围只在 validation 阶段提供，未知时为 `-1`，
+极端供应商数值限幅至正负十亿样本，避免诊断本身溢出。
+日志不记录 token 内容、异常正文、traceback、PCM 或模型路径。用时间与 span 元数据
+定位失败段，再结合 `error.code` 区分文本不匹配、时间分辨率不足、边界异常、超时与负载。
+
+会议和字幕收到 `alignment.failed` 后保留正文，显示对应的可读原因；启用分人时将记录标为
+部分降级，已保存的说话人标签继续保留，后续可用归属仍可更新。辅助窗口过期不会覆盖
+已知的具体原因；稳定错误码保留在会话内诊断状态中。
 
 ## 容量与隔离
 

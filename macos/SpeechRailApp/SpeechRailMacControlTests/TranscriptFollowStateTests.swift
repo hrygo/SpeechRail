@@ -47,6 +47,58 @@ final class TranscriptFollowStateTests: XCTestCase {
         XCTAssertTrue(state.isPinnedToBottom)
     }
 
+    func testShortContentStillCountsAsAtBottom() {
+        // 内容底边早于视口底边表示内容放得下，不应被判成“离开底部”。
+        let state = TranscriptFollowState().userScrolled(
+            contentBottomY: 140,
+            viewportBottomY: 500
+        )
+        XCTAssertTrue(state.isPinnedToBottom)
+        XCTAssertNil(state.unseenBannerText)
+    }
+
+    func testLongContentMeasuresDistanceFromVisibleBottomToContentBottom() {
+        let away = TranscriptFollowState().userScrolled(
+            contentBottomY: 900,
+            viewportBottomY: 500
+        )
+        XCTAssertFalse(away.isPinnedToBottom)
+
+        let nearBottom = away.userScrolled(
+            contentBottomY: 508,
+            viewportBottomY: 500
+        )
+        XCTAssertTrue(nearBottom.isPinnedToBottom)
+    }
+
+    func testThresholdAndUnreadBannerGeometryJitterDoesNotFlipFollowState() {
+        var pinned = TranscriptFollowState()
+        for distance in [23.0, 25.0, 24.0, 23.5, 25.5] {
+            pinned = pinned.userScrolled(toBottomWithin: distance)
+            XCTAssertTrue(pinned.isPinnedToBottom, "Pinned state changed at \(distance) pt")
+            XCTAssertNil(pinned.unseenBannerText)
+        }
+
+        var readingEarlier = TranscriptFollowState()
+            .userScrolled(toBottomWithin: 400)
+            .contentArrived(lineCount: 3)
+            .state
+        for distance in [25.0, 23.0, 25.5, 23.5, 26.0] {
+            readingEarlier = readingEarlier.userScrolled(toBottomWithin: distance)
+            XCTAssertFalse(
+                readingEarlier.isPinnedToBottom,
+                "Unread-banner geometry changed follow state at \(distance) pt"
+            )
+            XCTAssertEqual(readingEarlier.unseenCount, 3)
+            XCTAssertEqual(readingEarlier.unseenBannerText, "下面有 3 条新的")
+        }
+
+        let latest = readingEarlier.jumpToLatest(anchor: "line-9")
+        XCTAssertTrue(latest.isPinnedToBottom)
+        XCTAssertEqual(latest.unseenCount, 0)
+        XCTAssertEqual(latest.pinnedAnchor, "line-9")
+    }
+
     func testReturningToBottomClearsUnseenAndFollowsAgain() {
         let state = TranscriptFollowState()
             .userScrolled(toBottomWithin: 800)
@@ -94,5 +146,34 @@ final class TranscriptFollowStateTests: XCTestCase {
         let state = TranscriptFollowState(isPinnedToBottom: false, unseenCount: 3)
         let result = state.contentArrived(lineCount: -5)
         XCTAssertEqual(result.state.unseenCount, 3)
+    }
+
+    func testContentGrowthDoesNotImpersonateUserScrolling() {
+        let state = TranscriptFollowState().geometryChanged(
+            to: .awayFromBottom, isUserInitiated: false
+        )
+        XCTAssertTrue(state.isPinnedToBottom)
+        XCTAssertEqual(state.contentArrived(lineCount: 1).decision, .follow(anchor: nil))
+    }
+
+    func testJumpAnimationDoesNotCancelFollowingBeforeReachingBottom() {
+        var state = TranscriptFollowState(isPinnedToBottom: false, unseenCount: 6)
+            .jumpToLatest(anchor: "last-line")
+        for proximity in [TranscriptFollowState.ScrollProximity.awayFromBottom, .thresholdBand, .atBottom] {
+            state = state.geometryChanged(to: proximity, isUserInitiated: false)
+            XCTAssertTrue(state.isPinnedToBottom)
+            XCTAssertEqual(state.unseenCount, 0)
+        }
+        XCTAssertEqual(state.contentArrived(lineCount: 2).decision, .follow(anchor: "last-line"))
+    }
+
+    func testUserScrollCanInterruptFollowingAndReturnToBottom() {
+        let state = TranscriptFollowState()
+            .geometryChanged(to: .awayFromBottom, isUserInitiated: true)
+            .contentArrived(lineCount: 2).state
+        XCTAssertFalse(state.isPinnedToBottom)
+        XCTAssertEqual(state.unseenCount, 2)
+        XCTAssertEqual(state.geometryChanged(to: .atBottom, isUserInitiated: false), state)
+        XCTAssertTrue(state.geometryChanged(to: .atBottom, isUserInitiated: true).isPinnedToBottom)
     }
 }

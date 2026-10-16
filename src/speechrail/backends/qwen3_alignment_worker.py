@@ -8,8 +8,9 @@ session; a caller that wants timestamps must already own the frozen text.
 from __future__ import annotations
 
 import argparse
+import json
+import math
 import sys
-import traceback
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +18,8 @@ from typing import BinaryIO, Final, Protocol
 
 from speechrail.backends.mlx_precision import mlx_dtype, resolve_load_dtype
 from speechrail.backends.model_identity import inspect_model
+from speechrail.domain.alignment import InvalidAlignmentOutputError
+from speechrail.observability.alignment import log_alignment_failure
 from speechrail.runtime.worker_protocol import (
     PROTOCOL_VERSION,
     ProtocolError,
@@ -139,14 +142,21 @@ def _handle_align_text(
 ) -> None:
     raw_request_id = frame.get("request_id")
     request_id: str | None = raw_request_id if isinstance(raw_request_id, str) else None
+    pcm, text = b"", ""
     try:
         request_id, pcm, language, text = _decode_align_request(frame)
         tokens = engine.align_text(pcm, text=text, language=language)
     except ProtocolError:
         _write_error(output_stream, "worker_invalid_request", request_id=request_id)
         return
-    except Exception:
-        traceback.print_exc(file=sys.stderr)
+    except InvalidAlignmentOutputError:
+        _write_error(output_stream, "invalid_alignment", request_id=request_id)
+        return
+    except Exception as exc:
+        log_alignment_failure(
+            code="alignment_worker_failed", stage="worker",
+            audio_samples=len(pcm) // 2, text_characters=len(text), exception=exc,
+        )
         _write_error(output_stream, "worker_alignment_error", request_id=request_id)
         return
     write_frame(
@@ -196,8 +206,11 @@ def serve(
         return
     try:
         engine = engine_factory(model_dir, device, dtype)
-    except Exception:
-        traceback.print_exc(file=sys.stderr)
+    except Exception as exc:
+        log_alignment_failure(
+            code="alignment_worker_failed", stage="initialize",
+            audio_samples=0, text_characters=0, exception=exc,
+        )
         _write_error(output_stream, "worker_load_error")
         return
     identity = engine.identity
@@ -248,6 +261,56 @@ def _clear_metal_cache() -> None:
     gc.collect()
 
 
+def _timestamp_quantum_seconds(model_dir: Path) -> float:
+    """Read this snapshot's timestamp cell size; never guess a model precision."""
+    config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
+    value = config.get("timestamp_segment_time") if isinstance(config, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RuntimeError("backend_identity_mismatch: invalid aligner timestamp grid")
+    try:
+        valid = math.isfinite(value) and value > 0 and value / 1000 > 0
+    except OverflowError:
+        valid = False
+    if not valid:
+        raise RuntimeError("backend_identity_mismatch: invalid aligner timestamp grid")
+    return float(value) / 1000
+
+
+def _fit_terminal_timestamp_cell(
+    tokens: list[tuple[str, float, float]], *, audio_samples: int, quantum_seconds: float,
+) -> list[tuple[str, float, float]]:
+    """Intersect only the nearest terminal model cell with the exact PCM edge.
+
+    Qwen timestamps are discrete classifications (80 ms for the active model).
+    A nearest cell can extend up to half a cell beyond an arbitrary PCM end.
+    Other out-of-bounds values, off-grid predictions and invalid ordering stay
+    untouched for strict application validation; no interior time is moved.
+    """
+    previous_end = 0.0
+    try:
+        for _, start, end in tokens:
+            if not (math.isfinite(start) and math.isfinite(end)):
+                return tokens
+            if start < previous_end or end < start:
+                return tokens
+            previous_end = end
+    except OverflowError:
+        return tokens
+    duration = audio_samples / ALIGNMENT_SAMPLE_RATE
+    position = duration / quantum_seconds
+    if not math.isfinite(position):
+        return tokens
+    nearest = math.floor(position + 0.5) * quantum_seconds
+    if nearest <= duration:
+        return tokens
+    return [
+        (text, min(start, duration), duration)
+        if math.isclose(end, nearest, rel_tol=0, abs_tol=1e-9)
+        else (text, start, end)
+        for text, start, end in tokens
+    ]
+
+
 class Qwen3AlignerEngine:  # pragma: no cover - requires an external aligner snapshot.
     """Adapter over ``mlx_qwen3_asr.ForcedAligner`` with explicit load identity."""
 
@@ -277,6 +340,7 @@ class Qwen3AlignerEngine:  # pragma: no cover - requires an external aligner sna
             )
         else:
             effective_dtype = observed_dtype
+        self._timestamp_quantum = _timestamp_quantum_seconds(model_dir)
         self.identity = AlignmentIdentity(
             device=device,
             dtype=effective_dtype,
@@ -294,7 +358,7 @@ class Qwen3AlignerEngine:  # pragma: no cover - requires an external aligner sna
 
         waveform = np.frombuffer(audio, dtype="<i2").astype(np.float32) / np.float32(32768)
         aligned = self._aligner.align(waveform, text, language=language or "auto")
-        raw: list[dict[str, object]] = []
+        raw: list[tuple[str, float, float]] = []
         for item in aligned:
             token = getattr(item, "text", None)
             start = getattr(item, "start_time", None)
@@ -306,15 +370,16 @@ class Qwen3AlignerEngine:  # pragma: no cover - requires an external aligner sna
                 or isinstance(end, bool)
                 or not isinstance(end, (int, float))
             ):
-                return []
-            # The forced aligner uses a coarse timestamp grid for some
-            # character-level tokens, so a token can collapse to start == end.
-            # Dropping it keeps the remaining alignment valid; the validator
-            # re-attaches that token's code points to the next valid token.
-            if end <= start:
-                continue
-            raw.append({"text": token, "start": start, "end": end})
-        return raw
+                raise InvalidAlignmentOutputError("invalid_alignment")
+            # Keep collapsed and reversed vendor intervals intact. The
+            # application validator can coalesce zero-width tokens only at
+            # segment granularity; dropping them here would erase spoken text
+            # before it can either be recovered or rejected with a reason.
+            raw.append((token, start, end))
+        fitted = _fit_terminal_timestamp_cell(
+            raw, audio_samples=len(audio) // 2, quantum_seconds=self._timestamp_quantum,
+        )
+        return [{"text": token, "start": start, "end": end} for token, start, end in fitted]
 
 
 def _engine_revision() -> str | None:

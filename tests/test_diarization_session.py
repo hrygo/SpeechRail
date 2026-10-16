@@ -194,6 +194,74 @@ def test_activity_backlog_deadline_degrades_without_blocking_canonical_audio() -
     asyncio.run(scenario())
 
 
+def test_activity_update_cannot_outrun_the_accepted_sample_watermark() -> None:
+    class _InterleavingActivity(_FakeActivitySession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.published = asyncio.Event()
+            self.release_append = asyncio.Event()
+
+        async def append(self, *, start_sample: int, pcm16: bytes) -> None:
+            end = start_sample + len(pcm16) // 2
+            await self.queue.put(
+                ActivityUpdate(
+                    epoch="epoch_1",
+                    step_id=1,
+                    replace_span=SampleSpan(start_sample, end),
+                    frames=(
+                        ActivityFrame(
+                            span=SampleSpan(start_sample, end),
+                            scores=(0.9, 0.0, 0.0, 0.0),
+                            active_slots=frozenset({0}),
+                        ),
+                    ),
+                    processed_through=end,
+                    stable_through=end,
+                )
+            )
+            self.published.set()
+            await self.release_append.wait()
+
+        async def finish(self, *, through_sample: int) -> None:
+            self.finished_through = through_sample
+            await self.queue.put(None)
+
+    class _ObservedLedger(AttributionLedger):
+        def __init__(self, *, accepted_samples):
+            super().__init__(accepted_samples=accepted_samples)
+            self.applied = asyncio.Event()
+
+        def apply(self, update: ActivityUpdate) -> tuple[Attribution, ...]:
+            try:
+                return super().apply(update)
+            finally:
+                self.applied.set()
+
+    async def scenario() -> None:
+        activity = _InterleavingActivity()
+        session: DiarizationSession
+        ledger = _ObservedLedger(accepted_samples=lambda: session.accepted_samples)
+        session = DiarizationSession(activity=activity, ledger=ledger)
+        await session.start()
+        append_task = asyncio.create_task(session.append(b"\x00\x00" * 16))
+
+        await activity.published.wait()
+        await asyncio.wait_for(ledger.applied.wait(), timeout=0.1)
+        activity.release_append.set()
+        await append_task
+
+        done = await session.finish("finish_1")
+        events = [event async for event in session.events()]
+        statuses = [event for event in events if isinstance(event, StatusChanged)]
+
+        assert done.status == "complete"
+        assert session.accepted_samples == 16
+        assert activity.finished_through == 16
+        assert statuses == []
+
+    asyncio.run(scenario())
+
+
 def test_activity_failure_finalizes_pending_unknown_and_emits_one_status() -> None:
     async def scenario() -> None:
         session, activity = _session()

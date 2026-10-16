@@ -184,6 +184,71 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         XCTAssertNotEqual(record?.state, .archived)
     }
 
+    func testAlignmentFailureKeepsItsReasonAndTextAfterAuxiliaryExpiry() async throws {
+        let h = try await makeHarness()
+        let suite = "meeting-alignment-diagnostic-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = SessionPreferences(defaults: defaults)
+        preferences.meetingDiarizationEnabled = true
+        h.session.preferences = { preferences }
+        let id = try await startRecording(h)
+        try await h.emit(.completed(itemID: "aligned-item", transcript: "保留的会议正文"))
+        try await h.settle { $0.session.lines.count == 1 }
+        try await h.emit(.attribution(itemID: "aligned-item", units: [
+            .init(segmentUID: "before-failure", speaker: "A", timingQuality: "aligned")
+        ], isFinal: true))
+        try await h.settle { $0.session.lines.first?.speakerLabel == "A" }
+        try await h.emit(.alignmentFailed(
+            itemID: "aligned-item", code: "text_mismatch", message: "private backend detail"
+        ))
+        try await h.settle { $0.session.labeling.state == .degraded }
+        let reason = try XCTUnwrap(h.session.labeling.note)
+        XCTAssertEqual(h.session.labeling.diagnosticCode, "text_mismatch")
+        XCTAssertFalse(reason.contains("private backend detail"))
+        XCTAssertTrue(reason.contains("文字"))
+
+        try await h.emit(.auxiliaryIncomplete(
+            itemID: "aligned-item", alignmentMissing: true, diarizationMissing: true
+        ))
+        try await h.settle { $0.session.lastFailure != nil }
+        XCTAssertEqual(h.session.labeling.note, reason)
+        XCTAssertEqual(h.session.labeling.diagnosticCode, "text_mismatch")
+        XCTAssertEqual(h.session.lastFailure, reason)
+        let record = try await h.store.session(id: id)
+        XCTAssertEqual(record?.diarizationNote, reason)
+        XCTAssertEqual(h.session.lines.map(\.text), ["保留的会议正文"])
+        XCTAssertEqual(h.session.phase, .recording)
+        XCTAssertEqual(h.session.lines.first?.speakerLabel, "A")
+        try await h.emit(.completed(itemID: "next-item", transcript: "后续仍能分人"))
+        try await h.emit(.attribution(itemID: "next-item", units: [
+            .init(segmentUID: "after-failure", speaker: "B", timingQuality: "aligned")
+        ], isFinal: true))
+        try await h.settle { $0.session.lines.last?.speakerLabel == "B" }
+        XCTAssertEqual(h.session.labeling.labels, ["A", "B"])
+    }
+
+    func testAlignmentFailureWithoutDiarizationIsNotReplacedByWindowExpiry() async throws {
+        let h = try await makeHarness()
+        let suite = "meeting-alignment-only-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = SessionPreferences(defaults: defaults)
+        preferences.meetingDiarizationEnabled = false
+        h.session.preferences = { preferences }
+        _ = try await startRecording(h)
+        try await h.emit(.alignmentFailed(itemID: "A", code: "text_mismatch", message: ""))
+        try await h.settle { $0.session.lastFailure != nil }
+        let reason = h.session.lastFailure
+        try await h.emit(.auxiliaryIncomplete(
+            itemID: "A", alignmentMissing: true, diarizationMissing: false
+        ))
+        try await h.emit(.completed(itemID: "B", transcript: "仍在继续"))
+        try await h.settle { $0.session.lines.count == 1 }
+        XCTAssertEqual(h.session.lastFailure, reason)
+        XCTAssertEqual(h.session.labeling.state, .off)
+    }
+
     /// Gap1：分人单项不可用（`diarization_not_available`）不拦整场。
     ///
     /// 用户开了分人、服务端却没有分人能力时，会议必须照常录下去：

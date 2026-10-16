@@ -31,9 +31,11 @@ from speechrail.domain.alignment import (
     AlignmentResult,
     AlignmentUnit,
     AlignTextPort,
+    InvalidAlignmentOutputError,
 )
 from speechrail.domain.audio_timeline import CORE_SAMPLE_RATE, PCM_SAMPLE_BYTES, SampleSpan
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment, TranscriptWord
+from speechrail.observability.alignment import log_alignment_failure
 
 
 class FixedTextTokenClient(Protocol):
@@ -42,6 +44,19 @@ class FixedTextTokenClient(Protocol):
     async def align_text(
         self, pcm: bytes, *, text: str, language: str | None
     ) -> tuple[tuple[str, float, float], ...]: ...
+
+
+def _diagnostic_timestamp_sample(value: object) -> int | None:
+    """Keep invalid or extreme vendor numbers from breaking diagnostic logging."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        if not math.isfinite(value):
+            return None
+    except OverflowError:
+        return None
+    limit_seconds = 1_000_000_000 / CORE_SAMPLE_RATE
+    return round(max(-limit_seconds, min(limit_seconds, value)) * CORE_SAMPLE_RATE)
 
 
 class FixedTextAligner:
@@ -57,14 +72,54 @@ class FixedTextAligner:
         self._worker_lease = worker_lease
 
     async def align(self, request: AlignmentRequest) -> AlignmentResult:
+        stage = "admission"
         try:
             async with self._worker_lease() if self._worker_lease else nullcontext():
+                stage = "worker"
                 raw = await self._client.align_text(
                     request.pcm16, text=request.text, language=request.language
                 )
-                return validate_alignment(request, raw)
-        except (RuntimeError, ValueError):
-            return _failed(request, "alignment_unavailable")
+                stage = "validation"
+                result = validate_alignment(request, raw)
+                if result.failure is not None:
+                    starts = [
+                        sample for _, start, _ in raw
+                        if (sample := _diagnostic_timestamp_sample(start)) is not None
+                    ]
+                    ends = [
+                        sample for _, _, end in raw
+                        if (sample := _diagnostic_timestamp_sample(end)) is not None
+                    ]
+                    log_alignment_failure(
+                        code=result.failure, stage="validation",
+                        audio_samples=request.span.length, text_characters=len(request.text),
+                        expected_audio_samples=request.span.length,
+                        span_start_sample=request.span.start,
+                        transcript_revision=request.transcript_revision,
+                        token_count=len(raw),
+                        collapsed_tokens=sum(start == end for _, start, end in raw),
+                        timestamp_min_start_sample=min(starts, default=-1),
+                        timestamp_max_end_sample=max(ends, default=-1),
+                    )
+                return result
+        except (RuntimeError, ValueError, OSError) as exc:
+            if isinstance(exc, TimeoutError):
+                code = "alignment_timeout"
+            elif stage == "admission":
+                code = "alignment_unavailable"
+            elif isinstance(exc, InvalidAlignmentOutputError) or stage == "validation":
+                code = "invalid_alignment"
+            elif isinstance(exc, ValueError):
+                code = "alignment_failed"
+            else:
+                code = "alignment_worker_failed"
+            log_alignment_failure(
+                code=code, stage=stage, audio_samples=request.span.length,
+                expected_audio_samples=request.span.length,
+                text_characters=len(request.text), span_start_sample=request.span.start,
+                transcript_revision=request.transcript_revision, exception=exc,
+            )
+            return _failed(request, code)
 
 
 class TranscriptAlignmentError(RuntimeError):
@@ -247,15 +302,31 @@ def validate_alignment(
 
     cursor = 0
     projection: _SpokenProjection | None = None
-    tokens: list[tuple[str, int, int, SampleSpan]] = []
+    tokens: list[tuple[str, int, int, int, int]] = []
+    previous_end_seconds: float | None = None
+    duration_seconds = request.span.length / CORE_SAMPLE_RATE
     for token, start_seconds, end_seconds in raw:
         if (
-            not token
-            or not math.isfinite(start_seconds)
-            or not math.isfinite(end_seconds)
-            or end_seconds <= start_seconds
+            not isinstance(token, str)
+            or not token
+            or isinstance(start_seconds, bool)
+            or not isinstance(start_seconds, (int, float))
+            or isinstance(end_seconds, bool)
+            or not isinstance(end_seconds, (int, float))
         ):
             return _failed(request, "invalid_alignment")
+        try:
+            finite_timestamps = math.isfinite(start_seconds) and math.isfinite(end_seconds)
+        except OverflowError:
+            finite_timestamps = False
+        if not finite_timestamps:
+            return _failed(request, "invalid_alignment")
+        if end_seconds < start_seconds:
+            return _failed(request, "invalid_alignment")
+        if start_seconds < 0 or end_seconds > duration_seconds:
+            return _failed(request, "alignment_out_of_bounds")
+        if previous_end_seconds is not None and start_seconds < previous_end_seconds:
+            return _failed(request, "alignment_not_monotonic")
         text_start = request.text.find(token, cursor)
         if text_start >= 0:
             text_end = text_start + len(token)
@@ -268,32 +339,41 @@ def validate_alignment(
             text_start, text_end = located
         start = request.span.start + round(start_seconds * CORE_SAMPLE_RATE)
         end = request.span.start + round(end_seconds * CORE_SAMPLE_RATE)
-        if start < request.span.start or end > request.span.end or end <= start:
+        if start < request.span.start or end > request.span.end or end < start:
             return _failed(request, "alignment_out_of_bounds")
-        if tokens and start < tokens[-1][3].end:
-            return _failed(request, "alignment_not_monotonic")
-        tokens.append((token, text_start, text_end, SampleSpan(start, end)))
+        tokens.append((token, text_start, text_end, start, end))
         cursor = text_end
+        previous_end_seconds = end_seconds
     if not tokens:
         return _failed(request, "text_mismatch")
-    if not _granularity_supported(request.granularity, tokens):
-        return _failed(request, "granularity_unsupported")
     if not _spoken_text_is_covered(request.text, tokens):
         return _failed(request, "text_mismatch")
-    # The aligner timestamps spoken tokens, not typography.  Preserve the
+    # The aligner timestamps spoken tokens, not typography. Preserve the
     # original immutable text by attaching every intervening code point
-    # (spaces and punctuation included) to the following spoken token.  The
-    # final unspoken suffix is attached to the preceding token below.
+    # (spaces and punctuation included) to the following spoken token. At
+    # segment granularity, a timestamp-grid tie has no representable interval
+    # of its own: attach its exact text range to the next timed segment, or to
+    # the previous timed segment when it is trailing. The segment span expands
+    # to include the collapsed timestamp point without inventing a finer split.
+    unit_ranges = _with_leading_gaps(tokens)
+    if any(start == end for _, _, start, end in unit_ranges):
+        if request.granularity != "segment":
+            return _failed(request, "alignment_time_resolution_insufficient")
+        unit_ranges = _coalesce_collapsed_segments(unit_ranges)
+        if not unit_ranges:
+            return _failed(request, "alignment_time_resolution_insufficient")
+    if not _granularity_supported(request.granularity, tokens):
+        return _failed(request, "granularity_unsupported")
     units = [
         AlignmentUnit(
             unit_id=f"{request.utterance_id}-{index}",
-            text_start=previous_end,
+            text_start=text_start,
             text_end=text_end,
-            audio_span=span,
+            audio_span=SampleSpan(start, end),
             granularity=request.granularity,
         )
-        for index, (_token, previous_end, text_end, span) in enumerate(
-            _with_leading_gaps(tokens)
+        for index, (text_start, text_end, start, end) in enumerate(
+            unit_ranges
         )
     ]
     if units[-1].text_end < len(request.text):
@@ -308,20 +388,56 @@ def validate_alignment(
 
 
 def _with_leading_gaps(
-    tokens: list[tuple[str, int, int, SampleSpan]],
-) -> list[tuple[str, int, int, SampleSpan]]:
-    """Return each token paired with the code-point gap that precedes it."""
+    tokens: list[tuple[str, int, int, int, int]],
+) -> list[tuple[int, int, int, int]]:
+    """Pair each token with the text gap and original sample interval before it."""
 
     cursor = 0
-    result: list[tuple[str, int, int, SampleSpan]] = []
-    for token, _text_start, text_end, span in tokens:
-        result.append((token, cursor, text_end, span))
+    result: list[tuple[int, int, int, int]] = []
+    for _token, _text_start, text_end, start, end in tokens:
+        result.append((cursor, text_end, start, end))
         cursor = text_end
     return result
 
 
+def _coalesce_collapsed_segments(
+    ranges: list[tuple[int, int, int, int]],
+) -> list[tuple[int, int, int, int]]:
+    """Attach zero-width text to a neighboring segment and retain its time point."""
+
+    coalesced: list[tuple[int, int, int, int]] = []
+    pending: tuple[int, int, int, int] | None = None
+    for text_start, text_end, start, end in ranges:
+        if start == end:
+            if pending is None:
+                pending = (text_start, text_end, start, end)
+            else:
+                pending = (pending[0], text_end, pending[2], end)
+            continue
+        if pending is None:
+            coalesced.append((text_start, text_end, start, end))
+            continue
+        pending_text_start, _pending_text_end, collapsed_start, _collapsed_end = pending
+        coalesced.append((pending_text_start, text_end, min(collapsed_start, start), end))
+        pending = None
+    if pending is not None:
+        if not coalesced:
+            return []
+        text_start, text_end, start, end = coalesced[-1]
+        pending_text_start, pending_text_end, _collapsed_start, collapsed_end = pending
+        if pending_text_start != text_end:
+            return []
+        coalesced[-1] = (
+            text_start,
+            pending_text_end,
+            start,
+            max(end, collapsed_end),
+        )
+    return coalesced
+
+
 def _spoken_text_is_covered(
-    text: str, tokens: list[tuple[str, int, int, SampleSpan]]
+    text: str, tokens: list[tuple[str, int, int, int, int]]
 ) -> bool:
     """Return whether the tokens account for every spoken code point.
 
@@ -335,7 +451,7 @@ def _spoken_text_is_covered(
     """
 
     cursor = 0
-    for _token, text_start, text_end, _span in tokens:
+    for _token, text_start, text_end, _start, _end in tokens:
         if any(_is_spoken_char(character) for character in text[cursor:text_start]):
             return False
         cursor = text_end
@@ -344,7 +460,7 @@ def _spoken_text_is_covered(
 
 def _granularity_supported(
     granularity: AlignmentGranularity,
-    tokens: list[tuple[str, int, int, SampleSpan]],
+    tokens: list[tuple[str, int, int, int, int]],
 ) -> bool:
     if granularity == "segment":
         return True

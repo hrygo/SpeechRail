@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Literal
 
 from speechrail.backends.qwen3_native import validate_forced_aligner_snapshot
+from speechrail.domain.alignment import InvalidAlignmentOutputError
 from speechrail.runtime.worker_process import (
     AsyncFramedWorkerProcess,
     WorkerProcessSpec,
@@ -185,15 +186,21 @@ class Qwen3AlignmentWorker:
                 binary_payload=pcm,
             )
             self._last_active = time.monotonic()
+            if (
+                result.get("type") == "error"
+                and result.get("request_id") == request_id
+                and result.get("code") == "invalid_alignment"
+            ):
+                raise InvalidAlignmentOutputError("invalid_alignment")
             if result.get("type") != "align_result" or result.get("request_id") != request_id:
                 raise RuntimeError(error_frame_message(result, "alignment_worker_failed"))
             raw_tokens = result.get("tokens")
             if not isinstance(raw_tokens, list):
-                raise RuntimeError("alignment_worker_invalid")
+                raise InvalidAlignmentOutputError("invalid_alignment")
             tokens: list[tuple[str, float, float]] = []
             for item in raw_tokens:
                 if not isinstance(item, Mapping):
-                    raise RuntimeError("alignment_worker_invalid")
+                    raise InvalidAlignmentOutputError("invalid_alignment")
                 token, start, end = item.get("text"), item.get("start"), item.get("end")
                 if (
                     not isinstance(token, str)
@@ -202,7 +209,7 @@ class Qwen3AlignmentWorker:
                     or isinstance(end, bool)
                     or not isinstance(end, (int, float))
                 ):
-                    raise RuntimeError("alignment_worker_invalid")
+                    raise InvalidAlignmentOutputError("invalid_alignment")
                 tokens.append((token, float(start), float(end)))
             return tuple(tokens)
         except (RuntimeError, TimeoutError, OSError):
