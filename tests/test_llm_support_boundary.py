@@ -3,12 +3,17 @@
 import re
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "macos" / "SpeechRailApp" / "SpeechRailApp"
 
 
-def test_provider_has_no_feature_type_or_static_recorder_dependency():
-    source = (APP / "LLMProvider.swift").read_text()
+@pytest.mark.parametrize(
+    "filename", ["LLMProvider.swift", "LLMStreamDelivery.swift", "AppPerformanceMetrics.swift"]
+)
+def test_provider_has_no_feature_type_or_static_recorder_dependency(filename):
+    source = (APP / filename).read_text()
     assert not re.search(r"\bTeleprompter\w+", source)
     assert not re.search(r"\b(?:MinutesGenerator|InnerOSSession|MeetingSession)\b", source)
     assert "recorderBox" not in source
