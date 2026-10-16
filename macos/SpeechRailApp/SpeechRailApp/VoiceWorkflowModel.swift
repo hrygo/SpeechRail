@@ -457,6 +457,8 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
             step = .confirmReference
         case .validate:
             step = .resumeValidation
+        case .revalidate:
+            step = .validate
         case .loadValidationAudio:
             step = .loadValidationAudio
         case .submitReview:
@@ -621,107 +623,9 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
                     return
                 }
 
-                if context.autoPublish {
-                    // 自动串联：读取参考音频 -> 确认参考文案 -> 机器复验 -> 提交人工审核与发布入库
-                    let refAudio = try await requireCreatorCapability(voiceDesignClient).fetchVoiceDesignReferenceAudio(
-                        id: candidate.id,
-                        expectedRevision: candidate.revision
-                    )
-                    guard isCurrentVoiceDesignPublication(generation) else { return }
-                    voiceDesignPublication.referenceAudioData = refAudio
-                    voiceDesignPublication.phase = .confirmingReference
-
-                    let confirmed = try await requireCreatorCapability(voiceDesignClient).confirmVoiceDesignCandidate(
-                        id: candidate.id,
-                        referenceText: nil
-                    )
-                    guard isCurrentVoiceDesignPublication(generation) else { return }
-                    guard confirmed.knownState == .confirmed else {
-                        failVoiceDesignPublication(
-                            "服务返回了未知候选状态；保留候选信息，不能继续复验。",
-                            retryStep: .confirmReference,
-                            generation: generation
-                        )
-                        return
-                    }
-                    context.candidateRevision = confirmed.revision
-                    voiceDesignPublicationContext = context
-                    voiceDesignPublication.candidateRevision = confirmed.revision
-
-                    // 执行 Base 合成机器复验
-                    voiceDesignPublication.phase = .validating
-                    let validated = try await requireCreatorCapability(voiceDesignClient).validateVoiceDesignCandidate(
-                        id: candidate.id,
-                        testText: nil,
-                        capabilityKey: nil,
-                        mode: .validationOnly
-                    )
-                    guard isCurrentVoiceDesignPublication(generation) else { return }
-                    guard validated.knownState == .validating || validated.knownState == .failed else {
-                        failVoiceDesignPublication(
-                            "服务返回了未知候选状态；保留候选信息，不能继续发布。",
-                            retryStep: .validate,
-                            generation: generation
-                        )
-                        return
-                    }
-                    guard validated.revision == confirmed.revision,
-                          let validation = validated.latestValidation,
-                          validation.candidateRevision == confirmed.revision
-                    else {
-                        failVoiceDesignPublication(
-                            "服务返回的复验结果与当前候选版本不一致，请重新读取候选。",
-                            retryStep: .validate,
-                            generation: generation
-                        )
-                        return
-                    }
-                    guard validation.machineStatus == VoiceDesignReview.pass.rawValue else {
-                        failVoiceDesignPublication(
-                            Self.voiceDesignValidationMessage(validation),
-                            retryStep: validated.knownState == .failed ? .regenerateCandidate : .validate,
-                            generation: generation
-                        )
-                        return
-                    }
-                    context.validationID = validation.validationID
-                    voiceDesignPublicationContext = context
-                    voiceDesignPublication.validationID = validation.validationID
-
-                    // 读取复验音频
-                    let valAudio = try await requireCreatorCapability(voiceDesignClient).fetchVoiceDesignValidationAudio(
-                        id: candidate.id,
-                        validationID: validation.validationID,
-                        expectedRevision: confirmed.revision
-                    )
-                    guard isCurrentVoiceDesignPublication(generation) else { return }
-                    voiceDesignPublication.validationAudioData = valAudio
-
-                    // 自动验收并发布
-                    voiceDesignPublication.phase = .submittingReview
-                    let reviewed = try await requireCreatorCapability(voiceDesignClient).validateVoiceDesignCandidate(
-                        id: candidate.id,
-                        testText: nil,
-                        capabilityKey: nil,
-                        mode: .automatedAcceptance
-                    )
-                    guard isCurrentVoiceDesignPublication(generation) else { return }
-                    guard reviewed.knownState == .publishable,
-                          reviewed.publishable,
-                          reviewed.revision == confirmed.revision,
-                          reviewed.latestValidation?.validationID == validation.validationID
-                    else {
-                        failVoiceDesignPublication(
-                            "自动验收尚未绑定到当前复验结果，暂时不能发布。",
-                            retryStep: .submitReview,
-                            generation: generation
-                        )
-                        return
-                    }
-
-                    // 发布入库
-                    voiceDesignPublication.phase = .publishing
-                    await self.publishVoiceDesignCandidate(context, generation: generation)
+                if context.autoPublish,
+                   candidate.knownState == .confirmed || candidate.knownState == .validating {
+                    await performVoiceDesignPublicationTask(.resumeValidation, generation: generation)
                 } else {
                     await loadVoiceDesignReferenceAudio(context, generation: generation)
                 }
@@ -1108,6 +1012,9 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
             voiceDesignPublication.validationAudioData = nil
             voiceDesignPublication.validationAudioWasPlayed = false
             voiceDesignPublication.message = nil
+            if context.autoPublish {
+                await performVoiceDesignPublicationTask(.confirmReference, generation: generation)
+            }
         } catch {
             failVoiceDesignPublication(
                 error,
@@ -1146,7 +1053,9 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
             // parked there. Re-issuing validation is the documented recovery and
             // `resumeValidation` already accepts this state, so this gate has to
             // agree with it — otherwise "重试这一步" is a dead end.
-            guard current.knownState == .confirmed || current.knownState == .validating
+            guard current.knownState == .confirmed
+                    || current.knownState == .validating
+                    || current.knownState == .publishable
             else {
                 failVoiceDesignPublication(
                     current.knownState == .failed
@@ -1169,6 +1078,7 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
             )
             guard isCurrentVoiceDesignPublication(generation) else { return }
             guard validated.knownState == .validating
+                    || validated.knownState == .publishable
                     || validated.knownState == .failed
             else {
                 failVoiceDesignPublication(
@@ -1256,6 +1166,10 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
             voiceDesignPublication.validationAudioData = audio
             voiceDesignPublication.validationAudioWasPlayed = false
             voiceDesignPublication.message = nil
+            if context.autoPublish {
+                voiceDesignPublication.phase = .submittingReview
+                await submitVoiceDesignReviewAndPublish(context, generation: generation)
+            }
         } catch {
             failVoiceDesignPublication(
                 error,
@@ -1306,7 +1220,7 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
                 id: candidateID,
                 testText: nil,
                 capabilityKey: nil,
-                mode: .manualReview(review)
+                mode: context.autoPublish ? .automatedAcceptance : .manualReview(review)
             )
             guard isCurrentVoiceDesignPublication(generation) else { return }
             guard reviewed.knownState == .publishable,
@@ -1315,7 +1229,7 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
                   reviewed.latestValidation?.validationID == validationID
             else {
                 failVoiceDesignPublication(
-                    "人工复核尚未绑定到当前复验结果，暂时不能发布。",
+                    "验收尚未绑定到当前复验结果，暂时不能发布。",
                     retryStep: .submitReview,
                     generation: generation
                 )
@@ -1324,9 +1238,13 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
             voiceDesignPublication.phase = .publishing
             await publishVoiceDesignCandidate(context, generation: generation)
         } catch {
+            let serviceError = error as? ServiceAPIClientError
+            let needsFreshValidation = context.autoPublish
+                && serviceError?.statusCode == 409
+                && serviceError?.code == "voice_design_machine_validation_required"
             failVoiceDesignPublication(
                 error,
-                retryStep: .submitReview,
+                retryStep: needsFreshValidation ? .revalidate : .submitReview,
                 generation: generation
             )
         }

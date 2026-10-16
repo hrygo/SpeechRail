@@ -1393,7 +1393,7 @@ final class AppModelTests: XCTestCase {
 
         let events = await creator.events()
         XCTAssertEqual(
-            events,
+            events.filter { $0 != "candidate.get" },
             [
                 "create",
                 "reference.audio",
@@ -1401,7 +1401,6 @@ final class AppModelTests: XCTestCase {
                 "validate",
                 "validation.audio",
                 "accept",
-                "candidate.get",
                 "publish",
             ]
         )
@@ -1438,6 +1437,94 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.voiceDesignPublicationRetryActionTitle, "重新生成候选")
         let events = await creator.events()
         XCTAssertEqual(events, ["create"])
+    }
+
+    func testAutoPublicationRetryKeepsMachineAcceptanceAfterValidationWarning() async {
+        let creator = VoiceDesignWorkflowCreatorClient()
+        await creator.warnNextValidation()
+        let model = makeVoiceModel(
+            transport: ClosureControlTransport { request in
+                ControlResponse(requestID: request.requestID, command: request.command, status: .completed)
+            },
+            voiceDirectoryClient: creator,
+            voiceDesignClient: creator
+        )
+        let preview = VoiceDesignCandidateSnapshot(
+            slot: "A", seed: 42, title: "候选 A",
+            instructionSnapshot: "温和自然的小说旁白女声",
+            referenceTextSnapshot: "这是一段用于验证自动保存重试的测试参考文案。",
+            status: .ready, audioData: Data([0, 1, 2])
+        )
+        model.startVoiceDesignPublication(preview, name: "自动重试音色", autoPublish: true)
+        await waitForVoiceDesignPhase(.failed, snapshot: { model.voiceDesignPublication })
+
+        model.retryVoiceDesignPublication()
+        await waitForVoiceDesignPhase(.published, snapshot: { model.voiceDesignPublication })
+
+        let events = await creator.events()
+        XCTAssertEqual(events.filter { $0 == "create" }.count, 1)
+        XCTAssertTrue(events.contains("accept"))
+        XCTAssertFalse(events.contains("review"), "自动保存重试不能伪造人工听审")
+        XCTAssertEqual(model.lastPublishedDesignedVoice?.name, "自动重试音色")
+    }
+
+    func testAutoPublicationRetriesResumeFailedStepWithoutHumanReview() async {
+        for step in ["reference.audio", "validation.audio", "accept"] {
+            let creator = VoiceDesignWorkflowCreatorClient()
+            await creator.failNextStep(step)
+            let model = makeVoiceModel(
+                transport: ClosureControlTransport { request in
+                    ControlResponse(requestID: request.requestID, command: request.command, status: .completed)
+                },
+                voiceDirectoryClient: creator,
+                voiceDesignClient: creator
+            )
+            let preview = VoiceDesignCandidateSnapshot(
+                slot: "A", seed: 42, title: "候选 A",
+                instructionSnapshot: "温和自然的小说旁白女声",
+                referenceTextSnapshot: "这是一段用于验证中途断线恢复的测试参考文案。",
+                status: .ready, audioData: Data([0, 1, 2])
+            )
+            model.startVoiceDesignPublication(preview, name: "断线恢复音色", autoPublish: true)
+            await waitForVoiceDesignPhase(.failed, snapshot: { model.voiceDesignPublication })
+            model.retryVoiceDesignPublication()
+            await waitForVoiceDesignPhase(.published, snapshot: { model.voiceDesignPublication })
+
+            let events = await creator.events()
+            XCTAssertEqual(events.filter { $0 == "create" }.count, 1, step)
+            XCTAssertEqual(events.filter { $0 == "validate" }.count, 1, step)
+            XCTAssertFalse(events.contains("review"), step)
+            XCTAssertEqual(model.lastPublishedDesignedVoice?.name, "断线恢复音色", step)
+        }
+    }
+
+    func testAutoPublicationRevalidatesAfterAcceptanceEvidenceExpires() async {
+        let creator = VoiceDesignWorkflowCreatorClient()
+        await creator.expireNextAcceptance()
+        let model = makeVoiceModel(
+            transport: ClosureControlTransport { request in
+                ControlResponse(requestID: request.requestID, command: request.command, status: .completed)
+            },
+            voiceDirectoryClient: creator,
+            voiceDesignClient: creator
+        )
+        let preview = VoiceDesignCandidateSnapshot(
+            slot: "A", seed: 42, title: "候选 A",
+            instructionSnapshot: "温和自然的小说旁白女声",
+            referenceTextSnapshot: "这是一段用于验证过期验收证据恢复的测试参考文案。",
+            status: .ready, audioData: Data([0, 1, 2])
+        )
+        model.startVoiceDesignPublication(preview, name: "重新复验音色", autoPublish: true)
+        await waitForVoiceDesignPhase(.failed, snapshot: { model.voiceDesignPublication })
+        model.retryVoiceDesignPublication()
+        await waitForVoiceDesignPhase(.published, snapshot: { model.voiceDesignPublication })
+
+        let events = await creator.events()
+        XCTAssertEqual(events.filter { $0 == "create" }.count, 1)
+        XCTAssertEqual(events.filter { $0 == "validate" }.count, 2)
+        XCTAssertEqual(events.filter { $0 == "accept" }.count, 2)
+        XCTAssertFalse(events.contains("review"))
+        XCTAssertEqual(model.lastPublishedDesignedVoice?.name, "重新复验音色")
     }
 
     func testFailedVoiceDesignCancellationRetainsCandidateForRetry() async {
@@ -2217,6 +2304,10 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailVoiceDirectoryClient, 
     private var shouldFailNextCandidateCancel = false
     private var shouldFailNextValidation = false
     private var shouldFailNextValidationTerminally = false
+    private var shouldWarnNextValidation = false
+    private var nextFailedStep: String?
+    private var shouldExpireNextAcceptance = false
+    private var validationRequiresRefresh = false
     private var heldPublication: CheckedContinuation<VoiceDesignPublishResult, Error>?
     private var heldPublicationResult: VoiceDesignPublishResult?
     private var nextCandidateState = "generated"
@@ -2244,6 +2335,24 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailVoiceDirectoryClient, 
     /// terminal `failed` state, which no longer accepts re-validation.
     func failNextValidationWithTerminalCandidate() {
         shouldFailNextValidationTerminally = true
+    }
+
+    func warnNextValidation() {
+        shouldWarnNextValidation = true
+    }
+
+    func failNextStep(_ step: String) {
+        nextFailedStep = step
+    }
+
+    func expireNextAcceptance() {
+        shouldExpireNextAcceptance = true
+    }
+
+    private func failRequestedStep(_ step: String) throws {
+        guard nextFailedStep == step else { return }
+        nextFailedStep = nil
+        throw ServiceAPIClientError.requestFailed
     }
 
     func setNextCandidateState(_ state: String) {
@@ -2324,6 +2433,7 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailVoiceDirectoryClient, 
         expectedRevision: String
     ) async throws -> Data {
         recordedEvents.append("reference.audio")
+        try failRequestedStep("reference.audio")
         guard let currentCandidate,
               currentCandidate.id == id,
               currentCandidate.revision == expectedRevision
@@ -2339,6 +2449,7 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailVoiceDirectoryClient, 
         expectedRevision: String
     ) async throws -> Data {
         recordedEvents.append("validation.audio")
+        try failRequestedStep("validation.audio")
         guard let currentCandidate,
               currentCandidate.id == id,
               currentCandidate.revision == expectedRevision,
@@ -2384,8 +2495,23 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailVoiceDirectoryClient, 
         }
         if automatedAcceptance {
             recordedEvents.append("accept")
+            try failRequestedStep("accept")
+            if shouldExpireNextAcceptance {
+                shouldExpireNextAcceptance = false
+                validationRequiresRefresh = true
+            }
+            if validationRequiresRefresh {
+                throw ServiceAPIClientError.http(
+                    statusCode: 409,
+                    code: "voice_design_machine_validation_required",
+                    message: "Machine validation no longer satisfies the current gates",
+                    requestID: nil,
+                    retryable: false
+                )
+            }
         } else if humanReview == nil {
             recordedEvents.append("validate")
+            validationRequiresRefresh = false
         } else {
             recordedEvents.append("review")
         }
@@ -2436,12 +2562,14 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailVoiceDirectoryClient, 
                 retryable: true
             )
         }
-        let isPass = automatedAcceptance || (humanReview?.identity == .pass && humanReview?.naturalness == .pass)
+        let machineWarned = shouldWarnNextValidation && humanReview == nil && !automatedAcceptance
+        shouldWarnNextValidation = false
+        let isPass = !machineWarned && (automatedAcceptance || (humanReview?.identity == .pass && humanReview?.naturalness == .pass))
         let validation = VoiceDesignValidation(
             validationID: validationID,
             candidateRevision: candidateRevision,
             status: isPass ? "pass" : "warn",
-            machineStatus: "pass",
+            machineStatus: machineWarned ? "warn" : "pass",
             identityStatus: humanReview?.identity ?? .notReviewed,
             naturalnessStatus: humanReview?.naturalness ?? .notReviewed,
             automatedAcceptance: automatedAcceptance,
