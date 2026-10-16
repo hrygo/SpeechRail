@@ -1059,6 +1059,24 @@ public struct AudiobookBookWorkspaceView: View {
     @State private var auditionPreviewRoleID: UUID?
     @State private var auditionLoadingRoleID: UUID?
 
+    private static let castMinorArchetypes: [AudiobookVoiceArchetype] = [
+        .youngMale, .matureMale, .youngFemale, .matureFemale, .neutralEnsemble
+    ]
+
+    private var isAllCastExpanded: Bool {
+        !workflow.characters.isEmpty && expandedRoleIDs.count >= workflow.characters.count
+    }
+
+    private func toggleAllCastExpansion() {
+        withAnimation(.easeInOut(duration: 0.15)) {
+            if isAllCastExpanded {
+                expandedRoleIDs.removeAll()
+            } else {
+                expandedRoleIDs = Set(workflow.characters.map(\.id))
+            }
+        }
+    }
+
     private var castInspectorColumn: some View {
         @Bindable var bindableWorkflow = workflow
         let allAvailableVoices = workflow.mergedAvailableVoices(
@@ -1083,17 +1101,10 @@ public struct AudiobookBookWorkspaceView: View {
                         trailingDetail: "核心 \(leadCount) · 配角 \(minorCount)"
                     )
                     Spacer(minLength: 0)
-                    let allExpanded = !workflow.characters.isEmpty && expandedRoleIDs.count >= workflow.characters.count
                     Button {
-                        withAnimation(.easeInOut(duration: 0.15)) {
-                            if allExpanded {
-                                expandedRoleIDs.removeAll()
-                            } else {
-                                expandedRoleIDs = Set(workflow.characters.map(\.id))
-                            }
-                        }
+                        toggleAllCastExpansion()
                     } label: {
-                        Text(allExpanded ? "全部收起" : "全部展开")
+                        Text(isAllCastExpanded ? "全部收起" : "全部展开")
                             .font(SpeechRailDesignTokens.Typography.caption)
                     }
                     .speechRailButton(.secondary)
@@ -1152,162 +1163,197 @@ public struct AudiobookBookWorkspaceView: View {
                 }
 
                 SessionHairline()
-                SessionPanelActions {
-                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        if workflow.pendingCastingPlan?.hasUnavoidableSceneConflicts == true {
-                            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                                Image(systemName: "exclamationmark.triangle.fill")
-                                    .font(SpeechRailDesignTokens.Typography.callout)
-                                    .foregroundStyle(SpeechRailDesignTokens.Color.attention)
-                                    .accessibilityHidden(true)
-                                Text("当前音色数量不足以完全避开同场角色撞音，建议在「更多整理…」中点击「补全六类群像」扩展音色库。")
-                                    .font(SpeechRailDesignTokens.Typography.callout)
-                                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                                Spacer(minLength: 0)
-                            }
-                            .padding(SpeechRailDesignTokens.Spacing.sm)
-                            .background(
-                                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Radius.subtle)
-                                    .fill(SpeechRailDesignTokens.Surface.attentionTint)
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Radius.subtle)
-                                    .stroke(SpeechRailDesignTokens.Color.attention.opacity(0.4), lineWidth: 1)
-                            )
-                        }
+                castInspectorActions(activeBookVoices: activeBookVoices, allAvailableVoices: allAvailableVoices)
+            }
+        }
+    }
 
-                        if let progressText = workflow.leadVoiceCreationProgressText,
-                           workflow.isCreatingLeadExclusiveVoices
-                        {
-                            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                                ProgressView()
-                                    .controlSize(.small)
-                                Text(progressText)
-                                    .font(SpeechRailDesignTokens.Typography.caption)
-                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                                Spacer()
-                            }
-                        }
+    @ViewBuilder
+    private var unavoidableConflictsAlert: some View {
+        if workflow.pendingCastingPlan?.hasUnavoidableSceneConflicts == true {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(SpeechRailDesignTokens.Typography.callout)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                    .accessibilityHidden(true)
+                Text("当前音色数量不足以完全避开同场角色撞音，建议在「更多整理…」中点击「补全六类群像」扩展音色库。")
+                    .font(SpeechRailDesignTokens.Typography.callout)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                Spacer(minLength: 0)
+            }
+            .padding(SpeechRailDesignTokens.Spacing.sm)
+            .background(
+                SpeechRailDesignTokens.Corner.controlShape
+                    .fill(SpeechRailDesignTokens.Surface.attentionTint)
+            )
+            .overlay(
+                SpeechRailDesignTokens.Corner.controlShape
+                    .stroke(SpeechRailDesignTokens.Color.attention.opacity(0.4), lineWidth: 1)
+            )
+        }
+    }
 
-                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                            Menu {
-                                Button {
-                                    Task {
-                                        _ = await workflow.ensureSixArchetypeVoicesForBook()
-                                        await appModel.engine.refreshDiscovery()
-                                    }
-                                } label: {
-                                    Label("补全六类群像", systemImage: "person.3.fill")
-                                }
-                                .disabled(workflow.isCreatingLeadExclusiveVoices)
+    @ViewBuilder
+    private var leadVoiceCreationProgressView: some View {
+        if let progressText = workflow.leadVoiceCreationProgressText,
+           workflow.isCreatingLeadExclusiveVoices
+        {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                ProgressView()
+                    .controlSize(.small)
+                Text(progressText)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Spacer()
+            }
+        }
+    }
 
-                                Button {
-                                    Task {
-                                        _ = await workflow.ensureSixArchetypeVoicesForBook(quietBanner: true)
-                                        _ = await workflow.createExclusiveVoicesForLeadCharacters()
-                                        await appModel.engine.refreshDiscovery()
-                                    }
-                                } label: {
-                                    Label(
-                                        workflow.isCreatingLeadExclusiveVoices ? "生成音色中…" : "为主角生成专属音色",
-                                        systemImage: "person.wave.2.fill"
-                                    )
-                                }
-                                .disabled(workflow.isCreatingLeadExclusiveVoices)
+    @ViewBuilder
+    private var primaryCastingActionButton: some View {
+        if workflow.isAuditionConfirmedForSelectedBook {
+            Button {
+                workflow.workbenchTab = .production
+            } label: {
+                Label("开始制作章节", systemImage: "play.circle.fill")
+            }
+            .speechRailButton(.primary)
+            .accessibilityIdentifier("audiobook-start-production-action-button")
+        } else {
+            Button {
+                Task {
+                    _ = await workflow.ensureSixArchetypeVoicesForBook(quietBanner: true)
+                    _ = await workflow.createExclusiveVoicesForLeadCharacters(quietBanner: true)
+                    _ = await workflow.refreshAvailableVoices()
+                    await workflow.autoAssignRecommendedVoices()
+                }
+            } label: {
+                Label("一键智能配声", systemImage: "wand.and.stars")
+            }
+            .speechRailButton(.primary)
+            .disabled(workflow.isCreatingLeadExclusiveVoices)
+            .accessibilityIdentifier("audiobook-smart-assign-voices-button")
+        }
+    }
 
-                                Menu {
-                                    let minorArchetypes: [AudiobookVoiceArchetype] = [
-                                        .youngMale, .matureMale, .youngFemale, .matureFemale, .neutralEnsemble
-                                    ]
-                                    ForEach(minorArchetypes) { archetype in
-                                        let matchingMinors = workflow.minorCharactersByArchetype[archetype] ?? []
-                                        Menu("\(archetype.shortBadgeTitle)（\(matchingMinors.count) 人）") {
-                                            let voicesToList = activeBookVoices.isEmpty ? allAvailableVoices : activeBookVoices
-                                            if voicesToList.isEmpty {
-                                                Text("当前无可用合成音色")
-                                            } else {
-                                                ForEach(voicesToList) { voice in
-                                                    Button("批量绑定：\(voice.name)") {
-                                                        Task {
-                                                            await workflow.batchBindArchetype(archetype, to: voice)
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        .disabled(matchingMinors.isEmpty)
-                                    }
-                                } label: {
-                                    Label("按声部批量配音…", systemImage: "person.3.sequence")
-                                }
+    @ViewBuilder
+    private func castInspectorActions(
+        activeBookVoices: [SafeVoiceEntry],
+        allAvailableVoices: [SafeVoiceEntry]
+    ) -> some View {
+        SessionPanelActions {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                unavoidableConflictsAlert
+                leadVoiceCreationProgressView
 
-                                Button {
-                                    workflow.isShowingCastMergeSheet = true
-                                } label: {
-                                    Label("合并/拆分角色…", systemImage: "arrow.triangle.merge")
-                                }
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    castMoreMenu(activeBookVoices: activeBookVoices, allAvailableVoices: allAvailableVoices)
+                    Spacer()
+                    primaryCastingActionButton
+                }
 
-                                Divider()
+                if let plan = workflow.pendingCastingPlan {
+                    AudiobookCastingReview(workflow: workflow).id(plan.inputDigest)
+                }
+            }
+        }
+    }
 
-                                let allExpanded = !workflow.characters.isEmpty && expandedRoleIDs.count >= workflow.characters.count
-                                Button {
-                                    withAnimation(.easeInOut(duration: 0.15)) {
-                                        if allExpanded {
-                                            expandedRoleIDs.removeAll()
-                                        } else {
-                                            expandedRoleIDs = Set(workflow.characters.map(\.id))
-                                        }
-                                    }
-                                } label: {
-                                    Label(
-                                        allExpanded ? "全部收起角色卡片" : "全部展开角色卡片",
-                                        systemImage: allExpanded ? "chevron.up.circle" : "chevron.down.circle"
-                                    )
-                                }
+    @ViewBuilder
+    private func castMoreMenu(
+        activeBookVoices: [SafeVoiceEntry],
+        allAvailableVoices: [SafeVoiceEntry]
+    ) -> some View {
+        Menu {
+            Button {
+                Task {
+                    _ = await workflow.ensureSixArchetypeVoicesForBook()
+                    await appModel.engine.refreshDiscovery()
+                }
+            } label: {
+                Label("补全六类群像", systemImage: "person.3.fill")
+            }
+            .disabled(workflow.isCreatingLeadExclusiveVoices)
 
-                                Button {
-                                    Task { await workflow.undoLastCastingChange() }
-                                } label: {
-                                    Label("撤销上次配声", systemImage: "arrow.uturn.backward")
-                                }
-                            } label: {
-                                Label("更多整理…", systemImage: "ellipsis.circle")
-                            }
-                            .speechRailButton(.secondary)
-                            .accessibilityIdentifier("audiobook-cast-more-menu")
+            Button {
+                Task {
+                    _ = await workflow.ensureSixArchetypeVoicesForBook(quietBanner: true)
+                    _ = await workflow.createExclusiveVoicesForLeadCharacters()
+                    await appModel.engine.refreshDiscovery()
+                }
+            } label: {
+                Label(
+                    workflow.isCreatingLeadExclusiveVoices ? "生成音色中…" : "为主角生成专属音色",
+                    systemImage: "person.wave.2.fill"
+                )
+            }
+            .disabled(workflow.isCreatingLeadExclusiveVoices)
 
-                            Spacer()
+            castArchetypeBatchMenu(activeBookVoices: activeBookVoices, allAvailableVoices: allAvailableVoices)
 
-                            if workflow.isAuditionConfirmedForSelectedBook {
-                                Button {
-                                    workflow.workbenchTab = .production
-                                } label: {
-                                    Label("开始制作章节", systemImage: "play.circle.fill")
-                                }
-                                .speechRailButton(.primary)
-                                .accessibilityIdentifier("audiobook-start-production-action-button")
-                            } else {
-                                Button {
-                                    Task {
-                                        _ = await workflow.ensureSixArchetypeVoicesForBook(quietBanner: true)
-                                        _ = await workflow.createExclusiveVoicesForLeadCharacters(quietBanner: true)
-                                        _ = await workflow.refreshAvailableVoices()
-                                        await workflow.autoAssignRecommendedVoices()
-                                    }
-                                } label: {
-                                    Label("一键智能配声", systemImage: "wand.and.stars")
-                                }
-                                .speechRailButton(.primary)
-                                .disabled(workflow.isCreatingLeadExclusiveVoices)
-                                .accessibilityIdentifier("audiobook-smart-assign-voices-button")
-                            }
-                        }
-                        if let plan = workflow.pendingCastingPlan {
-                            AudiobookCastingReview(workflow: workflow).id(plan.inputDigest)
+            Button {
+                workflow.isShowingCastMergeSheet = true
+            } label: {
+                Label("合并/拆分角色…", systemImage: "arrow.triangle.merge")
+            }
+
+            Divider()
+
+            Button {
+                toggleAllCastExpansion()
+            } label: {
+                Label(
+                    isAllCastExpanded ? "全部收起角色卡片" : "全部展开角色卡片",
+                    systemImage: isAllCastExpanded ? "chevron.up.circle" : "chevron.down.circle"
+                )
+            }
+
+            Button {
+                Task { await workflow.undoLastCastingChange() }
+            } label: {
+                Label("撤销上次配声", systemImage: "arrow.uturn.backward")
+            }
+        } label: {
+            Label("更多整理…", systemImage: "ellipsis.circle")
+        }
+        .speechRailButton(.secondary)
+        .accessibilityIdentifier("audiobook-cast-more-menu")
+    }
+
+    @ViewBuilder
+    private func castArchetypeSubmenu(
+        archetype: AudiobookVoiceArchetype,
+        voices: [SafeVoiceEntry]
+    ) -> some View {
+        let matchingMinors = workflow.minorCharactersByArchetype[archetype] ?? []
+        Menu("\(archetype.shortBadgeTitle)（\(matchingMinors.count) 人）") {
+            if voices.isEmpty {
+                Text("当前无可用合成音色")
+            } else {
+                ForEach(voices) { voice in
+                    Button("批量绑定：\(voice.name)") {
+                        Task {
+                            await workflow.batchBindArchetype(archetype, to: voice)
                         }
                     }
                 }
             }
+        }
+        .disabled(matchingMinors.isEmpty)
+    }
+
+    @ViewBuilder
+    private func castArchetypeBatchMenu(
+        activeBookVoices: [SafeVoiceEntry],
+        allAvailableVoices: [SafeVoiceEntry]
+    ) -> some View {
+        let voicesToList = activeBookVoices.isEmpty ? allAvailableVoices : activeBookVoices
+        Menu {
+            ForEach(Self.castMinorArchetypes) { archetype in
+                castArchetypeSubmenu(archetype: archetype, voices: voicesToList)
+            }
+        } label: {
+            Label("按声部批量配音…", systemImage: "person.3.sequence")
         }
     }
 

@@ -673,6 +673,10 @@ public final class AppModel {
         await voiceWorkflow.checkVoiceOutput(voiceID: voiceID)
     }
 
+    public func clearLastRegisteredCloneVoice() {
+        voiceWorkflow.clearLastRegisteredCloneVoice()
+    }
+
     public func playWork(_ work: CreativeWork) {
         dubbingWorkflow.playWork(work)
     }

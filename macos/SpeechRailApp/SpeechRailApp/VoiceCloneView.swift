@@ -749,6 +749,7 @@ public struct VoiceCloneView: View {
         case .reject:
             return "这段参考音频没通过（\(facts)）。\(codes)现在保存会被拒绝，请先重录一段。"
         case .unevaluated:
+            return "这次没有给出结论（\(facts)）。\(codes)保存时服务会再独立检查一次。"
         }
     }
 
@@ -808,7 +809,7 @@ public struct VoiceCloneView: View {
                         action: { Task { await model.checkVoiceOutput(voiceID: voice.id) } }
                     )
                 case let .failed(_, _, message), let .error(_, _, message):
-                    let guidance = cloneQualityDiagnosticMessage(for: message)
+                    let guidance = Self.cloneQualityDiagnosticMessage(for: message)
                     let fullMessage = guidance.isEmpty
                         ? "「\(voice.name)」未达到正式制作要求：\(message)"
                         : "「\(voice.name)」未达到正式制作要求：\(message)。排障建议：\(guidance)"

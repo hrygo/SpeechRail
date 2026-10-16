@@ -529,7 +529,7 @@ final class AudiobookWorkflowTests: XCTestCase {
     ) async {
         for _ in 0..<1_000 {
             if !workflow.isProducing { return }
-            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(5))
         }
         XCTFail("有声书制作任务未结束", file: file, line: line)
     }
