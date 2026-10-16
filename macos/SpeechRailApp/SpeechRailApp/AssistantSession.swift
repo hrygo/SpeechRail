@@ -1115,6 +1115,11 @@ public final class AssistantSession {
     ) async {
         ttsStream?.invalidate()
         ttsStream = nil
+        // Cancel owned consumers before intentional source completion can be mistaken for loss.
+        let closingUploader = uploaderTask
+        let closingReceiver = receiverTask
+        let closingPump = pump
+        stopPumpTasks()
         if let client { await client.close() }
         client = nil
         if let audioSession {
@@ -1124,7 +1129,7 @@ public final class AssistantSession {
             await source?.stop()
         }
         source = nil
-        stopPumpTasks()
+        _ = await (closingUploader?.value, closingReceiver?.value, closingPump?.value)
         level = 0
         blocked = .streamFailed(message)
         phase = .paused
@@ -1761,6 +1766,8 @@ public final class AssistantSession {
             recordSealResult(seal, targetID: recordID)
         }
         if preservingRecord {
+            // The record remains open for keyboard input after the failed voice source is joined.
+            inputLifecycle = .active
             isStoppingIntentionally = false
             level = 0
             blocked = .streamFailed(lastFailure ?? "音频来源已中断，请重试语音。")
@@ -2035,6 +2042,12 @@ public final class AssistantSession {
         // 只做轻量归约与身份校验；取消的远端等待由独立 effect 持有，不占用 receiver。
         stopPumpTasks()
         audioInputIsIncomplete = false
+        // Sequence and answer-eligibility baselines belong to this capture epoch;
+        // retain cumulative loss evidence without charging a rebuilt source twice.
+        lastUploadedChunkSequence = nil
+        lastChunkDroppedBefore = nil
+        lastAnsweredChunksSkipped = uploadedChunksSkipped
+        lastAnsweredSamplesDropped = uploadedSamplesDropped
         activeAudioStream = stream
         uploaderTask = Task { [weak self] in
             do {
@@ -2044,7 +2057,7 @@ public final class AssistantSession {
                 }
                 if !Task.isCancelled { self?.audioStreamFailed(AudioStreamError(reason: .sourceLost), connection: connection) }
             } catch {
-                if !(error is CancellationError) { self?.audioStreamFailed(error, connection: connection) }
+                if !Task.isCancelled, !(error is CancellationError) { self?.audioStreamFailed(error, connection: connection) }
             }
         }
         receiverTask = Task { [weak self] in

@@ -7,7 +7,7 @@ audience: "macOS 开发者、测试与产品负责人"
 
 # SpeechRail App 性能优化实施与验收记录
 
-核验时间：2026-10-16，Asia/Shanghai；实施阶段集成于 19:35 CST 完成，提交前 Swift 定向复核于 19:54 CST 完成。性能改动的源码基线为 `bedabb6a93669144c12a4e8dba6c5305f4503128`，改后源码为 `7f32582b38e3c4c87ed9ce982246da57ed6218dd`，包含创作存储与投影、流式音频与会话两个逻辑提交；后续文档提交不改变该源码。范围与预算见[设计](../superpowers/specs/2026-10-16-app-performance-design.md)，逐项 RED/GREEN 见[实施计划](../superpowers/plans/2026-10-16-app-performance-implementation-plan.md)，当前执行边界见[开发手册](../developers/macos-app-performance.md)。
+核验时间：2026-10-16，Asia/Shanghai；实施阶段集成于 19:35 CST 完成，提交前 Swift 定向复核于 19:54 CST 完成。性能改动的源码基线为 `bedabb6a93669144c12a4e8dba6c5305f4503128`，改后源码为 `7f32582b38e3c4c87ed9ce982246da57ed6218dd`，包含创作存储与投影、流式音频与会话两个逻辑提交；提交时的文档整理未改变该源码；PR #375 后续 CI 修复另见下节。范围与预算见[设计](../superpowers/specs/2026-10-16-app-performance-design.md)，逐项 RED/GREEN 见[实施计划](../superpowers/plans/2026-10-16-app-performance-implementation-plan.md)，当前执行边界见[开发手册](../developers/macos-app-performance.md)。
 
 按用户要求，PR 保留当前分支全部内容，目标为 `main`，提交时远端基线为 `383e6e23`。其中已有的 `bedabb6a` 是会议归属、实时转写与服务对齐修复，包含服务代码、公共文档及历史实施记录；其范围和当时实测见[专项记录](../superpowers/plans/2026-10-16-realtime-layout-diarization-repair.md)。这些历史局部实测不覆盖本次性能改动后的制品，也不替代本记录 B/C 层验收。
 
@@ -51,6 +51,19 @@ audience: "macOS 开发者、测试与产品负责人"
 | sources 清单 / PBX plist / 差异空白 / 提交敏感模式 | 通过；敏感模式扫描 0 命中 |
 
 Python 首次准备环境触发可选 native worker 打包编译，已主动中止；定向测试使用项目已有 `SPEECHRAIL_SKIP_NATIVE_WORKER_BUILD=1` 开关重启并通过，没有将 native 发布制品列入验收。本次没有运行完整 Python/Swift 套件、coverage gate、真实性能或交互验收；上述定向用例也不与实施阶段重复计数。
+
+## PR #375 CI 跟进
+
+2026-10-16，对完整 CI 的失败项继续排查，以下证据不替代 B/C 层验收：
+
+- 独立 LLM 编译脚本遗漏拆出的共享流与性能计量文件，本地按原入口复现类型缺失；补齐三个共享源码后独立编译通过，4 个业务依赖隔离守卫用例通过，仍不引入功能模块依赖。
+- 完整 Swift 回归复现助手语音断裂后的恢复失败。保持音频不连续即终止来源的策略；故障来源收尾后，同场文字输入恢复可用；显式重建采集 epoch 后重新建立序号与回答资格水位，累计丢音证据保留。对应测试先失败，再验证恢复路径。
+- 远端取消确认失败时，先取消上传/接收任务，再关闭音频与连接并等待任务退出，避免正常关闭被误报为来源丢失而再次进入 ending。取消后的上传任务不再上报采集失败。
+- 波形测试的“不响应取消的物理读者”改为 continuation 挂起，保留必须显式释放才退出的条件，避免多个并行测试用 semaphore 占满 Swift 协作线程池。9 个波形用例在 `LIBDISPATCH_COOPERATIVE_POOL_STRICT=1` 下通过；完整套件曾使测试调度延迟约 5 秒，超过辅助函数原有的 3 秒存活性等待；该等待放宽到 15 秒并透传失败调用位置，不改变断言。CI 是否恢复由新 head 的完整门禁确认，没有调高作业的 15 分钟超时或跳过测试。
+
+修复后的完整 `swift test --package-path macos/SpeechRailApp` 退出 0：1,733 个 XCTest（1 个既有 skip）、616 个 Swift Testing 用例 / 55 suites，0 failures。远端门禁以 PR 最终 head 的检查状态为准。
+
+#369、#371、#373 保持开放；真实性能、硬件/XPC、长时稳定性与交互验收仍未完成。源码回退还须覆盖以上 CI 修复与相应测试；仅撤销最初两个性能提交不足以完整回退本 PR。
 
 ## 独立审查与修复
 
