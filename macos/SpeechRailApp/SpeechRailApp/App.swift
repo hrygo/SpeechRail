@@ -1169,10 +1169,17 @@ private struct UITestCreatorClient: SpeechRailVoiceDirectoryClient, SpeechRailSp
         id: String,
         testText: String?,
         capabilityKey: String?,
-        humanReview: VoiceDesignHumanReview?,
-        automatedAcceptance: Bool
+        mode: VoiceDesignValidationMode
     ) async throws -> VoiceDesignCandidate {
-        try await voiceDesignStore.validate(
+        let (humanReview, automatedAcceptance): (VoiceDesignHumanReview?, Bool) = switch mode {
+        case .validationOnly:
+            (nil, false)
+        case .automatedAcceptance:
+            (nil, true)
+        case let .manualReview(review):
+            (review, false)
+        }
+        return try await voiceDesignStore.validate(
             id: id,
             humanReview: humanReview,
             automatedAcceptance: automatedAcceptance

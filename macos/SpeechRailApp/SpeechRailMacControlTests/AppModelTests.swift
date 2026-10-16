@@ -1116,6 +1116,46 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(message, "检查期间音色版本发生变化，请重新检查。")
     }
 
+    func testClearLastRegisteredCloneVoiceResetsCloneAndCheckState() async {
+        let creator = VoiceOutputCheckCreatorClient(
+            response: VoiceQualityRunResponse(
+                legacyReport: VoiceQualityReportSnapshotV2(status: .pass, runID: "vq_test"),
+                validationPersisted: true
+            ),
+            voices: [voiceOutputCheckVoice(id: "voice_clone_test")]
+        )
+        let model = await makeVoiceOutputCheckModel(creatorClient: creator)
+        _ = await model.checkVoiceOutput(voiceID: "voice_clone_test")
+        guard case .passed = model.voiceOutputCheck else {
+            XCTFail("Expected .passed, got \(model.voiceOutputCheck)")
+            return
+        }
+
+        model.clearLastRegisteredCloneVoice()
+        XCTAssertNil(model.lastRegisteredCloneVoice)
+        XCTAssertEqual(model.voiceOutputCheck, .idle)
+    }
+
+    func testVoiceCloneQualityDiagnosticGuidanceMapping() {
+        // AC-3.1: SNR / Noise
+        let noiseGuidance = VoiceWorkflowModel.cloneQualityDiagnosticMessage(for: "audio snr too low (12dB)")
+        XCTAssertTrue(noiseGuidance.contains("环境噪音偏高，建议在安静环境下录制"))
+        let noiseGuidanceAlt = VoiceWorkflowModel.cloneQualityDiagnosticMessage(for: "Background noise detected")
+        XCTAssertTrue(noiseGuidanceAlt.contains("环境噪音偏高，建议在安静环境下录制"))
+
+        // AC-3.2: Duration / Short
+        let durationGuidance = VoiceWorkflowModel.cloneQualityDiagnosticMessage(for: "Audio duration 2.1s too short")
+        XCTAssertTrue(durationGuidance.contains("有效语音过短，建议提供 5～15 秒连续自然语流"))
+
+        // AC-3.3: Silence
+        let silenceGuidance = VoiceWorkflowModel.cloneQualityDiagnosticMessage(for: "Too much silence in leading/trailing window")
+        XCTAssertTrue(silenceGuidance.contains("包含过多静音，建议裁剪"))
+
+        // Unknown
+        let unknownGuidance = VoiceWorkflowModel.cloneQualityDiagnosticMessage(for: "Unknown failure")
+        XCTAssertEqual(unknownGuidance, "")
+    }
+
     /// A check that started for one voice must not overwrite the state after the
     /// user switched to a different voice and started a new check.
     func testLateVoiceOutputCheckResultDoesNotPolluteNewerSelection() async throws {
@@ -1569,6 +1609,28 @@ final class AppModelTests: XCTestCase {
         model.markVoiceDesignReferenceAudioPlaybackFinished(successfully: true)
         model.confirmVoiceDesignReference()
         await waitForVoiceDesignPhase(.awaitingValidationReview, snapshot: { model.voiceDesignPublication })
+    }
+
+    func testVoiceDesignValidationModeEquivalenceAndEncoding() async throws {
+        let client = VoiceDesignWorkflowCreatorClient()
+        _ = try await client.createVoiceDesignCandidate(voiceID: "v1", name: "n", instruction: "i", referenceText: "r", seed: 1, idempotencyKey: nil)
+        _ = try await client.confirmVoiceDesignCandidate(id: "v1", referenceText: nil)
+
+        // Mode: validationOnly
+        _ = try await client.validateVoiceDesignCandidate(id: "v1", testText: nil, capabilityKey: nil, mode: .validationOnly)
+        let events1 = await client.events()
+        XCTAssertEqual(events1.last, "validate")
+
+        // Mode: automatedAcceptance
+        _ = try await client.validateVoiceDesignCandidate(id: "v1", testText: nil, capabilityKey: nil, mode: .automatedAcceptance)
+        let events2 = await client.events()
+        XCTAssertEqual(events2.last, "accept")
+
+        // Mode: manualReview
+        let review = VoiceDesignHumanReview(validationID: "val-1", identity: .pass, naturalness: .pass)
+        _ = try await client.validateVoiceDesignCandidate(id: "v1", testText: nil, capabilityKey: nil, mode: .manualReview(review))
+        let events3 = await client.events()
+        XCTAssertEqual(events3.last, "review")
     }
 
     private func waitForVoiceDesignPhase(
@@ -2278,9 +2340,16 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailVoiceDirectoryClient, 
         id: String,
         testText: String?,
         capabilityKey: String?,
-        humanReview: VoiceDesignHumanReview?,
-        automatedAcceptance: Bool
+        mode: VoiceDesignValidationMode
     ) async throws -> VoiceDesignCandidate {
+        let (humanReview, automatedAcceptance): (VoiceDesignHumanReview?, Bool) = switch mode {
+        case .validationOnly:
+            (nil, false)
+        case .automatedAcceptance:
+            (nil, true)
+        case let .manualReview(review):
+            (review, false)
+        }
         if automatedAcceptance {
             recordedEvents.append("accept")
         } else if humanReview == nil {

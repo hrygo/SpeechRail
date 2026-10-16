@@ -81,10 +81,54 @@ final class AudiobookWorkflowTests: XCTestCase {
             self.beforeRender = beforeRender
         }
 
+        var leadVoiceCreationHandler: (@Sendable (AudiobookLeadVoiceCreationRequest, Int) async throws -> AudiobookLeadVoiceCreationOutput)?
+
+        private var dynamicVoices: [SafeVoiceEntry] = []
+
         func createAndPublishLeadVoice(_ request: AudiobookLeadVoiceCreationRequest) async throws -> AudiobookLeadVoiceCreationOutput {
-            leadLock.withLock { leadRequests += 1 }
-            return .init(voiceID: "v-designed-narrator", voiceName: "设计旁白",
-                voiceRevision: "vr_0123456789abcdef0123456789abcdef", modelRevision: String(repeating: "a", count: 40))
+            let count = leadLock.withLock {
+                leadRequests += 1
+                return leadRequests
+            }
+            let output: AudiobookLeadVoiceCreationOutput
+            if let handler = leadVoiceCreationHandler {
+                output = try await handler(request, count)
+            } else {
+                output = .init(voiceID: "v-designed-narrator", voiceName: "设计旁白",
+                    voiceRevision: "vr_0123456789abcdef0123456789abcdef", modelRevision: String(repeating: "a", count: 40))
+            }
+            leadLock.withLock {
+                let model = ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    runtimeRevision: output.modelRevision,
+                    catalogRevision: output.modelRevision
+                )
+                let desc = SafeVoiceDescriptor(
+                    voiceMode: "instruction",
+                    locales: ["zh-CN"],
+                    styleTags: [],
+                    pitchBand: "unknown",
+                    timbreFamily: "unknown",
+                    baselinePace: "unknown",
+                    sourceType: "instruction_profile",
+                    metadataMethod: "declared_only"
+                )
+                dynamicVoices.removeAll { $0.id == output.voiceID }
+                dynamicVoices.append(SafeVoiceEntry(
+                    id: output.voiceID,
+                    name: output.voiceName,
+                    mode: "clone",
+                    available: true,
+                    availabilityReason: .available,
+                    voiceRevision: output.voiceRevision,
+                    voiceIdentityAssurance: .contentAddressed,
+                    model: model,
+                    descriptors: desc,
+                    operations: ["http_speech": JSONValue(.object(["parameters": JSONValue(.object(["speed": JSONValue(.object(["status": JSONValue(.string("supported")), "minimum": JSONValue(.number(0.25)), "maximum": JSONValue(.number(4))]))]))]))],
+                    productionReady: true
+                ))
+            }
+            return output
         }
 
         func fetchEffectiveCapabilities() async throws -> EffectiveCapabilitySnapshot {
@@ -103,6 +147,7 @@ final class AudiobookWorkflowTests: XCTestCase {
                 runtimeRevision: String(repeating: "a", count: 40),
                 catalogRevision: String(repeating: "a", count: 40)
             )
+            let dynamic = leadLock.withLock { dynamicVoices }
             return EffectiveCapabilitySnapshot(
                 serviceInstanceEpoch: "e1",
                 catalogRevision: "c1",
@@ -127,7 +172,7 @@ final class AudiobookWorkflowTests: XCTestCase {
                         availabilityReason: .available, voiceRevision: "vr_0123456789abcdef0123456789abcdef",
                         voiceIdentityAssurance: .contentAddressed, model: model, descriptors: desc,
                         operations: ["http_speech": JSONValue(.object(["parameters": JSONValue(.object(["speed": JSONValue(.object(["status": JSONValue(.string("supported")), "values": JSONValue(.array([JSONValue(.number(1))]))]))]))]))], productionReady: true)
-                ],
+                ] + dynamic,
                 operations: [:],
                 guarantees: [:]
             )
@@ -1553,6 +1598,64 @@ final class AudiobookWorkflowTests: XCTestCase {
         XCTAssertEqual(workflow.voiceBindings[role.id], original)
     }
 
+    func testLeadVoiceCreationGracefulFallbackOnTimeout() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let renderer = WorkflowFakeRenderer()
+        let (workflow, _) = makeWorkflow(renderer: renderer, store: store)
+        let text = "第一章 渡口\n“我们走吧。”\n“好，这就出发。”\n"
+        let imported = try await importBook(into: workflow, fileName: "lead_fallback.txt", text: text)
+        let chapter = try XCTUnwrap(workflow.chapters.first)
+        let role1 = AudiobookCharacter(bookID: imported.bookID, displayName: "林远", chapterIDs: [chapter.id])
+        let role2 = AudiobookCharacter(bookID: imported.bookID, displayName: "苏月", chapterIDs: [chapter.id])
+        try await store.saveCharacters(bookID: imported.bookID, characters: workflow.characters + [role1, role2])
+        let source = try await store.sourceIndex(for: imported.bookID)
+        let atoms = try await store.atoms(for: imported.bookID, chapterID: chapter.id)
+        let spoken = try atoms.filter { try source.text(in: $0.sourceRange).contains("“") }
+        let annotations = [
+            AudiobookAnnotation(bookID: imported.bookID, chapterID: chapter.id, windowID: UUID(), atomID: spoken[0].id, sourceRange: spoken[0].sourceRange, assignment: .assigned(roleID: role1.id)),
+            AudiobookAnnotation(bookID: imported.bookID, chapterID: chapter.id, windowID: UUID(), atomID: spoken[1].id, sourceRange: spoken[1].sourceRange, assignment: .assigned(roleID: role2.id))
+        ]
+        try await store.saveAnnotations(bookID: imported.bookID, annotations: annotations)
+        await workflow.openBook(imported.bookID)
+        _ = await workflow.ensureSixArchetypeVoicesForBook(for: imported.bookID, quietBanner: true)
+
+        renderer.leadVoiceCreationHandler = { request, count in
+            if request.roleID == role2.id {
+                throw ServiceAPIClientError.requestTimedOut
+            }
+            return .init(
+                voiceID: "v-exclusive-\(request.targetVoiceID)",
+                voiceName: request.voiceName,
+                voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                modelRevision: String(repeating: "a", count: 40)
+            )
+        }
+
+        let createdCount = await workflow.createExclusiveVoicesForLeadCharacters(for: imported.bookID)
+        XCTAssertGreaterThanOrEqual(createdCount, 1)
+        guard let summary = workflow.lastLeadVoiceCreationSummary else {
+            XCTFail("Expected lastLeadVoiceCreationSummary")
+            return
+        }
+        XCTAssertFalse(summary.fallbacks.isEmpty)
+        let fallbackID = summary.fallbacks.first!.roleID
+        XCTAssertEqual(fallbackID, role2.id)
+        XCTAssertTrue(workflow.fallbackRoleIDs.contains(fallbackID))
+
+        for character in workflow.characters {
+            let binding = workflow.voiceBindings[character.id]
+            XCTAssertNotNil(binding, "角色 \(character.displayName) 必须具备合法音色绑定")
+        }
+
+        let fallbackBinding = workflow.voiceBindings[fallbackID]
+        XCTAssertNotNil(fallbackBinding)
+        XCTAssertTrue(fallbackBinding!.isSynthesisReady)
+
+        let banner = workflow.bannerMessage ?? ""
+        XCTAssertTrue(banner.contains("专属音色"))
+        XCTAssertTrue(banner.contains("已回退为"))
+    }
+
     func testVoiceDesignReturnPreservesBookAndRole() async throws {
         let (workflow, _) = makeWorkflow()
         let txtURL = tempRoot.appendingPathComponent("voice_return.txt")
@@ -1639,5 +1742,76 @@ final class AudiobookWorkflowTests: XCTestCase {
         )
         XCTAssertEqual(windows.count, 3, "种子书必须规划为 3 窗（每章 1 窗）")
         XCTAssertEqual(Set(windows.map(\.chapterID)).count, 3, "3 窗应分属 3 个不同章节")
+    }
+
+    func testResolvingLastUnknownSpeakerAutoConfirmsCastAndEnablesProduction() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, _) = makeWorkflow(store: store)
+        let txtURL = tempRoot.appendingPathComponent("resolve_unknown_test.txt")
+        try Data("第一章 试炼\n林远站在长阶下。\n“准备好了吗？”老者问道。\n".utf8).write(to: txtURL)
+
+        await workflow.prepareImport(fileURL: txtURL, encoding: .utf8)
+        await workflow.confirmImport()
+        let bookID = try XCTUnwrap(workflow.selectedBook?.id)
+
+        let chapters = try await store.chapters(for: bookID)
+        let chapter = try XCTUnwrap(chapters.first)
+        let atoms = try await store.atoms(for: bookID, chapterID: chapter.id)
+            .filter { $0.kind != .formatting }
+        XCTAssertGreaterThanOrEqual(atoms.count, 2)
+
+        let characters = try await store.characters(for: bookID)
+        let narrator = try XCTUnwrap(characters.first(where: { $0.isNarrator }))
+
+        // 绑定旁白音色
+        await workflow.bindVoice(
+            roleID: narrator.id,
+            binding: AudiobookVoiceBinding(
+                roleID: narrator.id,
+                voiceID: "v-narrator",
+                voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                modelRevision: String(repeating: "a", count: 40)
+            )
+        )
+
+        // 段落 1 分配给旁白，段落 2 为未分配（待确认）
+        let ann1 = AudiobookAnnotation(
+            bookID: bookID,
+            chapterID: chapter.id,
+            windowID: UUID(),
+            atomID: atoms[0].id,
+            sourceRange: atoms[0].sourceRange,
+            assignment: .assigned(roleID: narrator.id)
+        )
+        let ann2 = AudiobookAnnotation(
+            bookID: bookID,
+            chapterID: chapter.id,
+            windowID: UUID(),
+            atomID: atoms[1].id,
+            sourceRange: atoms[1].sourceRange,
+            assignment: .unknown(reason: "歧义对白", candidateRoleIDs: [])
+        )
+        try await store.saveAnnotations(bookID: bookID, annotations: [ann1, ann2])
+        var book = try await store.book(id: bookID)
+        book.analysisState = .allWindowsValidated
+        try await store.updateBook(book)
+
+        await workflow.leaveWorkshop()
+        await workflow.openBook(bookID)
+        XCTAssertFalse(workflow.isAuditionConfirmedForSelectedBook)
+        XCTAssertEqual(workflow.allUnknownAnnotations.count, 1)
+
+        // 人工确认最后一个未知对白
+        await workflow.assignSpeakerAndAdvanceToNextUnknown(atomID: atoms[1].id, roleID: narrator.id)
+
+        // 断言自动锁定与文案 (AC-1.1, AC-1.2, AC-1.3)
+        XCTAssertTrue(workflow.allUnknownAnnotations.isEmpty)
+        XCTAssertTrue(workflow.isAuditionConfirmedForSelectedBook)
+        XCTAssertNotNil(workflow.selectedBook?.confirmedAuditionVoiceSetDigest)
+        XCTAssertEqual(
+            workflow.bannerMessage,
+            "全部台词已确认完毕，角色与音色已自动锁定，可直接开始制作章节。"
+        )
+        XCTAssertNil(workflow.errorMessage)
     }
 }

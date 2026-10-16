@@ -598,9 +598,16 @@ public final class ServiceAPIClient: @unchecked Sendable {
         id: String,
         testText: String?,
         capabilityKey: String?,
-        humanReview: VoiceDesignHumanReview?,
-        automatedAcceptance: Bool
+        mode: VoiceDesignValidationMode
     ) async throws -> VoiceDesignCandidate {
+        let (humanReview, automatedAcceptance): (VoiceDesignHumanReview?, Bool) = switch mode {
+        case .validationOnly:
+            (nil, false)
+        case .automatedAcceptance:
+            (nil, true)
+        case let .manualReview(review):
+            (review, false)
+        }
         let response: VoiceDesignCandidateEnvelope = try await postJSON(
             path: try voiceDesignPath(id: id) + "/validate",
             body: VoiceDesignValidateRequestBody(

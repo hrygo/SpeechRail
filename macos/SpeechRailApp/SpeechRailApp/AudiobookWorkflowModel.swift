@@ -255,6 +255,33 @@ public final class AudiobookWorkflowModel {
     public private(set) var isCreatingLeadExclusiveVoices: Bool = false
     public private(set) var leadVoiceCreationProgressText: String?
 
+    public struct LeadVoiceCreationSummary: Sendable, Equatable {
+        public var attemptedCount: Int
+        public var succeededCount: Int
+        public var fallbacks: [(roleID: UUID, roleName: String, fallbackArchetypeName: String)]
+
+        public init(
+            attemptedCount: Int = 0,
+            succeededCount: Int = 0,
+            fallbacks: [(roleID: UUID, roleName: String, fallbackArchetypeName: String)] = []
+        ) {
+            self.attemptedCount = attemptedCount
+            self.succeededCount = succeededCount
+            self.fallbacks = fallbacks
+        }
+
+        public static func == (lhs: LeadVoiceCreationSummary, rhs: LeadVoiceCreationSummary) -> Bool {
+            lhs.attemptedCount == rhs.attemptedCount &&
+            lhs.succeededCount == rhs.succeededCount &&
+            lhs.fallbacks.map(\.roleID) == rhs.fallbacks.map(\.roleID)
+        }
+    }
+
+    /// 最近一次主要角色专属音色生成的统计摘要与优雅降级记录。
+    public private(set) var lastLeadVoiceCreationSummary: LeadVoiceCreationSummary?
+    /// 自动回退为群像音色的角色集合（用于展示重试标识）。
+    public private(set) var fallbackRoleIDs: Set<UUID> = []
+
     /// 当前从引擎实时拉取并缓存的全部可用音色目录（含系统预置、克隆音色、六类群像音色与本书专属音色）。
     public private(set) var catalogVoices: [SafeVoiceEntry] = []
 
@@ -883,7 +910,19 @@ public final class AudiobookWorkflowModel {
                 if createdArchetypeVoices > 0 {
                     notes.append("已补全 \(createdArchetypeVoices) 类小说群像音色")
                 }
-                if createdLeadVoices > 0 {
+                if let leadSummary = self.lastLeadVoiceCreationSummary, leadSummary.attemptedCount > 0 {
+                    if leadSummary.fallbacks.isEmpty {
+                        notes.append("已为 \(leadSummary.succeededCount) 名主要角色生成专属音色")
+                    } else if leadSummary.succeededCount > 0 {
+                        let names = leadSummary.fallbacks.map(\.roleName).joined(separator: "、")
+                        let firstArchetype = (leadSummary.fallbacks.first?.fallbackArchetypeName ?? "群像") + "群像音色"
+                        notes.append("已为 \(leadSummary.succeededCount) 名主角生成专属音色，\(leadSummary.fallbacks.count) 名角色（\(names)）已回退为\(firstArchetype)")
+                    } else {
+                        let names = leadSummary.fallbacks.map(\.roleName).joined(separator: "、")
+                        let firstArchetype = (leadSummary.fallbacks.first?.fallbackArchetypeName ?? "群像") + "群像音色"
+                        notes.append("\(leadSummary.fallbacks.count) 名角色（\(names)）已回退为\(firstArchetype)")
+                    }
+                } else if createdLeadVoices > 0 {
                     notes.append("已为 \(createdLeadVoices) 名主要角色生成专属音色")
                 }
                 if summary.unknownSpeakerCount == 0 {
@@ -1151,6 +1190,10 @@ public final class AudiobookWorkflowModel {
         } catch { errorMessage = "试听未完成，声音或配声方案可能已变化，请刷新后重试。" }
     }
 
+    public func stopAuditionPlayback() {
+        playbackOwner.stop()
+    }
+
     public func autoAssignRecommendedVoices(
         for bookID: UUID? = nil,
         availableVoices: [SafeVoiceEntry]? = nil
@@ -1335,7 +1378,18 @@ public final class AudiobookWorkflowModel {
             await reloadSelectedChapterDetails()
             await refreshChapterReadinessMap(for: bookID)
             await refreshShelf()
-            bannerMessage = "已更新 \(atomIDs.count) 处段落的说话人归属。"
+            if allUnknownAnnotations.isEmpty {
+                focusedUnknownAtomID = nil
+                showOnlyUnknownAtomsInChapter = false
+                let autoConfirmed = await confirmCastAndAudition(switchToProduction: false)
+                if autoConfirmed && isAuditionConfirmedForSelectedBook {
+                    bannerMessage = "全部台词已确认完毕，角色与音色已自动锁定，可直接开始制作章节。"
+                } else {
+                    bannerMessage = "已更新 \(atomIDs.count) 处段落的说话人归属。全书待确认说话人已全部确认完毕！"
+                }
+            } else {
+                bannerMessage = "已更新 \(atomIDs.count) 处段落的说话人归属。"
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -1362,7 +1416,12 @@ public final class AudiobookWorkflowModel {
             } else {
                 focusedUnknownAtomID = nil
                 showOnlyUnknownAtomsInChapter = false
-                bannerMessage = "全书所有待确认说话人已全部确认完毕！"
+                let autoConfirmed = await confirmCastAndAudition(switchToProduction: false)
+                if autoConfirmed && isAuditionConfirmedForSelectedBook {
+                    bannerMessage = "全部台词已确认完毕，角色与音色已自动锁定，可直接开始制作章节。"
+                } else {
+                    bannerMessage = "全书所有待确认说话人已全部确认完毕！"
+                }
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -1462,6 +1521,11 @@ public final class AudiobookWorkflowModel {
                 } else {
                     focusedUnknownAtomID = nil
                     showOnlyUnknownAtomsInChapter = false
+                    let autoConfirmed = await confirmCastAndAudition(switchToProduction: false)
+                    if autoConfirmed && isAuditionConfirmedForSelectedBook {
+                        bannerMessage = "全部台词已确认完毕，角色与音色已自动锁定，可直接开始制作章节。"
+                        return
+                    }
                 }
             }
             if outcome.resolvedCount > 0 {
@@ -1655,6 +1719,7 @@ public final class AudiobookWorkflowModel {
 
         isCreatingLeadExclusiveVoices = true
         var createdCount = 0
+        var fallbackRoles: [(roleID: UUID, roleName: String, fallbackArchetypeName: String)] = []
 
         for (idx, role) in leadCandidates.enumerated() {
             leadVoiceCreationProgressText = "正在为「\(role.displayName)」创建专属音色 (\(idx + 1)/\(leadCandidates.count))…"
@@ -1667,8 +1732,19 @@ public final class AudiobookWorkflowModel {
                 onlyIfUnbound: true
             ) {
                 createdCount += 1
+                fallbackRoleIDs.remove(role.id)
+            } else {
+                let archetype = roleStatsByID[role.id]?.archetype ?? role.inferredVoiceArchetype(peers: stratifiedChars)
+                fallbackRoles.append((roleID: role.id, roleName: role.displayName, fallbackArchetypeName: archetype.shortBadgeTitle))
+                fallbackRoleIDs.insert(role.id)
             }
         }
+
+        lastLeadVoiceCreationSummary = LeadVoiceCreationSummary(
+            attemptedCount: leadCandidates.count,
+            succeededCount: createdCount,
+            fallbacks: fallbackRoles
+        )
 
         leadVoiceCreationProgressText = nil
         isCreatingLeadExclusiveVoices = false
@@ -1685,8 +1761,16 @@ public final class AudiobookWorkflowModel {
         }
 
         if !quietBanner {
-            if createdCount > 0 {
-                bannerMessage = "已为 \(createdCount) 名主要角色创建并绑定本书专属音色。"
+            if createdCount > 0 && fallbackRoles.isEmpty {
+                bannerMessage = "已为 \(createdCount) 名主要角色生成专属音色。"
+            } else if !fallbackRoles.isEmpty {
+                let names = fallbackRoles.map(\.roleName).joined(separator: "、")
+                let archetypeName = (fallbackRoles.first?.fallbackArchetypeName ?? "群像") + "群像音色"
+                if createdCount > 0 {
+                    bannerMessage = "已为 \(createdCount) 名主角生成专属音色，\(fallbackRoles.count) 名角色（\(names)）已回退为\(archetypeName)。"
+                } else {
+                    bannerMessage = "\(fallbackRoles.count) 名角色（\(names)）专属音色生成未通过，已回退为\(archetypeName)。"
+                }
             } else {
                 errorMessage = "当前语音服务未开启音色设计（VoiceDesign）能力或生成未通过校验，已保留推荐音色。"
             }
@@ -1720,6 +1804,7 @@ public final class AudiobookWorkflowModel {
         _ = await refreshAvailableVoices()
 
         if let created {
+            fallbackRoleIDs.remove(roleID)
             voiceBindings = (try? await store.voiceBindings(for: bookID)) ?? voiceBindings
             selectedBook = (try? await store.book(id: bookID)) ?? selectedBook
             await refreshChapterReadinessMap(for: bookID)
@@ -1781,7 +1866,6 @@ public final class AudiobookWorkflowModel {
             return nil
         }
 
-        let archetype = roleStatsByID[role.id]?.archetype ?? role.inferredVoiceArchetype(peers: peers)
         let binding = AudiobookVoiceBinding(
             roleID: role.id,
             voiceID: output.voiceID,
@@ -1918,7 +2002,7 @@ public final class AudiobookWorkflowModel {
     }
 
     @discardableResult
-    public func confirmCastAndAudition() async -> Bool {
+    public func confirmCastAndAudition(switchToProduction: Bool = true) async -> Bool {
         guard let bookID = selectedBook?.id, let castController, let store else { return false }
         do {
             errorMessage = nil
@@ -1956,7 +2040,9 @@ public final class AudiobookWorkflowModel {
                     bannerMessage = "已确认人物与声音；全书仍有 \(allUnknownAnnotations.count) 处待确认说话人，已为您定位至第 1 处。"
                 }
             } else {
-                workbenchTab = .production
+                if switchToProduction {
+                    workbenchTab = .production
+                }
                 bannerMessage = "已确认全书人物与试听声音，可开始制作已确认章节。"
             }
             return true

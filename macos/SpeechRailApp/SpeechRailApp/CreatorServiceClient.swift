@@ -576,6 +576,12 @@ public struct VoiceDesignHumanReview: Codable, Equatable, Sendable {
     }
 }
 
+public enum VoiceDesignValidationMode: Sendable, Equatable {
+    case validationOnly
+    case automatedAcceptance
+    case manualReview(VoiceDesignHumanReview)
+}
+
 public struct VoiceDesignReference: Codable, Equatable, Sendable {
     public let audioSHA256: String
     public let textSHA256: String
@@ -948,8 +954,7 @@ public protocol SpeechRailVoiceDesignClient: Sendable {
         id: String,
         testText: String?,
         capabilityKey: String?,
-        humanReview: VoiceDesignHumanReview?,
-        automatedAcceptance: Bool
+        mode: VoiceDesignValidationMode
     ) async throws -> VoiceDesignCandidate
     func fetchVoiceDesignCandidates() async throws -> [VoiceDesignCandidate]
     func fetchVoiceDesignCandidate(id: String) async throws -> VoiceDesignCandidate

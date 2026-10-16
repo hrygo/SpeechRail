@@ -618,8 +618,7 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
                         id: candidate.id,
                         testText: nil,
                         capabilityKey: nil,
-                        humanReview: nil,
-                        automatedAcceptance: false
+                        mode: .validationOnly
                     )
                     guard isCurrentVoiceDesignPublication(generation) else { return }
                     guard validated.knownState == .validating || validated.knownState == .failed else {
@@ -668,8 +667,7 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
                         id: candidate.id,
                         testText: nil,
                         capabilityKey: nil,
-                        humanReview: nil,
-                        automatedAcceptance: true
+                        mode: .automatedAcceptance
                     )
                     guard isCurrentVoiceDesignPublication(generation) else { return }
                     guard reviewed.knownState == .publishable,
@@ -1131,8 +1129,7 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
                 id: candidateID,
                 testText: nil,
                 capabilityKey: nil,
-                humanReview: nil,
-                automatedAcceptance: false
+                mode: .validationOnly
             )
             guard isCurrentVoiceDesignPublication(generation) else { return }
             guard validated.knownState == .validating
@@ -1273,8 +1270,7 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
                 id: candidateID,
                 testText: nil,
                 capabilityKey: nil,
-                humanReview: review,
-                automatedAcceptance: false
+                mode: .manualReview(review)
             )
             guard isCurrentVoiceDesignPublication(generation) else { return }
             guard reviewed.knownState == .publishable,
@@ -1824,6 +1820,25 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
             await self?.checkVoiceOutput(voiceID: voice.id)
         }
         return voice
+    }
+
+    public func clearLastRegisteredCloneVoice() {
+        lastRegisteredCloneVoice = nil
+        voiceOutputCheck = .idle
+    }
+
+    public static func cloneQualityDiagnosticMessage(for message: String) -> String {
+        let lower = message.lowercased()
+        if lower.contains("snr") || lower.contains("noise") {
+            return "环境噪音偏高，建议在安静环境下录制，或使用降噪后的音频。"
+        }
+        if lower.contains("duration") || lower.contains("short") {
+            return "有效语音过短，建议提供 5～15 秒连续自然语流。"
+        }
+        if lower.contains("silence") {
+            return "包含过多静音，建议裁剪后再试。"
+        }
+        return ""
     }
 
     private static func isUncertainCloneRegistrationError(_ error: Error) -> Bool {

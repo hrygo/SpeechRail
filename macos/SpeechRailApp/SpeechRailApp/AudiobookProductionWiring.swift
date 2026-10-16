@@ -213,8 +213,7 @@ public enum AudiobookProductionWiring {
                             id: candidate.id,
                             testText: validationTestText,
                             capabilityKey: nil,
-                            humanReview: nil,
-                            automatedAcceptance: false
+                            mode: .validationOnly
                         )
                     }
 
@@ -230,8 +229,7 @@ public enum AudiobookProductionWiring {
                             id: candidate.id,
                             testText: nil,
                             capabilityKey: nil,
-                            humanReview: nil,
-                            automatedAcceptance: true
+                            mode: .automatedAcceptance
                         )
                     }
 

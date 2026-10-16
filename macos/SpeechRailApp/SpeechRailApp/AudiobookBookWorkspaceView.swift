@@ -1057,6 +1057,7 @@ public struct AudiobookBookWorkspaceView: View {
     @State private var activeVoicePickerRoleID: UUID?
     @State private var expandedRoleIDs: Set<UUID> = []
     @State private var auditionPreviewRoleID: UUID?
+    @State private var auditionLoadingRoleID: UUID?
 
     private var castInspectorColumn: some View {
         @Bindable var bindableWorkflow = workflow
@@ -1076,10 +1077,29 @@ public struct AudiobookBookWorkspaceView: View {
 
         return SessionPanel {
             VStack(alignment: .leading, spacing: 0) {
-                SessionPanelHead(
-                    title: "人物与声音（\(workflow.characters.count)）",
-                    trailingDetail: "核心 \(leadCount) · 配角 \(minorCount)"
-                )
+                HStack(alignment: .center, spacing: 0) {
+                    SessionPanelHead(
+                        title: "人物与声音（\(workflow.characters.count)）",
+                        trailingDetail: "核心 \(leadCount) · 配角 \(minorCount)"
+                    )
+                    Spacer(minLength: 0)
+                    let allExpanded = !workflow.characters.isEmpty && expandedRoleIDs.count >= workflow.characters.count
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            if allExpanded {
+                                expandedRoleIDs.removeAll()
+                            } else {
+                                expandedRoleIDs = Set(workflow.characters.map(\.id))
+                            }
+                        }
+                    } label: {
+                        Text(allExpanded ? "全部收起" : "全部展开")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                    }
+                    .speechRailButton(.secondary)
+                    .padding(.trailing, SpeechRailDesignTokens.Spacing.md)
+                    .accessibilityIdentifier("audiobook-cast-toggle-all-expansion-button")
+                }
                 SessionHairline()
 
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
@@ -1134,6 +1154,28 @@ public struct AudiobookBookWorkspaceView: View {
                 SessionHairline()
                 SessionPanelActions {
                     VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        if workflow.pendingCastingPlan?.hasUnavoidableSceneConflicts == true {
+                            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(SpeechRailDesignTokens.Typography.callout)
+                                    .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                                    .accessibilityHidden(true)
+                                Text("当前音色数量不足以完全避开同场角色撞音，建议在「更多整理…」中点击「补全六类群像」扩展音色库。")
+                                    .font(SpeechRailDesignTokens.Typography.callout)
+                                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                                Spacer(minLength: 0)
+                            }
+                            .padding(SpeechRailDesignTokens.Spacing.sm)
+                            .background(
+                                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Radius.subtle)
+                                    .fill(SpeechRailDesignTokens.Surface.attentionTint)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Radius.subtle)
+                                    .stroke(SpeechRailDesignTokens.Color.attention.opacity(0.4), lineWidth: 1)
+                            )
+                        }
+
                         if let progressText = workflow.leadVoiceCreationProgressText,
                            workflow.isCreatingLeadExclusiveVoices
                         {
@@ -1206,6 +1248,22 @@ public struct AudiobookBookWorkspaceView: View {
                                 }
 
                                 Divider()
+
+                                let allExpanded = !workflow.characters.isEmpty && expandedRoleIDs.count >= workflow.characters.count
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.15)) {
+                                        if allExpanded {
+                                            expandedRoleIDs.removeAll()
+                                        } else {
+                                            expandedRoleIDs = Set(workflow.characters.map(\.id))
+                                        }
+                                    }
+                                } label: {
+                                    Label(
+                                        allExpanded ? "全部收起角色卡片" : "全部展开角色卡片",
+                                        systemImage: allExpanded ? "chevron.up.circle" : "chevron.down.circle"
+                                    )
+                                }
 
                                 Button {
                                     Task { await workflow.undoLastCastingChange() }
@@ -1407,34 +1465,56 @@ public struct AudiobookBookWorkspaceView: View {
                     // 试听按钮
                     if let b = binding {
                         let isAuditioning = auditionPreviewRoleID == role.id
+                        let isLoading = auditionLoadingRoleID == role.id
                         Button {
                             if isAuditioning {
                                 auditionPreviewRoleID = nil
+                                auditionLoadingRoleID = nil
                                 appModel.cancelVoicePreview()
+                                workflow.stopAuditionPlayback()
+                            } else if isLoading {
+                                auditionLoadingRoleID = nil
+                                workflow.stopAuditionPlayback()
                             } else if let creatorVoice = appModel.creatorVoices.first(where: { $0.id == b.voiceID }) {
                                 auditionPreviewRoleID = role.id
                                 appModel.startVoicePreview(creatorVoice)
                             } else {
+                                auditionLoadingRoleID = role.id
                                 Task {
                                     var comparisonVoices = [b.voiceID]
                                     await workflow.prepareCastingAudition(kind: .sameTextComparison, roleID: role.id, comparisonVoiceIDs: comparisonVoices)
-                                    if workflow.castingAudition != nil {
+                                    guard auditionLoadingRoleID == role.id else { return }
+                                    auditionLoadingRoleID = nil
+                                    if workflow.castingAudition != nil && workflow.errorMessage == nil {
+                                        auditionPreviewRoleID = role.id
                                         await workflow.playCastingAudition(itemIndex: 0)
+                                        if workflow.errorMessage != nil {
+                                            auditionPreviewRoleID = nil
+                                        }
+                                    } else {
+                                        auditionPreviewRoleID = nil
                                     }
                                 }
                             }
                         } label: {
-                            Image(systemName: isAuditioning ? "stop.circle.fill" : "play.circle.fill")
-                                .font(SpeechRailDesignTokens.Typography.statusIcon)
-                                .foregroundStyle(
-                                    isAuditioning
-                                        ? SpeechRailDesignTokens.Color.attention
-                                        : SpeechRailDesignTokens.Color.voice
-                                )
+                            if isLoading {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .frame(width: 16, height: 16)
+                            } else {
+                                Image(systemName: isAuditioning ? "stop.circle.fill" : "play.circle.fill")
+                                    .font(SpeechRailDesignTokens.Typography.statusIcon)
+                                    .foregroundStyle(
+                                        isAuditioning
+                                            ? SpeechRailDesignTokens.Color.attention
+                                            : SpeechRailDesignTokens.Color.voice
+                                    )
+                            }
                         }
                         .buttonStyle(.plain)
-                        .help(isAuditioning ? "停止试听" : "试听当前音色")
-                        .accessibilityLabel(isAuditioning ? "停止试听" : "试听角色音色")
+                        .disabled(isLoading)
+                        .help(isAuditioning ? "停止试听" : (isLoading ? "正在生成试听音频…" : "试听当前音色"))
+                        .accessibilityLabel(isAuditioning ? "停止试听" : (isLoading ? "正在生成试听音频…" : "试听角色音色"))
                     }
 
                     // 展开/折叠按钮
@@ -1512,6 +1592,17 @@ public struct AudiobookBookWorkspaceView: View {
                         }
                         .speechRailButton(.secondary)
                         .fixedSize()
+
+                        if workflow.fallbackRoleIDs.contains(role.id) {
+                            Button {
+                                Task { await workflow.createExclusiveVoiceForRole(role.id) }
+                            } label: {
+                                Label("重试专属音色", systemImage: "arrow.clockwise")
+                            }
+                            .speechRailButton(.secondary)
+                            .disabled(workflow.isCreatingLeadExclusiveVoices)
+                            .help("此前专属音色生成超时或未通过，当前已回退至群像音色，可点击重试。")
+                        }
 
                         Spacer()
 
