@@ -123,7 +123,7 @@ public struct MeetingView: View {
                                 } else {
                                     Button("重试结束并整理") { Task { await meeting.requestFinish() } }
                                 }
-                                exportMenu(title: "导出已保存文字…", helpText: "保留已保存的文字记录")
+                                exportMenu(title: "导出已保存文字…", helpText: "保留已保存的文字记录", includeMinutes: false)
                             }
                         }
                         .padding(SpeechRailDesignTokens.Spacing.md)
@@ -215,7 +215,7 @@ public struct MeetingView: View {
                 // ①「先导出转录…」——纪要最长要跑十几分钟，等它出来才让导是不合理的：
                 //   转录此时**已经封存**，导出读库、不等纪要（§20.3 的 J2 摩擦点）。
                 // ②「停止整理」——停下来不丢东西，可以重新生成。
-                exportMenu(title: "先导出文字记录…", helpText: "把已经存好的文字记录导出成文件；纪要还在生成，不等它")
+                exportMenu(title: "先导出文字记录…", helpText: "把已经存好的文字记录导出成文件；纪要还在生成，不等它", includeMinutes: false)
                 PageActionButton(
                     title: "停止整理",
                     systemImage: "stop.circle",

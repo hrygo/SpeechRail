@@ -101,7 +101,7 @@ public struct SpeakerLabelingPanel: View {
                 Text("这一场没有标说话人")
                     .font(SpeechRailDesignTokens.Typography.bodyMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                Text("正文照常记录。下一次开始前在「实时字幕 / 会议」里打开「说话人标签」，就能在行上看到谁在说。")
+                Text("正文照常记录。下次开始前在「会议设置…」中开启「发言人区分」，即可在记录中区分不同说话人。")
                     .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -123,7 +123,7 @@ public struct SpeakerLabelingPanel: View {
                 }
 
                 if labeling.speakers.isEmpty {
-                    Text("当前尚未检测出独立的发言人。说话人区分需要持续的声纹特征积累；您也可以直接在左侧实时转录中点击「未指定」为句子指认发言人。")
+                    Text("当前尚未检测出独立的发言人。发言人区分需要持续的声纹特征积累；你也可以直接在左侧实时记录中点击「未标说话人」为句子指定说话人。")
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -189,7 +189,7 @@ public struct SpeakerLabelingPanel: View {
                         .help("这两个标签的行都保留；合并只改显示名，可回溯")
                     }
                     if let suggestion = speaker.suggestedMergeInto, others.contains(where: { $0.label == suggestion }) {
-                        Text("服务端认为它可能是 \(suggestion)")
+                        Text("声纹相近，可能与 \(labeling.displayText(for: suggestion)) 是同一人")
                             .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                     }

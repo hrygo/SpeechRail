@@ -24,6 +24,7 @@
 
 ## 实施计划
 
+- [会议助手模块端到端体验优化：竞品调研、用户旅途、UI 盘点与落地验收方案](plans/2026-10-17-meeting-assistant-ux-ui-redesign.md)（`completed`；四竞品调研、七阶段用户旅途、全量 UI 盘点与会前/会中/会后 UX 落地及 144 项单测验收通过）
 - [语音助手、会议助手与 AI 提词器 UI 文案与无障碍体系化优化方案](plans/2026-10-17-assistant-meeting-teleprompter-ui-copy-redesign.md)（`completed`；三模块全量按钮/标签/状态/无障碍文案清单与 AC 核验通过）
 - [AI 提词器模块体验优化：调研、方案与落地验收记录](plans/2026-10-17-teleprompter-ux-ui-redesign.md)（`completed`；修复就绪态回改死锁、口述字符稿连续文档流减负、按 ID 复制回退、场景预设坞与舞台键盘焦点守卫）
 - [有声书制作模块 UX/UI 现代化重构方案](plans/2026-10-16-audiobook-ux-ui-redesign.md)（`completed`；流线型工作台减负）

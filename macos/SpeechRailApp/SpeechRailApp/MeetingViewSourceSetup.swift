@@ -56,7 +56,7 @@ extension MeetingView {
             ) {
                 Button("开始会议") { Task { await start() } }
                     .speechRailButton(.primary)
-                    .help("按现在选的来源开始记；第一次用麦克风会请求系统授权")
+                    .help("按当前所选音源开始录制（⌘⇧N）；首次使用麦克风会请求系统授权")
             }
 
             // 空态只有**一条**右栏（页级 `inspector`，这一态渲染 `meetingInfoCard`）。
@@ -121,9 +121,7 @@ extension MeetingView {
         SessionPanel {
             SessionPanelHead(
                 title: "音频来源",
-                detail: "麦克风单选；本机音频按 App 多选。两路一起来时分别标注来源，"
-                    + "这里如实说明：多选时两路合成一条流转录，来源只记「合流」——"
-                    + "哪一句出在哪一路，这条链路上分不出来，也就不猜。"
+                detail: "可同时勾选麦克风与多个正在发声的 App。多路音源同时开启时将自动混音识别，记录来源如实标记为「合流」。"
             )
             SessionHairline()
             SessionCheckRow(
@@ -213,6 +211,7 @@ extension MeetingView {
                 SessionKVRow("识别精度", profileRowText)
                 SessionKVRow("音频来源", sourceSummary)
                 SessionKVRow("发言人区分", preferences.meetingDiarizationEnabled ? "已开启" : "未开启")
+                SessionKVRow("纪要整理", preferences.isLLMConfigured(for: .minutes) ? "结束后自动生成" : "未配置模型（仅存文字）")
                 SessionKVRow("保存位置", "记录库 · 长期保留")
             }
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
@@ -296,6 +295,7 @@ extension MeetingView {
             .buttonStyle(.plain)
             .speechRailPointerCursor()
             .help("按回车或点击此按钮立即开始会议")
+            .accessibilityLabel("立即开始会议")
         }
         .speechRailSingleLineInput(.regular)
     }

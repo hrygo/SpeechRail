@@ -133,6 +133,7 @@ public struct InnerOSDrawer: View {
                 TextField("私下向助手提问（仅参考本场文字记录，不联网、不入公频）", text: $question)
                     .textFieldStyle(.plain)
                     .speechRailSingleLineInput(.regular)
+                    .accessibilityLabel("会中私聊提问输入框")
                     .onSubmit { send() }
                 if session.state == .generating {
                     Button("取消") { session.cancel() }
@@ -178,6 +179,7 @@ public struct InnerOSDrawer: View {
         }
         .buttonStyle(.plain)
         .speechRailPointerCursor()
+        .accessibilityValue(exchange.id == selectedExchangeID ? "已选中" : "未选中")
     }
 
     private func statusLine(_ exchange: InnerOSExchange) -> String {

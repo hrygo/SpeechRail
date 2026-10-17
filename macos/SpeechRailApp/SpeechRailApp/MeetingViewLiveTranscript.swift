@@ -20,15 +20,24 @@ extension MeetingView {
                     // `labeling.state` 三种（没开 / 不支持 / 在用）面板自己会说话，所以按钮常在；
                     // 会话还没建起来时不给（那时没有可标注的行）。
                     if meeting.sessionID != nil {
-                        Button("复制全部文字", systemImage: "doc.on.doc") {
+                        Button(
+                            transcriptCopyMessage == "已复制全文" ? "已复制全文" : "复制全部文字",
+                            systemImage: transcriptCopyMessage == "已复制全文" ? "checkmark" : "doc.on.doc"
+                        ) {
                             Task {
                                 do {
                                     let text = try await meeting.completeTranscriptText()
-                                    NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
-                                } catch { transcriptCopyMessage = "文字暂时未能复制，请重试。" }
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(text, forType: .string)
+                                    transcriptCopyMessage = "已复制全文"
+                                } catch {
+                                    transcriptCopyMessage = "文字暂时未能复制，请重试。"
+                                }
                             }
                         }
                         .speechRailButton(.quiet)
+                        .disabled(meeting.lines.isEmpty && meeting.storedLineCount == 0)
+                        .help("复制本场已记录的全部文字至剪贴板")
                     }
                     if meeting.sessionID != nil {
                         Button {
@@ -53,12 +62,13 @@ extension MeetingView {
                                 .speechRailButton(.quiet)
                                 .disabled(meeting.transcriptPresentation.isLoadingPage)
                             }
-                            if let transcriptCopyMessage { Text(transcriptCopyMessage).font(SpeechRailDesignTokens.Typography.caption) }
+                            if let transcriptCopyMessage, transcriptCopyMessage != "已复制全文" {
+                                Text(transcriptCopyMessage)
+                                    .font(SpeechRailDesignTokens.Typography.caption)
+                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            }
                             if meeting.lines.isEmpty, meeting.partialText == nil {
-                                Text("这一场还没有说到能定稿的句子。")
-                                    .font(SpeechRailDesignTokens.Typography.callout)
-                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                                    .padding(.vertical, SpeechRailDesignTokens.Spacing.lg)
+                                liveEmptyPrompt
                             }
                             ForEach(meeting.lines) { line in
                                 if let before = meeting.transcriptPresentation.gapBefore(id: line.id) {
@@ -268,6 +278,43 @@ extension MeetingView {
             }
             Spacer(minLength: 0)
         }
+        .contextMenu {
+            Button("复制这一句") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(line.text, forType: .string)
+            }
+            Button("复制这一句（含时间与说话人）") {
+                let speaker = line.speakerLabel.map { meeting.labeling.displayText(for: $0) } ?? "未标说话人"
+                let timecode = TranscriptTimeWindow.timecodeColumn(observed: line.start, quality: line.timingQuality)
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString("[\(timecode)] \(speaker)：\(line.text)", forType: .string)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var liveEmptyPrompt: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            if meeting.phase == .preparing {
+                ProgressView()
+                    .controlSize(.small)
+                Text("正在连接音频与识别服务，请稍候…")
+                    .font(SpeechRailDesignTokens.Typography.callout)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            } else if meeting.isPaused {
+                Image(systemName: "pause.circle")
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    .accessibilityHidden(true)
+                Text("录制已暂停。点击上方「继续录制」恢复收音。")
+                    .font(SpeechRailDesignTokens.Typography.callout)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            } else {
+                Text("正在聆听会议发言，识别出的句子会实时显示在这里。")
+                    .font(SpeechRailDesignTokens.Typography.callout)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+            }
+        }
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.lg)
     }
 
     /// 说话人列：点它就能改名、标记为我或与其他说话人合并。未指定时展示轻量占位。
