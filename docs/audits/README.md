@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 审计与专项审查记录索引"
 status: active
-version: "1.3.0"
+version: "1.4.0"
 date: 2026-10-17
 ---
 
@@ -17,6 +17,8 @@ date: 2026-10-17
 ---
 
 ## 📑 审查与排障记录
+
+- **[2026-10-17 VoiceStudio 代码级能力复核与吸收候选](2026-10-17-voicestudio-capability-reaudit.md)**：对本地竞品 VoiceStudio（HEAD `f47221a1`）做实现级核对，覆盖响度预设与失败语义、发音词典（含空值删除词与 CJK 边界）、起点吸附对齐、音频质量自检、分块合成与 OpenAI 兼容面；给出 V1–V5 吸收候选与"明确不吸收"边界，并更正此前把 `-1.5 dBTP` 记为 ACX 预设的口径错误（该值来自 podcast 预设）。
 
 - **[2026-10-17 SpeechRail 对 ElevenLabs 的分阶段吸收方案](2026-10-17-speechrail-elevenlabs-absorption-plan.md)**：把 ElevenLabs（云端商用参照）的产品/开发者设计语义转译为本地可行候选（E1–E7），含分阶段方案、定性 ROI、依赖、风险、验收条件与明确不做项（不引入云 API/计费/发行/商业条款）。
 - **[2026-10-17 SpeechRail 与 VoiceStudio、ElevenLabs 竞品能力调研与设计吸收建议](2026-10-17-speechrail-voicestudio-competitive-research.md)**：三方对照（v1.3.0 纳入 ElevenLabs 与 E1–E7 矩阵）；含 VoiceStudio 两轮证据校正（响度/封面/分块/隐私同意、manifest schema 与 verifier 依赖、阶段顺序与验收门槛），并按网页版/PDF 来源范围修订 ACX 封面规格（含 ≤8 MB）。仅改方案，不动产品代码。
