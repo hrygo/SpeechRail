@@ -424,6 +424,10 @@ def _normalized_chars(text: str) -> list[str]:
     return [c for c in normalized if unicodedata.category(c)[0] in {"L", "N", "M"}]
 
 
+def _join_utterance_text(utterances: Sequence[JsonDict]) -> str:
+    return " ".join(str(utterance["text"]) for utterance in utterances)
+
+
 def _sequence_edit_distance(expected: Sequence[str], actual: Sequence[str]) -> int:
     if not expected:
         return len(actual)
@@ -490,10 +494,14 @@ def _validate_timed_utterances(
             or not 0 <= start_f < end_f <= duration + 1.0 + 1e-9
         ):
             raise ValueError("invalid speaker-attributed utterance row")
+        bounded_start = min(start_f, duration)
+        bounded_end = min(end_f, duration)
+        if bounded_end <= bounded_start:
+            continue
         validated.append(
             {
-                "start": start_f,
-                "end": min(end_f, duration),
+                "start": bounded_start,
+                "end": bounded_end,
                 "speaker": speaker,
                 "text": text,
             }
@@ -615,8 +623,8 @@ def score_speaker_attributed_asr(
             h_list = hyp_by_spk.get(h_spk, [])
             if not r_spk.startswith("__empty_ref_") and not h_spk.startswith("__empty_hyp_"):
                 current_map[h_spk] = r_spk
-            r_text = "".join(item["text"] for item in r_list)
-            h_text = "".join(item["text"] for item in h_list)
+            r_text = _join_utterance_text(r_list)
+            h_text = _join_utterance_text(h_list)
             cp_char_err += _sequence_edit_distance(
                 _normalized_chars(r_text), _normalized_chars(h_text)
             )
@@ -670,12 +678,9 @@ def score_speaker_attributed_asr(
     di_char_errors = unmatched_oracle_chars
     di_word_errors = unmatched_oracle_words
     for r_spk in ref_speakers:
-        r_text = "".join(item["text"] for item in ref_by_spk[r_spk])
-        h_text = "".join(
-            item["text"]
-            for item in sorted(
-                oracle_hyp_by_spk[r_spk], key=lambda x: (x["start"], x["end"])
-            )
+        r_text = _join_utterance_text(ref_by_spk[r_spk])
+        h_text = _join_utterance_text(
+            sorted(oracle_hyp_by_spk[r_spk], key=lambda x: (x["start"], x["end"]))
         )
         di_char_errors += _sequence_edit_distance(
             _normalized_chars(r_text), _normalized_chars(h_text)
@@ -813,13 +818,19 @@ def score_meeting_1to4_session(
     )
     diar["quality_gate"] = "pass" if diar_gate_pass else "fail"
 
-    ref_full_text = "".join(str(u["text"]) for u in reference_utterances)
-    hyp_full_text = "".join(str(u["text"]) for u in hypothesis_utterances)
+    validated_ref_utterances = _validate_timed_utterances(
+        reference_utterances, duration=duration, allow_unknown=False
+    )
+    validated_hyp_utterances = _validate_timed_utterances(
+        hypothesis_utterances, duration=duration, allow_unknown=True
+    )
+    ref_full_text = _join_utterance_text(validated_ref_utterances)
+    hyp_full_text = _join_utterance_text(validated_hyp_utterances)
     asr_cer = character_error_metrics(ref_full_text, hyp_full_text)
     asr_wer = word_error_metrics(ref_full_text, hyp_full_text)
     sa_asr = score_speaker_attributed_asr(
-        reference_utterances,
-        hypothesis_utterances,
+        validated_ref_utterances,
+        validated_hyp_utterances,
         duration=duration,
         tcp_collar_seconds=tcp_collar_seconds,
     )

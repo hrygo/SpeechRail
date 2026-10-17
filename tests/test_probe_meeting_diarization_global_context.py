@@ -129,4 +129,3 @@ def test_global_probe_rejects_segments_more_than_one_second_past_audio_end() -> 
         _clip_segments_to_duration(
             [{"start": 9.0, "end": 11.01, "speaker": "S1"}], duration=10.0
         )
-

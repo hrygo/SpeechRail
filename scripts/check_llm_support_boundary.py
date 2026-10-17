@@ -14,6 +14,12 @@ def main() -> None:
             "LLMProvider.swift",
             "LLMStreamDelivery.swift",
             "AppPerformanceMetrics.swift",
+            # The shared metric contracts live beside the capture relay. Include
+            # that infrastructure and its two type dependencies, without any
+            # feature preparation or prompt sources.
+            "CaptureAudioRelay.swift",
+            "CaptureDeliveryWindow.swift",
+            "AudioChunkStream.swift",
         )
     ]
     # Build only the SDK dependency. No SpeechRail preparation/prompts target is

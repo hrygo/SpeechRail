@@ -33,13 +33,13 @@
    - **Local Disk Space (`df -h` / `shutil.disk_usage` on `/System/Volumes/Data`):**
      - `1,858.14 GiB` total, `1,490.41 GiB` used, **`367.74 GiB` free** — sufficient for `Train_Ali_near.tar.gz` (`~50 GiB` peak) + `Eval_Ali.tar.gz` (`~8 GiB` peak).
 3. **External Benchmark & Model Path Status on This Machine (Seatbelt & Connected Folders Audit):**
-   - Connected Folders in this session: `[/Users/hrygo/.codex-workspaces/worktrees/ios-b4bb9ec5-693d-445c-894d-41d7ca4e71af/SpeechRail]`.
-   - Writable external directories inside the Seatbelt sandbox: `/private/tmp`, `/var/tmp`, `$HOME` (`/Users/hrygo/.gemini/users/user1`), and `$GEMINI_WORKSPACE_DIR`. None of these contain any `.mlmodelc` bundles, `Qwen3-ASR` weights, or meeting audio archives.
-   - `/Users/hrygo/Library/Application Support/SpeechRail/benchmarks`: `PermissionError(errno=1): Operation not permitted` under the worktree-only Connected Folder sandbox.
-   - `/Users/hrygo/Library/Application Support/SpeechRail/models`: `PermissionError(errno=1): Operation not permitted` under the worktree-only Connected Folder sandbox; `SortformerNvidiaLow_v2.1.mlmodelc` is inaccessible from inside the sandbox.
-   - `/Users/hrygo/Library/Application Support/SpeechRail/benchmarks/issue370-aishell4-test-20261017/test.tar.gz`: `PermissionError(errno=1): Operation not permitted` (`R003` has 5–6 speakers; `R004` is sealed holdout).
-   - `/Users/hrygo/Library/Application Support/SpeechRail/benchmarks/issue370-aishell4-test-20261017/reconstructed-split`: `FileNotFoundError(errno=2): No such file or directory`.
-   - `/Users/hrygo/Library/Application Support/SpeechRail/benchmarks/issue370-alimeeting-eval-20261017/Eval_Ali.tar.gz.partial`: `PermissionError(errno=1): Operation not permitted` (incomplete `.partial` download; reserved for `frozen_holdout`).
+   - Connected Folders in this session: `[<worktree>]`.
+   - Writable external directories inside the Seatbelt sandbox: `/private/tmp`, `/var/tmp`, `$HOME`（沙盒隔离目录）, and `$GEMINI_WORKSPACE_DIR`. None of these contain any `.mlmodelc` bundles, `Qwen3-ASR` weights, or meeting audio archives.
+   - `$SPEECHRAIL_APP_HOME/benchmarks`: `PermissionError(errno=1): Operation not permitted` under the worktree-only Connected Folder sandbox.
+   - `$SPEECHRAIL_APP_HOME/models`: `PermissionError(errno=1): Operation not permitted` under the worktree-only Connected Folder sandbox; `SortformerNvidiaLow_v2.1.mlmodelc` is inaccessible from inside the sandbox.
+   - `$SPEECHRAIL_APP_HOME/benchmarks/issue370-aishell4-test-20261017/test.tar.gz`: `PermissionError(errno=1): Operation not permitted` (`R003` has 5–6 speakers; `R004` is sealed holdout).
+   - `$SPEECHRAIL_APP_HOME/benchmarks/issue370-aishell4-test-20261017/reconstructed-split`: `FileNotFoundError(errno=2): No such file or directory`.
+   - `$SPEECHRAIL_APP_HOME/benchmarks/issue370-alimeeting-eval-20261017/Eval_Ali.tar.gz.partial`: `PermissionError(errno=1): Operation not permitted` (incomplete `.partial` download; reserved for `frozen_holdout`).
 4. **Frozen Phase 1 Candidate Specification (`candidate_spec_sha256 = 0320dcfc3a417575efe79310b326af396e06d45ca691e8ad4e5890de1653fe46`):**
    - Computed deterministically by `frozen_phase1_candidate_spec()` from `src/speechrail/assets/model-catalog.json`, `src/speechrail/assets/runtime-lock.json`, and `CoreMLSortformerEngine`:
      - `diarization`: `SortformerNvidiaLow_v2.1.mlmodelc` (`revision = ae9a27ab45dc0aa3abede7d2d6bad2b7a69aa6d1`, `dtype = fp16`, `fluidaudio_sdk_commit = 5c19d5e12320e22bbfb7a1877b089d2665a69add`, `worker_executable_sha256 = 6db420e7b516841eae472ae67831e5ce6c2f537e68c46407db3db918c542bd06`, `sortformer_config = SortformerConfig.balancedV2_1`, `activity_threshold = 0.25`, `timeline_max_stored_seconds = 60.0`, `system_cap = 4`, `max_speakers = 4`).
@@ -64,7 +64,7 @@
   3. **Speaker-attributed joint**: exact minimum-permutation `cpCER`, `cpWER`, time-constrained `tcpCER`, `tcpWER`, diarization-invariant `DI-cpCER`, `DI-cpWER`, and speaker-confusion deltas (`cpCER - di_cpCER`, `cpWER - di_cpWER`), keeping `"unknown"` unattributed speech in the error denominator;
   4. **Stratification**: per-speaker-count (`1, 2, 3, 4` speakers) aggregate breakdown that explicitly marks any missing speaker count as `unobserved_stratum` and `quality_gate: "no-go"`.
 - [x] **AC-PROBE**: Implement the protocol-v1 `Sortformer` (`CoreMLSortformerEngine` / `ActivityFrame` 4-slot) evaluation runner (`evaluate_locked_1to4_split`), frozen candidate spec digest (`frozen_phase1_candidate_spec`), and CLI (`--mode preflight`, `--mode evaluate-development`, `--mode evaluate-frozen-holdout`), verified by deterministic unit tests in `tests/test_probe_meeting_sortformer_1to4.py` passing `pytest` (`99 passed`), `ruff check`, and `mypy`.
-- [ ] **AC-REAL-EVAL** *(Unchecked / Blocked on Connected Folder Sandbox Access to `/Users/hrygo/Library/Application Support/SpeechRail` & Unstaged 1–4 Speaker Development Corpus)*: Unpack and verify the external 1–4 speaker `development` corpus (`AliMeeting Train` 2–4 speakers + 1-speaker control) under `/Users/hrygo/Library/Application Support/SpeechRail/benchmarks/`, certify `development-certification.json` across `1, 2, 3, 4` speakers, and only then run single-shot `frozen_holdout` on complete `Eval_Ali.tar.gz`.
+- [ ] **AC-REAL-EVAL** *(Unchecked / Blocked on Connected Folder Sandbox Access to `$SPEECHRAIL_APP_HOME` & Unstaged 1–4 Speaker Development Corpus)*: Unpack and verify the external 1–4 speaker `development` corpus (`AliMeeting Train` 2–4 speakers + 1-speaker control) under `$SPEECHRAIL_APP_HOME/benchmarks/`, certify `development-certification.json` across `1, 2, 3, 4` speakers, and only then run single-shot `frozen_holdout` on complete `Eval_Ali.tar.gz`.
 
 ---
 

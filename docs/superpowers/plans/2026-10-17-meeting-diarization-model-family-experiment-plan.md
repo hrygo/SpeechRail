@@ -199,4 +199,3 @@
 - [x] Run all eight R003 sessions; UMAP-HDBSCAN predicted 2–4 speakers against 5–6 references, produced mean DER/JER 28.34%/58.44%, and passed 0/8 complete gates.
 - [x] Treat the five `-1` rows as unassigned speech; keep the scorer and gates unchanged. UMAP-HDBSCAN lowered mean DER by 0.65 percentage points versus spectral but increased mean JER by 4.46 points and mean runtime by about 55%.
 - [x] Record the model family as no-go; keep R004 sealed and leave production settings unchanged.
-

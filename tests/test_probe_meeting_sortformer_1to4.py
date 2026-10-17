@@ -335,6 +335,70 @@ def test_speaker_attributed_asr_separates_speaker_confusion_and_penalizes_unknow
     assert unknown_scored["cp_char_errors"] == 12
 
 
+def test_word_metrics_preserve_utterance_boundaries_and_leave_character_metrics_unchanged() -> None:
+    spans = [{"start": 0.0, "end": 2.0, "speaker": "S1"}]
+    english = score_meeting_1to4_session(
+        reference_speaker_spans=[{"start": 0.0, "end": 2.0, "speaker": "R1"}],
+        hypothesis_speaker_spans=spans,
+        reference_utterances=[
+            {"start": 0.0, "end": 1.0, "speaker": "R1", "text": "hello"},
+            {"start": 1.0, "end": 2.0, "speaker": "R1", "text": "world"},
+        ],
+        hypothesis_utterances=[
+            {"start": 0.0, "end": 2.0, "speaker": "S1", "text": "helloworld"}
+        ],
+        duration=2.0,
+    )
+    assert english["asr_only"]["reference_words"] == 2
+    assert english["asr_only"]["word_errors"] == 2
+    assert english["asr_only"]["wer"] == 1.0
+    assert english["asr_only"]["cer"] == 0.0
+    assert english["speaker_attributed"]["cp_wer"] == 1.0
+    assert english["speaker_attributed"]["tcp_wer"] == 1.0
+    assert english["speaker_attributed"]["di_cp_wer"] == 1.0
+    assert english["speaker_attributed"]["cp_cer"] == 0.0
+    assert english["speaker_attributed"]["di_cp_cer"] == 0.0
+
+    chinese = score_meeting_1to4_session(
+        reference_speaker_spans=[{"start": 0.0, "end": 2.0, "speaker": "R1"}],
+        hypothesis_speaker_spans=spans,
+        reference_utterances=[
+            {"start": 0.0, "end": 1.0, "speaker": "R1", "text": "你好"},
+            {"start": 1.0, "end": 2.0, "speaker": "R1", "text": "世界"},
+        ],
+        hypothesis_utterances=[
+            {"start": 0.0, "end": 2.0, "speaker": "S1", "text": "你好世界"}
+        ],
+        duration=2.0,
+    )
+    assert chinese["asr_only"]["cer"] == 0.0
+    assert chinese["speaker_attributed"]["cp_cer"] == 0.0
+    assert chinese["speaker_attributed"]["di_cp_cer"] == 0.0
+    assert chinese["speaker_attributed"]["cp_wer"] == 0.0
+    assert chinese["speaker_attributed"]["di_cp_wer"] == 0.0
+
+
+def test_speaker_attributed_asr_discards_segments_wholly_in_tail_padding() -> None:
+    scored = score_meeting_1to4_session(
+        reference_speaker_spans=[{"start": 0.0, "end": 1.0, "speaker": "R1"}],
+        hypothesis_speaker_spans=[{"start": 0.0, "end": 1.0, "speaker": "S1"}],
+        reference_utterances=[
+            {"start": 0.0, "end": 1.0, "speaker": "R1", "text": "hello"}
+        ],
+        hypothesis_utterances=[
+            {"start": 0.0, "end": 1.0, "speaker": "S1", "text": "hello"},
+            {"start": 10.2, "end": 10.8, "speaker": "S1", "text": "tail"},
+        ],
+        duration=10.0,
+    )
+
+    assert scored["asr_only"]["cer"] == 0.0
+    assert scored["asr_only"]["wer"] == 0.0
+    assert scored["speaker_attributed"]["cp_wer"] == 0.0
+    assert scored["speaker_attributed"]["tcp_wer"] == 0.0
+    assert scored["speaker_attributed"]["di_cp_wer"] == 0.0
+
+
 def test_score_meeting_1to4_session_and_stratification_marks_missing_strata() -> None:
     ref_spans = [
         {"start": 0.0, "end": 4.0, "speaker": "R1"},

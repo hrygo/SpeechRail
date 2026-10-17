@@ -199,9 +199,8 @@ pair1、pair3 与 pair4 共三组 idle 前台/隐藏态比较；pair2 因预检�
 
 ## 2026-10-17 follow-up: 接手监督复核与静态门修复
 
-在目标工作树 `/Users/hrygo/.codex-workspaces/worktrees/ios-b4bb9ec5-693d-445c-894d-41d7ca4e71af/SpeechRail` 对五个高 ROI issue 的实现、测试与文档开展独立核查：
+在目标工作树 `<worktree>` 对五个高 ROI issue 的实现、测试与文档开展独立核查：
 
 - 修复 `#370` 新增探针 `examples/perf/probe_meeting_diarization_global_context.py` 与 `examples/perf/diarization_3d_speaker_runner.py` 中的 7 个 `mypy` 类型检查错误；修复后 9 个相关 Python 源文件 `mypy` 与 `ruff check` 全部通过，171 项关联 `pytest` 用例通过（1.87s）。
 - 复核 `#369` 8 个 Swift 测试套件（59 项参数化/非参数化测试调用，含 `AudioCaptureDrainTests` 10 项 EOS 重采样冲刷与 `captureStop` 计量、`AudioInputTerminationTests` 14 项）、`#371` `AudiobookWorkspacePerformanceTests`（10 项）、`scripts/check_macos_test_target_coverage.py`（`OK`）及 `SpeechRailDiarizationProtocolSelfTest`（退出码 `0`），全部通过。
 - 清理本计划上文重复粘贴的第二段 `#308 controlled seed duration and content probe`：V16 默认派生 seed `4004728035` 仅证明该单句默认请求稳定，不代表消除 `mlx-audio#1002` 通用慢放；五个 issue 均保持 OPEN / no-close。
-

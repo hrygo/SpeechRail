@@ -7,8 +7,8 @@ date: 2026-10-17
 
 # SpeechRail 前五项高 ROI Issue 交接
 
-**核验日期：** 2026-10-17（Asia/Shanghai）  
-**交接范围：** GitHub `hrygo/SpeechRail` 前五项高 ROI issue：[#369](https://github.com/hrygo/SpeechRail/issues/369)、[#308](https://github.com/hrygo/SpeechRail/issues/308)、[#371](https://github.com/hrygo/SpeechRail/issues/371)、[#372](https://github.com/hrygo/SpeechRail/issues/372)、[#370](https://github.com/hrygo/SpeechRail/issues/370)。  
+**核验日期：** 2026-10-17（Asia/Shanghai）
+**交接范围：** GitHub `hrygo/SpeechRail` 前五项高 ROI issue：[#369](https://github.com/hrygo/SpeechRail/issues/369)、[#308](https://github.com/hrygo/SpeechRail/issues/308)、[#371](https://github.com/hrygo/SpeechRail/issues/371)、[#372](https://github.com/hrygo/SpeechRail/issues/372)、[#370](https://github.com/hrygo/SpeechRail/issues/370)。
 **目标：** 让接手团队能从当前代码、已完成的实验和未满足的验收门继续推进，不重复无效实验，也不把局部回归或探索性结果当成 issue 已关闭。
 
 ## 交接结论
@@ -113,10 +113,10 @@ date: 2026-10-17
 
 ## 2026-10-17 接手监督复核与本地修正记录
 
-核验日期：2026-10-17（Asia/Shanghai）。本节记录在目标工作树 `/Users/hrygo/.codex-workspaces/worktrees/ios-b4bb9ec5-693d-445c-894d-41d7ca4e71af/SpeechRail` 完成的独立盘点、源码/制品复核与静态门修复：
+核验日期：2026-10-17（Asia/Shanghai）。本节记录在目标工作树 `<worktree>` 完成的独立盘点、源码/制品复核与静态门修复：
 
 1. **工作区与 `.git` 沙盒边界实测：**
-   - 目标工作树 `.git` 文件指向 `gitdir: /Users/hrygo/Documents/SpeechRail/.git/worktrees/SpeechRail`。在仅挂载本 worktree 目录的受限沙盒下，外部主仓库 `.git/worktrees/SpeechRail` 不可直读（`git status` 返回 `exit 128`）。
+   - 目标工作树 `.git` 文件指向 `gitdir: <repository>/.git/worktrees/SpeechRail`。在仅挂载本 worktree 目录的受限沙盒下，外部主仓库 `.git/worktrees/SpeechRail` 不可直读（`git status` 返回 `exit 128`）。
    - 对照检出基线时间戳（`README.md` / `pyproject.toml`：`2026-10-17 02:56:36`）与 `/private/tmp/speechrail-performance-baseline-source-20261017` 逐文件比对，确认本工作树在检出后共有 **60 个非构建/非缓存源码、测试与文档文件发生修改或新增**（对应交接前 47 个已跟踪修改 + 17 个未跟踪文件/目录项，外加本交接文档）。全部既有改动完整保留，未执行任何 `reset`、`checkout` 或清理。
 2. **交接陈述与实际证据的偏差修正（防止误判）：**
    - **#308 多分块派生 seed 细节：** `src/speechrail/backends/qwen3_tts_worker.py` 中 `MlxQwenTtsEngine.synthesize` 先经 `TtsTextPlanner().plan(clean_text)` 切分 `planned_chunk.spoken_text` 再逐块调用 `_generate`；缺省 `request_derived` 策略按每个 `planned_chunk.spoken_text` 派生 seed 并更新 `_last_sampling_observation`。单分块 V16 文本上 `seed=4004728035` 30/30 一致（11.52 秒），但不能外推为任意文本/多分块或显式 caller seed 已消除 `mlx-audio#1002` 慢放，且 `receipt state=partial`、无新一轮人工双听。
@@ -128,5 +128,3 @@ date: 2026-10-17
    - Python 定向回归（`test_tts_sampling.py`、`test_qwen3_tts.py`、`test_qwen3_tts_worker.py`、`test_probe_meeting_diarization_3d_speaker.py`、`test_calibrate_meeting_diarization.py`、`test_probe_meeting_diarization_global_context.py`、`test_diarization_worker.py`、`test_meeting_diarization_quality.py`、`test_asr_quality_metrics.py`）：**171 passed in 1.87s**。
    - Swift 定向回归（基于当前工作树 `SpeechRailAppSupport.o` 与源码编译执行）：`#369` 核心 7 个套件 **45/45 通过**（含 `AudioCaptureDrainTests` 10 项 EOS 重采样冲刷与 `captureStop` 计量），`#371` `AudiobookWorkspacePerformanceTests` **10/10 通过**。
    - 五个 issue（`#369`、`#308`、`#371`、`#372`、`#370`）在当前阶段**均保持 OPEN / 不关闭**。
-
-
