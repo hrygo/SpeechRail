@@ -8,6 +8,8 @@
 
 ## 设计规格
 
+- [会议转录与分人：调研与设计](specs/2026-10-18-meeting-asr-diarization-research-design.md)（`approved`；可信评测、独占 owner 和八槽流式候选）
+
 - [SpeechRail App 性能与资源治理设计](specs/2026-10-16-app-performance-design.md)（`active`；代码与确定性集成完成，实际性能与交互待验收）
 - [会议分人前处理质量实验](specs/2026-10-17-meeting-diarization-preprocessing-experiment.md)（`active`；基于 AISHELL-4 开发集验证分段密度和短段嵌入）
 - [会议分人模型家族对照](specs/2026-10-17-meeting-diarization-model-family-experiment.md)（`active`；在隔离 R003 开发集评估 3D-Speaker CAM++ 管线）
@@ -25,6 +27,8 @@
 - [Extreme BF16 第四档设计](specs/2026-09-23-extreme-tier-bf16-design.md)（`superseded`；preset/四档体系已被目标架构移除，仅历史追溯）
 
 ## 实施计划
+
+- [会议转录与分人实施计划](plans/2026-10-18-meeting-asr-diarization-implementation-plan.md)（`active`；同一 PR 持续实施，真实模型与运行态按阶段授权）
 
 - [会议助手模块端到端体验优化：竞品调研、用户旅途、UI 盘点与落地验收方案](plans/2026-10-17-meeting-assistant-ux-ui-redesign.md)（`completed`；四竞品调研、七阶段用户旅途、全量 UI 盘点与会前/会中/会后 UX 落地及 144 项单测验收通过）
 - [语音助手、会议助手与 AI 提词器 UI 文案与无障碍体系化优化方案](plans/2026-10-17-assistant-meeting-teleprompter-ui-copy-redesign.md)（`completed`；三模块全量按钮/标签/状态/无障碍文案清单与 AC 核验通过）

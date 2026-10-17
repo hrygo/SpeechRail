@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 实施与交付记录索引"
 status: active
-version: "1.0.4"
-date: 2026-10-17
+version: "1.0.5"
+date: 2026-10-18
 ---
 
 # 🛠️ 实施与交付记录中心 (Implementation & Delivery)
@@ -28,6 +28,7 @@ date: 2026-10-17
 
 ### 2. 专项 Issue 闭环计划与交付报告
 针对具体 Issue 的端到端闭环计划、执行跟踪与交付记录：
+- **会议转录与分人**：[2026-10-18 接手与实施记录](2026-10-18-meeting-diarization-handoff-audit.md)，记录 OpenCode 保留式整合、T0–T8 证据及未验门。
 - **会议与字幕窗口**：[2026-10-16 实施及验收记录](2026-10-16-meeting-caption-acceptance.md)，区分确定性回归、真实模型回放、UI 阻塞与 no-go 启用门。
 - **前五项高 ROI Issue 交接**：[2026-10-17 交接文档](2026-10-17-open-issues-handoff.md)，汇总 #369、#308、#371、#372、#370 的当前证据、接手步骤、运行限制与 #370 的“先 4 人”范围。
 - **Issue #370（会议分人质量）**：[整场上下文算法诊断报告](2026-10-17-meeting-diarization-global-context-report.md)，记录全局 VBx/预处理、PLDA、zero-vote 和 CAM++/UMAP-HDBSCAN 对照；模型候选仍未通过 R003 完整门槛，R004 保持封存。
