@@ -103,8 +103,39 @@ public enum WindowLayoutPolicy {
     }
 
     public static let audiobookInlineCastColumnMinimumWidth: CGFloat = 1_120
+    /// 当左侧章节目录栏被收起时，仅需保障主画布最小可读宽度（500pt）+ 间距 + 右栏检查器（360pt），内联阈值降至 880pt。
+    public static let audiobookInlineCastColumnCollapsedSidebarMinimumWidth: CGFloat = 880
 
-    public static func audiobookShowsInlineCastColumn(forWidth width: CGFloat) -> Bool {
-        width >= audiobookInlineCastColumnMinimumWidth
+    public static func audiobookShowsInlineCastColumn(
+        forWidth width: CGFloat,
+        isChapterSidebarCollapsed: Bool = false,
+        isCastInspectorCollapsed: Bool = false
+    ) -> Bool {
+        guard !isCastInspectorCollapsed else { return false }
+        let threshold = isChapterSidebarCollapsed
+            ? audiobookInlineCastColumnCollapsedSidebarMinimumWidth
+            : audiobookInlineCastColumnMinimumWidth
+        return width >= threshold
+    }
+
+    /// 遵循“自动准备、关键处确认”原则：计算阶段切换时右侧人物与声音检查器的推荐折叠态。
+    /// - 当存在用户手动显隐偏好（`userOverride`）时，严格尊重用户选择；
+    /// - 在 `.preparation`（准备与角色）阶段默认展开（`false`），便于对照原文确认说话人与试听配声；
+    /// - 在 `.production`（制作与返修）阶段，若全书无待确认说话人且已完成配声确认，则自动收起右侧人物栏（`true`），聚焦「章节目录 + 音频片段流」两栏制作；若仍有待确认项或尚未确认配声，则保持展开以便即时处理。
+    public static func audiobookRecommendedCastInspectorCollapsed(
+        forTab workbenchTab: AudiobookWorkflowModel.WorkbenchTab,
+        hasUnresolvedUnknownSpeakers: Bool,
+        isCastConfirmed: Bool,
+        userOverride: Bool? = nil
+    ) -> Bool {
+        if let userOverride {
+            return userOverride
+        }
+        switch workbenchTab {
+        case .preparation:
+            return false
+        case .production:
+            return !hasUnresolvedUnknownSpeakers && isCastConfirmed
+        }
     }
 }

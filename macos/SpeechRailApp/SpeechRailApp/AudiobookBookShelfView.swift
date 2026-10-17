@@ -134,7 +134,7 @@ public struct AudiobookBookShelfView: View {
                         .disabled(isOpening)
 
                         Menu {
-                            Button("进入工作台") {
+                            Button("打开工作台") {
                                 Task {
                                     await withPendingBook(summary.id) {
                                         await workflow.openBook(summary.id)
@@ -143,7 +143,7 @@ public struct AudiobookBookShelfView: View {
                             }
                             .disabled(isOpening)
                             if summary.completedChapterCount > 0 {
-                                Button("进入听书模式") {
+                                Button("开始听书") {
                                     Task {
                                         await withPendingBook(summary.id) {
                                             await workflow.openBook(summary.id)
@@ -165,16 +165,19 @@ public struct AudiobookBookShelfView: View {
                                 .disabled(isOpening)
                             }
                             Divider()
-                            Button("移入有声书废纸篓", role: .destructive) {
+                            Button("移入废纸篓", role: .destructive) {
                                 Task { await workflow.trashBook(summary.id) }
                             }
                             .disabled(isOpening)
+                            .help("移入废纸篓后仍可随时恢复，不影响原始 TXT 与已导出文件")
                         } label: {
                             Image(systemName: "ellipsis.circle")
                                 .font(SpeechRailDesignTokens.Typography.body)
                         }
                         .menuStyle(.borderlessButton)
                         .frame(width: 28)
+                        .help("更多操作")
+                        .accessibilityLabel("更多书籍操作")
                     }
                 }
 
@@ -194,7 +197,7 @@ public struct AudiobookBookShelfView: View {
                     Spacer()
 
                     if let bookmark = summary.bookmark {
-                        Text("上次听到片段偏置 \(Int(bookmark.fragmentOffsetSeconds))s · \(String(format: "%.2gx", bookmark.playbackRate))")
+                        Text("上次听到本段第 \(Int(bookmark.fragmentOffsetSeconds)) 秒 · \(String(format: "%.2gx", bookmark.playbackRate))")
                             .font(SpeechRailDesignTokens.Typography.technical)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     }
@@ -220,7 +223,7 @@ public struct AudiobookBookShelfView: View {
         } else if summary.book.analysisState == .paused {
             StatusPill(tone: .attention, label: "分析：已暂停")
         } else if summary.book.analysisState == .failed {
-            StatusPill(tone: .critical, label: "分析：需处理")
+            StatusPill(tone: .critical, label: "分析：需重试")
         } else {
             StatusPill(tone: .healthy, label: "全书分析已完成")
         }
@@ -253,7 +256,7 @@ public struct AudiobookBookShelfView: View {
         case .fullBookProduced:
             StatusPill(tone: .healthy, label: "全书制作完成")
         case .failed:
-            StatusPill(tone: .critical, label: "制作：需处理")
+            StatusPill(tone: .critical, label: "制作：需重试")
         }
         }
     }
@@ -264,7 +267,7 @@ public struct AudiobookBookShelfView: View {
         case .noneAvailable:
             StatusPill(tone: .neutral, label: "收听：暂无成品")
         case .previousRevisionAvailable:
-            StatusPill(tone: .attention, label: "可听：之前的版本")
+            StatusPill(tone: .attention, label: "可听：旧版音频")
         case .partialChaptersListenable:
             StatusPill(tone: .healthy, label: "可听：部分章节")
         case .fullBookListenable:

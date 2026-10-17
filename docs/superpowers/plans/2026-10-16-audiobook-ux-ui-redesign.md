@@ -91,11 +91,77 @@ date: 2026-10-16
    - 合并重复的 `tier` 与 `archetype` 胶囊（不再同时显示 `ⓘ 群像` + `ⓘ 特色群像`），主角显示 `主角 · 青年男声`，配角/群像仅显示具体声部行当（如 `青年男声`、`中年女声`、`特色群像`）。
    - 底部存在零台词仅提及人物时，以轻量折叠提示 `已自动隐藏 N 个零台词提及人物` 告知用户，支持按需展开查看。
 2. **底部常驻迷你播放与审听栏（`AudiobookBookWorkspaceView.swift`）**：
-   - 当所选章节已有可收听音频版本或正在播放时，在三栏工作台底部直接挂载紧凑的常驻播放控制条（支持播放/暂停、±15 秒快进快退、倍速切换与实时朗读进度展示），实现“边看剧本、边听成片、随时返修”的无缝闭环。
+   - 当所选章节已有可收听音频版本或正在播放时，在工作台底部直接挂载紧凑的常驻播放控制条（支持播放/暂停、±15 秒快进快退、倍速切换与实时朗读进度展示），实现“边看剧本、边听成片、随时返修”的无缝闭环。
+
+### 3.5 阶段五（Step 5，2026-10-17 深化）：制作页三栏 vs 响应式两栏/上下文检查器深度对比与布局演进
+
+#### 3.5.1 近期官方竞品长篇/多角色制作流程与布局核查（核实日期：2026-10-17）
+
+| 竞品与规范来源 | 真实长篇/多角色布局与流程事实（【来源事实】） | 官方来源链接与日期 |
+| :--- | :--- | :--- |
+| **ElevenLabs Audiobooks & ElevenCreative Studio 4.0** | 1. **章节侧栏（Chapters Sidebar）+ 中央连续文稿画布 + 上下文右侧栏（Contextual Sidebar）**：Audio project 通过左侧 `Chapters` 标签管理章节（新建、重命名、拖拽排序），中央画布采用段落左侧状态条（浅灰=未转换，深色=已生成）的连续文稿流，右侧 `Contextual sidebar` 随当前选中对象动态切换（配音、模型、生成历史、Character Casting），支持按需展开或收起，而非在所有阶段死锁固定宽度。<br>2. **底部常驻播放与顺播生成栏（Bottom Player）**：底部播放器统一承载 `Selection`（单段）与 `Until end`（顺播生成）控制。 | [Audiobooks \| ElevenLabs Documentation](https://elevenlabs.io/docs/eleven-creative/products/audiobooks)、[ElevenCreative Studio overview \| ElevenLabs Documentation](https://elevenlabs.io/docs/eleven-creative/products/studio)（官方文档，2026-09-22 / 2026-10-17 核实） |
+| **Descript Script Editor (Markers & Speakers)** | 1. **主剧本流绝对优先 + 按需展开章节/属性抽屉**：章节（Markers `#`）既作为内联段落标题存在于剧本流中，也可通过播放控制旁的紧凑 Marker 列表跳转；说话人（Speaker labels `@`）在连续发言时合并展示，右侧属性检查器可随时折叠以最大化剧本阅读与波形审听空间。 | [Markers and chapters - Descript Help Center](https://help.descript.com/script-editing/markers-chapters)、[Speaker labels - Descript Help Center](https://help.descript.com/script-editing/speaker-labels)（官方帮助中心，2026-10-17 核实） |
+| **Apple macOS Human Interface Guidelines — Split Views & Layout** | 1. **保护主内容最小可读宽度（Primary Content Protection）**：macOS 分栏视图应优先保障主内容区宽度（SpeechRail 契约为 `minimumPrimaryContentWidth = 500pt`），当窗口收窄或进入专注阶段时，次级导航栏（`sidebar.left`）与右侧检查器（`sidebar.right`）应支持双向独立折叠或响应式转浮层，且严禁将导航标签命名为固定几何形态（如「三栏工作台」）。 | [Split views \| Apple Developer Documentation](https://developer.apple.com/design/human-interface-guidelines/split-views)、[Layout \| Apple Developer Documentation](https://developer.apple.com/design/human-interface-guidelines/layout)（2026-09-09 更新，2026-10-17 核实） |
+
+#### 3.5.2 结合 SpeechRail 窗口宽度预算与四阶段流程的三方案对比
+
+在 `SpeechRail` 中，窗口最小宽度为 `800pt`，常见笔记本窗口宽度为 `1120–1440pt`。扣除全局左侧主导航栏（展开时 `240pt`）与页面两侧边距（`2 × 20pt = 40pt`）后，有声书工作台可用宽度通常在 `840pt ~ 1160pt` 之间。若左栏章节列表（`240pt` + 间距 `16pt` = `256pt`）与右栏人物检查器（`360pt` + 间距 `16pt` = `376pt`）同时固定常驻，两侧共吞噬 **`632pt`**，在 `1120pt` 工作区宽度下中央主画布仅剩 **`488pt`**。
+
+| 评估维度 | 方案 A：固定三栏 + 仅左栏可收起（旧实现） | 方案 B：纯两栏（左章 + 中主区）+ 弹窗选角 | **方案 C（推荐并采用）：阶段感知 + 宽度自适应的「主画布优先 + 双向可折叠侧栏/上下文检查器」混合架构** |
+| :--- | :--- | :--- | :--- |
+| **布局结构** | 左（章节 `240pt` 可收起）+ 中（主画布）+ 右（人物与声音 `360pt`，宽屏 `≥1120pt` 强制常驻且不可收起，窄屏转 Popover） | 左（章节 `240pt`）+ 中（主画布）；彻底取消右侧内联栏，所有角色与配声操作放进模态 Sheet 或 Popover | 左（章节导航 `240pt`，`sidebar.left` 可收起）+ 中（共享主画布，保底 `≥500pt`）+ 右（人物与声音上下文检查器 `360pt`，支持 `sidebar.right` 手动收展 + 阶段感知自动收展 + 宽度不足时自动转 Popover） |
+| **宽度预算与左栏联动** | 即使用户收起了左栏章节目录（释放 `256pt`），在 `900~1119pt` 窗口下右栏依然被迫缩成 Popover；而在 `≥1120pt` 下用户又无法收起右栏 | 宽屏（`≥1200pt`）下中央主画布受限于 `820pt` 阅读行宽上限，右侧留下大片空白，且选角期需频繁开关弹窗 | 1. 左栏展开时内联右栏阈值为 `1120pt`；**左栏收起后内联右栏阈值智能降至 `880pt`**（`500pt` 主区 + `16pt` 间距 + `360pt` 右栏），让中等窗口也能并排对校「原文 + 人物配声」；<br>2. 任何宽度下均可点击 `sidebar.right` 收起右栏。 |
+| **跨阶段任务流匹配（「准备与角色」vs「制作与返修」）** | 切换到「制作与返修」后，角色配声已锁定，但右侧 `360pt` 人物列表仍常驻占屏，挤压音频片段与候选重录对比空间；且音频片段仍套重型 `CardSurface` | 在「准备与角色」阶段核对全书角色、排查同场撞音与试听真实台词时，弹窗遮挡正文上下文 | 遵循**“自动准备、关键处确认”**：<br>1. **准备与角色阶段**：宽屏默认展开右侧人物检查器，边读原文边试听配声；<br>2. **制作与返修阶段**：当全书无待确认说话人且配声已确认时，**自动收起右侧人物检查器**（聚焦「章节导航 + 音频片段流」两栏布局），同时保留顶栏按钮随时一键展开或微调角色音色；音频片段同步升级为左侧 3pt 状态色条流。 |
+| **状态可恢复性与术语一致性** | 顶栏硬编码 `三栏工作台`，窄屏或收起侧栏时名实不符 | 关闭选角弹窗易丢失筛选上下文 | 顶栏正名为 **「制作工作台」**；自动或手动收展侧栏/检查器完整保留 `castFilterScope`、`expandedRoleIDs`、当前选中章节与制作进度。 |
+
+**决策结论**：放弃“预设必须固定保留三栏”的静态思维，实施 **方案 C（阶段感知 + 宽度自适应的「主画布优先 + 双向可折叠侧栏/上下文检查器」混合架构）**。
+
+---
+
+### 3.6 有声书全流程 UI 文案审查与优化清单（2026-10-17 专项）
+
+#### 3.6.1 平台与行业官方 UX 文案原则（核实日期：2026-10-17）
+
+| 规范与竞品来源 | 核心文案与交互标签准则（【来源事实】） | 官方来源链接与日期 |
+| :--- | :--- | :--- |
+| **Apple Human Interface Guidelines — Writing, Buttons & Menus** | 1. **动词+宾语说清动作或结果**：按钮与菜单项应使用简短、直接的动宾结构说明点击后发生的动作或结果，避免使用模糊的“确定（OK）”“处理（Process）”“完成（Done，非编辑态时）”。<br>2. **省略号（`…`）精确表意**：仅当点击后会打开新窗口/弹窗要求用户进一步输入确认时追加 `…`；立即执行的动作不加 `…`。<br>3. **同义动作全局一致**：同一目标动作在卡片主按钮、更多菜单、顶栏与空状态中必须使用相同动词词组，避免混用近义词造成认知分裂。<br>4. **破坏性操作显式声明后果与可逆范围**：破坏性按钮（`.destructive`）必须写明具体动作（如“永久删除” vs “移入废纸篓”）及影响边界。 | [Writing \| Apple Developer Documentation](https://developer.apple.com/design/human-interface-guidelines/writing)、[Buttons \| Apple Developer Documentation](https://developer.apple.com/design/human-interface-guidelines/buttons)（2025-12-16 更新，2026-10-17 核实）、[Menus \| Apple Developer Documentation](https://developer.apple.com/design/human-interface-guidelines/menus)（2026-10-17 核实） |
+| **Apple Human Interface Guidelines — Accessibility** | 1. **纯图标控件必须具备动态无障碍名称（`.accessibilityLabel`）**：所有仅显示 SF Symbols 图标的按钮（如侧边栏折叠、播放/暂停、试听/停止、展开/收起、星标收藏）必须提供随状态更新的 `.accessibilityLabel`，不能仅依赖鼠标悬停 `.help`。<br>2. **避免向普通用户暴露底层工程单位**：采样帧、字节偏置、内部数据结构名（如 `TextAtom` / `FragmentPlan` / `Generation`）不应直接出现在面向创作者的主界面文案中。 | [Accessibility \| Apple Developer Documentation](https://developer.apple.com/design/human-interface-guidelines/accessibility)（2025-06-09 更新，2026-10-17 核实） |
+| **ElevenLabs Audiobooks & Studio / Descript Script Editor** | 1. **创作者心智词典**：长篇有声书与多角色配音工具面向创作者统一使用「章节（Chapters）」「段落（Paragraphs/Segments）」「说话人/角色（Speakers/Characters）」「生成/重录（Generate/Regenerate）」「第 N 版（Version/Take）」等直观创作词汇，不暴露底层切分块或音频采样帧计数。 | [Audiobooks \| ElevenLabs Documentation](https://elevenlabs.io/docs/eleven-creative/products/audiobooks)、[Speakers - Descript Help Center](https://help.descript.com/script-editing/speakers)（2026-10-14 更新，2026-10-17 核实） |
+
+#### 3.6.2 按全制作流程的完整 UI 文案审查清单（导入 → 分析 → 选角 → 章节制作 → 审听/导出）
+
+| 流程阶段 | 出现位置（文件与行号） | 用户此刻要完成的事 | 现文 | 理解/歧义/术语/截断/无障碍问题 | 建议文案与理由 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **全局/提示栏** | `AudiobookWorkshopView.swift:35, 38` | 查看操作报错并关闭错误横幅 | 标题：`需要处理`<br>按钮：`关闭提示` | `需要处理` 含糊且像系统后台工单术语；按钮 `关闭提示` 冗长 | 标题改为 **`操作未完成`**，按钮改为 **`知道了`**，直接说明当前动作未生效并简洁收起 |
+| **全局/导航栏** | `AudiobookWorkshopView.swift:124-126` | 悬停顶栏视图切换器了解何时可进入工作台/听书 | `.help("先从书架选择一本书，再进入工作台或听书界面。")` | 与切换器标签 `制作工作台` / `听书` 呼应，但可更简练 | 改为 **`请先在书架选择一本书`**，简短直接 |
+| **1. 书架与导入** | `AudiobookBookShelfView.swift:115, 123` | 从书籍卡片或卡片右上角 `⋯` 菜单打开该书制作页 | 主按钮：`打开工作台`<br>`⋯` 菜单：`进入工作台` | 同一卡片内相同动作使用了 `打开工作台` 与 `进入工作台` 两种词，违反一致性原则 | 统一为 **`打开工作台`**；同时为 `⋯` 菜单补充 `.accessibilityLabel("更多书籍操作")` 与 `.help("更多操作")` |
+| **1. 书架与导入** | `AudiobookBookShelfView.swift:127, 134, 143` | 从书籍卡片 `⋯` 菜单收听、导出或移入废纸篓 | `开始听书` / `导出…` / `移入废纸篓` | `导出…` 与工作台顶栏 `导出有声书…` 不一致；`移入废纸篓` 缺少悬停说明可恢复性 | 改为 **`开始听书`** / **`导出有声书…`** / **`移入废纸篓`**（附 `.help("移入废纸篓后仍可随时恢复")`） |
+| **1. 书架与导入** | `AudiobookBookShelfView.swift:175` | 在书架卡片查看上次听书进度书签 | `上次听到片段偏置 \(Int(bookmark.fragmentOffsetSeconds))s · ...` | **严重内部术语泄露**：`片段偏置`（fragment offset）是底层数据结构字段名，普通用户完全无法理解 | 改为 **`上次听到本段第 \(Int(bookmark.fragmentOffsetSeconds)) 秒 · \(String(format: "%.2gx", bookmark.playbackRate))`**，自然易懂 |
+| **1. 书架与导入** | `AudiobookBookShelfView.swift:198, 232, 241` | 在书架卡片查看书籍分析、制作与可听状态胶囊 | `分析：需处理` / `制作：需处理` / `可听：之前的版本` | `需处理` 过于模糊，未指明是失败需重试；`之前的版本` 口语拖沓且窄卡片易占宽 | 改为 **`分析：需重试`** / **`制作：需重试`** / **`可听：旧版音频`**，状态与工作台胶囊严格对齐 |
+| **1. 书架与导入** | `AudiobookWorkshopView.swift:267` | 导入 TXT 预览弹窗中确认导入并开始建书 | 勾选：`导入后立即在后台启动全书角色与说话人分析` | 文案偏长且强调“在后台启动”内部机制 | 改为 **`导入后立即开始全书分析`**，简明扼要 |
+| **1. 书架与导入** | `AudiobookWorkshopView.swift:331` | 查看完废纸篓弹窗后关闭弹窗 | 按钮：`完成` | 在非表单编辑的纯列表查看弹窗中，使用 `完成` 语义含糊 | 改为 **`关闭`**，符合 macOS HIG 浏览型 Sheet 关闭规范 |
+| **2. 全书分析与目录** | `AudiobookBookWorkspaceView.swift:256-267` | 点击工作台左上角图标收起/展开章节目录栏 | 仅有 `.help(...)`，无 `.accessibilityLabel` | **无障碍缺失**：纯图标按钮 `sidebar.left` 缺少动态 `.accessibilityLabel`，VoiceOver 仅读出系统符号名 | 补齐 `.accessibilityLabel(isChapterSidebarCollapsed ? "展开章节目录" : "收起章节目录")` |
+| **2. 全书分析与目录** | `AudiobookBookWorkspaceView.swift:318-334` | 点击工作台右上角按钮收起/展开右侧人物与声音栏 | 仅有 `Label` 与 `.help(...)` | 补齐动态 `.accessibilityValue(showInlineCast || workflow.isCastInspectorPresented ? "已展开" : "已收起")`，便于读屏感知面板状态 | 补充 `.accessibilityValue(showInlineCast || workflow.isCastInspectorPresented ? "已展开" : "已收起")` |
+| **2. 全书分析与目录** | `AudiobookBookWorkspaceView.swift:554` | 在左侧章节列表查看修改配声后仍有旧版音频的章节 | `之前的版本可听` | 7 字副文案在 `240pt` 窄侧栏中与 `待更新`、`待确认 N` 并排时极易挤压截断 | 精简为 **`旧版可听`**（4 字），与书架和听书页统一且零截断 |
+| **2. 全书分析与目录** | `AudiobookWorkflowModel.swift:2431, 2472` | 拆分或合并章节后查看顶部反馈横幅 | `目录已拆分，规范化原文保持不变。请重新分析角色后继续制作。` | **内部术语泄露**：`规范化原文`（normalized text）属于内部索引实现概念 | 改为 **`章节已拆分，原文内容保持不变。请重新分析全书后继续制作。`** / **`章节已合并，原文内容保持不变。请重新分析全书后继续制作。`** |
+| **3. 校对与选角** | `AudiobookBookWorkspaceView.swift:850, 961, 973, 994` | 在正文段落中批量或单段指定说话人 | 批量栏：`归属「X」`<br>单段菜单：`改派说话人` → `指派给：X` | 同一动作混用了 `归属`、`改派`、`指派给` 三种动词，且 `归属` 偏学术/内部化 | 批量栏改为 **`设为「\(role.displayName)」`**；单段菜单按钮改为 **`更换说话人`**，菜单项改为 **`设为：\(role.displayName)`**，底部撤销改为 **`撤销上次说话人修改`**，全链路动词统一 |
+| **3. 校对与选角** | `AudiobookBookWorkspaceView.swift:1018` | 在待确认说话人卡片点击候选角色芯片 | `一键确认并跳至下一处：` | 提示词偏长 | 精简为 **`选择说话人（按数字键 1–5 快速确认并跳至下一处）：`**，直接教会用户键盘快捷键！ |
+| **3. 校对与选角** | `AudiobookBookWorkspaceView.swift:1440, 1623-1624` | 切换是否显示全书 0 句对白的角色 | 栏头：`已折叠 N 个无对白人物` / `隐藏 N 个无对白人物`<br>菜单：`显示/隐藏 0 句无对白人物（N）` | `0 句无对白人物` 语义重复（0 句 = 无对白），且栏头静态状态描述不如动作清晰 | 栏头按钮改为 **`显示 \(silentCount) 个无对白角色`** / **`隐藏 \(silentCount) 个无对白角色`**；菜单项统一为 **`显示无对白角色（\(workflow.silentCharacterCount)）`** / **`隐藏无对白角色（\(workflow.silentCharacterCount)）`** |
+| **3. 校对与选角** | `AudiobookBookWorkspaceView.swift:1555` | 点击右侧人物栏底部主按钮一键分配全书角色音色 | `智能配声（配角可共享）` | 按钮内塞入括号说明导致按钮长达 11 字，在 `360pt` 检查器底部与左侧 `更多整理…` 并排时显得拥挤，且说明已在 `.help` 中给出 | 按钮精简为 **`一键智能配声`**（6 字，零截断），`.help` 明確说明 **`为主角分配专属音色，配角按声部共享音色；若存在同场撞音将提示确认`** |
+| **3. 校对与选角** | `AudiobookWorkshopView.swift:391` | 在「合并或拆分角色」弹窗中选择要拆出的段落范围 | `当前已选中 \(workflow.selectedAtomIDs.count) 个正文切分块` | **严重内部术语泄露**：`正文切分块`（TextAtom）是内部解析器术语，用户只知道“正文段落” | 改为 **`当前已选中 \(workflow.selectedAtomIDs.count) 段正文（在主工作区勾选段落后可拆出为独立角色）`** |
+| **3. 校对与选角** | `AudiobookWorkshopView.swift:415` | 关闭「合并或拆分角色」弹窗 | `完成` | 与废纸篓弹窗同理，该弹窗中「合并角色」与「拆出新角色」已是即时生效按钮，底部退出按钮用 `关闭` 更准确 | 改为 **`关闭`** |
+| **4. 章节制作与返修** | `AudiobookBookWorkspaceView.swift:1120-1123` | 切换到尚未生成音频的章节「制作与返修」页查看空状态 | 标题：`当前章节尚未生成片段规划`<br>按钮：`制作本章` | **严重内部术语泄露**：`片段规划`（Fragment Plan）是合成管线内部概念，用户关心的是“本章尚未生成音频” | 标题改为 **`本章尚未生成音频`**，说明改为 **`请先完成全书分析并确认角色配声，即可生成本章音频。`**，按钮改为 **`生成本章音频`** |
+| **4. 章节制作与返修** | `AudiobookBookWorkspaceView.swift:1095, 1181` | 查看章节增量复用提示与底部制作按钮 | 胶囊：`待生成/更新 N 段`<br>按钮：`制作/更新本章` | 带斜杠的复合词 `制作/更新本章` 显得机械生硬；可根据本章是否已有成片版本动态显示精确动词 | 胶囊改为 **`待合成 \(plan.redoFragmentIDs.count) 段`**；底部按钮按当前章节是否已有 `currentChapterRevisionID` 动态显示 **`更新本章音频`** 或 **`生成本章音频`** |
+| **4. 章节制作与返修** | `AudiobookBookWorkspaceView.swift:1249` | 查看配声变更后待重新合成的音频片段状态胶囊 | `待更新（保留之前版本）` | 11 字胶囊在片段头部窄行中冗长 | 精简为 **`待更新 · 旧版可听`** |
+| **4. 章节制作与返修** | `AudiobookBookWorkspaceView.swift:1295-1315` | 展开单段音频的多次重录历史候选进行试听对比与采用 | `候选版本对比与采用（共 N 条）`<br>`代次 #\(candidate.generation)`<br>`%.2f 秒（%lld 帧）`<br>`匹配当前设定` / `之前的版本`<br>`采用此候选` | **严重内部术语与底层参数泄露**：`代次 #1`（generation）和 `（240000 帧）`（48kHz PCM frameCount）是底层数据库与音频帧校验字段，普通创作者完全不需要看采样帧数！ | 折叠标题改为 **`历史重录版本（共 \(candidates.count) 版）`**；版本名改为 **`第 \(candidate.generation) 版`**；时长仅显示 **`String(format: "%.1f 秒", candidate.durationSeconds)`**（移除 `%lld 帧`）；状态胶囊改为 **`当前设定`** / **`旧版设定`**；按钮改为 **`设为当前版本`**；试听按钮补充 `.accessibilityLabel("试听第 \(candidate.generation) 版")` |
+| **5. 审听与导出** | `AudiobookBookWorkspaceView.swift:466-485` | 在工作台底部迷你播放栏播放/暂停或快进快退 | 播放按钮仅有 `Image(systemName:)` 与 `.help`，无 `.accessibilityLabel` | **无障碍缺失**：VoiceOver 焦点落到工作台底部播放键时无法读出“播放本章/暂停播放” | 补齐 `.accessibilityLabel(controller.isPlaying ? "暂停播放" : "播放本章")`，并为 `−15 秒` / `+15 秒` 补充 `.accessibilityLabel("后退 15 秒")` / `.accessibilityLabel("前进 15 秒")` |
+| **5. 审听与导出** | `AudiobookListeningView.swift:69, 97` | 在听书视图查看章节与顶部横幅的旧版音频标识 | `之前的版本` / `正在收听：之前的版本（当前设定已有调整，待重新制作）` | 与书架和工作台的 `旧版音频` / `旧版可听` 术语统一 | 改为 **`旧版音频`** 与 **`正在收听：旧版音频（角色或配声已调整，重新生成后可更新）`** |
+| **5. 审听与导出** | `AudiobookListeningView.swift:124` | 在听书模式中发现某段读音不理想，跳回工作台重录该段 | `返修此段` | 工作台中对应按钮叫 `重录本段`，而听书页叫 `返修此段`，前后端用词不一致 | 统一改为 **`重录本段`**，并附 `.help("返回制作工作台重新生成此段音频")` |
+| **5. 审听与导出** | `AudiobookListeningView.swift:152-167, 179` | 在听书视图底部控制栏控制播放并查看自动书签说明 | 副文案：`按 48 kHz 实际采样帧计时 · 自动每 5 秒与暂停/离开时保存书签` | **严重底层实现术语泄露**：`按 48 kHz 实际采样帧计时` 是底层音频时钟实现细节，对听书用户毫无意义且造成干扰；同时底部 `−15 秒` / `+15 秒` 按钮可补齐明确无障碍标签 | 副文案改为 **`自动保存收听进度，暂停或离开后可随时续听`**；播放/暂停按钮补齐 `.accessibilityLabel(controller.isPlaying ? "暂停播放" : "开始播放")`，快退/快进补齐 `.accessibilityLabel("后退 15 秒")` / `.accessibilityLabel("前进 15 秒")` |
 
 ## 4. 严格验收标准（Acceptance Criteria）
 
-重构完成后必须逐项通过以下 **15 项可量化验收标准**：
+重构完成后必须逐项通过以下 **26 项可量化验收标准**：
 
 ### 4.1 角色分层与配声死锁修复（AC-1）
 - [x] **AC-1.1（新提取角色默认共享策略）**：`AudiobookCastRegistry.applyMergeBatch` 创建的新非旁白角色默认 `isMajor == false` 且 `allowSharedMinorVoice == true`。（已由 `AudiobookCastRegistry.swift:307-309` 实现，并通过 `AudiobookCastTests.testAC11_to_AC12_NewlyExtractedCharactersDefaultToEnsembleAndAutoStratify` 单测断言通过）
@@ -125,3 +191,18 @@ date: 2026-10-16
   - `AudiobookWorkflowTests`（含新增 `testAC13_to_AC15_SilentRoleFoldingDefaultScopeAndLegacyOneClickAutoCast`）：2/2 项工作流自愈与自动锁定套件通过（既有全量 44 项通过）；
   - `swiftc -typecheck -swift-version 6 -parse-as-library ... SpeechRailApp/*.swift`：全量 App 源码（含 `AudiobookWorkshopView.swift` 与 `AudiobookBookWorkspaceView.swift`）0 编译错误通过；
   - `scripts/macos_app_build.sh --configuration Debug`：`BUILD SUCCEEDED`（注：遵循仓库 `AGENTS.md` 前台窗口保护门禁，未擅自拉起会抢占焦点的 GUI 自动化测试 `scripts/macos_app_test.sh`，桌面端前台点击交互留待人工打开 App 目视确认）。
+
+### 4.5 制作页布局演进：阶段感知、双向折叠与音频片段流减负（AC-5，2026-10-17 新增）
+- [x] **AC-5.1（自适应双核工作区宽度预算与左栏联动）**：`WindowLayoutPolicy.audiobookShowsInlineCastColumn(forWidth:isChapterSidebarCollapsed:isCastInspectorCollapsed:)` 支持显式收起右侧检查器（`isCastInspectorCollapsed == true` 时始终返回 `false`）；左栏展开时内联右栏阈值为 `1120pt`，左栏收起后内联右栏阈值降至 `880pt`（保障主画布 `≥500pt` + 右栏 `360pt`），兼容单参数既有调用。（已由 `WindowLayoutPolicy.swift` 实现，并通过 `AudiobookWorkflowTests.testAC51_to_AC55_AdaptiveWorkspaceLayoutPolicyAndRecoverablePhaseTransition` 单测断言通过）
+- [x] **AC-5.2（阶段感知自动收展与双向可恢复侧栏控制）**：次顶栏同时提供左栏目录开关（`sidebar.left`）与右栏人物与声音检查器开关（`sidebar.right` / `人物与声音（N）`，`audiobook-toggle-cast-inspector`）；当全书无待确认说话人且配声已锁定、用户切入「制作与返修」阶段（且未手动固定右栏）时，自动收起右侧人物栏以聚焦「章节 + 音频片段」两栏制作；切回「准备与角色」时自动恢复展开，且任何宽度与阶段下均可手动展开或浮层唤出，筛选与角色状态 100% 保留。（已由 `WindowLayoutPolicy.audiobookRecommendedCastInspectorCollapsed` 与 `AudiobookBookWorkspaceView.swift` 实现，并通过 `testAC51_to_AC55_AdaptiveWorkspaceLayoutPolicyAndRecoverablePhaseTransition` 单测及 Swift 6 全量类型检查验证）
+- [x] **AC-5.3（移除「三栏工作台」硬编码命名）**：`AudiobookWorkshopView.swift` 顶栏视图模式切换器由 `三栏工作台` 改为任务导向的 `制作工作台`，消除窄屏或两栏专注态下的命名冲突。（已由 `AudiobookWorkshopView.swift:117` 实现并通过 Swift 6 全量类型检查验证）
+- [x] **AC-5.4（「制作与返修」音频片段流去卡片框与连续同角色去重）**：`AudiobookBookWorkspaceView.swift` 的 `fragmentRowView` 移除外层重型 `CardSurface` 嵌套，统一采用左侧 3pt 垂直状态色条（制作中/待更新 = `attention`、已就绪 = `ready`、待合成 = `separator`），且连续相同角色且已就绪的片段默认折叠重复角色胶囊（悬停、多候选或角色切换时显露）。（已由 `AudiobookBookWorkspaceView.swift` 的 `fragmentRowView(fragment:previousFragment:)` 与 `hoveredFragmentID` 实现并通过 Swift 6 全量类型检查验证）
+- [x] **AC-5.5（布局策略与状态可恢复性单测及编译验证）**：新增确定性测试覆盖 `WindowLayoutPolicy` 动态阈值与阶段感知自动收展策略，并通过 `check_macos_test_target_coverage.py`（`macos-test-target-coverage: OK`）、有声书单测套件（`AudiobookSourceTests` 11/11、`AudiobookCastTests` 7/7、`AudiobookWorkflowTests` 3/3 全部通过）与 `swiftc -typecheck -swift-version 6` 全量编译检查（`0_COMPILER_ERRORS`）。
+
+### 4.6 全流程 UI 文案一致性、去术语化与无障碍标签优化（AC-6，2026-10-17 新增）
+- [x] **AC-6.1（彻底清除面向用户的底层实现术语）**：移除有声书界面中的 `片段偏置`、`正文切分块`、`当前章节尚未生成片段规划`、`规范化原文`、`代次 #N`、`（%lld 帧）`、`按 48 kHz 实际采样帧计时` 等内部工程概念，分别替换为创作者直觉语言（`上次听到本段第 X 秒`、`已选中 N 段正文`、`本章尚未生成音频`、`原文内容保持不变`、`第 N 版`、纯秒数时长、`自动保存收听进度，暂停或离开后可随时续听`）。（已由 `AudiobookBookShelfView.swift`、`AudiobookWorkshopView.swift`、`AudiobookBookWorkspaceView.swift`、`AudiobookListeningView.swift` 与 `AudiobookWorkflowModel.swift` 实现，并通过 `AudiobookWorkflowTests.testAC61_to_AC65_ChapterProductionButtonTitleAndSplitMergeBannerCopy` 单测及 Swift 6 类型检查验证）
+- [x] **AC-6.2（书架、工作台与听书页跨视图动作与状态词典统一）**：书架卡片主按钮与 `⋯` 菜单统一为 `打开工作台`，导出菜单项统一为 `导出有声书…`，模糊状态 `分析：需处理` / `制作：需处理` 明确为 `分析：需重试` / `制作：需重试`，旧版音频状态在书架、章节栏、片段对比与听书页统一为 `旧版音频` / `旧版可听` / `旧版设定`，听书页单段返修按钮与工作台统一为 `重录本段`。（已由 `AudiobookBookShelfView.swift`、`AudiobookWorkshopView.swift`、`AudiobookBookWorkspaceView.swift` 与 `AudiobookListeningView.swift` 实现并通过 Swift 6 类型检查验证）
+- [x] **AC-6.3（校对与选角面板动宾一致性及窄栏防截断）**：正文批量与单段说话人修改统一为 `设为「X」` / `更换说话人` / `撤销上次说话人修改`；待确认说话人卡片提示直接标明 `选择说话人（按数字键 1–5 快速确认并跳至下一处）：`；右侧人物栏底部主按钮精简为 `一键智能配声`，无对白角色开关文案统一为 `显示/隐藏 N 个无对白角色`。（已由 `AudiobookBookWorkspaceView.swift` 实现并通过 Swift 6 类型检查验证）
+- [x] **AC-6.4（章节制作状态感知按钮与弹窗关闭语义规范）**：章节制作页空状态与底部主按钮根据当前章节是否已有成片动态显示 `生成本章音频` 或 `更新本章音频`（消除生硬的 `制作/更新本章` 斜杠词）；废纸篓与合并/拆分角色等非表单弹窗关闭按钮由模糊的 `完成` 统一改为 `关闭`，错误横幅由 `需要处理 / 关闭提示` 改为 `操作未完成 / 知道了`。（已由 `AudiobookWorkflowModel.chapterProductionButtonTitle(for:)`、`AudiobookBookWorkspaceView.swift` 与 `AudiobookWorkshopView.swift` 实现，并通过 `AudiobookWorkflowTests.testAC61_to_AC65_ChapterProductionButtonTitleAndSplitMergeBannerCopy` 单测断言通过）
+- [x] **AC-6.5（纯图标控件与播放传输栏无障碍名称全覆盖）**：为工作台左栏折叠按钮（`展开章节目录` / `收起章节目录`）、右栏检查器开关（含展开/收起状态值）、工作台迷你播放栏与听书页底部播放栏的播放/暂停及 `−15 秒` / `+15 秒`（`后退 15 秒` / `前进 15 秒`）、书架卡片 `⋯` 菜单（`更多书籍操作`）及候选音频试听按钮补齐动态 `.accessibilityLabel` / `.accessibilityValue`。（已由 `AudiobookBookShelfView.swift`、`AudiobookBookWorkspaceView.swift` 与 `AudiobookListeningView.swift` 实现并通过 Swift 6 类型检查验证）
+- [x] **AC-6.6（UI 文案契约确定性测试与 Swift 6 全量类型检查通过）**：新增确定性测试 `testAC61_to_AC65_ChapterProductionButtonTitleAndSplitMergeBannerCopy` 校验关键动态文案与去术语化契约，运行有声书单元测试（`AudiobookSourceTests` 11/11、`AudiobookCastTests` 7/7、`AudiobookWorkflowTests` 4/4 全部通过）、`check_macos_test_target_coverage.py`（`macos-test-target-coverage: OK`）与 Swift 6 全量类型检查（`0_COMPILER_ERRORS`）全部通过，且未触碰提词器等旁支模块文件。

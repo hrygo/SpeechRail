@@ -2182,4 +2182,140 @@ final class AudiobookWorkflowTests: XCTestCase {
         XCTAssertNil(workflow.pendingCastingPlan, "AC-1.5: 无阻断冲突的智能配声应直接生效，不卡在二次确认弹窗")
         XCTAssertGreaterThanOrEqual(workflow.voiceBindings.count, 8, "AC-1.5: 所有有台词角色均已自动绑定音色")
     }
+
+    func testAC51_to_AC55_AdaptiveWorkspaceLayoutPolicyAndRecoverablePhaseTransition() async throws {
+        // AC-5.1: Dynamic inline cast column threshold & manual collapse behavior
+        XCTAssertTrue(
+            WindowLayoutPolicy.audiobookShowsInlineCastColumn(
+                forWidth: 1_120,
+                isChapterSidebarCollapsed: false,
+                isCastInspectorCollapsed: false
+            )
+        )
+        XCTAssertFalse(
+            WindowLayoutPolicy.audiobookShowsInlineCastColumn(
+                forWidth: 1_000,
+                isChapterSidebarCollapsed: false,
+                isCastInspectorCollapsed: false
+            ),
+            "AC-5.1: 左栏展开时 1000pt 宽度不足以同时保证 240pt 左栏 + 500pt 主区 + 360pt 右栏"
+        )
+        XCTAssertTrue(
+            WindowLayoutPolicy.audiobookShowsInlineCastColumn(
+                forWidth: 920,
+                isChapterSidebarCollapsed: true,
+                isCastInspectorCollapsed: false
+            ),
+            "AC-5.1: 收起左栏后 920pt 宽度（>= 880pt）可并排展示 500pt 主画布与 360pt 右栏"
+        )
+        XCTAssertFalse(
+            WindowLayoutPolicy.audiobookShowsInlineCastColumn(
+                forWidth: 1_440,
+                isChapterSidebarCollapsed: false,
+                isCastInspectorCollapsed: true
+            ),
+            "AC-5.1: 当右侧人物与声音栏处于收起态时，任何宽度下均不展示内联右栏，将空间释放给主画布"
+        )
+
+        // AC-5.2: Stage-aware automatic collapse & user override preservation
+        XCTAssertFalse(
+            WindowLayoutPolicy.audiobookRecommendedCastInspectorCollapsed(
+                forTab: .preparation,
+                hasUnresolvedUnknownSpeakers: false,
+                isCastConfirmed: true,
+                userOverride: nil
+            ),
+            "AC-5.2: 准备与角色阶段默认展开右侧人物栏"
+        )
+        XCTAssertTrue(
+            WindowLayoutPolicy.audiobookRecommendedCastInspectorCollapsed(
+                forTab: .production,
+                hasUnresolvedUnknownSpeakers: false,
+                isCastConfirmed: true,
+                userOverride: nil
+            ),
+            "AC-5.2: 切入制作与返修阶段且无待确认说话人、已确认配声时，自动收起右侧人物栏聚焦音频片段"
+        )
+        XCTAssertFalse(
+            WindowLayoutPolicy.audiobookRecommendedCastInspectorCollapsed(
+                forTab: .production,
+                hasUnresolvedUnknownSpeakers: true,
+                isCastConfirmed: false,
+                userOverride: nil
+            ),
+            "AC-5.2: 若仍有待确认说话人或未确认配声，切入制作阶段仍保持右栏展开以便即时处理"
+        )
+        XCTAssertFalse(
+            WindowLayoutPolicy.audiobookRecommendedCastInspectorCollapsed(
+                forTab: .production,
+                hasUnresolvedUnknownSpeakers: false,
+                isCastConfirmed: true,
+                userOverride: false
+            ),
+            "AC-5.2: 用户手动展开右栏后（userOverride == false），阶段切换严格尊重用户显隐选择"
+        )
+
+        // Verify workflow state recoverability across workbenchTab transitions
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, _) = makeWorkflow(store: store)
+        let txtURL = tempRoot.appendingPathComponent("ac5_state_recovery.txt")
+        try Data("第一章 雾起\n“快看前面。”\n第二章 灯塔\n“到了。”\n".utf8).write(to: txtURL)
+        await workflow.prepareImport(fileURL: txtURL, encoding: .utf8)
+        await workflow.confirmImport()
+
+        workflow.castFilterScope = .leads
+        workflow.workbenchTab = .production
+        XCTAssertEqual(workflow.castFilterScope, .leads, "切换至制作阶段必须完整保留角色筛选上下文")
+        workflow.workbenchTab = .preparation
+        XCTAssertEqual(workflow.castFilterScope, .leads, "切回准备阶段必须完整恢复选角上下文")
+    }
+
+    @MainActor
+    func testAC61_to_AC65_ChapterProductionButtonTitleAndSplitMergeBannerCopy() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, _) = makeWorkflow(store: store)
+        let txtURL = tempRoot.appendingPathComponent("ac6_copy_contract.txt")
+        try Data("第一章 启程\n第一段旁白。\n第二段旁白。\n第三段旁白。\n第二章 归途\n第四段旁白。\n".utf8).write(to: txtURL)
+        await workflow.prepareImport(fileURL: txtURL, encoding: .utf8)
+        await workflow.confirmImport()
+
+        let firstChapterID = try XCTUnwrap(workflow.chapters.first?.id)
+        XCTAssertEqual(
+            workflow.chapterProductionButtonTitle(for: firstChapterID),
+            "生成本章音频",
+            "AC-6.4: 未生成成片的章节主按钮应明确为「生成本章音频」，不再使用「制作/更新本章」"
+        )
+
+        // Split chapter before middle atom and verify user-facing banner copy avoids internal jargon
+        workflow.selectedChapterID = firstChapterID
+        let middleAtomID = try XCTUnwrap(workflow.chapterAtoms.dropFirst().first?.id)
+        workflow.selectedAtomIDs = [middleAtomID]
+        await workflow.splitSelectedChapterBeforeSelectedAtom()
+        XCTAssertEqual(
+            workflow.bannerMessage,
+            "章节已拆分，原文内容保持不变。请重新分析全书后继续制作。",
+            "AC-6.1: 拆分章节反馈不得暴露「规范化原文」内部术语"
+        )
+        XCTAssertFalse(workflow.bannerMessage?.contains("规范化原文") == true)
+
+        await workflow.mergeSelectedChapterWithPrevious()
+        XCTAssertEqual(
+            workflow.bannerMessage,
+            "章节已合并，原文内容保持不变。请重新分析全书后继续制作。",
+            "AC-6.1: 合并章节反馈不得暴露「规范化原文」内部术语"
+        )
+        XCTAssertFalse(workflow.bannerMessage?.contains("规范化原文") == true)
+
+        // Simulate an adopted chapter revision and verify button title transitions to 更新本章音频
+        var updatedChapters = workflow.chapters
+        updatedChapters[0].currentChapterRevisionID = UUID()
+        let bookID = try XCTUnwrap(workflow.selectedBook?.id)
+        try await store.updateChapters(bookID: bookID, chapters: updatedChapters)
+        await workflow.openBook(bookID)
+        XCTAssertEqual(
+            workflow.chapterProductionButtonTitle(for: updatedChapters[0].id),
+            "更新本章音频",
+            "AC-6.4: 已有成片的章节主按钮应动态切换为「更新本章音频」"
+        )
+    }
 }

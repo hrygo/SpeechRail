@@ -595,6 +595,19 @@ public final class AudiobookWorkflowModel {
         return action.title
     }
 
+    public func chapterProductionButtonTitle(for chapterID: UUID?) -> String {
+        if isSelectedBookBlockedByProduction {
+            return "另一部有声书正在制作"
+        }
+        guard let chapterID,
+              let chapter = chapters.first(where: { $0.id == chapterID }),
+              chapter.currentChapterRevisionID != nil
+        else {
+            return "生成本章音频"
+        }
+        return "更新本章音频"
+    }
+
     /// 严格唯一主动作推导：任何状态下只突出下一步最合理的动作。
     public func nextPrimaryAction(for summary: AudiobookBookSummary) -> PrimaryBookAction {
         let book = summary.book
@@ -2428,7 +2441,7 @@ public final class AudiobookWorkflowModel {
             }
             await refreshShelf()
             if selectedBook?.id == bookID {
-                bannerMessage = "目录已拆分，规范化原文保持不变。请重新分析角色后继续制作。"
+                bannerMessage = "章节已拆分，原文内容保持不变。请重新分析全书后继续制作。"
             }
         } catch {
             if selectedBook?.id == bookID {
@@ -2471,7 +2484,7 @@ public final class AudiobookWorkflowModel {
             }
             await refreshShelf()
             if selectedBook?.id == bookID {
-                bannerMessage = "章节已合并，规范化原文保持不变。请重新分析角色后继续制作。"
+                bannerMessage = "章节已合并，原文内容保持不变。请重新分析全书后继续制作。"
             }
         } catch {
             if selectedBook?.id == bookID {
