@@ -37,8 +37,8 @@ extension MeetingView {
     private func reviewInspectorCard(_ record: SessionRecord) -> some View {
         CardSurface {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                CardHead(title: "这一场") {
-                    Button("回到这一场") { closeReview() }
+                CardHead(title: "历史会议信息") {
+                    Button("返回当前会议") { closeReview() }
                         .buttonStyle(.link)
                         .font(SpeechRailDesignTokens.Typography.caption)
                 }
@@ -146,14 +146,14 @@ extension MeetingView {
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Button("继续这一段") { Task { await meeting.continueAfterInterruption() } }
+                    Button("继续录制") { Task { await meeting.continueAfterInterruption() } }
                         .buttonStyle(.borderedProminent)
                     Button("结束并整理") { Task { await meeting.requestFinish() } }
                         .buttonStyle(.bordered)
                 }
                 .controlSize(.small)
                 Divider()
-                Text("四种断法")
+                Text("中断处理说明")
                     .font(SpeechRailDesignTokens.Typography.captionMedium)
                 ForEach(Self.interruptionNotes, id: \.0) { note in
                     Text("\(note.0)：\(note.1)")

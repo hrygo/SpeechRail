@@ -29,7 +29,7 @@ struct SpeakerLabelingSheet: View {
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 }
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-                Button("完成") { close() }
+                Button("关闭") { close() }
                     .keyboardShortcut(.defaultAction)
             }
             if let sessionID {

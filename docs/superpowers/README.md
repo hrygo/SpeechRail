@@ -24,6 +24,9 @@
 
 ## 实施计划
 
+- [语音助手、会议助手与 AI 提词器 UI 文案与无障碍体系化优化方案](plans/2026-10-17-assistant-meeting-teleprompter-ui-copy-redesign.md)（`completed`；三模块全量按钮/标签/状态/无障碍文案清单与 AC 核验通过）
+- [AI 提词器模块体验优化：调研、方案与落地验收记录](plans/2026-10-17-teleprompter-ux-ui-redesign.md)（`completed`；修复就绪态回改死锁、口述字符稿连续文档流减负、按 ID 复制回退、场景预设坞与舞台键盘焦点守卫）
+- [有声书制作模块 UX/UI 现代化重构方案](plans/2026-10-16-audiobook-ux-ui-redesign.md)（`completed`；流线型工作台减负）
 - [SpeechRail App 性能治理实施计划](plans/2026-10-16-app-performance-implementation-plan.md)（A 层完成；覆盖 App、采集与播放，B/C 层及服务侧条件排查见待办）
 - [Wheel 本地安装器计划](plans/2026-09-01-wheel-local-installer.md)
 - [OpenAI Realtime 交接计划](plans/2026-09-02-openai-realtime-handover.md)（`superseded`）

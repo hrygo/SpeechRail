@@ -18,6 +18,7 @@ extension MeetingView {
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()
+                        .accessibilityLabel("会后视图切换")
 
                         if postTab == .minutes, let body = displayedMinutesBody, !body.isEmpty {
                             Button {
@@ -216,6 +217,8 @@ extension MeetingView {
                 }
                 .buttonStyle(.plain)
                 .speechRailPointerCursor()
+                .help("清除转写筛选")
+                .accessibilityLabel("清除转写筛选")
             }
             Text("\(filteredReviewLines.count) / \(reviewLines.count) 段")
                 .font(SpeechRailDesignTokens.Typography.caption)

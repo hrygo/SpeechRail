@@ -278,7 +278,7 @@ extension MeetingView {
                 Button {
                     isLabelingSpeakers = true
                 } label: {
-                    Label("标注与重命名…", systemImage: "pencil")
+                    Label("重命名或合并说话人…", systemImage: "pencil")
                 }
                 Button {
                     Task { await meeting.markAsMe(label: label) }
@@ -313,7 +313,7 @@ extension MeetingView {
                 Button {
                     isLabelingSpeakers = true
                 } label: {
-                    Label("标注发言人…", systemImage: "pencil")
+                    Label("标注说话人…", systemImage: "pencil")
                 }
                 let existing = meeting.labeling.labels
                 if !existing.isEmpty {
@@ -328,7 +328,7 @@ extension MeetingView {
                 HStack(spacing: 2) {
                     Image(systemName: "person.badge.plus")
                         .font(SpeechRailDesignTokens.Typography.chipIcon)
-                    Text("未指定")
+                    Text("未标说话人")
                         .font(SpeechRailDesignTokens.Typography.caption)
                 }
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary.opacity(0.8))

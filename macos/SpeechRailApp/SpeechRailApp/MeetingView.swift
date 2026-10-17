@@ -161,9 +161,9 @@ public struct MeetingView: View {
             if meeting.phase == .idle, meeting.blocked == nil {
                 SessionHeaderKeycap("⌘⇧N")
                 PageActionButton(
-                    title: "查看设置",
+                    title: "会议设置…",
                     systemImage: "slider.horizontal.3",
-                    helpText: "打开会话设置：谁在说话、纪要模型与默认对话方式"
+                    helpText: "打开会话设置：发言人区分、纪要模型与默认录音方式"
                 ) { openSettings() }
             } else if meeting.phase.isLive || meeting.phase == .interrupted {
                 // 稿 `screenMeetingRecording` 的页头三件：`⌘⇧.` 键帽 / 静音麦克风 / 结束会议。
@@ -195,9 +195,9 @@ public struct MeetingView: View {
                         NSWorkspace.shared.activateFileViewerSelecting([session.libraryURL])
                     }
                     PageActionButton(
-                        title: "继续这一段",
+                        title: "继续录制",
                         systemImage: "play.fill",
-                        helpText: "重新拿一次来源接着录：序号继续，断点期间没录上的就是没有"
+                        helpText: "重新连接音频来源并接着本场继续录制；中断期间未录到的内容无法补回"
                     ) {
                         Task { await meeting.continueAfterInterruption() }
                     }

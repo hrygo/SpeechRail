@@ -162,8 +162,9 @@ extension MeetingView {
             SessionHairline()
             CardFoot(note: "来源列表只列正在出声或最近出过声的 App；列表为空时先去那个 App 里放一声。") {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Button("测试输入电平") { isCheckingInput = true }
+                    Button("检查麦克风音量…") { isCheckingInput = true }
                         .speechRailButton(.secondary)
+                        .help("查看当前麦克风的实时音量反应")
                     Button("刷新列表") { refreshSources() }
                         .speechRailButton(.secondary)
                 }
@@ -211,7 +212,7 @@ extension MeetingView {
                 // 那个选择器在设置与模型页，那边仍叫「档位」。
                 SessionKVRow("识别精度", profileRowText)
                 SessionKVRow("音频来源", sourceSummary)
-                SessionKVRow("谁在说话", preferences.meetingDiarizationEnabled ? "已开" : "关着")
+                SessionKVRow("发言人区分", preferences.meetingDiarizationEnabled ? "已开启" : "未开启")
                 SessionKVRow("保存位置", "记录库 · 长期保留")
             }
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
@@ -219,8 +220,9 @@ extension MeetingView {
             Spacer(minLength: 0)
             SessionHairline()
             SessionPanelActions(alignment: .spread) {
-                Button("检查输入电平") { isCheckingInput = true }
+                Button("检查麦克风音量…") { isCheckingInput = true }
                     .speechRailButton(.secondary)
+                    .help("查看当前麦克风的实时音量反应")
             }
         }
     }
