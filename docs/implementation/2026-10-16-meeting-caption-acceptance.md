@@ -1,8 +1,8 @@
 ---
 title: "会议与字幕窗口实施及验收记录"
 status: active
-version: "0.2.0"
-date: 2026-10-16
+version: "0.2.1"
+date: 2026-10-17
 ---
 
 # 会议与字幕窗口实施及验收记录
@@ -232,3 +232,108 @@ App 的窗口投影保留 `lastUICommitAt` 本地时钟。
   原 API 文档在基线之后另有修改，未用 worktree 文档覆盖它。
 
 原始证据目录由本机验收记录定位，不把音频、转写正文或日志复制到本报告。
+
+## 2026-10-17 follow-up: #370 warm AISHELL-4 batch-ASR slice
+
+使用现有 AISHELL-4 六条短会议 fixture，通过正式 `examples/perf/bench_profiles.py` 入口，
+在本机 SpeechRail `3.11.1`、`quality/quality` selection 上执行 warm phase。六次请求均为 HTTP 200，
+真实输入总长 38.890 秒；参考共 166 个字符，累计 8 个字符错误，按总字符加权 CER 为
+`8/166 = 4.8193%`。单次延迟 p50 为 0.2033 秒、p95 为 0.6786 秒；RTF p50 为 0.0325、
+p95 为 0.1030。六个 fixture 的资源 tick 均完整，`sampling_complete=true`。
+
+原始匿名结果保留在仓库外，artifact id `speechrail-issue370-20261017-70ndgojc`，
+SHA-256 `e9f0f8b59d56a9266616a51f1a68d990aff7e751c3af170050db236184036635`。这只是六条短音频的
+warm batch-ASR 结果；只观察了 `warm` phase，整体 `release_pass=false`。它没有测整场会议、多人
+动态分人、DER/JER 或安装态留出集，不能替代会议质量门。既有开发集 8 场/24 组策略仍无合格
+winner，`production_certified=false`，留出集继续锁定；#370 保持 no-go。
+
+本机另有一个完整 37 分钟 AISHELL-4 `asr` fixture，但其 manifest 将用途限定为 resource/sample coverage：重叠讲话没有唯一参考顺序，音频包含已评分片段而非独立会议，且单场 37 分钟不能证明无人值守多小时稳定。因此未把它当作 #370 的独立会议质量样本，也未把它当作 #371 的一小时/四小时长稳验收。
+
+## 2026-10-17 follow-up: #372 AISHELL-4 时间标注粒度
+
+检查现有单场 AISHELL-4 全长 fixture 的 TextGrid 结构时，发现五个 `IntervalTier`，各 tier 非空区间数为
+283、85、144、76、129；区间时长中位数为 0.886–2.860 秒，标注文本长度中位数为 3–16 个 codepoint。
+这组注释处于话语/片段粒度，不能映射字幕要求的人工逐词结束时刻。现有六条 AISHELL-4 短会议 fixture
+也不补足逐词人工时钟；AMI manifest 中标注的词时间来源仍是自动强制对齐，而非独立人工时间真值。
+
+本次只读取 manifest 与 TextGrid 的结构和区间统计，未读取或复制转写正文，也未运行字幕 UI/Realtime。
+因此 #372 所需的人工 token 对应、真实音频到 UI 首字/持续字提交时延、可见回溯/误改率仍为
+`not_observed`，策略继续 no-go。TextGrid 结构统计是本地 fixture 实测；关于其无法满足逐词时钟门槛，
+是按其区间粒度对照 Issue 验收条件所得的判断。
+
+## 2026-10-17 follow-up: #370 reconstructed AISHELL-4 development calibration
+
+原 8/4 场 source manifest 与对应源注释在本机不可用。本次从[OpenSLR AISHELL-4 test archive](https://www.openslr.org/111/)
+重新构建一个预先锁定的样本集；官方页面列出的许可为 CC BY-SA 4.0。下载归档 SHA-256 为
+`7e5d306b5f18ab66fcd7e0380c90979b47fd9576bfa8e67e6353bdec7c14a35a`，source manifest SHA-256 为
+`2961588e1ec9bc34429a9db25c57e7c6dbc8e5ef7a549def66b03f49a5fdb277`。按文件 ID 在任何模型推理前
+固定 8 场 R003 开发集和 4 场 R004 留出集；开发集覆盖 M/L/S 三类房间、共 82.51486 分钟，speaker 数为
+5–6。该开发样本没有 ≤4 人会议，故该人数层未覆盖。开发 manifest SHA-256 为
+`ff3df5d28862fb5c2c73f597a98d4e204248121fc39994b412cf0513968c01cd`；留出 manifest SHA-256 为
+`574a2822d28ea35deb38c91e584586c6e908623810437f5d99863d0825714d13`，留出结果未读取、未评分。
+这是新建 split，不能与历史 8 场/24 策略数值直接比较。
+
+使用同一开发 manifest、native worker SDK revision `5c19d5e12320e22bbfb7a1877b089d2665a69add`、
+model revision `7eab74f3463c736418d0eb10296261ae581146c9` 串行对照 24 个策略。默认设置与
+仅校准启用的 `zero_vote_reembed` 各自均为 8/8 场逐场质量门失败、0 个 feasible candidate、无 winner；
+没有生成 `selected-candidate.json`，`production_certified=false`。两组 best-observed policy 仅作开发集诊断，
+不构成已选候选：基线 index 11 的场均 known accuracy/coverage 为 89.61%/89.42%，zero-vote index 9 为
+89.65%/90.20%；zero-vote 的场均 top-four 最低 known coverage 为 69.49%，其他参与者最低 coverage 的场均值为
+71.84%，逐场最低值为 0%。动态分人继续 no-go，因此没有解锁 R004 留出集，也没有进行安装态 API 验收。
+本次只评估 native diarization；整场会议 ASR 候选 CER 与关键事实词评分未运行，六条短样本 warm batch-ASR
+结果仍不替代该门。
+
+校准入口只接受哈希相符的 AISHELL-4 八场开发 manifest，拒绝 R004、重复 ID、非字符串 ID 和不完整 split lock；
+只有所有开发会议逐场通过完整质量门时才会写入 `selected-candidate.json`。`zero_vote_reembed` 仅可在
+`meeting_dynamic` calibration worker 中开启，执行锁同时记录 SDK/model revision、worker、manifest、策略网格和
+开关值。相关 Python 回归 24 项通过，Ruff、mypy、Swift Release worker build 与 `git diff --check` 通过。
+
+脱敏汇总制品在仓库外，artifact id `speechrail-issue370-reconstructed-dev-calibration-20261017`，
+SHA-256 `2809619b2b8192a8f1d1d168e1628f55ea5a1b90b105f6dc9fadad842702843c`。该摘要包含 source/split、
+worker、SDK/model、执行锁和开发集聚合指标，不包含原始音频、转写、embedding 或绝对模型路径。
+
+## 2026-10-17 follow-up: #372 word-boundary corpus sourcing
+
+官方 ILAS 资料说明，Sinica MCDC8 包含 8 小时会话语音、signal-aligned IPUs 与 word boundary annotation；
+其所属的 Sinica Taiwan Mandarin Conversational Corpus 包含自由会话与任务会话。它可提供人工词边界候选，
+但语言变体及安静录音环境与 SpeechRail 面向的大陆中文会议并不完全匹配，不能单独代表目标场景。
+[ILAS 语料说明](https://tmc.ling.sinica.edu.tw/corpus_resource_en/)、
+[语料列表](https://tmc.ling.sinica.edu.tw/corpus_list_en/)。
+
+Academia Sinica 的方法论文将其描述为混合标注流程：词边界综合自动 syllable alignment 与文本分词，
+并对 word boundaries 进行人工核验。由于 #372 要求独立人工音频词时间，不能只凭语料目录将其直接视为
+人工标注真值；需在获准访问后核对实际样本的边界来源和人工核验范围。
+[语料方法论文](https://www.ling.sinica.edu.tw/upload/researcher_manager_result/6be9a95216afe6ab0d0a6036597bcf74.pdf)。
+
+截至 2026-10-17（Asia/Shanghai），ACLCLP 公布的 MCDC8 申请要求包括申请人所属机构证明及三份签署的原始许可协议；
+海外非营利学术机构价格为会员 US$2,000、非会员 US$2,100，其他海外机构分别为 US$6,000 和 US$6,400。
+本机未核实申请人所属机构适用的价格类别；许可协议 PDF 本次请求返回 HTTP 403，协议条款未能审阅。
+未签署或接受许可条款；没有联系、申请、下载或付款。
+[ACLCLP MCDC8 许可说明](https://www.aclclp.org.tw/use_mat.php#mcdc)。
+
+MagicData-RAMC 官方 README 描述的是逐样本人工转写及人工 speaker voice activity timestamps；该说明没有声明
+人工 word-boundary annotation，故现有公开描述不足以将其作为人工词尾时间真值来源。
+[MagicData-RAMC README](https://github.com/MagicHub-io/MagicData-RAMC/blob/main/README.md)。
+
+本次只核验公开来源与授权条件，没有获取语料或产生人工标注。#372 的人工 token 对应、音频至 UI 首字/持续字
+时延、回溯收益及误改率仍为 `not_observed`，候选继续 no-go；MCDC8 仅是待审批的数据源选项。
+
+## 2026-10-17 follow-up: #370 acoustic clustering calibration
+
+在已锁定的 8 场 AISHELL-4 R003 开发集上完成七档声学聚类/VBx screen，并对排名前二的 `threshold=0.45`
+与 `threshold=0.75` 分别运行完整 24-policy matcher grid。执行固定 manifest SHA-256
+`ff3df5d28862fb5c2c73f597a98d4e204248121fc39994b412cf0513968c01cd`、SDK revision
+`5c19d5e12320e22bbfb7a1877b089d2665a69add` 和 model revision
+`7eab74f3463c736418d0eb10296261ae581146c9`；screen 与 refinement 均完成 8/8 场，
+`zero_vote_reembed=false`。每个 PCM 窗口只执行一次 `prepare`，聚类候选在同一 worker 内串行评估。
+
+两个 refinement 的 best-observed matcher 都是 index 11，但没有可行候选：各组 0/24 候选通过全部开发门，
+两组均无 winner、未写入 `selected-candidate.json`，`production_certified=false`。`threshold=0.45` 的
+8 场均值 known accuracy/coverage 为 89.98%/89.76%，top-four 最低覆盖均值 59.36%，其他参与者最低覆盖均值
+71.84%；`threshold=0.75` 分别为 90.15%/90.25%、62.12% 和 70.51%。两组 best-observed 候选的
+top-four 与其他参与者最低覆盖都至少有一场为 0%，因此 #370 继续 no-go。正常生产配置未改动；R004 留出集
+未读取或评分，也未做安装态公共 API 或整场会议 ASR 验收。
+
+脱敏聚合制品位于仓库外，artifact id `speechrail-issue370-cluster-calibration-20261017`，SHA-256
+`750ad545a0d322e4a417cf75437a9f22c90dda7805e4fabf5fdb402012c07322`。它只含版本锁、候选摘要与汇总指标；
+逐场结果和音频派生帧仍保存在受限的仓库外验收目录。

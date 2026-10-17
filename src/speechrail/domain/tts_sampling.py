@@ -1,10 +1,10 @@
 """Vendor-neutral sampling facts for one executed TTS render.
 
 The worker reports the sampler it *actually* used. A request that asked for
-a seed and got one is `caller_fixed`; a clone derives its own; a voice-design
-render inherits the profile's seed. When nothing seeded the stream, the
-policy says so explicitly — the recipe must never present an unfixed sampler
-as a reproducible one.
+a seed and got one is `caller_fixed`; custom_voice can derive a stable seed
+from the request; a clone derives its own; a voice-design render inherits the
+profile's seed. When nothing seeded the stream, the policy says so explicitly
+— the recipe must never present an unfixed sampler as reproducible.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ TTS_SAMPLING_SCHEMA: Literal["tts_sampling_v1"] = "tts_sampling_v1"
 
 SeedPolicy = Literal[
     "caller_fixed",
+    "request_derived",
     "clone_reference_derived",
     "voice_profile_fixed",
     "unseeded_sampler",

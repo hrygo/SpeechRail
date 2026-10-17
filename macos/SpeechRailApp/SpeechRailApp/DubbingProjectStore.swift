@@ -295,6 +295,14 @@ private struct DubbingProjectJournal: Codable {
 /// 提交规则与作品库一致：`projects.json` 的原子替换是唯一逻辑提交点，
 /// journal 只用于重启后判定旧状态还是新状态。
 public actor DubbingProjectStore {
+    private struct ExportMeasurement {
+        var bytesWritten = 0
+        var candidateFiles = 0
+        mutating func recordWrittenBytes(_ count: Int) {
+            let (total, overflow) = bytesWritten.addingReportingOverflow(count)
+            bytesWritten = overflow ? .max : total
+        }
+    }
     private var commitHistory = StoreCommitHistory()
     private var activeExportLease: (id: UUID, directory: URL)?
     private var activeOperationID: UUID?
@@ -329,18 +337,20 @@ public actor DubbingProjectStore {
     private let indexURL: URL
     private let lockURL: URL
     private let transactionsDirectory: URL
+    private let metrics: AppPerformanceMetrics
 
     deinit {
         if let lease = activeExportLease { try? FileManager.default.removeItem(at: lease.directory) }
     }
 
-    public init(directory: URL) {
-        self.init(directory: directory, fileOperations: CreativeWorkFileOperations())
+    public init(directory: URL, metrics: AppPerformanceMetrics = .shared) {
+        self.init(directory: directory, fileOperations: CreativeWorkFileOperations(), metrics: metrics)
     }
 
     init(
         directory: URL,
-        fileOperations: sending CreativeWorkFileOperations
+        fileOperations: sending CreativeWorkFileOperations,
+        metrics: AppPerformanceMetrics = .shared
     ) {
         self.operations = fileOperations
         self.directory = directory
@@ -348,6 +358,7 @@ public actor DubbingProjectStore {
         self.lockURL = directory.appendingPathComponent(".projects.lock", isDirectory: false)
         self.transactionsDirectory = directory
             .appendingPathComponent(".transactions", isDirectory: true)
+        self.metrics = metrics
     }
 
     public func list() throws -> [DubbingProject] {
@@ -653,6 +664,30 @@ public actor DubbingProjectStore {
     }
 
     public func prepareExport(projectID: String) throws -> PreparedDubbingExport {
+        let measurePreparation = metrics.isEnabled
+        let startedAt = measurePreparation ? DispatchTime.now().uptimeNanoseconds : 0
+        var measurement = ExportMeasurement()
+        do {
+            let prepared = try prepareExport(projectID: projectID, measurement: &measurement, trackMetrics: measurePreparation)
+            if measurePreparation {
+                metrics.record(.init(operation: .dubbingExport,
+                    durationNanoseconds: DispatchTime.now().uptimeNanoseconds &- startedAt,
+                    bytes: measurement.bytesWritten, count: measurement.candidateFiles))
+            }
+            return prepared
+        } catch {
+            if measurePreparation {
+                metrics.record(.init(operation: .dubbingExport,
+                    durationNanoseconds: DispatchTime.now().uptimeNanoseconds &- startedAt,
+                    bytes: measurement.bytesWritten, count: measurement.candidateFiles,
+                    outcome: error is CancellationError ? .cancelled : .failed))
+            }
+            throw error
+        }
+    }
+
+    private func prepareExport(projectID: String, measurement: inout ExportMeasurement,
+                               trackMetrics: Bool) throws -> PreparedDubbingExport {
         try Task.checkCancellation()
         guard activeExportLease == nil else { throw DubbingExportError.exportBusy }
         return try withRecoveredLibrary {
@@ -668,6 +703,7 @@ public actor DubbingProjectStore {
                 let url = directory.appendingPathComponent(candidate.audioFileName)
                 guard !operations.isSymbolicLink(at: url) else { throw DubbingProjectError.candidateNotAdoptable }
                 inputs.append(url)
+                if trackMetrics { measurement.candidateFiles = inputs.count }
             }
             guard !inputs.isEmpty else { throw DubbingExportError.incompleteProject }
             let id = UUID(), temp = FileManager.default.temporaryDirectory.appendingPathComponent("speechrail-export-\(id.uuidString)")
@@ -676,15 +712,21 @@ public actor DubbingProjectStore {
             defer { if !succeeded { try? FileManager.default.removeItem(at: temp) } }
             let audio = temp.appendingPathComponent("audio.wav"), script = temp.appendingPathComponent("script.txt")
             let bytes = try DubbingStreamingWAV.write(inputs: inputs, output: audio)
+            if trackMetrics { measurement.bytesWritten = Int(clamping: bytes) }
             guard FileManager.default.createFile(atPath: script.path, contents: nil) else { throw DubbingExportError.invalidDestination }
             let handle = try FileHandle(forWritingTo: script); defer { try? handle.close() }
             for (index, segment) in record.project.segments.enumerated() {
                 try Task.checkCancellation()
-                if index > 0 { try handle.write(contentsOf: Data([10])) }
+                if index > 0 {
+                    try handle.write(contentsOf: Data([10]))
+                    if trackMetrics { measurement.recordWrittenBytes(1) }
+                }
                 // Each source segment is already bounded by the render contract.
                 let text = Data(segment.text.utf8)
                 for offset in stride(from: 0, to: text.count, by: DubbingStreamingWAV.chunkBytes) {
-                    try handle.write(contentsOf: text[offset..<min(text.count, offset + DubbingStreamingWAV.chunkBytes)])
+                    let chunk = text[offset..<min(text.count, offset + DubbingStreamingWAV.chunkBytes)]
+                    try handle.write(contentsOf: chunk)
+                    if trackMetrics { measurement.recordWrittenBytes(chunk.count) }
                 }
             }
             try handle.synchronize()

@@ -89,25 +89,28 @@ run `38905021569` 不再死锁，Swift 在约 10 分钟内结束，只剩 `testG
 
 ## 实际性能矩阵
 
-下表 build 均为“未生成配对 Release 构建”；before/after 没有可比数据。方案中的预算是目标，不能填写为本次成绩。原始性能制品未产生；未来获准采样后放在仓库外，仓库只写匿名汇总与制品引用。
+下表记录初始验收时的场景状态；后续实测以本节之后的日期附记为准。方案中的预算是目标，不能填写为本次成绩。性能原始制品保留仓库外，仓库只写匿名汇总与制品引用。
 
 | caseID | build SHA | process role | 输入规模 | sample duration | warmup | before | after | 重复次数 | 结论/未验证项 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| idle | 未测 | App/helper | 前台/隐藏，各 5 min | 未测 | 未测 | 未测 | 未测 | 0 | 空闲 CPU/唤醒/任务退出未验收 |
+| idle | baseline/candidate Release；二进制摘要见后文 | App | 前台/隐藏，各 5 min | 语音助手待机；pair3/pair4 使用统一预检查 | 见后文 | 见后文 | 3 组（pair1、pair3、pair4）；pair2 探索样本排除 | idle 重复数达到 3；helper、wakeups、主线程和其他场景未验收 |
 | catalog | 未测 | App | 100/1,000/5,000 音色 | 未测 | 未测 | 未测 | 未测 | 0 | 解码/主线程与外部变更时序未验收 |
 | audiobook | 未测 | App | 大书、多角色、快速切章 | 未测 | 未测 | 未测 | 未测 | 0 | 投影 p95、CPU、RSS 未验收 |
 | export | 未测 | App | 1/30/120 min 音频 | 未测 | 未测 | 未测 | 未测 | 0 | RSS、I/O、取消到释放未验收 |
 | llm | 未测 | App/service | 单字节 SSE、慢消费者/停顿 | 未测 | 未测 | 未测 | 未测 | 0 | 调度与传输资源实测未验收 |
 | capture | 未测 | App/helper/service/worker | 双路音频、重连 | 未测 | 未测 | 未测 | 未测 | 0 | callback 分配、gap、XPC、队列峰值未验收 |
+| capture-failure | 未测 | App/helper | 慢消费者、无/迟到 ACK、旧 epoch、100 次重连、停止与回调重叠 | 未测 | 未测 | 未测 | 未测 | 0 | 失败/回收性能未验收 |
 | teleprompter | 未测 | App | 长稿/重复词/版本切换 | 未测 | 未测 | 未测 | 未测 | 0 | 实际匹配 p95 与跟随延迟未验收 |
 | transcript | 未测 | App | 真实 1 h/4 h 会话与回看 | 未测 | 未测 | 未测 | 未测 | 0 | RSS、归属修订、用户位置/选区未验收 |
 | waveform | 未测 | App | 多 owner、快速换音频 | 未测 | 未测 | 未测 | 未测 | 0 | 扫描 CPU、AVAudioFile 缓冲与释放时间未验收 |
 
-AppPerformanceMetrics 已接入目录、工作区读取/投影、存储提交、LLM 事件、提词准备与波形扫描。`dubbingExport`、`captureEnqueue`、`mixerTick`、`captureStop`、`teleprompterMatch`、`transcriptPublish` 枚举暂未接入通用 signpost；这些领域的容量/次数由 owner 快照和定向测试检查。不得把这些通用统计中的 0 解读为未执行或无热点。实际采样应结合 Time Profiler、SwiftUI Instruments 和各 owner 的计数，不把固定容量证明当作 RSS 证明。
+AppPerformanceMetrics 已接入目录、工作区读取/投影、存储提交、LLM 事件、提词准备与波形扫描；`dubbingExport`、`captureEnqueue`、`mixerTick`、`captureStop`、`teleprompterMatch`、`transcriptPublish` 也已在各自 owner 边界记录数值样本。CaptureHelper 使用共享 sink 契约发出采集事件，不在 helper 进程内聚合内存统计。不得把通用统计中的 0 解读为未执行或无热点。实际采样应结合 Time Profiler、SwiftUI Instruments 和各 owner 的计数，不把固定容量证明当作 RSS 证明。
 
 ## 交互与运行态
 
-未运行接管前台的 UI 自动化，未启动 App 进行交互验证。需要后续确认：长会话回看锚点、页间补载/新行提示、文本选择与复制、快速换页取消、叶子依赖实际 body 更新、Reduce Motion、VoiceOver 和窄窗口。
+截至 2026-10-16，未运行接管前台的 UI 自动化，未启动 App 进行交互验证。需要后续确认：长会话回看锚点、页间补载/新行提示、文本选择与复制、快速换页取消、叶子依赖实际 body 更新、Reduce Motion、VoiceOver 和窄窗口。
+
+2026-10-17 经用户授权尝试运行 `testControlCenterHonorsRequestedWindowSizes`。仓库包装脚本中的 `xcodebuild test` 在测试发现阶段以 exit 70 退出；错误为 `No test bundle product for testingSpecifier`，`xcresult` 汇总为 0 tests、result `unknown`。日志同时报告本机 CoreSimulator `1171.7.0` 早于 Xcode 需要的 `1174.9.2`。源码中的 scheme、test plan 和 UI test target 均存在，但本次没有执行测试方法或产生产品交互证据；#371 的实际 UI 验收仍未完成。
 
 本性能治理实施与提交阶段未安装、部署、启停服务、操作 profile/模型、使用真实音频或下载模型，没有运行态回退动作。性能改动保持 REST/Realtime wire 与持久化业务格式；`.itemRetired` 是 App 内部事件。PR 中已有 ASR 专项对公共文档的澄清见其原提交与专项记录。App 与 CaptureHelper 的内部 XPC 参数已经共同迁移，后续发布和回退必须使用配套制品。
 
@@ -128,3 +131,114 @@ AppPerformanceMetrics 已接入目录、工作区读取/投影、存储提交、
 | [#373](https://github.com/hrygo/SpeechRail/issues/373) | 性能改造的真实交互、App/helper 配套交付与回退 | UI 可与 #371 协同；正式交付汇总前置结果，C 层与运行态动作各有实际授权/证据 |
 
 既有 #253、#258、#118 的 ASR/助手/提词器专项验收，以及 #79、#259 的 UI/会议功能范围仍由原 issue 跟踪；相同制品和条件的证据可复用，不重复建立其实施任务。三个新 issue 均包含清单、关闭条件、证据要求和授权边界，不以旧回归数量或本登记代替真实验收。
+
+## 2026-10-17 follow-up: #369 code and deterministic evidence
+
+本节记录 #369 的后续源码与确定性验证，不改写上文截至 2026-10-16 的历史验收状态。核验日期：2026-10-17，Asia/Shanghai。变更留在独立 worktree；未提交、推送或关闭 GitHub issue。
+
+正常停止现在先在原 drain queue 排空已接受输入，再向同一 `AVAudioConverter` 提交 `.endOfStream`。冲刷最多进行 8 次；错误、无输出进展、格式变化、丢样或交付失败都保留错误终态，只有确实到达 converter 的无数据 `.endOfStream` 才允许完成。EOS 尾部继续使用原 epoch/source ID、递增 sequence，并用最后接收输入帧的 capture uptime；取消不会冲刷，也不会标为成功。默认 prime method / info 未改，frame count 采用 converter 返回值。
+
+回归先以完整输入参考暴露现状：合成 44.1/48 kHz 用例分别少 9 个 24 kHz 输出采样；修复后 24/44.1/48 kHz 的 EOS 输出与同格式默认 converter 参考帧数一致，逐样本误差不超过 3。测试还检查 sequence 连续、来源时间不伪造为当前时刻、没有丢样、取消与格式错误终态，以及 drain stop 的 success/cancelled/failed 数值观测。
+
+六类 `AppPerformanceOperation` 均在实际 owner 边界产生数值样本：dubbing 准备与 staging 复制、helper chunk 入队/交付、单次 mixer tick、AudioCaptureDrain 与 CoreAudio tap 停止、已准备 Script 的 matcher，以及历史页投影。注入 collecting metrics 的定向回归核对 bytes/count/outcome；禁用统计仍不增加 sampler、Task 或 observer。配音保存回执和 lease 清理结果仍由原状态机单独定义，metrics 不代替提交事实。字段口径详见[性能手册](../developers/macos-app-performance.md)。
+
+验证结果：
+
+- Issue 指定的 SwiftPM filter：5 个 XCTest 与 56 个 Swift Testing 用例（8 suites）通过，0 failures；包含音频 drain、chunk stream、capture relay、mixer、input termination、metrics、提词匹配、transcript projection 和 dubbing export。
+- `python3 scripts/check_macos_test_target_coverage.py`：`macos-test-target-coverage: OK`。
+- `git diff --check`：通过。
+- 2026-10-17 使用 `scripts/macos_app_build.sh --configuration Release` 构建源码基线与当前候选；两者的 App 与 CaptureHelper 均编译成功，XPC packaging verification 通过，二进制为 arm64。候选 bundle 导出到仓库外，未安装或启动；当前候选编译覆盖了共享 metrics sink 的 target 集成。
+- 未运行实际麦克风/CoreAudio 采集、Release 配对性能采样或 UI 自动化；CPU/RSS、硬件尾音和交互仍未验收。
+
+## 2026-10-17 follow-up: #369 targeted rerun
+
+08:52（Asia/Shanghai）在当前 worktree 重跑同一 SwiftPM filter，5 个 XCTest 与 56 个 Swift Testing 用例（8 suites）通过，0 failures；`python3 scripts/check_macos_test_target_coverage.py` 返回 `macos-test-target-coverage: OK`。这次复核确认定向代码门在当前工作树仍通过，不增加真实硬件、Release 配对性能或 UI 交互证据。
+
+## 2026-10-17 follow-up: #371 foreground idle process sample
+
+2026-10-17（Asia/Shanghai）对当时已运行的 Release App 做 300.19 秒静止前台采样。App 与
+control-agent 进程身份在全程保持不变；60/60 个 5 秒 CPU tick 和 30/30 个 10 秒 footprint
+tick 完整，采样前后受保护 `/metrics` 的 realtime session、batch request 和 realtime request
+均为显式 0，`lsof` 未见 ESTABLISHED 客户端。没有开始会议或字幕，也没有操作当前工作区。
+
+| 角色 | PID / start time | CPU（单核百分比，p50/p95/max） | `phys_footprint`（p50/p95/max） |
+| --- | --- | ---: | ---: |
+| SpeechRail App 3.11.1 (54) | 11836 / 2026-10-17 01:37:15 | 0.0 / 0.0 / 0.0% | 159.345 / 159.345 / 159.345 MiB |
+| Local control-agent | 11847 / 2026-10-17 01:37:16 | 0.0 / 0.0 / 0.0% | 4.016 / 4.016 / 4.016 MiB |
+
+CPU 使用 `ps` 累计 CPU 时间每 5 秒差分；结果为该采样分辨率下的读数。采样期间没有
+CaptureHelper 进程，因而没有 CaptureHelper 音频路径数据；服务/模型 worker 也不计入上表。
+这只是当前 App 的一个静止场景，不是改前/改后配对结果，不覆盖活跃音频、主线程热点、队列、
+硬件尾音或长稳门。不能据此判定 #371 通过。
+
+脱敏原始采样保存在仓库外，artifact id `speechrail-issue371-idle-20261017-k7yhoezu`，
+SHA-256 `2e0268102922fbfff0c9e9d71542759dc17a24c0222d659bb4fc1a860182c3cf`；未保存音频、转写或窗口内容。
+
+## 2026-10-17 follow-up: #371 isolated Release idle pair
+
+2026-10-17（Asia/Shanghai）使用两个仓库外临时 Release App 副本，在默认语音助手空闲页各采样一组
+前台与隐藏态数据。两者分别为源码基线 `3.10.0 (52)` 和候选 `3.11.1 (54)`，均为 arm64；
+每个 300 秒样本采集 60 个 5 秒 CPU tick 与 30 个 10 秒 `phys_footprint` tick。临时副本使用
+隔离的用户目录与 `SPEECHRAIL_APP_HOME`，未开始会话、未操作正式 App 工作区，也没有采集音频或写入用户记录。
+
+| 状态 | 构建 | CPU p50/p95/max（%） | `phys_footprint` p50/p95/max（MiB） | 采样时长 |
+| --- | --- | ---: | ---: | ---: |
+| 前台空闲 | baseline `3.10.0 (52)` | 0.0 / 0.0 / 0.2 | 82.5 / 103.7 / 103.7 | 300.015 s |
+| 前台空闲 | candidate `3.11.1 (54)` | 0.0 / 0.0 / 0.2 | 82.2 / 103.4 / 103.4 | 300.016 s |
+| 隐藏空闲 | baseline `3.10.0 (52)` | 0.0 / 0.0 / 0.0 | 99.3 / 99.3 / 99.3 | 300.726 s |
+| 隐藏空闲 | candidate `3.11.1 (54)` | 0.0 / 0.0 / 0.0 | 99.1 / 99.1 / 99.1 | 300.016 s |
+
+前台两次样本都在后段由约 82 MiB 上升至约 103 MiB，p50/p95 差异分别约 0.3 MiB；隐藏态 p50
+差异约 0.2 MiB。该单次配对没有显示有意义的空闲资源变化。CPU 是 `ps` 累计 CPU 时间差分读数，
+此空闲场景中的 0.0% 只表示低于该采样分辨率。隐藏态 candidate 紧随其 300 秒前台样本；baseline
+隐藏态前的 300 秒前台预热开始于一次先前的隐藏/显示操作后，因此两条隐藏态历史并非完全相同。
+
+原始脱敏 JSON 留在仓库外：前台 baseline `speechrail-issue371-baseline-front-pair1-20261017`
+（SHA-256 `3481d4655958db00c79214e9084fadbce9ce2ba7969d9a27fc439a44511e52ea`）、前台 candidate
+`speechrail-issue371-current-front-pair1-20261017`（`bbee2142de074c009a5b7d0803538bc92db828adf68f0caee93a36aa4e8ab4cf`）、
+隐藏态 baseline `speechrail-issue371-baseline-hidden-pair1-20261017`
+（`e42ad310571c8b2037d7a0652eaf4b743cc178885396545b6e09d9dd647d0e0a`）与隐藏态 candidate
+`speechrail-issue371-current-hidden-pair1-20261017`
+（`b7b2244cad7a8abb067707baafa19746dc489c2279fe020692c156c150b572e5`）。
+
+这只覆盖一次空闲前台与隐藏态配对，不覆盖活跃音频、CaptureHelper、会话尾音、六项 metrics 的
+真实负载、主线程热点或长稳运行；不能据此关闭 #371。测量后按精确 PID 退出临时进程，并注销两份
+临时 bundle 的 LaunchServices 条目；正式 App（PID 11836）与服务未停止或修改。
+
+## 2026-10-17 follow-up: #371 isolated Release idle pair 3
+
+在 macOS 27.0.1 / Xcode 27.1、arm64 同一设备上，用 `scripts/macos_app_build.sh --configuration Release --export-path <外部目录>` 分别构建基线 `bedabb6a93669144c12a4e8dba6c5305f4503128` 与候选 `da18da8a80ec2fbd5827148c42537024656e5f18` 加当前 App 源码树。两份 App 均为 `3.10.0 (52)` / `3.11.1 (54)`；主程序 SHA-256 分别为 `18791cc38428427c0b15d9349fd5f026fbbbb77c579f8490c3e7b3e48317ce87` / `ed05ad75403727142c334f01ea0a2254f7e35426dacd406042245f6409e726ea`。CaptureHelper SHA-256 分别为 `79f1298aacbe8d1175330112bb15da0e8f71c33c50c538db051128b228d944b9` / `693cce2f217bfd27818392783e8cd8ebdf04edf518e169413e936f1818c4372d`；control-agent SHA-256 分别为 `0ac591790a3267584ddde84ddb0d646da3380066ec25c6a75ed57a1efa2b7d33` / `4ec30b96e039447e06b3655d962074c7a85db487eb5fce651698512d9cefb743`。候选 App 源码树 SHA-256 为 `749bb22585e25bf05b79aabb10acbaedafca2a463ad9a674a1b656433598b621`。
+
+前台 pair3 两个版本都在计时前读取相同的辅助功能树，随后保持语音助手待机 300.005 秒；隐藏 pair3 以相同方式隐藏各自的临时 App，分别采样 300.010 秒和 300.007 秒。用户 home 与 `SPEECHRAIL_APP_HOME` 均指向本轮独立临时目录，没有开启麦克风或创建会话。每份样本采集 59 个 5 秒 CPU/RSS tick 与 29 个 10 秒 `vmmap -summary` `phys_footprint` tick；CPU 是 `ps` 累计 CPU 时间差分，100% 代表一个逻辑核心。
+
+| 状态 | 构建 | CPU p50/p95/max（%） | RSS p50/p95/max（MiB） | `phys_footprint` p50/p95/max（MiB） | 时长 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 前台空闲 | baseline `3.10.0 (52)` | 0.0 / 0.0 / 0.2 | 178.3 / 178.3 / 178.4 | 79.2 / 79.2 / 79.2 | 300.005 s |
+| 前台空闲 | candidate `3.11.1 (54)` | 0.0 / 0.0 / 0.0 | 179.1 / 179.1 / 179.2 | 79.3 / 79.3 / 79.4 | 300.005 s |
+| 隐藏空闲 | baseline `3.10.0 (52)` | 0.0 / 0.0 / 0.2 | 193.6 / 193.6 / 193.7 | 97.5 / 97.5 / 97.5 | 300.010 s |
+| 隐藏空闲 | candidate `3.11.1 (54)` | 0.0 / 0.0 / 0.2 | 194.2 / 194.2 / 194.2 | 97.3 / 97.3 / 97.4 | 300.007 s |
+
+pair3 的前台与隐藏态差异均很小；它与既有 pair1 和下文 pair4 构成三组 idle 重复，不能外推到活跃功能。另有一组探索性 pair2 因 baseline 在计时期间读取辅助功能树、candidate 未读取而排除。pair1 隐藏态的前置显示/隐藏历史不完全一致；pair3/pair4 前台读取相同辅助功能树，隐藏态条件保持匹配。采样没有 CaptureHelper 进程，没有实际硬件音频；没有 1 秒 CPU 样本、wakeups、Instruments 主线程栈、队列/取消释放时间或 1 h/4 h 会话。其他必测场景仍未运行；#371 继续未通过。
+
+脱敏汇总制品 `speechrail-issue371-idle-pair3-20261017` 保存在仓库外，SHA-256 `cba6fde1c9f44f8628d18136adb427c34ad1e9d5ccd061e121a22e478ef617e5`。其中保留 pair3 四份原始数值 JSON 的摘要与进程时间；未保存窗口内容、转写或音频。
+
+## 2026-10-17 follow-up: #371 isolated Release idle pair 4
+
+沿用 pair3 的基线与候选 Release bundle、独立用户目录和 `SPEECHRAIL_APP_HOME`，每次样本均为 300 秒、59 个 5 秒 CPU/RSS tick 与 29 个 10 秒 footprint tick。前台计时前两个版本都读取相同的辅助功能树；隐藏态先隐藏对应临时进程。未启用麦克风或创建会话。
+
+| 状态 | 构建 | CPU p50/p95/max（%） | RSS p50/p95/max（MiB） | `phys_footprint` p50/p95/max（MiB） | 时长 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 前台空闲 | baseline `3.10.0 (52)` | 0.0 / 0.0 / 0.2 | 178.0 / 178.0 / 181.7 | 79.1 / 79.1 / 79.2 | 300.005 s |
+| 前台空闲 | candidate `3.11.1 (54)` | 0.0 / 0.0 / 0.2 | 178.9 / 178.9 / 200.1 | 79.3 / 79.3 / 79.4 | 300.004 s |
+| 隐藏空闲 | baseline `3.10.0 (52)` | 0.0 / 0.0 / 0.4 | 193.4 / 193.4 / 193.4 | 97.5 / 97.5 / 97.5 | 300.001 s |
+| 隐藏空闲 | candidate `3.11.1 (54)` | 0.0 / 0.0 / 0.2 | 194.2 / 194.2 / 194.3 | 97.6 / 97.6 / 97.7 | 300.000 s |
+
+前台与隐藏态 p50 footprint 的基线/候选差为 `+0.2 MiB` / `+0.1 MiB`；前台候选 RSS 单点 max 为 200.1 MiB，但 p95 为 178.9 MiB，不能仅凭这一点认定持续增长。pair4 与 pair1、pair3 合计三组 idle 重复；这只满足 idle 重复数量，不覆盖其他矩阵行。其他 9 个场景、真实音频、CaptureHelper、主线程/wakeup、队列/释放和 1 h/4 h 长稳门仍缺，#371 继续未通过。
+
+脱敏汇总 `speechrail-issue371-idle-pairs3-4-20261017` 保存在仓库外，SHA-256 `526be6952db5ca83aff45ec816f7766df123696f163b01c80a84752e78bbca57`；汇总包含 pair3/pair4 每个样本的原始 JSON SHA-256 和采样身份。没有保存窗口内容、转写或音频。采样后 `/health`、`/readyz` 均为 200，唯一 listener 正常，batch/realtime active requests 为 0；临时 App 进程按 PID 退出并从 LaunchServices 注销，正式 App 未隐藏或替换。
+
+## 2026-10-17 follow-up: synthetic audiobook role-stat regression
+
+为先检查 App 算法行为，运行现有性能与有界性定向回归。首次结果为 27 个 XCTest 中 4 项断言失败，均出现在 `AudiobookWorkspacePerformanceTests.testRoleStatsVisitAnnotationsAndEdgesOnceAndMatchReference` 的角色统计对照；同次 Swift Testing 6 个 suite 的 41 项均通过。源码核对确认生产算法遵循自动 `.lead` 数量上限和短角色停止规则，而独立参考算法只实现 75% 累计前沿；失败来自参考规则落后于角色分层验收，不是生产统计输出与当前验收冲突。
+
+同步更新了大规模选角规范至 2.2.0，并把独立参考算法补齐同一组分层条件，没有修改生产角色统计算法。复跑性能子集：27 XCTest、0 failures；Swift Testing 6 suites、41 tests、0 failures。另运行 `AudiobookCastTests`，73 XCTest、0 failures。该证据使用合成数据，证明确定性等价、遍历次数和资源上界；不证明 Release CPU/RSS、真实 MainActor 时延、硬件音频、XPC 或长稳表现。UI 自动化尝试另见上文，其 0-test 工具链发现错误不能作为产品通过证据。#371 仍保持 no-go。

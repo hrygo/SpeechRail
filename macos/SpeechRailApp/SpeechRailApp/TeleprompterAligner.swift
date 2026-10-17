@@ -21,9 +21,10 @@ public struct TeleprompterAligner: Sendable {
     }
 
     public let configuration: Configuration
+    private let metrics: AppPerformanceMetrics
 
-    public init(configuration: Configuration = .init()) {
-        self.configuration = configuration
+    public init(configuration: Configuration = .init(), metrics: AppPerformanceMetrics = .shared) {
+        self.configuration = configuration; self.metrics = metrics
     }
 
     /// End-exclusive UTF-16 position in the displayed (possibly user-edited) segment.
@@ -181,6 +182,12 @@ public struct TeleprompterAligner: Sendable {
     /// Semi-global edit distance: free start in a bounded script window, but every
     /// observed token pays for an insertion/substitution. No AI annotations required.
     public func locate(tokens input: [String], script: Script, anchor: Position) -> Match {
+        metrics.measure(.teleprompterMatch, count: input.count) {
+            locateUnmeasured(tokens: input, script: script, anchor: anchor)
+        }
+    }
+
+    private func locateUnmeasured(tokens input: [String], script: Script, anchor: Position) -> Match {
         let input = Array(input.suffix(72))
         let none = Match(position: nil, confidence: 0, matchedCount: 0)
         guard !input.isEmpty, !script.tokens.isEmpty else { return none }

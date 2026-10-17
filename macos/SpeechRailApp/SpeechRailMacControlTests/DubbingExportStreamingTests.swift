@@ -44,18 +44,24 @@ struct DubbingExportStreamingTests {
         let directory = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
         let prepared = try exportFixture(directory)
         let largestRead = Mutex(0)
-        let writer = DubbingExportWriter(onRead: { count in largestRead.withLock { $0 = max($0, count) } })
+        let metrics = AppPerformanceMetrics(collecting: true, signposting: false)
+        let expectedBytes = try Data(contentsOf: prepared.audioURL).count + Data(contentsOf: prepared.scriptURL).count
+        let writer = DubbingExportWriter(onRead: { count in largestRead.withLock { $0 = max($0, count) } }, metrics: metrics)
         let audio = directory.appendingPathComponent("saved.wav"), script = directory.appendingPathComponent("saved.txt")
         let receipt = try await writer.copyPrepared(prepared, audioDestination: audio, scriptDestination: script)
         #expect(receipt.audioCommitted && receipt.scriptCommitted)
         #expect(try Data(contentsOf: audio) == Data(contentsOf: prepared.audioURL))
         #expect(largestRead.withLock { $0 } <= 262_144)
         #expect(await writer.activeFileHandles == 0)
+        let summary = metrics.snapshot(for: .dubbingExport)
+        #expect(summary.samples == 1 && summary.bytes == UInt64(expectedBytes) && summary.count == 2)
+        #expect(summary.failed == 0 && summary.cancelled == 0)
     }
     @Test @MainActor func testSlowExportCopyDoesNotBlockMainActorAndCancellationPreservesDestination() async throws {
         let directory = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
         let prepared = try exportFixture(directory), gate = ExportCopyGate()
-        let writer = DubbingExportWriter(beforePublish: { _ in try gate.block() })
+        let metrics = AppPerformanceMetrics(collecting: true, signposting: false)
+        let writer = DubbingExportWriter(beforePublish: { _ in try gate.block() }, metrics: metrics)
         let destination = directory.appendingPathComponent("saved.wav")
         let original = Data("existing".utf8); try original.write(to: destination)
         let task = Task { try await writer.copyPrepared(prepared, audioDestination: destination,
@@ -67,10 +73,13 @@ struct DubbingExportStreamingTests {
         #expect(try Data(contentsOf: destination) == original)
         #expect(await writer.activeFileHandles == 0)
         #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).allSatisfy { !$0.hasPrefix(".speechrail-export-") })
+        #expect(metrics.snapshot(for: .dubbingExport).cancelled == 1)
     }
     @Test func testFailureOfSecondDestinationReportsPartialSuccess() async throws {
         let directory = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
-        let prepared = try exportFixture(directory), writer = DubbingExportWriter()
+        let prepared = try exportFixture(directory)
+        let metrics = AppPerformanceMetrics(collecting: true, signposting: false)
+        let writer = DubbingExportWriter(metrics: metrics)
         let audio = directory.appendingPathComponent("saved.wav"), script = directory.appendingPathComponent("saved.txt")
         try FileManager.default.createDirectory(at: script, withIntermediateDirectories: true)
         do { _ = try await writer.copyPrepared(prepared, audioDestination: audio, scriptDestination: script); Issue.record("expected partial failure") }
@@ -79,10 +88,13 @@ struct DubbingExportStreamingTests {
         }
         #expect(FileManager.default.fileExists(atPath: audio.path))
         #expect(await writer.activeFileHandles == 0)
+        let summary = metrics.snapshot(for: .dubbingExport)
+        #expect(summary.samples == 1 && summary.failed == 1 && summary.count == 2)
     }
     @Test func testOnlyOneExportLeaseAndReleaseRemovesTemporaryFiles() async throws {
         let directory = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
-        let store = DubbingProjectStore(directory: directory)
+        let metrics = AppPerformanceMetrics(collecting: true, signposting: false)
+        let store = DubbingProjectStore(directory: directory, metrics: metrics)
         let provenance = RenderProvenanceSnapshot(state: .verified, reason: nil,
             recipe: RenderRecipeSnapshot(state: .complete, missingFields: [], digest: "recipe", voiceID: "fixture"))
         let project = DubbingProject(id: "fixture", title: "fixture", scriptText: "synthetic", recipe: provenance,
@@ -98,6 +110,9 @@ struct DubbingExportStreamingTests {
         #expect(!FileManager.default.fileExists(atPath: prepared.audioURL.path))
         let again = try await store.prepareExport(projectID: project.id)
         try await store.releaseExport(leaseID: again.leaseID)
+        let summary = metrics.snapshot(for: .dubbingExport)
+        #expect(summary.samples == 3 && summary.failed == 1 && summary.count == 2)
+        #expect(summary.bytes == 2 * (Int(again.audioBytes) + "synthetic".utf8.count))
     }
     @Test @MainActor func testPreviewUsesURLAndSharedRequestCannotResumeAfterStopOrOtherOwner() throws {
         let driver = ExportPlaybackDriver(), playback = SharedPlaybackOwner(driver: driver)
@@ -119,7 +134,8 @@ struct DubbingExportStreamingTests {
     }
     @Test func testMissingCandidateFailsWithoutSilenceAndPrepareCancellationLeavesNoLease() async throws {
         let directory = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
-        let store = DubbingProjectStore(directory: directory)
+        let metrics = AppPerformanceMetrics(collecting: true, signposting: false)
+        let store = DubbingProjectStore(directory: directory, metrics: metrics)
         let provenance = RenderProvenanceSnapshot(state: .verified, reason: nil,
             recipe: RenderRecipeSnapshot(state: .complete, missingFields: [], digest: "recipe", voiceID: "fixture"))
         let project = DubbingProject(id: "fixture", title: "fixture", scriptText: "synthetic", recipe: provenance,
@@ -138,6 +154,8 @@ struct DubbingExportStreamingTests {
         let prepared = try await store.prepareExport(projectID: project.id)
         try await store.releaseExport(leaseID: prepared.leaseID)
         #expect(!FileManager.default.fileExists(atPath: prepared.scriptURL.path))
+        let summary = metrics.snapshot(for: .dubbingExport)
+        #expect(summary.samples == 3 && summary.failed == 1 && summary.cancelled == 1)
     }
     private func exportFixture(_ directory: URL) throws -> PreparedDubbingExport {
         let audio = directory.appendingPathComponent("source.wav"), script = directory.appendingPathComponent("source.txt")

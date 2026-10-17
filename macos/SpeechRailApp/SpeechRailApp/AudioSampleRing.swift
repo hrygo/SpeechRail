@@ -52,6 +52,15 @@ public final class AudioSampleRing: @unchecked Sendable {
         timeline.uptime(at: readIndex.load(ordering: .relaxed), samplesPerSecond: sampleRate)
     }
 
+    /// Capture time for a sample relative to the next unread frame. The consumer
+    /// calls this before advancing the read cursor so callback boundaries remain
+    /// available when a conversion batch spans more than one callback.
+    internal func captureUptimeNanoseconds(atSampleOffset offset: Int, sampleRate: Double) -> UInt64? {
+        guard offset >= 0 else { return nil }
+        let read = readIndex.load(ordering: .relaxed)
+        return timeline.uptime(at: read &+ offset, samplesPerSecond: sampleRate)
+    }
+
     /// Test and non-realtime convenience API. The audio callback uses the
     /// pointer overload below to avoid the array allocation.
     public func write(_ samples: [Float]) {

@@ -41,12 +41,13 @@ struct CaptureAudioRelayTests {
 
     @Test func testGracefulHelperStopWaitsUntilAppHasDequeuedAllDeliveredPCM() async throws {
         let epoch = UUID(), sourceID = UUID(), holder = Mutex<CaptureAudioRelay?>(nil)
+        let metrics = AppPerformanceMetrics(collecting: true, signposting: false)
         let helper = AudioChunkStream.makeStream(epoch: epoch, now: { 1_000 })
         let app = AudioChunkStream.makeStream(epoch: epoch, now: { 1_000 }, onDequeue: { chunk in
             if let sequence = chunk.captureStamp?.sourceSequence { holder.withLock { $0 }?.acknowledge(epoch: epoch, throughSequence: sequence) }
         })
         let relay = CaptureAudioRelay(epoch: epoch, stream: helper.stream, now: { 1_000 }, deliver: { app.continuation.offer($0) },
-            stopCapture: { app.continuation.finish($0) })
+            stopCapture: { app.continuation.finish($0) }, metrics: metrics)
         holder.withLock { $0 = relay }; relay.start()
         helper.continuation.offer(.init(pcm: Data(count: 1_920), level: 0,
             captureStamp: .init(captureEpoch: epoch, sourceID: sourceID, sourceSequence: 1, capturedUptimeNanoseconds: 1_000)))
@@ -59,6 +60,8 @@ struct CaptureAudioRelayTests {
         await relay.finishAndWait()
         #expect(try await reader.next() == nil)
         #expect(!relay.isPumpActive)
+        let summary = metrics.snapshot(for: .captureEnqueue)
+        #expect(summary.samples == 1 && summary.bytes == 1_920 && summary.count == 1)
         holder.withLock { $0 = nil }
     }
 

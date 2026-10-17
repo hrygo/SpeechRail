@@ -222,12 +222,15 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
     private var onChunk: (@Sendable (AudioChunk) -> Void)?
     private var onStopped: (@Sendable (AudioStreamError) -> Void)?
     private let captureEpoch: UUID, sourceID: UUID
+    private let metrics: any AppPerformanceSink
     private var sequence: UInt64 = 0
     private var pendingUptime: UInt64?
 
 
-    public init(configuration: Configuration, captureEpoch: UUID = UUID(), sourceID: UUID = UUID()) {
+    public init(configuration: Configuration, captureEpoch: UUID = UUID(), sourceID: UUID = UUID(),
+                metrics: any AppPerformanceSink = CapturePerformanceSignpostSink.shared) {
         self.configuration = configuration; self.captureEpoch = captureEpoch; self.sourceID = sourceID
+        self.metrics = metrics
     }
 
     /// 建立 tap、aggregate device 与 IOProc，并开始交付 PCM。
@@ -300,28 +303,40 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
 
     /// 停采集并释放全部设备。**幂等**：没起来过、已经停过都能再调一次。
     public func stop(drainPending: Bool = false) {
+        let measureStop = metrics.isEnabled
+        let startedAt = measureStop ? DispatchTime.now().uptimeNanoseconds : 0
+        let pendingSamples = measureStop ? (ring?.availableSampleCount ?? 0) : 0
+        var cleanupSucceeded = true
         drainQueue.sync { [self] in
             drainTimer?.setEventHandler {}; drainTimer?.cancel(); drainTimer = nil
             if aggregateDeviceID != 0, let ioProcID {
-                AudioDeviceStop(aggregateDeviceID, ioProcID)
-                AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
+                if AudioDeviceStop(aggregateDeviceID, ioProcID) != noErr { cleanupSucceeded = false }
+                if AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID) != noErr { cleanupSucceeded = false }
             }
             if drainPending, isRunningCapture {
                 while let ring, ring.availableSampleCount > 0, isRunningCapture {
                     let previous = ring.availableSampleCount
                     drain()
-                    if ring.availableSampleCount >= previous { break }
+                    if ring.availableSampleCount >= previous { cleanupSucceeded = false; break }
                 }
                 if isRunningCapture { flushChunks(level: 0, flushPartial: true) }
             }
             stateLock.withLock { isRunning = false }
-            if aggregateDeviceID != 0 { AudioHardwareDestroyAggregateDevice(aggregateDeviceID) }
-            if tapID != 0 { AudioHardwareDestroyProcessTap(tapID) }
+            if aggregateDeviceID != 0, AudioHardwareDestroyAggregateDevice(aggregateDeviceID) != noErr {
+                cleanupSucceeded = false
+            }
+            if tapID != 0, AudioHardwareDestroyProcessTap(tapID) != noErr { cleanupSucceeded = false }
         }
         ioProcID = nil; aggregateDeviceID = 0; tapID = 0
         ring?.reset(); ring = nil; converter = nil; inputFormat = nil; outputFormat = nil
         onChunk = nil; onStopped = nil; pendingUptime = nil
         pending.removeAll(keepingCapacity: false); scratch.removeAll(keepingCapacity: false)
+        if measureStop {
+            metrics.record(.init(operation: .captureStop,
+                durationNanoseconds: DispatchTime.now().uptimeNanoseconds &- startedAt,
+                bytes: pendingSamples * MemoryLayout<Float>.size, count: pendingSamples,
+                outcome: cleanupSucceeded ? (drainPending ? .success : .cancelled) : .failed))
+        }
     }
 
     /// 采集是否真的在出样本。会话提交前用它判"宁可没开始，也不要一条空记录"（§3.5）。

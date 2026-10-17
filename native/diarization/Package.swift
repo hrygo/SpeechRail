@@ -4,6 +4,12 @@ import PackageDescription
 let package = Package(
     name: "SpeechRailDiarization",
     platforms: [.macOS(.v26)],
+    products: [
+        .executable(
+            name: "SpeechRailDiarizationGlobalProbe",
+            targets: ["SpeechRailDiarizationGlobalProbe"]
+        ),
+    ],
     dependencies: [
         .package(
             url: "https://github.com/FluidInference/FluidAudio.git",
@@ -12,6 +18,12 @@ let package = Package(
     ],
     targets: [
         .target(name: "SpeechRailDiarizationProtocol"),
+        .executableTarget(
+            name: "SpeechRailDiarizationGlobalProbe",
+            dependencies: [
+                .product(name: "FluidAudio", package: "FluidAudio"),
+            ]
+        ),
         .executableTarget(
             name: "SpeechRailDiarizationWorker",
             dependencies: [
