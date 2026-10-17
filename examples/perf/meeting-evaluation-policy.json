@@ -16,6 +16,10 @@
   "collar_seconds": 0.0,
   "skip_overlap": false,
   "tcp_collar_seconds": 5.0,
+  "tcp_timing": {
+    "reference": "character_based",
+    "hypothesis": "character_based_points"
+  },
   "legacy_nonoverlap": {
     "known_coverage_min": 0.9,
     "known_accuracy_min": 0.95,

@@ -270,6 +270,28 @@ wheels = [
 ]
 
 [[package]]
+name = "cython"
+version = "3.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a9/d8/4981ef716ad0e3ff0d3ef383aefc6b03c4a88dee33b272bf8e0d833001ca/cython-3.3.0.tar.gz", hash = "sha256:eed0d93fbca7087f143b42c34b05a825849bdf17f101572c2105acfa49aa88b8", size = 3727515, upload-time = "2026-08-22T05:16:39.493Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8a/7f/e409f76bb955ecdcb746b80350b945fbb808846d797346d647a37e1790ca/cython-3.3.0-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:0deedc2e9a5a664e1adfa4c2d310aa7b54903e1a647c274b6c9213f77a02d637", size = 3186700, upload-time = "2026-08-22T05:17:24.288Z" },
+    { url = "https://files.pythonhosted.org/packages/0e/6b/4a623ab6e4a5b9814b22849665cb212273f9735399a7ebca4f3e8c254f1a/cython-3.3.0-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:46072c0d404616b5e652a63882c79cc3f8a1d62635a8692f56ed0e416a4dfed8", size = 3330606, upload-time = "2026-08-22T05:17:26.041Z" },
+    { url = "https://files.pythonhosted.org/packages/9f/57/6d620ebee4fc24d89340427702f6ceaf7b956511d1f2222a88c92c1a72b7/cython-3.3.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:82f94565b6001bab8e31bf52a0911672910b5735910612a2c0f772c719670006", size = 3454681, upload-time = "2026-08-22T05:17:28.449Z" },
+    { url = "https://files.pythonhosted.org/packages/73/4e/26e0a584d06c5b3f345df491d2546479606c89217627ee163f1aa55e899f/cython-3.3.0-cp314-cp314-win_amd64.whl", hash = "sha256:51999fb834365721b6c7f689cf6e2ec7c8667aae783df9eb5e589c290a414d9c", size = 2925966, upload-time = "2026-08-22T05:17:30.549Z" },
+    { url = "https://files.pythonhosted.org/packages/14/59/bc1a84b434cb5bebb0cd6f50da8f239d35a5c141b20fdeafc2817fd87778/cython-3.3.0-cp39-abi3-macosx_10_9_x86_64.whl", hash = "sha256:e0d2713d2b292c826bc21dc8732bd9e47628103aa3764180c881e04b3fef95dc", size = 3063660, upload-time = "2026-08-22T05:17:40.923Z" },
+    { url = "https://files.pythonhosted.org/packages/ba/6d/542e32908fb421d88354f327ed6450e14240f9825d25393065bc65f4723f/cython-3.3.0-cp39-abi3-manylinux1_i686.manylinux_2_28_i686.manylinux_2_5_i686.whl", hash = "sha256:169e56fd411f4cd5bba51c82f8239421d547a846099db2b261e4aed48ba9f51f", size = 3358395, upload-time = "2026-08-22T05:17:43.036Z" },
+    { url = "https://files.pythonhosted.org/packages/9c/7c/ddaf197bc65b581e1891657940bc4f7cb1f740e822115e828920b3a119ce/cython-3.3.0-cp39-abi3-manylinux2014_armv7l.manylinux_2_17_armv7l.manylinux_2_31_armv7l.whl", hash = "sha256:29f38ebafdf23e3da2516f40c4d065da38bfe002181bf93e2b8cf1262449aba6", size = 3041760, upload-time = "2026-08-22T05:17:44.907Z" },
+    { url = "https://files.pythonhosted.org/packages/19/a7/ae5ec3e34d43da846ed4c425734752d83aae0dae49feb929f09c90fc9afa/cython-3.3.0-cp39-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:75c4ae8a6d3a5ccf3cdaba8ab32e6a8d0cd38e3a476aa7ac12df8f8171a8d570", size = 3156152, upload-time = "2026-08-22T05:17:46.884Z" },
+    { url = "https://files.pythonhosted.org/packages/31/44/c60b601fc43f0b08e9d6f14b94e0dd02eb0ca8d60f46e242ace7191ac1be/cython-3.3.0-cp39-abi3-musllinux_1_2_armv7l.whl", hash = "sha256:b94fb5613b9fe34c27d13ec9972dc0dcd2a2155db2902e93921cadc162610a38", size = 3046690, upload-time = "2026-08-22T05:17:48.731Z" },
+    { url = "https://files.pythonhosted.org/packages/b0/9e/d735c26ed907563d3365534006acb263651c2d3b87fee804f7a483dd1714/cython-3.3.0-cp39-abi3-musllinux_1_2_i686.whl", hash = "sha256:c4558ba85849ab65dc57e10fd0efb13fabd9d3c09981a2566e18dec7cf47586a", size = 3373534, upload-time = "2026-08-22T05:17:50.7Z" },
+    { url = "https://files.pythonhosted.org/packages/e0/e8/aa7b4f3a28d6e8117c76e2cf78a0df7a503486cdf7243c5b53200c9533a1/cython-3.3.0-cp39-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:311a016369adfd1e0015c4f9819168fc0e518451d7efb4435c30d65a3a26d52b", size = 3265110, upload-time = "2026-08-22T05:17:52.577Z" },
+    { url = "https://files.pythonhosted.org/packages/9c/66/37892a8999d6bbd3f92d691a9701cb720c8ddd6171e16f5148eee6e8cb7f/cython-3.3.0-cp39-abi3-win32.whl", hash = "sha256:90869072e50b7c8904fe1dd7810321ae901fd5637a6eec6646ed9c57f9eb1081", size = 2587733, upload-time = "2026-08-22T05:17:54.547Z" },
+    { url = "https://files.pythonhosted.org/packages/19/a2/5f4d305cbd4489d21570e5491ad5c483c478cdab032853e2125c280e3bd5/cython-3.3.0-cp39-abi3-win_arm64.whl", hash = "sha256:dce56c26d388f00a19426371b6926bf2f77c5c03b71d5273e4556c68be98c2dd", size = 2608078, upload-time = "2026-08-22T05:17:56.386Z" },
+    { url = "https://files.pythonhosted.org/packages/bf/77/67b0b24e45073a699610e50f00c18474ff9b09ea29ecc95083bdf5e60acd/cython-3.3.0-py3-none-any.whl", hash = "sha256:9b24b5c8cd536946b62086fcafee6d5509d3f549f72d553d2336af87ffbe0da1", size = 1349151, upload-time = "2026-08-22T05:16:36.741Z" },
+]
+
+[[package]]
 name = "execnet"
 version = "2.1.2"
 source = { registry = "https://pypi.org/simple" }
@@ -494,6 +516,19 @@ wheels = [
 ]
 
 [[package]]
+name = "kaldialign"
+version = "0.12.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b0/58/bd83457ab1f4296cb48da2057330fd669e14d0139353d87f9c138fc055af/kaldialign-0.12.0.tar.gz", hash = "sha256:f25743ef7dcf15716c5ac47e164dd7191cab791196a78c27cff6a99c253e1a14", size = 31415, upload-time = "2026-06-15T13:16:40.7Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/08/0b/40c297aaa0429c212c984c777dc4800754b7f20c4b90084ccf9acbe17d09/kaldialign-0.12.0-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:a16f41a342d629397ac04183db3b93a9a8dcb6501ebeb875c0612a111be91e4a", size = 166741, upload-time = "2026-06-15T13:16:48.139Z" },
+    { url = "https://files.pythonhosted.org/packages/22/5b/a2a2eca1100b600f901c73328b83b55de9aa0ff0eac2c72b6941dec1292e/kaldialign-0.12.0-cp314-cp314-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:717635238cc88735f623d4d044b5611ee829125254b398bdf73619b7d234d77a", size = 100261, upload-time = "2026-06-15T13:18:08.391Z" },
+    { url = "https://files.pythonhosted.org/packages/17/ef/3b55db3404e974e1d4e24b54d4b9e0a8cbdab12fac2a27f85a61670bf655/kaldialign-0.12.0-cp314-cp314-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:9d1f8455a08defeca66fa4f8d0fa870741cedc965530cbc00aa76db0e0d615e5", size = 111089, upload-time = "2026-06-15T13:16:52.207Z" },
+    { url = "https://files.pythonhosted.org/packages/b7/0c/5e8515edddc35198e4dbef0931a9026671c1828655e71e73c133cfc07828/kaldialign-0.12.0-cp314-cp314-win32.whl", hash = "sha256:852985076956cf82ba7e6966bf0a05249d08b17e3f59533b6ff80840abb895ba", size = 89468, upload-time = "2026-06-15T13:19:37.859Z" },
+    { url = "https://files.pythonhosted.org/packages/c0/2c/e8922c84bdaab770c20761ef2c38cce3863f62ff9dfc4f988cac9eb88222/kaldialign-0.12.0-cp314-cp314-win_amd64.whl", hash = "sha256:8828e2a5f9e4bcacf51f5e767272f92b683cf242171287f39a36820e2e539903", size = 109195, upload-time = "2026-06-15T13:17:32.402Z" },
+]
+
+[[package]]
 name = "librt"
 version = "0.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -569,6 +604,19 @@ sdist = { url = "https://files.pythonhosted.org/packages/9e/2d/7c251e34207f6c510
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ce/48/32583066b155bb5d4507e7887dc88ee23118cc4de8e2a12870c49719e2a8/mcp_types-2.3.0-py3-none-any.whl", hash = "sha256:968efdbdaedfab06adae40d378a34395f1090c5921d4be3c9cde283aaf76d91d", size = 69108, upload-time = "2026-10-02T22:06:54.099Z" },
 ]
+
+[[package]]
+name = "meeteval"
+version = "0.4.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cython" },
+    { name = "kaldialign" },
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d4/13/10edb36a8881b24690e27213bfb2395e8857a70eeef61d241a463cb5522c/meeteval-0.4.3.tar.gz", hash = "sha256:02d3a359f375d39c67dfb8fe1c061e7dac19d6fc1fb89ee72d793a5813dafeb2", size = 843558, upload-time = "2025-09-08T11:57:30.158Z" }
 
 [[package]]
 name = "mypy"
@@ -1192,6 +1240,7 @@ dependencies = [
 dev = [
     { name = "jsonschema" },
     { name = "mcp" },
+    { name = "meeteval" },
     { name = "mypy" },
     { name = "numpy" },
     { name = "openai" },
@@ -1214,6 +1263,7 @@ requires-dist = [
     { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.23" },
     { name = "mcp", marker = "extra == 'dev'", specifier = ">=2.1,<3" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.1,<3" },
+    { name = "meeteval", marker = "extra == 'dev'", specifier = "==0.4.3" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.14" },
     { name = "numpy", marker = "extra == 'dev'", specifier = ">=1.26,<3.0" },
     { name = "onnxruntime", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = "==1.31.0" },

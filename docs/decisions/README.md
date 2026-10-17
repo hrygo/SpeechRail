@@ -23,5 +23,6 @@
 | [0019](0019-stateless-speech-plane-caller-orchestration.md) | 无状态 Speech Plane 与调用方助手编排 | Accepted |
 | [0020](0020-teleprompter-workflow-reliability.md) | 提词器 App 内受约束工作流、能力感知输出与局部恢复 | Implemented（待真实模型/UI 验收） |
 | [0021](0021-extreme-bf16-profile.md) | Extreme BF16 候选档、当前能力声明与启用门禁 | Superseded by [目标架构](../architecture/2026-09-25-asr-tts-target-architecture-no-legacy.md)（`extreme` 候选档退役，未启用） |
+| [0023](0023-meeting-evaluation-identities-and-product-gates.md) | 会议评测身份与产品评分门 | Accepted |
 
 ADR 记录为什么这样设计；旧决策不删除，后续改变用新 ADR supersede。

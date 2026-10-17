@@ -35,7 +35,7 @@ def score_diarization(
                 type(a) not in (int, float)
                 or type(b) not in (int, float)
                 or not math.isfinite(a + b)
-                or not 0 <= a < b <= duration + 1/16000 + 1e-9
+                or not 0 <= a < b <= duration + 1 / 16000 + 1e-9
                 or not isinstance(label, str)
                 or not label
             ):
@@ -50,9 +50,15 @@ def score_diarization(
     mapped = hyp.rename_labels(
         mapping={label: mapping.get(label, "unmapped:" + label) for label in hyp.labels()}
     )
-    der = IdentificationErrorRate(collar=0, skip_overlap=False)(ref, mapped, uem=uem)
-    jer = JaccardErrorRate(collar=0, skip_overlap=False)(ref, hyp, uem=uem)
+    detail = IdentificationErrorRate(collar=0, skip_overlap=False)(
+        ref, mapped, uem=uem, detailed=True
+    )
+    der = detail["identification error rate"]
+    jer = (
+        JaccardErrorRate(collar=0, skip_overlap=False)(ref, hyp, uem=uem) if ref.labels() else None
+    )
     comparable = IdentificationErrorRate(collar=0.25, skip_overlap=True)(ref, mapped, uem=uem)
+    research = IdentificationErrorRate(collar=0.25, skip_overlap=False)(ref, mapped, uem=uem)
     events = defaultdict(list)
     for group, rows in (("reference", reference), ("hypothesis", hypothesis)):
         for row in rows:
@@ -132,7 +138,17 @@ def score_diarization(
         "collar_seconds": 0,
         "skip_overlap": False,
         "der": float(der),
-        "jer": float(jer),
+        "jer": float(jer) if jer is not None else None,
+        "components": {
+            key: float(detail[key])
+            for key in ("total", "correct", "missed detection", "false alarm", "confusion")
+        },
+        "research_comparable": {
+            "collar_seconds": 0.25,
+            "skip_overlap": False,
+            "der": float(research),
+            "mapping_scope": "same_whole_session_mapping",
+        },
         "comparable": {
             "collar_seconds": 0.25,
             "skip_overlap": True,

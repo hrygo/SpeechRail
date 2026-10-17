@@ -11,9 +11,9 @@ stratified across 1, 2, 3, and 4 speakers:
   2. Diarization-only: DER, JER, comparable DER (collar=0.25, skip_overlap),
      known_coverage (>=90%), known_accuracy (>=95%), top_four_min_known_coverage
      (>=95%), with other_min_known_coverage marked not applicable for <=4 speakers.
-  3. Speaker-attributed joint: cpCER, tcpCER, cpWER, tcpWER, and diarization-
-     invariant DI-cpCER / DI-cpWER (separating speaker-confusion penalty from
-     lexical ASR error, keeping unattributed 'unknown' speech in the denominator).
+  3. Legacy product cp/tcp text metrics with an explicit unknown penalty,
+     plus temporal-oracle diagnostics. Standard cp/tcp/DI-cp metrics are
+     provided independently by meeting_quality_metrics.
 """
 
 from __future__ import annotations
@@ -641,7 +641,7 @@ def score_speaker_attributed_asr(
     duration: float,
     tcp_collar_seconds: float = 5.0,
 ) -> JsonDict:
-    """Compute cpCER, tcpCER, cpWER, tcpWER, and DI-cpCER / DI-cpWER for <=4 speakers.
+    """Compute legacy product text metrics and temporal-oracle diagnostics for <=4 speakers.
 
     Unattributed hypothesis utterances (`speaker == "unknown"`) are never mapped to
     any reference speaker and remain in the insertion error denominator so unknown
@@ -768,12 +768,14 @@ def score_speaker_attributed_asr(
 
     cp_cer = best_cp_char_errors / total_ref_chars if total_ref_chars else None
     tcp_cer = best_tcp_char_errors / total_ref_chars if total_ref_chars else None
-    di_cp_cer = di_char_errors / total_ref_chars if total_ref_chars else None
+    temporal_oracle_cer = di_char_errors / total_ref_chars if total_ref_chars else None
     cp_wer = best_cp_word_errors / total_ref_words if total_ref_words else None
     tcp_wer = best_tcp_word_errors / total_ref_words if total_ref_words else None
-    di_cp_wer = di_word_errors / total_ref_words if total_ref_words else None
+    temporal_oracle_wer = di_word_errors / total_ref_words if total_ref_words else None
 
     return {
+        "standard_metric": False,
+        "metric_family": "legacy_product_text_and_temporal_oracle",
         "reference_speakers_count": len(ref_speakers),
         "hypothesis_known_speakers_count": len(hyp_known_speakers),
         "unknown_utterance_count": len(unknown_utts),
@@ -784,22 +786,26 @@ def score_speaker_attributed_asr(
         "reference_characters": total_ref_chars,
         "cp_char_errors": best_cp_char_errors,
         "tcp_char_errors": best_tcp_char_errors,
-        "di_cp_char_errors": di_char_errors,
+        "temporal_oracle_char_errors": di_char_errors,
         "cp_cer": cp_cer,
         "tcp_cer": tcp_cer,
-        "di_cp_cer": di_cp_cer,
-        "speaker_confusion_cer_delta": (
-            cp_cer - di_cp_cer if cp_cer is not None and di_cp_cer is not None else None
+        "temporal_oracle_cer": temporal_oracle_cer,
+        "product_cp_minus_temporal_oracle_cer": (
+            cp_cer - temporal_oracle_cer
+            if cp_cer is not None and temporal_oracle_cer is not None
+            else None
         ),
         "reference_words": total_ref_words,
         "cp_word_errors": best_cp_word_errors,
         "tcp_word_errors": best_tcp_word_errors,
-        "di_cp_word_errors": di_word_errors,
+        "temporal_oracle_word_errors": di_word_errors,
         "cp_wer": cp_wer,
         "tcp_wer": tcp_wer,
-        "di_cp_wer": di_cp_wer,
-        "speaker_confusion_wer_delta": (
-            cp_wer - di_cp_wer if cp_wer is not None and di_cp_wer is not None else None
+        "temporal_oracle_wer": temporal_oracle_wer,
+        "product_cp_minus_temporal_oracle_wer": (
+            cp_wer - temporal_oracle_wer
+            if cp_wer is not None and temporal_oracle_wer is not None
+            else None
         ),
     }
 
@@ -963,10 +969,10 @@ def summarize_1to4_strata(
                 "other_min_known_coverage": "N/A",
                 "mean_cp_cer": None,
                 "mean_tcp_cer": None,
-                "mean_di_cp_cer": None,
+                "mean_temporal_oracle_cer": None,
                 "mean_cp_wer": None,
                 "mean_tcp_wer": None,
-                "mean_di_cp_wer": None,
+                "mean_temporal_oracle_wer": None,
             }
             continue
         n = len(rows)
@@ -992,11 +998,15 @@ def summarize_1to4_strata(
             "other_min_known_coverage": "N/A",
             "mean_cp_cer": sum(float(r["speaker_attributed"]["cp_cer"] or 0.0) for r in rows) / n,
             "mean_tcp_cer": sum(float(r["speaker_attributed"]["tcp_cer"] or 0.0) for r in rows) / n,
-            "mean_di_cp_cer": sum(float(r["speaker_attributed"]["di_cp_cer"] or 0.0) for r in rows)
+            "mean_temporal_oracle_cer": sum(
+                float(r["speaker_attributed"]["temporal_oracle_cer"] or 0.0) for r in rows
+            )
             / n,
             "mean_cp_wer": sum(float(r["speaker_attributed"]["cp_wer"] or 0.0) for r in rows) / n,
             "mean_tcp_wer": sum(float(r["speaker_attributed"]["tcp_wer"] or 0.0) for r in rows) / n,
-            "mean_di_cp_wer": sum(float(r["speaker_attributed"]["di_cp_wer"] or 0.0) for r in rows)
+            "mean_temporal_oracle_wer": sum(
+                float(r["speaker_attributed"]["temporal_oracle_wer"] or 0.0) for r in rows
+            )
             / n,
         }
 

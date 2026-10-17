@@ -307,8 +307,8 @@ def test_speaker_attributed_asr_separates_speaker_confusion_and_penalizes_unknow
     assert perfect["tcp_cer"] == 0.0
     assert perfect["cp_wer"] == 0.0
     assert perfect["tcp_wer"] == 0.0
-    assert perfect["di_cp_cer"] == 0.0
-    assert perfect["speaker_confusion_cer_delta"] == 0.0
+    assert perfect["temporal_oracle_cer"] == 0.0
+    assert perfect["product_cp_minus_temporal_oracle_cer"] == 0.0
 
     collapsed_hyp = [
         {"start": 0.1, "end": 1.9, "speaker": "S1", "text": "今天讨论预算"},
@@ -317,11 +317,11 @@ def test_speaker_attributed_asr_separates_speaker_confusion_and_penalizes_unknow
     collapsed = score_speaker_attributed_asr(
         reference, collapsed_hyp, duration=5.0, tcp_collar_seconds=1.0
     )
-    assert collapsed["di_cp_cer"] == 0.0
+    assert collapsed["temporal_oracle_cer"] == 0.0
     assert collapsed["cp_cer"] is not None and collapsed["cp_cer"] > 0.5
     assert (
-        collapsed["speaker_confusion_cer_delta"] is not None
-        and collapsed["speaker_confusion_cer_delta"] > 0.5
+        collapsed["product_cp_minus_temporal_oracle_cer"] is not None
+        and collapsed["product_cp_minus_temporal_oracle_cer"] > 0.5
     )
 
     unknown_hyp = [
@@ -353,9 +353,9 @@ def test_word_metrics_preserve_utterance_boundaries_and_leave_character_metrics_
     assert english["asr_only"]["cer"] == 0.0
     assert english["speaker_attributed"]["cp_wer"] == 1.0
     assert english["speaker_attributed"]["tcp_wer"] == 1.0
-    assert english["speaker_attributed"]["di_cp_wer"] == 1.0
+    assert english["speaker_attributed"]["temporal_oracle_wer"] == 1.0
     assert english["speaker_attributed"]["cp_cer"] == 0.0
-    assert english["speaker_attributed"]["di_cp_cer"] == 0.0
+    assert english["speaker_attributed"]["temporal_oracle_cer"] == 0.0
 
     chinese = score_meeting_1to4_session(
         reference_speaker_spans=[{"start": 0.0, "end": 2.0, "speaker": "R1"}],
@@ -369,9 +369,9 @@ def test_word_metrics_preserve_utterance_boundaries_and_leave_character_metrics_
     )
     assert chinese["asr_only"]["cer"] == 0.0
     assert chinese["speaker_attributed"]["cp_cer"] == 0.0
-    assert chinese["speaker_attributed"]["di_cp_cer"] == 0.0
+    assert chinese["speaker_attributed"]["temporal_oracle_cer"] == 0.0
     assert chinese["speaker_attributed"]["cp_wer"] == 0.0
-    assert chinese["speaker_attributed"]["di_cp_wer"] == 0.0
+    assert chinese["speaker_attributed"]["temporal_oracle_wer"] == 0.0
 
 
 def test_speaker_attributed_asr_discards_segments_wholly_in_tail_padding() -> None:
@@ -390,7 +390,7 @@ def test_speaker_attributed_asr_discards_segments_wholly_in_tail_padding() -> No
     assert scored["asr_only"]["wer"] == 0.0
     assert scored["speaker_attributed"]["cp_wer"] == 0.0
     assert scored["speaker_attributed"]["tcp_wer"] == 0.0
-    assert scored["speaker_attributed"]["di_cp_wer"] == 0.0
+    assert scored["speaker_attributed"]["temporal_oracle_wer"] == 0.0
 
 
 def test_score_meeting_1to4_session_and_stratification_marks_missing_strata() -> None:
@@ -692,3 +692,15 @@ def test_effective_candidate_tracks_consolidation_and_adapter(tmp_path: Path) ->
         consolidate=False,
     )
     assert candidate_digest(spec) != candidate_digest(rebuilt)
+
+
+def test_legacy_oracle_is_named_as_a_diagnostic() -> None:
+    result = score_speaker_attributed_asr(
+        [{"start": 0, "end": 1, "speaker": "R1", "text": "a"}],
+        [{"start": 0, "end": 1, "speaker": "S1", "text": "a"}],
+        duration=1,
+    )
+    assert "di_cp_cer" not in result
+    assert "di_cp_wer" not in result
+    assert result["temporal_oracle_cer"] == 0
+    assert result["standard_metric"] is False
