@@ -67,11 +67,12 @@ public final class TranscriptPresentation<Row: TranscriptPresentationRow> {
     @ObservationIgnored private var pages: [[Row]] = []
     @ObservationIgnored private var pageByID: [String: (page: Int, row: Int)] = [:]
     @ObservationIgnored private var generation = UUID()
+    @ObservationIgnored private let metrics: AppPerformanceMetrics
     public var tailCount: Int { tail.count }
     public var pageCount: Int { pages.count }
     public var pageRowCount: Int { pages.reduce(0) { $0 + $1.count } }
     public var ordinalComparisons: Int { tail.comparisons }
-    public init() {}
+    public init(metrics: AppPerformanceMetrics = .shared) { self.metrics = metrics }
     public func reset(_ lines: [Row]) {
         generation = UUID(); tail = .init(capacity: 500); pages = []; pageByID = [:]
         for line in lines { tail.upsert(line) }
@@ -147,12 +148,20 @@ public final class TranscriptPresentation<Row: TranscriptPresentationRow> {
         return next.ordinal
     }
     private func publishPages() {
+        let measurePublish = metrics.isEnabled
+        let startedAt = measurePublish ? DispatchTime.now().uptimeNanoseconds : 0
+        let publishedRows = pages.reduce(0) { $0 + $1.count }
         pageByID = [:]
         rows = []
         for (page, values) in pages.enumerated() {
             for (row, line) in values.enumerated() where pageByID[line.id] == nil {
                 pageByID[line.id] = (page, row); rows.append(line)
             }
+        }
+        if measurePublish {
+            metrics.record(.init(operation: .transcriptPublish,
+                durationNanoseconds: DispatchTime.now().uptimeNanoseconds &- startedAt,
+                count: publishedRows))
         }
     }
 }

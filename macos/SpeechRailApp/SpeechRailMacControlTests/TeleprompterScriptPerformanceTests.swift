@@ -19,6 +19,19 @@ struct TeleprompterScriptPerformanceTests {
         cache.clear()
         #expect(cache.current == nil)
     }
+    @Test func testMatchOperationReportsInputTokenCount() throws {
+        let segments = try TeleprompterSegmenter.segment(sourceText: "欢迎来到今天的测试。这里是第二段中文。")
+        let script = TeleprompterAligner.Script(segments: segments)
+        let tokens = TeleprompterCanonicalizer.values("这里是第二段中文")
+        let metrics = AppPerformanceMetrics(collecting: true, signposting: false)
+        let aligner = TeleprompterAligner(metrics: metrics)
+
+        _ = aligner.locate(tokens: tokens, script: script, anchor: .init(segmentIndex: 0, utf16Offset: 0))
+
+        let summary = metrics.snapshot(for: .teleprompterMatch)
+        #expect(summary.samples == 1 && summary.count == UInt64(tokens.count))
+        #expect(summary.failed == 0 && summary.cancelled == 0)
+    }
     @Test func testIndexedAnchorMatchesLinearReferenceAndComparisonsAreLogarithmic() throws {
         let segments = try TeleprompterSegmenter.segment(sourceText: String(repeating: "重复词 English 😀 二零二六。", count: 600))
         let script = TeleprompterAligner.Script(segments: segments)

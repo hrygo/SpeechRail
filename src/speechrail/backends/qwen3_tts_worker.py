@@ -111,6 +111,16 @@ def _seed_clone_generation(*, voice: str, text: str, ref_text: str) -> bool:
     return True
 
 
+def _custom_voice_default_seed(*, voice: str, text: str) -> int:
+    """Derive a stable default seed without retaining request text."""
+
+    material = "\x1f".join(
+        ("speechrail/custom_voice/default-seed-v1", voice, text)
+    ).encode("utf-8")
+    digest = hashlib.blake2s(material, digest_size=4).digest()
+    return int.from_bytes(digest, "little")
+
+
 def _sampling_observation(
     *,
     seed_policy: str,
@@ -584,18 +594,23 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
                     yield pcm
             return
 
-        # S3-2: custom_voice + voice_design(explicit instruction) share the
-        # caller-seed path: seed fixes the MLX sampling stream; missing seed
-        # keeps the legacy behavior. The clone path already rejected seed above.
+        # CustomVoice uses a request-derived seed by default so the same voice
+        # and text cannot randomly select a different-duration sample on each
+        # render. A caller seed remains an explicit override.
         applied_seed: int | None = None
         seed_policy = "unseeded_sampler"
-        if variant == "custom_voice" and seed is not None:
+        if variant == "custom_voice":
+            sampling_seed = (
+                int(seed)
+                if seed is not None
+                else _custom_voice_default_seed(voice=voice, text=text)
+            )
             try:
                 import mlx.core as mx  # type: ignore[import-not-found]
 
-                mx.random.seed(int(seed))
-                applied_seed = int(seed)
-                seed_policy = "caller_fixed"
+                mx.random.seed(sampling_seed)
+                applied_seed = sampling_seed
+                seed_policy = "caller_fixed" if seed is not None else "request_derived"
             except Exception:
                 pass
         if profile is None and instruction is None and variant == "voice_design":

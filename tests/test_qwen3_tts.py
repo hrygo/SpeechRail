@@ -16,6 +16,7 @@ from speechrail.backends.qwen3_tts import (
     Qwen3TtsWorker,
 )
 from speechrail.backends.qwen3_tts_worker import TTS_BACKEND_ID
+from speechrail.backends.tts_execution_adapter import bind_tts_execution
 from speechrail.domain.ports import SpeechRequest
 from speechrail.domain.tts import VoiceInUseError, VoiceStoreUnavailableError
 from speechrail.domain.voice_ports import VoiceLeases
@@ -453,6 +454,31 @@ def test_router_eviction_keeps_first_load_distinct_from_reload(tmp_path: Path) -
         await router.close()
 
     asyncio.run(run())
+
+
+def test_capability_router_forwards_worker_sampling_observations(tmp_path: Path) -> None:
+    worker, _fake = _worker(tmp_path)
+    worker._store_sampling_observation(
+        "response-1",
+        _completed_frame_with_sampling(
+            seed_policy="request_derived",
+            seed=4242,
+        ),
+    )
+    router = Qwen3TtsCapabilityRouter(
+        {"voice_design": worker},
+        voice_directory=FileVoiceRegistry.open(tmp_path / "voices.json", tmp_path / "audio"),
+    )
+    execution = bind_tts_execution(router)
+
+    assert execution.sampling is router
+    assert execution.sampling is not None
+    observation = execution.sampling.take_sampling_observation("response-1")
+
+    assert observation is not None
+    assert observation.seed_policy == "request_derived"
+    assert observation.seed == 4242
+    assert execution.sampling.take_sampling_observation("response-1") is None
 
 
 def test_tts_worker_prepare_returns_the_observed_runtime_identity(

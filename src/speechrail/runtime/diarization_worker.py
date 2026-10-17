@@ -22,6 +22,8 @@ _MAX_HEADER_BYTES = 64 * 1024
 _PROTOCOL_VERSION = 1
 _STDERR_TAIL_BYTES = 8 * 1024
 _STDERR_READ_CHUNK_BYTES = 1_024
+MEETING_DYNAMIC_SDK_REVISION = "5c19d5e12320e22bbfb7a1877b089d2665a69add"
+MEETING_DYNAMIC_MODEL_REVISION = "7eab74f3463c736418d0eb10296261ae581146c9"
 
 
 def encode_message(header: Mapping[str, object], audio: bytes = b"") -> bytes:
@@ -73,7 +75,8 @@ class CoreMLWorkerProcess:
     protocol_version: int = _PROTOCOL_VERSION
     backend: str = "sortformer"
     policy_path: Path | None = None
-    calibration_policies_path: Path | None = None
+    calibration_candidates_path: Path | None = None
+    zero_vote_reembed: bool = False
     process: asyncio.subprocess.Process | None = None
     _reader: asyncio.StreamReader | None = None
     _writer: asyncio.StreamWriter | None = None
@@ -89,14 +92,24 @@ class CoreMLWorkerProcess:
             await self.close()
         if not self.executable.is_file() or not self.model_path.is_dir():
             raise RuntimeError("CoreML diarization worker or compiled model is unavailable")
+        if self.zero_vote_reembed and (
+            self.backend != "meeting_dynamic" or self.calibration_candidates_path is None
+        ):
+            raise RuntimeError(
+                "zero-vote re-embedding is restricted to meeting-diarization calibration"
+            )
         self._close_task = None
         extra: list[str] = []
+        if self.calibration_candidates_path is not None and self.backend != "meeting_dynamic":
+            raise RuntimeError("calibration candidates are restricted to meeting diarization")
         if self.backend == "meeting_dynamic":
             if self.protocol_version != 2 or self.policy_path is None:
                 raise RuntimeError("dynamic diarization requires explicit protocol and policy")
             extra = ["--backend", self.backend, "--policy", str(self.policy_path)]
-            if self.calibration_policies_path is not None:
-                extra += ["--calibration-policies", str(self.calibration_policies_path)]
+            if self.calibration_candidates_path is not None:
+                extra += ["--calibration-candidates", str(self.calibration_candidates_path)]
+            if self.zero_vote_reembed:
+                extra.append("--zero-vote-reembed")
         process = await asyncio.create_subprocess_exec(
             str(self.executable),
             "--model",
@@ -124,8 +137,9 @@ class CoreMLWorkerProcess:
             self.backend == "meeting_dynamic"
             and (
                 response.get("backend") != self.backend
-                or response.get("sdk_revision") != "5c19d5e12320e22bbfb7a1877b089d2665a69add"
-                or response.get("model_revision") != "7eab74f3463c736418d0eb10296261ae581146c9"
+                or response.get("sdk_revision") != MEETING_DYNAMIC_SDK_REVISION
+                or response.get("model_revision") != MEETING_DYNAMIC_MODEL_REVISION
+                or response.get("zero_vote_reembed", False) is not self.zero_vote_reembed
             )
         ):
             await self.close()

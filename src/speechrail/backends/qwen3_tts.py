@@ -1272,6 +1272,18 @@ class Qwen3TtsCapabilityRouter:
                 return sidecar
         return None
 
+    def take_sampling_observation(
+        self,
+        response_id: str,
+    ) -> TtsSamplingObservation | None:
+        """Consume sampler facts from whichever worker served the response."""
+
+        for worker in self._worker_list:
+            observation = worker.take_sampling_observation(response_id)
+            if observation is not None:
+                return observation
+        return None
+
     async def evict_warm_capability(self) -> None:
         """Release all TTS workers before a heavyweight validation phase or idle eviction.
 

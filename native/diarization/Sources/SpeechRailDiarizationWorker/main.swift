@@ -156,8 +156,13 @@ if argument(named: "--protocol-version") == "2" {
         guard argument(named: "--backend") == "meeting_dynamic",
               let modelPath = argument(named: "--model"), let policyPath = argument(named: "--policy")
         else { throw MeetingWorkerError.invalidRequest }
+        let calibrationCandidatesPath = argument(named: "--calibration-candidates")
+        let zeroVoteReembed = CommandLine.arguments.contains("--zero-vote-reembed")
+        guard !zeroVoteReembed || calibrationCandidatesPath != nil else {
+            throw MeetingWorkerError.invalidRequest
+        }
         let worker = try MeetingDiarizationWorker(modelDirectory:modelPath,policyPath:policyPath,
-            calibrationPoliciesPath:argument(named:"--calibration-policies"))
+            calibrationCandidatesPath:calibrationCandidatesPath,zeroVoteReembed:zeroVoteReembed)
         diagnosticStage = "protocol"
         while let (header,payload) = try readPacket() {
             guard try DiarizationPacketCodec.nonnegativeInteger(header["protocol_version"]) == 2,
@@ -165,7 +170,8 @@ if argument(named: "--protocol-version") == "2" {
             if operation == "preflight" {
                 try writePacket(["protocol_version":2,"backend":"meeting_dynamic","ok":true,
                     "sdk_revision":"5c19d5e12320e22bbfb7a1877b089d2665a69add",
-                    "model_revision":"7eab74f3463c736418d0eb10296261ae581146c9"])
+                    "model_revision":"7eab74f3463c736418d0eb10296261ae581146c9",
+                    "zero_vote_reembed":zeroVoteReembed])
             } else if operation == "cancel" {
                 try writePacket(["protocol_version":2,"backend":"meeting_dynamic","ok":true]); exit(0)
             } else if operation == "infer" {

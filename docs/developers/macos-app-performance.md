@@ -2,12 +2,12 @@
 title: "macOS App 性能观测与回归"
 status: active
 version: "1.0.0"
-date: 2026-10-16
+date: 2026-10-17
 ---
 
 # macOS App 性能观测与回归
 
-AppPerformanceMetrics 提供按操作记录的 OSSignposter 区间和固定桶统计。它不启动任务、timer 或进程采样；默认关闭内存统计，只有 Instruments 启用 signpost 后才发送操作事件。测试或受控诊断可注入 collecting 为 true 的实例，按 AppPerformanceOperation 查询聚合结果。每种操作固定 13 个耗时桶，计数与总耗时溢出时饱和，不保留原始 sample 数组。
+AppPerformanceMetrics 提供按操作记录的 OSSignposter 区间和固定桶统计。共享的 `AppPerformanceSink` 契约由 App 与 CaptureHelper 共用；Helper 使用 `CapturePerformanceSignpostSink` 发送同一套有限枚举和数值字段，不在独立进程内聚合内存统计。采集器不启动任务、timer 或进程采样；默认关闭内存统计，只有 Instruments 启用 signpost 后才发送操作事件。测试或受控诊断可注入 collecting 为 true 的实例，按 AppPerformanceOperation 查询聚合结果。每种操作固定 13 个耗时桶，计数与总耗时溢出时饱和，不保留原始 sample 数组。
 
 记录仅包含枚举操作/结果、耗时（ns）、字节数与数量。禁止扩展为任意标签、路径、prompt、转写、音频或 Base64。measure 的同步闭包在调用者执行域运行；它用于观测，不能用来把 MainActor 工作移到后台。后续存储、投影与流式任务各自承担执行域和生命周期。
 
@@ -21,7 +21,20 @@ git diff --check
 
 SwiftPM 定向运行仍会编译测试目标；新测试必须同时登记到 Xcode 单测 target，生产文件也必须登记到 App 与相关单测 sources。需要构建 App 时使用仓库 macos_app_build.sh 包装入口，不裸跑产出 App 的 xcodebuild。
 
-当前已验证固定容量、数字字段、禁用采集和饱和计数；这不是实际 CPU、UI 流畅度或长时稳定性的验收。模块级观测点与对应回归随实施任务接入，不能把尚未接入的操作计数 0 当作没有工作。
+当前已验证固定容量、数字字段、禁用采集和饱和计数；这不是实际 CPU、UI 流畅度或长时稳定性的验收。
+
+以下六类 operation 在实际 owner 边界记录数值 signpost。App 进程通过 `AppPerformanceMetrics` 聚合；CaptureHelper 的采集与 chunk 交付使用 `CapturePerformanceSignpostSink` 直接发出事件。字段仅使用有限 operation 枚举、固定数字字段和结果，不保存原始样本；默认不启用聚合内存统计，Instruments 启用 signpost 时才发送事件。
+
+| Operation | 观测边界 | `bytes` / `count` 与结果口径 |
+| --- | --- | --- |
+| `dubbingExport` | `DubbingProjectStore.prepareExport` 与 `DubbingExportWriter.copyPrepared` 分别记录各自准备/复制工作 | 准备阶段 `bytes` 是写入 lease 的 WAV（含 header）与正文总字节数，`count` 是候选 WAV 数；复制阶段 `bytes` 是成功写入目标 staging 的内容字节数，`count` 是已尝试的目标文件数。`outcome` 描述各阶段调用成功、取消或抛错；每个目标的 `ExportCopyReceipt` 仍是提交事实，后续 lease 清理状态仍由原工作流单独报告。 |
+| `captureEnqueue` | `CaptureAudioRelay` 对一个 chunk 做 epoch/sequence 校验、信用入队并调用交付闭包 | `bytes` 是 PCM 字节数，`count` 每个 chunk 为 1。元数据无效或窗口拒绝记为失败；一个样本代表一批 chunk，不逐样本计时。 |
+| `mixerTick` | 通过活动状态检查后的一次 `StreamMixer.tick` | `bytes` 是实际输出 PCM 字节数；`count` 是参与混合的来源数。没有可混来源时记录一次零字节工作；状态已结束或无效帧数在入口跳过，不生成样本，延迟唤醒不会补跑旧 tick。 |
+| `captureStop` | `AudioCaptureDrain.stop` 等待采集 drain、有限 EOS flush 与资源释放；`CoreAudioTapCapture.stop` 等待其 serial queue 和设备清理 | `bytes` 是停止请求时待处理的 Float 输入字节数；`count` 是待处理 Float 样本数。失败优先于取消；取消不会记成功。CoreAudio teardown 返回错误或 ring drain 不前进时标记失败。 |
+| `teleprompterMatch` | 已准备好 Script 后的 `TeleprompterAligner.locate(tokens:script:anchor:)` | `count` 是输入 token 数。Script 准备仍由 `teleprompterPrepare` 分开记录；匹配完成后调用方丢弃过期结果，不改变该次计算结果的 outcome。 |
+| `transcriptPublish` | `TranscriptPresentation.publishPages` 重建有界历史页投影 | `count` 是正在发布的行数。live-tail 的追加、归属索引和独立电平变化不记为正文页发布。 |
+
+各 operation 的数值边界由 owner 注入 collecting metrics 的确定性回归验证。计数 0 只表示该 operation 没有已采集数值样本，不能推导没有工作或热点。
 
 ## 音色目录执行边界
 
@@ -83,7 +96,13 @@ Responses SSE 的 UTF-8/逐行解析仍为单 reader；只有完整事件更新�
 
 转换后排队 PCM 的双路保守上限为 137,280 B：三个 source channel 各 24,000 B、XPC 4 × 1,920 B、两个 mixer input 各 19,200 B、output 19,200 B。这不是总 RSS：麦克风 raw ring 的默认实际分配为 262,144 × 4 + 1,024 B（含 64 条时间边界）；每个 drain 的 scratch 为 `max(1024, ceil(rate/10)) × 4 + (ceil(frames × 24000/rate) + 64) × 2` B。系统采集另有按 native rate/channels 固定的 power-of-two raw ring、最多 100 ms 转换 scratch 及最多 24,000 B 的转换拼块工作区。正在处理的块、AVAudioConverter 内部存储和 ASR 合法窗口另计。750 ms 年龄限制按实际采集时间检查，不因 drain 推迟而刷新。
 
-helper 最多四块在途，App 真正 dequeue 才 ACK；无有效 ACK 达 1 s 终止。ACK 在同一临界区先检查已有期限，定时器执行延迟不能让过期 ACK 恢复 credit；过期终止以 staleInput 触发实际采集清理。正常停止等最后 ACK，再回复停止 RPC；App RPC 超时会显式记录清理未确认。mixer 最多两个来源 slot，旧 ingest 退休后才复用；延迟 tick 只处理一个当前周期。正常停止保留已转换的完整及部分尾块，失败停止清空无效输入。AVAudioConverter 重采样的 EOS 尾部冲刷尚未单独验证。场景 owner 等待采集、上传及既有受限 draining，已保存文字保留；残缺语音不得触发完整意图回复。
+helper 最多四块在途，App 真正 dequeue 才 ACK；无有效 ACK 达 1 s 终止。ACK 在同一临界区先检查已有期限，定时器执行延迟不能让过期 ACK 恢复 credit；过期终止以 staleInput 触发实际采集清理。正常停止等最后 ACK，再回复停止 RPC；App RPC 超时会显式记录清理未确认。mixer 最多两个来源 slot，旧 ingest 退休后才复用；延迟 tick 只处理一个当前周期。
+
+`AudioCaptureDrain` 在输入 producer 脱离后排空已接受的有限 raw ring，再在同一串行 drain queue 给现有 converter 明确提交 `.endOfStream`。冲刷最多执行 8 次转换；每次必须产生 PCM 进展，直到 converter 返回无数据的 `.endOfStream`。转换错误、无进展、格式变化、丢样和交付失败均以错误终态结束，不补静音、不强制 completed。尾部 chunk 使用 converter 最后接收输入帧的采集时间，继续使用原 capture epoch/source ID，并分配下一唯一 source sequence。取消不冲刷且不完成为成功；只有 stop 中的真实 queue 工作结束后才释放 converter 与 scratch。converter 默认 `primeMethod` / `primeInfo` 不变，输出 frame count 以 converter 实际返回的 buffer 为准，不按采样率比例补帧。
+
+Apple 文档将 `.inputRanDry` 定义为输出 buffer 已包含当前可转换的数据，将 `.endOfStream` 定义为到达流末尾且不再返回数据；`primeInfo` 表示转换器所需的 leading/trailing frames。实现保留当前 converter 的默认 priming 设置，并只使用其实际返回的 frame count。[`AVAudioConverterOutputStatus`](https://developer.apple.com/documentation/avfaudio/avaudioconverteroutputstatus)、[`AVAudioConverterPrimeInfo`](https://developer.apple.com/documentation/avfaudio/avaudioconverterprimeinfo)
+
+确定性测试使用 24/44.1/48 kHz 合成 Float32 PCM，比较完整输出与同格式默认 converter 的 EOS 参考，核对帧数、逐样本误差、sequence、来源时间、丢样和终态。该证据验证转换器调用路径，不等于真实设备端点音质或硬件时序验收。场景 owner 仍等待采集、上传及既有受限 draining，已保存文字保留；残缺语音不得触发完整意图回复。
 
 `AudioCaptureDrain` 的 tap 只做格式检查、原子水位与预分配 raw ring 搬运；converter、PCM Data 和电平计算在独占 drain queue。元数据 ring 固定 64 条，满载报告丢样，不能覆盖来源时间。格式变化退休旧 epoch。确定性测试证明转换不在自有 callback 中执行、stop 等待正在转换的工作；实际设备时序、callback 总分配与耗时需要另行 Instruments 验证。
 

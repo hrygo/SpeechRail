@@ -1296,12 +1296,14 @@ paths:
             minimum: 0
             maximum: 4294967295
           description: |
-            Optional caller seed for reproducible custom_voice synthesis
+            Optional caller seed override for reproducible custom_voice synthesis
             (S3-2, #137). The same voice x text x seed renders deterministically
-            by seeding the MLX sampling stream; omitting it preserves the
-            historical nondeterministic behavior. Clone (base) voices reject a
-            caller seed with `400 clone_seed_unsupported`; a body-borne `seed`
-            field is rejected by the OpenAI-compatible body contract.
+            by seeding the MLX sampling stream. When omitted, the service derives
+            a stable seed from the custom voice and normalized text, so repeated
+            renders of the same input use the same sampling stream. Clone (base)
+            voices reject a caller seed with `400 clone_seed_unsupported`; a
+            body-borne `seed` field is rejected by the OpenAI-compatible body
+            contract.
         - in: header
           name: SpeechRail-Validation-Policy
           required: false

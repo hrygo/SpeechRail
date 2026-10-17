@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- CustomVoice 合成在未指定 `SpeechRail-Seed` 时，按音色与归一化文本派生稳定采样 seed，避免同一请求每次随机选择不同的语音时长；显式 caller seed 仍可覆盖，integrity receipt 记录实际使用的采样策略与 seed。
+
 ## [3.12.0] - 2026-10-17
 
 ### Added

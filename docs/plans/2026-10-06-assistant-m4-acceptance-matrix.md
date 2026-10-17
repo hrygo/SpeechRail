@@ -191,6 +191,12 @@ run2 音频 19.52s（≈2.2 倍时长）但转写文本与 run1/run3 等价—�
 异常慢放版耳感与分半转写结论一致（慢放非重复）。
 听审材料在仓库外（`/tmp/v16a65_1.wav`、`v16a65_3.wav`），仓库仅保留本结论。
 
+### V16 request-derived seed 复核（2026-10-17，受管默认路径）
+
+规范化后的精确 V16 输入在受管 `quality/quality` TTS API 上连续请求 30 次，不带 `SpeechRail-Seed`，使用 `serena`、`speed=1.0` 和 WAV 输出。30 次均为 11.52 秒、24 kHz mono、553,004 bytes，SHA-256 完全一致（`22d0689c775d35f2ede982d7894941684be0a2d88bc3f740e3342dd485639385`），0/30 超过 issue 的 14 秒阈值。integrity receipt 记录 `seed_policy=request_derived` 与 `observed_sampling_parameters.seed=4004728035`；对应脱敏 ASR proxy 核验日期、地点、改期、金额与号码段通过。
+
+初期 seed `3288020616` 来自未规范化原文，因此不等同于实际请求缺省 seed；生产路径对加上终止标点的规范化文本派生为 `4004728035`。本结果满足该 issue 的同文本 30 次零超阈时长门。音频未人工听审，且没有定位 vendor 慢放触发根因，因此只确认 V16 默认请求验收，不外推到其他文本或通用声学质量。
+
 | commit | 设备 | 系统 | spec | voice revision | provider | 样本数 | 未通过项 |
 |---|---|---|---|---|---|---|---|
 | f7e9d4b9 | Apple M5 Max | macOS 27.0.1 | quality/quality | serena（系统音色） | 本地 realtime+REST | 延迟 4+4 turns | V17/取消/长稳待执行（听审已通过） |

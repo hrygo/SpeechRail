@@ -14,12 +14,16 @@ final class AudioCaptureDrain: Sendable {
         var output: AVAudioPCMBuffer?
         var timer: DispatchSourceTimer?
         var sequence: UInt64 = 0
+        var lastCaptureUptimeNanoseconds: UInt64?
     }
+    private static let maximumConverterFlushPasses = 8
     private let queue = DispatchQueue(label: "com.speechrail.app.capture-drain", qos: .userInitiated)
     private let state: Mutex<State>
     private let accepting = Atomic<Bool>(true), changedFormat = Atomic<Bool>(false), timerActive = Atomic<Bool>(false)
+    private let cancelled = Atomic<Bool>(false), failed = Atomic<Bool>(false)
     private let ring: AudioSampleRing
     private let sampleRate: Double, scratchBytes: Int
+    private let metrics: AppPerformanceMetrics
     private let epoch: UUID, sourceID: UUID
     private let continuation: AudioChunkStream.Continuation
     private let beforeConvert: (@Sendable () -> Void)?
@@ -27,7 +31,8 @@ final class AudioCaptureDrain: Sendable {
 
     init(inputSampleRate: Double, ringCapacity: Int = 131_072, epoch: UUID = UUID(), sourceID: UUID = UUID(),
          automaticDrain: Bool = true, continuation: AudioChunkStream.Continuation,
-         beforeConvert: (@Sendable () -> Void)? = nil, onFailure: (@Sendable (AudioStreamTermination) -> Void)? = nil) throws {
+         beforeConvert: (@Sendable () -> Void)? = nil, onFailure: (@Sendable (AudioStreamTermination) -> Void)? = nil,
+         metrics: AppPerformanceMetrics = .shared) throws {
         guard inputSampleRate.isFinite, inputSampleRate > 0, inputSampleRate <= 384_000,
               let inputFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: inputSampleRate, channels: 1, interleaved: false),
               let outputFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 24_000, channels: 1, interleaved: true),
@@ -44,6 +49,7 @@ final class AudioCaptureDrain: Sendable {
         }
         self.sampleRate = inputSampleRate; self.epoch = epoch; self.sourceID = sourceID
         self.continuation = continuation; self.beforeConvert = beforeConvert; self.onFailure = onFailure
+        self.metrics = metrics
         ring = AudioSampleRing(capacity: ringCapacity)
         scratchBytes = frames * MemoryLayout<Float>.stride + convertedFrames * MemoryLayout<Int16>.stride
         state = Mutex(State(converter: converter, input: input, output: output))
@@ -82,6 +88,7 @@ final class AudioCaptureDrain: Sendable {
 
     func requestStop() {
         accepting.store(false, ordering: .releasing)
+        cancelled.store(true, ordering: .releasing)
         continuation.finish(.cancelled)
         queue.async { [weak self] in
             guard let self else { return }
@@ -91,18 +98,40 @@ final class AudioCaptureDrain: Sendable {
     }
 
     func stop(drainPending: Bool = false) async {
+        let measureStop = metrics.isEnabled
+        let startedAt = measureStop ? DispatchTime.now().uptimeNanoseconds : 0
+        let pendingSamples = measureStop ? ring.availableSampleCount : 0
         accepting.store(false, ordering: .releasing)
+        if !drainPending {
+            cancelled.store(true, ordering: .releasing)
+            continuation.finish(.cancelled)
+        }
         await withCheckedContinuation { done in
             queue.async { [self] in
-                if drainPending {
+                if drainPending, !cancelled.load(ordering: .acquiring), !failed.load(ordering: .acquiring) {
+                    if changedFormat.load(ordering: .acquiring) {
+                        fail(.sourceLost)
+                    } else if ring.droppedSampleCount > 0 {
+                        fail(.droppedSamples)
+                    }
                     // Producer is already detached by the source. This bounded ring is now a finite tail.
-                    while ring.availableSampleCount > 0 {
+                    while ring.availableSampleCount > 0,
+                          !cancelled.load(ordering: .acquiring), !failed.load(ordering: .acquiring) {
                         let previous = ring.availableSampleCount
                         drainOnQueue(whileStopping: true)
-                        if ring.availableSampleCount >= previous { break }
+                        if ring.availableSampleCount >= previous,
+                           !cancelled.load(ordering: .acquiring), !failed.load(ordering: .acquiring) {
+                            fail(.sourceLost)
+                        }
+                    }
+                    if ring.availableSampleCount == 0,
+                       !cancelled.load(ordering: .acquiring), !failed.load(ordering: .acquiring) {
+                        _ = flushConverterOnQueue()
                     }
                 }
-                continuation.finish(drainPending ? .completed : .cancelled)
+                if !cancelled.load(ordering: .acquiring), !failed.load(ordering: .acquiring) {
+                    continuation.finish(.completed)
+                }
                 state.withLock { value in
                     value.timer?.setEventHandler {}; value.timer?.cancel(); value.timer = nil
                     value.converter = nil; value.input = nil; value.output = nil
@@ -111,6 +140,12 @@ final class AudioCaptureDrain: Sendable {
                 ring.discardPending()
                 done.resume()
             }
+        }
+        if measureStop {
+            metrics.record(.init(operation: .captureStop,
+                durationNanoseconds: DispatchTime.now().uptimeNanoseconds &- startedAt,
+                bytes: pendingSamples * MemoryLayout<Float>.size, count: pendingSamples,
+                outcome: failed.load(ordering: .acquiring) ? .failed : (cancelled.load(ordering: .acquiring) ? .cancelled : .success)))
         }
     }
 
@@ -131,6 +166,8 @@ final class AudioCaptureDrain: Sendable {
     }
 
     private func fail(_ reason: AudioStreamTermination) {
+        guard !failed.load(ordering: .acquiring) else { return }
+        failed.store(true, ordering: .releasing)
         accepting.store(false, ordering: .releasing)
         continuation.finish(AudioStreamError(reason: reason, captureEpoch: epoch, sourceID: sourceID,
             droppedSamples: reason == .droppedSamples ? UInt64(max(0, ring.droppedSampleCount)) : nil))
@@ -141,17 +178,26 @@ final class AudioCaptureDrain: Sendable {
     }
 
     private func drainOnQueue(whileStopping: Bool = false) {
+        guard !failed.load(ordering: .acquiring), !cancelled.load(ordering: .acquiring) else { return }
         if changedFormat.load(ordering: .acquiring) { fail(.sourceLost); return }
         guard whileStopping || accepting.load(ordering: .acquiring) else { return }
         guard ring.droppedSampleCount == 0 else { fail(.droppedSamples); return }
         guard ring.availableSampleCount > 0 else { return }
-        let captured = ring.oldestCaptureUptimeNanoseconds(sampleRate: sampleRate)
         var conversionFailed = false
-        let chunk: AudioChunk? = state.withLock { value in
+        let chunk: AudioChunk? = state.withLock { value -> AudioChunk? in
             guard let converter = value.converter, let input = value.input, let output = value.output,
-                  let destination = input.floatChannelData?[0] else { return nil }
-            let count = ring.read(into: destination, maxCount: Int(input.frameCapacity))
+                  let destination = input.floatChannelData?[0] else { conversionFailed = true; return nil }
+            let countToRead = min(ring.availableSampleCount, Int(input.frameCapacity))
+            guard countToRead > 0,
+                  let captured = ring.oldestCaptureUptimeNanoseconds(sampleRate: sampleRate),
+                  let lastCaptured = ring.captureUptimeNanoseconds(atSampleOffset: countToRead - 1, sampleRate: sampleRate) else {
+                conversionFailed = true
+                return nil
+            }
+            let count = ring.read(into: destination, maxCount: countToRead)
             guard count > 0 else { return nil }
+            guard count == countToRead else { conversionFailed = true; return nil }
+            value.lastCaptureUptimeNanoseconds = lastCaptured
             input.frameLength = AVAudioFrameCount(count); output.frameLength = 0
             beforeConvert?()
             var supplied = false, error: NSError?
@@ -159,20 +205,78 @@ final class AudioCaptureDrain: Sendable {
                 if supplied { status.pointee = .noDataNow; return nil }
                 supplied = true; status.pointee = .haveData; return input
             }
-            guard status != .error, error == nil else { conversionFailed = true; return nil }
-            guard output.frameLength > 0, let samples = output.int16ChannelData?[0] else { return nil }
+            guard status != .error, status != .endOfStream, error == nil else { conversionFailed = true; return nil }
+            guard output.frameLength > 0 else { return nil }
+            guard let samples = output.int16ChannelData?[0] else { conversionFailed = true; return nil }
             value.sequence &+= 1
             let pcm = Data(bytes: samples, count: Int(output.frameLength) * 2)
             let level = AudioLevel.peak(UnsafeBufferPointer(start: samples, count: Int(output.frameLength)))
-            let stamp = captured.map { AudioCaptureStamp(captureEpoch: epoch, sourceID: sourceID,
-                sourceSequence: value.sequence, capturedUptimeNanoseconds: $0) }
-            return .init(pcm: pcm, level: level, capturedAt: stamp?.capturedInstant, sequenceNumber: Int(exactly: value.sequence),
+            let stamp = AudioCaptureStamp(captureEpoch: epoch, sourceID: sourceID,
+                sourceSequence: value.sequence, capturedUptimeNanoseconds: captured)
+            return .init(pcm: pcm, level: level, capturedAt: stamp.capturedInstant, sequenceNumber: Int(exactly: value.sequence),
                 droppedSamplesBefore: ring.droppedSampleCount, captureStamp: stamp)
         }
         if conversionFailed { fail(.sourceLost); return }
-        guard (whileStopping || accepting.load(ordering: .acquiring)), let chunk else { return }
+        guard !cancelled.load(ordering: .acquiring), !failed.load(ordering: .acquiring),
+              (whileStopping || accepting.load(ordering: .acquiring)), let chunk else { return }
         let result = continuation.offer(chunk)
         if result != .accepted { fail(result == .overflow ? .overflow : .sourceLost) }
+    }
+
+    /// Sends an explicit EOS to the converter only after the source has detached.
+    /// A fixed pass budget makes a converter that stops making progress fail closed.
+    private func flushConverterOnQueue() -> Bool {
+        for _ in 0..<Self.maximumConverterFlushPasses {
+            guard !cancelled.load(ordering: .acquiring), !failed.load(ordering: .acquiring) else { return false }
+            var conversionFailed = false
+            var reachedEnd = false
+            let chunk: AudioChunk? = state.withLock { value in
+                guard let converter = value.converter, let output = value.output else {
+                    conversionFailed = true
+                    return nil
+                }
+                output.frameLength = 0
+                var error: NSError?
+                let status = converter.convert(to: output, error: &error) { _, inputStatus in
+                    inputStatus.pointee = .endOfStream
+                    return nil
+                }
+                guard status != .error, error == nil else { conversionFailed = true; return nil }
+                if status == .endOfStream {
+                    guard output.frameLength == 0 else { conversionFailed = true; return nil }
+                    reachedEnd = true
+                    return nil
+                }
+                guard status == .haveData || status == .inputRanDry,
+                      output.frameLength > 0,
+                      let samples = output.int16ChannelData?[0],
+                      let captured = value.lastCaptureUptimeNanoseconds else {
+                    conversionFailed = true
+                    return nil
+                }
+                value.sequence &+= 1
+                let pcm = Data(bytes: samples, count: Int(output.frameLength) * MemoryLayout<Int16>.size)
+                let level = AudioLevel.peak(UnsafeBufferPointer(start: samples, count: Int(output.frameLength)))
+                let stamp = AudioCaptureStamp(captureEpoch: epoch, sourceID: sourceID,
+                    sourceSequence: value.sequence, capturedUptimeNanoseconds: captured)
+                return .init(pcm: pcm, level: level, capturedAt: stamp.capturedInstant,
+                    sequenceNumber: Int(exactly: value.sequence), droppedSamplesBefore: ring.droppedSampleCount,
+                    captureStamp: stamp)
+            }
+            if conversionFailed { fail(.sourceLost); return false }
+            if let chunk {
+                guard !cancelled.load(ordering: .acquiring), !failed.load(ordering: .acquiring) else { return false }
+                let result = continuation.offer(chunk)
+                if result != .accepted {
+                    fail(result == .overflow ? .overflow : .sourceLost)
+                    return false
+                }
+            }
+            if reachedEnd { return true }
+            guard chunk != nil else { fail(.sourceLost); return false }
+        }
+        fail(.sourceLost)
+        return false
     }
 
     @inline(__always)

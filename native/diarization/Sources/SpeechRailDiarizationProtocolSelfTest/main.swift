@@ -9,6 +9,99 @@ func require(_ condition: @autoclosure () -> Bool, _ message: String) {
 }
 
 do {
+    let declared = [
+        DiarizationClusteringPolicy(threshold: 0.60, warmStartFa: 0.07, warmStartFb: 0.8),
+        DiarizationClusteringPolicy(threshold: 0.45, warmStartFa: 0.07, warmStartFb: 0.8),
+        DiarizationClusteringPolicy(threshold: 0.75, warmStartFa: 0.07, warmStartFb: 0.8),
+        DiarizationClusteringPolicy(threshold: 0.60, warmStartFa: 0.05, warmStartFb: 0.8),
+        DiarizationClusteringPolicy(threshold: 0.60, warmStartFa: 0.09, warmStartFb: 0.8),
+        DiarizationClusteringPolicy(threshold: 0.60, warmStartFa: 0.07, warmStartFb: 0.5),
+        DiarizationClusteringPolicy(threshold: 0.60, warmStartFa: 0.07, warmStartFb: 1.1),
+    ]
+    for policy in declared { try policy.validate() }
+    for value in [0.0, -0.1, 2.01, Double.nan, Double.infinity] {
+        do {
+            try DiarizationClusteringPolicy(threshold: value, warmStartFa: 0.07, warmStartFb: 0.8)
+                .validate()
+            require(false, "invalid clustering threshold rejection")
+        } catch {}
+    }
+    for value in [0.0, -0.1, Double.nan, Double.infinity] {
+        do {
+            try DiarizationClusteringPolicy(threshold: 0.6, warmStartFa: value, warmStartFb: 0.8)
+                .validate()
+            require(false, "invalid Fa rejection")
+        } catch {}
+        do {
+            try DiarizationClusteringPolicy(threshold: 0.6, warmStartFa: 0.07, warmStartFb: value)
+                .validate()
+            require(false, "invalid Fb rejection")
+        } catch {}
+    }
+} catch { require(false, "clustering policy validation") }
+
+do {
+    let baseline = DiarizationPreprocessingPolicy(
+        segmentationStepRatio: 0.2, embeddingMinSegmentDurationSeconds: 1.0
+    )
+    let highRecall = DiarizationPreprocessingPolicy(
+        segmentationStepRatio: 0.1, embeddingMinSegmentDurationSeconds: 0.0
+    )
+    try baseline.validate()
+    try highRecall.validate()
+    for value in [0.0, -0.1, 1.01, Double.nan, Double.infinity] {
+        do {
+            try DiarizationPreprocessingPolicy(
+                segmentationStepRatio: value, embeddingMinSegmentDurationSeconds: 1.0
+            ).validate()
+            require(false, "invalid segmentation step ratio rejection")
+        } catch {}
+    }
+    for value in [-0.1, 5.01, Double.nan, Double.infinity] {
+        do {
+            try DiarizationPreprocessingPolicy(
+                segmentationStepRatio: 0.2, embeddingMinSegmentDurationSeconds: value
+            ).validate()
+            require(false, "invalid embedding minimum duration rejection")
+        } catch {}
+    }
+} catch { require(false, "preprocessing policy validation") }
+
+do {
+    let policy = SpeakerMatchingPolicy(version: "test_v1", prototypePolicy: "anchor_farthest_v1",
+        matchDistanceMax: 0.25, matchMarginMin: 0.06, updateDistanceMax: 0.12,
+        minimumNewVoiceMs: 1500, minimumUpdateVoiceMs: 2000, candidateRetentionMs: 60000,
+        modelSnapshot: "7eab74f3463c736418d0eb10296261ae581146c9",
+        calibrationDigest: String(repeating: "a", count: 64))
+    let candidate = DiarizationCalibrationCandidate(
+        matchingPolicy: policy,
+        matchingEmbeddingSpace: .pldaRho128Cosine,
+        clusteringPolicy: DiarizationClusteringPolicy(threshold: 0.60, warmStartFa: 0.07, warmStartFb: 0.8),
+        preprocessingPolicy: DiarizationPreprocessingPolicy(
+            segmentationStepRatio: 0.1, embeddingMinSegmentDurationSeconds: 0.0
+        )
+    )
+    try candidate.validate()
+    let encoder = JSONEncoder()
+    encoder.keyEncodingStrategy = .convertToSnakeCase
+    let encoded = try encoder.encode([candidate])
+    let decoded = try DiarizationCalibrationCandidate.decodeArray(encoded)
+    require(decoded.count == 1 && decoded[0].clusteringPolicy.threshold == 0.60
+        && decoded[0].matchingEmbeddingSpace == .pldaRho128Cosine
+        && decoded[0].preprocessingPolicy.segmentationStepRatio == 0.1
+        && decoded[0].preprocessingPolicy.embeddingMinSegmentDurationSeconds == 0.0,
+        "calibration candidate decoding")
+    do {
+        _ = try DiarizationCalibrationCandidate.decodeArray(try encoder.encode(Array(repeating: candidate, count: 25)))
+        require(false, "calibration candidate count limit")
+    } catch {}
+    do {
+        _ = try DiarizationCalibrationCandidate.decodeArray(Data(repeating: 0x20, count: 65537))
+        require(false, "calibration candidate encoded size limit")
+    } catch {}
+} catch { require(false, "calibration candidate validation") }
+
+do {
     let payload = Data([0x01, 0x00, 0x02, 0x00])
     let encoded = try DiarizationPacketCodec.encode(
         header: ["protocol_version": DiarizationPacketCodec.protocolVersion, "operation": "append"],
@@ -32,6 +125,13 @@ do {
     }
     let integer = try DiarizationPacketCodec.nonnegativeInteger(NSNumber(value: 2))
     require(integer == 2, "integer accepts JSON number")
+    do {
+        _ = try DiarizationPacketCodec.encode(
+            header: ["operation": "infer"],
+            payload: Data(repeating: 0, count: DiarizationPacketCodec.maxPayloadBytes + 1)
+        )
+        require(false, "IPC payload limit")
+    } catch PacketCodecError.packetTooLarge {}
 } catch {
     FileHandle.standardError.write(Data("self-test failed: \(error)\n".utf8))
     exit(1)

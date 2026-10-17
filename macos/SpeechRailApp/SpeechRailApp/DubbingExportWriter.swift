@@ -37,22 +37,41 @@ public actor DubbingExportWriter {
     public private(set) var activeFileHandles = 0
     private let onRead: (@Sendable (Int) -> Void)?
     private let beforePublish: (@Sendable (URL) throws -> Void)?
-    public init(onRead: (@Sendable (Int) -> Void)? = nil, beforePublish: (@Sendable (URL) throws -> Void)? = nil) {
-        self.onRead = onRead; self.beforePublish = beforePublish
+    private let metrics: AppPerformanceMetrics
+    public init(onRead: (@Sendable (Int) -> Void)? = nil, beforePublish: (@Sendable (URL) throws -> Void)? = nil,
+                metrics: AppPerformanceMetrics = .shared) {
+        self.onRead = onRead; self.beforePublish = beforePublish; self.metrics = metrics
     }
     public func copyPrepared(_ export: PreparedDubbingExport, audioDestination: URL,
                              scriptDestination: URL) async throws -> ExportCopyReceipt {
+        let measureExport = metrics.isEnabled
+        let startedAt = measureExport ? DispatchTime.now().uptimeNanoseconds : 0
+        var bytesWritten = 0, filesAttempted = 0
+        var outcome = AppPerformanceOutcome.success
+        defer {
+            if measureExport {
+                metrics.record(.init(operation: .dubbingExport,
+                    durationNanoseconds: DispatchTime.now().uptimeNanoseconds &- startedAt,
+                    bytes: bytesWritten, count: filesAttempted, outcome: outcome))
+            }
+        }
         var receipt = ExportCopyReceipt()
         do {
             let targets = [audioDestination.standardizedFileURL, scriptDestination.standardizedFileURL]
             guard targets[0] != targets[1], !targets.contains(export.audioURL.standardizedFileURL),
                   !targets.contains(export.scriptURL.standardizedFileURL) else { throw DubbingExportError.invalidDestination }
-            try copy(export.audioURL, to: audioDestination) { receipt.audioCommitted = true }
-            try copy(export.scriptURL, to: scriptDestination) { receipt.scriptCommitted = true }
+            filesAttempted += 1
+            try copy(export.audioURL, to: audioDestination, bytesWritten: &bytesWritten, trackBytes: measureExport) { receipt.audioCommitted = true }
+            filesAttempted += 1
+            try copy(export.scriptURL, to: scriptDestination, bytesWritten: &bytesWritten, trackBytes: measureExport) { receipt.scriptCommitted = true }
             return receipt
-        } catch { throw ExportCopyFailure(receipt: receipt, cancelled: error is CancellationError) }
+        } catch {
+            outcome = error is CancellationError ? .cancelled : .failed
+            throw ExportCopyFailure(receipt: receipt, cancelled: error is CancellationError)
+        }
     }
-    private func copy(_ source: URL, to destination: URL, committed: () -> Void) throws {
+    private func copy(_ source: URL, to destination: URL, bytesWritten: inout Int, trackBytes: Bool,
+                      committed: () -> Void) throws {
         try Task.checkCancellation()
         let directory = destination.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -69,6 +88,10 @@ public actor DubbingExportWriter {
             onRead?(bytes.count)
             if bytes.isEmpty { break }
             try output.write(contentsOf: bytes)
+            if trackBytes {
+                let (total, overflow) = bytesWritten.addingReportingOverflow(bytes.count)
+                bytesWritten = overflow ? .max : total
+            }
         }
         try output.synchronize()
         try beforePublish?(destination)
