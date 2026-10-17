@@ -166,7 +166,7 @@ worker 自身取消回收会记录失败，其他 worker 的空闲监控继续�
 worker 上报的两类事实在渲染完成后才会落地：`model.engine_revision` 是首个 PCM 产生后
 才可信的运行时身份，`parameters.seed_policy` 与
 `parameters.observed_sampling_parameters` 是执行侧**实际使用的采样器**
-（`seed_policy` 取 `caller_fixed` / `clone_reference_derived` /
+（`seed_policy` 取 `caller_fixed` / `request_derived` / `clone_reference_derived` /
 `voice_profile_fixed` / `unseeded_sampler`，并带 `seed`、`temperature`、`top_p`、
 `repetition_penalty`）。请求里带了 seed 不等于采样流被固定：只有真正下发了 seed 才会
 记为固定策略，运行时装不上确定性采样时如实记为 `unseeded_sampler`。
@@ -280,10 +280,11 @@ worker 的 stderr 或内部异常文本；未知的 TTS 运行时错误仍返回
 
 `seed` 用于 VoiceDesign preview 与 CustomVoice 生产合成的确定性采样：生产
 合成经 `SpeechRail-Seed: 0..4294967295` header 传入（S3-2，#137），同 voice ×
-同文本 × 同 seed 可复现，缺省保持原行为；克隆音色仍不接受调用方 `seed`
-（`400 clone_seed_unsupported`）。OpenAI body 保持 `extra=forbid`，body 内私
-自附加 `seed` 会被拒绝。内部 adapter 对不支持的组合返回稳定错误，不以“已接
-受”暗示参数生效。
+同文本 × 同 seed 可复现。未传 header 时，CustomVoice 从 voice 与归一化文本派生稳定
+seed；同一模型与同一输入重复合成使用同一采样流。调用方显式 seed 可选择另一条可
+复现采样流。克隆音色仍不接受调用方 `seed`（`400 clone_seed_unsupported`）。
+OpenAI body 保持 `extra=forbid`，body 内私自附加 `seed` 会被拒绝。内部 adapter 对
+不支持的组合返回稳定错误，不以“已接受”暗示参数生效。
 
 ### 4.1 SpeechRail 可选准入扩展
 

@@ -29,11 +29,16 @@ struct TranscriptPresentationTests {
         #expect(index[late] == nil)
     }
     @Test func testAppendDoesNotSortWholeHistoryAndAttributionIsIndexed() {
-        let model = TranscriptPresentation<PresentationFixtureLine>()
+        let metrics = AppPerformanceMetrics(collecting: true, signposting: false)
+        let model = TranscriptPresentation<PresentationFixtureLine>(metrics: metrics)
         for ordinal in 1...20_000 { model.apply(.init(id: "line-\(ordinal)", ordinal: ordinal, text: "synthetic")) }
         #expect(model.tailCount == 500 && model.rows.count == 500)
         #expect(model.ordinalComparisons == 0)
         #expect(model.rows.first?.ordinal == 19_501)
+        #expect(metrics.snapshot(for: .transcriptPublish).samples == 0)
+        model.beginHistory(anchorID: model.rows.first?.id)
+        let publication = metrics.snapshot(for: .transcriptPublish)
+        #expect(publication.samples == 1 && publication.count == 500)
         let revision = model.revision
         model.update(id: "line-19999") { $0.text = "updated" }
         #expect(model.line(id: "line-19999")?.text == "updated")

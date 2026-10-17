@@ -64,6 +64,7 @@ actor StreamMixer {
     private let automaticTicks: Bool
     private let now: @Sendable () -> UInt64
     private let sleepUntil: @Sendable (UInt64) async throws -> Void
+    private let metrics: AppPerformanceMetrics
     private let epoch = UUID(), outputID = UUID()
     private var output: AudioChunkStream?
     private var continuation: AudioChunkStream.Continuation?
@@ -78,8 +79,8 @@ actor StreamMixer {
          sleepUntil: @Sendable @escaping (UInt64) async throws -> Void = { deadline in
              let current = DispatchTime.now().uptimeNanoseconds
              if deadline > current { try await Task.sleep(for: .nanoseconds(Int64(min(deadline - current, UInt64(Int64.max))))) }
-         }) {
-        self.automaticTicks = automaticTicks; self.now = now; self.sleepUntil = sleepUntil
+         }, metrics: AppPerformanceMetrics = .shared) {
+        self.automaticTicks = automaticTicks; self.now = now; self.sleepUntil = sleepUntil; self.metrics = metrics
     }
 
     func start() -> AudioChunkStream {
@@ -187,6 +188,17 @@ actor StreamMixer {
     /// One invocation processes one present tick, including after a delayed wake. No catch-up loop.
     func tick(at uptime: UInt64, whileStopping: Bool = false, frames: Int = 960) {
         guard (!stopped || whileStopping), frames > 0, let continuation, output?.snapshot.termination == nil else { return }
+        let measureTick = metrics.isEnabled
+        let startedAt = measureTick ? DispatchTime.now().uptimeNanoseconds : 0
+        var measuredBytes = 0, measuredSources = 0
+        var outcome = AppPerformanceOutcome.success
+        defer {
+            if measureTick {
+                metrics.record(.init(operation: .mixerTick,
+                    durationNanoseconds: DispatchTime.now().uptimeNanoseconds &- startedAt,
+                    bytes: measuredBytes, count: measuredSources, outcome: outcome))
+            }
+        }
         ticks &+= 1; nextTick = uptime.addingReportingOverflow(40_000_000).partialValue
         var mixed = [Int32](repeating: 0, count: frames)
         var served = 0, didGap = false
@@ -205,8 +217,14 @@ actor StreamMixer {
                 served += 1
                 if slots[key]?.completed == true, slots[key]?.ring.bytes == 0 { slots[key]?.active = false }
             }
-        } catch { fail((error as? AudioStreamError)?.reason ?? .sourceLost); return }
+        } catch {
+            outcome = .failed
+            fail((error as? AudioStreamError)?.reason ?? .sourceLost)
+            return
+        }
         guard served > 0 else { return }
+        measuredBytes = frames * MemoryLayout<Int16>.size
+        measuredSources = served
         if didGap { gaps += 1 }
         var pcm = Data(count: frames * 2)
         var peak: Int32 = 0
@@ -224,6 +242,9 @@ actor StreamMixer {
         let result = continuation.offer(.init(pcm: pcm, level: level, capturedAt: capturedAt,
             sequenceNumber: Int(exactly: sequence), droppedSamplesBefore: watermarks.isEmpty ? nil : 0,
             captureStamp: stamp, sourceWatermarks: watermarks))
-        if result != .accepted { fail(output?.snapshot.termination ?? .overflow) }
+        if result != .accepted {
+            outcome = .failed
+            fail(output?.snapshot.termination ?? .overflow)
+        }
     }
 }

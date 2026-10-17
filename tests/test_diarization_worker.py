@@ -138,6 +138,109 @@ def test_worker_request_rejects_an_ipc_protocol_mismatch(monkeypatch) -> None:
     asyncio.run(scenario())
 
 
+def test_meeting_calibration_can_explicitly_enable_zero_vote_reembedding(
+    monkeypatch, tmp_path
+) -> None:
+    executable = tmp_path / "worker"
+    executable.write_text("worker")
+    models = tmp_path / "models"
+    models.mkdir()
+    command: list[str] = []
+
+    class Writer:
+        def write(self, packet: bytes) -> None:
+            del packet
+
+        async def drain(self) -> None:
+            return None
+
+    class Process:
+        returncode = None
+
+        def __init__(self) -> None:
+            self.stdin = Writer()
+            self.stdout = object()
+            self.stderr = asyncio.StreamReader()
+            self.stderr.feed_eof()
+
+    async def spawn(*args, **kwargs):
+        del kwargs
+        command.extend(str(arg) for arg in args)
+        return Process()
+
+    async def preflight(reader):
+        del reader
+        return (
+            {
+                "protocol_version": 2,
+                "backend": "meeting_dynamic",
+                "ok": True,
+                "sdk_revision": "5c19d5e12320e22bbfb7a1877b089d2665a69add",
+                "model_revision": "7eab74f3463c736418d0eb10296261ae581146c9",
+                "zero_vote_reembed": True,
+            },
+            b"",
+        )
+
+    monkeypatch.setattr(diarization_worker.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(diarization_worker, "_read_packet", preflight)
+    worker = CoreMLWorkerProcess(
+        executable=executable,
+        model_path=models,
+        protocol_version=2,
+        backend="meeting_dynamic",
+        policy_path=tmp_path / "policy.json",
+        calibration_candidates_path=tmp_path / "candidates.json",
+        zero_vote_reembed=True,
+    )
+
+    async def scenario() -> None:
+        await worker.start()
+        assert "--zero-vote-reembed" in command
+        assert "--calibration-candidates" in command
+        assert str(tmp_path / "candidates.json") in command
+        assert worker._stderr_task is not None
+        await worker._stderr_task
+
+    asyncio.run(scenario())
+
+
+def test_zero_vote_reembedding_is_rejected_outside_meeting_calibration(tmp_path) -> None:
+    executable = tmp_path / "worker"
+    executable.write_text("worker")
+    models = tmp_path / "models"
+    models.mkdir()
+    worker = CoreMLWorkerProcess(
+        executable=executable,
+        model_path=models,
+        zero_vote_reembed=True,
+    )
+
+    async def scenario() -> None:
+        with pytest.raises(RuntimeError, match="meeting-diarization calibration"):
+            await worker.start()
+
+    asyncio.run(scenario())
+
+
+def test_calibration_candidates_are_rejected_outside_meeting_diarization(tmp_path) -> None:
+    executable = tmp_path / "worker"
+    executable.write_text("worker")
+    models = tmp_path / "models"
+    models.mkdir()
+    worker = CoreMLWorkerProcess(
+        executable=executable,
+        model_path=models,
+        calibration_candidates_path=tmp_path / "candidates.json",
+    )
+
+    async def scenario() -> None:
+        with pytest.raises(RuntimeError, match="restricted to meeting diarization"):
+            await worker.start()
+
+    asyncio.run(scenario())
+
+
 def test_coreml_worker_stderr_tail_is_bounded_and_never_exposed_verbatim() -> None:
     async def scenario() -> None:
         reader = asyncio.StreamReader()

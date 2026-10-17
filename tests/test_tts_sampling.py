@@ -24,7 +24,12 @@ def test_unseeded_sampler_is_named_as_such() -> None:
 
 @pytest.mark.parametrize(
     "seed_policy",
-    ["caller_fixed", "clone_reference_derived", "voice_profile_fixed"],
+    [
+        "caller_fixed",
+        "clone_reference_derived",
+        "voice_profile_fixed",
+        "request_derived",
+    ],
 )
 def test_every_fixed_seed_policy_is_reproducible(seed_policy: str) -> None:
     observation = TtsSamplingObservation(

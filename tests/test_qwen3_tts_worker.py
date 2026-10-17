@@ -560,6 +560,52 @@ def test_caller_seed_is_reported_as_fixed_when_the_runtime_seeds(
     assert observation["repetition_penalty"] == 1.05
 
 
+def test_custom_voice_without_caller_seed_uses_a_stable_request_derived_seed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seeded: list[int] = []
+    _fake_mlx_runtime(monkeypatch, seeded)
+    engine = _sampling_engine("custom_voice")
+    text = "同一请求的合成文本。"
+    expected_seed = worker_module._custom_voice_default_seed(
+        voice="default", text=text
+    )
+
+    list(engine._generate(text, voice="default", speed=1.0, language="auto"))
+    observation = engine.consume_sampling_observation()
+
+    assert seeded == [expected_seed]
+    assert observation is not None
+    assert observation["seed_policy"] == "request_derived"
+    assert observation["seed"] == expected_seed
+
+
+def test_custom_voice_default_seed_is_stable_and_text_specific() -> None:
+    seed = worker_module._custom_voice_default_seed(voice="serena", text="A line.")
+
+    assert seed == worker_module._custom_voice_default_seed(
+        voice="serena", text="A line."
+    )
+    assert seed != worker_module._custom_voice_default_seed(
+        voice="serena", text="Another line."
+    )
+    assert 0 <= seed <= 4_294_967_295
+
+
+def test_request_derived_seed_is_not_reported_when_the_runtime_cannot_apply_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_mlx_runtime(monkeypatch)
+    engine = _sampling_engine("custom_voice")
+
+    list(engine._generate("你好。", voice="default", speed=1.0, language="auto"))
+    observation = engine.consume_sampling_observation()
+
+    assert observation is not None
+    assert observation["seed_policy"] == "unseeded_sampler"
+    assert observation["seed"] is None
+
+
 def test_clone_path_reports_its_derived_seed_and_fixed_sampling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -2,40 +2,6 @@ import Foundation
 import os
 import Synchronization
 
-public enum AppPerformanceOperation: Int, CaseIterable, Sendable {
-    case catalogRefresh, workspaceRead, workspaceProject, storeCommit, dubbingExport
-    case llmEvent, captureEnqueue, mixerTick, captureStop
-    case teleprompterPrepare, teleprompterMatch, transcriptPublish, waveformScan
-}
-
-public enum AppPerformanceOutcome: Int, Sendable {
-    case success, cancelled, failed
-}
-
-/// Deliberately excludes arbitrary labels, text, paths, and audio payloads.
-public struct AppPerformanceSample: Sendable {
-    public let operation: AppPerformanceOperation
-    public let durationNanoseconds: UInt64
-    public let bytes: Int
-    public let count: Int
-    public let outcome: AppPerformanceOutcome
-
-    public init(
-        operation: AppPerformanceOperation, durationNanoseconds: UInt64,
-        bytes: Int = 0, count: Int = 1, outcome: AppPerformanceOutcome = .success
-    ) {
-        self.operation = operation
-        self.durationNanoseconds = durationNanoseconds
-        self.bytes = bytes
-        self.count = count
-        self.outcome = outcome
-    }
-}
-
-public protocol AppPerformanceSink: Sendable {
-    func record(_ sample: AppPerformanceSample)
-}
-
 public struct AppPerformanceSummary: Sendable {
     public private(set) var samples: UInt64 = 0
     public private(set) var bytes: UInt64 = 0
@@ -83,6 +49,8 @@ public final class AppPerformanceMetrics: AppPerformanceSink {
         self.collecting = collecting
         self.signposting = signposting
     }
+
+    public var isEnabled: Bool { collecting || (signposting && signposter.isEnabled) }
 
     public func record(_ sample: AppPerformanceSample) {
         if collecting {

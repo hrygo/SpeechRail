@@ -9,6 +9,8 @@
 ## 设计规格
 
 - [SpeechRail App 性能与资源治理设计](specs/2026-10-16-app-performance-design.md)（`active`；代码与确定性集成完成，实际性能与交互待验收）
+- [会议分人前处理质量实验](specs/2026-10-17-meeting-diarization-preprocessing-experiment.md)（`active`；基于 AISHELL-4 开发集验证分段密度和短段嵌入）
+- [会议分人模型家族对照](specs/2026-10-17-meeting-diarization-model-family-experiment.md)（`active`；在隔离 R003 开发集评估 3D-Speaker CAM++ 管线）
 - [macOS 26 App 最佳实践整改](specs/2026-09-13-macos26-app-best-practices-remediation-design.md)（`approved`）
 - [OpenAI Realtime 交接设计](../archive/superpowers/specs/2026-09-02-openai-realtime-handover-design.md)（`superseded`）
 - [资源优化设计](specs/2026-09-02-resource-optimization-design.md)
@@ -29,6 +31,9 @@
 - [AI 提词器模块体验优化：调研、方案与落地验收记录](plans/2026-10-17-teleprompter-ux-ui-redesign.md)（`completed`；修复就绪态回改死锁、口述字符稿连续文档流减负、按 ID 复制回退、场景预设坞与舞台键盘焦点守卫）
 - [有声书制作模块 UX/UI 现代化重构方案](plans/2026-10-16-audiobook-ux-ui-redesign.md)（`completed`；流线型工作台减负）
 - [SpeechRail App 性能治理实施计划](plans/2026-10-16-app-performance-implementation-plan.md)（A 层完成；覆盖 App、采集与播放，B/C 层及服务侧条件排查见待办）
+- [会议分人前处理质量实验计划](plans/2026-10-17-meeting-diarization-preprocessing-experiment-plan.md)（开发集 screen 与候选细化；不触碰留出集或生产默认）
+- [会议分人模型家族对照计划](plans/2026-10-17-meeting-diarization-model-family-experiment-plan.md)（隔离 R003 模型评估；不接入生产默认）
+- [会议分人第一阶段（1–4 人 Sortformer 与联合 SA-ASR）计划](plans/2026-10-17-meeting-diarization-sortformer-1to4-plan.md)（`active`；1–4 人语料锁、分层与 CER/DER/cpWER/tcpWER 联合评测工具已就绪，待外部语料目录授权后实测）
 - [Wheel 本地安装器计划](plans/2026-09-01-wheel-local-installer.md)
 - [OpenAI Realtime 交接计划](plans/2026-09-02-openai-realtime-handover.md)（`superseded`）
 - [资源优化计划](plans/2026-09-02-resource-optimization.md)

@@ -131,8 +131,9 @@ The design lane carries its own admission rules on top of this:
 
 CustomVoice synthesis is reproducible when the caller passes
 `SpeechRail-Seed: 0..4294967295` on `POST /v1/audio/speech` (same voice x
-same text x same seed); omitting it keeps the historical nondeterministic
-behavior. Base/clone synthesis is **not** deterministic across renders and
+same text x same seed). When omitted, SpeechRail derives a stable seed from
+the voice and normalized text, so repeated renders of the same input use the
+same sampling stream. Base/clone synthesis is **not** deterministic across renders and
 rejects a caller seed (`400 clone_seed_unsupported`). Repeated renders of the
 same voice and text may drift in rate, pitch, and spectrum (observed rate RSD
 ~7.5%). Do not judge on single-render acoustic metrics (voice spacing, rate
