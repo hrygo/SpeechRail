@@ -85,7 +85,7 @@ public struct AudiobookListeningView: View {
                                     if hasCurrent {
                                         StatusPill(tone: .healthy, label: "当前版本")
                                     } else if hasPrevious {
-                                        StatusPill(tone: .attention, label: "之前的版本")
+                                        StatusPill(tone: .attention, label: "旧版音频")
                                     } else {
                                         StatusPill(tone: .neutral, label: "未制作")
                                     }
@@ -117,7 +117,7 @@ public struct AudiobookListeningView: View {
                         trailingDetail: activeFragmentProgressLabel
                     )
                     if listening?.activePlayback?.isPreviousRevision == true {
-                        StatusPill(tone: .attention, label: "正在收听：之前的版本")
+                        StatusPill(tone: .attention, label: "正在收听：旧版音频")
                             .padding(.trailing, SpeechRailDesignTokens.Spacing.sm)
                     }
                 }
@@ -145,7 +145,7 @@ public struct AudiobookListeningView: View {
                                             .frame(width: 48, height: 14)
                                         }
                                         Spacer()
-                                        Button("返修此段") {
+                                        Button("重录本段") {
                                             Task {
                                                 await listening?.pause()
                                                 workflow.selectedFragmentID = fragment.id
@@ -154,7 +154,7 @@ public struct AudiobookListeningView: View {
                                             }
                                         }
                                         .speechRailButton(.quiet)
-                                        .help("暂停听书并前往制作工作台重录或替换当前片段")
+                                        .help("返回制作工作台重新生成此段音频")
                                     }
 
                                     Text(text)
@@ -196,6 +196,7 @@ public struct AudiobookListeningView: View {
                 }
                 .speechRailButton(.secondary)
                 .keyboardShortcut(.leftArrow, modifiers: [])
+                .accessibilityLabel("后退 15 秒")
                 .accessibilityIdentifier("audiobook-listening-skip-back-15")
 
                 Button {
@@ -216,6 +217,7 @@ public struct AudiobookListeningView: View {
                 }
                 .speechRailButton(.primary)
                 .keyboardShortcut(.space, modifiers: [])
+                .accessibilityLabel(listening?.isPlaying == true ? "暂停播放" : "开始播放")
                 .accessibilityIdentifier("audiobook-listening-play-pause")
 
                 Button {
@@ -225,13 +227,14 @@ public struct AudiobookListeningView: View {
                 }
                 .speechRailButton(.secondary)
                 .keyboardShortcut(.rightArrow, modifiers: [])
+                .accessibilityLabel("前进 15 秒")
                 .accessibilityIdentifier("audiobook-listening-skip-forward-15")
 
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
                     Text(timecodeSummary)
                         .font(SpeechRailDesignTokens.Typography.technical)
                         .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                    Text("按 48 kHz 实际采样帧计时 · 自动每 5 秒与暂停/离开时保存书签")
+                    Text("自动保存收听进度，暂停或离开后可随时续听")
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 }

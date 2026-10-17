@@ -37,9 +37,9 @@ public struct AudiobookWorkshopView: View {
                     StatusBanner(
                         kind: .standard,
                         tone: .critical,
-                        title: "需要处理",
+                        title: "操作未完成",
                         message: errorMsg,
-                        actionTitle: "关闭提示"
+                        actionTitle: "知道了"
                     ) {
                         workflow.errorMessage = nil
                     }
@@ -128,7 +128,7 @@ public struct AudiobookWorkshopView: View {
                         }
                     )
                 ) {
-                    Text("三栏工作台").tag(AudiobookWorkflowModel.SurfaceMode.workspace)
+                    Text("制作工作台").tag(AudiobookWorkflowModel.SurfaceMode.workspace)
                     Text("听书模式").tag(AudiobookWorkflowModel.SurfaceMode.listening)
                 }
                 .pickerStyle(.segmented)
@@ -138,7 +138,7 @@ public struct AudiobookWorkshopView: View {
                 .accessibilityLabel("有声书视图模式")
 
                 PageActionButton(
-                    title: "导出…",
+                    title: "导出有声书…",
                     systemImage: "square.and.arrow.up",
                     helpText: "导出整本 M4B 或分章节 MP3"
                 ) {
@@ -570,7 +570,7 @@ struct AudiobookTrashSheet: View {
 
             HStack {
                 Spacer()
-                Button("完成") {
+                Button("关闭") {
                     workflow.isShowingTrashSheet = false
                 }
                 .speechRailButton(.primary)
@@ -650,7 +650,7 @@ struct AudiobookCastMergeSplitSheet: View {
                     TextField("新角色名称（如：老周·青年时期）", text: $splitNewRoleName)
                         .speechRailSingleLineInput()
                     HStack {
-                        Text("当前已选中 \(workflow.selectedAtomIDs.count) 个正文切分块")
+                        Text("当前已选中 \(workflow.selectedAtomIDs.count) 段正文（在主工作区勾选段落后可拆出为独立角色）")
                             .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         Spacer()
