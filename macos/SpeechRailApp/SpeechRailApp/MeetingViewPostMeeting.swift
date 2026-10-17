@@ -20,7 +20,7 @@ extension MeetingView {
                         .labelsHidden()
                         .accessibilityLabel("会后视图切换")
 
-                        if postTab == .minutes, let body = displayedMinutesBody, !body.isEmpty {
+                        if postTab == .minutes, let body = (reviewRecord != nil ? reviewMinutes?.body : displayedMinutesBody), !body.isEmpty {
                             Button {
                                 copyMinutesToPasteboard(body)
                             } label: {
@@ -33,6 +33,19 @@ extension MeetingView {
                             .controlSize(.small)
                             .speechRailPointerCursor()
                             .help("复制纪要全文至剪贴板")
+                        } else if postTab == .transcript, !filteredReviewLines.isEmpty {
+                            Button {
+                                copyMinutesToPasteboard(formattedTranscriptForCopy)
+                            } label: {
+                                Label(
+                                    copiedNotice ?? "复制全文",
+                                    systemImage: copiedNotice != nil ? "checkmark" : "doc.on.doc"
+                                )
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .speechRailPointerCursor()
+                            .help("复制当前显示的文字记录至剪贴板")
                         }
                     }
                 }
@@ -58,10 +71,16 @@ extension MeetingView {
     }
 
     private var postDetail: String? {
-        if reviewRecord != nil { return "在看以前的一场；点「回到这一场」回来" }
-        guard let id = meeting.sessionID else { return nil }
+        if reviewRecord != nil {
+            return "正在查看历史会议 · 共 \(reviewLines.count) 段发言"
+        }
+        guard meeting.sessionID != nil else { return nil }
         let count = reviewLines.count
-        return "\(id.prefix(8)) · \(count) 段"
+        let speakerCount = Set(reviewLines.compactMap(\.speakerLabel)).count
+        if speakerCount > 0 {
+            return "共 \(count) 段发言 · \(speakerCount) 位说话人"
+        }
+        return "共 \(count) 段发言"
     }
 
     private var minutesBody: some View {
@@ -207,6 +226,7 @@ extension MeetingView {
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
             TextField("按关键词或说话人筛选文字记录…", text: $transcriptSearchText)
                 .textFieldStyle(.plain)
+                .accessibilityLabel("按关键词或说话人筛选文字记录")
             if !transcriptSearchText.isEmpty {
                 Button {
                     transcriptSearchText = ""
@@ -308,6 +328,12 @@ extension MeetingView {
                     .padding(.vertical, SpeechRailDesignTokens.Spacing.md)
             }
             ForEach(filteredReviewLines) { line in
+                let speakerText = line.speakerLabel.map {
+                    SpeakerLabeling.chipText(
+                        label: $0,
+                        displayName: reviewSpeakerNames[$0], ordinal: ordinals[$0]
+                    )
+                }
                 HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
                     Text(Self.timecode(line.tStart ?? 0))
                         .font(SpeechRailDesignTokens.Typography.technicalValue)
@@ -316,19 +342,14 @@ extension MeetingView {
                             width: SpeechRailDesignTokens.Layout.sessionTimecodeColumnWidth,
                             alignment: .leading
                         )
-                    if let label = line.speakerLabel {
-                        Text(
-                            SpeakerLabeling.chipText(
-                                label: label,
-                                displayName: reviewSpeakerNames[label], ordinal: ordinals[label]
+                    if let speakerText {
+                        Text(speakerText)
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            .frame(
+                                width: SpeechRailDesignTokens.Layout.sessionSpeakerColumnWidth,
+                                alignment: .leading
                             )
-                        )
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .frame(
-                            width: SpeechRailDesignTokens.Layout.sessionSpeakerColumnWidth,
-                            alignment: .leading
-                        )
                     }
                     Text(line.text)
                         .font(SpeechRailDesignTokens.Typography.body)
@@ -336,8 +357,37 @@ extension MeetingView {
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
                 }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("\(Self.timecode(line.tStart ?? 0)) \(speakerText ?? "") \(line.text)")
+                .contextMenu {
+                    Button("复制这一句") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(line.text, forType: .string)
+                    }
+                    Button("复制这一句（含时间与说话人）") {
+                        let prefix = speakerText.map { "[\(Self.timecode(line.tStart ?? 0))] \($0)：" } ?? "[\(Self.timecode(line.tStart ?? 0))] "
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(prefix + line.text, forType: .string)
+                    }
+                }
             }
         }
+    }
+
+    private var formattedTranscriptForCopy: String {
+        let ordinals = SpeakerLabeling.displayOrdinals(for: reviewLines.compactMap(\.speakerLabel))
+        return filteredReviewLines.map { line in
+            let timecode = Self.timecode(line.tStart ?? 0)
+            if let label = line.speakerLabel {
+                let speaker = SpeakerLabeling.chipText(
+                    label: label,
+                    displayName: reviewSpeakerNames[label],
+                    ordinal: ordinals[label]
+                )
+                return "[\(timecode)] \(speaker)：\(line.text)"
+            }
+            return "[\(timecode)] \(line.text)"
+        }.joined(separator: "\n")
     }
 
     private func reviewBody(_ record: SessionRecord) -> some View {
@@ -347,17 +397,24 @@ extension MeetingView {
                     .font(SpeechRailDesignTokens.Typography.bodyMedium)
                 StatusPill(tone: .neutral, label: record.endedReason.title)
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
-                Button("回到这一场") { closeReview() }
+                Button("返回当前会议") { closeReview() }
                     .buttonStyle(.link)
                     .font(SpeechRailDesignTokens.Typography.caption)
             }
-            if let reviewMinutes, let body = reviewMinutes.body {
-                Text(body)
+            if postTab == .transcript {
+                transcriptBody
+            } else if let reviewMinutes, let body = reviewMinutes.body, !body.isEmpty {
+                Text(LocalizedStringKey(body))
                     .font(SpeechRailDesignTokens.Typography.body)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
-                transcriptBody
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Text("这场历史会议尚未生成纪要，以下为当时的文字记录。")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    transcriptBody
+                }
             }
         }
     }
@@ -418,11 +475,11 @@ extension MeetingView {
 
     /// 页头的导出动作。四种格式收进一个菜单：页头是低频动作的地方，四个格式不值得占四个槽位
     /// （与记录库页同一个口径）。默认格式排第一——会议是 Markdown。
-    func exportMenu(title: String, helpText: String) -> some View {
+    func exportMenu(title: String, helpText: String, includeMinutes: Bool = true) -> some View {
         PageActionsMenu(title: title, systemImage: "square.and.arrow.down", helpText: helpText) {
             ForEach(orderedFormats) { format in
                 Button(format.title) {
-                    exportCurrentSession(includeMinutes: true, as: format)
+                    exportCurrentSession(includeMinutes: includeMinutes, as: format)
                 }
             }
         }
