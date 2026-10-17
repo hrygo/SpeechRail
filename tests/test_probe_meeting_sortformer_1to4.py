@@ -254,7 +254,7 @@ def test_frozen_candidate_spec_and_holdout_unlock_gate(tmp_path: Path) -> None:
             holdout_manifest_sha256=holdout_sha,
         )
 
-    # Full development certification unlocks frozen holdout
+    # Historical receipts explain old results but never unlock a new experiment.
     receipt_path.write_text(
         json.dumps(
             {
@@ -268,13 +268,13 @@ def test_frozen_candidate_spec_and_holdout_unlock_gate(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    unlocked = validate_frozen_holdout_unlock(
-        receipt_path,
-        repository_root=repo_root,
-        expected_candidate_spec_sha256=spec_sha,
-        holdout_manifest_sha256=holdout_sha,
-    )
-    assert unlocked["holdout_unlocked"] is True
+    with pytest.raises(ValueError, match="legacy"):
+        validate_frozen_holdout_unlock(
+            receipt_path,
+            repository_root=repo_root,
+            expected_candidate_spec_sha256=spec_sha,
+            holdout_manifest_sha256=holdout_sha,
+        )
 
     # Preflight CLI returns exit code 2 when --require-pass is set and strata are unobserved
     exit_code = main(
@@ -344,9 +344,7 @@ def test_word_metrics_preserve_utterance_boundaries_and_leave_character_metrics_
             {"start": 0.0, "end": 1.0, "speaker": "R1", "text": "hello"},
             {"start": 1.0, "end": 2.0, "speaker": "R1", "text": "world"},
         ],
-        hypothesis_utterances=[
-            {"start": 0.0, "end": 2.0, "speaker": "S1", "text": "helloworld"}
-        ],
+        hypothesis_utterances=[{"start": 0.0, "end": 2.0, "speaker": "S1", "text": "helloworld"}],
         duration=2.0,
     )
     assert english["asr_only"]["reference_words"] == 2
@@ -366,9 +364,7 @@ def test_word_metrics_preserve_utterance_boundaries_and_leave_character_metrics_
             {"start": 0.0, "end": 1.0, "speaker": "R1", "text": "你好"},
             {"start": 1.0, "end": 2.0, "speaker": "R1", "text": "世界"},
         ],
-        hypothesis_utterances=[
-            {"start": 0.0, "end": 2.0, "speaker": "S1", "text": "你好世界"}
-        ],
+        hypothesis_utterances=[{"start": 0.0, "end": 2.0, "speaker": "S1", "text": "你好世界"}],
         duration=2.0,
     )
     assert chinese["asr_only"]["cer"] == 0.0
@@ -382,9 +378,7 @@ def test_speaker_attributed_asr_discards_segments_wholly_in_tail_padding() -> No
     scored = score_meeting_1to4_session(
         reference_speaker_spans=[{"start": 0.0, "end": 1.0, "speaker": "R1"}],
         hypothesis_speaker_spans=[{"start": 0.0, "end": 1.0, "speaker": "S1"}],
-        reference_utterances=[
-            {"start": 0.0, "end": 1.0, "speaker": "R1", "text": "hello"}
-        ],
+        reference_utterances=[{"start": 0.0, "end": 1.0, "speaker": "R1", "text": "hello"}],
         hypothesis_utterances=[
             {"start": 0.0, "end": 1.0, "speaker": "S1", "text": "hello"},
             {"start": 10.2, "end": 10.8, "speaker": "S1", "text": "tail"},
@@ -425,10 +419,7 @@ def test_score_meeting_1to4_session_and_stratification_marks_missing_strata() ->
     )
     assert session_metrics["speakers_count"] == 2
     assert session_metrics["diarization_gate"] == "pass"
-    assert (
-        session_metrics["diarization_only"]["other_min_known_coverage_applicable"]
-        is False
-    )
+    assert session_metrics["diarization_only"]["other_min_known_coverage_applicable"] is False
     assert session_metrics["asr_only"]["cer"] == 0.0
     assert session_metrics["speaker_attributed"]["cp_cer"] == 0.0
 
@@ -600,9 +591,7 @@ def test_evaluate_locked_1to4_split_end_to_end_dev_and_holdout(tmp_path: Path) -
     dev_manifest_path.write_bytes(dev_manifest_bytes)
     dev_sha = hashlib.sha256(dev_manifest_bytes).hexdigest()
 
-    holdout_fixtures = [
-        {**f, "id": f"Eval_Ali_S{f['speakers_count']}"} for f in fixtures
-    ]
+    holdout_fixtures = [{**f, "id": f"Eval_Ali_S{f['speakers_count']}"} for f in fixtures]
     for hf in holdout_fixtures:
         speaker_map[hf["id"]] = int(hf["speakers_count"])
     holdout_manifest_bytes = json.dumps(
@@ -644,29 +633,62 @@ def test_evaluate_locked_1to4_split_end_to_end_dev_and_holdout(tmp_path: Path) -
             output_dir=dev_out,
             repository_root=repo_root,
             expected_split_role="development",
-            session_factory=lambda epoch: _FakeSortformerSession(
-                speakers_count=speaker_map[epoch]
-            ),
+            session_factory=lambda epoch: _FakeSortformerSession(speakers_count=speaker_map[epoch]),
         )
     )
-    assert dev_report["verdict"] == "go"
+    assert dev_report["verdict"] == "no-go"
     assert dev_report["all_1to4_strata_observed"] is True
-    assert dev_report["phase1_diarization_certified"] is True
+    assert dev_report["phase1_diarization_certified"] is False
+    assert dev_report["diagnostic_only"] is True
     assert (dev_out / "development-certification.json").is_file()
 
     holdout_out = external / "holdout-out"
-    holdout_report = asyncio.run(
-        evaluate_locked_1to4_split(
-            manifest_path=holdout_manifest_path,
-            output_dir=holdout_out,
-            repository_root=repo_root,
-            expected_split_role="frozen_holdout",
-            session_factory=lambda epoch: _FakeSortformerSession(
-                speakers_count=speaker_map[epoch]
-            ),
-            development_receipt_path=dev_out / "development-certification.json",
+    with pytest.raises(ValueError, match=r"legacy|locked"):
+        asyncio.run(
+            evaluate_locked_1to4_split(
+                manifest_path=holdout_manifest_path,
+                output_dir=holdout_out,
+                repository_root=repo_root,
+                expected_split_role="frozen_holdout",
+                session_factory=lambda epoch: _FakeSortformerSession(
+                    speakers_count=speaker_map[epoch]
+                ),
+                development_receipt_path=dev_out / "development-certification.json",
+            )
         )
+    assert not holdout_out.exists()
+
+
+def test_effective_candidate_tracks_consolidation_and_adapter(tmp_path: Path) -> None:
+    from meeting_evaluation_identity import candidate_digest
+    from probe_meeting_sortformer_1to4 import sortformer_execution_spec
+
+    root = Path(__file__).resolve().parents[1]
+    executable = tmp_path / "worker"
+    executable.write_bytes(b"worker-v1")
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "weights.bin").write_bytes(b"weights")
+    spec = sortformer_execution_spec(
+        repository_root=root,
+        executable=executable,
+        model_path=model,
+        consolidate=False,
     )
-    assert holdout_report["verdict"] == "go"
-    assert holdout_report["holdout_unlock"]["holdout_unlocked"] is True
-    assert (holdout_out / "frozen-holdout-report.json").is_file()
+    changed = sortformer_execution_spec(
+        repository_root=root,
+        executable=executable,
+        model_path=model,
+        consolidate=True,
+    )
+    assert candidate_digest(spec) != candidate_digest(changed)
+    assert spec.decoder["activity_comparison"] == ">="
+    assert changed.decoder["consolidation"]["bridge_seconds"] == 0.24
+    executable.write_bytes(b"worker-resigned")
+    rebuilt = sortformer_execution_spec(
+        repository_root=root,
+        executable=executable,
+        model_path=model,
+        consolidate=False,
+    )
+    assert candidate_digest(spec) != candidate_digest(rebuilt)

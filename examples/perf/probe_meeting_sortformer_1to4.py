@@ -32,12 +32,20 @@ import tarfile
 import unicodedata
 import wave
 from collections.abc import Callable, Sequence
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, cast
 
 try:
     from .asr_quality import character_error_metrics  # type: ignore[import-not-found]
     from .diarization_quality import score_diarization  # type: ignore[import-not-found]
+    from .meeting_evaluation_identity import (
+        MeetingCandidateSpec,
+        candidate_digest,
+        file_digest,
+        model_file_digests,
+        validate_execution_identity,
+    )
 except ImportError:  # pragma: no cover - direct CLI or top-level import
     from asr_quality import (  # type: ignore[no-redef,import-not-found]
         character_error_metrics,
@@ -45,10 +53,23 @@ except ImportError:  # pragma: no cover - direct CLI or top-level import
     from diarization_quality import (  # type: ignore[no-redef,import-not-found]
         score_diarization,
     )
+    from meeting_evaluation_identity import (
+        MeetingCandidateSpec,
+        candidate_digest,
+        file_digest,
+        model_file_digests,
+        validate_execution_identity,
+    )
 
 from speechrail.backends.diarization.coreml import (  # type: ignore[import-untyped]
+    FLUIDAUDIO_COMMIT,
     MODEL_BUNDLE_NAME,
+    MODEL_REVISION,
     CoreMLSortformerEngine,
+)
+from speechrail.backends.diarization.slot_postpass import (  # type: ignore[import-untyped]
+    SlotConsolidationConfig,
+    consolidate_slot_spans,
 )
 from speechrail.domain.diarization.ports import (  # type: ignore[import-untyped]
     ActivitySession,
@@ -83,7 +104,7 @@ def _is_real_number(value: object) -> bool:
 
 
 def frozen_phase1_candidate_spec(*, repository_root: Path) -> JsonDict:
-    """Return the immutable Phase 1 candidate model, algorithm, threshold, and scoring spec."""
+    """Explain historical schema-1 results; never use this identity for new certification."""
     root = repository_root.resolve()
     catalog_path = root / "src/speechrail/assets/model-catalog.json"
     runtime_lock_path = root / "src/speechrail/assets/runtime-lock.json"
@@ -117,13 +138,11 @@ def frozen_phase1_candidate_spec(*, repository_root: Path) -> JsonDict:
             "backend": "sortformer",
             "artifact_key": "diarization-sortformer-fp16",
             "model_id": (
-                diar_artifact.get("model_id")
-                or "FluidInference/diar-streaming-sortformer-coreml"
+                diar_artifact.get("model_id") or "FluidInference/diar-streaming-sortformer-coreml"
             ),
             "model_bundle": "SortformerNvidiaLow_v2.1.mlmodelc",
             "model_revision": (
-                diar_artifact.get("revision")
-                or "ae9a27ab45dc0aa3abede7d2d6bad2b7a69aa6d1"
+                diar_artifact.get("revision") or "ae9a27ab45dc0aa3abede7d2d6bad2b7a69aa6d1"
             ),
             "dtype": "fp16",
             "fluidaudio_sdk_commit": "5c19d5e12320e22bbfb7a1877b089d2665a69add",
@@ -175,14 +194,89 @@ def frozen_phase1_candidate_spec(*, repository_root: Path) -> JsonDict:
             "other_min_known_coverage_le_4_speakers": "not_applicable",
         },
     }
-    canonical_bytes = json.dumps(
-        spec_payload, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
+    canonical_bytes = json.dumps(spec_payload, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
     spec_sha256 = hashlib.sha256(canonical_bytes).hexdigest()
     return {
         "candidate_spec_sha256": spec_sha256,
         "spec": spec_payload,
     }
+
+
+def sortformer_execution_spec(
+    *,
+    repository_root: Path,
+    executable: Path,
+    model_path: Path,
+    consolidate: bool,
+) -> MeetingCandidateSpec:
+    """Measure local artifact bytes and bind every effective legacy decoder knob."""
+    root = repository_root.resolve()
+    return MeetingCandidateSpec(
+        implementation_id="speechrail-sortformer-v2.1-diagnostic-v2",
+        adapter_sha256=file_digest(root / "src/speechrail/backends/diarization/coreml.py"),
+        sdk_revision=FLUIDAUDIO_COMMIT,
+        worker_sha256=file_digest(executable),
+        model_revision=MODEL_REVISION,
+        model_files_sha256=model_file_digests(model_path),
+        dtype="fp16",
+        compute_units="all",
+        preset={
+            "name": "balancedV2_1",
+            "numSpeakers": 4,
+            "preEncoderDims": 512,
+            "subsamplingFactor": 8,
+            "chunkLen": 6,
+            "chunkLeftContext": 1,
+            "chunkRightContext": 7,
+            "fifoLen": 188,
+            "spkcacheLen": 188,
+            "spkcacheUpdatePeriod": 144,
+            "spkcacheSilFramesPerSpk": 3,
+            "debugMode": False,
+            "sampleRate": 16000,
+            "melWindow": 400,
+            "melStride": 160,
+            "melFeatures": 128,
+            "silenceThreshold": 0.2,
+            "predScoreThreshold": 0.25,
+            "scoresBoostLatest": 0.05,
+            "strongBoostRate": 0.75,
+            "weakBoostRate": 1.5,
+            "minPosScoresRate": 0.5,
+            "maxIndex": 99999,
+            "timeline_max_stored_seconds": 60,
+            "timeline_store_segments": False,
+            "worker_source_sha256": file_digest(
+                root / "native/diarization/Sources/SpeechRailDiarizationWorker/main.swift"
+            ),
+        },
+        decoder={
+            "activity_threshold": 0.25,
+            "activity_comparison": ">=",
+            "eof_padding": "one_right_context_clipped_to_accepted_samples",
+            "consolidation": {"enabled": consolidate, **asdict(SlotConsolidationConfig())},
+            "consolidation_source_sha256": file_digest(
+                root / "src/speechrail/backends/diarization/slot_postpass.py"
+            ),
+        },
+        attribution={
+            "algorithm": "max_temporal_overlap_with_unknown_fallback",
+            "unknown": "retain",
+            "probe_sha256": file_digest(Path(__file__)),
+        },
+        scorer={
+            "version": "legacy-diagnostic-v2",
+            "certification_eligible": False,
+            "source_sha256": file_digest(root / "examples/perf/diarization_quality.py"),
+            "collar": 0.0,
+            "skip_overlap": False,
+            "tcp_collar_seconds": 5.0,
+            "normalization": "NFKC_casefold_unicode_L_N_M",
+            "word_tokenization": "NFKC_casefold_cjk_char_and_alnum_word_v1",
+        },
+    )
 
 
 def verify_archive_ready(
@@ -294,9 +388,7 @@ def validate_locked_1to4_manifest(
                 continue
             other_entry = splits.get(other_role)
             if isinstance(other_entry, dict) and other_entry.get("manifest_sha256") == digest:
-                raise ValueError(
-                    "holdout manifest cannot be evaluated as a development split"
-                )
+                raise ValueError("holdout manifest cannot be evaluated as a development split")
 
     dataset_name = str(manifest.get("dataset") or split_lock.get("dataset") or "")
     source_split = str(manifest.get("source_split") or split_entry.get("source_split") or "")
@@ -367,9 +459,7 @@ def validate_frozen_holdout_unlock(
     holdout_manifest_sha256: str,
 ) -> JsonDict:
     """Verify development certification passed with the frozen spec before unlocking holdout."""
-    resolved = _require_external_path(
-        development_receipt_path, repository_root=repository_root
-    )
+    resolved = _require_external_path(development_receipt_path, repository_root=repository_root)
     if re.fullmatch(r"[0-9a-f]{64}", expected_candidate_spec_sha256) is None:
         raise ValueError("expected_candidate_spec_sha256 must be a 64-character hex digest")
     if re.fullmatch(r"[0-9a-f]{64}", holdout_manifest_sha256) is None:
@@ -407,11 +497,9 @@ def validate_frozen_holdout_unlock(
             "frozen holdout is locked: development 1-4 speaker strata or quality gates did not pass"
         )
 
-    return {
-        "development_manifest_sha256": dev_manifest_sha,
-        "candidate_spec_sha256": expected_candidate_spec_sha256,
-        "holdout_unlocked": True,
-    }
+    raise ValueError(
+        "legacy Phase 1 receipts are diagnostic only; use the v2 identity/policy holdout gate"
+    )
 
 
 def _tokenize_words(text: str) -> list[str]:
@@ -489,10 +577,7 @@ def _validate_timed_utterances(
             raise ValueError("invalid speaker-attributed utterance row")
         start_f = float(cast(float, start))
         end_f = float(cast(float, end))
-        if (
-            not math.isfinite(start_f + end_f)
-            or not 0 <= start_f < end_f <= duration + 1.0 + 1e-9
-        ):
+        if not math.isfinite(start_f + end_f) or not 0 <= start_f < end_f <= duration + 1.0 + 1e-9:
             raise ValueError("invalid speaker-attributed utterance row")
         bounded_start = min(start_f, duration)
         bounded_end = min(end_f, duration)
@@ -543,9 +628,7 @@ def _time_constrained_stream_distance(
             deletion = previous[col] + 1
             insertion = current[-1] + 1
             overlaps = (h_start <= r_end + collar_seconds) and (r_start <= h_end + collar_seconds)
-            substitution = (
-                previous[col - 1] + (r_tok != h_tok) if overlaps else inf
-            )
+            substitution = previous[col - 1] + (r_tok != h_tok) if overlaps else inf
             current.append(min(deletion, insertion, substitution))
         previous = current
     return previous[-1]
@@ -577,9 +660,7 @@ def score_speaker_attributed_asr(
     )
 
     ref_speakers = sorted({row["speaker"] for row in ref_rows})
-    hyp_known_speakers = sorted(
-        {row["speaker"] for row in hyp_rows if row["speaker"] != "unknown"}
-    )
+    hyp_known_speakers = sorted({row["speaker"] for row in hyp_rows if row["speaker"] != "unknown"})
     if len(ref_speakers) > 4 or len(hyp_known_speakers) > 4:
         raise ValueError("Phase 1 speaker-attributed scorer supports at most 4 speakers")
 
@@ -628,9 +709,7 @@ def score_speaker_attributed_asr(
             cp_char_err += _sequence_edit_distance(
                 _normalized_chars(r_text), _normalized_chars(h_text)
             )
-            cp_word_err += _sequence_edit_distance(
-                _tokenize_words(r_text), _tokenize_words(h_text)
-            )
+            cp_word_err += _sequence_edit_distance(_tokenize_words(r_text), _tokenize_words(h_text))
             tcp_char_err += _time_constrained_stream_distance(
                 r_list, h_list, collar_seconds=tcp_collar_seconds, tokenizer=_normalized_chars
             )
@@ -685,9 +764,7 @@ def score_speaker_attributed_asr(
         di_char_errors += _sequence_edit_distance(
             _normalized_chars(r_text), _normalized_chars(h_text)
         )
-        di_word_errors += _sequence_edit_distance(
-            _tokenize_words(r_text), _tokenize_words(h_text)
-        )
+        di_word_errors += _sequence_edit_distance(_tokenize_words(r_text), _tokenize_words(h_text))
 
     cp_cer = best_cp_char_errors / total_ref_chars if total_ref_chars else None
     tcp_cer = best_tcp_char_errors / total_ref_chars if total_ref_chars else None
@@ -780,14 +857,10 @@ def attribute_utterances_to_spans(
                 spk = str(span["speaker"])
                 overlap_by_speaker[spk] = overlap_by_speaker.get(spk, 0.0) + ov
         if overlap_by_speaker:
-            best_speaker = max(
-                sorted(overlap_by_speaker), key=lambda k: overlap_by_speaker[k]
-            )
+            best_speaker = max(sorted(overlap_by_speaker), key=lambda k: overlap_by_speaker[k])
         else:
             best_speaker = "unknown"
-        attributed.append(
-            {"start": start, "end": end, "speaker": best_speaker, "text": text}
-        )
+        attributed.append({"start": start, "end": end, "speaker": best_speaker, "text": text})
     return attributed
 
 
@@ -801,9 +874,7 @@ def score_meeting_1to4_session(
     tcp_collar_seconds: float = 5.0,
 ) -> JsonDict:
     """Compute decoupled ASR, diarization, and joint SA-ASR metrics for a 1-4 speaker session."""
-    diar = score_diarization(
-        reference_speaker_spans, hypothesis_speaker_spans, duration=duration
-    )
+    diar = score_diarization(reference_speaker_spans, hypothesis_speaker_spans, duration=duration)
     diar.pop("participants", None)
     participant_count = int(diar["participant_count"])
     if not 1 <= participant_count <= 4:
@@ -911,41 +982,21 @@ def summarize_1to4_strata(
             "mean_wer": sum(float(r["asr_only"]["wer"] or 0.0) for r in rows) / n,
             "mean_der": sum(float(r["diarization_only"]["der"]) for r in rows) / n,
             "mean_jer": sum(float(r["diarization_only"]["jer"]) for r in rows) / n,
-            "mean_known_coverage": sum(
-                float(r["diarization_only"]["known_coverage"]) for r in rows
-            )
+            "mean_known_coverage": sum(float(r["diarization_only"]["known_coverage"]) for r in rows)
             / n,
-            "mean_known_accuracy": sum(
-                float(r["diarization_only"]["known_accuracy"]) for r in rows
-            )
+            "mean_known_accuracy": sum(float(r["diarization_only"]["known_accuracy"]) for r in rows)
             / n,
             "minimum_top_four_known_coverage": min(
                 float(r["diarization_only"]["top_four_min_known_coverage"]) for r in rows
             ),
             "other_min_known_coverage": "N/A",
-            "mean_cp_cer": sum(
-                float(r["speaker_attributed"]["cp_cer"] or 0.0) for r in rows
-            )
+            "mean_cp_cer": sum(float(r["speaker_attributed"]["cp_cer"] or 0.0) for r in rows) / n,
+            "mean_tcp_cer": sum(float(r["speaker_attributed"]["tcp_cer"] or 0.0) for r in rows) / n,
+            "mean_di_cp_cer": sum(float(r["speaker_attributed"]["di_cp_cer"] or 0.0) for r in rows)
             / n,
-            "mean_tcp_cer": sum(
-                float(r["speaker_attributed"]["tcp_cer"] or 0.0) for r in rows
-            )
-            / n,
-            "mean_di_cp_cer": sum(
-                float(r["speaker_attributed"]["di_cp_cer"] or 0.0) for r in rows
-            )
-            / n,
-            "mean_cp_wer": sum(
-                float(r["speaker_attributed"]["cp_wer"] or 0.0) for r in rows
-            )
-            / n,
-            "mean_tcp_wer": sum(
-                float(r["speaker_attributed"]["tcp_wer"] or 0.0) for r in rows
-            )
-            / n,
-            "mean_di_cp_wer": sum(
-                float(r["speaker_attributed"]["di_cp_wer"] or 0.0) for r in rows
-            )
+            "mean_cp_wer": sum(float(r["speaker_attributed"]["cp_wer"] or 0.0) for r in rows) / n,
+            "mean_tcp_wer": sum(float(r["speaker_attributed"]["tcp_wer"] or 0.0) for r in rows) / n,
+            "mean_di_cp_wer": sum(float(r["speaker_attributed"]["di_cp_wer"] or 0.0) for r in rows)
             / n,
         }
 
@@ -956,9 +1007,7 @@ def summarize_1to4_strata(
     certified = all_observed_pass and all_strata_covered
     return {
         "total_sessions": len(session_results),
-        "observed_speaker_counts": sorted(
-            count for count in _REQUIRED_STRATA if by_count[count]
-        ),
+        "observed_speaker_counts": sorted(count for count in _REQUIRED_STRATA if by_count[count]),
         "unobserved_speaker_counts": unobserved_strata,
         "all_1to4_strata_observed": all_strata_covered,
         "all_observed_sessions_pass_diarization_gate": all_observed_pass,
@@ -974,6 +1023,7 @@ async def run_sortformer_session_on_wav(
     session_factory: Callable[[str], ActivitySession],
     epoch: str,
     chunk_samples: int = 16_000,
+    consolidate: bool = False,
 ) -> tuple[list[JsonDict], float]:
     """Stream a 16 kHz mono PCM16 WAV through a Sortformer ActivitySession."""
     if chunk_samples <= 0:
@@ -1008,13 +1058,14 @@ async def run_sortformer_session_on_wav(
         await session.cancel()
         raise
 
-    ordered_frames = [
-        collected_frames[key] for key in sorted(collected_frames)
-    ]
+    ordered_frames = [collected_frames[key] for key in sorted(collected_frames)]
+    if consolidate:
+        return (
+            consolidate_slot_spans(ordered_frames, duration=duration),
+            duration,
+        )
     return (
-        frames_to_speaker_spans(
-            ordered_frames, sample_rate=16_000, duration=duration
-        ),
+        frames_to_speaker_spans(ordered_frames, sample_rate=16_000, duration=duration),
         duration,
     )
 
@@ -1042,16 +1093,21 @@ async def evaluate_locked_1to4_split(
     expected_split_role: str,
     session_factory: Callable[[str], ActivitySession],
     development_receipt_path: Path | None = None,
+    consolidate: bool = False,
+    execution_spec: MeetingCandidateSpec | None = None,
+    observed_identity: JsonDict | None = None,
 ) -> JsonDict:
     """Execute Phase 1 evaluation on a locked external 1-4 speaker development or holdout split."""
-    resolved_manifest = _require_external_path(
-        manifest_path, repository_root=repository_root
-    )
-    resolved_output = _require_external_path(
-        output_dir, repository_root=repository_root
-    )
+    resolved_manifest = _require_external_path(manifest_path, repository_root=repository_root)
+    resolved_output = _require_external_path(output_dir, repository_root=repository_root)
     if resolved_output.exists():
         raise ValueError("output_dir must not already exist")
+    if execution_spec is not None:
+        if observed_identity is None:
+            raise ValueError("execution identity must be observed before inference")
+        validate_execution_identity(execution_spec, observed_identity)
+        if execution_spec.decoder["consolidation"]["enabled"] is not consolidate:
+            raise ValueError("execution identity consolidation differs from runner")
 
     manifest_bytes = resolved_manifest.read_bytes()
     fixtures, meta = validate_locked_1to4_manifest(
@@ -1112,6 +1168,7 @@ async def evaluate_locked_1to4_split(
             audio_path,
             session_factory=session_factory,
             epoch=session_id,
+            consolidate=consolidate,
         )
         ref_payload = json.loads(ref_path.read_text(encoding="utf-8"))
         asr_payload = json.loads(asr_hyp_path.read_text(encoding="utf-8"))
@@ -1150,8 +1207,14 @@ async def evaluate_locked_1to4_split(
         "all_observed_sessions_pass_diarization_gate": strata_summary[
             "all_observed_sessions_pass_diarization_gate"
         ],
-        "phase1_diarization_certified": strata_summary["phase1_diarization_certified"],
-        "verdict": strata_summary["verdict"],
+        "phase1_diarization_certified": False,
+        "verdict": "no-go",
+        "diagnostic_only": True,
+        "certification_blocker": "legacy scoring is not the approved v2 product policy",
+        "execution_candidate_sha256": (
+            candidate_digest(execution_spec) if execution_spec is not None else None
+        ),
+        "execution_candidate": execution_spec.as_dict() if execution_spec is not None else None,
         "evaluation": strata_summary,
         "sessions": anonymous_session_rows,
     }
@@ -1163,9 +1226,7 @@ async def evaluate_locked_1to4_split(
         else "frozen-holdout-report.json"
     )
     receipt_path = resolved_output / receipt_filename
-    encoded = json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False).encode(
-        "utf-8"
-    )
+    encoded = json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False).encode("utf-8")
     receipt_path.write_bytes(encoded)
     (resolved_output / f"{receipt_filename}.sha256").write_text(
         hashlib.sha256(encoded).hexdigest() + "\n", encoding="utf-8"
@@ -1227,9 +1288,7 @@ def run_preflight_probe(
     probed_paths = {
         "benchmark_root": _probe_path_status(benchmark_root),
         "model_root": _probe_path_status(model_root),
-        "sortformer_mlmodelc": _probe_path_status(
-            model_root / "SortformerNvidiaLow_v2.1.mlmodelc"
-        ),
+        "sortformer_mlmodelc": _probe_path_status(model_root / "SortformerNvidiaLow_v2.1.mlmodelc"),
         "aishell4_test_archive": _probe_path_status(
             benchmark_root / "issue370-aishell4-test-20261017/test.tar.gz"
         ),
@@ -1318,6 +1377,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Exit with code 2 when any 1..4 speaker stratum is unobserved or quality gate fails.",
     )
+    parser.add_argument(
+        "--slot-consolidate",
+        action="store_true",
+        default=False,
+        help="Consolidate whole-session Sortformer slot spans before scoring.",
+    )
+    parser.add_argument(
+        "--candidate-spec",
+        type=Path,
+        default=None,
+        help="External frozen v2 candidate JSON; measured execution must match before inference.",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
     repo_root = Path(__file__).resolve().parents[2]
 
@@ -1333,9 +1404,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.manifest is None or args.output is None:
-        sys.stderr.write(
-            f"{args.mode} requires --manifest and --output outside the repository\n"
-        )
+        sys.stderr.write(f"{args.mode} requires --manifest and --output outside the repository\n")
         return 2
 
     worker_exe = (
@@ -1352,11 +1421,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         if not engine.readiness.ready:
             raise ValueError(engine.readiness.message)
-        expected_role = (
-            "development"
-            if args.mode == "evaluate-development"
-            else "frozen_holdout"
+        observed = sortformer_execution_spec(
+            repository_root=repo_root,
+            executable=worker_exe,
+            model_path=model_bundle,
+            consolidate=args.slot_consolidate,
         )
+        spec = observed
+        if args.candidate_spec is not None:
+            spec_path = _require_external_path(args.candidate_spec, repository_root=repo_root)
+            spec = MeetingCandidateSpec(**json.loads(spec_path.read_text(encoding="utf-8")))
+        validate_execution_identity(spec, observed.as_dict())
+        expected_role = "development" if args.mode == "evaluate-development" else "frozen_holdout"
         eval_report = asyncio.run(
             evaluate_locked_1to4_split(
                 manifest_path=args.manifest,
@@ -1365,6 +1441,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 expected_split_role=expected_role,
                 session_factory=lambda epoch: engine.open(epoch=epoch),
                 development_receipt_path=args.development_receipt,
+                consolidate=args.slot_consolidate,
+                execution_spec=spec,
+                observed_identity=observed.as_dict(),
             )
         )
     except (OSError, ValueError, RuntimeError) as exc:

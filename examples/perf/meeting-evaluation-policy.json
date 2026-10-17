@@ -1,0 +1,48 @@
+{
+  "schema_version": 2,
+  "speaker_time_recall_min": 0.9,
+  "speaker_time_precision_min": 0.95,
+  "top_four_recall_min": 0.95,
+  "other_recall_min": 0.8,
+  "other_min_duration_seconds": 2.0,
+  "scorer_versions": {
+    "pyannote.metrics": "4.1",
+    "meeteval": "0.4.3"
+  },
+  "tokenization": {
+    "character": "NFKC_casefold_unicode_L_N_M_v1",
+    "word": "NFKC_casefold_cjk_char_and_alnum_word_v1"
+  },
+  "collar_seconds": 0.0,
+  "skip_overlap": false,
+  "tcp_collar_seconds": 5.0,
+  "legacy_nonoverlap": {
+    "known_coverage_min": 0.9,
+    "known_accuracy_min": 0.95,
+    "top_four_min_known_coverage_min": 0.95,
+    "other_min_known_coverage_min": 0.8
+  },
+  "short_turn_bins_seconds": [0.0, 0.32, 2.0],
+  "latency": {
+    "input_rate": 1.0,
+    "stable_label_p95_seconds": 15.0,
+    "stable_label_hard_seconds": 30.0,
+    "finish_p95_seconds": 5.0,
+    "finish_hard_seconds": 15.0,
+    "asr_relative_p95_max": 1.05,
+    "diarization_relative_p95_max": 1.1,
+    "primary_benefit": "serial_minus_overlap_joint_tail_to_final"
+  },
+  "statistics": {
+    "unit": "source_meeting_id",
+    "seed": 1717,
+    "bootstrap_draws": 10000,
+    "percentile_interval": [0.025, 0.975],
+    "development_checkpoints_per_stratum": [6, 12, 18, 24],
+    "holdout_min_groups_per_stratum": 12,
+    "holdout_development_multiplier": 2,
+    "holdout_max_groups_per_stratum": 48,
+    "c0_der_and_cpcer_degradation_max": 0.0,
+    "selection_der_noninferiority_margin": 0.01
+  }
+}

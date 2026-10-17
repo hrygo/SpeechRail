@@ -8,6 +8,7 @@ message before it reaches the domain layer.
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import AsyncIterator, Callable
 from hashlib import sha256
 from pathlib import Path
@@ -62,6 +63,21 @@ MODEL_MIL_SIGNATURES = {
 _ACTIVITY_THRESHOLD = 0.25
 
 
+def _coerce_activity_threshold(value: float) -> float:
+    """Return ``value`` as a float in ``[0.0, 1.0]`` or raise ``ValueError``.
+
+    The threshold is a tunable knob (default ``_ACTIVITY_THRESHOLD``): every
+    score greater than or equal to it marks its slot active for that hop.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("activity_threshold must be a real number in [0, 1]")
+    threshold = float(value)
+    if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        raise ValueError("activity_threshold must be a finite number in [0, 1]")
+    return threshold
+
+
 class CoreMLSortformerEngine:
     """The only production implementation of the streaming activity port."""
 
@@ -75,10 +91,12 @@ class CoreMLSortformerEngine:
         worker_factory: Callable[[], CoreMLWorkerProcess] | None = None,
         required_hashes: dict[str, str] | None = None,
         required_signatures: dict[str, tuple[str, ...]] | None = None,
+        activity_threshold: float = _ACTIVITY_THRESHOLD,
     ) -> None:
         self._model_path = model_path
         self._executable = executable
         self._worker_factory = worker_factory
+        self._activity_threshold = _coerce_activity_threshold(activity_threshold)
         self._required_hashes = (
             MODEL_FILE_SHA256 if required_hashes is None else required_hashes
         )
@@ -107,7 +125,11 @@ class CoreMLSortformerEngine:
             if factory is not None
             else CoreMLWorkerProcess(executable=self._executable, model_path=self._model_path)
         )
-        return CoreMLActivitySession(worker=worker, epoch=epoch)
+        return CoreMLActivitySession(
+            worker=worker,
+            epoch=epoch,
+            activity_threshold=self._activity_threshold,
+        )
 
     def _check_readiness(self) -> DiarizationReadiness:
         if self._model_path.name != MODEL_BUNDLE_NAME or not self._model_path.is_dir():
@@ -171,9 +193,16 @@ def _has_signatures(path: Path, signatures: tuple[str, ...]) -> bool:
 class CoreMLActivitySession:
     """Validated bridge from the private Swift process to ``ActivityUpdate``."""
 
-    def __init__(self, *, worker: CoreMLWorkerProcess, epoch: str) -> None:
+    def __init__(
+        self,
+        *,
+        worker: CoreMLWorkerProcess,
+        epoch: str,
+        activity_threshold: float = _ACTIVITY_THRESHOLD,
+    ) -> None:
         self._worker = worker
         self._epoch = epoch
+        self._activity_threshold = _coerce_activity_threshold(activity_threshold)
         self._next_start = 0
         self._processed = 0
         self._stable = 0
@@ -264,6 +293,7 @@ class CoreMLActivitySession:
             step_id=self._step_id,
             replace_start=self._processed,
             accepted=self._next_start,
+            activity_threshold=self._activity_threshold,
         )
         self._step_id += 1
         self._processed = update.processed_through
@@ -283,6 +313,7 @@ def _update_from_response(
     step_id: int,
     replace_start: int,
     accepted: int,
+    activity_threshold: float = _ACTIVITY_THRESHOLD,
 ) -> ActivityUpdate:
     if response.get("ok") is not True:
         raise DiarizationError(
@@ -334,7 +365,9 @@ def _update_from_response(
                 span=SampleSpan(start, min(end, accepted)),
                 scores=tuple(float(score) for score in scores),  # type: ignore[arg-type]
                 active_slots=frozenset(
-                    slot for slot, score in enumerate(scores) if float(score) >= _ACTIVITY_THRESHOLD
+                    slot
+                    for slot, score in enumerate(scores)
+                    if float(score) >= activity_threshold
                 ),
             )
         )
