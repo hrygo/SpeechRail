@@ -1,6 +1,6 @@
 # SpeechRail Realtime ASR/TTS 协议契约
 
-> 契约版本：`6.5.0`；生效日期：2026-10-16。唯一机器 schema 是
+> 契约版本：`6.6.0`；生效日期：2026-10-17。唯一机器 schema 是
 > [`realtime-events.schema.json`](realtime-events.schema.json)，字段责任表是
 > [`realtime-field-matrix.json`](realtime-field-matrix.json)。
 
@@ -126,6 +126,19 @@ snapshot 的对应 voice 读取。系统音色校验 CustomVoice 制品，克隆
 `session.speechrail.expected_tts_revision`（包括 `audio.input.speechrail` 中的同名字段）
 不受支持，返回 `unsupported_operation`，失败不部分启用 TTS。TTS pin 只能由带有音色身份的
 `speechrail.tts.start` 事件携带。
+
+### 4.1 增量 TTS 的承诺点
+
+本节说明既有字段的语义边界，不新增事件或字段。
+
+契约定义的是**屏障**，不是首音延迟指标。`speechrail.tts.finish_text` 只关闭文本侧并以最后
+ACK 序号为屏障，不会提前合成尚未追加的文本；消费额度的阻塞语义见下文「PCM 消费窗口」，
+本节不重复。
+
+延迟与韵律的取舍因此由调用方掌握：一次追加较长文本，合成器能看到更完整的上下文，韵律更
+连贯，但首段音频更晚；频繁追加短文本能更早出声，代价是句内停顿与重音更容易被切碎。服务不
+承诺固定首音延迟，也不替调用方选择文本粒度；需要可预测延迟的调用方应自行决定追加节奏，并
+用 `audio_ack` 维持消费窗口。
 
 ## 5. 服务端事件
 

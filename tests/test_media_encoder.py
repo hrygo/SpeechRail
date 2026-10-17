@@ -13,6 +13,7 @@ import pytest
 from speechrail.media.encoder import (
     MediaCodecUnavailableError,
     MediaEncodeError,
+    MediaProcessOutput,
     MediaToolchain,
     encode,
 )
@@ -20,6 +21,23 @@ from speechrail.media.manifest import (
     MediaChapterEntry,
     MediaExportManifest,
     MediaFragmentEntry,
+    MediaLoudnessSettings,
+)
+
+DEFAULT_LOUDNORM_STDERR = (
+    "[\nloudnorm @ 0x1] Parsed_loudnorm_0\n"
+    "{\n"
+    '    "input_i" : "-23.40",\n'
+    '    "input_tp" : "-3.10",\n'
+    '    "input_lra" : "7.20",\n'
+    '    "input_thresh" : "-34.00",\n'
+    '    "output_i" : "-18.00",\n'
+    '    "output_tp" : "-1.50",\n'
+    '    "output_lra" : "7.00",\n'
+    '    "output_thresh" : "-28.50",\n'
+    '    "normalization_type" : "dynamic",\n'
+    '    "target_offset" : "-0.50"\n'
+    "}\n"
 )
 
 
@@ -48,10 +66,28 @@ def _make_wav_bytes(frame_count: int = 4800) -> bytes:
 class FakeMediaRunner:
     def __init__(self, *, frame_count_per_norm: int = 4800) -> None:
         self.recorded_argv: list[list[str]] = []
+        self.recorded_capture_argv: list[list[str]] = []
         self.frame_count_per_norm = frame_count_per_norm
         self.captured_ffmetadata: str = ""
         self.captured_concat: str = ""
         self.raise_on_final_encode: BaseException | None = None
+        self.capture_output: MediaProcessOutput | None = None
+        self.capture_count = 0
+
+    async def run_capture(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path,
+        cancel_event: asyncio.Event | None = None,
+    ) -> MediaProcessOutput:
+        args = list(argv)
+        self.recorded_argv.append(args)
+        self.recorded_capture_argv.append(args)
+        self.capture_count += 1
+        if self.capture_output is not None:
+            return self.capture_output
+        return MediaProcessOutput(return_code=0, stdout="", stderr=DEFAULT_LOUDNORM_STDERR)
 
     async def run(
         self,
@@ -238,3 +274,293 @@ def test_missing_codec_never_downloads_tool(tmp_path: Path) -> None:
         asyncio.run(encode(manifest, tools_without_aac, runner, app_home=app_home))
     assert exc_info.value.error_code == "codec_unavailable"
     assert runner.recorded_argv == []
+
+
+def _seed_book(
+    tmp_path: Path,
+    *,
+    chapters: int = 1,
+    profile: str = "m4b",
+    loudness: MediaLoudnessSettings | None = None,
+    toolchain_has_loudnorm: bool | None = None,
+) -> tuple[Path, MediaExportManifest, MediaToolchain]:
+    app_home = tmp_path / "app_home"
+    book_id = uuid4()
+    request_id = uuid4()
+    audio_dir = app_home / "audiobooks" / "books" / str(book_id) / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+
+    fake_ffmpeg = tmp_path / "ffmpeg"
+    fake_ffmpeg.write_text("#!/bin/sh\n", encoding="utf-8")
+    has_loudnorm = (
+        toolchain_has_loudnorm
+        if toolchain_has_loudnorm is not None
+        else loudness is not None
+    )
+    tools = MediaToolchain(
+        ffmpeg_path=fake_ffmpeg,
+        encoders=frozenset({"aac", "libmp3lame", "pcm_s16le"}),
+        has_loudnorm=has_loudnorm,
+    )
+
+    wav_bytes = _make_wav_bytes(2400)
+    wav_sha = hashlib.sha256(wav_bytes).hexdigest()
+    cid = uuid4()
+    (audio_dir / f"{cid}.wav").write_bytes(wav_bytes)
+
+    chapter_entries: list[MediaChapterEntry] = []
+    for idx in range(chapters):
+        chapter_entries.append(
+            MediaChapterEntry(
+                chapter_id=uuid4(),
+                ordinal=idx,
+                title=f"第 {idx + 1} 章",
+                fragments=(
+                    MediaFragmentEntry(
+                        fragment_id=uuid4(),
+                        candidate_id=cid,
+                        relative_path=f"books/{book_id}/audio/{cid}.wav",
+                        file_sha256=wav_sha,
+                        pcm_sha256="",
+                        frame_count=2400,
+                        sample_rate=48000,
+                    ),
+                ),
+            )
+        )
+
+    manifest = MediaExportManifest(
+        schema_version="audiobook_media_export_v2",
+        request_id=request_id,
+        book_id=book_id,
+        source_id=uuid4(),
+        production_revision_id=uuid4(),
+        profile=profile,
+        book_title="响度测试",
+        author="林远",
+        chapters=tuple(chapter_entries),
+        app_home=app_home,
+        loudness=loudness,
+    )
+    return app_home, manifest, tools
+
+
+def _af_value(argv: Sequence[str]) -> str:
+    index = argv.index("-af")
+    return argv[index + 1]
+
+
+def test_encode_m4b_off_argv_is_golden_and_never_captures(tmp_path: Path) -> None:
+    app_home, manifest, tools = _seed_book(tmp_path, profile="m4b")
+    runner = FakeMediaRunner(frame_count_per_norm=4800)
+
+    asyncio.run(encode(manifest, tools, runner, app_home=app_home))
+
+    final_argv = runner.recorded_argv[-1]
+    expected = [
+        str(tools.ffmpeg_path),
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        "concat.txt",
+        "-f",
+        "ffmetadata",
+        "-i",
+        "chapters.ffmeta",
+        "-map",
+        "0:a:0",
+        "-map_metadata",
+        "1",
+        "-map_chapters",
+        "1",
+        "-vn",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-ar",
+        "48000",
+        "-ac",
+        "1",
+        "-movflags",
+        "+faststart+disable_chpl",
+        "-progress",
+        "pipe:1",
+        "book.m4b",
+    ]
+    assert final_argv == expected
+    assert "-af" not in final_argv
+    assert runner.capture_count == 0
+    assert runner.recorded_capture_argv == []
+
+
+def test_encode_mp3_off_argv_is_golden_and_never_captures(tmp_path: Path) -> None:
+    app_home, manifest, tools = _seed_book(tmp_path, profile="chapter_mp3")
+    runner = FakeMediaRunner(frame_count_per_norm=4800)
+
+    asyncio.run(encode(manifest, tools, runner, app_home=app_home))
+
+    final_argv = runner.recorded_argv[-1]
+    expected = [
+        str(tools.ffmpeg_path),
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        "concat_ch_0000.txt",
+        "-vn",
+        "-metadata",
+        "title=第 1 章",
+        "-metadata",
+        "album=响度测试",
+        "-metadata",
+        "track=1/1",
+        "-c:a",
+        "libmp3lame",
+        "-b:a",
+        "128k",
+        "-ar",
+        "48000",
+        "-ac",
+        "1",
+        "-progress",
+        "pipe:1",
+        "chapters/chapter_0001.mp3",
+    ]
+    assert final_argv == expected
+    assert "-af" not in final_argv
+    assert runner.capture_count == 0
+    assert runner.recorded_capture_argv == []
+
+
+def test_encode_m4b_loudness_probes_whole_book_then_applies_linear_filter(
+    tmp_path: Path,
+) -> None:
+    settings = MediaLoudnessSettings(
+        unit="lufs", target_i=-18.0, true_peak_db=-1.5, loudness_range=11.0
+    )
+    app_home, manifest, tools = _seed_book(tmp_path, profile="m4b", loudness=settings)
+    runner = FakeMediaRunner(frame_count_per_norm=4800)
+
+    asyncio.run(encode(manifest, tools, runner, app_home=app_home))
+
+    assert runner.capture_count == 1
+    probe_argv = runner.recorded_capture_argv[0]
+    assert probe_argv[-3:] == ["-f", "null", "-"]
+    assert probe_argv[probe_argv.index("-i") + 1] == "concat.txt"
+    probe_filter = _af_value(probe_argv)
+    assert "dual_mono=false" in probe_filter
+    assert "print_format=json" in probe_filter
+    assert "measured_I=" not in probe_filter
+
+    final_argv = runner.recorded_argv[-1]
+    assert final_argv.count("-af") == 1
+    applied_filter = _af_value(final_argv)
+    assert "measured_I=" in applied_filter
+    assert "linear=true" in applied_filter
+    assert "dual_mono=false" in applied_filter
+    assert final_argv[final_argv.index("-af") + 2 :][:1] == ["-c:a"]
+    assert final_argv[final_argv.index("-ar") + 1] == "48000"
+    assert final_argv[final_argv.index("-ac") + 1] == "1"
+
+
+def test_encode_mp3_loudness_measures_once_and_reuses_identical_filter_per_chapter(
+    tmp_path: Path,
+) -> None:
+    settings = MediaLoudnessSettings(
+        unit="lufs", target_i=-19.0, true_peak_db=-2.0, loudness_range=9.0
+    )
+    app_home, manifest, tools = _seed_book(
+        tmp_path, chapters=2, profile="chapter_mp3", loudness=settings
+    )
+    runner = FakeMediaRunner(frame_count_per_norm=4800)
+
+    asyncio.run(encode(manifest, tools, runner, app_home=app_home))
+
+    assert runner.capture_count == 1
+    probe_argv = runner.recorded_capture_argv[0]
+    assert probe_argv[probe_argv.index("-i") + 1] == "loudness_probe.txt"
+
+    chapter_argvs = [argv for argv in runner.recorded_argv if "libmp3lame" in argv]
+    assert len(chapter_argvs) == 2
+    filters = {_af_value(argv) for argv in chapter_argvs}
+    assert len(filters) == 1
+
+    stage_dir = app_home / "audiobooks" / "exports" / str(manifest.request_id) / "stage"
+    probe_content = (stage_dir / "loudness_probe.txt").read_text(encoding="utf-8")
+    assert probe_content.startswith("ffconcat version 1.0\n")
+    assert probe_content.count("file '") == 2
+
+
+def test_encode_loudness_probe_failure_fails_closed(tmp_path: Path) -> None:
+    settings = MediaLoudnessSettings(
+        unit="lufs", target_i=-18.0, true_peak_db=-1.5, loudness_range=11.0
+    )
+    app_home, manifest, tools = _seed_book(tmp_path, profile="m4b", loudness=settings)
+
+    nonzero = FakeMediaRunner(frame_count_per_norm=4800)
+    nonzero.capture_output = MediaProcessOutput(return_code=1, stdout="", stderr="boom")
+    with pytest.raises(MediaEncodeError) as exc_info:
+        asyncio.run(encode(manifest, tools, nonzero, app_home=app_home))
+    assert exc_info.value.error_code == "command_failed"
+
+    unparseable = FakeMediaRunner(frame_count_per_norm=4800)
+    unparseable.capture_output = MediaProcessOutput(
+        return_code=0, stdout="", stderr="not json at all"
+    )
+    with pytest.raises(MediaEncodeError) as exc_info:
+        asyncio.run(encode(manifest, tools, unparseable, app_home=app_home))
+    assert exc_info.value.error_code == "command_failed"
+
+
+def test_encode_loudness_nonfinite_measurement_rejected(tmp_path: Path) -> None:
+    settings = MediaLoudnessSettings(
+        unit="lufs", target_i=-18.0, true_peak_db=-1.5, loudness_range=11.0
+    )
+    app_home, manifest, tools = _seed_book(tmp_path, profile="m4b", loudness=settings)
+    runner = FakeMediaRunner(frame_count_per_norm=4800)
+    runner.capture_output = MediaProcessOutput(
+        return_code=0,
+        stdout="",
+        stderr=(
+            '{\n"input_i" : "-inf",\n"input_tp" : "-3.10",\n'
+            '"input_lra" : "7.20",\n"input_thresh" : "-34.00",\n'
+            '"target_offset" : "-0.50"\n}\n'
+        ),
+    )
+
+    with pytest.raises(MediaEncodeError) as exc_info:
+        asyncio.run(encode(manifest, tools, runner, app_home=app_home))
+    assert exc_info.value.error_code == "command_failed"
+
+
+def test_encode_loudness_requires_toolchain_support(tmp_path: Path) -> None:
+    settings = MediaLoudnessSettings(
+        unit="lufs", target_i=-18.0, true_peak_db=-1.5, loudness_range=11.0
+    )
+    app_home, manifest, tools = _seed_book(
+        tmp_path,
+        profile="m4b",
+        loudness=settings,
+        toolchain_has_loudnorm=False,
+    )
+    runner = FakeMediaRunner(frame_count_per_norm=4800)
+
+    with pytest.raises(MediaCodecUnavailableError) as exc_info:
+        asyncio.run(encode(manifest, tools, runner, app_home=app_home))
+    assert exc_info.value.error_code == "codec_unavailable"
+    assert runner.recorded_argv == []
+    assert runner.capture_count == 0

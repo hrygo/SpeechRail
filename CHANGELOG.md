@@ -6,6 +6,24 @@
 
 - CustomVoice 合成在未指定 `SpeechRail-Seed` 时，按音色与归一化文本派生稳定采样 seed，避免同一请求每次随机选择不同的语音时长；显式 caller seed 仍可覆盖，integrity receipt 记录实际使用的采样策略与 seed。
 
+## [3.12.0] - 2026-10-17
+
+### Added
+
+- 有声书整书 M4B 导出支持嵌入封面：App 校验并随书保存图片，导出清单以 v2 封面条目传递，编码器在存在封面时才追加 `attached_pic` 音轨；无封面时命令行与旧版逐字节一致，v1 清单夹带封面或 v2 非 M4B 清单按 `invalid_request` 拒绝。
+
+### Changed
+
+- 重构有声书制作、会议助手、实时字幕与提词器的工作流与界面文案，收敛首屏动作、流程反馈与高级操作的分层。
+
+### Fixed
+
+- 推理流停滞 deadline 测试改用显式时间点断言，消除 CI 负载下 `Task.sleep` 抖动造成的假失败。
+
+### Notes
+
+- macOS App build 递增为 55；本机 ad-hoc 构建未做 Developer ID 公证。
+
 ## [3.11.1] - 2026-10-17
 
 ### Changed
