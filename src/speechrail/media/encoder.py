@@ -439,6 +439,16 @@ async def encode(
 
             m4b_rel = f"exports/{manifest.request_id}/stage/book.m4b"
             m4b_abs = stage_dir / "book.m4b"
+            # A cover is a third input (index 2) mapped as an attached picture; the
+            # no-cover argv stays byte-for-byte identical (empty insertions, `-vn`).
+            cover_input: list[str] = []
+            if manifest.cover is not None:
+                cover_input = ["-i", str(audiobooks_root / manifest.cover.relative_path)]
+            cover_map = (
+                ["-map", "2:v:0", "-c:v", "copy", "-disposition:v:0", "attached_pic"]
+                if manifest.cover is not None
+                else ["-vn"]
+            )
             m4b_argv = [
                 ffmpeg_str,
                 "-nostdin",
@@ -456,13 +466,14 @@ async def encode(
                 "ffmetadata",
                 "-i",
                 "chapters.ffmeta",
+                *cover_input,
                 "-map",
                 "0:a:0",
                 "-map_metadata",
                 "1",
                 "-map_chapters",
                 "1",
-                "-vn",
+                *cover_map,
                 "-c:a",
                 "aac",
                 "-b:a",

@@ -78,6 +78,7 @@ public struct AudiobookPreparedExport: Codable, Equatable, Sendable {
     public let expectedFrameCount: Int64
     public let expectedSampleRate: Int
     public let expectedChapterFrameCounts: [UUID: Int64]
+    public let expectsArtwork: Bool
     public var verification: AudiobookMediaVerification?
 
     public init(
@@ -93,6 +94,7 @@ public struct AudiobookPreparedExport: Codable, Equatable, Sendable {
         expectedFrameCount: Int64,
         expectedSampleRate: Int = AudiobookLimits.intermediateSampleRate,
         expectedChapterFrameCounts: [UUID: Int64] = [:],
+        expectsArtwork: Bool = false,
         verification: AudiobookMediaVerification? = nil
     ) {
         self.requestID = requestID
@@ -107,6 +109,7 @@ public struct AudiobookPreparedExport: Codable, Equatable, Sendable {
         self.expectedFrameCount = expectedFrameCount
         self.expectedSampleRate = expectedSampleRate
         self.expectedChapterFrameCounts = expectedChapterFrameCounts
+        self.expectsArtwork = expectsArtwork
         self.verification = verification
     }
 }
@@ -120,6 +123,9 @@ public enum AudiobookExportError: LocalizedError, Equatable, Sendable {
     case overwriteConsentRequired(URL)
     case destinationModifiedAfterConsent(URL)
     case commitFailed(String)
+    case coverNotSupportedForProfile
+    case coverBookMismatch
+    case coverServiceUnsupported
 
     public var errorDescription: String? {
         switch self {
@@ -140,6 +146,12 @@ public enum AudiobookExportError: LocalizedError, Equatable, Sendable {
             return "目标文件在您确认覆盖后已被其他程序修改，为保护原文件已中止覆盖。"
         case let .commitFailed(detail):
             return "导出文件保存失败：\(detail)"
+        case .coverNotSupportedForProfile:
+            return "分章 MP3 导出暂不支持封面；封面仅用于整本 M4B。"
+        case .coverBookMismatch:
+            return "所选封面不属于当前书籍；请重新选择。"
+        case .coverServiceUnsupported:
+            return "当前服务版本不识别带封面的导出清单；请更新 SpeechRail 服务后重试。封面不会被静默丢弃。"
         }
     }
 }
@@ -231,8 +243,17 @@ public actor AudiobookExportController {
     public func prepare(
         bookID: UUID,
         chapterIDs: [UUID]?,
-        profile: AudiobookExportProfile
+        profile: AudiobookExportProfile,
+        cover: AudiobookCoverAsset? = nil
     ) async throws -> AudiobookPreparedExport {
+        if let cover {
+            if profile == .chapterMP3 {
+                throw AudiobookExportError.coverNotSupportedForProfile
+            }
+            guard cover.bookID == bookID else {
+                throw AudiobookExportError.coverBookMismatch
+            }
+        }
         let book = try await store.book(id: bookID)
         let allChapters = try await store.chapters(for: bookID).sorted { $0.ordinal < $1.ordinal }
         let allCandidates = try await store.candidates(for: bookID)
@@ -375,7 +396,13 @@ public actor AudiobookExportController {
             profile: profile.rawValue,
             bookTitle: book.title,
             author: book.author,
-            chapters: manifestChapters
+            chapters: manifestChapters,
+            cover: cover.map {
+                AudiobookExportManifestPayload.CoverItem(
+                    relativePath: $0.relativePath,
+                    imageSHA256: $0.fileSHA256
+                )
+            }
         )
         let manifestData = try ControlWireCodec.encode(manifest)
         let requestFileURL = exportReqDir.appendingPathComponent("request.json", isDirectory: false)
@@ -385,7 +412,10 @@ public actor AudiobookExportController {
         if let customStageEncoder {
             stageResult = try await customStageEncoder(manifest, exportReqDir)
         } else {
-            stageResult = try await executeMediaExportViaControlTransport(requestID: requestID)
+            stageResult = try await executeMediaExportViaControlTransport(
+                requestID: requestID,
+                hasCover: cover != nil
+            )
         }
 
         if cancelledRequestIDs.contains(requestID) || Task.isCancelled {
@@ -465,7 +495,8 @@ public actor AudiobookExportController {
             stageURL: stageTargetURL,
             expectedFrameCount: totalFrames,
             expectedSampleRate: targetSampleRate,
-            expectedChapterFrameCounts: expectedChapterFrameCounts
+            expectedChapterFrameCounts: expectedChapterFrameCounts,
+            expectsArtwork: cover != nil
         )
         let verification: AudiobookMediaVerification
         do {
@@ -656,7 +687,8 @@ public actor AudiobookExportController {
     // MARK: - Private XPC Polling
 
     private func executeMediaExportViaControlTransport(
-        requestID: UUID
+        requestID: UUID,
+        hasCover: Bool
     ) async throws -> MediaExportResultSnapshot {
         let startResponse: ControlResponse
         do {
@@ -674,6 +706,9 @@ public actor AudiobookExportController {
         if startResponse.status == .failed {
             if startResponse.errorCode == .unsupported || startResponse.errorCode == .managedRuntimeMissing || startResponse.errorCode == .codecUnavailable {
                 throw AudiobookExportError.mediaToolUnavailable(startResponse.message ?? "当前运行时未包含媒体导出工具")
+            }
+            if hasCover, startResponse.errorCode == .invalidRequest {
+                throw AudiobookExportError.coverServiceUnsupported
             }
             throw AudiobookExportError.commitFailed(startResponse.message ?? "导出启动失败")
         }
@@ -710,6 +745,9 @@ public actor AudiobookExportController {
             case .failed, .rolledBack, .unavailable:
                 if statusResp.errorCode == .unsupported || statusResp.errorCode == .codecUnavailable {
                     throw AudiobookExportError.mediaToolUnavailable(statusResp.message ?? "缺少音频编码器")
+                }
+                if hasCover, statusResp.errorCode == .invalidRequest {
+                    throw AudiobookExportError.coverServiceUnsupported
                 }
                 throw AudiobookExportError.commitFailed(statusResp.message ?? "媒体编码过程失败")
             case .accepted, .running, .ok, .unchanged:

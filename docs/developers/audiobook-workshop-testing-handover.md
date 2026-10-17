@@ -2,8 +2,8 @@
 title: "有声书工坊（Audiobook Workshop）测试与验收交接手册"
 status: active
 audience: "QA 测试团队、客户端验收工程师、发布门禁负责人"
-version: "1.4.0"
-date: 2026-10-15
+version: "1.5.0"
+date: 2026-10-17
 ---
 
 # 🧪 有声书工坊（Audiobook Workshop）测试与验收交接手册
@@ -67,8 +67,8 @@ uv run --no-sync pytest --no-cov \
 ```
 
 **重点验收点**：
-- `tests/test_media_manifest.py`：拒绝 `../` 越界、拒绝符号链接、拒绝非本 `book_id` 目录下的 WAV、拒绝 SHA-256 不匹配的篡改音频、拒绝 >64 MiB 的超大 manifest。
-- `tests/test_media_encoder.py`：验证 300 章合成 M4B 的章节数 (`len(chapters) == 300`)、采样率 (`48000 Hz`)、时长误差 (`<= 250ms`)，以及分章 MP3 的文件数量与 `manifest.json` 完整性。
+- `tests/test_media_manifest.py`：拒绝 `../` 越界、拒绝符号链接、拒绝非本 `book_id` 目录下的 WAV、拒绝 SHA-256 不匹配的篡改音频、拒绝 >64 MiB 的超大 manifest；v1 回归不变、v1 带 `cover` 拒绝、v2 封面路径/扩展名/越界与超限/缺失/符号链接拒绝、v2 图像 SHA-256 核对、`chapter_mp3` 配 v2 拒绝。
+- `tests/test_media_encoder.py`：验证 300 章合成 M4B 的章节数 (`len(chapters) == 300`)、采样率 (`48000 Hz`)、时长误差 (`<= 250ms`)，以及分章 MP3 的文件数量与 `manifest.json` 完整性；含封面 M4B 的 argv 增加 `2:v:0`/`attached_pic`/`-c:v copy` 并去掉 `-vn`，无封面 argv 逐项不变。
 - `tests/test_media_commands.py`：验证 `speechrail media encode-audiobook` CLI JSON 输出契约与错误码映射。
 
 ### 2.2 SwiftPM 模块级确定性单元测试（T01–T14）
@@ -86,7 +86,7 @@ swift test --package-path macos/SpeechRailApp --filter "Audiobook|LLMProviderTes
 |---|---|---|---|
 | **T01** | `AudiobookSourceTests` | UTF-8 半开字节区间 `[startByte, endByte)`、非标量边界拒绝、大文件分块读取不常驻内存、稳定哈希 | `swift test --package-path macos/SpeechRailApp --filter AudiobookSourceTests` |
 | **T02** | `AudiobookImportTests` | UTF-8 / BOM / UTF-16LE / UTF-16BE / GB18030 流式转码、CRLF/CR 归一化、>64 MiB 拒绝、中英文章节识别、序章合并、无标题长文按句切分 | `swift test --package-path macos/SpeechRailApp --filter AudiobookImportTests` |
-| **T03** | `AudiobookStoreTests` | SQLite WAL + 外键约束、1,000 段批量读写、`AudiobookAssetJournal` 崩溃恢复（清理 staged 与孤儿 WAV，保护已采用与可撤销历史 WAV） | `swift test --package-path macos/SpeechRailApp --filter AudiobookStoreTests` |
+| **T03** | `AudiobookStoreTests` | SQLite WAL + 外键约束、1,000 段批量读写、`AudiobookAssetJournal` 崩溃恢复（清理 staged 与孤儿 WAV，保护已采用与可撤销历史 WAV）；封面资产安装原子性与类型/超限/符号链接/空文件拒绝、`existing`/`remove` 边界、废纸篓携带封面 | `swift test --package-path macos/SpeechRailApp --filter AudiobookStoreTests` |
 | **T04** | `AudiobookAnalysisPromptTests` & `LLMProviderTests` | `LLMModule.audiobook` 专用/全局回退与未配置拦截、章节理解与角色合并 JSON 契约、越界字节区间与无效置信度拒绝 | `swift test --package-path macos/SpeechRailApp --filter "AudiobookAnalysisPromptTests|LLMProviderTests"` |
 | **T05** | `AudiobookAnalysisTests` | 跨章同名/别名合并、低置信度对白标记 `needsConfirmation` 并默认回退旁白、断点续跑与模型身份变更失效 | `swift test --package-path macos/SpeechRailApp --filter AudiobookAnalysisTests` |
 | **T05b** | `AudiobookAnalysisProgressTests` | 分析进度闭式事件序列、三阶段覆盖与终态收敛、百分比单调、拆窗重试显形与复位、失败诊断不丢、runID 观测关联、run 级 sink 优先、过期/跨 run 事件丢弃、错误码封闭词表、事件缓冲有界与脱敏 | `swift test --package-path macos/SpeechRailApp --filter AudiobookAnalysisProgressTests` |
@@ -97,7 +97,7 @@ swift test --package-path macos/SpeechRailApp --filter "Audiobook|LLMProviderTes
 | **T08** | `AudiobookProductionTests` & `ServiceContractTests` | 能力快照版本锁定、串行 TTS 合成、8 MiB 响应体积上限护栏、48 kHz 单声道 WAV 落盘、静音/削波检测、暂停/恢复与崩溃续作 | `swift test --package-path macos/SpeechRailApp --filter "AudiobookProductionTests|ServiceContractTests"` |
 | **T09** | `AudiobookRevisionTests` | 单段重录候选生成、新旧候选试听对比、原子采用切换、一键撤销恢复原版、历史候选保护 | `swift test --package-path macos/SpeechRailApp --filter AudiobookRevisionTests` |
 | **T10** | `AudiobookListeningTests` & `AppModelTests` | `SharedPlaybackOwner` 唯一播放权抢占、收听/试听自动暂停后台合成、跨切片无缝推进、章节跳转、断点续听持久化 | `swift test --package-path macos/SpeechRailApp --filter "AudiobookListeningTests|AppModelTests"` |
-| **T12** | `AudiobookExportTests` & `AgentCoreTests` | `encodeAudiobookMedia` XPC 命令白名单与参数校验、输入 WAV 哈希/帧数预检、M4B/MP3 产物二次校验、损坏产物拦截 | `swift test --package-path macos/SpeechRailApp --filter "AudiobookExportTests|AgentCoreTests"` |
+| **T12** | `AudiobookExportTests` & `AgentCoreTests` | `encodeAudiobookMedia` XPC 命令白名单与参数校验、输入 WAV 哈希/帧数预检、M4B/MP3 产物二次校验、损坏产物拦截；封面：`chapter_mp3` 与跨书封面预拒绝、v2 清单内容、`expectsArtwork` 传递、verifier 需/禁封面与 `artworkPresent` 上报 | `swift test --package-path macos/SpeechRailApp --filter "AudiobookExportTests|AgentCoreTests"` |
 | **T13** | `AudiobookWorkflowTests` & `WindowLayoutPolicyTests` | `AudiobookWorkflowModel` 四阶段流转、书架/工作台/收听模式切换、分析进度接线（sink 随 run 传入、暂停重跑代次隔离）与响应式窗口布局契约 | `swift test --package-path macos/SpeechRailApp --filter "AudiobookWorkflowTests|WindowLayoutPolicyTests"` |
 | **T14** | `AudiobookAcceptanceTests` | 端到端全链路闭环验收（导入 → 分章 → AI 理解 → 角色绑定与试听门禁 → 章节合成 → 单段重录采用与撤销 → 收听进度 → M4B/MP3 导出） | `swift test --package-path macos/SpeechRailApp --filter AudiobookAcceptanceTests` |
 

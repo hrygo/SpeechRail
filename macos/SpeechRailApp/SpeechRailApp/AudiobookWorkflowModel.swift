@@ -280,6 +280,9 @@ public final class AudiobookWorkflowModel {
     public var preparedExport: AudiobookPreparedExport?
     public private(set) var isPreparingExport: Bool = false
     public private(set) var exportRecords: [AudiobookExportRecord] = []
+    public private(set) var exportCover: AudiobookCoverAsset?
+    public private(set) var exportCoverPreviewURL: URL?
+    public private(set) var exportCoverErrorMessage: String?
 
     public var importPreview: AudiobookImportPreview?
     public var importFileURL: URL?
@@ -315,6 +318,7 @@ public final class AudiobookWorkflowModel {
     private var revisionController: AudiobookRevisionController?
     private var productionController: AudiobookProductionController?
     private var exportController: AudiobookExportController?
+    private var coverStore: AudiobookCoverAssetStore?
 
     public let voiceCatalogModel: VoiceCatalogModel
     public private(set) var voiceCatalogRevision: String = ""
@@ -358,6 +362,7 @@ public final class AudiobookWorkflowModel {
         guard store == nil else { return }
         guard let createdStore = try? dependencies.makeStore() else { return }
         self.store = createdStore
+        self.coverStore = AudiobookCoverAssetStore(root: createdStore.rootURL)
         let renderer = dependencies.speechRenderer
         let cast = AudiobookCastController(store: createdStore, capabilityProvider: { try await renderer.fetchEffectiveCapabilities() }, voiceCatalog: dependencies.voiceCatalog)
         let rev = AudiobookRevisionController(store: createdStore)
@@ -782,6 +787,7 @@ public final class AudiobookWorkflowModel {
             let committedChapterID = latestChapterSelection ?? snapshot.chapterDetails.chapterID
             let mustReloadChapterDetails = committedChapterID != snapshot.chapterDetails.chapterID
             selectedBook = snapshot.book
+            await reloadExportCover(for: bookID)
             chapters = snapshot.chapters
             roleStatsByID = snapshot.roleStatsByID
             characters = snapshot.characters
@@ -871,6 +877,9 @@ public final class AudiobookWorkflowModel {
             if selectedBook?.id == bookID {
                 selectedBook = nil
                 surfaceMode = .shelf
+                exportCover = nil
+                exportCoverPreviewURL = nil
+                exportCoverErrorMessage = nil
             }
             await refreshShelf()
             bannerMessage = "已移入有声书废纸篓，原始 TXT 与已导出的外部文件不受影响。"
@@ -2819,15 +2828,61 @@ public final class AudiobookWorkflowModel {
 
     // MARK: - Export Actions
 
+    public func setExportCover(sourceURL: URL) async {
+        guard let bookID = selectedBook?.id, let coverStore else { return }
+        exportCoverErrorMessage = nil
+        do {
+            exportCover = try await coverStore.install(bookID: bookID, sourceURL: sourceURL)
+            exportCoverPreviewURL = await coverStore.coverFileURL(bookID: bookID)
+        } catch {
+            exportCover = nil
+            exportCoverPreviewURL = nil
+            exportCoverErrorMessage = error.localizedDescription
+        }
+    }
+
+    public func clearExportCover() async {
+        guard let bookID = selectedBook?.id, let coverStore else {
+            exportCover = nil
+            exportCoverPreviewURL = nil
+            return
+        }
+        exportCover = nil
+        exportCoverPreviewURL = nil
+        exportCoverErrorMessage = nil
+        try? await coverStore.remove(bookID: bookID)
+    }
+
+    private func reloadExportCover(for bookID: UUID) async {
+        guard let coverStore else {
+            exportCover = nil
+            exportCoverPreviewURL = nil
+            return
+        }
+        exportCoverErrorMessage = nil
+        if let asset = try? await coverStore.existing(bookID: bookID) {
+            exportCover = asset
+            exportCoverPreviewURL = await coverStore.coverFileURL(bookID: bookID)
+        } else {
+            exportCover = nil
+            exportCoverPreviewURL = nil
+        }
+    }
+
     public func prepareExport(profile: AudiobookExportProfile, chapterIDs: [UUID]?) async {
         guard let bookID = selectedBook?.id, let exportController else { return }
         isPreparingExport = true
         errorMessage = nil
+        if let exportCover, exportCover.bookID != bookID {
+            self.exportCover = nil
+        }
+        let scopedCover = exportCover.flatMap { $0.bookID == bookID ? $0 : nil }
         do {
             let prepared = try await exportController.prepare(
                 bookID: bookID,
                 chapterIDs: chapterIDs,
-                profile: profile
+                profile: profile,
+                cover: scopedCover
             )
             preparedExport = prepared
             isPreparingExport = false

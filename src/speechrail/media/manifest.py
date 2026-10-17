@@ -12,7 +12,21 @@ from uuid import UUID
 
 MAX_MANIFEST_BYTES = 64 * 1024 * 1024
 IO_CHUNK_BYTES = 64 * 1024
-MANIFEST_SCHEMA_VERSION = "audiobook_media_export_v1"
+MANIFEST_SCHEMA_VERSION_V1 = "audiobook_media_export_v1"
+MANIFEST_SCHEMA_VERSION_V2 = "audiobook_media_export_v2"
+# Kept as the historical v1 alias so existing readers/importers keep resolving.
+MANIFEST_SCHEMA_VERSION = MANIFEST_SCHEMA_VERSION_V1
+SUPPORTED_MANIFEST_SCHEMA_VERSIONS = frozenset(
+    {MANIFEST_SCHEMA_VERSION_V1, MANIFEST_SCHEMA_VERSION_V2}
+)
+# Engineering cap matching the ACX web Help Center cover limit (<= 8 MB). This is
+# a fail-closed upload guard, not a proof that the file satisfies ACX precisely.
+MAX_COVER_BYTES = 8 * 1024 * 1024
+_ALLOWED_COVER_SUFFIXES = frozenset({".jpg", ".jpeg", ".png"})
+# F3: the App-side cover store writes exactly this directory + filename stem, so the
+# manifest validator enforces the same fixed shape instead of accepting any path.
+_COVER_DIRECTORY_NAME = "cover"
+_COVER_FILENAME_STEM = "cover"
 _SAFE_REL_PATH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 
 
@@ -44,6 +58,12 @@ class MediaChapterEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class MediaCoverEntry:
+    relative_path: str
+    image_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
 class MediaExportManifest:
     schema_version: str
     request_id: UUID
@@ -55,6 +75,7 @@ class MediaExportManifest:
     author: str | None
     chapters: tuple[MediaChapterEntry, ...]
     app_home: Path | None = None
+    cover: MediaCoverEntry | None = None
 
 
 def sha256_file_chunked(path: Path, *, chunk_size: int = IO_CHUNK_BYTES) -> str:
@@ -133,6 +154,52 @@ def _validate_owned_relative_path(
     return candidate_path
 
 
+def _validate_owned_cover_path(
+    relative_path: str, *, book_id: UUID, audiobooks_root: Path
+) -> Path:
+    """Validate a v2 cover path against the fixed ``books/<book_id>/cover/cover.<ext>`` shape.
+
+    F3: the App-side store only ever installs ``cover/cover.<ext>``, so the filename is
+    pinned here rather than accepting an arbitrary owned image path.
+    """
+    if (
+        not relative_path
+        or "://" in relative_path
+        or relative_path.startswith("/")
+        or relative_path.startswith("-")
+        or "\\" in relative_path
+        or not _SAFE_REL_PATH_RE.match(relative_path)
+    ):
+        raise MediaManifestError("invalid relative asset path", error_code="invalid_request")
+
+    parts = relative_path.split("/")
+    if any(part in {"", ".", ".."} or part.startswith("-") for part in parts):
+        raise MediaManifestError(
+            "path traversal or flag injection rejected",
+            error_code="invalid_request",
+        )
+
+    if (
+        len(parts) != 4
+        or tuple(parts[:3]) != ("books", str(book_id), _COVER_DIRECTORY_NAME)
+        or Path(parts[3]).stem != _COVER_FILENAME_STEM
+        or Path(parts[3]).suffix.lower() not in _ALLOWED_COVER_SUFFIXES
+    ):
+        raise MediaManifestError(
+            "cover asset must be books/<book_id>/cover/cover.<jpg|jpeg|png>",
+            error_code="invalid_request",
+        )
+
+    candidate_path = audiobooks_root.joinpath(*parts)
+    _reject_symlinks_on_chain(audiobooks_root, candidate_path)
+    if not candidate_path.is_file():
+        raise MediaManifestError(
+            "referenced cover image does not exist",
+            error_code="integrity_mismatch",
+        )
+    return candidate_path
+
+
 def load_manifest(app_home: Path, request_id: UUID) -> MediaExportManifest:
     """Load and validate `<app_home>/audiobooks/exports/<request_id>/request.json`."""
     if not isinstance(request_id, UUID):
@@ -183,7 +250,12 @@ def load_manifest(app_home: Path, request_id: UUID) -> MediaExportManifest:
             error_code="invalid_request",
         ) from exc
 
-    if not isinstance(payload, dict) or payload.get("schema_version") != MANIFEST_SCHEMA_VERSION:
+    schema_version = payload.get("schema_version") if isinstance(payload, dict) else None
+    if (
+        not isinstance(payload, dict)
+        or not isinstance(schema_version, str)
+        or schema_version not in SUPPORTED_MANIFEST_SCHEMA_VERSIONS
+    ):
         raise MediaManifestError(
             "unsupported manifest schema_version",
             error_code="invalid_request",
@@ -209,6 +281,58 @@ def load_manifest(app_home: Path, request_id: UUID) -> MediaExportManifest:
     profile = payload.get("profile")
     if profile not in {"m4b", "chapter_mp3"}:
         raise MediaManifestError("unsupported export profile", error_code="invalid_request")
+
+    if schema_version == MANIFEST_SCHEMA_VERSION_V1 and "cover" in payload:
+        raise MediaManifestError(
+            "v1 manifest must not carry a cover entry",
+            error_code="invalid_request",
+        )
+    if schema_version == MANIFEST_SCHEMA_VERSION_V2 and profile != "m4b":
+        raise MediaManifestError(
+            "cover art is only supported for the m4b profile",
+            error_code="invalid_request",
+        )
+
+    cover_entry: MediaCoverEntry | None = None
+    if schema_version == MANIFEST_SCHEMA_VERSION_V2:
+        raw_cover = payload.get("cover")
+        if not isinstance(raw_cover, dict):
+            raise MediaManifestError(
+                "v2 manifest must contain a cover object",
+                error_code="invalid_request",
+            )
+        try:
+            cover_rel_path = str(raw_cover["relative_path"])
+            cover_sha256 = str(raw_cover["image_sha256"]).lower()
+        except (KeyError, ValueError, TypeError) as exc:
+            raise MediaManifestError("invalid cover fields", error_code="invalid_request") from exc
+
+        resolved_cover = _validate_owned_cover_path(
+            cover_rel_path,
+            book_id=book_id,
+            audiobooks_root=audiobooks_root,
+        )
+        try:
+            cover_byte_count = resolved_cover.stat().st_size
+        except OSError as exc:
+            raise MediaManifestError(
+                "referenced cover image does not exist",
+                error_code="integrity_mismatch",
+            ) from exc
+        if cover_byte_count > MAX_COVER_BYTES:
+            raise MediaManifestError(
+                "cover image exceeds the 8 MiB limit",
+                error_code="invalid_request",
+            )
+        if sha256_file_chunked(resolved_cover).lower() != cover_sha256:
+            raise MediaManifestError(
+                "cover image SHA-256 mismatch against manifest",
+                error_code="integrity_mismatch",
+            )
+        cover_entry = MediaCoverEntry(
+            relative_path=cover_rel_path,
+            image_sha256=cover_sha256,
+        )
 
     book_title = str(payload.get("book_title") or "").strip()
     if not book_title:
@@ -312,7 +436,7 @@ def load_manifest(app_home: Path, request_id: UUID) -> MediaExportManifest:
         )
 
     return MediaExportManifest(
-        schema_version=MANIFEST_SCHEMA_VERSION,
+        schema_version=schema_version,
         request_id=request_id,
         book_id=book_id,
         source_id=source_id,
@@ -322,4 +446,5 @@ def load_manifest(app_home: Path, request_id: UUID) -> MediaExportManifest:
         author=author,
         chapters=tuple(chapters),
         app_home=Path(app_home).resolve(),
+        cover=cover_entry,
     )

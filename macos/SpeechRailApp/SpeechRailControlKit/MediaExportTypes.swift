@@ -197,6 +197,24 @@ public struct AudiobookExportManifestPayload: Codable, Equatable, Sendable {
         }
     }
 
+    public struct CoverItem: Codable, Equatable, Sendable {
+        public let relativePath: String
+        public let imageSHA256: String
+
+        public init(relativePath: String, imageSHA256: String) {
+            self.relativePath = relativePath
+            self.imageSHA256 = imageSHA256
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case relativePath = "relative_path"
+            case imageSHA256 = "image_sha256"
+        }
+    }
+
+    public static let v1SchemaVersion = "audiobook_media_export_v1"
+    public static let v2SchemaVersion = "audiobook_media_export_v2"
+
     public let schemaVersion: String
     public let requestID: UUID
     public let bookID: UUID
@@ -206,9 +224,9 @@ public struct AudiobookExportManifestPayload: Codable, Equatable, Sendable {
     public let bookTitle: String
     public let author: String?
     public let chapters: [ChapterItem]
+    public let cover: CoverItem?
 
     public init(
-        schemaVersion: String = "audiobook_media_export_v1",
         requestID: UUID,
         bookID: UUID,
         sourceID: UUID,
@@ -216,9 +234,10 @@ public struct AudiobookExportManifestPayload: Codable, Equatable, Sendable {
         profile: String,
         bookTitle: String,
         author: String? = nil,
-        chapters: [ChapterItem]
+        chapters: [ChapterItem],
+        cover: CoverItem? = nil
     ) {
-        self.schemaVersion = schemaVersion
+        self.schemaVersion = cover == nil ? Self.v1SchemaVersion : Self.v2SchemaVersion
         self.requestID = requestID
         self.bookID = bookID
         self.sourceID = sourceID
@@ -227,6 +246,7 @@ public struct AudiobookExportManifestPayload: Codable, Equatable, Sendable {
         self.bookTitle = bookTitle
         self.author = author
         self.chapters = chapters
+        self.cover = cover
     }
 
     enum CodingKeys: String, CodingKey {
@@ -239,5 +259,6 @@ public struct AudiobookExportManifestPayload: Codable, Equatable, Sendable {
         case bookTitle = "book_title"
         case author
         case chapters
+        case cover
     }
 }

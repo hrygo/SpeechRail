@@ -12,19 +12,32 @@ public struct AudiobookMediaVerification: Codable, Equatable, Sendable {
     public var durationSeconds: TimeInterval
     public var chapterTitles: [String]
     public var fileSHA256: String
+    public var artworkPresent: Bool
 
     public init(
         codec: String,
         frameCount: Int64,
         durationSeconds: TimeInterval,
         chapterTitles: [String],
-        fileSHA256: String
+        fileSHA256: String,
+        artworkPresent: Bool = false
     ) {
         self.codec = codec
         self.frameCount = frameCount
         self.durationSeconds = durationSeconds
         self.chapterTitles = chapterTitles
         self.fileSHA256 = fileSHA256
+        self.artworkPresent = artworkPresent
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        codec = try container.decode(String.self, forKey: .codec)
+        frameCount = try container.decode(Int64.self, forKey: .frameCount)
+        durationSeconds = try container.decode(TimeInterval.self, forKey: .durationSeconds)
+        chapterTitles = try container.decode([String].self, forKey: .chapterTitles)
+        fileSHA256 = try container.decode(String.self, forKey: .fileSHA256)
+        artworkPresent = try container.decodeIfPresent(Bool.self, forKey: .artworkPresent) ?? false
     }
 }
 
@@ -112,14 +125,40 @@ public enum AudiobookMediaVerifier {
             chapterTitle: nil
         )
         let actualChapterTitles = try await inspectAndVerifyM4BChapters(at: url, expected: expected)
+        let artworkPresent = try await hasEmbeddedArtwork(at: url)
+        if expected.expectsArtwork, !artworkPresent {
+            throw AudiobookExportError.verificationFailed("导出请求要求写入封面，但产物中未检测到封面图。")
+        }
+        if !expected.expectsArtwork, artworkPresent {
+            throw AudiobookExportError.verificationFailed("本次导出未请求封面，但产物中检测到封面图。")
+        }
         let fileSHA = try sha256File(at: url)
         return AudiobookMediaVerification(
             codec: "aac",
             frameCount: expected.expectedFrameCount,
             durationSeconds: actualDuration,
             chapterTitles: actualChapterTitles,
-            fileSHA256: fileSHA
+            fileSHA256: fileSHA,
+            artworkPresent: artworkPresent
         )
+    }
+
+    /// F1: AVFoundation does not guarantee that an FFmpeg `attached_pic` stream surfaces as
+    /// `commonIdentifierArtwork` metadata, so artwork counts as present when EITHER the common
+    /// metadata carries an artwork item OR the asset exposes a non-audio picture track. This
+    /// keeps a silently dropped cover failing closed instead of passing as "no artwork".
+    private static func hasEmbeddedArtwork(at url: URL) async throws -> Bool {
+        try Task.checkCancellation()
+        let asset = AVURLAsset(url: url)
+        let artworkItems = AVMetadataItem.metadataItems(
+            from: try await asset.load(.commonMetadata),
+            filteredByIdentifier: .commonIdentifierArtwork
+        )
+        if !artworkItems.isEmpty {
+            return true
+        }
+        let videoTracks = try await asset.load(.tracks).filter { $0.mediaType == .video }
+        return !videoTracks.isEmpty
     }
 
     private static func inspectAndVerifyM4BChapters(

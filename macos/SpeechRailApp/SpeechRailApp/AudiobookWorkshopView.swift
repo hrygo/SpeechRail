@@ -353,6 +353,7 @@ struct AudiobookExportSheet: View {
     @Bindable var workflow: AudiobookWorkflowModel
     @State private var selectedProfile: AudiobookExportProfile = .m4b
     @State private var selectedChapterIDs: Set<UUID> = []
+    @State private var isPresentingCoverImporter = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
@@ -380,6 +381,50 @@ struct AudiobookExportSheet: View {
             Text(selectedProfile.subtitle)
                 .font(SpeechRailDesignTokens.Typography.callout)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+
+            if selectedProfile == .m4b {
+                CardSurface {
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                            coverThumbnail
+                            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                                Text("封面")
+                                    .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                                Text(workflow.exportCover == nil
+                                    ? "可选：选择一张 JPG 或 PNG 图片，随整本 M4B 一起写入，播放器中即可显示。"
+                                    : "已选择封面，将随整本 M4B 一起写入。")
+                                    .font(SpeechRailDesignTokens.Typography.caption)
+                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            }
+                            Spacer()
+                            Button(workflow.exportCover == nil ? "选择封面…" : "更换…") {
+                                isPresentingCoverImporter = true
+                            }
+                            .speechRailButton(.quiet)
+                            if workflow.exportCover != nil {
+                                Button("清除") {
+                                    Task { await workflow.clearExportCover() }
+                                }
+                                .speechRailButton(.quiet)
+                            }
+                        }
+                        if let coverError = workflow.exportCoverErrorMessage {
+                            Text(coverError)
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        }
+                    }
+                    .padding(SpeechRailDesignTokens.Spacing.sm)
+                }
+                .fileImporter(
+                    isPresented: $isPresentingCoverImporter,
+                    allowedContentTypes: [.jpeg, .png]
+                ) { result in
+                    if case let .success(url) = result {
+                        Task { await workflow.setExportCover(sourceURL: url) }
+                    }
+                }
+            }
 
             if selectedProfile == .chapterMP3 {
                 CardSurface {
@@ -481,6 +526,27 @@ struct AudiobookExportSheet: View {
         .frame(width: SpeechRailDesignTokens.Layout.Sheet.wideWidth)
         .onAppear {
             selectedChapterIDs = Set(workflow.chapters.map(\.id))
+        }
+    }
+
+    @ViewBuilder
+    private var coverThumbnail: some View {
+        if let url = workflow.exportCoverPreviewURL, let image = NSImage(contentsOf: url) {
+            Image(nsImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(
+                    width: SpeechRailDesignTokens.List.rowIconFrame,
+                    height: SpeechRailDesignTokens.List.rowIconFrame
+                )
+                .clipShape(SpeechRailDesignTokens.Corner.compactShape)
+        } else {
+            Image(systemName: "photo")
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .frame(
+                    width: SpeechRailDesignTokens.List.rowIconFrame,
+                    height: SpeechRailDesignTokens.List.rowIconFrame
+                )
         }
     }
 

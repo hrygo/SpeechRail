@@ -257,6 +257,7 @@ let package = Package(
                 "AudiobookListeningController.swift",
                 "AudiobookMediaVerifier.swift",
                 "AudiobookExportController.swift",
+                "AudiobookCoverAssetStore.swift",
                 "AudiobookWorkflowModel.swift",
                 "AudiobookWorkspaceProjection.swift",
                 "AudiobookWorkspaceReader.swift",
