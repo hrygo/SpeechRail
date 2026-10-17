@@ -46,6 +46,8 @@ final class AudiobookWorkspacePerformanceTests: XCTestCase {
                 let expected = referenceStats(characters: roles, annotations: duplicated, source: sourceInput)
                 XCTAssertEqual(actual.updatedCharacters, expected.updatedCharacters)
                 XCTAssertEqual(actual.statsByRoleID, expected.statsByRoleID)
+                XCTAssertLessThanOrEqual(actual.statsByRoleID.values.filter { $0.tier == .lead }.count, 6,
+                    "Eight available voices reserve two slots outside the automatic lead-role pool")
                 XCTAssertEqual(actual.conflictWeights, expected.conflictWeights)
                 XCTAssertEqual(work.annotationVisits, duplicated.count)
                 XCTAssertEqual(work.edgeVisits, graph.edges.count)
@@ -316,8 +318,12 @@ final class AudiobookWorkspacePerformanceTests: XCTestCase {
             volume($0.id) == volume($1.id) ? $0.id.uuidString < $1.id.uuidString : volume($0.id) > volume($1.id)
         }
         let total = ranked.reduce(0) { $0 + volume($1.id) }
+        let maxLeadRoles = max(1, min(8, availableVoiceCount > 0 ? max(3, availableVoiceCount - 2) : 6))
         var front = 0, leads: Set<UUID> = []
-        for role in ranked where front < Int(ceil(Double(total) * 0.75)) {
+        for role in ranked where front < Int(ceil(Double(total) * 0.75)) && leads.count < maxLeadRoles {
+            if ranked.count > maxLeadRoles && (counts[role.id] ?? 0) <= 1 && !leads.isEmpty {
+                break
+            }
             leads.insert(role.id); front += volume(role.id)
         }
         var stats: [UUID: AudiobookRoleDialogueStats] = [:]
