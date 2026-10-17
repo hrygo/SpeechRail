@@ -2,7 +2,7 @@
 title: "有声书工坊系统架构与边界合同"
 status: active
 audience: "系统架构师、核心开发者"
-version: "1.5.0"
+version: "1.6.0"
 date: 2026-10-17
 ---
 
@@ -70,3 +70,4 @@ graph LR
 - M4B 使用 AVFoundation 读取实际章节元数据组，核对章节数量、按时间排序的标题及每章起止位置。预期起止位置由逐章帧数累计计算，并与整本帧数一致；章节边界允许一个 codec frame 的容差（24 ms）。缺少或无法读取章节时拒绝导出，返回的 `chapterTitles` 来自实际媒体。
 - 封面随请求清单版本协商：带封面时写 `audiobook_media_export_v2`，封面路径固定为 `books/<book_id>/cover/cover.<jpg|jpeg|png>` 并附图像 SHA-256；服务端仅接受该固定文件名、限 8 MiB、拒绝 `chapter_mp3` 配封面。旧服务不识别 v2 时返回可见失败，不静默丢弃封面。
 - `AudiobookMediaVerifier` 以 AVFoundation 复核封面：请求要求封面时必须能读到封面图，未要求时不得存在封面图；缺失或多余均拒绝导出。检测同时覆盖 `commonIdentifierArtwork` 元数据与非音频图形轨，避免 FFmpeg 附加图未被暴露为美术元数据时误判为「无封面」。
+- 交付响度归一同为 v2 的可选扩展：清单带 `loudness` 时，服务先对拼接后的整本节目测量一次，再以测得的 I/LRA/TP/thresh/offset 施加线性增益，M4B 与分章 MP3 共用同一组测量值，因此同一本书内不会逐章漂移。`unit` 固定 `lufs`（按 ITU-R BS.1770-4 计量），`target_i` 必填，`true_peak_db` 与 `loudness_range` 有默认值和范围校验，未知字段拒绝；受管 `ffmpeg` 缺少 `loudnorm` 时直接拒绝导出，不静默产出未归一的媒体。默认值是叙事长内容的产品默认值，不构成 ACX/Audible 合规承诺。

@@ -2,8 +2,8 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.17.0"
-date: 2026-10-16
+version: "3.18.0"
+date: 2026-10-17
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -211,6 +211,10 @@ aligner 时，`verbose_json` / `srt` / `vtt` 返回 `503 timestamp_alignment_una
 `request_id`），既不隐式下载模型，也不返回空时间轴；aligner 无法给出请求粒度时返回
 `502 timestamp_alignment_unavailable`，不用整句均分冒充词级边界。`json`、`text` 与匿名分人的
 `diarized_json` 不需要 aligner。
+
+对齐的输入域是本请求自己的音频与它产出的冻结正文：调用方无法另外提交一段音频和一份自带文本
+要求逐词对齐，也没有独立的对齐端点。需要给外部录音配时间轴时，先用该录音走转写，再按转写
+结果取时间戳；两者不是同一能力。
 
 其余 OpenAI multipart 字段的真实行为：`languages` 在未给 `language` 时取首项作为语言提示；`temperature` 只校验 0–2，不参与推理；`keywords` 会去重后作为 `Key terms: ...` 前缀并入 `prompt`（总长上限 2000 字符）；`include` 接受但忽略——服务不返回 logprobs 或已知说话人识别；`known_speaker_names` / `known_speaker_references` 在普通转写中接受并忽略，若同一请求还要匿名分人则返回 `400 unsupported_parameter`；`stream=true` 只在匿名分人请求中可用，普通转写返回 `400 stream_unsupported`；`chunking_strategy` 同样只在分人请求中接受，取值限 `auto` / `server_vad`，也可写作 OpenAI 的 `chunking_strategy[type]` 形式，普通转写传入时返回 `400 chunking_strategy_unsupported`。
 

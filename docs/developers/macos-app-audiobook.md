@@ -2,7 +2,7 @@
 title: "SpeechRail macOS App 有声书工坊开发说明"
 status: active
 audience: "macOS App 开发者、架构与测试工程师"
-version: "1.7.0"
+version: "1.8.0"
 date: 2026-10-17
 ---
 
@@ -47,8 +47,9 @@ date: 2026-10-17
 
 ### 1.3 Python 媒体导出子系统 (`src/speechrail/media/`)
 
-- **`manifest.py`**：校验 `audiobook_media_export_v1`/`audiobook_media_export_v2` 请求清单、64 MiB 体积上限、路径穿越与符号链接拦截、所有输入 WAV 的 64 KiB 分块 SHA-256 核对。v2 额外要求固定形状的封面路径 `books/<book_id>/cover/cover.<jpg|jpeg|png>`（文件名固定为 `cover`）、图像 SHA-256 与 8 MiB 上限；`v1` 出现 `cover` 键、`chapter_mp3` 配 v2 一律拒绝。
-- **`encoder.py`**：定位 `ffmpeg`，整理章节 PCM 为 48 kHz 单声道，生成以 `1/48000` 为时间基准的 FFMETADATA 章节轨，编码为 `.m4b`（AAC、`+faststart+disable_chpl`）或分章 `.mp3`；有封面时 `.m4b` 追加第二路输入并以 `-map 2:v:0 -c:v copy -disposition:v:0 attached_pic` 挂载封面（同时移除 `-vn`），无封面时命令行与既有输出逐项一致；Swift 校验器独立探测实际媒体并与预期帧数核对。
+- **`manifest.py`**：校验 `audiobook_media_export_v1`/`audiobook_media_export_v2` 请求清单、64 MiB 体积上限、路径穿越与符号链接拦截、所有输入 WAV 的 64 KiB 分块 SHA-256 核对。v2 额外要求固定形状的封面路径 `books/<book_id>/cover/cover.<jpg|jpeg|png>`（文件名固定为 `cover`）、图像 SHA-256 与 8 MiB 上限；`v1` 出现 `cover` 键、`chapter_mp3` 配 v2 一律拒绝。v2 的 `loudness` 与封面同为可选扩展，可独立出现：`unit` 固定 `lufs`、`target_i` 必填、`true_peak_db`（默认 `-1.5`）与 `loudness_range`（默认 `11`）范围校验、未知键拒绝；`v1` 携带 `loudness` 同样拒绝。
+- **`encoder.py`**：定位 `ffmpeg`，整理章节 PCM 为 48 kHz 单声道，生成以 `1/48000` 为时间基准的 FFMETADATA 章节轨，编码为 `.m4b`（AAC、`+faststart+disable_chpl`）或分章 `.mp3`；有封面时 `.m4b` 追加第二路输入并以 `-map 2:v:0 -c:v copy -disposition:v:0 attached_pic` 挂载封面（同时移除 `-vn`），无封面时命令行与既有输出逐项一致；Swift 校验器独立探测实际媒体并与预期帧数核对。请求带 `loudness` 时先以 `-f null` 测量整本节目、解析 `print_format=json` 的 I/LRA/TP/thresh/offset，再以 `linear=true` 把同一组测量值应用到 `.m4b` 或每个分章 `.mp3`；工具链探测不到 `loudnorm` 时抛 `MediaCodecUnavailableError`，测量失败即报错，不回退单遍处理。
+
 - **`commands.py` & `cli.py`**：提供 `speechrail media encode-audiobook --app-home <path> --request-id <uuid> --format json`，供 `SpeechRailControlAgent` 调用并记入 `OperationJournal`。
 
 ## 2. 关键不变量
