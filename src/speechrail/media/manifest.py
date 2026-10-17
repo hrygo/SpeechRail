@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +29,28 @@ _ALLOWED_COVER_SUFFIXES = frozenset({".jpg", ".jpeg", ".png"})
 _COVER_DIRECTORY_NAME = "cover"
 _COVER_FILENAME_STEM = "cover"
 _SAFE_REL_PATH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+# Optional v2 loudness normalization. The unit is pinned to LUFS so a manifest
+# cannot request an unverifiable scale: integrated loudness is measured per
+# ITU-R BS.1770-4, which is what makes a `target_i` value comparable across runs.
+# The accepted ranges mirror the App-side slider so the API cannot express a
+# target the UI could never produce.
+#
+# The defaults below are product defaults for generic narrated long form, chosen
+# on their own terms rather than copied from any storefront or tool preset:
+# -1.5 dBTP keeps 1.5 dB of headroom under full scale for lossy re-encoding, and
+# an LRA target of 11 tolerates normal narration dynamics while still bounding
+# chapter-to-chapter swings. They are deliberately NOT an ACX/Audible claim: ACX
+# states its own RMS/peak/noise-floor window and forbids unauthorized synthetic
+# speech, so these values must never be presented as an ACX-ready guarantee.
+LOUDNESS_UNIT = "lufs"
+_LOUDNESS_TARGET_I_RANGE = (-40.0, -5.0)
+_LOUDNESS_TRUE_PEAK_DB_RANGE = (-10.0, 0.0)
+_LOUDNESS_RANGE_RANGE = (1.0, 50.0)
+_LOUDNESS_TRUE_PEAK_DB_DEFAULT = -1.5
+_LOUDNESS_RANGE_DEFAULT = 11.0
+_ALLOWED_LOUDNESS_KEYS = frozenset(
+    {"unit", "target_i", "true_peak_db", "loudness_range"}
+)
 
 
 class MediaManifestError(ValueError):
@@ -64,6 +87,14 @@ class MediaCoverEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class MediaLoudnessSettings:
+    unit: str
+    target_i: float
+    true_peak_db: float
+    loudness_range: float
+
+
+@dataclass(frozen=True, slots=True)
 class MediaExportManifest:
     schema_version: str
     request_id: UUID
@@ -76,6 +107,7 @@ class MediaExportManifest:
     chapters: tuple[MediaChapterEntry, ...]
     app_home: Path | None = None
     cover: MediaCoverEntry | None = None
+    loudness: MediaLoudnessSettings | None = None
 
 
 def sha256_file_chunked(path: Path, *, chunk_size: int = IO_CHUNK_BYTES) -> str:
@@ -200,6 +232,92 @@ def _validate_owned_cover_path(
     return candidate_path
 
 
+def _require_finite_number(value: Any, *, field: str) -> float:
+    """Return ``value`` as a float, rejecting booleans and non-finite numbers.
+
+    ``isinstance(True, int)`` is true in Python, and JSON admits ``NaN``/``Infinity``,
+    so a bare numeric check would let ``true`` through as 1.0 or smuggle a
+    non-comparable value past the range gates.
+    """
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+    ):
+        raise MediaManifestError(
+            f"loudness {field} must be a finite number",
+            error_code="invalid_request",
+        )
+    return float(value)
+
+
+def _parse_loudness_settings(raw: Any) -> MediaLoudnessSettings:
+    """Parse and validate the optional v2 ``loudness`` object.
+
+    Unknown keys are rejected rather than ignored so a misspelled field cannot
+    silently fall back to its default.
+    """
+    if not isinstance(raw, dict):
+        raise MediaManifestError(
+            "loudness must be an object",
+            error_code="invalid_request",
+        )
+    if set(raw) - _ALLOWED_LOUDNESS_KEYS:
+        raise MediaManifestError(
+            "loudness contains unknown fields",
+            error_code="invalid_request",
+        )
+    if raw.get("unit") != LOUDNESS_UNIT:
+        raise MediaManifestError(
+            f"loudness unit must be {LOUDNESS_UNIT!r}",
+            error_code="invalid_request",
+        )
+    if "target_i" not in raw:
+        raise MediaManifestError(
+            "loudness target_i is required",
+            error_code="invalid_request",
+        )
+
+    target_i = _require_finite_number(raw["target_i"], field="target_i")
+    low, high = _LOUDNESS_TARGET_I_RANGE
+    if not low <= target_i <= high:
+        raise MediaManifestError(
+            f"loudness target_i must be within [{low}, {high}]",
+            error_code="invalid_request",
+        )
+
+    true_peak_db = (
+        _require_finite_number(raw["true_peak_db"], field="true_peak_db")
+        if "true_peak_db" in raw
+        else _LOUDNESS_TRUE_PEAK_DB_DEFAULT
+    )
+    low, high = _LOUDNESS_TRUE_PEAK_DB_RANGE
+    if not low <= true_peak_db <= high:
+        raise MediaManifestError(
+            f"loudness true_peak_db must be within [{low}, {high}]",
+            error_code="invalid_request",
+        )
+
+    loudness_range = (
+        _require_finite_number(raw["loudness_range"], field="loudness_range")
+        if "loudness_range" in raw
+        else _LOUDNESS_RANGE_DEFAULT
+    )
+    low, high = _LOUDNESS_RANGE_RANGE
+    if not low <= loudness_range <= high:
+        raise MediaManifestError(
+            f"loudness loudness_range must be within [{low}, {high}]",
+            error_code="invalid_request",
+        )
+
+    return MediaLoudnessSettings(
+        unit=LOUDNESS_UNIT,
+        target_i=target_i,
+        true_peak_db=true_peak_db,
+        loudness_range=loudness_range,
+    )
+
+
 def load_manifest(app_home: Path, request_id: UUID) -> MediaExportManifest:
     """Load and validate `<app_home>/audiobooks/exports/<request_id>/request.json`."""
     if not isinstance(request_id, UUID):
@@ -282,57 +400,72 @@ def load_manifest(app_home: Path, request_id: UUID) -> MediaExportManifest:
     if profile not in {"m4b", "chapter_mp3"}:
         raise MediaManifestError("unsupported export profile", error_code="invalid_request")
 
-    if schema_version == MANIFEST_SCHEMA_VERSION_V1 and "cover" in payload:
+    if schema_version == MANIFEST_SCHEMA_VERSION_V1 and (
+        "cover" in payload or "loudness" in payload
+    ):
         raise MediaManifestError(
-            "v1 manifest must not carry a cover entry",
-            error_code="invalid_request",
-        )
-    if schema_version == MANIFEST_SCHEMA_VERSION_V2 and profile != "m4b":
-        raise MediaManifestError(
-            "cover art is only supported for the m4b profile",
+            "v1 manifest must not carry cover or loudness entries",
             error_code="invalid_request",
         )
 
     cover_entry: MediaCoverEntry | None = None
+    loudness_settings: MediaLoudnessSettings | None = None
     if schema_version == MANIFEST_SCHEMA_VERSION_V2:
-        raw_cover = payload.get("cover")
-        if not isinstance(raw_cover, dict):
+        has_cover = "cover" in payload
+        has_loudness = "loudness" in payload
+        if not has_cover and not has_loudness:
             raise MediaManifestError(
-                "v2 manifest must contain a cover object",
+                "v2 manifest must contain a cover or loudness object",
                 error_code="invalid_request",
             )
-        try:
-            cover_rel_path = str(raw_cover["relative_path"])
-            cover_sha256 = str(raw_cover["image_sha256"]).lower()
-        except (KeyError, ValueError, TypeError) as exc:
-            raise MediaManifestError("invalid cover fields", error_code="invalid_request") from exc
+        if has_cover and profile != "m4b":
+            raise MediaManifestError(
+                "cover art is only supported for the m4b profile",
+                error_code="invalid_request",
+            )
+        if has_cover:
+            raw_cover = payload.get("cover")
+            if not isinstance(raw_cover, dict):
+                raise MediaManifestError(
+                    "v2 manifest cover must be an object",
+                    error_code="invalid_request",
+                )
+            try:
+                cover_rel_path = str(raw_cover["relative_path"])
+                cover_sha256 = str(raw_cover["image_sha256"]).lower()
+            except (KeyError, ValueError, TypeError) as exc:
+                raise MediaManifestError(
+                    "invalid cover fields", error_code="invalid_request"
+                ) from exc
 
-        resolved_cover = _validate_owned_cover_path(
-            cover_rel_path,
-            book_id=book_id,
-            audiobooks_root=audiobooks_root,
-        )
-        try:
-            cover_byte_count = resolved_cover.stat().st_size
-        except OSError as exc:
-            raise MediaManifestError(
-                "referenced cover image does not exist",
-                error_code="integrity_mismatch",
-            ) from exc
-        if cover_byte_count > MAX_COVER_BYTES:
-            raise MediaManifestError(
-                "cover image exceeds the 8 MiB limit",
-                error_code="invalid_request",
+            resolved_cover = _validate_owned_cover_path(
+                cover_rel_path,
+                book_id=book_id,
+                audiobooks_root=audiobooks_root,
             )
-        if sha256_file_chunked(resolved_cover).lower() != cover_sha256:
-            raise MediaManifestError(
-                "cover image SHA-256 mismatch against manifest",
-                error_code="integrity_mismatch",
+            try:
+                cover_byte_count = resolved_cover.stat().st_size
+            except OSError as exc:
+                raise MediaManifestError(
+                    "referenced cover image does not exist",
+                    error_code="integrity_mismatch",
+                ) from exc
+            if cover_byte_count > MAX_COVER_BYTES:
+                raise MediaManifestError(
+                    "cover image exceeds the 8 MiB limit",
+                    error_code="invalid_request",
+                )
+            if sha256_file_chunked(resolved_cover).lower() != cover_sha256:
+                raise MediaManifestError(
+                    "cover image SHA-256 mismatch against manifest",
+                    error_code="integrity_mismatch",
+                )
+            cover_entry = MediaCoverEntry(
+                relative_path=cover_rel_path,
+                image_sha256=cover_sha256,
             )
-        cover_entry = MediaCoverEntry(
-            relative_path=cover_rel_path,
-            image_sha256=cover_sha256,
-        )
+        if has_loudness:
+            loudness_settings = _parse_loudness_settings(payload["loudness"])
 
     book_title = str(payload.get("book_title") or "").strip()
     if not book_title:
@@ -447,4 +580,5 @@ def load_manifest(app_home: Path, request_id: UUID) -> MediaExportManifest:
         chapters=tuple(chapters),
         app_home=Path(app_home).resolve(),
         cover=cover_entry,
+        loudness=loudness_settings,
     )
