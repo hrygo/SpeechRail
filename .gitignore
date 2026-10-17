@@ -58,6 +58,7 @@ secrets/
 .omo/
 .opencode/
 .superpowers/
+.workbuddy-ai/
 
 # Local inference artifacts must stay outside the repository.
 *.safetensors
