@@ -297,13 +297,13 @@ public struct AssistantView: View {
                 // 「开始对话」**不在页头**：它已经在结论条上（用户第一眼看的地方）。
                 // 同一个动作在一屏里画两遍，是上一轮刚收掉的毛病。
                 PageActionButton(
-                    title: "打开设置",
+                    title: "会话设置…",
                     systemImage: "slider.horizontal.3",
                     helpText: "打开会话设置：模型地址、默认角色与声音"
                 ) { openSettings() }
             case .blocked:
                 PageActionButton(
-                    title: "设置 · 会话",
+                    title: "会话设置…",
                     systemImage: "slider.horizontal.3",
                     helpText: "打开会话设置，填对话模型的地址、模型与密钥"
                 ) { openSettings() }
@@ -911,13 +911,13 @@ public struct AssistantView: View {
                 }
             }
             Divider()
-            Button("🎙️ 录制专属声音（音色克隆）…") {
+            Button("克隆新声音…") {
                 navigation.request(.voiceClone)
             }
-            Button("✨ 创作新音色（音色创作）…") {
+            Button("设计新声音…") {
                 navigation.request(.voiceDesign)
             }
-            Button("📚 打开音色库管理…") {
+            Button("管理音色库…") {
                 navigation.request(.voiceLibrary)
             }
         } label: {
@@ -1847,17 +1847,17 @@ public struct AssistantView: View {
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
 
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Button("👋 你好，介绍一下你自己") {
+                    Button("你好，介绍一下你自己") {
                         sendPrompt("你好，介绍一下你自己")
                     }
                     .speechRailButton(.secondary)
 
-                    Button("💡 讲一个有趣的科技冷知识") {
+                    Button("讲一个有趣的科技冷知识") {
                         sendPrompt("讲一个有趣的科技冷知识")
                     }
                     .speechRailButton(.secondary)
 
-                    Button("🎙️ 测试朗读语速与音色效果") {
+                    Button("试听当前朗读音色") {
                         // VA-12/A43：试听走现有 previewSelectedVoice，不经 typed 提问。
                         // 经提问会按文字模态生成且不自动朗读，测不到 TTS/播放。
                         previewSelectedVoice()
@@ -1938,13 +1938,15 @@ public struct AssistantView: View {
                 Image(systemName: assistant.isMuted ? "mic.slash.fill" : "mic.fill")
                     .font(SpeechRailDesignTokens.Typography.captionMedium)
                     .accessibilityHidden(true)
-                Text(assistant.isMuted ? "取消静音" : "静音")
+                Text(assistant.isMuted ? "取消静音" : "静音麦克风")
                     .font(SpeechRailDesignTokens.Typography.captionMedium)
             }
         }
         .speechRailButton(assistant.isMuted ? .primary : .secondary)
         .fixedSize(horizontal: true, vertical: false)
         .help(assistant.isMuted ? "取消静音，恢复麦克风拾音" : "静音麦克风，暂停语音输入")
+        .accessibilityLabel(assistant.isMuted ? "取消静音麦克风" : "静音麦克风")
+        .accessibilityValue(assistant.isMuted ? "已静音" : "正在拾音")
     }
 
     private var liveChatTextField: some View {
@@ -1995,13 +1997,14 @@ public struct AssistantView: View {
                 Image(systemName: "stop.circle")
                     .font(SpeechRailDesignTokens.Typography.captionMedium)
                     .accessibilityHidden(true)
-                Text("结束")
+                Text("结束对话")
                     .font(SpeechRailDesignTokens.Typography.captionMedium)
             }
         }
         .speechRailButton(.quiet)
         .fixedSize(horizontal: true, vertical: false)
         .help("结束这次对话；记录会保存在记录库里")
+        .accessibilityLabel("结束当前对话")
     }
 
     private var isAssistantSpeaking: Bool {
@@ -2503,6 +2506,8 @@ public struct AssistantView: View {
                 }
                 .speechRailButton(.secondary)
                 .help("只是暂时不说了；对话、记录都留着。要结束用页头的「结束对话」")
+                .accessibilityLabel(assistant.isMuted ? "取消静音麦克风" : "静音麦克风")
+                .accessibilityValue(assistant.isMuted ? "已静音" : "正在拾音")
 
                 livePersonaBadge
                 controlsModeIndicator
@@ -2560,13 +2565,13 @@ public struct AssistantView: View {
                     }
                 }
                 Divider()
-                Button("🎙️ 录制专属声音（音色克隆）…") {
+                Button("克隆新声音…") {
                     navigation.request(.voiceClone)
                 }
-                Button("✨ 创作新音色（音色创作）…") {
+                Button("设计新声音…") {
                     navigation.request(.voiceDesign)
                 }
-                Button("📚 打开音色库管理…") {
+                Button("管理音色库…") {
                     navigation.request(.voiceLibrary)
                 }
             }
@@ -2654,9 +2659,9 @@ public struct AssistantView: View {
     private var livePersonaBadge: some View {
         Menu {
             Text("当前会话已绑定角色：「\(selectedPersonaTitle)」")
-            Text("按设计规范，中途更换风格会导致上下文认知混乱。")
+            Text("为保持对话上下文连贯，本轮对话中角色固定不变。")
             Divider()
-            Button("结束当前会话，并以新角色开新对话…") {
+            Button("结束本轮并更换角色…") {
                 Task { await restartWithPersonaPick() }
             }
         } label: {
@@ -2831,7 +2836,7 @@ public struct AssistantView: View {
         case .record:
             return "历史对话归档"
         case .memory:
-            return "长期记忆资产"
+            return "长期记忆"
         }
     }
 
@@ -2869,6 +2874,7 @@ public struct AssistantView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            .accessibilityLabel("语音助手辅助面板切换")
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
         .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
@@ -2914,8 +2920,9 @@ public struct AssistantView: View {
             SessionHairline()
             SessionPanelActions(alignment: .spread) {
                 if state == .ready {
-                    Button("检查输入电平") { isCheckingInput = true }
+                    Button("检查麦克风音量…") { isCheckingInput = true }
                         .speechRailButton(.secondary)
+                        .help("查看当前麦克风的实时音量反应")
                 } else if state == .blocked {
                     Button("检查连接") { Task { await assistant.retry() } }
                         .speechRailButton(.secondary)
@@ -2923,13 +2930,21 @@ public struct AssistantView: View {
                         .help(
                             preferences.isLLMConfigured(for: .assistant)
                                 ? "重新走一遍连通性与接口检查"
-                                : "还没填服务地址与模型；先在「设置 · 会话」里填好，再来点它"
+                                : "还没填服务地址与模型；先在「会话设置…」里填好，再来点它"
                         )
                 } else if state == .live {
-                    Button("🎨 换音色") { inspectorTab = .voice }
-                        .speechRailButton(.secondary)
-                    Button("🔄 新开一轮换角色") { Task { await restartWithPersonaPick() } }
-                        .speechRailButton(.secondary)
+                    Button {
+                        inspectorTab = .voice
+                    } label: {
+                        Label("切换音色", systemImage: "waveform.badge.magnifyingglass")
+                    }
+                    .speechRailButton(.secondary)
+                    Button {
+                        Task { await restartWithPersonaPick() }
+                    } label: {
+                        Label("新开对话并换角色", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .speechRailButton(.secondary)
                 }
             }
         }
@@ -2968,7 +2983,7 @@ public struct AssistantView: View {
                 Spacer()
                 StatusPill(tone: .healthy, label: "本地私有")
             }
-            Text("实时麦克风电平动态感应，音频 PCM 纯内存流转、绝不落盘；识别与合成均由 Apple Silicon 独立单元驱动。")
+            Text("实时感应麦克风音量，原始音频仅在内存处理、不写盘；语音识别与合成均在本机完成。")
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -3360,17 +3375,17 @@ public struct AssistantView: View {
             SessionHairline()
             SessionPanelActions(alignment: .spread) {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Button("🎙️ 录音克隆…") {
+                    Button("克隆新声音…") {
                         navigation.request(.voiceClone)
                     }
                     .speechRailButton(.secondary)
                     .help("录制 10~30 秒样本，克隆专属音色")
 
-                    Button("✨ 创作音色…") {
+                    Button("设计新声音…") {
                         navigation.request(.voiceDesign)
                     }
                     .speechRailButton(.secondary)
-                    .help("用提示词创作新音色")
+                    .help("用描述词设计新音色")
                 }
 
                 Button("回到会话") { inspectorTab = .session }
@@ -3589,10 +3604,10 @@ public struct AssistantView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
-                    Text("长期记忆资产")
+                    Text("长期记忆")
                         .font(SpeechRailDesignTokens.Typography.captionMedium)
                         .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                    Text("自动注入提示词上下文，下一轮起效")
+                    Text("自动带入后续对话，下一轮生效")
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                 }
@@ -3714,7 +3729,7 @@ public struct AssistantView: View {
             Spacer(minLength: 0)
             SessionHairline()
             SessionPanelActions(alignment: .spread) {
-                Text(memories.isEmpty ? "记忆留存本机" : "已记录 \(memories.count) 条记忆资产")
+                Text(memories.isEmpty ? "记忆留存本机" : "已保存 \(memories.count) 条记忆")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                 Button("回到会话") { inspectorTab = .session }
@@ -4461,7 +4476,7 @@ struct InputLevelSheet: View {
 
             HStack {
                 Spacer(minLength: 0)
-                Button("完成") { dismiss() }
+                Button("关闭") { dismiss() }
                     .speechRailButton(.primary)
             }
         }

@@ -183,8 +183,8 @@ public struct InnerOSDrawer: View {
     private func statusLine(_ exchange: InnerOSExchange) -> String {
         var parts: [String] = []
         switch exchange.status {
-        case .generating: parts.append("在答…")
-        case .failed: parts.append("没答出来")
+        case .generating: parts.append("正在回答…")
+        case .failed: parts.append("未能生成回答")
         case .cancelled: parts.append("已取消")
         case .ready:
             let count = session.evidence[exchange.id]?.count ?? 0
@@ -342,7 +342,7 @@ public struct InnerOSDrawer: View {
     private func sentencePicker(for exchange: InnerOSExchange) -> some View {
         let sentences = InnerOSSession.selectableSentences(in: exchange.answerText ?? "")
         return VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Text("写进纪要哪几句")
+            Text("选择要写进纪要的句子")
                 .font(.headline)
             Text("只勾你想要的句子。没勾的不会进纪要，也不会写进这次会议的存档。")
                 .font(.callout)

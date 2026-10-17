@@ -71,12 +71,14 @@ extension MeetingView {
             facts: pageStatusPresentation.facts
         ) {
             if meeting.phase.isLive {
-                Button(meeting.isPaused ? "继续录" : "暂停一下") {
+                Button(meeting.isPaused ? "继续录制" : "暂停录制") {
                     Task { await meeting.togglePause() }
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .help("只是暂时不把声音送进去；会话、文字记录都在，麦克风也还归这一场")
+                .accessibilityLabel(meeting.isPaused ? "继续录制会议" : "暂停录制会议")
+                .accessibilityValue(meeting.isPaused ? "已暂停" : "正在录制")
             }
         }
     }
@@ -92,7 +94,7 @@ extension MeetingView {
             if meeting.isPaused { return "已暂停" }
             return meeting.isMicrophoneMuted ? "正在录音 · 麦克风已静音" : "正在录音"
         case .interrupted: return "录制中断"
-        case .processing: return meeting.minutes.isBusy ? "正在整理会议…" : "会议收尾需要处理"
+        case .processing: return meeting.minutes.isBusy ? "正在整理会议…" : "会议收尾未完成"
         case .archived: return "这一场已经结束"
         }
     }
