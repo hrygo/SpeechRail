@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 审计与专项审查记录索引"
 status: active
-version: "1.2.0"
+version: "1.3.0"
 date: 2026-10-17
 ---
 
@@ -18,7 +18,8 @@ date: 2026-10-17
 
 ## 📑 审查与排障记录
 
-- **[2026-10-17 SpeechRail 与 VoiceStudio 竞品能力调研与设计吸收建议](2026-10-17-speechrail-voicestudio-competitive-research.md)**：第二轮校正响度/封面/分块/隐私同意证据，补齐 manifest schema 与 verifier 依赖、阶段顺序和验收门槛；本轮仅改方案，不动产品代码。
+- **[2026-10-17 SpeechRail 对 ElevenLabs 的分阶段吸收方案](2026-10-17-speechrail-elevenlabs-absorption-plan.md)**：把 ElevenLabs（云端商用参照）的产品/开发者设计语义转译为本地可行候选（E1–E7），含分阶段方案、定性 ROI、依赖、风险、验收条件与明确不做项（不引入云 API/计费/发行/商业条款）。
+- **[2026-10-17 SpeechRail 与 VoiceStudio、ElevenLabs 竞品能力调研与设计吸收建议](2026-10-17-speechrail-voicestudio-competitive-research.md)**：三方对照（v1.3.0 纳入 ElevenLabs 与 E1–E7 矩阵）；含 VoiceStudio 两轮证据校正（响度/封面/分块/隐私同意、manifest schema 与 verifier 依赖、阶段顺序与验收门槛），并按网页版/PDF 来源范围修订 ACX 封面规格（含 ≤8 MB）。仅改方案，不动产品代码。
 - **[2026-10-16 合并后音频与转录链路回归审查](2026-10-16-post-merge-regression-review.md)**：rebase 前后修复核对、音频预取消、会议收尾保存、字幕正文保留和动态分人认证人数边界。
 - **[2026-10-16 App 性能优化实施与验收记录](2026-10-16-app-performance-acceptance.md)**：跨模块确定性回归、资源容量、取消回收与真实 CPU/交互待测矩阵。
 - **[2026-10-15 有声书工坊流程、算法与用户旅程审查记录](2026-10-15-audiobook-workshop-review.md)**：覆盖 TXT 导入、章节规划、全书分析、角色确认、章节制作、返修恢复、收听和导出的模块审查与缺陷复盘。

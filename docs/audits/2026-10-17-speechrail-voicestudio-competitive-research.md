@@ -1,16 +1,16 @@
 ---
-title: "SpeechRail 与 VoiceStudio 竞品能力调研与设计吸收建议"
+title: "SpeechRail 与 VoiceStudio、ElevenLabs 竞品能力调研与设计吸收建议"
 status: active
-version: "1.2.0"
+version: "1.3.0"
 date: 2026-10-17
 audience: "系统架构师、后端与 macOS 核心开发者、产品决策者"
 ---
 
-# SpeechRail 与 VoiceStudio 竞品能力调研与设计吸收建议
+# SpeechRail 与 VoiceStudio、ElevenLabs 竞品能力调研与设计吸收建议
 
-本报告以证据驱动方式，对两个本地语音/有声书生成工具进行对照调研：本仓库 **SpeechRail**，以及竞品 **VoiceStudio（ObsidianAudio）**。目标不是功能罗列，而是识别「哪些设计值得吸收、在 SpeechRail 的架构与职责边界内如何落地、代价与风险、如何验收」。
+本报告以证据驱动方式，对语音/有声书生成工具进行对照调研：本仓库 **SpeechRail**、本地竞品 **VoiceStudio（ObsidianAudio）**，以及云端商用参照 **ElevenLabs**（用户已确认的调研对象；其与 SpeechRail 的吸收关系为「云 SaaS 设计语义转译为本地可行形态」，详见证据分层与 §2.13）。目标不是功能罗列，而是识别「哪些设计值得吸收、在 SpeechRail 的架构与职责边界内如何落地、代价与风险、如何验收」。
 
-> 本轮授权范围：仅产出本调研报告与更新 `docs/audits/README.md` 索引。**未修改任何 SpeechRail 产品代码，未新增或运行任何测试，未运行 build / UI 自动化 / benchmark / 服务 / 真实模型**。
+> 增补轮（v1.3.0）授权范围：仅更新本报告、新建 `2026-10-17-speechrail-elevenlabs-absorption-plan.md`、更新 `docs/audits/README.md` 索引。**未修改任何 SpeechRail 产品代码/契约/测试，未新增或运行任何测试，未运行 build / UI 自动化 / benchmark / 服务 / 真实模型，未提交/推送**。v1.1.0–v1.2.0 期间的授权声明为各轮历史记录。
 
 ---
 
@@ -20,6 +20,7 @@ audience: "系统架构师、后端与 macOS 核心开发者、产品决策者"
 - **核验日期**：2026-10-17（会话环境日期）。
 - **SpeechRail**：分支 `main`（`da18da8a chore: release 3.11.1`，领先 `origin/main` 1 个提交）。本轮编辑前工作区为 19 个已修改文件 + 2 个未跟踪文件；其中 `docs/audits/README.md` 是既有审计索引改动，竞品报告与另一计划未跟踪。其他 18 个修改文件与另 1 个未跟踪计划均为并行改动，保留原样（详见 §7）。
 - **VoiceStudio（ObsidianAudio）**：分支 `main`，HEAD `f47221a1`，工作区干净。
+- **历史快照说明（v1.3.0 增补）**：上两行与 §7 的分支/HEAD/改动数是 v1.2.0 写作时点的**历史快照**。v1.3.0 增补（ElevenLabs 纳入）在分支 `codex/speechrail-ux-redesigns`（`4b52697e`，工作区干净）上执行；当时并行 UX 改动已提交入库，未再改动。历史快照不作为当前工作区事实引用。
 
 ### 0.2 证据分层标注（全文统一）
 - **【代码实测】**：在核验日期于指定 `path:line` 直接读取源码确认的当前行为。
@@ -28,7 +29,7 @@ audience: "系统架构师、后端与 macOS 核心开发者、产品决策者"
 - **文件存在或函数存在 ≠ 能力可用**；`/readyz=200` 或单次 smoke 通过 ≠ 质量/性能/长时稳定性通过。
 
 ### 0.3 外部事实
-外部规范于 **2026-10-17** 核验。ACX 当前公开音频要求是每个文件 RMS -23 至 -18 dB、peak 不高于 -3 dB、noise floor 不高于 -60 dB RMS；其公开要求没有把 `-19 LUFS / LRA 11` 定义为 ACX 合规阈值，RMS 与 LUFS 不可直接替换。ACX 还写明未经授权不得使用 TTS/AI 自动录音，因此 SpeechRail 的 AI 生成用途不能宣传为 ACX-ready 或默认适用于 ACX 提交。封面规格另含正方形、至少 2400×2400、RGB、24-bit、≤8 MB 等；把 artwork 附加到 M4B 并不自动满足这些规格，且 ACX 流程把封面作为单独的项目资料管理。详见 [ACX 音频提交要求](https://help.acx.com/s/article/what-are-the-acx-audio-submission-requirements) 与 [ACX 封面要求](https://help.acx.com/s/article/cover-art-requirements)。FFmpeg `loudnorm` 官方文档确认支持单遍/双遍，动态模式可能升采样到 192 kHz；实施时需明确采样率恢复和 mono `dual_mono` 设置，详见 [FFmpeg loudnorm 文档](https://ffmpeg.org/ffmpeg-filters.html#loudnorm)。以上仅用于评估设计，不构成平台审核保证。
+外部规范于 **2026-10-17** 核验。ACX 当前公开音频要求是每个文件 RMS -23 至 -18 dB、peak 不高于 -3 dB、noise floor 不高于 -60 dB RMS；其公开要求没有把 `-19 LUFS / LRA 11` 定义为 ACX 合规阈值，RMS 与 LUFS 不可直接替换。ACX 还写明未经授权不得使用 TTS/AI 自动录音，因此 SpeechRail 的 AI 生成用途不能宣传为 ACX-ready 或默认适用于 ACX 提交。封面要求须按**来源范围**区分（v1.3.0 修订）：ACX Help Center [封面要求](https://help.acx.com/s/article/cover-art-requirements) **网页版**为官方条款来源——条目更新于 **Oct 6, 2026**，其 "cover art size and file requirements" 明列 **`File size cannot exceed 8 MB`**（Codex 于 2026-10-17 直接核验该官方页面原文；OpenCode 环境 webfetch 因页面 JS 壳仅能获取加载框架，属工具限制，引用内容以该次官方页面核验为准）；Amazon 托管官方图示规格 [OfficialAudibleCoverArtRequirementsv4.pdf](https://g-ec2.images-amazon.com/images/G/01/Audible/en_US/acx/pdf/OfficialAudibleCoverArtRequirementsv4.pdf)（本会话直接抽取文本）列出正方形、≥2400×2400、24-bit、≥72 dpi、RGB、JPG/PNG/TIF、文件名规则与内容禁忌，**未列文件大小**。二者并集为封面要求：**网页版含 ≤8 MB（官方条款），PDF 为图像规格图示**。此前「PDF 未列出文件大小 ⇒ ACX 无此要求」的推断过强，已按网页版官方条款修订。把 artwork 附加到 M4B 并不自动满足这些规格，且 ACX 流程把封面作为单独的项目资料管理。详见 [ACX 音频提交要求](https://help.acx.com/s/article/what-are-the-acx-audio-submission-requirements) 与 [ACX 封面要求](https://help.acx.com/s/article/cover-art-requirements)。FFmpeg `loudnorm` 官方文档确认支持单遍/双遍，动态模式可能升采样到 192 kHz；实施时需明确采样率恢复和 mono `dual_mono` 设置，详见 [FFmpeg loudnorm 文档](https://ffmpeg.org/ffmpeg-filters.html#loudnorm)。以上仅用于评估设计，不构成平台审核保证。
 
 ### 0.4 方法边界（本轮约束）
 - 未运行任何测试、build、服务、benchmark 或真实模型；所有结论为**静态代码 + 文档**证据。
@@ -48,6 +49,8 @@ audience: "系统架构师、后端与 macOS 核心开发者、产品决策者"
 | 起点 | 契约与运行时正确性、可观测、可回滚 | 单机开箱即用、首屏「第一次发声」、成本/显存自愈 |
 
 **结论**：两者不可直接比较功能数量。有价值的吸收点集中在**长文工程质量、导出交付质量、开箱体验、自愈与证据可信度**四类，且必须映射回 SpeechRail 的既有边界（§4 逐项分析）。
+
+**ElevenLabs（云端商用语音平台，用户已确认为调研对象）**：与上述本地两者的根本差异是**形态**——云端 SaaS、credits 计量、商业授权绑定付费计划、音频/文本出网处理（企业可选数据驻留与 Zero Retention Mode）。对 SpeechRail（本地隐私优先运行时）它是**设计参照与生态竞争者**（同为语音能力供给）；对 VoiceStudio（本地有声书工坊）它以 Audiobooks 产品构成更直接的**产品竞品**。吸收原则：只转译其**产品设计语义**（上下文试听、生成状态、换声影响范围、调度权衡、对齐契约等）为本地可行形态，**不引入**其云 API、计费、分发与商业条款。能力清单见 §2.13，吸收方案见 `2026-10-17-speechrail-elevenlabs-absorption-plan.md`。
 
 ---
 
@@ -103,6 +106,14 @@ audience: "系统架构师、后端与 macOS 核心开发者、产品决策者"
 - 【代码实测】`backend/api/routers/engines.py`：引擎目录/安装/选择（TTS/ASR/LLM/分人/翻译），`engine_disk_usage`、`_is_hf_repo_id` 校验、sidecar 安装。
 - 【代码实测】`backend/services/endpoint_race.py`：出站端点探测/竞速，`_is_allowed_probe_endpoint` **允许清单**、`ProbeResult`、`throughput_probe`、`env_opt_out()`、`explicit_endpoint()`、`mode()`/`set_mode_pref()`。
 - 【代码实测】`backend/services/engine_routing.py`、`gpu_gateway.py`：引擎路由与 GPU 网关（存在）。
+
+### 2.13 ElevenLabs 能力清单（官方文档，核验 2026-10-17）
+> 本节全部为【官方文档】证据（elevenlabs.io 官方产品/开发者文档），不含源码实测（云端闭源）；官方营销表述不作为独立证据。
+- **Audiobooks 长文工作流**：EPUB/PDF 导入→解析（章节/版权页等结构检测，官方提示须人工复核）→ **Character Casting**（AI 检测角色并按真实台词试听、上限 150 角色/书、**换角色声音→作废该角色全部已生成音频→确认→仅重生成段落计费**）→ 发音（自动检测词条 + alias 规则 + **在原文句子上下文中试听** + 词典**按序首条命中**、空规则回退默认）→ **段落级生成与状态条**（已生成不随配置自动更新，须显式重生成）→ 播放三模式（选段 / 逐段生成到章末 / 预生成多段平滑播放）→ 导出（全书/分章、MP3/WAV、单文件/章节 ZIP、AAF 时间线、字幕）→ 发行（ElevenReader/合作平台）。封面从 EPUB/PDF 自动提取。来源：[Audiobooks](https://elevenlabs.io/docs/eleven-creative/products/audiobooks.md)。
+- **TTS 流式与调度**：HTTP 分块流式 + WebSocket `stream-input`（`chunk_length_schedule`/`auto_mode`/`flush`/`try_trigger_generation`；官方明确「过小块生成可能降质」的**延迟-韵律权衡**由调度/auto_mode 把握）；word-to-audio 对齐选项（`sync_alignment`）；输出格式按订阅档门禁。来源：[Stream speech](https://elevenlabs.io/docs/api-reference/text-to-speech/stream)、[WebSocket](https://elevenlabs.io/docs/api-reference/text-to-speech/v-1-text-to-speech-voice-id-stream-input.mdx)、[Audio streaming 概念](https://elevenlabs.io/docs/eleven-api/concepts/audio-streaming.mdx)。
+- **Voice Design**：文本提示造音、一次生成 3 候选、guidance scale/loudness 参数；**官方自标 experimental**，生产一致性推荐 Professional Voice Clone。来源：[Voice Design](https://elevenlabs.io/docs/eleven-creative/voices/voice-design.md)。
+- **Forced Alignment**：音频 + 纯文本→逐词时间对齐转写（官方用途含有声书时间戳）；29 语、≤3GB/10h/675k 字符、不支持分人输入、与 STT 同价。来源：[Forced Alignment](https://elevenlabs.io/docs/overview/capabilities/forced-alignment.md)。
+- **商业与数据边界**：Free/Starter/Creator/Pro/Scale/Business+Enterprise；credits 计量、PAYG；**付费计划生成内容才有商业使用权，Free 仅非商用+署名**；克隆需 Starter+。默认美国存储；Enterprise 数据驻留（EU/印度/新加坡隔离环境，**存储限区但处理仍可能跨境**，见其 DPA）；Zero Retention Mode 可选且独立于驻留。来源：[Billing](https://elevenlabs.io/docs/overview/administration/billing.md)、[Data residency](https://elevenlabs.io/docs/overview/administration/data-residency.md)。
 
 ---
 
@@ -316,6 +327,15 @@ audience: "系统架构师、后端与 macOS 核心开发者、产品决策者"
 | P2-5 | 多语言（21 locale） | P2 | 代码实测 | 视目标受众再评估 | 否 |
 | P2-6 | 音频水印（溯源） | P2 | 代码实测 | 可选、懒加载；须权衡常驻模型约束 | 否 |
 | P2-7 | 出站端点探测/竞速治理 | P2 | 代码实测 | **不吸收**（SpeechRail 请求路径无静默网络） | 否 |
+| E1 | 发音规则上下文试听（ElevenLabs） | P1（UI/产品） | 官方文档 | 有声书工坊发音确认：规则在原文句子中试听 | 否（方案见吸收方案文档） |
+| E2 | 词典匹配次序语义澄清（ElevenLabs） | P2（契约/文档） | 官方文档+代码实测 | 明确按序首匹配/空规则回退语义（若未成文） | 否 |
+| E3 | 换声影响范围确认（ElevenLabs） | P2（产品设计） | 官方文档 | 改角色声音时明示作废/重生成范围 | 否 |
+| E4 | Forced Alignment 本地化研究（ElevenLabs） | P1（研究） | 官方文档 | 评估本地对齐器对提词器/有声书/字幕对齐的覆盖 | 否（研究前置） |
+| E5 | 流式调度权衡文档注脚（ElevenLabs） | P3（文档） | 官方文档 | 补「承诺点/延迟-韵律」权衡说明，不改协议 | 否 |
+| E6 | Voice Design 多候选试听（ElevenLabs） | P2（产品） | 官方文档 | 一次多候选试听；保留结构化指令词表 | 否 |
+| E7 | 水印可检测性对位（ElevenLabs，补强 P2-6） | P2 | 官方文档 | 做水印须同评估可检测性 | 否 |
+
+ElevenLabs 吸收项（E1–E7）的分阶段方案、ROI、依赖、风险、验收与**明确不做项**见 [`2026-10-17-speechrail-elevenlabs-absorption-plan.md`](2026-10-17-speechrail-elevenlabs-absorption-plan.md)。
 
 ---
 
@@ -358,8 +378,9 @@ audience: "系统架构师、后端与 macOS 核心开发者、产品决策者"
 
 ## 8. 结论
 - 目前有 3 个值得继续验证的高价值候选：**P0-1 通用交付响度、P0-2 M4B 封面、P0-3 密集文本规划**。它们都不是可直接开工的实现清单：P0-1 已核验 ACX 官方音频数值与 AI/TTS 限制，但该限制使 SpeechRail 不应承诺 ACX-ready；仍需验证通用目标的两遍成本与成品相对响度。P0-2 依赖 manifest schema、Swift/Python 边界和 artwork verifier 协调；P0-3 需以实际共用 240 codepoint planner 为基线做多语样本评估。P1-2 是独立产品方向，需覆盖隐私选择、失败恢复和无障碍体验。
-- SpeechRail 在**只读真源、确定性窗口/检查点、覆盖性回退、媒体双验证、能力快照与作业模型**上已强于或等价于 VoiceStudio，不应为「对齐功能数」而削弱这些边界。
-- 本报告第二轮补足了关键依赖与纠错。所有候选仍处于研究/方案阶段；本轮**仅修改审计文档与索引**，未实施产品代码、未新增或运行测试，未改变服务运行态。实施时按实际授权和项目规则选择最小验证，UI 自动化仍须逐次明确授权。
+- **ElevenLabs（v1.3.0 增补）**：作为云端商用参照纳入三方对照。高价值转译点是 **E1 发音上下文试听**与 **E4 Forced Alignment 研究**（P1）；E2/E3/E6/E7 为产品与契约层候选（P2）；E5 为文档注脚（P3）。全部吸收项均以「云 SaaS 设计语义 → 本地可行形态」为原则，**不引入**云 API、计费、发行与商业条款；分阶段方案与明确不做项见 `2026-10-17-speechrail-elevenlabs-absorption-plan.md`。ACX 封面要求已按网页版（含 ≤8 MB）与 PDF（图像规格）的来源范围区分修订（§0.3）。
+- SpeechRail 在**只读真源、确定性窗口/检查点、覆盖性回退、媒体双验证、能力快照与作业模型**上已强于或等价于 VoiceStudio，不应为「对齐功能数」而削弱这些边界；面对 ElevenLabs 类云端平台，SpeechRail 的结构性差异（隐私优先、无额度、本地验证安装）是定位而非差距。
+- 所有候选仍处于研究/方案阶段；增补轮**仅修改审计文档与索引**，未实施产品代码、未新增或运行测试，未改变服务运行态。实施时按实际授权和项目规则选择最小验证，UI 自动化仍须逐次明确授权。
 
 ---
 
@@ -398,5 +419,14 @@ audience: "系统架构师、后端与 macOS 核心开发者、产品决策者"
 
 **外部官方规范（核验日期 2026-10-17）**
 - [ACX 音频提交要求](https://help.acx.com/s/article/what-are-the-acx-audio-submission-requirements)：RMS/peak/noise floor、AI/TTS 限制及章节文件要求。
-- [ACX 封面要求](https://help.acx.com/s/article/cover-art-requirements)：方形、尺寸、格式、色彩与文件大小要求。
+- [ACX 封面要求·网页版](https://help.acx.com/s/article/cover-art-requirements)：官方条款，条目更新 Oct 6, 2026，明列 `File size cannot exceed 8 MB`（Codex 2026-10-17 直接核验官方页面原文）；[官方图示规格 PDF v4](https://g-ec2.images-amazon.com/images/G/01/Audible/en_US/acx/pdf/OfficialAudibleCoverArtRequirementsv4.pdf)：方形、≥2400×2400、24-bit、≥72 dpi、RGB、JPG/PNG/TIF、文件名规则（该 PDF 未列文件大小）。
 - [FFmpeg loudnorm filter](https://ffmpeg.org/ffmpeg-filters.html#loudnorm)：单遍/双遍选项、动态模式升采样提示、dual-mono 与测量参数要求。
+
+**ElevenLabs 官方文档（核验日期 2026-10-17）**
+- [Audiobooks](https://elevenlabs.io/docs/eleven-creative/products/audiobooks.md)：长文工作流、Character Casting、发音上下文试听、段落级生成状态、导出/发行。
+- [TTS Stream](https://elevenlabs.io/docs/api-reference/text-to-speech/stream)、[WebSocket stream-input](https://elevenlabs.io/docs/api-reference/text-to-speech/v-1-text-to-speech-voice-id-stream-input.mdx)、[Audio streaming 概念](https://elevenlabs.io/docs/eleven-api/concepts/audio-streaming.mdx)：流式调度（chunk_length_schedule/auto_mode/flush）与延迟-韵律权衡。
+- [Voice Design](https://elevenlabs.io/docs/eleven-creative/voices/voice-design.md)：3 候选生成、guidance scale、experimental 声明。
+- [Forced Alignment](https://elevenlabs.io/docs/overview/capabilities/forced-alignment.md)：音频+纯文本→逐词时间对齐契约。
+- [Billing](https://elevenlabs.io/docs/overview/administration/billing.md)：credits/订阅档/商业授权边界（付费计划才有商业使用权）。
+- [Data residency](https://elevenlabs.io/docs/overview/administration/data-residency.md)：默认美国存储、Enterprise 隔离环境、ZRM 可选、处理可能跨境。
+- 分阶段吸收方案：[`2026-10-17-speechrail-elevenlabs-absorption-plan.md`](2026-10-17-speechrail-elevenlabs-absorption-plan.md)。
