@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail macOS App AI 提词器"
 status: active
-version: "0.7.3"
-date: 2026-10-16
+version: "0.7.4"
+date: 2026-10-17
 ---
 
 # SpeechRail macOS App AI 提词器
@@ -262,3 +262,5 @@ scripts/macos_app_build.sh --configuration Debug
 验证：`swift test --package-path macos/SpeechRailApp --filter Teleprompter` 375 项 / 16 套件全部通过（新增 `stageMirrorPreferencePersists` 单测覆盖镜像默认值与持久化往返）。**未执行 UI 自动化与界面走查**（严格遵守 AGENTS.md 约束）。
 
 2026-10-05（用户旅程 E1–E8 实现核验）：按[`提词器用户旅程执行方案`](../../implementation/2026-10-03-teleprompter-user-journey-luna-guide.md) §3 / §5 / §8 完成实现与定向回归。内容侧：首次输入经 `updateQuickDraft` 取得文档身份并同步落盘，切稿前 `flushPendingDraftSave`，失败保留身份与重试；候选采用保留段落身份与来源用途，撤销恢复修改前内容，全跳过时以 `noReadableBlocks` 拒绝采用。控制侧：稳定前缀按丢弃数换算到保留坐标，同位短 final 可确认且不重复移动视口，有假设的空 final 保位并报“本句未确认，位置已保持”；人工接管同步撤销旧 generation，停止失败保持可重试状态；手动开台不调用 LLM/麦克风/ASR，重开恢复位置且保持手动态。回放报告为 `teleprompter.eval.v2`，输入仍为 `teleprompter.replay.v1`。验证：`swift test --package-path macos/SpeechRailApp` 419 项 / 17 套件通过，`scripts/macos_app_build.sh --configuration Debug` BUILD SUCCEEDED，`git diff --check` 通过；`teleprompter-replay --help` 可用，实际回放缺授权素材记 `not_run`。**未执行前台 UI 走查、VoiceOver、Reduce Motion 实测与真人音频验收；E9 条件增强记 `deferred`**。
+
+2026-10-17（提词器体验优化与流线型减负）：按[`提词器模块体验优化：调研、方案与落地验收记录`](../superpowers/plans/2026-10-17-teleprompter-ux-ui-redesign.md) 完成五项体验闭环修复：① **打通 `.ready` / `.ended` 返回原稿编辑闭环**：新增 `TeleprompterSession.returnToDraftEditing()` 与 `returnToReadyVersion()`，修复 `.ready` / `.ended` 下「重新编辑原稿」按钮因调用 `discardPendingVersion()` 而在 `activeVersion != nil` 时变成空操作的死锁，并补上 `.ready` / `.ended` 直接发起「重新整理朗读稿」的次级动作；② **`.prepared` 口述字符稿连续文档流减负与段落菜单补齐**：移除内层重复 `CardSurface` 套娃，段落编辑最小高度收紧为 `SpeechRailDesignTokens.Teleprompter.preparedBlockCompactMinHeight = 52`，将每段重复渲染的「撤销上次段落修改」提至表头唯一一处，移除表头与底座重复的第二个「恢复原稿」按钮，并为每段补齐一键切跟读方式与右侧「⋯」拆分/合并/插入菜单（接线 `splitBlock` / `mergeBlock` / `insertBlock`）；③ **目标时长即时同步与侧栏按 ID 复制回退**：`targetMinutesInput` 变更即同步并在开台/整理前兜底提交；新增 `copyableDocumentText(documentID:)`，修复侧栏行菜单误拷当前文档或在无版本时无法回退 `sourceText` 的缺陷；④ **顶栏/首屏/底部视效坞渐进披露**：首屏常驻推流与隐私横幅收敛为顶栏 `[推流与隐私 ⓘ]` Popover，移除顶栏重复的「打开提词器」按钮；工作台底部视效坞补齐 `镜头口播 / 讲台阅读 / 自定义`（`TeleprompterStagePreset`）分段切换，细项滑杆收纳进 `[显示设置…]` Popover；⑤ **舞台键盘守卫与主窗导播副驾**：`TeleprompterStagePresentationState` 同步控件焦点与外观 Popover 状态，避免 `TeleprompterPanel.keyHandler` 在按钮获焦或弹层展开时拦截 `Space/J/K/V/M`，并确保 `Esc` 优先关闭外观 Popover；`.ready` 列表增加「回到首段」快捷重置，`workbenchRunningContent` 增加当前朗读段实时预览与手动上一行/下一行/回首段控制。**未执行前台 UI 自动化、视觉/Reduce Motion 走查、VoiceOver 实机播报与真实麦克风验收**。

@@ -124,10 +124,14 @@ public struct TeleprompterStageView: View {
             .onChange(of: session.lastFailure) { _, failure in
                 showErrorNoticeIfNeeded(failure != nil && session.blocked == nil)
             }
+            .onChange(of: readingAreaFocused, initial: true) { _, focused in
+                presentation.readingAreaFocused = focused
+            }
             .onChange(of: focusedControl) { _, _ in
                 handleControlFocusChange()
             }
-            .onChange(of: isAppearancePopoverPresented) { _, presented in
+            .onChange(of: isAppearancePopoverPresented, initial: true) { _, presented in
+                presentation.isAppearancePopoverPresented = presented
                 if presented {
                     revealControls(immediate: true)
                 } else {
@@ -139,6 +143,11 @@ public struct TeleprompterStageView: View {
                         guard session.isStageOpen, focusedControl == nil else { return }
                         readingAreaFocused = true
                     }
+                }
+            }
+            .onChange(of: presentation.isAppearancePopoverPresented) { _, presented in
+                if isAppearancePopoverPresented != presented {
+                    isAppearancePopoverPresented = presented
                 }
             }
             .onChange(of: presentation.settingsRequestID) { _, requestID in
@@ -275,6 +284,7 @@ public struct TeleprompterStageView: View {
 
     private func handleControlFocusChange() {
         let focusInside = focusedControl != nil
+        presentation.controlFocusInside = focusInside
         interactionState.setControlFocus(focusInside)
         if focusInside {
             revealControls(immediate: true)
@@ -1183,7 +1193,7 @@ private struct TeleprompterStageAppearancePopover: View {
             TeleprompterStageQuickPresetControl(settings: settings)
             Divider()
             Toggle(
-                "始终显示控制",
+                "常显底部控制栏",
                 isOn: Binding(
                     get: { settings.alwaysShowControls },
                     set: { settings.alwaysShowControls = $0 }
@@ -1197,7 +1207,7 @@ private struct TeleprompterStageAppearancePopover: View {
                 )
             )
             Toggle(
-                "水平镜像翻转 (分光镜)",
+                "水平镜像翻转（分光镜）",
                 isOn: Binding(
                     get: { settings.isMirrored },
                     set: { settings.isMirrored = $0 }
@@ -1234,11 +1244,11 @@ private struct TeleprompterStageColumnWidthControl: View {
 
     var body: some View {
         TeleprompterStageContinuousSliderRow(
-            title: "正文列宽",
+            title: "正文栏宽",
             valueText: "\(Int(settings.contentWidth.rounded())) pt",
             value: Binding(get: { settings.contentWidth }, set: { settings.contentWidth = $0 }),
             range: Double(SpeechRailDesignTokens.Teleprompter.stageMinimumContentWidth)...Double(SpeechRailDesignTokens.Teleprompter.stageMaximumContentWidth),
-            accessibilityLabel: "提词卡正文列宽",
+            accessibilityLabel: "提词卡正文栏宽",
             accessibilityValue: "\(Int(settings.contentWidth.rounded())) 点",
             helpText: "限制每行字数；窗口再宽也不会把一行拉得过长"
         )

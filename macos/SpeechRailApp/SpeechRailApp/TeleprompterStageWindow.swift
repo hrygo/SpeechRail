@@ -8,8 +8,27 @@ public final class TeleprompterStagePresentationState {
     public var settingsRequestID: UUID?
     public private(set) var lineNavigationRequestID: UUID?
     public private(set) var lineNavigationDelta = 0
+    public var readingAreaFocused = true
+    public var controlFocusInside = false
+    public var isAppearancePopoverPresented = false
 
     public init() {}
+
+    public var acceptsReadingKeyCommands: Bool {
+        TeleprompterStageInteractionPolicy.acceptsReadingKeyCommands(
+            readingAreaFocused: readingAreaFocused,
+            controlFocusInside: controlFocusInside,
+            menuOrPopoverPresented: isAppearancePopoverPresented
+        )
+    }
+
+    /// 优先收起已展开的外观设置 Popover；若无弹层展开则返回 `false`，交由窗口执行关闭。
+    @discardableResult
+    public func dismissPresentedPopoverIfNeeded() -> Bool {
+        guard isAppearancePopoverPresented else { return false }
+        isAppearancePopoverPresented = false
+        return true
+    }
 
     public func requestLineNavigation(by delta: Int) {
         guard delta != 0 else { return }
@@ -66,6 +85,11 @@ public final class TeleprompterStageWindowController: NSObject, NSWindowDelegate
     public func moveReadingLine(by delta: Int) {
         guard isVisible else { return }
         presentation.requestLineNavigation(by: delta)
+    }
+
+    public func refreshWindowSizeIfNeeded() {
+        guard isVisible else { return }
+        updatePreferredWindowSize()
     }
 
     public func close() {
@@ -213,12 +237,15 @@ public final class TeleprompterStageWindowController: NSObject, NSWindowDelegate
             }
             switch event.keyCode {
             case 126, 123, 40: // Up arrow, Left arrow, K
+                guard self.presentation.acceptsReadingKeyCommands else { return false }
                 self.moveReadingLine(by: -1)
                 return true
             case 125, 124, 49, 38: // Down arrow, Right arrow, Space, J
+                guard self.presentation.acceptsReadingKeyCommands else { return false }
                 self.moveReadingLine(by: 1)
                 return true
             case 9: // V: toggle voice follow
+                guard self.presentation.acceptsReadingKeyCommands else { return false }
                 Task { @MainActor in
                     switch self.session.voiceAssistState {
                     case .following:
@@ -233,10 +260,13 @@ public final class TeleprompterStageWindowController: NSObject, NSWindowDelegate
                 }
                 return true
             case 46: // M: toggle mirror
+                guard self.presentation.acceptsReadingKeyCommands else { return false }
                 self.settings.isMirrored.toggle()
                 return true
-            case 53: // Escape
-                self.close()
+            case 53: // Escape: 优先收起已打开的外观设置 Popover，否则关闭舞台
+                if !self.presentation.dismissPresentedPopoverIfNeeded() {
+                    self.close()
+                }
                 return true
             default:
                 return false

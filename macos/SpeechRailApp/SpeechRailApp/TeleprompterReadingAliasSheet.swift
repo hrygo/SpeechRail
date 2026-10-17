@@ -266,7 +266,7 @@ public struct TeleprompterReadingAliasSheet: View {
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
             Spacer()
-            Button("完成") {
+            Button("关闭") {
                 dismiss()
             }
             .speechRailButton(.secondary)

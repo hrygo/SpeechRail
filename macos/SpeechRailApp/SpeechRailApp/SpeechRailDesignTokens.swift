@@ -1490,6 +1490,11 @@ public enum SpeechRailDesignTokens {
         public static let analyzingProgressMaxWidth: CGFloat = 360
         /// E6 候选段落编辑器单段最小高度：与原稿编辑器同级的可读写作空间。
         public static let preparedBlockEditorMinHeight: CGFloat = 144
+        /// 连续文档流模式下候选段落编辑框的紧凑最小高度（短句不留大片空白，长段随内容增高）。
+        public static let preparedBlockCompactMinHeight: CGFloat = 52
+        /// 工作台底部舞台显示设置 Popover 宽度与顶栏推流/隐私说明 Popover 宽度。
+        public static let workbenchStageSettingsPopoverWidth: CGFloat = 320
+        public static let privacyDisclosurePopoverWidth: CGFloat = 360
         /// 计时试读窗口样稿滚动区高度
         public static let trialSampleScrollHeight: CGFloat = 140
         /// 整理稿段落列表的可视高度上限，超出后列表内部滚动。

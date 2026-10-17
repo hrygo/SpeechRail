@@ -1209,4 +1209,33 @@ struct TeleprompterStageSettingsTests {
         settings.fontScale = SpeechRailDesignTokens.Teleprompter.stageMaximumFontScale
         #expect(settings.scriptPointSize <= SpeechRailDesignTokens.Teleprompter.stageScriptMaximumPointSize)
     }
+
+    @Test("stage presentation state guards reading key commands when controls or popover are active and dismisses popover first on Escape")
+    func stagePresentationStateGuardsReadingKeysAndDismissesPopoverFirst() {
+        let presentation = TeleprompterStagePresentationState()
+        #expect(presentation.acceptsReadingKeyCommands)
+        #expect(!presentation.dismissPresentedPopoverIfNeeded())
+
+        // 当焦点进入底部控制按钮时，Space/J/K/V/M 等阅读单键不得穿透。
+        presentation.controlFocusInside = true
+        #expect(!presentation.acceptsReadingKeyCommands)
+        presentation.controlFocusInside = false
+        #expect(presentation.acceptsReadingKeyCommands)
+
+        // 当外观设置 Popover 展开时，阅读单键不得穿透，且 Esc 优先关闭 Popover 而不直接关舞台。
+        presentation.isAppearancePopoverPresented = true
+        #expect(!presentation.acceptsReadingKeyCommands)
+        #expect(presentation.dismissPresentedPopoverIfNeeded())
+        #expect(!presentation.isAppearancePopoverPresented)
+        #expect(presentation.acceptsReadingKeyCommands)
+    }
+
+    @Test("prepared block compact height token stays below full editor minimum height")
+    func preparedBlockCompactHeightTokenStaysCompact() {
+        #expect(SpeechRailDesignTokens.Teleprompter.preparedBlockCompactMinHeight == 52)
+        #expect(
+            SpeechRailDesignTokens.Teleprompter.preparedBlockCompactMinHeight
+                < SpeechRailDesignTokens.Teleprompter.preparedBlockEditorMinHeight
+        )
+    }
 }
