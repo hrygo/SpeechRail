@@ -204,7 +204,7 @@ public struct TeleprompterTrialReadingSheet: View {
                     .foregroundStyle(SpeechRailDesignTokens.Color.attention)
                     .fixedSize(horizontal: false, vertical: true)
             case .listening:
-                Text("正在听你朗读这段文字，读完后按「读完了」。这段文字不会写进记录。")
+                Text("正在听你朗读这段文字，读完后点击「结束语音试读」。这段文字不会写进记录。")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -323,7 +323,7 @@ public struct TeleprompterTrialReadingSheet: View {
                 .speechRailButton(.primary)
                 .controlSize(.large)
 
-                Button("放弃") {
+                Button("重置本次计时") {
                     stopTimer()
                     elapsedSeconds = 0
                     guidanceMessage = nil
@@ -412,7 +412,7 @@ public struct TeleprompterTrialReadingSheet: View {
                    let baseEstimateSeconds,
                    (session.speechTrialEvidence?.durationSeconds ?? 0)
                     >= TeleprompterTimingPolicy.minimumTrialDurationSeconds {
-                    Button("采用这次试读") {
+                    Button("采用校准语速") {
                         guard session.applySpeechTrialCalibration(
                             baseEstimateSeconds: baseEstimateSeconds
                         ) != nil else { return }
@@ -421,7 +421,7 @@ public struct TeleprompterTrialReadingSheet: View {
                     .speechRailButton(.primary)
                 }
             } else if let result = trialResult, result.isWithinValidRange {
-                Button("采用此校准") {
+                Button("采用校准语速") {
                     session.applyTrialCalibration(
                         k: result.calibrationFactor,
                         source: .manualTrial(durationSeconds: result.durationSeconds)

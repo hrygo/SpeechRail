@@ -472,6 +472,28 @@ public final class TeleprompterSession {
         return exportMarkdown() ?? document.sourceText
     }
 
+    /// 复制指定 `documentID` 的可读稿件内容。
+    ///
+    /// 若目标即当前激活文档，直接走 `copyableDocumentText()`（含内存未落盘草稿回退）；
+    /// 若目标是左侧稿件列表中的其他文档，优先导出已确认朗读稿，尚未生成版本时
+    /// 回退返回该文档的最新原稿正文，避免行菜单拷错文档或在无版本时静默失败。
+    public func copyableDocumentText(documentID: String) -> String? {
+        if document?.id == documentID {
+            return copyableDocumentText()
+        }
+        guard let bundle = try? v2Store.load(documentID: documentID) else {
+            return nil
+        }
+        if let body = try? v2Store.exportReading(bundle),
+           !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "# \(bundle.document.title)\n\n\(body)"
+        }
+        let currentSource = bundle.sourceRevisions.first {
+            $0.id == bundle.document.currentSourceRevisionID
+        } ?? bundle.sourceRevisions.last
+        return currentSource?.sourceText
+    }
+
     public func exportSourceData() -> Data? {
         guard let document else { return nil }
         return try? v2Store.exportSource(v2Store.load(documentID: document.id))
@@ -746,6 +768,34 @@ public final class TeleprompterSession {
         pendingVersion = nil
         phase = activeVersion == nil ? .draft : .ready
         scheduleDraftSave()
+    }
+
+    /// 当前处于 `.draft` 且存在与当前原稿一致的已确认版本时，可直接返回 `.ready` 分段视图。
+    public var canReturnToReadyVersion: Bool {
+        guard canEdit, phase == .draft, let activeVersion else { return false }
+        return activeVersion.sourceText == effectiveSourceText
+    }
+
+    /// 从就绪态（`.ready`）或结束态（`.ended`）退回原稿编辑态（`.draft`）。
+    ///
+    /// `.ready` / `.ended` 下 `activeVersion` 非 nil，`discardPendingVersion()`
+    /// 会把相位重新算回 `.ready` 导致「重新编辑原稿」按钮失效。这里显式切回 `.draft`，
+    /// 同时保留已确认的 `activeVersion` 与阅读进度，直到用户实际改动 `sourceText`
+    /// 或重新发起分段/整理。
+    public func returnToDraftEditing() {
+        guard canEdit else { return }
+        guard phase != .following, phase != .paused, phase != .uncertain else { return }
+        invalidateAnalysis()
+        clearPreparedEditHistory()
+        pendingVersion = nil
+        readingBlocks = []
+        phase = .draft
+    }
+
+    /// 当原稿未修改且仍保有已确认版本时，从 `.draft` 直接返回 `.ready` 分段视图。
+    public func returnToReadyVersion() {
+        guard canReturnToReadyVersion else { return }
+        phase = .ready
     }
 
     // MARK: - 目标时长、节奏与校准

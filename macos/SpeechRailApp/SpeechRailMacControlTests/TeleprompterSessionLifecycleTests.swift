@@ -2776,6 +2776,103 @@ struct TeleprompterSessionLifecycleTests {
         try reloaded.load(documentID: documentID)
         #expect(reloaded.document?.sourceText == source)
     }
+
+    @Test("returning to draft editing from ready or ended breaks the read-only deadlock and preserves active version until modified")
+    func returnToDraftEditingBreaksReadyDeadlockAndPreservesActiveVersion() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeThreeSegmentDocument()
+
+        try harness.session.openForManualReading()
+        harness.session.moveToSegment(1)
+        await harness.session.closeStage()
+        #expect(harness.session.phase == .ready)
+        #expect(harness.session.activeVersion != nil)
+
+        // 旧实现调用 discardPendingVersion() 会在 activeVersion != nil 时停留在 .ready。
+        // 新实现 returnToDraftEditing() 必须回到 .draft，且在未修改原稿前允许一键返回已就绪分段。
+        harness.session.returnToDraftEditing()
+        #expect(harness.session.phase == .draft)
+        #expect(harness.session.activeVersion != nil)
+        #expect(harness.session.canReturnToReadyVersion)
+
+        harness.session.returnToReadyVersion()
+        #expect(harness.session.phase == .ready)
+        #expect(harness.session.currentSegmentIndex == 1)
+
+        // 再次退回原稿并修改文本后，canReturnToReadyVersion 置为 false，重新开台按新原稿切分。
+        harness.session.returnToDraftEditing()
+        #expect(harness.session.phase == .draft)
+        harness.session.updateSourceText("全新一段。全新二段。")
+        #expect(!harness.session.canReturnToReadyVersion)
+
+        try harness.session.openForManualReading()
+        #expect(harness.session.phase == .manual)
+        #expect(harness.session.activeVersion?.segments.count == 2)
+        #expect(harness.session.activeVersion?.segments.first?.text == "全新一段。")
+        await harness.session.closeStage()
+    }
+
+    @Test("copyableDocumentText by documentID copies target document rather than active document and falls back to sourceText")
+    func copyableDocumentTextByDocumentIDCopiesTargetDocumentWithFallback() throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+
+        harness.session.createDocument(title: "未整理原稿A", sourceText: "甲稿第一句。甲稿第二句。")
+        let idA = try #require(harness.session.document?.id)
+
+        harness.session.createDocument(title: "已就绪稿B", sourceText: "乙稿第一句。乙稿第二句。")
+        let idB = try #require(harness.session.document?.id)
+        try harness.session.useDeterministicFallback()
+        #expect(harness.session.document?.id == idB)
+        #expect(harness.session.phase == .ready)
+
+        // 当前选中的是 B，但在左侧列表点击 A 的「复制稿件内容」必须拷出 A 的原稿，不能误拷 B，也不能因为 A 无 activeVersion 而返回 nil。
+        let copiedA = harness.session.copyableDocumentText(documentID: idA)
+        #expect(copiedA == "甲稿第一句。甲稿第二句。")
+
+        // 切回 A 后，点击 B 的「复制稿件内容」应导出 B 的已确认朗读稿（带标题）。
+        try harness.session.load(documentID: idA)
+        let copiedB = try #require(harness.session.copyableDocumentText(documentID: idB))
+        #expect(copiedB.contains("# 已就绪稿B"))
+        #expect(copiedB.contains("乙稿第一句。"))
+    }
+
+    @Test("prepared block progressive disclosure actions split, merge, insert, and undo cleanly")
+    func preparedBlockSplitMergeInsertAndUndoRoundTrip() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.makeManyBlockDocument()
+        harness.session.preparationClient = TeleprompterPreparationClient { prompt in
+            try TestPreparationResponse.response(for: prompt)
+        }
+        await harness.session.analyzeDraft()
+        #expect(harness.session.phase == .prepared)
+
+        let initialCount = harness.session.readingBlocks.count
+        #expect(initialCount >= 2)
+
+        // 1. 拆分首段：段数 +1，单步撤销可恢复原段数
+        harness.session.splitBlock(at: 0)
+        #expect(harness.session.readingBlocks.count == initialCount + 1)
+        #expect(harness.session.canUndoPreparedEdit)
+        harness.session.undoLastPreparedEdit()
+        #expect(harness.session.readingBlocks.count == initialCount)
+
+        // 2. 与下一段合并：段数 -1，单步撤销可恢复原段数
+        harness.session.mergeBlock(at: 0)
+        #expect(harness.session.readingBlocks.count == initialCount - 1)
+        #expect(harness.session.canUndoPreparedEdit)
+        harness.session.undoLastPreparedEdit()
+        #expect(harness.session.readingBlocks.count == initialCount)
+
+        // 3. 在下方插入新段：段数 +1，单步撤销可恢复原段数
+        harness.session.insertBlock(after: 0)
+        #expect(harness.session.readingBlocks.count == initialCount + 1)
+        #expect(harness.session.canUndoPreparedEdit)
+        harness.session.undoLastPreparedEdit()
+        #expect(harness.session.readingBlocks.count == initialCount)
+    }
 }
 private enum TestPreparationResponse {
     enum Failure: Error {
