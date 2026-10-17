@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import errno
 import json
+import math
 import re
 import shutil
 import struct
@@ -14,12 +15,13 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import UUID
 
 from speechrail.media.manifest import (
     IO_CHUNK_BYTES,
     MediaExportManifest,
+    MediaLoudnessSettings,
     sha256_file_chunked,
 )
 
@@ -27,6 +29,7 @@ SAMPLE_RATE_HZ = 48_000
 CHANNELS = 1
 NO_PROGRESS_TIMEOUT_SECONDS = 90.0
 TOTAL_EXPORT_TIMEOUT_SECONDS = 2 * 3600.0
+CAPTURE_LIMIT_BYTES = 1024 * 1024
 
 
 class MediaEncodeError(RuntimeError):
@@ -48,6 +51,7 @@ class MediaCodecUnavailableError(MediaEncodeError):
 class MediaToolchain:
     ffmpeg_path: Path | None
     encoders: frozenset[str]
+    has_loudnorm: bool = False
 
     @property
     def available(self) -> bool:
@@ -84,6 +88,13 @@ class MediaExportResult:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class MediaProcessOutput:
+    return_code: int
+    stdout: str
+    stderr: str
+
+
 class MediaProcessRunner(Protocol):
     async def run(
         self,
@@ -95,6 +106,14 @@ class MediaProcessRunner(Protocol):
         no_progress_timeout: float = NO_PROGRESS_TIMEOUT_SECONDS,
         total_timeout: float = TOTAL_EXPORT_TIMEOUT_SECONDS,
     ) -> int: ...
+
+    async def run_capture(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path,
+        cancel_event: asyncio.Event | None = None,
+    ) -> MediaProcessOutput: ...
 
 
 class SubprocessMediaRunner:
@@ -193,6 +212,82 @@ class SubprocessMediaRunner:
                 with contextlib.suppress(BaseException):
                     await stderr_task
 
+    async def run_capture(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path,
+        cancel_event: asyncio.Event | None = None,
+    ) -> MediaProcessOutput:
+        process = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=str(cwd),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        assert process.stdout is not None
+        assert process.stderr is not None
+        stdout_buf = bytearray()
+        stderr_buf = bytearray()
+        start_monotonic = time.monotonic()
+        last_progress_monotonic = start_monotonic
+
+        async def _drain(
+            stream: asyncio.StreamReader, buffer: bytearray, *, is_progress: bool
+        ) -> None:
+            nonlocal last_progress_monotonic
+            while True:
+                chunk = await stream.read(4096)
+                if not chunk:
+                    break
+                if is_progress:
+                    last_progress_monotonic = time.monotonic()
+                if len(buffer) < CAPTURE_LIMIT_BYTES:
+                    buffer.extend(chunk[: CAPTURE_LIMIT_BYTES - len(buffer)])
+
+        stdout_task = asyncio.create_task(
+            _drain(process.stdout, stdout_buf, is_progress=False)
+        )
+        stderr_task = asyncio.create_task(
+            _drain(process.stderr, stderr_buf, is_progress=True)
+        )
+        try:
+            while not (stdout_task.done() and stderr_task.done()):
+                if cancel_event is not None and cancel_event.is_set():
+                    await _terminate_and_reap(process)
+                    raise MediaEncodeError("media export was cancelled", error_code="cancelled")
+
+                now = time.monotonic()
+                if now - start_monotonic > TOTAL_EXPORT_TIMEOUT_SECONDS:
+                    await _terminate_and_reap(process)
+                    raise MediaEncodeError(
+                        "media export exceeded maximum duration", error_code="timeout"
+                    )
+                if now - last_progress_monotonic >= NO_PROGRESS_TIMEOUT_SECONDS:
+                    await _terminate_and_reap(process)
+                    raise MediaEncodeError(
+                        "media export stalled without progress", error_code="timeout"
+                    )
+                await asyncio.sleep(0.1)
+
+            return_code = await process.wait()
+            await asyncio.gather(stdout_task, stderr_task)
+            return MediaProcessOutput(
+                return_code=return_code,
+                stdout=stdout_buf.decode("utf-8", errors="replace"),
+                stderr=stderr_buf.decode("utf-8", errors="replace"),
+            )
+        except asyncio.CancelledError:
+            await _terminate_and_reap(process)
+            raise
+        finally:
+            for task in (stdout_task, stderr_task):
+                if not task.done():
+                    task.cancel()
+                    with contextlib.suppress(BaseException):
+                        await task
+
 
 async def _terminate_and_reap(process: asyncio.subprocess.Process) -> None:
     if process.returncode is not None:
@@ -246,7 +341,27 @@ def discover_media_toolchain(app_home: Path) -> MediaToolchain:
     for token in ("aac", "libmp3lame", "pcm_s16le"):
         if re.search(rf"\b{re.escape(token)}\b", output):
             found.add(token)
-    return MediaToolchain(ffmpeg_path=ffmpeg_bin, encoders=frozenset(found))
+
+    has_loudnorm = False
+    try:
+        filters_completed = subprocess.run(
+            [str(ffmpeg_bin), "-hide_banner", "-filters"],
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+            check=False,
+        )
+    except OSError:
+        has_loudnorm = False
+    else:
+        filters_output = (filters_completed.stdout or "") + "\n" + (filters_completed.stderr or "")
+        has_loudnorm = bool(re.search(r"\bloudnorm\b", filters_output))
+
+    return MediaToolchain(
+        ffmpeg_path=ffmpeg_bin,
+        encoders=frozenset(found),
+        has_loudnorm=has_loudnorm,
+    )
 
 
 def escape_ffmetadata(value: str) -> str:
@@ -314,6 +429,102 @@ def read_wav_pcm16_frames(path: Path) -> int:
     return data_bytes // bytes_per_frame
 
 
+_MEASUREMENT_KEYS = ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset")
+
+
+def _loudness_probe_argv(
+    ffmpeg_str: str, concat_name: str, settings: MediaLoudnessSettings
+) -> list[str]:
+    loudnorm = (
+        f"loudnorm=I={settings.target_i}:LRA={settings.loudness_range}"
+        f":TP={settings.true_peak_db}:dual_mono=false:print_format=json"
+    )
+    return [
+        ffmpeg_str,
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "info",
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        concat_name,
+        "-af",
+        loudnorm,
+        "-f",
+        "null",
+        "-",
+    ]
+
+
+def _parse_loudnorm_measurement(stderr: str) -> dict[str, float]:
+    start = stderr.find("{")
+    end = stderr.rfind("}")
+    if start == -1 or end <= start:
+        raise MediaEncodeError("loudnorm measurement failed", error_code="command_failed")
+    try:
+        decoded = cast("object", json.loads(stderr[start : end + 1]))
+    except ValueError as exc:
+        raise MediaEncodeError(
+            "loudnorm measurement failed", error_code="command_failed"
+        ) from exc
+    if not isinstance(decoded, dict):
+        raise MediaEncodeError("loudnorm measurement failed", error_code="command_failed")
+
+    payload: dict[str, object] = {}
+    for raw_key, raw_value in cast("dict[object, object]", decoded).items():
+        if isinstance(raw_key, str):
+            payload[raw_key] = raw_value
+
+    measured: dict[str, float] = {}
+    for key in _MEASUREMENT_KEYS:
+        raw = payload.get(key)
+        if raw is None or isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+            raise MediaEncodeError("loudnorm measurement failed", error_code="command_failed")
+        try:
+            number = float(raw)
+        except ValueError as exc:
+            raise MediaEncodeError(
+                "loudnorm measurement failed", error_code="command_failed"
+            ) from exc
+        if not math.isfinite(number):
+            raise MediaEncodeError("loudnorm measurement failed", error_code="command_failed")
+        measured[key] = number
+    return measured
+
+
+def _loudness_filter_args(
+    settings: MediaLoudnessSettings, measured: dict[str, float]
+) -> list[str]:
+    loudnorm = (
+        f"loudnorm=I={settings.target_i}:LRA={settings.loudness_range}"
+        f":TP={settings.true_peak_db}:measured_I={measured['input_i']}"
+        f":measured_LRA={measured['input_lra']}:measured_TP={measured['input_tp']}"
+        f":measured_thresh={measured['input_thresh']}:offset={measured['target_offset']}"
+        f":linear=true:dual_mono=false"
+    )
+    return ["-af", loudnorm]
+
+
+async def _measure_loudness(
+    runner: MediaProcessRunner,
+    ffmpeg_str: str,
+    concat_name: str,
+    settings: MediaLoudnessSettings,
+    *,
+    cwd: Path,
+    cancel_event: asyncio.Event | None,
+) -> list[str]:
+    probe_argv = _loudness_probe_argv(ffmpeg_str, concat_name, settings)
+    output = await runner.run_capture(probe_argv, cwd=cwd, cancel_event=cancel_event)
+    if output.return_code != 0:
+        raise MediaEncodeError("loudnorm measurement failed", error_code="command_failed")
+    return _loudness_filter_args(settings, _parse_loudnorm_measurement(output.stderr))
+
+
 async def encode(
     manifest: MediaExportManifest,
     tools: MediaToolchain,
@@ -331,6 +542,8 @@ async def encode(
         raise MediaCodecUnavailableError("AAC encoder is unavailable in managed ffmpeg")
     if manifest.profile == "chapter_mp3" and not tools.supports_mp3:
         raise MediaCodecUnavailableError("libmp3lame encoder is unavailable in managed ffmpeg")
+    if manifest.loudness is not None and not tools.has_loudnorm:
+        raise MediaCodecUnavailableError("loudnorm filter is unavailable in managed ffmpeg")
 
     raw_home = app_home or manifest.app_home
     if raw_home is None:
@@ -437,6 +650,17 @@ async def encode(
             concat_path.write_text("\n".join(concat_lines) + "\n", encoding="utf-8")
             ffmeta_path.write_text("\n".join(ffmeta_lines) + "\n", encoding="utf-8")
 
+            m4b_loudness_af: list[str] = []
+            if manifest.loudness is not None:
+                m4b_loudness_af = await _measure_loudness(
+                    runner,
+                    ffmpeg_str,
+                    "concat.txt",
+                    manifest.loudness,
+                    cwd=stage_dir,
+                    cancel_event=cancel_event,
+                )
+
             m4b_rel = f"exports/{manifest.request_id}/stage/book.m4b"
             m4b_abs = stage_dir / "book.m4b"
             # A cover is a third input (index 2) mapped as an attached picture; the
@@ -474,6 +698,7 @@ async def encode(
                 "-map_chapters",
                 "1",
                 *cover_map,
+                *m4b_loudness_af,
                 "-c:a",
                 "aac",
                 "-b:a",
@@ -504,6 +729,25 @@ async def encode(
         else:
             chapters_out_dir = stage_dir / "chapters"
             chapters_out_dir.mkdir(parents=True, exist_ok=True)
+
+            mp3_loudness_af: list[str] = []
+            if manifest.loudness is not None:
+                probe_lines = ["ffconcat version 1.0"]
+                for _, _, norm_entries in chapter_norm_files:
+                    for norm_rel_name, _ in norm_entries:
+                        probe_lines.append(f"file '{norm_rel_name}'")
+                (stage_dir / "loudness_probe.txt").write_text(
+                    "\n".join(probe_lines) + "\n", encoding="utf-8"
+                )
+                mp3_loudness_af = await _measure_loudness(
+                    runner,
+                    ffmpeg_str,
+                    "loudness_probe.txt",
+                    manifest.loudness,
+                    cwd=stage_dir,
+                    cancel_event=cancel_event,
+                )
+
             for idx, (ordinal, chapter_title, norm_entries) in enumerate(chapter_norm_files):
                 concat_name = f"concat_ch_{idx:04d}.txt"
                 concat_path = stage_dir / concat_name
@@ -535,6 +779,7 @@ async def encode(
                     f"album={manifest.book_title}",
                     "-metadata",
                     f"track={ordinal + 1}/{len(chapter_norm_files)}",
+                    *mp3_loudness_af,
                     "-c:a",
                     "libmp3lame",
                     "-b:a",
