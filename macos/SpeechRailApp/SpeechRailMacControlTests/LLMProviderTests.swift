@@ -1383,21 +1383,33 @@ final class LLMProviderTests: XCTestCase {
 
     /// V15:noteProgress 只展期停滞 deadline，不解除首正文 deadline。
     func testStreamTimerProgressExtendsStallButNotFirstText() async throws {
-        let timer = StreamTimer(
-            firstDeadline: ContinuousClock.now.advanced(by: .milliseconds(300)),
+        // 规则层用显式时间点断言：不依赖真实睡眠，避免 CI 负载下
+        // Task.sleep 抖动越过 300ms 首正文 deadline 造成假失败。
+        let start = ContinuousClock.now
+        var deadline = StreamDeadlineState(
+            firstProgressDeadline: start.advanced(by: .milliseconds(300)),
             stallTimeout: .milliseconds(200),
-            initialStall: ContinuousClock.now.advanced(by: .milliseconds(50))
+            initialStall: start.advanced(by: .milliseconds(50))
         )
-        // 50ms 后来一次推理进展：停滞展期 200ms；再睡 100ms 仍未到期。
-        try await Task.sleep(for: .milliseconds(50))
-        try timer.advance(events: [.reasoning], now: .now)
-        try await Task.sleep(for: .milliseconds(100))
-        let expired = timer.expired
-        XCTAssertFalse(expired, "推理进展应展期停滞 deadline，不误杀合法等待")
-        let seen = timer.firstTextSeen
-        XCTAssertFalse(seen, "推理进展不得算首正文，首正文 deadline 仍有效")
-        // 首正文 deadline 到达仍超限：推理不能无限延长正文等待。
-        try await Task.sleep(for: .milliseconds(250))
+        // 50ms 时来一次推理进展：停滞展期 200ms 到 250ms，但不产生首正文。
+        try deadline.advance(event: .reasoning, now: start.advanced(by: .milliseconds(50)))
+        XCTAssertFalse(deadline.firstTextSeen, "推理进展不得算首正文，首正文 deadline 仍有效")
+        XCTAssertEqual(deadline.stallDeadline,
+                       start.advanced(by: .milliseconds(250)) as ContinuousClock.Instant?,
+                       "推理进展应展期停滞 deadline，不误杀合法等待")
+        XCTAssertNil(deadline.expiry(now: start.advanced(by: .milliseconds(150))),
+                     "展期后的停滞 deadline 未到，不应判定超限")
+        XCTAssertEqual(deadline.expiry(now: start.advanced(by: .milliseconds(300))),
+                       "首个有效正文超时未到达",
+                       "首正文 deadline 到达仍超限：推理不能无限延长正文等待")
+
+        // 计时器层：首正文 deadline 已过时必须立即以「首个有效正文」超限，
+        // 不等待真实时间流逝。
+        let timer = StreamTimer(
+            firstDeadline: start.advanced(by: .milliseconds(-1)),
+            stallTimeout: .milliseconds(200),
+            initialStall: nil
+        )
         do {
             try await timer.waitForExpiry()
             XCTFail("首正文 deadline 到达必须抛超限，不能被推理无限延长")
