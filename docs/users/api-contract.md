@@ -732,6 +732,24 @@ journal 不可读返回 `503 idempotency_store_unavailable`（可重试）。该
 `spoken`（替换后的朗读文本，≤256 字符）、`language`（默认 `auto`）、`case_sensitive`
 （默认 `true`）、`word_boundary`（默认 `false`）、`source`（`system` 或 `user`）。
 
+匹配语义（对一次合成是确定的，不依赖条目在请求中的顺序）：
+
+- 条目在写入时按 `id` 规范化排序，`revision` 由该顺序派生。重排条目不会改变朗读结果，
+  调用方无需为顺序负责。
+- 匹配发生在规范化后的文本上（先按 TTS 文本规则清理标记与表情），命中区间再映射回原始
+  文本偏移；`raw_start`/`raw_end` 始终指向调用方传入的原文。
+- 自左向右扫描，命中不重叠：每次命中后从该片段末尾继续。某一位置能否命中由 `language`
+  （等于请求语言或为 `auto`；请求语言为 `auto` 时全部条目参与）、`case_sensitive` 和
+  `word_boundary` 共同决定。
+- 同一位置有多条可命中时，**最长 `surface` 优先**；长度相同则 `id` 字典序最小者生效。
+  这是唯一的重叠消解规则，与条目写入先后无关。
+- 同一 `language` + `surface` + `case_sensitive` + `word_boundary` 组合映射到不同 `spoken`
+  时，写入即失败并返回 `409 pronunciation_conflict`；不存在"先写入者生效"。
+- `spoken` 不得为空白：没有"空规则回退默认发音"的语义，停用一条规则只能写入不含该条目的
+  新 revision。
+- URL、邮箱、围栏代码块与行内代码内的片段永不重写；`surface` 或 `spoken` 为空白同样在写入
+  时被拒绝。
+
 错误语义：`expected_revision` 与当前 revision 不一致返回 `409 pronunciation_conflict`；
 读取已撤销 revision 返回 `409 pronunciation_revoked`；set 或 revision 不存在返回
 `404 pronunciation_revision_not_found`（删除不存在 set 时为 `404 pronunciation_set_not_found`）；
