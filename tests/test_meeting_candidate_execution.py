@@ -281,6 +281,70 @@ def test_invalid_native_handshake_reaps_child_without_producing_result(
     assert not (tmp_path / "result/result.json").exists()
 
 
+def test_native_candidate_scope_is_bound_to_active_exact_transport(candidate, monkeypatch):
+    from types import SimpleNamespace
+
+    from meeting_candidate_execution import CandidateArtifacts, NativeCandidateRun
+    from meeting_process_snapshot import ProcessKey, ProcessUsage
+
+    from speechrail.domain.resource_limits import GovernorLimits
+    from speechrail.runtime.resource_governor import ResourceGovernor
+
+    class Reader:
+        backend = "injected"
+
+        def read(self, pid):
+            return ProcessUsage(ProcessKey(pid, 100), 50)
+
+        def children(self, pid):
+            return ()
+
+    fake_native(monkeypatch)
+    worker, model, spec = candidate
+    artifacts = CandidateArtifacts(spec, worker, model)
+    governor = ResourceGovernor(GovernorLimits(3, 1, 4), allow_heavy_overlap=False)
+
+    async def run():
+        with EvaluationPortLease(9912) as port:
+            native = NativeCandidateRun(artifacts, port, governor)
+            with pytest.raises(ValueError, match="owner"):
+                await native.capture_process_scope(reader=Reader())
+            session = native.activity_factory()
+            try:
+                await session.append(start_sample=0, pcm16=bytes(320))
+                native.transport.process = SimpleNamespace(pid=3, returncode=None)
+                scope = await native.capture_process_scope(reader=Reader())
+                async with scope.observe(phases=("steady_state",)) as observation:
+                    pass
+                assert observation.report()["status"] == "complete_metadata"
+                owner = governor.diarization_owner
+                original = owner._generation
+                owner._generation += 1
+                with pytest.raises(ValueError, match="owner"):
+                    scope.verify()
+                owner._generation = original
+            finally:
+                await session.cancel()
+            with pytest.raises(ValueError, match="owner"):
+                scope.verify()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("control", [False, True])
+def test_process_observation_sources_are_part_of_candidate_identity(control):
+    from meeting_c0 import C0_ADAPTER_SOURCES
+    from probe_meeting_candidate import CANDIDATE_ADAPTER_SOURCES
+
+    sources = C0_ADAPTER_SOURCES if control else CANDIDATE_ADAPTER_SOURCES
+    for name in (
+        "meeting_process_owner.py",
+        "meeting_process_observer.py",
+        "meeting_process_snapshot.py",
+    ):
+        assert "examples/perf/" + name in sources
+
+
 def test_artifact_change_after_scoring_cannot_commit_completion(tmp_path, candidate, monkeypatch):
     import meeting_development_fixture as fixture
 

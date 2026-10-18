@@ -11,7 +11,7 @@ import asyncio
 import copy
 import math
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
 from functools import partial
@@ -42,6 +42,7 @@ class ProcessPhaseObserver:
         max_samples: int,
         max_processes: int,
         max_span_seconds: float,
+        scope_guard: Callable[[], None] | None,
     ) -> None:
         roots, phases = tuple(roots), tuple(phases)
         if (
@@ -55,12 +56,15 @@ class ProcessPhaseObserver:
             or type(max_processes) is not int
             or not len(roots) <= max_processes <= 64
             or reader.backend not in {"injected", "libproc_rusage_info_v0"}
+            or (scope_guard is not None and not callable(scope_guard))
         ):
             raise ValueError("invalid observer policy")
         _number(interval_seconds, 0.01, 5)
         _number(max_span_seconds, 0.001, 5)
         self._roots, self._reader = roots, reader
         self._backend = reader.backend
+        self._scope_guard = scope_guard
+        self._scope_guard_failures = 0
         self._max_samples, self._max_processes = max_samples, max_processes
         self._labels = phases
         self._policy = {
@@ -101,10 +105,21 @@ class ProcessPhaseObserver:
             raise ValueError("observer not active or closed")
         if self._index + 1 >= len(self._labels) or label != self._labels[self._index + 1]:
             raise ValueError("phase must be the next registered slot")
+        if not self._check_scope():
+            raise ValueError("process owner scope changed")
         now = time.monotonic()
         self._windows[self._index]["ended_at"] = now
         self._index += 1
         self._windows[self._index]["started_at"] = now
+
+    def _check_scope(self) -> bool:
+        try:
+            if self._scope_guard is not None:
+                self._scope_guard()
+            return True
+        except Exception:
+            self._scope_guard_failures += 1
+            return False
 
     async def _run(self) -> None:
         try:
@@ -115,6 +130,8 @@ class ProcessPhaseObserver:
                 snapshot = None
                 # Do not retain exception objects, command lines or paths.
                 with suppress(Exception):
+                    if not self._check_scope():
+                        raise ValueError("process owner scope changed")
                     snapshot = await loop.run_in_executor(
                         self._executor,
                         partial(
@@ -125,7 +142,9 @@ class ProcessPhaseObserver:
                             max_span_seconds=self._policy["max_span_seconds"],
                         ),
                     )
-                if snapshot is not None and snapshot["backend"] != self._backend:
+                if not self._check_scope() or (
+                    snapshot is not None and snapshot["backend"] != self._backend
+                ):
                     snapshot = None
                 ended = time.monotonic()
                 window = self._windows[index]
@@ -191,6 +210,7 @@ class ProcessPhaseObserver:
 
     async def _close(self) -> None:
         if self._closing is None:
+            self._check_scope()
             self._windows[self._index]["ended_at"] = time.monotonic()
             self._stop.set()
             self._closing = asyncio.create_task(self._finish())
@@ -217,6 +237,7 @@ class ProcessPhaseObserver:
             and not failed
             and not self._budget_exhausted
             and not self._monitor_failed
+            and not self._scope_guard_failures
         )
         return copy.deepcopy(
             {
@@ -225,6 +246,8 @@ class ProcessPhaseObserver:
                 "clock": "host_monotonic_seconds",
                 "backend": self._backend,
                 "scope": "caller_owned_roots_and_descendants_sequential_span",
+                "scope_guard_enabled": self._scope_guard is not None,
+                "scope_guard_failures": self._scope_guard_failures,
                 "roots": [[r.pid, r.start_abstime] for r in self._roots],
                 "policy": self._policy,
                 "phases": phases,
@@ -261,6 +284,7 @@ def observe_process_phases(
     max_samples: int = 4096,
     max_processes: int = 64,
     max_span_seconds: float = 1.0,
+    scope_guard: Callable[[], None] | None = None,
 ) -> AbstractAsyncContextManager[ProcessPhaseObserver]:
     """Freeze scope/policy now; reading begins only on explicit async entry.
 
@@ -276,5 +300,6 @@ def observe_process_phases(
             max_samples=max_samples,
             max_processes=max_processes,
             max_span_seconds=max_span_seconds,
+            scope_guard=scope_guard,
         )
     )

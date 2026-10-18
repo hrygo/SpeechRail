@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.52"
+version: "3.3.53"
 date: 2026-10-18
 ---
 
@@ -480,10 +480,28 @@ resource_report = observation.report()
 
 全部注册槽有有效样本且无读取失败、预算耗尽和监控故障时，状态仅为complete_metadata。每阶段最大值只是有效顺序样本总和的已观察最大值；报告始终不宣称原子快照、真实峰值、worker回收、运行身份或认证通过。阶段报告含进程元数据，真实制品保留在仓库外，不进入公开审计。ABBA footprint仍为not_observed；精确owner/负载接线、完整场景矩阵、测量扰动及授权实跑仍需单独验证，不据此修改resident声明。
 
+### 已就绪私有 owner 的资源绑定
+
+`FrozenAsrRuntime.capture_process_scope(reader=...)` 从仍有效的私有ASR/aligner owner取得两个实际子进程对象；`NativeCandidateRun.capture_process_scope(reader=...)` 仅在原生分人会话已预检且owner仍占用时绑定实际transport。分人入口核对原governor、owner对象、generation和attached child、transport、artifact与端口guard；ASR入口复用原有就绪配置、generation和进程对象校验。未启动、替换、隔离或已关闭的owner不能登记，不通过命令名或历史PID发现目标。两者都要求显式reader，不启用默认原生读取。
+
+共同入口 `capture_owned_process_scope` 保留确切句柄对象及其live状态，用专用线程取得启动token并进行进程树两遍复核；登记及线程退出均通过join_cleanup等待，结束后再次核对原owner。返回的scope不转移进程生命周期所有权。`scope.observe(...)` 将owner guard接入阶段观察器：每次读取前后及观察关闭时，在事件循环上核对同一对象、PID、存活状态和reader来源；失败计入scope_guard_failures，拒收该读数或使报告incomplete_metadata，不能因为先前有成功样本而继续宣称完整。guard不在原生读取线程访问事件循环所属状态。
+
+调用顺序如下；`runtime` 已由调用方在明确授权的窗口准备，观察上下文必须先于runtime关闭：
+
+```python
+scope = await runtime.capture_process_scope(reader=reader)
+async with scope.observe(phases=("steady_state",)) as observation:
+    await controlled_workload()
+resource_report = observation.report()
+```
+
+这种scope从已就绪句柄开始，明确拒绝cold_start阶段。ASR两根不包含宿主VAD、PCM/队列或原生分人，分人一根不包含宿主和ASR；采样前的加载、进程回收后的区间亦未覆盖。它们不能分别取峰再相加、不能组合成T6总内存认证，也不证明登记前的启动历史、加载字节或无采样间瞬时变化。完整共存harness的宿主根、加载至回收的全生命周期、finish/cancel与完整场景矩阵仍待接线；ABBA footprint、峰值/回收/运行身份认证仍未观察。资源helper已进入ASR冻结源码闭包及C0/fast候选adapter身份，旧候选spec/controls须重新冻结，不能沿用旧收据。
+
 合成验证命令（不执行原生reader、模型或音频）：
 
 ```sh
 PYTHONPATH=src:examples/perf uv run --no-sync pytest \
+  tests/test_meeting_process_owner.py \
   tests/test_meeting_process_observer.py tests/test_meeting_process_snapshot.py \
   tests/test_profile_metrics.py tests/test_resource_sampling.py --no-cov
 ```

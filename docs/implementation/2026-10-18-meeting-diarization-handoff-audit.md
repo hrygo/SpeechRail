@@ -724,3 +724,14 @@ ABBA校验schema/原点/时刻与source一致，拒绝返回早于源末端、�
 初始14测试缺模块RED后GREEN；来源改变不能混入注册证据、预算耗尽不得接受阶段标记各另先RED再GREEN。四相关文件61 passed in0.17s，二Python Ruff、一source strict Mypy通过。覆盖阶段有效/遗漏、失败脱敏、跨阶段、预算、配置复制、非法策略、启动及运行中重复取消与线程join。所有进程树/读取均注入；本轮没有原生进程采样、真实音频解码、模型或benchmark运行。新文件图谱freshness missing，直接复核worktree，没有重建索引。父5772596f八项PR checks均success/completed。
 
 complete_metadata只表示注册槽的采样元数据覆盖，不代表完整场景矩阵、峰值或认证；atomic/peak/reaping/runtime identity/certification均保持false。ABBA footprint仍not_observed，尚需精确owner与受控负载接线、扰动评估、完整场景矩阵及获准实跑。没有修改resident或服务/安装/UI/发布/合并状态；真实开发评测授权尚待回复。E3、真实CER/人数/P95与最终生产联合身份仍未验，#370未完成，完整目标继续。
+
+
+## T6 已就绪私有 owner 与阶段资源观察绑定
+
+2026-10-18：补充capture_owned_process_scope，以实际private owner getter取得的子进程对象、live PID和启动token登记，不接受历史PID名单作为所有权。专用线程读取并做两遍进程树核对，登记/取消/线程退出均joined，结束再核对原句柄。ASR FrozenAsrRuntime与NativeCandidateRun提供窄入口；ASR复用配置/generation/进程对象guard，分人核对原governor、owner generation、attached child、transport、artifacts及端口guard。实际模型与生命周期仍归原owner，默认不采样、不启动模型。
+
+scope.observe将owner guard置于事件循环，每次读前后和关闭时检查原对象、PID、live状态与reader来源。变动/退出/缺失拒收或使metadata不完整；已成功样本不能掩盖后续guard失败。已就绪scope拒绝cold_start，不能冒充加载阶段；scope必须在runtime关闭前退出。资源helper进入ASR冻结源码闭包和C0/fast adapter身份，旧spec/controls须重新冻结，不复用旧收据。
+
+先RED后GREEN：通用绑定及ASR入口9项，原生候选入口/两族source closure3项，另补cold_start拒绝与非法guard两项反例。九相关测试文件229 passed in4.69s，十Python Ruff、四source strict Mypy通过；另四相关文件验证ASR执行、候选checkpoint、live pipeline与ABBA接线，174 passed in12.63s。覆盖句柄替换/PID改变/退出/移除、登记中owner变化及重复取消线程join、原生token变化、实际fake ASR/分人owner与代际改变。父a5142473八项PR checks均success/completed。新/变更图谱freshness missing，直接复核worktree，无索引重建。
+
+全部是合成文件、fake RPC和注入进程树，无本机原生进程采样、真实音频/模型/benchmark、下载或服务/安装/UI/发布/合并。就绪ASR两根不含宿主VAD/PCM/队列/分人，分人根不含ASR/宿主；加载前、回收后与完整finish/cancel矩阵仍未覆盖，不能分别取峰相加或升级T6总内存认证。完整harness生命周期根、测量扰动及授权实跑仍待接线；ABBA footprint保持not_observed，E3/真实CER/人数/P95与最终生产联合身份未验，#370及完整目标保持未完成。

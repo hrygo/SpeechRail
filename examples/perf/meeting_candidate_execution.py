@@ -26,6 +26,8 @@ from meeting_development_fixture import evaluate_development_fixture
 from meeting_evaluation_identity import MeetingCandidateSpec, candidate_digest
 from meeting_live_text import LiveTextChannel
 from meeting_pcm_feed import PcmChunk
+from meeting_process_owner import OwnedProcessScope, capture_owned_process_scope
+from meeting_process_snapshot import ProcessReader
 
 from speechrail.backends.diarization.coreml import CoreMLActivitySession
 from speechrail.domain.diarization.ports import ActivitySession
@@ -208,6 +210,29 @@ class NativeCandidateRun:
         self._governor = governor
         self._shared_active = False
         self.transport: CandidateWorkerProcess | C0WorkerProcess | None = None
+
+    async def capture_process_scope(self, *, reader: ProcessReader) -> OwnedProcessScope:
+        """Enroll only the active exact native transport, never a saved PID."""
+        transport, artifacts = self.transport, self.artifacts
+        owner = self._governor.diarization_owner
+        generation = owner._generation
+
+        def processes() -> tuple[object, ...]:
+            if (
+                transport is None or self.transport is not transport
+                or self.governor is not self._governor
+                or self._governor.diarization_owner is not owner
+                or not owner.occupied or owner.isolated
+                or owner._generation != generation or owner._child is not transport
+                or not transport.preflight_observed
+                or self.artifacts is not artifacts
+            ):
+                raise ValueError("native candidate process owner changed or unavailable")
+            _ = self.port.descriptor
+            artifacts.verify_stamps()
+            return (transport.process,)
+
+        return await capture_owned_process_scope(get_processes=processes, reader=reader)
 
     async def evaluate_shared_pcm(
         self,

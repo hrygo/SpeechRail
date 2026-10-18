@@ -34,6 +34,8 @@ from meeting_evaluation_identity import (
 )
 from meeting_live_text import LiveTextChannel, SealedBody
 from meeting_pcm_feed import PcmChunk
+from meeting_process_owner import OwnedProcessScope, capture_owned_process_scope
+from meeting_process_snapshot import ProcessReader
 from meeting_realtime_asr_replay import realtime_replay_preset, replay_realtime_session
 from probe_meeting_asr_quality import ASR_SCORER, RuntimeObservation, replay_long_blocks
 
@@ -659,6 +661,19 @@ class FrozenAsrRuntime:
             self._invalid = True
             self._commit_ready = False
             raise ValueError("closed ASR runtime verification is unavailable or changed") from None
+
+    async def capture_process_scope(self, *, reader: ProcessReader) -> OwnedProcessScope:
+        """Enroll this ready runtime's actual two child handles for diagnostics.
+
+        Explicit reader required; no discovery or model/runtime action. Observe
+        inside this runtime's lifetime. Host VAD/PCM and cold loading are outside
+        these two roots and cannot be certified by this scope.
+        """
+        def processes() -> tuple[object, ...]:
+            self._check()
+            return (self._owners.asr_transport._process, self._owners.alignment_transport._process)
+
+        return await capture_owned_process_scope(get_processes=processes, reader=reader)
 
     async def _verify_closed_bytes(self) -> None:
         self._check_closed()

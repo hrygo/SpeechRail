@@ -214,6 +214,7 @@ def test_configuration_is_copied_and_phase_order_cannot_skip_registered_slots():
         {"phases": ("finish",), "max_samples": 4097},
         {"phases": ("finish",), "max_processes": 65},
         {"phases": ("finish",), "max_span_seconds": float("nan")},
+        {"phases": ("finish",), "scope_guard": 0},
     ],
 )
 def test_invalid_policy_is_rejected_before_reader_or_thread_start(kwargs):

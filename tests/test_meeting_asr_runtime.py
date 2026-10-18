@@ -188,6 +188,37 @@ def runtime_setup(tmp_path, monkeypatch):
     return state
 
 
+def test_ready_runtime_exposes_guarded_resource_scope_without_loading_again(runtime_setup):
+    state = runtime_setup
+
+    class Reader:
+        backend = "injected"
+
+        def read(self, pid):
+            from meeting_process_snapshot import ProcessKey, ProcessUsage
+
+            return ProcessUsage(ProcessKey(pid, 100), 50)
+
+        def children(self, pid):
+            return ()
+
+    async def run():
+        async with state.module.prepare_frozen_asr_runtime(
+            state.settings, dependencies=state.dependencies
+        ) as runtime:
+            owners = runtime._owners
+            owners.asr_transport._process.pid = 1
+            owners.alignment_transport._process.pid = 2
+            scope = await runtime.capture_process_scope(reader=Reader())
+            async with scope.observe(phases=("steady_state",)) as observation:
+                pass
+            assert observation.report()["samples"][0]["sample_sum_bytes"] == 100
+        with pytest.raises(ValueError, match="owner"):
+            scope.verify()
+
+    asyncio.run(run())
+
+
 def test_private_root_prepares_actual_cap_and_closes_only_its_two_owners(runtime_setup):
     state = runtime_setup
 
