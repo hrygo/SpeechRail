@@ -18,6 +18,7 @@ from meeting_candidate_protocol import candidate_activity_update
 from speechrail.backends.diarization.coreml import CoreMLActivitySession
 from speechrail.domain.diarization.types import DiarizationError
 from speechrail.runtime.diarization_worker import CoreMLWorkerProcess
+from speechrail.runtime.phase_trace import PhaseTrace
 from speechrail.runtime.resource_governor import ResourceGovernor
 
 MAX_APPEND_SAMPLES = 16_000
@@ -72,6 +73,7 @@ def open_candidate_session(
     epoch: str,
     governor: ResourceGovernor,
     worker_factory: Callable[[], CoreMLWorkerProcess],
+    phase_trace: PhaseTrace | None = None,
 ) -> CandidateActivitySession:
     """Claim before construction; model loading remains inside compute admission."""
     generation = governor.diarization_owner.claim(epoch)
@@ -82,6 +84,7 @@ def open_candidate_session(
             epoch=epoch,
             governor=governor,
             generation=generation,
+            phase_trace=phase_trace,
         )
     except BaseException:
         governor.diarization_owner.release(generation, reaped=True)

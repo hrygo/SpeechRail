@@ -24,6 +24,7 @@ from speechrail.domain.diarization.types import ActivityFrame, ActivityUpdate
 from speechrail.domain.resource_limits import GovernorLimits
 from speechrail.runtime.diarization_owner import DiarizationWorkerLease
 from speechrail.runtime.diarization_worker import CoreMLWorkerProcess
+from speechrail.runtime.phase_trace import Operation, PhaseSpan, PhaseTrace
 from speechrail.runtime.resource_governor import ResourceGovernor, WorkClass
 
 MODEL_REVISION = "ae9a27ab45dc0aa3abede7d2d6bad2b7a69aa6d1"
@@ -216,6 +217,7 @@ class CoreMLActivitySession:
         activity_threshold: float = _ACTIVITY_THRESHOLD,
         governor: ResourceGovernor | None = None,
         generation: int | None = None,
+        phase_trace: PhaseTrace | None = None,
     ) -> None:
         self._worker = worker
         self._epoch = epoch
@@ -224,7 +226,9 @@ class CoreMLActivitySession:
             GovernorLimits(2, 1, 8),
             allow_heavy_overlap=False,
         )
+        self._phase_trace = phase_trace
         self._lease = DiarizationWorkerLease(
+            phase_trace=phase_trace,
             worker=worker,
             governor=self._governor,
             generation=(
@@ -268,7 +272,7 @@ class CoreMLActivitySession:
                 raise DiarizationError("invalid PCM for CoreML diarization", code="invalid_audio")
             if start_sample != self._next_start:
                 raise DiarizationError("diarization sample continuity broken", code="invalid_audio")
-            async with self._governor.reserve(WorkClass.DIARIZATION):
+            async with self._compute("append", start_sample + len(pcm16) // 2):
                 try:
                     if self._closed:
                         raise DiarizationError("activity session is closed", code="invalid_audio")
@@ -320,7 +324,7 @@ class CoreMLActivitySession:
                 return
             if self._closed or through_sample != self._next_start:
                 raise DiarizationError("invalid activity finish barrier", code="invalid_audio")
-            async with self._governor.reserve(WorkClass.DIARIZATION):
+            async with self._compute("finish", through_sample):
                 try:
                     if self._closed:
                         raise DiarizationError("activity session is closed", code="invalid_audio")
@@ -364,6 +368,19 @@ class CoreMLActivitySession:
         finally:
             await self._close_updates()
 
+    @asynccontextmanager
+    async def _compute(self, operation: Operation, through_sample: int) -> AsyncIterator[None]:
+        with PhaseSpan(self._phase_trace, "compute_queue", operation, through_sample) as span:
+            async with self._governor.reserve(WorkClass.DIARIZATION):
+                span.finish()  # End admission timing before any load or native call.
+                yield
+
+    def drain_phase_events(self) -> tuple[dict[str, object], ...]:
+        return self._phase_trace.drain() if self._phase_trace is not None else ()
+
+    def phase_trace_status(self) -> dict[str, object]:
+        return self._phase_trace.status() if self._phase_trace is not None else {"enabled": False}
+
     async def _start(self) -> None:
         if not self._started:
             try:
@@ -378,7 +395,12 @@ class CoreMLActivitySession:
         self, header: dict[str, object], audio: bytes = b""
     ) -> tuple[dict[str, object], bytes]:
         try:
-            return await self._worker.request(header, audio)
+            operation: Operation = "append" if header["operation"] == "append" else "finish"
+            with PhaseSpan(
+                self._phase_trace, "infer" if operation == "append" else "finalize", operation,
+                self._next_start + len(audio) // 2 if operation == "append" else self._next_start,
+            ):
+                return await self._worker.request(header, audio)
         except RuntimeError as exc:
             raise DiarizationError(
                 "CoreML diarization worker failed", code="diarization_invalid_output"

@@ -188,6 +188,14 @@ async def run_candidate_stream(
         async with output_lock, asyncio.timeout(sink_timeout_seconds):
             await sink({**row, "elapsed_seconds": elapsed()})
 
+    async def publish_phases() -> None:
+        # Native calls only append bounded RAM metadata. All sink I/O happens
+        # after their compute reservation has exited, including exact reaping.
+        drain = getattr(activity, "drain_phase_events", None)
+        if drain is not None:
+            for event in drain():
+                await emit({**event, "kind": "phase"})
+
     async def publish(events: tuple[EvidenceEvent, ...]) -> None:
         nonlocal emitted_characters
         for event in events:
@@ -269,12 +277,14 @@ async def run_candidate_stream(
                 await register(ready)
                 before = elapsed()
                 await activity.append(start_sample=endpoint - len(packet) // 2, pcm16=packet)
+                append_duration = elapsed() - before
                 appends += 1
+                await publish_phases()
                 await emit(
                     {
                         "kind": "phase",
                         "phase": "activity_append_including_admission_and_load",
-                        "duration_seconds": elapsed() - before,
+                        "duration_seconds": append_duration,
                         "through_sample": evidence.accepted,
                     }
                 )
@@ -294,6 +304,7 @@ async def run_candidate_stream(
             finish_started_at = elapsed()
             finishing = True
             await activity.finish(through_sample=evidence.accepted)
+            await publish_phases()
             await pump
             await publish(evidence.finish())
             finish_ended_at = elapsed()
@@ -323,8 +334,16 @@ async def run_candidate_stream(
                 await close_source()
         except Exception:
             cleanup_failed = True
+        phase_sink_failed = False
+        try:
+            await publish_phases()
+        except Exception:
+            phase_sink_failed = True
         if cleanup_failed:
             raise RuntimeError("candidate_cleanup_incomplete") from None
+        if phase_sink_failed:
+            raise RuntimeError("candidate_phase_sink_failed") from None
+    trace_status = getattr(activity, "phase_trace_status", lambda: {"enabled": False})()
     return {
         "complete": True,
         "accepted_samples": evidence.accepted,
@@ -339,6 +358,11 @@ async def run_candidate_stream(
         "finish_started_at_seconds": finish_started_at,
         "finish_ended_at_seconds": finish_ended_at,
         "max_input_lateness_seconds": max_input_lateness if input_mode == "realtime" else None,
+        "phase_trace": trace_status,
+        "phase_trace_observed": (
+            trace_status.get("complete") is True
+            and trace_status.get("required_phases_observed") is True
+        ),
         "clock_scope": "diarization_with_fixed_asr_sidecar",
         "joint_asr_latency_observed": False,
         "runtime_identity_verified": False,

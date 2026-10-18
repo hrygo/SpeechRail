@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.17"
+version: "3.3.18"
 date: 2026-10-18
 ---
 
@@ -94,11 +94,19 @@ uv run --no-sync python examples/perf/prepare_meeting_evaluation_manifest.py \
 
 `FixedTextReplay` 是有一项前瞻的生产者顺序 iterator；`ScheduledText` 的 `ready_after_sample` 与 `finish_only` 控制 ASR 完成项何时可进入归属，不向模型注入参考文字或边界。它用于 C0/C1/C2 固定 ASR 对照，不能代替当次真实 ASR 推理。每批完成项最多 4,096 个、262,144 字符，不接受超过实际 accepted samples 的时间；完整原始事件只写仓库外 sink，摘要仅保留计数和文字摘要。
 
-`input_mode=throughput` 用于尽快重放；`realtime` 按累计整数样本的 1× 时钟供给，记录输入迟到，测试注入时钟显式标为 `injected`。阶段事件记录 ASR 文字可用、活动水位、append（包含准入/加载/推理）及 finish 边界；尚未拆分的耗时不命名为独立 queue/load/infer 指标。固定 sidecar 的 `clock_scope=diarization_with_fixed_asr_sidecar`、`joint_asr_latency_observed=false`、稳定标签 P95=`null`，不能用于 15 秒联合产品门。
+`input_mode=throughput` 用于尽快重放；`realtime` 按累计整数样本的 1× 时钟供给，记录输入迟到，测试注入时钟显式标为 `injected`。阶段事件记录 ASR 文字可用、活动水位、append 总耗时及 finish 边界。注入 `PhaseTrace` 的 session 另提供实际 admission/load/request/reap 边界，定义见下节。固定 sidecar 的 `clock_scope=diarization_with_fixed_asr_sidecar`、`joint_asr_latency_observed=false`、稳定标签 P95=`null`，不能用于 15 秒联合产品门。
 
 完成摘要的 `complete` 只证明供给/处理覆盖与原文字符保留。运行器自身不认证文件、ASR sidecar 或 runtime 身份，相关 verified 字段均为 false，`certification_eligible=false`、`verdict=diagnostic`、`certified_max_speakers=null`。锁定来源与身份检查、评分/调度接线、开发/留出 CLI、真实双路时钟和收据签发由后续执行器完成。候选 spec 已绑定这套归属配置、ledger 和回放源码，变更须重新生成 spec；预检仍不执行 worker。
 
 fake 测试为 `tests/test_meeting_candidate_runner.py`，包含单项队列的供给/消费、真实 session 类与 fake worker 的 owner 集成、失败隔离、取消、慢 sink、deadline、提前关闭、样本时钟和 WAV 边界。它们不证明模型质量、实际 1× 负载或真实 footprint。
+
+### 分人阶段耗时观测
+
+`CoreMLActivitySession` 和 `open_candidate_session` 可接收可选 `PhaseTrace`。默认关闭，不读取时钟；启用后只在 RAM 写入固定标签和数值，不在计算租约内执行 sink、文件 I/O 或回调。runner 在每次 append、finish 及清理后排空事件，sink 失败不能返回成功，精确 child 清理优先完成。
+
+`compute_queue` 从请求计算租约到实际准入；`load` 包含真实 worker start/preflight；`infer/finalize` 分别覆盖实际 append/finish 请求；`close` 覆盖加入 start、精确 child 关闭及 owner 释放或隔离确认。它们包含 IPC 与 native 等待，不是 accelerator kernel 时间；取消时区间可能重叠，不得直接求和当总计算耗时。事件包含 operation、through_sample、host monotonic 起止、duration、completed/cancelled/failed 和 clock_source，不含正文、音频、路径或身份。
+
+默认最多缓存 256 项；调用方可配置 1–65,536 项。未及时排空导致溢出、非法/倒退/抛错时钟会永久标记观测不完整，不阻断模型执行及回收。`complete` 仅表示 trace 无丢失、无未结束 span 且有事件；`required_phases_observed` 还要求五类阶段均有 completed 记录。runner 的 `phase_trace_observed` 合并这两个条件，不能证明实际模型身份或成功质量。注入时钟标为 `injected`，固定 sidecar 的联合时钟和 P95 仍未观察。fake 回归见 `tests/test_diarization_phase_trace.py`。
 
 ### 固定 ASR sidecar 输入
 
@@ -138,7 +146,7 @@ proof 只声明 `bytes_and_timing_verified=true`，保持 `producer_provenance_v
 
 `evaluate_development_checkpoint` 消费不可变 `CommonPrefixSchedule` 的 pending request 和固定候选摘要/工厂映射。1–4 人包含 C0，5–8 人不伪造四槽对照；完整预检共同前缀后，串行执行每个存活候选的全部来源组及其同层 fixture，上一 session 回收确认后才构造下一 session。完整配对完成后，按来源组计算产品汇总及对 C0 的 DER/cpCER 配对不退化门，并分别报告 near/far；缺场景明确 `not_observed`。任何部分失败不生成 `checkpoint.json`，也不修改原 schedule；成功时返回下一不可变状态，后续扩样继续遵循共同前缀与不可复活规则。
 
-检查点预检只跨会议保留文件指纹，不持有整个来源池的参考正文；逐场评分后只保留脱敏结果。该执行器验证实际输入与输出覆盖，并连接产品门和调度，仍不证明 activity factory 的真实制品/SDK/运行身份、生产者来源、跨进程排他或联合延迟。`runtime_identity_verified=false/certification_eligible=false/verdict=diagnostic/certified_max_speakers=null` 保持明确；调度的 `passed` 仅表示该共同检查点的评分门通过，不代表唯一候选选型或产品认证。生产组合根、完整 phase tracing、联合 ASR 时钟、开发收据签发、跨层选型及评测 CLI 仍需接线。fake 测试为 `tests/test_meeting_development_fixture.py`。
+检查点预检只跨会议保留文件指纹，不持有整个来源池的参考正文；逐场评分后只保留脱敏结果。该执行器验证实际输入与输出覆盖，并连接产品门和调度，仍不证明 activity factory 的真实制品/SDK/运行身份、生产者来源、跨进程排他或联合延迟。`runtime_identity_verified=false/certification_eligible=false/verdict=diagnostic/certified_max_speakers=null` 保持明确；调度的 `passed` 仅表示该共同检查点的评分门通过，不代表唯一候选选型或产品认证。生产组合根须启用并导出阶段观测；联合 ASR 时钟、开发收据签发、跨层选型及评测 CLI 仍需接线。fake 测试为 `tests/test_meeting_development_fixture.py`。
 
 ### 有声书外置小说语料回归
 

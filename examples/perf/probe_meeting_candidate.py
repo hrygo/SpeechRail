@@ -102,6 +102,7 @@ def static_candidate_spec(
             "examples/perf/meeting_evaluation_identity.py",
             "src/speechrail/backends/diarization/coreml.py",
             "src/speechrail/runtime/diarization_owner.py",
+            "src/speechrail/runtime/phase_trace.py",
             "src/speechrail/runtime/diarization_worker.py",
             "src/speechrail/runtime/resource_governor.py",
             "src/speechrail/runtime/cleanup.py",

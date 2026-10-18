@@ -7,6 +7,7 @@ from contextlib import suppress
 
 from speechrail.runtime.cleanup import join_cleanup
 from speechrail.runtime.diarization_worker import CoreMLWorkerProcess
+from speechrail.runtime.phase_trace import PhaseSpan, PhaseTrace
 from speechrail.runtime.resource_governor import (
     GovernorLaneIsolatedError,
     GovernorQueueFullError,
@@ -66,8 +67,10 @@ class DiarizationWorkerLease:
         worker: CoreMLWorkerProcess,
         governor: ResourceGovernor,
         generation: int,
+        phase_trace: PhaseTrace | None = None,
     ) -> None:
         self._worker = worker
+        self._phase_trace = phase_trace
         self._governor = governor
         self._generation = generation
         self._close_task: asyncio.Task[None] | None = None
@@ -79,11 +82,15 @@ class DiarizationWorkerLease:
             raise RuntimeError("diarization worker is closing")
         if self._start_task is None:
             self._start_task = asyncio.create_task(
-                self._worker.start(), name="owned-diarization-start"
+                self._start(), name="owned-diarization-start"
             )
         # The transport makes OS process creation cancellation-safe. Preflight
         # can then be interrupted without losing a late exact child.
         await asyncio.shield(self._start_task)
+
+    async def _start(self) -> None:
+        with PhaseSpan(self._phase_trace, "load", "start"):
+            await self._worker.start()
 
     async def close(self) -> None:
         if self._close_task is None:
@@ -91,6 +98,10 @@ class DiarizationWorkerLease:
         await join_cleanup(self._close_task)
 
     async def _close(self) -> None:
+        with PhaseSpan(self._phase_trace, "close", "close"):
+            await self._reap()
+
+    async def _reap(self) -> None:
         if self._start_task is not None:
             # Interrupt a blocked preflight, but join protected OS creation.
             self._start_task.cancel()

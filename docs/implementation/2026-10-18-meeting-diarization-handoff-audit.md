@@ -277,3 +277,22 @@ PYTHONPATH=src:examples/perf uv run --no-sync pytest -o addopts= --no-cov -q \
   tests/test_meeting_candidate_runner.py tests/test_meeting_asr_sidecar.py \
   tests/test_meeting_development_fixture.py tests/test_diarization_attribution.py
 ```
+
+
+## T4 分人阶段耗时与回收观测
+
+2026-10-18：新增可选、有界 `PhaseTrace`，在实际计算准入、worker start/preflight、append/finish 请求和 exact-child 回收路径记录五类阶段。准入计时在资源获准时结束，加载只记录实际 start task 一次，close 记录到回收/隔离确认；重复 finish/cancel 不复制事件。默认关闭，不改变模型输出、公共接口或安装态。
+
+事件只含固定标签、样本位置和数值时钟，先写 RAM；runner 在租约外逐次排空。时钟抛错、非有限值、倒退、bool 或容量溢出会永久使 trace 不完整，但不阻断 child 回收。失败回收保持 owner 隔离，取消的排队不伪造模型推理。append 总耗时在写 phase sink 前截取，避免将制品写入算为模型工作。source identity 纳入 trace 实现，变更后须重新冻结候选。
+
+Ruling: `phase_trace_observed` 只表示无丢失且五类阶段均有 completed 记录；host wall time 包含 IPC/native 等待，取消时阶段可能交叠，不是 kernel 时间，也不能直接相加。注入时钟标记 injected；固定 sidecar 仍不证明当次 ASR、联合 P95、真实 runtime 或人数认证。生产组合根仍须实际启用并导出 trace，不能因可选代码存在宣称真实负载已测。
+
+RED：trace 模块缺失；反例覆盖 queue 与 load/infer 分离、close 未确认前不发完成事件、回收失败隔离、时钟异常与溢出不妨碍清理、sink 错误脱敏。GREEN：13 项新 fake 回归通过；与原相关测试合并为 `282 passed in 6.31s`。随后修正 append 总耗时不得包含 phase sink 写入，相关 31 项回归 `31 passed in 0.26s`；变更 Python Ruff、生产三个 source Mypy、评测三个 source 与 trace 严格 Mypy、diff 检查通过。没有真实音频/模型、benchmark、下载、服务、安装、发布或合并。
+
+远端核实：上一提交 `f0bacd5f4a95d1c312230b185569a3398240c4c6` 的主 CI `39089905037` 和候选 CI `39089904957` 均成功；不将其作为本节新提交的验证。
+
+```bash
+PYTHONPATH=src:examples/perf uv run --no-sync pytest -o addopts= --no-cov -q \
+  tests/test_diarization_phase_trace.py tests/test_meeting_candidate_session.py \
+  tests/test_meeting_candidate_runner.py
+```
