@@ -1,4 +1,4 @@
-"""Artifact preflight and explicit serial development execution for eight-slot candidates.
+"""Artifact preflight and serial development execution for C0/C1/C2.
 
 Preflight reads files only. evaluate-development launches a supervised native
 worker using caller-prepared local artifacts. No downloads or holdout execution.
@@ -132,18 +132,26 @@ def static_candidate_spec(
 def artifact_preflight(
     spec: MeetingCandidateSpec, *, worker: Path, model_directory: Path,
 ) -> dict[str, object]:
-    observed = static_candidate_spec(
-        worker=worker, model_directory=model_directory,
-        preset=str(spec.preset.get("name")), model_revision=spec.model_revision,
-        compute_units=spec.compute_units,
-    )
+    from meeting_c0 import C0_IMPLEMENTATION, static_c0_spec
+
+    if spec.implementation_id == C0_IMPLEMENTATION:
+        observed = static_c0_spec(worker=worker, model_directory=model_directory)
+    elif spec.implementation_id == "nemotron3-streaming-candidate-v1":
+        observed = static_candidate_spec(
+            worker=worker, model_directory=model_directory,
+            preset=str(spec.preset.get("name")), model_revision=spec.model_revision,
+            compute_units=spec.compute_units,
+        )
+    else:
+        raise ValueError("unknown frozen candidate implementation")
     validate_execution_identity(spec, observed.as_dict())
     return {
         "schema_version": 2, "mode": "artifact_preflight",
         "candidate_sha256": candidate_digest(observed),
         "artifact_spec_matches": True, "runtime_identity_verified": False,
         "model_shape_verified": False, "model_revision_provenance_verified": False,
-        "model_slots": 8, "certified_max_speakers": None,
+        "model_slots": 4 if spec.implementation_id == C0_IMPLEMENTATION else 8,
+        "certified_max_speakers": None,
         "verdict": "not_evaluated",
     }
 

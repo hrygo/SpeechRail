@@ -16,14 +16,15 @@ from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import Any
 
+from meeting_c0 import C0_IMPLEMENTATION, C0WorkerProcess, open_c0_session
 from meeting_candidate_session import (
-    CandidateActivitySession,
     CandidateWorkerProcess,
     open_candidate_session,
 )
 from meeting_development_fixture import evaluate_development_fixture
 from meeting_evaluation_identity import MeetingCandidateSpec, candidate_digest
 
+from speechrail.backends.diarization.coreml import CoreMLActivitySession
 from speechrail.domain.diarization.ports import ActivitySession
 from speechrail.domain.diarization.types import ActivityUpdate
 from speechrail.domain.resource_limits import GovernorLimits
@@ -150,7 +151,7 @@ class CandidateArtifacts:
 class CheckedCandidateSession:
     """Artifact checks run outside native compute; original exact-child lease owns cleanup."""
 
-    def __init__(self, session: CandidateActivitySession, artifacts: CandidateArtifacts) -> None:
+    def __init__(self, session: CoreMLActivitySession, artifacts: CandidateArtifacts) -> None:
         self._session, self._artifacts = session, artifacts
 
     async def append(self, *, start_sample: int, pcm16: bytes) -> None:
@@ -204,10 +205,25 @@ async def evaluate_candidate_development(
             )
         )
         governor = ResourceGovernor(GovernorLimits(2, 1, 8), allow_heavy_overlap=False)
-        transport: CandidateWorkerProcess | None = None
+        transport: CandidateWorkerProcess | C0WorkerProcess | None = None
 
         def activity_factory() -> ActivitySession:
             nonlocal transport
+
+            if spec.implementation_id == C0_IMPLEMENTATION:
+                def construct_c0() -> C0WorkerProcess:
+                    nonlocal transport
+                    transport = C0WorkerProcess(
+                        executable=artifacts.worker,
+                        model_path=artifacts.models / str(spec.preset["model_file_name"]),
+                        inherited_guard_fd=port.descriptor,
+                    )
+                    return transport
+
+                return CheckedCandidateSession(
+                    open_c0_session(worker_factory=construct_c0, governor=governor,
+                                    phase_trace=PhaseTrace()), artifacts
+                )
 
             def construct() -> CandidateWorkerProcess:
                 nonlocal transport

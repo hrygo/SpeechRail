@@ -347,3 +347,14 @@ PYTHONPATH=src:examples/perf uv run --no-sync pytest -o addopts= --no-cov -q \
 独立只读代理核对当前生产装配，主代理覆盖检查并直接复核 `services.py`、`qwen3_window.py`、`qwen3_worker.py` 关键路径。实际 window review 的预算由 worker `_dynamic_budget(duration,self._max_new_tokens)` 计算；window RPC 不发送 max_tokens，组合根先创建 batch shared owner 后供 streaming/window 复用，不能把 streaming 配置值直接当有效 window cap。review 已强制 EOS、拒绝 length/truncated，不能说它没有截断检查；但 budget/finish_reason/truncated 尚未随成功结果跨 RPC 保存，当前 token_limit_hit=None 仍不可替换为False。
 
 下一 ASR 切片应复用正式 Realtime session 的 VAD/admission/boundary 路径及独立有界输入时钟，再贯通每 attempt 的有效 decoder 证据；不复制生产 frontier 规则、不把顺序 feeder 当采集基准。该核验无模型/服务/留出操作，没有冻结真实 A0 或改善 CER。
+
+
+## T4 四槽 C0 共享执行接线
+
+2026-10-18：新增 meeting_c0，冻结当前生产四槽 C0 的 worker/model/source/scorer 身份。模型要求生产固定文件哈希和 MIL 签名；外部目录中其余文件也纳入字节摘要。配置绑定旧 SDK 的 balancedV2_1、all compute、生产 >=0.25 阈值、不做 consolidation/ghost/短轮丢弃，并记录原生 EOF 私有右上下文补齐与输入样本裁剪。probe 的只读 preflight 和显式 evaluate-development 按冻结 implementation_id 分派，拒绝未知实现。
+
+C0 通过原 CoreMLActivitySession 解码，评测子类额外验证连续四槽概率覆盖和 EOF，保留阈值边界及单样本尾音；共享端口继承锁、先 claim 后构造、串行 governor、阶段观测、制品完整性检查、exact-child 回收和统一 fixture/scorer 路径。C0 只作为 ≤4 人对照；共同检查点 CLI 仍待接线。
+
+Ruling: C0 protocol 1 原生 preflight 只有 ok，native_preflight_observed 仅记录该握手，不证明 SDK/config/shape/build provenance。static spec 的 SDK/config 是被源文件和固定 revision 绑定的声明，不能升级成原生执行证明；runtime_identity_verified/model_shape_verified/production_certification 继续 false。没有更改生产 worker、默认解码或 public contract。
+
+RED：新模块缺失导致10项反例失败。GREEN：C0 spec/变更拒绝/生产模型字节/阈值边界/尾音/缺帧/非法概率，以及合成 WAV → fake protocol-1 → 实际 fixture/评分/保存摘要的完整接线，与原 probe/执行器共59项通过。严格 Mypy 三个 source 与 Ruff 四个文件通过。未执行真实模型、音频、benchmark、服务、下载、安装、UI、发布或合并。父提交 7ac3892 的主 CI 39091457710、原生 CI 39091457684 均成功；不能作为本节后续提交的全量验证。
