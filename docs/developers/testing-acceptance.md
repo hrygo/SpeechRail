@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.35"
+version: "3.3.36"
 date: 2026-10-18
 ---
 
@@ -320,6 +320,18 @@ schema 1 comparison lock 恰含 `schema_version/cases/scorer_policy/baseline/can
 控制与报告JSON单文件限16MiB、总量32MiB，拒绝重复键、非有限数、未知控制字段、相对路径、叶符号链接和非普通文件。评分、写partial之后加入输入与执行源码全量校验，再同步核对文件状态、输出目录身份、partial内容与状态，无await提交comparison.json；失败和取消不提交完成结果，取消须等待评分线程退出。目录必须为仓库外新0700目录，文件0600，既有输出不覆盖，错误只保存固定码。
 
 结果记录控制与执行实现摘要、case数量和现有来源组配对诊断统计，不回显输入路径或正文。`verdict=diagnostic/runtime_identity_verified=false/certification_eligible=false/quality_gate=fail` 固定；development_text_gate仅是声明输入下的文字诊断门，不签收据、不证明实际A0或CER产品验收。CLI属于ASR执行源码身份，接线变化后相关candidate spec与控制锁须重新冻结。fake回归见 `tests/test_meeting_asr_comparison.py` 与 `tests/test_probe_meeting_asr_development.py`。
+
+### ASR 与分人四模式调度核心
+
+`bench_asr_diarization_overlap.run_workload_schedule` 提供 asr-only、diarization-only、serial、overlap 的异步调度库，不提供模型发现、真实评测CLI或文件写出。调用方提供事前获准、已绑定来源的ASR/分人回调；所选模式以外的回调必须缺省。每个回调接收同一个显式ResourceGovernor，并负责把实际计算交给它、等待所属推理和session清理后再返回或传播取消；库不能从参数传递证明回调确实遵循了这些约束。
+
+两个联合模式都同时启动两路回调。serial要求Governor的allow_heavy_overlap明确false，由实际计算准入串行，不能把整场ASR跑完后再启动分人当作串行基线；overlap要求overlap_enabled为bool true且Governor明确允许交叠。启动前拒绝已有活动/排队计算、retained分人资源、计算拒绝或相关lane不可用；不改Governor配置，不预留整场计算租约，也不能据此证明预算声明来源或跨进程排他。
+
+回调报告须声明完成且无失败：接受complete=true、status=completed或quality_evidence_valid=true之一，出现的其他完成字段也须一致。报告只作有限JSON快照和摘要，最大16MiB；快照/散列在线程执行并加入取消清理，原文、PCM与路径不进入调度输出。这个完成声明不替代质量门或真实生产者证明。任何失败、自取消、超时、非法/倒退时钟或部分完成均不返回schedule_completed结果；外部重复取消须等待所有已启动回调和散列线程退出。执行deadline默认900秒、最大7200秒，不包含其后不可放弃的清理等待；回调吞掉deadline取消也不能提交完成。
+
+输出区间为宿主回调开始至返回，包含其自身清理，非kernel推理时间。clock明确区分monotonic/injected；schedule_completed只证明调度结束。runtime_identity_verified、certification_eligible、same_source_verified、worker_reaping_verified、compute_overlap_observed、joint_latency_observed保持false，quality_gate/footprint/p95保持not_observed。
+
+完整T6还需接入同PCM的共同1×供给、真实ASR正文与分人watermark及稳定发布、确切进程footprint、冷/热ABBA block、按来源组配对统计和生产身份核验。回调墙钟、合成任务的交叠或Governor准入测试不能替代这些证据。确定性回归见 `tests/test_asr_diarization_overlap_harness.py`；它只使用asyncio、实际Governor和fake计算，不打开音频或加载模型。
 
 ### 有声书外置小说语料回归
 

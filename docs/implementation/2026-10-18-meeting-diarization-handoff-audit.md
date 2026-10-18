@@ -511,3 +511,13 @@ root使用同一ready window factory创建长块session，沿用既有纯PCM网�
 下一真实执行前需提供并核验schema2来源catalog、原artifact root及独立主参考：来源/祖先、录音摘要、通道与变换、自然/派生样本分类、near/far、匿名参考规则和split隔离；不足则保持insufficient_sources，不伪造独立N。旧四条仅保留诊断价值。另已核对T6计划要求的bench_asr_diarization_overlap.py尚未实现；现有bench_overlap.py是ASR/TTS，不能替代ASR/分人四模式执行器。现有candidate runner使用固定sidecar，joint_asr_latency_observed明确false，不能从其墙钟推导真实联合P95。
 
 代码提交3516875d主CI39097139430、原生CI39097139429均已核验success/completed。该证据仍是代码/构建/确定性门禁，不能替代上述数据就绪或真实质量。此节只改文档，diff检查通过，未重复运行测试。
+
+## T6 四模式调度与 joined 清理基础
+
+2026-10-18：新增bench_asr_diarization_overlap.run_workload_schedule，只接显式ASR/分人异步回调和同一个ResourceGovernor，无模型构造、CLI或文件写出。支持两个单路基线和serial/overlap；检查Governor是否空闲/可准入，交叠须显式启用且Governor允许。完成报告只在线程冻结JSON并散列，不回显回调中的原文或路径。超时/失败/取消不返回完成结果，外部重复取消加入全部子任务与散列线程。
+
+最初14项模块缺失RED后GREEN。审查发现整条回调先ASR后DIA会制造错误串行基线：补两路互相等待feed-ready、但真实Governor计算必须互斥的反例，旧写法超时RED；改为联合模式都启动两路，由serial的非交叠Governor或overlap的交叠Governor控制真实计算，随后GREEN。另以反例复现asyncio.timeout被回调吞掉取消后仍返回完成，增加deadline.expired显式拒绝，RED后GREEN。
+
+31项新回归覆盖两路真实Governor准入、模式及显式交叠保护、单路基线、失败时加入兄弟清理、超时、自取消、重复取消、异常隐私、时钟、报告非有限数、摘要线程及失败清理期间再次取消。与既有Governor联合 `64 passed in 0.44s`，两个Python Ruff、一个source strict/follow-imports=silent Mypy通过。生产Governor/limits/cleanup图谱coverage metadata_match，新source/test missing，当前源码直接复核，未重建索引。
+
+Ruling: 只证明回调调度与清理，不证明共用PCM、1×输入、实际计算交叠、精确child回收、模型质量或联合P95。same_source/worker_reaping/runtime/certification及joint_latency/compute_overlap均false，quality/footprint/p95未观察。完整T6的共同源、实时正文/活动/稳定发布、进程footprint、冷/热ABBA及配对统计仍未接通；没有执行真实模型/音频、benchmark、下载、服务/安装、UI、发布或合并。父fda71298主CI39097526802及原生CI39097526765均成功，新提交另行核验。
