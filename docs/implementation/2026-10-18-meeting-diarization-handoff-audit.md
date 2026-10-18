@@ -1108,3 +1108,20 @@ fast32 在辅助参考下 recall/precision/最低逐人 recall 从 92.16371%／9
 两份正文并不相同：固定最小编辑对齐下共有 27 项相同错误，基线和候选各有 3 项独有错误。CER 相等不证明关键事实不退化，也没有达到 CER 改善目标；保留人工语义复核、独立主参考和扩样要求，不将效率信号包装为转录质量改善。当前证据支持在 PR 保留该生产候选继续验证，尚未安装或切换正式服务。
 
 两路冻结文件均在运行后稳定、owned children 已回收；候选无 token-limit 命中。缺少独立主参考仍是预期的唯一失败原因，loaded-model/import 字节认证缺口保持原值，不宣称正式质量通过。候选窗口通过 managed CLI 恢复唯一 listener PID 31417，health/readyz 200、3.12.0、quality/quality，配置、selection 和 runtime target 未变。音频、正文、对齐单元和原始制品只保存在仓库外。
+
+
+## ASR 剩余错误定位与联合候选准备
+
+2026-10-18：使用原 37 条无重叠参考句的真实区间和既有复核拥有区间作只读定位，不给字符均分时间。8 条参考句跨过复核边界，含 140/515 个规范化字符；固定最小编辑对齐下，基线 30 个错误中 6 个、完整单元候选 30 个错误中 5 个落在这些句内。句级定位不是字级因果证据，但不支持把剩余错误主要归因于切口，因此不继续作窗口长度参数搜索。
+
+查阅 [Qwen3-ASR 官方说明](https://github.com/QwenLM/Qwen3-ASR) 与当前 worker：官方公开评测使用 greedy、未指定语言；本机 review 为完整音频 prefix-free 解码，未找到可直接采用且已验证的 beam search 改进。公开评测配置不能替代同源开发结论，也不据此修改生产语言设置。
+
+本机另有 SenseVoiceSmall 缓存 snapshot，共 29 文件、943980179 字节；已检查的当前评测依赖根没有 FunASR/PyTorch，未运行或安装它。其 ASR 与情绪/事件标签不等于分人，官方也明确分人需另外组合组件，见 [SenseVoice 官方说明](https://github.com/QwenAudio/SenseVoice)。缓存盘点不宣称模型已加载、字节已通过发布方校验或质量优于当前模型。
+
+下一项拟诊断为 [OpenMOSS-Team/MOSS-Transcribe-Diarize](https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize)，固定 revision `704aa4a9c304e8520be88901e0d1960158ef5b15`，Apache-2.0、原始 BF16，16 个必要文件共 1833089258 字节（1.707 GiB）；主权重和 tokenizer 有发布方 LFS SHA-256。尚未确认 ModelScope 上版本、格式与完整文件集均匹配的制品，拟用官方 Hugging Face 源逐文件校验。其联合文字/匿名说话人路径与目标相关，但模型卡分数不证明本任务收益；这是待检验候选，不是已选中的生产模型。
+
+候选采用独立 Python 3.14 环境，固定 `Blaizzy/mlx-audio` 源码 `4ef6c3a577ade12d946e4b1d1870e4ba67fb5b9a`。只读检查发现 loader 有原始权重布局适配；生成路径支持确定性采样，SDK 的 segment parser 会跳过非法区间或在没有时间戳时生成全长 fallback，诊断必须直接完整解析原始输出并拒绝这些情况。4096-token 固定上限、无参考/热词注入，截断或非法时间范围均失败。该 SDK 的 MLX 0.32.4 有 CPython 3.14/macOS arm64 wheel，完整依赖解析、源码执行审查及运行识别尚未完成，不改现有 runtime。
+
+拟先仅运行已有 Train_near 的 diagnostic-001 与 diagnostic-006，每片 15 分钟超时；同时查看前者派生 CER 和两者 speaker-time 指标，结果无收益则停止，不提前实现生产 adapter 或扩大人数声明。它使用完整片段，只是离线联合诊断，不能冒充实时延迟或跨窗口身份通过。8 GiB 是拟用的保守准入预算，尚非实测内存；真实峰值和清理仍需执行证据。元数据、必要文件表与候选条件已写至仓库外，尚未下载权重、创建新环境或加载模型。新增模型下载和隔离准备的确认正在等待用户答复，原 C1/C2 下载授权不扩用。
+
+同日核验 `adb9247c` 的八项 GitHub CI 全部通过，包括完整 Python 套件、Swift 测试、App 构建及隔离候选 fake 测试；没有真实语料 CI。正式服务自上一窗口恢复后未再次启停，生产安装与配置未改动。
