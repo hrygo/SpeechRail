@@ -19,7 +19,7 @@ from typing import Any
 
 from meeting_candidate_schedule import CommonPrefixSchedule, eligible_across_strata
 from meeting_evaluation_identity import canonical_digest
-from meeting_quality_metrics import _validate_policy
+from meeting_quality_metrics import _validate_policy, standard_metric_totals
 
 _MAX_JSON_BYTES = 32 * 1024 * 1024
 _SCENES = ("near", "far")
@@ -59,57 +59,6 @@ def _snapshot(value: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _number(value: Any) -> float:
-    if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
-        raise ValueError("selection metrics require finite nonnegative observations")
-    return float(value)
-
-
-def _ratio(numerator: float, denominator: float, reported: Any) -> float:
-    value = _number(reported)
-    if denominator <= 0 or not math.isclose(value, numerator / denominator, abs_tol=1e-9):
-        raise ValueError("selection score disagrees with measured numerator and denominator")
-    return value
-
-
-def _totals(
-    row: dict[str, Any], policy: dict[str, Any]
-) -> tuple[float, float, float | None, float | None]:
-    quality = row["quality"]
-    if quality["schema_version"] != 3 or quality["policy_sha256"] != canonical_digest(policy):
-        raise ValueError("selection quality scorer differs from frozen policy")
-    standard = quality["standard_metrics"]
-    der = standard["diarization"]
-    if (
-        der.get("scorer") != "pyannote.metrics"
-        or der.get("scorer_version") != "4.1"
-        or type(der.get("collar_seconds")) not in (int, float)
-        or der["collar_seconds"] != 0
-        or der.get("skip_overlap") is not False
-    ):
-        raise ValueError("selection requires zero collar DER including overlap")
-    if der.get("availability") != "observed" or der.get("der") is None:
-        return 0, 0, None, None
-    components = der["components"]
-    total = _number(components["total"])
-    errors = math.fsum(
-        _number(components[k]) for k in ("missed detection", "false alarm", "confusion")
-    )
-    _ratio(errors, total, der["der"])
-    cp = standard["cp_cer"]
-    if cp.get("availability") != "observed" or cp.get("error_rate") is None:
-        return errors, total, None, None
-    if (
-        cp.get("algorithm") != "meeteval.cp"
-        or cp.get("scorer_version") != "0.4.3"
-        or cp.get("tokenization") != policy["tokenization"]["character"]
-    ):
-        raise ValueError("selection cpCER identity differs from frozen scorer")
-    cp_errors, cp_total = _number(cp["errors"]), _number(cp["reference_tokens"])
-    _ratio(cp_errors, cp_total, cp["error_rate"])
-    return errors, total, cp_errors, cp_total
-
-
 def _restore(
     initial: CommonPrefixSchedule,
     report: dict[str, Any],
@@ -140,7 +89,8 @@ def _restore(
     }
     if (
         report["status"] != "completed"
-        or request["status"] != "passed"
+        or request["status"] not in {"passed", "evidence_exhausted"}
+        or not request["eligible_candidates"]
         or any(
             canonical_digest({"v": report[k]}) != canonical_digest({"v": v})
             for k, v in identities.items()
@@ -150,7 +100,7 @@ def _restore(
         or initial.as_dict()["source_groups"] != manifest["group_order"][str(state.speakers_count)]
     ):
         raise ValueError(
-            "selection requires completed passed common prefixes and frozen identities"
+            "selection requires completed eligible common prefixes and frozen identities"
         )
     last = saved["rounds"][-1]
     if set(report["observations"]) != set(last) or set(report["comparisons"]) != set(last):
@@ -230,7 +180,7 @@ def _collect(
                 )
             ):
                 raise ValueError("selection fixture identities differ from frozen manifest")
-            totals = _totals(row, policy)
+            totals = standard_metric_totals(row, policy)
             if totals[1] == 0:
                 missing_der.add(name)
             denominator = totals[1], totals[3]

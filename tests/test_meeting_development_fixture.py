@@ -570,3 +570,52 @@ def test_cancel_during_sidecar_open_joins_and_closes_entered_context(tmp_path, m
         assert not (tmp_path / "result" / "result.json").exists()
 
     asyncio.run(run())
+@pytest.mark.parametrize("metric", ["der", "cp_cer"])
+def test_same_source_fragments_cannot_hide_long_fragment_regression(metric):
+    from meeting_development_fixture import _paired_metrics
+    from meeting_evaluation_identity import canonical_digest
+    from meeting_quality_metrics import nondegradation_gate
+
+    from test_meeting_quality_metrics import policy
+
+    frozen = policy()
+
+    def row(group, fragment, errors, total):
+        return {
+            "fixture_id": f"{group}-{fragment}", "source_meeting_id": group,
+            "quality": {
+                "schema_version": 3, "policy_sha256": canonical_digest(frozen),
+                "standard_metrics": {
+                    "diarization": {
+                        "availability": "observed", "scorer": "pyannote.metrics",
+                        "scorer_version": "4.1", "collar_seconds": 0, "skip_overlap": False,
+                        "der": errors / total if metric == "der" else 0,
+                        "components": {"total": total,
+                                       "missed detection": errors if metric == "der" else 0,
+                                       "false alarm": 0, "confusion": 0},
+                    },
+                    "cp_cer": {
+                        "availability": "observed", "algorithm": "meeteval.cp",
+                        "scorer_version": "0.4.3",
+                        "tokenization": frozen["tokenization"]["character"],
+                        "errors": errors * 10 if metric == "cp_cer" else 0,
+                        "reference_tokens": total * 10,
+                        "error_rate": errors / total if metric == "cp_cer" else 0,
+                    },
+                },
+            },
+        }
+
+    baseline = [r for i in range(6) for r in (
+        row(f"M{i}", "long", 0, 1000), row(f"M{i}", "short", 0.8, 1)
+    )]
+    candidate = [r for i in range(6) for r in (
+        row(f"M{i}", "long", 20, 1000), row(f"M{i}", "short", 0, 1)
+    )]
+    result = nondegradation_gate(
+        _paired_metrics(baseline, policy=frozen),
+        _paired_metrics(candidate, policy=frozen),
+        policy=frozen,
+    )
+    assert result["decision"] == "point_failed"
+    assert result["metrics"][metric]["difference"] == pytest.approx(19.2 / 1001)

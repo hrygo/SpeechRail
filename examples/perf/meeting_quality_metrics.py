@@ -23,6 +23,7 @@ except ImportError:  # direct CLI imports
     from meeting_evaluation_identity import canonical_digest
 
 _WORD = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]|[a-z0-9]+")
+SOURCE_AGGREGATION = "one_execution_per_fixture_source_totals_v1"
 _REQUIRED_POLICY = {
     "schema_version",
     "speaker_time_recall_min",
@@ -44,6 +45,12 @@ def _validate_policy(policy: Mapping[str, object]) -> None:
     missing = _REQUIRED_POLICY - set(policy)
     if missing:
         raise ValueError(f"incomplete scorer policy: {sorted(missing)}")
+    statistics = policy.get("statistics")
+    if (
+        not isinstance(statistics, Mapping)
+        or statistics.get("fixture_aggregation") != SOURCE_AGGREGATION
+    ):
+        raise ValueError("scorer policy must freeze single-execution fixture source totals")
     if (
         type(policy["schema_version"]) is not int
         or policy["schema_version"] != 2
@@ -443,10 +450,61 @@ def allows_latency_tiebreaker(difference, *, policy) -> bool:
     return type(upper) in (int, float) and math.isfinite(upper) and upper <= margin
 
 
+def _metric_number(value: Any) -> float:
+    if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+        raise ValueError("metrics require finite nonnegative observations")
+    return float(value)
+
+
+def _metric_ratio(numerator: float, denominator: float, reported: Any) -> None:
+    value = _metric_number(reported)
+    if denominator <= 0 or not math.isclose(value, numerator / denominator, abs_tol=1e-9):
+        raise ValueError("score disagrees with measured numerator and denominator")
+
+
+def standard_metric_totals(
+    row: Mapping[str, Any], policy: Mapping[str, Any]
+) -> tuple[float, float, float | None, float | None]:
+    """Validate independent scorer identity and retain additive fixture totals."""
+    quality = row["quality"]
+    if quality["schema_version"] != 3 or quality["policy_sha256"] != canonical_digest(policy):
+        raise ValueError("quality scorer differs from frozen policy")
+    standard = quality["standard_metrics"]
+    der = standard["diarization"]
+    if (
+        der.get("scorer") != "pyannote.metrics"
+        or der.get("scorer_version") != "4.1"
+        or type(der.get("collar_seconds")) not in (int, float)
+        or der["collar_seconds"] != 0
+        or der.get("skip_overlap") is not False
+    ):
+        raise ValueError("requires zero collar DER including overlap")
+    if der.get("availability") != "observed" or der.get("der") is None:
+        return 0, 0, None, None
+    components = der["components"]
+    total = _metric_number(components["total"])
+    errors = math.fsum(
+        _metric_number(components[k]) for k in ("missed detection", "false alarm", "confusion")
+    )
+    _metric_ratio(errors, total, der["der"])
+    cp = standard["cp_cer"]
+    if cp.get("availability") != "observed" or cp.get("error_rate") is None:
+        return errors, total, None, None
+    if (
+        cp.get("algorithm") != "meeteval.cp"
+        or cp.get("scorer_version") != "0.4.3"
+        or cp.get("tokenization") != policy["tokenization"]["character"]
+    ):
+        raise ValueError("cpCER identity differs from frozen scorer")
+    cp_errors, cp_total = _metric_number(cp["errors"]), _metric_number(cp["reference_tokens"])
+    _metric_ratio(cp_errors, cp_total, cp["error_rate"])
+    return errors, total, cp_errors, cp_total
+
+
 def summarize_meeting_quality(rows, *, required_strata, policy) -> dict[str, Any]:
     """Acoustic product evidence only; runtime/holdout certification is separate.
 
-    Repeated observations in one source meeting are averaged first. Both pooled
+    Each fixture has one execution; distinct source fragments add totals. Both pooled
     speaker-time and equal-meeting macro ratios must pass; neither substitutes
     for a failed individual participant or the frozen legacy gate.
     """
@@ -462,15 +520,21 @@ def summarize_meeting_quality(rows, *, required_strata, policy) -> dict[str, Any
         raise ValueError("invalid evaluation summary bounds")
     by_stratum = {count: defaultdict(list) for count in required_strata}
     observed_policy = canonical_digest(policy)
+    seen_fixtures: set[str] = set()
     for row in rows:
         count, group = row["speakers_count"], row["source_meeting_id"]
+        fixture = row.get("fixture_id")
         if (
             type(count) is not int
             or count not in by_stratum
             or not isinstance(group, str)
             or not group
+            or not isinstance(fixture, str)
+            or not fixture
+            or fixture in seen_fixtures
         ):
-            raise ValueError("invalid evaluation stratum or source group")
+            raise ValueError("invalid evaluation stratum, source group or duplicate fixture")
+        seen_fixtures.add(fixture)
         if row["quality"].get("schema_version") != 3:
             raise ValueError("score schema must separate activity and text inputs")
         if row["quality"]["policy_sha256"] != observed_policy:
@@ -493,9 +557,9 @@ def summarize_meeting_quality(rows, *, required_strata, policy) -> dict[str, Any
             for meetings in grouped.values()
             for q in meetings
         )
-        means = np.array(
+        source_totals = np.array(
             [
-                np.mean(
+                np.sum(
                     [
                         [
                             q["product_all_regions"][key]
@@ -512,8 +576,8 @@ def summarize_meeting_quality(rows, *, required_strata, policy) -> dict[str, Any
                 for group in sorted(grouped)
             ]
         )
-        if not np.isfinite(means).all() or (means[:, 1:] <= 0).any():
-            observed_miss = np.isfinite(means).all() and (means[:, 1] > 0).all()
+        if not np.isfinite(source_totals).all() or (source_totals[:, 1:] <= 0).any():
+            observed_miss = np.isfinite(source_totals).all() and (source_totals[:, 1] > 0).all()
             summaries[str(count)] = {
                 "availability": "observed" if observed_miss else "not_observed",
                 "quality_gate": "fail",
@@ -522,14 +586,14 @@ def summarize_meeting_quality(rows, *, required_strata, policy) -> dict[str, Any
             }
             continue
         indices = _bootstrap_indices(len(grouped), policy)
-        sampled = means[indices]
-        totals = means.sum(axis=0)
+        sampled = source_totals[indices]
+        totals = source_totals.sum(axis=0)
         summary = {"availability": "observed", "independent_groups": len(grouped)}
         confidence_pass = (
             len(grouped) >= policy["statistics"]["development_checkpoints_per_stratum"][0]
         )
         for name, col in (("recall", 1), ("precision", 2)):
-            ratios = means[:, 0] / means[:, col]
+            ratios = source_totals[:, 0] / source_totals[:, col]
             distributions = {
                 "pooled": sampled[:, :, 0].sum(axis=1) / sampled[:, :, col].sum(axis=1),
                 "macro": (sampled[:, :, 0] / sampled[:, :, col]).mean(axis=1),

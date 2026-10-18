@@ -38,6 +38,7 @@
     "primary_benefit": "serial_minus_overlap_joint_tail_to_final"
   },
   "statistics": {
+    "fixture_aggregation": "one_execution_per_fixture_source_totals_v1",
     "unit": "source_meeting_id",
     "seed": 1717,
     "bootstrap_draws": 10000,

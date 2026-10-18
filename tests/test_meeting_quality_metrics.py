@@ -236,7 +236,10 @@ def test_aggregate_preserves_missing_strata_and_per_person_failure():
     from meeting_quality_metrics import summarize_meeting_quality
 
     good = score([span(0, 1, "R1")], [span(0, 1, "S1")])
-    rows = [{"source_meeting_id": f"M{i}", "speakers_count": 1, "quality": good} for i in range(6)]
+    rows = [
+        {"fixture_id": f"F{i}", "source_meeting_id": f"M{i}", "speakers_count": 1, "quality": good}
+        for i in range(6)
+    ]
     complete = summarize_meeting_quality(rows, required_strata=(1,), policy=policy())
     assert complete["quality_gate"] == "pass"
     missing = summarize_meeting_quality(rows, required_strata=(1, 2), policy=policy())
@@ -254,10 +257,45 @@ def test_single_meeting_repetitions_do_not_create_certification_evidence():
     from meeting_quality_metrics import summarize_meeting_quality
 
     good = score([span(0, 1, "R1")], [span(0, 1, "S1")])
-    rows = [{"source_meeting_id": "M1", "speakers_count": 1, "quality": good}] * 24
+    rows = [
+        {"fixture_id": f"F{i}", "source_meeting_id": "M1", "speakers_count": 1, "quality": good}
+        for i in range(24)
+    ]
     result = summarize_meeting_quality(rows, required_strata=(1,), policy=policy())
     assert result["strata"]["1"]["independent_groups"] == 1
     assert result["quality_gate"] == "fail"
+
+
+def test_duplicate_fixture_cannot_be_relabelled_as_a_repeat():
+    from meeting_quality_metrics import summarize_meeting_quality
+
+    good = score([span(0, 1, "R1")], [span(0, 1, "S1")])
+    row = {"fixture_id": "F0", "source_meeting_id": "M0", "speakers_count": 1, "quality": good}
+    with pytest.raises(ValueError, match="duplicate fixture"):
+        summarize_meeting_quality([row, row], required_strata=(1,), policy=policy())
+
+
+def test_many_fragments_cannot_downweight_a_sources_pooled_precision_failure():
+    from meeting_quality_metrics import summarize_meeting_quality
+
+    reference = [span(0, 0.5, "R1"), span(0.25, 0.5, "R2")]
+    hypothesis = [span(0, 0.5, "S1"), span(0.25, 0.5, "S2")]
+    bad = score(reference, [*hypothesis, span(0.25, 0.25 + 0.75 * (1 / 0.94 - 1), "S3")])
+    good = score(reference, hypothesis)
+    assert bad["legacy_nonoverlap"]["quality_gate"] == "pass"
+    assert bad["product_all_regions"]["participant_gate"] == "pass"
+    rows = [
+        {"fixture_id": f"fragment-{i}", "source_meeting_id": "M0",
+         "speakers_count": 2, "quality": bad}
+        for i in range(1000)
+    ] + [
+        {"fixture_id": f"good-{i}", "source_meeting_id": f"M{i}",
+         "speakers_count": 2, "quality": good}
+        for i in range(1, 6)
+    ]
+    result = summarize_meeting_quality(rows, required_strata=(1, 2), policy=policy())["strata"]["2"]
+    assert result["decision"] == "point_failed"
+    assert result["pooled_precision"]["value"] == pytest.approx(1005 / (1000 / 0.94 + 5))
 
 
 def test_activity_and_text_are_independent_observations():
@@ -313,7 +351,8 @@ def overlap_summary_rows(extra_seconds):
     assert bad_precision["legacy_nonoverlap"]["quality_gate"] == "pass"
     one = score([span(0, 1, "R1")], [span(0, 1, "S1")])
     rows = [
-        {"source_meeting_id": f"M{count}_{i}", "speakers_count": count,
+        {"fixture_id": f"F{count}_{i}", "source_meeting_id": f"M{count}_{i}",
+         "speakers_count": count,
          "quality": one if count == 1 else good}
         for count in (1, 2) for i in range(6)
     ]
@@ -351,7 +390,7 @@ def test_legacy_score_schema_cannot_be_pooled_after_input_semantics_change():
     old["schema_version"] = 2
     with pytest.raises(ValueError, match="schema"):
         summarize_meeting_quality(
-            [{"source_meeting_id": "M1", "speakers_count": 1, "quality": old}],
+            [{"fixture_id": "F1", "source_meeting_id": "M1", "speakers_count": 1, "quality": old}],
             required_strata=(1,), policy=policy(),
         )
 
@@ -382,7 +421,8 @@ def test_observed_total_miss_is_point_failure_not_missing_observation():
     missed = score([span(0, 1, "R1", "a")], [])
     assert missed["standard_metrics"]["cp_cer"]["error_rate"] == 1
     rows = [
-        {"source_meeting_id": f"M{i}", "speakers_count": 1, "quality": missed}
+        {"fixture_id": f"F{i}", "source_meeting_id": f"M{i}",
+         "speakers_count": 1, "quality": missed}
         for i in range(6)
     ]
     result = summarize_meeting_quality(rows, required_strata=(1,), policy=policy())

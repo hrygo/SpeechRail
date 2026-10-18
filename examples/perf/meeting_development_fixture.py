@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
 import os
 import re
 import sys
@@ -31,6 +32,7 @@ from meeting_evaluation_identity import canonical_digest
 from meeting_quality_metrics import (
     nondegradation_gate,
     score_meeting_quality,
+    standard_metric_totals,
     summarize_meeting_quality,
     validate_scorer_environment,
 )
@@ -464,18 +466,28 @@ async def evaluate_development_fixture(
         raise RuntimeError("development_fixture_failed") from None
 
 
-def _paired_metrics(rows: list[dict[str, Any]]) -> dict[str, dict[str, list[float]]] | None:
-    metrics: dict[str, dict[str, list[float]]] = {"der": {}, "cp_cer": {}}
+def _paired_metrics(
+    rows: list[dict[str, Any]], *, policy: Mapping[str, Any]
+) -> dict[str, dict[str, list[float]]] | None:
+    grouped: dict[str, list[tuple[float, float, float, float]]] = {}
+    seen: set[str] = set()
     for row in rows:
-        standard = row["quality"]["standard_metrics"]
-        values = {
-            "der": standard["diarization"]["der"],
-            "cp_cer": standard["cp_cer"].get("error_rate"),
-        }
-        for name, value in values.items():
-            if type(value) not in (int, float):
-                return None
-            metrics[name].setdefault(row["source_meeting_id"], []).append(value)
+        fixture = row["fixture_id"]
+        if fixture in seen:
+            raise ValueError("duplicate fixture is not an independent repeat")
+        seen.add(fixture)
+        errors, total, cp_errors, cp_total = standard_metric_totals(row, policy)
+        if total <= 0 or cp_errors is None or cp_total is None:
+            return None
+        grouped.setdefault(row["source_meeting_id"], []).append(
+            (errors, total, cp_errors, cp_total)
+        )
+    metrics: dict[str, dict[str, list[float]]] = {"der": {}, "cp_cer": {}}
+    for group, values in grouped.items():
+        metrics["der"][group] = [math.fsum(v[0] for v in values) / math.fsum(v[1] for v in values)]
+        metrics["cp_cer"][group] = [
+            math.fsum(v[2] for v in values) / math.fsum(v[3] for v in values)
+        ]
     return metrics
 
 
@@ -615,8 +627,8 @@ async def evaluate_development_checkpoint(
             product = summary["strata"][str(count)]
             nondegradation = None
             if count <= 4 and name != "C0":
-                baseline_metrics = _paired_metrics(observations["C0"])
-                candidate_metrics = _paired_metrics(rows)
+                baseline_metrics = _paired_metrics(observations["C0"], policy=scorer_policy)
+                candidate_metrics = _paired_metrics(rows, policy=scorer_policy)
                 nondegradation = (
                     await join_cleanup(
                         asyncio.create_task(

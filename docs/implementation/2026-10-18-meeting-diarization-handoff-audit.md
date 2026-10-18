@@ -463,3 +463,13 @@ Ruling: preload/post-prepare/post-replay证明具名文件稳定及对象核对�
 driver在context退出后复核关闭证明、controls/source，再写0600 partial。partial内容、inode/stamps及输出目录身份也受守卫；最终所有await完成后同步检查controls/source/runtime和partial，再exclusive link提交result.json。主线补充model bundle文件symlink指向仓库的RED反例，改为同次preload inventory对全部model entry.resolved在prepare前拒绝，封住仅验证model root的缺口。错误与报告不含路径、正文或环境值；声明端口排他不证明其他端口无实例。
 
 runtime新增19项、driver54项、CLI5项fake回归；主线五个ASR相关文件 `204 passed in 11.22s`，六个本节Python Ruff通过，root/driver/CLI按项目配置Mypy通过。transport其他调用面额外TTS/streaming/aligner的93项fake回归通过。两执行者分别独占root/driver，主线独占CLI/文档，停写后统一复核；没有覆盖并行改动。父提交6e6f4837主CI39095347788和原生CI39095347813均成功。没有真实语料/模型、benchmark、下载、服务、安装、UI、发布或合并动作；loaded/import bytes、实际A0、CER改善、认证人数及联合P95仍未证明。
+
+## T5 来源片段聚合与扩样耗尽后的合格选型
+
+2026-10-18：独立只读审查确认三处问题。第一，C0不退化检查点将来源片段率当重复执行平均；六组来源各含参考量1000/1的片段，C0错误量0/0.8、候选20/0时，旧DER差值为−0.39而正确来源差值为+0.01918081918，应点值失败。第二，产品汇总先平均来源片段speaker-time，使多片段来源被稀释；一组1000片段精确率0.94、另五组单片段完美时，旧pooled为0.98947368，正确为0.94028068，应失败。第三，24组耗尽时，证据不足候选使调度成为evidence_exhausted，却错误阻止另一名已合格候选进入跨层选择。
+
+修正为同一来源片段分子分母求和；DER/cpCER独立scorer身份和分子分母校验复用同一函数，检查点与最终排名保持一致。唯一fixture只执行一次，重复行拒绝。statistics.fixture_aggregation固定one_execution_per_fixture_source_totals_v1，进入policy及关联身份；旧policy拒绝，旧manifest/spec/schedule/checkpoint须重新冻结并重算，不重写历史报告。选择允许完成的evidence_exhausted且非空合格集合，证据不足候选仍不合格，连续人数层及候选交集要求保留。
+
+两处聚合和耗尽选型均先以反例RED复现，再GREEN；另补cpCER、重复fixture和旧policy拒绝回归。此前八个相关文件228项fake回归通过；提交前重新核验结果见本节后续记录。仅验证合成评分与离线选型，不证明实际CER、分人质量、认证人数或P95。没有真实音频/模型、benchmark、下载、服务、安装、UI、发布或合并操作。
+
+提交前复验：八个相关测试文件 `228 passed in 5.14s`；六个Python Ruff通过，`MYPYPATH=src:examples/perf uv run --no-sync mypy --strict --follow-imports=silent examples/perf/meeting_development_fixture.py examples/perf/meeting_candidate_selection.py` 两个source通过。直接扩大follow-imports扫描会暴露既有非类型化评分模块和第三方stubs问题，不宣称整个perf目录strict检查通过。父提交6e6f4837的主CI39095347788与原生CI39095347813已核验成功；新提交CI另行核验。

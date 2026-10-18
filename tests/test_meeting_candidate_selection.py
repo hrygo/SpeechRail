@@ -18,11 +18,11 @@ def sha(value):
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def inputs(maximum=2, *, scenes=("near", "far"), shared_groups=False):
+def inputs(maximum=2, *, scenes=("near", "far"), shared_groups=False, group_count=6):
     scorer = policy()
     manifest = {"schema_version": 2, "split": "development", "fixtures": [], "group_order": {}}
     for count in range(1, maximum + 1):
-        groups = [sha(f"{count}-{i}") for i in range(6)]
+        groups = [sha(f"{count}-{i}") for i in range(group_count)]
         if shared_groups and count > 1:
             groups = list(manifest["group_order"]["1"])
         manifest["group_order"][str(count)] = groups
@@ -162,6 +162,36 @@ def select(value):
         policy=scorer,
         required_max=len(initial),
     )
+
+
+def test_exhausted_insufficient_candidate_cannot_block_an_already_eligible_peer():
+    initial, checkpoints, manifest, scorer = inputs(1, group_count=24)
+    state = initial[1]
+    for _ in range(4):
+        request = state.request()
+        state = state.record({
+            name: {
+                "candidate_sha256": digest,
+                "source_group_ids": request["source_group_ids"],
+                "product_decision": "insufficient_evidence" if name == "C1" else "pass",
+                "nondegradation_decision": "pass" if name != "C0" else None,
+            }
+            for name, digest in state.candidate_ids.items()
+        })
+    report = checkpoints[1]
+    report.update(schedule=state.as_dict(), request=state.request(), checkpoint=24,
+                  source_group_ids=state.request()["source_group_ids"])
+    report["comparisons"]["C1"]["product"]["decision"] = "insufficient_evidence"
+    assert state.request()["status"] == "evidence_exhausted"
+    assert state.request()["eligible_candidates"] == ["C2"]
+    assert select((initial, checkpoints, manifest, scorer))["selected_candidate"] == "C2"
+
+
+def test_old_fragment_mean_policy_cannot_reuse_checkpoint_history():
+    value = inputs(1)
+    del value[3]["statistics"]["fixture_aggregation"]
+    with pytest.raises(ValueError, match="fixture source totals"):
+        select(value)
 
 
 def change_der(row, value, total=100):

@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.31"
+version: "3.3.32"
 date: 2026-10-18
 ---
 
@@ -146,7 +146,9 @@ proof 只声明 `bytes_and_timing_verified=true`，保持 `producer_provenance_v
 
 `evaluate_development_checkpoint` 消费不可变 `CommonPrefixSchedule` 的 pending request 和固定候选摘要/工厂映射。1–4 人包含 C0，5–8 人不伪造四槽对照；完整预检共同前缀后，串行执行每个存活候选的全部来源组及其同层 fixture，上一 session 回收确认后才构造下一 session。完整配对完成后，按来源组计算产品汇总及对 C0 的 DER/cpCER 配对不退化门，并分别报告 near/far；缺场景明确 `not_observed`。任何部分失败不生成 `checkpoint.json`，也不修改原 schedule；成功时返回下一不可变状态，后续扩样继续遵循共同前缀与不可复活规则。
 
-检查点预检只跨会议保留文件指纹，不持有整个来源池的参考正文；逐场评分后只保留脱敏结果。该执行器验证实际输入与输出覆盖，并连接产品门和调度，仍不证明 activity factory 的真实制品/SDK/运行身份、生产者来源、跨进程排他或联合延迟。`runtime_identity_verified=false/certification_eligible=false/verdict=diagnostic/certified_max_speakers=null` 保持明确；调度的 `passed` 仅表示该共同检查点的评分门通过，不代表唯一候选选型或产品认证。生产组合根须启用并导出阶段观测；联合 ASR 时钟、开发收据签发、跨层选型及共同检查点/留出 CLI 仍需接线。fake 测试为 `tests/test_meeting_development_fixture.py`。
+评分 policy 的 `statistics.fixture_aggregation` 必须固定为 `one_execution_per_fixture_source_totals_v1`。每个唯一 fixture 仅允许一次执行，重复 fixture 不作为独立重复测量。同一来源的不同片段先累加正确量、参考量与预测量，再计算 pooled speaker-time 和等会议 macro 比率；DER/cpCER 先按来源累加错误量与参考量，再以来源组配对计算区间，不能平均片段错误率或用片段数稀释来源权重。bootstrap 的独立单位仍为来源会议组。旧 policy 缺少该身份时拒绝；所有受其摘要约束的 manifest、候选 spec、schedule 与 checkpoint 必须重新冻结并重算，不复用旧通过结论。
+
+检查点预检只跨会议保留文件指纹，不持有整个来源池的参考正文；逐场评分后只保留脱敏结果。该执行器验证实际输入与输出覆盖，并连接产品门和调度，仍不证明 activity factory 的真实制品/SDK/运行身份、生产者来源、跨进程排他或联合延迟。`runtime_identity_verified=false/certification_eligible=false/verdict=diagnostic/certified_max_speakers=null` 保持明确；调度的 `passed` 仅表示该共同检查点的评分门通过，不代表唯一候选选型或产品认证。生产组合根须启用并导出阶段观测；真实联合 ASR 时钟、可信开发收据签发及留出执行仍需接线；共同检查点和跨层离线选择入口见下文。fake 测试为 `tests/test_meeting_development_fixture.py`。
 
 ### 候选原生开发入口
 
@@ -169,7 +171,7 @@ PYTHONPATH=src:examples/perf uv run --no-sync python examples/perf/probe_meeting
   --fixture-id "$FIXTURE_ID" --service-port "$SERVICE_PORT" --input-mode throughput
 ```
 
-fake 验证见 `tests/test_meeting_candidate_execution.py` 与 `tests/test_diarization_worker.py`；包含合成 WAV/文字、fake IPC 以及不加载模型的锁继承子进程，不证明 CoreML 模型、真实 footprint 或质量达标。C0 spec 由 meeting_c0.static_c0_spec 只读构造，model-directory 指向含 SortformerNvidiaLow_v2.1.mlmodelc 的外部目录；同一 CLI 按冻结 implementation_id 分派，未知实现拒绝。C0 只参加 ≤4 人质量对照，超过四人不能认证。跨层选型、真实来源与联合身份、收据及留出仍待接线；C0 fake 回归另见 tests/test_meeting_c0.py。
+fake 验证见 `tests/test_meeting_candidate_execution.py` 与 `tests/test_diarization_worker.py`；包含合成 WAV/文字、fake IPC 以及不加载模型的锁继承子进程，不证明 CoreML 模型、真实 footprint 或质量达标。C0 spec 由 meeting_c0.static_c0_spec 只读构造，model-directory 指向含 SortformerNvidiaLow_v2.1.mlmodelc 的外部目录；同一 CLI 按冻结 implementation_id 分派，未知实现拒绝。C0 只参加 ≤4 人质量对照，超过四人不能认证。跨层离线选择见下文；真实来源与联合身份、收据及留出仍待接线；C0 fake 回归另见 tests/test_meeting_c0.py。
 
 ### 原生共同检查点入口
 
@@ -199,7 +201,7 @@ PYTHONPATH=src:examples/perf uv run --no-sync python examples/perf/probe_meeting
 
 ### 跨人数层的开发候选选择
 
-`meeting_candidate_selection.select_development_candidate` 是离线诊断入口，接收独立初始 schedules、冻结 development manifest/scorer policy 和最后已完成的共同 checkpoint。声明人数上限要求1到该上限所有连续层均为 passed；恢复有限历史后取各层合格候选的交集，任一层已淘汰的候选不能复活。C1/C2及低人数层C0身份须跨层一致。每层只使用其最终共同前缀，逐项核对全部冻结fixture、场景、来源组、候选、sidecar与评分身份；不追加排名数据，不把重复报告当独立来源。
+`meeting_candidate_selection.select_development_candidate` 是离线诊断入口，接收独立初始 schedules、冻结 development manifest/scorer policy 和最后已完成的共同 checkpoint。声明人数上限要求1到该上限所有连续层均有已完成且非空的合格候选集合：调度状态可为 passed，或共同扩样至24组后为 evidence_exhausted 且仍存在已合格候选。证据耗尽的候选本身不获得资格；pending、缺来源或空合格集合不能选型。恢复有限历史后取各层合格候选的交集，任一层已淘汰的候选不能复活。C1/C2及低人数层C0身份须跨层一致。每层只使用其最终共同前缀，逐项核对全部冻结fixture、场景、来源组、候选、sidecar与评分身份；不追加排名数据，不把重复报告当独立来源。
 
 主排名为collar=0且包含overlap的DER，来自独立scorer报告的错误量/参考量，而非只信任报告率。先合并同一来源、同一场景的片段分子分母，再对来源会议组、near/far场景和人数层等权；cpCER同样合并后用于DER完全相同的同分判定。缺任一要求场景或合格候选DER时不生成排名。候选参考分母须配对一致，缺cpCER不能掩盖DER分母不一致。
 
