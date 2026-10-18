@@ -1512,3 +1512,10 @@ managed窗口先确认无请求/客户端，再停服；两个原生子进程终
 250ms物理footprint观察最大和为7685185888→10297172464字节，ASR采样中位数2814790896→5350280384字节。基线有1次读取缺样，候选0次；不将该不完整资源对照声明为峰值门通过或精确资源回归百分比。源码复核发现窗口decode只在window.close清理闲置缓存，普通flush已有请求后清理；这为现有opt-in路径的缓存改进提供定位依据，不支持启用模式的质量结论。
 
 首次窗口候选因私有driver访问错误的请求嵌套层级，在模型加载和供给前KeyError退出；保留成功基线及失败记录，修正后先离线核对互斥请求，再只补跑候选。两个维护窗口均managed停启并恢复；最后唯一listener/LaunchAgent PID52970、health/readyz200、3.12.0、quality/quality，配置/selection/runtime摘要未变。三个真实worker均wait回收、关闭后冻结内容稳定，两arm生产Python字节相同。仓库外`asr-meeting-window-mode-joint-20261019`保留登记、完整结果、比较、缺样与恢复记录。未安装、改变默认、下载新模型或访问留出，仍非正式质量认证。
+
+
+## 提词器生命周期测试的异步等待修复
+
+2026-10-19：`ba2a76f4`远端Python、质量、App构建、独立候选fake及wheel门成功，但Swift package任务失败。原日志确认唯一失败用例为`oneReadingRunKeepsPositionHonestAcrossEveryScenario`：掉线后释放占用和回到manual的两次等待各耗尽200次`Task.yield()`，随后的phase仍为uncertain。保留workflow 39171796423的失败记录；同一用例本机单跑通过，不能因此忽略CI失败，也不能把200次调度机会视为跨runner的等待时长。
+
+只修改该测试文件的私有`waitFor`：继续等待实际异步条件，使用ContinuousClock的10秒截止作防挂看门狗；1ms间隔仅限制轮询工作量，不作为状态成立或性能断言。保留超时Issue.record，取消也显式记录失败。条件可跨actor读取，未增加生产API、放松断言或改变提词器行为。84项该类测试通过，完整本机Swift package通过（XCTest 1757项、1项既有跳过、0失败；Swift Testing 658项、0失败）。临时加入始终false的状态条件，短看门狗必须以等待超时失败；验证后源码逐字恢复，没有保留预期失败用例或静默放行。未接管UI、采集屏幕或加载模型。
