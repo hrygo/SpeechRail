@@ -318,3 +318,32 @@ PYTHONPATH=src:examples/perf uv run --no-sync pytest -o addopts= --no-cov -q \
 MYPYPATH=src:examples/perf uv run --no-sync mypy --strict --follow-imports=silent \
   examples/perf/probe_meeting_asr_quality.py
 ```
+
+
+## T4 原生候选开发入口与继承排他锁
+
+2026-10-18：新增 `meeting_candidate_execution`，并扩展 probe CLI 的 `evaluate-development`。入口连接一个冻结 development fixture 的 C1/C2 原生候选、共享串行 governor/owner、有界回放、阶段观测和标准评分；原 preflight 保持只读。实际原生 SDK/preset/compute/shape 握手必须成功，之后每个 packet 继续校验；模型/worker/adapter/scorer 的文件摘要及 inode/mtime/ctime 等在构造前、finish/cancel 后和评分后核验，修改后恢复字节也拒绝完成。控制 JSON 限16MiB，拒绝重复字段、NaN、符号链接及非普通文件。
+
+为防评测与服务竞争同一实例，入口使用 serve 相同的 per-user/per-port flock，不写服务 owner 元数据。CoreML transport 新增默认关闭的 inherited_guard_fd；只有显式传入时才向精确 child 继承。父级释放只 close，不执行 LOCK_UN，避免解锁仍活着的 child；启动时拒绝 bool/负数/失效 FD，不接管调用方 descriptor。子任务只写 transport 和测试，主线写执行器/CLI，已复核无同文件冲突。
+
+Ruling: 该锁仅排除显式配置的服务端口，不探测其他端口、自定义运行实例或替代 managed lifecycle；真实调用须提供实际服务端口并遵守模型运行授权。内核子进程测试证明继承 FD 在父级关闭后仍排他，不证明真实 CoreML orphan 场景已经实测。finish 墙钟含制品核验开销，不作真实联合 P95。当前入口只执行一个候选/fixture；C0 组合根、共同检查点 CLI、跨层选型、来源与最终联合身份、开发收据/留出/安装态仍未完成。
+
+`candidate_execution` 进入完成制品前由 async verifier 核对文件、原生握手和 exact-child 回收；字段集封闭且类型严格，不允许通过扩展字段带入文字/路径。模型 revision 来源、真实联合 ASR 与生产认证保持 false，顶层 runtime_identity_verified/certification_eligible 仍 false；没有把握手或文件一致升级成产品认证。候选 source identity 纳入执行器与 server lock，旧 spec 必须重新冻结。
+
+RED：执行器模块不存在；transport 的四项 FD 反例先失败；附加 observation 带入文字的反例先成功写出后被修正为拒绝。GREEN：新执行器15项fake/合成回归通过，transport21项通过（新增5项）；与既有相关回归共 `368 passed in 5.19s`。覆盖实际 fixture/scorer/保存摘要接线、fake native握手与错误回收、文件修改与恢复、评分后修改、holdout角色拒绝、同端口服务冲突、无模型子进程继承锁、CLI显式分派及脱敏。五个 source 严格Mypy、七个变更Python Ruff、diff检查通过；两项 CLI --help 实际执行通过。没有执行真实 evaluate-development、音频/模型/benchmark、下载、服务启停、安装、发布或合并。
+
+上一提交 `c450e962f09133080d583545d2bd92e9769b938e` 的主CI `39090801065` 与候选CI `39090801088` 均成功，不代表本节后续提交的全量验证。
+
+```bash
+PYTHONPATH=src:examples/perf uv run --no-sync pytest -o addopts= --no-cov -q \
+  tests/test_meeting_candidate_execution.py tests/test_probe_meeting_candidate.py \
+  tests/test_meeting_development_fixture.py tests/test_meeting_candidate_session.py \
+  tests/test_diarization_worker.py tests/test_diarization_phase_trace.py \
+  tests/test_meeting_candidate_runner.py
+```
+
+### ASR 后续接线核验
+
+独立只读代理核对当前生产装配，主代理覆盖检查并直接复核 `services.py`、`qwen3_window.py`、`qwen3_worker.py` 关键路径。实际 window review 的预算由 worker `_dynamic_budget(duration,self._max_new_tokens)` 计算；window RPC 不发送 max_tokens，组合根先创建 batch shared owner 后供 streaming/window 复用，不能把 streaming 配置值直接当有效 window cap。review 已强制 EOS、拒绝 length/truncated，不能说它没有截断检查；但 budget/finish_reason/truncated 尚未随成功结果跨 RPC 保存，当前 token_limit_hit=None 仍不可替换为False。
+
+下一 ASR 切片应复用正式 Realtime session 的 VAD/admission/boundary 路径及独立有界输入时钟，再贯通每 attempt 的有效 decoder 证据；不复制生产 frontier 规则、不把顺序 feeder 当采集基准。该核验无模型/服务/留出操作，没有冻结真实 A0 或改善 CER。

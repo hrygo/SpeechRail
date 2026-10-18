@@ -1,12 +1,13 @@
-"""Read-only artifact preflight for the isolated eight-slot candidate.
+"""Artifact preflight and explicit serial development execution for eight-slot candidates.
 
-No native worker is launched here. Runtime SDK identity, CoreML shape checks,
-development/holdout scoring and certification require later execution gates.
+Preflight reads files only. evaluate-development launches a supervised native
+worker using caller-prepared local artifacts. No downloads or holdout execution.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import math
 import re
@@ -88,6 +89,8 @@ def static_candidate_spec(
             "examples/perf/probe_meeting_candidate.py",
             "examples/perf/meeting_candidate_protocol.py",
             "examples/perf/meeting_candidate_session.py",
+            "examples/perf/meeting_candidate_execution.py",
+            "src/speechrail/runtime/server_lock.py",
             "examples/perf/meeting_candidate_evidence.py",
             "examples/perf/meeting_candidate_runner.py",
             "examples/perf/meeting_asr_sidecar.py",
@@ -154,14 +157,47 @@ def main(argv: list[str] | None = None) -> int:
     preflight.add_argument("--candidate-spec", required=True, type=Path)
     preflight.add_argument("--worker", required=True, type=Path)
     preflight.add_argument("--model-directory", required=True, type=Path)
+    development = commands.add_parser(
+        "evaluate-development",
+        help="execute one locked development fixture; requires model-run authorization"
+    )
+    for name in ("candidate-spec", "worker", "model-directory", "manifest", "split-lock",
+                 "scorer-policy", "artifact-root", "output-directory"):
+        development.add_argument(f"--{name}", required=True, type=Path)
+    development.add_argument("--fixture-id", required=True)
+    development.add_argument("--service-port", required=True, type=int)
+    development.add_argument(
+        "--input-mode", choices=("throughput", "realtime"), default="throughput"
+    )
+    development.add_argument("--timeout-seconds", type=float, default=1800)
     args = parser.parse_args(argv)
     try:
-        spec = MeetingCandidateSpec(**json.loads(args.candidate_spec.read_text(encoding="utf-8")))
-        report = artifact_preflight(spec, worker=args.worker, model_directory=args.model_directory)
+        from meeting_candidate_execution import evaluate_candidate_development, read_control_json
+
+        spec = MeetingCandidateSpec(**read_control_json(args.candidate_spec))
+        if args.command == "preflight":
+            report = artifact_preflight(
+                spec, worker=args.worker, model_directory=args.model_directory
+            )
+        else:
+            report = asyncio.run(evaluate_candidate_development(
+                spec=spec, worker=args.worker, model_directory=args.model_directory,
+                manifest=read_control_json(args.manifest),
+                split_lock=read_control_json(args.split_lock),
+                scorer_policy=read_control_json(args.scorer_policy),
+                artifact_root=args.artifact_root,
+                output_directory=args.output_directory, fixture_id=args.fixture_id,
+                service_port=args.service_port, input_mode=args.input_mode,
+                timeout_seconds=args.timeout_seconds,
+            ))
     except OSError:
         parser.error("required local artifact is unavailable")
     except (ValueError, TypeError, KeyError):
         parser.error("candidate spec or local artifacts do not match the frozen configuration")
+    except RuntimeError as exc:
+        if str(exc) == "evaluation_port_busy":
+            parser.error("configured service port is busy; evaluation did not start a worker")
+        parser.error("development execution failed; inspect the external attempt artifacts")
     print(json.dumps(report, sort_keys=True, allow_nan=False))
     return 0
 

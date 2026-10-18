@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import struct
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -84,6 +85,7 @@ class CoreMLWorkerProcess:
     _stderr_tail: bytearray = field(default_factory=bytearray)
     _stderr_task: asyncio.Task[None] | None = None
     _close_task: asyncio.Task[None] | None = None
+    inherited_guard_fd: int | None = None
 
     async def start(self) -> None:
         if self.process is not None and self.process.returncode is None:
@@ -129,17 +131,40 @@ class CoreMLWorkerProcess:
             raise RuntimeError("CoreML diarization worker preflight failed")
 
     async def _launch(self, extra: list[str]) -> None:
-        process = await asyncio.create_subprocess_exec(
+        guard_fd = self.inherited_guard_fd
+        if guard_fd is not None:
+            if type(guard_fd) is not int or guard_fd < 0:
+                raise ValueError("inherited guard fd must be an open non-negative descriptor")
+            try:
+                os.fstat(guard_fd)
+            except OSError as exc:
+                raise ValueError(
+                    "inherited guard fd must be an open non-negative descriptor"
+                ) from exc
+
+        command = (
             str(self.executable),
             "--model",
             str(self.model_path),
             "--protocol-version",
             str(self.protocol_version),
             *extra,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
         )
+        if guard_fd is None:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        else:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                pass_fds=(guard_fd,),
+            )
         assert (
             process.stdin is not None and process.stdout is not None and process.stderr is not None
         )

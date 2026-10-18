@@ -15,7 +15,7 @@ import os
 import re
 import sys
 import wave
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -44,6 +44,16 @@ _SHA = re.compile(r"[0-9a-f]{64}")
 _MAX_REFERENCE_BYTES = 16 * 1024 * 1024
 _MAX_EVENTS_BYTES = 256 * 1024 * 1024
 _MAX_ROWS = 100000
+_CANDIDATE_EXECUTION_FIELDS = {
+    "configured_port_exclusion": True,
+    "exclusion_scope": "per_user_configured_port",
+    "native_preflight_observed": True,
+    "artifact_checks_through_cleanup": True,
+    "exact_child_reaped": True,
+    "model_revision_provenance_verified": False,
+    "joint_asr_latency_observed": False,
+    "production_certification": False,
+}
 
 
 def _stamp(path: Path) -> tuple[int, ...]:
@@ -266,6 +276,7 @@ async def evaluate_development_fixture(
     input_mode: str = "throughput",
     epoch: str = "session",
     timeout_seconds: float = 1800,
+    verify_candidate: Callable[[], Awaitable[Mapping[str, object]]] | None = None,
 ) -> dict[str, Any]:
     """Replay and score a development fixture with a supervised caller factory.
 
@@ -371,6 +382,18 @@ async def evaluate_development_fixture(
             )
         )
         await join_cleanup(asyncio.create_task(asyncio.to_thread(_check_inputs, prepared)))
+        candidate_execution = (
+            dict(await verify_candidate()) if verify_candidate is not None else None
+        )
+        if candidate_execution is not None and (
+            set(candidate_execution) != set(_CANDIDATE_EXECUTION_FIELDS)
+            or any(
+                type(candidate_execution[key]) is not type(value)
+                or candidate_execution[key] != value
+                for key, value in _CANDIDATE_EXECUTION_FIELDS.items()
+            )
+        ):
+            raise ValueError("candidate execution observation is invalid")
         result = {
             **identity,
             "status": "completed",
@@ -392,6 +415,8 @@ async def evaluate_development_fixture(
             "certified_max_speakers": None,
             "verdict": "diagnostic",
         }
+        if candidate_execution is not None:
+            result["candidate_execution"] = candidate_execution
         await join_cleanup(
             asyncio.create_task(
                 asyncio.to_thread(_write_json, output / "result.partial.json", result)

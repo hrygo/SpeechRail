@@ -114,6 +114,7 @@ class CandidateWorkerProcess(CoreMLWorkerProcess):
         model_path: Path,
         preset: str,
         compute_units: str,
+        inherited_guard_fd: int | None = None,
     ) -> None:
         if preset not in {"fast32", "fast128"} or compute_units not in {
             "all",
@@ -127,9 +128,11 @@ class CandidateWorkerProcess(CoreMLWorkerProcess):
             model_path=model_path,
             protocol_version=3,
             backend="nemotron3_candidate",
+            inherited_guard_fd=inherited_guard_fd,
         )
         self.preset = preset
         self.compute_units = compute_units
+        self.preflight_observed = False
 
     async def _launch(self, extra: list[str]) -> None:
         await super()._launch(
@@ -161,5 +164,6 @@ class CandidateWorkerProcess(CoreMLWorkerProcess):
         if header.get("operation") == "preflight":
             if payload or response.get("model_shape_verified") is not True:
                 raise RuntimeError("candidate model shape is unverified")
+            self.preflight_observed = True
             return response, b""
         return decode_candidate_frames(response, payload), b""

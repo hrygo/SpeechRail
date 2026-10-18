@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.19"
+version: "3.3.20"
 date: 2026-10-18
 ---
 
@@ -146,7 +146,30 @@ proof 只声明 `bytes_and_timing_verified=true`，保持 `producer_provenance_v
 
 `evaluate_development_checkpoint` 消费不可变 `CommonPrefixSchedule` 的 pending request 和固定候选摘要/工厂映射。1–4 人包含 C0，5–8 人不伪造四槽对照；完整预检共同前缀后，串行执行每个存活候选的全部来源组及其同层 fixture，上一 session 回收确认后才构造下一 session。完整配对完成后，按来源组计算产品汇总及对 C0 的 DER/cpCER 配对不退化门，并分别报告 near/far；缺场景明确 `not_observed`。任何部分失败不生成 `checkpoint.json`，也不修改原 schedule；成功时返回下一不可变状态，后续扩样继续遵循共同前缀与不可复活规则。
 
-检查点预检只跨会议保留文件指纹，不持有整个来源池的参考正文；逐场评分后只保留脱敏结果。该执行器验证实际输入与输出覆盖，并连接产品门和调度，仍不证明 activity factory 的真实制品/SDK/运行身份、生产者来源、跨进程排他或联合延迟。`runtime_identity_verified=false/certification_eligible=false/verdict=diagnostic/certified_max_speakers=null` 保持明确；调度的 `passed` 仅表示该共同检查点的评分门通过，不代表唯一候选选型或产品认证。生产组合根须启用并导出阶段观测；联合 ASR 时钟、开发收据签发、跨层选型及评测 CLI 仍需接线。fake 测试为 `tests/test_meeting_development_fixture.py`。
+检查点预检只跨会议保留文件指纹，不持有整个来源池的参考正文；逐场评分后只保留脱敏结果。该执行器验证实际输入与输出覆盖，并连接产品门和调度，仍不证明 activity factory 的真实制品/SDK/运行身份、生产者来源、跨进程排他或联合延迟。`runtime_identity_verified=false/certification_eligible=false/verdict=diagnostic/certified_max_speakers=null` 保持明确；调度的 `passed` 仅表示该共同检查点的评分门通过，不代表唯一候选选型或产品认证。生产组合根须启用并导出阶段观测；联合 ASR 时钟、开发收据签发、跨层选型及共同检查点/留出 CLI 仍需接线。fake 测试为 `tests/test_meeting_development_fixture.py`。
+
+### 候选原生开发入口
+
+`probe_meeting_candidate.py preflight` 只读取候选 spec 和本地文件，不启动 worker。`evaluate-development` 显式执行一个冻结 development fixture 的 C1/C2 原生候选，接 `evaluate_development_fixture` 的来源验证、归属、评分和独占制品写入。控制 JSON 限 16 MiB、必须为对象，拒绝重复字段、非有限数、符号链接和非普通文件。`evaluate-frozen-holdout` 不提供；该入口不替代 C0/C1/C2 共同检查点，不签开发收据或人数认证。
+
+入口要求显式 `--service-port`，使用与 serve 相同的 per-user/per-port 内核锁。必须传入拟排他的实际服务端口；它不能探测或排除其他端口的自定义实例，也不自动启停服务。端口被持有时，在构造 worker 前失败。锁 FD 由精确 child 继承，父进程只关闭自己的 FD，不调用 LOCK_UN；child 未退出时仍阻止同端口 serve/evaluation。未修改服务锁元数据或生产默认 transport；普通服务不传继承 FD。
+
+执行前核对 worker/model/adapter/scorer 字节及文件状态，finish、cancel 与评分后再核验；修改后恢复原内容也因 inode/ctime 等变化而失败。实际 native preflight 必须确认 SDK、preset、compute units 和 shape，运行中每个 packet 继续校验。共享串行 governor/owner、精确回收和 `PhaseTrace` 均启用；文件核验和外部 sink 在计算租约外执行。
+
+`candidate_execution` 是封闭的脱敏字段集：记录配置端口排他、原生握手、文件核验及回收确认；不接受额外文字/路径或将 bool 改为整数。模型 revision 来源、真实联合 ASR 与生产认证保持 false，顶层 `runtime_identity_verified/certification_eligible` 也保持 false。摘要与 `result.json` 相同；失败不能落 completed 结果。finish 墙钟包含评测文件核验开销，固定 sidecar 和本入口的 realtime 供给均不能作为真实联合 P95 基准。
+
+下列是需要真实模型/音频运行授权的入口示例；常规 fake 验证不执行它。所有变量均指向已准备的仓库外制品，SERVICE_PORT 为实际拟排他的服务端口：
+
+```bash
+PYTHONPATH=src:examples/perf uv run --no-sync python examples/perf/probe_meeting_candidate.py \
+  evaluate-development --candidate-spec "$CANDIDATE_SPEC" --worker "$CANDIDATE_WORKER" \
+  --model-directory "$MODEL_DIRECTORY" --manifest "$DEVELOPMENT_MANIFEST" \
+  --split-lock "$SPLIT_LOCK" --scorer-policy "$SCORER_POLICY" \
+  --artifact-root "$ARTIFACT_ROOT" --output-directory "$OUTPUT_DIRECTORY" \
+  --fixture-id "$FIXTURE_ID" --service-port "$SERVICE_PORT" --input-mode throughput
+```
+
+fake 验证见 `tests/test_meeting_candidate_execution.py` 与 `tests/test_diarization_worker.py`；包含合成 WAV/文字、fake IPC 以及不加载模型的锁继承子进程，不证明 CoreML 模型、真实 footprint 或质量达标。C0 组合根、共同检查点 CLI、跨层选型、真实来源与联合身份、收据及留出仍待接线。
 
 ### ASR 正文诊断重放
 
