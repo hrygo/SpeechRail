@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.27"
+version: "3.3.28"
 date: 2026-10-18
 ---
 
@@ -196,6 +196,16 @@ PYTHONPATH=src:examples/perf uv run --no-sync python examples/perf/probe_meeting
 ```
 
 恢复时使用同一独立初始锁，把上轮 `checkpoint.json` 的 `schedule` 对象单独保存为外部 JSON，并增加 `--resume-schedule "$RESUME_SCHEDULE"`。恢复会重新核对候选、来源、manifest、scorer 与有限历史，终止状态不能继续；每轮输出目录必须新建且独占。可改写的恢复文件只用于诊断调度，不作为可信收据或认证。任一 fixture、校验或回收失败都不提交 checkpoint.json；先前已完成的单场制品仍可用于排障。fake 回归见 `tests/test_meeting_checkpoint_execution.py`。
+
+### 跨人数层的开发候选选择
+
+`meeting_candidate_selection.select_development_candidate` 是离线诊断入口，接收独立初始 schedules、冻结 development manifest/scorer policy 和最后已完成的共同 checkpoint。声明人数上限要求1到该上限所有连续层均为 passed；恢复有限历史后取各层合格候选的交集，任一层已淘汰的候选不能复活。C1/C2及低人数层C0身份须跨层一致。每层只使用其最终共同前缀，逐项核对全部冻结fixture、场景、来源组、候选、sidecar与评分身份；不追加排名数据，不把重复报告当独立来源。
+
+主排名为collar=0且包含overlap的DER，来自独立scorer报告的错误量/参考量，而非只信任报告率。先合并同一来源、同一场景的片段分子分母，再对来源会议组、near/far场景和人数层等权；cpCER同样合并后用于DER完全相同的同分判定。缺任一要求场景或合格候选DER时不生成排名。候选参考分母须配对一致，缺cpCER不能掩盖DER分母不一致。
+
+配对bootstrap固定seed1717、10000次；按来源在全部人数层×场景中的覆盖模式分块抽取整个来源会议组，同源的跨层片段及near/far共同抽样，保留冻结设计和场景权重。单独片段不能增加独立N，单来源分块不提供可信区间。报告candidate−DER最优者的95%区间与1个百分点非劣界，区间跨0不解释为等价。
+
+当前checkpoint不提供可验证的稳定标签分布和峰值footprint，二者明确not_observed，不使用自报verified或处理耗时替代。因此选择保守依次采用DER、完全同分时cpCER；仍同分或缺同分证据时按固定候选顺序并标注不确定，不按未经观察的“更快”改选。报告绑定selector实现/固定选择策略及每层checkpoint摘要，仍只给出开发诊断候选，不证明已执行质量门、真实运行身份、最大人数或生产认证；所有认证字段保持false/null，真实延迟/footprint和可信收据仍需后续接线。fake回归见 `tests/test_meeting_candidate_selection.py`。
 
 ### ASR 正文诊断重放
 

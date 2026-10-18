@@ -417,3 +417,15 @@ Ruling: streaming配置不是实际shared window cap。冻结max_tokens只作为
 正式重放观察到有效cap时，要求冻结decoder.max_tokens与之相同；已知值进入configuration/replay policy，退出时变化不能返回有效诊断证据。未提供该字段的factory仍按caller upper-bound逐attempt检查，保持未知与未认证。ready cap不是streaming配置，不是已加载模型字节证明，也不证明vendor包或实际A0；现有runtime revision来自模型结构握手，shape指纹不能当权重SHA。下一组合根须在加载前锁定模型/adapter/worker/interpreter/vendor字节，加载后再次核验并绑定同一shared owner/generation及aligner/VAD依赖，不能把准备后的文件hash推断为加载时实际字节。
 
 RED：10项新增用例暴露ready无cap、owner/factory无观测；5项正式重放反例暴露冻结cap不符和退出变化仍放行。GREEN：补充不同engine cap与launch默认、0默认、重启缺字段不复用等边界后，7个相关文件 `228 passed in 4.95s`，包含实际fake framed subprocess与合成重放，唯一warning为既有asyncio.iscoroutinefunction弃用。7个Python Ruff、4个source按项目strict配置Mypy通过。没有真实模型、音频、benchmark、服务、下载、安装或UI操作；当前分人selector由另一执行者仅写两份新perf/test文件，无同文件冲突。
+
+## T5 跨连续人数层的开发诊断选择
+
+2026-10-18：新增 meeting_candidate_selection，接收独立初始schedules、冻结development manifest/scorer和各层最后完成checkpoint，恢复有限历史、要求1..required_max连续层passed，再取合格候选交集。逐fixture核对实际checkpoint的完整共同前缀、候选/来源/场景/sidecar/评分身份，低人数层C0跨层固定；已淘汰候选不复活，不同候选不能使用不等参考分母，cpCER缺失也不能掩盖DER分母变化。输入总JSON上限32MiB；当前schema每fixture只有一次执行，重复行拒绝，不伪造repeat ID或增加独立N。
+
+选择采用含overlap、零collar独立DER组件，先同来源同场景合并错误量/参考量，再来源、场景、人数层等权；DER完全同分依cpCER，仍同分或缺同分数据则固定候选顺序并声明不确定。全局source cluster按完整人数层×场景incidence分块，seed1717/10000次配对重抽样，同源跨层和near/far共同抽取，保留每cell权重。主线发现初稿按层独立抽样且拒绝跨层同源，超出manifest允许范围；替换为全局来源抽样，两层反向差值但总体恒定的反例得到精确恒定区间，未缩窄合法输入。singleton分块差值区间保持null，不能宣称1个百分点非劣。
+
+Ruling: 当前checkpoint没有真实稳定标签P95/峰值footprint观测链，二者始终not_observed，禁止使用自报verified或处理耗时代替，不触发未经观察的速度择优。报告绑定选择实现/固定policy及每层checkpoint摘要，但这些一致性检查不证明实际模型运行、产品验收或收据可信性；selected只是开发诊断建议，全部runtime/certification字段继续false/null。正式CLI、真实开发结果、可信模型/生产者、质量/延迟门及收据仍待完成。
+
+31项新增fake测试包含实际evaluate_development_checkpoint的18次合成WAV/fake Activity结果原样输入、独立锁/连续层/固定C0/精确配对/缺场景与DER/淘汰交集/同源片段合并/跨层全局bootstrap/cpCER同分/不接受自报时延/实现与输入摘要。缺DER保护mutation按预期失败，恢复后全部通过。主线复核新文件和依赖当前源码；图谱为旧主checkout且perf文件missing，未重建索引。子代理独占两份新perf/test，主线独占ASR遥测及文档，未覆盖并行修改。父e821bd13的主CI39093218903与原生CI39093218867均成功；无真实模型/语料/benchmark、下载、服务、安装、UI、发布或合并动作。
+
+主线对全局来源抽样修正后的26个相关文件联合复验：`678 passed in 13.93s`，仅既有asyncio.iscoroutinefunction弃用warning；本轮9个Python Ruff、5个source按项目strict配置Mypy通过，diff检查通过。上述结果只证明合成机制和离线接线，不证明实际CER改善、真实分人上限或P95。
