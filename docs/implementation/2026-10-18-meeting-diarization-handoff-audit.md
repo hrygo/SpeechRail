@@ -521,3 +521,13 @@ root使用同一ready window factory创建长块session，沿用既有纯PCM网�
 31项新回归覆盖两路真实Governor准入、模式及显式交叠保护、单路基线、失败时加入兄弟清理、超时、自取消、重复取消、异常隐私、时钟、报告非有限数、摘要线程及失败清理期间再次取消。与既有Governor联合 `64 passed in 0.44s`，两个Python Ruff、一个source strict/follow-imports=silent Mypy通过。生产Governor/limits/cleanup图谱coverage metadata_match，新source/test missing，当前源码直接复核，未重建索引。
 
 Ruling: 只证明回调调度与清理，不证明共用PCM、1×输入、实际计算交叠、精确child回收、模型质量或联合P95。same_source/worker_reaping/runtime/certification及joint_latency/compute_overlap均false，quality/footprint/p95未观察。完整T6的共同源、实时正文/活动/稳定发布、进程footprint、冷/热ABBA及配对统计仍未接通；没有执行真实模型/音频、benchmark、下载、服务/安装、UI、发布或合并。父fda71298主CI39097526802及原生CI39097526765均成功，新提交另行核验。
+
+## T5 原始训练语料定位与归档元数据核验
+
+2026-10-18：用户要求自行查找、获取本机既有语料后，核对SpeechRail benchmarks目录文件大小，总量约37.504GiB，包含Train_Ali_near归档22.846GiB、Eval_Ali归档3.421GiB和AISHELL-4 test归档4.881GiB等；数据仍在仓库外。旧四条清单只代表已制备诊断组，不能据此判断原始语料不足或要求用户重新提供路径。
+
+完整流式遍历Train_Ali_near的tar成员并计算压缩文件SHA-256：683个WAV与683个TextGrid按同stem一一配对，无重复轨道或未匹配命名；按原文件名的房间/会议组合分组得到209组，2/3/4个headset轨道分别69/15/125组。WAV成员字节41784790844、TextGrid成员字节20817666。当前完整压缩文件SHA-256与既有本机verify记录一致；该记录不是发布方校验，publisher_checksum_verified仍false。仅遍历归档与摘要，没有解码音频、读取标注正文、运行模型或进入留出。
+
+2026-10-18重新核对[OpenSLR官方页面](https://www.openslr.org/119/)：Train总述为212场/104.75小时、每场2–4人，训练near为headset、许可CC BY-SA 4.0。本机按文件名得到209组与官方总述212场存在差异，不能静默补成212，也不能仅凭差异断言本地包损坏。轨道数不等于参考活动中实际观察人数；后续还需逐场标注/时轴/通道与来源组核验。此近场包不证明自然单人或远场覆盖。
+
+元数据结果仅写仓库外的training-archive-metadata-20261018.json与meeting-corpus-inventory-20261018.json，不将轨道标识或原始参考写入仓库。可继续用已定位Train来源准备schema2 catalog与独立ASR主参考，先保留缺层及来源差异；Eval_Ali与AISHELL-4已有留出继续隔离，不为扩充development而改名或重分组。该进展不是开发通过、真实CER改善、人数认证或延迟验收。
