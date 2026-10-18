@@ -15,15 +15,17 @@ import asyncio
 import json
 import math
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any
 
 from meeting_evaluation_identity import _freeze, _thaw, canonical_digest
+from meeting_pcm_feed import CommonPcmFeed, PcmChunk
 
 from speechrail.runtime.cleanup import join_cleanup
 from speechrail.runtime.resource_governor import ResourceGovernor, WorkClass
 
 Workload = Callable[[ResourceGovernor], Awaitable[Mapping[str, Any]]]
+PcmWorkload = Callable[[ResourceGovernor, AsyncIterator[PcmChunk]], Awaitable[Mapping[str, Any]]]
 _MODES = {
     "asr-only": ("asr",),
     "diarization-only": ("diarization",),
@@ -210,3 +212,106 @@ async def run_workload_schedule(
         raise ValueError(_ERROR) from None
     except Exception:
         raise ValueError(_ERROR) from None
+
+
+async def run_pcm_workload_schedule(
+    *,
+    pcm: bytes,
+    expected_pcm_sha256: str,
+    mode: str,
+    governor: ResourceGovernor,
+    max_lateness_seconds: float,
+    asr: PcmWorkload | None = None,
+    diarization: PcmWorkload | None = None,
+    overlap_enabled: bool = False,
+    timeout_seconds: float = 900,
+    chunk_samples: int = 320,
+    queue_chunks: int = 8,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> dict[str, Any]:
+    """Bind both callbacks to one immutable source and fixed 16 kHz deadlines.
+
+    The PCM is already loaded by the caller. Digest/complete delivery prove
+    in-memory source consistency only; no production adapter or capture claim.
+    """
+    operation: asyncio.Task[dict[str, Any]] | None = None
+    feed: CommonPcmFeed | None = None
+    error = "ASR diarization PCM workload schedule failed"
+    try:
+        if mode not in _MODES:
+            raise ValueError("invalid PCM workload mode")
+        required = _MODES[mode]
+        callbacks = {"asr": asr, "diarization": diarization}
+        if any((callbacks[name] is None) != (name not in required) for name in callbacks):
+            raise ValueError("PCM callbacks differ from mode")
+        source = CommonPcmFeed(
+            pcm,
+            expected_pcm_sha256=expected_pcm_sha256,
+            lanes=required,
+            chunk_samples=chunk_samples,
+            queue_chunks=queue_chunks,
+            max_lateness_seconds=max_lateness_seconds,
+            clock=clock,
+            sleep=sleep,
+        )
+        feed = source
+
+        def bind(name: str) -> Workload:
+            callback = callbacks[name]
+            assert callback is not None
+
+            async def invoke(shared: ResourceGovernor) -> Mapping[str, Any]:
+                result = await callback(shared, source.stream(name))
+                source.verify_drained(name)
+                return result
+
+            return invoke
+
+        async def produce() -> None:
+            producer = asyncio.create_task(source.produce(), name="pcm-producer")
+            try:
+                await producer
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
+                raise ValueError("PCM producer cancelled itself") from None
+
+        async def run() -> dict[str, Any]:
+            async with asyncio.TaskGroup() as group:
+                group.create_task(produce(), name="pcm-source")
+                schedule = group.create_task(
+                    run_workload_schedule(
+                        mode=mode,
+                        governor=governor,
+                        asr=bind("asr") if "asr" in required else None,
+                        diarization=bind("diarization") if "diarization" in required else None,
+                        overlap_enabled=overlap_enabled,
+                        timeout_seconds=timeout_seconds,
+                        clock=clock,
+                    ),
+                    name="pcm-workloads",
+                )
+            return {**schedule.result(), "pcm_feed": source.summary()}
+
+        operation = asyncio.create_task(run(), name="pcm-schedule")
+        return await asyncio.shield(operation)
+    except asyncio.CancelledError:
+        if operation is not None:
+            if not operation.done():
+                operation.cancel()
+
+            async def drain() -> None:
+                await asyncio.gather(operation, return_exceptions=True)
+
+            await join_cleanup(asyncio.create_task(drain(), name="pcm-cleanup"))
+        caller = asyncio.current_task()
+        if caller is not None and caller.cancelling():
+            raise
+        raise ValueError(error) from None
+    except Exception:
+        raise ValueError(error) from None
+    finally:
+        if feed is not None:
+            feed.close()

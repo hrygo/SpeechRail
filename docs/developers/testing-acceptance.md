@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.37"
+version: "3.3.38"
 date: 2026-10-18
 ---
 
@@ -331,7 +331,17 @@ schema 1 comparison lock 恰含 `schema_version/cases/scorer_policy/baseline/can
 
 输出区间为宿主回调开始至返回，包含其自身清理，非kernel推理时间。clock明确区分monotonic/injected；schedule_completed只证明调度结束。runtime_identity_verified、certification_eligible、same_source_verified、worker_reaping_verified、compute_overlap_observed、joint_latency_observed保持false，quality_gate/footprint/p95保持not_observed。
 
-完整T6还需接入同PCM的共同1×供给、真实ASR正文与分人watermark及稳定发布、确切进程footprint、冷/热ABBA block、按来源组配对统计和生产身份核验。回调墙钟、合成任务的交叠或Governor准入测试不能替代这些证据。确定性回归见 `tests/test_asr_diarization_overlap_harness.py`；它只使用asyncio、实际Governor和fake计算，不打开音频或加载模型。
+完整T6还需将共同PCM供给接入真实ASR正文与分人watermark及稳定发布，补齐确切进程footprint、冷/热ABBA block、按来源组配对统计和生产身份核验。回调墙钟、合成任务的交叠或Governor准入测试不能替代这些证据。确定性回归见 `tests/test_asr_diarization_overlap_harness.py`；它只使用asyncio、实际Governor和fake计算，不打开音频或加载模型。
+
+### 会议评测共同 PCM 供给
+
+`bench_asr_diarization_overlap.run_pcm_workload_schedule` 在四模式调度核心外提供一个共同的16kHz mono PCM16供给源。调用方传入已加载的不可变bytes与预登记SHA-256，回调签名为 `(governor, frames)`；源摘要在线程校验，frames是有界异步迭代器，回调必须完整读至结束并负责自身推理/session的joined清理。原始PCM不进入返回报告、日志或对象repr。库不打开文件、不构造模型、不提供真实执行CLI。
+
+输入为正数个完整样本，最大600秒；每包1–16000样本、总包数不超过65536，默认320样本。每路队列1–64包、默认8包，共享同一个不可变分包；缺失或额外回调按模式拒绝。所有所需消费者进入首次读取后确定供给原点，按每包样本末端相对原点的固定deadline等待，最后不足整包的尾样本保留。等待消费者或源摘要校验的时间仍包含在外层回调总区间内，不伪装成推理时间。
+
+`max_lateness_seconds` 必须显式事前提供，有限正数且不超过1秒；这是供给调度预算，不是稳定标签或finish产品门。提前供给、迟到超预算、倒退/非法时钟、任一路队列满或未读至结束都使整体失败；不丢包、不因反压移动供给原点、不按结果放宽预算。失败、超时、自取消与外部重复取消加入供给、消费与源摘要线程，结束后关闭迭代器并释放源/排队引用，不能在作用域外继续读取。
+
+`pcm_feed` 记录源/策略摘要、样本与包数、宿主供给原点/末包计划与实际时刻、最大迟到、各路交付样本数/队列峰值及排队时长。默认monotonic与注入clock/sleep明确区分并进入策略摘要；注入时钟只能作为合成证据。共同源交付不证明模型实际接受/消费了全部样本，更不证明麦克风采集、活动稳定发布或真实计算交叠。model_acceptance_verified、microphone_capture_verified和外层runtime/certification/joint_latency/compute_overlap标记保持false；quality/footprint/p95仍未观察。生产适配器与真实阶段观测就绪前不签共存收据。确定性回归见 `tests/test_meeting_pcm_feed.py`。
 
 ### 有声书外置小说语料回归
 

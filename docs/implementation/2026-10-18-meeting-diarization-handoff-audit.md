@@ -545,3 +545,13 @@ Ruling: 只证明回调调度与清理，不证明共用PCM、1×输入、实际
 683条音频头均声明mono/16kHz/16-bit PCM；683份标注均由现有textgrid_intervals解析为单tier，共186605个非空正时长区间。三条轨道的标注末端超过WAV时长，分别约4.5625/40/75ms；72个来源会议的轨道长度存在差异，最大581.375ms，均不超过1秒。没有静默裁剪末端、补PCM或按模型输出挑选来源。解析成功只证明结构及所检查的时轴关系，不证明标签风格、串音、活动真值、独立ASR主参考或自然会议场景。
 
 现有schema2契约将headset重混音与单轨视为derived_mix/derived_single_track，仅可作diagnostic。此包因此提供可追溯派生诊断来源，不能伪装natural_meeting/natural_single补齐认证层。后续catalog仍需显式变换/标注末端规则、自然场景来源、独立ASR重叠顺序与主参考；保留meeting-disjoint声明，不假定global speaker身份或模型未见数据。没有生成虚假development就绪、CER改善、人数认证或P95通过。
+
+## T6 共同 PCM 与样本末端供给时钟
+
+2026-10-18：新增meeting_pcm_feed与run_pcm_workload_schedule，将同一不可变PCM/SHA锁、固定16k样本网格和有界独立队列接入四模式调度。所有消费者进入读取后确定共同原点；每包在样本末端deadline供给，不移动原点，不通过等待满队列制造虚假实时性；尾部单样本不丢失。摘要在线程核验，源/策略/宿主供给与排队量独立记录，回调总区间含自身初始化和清理。
+
+最初8项入口缺失RED后GREEN；继续补供给方自行task.cancel、作用域关闭后的读取、真实/注入时钟同policy摘要三类反例，均先RED后修正。供给任务用独立守卫将自取消转失败以取消并加入消费者；外部重复取消不放弃源摘要线程；全部任务加入后关闭流、释放源与排队引用。真实/注入时钟进入policy摘要，不把合成供给时钟用于真实认证。
+
+新增30项回归与既有调度/Governor联合97 passed in0.52s；三Python Ruff、两source strict/follow-imports=silent Mypy通过。用合成PCM覆盖两联合模式、相同对象/序列/尾样本、队列溢出、未读完、摘要不符、非法预算、提前/迟到、超时、自取消、重复外部取消、后台散列join及20ms默认宿主时钟路径。后者是无模型合成输入的功能回归，不是性能或P95实测。
+
+来源一致性仍只到内存交付；模型实际接受、麦克风、稳定标签、生产字节、footprint及ABBA未证明。所有认证与联合延迟标记保持false。图谱新source/test及harness missing，直接复核当前源码，无索引重建。无真实音频解码/模型/benchmark/下载/服务/安装/UI/发布/合并。父f56c9b53原生CI39098626051与主CI39098626050均已核验success/completed，新提交另行核验。
