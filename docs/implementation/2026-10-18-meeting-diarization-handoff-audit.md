@@ -377,3 +377,15 @@ Ruling: 动态窗口 budget 与生成 budget 分开：decode_max_new_tokens 记�
 Ruling: 报告仅保留哈希、样本范围、计数和固定状态；未知 finish_reason 输出 other，不能回显厂商原串。compare_asr_runs 重新校验有界逐次记录、唯一 attempt 摘要、计数、范围、预算及记录摘要，不仅依赖 quality_evidence_valid。字段/摘要自洽仍不证明生产者或实际 A0，runtime_identity_verified/certification_eligible 保持 false；冻结真实生产 cap/权重/来源与正式 Realtime 装配仍待后续接线及授权实测。旧诊断报告不能复用新 scorer 门。
 
 RED：8项反例复现自报未截断误放行、实际元数据未消费、unknown/kind/预算错误及缺逐次记录；另两项反例复现缺一次观测被后续成功掩盖及比较器仅信摘要布尔值。GREEN：ASR probe 62项，通过与 domain/worker/window/stream decoder 合并 `173 passed in 0.89s`；两个变更 Python Ruff 和 probe 按项目 strict 配置 Mypy 通过。12项新增参数化/普通回归包含4096次调用上限、preview 截断与最终 review 成功共存的拒绝。无真实模型/音频/benchmark、下载、服务、安装、UI、发布或合并动作。父提交 b0ab7db 的主 CI 39091938089、原生 CI 39091938093 均成功，不能替代后续提交验证。
+
+## T4 原生共同前缀 CLI 与恢复
+
+2026-10-18：新增 meeting_checkpoint_execution 与 evaluate-checkpoint CLI。独立 schema 1 控制锁绑定 manifest/split/scorer 的 canonical digest、绝对路径、三候选 spec 和模型/worker 路径、人数层及实际排他端口。来源组顺序沿用 manifest；C0固定四槽、C1=fast32、C2=fast128，scorer和角色不能互换。恢复仅接受 standalone schedule，由 CommonPrefixSchedule.restore 对独立初始锁重放有限历史，不能自选存活集合或继续终止状态。
+
+NativeCandidateRun 抽取原单场 factory/verifier，单场与共同检查点复用同一原生构造、先claim后构造、共享串行 governor/owner、继承端口排他、握手与exact-child回收。全部注册候选制品和全部共同前缀来源在首worker前预检；大于四人不构造C0，已淘汰候选不执行。候选adapter source tuple抽为常量，额外绑定共同检查点组合根；scorer/policy源码和整个模型目录项也进入文件状态观察，既有spec需重新冻结。
+
+Ruling: 逐fixture与最终checkpoint增加async verifier及同步commit hook。主线复核时发现最后_input检查后增加await会重新打开输入变更窗口；追加反例证实fixture最后verifier修改PCM/参考/sidecar，以及最终artifact校验修改controls/source/模型目录项/来源PCM，曾使completed误提交。修复为慢摘要校验在计算租约外执行，所有await之后同步核对controls、adapter/scorer、worker/完整模型目录项及输入stamps，再无await地os.link提交。未确认回收不提交；失败可保留先前单场诊断制品，但不能落checkpoint.json或推进调度。这只封住可观察异步窗口，不宣称跨进程、跨文件绝对原子认证。
+
+子代理独占五个perf源与新测试，主线独占ASR probe/测试和文档；均无同文件写入冲突。主线对六条路径coverage复核均missing，改读当前worktree源码，不重建索引。28项新增fake回归覆盖18个fake worker完整配对、全部来源与候选预检、C0高人数排除、角色交换、独立恢复/存活集合、holdout、busy端口、无效握手、strict控制文件、CLI分派/脱敏及最终变更反例。子代理精确相关114项通过；主线22个相关文件联合 `530 passed in 10.67s`，8个本轮变更Python Ruff、6个perf source按项目strict配置Mypy通过，evaluate-checkpoint --help与diff检查通过。
+
+未执行实际evaluate-checkpoint、真实音频/模型/benchmark、下载、服务、安装、UI、发布或合并。原生C0握手仍只有ok，source声明不是SDK/shape执行证明；全部结果保持diagnostic、runtime_identity_verified=false、certification_eligible=false、certified_max_speakers=null。共同检查点CLI已接线，跨层唯一候选、正式ASR评测组合根与真实A0/质量、生产联合身份、收据、留出及授权运行仍未完成。

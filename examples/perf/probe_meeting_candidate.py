@@ -52,6 +52,37 @@ def _source_digest(paths: tuple[str, ...]) -> str:
     return canonical_digest({name: file_digest(ROOT / name) for name in paths})
 
 
+CANDIDATE_ADAPTER_SOURCES = (
+    "examples/perf/probe_meeting_candidate.py",
+    "examples/perf/meeting_candidate_protocol.py",
+    "examples/perf/meeting_candidate_session.py",
+    "examples/perf/meeting_candidate_execution.py",
+    "examples/perf/meeting_checkpoint_execution.py",
+    "src/speechrail/runtime/server_lock.py",
+    "examples/perf/meeting_candidate_evidence.py",
+    "examples/perf/meeting_candidate_runner.py",
+    "examples/perf/meeting_asr_sidecar.py",
+    "examples/perf/meeting_development_fixture.py",
+    "examples/perf/meeting_candidate_schedule.py",
+    "examples/perf/prepare_meeting_evaluation_manifest.py",
+    "native/diarization-candidate/Package.swift",
+    "native/diarization-candidate/Sources/CandidateFrames/CandidateFrames.swift",
+    "native/diarization-candidate/Package.resolved",
+    "native/diarization-candidate/Sources/MeetingDiarizationCandidate/main.swift",
+    "native/diarization/Sources/SpeechRailDiarizationProtocol/PacketCodec.swift",
+    "examples/perf/meeting_evaluation_identity.py",
+    "src/speechrail/backends/diarization/coreml.py",
+    "src/speechrail/runtime/diarization_owner.py",
+    "src/speechrail/runtime/phase_trace.py",
+    "src/speechrail/runtime/diarization_worker.py",
+    "src/speechrail/runtime/resource_governor.py",
+    "src/speechrail/runtime/cleanup.py",
+    "src/speechrail/domain/diarization/types.py",
+    "src/speechrail/domain/diarization/attribution.py",
+    "src/speechrail/domain/audio_timeline.py",
+)
+
+
 def static_candidate_spec(
     *, worker: Path, model_directory: Path, preset: str,
     model_revision: str, compute_units: str,
@@ -85,34 +116,7 @@ def static_candidate_spec(
     policy = json.loads(POLICY.read_text(encoding="utf-8"))
     return MeetingCandidateSpec(
         implementation_id="nemotron3-streaming-candidate-v1",
-        adapter_sha256=_source_digest((
-            "examples/perf/probe_meeting_candidate.py",
-            "examples/perf/meeting_candidate_protocol.py",
-            "examples/perf/meeting_candidate_session.py",
-            "examples/perf/meeting_candidate_execution.py",
-            "src/speechrail/runtime/server_lock.py",
-            "examples/perf/meeting_candidate_evidence.py",
-            "examples/perf/meeting_candidate_runner.py",
-            "examples/perf/meeting_asr_sidecar.py",
-            "examples/perf/meeting_development_fixture.py",
-            "examples/perf/meeting_candidate_schedule.py",
-            "examples/perf/prepare_meeting_evaluation_manifest.py",
-            "native/diarization-candidate/Package.swift",
-            "native/diarization-candidate/Sources/CandidateFrames/CandidateFrames.swift",
-            "native/diarization-candidate/Package.resolved",
-            "native/diarization-candidate/Sources/MeetingDiarizationCandidate/main.swift",
-            "native/diarization/Sources/SpeechRailDiarizationProtocol/PacketCodec.swift",
-            "examples/perf/meeting_evaluation_identity.py",
-            "src/speechrail/backends/diarization/coreml.py",
-            "src/speechrail/runtime/diarization_owner.py",
-            "src/speechrail/runtime/phase_trace.py",
-            "src/speechrail/runtime/diarization_worker.py",
-            "src/speechrail/runtime/resource_governor.py",
-            "src/speechrail/runtime/cleanup.py",
-            "src/speechrail/domain/diarization/types.py",
-            "src/speechrail/domain/diarization/attribution.py",
-            "src/speechrail/domain/audio_timeline.py",
-        )),
+        adapter_sha256=_source_digest(CANDIDATE_ADAPTER_SOURCES),
         sdk_revision=SDK_REVISION, worker_sha256=file_digest(worker),
         model_revision=model_revision, model_files_sha256=model_file_digests(model_root),
         dtype="fp16", preset=configuration, compute_units=compute_units,
@@ -127,6 +131,26 @@ def static_candidate_spec(
                     "examples/perf/diarization_quality.py",
                 )), "versions": policy["scorer_versions"]},
     )
+
+
+def candidate_source_paths(spec: MeetingCandidateSpec) -> tuple[Path, ...]:
+    """Exact adapter/scorer inputs, shared with the final cheap stamp check."""
+    from meeting_c0 import C0_ADAPTER_SOURCES, C0_IMPLEMENTATION
+
+    sources = (
+        C0_ADAPTER_SOURCES
+        if spec.implementation_id == C0_IMPLEMENTATION
+        else CANDIDATE_ADAPTER_SOURCES
+    )
+    paths = tuple(
+        ROOT / name
+        for name in (
+            *sources,
+            "examples/perf/meeting_quality_metrics.py",
+            "examples/perf/diarization_quality.py",
+        )
+    )
+    return (*paths, POLICY)
 
 
 def artifact_preflight(
@@ -167,10 +191,18 @@ def main(argv: list[str] | None = None) -> int:
     preflight.add_argument("--model-directory", required=True, type=Path)
     development = commands.add_parser(
         "evaluate-development",
-        help="execute one locked development fixture; requires model-run authorization"
+        help="execute one locked development fixture; requires model-run authorization",
     )
-    for name in ("candidate-spec", "worker", "model-directory", "manifest", "split-lock",
-                 "scorer-policy", "artifact-root", "output-directory"):
+    for name in (
+        "candidate-spec",
+        "worker",
+        "model-directory",
+        "manifest",
+        "split-lock",
+        "scorer-policy",
+        "artifact-root",
+        "output-directory",
+    ):
         development.add_argument(f"--{name}", required=True, type=Path)
     development.add_argument("--fixture-id", required=True)
     development.add_argument("--service-port", required=True, type=int)
@@ -178,29 +210,68 @@ def main(argv: list[str] | None = None) -> int:
         "--input-mode", choices=("throughput", "realtime"), default="throughput"
     )
     development.add_argument("--timeout-seconds", type=float, default=1800)
+    checkpoint = commands.add_parser(
+        "evaluate-checkpoint",
+        help="run one native common prefix from an independent checkpoint lock; diagnostic only",
+    )
+    checkpoint.add_argument(
+        "--checkpoint-lock",
+        required=True,
+        type=Path,
+        help="independent JSON lock; all input paths must be absolute",
+    )
+    checkpoint.add_argument(
+        "--resume-schedule",
+        type=Path,
+        help="standalone schedule object from the previous checkpoint",
+    )
+    checkpoint.add_argument("--output-directory", required=True, type=Path)
+    checkpoint.add_argument(
+        "--input-mode", choices=("throughput", "realtime"), default="throughput"
+    )
+    checkpoint.add_argument("--timeout-seconds", type=float, default=1800)
     args = parser.parse_args(argv)
     try:
         from meeting_candidate_execution import evaluate_candidate_development, read_control_json
 
-        spec = MeetingCandidateSpec(**read_control_json(args.candidate_spec))
-        if args.command == "preflight":
+        if args.command == "evaluate-checkpoint":
+            from meeting_checkpoint_execution import evaluate_native_checkpoint
+
+            report = asyncio.run(
+                evaluate_native_checkpoint(
+                    checkpoint_lock=args.checkpoint_lock,
+                    resume_schedule=args.resume_schedule,
+                    output_directory=args.output_directory,
+                    input_mode=args.input_mode,
+                    timeout_seconds=args.timeout_seconds,
+                )
+            )
+        elif args.command == "preflight":
+            spec = MeetingCandidateSpec(**read_control_json(args.candidate_spec))
             report = artifact_preflight(
                 spec, worker=args.worker, model_directory=args.model_directory
             )
         else:
-            report = asyncio.run(evaluate_candidate_development(
-                spec=spec, worker=args.worker, model_directory=args.model_directory,
-                manifest=read_control_json(args.manifest),
-                split_lock=read_control_json(args.split_lock),
-                scorer_policy=read_control_json(args.scorer_policy),
-                artifact_root=args.artifact_root,
-                output_directory=args.output_directory, fixture_id=args.fixture_id,
-                service_port=args.service_port, input_mode=args.input_mode,
-                timeout_seconds=args.timeout_seconds,
-            ))
+            spec = MeetingCandidateSpec(**read_control_json(args.candidate_spec))
+            report = asyncio.run(
+                evaluate_candidate_development(
+                    spec=spec,
+                    worker=args.worker,
+                    model_directory=args.model_directory,
+                    manifest=read_control_json(args.manifest),
+                    split_lock=read_control_json(args.split_lock),
+                    scorer_policy=read_control_json(args.scorer_policy),
+                    artifact_root=args.artifact_root,
+                    output_directory=args.output_directory,
+                    fixture_id=args.fixture_id,
+                    service_port=args.service_port,
+                    input_mode=args.input_mode,
+                    timeout_seconds=args.timeout_seconds,
+                )
+            )
     except OSError:
         parser.error("required local artifact is unavailable")
-    except (ValueError, TypeError, KeyError):
+    except ValueError, TypeError, KeyError:
         parser.error("candidate spec or local artifacts do not match the frozen configuration")
     except RuntimeError as exc:
         if str(exc) == "evaluation_port_busy":

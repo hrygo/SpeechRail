@@ -28,6 +28,36 @@ from speechrail.runtime.resource_governor import ResourceGovernor
 C0_IMPLEMENTATION = "sortformer-four-slot-control-v1"
 
 
+C0_ADAPTER_SOURCES = (
+    "examples/perf/meeting_c0.py",
+    "examples/perf/probe_meeting_candidate.py",
+    "examples/perf/meeting_candidate_execution.py",
+    "examples/perf/meeting_checkpoint_execution.py",
+    "examples/perf/meeting_candidate_evidence.py",
+    "examples/perf/meeting_candidate_runner.py",
+    "examples/perf/meeting_asr_sidecar.py",
+    "examples/perf/meeting_development_fixture.py",
+    "examples/perf/meeting_candidate_schedule.py",
+    "examples/perf/prepare_meeting_evaluation_manifest.py",
+    "examples/perf/meeting_evaluation_identity.py",
+    "native/diarization/Package.swift",
+    "native/diarization/Package.resolved",
+    "native/diarization/Sources/SpeechRailDiarizationWorker/main.swift",
+    "native/diarization/Sources/SpeechRailDiarizationProtocol/PacketCodec.swift",
+    "native/diarization/Sources/SpeechRailDiarizationProtocol/RetainedFrameCursor.swift",
+    "src/speechrail/backends/diarization/coreml.py",
+    "src/speechrail/runtime/server_lock.py",
+    "src/speechrail/runtime/diarization_owner.py",
+    "src/speechrail/runtime/diarization_worker.py",
+    "src/speechrail/runtime/phase_trace.py",
+    "src/speechrail/runtime/resource_governor.py",
+    "src/speechrail/runtime/cleanup.py",
+    "src/speechrail/domain/diarization/types.py",
+    "src/speechrail/domain/diarization/attribution.py",
+    "src/speechrail/domain/audio_timeline.py",
+)
+
+
 def static_c0_spec(*, worker: Path, model_directory: Path) -> MeetingCandidateSpec:
     """Require production-pinned model bytes; record every effective local file."""
     from probe_meeting_candidate import POLICY, ROOT, _source_digest
@@ -51,35 +81,7 @@ def static_c0_spec(*, worker: Path, model_directory: Path) -> MeetingCandidateSp
     policy = json.loads(POLICY.read_text(encoding="utf-8"))
     return MeetingCandidateSpec(
         implementation_id=C0_IMPLEMENTATION,
-        adapter_sha256=_source_digest(
-            (
-                "examples/perf/meeting_c0.py",
-                "examples/perf/probe_meeting_candidate.py",
-                "examples/perf/meeting_candidate_execution.py",
-                "examples/perf/meeting_candidate_evidence.py",
-                "examples/perf/meeting_candidate_runner.py",
-                "examples/perf/meeting_asr_sidecar.py",
-                "examples/perf/meeting_development_fixture.py",
-                "examples/perf/meeting_candidate_schedule.py",
-                "examples/perf/prepare_meeting_evaluation_manifest.py",
-                "examples/perf/meeting_evaluation_identity.py",
-                "native/diarization/Package.swift",
-                "native/diarization/Package.resolved",
-                "native/diarization/Sources/SpeechRailDiarizationWorker/main.swift",
-                "native/diarization/Sources/SpeechRailDiarizationProtocol/PacketCodec.swift",
-            "native/diarization/Sources/SpeechRailDiarizationProtocol/RetainedFrameCursor.swift",
-                "src/speechrail/backends/diarization/coreml.py",
-                "src/speechrail/runtime/server_lock.py",
-                "src/speechrail/runtime/diarization_owner.py",
-                "src/speechrail/runtime/diarization_worker.py",
-                "src/speechrail/runtime/phase_trace.py",
-                "src/speechrail/runtime/resource_governor.py",
-                "src/speechrail/runtime/cleanup.py",
-                "src/speechrail/domain/diarization/types.py",
-                "src/speechrail/domain/diarization/attribution.py",
-                "src/speechrail/domain/audio_timeline.py",
-            )
-        ),
+        adapter_sha256=_source_digest(C0_ADAPTER_SOURCES),
         sdk_revision=coreml.FLUIDAUDIO_COMMIT,
         worker_sha256=file_digest(worker),
         model_revision=coreml.MODEL_REVISION,

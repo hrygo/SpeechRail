@@ -200,6 +200,13 @@ def _prepare(
         raise ValueError("development input validation failed") from None
 
 
+def _check_input_stamps(prepared: Mapping[str, Any]) -> None:
+    """Cheap final observation; no await before exclusive evidence commit."""
+    for kind, descriptor in prepared["fixture"]["artifacts"].items():
+        if _stamp(prepared["root"] / descriptor["path"]) != prepared["stamps"][kind]:
+            raise ValueError("development input changed before commit")
+
+
 def _check_inputs(prepared: Mapping[str, Any]) -> None:
     for kind, descriptor in prepared["fixture"]["artifacts"].items():
         path = prepared["root"] / descriptor["path"]
@@ -277,6 +284,7 @@ async def evaluate_development_fixture(
     epoch: str = "session",
     timeout_seconds: float = 1800,
     verify_candidate: Callable[[], Awaitable[Mapping[str, object]]] | None = None,
+    verify_commit: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Replay and score a development fixture with a supervised caller factory.
 
@@ -423,6 +431,11 @@ async def evaluate_development_fixture(
             )
         )
         await join_cleanup(asyncio.create_task(asyncio.to_thread(_check_inputs, prepared)))
+        if verify_candidate is not None and dict(await verify_candidate()) != candidate_execution:
+            raise ValueError("candidate execution observation changed before commit")
+        if verify_commit is not None:
+            verify_commit()
+        _check_input_stamps(prepared)
         # No await between the exclusive commit and return: cancellation while
         # writing evidence leaves only a partial artifact, never a completed result.
         os.link(output / "result.partial.json", output / "result.json", follow_symlinks=False)
@@ -478,6 +491,9 @@ async def evaluate_development_checkpoint(
     output_directory: Path,
     input_mode: str = "throughput",
     timeout_seconds: float = 1800,
+    candidate_verifiers: Mapping[str, Callable[[], Awaitable[Mapping[str, object]]]] | None = None,
+    verify_checkpoint: Callable[[], Awaitable[None]] | None = None,
+    verify_commit: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Run one complete paired prefix, score it and return the next immutable state.
 
@@ -488,6 +504,10 @@ async def evaluate_development_checkpoint(
     """
     request = schedule.request()
     candidate_ids, activity_factories = dict(candidate_ids), dict(activity_factories)
+    if candidate_verifiers is not None:
+        candidate_verifiers = dict(candidate_verifiers)
+        if set(candidate_verifiers) != set(request["candidates"]):
+            raise ValueError("development checkpoint verifier set differs from request")
     frozen = json.loads(
         json.dumps(
             {"manifest": manifest, "lock": split_lock, "policy": scorer_policy}, allow_nan=False
@@ -572,6 +592,10 @@ async def evaluate_development_checkpoint(
                         output_directory=output / name / fixture["id"],
                         input_mode=input_mode,
                         timeout_seconds=timeout_seconds,
+                        verify_candidate=(
+                            candidate_verifiers[name] if candidate_verifiers is not None else None
+                        ),
+                        verify_commit=verify_commit,
                     )
                 )
             observations[name] = rows
@@ -653,6 +677,15 @@ async def evaluate_development_checkpoint(
         )
         for item in prepared:
             await join_cleanup(asyncio.create_task(asyncio.to_thread(_check_inputs, item)))
+        if candidate_verifiers is not None:
+            for verify in candidate_verifiers.values():
+                await verify()
+        if verify_checkpoint is not None:
+            await verify_checkpoint()
+        if verify_commit is not None:
+            verify_commit()
+        for item in prepared:
+            _check_input_stamps(item)
         os.link(
             output / "checkpoint.partial.json", output / "checkpoint.json", follow_symlinks=False
         )

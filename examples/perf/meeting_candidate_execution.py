@@ -123,14 +123,23 @@ class CandidateArtifacts:
         artifact_preflight(self.spec, worker=self.worker, model_directory=self.models)
 
     def _stamps(self) -> dict[str, tuple[int, ...]]:
+        from probe_meeting_candidate import candidate_source_paths
+
         result: dict[str, tuple[int, ...]] = {}
-        for key, path in [
+        entries = [
             ("worker", self.worker),
-            *[(f"model/{name}", self.models / name) for name in self.spec.model_files_sha256],
-        ]:
+            ("models", self.models),
+            *[(f"model/{path.relative_to(self.models)}", path) for path in self.models.rglob("*")],
+            *[(f"source/{i}", path) for i, path in enumerate(candidate_source_paths(self.spec))],
+        ]
+        for key, path in entries:
             value = path.stat(follow_symlinks=False)
-            if not stat.S_ISREG(value.st_mode):
-                raise ValueError("candidate artifacts must remain regular files")
+            if not stat.S_ISREG(value.st_mode) and not (
+                key.startswith("model") and stat.S_ISDIR(value.st_mode)
+            ):
+                raise ValueError(
+                    "candidate artifacts must remain regular files or model directories"
+                )
             result[key] = (
                 value.st_dev,
                 value.st_ino,
@@ -139,6 +148,11 @@ class CandidateArtifacts:
                 value.st_ctime_ns,
             )
         return result
+
+    def verify_stamps(self) -> None:
+        """No hashes or awaits: close observable changes just before commit."""
+        if self._stamps() != self._baseline:
+            raise ValueError("candidate artifacts changed before commit")
 
     def verify(self) -> None:
         if self._stamps() != self._baseline:
@@ -178,6 +192,84 @@ class CheckedCandidateSession:
         return self._session.phase_trace_status()
 
 
+class NativeCandidateRun:
+    """Reuse one frozen artifact set and shared owner; construct only after claim."""
+
+    def __init__(
+        self,
+        artifacts: CandidateArtifacts,
+        port: EvaluationPortLease,
+        governor: ResourceGovernor,
+    ) -> None:
+        self.artifacts, self.port, self.governor = artifacts, port, governor
+        self.transport: CandidateWorkerProcess | C0WorkerProcess | None = None
+
+    def activity_factory(self) -> ActivitySession:
+        spec, artifacts = self.artifacts.spec, self.artifacts
+        if spec.implementation_id == C0_IMPLEMENTATION:
+
+            def construct_c0() -> C0WorkerProcess:
+                self.transport = C0WorkerProcess(
+                    executable=artifacts.worker,
+                    model_path=artifacts.models / str(spec.preset["model_file_name"]),
+                    inherited_guard_fd=self.port.descriptor,
+                )
+                return self.transport
+
+            return CheckedCandidateSession(
+                open_c0_session(
+                    worker_factory=construct_c0, governor=self.governor, phase_trace=PhaseTrace()
+                ),
+                artifacts,
+            )
+
+        def construct() -> CandidateWorkerProcess:
+            self.transport = CandidateWorkerProcess(
+                executable=artifacts.worker,
+                model_path=artifacts.models,
+                preset=str(spec.preset["name"]),
+                compute_units=spec.compute_units,
+                inherited_guard_fd=self.port.descriptor,
+            )
+            return self.transport
+
+        session = open_candidate_session(
+            epoch="session",
+            governor=self.governor,
+            worker_factory=construct,
+            phase_trace=PhaseTrace(),
+        )
+        return CheckedCandidateSession(session, artifacts)
+
+    def verify_commit(self) -> None:
+        self.artifacts.verify_stamps()
+        if (
+            self.transport is None
+            or not self.transport.preflight_observed
+            or (self.governor.diarization_owner.occupied)
+        ):
+            raise ValueError("candidate execution observation changed before commit")
+
+    async def verify(self) -> Mapping[str, object]:
+        await join_cleanup(asyncio.create_task(asyncio.to_thread(self.artifacts.verify)))
+        if (
+            self.transport is None
+            or not self.transport.preflight_observed
+            or self.governor.diarization_owner.occupied
+        ):
+            raise ValueError("candidate preflight or child reclamation is unconfirmed")
+        return {
+            "configured_port_exclusion": True,
+            "exclusion_scope": "per_user_configured_port",
+            "native_preflight_observed": True,
+            "artifact_checks_through_cleanup": True,
+            "exact_child_reaped": True,
+            "model_revision_provenance_verified": False,
+            "joint_asr_latency_observed": False,
+            "production_certification": False,
+        }
+
+
 async def evaluate_candidate_development(
     *,
     spec: MeetingCandidateSpec,
@@ -204,64 +296,11 @@ async def evaluate_candidate_development(
                 asyncio.to_thread(CandidateArtifacts, spec, worker, model_directory)
             )
         )
-        governor = ResourceGovernor(GovernorLimits(2, 1, 8), allow_heavy_overlap=False)
-        transport: CandidateWorkerProcess | C0WorkerProcess | None = None
-
-        def activity_factory() -> ActivitySession:
-            nonlocal transport
-
-            if spec.implementation_id == C0_IMPLEMENTATION:
-                def construct_c0() -> C0WorkerProcess:
-                    nonlocal transport
-                    transport = C0WorkerProcess(
-                        executable=artifacts.worker,
-                        model_path=artifacts.models / str(spec.preset["model_file_name"]),
-                        inherited_guard_fd=port.descriptor,
-                    )
-                    return transport
-
-                return CheckedCandidateSession(
-                    open_c0_session(worker_factory=construct_c0, governor=governor,
-                                    phase_trace=PhaseTrace()), artifacts
-                )
-
-            def construct() -> CandidateWorkerProcess:
-                nonlocal transport
-                transport = CandidateWorkerProcess(
-                    executable=artifacts.worker,
-                    model_path=artifacts.models,
-                    preset=str(spec.preset["name"]),
-                    compute_units=spec.compute_units,
-                    inherited_guard_fd=port.descriptor,
-                )
-                return transport
-
-            session = open_candidate_session(
-                epoch="session",
-                governor=governor,
-                worker_factory=construct,
-                phase_trace=PhaseTrace(),
-            )
-            return CheckedCandidateSession(session, artifacts)
-
-        async def verify_candidate() -> Mapping[str, object]:
-            await join_cleanup(asyncio.create_task(asyncio.to_thread(artifacts.verify)))
-            if (
-                transport is None
-                or not transport.preflight_observed
-                or governor.diarization_owner.occupied
-            ):
-                raise ValueError("candidate preflight or child reclamation is unconfirmed")
-            return {
-                "configured_port_exclusion": True,
-                "exclusion_scope": "per_user_configured_port",
-                "native_preflight_observed": True,
-                "artifact_checks_through_cleanup": True,
-                "exact_child_reaped": True,
-                "model_revision_provenance_verified": False,
-                "joint_asr_latency_observed": False,
-                "production_certification": False,
-            }
+        run = NativeCandidateRun(
+            artifacts,
+            port,
+            ResourceGovernor(GovernorLimits(2, 1, 8), allow_heavy_overlap=False),
+        )
 
         return await evaluate_development_fixture(
             manifest,
@@ -270,9 +309,10 @@ async def evaluate_candidate_development(
             scorer_policy=scorer_policy,
             fixture_id=fixture_id,
             candidate_sha256=candidate_digest(spec),
-            activity_factory=activity_factory,
+            activity_factory=run.activity_factory,
             output_directory=output_directory,
             input_mode=input_mode,
             timeout_seconds=timeout_seconds,
-            verify_candidate=verify_candidate,
+            verify_candidate=run.verify,
+            verify_commit=run.verify_commit,
         )

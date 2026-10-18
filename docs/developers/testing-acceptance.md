@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.23"
+version: "3.3.24"
 date: 2026-10-18
 ---
 
@@ -169,7 +169,33 @@ PYTHONPATH=src:examples/perf uv run --no-sync python examples/perf/probe_meeting
   --fixture-id "$FIXTURE_ID" --service-port "$SERVICE_PORT" --input-mode throughput
 ```
 
-fake 验证见 `tests/test_meeting_candidate_execution.py` 与 `tests/test_diarization_worker.py`；包含合成 WAV/文字、fake IPC 以及不加载模型的锁继承子进程，不证明 CoreML 模型、真实 footprint 或质量达标。C0 spec 由 meeting_c0.static_c0_spec 只读构造，model-directory 指向含 SortformerNvidiaLow_v2.1.mlmodelc 的外部目录；同一 CLI 按冻结 implementation_id 分派，未知实现拒绝。C0 只参加 ≤4 人质量对照，超过四人不能认证。共同检查点 CLI、跨层选型、真实来源与联合身份、收据及留出仍待接线；C0 fake 回归另见 tests/test_meeting_c0.py。
+fake 验证见 `tests/test_meeting_candidate_execution.py` 与 `tests/test_diarization_worker.py`；包含合成 WAV/文字、fake IPC 以及不加载模型的锁继承子进程，不证明 CoreML 模型、真实 footprint 或质量达标。C0 spec 由 meeting_c0.static_c0_spec 只读构造，model-directory 指向含 SortformerNvidiaLow_v2.1.mlmodelc 的外部目录；同一 CLI 按冻结 implementation_id 分派，未知实现拒绝。C0 只参加 ≤4 人质量对照，超过四人不能认证。跨层选型、真实来源与联合身份、收据及留出仍待接线；C0 fake 回归另见 tests/test_meeting_c0.py。
+
+### 原生共同检查点入口
+
+`probe_meeting_candidate.py evaluate-checkpoint` 使用独立初始控制锁，接通 `CommonPrefixSchedule` 与 `evaluate_development_checkpoint`，每次执行一个共同前缀检查点。入口不自动跑完全部检查点，不签开发收据、不打开留出集，也不选择跨层唯一胜者。
+
+初始 JSON 控制锁使用 schema_version=1，字段集严格封闭：
+
+- `speakers_count`：1–8 的整数；来源组顺序取冻结 manifest 对应层。
+- `service_port`：本轮持续持有排他锁的实际服务端口。
+- `manifest`、`split_lock`、`scorer_policy`：各为 `{ "path": "/outside/path.json", "sha256": "<canonical-sha256>" }`。摘要使用 `meeting_evaluation_identity.canonical_digest`，并非 JSON 文件的逐字节 SHA-256。
+- `artifact_root`：显式绝对路径，指向已准备的仓库外素材根。
+- `candidates`：固定 C0/C1/C2，每项恰含 `spec`、`worker`、`model_directory`；`spec` 使用同样的 path/sha256 descriptor，另外两项为绝对路径。C0 必须是固定四槽对照，C1 为 fast32、C2 为 fast128，角色和 scorer 身份不能互换。
+
+所有控制 JSON 使用有界严格读取；拒绝未知字段、重复键、非有限数、符号链接和非普通文件。全部注册候选的文件身份和全部共同前缀来源在首 worker 前完成预检。大于四人时仍保留初始三候选锁与制品核对，但不构造 C0；已淘汰候选也不执行。实际存活集合由不可变调度状态计算，不能通过 CLI 自选。
+
+一轮共用一个端口租约、串行 governor 和 owner；各 fixture 复用单场入口的原生握手、阶段观测、评分和精确回收。慢摘要校验在计算租约外执行，完成提交前核对输入、控制与候选文件状态，拒绝异步校验期间可观察的变更。文件状态检查不是跨进程、跨文件的绝对原子认证，输出继续保持 diagnostic，SDK/生产者/联合身份的证据限制与单场入口一致。
+
+以下命令须先获得真实模型/音频运行授权；常规 fake 回归不执行它：
+
+```bash
+PYTHONPATH=src:examples/perf uv run --no-sync python examples/perf/probe_meeting_candidate.py \
+  evaluate-checkpoint --checkpoint-lock "$CHECKPOINT_LOCK" \
+  --output-directory "$CHECKPOINT_OUTPUT" --input-mode throughput
+```
+
+恢复时使用同一独立初始锁，把上轮 `checkpoint.json` 的 `schedule` 对象单独保存为外部 JSON，并增加 `--resume-schedule "$RESUME_SCHEDULE"`。恢复会重新核对候选、来源、manifest、scorer 与有限历史，终止状态不能继续；每轮输出目录必须新建且独占。可改写的恢复文件只用于诊断调度，不作为可信收据或认证。任一 fixture、校验或回收失败都不提交 checkpoint.json；先前已完成的单场制品仍可用于排障。fake 回归见 `tests/test_meeting_checkpoint_execution.py`。
 
 ### ASR 正文诊断重放
 
