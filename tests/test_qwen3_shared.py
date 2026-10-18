@@ -121,6 +121,63 @@ def test_start_retains_observed_runtime_revision_until_worker_closes() -> None:
     _run(scenario())
 
 
+@pytest.mark.parametrize("cap", [None, 32, 384, 2048, True, "512", 0, 2049])
+def test_ready_window_cap_is_strict_unknown_when_missing_and_cleared_on_close(cap):
+    async def scenario():
+        worker = Qwen3SharedWorker(_Config(timeout_seconds=1))
+        original = worker._transport.exchange
+
+        async def exchange(*args, **kwargs):
+            ready = await original(*args, **kwargs)
+            if cap is not None:
+                ready["window_decode_max_new_tokens"] = cap
+            return ready
+
+        worker._transport.exchange = exchange
+        try:
+            assert worker.window_decode_max_new_tokens is None
+            if cap is not None and (type(cap) is not int or not 32 <= cap <= 2048):
+                with pytest.raises(RuntimeError, match="backend_identity_mismatch"):
+                    await worker.start()
+                assert not worker.ready
+                assert worker.window_decode_max_new_tokens is None
+            else:
+                await worker.start()
+                assert worker.window_decode_max_new_tokens == cap
+        finally:
+            await worker.close()
+        assert worker.window_decode_max_new_tokens is None
+
+    _run(scenario())
+
+
+def test_new_ready_generation_does_not_reuse_previous_observed_cap():
+    async def scenario():
+        worker = Qwen3SharedWorker(_Config(timeout_seconds=1))
+        original = worker._transport.exchange
+        calls = 0
+
+        async def exchange(*args, **kwargs):
+            nonlocal calls
+            ready = await original(*args, **kwargs)
+            calls += 1
+            if calls == 1:
+                ready["window_decode_max_new_tokens"] = 384
+            return ready
+
+        worker._transport.exchange = exchange
+        try:
+            await worker.start()
+            assert worker.window_decode_max_new_tokens == 384
+            await worker.close()
+            await worker.start()
+            assert worker.window_decode_max_new_tokens is None
+        finally:
+            await worker.close()
+
+    _run(scenario())
+
+
 def test_register_session_has_bounded_queue_and_hard_cap() -> None:
     async def scenario() -> None:
         worker = Qwen3SharedWorker(_Config(), max_sessions=2)

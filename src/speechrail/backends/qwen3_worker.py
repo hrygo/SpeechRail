@@ -945,6 +945,12 @@ def serve(
         getattr(engine, "close_window", None)
     ):
         ready["capabilities"] = ["window_decode_v1"]
+        cap = getattr(engine, "window_decode_max_new_tokens", None)
+        if cap is not None:
+            if type(cap) is not int or not 32 <= cap <= 2048:
+                _write_error(output_stream, "backend_identity_mismatch")
+                return
+            ready["window_decode_max_new_tokens"] = cap
     write_frame(
         output_stream,
         ready,
@@ -1224,6 +1230,11 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         if state is None:
             raise RuntimeError(f"no active session: {session_id}")
         return state.preview.sample_watermark if state.preview is not None else 0
+
+    @property
+    def window_decode_max_new_tokens(self) -> int:
+        """Effective cap consumed by this engine's dynamic window budget."""
+        return self._max_new_tokens or 512
 
     def preview_revision(self, session_id: str) -> int:
         state = self._streaming_states.get(session_id)

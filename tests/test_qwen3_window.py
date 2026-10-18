@@ -271,8 +271,9 @@ def test_engine_changed_pcm_or_language_cannot_reuse_old_prefix():
     assert calls[1][0] is not calls[2][0]
 
 
-def serve_window_frames(changes=None):
+def serve_window_frames(changes=None, *, engine_cap=512):
     instance, _, _ = engine()
+    instance._max_new_tokens = engine_cap
     instance.identity = WorkerIdentity(
         device="mps",
         dtype="float16",
@@ -333,6 +334,22 @@ def test_window_binary_ipc_reports_capability_result_then_real_close_ack():
     assert [f["type"] for f in frames] == ["ready", "window.result", "window.closed"]
     assert frames[1]["request_id"] == "rpc-1" and frames[1]["complete"] is True
     assert frames[2]["request_id"] == "rpc-close"
+
+
+@pytest.mark.parametrize("cap", [0, 384, 512])
+def test_window_ready_retains_engine_cap_independently_of_launch_default(cap):
+    frames = serve_window_frames(engine_cap=cap)
+    assert frames[0]["window_decode_max_new_tokens"] == (cap or 512)
+
+
+def test_factory_exposes_only_ready_worker_observed_window_cap():
+    worker, _, factory = setup()
+    worker.window_decode_max_new_tokens = 384
+    assert factory.window_decode_max_new_tokens is None
+    worker.ready = True
+    assert factory.window_decode_max_new_tokens == 384
+    worker.ready = False
+    assert factory.window_decode_max_new_tokens is None
 
 
 @pytest.mark.parametrize(

@@ -38,6 +38,11 @@ class NativeWindowAsrFactory:
     def runtime_revision(self) -> str | None:
         return self._worker.runtime_revision
 
+    @property
+    def window_decode_max_new_tokens(self) -> int | None:
+        """Expose the ready owner's observed cap, never streaming configuration."""
+        return self._worker.window_decode_max_new_tokens if self.ready else None
+
     def create(self, *, identity: WindowIdentity) -> Qwen3WindowSession:
         if self._session is not None:
             raise AsrModeBusy("revision window ASR owner is busy")

@@ -409,3 +409,11 @@ Ruling: streaming配置不是实际shared window cap。冻结max_tokens只作为
 56项新增fake回归覆盖随机/极值/奇偶与跨wire包/EOF映射、实际decode PCM逐字节、sealed正文、production boundary fallback、独立时钟持续供给、overflow、错误隐私、timeout/cancel joined、有效admission漂移、streaming配置与实际budget不同及终态非法数据。主线增加两个来源锁→实际session→评分集成用例，证明明确主参考评分与close后参考变更拒绝；source回归共21项。24个相关文件联合 `607 passed in 15.90s`，四个Python Ruff、两个perf source按项目strict配置Mypy通过。图谱为主checkout旧generation，新文件missing，主线直接复核当前worktree源码，未重建索引。
 
 父提交15a3f61c的主CI39092542520和原生CI39092542609均成功；这是父提交证据。没有真实语料/模型、benchmark、下载、服务、安装、UI、发布或合并操作。实际A0生产字节和可信运行组合根、真实损失归因、CER改善、认证人数及联合延迟仍未完成。
+
+## T8 ready 握手中的有效窗口预算
+
+2026-10-18：生产Qwen3Engine公开只读window_decode_max_new_tokens，由动态窗口budget实际使用的_max_new_tokens得到，0仍按既有512默认处理；serve仅在window能力存在时跨私有ready帧传递。shared owner严格核对32–2048整数，缺失保持未知，bool/字符串/越界拒绝握手；关闭、失败与重启清除旧代观测，NativeWindowAsrFactory只在ready期间暴露。未改变动态budget公式、生成策略或公共Realtime契约。
+
+正式重放观察到有效cap时，要求冻结decoder.max_tokens与之相同；已知值进入configuration/replay policy，退出时变化不能返回有效诊断证据。未提供该字段的factory仍按caller upper-bound逐attempt检查，保持未知与未认证。ready cap不是streaming配置，不是已加载模型字节证明，也不证明vendor包或实际A0；现有runtime revision来自模型结构握手，shape指纹不能当权重SHA。下一组合根须在加载前锁定模型/adapter/worker/interpreter/vendor字节，加载后再次核验并绑定同一shared owner/generation及aligner/VAD依赖，不能把准备后的文件hash推断为加载时实际字节。
+
+RED：10项新增用例暴露ready无cap、owner/factory无观测；5项正式重放反例暴露冻结cap不符和退出变化仍放行。GREEN：补充不同engine cap与launch默认、0默认、重启缺字段不复用等边界后，7个相关文件 `228 passed in 4.95s`，包含实际fake framed subprocess与合成重放，唯一warning为既有asyncio.iscoroutinefunction弃用。7个Python Ruff、4个source按项目strict配置Mypy通过。没有真实模型、音频、benchmark、服务、下载、安装或UI操作；当前分人selector由另一执行者仅写两份新perf/test文件，无同文件冲突。

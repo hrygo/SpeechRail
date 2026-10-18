@@ -410,6 +410,49 @@ def test_window_attempt_budget_is_independent_of_streaming_factory_configuration
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("cap", [128, 512, True, "128"])
+def test_formal_replay_freezes_observed_window_cap_or_refuses_mismatch(cap):
+    async def scenario():
+        services, factory, _, candidate = setup()
+        factory.window_decode_max_new_tokens = cap
+        if type(cap) is not int or cap != 128:
+            with pytest.raises(ValueError, match="window cap"):
+                await replay_realtime_session(
+                    case(), candidate, services, observe=observe(candidate)
+                )
+            assert not factory.sessions
+        else:
+            result = await replay_realtime_session(
+                case(), candidate, services, observe=observe(candidate)
+            )
+            assert result["quality_evidence_valid"]
+            assert result["diagnostics"]["window_decoder_config_cap"] == 128
+            assert result["diagnostics"]["decode_cap_origin"] == "ready_factory_observation"
+            assert result["runtime_identity_verified"] is False
+
+    asyncio.run(scenario())
+
+
+def test_changed_ready_window_cap_invalidates_replay_evidence():
+    async def scenario():
+        services, factory, _, candidate = setup()
+        factory.window_decode_max_new_tokens = 128
+        calls = 0
+
+        def observer():
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                factory.window_decode_max_new_tokens = 256
+            return RuntimeObservation(candidate.as_dict(), "fake")
+
+        result = await replay_realtime_session(case(), candidate, services, observe=observer)
+        assert "implementation_or_configuration_changed" in result["failures"]
+        assert not result["quality_evidence_valid"]
+
+    asyncio.run(scenario())
+
+
 def test_input_error_is_sanitized_and_all_tasks_joined():
     async def scenario():
         services, factory, _, candidate = setup()

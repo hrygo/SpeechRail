@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.26"
+version: "3.3.27"
 date: 2026-10-18
 ---
 
@@ -209,7 +209,7 @@ PYTHONPATH=src:examples/perf uv run --no-sync python examples/perf/probe_meeting
 
 `RuntimeObservation` 调用前后字段匹配只得到 `execution_identity_matches`，不证明可信来源。没有可信生产评测组合根时保持 `runtime_identity_verified=false/certification_eligible=false/a0_execution=not_observed`；fake 或自报 runtime origin 不升级认证。顺序 feeder 逐包 flush intents，不等价独立 1× 采集/P95 基准；非法、非有限或倒退 clock 拒绝，注入 clock 明示 injected。取消加入 session 关闭，错误输出脱敏，摘要不含原文、PCM 或绝对模型路径。独立 overlap ORC、可信实际 A0、真实错误归因和质量改善仍待后续接线/实测。fake 回归见 `tests/test_probe_meeting_asr_quality.py`。
 
-生产 WindowDecodeResult 可携带内部 WindowDecodeObservation，经 window.result 私有 RPC 保留每次 preview/review 的实际 decode_max_new_tokens、generation_max_new_tokens、finish_reason、truncated 和 generated_token_count。decode budget 是 engine 调用入参；preview generation budget 是扣除复用 prefix 后实际传给生成器的 remaining_tokens，token count 在 header strip / prefix merge 前取实际返回 tokens 长度。review 的内部 generation budget 和 count 无可验证观察，保持 null。finish/truncated 缺失保持 null，拒绝类型强制转换、非法范围、额外字段和错误 kind；缺整个 observation 也保持未知。该内部元数据不进入公共 Realtime 契约，不改变解码策略，也不自动升级实际 A0。回归见 test_asr_window.py、test_qwen3_window.py、test_qwen3_stream_decoder.py。
+ready 帧的窗口 cap 来自 engine 实际动态预算字段，而非重复 CLI 入参；0 的既有默认预算语义报告为512。它只补充内部有效配置观测，不证明模型文件字节、vendor package 来源或实际 A0。类型须为32–2048整数，拒绝 bool、字符串和越界值；未提供保持 null，不强制推断。生产 WindowDecodeResult 可携带内部 WindowDecodeObservation，经 window.result 私有 RPC 保留每次 preview/review 的实际 decode_max_new_tokens、generation_max_new_tokens、finish_reason、truncated 和 generated_token_count。decode budget 是 engine 调用入参；preview generation budget 是扣除复用 prefix 后实际传给生成器的 remaining_tokens，token count 在 header strip / prefix merge 前取实际返回 tokens 长度。review 的内部 generation budget 和 count 无可验证观察，保持 null。finish/truncated 缺失保持 null，拒绝类型强制转换、非法范围、额外字段和错误 kind；缺整个 observation 也保持未知。该内部元数据不进入公共 Realtime 契约，不改变解码策略，也不自动升级实际 A0。回归见 test_asr_window.py、test_qwen3_window.py、test_qwen3_stream_decoder.py。
 
 正文诊断报告使用 schema 2，ASR scorer 身份为 asr-body-v2；旧报告须重新执行，不能沿用旧门。RuntimeObservation 只提供调用前后身份与 origin，移除自报 token_limit_hit 入参。每个实际 decode 都记录匿名 attempt 摘要、preview/review、样本范围、实际预算和可见完成元数据；最多4096次，超额在调用下一个 decoder 前失败。仅全部 attempt 明确 finish_reason=eos、truncated=false 且实际 decode budget 不超过冻结上限时，截断证据门才可通过；缺观测、kind 错配、未知终止状态、任一 preview/review 截断均不能被后续成功 review 掩盖。review 的 generation budget/count 仍可为 null，不推断厂商内部行为。未知 finish reason 只输出 other，不回显厂商字符串。报告包含有界逐次记录与其摘要、观察/缺失/未知计数；compare_asr_runs 重新检查记录、计数、范围和摘要，不只信任 quality_evidence_valid。合成执行可以通过诊断证据门，但不能获得生产身份、质量改善或人数认证。
 
@@ -242,7 +242,7 @@ wire 固定为24kHz PCM16，kernel 为16kHz。为保留锁定 kernel 字节，�
 
 输入由独立生产者和消费者经1–64包有界队列传递，每包至多一秒；throughput 尽快供给，realtime 按累计 wire 样本以1×时钟供给。队列满、协议失败、缺覆盖或超时均失败，不静默丢帧或重试。TaskGroup 加入两个任务后，等待生产 session.close 清理当前有界 decode；取消同样先加入清理再传播，不强取消共享 worker。总输入 deadline 不包含可能仍需等待的当前 decode 清理预算，因此不能把它当绝对墙钟上限。注入时钟明示 injected；该诊断不提供真实采集延迟或P95认证。
 
-只取有界 sealed 正文评分，逐 attempt 记录沿用 schema 2。冻结 max_tokens 是调用方声明上限，实际每次 budget 必须由 observation 证明且不超过该上限；streaming 配置不等于共享 window owner 的有效 cap。缺观测保持未知。replay policy 绑定实现/配置摘要、有效策略、输入模式、包/队列与时限；前后身份字段匹配仍只是调用方声明，runtime_identity_verified/certification_eligible 保持 false，a0_execution 为 not_certified。
+只取有界 sealed 正文评分，逐 attempt 记录沿用 schema 2。实际 Qwen3 engine 通过 ready 私有帧报告 window_decode_max_new_tokens，经 shared owner 严格校验后只在该代 ready 期间暴露给 window factory；关闭、失效或重启清除，缺字段保持未知。formal replay 观察到该值时要求它与冻结 max_tokens 完全一致，并在 replay policy 中绑定、退出时重核；没有观测的 factory 仍只按调用方上限作诊断。每次真实 budget 继续由 observation 证明且不超过冻结上限；streaming 配置不等于共享 window owner 的有效 cap。缺观测保持未知。replay policy 绑定实现/配置摘要、有效策略、输入模式、包/队列与时限；前后身份字段匹配仍只是调用方声明，runtime_identity_verified/certification_eligible 保持 false，a0_execution 为 not_certified。
 
 可将该 callback 交给 `evaluate_locked_asr_case`，贯通共享 development 来源、显式主参考、实际 session、评分与退出后文件核对；会话关闭后修改参考也不能返回 source proof。摘要不含正文、PCM、Base64 或绝对路径。fake 回归见 `tests/test_meeting_realtime_asr_replay.py` 与 `tests/test_meeting_asr_source.py`；实际 A0 生产字节证明、真实质量与延迟仍需独立授权和验收。
 

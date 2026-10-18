@@ -268,6 +268,9 @@ def _source_digests() -> dict[str, str]:
                 "compatibility/openai_realtime.py",
                 "backends/vad.py",
                 "backends/neural_vad.py",
+                "backends/qwen3_shared.py",
+                "backends/qwen3_window.py",
+                "backends/qwen3_worker.py",
                 "realtime/speech_admission.py",
                 "domain/audio_timeline.py",
                 "domain/asr_window.py",
@@ -276,6 +279,13 @@ def _source_digests() -> dict[str, str]:
         },
     }
     return {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in paths.items()}
+
+
+def _observed_window_cap(services: AppServices) -> int | None:
+    cap = getattr(services.window_asr_factory, "window_decode_max_new_tokens", None)
+    if cap is not None and (type(cap) is not int or not 32 <= cap <= 2048):
+        raise ValueError("observed window cap must be an integer in 32–2048")
+    return cap
 
 
 def _configuration(services: AppServices) -> dict[str, object]:
@@ -290,6 +300,7 @@ def _configuration(services: AppServices) -> dict[str, object]:
         # This is configuration only. The shared window owner's actual decoder
         # cap cannot be inferred from its streaming-factory configuration.
         "streaming_config_max_new_tokens_not_window_cap": settings.qwen3_streaming_max_new_tokens,
+        "observed_window_decode_max_new_tokens": _observed_window_cap(services),
     }
 
 
@@ -401,6 +412,11 @@ async def replay_realtime_session(
         raise ValueError("caller must supply an already-ready revision-window runtime")
     before = _callback(observe)
     validate_execution_identity(spec, before.identity)
+    if not services.revision_window_ready:
+        raise ValueError("runtime stopped during identity observation")
+    observed_cap = _observed_window_cap(services)
+    if observed_cap is not None and observed_cap != spec.decoder["max_tokens"]:
+        raise ValueError("frozen decoder differs from observed ready window cap")
     source_digests = _source_digests()
     configuration = _configuration(services)
     slot = _SessionSlot()
@@ -571,8 +587,10 @@ async def replay_realtime_session(
             and effective_policy is not None,
             "effective_vad_admission": effective_policy,
             "configuration_sha256": canonical_digest(configuration),
-            "decode_cap_origin": "frozen_caller_upper_bound_checked_per_attempt",
-            "window_decoder_config_cap": "not_observed",
+            "decode_cap_origin": "ready_factory_observation" if observed_cap is not None
+            else "frozen_caller_upper_bound_checked_per_attempt",
+            "window_decoder_config_cap": observed_cap if observed_cap is not None
+            else "not_observed",
             "cleanup_budget": "joined_production_close_may_wait_current_decode_timeout",
             "wire_mapping": _MAPPING,
             "source_digests": source_digests,

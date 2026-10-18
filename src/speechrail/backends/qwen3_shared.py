@@ -121,6 +121,7 @@ class Qwen3SharedWorker:
         self._window_owner: object | None = None
         self._identity: tuple[str, str] | None = None
         self._runtime_revision: str | None = None
+        self._window_decode_max_new_tokens: int | None = None
         # The gate/scheduler lifetime belongs to the owner across worker restarts.
         self._mode_gate = AsrModeGate()
         self._mode_scheduler = AsrModeScheduler(
@@ -171,6 +172,11 @@ class Qwen3SharedWorker:
         if not self.ready:
             return None
         return self._runtime_revision
+
+    @property
+    def window_decode_max_new_tokens(self) -> int | None:
+        """Window cap observed from this ready generation; absent stays unknown."""
+        return self._window_decode_max_new_tokens if self.ready else None
 
     @property
     def mode_gate(self) -> AsrModeGate:
@@ -267,6 +273,7 @@ class Qwen3SharedWorker:
             self._failure_broadcasted = False
             self._identity = None
             self._runtime_revision = None
+            self._window_decode_max_new_tokens = None
             self._clear_retired_request_ids()
             try:
                 await self._transport.start()
@@ -288,6 +295,11 @@ class Qwen3SharedWorker:
                     or ready.get("compute_config") != self.config.device
                 ):
                     raise RuntimeError("backend_identity_mismatch")
+                window_cap = ready.get("window_decode_max_new_tokens")
+                if window_cap is not None and (
+                    type(window_cap) is not int or not 32 <= window_cap <= 2048
+                ):
+                    raise RuntimeError("backend_identity_mismatch")
             except BaseException:
                 self._ready = False
                 await self._fail_generation(generation, code="worker_start_failed")
@@ -298,6 +310,7 @@ class Qwen3SharedWorker:
             self._ready = True
             self._identity = (self.config.device, self.config.dtype)
             self._runtime_revision = observed_runtime_revision(ready)
+            self._window_decode_max_new_tokens = window_cap
             capabilities = ready.get("capabilities", [])
             self._capabilities = frozenset(capabilities) if isinstance(capabilities, list) and all(
                 isinstance(value, str) for value in capabilities
@@ -407,6 +420,7 @@ class Qwen3SharedWorker:
             self._ready = False
             self._identity = None
             self._runtime_revision = None
+            self._window_decode_max_new_tokens = None
             self._failure_broadcasted = True
             await self._stop_dispatcher()
             if self._failure_task is not None:
@@ -501,6 +515,7 @@ class Qwen3SharedWorker:
         self._ready = False
         self._identity = None
         self._runtime_revision = None
+        self._window_decode_max_new_tokens = None
         if not self._failure_broadcasted:
             self._failure_broadcasted = True
             terminal = dict(frame) if frame is not None else {"type": "error", "code": code}
