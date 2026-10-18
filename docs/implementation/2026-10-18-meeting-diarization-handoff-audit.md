@@ -1444,3 +1444,10 @@ ASR正式文字后至对齐完成中位数29.74→38.57ms，增加8.82ms；段�
 `a0b5981a`首次完整Python CI为5423通过、1跳过、1失败；唯一失败是既有DMG测试的`hdiutil attach`报Resource temporarily unavailable，其他已选择的构建/Swift/质量门成功。保留失败日志，只重跑该workflow的失败任务一次，未放宽测试或自动宣称基础设施问题已排除；重跑结果以远端实际状态为准。
 
 2026-10-19重跑完成：同一`a0b5981a`、workflow 39143213182 attempt 2成功，Python完整测试5424通过、1跳过，wheel及Gate Summary全部成功；独立候选构建/fake workflow也已成功。未修改生产或测试、未放宽DMG断言，首次失败记录保留。
+
+
+## 发布阶段测试等待的机器无关修复
+
+2026-10-19：`48f7cdc6`远端Python、App构建和独立候选fake门通过，Swift package任务在`testAutoPublicationRetriesResumeFailedStepWithoutHumanReview`失败：预期published，实际仍publishing，后续已发布音色断言也失败。该提交只改文档；失败时测试等待函数仅允许200次`Task.yield()`，把调度机会数当作异步完成条件，不能跨runner速度成立。保留workflow 39144161636首次失败日志，没有把它计为质量失败或忽略。
+
+只修改`AppModelTests.swift`的发布阶段等待器：用Observation订阅实际阶段，变更后在MainActor重新观察；到达目标时只完成一次，结束/超时关闭观察，回调弱引用避免遗留持有。10秒仅为防挂看门狗，不用于性能断言；不增加sleep、轮询次数或生产API。相关AppModel类97项测试通过，包含11项定向音色/发布测试。将阶段变更后的重新观察变为停止观察，目标测试因两个阶段均未收到完成通知而失败；恢复原实现后97项通过，说明不会在未观察到实际状态时放行。未运行UI自动化、加载真实模型或改安装/配置，完整CI以修复提交的远端状态为准。
