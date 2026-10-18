@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.18"
+version: "3.3.19"
 date: 2026-10-18
 ---
 
@@ -102,7 +102,7 @@ fake 测试为 `tests/test_meeting_candidate_runner.py`，包含单项队列的�
 
 ### 分人阶段耗时观测
 
-`CoreMLActivitySession` 和 `open_candidate_session` 可接收可选 `PhaseTrace`。默认关闭，不读取时钟；启用后只在 RAM 写入固定标签和数值，不在计算租约内执行 sink、文件 I/O 或回调。runner 在每次 append、finish 及清理后排空事件，sink 失败不能返回成功，精确 child 清理优先完成。
+`CoreMLActivitySession` 和 `open_candidate_session` 可接收可选 `PhaseTrace`。默认关闭，不读取时钟；启用后只在 RAM 写入固定标签和数值，不在计算租约内执行 sink、文件 I/O 或异步制品回调。注入 clock 必须同步且不阻塞，只用于诊断或测试。runner 在每次 append、finish 及清理后排空事件，sink 失败不能返回成功，精确 child 清理优先完成。
 
 `compute_queue` 从请求计算租约到实际准入；`load` 包含真实 worker start/preflight；`infer/finalize` 分别覆盖实际 append/finish 请求；`close` 覆盖加入 start、精确 child 关闭及 owner 释放或隔离确认。它们包含 IPC 与 native 等待，不是 accelerator kernel 时间；取消时区间可能重叠，不得直接求和当总计算耗时。事件包含 operation、through_sample、host monotonic 起止、duration、completed/cancelled/failed 和 clock_source，不含正文、音频、路径或身份。
 
@@ -147,6 +147,18 @@ proof 只声明 `bytes_and_timing_verified=true`，保持 `producer_provenance_v
 `evaluate_development_checkpoint` 消费不可变 `CommonPrefixSchedule` 的 pending request 和固定候选摘要/工厂映射。1–4 人包含 C0，5–8 人不伪造四槽对照；完整预检共同前缀后，串行执行每个存活候选的全部来源组及其同层 fixture，上一 session 回收确认后才构造下一 session。完整配对完成后，按来源组计算产品汇总及对 C0 的 DER/cpCER 配对不退化门，并分别报告 near/far；缺场景明确 `not_observed`。任何部分失败不生成 `checkpoint.json`，也不修改原 schedule；成功时返回下一不可变状态，后续扩样继续遵循共同前缀与不可复活规则。
 
 检查点预检只跨会议保留文件指纹，不持有整个来源池的参考正文；逐场评分后只保留脱敏结果。该执行器验证实际输入与输出覆盖，并连接产品门和调度，仍不证明 activity factory 的真实制品/SDK/运行身份、生产者来源、跨进程排他或联合延迟。`runtime_identity_verified=false/certification_eligible=false/verdict=diagnostic/certified_max_speakers=null` 保持明确；调度的 `passed` 仅表示该共同检查点的评分门通过，不代表唯一候选选型或产品认证。生产组合根须启用并导出阶段观测；联合 ASR 时钟、开发收据签发、跨层选型及评测 CLI 仍需接线。fake 测试为 `tests/test_meeting_development_fixture.py`。
+
+### ASR 正文诊断重放
+
+`probe_meeting_asr_quality` 是 development 诊断库，不提供模型发现、下载、安装态探测或留出执行入口。调用方须先核验外部 manifest/split、来源组和主参考，再构造 `AsrCase`；该对象冻结 SHA-256 身份、16kHz mono PCM16、主参考及重叠顺序，单次输入最多十分钟。它在 RAM 持有这段输入，不能作为生产有界流管线或完整会议采集器。
+
+`replay_production_windows` 连接当前 `AsrWindowCoordinator → WindowAsrSession.decode`，输入只含 PCM 与样本范围。调用方注入当前 VAD/admission、EOF drain 和边界 review adapter；录证器核对实际调用 PCM、attempt/result identity、完整性和封存覆盖。只评分 sealed 正文，不用 preview 替代定稿。延迟 pre-roll 用 retained frontier 表达；未决尾音不当作已确认静音。`replay_long_blocks` 以固定音频网格切分，每块最多 30 秒、context 为空，不使用参考文字或边界形成输入；与生产对照时必须同权重/精度，始终为诊断。
+
+评分身份绑定工具源码、raw/normalized token 化、重叠顺序、编辑路径同分规则与汇总定义；分包、窗口和时限另有 replay policy 摘要。规范化为 NFKC/casefold，CER 保留 Unicode L/N/M；混合 WER 按中文字符和 ASCII 字母数字词分词，raw WER 按空白分词，不冒充独立英文子集验收。插、删、替统计按最短编辑路径，同分依次 diagonal/delete/insert，不能据此证明声学原因。
+
+同一 case 的重复先平均错误数，同源片段再合并分子/分母，最后每个独立来源组等权计算主 CER。≥10% 相对点改善和 candidate−baseline 配对 95% 区间上界<0 使用同一来源组等权估计量；seed/重采样复用冻结 policy。全体 pooled CER 单列，重复和片段不增加独立 N。基线 CER=0、缺无歧义主参考、缺真实 decode、缺帧/重复/超时/截断或未观察 token-limit 均不能通过。关键事实人工复核独立记录，时间戳变化不能计为正文改善。
+
+`RuntimeObservation` 调用前后字段匹配只得到 `execution_identity_matches`，不证明可信来源。没有生产组合根及 token-limit telemetry 接线时保持 `runtime_identity_verified=false/certification_eligible=false/a0_execution=not_observed`；fake 或自报 runtime origin 不升级认证。顺序 feeder 逐包 flush intents，不等价独立 1× 采集/P95 基准；非法、非有限或倒退 clock 拒绝，注入 clock 明示 injected。取消加入 session 关闭，错误输出脱敏，摘要不含原文、PCM 或绝对模型路径。独立 overlap ORC、可信实际 A0、真实错误归因和质量改善仍待后续接线/实测。fake 回归见 `tests/test_probe_meeting_asr_quality.py`。
 
 ### 有声书外置小说语料回归
 

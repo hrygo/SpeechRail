@@ -296,3 +296,25 @@ PYTHONPATH=src:examples/perf uv run --no-sync pytest -o addopts= --no-cov -q \
   tests/test_diarization_phase_trace.py tests/test_meeting_candidate_session.py \
   tests/test_meeting_candidate_runner.py
 ```
+
+
+## T8 ASR 实际 callable 诊断库
+
+2026-10-18：独立执行者仅拥有 `probe_meeting_asr_quality.py` 和对应测试，主线拥有 DIA trace，写入无重叠。接收后主代理复核新文件与实际生产 coordinator/WindowPolicy/admission 路径；图谱对新文件缺索引，关键结论依赖当前源码，未重建索引。
+
+新增库将冻结 PCM/主参考/来源组与 `MeetingCandidateSpec`、调用前后观测字段匹配、实际 `WindowAsrSession.decode` 录证、生产 coordinator 封存正文及独立评分连接。每个诊断 case 最多十分钟 PCM 常驻 RAM，长块按固定音频网格≤30秒且不使用参考边界/文字；有界长块不是生产替代候选。生产重放接调用方 VAD/review adapter，支持 retained frontier/pre-roll/EOF drain；错误、无调用、缺完整覆盖、重复、截断、超时、无主分母和未观察 token-limit 均不放行。关闭通过 join_cleanup，重复取消不能提前丢失回收任务，厂商错误脱敏。
+
+raw/normalized CER/WER 分列与确定性 S/D/I 最短路径统计；ForcedAligner 时间变化不计正文收益，编辑操作不冒充声学归因。关键事实、独立重叠 ORC 和声学归因仍缺观察；混合 WER 不冒充独立英文子集验收。身份绑定工具源码、normalization/overlap、同分路径和汇总口径，运行分包/窗口/时限另有 replay policy 摘要。
+
+Ruling: 接收初稿把 pooled CER 点改善与来源组等权 macro CI 混用。真实候选尚未输出，主线先用反例复现估计量差异，再统一为来源组等权主 CER 点值和同口径配对区间，pooled 单列诊断，并同步设计 §6.6/评分身份。case 内重复平均 errors，同源片段合并分子分母，独立来源各一票；不能以重跑或拆片增大独立 N。保持≥10%点改善、CI上界<0、基线0时relative=null；不降低既定门槛。
+
+Ruling: observation.origin 自报为 runtime_observed 和字段相等，不能证明可信组合根、真实 adapter、token-limit telemetry 或安装态。该库始终 `runtime_identity_verified=false/certification_eligible=false/a0_execution=not_observed`；development_text_gate 不签收据。顺序 feeder 每包 flush intents，不等价独立实时采集/P95 benchmark；fake clock 首次 final≥22秒仅为生产窗口的合成反例。主线另复现非法 NaN/inf/bool clock 被接受后修正，clock 必须有限且单调。
+
+RED：模块缺失、身份/时限/尾部覆盖缺口、取消回收和认证自报误用、S/D/I 缺失；主线的点值/区间口径差异和非法时钟反例均先失败再修复。GREEN：50 项 ASR fake 回归通过；与前述全部相关回归合并 `332 passed in 6.67s`，仅合成 PCM/参考与 fake decoder。随后将来源字段明确命名 source_group_id，避免原始 meeting 与泄漏关联组混淆；最终针对性复验 `50 passed in 0.24s`。ASR source 严格 Mypy、两项 Python Ruff/format 通过；未运行真实音频/模型、性能质量 benchmark、下载、服务、安装、发布或合并。T8 工具可诊断，不代表实际 A0 已冻结或 CER 改善已实现。
+
+```bash
+PYTHONPATH=src:examples/perf uv run --no-sync pytest -o addopts= --no-cov -q \
+  tests/test_probe_meeting_asr_quality.py
+MYPYPATH=src:examples/perf uv run --no-sync mypy --strict --follow-imports=silent \
+  examples/perf/probe_meeting_asr_quality.py
+```
