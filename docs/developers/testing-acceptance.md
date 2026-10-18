@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.13"
+version: "3.3.14"
 date: 2026-10-18
 ---
 
@@ -75,6 +75,16 @@ uv run --no-sync python examples/perf/prepare_meeting_evaluation_manifest.py \
 `meeting_candidate_schedule.CommonPrefixSchedule` 消费已锁定的单个人数层来源顺序、manifest/scorer 摘要和 C1/C2 身份；1–4 人还必须有 C0，5–8 人不虚构四槽 C0 对照。初次请求 6 组，仅在 6/12/18/24 检查。每轮必须提交 C0 及全部存活候选、相同顺序的完整来源前缀和匹配的候选摘要。点值失败永久淘汰，区间证据不足时所有存活候选共同扩样；C0 的绝对门失败不淘汰对照。缺观察停止比较，不丢失败组后继续；到上限或无下一完整前缀时终止，只有在当前共同前缀已通过的候选仍可进入后续选型。
 
 调度状态为不可变快照，恢复时以独立载入的来源/候选锁为基准重放每轮校验，不接受改身份、改变组顺序、复活候选或在终止后追加。`eligible_across_strata` 对所有连续人数层取同一候选的交集，拒绝跨层混用候选/scorer/manifest；pending、缺失或无共同候选不能形成完整人数范围。调度器只处理上游评分结论，不运行模型、不选择 DER 排名、不签收据；实际执行器仍须核实评分报告、来源和运行身份，完成产品延迟及独立留出。对应确定性测试为 `tests/test_meeting_candidate_schedule.py`。
+
+### 会议候选活动与正文证据
+
+`meeting_candidate_evidence.CandidateEvidence` 复用生产 `AttributionLedger` 与显式归属策略，以 session-scoped `S1`–`S8` 标签连接实际活动和 ASR 完成项。输入不包含参考文字、参考 speaker 或参考边界；`CompletedText` 必须带实际已接受音频中的整数样本区间，sequence 连续。
+
+没有词时间证据时，完成项按整个实际 ASR 区间作 utterance 归属；有词证据时逐词归属，拒绝缺文字覆盖、越界、缺时间或把整句重复时间冒充词时间。字符切片保留所有原始空白、标点和正文，不插值时间、不改写文本。歧义 overlap 和已淘汰的历史保留原文并输出 unknown 及原因；未知不强行归给主讲。
+
+活动必须是连续、稳定、不可回改的样本区间。跨 chunk 同 slot 活动合并成连续区间，同时保留 overlap 和 10ms 插话；无 min-turn、bridge、ghost 或 VAD 删除。默认 RAM 历史为 60 秒，待归属文字最多 262,144 字符，ledger 单元最多 4,096 个，活动帧最多 8,192 个，限制进入候选身份。稳定历史按水位压缩，旧完成项不能凭缺失历史恢复身份。
+
+完成必须覆盖全部已接受音频且无未归属单元。中止或不完整 finish 将待处理原文以 unknown 发出，只关闭已实际处理的活动区间，不给未处理尾音补造活动。重复 finish/cleanup 幂等。`SpeakerSpan` 与 `AttributedText` 分别供时间评分与文字评分；完整事件只能进入仓库外原始评测制品，报告和日志不含原文。单独归属机制通过不代表真实模型或生产质量通过；fake 测试为 `tests/test_meeting_candidate_evidence.py`。
 
 ### 有声书外置小说语料回归
 
