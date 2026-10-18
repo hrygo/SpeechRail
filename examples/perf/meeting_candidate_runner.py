@@ -258,7 +258,10 @@ async def run_candidate_stream(
                     max_input_lateness = max(max_input_lateness, elapsed() - endpoint / 16000)
                 evidence.accept(len(packet) // 2)
                 input_finished_at = elapsed()
-                await register(text_replay.ready(evidence.accepted))
+                ready = await join_cleanup(
+                    asyncio.create_task(asyncio.to_thread(text_replay.ready, evidence.accepted))
+                )
+                await register(ready)
                 before = elapsed()
                 await activity.append(start_sample=endpoint - len(packet) // 2, pcm16=packet)
                 appends += 1
@@ -279,7 +282,10 @@ async def run_candidate_stream(
             while consumed_updates < appends:
                 updates_consumed.clear()
                 await updates_consumed.wait()
-            await register(text_replay.finish(evidence.accepted))
+            final_text = await join_cleanup(
+                asyncio.create_task(asyncio.to_thread(text_replay.finish, evidence.accepted))
+            )
+            await register(final_text)
             finish_started_at = elapsed()
             finishing = True
             await activity.finish(through_sample=evidence.accepted)
@@ -306,7 +312,7 @@ async def run_candidate_stream(
             except Exception:
                 cleanup_failed = True
         try:
-            text_replay.close()
+            await join_cleanup(asyncio.create_task(asyncio.to_thread(text_replay.close)))
             close_source = getattr(pcm_source, "aclose", None)
             if close_source is not None:
                 await close_source()

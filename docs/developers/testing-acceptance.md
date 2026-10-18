@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.15"
+version: "3.3.16"
 date: 2026-10-18
 ---
 
@@ -99,6 +99,32 @@ uv run --no-sync python examples/perf/prepare_meeting_evaluation_manifest.py \
 完成摘要的 `complete` 只证明供给/处理覆盖与原文字符保留。运行器自身不认证文件、ASR sidecar 或 runtime 身份，相关 verified 字段均为 false，`certification_eligible=false`、`verdict=diagnostic`、`certified_max_speakers=null`。锁定来源与身份检查、评分/调度接线、开发/留出 CLI、真实双路时钟和收据签发由后续执行器完成。候选 spec 已绑定这套归属配置、ledger 和回放源码，变更须重新生成 spec；预检仍不执行 worker。
 
 fake 测试为 `tests/test_meeting_candidate_runner.py`，包含单项队列的供给/消费、真实 session 类与 fake worker 的 owner 集成、失败隔离、取消、慢 sink、deadline、提前关闭、样本时钟和 WAV 边界。它们不证明模型质量、实际 1× 负载或真实 footprint。
+
+### 固定 ASR sidecar 输入
+
+`meeting_asr_sidecar.open_asr_sidecar` 将来源 manifest 中的 `asr_sidecar` descriptor 接到 `FixedTextReplay`。调用方提供仓库外 artifact root、锁定的 PCM SHA-256 和实际总样本数；descriptor 字段严格为 `path/sha256/producer_identity_sha256/timing_evidence_sha256`。路径相对 root，不接受符号链接或目录逃逸；文件限 256 MiB、每行 65,536 bytes、正文记录最多 100,000 项。文件内容仅用于外部评测，不进入报告或日志。
+
+格式为 UTF-8 JSONL，每行必须以换行结束，不接受重复键。第一行为以下字段构成的 header：
+
+| 字段 | 值或含义 |
+|---|---|
+| `schema_version` | 整数 `1` |
+| `kind` | `fixed_asr_sidecar` |
+| `sample_rate` | 整数 `16000` |
+| `pcm_sha256` | 同一锁定 PCM 文件的摘要 |
+| `producer_identity_sha256` | 与 manifest 相同的冻结 ASR 生产者身份摘要 |
+| `timing_evidence_sha256` | 与 manifest 相同的有序时间证据摘要 |
+| `timing_algorithm` | `sha256_timing_row_digests_v1` |
+
+后续各行严格包含 `sequence/text/start_sample/end_sample/ready_after_sample/finish_only/units`。sequence 从 0 连续；样本位置为整数，`0≤start<end≤ready_after_sample≤total_samples`，单项实际 ASR 区间不超过 30 秒。生产者可用时刻非递减，进入 finish 阶段后不能恢复 append 阶段。允许没有正文行：它表示已观察到空识别，不能当成缺失 sidecar。
+
+`units=[]` 明确按整句归属。有实际词证据时，每项严格包含 `text_start/text_end/start_sample/end_sample`，以原文字符偏移与实际样本时间描述；拒绝词外漏字、越界、空区间和重复整句时间网格。输入不含 speaker、参考边界或参考正文，不接收额外字段。匿名 unit ID 由读取器生成，正文空白与标点原样保留。
+
+`timing_digest` 定义确定性摘要：SHA-256 初始输入为 ASCII 的算法名及一个 NUL byte；随后依序追加每个正文行除 `text` 外全部字段的 canonical JSON SHA-256 原始 32 bytes。canonical JSON 使用 `sort_keys=True/separators=(",", ":")/allow_nan=False`。header 不进入此摘要，避免自引用；整个 JSONL 的文件 SHA-256 另由 descriptor 锁定。摘要绑定时间与字符偏移，不能通过只更新正文文件摘要掩盖时间改变。
+
+读取器先以有界逐行扫描验证全部记录、内容及时间摘要，再从同一个打开的 descriptor 回放；每次读取与 EOF 校验文件身份和修改状态。未读到有效 EOF、部分消费、替换文件或读取中修改都不能取得 proof。正常 context 退出要求完整消费；异常退出关闭文件并保留原异常。打开/预检为同步文件 I/O，执行器应在线程中完成；runner 的 `ready/finish/close` 在线程执行，取消须加入在途读取后再关闭 source。
+
+proof 只声明 `bytes_and_timing_verified=true`，保持 `producer_provenance_verified=false`、`joint_asr_latency_observed=false` 和 `certification_eligible=false`。它验证文件与预登记关联，不证明生产者声明为真、PCM 实际解码身份、当次 ASR 时钟或模型运行身份。CLI、评分/调度与来源真实性验证仍由锁定执行器负责；该库不能解锁留出。fake 回归见 `tests/test_meeting_asr_sidecar.py`。
 
 ### 有声书外置小说语料回归
 

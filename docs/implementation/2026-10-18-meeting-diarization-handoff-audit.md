@@ -233,3 +233,15 @@ PYTHONPATH=src:examples/perf uv run --no-sync pytest -o addopts= --no-cov -q \
 ```
 
 审查中禁用提前关闭 guard 后，尾部 ASR 注册反例按预期失败；恢复源码并重新编译 bytecode 后复验。fake pipeline 测试统一加 2 秒外层时限，避免错误分支等待真实会议用的长 deadline。
+
+## T4/T5 固定 ASR 文件证据接线
+
+2026-10-18：新增 `meeting_asr_sidecar.open_asr_sidecar`，将来源锁中既有 sidecar descriptor 转为 runner 的 `ScheduledText`，不读取参考制品。严格 JSONL header 绑定 PCM、生产者与时间摘要，逐项保留原文、真实区间和词字符偏移；没有词证据则明确整句归属。禁止附带 speaker/参考字段，空识别作为已观察结果保留。
+
+文件先有界完整预检，再从同一打开的 descriptor 回放并核对消费摘要和文件状态；替换、读取中修改、部分消费、重复键、超预算和无效因果/词时间均失败。候选源码身份包含此读取器；固定 sidecar 的生产者 provenance、真实联合延迟与质量认证仍为 false，未添加可以绕过门禁的收据/留出入口。
+
+runner 的 sidecar ready/finish/close 文件操作移至线程，使用 `join_cleanup` 等待在途读取后再关闭。Ruling: 预检 proof 只证明实际字节、时间摘要与声明关联，生产者真实性仍须执行器独立证明；不能把文件自报 producer hash 变成运行证明。代价是本库不能单独签发开发收据，符合 T1 的身份链要求。
+
+RED：sidecar 模块不存在；将 runner ready 暂时恢复为事件循环直接读取后，线程隔离反例按预期失败。GREEN：29 项新合成回归通过，包括磁盘 sidecar 与受监督 runner 集成、关闭前等待取消中的读取、后续坏行在 worker 前被拒、内容及时间摘要、文件替换、部分读取和文件/行/总量预算。恢复源码后，原十个测试文件加新 sidecar 文件共 `242 passed in 5.94s`，Ruff 和三项 source 严格 Mypy 通过。没有真实音频/模型运行、benchmark、运行态、安装或发布动作。公共格式见[测试与验收](../developers/testing-acceptance.md#固定-asr-sidecar-输入)。
+
+远端核实：`5d08af28c4522ad677e78259b9977fb00f616e90` 候选 CI `39088576081` 成功；主 CI `39088576078` 失败。Python、打包与 App 构建成功，Swift package 的 `testAutoPublicationRetriesResumeFailedStepWithoutHumanReview` 在 `AppModelTests.swift:1594/1600` 观察到 publishing 而非 published，且音色名为 nil。该用例不在本批改动范围，失败原因尚未确认；不把此前绿色 SHA 或本地定向回归当作该 SHA 的全量通过。

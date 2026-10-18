@@ -90,6 +90,7 @@ def static_candidate_spec(
             "examples/perf/meeting_candidate_session.py",
             "examples/perf/meeting_candidate_evidence.py",
             "examples/perf/meeting_candidate_runner.py",
+            "examples/perf/meeting_asr_sidecar.py",
             "native/diarization-candidate/Package.swift",
             "native/diarization-candidate/Sources/CandidateFrames/CandidateFrames.swift",
             "native/diarization-candidate/Package.resolved",
