@@ -129,14 +129,16 @@ class RuntimeLifecycle:
         ``unconfigured`` means this runtime was composed without a runner (no
         job spool), so no task can exist. ``inactive`` means a runner exists but
         its task is not running: not started yet, shut down, or exited on its
-        own. ``active`` means the task is alive and polling. This is the only
-        authority for runner liveness; spool readiness alone cannot distinguish
-        an unconfigured deployment from a stopped runner.
+        own. ``active`` means the task is alive and polling. A task with a
+        pending cancellation is already inactive: it will not claim new work
+        even if a blocking processor delays its final unwinding. This is the
+        only authority for runner liveness; spool readiness alone cannot
+        distinguish an unconfigured deployment from a stopped runner.
         """
         if self._runner is None:
             return "unconfigured"
         task = self._runner_task
-        if task is None or task.done():
+        if task is None or task.done() or task.cancelling():
             return "inactive"
         return "active"
 

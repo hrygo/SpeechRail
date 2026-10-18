@@ -363,6 +363,7 @@ def test_jobs_api_health_reports_inactive_before_runner_starts(tmp_path) -> None
     assert response.status_code == 200
     assert response.json()["job_spool_ready"] is True
     assert response.json()["job_runner_state"] == "inactive"
+    client.close()
 
 
 def test_jobs_api_create_stores_and_returns_params(tmp_path) -> None:

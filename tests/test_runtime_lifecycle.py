@@ -299,3 +299,31 @@ def test_runner_state_is_inactive_after_the_runner_task_fails() -> None:
             await life.close()
 
     asyncio.run(run())
+
+
+def test_runner_state_is_inactive_while_cancellation_is_pending() -> None:
+    async def run() -> None:
+        release = asyncio.Event()
+
+        class StubbornRunner:
+            async def run_once(self) -> bool:
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    await release.wait()
+                    raise
+                return False
+
+        life = RuntimeLifecycle(runner=StubbornRunner(), poll_seconds=0.01)
+        await life.start()
+        assert life.runner_state == "active"
+        closing = asyncio.create_task(life.close())
+        await asyncio.sleep(0.05)
+        # Cancellation is already requested: no new work will be claimed even
+        # though the processor has not finished unwinding yet.
+        assert life.runner_state == "inactive"
+        release.set()
+        await closing
+        assert life.runner_state == "inactive"
+
+    asyncio.run(run())
