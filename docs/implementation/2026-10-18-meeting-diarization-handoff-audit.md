@@ -358,3 +358,14 @@ C0 通过原 CoreMLActivitySession 解码，评测子类额外验证连续四槽
 Ruling: C0 protocol 1 原生 preflight 只有 ok，native_preflight_observed 仅记录该握手，不证明 SDK/config/shape/build provenance。static spec 的 SDK/config 是被源文件和固定 revision 绑定的声明，不能升级成原生执行证明；runtime_identity_verified/model_shape_verified/production_certification 继续 false。没有更改生产 worker、默认解码或 public contract。
 
 RED：新模块缺失导致10项反例失败。GREEN：C0 spec/变更拒绝/生产模型字节/阈值边界/尾音/缺帧/非法概率，以及合成 WAV → fake protocol-1 → 实际 fixture/评分/保存摘要的完整接线，与原 probe/执行器共59项通过。严格 Mypy 三个 source 与 Ruff 四个文件通过。未执行真实模型、音频、benchmark、服务、下载、安装、UI、发布或合并。父提交 7ac3892 的主 CI 39091457710、原生 CI 39091457684 均成功；不能作为本节后续提交的全量验证。
+
+
+## T8 逐 attempt 解码观测跨 RPC 传递
+
+2026-10-18：新增内部 WindowDecodeObservation，并贯通生产 Qwen3 engine → window.result → Qwen3WindowSession。字段包括 kind、decode_max_new_tokens、generation_max_new_tokens、finish_reason、truncated、generated_token_count；缺整个观测或缺可选字段均保持未知。consumer 拒绝额外字段、非法类型/范围和 preview/review kind 错配；取消与错误回收继续沿用既有路径。
+
+Ruling: 动态窗口 budget 与生成 budget 分开：decode_max_new_tokens 记录真实 transcribe/Bound decoder 调用入参；preview 扣除复用 prefix 后的 remaining_tokens 才是可观测 generation budget。preview token count 在 header strip/prefix merge 前取 generation.tokens 长度，不能用最终 raw_tokens 长度代替。review 的内部 generation budget/count 未观察，保持 null。finish/truncated 不再隐式 str/bool 转换；缺失保持 null，既有 review EOS/截断拒绝规则不变。未调整预算公式、复用策略或公共 Realtime 契约；评测端逐 attempt 消费、正式 Realtime 组合根与实际 A0 仍待接线/授权实测，不宣称 CER 改善。
+
+子代理独占四个生产 source 及三个相关测试，主线只改 perf/C0 与文档；主代理复核当前 diff 和图谱覆盖，索引 generation 2026-10-17T22:35:42Z 为主 checkout，故关键证据以当前 worktree source 为准，没有重建索引。新增回归先 RED 后 GREEN；子代理 targeted fake 验证111项通过，Ruff七文件和 Mypy四 source通过。未运行真实模型、benchmark、服务或 UI。
+
+主线联合复验：21个相关测试文件共 `490 passed in 7.29s`；11个变更 Python 文件 Ruff 通过；7个 source 按项目 strict 配置执行 Mypy 通过（保留 pyproject.toml 的 warn_unused_ignores=false）。额外强制 --strict 会覆盖该开关，报告六处既有 vendor import 的 unused-ignore；未为消除此命令差异改写依赖策略。CLI --help 与 diff 检查通过。上述证据均为机制/合成回归，不证明真实质量或人数认证。

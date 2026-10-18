@@ -32,6 +32,7 @@ from speechrail.backends.qwen3_stream_decoder import (
 )
 from speechrail.domain.asr_policy import ASRPolicy
 from speechrail.domain.asr_window import (
+    WindowDecodeObservation,
     WindowDecodeRequest,
     WindowDecodeResult,
     WindowIdentity,
@@ -403,7 +404,8 @@ def _handle_window(frame: dict[str, object], output: BinaryIO, engine: WorkerEng
         write_frame(output, {"version": PROTOCOL_VERSION, "type": "window.result",
             "request_id": request_id, **asdict(identity), "attempt_id": result.attempt_id,
             "start_sample": result.input_span.start, "end_sample": result.input_span.end,
-            "text": result.text, "language": result.language, "complete": result.complete})
+            "text": result.text, "language": result.language, "complete": result.complete,
+            "observation": asdict(result.observation) if result.observation is not None else None})
     except Exception:
         # Do not expose vendor errors that may embed text, keywords or paths.
         error: dict[str, object] = {
@@ -1303,6 +1305,11 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
             _require_complete_final(final)
             text = getattr(final, "text", None)
             detected_language = getattr(final, "language", None)
+            observation = WindowDecodeObservation(
+                request.kind, budget,
+                finish_reason=getattr(final, "finish_reason", None),
+                truncated=getattr(final, "truncated", None),
+            )
             complete = True
         else:
             old = getattr(self, "_window_preview", None)
@@ -1323,13 +1330,20 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
                 language, request.context, hashlib.sha256(request.pcm16).digest(), state)
             text = preview.text
             detected_language = preview.language
+            observation = WindowDecodeObservation(
+                request.kind, budget,
+                generation_max_new_tokens=getattr(preview, "generation_max_new_tokens", None),
+                finish_reason=getattr(preview, "finish_reason", None),
+                truncated=getattr(preview, "truncated", None),
+                generated_token_count=getattr(preview, "generated_token_count", None),
+            )
             complete = False
         if not isinstance(text, str) or (
             detected_language is not None and not isinstance(detected_language, str)
         ):
             raise ValueError("invalid vendor window result")
         return WindowDecodeResult(request.identity, request.attempt_id, request.input_span,
-            text.strip(), detected_language, complete)
+            text.strip(), detected_language, complete, observation)
 
     def close_window(self, identity: WindowIdentity) -> None:
         current = getattr(self, "_window_identity", None)
