@@ -1309,3 +1309,20 @@ v2在双人原句级上改善覆盖，但辅助参考的精确率下降；四人
 两次维护均确认无客户端后通过managed CLI停服并恢复；最后唯一listener和LaunchAgent为PID59434，health/readyz200，配置、selection及runtime target未变。Qwen未运行或变更，未下载新模型、触及far/留出。仓库外`sortformer-fifo-revision-diagnostic-20261018`保留固定假设、源码/worker身份、FIFO概率、评分和恢复证明。
 
 后续优先级按预期用户收益、证据强度及完整实施/验收成本排序：优先定位生产会话的错漏词和文字归属损失，以及会阻塞音频接收/定稿的确定性等待；其次采用已证实的资源瓶颈修复；收益不明确的模型、阈值与多候选搜索后置。新诊断必须有单一假设与止损条件，失败即换方向，评测框架完整性不作为前置。
+
+
+## 原生分人结束预算的生产修复
+
+2026-10-18：按ROI优先处理已有结束保护的缺口。共享`DiarizationSession.finish`原先先无限等待`activity.finish`，随后才给事件pump 30秒排空预算；Realtime及HTTP外层已有自身deadline，因此不将此描述成所有调用方都会无限等待。生产修复用同一个内部预算覆盖原生EOF及事件排空，超时按`finalization_timeout`降级，取消并join活动pump；原worker的close/join与资源隔离规则仍生效。没有扩大并发、改模型或引入PCM缓冲队列。
+
+实跑发现原生EOF取消会先关闭活动流，使pump抢先发出`diarization_invalid_output`。追加RED反例后，结束期间的流失败交由finish owner归因：正常收尾中的真实流错误仍按invalid-output降级，取消引发的错误保留timeout。Realtime投影同步保留该既有公共错误码；WebSocket反例先RED后GREEN，冻结正文保持有效。契约和用户手册同步明确结束预算与错误原因。
+
+首次真实窗口保留正常前后与故障基线结果，因取消竞争的断言失败而结束，原服务已恢复；未覆盖原制品。修正后重新冻结源码，在仓库外同一生产v2.1 worker、SDK、模型、阈值、输入与评分器上完成四次运行：正常006的before/after、故障001的before/after。故障在真实原生EOF响应已生成后仅暂扣其交付，不模拟音频或概率。故障组内部预算固定250ms，外部诊断看门狗1秒；这不是生产默认值或机器性能门槛。
+
+正常148秒四人片段的1850帧完整活动输出和质量评分逐项完全相同，覆盖到2368000 samples；finish观察为13.447/13.904ms，不作正常速度提升结论。故障基线耗尽1秒外部看门狗，由观察器取消，未自行返回actor终态；修复版在263.260ms返回degraded，原因为`finalization_timeout`，不依赖外部看门狗。四组原生进程均wait回收、消费者均join；未确认的尾部归属不被封存为已识别speaker。这是EOF卡住时的有界降级收益，不是CER或分人准确率改善。
+
+50ms原生物理footprint观察最大值：正常before/after为269059200/263914600字节（各63/62次有效读取、0缺失），故障为262308944/262423656字节（73/59次读取，基线1次缺失）。采样不完整且未控制系统缓存，不宣称峰值、内存降低或净资源收益；没有运行Qwen或ASR/分人联合会话，不能外推UI延迟。运行前后冻结输入、模型、worker、actor源码与评分器摘要稳定。
+
+验证：6个定向测试文件92项通过、0失败/跳过；四个结束阶段/取消竞争反例及WebSocket公开错误码反例覆盖新行为，首次RED保留。条件反转mutation检出取消竞争，源码逐字节恢复；Ruff及另外6项WebSocket契约/用户文档检查通过。测试使用事件门和受控deadline，不依赖本机推理速度，不加载模型或读取真实语料。完整CI以该提交的远端状态为准。
+
+最后通过managed CLI恢复后唯一listener与LaunchAgent均为PID63138，health/readyz200、3.12.0、quality/quality，配置/selection/runtime target摘要不变。生产源码未部署或安装；运行的是仓库外冻结实现。回退可revert本逻辑提交；两次诊断目录`diarization-native-drain-deadline-20261018`和`diarization-native-drain-deadline-race-fix-20261018`保留原始证据，不进入仓库。原质量目标、独立参考和人数认证仍未完成。

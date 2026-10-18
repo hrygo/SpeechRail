@@ -2,7 +2,7 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.18.0"
+version: "3.18.1"
 date: 2026-10-18
 ---
 
@@ -876,6 +876,8 @@ PCM 样本数，再 clear/close。空/重复提交也返回回执，不重复文
 归属更新始终携带该段 ASR final 冻结的 `utterance_id` 与文本 revision，每个事件只包含该段
 units。结束分人时，服务先发送全部已接纳段的归属修订，再发会话终态；`diarization.done`
 只带最后完成段的快照，较早段的归属由先前 `diarization.updated` 保留。
+结束预算同时覆盖原生收尾与归属事件排空；超时保留 `finalization_timeout` 原因，
+取消时的活动流错误不会覆盖它，已确认的转写文字仍可使用。
 
 `segment` 对齐可将模型时间网格上没有独立时长的 token 合并进相邻有效 segment，完整保留
 正文。Qwen3 的尾部结束点若恰好落在音频边界最近的模型格点，可在适配层以实际 PCM 边界

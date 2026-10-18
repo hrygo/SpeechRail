@@ -734,7 +734,9 @@ class RealtimeAuxiliaryOwner:
         """First-wins transport projection for an actor degradation."""
         reason = (
             exc.code
-            if exc.code in {"diarization_overloaded", "diarization_invalid_output"}
+            if exc.code in {
+                "diarization_overloaded", "diarization_invalid_output", "finalization_timeout"
+            }
             else "diarization_invalid_output"
         )
         self._mark_degraded(reason)

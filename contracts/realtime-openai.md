@@ -1,6 +1,6 @@
 # SpeechRail Realtime ASR/TTS 协议契约
 
-> 契约版本：`6.6.0`；生效日期：2026-10-18。唯一机器 schema 是
+> 契约版本：`6.6.1`；生效日期：2026-10-18。唯一机器 schema 是
 > [`realtime-events.schema.json`](realtime-events.schema.json)，字段责任表是
 > [`realtime-field-matrix.json`](realtime-field-matrix.json)。
 
@@ -278,6 +278,8 @@ diarization 关闭；关闭 alignment 则不保留 PCM，即使 diarization 开�
 帧之前改变。`speechrail.diarization.finish` 必须先等齐已冻结 item 尚在进行的对齐任务，再封存
 归属账本，并等待归属事件消费者发送完封存前的修订，最后发送会话终态。等待超过
 `realtime_diarization_drain_deadline_seconds` 时按 `finalization_timeout` 降级。
+原生 EOF 与活动事件排空受同一内部结束预算约束；任一阶段超时都保留
+`finalization_timeout` 原因，不因取消引发的活动流错误改记为输出异常，已封存 ASR 正文仍有效。
 
 对齐只有 `granularity` 一个会话级旋钮。对齐器精度由 active profile 在进程启动时固定，
 不提供会话级 `precision`：单服务单 worker 的边界不允许按连接重建模型进程。
