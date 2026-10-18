@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.54"
+version: "3.3.55"
 date: 2026-10-18
 ---
 
@@ -241,6 +241,11 @@ ready 帧的窗口 cap 来自 engine 实际动态预算字段，而非重复 CLI
 ### ASR 开发来源与主参考
 
 `meeting_asr_source.load_locked_asr_case` 复用共同会议 development manifest/split/scorer 的来源验证，读取一个 fixture 的 16kHz mono PCM16 WAV，并构造最多十分钟的不可变 `AsrCase`。现有活动参考、分人文字参考及固定 ASR sidecar 仍按共享来源规则核对，但不进入 ASR 请求，也不作为主参考文字。该入口属于共用会议评测，依赖同一 scorer 环境；它不是独立通用音频导入器。
+
+`load_locked_asr_diagnostic_case` 接受只含 diagnostic fixtures 的 schema 2 catalog 与完整 split lock，重建来源祖先、保留分区和制品摘要，再加载所选 PCM。该入口只要求 PCM、活动参考和分人文字参考三项制品，不依赖已有 ASR sidecar；两类参考均校验匿名标签与整数样本时轴，不进入识别请求。它仍要求显式主参考文件绑定 diagnostic manifest 和 PCM，缺少独立主参考时须写 `main_reference: null`，不得从分人文字拼接任意主顺序。development 或 holdout fixtures 混入 catalog 即拒绝，原正式入口仍拒绝 diagnostic manifest。
+
+诊断来源复用同一 `LockedAsrCase` 文件保护和关闭后核验。其 source proof 明确 `source_scope=diagnostic`、`natural_development_eligible=false`；`evaluate_locked_asr_case` 强制返回 `split_role=diagnostic`、`quality_evidence_valid=false`、`certification_eligible=false`、`certified_max_speakers=null`、`asr_quality_improvement_gate=not_observed`，覆盖回调中的相反自报。独立诊断指标可用于定位损失，不计入自然开发改善、人数认证或留出资格。现有 schema 2 正式执行锁仍只调用 development 入口；诊断库入口不绕过端口锁或授权条件，也不自行创建 runtime。
+
 
 调用方另传冻结主参考 descriptor（相对 artifact root 的 `path` 与文件字节 `sha256`）。主参考 JSON 必须恰含：
 

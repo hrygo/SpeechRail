@@ -764,3 +764,15 @@ scope.observe将owner guard置于事件循环，每次读前后和关闭时检�
 外部制品摘要：catalog `4cadb84577c2c32d91d55324c244b4793907753d43ae3c19956fac6aae5663a9`；预登记 `9499a33d87bc986f6d3f69a41245ef63321899c4b84949c8b5d79a05d6b65bcc`。独立复核重新读取全部 WAV、核对制品哈希和 PCM 格式/帧数、校验两类参考区间及匿名标签，并重建 manifests 逐对象比较，通过。准备脚本末尾 summary 的 NumPy int64 序列化失败；保留原部分文件，另用原生整数独立重建 `verification-summary.json`，不把原退出码当完成证据。
 
 结果边界：schema 2 catalog 可验证，不代表正式开发输入就绪；自然 development fixtures 为 0，split lock 为 `insufficient_sources`。头戴麦派生混音只适合诊断，不能填补自然单人、自然近/远场或连续 1–4 人认证。现有正式执行器也明确拒绝 diagnostic 输入，因此下一步需要补足符合计划的自然来源与独立主参考，或先实施边界明确的诊断入口；不能通过改标签、空 sidecar 或放宽校验伪造正式评测。模型占用冲突解除前不启动实跑。本轮没有质量成绩、ABBA、生产认证或运行态变更；9d7cf2fc 的远端八项 CI 均已成功，该 CI 不是模型质量证据。
+
+## ASR 派生诊断来源入口
+
+2026-10-18：增加 `load_locked_asr_diagnostic_case`，从仅含 diagnostic fixtures 的 schema 2 catalog 重建来源/祖先/保留分区和完整 split lock，再核对所选 PCM 及活动、文字参考的匿名样本时轴。该入口不要求既有 ASR sidecar，避免对 ASR 自身诊断形成循环依赖；development 与 holdout 混入即拒绝，原正式加载和 schema 2 执行锁仍只接受 development。两入口共用主参考绑定、PCM 读取及 `LockedAsrCase` 生命周期保护，未修改正式分人 fixture 执行器。
+
+主参考仍须显式冻结；缺独立主参考保留 null，不从分人文字重建主顺序。诊断 source proof 带明确 scope 和自然开发不合格标记。replay 包装层覆盖回调自报的相反结论：split_role=diagnostic、quality_evidence_valid=false、natural_development_eligible=false、certification_eligible=false、certified_max_speakers=null、asr_quality_improvement_gate=not_observed。因此诊断指标不能冒充正式开发改善、人数认证或留出资格。该库未增加自动模型加载、替代端口或服务控制入口。
+
+RED：首批 7 个反例因入口缺失失败；新增非法 candidate 摘要和回调提升质量资格两例分别重现未拒绝/未覆盖，再实施校验。GREEN：7 个相关测试文件 347 passed in 14.95s；两文件 Ruff/格式通过；`MYPYPATH=src` 的定向 strict/follow-imports=silent Mypy 通过。未设 MYPYPATH 的初次检查遇到 installed package 缺 py.typed，不计通过；后续显式使用本工作树 src 完成。图谱对所涉新增路径 freshness=missing，按直接源码核验，没有重建索引。
+
+使用上一节真实派生 PCM，仓库外另存 18 份 main_reference=null 的绑定文件，逐组经新加载器读取并核对身份、PCM、两类参考和退出后文件一致性：18 组、38465280 样本全部通过。输入校验使用明确标注的非模型 sentinel 摘要，没有据此声明 A0/candidate 身份；没有 replay、模型加载或质量评分。最终复核实现摘要为 c190943dfd740a079339e14e71249c74443d8ebc2e376e4bad4b5951272ec7d4。原始参考及路径仅留仓库外，报告不含正文。
+
+本轮推进了派生材料的诊断输入边界；完整诊断执行控制、实际模型字节冻结、自然开发来源与独立主参考仍待补齐。此前实测的服务独占冲突没有被本次代码绕过，未再次尝试模型启动。没有新增 CER、分人质量或人数认证结论。

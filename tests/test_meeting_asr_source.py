@@ -250,9 +250,7 @@ def test_locked_source_drives_formal_session_and_revalidates_after_close(
         data["total_samples"] = len(pcm) // 2
         target.write_text(json.dumps(data))
         artifacts[kind]["sha256"] = hashlib.sha256(target.read_bytes()).hexdigest()
-    _, artifacts["asr_sidecar"] = sidecar_fixture(
-        tmp_path, pcm_sha256=artifacts["pcm"]["sha256"]
-    )
+    _, artifacts["asr_sidecar"] = sidecar_fixture(tmp_path, pcm_sha256=artifacts["pcm"]["sha256"])
     split["development_manifest_sha256"] = canonical_digest(manifest)
     reference.update(
         manifest_sha256=canonical_digest(manifest),
@@ -294,3 +292,165 @@ def test_locked_source_drives_formal_session_and_revalidates_after_close(
         assert result["certification_eligible"] is False
         encoded = json.dumps(result, ensure_ascii=False)
         assert "甲乙" not in encoded and str(tmp_path) not in encoded
+
+
+@pytest.fixture
+def diagnostic_source(tmp_path, source):
+    from prepare_meeting_evaluation_manifest import build_manifests
+
+    manifest, _, reference, descriptor = source
+    fixture = dict(manifest["fixtures"][0])
+    fixture.pop("source_group_id")
+    fixture["split"] = "diagnostic"
+    fixture["sample_kind"] = "derived_mix"
+    fixture["artifacts"] = {k: v for k, v in fixture["artifacts"].items() if k != "asr_sidecar"}
+    catalog = {
+        "schema_version": 2,
+        "independence_level": "meeting-disjoint",
+        "sources": {
+            "M0": {
+                "dataset": "synthetic",
+                "partition": "train",
+                "recording_sha256": "d" * 64,
+                "derived_from": [],
+                "global_speaker_ids": [],
+            }
+        },
+        "fixtures": [fixture],
+    }
+    result = build_manifests(catalog, artifact_root=tmp_path, scorer_policy=policy())
+    reference["manifest_sha256"] = canonical_digest(result["diagnostic"])
+    reference["main_reference"] = None
+    reference["overlap_order"] = "ambiguous"
+    path = tmp_path / "primary.json"
+    path.write_text(json.dumps(reference))
+    descriptor["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return catalog, result, descriptor
+
+
+def load_diagnostic(tmp_path, diagnostic_source):
+    from meeting_asr_source import load_locked_asr_diagnostic_case
+
+    catalog, result, descriptor = diagnostic_source
+    return load_locked_asr_diagnostic_case(
+        catalog,
+        result["split_lock"],
+        artifact_root=tmp_path,
+        scorer_policy=policy(),
+        fixture_id="M0",
+        candidate_sha256="a" * 64,
+        primary_reference=descriptor,
+    )
+
+
+def test_diagnostic_asr_loads_derived_pcm_without_sidecar_or_fabricating_primary(
+    tmp_path,
+    diagnostic_source,
+):
+    locked = load_diagnostic(tmp_path, diagnostic_source)
+    assert locked.case.pcm16 == bytes(320)
+    assert locked.case.main_reference is None
+    assert locked.case.overlap_order == "ambiguous"
+    assert locked.proof()["source_scope"] == "diagnostic"
+    assert locked.proof()["natural_development_eligible"] is False
+    locked.verify()
+
+
+def test_diagnostic_replay_cannot_claim_development_or_certification(tmp_path, diagnostic_source):
+    from meeting_asr_source import evaluate_locked_asr_case
+
+    locked = load_diagnostic(tmp_path, diagnostic_source)
+
+    async def misleading_runner(data):
+        return {
+            **data.identity(),
+            "candidate_sha256": "a" * 64,
+            "split_role": "development",
+            "certification_eligible": True,
+            "certified_max_speakers": 8,
+            "asr_quality_improvement_gate": "pass",
+        }
+
+    report = asyncio.run(evaluate_locked_asr_case(locked, misleading_runner))
+    assert report["split_role"] == "diagnostic"
+    assert report["certification_eligible"] is False
+    assert report["certified_max_speakers"] is None
+    assert report["asr_quality_improvement_gate"] == "not_observed"
+    assert report["natural_development_eligible"] is False
+
+
+@pytest.mark.parametrize("change", ["reserved", "development", "lock", "reference", "timebase"])
+def test_diagnostic_source_scope_and_references_fail_closed(tmp_path, diagnostic_source, change):
+    catalog, result, _ = diagnostic_source
+    if change == "reserved":
+        catalog["sources"]["M0"]["partition"] = "Eval_Ali"
+    elif change == "development":
+        catalog["fixtures"][0]["split"] = "development"
+    elif change == "lock":
+        result["split_lock"]["diagnostic_manifest_sha256"] = "f" * 64
+    else:
+        kind = "text_reference"
+        path = tmp_path / catalog["fixtures"][0]["artifacts"][kind]["path"]
+        value = json.loads(path.read_text())
+        if change == "reference":
+            value["segments"][0]["speaker"] = "real-name"
+        else:
+            value["total_samples"] += 1
+        path.write_text(json.dumps(value))
+        catalog["fixtures"][0]["artifacts"][kind]["sha256"] = hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+        from prepare_meeting_evaluation_manifest import build_manifests
+
+        result.update(build_manifests(catalog, artifact_root=tmp_path, scorer_policy=policy()))
+        primary = tmp_path / "primary.json"
+        reference = json.loads(primary.read_text())
+        reference["manifest_sha256"] = canonical_digest(result["diagnostic"])
+        primary.write_text(json.dumps(reference))
+        diagnostic_source[2]["sha256"] = hashlib.sha256(primary.read_bytes()).hexdigest()
+    with pytest.raises(ValueError):
+        load_diagnostic(tmp_path, diagnostic_source)
+
+
+def test_diagnostic_input_never_enters_existing_development_loader(tmp_path, diagnostic_source):
+    from meeting_asr_source import load_locked_asr_case
+
+    _, result, descriptor = diagnostic_source
+    with pytest.raises(ValueError):
+        load_locked_asr_case(
+            result["diagnostic"],
+            result["split_lock"],
+            artifact_root=tmp_path,
+            scorer_policy=policy(),
+            fixture_id="M0",
+            candidate_sha256="a" * 64,
+            primary_reference=descriptor,
+        )
+
+
+def test_diagnostic_candidate_digest_is_validated(tmp_path, diagnostic_source):
+    from meeting_asr_source import load_locked_asr_diagnostic_case
+
+    catalog, result, descriptor = diagnostic_source
+    with pytest.raises(ValueError):
+        load_locked_asr_diagnostic_case(
+            catalog,
+            result["split_lock"],
+            artifact_root=tmp_path,
+            scorer_policy=policy(),
+            fixture_id="M0",
+            candidate_sha256="private invalid identity",
+            primary_reference=descriptor,
+        )
+
+
+def test_diagnostic_callback_cannot_promote_text_evidence(tmp_path, diagnostic_source):
+    from meeting_asr_source import evaluate_locked_asr_case
+
+    locked = load_diagnostic(tmp_path, diagnostic_source)
+
+    async def runner(data):
+        return {**data.identity(), "candidate_sha256": "a" * 64, "quality_evidence_valid": True}
+
+    result = asyncio.run(evaluate_locked_asr_case(locked, runner))
+    assert result["quality_evidence_valid"] is False
