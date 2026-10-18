@@ -1313,7 +1313,6 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
             if language not in {"", "auto"}:
                 kwargs["language"] = language
             final = self._session.transcribe((waveform, ASR_SAMPLE_RATE), **kwargs)
-            _require_complete_final(final)
             text = getattr(final, "text", None)
             detected_language = getattr(final, "language", None)
             observation = WindowDecodeObservation(
@@ -1321,7 +1320,9 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
                 finish_reason=getattr(final, "finish_reason", None),
                 truncated=getattr(final, "truncated", None),
             )
-            complete = True
+            # Preserve incomplete evidence for the bounded window owner. It may
+            # retry its owned PCM, but must never seal this hypothesis as final.
+            complete = observation.finish_reason == "eos" and observation.truncated is not True
         else:
             old = getattr(self, "_window_preview", None)
             reusable = (

@@ -185,6 +185,28 @@ def test_incomplete_timeout_and_failed_calls_cannot_pass(options, reason):
     assert result["quality_evidence_valid"] is False
 
 
+def test_incomplete_observation_does_not_replace_production_recovery_policy():
+    from probe_meeting_asr_quality import _RecordedSession
+
+    from speechrail.domain.asr_window import WindowDecodeRequest, WindowIdentity
+    from speechrail.domain.audio_timeline import SampleSpan
+
+    async def run_recorded():
+        data = case()
+        decoder = Decoder(complete=False)
+        recorded = _RecordedSession(decoder, data, 30, 128)
+        request = WindowDecodeRequest(
+            WindowIdentity("s", 0, "w"), "attempt", "review", SampleSpan(0, 16000),
+            data.pcm16, None, "",
+        )
+        result = await recorded.decode(request)
+        assert result.complete is False
+        assert recorded.failures == {"incomplete_decode"}
+        assert recorded.calls == 1
+
+    asyncio.run(run_recorded())
+
+
 def test_unobserved_decode_limit_and_caller_report_are_not_certified():
     result = asyncio.run(
         replay_long_blocks(

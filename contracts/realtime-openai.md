@@ -1,6 +1,6 @@
 # SpeechRail Realtime ASR/TTS 协议契约
 
-> 契约版本：`6.6.0`；生效日期：2026-10-17。唯一机器 schema 是
+> 契约版本：`6.6.0`；生效日期：2026-10-18。唯一机器 schema 是
 > [`realtime-events.schema.json`](realtime-events.schema.json)，字段责任表是
 > [`realtime-field-matrix.json`](realtime-field-matrix.json)。
 
@@ -461,6 +461,11 @@ the effective window budgets. The feature is disabled by default.
 | --- | --- | --- | --- | --- | --- | --- |
 | meeting | 20 s | 2 s | 2 s | 24 s | 1500 ms | 15 s |
 | caption | 4 s | 8 s | 2 s | 14 s | 500 ms | 5 s |
+
+An incomplete contextual review may retry exactly the owned PCM once within
+the original finalization deadline. The retry has a fresh attempt identity and
+does not extend the input span or budget. An incomplete owned-only retry, stale
+result, or timeout produces failed coverage; incomplete text is never sealed.
 
 All public spans are half-open 24 kHz samples. Internally each raw 16 kHz sample
 enters a continuous RAM ring once, before speech admission. Pre-roll decisions

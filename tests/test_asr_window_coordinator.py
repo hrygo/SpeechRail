@@ -199,6 +199,93 @@ async def test_review_failure_diagnostic_identifies_decode_without_echoing_backe
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("permanent", [False, True])
+async def test_incomplete_contextual_review_retries_owned_pcm_once(permanent):
+    from dataclasses import replace
+
+    from speechrail.observability.metrics import Metrics
+
+    scopes = []
+    metrics = Metrics()
+
+    async def review(request, result, owned, deadline):
+        scopes.append(request.input_span)
+        assert request.input_span == owned
+        return result.text, "owned_only"
+
+    c, decoder, events, finals = await setup(review=review, metrics=metrics)
+    original = decoder.decode
+    attempts = []
+
+    async def incomplete(request):
+        result = await original(request)
+        if request.kind == "review":
+            attempts.append(request)
+            if permanent or len(attempts) == 1:
+                return replace(result, complete=False, text="不应封存的正文")
+        return result
+
+    decoder.decode = incomplete
+    pcm = b"\x01\x00" * (6 * 16000)
+    try:
+        await c.append(0, pcm)
+        c.admit(SampleSpan(2 * 16000, 4 * 16000))
+        receipt = await c.freeze()
+        assert len(attempts) == 2
+        assert attempts[0].input_span == SampleSpan(0, 6 * 16000)
+        assert attempts[1].input_span == SampleSpan(2 * 16000, 4 * 16000)
+        assert attempts[1].pcm16 == pcm[4 * 16000:8 * 16000]
+        assert attempts[0].attempt_id != attempts[1].attempt_id
+        assert metrics.read_state().counters["speechrail_asr_window_fallbacks_total"] == {
+            (("reason", "contextual_decode_incomplete"),): 1.0,
+        }
+        assert bool(receipt.failed_items_count) is permanent
+        assert len(scopes) == (0 if permanent else 1)
+        assert len(finals) == (0 if permanent else 1)
+        assert "不应封存的正文" not in json.dumps(events, ensure_ascii=False)
+    finally:
+        await c.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure", ["stale", "runtime", "owned_incomplete"])
+async def test_review_recovery_does_not_retry_stale_errors_or_owned_failures(failure):
+    from dataclasses import replace
+
+    async def review(request, result, owned, deadline):
+        pytest.fail("invalid review must not reach boundary alignment")
+
+    c, decoder, _, _ = await setup(review=review)
+    original = decoder.decode
+    attempts = []
+
+    async def invalid(request):
+        result = await original(request)
+        if request.kind != "review":
+            return result
+        attempts.append(request)
+        if failure == "runtime":
+            raise RuntimeError("backend unavailable")
+        return replace(
+            result, complete=False,
+            attempt_id="stale" if failure == "stale" else request.attempt_id,
+        )
+
+    decoder.decode = invalid
+    try:
+        await c.append(0, bytes(6 * 16000 * 2))
+        owned = (
+            SampleSpan(0, 6 * 16000)
+            if failure == "owned_incomplete" else SampleSpan(2 * 16000, 4 * 16000)
+        )
+        c.admit(owned)
+        assert (await c.freeze()).failed_items_count > 0
+        assert len(attempts) == 1
+    finally:
+        await c.close()
+
+
+@pytest.mark.anyio
 async def test_caption_reports_three_sustained_lag_observations_while_decoder_waits():
     now = [0.0]
     c, d, events, _ = await setup(clock=lambda: now[0])

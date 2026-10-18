@@ -289,7 +289,8 @@ class _RecordedSession:
                 self.failures.add("decode_budget_exceeds_frozen_limit")
         if request.kind == "review" and not result.complete:
             self.failures.add("incomplete_decode")
-            raise ValueError("ASR review is incomplete")
+            # Observe without replacing production recovery policy. The report
+            # remains invalid even when the coordinator recovers this attempt.
         return result
 
     def decode_evidence(self) -> dict[str, Any]:

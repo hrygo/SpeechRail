@@ -409,6 +409,21 @@ def test_engine_window_preserves_preview_generation_observations_and_missing_rev
     assert review.observation.truncated is None
 
 
+@pytest.mark.parametrize(
+    "reason,truncated",
+    [("repetition", False), ("length", True), ("mixed", False), ("eos", True), (None, False)],
+)
+def test_window_incomplete_review_preserves_evidence_without_claiming_completion(reason, truncated):
+    e, _, _ = engine()
+    e._session = SimpleNamespace(transcribe=lambda *a, **k: SimpleNamespace(
+        text="不应封存的正文", language="zh", finish_reason=reason, truncated=truncated,
+    ))
+    result = e.decode_window(make_request())
+    assert result.complete is False
+    assert result.observation.finish_reason == reason
+    assert result.observation.truncated is truncated
+
+
 def test_window_ipc_and_session_preserve_decode_observation():
     frames = serve_window_frames()
     observation = frames[1]["observation"]

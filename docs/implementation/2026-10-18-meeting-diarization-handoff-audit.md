@@ -1154,3 +1154,24 @@ fast32 在辅助参考下 recall/precision/最低逐人 recall 从 92.16371%／9
 三个arm的观察状态均为complete_metadata：注册owner全部被观测、没有未知子进程或读取失败，注册句柄关闭、cleanup后进程树仅剩runner；独立runtime proof确认owned children回收、关闭及回放后文件稳定。三组均无token-limit命中，缺独立主参考仍是唯一预期失败。仍保留 loaded-bytes/import、原子采样与真实峰值认证缺口，0.25秒采样会漏掉更短的峰值；不把观察最大和改称硬性峰值。存储和Metal缓存未重置，阶段名cold_start不代表严格冷启动；没有warm-N、ABBA、跨硬件或长期会话结论。
 
 缓存配置链与相关对齐/窗口定向回归132项通过、1项跳过，Ruff通过；断言参数传递、单位换算、调用顺序与失败行为，不包含真实模型、本机内存或耗时阈值。三个窗口均使用managed CLI检查无活动请求/客户端后停服并恢复；最后恢复唯一listener PID38275，health/readyz200、3.12.0、quality/quality，配置、selection及runtime target未变。新修复尚未安装，回退可revert对应逻辑commit，现有用户数据与安装态不受影响。新联合模型下载仍待单独确认。
+
+
+## 四人开发片段的不完整复核恢复
+
+2026-10-18：将资源对照扩展到既有 diagnostic-006、148秒/2368000样本、四人开发来源。基线在两个24秒上下文review失败，保护门中止第二arm并恢复服务，没有将失败运行算作有效资源对照。仅增加结构化失败记录后复跑，103次decode中有两次review没有返回观察证据；输入3552000个24kHz样本全部消费、丢失为0，但终态包含失败。输入覆盖完整不代表正文完整。
+
+随后只在已失败的两个固定区间作原参数诊断。66.704–90.704秒的上下文解码明确返回`repetition`、`truncated=false`；对应68.704–88.704秒拥有区间返回完整EOS。另一个上下文区间单独运行可正常EOS，其88.704–108.704秒拥有区间也正常EOS。没有支持“168-token动态预算截断”的证据，因此没有运行提至512-token的变体，也没有修改预算或接受repetition正文。单独诊断与整片时序不等价，保留后者的实际两次失败事实。
+
+生产修复复用现有窗口结果、PCM pin和截止时间：worker保留不完整review的观察证据并返回`complete=false`；协调器先核对结果身份，再仅对拥有PCM重试一次，使用新的attempt ID，不扩展输入或截止时间。重试仍不完整、身份不符、运行错误或超时均按原失败终态收尾；异常假设不能封存。正常上下文复核仍可使用已有对齐裁取及至多一次owned-only回退，两种回退不会在同一初始不完整路径叠加。batch完整段仍保留原严格完整性检查，公共事件字段和默认开关不变。
+
+评测观察器不再通过额外抛错阻断生产恢复；它仍记录`incomplete_decode`并使质量报告无效，不把恢复后的终态包装为所有解码均成功。先确认5项新反例在旧实现失败，再实施；另将恢复条件反转，两个关键回归均失败并逐字恢复源码。确定性测试覆盖精确PCM裁取、唯一重试、新attempt、持续不完整、过期身份、运行错误、原本已是owned-only的失败及非EOS/截断证据；没有本机速度、内存或语料依赖。恢复原因使用有限的`contextual_decode_incomplete`指标标签。
+
+冻结生产候选后，同一148秒1×整片实跑104次decode，其中90次preview、14次review；两次不完整上下文结果都被对应20秒拥有区间的EOS重试恢复。相比诊断基线的91次preview、12次review，总decode净增1次，不能将调度变动当作固定成本。整片43个封存事务、0个失败项，9个正文单元；正文从674字变为938字。两个被恢复拥有区间合计40秒输入，不等于40 speaker-seconds，也不证明新增文字全对。片内拥有区间结束至封存中位数2.93875秒、nearest-rank P95 3.35656秒；基线正文覆盖不同，不据此宣称延迟改善。
+
+该片包含重叠发言，没有独立有序主参考，CER保持未观测。报告继续保留`incomplete_decode`、`decode_limit_not_observed`及`main_reference_not_observed`失败；完整终态恢复不是CER或分人认证通过。整片候选同时包含此前缓存配置修复，不对内存或时延作单变量归因。运行后控制内容与冻结文件稳定，owned children已回收，进程观察为complete_metadata、读取失败和未知子进程为0、cleanup后仅剩runner；loaded-model/import及真实峰值认证缺口保持不变。
+
+维护中另发现一次health/readyz正常但LaunchAgent身份与listener不一致，后续运行在停服前保护性中止。已核对无客户端及精确managed进程，通过现有controller完成一次停止/启动恢复，配置、selection、runtime target未改；后续恢复增加LaunchAgent PID与唯一listener一致性的独立核验。没有安装候选、变更档位、下载模型或触及留出，原始正文与运行制品仅保存仓库外。
+
+随后以同一冻结候选重跑原diagnostic-001、123.41秒：95次decode、1974560样本覆盖、完整正文逐字与缓存修复基线相同，派生诊断仍30/515错、5.82524%，未触发不完整恢复，唯一预期失败仍是缺主参考。独立runtime proof确认子进程回收及文件稳定；资源读取完整、cleanup后仅剩runner。两个实跑快照后的生产改动仅为补齐有限指标原因标签，不改变解码或恢复路径，已用fake回归核验。相关八个确定性测试文件323项通过，Ruff、条件反转检出和diff检查通过；不将这些验证扩展为独立质量验收。
+
+最后通过managed CLI恢复唯一listener PID44981，额外核对LaunchAgent PID也为44981，health/readyz200、3.12.0、quality/quality，配置、selection及runtime target与窗口前摘要相同。`06bf1325`的八项GitHub CI已全部通过；本次修复的远端CI以对应提交后结果为准。

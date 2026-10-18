@@ -612,6 +612,7 @@ class Metrics:
 
     def record_asr_window_fallback(self, reason: str) -> None:
         if reason not in {
+            "contextual_decode_incomplete",
             "word_alignment_unavailable",
             "alignment_text_coverage",
             "alignment_timestamp_grid",

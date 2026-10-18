@@ -492,6 +492,26 @@ class AsrWindowCoordinator:
                         result.identity != request.identity
                         or result.attempt_id != request.attempt_id
                         or result.input_span != span
+                    ):
+                        raise ValueError("review returned stale evidence")
+                    if not result.complete and self._review is not None and span != owned:
+                        # One fresh attempt on exactly the owned samples, under
+                        # the same deadline and pin. A failed retry is terminal.
+                        if self._metrics is not None:
+                            self._metrics.record_asr_window_fallback("contextual_decode_incomplete")
+                        begin = (owned.start - span.start) * 2
+                        request = replace(
+                            request,
+                            attempt_id="attempt_" + uuid4().hex,
+                            input_span=owned,
+                            pcm16=pin.pcm16[begin : begin + owned.length * 2],
+                        )
+                        span = owned
+                        result = await self.decoder.decode(request)
+                    if (
+                        result.identity != request.identity
+                        or result.attempt_id != request.attempt_id
+                        or result.input_span != span
                         or not result.complete
                     ):
                         raise ValueError("review returned incomplete or stale evidence")

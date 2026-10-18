@@ -3,7 +3,7 @@ title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
 version: "3.18.0"
-date: 2026-10-17
+date: 2026-10-18
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -27,6 +27,8 @@ date: 2026-10-17
 完整事件、容量与采样率规则见[Realtime 窗口契约](../../contracts/realtime-openai.md#revision-window-transcription)。
 字幕快照的 `falling_behind` 表示已接收语音连续落后，客户端应提示正在追赶。
 块尾预览不等待后续上下文复核；正式文字仍按封存与保存屏障确认。
+上下文复核没有完整结束时，服务可在原截止时间内仅对拥有区间重识别一次；
+仍不完整、结果身份不符或超时则按失败收尾，不把异常假设作为正式正文。
 
 分人以 `session.speechrail.diarization.backend` 单独选择。省略为既有 `sortformer`；
 `meeting_dynamic` 只有本地制品、对齐和独立质量认证均就绪时可用。
