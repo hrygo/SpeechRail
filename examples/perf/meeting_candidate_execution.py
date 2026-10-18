@@ -12,7 +12,8 @@ import fcntl
 import json
 import os
 import stat
-from collections.abc import AsyncIterator, Mapping
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ from meeting_candidate_session import (
 )
 from meeting_development_fixture import evaluate_development_fixture
 from meeting_evaluation_identity import MeetingCandidateSpec, candidate_digest
+from meeting_pcm_feed import PcmChunk
 
 from speechrail.backends.diarization.coreml import CoreMLActivitySession
 from speechrail.domain.diarization.ports import ActivitySession
@@ -202,7 +204,66 @@ class NativeCandidateRun:
         governor: ResourceGovernor,
     ) -> None:
         self.artifacts, self.port, self.governor = artifacts, port, governor
+        self._governor = governor
+        self._shared_active = False
         self.transport: CandidateWorkerProcess | C0WorkerProcess | None = None
+
+    async def evaluate_shared_pcm(
+        self,
+        pcm: bytes,
+        frames: AsyncIterator[PcmChunk],
+        *,
+        governor: ResourceGovernor,
+        sink: Callable[[Mapping[str, Any]], Awaitable[None]],
+        timeout_seconds: float = 1800,
+        sink_timeout_seconds: float = 5,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> dict[str, Any]:
+        """Use this native owner's lane, inherited guard and checked artifacts.
+
+        No text sidecar, model discovery or joint runtime certification. The
+        caller owns the outer common-feed scope and any separate ASR runtime.
+        """
+        from meeting_activity_workload import run_shared_activity_stream
+
+        delegated = claimed = False
+
+        def check_owner() -> None:
+            if self.governor is not self._governor or governor is not self._governor:
+                raise ValueError("shared activity governor differs from native owner")
+
+        def construct() -> ActivitySession:
+            check_owner()
+            self.artifacts.verify_stamps()
+            return self.activity_factory()
+
+        try:
+            check_owner()
+            if self._shared_active or governor.diarization_owner.occupied:
+                raise ValueError("native shared activity owner is busy")
+            self._shared_active = claimed = True
+            _ = self.port.descriptor
+            await join_cleanup(asyncio.create_task(asyncio.to_thread(self.artifacts.verify)))
+            check_owner()
+            delegated = True
+            result = await run_shared_activity_stream(
+                pcm, frames, activity_factory=construct, epoch="session", sink=sink,
+                timeout_seconds=timeout_seconds, sink_timeout_seconds=sink_timeout_seconds,
+                clock=clock,
+            )
+            check_owner()
+            observation = await self.verify()
+            check_owner()
+            return {**result, "candidate_execution": dict(observation)}
+        finally:
+            if claimed:
+                self._shared_active = False
+            if not delegated:
+                close = getattr(frames, "aclose", None)
+                if close is not None:
+                    await join_cleanup(
+                        asyncio.create_task(close(), name="native-activity-source-close")
+                    )
 
     def activity_factory(self) -> ActivitySession:
         spec, artifacts = self.artifacts.spec, self.artifacts

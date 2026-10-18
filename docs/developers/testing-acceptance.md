@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.39"
+version: "3.3.40"
 date: 2026-10-18
 ---
 
@@ -269,7 +269,7 @@ wire 固定为24kHz PCM16，kernel 为16kHz。为保留锁定 kernel 字节，�
 
 `input_mode=shared_pcm` 必须同时提供外部 `pcm_frames`，其他mode拒绝该参数。共享输入不重新计时或读取旧sidecar：逐包核对PcmChunk的整数序列、连续样本区间、原case PCM字节、有限且一致的源时钟元数据；EOF必须覆盖全case。逆嵌入跨包保留至多一个奇数kernel样本，最后再flush，不能逐包独立丢失配对状态。一个源包拆成多个wire包时，内部队列满先给ready消费者一次调度机会，仍满则失败，不等待queue.put容量、不移动共同源时钟。源自取消转为失败，取消并加入另一条重放任务；外部取消仍等待session与源迭代器清理。
 
-共享源的 `diagnostics.input_clock=external_shared_source_unverified`：帧中的时间是调用方元数据，必须结合共同供给报告才能区分真实monotonic和注入clock，不能因未注入本函数clock而冒称真实时钟。`diagnostics.shared_pcm` 只记录已核对的帧数/样本数；共享输入未增加正文、活动稳定发布、footprint或P95证明。该库入口不自动提供联合评测CLI或可信收据，wire逆嵌入仍非真实24k采集。
+共享源的 `diagnostics.input_clock=external_shared_source_unverified`：帧中的时间是调用方元数据，必须结合共同供给报告才能区分真实monotonic和注入clock，不能因未注入本函数clock而冒称真实时钟。`diagnostics.shared_pcm` 只记录已核对的帧数/样本数；ASR重放自身不提供分人活动发布、footprint或P95证明。该库入口不自动提供联合评测CLI或可信收据，wire逆嵌入仍非真实24k采集。
 
 只取有界 sealed 正文评分，逐 attempt 记录沿用 schema 2。实际 Qwen3 engine 通过 ready 私有帧报告 window_decode_max_new_tokens，经 shared owner 严格校验后只在该代 ready 期间暴露给 window factory；关闭、失效或重启清除，缺字段保持未知。formal replay 观察到该值时要求它与冻结 max_tokens 完全一致，并在 replay policy 中绑定、退出时重核；没有观测的 factory 仍只按调用方上限作诊断。每次真实 budget 继续由 observation 证明且不超过冻结上限；streaming 配置不等于共享 window owner 的有效 cap。缺观测保持未知。replay policy 绑定实现/配置摘要、有效策略、输入模式、包/队列与时限；前后身份字段匹配仍只是调用方声明，runtime_identity_verified/certification_eligible 保持 false，a0_execution 为 not_certified。
 
@@ -348,6 +348,14 @@ schema 1 comparison lock 恰含 `schema_version/cases/scorer_policy/baseline/can
 `max_lateness_seconds` 必须显式事前提供，有限正数且不超过1秒；这是供给调度预算，不是稳定标签或finish产品门。提前供给、迟到超预算、倒退/非法时钟、任一路队列满或未读至结束都使整体失败；不丢包、不因反压移动供给原点、不按结果放宽预算。失败、超时、自取消与外部重复取消加入供给、消费与源摘要线程，结束后关闭迭代器并释放源/排队引用，不能在作用域外继续读取。
 
 `pcm_feed` 记录源/策略摘要、样本与包数、宿主供给原点/末包计划与实际时刻、最大迟到、各路交付样本数/队列峰值及排队时长。默认monotonic与注入clock/sleep明确区分并进入策略摘要；注入时钟只能作为合成证据。共同源交付不证明模型实际接受/消费了全部样本，更不证明麦克风采集、活动稳定发布或真实计算交叠。model_acceptance_verified、microphone_capture_verified和外层runtime/certification/joint_latency/compute_overlap标记保持false；quality/footprint/p95仍未观察。生产适配器与真实阶段观测就绪前不签共存收据。确定性回归见 `tests/test_meeting_pcm_feed.py`。
+
+`meeting_activity_workload.run_shared_activity_stream` 接收同一原始PCM与外部frames，使用与正式ASR重放相同的 `PcmSequenceVerifier` 检查实际字节、连续样本、包序列和源时钟元数据，EOF必须完整覆盖来源。它委托候选runner消费活动，不二次计时，不构造Governor或模型。返回 `input_mode=shared_pcm`、`input_clock=external_shared_source_unverified` 与已核对帧/样本计数；结束、失败或取消后关闭外部迭代器。
+
+候选runner的 `text_replay=None` 明确表示仅观察活动：`asr_text_source=not_observed`、`asr_text_sha256=null`、`clock_scope=diarization_activity_only`，不能用空sidecar冒充本次ASR正文。固定sidecar模式仍单独报告 `fixed_sidecar`。每个通过因果覆盖校验的稳定活动帧向外部sink发布 `stable_activity_frame`，包含样本区间、session-scoped匿名slot、step及接收时的 `observed_at_seconds`；sink实际交付时刻仍为 `elapsed_seconds`。评分用的闭合speaker区间可持续到finish，不能以它的关闭时刻替代稳定帧观测。两个时刻均相对runner宿主起点；需要结合共同源时钟与最终产品发布路径才可计算联合延迟，不能直接生成稳定标签P95。活动消费者自取消使执行失败并取消输入；外部重复取消等待活动回收、来源关闭及制品复核结束。
+
+`NativeCandidateRun.evaluate_shared_pcm` 是原生候选的显式库入口。传入Governor必须与创建owner时捕获的对象一致，并在构造session前及执行/制品复核后检查；同一handle的并行共享执行和已占用分人owner被拒绝。它复用既有session、端口继承、native preflight及制品检查，并在精确child回收后返回候选执行观察。原始输入、sink和共同供给作用域仍由调用方明确提供，没有新增自动执行CLI。C0与候选adapter源码闭包包含共享活动与PCM校验模块；闭包变化要求重新冻结spec和重新执行，不能沿用旧结果。Governor对象一致不证明资源预算、加载字节或最终ASR/分人联合身份。
+
+上述活动适配仍未接收live ASR正文，未验证产品稳定标签发布、footprint、ABBA或真实质量。runtime/certification/joint latency标记保持false，人数认证与P95保持未观察。相关fake回归见 `tests/test_meeting_candidate_runner.py` 与 `tests/test_meeting_candidate_execution.py`。
 
 ### 有声书外置小说语料回归
 

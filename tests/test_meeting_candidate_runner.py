@@ -518,3 +518,255 @@ def test_wav_reader_rejects_non_regular_inputs_before_open(tmp_path):
             _ = [packet async for packet in iter_wav_pcm(tmp_path)]
 
     asyncio.run(run())
+
+
+def test_activity_only_has_no_observed_asr_body():
+    async def run():
+        activity, output = Activity(), []
+
+        async def sink(event):
+            output.append(event)
+
+        result = await bounded_run(
+            pcm(3), activity_factory=lambda: activity, text_replay=None,
+            epoch="session", sink=sink,
+        )
+        assert result["complete"] is True
+        assert result["accepted_samples"] == result["processed_samples"] == 480
+        assert result["clock_scope"] == "diarization_activity_only"
+        assert result["asr_text_sha256"] is None
+        assert result["asr_text_source"] == "not_observed"
+        assert result["joint_asr_latency_observed"] is False
+        assert not any(e["kind"] in {"text", "asr_text_ready"} for e in output)
+        assert len([e for e in output if e["kind"] == "activity_watermark"]) == 3
+        frames = [e for e in output if e["kind"] == "stable_activity_frame"]
+        assert [(e["start_sample"], e["end_sample"]) for e in frames] == [
+            (0, 160), (160, 320), (320, 480),
+        ]
+        assert all(e["active_slots"] == [0] for e in frames)
+        assert all(0 <= e["observed_at_seconds"] <= e["elapsed_seconds"] for e in frames)
+        # One continuous speaker run only closes at finish; those final spans
+        # must not erase the earlier stable-frame observation times.
+        assert len([e for e in output if e["kind"] == "activity"]) == 1
+        assert activity.cancels == 1
+
+    asyncio.run(run())
+
+
+def test_common_feed_runs_activity_adapter_with_original_governor_and_tail():
+    import hashlib
+
+    from bench_asr_diarization_overlap import run_pcm_workload_schedule
+    from meeting_activity_workload import run_shared_activity_stream
+
+    from speechrail.domain.resource_limits import GovernorLimits
+    from speechrail.runtime.resource_governor import ResourceGovernor, WorkClass
+
+    async def run():
+        shared = ResourceGovernor(GovernorLimits(3, 1, 4), allow_heavy_overlap=False)
+        activity, reports, output = Activity(), [], []
+        original = b"\x01\x00" * 481
+
+        class GovernedActivity(Activity):
+            async def append(self, *, start_sample, pcm16):
+                async with shared.reserve(WorkClass.DIARIZATION):
+                    await super().append(start_sample=start_sample, pcm16=pcm16)
+
+        activity = GovernedActivity()
+
+        async def sink(event):
+            output.append(event)
+
+        async def workload(received, frames):
+            assert received is shared
+            report = await run_shared_activity_stream(
+                original, frames, activity_factory=lambda: activity,
+                epoch="session", sink=sink,
+            )
+            reports.append(report)
+            return report
+
+        result = await asyncio.wait_for(run_pcm_workload_schedule(
+            pcm=original, expected_pcm_sha256=hashlib.sha256(original).hexdigest(),
+            mode="diarization-only", governor=shared, diarization=workload,
+            chunk_samples=160, max_lateness_seconds=1,
+        ), 2)
+        assert result["schedule_completed"] is True
+        assert result["certification_eligible"] is False
+        assert reports[0]["processed_samples"] == 481
+        assert reports[0]["shared_pcm"] == {"frames_verified": 4, "samples_verified": 481}
+        assert activity.cancels == 1
+        assert not shared.diarization_owner.occupied
+        watermarks = [e for e in output if e["kind"] == "activity_watermark"]
+        assert [e["stable_samples"] for e in watermarks] == [160, 320, 480, 481]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("bad", [None, "bytes", "sequence", "short", "origin", "clock"])
+def test_shared_activity_verifies_actual_source_and_joins_cleanup(bad):
+    from dataclasses import replace
+
+    from meeting_activity_workload import run_shared_activity_stream
+    from meeting_pcm_feed import PcmChunk
+
+    async def run():
+        activity, output, closed = Activity(), [], []
+        original = b"\x01\x00" * 7
+        chunks = [
+            PcmChunk(0, 0, 3, 10 + 3 / 16000, 10 + 3 / 16000, original[:6]),
+            PcmChunk(1, 3, 7, 10 + 7 / 16000, 10 + 7 / 16000, original[6:]),
+        ]
+        if bad == "bytes":
+            chunks[1] = replace(chunks[1], pcm=bytes(8))
+        elif bad == "sequence":
+            chunks[1] = replace(chunks[1], sequence=2)
+        elif bad == "short":
+            chunks.pop()
+        elif bad == "origin":
+            chunks[1] = replace(chunks[1], target_at=11., offered_at=11.)
+        elif bad == "clock":
+            chunks[1] = replace(chunks[1], offered_at=True)
+
+        async def frames():
+            try:
+                for chunk in chunks:
+                    yield chunk
+            finally:
+                closed.append(True)
+
+        async def sink(event):
+            output.append(event)
+
+        call = run_shared_activity_stream(
+            original, frames(), activity_factory=lambda: activity,
+            epoch="session", sink=sink,
+        )
+        if bad is not None:
+            with pytest.raises(RuntimeError, match="candidate_run_failed"):
+                await asyncio.wait_for(call, 2)
+        else:
+            result = await asyncio.wait_for(call, 2)
+            assert result["accepted_samples"] == result["processed_samples"] == 7
+            assert result["input_mode"] == "shared_pcm"
+            assert result["input_clock"] == "external_shared_source_unverified"
+            assert result["shared_pcm"] == {"frames_verified": 2, "samples_verified": 7}
+            assert result["asr_text_source"] == "not_observed"
+            assert result["certification_eligible"] is False
+        assert activity.cancels == 1
+        assert closed == [True]
+        assert not any(e["kind"] == "text" for e in output)
+
+    asyncio.run(run())
+
+
+def test_shared_activity_closes_source_when_startup_rejects_clock():
+    from meeting_activity_workload import run_shared_activity_stream
+
+    class Source:
+        closed = reads = 0
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            self.reads += 1
+            raise AssertionError("invalid startup must not read the source")
+
+        async def aclose(self):
+            self.closed += 1
+
+    async def run():
+        source = Source()
+
+        async def sink(event):
+            raise AssertionError("invalid startup must not emit")
+
+        with pytest.raises(ValueError, match="clock"):
+            await run_shared_activity_stream(
+                bytes(2), source, activity_factory=Activity, epoch="session", sink=sink,
+                clock=lambda: True,
+            )
+        assert source.closed == 1 and source.reads == 0
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("self_cancel", [False, True])
+def test_activity_pump_self_cancel_fails_without_waiting_for_input_deadline(self_cancel):
+    class CancelledActivity(Activity):
+        async def updates(self):
+            if self_cancel:
+                asyncio.current_task().cancel()
+                await asyncio.sleep(0)
+            raise asyncio.CancelledError
+            yield  # Async generator, even when no update is produced.
+
+    async def run():
+        activity, source_closed = CancelledActivity(), []
+
+        async def source():
+            try:
+                yield bytes(2)
+                await asyncio.Event().wait()
+            finally:
+                source_closed.append(True)
+
+        async def sink(event):
+            pass
+
+        with pytest.raises(RuntimeError, match="candidate_run_failed"):
+            await asyncio.wait_for(
+                run_candidate_stream(
+                    source(), activity_factory=lambda: activity, text_replay=None,
+                    epoch="session", sink=sink,
+                ), .2,
+            )
+        assert source_closed == [True] and activity.cancels == 1
+
+    asyncio.run(run())
+
+
+def test_repeated_cancellation_joins_activity_reaping_and_source_close():
+    async def run():
+        consuming, reaping, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        closed = []
+
+        class SlowActivity(Activity):
+            async def cancel(self):
+                self.cancels += 1
+                reaping.set()
+                await release.wait()
+
+        activity = SlowActivity()
+
+        async def source():
+            try:
+                yield bytes(320)
+                consuming.set()
+                await asyncio.Event().wait()
+            finally:
+                closed.append(True)
+
+        async def sink(event):
+            pass
+
+        task = asyncio.create_task(run_candidate_stream(
+            source(), activity_factory=lambda: activity, text_replay=None,
+            epoch="session", sink=sink,
+        ))
+        try:
+            await asyncio.wait_for(consuming.wait(), 1)
+            task.cancel()
+            await asyncio.wait_for(reaping.wait(), 1)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+        finally:
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert closed == [True] and activity.cancels == 1
+        assert not [t for t in asyncio.all_tasks() if t.get_name().startswith("candidate-activity")]
+
+    asyncio.run(run())

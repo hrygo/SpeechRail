@@ -142,7 +142,7 @@ async def run_candidate_stream(
     pcm_source: AsyncIterator[bytes],
     *,
     activity_factory: Callable[[], ActivitySession],
-    text_replay: FixedTextReplay,
+    text_replay: FixedTextReplay | None,
     epoch: str,
     sink: Callable[[Mapping[str, Any]], Awaitable[None]],
     input_mode: str = "throughput",
@@ -151,11 +151,12 @@ async def run_candidate_stream(
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> dict[str, Any]:
-    """Run one controlled sidecar comparison with the caller's shared owner/lane.
+    """Run activity-only or a controlled sidecar comparison on the caller's lane.
 
     The factory must use the real composition-root governor. Cross-process
     service exclusion and artifact/runtime identities are the caller's duties.
     Sink is a raw external-artifact sink; returned summary never contains text.
+    text_replay=None explicitly means no ASR body was observed.
     """
     if input_mode not in {"throughput", "realtime"} or any(
         type(v) not in (int, float) or not math.isfinite(v) or v <= 0
@@ -166,7 +167,7 @@ async def run_candidate_stream(
     activity: ActivitySession | None = None
     output_lock = asyncio.Lock()
     start = previous_time = clock()
-    if not math.isfinite(start):
+    if type(start) not in (int, float) or not math.isfinite(start):
         raise ValueError("candidate monotonic clock must be finite")
     finishing = False
     appends = consumed_updates = 0
@@ -179,7 +180,7 @@ async def run_candidate_stream(
     def elapsed() -> float:
         nonlocal previous_time
         now = clock()
-        if not math.isfinite(now) or now < previous_time:
+        if type(now) not in (int, float) or not math.isfinite(now) or now < previous_time:
             raise ValueError("candidate monotonic clock moved backwards")
         previous_time = now
         return now - start
@@ -235,7 +236,24 @@ async def run_candidate_stream(
     async def consume(session: ActivitySession) -> None:
         nonlocal consumed_updates
         async for update in session.updates():
-            await publish(evidence.apply(update))
+            events = evidence.apply(update)
+            observed_at = elapsed()
+            await publish(events)
+            # The closed speaker runs used for scoring may stay open until
+            # finish. Preserve each validated stable frame's observation time
+            # independently; never infer stable publication latency from when
+            # an arbitrarily long scoring run finally closes.
+            for frame in update.frames:
+                await emit(
+                    {
+                        "kind": "stable_activity_frame",
+                        "step_id": update.step_id,
+                        "start_sample": frame.span.start,
+                        "end_sample": frame.span.end,
+                        "active_slots": sorted(frame.active_slots),
+                        "observed_at_seconds": observed_at,
+                    }
+                )
             await emit(
                 {
                     "kind": "activity_watermark",
@@ -248,6 +266,19 @@ async def run_candidate_stream(
             updates_consumed.set()
         if not finishing:
             raise ValueError("candidate activity closed before input finish")
+
+    async def owned_consume(session: ActivitySession) -> None:
+        # TaskGroup treats a child's CancelledError as normal completion. Run
+        # the actual pump separately so its self-cancellation fails the group
+        # and cancels the input owner instead of waiting for a meeting timeout.
+        child = asyncio.create_task(consume(session), name="candidate-activity-consume")
+        try:
+            await child
+        except asyncio.CancelledError:
+            owner = asyncio.current_task()
+            if owner is not None and owner.cancelling():
+                raise
+            raise RuntimeError("candidate_activity_self_cancelled") from None
 
     try:
         async with asyncio.timeout(timeout_seconds), asyncio.TaskGroup() as tasks:
@@ -262,7 +293,9 @@ async def run_candidate_stream(
                     raise ValueError("candidate PCM packet must be bounded whole samples")
                 if activity is None:
                     activity = activity_factory()
-                    pump = tasks.create_task(consume(activity), name="candidate-activity-pump")
+                    pump = tasks.create_task(
+                        owned_consume(activity), name="candidate-activity-pump"
+                    )
                 endpoint = evidence.accepted + len(packet) // 2
                 if input_mode == "realtime":
                     delay = endpoint / 16000 - elapsed()
@@ -271,10 +304,11 @@ async def run_candidate_stream(
                     max_input_lateness = max(max_input_lateness, elapsed() - endpoint / 16000)
                 evidence.accept(len(packet) // 2)
                 input_finished_at = elapsed()
-                ready = await join_cleanup(
-                    asyncio.create_task(asyncio.to_thread(text_replay.ready, evidence.accepted))
-                )
-                await register(ready)
+                if text_replay is not None:
+                    ready = await join_cleanup(
+                        asyncio.create_task(asyncio.to_thread(text_replay.ready, evidence.accepted))
+                    )
+                    await register(ready)
                 before = elapsed()
                 await activity.append(start_sample=endpoint - len(packet) // 2, pcm16=packet)
                 append_duration = elapsed() - before
@@ -297,10 +331,11 @@ async def run_candidate_stream(
             while consumed_updates < appends:
                 updates_consumed.clear()
                 await updates_consumed.wait()
-            final_text = await join_cleanup(
-                asyncio.create_task(asyncio.to_thread(text_replay.finish, evidence.accepted))
-            )
-            await register(final_text)
+            if text_replay is not None:
+                final_text = await join_cleanup(
+                    asyncio.create_task(asyncio.to_thread(text_replay.finish, evidence.accepted))
+                )
+                await register(final_text)
             finish_started_at = elapsed()
             finishing = True
             await activity.finish(through_sample=evidence.accepted)
@@ -317,32 +352,37 @@ async def run_candidate_stream(
     except Exception:
         raise RuntimeError("candidate_run_failed") from None
     finally:
-        cleanup_failed = False
-        if not evidence.complete:
-            # Failed sink cannot turn an incomplete run into a valid result.
-            with contextlib.suppress(Exception):
-                await publish(evidence.abort("finalization_incomplete"))
-        if activity is not None:
+        async def cleanup() -> None:
+            cleanup_failed = False
+            if not evidence.complete:
+                # Failed sink cannot turn an incomplete run into a valid result.
+                with contextlib.suppress(Exception, asyncio.CancelledError):
+                    await publish(evidence.abort("finalization_incomplete"))
+            if activity is not None:
+                try:
+                    # Shared exact-child lease owns bounded reaping/isolation.
+                    await activity.cancel()
+                except (Exception, asyncio.CancelledError):
+                    cleanup_failed = True
             try:
-                await activity.cancel()  # Shared exact-child lease owns bounded reaping/isolation.
-            except Exception:
+                if text_replay is not None:
+                    await join_cleanup(asyncio.create_task(asyncio.to_thread(text_replay.close)))
+                close_source = getattr(pcm_source, "aclose", None)
+                if close_source is not None:
+                    await close_source()
+            except (Exception, asyncio.CancelledError):
                 cleanup_failed = True
-        try:
-            await join_cleanup(asyncio.create_task(asyncio.to_thread(text_replay.close)))
-            close_source = getattr(pcm_source, "aclose", None)
-            if close_source is not None:
-                await close_source()
-        except Exception:
-            cleanup_failed = True
-        phase_sink_failed = False
-        try:
-            await publish_phases()
-        except Exception:
-            phase_sink_failed = True
-        if cleanup_failed:
-            raise RuntimeError("candidate_cleanup_incomplete") from None
-        if phase_sink_failed:
-            raise RuntimeError("candidate_phase_sink_failed") from None
+            phase_sink_failed = False
+            try:
+                await publish_phases()
+            except (Exception, asyncio.CancelledError):
+                phase_sink_failed = True
+            if cleanup_failed:
+                raise RuntimeError("candidate_cleanup_incomplete") from None
+            if phase_sink_failed:
+                raise RuntimeError("candidate_phase_sink_failed") from None
+
+        await join_cleanup(asyncio.create_task(cleanup(), name="candidate-activity-cleanup"))
     trace_status = getattr(activity, "phase_trace_status", lambda: {"enabled": False})()
     return {
         "complete": True,
@@ -350,7 +390,8 @@ async def run_candidate_stream(
         "processed_samples": evidence.processed,
         "text_characters": registered_characters,
         "emitted_text_characters": emitted_characters,
-        "asr_text_sha256": transcript_digest.hexdigest(),
+        "asr_text_sha256": transcript_digest.hexdigest() if text_replay is not None else None,
+        "asr_text_source": "fixed_sidecar" if text_replay is not None else "not_observed",
         "input_mode": input_mode,
         "clock_source": "monotonic" if clock is time.monotonic else "injected",
         "elapsed_seconds": elapsed(),
@@ -363,7 +404,10 @@ async def run_candidate_stream(
             trace_status.get("complete") is True
             and trace_status.get("required_phases_observed") is True
         ),
-        "clock_scope": "diarization_with_fixed_asr_sidecar",
+        "clock_scope": (
+            "diarization_with_fixed_asr_sidecar"
+            if text_replay is not None else "diarization_activity_only"
+        ),
         "joint_asr_latency_observed": False,
         "runtime_identity_verified": False,
         "artifact_identity_verified": False,

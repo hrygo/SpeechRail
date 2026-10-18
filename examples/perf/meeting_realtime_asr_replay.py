@@ -33,7 +33,7 @@ from meeting_evaluation_identity import (
     canonical_digest,
     validate_execution_identity,
 )
-from meeting_pcm_feed import PcmChunk
+from meeting_pcm_feed import PcmChunk, PcmSequenceVerifier
 from probe_meeting_asr_quality import (
     AsrCase,
     RuntimeObservation,
@@ -253,47 +253,18 @@ async def _shared_packets(
 ) -> AsyncGenerator[bytes]:
     """Keep one odd kernel sample across source boundaries for exact mapping."""
     carry = b""
-    origin: float | None = None
-    previous_offered: float | None = None
+    verifier = PcmSequenceVerifier(data.pcm16)
     try:
         async for frame in frames:
-            if (
-                not isinstance(frame, PcmChunk)
-                or type(frame.sequence) is not int
-                or frame.sequence != verified["frames_verified"]
-                or type(frame.start_sample) is not int
-                or frame.start_sample != verified["samples_verified"]
-                or type(frame.end_sample) is not int
-                or not frame.start_sample < frame.end_sample <= len(data.pcm16) // 2
-                or type(frame.pcm) is not bytes
-                or not 0 < len(frame.pcm) <= 32000
-                or len(frame.pcm) != (frame.end_sample - frame.start_sample) * 2
-                or frame.pcm != data.pcm16[frame.start_sample * 2 : frame.end_sample * 2]
-                or any(
-                    type(value) not in (int, float) or not math.isfinite(value)
-                    for value in (frame.target_at, frame.offered_at)
-                )
-                or frame.offered_at < frame.target_at
-                or (previous_offered is not None and frame.offered_at < previous_offered)
-                or verified["frames_verified"] >= 65536
-            ):
-                raise ValueError("shared PCM differs from frozen source or sample sequence")
-            observed_origin = frame.target_at - frame.end_sample / 16000
-            if origin is None:
-                origin = observed_origin
-            elif not math.isclose(origin, observed_origin, rel_tol=0, abs_tol=1e-6):
-                raise ValueError("shared PCM clock origin changed")
-            previous_offered = frame.offered_at
-            verified["frames_verified"] += 1
-            verified["samples_verified"] = frame.end_sample
+            verifier.accept(frame)
+            verified.update(verifier.summary())
             block = carry + frame.pcm
             paired_bytes = len(block) // 4 * 4
             carry = block[paired_bytes:]
             wire = inverse_embed_pcm16(block[:paired_bytes])
             for offset in range(0, len(wire), wire_packet_samples * 2):
                 yield wire[offset : offset + wire_packet_samples * 2]
-        if verified["samples_verified"] != len(data.pcm16) // 2:
-            raise ValueError("shared PCM ended before the frozen source")
+        verifier.finish()
         if carry:
             yield inverse_embed_pcm16(carry)
     finally:

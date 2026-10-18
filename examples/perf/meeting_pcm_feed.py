@@ -29,6 +29,60 @@ class PcmChunk:
     pcm: bytes = field(repr=False)
 
 
+class PcmSequenceVerifier:
+    """Check actual lane bytes and timing metadata against one frozen source.
+
+    This verifies metadata consistency, not the producer clock's provenance.
+    The caller owns iterator cancellation, closing and source lifetime.
+    """
+
+    def __init__(self, pcm: bytes):
+        if type(pcm) is not bytes or not 0 < len(pcm) <= 600 * 16000 * 2 or len(pcm) % 2:
+            raise ValueError("shared PCM source must be bounded whole samples")
+        self.pcm = pcm
+        self.frames = self.samples = 0
+        self.origin: float | None = None
+        self.previous_offered: float | None = None
+
+    def accept(self, frame: PcmChunk) -> None:
+        if (
+            not isinstance(frame, PcmChunk)
+            or type(frame.sequence) is not int
+            or frame.sequence != self.frames
+            or type(frame.start_sample) is not int
+            or frame.start_sample != self.samples
+            or type(frame.end_sample) is not int
+            or not frame.start_sample < frame.end_sample <= len(self.pcm) // 2
+            or type(frame.pcm) is not bytes
+            or not 0 < len(frame.pcm) <= 32000
+            or len(frame.pcm) != (frame.end_sample - frame.start_sample) * 2
+            or frame.pcm != self.pcm[frame.start_sample * 2 : frame.end_sample * 2]
+            or any(
+                type(value) not in (int, float) or not math.isfinite(value)
+                for value in (frame.target_at, frame.offered_at)
+            )
+            or frame.offered_at < frame.target_at
+            or (self.previous_offered is not None and frame.offered_at < self.previous_offered)
+            or self.frames >= 65536
+        ):
+            raise ValueError("shared PCM differs from frozen source or sample sequence")
+        origin = frame.target_at - frame.end_sample / 16000
+        if self.origin is None:
+            self.origin = origin
+        elif not math.isclose(self.origin, origin, rel_tol=0, abs_tol=1e-6):
+            raise ValueError("shared PCM clock origin changed")
+        self.previous_offered = frame.offered_at
+        self.frames += 1
+        self.samples = frame.end_sample
+
+    def finish(self) -> None:
+        if self.samples != len(self.pcm) // 2:
+            raise ValueError("shared PCM ended before the frozen source")
+
+    def summary(self) -> dict[str, int]:
+        return {"frames_verified": self.frames, "samples_verified": self.samples}
+
+
 class _Lane(AsyncIterator[PcmChunk]):
     def __init__(self, feed: CommonPcmFeed):
         self.feed = feed

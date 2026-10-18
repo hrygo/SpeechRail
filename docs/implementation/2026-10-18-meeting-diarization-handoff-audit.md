@@ -565,3 +565,16 @@ FrozenAsrRuntime捕获实际services与NativeWindowAsrFactory共用的Governor�
 共享输入与对象绑定检查先RED后接线，另以会话启动失败未关闭输入源、源自取消导致consumer等待及大源包小wire包导致同步队列假溢出分别复现后修正。源关闭恰一次；自取消变为失败并加入兄弟任务；内部满队列先给ready consumer一次事件循环机会，仍满失败，不等待容量或移动来源时钟。私有root集成扩展到shared_pcm，包括真实生产factory/窗口session上的合成PCM、源/依赖/权重/generation变动及上下文关闭时取消正在decode的回放；模型RPC均fake。
 
 最终十个相关测试文件联合455 passed in14.90s；四Python Ruff、两source strict/follow-imports=silent Mypy通过。改动的ASR重放/私有root及tests图谱missing，直接复核当前worktree；生产factory/services coverage metadata_match，无索引重建。源码闭包与replay policy变化后，旧ASR spec/controls/report需重新冻结执行。共同Governor对象不证明DIA预算、实际加载字节或联合身份；DIA适配、live正文/活动稳定发布、footprint及ABBA未完成。无真实音频解码、模型/benchmark、下载、运行态、安装、UI、发布或合并，所有认证/实际A0标记不升级。父2e37b783主CI39099075868与原生CI39099075836均success/completed。
+
+
+## T6 共同 PCM 接入原生分人活动与稳定帧观察
+
+2026-10-18：新增显式shared activity库适配，复用候选runner的活动校验、finish与清理。text_replay=None表示本次未观察ASR正文，digest为null；不以空FixedTextReplay冒充live ASR。ASR与DIA共同使用PcmSequenceVerifier核对冻结PCM字节、整数序列/连续样本、单包与总包预算、有限源时钟及完整EOF，不二次重放或移动供给原点。外部frames在成功、失败、取消及启动校验失败后关闭，input_clock仍external_shared_source_unverified。
+
+NativeCandidateRun.evaluate_shared_pcm复用创建时捕获的Governor、实际原生session factory、端口继承、制品检查与native preflight。不同/替换Governor在读源前拒绝，运行中替换也不返回成功；同一handle的共享执行单飞。原生session结束并完成exact-child回收与制品复核后才返回candidate_execution，runtime/certification仍false。C0和候选源码闭包加入共享活动与PCM模块，旧spec/report须重新冻结执行；不证明实际加载字节或最终联合身份。
+
+每个通过因果覆盖检查的稳定活动帧单独输出stable_activity_frame、匿名active_slots和接收观察时刻，sink交付时刻独立保留。连续speaker评分区间可到finish才关闭，不能拿它的关闭时间冒充稳定标签延迟。未接live ASR正文或产品稳定发布，不能计算或宣称联合P95。另以两种活动pump自取消、重复外部取消的反例先RED：自取消转失败立即取消输入；整个回收/源关闭/制品检查清理放入独立owned task并由join_cleanup加入，重复取消不放弃清理。非法bool宿主时钟在读源前拒绝。
+
+十一相关测试文件388 passed in9.96s；九Python Ruff、五source strict/follow-imports=silent Mypy通过。回归包含共同供给→实际Governor准入→活动适配的合成尾样本、原生候选factory上的fake RPC/preflight/guard/回收、字节/序列/EOF/时钟异常与取消。它们不是实际模型、真实音频或性能质量基准。图谱相关perf源码/tests missing，直接复核worktree，生产活动types为metadata_match；未重建索引。父3e479f9a主CI39099790104与原生CI39099790102均已核验success/completed。
+
+T6仍缺live正文归属总线、产品稳定发布、资源footprint与ABBA；真实CER、人数上限和P95均未观察，#370继续未完成。未进行真实音频解码、模型/benchmark、下载、服务/安装、UI、发布或合并。语料路径复核确认benchmarks中的三个归档入口为指向同一app home下corpus目录的符号链接；原训练/留出角色不变，不重复下载或混入开发调参。

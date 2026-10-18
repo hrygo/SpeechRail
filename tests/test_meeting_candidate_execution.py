@@ -175,6 +175,73 @@ def test_native_driver_connects_locked_fixture_trace_and_saved_observation(
     assert str(tmp_path) not in json.dumps(result)
 
 
+@pytest.mark.parametrize("binding", ["same", "different", "changed", "during"])
+def test_native_shared_pcm_uses_original_owner_and_checks_reaping(
+    candidate, monkeypatch, binding
+):
+    from meeting_candidate_execution import CandidateArtifacts, NativeCandidateRun
+    from meeting_pcm_feed import PcmChunk
+
+    from speechrail.domain.resource_limits import GovernorLimits
+    from speechrail.runtime.resource_governor import ResourceGovernor
+
+    worker, model, spec = candidate
+    artifacts = CandidateArtifacts(spec, worker, model)
+    shared = ResourceGovernor(GovernorLimits(3, 1, 4), allow_heavy_overlap=False)
+    other = ResourceGovernor(GovernorLimits(3, 1, 4), allow_heavy_overlap=False)
+    owners = []
+
+    def mutate():
+        if binding == "during":
+            owners[0].governor = other
+
+    peers = fake_native(monkeypatch, mutate=mutate)
+
+    async def run():
+        output, reads = [], []
+        original = bytes(320)
+
+        async def frames():
+            reads.append(True)
+            yield PcmChunk(0, 0, 160, .01, .01, original)
+
+        async def sink(event):
+            output.append(event)
+
+        with EvaluationPortLease(9912) as port:
+            native = NativeCandidateRun(artifacts, port, shared)
+            owners.append(native)
+            if binding == "changed":
+                native.governor = other
+            call = native.evaluate_shared_pcm(
+                original, frames(), governor=other if binding == "different" else shared,
+                sink=sink,
+            )
+            if binding in {"different", "changed"}:
+                with pytest.raises(ValueError, match="governor"):
+                    await call
+                assert not reads and not peers
+                return
+            if binding == "during":
+                with pytest.raises(ValueError, match="governor"):
+                    await call
+                assert not shared.diarization_owner.occupied
+                assert len(peers) == 1 and peers[0].test_closes == 1
+                return
+            result = await call
+            assert result["processed_samples"] == 160
+            assert result["candidate_execution"]["exact_child_reaped"] is True
+            assert result["asr_text_source"] == "not_observed"
+            assert result["runtime_identity_verified"] is False
+            assert result["certification_eligible"] is False
+            assert not shared.diarization_owner.occupied
+            assert len(peers) == 1 and peers[0].test_closes == 1
+            assert peers[0].inherited_guard_fd == port.descriptor
+            assert any(e["kind"] == "stable_activity_frame" for e in output)
+
+    asyncio.run(asyncio.wait_for(run(), 3))
+
+
 @pytest.mark.parametrize("restore", [False, True])
 def test_artifact_change_during_model_execution_rejects_completed_result(
     tmp_path, candidate, monkeypatch, restore

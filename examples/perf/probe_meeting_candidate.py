@@ -61,6 +61,8 @@ CANDIDATE_ADAPTER_SOURCES = (
     "src/speechrail/runtime/server_lock.py",
     "examples/perf/meeting_candidate_evidence.py",
     "examples/perf/meeting_candidate_runner.py",
+    "examples/perf/meeting_activity_workload.py",
+    "examples/perf/meeting_pcm_feed.py",
     "examples/perf/meeting_asr_sidecar.py",
     "examples/perf/meeting_development_fixture.py",
     "examples/perf/meeting_candidate_schedule.py",
