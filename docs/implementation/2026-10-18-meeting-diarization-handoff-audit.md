@@ -682,3 +682,14 @@ observe复核实际宿主报告身份、共同来源原点、稳定确认及join
 初始21项缺模块RED→GREEN，fixture别名反例另先RED后GREEN；合成接线实际调用四模式PCM scheduler共48次，完整填入warm的8块，输出仍complete_metadata而非质量或并发通过。六相关测试文件177 passed in0.73s，二Python Ruff、一source Mypy通过。父6e554009本轮四项PR checks成功、两项仍运行，未声称全绿。图谱相关perf/tests freshness missing，直接复核，无索引重建。
 
 E3仍未验：没有主量joint tail-to-final配对区间、ASR/DIA相对门、独立质量/footprint或最终联合身份，不用callback elapsed替代并发收益；selected_schedule/primary interval保持null。已异步请求Train near开发集真实解码/模型评测授权，未收到回复时不启动实跑。无下载、服务/安装/UI/发布/合并动作；CER、认证人数、真实P95与#370状态不升级，完整目标继续。
+
+
+## T6 ABBA 联合 finish 配对诊断
+
+2026-10-18：从FinishCohort抽出validate_finish_report，共用原有完整时序核对和稳定/finish计算，队列仍在前后核验源码。ABBA schema2可选预登记全部来源×serial/overlap的完整pipeline策略和各模式共同配置，另锁仅移除mode/overlap_enabled的跨模式共同配置。先RED证明两模式各自完整登记仍可同时改sink timeout，再增加comparison锁使其拒绝，不把多变量变化归因于调度。未启用joint登记时继续仅记metadata，不事后接纳秒数。
+
+真实输出前裁决并登记统计口径：同源同模式全部重复取最大值，再等来源权重离散P95，主差值serial-minus-overlap；PCG64 seed1717、10000次，共同来源索引配对重采样P95差值，双侧2.5/97.5 linear percentile。RNG/方法/NumPy版本进入计划，源码及版本变更拒绝复用。冷/热分开，任一基线或ABBA位置失败/缺失均保留原来源失败权重，不计算区间，绝对finish门no-go。benefit_supported只表示该宿主区间下界>0，不签发运行策略、生产身份或质量通过。
+
+新增测试先RED再GREEN覆盖共享校验器、joint登记缺失/改动/明细失败、共同配置差异；合成恒定0.5秒配对差的区间精确为[0.5,0.5]，重复不扩N、冷/热相反收益分开，24组1失败而有限P95也不能通过。预输出冻结后48次实际单路/联合live pipeline的合成接线进入区间分析，零收益不选择overlap。六相关文件188 passed in1.33s；进一步覆盖候选执行、ASR重放、评分、来源锁和选择器等二十一相关文件734 passed in20.02s，四Python Ruff、二source Mypy通过。父08172628核验七项PR checks成功、Gate Summary仍运行。图谱coverage missing直接复核worktree，未重建。
+
+这仍是合成PCM/fake模型/RPC及宿主metadata一致性。没有真实解码、模型/benchmark、下载、服务/安装/UI、发布或合并；授权请求未收到回复。真实ASR/DIA相对P95、footprint、冷热准备、生产联合身份及独立主参考/质量仍未就绪；selected_schedule保持null，E3未验，CER、认证人数、真实P95与#370状态不升级，完整目标继续。

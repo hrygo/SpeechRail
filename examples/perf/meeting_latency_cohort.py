@@ -115,6 +115,218 @@ def _sources() -> dict[str, str]:
     }
 
 
+def validate_finish_report(
+    *,
+    report: Mapping[str, Any],
+    mode: str,
+    pcm_sha256: str,
+    expected_samples: int,
+    pipeline_policy_sha256: str,
+    pipeline_configuration_sha256: str,
+) -> dict[str, Any]:
+    """Check host trace against frozen controls; no cohort or runtime attestation."""
+    if mode not in {"serial", "overlap"}:
+        raise ValueError("invalid joint finish mode")
+    _sha(pcm_sha256)
+    _sha(pipeline_policy_sha256)
+    _sha(pipeline_configuration_sha256)
+    _int(expected_samples, 1, 600 * 16000)
+    value = _snapshot(report)
+    policy, feed = _obj(value.get("pipeline_policy")), _obj(value.get("pcm_feed"))
+    timing = _obj(value.get("timing_observations"))
+    diagnostics = _obj(timing.get("latency_diagnostics"))
+    if (
+        value.get("mode") != mode
+        or policy.get("mode") != mode
+        or canonical_digest(policy) != pipeline_policy_sha256
+        or value.get("pipeline_policy_sha256") != pipeline_policy_sha256
+        or canonical_digest(_obj(policy.get("latency"))) != canonical_digest(latency_policy())
+        or feed.get("source_pcm_sha256") != pcm_sha256
+        or type(feed.get("source_samples")) is not int
+        or feed["source_samples"] != expected_samples
+        or any(
+            value.get(k) is not False
+            for k in (
+                "runtime_identity_verified",
+                "certification_eligible",
+                "joint_latency_observed",
+                "worker_reaping_verified",
+            )
+        )
+        or timing.get("clock_source") not in {"injected", "monotonic"}
+        or timing["clock_source"] != feed.get("clock_source")
+        or type(timing.get("schema_version")) is not int
+        or timing["schema_version"] != 2
+    ):
+        raise ValueError("finish report differs from diagnostic registration")
+    configuration = finish_configuration(policy, feed)
+    expected_configuration = pipeline_configuration_sha256
+    if canonical_digest(configuration) != expected_configuration:
+        raise ValueError("finish pipeline configuration differs")
+    if _int(feed.get("sample_rate"), 16000, 16000) != 16000:
+        raise ValueError("finish input must be 16 kHz")
+    _int(feed.get("chunk_samples"), 1, 16000)
+    _int(feed.get("queue_chunks"), 1, 64)
+    if not 0 < _number(feed.get("max_lateness_seconds")) <= 1:
+        raise ValueError("finish source lateness budget differs")
+    feed_policy = {
+        k: feed.get(k)
+        for k in (
+            "clock_source",
+            "sample_rate",
+            "chunk_samples",
+            "queue_chunks",
+            "max_lateness_seconds",
+            "source_pcm_sha256",
+            "source_samples",
+        )
+    }
+    if (
+        canonical_digest(feed_policy) != feed.get("policy_sha256")
+        or policy.get("pcm_feed_policy_sha256") != feed["policy_sha256"]
+    ):
+        raise ValueError("finish source policy differs")
+    origin = _number(timing.get("source_origin_at"))
+    samples = expected_samples
+    if (
+        not math.isclose(origin, _number(feed.get("source_origin_at")), rel_tol=0, abs_tol=1e-6)
+        or not math.isclose(
+            origin + samples / 16000,
+            _number(feed.get("source_end_target_at")),
+            rel_tol=0,
+            abs_tol=1e-6,
+        )
+        or timing.get("record_fields") != _FIELDS
+    ):
+        raise ValueError("finish common source origin differs")
+    records = timing.get("records")
+    if not isinstance(records, list) or len(records) > 98304:
+        raise ValueError("finish timing records exceed budget")
+    acks, stable_sequences, unknown = [], set(), False
+    texts: dict[int, tuple[int, int, bool, str, float]] = {}
+    asr_through = dia_through = 0
+    asr_ack = dia_ack = origin
+    trace_complete = True
+    stable_delays: list[tuple[int, float | None]] = []
+    for row in records:
+        if not isinstance(row, list) or len(row) != 8:
+            raise ValueError("invalid finish timing record")
+        if row[0] not in {
+            "asr_sealed",
+            "activity_watermark",
+            "text",
+            "stable_text",
+            "asr_body_snapshot",
+        }:
+            raise ValueError("unknown finish timing record")
+        if row[7] is None:
+            trace_complete = False
+            continue
+        start, end = _int(row[1], 0, samples), _int(row[2], 0, samples)
+        entered, finished = _number(row[6]), _number(row[7])
+        if start > end or finished < entered or finished + 1e-6 < origin + end / 16000:
+            raise ValueError("invalid final sink acknowledgement")
+        if row[0] in {"asr_sealed", "activity_watermark"}:
+            if _int(row[3], -1, -1) != -1 or row[4] is not None or row[5] is not None:
+                raise ValueError("invalid finish coverage record")
+            if row[0] == "asr_sealed":
+                trace_complete &= start == asr_through and start < end and entered == finished
+                asr_through, asr_ack = end, finished
+            else:
+                trace_complete &= start == dia_through
+                dia_through, dia_ack = end, finished
+            continue
+        if start == end:
+            raise ValueError("empty finish publication")
+        if row[0] == "text":
+            sequence, text_hash = _int(row[3], 0, 4095), _sha(row[5])
+            if type(row[4]) is not bool:
+                raise ValueError("invalid finish text disposition")
+            trace_complete &= sequence not in texts
+            texts[sequence] = (start, end, row[4], text_hash, finished)
+            continue
+        if row[0] == "stable_text":
+            sequence = _int(row[3], 0, 4095)
+            _sha(row[5])
+            if type(row[4]) is not bool or sequence in stable_sequences:
+                raise ValueError("invalid or duplicate stable finish marker")
+            stable_sequences.add(sequence)
+            unknown = unknown or not row[4]
+            text = texts.get(sequence)
+            trace_complete &= (
+                text is not None
+                and text[:4] == (start, end, row[4], row[5])
+                and entered >= max(text[4], asr_ack, dia_ack)
+                and end <= min(asr_through, dia_through)
+            )
+            stable_delays.append((end - start, max(0.0, finished - origin - end / 16000)))
+        else:
+            # A replacement snapshot means attribution was withdrawn, even
+            # if contradictory summary booleans still claim success.
+            trace_complete = False
+        acks.append(finished)
+    marks = _obj(timing.get("milestones_at"))
+    if set(marks) != {"asr_callback_complete", "dia_input_eof", "dia_scope_closed"}:
+        raise ValueError("finish report lacks joined scopes")
+    mark_times = {k: _number(v) for k, v in marks.items()}
+    finish = diagnostics.get("finish_seconds")
+    if finish is not None:
+        finish = _number(finish)
+        actual = max([origin, *acks, *mark_times.values()]) - origin - samples / 16000
+        if finish < 0 or not math.isclose(finish, actual, rel_tol=0, abs_tol=1e-6):
+            raise ValueError("finish summary differs from acknowledgement trace")
+    expected_units = _int(timing.get("expected_text_units"), 0, 4096)
+    stable_p95 = weighted_p95(stable_delays)
+    completed = (
+        trace_complete
+        and asr_through == dia_through == samples
+        and mark_times["asr_callback_complete"] >= max(asr_ack, origin + samples / 16000)
+        and mark_times["dia_input_eof"] >= origin + samples / 16000
+        and mark_times["dia_scope_closed"] >= max(dia_ack, mark_times["dia_input_eof"])
+        and set(texts) == stable_sequences
+        and stable_p95 is not None
+        and stable_p95 <= latency_policy()["stable_label_p95_seconds"]
+        and all(
+            delay is not None and delay <= latency_policy()["stable_label_hard_seconds"]
+            for _, delay in stable_delays
+        )
+        and not unknown
+        and expected_units > 0
+        and stable_sequences == set(range(expected_units))
+        and finish is not None
+        and diagnostics.get("finish_unresolved") is False
+        and value.get("schedule_completed") is True
+        and value.get("asr_complete") is True
+        and value.get("live_attribution_complete") is True
+        and value.get("asr_preserved_as_unknown") is False
+        and value.get("diarization_failure") is None
+        and value.get("joint_verdict") == "diagnostic_not_certified"
+        and _obj(value.get("deadline_enforcement")).get("status") == "not_expired"
+        and diagnostics.get("stable_gate") == "diagnostic_pass"
+        and timing.get("text_delivery_verified") is True
+        and timing.get("stable_delivery_verified") is True
+        and type(timing.get("open_sink_deliveries")) is int
+        and timing["open_sink_deliveries"] == 0
+        and timing.get("failed_sink_deliveries") == {}
+        and all(
+            type(timing.get(k)) is int and timing[k] == samples
+            for k in (
+                "source_samples_observed",
+                "asr_sealed_through",
+                "dia_stable_through",
+            )
+        )
+    )
+    return {
+        "report_sha256": canonical_digest(value),
+        "clock_source": timing["clock_source"],
+        "status": "completed" if completed else "failed",
+        "finish_seconds": finish,
+        "runtime_identity_verified": False,
+        "certification_eligible": False,
+    }
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class FinishCohort:
     _plan_json: str
@@ -268,202 +480,19 @@ class FinishCohort:
         execution = self._entries.get(_sha(execution_sha256))
         if execution is None:
             raise ValueError("unregistered finish execution")
-        value = _snapshot(report)
-        policy, feed = _obj(value.get("pipeline_policy")), _obj(value.get("pcm_feed"))
-        timing = _obj(value.get("timing_observations"))
-        diagnostics = _obj(timing.get("latency_diagnostics"))
-        if (
-            value.get("mode") != self._context["mode"]
-            or policy.get("mode") != self._context["mode"]
-            or canonical_digest(policy) != execution["pipeline_policy_sha256"]
-            or value.get("pipeline_policy_sha256") != execution["pipeline_policy_sha256"]
-            or canonical_digest(_obj(policy.get("latency"))) != canonical_digest(latency_policy())
-            or feed.get("source_pcm_sha256") != execution["pcm_sha256"]
-            or type(feed.get("source_samples")) is not int
-            or feed["source_samples"] != execution["expected_samples"]
-            or any(
-                value.get(k) is not False
-                for k in (
-                    "runtime_identity_verified",
-                    "certification_eligible",
-                    "joint_latency_observed",
-                    "worker_reaping_verified",
-                )
-            )
-            or timing.get("clock_source") not in {"injected", "monotonic"}
-            or timing["clock_source"] != feed.get("clock_source")
-            or type(timing.get("schema_version")) is not int
-            or timing["schema_version"] != 2
-        ):
-            raise ValueError("finish report differs from diagnostic registration")
-        configuration = finish_configuration(policy, feed)
-        expected_configuration = self._context["pipeline_configuration_sha256"]
-        if canonical_digest(configuration) != expected_configuration:
-            raise ValueError("finish pipeline configuration differs")
-        if _int(feed.get("sample_rate"), 16000, 16000) != 16000:
-            raise ValueError("finish input must be 16 kHz")
-        _int(feed.get("chunk_samples"), 1, 16000)
-        _int(feed.get("queue_chunks"), 1, 64)
-        if not 0 < _number(feed.get("max_lateness_seconds")) <= 1:
-            raise ValueError("finish source lateness budget differs")
-        feed_policy = {
-            k: feed.get(k)
-            for k in (
-                "clock_source",
-                "sample_rate",
-                "chunk_samples",
-                "queue_chunks",
-                "max_lateness_seconds",
-                "source_pcm_sha256",
-                "source_samples",
-            )
-        }
-        if (
-            canonical_digest(feed_policy) != feed.get("policy_sha256")
-            or policy.get("pcm_feed_policy_sha256") != feed["policy_sha256"]
-        ):
-            raise ValueError("finish source policy differs")
-        origin = _number(timing.get("source_origin_at"))
-        samples = execution["expected_samples"]
-        if (
-            not math.isclose(origin, _number(feed.get("source_origin_at")), rel_tol=0, abs_tol=1e-6)
-            or not math.isclose(
-                origin + samples / 16000,
-                _number(feed.get("source_end_target_at")),
-                rel_tol=0,
-                abs_tol=1e-6,
-            )
-            or timing.get("record_fields") != _FIELDS
-        ):
-            raise ValueError("finish common source origin differs")
-        records = timing.get("records")
-        if not isinstance(records, list) or len(records) > 98304:
-            raise ValueError("finish timing records exceed budget")
-        acks, stable_sequences, unknown = [], set(), False
-        texts: dict[int, tuple[int, int, bool, str, float]] = {}
-        asr_through = dia_through = 0
-        asr_ack = dia_ack = origin
-        trace_complete = True
-        stable_delays: list[tuple[int, float | None]] = []
-        for row in records:
-            if not isinstance(row, list) or len(row) != 8:
-                raise ValueError("invalid finish timing record")
-            if row[0] not in {
-                "asr_sealed",
-                "activity_watermark",
-                "text",
-                "stable_text",
-                "asr_body_snapshot",
-            }:
-                raise ValueError("unknown finish timing record")
-            if row[7] is None:
-                trace_complete = False
-                continue
-            start, end = _int(row[1], 0, samples), _int(row[2], 0, samples)
-            entered, finished = _number(row[6]), _number(row[7])
-            if start > end or finished < entered or finished + 1e-6 < origin + end / 16000:
-                raise ValueError("invalid final sink acknowledgement")
-            if row[0] in {"asr_sealed", "activity_watermark"}:
-                if _int(row[3], -1, -1) != -1 or row[4] is not None or row[5] is not None:
-                    raise ValueError("invalid finish coverage record")
-                if row[0] == "asr_sealed":
-                    trace_complete &= start == asr_through and start < end and entered == finished
-                    asr_through, asr_ack = end, finished
-                else:
-                    trace_complete &= start == dia_through
-                    dia_through, dia_ack = end, finished
-                continue
-            if start == end:
-                raise ValueError("empty finish publication")
-            if row[0] == "text":
-                sequence, text_hash = _int(row[3], 0, 4095), _sha(row[5])
-                if type(row[4]) is not bool:
-                    raise ValueError("invalid finish text disposition")
-                trace_complete &= sequence not in texts
-                texts[sequence] = (start, end, row[4], text_hash, finished)
-                continue
-            if row[0] == "stable_text":
-                sequence = _int(row[3], 0, 4095)
-                _sha(row[5])
-                if type(row[4]) is not bool or sequence in stable_sequences:
-                    raise ValueError("invalid or duplicate stable finish marker")
-                stable_sequences.add(sequence)
-                unknown = unknown or not row[4]
-                text = texts.get(sequence)
-                trace_complete &= (
-                    text is not None
-                    and text[:4] == (start, end, row[4], row[5])
-                    and entered >= max(text[4], asr_ack, dia_ack)
-                    and end <= min(asr_through, dia_through)
-                )
-                stable_delays.append((end - start, max(0.0, finished - origin - end / 16000)))
-            else:
-                # A replacement snapshot means attribution was withdrawn, even
-                # if contradictory summary booleans still claim success.
-                trace_complete = False
-            acks.append(finished)
-        marks = _obj(timing.get("milestones_at"))
-        if set(marks) != {"asr_callback_complete", "dia_input_eof", "dia_scope_closed"}:
-            raise ValueError("finish report lacks joined scopes")
-        mark_times = {k: _number(v) for k, v in marks.items()}
-        finish = diagnostics.get("finish_seconds")
-        if finish is not None:
-            finish = _number(finish)
-            actual = max([origin, *acks, *mark_times.values()]) - origin - samples / 16000
-            if finish < 0 or not math.isclose(finish, actual, rel_tol=0, abs_tol=1e-6):
-                raise ValueError("finish summary differs from acknowledgement trace")
-        expected_units = _int(timing.get("expected_text_units"), 0, 4096)
-        stable_p95 = weighted_p95(stable_delays)
-        completed = (
-            trace_complete
-            and asr_through == dia_through == samples
-            and mark_times["asr_callback_complete"] >= max(asr_ack, origin + samples / 16000)
-            and mark_times["dia_input_eof"] >= origin + samples / 16000
-            and mark_times["dia_scope_closed"] >= max(dia_ack, mark_times["dia_input_eof"])
-            and set(texts) == stable_sequences
-            and stable_p95 is not None
-            and stable_p95 <= latency_policy()["stable_label_p95_seconds"]
-            and all(
-                delay is not None and delay <= latency_policy()["stable_label_hard_seconds"]
-                for _, delay in stable_delays
-            )
-            and not unknown
-            and expected_units > 0
-            and stable_sequences == set(range(expected_units))
-            and finish is not None
-            and diagnostics.get("finish_unresolved") is False
-            and value.get("schedule_completed") is True
-            and value.get("asr_complete") is True
-            and value.get("live_attribution_complete") is True
-            and value.get("asr_preserved_as_unknown") is False
-            and value.get("diarization_failure") is None
-            and value.get("joint_verdict") == "diagnostic_not_certified"
-            and _obj(value.get("deadline_enforcement")).get("status") == "not_expired"
-            and diagnostics.get("stable_gate") == "diagnostic_pass"
-            and timing.get("text_delivery_verified") is True
-            and timing.get("stable_delivery_verified") is True
-            and type(timing.get("open_sink_deliveries")) is int
-            and timing["open_sink_deliveries"] == 0
-            and timing.get("failed_sink_deliveries") == {}
-            and all(
-                type(timing.get(k)) is int and timing[k] == samples
-                for k in (
-                    "source_samples_observed",
-                    "asr_sealed_through",
-                    "dia_stable_through",
-                )
-            )
+        verified = validate_finish_report(
+            report=report,
+            mode=self._context["mode"],
+            pcm_sha256=execution["pcm_sha256"],
+            expected_samples=execution["expected_samples"],
+            pipeline_policy_sha256=execution["pipeline_policy_sha256"],
+            pipeline_configuration_sha256=self._context["pipeline_configuration_sha256"],
         )
         observation = {
             "schema_version": 1,
             "cohort_sha256": self._cohort_sha256,
             "execution_sha256": execution_sha256,
-            "report_sha256": canonical_digest(value),
-            "clock_source": timing["clock_source"],
-            "status": "completed" if completed else "failed",
-            "finish_seconds": finish,
-            "runtime_identity_verified": False,
-            "certification_eligible": False,
+            **verified,
         }
         self._verify_sources()
         return {**observation, "observation_sha256": canonical_digest(observation)}

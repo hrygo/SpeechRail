@@ -500,3 +500,23 @@ def test_summary_pass_cannot_override_missing_or_contradictory_publication_trace
     result = cohort.aggregate([observed])
     assert result["finish_gate"] == "no-go"
     assert result["failed_source_groups"] == 6
+
+
+def test_shared_finish_validator_uses_expected_controls_without_granting_certification():
+    from meeting_latency_cohort import validate_finish_report
+
+    args, reports = controls()
+    value = reports[("f0", 0)]
+    expected = {
+        "mode": "serial",
+        "pcm_sha256": value["pcm_feed"]["source_pcm_sha256"],
+        "expected_samples": 16000,
+        "pipeline_policy_sha256": value["pipeline_policy_sha256"],
+        "pipeline_configuration_sha256": args["pipeline_configuration_sha256"],
+    }
+    observed = validate_finish_report(report=value, **expected)
+    assert observed["status"] == "completed"
+    assert observed["finish_seconds"] == 2.0
+    assert observed["certification_eligible"] is False
+    with pytest.raises(ValueError):
+        validate_finish_report(report=value, **{**expected, "pcm_sha256": sha("wrong")})

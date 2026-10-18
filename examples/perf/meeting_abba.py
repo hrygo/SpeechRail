@@ -12,11 +12,13 @@ import json
 import math
 import re
 from collections.abc import Mapping, Sequence
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any, cast
 
 from meeting_evaluation_identity import _freeze, _thaw, canonical_digest
-from meeting_latency_policy import latency_policy
+from meeting_latency_cohort import finish_configuration, validate_finish_report
+from meeting_latency_policy import latency_policy, weighted_p95
 
 _CONTROLS = {
     "attempt_sha256",
@@ -67,17 +69,31 @@ def _number(value: Any) -> float:
     return float(value)
 
 
+def joint_comparison_configuration(
+    pipeline_policy: Mapping[str, Any],
+    feed_policy: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Only scheduling mode/permission may differ between paired workloads."""
+    value = finish_configuration(pipeline_policy, feed_policy)
+    return {k: v for k, v in value.items() if k not in {"mode", "overlap_enabled"}}
+
+
 def _sources() -> dict[str, str]:
     root = Path(__file__).parent
     return {
-        name: hashlib.sha256((root / name).read_bytes()).hexdigest()
-        for name in (
-            "meeting_abba.py",
-            "meeting_evaluation_identity.py",
-            "meeting_latency_policy.py",
-            "bench_asr_diarization_overlap.py",
-            "meeting_pcm_feed.py",
-        )
+        "numpy_version_sha256": hashlib.sha256(version("numpy").encode()).hexdigest(),
+        **{
+            name: hashlib.sha256((root / name).read_bytes()).hexdigest()
+            for name in (
+                "meeting_abba.py",
+                "meeting_evaluation_identity.py",
+                "meeting_latency_policy.py",
+                "bench_asr_diarization_overlap.py",
+                "meeting_pcm_feed.py",
+                "meeting_latency_cohort.py",
+                "meeting_quality_metrics.py",
+            )
+        },
     }
 
 
@@ -97,6 +113,8 @@ class AbbaLedger:
         conditions: Sequence[str],
         blocks_per_source: int,
         feed_configuration: Mapping[str, Any],
+        joint_policies: Mapping[str, Any] | None = None,
+        joint_comparison_sha256: str | None = None,
     ) -> None:
         control, feed, source_rows = (
             _snapshot(controls),
@@ -147,8 +165,30 @@ class AbbaLedger:
             groups.add(row["source_group_sha256"])
             pcms.add(row["pcm_sha256"])
             fixtures.add(row["fixture_sha256"])
+        joint = _snapshot(joint_policies) if joint_policies is not None else None
+        if joint is None and joint_comparison_sha256 is not None:
+            raise ValueError("joint comparison requires complete policies")
+        if joint is not None:
+            _sha(joint_comparison_sha256)
+            if not isinstance(joint, dict) or set(joint) != groups:
+                raise ValueError("joint policies must cover all ABBA sources")
+            common: dict[str, str] = {}
+            for modes in joint.values():
+                if not isinstance(modes, dict) or set(modes) != {"serial", "overlap"}:
+                    raise ValueError("joint policies must include both modes")
+                for mode, binding in modes.items():
+                    if not isinstance(binding, dict) or set(binding) != {
+                        "pipeline_policy_sha256",
+                        "pipeline_configuration_sha256",
+                    }:
+                        raise ValueError("joint policy binding incomplete")
+                    for value in binding.values():
+                        _sha(value)
+                    digest = binding["pipeline_configuration_sha256"]
+                    if common.setdefault(mode, digest) != digest:
+                        raise ValueError("joint common configuration differs between sources")
         context = {
-            "schema_version": 1,
+            "schema_version": 2,
             "controls": control,
             "feed_configuration": feed,
             "sources": source_rows,
@@ -156,6 +196,20 @@ class AbbaLedger:
             "blocks_per_source": blocks_per_source,
             "source_digests": _sources(),
             "latency_policy": latency_policy(),
+            "joint_policies": joint,
+            "joint_comparison_sha256": joint_comparison_sha256,
+            "statistics": {
+                "unit": "source_meeting_group",
+                "within_source": "mode_max_all_repeats",
+                "point": "equal_source_inverse_cdf_p95_serial_minus_overlap",
+                "resampling": "paired_same_indices_for_both_modes",
+                "numpy_version": version("numpy"),
+                "rng": "PCG64",
+                "seed": 1717,
+                "draws": 10000,
+                "interval": "two_sided_percentile_95_linear_2.5_97.5",
+                "conditions": "separate_no_pooling",
+            },
             "condition_scope": "declared_per_execution_not_inferred_from_first_run",
             "block_order": list(_ORDER),
             "source_weight": "one_independent_group",
@@ -215,6 +269,8 @@ class AbbaLedger:
         self._runs = tuple(cast(Mapping[str, Any], _freeze(r)) for r in runs)
         self._feed = cast(Mapping[str, Any], _freeze(feed))
         self._sources = _freeze(context["source_digests"])
+        self._joint = cast(Mapping[str, Any] | None, _freeze(joint))
+        self._joint_comparison_sha = joint_comparison_sha256
         self._receipts: list[dict[str, Any]] = []
         self._reports: set[str] = set()
         self._last_source_end: float | None = None
@@ -303,6 +359,26 @@ class AbbaLedger:
                 or not math.isclose(end - start, elapsed, rel_tol=0, abs_tol=1e-6)
             ):
                 raise ValueError("ABBA workload timing differs")
+        joint_observation = None
+        if self._joint is not None and row["mode"] in {"serial", "overlap"}:
+            if (
+                canonical_digest(
+                    joint_comparison_configuration(
+                        value.get("pipeline_policy", {}),
+                        value["pcm_feed"],
+                    )
+                )
+                != self._joint_comparison_sha
+            ):
+                raise ValueError("ABBA joint comparison configuration differs")
+            binding = self._joint[row["source_group_sha256"]][row["mode"]]
+            joint_observation = validate_finish_report(
+                report=value,
+                mode=row["mode"],
+                pcm_sha256=row["pcm_sha256"],
+                expected_samples=row["samples"],
+                **dict(binding),
+            )
         digest = canonical_digest(value)
         if digest in self._reports:
             raise ValueError("ABBA report reused")
@@ -310,8 +386,94 @@ class AbbaLedger:
         self._reports.add(digest)
         self._last_source_end = offered
         self._receipts.append(
-            {"run_sha256": row["run_sha256"], "status": "completed", "report_sha256": digest}
+            {
+                "run_sha256": row["run_sha256"],
+                "status": "failed"
+                if joint_observation is not None and joint_observation["status"] != "completed"
+                else "completed",
+                "report_sha256": digest,
+                "joint_finish": joint_observation,
+            }
         )
+
+    def _joint_summary(self, condition: str, receipts: Mapping[str, Any]) -> dict[str, Any]:
+        groups = [row["source_group_sha256"] for row in self.registration()["sources"]]
+        if self._joint is None:
+            return {
+                "status": "not_observed",
+                "source_groups": len(groups),
+                "paired_interval_seconds": None,
+                "benefit_supported": False,
+            }
+        outcomes = []
+        for group in groups:
+            runs = [
+                r
+                for r in self._runs
+                if r["condition"] == condition and r["source_group_sha256"] == group
+            ]
+            complete = all(
+                receipts.get(r["run_sha256"], {}).get("status") == "completed" for r in runs
+            )
+            values = {}
+            for mode in ("serial", "overlap"):
+                times = [
+                    receipts.get(r["run_sha256"], {}).get("joint_finish", {})
+                    for r in runs
+                    if r["mode"] == mode
+                ]
+                values[mode] = max(t["finish_seconds"] for t in times) if complete else None
+            outcomes.append({"source_group_sha256": group, **values})
+        failed = sum(r["serial"] is None or r["overlap"] is None for r in outcomes)
+        p95 = {
+            mode: weighted_p95([(1, r[mode]) for r in outcomes]) for mode in ("serial", "overlap")
+        }
+        worst = {
+            mode: None if failed else max(r[mode] for r in outcomes)
+            for mode in ("serial", "overlap")
+        }
+        gates = {
+            mode: "diagnostic_pass"
+            if not failed
+            and p95[mode] is not None
+            and p95[mode] <= latency_policy()["finish_p95_seconds"]
+            and worst[mode] <= latency_policy()["finish_hard_seconds"]
+            else "no-go"
+            for mode in ("serial", "overlap")
+        }
+        interval, difference = None, None
+        if not failed:
+            import numpy as np
+
+            # The same sampled source indices preserve pairing and independent N.
+            serial = np.array([r["serial"] for r in outcomes], dtype=float)
+            overlap = np.array([r["overlap"] for r in outcomes], dtype=float)
+            indices = np.random.Generator(np.random.PCG64(1717)).integers(
+                0, len(groups), size=(10000, len(groups))
+            )
+            rank = (95 * len(groups) + 99) // 100 - 1
+            draws = (
+                np.sort(serial[indices], axis=1)[:, rank]
+                - np.sort(overlap[indices], axis=1)[:, rank]
+            )
+            interval = [float(v) for v in np.quantile(draws, [0.025, 0.975], method="linear")]
+            serial_p95, overlap_p95 = p95["serial"], p95["overlap"]
+            assert serial_p95 is not None and overlap_p95 is not None
+            difference = serial_p95 - overlap_p95
+        return {
+            "status": "no-go" if failed else "diagnostic_not_certified",
+            "source_groups": len(groups),
+            "failed_source_groups": failed,
+            "source_outcomes": outcomes,
+            "serial_p95_seconds": p95["serial"],
+            "overlap_p95_seconds": p95["overlap"],
+            "serial_worst_seconds": worst["serial"],
+            "overlap_worst_seconds": worst["overlap"],
+            "absolute_finish_gate": gates,
+            "primary_difference_seconds": difference,
+            "paired_interval_seconds": interval,
+            "benefit_supported": interval is not None and interval[0] > 0,
+        }
 
     def summary(self) -> dict[str, Any]:
         self._verify()
@@ -331,11 +493,12 @@ class AbbaLedger:
                 "expected_blocks": len(blocks),
                 "complete_blocks": complete,
                 "declared_source_groups": len(plan["sources"]),
+                "joint_finish": self._joint_summary(condition, receipts),
             }
         missing = len(self._runs) - len(receipts)
         failed = sum(r["status"] == "failed" for r in receipts.values())
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "plan_sha256": self._plan_sha,
             "status": "invalid" if missing or failed else "complete_metadata",
             "expected_runs": len(self._runs),

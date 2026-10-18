@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.48"
+version: "3.3.49"
 date: 2026-10-18
 ---
 
@@ -423,7 +423,15 @@ finish期限为源原点加全部源样本时长再加finish预算，因而不�
 
 `observe()` 按登记顺序消费 `run_pcm_workload_schedule` 的宿主报告，核对mode、声明条件、时钟、PCM/feed摘要、完整单/双路lane和已交付样本，拒绝时序矛盾、源供给倒序、报告复用及认证标志升级。接收端不执行负载，不打开模型/音频/参考，不证明回调使用了已声明模型或实际冷热状态。`fail()` 明确保留失败位置，未观察执行仍保留missing；缺单路或任一ABBA位置不得丢弃整个block后只分析成功记录。
 
-`summary()` 仅有invalid或complete_metadata。完整metadata不签发质量不变、绝对延迟、并发收益或调度选择；主量始终为serial-minus-overlap的joint tail-to-final，不能拿含整段供给/清理的callback elapsed替代。paired interval/selected_schedule保持null，quality/footprint未观察，condition setup/runtime/certification保持false。完整联合时序、串行质量与绝对门、真实ASR provenance、精确进程footprint及配对区间仍须独立完成。确定性测试含输出前冻结、真实PCM scheduler四模式的48次合成供给接线，未使用真实音频或模型。
+ABBA登记schema 2可选启用joint明细分析：调用方须同时预登记所有来源serial/overlap的完整pipeline policy及各模式共同配置摘要，另给跨模式共同配置摘要。`joint_comparison_configuration()` 只去掉mode和overlap_enabled，保留其余来源无关pipeline/feed设置，拒绝两模式同时改变超时、分包、队列或实现策略等变量。摘要仅锁声明，不提供生产模型身份的权威证明。未登记joint策略时不计算收益，不能事后凭单独finish秒数补填。
+
+启用joint时，`observe()` 将live pipeline报告交给与FinishCohort共用的 `validate_finish_report()`，核对双水位、正文/稳定标记及确认时序、重算稳定门和finish。结构错误拒绝且不前进；有效但失败的joint执行以failed位置保留。该校验器接收已冻结的期望参数，本身不替代来源catalog审查或runtime attestation。
+
+每个条件独立生成 `conditions.<condition>.joint_finish`：同来源同模式的全部ABBA重复先取最慢finish，再来源等权取离散逆CDF P95；主点量为serial P95减overlap P95。以来源组配对bootstrap，PCG64 seed=1717、10,000次，两个模式共用同一批来源索引；差值取2.5%/97.5%的linear percentile区间。估计量、重复聚合、RNG、区间方法及NumPy版本在输出前进入plan摘要；源码或版本变化拒绝复用。独立N只按来源组计，冷/热不合并成一个区间。各模式同时报告最慢来源、5秒P95及15秒单次硬上限门。
+
+任一单路基线、ABBA位置缺失或failed，该来源保留权重为正无穷，两个模式的区间不计算；即使24组仅一组失败而P95仍有限，也不得通过绝对门。`benefit_supported` 只表示宿主诊断区间下界大于0，不能越过质量、稳定/finish绝对门、ASR/DIA相对门、精确footprint和真实身份前置。不能用含整段供给/清理的callback elapsed替代尾音到双路确认。
+
+`summary()` 顶层仍仅有invalid或complete_metadata，不签发生产质量、并发认证或调度选择；selected_schedule及跨条件primary_benefit_interval_seconds保持null，quality/footprint未观察，condition setup/runtime/certification保持false。确定性测试覆盖预输出冻结、48次四模式PCM scheduler及48次单路/联合live pipeline合成接线、配对常数差、重复最慢值、冷/热分离和缺失分母；未使用真实音频或模型。
 
 ### 有声书外置小说语料回归
 
