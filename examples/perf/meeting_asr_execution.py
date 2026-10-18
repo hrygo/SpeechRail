@@ -21,6 +21,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, get_args, get_origin
 
 from meeting_asr_runtime import (
+    AsrReplayPlan,
     RuntimeDependencyRoots,
     _private_settings,
     prepare_frozen_asr_runtime,
@@ -233,6 +234,7 @@ class _AsrControls:
             self.read(path),
             {
                 "schema_version",
+                "replay",
                 "fixture_id",
                 "service_port",
                 "artifact_root",
@@ -248,13 +250,14 @@ class _AsrControls:
         port = self.lock["service_port"]
         if (
             type(self.lock["schema_version"]) is not int
-            or self.lock["schema_version"] != 1
+            or self.lock["schema_version"] != 2
             or type(port) is not int
             or not 1 <= port <= 65535
             or not isinstance(self.lock["fixture_id"], str)
             or not self.lock["fixture_id"]
         ):
             raise ValueError("ASR evaluation version, port or fixture invalid")
+        self.replay = AsrReplayPlan.from_wire(self.lock["replay"])
         self.port, self.fixture_id = port, self.lock["fixture_id"]
         self.artifact_root = self.bind_path(self.lock["artifact_root"], directory=True)
         if self.artifact_root.is_relative_to(_ROOT):
@@ -420,13 +423,22 @@ async def execute_asr_development(
                 validate_execution_identity(
                     controls.expected_spec, runtime.candidate_spec(language=language).as_dict()
                 )
-                result = await runtime.evaluate(source, controls.expected_spec)
+                result = await runtime.evaluate(
+                    source, controls.expected_spec, replay_plan=controls.replay
+                )
+                if result.get("mode") != controls.replay.mode:
+                    raise ValueError("ASR replay mode differs from registration")
+                if controls.replay.mode == "bounded_long_block_diagnostic" and result.get(
+                    "replay_policy_sha256"
+                ) != canonical_digest(controls.replay.as_dict()):
+                    raise ValueError("ASR long-block policy differs from registration")
             proof = await runtime.verify_closed()
             await join_cleanup(asyncio.create_task(asyncio.to_thread(source.verify)))
             await join_cleanup(asyncio.create_task(asyncio.to_thread(controls.verify)))
             report = {
                 **result,
                 "runtime_freeze": proof,
+                "diagnostic_replay": controls.replay.as_dict(),
                 "runtime_identity_verified": False,
                 "certification_eligible": False,
                 "a0_execution": "not_certified",

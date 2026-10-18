@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 import os
 import stat
 import sys
@@ -32,7 +33,7 @@ from meeting_evaluation_identity import (
     validate_execution_identity,
 )
 from meeting_realtime_asr_replay import realtime_replay_preset, replay_realtime_session
-from probe_meeting_asr_quality import ASR_SCORER, RuntimeObservation
+from probe_meeting_asr_quality import ASR_SCORER, RuntimeObservation, replay_long_blocks
 
 import speechrail.application.services as services_module
 import speechrail.backends.neural_vad as vad_module
@@ -44,6 +45,7 @@ from speechrail.backends.qwen3_native import Qwen3BackendConfig
 from speechrail.backends.qwen3_shared import Qwen3SharedWorker
 from speechrail.backends.qwen3_window import NativeWindowAsrFactory
 from speechrail.config import Settings
+from speechrail.domain.asr_window import WindowIdentity
 from speechrail.infrastructure.voice_registry import FileVoiceRegistry
 from speechrail.runtime.cleanup import join_cleanup
 from speechrail.runtime.server_lock import ServerInstanceLock
@@ -53,6 +55,57 @@ _MAX_FILES = 250_000
 _MAX_BYTES = 128 * 1024**3
 _REPOSITORY = Path(__file__).resolve().parents[2]
 _Stamp = tuple[int, int, int, int, int, int]
+
+
+@dataclass(frozen=True, slots=True)
+class AsrReplayPlan:
+    """Independent, immutable replay choices; never a production policy."""
+
+    mode: str = "formal_realtime_session_diagnostic"
+    block_seconds: int | None = None
+    decode_timeout_seconds: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.mode == "formal_realtime_session_diagnostic":
+            if self.block_seconds is not None or self.decode_timeout_seconds is not None:
+                raise ValueError("formal replay does not accept long-block choices")
+        elif self.mode == "bounded_long_block_diagnostic":
+            if (
+                type(self.block_seconds) is not int
+                or not 1 <= self.block_seconds <= 30
+                or self.decode_timeout_seconds is None
+                or type(self.decode_timeout_seconds) not in (int, float)
+                or not math.isfinite(self.decode_timeout_seconds)
+                or not 0 < self.decode_timeout_seconds <= 300
+            ):
+                raise ValueError("long-block replay requires explicit bounded choices")
+        else:
+            raise ValueError("unknown ASR replay mode")
+
+    @classmethod
+    def from_wire(cls, value: object) -> AsrReplayPlan:
+        if not isinstance(value, dict):
+            raise ValueError("ASR replay plan must be an object")
+        mode = value.get("mode")
+        expected = (
+            {"mode"}
+            if mode == "formal_realtime_session_diagnostic"
+            else {"mode", "block_seconds", "decode_timeout_seconds"}
+        )
+        if set(value) != expected:
+            raise ValueError("ASR replay fields differ from frozen schema")
+        return cls(**value)
+
+    def as_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {"mode": self.mode}
+        if self.mode == "bounded_long_block_diagnostic":
+            result.update(
+                block_seconds=self.block_seconds, decode_timeout_seconds=self.decode_timeout_seconds
+            )
+        return result
+
+
+_FORMAL_REPLAY = AsrReplayPlan()
 
 
 def _guard_path(port: int) -> Path:
@@ -680,8 +733,10 @@ class FrozenAsrRuntime:
         self,
         source: LockedAsrCase,
         spec: MeetingCandidateSpec,
+        *,
+        replay_plan: AsrReplayPlan = _FORMAL_REPLAY,
     ) -> dict[str, Any]:
-        """Use the locked-source guard and unchanged production formal session."""
+        """Run a registered diagnostic over the same guarded private owners."""
         if self._evaluating or self._closing:
             raise ValueError("private ASR runtime permits one replay at a time")
         self._evaluating = True
@@ -697,6 +752,20 @@ class FrozenAsrRuntime:
                 return RuntimeObservation(measured.as_dict(), "runtime_observed")
 
             async def replay(data: Any) -> dict[str, Any]:
+                if replay_plan.mode == "bounded_long_block_diagnostic":
+                    assert replay_plan.block_seconds is not None
+                    assert replay_plan.decode_timeout_seconds is not None
+                    session = self._owners.factory.create(
+                        identity=WindowIdentity("asr-diagnostic", 0, "long-block")
+                    )
+                    return await replay_long_blocks(
+                        data,
+                        spec,
+                        session,
+                        observe=observe,
+                        block_seconds=replay_plan.block_seconds,
+                        decode_timeout_seconds=replay_plan.decode_timeout_seconds,
+                    )
                 return await replay_realtime_session(
                     data,
                     spec,
@@ -712,6 +781,7 @@ class FrozenAsrRuntime:
             return {
                 **result,
                 "runtime_freeze": self.proof(),
+                "a0_execution": "not_certified",
                 "runtime_verification": "preload_files_and_owners_guarded_loaded_bytes_unproven",
             }
         finally:

@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.34"
+version: "3.3.35"
 date: 2026-10-18
 ---
 
@@ -292,7 +292,11 @@ PYTHONPATH=src:examples/perf uv run --no-sync python examples/perf/probe_meeting
   evaluate-development --asr-lock "$ASR_LOCK" --output-directory "$ASR_OUTPUT"
 ```
 
-`meeting_asr_execution.execute_asr_development` 的 schema 1 控制锁必须恰含 schema_version、fixture_id、service_port、artifact_root、manifest、split_lock、scorer_policy、primary_reference、settings、dependencies、candidate_spec。manifest/split_lock/scorer_policy/settings/candidate_spec 各为绝对 JSON 路径与 canonical SHA-256 descriptor；primary_reference 使用前述相对 artifact root 路径与文件字节摘要。dependencies 恰含 host/asr/aligner 三个角色的显式绝对路径数组。JSON 单文件16MiB、总量32MiB；拒绝未知字段、重复键、非有限数、控制/参考文件的符号链接及非普通文件，不提供 holdout 入口。显式 worker Python 与依赖文件允许普通文件符号链接，由 runtime 同时保护链接和目标；模型/依赖目录不允许符号链接，模型真实路径必须在仓库外。
+`meeting_asr_execution.execute_asr_development` 的 schema 2 控制锁必须恰含 schema_version、replay、fixture_id、service_port、artifact_root、manifest、split_lock、scorer_policy、primary_reference、settings、dependencies、candidate_spec。manifest/split_lock/scorer_policy/settings/candidate_spec 各为绝对 JSON 路径与 canonical SHA-256 descriptor；primary_reference 使用前述相对 artifact root 路径与文件字节摘要。dependencies 恰含 host/asr/aligner 三个角色的显式绝对路径数组。JSON 单文件16MiB、总量32MiB；拒绝未知字段、重复键、非有限数、控制/参考文件的符号链接及非普通文件，不提供 holdout 入口。显式 worker Python 与依赖文件允许普通文件符号链接，由 runtime 同时保护链接和目标；模型/依赖目录不允许符号链接，模型真实路径必须在仓库外。
+
+`replay` 通过不可变 `AsrReplayPlan` 显式选择诊断路径。正式 Realtime 模式恰含 `mode=formal_realtime_session_diagnostic`；同权重长块模式恰含 `mode=bounded_long_block_diagnostic/block_seconds/decode_timeout_seconds`，块长为1–30秒非bool整数，每次decode时限为0到300秒之间的有限正数，不接受bool。长块只按音频样本固定网格，context为空，不使用参考正文、活动边界或分人输出形成输入。旧schema 1执行锁拒绝，不能隐式选择正式路径；必须先重新登记schema 2的计划和相关候选身份。
+
+两个模式复用相同冻结生产owner/config与来源守卫。长块在同一已ready window factory创建诊断session，由既有replay_long_blocks关闭；root加入回放后再清理ASR/aligner。模型candidate身份描述冻结模型与配置，mode及长块预算由独立控制锁、diagnostic_replay和replay_policy_sha256绑定；同一权重的两条路径不被解释为同一生产行为。执行器拒绝结果mode或长块policy与计划不符。长块结果仅用于定位切块/VAD/上下文损失，不构成可上线候选、实际A0或延迟认证；两模式仍需关闭后核验才能提交。
 
 settings 只从控制文档的显式值和代码默认值构造，关闭 environment/dotenv/secrets sources，拒绝未知字段和服务密钥；环境变量也不能通过 legacy validator 补值或改变判断。服务端口必须与 settings.port 一致，host 为127.0.0.1。执行前先验证 development 来源和独立主参考，再获取同一用户/声明端口的排他锁；两个私有 ASR/aligner child 显式继承锁 FD。锁持续到两个 child 退出，父级仅 close、不执行 LOCK_UN；该锁不证明其他端口没有实例。
 

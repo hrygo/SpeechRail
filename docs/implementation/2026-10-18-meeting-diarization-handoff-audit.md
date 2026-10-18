@@ -491,3 +491,13 @@ JSON输入总量32MiB、单文件16MiB；评分前后与partial之后复核输�
 最初18项测试在模块缺失时RED，再GREEN；随后补取消join、最后校验期间partial变化、输出目录替换、既有目录保护/总预算、禁止打开音频或启动进程，以及CLI隔离分派/错误隐私。正式OpenAIRealtimeSession合成报告原样输入的集成用例先RED，发现mode尚未包含formal_realtime_session_diagnostic，补齐后GREEN，不修改生产报告。七个ASR相关文件联合 `310 passed in 11.46s`，四个Python Ruff、两个source strict/follow-imports=silent Mypy通过。无真实音频/模型、benchmark、下载、服务/安装、UI、发布或合并操作。旧spec需因CLI执行源码变化重新冻结。父7905a111原生CI39096529214成功，主CI39096529300仍运行，新提交单独核验。
 
 提交前补充coverage_samples拒绝bool，离线入口与CLI两文件最新 `32 passed in 0.36s`，四Python Ruff、两source Mypy和compare-development --help通过；前述310项是加入该类型守卫前的联合证据。图谱四个新/改source/test均missing，直接复核当前源码，未重建索引。
+
+## T8 同一冻结模型的正式与长块诊断接线
+
+2026-10-18：确认已有replay_long_blocks库尚未接通私有root/执行入口，新增不可变AsrReplayPlan与schema 2执行锁replay字段。正式模式显式登记，长块模式冻结1–30秒块长与有限正数≤300秒的逐decode时限。旧schema 1锁拒绝，不隐式升级；相关spec/controls需重新冻结。模型candidate身份保持描述同一模型配置，实际重放mode/预算另由控制锁、diagnostic_replay及replay_policy摘要绑定。
+
+root使用同一ready window factory创建长块session，沿用既有纯PCM网格、空context与逐attempt录证；source守卫、单回放约束、全量配置/字节核验、后台取消join及两个owned child关闭后守卫均复用。长块session由replay库关闭，driver核对返回mode/policy；错误或取消不提交。两种模式都保持a0_execution=not_certified及runtime/certification=false，长块不是可上线候选。
+
+正式/长块执行用例先因新锁缺入口RED，再GREEN。新增注册计划/非法预算/旧schema拒绝、一采样尾包、mode/policy篡改与同模型同PCM两路径对照；原root的来源→实际factory/session回归扩展到两模式，覆盖权重/依赖/源码/generation变更及后台取消。134项root+driver在补最后三个集成用例前通过；最终联合验证见后续记录。没有真实音频/模型、benchmark、下载、服务/安装、UI、发布或合并操作。父71eef764原生CI39096827560成功，主CI39096827567仍运行，新提交另行核验。
+
+最终七个ASR相关文件联合 `331 passed in 13.28s`；四个Python Ruff、两个source strict/follow-imports=silent Mypy与diff检查通过。同PCM的合成正式CER=0、长块CER=1按规则不能判改善，未因接通新路径而放宽诊断门。图谱六个相关source/test missing，当前worktree源码直接复核，无索引重建。

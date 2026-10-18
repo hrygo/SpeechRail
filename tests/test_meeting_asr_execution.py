@@ -75,7 +75,8 @@ def execution_case(tmp_path, runtime_setup):  # noqa: F811
         )
     )
     lock = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "replay": {"mode": "formal_realtime_session_diagnostic"},
         "fixture_id": "M0",
         "service_port": state.settings.port,
         "artifact_root": str(root),
@@ -727,3 +728,127 @@ def test_invalid_control_version_cannot_start_or_create_output(tmp_path, version
             execute_asr_development(evaluation_lock=lock, output_directory=tmp_path / "output")
         )
     assert not (tmp_path / "output").exists()
+
+
+def test_preregistered_long_block_uses_same_private_owner_and_locked_source(execution_case):
+    data = execution_case
+    data.lock["replay"] = {
+        "mode": "bounded_long_block_diagnostic",
+        "block_seconds": 1,
+        "decode_timeout_seconds": 30,
+    }
+    save_lock(data)
+    result = execute(data)
+    assert result["mode"] == "bounded_long_block_diagnostic"
+    assert result["candidate_sha256"] == canonical_digest(data.documents["candidate_spec"])
+    assert result["source_validation"]["bytes_verified"] is True
+    assert result["coverage_samples"] == result["expected_samples"]
+    assert result["quality_evidence_valid"] is True
+    assert result["diagnostic_replay"] == data.lock["replay"]
+    assert result["runtime_freeze"]["owned_children_reaped"] is True
+    assert sorted(name for name, _ in data.state.closed) == ["aligner", "asr"]
+    assert data.state.created[0].window_asr_factory._session is None
+    assert result["certification_eligible"] is False
+    calls = result["decode_evidence"]["attempts"]
+    assert len(calls) == 2  # 16001 samples: a full second and one-sample tail.
+    assert all(row["end_sample"] - row["start_sample"] <= 16000 for row in calls)
+    assert result["replay_policy_sha256"] == canonical_digest(data.lock["replay"])
+
+
+@pytest.mark.parametrize(
+    "replay",
+    [
+        {},
+        {"mode": "unknown"},
+        {"mode": "formal_realtime_session_diagnostic", "block_seconds": 1},
+        {"mode": "bounded_long_block_diagnostic"},
+        {
+            "mode": "bounded_long_block_diagnostic",
+            "block_seconds": True,
+            "decode_timeout_seconds": 30,
+        },
+        {
+            "mode": "bounded_long_block_diagnostic",
+            "block_seconds": 31,
+            "decode_timeout_seconds": 30,
+        },
+        {"mode": "bounded_long_block_diagnostic", "block_seconds": 0, "decode_timeout_seconds": 30},
+        {
+            "mode": "bounded_long_block_diagnostic",
+            "block_seconds": 1,
+            "decode_timeout_seconds": 301,
+        },
+        {
+            "mode": "bounded_long_block_diagnostic",
+            "block_seconds": 1,
+            "decode_timeout_seconds": True,
+        },
+    ],
+)
+def test_invalid_replay_plan_fails_before_model_loading(execution_case, replay):
+    data = execution_case
+    data.lock["replay"] = replay
+    save_lock(data)
+    with pytest.raises(ValueError):
+        execute(data)
+    assert not data.state.created
+    assert_no_result(data)
+
+
+def test_schema_one_cannot_silently_choose_formal_replay(execution_case):
+    data = execution_case
+    data.lock["schema_version"] = 1
+    del data.lock["replay"]
+    save_lock(data)
+    with pytest.raises(ValueError):
+        execute(data)
+    assert not data.state.created
+    assert_no_result(data)
+
+
+@pytest.mark.parametrize("field", ["mode", "replay_policy_sha256"])
+def test_long_block_result_must_match_registered_replay(execution_case, monkeypatch, field):
+    data = execution_case
+    data.lock["replay"] = {
+        "mode": "bounded_long_block_diagnostic",
+        "block_seconds": 1,
+        "decode_timeout_seconds": 30,
+    }
+    save_lock(data)
+    original = data.state.module.replay_long_blocks
+
+    async def mismatched(*args, **kwargs):
+        report = await original(*args, **kwargs)
+        report[field] = "wrong-replay"
+        return report
+
+    monkeypatch.setattr(data.state.module, "replay_long_blocks", mismatched)
+    with pytest.raises(ValueError):
+        execute(data)
+    assert_no_result(data)
+    assert sorted(name for name, _ in data.state.closed) == ["aligner", "asr"]
+
+
+def test_formal_and_long_block_reports_compare_with_same_frozen_model_and_pcm(execution_case):
+    from probe_meeting_asr_quality import compare_asr_runs
+
+    data = execution_case
+    formal = execute(data)
+    data.output = data.output.parent / "long-block-output"
+    data.lock["replay"] = {
+        "mode": "bounded_long_block_diagnostic",
+        "block_seconds": 1,
+        "decode_timeout_seconds": 30,
+    }
+    save_lock(data)
+    long = execute(data)
+    assert formal["weights_sha256"] == long["weights_sha256"]
+    assert formal["candidate_sha256"] == long["candidate_sha256"]
+    assert formal["case_sha256"] == long["case_sha256"]
+    assert formal["replay_policy_sha256"] != long["replay_policy_sha256"]
+    result = compare_asr_runs([formal], [long], policy=policy())
+    assert result["paired_cer"]["groups"] == 1
+    assert result["baseline_macro_cer"] == 0
+    assert result["candidate_macro_cer"] == 1
+    assert result["development_text_gate"] == "fail"
+    assert result["certification_eligible"] is False

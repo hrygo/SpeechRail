@@ -1072,11 +1072,12 @@ def test_directory_symlinks_fail_closed_and_file_symlinks_bind_target(runtime_se
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("long_blocks", [False, True])
 @pytest.mark.parametrize(
     "mutate", [None, "asr", "dependency", "source", "generation", "background_cancel"]
 )
 def test_locked_source_flows_through_production_session_with_measured_spec(
-    runtime_setup, tmp_path, monkeypatch, mutate
+    runtime_setup, tmp_path, monkeypatch, mutate, long_blocks
 ):
     import wave
 
@@ -1088,7 +1089,13 @@ def test_locked_source_flows_through_production_session_with_measured_spec(
     from test_meeting_realtime_asr_replay import case
 
     state = runtime_setup
-    original_replay = state.module.replay_realtime_session
+    plan = (
+        state.module.AsrReplayPlan("bounded_long_block_diagnostic", 1, 30)
+        if long_blocks
+        else state.module.AsrReplayPlan()
+    )
+    replay_name = "replay_long_blocks" if long_blocks else "replay_realtime_session"
+    original_replay = getattr(state.module, replay_name)
     entered, release, context_closing = asyncio.Event(), asyncio.Event(), asyncio.Event()
     original_request = Qwen3SharedWorker.request
 
@@ -1115,7 +1122,7 @@ def test_locked_source_flows_through_production_session_with_measured_spec(
             target.write_bytes(target.read_bytes() + b"changed after replay")
         return result
 
-    monkeypatch.setattr(state.module, "replay_realtime_session", replay_then_mutate)
+    monkeypatch.setattr(state.module, replay_name, replay_then_mutate)
     fixture_root = tmp_path / "fixture"
     fixture_root.mkdir()
     manifest, split = inputs(fixture_root)
@@ -1169,7 +1176,7 @@ def test_locked_source_flows_through_production_session_with_measured_spec(
                 },
             )
             if mutate == "background_cancel":
-                background = asyncio.create_task(runtime.evaluate(locked, spec))
+                background = asyncio.create_task(runtime.evaluate(locked, spec, replay_plan=plan))
                 await asyncio.wait_for(entered.wait(), 3)
                 original_finish = runtime._finish
 
@@ -1188,9 +1195,9 @@ def test_locked_source_flows_through_production_session_with_measured_spec(
                 release_task = asyncio.create_task(finish_decode_after_context_cancels())
             elif mutate is not None:
                 with pytest.raises(ValueError, match=r"runtime (bytes|owner)"):
-                    await runtime.evaluate(locked, spec)
+                    await runtime.evaluate(locked, spec, replay_plan=plan)
             else:
-                result = await runtime.evaluate(locked, spec)
+                result = await runtime.evaluate(locked, spec, replay_plan=plan)
                 assert result["source_validation"]["bytes_verified"] is True
                 assert result["quality_evidence_valid"] is True
                 assert result["actual_decode_calls"] > 0
