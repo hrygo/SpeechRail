@@ -524,10 +524,18 @@ def test_lease_lock_protects_against_eviction() -> None:
     asyncio.run(run())
 
 
-def test_min_uptime_guard_protects_freshly_loaded_worker() -> None:
+def test_min_uptime_guard_protects_freshly_loaded_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A worker that just loaded (lazy start / restart) is not evicted
     before min_uptime_seconds even if the idle timeout already elapsed."""
+    from types import SimpleNamespace
+
+    import speechrail.runtime.worker_lease as module
     from speechrail.runtime.worker_lease import WorkerLifecycleState
+
+    now = [100.0]
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: now[0]))
 
     class _LazyWorker:
         def __init__(self) -> None:
@@ -539,6 +547,19 @@ def test_min_uptime_guard_protects_freshly_loaded_worker() -> None:
             self.alive = False
 
     async def run() -> None:
+        ticks: asyncio.Queue[float] = asyncio.Queue()
+        scanned: asyncio.Queue[float] = asyncio.Queue()
+
+        async def scan_tick(seconds: float) -> None:
+            # Arriving at the next sleep acknowledges completion of the entire
+            # preceding scan, including joined close. No scheduler wall time
+            # can shift the simulated first-load observation or guard boundary.
+            scanned.put_nowait(now[0])
+            now[0] = await ticks.get()
+
+        monkeypatch.setattr(
+            module, "asyncio", SimpleNamespace(**{**vars(asyncio), "sleep": scan_tick})
+        )
         worker = _LazyWorker()
         evictor = WorkerIdleEvictor(
             (worker,),
@@ -549,17 +570,21 @@ def test_min_uptime_guard_protects_freshly_loaded_worker() -> None:
         )
         await evictor.start()
         try:
+            await asyncio.wait_for(scanned.get(), 1)
             # Simulate the first request loading the worker (lazy start).
             worker.alive = True
-
-            # Past the idle timeout (0.03s) but still inside min_uptime (0.15s):
-            # the guard must hold eviction off.
-            await asyncio.sleep(0.07)
+            # First polling can be arbitrarily delayed. Uptime starts when the
+            # monitor observes the load, not when this test sets alive=True.
+            ticks.put_nowait(100.08)
+            await asyncio.wait_for(scanned.get(), 1)
+            ticks.put_nowait(100.229)  # idle > 0.03, observed uptime < 0.15.
+            await asyncio.wait_for(scanned.get(), 1)
             assert worker.closed is False
             assert evictor.state_of(worker) == WorkerLifecycleState.ACTIVE
 
             # Once min_uptime elapses and idle persists -> eviction proceeds.
-            await asyncio.sleep(0.12)
+            ticks.put_nowait(100.231)
+            await asyncio.wait_for(scanned.get(), 1)
             assert worker.closed is True
             assert evictor.state_of(worker) == WorkerLifecycleState.COLD_EVICTED
         finally:
