@@ -1253,6 +1253,64 @@ def test_worker_rejects_unknown_session_audio() -> None:
     assert errors[0]["session_id"] == "ghost"
 
 
+@pytest.mark.parametrize("fail_first", [False, True])
+def test_worker_flush_releases_idle_cache_and_preserves_streaming_state(
+    monkeypatch: pytest.MonkeyPatch,
+    fail_first: bool,
+) -> None:
+    class PreviewEngine(_FakeEngine):
+        preview_calls = 0
+
+        def partial_text(self, session_id: str) -> str:
+            self.preview_calls += 1
+            if fail_first and self.preview_calls == 1:
+                raise RuntimeError("synthetic preview failure")
+            return super().partial_text(session_id)
+
+    engine = PreviewEngine(Path("/tmp"), "mps", "float16", 512)
+    retained_samples: list[int | None] = []
+
+    def trim() -> None:
+        retained_samples.append(engine.decoded_samples("s") if engine.has_session("s") else None)
+
+    monkeypatch.setattr(worker_module, "_clear_metal_cache", trim)
+    responses = _run_serve(
+        [
+            _start_frame(),
+            {
+                "version": PROTOCOL_VERSION,
+                "type": "session.open",
+                "session_id": "s",
+                "language": "zh",
+            },
+            {
+                "version": PROTOCOL_VERSION,
+                "type": "audio.append",
+                "session_id": "s",
+                "pcm_b64": "AAA=",
+            },
+            {"version": PROTOCOL_VERSION, "type": "flush", "session_id": "s"},
+            {
+                "version": PROTOCOL_VERSION,
+                "type": "audio.append",
+                "session_id": "s",
+                "pcm_b64": "AAA=",
+            },
+            {"version": PROTOCOL_VERSION, "type": "flush", "session_id": "s"},
+            {"version": PROTOCOL_VERSION, "type": "commit", "session_id": "s"},
+        ],
+        engine=engine,
+    )
+    assert retained_samples == [1, 2, None]
+    partials = [v for v in responses if v.get("kind") == "partial"]
+    assert [v["sample_watermark"] for v in partials] == ([2] if fail_first else [1, 2])
+    assert partials[-1]["text"] == "partial:2"
+    completed = [v for v in responses if v.get("kind") == "completed"]
+    assert len(completed) == 1 and completed[0]["text"] == "text:2"
+    assert len([v for v in responses if v["type"] == "error"]) == int(fail_first)
+    assert engine.active_session_count() == 0
+
+
 def test_worker_trim_memory_does_not_emit_confirmation_frame() -> None:
     engine = _FakeEngine(Path("/tmp"), "mps", "float16", 512)
     transcribe = {

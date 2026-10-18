@@ -985,7 +985,11 @@ def serve(
         elif kind == "audio.append":
             _handle_audio_append(frame, output_stream, engine)
         elif kind == "flush":
-            _handle_flush(frame, output_stream, engine)
+            try:
+                _handle_flush(frame, output_stream, engine)
+            finally:
+                # Keep live decoder state while releasing unused preview allocations.
+                _clear_metal_cache()
         elif kind == "commit":
             _handle_commit(frame, output_stream, engine)
             _clear_metal_cache()
