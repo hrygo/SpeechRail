@@ -244,7 +244,11 @@ def serve(
             return
         kind = frame.get("type")
         if kind == "align_text":
-            _handle_align_text(frame, output_stream, engine)
+            try:
+                _handle_align_text(frame, output_stream, engine)
+            finally:
+                # Request-local tensors have left scope; retain weights, not idle allocations.
+                _clear_metal_cache()
         elif kind == "shutdown":
             return
         elif kind == "trim_memory":

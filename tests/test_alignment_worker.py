@@ -114,6 +114,39 @@ def test_alignment_worker_serves_fixed_text_and_rejects_asr_frames(tmp_path: Pat
     assert read_frame(output) is None
 
 
+@pytest.mark.parametrize("fail_first", [False, True])
+def test_alignment_worker_releases_temporary_cache_between_requests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_first: bool
+) -> None:
+    calls: list[str] = []
+
+    class TrackingEngine(_FakeEngine):
+        def align_text(self, audio: bytes, *, text: str, language: str) -> list[dict[str, object]]:
+            calls.append("align")
+            if fail_first and len(calls) == 1:
+                raise RuntimeError("synthetic alignment failure")
+            return super().align_text(audio, text=text, language=language)
+
+    monkeypatch.setattr(alignment_worker_module, "_clear_metal_cache", lambda: calls.append("trim"))
+    model_dir = tmp_path / "aligner"
+    output = _run_serve(
+        _start_frame(model_dir)
+        + _align_frame("r1")
+        + _align_frame("r2")
+        + encode_frame({"version": PROTOCOL_VERSION, "type": "shutdown"}),
+        TrackingEngine(),
+        model_dir,
+    )
+    assert calls == ["align", "trim", "align", "trim"]
+    assert read_frame(output)["type"] == "ready"
+    first = read_frame(output)
+    assert first["request_id"] == "r1"
+    assert first["type"] == ("error" if fail_first else "align_result")
+    second = read_frame(output)
+    assert second["request_id"] == "r2" and second["type"] == "align_result"
+    assert read_frame(output) is None
+
+
 def test_alignment_worker_preserves_collapsed_and_invalid_vendor_times(
     tmp_path: Path,
 ) -> None:
