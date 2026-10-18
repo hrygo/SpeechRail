@@ -293,7 +293,10 @@ def test_runner_state_is_inactive_after_the_runner_task_fails() -> None:
 
         life = RuntimeLifecycle(runner=FailingRunner(), poll_seconds=0.01)
         await life.start()
-        await asyncio.sleep(0.05)
+        task = life._runner_task
+        assert task is not None
+        with pytest.raises(RuntimeError):
+            await task
         assert life.runner_state == "inactive"
         with pytest.raises(ExceptionGroup):
             await life.close()
@@ -303,6 +306,7 @@ def test_runner_state_is_inactive_after_the_runner_task_fails() -> None:
 
 def test_runner_state_is_inactive_while_cancellation_is_pending() -> None:
     async def run() -> None:
+        cancelled = asyncio.Event()
         release = asyncio.Event()
 
         class StubbornRunner:
@@ -310,6 +314,7 @@ def test_runner_state_is_inactive_while_cancellation_is_pending() -> None:
                 try:
                     await asyncio.sleep(3600)
                 except asyncio.CancelledError:
+                    cancelled.set()
                     await release.wait()
                     raise
                 return False
@@ -318,7 +323,7 @@ def test_runner_state_is_inactive_while_cancellation_is_pending() -> None:
         await life.start()
         assert life.runner_state == "active"
         closing = asyncio.create_task(life.close())
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(cancelled.wait(), timeout=1)
         # Cancellation is already requested: no new work will be claimed even
         # though the processor has not finished unwinding yet.
         assert life.runner_state == "inactive"

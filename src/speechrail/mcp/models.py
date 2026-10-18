@@ -118,7 +118,9 @@ class JobsStatus(BaseModel):
     ``runner_state`` is the authoritative runner lifecycle reported by the
     service. ``unknown`` means the service did not report it, which must stay
     distinct from ``inactive``: a proxy that cannot observe the runner must not
-    present a stopped runner as fact.
+    present a stopped runner as fact. ``active`` only asserts that the runner
+    task is alive and polling; it does not promise that any individual job will
+    succeed.
     """
 
     model_config = ConfigDict(extra="allow")

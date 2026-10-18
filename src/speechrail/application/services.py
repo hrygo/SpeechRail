@@ -613,8 +613,17 @@ class AppServices:
 
     @property
     def job_runner_state(self) -> Literal["unconfigured", "inactive", "active"]:
-        """Return the authoritative durable-job runner lifecycle state."""
-        return self.lifecycle.runner_state
+        """Return the authoritative durable-job runner lifecycle state.
+
+        Spool readiness and runner state must never contradict each other: no
+        repository means ``unconfigured`` even if a lifecycle object was
+        injected without a runner, and a configured repository without a runner
+        is ``inactive`` rather than ``unconfigured``.
+        """
+        if self.job_repository is None:
+            return "unconfigured"
+        state = self.lifecycle.runner_state
+        return "inactive" if state == "unconfigured" else state
 
     @property
     def _asr_configured(self) -> bool:
