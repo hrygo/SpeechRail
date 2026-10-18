@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.51"
+version: "3.3.52"
 date: 2026-10-18
 ---
 
@@ -449,9 +449,44 @@ schedule schema和scorer摘要变化后，旧控制锁、候选spec及ABBA计划
 
 结果仅包含PID、启动token、物理字节、一次读取区间和该区间的逐进程读数总和。默认允许跨度1秒、配置上限5秒；这是结束后的有效性检查，不能中断正在进行的内核调用，也不形成硬墙钟超时。顺序读取不是原子快照，两遍核验不能发现所有短命进程/瞬时变化，采样间峰值亦未覆盖；atomic_snapshot_verified/peak_footprint_verified/worker_reaping_verified/certification_eligible始终false。
 
-此入口不自动开启后台监控，也未接入ABBA的footprint门。后续受控runner须绑定精确owner、在独立观察执行域中采集并joined清理，登记冷启动/稳态/静音恢复/重叠/finish-cancel等窗口、跨度、开销、失败与遗漏；不得把单次读数或各进程不同时间的最大值之和用作真实峰值或resident声明。现有通用 `ProcessResourceMonitor` 保持其独立行为，不作为该入口的发现器。
+此入口不自动开启后台监控，也未接入ABBA的footprint门。受控runner须绑定精确owner，并显式使用下述阶段观察器；不得把单次读数或各进程不同时间的最大值之和用作真实峰值或resident声明。现有通用 `ProcessResourceMonitor` 保持其独立行为，不作为该入口的发现器。
 
 确定性测试使用注入libproc和进程树。另有仅对验证脚本自身的单次原生只读smoke，确认FFI、生命周期一致与物理字段可读；它不采样SpeechRail/模型进程、不运行会议负载、不提供E3或峰值证据。
+
+### 会议进程树阶段观察
+
+`meeting_process_observer.observe_process_phases` 在同步构造时复制根生命周期和预登记阶段序列，在显式进入异步上下文时才启动采样。调用方提供reader和当次owned根；观察器不发现、启动或回收模型。首次读取尝试完成后才交还控制权，失败样本仍保留。每个观察器使用独立单线程executor，原生读取不占用ASR事件循环；退出通过共享 `join_cleanup` 等待已开始的读取与executor线程结束，重复取消不能遗留线程。读取跨度预算不能中断原生调用，退出可能等待该调用返回，不承诺硬墙钟截止。
+
+阶段槽位可重复，按注册顺序逐一推进，最多64槽；允许cold_start、steady_state、silence_recovery、overlap、finish和cancel。实际阶段边界由受控runner标记，不从模式名推断冷/热状态。结束或预算耗尽后拒绝新阶段标记。示例中的 `owned_roots`、`reader` 和负载函数均由已授权的runner提供：
+
+```python
+from meeting_process_observer import observe_process_phases
+
+context = observe_process_phases(
+    roots=owned_roots,
+    reader=reader,
+    phases=("cold_start", "steady_state", "finish"),
+)
+async with context as observation:
+    await controlled_load()
+    observation.advance_phase("steady_state")
+    await controlled_workload()
+    observation.advance_phase("finish")
+    await controlled_finish()
+resource_report = observation.report()
+```
+
+策略限制为每次最多4096个样本、每样本最多64进程、采样间隔0.01–5秒、读跨度0.001–5秒。间隔在前次读取返回后计算，不补发积压tick，不假设均匀采样。报告保留逐次宿主起止、读跨度、逐进程 `[pid, start_abstime, phys_footprint_bytes]`、失败和跨阶段记录；observer_span包含派发、读取及事件循环恢复等待，不等于CPU开销或已隔离的测量扰动。跨阶段读取不计入任一阶段覆盖；未进入/无有效样本的阶段保留空值，失败不填零，预算耗尽或监控故障保持incomplete_metadata，reader来源变化亦拒收。
+
+全部注册槽有有效样本且无读取失败、预算耗尽和监控故障时，状态仅为complete_metadata。每阶段最大值只是有效顺序样本总和的已观察最大值；报告始终不宣称原子快照、真实峰值、worker回收、运行身份或认证通过。阶段报告含进程元数据，真实制品保留在仓库外，不进入公开审计。ABBA footprint仍为not_observed；精确owner/负载接线、完整场景矩阵、测量扰动及授权实跑仍需单独验证，不据此修改resident声明。
+
+合成验证命令（不执行原生reader、模型或音频）：
+
+```sh
+PYTHONPATH=src:examples/perf uv run --no-sync pytest \
+  tests/test_meeting_process_observer.py tests/test_meeting_process_snapshot.py \
+  tests/test_profile_metrics.py tests/test_resource_sampling.py --no-cov
+```
 
 ### 有声书外置小说语料回归
 

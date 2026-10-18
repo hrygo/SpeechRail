@@ -715,3 +715,12 @@ ABBA校验schema/原点/时刻与source一致，拒绝返回早于源末端、�
 初始12项缺模块RED后GREEN；嵌套根按子级优先传入的反例另先RED，改为实际祖先深度顺序复核后GREEN。三个相关文件45 passed in0.08s，二Python Ruff、一source Mypy通过。xcrun clang仅fsyntax-only静态断言验证sizeof96及physical/start/exit偏移72/80/88，无构建制品。另对验证脚本自身做一次native只读smoke，生命周期一致、physical字段可读、跨度有效；未输出PID或真实内存数值。这是FFI验证，不是会议/模型进程资源基准。
 
 父09eee274八项PR checks success/completed。图谱旧通用资源文件metadata_match，新collector/tests missing，直接复核源码，无重建。未执行真实语料解码、模型或会议benchmark、下载、服务/安装/UI/发布/合并。ABBA footprint仍not_observed，尚需owned根接线、独立观察域、阶段窗口与开销/失败记录和授权实跑；E3与真实质量/最终联合身份未验，#370及完整目标继续。
+
+
+## T6 独立阶段资源观察与取消清理
+
+2026-10-18：新增显式opt-in的meeting_process_observer。同步构造冻结exact roots、reader来源和预登记阶段；异步进入后用专用单线程executor读现有snapshot，首次尝试完成才交还负载控制。按注册顺序推进最多64阶段，分别保留宿主窗口、逐次读跨度与派发/读取/恢复总跨度、整数bytes及生命周期三元组；跨阶段样本保留但不供阶段覆盖，失败/缺阶段/预算耗尽不填零或删除分母。上限4096样本×64进程，结束或预算耗尽拒绝新阶段。退出复用join_cleanup，等待已开始的读取及executor shutdown，反复取消不能遗留线程；原生调用不能强制中断，不作硬墙钟关闭承诺。
+
+初始14测试缺模块RED后GREEN；来源改变不能混入注册证据、预算耗尽不得接受阶段标记各另先RED再GREEN。四相关文件61 passed in0.17s，二Python Ruff、一source strict Mypy通过。覆盖阶段有效/遗漏、失败脱敏、跨阶段、预算、配置复制、非法策略、启动及运行中重复取消与线程join。所有进程树/读取均注入；本轮没有原生进程采样、真实音频解码、模型或benchmark运行。新文件图谱freshness missing，直接复核worktree，没有重建索引。父5772596f八项PR checks均success/completed。
+
+complete_metadata只表示注册槽的采样元数据覆盖，不代表完整场景矩阵、峰值或认证；atomic/peak/reaping/runtime identity/certification均保持false。ABBA footprint仍not_observed，尚需精确owner与受控负载接线、扰动评估、完整场景矩阵及获准实跑。没有修改resident或服务/安装/UI/发布/合并状态；真实开发评测授权尚待回复。E3、真实CER/人数/P95与最终生产联合身份仍未验，#370未完成，完整目标继续。
