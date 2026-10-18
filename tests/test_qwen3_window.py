@@ -328,6 +328,33 @@ def serve_window_frames(changes=None, *, engine_cap=512):
     return frames
 
 
+@pytest.mark.parametrize("fail_decode", [False, True])
+def test_window_decode_clears_idle_cache_before_close_without_discarding_preview(
+    monkeypatch, fail_decode,
+):
+    import speechrail.backends.qwen3_worker as worker
+
+    decode = Qwen3Engine.decode_window
+    current = {}
+    retained = []
+
+    def observed_decode(instance, request):
+        current["engine"] = instance
+        if fail_decode:
+            raise RuntimeError("synthetic window decode failure")
+        return decode(instance, request)
+
+    def clear_cache():
+        retained.append(getattr(current["engine"], "_window_preview", None) is not None)
+
+    monkeypatch.setattr(Qwen3Engine, "decode_window", observed_decode)
+    monkeypatch.setattr(worker, "_clear_metal_cache", clear_cache)
+    frames = serve_window_frames({"kind": "preview"})
+    assert retained == [not fail_decode, False]
+    assert frames[1]["type"] == ("error" if fail_decode else "window.result")
+    assert frames[2]["type"] == "window.closed"
+
+
 def test_window_binary_ipc_reports_capability_result_then_real_close_ack():
     frames = serve_window_frames()
     assert frames[0]["capabilities"] == ["window_decode_v1"]

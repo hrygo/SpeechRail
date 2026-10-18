@@ -974,8 +974,9 @@ def serve(
             return
         kind = frame.get("type")
         if kind in ("window.decode", "window.close"):
-            _handle_window(frame, output_stream, engine)
-            if kind == "window.close":
+            try:
+                _handle_window(frame, output_stream, engine)
+            finally:
                 _clear_metal_cache()
         elif kind == "transcribe":
             _handle_transcribe(frame, output_stream, engine, identity)

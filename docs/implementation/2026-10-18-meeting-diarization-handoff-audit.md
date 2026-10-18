@@ -1519,3 +1519,14 @@ managed窗口先确认无请求/客户端，再停服；两个原生子进程终
 2026-10-19：`ba2a76f4`远端Python、质量、App构建、独立候选fake及wheel门成功，但Swift package任务失败。原日志确认唯一失败用例为`oneReadingRunKeepsPositionHonestAcrossEveryScenario`：掉线后释放占用和回到manual的两次等待各耗尽200次`Task.yield()`，随后的phase仍为uncertain。保留workflow 39171796423的失败记录；同一用例本机单跑通过，不能因此忽略CI失败，也不能把200次调度机会视为跨runner的等待时长。
 
 只修改该测试文件的私有`waitFor`：继续等待实际异步条件，使用ContinuousClock的10秒截止作防挂看门狗；1ms间隔仅限制轮询工作量，不作为状态成立或性能断言。保留超时Issue.record，取消也显式记录失败。条件可跨actor读取，未增加生产API、放松断言或改变提词器行为。84项该类测试通过，完整本机Swift package通过（XCTest 1757项、1项既有跳过、0失败；Swift Testing 658项、0失败）。临时加入始终false的状态条件，短看门狗必须以等待超时失败；验证后源码逐字恢复，没有保留预期失败用例或静默放行。未接管UI、采集屏幕或加载模型。
+
+
+## 窗口解码请求后的闲置缓存释放
+
+2026-10-19：针对上一对照定位的opt-in路径ASR驻留，仅修改Qwen worker的window.decode/window.close分支：处理函数离开时用finally复用既有闲置缓存清理。保留权重、活跃decoder state与PCM，不卸载模型、不改变模式默认、配置或预算。两个fake反例在旧实现失败，修复后覆盖成功预览状态保留、失败请求清理及随后正常window.close确认；worker、window和backend相关定向回归及Ruff通过。
+
+复用上一轮已完整完成、0缺样的窗口arm作基线，固定同一001的123.41秒输入、Qwen/aligner/C0和请求，仅补跑缓存候选一次。两个冻结生产Python树仅qwen3_worker.py不同。原始配置摘要因独立源码根不同；cold无模型重建精确复现各自登记摘要，仅统一源码根后完整配置摘要及每个字段相同。两arm均完整输入、10个正式ASR、10个对齐、82个sealed事务、73个updated快照、0失败；按拥有区间排序的正式正文和区间完全一致，派生错误仍35/515。封存正文、owned span、review scope和state一致；对齐比较只剔除跨会话随机segment_uid，其余全部字段一致。原生活动、概率与slot逐项相同。预览事件只保存文字长度，不声明预览正文逐字一致。
+
+250ms物理footprint采样无缺tick，进程树观察最大和10297172464→8072208736字节（下降21.61%），ASR采样中位数5350280384→2815413392字节（下降47.38%）。采样为顺序读取，不是原子物理峰值或跨硬件预算认证。非空sealed事务的源采样封存边界至服务发出延迟中位数2.45540→2.46863秒（增加13.22ms）、片内P95 3.26401→3.22950秒；非空snapshot音频区间末尾至发出中位数50.24→57.33ms、P95 97.46→93.39ms。这些只是私有1×供给时钟的服务观察，不是人工词时间或UI延迟，每arm一次、不作稳定提速结论。
+
+保留低复杂度的窗口闲置缓存释放；资源收益不构成窗口模式准确性收益，App及服务默认仍不变。该维护确认无客户端和请求后managed停启，三个worker均wait回收、关闭后冻结字节稳定；独立使用安装态解释器-I复核health/readyz/metrics200、active requests均0、唯一listener/LaunchAgent PID54602，3.12.0、quality/quality，配置/selection/runtime target未变。源码逐字匹配实际候选。仓库外`asr-window-cache-20261019`保存冻结登记、配置证明、全部比较和独立恢复结果；无下载、安装、留出访问。回退可revert本逻辑提交，无用户数据或持久化格式变化，正式质量目标仍未完成。
