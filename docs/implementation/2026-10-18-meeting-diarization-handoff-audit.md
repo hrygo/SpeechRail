@@ -671,3 +671,14 @@ observe复核实际宿主报告身份、共同来源原点、稳定确认及join
 现从时序明细核对连续ASR sealed/DIA稳定水位、唯一已确认文字与稳定标记的sequence/span/hash/known及确认先后，重新按span样本权重计算稳定P95与30秒硬上限；结束里程碑须覆盖源末端和相应确认。逻辑不完整保留failed并进入原来源失败分母，结构非法仍拒绝，不以摘要补造证据。已冻结队列的源码身份变化后需重建登记。仍只证明宿主metadata自洽，不证明真实采集、独立主参考、生产加载字节或质量。
 
 四相关文件120 passed in0.56s，二Python Ruff、一source Mypy通过；合成实际流水线接线仍通过。父6ca597f0本轮核验四项checks成功、两项仍运行，未声称全绿。相关图谱missing，直接复核当前源码，未重建索引。未做真实PCM解码/模型/benchmark/下载或服务、安装、UI、发布、合并动作；CER、认证人数、真实P95和#370状态不升级，完整目标继续。
+
+
+## T6 ABBA 顺序与单路基线预登记
+
+2026-10-18：新增AbbaLedger，输出前冻结声明的development来源池/attempt/ASR/DIA/scorer/workload身份、8–24个组的单fixture/PCM、共同feed与cold/warm条件，每条件每来源1–8块均衡安排；每块单独ASR-only、DIA-only后执行A-B-B-A。来源/fixture/PCM别名拒绝，重复不增加独立N。源码和latency policy也进入计划身份；ASR私有root的perf闭包变化后旧spec须重新冻结。
+
+宿主账本逐位置核对实际PCM scheduler报告的mode、声明条件、时钟、源hash/样本、共同分包/队列、实际lane和交付量及回调时长一致性；缺基线/错序不前进，失败和missing位置保留，不能筛掉失败block。条件和模型身份仍仅声明，未证明cold/warm准备、生产加载字节或来源独立性；不读取任何真实音频/模型/参考或留出。预算显式区分64次joint与32次单路：8来源、两条件、5分钟片段最低8小时PCM供给，另加加载/预热/清理等。
+
+初始21项缺模块RED→GREEN，fixture别名反例另先RED后GREEN；合成接线实际调用四模式PCM scheduler共48次，完整填入warm的8块，输出仍complete_metadata而非质量或并发通过。六相关测试文件177 passed in0.73s，二Python Ruff、一source Mypy通过。父6e554009本轮四项PR checks成功、两项仍运行，未声称全绿。图谱相关perf/tests freshness missing，直接复核，无索引重建。
+
+E3仍未验：没有主量joint tail-to-final配对区间、ASR/DIA相对门、独立质量/footprint或最终联合身份，不用callback elapsed替代并发收益；selected_schedule/primary interval保持null。已异步请求Train near开发集真实解码/模型评测授权，未收到回复时不启动实跑。无下载、服务/安装/UI/发布/合并动作；CER、认证人数、真实P95与#370状态不升级，完整目标继续。

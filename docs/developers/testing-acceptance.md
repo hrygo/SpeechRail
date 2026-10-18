@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.47"
+version: "3.3.48"
 date: 2026-10-18
 ---
 
@@ -412,6 +412,18 @@ finish期限为源原点加全部源样本时长再加finish预算，因而不�
 `aggregate(observations)` 拒绝未知/重复execution、跨队列或篡改的observation，以及同一报告摘要在不同执行中重复使用。每个预登记来源先取全部fixture和重复执行的最慢finish，再按来源组等权使用离散逆CDF计算P95，并保留最慢来源；派生fixture更多的来源不增加独立统计权重。任一缺失或failed执行使该来源保留原权重为正无穷，JSON用null表达该来源及最差值；即使单个缺失来源占比不足5%而P95仍有限，也不能通过hard gate。P95≤5秒、各来源单次上限≤15秒且没有缺失/失败才给diagnostic_pass，边界含等号。
 
 队列输出包括期望/观察/缺失执行数、失败来源数、逐来源结果、P95/最慢值及输入observation集合摘要；不输出原文、PCM、speaker实名或路径。它不计算质量、并发净收益或可信区间，不解锁模型执行、留出或发布；runtime_identity_verified/certification_eligible保持false、人数认证为null。调用方仍须先完成来源/参考审查、串行质量及其他联合门，不能把元数据自洽当作质量或真实P95认证。确定性回归见 `tests/test_meeting_latency_cohort.py`，含模型输出前冻结→实际pipeline合成输入→来源聚合的接线测试。
+
+### 会议 ABBA 预登记与宿主账本
+
+`meeting_abba.AbbaLedger` 在任何候选输出前接收已审查的development来源池摘要、attempt、ASR/分人候选、scorer与共同workload策略摘要，以及8–24个来源的fixture/PCM摘要、样本数和共同feed设置。每来源仅一份fixture，组/fixture/PCM不得重复；来源字段仅摘要和样本数，不包含音频、文字或路径。此库只锁定调用方声明的身份，不重新验证完整catalog、独立主参考、来源独立性或生产模型字节。
+
+每个明确声明的cold/warm条件均衡分配1–8个block/来源；每块固定顺序为ASR-only、diarization-only、serial、overlap、overlap、serial。前两次是独立单路基线，不能由双路结果推算。条件适用于每次执行，不能把整个block首个运行是冷启动当作其余运行的冷启动证据；实际冷/热准备仍由后续受控执行器证明。登记记录固定来源、顺序、共同配置、源码和latency policy摘要及各run ID，后改调用方参数不改变冻结计划。
+
+`registration()` 给出joint及含单路基线的最低PCM供给预算，不包括加载、预热、清理、人工质量复核及生产候选复验。8个来源、cold/warm各1块、5分钟片段共96次供给，最低8小时；其中64次joint供给为5小时20分钟。该预算不授权真实模型运行。
+
+`observe()` 按登记顺序消费 `run_pcm_workload_schedule` 的宿主报告，核对mode、声明条件、时钟、PCM/feed摘要、完整单/双路lane和已交付样本，拒绝时序矛盾、源供给倒序、报告复用及认证标志升级。接收端不执行负载，不打开模型/音频/参考，不证明回调使用了已声明模型或实际冷热状态。`fail()` 明确保留失败位置，未观察执行仍保留missing；缺单路或任一ABBA位置不得丢弃整个block后只分析成功记录。
+
+`summary()` 仅有invalid或complete_metadata。完整metadata不签发质量不变、绝对延迟、并发收益或调度选择；主量始终为serial-minus-overlap的joint tail-to-final，不能拿含整段供给/清理的callback elapsed替代。paired interval/selected_schedule保持null，quality/footprint未观察，condition setup/runtime/certification保持false。完整联合时序、串行质量与绝对门、真实ASR provenance、精确进程footprint及配对区间仍须独立完成。确定性测试含输出前冻结、真实PCM scheduler四模式的48次合成供给接线，未使用真实音频或模型。
 
 ### 有声书外置小说语料回归
 
