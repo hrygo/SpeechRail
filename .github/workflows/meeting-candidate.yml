@@ -1,0 +1,42 @@
+name: Meeting Candidate Native
+
+on:
+  pull_request:
+    paths:
+      - native/diarization-candidate/**
+      - native/diarization/Sources/SpeechRailDiarizationProtocol/PacketCodec.swift
+      - .github/workflows/meeting-candidate.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: meeting-candidate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  candidate:
+    name: Isolated Candidate Build and Fake Tests
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify and fingerprint toolchain
+        id: toolchain
+        run: |
+          test "$(uname -m)" = "arm64"
+          xcodebuild -showsdks | grep -F 'macOS 26'
+          fingerprint=$({ xcodebuild -version; swift --version; } | shasum -a 256 | cut -d ' ' -f 1)
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: native/diarization-candidate/.build
+          key: meeting-candidate-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('native/diarization-candidate/Package.*') }}-${{ hashFiles('native/diarization-candidate/**/*.swift', 'native/diarization/Sources/SpeechRailDiarizationProtocol/PacketCodec.swift') }}
+          restore-keys: |
+            meeting-candidate-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('native/diarization-candidate/Package.*') }}-
+      - name: Test deterministic frame validation without models
+        run: swift test --package-path native/diarization-candidate
+      - name: Compile isolated CLI without model execution
+        run: swift build --package-path native/diarization-candidate -c release

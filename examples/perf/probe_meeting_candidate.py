@@ -86,6 +86,12 @@ def static_candidate_spec(
         adapter_sha256=_source_digest((
             "examples/perf/probe_meeting_candidate.py",
             "examples/perf/meeting_candidate_protocol.py",
+            "examples/perf/meeting_candidate_session.py",
+            "native/diarization-candidate/Package.swift",
+            "native/diarization-candidate/Sources/CandidateFrames/CandidateFrames.swift",
+            "native/diarization-candidate/Package.resolved",
+            "native/diarization-candidate/Sources/MeetingDiarizationCandidate/main.swift",
+            "native/diarization/Sources/SpeechRailDiarizationProtocol/PacketCodec.swift",
             "examples/perf/meeting_evaluation_identity.py",
             "src/speechrail/backends/diarization/coreml.py",
             "src/speechrail/runtime/diarization_owner.py",

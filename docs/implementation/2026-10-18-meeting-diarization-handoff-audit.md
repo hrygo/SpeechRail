@@ -65,7 +65,7 @@ Ruling: 根据用户明确要求，最终审查也由主代理完成，不调用
 | T1 | 已实施 | 身份与收据定向 fake 通过；旧 runner 仅诊断，不签发 v2 认证 |
 | T2 | 已实施 | 产品、标准与 oracle 分开；来源组统计与旧/新门并行，80 项定向通过 |
 | T3 | 已实施 | owner、隔离、队列、预算及持久任务接线；251 项定向通过 |
-| T4 | 部分实施 | 八维概率协议和只读制品预检已交付，32 项 fake 通过；native 包、session 接线与构建尚未完成 |
+| T4 | 部分实施 | 八维协议、只读预检、隔离 native 包与 session 接线已交付；410 项 Python 定向测试和 3 项原生测试通过，真实模型与评测命令未接通 |
 | T5–T6 | 待实施 | 来源锁、有限候选对照和真实共存 harness |
 | T7 | 前置未满足 | 无生产认证，不接入默认能力、不安装 |
 | T8 | 待实施 | 先交付归因工具，不声称 CER 改善 |
@@ -125,7 +125,7 @@ PYTHONPATH=src:examples/perf uv run --no-sync pytest \
 
 预检固定 fast32/fast128 的完整 SDK preset、关闭外部后处理与 VAD gate，绑定实际 worker/模型/embedding、adapter 与 scorer 源码及 policy 摘要。只接受匹配的预编译 bundle 和本地 512 Float32 silence embedding，不编译、下载或启动 worker。配置依据为核验于本日的[固定 SDK Types](https://github.com/FluidInference/FluidAudio/blob/503b4bd1bbf7220882de39fe8ae6716aae4132da/Sources/FluidAudio/Diarizer/Nemotron3/Nemotron3Types.swift)与[本地加载源码](https://github.com/FluidInference/FluidAudio/blob/503b4bd1bbf7220882de39fe8ae6716aae4132da/Sources/FluidAudio/Diarizer/Nemotron3/Nemotron3Models.swift)。
 
-输出明确 `verdict=not_evaluated`、`certified_max_speakers=null`，运行身份、实际 CoreML shape 和 snapshot 来源均未验证。`preflight` 的文件匹配不构成模型可运行或质量证据；尚不提供 development/holdout 执行命令。native 包与锁、单 task worker、session owner 接线及实际构建仍是 T4 未完成项，T5–T8 继续保留各自前置。
+输出明确 `verdict=not_evaluated`、`certified_max_speakers=null`，运行身份、实际 CoreML shape 和 snapshot 来源均未验证。`preflight` 的文件匹配不构成模型可运行或质量证据；尚不提供 development/holdout 执行命令。后续已补 native 包与锁、单 task worker、session owner 接线及构建，见下节。development/holdout 命令仍须等待 T5 来源锁与门禁接线，T5–T8 继续保留各自前置。
 
 RED：协议模块和预检入口分别缺失。GREEN：`PYTHONPATH=src:examples/perf uv run --no-sync pytest tests/test_probe_meeting_candidate.py --no-cov`，32 项 fake 通过，包含 CLI、摘要变化拒绝及 symlink 拒绝；预检模块通过 Ruff 与指定 source path 的 Mypy。CLI `preflight --help` 已实际执行。
 
@@ -150,3 +150,16 @@ PYTHONPATH=src:examples/perf uv run --no-sync pytest \
 ```
 
 审查补充：同类等待队列满时，`lane_available` 先前仍可能把空闲的独立 lane 显示为可用，而实际 `_acquire` 会拒绝。新增 `test_lane_available_respects_full_pending_class_even_for_free_independent_lane` 首次断言失败，补齐同一队列上限条件后 GREEN；上面的 393 项合并复验包含此回归。候选制品身份同步纳入 governor 与 cleanup 源码摘要，资源策略或取消行为改变后必须刷新身份。
+
+
+## T4 隔离 native worker 与会话接线
+
+2026-10-18，新增 `native/diarization-candidate`，仅锁定候选 SDK，不改主服务 native package/lock、默认能力或运行配置。相对符号链接复用既有 PacketCodec；`traits: []` 关闭候选不使用的 SDK 文本规范化能力。SwiftPM 仍解析该上游二进制依赖；首轮下载停滞后通过原 URL 取回，SHA-256 与 SDK manifest 的 `5fa8c10d4ec26c1bb2413125f351a7222a4c68a23b74476680fbada7e26fc6aa` 一致，再由 SwiftPM 从缓存校验使用；未下载模型。
+
+worker 由单一顺序 task 独占 SDK，只走本地 `Nemotron3Models.load` 和流式 `appendAudio/processBufferedAudio/finishStream`。加载前要求预编译 bundle 和有限的 512-Float32 silence embedding；代码要求静态 shape、FP16 I/O 与 Int32 长度字段匹配。未调用 `processComplete` 或带默认 200ms 过滤的 segments。输入每次最多 16,000 samples；响应最多 2,048 帧，JSON frame payload 最多 512KiB，保持原 64KiB header 限制。fast128 的千帧响应不能放入 header，该边界有超过 64KiB 的 fake 数据回归。
+
+`meeting_candidate_session.py` 复用生产会话的 owner、计算准入、有界 updates 和精确回收；新增 transport 校验 runtime SDK/preset/compute units/shape 标志。调用者必须传入同一组合根 governor；它不能替代跨进程运行窗口检查。取消卡在 preflight 的真实 fake child 时，先回收精确进程，再释放 owner。概率维度、阈值、尾裁剪、异常 packet、慢消费者、owner/factory/回收失败和 IPC 身份均有 fake 覆盖。native 源码、包锁和新 adapter 进入 candidate identity，变更这些内容会使旧 spec 失配。
+
+验证：21 个 Python 定向测试文件 `410 passed in 7.61s`；新增候选 session 文件含 17 项测试。`swift test --package-path native/diarization-candidate` 的 3 项测试先因缺少帧验证实现 RED，补实现后 GREEN；Debug CLI 编译通过。新增候选专用 GitHub Actions 工作流执行同样的无模型测试与 Release CLI 编译。本机 Swift 6.4 / SDK 27.0 已实测；Release CLI 构建通过（51.03s），SHA-256 `6dc10ad96f8109fac3b0bc5670cedcf2e63f36407b61a53ffd3d3ebf90534e60`；Mach-O `minos=26.0`、`sdk=26.0`。实际 CLI 的参数错误、缺制品、非允许 preset 三项启动拒绝检查通过，固定错误 packet 不含临时路径，无模型加载。Ruff 三文件及 Mypy 两源文件通过，staged diff 检查通过。
+
+以上只证明代码编译、合成协议和资源生命周期；没有启动真实 native 模型，也未验证实际模型 shape、snapshot 来源、准确率、P95、共存或认证人数。T4 保持部分完成，T5–T8 未因此放行。审查仍由作者自行执行，无子代理；回退为 revert 本批提交，不涉及服务或用户数据。
