@@ -60,6 +60,7 @@ class MeetingTiming:
     MAX_ASR_RECORDS = 65536
     MAX_PUBLICATION_RECORDS = MAX_RECORDS - MAX_ASR_RECORDS - 1
     MAX_OPEN = 64
+    MAX_EXPECTED_UNITS = 4096
     KINDS = frozenset({"phase", "activity", "asr_text_ready", "stable_activity_frame",
                        "activity_watermark", "text", "stable_text", "asr_body_snapshot"})
 
@@ -81,11 +82,18 @@ class MeetingTiming:
         self._marks: dict[str, float] = {}
         self._max_queue = self._max_sink = 0.
         self.changed = asyncio.Event()
+        self.deadline_changed = asyncio.Event()
         self._pending: list[tuple[int, int, int]] = []
         self._texts: dict[int, list[int]] = {}
         self._speakers: dict[int, str] = {}
         self._offered: dict[int, int] = {}
         self._stable: set[int] = set()
+        self._expected: dict[int, tuple[int, int, str]] = {}
+        self._pending_expected: list[tuple[int, int]] = []
+        self._completed_expected: dict[int, float] = {}
+        self._max_stable_delay = -1.
+        self._max_stable_end = 0
+        self._last_stable_ack = 0.
 
     def tick(self) -> float:
         value = self.clock()
@@ -94,6 +102,48 @@ class MeetingTiming:
             raise ValueError("invalid common timing clock")
         self._previous = float(value)
         return float(value)
+
+    def _signal(self) -> None:
+        self.changed.set()
+        self.deadline_changed.set()
+
+    def expect_text(self, item: CompletedText) -> None:
+        if (type(item.sequence) is not int or item.sequence != len(self._expected)
+                or len(self._expected) >= self.MAX_EXPECTED_UNITS or not item.text
+                or not 0 <= item.span.start < item.span.end <= self.source_samples):
+            raise ValueError("invalid expected deadline text")
+        self._expected[item.sequence] = (
+            item.span.start, item.span.end, hashlib.sha256(item.text.encode()).hexdigest(),
+        )
+        heapq.heappush(self._pending_expected, (item.span.end, item.sequence))
+        self._signal()
+
+    def next_stable_deadline(self, hard_seconds: float) -> float | None:
+        hard_seconds = _finite(hard_seconds)
+        if not 0 < hard_seconds <= 30:
+            raise ValueError("invalid stable deadline budget")
+        while self._pending_expected and self._pending_expected[0][1] in self._completed_expected:
+            heapq.heappop(self._pending_expected)
+        if self.origin is None or not self._pending_expected:
+            return None
+        return self.origin + self._pending_expected[0][0] / 16000 + hard_seconds
+
+    def late_stable_deadline(self, hard_seconds: float) -> float | None:
+        hard_seconds = _finite(hard_seconds)
+        if not 0 < hard_seconds <= 30:
+            raise ValueError("invalid stable deadline budget")
+        if self.origin is not None and self._max_stable_delay > hard_seconds:
+            return self.origin + self._max_stable_end / 16000 + hard_seconds
+        return None
+
+    def finish_completed_at(self) -> float | None:
+        if (self.next_stable_deadline(30.) is not None
+                or not self.asr_sealed == self.dia_stable == self.source_samples == self.samples
+                or set(self._marks) != {
+                    "asr_callback_complete", "dia_input_eof", "dia_scope_closed",
+                }):
+            return None
+        return max(self._last_stable_ack, *self._marks.values())
 
     def source(self, frame: PcmChunk) -> None:
         if (
@@ -119,6 +169,7 @@ class MeetingTiming:
         self._max_queue = max(self._max_queue, delay)
         self.source_frames += 1
         self.source_samples = frame.end_sample
+        self._signal()
 
     def _add(self, record: _Record) -> int:
         bucket = (
@@ -140,7 +191,7 @@ class MeetingTiming:
         at = self.tick()
         self._add(_Record("asr_sealed", start, end, -1, None, None, at, at))
         self.asr_sealed = end
-        self.changed.set()
+        self._signal()
 
     def ready_publications(self) -> tuple[dict[str, Any], ...]:
         """Claim each marker once; no raw text or reference data enters it."""
@@ -225,21 +276,30 @@ class MeetingTiming:
             if record.kind == "text":
                 self._texts.setdefault(record.sequence, []).append(ticket.record)
                 heapq.heappush(self._pending, (record.end, record.sequence, ticket.record))
-            self.changed.set()
+            if record.kind == "stable_text" and self.origin is not None:
+                expected = self._expected.get(record.sequence)
+                if expected == (record.start, record.end, record.text_sha256):
+                    self._completed_expected[record.sequence] = at
+                    self._last_stable_ack = max(self._last_stable_ack, at)
+                    delay = at - self.origin - record.end / 16000
+                    if delay > self._max_stable_delay:
+                        self._max_stable_delay, self._max_stable_end = delay, record.end
         self._max_sink = max(self._max_sink, at - ticket.entered)
         self._delivered[ticket.kind] += 1
         del self._open[ticket.id]
+        self._signal()
 
     def fail_delivery(self, ticket: _Ticket) -> None:
         if self._open.pop(ticket.id, None) is ticket:
             self._failed[ticket.kind] += 1
+            self._signal()
 
     def mark(self, kind: str) -> None:
         if (kind not in {"asr_callback_complete", "dia_input_eof", "dia_scope_closed"}
                 or kind in self._marks):
             raise ValueError("invalid timing milestone")
         self._marks[kind] = self.tick()
-        self.changed.set()
+        self._signal()
 
     def summary(
         self, feed: Mapping[str, Any], expected: Sequence[CompletedText],
@@ -315,6 +375,8 @@ class MeetingTiming:
             "source_samples_observed": self.source_samples,
             "source_frames_observed": self.source_frames,
             "asr_sealed_through": self.asr_sealed, "dia_stable_through": self.dia_stable,
+            "deadline_expected_text_units": len(self._expected),
+            "deadline_completed_text_units": len(self._completed_expected),
             "expected_text_units": len(expected),
             "missing_or_invalid_text_units": len(expected) - matched,
             "extra_text_units": extra, "known_text_units": known,

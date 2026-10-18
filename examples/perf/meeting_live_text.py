@@ -53,6 +53,8 @@ class SealedBody:
         ):
             self.fail()
             raise ValueError("invalid or unbounded sealed body")
+        if self._timing is not None:
+            self._timing.expect_text(item)
         self._items.append(item)
         self._characters += len(item.text)
         self._through = item.span.end

@@ -636,3 +636,18 @@ finish为单会议最后源样本目标时刻到最终确认、ASR回调完成�
 新增先RED后GREEN覆盖双水位/正文确认前禁止稳定标记、策略缺采样或改权重/quantile拒绝，以及收尾竞态：调度已结束时不能只发首个就绪批次，须排空所有批次。另覆盖15/30边界、95%离散权重边界、unknown保留权重、scope清理计入finish、稳定sink失败/吞取消和重复外部取消。十九相关测试文件659 passed in19.75s；十一Python Ruff通过，五个源文件strict/follow-imports=silent Mypy通过。另直接strict检查meeting_quality_metrics.py报告未类型化函数、第三方stub及相对导入解析问题，该模块不在五源通过范围；本轮相关变更由fake功能回归与Ruff覆盖，未扩范围重写评分实现。
 
 父073216d7的全部八项PR checks已核验success/completed。本轮不使用真实PCM/模型，不运行真实质量或性能benchmark，不下载、不改变运行/安装/UI/发布/合并状态。图谱perf/tests missing，直接复核worktree，无索引重建。可信CER、人数上限及真实P95未观察，#370未完成；footprint、ABBA与最终联合身份及来源catalog/main reference等仍待完成。
+
+
+## T6 诊断稳定与 finish 硬期限控制
+
+2026-10-18：SealedBody在实际ASR sealed unit追加时向独立deadline账本登记sequence、owned span及文字摘要，最多4096项，不等DIA输出文字才建期限，不存第二份原文。未完成句段按末样本排序，有效稳定标记确认匹配原ASR证据才出等待堆；同一source origin下固定句末目标时刻加30秒。ASR自身迟到超过期限时，登记后即可停用DIA，但不取消ASR。未知的未来sealed句段无法提前预知，ASR封存策略的联合预算可达性仍待独立核查。
+
+finish期限改为源原点加全部样本时长再加预算（默认/上限15秒），覆盖DIA operation、ASR尾部等待和稳定publisher；不因模型完成、relay EOF或ASR复核迟到而提前撤销或顺延。监控与发布使用独立事件通知，共同clock计算剩余量、event-loop timer等待。注入clock冻结时仍有实际timer取消，报告保留timer触发与injected属性，不作为真实采集/时钟证明。timer醒后先重读实际完成证据，期限内的确认不因监控晚调度而变超时，实际迟到标记保留迟到事实。
+
+首次超时以stable_label_timeout/diarization_finish_timeout报告deadline_at、observed_at和timer来源；取消DIA实际operation及稳定publisher、加入其清理，relay继续排空且ASR保留完整输入与正文，随后才发unknown全量替换，joint保持no-go。清理与ASR可能晚于触发时刻完成，不把取消请求伪装为硬墙钟完成或worker_reaping_verified。policy同步起点、动作与expected-unit预算，源码闭包改变后须重新冻结旧spec/controls/report。
+
+三个关键反例先RED再GREEN：分人尚未给文字时仍须有期限；模型作用域已结束但稳定sink卡住不能逃过finish；合成60秒来源在早期标签超时后，DIA清理完成、ASR继续消费全部60秒并保留60句unknown。账本单测覆盖30秒边界及迟到确认、很晚再观察仍保留原完成时刻。正常case的测试finish预算不再复用10ms负例预算，避免依赖摘要线程在10ms内结束。
+
+十九相关文件663 passed in19.84s，五Python Ruff与三source strict/follow-imports=silent Mypy通过，图谱相关perf/tests missing直接复核worktree，无索引重建。父84af3235全部八项PR checks success/completed。均为合成PCM/fake模型或RPC；未解码真实语料、加载模型、运行真实benchmark、下载、改变服务/安装/UI、发布或合并。
+
+目标继续：仍需跨来源finish统计、生产接线与真实硬期限/精确回收验收、进程footprint、ABBA及最终联合身份；schema2来源catalog/独立ASR主参考和真实质量未就绪，CER、认证人数、真实P95不升级，#370未完成。

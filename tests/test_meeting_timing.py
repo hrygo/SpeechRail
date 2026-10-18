@@ -244,3 +244,37 @@ def test_registered_latency_limits_and_unknown_weight_are_not_success_filtered(
     assert diagnostics["finish_seconds"] == pytest.approx(delay + 1.)
     assert report["stable_label_p95_seconds"] is None
     assert report["certification_eligible"] is False
+
+
+@pytest.mark.parametrize("late", [False, True])
+def test_pending_deadline_exists_before_dia_text_and_uses_sample_end_origin(late):
+    from meeting_pcm_feed import PcmChunk
+    from meeting_timing import MeetingTiming
+
+    now = [11.]
+    timing = MeetingTiming(samples=16000, clock=lambda: now[0])
+    timing.source(PcmChunk(0, 0, 16000, 11., 11., bytes(32000)))
+    timing.expect_text(CompletedText(0, "甲", SampleSpan(0, 16000)))
+    assert timing.next_stable_deadline(30.) == 41.
+    assert timing.finish_completed_at() is None
+    timing.asr_terminal(0, 16000)
+    timing.end_delivery(timing.begin_delivery({
+        "kind": "activity_watermark", "accepted_samples": 16000,
+        "processed_samples": 16000, "stable_samples": 16000,
+    }))
+    timing.end_delivery(timing.begin_delivery({
+        "kind": "text", "sequence": 0, "unit_index": 0, "text": "甲",
+        "start_sample": 0, "end_sample": 16000, "speaker": "S1", "granularity": "utterance",
+    }))
+    marker = timing.begin_delivery(timing.ready_publications()[0])
+    now[0] = 41.001 if late else 41.
+    timing.end_delivery(marker)
+    timing.mark("asr_callback_complete")
+    timing.mark("dia_input_eof")
+    timing.mark("dia_scope_closed")
+    assert timing.next_stable_deadline(30.) is None
+    assert timing.late_stable_deadline(30.) == (41. if late else None)
+    assert timing.finish_completed_at() == (41.001 if late else 41.)
+    now[0] = 100.
+    assert timing.next_stable_deadline(30.) is None
+    assert timing.finish_completed_at() == (41.001 if late else 41.)

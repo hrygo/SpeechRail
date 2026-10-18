@@ -91,7 +91,8 @@ def test_diarization_failure_preserves_entire_asr_body_and_does_not_pass_joint_g
             governor=shared, asr=asr, diarization=dia, sink=sink,
             max_lateness_seconds=1, chunk_samples=10, queue_chunks=16,
             diarization_queue_chunks=16 if failure != "overflow" else 1,
-            finish_timeout_seconds=.01, clock=clock, sleep=clock.sleep,
+            finish_timeout_seconds=.01 if failure == "finish" else 1,
+            clock=clock, sleep=clock.sleep,
         ), 2)
         assert result["asr_complete"] is True
         assert result["pcm_feed"]["delivered_samples"]["asr"] == 100
@@ -318,7 +319,7 @@ def test_repeated_external_cancellation_joins_nested_native_cleanup_before_retur
     asyncio.run(run())
 
 
-def test_dia_finish_deadline_starts_at_input_eof_even_if_asr_final_review_is_pending():
+def test_finish_deadline_uses_source_end_even_if_asr_final_review_is_pending():
     from meeting_live_pipeline import run_live_meeting_pipeline
 
     async def run():
@@ -600,3 +601,108 @@ def test_final_stable_publication_drains_multiple_ready_batches(monkeypatch):
         None, monkeypatch,
     )
     assert not buffered
+
+
+def test_finish_deadline_also_cancels_stable_sink_after_dia_model_scope_has_closed():
+    from meeting_activity_workload import run_shared_activity_stream
+    from meeting_live_pipeline import run_live_meeting_pipeline
+
+    from test_meeting_candidate_runner import Activity
+
+    async def run():
+        output, closed = [], []
+
+        async def asr(shared, frames, channel, body):
+            async for frame in frames:
+                item = CompletedText(0, "甲", SampleSpan(frame.start_sample, frame.end_sample))
+                body.append(item)
+                body.record_terminal(frame.start_sample, frame.end_sample)
+                channel.publish(item)
+            body.finish()
+            channel.finish()
+            return {"complete": True}
+
+        async def dia(shared, frames, channel, sink):
+            try:
+                return await run_shared_activity_stream(
+                    bytes(20), frames, activity_factory=Activity, epoch="session",
+                    sink=sink, text_channel=channel,
+                )
+            finally:
+                closed.append("dia")
+
+        async def sink(row):
+            if row["kind"] == "stable_text":
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    closed.append("publication")
+            output.append(row)
+
+        result = await asyncio.wait_for(run_live_meeting_pipeline(
+            **policy_arguments(), asr=asr, diarization=dia, sink=sink,
+            finish_timeout_seconds=.01,
+        ), 1)
+        assert sorted(closed) == ["dia", "publication"]
+        assert result["diarization_failure"] == "diarization_finish_timeout"
+        assert result["deadline_enforcement"]["kind"] == "finish"
+        assert result["asr_complete"] is True
+        assert result["joint_verdict"] == "no-go"
+        assert output[-1]["kind"] == "asr_body_snapshot"
+        assert not [t for t in asyncio.all_tasks() if t.get_name().startswith("live-")]
+
+    asyncio.run(run())
+
+
+def test_stable_timeout_before_input_end_reaps_dia_and_asr_continues_full_source():
+    from meeting_live_pipeline import run_live_meeting_pipeline
+
+    from test_meeting_pcm_feed import Clock
+
+    async def run():
+        clock, output, closed = Clock(), [], asyncio.Event()
+        pcm = bytes(60 * 16000 * 2)
+
+        async def asr(shared, frames, channel, body):
+            sequence = 0
+            async for frame in frames:
+                item = CompletedText(
+                    sequence, "甲", SampleSpan(frame.start_sample, frame.end_sample)
+                )
+                body.append(item)
+                body.record_terminal(frame.start_sample, frame.end_sample)
+                channel.publish(item)
+                sequence += 1
+                if sequence == 1:
+                    await closed.wait()
+            body.finish()
+            channel.finish()
+            return {"complete": True}
+
+        async def dia(shared, frames, channel, sink):
+            try:
+                async for _ in frames:
+                    pass
+                await asyncio.Event().wait()
+            finally:
+                closed.set()
+
+        async def sink(row):
+            output.append(row)
+
+        result = await asyncio.wait_for(run_live_meeting_pipeline(
+            pcm=pcm, expected_pcm_sha256=hashlib.sha256(pcm).hexdigest(),
+            governor=ResourceGovernor(GovernorLimits(3, 1, 4), allow_heavy_overlap=False),
+            asr=asr, diarization=dia, sink=sink, max_lateness_seconds=1,
+            chunk_samples=16000, queue_chunks=64, diarization_queue_chunks=64,
+            clock=clock, sleep=clock.sleep,
+        ), 2)
+        assert result["diarization_failure"] == "stable_label_timeout"
+        assert result["deadline_enforcement"]["kind"] == "stable_label"
+        assert result["asr_complete"] is True
+        assert result["timing_observations"]["source_samples_observed"] == 60 * 16000
+        assert len(output[-1]["items"]) == 60
+        assert result["joint_verdict"] == "no-go"
+        assert closed.is_set()
+
+    asyncio.run(run())

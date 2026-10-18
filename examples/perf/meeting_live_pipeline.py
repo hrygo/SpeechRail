@@ -132,13 +132,15 @@ async def run_live_meeting_pipeline(
     timing = MeetingTiming(samples=len(pcm) // 2, clock=clock)
     body = SealedBody(samples=len(pcm) // 2, timing=timing)
     ingress = _Ingress(diarization_queue_chunks)
-    dia_done, relay_done = asyncio.Event(), asyncio.Event()
     publication_done = asyncio.Event()
+    publication_closed = asyncio.Event()
     output_lock = asyncio.Lock()
     operation: asyncio.Task[Mapping[str, Any]] | None = None
+    publisher: asyncio.Task[None] | None = None
     dia_digest: str | None = None
     dia_report: Mapping[str, Any] | None = None
     failure: str | None = None
+    deadline_evidence: dict[str, Any] = {"status": "not_expired", "kind": None}
 
     def disable(code: str) -> None:
         nonlocal failure
@@ -147,6 +149,10 @@ async def run_live_meeting_pipeline(
         channel.fail()
         if operation is not None and not operation.done():
             operation.cancel()
+        if (publisher is not None and publisher is not asyncio.current_task()
+                and not publisher.done()):
+            publisher.cancel()
+        timing.deadline_changed.set()
 
     async def emit(row: Mapping[str, Any]) -> None:
         async with output_lock:
@@ -200,6 +206,64 @@ async def run_live_meeting_pipeline(
             disable("stable_publication_cancelled")
         except Exception:
             disable("stable_publication_failed")
+        finally:
+            publication_closed.set()
+            timing.deadline_changed.set()
+
+    async def enforce_deadlines() -> None:
+        hard = latency_policy()["stable_label_hard_seconds"]
+        expired_timer: tuple[float, str] | None = None
+
+        def expire(kind: str, at: float, timer: bool) -> None:
+            deadline_evidence.update(
+                status="expired", kind=kind, deadline_at=at,
+                observed_at=timing.tick(), event_loop_timer_expired=timer,
+            )
+            disable(
+                "stable_label_timeout" if kind == "stable_label" else "diarization_finish_timeout"
+            )
+
+        while failure is None:
+            timing.deadline_changed.clear()
+            stable = timing.next_stable_deadline(hard)
+            late = timing.late_stable_deadline(hard)
+            if late is not None:
+                expire("stable_label", late, False)
+                return
+            finish = (
+                None if timing.origin is None else
+                timing.origin + timing.samples / 16000 + finish_timeout_seconds
+            )
+            completed = timing.finish_completed_at()
+            if finish is not None and completed is not None:
+                if completed > finish:
+                    expire("finish", finish, False)
+                return
+            deadlines = [(at, kind) for at, kind in (
+                (stable, "stable_label"), (finish, "finish"),
+            ) if at is not None]
+            if not deadlines:
+                if publication_done.is_set() and publication_closed.is_set():
+                    return
+                await timing.deadline_changed.wait()
+                continue
+            at, kind = min(deadlines)
+            remaining = at - timing.tick()
+            if remaining < 0 or expired_timer == (at, kind):
+                expire(kind, at, expired_timer == (at, kind))
+                return
+            if publication_done.is_set() and publication_closed.is_set():
+                return
+            expired_timer = None
+            try:
+                async with asyncio.timeout(max(remaining, .000001)):
+                    await timing.deadline_changed.wait()
+            except TimeoutError:
+                # An actual event-loop timer is bounded even for an injected
+                # frozen clock. Such runs remain explicitly non-certified.
+                # Re-read acknowledgements before deciding: an on-time sink
+                # completion may have raced this timer's delivery.
+                expired_timer = (at, kind)
 
     async def run_asr(
         shared: ResourceGovernor, frames: AsyncIterator[PcmChunk],
@@ -245,7 +309,6 @@ async def run_live_meeting_pipeline(
                 disable("diarization_failed")
             finally:
                 timing.mark("dia_scope_closed")
-                dia_done.set()
 
         async def relay() -> None:
             await started.wait()
@@ -254,20 +317,10 @@ async def run_live_meeting_pipeline(
                     disable("diarization_ingress_full")
             ingress.finish()
             timing.mark("dia_input_eof")
-            relay_done.set()
-
-        async def deadline() -> None:
-            await relay_done.wait()
-            try:
-                async with asyncio.timeout(finish_timeout_seconds):
-                    await dia_done.wait()
-            except TimeoutError:
-                disable("diarization_finish_timeout")
 
         async with asyncio.TaskGroup() as tasks:
             tasks.create_task(consume(), name="live-dia-consumer")
             tasks.create_task(relay(), name="live-dia-relay")
-            tasks.create_task(deadline(), name="live-dia-deadline")
         # This complete flag is only for the joined relay callback. Never
         # present it as the failed model's complete report or quality result.
         return {"complete": True, "scope": "diarization_relay", "degraded": failure is not None}
@@ -275,7 +328,8 @@ async def run_live_meeting_pipeline(
     try:
         sources = await join_cleanup(asyncio.create_task(asyncio.to_thread(_source_digests)))
         async with asyncio.TaskGroup() as tasks:
-            tasks.create_task(publish_stable(), name="live-stable-publication")
+            publisher = tasks.create_task(publish_stable(), name="live-stable-publication")
+            tasks.create_task(enforce_deadlines(), name="live-deadline")
             try:
                 schedule = await run_pcm_workload_schedule(
                     pcm=pcm, expected_pcm_sha256=expected_pcm_sha256, mode=mode, governor=governor,
@@ -287,6 +341,7 @@ async def run_live_meeting_pipeline(
             finally:
                 publication_done.set()
                 timing.changed.set()
+                timing.deadline_changed.set()
         after_sources = await join_cleanup(asyncio.create_task(asyncio.to_thread(_source_digests)))
         if sources != after_sources:
             raise ValueError("live pipeline source changed")
@@ -326,8 +381,11 @@ async def run_live_meeting_pipeline(
             "timeout_seconds": timeout_seconds, "finish_timeout_seconds": finish_timeout_seconds,
             "sink_timeout_seconds": sink_timeout_seconds,
             "diarization_queue_chunks": diarization_queue_chunks,
-            "deadline_clock": "event_loop_monotonic",
-            "dia_finish_deadline_origin": "diarization_relay_input_eof",
+            "deadline_clock": "common_host_clock_with_event_loop_timer",
+            "dia_finish_deadline_origin": "last_source_sample_target",
+            "stable_deadline_origin": "sealed_owned_span_last_sample_target",
+            "deadline_action": "cancel_dia_and_publisher_join_cleanup_keep_asr_v1",
+            "max_expected_deadline_units": MeetingTiming.MAX_EXPECTED_UNITS,
             "degradation": "drain_dia_keep_asr_replace_all_unknown_v1",
             "timing_schema_version": 2,
             "max_timing_records": MeetingTiming.MAX_RECORDS,
@@ -352,6 +410,7 @@ async def run_live_meeting_pipeline(
             "joint_quality_gate": "not_observed", "live_text": observed,
             "worker_reaping_verified": False,
             "timing_observations": observations,
+            "deadline_enforcement": deadline_evidence,
             "pipeline_policy": policy, "pipeline_policy_sha256": canonical_digest(policy),
             "asr_preserved_as_unknown": not complete,
         }

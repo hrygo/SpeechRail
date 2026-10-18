@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.44"
+version: "3.3.45"
 date: 2026-10-18
 ---
 
@@ -369,7 +369,7 @@ live通道不证明实际来源/生产字节或最终联合身份；必须在全
 
 `SealedBody` 独立于observer的关闭/失败，按真实sealed非空final unit记录句级正文与owned span；最多600秒、4096个unit和10000字符，单unit跨度不超过30秒。非法序列/时间、非空或可变units、重复finish及使用失败记录均拒绝。ASR有效完成后才能读取items与摘要；摘要只含完整状态、样本数、字符数和文字摘要。它只在本次作用域内保留文字，不落盘，pipeline退出后清除引用；失败或取消的ASR不能借部分正文形成“成功降级”。
 
-DIA relay始终读完共同源的分人支路，另以1–64包、默认8包的有界队列交给实际DIA。模型启动失败、自取消、无效结果、队列溢出或finish超时会停用DIA、取消并加入其清理，但relay继续排空来源，使ASR继续接收完整PCM。relay交付量不等于模型接受量。finish期限使用event-loop monotonic，从分人relay输入EOF开始，默认15秒且只可显式设置为有限正数、不超过15秒；不能等ASR最终复核完成才启动。超时取消不放弃native回收，回收和ASR正文可能在期限后完成，因此该deadline不是产品finish延迟通过证明。
+DIA relay始终读完共同源的分人支路，另以1–64包、默认8包的有界队列交给实际DIA。模型启动失败、自取消、无效结果、队列溢出或finish超时会停用DIA、取消并加入其清理，但relay继续排空来源，使ASR继续接收完整PCM。relay交付量不等于模型接受量。finish期限从共同源最后样本的目标时刻开始，默认15秒且只可显式设置为有限正数、不超过15秒，覆盖ASR尾部等待、实际DIA结束和稳定标记交付，不能在模型结束时提前撤销，也不等relay EOF或ASR最终复核才开始计时。超时取消实际DIA和稳定发布任务并加入清理，relay仍排空、ASR仍独立继续；native回收和完整正文可能在期限后完成，因此取消请求不是端到端硬上限通过证明。
 
 实际DIA报告先冻结为不可变快照，摘要与归属判定使用同一快照，字符计数必须为非bool整数。若DIA完整结束、live channel明确读至EOF且未失败、归属正文摘要/注册及输出字符数均匹配独立ASR正文、实际sink逐条完成的正文与稳定标记摘要及序列/span全部一致、共同源/ASR sealed/DIA稳定覆盖完整且无未完成或失败交付，则只报告 `live_attribution_complete=true`；其中仍可能包含unknown，不代表说话人正确或质量通过。否则在全部回调清理后向外部sink发送一次 `asr_body_snapshot`：`replaces_all_attribution=true`，包含完整原ASR正文和实际句级时间，所有speaker为null、state为unknown，替换此前归属而非追加重复文字。此时 `asr_preserved_as_unknown=true`、`joint_verdict=no-go`，不能通过改成unknown绕过质量门。ASR、来源核验或最终sink失败则整体失败，不报告成功保留。
 
@@ -391,7 +391,15 @@ scorer policy与 `meeting_latency_policy.latency_policy()` 冻结相同阈值及
 
 `timing_observations.latency_diagnostics` 给出上述宿主稳定发布P95、期望/失败样本权重、硬上限失败数及单会议finish秒数。finish从最后源样本目标时刻至最终交付确认、ASR回调和DIA joined作用域结束的最晚时刻，包括清理及必要的最终unknown快照；缺完整证据时finish_unresolved=true，不能丢弃该会议。finish每次执行只有一个观测。跨来源统计口径预登记为同一来源组先取全部执行最大值，再按来源组等权取P95并检查最慢来源；缺失执行使该来源保留原权重按正无穷失败。本库入口尚不做跨来源聚合，单例超过5秒记录target_exceeded、超过15秒记录hard_failed。
 
-这些数值和diagnostic_pass只描述宿主sink，不能证明麦克风1×采集、App/UI显示、真实生产字节或产品稳定发布验收。记录schema为2；顶层两个认证P95仍null、latency_gate=not_evaluated、certification_eligible=false。稳定/finish硬期限执行、真实进程footprint、ABBA、最终联合身份及真实质量需独立完成；事后诊断no-go不替代运行时超时停止/精确回收。相关确定性回归见 `tests/test_meeting_timing.py`、`tests/test_meeting_live_pipeline.py` 和 `tests/test_meeting_quality_metrics.py`。
+这些数值和diagnostic_pass只描述宿主sink，不能证明麦克风1×采集、App/UI显示、真实生产字节或产品稳定发布验收。记录schema为2；顶层两个认证P95仍null、latency_gate=not_evaluated、certification_eligible=false。生产稳定/finish硬期限及回收验收、真实进程footprint、ABBA、最终联合身份及真实质量需独立完成；诊断取消与事后no-go不替代真实硬上限通过证据。相关确定性回归见 `tests/test_meeting_timing.py`、`tests/test_meeting_live_pipeline.py` 和 `tests/test_meeting_quality_metrics.py`。
+
+### 会议诊断硬期限控制
+
+独立deadline任务与稳定发布任务一起加入pipeline作用域。ASR向独立SealedBody追加实际sealed unit时，同步登记该unit的sequence、真实span及文字摘要，最多4096项；不等DIA开始或输出文字才登记，也不存第二份原文。等待堆按句末样本排序，稳定标记完成且与该独立证据匹配后才移出；没有文字交付的unit仍有期限。稳定期限固定为该句末样本目标时刻加30秒，ASR迟到使登记时期限已经过去时，立即停用DIA而不取消ASR。尚未由ASR sealed产生的未来句段无法预知，不能据此宣称其已获延迟保障；ASR封存周期仍须先做可达性审查。
+
+finish期限为源原点加全部源样本时长再加finish预算，因而不会因relay EOF迟到或ASR复核迟到而顺延。模型已结束但稳定sink卡住仍受同一期限约束。控制器使用共同宿主clock计算期限，以event-loop timer等待；各自独立的事件通知避免稳定发布与监控互相清除通知。注入clock跳变通过进度通知重新检查，冻结注入clock仍有实际event-loop等待期限，报告明确标记timer触发而不把它当真实clock认证。
+
+超时保留首次原因 `stable_label_timeout` 或 `diarization_finish_timeout`，记录期限、观察时刻与是否由event-loop timer唤醒；停用DIA并取消其实际operation及稳定publisher，两者清理必须加入后才允许unknown全量替换。sink交付自取消、取消吞掉、重复外部取消仍遵循owned task清理规则。监控在timer唤醒后先重读完成证据；迟到的监控不能把期限内已完成的交付误判超时，超过期限才完成的稳定标记仍会被识别。只有诊断触发记录，不上调worker_reaping_verified、runtime或certification；回收等待、ASR最终正文及unknown快照不保证在触发时刻完成。相关fake回归见 `tests/test_meeting_live_pipeline.py` 与 `tests/test_meeting_timing.py`。
 
 ### 有声书外置小说语料回归
 
