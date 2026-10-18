@@ -122,8 +122,15 @@ class AttributionLedger:
         self._latest_step = update.step_id
         while len(self._steps) > 64:
             self._steps.pop(next(iter(self._steps)))
+        previous_stable = self._stable_through
         self._processed_through = update.processed_through
         self._stable_through = update.stable_through
+        if (
+            not update.frames
+            and update.replace_span.start == update.replace_span.end
+            and update.stable_through == previous_stable
+        ):
+            return ()
         retained: list[ActivityFrame] = []
         for frame in self._frames:
             if (
@@ -152,6 +159,13 @@ class AttributionLedger:
         changed: list[Attribution] = []
         for state in self._units.values():
             if state.attribution.state == "final":
+                continue
+            span = state.unit.audio_span
+            if (
+                span is not None
+                and span.end > self._stable_through
+                and not span.overlaps(update.replace_span)
+            ):
                 continue
             next_attribution = self._evaluate(
                 state.unit,

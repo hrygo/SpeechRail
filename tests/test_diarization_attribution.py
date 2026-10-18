@@ -201,6 +201,40 @@ def test_changed_provisional_speaker_still_emits_next_revision() -> None:
     assert changed.revision == first.revision + 1
 
 
+@pytest.mark.parametrize("frames", [(), (_frame(1600, 3200, 1),)])
+def test_unrelated_activity_avoids_pending_unit_work_but_finalization_still_runs(
+    monkeypatch: pytest.MonkeyPatch, frames: tuple[ActivityFrame, ...]
+) -> None:
+    ledger = AttributionLedger(accepted_samples=lambda: 3200)
+    ledger.apply(
+        _update(step=1, start=0, end=1600, frames=(_frame(0, 1600, 0),),
+                processed=1600, stable=0)
+    )
+    ledger.register("item", (TextUnit("unit", 0, 1, SampleSpan(0, 1600)),))
+    original_frames = ledger._frames
+    evaluate = ledger._evaluate
+    evaluated: list[str] = []
+
+    def measured(unit: TextUnit, *, revision: int):
+        evaluated.append(unit.id)
+        return evaluate(unit, revision=revision)
+
+    monkeypatch.setattr(ledger, "_evaluate", measured)
+    assert ledger.apply(
+        _update(step=2, start=1600, end=3200 if frames else 1600, frames=frames,
+                processed=3200 if frames else 1600, stable=0)
+    ) == ()
+    # Count work rather than elapsed time so the bound holds on slower machines.
+    assert evaluated == []
+    if not frames:
+        assert ledger._frames is original_frames
+    (final,) = ledger.apply(
+        _update(step=3, start=3200, end=3200, frames=(), processed=3200, stable=1600)
+    )
+    assert evaluated == ["unit"]
+    assert final.state == "final" and final.speaker == "A" and final.revision == 2
+
+
 def test_degradation_only_finalizes_pending_unknown_units() -> None:
     ledger = AttributionLedger(accepted_samples=lambda: 3200)
     ledger.apply(
