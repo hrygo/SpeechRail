@@ -32,6 +32,7 @@ from meeting_evaluation_identity import (
     canonical_digest,
     validate_execution_identity,
 )
+from meeting_live_text import LiveTextChannel
 from meeting_pcm_feed import PcmChunk
 from meeting_realtime_asr_replay import realtime_replay_preset, replay_realtime_session
 from probe_meeting_asr_quality import ASR_SCORER, RuntimeObservation, replay_long_blocks
@@ -758,17 +759,22 @@ class FrozenAsrRuntime:
         replay_plan: AsrReplayPlan = _FORMAL_REPLAY,
         pcm_frames: AsyncIterator[PcmChunk] | None = None,
         governor: ResourceGovernor | None = None,
+        text_channel: LiveTextChannel | None = None,
     ) -> dict[str, Any]:
         """Run a registered diagnostic over the same guarded private owners."""
         if self._evaluating or self._closing:
+            if text_channel is not None:
+                text_channel.fail()
             raise ValueError("private ASR runtime permits one replay at a time")
-        if (pcm_frames is None and governor is not None) or (
+        if (pcm_frames is None and (governor is not None or text_channel is not None)) or (
             pcm_frames is not None
             and (
                 governor is not self._owners.governor
                 or replay_plan.mode != "formal_realtime_session_diagnostic"
             )
         ):
+            if text_channel is not None:
+                text_channel.fail()
             raise ValueError("shared PCM requires the frozen governor and formal replay")
         self._evaluating = True
         self._inflight = asyncio.current_task()
@@ -804,6 +810,7 @@ class FrozenAsrRuntime:
                     observe=observe,
                     input_mode="shared_pcm" if pcm_frames is not None else "throughput",
                     pcm_frames=pcm_frames,
+                    text_channel=text_channel,
                 )
 
             try:
@@ -817,6 +824,10 @@ class FrozenAsrRuntime:
                 "a0_execution": "not_certified",
                 "runtime_verification": "preload_files_and_owners_guarded_loaded_bytes_unproven",
             }
+        except BaseException:
+            if text_channel is not None:
+                text_channel.fail()
+            raise
         finally:
             self._evaluating = False
             self._inflight = None

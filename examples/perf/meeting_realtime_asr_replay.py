@@ -28,11 +28,13 @@ from pathlib import Path
 from typing import Any, Literal, cast
 from uuid import uuid4
 
+from meeting_candidate_evidence import CompletedText
 from meeting_evaluation_identity import (
     MeetingCandidateSpec,
     canonical_digest,
     validate_execution_identity,
 )
+from meeting_live_text import LiveTextChannel
 from meeting_pcm_feed import PcmChunk, PcmSequenceVerifier
 from probe_meeting_asr_quality import (
     AsrCase,
@@ -53,6 +55,7 @@ from speechrail.domain.asr_window import (
     WindowIdentity,
     WindowPolicy,
 )
+from speechrail.domain.audio_timeline import SampleSpan
 from speechrail.domain.ports import WindowAsrFactory, WindowAsrSession
 from speechrail.runtime.cleanup import join_cleanup
 
@@ -164,12 +167,16 @@ class _IngressFullError(RuntimeError):
 class _Terminals:
     """Consume events immediately; retain only bounded sealed body and counts."""
 
-    def __init__(self, samples: int, failures: set[str]) -> None:
+    def __init__(
+        self, samples: int, failures: set[str], *, text_channel: LiveTextChannel | None = None,
+    ) -> None:
         self.samples, self.failures = samples, failures
         self.covered = self.sealed = self.events = self.text_length = 0
         self.finals: list[str] = []
         self.expected_session: dict[str, Any] | None = None
         self.session_policy_verified = False
+        self.text_channel = text_channel
+        self.live_sequence = 0
 
     def _kernel(self, value: Any) -> int:
         if type(value) is not int or not 0 <= value <= self.samples * 3 // 2:
@@ -232,6 +239,11 @@ class _Terminals:
             self.finals.append(text)
             if len(self.finals) > 4096:
                 raise ValueError("sealed unit budget exceeded")
+            if text and self.text_channel is not None:
+                self.text_channel.publish(
+                    CompletedText(self.live_sequence, text, SampleSpan(left, right))
+                )
+                self.live_sequence += 1
         self.covered += end - start
         self.sealed = end
         return self.events
@@ -288,6 +300,8 @@ def _source_digests() -> dict[str, str]:
     paths = {
         "formal_replay": Path(__file__),
         "shared_pcm_feed": Path(__file__).with_name("meeting_pcm_feed.py"),
+        "live_text": Path(__file__).with_name("meeting_live_text.py"),
+        "completed_text": Path(__file__).with_name("meeting_candidate_evidence.py"),
         **{
             relative: root / relative
             for relative in (
@@ -404,6 +418,53 @@ async def replay_realtime_session(
     observe: Callable[[], RuntimeObservation],
     input_mode: Literal["throughput", "realtime", "shared_pcm"] = "throughput",
     pcm_frames: AsyncIterator[PcmChunk] | None = None,
+    text_channel: LiveTextChannel | None = None,
+    wire_packet_samples: int = 2400,
+    queue_capacity: int = 16,
+    decode_timeout_seconds: float = 30,
+    total_timeout_seconds: float = 900,
+    pace: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> dict[str, Any]:
+    """Finish or fail the optional live observer on every replay outcome.
+
+    Observer detachment cannot invalidate the independently scored ASR body.
+    It invalidates joint evidence; the orchestration must inspect that state.
+    """
+    try:
+        if text_channel is not None:
+            text_channel.claim_producer()
+        if text_channel is not None and text_channel.samples != len(data.pcm16) // 2:
+            raise ValueError("live text source length differs from ASR source")
+        result = await _replay_realtime_session(
+            data, spec, services, observe=observe, input_mode=input_mode,
+            pcm_frames=pcm_frames, text_channel=text_channel,
+            wire_packet_samples=wire_packet_samples, queue_capacity=queue_capacity,
+            decode_timeout_seconds=decode_timeout_seconds,
+            total_timeout_seconds=total_timeout_seconds, pace=pace, clock=clock,
+        )
+        if text_channel is not None:
+            if result["quality_evidence_valid"]:
+                text_channel.finish()
+            else:
+                text_channel.fail()
+            result["diagnostics"]["live_text"] = text_channel.summary()
+        return result
+    except BaseException:
+        if text_channel is not None:
+            text_channel.fail()
+        raise
+
+
+async def _replay_realtime_session(
+    data: AsrCase,
+    spec: MeetingCandidateSpec,
+    services: AppServices,
+    *,
+    observe: Callable[[], RuntimeObservation],
+    input_mode: Literal["throughput", "realtime", "shared_pcm"] = "throughput",
+    pcm_frames: AsyncIterator[PcmChunk] | None = None,
+    text_channel: LiveTextChannel | None = None,
     wire_packet_samples: int = 2400,
     queue_capacity: int = 16,
     decode_timeout_seconds: float = 30,
@@ -466,7 +527,7 @@ async def replay_realtime_session(
             slot,
         ),
     )
-    terminals = _Terminals(len(data.pcm16) // 2, recorded.failures)
+    terminals = _Terminals(len(data.pcm16) // 2, recorded.failures, text_channel=text_channel)
     session = OpenAIRealtimeSession(
         decorated, session_id="formal-asr-" + uuid4().hex, send=terminals.send
     )
@@ -654,6 +715,11 @@ async def replay_realtime_session(
             "input_mode": input_mode,
             "decode_timeout_seconds": decode_timeout_seconds,
             "total_timeout_seconds": total_timeout_seconds,
+            "live_text_enabled": text_channel is not None,
+            "live_text_queue_items": text_channel.queue_items if text_channel is not None else None,
+            "live_text_queue_characters": (
+                text_channel.queue_characters if text_channel is not None else None
+            ),
         },
         diagnostics={
             "session_policy_verified": terminals.session_policy_verified

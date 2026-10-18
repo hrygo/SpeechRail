@@ -578,3 +578,18 @@ NativeCandidateRun.evaluate_shared_pcm复用创建时捕获的Governor、实际�
 十一相关测试文件388 passed in9.96s；九Python Ruff、五source strict/follow-imports=silent Mypy通过。回归包含共同供给→实际Governor准入→活动适配的合成尾样本、原生候选factory上的fake RPC/preflight/guard/回收、字节/序列/EOF/时钟异常与取消。它们不是实际模型、真实音频或性能质量基准。图谱相关perf源码/tests missing，直接复核worktree，生产活动types为metadata_match；未重建索引。父3e479f9a主CI39099790104与原生CI39099790102均已核验success/completed。
 
 T6仍缺live正文归属总线、产品稳定发布、资源footprint与ABBA；真实CER、人数上限和P95均未观察，#370继续未完成。未进行真实音频解码、模型/benchmark、下载、服务/安装、UI、发布或合并。语料路径复核确认benchmarks中的三个归档入口为指向同一app home下corpus目录的符号链接；原训练/留出角色不变，不重复下载或混入开发调参。
+
+
+## T6 sealed 正文有界观察与活动归属
+
+2026-10-18：新增LiveTextChannel/LiveTextObservation，明确单producer/reader、case与排队item/字符预算、实际样本范围及有限不倒退时钟。同步publish不等待消费；溢出、非法数据、重复producer或消费者中止使通道永久失败，释放排队引用并唤醒reader。失败observer不抛回ASR正文生产者，不能用后续finish恢复或复用旧正文；报告和repr不含原文。它是诊断观察通道，不是来源/身份认证。
+
+正式ASR session接收端只转发sealed final_units的非空实际正文，按owned_span排序并精确映射16k kernel span；不转发预览/参考，也不伪造词级时间。重放wrapper在所有结果上结束或失败通道，ASR独立评分有效但observer已失败时保留原评分并明确live_text.failed。私有ASR root只在same-Governor/formal/shared PCM下接通，后验失败使通道失效。排队预算与开关进入replay policy；正式/source与C0/候选闭包纳入live模块，旧锁和结果需要重新冻结执行。
+
+DIA runner独立text pump等待真实accepted样本覆盖正文末端，再注册CandidateEvidence。输入不足、通道失败或缺少明确EOF不返回完成；收到ASR EOF后仍执行活动finish、文字守恒和joined清理。NativeCandidateRun与shared activity适配接收同一channel，live/fixed/未观察三类来源互斥并明确报告；producer绝对观察时刻与DIA相对sink交付时刻分开，不能直接相减宣称P95。fake共同PCM→实际OpenAIRealtimeSession→活动归属集成仅使用sealed正文，无sidecar，文字守恒且匿名归属为句级。原生candidate factory与私有ASR owner的fake RPC路径均覆盖live参数及字节/依赖/源码/generation变动和关闭中取消。
+
+十二个相关文件457 passed in17.71s；十二Python Ruff、六source strict/follow-imports=silent Mypy通过。通道新增15个回归覆盖预算/序列/span/非法clock、EOF/reader关闭、复用、启动失败、ahead-of-DIA等待与短输入；私有root增加shared-live六种执行/变动场景。所有新perf与tests图谱missing，直接复核当前源码，未重建索引。真实PCM、模型、benchmark、下载、服务/安装、UI、发布和合并未执行。
+
+父ccb6419f原生CI39100437295成功；主CI39100437297失败，macOS并行测试5150 passed/1 failed/1 skipped，失败为既有worker lease最短驻留测试。通过延迟首轮poll至80ms稳定复现原固定sleep断言：监控的最短驻留起点是观察load时，原测试从设置alive推算，可能提前断言回收。独立提交c25720b将该测试改为虚拟时钟与逐轮scan确认，覆盖延迟观察、驻留期前保护及期满回收；worker lease21项通过，生产代码未改，不把旧CI报告为通过。
+
+T6仍未完成：通用调度器lane失败仍取消全部任务，observer解耦只证明独立ASR评分正文可保留，不代表整条流水线的ASR优先降级。产品稳定发布与共同时间原点、footprint、ABBA和可信联合身份尚待实施。没有新的实际CER、人数上限或P95；#370仍未完成，目标继续。

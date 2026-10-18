@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.40"
+version: "3.3.41"
 date: 2026-10-18
 ---
 
@@ -351,11 +351,17 @@ schema 1 comparison lock 恰含 `schema_version/cases/scorer_policy/baseline/can
 
 `meeting_activity_workload.run_shared_activity_stream` 接收同一原始PCM与外部frames，使用与正式ASR重放相同的 `PcmSequenceVerifier` 检查实际字节、连续样本、包序列和源时钟元数据，EOF必须完整覆盖来源。它委托候选runner消费活动，不二次计时，不构造Governor或模型。返回 `input_mode=shared_pcm`、`input_clock=external_shared_source_unverified` 与已核对帧/样本计数；结束、失败或取消后关闭外部迭代器。
 
-候选runner的 `text_replay=None` 明确表示仅观察活动：`asr_text_source=not_observed`、`asr_text_sha256=null`、`clock_scope=diarization_activity_only`，不能用空sidecar冒充本次ASR正文。固定sidecar模式仍单独报告 `fixed_sidecar`。每个通过因果覆盖校验的稳定活动帧向外部sink发布 `stable_activity_frame`，包含样本区间、session-scoped匿名slot、step及接收时的 `observed_at_seconds`；sink实际交付时刻仍为 `elapsed_seconds`。评分用的闭合speaker区间可持续到finish，不能以它的关闭时刻替代稳定帧观测。两个时刻均相对runner宿主起点；需要结合共同源时钟与最终产品发布路径才可计算联合延迟，不能直接生成稳定标签P95。活动消费者自取消使执行失败并取消输入；外部重复取消等待活动回收、来源关闭及制品复核结束。
+候选runner未提供 `text_replay` 或 `text_channel` 时明确表示仅观察活动：`asr_text_source=not_observed`、`asr_text_sha256=null`、`clock_scope=diarization_activity_only`，不能用空sidecar冒充本次ASR正文。固定sidecar模式仍单独报告 `fixed_sidecar`，与live channel互斥。每个通过因果覆盖校验的稳定活动帧向外部sink发布 `stable_activity_frame`，包含样本区间、session-scoped匿名slot、step及接收时的 `observed_at_seconds`；sink实际交付时刻仍为 `elapsed_seconds`。评分用的闭合speaker区间可持续到finish，不能以它的关闭时刻替代稳定帧观测。两个时刻均相对runner宿主起点；需要结合共同源时钟与最终产品发布路径才可计算联合延迟，不能直接生成稳定标签P95。活动消费者自取消使执行失败并取消输入；外部重复取消等待活动回收、来源关闭及制品复核结束。
 
 `NativeCandidateRun.evaluate_shared_pcm` 是原生候选的显式库入口。传入Governor必须与创建owner时捕获的对象一致，并在构造session前及执行/制品复核后检查；同一handle的并行共享执行和已占用分人owner被拒绝。它复用既有session、端口继承、native preflight及制品检查，并在精确child回收后返回候选执行观察。原始输入、sink和共同供给作用域仍由调用方明确提供，没有新增自动执行CLI。C0与候选adapter源码闭包包含共享活动与PCM校验模块；闭包变化要求重新冻结spec和重新执行，不能沿用旧结果。Governor对象一致不证明资源预算、加载字节或最终ASR/分人联合身份。
 
-上述活动适配仍未接收live ASR正文，未验证产品稳定标签发布、footprint、ABBA或真实质量。runtime/certification/joint latency标记保持false，人数认证与P95保持未观察。相关fake回归见 `tests/test_meeting_candidate_runner.py` 与 `tests/test_meeting_candidate_execution.py`。
+`meeting_live_text.LiveTextChannel` 提供单producer、单reader的有界live正文观察通道。默认最多64个排队item和10000字符，分别可显式设置为1–4096和1–10000；整个case仍最多4096个item、10000字符、600秒，每个实际owned span不超过30秒。重复producer、队列或字符预算超限、非法/倒退时钟、文字序列或样本区间异常使通道永久失败并释放排队正文。发布使用非阻塞操作，不等待DIA消费、不延后PCM供给；失败/关闭后的发布返回false，不阻断ASR独立评分正文。通道报告只含计数、预算与状态，不保留报告正文；timed observation的repr也不包含文字。
+
+正式ASR重放显式接收 `text_channel`，只转发实际生产session sealed final_units中非空正文，并将owned_span准确映射至16k kernel样本。预览、参考、silence与coverage本身不产生文字，句级跨度不伪装成词级对齐。ASR正常完成且质量证据有效后发送明确EOF；启动异常、取消或无效结果使通道失败并唤醒reader。observer失败仍可保留独立ASR评分结果，但不能作为联合通过证据。排队预算与是否启用live进入重放policy；私有ASR root仅在formal shared_pcm与同一Governor绑定下接受此通道，root后验失败也使通道失效。
+
+`run_shared_activity_stream` 和 `NativeCandidateRun.evaluate_shared_pcm` 可接收同一live channel。独立text pump等待DIA实际accepted_samples覆盖文字末端后才注册，输入EOF仍不足则失败；必须收到ASR明确EOF并完成文字守恒、DIA finish与清理后才返回完成。此模式报告 `asr_text_source=live_sealed_session`、`clock_scope=diarization_with_live_asr_observer`。`asr_text_ready.producer_observed_at` 为通道clock的绝对观察时刻，`elapsed_seconds`为DIA runner相对起点的sink交付时刻，不能直接相减冒充产品延迟；通道clock区分monotonic/injected。DIA失败会关闭observer，但通用调度器仍会取消失败lane的其他任务，尚不等于整条流水线实现ASR优先降级。
+
+live通道不证明实际来源/生产字节或最终联合身份；必须在全部作用域结束后核对其最终状态，ASR报告中的快照不证明reader随后完整读完。产品稳定标签发布、共同起点、footprint、ABBA与真实质量仍未验证，runtime/certification/joint latency标记保持false，人数认证与P95未观察。相关fake回归见 `tests/test_meeting_live_text.py`、`tests/test_meeting_candidate_runner.py` 与 `tests/test_meeting_candidate_execution.py`。源码闭包变化后重新冻结spec与重放controls/report，不沿用旧认证。
 
 ### 有声书外置小说语料回归
 

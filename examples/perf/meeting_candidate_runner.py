@@ -1,7 +1,8 @@
-"""Bounded candidate replay with concurrent activity consumption.
+"""Bounded candidate execution with concurrent activity and text consumption.
 
 Fixed ASR sidecars support controlled diarization comparisons. Their clocks do
-not constitute live ASR or joint product-latency evidence. This library does not
+not constitute live ASR evidence. A separate bounded channel can observe actual
+sealed ASR text; neither mode proves joint product latency. This library does not
 create a governor, download models, issue receipts or modify a running service.
 """
 
@@ -13,8 +14,17 @@ import hashlib
 import math
 import time
 import wave
-from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Iterator, Mapping
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Generator,
+    Iterator,
+    Mapping,
+)
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +34,7 @@ from meeting_candidate_evidence import (
     CompletedText,
     EvidenceEvent,
 )
+from meeting_live_text import LiveTextChannel
 
 from speechrail.domain.diarization.ports import ActivitySession
 from speechrail.runtime.cleanup import join_cleanup
@@ -143,6 +154,7 @@ async def run_candidate_stream(
     *,
     activity_factory: Callable[[], ActivitySession],
     text_replay: FixedTextReplay | None,
+    text_channel: LiveTextChannel | None = None,
     epoch: str,
     sink: Callable[[Mapping[str, Any]], Awaitable[None]],
     input_mode: str = "throughput",
@@ -151,14 +163,16 @@ async def run_candidate_stream(
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> dict[str, Any]:
-    """Run activity-only or a controlled sidecar comparison on the caller's lane.
+    """Run activity-only, fixed sidecar or live observation on the caller's lane.
 
     The factory must use the real composition-root governor. Cross-process
     service exclusion and artifact/runtime identities are the caller's duties.
     Sink is a raw external-artifact sink; returned summary never contains text.
-    text_replay=None explicitly means no ASR body was observed.
+    Without either text source no ASR body was observed. Sources are exclusive.
     """
-    if input_mode not in {"throughput", "realtime"} or any(
+    if (text_replay is not None and text_channel is not None) or (
+        input_mode not in {"throughput", "realtime"}
+    ) or any(
         type(v) not in (int, float) or not math.isfinite(v) or v <= 0
         for v in (timeout_seconds, sink_timeout_seconds)
     ):
@@ -172,6 +186,8 @@ async def run_candidate_stream(
     finishing = False
     appends = consumed_updates = 0
     updates_consumed = asyncio.Event()
+    audio_progress = asyncio.Event()
+    input_done = False
     registered_characters = emitted_characters = 0
     transcript_digest = hashlib.sha256()
     input_finished_at = finish_started_at = finish_ended_at = None
@@ -217,7 +233,9 @@ async def run_candidate_stream(
                 emitted_characters += len(event.text)
             await emit(row)
 
-    async def register(items: tuple[CompletedText, ...]) -> None:
+    async def register(
+        items: tuple[CompletedText, ...], *, producer_observed_at: float | None = None,
+    ) -> None:
         nonlocal registered_characters
         for item in items:
             events = evidence.register(item)
@@ -229,9 +247,20 @@ async def run_candidate_stream(
                     "sequence": item.sequence,
                     "end_sample": item.span.end,
                     "accepted_samples": evidence.accepted,
+                    "producer_observed_at": producer_observed_at,
                 }
             )
             await publish(events)
+
+    async def consume_text() -> None:
+        assert text_channel is not None
+        async for row in text_channel:
+            while row.item.span.end > evidence.accepted:
+                if input_done:
+                    raise ValueError("live text exceeds actual accepted audio")
+                audio_progress.clear()
+                await audio_progress.wait()
+            await register((row.item,), producer_observed_at=row.observed_at)
 
     async def consume(session: ActivitySession) -> None:
         nonlocal consumed_updates
@@ -267,11 +296,13 @@ async def run_candidate_stream(
         if not finishing:
             raise ValueError("candidate activity closed before input finish")
 
-    async def owned_consume(session: ActivitySession) -> None:
+    async def owned(
+        target: Callable[[], Coroutine[Any, Any, None]], name: str,
+    ) -> None:
         # TaskGroup treats a child's CancelledError as normal completion. Run
         # the actual pump separately so its self-cancellation fails the group
         # and cancels the input owner instead of waiting for a meeting timeout.
-        child = asyncio.create_task(consume(session), name="candidate-activity-consume")
+        child = asyncio.create_task(target(), name=name + "-consume")
         try:
             await child
         except asyncio.CancelledError:
@@ -283,6 +314,10 @@ async def run_candidate_stream(
     try:
         async with asyncio.timeout(timeout_seconds), asyncio.TaskGroup() as tasks:
             pump = None
+            live_pump = (
+                tasks.create_task(owned(consume_text, "candidate-text"), name="candidate-text-pump")
+                if text_channel is not None else None
+            )
             async for packet in pcm_source:
                 if (
                     not isinstance(packet, bytes)
@@ -294,7 +329,8 @@ async def run_candidate_stream(
                 if activity is None:
                     activity = activity_factory()
                     pump = tasks.create_task(
-                        owned_consume(activity), name="candidate-activity-pump"
+                        owned(partial(consume, activity), "candidate-activity"),
+                        name="candidate-activity-pump",
                     )
                 endpoint = evidence.accepted + len(packet) // 2
                 if input_mode == "realtime":
@@ -303,6 +339,7 @@ async def run_candidate_stream(
                         await sleep(delay)
                     max_input_lateness = max(max_input_lateness, elapsed() - endpoint / 16000)
                 evidence.accept(len(packet) // 2)
+                audio_progress.set()
                 input_finished_at = elapsed()
                 if text_replay is not None:
                     ready = await join_cleanup(
@@ -322,6 +359,8 @@ async def run_candidate_stream(
                         "through_sample": evidence.accepted,
                     }
                 )
+            input_done = True
+            audio_progress.set()
             if activity is None or pump is None:
                 raise ValueError("candidate input contains no audio")
             # Candidate/C0 private sessions publish exactly one update per
@@ -331,6 +370,11 @@ async def run_candidate_stream(
             while consumed_updates < appends:
                 updates_consumed.clear()
                 await updates_consumed.wait()
+            if live_pump is not None:
+                await live_pump
+                assert text_channel is not None
+                if text_channel.samples != evidence.accepted:
+                    raise ValueError("live text source length differs from accepted audio")
             if text_replay is not None:
                 final_text = await join_cleanup(
                     asyncio.create_task(asyncio.to_thread(text_replay.finish, evidence.accepted))
@@ -372,6 +416,11 @@ async def run_candidate_stream(
                     await close_source()
             except (Exception, asyncio.CancelledError):
                 cleanup_failed = True
+            if text_channel is not None:
+                try:
+                    await text_channel.aclose()
+                except (Exception, asyncio.CancelledError):
+                    cleanup_failed = True
             phase_sink_failed = False
             try:
                 await publish_phases()
@@ -390,8 +439,15 @@ async def run_candidate_stream(
         "processed_samples": evidence.processed,
         "text_characters": registered_characters,
         "emitted_text_characters": emitted_characters,
-        "asr_text_sha256": transcript_digest.hexdigest() if text_replay is not None else None,
-        "asr_text_source": "fixed_sidecar" if text_replay is not None else "not_observed",
+        "asr_text_sha256": (
+            transcript_digest.hexdigest()
+            if text_replay is not None or text_channel is not None else None
+        ),
+        "asr_text_source": (
+            "live_sealed_session" if text_channel is not None
+            else "fixed_sidecar" if text_replay is not None else "not_observed"
+        ),
+        "live_text": text_channel.summary() if text_channel is not None else None,
         "input_mode": input_mode,
         "clock_source": "monotonic" if clock is time.monotonic else "injected",
         "elapsed_seconds": elapsed(),
@@ -405,7 +461,8 @@ async def run_candidate_stream(
             and trace_status.get("required_phases_observed") is True
         ),
         "clock_scope": (
-            "diarization_with_fixed_asr_sidecar"
+            "diarization_with_live_asr_observer" if text_channel is not None
+            else "diarization_with_fixed_asr_sidecar"
             if text_replay is not None else "diarization_activity_only"
         ),
         "joint_asr_latency_observed": False,

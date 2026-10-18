@@ -1072,7 +1072,7 @@ def test_directory_symlinks_fail_closed_and_file_symlinks_bind_target(runtime_se
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("replay_kind", ["formal", "long", "shared_pcm"])
+@pytest.mark.parametrize("replay_kind", ["formal", "long", "shared_pcm", "shared_pcm_live"])
 @pytest.mark.parametrize(
     "mutate", [None, "asr", "dependency", "source", "generation", "background_cancel"]
 )
@@ -1158,7 +1158,7 @@ def test_locked_source_flows_through_production_session_with_measured_spec(
     )
 
     async def evaluate(runtime, locked, spec):
-        if replay_kind != "shared_pcm":
+        if not replay_kind.startswith("shared_pcm"):
             return await runtime.evaluate(locked, spec, replay_plan=plan)
         from bench_asr_diarization_overlap import run_pcm_workload_schedule
 
@@ -1167,9 +1167,24 @@ def test_locked_source_flows_through_production_session_with_measured_spec(
         captured, clock = [], Clock()
 
         async def workload(shared, frames):
-            result = await runtime.evaluate(locked, spec, pcm_frames=frames, governor=shared)
-            captured.append(result)
-            return result
+            from meeting_live_text import LiveTextChannel
+
+            channel = (
+                LiveTextChannel(samples=len(pcm) // 2) if replay_kind == "shared_pcm_live" else None
+            )
+            try:
+                result = await runtime.evaluate(
+                    locked, spec, pcm_frames=frames, governor=shared, text_channel=channel,
+                )
+                if channel is not None:
+                    rows = [row.item async for row in channel]
+                    assert "".join(row.text for row in rows) == "甲乙"
+                    assert channel.summary()["producer_finished"] is True
+                captured.append(result)
+                return result
+            finally:
+                if channel is not None:
+                    await channel.aclose()
 
         await run_pcm_workload_schedule(
             pcm=pcm,
@@ -1225,7 +1240,7 @@ def test_locked_source_flows_through_production_session_with_measured_spec(
                 with pytest.raises(
                     ValueError,
                     match="PCM workload"
-                    if replay_kind == "shared_pcm"
+                    if replay_kind.startswith("shared_pcm")
                     else r"runtime (bytes|owner)",
                 ):
                     await evaluate(runtime, locked, spec)
@@ -1247,7 +1262,7 @@ def test_locked_source_flows_through_production_session_with_measured_spec(
         if background is not None:
             await release_task
             with pytest.raises(
-                ValueError if replay_kind == "shared_pcm" else asyncio.CancelledError
+                ValueError if replay_kind.startswith("shared_pcm") else asyncio.CancelledError
             ):
                 await background
             assert not any(t.get_name().startswith("frozen-asr-") for t in asyncio.all_tasks())

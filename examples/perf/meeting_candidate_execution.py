@@ -24,6 +24,7 @@ from meeting_candidate_session import (
 )
 from meeting_development_fixture import evaluate_development_fixture
 from meeting_evaluation_identity import MeetingCandidateSpec, candidate_digest
+from meeting_live_text import LiveTextChannel
 from meeting_pcm_feed import PcmChunk
 
 from speechrail.backends.diarization.coreml import CoreMLActivitySession
@@ -215,6 +216,7 @@ class NativeCandidateRun:
         *,
         governor: ResourceGovernor,
         sink: Callable[[Mapping[str, Any]], Awaitable[None]],
+        text_channel: LiveTextChannel | None = None,
         timeout_seconds: float = 1800,
         sink_timeout_seconds: float = 5,
         clock: Callable[[], float] = time.monotonic,
@@ -248,6 +250,7 @@ class NativeCandidateRun:
             delegated = True
             result = await run_shared_activity_stream(
                 pcm, frames, activity_factory=construct, epoch="session", sink=sink,
+                text_channel=text_channel,
                 timeout_seconds=timeout_seconds, sink_timeout_seconds=sink_timeout_seconds,
                 clock=clock,
             )
@@ -255,10 +258,16 @@ class NativeCandidateRun:
             observation = await self.verify()
             check_owner()
             return {**result, "candidate_execution": dict(observation)}
+        except BaseException:
+            if text_channel is not None:
+                text_channel.fail()
+            raise
         finally:
             if claimed:
                 self._shared_active = False
             if not delegated:
+                if text_channel is not None:
+                    await text_channel.aclose()
                 close = getattr(frames, "aclose", None)
                 if close is not None:
                     await join_cleanup(

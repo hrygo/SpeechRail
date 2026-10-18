@@ -176,12 +176,16 @@ def test_native_driver_connects_locked_fixture_trace_and_saved_observation(
 
 
 @pytest.mark.parametrize("binding", ["same", "different", "changed", "during"])
+@pytest.mark.parametrize("live", [False, True])
 def test_native_shared_pcm_uses_original_owner_and_checks_reaping(
-    candidate, monkeypatch, binding
+    candidate, monkeypatch, binding, live
 ):
+    from meeting_candidate_evidence import CompletedText
     from meeting_candidate_execution import CandidateArtifacts, NativeCandidateRun
+    from meeting_live_text import LiveTextChannel
     from meeting_pcm_feed import PcmChunk
 
+    from speechrail.domain.audio_timeline import SampleSpan
     from speechrail.domain.resource_limits import GovernorLimits
     from speechrail.runtime.resource_governor import ResourceGovernor
 
@@ -200,6 +204,10 @@ def test_native_shared_pcm_uses_original_owner_and_checks_reaping(
     async def run():
         output, reads = [], []
         original = bytes(320)
+        channel = LiveTextChannel(samples=160) if live else None
+        if channel is not None:
+            assert channel.publish(CompletedText(0, "甲", SampleSpan(0, 160)))
+            channel.finish()
 
         async def frames():
             reads.append(True)
@@ -216,6 +224,7 @@ def test_native_shared_pcm_uses_original_owner_and_checks_reaping(
             call = native.evaluate_shared_pcm(
                 original, frames(), governor=other if binding == "different" else shared,
                 sink=sink,
+                text_channel=channel,
             )
             if binding in {"different", "changed"}:
                 with pytest.raises(ValueError, match="governor"):
@@ -231,7 +240,8 @@ def test_native_shared_pcm_uses_original_owner_and_checks_reaping(
             result = await call
             assert result["processed_samples"] == 160
             assert result["candidate_execution"]["exact_child_reaped"] is True
-            assert result["asr_text_source"] == "not_observed"
+            assert result["asr_text_source"] == ("live_sealed_session" if live else "not_observed")
+            assert result["text_characters"] == int(live)
             assert result["runtime_identity_verified"] is False
             assert result["certification_eligible"] is False
             assert not shared.diarization_owner.occupied
