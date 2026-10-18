@@ -51,6 +51,10 @@ def test_model_file_symlink_into_repository_rejected_before_loading(runtime_setu
 def runtime_setup(tmp_path, monkeypatch):
     import meeting_asr_runtime as module
 
+    # Composition policy sees a synthetic memory budget, never the test host.
+    monkeypatch.setattr(
+        "speechrail.application.services.detect_system_memory_bytes", lambda: 16 * 1024**3
+    )
     snapshots = []
     for name in ("asr", "aligner"):
         root = tmp_path / name
@@ -1176,11 +1180,19 @@ def test_locked_source_flows_through_production_session_with_measured_spec(
     if mutate == "background_cancel":
         monkeypatch.setattr(Qwen3SharedWorker, "request", blocking_request)
 
+    input_time = [0.0]
+
+    async def advance_input_time(seconds):
+        input_time[0] += seconds
+        await asyncio.sleep(0)
+
     async def replay_then_mutate(*args, **kwargs):
         if replay_kind == "formal":
             # Production capture has a bounded undecoded backlog. A formal
             # replay must preserve capture pacing rather than burst the file.
             assert kwargs["input_mode"] == "realtime"
+            kwargs["clock"] = lambda: input_time[0]
+            kwargs["pace"] = advance_input_time
         result = await original_replay(*args, **kwargs)
         assert state.created[0].window_asr_factory._session is None
         if mutate == "generation":
@@ -1324,6 +1336,8 @@ def test_locked_source_flows_through_production_session_with_measured_spec(
             else:
                 result = await evaluate(runtime, locked, spec)
                 assert result["source_validation"]["bytes_verified"] is True
+                if replay_kind == "formal":
+                    assert result["diagnostics"]["input_clock"] == "injected"
                 assert result["quality_evidence_valid"] is True
                 assert result["actual_decode_calls"] > 0
                 assert result["runtime_identity_verified"] is False

@@ -704,3 +704,31 @@ def test_legacy_oracle_is_named_as_a_diagnostic() -> None:
     assert "di_cp_wer" not in result
     assert result["temporal_oracle_cer"] == 0
     assert result["standard_metric"] is False
+
+
+def test_preflight_default_paths_follow_user_home(tmp_path, monkeypatch):
+    import probe_meeting_sortformer_1to4 as probe
+
+    home = tmp_path / "another-user"
+    monkeypatch.setenv("HOME", str(home))
+    captured = {}
+
+    def preflight(**kwargs):
+        captured.update(kwargs)
+        return {"evaluation": {"verdict": "no-go"}}
+
+    monkeypatch.setattr(probe, "run_preflight_probe", preflight)
+    assert probe.main(["--mode", "preflight"]) == 0
+    app = home / "Library" / "Application Support" / "SpeechRail"
+    assert captured["benchmark_root"] == app / "benchmarks"
+    assert captured["model_root"] == app / "models"
+
+
+def test_evaluation_requires_explicit_inputs_before_model_engine(monkeypatch):
+    import probe_meeting_sortformer_1to4 as probe
+
+    def forbidden(**kwargs):
+        pytest.fail("model engine must not be constructed without explicit inputs")
+
+    monkeypatch.setattr(probe, "CoreMLSortformerEngine", forbidden)
+    assert probe.main(["--mode", "evaluate-development"]) == 2

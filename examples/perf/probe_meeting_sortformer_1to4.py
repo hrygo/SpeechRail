@@ -1351,12 +1351,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--benchmark-root",
         type=Path,
-        default=Path("/Users/hrygo/Library/Application Support/SpeechRail/benchmarks"),
+        default=Path.home() / "Library/Application Support/SpeechRail/benchmarks",
     )
     parser.add_argument(
         "--model-root",
         type=Path,
-        default=Path("/Users/hrygo/Library/Application Support/SpeechRail/models"),
+        default=Path.home() / "Library/Application Support/SpeechRail/models",
     )
     parser.add_argument(
         "--manifest",
