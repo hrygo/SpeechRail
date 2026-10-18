@@ -1072,12 +1072,12 @@ def test_directory_symlinks_fail_closed_and_file_symlinks_bind_target(runtime_se
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("long_blocks", [False, True])
+@pytest.mark.parametrize("replay_kind", ["formal", "long", "shared_pcm"])
 @pytest.mark.parametrize(
     "mutate", [None, "asr", "dependency", "source", "generation", "background_cancel"]
 )
 def test_locked_source_flows_through_production_session_with_measured_spec(
-    runtime_setup, tmp_path, monkeypatch, mutate, long_blocks
+    runtime_setup, tmp_path, monkeypatch, mutate, replay_kind
 ):
     import wave
 
@@ -1091,10 +1091,10 @@ def test_locked_source_flows_through_production_session_with_measured_spec(
     state = runtime_setup
     plan = (
         state.module.AsrReplayPlan("bounded_long_block_diagnostic", 1, 30)
-        if long_blocks
+        if replay_kind == "long"
         else state.module.AsrReplayPlan()
     )
-    replay_name = "replay_long_blocks" if long_blocks else "replay_realtime_session"
+    replay_name = "replay_long_blocks" if replay_kind == "long" else "replay_realtime_session"
     original_replay = getattr(state.module, replay_name)
     entered, release, context_closing = asyncio.Event(), asyncio.Event(), asyncio.Event()
     original_request = Qwen3SharedWorker.request
@@ -1157,6 +1157,34 @@ def test_locked_source_flows_through_production_session_with_measured_spec(
         )
     )
 
+    async def evaluate(runtime, locked, spec):
+        if replay_kind != "shared_pcm":
+            return await runtime.evaluate(locked, spec, replay_plan=plan)
+        from bench_asr_diarization_overlap import run_pcm_workload_schedule
+
+        from test_meeting_pcm_feed import Clock
+
+        captured, clock = [], Clock()
+
+        async def workload(shared, frames):
+            result = await runtime.evaluate(locked, spec, pcm_frames=frames, governor=shared)
+            captured.append(result)
+            return result
+
+        await run_pcm_workload_schedule(
+            pcm=pcm,
+            expected_pcm_sha256=hashlib.sha256(pcm).hexdigest(),
+            mode="asr-only",
+            governor=runtime.governor,
+            asr=workload,
+            chunk_samples=320,
+            queue_chunks=64,
+            max_lateness_seconds=0.01,
+            clock=clock,
+            sleep=clock.sleep,
+        )
+        return captured[0]
+
     async def run():
         background, release_task = None, None
         async with state.module.prepare_frozen_asr_runtime(
@@ -1176,7 +1204,7 @@ def test_locked_source_flows_through_production_session_with_measured_spec(
                 },
             )
             if mutate == "background_cancel":
-                background = asyncio.create_task(runtime.evaluate(locked, spec, replay_plan=plan))
+                background = asyncio.create_task(evaluate(runtime, locked, spec))
                 await asyncio.wait_for(entered.wait(), 3)
                 original_finish = runtime._finish
 
@@ -1188,16 +1216,21 @@ def test_locked_source_flows_through_production_session_with_measured_spec(
 
                 async def finish_decode_after_context_cancels():
                     await context_closing.wait()
-                    assert background.cancelling()
+                    assert runtime._inflight is not None and runtime._inflight.cancelling()
                     assert not state.closed
                     release.set()
 
                 release_task = asyncio.create_task(finish_decode_after_context_cancels())
             elif mutate is not None:
-                with pytest.raises(ValueError, match=r"runtime (bytes|owner)"):
-                    await runtime.evaluate(locked, spec, replay_plan=plan)
+                with pytest.raises(
+                    ValueError,
+                    match="PCM workload"
+                    if replay_kind == "shared_pcm"
+                    else r"runtime (bytes|owner)",
+                ):
+                    await evaluate(runtime, locked, spec)
             else:
-                result = await runtime.evaluate(locked, spec, replay_plan=plan)
+                result = await evaluate(runtime, locked, spec)
                 assert result["source_validation"]["bytes_verified"] is True
                 assert result["quality_evidence_valid"] is True
                 assert result["actual_decode_calls"] > 0
@@ -1213,8 +1246,75 @@ def test_locked_source_flows_through_production_session_with_measured_spec(
         assert len(state.closed) == 2
         if background is not None:
             await release_task
-            with pytest.raises(asyncio.CancelledError):
+            with pytest.raises(
+                ValueError if replay_kind == "shared_pcm" else asyncio.CancelledError
+            ):
                 await background
             assert not any(t.get_name().startswith("frozen-asr-") for t in asyncio.all_tasks())
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("target", ["services", "factory"])
+def test_private_root_governor_object_cannot_be_replaced(runtime_setup, target):
+    from speechrail.domain.resource_limits import GovernorLimits
+    from speechrail.runtime.resource_governor import ResourceGovernor
+
+    state = runtime_setup
+
+    async def scenario():
+        async with state.module.prepare_frozen_asr_runtime(
+            state.settings, dependencies=state.dependencies
+        ) as runtime:
+            services = state.created[0]
+            assert runtime.governor is services.governor
+            replacement = ResourceGovernor(GovernorLimits(3, 1, 4))
+            if target == "services":
+                object.__setattr__(services, "governor", replacement)
+            else:
+                services.window_asr_factory._governor = replacement
+            with pytest.raises(ValueError, match="runtime owner"):
+                await runtime.verify()
+        assert len(state.closed) == 2
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("invalid", ["missing", "different", "without_stream", "long_blocks"])
+def test_shared_source_requires_same_guarded_governor_and_formal_plan(runtime_setup, invalid):
+    from speechrail.domain.resource_limits import GovernorLimits
+    from speechrail.runtime.resource_governor import ResourceGovernor
+
+    state = runtime_setup
+
+    async def scenario():
+        async with state.module.prepare_frozen_asr_runtime(
+            state.settings, dependencies=state.dependencies
+        ) as runtime:
+            spec = runtime.candidate_spec()
+            before = list(state.calls)
+
+            async def frames():
+                pytest.fail("invalid binding must not read source")
+                yield
+
+            options = {"pcm_frames": frames(), "governor": runtime.governor}
+            if invalid == "missing":
+                options["governor"] = None
+            if invalid == "different":
+                options["governor"] = ResourceGovernor(GovernorLimits(3, 1, 4))
+            if invalid == "without_stream":
+                options["pcm_frames"] = None
+            if invalid == "long_blocks":
+                options["replay_plan"] = state.module.AsrReplayPlan(
+                    "bounded_long_block_diagnostic", 1, 30
+                )
+            try:
+                with pytest.raises(ValueError, match="shared PCM requires"):
+                    await runtime.evaluate(None, spec, **options)
+                assert state.calls == before
+            finally:
+                if options["pcm_frames"] is not None:
+                    await options["pcm_frames"].aclose()
+
+    asyncio.run(scenario())

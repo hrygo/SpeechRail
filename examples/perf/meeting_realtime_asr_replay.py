@@ -21,7 +21,8 @@ import base64
 import hashlib
 import math
 import time
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine, Iterator
+from contextlib import aclosing
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -32,6 +33,7 @@ from meeting_evaluation_identity import (
     canonical_digest,
     validate_execution_identity,
 )
+from meeting_pcm_feed import PcmChunk
 from probe_meeting_asr_quality import (
     AsrCase,
     RuntimeObservation,
@@ -243,6 +245,63 @@ def _packets(data: AsrCase, wire_packet_samples: int) -> Iterator[bytes]:
             yield wire[offset : offset + wire_packet_samples * 2]
 
 
+async def _shared_packets(
+    data: AsrCase,
+    frames: AsyncIterator[PcmChunk],
+    wire_packet_samples: int,
+    verified: dict[str, int],
+) -> AsyncGenerator[bytes]:
+    """Keep one odd kernel sample across source boundaries for exact mapping."""
+    carry = b""
+    origin: float | None = None
+    previous_offered: float | None = None
+    try:
+        async for frame in frames:
+            if (
+                not isinstance(frame, PcmChunk)
+                or type(frame.sequence) is not int
+                or frame.sequence != verified["frames_verified"]
+                or type(frame.start_sample) is not int
+                or frame.start_sample != verified["samples_verified"]
+                or type(frame.end_sample) is not int
+                or not frame.start_sample < frame.end_sample <= len(data.pcm16) // 2
+                or type(frame.pcm) is not bytes
+                or not 0 < len(frame.pcm) <= 32000
+                or len(frame.pcm) != (frame.end_sample - frame.start_sample) * 2
+                or frame.pcm != data.pcm16[frame.start_sample * 2 : frame.end_sample * 2]
+                or any(
+                    type(value) not in (int, float) or not math.isfinite(value)
+                    for value in (frame.target_at, frame.offered_at)
+                )
+                or frame.offered_at < frame.target_at
+                or (previous_offered is not None and frame.offered_at < previous_offered)
+                or verified["frames_verified"] >= 65536
+            ):
+                raise ValueError("shared PCM differs from frozen source or sample sequence")
+            observed_origin = frame.target_at - frame.end_sample / 16000
+            if origin is None:
+                origin = observed_origin
+            elif not math.isclose(origin, observed_origin, rel_tol=0, abs_tol=1e-6):
+                raise ValueError("shared PCM clock origin changed")
+            previous_offered = frame.offered_at
+            verified["frames_verified"] += 1
+            verified["samples_verified"] = frame.end_sample
+            block = carry + frame.pcm
+            paired_bytes = len(block) // 4 * 4
+            carry = block[paired_bytes:]
+            wire = inverse_embed_pcm16(block[:paired_bytes])
+            for offset in range(0, len(wire), wire_packet_samples * 2):
+                yield wire[offset : offset + wire_packet_samples * 2]
+        if verified["samples_verified"] != len(data.pcm16) // 2:
+            raise ValueError("shared PCM ended before the frozen source")
+        if carry:
+            yield inverse_embed_pcm16(carry)
+    finally:
+        close = getattr(frames, "aclose", None)
+        if close is not None:
+            await join_cleanup(asyncio.create_task(close(), name="formal-asr-source-close"))
+
+
 def _failure_codes(error: BaseException) -> set[str]:
     if isinstance(error, BaseExceptionGroup):
         return set().union(*(_failure_codes(child) for child in error.exceptions))
@@ -257,6 +316,7 @@ def _source_digests() -> dict[str, str]:
     root = Path(asr_module.__file__).parent.parent
     paths = {
         "formal_replay": Path(__file__),
+        "shared_pcm_feed": Path(__file__).with_name("meeting_pcm_feed.py"),
         **{
             relative: root / relative
             for relative in (
@@ -371,7 +431,8 @@ async def replay_realtime_session(
     services: AppServices,
     *,
     observe: Callable[[], RuntimeObservation],
-    input_mode: Literal["throughput", "realtime"] = "throughput",
+    input_mode: Literal["throughput", "realtime", "shared_pcm"] = "throughput",
+    pcm_frames: AsyncIterator[PcmChunk] | None = None,
     wire_packet_samples: int = 2400,
     queue_capacity: int = 16,
     decode_timeout_seconds: float = 30,
@@ -399,7 +460,9 @@ async def replay_realtime_session(
         raise ValueError("wire packets must be bounded to one second")
     if type(queue_capacity) is not int or not 1 <= queue_capacity <= 64:
         raise ValueError("ingress capacity must be bounded to 1–64 packets")
-    if input_mode not in {"throughput", "realtime"}:
+    if input_mode not in {"throughput", "realtime", "shared_pcm"} or (
+        (input_mode == "shared_pcm") != (pcm_frames is not None)
+    ):
         raise ValueError("invalid input clock mode")
     policy, language = _settings(spec)
     if (
@@ -487,6 +550,8 @@ async def replay_realtime_session(
     }
     queue: asyncio.Queue[bytes | None] = asyncio.Queue(queue_capacity)
     previous_clock: float | None = None
+    shared_verified = {"frames_verified": 0, "samples_verified": 0}
+    source_claimed = False
 
     def now() -> float:
         nonlocal previous_clock
@@ -500,7 +565,30 @@ async def replay_realtime_session(
         previous_clock = float(value)
         return float(value)
 
+    def enqueue(packet: bytes) -> None:
+        try:
+            queue.put_nowait(packet)
+        except asyncio.QueueFull:
+            raise _IngressFullError("bounded replay ingress is full") from None
+        ingress["produced_wire_samples"] += len(packet) // 2
+        ingress["high_water_packets"] = max(ingress["high_water_packets"], queue.qsize())
+
     async def produce() -> None:
+        nonlocal source_claimed
+        if pcm_frames is not None:
+            source_claimed = True
+            async with aclosing(
+                _shared_packets(data, pcm_frames, wire_packet_samples, shared_verified)
+            ) as packets:
+                async for packet in packets:
+                    # A single source frame can contain many wire packets.
+                    # Give the ready consumer one turn before treating a full
+                    # queue as overload; never wait on put() or shift pacing.
+                    if queue.full():
+                        await asyncio.sleep(0)
+                    enqueue(packet)
+            await queue.put(None)
+            return
         origin = now()
         scheduled = 0
         for packet in _packets(data, wire_packet_samples):
@@ -509,12 +597,7 @@ async def replay_realtime_session(
                 await pace(max(0.0, origin + scheduled / 24000 - now()))
             else:
                 await asyncio.sleep(0)
-            try:
-                queue.put_nowait(packet)
-            except asyncio.QueueFull:
-                raise _IngressFullError("bounded replay ingress is full") from None
-            ingress["produced_wire_samples"] += len(packet) // 2
-            ingress["high_water_packets"] = max(ingress["high_water_packets"], queue.qsize())
+            enqueue(packet)
         await queue.put(None)
 
     async def consume() -> None:
@@ -528,6 +611,16 @@ async def replay_realtime_session(
             ingress["consumed_wire_samples"] += len(packet) // 2
         await session.handle({"type": "input_audio_buffer.commit", "event_id": "formal-commit"})
 
+    async def owned(target: Callable[[], Coroutine[Any, Any, None]], name: str) -> None:
+        task = asyncio.create_task(target(), name=name + "-operation")
+        try:
+            await task
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+            raise RuntimeError("formal replay child cancelled itself") from None
+
     effective_policy: dict[str, object] | None = None
     try:
         async with asyncio.timeout(total_timeout_seconds):
@@ -537,8 +630,8 @@ async def replay_realtime_session(
             if not terminals.session_policy_verified:
                 raise ValueError("effective protocol session was not observed")
             async with asyncio.TaskGroup() as group:
-                group.create_task(produce(), name="formal-asr-producer")
-                group.create_task(consume(), name="formal-asr-consumer")
+                group.create_task(owned(produce, "formal-asr-producer"), name="formal-asr-producer")
+                group.create_task(owned(consume, "formal-asr-consumer"), name="formal-asr-consumer")
             if (
                 session._asr_owner._kernel_timeline.accepted_samples != len(data.pcm16) // 2
                 or session._asr_owner.accepted_samples != len(data.pcm16) // 2 * 3 // 2
@@ -555,6 +648,15 @@ async def replay_realtime_session(
             recorded.failures.add("session_cleanup_failed")
         while not queue.empty():
             queue.get_nowait()
+        if pcm_frames is not None and not source_claimed:
+            close_source = getattr(pcm_frames, "aclose", None)
+            if close_source is not None:
+                try:
+                    await join_cleanup(
+                        asyncio.create_task(close_source(), name="formal-asr-source-close")
+                    )
+                except Exception:
+                    recorded.failures.add("source_cleanup_failed")
     after = _callback(observe)
     validate_execution_identity(spec, after.identity)
     if before.origin != after.origin:
@@ -587,16 +689,23 @@ async def replay_realtime_session(
             and effective_policy is not None,
             "effective_vad_admission": effective_policy,
             "configuration_sha256": canonical_digest(configuration),
-            "decode_cap_origin": "ready_factory_observation" if observed_cap is not None
+            "decode_cap_origin": "ready_factory_observation"
+            if observed_cap is not None
             else "frozen_caller_upper_bound_checked_per_attempt",
-            "window_decoder_config_cap": observed_cap if observed_cap is not None
+            "window_decoder_config_cap": observed_cap
+            if observed_cap is not None
             else "not_observed",
             "cleanup_budget": "joined_production_close_may_wait_current_decode_timeout",
             "wire_mapping": _MAPPING,
             "source_digests": source_digests,
             "vad_input_domain": "kernel_pcm16_16000",
             "ingress": ingress,
-            "input_clock": "monotonic" if clock is time.monotonic else "injected",
+            "shared_pcm": shared_verified if pcm_frames is not None else None,
+            "input_clock": "external_shared_source_unverified"
+            if pcm_frames is not None
+            else "monotonic"
+            if clock is time.monotonic
+            else "injected",
             "input_mode": input_mode,
             "timing_scope": "diagnostic_not_capture_or_p95",
             "contextual_boundary_adapter": True,

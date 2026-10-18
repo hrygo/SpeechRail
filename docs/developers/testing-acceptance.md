@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.38"
+version: "3.3.39"
 date: 2026-10-18
 ---
 
@@ -267,6 +267,10 @@ wire 固定为24kHz PCM16，kernel 为16kHz。为保留锁定 kernel 字节，�
 
 输入由独立生产者和消费者经1–64包有界队列传递，每包至多一秒；throughput 尽快供给，realtime 按累计 wire 样本以1×时钟供给。队列满、协议失败、缺覆盖或超时均失败，不静默丢帧或重试。TaskGroup 加入两个任务后，等待生产 session.close 清理当前有界 decode；取消同样先加入清理再传播，不强取消共享 worker。总输入 deadline 不包含可能仍需等待的当前 decode 清理预算，因此不能把它当绝对墙钟上限。注入时钟明示 injected；该诊断不提供真实采集延迟或P95认证。
 
+`input_mode=shared_pcm` 必须同时提供外部 `pcm_frames`，其他mode拒绝该参数。共享输入不重新计时或读取旧sidecar：逐包核对PcmChunk的整数序列、连续样本区间、原case PCM字节、有限且一致的源时钟元数据；EOF必须覆盖全case。逆嵌入跨包保留至多一个奇数kernel样本，最后再flush，不能逐包独立丢失配对状态。一个源包拆成多个wire包时，内部队列满先给ready消费者一次调度机会，仍满则失败，不等待queue.put容量、不移动共同源时钟。源自取消转为失败，取消并加入另一条重放任务；外部取消仍等待session与源迭代器清理。
+
+共享源的 `diagnostics.input_clock=external_shared_source_unverified`：帧中的时间是调用方元数据，必须结合共同供给报告才能区分真实monotonic和注入clock，不能因未注入本函数clock而冒称真实时钟。`diagnostics.shared_pcm` 只记录已核对的帧数/样本数；共享输入未增加正文、活动稳定发布、footprint或P95证明。该库入口不自动提供联合评测CLI或可信收据，wire逆嵌入仍非真实24k采集。
+
 只取有界 sealed 正文评分，逐 attempt 记录沿用 schema 2。实际 Qwen3 engine 通过 ready 私有帧报告 window_decode_max_new_tokens，经 shared owner 严格校验后只在该代 ready 期间暴露给 window factory；关闭、失效或重启清除，缺字段保持未知。formal replay 观察到该值时要求它与冻结 max_tokens 完全一致，并在 replay policy 中绑定、退出时重核；没有观测的 factory 仍只按调用方上限作诊断。每次真实 budget 继续由 observation 证明且不超过冻结上限；streaming 配置不等于共享 window owner 的有效 cap。缺观测保持未知。replay policy 绑定实现/配置摘要、有效策略、输入模式、包/队列与时限；前后身份字段匹配仍只是调用方声明，runtime_identity_verified/certification_eligible 保持 false，a0_execution 为 not_certified。
 
 可将该 callback 交给 `evaluate_locked_asr_case`，贯通共享 development 来源、显式主参考、实际 session、评分与退出后文件核对；会话关闭后修改参考也不能返回 source proof。摘要不含正文、PCM、Base64 或绝对路径。fake 回归见 `tests/test_meeting_realtime_asr_replay.py` 与 `tests/test_meeting_asr_source.py`；实际 A0 生产字节证明、真实质量与延迟仍需独立授权和验收。
@@ -280,6 +284,8 @@ wire 固定为24kHz PCM16，kernel 为16kHz。为保留锁定 kernel 字节，�
 私有 worker transport 设置 `PYTHONDONTWRITEBYTECODE=1` 并纳入配置摘要；不修改宿主全局解释器标志。宿主导入若改变声明的依赖目录，同样判定文件不稳定，不静默忽略新 bytecode。Silero 使用宿主进程共享缓存：拒绝已存在的对应模型 cache key，保护模型文件，但不清空全局缓存，不宣称本次调用独占或释放该缓存。
 
 ready 后绑定同一生产 window factory、shared owner、ASR generation、实际进程对象、ready 结构身份、有效窗口 cap 与配置。aligner 未暴露 generation，仅核对原 client/transport/process 对象和 ready identity。`candidate_spec()` 从冻结文件和实际 ready 配置形成诊断比较身份，sdk_revision 字段使用 `filesystem-closure:` 摘要绑定完整具名文件集合、两个 worker 的完整环境及有效配置，不冒充已导入 SDK 版本；`evaluate()` 贯通 `LockedAsrCase → evaluate_locked_asr_case → replay_realtime_session`，每次回放前后复核，单 handle 不允许并行回放。退出先加入准备或正在进行的回放，再关闭私有创建的两个 child；替换的未知 worker/process 不按假定所有权关闭，清理未确认则失败。
+
+私有root同时绑定原services与NativeWindowAsrFactory中的实际Governor对象，任一被替换即失败。`governor`属性只在有效handle上返回该对象；`evaluate(..., pcm_frames=frames, governor=shared)` 只接受同一对象和正式session计划，不接受缺Governor、其他Governor、无流却传Governor或长块计划配流。其来源/字节/owner/generation及关闭后校验沿用普通重放；共同输入等待仍计入外层回调区间。Governor对象相同不证明DIA的预算声明、实际联合生产身份或并发净收益。此接线是显式库入口，现有单场ASR CLI不隐式创建共同输入源；相关源码闭包/spec与重放身份变化后须重新冻结和执行，不沿用旧报告认证。
 
 `proof()` 的 preload/post-prepare/post-replay 字段只描述具名文件稳定性与对象核对。`loaded_model_bytes_verified/actual_imports_verified/source_import_bytes_verified` 保持 false；ready revision 是结构指纹，不能作为权重字节证明，依赖声明也不证明实际 import resolution。结果继续 `runtime_identity_verified=false/certification_eligible=false`，实际 A0、质量改善与 P95 仍需独立证据。fake 回归见 `tests/test_meeting_asr_runtime.py`。
 

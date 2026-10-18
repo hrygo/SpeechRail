@@ -32,6 +32,7 @@ from meeting_evaluation_identity import (
     canonical_digest,
     validate_execution_identity,
 )
+from meeting_pcm_feed import PcmChunk
 from meeting_realtime_asr_replay import realtime_replay_preset, replay_realtime_session
 from probe_meeting_asr_quality import ASR_SCORER, RuntimeObservation, replay_long_blocks
 
@@ -48,6 +49,7 @@ from speechrail.config import Settings
 from speechrail.domain.asr_window import WindowIdentity
 from speechrail.infrastructure.voice_registry import FileVoiceRegistry
 from speechrail.runtime.cleanup import join_cleanup
+from speechrail.runtime.resource_governor import ResourceGovernor
 from speechrail.runtime.server_lock import ServerInstanceLock
 from speechrail.runtime.worker_process import AsyncFramedWorkerProcess
 
@@ -377,6 +379,7 @@ class _Owners:
     aligner: Qwen3AlignmentWorker
     asr_transport: AsyncFramedWorkerProcess
     alignment_transport: AsyncFramedWorkerProcess
+    governor: ResourceGovernor
     process_pair: tuple[object, object] | None = None
     guard: _InheritedGuard | None = None
 
@@ -399,6 +402,7 @@ class _Owners:
             or type(asr.config) is not Qwen3BackendConfig
             or services.asr_worker is None
             or services.asr_worker.shared_owner is not asr
+            or factory._governor is not services.governor
         ):
             raise ValueError("private root requires one actual production ASR owner")
         if (
@@ -417,7 +421,16 @@ class _Owners:
             or asr._window_owner is not None
         ):
             raise ValueError("private root requires cold never-published production owners")
-        return cls(services, factory, asr, adapter, aligner, asr._transport, aligner._process)
+        return cls(
+            services,
+            factory,
+            asr,
+            adapter,
+            aligner,
+            asr._transport,
+            aligner._process,
+            services.governor,
+        )
 
     def check_objects(self) -> None:
         if (
@@ -429,6 +442,8 @@ class _Owners:
             or self.services.asr_worker.shared_owner is not self.asr
             or self.asr._transport is not self.asr_transport
             or self.aligner._process is not self.alignment_transport
+            or self.services.governor is not self.governor
+            or self.factory._governor is not self.governor
         ):
             raise ValueError("ASR runtime owner composition changed")
         if self.guard is not None:
@@ -613,6 +628,12 @@ class FrozenAsrRuntime:
             self._invalid = True
             raise
 
+    @property
+    def governor(self) -> ResourceGovernor:
+        """Return the guarded actual compute owner for joint scheduling."""
+        self._check()
+        return self._owners.governor
+
     def _check_closed(self) -> None:
         try:
             owners = self._owners
@@ -735,10 +756,20 @@ class FrozenAsrRuntime:
         spec: MeetingCandidateSpec,
         *,
         replay_plan: AsrReplayPlan = _FORMAL_REPLAY,
+        pcm_frames: AsyncIterator[PcmChunk] | None = None,
+        governor: ResourceGovernor | None = None,
     ) -> dict[str, Any]:
         """Run a registered diagnostic over the same guarded private owners."""
         if self._evaluating or self._closing:
             raise ValueError("private ASR runtime permits one replay at a time")
+        if (pcm_frames is None and governor is not None) or (
+            pcm_frames is not None
+            and (
+                governor is not self._owners.governor
+                or replay_plan.mode != "formal_realtime_session_diagnostic"
+            )
+        ):
+            raise ValueError("shared PCM requires the frozen governor and formal replay")
         self._evaluating = True
         self._inflight = asyncio.current_task()
         try:
@@ -771,6 +802,8 @@ class FrozenAsrRuntime:
                     spec,
                     self._owners.services,
                     observe=observe,
+                    input_mode="shared_pcm" if pcm_frames is not None else "throughput",
+                    pcm_frames=pcm_frames,
                 )
 
             try:

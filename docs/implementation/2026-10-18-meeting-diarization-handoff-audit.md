@@ -555,3 +555,13 @@ Ruling: 只证明回调调度与清理，不证明共用PCM、1×输入、实际
 新增30项回归与既有调度/Governor联合97 passed in0.52s；三Python Ruff、两source strict/follow-imports=silent Mypy通过。用合成PCM覆盖两联合模式、相同对象/序列/尾样本、队列溢出、未读完、摘要不符、非法预算、提前/迟到、超时、自取消、重复外部取消、后台散列join及20ms默认宿主时钟路径。后者是无模型合成输入的功能回归，不是性能或P95实测。
 
 来源一致性仍只到内存交付；模型实际接受、麦克风、稳定标签、生产字节、footprint及ABBA未证明。所有认证与联合延迟标记保持false。图谱新source/test及harness missing，直接复核当前源码，无索引重建。无真实音频解码/模型/benchmark/下载/服务/安装/UI/发布/合并。父f56c9b53原生CI39098626051与主CI39098626050均已核验success/completed，新提交另行核验。
+
+## T6 共同 PCM 接入正式 ASR session 与私有 owner
+
+2026-10-18：正式replay新增显式shared_pcm输入模式，与外部pcm_frames必须配对。逐包检查序列/连续样本/原case字节/时间元数据；跨包保留至多一个奇数kernel样本后完成24k逆嵌入，走同一生产OpenAIRealtimeSession/VAD/admission/window/commit/close路径。共同源决定供给，不二次重放或计时；metadata时钟统一external_shared_source_unverified，不能把注入源冒充本函数默认monotonic。原有逆嵌入仍只是当前resampler的诊断等价，不代表真实24k采集。
+
+FrozenAsrRuntime捕获实际services与NativeWindowAsrFactory共用的Governor对象，cold/ready/replay/closed对象守卫一并核对。有效handle暴露该guarded对象，共同输入evaluate只接受同一对象与正式计划；缺失、不同对象、无流传Governor及长块配流均在读取来源前拒绝。通过原LockedAsrCase的字节与主参考守卫，单飞、全量源码/依赖/权重、generation及close后复核不绕过；没有新增隐式模型构造或CLI共同源发现。
+
+共享输入与对象绑定检查先RED后接线，另以会话启动失败未关闭输入源、源自取消导致consumer等待及大源包小wire包导致同步队列假溢出分别复现后修正。源关闭恰一次；自取消变为失败并加入兄弟任务；内部满队列先给ready consumer一次事件循环机会，仍满失败，不等待容量或移动来源时钟。私有root集成扩展到shared_pcm，包括真实生产factory/窗口session上的合成PCM、源/依赖/权重/generation变动及上下文关闭时取消正在decode的回放；模型RPC均fake。
+
+最终十个相关测试文件联合455 passed in14.90s；四Python Ruff、两source strict/follow-imports=silent Mypy通过。改动的ASR重放/私有root及tests图谱missing，直接复核当前worktree；生产factory/services coverage metadata_match，无索引重建。源码闭包与replay policy变化后，旧ASR spec/controls/report需重新冻结执行。共同Governor对象不证明DIA预算、实际加载字节或联合身份；DIA适配、live正文/活动稳定发布、footprint及ABBA未完成。无真实音频解码、模型/benchmark、下载、运行态、安装、UI、发布或合并，所有认证/实际A0标记不升级。父2e37b783主CI39099075868与原生CI39099075836均success/completed。

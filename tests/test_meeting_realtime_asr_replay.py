@@ -594,3 +594,211 @@ def test_sealed_body_is_sorted_by_owned_sample_independently_of_wire_unit_order(
         assert receiver.finals == ["甲", "乙"]
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("chunk_samples", [3, 319, 320, 16000])
+def test_shared_pcm_source_reaches_actual_formal_session_with_odd_packet_boundaries(chunk_samples):
+    from bench_asr_diarization_overlap import run_pcm_workload_schedule
+
+    from test_meeting_pcm_feed import Clock
+
+    async def scenario():
+        import hashlib
+
+        services, factory, _, candidate = setup()
+        data, clock, reports = case(4099), Clock(), []
+
+        async def workload(shared, frames):
+            assert shared is services.governor
+            report = await replay_realtime_session(
+                data,
+                candidate,
+                services,
+                observe=observe(candidate),
+                input_mode="shared_pcm",
+                pcm_frames=frames,
+                wire_packet_samples=37,
+                queue_capacity=64,
+                clock=clock,
+            )
+            reports.append(report)
+            return report
+
+        result = await run_pcm_workload_schedule(
+            pcm=data.pcm16,
+            expected_pcm_sha256=hashlib.sha256(data.pcm16).hexdigest(),
+            mode="asr-only",
+            governor=services.governor,
+            asr=workload,
+            chunk_samples=chunk_samples,
+            queue_chunks=64,
+            max_lateness_seconds=0.01,
+            clock=clock,
+            sleep=clock.sleep,
+        )
+        assert result["schedule_completed"] is True
+        report = reports[0]
+        assert report["quality_evidence_valid"] is True
+        assert report["coverage_samples"] == 4099
+        assert report["diagnostics"]["shared_pcm"]["samples_verified"] == 4099
+        assert (
+            report["diagnostics"]["shared_pcm"]["frames_verified"]
+            == (4099 + chunk_samples - 1) // chunk_samples
+        )
+        assert report["diagnostics"]["input_mode"] == "shared_pcm"
+        assert report["diagnostics"]["input_clock"] == "external_shared_source_unverified"
+        assert report["diagnostics"]["ingress"]["consumed_wire_samples"] == 6148
+        assert factory.sessions[0].closed
+        for request in factory.sessions[0].calls:
+            assert (
+                request.pcm16
+                == data.pcm16[request.input_span.start * 2 : request.input_span.end * 2]
+            )
+        assert not [
+            t
+            for t in asyncio.all_tasks()
+            if t.get_name().startswith(("formal-asr-", "pcm-", "joint-"))
+        ]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("mutate", ["bytes", "sequence", "gap", "short", "timestamp"])
+def test_shared_pcm_invalid_source_is_failed_and_actual_session_is_closed(mutate):
+    from meeting_pcm_feed import PcmChunk
+
+    async def scenario():
+        services, factory, _, candidate = setup()
+        data = case(4099)
+
+        async def source():
+            frame = PcmChunk(0, 0, 320, 10.02, 10.02, data.pcm16[:640])
+            if mutate == "bytes":
+                frame = replace(frame, pcm=b"\x00" * 640)
+            if mutate == "sequence":
+                frame = replace(frame, sequence=1)
+            if mutate == "gap":
+                frame = replace(frame, start_sample=1)
+            if mutate == "timestamp":
+                frame = replace(frame, offered_at=float("nan"))
+            yield frame
+            if mutate != "short":
+                yield PcmChunk(1, 320, 4099, 11.0, 11.0, data.pcm16[640:])
+
+        result = await replay_realtime_session(
+            data,
+            candidate,
+            services,
+            observe=observe(candidate),
+            input_mode="shared_pcm",
+            pcm_frames=source(),
+        )
+        assert result["quality_evidence_valid"] is False
+        assert result["failures"]
+        assert result["diagnostics"]["ingress"]["session_closed"] is True
+        assert factory.sessions[0].closed
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "mode,provided", [("throughput", True), ("realtime", True), ("shared_pcm", False)]
+)
+def test_shared_source_and_input_mode_must_be_registered_together_before_session(mode, provided):
+    async def scenario():
+        services, factory, _, candidate = setup()
+
+        async def empty():
+            if False:
+                yield None
+
+        with pytest.raises(ValueError):
+            await replay_realtime_session(
+                case(),
+                candidate,
+                services,
+                observe=observe(candidate),
+                input_mode=mode,
+                pcm_frames=empty() if provided else None,
+            )
+        assert not factory.sessions
+
+    asyncio.run(scenario())
+
+
+def test_shared_source_self_cancel_does_not_leave_formal_consumer_waiting():
+    async def scenario():
+        services, factory, _, candidate = setup()
+        closed = asyncio.Event()
+
+        async def source():
+            try:
+                raise asyncio.CancelledError
+                yield
+            finally:
+                closed.set()
+
+        result = await asyncio.wait_for(
+            replay_realtime_session(
+                case(),
+                candidate,
+                services,
+                observe=observe(candidate),
+                input_mode="shared_pcm",
+                pcm_frames=source(),
+                total_timeout_seconds=10,
+            ),
+            timeout=0.2,
+        )
+        assert result["quality_evidence_valid"] is False
+        assert closed.is_set() and factory.sessions[0].closed
+        assert result["diagnostics"]["ingress"]["all_tasks_joined"] is True
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("start_failed", [False, True])
+def test_shared_source_closed_once_even_if_session_start_fails(monkeypatch, start_failed):
+    from meeting_pcm_feed import PcmChunk
+
+    async def scenario():
+        services, _, _, candidate = setup()
+        data = case(4099)
+
+        class Source:
+            def __init__(self):
+                self.sent = False
+                self.closed = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.sent:
+                    raise StopAsyncIteration
+                self.sent = True
+                return PcmChunk(0, 0, 4099, 10.0, 10.0, data.pcm16)
+
+            async def aclose(self):
+                self.closed += 1
+
+        source = Source()
+        if start_failed:
+
+            async def broken_start(self):
+                raise RuntimeError("private startup detail")
+
+            monkeypatch.setattr(OpenAIRealtimeSession, "start", broken_start)
+        result = await replay_realtime_session(
+            data,
+            candidate,
+            services,
+            observe=observe(candidate),
+            input_mode="shared_pcm",
+            pcm_frames=source,
+        )
+        assert source.closed == 1
+        assert result["quality_evidence_valid"] is (not start_failed)
+        assert result["diagnostics"]["ingress"]["session_closed"] is True
+
+    asyncio.run(scenario())
