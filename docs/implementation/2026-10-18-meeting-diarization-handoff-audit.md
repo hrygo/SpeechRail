@@ -537,3 +537,11 @@ Ruling: 只证明回调调度与清理，不证明共用PCM、1×输入、实际
 2026-10-18：复核TaskGroup对CancelledError的语义发现，联合模式直接在lane任务内执行回调时，回调自行取消会被TaskGroup当作普通child取消，另一条路继续等待至总deadline。直接抛CancelledError与current_task().cancel两项反例先RED；将实际回调置于独立任务，使lane能区分自身收到外部取消与回调自行取消，后者转为失败触发兄弟取消并加入清理。回调使用Coroutine包装保留原Awaitable契约，另有Future回调回归。
 
 最新调度与Governor联合67 passed in0.45s、两个Python Ruff与一个source strict/follow-imports=silent Mypy通过；原失败/重复取消/后台摘要join用例全部保留通过。source/test图谱missing，直接复核当前worktree，无索引重建。没有模型或音频评测、下载、运行态或安装操作。父51ed0b40原生CI39098376192成功，主CI39098376236最后仍运行；85ef3d41原生成功而主CI39098268969已cancelled，不能把它报告为通过。
+
+## T5 训练标注与 WAV 元数据准备
+
+2026-10-18：从同一冻结Train_Ali_near包逐成员读取WAV头、计算原成员摘要，并提取683份TextGrid到仓库外新目录。完整归档摘要再次匹配原库存，读取前后device/inode/size/mtime未变。只解析训练标注与音频头，无PCM解码或模型运行，不打开Eval/R004材料。原始标注正文只留仓库外；来源计划使用匿名会议与轨道摘要、原成员摘要、WAV参数、相对标注路径和parser源码摘要，未宣称人工真值验证或schema2就绪。
+
+683条音频头均声明mono/16kHz/16-bit PCM；683份标注均由现有textgrid_intervals解析为单tier，共186605个非空正时长区间。三条轨道的标注末端超过WAV时长，分别约4.5625/40/75ms；72个来源会议的轨道长度存在差异，最大581.375ms，均不超过1秒。没有静默裁剪末端、补PCM或按模型输出挑选来源。解析成功只证明结构及所检查的时轴关系，不证明标签风格、串音、活动真值、独立ASR主参考或自然会议场景。
+
+现有schema2契约将headset重混音与单轨视为derived_mix/derived_single_track，仅可作diagnostic。此包因此提供可追溯派生诊断来源，不能伪装natural_meeting/natural_single补齐认证层。后续catalog仍需显式变换/标注末端规则、自然场景来源、独立ASR重叠顺序与主参考；保留meeting-disjoint声明，不假定global speaker身份或模型未见数据。没有生成虚假development就绪、CER改善、人数认证或P95通过。
