@@ -531,3 +531,9 @@ Ruling: 只证明回调调度与清理，不证明共用PCM、1×输入、实际
 2026-10-18重新核对[OpenSLR官方页面](https://www.openslr.org/119/)：Train总述为212场/104.75小时、每场2–4人，训练near为headset、许可CC BY-SA 4.0。本机按文件名得到209组与官方总述212场存在差异，不能静默补成212，也不能仅凭差异断言本地包损坏。轨道数不等于参考活动中实际观察人数；后续还需逐场标注/时轴/通道与来源组核验。此近场包不证明自然单人或远场覆盖。
 
 元数据结果仅写仓库外的training-archive-metadata-20261018.json与meeting-corpus-inventory-20261018.json，不将轨道标识或原始参考写入仓库。可继续用已定位Train来源准备schema2 catalog与独立ASR主参考，先保留缺层及来源差异；Eval_Ali与AISHELL-4已有留出继续隔离，不为扩充development而改名或重分组。该进展不是开发通过、真实CER改善、人数认证或延迟验收。
+
+## T6 联合回调自取消的失败传播
+
+2026-10-18：复核TaskGroup对CancelledError的语义发现，联合模式直接在lane任务内执行回调时，回调自行取消会被TaskGroup当作普通child取消，另一条路继续等待至总deadline。直接抛CancelledError与current_task().cancel两项反例先RED；将实际回调置于独立任务，使lane能区分自身收到外部取消与回调自行取消，后者转为失败触发兄弟取消并加入清理。回调使用Coroutine包装保留原Awaitable契约，另有Future回调回归。
+
+最新调度与Governor联合67 passed in0.45s、两个Python Ruff与一个source strict/follow-imports=silent Mypy通过；原失败/重复取消/后台摘要join用例全部保留通过。source/test图谱missing，直接复核当前worktree，无索引重建。没有模型或音频评测、下载、运行态或安装操作。父51ed0b40原生CI39098376192成功，主CI39098376236最后仍运行；85ef3d41原生成功而主CI39098268969已cancelled，不能把它报告为通过。

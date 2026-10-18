@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.36"
+version: "3.3.37"
 date: 2026-10-18
 ---
 
@@ -327,7 +327,7 @@ schema 1 comparison lock 恰含 `schema_version/cases/scorer_policy/baseline/can
 
 两个联合模式都同时启动两路回调。serial要求Governor的allow_heavy_overlap明确false，由实际计算准入串行，不能把整场ASR跑完后再启动分人当作串行基线；overlap要求overlap_enabled为bool true且Governor明确允许交叠。启动前拒绝已有活动/排队计算、retained分人资源、计算拒绝或相关lane不可用；不改Governor配置，不预留整场计算租约，也不能据此证明预算声明来源或跨进程排他。
 
-回调报告须声明完成且无失败：接受complete=true、status=completed或quality_evidence_valid=true之一，出现的其他完成字段也须一致。报告只作有限JSON快照和摘要，最大16MiB；快照/散列在线程执行并加入取消清理，原文、PCM与路径不进入调度输出。这个完成声明不替代质量门或真实生产者证明。任何失败、自取消、超时、非法/倒退时钟或部分完成均不返回schedule_completed结果；外部重复取消须等待所有已启动回调和散列线程退出。执行deadline默认900秒、最大7200秒，不包含其后不可放弃的清理等待；回调吞掉deadline取消也不能提交完成。
+回调报告须声明完成且无失败：接受complete=true、status=completed或quality_evidence_valid=true之一，出现的其他完成字段也须一致。报告只作有限JSON快照和摘要，最大16MiB；快照/散列在线程执行并加入取消清理，原文、PCM与路径不进入调度输出。这个完成声明不替代质量门或真实生产者证明。每路回调在独立任务中执行，可返回任意受支持的Awaitable；回调自行取消属于失败，立即取消并等待另一条路清理，不等待总deadline才处理。任何失败、自取消、超时、非法/倒退时钟或部分完成均不返回schedule_completed结果；外部重复取消须等待所有已启动回调和散列线程退出。执行deadline默认900秒、最大7200秒，不包含其后不可放弃的清理等待；回调吞掉deadline取消也不能提交完成。
 
 输出区间为宿主回调开始至返回，包含其自身清理，非kernel推理时间。clock明确区分monotonic/injected；schedule_completed只证明调度结束。runtime_identity_verified、certification_eligible、same_source_verified、worker_reaping_verified、compute_overlap_observed、joint_latency_observed保持false，quality_gate/footprint/p95保持not_observed。
 

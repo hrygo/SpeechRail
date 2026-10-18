@@ -132,7 +132,21 @@ async def run_workload_schedule(
             callback = callbacks[name]
             assert callback is not None
             started = tick() - origin
-            report = await callback(governor)
+
+            # Isolate callback cancellation from its lane. TaskGroup otherwise
+            # treats a self-cancelled child as normal cancellation and leaves
+            # its peer running until the global deadline.
+            async def invoke(target: Workload) -> Mapping[str, Any]:
+                return await target(governor)
+
+            workload = asyncio.create_task(invoke(callback), name=f"joint-{name}-callback")
+            try:
+                report = await workload
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
+                raise ValueError("workload cancelled itself") from None
             ended = tick() - origin
             digest = await join_cleanup(
                 asyncio.create_task(asyncio.to_thread(_report_digest, report))

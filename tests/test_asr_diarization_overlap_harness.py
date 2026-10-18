@@ -398,3 +398,62 @@ def test_swallowed_deadline_cancellation_cannot_report_completion():
                 mode="asr-only", governor=governor(), asr=workload, timeout_seconds=0.01
             )
         )
+
+
+@pytest.mark.parametrize("self_cancel", [False, True])
+def test_joint_self_cancelled_callback_fails_and_joins_peer_without_waiting_for_deadline(
+    self_cancel,
+):
+    from bench_asr_diarization_overlap import run_workload_schedule
+
+    async def scenario():
+        entered, cleaned = asyncio.Event(), asyncio.Event()
+
+        async def asr(shared):
+            await entered.wait()
+            if self_cancel:
+                asyncio.current_task().cancel()
+                await asyncio.sleep(0)
+            raise asyncio.CancelledError
+
+        async def dia(shared):
+            try:
+                entered.set()
+                await asyncio.Event().wait()
+            finally:
+                cleaned.set()
+
+        task = asyncio.create_task(
+            run_workload_schedule(
+                mode="serial",
+                governor=governor(False),
+                asr=asr,
+                diarization=dia,
+                timeout_seconds=10,
+            )
+        )
+        try:
+            await asyncio.wait_for(cleaned.wait(), timeout=0.2)
+            with pytest.raises(ValueError, match="workload schedule failed"):
+                await task
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_callback_may_return_a_future_awaitable():
+    from bench_asr_diarization_overlap import run_workload_schedule
+
+    async def scenario():
+        def workload(shared):
+            future = asyncio.get_running_loop().create_future()
+            future.set_result({"complete": True})
+            return future
+
+        report = await run_workload_schedule(mode="asr-only", governor=governor(), asr=workload)
+        assert report["schedule_completed"] is True
+
+    asyncio.run(scenario())
