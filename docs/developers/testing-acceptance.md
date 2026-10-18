@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.55"
+version: "3.3.56"
 date: 2026-10-18
 ---
 
@@ -304,6 +304,8 @@ PYTHONPATH=src:examples/perf uv run --no-sync python examples/perf/probe_meeting
 ```
 
 `meeting_asr_execution.execute_asr_development` 的 schema 2 控制锁必须恰含 schema_version、replay、fixture_id、service_port、artifact_root、manifest、split_lock、scorer_policy、primary_reference、settings、dependencies、candidate_spec。manifest/split_lock/scorer_policy/settings/candidate_spec 各为绝对 JSON 路径与 canonical SHA-256 descriptor；primary_reference 使用前述相对 artifact root 路径与文件字节摘要。dependencies 恰含 host/asr/aligner 三个角色的显式绝对路径数组。JSON 单文件16MiB、总量32MiB；拒绝未知字段、重复键、非有限数、控制/参考文件的符号链接及非普通文件，不提供 holdout 入口。显式 worker Python 与依赖文件允许普通文件符号链接，由 runtime 同时保护链接和目标；模型/依赖目录不允许符号链接，模型真实路径必须在仓库外。
+
+私有 ASR runtime 的正式 Realtime 回放按源音频的 1× 时间节奏输入，保留生产侧未解码积压上限；不把文件尽快灌入造成的拒绝解释为真实采集丢音。共享 PCM 路径继续由共同输入源控制节奏。底层 throughput 入口用于显式过载诊断，其失败不能直接代表真实时间识别质量；两种输入节奏的 replay policy 摘要不同，不混合比较。
 
 `replay` 通过不可变 `AsrReplayPlan` 显式选择诊断路径。正式 Realtime 模式恰含 `mode=formal_realtime_session_diagnostic`；同权重长块模式恰含 `mode=bounded_long_block_diagnostic/block_seconds/decode_timeout_seconds`，块长为1–30秒非bool整数，每次decode时限为0到300秒之间的有限正数，不接受bool。长块只按音频样本固定网格，context为空，不使用参考正文、活动边界或分人输出形成输入。旧schema 1执行锁拒绝，不能隐式选择正式路径；必须先重新登记schema 2的计划和相关候选身份。
 

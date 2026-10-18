@@ -1177,6 +1177,10 @@ def test_locked_source_flows_through_production_session_with_measured_spec(
         monkeypatch.setattr(Qwen3SharedWorker, "request", blocking_request)
 
     async def replay_then_mutate(*args, **kwargs):
+        if replay_kind == "formal":
+            # Production capture has a bounded undecoded backlog. A formal
+            # replay must preserve capture pacing rather than burst the file.
+            assert kwargs["input_mode"] == "realtime"
         result = await original_replay(*args, **kwargs)
         assert state.created[0].window_asr_factory._session is None
         if mutate == "generation":

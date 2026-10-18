@@ -830,7 +830,7 @@ class FrozenAsrRuntime:
                     spec,
                     self._owners.services,
                     observe=observe,
-                    input_mode="shared_pcm" if pcm_frames is not None else "throughput",
+                    input_mode="shared_pcm" if pcm_frames is not None else "realtime",
                     pcm_frames=pcm_frames,
                     text_channel=text_channel,
                     sealed_body=sealed_body,

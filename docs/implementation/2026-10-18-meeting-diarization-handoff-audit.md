@@ -818,3 +818,25 @@ v2 进程退出码为 1，仅留下 ValueError 类型，没有生成 candidate-s
 服务恢复后仅做离线定位：完整闭包仍匹配；使用真实配置构建冷的生产 ASR/aligner owner 成功，未启动模型；在 prepare_revision_window 入口设置明确拦截后，真实准备路径能通过冻结与配置核对到达该边界，随后清理冷 owner。该结果缩小故障范围，但不证明真实 worker 启动或 ready 身份校验通过。
 
 保留 v1/v2 失败制品，仓库外另存 v3 同输入诊断。仅记录最多 32 条 runtime 异常的函数、行号和异常类型，以及退出栈的文件名/函数/行号；不记录异常正文、局部变量、原始路径或 worker stderr。合成异常检查确认私有文本不进入记录，未实跑。该跟踪只为定位当前阻塞，不用于性能结论；再次停服另行申请授权，尚未执行。
+
+## 首片真实解码与输入节奏对照
+
+2026-10-18：用户批准第三个窗口，随后进一步明确授权本任务随时停止服务；后续必要停服无需逐次询问，仍采用 managed CLI、核对身份并在评测清理后恢复。第三次预检观察到 worker 生命周期 gauge 可从 active/warm_standby/cold_evicted 转换，而 active requests 均为 0；不再把 gauge 名称当作活动请求数。停服前仍核对 active requests 与 ESTABLISHED 客户端。
+
+第三次首片记录定位到 prepare_frozen_asr_runtime 中 prepare_revision_window 抛出 GovernorBudgetError，继而被包装为 ValueError；未生成 ready candidate。根因是仓库外诊断配置复制 ASR 字段时漏掉资源声明，使 asr_resident_bytes 默认为 0，生产策略按 enabled component 未声明峰值拒绝计算。不是本机内存不足或识别质量失败。服务恢复、health/readyz 200，配置和 runtime 未变。
+
+修正只作用于仓库外 settings-v4：复制有效 selection/config 中现有 asr_resident_bytes=2796424312 及 shared/active/workspace/safety/include-shared 字段，并将该诊断明确限制为串行。声明来自现有资源配置，不是本次测得的物理峰值；没有把值改作更大的虚假预算，也没有修改生产准入。冷生产 owner 的 governor reserve 离线通过后，重算并核对同一文件闭包，再执行同一首片。
+
+v4 实际完成 ASR 与 aligner ready 握手并冻结候选身份，产生 5 次 preview decode；动态 token 上限均已观察，未触及上限。123.41 秒（1974560 样本）输入中，终态覆盖仅 107008 样本（6.688 秒），报告 replay_failed、ingress_not_fully_consumed 和 coverage_gap_or_duplicate；缺主参考仍不能计算 CER。进程退出 0 表示诊断报告成功生成，不表示识别通过。两个实际子进程已清理，退出后闭包复核通过；原服务恢复至唯一 listener PID 99727，health/readyz 200、3.12.0、quality/quality，selection/.env/runtime 保持一致。
+
+v4 输入为 throughput，生产窗口另有 20 秒未解码积压保护；存在回放快于采集而触发保护的可能，不能直接把诊断中断归因于产品。下一项同片对照保持模型与生产策略不变，仅将仓库外诊断输入改为 realtime，并在异常捕获边界记录文件名/函数/行号和类型。移除逐行 Python tracing，不将这组诊断当作性能基准。该对照正在运行，尚无结果；未据此修改生产保护或声明质量改善。
+
+
+v5 同片真实时间对照已完成：103 次实际 decode（71 preview、32 review），终态覆盖 1974560/1974560 样本，wire produced/consumed 均 2961840、dropped=0，队列 high-water=1，任务已加入、session 已关闭，无 replay 异常。报告仅剩 main_reference_not_observed；输出 587 字符，不能据此判断正确率。报告无 token-limit hit、无不完整 review；32 次 review 未暴露 generated_token_count，不据此声称完整生成 token 计数。累计解码输入 568.34 秒约为源长 4.61 倍，包含正常的预览与复核重叠，是后续资源优化的候选观察点，未证明冗余可安全删除。
+
+两个子进程已清理，退出后闭包稳定；managed 服务恢复至唯一 listener PID 2135，health/readyz 200、版本/profile 和配置保持一致。该对照支持先排除输入节奏造成的失败，不能证明 throughput 失败的具体异常类型，也不证明 ASR CER、分人、峰值资源或延迟门通过。v4/v5 的输入节奏和 tracing 不同，不把墙钟差异作为性能收益。
+
+将已实测的 realtime 输入节奏落实到私有 runtime 的正式单场回放路由，底层显式过载诊断入口保留，shared PCM 仍由共同输入源控制；生产采集、模型参数及积压保护不变。新增路由断言先在旧实现失败，再修改一行路由。此前外部文件闭包属于修改前源码，后续实跑须重新冻结，不沿用为当前代码身份。
+
+
+验证：三个相关文件 test_meeting_asr_runtime、test_meeting_asr_execution、test_meeting_realtime_asr_replay 以 --no-cov 定向运行通过；Ruff check 通过，diff check 通过。初次六例均通过但默认全仓覆盖率门使该局部命令退出非零，不记为完整 gate 通过；未运行全仓测试。两文件 format check 提示既有格式差异，另以 HEAD 原文验证同样需格式化，本次不扩展为整文件格式整理。未据定向 fake 检查声明当前源码真实模型质量通过。
