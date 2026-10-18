@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.12"
-date: 2026-10-16
+version: "3.3.13"
+date: 2026-10-18
 ---
 
 # SpeechRail 测试与验收
@@ -45,6 +45,32 @@ GitHub Actions 使用同一套锁定依赖门禁：`quality` 运行 Ruff、Mypy�
 音色的流程、并发和路由测试使用 fake backend；仅显式导入 `voice_test_fixtures` 的模块会自动启用音高 fixture，每个用例后恢复真实函数，避免每次状态机断言都重复执行昂贵的自相关计算。真实音高估计仍由专门的声学门禁测试验证，输入质量和流程安全断言继续执行；这些流程测试不代表真实模型质量验收。
 
 版本 tag release 还会并行构建 unsigned arm64 DMG。发布前核对 tag、App bundle 版本、App 架构、DMG 可挂载内容和 wheel/DMG checksum；最终 Release 资产为 wheel、`SpeechRail-<version>-macOS-arm64.dmg` 和 `SHA256SUMS`。GitHub 上生成的 DMG 不做 Developer ID、notarization 或 staple，因此不能替代本机正式分发验收。
+
+### 会议评测来源锁
+
+`examples/perf/prepare_meeting_evaluation_manifest.py` 读取仓库外的 schema 2 catalog，核对来源声明和本地制品摘要，生成 `development.json`、`holdout.json`、`diagnostic.json` 与 `split-lock.json`。它不解码音频、不推理、不下载文件，不提供质量或人数认证。旧 `prepare_meeting_corpus.py` 的 schema 1 输出可提供已核验的音频/参考摘要，但必须补齐下列来源信息，不能直接当作新认证 manifest。
+
+catalog 顶层仅含 `schema_version=2`、`independence_level`、`sources` 和 `fixtures`：
+
+| 对象 | 必需字段和语义 |
+|---|---|
+| `sources` | 以匿名来源 ID 为键；每项含 `dataset`、`partition`、`recording_sha256`、`derived_from`（直接父来源 ID 列表）、`global_speaker_ids`（已知全局人员的匿名 SHA-256 ID 列表；未知为空） |
+| `fixtures` | 每项含匿名 `id`、`source_meeting_id`、`derived_from`（完整祖先 ID 排序列表）、非负 `channel`、`split`、`sample_kind`、`scene`、`speakers_count`、非空 `transform`、非空 `reference_label_policy`、`artifacts` |
+| `split` / `scene` | 分别为 `development` / `holdout` / `diagnostic`，以及 `near` / `far` |
+| `sample_kind` | `natural_single`、`natural_meeting`、`continuous_excerpt`、`derived_single_track` 或 `derived_mix`；派生重混音/单轨，以及单人连续截取仅作 diagnostic，不充当自然单人认证数据 |
+| `artifacts` | 必需 `pcm`、`activity_reference`、`text_reference`，各含相对 catalog 所在目录的 `path` 与实际文件 `sha256`；可选 `asr_sidecar` 还须带 `producer_identity_sha256` 和 `timing_evidence_sha256` |
+| `independence_level` | 缺完整全局人员声明时只能是 `meeting-disjoint`；`speaker-disjoint` 要求涉及的全部来源声明非空全局人员 ID。声明仍须人工核实，不代表工具从声音证实身份 |
+
+来源、祖先、相同原始录音摘要及已知全局人员连接成组。holdout 不与 development/diagnostic 共享组或 PCM；同组的开发诊断视图可以并存，但不增加独立组数。相同 PCM 若被声明为不同组，工具拒绝，要求先纠正来源。`test`、`Eval_Ali`、`R004`、`holdout` partition、Eval_Ali dataset 及来源 ID 中的 R004 标记均作为封存来源，约束传递到派生组，不得进入开发或诊断。工具只能核对已声明的来源关系，无法自动发现未声明的人员或隐瞒的派生关系。
+
+固定 seed=1717 的组顺序、参考规则、处理变换、通道、scorer policy 和制品摘要进入 manifest。`split-lock.json` 使用 `canonical_digest` 的规范 JSON SHA-256，不能用格式化文件的原始字节摘要代替。默认要求连续 1–4 人层：每层开发来源至少 6 组，预锁留出池至少 `max(12, 2 × 开发池可用的最大检查点)`（检查点为 6/12/18/24） 组；不足时输出 `readiness=insufficient_sources`。`source_pool_locked` 仅代表声明来源池可供后续调度，`certified_max_speakers` 始终为 `null`。每层 6/12/18/24 的共同前缀筛选与一次性留出须由后续执行器实施；准备工具不签开发收据、不消费留出。
+
+```bash
+uv run --no-sync python examples/perf/prepare_meeting_evaluation_manifest.py \
+  --catalog /path/to/catalog.json --output-dir /path/to/new-lock-directory
+```
+
+输入制品必须在 catalog 目录内，拒绝符号链接和路径逃逸；输出目录必须位于仓库外且尚不存在，不覆盖已有锁。输出 manifest 保留相对路径，后续执行器须显式使用原 catalog 目录作为 artifact root，并重新核对文件摘要。CLI 验证错误不打印私有路径。确定性测试使用人工文件：`PYTHONPATH=src:examples/perf uv run --no-sync pytest tests/test_meeting_evaluation_manifest.py --no-cov`。
 
 ### 有声书外置小说语料回归
 
