@@ -776,3 +776,15 @@ RED：首批 7 个反例因入口缺失失败；新增非法 candidate 摘要和
 使用上一节真实派生 PCM，仓库外另存 18 份 main_reference=null 的绑定文件，逐组经新加载器读取并核对身份、PCM、两类参考和退出后文件一致性：18 组、38465280 样本全部通过。输入校验使用明确标注的非模型 sentinel 摘要，没有据此声明 A0/candidate 身份；没有 replay、模型加载或质量评分。最终复核实现摘要为 c190943dfd740a079339e14e71249c74443d8ebc2e376e4bad4b5951272ec7d4。原始参考及路径仅留仓库外，报告不含正文。
 
 本轮推进了派生材料的诊断输入边界；完整诊断执行控制、实际模型字节冻结、自然开发来源与独立主参考仍待补齐。此前实测的服务独占冲突没有被本次代码绕过，未再次尝试模型启动。没有新增 CER、分人质量或人数认证结论。
+
+## ASR 本地制品准备与首片维护窗口
+
+2026-10-18：只读解析 managed 配置、selection 与 model bindings；`.env` 原始 ASR 路径已不存在，不能把它作为有效模型位置。selection 解析结果为 quality / asr-1.7b-q8，实际 ASR 与 aligner-bf16 文件集均匹配仓库 catalog 的大小与 SHA-256；各 10 文件，分别 2467857511 和 1840061431 字节。宿主、worker Python 均 3.14.7。按显式 stdlib/site-packages 根登记 78012 条模型、解释器、依赖与源码记录，capture 后再次 verify 通过，清单摘要 d0662d636738cd722468f826b771510c93d548f85e925957c95c4c38e0540359。全部原始路径及逐文件清单仅留仓库外。文件闭包一致不等于实际导入或加载字节证明；ready structural revision 和 A0 spec 均尚未实测。
+
+为首个已登记 diagnostic-001 准备独立执行脚本：事前验证输入、保持同一 8201 端口保护、准备私有 ASR/aligner owner、在第一次输出前冻结 ready spec、运行同一 formal realtime diagnostic replay、清理并核对文件后才生成成功结果。模型阶段 asyncio 超时 900 秒，取消仍等待有界 decode/owner 清理；脚本不控制 managed 服务，不切端口、不下载、不读取留出。4 项 fake 检查覆盖输入失败/端口占用前不创建 runtime、cleanup 失败不生成结果及成功退出顺序；这些不是模型证据。
+
+用户另行批准一次临时停服、首片诊断及恢复。实际维护前，通过显式 `Accept: application/json` 的鉴权 health/readyz/metrics 核验：3.12.0、quality/quality、HTTP 200，batch/realtime active requests 为 0，四类 worker cold_evicted；lsof 无 ESTABLISHED 连接。session gauge 未输出，不将缺失值冒充实测零。com.speechrail 的原 PID 62386 与 listener 身份相符。managed `service stop --json` 完成后，原 PID 已退出、listener 消失、同端口保护锁可获取。
+
+首片进程在模型加载前失败，未创建输出目录、未加载模型或执行 decode：完整 inventory.json 为 41312622 字节，超过执行控制读取器既有 16 MiB 上限。准备时仅验证脚本语法与 fake 流程，没有提前用真实清单贯通控制解析，属于本次预检遗漏。维护外层 finally 已经通过 managed `service start --json` 恢复服务，health/readyz 均 200、版本与 profile 不变；selection、私有 .env 字节和 runtime target 摘要均保持一致，恢复后的唯一 listener PID 为 96517。没有安装、selection/profile 或模型变更。
+
+修正保留完整审计清单，仅另建 1843 字节 inventory-roots 执行控制，仍用原摘要重算实际文件闭包，不放宽 16 MiB 上限。v2 计划与脚本分别另存，不覆盖第一次失败证据。使用真实配置、源 PCM、参考及主参考缺失声明，离线重算闭包仍匹配；以 test guard 截止执行，确认真实控制解析和输入核验均能到达端口保护边界，没有碰真实端口锁或创建模型。第二个维护窗口已另行请求，未将第一次窗口授权自动扩展为重复停服。本节不构成 CER、分人质量或人数认证证据。
