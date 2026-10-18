@@ -447,3 +447,9 @@ Ruling: 当前checkpoint没有真实稳定标签P95/峰值footprint观测链，�
 Ruling: preload/post-prepare/post-replay证明具名文件稳定及对象核对，不能证明实际loader/import消费字节。loaded_model_bytes_verified/actual_imports_verified/source_import_bytes_verified以及runtime_identity_verified/certification_eligible保持false，A0为not_certified；尚无真实转录/分人质量、认证人数或P95结论。入口仅为显式库API，不执行留出、不签收据，不自动发现模型或启动managed服务。
 
 执行者独占两份新source/test，主线只改文档，无覆盖并行改动。44项新增fake回归包含真实production owners/factory与正式OpenAIRealtimeSession接线，仅替换推理/RPC；主线十个相关测试文件联合 `361 passed, 1 warning in 11.87s`，warning为既有asyncio.iscoroutinefunction弃用。两个新Python Ruff、一个source按项目配置Mypy、diff检查通过。图谱generation 2026-10-17T22:35:42Z中新文件missing，关键结论以当前worktree源码复核，无索引重建。父提交4fc7bdb4的主CI39094547962、原生CI39094547939均成功；不是本节提交的CI证据。没有真实语料/模型/benchmark、下载、服务、安装、UI、发布或合并动作。后续仍需可信实际A0/加载来源、真实损失诊断、唯一分人候选及联合质量/延迟验收。
+
+## T8 framed worker 的显式描述符继承
+
+2026-10-18：为ASR正式执行器贯穿子进程排他锁补充最小transport前置。WorkerProcessSpec新增pass_fds，默认空；只接受最多16个唯一、非bool的3及以上整数，禁止隐式继承stdio或任意宿主描述符。AsyncFramedWorkerProcess将显式集合传给create_subprocess_exec；调用方仍拥有父级副本，transport只随精确child退出回收其继承副本。普通生产调用未传FD时保持空集合。
+
+8项新增反例先因字段缺失RED，再GREEN。两个真实无模型Python子进程共同继承同一flock，父级close后任一child存活仍排他，最后一个child回收后才可重新取锁；空集合不泄漏该FD。六类非法参数拒绝。与shared/window worker联合 `95 passed, 1 warning in 3.85s`（既有弃用warning），两文件Ruff、transport项目Mypy通过。此证据不代表ASR正式执行器、真实CoreML孤儿场景或产品并发已经验收；root锁接线与正式driver由其他执行者独占perf文件继续实施，无同文件写入。无真实音频/模型/benchmark、服务、下载、安装、UI、发布或合并动作。

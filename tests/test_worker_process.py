@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
+import os
 import sys
 from collections.abc import Callable, Coroutine
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -84,6 +87,77 @@ def test_start_is_idempotent_and_frames_round_trip(tmp_path: Path) -> None:
             await transport.close()
 
     _run(scenario)
+
+
+@pytest.mark.parametrize("descriptors", [(True,), (-1,), (0,), (3, 3), [3], tuple(range(3, 20))])
+def test_inherited_descriptors_must_be_explicit_bounded_unique_non_stdio(
+    tmp_path: Path, descriptors: object
+) -> None:
+    with pytest.raises(ValueError, match="inherited worker descriptors"):
+        replace(_spec(tmp_path), pass_fds=descriptors)
+
+
+@pytest.mark.parametrize("inherit", [False, True])
+def test_only_explicit_children_keep_exclusion_after_parent_descriptor_closes(
+    tmp_path: Path, inherit: bool
+) -> None:
+    """A real no-model child retains the same open-file description, not a new lock."""
+    path = tmp_path / "guard.lock"
+    descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    parent_closed = False
+    info = os.fstat(descriptor)
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    program = """
+import os, sys
+from speechrail.runtime.worker_protocol import encode_frame
+try:
+    observed = os.fstat(int(sys.argv[1]))
+    inherited = (observed.st_dev, observed.st_ino) == (int(sys.argv[2]), int(sys.argv[3]))
+except OSError:
+    inherited = False
+sys.stdout.buffer.write(encode_frame({"type": "ready", "inherited": inherited}))
+sys.stdout.buffer.flush()
+sys.stdin.buffer.read()
+"""
+    spec = replace(
+        _spec(tmp_path, shutdown_timeout=0.05),
+        command=(
+            sys.executable, "-c", program, str(descriptor), str(info.st_dev), str(info.st_ino)
+        ),
+        pass_fds=(descriptor,) if inherit else (),
+    )
+    children = [AsyncFramedWorkerProcess(spec), AsyncFramedWorkerProcess(spec)]
+
+    async def scenario() -> None:
+        nonlocal parent_closed
+        probe = os.open(path, os.O_RDWR)
+        try:
+            for child in children:
+                await child.start()
+                assert (await child.receive()) == {"type": "ready", "inherited": inherit}
+            os.close(descriptor)
+            parent_closed = True
+            if inherit:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                await children[0].close()
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(probe, fcntl.LOCK_UN)
+            await children[1].close()
+            if inherit:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            await asyncio.gather(*(child.close() for child in children))
+            os.close(probe)
+
+    try:
+        _run(scenario)
+    finally:
+        if not parent_closed:
+            os.close(descriptor)
 
 
 def test_concurrent_exchanges_are_serialized_and_route_frames_correctly(
