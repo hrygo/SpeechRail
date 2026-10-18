@@ -501,3 +501,13 @@ root使用同一ready window factory创建长块session，沿用既有纯PCM网�
 正式/长块执行用例先因新锁缺入口RED，再GREEN。新增注册计划/非法预算/旧schema拒绝、一采样尾包、mode/policy篡改与同模型同PCM两路径对照；原root的来源→实际factory/session回归扩展到两模式，覆盖权重/依赖/源码/generation变更及后台取消。134项root+driver在补最后三个集成用例前通过；最终联合验证见后续记录。没有真实音频/模型、benchmark、下载、服务/安装、UI、发布或合并操作。父71eef764原生CI39096827560成功，主CI39096827567仍运行，新提交另行核验。
 
 最终七个ASR相关文件联合 `331 passed in 13.28s`；四个Python Ruff、两个source strict/follow-imports=silent Mypy与diff检查通过。同PCM的合成正式CER=0、长块CER=1按规则不能判改善，未因接通新路径而放宽诊断门。图谱六个相关source/test missing，当前worktree源码直接复核，无索引重建。
+
+## T5 现有开发语料的元数据就绪核验
+
+2026-10-18：仅检查已知SpeechRail benchmarks下issue370-sortformer-1to4-20261017与issue370-aishell4-test-20261017两个任务目录的清单元数据，未解码音频、读取参考正文或运行模型/留出。旧dev-v2/development.json实际为schema1、dataset=AliMeeting_Train_Near_1to4_Control_v1、source_split=Train_Ali_near、split_role=development，共4条，1/2/3/4人各1条；其fixture字段不含source_meeting_id/source_group_id/source_session_id/derived_from，也没有natural_single样本类型声明。不能据此证实独立来源数或自然单人，也不满足每层至少6组。该任务目录存在Train_Ali_near.tar.gz文件；仅文件存在不证明归档完整、来源声明、许可或可直接评测。
+
+这两个已检查目录未找到文件名包含catalog的JSON；该范围内已查看的开发清单仍为schema1，不作全机不存在新catalog的断言。旧AISHELL-4材料位于test语料任务目录，不能通过改名或重分组绕过当前封存来源规则；本次没有用它追加development。未重写旧清单、音频、参考或报告。
+
+下一真实执行前需提供并核验schema2来源catalog、原artifact root及独立主参考：来源/祖先、录音摘要、通道与变换、自然/派生样本分类、near/far、匿名参考规则和split隔离；不足则保持insufficient_sources，不伪造独立N。旧四条仅保留诊断价值。另已核对T6计划要求的bench_asr_diarization_overlap.py尚未实现；现有bench_overlap.py是ASR/TTS，不能替代ASR/分人四模式执行器。现有candidate runner使用固定sidecar，joint_asr_latency_observed明确false，不能从其墙钟推导真实联合P95。
+
+代码提交3516875d主CI39097139430、原生CI39097139429均已核验success/completed。该证据仍是代码/构建/确定性门禁，不能替代上述数据就绪或真实质量。此节只改文档，diff检查通过，未重复运行测试。
