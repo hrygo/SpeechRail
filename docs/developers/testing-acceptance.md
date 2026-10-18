@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.33"
+version: "3.3.34"
 date: 2026-10-18
 ---
 
@@ -299,6 +299,23 @@ settings 只从控制文档的显式值和代码默认值构造，关闭 environ
 同一次加载前文件冻结先核对预登记 spec 的 closure/config 与静态文件部分，ready 后再核对完整 spec，匹配后才允许正式回放。锁的稳定语义绑定用户、端口和角色，不以瞬时 FD 数值定义候选；运行内另核对具体 FD/file identity。退出时加入回放与两个 child 清理，再完整复核关闭期间文件和配置。`verify_closed()` 可在成功退出后异步复核，`verify_commit()` 只在确认回收及完整核对后提供同步最终守卫，失败或取消不能获得可提交状态。
 
 输出使用仓库外新0700目录、0600文件；只保存匿名诊断摘要，不保存正文、PCM、路径或环境值。partial 写入后再次加入控制、来源与已关闭 runtime 的全量核验，全部 await 之后同步检查三者，再无 await 硬链提交 result.json。失败、取消、来源变更或回收未确认均不提交完成结果，不覆盖既有输出。完成只证明预登记身份匹配且诊断执行结束，不签可信收据，不升级加载来源、实际 A0、CER改善或认证；runtime/certification 字段继续 false。相关 fake 回归见 `tests/test_meeting_asr_execution.py`、`tests/test_probe_meeting_asr_development.py`。
+
+### ASR 离线开发对照
+
+`meeting_asr_comparison.execute_asr_comparison` 只读取预登记的脱敏JSON结果，不打开音频、参考正文、模型或留出，不启动worker，也不探测服务。它接通现有 `compare_asr_runs`，不另设CER估计量或修改候选参数。
+
+```bash
+PYTHONPATH=src:examples/perf uv run --no-sync python examples/perf/probe_meeting_asr_development.py \
+  compare-development --comparison-lock "$ASR_COMPARISON_LOCK" --output-directory "$ASR_COMPARISON_OUTPUT"
+```
+
+schema 1 comparison lock 恰含 `schema_version/cases/scorer_policy/baseline/candidate/key_facts_review`。`cases` 为事前冻结的1–1024个唯一case，每项包含 `AsrCase.identity()` 的六个摘要及 `expected_samples`；case摘要须与其组成字段一致，scorer须与当前实现相符，样本数为非bool整数且不超过十分钟。这个列表定义本次诊断范围，不能从已完成结果中挑选后冒充事前登记或整个人数范围认证。它不重新核验原始manifest、主参考、PCM或生产者真实性。
+
+`scorer_policy` 为绝对JSON路径与canonical SHA-256 descriptor。两组各恰含 `candidate_sha256/replay_policy_sha256/mode/reports`，事前固定各自身份，reports包含每个case恰好一份descriptor。mode仅允许 production_window、bounded_long_block_diagnostic、formal_realtime_session_diagnostic；同组必须一致。正式单场执行结果可原样输入。重复或缺场、错误候选/重放/来源身份、样本数不符、holdout、自报runtime或certification为true均拒绝。该入口不提供重复执行合并；单次case不能通过重复报告增加独立N。人工关键事实状态只接受not_observed/pass/fail，属于声明，不能单独证明人工核验来源。
+
+控制与报告JSON单文件限16MiB、总量32MiB，拒绝重复键、非有限数、未知控制字段、相对路径、叶符号链接和非普通文件。评分、写partial之后加入输入与执行源码全量校验，再同步核对文件状态、输出目录身份、partial内容与状态，无await提交comparison.json；失败和取消不提交完成结果，取消须等待评分线程退出。目录必须为仓库外新0700目录，文件0600，既有输出不覆盖，错误只保存固定码。
+
+结果记录控制与执行实现摘要、case数量和现有来源组配对诊断统计，不回显输入路径或正文。`verdict=diagnostic/runtime_identity_verified=false/certification_eligible=false/quality_gate=fail` 固定；development_text_gate仅是声明输入下的文字诊断门，不签收据、不证明实际A0或CER产品验收。CLI属于ASR执行源码身份，接线变化后相关candidate spec与控制锁须重新冻结。fake回归见 `tests/test_meeting_asr_comparison.py` 与 `tests/test_probe_meeting_asr_development.py`。
 
 ### 有声书外置小说语料回归
 

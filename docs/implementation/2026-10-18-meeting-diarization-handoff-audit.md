@@ -481,3 +481,13 @@ runtime新增19项、driver54项、CLI5项fake回归；主线五个ASR相关文�
 修正为汇总前校验字符计数、S+D+I、参考与推导预测长度、编辑同分规则、两处CER和同case参考分母。保留现有source-group等权估计量、重复错误均值及片段分子分母合并；不裁剪合法CER>1，不把缺主参考升级为观察。增加正向边界回归后，六个ASR相关文件 `284 passed in 11.66s`；两个Python Ruff通过，一个source按strict/follow-imports=silent的Mypy通过。源码摘要属于ASR_SCORER身份，旧spec/report须重新冻结和执行；计数自洽不证明生产者、参考来源或实际A0。
 
 图谱generation2026-10-17T22:35:42Z不含这三份新ASR source/test记录，结论由当前worktree相关源码直接复核，未重建索引。父提交54f2f11c原生CI39096340069已成功，主CI39096340067仍运行；新提交另行核验。没有真实音频/模型、benchmark、下载、服务/安装变更、UI、发布或合并操作。
+
+## T8 预登记 ASR 离线对照入口
+
+2026-10-18：新增meeting_asr_comparison与compare-development命令，独立控制锁固定case身份/样本数、两组候选与重放身份、报告descriptor和scorer。case列表定义事前诊断范围，每组恰好一份每case结果；不从本次输出推断A0，不打开音频/主参考/模型、不签可信收据。只接受未认证development报告，复用compare_asr_runs的计数、覆盖和配对统计。
+
+JSON输入总量32MiB、单文件16MiB；评分前后与partial之后复核输入/源码。固定匿名报告、输出目录身份和partial内容/状态，最后无await硬链提交。取消加入离线线程；目录被替换时不向新目录写完成或失败文件。全部runtime/certification仍false，quality_gate固定fail，文字诊断门单列；人工关键事实状态只作为声明。
+
+最初18项测试在模块缺失时RED，再GREEN；随后补取消join、最后校验期间partial变化、输出目录替换、既有目录保护/总预算、禁止打开音频或启动进程，以及CLI隔离分派/错误隐私。正式OpenAIRealtimeSession合成报告原样输入的集成用例先RED，发现mode尚未包含formal_realtime_session_diagnostic，补齐后GREEN，不修改生产报告。七个ASR相关文件联合 `310 passed in 11.46s`，四个Python Ruff、两个source strict/follow-imports=silent Mypy通过。无真实音频/模型、benchmark、下载、服务/安装、UI、发布或合并操作。旧spec需因CLI执行源码变化重新冻结。父7905a111原生CI39096529214成功，主CI39096529300仍运行，新提交单独核验。
+
+提交前补充coverage_samples拒绝bool，离线入口与CLI两文件最新 `32 passed in 0.36s`，四Python Ruff、两source Mypy和compare-development --help通过；前述310项是加入该类型守卫前的联合证据。图谱四个新/改source/test均missing，直接复核当前源码，未重建索引。

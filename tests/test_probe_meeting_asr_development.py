@@ -84,3 +84,62 @@ def test_help_and_missing_controls_cannot_start_runtime(monkeypatch, capsys):
     with pytest.raises(SystemExit) as caught:
         main(["evaluate-development"])
     assert caught.value.code == 2
+
+
+def test_offline_comparison_cli_dispatch_does_not_import_runtime(monkeypatch, capsys):
+    from probe_meeting_asr_development import main
+
+    calls = []
+
+    async def compare(**kwargs):
+        calls.append(kwargs)
+        return {"verdict": "diagnostic"}
+
+    monkeypatch.setitem(
+        sys.modules, "meeting_asr_comparison", SimpleNamespace(execute_asr_comparison=compare)
+    )
+    monkeypatch.setitem(sys.modules, "meeting_asr_execution", None)
+    assert (
+        main(
+            [
+                "compare-development",
+                "--comparison-lock",
+                "/external/compare.json",
+                "--output-directory",
+                "/external/new-output",
+            ]
+        )
+        == 0
+    )
+    assert calls == [
+        {
+            "comparison_lock": Path("/external/compare.json"),
+            "output_directory": Path("/external/new-output"),
+        }
+    ]
+    assert json.loads(capsys.readouterr().out)["verdict"] == "diagnostic"
+
+
+def test_comparison_cli_error_is_sanitized(monkeypatch, capsys):
+    from probe_meeting_asr_development import main
+
+    async def compare(**kwargs):
+        raise ValueError("private transcript /private/input.json")
+
+    monkeypatch.setitem(
+        sys.modules, "meeting_asr_comparison", SimpleNamespace(execute_asr_comparison=compare)
+    )
+    with pytest.raises(SystemExit) as caught:
+        main(
+            [
+                "compare-development",
+                "--comparison-lock",
+                "/external/compare.json",
+                "--output-directory",
+                "/external/new-output",
+            ]
+        )
+    assert caught.value.code == 2
+    output = capsys.readouterr()
+    assert not output.out and "private" not in output.err
+    assert "locked ASR comparison failed" in output.err
