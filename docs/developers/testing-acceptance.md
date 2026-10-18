@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.30"
+version: "3.3.31"
 date: 2026-10-18
 ---
 
@@ -278,6 +278,23 @@ wire 固定为24kHz PCM16，kernel 为16kHz。为保留锁定 kernel 字节，�
 ready 后绑定同一生产 window factory、shared owner、ASR generation、实际进程对象、ready 结构身份、有效窗口 cap 与配置。aligner 未暴露 generation，仅核对原 client/transport/process 对象和 ready identity。`candidate_spec()` 从冻结文件和实际 ready 配置形成诊断比较身份，sdk_revision 字段使用 `filesystem-closure:` 摘要绑定完整具名文件集合、两个 worker 的完整环境及有效配置，不冒充已导入 SDK 版本；`evaluate()` 贯通 `LockedAsrCase → evaluate_locked_asr_case → replay_realtime_session`，每次回放前后复核，单 handle 不允许并行回放。退出先加入准备或正在进行的回放，再关闭私有创建的两个 child；替换的未知 worker/process 不按假定所有权关闭，清理未确认则失败。
 
 `proof()` 的 preload/post-prepare/post-replay 字段只描述具名文件稳定性与对象核对。`loaded_model_bytes_verified/actual_imports_verified/source_import_bytes_verified` 保持 false；ready revision 是结构指纹，不能作为权重字节证明，依赖声明也不证明实际 import resolution。结果继续 `runtime_identity_verified=false/certification_eligible=false`，实际 A0、质量改善与 P95 仍需独立证据。fake 回归见 `tests/test_meeting_asr_runtime.py`。
+
+### 锁定 ASR 单场开发执行
+
+正式单场入口要求先登记预期 candidate spec，再执行来源锁回放；不能把本次转写完成后测得的 spec 直接登记为 A0。需要采集身份时，调用方须另获模型运行授权，以不接收 fixture、不回放音频、不评分的私有 root 生成候选草案，再独立冻结执行锁。此入口不提供自动选模型、改配置或重试失败候选的选项。
+
+```bash
+PYTHONPATH=src:examples/perf uv run --no-sync python examples/perf/probe_meeting_asr_development.py \
+  evaluate-development --asr-lock "$ASR_LOCK" --output-directory "$ASR_OUTPUT"
+```
+
+`meeting_asr_execution.execute_asr_development` 的 schema 1 控制锁必须恰含 schema_version、fixture_id、service_port、artifact_root、manifest、split_lock、scorer_policy、primary_reference、settings、dependencies、candidate_spec。manifest/split_lock/scorer_policy/settings/candidate_spec 各为绝对 JSON 路径与 canonical SHA-256 descriptor；primary_reference 使用前述相对 artifact root 路径与文件字节摘要。dependencies 恰含 host/asr/aligner 三个角色的显式绝对路径数组。JSON 单文件16MiB、总量32MiB；拒绝未知字段、重复键、非有限数、控制/参考文件的符号链接及非普通文件，不提供 holdout 入口。显式 worker Python 与依赖文件允许普通文件符号链接，由 runtime 同时保护链接和目标；模型/依赖目录不允许符号链接，模型真实路径必须在仓库外。
+
+settings 只从控制文档的显式值和代码默认值构造，关闭 environment/dotenv/secrets sources，拒绝未知字段和服务密钥；环境变量也不能通过 legacy validator 补值或改变判断。服务端口必须与 settings.port 一致，host 为127.0.0.1。执行前先验证 development 来源和独立主参考，再获取同一用户/声明端口的排他锁；两个私有 ASR/aligner child 显式继承锁 FD。锁持续到两个 child 退出，父级仅 close、不执行 LOCK_UN；该锁不证明其他端口没有实例。
+
+同一次加载前文件冻结先核对预登记 spec 的 closure/config 与静态文件部分，ready 后再核对完整 spec，匹配后才允许正式回放。锁的稳定语义绑定用户、端口和角色，不以瞬时 FD 数值定义候选；运行内另核对具体 FD/file identity。退出时加入回放与两个 child 清理，再完整复核关闭期间文件和配置。`verify_closed()` 可在成功退出后异步复核，`verify_commit()` 只在确认回收及完整核对后提供同步最终守卫，失败或取消不能获得可提交状态。
+
+输出使用仓库外新0700目录、0600文件；只保存匿名诊断摘要，不保存正文、PCM、路径或环境值。partial 写入后再次加入控制、来源与已关闭 runtime 的全量核验，全部 await 之后同步检查三者，再无 await 硬链提交 result.json。失败、取消、来源变更或回收未确认均不提交完成结果，不覆盖既有输出。完成只证明预登记身份匹配且诊断执行结束，不签可信收据，不升级加载来源、实际 A0、CER改善或认证；runtime/certification 字段继续 false。相关 fake 回归见 `tests/test_meeting_asr_execution.py`、`tests/test_probe_meeting_asr_development.py`。
 
 ### 有声书外置小说语料回归
 

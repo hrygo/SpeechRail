@@ -26,7 +26,11 @@ from types import MappingProxyType
 from typing import Any
 
 from meeting_asr_source import LockedAsrCase, evaluate_locked_asr_case
-from meeting_evaluation_identity import MeetingCandidateSpec, canonical_digest
+from meeting_evaluation_identity import (
+    MeetingCandidateSpec,
+    canonical_digest,
+    validate_execution_identity,
+)
 from meeting_realtime_asr_replay import realtime_replay_preset, replay_realtime_session
 from probe_meeting_asr_quality import ASR_SCORER, RuntimeObservation
 
@@ -42,11 +46,75 @@ from speechrail.backends.qwen3_window import NativeWindowAsrFactory
 from speechrail.config import Settings
 from speechrail.infrastructure.voice_registry import FileVoiceRegistry
 from speechrail.runtime.cleanup import join_cleanup
+from speechrail.runtime.server_lock import ServerInstanceLock
 from speechrail.runtime.worker_process import AsyncFramedWorkerProcess
 
 _MAX_FILES = 250_000
 _MAX_BYTES = 128 * 1024**3
+_REPOSITORY = Path(__file__).resolve().parents[2]
 _Stamp = tuple[int, int, int, int, int, int]
+
+
+def _guard_path(port: int) -> Path:
+    return ServerInstanceLock(port).path
+
+
+@dataclass(frozen=True, slots=True)
+class _InheritedGuard:
+    descriptors: tuple[int, ...]
+    port: int
+    uid: int
+    stamps: tuple[_Stamp, ...]
+
+    @classmethod
+    def capture(cls, descriptors: tuple[int, ...], port: int) -> _InheritedGuard:
+        if (
+            not isinstance(descriptors, tuple)
+            or len(descriptors) > 16
+            or any(type(fd) is not int or fd < 3 for fd in descriptors)
+            or len(set(descriptors)) != len(descriptors)
+        ):
+            raise ValueError("invalid inherited ASR runtime guard")
+        try:
+            guard = cls(
+                descriptors, port, os.getuid(), tuple(_stamp(os.fstat(fd)) for fd in descriptors)
+            )
+            guard.verify()
+            return guard
+        except OSError, ValueError:
+            raise ValueError("inherited ASR runtime guard is unavailable or changed") from None
+
+    def verify(self) -> None:
+        try:
+            if os.getuid() != self.uid:
+                raise ValueError("runtime guard user changed")
+            if not self.descriptors:
+                return
+            path_info = _guard_path(self.port).lstat()
+            if not stat.S_ISREG(path_info.st_mode) or path_info.st_uid != self.uid:
+                raise ValueError("runtime guard file changed")
+            for descriptor, expected in zip(self.descriptors, self.stamps, strict=True):
+                info = os.fstat(descriptor)
+                if (
+                    _stamp(info) != expected
+                    or _stamp(path_info) != expected
+                    or info.st_uid != self.uid
+                    or not stat.S_ISREG(info.st_mode)
+                ):
+                    raise ValueError("runtime guard file changed")
+        except OSError, ValueError:
+            raise ValueError("inherited ASR runtime guard is unavailable or changed") from None
+
+    def configuration(self) -> dict[str, object]:
+        # Stable candidate identity describes lock semantics. Numeric descriptors
+        # and inode/stamp evidence belong only to this run's replacement guard.
+        return {
+            "namespace": "speechrail-user-port-lock-v1",
+            "port": self.port,
+            "uid": self.uid,
+            "asr_descriptor_count": len(self.descriptors),
+            "aligner_descriptor_count": len(self.descriptors),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,6 +325,7 @@ class _Owners:
     asr_transport: AsyncFramedWorkerProcess
     alignment_transport: AsyncFramedWorkerProcess
     process_pair: tuple[object, object] | None = None
+    guard: _InheritedGuard | None = None
 
     @property
     def asr_config(self) -> Qwen3BackendConfig:
@@ -309,6 +378,14 @@ class _Owners:
             or self.aligner._process is not self.alignment_transport
         ):
             raise ValueError("ASR runtime owner composition changed")
+        if self.guard is not None:
+            self.guard.verify()
+            if (
+                self.services.settings.port != self.guard.port
+                or self.asr_transport._spec.pass_fds != self.guard.descriptors
+                or self.alignment_transport._spec.pass_fds != self.guard.descriptors
+            ):
+                raise ValueError("inherited ASR runtime guard configuration changed")
 
     async def close(self) -> None:
         # These exact objects were created privately, prior to any await/yield.
@@ -332,7 +409,18 @@ class _Owners:
             raise RuntimeError("ASR runtime cleanup ownership is unconfirmed")
         if any(isinstance(result, BaseException) for result in results):
             raise RuntimeError("owned ASR runtime child cleanup failed") from None
-        if self.asr.alive or self.aligner.alive:
+        if (
+            self.asr.alive
+            or self.aligner.alive
+            or self.asr_transport._process is not None
+            or self.alignment_transport._process is not None
+            or (
+                self.process_pair is not None
+                and any(
+                    getattr(process, "returncode", None) is None for process in self.process_pair
+                )
+            )
+        ):
             raise RuntimeError("owned ASR runtime child cleanup is unconfirmed")
 
 
@@ -362,8 +450,41 @@ def _configuration(owners: _Owners) -> str:
             "revision_windows_enabled": settings.asr_revision_windows_enabled,
             "asr_timeout": owners.asr.config.timeout_seconds,
             "aligner_timeout": owners.aligner.config.timeout_seconds,
+            "inherited_guard": owners.guard.configuration() if owners.guard is not None else None,
         }
     )
+
+
+def _candidate_spec(
+    owners: _Owners,
+    inventory: _Inventory,
+    configuration: object,
+    *,
+    revision: str,
+    language: str | None,
+) -> MeetingCandidateSpec:
+    return MeetingCandidateSpec(
+        implementation_id="production_revision_window_asr",
+        adapter_sha256=inventory.files("source:adapter")["."],
+        worker_sha256=inventory.files("source:worker")["."],
+        sdk_revision="filesystem-closure:"
+        + canonical_digest({"files": inventory.digest(""), "configuration": configuration}),
+        model_revision=revision,
+        model_files_sha256=inventory.files("asr_model"),
+        dtype=owners.asr_config.dtype,
+        compute_units=owners.asr_config.device,
+        preset=realtime_replay_preset(owners.services, language=language),
+        decoder={"max_tokens": owners.asr_config.max_new_tokens or 512, "timestamps": False},
+        attribution={"algorithm": "none"},
+        scorer=ASR_SCORER,
+    )
+
+
+def _expected_language(expected: MeetingCandidateSpec) -> str | None:
+    language = expected.preset.get("language")
+    if language is not None and not isinstance(language, str):
+        raise ValueError("invalid frozen ASR language")
+    return language
 
 
 def _ready_identity(owners: _Owners) -> tuple[object, ...]:
@@ -399,7 +520,7 @@ def _ready_identity(owners: _Owners) -> tuple[object, ...]:
 
 
 class FrozenAsrRuntime:
-    """A private root's prepared handle; usable only inside its context."""
+    """Prepared replay handle and, after successful cleanup, commit guards."""
 
     def __init__(self, owners: _Owners, inventory: _Inventory) -> None:
         self._owners, self._inventory = owners, inventory
@@ -408,6 +529,7 @@ class FrozenAsrRuntime:
         self._invalid = False
         self._evaluating = False
         self._closing = False
+        self._commit_ready = False
         self._inflight: asyncio.Task[Any] | None = None
         self._full_checks = 0
         self._verified_replays = 0
@@ -438,6 +560,64 @@ class FrozenAsrRuntime:
             self._invalid = True
             raise
 
+    def _check_closed(self) -> None:
+        try:
+            owners = self._owners
+            owners.check_objects()
+            if (
+                self._active
+                or not self._closing
+                or self._invalid
+                or owners.asr.ready
+                or owners.aligner.ready
+                or owners.asr_transport._process is not None
+                or owners.alignment_transport._process is not None
+                or owners.asr.generation != self._identity[0]
+                or _configuration(owners) != self._identity[-1]
+                or owners.process_pair is None
+                or any(
+                    getattr(process, "returncode", None) is None for process in owners.process_pair
+                )
+            ):
+                raise ValueError("runtime cleanup is unconfirmed")
+        except AttributeError, TypeError, ValueError:
+            self._invalid = True
+            self._commit_ready = False
+            raise ValueError("closed ASR runtime verification is unavailable or changed") from None
+
+    async def _verify_closed_bytes(self) -> None:
+        self._check_closed()
+        try:
+            await join_cleanup(
+                asyncio.create_task(
+                    asyncio.to_thread(self._inventory.verify), name="frozen-asr-closed-verify"
+                )
+            )
+            self._check_closed()
+        except BaseException:
+            self._invalid = True
+            self._commit_ready = False
+            raise
+
+    async def verify_closed(self) -> dict[str, object]:
+        """Rehash after successful context exit and confirmed child reaping."""
+        if not self._commit_ready:
+            raise ValueError("closed ASR runtime verification is unavailable or changed")
+        await self._verify_closed_bytes()
+        return self.proof()
+
+    def verify_commit(self) -> None:
+        """No await or file hashing; guard immediately before atomic submission."""
+        if not self._commit_ready:
+            raise ValueError("closed ASR runtime verification is unavailable or changed")
+        try:
+            self._check_closed()
+            self._inventory.verify(hash_bytes=False)
+        except BaseException:
+            self._invalid = True
+            self._commit_ready = False
+            raise
+
     def candidate_spec(self, *, language: str | None = None) -> MeetingCandidateSpec:
         """Build comparison identity from frozen bytes and actual ready owners.
 
@@ -449,32 +629,20 @@ class FrozenAsrRuntime:
         self._inventory.verify(hash_bytes=False)
         owner = self._owners.asr
         assert owner.identity is not None and owner.runtime_revision is not None
-        adapter = self._inventory.files("source:adapter")["."]
-        worker = self._inventory.files("source:worker")["."]
-        return MeetingCandidateSpec(
-            implementation_id="production_revision_window_asr",
-            adapter_sha256=adapter,
-            worker_sha256=worker,
-            sdk_revision="filesystem-closure:"
-            + canonical_digest(
-                {
-                    "files": self._inventory.digest(""),
-                    "configuration": self._identity[-1],
-                }
-            ),
-            model_revision=owner.runtime_revision,
-            model_files_sha256=self._inventory.files("asr_model"),
-            dtype=owner.identity[1],
-            compute_units=owner.identity[0],
-            preset=realtime_replay_preset(self._owners.services, language=language),
-            decoder={"max_tokens": owner.window_decode_max_new_tokens, "timestamps": False},
-            attribution={"algorithm": "none"},
-            scorer=ASR_SCORER,
+        return _candidate_spec(
+            self._owners,
+            self._inventory,
+            self._identity[-1],
+            revision=owner.runtime_revision,
+            language=language,
         )
 
     def proof(self) -> dict[str, object]:
-        self._check()
-        self._inventory.verify(hash_bytes=False)
+        if self._active:
+            self._check()
+            self._inventory.verify(hash_bytes=False)
+        else:
+            self.verify_commit()
         return {
             "schema_version": 1,
             "preload_bytes_frozen": True,
@@ -500,6 +668,12 @@ class FrozenAsrRuntime:
             "host_dependency_writes": "any_change_in_declared_roots_rejected",
             "worker_lifecycle_owner": "private_root_two_children",
             "vad_lifecycle_owner": "host_process_shared_cache_not_cleared",
+            "inherited_guard_descriptor_count": (
+                len(self._owners.guard.descriptors) if self._owners.guard is not None else 0
+            ),
+            "owned_children_reaped": self._commit_ready,
+            "post_close_bytes_stable": self._commit_ready,
+            "commit_guard_ready": self._commit_ready,
         }
 
     async def evaluate(
@@ -549,6 +723,7 @@ class FrozenAsrRuntime:
         if self._inflight is not None and not self._inflight.done():
             self._inflight.cancel()
             await asyncio.gather(self._inflight, return_exceptions=True)
+            self._invalid = True
         self._active = False
 
 
@@ -615,6 +790,8 @@ async def prepare_frozen_asr_runtime(
     settings: Settings,
     *,
     dependencies: RuntimeDependencyRoots,
+    expected_spec: MeetingCandidateSpec | None = None,
+    inherited_fds: tuple[int, ...] = (),
 ) -> AsyncIterator[FrozenAsrRuntime]:
     """Construct privately, freeze before loading, prepare, and own two children.
 
@@ -623,6 +800,8 @@ async def prepare_frozen_asr_runtime(
     joins preparation and cleanup before returning. A root that unexpectedly
     returns hot/shared owners is rejected without touching those workers.
     """
+    if expected_spec is not None and type(expected_spec) is not MeetingCandidateSpec:
+        raise ValueError("expected ASR candidate must be an immutable candidate spec")
     private = _private_settings(settings)
     # Constructor only: do not open/load the user's persistent voice registry.
     unused_voices = FileVoiceRegistry(
@@ -634,7 +813,9 @@ async def prepare_frozen_asr_runtime(
         raise ValueError("private ASR runtime construction failed") from None
     owners = _Owners.cold(services)
     runtime: FrozenAsrRuntime | None = None
+    completed = False
     try:
+        owners.guard = _InheritedGuard.capture(inherited_fds, private.port)
         for transport in (owners.asr_transport, owners.alignment_transport):
             transport._spec = replace(
                 transport._spec,
@@ -642,6 +823,7 @@ async def prepare_frozen_asr_runtime(
                     **transport._spec.env,
                     "PYTHONDONTWRITEBYTECODE": "1",
                 },
+                pass_fds=inherited_fds,
             )
         try:
             roots = _roots(owners, dependencies)
@@ -651,9 +833,27 @@ async def prepare_frozen_asr_runtime(
                     asyncio.to_thread(_Inventory.capture, roots), name="frozen-asr-preload-freeze"
                 )
             )
+            if any(
+                entry.resolved.is_relative_to(_REPOSITORY)
+                for (role, _), entry in inventory.entries.items()
+                if role in {"asr_model", "aligner_model", "vad_model"}
+            ):
+                raise ValueError("model artifacts must remain outside repository")
             owners.check_objects()
             if _configuration(owners) != before_configuration:
                 raise ValueError("ASR runtime owner configuration changed while freezing")
+            if expected_spec is not None:
+                # Preregistered model_revision is deliberately copied only for
+                # this static comparison. It is independently measured after
+                # ready and the complete identity must match before publication.
+                before_spec = _candidate_spec(
+                    owners,
+                    inventory,
+                    before_configuration,
+                    revision=expected_spec.model_revision,
+                    language=_expected_language(expected_spec),
+                )
+                validate_execution_identity(expected_spec, before_spec.as_dict())
             await join_cleanup(
                 asyncio.create_task(services.prepare_revision_window(), name="frozen-asr-prepare")
             )
@@ -661,14 +861,33 @@ async def prepare_frozen_asr_runtime(
                 raise ValueError("ASR runtime owner configuration changed while preparing")
             runtime = FrozenAsrRuntime(owners, inventory)
             await runtime.verify()
+            if expected_spec is not None:
+                validate_execution_identity(
+                    expected_spec,
+                    runtime.candidate_spec(language=_expected_language(expected_spec)).as_dict(),
+                )
         except OSError, RuntimeError:
             raise ValueError("private ASR runtime preparation failed") from None
         yield runtime
+        completed = True
     finally:
+        if runtime is not None and not completed:
+            runtime._invalid = True
 
         async def close() -> None:
             if runtime is not None:
                 await runtime._finish()
             await owners.close()
 
-        await join_cleanup(asyncio.create_task(close(), name="frozen-asr-owned-close"))
+        try:
+            await join_cleanup(asyncio.create_task(close(), name="frozen-asr-owned-close"))
+            if runtime is not None and completed and not runtime._invalid:
+                await runtime._verify_closed_bytes()
+                # Set only in the awaiting caller after joined checks returned;
+                # cancellation cannot leave a successful proof in a background task.
+                runtime._commit_ready = True
+        except BaseException:
+            if runtime is not None:
+                runtime._invalid = True
+                runtime._commit_ready = False
+            raise

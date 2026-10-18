@@ -24,6 +24,29 @@ from speechrail.config import Settings
 from speechrail.infrastructure.voice_registry import FileVoiceRegistry
 
 
+def test_model_file_symlink_into_repository_rejected_before_loading(runtime_setup):
+    state = runtime_setup
+    weight = state.snapshots[0] / "model.safetensors"
+    weight.unlink()
+    weight.symlink_to(Path(__file__).resolve().parents[1] / "pyproject.toml")
+    started = []
+
+    async def mark_started():
+        started.append(True)
+
+    state.start_hook = mark_started
+
+    async def run():
+        with pytest.raises(ValueError, match="model artifacts must remain outside repository"):
+            async with state.module.prepare_frozen_asr_runtime(
+                state.settings, dependencies=state.dependencies
+            ):
+                pass
+        assert not started
+
+    asyncio.run(run())
+
+
 @pytest.fixture
 def runtime_setup(tmp_path, monkeypatch):
     import meeting_asr_runtime as module
@@ -99,11 +122,15 @@ def runtime_setup(tmp_path, monkeypatch):
 
     async def close_asr(owner):
         closed.append(("asr", owner))
+        if owner._transport._process is not None:
+            owner._transport._process.returncode = 0
         owner._ready = False
         owner._transport._process = None
 
     async def close_aligner(owner):
         closed.append(("aligner", owner))
+        if owner._process._process is not None:
+            owner._process._process.returncode = 0
         owner._ready = None
         owner._process._process = None
 
@@ -193,6 +220,314 @@ def test_private_root_prepares_actual_cap_and_closes_only_its_two_owners(runtime
         assert not any(t.get_name().startswith("frozen-asr-") for t in asyncio.all_tasks())
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "field", ["adapter_sha256", "worker_sha256", "sdk_revision", "model_files_sha256", "dtype"]
+)
+def test_expected_static_candidate_rejected_before_prepare(runtime_setup, field):
+    state = runtime_setup
+
+    async def run():
+        async with state.module.prepare_frozen_asr_runtime(
+            state.settings, dependencies=state.dependencies
+        ) as runtime:
+            expected = runtime.candidate_spec(language="Chinese")
+        changed = {"model.safetensors": "0" * 64} if field == "model_files_sha256" else "0" * 64
+        expected = replace(expected, **{field: changed})
+        entered = False
+
+        async def started():
+            nonlocal entered
+            entered = True
+
+        state.start_hook = started
+        with pytest.raises(ValueError, match="execution identity mismatch"):
+            async with state.module.prepare_frozen_asr_runtime(
+                state.settings, dependencies=state.dependencies, expected_spec=expected
+            ):
+                pytest.fail("published mismatched preregistered candidate")
+        assert not entered
+
+    asyncio.run(run())
+
+
+def test_expected_ready_candidate_checked_before_publication(runtime_setup):
+    state = runtime_setup
+
+    async def run():
+        async with state.module.prepare_frozen_asr_runtime(
+            state.settings, dependencies=state.dependencies
+        ) as runtime:
+            expected = runtime.candidate_spec(language="Chinese")
+        with pytest.raises(ValueError, match="model_revision"):
+            async with state.module.prepare_frozen_asr_runtime(
+                state.settings,
+                dependencies=state.dependencies,
+                expected_spec=replace(expected, model_revision="unobserved-revision"),
+            ):
+                pytest.fail("published mismatched ready identity")
+        async with state.module.prepare_frozen_asr_runtime(
+            state.settings, dependencies=state.dependencies, expected_spec=expected
+        ) as runtime:
+            assert runtime.candidate_spec(language="Chinese") == expected
+            with pytest.raises(ValueError, match="closed"):
+                runtime.verify_commit()
+        proof = await runtime.verify_closed()
+        assert proof["owned_children_reaped"] is True
+        assert proof["post_close_bytes_stable"] is True
+        assert proof["commit_guard_ready"] is True
+        assert proof["loaded_model_bytes_verified"] is False
+        runtime.verify_commit()
+
+    asyncio.run(run())
+
+
+def test_post_close_changes_and_body_failure_never_allow_commit(runtime_setup):
+    state = runtime_setup
+
+    async def run():
+        async with state.module.prepare_frozen_asr_runtime(
+            state.settings, dependencies=state.dependencies
+        ) as runtime:
+            pass
+        (state.dependency / "library.so").write_bytes(b"changed after close")
+        with pytest.raises(ValueError):
+            runtime.verify_commit()
+        with pytest.raises(ValueError):
+            await runtime.verify_closed()
+        with pytest.raises(RuntimeError, match="caller failed"):
+            async with state.module.prepare_frozen_asr_runtime(
+                state.settings, dependencies=state.dependencies
+            ) as failed:
+                raise RuntimeError("caller failed")
+        with pytest.raises(ValueError):
+            failed.verify_commit()
+
+    asyncio.run(run())
+
+
+def test_success_exit_full_check_catches_mutation_during_child_close(runtime_setup, monkeypatch):
+    state = runtime_setup
+    original = Qwen3AlignmentWorker.close
+
+    async def close(owner):
+        await original(owner)
+        (state.dependency / "library.so").write_bytes(b"changed during close")
+
+    monkeypatch.setattr(Qwen3AlignmentWorker, "close", close)
+
+    async def run():
+        with pytest.raises(ValueError, match="runtime bytes"):
+            async with state.module.prepare_frozen_asr_runtime(
+                state.settings, dependencies=state.dependencies
+            ) as runtime:
+                pass
+        assert len(state.closed) == 2
+        with pytest.raises(ValueError):
+            runtime.verify_commit()
+
+    asyncio.run(run())
+
+
+def test_inherited_port_guard_binds_roles_not_fd_numbers(runtime_setup, tmp_path, monkeypatch):
+    from meeting_candidate_execution import EvaluationPortLease
+
+    state = runtime_setup
+    lease = EvaluationPortLease(state.settings.port, directory=tmp_path)
+    monkeypatch.setattr(state.module, "_guard_path", lambda port: lease._path)
+
+    async def prepare(descriptor, expected=None):
+        async with state.module.prepare_frozen_asr_runtime(
+            state.settings,
+            dependencies=state.dependencies,
+            expected_spec=expected,
+            inherited_fds=(descriptor,),
+        ) as runtime:
+            for transport in (runtime._owners.asr_transport, runtime._owners.alignment_transport):
+                assert transport._spec.pass_fds == (descriptor,)
+            spec = runtime.candidate_spec(language="Chinese")
+        await runtime.verify_closed()
+        return spec
+
+    with lease:
+        descriptor = os.dup(lease.descriptor)
+        try:
+            expected = asyncio.run(prepare(lease.descriptor))
+            assert asyncio.run(prepare(descriptor, expected)) == expected
+        finally:
+            os.close(descriptor)
+    inode = lease._path.stat().st_ino
+    # Recreating the same semantic lock for another run must not change the
+    # candidate. This run still independently freezes its actual new inode.
+    previous = tmp_path / "previous-lock"
+    lease._path.rename(previous)
+    with lease:
+        assert lease._path.stat().st_ino != inode
+        assert asyncio.run(prepare(lease.descriptor, expected)) == expected
+
+
+def test_inherited_guard_replacement_poisoned_even_after_close(
+    runtime_setup, tmp_path, monkeypatch
+):
+    from meeting_candidate_execution import EvaluationPortLease
+
+    state = runtime_setup
+    lease = EvaluationPortLease(state.settings.port, directory=tmp_path)
+    monkeypatch.setattr(state.module, "_guard_path", lambda port: lease._path)
+
+    async def run(descriptor):
+        async with state.module.prepare_frozen_asr_runtime(
+            state.settings, dependencies=state.dependencies, inherited_fds=(descriptor,)
+        ) as runtime:
+            pass
+        replacement = os.open(tmp_path / "other", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            os.dup2(replacement, descriptor)
+            with pytest.raises(ValueError, match="closed"):
+                runtime.verify_commit()
+        finally:
+            os.close(replacement)
+
+    with lease:
+        descriptor = os.dup(lease.descriptor)
+        try:
+            asyncio.run(run(descriptor))
+        finally:
+            os.close(descriptor)
+
+
+@pytest.mark.parametrize("kind", ["retained_process", "unreaped_process"])
+def test_close_requires_exact_children_reaped_not_only_ready_false(
+    runtime_setup, monkeypatch, kind
+):
+    state = runtime_setup
+    original = Qwen3SharedWorker.close
+
+    async def close(owner):
+        process = owner._transport._process
+        await original(owner)
+        if kind == "retained_process":
+            owner._transport._process = process
+        else:
+            process.returncode = None
+
+    monkeypatch.setattr(Qwen3SharedWorker, "close", close)
+
+    async def run():
+        with pytest.raises(RuntimeError, match="cleanup is unconfirmed"):
+            async with state.module.prepare_frozen_asr_runtime(
+                state.settings, dependencies=state.dependencies
+            ) as runtime:
+                pass
+        assert len(state.closed) == 2
+        with pytest.raises(ValueError):
+            await runtime.verify_closed()
+        with pytest.raises(ValueError):
+            runtime.proof()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("kind", ["owner", "configuration", "generation", "process"])
+def test_closed_guard_rechecks_exact_composition_and_configuration(runtime_setup, kind):
+    state = runtime_setup
+
+    async def run():
+        async with state.module.prepare_frozen_asr_runtime(
+            state.settings, dependencies=state.dependencies
+        ) as runtime:
+            pass
+        owners = runtime._owners
+        if kind == "owner":
+            object.__setattr__(owners.services, "window_asr_factory", object())
+        elif kind == "configuration":
+            owners.asr_transport._spec = replace(
+                owners.asr_transport._spec,
+                env={**owners.asr_transport._spec.env, "ASR_CHANGED": "1"},
+            )
+        elif kind == "generation":
+            owners.asr._generation_guard.advance()
+        else:
+            owners.asr_transport._process = SimpleNamespace(returncode=None)
+        with pytest.raises(ValueError, match="closed"):
+            runtime.verify_commit()
+        with pytest.raises(ValueError):
+            await runtime.verify_closed()
+
+    asyncio.run(run())
+
+
+def test_cancelled_post_close_full_hash_is_joined_and_cannot_commit(runtime_setup, monkeypatch):
+    state = runtime_setup
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    original = state.module._Inventory.verify
+
+    def verify(inventory, *, hash_bytes=True):
+        if hash_bytes and len(state.closed) == 2:
+            entered.set()
+            assert release.wait(3)
+            original(inventory, hash_bytes=hash_bytes)
+            finished.set()
+        else:
+            original(inventory, hash_bytes=hash_bytes)
+
+    monkeypatch.setattr(state.module._Inventory, "verify", verify)
+
+    async def run():
+        handles = []
+
+        async def context():
+            async with state.module.prepare_frozen_asr_runtime(
+                state.settings, dependencies=state.dependencies
+            ) as runtime:
+                handles.append(runtime)
+
+        task = asyncio.create_task(context())
+        assert await asyncio.to_thread(entered.wait, 3)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert finished.is_set()
+        with pytest.raises(ValueError):
+            handles[0].verify_commit()
+        with pytest.raises(ValueError):
+            await handles[0].verify_closed()
+        assert not any(t.get_name().startswith("frozen-asr-") for t in asyncio.all_tasks())
+
+    asyncio.run(run())
+
+
+def test_inherited_guard_rejects_unrelated_file_before_loading(runtime_setup, tmp_path):
+    state = runtime_setup
+    entered = False
+
+    async def start():
+        nonlocal entered
+        entered = True
+
+    state.start_hook = start
+    descriptor = os.open(tmp_path / "unrelated", os.O_CREAT | os.O_RDWR, 0o600)
+
+    async def run():
+        with pytest.raises(ValueError, match="inherited ASR runtime guard") as error:
+            async with state.module.prepare_frozen_asr_runtime(
+                state.settings, dependencies=state.dependencies, inherited_fds=(descriptor,)
+            ):
+                pytest.fail("unrelated descriptor was accepted as the service guard")
+        assert str(tmp_path) not in str(error.value)
+        assert not entered
+        assert len(state.closed) == 2
+
+    try:
+        asyncio.run(run())
+    finally:
+        os.close(descriptor)
 
 
 @pytest.mark.parametrize("kind", ["asr", "aligner", "dependency", "source"])

@@ -453,3 +453,13 @@ Ruling: preload/post-prepare/post-replay证明具名文件稳定及对象核对�
 2026-10-18：为ASR正式执行器贯穿子进程排他锁补充最小transport前置。WorkerProcessSpec新增pass_fds，默认空；只接受最多16个唯一、非bool的3及以上整数，禁止隐式继承stdio或任意宿主描述符。AsyncFramedWorkerProcess将显式集合传给create_subprocess_exec；调用方仍拥有父级副本，transport只随精确child退出回收其继承副本。普通生产调用未传FD时保持空集合。
 
 8项新增反例先因字段缺失RED，再GREEN。两个真实无模型Python子进程共同继承同一flock，父级close后任一child存活仍排他，最后一个child回收后才可重新取锁；空集合不泄漏该FD。六类非法参数拒绝。与shared/window worker联合 `95 passed, 1 warning in 3.85s`（既有弃用warning），两文件Ruff、transport项目Mypy通过。此证据不代表ASR正式执行器、真实CoreML孤儿场景或产品并发已经验收；root锁接线与正式driver由其他执行者独占perf文件继续实施，无同文件写入。无真实音频/模型/benchmark、服务、下载、安装、UI、发布或合并动作。
+
+## T8 预登记 ASR 单场执行与关闭后提交
+
+2026-10-18：新增 meeting_asr_execution 与专用 evaluate-development CLI。独立严格控制锁绑定来源、主参考、配置、显式依赖和事前candidate spec；settings仅init source，关闭环境/dotenv/secrets，并覆盖直接读环境的legacy validator。禁止未知字段、服务密钥和非ASR配置；模型真实路径外置，允许受冻结保护的解释器/依赖file symlink。来源先于模型预检，不接触holdout、不从本次转写输出生成A0。
+
+私有root在同一次preload snapshot后、prepare前核对expected静态文件和closure/config，ready后核对完整spec。两个私有child继承声明端口的同一锁；候选摘要绑定uid/port/namespace/角色数量，实际FD/file identity另守卫，瞬时FD号/inode不定义稳定candidate。正常退出必须确认原process.returncode和transport清空，joined完整核对关闭期间的字节/配置；只有成功路径获得verify_closed/verify_commit资格。失败、取消、替换owner或回收不明均不提交。Silero仍是宿主共享cache，不清理全局缓存。
+
+driver在context退出后复核关闭证明、controls/source，再写0600 partial。partial内容、inode/stamps及输出目录身份也受守卫；最终所有await完成后同步检查controls/source/runtime和partial，再exclusive link提交result.json。主线补充model bundle文件symlink指向仓库的RED反例，改为同次preload inventory对全部model entry.resolved在prepare前拒绝，封住仅验证model root的缺口。错误与报告不含路径、正文或环境值；声明端口排他不证明其他端口无实例。
+
+runtime新增19项、driver54项、CLI5项fake回归；主线五个ASR相关文件 `204 passed in 11.22s`，六个本节Python Ruff通过，root/driver/CLI按项目配置Mypy通过。transport其他调用面额外TTS/streaming/aligner的93项fake回归通过。两执行者分别独占root/driver，主线独占CLI/文档，停写后统一复核；没有覆盖并行改动。父提交6e6f4837主CI39095347788和原生CI39095347813均成功。没有真实语料/模型、benchmark、下载、服务、安装、UI、发布或合并动作；loaded/import bytes、实际A0、CER改善、认证人数及联合P95仍未证明。
