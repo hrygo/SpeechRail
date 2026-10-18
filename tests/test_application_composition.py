@@ -892,6 +892,7 @@ def test_idle_tts_reclamation_failure_blocks_ordinary_speech_admission(
         qwen3_tts_design_model_dir=tmp_path / "voice_design",
         worker_idle_timeout_seconds=10_000,
         voice_design_idle_timeout_seconds=10_000,
+        tts_resident_bytes=512 * 1024 * 1024,
     )
 
     async def run() -> None:
@@ -966,6 +967,7 @@ def test_tts_quarantine_preserves_independent_asr_readiness(
             tts_synthesizer=object(),
             governor=services_module.ResourceGovernor(
                 fake_services.settings.governor_limits, allow_heavy_overlap=True,
+                quarantine_resources_bounded=True,
             ),
         )
         services.governor.quarantine_tts_lane(None)
@@ -1018,6 +1020,7 @@ def test_tts_readiness_tracks_the_configured_production_lanes(
         governor=services_module.ResourceGovernor(
             fake_services.settings.governor_limits,
             allow_heavy_overlap=True,
+            quarantine_resources_bounded=True,
         ),
     )
     services.governor.quarantine_tts_lane("tts_base")

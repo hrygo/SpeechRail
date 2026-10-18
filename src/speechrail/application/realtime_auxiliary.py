@@ -51,10 +51,12 @@ from speechrail.observability.alignment import (
 )
 from speechrail.observability.metrics import Metrics
 from speechrail.runtime.alignment_admission import AlignmentAdmission, AlignmentAdmissionFullError
+from speechrail.runtime.busy import BusyReason
 from speechrail.runtime.diarization_admission import (
     DiarizationAdmission,
     DiarizationAdmissionFullError,
 )
+from speechrail.runtime.resource_governor import GovernorLaneIsolatedError, GovernorQueueFullError
 
 _MAX_UPDATES_PER_EVENT = 256
 
@@ -887,6 +889,17 @@ class RealtimeAuxiliaryOwner:
             holder["session"] = self._diarization
             await self._diarization.start()
             self._diarization_events = asyncio.create_task(self._consume_diarization_events())
+        except GovernorLaneIsolatedError as exc:
+            await self._release_diarization()
+            raise RealtimeAdapterError(
+                "backend_reclamation_failed", "diarization resource reclamation is unconfirmed",
+            ) from exc
+        except GovernorQueueFullError as exc:
+            await self._release_diarization()
+            raise RealtimeAdapterError(
+                "backend_busy", "another diarization session is active",
+                busy_reason=str(BusyReason.DIARIZATION_CAPACITY),
+            ) from exc
         except BaseException:
             await self._release_diarization()
             raise

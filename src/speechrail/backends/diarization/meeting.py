@@ -19,6 +19,7 @@ from speechrail.domain.diarization.types import (
 )
 from speechrail.observability.metrics import Metrics
 from speechrail.runtime.cleanup import join_cleanup
+from speechrail.runtime.diarization_owner import DiarizationWorkerLease
 from speechrail.runtime.diarization_worker import CoreMLWorkerProcess
 from speechrail.runtime.resource_governor import ResourceGovernor, WorkClass
 from speechrail.runtime.window_pcm import PcmBudget, WindowPcmRing
@@ -139,23 +140,29 @@ class MeetingDiarizationEngine:
             raise DiarizationError(
                 self.readiness.message, code=self.readiness.code or "model_not_ready"
             )
-        worker = (
-            self._worker_factory()
-            if self._worker_factory
-            else CoreMLWorkerProcess(
-                executable=self._executable,
-                model_path=self._model_dir,
-                protocol_version=2,
-                backend=self.backend,
-                policy_path=self._policy_path,
+        generation = self._governor.diarization_owner.claim(epoch)
+        try:
+            worker = (
+                self._worker_factory()
+                if self._worker_factory
+                else CoreMLWorkerProcess(
+                    executable=self._executable,
+                    model_path=self._model_dir,
+                    protocol_version=2,
+                    backend=self.backend,
+                    policy_path=self._policy_path,
+                )
             )
-        )
+        except BaseException:
+            self._governor.diarization_owner.release(generation, reaped=True)
+            raise
         return MeetingActivitySession(
             worker=worker,
             epoch=epoch,
             governor=self._governor,
             pcm_budget=self._pcm_budget,
             metrics=self._metrics,
+            generation=generation,
         )
 
 
@@ -170,10 +177,16 @@ class MeetingActivitySession:
         governor: ResourceGovernor,
         pcm_budget: PcmBudget | None = None,
         metrics: Metrics | None = None,
+        generation: int | None = None,
     ) -> None:
         if not epoch:
             raise ValueError("activity epoch is required")
         self._worker, self._epoch, self._governor = worker, epoch, governor
+        self._lease = DiarizationWorkerLease(
+            worker=worker, governor=governor,
+            generation=(generation if generation is not None
+                        else governor.diarization_owner.claim(epoch)),
+        )
         self._metrics = metrics
         self.ring = WindowPcmRing(budget_account=pcm_budget)
         self._next_tick = 160000
@@ -184,6 +197,8 @@ class MeetingActivitySession:
         self._finishing = self._closed = False
         self._failure: BaseException | None = None
         self._close_task: asyncio.Task[None] | None = None
+        self._updates_closed = False
+        self._finished_through: int | None = None
 
     async def append(self, *, start_sample: int, pcm16: bytes) -> None:
         if self._closed or self._finishing or self._failure is not None:
@@ -195,8 +210,12 @@ class MeetingActivitySession:
 
     async def updates(self) -> AsyncIterator[ActivityUpdate]:
         while True:
+            if self._queue.empty() and self._updates_closed:
+                self._raise_failure()
+                return
             update = await self._queue.get()
             if update is None:
+                self._raise_failure()
                 return
             if isinstance(update, BaseException):
                 raise DiarizationError(
@@ -205,6 +224,8 @@ class MeetingActivitySession:
             yield update
 
     async def finish(self, *, through_sample: int) -> None:
+        if self._finished_through == through_sample and self._failure is None:
+            return
         if through_sample != self.ring.accepted_samples or self._closed:
             raise DiarizationError("invalid activity finish barrier", code="invalid_audio")
         self._finishing = True
@@ -229,17 +250,32 @@ class MeetingActivitySession:
         # before cancelling its pump and allowing the compute lease to exit.
         try:
             started = time.monotonic()
-            await self._worker.close()
+            await self._lease.close()
             self._record_phase("close", started)
-        except BaseException:
+        except BaseException as exc:
             if self._metrics:
                 self._metrics.record_diarization_failure("close")
-            self._governor.quarantine_asr_lane()
+            self._failure = exc
+            self._governor.quarantine_diarization_lane()
+            self._close_updates()
             raise
         if self._pump is not None and not self._pump.done():
             self._pump.cancel()
             await asyncio.gather(self._pump, return_exceptions=True)
         self.ring.clear()
+        self._close_updates()
+
+    def _close_updates(self) -> None:
+        if not self._updates_closed:
+            self._updates_closed = True
+            if not self._queue.full():
+                self._queue.put_nowait(None)
+
+    def _raise_failure(self) -> None:
+        if self._failure is not None:
+            raise DiarizationError(
+                "meeting activity failed", code="model_not_ready"
+            ) from self._failure
 
     async def _run(self) -> None:
         try:
@@ -250,24 +286,28 @@ class MeetingActivitySession:
                     await self._wake.wait()
                     continue
                 if accepted == 0 or (self._finishing and self._stable == accepted):
-                    await join_cleanup(asyncio.create_task(self._worker.close()))
+                    await self._lease.close()
+                    self._finished_through = accepted
                     self.ring.clear()
-                    await self._queue.put(None)
+                    self._close_updates()
                     return
                 end = min(accepted, max(self._next_tick, self.ring.retained_from_sample + 1))
                 span = SampleSpan(max(self.ring.retained_from_sample, end - 480000), end)
                 final = self._finishing and end == accepted
                 with self.ring.borrow(span) as pin:
-                    # No lane declaration for dynamic inference: share the serial
-                    # heavy-ASR lane until a measured profile permits otherwise.
+                    # Diarization reserves its own declared capability lane; it no
+                    # longer borrows the serial heavy-ASR lane, and may overlap
+                    # heavy compute only under the declared-bytes memory budget.
                     waiting = time.monotonic()
-                    async with self._governor.reserve(WorkClass.REALTIME_ASR):
+                    async with self._governor.reserve(WorkClass.DIARIZATION):
                         self._record_phase("wait", waiting)
                         stage = "load"
                         try:
                             async with asyncio.timeout(30):
                                 started = time.monotonic()
-                                await self._worker.start()
+                                await self._lease.start()
+                                if self._closed:
+                                    raise asyncio.CancelledError
                                 self._record_phase("load", started)
                                 stage = "infer"
                                 started = time.monotonic()
@@ -299,28 +339,37 @@ class MeetingActivitySession:
                                 )
                             update = self._parse(response, span, final)
                             if final:
-                                await join_cleanup(asyncio.create_task(self._worker.close()))
+                                stage = "close"
+                                started = time.monotonic()
+                                await self._lease.close()
+                                self._record_phase("close", started)
                         except BaseException:
                             if self._metrics:
                                 self._metrics.record_diarization_failure(stage)
                             try:
-                                await join_cleanup(asyncio.create_task(self._worker.close()))
+                                await self._lease.close()
                             except BaseException:
-                                self._governor.quarantine_asr_lane()
+                                self._governor.quarantine_diarization_lane()
                                 raise
                             raise
                 self._processed, self._stable = update.processed_through, update.stable_through
                 self._next_tick = end + 160000
-                await self._queue.put(update)
+                self._queue.put_nowait(update)
                 if final:
+                    self._finished_through = accepted
                     self.ring.clear()
-                    await self._queue.put(None)
+                    self._close_updates()
                     return
-        except asyncio.CancelledError:
-            raise
         except BaseException as exc:
-            self._failure = exc
-            await self._queue.put(exc)
+            if not (isinstance(exc, asyncio.CancelledError) and self._closed):
+                self._failure = exc
+            try:
+                await self._lease.close()
+            except BaseException as close_error:
+                self._failure = close_error
+            else:
+                self.ring.clear()
+            self._close_updates()
 
     def _record_phase(self, phase: str, started: float) -> None:
         if self._metrics:

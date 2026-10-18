@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from speechrail.application.realtime_auxiliary import (
     RealtimeAuxiliaryOwner,
     RealtimeAuxiliaryPorts,
@@ -13,6 +15,7 @@ from speechrail.application.realtime_state import (
     FrozenTranscript,
     RealtimeConfiguration,
 )
+from speechrail.compatibility.openai_realtime import RealtimeAdapterError
 from speechrail.config import Settings
 from speechrail.domain.alignment import AlignmentRequest, AlignmentResult, AlignmentUnit
 from speechrail.domain.audio_timeline import SampleSpan
@@ -20,6 +23,7 @@ from speechrail.domain.diarization.types import ActivityFrame, ActivityUpdate
 from speechrail.observability.metrics import Metrics
 from speechrail.runtime.alignment_admission import AlignmentAdmission
 from speechrail.runtime.diarization_admission import DiarizationAdmission
+from speechrail.runtime.resource_governor import GovernorLaneIsolatedError, GovernorQueueFullError
 
 
 class _Input:
@@ -149,6 +153,28 @@ class _Harness:
             await self.release_updates.wait()
         self.events.append(dict(event))
         return len(self.events)
+
+
+@pytest.mark.parametrize(
+    "error,code", [(GovernorQueueFullError, "backend_busy"),
+                   (GovernorLaneIsolatedError, "backend_reclamation_failed")],
+)
+def test_model_owner_rejection_releases_realtime_presence_and_uses_stable_error(error, code):
+    async def scenario():
+        harness = _Harness(_LateFirstAligner())
+
+        def reject(*, epoch):
+            raise error("private worker detail")
+
+        harness.engine.open = reject
+        with pytest.raises(RealtimeAdapterError) as failure:
+            await harness.owner.configure(alignment=False, diarization=True)
+        assert failure.value.code == code
+        assert "private" not in str(failure.value)
+        assert harness.owner._ports.diarization_admission.active == 0
+        await harness.owner.close()
+
+    asyncio.run(scenario())
 
 
 def test_failed_close_retains_owner_and_admission_until_runtime_recovery():

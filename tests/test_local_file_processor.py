@@ -221,6 +221,40 @@ class _FakeTranscriber:
         )
 
 
+def test_governed_transcription_job_releases_asr_before_diarization(tmp_path, monkeypatch):
+    import speechrail.runtime.local_file_processor as module
+    from speechrail.runtime.resource_governor import WorkClass
+
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    audio = spool / "input.wav"
+    audio.write_bytes(b"fake")
+    governor = ResourceGovernor(GovernorLimits(2, 1, 4), allow_heavy_overlap=False)
+    class Transcriber(_FakeTranscriber):
+        async def transcribe(self, request):
+            assert governor.snapshot().active_asr == 1
+            return await super().transcribe(request)
+    async def diarize(**kwargs):
+        assert governor.snapshot().active_asr == 0
+        async with governor.reserve(WorkClass.DIARIZATION):
+            return kwargs["result"]
+    monkeypatch.setattr(module, "diarize_transcript", diarize)
+    processor = LocalFileJobProcessor(spool_dir=spool, batch_transcriber=Transcriber(),
+        diarization_engine=object(), text_aligner=object(), governor=governor)
+    async def decode(_):
+        return bytes(3200)
+    processor._decode_audio = decode
+    repository = JobRepository(spool)
+    job = repository.create(kind="transcription", owner="owner",
+        request={"input_ref": str(audio), "params": {"diarize": True}})
+    runner = JobRunner(repository=repository, governor=governor, processor=processor,
+        deadline_seconds=0.5,
+        processor_manages_transcription_admission=processor.manages_transcription_admission)
+    asyncio.run(runner.run_once())
+    assert repository.get(job.id, owner="owner").state == "completed"
+    assert governor.snapshot().active_asr == governor.snapshot().active_diarization == 0
+
+
 def test_processor_transcription_writes_artifact_and_returns_relative_ref(tmp_path: Path) -> None:
     spool = tmp_path / "spool"
     spool.mkdir()

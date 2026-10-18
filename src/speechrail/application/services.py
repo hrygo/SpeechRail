@@ -114,6 +114,20 @@ def _resident_tts_worker_count(component: object | None) -> int:
     return count if type(count) is int and count >= 1 else 1
 
 
+def _diarization_declared_bytes(settings: Settings) -> int:
+    """Resident alternatives share one owner; every enabled alternative must be known."""
+    if settings.diarization_dynamic_enabled:
+        if settings.diarization_dynamic_resident_bytes <= 0:
+            return 0
+        if (
+            settings.diarization_coreml_model_path is not None
+            and settings.diarization_resident_bytes <= 0
+        ):
+            return 0
+        return max(settings.diarization_resident_bytes, settings.diarization_dynamic_resident_bytes)
+    return settings.diarization_resident_bytes
+
+
 def _declared_footprint(
     settings: Settings,
     *,
@@ -136,12 +150,7 @@ def _declared_footprint(
         tts_bytes=_bytes(tts_enabled, settings.tts_resident_bytes * tts_worker_count),
         diarization_bytes=_bytes(
             diarization_enabled,
-            max(
-                settings.diarization_resident_bytes,
-                settings.diarization_dynamic_resident_bytes
-                if settings.diarization_dynamic_enabled
-                else 0,
-            ),
+            _diarization_declared_bytes(settings),
         ),
         service_bytes=_SERVICE_OVERHEAD_BYTES,
         shared_dependency_bytes=settings.shared_resident_bytes,
@@ -175,12 +184,7 @@ def _undeclared_composed_components(
         (
             "diarization",
             diarization_from_settings and diarization_enabled,
-            max(
-                settings.diarization_resident_bytes,
-                settings.diarization_dynamic_resident_bytes
-                if settings.diarization_dynamic_enabled
-                else 0,
-            ),
+            _diarization_declared_bytes(settings),
         ),
     )
     return tuple(name for name, composed, declared in pairs if composed and declared <= 0)
@@ -235,7 +239,7 @@ def _heavy_overlap_policy(
     diarization_enabled: bool,
     tts_worker_count: int = 1,
 ) -> tuple[bool, str]:
-    """Decide whether heavy ASR/TTS compute may overlap.
+    """Decide whether heavy compute may overlap across capability axes.
 
     Declared `*_resident_bytes` settings feed a shared hardware budget. TTS
     bytes are declared per worker and multiplied by the maximum number of
@@ -243,6 +247,13 @@ def _heavy_overlap_policy(
     with 0 declared bytes is still unknown and fail-closes under `auto`.
     `allow_heavy_overlap` may force the decision: "true" always allows overlap
     and "false" always serializes, both recorded in the reason.
+
+    The heavy set is ASR, TTS and diarization, and the decision is budget-driven
+    rather than axis-count-driven: the eligible axes include
+    ASR||DIARIZATION and TTS||DIARIZATION (and the three-way combination) as
+    long as the summed declared footprint fits the budget. The governor keeps
+    each axis's own serial lane and applies this decision to the cross-axis
+    overlap only.
     """
     if settings.allow_heavy_overlap == "false":
         return False, "heavy overlap disabled by configuration"
@@ -326,8 +337,10 @@ class AppServices:
             }
         engine = self.diarization_engine_for(backend)
         readiness = getattr(engine, "readiness", None)
-        ready = (isinstance(readiness, DiarizationReadiness) and readiness.ready
-                 and self.text_aligner is not None)
+        ready = (
+            isinstance(readiness, DiarizationReadiness) and readiness.ready
+            and self.text_aligner is not None and not self.governor.diarization_lane_isolated()
+        )
         return {
             "configured": engine is not None,
             "ready": ready,
@@ -361,7 +374,7 @@ class AppServices:
 
     @property
     def asr_ready(self) -> bool:
-        return (
+        return not self.governor.asr_lane_isolated() and (
             self.transcribe is not None
             or self.batch_transcriber is not None
             or self.realtime_asr_factory is not None
@@ -573,6 +586,12 @@ class AppServices:
                 "profile": None,
             }
         readiness = getattr(self.diarization_engine, "readiness", None)
+        if self.governor.diarization_lane_isolated():
+            return {
+                "configured": True, "ready": False, "code": "backend_reclamation_failed",
+                "message": "diarization resource reclamation is unconfirmed",
+                "profile": getattr(readiness, "profile", None),
+            }
         if isinstance(readiness, DiarizationReadiness):
             return {
                 "configured": readiness.configured,
@@ -808,19 +827,16 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         )
 
     diarization_engine = overrides.diarization_engine
-    if diarization_engine is None and settings.diarization_coreml_model_path is not None:
-        assert settings.diarization_worker_path is not None
-        diarization_engine = CoreMLSortformerEngine(
-            model_path=settings.diarization_coreml_model_path,
-            executable=settings.diarization_worker_path,
-        )
 
     admission = AdmissionQueue(settings.max_queue_size)
     asr_enabled = (
         transcribe is not None or batch_transcriber is not None or realtime_asr_factory is not None
     )
     tts_enabled = tts_synthesizer is not None
-    diarization_enabled = diarization_engine is not None or settings.diarization_dynamic_enabled
+    diarization_enabled = (
+        diarization_engine is not None or settings.diarization_coreml_model_path is not None
+        or settings.diarization_dynamic_enabled
+    )
     tts_worker_count = _resident_tts_worker_count(tts_synthesizer)
     allow_heavy_overlap, policy_reason = _heavy_overlap_policy(
         settings,
@@ -850,6 +866,18 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         tts_worker_count=_resident_tts_worker_count(tts_synthesizer),
         undeclared_components=undeclared_components,
     )
+    # A forced overlap switch does not prove an abandoned child's resource
+    # upper bound. Independently require the complete footprint/budget check.
+    try:
+        quarantine_resources_bounded, _ = can_overlap_heavy_compute(
+            budget_for_hardware(detect_system_memory_bytes()),
+            _declared_footprint(
+                settings, asr_enabled=asr_enabled, tts_enabled=tts_enabled,
+                diarization_enabled=diarization_enabled, tts_worker_count=tts_worker_count,
+            ),
+        )
+    except (RuntimeError, ValueError):
+        quarantine_resources_bounded = False
     governor = ResourceGovernor(
         settings.governor_limits,
         on_reject=metrics.record_governor_rejection,
@@ -859,7 +887,14 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         policy_reason=policy_reason,
         reject_heavy_compute=reject_heavy_compute,
         budget_reason=budget_reason,
+        quarantine_resources_bounded=quarantine_resources_bounded,
     )
+    if diarization_engine is None and settings.diarization_coreml_model_path is not None:
+        assert settings.diarization_worker_path is not None
+        diarization_engine = CoreMLSortformerEngine(
+            model_path=settings.diarization_coreml_model_path,
+            executable=settings.diarization_worker_path, governor=governor,
+        )
     if batch_transcriber is None and transcribe is not None:
         batch_transcriber = _CallableBatchTranscriber(transcribe, settings.model_id)
     text_aligner = overrides.text_aligner
@@ -923,6 +958,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                 text_aligner=text_aligner,
                 diarization_admission=diarization_admission,
                 alignment_admission=alignment_admission,
+                governor=governor,
             )
         job_runner = JobRunner(
             repository=job_repository,
@@ -930,6 +966,10 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
             processor=processor,
             deadline_seconds=settings.request_timeout_seconds,
             result_ttl_seconds=settings.job_result_ttl_seconds,
+            processor_manages_transcription_admission=(
+                isinstance(processor, LocalFileJobProcessor)
+                and processor.manages_transcription_admission
+            ),
         )
 
     render_receipts = RenderReceiptRegistry()

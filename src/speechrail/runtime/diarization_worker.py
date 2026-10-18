@@ -110,6 +110,25 @@ class CoreMLWorkerProcess:
                 extra += ["--calibration-candidates", str(self.calibration_candidates_path)]
             if self.zero_vote_reembed:
                 extra.append("--zero-vote-reembed")
+        # Cancellation may interrupt preflight, but cannot leave an OS child
+        # created later without assigning it to this transport first.
+        await join_cleanup(
+            asyncio.create_task(self._launch(extra), name="diarization-worker-launch")
+        )
+        response, _ = await self.request({"operation": "preflight"})
+        if response.get("ok") is not True or (
+            self.backend == "meeting_dynamic"
+            and (
+                response.get("backend") != self.backend
+                or response.get("sdk_revision") != MEETING_DYNAMIC_SDK_REVISION
+                or response.get("model_revision") != MEETING_DYNAMIC_MODEL_REVISION
+                or response.get("zero_vote_reembed", False) is not self.zero_vote_reembed
+            )
+        ):
+            await self.close()
+            raise RuntimeError("CoreML diarization worker preflight failed")
+
+    async def _launch(self, extra: list[str]) -> None:
         process = await asyncio.create_subprocess_exec(
             str(self.executable),
             "--model",
@@ -132,19 +151,6 @@ class CoreMLWorkerProcess:
         self._stderr_task = asyncio.create_task(
             self._drain_stderr(process.stderr), name="coreml-diarization-stderr-drain"
         )
-        response, _ = await self.request({"operation": "preflight"})
-        if response.get("ok") is not True or (
-            self.backend == "meeting_dynamic"
-            and (
-                response.get("backend") != self.backend
-                or response.get("sdk_revision") != MEETING_DYNAMIC_SDK_REVISION
-                or response.get("model_revision") != MEETING_DYNAMIC_MODEL_REVISION
-                or response.get("zero_vote_reembed", False) is not self.zero_vote_reembed
-            )
-        ):
-            await self.close()
-            raise RuntimeError("CoreML diarization worker preflight failed")
-
     async def request(
         self, header: Mapping[str, object], audio: bytes = b""
     ) -> tuple[dict[str, object], bytes]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import Callable
@@ -72,6 +73,7 @@ class JobRunner:
         deadline_seconds: float,
         result_ttl_seconds: float | None = None,
         clock: Callable[[], datetime] | None = None,
+        processor_manages_transcription_admission: bool = False,
     ) -> None:
         if deadline_seconds <= 0:
             raise ValueError("deadline_seconds must be positive")
@@ -84,6 +86,7 @@ class JobRunner:
         self._result_ttl_seconds = result_ttl_seconds
         self._clock = clock or (lambda: datetime.now(UTC))
         self._last_kind: JobKind | None = None
+        self._processor_manages_transcription_admission = processor_manages_transcription_admission
 
     async def run_once(self) -> bool:
         # Expiry runs before claiming so the idle poll loop also ages results
@@ -97,12 +100,17 @@ class JobRunner:
         work_class = WorkClass.BATCH_TTS if job.kind == "speech" else WorkClass.BATCH_ASR
         try:
             resource_key = self._resource_key_for_job(job)
-            result_ref = await self._governor.run(
-                lambda: self._processor.process(job),
-                work_class,
-                deadline=self._deadline_seconds,
-                resource_key=resource_key,
-            )
+            if job.kind == "transcription" and self._processor_manages_transcription_admission:
+                # The concrete local processor releases ASR before diarization.
+                async with asyncio.timeout(self._deadline_seconds):
+                    result_ref = await self._processor.process(job)
+            else:
+                result_ref = await self._governor.run(
+                    lambda: self._processor.process(job),
+                    work_class,
+                    deadline=self._deadline_seconds,
+                    resource_key=resource_key,
+                )
             try:
                 self._repository.complete(job.id, result_ref=result_ref)
             except Exception:

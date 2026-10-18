@@ -37,8 +37,8 @@ date: 2026-10-18
 
 | 阶段 | 2026-10-18 起点 | 放行证据 |
 |---|---|---|
-| E0 | 候选摘要漏后处理，oracle 指标误名 | T1/T2 定向测试及身份拒绝验证，待实施 |
-| E1 | 原作者报告机制测试通过，未由本会话复验 | T3 独占 owner、故障/队列/预算回归，待实施 |
+| E0 | 候选摘要漏后处理，oracle 指标误名 | T1/T2 定向测试已通过；正式收据仍待来源锁接线 |
+| E1 | 原作者报告机制测试通过，未由本会话复验 | T3 独占 owner、故障/队列/预算 fake 回归 251 项通过 |
 | E2 | 原 dev-v2 三份报告均 no-go | 新 C0/C1/C2 共同开发集，未运行 |
 | E3 | sleep 负载机制 ABBA，非真实双模型 | 真实四模式、配对时延与 footprint，未运行 |
 | E4 | 未认证新候选 | 生产字节冻结及独立留出，未运行 |
@@ -64,7 +64,7 @@ Ruling: 根据用户明确要求，最终审查也由主代理完成，不调用
 | T0 | 代码边界已固定；延迟前置未满足 | 见下方 policy 和静态 ASR 核对；真实实验保持关闭 |
 | T1 | 已实施 | 身份与收据定向 fake 通过；旧 runner 仅诊断，不签发 v2 认证 |
 | T2 | 已实施 | 产品、标准与 oracle 分开；来源组统计与旧/新门并行，80 项定向通过 |
-| T3 | 待实施 | owner、隔离、队列和预算 |
+| T3 | 已实施 | owner、隔离、队列、预算及持久任务接线；251 项定向通过 |
 | T4–T6 | 待实施 | fake/preflight 可先交付；真实模型/评测另行授权 |
 | T7 | 前置未满足 | 无生产认证，不接入默认能力、不安装 |
 | T8 | 待实施 | 先交付归因工具，不声称 CER 改善 |
@@ -94,3 +94,26 @@ T1 提交前复验：上述三组加 `tests/test_diarization_sdk.py` 共 54 项�
 本 worktree 的隔离 dev 环境安装并实际导入 `pyannote.metrics==4.1` 和 `meeteval==0.4.3`，lock 保留全部原版本，仅新增 MeetEval 及其两项依赖；未改服务运行依赖。首次同步触发仓库默认 native CLI build，已中断并使用 `SPEECHRAIL_SKIP_NATIVE_WORKER_BUILD=1 uv sync --locked --extra dev` 完成测试环境同步，没有运行 worker、加载模型或产出 App。
 
 RED：评分模块/统计接口缺失、旧 `di_cp_*` 名称回归分别失败。GREEN：`PYTHONPATH=src:examples/perf uv run --no-sync pytest tests/test_meeting_quality_metrics.py tests/test_meeting_diarization_quality.py tests/test_probe_meeting_sortformer_1to4.py tests/test_meeting_evaluation_identity.py --no-cov`，80 项通过。测试仅使用人工构造文本与时间区间，不运行模型、不读真实转写。
+
+## T3 验证记录
+
+2026-10-18：两个生产分人路径共享 governor 的单一 owner；认领先于 worker factory，计算预留覆盖 load/preflight、infer 和 finish。故障回收只合并到一个 lease，失联 child 保持 owner/引用与 retained 占用；资源上界未知或串行策略下全部 fail-closed。有可信完整预算时仅隔离自身轴；独立 lane 可越过因自身模型忙而阻塞的前项，同 lane FIFO 保留。启用的分人替代路径任一缺声明，都不能用 max 掩盖未知。
+
+审查发现并补齐会议路径的取消消费者唤醒、有界慢消费者失败、重复 finish 和 close 指标。启动中的 OS 子进程创建必须完成精确 child 登记，再允许取消回收；preflight 阻塞本身可中断，不因 shield 整个启动而永久等待。HTTP/Realtime/持久任务的 owner busy 与隔离沿用已有稳定错误，不暴露 worker 细节。
+
+Ruling: 将具体持久转录 processor 的准入改为按阶段持有，runner 保留全流程 deadline。原因是整个任务持有 ASR 后再获取分人，在串行策略下会形成自身等待。注入的其他 processor 仍由 runner 准入，speech 的 TTS 路径不变。代价是明确分担准入责任，增加组合根和真实 local processor 的 fake 集成回归。
+
+RED：owner 模块/新轴缺失导致 collection 失败；慢消费者与取消消费者测试超时；重复 finish 返回错误；卡住的 preflight 无法取消；延迟创建的 child 未完成登记便退出。GREEN：修复后定向命令如下，251 项通过（含 HTTP/Realtime 和持久任务集成），11 个变更 source 文件通过 Mypy，变更 Python 文件通过 Ruff，`git diff --check` 通过。
+
+```bash
+PYTHONPATH=src:examples/perf uv run --no-sync pytest \
+  tests/test_diarization_owner.py tests/test_diarization_lane.py \
+  tests/test_diarization_overlap_policy.py tests/test_meeting_diarization_session.py \
+  tests/test_diarization_worker.py tests/test_diarization_sdk.py \
+  tests/test_diarization_session.py tests/test_resource_governor.py \
+  tests/test_application_composition.py tests/test_local_file_processor.py \
+  tests/test_job_runner.py tests/test_openai_diarized_batch.py \
+  tests/test_realtime_auxiliary_attribution.py --no-cov
+```
+
+以上只证明 fake 机制和接线，未执行真实双模型、质量/性能 benchmark、服务或配置变更，不签发人数认证，也不改变生产默认并发策略。

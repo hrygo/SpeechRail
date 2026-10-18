@@ -258,6 +258,62 @@ def test_coreml_worker_stderr_tail_is_bounded_and_never_exposed_verbatim() -> No
     asyncio.run(scenario())
 
 
+def test_cancelled_launch_assigns_late_exact_child_before_reap(monkeypatch, tmp_path):
+    async def scenario():
+        entered, launched = asyncio.Event(), asyncio.Event()
+
+        class Writer:
+            def write(self, packet):
+                pass
+
+            async def drain(self):
+                pass
+
+            def close(self):
+                pass
+
+            async def wait_closed(self):
+                pass
+
+        class Process:
+            returncode = None
+
+            def __init__(self):
+                self.stdin = Writer()
+                self.stdout, self.stderr = asyncio.StreamReader(), asyncio.StreamReader()
+                self.stderr.feed_eof()
+
+            async def wait(self):
+                self.returncode = 0
+                return 0
+
+        process = Process()
+
+        async def spawn(*args, **kwargs):
+            entered.set()
+            await launched.wait()
+            return process
+
+        monkeypatch.setattr(diarization_worker.asyncio, "create_subprocess_exec", spawn)
+        executable = tmp_path / "fake-worker"
+        executable.touch()
+        models = tmp_path / "fake-models"
+        models.mkdir()
+        worker = CoreMLWorkerProcess(executable=executable, model_path=models)
+        start = asyncio.create_task(worker.start())
+        await entered.wait()
+        start.cancel()
+        await asyncio.sleep(0)
+        assert not start.done(), "creation must finish assigning the exact child"
+        launched.set()
+        await asyncio.gather(start, return_exceptions=True)
+        assert worker.process is process
+        await worker.close()
+        assert process.returncode == 0 and worker.process is None
+
+    asyncio.run(scenario())
+
+
 def test_coreml_activity_session_maps_worker_transport_failure_to_stable_error() -> None:
     class Worker:
         async def start(self) -> None:
