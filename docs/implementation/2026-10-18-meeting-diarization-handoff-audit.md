@@ -748,3 +748,19 @@ scope.observe将owner guard置于事件循环，每次读前后和关闭时检�
 9项初始checkpoint/新模块测试RED后GREEN；候选两族及ABBA source closure3反例RED后GREEN；审查另以PID=True反例先RED再修正。最终十四相关测试文件416 passed in17.34s，十一Python Ruff、四source strict Mypy通过；staged whitespace及敏感字段核对。父afe86b42八项PR checks均success/completed。相关图谱freshness missing，直接复核worktree，没有重建索引。
 
 宿主观察/采样代码进入ASR、C0/fast及ABBA源码身份，旧spec/controls须重新冻结。完整范围仅给可调用的metadata基础，returncode和树为空不证明真实wait/reap或瞬时峰值，reaping/peak/runtime identity/certification仍false。没有真实语料解码、原生进程读取、模型/benchmark、下载或服务/安装/UI/发布/合并操作；实际完整冷热/静音/重叠/finish-cancel矩阵、扰动与ABBA内存门仍待授权实跑和证据接线，footprint保持not_observed，E3、真实CER/人数/P95与最终生产联合身份未验，#370和完整目标保持未完成。
+
+## Train near 开发解码授权与诊断 PCM 准备
+
+2026-10-18 16:03 CST：用户明确授权“允许开发集真实解码和模型评测”，范围为既有 Train_Ali_near；Eval/AISHELL-4 留出不进入开发，不下载模型、不改变服务或安装态，遇现有服务/模型占用冲突停止实跑。此前记录中的未授权状态仅代表当时情况。
+
+只读预检：8201 存在服务 listener；鉴权 `/metrics` 返回 200，batch/realtime active requests 均为 0，所观察服务进程树没有模型子进程。不过，与该端口共用的 `EvaluationPortLease(8201)` 实际返回 `evaluation_port_busy`。空闲请求数不能替代独占锁；本轮未启动模型、未更换端口绕过保护、未停止或修改现有服务。真实 A0/候选评测仍未运行。
+
+在任何候选输出出现前，以 seed 1717 冻结来源顺序和 6/12/18/24 检查点。诊断选取规则为从原始时间零点开始，120 秒后首个至少 400 ms 的全说话人空隙结束，上限 180 秒；不存在共同有效时轴、切断话语或片段内缺少某轨说话时不纳入。2/3/4 轨池分别有 24/14/24 个合格来源，首批各 6 组，共 18 组、54 条轨道。3 轨池不足 18/24 检查点，不能靠重复窗口增加独立组数。这里的轨道数是来源分层条件，不是模型检测或认证人数。
+
+实际流式读取冻结 Train near 归档，重新核对压缩包摘要、读取前后 stat 和选中 WAV 成员摘要；解码 mono/16 kHz/PCM16。各组以相同零点及结束样本取轨道等权均值，用 nearest-even 整数舍入生成 PCM16，不补齐、不同步漂移校正、不截断参考话语。18 个派生混音共 2404.08 秒（约 40.1 分钟）。原始 PCM、TextGrid、参考正文、来源登记及脚本均留仓库外受限目录。
+
+已生成 schema 2 catalog、diagnostic manifest、空 development/holdout manifest 及 split lock；18 组全部标记 `derived_mix` / `diagnostic`。沿用原始 TextGrid 话语区间与会话内匿名标签，时间量化为最近整数样本；不声称词级时间或人工复核。独立 ASR 主参考仍 `not_observed`，没有从多说话人标注拼接一个任意主序列。源录音摘要绑定同组轨道摘要集合，独立性只声明 meeting-disjoint，未知跨会议人员身份不升级为 speaker-disjoint。
+
+外部制品摘要：catalog `4cadb84577c2c32d91d55324c244b4793907753d43ae3c19956fac6aae5663a9`；预登记 `9499a33d87bc986f6d3f69a41245ef63321899c4b84949c8b5d79a05d6b65bcc`。独立复核重新读取全部 WAV、核对制品哈希和 PCM 格式/帧数、校验两类参考区间及匿名标签，并重建 manifests 逐对象比较，通过。准备脚本末尾 summary 的 NumPy int64 序列化失败；保留原部分文件，另用原生整数独立重建 `verification-summary.json`，不把原退出码当完成证据。
+
+结果边界：schema 2 catalog 可验证，不代表正式开发输入就绪；自然 development fixtures 为 0，split lock 为 `insufficient_sources`。头戴麦派生混音只适合诊断，不能填补自然单人、自然近/远场或连续 1–4 人认证。现有正式执行器也明确拒绝 diagnostic 输入，因此下一步需要补足符合计划的自然来源与独立主参考，或先实施边界明确的诊断入口；不能通过改标签、空 sidecar 或放宽校验伪造正式评测。模型占用冲突解除前不启动实跑。本轮没有质量成绩、ABBA、生产认证或运行态变更；9d7cf2fc 的远端八项 CI 均已成功，该 CI 不是模型质量证据。
