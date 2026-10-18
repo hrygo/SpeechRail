@@ -662,3 +662,12 @@ observe复核实际宿主报告身份、共同来源原点、稳定确认及join
 合成接线测试在任何输出前冻结实际pipeline策略，再消费合成PCM获得真实流水线报告并投影observation；其余五个预登记执行未运行时保持no-go。二十相关测试文件682 passed in19.67s，四Python Ruff、三source Mypy通过。父cab45e8c全部八项PR checks success/completed。相关图谱coverage missing，以当前worktree直接复核；未重建索引。
 
 仅使用合成PCM与fake模型/RPC，未解码真实语料、加载模型、运行真实benchmark、下载或改变服务/安装/UI/发布/合并。runtime_identity_verified/certification_eligible仍false，CER、认证人数及真实P95未观察，#370未完成。目标继续：生产接线与真实回收验收、footprint、ABBA及最终联合身份、schema2来源catalog和独立ASR主参考及真实质量仍待完成。
+
+
+## T6 finish 观察的明细与摘要交叉核对
+
+2026-10-18：继续审查发现，先前observe虽然重算finish端点，仍信任stable_gate/text_delivery_verified等摘要；缺文字、摘要或span不匹配、水位有缺口、稳定确认先于正文/水位，以及稳定时延已超门但摘要仍pass时可能输出completed。新增18个先RED后GREEN反例，另含unknown文字、重复文字、最终替换快照、ASR回调/分人EOF/close早于来源完成。
+
+现从时序明细核对连续ASR sealed/DIA稳定水位、唯一已确认文字与稳定标记的sequence/span/hash/known及确认先后，重新按span样本权重计算稳定P95与30秒硬上限；结束里程碑须覆盖源末端和相应确认。逻辑不完整保留failed并进入原来源失败分母，结构非法仍拒绝，不以摘要补造证据。已冻结队列的源码身份变化后需重建登记。仍只证明宿主metadata自洽，不证明真实采集、独立主参考、生产加载字节或质量。
+
+四相关文件120 passed in0.56s，二Python Ruff、一source Mypy通过；合成实际流水线接线仍通过。父6ca597f0本轮核验四项checks成功、两项仍运行，未声称全绿。相关图谱missing，直接复核当前源码，未重建索引。未做真实PCM解码/模型/benchmark/下载或服务、安装、UI、发布、合并动作；CER、认证人数、真实P95和#370状态不升级，完整目标继续。

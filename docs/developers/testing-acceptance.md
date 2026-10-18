@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.46"
+version: "3.3.47"
 date: 2026-10-18
 ---
 
@@ -407,7 +407,7 @@ finish期限为源原点加全部源样本时长再加finish预算，因而不�
 
 模型输出前可用 `CommonPcmFeed.policy()` 获取已知源参数，用 `live_pipeline_policy()` 冻结完整执行策略；这两个函数不证明PCM摘要已验证、模型可用或运行已发生。`finish_configuration()` 从策略中移除来源特有的PCM摘要/样本总长，保留clock类型、16k采样率、分包、队列与最大供给迟到等设置；该共同配置摘要也必须预登记，不能把不同来源误当不同调度设置，或在移除来源信息时连同队列/分包一起漏掉。每条执行另锁完整pipeline策略摘要、实际PCM摘要、样本数及fixture摘要，execution ID由上下文和该登记计算，队列摘要同时锁定聚合源码。
 
-`observe(execution_sha256, report)` 接受现有live pipeline报告，核对执行身份、完整策略和共同配置、来源hash/样本/原点、记录schema及未认证标记；根据稳定标记/最终快照确认和ASR/DIA joined里程碑重算finish，不只相信摘要里的秒数。unknown或缺失稳定标记不能靠summary布尔值冒充完整；降级、未解决finish及失败执行保留failed状态。完整报告最多16MiB，输出仅摘要与标量；控制/报告没有实际来源、忠实解码、生产字节、真实clock或独立执行的权威证明。源码变化拒绝继续复用原队列。
+`observe(execution_sha256, report)` 接受现有live pipeline报告，核对执行身份、完整策略和共同配置、来源hash/样本/原点、记录schema及未认证标记；根据稳定标记/最终快照确认和ASR/DIA joined里程碑重算finish，不只相信摘要里的秒数。逐条核对已确认文字与稳定标记的sequence、owned span、文字摘要和known状态，检查正文确认及连续ASR/DIA水位先于稳定标记，覆盖须到达源末端；从标记确认重新计算按span时长加权的稳定P95与硬上限，不只信任stable_gate。结束里程碑不能早于源末端及对应覆盖确认。unknown、缺失/重复文字、未完成交付或最终替换快照不能靠summary布尔值冒充完整；降级、未解决finish及失败执行保留failed状态。这些核对不提供独立ASR主参考或采集证明。完整报告最多16MiB，输出仅摘要与标量；控制/报告没有实际来源、忠实解码、生产字节、真实clock或独立执行的权威证明。源码变化拒绝继续复用原队列。
 
 `aggregate(observations)` 拒绝未知/重复execution、跨队列或篡改的observation，以及同一报告摘要在不同执行中重复使用。每个预登记来源先取全部fixture和重复执行的最慢finish，再按来源组等权使用离散逆CDF计算P95，并保留最慢来源；派生fixture更多的来源不增加独立统计权重。任一缺失或failed执行使该来源保留原权重为正无穷，JSON用null表达该来源及最差值；即使单个缺失来源占比不足5%而P95仍有限，也不能通过hard gate。P95≤5秒、各来源单次上限≤15秒且没有缺失/失败才给diagnostic_pass，边界含等号。
 

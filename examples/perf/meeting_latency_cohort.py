@@ -340,15 +340,48 @@ class FinishCohort:
         if not isinstance(records, list) or len(records) > 98304:
             raise ValueError("finish timing records exceed budget")
         acks, stable_sequences, unknown = [], set(), False
+        texts: dict[int, tuple[int, int, bool, str, float]] = {}
+        asr_through = dia_through = 0
+        asr_ack = dia_ack = origin
+        trace_complete = True
+        stable_delays: list[tuple[int, float | None]] = []
         for row in records:
             if not isinstance(row, list) or len(row) != 8:
                 raise ValueError("invalid finish timing record")
-            if row[0] not in {"stable_text", "asr_body_snapshot"} or row[7] is None:
+            if row[0] not in {
+                "asr_sealed",
+                "activity_watermark",
+                "text",
+                "stable_text",
+                "asr_body_snapshot",
+            }:
+                raise ValueError("unknown finish timing record")
+            if row[7] is None:
+                trace_complete = False
                 continue
-            start, end = _int(row[1], 0, samples), _int(row[2], 1, samples)
+            start, end = _int(row[1], 0, samples), _int(row[2], 0, samples)
             entered, finished = _number(row[6]), _number(row[7])
-            if not start < end or finished < entered or finished + 1e-6 < origin + end / 16000:
+            if start > end or finished < entered or finished + 1e-6 < origin + end / 16000:
                 raise ValueError("invalid final sink acknowledgement")
+            if row[0] in {"asr_sealed", "activity_watermark"}:
+                if _int(row[3], -1, -1) != -1 or row[4] is not None or row[5] is not None:
+                    raise ValueError("invalid finish coverage record")
+                if row[0] == "asr_sealed":
+                    trace_complete &= start == asr_through and start < end and entered == finished
+                    asr_through, asr_ack = end, finished
+                else:
+                    trace_complete &= start == dia_through
+                    dia_through, dia_ack = end, finished
+                continue
+            if start == end:
+                raise ValueError("empty finish publication")
+            if row[0] == "text":
+                sequence, text_hash = _int(row[3], 0, 4095), _sha(row[5])
+                if type(row[4]) is not bool:
+                    raise ValueError("invalid finish text disposition")
+                trace_complete &= sequence not in texts
+                texts[sequence] = (start, end, row[4], text_hash, finished)
+                continue
             if row[0] == "stable_text":
                 sequence = _int(row[3], 0, 4095)
                 _sha(row[5])
@@ -356,23 +389,45 @@ class FinishCohort:
                     raise ValueError("invalid or duplicate stable finish marker")
                 stable_sequences.add(sequence)
                 unknown = unknown or not row[4]
+                text = texts.get(sequence)
+                trace_complete &= (
+                    text is not None
+                    and text[:4] == (start, end, row[4], row[5])
+                    and entered >= max(text[4], asr_ack, dia_ack)
+                    and end <= min(asr_through, dia_through)
+                )
+                stable_delays.append((end - start, max(0.0, finished - origin - end / 16000)))
+            else:
+                # A replacement snapshot means attribution was withdrawn, even
+                # if contradictory summary booleans still claim success.
+                trace_complete = False
             acks.append(finished)
         marks = _obj(timing.get("milestones_at"))
         if set(marks) != {"asr_callback_complete", "dia_input_eof", "dia_scope_closed"}:
             raise ValueError("finish report lacks joined scopes")
+        mark_times = {k: _number(v) for k, v in marks.items()}
         finish = diagnostics.get("finish_seconds")
         if finish is not None:
             finish = _number(finish)
-            actual = (
-                max([origin, *acks, *(_number(v) for v in marks.values())])
-                - origin
-                - samples / 16000
-            )
+            actual = max([origin, *acks, *mark_times.values()]) - origin - samples / 16000
             if finish < 0 or not math.isclose(finish, actual, rel_tol=0, abs_tol=1e-6):
                 raise ValueError("finish summary differs from acknowledgement trace")
         expected_units = _int(timing.get("expected_text_units"), 0, 4096)
+        stable_p95 = weighted_p95(stable_delays)
         completed = (
-            not unknown
+            trace_complete
+            and asr_through == dia_through == samples
+            and mark_times["asr_callback_complete"] >= max(asr_ack, origin + samples / 16000)
+            and mark_times["dia_input_eof"] >= origin + samples / 16000
+            and mark_times["dia_scope_closed"] >= max(dia_ack, mark_times["dia_input_eof"])
+            and set(texts) == stable_sequences
+            and stable_p95 is not None
+            and stable_p95 <= latency_policy()["stable_label_p95_seconds"]
+            and all(
+                delay is not None and delay <= latency_policy()["stable_label_hard_seconds"]
+                for _, delay in stable_delays
+            )
+            and not unknown
             and expected_units > 0
             and stable_sequences == set(range(expected_units))
             and finish is not None

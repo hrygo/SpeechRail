@@ -78,7 +78,12 @@ def report(fixture, repetition=0, finish=2.0):
                 "entered_at",
                 "completed_at",
             ],
-            "records": [["stable_text", 0, 16000, 0, True, sha("text"), origin + 1, end]],
+            "records": [
+                ["asr_sealed", 0, 16000, -1, None, None, origin + 1, origin + 1],
+                ["activity_watermark", 0, 16000, -1, None, None, origin + 1, origin + 1],
+                ["text", 0, 16000, 0, True, sha("text"), origin + 1, origin + 1],
+                ["stable_text", 0, 16000, 0, True, sha("text"), origin + 1, end],
+            ],
             "milestones_at": {
                 "asr_callback_complete": end,
                 "dia_input_eof": origin + 1,
@@ -296,7 +301,7 @@ def test_missing_or_unknown_stable_trace_cannot_be_accepted_by_summary_booleans(
     args, reports = controls()
     cohort = FinishCohort(**args)
     value = reports[("f0", 0)]
-    value["timing_observations"]["records"][0][4] = False
+    value["timing_observations"]["records"][-1][4] = False
     observation = cohort.observe(cohort.registration()["executions"][0]["execution_sha256"], value)
     assert observation["status"] == "failed"
     value["timing_observations"]["records"].clear()
@@ -423,3 +428,75 @@ def test_per_source_policy_cannot_hide_a_different_feed_configuration():
     cohort = FinishCohort(**args)
     with pytest.raises(ValueError, match="configuration"):
         cohort.observe(cohort.registration()["executions"][0]["execution_sha256"], value)
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "text_missing",
+        "text_duplicate",
+        "text_hash",
+        "text_span",
+        "text_known",
+        "text_late_ack",
+        "asr_missing",
+        "dia_missing",
+        "asr_gap",
+        "dia_gap",
+        "asr_late_ack",
+        "dia_late_ack",
+        "stable_target",
+        "stable_hard",
+        "snapshot",
+        "asr_callback_early",
+        "dia_eof_early",
+        "dia_close_early",
+    ],
+)
+def test_summary_pass_cannot_override_missing_or_contradictory_publication_trace(fault):
+    from meeting_latency_cohort import FinishCohort
+
+    args, reports = controls()
+    cohort = FinishCohort(**args)
+    value = reports[("f0", 0)]
+    timing = value["timing_observations"]
+    records = timing["records"]
+    if fault == "text_missing":
+        records.pop(2)
+    elif fault == "text_duplicate":
+        records.insert(2, copy.deepcopy(records[2]))
+    elif fault == "text_hash":
+        records[2][5] = sha("different")
+    elif fault == "text_span":
+        records[2][1] = 1
+    elif fault == "text_known":
+        records[2][4] = False
+    elif fault == "text_late_ack":
+        records[2][7] += 1
+    elif fault in {"asr_missing", "dia_missing"}:
+        records.pop(0 if fault == "asr_missing" else 1)
+    elif fault in {"asr_gap", "dia_gap"}:
+        records[0 if fault == "asr_gap" else 1][1] = 1
+    elif fault in {"asr_late_ack", "dia_late_ack"}:
+        records[0 if fault == "asr_late_ack" else 1][7] += 1
+    elif fault in {"stable_target", "stable_hard"}:
+        delay = 16 if fault == "stable_target" else 31
+        records[-1][7] = timing["source_origin_at"] + 1 + delay
+        timing["latency_diagnostics"]["finish_seconds"] = delay
+    elif fault.endswith("early"):
+        mark = {
+            "asr_callback_early": "asr_callback_complete",
+            "dia_eof_early": "dia_input_eof",
+            "dia_close_early": "dia_scope_closed",
+        }[fault]
+        timing["milestones_at"][mark] = timing["source_origin_at"]
+    else:
+        records.append(
+            ["asr_body_snapshot", 0, 16000, -1, False, None, records[-1][7], records[-1][7]]
+        )
+    execution = cohort.registration()["executions"][0]["execution_sha256"]
+    observed = cohort.observe(execution, value)
+    assert observed["status"] == "failed"
+    result = cohort.aggregate([observed])
+    assert result["finish_gate"] == "no-go"
+    assert result["failed_source_groups"] == 6
