@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 from uuid import uuid4
 
 from speechrail.application.alignment import FixedTextAligner
@@ -610,6 +610,11 @@ class AppServices:
                 "streaming", self._streaming_configured, worker_states
             ),
         }
+
+    @property
+    def job_runner_state(self) -> Literal["unconfigured", "inactive", "active"]:
+        """Return the authoritative durable-job runner lifecycle state."""
+        return self.lifecycle.runner_state
 
     @property
     def _asr_configured(self) -> bool:

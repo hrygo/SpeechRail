@@ -255,3 +255,47 @@ def test_confirmed_parent_shutdown_recovers_tracked_child_isolation() -> None:
         await life.close()
 
     asyncio.run(run())
+
+
+def test_runner_state_is_unconfigured_without_a_runner() -> None:
+    async def run() -> None:
+        life = RuntimeLifecycle()
+        assert life.runner_state == "unconfigured"
+        await life.start()
+        assert life.runner_state == "unconfigured"
+        await life.close()
+        assert life.runner_state == "unconfigured"
+
+    asyncio.run(run())
+
+
+def test_runner_state_tracks_the_owned_task_lifecycle() -> None:
+    async def run() -> None:
+        class IdleRunner:
+            async def run_once(self) -> bool:
+                return False
+
+        life = RuntimeLifecycle(runner=IdleRunner(), poll_seconds=0.01)
+        assert life.runner_state == "inactive"
+        await life.start()
+        assert life.runner_state == "active"
+        await life.close()
+        assert life.runner_state == "inactive"
+
+    asyncio.run(run())
+
+
+def test_runner_state_is_inactive_after_the_runner_task_fails() -> None:
+    async def run() -> None:
+        class FailingRunner:
+            async def run_once(self) -> bool:
+                raise RuntimeError("repository unavailable")
+
+        life = RuntimeLifecycle(runner=FailingRunner(), poll_seconds=0.01)
+        await life.start()
+        await asyncio.sleep(0.05)
+        assert life.runner_state == "inactive"
+        with pytest.raises(ExceptionGroup):
+            await life.close()
+
+    asyncio.run(run())

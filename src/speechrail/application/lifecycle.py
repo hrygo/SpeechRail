@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
-from typing import Protocol
+from typing import Literal, Protocol
 
 from speechrail.runtime.cleanup import join_cleanup
 from speechrail.runtime.job_runner import JobRunner
@@ -121,6 +121,24 @@ class RuntimeLifecycle:
             return False
         ready = getattr(self._tts, "ready", None)
         return ready if isinstance(ready, bool) else None
+
+    @property
+    def runner_state(self) -> Literal["unconfigured", "inactive", "active"]:
+        """Return the durable-job runner lifecycle as an observable state.
+
+        ``unconfigured`` means this runtime was composed without a runner (no
+        job spool), so no task can exist. ``inactive`` means a runner exists but
+        its task is not running: not started yet, shut down, or exited on its
+        own. ``active`` means the task is alive and polling. This is the only
+        authority for runner liveness; spool readiness alone cannot distinguish
+        an unconfigured deployment from a stopped runner.
+        """
+        if self._runner is None:
+            return "unconfigured"
+        task = self._runner_task
+        if task is None or task.done():
+            return "inactive"
+        return "active"
 
     @asynccontextmanager
     async def run(self) -> AsyncIterator[None]:

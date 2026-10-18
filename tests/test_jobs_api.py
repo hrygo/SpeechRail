@@ -325,6 +325,7 @@ def test_jobs_api_health_exposes_job_spool_ready(tmp_path) -> None:
 
     assert response.status_code == 200
     assert response.json()["job_spool_ready"] is True
+    assert response.json()["job_runner_state"] == "active"
 
 
 def test_jobs_api_health_no_spool_returns_false(tmp_path) -> None:
@@ -340,6 +341,28 @@ def test_jobs_api_health_no_spool_returns_false(tmp_path) -> None:
 
     assert response.status_code == 200
     assert response.json()["job_spool_ready"] is False
+    assert response.json()["job_runner_state"] == "unconfigured"
+
+
+def test_jobs_api_health_reports_inactive_before_runner_starts(tmp_path) -> None:
+    spool_dir = tmp_path / "speechrail-job-spool"
+    # No context manager: the lifespan (and therefore the runner task) never
+    # starts, so a configured spool must report an inactive runner rather than
+    # borrowing the unconfigured state.
+    client = TestClient(
+        create_app(
+            Settings(
+                job_spool_dir=spool_dir,
+                qwen3_model_dir=None,
+                qwen3_python=None,
+            )
+        )
+    )
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["job_spool_ready"] is True
+    assert response.json()["job_runner_state"] == "inactive"
 
 
 def test_jobs_api_create_stores_and_returns_params(tmp_path) -> None:

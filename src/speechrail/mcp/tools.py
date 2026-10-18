@@ -26,7 +26,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
 
@@ -121,6 +121,21 @@ def _text(value: object) -> str | None:
 
 def _bool_flag(value: object) -> bool:
     return value is True
+
+
+_RUNNER_STATES = frozenset({"unconfigured", "inactive", "active"})
+
+
+def _runner_state(value: object) -> Literal["unconfigured", "inactive", "active", "unknown"]:
+    """Pass through an observed runner state; a missing report stays unknown.
+
+    ``unknown`` is deliberately not collapsed to ``inactive``: the proxy must
+    not turn "the service did not report the runner" into "the runner is not
+    running".
+    """
+    if isinstance(value, str) and value in _RUNNER_STATES:
+        return cast(Literal["unconfigured", "inactive", "active"], value)
+    return "unknown"
 
 
 def _first_tts_model(models: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -506,7 +521,7 @@ async def describe(client: SpeechRailClient) -> dict[str, Any]:
         and _bool_flag(capabilities.get("supports_preview")),
         "jobs": {
             "spool_ready": _bool_flag(health.get("job_spool_ready")),
-            "runner_active": _bool_flag(health.get("job_runner_active")),
+            "runner_state": _runner_state(health.get("job_runner_state")),
         },
         "models": safe_models,
         "voices": _effective_voice_projection(

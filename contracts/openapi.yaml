@@ -2772,6 +2772,7 @@ components:
         - streaming_state
         - ready
         - job_spool_ready
+        - job_runner_state
       properties:
         status:
           type: string
@@ -2832,6 +2833,16 @@ components:
         job_spool_ready:
           type: boolean
           description: True when a job spool repository is configured and available.
+        job_runner_state:
+          type: string
+          enum: [unconfigured, inactive, active]
+          description: >
+            Durable-job runner lifecycle. `unconfigured` means no spool is
+            configured, so no runner exists; `inactive` means a spool is
+            configured but the runner task is not running; `active` means the
+            runner task is alive and polling the spool. This is the authoritative
+            runner state; clients must not infer runner liveness from
+            `job_spool_ready` alone.
     TtsDesignStatus:
       type: object
       additionalProperties: false
