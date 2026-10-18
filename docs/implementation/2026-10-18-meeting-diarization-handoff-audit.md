@@ -840,3 +840,24 @@ v5 同片真实时间对照已完成：103 次实际 decode（71 preview、32 re
 
 
 验证：三个相关文件 test_meeting_asr_runtime、test_meeting_asr_execution、test_meeting_realtime_asr_replay 以 --no-cov 定向运行通过；Ruff check 通过，diff check 通过。初次六例均通过但默认全仓覆盖率门使该局部命令退出非零，不记为完整 gate 通过；未运行全仓测试。两文件 format check 提示既有格式差异，另以 HEAD 原文验证同样需格式化，本次不扩展为整文件格式整理。未据定向 fake 检查声明当前源码真实模型质量通过。
+
+
+## 测试可移植性与首片分人实测
+
+2026-10-18：用户要求测试不依赖本机速度与容量，GitHub CI 不自动运行真实语料。检查当前 CI 与 Python gate 调用链，现有 CI 运行 tests 下的确定性测试、fake native 测试及制品构建，不调用真实语料 benchmark CLI。移除旧 Sortformer 脚本两处开发者绝对目录，默认路径按当前 HOME 解析且保留显式参数覆盖；正式回放集成单测改用推进式注入时钟，composition 的硬件预算固定为合成值，不探测测试宿主物理内存。两项回归分别在旧路径/真实时钟实现失败；修改后四个相关测试文件通过，Ruff check 与 diff check 通过。另验证缺少显式外部输入时不构造真实模型 engine。没有增加 CI 真实模型或语料执行步骤。
+
+使用既有 diagnostic-001 的同一 123.41 秒 PCM 和独立活动参考，先冻结 C0 adapter、显式 native 二进制、模型文件和既定参数身份，再实际运行 CoreML ActivitySession，append 与 updates 同时推进，防止积压在有界更新队列。四槽 C0 不启用 consolidation，阈值保持 0.25，未搜索阈值。125 次更新、1543 帧，processed/stable 均达到 1974560 样本；唯一 native 子进程退出，模型/二进制/源码与输入复核稳定。此为派生混音诊断，未认证自然会议、连续人数范围、八人能力或生产联合身份。
+
+| 首片指标 | C0 原始活动 | 既有默认 slot consolidation |
+|---|---:|---:|
+| 全区间 speaker-time recall | 88.9843% | 89.6235% |
+| 全区间 speaker-time precision | 98.8243% | 98.8326% |
+| 逐人最低 recall | 88.4672% | 89.6084% |
+| 无 collar / 含 overlap 的 DER | 12.0743% | 11.4351% |
+| 质量门 | fail | fail |
+
+C0 的参考 speaker-time 为 100.13 秒，正确 89.10 秒、漏检 11.03 秒、误检 1.06 秒、混淆 0 秒。两位逐人 recall 分别 89.2470% 和 88.4672%；本片无参考重叠。37 个参考活动段全部有相应假设重叠，匹配段开始偏晚的中位数 150 ms、结束偏早的中位数 110 ms，正开始偏差合计 5.89 秒、负结束偏差合计 4.10 秒。该分析指向活动边界漏检，不能扩展为其他来源均无身份问题。
+
+既有 postpass 对照使用实际阈值活动区间的无损二值重建，scores=None，不虚构模型概率，不重新运行模型或改变默认配置；其仅回收 0.64 秒正确 speaker-time，仍不达标，不将微小变化作为发布理由。后续优先对更多预登记来源验证边界误差，并评估有语音证据支持的边界修正；不直接整体平移、放宽参考 collar 或以本片选择生产阈值。没有 ASR 主参考/实际归属文字，文字质量仍 not_observed。
+
+运维外层 finally 已恢复唯一 com.speechrail listener PID 5086，health/readyz 200、3.12.0、quality/quality，配置、selection 和 runtime target 不变。预检中的 worker 缺失只针对本 worktree 的默认包内位置；随后以 managed Python 的隔离导入核验已安装包的 bundled worker 实际存在。此前将该 worktree 观察称为安装态缺失不成立，外部证据另存 scope correction，本次诊断使用明确登记的原 checkout 二进制，不改安装配置。宿主 OS/架构/芯片/物理内存另存仓库外 environment.json，仅用于说明观测条件；尚未实测峰值物理内存、P95 或跨机器性能。
