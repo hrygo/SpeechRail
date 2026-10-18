@@ -3,7 +3,7 @@ title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
 version: "3.18.2"
-date: 2026-10-18
+date: 2026-10-19
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -190,6 +190,8 @@ worker 没有上报时，这些字段保持 `null` 而不是用制品版本或�
 POST /v1/audio/transcriptions
 Content-Type: multipart/form-data
 ```
+
+批量转写只接受正常解码完成的正文。模型因重复、token上限或其他非EOS原因停止时，请求走现有推理错误路径，不将不完整文字作为成功结果返回；长音频中任一窗口失败也不返回部分成功。此完整性检查不保证正文中每个字都正确。
 
 ### 请求参数表 (Multipart Form-Data)
 | 参数名 | 类型 | 必填 | 默认值 | 说明 |

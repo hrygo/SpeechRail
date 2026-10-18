@@ -606,6 +606,64 @@ def test_qwen3_engine_full_segment_rejects_truncated_final() -> None:
         engine.finish_streaming("truncated-final")
 
 
+@pytest.mark.parametrize(
+    ("finish_reason", "truncated"),
+    [("length", True), ("repetition", False), ("mixed", False), (None, False), ("eos", True)],
+)
+def test_qwen3_batch_rejects_incomplete_final_and_preserves_next_request(
+    finish_reason: str | None, truncated: bool,
+) -> None:
+    session = _FakeFullSegmentSession(
+        SimpleNamespace(
+            text="unfinished", language="Chinese", finish_reason=finish_reason,
+            truncated=truncated,
+        )
+    )
+    engine = _engine_with_fake_decoder(session=session, decoder=_FakeBoundDecoder())
+
+    with pytest.raises(RuntimeError, match=r"truncated|unsupported finish reason"):
+        engine.transcribe(b"\x01\x00", language="Chinese", prompt="")
+
+    session.result = SimpleNamespace(
+        text="complete", language="Chinese", finish_reason="eos", truncated=False,
+    )
+    assert engine.transcribe(b"\x02\x00", language="Chinese", prompt="") == (
+        "complete", "Chinese", [],
+    )
+
+
+def test_batch_protocol_does_not_publish_incomplete_text_as_a_result() -> None:
+    session = _FakeFullSegmentSession(
+        SimpleNamespace(
+            text="unfinished", language="Chinese", finish_reason="repetition", truncated=False,
+        )
+    )
+    engine = _engine_with_fake_decoder(session=session, decoder=_FakeBoundDecoder())
+    identity = _FakeEngine(Path("/tmp"), "mps", "float16", 512).identity
+    output = BytesIO()
+    frame = {
+        "version": PROTOCOL_VERSION, "type": "transcribe", "request_id": "batch-1",
+        "sample_rate": 16000, "channels": 1, "sample_width_bytes": 2,
+        "language": "Chinese", "prompt": "", "pcm_b64": "AQA=",
+    }
+    worker_module._handle_transcribe(frame, output, engine, identity)
+    session.result = SimpleNamespace(
+        text="complete", language="Chinese", finish_reason="eos", truncated=False,
+    )
+    worker_module._handle_transcribe({**frame, "request_id": "batch-2"}, output, engine, identity)
+    output.seek(0)
+    assert read_frame(output) == {
+        "version": PROTOCOL_VERSION, "type": "error", "request_id": "batch-1",
+        "code": "worker_inference_error",
+    }
+    success = read_frame(output)
+    assert success is not None
+    assert (success["type"], success["request_id"], success["text"]) == (
+        "result", "batch-2", "complete",
+    )
+    assert read_frame(output) is None
+
+
 def test_qwen3_engine_rejects_an_append_that_exceeds_segment_buffer() -> None:
     engine = _engine_with_fake_decoder(
         session=_FakeFullSegmentSession(),

@@ -204,6 +204,9 @@ paths:
         lifecycle failure after admission returns 503 with the compatible
         `backend_busy` code and low-cardinality `SpeechRail-Busy-Reason` /
         `SpeechRail-Retry-Hint` headers; private worker stderr is never returned.
+        A batch decode stopped by repetition, a token limit, or another non-EOS
+        termination fails through the existing inference error path; incomplete
+        text is not returned as a successful transcription.
       security:
         - BearerAuth: []
         - {}

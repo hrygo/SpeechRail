@@ -1486,3 +1486,18 @@ ASR正式文字后至对齐完成中位数29.74→38.57ms，增加8.82ms；段�
 两个模式均输出4个匿名标签，均未同时通过既定门。整段attention在两套参考下均无净收益；新流式在原句级参考下提高整体覆盖，但降低precision与最低逐人覆盖，辅助参考下也没有优势。拒绝替换生产或继续该分支阈值搜索。流式最后一个区间超出148秒输入10ms，评分未悄悄裁掉，超出时间计入误报。两arm新进程各一次、无预热，进程wall time为15.305秒和0.354秒，含加载/文件处理，不作为实时交付、稳定性能或峰值物理内存认证。
 
 managed窗口先确认无请求/客户端，再停服；两个原生子进程终态均为0并wait回收，模型、运行二进制和输入/参考摘要前后稳定。原服务恢复唯一listener/LaunchAgent PID48617、health/readyz200、3.12.0、quality/quality，配置/selection/runtime target摘要未变。仓库外`nemo-native-diarization-review-20261019`保存授权、下载校验、登记、原始输出、精确积分对照及维护记录。无留出访问，PR保持draft，人数认证不变。
+
+
+## 批量转写的不完整解码拒绝
+
+2026-10-19：沿真实006片段的已知`repetition`失败复核生产入口，发现`Qwen3Engine.finish_streaming(full_segment)`检查完整EOS，但`Qwen3Engine.transcribe`直接提取vendor正文；经`_handle_transcribe`和`Qwen3Worker._transcribe_once`会把异常停止的正文交付为批量成功。此前“四人开发片段的不完整复核恢复”中的“batch完整段仍保留原严格完整性检查”表述不准确：当时实装检查的是Realtime的full_segment定稿，不能覆盖文件批量入口。本次明确更正并补齐该入口，不用历史文字代替代码证据。
+
+生产改动仅在batch vendor返回后复用既有`_require_complete_final`。token上限截断、repetition、mixed、缺少终止原因以及EOS同时声明truncated均拒绝；正常EOS继续提取原正文和时间信息。错误复用既有worker推理错误路径，保留request ID、不发布部分成功，也不把语义错误当作传输丢失自动重试。没有增加模型调用、预算、开关或公共字段；OpenAPI描述及用户手册同步说明完整性边界。拒绝异常解码不等于识别准确率提升。
+
+5个参数化反例在旧实现均因未抛错而失败；另一个真实worker帧边界的fake用例验证不完整请求只返回错误、同engine的下一正常请求仍返回成功。移除新增检查后6个用例全部失败，随后逐字恢复实现。相关worker、backend、长音频、音频错误及OpenAPI定向回归、Ruff、OpenAPI和用户文档契约检查通过；测试均不加载模型或真实语料，不依赖本机速度。
+
+真实对照只使用此前已正确解码的006 PCM和两个既定24秒上下文区间，另以各自20秒owned区间作完整EOS控制。冻结改动前后worker文件，两arm共用一份实际加载Qwen Q8、语言Chinese、空context和同一动态预算，每段按基线→候选各重新推理一次。两个24秒区间都复现`repetition`、`truncated=false`；基线分别将136/20字vendor正文返回为成功，候选均拒绝，未交付正文。两个20秒EOS控制均成功，127/137字正文摘要前后相同；8次调用全部完成，实际运行候选与工作树逐字一致。这是batch engine及worker帧边界的证据，不是安装态公共HTTP端到端认证、整片CER改善或人工复核。
+
+首次维护在模型加载前因vendor Python不具备host预检模块依赖而失败；将预检移回host后，第二次又被历史inventory摘要不匹配拒绝。两次均恢复服务且保留失败记录，没有复用旧摘要或把失败记作有效arm。历史inventory含当前host依赖，不能继续假定与旧诊断身份一致；重新登记当前依赖及生产源码，比较两份冻结worker在这个相同新环境中的行为，推理前后完整inventory复核稳定，不拿历史推理当作本次基线。第三次完整运行成功；模型、PCM和设置摘要核验通过。
+
+三个窗口均先排除活动请求/客户端，再managed停启并恢复；最后唯一listener/LaunchAgent PID49965、health/readyz200、3.12.0、quality/quality，配置/selection/runtime target摘要未变。真实推理子进程由900秒deadline约束并wait回收；没有新ASR模型、安装或profile更改、留出访问。本轮未测峰值物理内存和稳定性能，不据单次亚秒wall time声明提速。仓库外`asr-batch-completeness-20261019`保存冻结、新身份登记、两次无效尝试、8次真实对照及服务恢复证明。回退可revert本逻辑提交，无用户数据或持久化格式变化；完整质量目标仍未达到，PR继续draft。

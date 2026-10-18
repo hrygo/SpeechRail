@@ -1135,6 +1135,7 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         if include_timestamps:
             kwargs["return_timestamps"] = True
         result = self._session.transcribe((waveform, 16_000), **kwargs)
+        _require_complete_final(result)
         text = getattr(result, "text", "") or ""
         text = text.strip() if isinstance(text, str) else ""
         detected = getattr(result, "language", None) or ("" if language == "auto" else language)
