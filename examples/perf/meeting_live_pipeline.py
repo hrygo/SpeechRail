@@ -53,6 +53,36 @@ def _dia_snapshot(report: Mapping[str, Any]) -> tuple[str, Mapping[str, Any]]:
     return _report_digest(frozen), frozen
 
 
+def live_pipeline_policy(
+    *, pcm_feed_policy_sha256: str, sources: Mapping[str, str],
+    mode: str = "serial", overlap_enabled: bool = False, timeout_seconds: float = 900,
+    finish_timeout_seconds: float = 15, sink_timeout_seconds: float = 5,
+    diarization_queue_chunks: int = 8,
+) -> dict[str, Any]:
+    """Freeze metadata before candidate output; does not attest runtime readiness."""
+    return {
+        "mode": mode, "overlap_enabled": overlap_enabled,
+        "timeout_seconds": timeout_seconds, "finish_timeout_seconds": finish_timeout_seconds,
+        "sink_timeout_seconds": sink_timeout_seconds,
+        "diarization_queue_chunks": diarization_queue_chunks,
+        "deadline_clock": "common_host_clock_with_event_loop_timer",
+        "dia_finish_deadline_origin": "last_source_sample_target",
+        "stable_deadline_origin": "sealed_owned_span_last_sample_target",
+        "deadline_action": "cancel_dia_and_publisher_join_cleanup_keep_asr_v1",
+        "max_expected_deadline_units": MeetingTiming.MAX_EXPECTED_UNITS,
+        "degradation": "drain_dia_keep_asr_replace_all_unknown_v1",
+        "timing_schema_version": 2,
+        "max_timing_records": MeetingTiming.MAX_RECORDS,
+        "max_asr_timing_records": MeetingTiming.MAX_ASR_RECORDS,
+        "max_publication_timing_records": MeetingTiming.MAX_PUBLICATION_RECORDS,
+        "max_open_sink_deliveries": MeetingTiming.MAX_OPEN,
+        "latency": latency_policy(),
+        "stable_publication": "joined_asr_activity_watermarks_and_text_sink_v1",
+        "pcm_feed_policy_sha256": pcm_feed_policy_sha256,
+        "source_digests": dict(sources),
+    }
+
+
 class _Ingress(AsyncIterator[PcmChunk]):
     def __init__(self, capacity: int) -> None:
         self.capacity = capacity
@@ -376,27 +406,13 @@ async def run_live_meeting_pipeline(
                 } for item in body.items()],
             })
             observations = timing.summary(schedule["pcm_feed"], body.items())
-        policy = {
-            "mode": mode, "overlap_enabled": overlap_enabled,
-            "timeout_seconds": timeout_seconds, "finish_timeout_seconds": finish_timeout_seconds,
-            "sink_timeout_seconds": sink_timeout_seconds,
-            "diarization_queue_chunks": diarization_queue_chunks,
-            "deadline_clock": "common_host_clock_with_event_loop_timer",
-            "dia_finish_deadline_origin": "last_source_sample_target",
-            "stable_deadline_origin": "sealed_owned_span_last_sample_target",
-            "deadline_action": "cancel_dia_and_publisher_join_cleanup_keep_asr_v1",
-            "max_expected_deadline_units": MeetingTiming.MAX_EXPECTED_UNITS,
-            "degradation": "drain_dia_keep_asr_replace_all_unknown_v1",
-            "timing_schema_version": 2,
-            "max_timing_records": MeetingTiming.MAX_RECORDS,
-            "max_asr_timing_records": MeetingTiming.MAX_ASR_RECORDS,
-            "max_publication_timing_records": MeetingTiming.MAX_PUBLICATION_RECORDS,
-            "max_open_sink_deliveries": MeetingTiming.MAX_OPEN,
-            "latency": latency_policy(),
-            "stable_publication": "joined_asr_activity_watermarks_and_text_sink_v1",
-            "pcm_feed_policy_sha256": schedule["pcm_feed"]["policy_sha256"],
-            "source_digests": sources,
-        }
+        policy = live_pipeline_policy(
+            pcm_feed_policy_sha256=schedule["pcm_feed"]["policy_sha256"], sources=sources,
+            mode=mode, overlap_enabled=overlap_enabled, timeout_seconds=timeout_seconds,
+            finish_timeout_seconds=finish_timeout_seconds,
+            sink_timeout_seconds=sink_timeout_seconds,
+            diarization_queue_chunks=diarization_queue_chunks,
+        )
         return {
             **schedule, "asr_complete": True, "asr_body": body_summary,
             "live_attribution_complete": bool(complete),

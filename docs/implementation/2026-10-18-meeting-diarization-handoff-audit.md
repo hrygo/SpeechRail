@@ -651,3 +651,14 @@ finish期限改为源原点加全部样本时长再加预算（默认/上限15�
 十九相关文件663 passed in19.84s，五Python Ruff与三source strict/follow-imports=silent Mypy通过，图谱相关perf/tests missing直接复核worktree，无索引重建。父84af3235全部八项PR checks success/completed。均为合成PCM/fake模型或RPC；未解码真实语料、加载模型、运行真实benchmark、下载、改变服务/安装/UI、发布或合并。
 
 目标继续：仍需跨来源finish统计、生产接线与真实硬期限/精确回收验收、进程footprint、ABBA及最终联合身份；schema2来源catalog/独立ASR主参考和真实质量未就绪，CER、认证人数、真实P95不升级，#370未完成。
+
+
+## T6 按独立来源聚合 finish
+
+2026-10-18：新增离线FinishCohort，在候选输出前冻结schema2 development manifest/split/scorer摘要、共同来源前缀、候选身份、共同调度配置以及全部fixture×重复的执行清单。每执行绑定PCM/样本/完整pipeline策略；提取CommonPcmFeed.policy与live_pipeline_policy供预登记使用，不声称读取前验证PCM或runtime ready。共同配置移除来源特有信息但保留clock、分包、队列和迟到预算；先RED证明仅移除整个feed摘要会漏掉分包变更，再修正为GREEN。
+
+observe复核实际宿主报告身份、共同来源原点、稳定确认及joined里程碑，重算finish；缺稳定标记或unknown不能只靠summary声称完整。aggregate逐来源取全部fixture/重复的最大值，再等来源权重取离散P95并检查最慢来源；任一缺失/失败保留原来源权重为正无穷，不能靠派生样本数或不足5%的缺失比例稀释失败。拒绝重复执行、报告复用、篡改及源码变化。摘要只证明声明控制与宿主metadata自洽，不证明独立执行、忠实解码、真实clock或生产字节。
+
+合成接线测试在任何输出前冻结实际pipeline策略，再消费合成PCM获得真实流水线报告并投影observation；其余五个预登记执行未运行时保持no-go。二十相关测试文件682 passed in19.67s，四Python Ruff、三source Mypy通过。父cab45e8c全部八项PR checks success/completed。相关图谱coverage missing，以当前worktree直接复核；未重建索引。
+
+仅使用合成PCM与fake模型/RPC，未解码真实语料、加载模型、运行真实benchmark、下载或改变服务/安装/UI/发布/合并。runtime_identity_verified/certification_eligible仍false，CER、认证人数及真实P95未观察，#370未完成。目标继续：生产接线与真实回收验收、footprint、ABBA及最终联合身份、schema2来源catalog和独立ASR主参考及真实质量仍待完成。

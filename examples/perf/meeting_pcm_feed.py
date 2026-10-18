@@ -232,15 +232,9 @@ class CommonPcmFeed:
             while not lane.queue.empty():
                 lane.queue.get_nowait()
 
-    def summary(self) -> dict[str, Any]:
-        if (
-            self.closed
-            or not self.finished
-            or any(not lane.exhausted for lane in self.lanes.values())
-        ):
-            raise ValueError("PCM feed did not complete")
-        assert self.origin is not None
-        policy = {
+    def policy(self) -> dict[str, Any]:
+        """Freeze source parameters before consumption; no hash/readiness claim."""
+        return {
             "clock_source": self.clock_source,
             "sample_rate": 16000,
             "chunk_samples": self.chunk_samples,
@@ -249,6 +243,16 @@ class CommonPcmFeed:
             "source_pcm_sha256": self.expected_pcm_sha256,
             "source_samples": self.samples,
         }
+
+    def summary(self) -> dict[str, Any]:
+        if (
+            self.closed
+            or not self.finished
+            or any(not lane.exhausted for lane in self.lanes.values())
+        ):
+            raise ValueError("PCM feed did not complete")
+        assert self.origin is not None
+        policy = self.policy()
         return {
             **policy,
             "policy_sha256": canonical_digest(policy),

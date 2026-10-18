@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.45"
+version: "3.3.46"
 date: 2026-10-18
 ---
 
@@ -389,7 +389,7 @@ pipeline policy冻结模式、所有deadline、DIA队列预算、降级语义及
 
 scorer policy与 `meeting_latency_policy.latency_policy()` 冻结相同阈值及采样口径，缺字段或变更权重/quantile被拒绝。`sealed_owned_span_duration_v1` 对所有实际非空sealed ASR unit按owned span样本时长加权，以句末样本目标时刻为起点，以双水位覆盖后稳定标记sink成功返回为完成；P95取累计权重首次达到95%的观测值，不插值。缺失/无效标记及unknown保留原权重为正无穷失败，用null报告不可得分位值，任一未完成或超过30秒的unit均no-go；15秒P95边界含等号。各会议分别报告并检查最慢会议，不跨会议混池稀释慢例。实际ASR删除由独立ASR质量门核对，不补造句段或从参考向运行时注入文字/边界。
 
-`timing_observations.latency_diagnostics` 给出上述宿主稳定发布P95、期望/失败样本权重、硬上限失败数及单会议finish秒数。finish从最后源样本目标时刻至最终交付确认、ASR回调和DIA joined作用域结束的最晚时刻，包括清理及必要的最终unknown快照；缺完整证据时finish_unresolved=true，不能丢弃该会议。finish每次执行只有一个观测。跨来源统计口径预登记为同一来源组先取全部执行最大值，再按来源组等权取P95并检查最慢来源；缺失执行使该来源保留原权重按正无穷失败。本库入口尚不做跨来源聚合，单例超过5秒记录target_exceeded、超过15秒记录hard_failed。
+`timing_observations.latency_diagnostics` 给出上述宿主稳定发布P95、期望/失败样本权重、硬上限失败数及单会议finish秒数。finish从最后源样本目标时刻至最终交付确认、ASR回调和DIA joined作用域结束的最晚时刻，包括清理及必要的最终unknown快照；缺完整证据时finish_unresolved=true，不能丢弃该会议。finish每次执行只有一个观测。跨来源统计口径预登记为同一来源组先取全部执行最大值，再按来源组等权取P95并检查最慢来源；缺失执行使该来源保留原权重按正无穷失败。单执行入口只记录本次值，跨来源聚合由FinishCohort执行；单例超过5秒记录target_exceeded、超过15秒记录hard_failed。
 
 这些数值和diagnostic_pass只描述宿主sink，不能证明麦克风1×采集、App/UI显示、真实生产字节或产品稳定发布验收。记录schema为2；顶层两个认证P95仍null、latency_gate=not_evaluated、certification_eligible=false。生产稳定/finish硬期限及回收验收、真实进程footprint、ABBA、最终联合身份及真实质量需独立完成；诊断取消与事后no-go不替代真实硬上限通过证据。相关确定性回归见 `tests/test_meeting_timing.py`、`tests/test_meeting_live_pipeline.py` 和 `tests/test_meeting_quality_metrics.py`。
 
@@ -400,6 +400,18 @@ scorer policy与 `meeting_latency_policy.latency_policy()` 冻结相同阈值及
 finish期限为源原点加全部源样本时长再加finish预算，因而不会因relay EOF迟到或ASR复核迟到而顺延。模型已结束但稳定sink卡住仍受同一期限约束。控制器使用共同宿主clock计算期限，以event-loop timer等待；各自独立的事件通知避免稳定发布与监控互相清除通知。注入clock跳变通过进度通知重新检查，冻结注入clock仍有实际event-loop等待期限，报告明确标记timer触发而不把它当真实clock认证。
 
 超时保留首次原因 `stable_label_timeout` 或 `diarization_finish_timeout`，记录期限、观察时刻与是否由event-loop timer唤醒；停用DIA并取消其实际operation及稳定publisher，两者清理必须加入后才允许unknown全量替换。sink交付自取消、取消吞掉、重复外部取消仍遵循owned task清理规则。监控在timer唤醒后先重读完成证据；迟到的监控不能把期限内已完成的交付误判超时，超过期限才完成的稳定标记仍会被识别。只有诊断触发记录，不上调worker_reaping_verified、runtime或certification；回收等待、ASR最终正文及unknown快照不保证在触发时刻完成。相关fake回归见 `tests/test_meeting_live_pipeline.py` 与 `tests/test_meeting_timing.py`。
+
+### 会议 finish 来源队列
+
+`meeting_latency_cohort.FinishCohort` 只处理已生成的宿主metadata，不打开音频、参考内容、模型或留出。构造时核对schema 2 development manifest、split lock、source catalog及scorer policy摘要，固定ASR/分人候选身份、serial或overlap模式、人数层与6/12/18/24组共同来源前缀。预登记必须覆盖选中前缀内的每个fixture及每次重复（1–8次、总计最多4096次）；每个来源须有fixture，每个fixture重复的PCM/样本数/策略须一致。同一PCM不能声明为独立来源组。控制映射保存为不可变快照，后改调用方对象不改变队列。
+
+模型输出前可用 `CommonPcmFeed.policy()` 获取已知源参数，用 `live_pipeline_policy()` 冻结完整执行策略；这两个函数不证明PCM摘要已验证、模型可用或运行已发生。`finish_configuration()` 从策略中移除来源特有的PCM摘要/样本总长，保留clock类型、16k采样率、分包、队列与最大供给迟到等设置；该共同配置摘要也必须预登记，不能把不同来源误当不同调度设置，或在移除来源信息时连同队列/分包一起漏掉。每条执行另锁完整pipeline策略摘要、实际PCM摘要、样本数及fixture摘要，execution ID由上下文和该登记计算，队列摘要同时锁定聚合源码。
+
+`observe(execution_sha256, report)` 接受现有live pipeline报告，核对执行身份、完整策略和共同配置、来源hash/样本/原点、记录schema及未认证标记；根据稳定标记/最终快照确认和ASR/DIA joined里程碑重算finish，不只相信摘要里的秒数。unknown或缺失稳定标记不能靠summary布尔值冒充完整；降级、未解决finish及失败执行保留failed状态。完整报告最多16MiB，输出仅摘要与标量；控制/报告没有实际来源、忠实解码、生产字节、真实clock或独立执行的权威证明。源码变化拒绝继续复用原队列。
+
+`aggregate(observations)` 拒绝未知/重复execution、跨队列或篡改的observation，以及同一报告摘要在不同执行中重复使用。每个预登记来源先取全部fixture和重复执行的最慢finish，再按来源组等权使用离散逆CDF计算P95，并保留最慢来源；派生fixture更多的来源不增加独立统计权重。任一缺失或failed执行使该来源保留原权重为正无穷，JSON用null表达该来源及最差值；即使单个缺失来源占比不足5%而P95仍有限，也不能通过hard gate。P95≤5秒、各来源单次上限≤15秒且没有缺失/失败才给diagnostic_pass，边界含等号。
+
+队列输出包括期望/观察/缺失执行数、失败来源数、逐来源结果、P95/最慢值及输入observation集合摘要；不输出原文、PCM、speaker实名或路径。它不计算质量、并发净收益或可信区间，不解锁模型执行、留出或发布；runtime_identity_verified/certification_eligible保持false、人数认证为null。调用方仍须先完成来源/参考审查、串行质量及其他联合门，不能把元数据自洽当作质量或真实P95认证。确定性回归见 `tests/test_meeting_latency_cohort.py`，含模型输出前冻结→实际pipeline合成输入→来源聚合的接线测试。
 
 ### 有声书外置小说语料回归
 
