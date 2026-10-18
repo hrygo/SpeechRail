@@ -133,7 +133,7 @@ RED：协议模块和预检入口分别缺失。GREEN：`PYTHONPATH=src:examples
 
 CI `39082691725` 全量自动测试中有 3 项隔离 fixture 失败，4,347 项通过、1 项 skipped。该 fixture 模拟了 overlap/单任务预算，却没有固定故障资源上界检查所需的硬件条件；本地结果因而不能代表 CI。已显式注入已知/未知硬件预算，并同时验证资源上界未知时所有能力及 readiness 拒绝。12 项定向回归通过，不放宽生产资源检查；修复提交 `fb89beb`。
 
-本批提交前合并复验：2026-10-18，以下 20 个相关测试文件共 392 项通过；全分支 34 个变更 Python 文件通过 Ruff，生产源文件 11 个和预检源文件 2 个分别通过 Mypy，文档本地链接/代码围栏/换行与 diff 检查通过。
+本批提交前合并复验：2026-10-18，以下 20 个相关测试文件共 393 项通过；全分支 34 个变更 Python 文件通过 Ruff，生产源文件 11 个和预检源文件 2 个分别通过 Mypy，文档本地链接/代码围栏/换行与 diff 检查通过。
 
 ```bash
 PYTHONPATH=src:examples/perf uv run --no-sync pytest \
@@ -148,3 +148,5 @@ PYTHONPATH=src:examples/perf uv run --no-sync pytest \
   tests/test_job_runner.py tests/test_openai_diarized_batch.py \
   tests/test_realtime_auxiliary_attribution.py tests/test_probe_meeting_candidate.py --no-cov
 ```
+
+审查补充：同类等待队列满时，`lane_available` 先前仍可能把空闲的独立 lane 显示为可用，而实际 `_acquire` 会拒绝。新增 `test_lane_available_respects_full_pending_class_even_for_free_independent_lane` 首次断言失败，补齐同一队列上限条件后 GREEN；上面的 393 项合并复验包含此回归。候选制品身份同步纳入 governor 与 cleanup 源码摘要，资源策略或取消行为改变后必须刷新身份。

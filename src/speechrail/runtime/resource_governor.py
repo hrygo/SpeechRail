@@ -340,6 +340,8 @@ class ResourceGovernor:
         key = self._normalize_resource_key(work_class, resource_key)
         if self._reject_heavy_compute:
             return False
+        if len(self._waiters_for(work_class)) >= self._limits.max_pending_per_class:
+            return False
         waiter = _Waiter(self._ticket + 1, work_class, WorkPurpose.DEFAULT, self._clock(), key)
         return self._can_admit(waiter)
 

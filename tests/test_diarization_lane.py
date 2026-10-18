@@ -19,6 +19,30 @@ LIMITS = GovernorLimits(
 )
 
 
+def test_lane_available_respects_full_pending_class_even_for_free_independent_lane():
+    from speechrail.runtime.resource_governor import GovernorQueueFullError
+
+    async def run():
+        governor = ResourceGovernor(GovernorLimits(3, 1, 1), allow_heavy_overlap=True)
+        async with governor.reserve(WorkClass.DIARIZATION):
+            waiting = asyncio.create_task(
+                governor.run(lambda: asyncio.sleep(0), WorkClass.DIARIZATION)
+            )
+            await asyncio.sleep(0)
+            try:
+                assert governor.snapshot().pending_batch == 1
+                assert not governor.lane_available(WorkClass.BATCH_ASR)
+                with pytest.raises(GovernorQueueFullError):
+                    async with governor.reserve(WorkClass.BATCH_ASR):
+                        pytest.fail("a full class queue must reject consistently")
+            finally:
+                waiting.cancel()
+                await asyncio.gather(waiting, return_exceptions=True)
+        assert governor.snapshot().pending_batch == 0
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("lane", [WorkClass.DIARIZATION, WorkClass.BATCH_ASR])
 def test_busy_waiter_does_not_block_an_independent_batch_lane(lane):
     async def run():

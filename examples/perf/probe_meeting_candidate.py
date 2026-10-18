@@ -90,6 +90,8 @@ def static_candidate_spec(
             "src/speechrail/backends/diarization/coreml.py",
             "src/speechrail/runtime/diarization_owner.py",
             "src/speechrail/runtime/diarization_worker.py",
+            "src/speechrail/runtime/resource_governor.py",
+            "src/speechrail/runtime/cleanup.py",
             "src/speechrail/domain/diarization/types.py",
             "src/speechrail/domain/audio_timeline.py",
         )),
