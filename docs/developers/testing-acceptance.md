@@ -72,6 +72,10 @@ uv run --no-sync python examples/perf/prepare_meeting_evaluation_manifest.py \
 
 输入制品必须在 catalog 目录内，拒绝符号链接和路径逃逸；输出目录必须位于仓库外且尚不存在，不覆盖已有锁。输出 manifest 保留相对路径，后续执行器须显式使用原 catalog 目录作为 artifact root，并重新核对文件摘要。CLI 验证错误不打印私有路径。确定性测试使用人工文件：`PYTHONPATH=src:examples/perf uv run --no-sync pytest tests/test_meeting_evaluation_manifest.py --no-cov`。
 
+`meeting_candidate_schedule.CommonPrefixSchedule` 消费已锁定的单个人数层来源顺序、manifest/scorer 摘要和 C1/C2 身份；1–4 人还必须有 C0，5–8 人不虚构四槽 C0 对照。初次请求 6 组，仅在 6/12/18/24 检查。每轮必须提交 C0 及全部存活候选、相同顺序的完整来源前缀和匹配的候选摘要。点值失败永久淘汰，区间证据不足时所有存活候选共同扩样；C0 的绝对门失败不淘汰对照。缺观察停止比较，不丢失败组后继续；到上限或无下一完整前缀时终止，只有在当前共同前缀已通过的候选仍可进入后续选型。
+
+调度状态为不可变快照，恢复时以独立载入的来源/候选锁为基准重放每轮校验，不接受改身份、改变组顺序、复活候选或在终止后追加。`eligible_across_strata` 对所有连续人数层取同一候选的交集，拒绝跨层混用候选/scorer/manifest；pending、缺失或无共同候选不能形成完整人数范围。调度器只处理上游评分结论，不运行模型、不选择 DER 排名、不签收据；实际执行器仍须核实评分报告、来源和运行身份，完成产品延迟及独立留出。对应确定性测试为 `tests/test_meeting_candidate_schedule.py`。
+
 ### 有声书外置小说语料回归
 
 常规 `AudiobookImportTests`、`AudiobookSourceTests` 使用小型虚构文本，验证漏章、合集层级、重复标题、重复正文确认和 CRLF 预算，不依赖真实小说，可在 CI 中运行。`tests/test_audiobook_corpus_runner.py` 仅验证工具的启用与跳过策略，也不读取小说、不调用 Swift 或模型。
