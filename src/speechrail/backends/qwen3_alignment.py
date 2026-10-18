@@ -77,6 +77,8 @@ class Qwen3AlignmentConfig:
             self.device,
             "--dtype",
             self.dtype,
+            "--cache-limit-mb",
+            str(self.cache_limit_mb),
         ]
         if self.memory_limit_mb > 0:
             cmd.extend(["--memory-limit-mb", str(self.memory_limit_mb)])
@@ -212,7 +214,7 @@ class Qwen3AlignmentWorker:
                     raise InvalidAlignmentOutputError("invalid_alignment")
                 tokens.append((token, float(start), float(end)))
             return tuple(tokens)
-        except (RuntimeError, TimeoutError, OSError):
+        except RuntimeError, TimeoutError, OSError:
             # A crashed or timed-out aligner must not poison the next request.
             await self._reset_transport()
             raise

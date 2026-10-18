@@ -120,9 +120,7 @@ def test_alignment_worker_preserves_collapsed_and_invalid_vendor_times(
     """The application validator needs the original vendor timestamps to diagnose them."""
 
     class InvalidTimelineEngine(_FakeEngine):
-        def align_text(
-            self, audio: bytes, *, text: str, language: str
-        ) -> list[dict[str, object]]:
+        def align_text(self, audio: bytes, *, text: str, language: str) -> list[dict[str, object]]:
             return [
                 {"text": "zero", "start": 0.1, "end": 0.1},
                 {"text": "reverse", "start": 0.4, "end": 0.3},
@@ -405,9 +403,7 @@ def test_invalid_vendor_output_keeps_its_failure_category_across_worker_frames(
     tmp_path: Path,
 ) -> None:
     class InvalidOutputEngine(_FakeEngine):
-        def align_text(
-            self, audio: bytes, *, text: str, language: str
-        ) -> list[dict[str, object]]:
+        def align_text(self, audio: bytes, *, text: str, language: str) -> list[dict[str, object]]:
             raise alignment_worker_module.InvalidAlignmentOutputError("invalid_alignment")
 
     model_dir = tmp_path / "aligner"
@@ -437,9 +433,7 @@ def test_alignment_client_fails_fast_when_the_queue_is_full(tmp_path: Path) -> N
     )
 
     async def scenario() -> None:
-        first = asyncio.create_task(
-            worker.align_text(b"\x00\x00" * 16, text="你好", language="zh")
-        )
+        first = asyncio.create_task(worker.align_text(b"\x00\x00" * 16, text="你好", language="zh"))
         await asyncio.sleep(0)
         await asyncio.sleep(0)
         with pytest.raises(AlignmentQueueFullError):
@@ -460,3 +454,112 @@ def test_alignment_client_resets_a_crashed_transport(tmp_path: Path) -> None:
 
     assert process.aborted == 1
     assert worker.ready is False
+
+
+def test_aligner_launch_preserves_configured_allocator_limits(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    config = replace(_config(tmp_path), cache_limit_mb=64, memory_limit_mb=1024)
+    command = config.command()
+    assert command[command.index("--cache-limit-mb") + 1] == "64"
+    assert command[command.index("--memory-limit-mb") + 1] == "1024"
+
+
+def _fake_allocator_entrypoint(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    events: list[object] = []
+    core = ModuleType("mlx.core")
+    core.set_cache_limit = lambda value: events.append(("cache", value))  # type: ignore[attr-defined]
+    core.set_memory_limit = lambda value: events.append(("memory", value))  # type: ignore[attr-defined]
+    package = ModuleType("mlx")
+    package.core = core  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mlx", package)
+    monkeypatch.setitem(sys.modules, "mlx.core", core)
+    monkeypatch.setattr(
+        alignment_worker_module, "serve", lambda *args, **kwargs: events.append("load")
+    )
+    monkeypatch.setattr(
+        alignment_worker_module,
+        "sys",
+        SimpleNamespace(
+            stdin=SimpleNamespace(buffer=io.BytesIO()), stdout=SimpleNamespace(buffer=io.BytesIO())
+        ),
+    )
+    return events
+
+
+def test_aligner_entrypoint_applies_limits_before_loading(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = _fake_allocator_entrypoint(monkeypatch)
+    assert (
+        alignment_worker_module.main(
+            [
+                "--model-dir",
+                "unused-model",
+                "--device",
+                "mps",
+                "--cache-limit-mb",
+                "64",
+                "--memory-limit-mb",
+                "1024",
+            ]
+        )
+        == 0
+    )
+    assert events == [("cache", 64 * 1024**2), ("memory", 1024 * 1024**2), "load"]
+
+
+@pytest.mark.parametrize("flag", ["--cache-limit-mb", "--memory-limit-mb"])
+def test_aligner_rejects_negative_limits_before_loading(
+    monkeypatch: pytest.MonkeyPatch, flag: str
+) -> None:
+    events = _fake_allocator_entrypoint(monkeypatch)
+    with pytest.raises(SystemExit):
+        alignment_worker_module.main(["--model-dir", "unused-model", "--device", "mps", flag, "-1"])
+    assert not events
+
+
+def test_aligner_does_not_load_when_allocator_limit_application_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = _fake_allocator_entrypoint(monkeypatch)
+
+    def fail(value):
+        raise RuntimeError("fake allocator failure")
+
+    monkeypatch.setattr(sys.modules["mlx.core"], "set_cache_limit", fail)
+    assert (
+        alignment_worker_module.main(
+            [
+                "--model-dir",
+                "unused-model",
+                "--device",
+                "mps",
+                "--cache-limit-mb",
+                "64",
+            ]
+        )
+        == 1
+    )
+    assert not events
+    output = alignment_worker_module.sys.stdout.buffer
+    output.seek(0)
+    assert read_frame(output)["code"] == "worker_memory_limit_error"
+
+
+def test_aligner_zero_limits_keep_vendor_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = _fake_allocator_entrypoint(monkeypatch)
+    assert (
+        alignment_worker_module.main(
+            [
+                "--model-dir",
+                "unused-model",
+                "--device",
+                "mps",
+                "--cache-limit-mb",
+                "0",
+                "--memory-limit-mb",
+                "0",
+            ]
+        )
+        == 0
+    )
+    assert events == ["load"]
