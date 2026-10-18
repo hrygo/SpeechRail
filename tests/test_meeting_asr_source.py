@@ -1,0 +1,223 @@
+"""Only synthetic source manifests, WAV and frozen primary references."""
+
+import asyncio
+import hashlib
+import json
+
+import pytest
+from meeting_evaluation_identity import canonical_digest
+
+from test_meeting_development_fixture import inputs
+from test_meeting_quality_metrics import policy
+
+
+@pytest.fixture
+def source(tmp_path):
+    manifest, split = inputs(tmp_path)
+    fixture = manifest["fixtures"][0]
+    reference = {
+        "schema_version": 1,
+        "fixture_id": "M0",
+        "manifest_sha256": canonical_digest(manifest),
+        "pcm_sha256": fixture["artifacts"]["pcm"]["sha256"],
+        "overlap_order": "unambiguous",
+        "main_reference": "frozen primary",
+    }
+    path = tmp_path / "primary.json"
+    path.write_text(json.dumps(reference))
+    descriptor = {"path": "primary.json", "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    return manifest, split, reference, descriptor
+
+
+def load(tmp_path, source):
+    from meeting_asr_source import load_locked_asr_case
+
+    manifest, split, _, descriptor = source
+    return load_locked_asr_case(
+        manifest,
+        split,
+        artifact_root=tmp_path,
+        scorer_policy=policy(),
+        fixture_id="M0",
+        candidate_sha256="a" * 64,
+        primary_reference=descriptor,
+    )
+
+
+def test_loads_identical_kernel_pcm_and_explicit_primary_not_speaker_reference(tmp_path, source):
+    locked = load(tmp_path, source)
+    assert locked.case.pcm16 == bytes(320)
+    assert locked.case.main_reference == "frozen primary"
+    assert locked.case.source_group_id == source[0]["fixtures"][0]["source_group_id"]
+    assert locked.case.manifest_sha256 == canonical_digest(source[0])
+    locked.verify()
+    locked.verify_stamps()
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("manifest_sha256", "f" * 64),
+        ("pcm_sha256", "f" * 64),
+        ("fixture_id", "other"),
+        ("schema_version", True),
+    ],
+)
+def test_primary_reference_must_bind_selected_development_source(tmp_path, source, field, value):
+    source[2][field] = value
+    path = tmp_path / "primary.json"
+    path.write_text(json.dumps(source[2]))
+    source[3]["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    with pytest.raises(ValueError):
+        load(tmp_path, source)
+
+
+def test_ambiguous_or_missing_primary_is_preserved_not_ordered_by_timestamps(tmp_path, source):
+    source[2]["overlap_order"] = "ambiguous"
+    source[2]["main_reference"] = None
+    path = tmp_path / "primary.json"
+    path.write_text(json.dumps(source[2]))
+    source[3]["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    locked = load(tmp_path, source)
+    assert locked.case.overlap_order == "ambiguous"
+    assert locked.case.main_reference is None
+
+
+@pytest.mark.parametrize("kind", ["primary", "pcm", "text_reference", "asr_sidecar"])
+def test_input_change_after_loading_rejected_including_restored_bytes(tmp_path, source, kind):
+    locked = load(tmp_path, source)
+    path = (
+        tmp_path / "primary.json"
+        if kind == "primary"
+        else tmp_path / source[0]["fixtures"][0]["artifacts"][kind]["path"]
+    )
+    original = path.read_bytes()
+    path.write_bytes(original + b"changed")
+    path.write_bytes(original)
+    with pytest.raises(ValueError):
+        locked.verify_stamps()
+    with pytest.raises(ValueError):
+        locked.verify()
+
+
+def test_locked_execution_verifies_identity_and_final_files_without_text_in_report(
+    tmp_path, source
+):
+    from meeting_asr_source import evaluate_locked_asr_case
+
+    locked = load(tmp_path, source)
+
+    async def runner(data):
+        return {
+            **data.identity(),
+            "candidate_sha256": "a" * 64,
+            "runtime_identity_verified": False,
+            "certification_eligible": False,
+        }
+
+    report = asyncio.run(evaluate_locked_asr_case(locked, runner))
+    assert report["source_validation"]["bytes_verified"] is True
+    assert report["source_validation"]["human_reference_provenance_verified"] is False
+    assert "frozen primary" not in json.dumps(report)
+    assert str(tmp_path) not in json.dumps(report)
+
+
+def test_mutation_during_replay_or_wrong_candidate_cannot_return_verified_report(tmp_path, source):
+    from meeting_asr_source import evaluate_locked_asr_case
+
+    locked = load(tmp_path, source)
+
+    async def runner(data):
+        (tmp_path / "primary.json").write_text("changed during replay")
+        return {**data.identity(), "candidate_sha256": "a" * 64}
+
+    with pytest.raises(ValueError):
+        asyncio.run(evaluate_locked_asr_case(locked, runner))
+
+
+def test_wrong_candidate_or_case_report_cannot_receive_source_proof(tmp_path, source):
+    from meeting_asr_source import evaluate_locked_asr_case
+
+    locked = load(tmp_path, source)
+
+    async def runner(data):
+        return {**data.identity(), "candidate_sha256": "b" * 64}
+
+    with pytest.raises(ValueError, match="source or candidate"):
+        asyncio.run(evaluate_locked_asr_case(locked, runner))
+
+
+@pytest.mark.parametrize("change", ["extra", "symlink", "digest", "holdout"])
+def test_reference_schema_symlink_digest_and_holdout_rejected(tmp_path, source, change):
+    if change == "extra":
+        source[2]["speaker_order"] = ["R1"]
+        path = tmp_path / "primary.json"
+        path.write_text(json.dumps(source[2]))
+        source[3]["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    elif change == "symlink":
+        path = tmp_path / "primary.json"
+        target = tmp_path / "same-primary.json"
+        target.write_bytes(path.read_bytes())
+        path.unlink()
+        path.symlink_to(target)
+    elif change == "digest":
+        source[3]["sha256"] = "f" * 64
+    else:
+        source[0]["split"] = "frozen_holdout"
+        source[1]["development_manifest_sha256"] = canonical_digest(source[0])
+    with pytest.raises(ValueError):
+        load(tmp_path, source)
+
+
+def test_cancelled_replay_closes_runner_then_joins_source_revalidation(
+    tmp_path, source, monkeypatch
+):
+    from meeting_asr_source import LockedAsrCase, evaluate_locked_asr_case
+
+    locked = load(tmp_path, source)
+    original = LockedAsrCase.verify
+    checks = []
+
+    def verify(self):
+        checks.append(True)
+        original(self)
+
+    monkeypatch.setattr(LockedAsrCase, "verify", verify)
+
+    async def exercise():
+        entered = asyncio.Event()
+        closed = []
+
+        async def runner(data):
+            try:
+                entered.set()
+                await asyncio.Event().wait()
+            finally:
+                closed.append(True)
+
+        task = asyncio.create_task(evaluate_locked_asr_case(locked, runner))
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert closed == [True]
+        assert len(checks) == 2
+
+    asyncio.run(exercise())
+
+
+def test_callback_and_missing_input_errors_are_sanitized(tmp_path, source):
+    from meeting_asr_source import evaluate_locked_asr_case
+
+    locked = load(tmp_path, source)
+
+    async def runner(data):
+        raise RuntimeError("private transcript /private/model")
+
+    with pytest.raises(RuntimeError) as caught:
+        asyncio.run(evaluate_locked_asr_case(locked, runner))
+    assert str(caught.value) == "locked ASR replay failed"
+    (tmp_path / "primary.json").unlink()
+    with pytest.raises(ValueError) as caught:
+        locked.verify()
+    assert str(tmp_path) not in str(caught.value)

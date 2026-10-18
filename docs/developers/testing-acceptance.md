@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.24"
+version: "3.3.25"
 date: 2026-10-18
 ---
 
@@ -212,6 +212,27 @@ PYTHONPATH=src:examples/perf uv run --no-sync python examples/perf/probe_meeting
 生产 WindowDecodeResult 可携带内部 WindowDecodeObservation，经 window.result 私有 RPC 保留每次 preview/review 的实际 decode_max_new_tokens、generation_max_new_tokens、finish_reason、truncated 和 generated_token_count。decode budget 是 engine 调用入参；preview generation budget 是扣除复用 prefix 后实际传给生成器的 remaining_tokens，token count 在 header strip / prefix merge 前取实际返回 tokens 长度。review 的内部 generation budget 和 count 无可验证观察，保持 null。finish/truncated 缺失保持 null，拒绝类型强制转换、非法范围、额外字段和错误 kind；缺整个 observation 也保持未知。该内部元数据不进入公共 Realtime 契约，不改变解码策略，也不自动升级实际 A0。回归见 test_asr_window.py、test_qwen3_window.py、test_qwen3_stream_decoder.py。
 
 正文诊断报告使用 schema 2，ASR scorer 身份为 asr-body-v2；旧报告须重新执行，不能沿用旧门。RuntimeObservation 只提供调用前后身份与 origin，移除自报 token_limit_hit 入参。每个实际 decode 都记录匿名 attempt 摘要、preview/review、样本范围、实际预算和可见完成元数据；最多4096次，超额在调用下一个 decoder 前失败。仅全部 attempt 明确 finish_reason=eos、truncated=false 且实际 decode budget 不超过冻结上限时，截断证据门才可通过；缺观测、kind 错配、未知终止状态、任一 preview/review 截断均不能被后续成功 review 掩盖。review 的 generation budget/count 仍可为 null，不推断厂商内部行为。未知 finish reason 只输出 other，不回显厂商字符串。报告包含有界逐次记录与其摘要、观察/缺失/未知计数；compare_asr_runs 重新检查记录、计数、范围和摘要，不只信任 quality_evidence_valid。合成执行可以通过诊断证据门，但不能获得生产身份、质量改善或人数认证。
+
+### ASR 开发来源与主参考
+
+`meeting_asr_source.load_locked_asr_case` 复用共同会议 development manifest/split/scorer 的来源验证，读取一个 fixture 的 16kHz mono PCM16 WAV，并构造最多十分钟的不可变 `AsrCase`。现有活动参考、分人文字参考及固定 ASR sidecar 仍按共享来源规则核对，但不进入 ASR 请求，也不作为主参考文字。该入口属于共用会议评测，依赖同一 scorer 环境；它不是独立通用音频导入器。
+
+调用方另传冻结主参考 descriptor（相对 artifact root 的 `path` 与文件字节 `sha256`）。主参考 JSON 必须恰含：
+
+```json
+{
+  "schema_version": 1,
+  "fixture_id": "M0",
+  "manifest_sha256": "<canonical-development-manifest-sha256>",
+  "pcm_sha256": "<wav-file-sha256>",
+  "overlap_order": "unambiguous",
+  "main_reference": "<frozen-primary-transcript>"
+}
+```
+
+`overlap_order` 只能为 unambiguous/ambiguous，主参考可为 null；缺失或歧义不会按时间戳、speaker 顺序或候选输出补造。主参考正文上限10000字符；拒绝额外字段、错误来源/fixture/WAV绑定、重复键、符号链接和非普通文件。主参考应在查看候选输出前冻结；文件一致性不能证明人工来源或冻结时点。
+
+`evaluate_locked_asr_case` 接收已加载来源和负责关闭会话的 replay callback；调用前、退出时 joined 校验全部来源，返回前同步核对文件状态，并确认结果的 case/candidate 摘要。取消也等待来源复核；修改后恢复字节仍因文件状态变化失败。返回的 source_validation 只报告字节核对，human_reference_provenance_verified/source_catalog_provenance_verified 继续 false；它不升级 runtime_identity_verified、实际 A0 或认证。callback 抛出的普通错误统一脱敏。主参考与PCM留在RAM，不写入报告或仓库；fake回归见 `tests/test_meeting_asr_source.py`。
 
 ### 有声书外置小说语料回归
 

@@ -389,3 +389,11 @@ Ruling: 逐fixture与最终checkpoint增加async verifier及同步commit hook。
 子代理独占五个perf源与新测试，主线独占ASR probe/测试和文档；均无同文件写入冲突。主线对六条路径coverage复核均missing，改读当前worktree源码，不重建索引。28项新增fake回归覆盖18个fake worker完整配对、全部来源与候选预检、C0高人数排除、角色交换、独立恢复/存活集合、holdout、busy端口、无效握手、strict控制文件、CLI分派/脱敏及最终变更反例。子代理精确相关114项通过；主线22个相关文件联合 `530 passed in 10.67s`，8个本轮变更Python Ruff、6个perf source按项目strict配置Mypy通过，evaluate-checkpoint --help与diff检查通过。
 
 未执行实际evaluate-checkpoint、真实音频/模型/benchmark、下载、服务、安装、UI、发布或合并。原生C0握手仍只有ok，source声明不是SDK/shape执行证明；全部结果保持diagnostic、runtime_identity_verified=false、certification_eligible=false、certified_max_speakers=null。共同检查点CLI已接线，跨层唯一候选、正式ASR评测组合根与真实A0/质量、生产联合身份、收据、留出及授权运行仍未完成。
+
+## T8 共用开发来源加载与独立主参考
+
+2026-10-18：新增 meeting_asr_source，复用共同会议development输入验证，读取已锁16kHz mono PCM16 WAV，保留最多十分钟AsrCase。另传主参考descriptor及严格JSON header，绑定fixture、development manifest canonical摘要和WAV文件字节摘要；主参考不从speaker区间文字、固定sidecar或候选输出推导，ambiguous/null保持未观察。原共享活动/文字/sidecar仍核对，但不进入ASR模型请求；loader依赖共同scorer环境，未伪装成独立通用导入器。
+
+LockedAsrCase丢弃无关参考正文，仅保留不可变case和文件指纹；evaluate_locked_asr_case在callback前和退出时joined校验，返回前同步stamps并核对case/candidate摘要。修改后恢复、来源角色/绑定错误、未知字段、symlink、digest不符或回放期间变更均不能返回verified source结果。取消先由replay负责会话清理，再等待来源复核；普通callback错误和缺文件错误均脱敏。proof只说明字节匹配，人工参考来源与source catalog真实性保持false，生产身份/实际A0/质量不升级。
+
+RED：12项新模块缺失及来源绑定/变更反例先失败；GREEN：19项loader合成回归通过，与原共享fixture合并 `46 passed in 1.91s`。Ruff两文件、loader按项目strict配置Mypy及diff检查通过。全部为合成WAV/参考，没有真实语料/模型、benchmark、下载、服务或安装/UI操作。父提交15a3f61c的原生CI39092542609成功；同SHA主CI39092542520仍queued，继续观察同一handle，不重启或推断失败。
