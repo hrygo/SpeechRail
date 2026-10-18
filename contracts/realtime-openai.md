@@ -1,6 +1,6 @@
 # SpeechRail Realtime ASR/TTS 协议契约
 
-> 契约版本：`6.6.2`；生效日期：2026-10-18。唯一机器 schema 是
+> 契约版本：`6.6.3`；生效日期：2026-10-19。唯一机器 schema 是
 > [`realtime-events.schema.json`](realtime-events.schema.json)，字段责任表是
 > [`realtime-field-matrix.json`](realtime-field-matrix.json)。
 
@@ -171,6 +171,8 @@ clear 取消。此后对空缓冲区执行一次 `commit` 会产生空 `complete
 24 kHz wire 样本半开区间 `[start, end)` 和关闭原因 `vad`、`client_commit` 或
 `budget_rollover`。只有 client commit 关闭可选带 `commit_event_id`。预算切段仅说明输入段
 冻结，不代表语义结束，也不应单独触发调用方的一轮回复；空输入不创建虚假的样本区间。
+重采样相位跨 client commit 连续保留。极短的新 wire 输入若未产生新的识别样本，提交仍返回
+空 `completed`，不创建 `segment_closed`；完成屏障的 `accepted_samples` 仍统计全部 wire 输入。
 
 ```json
 {

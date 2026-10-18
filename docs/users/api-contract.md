@@ -2,7 +2,7 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.18.2"
+version: "3.18.3"
 date: 2026-10-19
 ---
 
@@ -860,6 +860,8 @@ registry 不可读返回 `503 pronunciation_store_unavailable`（可重试）。
 `sample_span.start` / `sample_span.end` 是 24 kHz wire 样本数，表示半开区间 `[start, end)`；
 预算切段只结束识别 item，不代表助手业务轮次完成。仅 `client_commit` 可附带可选
 `commit_event_id`。`completed` 的既有形状保持不变。
+重采样相位在多次提交之间连续保留。极短输入没有产生新的识别样本时返回空 `completed`，
+不创建虚假段边界；完成屏障仍按原始 wire 输入累计样本数。
 
 客户端调用 `input_audio_buffer.commit` 时生成稳定 `event_id`。由这次提交产生的
 `completed` / `failed` 会回显 `commit_event_id`。结束录音时请给 commit 附带

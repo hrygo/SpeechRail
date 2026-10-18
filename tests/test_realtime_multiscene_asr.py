@@ -91,8 +91,12 @@ def test_failed_input_recovery_joins_teardown_and_terminal_delivery():
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("first_samples", [1, 25, 80, 81])
-def test_manual_commits_keep_exact_wire_anchors_and_single_sample_tail(first_samples):
+@pytest.mark.parametrize(
+    "first_samples,second_has_pcm", [(1, True), (25, True), (80, False), (81, True)],
+)
+def test_manual_commits_keep_exact_wire_anchors_and_single_sample_tail(
+    first_samples, second_has_pcm,
+):
     async def run():
         services, factory = _build()
         sent = []
@@ -105,26 +109,41 @@ def test_manual_commits_keep_exact_wire_anchors_and_single_sample_tail(first_sam
         await session._update_session(_policy_update())
         first = (500).to_bytes(2, "little", signed=True) * first_samples
         second = (-300).to_bytes(2, "little", signed=True)
-        for audio in (first, second):
+        for index, audio in enumerate((first, second)):
             await session._asr_owner.append({
                 "type": "input_audio_buffer.append",
                 "audio": base64.b64encode(audio).decode(),
             })
-            await session._asr_owner.commit()
+            await session._asr_owner.commit(
+                commit_event_id=f"tail-{index}", request_receipt=True,
+            )
         boundaries = [e for e in sent if e["type"].endswith("segment_closed")]
-        assert [e["sample_span"] for e in boundaries] == [
-            {"start": 0, "end": first_samples},
-            {"start": first_samples, "end": first_samples + 1},
-        ]
+        expected_spans = [{"start": 0, "end": first_samples}]
+        if second_has_pcm:
+            expected_spans.append({"start": first_samples, "end": first_samples + 1})
+        assert [e["sample_span"] for e in boundaries] == expected_spans
         resampler = RationalResampler(24000, 16000)
         expected = b"".join(
             resampler.process(audio) + resampler.flush() for audio in (first, second)
         )
         received = b"".join(chunk for item in factory.sessions for chunk in item.received)
         assert received == expected
+        assert len(received) // 2 == ((first_samples + 1) * 2 + 2) // 3
+        assert len(factory.sessions) == 1 + int(second_has_pcm)
         terminals = [e for e in sent if e["type"].endswith(("completed", "failed"))]
         assert len(terminals) == 2
-        assert {e["item_id"] for e in terminals} == {e["item_id"] for e in boundaries}
+        assert all(e["type"].endswith("completed") for e in terminals)
+        assert {e["item_id"] for e in terminals if e["transcript"]} == {
+            e["item_id"] for e in boundaries
+        }
+        if not second_has_pcm:
+            # Source position 80 is skipped by the global 3:2 phase after the
+            # first commit. A terminal is still required, without fabricated PCM.
+            assert terminals[1]["transcript"] == ""
+        receipts = [e for e in sent if e["type"] == "speechrail.input_audio_buffer.committed"]
+        assert [(e["commit_event_id"], e["accepted_samples"]) for e in receipts] == [
+            ("tail-0", first_samples), ("tail-1", first_samples + 1),
+        ]
         await session.close()
 
     asyncio.run(run())
