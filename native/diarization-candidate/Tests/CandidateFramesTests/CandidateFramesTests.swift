@@ -47,3 +47,25 @@ import Testing
     #expect(frames.last?.end == 163_840)
     #expect(try timeline.consume(chunks: [], accepted: 163_841, final: false).isEmpty)
 }
+
+@Test(arguments: [160, 208])
+func clipsOneCenterPaddedSDKFrameAtEOF(accepted: Int) throws {
+    var timeline = CandidateFrames()
+    let frameCount = (accepted + 159) / 160
+    let scores = [Float](repeating: 0.75, count: (frameCount + 1) * 8)
+    let frames = try timeline.consume(chunks: [scores], accepted: accepted, final: true)
+    #expect(frames.count == frameCount)
+    #expect(timeline.emitted == frameCount * 160)
+    #expect(frames.last?.start ?? 0 < accepted)
+}
+
+@Test func rejectsInvalidOrExcessPaddingWithoutAdvancingTimeline() throws {
+    for scores in [[Float](repeating: 0.5, count: 24),
+                   [Float](repeating: 0.5, count: 8) + [Float.nan] + [Float](repeating: 0, count: 7)] {
+        var timeline = CandidateFrames()
+        #expect(throws: (any Error).self) {
+            try timeline.consume(chunks: [scores], accepted: 160, final: true)
+        }
+        #expect(timeline.emitted == 0)
+    }
+}

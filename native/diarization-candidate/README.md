@@ -26,8 +26,11 @@ retain the 64 KiB limit; response frames use a JSON-array payload bounded to
 512 KiB and 2,048 frames. Input PCM16 is mono 16 kHz, at most 16,000 samples per
 append. A single sequential task owns the SDK and uses
 `appendAudio/processBufferedAudio/finishStream`, with no whole-recording buffer
-or SDK segment filtering. Output carries raw eight-slot probabilities at 10 ms;
-Python applies strict `score > 0.5` and clips final padding to accepted samples.
+or SDK segment filtering. Output carries raw eight-slot probabilities at 10 ms.
+At EOF the native adapter validates and discards at most one additional
+center-padded SDK frame beyond the rounded audio extent; missing coverage,
+larger overruns and invalid padding probabilities are rejected. Python applies
+strict `score > 0.5` and clips the final partial frame to accepted samples.
 The eight slots do not detect an unknown ninth person.
 
 `examples/perf/meeting_candidate_session.py` reuses the service's session owner,

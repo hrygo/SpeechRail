@@ -27,8 +27,18 @@ public struct CandidateFrames {
             }
         }
         let padded = (accepted + 159) / 160 * 160
-        guard final ? cursor == padded : cursor <= accepted else { throw InvalidOutput.coverage }
-        emitted = cursor
+        // The SDK's center-padded STFT can emit one additional 10 ms frame at
+        // EOF. Validate its scores above, then discard only padding beyond the
+        // accepted audio. Missing coverage and larger overruns remain errors.
+        if final {
+            guard cursor == padded || (accepted > 0 && cursor == padded + 160) else {
+                throw InvalidOutput.coverage
+            }
+            frames.removeAll { $0.start >= padded }
+        } else {
+            guard cursor <= accepted else { throw InvalidOutput.coverage }
+        }
+        emitted = final ? padded : cursor
         return frames
     }
 }

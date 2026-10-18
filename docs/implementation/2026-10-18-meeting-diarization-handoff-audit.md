@@ -897,3 +897,15 @@ C0 的参考 speaker-time 为 100.13 秒，正确 89.10 秒、漏检 11.03 秒�
 修复保持当前 revision 计算归属，只有实际内容或定稿状态改变时才递增并返回。保持真正的匿名 label 修正、unknown 原因和 provisional → final 转换；不更改模型、阈值、活动参考、PCM 或公共字段。两例 unchanged 回归在旧实现失败，真实 speaker 变化保护例通过；修复后三个直接相关测试文件 28 项通过，四个边界/集成文件 41 项通过，定向 Ruff 和 diff check 通过。仅执行相关确定性测试，没有自动加入真实语料 CI。
 
 另以此前 18 片实际 C0 活动帧构建仓库外确定性账本对照：使用参考活动区间作为无文字代理 units，所有 units 在 feed 前注册，按合成的一秒稳定窗口喂入。该工作负载不是实际 ASR unit 到达节奏，也不是实时性能或质量认证。前后发出的 unit 修订数为 69019 → 2290；去除仅 revision 不同的重复后，有意义修订的时间序列与全部最终 label 完全相同。证据证明该输入和调度下消除了重复修订，不能据此声称真实会话流量同比下降、CER/分人准确率提高或 P95 改善。baseline 源码、输入和逐来源计数留在仓库外 attribution-revision-diagnostic-20261018；未停服、未加载新模型完成此对照。
+
+## Nemotron 首片实测与结束边界修复
+
+2026-10-18：用户明确授权下载两个候选并继续同源诊断，随后给予一小时任务内自主执行授权。固定模型 revision 的 9 文件已下载到仓库外，每个文件均核对大小及发布方 LFS SHA-256 或 Git blob ID；全部匹配。没有下载其他模型或修改安装、selection、profile。候选制品预检与实际推理分开记录。
+
+首次 fast32 在 finish 阶段失败，第二次仅补安全异常树和子进程状态，确认 runtime preflight/形状检查通过、native 子进程退出码 1 且已回收；fast128 未启动。锁定 SDK 的中心化 STFT 在 EOF 可多输出一个 10 ms 帧，原 CandidateFrames 强制输出等于输入向上取整后的长度，发生边界冲突。两例 EOF padding 测试在旧实现以 coverage 失败；修复先验证所有概率，再丢弃最多一个完全位于向上取整范围外的 padding 帧。输入范围内的输出、缺帧检查、较大越界拒绝与 NaN 拒绝均保留；不修改 SDK checkout、阈值或模型。
+
+一次复跑在 Release 构建尚未完成时错误地冻结并使用了旧二进制，仍在 finish 失败；该结果不算修复后的证据。等待构建成功并通过 --show-bin-path 核对实际产物后，确认 SHA-256 改变再冻结 v4，避免将源码修改冒充实际二进制修改。原有失败制品全部保留。Swift Testing 的 5 项测试（含参数化用例）通过，Release 构建成功，新二进制摘要为 124ceb24924366acb6812a595e6bd215f51bc8358b82f22f6cb6440705fd8ebd。
+
+v4 两候选均完成首片，processed/stable 为 1974560，125 次更新，runtime SDK/preset/compute-unit 与形状检查通过，实际子进程回收、输入与模型/源码/二进制复核稳定。fast32 的 recall/precision/最低逐人 recall 为 86.63737%／99.96543%／85.79899%；fast128 为 87.03685%／100%／85.82864%，质量门均 fail。它们在该片比 C0 召回率低、精确率高，不能据首片认定整体改善或替换生产。没有 ASR 主参考、实际联合转写或峰值/P95 成绩；仍为派生诊断。
+
+四个窗口结束均恢复原服务，最终唯一 listener PID 10809，health/readyz 200、3.12.0、quality/quality，配置、selection 和 runtime target 不变。
