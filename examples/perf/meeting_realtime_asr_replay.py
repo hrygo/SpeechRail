@@ -308,6 +308,7 @@ def _source_digests() -> dict[str, str]:
         "shared_pcm_feed": Path(__file__).with_name("meeting_pcm_feed.py"),
         "live_text": Path(__file__).with_name("meeting_live_text.py"),
         "timing": Path(__file__).with_name("meeting_timing.py"),
+        "latency_policy": Path(__file__).with_name("meeting_latency_policy.py"),
         "completed_text": Path(__file__).with_name("meeting_candidate_evidence.py"),
         **{
             relative: root / relative

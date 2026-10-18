@@ -39,6 +39,7 @@ C0_ADAPTER_SOURCES = (
     "examples/perf/meeting_pcm_feed.py",
     "examples/perf/meeting_live_text.py",
     "examples/perf/meeting_timing.py",
+    "examples/perf/meeting_latency_policy.py",
     "examples/perf/meeting_asr_sidecar.py",
     "examples/perf/meeting_development_fixture.py",
     "examples/perf/meeting_candidate_schedule.py",
@@ -117,7 +118,8 @@ def static_c0_spec(*, worker: Path, model_directory: Path) -> MeetingCandidateSp
         scorer={
             "policy_sha256": canonical_digest(policy),
             "source_sha256": _source_digest(
-                ("examples/perf/meeting_quality_metrics.py", "examples/perf/diarization_quality.py")
+                ("examples/perf/meeting_quality_metrics.py", "examples/perf/diarization_quality.py",
+                 "examples/perf/meeting_latency_policy.py")
             ),
             "versions": policy["scorer_versions"],
         },

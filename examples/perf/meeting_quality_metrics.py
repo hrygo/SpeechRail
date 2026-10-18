@@ -18,9 +18,11 @@ from typing import Any
 try:
     from .diarization_quality import score_diarization
     from .meeting_evaluation_identity import canonical_digest
+    from .meeting_latency_policy import latency_policy
 except ImportError:  # direct CLI imports
     from diarization_quality import score_diarization
     from meeting_evaluation_identity import canonical_digest
+    from meeting_latency_policy import latency_policy
 
 _WORD = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]|[a-z0-9]+")
 SOURCE_AGGREGATION = "one_execution_per_fixture_source_totals_v1"
@@ -45,6 +47,8 @@ def _validate_policy(policy: Mapping[str, object]) -> None:
     missing = _REQUIRED_POLICY - set(policy)
     if missing:
         raise ValueError(f"incomplete scorer policy: {sorted(missing)}")
+    if canonical_digest(policy.get("latency")) != canonical_digest(latency_policy()):
+        raise ValueError("latency thresholds and sampling differ from the registered policy")
     statistics = policy.get("statistics")
     if (
         not isinstance(statistics, Mapping)

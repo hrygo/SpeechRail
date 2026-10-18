@@ -18,6 +18,7 @@ from typing import Any
 
 from bench_asr_diarization_overlap import _report_digest, run_pcm_workload_schedule
 from meeting_evaluation_identity import _freeze, canonical_digest
+from meeting_latency_policy import latency_policy
 from meeting_live_text import LiveTextChannel, SealedBody
 from meeting_pcm_feed import PcmChunk
 from meeting_timing import MeetingTiming
@@ -41,7 +42,7 @@ def _source_digests() -> dict[str, str]:
     return {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in (
         "meeting_live_pipeline.py", "bench_asr_diarization_overlap.py", "meeting_pcm_feed.py",
         "meeting_live_text.py", "meeting_candidate_runner.py", "meeting_realtime_asr_replay.py",
-        "meeting_asr_runtime.py", "meeting_timing.py",
+        "meeting_asr_runtime.py", "meeting_timing.py", "meeting_latency_policy.py",
     )}
 
 
@@ -132,6 +133,8 @@ async def run_live_meeting_pipeline(
     body = SealedBody(samples=len(pcm) // 2, timing=timing)
     ingress = _Ingress(diarization_queue_chunks)
     dia_done, relay_done = asyncio.Event(), asyncio.Event()
+    publication_done = asyncio.Event()
+    output_lock = asyncio.Lock()
     operation: asyncio.Task[Mapping[str, Any]] | None = None
     dia_digest: str | None = None
     dia_report: Mapping[str, Any] | None = None
@@ -146,6 +149,10 @@ async def run_live_meeting_pipeline(
             operation.cancel()
 
     async def emit(row: Mapping[str, Any]) -> None:
+        async with output_lock:
+            await deliver(row)
+
+    async def deliver(row: Mapping[str, Any]) -> None:
         ticket = timing.begin_delivery(row)
 
         async def invoke() -> None:
@@ -171,6 +178,28 @@ async def run_live_meeting_pipeline(
         except BaseException:
             timing.fail_delivery(ticket)
             raise
+
+    async def publish_stable() -> None:
+        try:
+            while failure is None:
+                timing.changed.clear()
+                ready = timing.ready_publications()
+                for row in ready:
+                    if failure is not None:
+                        return
+                    await emit(row)
+                if publication_done.is_set():
+                    if ready:
+                        continue
+                    return
+                await timing.changed.wait()
+        except asyncio.CancelledError:
+            owner = asyncio.current_task()
+            if owner is not None and owner.cancelling():
+                raise
+            disable("stable_publication_cancelled")
+        except Exception:
+            disable("stable_publication_failed")
 
     async def run_asr(
         shared: ResourceGovernor, frames: AsyncIterator[PcmChunk],
@@ -245,12 +274,19 @@ async def run_live_meeting_pipeline(
 
     try:
         sources = await join_cleanup(asyncio.create_task(asyncio.to_thread(_source_digests)))
-        schedule = await run_pcm_workload_schedule(
-            pcm=pcm, expected_pcm_sha256=expected_pcm_sha256, mode=mode, governor=governor,
-            asr=run_asr, diarization=run_dia, overlap_enabled=overlap_enabled,
-            timeout_seconds=timeout_seconds, chunk_samples=chunk_samples, queue_chunks=queue_chunks,
-            max_lateness_seconds=max_lateness_seconds, clock=clock, sleep=sleep,
-        )
+        async with asyncio.TaskGroup() as tasks:
+            tasks.create_task(publish_stable(), name="live-stable-publication")
+            try:
+                schedule = await run_pcm_workload_schedule(
+                    pcm=pcm, expected_pcm_sha256=expected_pcm_sha256, mode=mode, governor=governor,
+                    asr=run_asr, diarization=run_dia, overlap_enabled=overlap_enabled,
+                    timeout_seconds=timeout_seconds, chunk_samples=chunk_samples,
+                    queue_chunks=queue_chunks, max_lateness_seconds=max_lateness_seconds,
+                    clock=clock, sleep=sleep,
+                )
+            finally:
+                publication_done.set()
+                timing.changed.set()
         after_sources = await join_cleanup(asyncio.create_task(asyncio.to_thread(_source_digests)))
         if sources != after_sources:
             raise ValueError("live pipeline source changed")
@@ -269,6 +305,7 @@ async def run_live_meeting_pipeline(
             and dia_report.get("text_characters") == body_summary["text_characters"]
             and dia_report.get("emitted_text_characters") == body_summary["text_characters"]
             and observations["text_delivery_verified"]
+            and observations["stable_delivery_verified"]
             and observations["open_sink_deliveries"] == 0
             and not observations["failed_sink_deliveries"]
             and timing.source_samples == timing.asr_sealed == timing.dia_stable == len(pcm) // 2
@@ -292,12 +329,13 @@ async def run_live_meeting_pipeline(
             "deadline_clock": "event_loop_monotonic",
             "dia_finish_deadline_origin": "diarization_relay_input_eof",
             "degradation": "drain_dia_keep_asr_replace_all_unknown_v1",
-            "timing_schema_version": 1,
+            "timing_schema_version": 2,
             "max_timing_records": MeetingTiming.MAX_RECORDS,
             "max_asr_timing_records": MeetingTiming.MAX_ASR_RECORDS,
             "max_publication_timing_records": MeetingTiming.MAX_PUBLICATION_RECORDS,
             "max_open_sink_deliveries": MeetingTiming.MAX_OPEN,
-            "latency_sampling_policy": "not_registered",
+            "latency": latency_policy(),
+            "stable_publication": "joined_asr_activity_watermarks_and_text_sink_v1",
             "pcm_feed_policy_sha256": schedule["pcm_feed"]["policy_sha256"],
             "source_digests": sources,
         }
@@ -307,7 +345,10 @@ async def run_live_meeting_pipeline(
             "diarization_report_sha256": dia_digest,
             "diarization_failure": failure or (None if complete else "invalid_attribution"),
             "diarization_ingress_high_water": ingress.high_water,
-            "joint_verdict": "diagnostic_not_certified" if complete else "no-go",
+            "joint_verdict": "diagnostic_not_certified" if (
+                complete and observations["latency_diagnostics"]["stable_gate"] != "no-go"
+                and not observations["latency_diagnostics"]["finish_hard_failed"]
+            ) else "no-go",
             "joint_quality_gate": "not_observed", "live_text": observed,
             "worker_reaping_verified": False,
             "timing_observations": observations,

@@ -104,6 +104,8 @@ def test_diarization_failure_preserves_entire_asr_body_and_does_not_pass_joint_g
             assert timing["source_samples_observed"] == timing["asr_sealed_through"] == 100
             assert timing["dia_stable_through"] == 100
             assert timing["text_delivery_verified"] is True
+            assert timing["stable_delivery_verified"] is True
+            assert len([r for r in output if r["kind"] == "stable_text"]) == 10
             assert timing["clock_source"] == "injected"
             assert timing["latency_gate"] == "not_evaluated"
             assert timing["stable_label_p95_seconds"] is None
@@ -464,3 +466,137 @@ def test_actual_sink_delivery_must_match_body_even_when_dia_report_claims_comple
         assert output[-1]["items"][0]["text"] == "甲"
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("sink_failure", ["error", "swallowed_timeout"])
+def test_stable_marker_sink_failure_keeps_asr_body_and_cannot_pass_joint_gate(sink_failure):
+    from meeting_activity_workload import run_shared_activity_stream
+    from meeting_live_pipeline import run_live_meeting_pipeline
+
+    from test_meeting_candidate_runner import Activity
+
+    async def run():
+        output = []
+
+        async def asr(shared, frames, channel, body):
+            async for frame in frames:
+                item = CompletedText(0, "甲", SampleSpan(frame.start_sample, frame.end_sample))
+                body.append(item)
+                body.record_terminal(frame.start_sample, frame.end_sample)
+                channel.publish(item)
+            body.finish()
+            channel.finish()
+            return {"complete": True}
+
+        async def dia(shared, frames, channel, sink):
+            return await run_shared_activity_stream(
+                bytes(20), frames, activity_factory=Activity, epoch="session",
+                sink=sink, text_channel=channel,
+            )
+
+        async def sink(row):
+            if row["kind"] == "stable_text":
+                if sink_failure == "error":
+                    raise RuntimeError("private publication failure")
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    return
+            output.append(row)
+
+        result = await asyncio.wait_for(run_live_meeting_pipeline(
+            **policy_arguments(), asr=asr, diarization=dia, sink=sink,
+            sink_timeout_seconds=.01,
+        ), 1)
+        assert result["asr_complete"] is True
+        assert result["joint_verdict"] == "no-go"
+        assert result["diarization_failure"] == "stable_publication_failed"
+        assert result["timing_observations"]["failed_sink_deliveries"]["stable_text"] == 1
+        assert output[-1]["kind"] == "asr_body_snapshot"
+        assert output[-1]["items"][0]["text"] == "甲"
+        assert "private publication failure" not in str(result)
+        assert not [t for t in asyncio.all_tasks() if t.get_name().startswith("live-")]
+
+    asyncio.run(run())
+
+
+def test_repeated_cancellation_joins_stable_marker_sink_cleanup():
+    from meeting_activity_workload import run_shared_activity_stream
+    from meeting_live_pipeline import run_live_meeting_pipeline
+
+    from speechrail.runtime.cleanup import join_cleanup
+    from test_meeting_candidate_runner import Activity
+
+    async def run():
+        entered, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        output = []
+
+        async def asr(shared, frames, channel, body):
+            async for frame in frames:
+                item = CompletedText(0, "甲", SampleSpan(frame.start_sample, frame.end_sample))
+                body.append(item)
+                body.record_terminal(frame.start_sample, frame.end_sample)
+                channel.publish(item)
+            body.finish()
+            channel.finish()
+            return {"complete": True}
+
+        async def dia(shared, frames, channel, sink):
+            return await run_shared_activity_stream(
+                bytes(20), frames, activity_factory=Activity, epoch="session",
+                sink=sink, text_channel=channel,
+            )
+
+        async def sink(row):
+            if row["kind"] == "stable_text":
+                try:
+                    entered.set()
+                    await asyncio.Event().wait()
+                finally:
+                    cleaning.set()
+                    await join_cleanup(asyncio.create_task(release.wait()))
+            output.append(row)
+
+        task = asyncio.create_task(run_live_meeting_pipeline(
+            **policy_arguments(), asr=asr, diarization=dia, sink=sink,
+        ))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            task.cancel()
+            await asyncio.wait_for(cleaning.wait(), 1)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+        finally:
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert not [r for r in output if r["kind"] in {"stable_text", "asr_body_snapshot"}]
+        assert not [t for t in asyncio.all_tasks() if t.get_name().startswith("live-")]
+
+    asyncio.run(run())
+
+
+def test_final_stable_publication_drains_multiple_ready_batches(monkeypatch):
+    import meeting_live_pipeline as module
+    from meeting_timing import MeetingTiming
+
+    original = MeetingTiming.ready_publications
+    buffered, schedule_done = [], []
+    actual_schedule = module.run_pcm_workload_schedule
+
+    async def scheduled(**kwargs):
+        result = await actual_schedule(**kwargs)
+        schedule_done.append(True)
+        return result
+
+    def one_at_a_time(timing):
+        buffered.extend(original(timing))
+        return (buffered.pop(0),) if buffered and schedule_done else ()
+
+    monkeypatch.setattr(module, "run_pcm_workload_schedule", scheduled)
+    monkeypatch.setattr(MeetingTiming, "ready_publications", one_at_a_time)
+    test_diarization_failure_preserves_entire_asr_body_and_does_not_pass_joint_gate(
+        None, monkeypatch,
+    )
+    assert not buffered

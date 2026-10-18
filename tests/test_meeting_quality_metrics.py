@@ -428,3 +428,16 @@ def test_observed_total_miss_is_point_failure_not_missing_observation():
     result = summarize_meeting_quality(rows, required_strata=(1,), policy=policy())
     assert result["decision"] == "point_failed"
     assert result["strata"]["1"]["availability"] == "observed"
+
+
+@pytest.mark.parametrize("fault", ["missing", "weight", "quantile"])
+def test_latency_sampling_is_required_and_cannot_change_after_policy_freeze(fault):
+    value = policy()
+    if fault == "missing":
+        value["latency"].pop("sampling", None)
+    elif fault == "weight":
+        value["latency"]["sampling"]["stable_weight"] = "unit_count"
+    else:
+        value["latency"]["sampling"]["quantile"] = "linear_interpolation"
+    with pytest.raises(ValueError, match="latency"):
+        score([span(0, 1, "R1")], [span(0, 1, "S1")], override=value)

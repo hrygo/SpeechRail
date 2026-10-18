@@ -39,6 +39,7 @@ _SOURCES = (
     "examples/perf/probe_meeting_asr_development.py",
     "examples/perf/probe_meeting_asr_quality.py",
     "examples/perf/meeting_quality_metrics.py",
+    "examples/perf/meeting_latency_policy.py",
     "examples/perf/meeting_evaluation_identity.py",
     "examples/perf/meeting_candidate_execution.py",
     "examples/perf/meeting_checkpoint_execution.py",

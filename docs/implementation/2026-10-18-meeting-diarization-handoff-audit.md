@@ -621,3 +621,18 @@ finish watchdog从DIA relay输入EOF启动，默认/上限15秒；不能等ASR�
 当前policy只有15/30与5/15秒阈值，采样单位、权重与quantile口径未登记，因此本轮只提供可重算宿主记录及诊断端点最大delay，不计算P95、不宣布稳定/finish期限通过。sampling_policy=not_registered、P95=null、latency_gate=not_evaluated。失败记录不丢弃，unknown替换后不把此前known交付量作为最终有效归属。
 
 最终十三相关测试文件473 passed in15.92s，八Python Ruff、四source Mypy通过。改动的perf源码/tests图谱freshness均missing，直接复核当前worktree，无索引重建。父fe541a0d PR所有八项checks均已核验success/completed；本轮仍为合成PCM与fake模型/RPC，不解码真实语料、不加载模型、不运行真实benchmark、不下载、不改变服务/安装/UI/发布或合并状态。T6仍缺产品稳定发布与采样/硬期限、真实进程footprint、ABBA与最终联合身份；CER、认证人数与真实P95均未观察，#370未完成，目标继续。
+
+
+## T6 双水位稳定标记与延迟采样登记
+
+2026-10-18：live pipeline新增joined稳定发布任务。实际正文sink已完成、ASR sealed水位及已交付DIA稳定水位都覆盖owned span末端后，按句末堆取出一次stable_text标记；只引用原sequence/span、匿名speaker和句级粒度，不再交付原文。sink全局串行，任务失败/自取消或吞掉超时取消均停用DIA、保持完整ASR unknown降级；全部稳定任务结束/清理后才发送全量替换，防止晚到覆盖。重复外部取消加入稳定sink的owned清理。
+
+稳定/文字/水位共用原有publication预算，ASR与最终快照预留不变。record schema升为2，policy冻结实际稳定发布语义。正式重放、C0/候选adapter/scorer和ASR comparison闭包纳入meeting_latency_policy，scorer policy摘要改变；旧spec/controls/report须重新冻结执行，不沿用旧认证。
+
+采样选择为所有实际非空sealed ASR unit，按owned span样本时长加权，起点为句末源样本目标时刻，完成为双水位覆盖后的稳定标记sink返回。P95用离散逆经验CDF，在累计权重首次达到95%处取值，不插值；缺失/无效/unknown保留原权重为正无穷，JSON用null表达不可得分位，不丢失败分母，任一缺失或超过30秒unit均no-go。各会议单独计算并检查最慢会议，不跨会议池化。ASR漏字由独立质量门检查，不向运行时注入参考或伪造延迟unit；后续候选调度比较必须保持相同冻结ASR身份，ASR窗口变化可能改变句段分布，不能混作同一延迟对照。
+
+finish为单会议最后源样本目标时刻到最终确认、ASR回调完成、DIA joined清理结束的最大值，含必要的最终unknown快照确认；缺完整证据保留finish_unresolved。每执行只有一个finish观测；预登记同一来源先取全部执行最大值，再按来源等权P95及最慢来源，缺失执行不从分母消失。本轮不计算该跨来源finish P95。单会议5秒target与15秒hard分别标注；顶层认证P95仍null、latency_gate未评估、runtime/certification保持false。宿主diagnostic_pass不证明麦克风采集、UI显示或产品稳定发布；稳定/finish硬期限执行及生产接线仍需完成。
+
+新增先RED后GREEN覆盖双水位/正文确认前禁止稳定标记、策略缺采样或改权重/quantile拒绝，以及收尾竞态：调度已结束时不能只发首个就绪批次，须排空所有批次。另覆盖15/30边界、95%离散权重边界、unknown保留权重、scope清理计入finish、稳定sink失败/吞取消和重复外部取消。十九相关测试文件659 passed in19.75s；十一Python Ruff通过，五个源文件strict/follow-imports=silent Mypy通过。另直接strict检查meeting_quality_metrics.py报告未类型化函数、第三方stub及相对导入解析问题，该模块不在五源通过范围；本轮相关变更由fake功能回归与Ruff覆盖，未扩范围重写评分实现。
+
+父073216d7的全部八项PR checks已核验success/completed。本轮不使用真实PCM/模型，不运行真实质量或性能benchmark，不下载、不改变运行/安装/UI/发布/合并状态。图谱perf/tests missing，直接复核worktree，无索引重建。可信CER、人数上限及真实P95未观察，#370未完成；footprint、ABBA与最终联合身份及来源catalog/main reference等仍待完成。
