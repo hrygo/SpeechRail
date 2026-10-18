@@ -11,7 +11,8 @@ import hashlib
 import math
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import aclosing
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ from bench_asr_diarization_overlap import _report_digest, run_pcm_workload_sched
 from meeting_evaluation_identity import _freeze, canonical_digest
 from meeting_live_text import LiveTextChannel, SealedBody
 from meeting_pcm_feed import PcmChunk
+from meeting_timing import MeetingTiming
 
 from speechrail.runtime.cleanup import join_cleanup
 from speechrail.runtime.resource_governor import ResourceGovernor
@@ -39,7 +41,7 @@ def _source_digests() -> dict[str, str]:
     return {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in (
         "meeting_live_pipeline.py", "bench_asr_diarization_overlap.py", "meeting_pcm_feed.py",
         "meeting_live_text.py", "meeting_candidate_runner.py", "meeting_realtime_asr_replay.py",
-        "meeting_asr_runtime.py",
+        "meeting_asr_runtime.py", "meeting_timing.py",
     )}
 
 
@@ -126,7 +128,8 @@ async def run_live_meeting_pipeline(
     ):
         raise ValueError("invalid live pipeline policy")
     channel = LiveTextChannel(samples=len(pcm) // 2, clock=clock)
-    body = SealedBody(samples=len(pcm) // 2)
+    timing = MeetingTiming(samples=len(pcm) // 2, clock=clock)
+    body = SealedBody(samples=len(pcm) // 2, timing=timing)
     ingress = _Ingress(diarization_queue_chunks)
     dia_done, relay_done = asyncio.Event(), asyncio.Event()
     operation: asyncio.Task[Mapping[str, Any]] | None = None
@@ -143,6 +146,8 @@ async def run_live_meeting_pipeline(
             operation.cancel()
 
     async def emit(row: Mapping[str, Any]) -> None:
+        ticket = timing.begin_delivery(row)
+
         async def invoke() -> None:
             await sink(row)
 
@@ -156,16 +161,29 @@ async def run_live_meeting_pipeline(
             owner = asyncio.current_task()
             if owner is not None and owner.cancelling():
                 raise asyncio.CancelledError
+            timing.end_delivery(ticket)
         except asyncio.CancelledError:
+            timing.fail_delivery(ticket)
             owner = asyncio.current_task()
             if owner is not None and owner.cancelling():
                 raise
             raise RuntimeError("live sink cancelled itself") from None
+        except BaseException:
+            timing.fail_delivery(ticket)
+            raise
 
     async def run_asr(
         shared: ResourceGovernor, frames: AsyncIterator[PcmChunk],
     ) -> Mapping[str, Any]:
-        return await asr(shared, frames, channel, body)
+        async def tracked() -> AsyncGenerator[PcmChunk]:
+            async for frame in frames:
+                timing.source(frame)
+                yield frame
+
+        async with aclosing(tracked()) as observed_frames:
+            result = await asr(shared, observed_frames, channel, body)
+        timing.mark("asr_callback_complete")
+        return result
 
     async def run_dia(
         shared: ResourceGovernor, frames: AsyncIterator[PcmChunk],
@@ -197,6 +215,7 @@ async def run_live_meeting_pipeline(
             except Exception:
                 disable("diarization_failed")
             finally:
+                timing.mark("dia_scope_closed")
                 dia_done.set()
 
         async def relay() -> None:
@@ -205,6 +224,7 @@ async def run_live_meeting_pipeline(
                 if failure is None and not ingress.offer(frame):
                     disable("diarization_ingress_full")
             ingress.finish()
+            timing.mark("dia_input_eof")
             relay_done.set()
 
         async def deadline() -> None:
@@ -238,6 +258,7 @@ async def run_live_meeting_pipeline(
         if body_summary["complete"] is not True:
             raise ValueError("ASR did not finish its independent body")
         observed = channel.summary()
+        observations = timing.summary(schedule["pcm_feed"], body.items())
         complete = (
             failure is None and dia_report is not None and observed["consumer_exhausted"]
             and not observed["failed"]
@@ -247,6 +268,10 @@ async def run_live_meeting_pipeline(
             and dia_report.get("asr_text_sha256") == body_summary["text_sha256"]
             and dia_report.get("text_characters") == body_summary["text_characters"]
             and dia_report.get("emitted_text_characters") == body_summary["text_characters"]
+            and observations["text_delivery_verified"]
+            and observations["open_sink_deliveries"] == 0
+            and not observations["failed_sink_deliveries"]
+            and timing.source_samples == timing.asr_sealed == timing.dia_stable == len(pcm) // 2
         )
         if not complete:
             await emit({
@@ -258,6 +283,7 @@ async def run_live_meeting_pipeline(
                     "speaker": None, "state": "unknown", "granularity": "utterance",
                 } for item in body.items()],
             })
+            observations = timing.summary(schedule["pcm_feed"], body.items())
         policy = {
             "mode": mode, "overlap_enabled": overlap_enabled,
             "timeout_seconds": timeout_seconds, "finish_timeout_seconds": finish_timeout_seconds,
@@ -266,6 +292,12 @@ async def run_live_meeting_pipeline(
             "deadline_clock": "event_loop_monotonic",
             "dia_finish_deadline_origin": "diarization_relay_input_eof",
             "degradation": "drain_dia_keep_asr_replace_all_unknown_v1",
+            "timing_schema_version": 1,
+            "max_timing_records": MeetingTiming.MAX_RECORDS,
+            "max_asr_timing_records": MeetingTiming.MAX_ASR_RECORDS,
+            "max_publication_timing_records": MeetingTiming.MAX_PUBLICATION_RECORDS,
+            "max_open_sink_deliveries": MeetingTiming.MAX_OPEN,
+            "latency_sampling_policy": "not_registered",
             "pcm_feed_policy_sha256": schedule["pcm_feed"]["policy_sha256"],
             "source_digests": sources,
         }
@@ -278,6 +310,7 @@ async def run_live_meeting_pipeline(
             "joint_verdict": "diagnostic_not_certified" if complete else "no-go",
             "joint_quality_gate": "not_observed", "live_text": observed,
             "worker_reaping_verified": False,
+            "timing_observations": observations,
             "pipeline_policy": policy, "pipeline_policy_sha256": canonical_digest(policy),
             "asr_preserved_as_unknown": not complete,
         }

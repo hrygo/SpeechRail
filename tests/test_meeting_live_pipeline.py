@@ -28,13 +28,22 @@ def test_sealed_body_survives_observer_failure_and_requires_explicit_completion(
         body.items()
 
 
-@pytest.mark.parametrize("failure", [None, "startup", "overflow", "self_cancel", "finish"])
-def test_diarization_failure_preserves_entire_asr_body_and_does_not_pass_joint_gate(failure):
+@pytest.mark.parametrize("failure", [
+    None, "startup", "overflow", "self_cancel", "finish", "timing_budget",
+])
+def test_diarization_failure_preserves_entire_asr_body_and_does_not_pass_joint_gate(
+    failure, monkeypatch,
+):
     from meeting_activity_workload import run_shared_activity_stream
     from meeting_live_pipeline import run_live_meeting_pipeline
 
     from test_meeting_candidate_runner import Activity
     from test_meeting_pcm_feed import Clock
+
+    if failure == "timing_budget":
+        from meeting_timing import MeetingTiming
+
+        monkeypatch.setattr(MeetingTiming, "MAX_PUBLICATION_RECORDS", 1)
 
     async def run():
         clock, output, closed = Clock(), [], []
@@ -49,6 +58,7 @@ def test_diarization_failure_preserves_entire_asr_body_and_does_not_pass_joint_g
                 )
                 sequence += 1
                 body.append(item)
+                body.record_terminal(frame.start_sample, frame.end_sample)
                 channel.publish(item)
             body.finish()
             channel.finish()
@@ -90,6 +100,14 @@ def test_diarization_failure_preserves_entire_asr_body_and_does_not_pass_joint_g
         snapshots = [row for row in output if row["kind"] == "asr_body_snapshot"]
         if failure is None:
             assert result["live_attribution_complete"] is True
+            timing = result["timing_observations"]
+            assert timing["source_samples_observed"] == timing["asr_sealed_through"] == 100
+            assert timing["dia_stable_through"] == 100
+            assert timing["text_delivery_verified"] is True
+            assert timing["clock_source"] == "injected"
+            assert timing["latency_gate"] == "not_evaluated"
+            assert timing["stable_label_p95_seconds"] is None
+            assert "甲" not in str(timing)
             assert not snapshots
             assert "".join(r["text"] for r in output if r["kind"] == "text") == "甲" * 10
         else:
@@ -144,6 +162,7 @@ def test_actual_formal_session_populates_independent_body_even_when_dia_fails(br
         ), 3)
         assert result["asr_complete"] is True
         assert result["asr_body"]["text_characters"] == 2
+        assert result["timing_observations"]["asr_sealed_through"] == len(data.pcm16) // 2
         if broken_dia:
             snapshot = next(r for r in output if r["kind"] == "asr_body_snapshot")
             assert "".join(item["text"] for item in snapshot["items"]) == "甲乙"
@@ -202,6 +221,7 @@ def test_asr_or_sink_or_source_failures_cannot_be_reported_as_successful_degrada
                 async for frame in frames:
                     item = CompletedText(0, "甲", SampleSpan(frame.start_sample, frame.end_sample))
                     body.append(item)
+                    body.record_terminal(frame.start_sample, frame.end_sample)
                     channel.publish(item)
                 if fault == "asr":
                     raise RuntimeError("private ASR failure")
@@ -306,6 +326,7 @@ def test_dia_finish_deadline_starts_at_input_eof_even_if_asr_final_review_is_pen
             async for frame in frames:
                 item = CompletedText(0, "甲", SampleSpan(frame.start_sample, frame.end_sample))
                 body.append(item)
+                body.record_terminal(frame.start_sample, frame.end_sample)
                 channel.publish(item)
             await dia_closed.wait()
             body.finish()
@@ -362,6 +383,7 @@ def test_joint_completion_uses_strict_counts_and_the_same_immutable_report_as_it
             async for frame in frames:
                 item = CompletedText(0, "甲", SampleSpan(frame.start_sample, frame.end_sample))
                 body.append(item)
+                body.record_terminal(frame.start_sample, frame.end_sample)
                 channel.publish(item)
             body.finish()
             channel.finish()
@@ -385,5 +407,60 @@ def test_joint_completion_uses_strict_counts_and_the_same_immutable_report_as_it
         assert result["live_attribution_complete"] is False
         assert result["joint_verdict"] == "no-go"
         assert output[-1]["kind"] == "asr_body_snapshot"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("fault", ["missing", "different", "duplicate", "span"])
+def test_actual_sink_delivery_must_match_body_even_when_dia_report_claims_complete(fault):
+    from meeting_activity_workload import run_shared_activity_stream
+    from meeting_live_pipeline import run_live_meeting_pipeline
+
+    from test_meeting_candidate_runner import Activity
+
+    async def run():
+        output = []
+
+        async def asr(shared, frames, channel, body):
+            async for frame in frames:
+                item = CompletedText(0, "甲", SampleSpan(frame.start_sample, frame.end_sample))
+                body.append(item)
+                body.record_terminal(frame.start_sample, frame.end_sample)
+                channel.publish(item)
+            body.finish()
+            channel.finish()
+            return {"complete": True}
+
+        async def dia(shared, frames, channel, sink):
+            async def corrupted(row):
+                if row["kind"] == "text":
+                    if fault == "missing":
+                        return
+                    row = dict(row)
+                    if fault == "different":
+                        row["text"] = "乙"
+                    if fault == "span":
+                        row["start_sample"] += 1
+                    if fault == "duplicate":
+                        await sink(row)
+                await sink(row)
+
+            return await run_shared_activity_stream(
+                bytes(20), frames, activity_factory=Activity, epoch="session",
+                sink=corrupted, text_channel=channel,
+            )
+
+        async def sink(row):
+            output.append(row)
+
+        result = await run_live_meeting_pipeline(
+            **policy_arguments(), asr=asr, diarization=dia, sink=sink,
+        )
+        assert result["live_attribution_complete"] is False
+        assert result["timing_observations"]["text_delivery_verified"] is False
+        assert result["timing_observations"]["missing_or_invalid_text_units"] == 1
+        assert result["joint_verdict"] == "no-go"
+        assert output[-1]["kind"] == "asr_body_snapshot"
+        assert output[-1]["items"][0]["text"] == "甲"
 
     asyncio.run(run())

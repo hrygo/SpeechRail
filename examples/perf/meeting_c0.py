@@ -38,6 +38,7 @@ C0_ADAPTER_SOURCES = (
     "examples/perf/meeting_activity_workload.py",
     "examples/perf/meeting_pcm_feed.py",
     "examples/perf/meeting_live_text.py",
+    "examples/perf/meeting_timing.py",
     "examples/perf/meeting_asr_sidecar.py",
     "examples/perf/meeting_development_fixture.py",
     "examples/perf/meeting_candidate_schedule.py",

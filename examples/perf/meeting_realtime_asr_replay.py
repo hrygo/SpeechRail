@@ -248,6 +248,8 @@ class _Terminals:
                 if self.text_channel is not None:
                     self.text_channel.publish(item)
                 self.live_sequence += 1
+        if self.sealed_body is not None:
+            self.sealed_body.record_terminal(start, end)
         self.covered += end - start
         self.sealed = end
         return self.events
@@ -305,6 +307,7 @@ def _source_digests() -> dict[str, str]:
         "formal_replay": Path(__file__),
         "shared_pcm_feed": Path(__file__).with_name("meeting_pcm_feed.py"),
         "live_text": Path(__file__).with_name("meeting_live_text.py"),
+        "timing": Path(__file__).with_name("meeting_timing.py"),
         "completed_text": Path(__file__).with_name("meeting_candidate_evidence.py"),
         **{
             relative: root / relative

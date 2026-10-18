@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from meeting_candidate_evidence import CompletedText
+from meeting_timing import MeetingTiming
 
 from speechrail.domain.audio_timeline import SampleSpan
 
@@ -28,10 +29,11 @@ class SealedBody:
     supplied external sink; summaries contain counts/digest, never text.
     """
 
-    def __init__(self, *, samples: int) -> None:
+    def __init__(self, *, samples: int, timing: MeetingTiming | None = None) -> None:
         if type(samples) is not int or not 0 < samples <= 600 * 16000:
             raise ValueError("invalid sealed body source")
         self.samples = samples
+        self._timing = timing
         self._items: list[CompletedText] = []
         self._characters = self._through = 0
         self._finished = self._failed = self._closed = False
@@ -54,6 +56,13 @@ class SealedBody:
         self._items.append(item)
         self._characters += len(item.text)
         self._through = item.span.end
+
+    def record_terminal(self, start: int, end: int) -> None:
+        """Record validated closed coverage, including regions without text."""
+        if self._finished or self._failed or self._closed:
+            raise ValueError("sealed body cannot record a terminal")
+        if self._timing is not None:
+            self._timing.asr_terminal(start, end)
 
     def finish(self) -> None:
         if self._failed or self._finished or self._closed:

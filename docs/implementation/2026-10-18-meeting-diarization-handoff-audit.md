@@ -608,3 +608,16 @@ finish watchdog从DIA relay输入EOF启动，默认/上限15秒；不能等ASR�
 新24项fake回归含独立正文非法/预算/复用、正常/启动失败/溢出/自取消/finish卡住、实际OpenAIRealtimeSession在DIA正常与失败时的共同PCM正文保留、ASR/来源/sink失败、外部重复取消、EOF deadline与ASR复核相互等待，以及bool计数和摘要后mapping变动反例。后四个取消/期限/判定反例均先RED后修正；私有root shared-live六场景同时覆盖独立正文参数。最终十三相关文件481 passed in18.83s、六Python Ruff与四source strict/follow-imports=silent Mypy通过；既有asyncio.iscoroutinefunction弃用warning未顺手改动。相关perf/tests图谱missing，直接核对worktree，无索引重建。父f81060a1主CI39101028466与原生CI39101028467均已核验success/completed。
 
 此为诊断库链路的代码与fake证据，不是生产服务/App降级验收。仍缺产品稳定标签发布及共同计时、真实进程footprint、ABBA、可信联合身份和真实质量。joint quality not_observed、runtime/certification/joint latency/worker reaping不升级，无新的CER、认证人数或P95，#370未完成。无真实PCM解码、模型/benchmark、下载、服务/安装、UI、发布或合并，目标继续。
+
+
+## T6 共同宿主计时与实际正文交付核对
+
+2026-10-18：新增MeetingTiming并接入live pipeline的同一clock。ASR取包按序校验共同源原点与offer时刻，正式sealed接收端记录包括无文字区间在内的closed coverage；DIA水位与文字在外部sink调用前/成功返回后分别打点，ASR回调完成、DIA输入EOF及joined作用域结束独立记录。报告保留注入clock标记、源原点、时序metadata、摘要、缺失/无效及失败/未完成交付计数，无原文/PCM/embedding。sink返回不证明UI显示或产品稳定标签。
+
+先RED复现DIA报告文字摘要/计数完整、实际sink漏句/改字/重复/错误span仍被判完整的问题。现逐条核对序列、owned span与文字摘要，并要求共同源/ASR sealed/DIA稳定覆盖全部输入、无失败和开放交付；不匹配时完整ASR正文保留为unknown快照且joint no-go。覆盖实际生产session加fake RPC的sealed水位，不从非空文字反推静音覆盖。
+
+时序记录预算98304条：ASR独占65536、DIA水位/文字32767、最终unknown快照预留1，开放ticket上限64。DIA时序超预算取消并加入分人清理，不挤占ASR与最终快照；新增整体pipeline预算耗尽回归验证正文仍完整保留。策略冻结schema/各预算，正式重放与C0/候选源码闭包加入timing模块；旧spec/controls/report需重新冻结执行。
+
+当前policy只有15/30与5/15秒阈值，采样单位、权重与quantile口径未登记，因此本轮只提供可重算宿主记录及诊断端点最大delay，不计算P95、不宣布稳定/finish期限通过。sampling_policy=not_registered、P95=null、latency_gate=not_evaluated。失败记录不丢弃，unknown替换后不把此前known交付量作为最终有效归属。
+
+最终十三相关测试文件473 passed in15.92s，八Python Ruff、四source Mypy通过。改动的perf源码/tests图谱freshness均missing，直接复核当前worktree，无索引重建。父fe541a0d PR所有八项checks均已核验success/completed；本轮仍为合成PCM与fake模型/RPC，不解码真实语料、不加载模型、不运行真实benchmark、不下载、不改变服务/安装/UI/发布或合并状态。T6仍缺产品稳定发布与采样/硬期限、真实进程footprint、ABBA与最终联合身份；CER、认证人数与真实P95均未观察，#370未完成，目标继续。

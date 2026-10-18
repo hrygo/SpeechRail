@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.42"
+version: "3.3.43"
 date: 2026-10-18
 ---
 
@@ -371,11 +371,21 @@ live通道不证明实际来源/生产字节或最终联合身份；必须在全
 
 DIA relay始终读完共同源的分人支路，另以1–64包、默认8包的有界队列交给实际DIA。模型启动失败、自取消、无效结果、队列溢出或finish超时会停用DIA、取消并加入其清理，但relay继续排空来源，使ASR继续接收完整PCM。relay交付量不等于模型接受量。finish期限使用event-loop monotonic，从分人relay输入EOF开始，默认15秒且只可显式设置为有限正数、不超过15秒；不能等ASR最终复核完成才启动。超时取消不放弃native回收，回收和ASR正文可能在期限后完成，因此该deadline不是产品finish延迟通过证明。
 
-实际DIA报告先冻结为不可变快照，摘要与归属判定使用同一快照，字符计数必须为非bool整数。若DIA完整结束、live channel明确读至EOF且未失败、归属正文摘要/注册及输出字符数均匹配独立ASR正文，则只报告 `live_attribution_complete=true`；其中仍可能包含unknown，不代表说话人正确或质量通过。否则在全部回调清理后向外部sink发送一次 `asr_body_snapshot`：`replaces_all_attribution=true`，包含完整原ASR正文和实际句级时间，所有speaker为null、state为unknown，替换此前归属而非追加重复文字。此时 `asr_preserved_as_unknown=true`、`joint_verdict=no-go`，不能通过改成unknown绕过质量门。ASR、来源核验或最终sink失败则整体失败，不报告成功保留。
+实际DIA报告先冻结为不可变快照，摘要与归属判定使用同一快照，字符计数必须为非bool整数。若DIA完整结束、live channel明确读至EOF且未失败、归属正文摘要/注册及输出字符数均匹配独立ASR正文、实际sink逐条完成的文字摘要与序列/span全部一致、共同源/ASR sealed/DIA稳定覆盖完整且无未完成或失败交付，则只报告 `live_attribution_complete=true`；其中仍可能包含unknown，不代表说话人正确或质量通过。否则在全部回调清理后向外部sink发送一次 `asr_body_snapshot`：`replaces_all_attribution=true`，包含完整原ASR正文和实际句级时间，所有speaker为null、state为unknown，替换此前归属而非追加重复文字。此时 `asr_preserved_as_unknown=true`、`joint_verdict=no-go`，不能通过改成unknown绕过质量门。ASR、来源核验或最终sink失败则整体失败，不报告成功保留。
 
 sink调用有独立owned task和有限期限，默认5秒且不超过5秒；自取消及吞掉超时取消仍失败。外部重复取消加入relay、实际DIA调用、source hash/报告摘要线程及native清理，之后释放PCM队列与正文引用。报告只有摘要、状态、策略与宿主供给信息，不含快照原文或异常私有内容。`workloads.diarization` 的complete/digest描述joined relay作用域，实际DIA报告摘要另为 `diarization_report_sha256`，不得混作模型成功；worker_reaping_verified仍false。
 
 pipeline policy冻结模式、所有deadline、DIA队列预算、降级语义及共同PCM策略摘要；相关源码摘要在执行前后复核。它不证明回调来源、实际加载字节、最终联合身份或生产降级。quality仍not_observed、certification/runtime/joint latency仍false；产品稳定标签发布、共同起点、footprint、ABBA与真实质量需独立验收。确定性回归见 `tests/test_meeting_live_pipeline.py`，只使用合成PCM和fake模型RPC。
+
+### 会议共同宿主计时观察
+
+`meeting_timing.MeetingTiming` 由live pipeline使用同一clock记录源包被ASR取走、验证后的ASR closed coverage（包括无文字区间）、DIA稳定水位sink进入/完成、实际文字sink进入/完成，以及ASR回调完成、DIA输入EOF和清理作用域结束。源原点从包的样本末端目标时刻反推，与共同feed报告严格核对；时钟须有限且不倒退，样本和序列必须为非bool整数。注入clock保留injected标记，不升级为真实采集或时钟认证。
+
+每条文字只存序列、样本区间、known布尔、文字摘要及宿主时刻，不存原文/PCM/embedding。实际sink完成记录须与独立sealed正文逐条匹配；漏句、改字、重复或错误span不能用DIA报告中的守恒计数掩盖。缺失/无效unit、额外unit、未完成与失败sink分别计数；失败记录保留未完成时刻。计数描述实际交付尝试，发生unknown全量替换时不能把此前known计数解释为最终有效归属。
+
+总计最多98304条记录，其中ASR sealed独占最多65536条、DIA水位/文字共用最多32767条，另预留一次最终unknown快照；最多64个开放sink ticket。DIA预算耗尽使其观察失败，不占用ASR或降级快照容量。策略冻结schema与各预算，正式重放、C0及候选源码闭包包含timing模块，旧锁/报告需重新冻结执行。
+
+`timing_observations` 中的端点最大delay、sink耗时和ASR取包排队时间均为诊断宿主观测；sink完成只证明调用返回，不能证明App/UI已显示或标签已满足产品稳定发布条件。记录可支持后续按预登记规则重算，但当前scorer policy未登记采样单位、权重及quantile口径，`sampling_policy=not_registered`、两个P95为null、`latency_gate=not_evaluated`；15/30秒与5/15秒阈值不因此通过。产品稳定标签的ASR与活动双证据、硬期限策略、真实进程footprint、ABBA及实际质量仍需独立完成。相关确定性回归见 `tests/test_meeting_timing.py` 与 `tests/test_meeting_live_pipeline.py`。
 
 ### 有声书外置小说语料回归
 
