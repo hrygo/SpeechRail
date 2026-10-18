@@ -1167,24 +1167,29 @@ def test_locked_source_flows_through_production_session_with_measured_spec(
         captured, clock = [], Clock()
 
         async def workload(shared, frames):
-            from meeting_live_text import LiveTextChannel
+            from meeting_live_text import LiveTextChannel, SealedBody
 
             channel = (
                 LiveTextChannel(samples=len(pcm) // 2) if replay_kind == "shared_pcm_live" else None
             )
+            body = SealedBody(samples=len(pcm) // 2) if channel is not None else None
             try:
                 result = await runtime.evaluate(
                     locked, spec, pcm_frames=frames, governor=shared, text_channel=channel,
+                    sealed_body=body,
                 )
                 if channel is not None:
                     rows = [row.item async for row in channel]
                     assert "".join(row.text for row in rows) == "甲乙"
                     assert channel.summary()["producer_finished"] is True
+                    assert "".join(item.text for item in body.items()) == "甲乙"
                 captured.append(result)
                 return result
             finally:
                 if channel is not None:
                     await channel.aclose()
+                if body is not None:
+                    body.close()
 
         await run_pcm_workload_schedule(
             pcm=pcm,

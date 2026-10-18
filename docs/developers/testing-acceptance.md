@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.41"
+version: "3.3.42"
 date: 2026-10-18
 ---
 
@@ -359,9 +359,23 @@ schema 1 comparison lock 恰含 `schema_version/cases/scorer_policy/baseline/can
 
 正式ASR重放显式接收 `text_channel`，只转发实际生产session sealed final_units中非空正文，并将owned_span准确映射至16k kernel样本。预览、参考、silence与coverage本身不产生文字，句级跨度不伪装成词级对齐。ASR正常完成且质量证据有效后发送明确EOF；启动异常、取消或无效结果使通道失败并唤醒reader。observer失败仍可保留独立ASR评分结果，但不能作为联合通过证据。排队预算与是否启用live进入重放policy；私有ASR root仅在formal shared_pcm与同一Governor绑定下接受此通道，root后验失败也使通道失效。
 
-`run_shared_activity_stream` 和 `NativeCandidateRun.evaluate_shared_pcm` 可接收同一live channel。独立text pump等待DIA实际accepted_samples覆盖文字末端后才注册，输入EOF仍不足则失败；必须收到ASR明确EOF并完成文字守恒、DIA finish与清理后才返回完成。此模式报告 `asr_text_source=live_sealed_session`、`clock_scope=diarization_with_live_asr_observer`。`asr_text_ready.producer_observed_at` 为通道clock的绝对观察时刻，`elapsed_seconds`为DIA runner相对起点的sink交付时刻，不能直接相减冒充产品延迟；通道clock区分monotonic/injected。DIA失败会关闭observer，但通用调度器仍会取消失败lane的其他任务，尚不等于整条流水线实现ASR优先降级。
+`run_shared_activity_stream` 和 `NativeCandidateRun.evaluate_shared_pcm` 可接收同一live channel。独立text pump等待DIA实际accepted_samples覆盖文字末端后才注册，输入EOF仍不足则失败；必须收到ASR明确EOF并完成文字守恒、DIA finish与清理后才返回完成。此模式报告 `asr_text_source=live_sealed_session`、`clock_scope=diarization_with_live_asr_observer`。`asr_text_ready.producer_observed_at` 为通道clock的绝对观察时刻，`elapsed_seconds`为DIA runner相对起点的sink交付时刻，不能直接相减冒充产品延迟；通道clock区分monotonic/injected。DIA失败会关闭observer；通用调度器仍取消失败lane的其他任务，ASR优先的诊断降级须使用下述独立live pipeline入口。
 
 live通道不证明实际来源/生产字节或最终联合身份；必须在全部作用域结束后核对其最终状态，ASR报告中的快照不证明reader随后完整读完。产品稳定标签发布、共同起点、footprint、ABBA与真实质量仍未验证，runtime/certification/joint latency标记保持false，人数认证与P95未观察。相关fake回归见 `tests/test_meeting_live_text.py`、`tests/test_meeting_candidate_runner.py` 与 `tests/test_meeting_candidate_execution.py`。源码闭包变化后重新冻结spec与重放controls/report，不沿用旧认证。
+
+### 会议 live 诊断降级
+
+`meeting_live_pipeline.run_live_meeting_pipeline` 将共同输入、独立sealed正文和DIA观察组合为显式库入口，支持serial或显式启用的overlap；不提供模型发现、CLI、真实执行或生产服务接线。ASR回调接收 `(governor, frames, channel, body)`，DIA回调接收 `(governor, frames, channel, sink)`，两者必须加入各自native/session清理。实际ASR重放和私有root显式接受 `sealed_body`；私有root仍只允许formal/shared PCM与同一Governor，后验失败使正文记录失效。
+
+`SealedBody` 独立于observer的关闭/失败，按真实sealed非空final unit记录句级正文与owned span；最多600秒、4096个unit和10000字符，单unit跨度不超过30秒。非法序列/时间、非空或可变units、重复finish及使用失败记录均拒绝。ASR有效完成后才能读取items与摘要；摘要只含完整状态、样本数、字符数和文字摘要。它只在本次作用域内保留文字，不落盘，pipeline退出后清除引用；失败或取消的ASR不能借部分正文形成“成功降级”。
+
+DIA relay始终读完共同源的分人支路，另以1–64包、默认8包的有界队列交给实际DIA。模型启动失败、自取消、无效结果、队列溢出或finish超时会停用DIA、取消并加入其清理，但relay继续排空来源，使ASR继续接收完整PCM。relay交付量不等于模型接受量。finish期限使用event-loop monotonic，从分人relay输入EOF开始，默认15秒且只可显式设置为有限正数、不超过15秒；不能等ASR最终复核完成才启动。超时取消不放弃native回收，回收和ASR正文可能在期限后完成，因此该deadline不是产品finish延迟通过证明。
+
+实际DIA报告先冻结为不可变快照，摘要与归属判定使用同一快照，字符计数必须为非bool整数。若DIA完整结束、live channel明确读至EOF且未失败、归属正文摘要/注册及输出字符数均匹配独立ASR正文，则只报告 `live_attribution_complete=true`；其中仍可能包含unknown，不代表说话人正确或质量通过。否则在全部回调清理后向外部sink发送一次 `asr_body_snapshot`：`replaces_all_attribution=true`，包含完整原ASR正文和实际句级时间，所有speaker为null、state为unknown，替换此前归属而非追加重复文字。此时 `asr_preserved_as_unknown=true`、`joint_verdict=no-go`，不能通过改成unknown绕过质量门。ASR、来源核验或最终sink失败则整体失败，不报告成功保留。
+
+sink调用有独立owned task和有限期限，默认5秒且不超过5秒；自取消及吞掉超时取消仍失败。外部重复取消加入relay、实际DIA调用、source hash/报告摘要线程及native清理，之后释放PCM队列与正文引用。报告只有摘要、状态、策略与宿主供给信息，不含快照原文或异常私有内容。`workloads.diarization` 的complete/digest描述joined relay作用域，实际DIA报告摘要另为 `diarization_report_sha256`，不得混作模型成功；worker_reaping_verified仍false。
+
+pipeline policy冻结模式、所有deadline、DIA队列预算、降级语义及共同PCM策略摘要；相关源码摘要在执行前后复核。它不证明回调来源、实际加载字节、最终联合身份或生产降级。quality仍not_observed、certification/runtime/joint latency仍false；产品稳定标签发布、共同起点、footprint、ABBA与真实质量需独立验收。确定性回归见 `tests/test_meeting_live_pipeline.py`，只使用合成PCM和fake模型RPC。
 
 ### 有声书外置小说语料回归
 

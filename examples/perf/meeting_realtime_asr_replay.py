@@ -34,7 +34,7 @@ from meeting_evaluation_identity import (
     canonical_digest,
     validate_execution_identity,
 )
-from meeting_live_text import LiveTextChannel
+from meeting_live_text import LiveTextChannel, SealedBody
 from meeting_pcm_feed import PcmChunk, PcmSequenceVerifier
 from probe_meeting_asr_quality import (
     AsrCase,
@@ -169,6 +169,7 @@ class _Terminals:
 
     def __init__(
         self, samples: int, failures: set[str], *, text_channel: LiveTextChannel | None = None,
+        sealed_body: SealedBody | None = None,
     ) -> None:
         self.samples, self.failures = samples, failures
         self.covered = self.sealed = self.events = self.text_length = 0
@@ -176,6 +177,7 @@ class _Terminals:
         self.expected_session: dict[str, Any] | None = None
         self.session_policy_verified = False
         self.text_channel = text_channel
+        self.sealed_body = sealed_body
         self.live_sequence = 0
 
     def _kernel(self, value: Any) -> int:
@@ -239,10 +241,12 @@ class _Terminals:
             self.finals.append(text)
             if len(self.finals) > 4096:
                 raise ValueError("sealed unit budget exceeded")
-            if text and self.text_channel is not None:
-                self.text_channel.publish(
-                    CompletedText(self.live_sequence, text, SampleSpan(left, right))
-                )
+            if text and (self.text_channel is not None or self.sealed_body is not None):
+                item = CompletedText(self.live_sequence, text, SampleSpan(left, right))
+                if self.sealed_body is not None:
+                    self.sealed_body.append(item)
+                if self.text_channel is not None:
+                    self.text_channel.publish(item)
                 self.live_sequence += 1
         self.covered += end - start
         self.sealed = end
@@ -419,6 +423,7 @@ async def replay_realtime_session(
     input_mode: Literal["throughput", "realtime", "shared_pcm"] = "throughput",
     pcm_frames: AsyncIterator[PcmChunk] | None = None,
     text_channel: LiveTextChannel | None = None,
+    sealed_body: SealedBody | None = None,
     wire_packet_samples: int = 2400,
     queue_capacity: int = 16,
     decode_timeout_seconds: float = 30,
@@ -436,9 +441,11 @@ async def replay_realtime_session(
             text_channel.claim_producer()
         if text_channel is not None and text_channel.samples != len(data.pcm16) // 2:
             raise ValueError("live text source length differs from ASR source")
+        if sealed_body is not None and sealed_body.samples != len(data.pcm16) // 2:
+            raise ValueError("sealed body source length differs from ASR source")
         result = await _replay_realtime_session(
             data, spec, services, observe=observe, input_mode=input_mode,
-            pcm_frames=pcm_frames, text_channel=text_channel,
+            pcm_frames=pcm_frames, text_channel=text_channel, sealed_body=sealed_body,
             wire_packet_samples=wire_packet_samples, queue_capacity=queue_capacity,
             decode_timeout_seconds=decode_timeout_seconds,
             total_timeout_seconds=total_timeout_seconds, pace=pace, clock=clock,
@@ -449,10 +456,18 @@ async def replay_realtime_session(
             else:
                 text_channel.fail()
             result["diagnostics"]["live_text"] = text_channel.summary()
+        if sealed_body is not None:
+            if result["quality_evidence_valid"]:
+                sealed_body.finish()
+            else:
+                sealed_body.fail()
+            result["diagnostics"]["sealed_body"] = sealed_body.summary()
         return result
     except BaseException:
         if text_channel is not None:
             text_channel.fail()
+        if sealed_body is not None:
+            sealed_body.fail()
         raise
 
 
@@ -465,6 +480,7 @@ async def _replay_realtime_session(
     input_mode: Literal["throughput", "realtime", "shared_pcm"] = "throughput",
     pcm_frames: AsyncIterator[PcmChunk] | None = None,
     text_channel: LiveTextChannel | None = None,
+    sealed_body: SealedBody | None = None,
     wire_packet_samples: int = 2400,
     queue_capacity: int = 16,
     decode_timeout_seconds: float = 30,
@@ -527,7 +543,9 @@ async def _replay_realtime_session(
             slot,
         ),
     )
-    terminals = _Terminals(len(data.pcm16) // 2, recorded.failures, text_channel=text_channel)
+    terminals = _Terminals(
+        len(data.pcm16) // 2, recorded.failures, text_channel=text_channel, sealed_body=sealed_body
+    )
     session = OpenAIRealtimeSession(
         decorated, session_id="formal-asr-" + uuid4().hex, send=terminals.send
     )
@@ -716,6 +734,7 @@ async def _replay_realtime_session(
             "decode_timeout_seconds": decode_timeout_seconds,
             "total_timeout_seconds": total_timeout_seconds,
             "live_text_enabled": text_channel is not None,
+            "sealed_body_enabled": sealed_body is not None,
             "live_text_queue_items": text_channel.queue_items if text_channel is not None else None,
             "live_text_queue_characters": (
                 text_channel.queue_characters if text_channel is not None else None

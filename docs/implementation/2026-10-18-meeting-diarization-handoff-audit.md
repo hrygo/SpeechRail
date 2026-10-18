@@ -593,3 +593,18 @@ DIA runner独立text pump等待真实accepted样本覆盖正文末端，再注�
 父ccb6419f原生CI39100437295成功；主CI39100437297失败，macOS并行测试5150 passed/1 failed/1 skipped，失败为既有worker lease最短驻留测试。通过延迟首轮poll至80ms稳定复现原固定sleep断言：监控的最短驻留起点是观察load时，原测试从设置alive推算，可能提前断言回收。独立提交c25720b将该测试改为虚拟时钟与逐轮scan确认，覆盖延迟观察、驻留期前保护及期满回收；worker lease21项通过，生产代码未改，不把旧CI报告为通过。
 
 T6仍未完成：通用调度器lane失败仍取消全部任务，observer解耦只证明独立ASR评分正文可保留，不代表整条流水线的ASR优先降级。产品稳定发布与共同时间原点、footprint、ABBA和可信联合身份尚待实施。没有新的实际CER、人数上限或P95；#370仍未完成，目标继续。
+
+
+## T6 live 诊断流水线的 ASR 正文保留与 unknown 降级
+
+2026-10-18：新增run_live_meeting_pipeline，沿用共同PCM供给与既有Governor/四模式调度中的serial或显式overlap准入，另设有界DIA relay。实际分人失败后relay继续排空该支路，实际ASR仍接收全部来源；relay complete仅证明该宿主作用域结束，不作为模型成功。DIA启动失败、自取消、队列溢出、无效结果或finish超时使观察失效并取消/加入实际调用与native清理，ASR或来源错误仍使整体失败，不借降级伪装成功。
+
+独立SealedBody由实际生产sealed接收端记录非空正文与真实owned kernel span，不依赖observer排队与关闭。明确完成前不可读取；非完整ASR不保留为成功结果。600秒/4096unit/10000字符、单unit30秒预算与严格不可变句级证据约束；只向显式外部sink交付原文，报告仅摘要/计数，作用域结束释放正文和排队引用。正式ASR/root新增显式sealed_body参数，root继续same-Governor/formal shared限定与前后源码/依赖/权重/generation核验。
+
+DIA完整结束后对live EOF、独立正文摘要与非bool整数计数守恒判定；实际报告先冻结，摘要与判定共用同一不可变快照，阻断摘要后原mapping变更。失败时等全部回调清理后发asr_body_snapshot、replaces_all_attribution=true，以完整原ASR句级正文和unknown覆盖此前归属；asr_preserved_as_unknown=true而joint_verdict仍no-go。sink失败不报告保留成功，未知归属不折算为质量通过。
+
+finish watchdog从DIA relay输入EOF启动，默认/上限15秒；不能等ASR最终复核完成才计时。超时取消DIA并加入清理，ASR正文仍可继续完成，回收/正文可能超过该时刻，因此不声称产品finish硬上限已通过。sink默认/上限5秒、独立owned task，自取消及吞掉超时取消仍失败。外部重复取消加入嵌套native回收和source/报告摘要线程。policy包含deadline/队列/降级语义、共同PCM策略摘要与执行前后源码摘要；回调来源、实际加载字节、产品发布及最终联合身份仍未证明。
+
+新24项fake回归含独立正文非法/预算/复用、正常/启动失败/溢出/自取消/finish卡住、实际OpenAIRealtimeSession在DIA正常与失败时的共同PCM正文保留、ASR/来源/sink失败、外部重复取消、EOF deadline与ASR复核相互等待，以及bool计数和摘要后mapping变动反例。后四个取消/期限/判定反例均先RED后修正；私有root shared-live六场景同时覆盖独立正文参数。最终十三相关文件481 passed in18.83s、六Python Ruff与四source strict/follow-imports=silent Mypy通过；既有asyncio.iscoroutinefunction弃用warning未顺手改动。相关perf/tests图谱missing，直接核对worktree，无索引重建。父f81060a1主CI39101028466与原生CI39101028467均已核验success/completed。
+
+此为诊断库链路的代码与fake证据，不是生产服务/App降级验收。仍缺产品稳定标签发布及共同计时、真实进程footprint、ABBA、可信联合身份和真实质量。joint quality not_observed、runtime/certification/joint latency/worker reaping不升级，无新的CER、认证人数或P95，#370未完成。无真实PCM解码、模型/benchmark、下载、服务/安装、UI、发布或合并，目标继续。

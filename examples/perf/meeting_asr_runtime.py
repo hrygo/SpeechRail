@@ -32,7 +32,7 @@ from meeting_evaluation_identity import (
     canonical_digest,
     validate_execution_identity,
 )
-from meeting_live_text import LiveTextChannel
+from meeting_live_text import LiveTextChannel, SealedBody
 from meeting_pcm_feed import PcmChunk
 from meeting_realtime_asr_replay import realtime_replay_preset, replay_realtime_session
 from probe_meeting_asr_quality import ASR_SCORER, RuntimeObservation, replay_long_blocks
@@ -760,13 +760,18 @@ class FrozenAsrRuntime:
         pcm_frames: AsyncIterator[PcmChunk] | None = None,
         governor: ResourceGovernor | None = None,
         text_channel: LiveTextChannel | None = None,
+        sealed_body: SealedBody | None = None,
     ) -> dict[str, Any]:
         """Run a registered diagnostic over the same guarded private owners."""
         if self._evaluating or self._closing:
             if text_channel is not None:
                 text_channel.fail()
+            if sealed_body is not None:
+                sealed_body.fail()
             raise ValueError("private ASR runtime permits one replay at a time")
-        if (pcm_frames is None and (governor is not None or text_channel is not None)) or (
+        if (pcm_frames is None and (
+            governor is not None or text_channel is not None or sealed_body is not None
+        )) or (
             pcm_frames is not None
             and (
                 governor is not self._owners.governor
@@ -775,6 +780,8 @@ class FrozenAsrRuntime:
         ):
             if text_channel is not None:
                 text_channel.fail()
+            if sealed_body is not None:
+                sealed_body.fail()
             raise ValueError("shared PCM requires the frozen governor and formal replay")
         self._evaluating = True
         self._inflight = asyncio.current_task()
@@ -811,6 +818,7 @@ class FrozenAsrRuntime:
                     input_mode="shared_pcm" if pcm_frames is not None else "throughput",
                     pcm_frames=pcm_frames,
                     text_channel=text_channel,
+                    sealed_body=sealed_body,
                 )
 
             try:
@@ -827,6 +835,8 @@ class FrozenAsrRuntime:
         except BaseException:
             if text_channel is not None:
                 text_channel.fail()
+            if sealed_body is not None:
+                sealed_body.fail()
             raise
         finally:
             self._evaluating = False

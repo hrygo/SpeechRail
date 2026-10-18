@@ -8,6 +8,7 @@ joint evidence and cannot be recovered by a later successful finish.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import math
 import time
 from collections import deque
@@ -16,6 +17,72 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from meeting_candidate_evidence import CompletedText
+
+from speechrail.domain.audio_timeline import SampleSpan
+
+
+class SealedBody:
+    """Independent bounded ASR body; observer closure cannot erase its text.
+
+    The ASR owner alone appends/finishes. Raw items only go to the explicitly
+    supplied external sink; summaries contain counts/digest, never text.
+    """
+
+    def __init__(self, *, samples: int) -> None:
+        if type(samples) is not int or not 0 < samples <= 600 * 16000:
+            raise ValueError("invalid sealed body source")
+        self.samples = samples
+        self._items: list[CompletedText] = []
+        self._characters = self._through = 0
+        self._finished = self._failed = self._closed = False
+
+    def append(self, item: CompletedText) -> None:
+        if (
+            self._finished or self._failed or self._closed
+            or not isinstance(item, CompletedText)
+            or type(item.sequence) is not int or item.sequence != len(self._items)
+            or type(item.text) is not str or not item.text
+            or type(item.units) is not tuple or item.units
+            or not isinstance(item.span, SampleSpan)
+            or type(item.span.start) is not int or type(item.span.end) is not int
+            or not self._through <= item.span.start < item.span.end <= self.samples
+            or item.span.length > 30 * 16000
+            or len(self._items) >= 4096 or self._characters + len(item.text) > 10000
+        ):
+            self.fail()
+            raise ValueError("invalid or unbounded sealed body")
+        self._items.append(item)
+        self._characters += len(item.text)
+        self._through = item.span.end
+
+    def finish(self) -> None:
+        if self._failed or self._finished or self._closed:
+            raise ValueError("sealed body cannot finish")
+        self._finished = True
+
+    def fail(self) -> None:
+        self._failed = True
+        self._items.clear()
+
+    def close(self) -> None:
+        self._closed = True
+        self._items.clear()
+
+    def items(self) -> tuple[CompletedText, ...]:
+        if not self._finished or self._failed or self._closed:
+            raise ValueError("sealed body is incomplete")
+        return tuple(self._items)
+
+    def summary(self) -> dict[str, Any]:
+        complete = self._finished and not self._failed and not self._closed
+        return {
+            "complete": complete, "source_samples": self.samples,
+            "text_characters": self._characters,
+            "text_sha256": (
+                hashlib.sha256("".join(item.text for item in self._items).encode()).hexdigest()
+                if complete else None
+            ),
+        }
 
 
 @dataclass(frozen=True, slots=True)
