@@ -318,38 +318,64 @@ def test_evictor_close_is_blocked_while_worker_lock_is_held() -> None:
     asyncio.run(run())
 
 
-def test_evictor_respects_worker_last_active_attribute() -> None:
+def test_evictor_respects_worker_last_active_attribute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """When a worker updates its own last_active attribute, eviction is postponed."""
+    from types import SimpleNamespace
+
+    import speechrail.runtime.worker_lease as worker_lease
+
+    now = [100.0]
+    monkeypatch.setattr(worker_lease, "time", SimpleNamespace(monotonic=lambda: now[0]))
 
     class _ActiveWorker:
         def __init__(self) -> None:
-            import time
-
             self.alive = True
             self.closed = False
-            self.last_active: float = time.monotonic()
+            self.last_active = now[0]
 
         async def close(self) -> None:
             self.closed = True
             self.alive = False
 
     async def run() -> None:
-        import time
+        pending_ticks: asyncio.Queue[asyncio.Future[None]] = asyncio.Queue()
+
+        async def monitor_sleep(delay: float) -> None:
+            assert delay == 2.0
+            pending = asyncio.get_running_loop().create_future()
+            pending_ticks.put_nowait(pending)
+            await pending
+
+        # Replace only this module's sleep; the event loop keeps its real clock.
+        monkeypatch.setattr(
+            worker_lease, "asyncio", SimpleNamespace(**(vars(asyncio) | {"sleep": monitor_sleep}))
+        )
 
         worker = _ActiveWorker()
         evictor = WorkerIdleEvictor(
-            (worker,), idle_timeout_seconds=0.08, check_interval_seconds=0.02
+            (worker,), idle_timeout_seconds=10.0, check_interval_seconds=2.0
         )
         await evictor.start()
         try:
-            await asyncio.sleep(0.04)
-            # Worker reports recent internal activity
-            worker.last_active = time.monotonic()
-            await asyncio.sleep(0.05)
-            # Should still be alive because worker.last_active was updated
+            pending = await asyncio.wait_for(pending_ticks.get(), timeout=1)
+
+            async def tick(at: float) -> None:
+                nonlocal pending
+                now[0] = at
+                pending.set_result(None)
+                # Reaching the next sleep proves the entire preceding tick finished.
+                pending = await asyncio.wait_for(pending_ticks.get(), timeout=1)
+
+            await tick(104.0)
+            worker.last_active = 104.0
+            await tick(111.0)  # Original TTL passed, but reported activity is recent.
             assert worker.closed is False
-            await asyncio.sleep(0.06)
-            # Now it should be evicted
+            worker.last_active = 101.0  # Stale reports must not move the idle clock back.
+            await tick(113.0)
+            assert worker.closed is False
+            await tick(114.0)  # Exactly the TTL since the last fresh activity.
             assert worker.closed is True
         finally:
             await evictor.close()
