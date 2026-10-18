@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.29"
+version: "3.3.30"
 date: 2026-10-18
 ---
 
@@ -266,6 +266,18 @@ wire 固定为24kHz PCM16，kernel 为16kHz。为保留锁定 kernel 字节，�
 只取有界 sealed 正文评分，逐 attempt 记录沿用 schema 2。实际 Qwen3 engine 通过 ready 私有帧报告 window_decode_max_new_tokens，经 shared owner 严格校验后只在该代 ready 期间暴露给 window factory；关闭、失效或重启清除，缺字段保持未知。formal replay 观察到该值时要求它与冻结 max_tokens 完全一致，并在 replay policy 中绑定、退出时重核；没有观测的 factory 仍只按调用方上限作诊断。每次真实 budget 继续由 observation 证明且不超过冻结上限；streaming 配置不等于共享 window owner 的有效 cap。缺观测保持未知。replay policy 绑定实现/配置摘要、有效策略、输入模式、包/队列与时限；前后身份字段匹配仍只是调用方声明，runtime_identity_verified/certification_eligible 保持 false，a0_execution 为 not_certified。
 
 可将该 callback 交给 `evaluate_locked_asr_case`，贯通共享 development 来源、显式主参考、实际 session、评分与退出后文件核对；会话关闭后修改参考也不能返回 source proof。摘要不含正文、PCM、Base64 或绝对路径。fake 回归见 `tests/test_meeting_realtime_asr_replay.py` 与 `tests/test_meeting_asr_source.py`；实际 A0 生产字节证明、真实质量与延迟仍需独立授权和验收。
+
+### 私有 ASR 运行组合与加载前冻结
+
+`meeting_asr_runtime.prepare_frozen_asr_runtime` 是显式模型加载库入口，调用前必须已有真实模型运行授权；导入模块不启动模型，也不提供自动发现、下载、留出或 managed service 操作。它使用生产 `build_app_services` 构造私有 ASR/aligner 对象，不借用正在运行的服务，不启动 RuntimeLifecycle；voice registry 仅构造未打开对象，不读取用户音色库。设置必须显式提供 ASR 模型、aligner 与 worker Python，并排除 TTS、分人和 durable job 配置；私有副本关闭 idle eviction。
+
+调用方以 `RuntimeDependencyRoots(host=..., asr=..., aligner=...)` 分别声明三个解释器角色的绝对依赖路径。加载前冻结实际 ASR/aligner 模型目录、必要 VAD 模型、宿主及两个 worker 解释器、生产/评测 Python 源码和声明的依赖文件；目录包含现存 bytecode 与 native library，不推断依赖完整性。目录符号链接拒绝，文件符号链接同时绑定链接状态和目标字节。冻结后、准备后和回放后核对完整目录项、摘要及文件状态，修改后恢复也拒绝；任何读取或目录遍历失败均拒绝继续。
+
+私有 worker transport 设置 `PYTHONDONTWRITEBYTECODE=1` 并纳入配置摘要；不修改宿主全局解释器标志。宿主导入若改变声明的依赖目录，同样判定文件不稳定，不静默忽略新 bytecode。Silero 使用宿主进程共享缓存：拒绝已存在的对应模型 cache key，保护模型文件，但不清空全局缓存，不宣称本次调用独占或释放该缓存。
+
+ready 后绑定同一生产 window factory、shared owner、ASR generation、实际进程对象、ready 结构身份、有效窗口 cap 与配置。aligner 未暴露 generation，仅核对原 client/transport/process 对象和 ready identity。`candidate_spec()` 从冻结文件和实际 ready 配置形成诊断比较身份，sdk_revision 字段使用 `filesystem-closure:` 摘要绑定完整具名文件集合、两个 worker 的完整环境及有效配置，不冒充已导入 SDK 版本；`evaluate()` 贯通 `LockedAsrCase → evaluate_locked_asr_case → replay_realtime_session`，每次回放前后复核，单 handle 不允许并行回放。退出先加入准备或正在进行的回放，再关闭私有创建的两个 child；替换的未知 worker/process 不按假定所有权关闭，清理未确认则失败。
+
+`proof()` 的 preload/post-prepare/post-replay 字段只描述具名文件稳定性与对象核对。`loaded_model_bytes_verified/actual_imports_verified/source_import_bytes_verified` 保持 false；ready revision 是结构指纹，不能作为权重字节证明，依赖声明也不证明实际 import resolution。结果继续 `runtime_identity_verified=false/certification_eligible=false`，实际 A0、质量改善与 P95 仍需独立证据。fake 回归见 `tests/test_meeting_asr_runtime.py`。
 
 ### 有声书外置小说语料回归
 

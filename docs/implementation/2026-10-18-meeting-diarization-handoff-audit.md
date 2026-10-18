@@ -437,3 +437,13 @@ Ruling: 当前checkpoint没有真实稳定标签P95/峰值footprint观测链，�
 加载、评分后、写出后核对输入及直接执行/评分源码的摘要与文件状态，最后同步检查stamps、无await提交selection.json。取消先加入离线线程，失败不提交完成结果；输出采用仓库外新0700目录与0600文件，错误只保留固定状态码。修改后恢复字节仍因状态变化拒绝。报告中的input_files_verified只说明文件核对，selection_control_sha256/selection_executor_sha256只绑定诊断输入与代码；不签发可信development receipt，不解锁留出，所有runtime/certification字段保持false/null。CLI源码属于候选adapter身份，旧spec需按修改后的源码重新冻结。
 
 18项新增合成回归覆盖实际CLI分派、严格schema/摘要/文件类型、总量预算、取消join、评分及最终写出后输入变更、隐私输出和既有目录保留；前16项在新模块缺失/CLI缺命令时先RED后GREEN，后补两项预算/FIFO保护。与selector、原probe和checkpoint执行器联合 `110 passed in 4.47s`；三个Python Ruff和两个source按项目配置Mypy通过。父提交1a9b6817的主CI39093880641、原生CI39093880632均成功，不替代本节变更验证。没有执行真实音频/模型/benchmark、下载、服务、安装、UI、发布或合并；ASR组合根由另一执行者独占新文件，无同文件写入冲突。
+
+## T8 私有生产 ASR 组合与加载前文件冻结
+
+2026-10-18：新增 meeting_asr_runtime。显式调用时以生产build_app_services创建私有ASR/aligner，拒绝TTS/DIA/job设置，不借用运行服务、不启动RuntimeLifecycle；构造未打开voice registry，不读取私有音色。加载前冻结模型、必要VAD、三个解释器角色、显式依赖目录和生产/评测Python源码，准备后及正式来源锁回放后复核。两个私有transport禁止写bytecode，宿主不改全局flag；声明目录的任何变化仍拒绝。ready实际cap、共享owner/generation、aligner ready/process对象和有效配置进入比较身份，sdk_revision明确为filesystem closure/config摘要，不是导入SDK版本。
+
+主线复核推动补齐目录/源码扫描错误不能静默遗漏、resolved target以nonblocking/nofollow打开并fstat防FIFO替换、0预算对应有效512语义、完整transport环境摘要和错误路径脱敏。执行者另以RED反例修正freeze期间配置变化遗漏，以及candidate身份此前未绑定aligner/VAD/全部源码与依赖closure的问题。取消加入hash/prepare和后台回放后才关闭两个确知拥有的child；替换process不误关，其他已确认child仍清理。Silero预热cache key拒绝，但不清空宿主共享缓存；aligner无generation，只保护对象和ready identity。
+
+Ruling: preload/post-prepare/post-replay证明具名文件稳定及对象核对，不能证明实际loader/import消费字节。loaded_model_bytes_verified/actual_imports_verified/source_import_bytes_verified以及runtime_identity_verified/certification_eligible保持false，A0为not_certified；尚无真实转录/分人质量、认证人数或P95结论。入口仅为显式库API，不执行留出、不签收据，不自动发现模型或启动managed服务。
+
+执行者独占两份新source/test，主线只改文档，无覆盖并行改动。44项新增fake回归包含真实production owners/factory与正式OpenAIRealtimeSession接线，仅替换推理/RPC；主线十个相关测试文件联合 `361 passed, 1 warning in 11.87s`，warning为既有asyncio.iscoroutinefunction弃用。两个新Python Ruff、一个source按项目配置Mypy、diff检查通过。图谱generation 2026-10-17T22:35:42Z中新文件missing，关键结论以当前worktree源码复核，无索引重建。父提交4fc7bdb4的主CI39094547962、原生CI39094547939均成功；不是本节提交的CI证据。没有真实语料/模型/benchmark、下载、服务、安装、UI、发布或合并动作。后续仍需可信实际A0/加载来源、真实损失诊断、唯一分人候选及联合质量/延迟验收。
