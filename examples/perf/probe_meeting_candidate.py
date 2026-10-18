@@ -1,0 +1,153 @@
+"""Read-only artifact preflight for the isolated eight-slot candidate.
+
+No native worker is launched here. Runtime SDK identity, CoreML shape checks,
+development/holdout scoring and certification require later execution gates.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import re
+import struct
+from pathlib import Path
+
+from meeting_candidate_protocol import SDK_REVISION
+from meeting_evaluation_identity import (
+    MeetingCandidateSpec,
+    candidate_digest,
+    canonical_digest,
+    file_digest,
+    model_file_digests,
+    validate_execution_identity,
+)
+
+ROOT = Path(__file__).resolve().parents[2]
+POLICY = Path(__file__).with_name("meeting-evaluation-policy.json")
+
+
+def preset_configuration(name: str) -> dict[str, object]:
+    """All SDK configuration fields, pinned to the approved monolithic FP16 presets."""
+    if name not in {"fast32", "fast128"}:
+        raise ValueError("only frozen fast32/fast128 FP16 candidates are allowed")
+    return {
+        "name": name, "num_speakers": 8, "pre_encoder_dims": 512,
+        "subsampling_factor": 8, "mel_features": 128, "sample_rate": 16000,
+        "upsample_factor": 8, "chunk_len": 32 if name == "fast32" else 128,
+        "chunk_left_context": 0, "chunk_right_context": 4, "fifo_len": 40,
+        "spkcache_len": 264, "spkcache_update_period": 40,
+        "silence_threshold": 0.2, "pred_score_threshold": 0.25,
+        "scores_boost_latest": 0.05, "strong_boost_rate": 0.75,
+        "weak_boost_rate": 1.5, "min_pos_scores_rate": 0.5,
+        "spkcache_sil_frames_per_spk": 1, "max_index": 99999,
+        "debug_mode": False, "split_graph": False,
+        "model_file_name": f"Nemotron3Diarizer_{name}.mlmodelc",
+    }
+
+
+def _source_digest(paths: tuple[str, ...]) -> str:
+    return canonical_digest({name: file_digest(ROOT / name) for name in paths})
+
+
+def static_candidate_spec(
+    *, worker: Path, model_directory: Path, preset: str,
+    model_revision: str, compute_units: str,
+) -> MeetingCandidateSpec:
+    """Bind observed files and frozen configuration, without claiming runtime provenance."""
+    configuration = preset_configuration(preset)
+    if re.fullmatch(r"[0-9a-f]{40}", model_revision) is None:
+        raise ValueError("explicit model snapshot revision is required")
+    if compute_units not in {"all", "cpuAndNeuralEngine", "cpuAndGPU", "cpuOnly"}:
+        raise ValueError("explicit CoreML compute units are required")
+    if worker.is_symlink() or not worker.is_file():
+        raise ValueError("an exact candidate worker file is required")
+    model_root = model_directory.resolve(strict=True)
+    if model_root.is_relative_to(ROOT):
+        raise ValueError("candidate models must remain outside the repository")
+    bundle = model_root / str(configuration["model_file_name"])
+    if (
+        bundle.is_symlink() or not bundle.is_dir()
+        or (bundle / "coremldata.bin").is_symlink()
+        or not (bundle / "coremldata.bin").is_file()
+    ):
+        raise ValueError("the matching precompiled preset bundle is required; no implicit compile")
+    embedding_path = model_root / "learnable_sil_emb.bin"
+    if embedding_path.is_symlink() or embedding_path.stat().st_size != 512 * 4:
+        raise ValueError("the local silence embedding must have exactly 2048 bytes")
+    embedding = embedding_path.read_bytes()
+    if len(embedding) != 512 * 4 or any(
+        not math.isfinite(value[0]) for value in struct.iter_unpack("<f", embedding)
+    ):
+        raise ValueError("the local silence embedding must contain 512 finite Float32 values")
+    policy = json.loads(POLICY.read_text(encoding="utf-8"))
+    return MeetingCandidateSpec(
+        implementation_id="nemotron3-streaming-candidate-v1",
+        adapter_sha256=_source_digest((
+            "examples/perf/probe_meeting_candidate.py",
+            "examples/perf/meeting_candidate_protocol.py",
+            "examples/perf/meeting_evaluation_identity.py",
+            "src/speechrail/backends/diarization/coreml.py",
+            "src/speechrail/runtime/diarization_owner.py",
+            "src/speechrail/runtime/diarization_worker.py",
+            "src/speechrail/domain/diarization/types.py",
+            "src/speechrail/domain/audio_timeline.py",
+        )),
+        sdk_revision=SDK_REVISION, worker_sha256=file_digest(worker),
+        model_revision=model_revision, model_files_sha256=model_file_digests(model_root),
+        dtype="fp16", preset=configuration, compute_units=compute_units,
+        decoder={"threshold": 0.5, "comparison": ">", "frame_samples": 160,
+                 "minimum_turn_seconds": 0, "bridge_seconds": 0,
+                 "ghost_merge": False, "consolidation": False, "vad_gate": False,
+                 "tail": "clip_to_accepted_samples"},
+        attribution={"algorithm": "not_connected", "production_certification": False},
+        scorer={"policy_sha256": canonical_digest(policy),
+                "source_sha256": _source_digest((
+                    "examples/perf/meeting_quality_metrics.py",
+                    "examples/perf/diarization_quality.py",
+                )), "versions": policy["scorer_versions"]},
+    )
+
+
+def artifact_preflight(
+    spec: MeetingCandidateSpec, *, worker: Path, model_directory: Path,
+) -> dict[str, object]:
+    observed = static_candidate_spec(
+        worker=worker, model_directory=model_directory,
+        preset=str(spec.preset.get("name")), model_revision=spec.model_revision,
+        compute_units=spec.compute_units,
+    )
+    validate_execution_identity(spec, observed.as_dict())
+    return {
+        "schema_version": 2, "mode": "artifact_preflight",
+        "candidate_sha256": candidate_digest(observed),
+        "artifact_spec_matches": True, "runtime_identity_verified": False,
+        "model_shape_verified": False, "model_revision_provenance_verified": False,
+        "model_slots": 8, "certified_max_speakers": None,
+        "verdict": "not_evaluated",
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    preflight = commands.add_parser(
+        "preflight", help="read files only; no worker or model execution"
+    )
+    preflight.add_argument("--candidate-spec", required=True, type=Path)
+    preflight.add_argument("--worker", required=True, type=Path)
+    preflight.add_argument("--model-directory", required=True, type=Path)
+    args = parser.parse_args(argv)
+    try:
+        spec = MeetingCandidateSpec(**json.loads(args.candidate_spec.read_text(encoding="utf-8")))
+        report = artifact_preflight(spec, worker=args.worker, model_directory=args.model_directory)
+    except OSError:
+        parser.error("required local artifact is unavailable")
+    except (ValueError, TypeError, KeyError):
+        parser.error("candidate spec or local artifacts do not match the frozen configuration")
+    print(json.dumps(report, sort_keys=True, allow_nan=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

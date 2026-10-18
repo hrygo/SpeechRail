@@ -65,7 +65,8 @@ Ruling: 根据用户明确要求，最终审查也由主代理完成，不调用
 | T1 | 已实施 | 身份与收据定向 fake 通过；旧 runner 仅诊断，不签发 v2 认证 |
 | T2 | 已实施 | 产品、标准与 oracle 分开；来源组统计与旧/新门并行，80 项定向通过 |
 | T3 | 已实施 | owner、隔离、队列、预算及持久任务接线；251 项定向通过 |
-| T4–T6 | 待实施 | fake/preflight 可先交付；真实模型/评测另行授权 |
+| T4 | 部分实施 | 八维概率协议和只读制品预检已交付，32 项 fake 通过；native 包、session 接线与构建尚未完成 |
+| T5–T6 | 待实施 | 来源锁、有限候选对照和真实共存 harness |
 | T7 | 前置未满足 | 无生产认证，不接入默认能力、不安装 |
 | T8 | 待实施 | 先交付归因工具，不声称 CER 改善 |
 
@@ -117,3 +118,33 @@ PYTHONPATH=src:examples/perf uv run --no-sync pytest \
 ```
 
 以上只证明 fake 机制和接线，未执行真实双模型、质量/性能 benchmark、服务或配置变更，不签发人数认证，也不改变生产默认并发策略。
+
+## T4 制品预检与交付批次审查
+
+2026-10-18：新增私有八槽 packet 校验器和 `probe_meeting_candidate.py preflight`。frame 必须为八维有限概率，采用 `>0.5`，恰好 0.5 不活动；保留 10ms 短插话，拒绝错误 SDK/epoch/watermark、帧缺口和静默填充。finish 的最后一个 padding frame 只裁到 accepted samples，不假定能检出第九位说话人。
+
+预检固定 fast32/fast128 的完整 SDK preset、关闭外部后处理与 VAD gate，绑定实际 worker/模型/embedding、adapter 与 scorer 源码及 policy 摘要。只接受匹配的预编译 bundle 和本地 512 Float32 silence embedding，不编译、下载或启动 worker。配置依据为核验于本日的[固定 SDK Types](https://github.com/FluidInference/FluidAudio/blob/503b4bd1bbf7220882de39fe8ae6716aae4132da/Sources/FluidAudio/Diarizer/Nemotron3/Nemotron3Types.swift)与[本地加载源码](https://github.com/FluidInference/FluidAudio/blob/503b4bd1bbf7220882de39fe8ae6716aae4132da/Sources/FluidAudio/Diarizer/Nemotron3/Nemotron3Models.swift)。
+
+输出明确 `verdict=not_evaluated`、`certified_max_speakers=null`，运行身份、实际 CoreML shape 和 snapshot 来源均未验证。`preflight` 的文件匹配不构成模型可运行或质量证据；尚不提供 development/holdout 执行命令。native 包与锁、单 task worker、session owner 接线及实际构建仍是 T4 未完成项，T5–T8 继续保留各自前置。
+
+RED：协议模块和预检入口分别缺失。GREEN：`PYTHONPATH=src:examples/perf uv run --no-sync pytest tests/test_probe_meeting_candidate.py --no-cov`，32 项 fake 通过，包含 CLI、摘要变化拒绝及 symlink 拒绝；预检模块通过 Ruff 与指定 source path 的 Mypy。CLI `preflight --help` 已实际执行。
+
+交付批次由主代理自行审查，未调用 subagents；逐项核对身份、含 overlap 分母、unknown 标准 stream、owner 生命周期、隔离上界、队头阻塞、持久任务接线和预检边界。审查修复纳入上述 RED/GREEN，不把自审当独立人审。原 OpenCode 的 21 个文件在本日逐项重新计算 SHA-256，均与接手备份一致。
+
+CI `39082691725` 全量自动测试中有 3 项隔离 fixture 失败，4,347 项通过、1 项 skipped。该 fixture 模拟了 overlap/单任务预算，却没有固定故障资源上界检查所需的硬件条件；本地结果因而不能代表 CI。已显式注入已知/未知硬件预算，并同时验证资源上界未知时所有能力及 readiness 拒绝。12 项定向回归通过，不放宽生产资源检查；修复提交 `fb89beb`。
+
+本批提交前合并复验：2026-10-18，以下 20 个相关测试文件共 392 项通过；全分支 34 个变更 Python 文件通过 Ruff，生产源文件 11 个和预检源文件 2 个分别通过 Mypy，文档本地链接/代码围栏/换行与 diff 检查通过。
+
+```bash
+PYTHONPATH=src:examples/perf uv run --no-sync pytest \
+  tests/test_meeting_evaluation_identity.py tests/test_probe_meeting_sortformer_1to4.py \
+  tests/test_slot_postpass.py tests/test_meeting_quality_metrics.py \
+  tests/test_meeting_diarization_quality.py tests/test_diarization_owner.py \
+  tests/test_diarization_lane.py tests/test_diarization_overlap_policy.py \
+  tests/test_meeting_diarization_session.py tests/test_diarization_worker.py \
+  tests/test_diarization_sdk.py tests/test_diarization_session.py \
+  tests/test_resource_governor.py tests/test_model_budget.py \
+  tests/test_application_composition.py tests/test_local_file_processor.py \
+  tests/test_job_runner.py tests/test_openai_diarized_batch.py \
+  tests/test_realtime_auxiliary_attribution.py tests/test_probe_meeting_candidate.py --no-cov
+```
