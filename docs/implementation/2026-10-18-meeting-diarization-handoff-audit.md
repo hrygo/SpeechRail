@@ -1210,3 +1210,23 @@ fast32 在辅助参考下 recall/precision/最低逐人 recall 从 92.16371%／9
 两组完整样本覆盖及终态区间分割均通过，未触发恢复的正常路径在这两个新增来源保持正文与decode工作量相同。这是小范围未见回归的证据，不是恢复普适有效、CER改善或人数认证；每个arm仅一次，没有ABBA、严格冷启动或完整峰值认证，不将小幅耗时/内存差异解释为收益。两个来源有重叠发言且没有独立有序ASR主参考，四份报告均保留`main_reference_not_observed`与`quality_evidence_valid=false`，不补造CER。
 
 四次窗口均完成owned children回收、控制文件摘要复核及回放/关闭后文件稳定检查；资源观察为complete_metadata、没有读取失败、cleanup后无owned子进程。每次恢复均额外确认LaunchAgent PID等于唯一listener；最后PID48995、health/readyz200、3.12.0、quality/quality，配置、selection与runtime target摘要未变。没有安装候选或读取留出，原始数据和正文保留仓库外。
+
+## Qwen 语言判定对照
+
+2026-10-18：完成上述四arm的完整性检查后，仅将同一Qwen Q8候选的语言从Chinese改为auto，执行预登记的唯一diagnostic-001、123.41秒对照。模型文件、设置、增益、PCM、上下文和预算不变，不给模型参考或热词。候选源码为`d739eab3`；对照此前有界恢复快照，candidate spec除语言外还有SDK源码revision差异，后者为有限指标标签补齐，不改变解码及恢复逻辑，不能把整体候选身份称为相同。
+
+两组均95次decode、1974560样本完整覆盖，593字正文逐字相同，派生诊断仍30/515错、5.82524%。拥有区间结束至封存中位数2.29559→2.30451秒、片内P95为2.61373→2.62549秒；steady-state物理内存采样最大和12.99415→13.12437 GiB。每组仅一次，不解释小幅时延/内存变化；没有识别收益，不采用auto或继续搜索语言参数。按一种最优字符编辑对齐，30个错误由22次替换、4次插入及4次删除构成，不涉及Latin字符；不将编辑分类当作声学或语义因果证明。
+
+候选仅保留缺独立主参考的预期失败，质量报告仍无效。关闭后owned children回收、文件稳定、完整资源观察和cleanup检查通过；managed服务恢复PID50417，LaunchAgent与唯一listener一致、health/readyz200，配置、selection与runtime target未变。没有替换ASR、下载模型、安装候选或触及留出。
+
+## Swift 失败终态的测试观察点
+
+2026-10-18：`2341e190`的Python完整套件通过，Swift套件的一项既有测试在部分回复已投影时过早断言`lastFailure`非空。源码确认`finalizeReply`追加turn后，调用方仍需等待interrupt effect返回，再以session/connection/generation守卫发布失败原因；行存在不等于完整失败终态已发布。
+
+测试改为同时等待助手行、非空失败原因及listening状态，保留原有断言和等待上限，不更改生产顺序。`swift test --package-path macos/SpeechRailApp --filter AssistantSessionTests`的46项通过；只使用fake依赖，没有UI自动化、真实网络模型或服务变更。最终远端门以修复提交的CI结果为准。
+
+## 离线分人的重叠输出核查
+
+2026-10-18：只读检查已锁定的FluidAudio SDK，发现Community-1默认`postProcessing.exclusiveSegments=true`，重建后的sanitize会裁去不同speaker的重叠；SpeechRail的MeetingDiarizationWorker和GlobalProbe均继承该设置。该SDK子树未进入结构图索引，此结论以本地锁定源码直接核验为准。
+
+此前离线默认候选的低召回事实保留，但不能仅据其互斥输出判断模型能否保留重叠。下一次固定验证只关闭该裁剪，保持同一现有模型、输入、自动人数及其余SDK参数；先与原diagnostic-006作同源比较，确认是否恢复真实重叠及是否增加误检，再决定生产修改与扩样。当前尚无该变体实跑收益，不修改生产分人配置或宣称人数能力。
