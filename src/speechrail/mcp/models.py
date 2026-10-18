@@ -113,12 +113,20 @@ class Readiness(BaseModel):
 
 
 class JobsStatus(BaseModel):
-    """Durable-job spool and runner status."""
+    """Durable-job spool and runner status.
+
+    ``runner_state`` is the authoritative runner lifecycle reported by the
+    service. ``unknown`` means the service did not report it, which must stay
+    distinct from ``inactive``: a proxy that cannot observe the runner must not
+    present a stopped runner as fact. ``active`` only asserts that the runner
+    task is alive and polling; it does not promise that any individual job will
+    succeed.
+    """
 
     model_config = ConfigDict(extra="allow")
 
     spool_ready: bool = False
-    runner_active: bool = False
+    runner_state: Literal["unconfigured", "inactive", "active", "unknown"] = "unknown"
 
 
 class RealtimeStatus(BaseModel):

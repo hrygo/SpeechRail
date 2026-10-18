@@ -496,6 +496,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             "streaming_state": states.get("streaming", "unconfigured"),
             "realtime_vad": services.realtime_vad_status,
             "job_spool_ready": services.job_repository is not None,
+            "job_runner_state": services.job_runner_state,
             "ready": services.asr_ready or services.tts_ready,
         }
 

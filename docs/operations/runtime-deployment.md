@@ -161,6 +161,13 @@ RSS 是单次 smoke 证据，不是质量、P95 或通用物理内存承诺。
 代码可显式注入受信任 `JobProcessor` 后启动 batch executor；它和 realtime 共用 Resource
 Governor。默认部署不包含内建的 `input_ref` 路径/URL resolver，不自动读取外部引用。
 
+`GET /health.job_runner_state` 是 runner 生命周期的权威状态：`unconfigured` 表示未配置
+spool、runner 不存在；`inactive` 表示 spool 已配置但 runner 任务未运行（尚未启动、已关闭
+或自行退出）；`active` 表示任务存活并轮询 spool。`job_spool_ready=true` 只说明 repository
+可用，不能替代 runner 状态。启用后应确认 `job_runner_state=active`，再用 `GET /v1/jobs`
+或 MCP `describe().jobs.runner_state` 复核同一状态；MCP 在服务未报告该字段时返回
+`unknown`，不得解释为 runner 已停止。
+
 ## wheel 与本地安装器
 
 发布安装与源码开发分开处理。macOS wheel 会编译并包含私有 CoreML diarization executable；其

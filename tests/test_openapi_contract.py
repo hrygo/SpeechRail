@@ -153,6 +153,17 @@ def test_health_contract_covers_every_worker_lifecycle_state() -> None:
     assert expected <= set(metrics["workers"]["additionalProperties"]["enum"])
 
 
+def test_health_contract_declares_authoritative_runner_state() -> None:
+    schema = _contract()["components"]["schemas"]["HealthResponse"]
+
+    assert "job_runner_state" in schema["required"]
+    assert set(schema["properties"]["job_runner_state"]["enum"]) == {
+        "unconfigured",
+        "inactive",
+        "active",
+    }
+
+
 def test_speech_request_body_is_the_openai_subset() -> None:
     """SpeechRail options live in headers, so the body must not accept them."""
 

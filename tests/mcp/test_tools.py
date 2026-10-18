@@ -236,6 +236,56 @@ def test_describe_merges_models_voices_health_for_quality(
     ]
 
 
+def test_describe_passes_through_observed_runner_state(
+    make_client: Any, run_async: Any
+) -> None:
+    models = _model("quality", "custom_voice")
+    voices = [_voice("serena", mode="system", available=True, variant="custom_voice")]
+    health = {
+        "status": "ok",
+        "profile": "quality",
+        "job_spool_ready": True,
+        "job_runner_state": "active",
+    }
+    client, _requests = make_client(_base_handler(models, voices, health))
+
+    snapshot = run_async(tools.describe(client))
+
+    assert snapshot["jobs"] == {"spool_ready": True, "runner_state": "active"}
+
+
+def test_describe_reports_unknown_runner_state_when_service_omits_it(
+    make_client: Any, run_async: Any
+) -> None:
+    """A missing report must not be presented as an observed stopped runner."""
+    models = _model("quality", "custom_voice")
+    voices = [_voice("serena", mode="system", available=True, variant="custom_voice")]
+    health = {"status": "ok", "profile": "quality", "job_spool_ready": False}
+    client, _requests = make_client(_base_handler(models, voices, health))
+
+    snapshot = run_async(tools.describe(client))
+
+    assert snapshot["jobs"] == {"spool_ready": False, "runner_state": "unknown"}
+
+
+def test_describe_treats_invalid_runner_state_as_unknown(
+    make_client: Any, run_async: Any
+) -> None:
+    models = _model("quality", "custom_voice")
+    voices = [_voice("serena", mode="system", available=True, variant="custom_voice")]
+    health = {
+        "status": "ok",
+        "profile": "quality",
+        "job_spool_ready": True,
+        "job_runner_state": "running",
+    }
+    client, _requests = make_client(_base_handler(models, voices, health))
+
+    snapshot = run_async(tools.describe(client))
+
+    assert snapshot["jobs"] == {"spool_ready": True, "runner_state": "unknown"}
+
+
 def test_describe_derives_balanced_from_custom_voice_profile(
     make_client: Any, run_async: Any
 ) -> None:
