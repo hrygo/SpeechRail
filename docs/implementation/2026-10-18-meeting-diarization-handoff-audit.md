@@ -875,3 +875,17 @@ C0 的参考 speaker-time 为 100.13 秒，正确 89.10 秒、漏检 11.03 秒�
 2／3／4 人组漏检分别为 125.27／127.98／138.12 speaker-seconds，误检分别为 11.66／9.23／78.58，混淆分别为 1.78／2.29／23.29。首片以边界漏检为主的现象不能代表整个池；4 人组同时存在明显误检和混淆，因此不据首片统一扩张边界或搜索 C0 阈值。下一项模型对照遵循已登记的 C1 fast32／C2 fast128 方案。18 片均未通过绝对质量门；派生诊断没有自然会议认证资格，缺单人层和独立 ASR 主参考，不能声明连续 1–4 人认证或 CER 改善。
 
 维护结束后 managed 服务恢复，唯一 listener PID 6828，health/readyz 200、3.12.0、quality/quality，配置、selection 和 runtime target 保持不变。本轮未测峰值物理内存、P95 或跨机器性能，不将本机完成耗时转成其他机器的测试超时或吞吐门槛。
+
+## 既有后处理全池对照与候选制品核验
+
+2026-10-18：对上述 18 片已保存的实际四槽概率帧，逐片重建 ActivityFrame；先以原活动转换和同一 scorer 重算 C0，确认 product_all_regions 与实跑报告完全一致，再应用既有默认 consolidation。不改变参数、不搜索阈值、不新跑模型、不改生产默认。
+
+| 说话人数 | 后处理加权 recall | 后处理加权 precision | recall 变化（百分点） | 最低逐人 recall：原始 → 后处理 |
+|---|---:|---:|---:|---:|
+| 2 | 82.80491% | 97.94793% | +0.47996 | 63.55852% → 63.27307% |
+| 3 | 84.46137% | 98.38117% | +0.25952 | 75.73490% → 75.94869% |
+| 4 | 86.61552% | 91.42642% | +0.32792 | 63.21001% → 62.25710% |
+
+5 个来源整体 recall 下降，18 个来源仍全部未通过质量门。小幅平均收益伴随弱说话人覆盖退化，因此不采用该后处理作为生产改进。完整逐片匿名对照留在仓库外 existing-postpass-pool-comparison.json，适用范围仍为派生诊断。
+
+只读检查 managed 模型目录、FluidAudio 标准缓存、Hugging Face/ModelScope 缓存及本机既有模型根目录，未发现 Nemotron 候选。候选可执行文件已存在，缺模型不能做实际推理。ModelScope 同名仓库 API 返回 404；转换方 [Hugging Face 固定快照](https://huggingface.co/FluidInference/nemotron-3-diarization-coreml/tree/25a90f97f254428d4b30374b76af9c74fdee8327/monolithic/v2)列出的 fast32／fast128 FP16 bundle 与共享 learnable_sil_emb.bin 共 9 文件、398165279 字节。已在仓库外保存文件大小、LFS SHA-256 或 Git blob ID 的下载提案，尚未下载；须在用户另行授权后取得、逐文件校验，再执行同源候选对照。该提案不改变安装、selection 或 profile。
