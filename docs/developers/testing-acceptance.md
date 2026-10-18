@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.32"
+version: "3.3.33"
 date: 2026-10-18
 ---
 
@@ -228,13 +228,15 @@ PYTHONPATH=src:examples/perf uv run --no-sync python examples/perf/probe_meeting
 
 评分身份绑定工具源码、raw/normalized token 化、重叠顺序、编辑路径同分规则与汇总定义；分包、窗口和时限另有 replay policy 摘要。规范化为 NFKC/casefold，CER 保留 Unicode L/N/M；混合 WER 按中文字符和 ASCII 字母数字词分词，raw WER 按空白分词，不冒充独立英文子集验收。插、删、替统计按最短编辑路径，同分依次 diagonal/delete/insert，不能据此证明声学原因。
 
+比较器在汇总前复核 normalized CER：参考量与 S/D/I/总错误量必须为非 bool 的有界非负整数，参考量非零，S+D 不超过参考量，错误总数等于 S+D+I，计数推导的预测长度遵循单次评分的10000 token 上限；characters.error_rate 与 normalized.cer 均须等于错误量/参考量，并匹配冻结编辑同分规则。同一 case 的配对及重复记录必须使用相同参考分母。合法的插入错误可使 CER 大于1，不作裁剪；缺主参考仍为未观察且不通过。此校验只证明计数与比率自洽，不证明参考或模型来源。
+
 同一 case 的重复先平均错误数，同源片段再合并分子/分母，最后每个独立来源组等权计算主 CER。≥10% 相对点改善和 candidate−baseline 配对 95% 区间上界<0 使用同一来源组等权估计量；seed/重采样复用冻结 policy。全体 pooled CER 单列，重复和片段不增加独立 N。基线 CER=0、缺无歧义主参考、缺真实 decode、缺帧/重复/超时/截断或未观察 token-limit 均不能通过。关键事实人工复核独立记录，时间戳变化不能计为正文改善。
 
 `RuntimeObservation` 调用前后字段匹配只得到 `execution_identity_matches`，不证明可信来源。没有可信生产评测组合根时保持 `runtime_identity_verified=false/certification_eligible=false/a0_execution=not_observed`；fake 或自报 runtime origin 不升级认证。顺序 feeder 逐包 flush intents，不等价独立 1× 采集/P95 基准；非法、非有限或倒退 clock 拒绝，注入 clock 明示 injected。取消加入 session 关闭，错误输出脱敏，摘要不含原文、PCM 或绝对模型路径。独立 overlap ORC、可信实际 A0、真实错误归因和质量改善仍待后续接线/实测。fake 回归见 `tests/test_probe_meeting_asr_quality.py`。
 
 ready 帧的窗口 cap 来自 engine 实际动态预算字段，而非重复 CLI 入参；0 的既有默认预算语义报告为512。它只补充内部有效配置观测，不证明模型文件字节、vendor package 来源或实际 A0。类型须为32–2048整数，拒绝 bool、字符串和越界值；未提供保持 null，不强制推断。生产 WindowDecodeResult 可携带内部 WindowDecodeObservation，经 window.result 私有 RPC 保留每次 preview/review 的实际 decode_max_new_tokens、generation_max_new_tokens、finish_reason、truncated 和 generated_token_count。decode budget 是 engine 调用入参；preview generation budget 是扣除复用 prefix 后实际传给生成器的 remaining_tokens，token count 在 header strip / prefix merge 前取实际返回 tokens 长度。review 的内部 generation budget 和 count 无可验证观察，保持 null。finish/truncated 缺失保持 null，拒绝类型强制转换、非法范围、额外字段和错误 kind；缺整个 observation 也保持未知。该内部元数据不进入公共 Realtime 契约，不改变解码策略，也不自动升级实际 A0。回归见 test_asr_window.py、test_qwen3_window.py、test_qwen3_stream_decoder.py。
 
-正文诊断报告使用 schema 2，ASR scorer 身份为 asr-body-v2；旧报告须重新执行，不能沿用旧门。RuntimeObservation 只提供调用前后身份与 origin，移除自报 token_limit_hit 入参。每个实际 decode 都记录匿名 attempt 摘要、preview/review、样本范围、实际预算和可见完成元数据；最多4096次，超额在调用下一个 decoder 前失败。仅全部 attempt 明确 finish_reason=eos、truncated=false 且实际 decode budget 不超过冻结上限时，截断证据门才可通过；缺观测、kind 错配、未知终止状态、任一 preview/review 截断均不能被后续成功 review 掩盖。review 的 generation budget/count 仍可为 null，不推断厂商内部行为。未知 finish reason 只输出 other，不回显厂商字符串。报告包含有界逐次记录与其摘要、观察/缺失/未知计数；compare_asr_runs 重新检查记录、计数、范围和摘要，不只信任 quality_evidence_valid。合成执行可以通过诊断证据门，但不能获得生产身份、质量改善或人数认证。
+正文诊断报告使用 schema 2，ASR scorer 身份为 asr-body-v2，并绑定实现源码摘要；实现或比较规则变化后，旧报告及候选 spec 须重新冻结和执行，不能沿用旧门。RuntimeObservation 只提供调用前后身份与 origin，移除自报 token_limit_hit 入参。每个实际 decode 都记录匿名 attempt 摘要、preview/review、样本范围、实际预算和可见完成元数据；最多4096次，超额在调用下一个 decoder 前失败。仅全部 attempt 明确 finish_reason=eos、truncated=false 且实际 decode budget 不超过冻结上限时，截断证据门才可通过；缺观测、kind 错配、未知终止状态、任一 preview/review 截断均不能被后续成功 review 掩盖。review 的 generation budget/count 仍可为 null，不推断厂商内部行为。未知 finish reason 只输出 other，不回显厂商字符串。报告包含有界逐次记录与其摘要、观察/缺失/未知计数；compare_asr_runs 重新检查记录、计数、范围和摘要，不只信任 quality_evidence_valid。合成执行可以通过诊断证据门，但不能获得生产身份、质量改善或人数认证。
 
 ### ASR 开发来源与主参考
 

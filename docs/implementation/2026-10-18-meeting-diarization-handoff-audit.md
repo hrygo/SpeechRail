@@ -473,3 +473,11 @@ runtime新增19项、driver54项、CLI5项fake回归；主线五个ASR相关文�
 两处聚合和耗尽选型均先以反例RED复现，再GREEN；另补cpCER、重复fixture和旧policy拒绝回归。此前八个相关文件228项fake回归通过；提交前重新核验结果见本节后续记录。仅验证合成评分与离线选型，不证明实际CER、分人质量、认证人数或P95。没有真实音频/模型、benchmark、下载、服务、安装、UI、发布或合并操作。
 
 提交前复验：八个相关测试文件 `228 passed in 5.14s`；六个Python Ruff通过，`MYPYPATH=src:examples/perf uv run --no-sync mypy --strict --follow-imports=silent examples/perf/meeting_development_fixture.py examples/perf/meeting_candidate_selection.py` 两个source通过。直接扩大follow-imports扫描会暴露既有非类型化评分模块和第三方stubs问题，不宣称整个perf目录strict检查通过。父提交6e6f4837的主CI39095347788与原生CI39095347813已核验成功；新提交CI另行核验。
+
+## T8 ASR 比较器的字符计数一致性
+
+2026-10-18：直接复核当前ASR比较器时发现，它检查normalized.cer有限值却使用未经复核的characters.errors/reference_tokens聚合；同一case重复记录沿用第一个参考分母。17项反例在修复前全部RED，包含bool/负数/非整数/非有限/越界、S/D/I与总错误不符、reported CER不符，以及配对或重复case分母漂移。旧实现部分直接使用非法值，零分母还触发除零错误，而非稳定拒绝。
+
+修正为汇总前校验字符计数、S+D+I、参考与推导预测长度、编辑同分规则、两处CER和同case参考分母。保留现有source-group等权估计量、重复错误均值及片段分子分母合并；不裁剪合法CER>1，不把缺主参考升级为观察。增加正向边界回归后，六个ASR相关文件 `284 passed in 11.66s`；两个Python Ruff通过，一个source按strict/follow-imports=silent的Mypy通过。源码摘要属于ASR_SCORER身份，旧spec/report须重新冻结和执行；计数自洽不证明生产者、参考来源或实际A0。
+
+图谱generation2026-10-17T22:35:42Z不含这三份新ASR source/test记录，结论由当前worktree相关源码直接复核，未重建索引。父提交54f2f11c原生CI39096340069已成功，主CI39096340067仍运行；新提交另行核验。没有真实音频/模型、benchmark、下载、服务/安装变更、UI、发布或合并操作。

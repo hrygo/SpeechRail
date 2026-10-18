@@ -778,6 +778,35 @@ async def replay_production_windows(
             await recorded.close()
 
 
+def _character_counts(row: Mapping[str, Any]) -> tuple[int, int] | None:
+    """Check primary CER arithmetic without trusting rates or reading text."""
+    metrics = row["metrics"]
+    if metrics.get("availability") != "observed":
+        return None
+    normalized = metrics["normalized"]
+    counts = normalized["characters"]
+    fields = ("reference_tokens", "errors", "substitutions", "deletions", "insertions")
+    if any(type(counts.get(key)) is not int or not 0 <= counts[key] <= 10000 for key in fields):
+        raise ValueError("ASR character counts must be bounded nonnegative integers")
+    reference, errors = counts["reference_tokens"], counts["errors"]
+    substitutions, deletions, insertions = (counts[key] for key in fields[2:])
+    if (
+        reference == 0
+        or errors != substitutions + deletions + insertions
+        or substitutions + deletions > reference
+        or reference - deletions + insertions > 10000
+        or counts.get("alignment_tie_policy") != ASR_SCORER["edit_alignment_tie"]
+        or any(
+            type(rate) not in (int, float)
+            or not math.isfinite(rate)
+            or not math.isclose(rate, errors / reference, rel_tol=1e-12, abs_tol=1e-12)
+            for rate in (counts.get("error_rate"), normalized.get("cer"))
+        )
+    ):
+        raise ValueError("ASR character counts and CER disagree")
+    return reference, errors
+
+
 def compare_asr_runs(
     baseline: Sequence[Mapping[str, Any]],
     candidate: Sequence[Mapping[str, Any]],
@@ -812,6 +841,7 @@ def compare_asr_runs(
     )
     valid = True
     eligible = True
+    reference_counts: dict[str, int] = {}
     keys = (
         "source_group_sha256",
         "case_sha256",
@@ -831,8 +861,16 @@ def compare_asr_runs(
             raise ValueError("long-block diagnosis requires the same weights and dtype as A0")
         for index, row in enumerate((old, new)):
             value = row["metrics"]["normalized"]["cer"]
+            counts = _character_counts(row)
+            if counts is not None:
+                frozen_count = reference_counts.setdefault(row["case_sha256"], counts[0])
+                if frozen_count != counts[0]:
+                    raise ValueError(
+                        "ASR character reference count differs across paired or repeated cases"
+                    )
             row_valid = (
-                _valid_decode_evidence(row)
+                counts is not None
+                and _valid_decode_evidence(row)
                 and row["quality_evidence_valid"] is True
                 and not row["failures"]
                 and type(row["actual_decode_calls"]) is int
@@ -850,13 +888,12 @@ def compare_asr_runs(
                 and row["execution_origin"] == "runtime_observed"
                 and row["mode"] == "production_window"
             )
-            if row_valid:
-                counts = row["metrics"]["normalized"]["characters"]
+            if row_valid and counts is not None:
                 entry = cases[index][row["source_group_sha256"]].setdefault(
                     row["case_sha256"],
-                    (counts["reference_tokens"], []),
+                    (counts[0], []),
                 )
-                entry[1].append(counts["errors"])
+                entry[1].append(counts[1])
     interval = None
     relative = None
     old_mean = new_mean = None

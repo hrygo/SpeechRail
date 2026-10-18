@@ -834,3 +834,62 @@ def test_preview_limit_evidence_cannot_be_hidden_by_successful_final_review():
     assert report["decode_evidence"]["token_limit_hit"] is True
     assert "decode_limit_hit" in report["failures"]
     assert report["quality_evidence_valid"] is False
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("reference_tokens", True), ("reference_tokens", 0),
+        ("reference_tokens", -1), ("reference_tokens", 1.5),
+        ("reference_tokens", 10001), ("errors", -1), ("errors", False),
+        ("errors", float("nan")), ("errors", float("inf")),
+        ("errors", 0), ("substitutions", -1), ("deletions", 5),
+        ("insertions", 10001), ("error_rate", 0),
+    ],
+)
+def test_comparison_rejects_inconsistent_character_counts(field, value):
+    from copy import deepcopy
+
+    old, _ = run()
+    new = deepcopy(old)
+    new["metrics"]["normalized"]["characters"][field] = value
+    with pytest.raises(ValueError, match="ASR character"):
+        compare_asr_runs([old], [new], policy=policy())
+
+
+def test_comparison_rejects_cer_disagreeing_with_character_counts():
+    from copy import deepcopy
+
+    old, _ = run()
+    new = deepcopy(old)
+    new["metrics"]["normalized"]["cer"] = 0
+    with pytest.raises(ValueError, match="ASR character"):
+        compare_asr_runs([old], [new], policy=policy())
+
+
+@pytest.mark.parametrize("repeat_only", [False, True])
+def test_comparison_requires_same_reference_count_for_paired_and_repeat_cases(repeat_only):
+    from copy import deepcopy
+
+    old, _ = run()
+    altered = deepcopy(old)
+    counts = altered["metrics"]["normalized"]["characters"]
+    counts["reference_tokens"] = 5
+    counts["error_rate"] = 2 / 5
+    altered["metrics"]["normalized"]["cer"] = 2 / 5
+    baseline = [old, altered] if repeat_only else [old]
+    candidate = [old, altered] if repeat_only else [altered]
+    with pytest.raises(ValueError, match="ASR character"):
+        compare_asr_runs(baseline, candidate, policy=policy())
+
+
+def test_comparison_preserves_valid_cer_above_one_and_missing_reference_failure():
+    old, _ = run(case(reference="甲"), text="甲乙丙丁")
+    new, _ = run(case(reference="甲"), text="甲乙")
+    result = compare_asr_runs([old], [new], policy=policy())
+    assert result["baseline_macro_cer"] == 3
+    assert result["candidate_macro_cer"] == 1
+    missing, _ = run(case(reference=None))
+    result = compare_asr_runs([missing], [missing], policy=policy())
+    assert result["baseline_macro_cer"] is None
+    assert result["development_text_gate"] == "fail"
