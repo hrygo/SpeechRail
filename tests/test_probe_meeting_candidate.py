@@ -167,3 +167,34 @@ def test_preflight_rejects_symlink_embedding_without_reading_target(artifacts):
     embedding.symlink_to(model.parent / "unavailable-outside-file")
     with pytest.raises(ValueError):
         artifact_preflight(spec, worker=worker, model_directory=model)
+
+
+def test_candidate_identity_binds_actual_attribution_and_replay_sources(artifacts, monkeypatch):
+    import probe_meeting_candidate as probe
+    from meeting_candidate_evidence import attribution_configuration
+
+    worker, model, _ = artifacts
+    observed = []
+    original = probe._source_digest
+
+    def digest(paths):
+        observed.extend(paths)
+        return original(paths)
+
+    monkeypatch.setattr(probe, "_source_digest", digest)
+    spec = probe.static_candidate_spec(
+        worker=worker,
+        model_directory=model,
+        preset="fast32",
+        model_revision="a" * 40,
+        compute_units="all",
+    )
+    assert spec.as_dict()["attribution"] == attribution_configuration()
+    assert {
+        "examples/perf/meeting_candidate_runner.py",
+        "examples/perf/meeting_candidate_evidence.py",
+        "src/speechrail/domain/diarization/attribution.py",
+    } <= set(observed)
+    changed = replace(spec, attribution={**spec.as_dict()["attribution"], "min_support": 0.9})
+    with pytest.raises(ValueError):
+        probe.artifact_preflight(changed, worker=worker, model_directory=model)

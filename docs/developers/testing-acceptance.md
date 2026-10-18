@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.14"
+version: "3.3.15"
 date: 2026-10-18
 ---
 
@@ -85,6 +85,20 @@ uv run --no-sync python examples/perf/prepare_meeting_evaluation_manifest.py \
 活动必须是连续、稳定、不可回改的样本区间。跨 chunk 同 slot 活动合并成连续区间，同时保留 overlap 和 10ms 插话；无 min-turn、bridge、ghost 或 VAD 删除。默认 RAM 历史为 60 秒，待归属文字最多 262,144 字符，ledger 单元最多 4,096 个，活动帧最多 8,192 个，限制进入候选身份。稳定历史按水位压缩，旧完成项不能凭缺失历史恢复身份。
 
 完成必须覆盖全部已接受音频且无未归属单元。中止或不完整 finish 将待处理原文以 unknown 发出，只关闭已实际处理的活动区间，不给未处理尾音补造活动。重复 finish/cleanup 幂等。`SpeakerSpan` 与 `AttributedText` 分别供时间评分与文字评分；完整事件只能进入仓库外原始评测制品，报告和日志不含原文。单独归属机制通过不代表真实模型或生产质量通过；fake 测试为 `tests/test_meeting_candidate_evidence.py`。
+
+### 会议候选有界回放
+
+`meeting_candidate_runner.run_candidate_stream` 接收有界 PCM iterator、调用方的 `activity_factory`、`FixedTextReplay` 和异步原始制品 sink。factory 必须复用同一组合根的 governor/owner；运行器不创建另一服务或 governor，也不提供跨进程排他。每包最多 16,000 个 PCM16 样本，活动消费者在输入期间持续运行，不等整场供给完再读更新；慢 sink 有时限，失败、总 deadline 或取消会加入消费者退出，并调用共享 exact-child lease 回收。回收未确认返回 `candidate_cleanup_incomplete`，不能作为成功或空闲资源。
+
+`iter_wav_pcm` 只读仓库外的 16kHz、mono、PCM16 WAV，格式与空输入在打开 worker 前校验，单次最多读一秒。文件读取在线程中完成，取消时先加入当前读取再关闭文件；不收集整场 PCM。调用方仍须用来源锁在执行前后核对文件摘要和真实运行身份。
+
+`FixedTextReplay` 是有一项前瞻的生产者顺序 iterator；`ScheduledText` 的 `ready_after_sample` 与 `finish_only` 控制 ASR 完成项何时可进入归属，不向模型注入参考文字或边界。它用于 C0/C1/C2 固定 ASR 对照，不能代替当次真实 ASR 推理。每批完成项最多 4,096 个、262,144 字符，不接受超过实际 accepted samples 的时间；完整原始事件只写仓库外 sink，摘要仅保留计数和文字摘要。
+
+`input_mode=throughput` 用于尽快重放；`realtime` 按累计整数样本的 1× 时钟供给，记录输入迟到，测试注入时钟显式标为 `injected`。阶段事件记录 ASR 文字可用、活动水位、append（包含准入/加载/推理）及 finish 边界；尚未拆分的耗时不命名为独立 queue/load/infer 指标。固定 sidecar 的 `clock_scope=diarization_with_fixed_asr_sidecar`、`joint_asr_latency_observed=false`、稳定标签 P95=`null`，不能用于 15 秒联合产品门。
+
+完成摘要的 `complete` 只证明供给/处理覆盖与原文字符保留。运行器自身不认证文件、ASR sidecar 或 runtime 身份，相关 verified 字段均为 false，`certification_eligible=false`、`verdict=diagnostic`、`certified_max_speakers=null`。锁定来源与身份检查、评分/调度接线、开发/留出 CLI、真实双路时钟和收据签发由后续执行器完成。候选 spec 已绑定这套归属配置、ledger 和回放源码，变更须重新生成 spec；预检仍不执行 worker。
+
+fake 测试为 `tests/test_meeting_candidate_runner.py`，包含单项队列的供给/消费、真实 session 类与 fake worker 的 owner 集成、失败隔离、取消、慢 sink、deadline、提前关闭、样本时钟和 WAV 边界。它们不证明模型质量、实际 1× 负载或真实 footprint。
 
 ### 有声书外置小说语料回归
 

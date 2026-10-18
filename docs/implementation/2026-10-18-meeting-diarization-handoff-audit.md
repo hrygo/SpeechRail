@@ -208,3 +208,28 @@ RED：调度模块缺失。GREEN：17 项 fake 测试通过，两个新文件 Ru
 整数样本、epoch、连续 step/sequence、完整文字范围、尾部覆盖和 RAM 预算在边界校验。重复整句时间不能冒充词证据；生产者可显式选择整句粒度。历史按稳定水位压缩，中止只关闭实际处理区间，不补造未处理尾部。原文只供外部原始制品 sink，报告不含原文。
 
 RED：模块缺失；完成后 cleanup 错误撤销 complete、浮点/bool 样本误收、整句词时间网格误收均由反例复现后修正。GREEN：17 项新 fake 测试通过，并与生产 attribution 回归合并验证；新 source 严格 Mypy、变更 Python Ruff、diff 检查通过。没有运行真实模型、音频质量/性能或服务操作；runner 与锁定评测 CLI 仍待接通，不能签发人数认证。
+
+## T4 有界候选回放库
+
+2026-10-18：新增 `run_candidate_stream`，在供给有界 PCM 时并发消费活动更新，复用调用方注入的共享 owner/session，不创建第二 governor。WAV 读取每次最多一秒，在线程中执行并在取消后加入读取再关闭。FixedTextReplay 只有一项前瞻，按原 ASR 生产者时序提供完成项，不输入参考 speaker/边界。原文和活动事件只交外部 raw sink，摘要不含原文。
+
+总 deadline、慢 sink、输入失败、活动提前关闭和取消不返回成功；消费者退出与精确回收必须加入，回收失败保留现有 owner 隔离并报 `candidate_cleanup_incomplete`。1× 供给用累计样本时钟，快放不声称体验延迟。记录文字可用、活动水位、合并 append 耗时及 finish 边界；不把尚未拆分的准入/加载/推理耗时伪称为单项指标。固定 sidecar 明确不是当次真实 ASR，联合延迟与生产认证字段仍未观察。
+
+候选身份加入实际归属配置、归属/runner/ledger 源码，拒绝旧 `not_connected` spec 与变更参数；artifact preflight 仍不启动 worker。运行器只是一项可复用机制，未签发来源/runtime 验证或质量收据；锁定 development/holdout CLI、来源核验、评分/调度及真实双路时钟仍待整合。
+
+RED：运行器模块缺失、总 timeout 错误归为普通失败、preflight 仍声明 not_connected，以及最终 ASR 注册期间提前关闭活动流被误收为完成。GREEN：18 项新运行器 fake 和 1 项 preflight 身份用例通过，包含真实 CandidateActivitySession + fake worker 的 owner/隔离集成；与归属、旧 scorer/身份/来源/调度等相关测试合并验证。变更 source 严格 Mypy 与变更 Python Ruff 通过。没有真实模型/benchmark、服务、模型下载、安装或发布操作。
+
+前一提交 `b432e93b` 的主 CI `39087242360` 和候选 CI `39087242479` 均在同一 SHA 成功；它们不证明本节未提交/后续提交的全量结果。当前真实质量结论仍为 no-go。
+
+本批合并验证：上述十个相关测试文件共 `213 passed`，仅 fake/人工输入。追加 append 消费屏障验证，既拒绝提前关闭，也允许 buffering 空更新在 finish 后吐齐尾帧；屏障依赖私有 Candidate/C0 session 每次 append 发布一次更新（包括空更新），不等待活动水位追上 accepted。
+
+```bash
+PYTHONPATH=src:examples/perf uv run --no-sync pytest -o addopts= --no-cov -q \
+  tests/test_meeting_candidate_schedule.py tests/test_meeting_evaluation_manifest.py \
+  tests/test_meeting_quality_metrics.py tests/test_meeting_evaluation_identity.py \
+  tests/test_probe_meeting_candidate.py tests/test_meeting_candidate_session.py \
+  tests/test_meeting_diarization_quality.py tests/test_meeting_candidate_evidence.py \
+  tests/test_meeting_candidate_runner.py tests/test_diarization_attribution.py
+```
+
+审查中禁用提前关闭 guard 后，尾部 ASR 注册反例按预期失败；恢复源码并重新编译 bytecode 后复验。fake pipeline 测试统一加 2 秒外层时限，避免错误分支等待真实会议用的长 deadline。

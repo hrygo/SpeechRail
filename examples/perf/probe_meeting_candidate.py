@@ -13,6 +13,7 @@ import re
 import struct
 from pathlib import Path
 
+from meeting_candidate_evidence import attribution_configuration
 from meeting_candidate_protocol import SDK_REVISION
 from meeting_evaluation_identity import (
     MeetingCandidateSpec,
@@ -87,6 +88,8 @@ def static_candidate_spec(
             "examples/perf/probe_meeting_candidate.py",
             "examples/perf/meeting_candidate_protocol.py",
             "examples/perf/meeting_candidate_session.py",
+            "examples/perf/meeting_candidate_evidence.py",
+            "examples/perf/meeting_candidate_runner.py",
             "native/diarization-candidate/Package.swift",
             "native/diarization-candidate/Sources/CandidateFrames/CandidateFrames.swift",
             "native/diarization-candidate/Package.resolved",
@@ -99,6 +102,7 @@ def static_candidate_spec(
             "src/speechrail/runtime/resource_governor.py",
             "src/speechrail/runtime/cleanup.py",
             "src/speechrail/domain/diarization/types.py",
+            "src/speechrail/domain/diarization/attribution.py",
             "src/speechrail/domain/audio_timeline.py",
         )),
         sdk_revision=SDK_REVISION, worker_sha256=file_digest(worker),
@@ -108,7 +112,7 @@ def static_candidate_spec(
                  "minimum_turn_seconds": 0, "bridge_seconds": 0,
                  "ghost_merge": False, "consolidation": False, "vad_gate": False,
                  "tail": "clip_to_accepted_samples"},
-        attribution={"algorithm": "not_connected", "production_certification": False},
+        attribution=attribution_configuration(),
         scorer={"policy_sha256": canonical_digest(policy),
                 "source_sha256": _source_digest((
                     "examples/perf/meeting_quality_metrics.py",
