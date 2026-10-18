@@ -120,6 +120,11 @@ def _wav_packets(path: Path) -> Generator[bytes]:
             yield packet
 
 
+def inspect_wav_pcm(path: Path) -> int:
+    """Validate the entire WAV in bounded packets before any model construction."""
+    return sum(len(packet) // 2 for packet in _wav_packets(path))
+
+
 async def iter_wav_pcm(path: Path) -> AsyncIterator[bytes]:
     """Read bounded packets off-loop and join each read before closing on cancel."""
     packets = _wav_packets(path)

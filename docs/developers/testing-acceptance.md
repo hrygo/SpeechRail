@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.16"
+version: "3.3.17"
 date: 2026-10-18
 ---
 
@@ -125,6 +125,20 @@ fake 测试为 `tests/test_meeting_candidate_runner.py`，包含单项队列的�
 读取器先以有界逐行扫描验证全部记录、内容及时间摘要，再从同一个打开的 descriptor 回放；每次读取与 EOF 校验文件身份和修改状态。未读到有效 EOF、部分消费、替换文件或读取中修改都不能取得 proof。正常 context 退出要求完整消费；异常退出关闭文件并保留原异常。打开/预检为同步文件 I/O，执行器应在线程中完成；runner 的 `ready/finish/close` 在线程执行，取消须加入在途读取后再关闭 source。
 
 proof 只声明 `bytes_and_timing_verified=true`，保持 `producer_provenance_verified=false`、`joint_asr_latency_observed=false` 和 `certification_eligible=false`。它验证文件与预登记关联，不证明生产者声明为真、PCM 实际解码身份、当次 ASR 时钟或模型运行身份。CLI、评分/调度与来源真实性验证仍由锁定执行器负责；该库不能解锁留出。fake 回归见 `tests/test_meeting_asr_sidecar.py`。
+
+### 开发集回放与检查点执行
+
+`meeting_development_fixture.evaluate_development_fixture` 接收 schema 2 development manifest、对应 split-lock、评分 policy、fixture ID、候选摘要、外部 artifact/output 目录和调用方的 `activity_factory`。它核对 manifest/source catalog/scorer 摘要和作用域，验证评分依赖版本、自然样本分类、文件摘要及完整 WAV，再构造第一个 worker；不接受 holdout manifest。WAV 是已按 manifest 记录的来源通道和变换准备好的单声道制品，执行器不另行选轨或重混音。所有 PCM 预检与回放均逐包有界，不保存整场音频。
+
+活动参考与正文参考分别为 UTF-8 JSON 文件，最多各 16 MiB、100,000 段；不接受重复键。顶层严格包含 `schema_version=1/sample_rate=16000/total_samples/segments`，三个数值均为整数且总样本数须与 WAV 相同。每段严格包含 `start_sample/end_sample/speaker`，正文参考另含非空 `text`；半开样本区间非空且位于实际 WAV 范围，参考 speaker 预先匿名为 `R1`–`R8`。活动参考不得含正文，正文时间不得代替连续活动边界。文件准备与人工参考核验须在执行候选前完成。
+
+参考只进入评分器；`activity_factory()` 不接收 manifest、参考文字、标签或边界，固定 ASR 只来自独立 sidecar。实际输出事件分别转换为活动区间和带标签正文，交给 `score_meeting_quality`。执行前后及报告提交前均校验全部输入文件摘要和 inode/大小/修改状态；失败、修改、慢 sink、预算超限和取消不能生成完成结果。sidecar 打开/完整预检、回放读取、评分与制品写入均在线程执行并加入取消清理；取消发生在 context entry 时也须关闭已经打开的文件。
+
+每个输出目录独占创建、权限 `0700`；`attempt.json/events.jsonl/result.json/failure.json` 权限 `0600`。原文只进入仓库外 `events.jsonl`；该文件限 256 MiB，活动和文字评分各限 100,000 段。先写并同步 `result.partial.json`，完成最终输入核验后以不覆盖已有文件的原子 link 提交 `result.json`；取消或失败留下 attempt/partial/failure 供审计，不能据此继续签收据或覆盖重跑。结果只含匿名 ID、制品/政策摘要、计数、评分、诊断时钟和来源条件，不含正文与绝对路径。
+
+`evaluate_development_checkpoint` 消费不可变 `CommonPrefixSchedule` 的 pending request 和固定候选摘要/工厂映射。1–4 人包含 C0，5–8 人不伪造四槽对照；完整预检共同前缀后，串行执行每个存活候选的全部来源组及其同层 fixture，上一 session 回收确认后才构造下一 session。完整配对完成后，按来源组计算产品汇总及对 C0 的 DER/cpCER 配对不退化门，并分别报告 near/far；缺场景明确 `not_observed`。任何部分失败不生成 `checkpoint.json`，也不修改原 schedule；成功时返回下一不可变状态，后续扩样继续遵循共同前缀与不可复活规则。
+
+检查点预检只跨会议保留文件指纹，不持有整个来源池的参考正文；逐场评分后只保留脱敏结果。该执行器验证实际输入与输出覆盖，并连接产品门和调度，仍不证明 activity factory 的真实制品/SDK/运行身份、生产者来源、跨进程排他或联合延迟。`runtime_identity_verified=false/certification_eligible=false/verdict=diagnostic/certified_max_speakers=null` 保持明确；调度的 `passed` 仅表示该共同检查点的评分门通过，不代表唯一候选选型或产品认证。生产组合根、完整 phase tracing、联合 ASR 时钟、开发收据签发、跨层选型及评测 CLI 仍需接线。fake 测试为 `tests/test_meeting_development_fixture.py`。
 
 ### 有声书外置小说语料回归
 

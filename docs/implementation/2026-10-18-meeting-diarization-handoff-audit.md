@@ -245,3 +245,35 @@ runner 的 sidecar ready/finish/close 文件操作移至线程，使用 `join_cl
 RED：sidecar 模块不存在；将 runner ready 暂时恢复为事件循环直接读取后，线程隔离反例按预期失败。GREEN：29 项新合成回归通过，包括磁盘 sidecar 与受监督 runner 集成、关闭前等待取消中的读取、后续坏行在 worker 前被拒、内容及时间摘要、文件替换、部分读取和文件/行/总量预算。恢复源码后，原十个测试文件加新 sidecar 文件共 `242 passed in 5.94s`，Ruff 和三项 source 严格 Mypy 通过。没有真实音频/模型运行、benchmark、运行态、安装或发布动作。公共格式见[测试与验收](../developers/testing-acceptance.md#固定-asr-sidecar-输入)。
 
 远端核实：`5d08af28c4522ad677e78259b9977fb00f616e90` 候选 CI `39088576081` 成功；主 CI `39088576078` 失败。Python、打包与 App 构建成功，Swift package 的 `testAutoPublicationRetriesResumeFailedStepWithoutHumanReview` 在 `AppModelTests.swift:1594/1600` 观察到 publishing 而非 published，且音色名为 nil。该用例不在本批改动范围，失败原因尚未确认；不把此前绿色 SHA 或本地定向回归当作该 SHA 的全量通过。
+
+## T4/T5 开发回放与共同检查点接线
+
+2026-10-18：新增 `meeting_development_fixture`。单场入口验证 schema 2 development manifest/split-lock、文件/时间/评分依赖和外部路径，将实际 WAV、固定 ASR、候选活动、正文归属及独立评分连接；不读取 holdout，不把参考提供给 activity factory。正文参考与活动参考是独立的匿名整数样本区间，评分结果不含正文或绝对路径。
+
+共同检查点入口消费冻结的 `CommonPrefixSchedule`，完整预检同一来源前缀后串行执行 C0 和所有存活候选，每场回收确认后再构造下一场。完整配对结果进入来源组产品汇总及 DER/cpCER 不退化门，near/far 分列；只有完整成功才返回下一不可变状态。部分执行失败不记录新轮次，不复活淘汰候选。候选摘要绑定执行器、来源准备器及调度源码；评分器提供可在加载模型前调用的依赖/政策核验。
+
+文件指纹和摘要在执行前后与完成提交前重复核验。预检 WAV 逐包扫描完整制品，不只相信 header；读取、评分和大制品写入在线程执行并加入取消清理。输出目录独占且为 0700，文件为 0600；正文只进入仓库外事件文件，限 256 MiB，参考各限 16 MiB，评分各限 100,000 段。正常结果先同步 partial，再以独占 link 提交；取消不能留下 completed 结果。跨会议只保留指纹，避免预检把整个来源池正文留在 RAM。
+
+Ruling: 此执行器连接真实输入/输出与评分，但 factory 的实际模型/SDK/运行身份与跨进程排他仍由生产组合根证明；固定 sidecar 仍不是当次 ASR。结果保持 `runtime_identity_verified=false/certification_eligible=false/verdict=diagnostic`。调度 `passed` 只表示共同前缀评分门通过，不能签开发收据、解锁留出、证明联合延迟或宣布唯一胜者；代价是实际选型/认证仍须完成后续接线，避免自报候选摘要升级为执行证明。
+
+RED：执行器/检查点入口缺失；反例复现完成报告写入期间取消仍留下 result、仅首包检查漏掉后续 PCM 截断，以及未在 worker 前拒绝不安全 fixture ID/评分 policy。GREEN：27 项新合成测试通过，包括 6 组 × C0/C1/C2 的完整串行回放、来源组配对统计、near/far 缺观察、文件变化、部分检查点失败、raw artifact 预算、取消进入/关闭、来源池 RAM 和已存在目录保护。与原十一文件合并为 `269 passed in 7.29s`；变更 Python Ruff、三个 source 严格 Mypy、diff 检查通过。无真实音频/模型运行、benchmark、下载、服务、安装、发布或合并。
+
+上一提交 `c5ab132e33ac6234aeeec72360a7b8beb2b6207c` 的主 CI `39089125203`、候选 CI `39089125321` 均已成功；这不证明本节新提交的全量结果，也不解释此前音色测试的失败原因。T4/T5 仍缺生产组合根/runtime 验证、完整 phase tracing、跨层选型与评测 CLI；T6/T7 与真实质量目标未通过。
+
+### ASR 并行只读核验
+
+由独立只读代理核对 T8 复用路径，主代理复核图谱覆盖与关键当前源码：`compare_asr_windows.py` 尚未绑定完整 normalization/overlap/scorer，也未实现 10% 相对改善门，不作为 T8 放行器。后续优先新增 ASR A0 冻结及实际 callable 录证工具，以来源组配对区分管线敏感线索与已证明原因，不用 sidecar 或 ForcedAligner 时间变化宣称正文收益。
+
+静态延迟措辞修正：meeting policy 是 20 秒 owned 滚动，关闭后等待 2 秒 grace，再允许 15 秒 review budget，并非固定 22 秒周期。连续语音无 VAD 提前关闭时，t=1 秒结束的早期区间可能等到首块 t=20 秒关闭、t=22 秒开始 review 才有 final，理想零计算也可等待 21 秒；这支持增加 fake clock 前置反例，不能据此宣称真实 P95 已测失败。主代理已直接复核 `asr_window.py`、`asr_window_coordinator.py` 的 policy/close/final 路径，并对代理引用路径调用 coverage；未运行真实 ASR、未改变窗口或预算。
+
+本批验证命令（全部为人工输入/fake）：
+
+```bash
+PYTHONPATH=src:examples/perf uv run --no-sync pytest -o addopts= --no-cov -q \
+  tests/test_meeting_candidate_schedule.py tests/test_meeting_evaluation_manifest.py \
+  tests/test_meeting_quality_metrics.py tests/test_meeting_evaluation_identity.py \
+  tests/test_probe_meeting_candidate.py tests/test_meeting_candidate_session.py \
+  tests/test_meeting_diarization_quality.py tests/test_meeting_candidate_evidence.py \
+  tests/test_meeting_candidate_runner.py tests/test_meeting_asr_sidecar.py \
+  tests/test_meeting_development_fixture.py tests/test_diarization_attribution.py
+```

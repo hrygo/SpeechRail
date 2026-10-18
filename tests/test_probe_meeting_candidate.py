@@ -193,6 +193,9 @@ def test_candidate_identity_binds_actual_attribution_and_replay_sources(artifact
     assert {
         "examples/perf/meeting_candidate_runner.py",
         "examples/perf/meeting_asr_sidecar.py",
+        "examples/perf/meeting_development_fixture.py",
+        "examples/perf/meeting_candidate_schedule.py",
+        "examples/perf/prepare_meeting_evaluation_manifest.py",
         "examples/perf/meeting_candidate_evidence.py",
         "src/speechrail/domain/diarization/attribution.py",
     } <= set(observed)

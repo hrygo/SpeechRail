@@ -265,6 +265,17 @@ def _text_metrics(reference, hypothesis, policy) -> dict[str, Any]:
     return results
 
 
+def validate_scorer_environment(policy: Mapping[str, Any]) -> None:
+    """Reject unsupported policy/dependencies before an evaluation loads a model."""
+    _validate_policy(policy)
+    try:
+        for package, expected in policy["scorer_versions"].items():
+            if importlib.metadata.version(package) != expected:
+                raise ValueError("installed scorer differs from approved policy")
+    except importlib.metadata.PackageNotFoundError:
+        raise ValueError("required scorer is unavailable") from None
+
+
 def score_meeting_quality(
     reference_activity: Sequence[Mapping[str, Any]],
     hypothesis_activity: Sequence[Mapping[str, Any]],
@@ -282,12 +293,9 @@ def score_meeting_quality(
     is unobserved; an empty hypothesis instead means observed complete deletion.
     This result alone does not certify missing strata or confidence bounds.
     """
-    _validate_policy(policy)
+    validate_scorer_environment(policy)
     if type(duration) not in (int, float) or not math.isfinite(duration) or duration <= 0:
         raise ValueError("invalid evaluation duration")
-    for package, expected in policy["scorer_versions"].items():
-        if importlib.metadata.version(package) != expected:
-            raise ValueError(f"installed {package} differs from scorer policy")
     if any("text" in row for row in [*reference_activity, *hypothesis_activity]):
         raise ValueError("activity must be separate from attributed text")
     if (reference_text is None) != (hypothesis_text is None):
