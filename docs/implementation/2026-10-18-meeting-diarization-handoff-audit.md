@@ -704,3 +704,14 @@ ABBA校验schema/原点/时刻与source一致，拒绝返回早于源末端、�
 先RED后GREEN覆盖缺宿主原点/相对统计、policy缺采样、相对门成功/超界、零分母、owned scope与外层时序矛盾；实际合成live pipeline四模式接线验证两个相对门可计算但零收益仍不选择策略。收尾另先RED证实下一次输入可在上一执行EOF后、报告验证或稳定交付结束前开始；顺序边界现取上次offer、各lane验证和可验证joint最终确认的最大值，两个反例均拒绝。七相关文件248 passed in2.26s；最终二十一相关文件746 passed in20.74s，六Python Ruff、三source Mypy通过。
 
 父4278a22e八项PR checks均success/completed。相关图谱freshness missing直接复核worktree，未重建索引。全部为合成PCM/fake模型/RPC，不是实际ASR/DIA性能或质量证据；未解码真实语料、运行模型/benchmark、下载或改变服务/安装/UI/发布/合并状态。真实开发评测授权仍待回复；E3、footprint、最终生产联合身份及独立参考/真实质量未验，selected_schedule为null、认证false，CER/人数/真实P95及#370状态不升级，完整目标继续。
+
+
+## T6 显式 root 进程树物理 footprint 读取基础
+
+2026-10-18：核查通用sample_resources以命令名发现及秒级ps lstart标识生命周期，未直接用于T6精确owner证据；保留其行为，新增窄入口meeting_process_snapshot。Apple官方libproc实现与本机SDK头文件确认RUSAGE_INFO_V0布局、physical bytes/启动absolute-time token和child枚举的数量口径；native reader同一次rusage读取生命周期与footprint，直接保留整数bytes，不做RSS倍数或MB浮点转换。
+
+显式传入当次owned根，最多16根/64进程，遍历后代并去重嵌套根；后代优先的第二遍核验生命周期和子集合。缺失/复用/变化/循环/预算/非法clock或跨度超限均失败且不返回部分完整样本，普通异常脱敏。原始Mach token不宣称ns或跨boot身份；顺序区间读数总和不宣称原子、峰值、清理回收或认证。跨度预算只作结束后检查，不中断内核调用。
+
+初始12项缺模块RED后GREEN；嵌套根按子级优先传入的反例另先RED，改为实际祖先深度顺序复核后GREEN。三个相关文件45 passed in0.08s，二Python Ruff、一source Mypy通过。xcrun clang仅fsyntax-only静态断言验证sizeof96及physical/start/exit偏移72/80/88，无构建制品。另对验证脚本自身做一次native只读smoke，生命周期一致、physical字段可读、跨度有效；未输出PID或真实内存数值。这是FFI验证，不是会议/模型进程资源基准。
+
+父09eee274八项PR checks success/completed。图谱旧通用资源文件metadata_match，新collector/tests missing，直接复核源码，无重建。未执行真实语料解码、模型或会议benchmark、下载、服务/安装/UI/发布/合并。ABBA footprint仍not_observed，尚需owned根接线、独立观察域、阶段窗口与开销/失败记录和授权实跑；E3与真实质量/最终联合身份未验，#370及完整目标继续。

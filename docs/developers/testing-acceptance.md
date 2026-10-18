@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.50"
+version: "3.3.51"
 date: 2026-10-18
 ---
 
@@ -440,6 +440,18 @@ latency/scorer policy的 `relative_sampling` 在输出前固定每执行一个la
 schedule schema和scorer摘要变化后，旧控制锁、候选spec及ABBA计划需重新冻结执行；不能沿用旧报告认证。
 
 `summary()` 顶层仍仅有invalid或complete_metadata，不签发生产质量、并发认证或调度选择；selected_schedule及跨条件primary_benefit_interval_seconds保持null，quality/footprint未观察，condition setup/runtime/certification保持false。确定性测试覆盖预输出冻结、48次四模式PCM scheduler及48次单路/联合live pipeline合成接线、配对常数差、重复最慢值、冷/热分离和缺失分母；未使用真实音频或模型。
+
+### 会议显式进程树 footprint 单次读取
+
+`meeting_process_snapshot.MacProcessReader` 显式构造后才加载macOS系统libproc；`read(pid)` 在同一次 `proc_pid_rusage(RUSAGE_INFO_V0)` 中取得原始启动absolute-time token和整数 `ri_phys_footprint` 字节值，退出/zombie、缺失或失败返回不可读。启动token保持其原始时钟单位，不作为秒级lstart或纳秒时间使用。后代枚举仅调用指定父PID的 `proc_listchildpids`，返回值按PID数量处理，错误或缓冲饱和失败。接口和布局依据 [Apple resource.h](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/resource.h) 与 [libproc实现](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.c)，并经本机SDK静态断言验证结构大小及关键字段偏移；代码不运行命令名扫描、读取命令行/环境、转换RSS或控制进程。
+
+`collect_process_snapshot(roots, reader, ...)` 由调用方传入本attempt内现存owned handle对应的 `ProcessKey(pid, start_abstime)`，最多16个根、总进程默认/上限64。遍历后代，嵌套根去重，不重复累计；按后代到父级的第二遍核验启动token和子进程集合。缺失、PID复用、循环、多个父关系、枚举变化、预算耗尽、时钟非法或已完成读操作跨度超限均拒绝返回完整样本，不用零填失败项。它核对传入生命周期和祖先关系，不验证根所有权、可执行文件/模型身份或跨boot身份。
+
+结果仅包含PID、启动token、物理字节、一次读取区间和该区间的逐进程读数总和。默认允许跨度1秒、配置上限5秒；这是结束后的有效性检查，不能中断正在进行的内核调用，也不形成硬墙钟超时。顺序读取不是原子快照，两遍核验不能发现所有短命进程/瞬时变化，采样间峰值亦未覆盖；atomic_snapshot_verified/peak_footprint_verified/worker_reaping_verified/certification_eligible始终false。
+
+此入口不自动开启后台监控，也未接入ABBA的footprint门。后续受控runner须绑定精确owner、在独立观察执行域中采集并joined清理，登记冷启动/稳态/静音恢复/重叠/finish-cancel等窗口、跨度、开销、失败与遗漏；不得把单次读数或各进程不同时间的最大值之和用作真实峰值或resident声明。现有通用 `ProcessResourceMonitor` 保持其独立行为，不作为该入口的发现器。
+
+确定性测试使用注入libproc和进程树。另有仅对验证脚本自身的单次原生只读smoke，确认FFI、生命周期一致与物理字段可读；它不采样SpeechRail/模型进程、不运行会议负载、不提供E3或峰值证据。
 
 ### 有声书外置小说语料回归
 
