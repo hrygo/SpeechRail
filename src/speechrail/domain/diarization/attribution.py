@@ -155,11 +155,13 @@ class AttributionLedger:
                 continue
             next_attribution = self._evaluate(
                 state.unit,
-                revision=state.attribution.revision + 1,
+                revision=state.attribution.revision,
             )
             if next_attribution != state.attribution:
-                state.attribution = next_attribution
-                changed.append(next_attribution)
+                state.attribution = replace(
+                    next_attribution, revision=state.attribution.revision + 1
+                )
+                changed.append(state.attribution)
         return tuple(changed)
 
     @property

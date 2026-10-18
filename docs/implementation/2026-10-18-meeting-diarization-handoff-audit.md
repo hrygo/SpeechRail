@@ -889,3 +889,11 @@ C0 的参考 speaker-time 为 100.13 秒，正确 89.10 秒、漏检 11.03 秒�
 5 个来源整体 recall 下降，18 个来源仍全部未通过质量门。小幅平均收益伴随弱说话人覆盖退化，因此不采用该后处理作为生产改进。完整逐片匿名对照留在仓库外 existing-postpass-pool-comparison.json，适用范围仍为派生诊断。
 
 只读检查 managed 模型目录、FluidAudio 标准缓存、Hugging Face/ModelScope 缓存及本机既有模型根目录，未发现 Nemotron 候选。候选可执行文件已存在，缺模型不能做实际推理。ModelScope 同名仓库 API 返回 404；转换方 [Hugging Face 固定快照](https://huggingface.co/FluidInference/nemotron-3-diarization-coreml/tree/25a90f97f254428d4b30374b76af9c74fdee8327/monolithic/v2)列出的 fast32／fast128 FP16 bundle 与共享 learnable_sil_emb.bin 共 9 文件、398165279 字节。已在仓库外保存文件大小、LFS SHA-256 或 Git blob ID 的下载提案，尚未下载；须在用户另行授权后取得、逐文件校验，再执行同源候选对照。该提案不改变安装、selection 或 profile。
+
+## 分人重复修订生产修复
+
+2026-10-18：生产 AttributionLedger.apply 在比较归属是否改变前将 revision 加一，而 dataclass 相等性包含 revision。因此每个未定稿 unit 在收到下一 activity update 时都会被判为变化，即使 speaker、active_speakers、state 和 reason 全部相同。DiarizationSession 会为这些结果生成 ItemAttributionUpdated，Realtime auxiliary 随后重新投影对应 item 并发送 metadata revision，增加无意义的事件与客户端处理。
+
+修复保持当前 revision 计算归属，只有实际内容或定稿状态改变时才递增并返回。保持真正的匿名 label 修正、unknown 原因和 provisional → final 转换；不更改模型、阈值、活动参考、PCM 或公共字段。两例 unchanged 回归在旧实现失败，真实 speaker 变化保护例通过；修复后三个直接相关测试文件 28 项通过，四个边界/集成文件 41 项通过，定向 Ruff 和 diff check 通过。仅执行相关确定性测试，没有自动加入真实语料 CI。
+
+另以此前 18 片实际 C0 活动帧构建仓库外确定性账本对照：使用参考活动区间作为无文字代理 units，所有 units 在 feed 前注册，按合成的一秒稳定窗口喂入。该工作负载不是实际 ASR unit 到达节奏，也不是实时性能或质量认证。前后发出的 unit 修订数为 69019 → 2290；去除仅 revision 不同的重复后，有意义修订的时间序列与全部最终 label 完全相同。证据证明该输入和调度下消除了重复修订，不能据此声称真实会话流量同比下降、CER/分人准确率提高或 P95 改善。baseline 源码、输入和逐来源计数留在仓库外 attribution-revision-diagnostic-20261018；未停服、未加载新模型完成此对照。

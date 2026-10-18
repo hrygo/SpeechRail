@@ -160,6 +160,47 @@ def test_final_attribution_is_covered_by_real_stable_watermark() -> None:
     assert changed[0].speaker == "A"
 
 
+@pytest.mark.parametrize("slots", [(), (0,)])
+def test_unchanged_activity_preserves_revision_until_finalization(slots: tuple[int, ...]) -> None:
+    ledger = AttributionLedger(accepted_samples=lambda: 3200)
+    ledger.apply(
+        _update(step=1, start=0, end=1600, frames=(_frame(0, 1600, *slots),),
+                processed=1600, stable=0)
+    )
+    (first,) = ledger.register("item", (TextUnit("unit", 0, 1, SampleSpan(0, 1600)),))
+    assert first.revision == 1 and first.state == "provisional"
+
+    # A later activity step can repeat the same evidence without changing the label.
+    assert ledger.apply(
+        _update(step=2, start=0, end=3200,
+                frames=(_frame(0, 1600, *slots), _frame(1600, 3200, 1)),
+                processed=3200, stable=0)
+    ) == ()
+
+    (final,) = ledger.apply(
+        _update(step=3, start=3200, end=3200, frames=(), processed=3200, stable=1600)
+    )
+    assert final.revision == 2 and final.state == "final"
+    assert final.speaker == first.speaker
+    assert final.active_speakers == first.active_speakers
+
+
+def test_changed_provisional_speaker_still_emits_next_revision() -> None:
+    ledger = AttributionLedger(accepted_samples=lambda: 1600)
+    ledger.apply(
+        _update(step=1, start=0, end=1600, frames=(_frame(0, 1600, 0),),
+                processed=1600, stable=0)
+    )
+    (first,) = ledger.register("item", (TextUnit("unit", 0, 1, SampleSpan(0, 1600)),))
+    (changed,) = ledger.apply(
+        _update(step=2, start=0, end=1600, frames=(_frame(0, 1600, 1),),
+                processed=1600, stable=0)
+    )
+    assert first.speaker == "A"
+    assert changed.speaker == "B" and changed.state == "provisional"
+    assert changed.revision == first.revision + 1
+
+
 def test_degradation_only_finalizes_pending_unknown_units() -> None:
     ledger = AttributionLedger(accepted_samples=lambda: 3200)
     ledger.apply(
