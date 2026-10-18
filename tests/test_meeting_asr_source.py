@@ -5,7 +5,7 @@ import hashlib
 import json
 
 import pytest
-from meeting_evaluation_identity import canonical_digest
+from meeting_evaluation_identity import candidate_digest, canonical_digest
 
 from test_meeting_development_fixture import inputs
 from test_meeting_quality_metrics import policy
@@ -221,3 +221,76 @@ def test_callback_and_missing_input_errors_are_sanitized(tmp_path, source):
     with pytest.raises(ValueError) as caught:
         locked.verify()
     assert str(tmp_path) not in str(caught.value)
+
+
+@pytest.mark.parametrize("mutate_after_replay", [False, True])
+def test_locked_source_drives_formal_session_and_revalidates_after_close(
+    tmp_path, source, mutate_after_replay
+):
+    import wave
+
+    from meeting_asr_source import evaluate_locked_asr_case, load_locked_asr_case
+    from meeting_realtime_asr_replay import replay_realtime_session
+
+    from test_meeting_asr_sidecar import fixture as sidecar_fixture
+    from test_meeting_realtime_asr_replay import case, observe, setup
+
+    services, factory, _, candidate = setup()
+    manifest, split, reference, descriptor = source
+    artifacts = manifest["fixtures"][0]["artifacts"]
+    pcm = case().pcm16
+    path = tmp_path / artifacts["pcm"]["path"]
+    with wave.open(str(path), "wb") as handle:
+        handle.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+        handle.writeframes(pcm)
+    artifacts["pcm"]["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    for kind in ("activity_reference", "text_reference"):
+        target = tmp_path / artifacts[kind]["path"]
+        data = json.loads(target.read_text())
+        data["total_samples"] = len(pcm) // 2
+        target.write_text(json.dumps(data))
+        artifacts[kind]["sha256"] = hashlib.sha256(target.read_bytes()).hexdigest()
+    _, artifacts["asr_sidecar"] = sidecar_fixture(
+        tmp_path, pcm_sha256=artifacts["pcm"]["sha256"]
+    )
+    split["development_manifest_sha256"] = canonical_digest(manifest)
+    reference.update(
+        manifest_sha256=canonical_digest(manifest),
+        pcm_sha256=artifacts["pcm"]["sha256"],
+        main_reference="甲乙",
+    )
+    primary_path = tmp_path / descriptor["path"]
+    primary_path.write_text(json.dumps(reference))
+    descriptor["sha256"] = hashlib.sha256(primary_path.read_bytes()).hexdigest()
+    locked = load_locked_asr_case(
+        manifest,
+        split,
+        artifact_root=tmp_path,
+        scorer_policy=policy(),
+        fixture_id="M0",
+        candidate_sha256=candidate_digest(candidate),
+        primary_reference=descriptor,
+    )
+
+    async def replay(data):
+        result = await replay_realtime_session(
+            data, candidate, services, observe=observe(candidate)
+        )
+        assert factory.sessions[0].closed
+        if mutate_after_replay:
+            primary_path.write_text("changed after session close")
+        return result
+
+    if mutate_after_replay:
+        with pytest.raises(ValueError, match="locked ASR source"):
+            asyncio.run(evaluate_locked_asr_case(locked, replay))
+    else:
+        result = asyncio.run(evaluate_locked_asr_case(locked, replay))
+        assert result["source_validation"]["bytes_verified"]
+        assert result["quality_evidence_valid"]
+        assert result["metrics"]["normalized"]["cer"] == 0
+        assert result["coverage_samples"] == len(pcm) // 2
+        assert result["runtime_identity_verified"] is False
+        assert result["certification_eligible"] is False
+        encoded = json.dumps(result, ensure_ascii=False)
+        assert "甲乙" not in encoded and str(tmp_path) not in encoded

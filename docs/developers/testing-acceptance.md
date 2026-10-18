@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.25"
+version: "3.3.26"
 date: 2026-10-18
 ---
 
@@ -233,6 +233,18 @@ PYTHONPATH=src:examples/perf uv run --no-sync python examples/perf/probe_meeting
 `overlap_order` 只能为 unambiguous/ambiguous，主参考可为 null；缺失或歧义不会按时间戳、speaker 顺序或候选输出补造。主参考正文上限10000字符；拒绝额外字段、错误来源/fixture/WAV绑定、重复键、符号链接和非普通文件。主参考应在查看候选输出前冻结；文件一致性不能证明人工来源或冻结时点。
 
 `evaluate_locked_asr_case` 接收已加载来源和负责关闭会话的 replay callback；调用前、退出时 joined 校验全部来源，返回前同步核对文件状态，并确认结果的 case/candidate 摘要。取消也等待来源复核；修改后恢复字节仍因文件状态变化失败。返回的 source_validation 只报告字节核对，human_reference_provenance_verified/source_catalog_provenance_verified 继续 false；它不升级 runtime_identity_verified、实际 A0 或认证。callback 抛出的普通错误统一脱敏。主参考与PCM留在RAM，不写入报告或仓库；fake回归见 `tests/test_meeting_asr_source.py`。
+
+### 正式 Realtime session 的 ASR 诊断重放
+
+`meeting_realtime_asr_replay.replay_realtime_session` 接受已经构造且 ready 的 `AppServices`、冻结 case/spec 和身份观察 callback，调用实际 `OpenAIRealtimeSession` 的 start/update/append/commit/close。仅在 dataclasses.replace 快照装饰 window factory；共享 worker、Resource Governor、准入与生命周期沿用调用方对象。正式 VAD、speech admission、边界复核和 EOF 处理均走生产路径；核对 session.updated、实际 window/language/context 与有效 VAD/admission 配置。它不负责模型启动、下载、服务操作或封存留出。
+
+wire 固定为24kHz PCM16，kernel 为16kHz。为保留锁定 kernel 字节，此诊断按当前线性 resampler 的逆嵌入将样本对 `(a,b)` 编为 `(a,b,b)`，奇数尾样本只保留一次；这不是声学重采样或真实24kHz采集。分包经过实际生产 resampler，逐 decode 核对原 case PCM；随机/极值、奇偶长度、任意 wire 包边界和 EOF flush 均有合成回归。映射版本及相关生产源文件摘要进入 replay policy，不能推广为其他 resampler 的等价输入。
+
+输入由独立生产者和消费者经1–64包有界队列传递，每包至多一秒；throughput 尽快供给，realtime 按累计 wire 样本以1×时钟供给。队列满、协议失败、缺覆盖或超时均失败，不静默丢帧或重试。TaskGroup 加入两个任务后，等待生产 session.close 清理当前有界 decode；取消同样先加入清理再传播，不强取消共享 worker。总输入 deadline 不包含可能仍需等待的当前 decode 清理预算，因此不能把它当绝对墙钟上限。注入时钟明示 injected；该诊断不提供真实采集延迟或P95认证。
+
+只取有界 sealed 正文评分，逐 attempt 记录沿用 schema 2。冻结 max_tokens 是调用方声明上限，实际每次 budget 必须由 observation 证明且不超过该上限；streaming 配置不等于共享 window owner 的有效 cap。缺观测保持未知。replay policy 绑定实现/配置摘要、有效策略、输入模式、包/队列与时限；前后身份字段匹配仍只是调用方声明，runtime_identity_verified/certification_eligible 保持 false，a0_execution 为 not_certified。
+
+可将该 callback 交给 `evaluate_locked_asr_case`，贯通共享 development 来源、显式主参考、实际 session、评分与退出后文件核对；会话关闭后修改参考也不能返回 source proof。摘要不含正文、PCM、Base64 或绝对路径。fake 回归见 `tests/test_meeting_realtime_asr_replay.py` 与 `tests/test_meeting_asr_source.py`；实际 A0 生产字节证明、真实质量与延迟仍需独立授权和验收。
 
 ### 有声书外置小说语料回归
 

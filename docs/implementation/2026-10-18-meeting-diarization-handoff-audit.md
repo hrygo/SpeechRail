@@ -397,3 +397,15 @@ Ruling: 逐fixture与最终checkpoint增加async verifier及同步commit hook。
 LockedAsrCase丢弃无关参考正文，仅保留不可变case和文件指纹；evaluate_locked_asr_case在callback前和退出时joined校验，返回前同步stamps并核对case/candidate摘要。修改后恢复、来源角色/绑定错误、未知字段、symlink、digest不符或回放期间变更均不能返回verified source结果。取消先由replay负责会话清理，再等待来源复核；普通callback错误和缺文件错误均脱敏。proof只说明字节匹配，人工参考来源与source catalog真实性保持false，生产身份/实际A0/质量不升级。
 
 RED：12项新模块缺失及来源绑定/变更反例先失败；GREEN：19项loader合成回归通过，与原共享fixture合并 `46 passed in 1.91s`。Ruff两文件、loader按项目strict配置Mypy及diff检查通过。全部为合成WAV/参考，没有真实语料/模型、benchmark、下载、服务或安装/UI操作。父提交15a3f61c的原生CI39092542609成功；同SHA主CI39092542520仍queued，继续观察同一handle，不重启或推断失败。
+
+## T8 正式 Realtime session 诊断重放
+
+2026-10-18：新增 meeting_realtime_asr_replay，调用实际 OpenAIRealtimeSession start/update/append/commit/close；在 AppServices 快照装饰 window factory，共享原 worker、governor、admission 与生命周期。沿用生产 VAD/admission/boundary/EOF，核对协议有效设置与实际 window/language/context、VAD 类型及 admission 参数。逆嵌入把16kHz样本对(a,b)编为24kHz wire(a,b,b)，奇数尾样本一次保留，经过当前生产线性resampler后逐decode对比原PCM；它不是声学重采样或真实24kHz采集。映射版本、正式组合根及相关生产源码、有效配置、包/队列/时钟模式与时限进入replay policy。
+
+独立生产者/消费者经有界队列供给，1×模式按累计wire样本计时；队列满直接失败，无静默丢包。超时、输入错误和取消先加入TaskGroup，再加入生产close等待当前有界decode，不强取消共享worker；total deadline不覆盖可能剩余的当前decode清理预算。只取sealed正文，核对连续terminal coverage和已排序不重叠final units；未知outcome拒绝。全部attempt沿用schema 2预算/完成证据，缺观测或失败不能被后续成功掩盖。
+
+Ruling: streaming配置不是实际shared window cap。冻结max_tokens只作为caller upper-bound，每attempt真实budget必须由observation证明；window_decoder_config_cap保持not_observed。前后runtime callback匹配仅是声明，保持runtime_identity_verified=false/certification_eligible=false/a0_execution=not_certified，不能冒充可信A0、真实采集/P95或质量认证。新入口只接收已ready服务，不启动模型、探测安装或执行留出。生产者与参考来源真实性仍未认证。
+
+56项新增fake回归覆盖随机/极值/奇偶与跨wire包/EOF映射、实际decode PCM逐字节、sealed正文、production boundary fallback、独立时钟持续供给、overflow、错误隐私、timeout/cancel joined、有效admission漂移、streaming配置与实际budget不同及终态非法数据。主线增加两个来源锁→实际session→评分集成用例，证明明确主参考评分与close后参考变更拒绝；source回归共21项。24个相关文件联合 `607 passed in 15.90s`，四个Python Ruff、两个perf source按项目strict配置Mypy通过。图谱为主checkout旧generation，新文件missing，主线直接复核当前worktree源码，未重建索引。
+
+父提交15a3f61c的主CI39092542520和原生CI39092542609均成功；这是父提交证据。没有真实语料/模型、benchmark、下载、服务、安装、UI、发布或合并操作。实际A0生产字节和可信运行组合根、真实损失归因、CER改善、认证人数及联合延迟仍未完成。
