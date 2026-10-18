@@ -158,14 +158,17 @@ def _speaker_time(reference, hypothesis, policy) -> dict[str, Any]:
         if ref_time[r] >= policy["other_min_duration_seconds"]
     ]
     other_min = min(other, default=None)
+    participant_pass = (
+        top_min is not None
+        and top_min >= policy["top_four_recall_min"]
+        and all(value >= policy["other_recall_min"] for value in other)
+    )
     passed = (
         recall is not None
         and recall >= policy["speaker_time_recall_min"]
         and precision is not None
         and precision >= policy["speaker_time_precision_min"]
-        and top_min is not None
-        and top_min >= policy["top_four_recall_min"]
-        and all(value >= policy["other_recall_min"] for value in other)
+        and participant_pass
     )
     return {
         "availability": "observed" if dref else "not_observed",
@@ -183,6 +186,7 @@ def _speaker_time(reference, hypothesis, policy) -> dict[str, Any]:
             {"reference_seconds": ref_time[r], "correct_seconds": correct[r], "recall": value}
             for r, value in zip(ordered, recalls, strict=True)
         ],
+        "participant_gate": "pass" if participant_pass else "fail",
         "quality_gate": ("pass" if passed else "fail") if dref else "not_observed",
     }
 
@@ -262,21 +266,36 @@ def _text_metrics(reference, hypothesis, policy) -> dict[str, Any]:
 
 
 def score_meeting_quality(
-    reference: Sequence[Mapping[str, Any]],
-    hypothesis: Sequence[Mapping[str, Any]],
+    reference_activity: Sequence[Mapping[str, Any]],
+    hypothesis_activity: Sequence[Mapping[str, Any]],
     *,
+    reference_text: Sequence[Mapping[str, Any]] | None,
+    hypothesis_text: Sequence[Mapping[str, Any]] | None,
     duration: float,
     policy: Mapping[str, Any],
 ) -> dict[str, object]:
-    """Score one meeting; this does not certify missing strata or confidence bounds."""
+    """Score independent activity and attributed-text observations.
+
+    Activity contains continuous speaker spans, including overlapping turns.
+    Text contains actual reference/predicted transcript spans. Neither stream
+    supplies the other's boundaries. Pass None for both text inputs when text
+    is unobserved; an empty hypothesis instead means observed complete deletion.
+    This result alone does not certify missing strata or confidence bounds.
+    """
     _validate_policy(policy)
     if type(duration) not in (int, float) or not math.isfinite(duration) or duration <= 0:
         raise ValueError("invalid evaluation duration")
     for package, expected in policy["scorer_versions"].items():
         if importlib.metadata.version(package) != expected:
             raise ValueError(f"installed {package} differs from scorer policy")
-    ref = _validate_rows(reference, duration=duration, reference=True)
-    hyp = _validate_rows(hypothesis, duration=duration, reference=False)
+    if any("text" in row for row in [*reference_activity, *hypothesis_activity]):
+        raise ValueError("activity must be separate from attributed text")
+    if (reference_text is None) != (hypothesis_text is None):
+        raise ValueError("text reference and hypothesis must be observed together")
+    ref = _validate_rows(reference_activity, duration=duration, reference=True)
+    hyp = _validate_rows(hypothesis_activity, duration=duration, reference=False)
+    text_ref = _validate_rows(reference_text or [], duration=duration, reference=True)
+    text_hyp = _validate_rows(hypothesis_text or [], duration=duration, reference=False)
     product = _speaker_time(ref, hyp, policy)
     legacy = score_diarization(
         ref, [r for r in hyp if r["speaker"] != "unknown"], duration=duration
@@ -291,7 +310,7 @@ def score_meeting_quality(
             legacy[key] = None
         legacy["quality_gate"] = "not_observed"
     independent = score_diarization(ref, hyp, duration=duration)
-    standard = _text_metrics(ref, hyp, policy)
+    standard = _text_metrics(text_ref, text_hyp, policy)
     standard["diarization"] = {
         "availability": "observed" if ref else "not_observed",
         "scorer": "pyannote.metrics",
@@ -303,12 +322,13 @@ def score_meeting_quality(
         "components": independent["components"],
         "research_comparable": independent["research_comparable"],
     }
-    char_total = sum(len(_tokens(row.get("text", ""), char=True)) for row in hyp)
+    char_total = sum(len(_tokens(row.get("text", ""), char=True)) for row in text_hyp)
     unknown_chars = sum(
-        len(_tokens(row.get("text", ""), char=True)) for row in hyp if row["speaker"] == "unknown"
+        len(_tokens(row.get("text", ""), char=True))
+        for row in text_hyp if row["speaker"] == "unknown"
     )
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "policy_sha256": canonical_digest(policy),
         "legacy_nonoverlap": legacy,
         "product_all_regions": product,
@@ -396,7 +416,15 @@ def nondegradation_gate(baseline, candidate, *, policy) -> dict[str, Any]:
         r["difference"] <= 0 and r["upper"] is not None and r["upper"] <= 0
         for r in results.values()
     )
-    return {"metrics": results, "quality_gate": "pass" if passed else "fail"}
+    decision = (
+        "point_failed" if any(r["difference"] > 0 for r in results.values())
+        else "pass" if passed else "insufficient_evidence"
+    )
+    return {
+        "metrics": results,
+        "quality_gate": "pass" if passed else "fail",
+        "decision": decision,
+    }
 
 
 def allows_latency_tiebreaker(difference, *, policy) -> bool:
@@ -435,6 +463,8 @@ def summarize_meeting_quality(rows, *, required_strata, policy) -> dict[str, Any
             or not group
         ):
             raise ValueError("invalid evaluation stratum or source group")
+        if row["quality"].get("schema_version") != 3:
+            raise ValueError("score schema must separate activity and text inputs")
         if row["quality"]["policy_sha256"] != observed_policy:
             raise ValueError("mixed scorer policies cannot be pooled")
         by_stratum[count][group].append(row["quality"])
@@ -444,11 +474,12 @@ def summarize_meeting_quality(rows, *, required_strata, policy) -> dict[str, Any
             summaries[str(count)] = {
                 "availability": "not_observed",
                 "quality_gate": "fail",
+                "decision": "not_observed",
                 "independent_groups": 0,
             }
             continue
         point_pass = all(
-            q["product_all_regions"]["quality_gate"] == "pass"
+            q["product_all_regions"]["participant_gate"] == "pass"
             and q["product_all_regions"]["reference_speakers_count"] == count
             and q["legacy_nonoverlap"]["quality_gate"] == "pass"
             for meetings in grouped.values()
@@ -474,9 +505,11 @@ def summarize_meeting_quality(rows, *, required_strata, policy) -> dict[str, Any
             ]
         )
         if not np.isfinite(means).all() or (means[:, 1:] <= 0).any():
+            observed_miss = np.isfinite(means).all() and (means[:, 1] > 0).all()
             summaries[str(count)] = {
-                "availability": "not_observed",
+                "availability": "observed" if observed_miss else "not_observed",
                 "quality_gate": "fail",
+                "decision": "point_failed" if observed_miss else "not_observed",
                 "independent_groups": len(grouped),
             }
             continue
@@ -508,14 +541,24 @@ def summarize_meeting_quality(rows, *, required_strata, policy) -> dict[str, Any
                     "upper": float(upper) if upper is not None else None,
                 }
                 threshold = policy[f"speaker_time_{name}_min"]
-                confidence_pass &= value >= threshold and lower is not None and lower >= threshold
+                point_pass &= value >= threshold
+                confidence_pass &= lower is not None and lower >= threshold
         summary["quality_gate"] = "pass" if point_pass and confidence_pass else "fail"
+        summary["decision"] = (
+            "point_failed" if not point_pass
+            else "pass" if confidence_pass else "insufficient_evidence"
+        )
         summaries[str(count)] = summary
+    decisions = {s["decision"] for s in summaries.values()}
     return {
         "strata": summaries,
         "quality_gate": "pass"
         if all(s["quality_gate"] == "pass" for s in summaries.values())
         else "fail",
+        "decision": next(
+            d for d in ("point_failed", "not_observed", "insufficient_evidence", "pass")
+            if d in decisions
+        ),
         "certified_max_speakers": None,
         "certification_scope": "product_scores_only_requires_c0_runtime_and_frozen_holdout",
     }

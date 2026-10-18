@@ -163,3 +163,20 @@ worker 由单一顺序 task 独占 SDK，只走本地 `Nemotron3Models.load` 和
 验证：21 个 Python 定向测试文件 `410 passed in 7.61s`；新增候选 session 文件含 17 项测试。`swift test --package-path native/diarization-candidate` 的 3 项测试先因缺少帧验证实现 RED，补实现后 GREEN；Debug CLI 编译通过。新增候选专用 GitHub Actions 工作流执行同样的无模型测试与 Release CLI 编译。本机 Swift 6.4 / SDK 27.0 已实测；Release CLI 构建通过（51.03s），SHA-256 `6dc10ad96f8109fac3b0bc5670cedcf2e63f36407b61a53ffd3d3ebf90534e60`；Mach-O `minos=26.0`、`sdk=26.0`。实际 CLI 的参数错误、缺制品、非允许 preset 三项启动拒绝检查通过，固定错误 packet 不含临时路径，无模型加载。Ruff 三文件及 Mypy 两源文件通过，staged diff 检查通过。
 
 以上只证明代码编译、合成协议和资源生命周期；没有启动真实 native 模型，也未验证实际模型 shape、snapshot 来源、准确率、P95、共存或认证人数。T4 保持部分完成，T5–T8 未因此放行。审查仍由作者自行执行，无子代理；回退为 revert 本批提交，不涉及服务或用户数据。
+
+## T2 评分接线复核
+
+2026-10-18：按既定设计 §6.4 修正真实候选接入前的输入和判定语义。连续说话活动和带标签文字现在独立输入；前者计算 speaker-time/DER/JER/旧门，后者计算标准文字指标，不从一个流推导另一个流的边界。未观察文字必须两侧显式 `null`；空假设表示已观察到的全量删除。评分输出升级 schema 3，旧评分不能直接混入新汇总；不改写历史结果。
+
+Ruling: 每场 product 总体 gate 仅作诊断，汇总使用每场逐人 gate、旧 gate，以及人数层 pooled/macro 总体门，符合获批范围；额外附加单场全区间 precision 会无意收紧设计。点值失败、区间证据不足、缺层分别报告，后续共同扩样不能复活点值失败。全量漏检属于已观察的点值失败，不能当作缺观察请求追加。
+
+RED：独立文字输入接口缺失；随后人工 overlap 反例复现单场总体门额外收紧，旧评分 schema 未被拒绝；全量漏检被误记为缺观察。GREEN：五个相关文件共 126 项 fake 测试通过，Ruff 和 diff 检查通过。另将逐人 gate 临时替换回单场总体 gate，反例按预期失败，再恢复并复验。测试全部使用人工区间与文字，无真实音频、模型或运行态操作。
+
+```bash
+PYTHONPATH=src:examples/perf uv run --no-sync pytest --no-cov -q \
+  tests/test_meeting_quality_metrics.py tests/test_meeting_diarization_quality.py \
+  tests/test_meeting_evaluation_identity.py tests/test_probe_meeting_candidate.py \
+  tests/test_meeting_candidate_session.py
+```
+
+T4/T5 的归属、来源锁和 runner 尚待接线；本批评分不签发人数认证或质量提升结论。用户已解除禁止子代理限制；此前自审记录保留为历史事实，后续可按任务边界使用代理。

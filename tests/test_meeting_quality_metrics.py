@@ -26,7 +26,14 @@ def span(start, end, speaker, text=None):
 
 
 def score(ref, hyp, duration=10, override=None):
-    return score_meeting_quality(ref, hyp, duration=duration, policy=override or policy())
+    return score_meeting_quality(
+        [{k: v for k, v in r.items() if k != "text"} for r in ref],
+        [{k: v for k, v in r.items() if k != "text"} for r in hyp],
+        reference_text=ref,
+        hypothesis_text=hyp,
+        duration=duration,
+        policy=override or policy(),
+    )
 
 
 def test_overlap_contributes_to_speaker_time_denominator():
@@ -151,7 +158,9 @@ def test_policy_never_silently_fills_missing_production_defaults(field):
     incomplete = copy.deepcopy(policy())
     del incomplete[field]
     with pytest.raises(ValueError, match="policy"):
-        score_meeting_quality([], [], duration=1, policy=incomplete)
+        score_meeting_quality(
+            [], [], reference_text=None, hypothesis_text=None, duration=1, policy=incomplete
+        )
 
 
 @pytest.mark.parametrize(
@@ -249,3 +258,133 @@ def test_single_meeting_repetitions_do_not_create_certification_evidence():
     result = summarize_meeting_quality(rows, required_strata=(1,), policy=policy())
     assert result["strata"]["1"]["independent_groups"] == 1
     assert result["quality_gate"] == "fail"
+
+
+def test_activity_and_text_are_independent_observations():
+    activity_ref = [span(0, 1, "R1")]
+    activity_hyp = [span(0, 1, "S1")]
+    result = score_meeting_quality(
+        activity_ref, activity_hyp,
+        reference_text=[span(0, 2, "R1", "hello world")],
+        hypothesis_text=[span(8, 9, "S1", "hello world")],
+        duration=10, policy=policy(),
+    )
+    assert result["standard_metrics"]["diarization"]["der"] == 0
+    assert result["product_all_regions"]["precision"] == 1
+    assert result["standard_metrics"]["cp_wer"]["error_rate"] == 0
+    assert result["standard_metrics"]["tcp_wer"]["error_rate"] > 0
+    wrong_activity = score_meeting_quality(
+        activity_ref, [span(8, 9, "S1")],
+        reference_text=[span(0, 2, "R1", "hello world")],
+        hypothesis_text=[span(8, 9, "S1", "hello world")],
+        duration=10, policy=policy(),
+    )
+    assert wrong_activity["product_all_regions"]["recall"] == 0
+    assert wrong_activity["standard_metrics"]["cp_wer"] == result["standard_metrics"]["cp_wer"]
+
+
+def test_absent_text_is_not_inferred_from_activity():
+    result = score_meeting_quality(
+        [span(0, 1, "R1")], [span(0, 1, "S1")],
+        reference_text=None, hypothesis_text=None, duration=1, policy=policy(),
+    )
+    assert result["standard_metrics"]["cp_cer"]["availability"] == "not_observed"
+    assert result["diagnostics"]["unknown_text_fraction"] is None
+    with pytest.raises(ValueError, match="text"):
+        score_meeting_quality(
+            [span(0, 1, "R1", "a")], [span(0, 1, "S1")],
+            reference_text=None, hypothesis_text=None, duration=1, policy=policy(),
+        )
+    with pytest.raises(ValueError, match="text"):
+        score_meeting_quality(
+            [span(0, 1, "R1")], [span(0, 1, "S1")],
+            reference_text=[span(0, 1, "R1", "a")], hypothesis_text=None,
+            duration=1, policy=policy(),
+        )
+
+
+def overlap_summary_rows(extra_seconds):
+    # Ghost activity only in overlap: legacy nonoverlap still passes. This
+    # isolates the additional all-region precision rule from the retained gate.
+    ref = [span(0, 2, "R1"), span(1, 2, "R2")]
+    hyp = [span(0, 2, "S1"), span(1, 2, "S2")]
+    good = score(ref, hyp)
+    bad_precision = score(ref, [*hyp, span(1, 1 + extra_seconds, "S3")])
+    assert bad_precision["legacy_nonoverlap"]["quality_gate"] == "pass"
+    one = score([span(0, 1, "R1")], [span(0, 1, "S1")])
+    rows = [
+        {"source_meeting_id": f"M{count}_{i}", "speakers_count": count,
+         "quality": one if count == 1 else good}
+        for count in (1, 2) for i in range(6)
+    ]
+    rows[-1]["quality"] = bad_precision
+    return rows, bad_precision
+
+
+def test_stratum_overall_gate_does_not_add_a_per_meeting_precision_gate():
+    from meeting_quality_metrics import summarize_meeting_quality
+
+    rows, bad_precision = overlap_summary_rows(0.18)
+    assert bad_precision["product_all_regions"]["precision"] < 0.95
+    result = summarize_meeting_quality(rows, required_strata=(1, 2), policy=policy())
+    assert result["quality_gate"] == "pass"
+    assert result["decision"] == "pass"
+
+
+def test_point_failure_and_insufficient_evidence_require_different_actions():
+    from meeting_quality_metrics import summarize_meeting_quality
+
+    rows, bad_precision = overlap_summary_rows(0.6)
+    result = summarize_meeting_quality(rows, required_strata=(1, 2), policy=policy())
+    assert result["quality_gate"] == "fail"
+    assert result["strata"]["2"]["pooled_precision"]["value"] > 0.95
+    assert result["decision"] == "insufficient_evidence"
+    rows = [dict(r, quality=bad_precision) if r["speakers_count"] == 2 else r for r in rows]
+    result = summarize_meeting_quality(rows, required_strata=(1, 2), policy=policy())
+    assert result["decision"] == "point_failed"
+
+
+def test_legacy_score_schema_cannot_be_pooled_after_input_semantics_change():
+    from meeting_quality_metrics import summarize_meeting_quality
+
+    old = score([span(0, 1, "R1")], [span(0, 1, "S1")])
+    old["schema_version"] = 2
+    with pytest.raises(ValueError, match="schema"):
+        summarize_meeting_quality(
+            [{"source_meeting_id": "M1", "speakers_count": 1, "quality": old}],
+            required_strata=(1,), policy=policy(),
+        )
+
+
+def test_nondegradation_distinguishes_insufficient_interval_from_worse_point():
+    from meeting_quality_metrics import nondegradation_gate
+
+    baseline = {name: {"A": [0.2], "B": [0.2]} for name in ("der", "cp_cer")}
+    candidate = {name: {"A": [0.0], "B": [0.3]} for name in ("der", "cp_cer")}
+    result = nondegradation_gate(baseline, candidate, policy=policy())
+    assert result["decision"] == "insufficient_evidence"
+    worse = {name: {"A": [0.3], "B": [0.3]} for name in ("der", "cp_cer")}
+    assert nondegradation_gate(baseline, worse, policy=policy())["decision"] == "point_failed"
+    assert nondegradation_gate(baseline, baseline, policy=policy())["decision"] == "pass"
+
+
+def test_missing_strata_cannot_be_treated_as_expandable_confidence():
+    from meeting_quality_metrics import summarize_meeting_quality
+
+    result = summarize_meeting_quality([], required_strata=(1,), policy=policy())
+    assert result["decision"] == "not_observed"
+    assert result["strata"]["1"]["decision"] == "not_observed"
+
+
+def test_observed_total_miss_is_point_failure_not_missing_observation():
+    from meeting_quality_metrics import summarize_meeting_quality
+
+    missed = score([span(0, 1, "R1", "a")], [])
+    assert missed["standard_metrics"]["cp_cer"]["error_rate"] == 1
+    rows = [
+        {"source_meeting_id": f"M{i}", "speakers_count": 1, "quality": missed}
+        for i in range(6)
+    ]
+    result = summarize_meeting_quality(rows, required_strata=(1,), policy=policy())
+    assert result["decision"] == "point_failed"
+    assert result["strata"]["1"]["availability"] == "observed"
