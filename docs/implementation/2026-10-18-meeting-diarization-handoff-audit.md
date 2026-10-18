@@ -369,3 +369,11 @@ Ruling: 动态窗口 budget 与生成 budget 分开：decode_max_new_tokens 记�
 子代理独占四个生产 source 及三个相关测试，主线只改 perf/C0 与文档；主代理复核当前 diff 和图谱覆盖，索引 generation 2026-10-17T22:35:42Z 为主 checkout，故关键证据以当前 worktree source 为准，没有重建索引。新增回归先 RED 后 GREEN；子代理 targeted fake 验证111项通过，Ruff七文件和 Mypy四 source通过。未运行真实模型、benchmark、服务或 UI。
 
 主线联合复验：21个相关测试文件共 `490 passed in 7.29s`；11个变更 Python 文件 Ruff 通过；7个 source 按项目 strict 配置执行 Mypy 通过（保留 pyproject.toml 的 warn_unused_ignores=false）。额外强制 --strict 会覆盖该开关，报告六处既有 vendor import 的 unused-ignore；未为消除此命令差异改写依赖策略。CLI --help 与 diff 检查通过。上述证据均为机制/合成回归，不证明真实质量或人数认证。
+
+## T8 逐次观测进入正文诊断判定
+
+2026-10-18：正文诊断报告升为 schema 2 / asr-body-v2，移除 RuntimeObservation.token_limit_hit 自报字段。_RecordedSession 在每次实际 decode 记录匿名 attempt 摘要、kind、样本范围、真实预算、可见完成元数据与明确/未知截断状态；最多4096次，超额不启动下一 decode。只有所有 attempt 均明确 eos + truncated=false 且 decode budget 不超冻结 cap，截断证据门才能通过。缺失字段保持未知，kind 错配不推进正文，超冻结上限失败；preview 的 length/truncated 不能被随后成功 review 掩盖。review 内部 generation budget/count 未观察时仍为 null，不以其他字段补造。
+
+Ruling: 报告仅保留哈希、样本范围、计数和固定状态；未知 finish_reason 输出 other，不能回显厂商原串。compare_asr_runs 重新校验有界逐次记录、唯一 attempt 摘要、计数、范围、预算及记录摘要，不仅依赖 quality_evidence_valid。字段/摘要自洽仍不证明生产者或实际 A0，runtime_identity_verified/certification_eligible 保持 false；冻结真实生产 cap/权重/来源与正式 Realtime 装配仍待后续接线及授权实测。旧诊断报告不能复用新 scorer 门。
+
+RED：8项反例复现自报未截断误放行、实际元数据未消费、unknown/kind/预算错误及缺逐次记录；另两项反例复现缺一次观测被后续成功掩盖及比较器仅信摘要布尔值。GREEN：ASR probe 62项，通过与 domain/worker/window/stream decoder 合并 `173 passed in 0.89s`；两个变更 Python Ruff 和 probe 按项目 strict 配置 Mypy 通过。12项新增参数化/普通回归包含4096次调用上限、preview 截断与最终 review 成功共存的拒绝。无真实模型/音频/benchmark、下载、服务、安装、UI、发布或合并动作。父提交 b0ab7db 的主 CI 39091938089、原生 CI 39091938093 均成功，不能替代后续提交验证。

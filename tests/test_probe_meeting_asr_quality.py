@@ -19,7 +19,7 @@ from probe_meeting_asr_quality import (
     replay_production_windows,
 )
 
-from speechrail.domain.asr_window import WindowDecodeResult, WindowPolicy
+from speechrail.domain.asr_window import WindowDecodeObservation, WindowDecodeResult, WindowPolicy
 from speechrail.realtime.speech_admission import AdmissionDecision
 
 
@@ -54,7 +54,8 @@ def case(group="source-1", reference="甲乙丙丁", seconds=1):
 
 
 class Decoder:
-    def __init__(self, text="甲乙", *, complete=True, failure=None):
+    def __init__(self, text="甲乙", *, complete=True, failure=None, observe_decode=True):
+        self.observe_decode = observe_decode
         self.text, self.complete, self.failure = text, complete, failure
         self.calls = []
         self.closed = False
@@ -64,15 +65,23 @@ class Decoder:
         if self.failure:
             raise self.failure("private transcript and /private/model")
         return WindowDecodeResult(
-            request.identity, request.attempt_id, request.input_span, self.text, None, self.complete
+            request.identity,
+            request.attempt_id,
+            request.input_span,
+            self.text,
+            None,
+            self.complete,
+            WindowDecodeObservation(request.kind, 32, finish_reason="eos", truncated=False)
+            if self.observe_decode
+            else None,
         )
 
     async def close(self):
         self.closed = True
 
 
-def observation(candidate=None, origin="fake", token_limit_hit=False):
-    return lambda: RuntimeObservation((candidate or spec()).as_dict(), origin, token_limit_hit)
+def observation(candidate=None, origin="fake"):
+    return lambda: RuntimeObservation((candidate or spec()).as_dict(), origin)
 
 
 def run(data=None, text="甲乙", *, candidate=None, origin="fake", **kwargs):
@@ -181,8 +190,8 @@ def test_unobserved_decode_limit_and_caller_report_are_not_certified():
         replay_long_blocks(
             case(),
             spec(),
-            Decoder(),
-            observe=lambda: RuntimeObservation(spec().as_dict(), "runtime_observed", None),
+            Decoder(observe_decode=False),
+            observe=lambda: RuntimeObservation(spec().as_dict(), "runtime_observed"),
         )
     )
     assert "decode_limit_not_observed" in result["failures"]
@@ -341,8 +350,10 @@ def test_token_limit_hit_and_changed_normalization_remain_fail_closed():
         replay_long_blocks(
             case(),
             spec(),
-            Decoder(),
-            observe=lambda: RuntimeObservation(spec().as_dict(), "fake", True),
+            ObservedDecoder(
+                WindowDecodeObservation("review", 32, finish_reason="length", truncated=True)
+            ),
+            observe=lambda: RuntimeObservation(spec().as_dict(), "fake"),
         )
     )
     assert "decode_limit_hit" in result["failures"]
@@ -635,3 +646,191 @@ def test_invalid_replay_clock_is_rejected_and_session_is_closed(value):
             )
         )
     assert decoder.closed
+
+
+def test_caller_limit_claim_cannot_replace_missing_per_attempt_observation():
+    with pytest.raises(TypeError):
+        RuntimeObservation(spec().as_dict(), token_limit_hit=False)
+    report = asyncio.run(
+        replay_long_blocks(case(), spec(), Decoder(observe_decode=False), observe=observation())
+    )
+    assert report["quality_evidence_valid"] is False
+    assert "decode_limit_not_observed" in report["failures"]
+    assert report["decode_evidence"]["attempts_without_observation"] == 1
+
+
+class ObservedDecoder(Decoder):
+    def __init__(self, metadata, **kwargs):
+        super().__init__(**kwargs)
+        self.metadata = metadata
+
+    async def decode(self, request):
+        result = await super().decode(request)
+        metadata = self.metadata(request) if callable(self.metadata) else self.metadata
+        return replace(result, observation=metadata)
+
+
+def test_actual_attempt_metadata_enables_diagnostic_evidence_without_runtime_claim():
+    from speechrail.domain.asr_window import WindowDecodeObservation
+
+    decoder = ObservedDecoder(
+        lambda request: WindowDecodeObservation(
+            request.kind, 32, finish_reason="eos", truncated=False
+        )
+    )
+    report = asyncio.run(
+        replay_long_blocks(
+            case(), spec(), decoder, observe=lambda: RuntimeObservation(spec().as_dict())
+        )
+    )
+    assert report["quality_evidence_valid"] is True
+    assert report["decode_evidence"]["token_limit_hit"] is False
+    assert report["decode_evidence"]["attempts_with_observation"] == 1
+    assert report["decode_evidence"]["attempts"][0]["generation_max_new_tokens"] is None
+    assert report["runtime_identity_verified"] is False
+    assert report["certification_eligible"] is False
+
+
+@pytest.mark.parametrize(
+    "metadata,reason",
+    [
+        ({"finish_reason": "length", "truncated": False}, "decode_limit_hit"),
+        ({"finish_reason": "eos", "truncated": True}, "decode_limit_hit"),
+        ({"finish_reason": "eos", "truncated": None}, "decode_limit_not_observed"),
+        ({"finish_reason": None, "truncated": False}, "decode_limit_not_observed"),
+        (
+            {"decode_max_new_tokens": 129, "finish_reason": "eos", "truncated": False},
+            "decode_budget_exceeds_frozen_limit",
+        ),
+    ],
+)
+def test_each_attempt_must_observe_limit_status_and_respect_frozen_cap(metadata, reason):
+    from speechrail.domain.asr_window import WindowDecodeObservation
+
+    values = {"kind": "review", "decode_max_new_tokens": 32, **metadata}
+    report = asyncio.run(
+        replay_long_blocks(
+            case(),
+            spec(),
+            ObservedDecoder(WindowDecodeObservation(**values)),
+            observe=observation(),
+        )
+    )
+    assert reason in report["failures"]
+    assert not report["quality_evidence_valid"]
+
+
+def test_unknown_finish_reason_is_redacted_and_kind_mismatch_cannot_advance():
+    from speechrail.domain.asr_window import WindowDecodeObservation
+
+    metadata = WindowDecodeObservation(
+        "review", 32, finish_reason="/private/model-or-text", truncated=False
+    )
+    report = asyncio.run(
+        replay_long_blocks(case(), spec(), ObservedDecoder(metadata), observe=observation())
+    )
+    assert "/private/model-or-text" not in json.dumps(report)
+    assert report["decode_evidence"]["attempts"][0]["finish_reason"] == "other"
+    assert report["quality_evidence_valid"] is False
+    metadata = replace(metadata, kind="preview")
+    report = asyncio.run(
+        replay_long_blocks(case(), spec(), ObservedDecoder(metadata), observe=observation())
+    )
+    assert "decode_observation_kind_mismatch" in report["failures"]
+    assert report["coverage_samples"] == 0
+
+
+def test_missing_attempt_cannot_be_hidden_by_later_complete_decode():
+    decoder = ObservedDecoder(
+        lambda request: (
+            None
+            if request.input_span.start == 0
+            else WindowDecodeObservation(request.kind, 32, finish_reason="eos", truncated=False)
+        )
+    )
+    report = asyncio.run(
+        replay_long_blocks(case(seconds=2), spec(), decoder, observe=observation(), block_seconds=1)
+    )
+    assert report["actual_decode_calls"] == 2
+    assert report["decode_evidence"]["attempts_with_observation"] == 1
+    assert report["decode_evidence"]["attempts_with_unknown_limit"] == 1
+    assert report["decode_evidence"]["token_limit_hit"] is None
+    assert not report["quality_evidence_valid"]
+
+
+def test_comparison_revalidates_per_attempt_evidence_not_only_summary_boolean():
+    from copy import deepcopy
+
+    old, _ = run()
+    new, _ = run(text="甲乙丙丁")
+    for mutation in ("missing", "count", "unknown", "budget", "digest"):
+        changed = deepcopy(new)
+        if mutation == "missing":
+            changed.pop("decode_evidence")
+        elif mutation == "count":
+            changed["decode_evidence"]["attempts_with_observation"] = 0
+        elif mutation == "unknown":
+            changed["decode_evidence"]["attempts"][0]["truncated"] = None
+        elif mutation == "budget":
+            changed["decode_evidence"]["attempts"][0]["decode_max_new_tokens"] = 129
+        else:
+            changed["decode_evidence"]["attempts_sha256"] = "a" * 64
+        result = compare_asr_runs([old], [changed], policy=policy())
+        assert result["development_text_gate"] == "fail"
+        assert result["paired_cer"] is None
+
+
+def test_attempt_budget_is_bounded_and_does_not_start_an_extra_decode():
+    from probe_meeting_asr_quality import _RecordedSession
+
+    from speechrail.domain.asr_window import WindowDecodeRequest, WindowIdentity
+    from speechrail.domain.audio_timeline import SampleSpan
+
+    async def exercise():
+        decoder = Decoder()
+        recorded = _RecordedSession(decoder, case(), 1, 128)
+        recorded.calls = 4096
+        request = WindowDecodeRequest(
+            WindowIdentity("s", 0, "w"), "extra", "review", SampleSpan(0, 1), bytes(2), None, ""
+        )
+        with pytest.raises(ValueError, match="attempt budget"):
+            await recorded.decode(request)
+        assert decoder.calls == []
+        assert "decode_attempt_budget_exceeded" in recorded.failures
+        assert recorded.decode_attempts == []
+
+    asyncio.run(exercise())
+
+
+def test_preview_limit_evidence_cannot_be_hidden_by_successful_final_review():
+    async def exercise():
+        now = [0.0]
+
+        async def pace(seconds):
+            now[0] += seconds
+
+        decoder = ObservedDecoder(
+            lambda request: WindowDecodeObservation(
+                request.kind,
+                32,
+                finish_reason="length" if request.kind == "preview" else "eos",
+                truncated=request.kind == "preview",
+            )
+        )
+        return await replay_production_windows(
+            case(seconds=23),
+            spec(),
+            decoder,
+            observe=observation(),
+            admission=admit_all,
+            pace=pace,
+            clock=lambda: now[0],
+        )
+
+    report = asyncio.run(exercise())
+    attempts = report["decode_evidence"]["attempts"]
+    assert {row["kind"] for row in attempts} == {"preview", "review"}
+    assert any(row["kind"] == "review" and row["token_limit_hit"] is False for row in attempts)
+    assert report["decode_evidence"]["token_limit_hit"] is True
+    assert "decode_limit_hit" in report["failures"]
+    assert report["quality_evidence_valid"] is False

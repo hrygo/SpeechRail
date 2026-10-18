@@ -20,10 +20,10 @@ import time
 import unicodedata
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from meeting_evaluation_identity import (
@@ -37,6 +37,7 @@ from meeting_quality_metrics import paired_meeting_interval
 from speechrail.application.asr_window_coordinator import AsrWindowCoordinator, Review
 from speechrail.domain.asr_window import (
     FinalWindowUnit,
+    WindowDecodeObservation,
     WindowDecodeRequest,
     WindowDecodeResult,
     WindowIdentity,
@@ -49,7 +50,8 @@ from speechrail.runtime.cleanup import join_cleanup
 
 ASR_SCORER: Mapping[str, object] = MappingProxyType(
     {
-        "version": "asr-body-v1",
+        "version": "asr-body-v2",
+        "decode_evidence": "all_attempts_eos_false_within_frozen_cap_v1",
         "implementation_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "character": "NFKC_casefold_unicode_L_N_M_v1",
         "word": "NFKC_casefold_cjk_char_and_alnum_word_v1",
@@ -149,18 +151,15 @@ class RuntimeObservation:
     runtime_observed records the caller's claim that it measured the executable,
     model bundle and effective settings. Its values are checked for equality;
     this injection point does not independently verify runtime provenance.
-    token_limit_hit=None retains the current port's missing limit evidence.
+    Decode-limit evidence comes only from each WindowDecodeResult.observation.
     """
 
     identity: Mapping[str, object]
     origin: Origin = "caller_reported"
-    token_limit_hit: bool | None = None
 
     def __post_init__(self) -> None:
         if self.origin not in {"caller_reported", "fake", "runtime_observed"}:
             raise ValueError("invalid execution evidence origin")
-        if self.token_limit_hit is not None and type(self.token_limit_hit) is not bool:
-            raise ValueError("decode limit observation must be boolean or null")
 
 
 def _settings(spec: MeetingCandidateSpec) -> tuple[WindowPolicy, str | None]:
@@ -192,8 +191,11 @@ class _RecordedSession:
         session: WindowAsrSession,
         data: AsrCase,
         timeout_seconds: float,
+        frozen_token_cap: int,
     ) -> None:
         self.session, self.data = session, data
+        self.frozen_token_cap = frozen_token_cap
+        self.decode_attempts: list[dict[str, Any]] = []
         self.timeout_seconds = timeout_seconds
         self.calls = 0
         self.attempts: set[str] = set()
@@ -209,8 +211,35 @@ class _RecordedSession:
         ):
             self.failures.add("input_or_attempt_mismatch")
             raise ValueError("ASR input differs from frozen PCM or reuses an attempt")
+        if self.calls >= 4096:
+            self.failures.add("decode_attempt_budget_exceeded")
+            raise ValueError("ASR diagnostic exceeds its attempt budget")
         self.attempts.add(request.attempt_id)
         self.calls += 1
+        attempt: dict[str, Any] = {
+            "attempt_sha256": canonical_digest(
+                {
+                    "identity": asdict(request.identity),
+                    "attempt_id": request.attempt_id,
+                    "kind": request.kind,
+                    "start_sample": span.start,
+                    "end_sample": span.end,
+                }
+            ),
+            "kind": request.kind,
+            "start_sample": span.start,
+            "end_sample": span.end,
+            "observation_present": False,
+            "observation_matches_kind": None,
+            "decode_max_new_tokens": None,
+            "generation_max_new_tokens": None,
+            "generated_token_count": None,
+            "finish_reason": "unknown",
+            "truncated": None,
+            "result_complete": None,
+            "token_limit_hit": None,
+        }
+        self.decode_attempts.append(attempt)
         try:
             async with asyncio.timeout(self.timeout_seconds):
                 result = await self.session.decode(request)
@@ -228,10 +257,59 @@ class _RecordedSession:
         ):
             self.failures.add("result_identity_mismatch")
             raise ValueError("ASR result identity mismatch")
+        attempt["result_complete"] = result.complete
+        observation = result.observation
+        if observation is not None:
+            reason = observation.finish_reason
+            hit = (
+                True
+                if reason == "length" or observation.truncated is True
+                else False
+                if reason == "eos" and observation.truncated is False
+                else None
+            )
+            attempt.update(
+                observation_present=True,
+                observation_matches_kind=observation.kind == request.kind,
+                decode_max_new_tokens=observation.decode_max_new_tokens,
+                generation_max_new_tokens=observation.generation_max_new_tokens,
+                generated_token_count=observation.generated_token_count,
+                finish_reason=reason
+                if reason in {"eos", "length"}
+                else "unknown"
+                if reason is None
+                else "other",
+                truncated=observation.truncated,
+                token_limit_hit=hit,
+            )
+            if observation.kind != request.kind:
+                self.failures.add("decode_observation_kind_mismatch")
+                raise ValueError("ASR decode observation kind mismatch")
+            if observation.decode_max_new_tokens > self.frozen_token_cap:
+                self.failures.add("decode_budget_exceeds_frozen_limit")
         if request.kind == "review" and not result.complete:
             self.failures.add("incomplete_decode")
             raise ValueError("ASR review is incomplete")
         return result
+
+    def decode_evidence(self) -> dict[str, Any]:
+        hits = [row["token_limit_hit"] for row in self.decode_attempts]
+        hit = True if True in hits else False if hits and all(v is False for v in hits) else None
+        return {
+            "schema_version": 1,
+            "frozen_token_cap": self.frozen_token_cap,
+            "attempt_budget": 4096,
+            "attempts": self.decode_attempts,
+            "attempts_sha256": canonical_digest({"attempts": self.decode_attempts}),
+            "attempts_with_observation": sum(
+                row["observation_present"] for row in self.decode_attempts
+            ),
+            "attempts_without_observation": sum(
+                not row["observation_present"] for row in self.decode_attempts
+            ),
+            "attempts_with_unknown_limit": sum(value is None for value in hits),
+            "token_limit_hit": hit,
+        }
 
     async def close(self) -> None:
         async def cleanup() -> None:
@@ -241,6 +319,85 @@ class _RecordedSession:
                 raise RuntimeError("ASR session cleanup failed") from None
 
         await join_cleanup(asyncio.create_task(cleanup(), name="asr-probe-cleanup"))
+
+
+def _valid_decode_evidence(report: Mapping[str, Any]) -> bool:
+    """Recheck bounded diagnostic evidence; this does not attest its producer."""
+    evidence = report.get("decode_evidence")
+    if (
+        not isinstance(evidence, Mapping)
+        or type(report.get("schema_version")) is not int
+        or report["schema_version"] != 2
+        or type(evidence.get("schema_version")) is not int
+        or evidence["schema_version"] != 1
+    ):
+        return False
+    attempts = evidence.get("attempts")
+    cap = evidence.get("frozen_token_cap")
+    calls = report.get("actual_decode_calls")
+    if (
+        not isinstance(attempts, list)
+        or type(calls) is not int
+        or not 0 < calls == len(attempts) <= 4096
+        or type(cap) is not int
+        or cap <= 0
+        or evidence.get("token_limit_hit") is not False
+        or any(
+            type(evidence.get(key)) is not int or evidence[key] != value
+            for key, value in (
+                ("attempt_budget", 4096),
+                ("attempts_with_observation", calls),
+                ("attempts_without_observation", 0),
+                ("attempts_with_unknown_limit", 0),
+            )
+        )
+    ):
+        return False
+    hashes: set[str] = set()
+    for row in attempts:
+        if not isinstance(row, Mapping):
+            return False
+        digest = row.get("attempt_sha256")
+        if (
+            not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            or digest in hashes
+            or row.get("observation_present") is not True
+            or row.get("observation_matches_kind") is not True
+            or row.get("token_limit_hit") is not False
+            or row.get("finish_reason") != "eos"
+            or row.get("truncated") is not False
+            or type(row.get("result_complete")) is not bool
+            or (row.get("kind") == "review" and row["result_complete"] is not True)
+        ):
+            return False
+        hashes.add(digest)
+        start, end = row.get("start_sample"), row.get("end_sample")
+        if (
+            type(start) is not int
+            or type(end) is not int
+            or not 0 <= start < end <= report["expected_samples"]
+        ):
+            return False
+        try:
+            observed = WindowDecodeObservation.from_wire_dict(
+                {
+                    key: row.get(key)
+                    for key in (
+                        "kind",
+                        "decode_max_new_tokens",
+                        "generation_max_new_tokens",
+                        "finish_reason",
+                        "truncated",
+                        "generated_token_count",
+                    )
+                }
+            )
+            if observed.decode_max_new_tokens > cap:
+                return False
+        except TypeError, ValueError:
+            return False
+    return evidence.get("attempts_sha256") == canonical_digest({"attempts": attempts})
 
 
 def _edit_metrics(reference: Sequence[str], hypothesis: Sequence[str]) -> dict[str, Any]:
@@ -326,15 +483,16 @@ def _report(
         failures.add("no_actual_decode")
     if coverage != len(data.pcm16) // 2:
         failures.add("coverage_gap_or_duplicate")
-    if observation.token_limit_hit is None:
+    evidence = recorded.decode_evidence()
+    if evidence["attempts_with_unknown_limit"] or not recorded.calls:
         failures.add("decode_limit_not_observed")
-    elif observation.token_limit_hit:
+    if evidence["token_limit_hit"]:
         failures.add("decode_limit_hit")
     if metrics["availability"] != "observed":
         failures.add("main_reference_not_observed")
     valid = not failures
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "split_role": "development",
         "mode": mode,
         **data.identity(),
@@ -348,6 +506,7 @@ def _report(
             }
         ),
         "actual_decode_calls": recorded.calls,
+        "decode_evidence": evidence,
         "coverage_samples": coverage,
         "expected_samples": len(data.pcm16) // 2,
         "execution_origin": observation.origin,
@@ -394,10 +553,11 @@ async def replay_long_blocks(
     Compare with A0 only when weights/dtype match. Context is deliberately empty.
     The caller owns model preparation; this function always closes its session.
     """
-    recorded = _RecordedSession(session, data, decode_timeout_seconds)
+    recorded = _RecordedSession(session, data, decode_timeout_seconds, 0)
     try:
         _validate_timeout(decode_timeout_seconds)
         _, language = _settings(spec)
+        recorded.frozen_token_cap = cast(int, spec.decoder["max_tokens"])
         before = _callback(observe)
         validate_execution_identity(spec, before.identity)
         if type(block_seconds) is not int or not 1 <= block_seconds <= 30:
@@ -470,11 +630,12 @@ async def replay_production_windows(
     The feeder paces and flushes each packet sequentially. It is a diagnostic
     callable replay, not independent live capture or a real-time latency test.
     """
-    recorded = _RecordedSession(session, data, decode_timeout_seconds)
+    recorded = _RecordedSession(session, data, decode_timeout_seconds, 0)
     coordinator: AsrWindowCoordinator | None = None
     try:
         _validate_timeout(decode_timeout_seconds)
         policy, language = _settings(spec)
+        recorded.frozen_token_cap = cast(int, spec.decoder["max_tokens"])
         if type(feed_samples) is not int or not 1 <= feed_samples <= 16000:
             raise ValueError("feed size must be bounded to one second")
         before = _callback(observe)
@@ -671,7 +832,8 @@ def compare_asr_runs(
         for index, row in enumerate((old, new)):
             value = row["metrics"]["normalized"]["cer"]
             row_valid = (
-                row["quality_evidence_valid"] is True
+                _valid_decode_evidence(row)
+                and row["quality_evidence_valid"] is True
                 and not row["failures"]
                 and type(row["actual_decode_calls"]) is int
                 and row["actual_decode_calls"] > 0
