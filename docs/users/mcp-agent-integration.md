@@ -69,6 +69,7 @@ flowchart LR
   `describe()` 的 `realtime` 字段会明确报告 `orchestration=caller`、`server_llm=false`、
   `conversation_state=false`。
 - **不切换档位**：MCP 不注册 profile apply/setup/prepare 工具，不经 REST 或 CLI 隐式更改活动档位，也不会建议 Agent 自动切档。`describe()` 只报告当前档位与当前有效能力；缺失或快照矛盾时明确返回未知/不一致状态。
+- **不伪造 runner 状态**：`describe().jobs.runner_state` 透传服务端 `/health.job_runner_state` 的权威值（`unconfigured` / `inactive` / `active`）。服务未报告该字段或返回非法值时返回 `unknown`，不能当作 `inactive`。`effective_capabilities.operations.jobs.status=supported` 只表示 spool 可接收任务；实际处理要求 `jobs.runner_state=active`，否则任务会排队而不会被消费。`active` 只表示 runner 任务存活并轮询，不保证单个 job 成功，job 结果仍以终态为准。
 
 ### 1.1 工具集（18 个）
 

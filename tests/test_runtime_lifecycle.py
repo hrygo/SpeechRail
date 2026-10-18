@@ -255,3 +255,80 @@ def test_confirmed_parent_shutdown_recovers_tracked_child_isolation() -> None:
         await life.close()
 
     asyncio.run(run())
+
+
+def test_runner_state_is_unconfigured_without_a_runner() -> None:
+    async def run() -> None:
+        life = RuntimeLifecycle()
+        assert life.runner_state == "unconfigured"
+        await life.start()
+        assert life.runner_state == "unconfigured"
+        await life.close()
+        assert life.runner_state == "unconfigured"
+
+    asyncio.run(run())
+
+
+def test_runner_state_tracks_the_owned_task_lifecycle() -> None:
+    async def run() -> None:
+        class IdleRunner:
+            async def run_once(self) -> bool:
+                return False
+
+        life = RuntimeLifecycle(runner=IdleRunner(), poll_seconds=0.01)
+        assert life.runner_state == "inactive"
+        await life.start()
+        assert life.runner_state == "active"
+        await life.close()
+        assert life.runner_state == "inactive"
+
+    asyncio.run(run())
+
+
+def test_runner_state_is_inactive_after_the_runner_task_fails() -> None:
+    async def run() -> None:
+        class FailingRunner:
+            async def run_once(self) -> bool:
+                raise RuntimeError("repository unavailable")
+
+        life = RuntimeLifecycle(runner=FailingRunner(), poll_seconds=0.01)
+        await life.start()
+        task = life._runner_task
+        assert task is not None
+        with pytest.raises(RuntimeError):
+            await task
+        assert life.runner_state == "inactive"
+        with pytest.raises(ExceptionGroup):
+            await life.close()
+
+    asyncio.run(run())
+
+
+def test_runner_state_is_inactive_while_cancellation_is_pending() -> None:
+    async def run() -> None:
+        cancelled = asyncio.Event()
+        release = asyncio.Event()
+
+        class StubbornRunner:
+            async def run_once(self) -> bool:
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    await release.wait()
+                    raise
+                return False
+
+        life = RuntimeLifecycle(runner=StubbornRunner(), poll_seconds=0.01)
+        await life.start()
+        assert life.runner_state == "active"
+        closing = asyncio.create_task(life.close())
+        await asyncio.wait_for(cancelled.wait(), timeout=1)
+        # Cancellation is already requested: no new work will be claimed even
+        # though the processor has not finished unwinding yet.
+        assert life.runner_state == "inactive"
+        release.set()
+        await closing
+        assert life.runner_state == "inactive"
+
+    asyncio.run(run())

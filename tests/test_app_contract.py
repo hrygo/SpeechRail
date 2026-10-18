@@ -70,6 +70,7 @@ def test_health_reports_contract_shell_without_backend() -> None:
         "tts_lifecycle": None,
         "streaming_state": "unconfigured",
         "job_spool_ready": False,
+        "job_runner_state": "unconfigured",
         "ready": False,
     }
 
@@ -468,6 +469,7 @@ def test_tts_only_runtime_reports_independent_readiness() -> None:
         "tts_lifecycle": None,
         "streaming_state": "unconfigured",
         "job_spool_ready": False,
+        "job_runner_state": "unconfigured",
         "ready": True,
     }
     assert client.get("/readyz").json() == {

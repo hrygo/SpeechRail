@@ -1024,3 +1024,18 @@ def test_tts_readiness_tracks_the_configured_production_lanes(
     assert services.tts_ready is True
     services.governor.quarantine_tts_lane("tts_custom_voice")
     assert services.tts_ready is False
+
+
+def test_runner_state_never_contradicts_spool_readiness(
+    fake_services: AppServices, tmp_path: Path
+) -> None:
+    from speechrail.runtime.jobs import JobRepository
+
+    assert fake_services.job_runner_state == "unconfigured"
+
+    configured = replace(
+        fake_services,
+        job_repository=JobRepository(tmp_path / "speechrail-job-spool"),
+    )
+    # A configured spool without a composed runner is inactive, not unconfigured.
+    assert configured.job_runner_state == "inactive"
