@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.28"
+version: "3.3.29"
 date: 2026-10-18
 ---
 
@@ -206,6 +206,17 @@ PYTHONPATH=src:examples/perf uv run --no-sync python examples/perf/probe_meeting
 配对bootstrap固定seed1717、10000次；按来源在全部人数层×场景中的覆盖模式分块抽取整个来源会议组，同源的跨层片段及near/far共同抽样，保留冻结设计和场景权重。单独片段不能增加独立N，单来源分块不提供可信区间。报告candidate−DER最优者的95%区间与1个百分点非劣界，区间跨0不解释为等价。
 
 当前checkpoint不提供可验证的稳定标签分布和峰值footprint，二者明确not_observed，不使用自报verified或处理耗时替代。因此选择保守依次采用DER、完全同分时cpCER；仍同分或缺同分证据时按固定候选顺序并标注不确定，不按未经观察的“更快”改选。报告绑定selector实现/固定选择策略及每层checkpoint摘要，仍只给出开发诊断候选，不证明已执行质量门、真实运行身份、最大人数或生产认证；所有认证字段保持false/null，真实延迟/footprint和可信收据仍需后续接线。fake回归见 `tests/test_meeting_candidate_selection.py`。
+
+选择命令只读取已完成的外部JSON，不需要模型、worker或服务端口：
+
+```bash
+PYTHONPATH=src:examples/perf uv run --no-sync python examples/perf/probe_meeting_candidate.py \
+  select-development --selection-lock "$SELECTION_LOCK" --output-directory "$SELECTION_OUTPUT"
+```
+
+独立selection lock顶层必须恰含schema_version=1、required_max（1–8整数）、manifest、scorer_policy和strata。manifest/policy都是`{"path":"<absolute-json-path>","sha256":"<canonical-json-sha256>"}`；strata恰含`"1"`到声明上限的键，每层恰含同格式的initial_schedule与checkpoint两个descriptor。initial_schedule必须来自输出前冻结的原始schedule、rounds为空，不从checkpoint倒造。全部JSON使用绝对路径，拒绝重复键、额外字段、bool代整数、符号链接和非普通文件；单文件至多16MiB、全部输入合计至多32MiB。
+
+`meeting_selection_execution` 在加载、排名后、写出后核对全部输入和直接执行/评分依赖源码的摘要及文件状态，所有异步校验完成后再同步核对stamps、无await提交selection.json。修改后恢复字节也因文件状态改变失败；取消加入评分线程，不提交完成结果。输出目录必须是仓库外新目录（0700），结果与partial/failure文件为0600，错误不回显路径/内容；保留未知或既有输出，失败可留partial/failure，不覆盖它们重试。报告只补充输入字节一致性与控制/执行器摘要，不签发development receipt，不解锁holdout，也不升级认证。fake回归见 `tests/test_meeting_selection_execution.py`。
 
 ### ASR 正文诊断重放
 

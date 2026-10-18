@@ -230,11 +230,25 @@ def main(argv: list[str] | None = None) -> int:
         "--input-mode", choices=("throughput", "realtime"), default="throughput"
     )
     checkpoint.add_argument("--timeout-seconds", type=float, default=1800)
+    selection = commands.add_parser(
+        "select-development", help="select from locked completed checkpoints offline; no models"
+    )
+    selection.add_argument("--selection-lock", required=True, type=Path)
+    selection.add_argument("--output-directory", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
         from meeting_candidate_execution import evaluate_candidate_development, read_control_json
 
-        if args.command == "evaluate-checkpoint":
+        if args.command == "select-development":
+            from meeting_selection_execution import execute_development_selection
+
+            report = asyncio.run(
+                execute_development_selection(
+                    selection_lock=args.selection_lock,
+                    output_directory=args.output_directory,
+                )
+            )
+        elif args.command == "evaluate-checkpoint":
             from meeting_checkpoint_execution import evaluate_native_checkpoint
 
             report = asyncio.run(

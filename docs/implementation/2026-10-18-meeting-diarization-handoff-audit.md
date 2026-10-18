@@ -429,3 +429,11 @@ Ruling: 当前checkpoint没有真实稳定标签P95/峰值footprint观测链，�
 31项新增fake测试包含实际evaluate_development_checkpoint的18次合成WAV/fake Activity结果原样输入、独立锁/连续层/固定C0/精确配对/缺场景与DER/淘汰交集/同源片段合并/跨层全局bootstrap/cpCER同分/不接受自报时延/实现与输入摘要。缺DER保护mutation按预期失败，恢复后全部通过。主线复核新文件和依赖当前源码；图谱为旧主checkout且perf文件missing，未重建索引。子代理独占两份新perf/test，主线独占ASR遥测及文档，未覆盖并行修改。父e821bd13的主CI39093218903与原生CI39093218867均成功；无真实模型/语料/benchmark、下载、服务、安装、UI、发布或合并动作。
 
 主线对全局来源抽样修正后的26个相关文件联合复验：`678 passed in 13.93s`，仅既有asyncio.iscoroutinefunction弃用warning；本轮9个Python Ruff、5个source按项目strict配置Mypy通过，diff检查通过。上述结果只证明合成机制和离线接线，不证明实际CER改善、真实分人上限或P95。
+
+## T5 离线候选选择命令与独立输入锁
+
+2026-10-18：新增 meeting_selection_execution 和 select-development CLI。独立 schema 1 selection lock 绑定 development manifest、scorer policy、连续1..required_max各层的原始空schedule与完成checkpoint，全部descriptor核对canonical JSON摘要。输入单文件限16MiB、合计限32MiB，拒绝重复键、未知字段、bool代整数、相对路径、叶符号链接和非普通文件；不从checkpoint反推初始存活集合。选择复用既有跨层配对算法，不构造worker或加载模型。
+
+加载、评分后、写出后核对输入及直接执行/评分源码的摘要与文件状态，最后同步检查stamps、无await提交selection.json。取消先加入离线线程，失败不提交完成结果；输出采用仓库外新0700目录与0600文件，错误只保留固定状态码。修改后恢复字节仍因状态变化拒绝。报告中的input_files_verified只说明文件核对，selection_control_sha256/selection_executor_sha256只绑定诊断输入与代码；不签发可信development receipt，不解锁留出，所有runtime/certification字段保持false/null。CLI源码属于候选adapter身份，旧spec需按修改后的源码重新冻结。
+
+18项新增合成回归覆盖实际CLI分派、严格schema/摘要/文件类型、总量预算、取消join、评分及最终写出后输入变更、隐私输出和既有目录保留；前16项在新模块缺失/CLI缺命令时先RED后GREEN，后补两项预算/FIFO保护。与selector、原probe和checkpoint执行器联合 `110 passed in 4.47s`；三个Python Ruff和两个source按项目配置Mypy通过。父提交1a9b6817的主CI39093880641、原生CI39093880632均成功，不替代本节变更验证。没有执行真实音频/模型/benchmark、下载、服务、安装、UI、发布或合并；ASR组合根由另一执行者独占新文件，无同文件写入冲突。
