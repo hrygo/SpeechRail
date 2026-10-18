@@ -441,3 +441,17 @@ def test_latency_sampling_is_required_and_cannot_change_after_policy_freeze(faul
         value["latency"]["sampling"]["quantile"] = "linear_interpolation"
     with pytest.raises(ValueError, match="latency"):
         score([span(0, 1, "R1")], [span(0, 1, "S1")], override=value)
+
+
+def test_relative_sampling_is_registered_with_explicit_owned_completion_boundaries():
+    from meeting_latency_policy import latency_policy
+
+    registered = latency_policy()["relative_sampling"]
+    assert registered["origin"] == "last_source_sample_target"
+    assert registered["asr_completion"] == "host_callback_return_including_owned_cleanup"
+    assert registered["dia_single_completion"] == "host_callback_and_report_validation_joined"
+    assert registered["dia_joint_completion"] == "actual_dia_scope_closed_not_relay"
+    value = policy()
+    value["latency"].pop("relative_sampling")
+    with pytest.raises(ValueError, match="latency"):
+        score([span(0, 1, "R1")], [span(0, 1, "S1")], override=value)

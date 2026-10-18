@@ -693,3 +693,14 @@ E3仍未验：没有主量joint tail-to-final配对区间、ASR/DIA相对门、�
 新增测试先RED再GREEN覆盖共享校验器、joint登记缺失/改动/明细失败、共同配置差异；合成恒定0.5秒配对差的区间精确为[0.5,0.5]，重复不扩N、冷/热相反收益分开，24组1失败而有限P95也不能通过。预输出冻结后48次实际单路/联合live pipeline的合成接线进入区间分析，零收益不选择overlap。六相关文件188 passed in1.33s；进一步覆盖候选执行、ASR重放、评分、来源锁和选择器等二十一相关文件734 passed in20.02s，四Python Ruff、二source Mypy通过。父08172628核验七项PR checks成功、Gate Summary仍运行。图谱coverage missing直接复核worktree，未重建。
 
 这仍是合成PCM/fake模型/RPC及宿主metadata一致性。没有真实解码、模型/benchmark、下载、服务/安装/UI、发布或合并；授权请求未收到回复。真实ASR/DIA相对P95、footprint、冷热准备、生产联合身份及独立主参考/质量仍未就绪；selected_schedule保持null，E3未验，CER、认证人数、真实P95与#370状态不升级，完整目标继续。
+
+
+## T6 owned lane 相对尾部 P95 与完整执行顺序
+
+2026-10-18：schedule报告升schema2，显式暴露共同宿主schedule_origin_at与各lane在joined摘要校验之后的validated_at_seconds，callback elapsed仍只统计进入到返回。ASR相对门用最后源样本目标到callback返回；DIA-only到callback及报告校验joined，joint到已核验actual dia_scope_closed，不拿整段elapsed、relay或外层报告处理时间替代。latency/scorer policy预登记人口、边界、同源模式最慢后等来源P95、缺失失败及零基线规则；旧spec/controls/计划需重新冻结执行。
+
+ABBA校验schema/原点/时刻与source一致，拒绝返回早于源末端、验证早于返回及内部scope晚于对应外层完成。按条件单独输出relative_lane_tail，ASR overlap/serial≤1.05、DIA overlap/单独≤1.10；零基线只候选同为零可过，ratio null。任一位置失败/缺失保留原来源权重并no-go，有限P95不能绕过；重复不扩N。相对门不覆盖绝对门/主收益/质量/footprint/身份。
+
+先RED后GREEN覆盖缺宿主原点/相对统计、policy缺采样、相对门成功/超界、零分母、owned scope与外层时序矛盾；实际合成live pipeline四模式接线验证两个相对门可计算但零收益仍不选择策略。收尾另先RED证实下一次输入可在上一执行EOF后、报告验证或稳定交付结束前开始；顺序边界现取上次offer、各lane验证和可验证joint最终确认的最大值，两个反例均拒绝。七相关文件248 passed in2.26s；最终二十一相关文件746 passed in20.74s，六Python Ruff、三source Mypy通过。
+
+父4278a22e八项PR checks均success/completed。相关图谱freshness missing直接复核worktree，未重建索引。全部为合成PCM/fake模型/RPC，不是实际ASR/DIA性能或质量证据；未解码真实语料、运行模型/benchmark、下载或改变服务/安装/UI/发布/合并状态。真实开发评测授权仍待回复；E3、footprint、最终生产联合身份及独立参考/真实质量未验，selected_schedule为null、认证false，CER/人数/真实P95及#370状态不升级，完整目标继续。

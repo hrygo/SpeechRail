@@ -156,6 +156,7 @@ async def run_workload_schedule(
             return {
                 "started_at_seconds": started,
                 "ended_at_seconds": ended,
+                "validated_at_seconds": tick() - origin,
                 "elapsed_seconds": ended - started,
                 "report_sha256": digest,
             }
@@ -176,7 +177,8 @@ async def run_workload_schedule(
             if deadline.expired():
                 raise TimeoutError("workload schedule deadline expired")
             return {
-                "schema_version": 1,
+                "schema_version": 2,
+                "schedule_origin_at": origin,
                 "mode": mode,
                 "schedule_completed": True,
                 "workloads": observations,

@@ -47,6 +47,7 @@ def arguments(groups=8, conditions=("cold", "warm"), repeats=1):
 
 
 def report(row):
+    duration = row["samples"] / 16000
     start = 100.0 + row["ordinal"] * 1000
     lanes = {
         "asr-only": ["asr"],
@@ -64,7 +65,7 @@ def report(row):
         "source_samples": row["samples"],
     }
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "mode": row["mode"],
         "schedule_completed": True,
         "runtime_identity_verified": False,
@@ -72,11 +73,13 @@ def report(row):
         "joint_latency_observed": False,
         "worker_reaping_verified": False,
         "clock_source": "injected",
+        "schedule_origin_at": start,
         "workloads": {
             name: {
                 "started_at_seconds": 0.0,
-                "ended_at_seconds": 301.0,
-                "elapsed_seconds": 301.0,
+                "ended_at_seconds": duration + 1.0,
+                "validated_at_seconds": duration + 1.0,
+                "elapsed_seconds": duration + 1.0,
                 "report_sha256": sha(f"{row['ordinal']}-{name}"),
             }
             for name in lanes
@@ -85,8 +88,8 @@ def report(row):
             **feed,
             "policy_sha256": canonical_digest(feed),
             "source_origin_at": start,
-            "source_end_target_at": start + 300,
-            "source_end_offered_at": start + 300,
+            "source_end_target_at": start + duration,
+            "source_end_offered_at": start + duration,
             "delivered_samples": dict.fromkeys(lanes, row["samples"]),
         },
     }
@@ -346,11 +349,13 @@ def joint_report(row, finish):
     lanes = ("asr", "diarization")
     feed.update(source_end_offered_at=source_end, delivered_samples=dict.fromkeys(lanes, 16000))
     value["clock_source"] = "injected"
-    value["schema_version"] = 1
+    value["schema_version"] = 2
+    value["schedule_origin_at"] = feed["source_origin_at"]
     value["workloads"] = {
         k: {
             "started_at_seconds": 0.0,
             "ended_at_seconds": 1.0 + finish,
+            "validated_at_seconds": 1.0 + finish,
             "elapsed_seconds": 1.0 + finish,
             "report_sha256": sha(f"{row['ordinal']}-{k}"),
         }
@@ -632,6 +637,10 @@ def test_live_joint_pipeline_reports_reach_paired_analysis_after_pre_output_free
     assert summary["selected_schedule"] is None
     assert "甲" not in json.dumps(summary)
     assert "stable_text" in sink_calls
+    relative = summary["conditions"]["warm"]["relative_lane_tail"]
+    assert relative["failed_source_groups"] == 0
+    assert relative["asr"]["gate"] == "diagnostic_pass"
+    assert relative["diarization"]["gate"] == "diagnostic_pass"
 
 
 def test_one_failed_source_of_24_retains_denominator_even_with_finite_p95():
@@ -668,3 +677,177 @@ def test_one_failed_source_of_24_retains_denominator_even_with_finite_p95():
     assert result["paired_interval_seconds"] is None
     assert result["benefit_supported"] is False
     assert result["absolute_finish_gate"] == {"serial": "no-go", "overlap": "no-go"}
+    relative = ledger.summary()["conditions"]["warm"]["relative_lane_tail"]
+    assert relative["failed_source_groups"] == 1
+    assert relative["asr"]["gate"] == relative["diarization"]["gate"] == "no-go"
+
+
+def fill_relative(ledger, *, asr_serial=2.0, asr_overlap=2.0, dia_only=2.0, dia_overlap=2.0):
+    for row in ledger.registration()["runs"]:
+        duration = row["samples"] / 16000
+        if row["mode"] in {"serial", "overlap"}:
+            value = joint_report(row, 2.0)
+            asr = asr_serial if row["mode"] == "serial" else asr_overlap
+            dia = 2.0 if row["mode"] == "serial" else dia_overlap
+            marks = value["timing_observations"]["milestones_at"]
+            end = value["pcm_feed"]["source_end_target_at"]
+            marks["asr_callback_complete"] = end + asr
+            marks["dia_scope_closed"] = end + dia
+            value["timing_observations"]["latency_diagnostics"]["finish_seconds"] = max(
+                2.0, asr, dia
+            )
+            for name, tail in (("asr", asr), ("diarization", dia)):
+                value["workloads"][name].update(
+                    ended_at_seconds=duration + tail,
+                    elapsed_seconds=duration + tail,
+                    validated_at_seconds=duration + tail,
+                )
+        else:
+            value = report(row)
+            tail = 2.0 if row["mode"] == "asr-only" else dia_only
+            # The DIA callback returns before its report-validation boundary.
+            for lane in value["workloads"].values():
+                lane.update(
+                    ended_at_seconds=duration,
+                    elapsed_seconds=duration,
+                    validated_at_seconds=duration + tail,
+                )
+        ledger.observe(row["run_sha256"], condition=row["condition"], report=value)
+
+
+@pytest.mark.parametrize(
+    "asr,dia,expected",
+    [
+        (2.0, 2.0, ("diagnostic_pass", "diagnostic_pass")),
+        (2.2, 2.0, ("no-go", "diagnostic_pass")),
+        (2.0, 2.3, ("diagnostic_pass", "no-go")),
+    ],
+)
+def test_relative_tail_gates_use_source_end_and_the_registered_comparison_baselines(
+    asr, dia, expected
+):
+    from meeting_abba import AbbaLedger
+
+    ledger = AbbaLedger(**joint_arguments())
+    fill_relative(ledger, asr_overlap=asr, dia_overlap=dia)
+    result = ledger.summary()["conditions"]["warm"]["relative_lane_tail"]
+    assert result["asr"]["baseline_mode"] == "serial"
+    assert result["diarization"]["baseline_mode"] == "diarization-only"
+    assert result["asr"]["baseline_p95_seconds"] == 2.0
+    assert result["diarization"]["baseline_p95_seconds"] == 2.0
+    assert (result["asr"]["gate"], result["diarization"]["gate"]) == expected
+    assert ledger.summary()["selected_schedule"] is None
+
+
+def test_relative_comparison_boundary_and_zero_baseline_are_explicit():
+    from meeting_abba import AbbaLedger
+
+    ledger = AbbaLedger(**joint_arguments())
+    fill_relative(ledger, asr_serial=20.0, asr_overlap=21.0, dia_only=20.0, dia_overlap=22.0)
+    result = ledger.summary()["conditions"]["warm"]["relative_lane_tail"]
+    assert result["asr"]["gate"] == result["diarization"]["gate"] == "diagnostic_pass"
+    # Passing a relative tolerance cannot override failed absolute finish limits.
+    assert (
+        ledger.summary()["conditions"]["warm"]["joint_finish"]["absolute_finish_gate"]["overlap"]
+        == "no-go"
+    )
+    zero = AbbaLedger(**joint_arguments())
+    fill_relative(zero, asr_serial=0.0, asr_overlap=0.1, dia_only=0.0, dia_overlap=0.0)
+    result = zero.summary()["conditions"]["warm"]["relative_lane_tail"]
+    assert result["asr"]["gate"] == "no-go"
+    assert result["asr"]["ratio"] is None
+    assert result["diarization"]["gate"] == "diagnostic_pass"
+    assert result["diarization"]["ratio"] is None
+
+
+def test_missing_scope_clock_is_rejected_instead_of_using_whole_callback_elapsed():
+    from meeting_abba import AbbaLedger
+
+    ledger = AbbaLedger(**arguments(conditions=("warm",)))
+    row = ledger.registration()["runs"][0]
+    value = report(row)
+    value.pop("schedule_origin_at", None)
+    with pytest.raises(ValueError):
+        ledger.observe(row["run_sha256"], condition="warm", report=value)
+
+
+def test_joint_dia_relative_tail_uses_owned_scope_instead_of_outer_report_callback():
+    from meeting_abba import AbbaLedger
+
+    ledger = AbbaLedger(**joint_arguments())
+    rows = ledger.registration()["runs"]
+    for row in rows:
+        if row["mode"] in {"serial", "overlap"}:
+            value = joint_report(row, 2.0)
+            # Outer host report processing is not the actual DIA close boundary.
+            value["workloads"]["diarization"].update(
+                ended_at_seconds=100.0, elapsed_seconds=100.0, validated_at_seconds=101.0
+            )
+        else:
+            value = report(row)
+            if row["mode"] == "diarization-only":
+                value["workloads"]["diarization"].update(validated_at_seconds=3.0)
+        ledger.observe(row["run_sha256"], condition="warm", report=value)
+    result = ledger.summary()["conditions"]["warm"]["relative_lane_tail"]
+    assert result["diarization"]["candidate_p95_seconds"] == 2.0
+    assert result["diarization"]["baseline_p95_seconds"] == 2.0
+    assert result["diarization"]["gate"] == "diagnostic_pass"
+
+
+@pytest.mark.parametrize("lane", ["asr", "diarization"])
+def test_scope_completion_cannot_be_later_than_its_outer_callback_validation(lane):
+    from meeting_abba import AbbaLedger
+
+    ledger = AbbaLedger(**joint_arguments())
+    rows = ledger.registration()["runs"]
+    for row in rows[:2]:
+        ledger.observe(row["run_sha256"], condition="warm", report=report(row))
+    row = rows[2]
+    value = joint_report(row, 2.0)
+    value["workloads"][lane].update(
+        ended_at_seconds=1.0, elapsed_seconds=1.0, validated_at_seconds=1.0
+    )
+    with pytest.raises(ValueError, match="scope"):
+        ledger.observe(row["run_sha256"], condition="warm", report=value)
+    assert ledger.summary()["observed_runs"] == 2
+
+
+@pytest.mark.parametrize("stage", ["baseline_validation", "stable_delivery"])
+def test_next_abba_input_cannot_overlap_previous_owned_cleanup_or_stable_delivery(stage):
+    from meeting_abba import AbbaLedger
+
+    ledger = AbbaLedger(**joint_arguments())
+    rows = ledger.registration()["runs"]
+    if stage == "baseline_validation":
+        first = report(rows[0])
+        ledger.observe(rows[0]["run_sha256"], condition="warm", report=first)
+        row, value = rows[1], report(rows[1])
+        new_origin = first["pcm_feed"]["source_end_target_at"] + 0.5
+    else:
+        for row in rows[:2]:
+            ledger.observe(row["run_sha256"], condition="warm", report=report(row))
+        first = joint_report(rows[2], 2.0)
+        end = first["pcm_feed"]["source_end_target_at"]
+        first["timing_observations"]["milestones_at"].update(
+            asr_callback_complete=end, dia_scope_closed=end
+        )
+        for lane in first["workloads"].values():
+            lane.update(ended_at_seconds=1.0, validated_at_seconds=1.0, elapsed_seconds=1.0)
+        ledger.observe(rows[2]["run_sha256"], condition="warm", report=first)
+        row, value = rows[3], joint_report(rows[3], 2.0)
+        new_origin = end + 0.5
+    delta = new_origin - value["pcm_feed"]["source_origin_at"]
+    for key in ("source_origin_at", "source_end_target_at", "source_end_offered_at"):
+        value["pcm_feed"][key] += delta
+    value["schedule_origin_at"] += delta
+    if "timing_observations" in value:
+        timing = value["timing_observations"]
+        timing["source_origin_at"] += delta
+        for record in timing["records"]:
+            record[6] += delta
+            if record[7] is not None:
+                record[7] += delta
+        for key in timing["milestones_at"]:
+            timing["milestones_at"][key] += delta
+    with pytest.raises(ValueError, match="order"):
+        ledger.observe(row["run_sha256"], condition="warm", report=value)

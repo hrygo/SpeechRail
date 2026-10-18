@@ -457,3 +457,25 @@ def test_callback_may_return_a_future_awaitable():
         assert report["schedule_completed"] is True
 
     asyncio.run(scenario())
+
+
+def test_callback_and_validation_timestamps_share_an_explicit_host_origin():
+    from bench_asr_diarization_overlap import run_workload_schedule
+
+    calls = iter([100.0, 101.0, 103.0, 104.0, 105.0])
+
+    async def workload(shared):
+        return {"complete": True}
+
+    value = asyncio.run(
+        run_workload_schedule(
+            mode="asr-only", governor=governor(), asr=workload, clock=lambda: next(calls)
+        )
+    )
+    assert value["schema_version"] == 2
+    assert value["schedule_origin_at"] == 100.0
+    lane = value["workloads"]["asr"]
+    assert lane["started_at_seconds"] == 1.0
+    assert lane["ended_at_seconds"] == 3.0
+    assert lane["validated_at_seconds"] == 4.0
+    assert lane["elapsed_seconds"] == 2.0

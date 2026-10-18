@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.49"
+version: "3.3.50"
 date: 2026-10-18
 ---
 
@@ -421,7 +421,7 @@ finish期限为源原点加全部源样本时长再加finish预算，因而不�
 
 `registration()` 给出joint及含单路基线的最低PCM供给预算，不包括加载、预热、清理、人工质量复核及生产候选复验。8个来源、cold/warm各1块、5分钟片段共96次供给，最低8小时；其中64次joint供给为5小时20分钟。该预算不授权真实模型运行。
 
-`observe()` 按登记顺序消费 `run_pcm_workload_schedule` 的宿主报告，核对mode、声明条件、时钟、PCM/feed摘要、完整单/双路lane和已交付样本，拒绝时序矛盾、源供给倒序、报告复用及认证标志升级。接收端不执行负载，不打开模型/音频/参考，不证明回调使用了已声明模型或实际冷热状态。`fail()` 明确保留失败位置，未观察执行仍保留missing；缺单路或任一ABBA位置不得丢弃整个block后只分析成功记录。
+`observe()` 按登记顺序消费 `run_pcm_workload_schedule` 的宿主报告，核对mode、声明条件、时钟、PCM/feed摘要、完整单/双路lane和已交付样本，拒绝时序矛盾、源供给倒序、报告复用及认证标志升级。下一次源原点不得早于上一次已验证的callback/report校验结束及joint最终确认；只晚于EOF但仍与清理或稳定交付重叠时拒绝。接收端不执行负载，不打开模型/音频/参考，不证明回调使用了已声明模型或实际冷热状态。`fail()` 明确保留失败位置，未观察执行仍保留missing；缺单路或任一ABBA位置不得丢弃整个block后只分析成功记录。
 
 ABBA登记schema 2可选启用joint明细分析：调用方须同时预登记所有来源serial/overlap的完整pipeline policy及各模式共同配置摘要，另给跨模式共同配置摘要。`joint_comparison_configuration()` 只去掉mode和overlap_enabled，保留其余来源无关pipeline/feed设置，拒绝两模式同时改变超时、分包、队列或实现策略等变量。摘要仅锁声明，不提供生产模型身份的权威证明。未登记joint策略时不计算收益，不能事后凭单独finish秒数补填。
 
@@ -430,6 +430,14 @@ ABBA登记schema 2可选启用joint明细分析：调用方须同时预登记所
 每个条件独立生成 `conditions.<condition>.joint_finish`：同来源同模式的全部ABBA重复先取最慢finish，再来源等权取离散逆CDF P95；主点量为serial P95减overlap P95。以来源组配对bootstrap，PCG64 seed=1717、10,000次，两个模式共用同一批来源索引；差值取2.5%/97.5%的linear percentile区间。估计量、重复聚合、RNG、区间方法及NumPy版本在输出前进入plan摘要；源码或版本变化拒绝复用。独立N只按来源组计，冷/热不合并成一个区间。各模式同时报告最慢来源、5秒P95及15秒单次硬上限门。
 
 任一单路基线、ABBA位置缺失或failed，该来源保留权重为正无穷，两个模式的区间不计算；即使24组仅一组失败而P95仍有限，也不得通过绝对门。`benefit_supported` 只表示宿主诊断区间下界大于0，不能越过质量、稳定/finish绝对门、ASR/DIA相对门、精确footprint和真实身份前置。不能用含整段供给/清理的callback elapsed替代尾音到双路确认。
+
+工作负载schedule报告schema 2包含同一宿主clock的 `schedule_origin_at`，各lane的 `started_at_seconds/ended_at_seconds/validated_at_seconds` 相对该原点，`elapsed_seconds` 仍仅为callback进入到返回；validated在joined报告摘要校验后取时，不把它混入纯callback耗时。ABBA拒绝旧schema、缺原点/校验时刻、校验早于返回或返回早于源末端。共同PCM报告提供最后样本目标时刻，绝不从整段elapsed减一个假设音频长度来猜尾部延迟。
+
+latency/scorer policy的 `relative_sampling` 在输出前固定每执行一个lane尾部观测：ASR使用宿主callback返回（调用方须已joined模型/会话清理），overlap相对serial；DIA-only使用callback加joined报告校验完成时刻，joint使用已校验的actual dia_scope_closed，不能拿relay/外层回调报告时刻代替。作用域里程碑不得晚于相应外层callback返回/校验。两种DIA边界均包含各自声明的清理/报告验证成本，但不声称是纯infer或真实worker回收。
+
+`conditions.<condition>.relative_lane_tail` 同来源同模式全部重复先取最慢值，再来源等权离散P95；cold/warm各自报告。ASR overlap P95≤serial P95×1.05、DIA overlap P95≤DIA-only P95×1.10才给各自diagnostic_pass。任何单路或ABBA位置失败/缺失均保留原来源权重为正无穷并no-go，不能用少于5%的失败让有限P95绕过门。零基线时，候选也为零才可通过，ratio保持null，禁止除零或替换分母。无joint策略/时序绑定时相对门not_observed，不借未验证的scope补值。相对门与绝对稳定/finish门、主收益区间和质量/footprint/身份门并列，任何单项通过都不自动选择overlap。
+
+schedule schema和scorer摘要变化后，旧控制锁、候选spec及ABBA计划需重新冻结执行；不能沿用旧报告认证。
 
 `summary()` 顶层仍仅有invalid或complete_metadata，不签发生产质量、并发认证或调度选择；selected_schedule及跨条件primary_benefit_interval_seconds保持null，quality/footprint未观察，condition setup/runtime/certification保持false。确定性测试覆盖预输出冻结、48次四模式PCM scheduler及48次单路/联合live pipeline合成接线、配对常数差、重复最慢值、冷/热分离和缺失分母；未使用真实音频或模型。
 
