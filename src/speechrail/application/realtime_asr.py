@@ -535,13 +535,14 @@ class RealtimeAsrOwner:
 
     def effective_segment_ms(self) -> int:
         policy = self.policy()
-        # Two retained spans account for PCM and its inference snapshot; the
-        # capability additionally bounds the admitted audio itself.
+        # Two retained spans account for PCM and its inference snapshot.
+        # Continuous speaker activity does not shorten the ASR context; fixed
+        # text alignment and attribution both support the decoder's 30 s bound.
         service_bytes = self._settings.max_realtime_buffer_bytes or 8_388_608
         return resolve_effective_max_segment_ms(
             policy,
             service_max_segment_ms=service_bytes // 64,
-            capability_max_segment_ms=8_000 if self.auxiliary.diarization_enabled else None,
+            capability_max_segment_ms=None,
             decoder_max_segment_ms=30_000,
         )
 

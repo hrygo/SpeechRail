@@ -1,6 +1,6 @@
 # SpeechRail Realtime ASR/TTS 协议契约
 
-> 契约版本：`6.6.1`；生效日期：2026-10-18。唯一机器 schema 是
+> 契约版本：`6.6.2`；生效日期：2026-10-18。唯一机器 schema 是
 > [`realtime-events.schema.json`](realtime-events.schema.json)，字段责任表是
 > [`realtime-field-matrix.json`](realtime-field-matrix.json)。
 
@@ -86,6 +86,9 @@ query 不得携带 key。每连接有独立 session、epoch、sequence 与临时
 - 成功的 `session.updated` 回显所请求的 ASR 策略和 `effective_max_segment_ms`。有效段预算是
   请求值、服务资源上限、能力上限与解码器上限的最小值；超出请求或无效字段直接拒绝，
   不静默夹取。场景预设由客户端选择，服务端不依据 task 推断策略或自动打开其他能力。
+  连续分人独立消费会话音频，不额外缩短 ASR 段预算；固定文字对齐和归属登记支持最长
+  30 秒单段，原有缓冲容量与准入限制仍生效。较长段可减少强制切断，但会延后正式文字
+  与其说话人归属，并可能增加推理内存；需要更早定稿的客户端可显式请求较短段。
 - `session.created` 和每个成功的 `session.updated` 都必须回显完整的有效 ASR 策略。默认值为
   `preview_interval_ms=1000`、`max_segment_ms=20000`、`finalization=full_segment`、
   `rollback_tokens=5`、`final_deadline_ms=120000`、`effective_max_segment_ms=20000`；

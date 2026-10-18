@@ -2,7 +2,7 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.18.1"
+version: "3.18.2"
 date: 2026-10-18
 ---
 
@@ -791,6 +791,9 @@ registry 不可读返回 `503 pronunciation_store_unavailable`（可重试）。
   省略时沿用请求 timeout。布尔值、小数、未知字段或枚举均拒绝。
 - `session.updated.session.speechrail.asr.effective_max_segment_ms` 回显实际有效段预算；它是
   请求、服务资源、能力与解码器上限的最小值。只有首个 PCM 前可更新；候选失败时旧配置保持不变。
+  启用连续分人不另缩短该预算；ASR、固定文字对齐与归属登记支持最长 30 秒单段，
+  缓冲容量与准入仍可限制实际预算。较长段能减少强制切断，但正式文字和说话人归属
+  等待更久，也可能占用更多推理内存；需要更早定稿时可请求更短段，预览间隔独立设置。
 - ASR 策略形状、范围或 deadline 无效时用 `asr_policy_invalid`；后端不支持该策略时用
   `asr_policy_unsupported`；无法在有界资源内接纳音频时用 `asr_buffer_overflow`。
 - 更新成功返回 `session.updated`。失败不半应用配置；未知字段、旧字段、Q4/Q6、Design runtime
