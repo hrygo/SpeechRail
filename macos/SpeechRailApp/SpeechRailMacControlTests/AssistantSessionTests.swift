@@ -1782,10 +1782,14 @@ final class AssistantSessionTests: XCTestCase {
         await harness.clients()[0].emit(.configured)
         await harness.clients()[0].emit(.completed(itemID: "i1", transcript: "天气怎么样"))
 
-        // 收尾完成的信号是助手那一行落库（`finalizeReply` 追加它），
-        // 不是 `phase`——回复还没开始时 phase 本来就是 .listening。
+        // finalizeReply 投影行后，调用方还要等 interrupt effect 返回才发布失败原因。
+        // 等待完整终态；单独看到行或 .listening 都不能证明失败处理已完成。
         await waitUntil(
-            { harness.session.turns.contains { $0.role == .assistant } },
+            {
+                harness.session.turns.contains { $0.role == .assistant }
+                    && harness.session.lastFailure != nil
+                    && harness.session.phase == .listening
+            },
             message: "provider 失败之后这一轮没有被收尾"
         )
         XCTAssertNotNil(harness.session.lastFailure, "失败必须给出可读原因")
