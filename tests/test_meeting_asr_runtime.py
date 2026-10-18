@@ -219,6 +219,43 @@ def test_ready_runtime_exposes_guarded_resource_scope_without_loading_again(runt
     asyncio.run(run())
 
 
+def test_outer_runner_scope_contains_private_asr_prepare_and_joined_cleanup(runtime_setup):
+    from meeting_runner_resources import observe_runner_process_tree
+
+    from test_meeting_runner_resources import Tree
+
+    state, reader = runtime_setup, Tree()
+
+    async def run():
+        async with observe_runner_process_tree(
+            reader=reader, expected_roles=("asr", "aligner"),
+            phases=("cold_start", "steady_state", "finish"),
+        ) as resources:
+            async with state.module.prepare_frozen_asr_runtime(
+                state.settings, dependencies=state.dependencies
+            ) as runtime:
+                handles = (runtime._owners.asr_transport._process,
+                           runtime._owners.alignment_transport._process)
+                for i, process in enumerate(handles, start=1):
+                    process.pid = i
+                reader.workers = list(handles)
+                scope = await runtime.capture_process_scope(reader=reader)
+                resources.register_owner(roles=("asr", "aligner"), scope=scope)
+                resources.advance_phase("steady_state")
+                await resources.checkpoint()
+                resources.advance_phase("finish")
+                await resources.checkpoint()
+            assert all(p.returncode is not None for p in handles)
+        report = resources.report()
+        assert report["status"] == "complete_metadata"
+        assert report["post_cleanup_empty"] is True
+        assert report["registered_handles_closed"] is True
+        assert report["runtime_identity_verified"] is False
+        assert not state.created[0].revision_window_ready
+
+    asyncio.run(run())
+
+
 def test_private_root_prepares_actual_cap_and_closes_only_its_two_owners(runtime_setup):
     state = runtime_setup
 

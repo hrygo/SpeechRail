@@ -92,6 +92,10 @@ def _sources() -> dict[str, str]:
                 "meeting_pcm_feed.py",
                 "meeting_latency_cohort.py",
                 "meeting_quality_metrics.py",
+                "meeting_runner_resources.py",
+                "meeting_process_owner.py",
+                "meeting_process_observer.py",
+                "meeting_process_snapshot.py",
             )
         },
     }

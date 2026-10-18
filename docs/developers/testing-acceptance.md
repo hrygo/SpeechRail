@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.53"
+version: "3.3.54"
 date: 2026-10-18
 ---
 
@@ -495,7 +495,7 @@ async with scope.observe(phases=("steady_state",)) as observation:
 resource_report = observation.report()
 ```
 
-这种scope从已就绪句柄开始，明确拒绝cold_start阶段。ASR两根不包含宿主VAD、PCM/队列或原生分人，分人一根不包含宿主和ASR；采样前的加载、进程回收后的区间亦未覆盖。它们不能分别取峰再相加、不能组合成T6总内存认证，也不证明登记前的启动历史、加载字节或无采样间瞬时变化。完整共存harness的宿主根、加载至回收的全生命周期、finish/cancel与完整场景矩阵仍待接线；ABBA footprint、峰值/回收/运行身份认证仍未观察。资源helper已进入ASR冻结源码闭包及C0/fast候选adapter身份，旧候选spec/controls须重新冻结，不能沿用旧收据。
+这种scope从已就绪句柄开始，明确拒绝cold_start阶段。ASR两根不包含宿主VAD、PCM/队列或原生分人，分人一根不包含宿主和ASR；采样前的加载、进程回收后的区间亦未覆盖。它们不能分别取峰再相加、不能组合成T6总内存认证，也不证明登记前的启动历史、加载字节或无采样间瞬时变化。完整共存harness的宿主范围由下述外层观察器登记；已就绪scope自身不覆盖完整生命周期。finish/cancel与完整真实场景矩阵、ABBA footprint及峰值/回收/运行身份认证仍未观察。资源helper已进入ASR冻结源码闭包及C0/fast候选adapter身份，旧候选spec/controls须重新冻结，不能沿用旧收据。
 
 合成验证命令（不执行原生reader、模型或音频）：
 
@@ -505,6 +505,39 @@ PYTHONPATH=src:examples/perf uv run --no-sync pytest \
   tests/test_meeting_process_observer.py tests/test_meeting_process_snapshot.py \
   tests/test_profile_metrics.py tests/test_resource_sampling.py --no-cov
 ```
+
+### 会议 runner 宿主及完整生命周期观察
+
+`meeting_runner_resources.observe_runner_process_tree` 在私有runtime构造和加载之前显式进入，使用当前宿主PID及其原始启动token作为唯一根，包含宿主PCM/队列/VAD与动态后代。初始两遍快照须仅含根；已有后代时拒绝开始，不借用或终止这些进程。同一宿主一次仅允许一个外层观察范围，避免并行工作共享资源证据。调用方仍须取得原有端口排他lease；当前进程没有后代不证明其他服务未运行，也不替代运行态核查。
+
+构造时冻结预期角色，单路ASR为asr/aligner、单路分人为diarization、联合为三者；阶段从cold_start开始，以finish或cancel结束。cold_start是调用方标记的加载窗口，不证明模型/系统缓存已清空或冷热准备已通过。使用原owner的capture_process_scope登记实际句柄与生命周期，角色不可重复，reader必须为同一实例。原owner继续负责加载、取消和joined清理，观察器不控制任何worker。
+
+`checkpoint()` 唤醒同一个有界采样循环，并等待在调用边界之后才派发的新读取；不复用已开始的读数，不另开并行采样器。取消检查点等待者不会丢弃底层读取，外层退出仍joined等待。检查点也消耗原样本预算，耗尽不补发、不使用旧快照。结束时在调用方清理之后强制一次新检查点，再退出并join采样线程。
+
+```python
+# lease、runtime依赖和reader由已获准的受控runner提供。
+async with observe_runner_process_tree(
+    reader=reader, expected_roles=("asr", "aligner"),
+    phases=("cold_start", "steady_state", "finish"),
+) as resources:
+    async with prepare_frozen_asr_runtime(
+        settings, dependencies=dependencies,
+        inherited_fds=(lease.descriptor,),
+    ) as runtime:
+        scope = await runtime.capture_process_scope(reader=reader)
+        resources.register_owner(roles=("asr", "aligner"), scope=scope)
+        resources.advance_phase("steady_state")
+        await resources.checkpoint()
+        await controlled_workload()
+        resources.advance_phase("finish")
+        await resources.checkpoint()
+    # runtime的原有清理已joined；外层退出再读宿主及后代。
+resource_report = resources.report()
+```
+
+报告保留内部所有样本及阶段分母，并核对全部角色登记、每个登记生命周期确实被观察、句柄PID类型/值未改变且returncode为整数，以及清理后新快照只剩同一宿主根。角色缺失、未退出句柄、已离开后代树但仍活着的登记句柄、未登记生命周期、残留后代、后置检查点缺失或任何内部采样失败均保持incomplete_metadata。未登记进程仅报告读取次数，不忽略、杀死或按RSS估算。returncode与树为空属于观察元数据，不证明调用方确实执行wait/reap、完整捕获所有瞬时后代或加载了冻结字节；worker_reaping_verified、peak_footprint_verified、runtime_identity_verified及certification_eligible仍false。
+
+该入口只建立可供受控负载调用的外层范围；真实模型、冷热准备、完整静音恢复/重叠/finish-cancel矩阵、采样扰动和ABBA内存门仍需独立证据，ABBA footprint保持not_observed。宿主物理footprint不宣称包含所有系统/加速器分配，也不作为resident声明。宿主观察、底层采样代码纳入ASR、C0/fast及ABBA源码身份，改动后重新冻结controls；报告中进程元数据仍仅落仓库外。
 
 ### 有声书外置小说语料回归
 

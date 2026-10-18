@@ -735,3 +735,16 @@ scope.observe将owner guard置于事件循环，每次读前后和关闭时检�
 先RED后GREEN：通用绑定及ASR入口9项，原生候选入口/两族source closure3项，另补cold_start拒绝与非法guard两项反例。九相关测试文件229 passed in4.69s，十Python Ruff、四source strict Mypy通过；另四相关文件验证ASR执行、候选checkpoint、live pipeline与ABBA接线，174 passed in12.63s。覆盖句柄替换/PID改变/退出/移除、登记中owner变化及重复取消线程join、原生token变化、实际fake ASR/分人owner与代际改变。父a5142473八项PR checks均success/completed。新/变更图谱freshness missing，直接复核worktree，无索引重建。
 
 全部是合成文件、fake RPC和注入进程树，无本机原生进程采样、真实音频/模型/benchmark、下载或服务/安装/UI/发布/合并。就绪ASR两根不含宿主VAD/PCM/队列/分人，分人根不含ASR/宿主；加载前、回收后与完整finish/cancel矩阵仍未覆盖，不能分别取峰相加或升级T6总内存认证。完整harness生命周期根、测量扰动及授权实跑仍待接线；ABBA footprint保持not_observed，E3/真实CER/人数/P95与最终生产联合身份未验，#370及完整目标保持未完成。
+
+
+## T6 宿主外层进程树与加载至清理观察
+
+2026-10-18：新增observe_runner_process_tree，从当前宿主PID/启动token开始，初始须无后代；一个宿主同时仅一个观察范围，不借用/停止已有进程。范围在私有runtime加载前进入，在原owner joined清理后结束，覆盖宿主VAD/PCM/队列与动态后代。预登记单路/联合角色和cold_start至finish/cancel阶段；cold_start仅为加载窗口标签，不证明冷热缓存准备。登记actual owner scope的原始句柄/生命周期，不以历史PID替代。
+
+底层增加checkpoint，唤醒同一有界采样循环并等待调用边界之后才派发的新读取；不复用已有或正在读取的旧样本，不建立并发采样器，检查点消耗原预算。取消等待者不丢弃owned读取；外层清理后强制新检查点，再join观察器。共同单次读取/登记线程清理提取为run_process_read，原有owner登记仍使用同一join规则。
+
+结束核对全部角色登记与实际观察、句柄PID类型/值不变且returncode为整数，以及后置快照只剩同一宿主根。缺角色、未登记生命周期、残留后代、离开后代树但登记句柄仍未退出、PID改变/布尔值、内部失败或后置预算耗尽都保持incomplete_metadata；没有杀进程或将缺失填零。cold加载、稳态、finish前后合成树与实际fake ASR私有组合根均接线，重复取消后外层singleton可释放。
+
+9项初始checkpoint/新模块测试RED后GREEN；候选两族及ABBA source closure3反例RED后GREEN；审查另以PID=True反例先RED再修正。最终十四相关测试文件416 passed in17.34s，十一Python Ruff、四source strict Mypy通过；staged whitespace及敏感字段核对。父afe86b42八项PR checks均success/completed。相关图谱freshness missing，直接复核worktree，没有重建索引。
+
+宿主观察/采样代码进入ASR、C0/fast及ABBA源码身份，旧spec/controls须重新冻结。完整范围仅给可调用的metadata基础，returncode和树为空不证明真实wait/reap或瞬时峰值，reaping/peak/runtime identity/certification仍false。没有真实语料解码、原生进程读取、模型/benchmark、下载或服务/安装/UI/发布/合并操作；实际完整冷热/静音/重叠/finish-cancel矩阵、扰动与ABBA内存门仍待授权实跑和证据接线，footprint保持not_observed，E3、真实CER/人数/P95与最终生产联合身份未验，#370和完整目标保持未完成。

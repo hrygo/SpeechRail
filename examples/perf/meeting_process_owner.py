@@ -120,15 +120,20 @@ async def capture_owned_process_scope(
             raise ValueError
     except Exception:
         raise ValueError("process owner unavailable for enrollment") from None
-    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="meeting-owner-enroll")
-
-    async def read() -> tuple[ProcessKey, ...]:
-        return await asyncio.get_running_loop().run_in_executor(pool, _read_roots, pids, reader)
-
-    try:
-        roots = await join_cleanup(asyncio.create_task(read()))
-    finally:
-        await join_cleanup(asyncio.create_task(asyncio.to_thread(pool.shutdown, wait=True)))
+    roots = await run_process_read(lambda: _read_roots(pids, reader))
     scope = OwnedProcessScope(roots, handles, get_processes, reader, backend)
     scope.verify()
     return scope
+
+
+async def run_process_read[T](operation: Callable[[], T]) -> T:
+    """Join a one-shot process read and dedicated thread even on repeated cancel."""
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="meeting-process-read")
+
+    async def read() -> T:
+        return await asyncio.get_running_loop().run_in_executor(pool, operation)
+
+    try:
+        return await join_cleanup(asyncio.create_task(read()))
+    finally:
+        await join_cleanup(asyncio.create_task(asyncio.to_thread(pool.shutdown, wait=True)))

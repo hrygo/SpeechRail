@@ -60,6 +60,7 @@ CANDIDATE_ADAPTER_SOURCES = (
     "examples/perf/meeting_process_owner.py",
     "examples/perf/meeting_process_observer.py",
     "examples/perf/meeting_process_snapshot.py",
+    "examples/perf/meeting_runner_resources.py",
     "examples/perf/meeting_checkpoint_execution.py",
     "src/speechrail/runtime/server_lock.py",
     "examples/perf/meeting_candidate_evidence.py",

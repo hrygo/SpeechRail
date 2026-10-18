@@ -851,3 +851,11 @@ def test_next_abba_input_cannot_overlap_previous_owned_cleanup_or_stable_deliver
             timing["milestones_at"][key] += delta
     with pytest.raises(ValueError, match="order"):
         ledger.observe(row["run_sha256"], condition="warm", report=value)
+def test_resource_observation_code_is_frozen_before_abba_output():
+    from meeting_abba import _sources
+
+    sources = _sources()
+    assert {
+        "meeting_runner_resources.py", "meeting_process_owner.py",
+        "meeting_process_observer.py", "meeting_process_snapshot.py",
+    } <= sources.keys()

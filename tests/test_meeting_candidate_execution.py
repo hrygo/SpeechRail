@@ -341,6 +341,7 @@ def test_process_observation_sources_are_part_of_candidate_identity(control):
         "meeting_process_owner.py",
         "meeting_process_observer.py",
         "meeting_process_snapshot.py",
+        "meeting_runner_resources.py",
     ):
         assert "examples/perf/" + name in sources
 

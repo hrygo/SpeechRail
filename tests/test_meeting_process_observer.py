@@ -204,6 +204,32 @@ def test_configuration_is_copied_and_phase_order_cannot_skip_registered_slots():
     asyncio.run(run())
 
 
+def test_checkpoint_requires_a_new_read_started_after_requested_boundary():
+    async def run():
+        import time
+
+        tree = Tree()
+        async with observer(tree, phases=("steady_state", "finish")) as monitor:
+            monitor.advance_phase("finish")
+            boundary = time.monotonic()
+            index = await monitor.checkpoint()
+        sample = monitor.report()["samples"][index]
+        assert sample["started_at"] >= boundary
+        assert sample["phase_index"] == 1
+        assert sample["status"] == "ok"
+
+    asyncio.run(run())
+
+
+def test_checkpoint_does_not_reuse_a_sample_after_budget_exhaustion():
+    async def run():
+        async with observer(Tree(), phases=("steady_state",), max_samples=1) as monitor:
+            with pytest.raises(ValueError, match="active"):
+                await monitor.checkpoint()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
