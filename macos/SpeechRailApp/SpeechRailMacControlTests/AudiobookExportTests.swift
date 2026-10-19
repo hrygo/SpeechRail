@@ -988,4 +988,110 @@ final class AudiobookExportTests: XCTestCase {
         }
         XCTAssertFalse(FileManager.default.fileExists(atPath: cancelDest.path))
     }
+
+    // MARK: - 导出清单 loudness 字段
+
+    private func readManifestJSON(
+        store: AudiobookProjectStore,
+        requestID: UUID
+    ) async throws -> [String: Any] {
+        let rootURL = await store.rootURL
+        let url = rootURL
+            .appendingPathComponent("exports", isDirectory: true)
+            .appendingPathComponent(requestID.uuidString, isDirectory: true)
+            .appendingPathComponent("request.json", isDirectory: false)
+        let data = try Data(contentsOf: url)
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    private func makeLoudnessExportController(
+        store: AudiobookProjectStore,
+        revisionController: AudiobookRevisionController
+    ) -> AudiobookExportController {
+        AudiobookExportController(
+            store: store,
+            castController: AudiobookCastController(store: store),
+            revisionController: revisionController,
+            customStageEncoder: Self.fakeStageEncoder,
+            mediaVerifier: Self.fakeMediaVerifier
+        )
+    }
+
+    func testExportWithoutLoudnessWritesV1ManifestWithoutLoudnessKey() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let revisionController = AudiobookRevisionController(store: store)
+        let controller = makeLoudnessExportController(store: store, revisionController: revisionController)
+        let fixture = try await makeTwoChapterExportFixture(
+            store: store,
+            revisionController: revisionController,
+            completeSecondChapter: true
+        )
+
+        let prepared = try await controller.prepare(
+            bookID: fixture.bookID,
+            chapterIDs: nil,
+            profile: .m4b
+        )
+
+        let json = try await readManifestJSON(store: store, requestID: prepared.requestID)
+        XCTAssertEqual(json["schema_version"] as? String, AudiobookExportManifestPayload.v1SchemaVersion)
+        XCTAssertNil(json["loudness"])
+    }
+
+    func testExportWithLoudnessWritesV2ManifestContainingObject() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let revisionController = AudiobookRevisionController(store: store)
+        let controller = makeLoudnessExportController(store: store, revisionController: revisionController)
+        let fixture = try await makeTwoChapterExportFixture(
+            store: store,
+            revisionController: revisionController,
+            completeSecondChapter: true
+        )
+
+        let prepared = try await controller.prepare(
+            bookID: fixture.bookID,
+            chapterIDs: nil,
+            profile: .m4b,
+            loudness: AudiobookLoudnessSettings()
+        )
+
+        let json = try await readManifestJSON(store: store, requestID: prepared.requestID)
+        XCTAssertEqual(json["schema_version"] as? String, AudiobookExportManifestPayload.v2SchemaVersion)
+        let loudness = try XCTUnwrap(json["loudness"] as? [String: Any])
+        XCTAssertEqual(loudness["unit"] as? String, "lufs")
+        XCTAssertEqual(loudness["target_i"] as? Double, -16)
+        XCTAssertEqual(loudness["true_peak_db"] as? Double, -1.5)
+        XCTAssertEqual(loudness["loudness_range"] as? Double, 11)
+    }
+
+    func testCoverAndLoudnessOnM4BWritesBoth() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let revisionController = AudiobookRevisionController(store: store)
+        let controller = makeLoudnessExportController(store: store, revisionController: revisionController)
+        let fixture = try await makeTwoChapterExportFixture(
+            store: store,
+            revisionController: revisionController,
+            completeSecondChapter: true
+        )
+        let cover = AudiobookCoverAsset(
+            bookID: fixture.bookID,
+            relativePath: "books/\(fixture.bookID.uuidString.lowercased())/cover/cover.jpg",
+            fileSHA256: String(repeating: "a", count: 64),
+            byteCount: 1024
+        )
+
+        let prepared = try await controller.prepare(
+            bookID: fixture.bookID,
+            chapterIDs: nil,
+            profile: .m4b,
+            cover: cover,
+            loudness: AudiobookLoudnessSettings()
+        )
+
+        let json = try await readManifestJSON(store: store, requestID: prepared.requestID)
+        XCTAssertEqual(json["schema_version"] as? String, AudiobookExportManifestPayload.v2SchemaVersion)
+        let coverJSON = try XCTUnwrap(json["cover"] as? [String: Any])
+        XCTAssertEqual(coverJSON["relative_path"] as? String, cover.relativePath)
+        XCTAssertNotNil(json["loudness"])
+    }
 }

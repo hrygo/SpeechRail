@@ -354,6 +354,7 @@ struct AudiobookExportSheet: View {
     @State private var selectedProfile: AudiobookExportProfile = .m4b
     @State private var selectedChapterIDs: Set<UUID> = []
     @State private var isPresentingCoverImporter = false
+    @State private var loudnessEnabled = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
@@ -381,6 +382,20 @@ struct AudiobookExportSheet: View {
             Text(selectedProfile.subtitle)
                 .font(SpeechRailDesignTokens.Typography.callout)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+
+            CardSurface {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Toggle(isOn: $loudnessEnabled) {
+                        Text("统一音量")
+                            .font(SpeechRailDesignTokens.Typography.body)
+                    }
+                    .accessibilityHint("让导出成品的各章听起来音量一致；默认关闭。")
+                    Text("让导出成品的各章听起来音量一致；默认关闭。")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                }
+                .padding(SpeechRailDesignTokens.Spacing.sm)
+            }
 
             if selectedProfile == .m4b {
                 CardSurface {
@@ -509,7 +524,11 @@ struct AudiobookExportSheet: View {
                     Button(workflow.isPreparingExport ? "正在编码并校验…" : "生成并校验导出包") {
                         let ids = selectedProfile == .m4b ? nil : Array(selectedChapterIDs)
                         Task {
-                            await workflow.prepareExport(profile: selectedProfile, chapterIDs: ids)
+                            await workflow.prepareExport(
+                                profile: selectedProfile,
+                                chapterIDs: ids,
+                                loudnessEnabled: loudnessEnabled
+                            )
                         }
                     }
                     .speechRailButton(.primary)

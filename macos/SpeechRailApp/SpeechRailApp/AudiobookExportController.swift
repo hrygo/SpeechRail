@@ -156,6 +156,25 @@ public enum AudiobookExportError: LocalizedError, Equatable, Sendable {
     }
 }
 
+public struct AudiobookLoudnessSettings: Equatable, Sendable {
+    public let unit: String
+    public let targetI: Double
+    public let truePeakDB: Double
+    public let loudnessRange: Double
+
+    public init(
+        unit: String = "lufs",
+        targetI: Double = -16.0,
+        truePeakDB: Double = -1.5,
+        loudnessRange: Double = 11.0
+    ) {
+        self.unit = unit
+        self.targetI = targetI
+        self.truePeakDB = truePeakDB
+        self.loudnessRange = loudnessRange
+    }
+}
+
 public actor AudiobookExportController {
     public typealias StageEncoderHandler = @Sendable (
         AudiobookExportManifestPayload,
@@ -244,7 +263,8 @@ public actor AudiobookExportController {
         bookID: UUID,
         chapterIDs: [UUID]?,
         profile: AudiobookExportProfile,
-        cover: AudiobookCoverAsset? = nil
+        cover: AudiobookCoverAsset? = nil,
+        loudness: AudiobookLoudnessSettings? = nil
     ) async throws -> AudiobookPreparedExport {
         if let cover {
             if profile == .chapterMP3 {
@@ -401,6 +421,14 @@ public actor AudiobookExportController {
                 AudiobookExportManifestPayload.CoverItem(
                     relativePath: $0.relativePath,
                     imageSHA256: $0.fileSHA256
+                )
+            },
+            loudness: loudness.map {
+                LoudnessItem(
+                    unit: $0.unit,
+                    targetI: $0.targetI,
+                    truePeakDB: $0.truePeakDB,
+                    loudnessRange: $0.loudnessRange
                 )
             }
         )

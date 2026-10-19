@@ -1169,6 +1169,61 @@ final class ControlKitTests: XCTestCase {
             XCTFail("unexpected error: \(error)")
         }
     }
+
+    // MARK: - 有声书清单 loudness 字段
+
+    private func makeManifest(
+        cover: AudiobookExportManifestPayload.CoverItem? = nil,
+        loudness: LoudnessItem? = nil
+    ) -> AudiobookExportManifestPayload {
+        AudiobookExportManifestPayload(
+            requestID: UUID(),
+            bookID: UUID(),
+            sourceID: UUID(),
+            productionRevisionID: UUID(),
+            profile: "m4b",
+            bookTitle: "测试书",
+            author: nil,
+            chapters: [],
+            cover: cover,
+            loudness: loudness
+        )
+    }
+
+    func testManifestWithoutCoverOrLoudnessStaysV1() {
+        let manifest = makeManifest()
+
+        XCTAssertEqual(manifest.schemaVersion, AudiobookExportManifestPayload.v1SchemaVersion)
+        XCTAssertNil(manifest.loudness)
+    }
+
+    func testManifestWithLoudnessAloneIsV2() {
+        let manifest = makeManifest(
+            loudness: LoudnessItem(unit: "lufs", targetI: -16, truePeakDB: -1.5, loudnessRange: 11)
+        )
+
+        XCTAssertEqual(manifest.schemaVersion, AudiobookExportManifestPayload.v2SchemaVersion)
+    }
+
+    func testManifestLoudnessRoundTripsThroughWireCodecWithSnakeCaseKeys() throws {
+        let loudness = LoudnessItem(unit: "lufs", targetI: -16, truePeakDB: -1.5, loudnessRange: 11)
+        let manifest = makeManifest(loudness: loudness)
+
+        let data = try ControlWireCodec.encode(manifest)
+        let decoded = try ControlWireCodec.decode(AudiobookExportManifestPayload.self, from: data)
+
+        XCTAssertEqual(decoded, manifest)
+        XCTAssertEqual(decoded.loudness, loudness)
+
+        let root = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(root["schema_version"] as? String, AudiobookExportManifestPayload.v2SchemaVersion)
+        let wire = try XCTUnwrap(root["loudness"] as? [String: Any])
+        XCTAssertEqual(Set(wire.keys), ["unit", "target_i", "true_peak_db", "loudness_range"])
+        XCTAssertEqual(wire["unit"] as? String, "lufs")
+        XCTAssertEqual(wire["target_i"] as? Double, -16)
+        XCTAssertEqual(wire["true_peak_db"] as? Double, -1.5)
+        XCTAssertEqual(wire["loudness_range"] as? Double, 11)
+    }
 }
 
 /// 服务落盘历史（`state/metrics-rollup`）的读取与聚合。
