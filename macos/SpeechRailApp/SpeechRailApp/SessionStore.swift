@@ -348,12 +348,17 @@ public actor SessionStore: SessionArchiveWriting {
     }
 
     /// 分人链路只允许改归属列，**正文一个字不动**（§15.3 第 2 条）。
-    public func attachSpeakerLabel(lineID: String, label: String?) throws {
+    @discardableResult
+    public func attachSpeakerLabel(lineID: String, label: String?) throws -> TranscriptLine {
         try withStatement("UPDATE line SET speaker_label = ?, attribution_json = NULL, speaker_label_is_manual = 1 WHERE id = ?;") { statement in
             bind(statement, 1, label)
             bind(statement, 2, lineID)
             try step(statement)
         }
+        guard let saved = try storedLine(id: lineID) else {
+            throw SessionStoreError.statementFailed("归属对应的转录行不存在")
+        }
+        return saved
     }
 
     /// 原子替换完整逐词快照；人工标注不会被迟到的自动归属覆盖。

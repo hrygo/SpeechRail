@@ -10,9 +10,9 @@ struct MeetingSpeakerCapacityTests {
     @MainActor @Test func dynamicReplayAndLineRetirementPreserveStoredIdentity() async throws {
         let (store, record, _) = try await TranscriptWindowPersistenceTests().fixture()
         let writes = Mutex(0)
-        let labeling = SpeakerLabeling(coordinator: SessionCoordinator(store: store), attachLabel: { lineID, label in
+        let labeling = SpeakerLabeling(coordinator: SessionCoordinator(store: store), attachAttribution: { lineID, units in
             writes.withLock { $0 += 1 }
-            try await store.attachSpeakerLabel(lineID: lineID, label: label)
+            return try await store.attachTranscriptAttribution(lineID: lineID, units: units)
         })
         let capacity = try JSONDecoder().decode(SpeechRailDiarizationCapacity.self,
             from: Data(#"{"enabled":true,"backend":"meeting_dynamic","max_speakers":8,"system_cap":32}"#.utf8))
@@ -23,7 +23,7 @@ struct MeetingSpeakerCapacityTests {
         for (index, lineID) in ["before-retirement", "after-retirement"].enumerated() {
             _ = try await store.appendLine(LineDraft(sessionID: record, role: .speaker,
                 text: "合成分人回归", source: .microphone, status: .final), id: lineID)
-            let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit-\(index)", speaker: "S5")]
+            let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit-\(index)", speaker: "S5", textStart: 0, textEnd: 6)]
             let label = try #require(labeling.register(units: units, lineID: lineID, ordinal: index + 1))
             labels.append(label)
             await labeling.apply(units: units)

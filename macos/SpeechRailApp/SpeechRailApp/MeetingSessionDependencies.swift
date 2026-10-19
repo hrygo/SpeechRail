@@ -176,7 +176,7 @@ public struct MeetingSessionDependencies: Sendable {
     public var powerMonitor: any MeetingPowerMonitor
     public var persistenceConfiguration: TranscriptPersistenceQueue.Configuration
     public var saveLine: (@Sendable (LineDraft, String) async throws -> Int)?
-    public var attachSpeakerLabel: (@Sendable (String, String?) async throws -> Void)?
+    public var attachTranscriptAttribution: (@Sendable (String, [TranscriptAttributionUnit]) async throws -> TranscriptLine)?
     public var drainTimeout: Duration
     public var revisionWindowEnabled: Bool?
     public var dynamicDiarizationEnabled: Bool?
@@ -188,7 +188,7 @@ public struct MeetingSessionDependencies: Sendable {
         powerMonitor: any MeetingPowerMonitor,
         persistenceConfiguration: TranscriptPersistenceQueue.Configuration = .init(),
         saveLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
-        attachSpeakerLabel: (@Sendable (String, String?) async throws -> Void)? = nil,
+        attachTranscriptAttribution: (@Sendable (String, [TranscriptAttributionUnit]) async throws -> TranscriptLine)? = nil,
         drainTimeout: Duration = .seconds(12),
         revisionWindowEnabled: Bool? = nil,
         dynamicDiarizationEnabled: Bool? = nil
@@ -199,7 +199,7 @@ public struct MeetingSessionDependencies: Sendable {
         self.powerMonitor = powerMonitor
         self.persistenceConfiguration = persistenceConfiguration
         self.saveLine = saveLine
-        self.attachSpeakerLabel = attachSpeakerLabel
+        self.attachTranscriptAttribution = attachTranscriptAttribution
         self.drainTimeout = drainTimeout
         self.revisionWindowEnabled = revisionWindowEnabled
         self.dynamicDiarizationEnabled = dynamicDiarizationEnabled

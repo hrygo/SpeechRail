@@ -294,16 +294,116 @@ final class SpeakerLabelingPersistenceTests: XCTestCase {
         try await super.tearDown()
     }
 
-    private func record(with ids: [String]) async throws -> String {
+    private func record(with ids: [String], text: String = "词") async throws -> String {
         let record = try await store.createSession(
             SessionDraft(kind: .meeting, engineProfile: "test", audioSource: .microphone)
         )
         for id in ids {
             _ = try await store.appendLine(
-                LineDraft(sessionID: record.id, role: .speaker, text: id, source: .microphone), id: id
+                LineDraft(sessionID: record.id, role: .speaker, text: text, source: .microphone), id: id
             )
         }
         return record.id
+    }
+
+    func testMixedWordsPersistWithoutCollapsingTheirSpeakers() async throws {
+        let id = try await record(with: ["甲乙"], text: "甲乙")
+        let owner = SpeakerLabeling(coordinator: coordinator)
+        owner.begin(sessionID: id, enabled: true)
+        let units: [RealtimeASRClient.AttributionUnit] = [
+            .init(segmentUID: "one", speaker: "A", textStart: 0, textEnd: 1),
+            .init(segmentUID: "two", speaker: "B", textStart: 1, textEnd: 2)
+        ]
+        owner.register(units: units, lineID: "甲乙", ordinal: 1)
+        await owner.apply(units: units)
+        let rows = try await store.lines(sessionID: id)
+        XCTAssertEqual(rows.first?.attributionUnits.map(\.speakerLabel), ["A", "B"])
+        XCTAssertNil(rows.first?.speakerLabel)
+        XCTAssertNil(owner.attributedLabel(forLineID: "甲乙"))
+        XCTAssertEqual(rows.first?.speakerRuns.map(\.text).joined(), "甲乙")
+    }
+
+    func testPartialUnknownRevisionKeepsOtherWordsKnown() async throws {
+        let id = try await record(with: ["甲乙"], text: "甲乙")
+        let owner = SpeakerLabeling(coordinator: coordinator)
+        owner.begin(sessionID: id, enabled: true)
+        let units: [RealtimeASRClient.AttributionUnit] = [
+            .init(segmentUID: "one", speaker: "A", textStart: 0, textEnd: 1),
+            .init(segmentUID: "two", speaker: "B", textStart: 1, textEnd: 2)
+        ]
+        owner.register(units: units, lineID: "甲乙", ordinal: 1)
+        await owner.apply(units: units)
+        await owner.apply(units: [.init(segmentUID: "two", speaker: nil, textStart: 1, textEnd: 2)])
+        let rows = try await store.lines(sessionID: id)
+        XCTAssertEqual(rows.first?.attributionUnits.map(\.speakerLabel), ["A", nil])
+        XCTAssertNil(owner.attributedLabel(forLineID: "甲乙"))
+        XCTAssertEqual(rows.first?.text, "甲乙")
+    }
+
+    func testAutomaticLabelsRespectManualRowChoice() async throws {
+        let id = try await record(with: ["甲乙"], text: "甲乙")
+        let owner = SpeakerLabeling(coordinator: coordinator)
+        owner.begin(sessionID: id, enabled: true)
+        let initial: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "one", speaker: "A", textStart: 0, textEnd: 2)]
+        owner.register(units: initial, lineID: "甲乙", ordinal: 1)
+        await owner.apply(units: initial)
+        await owner.split(lineIDs: ["甲乙"], to: "B")
+        await owner.apply(units: [.init(segmentUID: "one", speaker: "C", textStart: 0, textEnd: 2)])
+        let rows = try await store.lines(sessionID: id)
+        XCTAssertEqual(rows.first?.speakerLabel, "B")
+        XCTAssertEqual(owner.attributedLabel(forLineID: "甲乙"), "B")
+    }
+
+    func testManualChoiceIsReflectedAfterRepeatedIdenticalAutomaticSnapshot() async throws {
+        let id = try await record(with: ["甲乙"], text: "甲乙")
+        let owner = SpeakerLabeling(coordinator: coordinator)
+        owner.begin(sessionID: id, enabled: true)
+        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "one", speaker: "A", textStart: 0, textEnd: 2)]
+        owner.register(units: units, lineID: "甲乙", ordinal: 1)
+        await owner.apply(units: units)
+        await owner.split(lineIDs: ["甲乙"], to: "B")
+        await owner.apply(units: units)
+        let rows = try await store.lines(sessionID: id)
+        XCTAssertEqual(rows.first?.speakerLabel, "B")
+        XCTAssertEqual(owner.attributedLabel(forLineID: "甲乙"), "B")
+    }
+
+    func testMissingTextRangeCannotReplaceSavedWordEvidence() async throws {
+        let id = try await record(with: ["甲乙"], text: "甲乙")
+        let owner = SpeakerLabeling(coordinator: coordinator)
+        owner.begin(sessionID: id, enabled: true)
+        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "one", speaker: "A", textStart: 0, textEnd: 2)]
+        owner.register(units: units, lineID: "甲乙", ordinal: 1)
+        await owner.apply(units: units)
+        await owner.apply(units: [.init(segmentUID: "one", speaker: "B")])
+        let rows = try await store.lines(sessionID: id)
+        XCTAssertEqual(rows.first?.attributionUnits.map(\.speakerLabel), ["A"])
+        XCTAssertEqual(owner.attributedLabel(forLineID: "甲乙"), "A")
+        XCTAssertNotNil(owner.note)
+    }
+
+    func testFailedWholeSnapshotIsRetryableAndSuccessDeduplicates() async throws {
+        let id = try await record(with: ["甲乙"], text: "甲乙")
+        var attempts = 0
+        let owner = SpeakerLabeling(coordinator: coordinator, attachAttribution: { [store] lineID, units in
+            attempts += 1
+            if attempts == 1 { throw SessionStoreError.storageUnavailable }
+            return try await store!.attachTranscriptAttribution(lineID: lineID, units: units)
+        })
+        owner.begin(sessionID: id, enabled: true)
+        let units: [RealtimeASRClient.AttributionUnit] = [
+            .init(segmentUID: "one", speaker: "A", textStart: 0, textEnd: 1),
+            .init(segmentUID: "two", speaker: "B", textStart: 1, textEnd: 2)
+        ]
+        owner.register(units: units, lineID: "甲乙", ordinal: 1)
+        await owner.apply(units: units)
+        XCTAssertNil(owner.attributedLine(forLineID: "甲乙"))
+        await owner.apply(units: units)
+        await owner.apply(units: units)
+        XCTAssertEqual(attempts, 2)
+        let rows = try await store.lines(sessionID: id)
+        XCTAssertEqual(rows.first?.attributionUnits.map(\.speakerLabel), ["A", "B"])
+        XCTAssertEqual(owner.attributedLine(forLineID: "甲乙"), rows.first)
     }
 
     private func waitUntilEntered(_ gate: SpeakerAttributionWriteGate) async throws {
@@ -319,17 +419,17 @@ final class SpeakerLabelingPersistenceTests: XCTestCase {
         let old = try await record(with: ["old-one", "old-two"])
         let new = try await record(with: ["new-two"])
         let gate = SpeakerAttributionWriteGate(store: store)
-        let owner = SpeakerLabeling(coordinator: coordinator, attachLabel: { try await gate.write($0, label: $1) })
+        let owner = SpeakerLabeling(coordinator: coordinator, attachAttribution: { try await gate.write($0, units: $1) })
         owner.begin(sessionID: old, enabled: true)
         let units: [RealtimeASRClient.AttributionUnit] = [
-            .init(segmentUID: "one", speaker: "A"), .init(segmentUID: "two", speaker: "B")
+            .init(segmentUID: "one", speaker: "A", textStart: 0, textEnd: 1), .init(segmentUID: "two", speaker: "B", textStart: 0, textEnd: 1)
         ]
         owner.register(units: [units[0]], lineID: "old-one", ordinal: 1)
         owner.register(units: [units[1]], lineID: "old-two", ordinal: 2)
         let task = Task { await owner.apply(units: units) }
         try await waitUntilEntered(gate)
         owner.begin(sessionID: new, enabled: true)
-        owner.register(units: [.init(segmentUID: "two", speaker: nil)], lineID: "new-two", ordinal: 1)
+        owner.register(units: [.init(segmentUID: "two", speaker: nil, textStart: 0, textEnd: 1)], lineID: "new-two", ordinal: 1)
         await gate.release()
         await task.value
         let oldRows = try await store.lines(sessionID: old)
@@ -343,9 +443,9 @@ final class SpeakerLabelingPersistenceTests: XCTestCase {
         let old = try await record(with: ["old"])
         let new = try await record(with: ["history"])
         let gate = SpeakerAttributionWriteGate(store: store)
-        let owner = SpeakerLabeling(coordinator: coordinator, attachLabel: { try await gate.write($0, label: $1) })
+        let owner = SpeakerLabeling(coordinator: coordinator, attachAttribution: { try await gate.write($0, units: $1) })
         owner.begin(sessionID: old, enabled: true)
-        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit", speaker: "A")]
+        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit", speaker: "A", textStart: 0, textEnd: 1)]
         owner.register(units: units, lineID: "old", ordinal: 1)
         let task = Task { await owner.apply(units: units) }
         try await waitUntilEntered(gate)
@@ -362,7 +462,7 @@ final class SpeakerLabelingPersistenceTests: XCTestCase {
         let id = try await record(with: ["one", "two"])
         let owner = SpeakerLabeling(coordinator: coordinator)
         owner.begin(sessionID: id, enabled: true)
-        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit", speaker: "A")]
+        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit", speaker: "A", textStart: 0, textEnd: 1)]
         owner.register(units: units, lineID: "one", ordinal: 1)
         await owner.apply(units: units)
         owner.register(units: units, lineID: "two", ordinal: 2)
@@ -374,9 +474,9 @@ final class SpeakerLabelingPersistenceTests: XCTestCase {
     func testRebindingDuringWriteDoesNotMarkNewLineAsAlreadyPersisted() async throws {
         let id = try await record(with: ["one", "two"])
         let gate = SpeakerAttributionWriteGate(store: store)
-        let owner = SpeakerLabeling(coordinator: coordinator, attachLabel: { try await gate.write($0, label: $1) })
+        let owner = SpeakerLabeling(coordinator: coordinator, attachAttribution: { try await gate.write($0, units: $1) })
         owner.begin(sessionID: id, enabled: true)
-        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit", speaker: "A")]
+        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit", speaker: "A", textStart: 0, textEnd: 1)]
         owner.register(units: units, lineID: "one", ordinal: 1)
         let task = Task { await owner.apply(units: units) }
         try await waitUntilEntered(gate)
@@ -392,12 +492,12 @@ final class SpeakerLabelingPersistenceTests: XCTestCase {
         let id = try await record(with: ["old-generation", "new-generation"])
         let owner = SpeakerLabeling(coordinator: coordinator)
         owner.begin(sessionID: id, enabled: true)
-        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit", speaker: "A")]
+        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit", speaker: "A", textStart: 0, textEnd: 1)]
         owner.register(units: units, lineID: "old-generation", ordinal: 1)
         let command = owner.freezeAttribution(units: units)
         owner.begin(sessionID: id, enabled: true)
         owner.register(
-            units: [.init(segmentUID: "unit", speaker: nil)], lineID: "new-generation", ordinal: 2
+            units: [.init(segmentUID: "unit", speaker: nil, textStart: 0, textEnd: 1)], lineID: "new-generation", ordinal: 2
         )
         await owner.apply(command)
         let rows = try await store.lines(sessionID: id)
@@ -409,13 +509,13 @@ final class SpeakerLabelingPersistenceTests: XCTestCase {
     func testQueuedNilRevisionClearsPriorWriteInsteadOfBeingDiscardedAtAcceptance() async throws {
         let id = try await record(with: ["line"])
         let gate = SpeakerAttributionWriteGate(store: store)
-        let owner = SpeakerLabeling(coordinator: coordinator, attachLabel: { try await gate.write($0, label: $1) })
+        let owner = SpeakerLabeling(coordinator: coordinator, attachAttribution: { try await gate.write($0, units: $1) })
         owner.begin(sessionID: id, enabled: true)
-        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit", speaker: "A")]
+        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit", speaker: "A", textStart: 0, textEnd: 1)]
         owner.register(units: units, lineID: "line", ordinal: 1)
         let first = Task { await owner.apply(units: units) }
         try await waitUntilEntered(gate)
-        let clear = owner.freezeAttribution(units: [.init(segmentUID: "unit", speaker: nil)])
+        let clear = owner.freezeAttribution(units: [.init(segmentUID: "unit", speaker: nil, textStart: 0, textEnd: 1)])
         await gate.release()
         await first.value
         await owner.apply(clear)
@@ -434,9 +534,9 @@ final class SpeakerLabelingPersistenceTests: XCTestCase {
         let owner = SpeakerLabeling(coordinator: coordinator)
         owner.begin(sessionID: id, enabled: true)
         owner.register(
-            units: [.init(segmentUID: "unit", speaker: "A")], lineID: "old", ordinal: 1
+            units: [.init(segmentUID: "unit", speaker: "A", textStart: 0, textEnd: 1)], lineID: "old", ordinal: 1
         )
-        await owner.apply(units: [.init(segmentUID: "unit", speaker: "A")])
+        await owner.apply(units: [.init(segmentUID: "unit", speaker: "A", textStart: 0, textEnd: 1)])
         await owner.rename(label: "A", to: "张三")
         XCTAssertEqual(owner.labels, ["A"])
         XCTAssertEqual(owner.displayNames["A"], "张三")
@@ -451,14 +551,14 @@ final class SpeakerLabelingPersistenceTests: XCTestCase {
         XCTAssertEqual(owner.state, .active)
         // uid 坐标系已清空：旧 uid 的迟到修订无处可写，旧行保持原值。
         XCTAssertNil(owner.attributedLabel(forLineID: "old"))
-        await owner.apply(units: [.init(segmentUID: "unit", speaker: "B")])
+        await owner.apply(units: [.init(segmentUID: "unit", speaker: "B", textStart: 0, textEnd: 1)])
         let rows = try await store.lines(sessionID: id)
         XCTAssertEqual(rows.map(\.speakerLabel), ["A", nil])
         // 新 uid 照常写入：重置不断新写。
         owner.register(
-            units: [.init(segmentUID: "unit-2", speaker: "B")], lineID: "new", ordinal: 2
+            units: [.init(segmentUID: "unit-2", speaker: "B", textStart: 0, textEnd: 1)], lineID: "new", ordinal: 2
         )
-        await owner.apply(units: [.init(segmentUID: "unit-2", speaker: "B")])
+        await owner.apply(units: [.init(segmentUID: "unit-2", speaker: "B", textStart: 0, textEnd: 1)])
         let rowsAfter = try await store.lines(sessionID: id)
         XCTAssertEqual(rowsAfter.map(\.speakerLabel), ["A", "B"])
         XCTAssertEqual(owner.labels, ["A", "B"])
@@ -487,13 +587,13 @@ actor SpeakerAttributionWriteGate {
 
     func attach(_ store: SessionStore) { self.store = store }
 
-    func write(_ lineID: String, label: String?) async throws {
+    func write(_ lineID: String, units: [TranscriptAttributionUnit]) async throws -> TranscriptLine {
         if blocked {
             entered = true
             await withCheckedContinuation { continuation = $0 }
         }
         guard let store else { throw TranscriptPersistenceGate.Failure.unavailable }
-        try await store.attachSpeakerLabel(lineID: lineID, label: label)
+        return try await store.attachTranscriptAttribution(lineID: lineID, units: units)
     }
 
     func release() {

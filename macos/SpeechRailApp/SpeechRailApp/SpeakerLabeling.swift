@@ -8,7 +8,7 @@ import SpeechRailControlKit
 // 三条从契约与规格直接落下来的规矩：
 //
 //   1. **只改归属列，正文一个字不动**（§15.3 第 2 条）。服务端的归属是"原位修订"，
-//      所以这里唯一的写库动作是 `attachSpeakerLabel` 与 `speaker_name`。
+//      自动归属原子保存逐词快照；人工整行标注与显示名另行保存。
 //   2. **`segment_uid` 是修订的坐标**：`completed` 带回来一批单元，后来的
 //      `speechrail.diarization.updated` 按 uid 找行。所以"uid 落在哪一行"必须被记住，
 //      否则修订事件无处可写——这张表在内存里，锚在这一次会话上。
@@ -79,7 +79,7 @@ public final class SpeakerLabeling {
     }
 
     private let coordinator: SessionCoordinator
-    private let attachLabel: @MainActor (String, String?) async throws -> Void
+    private let attachAttribution: @MainActor (String, [TranscriptAttributionUnit]) async throws -> TranscriptLine
     /// 写下一条说话人修订之后要跑一次。
     ///
     /// 改名/合并/标记「我」都会追加一条 `kind='speaker'` 的修订事件，
@@ -89,7 +89,7 @@ public final class SpeakerLabeling {
     /// 路径**都**带上它：`markAsMe` 与 `merge` 内部就是调 `rename`。
     ///
     /// `split`（拆出）也带：它在**用户动作这一层**单独记一条归属修订，
-    /// 而不是让 `attachSpeakerLabel` 去记——那条同时是实时对齐的写入路径。
+    /// 自动逐词修订不记作用户修改；人工动作单独追加来源修订。
     /// 异步是为了让刷新在动作返回**之前**完成：否则用户改完名字，
     /// 界面先回显新名字、"需复核"再晚一步出现，中间那一瞬看着像是没生效。
     var onSourceRevision: (@MainActor () async -> Void)?
@@ -109,20 +109,25 @@ public final class SpeakerLabeling {
     /// `segment_uid` → 库里的行 id。修订事件靠它找行。
     private var lineByUnit: [String: String] = [:]
     private var unitsByLine: [String: Set<String>] = [:]
-    /// `segment_uid` → 已经写进库的那个标签（去重：同一个归属不重复写库）。
-    private var appliedByUnit: [String: String] = [:]
+    /// 已接纳的原始单元与成功保存的整行投影分开；保存失败不形成去重证明。
+    private var registeredByUnit: [String: RealtimeASRClient.AttributionUnit] = [:]
+    private struct AppliedLine {
+        let requested: [TranscriptAttributionUnit]
+        let projection: TranscriptLine
+    }
+    private var appliedByLine: [String: AppliedLine] = [:]
     private var lifecycle = UUID()
     /// 本场被并掉的标签 → 目标标签（"已并入 A"）。
     private var mergedInto: [String: String] = [:]
 
     public init(
         coordinator: SessionCoordinator,
-        attachLabel: (@MainActor (String, String?) async throws -> Void)? = nil,
+        attachAttribution: (@MainActor (String, [TranscriptAttributionUnit]) async throws -> TranscriptLine)? = nil,
         onSourceRevision: (@MainActor () async -> Void)? = nil
     ) {
         self.coordinator = coordinator
-        self.attachLabel = attachLabel ?? { lineID, label in
-            try await coordinator.attachSpeakerLabel(lineID: lineID, label: label)
+        self.attachAttribution = attachAttribution ?? { lineID, units in
+            try await coordinator.attachTranscriptAttribution(lineID: lineID, units: units)
         }
         self.onSourceRevision = onSourceRevision
     }
@@ -140,7 +145,8 @@ public final class SpeakerLabeling {
         firstOrdinal = [:]
         lineByUnit = [:]
         unitsByLine = [:]
-        appliedByUnit = [:]
+        registeredByUnit = [:]
+        appliedByLine = [:]
         mergedInto = [:]
         note = nil
         diagnosticCode = nil
@@ -160,7 +166,8 @@ public final class SpeakerLabeling {
         self.sessionID = sessionID
         lineByUnit = [:]
         unitsByLine = [:]
-        appliedByUnit = [:]
+        registeredByUnit = [:]
+        appliedByLine = [:]
     }
 
     /// 打开一场历史记录：只读回已经落库的显示名与出现过的标签，
@@ -169,7 +176,8 @@ public final class SpeakerLabeling {
         lifecycle = UUID()
         lineByUnit = [:]
         unitsByLine = [:]
-        appliedByUnit = [:]
+        registeredByUnit = [:]
+        appliedByLine = [:]
         self.sessionID = sessionID
         self.labels = labels
         self.displayNames = displayNames
@@ -180,14 +188,15 @@ public final class SpeakerLabeling {
         sessionID = nil
         lineByUnit = [:]
         unitsByLine = [:]
-        appliedByUnit = [:]
+        registeredByUnit = [:]
+        appliedByLine = [:]
     }
 
     public var isEnabled: Bool { state == .active || state == .degraded }
 
     // MARK: - 事件
 
-    /// 把归属单元关联到已经创建的行，并返回第一项可用标签。
+    /// 登记这一行的完整单元快照并退休被替换的 uid；返回第一项可用标签仅供面板登记。
     ///
     /// 这里仅建立 `segment_uid` → 行的索引；只有 `apply` 成功写入库后才登记为已应用。
     /// 这样首个晚到归属不会因为刚注册时就被标成"已应用"而跳过持久化。
@@ -199,13 +208,20 @@ public final class SpeakerLabeling {
     ) -> String? {
         guard isEnabled, !units.isEmpty else { return nil }
         var label: String?
+        let currentIDs = Set(units.map(\.segmentUID))
+        for uid in (unitsByLine[lineID] ?? []).subtracting(currentIDs) where lineByUnit[uid] == lineID {
+            lineByUnit.removeValue(forKey: uid)
+            registeredByUnit.removeValue(forKey: uid)
+        }
+        unitsByLine[lineID] = currentIDs
         for unit in units {
             if lineByUnit[unit.segmentUID] != lineID {
-                appliedByUnit.removeValue(forKey: unit.segmentUID)
+                appliedByLine.removeValue(forKey: lineID)
             }
             if let previous = lineByUnit[unit.segmentUID], previous != lineID { unitsByLine[previous]?.remove(unit.segmentUID) }
             lineByUnit[unit.segmentUID] = lineID
             unitsByLine[lineID, default: []].insert(unit.segmentUID)
+            registeredByUnit[unit.segmentUID] = unit
             guard let speaker = localLabel(unit.speaker), !speaker.isEmpty else { continue }
             if label == nil { label = speaker }
             observe(label: speaker, ordinal: ordinal)
@@ -217,82 +233,115 @@ public final class SpeakerLabeling {
     ///
     /// 写库前比较一次：同一个归属重复到达（服务端会重复推稳定前缀）不产生第二次写。
     public func apply(units: [RealtimeASRClient.AttributionUnit]) async {
-        await apply(freezeAttribution(units: units))
+        let command = freezeAttribution(units: units)
+        for unit in units {
+            if let target = lineByUnit[unit.segmentUID], command.acceptsProjection(for: target) {
+                registeredByUnit[unit.segmentUID] = unit
+            }
+        }
+        await apply(command)
     }
 
     struct AttributionCommand {
         fileprivate let lifecycle: UUID
         fileprivate let targets: [AttributionTarget]
+        fileprivate let invalidLines: Set<String>
+        func acceptsProjection(for lineID: String) -> Bool { !invalidLines.contains(lineID) }
     }
 
     fileprivate struct AttributionTarget {
-        let unitID: String
         let lineID: String
-        let label: String?
+        let units: [TranscriptAttributionUnit]
     }
 
-    /// 接纳时冻结整批坐标，供共享保存 owner 延后执行；不从新场账本重新查目标。
+    /// 冻结整行快照；部分 uid 修订保留该行其他已登记的词。
     func freezeAttribution(
         units: [RealtimeASRClient.AttributionUnit], lineID: String? = nil
     ) -> AttributionCommand {
-        AttributionCommand(
-            lifecycle: lifecycle,
-            targets: isEnabled ? units.compactMap { unit in
-                guard let targetLineID = lineID ?? lineByUnit[unit.segmentUID] else { return nil }
-                return AttributionTarget(unitID: unit.segmentUID, lineID: targetLineID, label: localLabel(unit.speaker))
-            } : []
-        )
+        guard isEnabled else { return .init(lifecycle: lifecycle, targets: [], invalidLines: []) }
+        var lineOrder: [String] = []
+        var incoming: [String: [RealtimeASRClient.AttributionUnit]] = [:]
+        for unit in units {
+            guard let target = lineID ?? lineByUnit[unit.segmentUID] else { continue }
+            if incoming[target] == nil { lineOrder.append(target) }
+            incoming[target, default: []].append(unit)
+        }
+        var targets: [AttributionTarget] = []
+        var invalid: Set<String> = []
+        for target in lineOrder {
+            var snapshot: [String: RealtimeASRClient.AttributionUnit] = [:]
+            if lineID == nil {
+                for uid in unitsByLine[target] ?? [] { snapshot[uid] = registeredByUnit[uid] }
+            }
+            let updates = incoming[target] ?? []
+            guard Set(updates.map(\.segmentUID)).count == updates.count else {
+                invalid.insert(target); continue
+            }
+            for unit in updates { snapshot[unit.segmentUID] = unit }
+            var mapped: [TranscriptAttributionUnit] = []
+            for unit in snapshot.values.sorted(by: {
+                ($0.textStart ?? Int.max, $0.textEnd ?? Int.max, $0.segmentUID)
+                    < ($1.textStart ?? Int.max, $1.textEnd ?? Int.max, $1.segmentUID)
+            }) {
+                guard let start = unit.textStart, let end = unit.textEnd else {
+                    invalid.insert(target); break
+                }
+                mapped.append(.init(id: unit.segmentUID, textStart: start, textEnd: end,
+                    speakerLabel: localLabel(unit.speaker),
+                    audioStartSample: unit.audioStartSample, audioEndSample: unit.audioEndSample))
+            }
+            guard !invalid.contains(target) else { continue }
+            targets.append(.init(lineID: target, units: mapped))
+        }
+        return .init(lifecycle: lifecycle, targets: targets, invalidLines: invalid)
     }
 
     @discardableResult
     func apply(_ command: AttributionCommand) async -> Set<String> {
         var confirmedLines: Set<String> = []
+        if lifecycle == command.lifecycle, !command.invalidLines.isEmpty {
+            note = "有一条说话人归属缺少文字范围，正文已保留。"
+        }
         for target in command.targets {
-            let ownsProjection = lifecycle == command.lifecycle && lineByUnit[target.unitID] == target.lineID
-            if ownsProjection {
-                if let applied = appliedByUnit[target.unitID], applied == target.label {
-                    confirmedLines.insert(target.lineID)
-                    continue
-                }
-                // 同生命周期、同一行没有任何已写归属可清除时，省去空写。
-                if target.label == nil, appliedByUnit[target.unitID] == nil { continue }
+            func ownsProjection() -> Bool {
+                lifecycle == command.lifecycle && target.units.allSatisfy { lineByUnit[$0.id] == target.lineID }
             }
-            do {
-                try await attachLabel(target.lineID, target.label)
-            } catch {
-                // 写不进去不是"归属没发生"，但也不该让整条链停下：正文已经落了库，
-                // 归属可以事后人工标注。如实留一句。
-                if lifecycle == command.lifecycle, lineByUnit[target.unitID] == target.lineID {
-                    note = "有一条说话人归属没能写进记录库：\(error.localizedDescription)"
-                }
+            if ownsProjection(), appliedByLine[target.lineID]?.requested == target.units {
+                confirmedLines.insert(target.lineID)
                 continue
             }
-            guard lifecycle == command.lifecycle, lineByUnit[target.unitID] == target.lineID else { continue }
-            confirmedLines.insert(target.lineID)
-            if let desired = target.label {
-                appliedByUnit[target.unitID] = desired
-                observe(label: desired, ordinal: nil)
-            } else {
-                appliedByUnit.removeValue(forKey: target.unitID)
+            let saved: TranscriptLine
+            do { saved = try await attachAttribution(target.lineID, target.units) }
+            catch {
+                if ownsProjection() { note = "有一条说话人归属没能写进记录库，正文已保留。" }
+                continue
             }
+            guard ownsProjection() else { continue }
+            appliedByLine[target.lineID] = .init(requested: target.units, projection: saved)
+            confirmedLines.insert(target.lineID)
+            for label in Set(saved.attributionUnits.compactMap(\.speakerLabel)) {
+                observe(label: label, ordinal: nil)
+            }
+            if let label = saved.speakerLabel { observe(label: label, ordinal: nil) }
         }
         return confirmedLines
     }
 
-    /// 这一行当前归属到的标签（按 uid 反查）。
-    ///
-    /// 修订事件到达时用它在内存里刷新 chip：库里那一行已经改过了，界面不该等到重开才跟上。
     public func attributedLabel(forLineID lineID: String) -> String? {
-        for uid in unitsByLine[lineID] ?? [] {
-            if let label = appliedByUnit[uid] { return label }
-        }
-        return nil
+        appliedByLine[lineID]?.projection.speakerLabel
+    }
+
+    func attributedLine(forLineID lineID: String) -> TranscriptLine? {
+        appliedByLine[lineID]?.projection
     }
 
     /// Called after accepted attribution writes leave the shared persistence owner.
     func retireLine(_ lineID: String) {
+        appliedByLine.removeValue(forKey: lineID)
         for unit in unitsByLine.removeValue(forKey: lineID) ?? [] {
-            if lineByUnit[unit] == lineID { lineByUnit.removeValue(forKey: unit); appliedByUnit.removeValue(forKey: unit) }
+            if lineByUnit[unit] == lineID {
+                lineByUnit.removeValue(forKey: unit); registeredByUnit.removeValue(forKey: unit)
+            }
         }
     }
     var liveUnitCount: Int { lineByUnit.count }
@@ -408,7 +457,11 @@ public final class SpeakerLabeling {
         }
         for lineID in lineIDs {
             do {
-                try await coordinator.attachSpeakerLabel(lineID: lineID, label: target)
+                let generation = lifecycle
+                let saved = try await coordinator.attachSpeakerLabel(lineID: lineID, label: target)
+                if lifecycle == generation {
+                    appliedByLine[lineID] = .init(requested: appliedByLine[lineID]?.requested ?? [], projection: saved)
+                }
             } catch {
                 note = "拆出没能保存：\(error.localizedDescription)"
                 return
@@ -416,8 +469,7 @@ public final class SpeakerLabeling {
         }
         observe(label: target, ordinal: nil)
         // 归属变了，依赖旧归属的纪要该提示复核。事件记在**用户动作**这一层，
-        // 不在 `attachSpeakerLabel` 里——那条同时是实时对齐写归属的路径，
-        // 在那里记会被每一次对齐到达刷屏（见 `noteSpeakerAttributionChange`）。
+        // 自动归属与用户动作分离，只有这里追加来源修订。
         do {
             try await coordinator.noteSpeakerAttributionChange(
                 sessionID: sessionID,

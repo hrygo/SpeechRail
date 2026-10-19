@@ -42,7 +42,7 @@ public struct CaptionSessionDependencies: Sendable {
         @Sendable (CaptionRealtimeClientConfiguration) -> any CaptionRealtimeClient
     public var persistenceConfiguration: TranscriptPersistenceQueue.Configuration
     public var saveLine: (@Sendable (LineDraft, String) async throws -> Int)?
-    public var attachSpeakerLabel: (@Sendable (String, String?) async throws -> Void)?
+    public var attachTranscriptAttribution: (@Sendable (String, [TranscriptAttributionUnit]) async throws -> TranscriptLine)?
     public var drainTimeout: Duration
     public var revisionWindowEnabled: Bool?
 
@@ -51,14 +51,14 @@ public struct CaptionSessionDependencies: Sendable {
             (CaptionRealtimeClientConfiguration) -> any CaptionRealtimeClient,
         persistenceConfiguration: TranscriptPersistenceQueue.Configuration = .init(),
         saveLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
-        attachSpeakerLabel: (@Sendable (String, String?) async throws -> Void)? = nil,
+        attachTranscriptAttribution: (@Sendable (String, [TranscriptAttributionUnit]) async throws -> TranscriptLine)? = nil,
         drainTimeout: Duration = .seconds(12),
         revisionWindowEnabled: Bool? = nil
     ) {
         self.makeRealtimeClient = makeRealtimeClient
         self.persistenceConfiguration = persistenceConfiguration
         self.saveLine = saveLine
-        self.attachSpeakerLabel = attachSpeakerLabel
+        self.attachTranscriptAttribution = attachTranscriptAttribution
         self.drainTimeout = drainTimeout
         self.revisionWindowEnabled = revisionWindowEnabled
     }
@@ -209,6 +209,8 @@ public final class CaptionSession {
         public var end: TimeInterval?
         /// 分人给的匿名标签（`A`…`D`）。未开分人时为 `nil`，行内就不出现 chip。
         public var speakerLabel: String?
+        public var attributionUnits: [TranscriptAttributionUnit] = []
+        public var speakerLabelIsManual = false
     }
 
     public enum ServiceReadiness: Sendable {
@@ -377,7 +379,7 @@ public final class CaptionSession {
     ) {
         let resolvedDependencies = dependencies ?? .production()
         self.coordinator = coordinator
-        self.labeling = SpeakerLabeling(coordinator: coordinator, attachLabel: resolvedDependencies.attachSpeakerLabel)
+        self.labeling = SpeakerLabeling(coordinator: coordinator, attachAttribution: resolvedDependencies.attachTranscriptAttribution)
         self.dependencies = resolvedDependencies
         self.port = port
         self.apiKey = apiKey
@@ -1263,7 +1265,7 @@ public final class CaptionSession {
         if sessionID == recordID, previewIdentity == identity {
             owner = labeling
         } else {
-            owner = SpeakerLabeling(coordinator: coordinator, attachLabel: dependencies.attachSpeakerLabel)
+            owner = SpeakerLabeling(coordinator: coordinator, attachAttribution: dependencies.attachTranscriptAttribution)
             owner.begin(sessionID: recordID, enabled: labelsEnabled)
         }
         let command = owner.freezeAttribution(units: units, lineID: lineID)
@@ -1288,12 +1290,18 @@ public final class CaptionSession {
             if savedTiming { self.timingQualityApplied.insert(lineID) }
             self.transcriptPresentation.update(id: lineID) { updated in
                 if confirmedLabels.contains(lineID) {
-                    updated.speakerLabel = owner.attributedLabel(forLineID: lineID)
+                    if let saved = owner.attributedLine(forLineID: lineID) {
+                        updated.speakerLabel = saved.speakerLabel
+                        updated.attributionUnits = saved.attributionUnits
+                        updated.speakerLabelIsManual = saved.speakerLabelIsManual
+                    }
                 }
             }
         }
         if accepted {
-            owner.register(units: units, lineID: lineID, ordinal: ordinal)
+            if command.acceptsProjection(for: lineID) {
+                owner.register(units: units, lineID: lineID, ordinal: ordinal)
+            }
         } else if sessionID == recordID, previewIdentity == identity {
             lastFailure = "部分说话人和时间信息未能保存，正文已保留。"
         }
