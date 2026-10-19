@@ -1834,3 +1834,9 @@ managed窗口先确认无请求/客户端，再停服；两个原生子进程终
 先确认原代码的预期失败，再完成领域和 batch/标准 Realtime 预览、终稿回归，三个相关测试文件共 103 项 fake 用例通过，Ruff、目标 Mypy 与 Realtime 契约检查通过。内存中禁用词边界保护使十四项测试失败，禁用百分比“点”检查使四项失败；源码未被 mutation 修改。契约和用户文档同步说明保留规则，事件 schema 和 API 参数不变，没有 CI 真实语料或硬件门限。生产文件新增七行（含说明注释），不新增模型、状态或解码调用。
 
 串行维护前冻结现有模型、运行时、依赖、当前生产源码、实际脚本、三份 PCM 与修改前后 ITN，执行后完整闭包核验稳定，推理子进程已 wait 回收。2026-10-19 04:14:57 UTC 独立核验原 3.12.0 quality/quality 服务恢复，唯一 listener/LaunchAgent PID 26129，health/readyz/metrics 均为 200，无活动请求或客户端，配置、selection、runtime target 摘要未变。没有下载、安装、默认切换或留出访问；没有新增时延、RTF、物理峰值及长时生命周期认证。代码尚未安装，按逻辑提交 revert 可回退。完整选择、原始音频和输出、冻结、评分、mutation 与维护证据保存在仓库外 `asr-decimal-boundary-fidelity-20261019`；新提交 CI 单独跟踪。
+
+## 联合资源观测的失效定位
+
+2026-10-19：只读复核先前 interval-index 联合对照的原始采样、私有驱动和当前生产源码。旧驱动在 `speechrail.diarization.finish` 返回后，要求 runner、ASR、aligner、分人四个进程仍全部存活，再读取 V4 lifetime maximum；但生产 `CoreMLActivitySession.finish` 在返回前已关闭分人 worker lease，因此这个四进程检查位置不成立。原始结果仅保存 `AssertionError`，不能追溯到具体断言；本次明确定位的是已证实的时机错误，不声称恢复了缺失的峰值读数。原采样在 done 之前仍有四进程，之后仅剩 runner；两臂均符合退出阶段的时序。本机无模型只读探针对同一存活进程比较 V0/V4 start token，身份一致且 lifetime maximum 不小于当前 footprint，没有证据支持 ABI 字段错位。
+
+原始采样、延迟和 wait 回收记录保留；此前约 7.878/7.623 GB 只能继续称为采样最大值，不能据此宣布物理峰值或资源非劣通过。后续确有产品候选需要联合实跑时，资源检查须分别绑定各 owned worker 的最后存活边界，并明确未覆盖的退出阶段；仅补采样次数或把四改成三均不能补出完整进程范围。不为这一报告缺口重复同源模型推理。本次零模型调用、零服务操作，私有证据 `asr-stable-attribution-resource-20261019/resource-checkpoint-root-cause.json` 记录输入摘要、自进程探针和终止事件前后采样；未修改原始证据、生产实现、预算或 CI。图谱不覆盖本 worktree，相关结论以实际源码与保存的原始观测为依据。
