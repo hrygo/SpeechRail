@@ -132,6 +132,27 @@ public enum MediaControlPayload: Codable, Equatable, Sendable {
     }
 }
 
+public struct LoudnessItem: Codable, Equatable, Sendable {
+    public let unit: String
+    public let targetI: Double
+    public let truePeakDB: Double
+    public let loudnessRange: Double
+
+    public init(unit: String, targetI: Double, truePeakDB: Double, loudnessRange: Double) {
+        self.unit = unit
+        self.targetI = targetI
+        self.truePeakDB = truePeakDB
+        self.loudnessRange = loudnessRange
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case unit
+        case targetI = "target_i"
+        case truePeakDB = "true_peak_db"
+        case loudnessRange = "loudness_range"
+    }
+}
+
 public struct AudiobookExportManifestPayload: Codable, Equatable, Sendable {
     public struct FragmentItem: Codable, Equatable, Sendable {
         public let fragmentID: UUID
@@ -225,6 +246,7 @@ public struct AudiobookExportManifestPayload: Codable, Equatable, Sendable {
     public let author: String?
     public let chapters: [ChapterItem]
     public let cover: CoverItem?
+    public let loudness: LoudnessItem?
 
     public init(
         requestID: UUID,
@@ -235,9 +257,12 @@ public struct AudiobookExportManifestPayload: Codable, Equatable, Sendable {
         bookTitle: String,
         author: String? = nil,
         chapters: [ChapterItem],
-        cover: CoverItem? = nil
+        cover: CoverItem? = nil,
+        loudness: LoudnessItem? = nil
     ) {
-        self.schemaVersion = cover == nil ? Self.v1SchemaVersion : Self.v2SchemaVersion
+        self.schemaVersion = (cover == nil && loudness == nil)
+            ? Self.v1SchemaVersion
+            : Self.v2SchemaVersion
         self.requestID = requestID
         self.bookID = bookID
         self.sourceID = sourceID
@@ -247,6 +272,7 @@ public struct AudiobookExportManifestPayload: Codable, Equatable, Sendable {
         self.author = author
         self.chapters = chapters
         self.cover = cover
+        self.loudness = loudness
     }
 
     enum CodingKeys: String, CodingKey {
@@ -260,5 +286,6 @@ public struct AudiobookExportManifestPayload: Codable, Equatable, Sendable {
         case author
         case chapters
         case cover
+        case loudness
     }
 }

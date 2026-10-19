@@ -2312,4 +2312,182 @@ final class AudiobookWorkflowTests: XCTestCase {
             "AC-6.4: 已有成片的章节主按钮应动态切换为「更新本章音频」"
         )
     }
+
+    // MARK: - 导出清单 loudness 接线
+
+    private final class MediaRequestRecorder: Sendable {
+        let mediaRequestIDs = Mutex<[UUID]>([])
+        func append(_ id: UUID) { mediaRequestIDs.withLock { $0.append(id) } }
+        func latest() -> UUID? { mediaRequestIDs.withLock { $0.last } }
+    }
+
+    private func makeExportWorkflow(
+        store: AudiobookProjectStore,
+        transport: any SpeechRailControlTransport
+    ) -> AudiobookWorkflowModel {
+        let config = LLMConfiguration(baseURL: "http://127.0.0.1:8000/v1", model: "test-model")
+        let deps = AudiobookDependencies(
+            makeStore: { store },
+            makeAnalysisClient: { _ in throw AudiobookAnalysisError.notConfigured },
+            resolveAnalysisSnapshot: { generation in
+                AudiobookAnalysisConfigSnapshot(configuration: config, generation: generation)
+            },
+            speechRenderer: WorkflowFakeRenderer(),
+            controlTransport: transport
+        )
+        return AudiobookWorkflowModel(
+            dependencies: deps,
+            playbackOwner: SharedPlaybackOwner(driver: FakeDriver()),
+            admission: SpeechCreationAdmission()
+        )
+    }
+
+    @discardableResult
+    private func makeExportableSingleChapterBook(
+        workflow: AudiobookWorkflowModel,
+        store: AudiobookProjectStore,
+        fileName: String,
+        text: String
+    ) async throws -> UUID {
+        let imported = try await importBook(into: workflow, fileName: fileName, text: text)
+        let bookID = imported.bookID
+        let chapterID = try XCTUnwrap(imported.chapterIDs.first)
+        let chapters = try await store.chapters(for: bookID)
+        let chapter = try XCTUnwrap(chapters.first { $0.id == chapterID })
+        let characters = try await store.characters(for: bookID)
+        let narrator = try XCTUnwrap(characters.first { $0.isNarrator })
+
+        var book = try await store.book(id: bookID)
+        book.analysisState = .allWindowsValidated
+        try await store.updateBook(book)
+
+        let atoms = try await store.atoms(for: bookID, chapterID: chapterID).filter { $0.kind != .formatting }
+        let annotations = atoms.map { atom in
+            AudiobookAnnotation(
+                bookID: bookID,
+                chapterID: chapterID,
+                windowID: UUID(),
+                atomID: atom.id,
+                sourceRange: atom.sourceRange,
+                assignment: .assigned(roleID: narrator.id)
+            )
+        }
+        try await store.saveAnnotations(bookID: bookID, annotations: annotations)
+        await workflow.bindVoice(
+            roleID: narrator.id,
+            binding: AudiobookVoiceBinding(
+                roleID: narrator.id,
+                voiceID: "v-narrator",
+                voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                modelRevision: String(repeating: "a", count: 40)
+            )
+        )
+        await workflow.confirmCastAndAudition()
+
+        let source = try await store.sourceIndex(for: bookID)
+        let allAtoms = try await store.atoms(for: bookID, chapterID: chapterID)
+        let bindings = try await store.voiceBindings(for: bookID)
+        let fragments = try AudiobookFragmentPlanner.plan(
+            chapter: chapter,
+            annotations: annotations,
+            bindings: bindings,
+            policy: .standard,
+            source: source,
+            atoms: allAtoms
+        )
+        try await store.saveFragments(bookID: bookID, chapterID: chapterID, fragments: fragments)
+
+        let wav = WorkflowFakeRenderer.makeWAV(frameCount: 4_800)
+        let candidateID = UUID()
+        let candidate = AudiobookRenderCandidate(
+            id: candidateID,
+            bookID: bookID,
+            chapterID: chapterID,
+            fragmentID: fragments[0].id,
+            generation: 1,
+            relativeAssetPath: "books/\(bookID.uuidString)/audio/\(candidateID.uuidString).wav",
+            fileSHA256: AudiobookDigest.sha256Hex(wav),
+            pcmSHA256: try AudioDigest.sha256HexOfPCM(in: wav),
+            frameCount: 4_800,
+            dependencyDigest: fragments[0].dependencyDigest
+        )
+        try await store.commitCandidate(candidate, wav: wav)
+        _ = try await AudiobookRevisionController(store: store)
+            .promoteInitialChapterIfComplete(bookID: bookID, chapterID: chapterID)
+        await workflow.openBook(bookID)
+        return bookID
+    }
+
+    private func makeLoudnessExportScenario(
+        fileName: String,
+        text: String
+    ) async throws -> (workflow: AudiobookWorkflowModel, store: AudiobookProjectStore, recorder: MediaRequestRecorder) {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let recorder = MediaRequestRecorder()
+        let transport = ClosureControlTransport { request in
+            if request.command == .mediaExport, let id = request.mediaRequestID {
+                recorder.append(id)
+            }
+            return ControlResponse(
+                requestID: request.requestID,
+                command: request.command,
+                status: .failed,
+                errorCode: .unsupported,
+                message: "测试桩：不执行真实编码"
+            )
+        }
+        let workflow = makeExportWorkflow(store: store, transport: transport)
+        _ = try await makeExportableSingleChapterBook(
+            workflow: workflow,
+            store: store,
+            fileName: fileName,
+            text: text
+        )
+        return (workflow, store, recorder)
+    }
+
+    private func readManifestJSON(
+        store: AudiobookProjectStore,
+        requestID: UUID
+    ) async throws -> [String: Any] {
+        let rootURL = await store.rootURL
+        let url = rootURL
+            .appendingPathComponent("exports", isDirectory: true)
+            .appendingPathComponent(requestID.uuidString, isDirectory: true)
+            .appendingPathComponent("request.json", isDirectory: false)
+        let data = try Data(contentsOf: url)
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    func testPrepareExportLoudnessToggleDefaultsOffAndWritesV1() async throws {
+        let scenario = try await makeLoudnessExportScenario(
+            fileName: "loudness_off.txt",
+            text: "第一章 归航\n海风停了。\n"
+        )
+
+        await scenario.workflow.prepareExport(profile: .m4b, chapterIDs: nil, loudnessEnabled: false)
+
+        let requestID = try XCTUnwrap(scenario.recorder.latest())
+        let json = try await readManifestJSON(store: scenario.store, requestID: requestID)
+        XCTAssertEqual(json["schema_version"] as? String, AudiobookExportManifestPayload.v1SchemaVersion)
+        XCTAssertNil(json["loudness"])
+    }
+
+    func testPrepareExportLoudnessToggleForwardsSettingsAndWritesV2() async throws {
+        let scenario = try await makeLoudnessExportScenario(
+            fileName: "loudness_on.txt",
+            text: "第一章 扬帆\n海风起了。\n"
+        )
+
+        await scenario.workflow.prepareExport(profile: .m4b, chapterIDs: nil, loudnessEnabled: true)
+
+        let requestID = try XCTUnwrap(scenario.recorder.latest())
+        let json = try await readManifestJSON(store: scenario.store, requestID: requestID)
+        XCTAssertEqual(json["schema_version"] as? String, AudiobookExportManifestPayload.v2SchemaVersion)
+        let loudness = try XCTUnwrap(json["loudness"] as? [String: Any])
+        XCTAssertEqual(loudness["unit"] as? String, "lufs")
+        XCTAssertEqual(loudness["target_i"] as? Double, -16)
+        XCTAssertEqual(loudness["true_peak_db"] as? Double, -1.5)
+        XCTAssertEqual(loudness["loudness_range"] as? Double, 11)
+    }
 }

@@ -2869,7 +2869,11 @@ public final class AudiobookWorkflowModel {
         }
     }
 
-    public func prepareExport(profile: AudiobookExportProfile, chapterIDs: [UUID]?) async {
+    public func prepareExport(
+        profile: AudiobookExportProfile,
+        chapterIDs: [UUID]?,
+        loudnessEnabled: Bool = false
+    ) async {
         guard let bookID = selectedBook?.id, let exportController else { return }
         isPreparingExport = true
         errorMessage = nil
@@ -2882,7 +2886,8 @@ public final class AudiobookWorkflowModel {
                 bookID: bookID,
                 chapterIDs: chapterIDs,
                 profile: profile,
-                cover: scopedCover
+                cover: scopedCover,
+                loudness: loudnessEnabled ? AudiobookLoudnessSettings() : nil
             )
             preparedExport = prepared
             isPreparingExport = false
