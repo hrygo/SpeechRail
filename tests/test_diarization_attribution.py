@@ -161,6 +161,81 @@ def test_probability_evidence_preserves_unambiguous_activity_assignment() -> Non
     assert result.speaker == "A"
 
 
+def test_one_voice_across_an_internal_pause_retains_word_attribution() -> None:
+    # A single aligned word can include a pause. The same sole voice speaks
+    # at both ends; inactive frames are not a competing speaker.
+    result = _attribute_frames((
+        ActivityFrame(SampleSpan(0, 400), (0.9, 0.01), frozenset({0})),
+        ActivityFrame(SampleSpan(400, 1200), (0.05, 0.01), frozenset()),
+        ActivityFrame(SampleSpan(1200, 1600), (0.9, 0.01), frozenset({0})),
+    ))
+    assert result.speaker == "A" and result.active_speakers == ("A",)
+    assert result.state == "final" and result.reason is None
+
+
+@pytest.mark.parametrize("middle,last", [
+    # Another speaker, unavailable scores, missing coverage, overlapping frames,
+    # degraded evidence, and an open edge must not become a confident identity.
+    (ActivityFrame(SampleSpan(400, 1200), (0.05, 0.9), frozenset({1})),
+     ActivityFrame(SampleSpan(1200, 1600), (0.9, 0.01), frozenset({0}))),
+    (ActivityFrame(SampleSpan(400, 1200), None, frozenset()),
+     ActivityFrame(SampleSpan(1200, 1600), (0.9, 0.01), frozenset({0}))),
+    (ActivityFrame(SampleSpan(500, 1200), (0.05, 0.01), frozenset()),
+     ActivityFrame(SampleSpan(1200, 1600), (0.9, 0.01), frozenset({0}))),
+    (ActivityFrame(SampleSpan(300, 1200), (0.05, 0.01), frozenset()),
+     ActivityFrame(SampleSpan(1200, 1600), (0.9, 0.01), frozenset({0}))),
+    (ActivityFrame(SampleSpan(400, 1200), (0.05, 0.01), frozenset(), "activity_gap"),
+     ActivityFrame(SampleSpan(1200, 1600), (0.9, 0.01), frozenset({0}))),
+    (ActivityFrame(SampleSpan(400, 1200), (0.05, 0.01), frozenset()),
+     ActivityFrame(SampleSpan(1200, 1600), (0.05, 0.01), frozenset())),
+    (ActivityFrame(SampleSpan(400, 1200), (0.05, 0.01), frozenset()),
+     ActivityFrame(SampleSpan(1200, 1500), (0.9, 0.01), frozenset({0}))),
+])
+def test_internal_pause_does_not_override_conflicting_or_missing_evidence(
+    middle: ActivityFrame, last: ActivityFrame,
+) -> None:
+    result = _attribute_frames((
+        ActivityFrame(SampleSpan(0, 400), (0.9, 0.01), frozenset({0})),
+        middle, last,
+    ))
+    assert result.speaker is None
+
+
+def test_internal_pause_requires_confidence_weighted_by_active_duration() -> None:
+    result = _attribute_frames((
+        ActivityFrame(SampleSpan(0, 100), (0.99,), frozenset({0})),
+        ActivityFrame(SampleSpan(100, 1000), (0.05,), frozenset()),
+        ActivityFrame(SampleSpan(1000, 1600), (0.4,), frozenset({0})),
+    ))
+    assert result.speaker is None and result.reason == "insufficient_evidence"
+
+
+def test_leading_silence_is_not_an_internal_pause() -> None:
+    result = _attribute_frames((
+        ActivityFrame(SampleSpan(0, 800), (0.05,), frozenset()),
+        ActivityFrame(SampleSpan(800, 1600), (0.9,), frozenset({0})),
+    ))
+    assert result.speaker is None and result.reason == "insufficient_evidence"
+
+
+def test_internal_pause_attribution_follows_watermarks_and_final_is_immutable() -> None:
+    ledger = AttributionLedger(accepted_samples=lambda: 1600)
+    frames = (
+        ActivityFrame(SampleSpan(0, 400), (0.9,), frozenset({0})),
+        ActivityFrame(SampleSpan(400, 1200), (0.05,), frozenset()),
+        ActivityFrame(SampleSpan(1200, 1600), (0.9,), frozenset({0})),
+    )
+    ledger.apply(_update(step=1, start=0, end=1600, frames=frames,
+                         processed=1600, stable=0))
+    (first,) = ledger.register("item", (TextUnit("word", 0, 2, SampleSpan(0, 1600)),))
+    assert first.speaker == "A" and first.state == "provisional"
+    (final,) = ledger.apply(_update(step=2, start=1600, end=1600, frames=(),
+                                   processed=1600, stable=1600))
+    assert final.speaker == "A" and final.state == "final"
+    assert final.revision == first.revision + 1
+    assert ledger.terminate_pending("model_not_ready") == ()
+
+
 def test_changed_scores_revise_provisional_attribution_but_not_final_text() -> None:
     ledger = AttributionLedger(accepted_samples=lambda: 3200)
     ledger.apply(_update(step=1, start=0, end=1600,

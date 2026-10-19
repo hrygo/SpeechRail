@@ -350,6 +350,55 @@ def test_late_attributions_keep_frozen_identity_and_finish_waits_for_updates() -
     asyncio.run(scenario())
 
 
+def test_internal_pause_keeps_public_word_speaker_and_frozen_text_offsets() -> None:
+    class PauseSession(_ActivitySession):
+        async def append(self, *, start_sample: int, pcm16: bytes) -> None:
+            assert start_sample == 0 and len(pcm16) == 1600
+            self.accepted_samples = 800
+            await self.queue.put(ActivityUpdate(
+                epoch=self.epoch, step_id=0, replace_span=SampleSpan(0, 800),
+                frames=(
+                    ActivityFrame(SampleSpan(0, 200), (0.9,), frozenset({0})),
+                    ActivityFrame(SampleSpan(200, 600), (0.05,), frozenset()),
+                    ActivityFrame(SampleSpan(600, 800), (0.9,), frozenset({0})),
+                ),
+                processed_through=800, stable_through=800,
+            ))
+
+    async def scenario() -> None:
+        aligner = _LateFirstAligner()
+        aligner.release_first.set()
+        harness = _Harness(aligner)
+        harness.hold_updates = False
+
+        def open_session(*, epoch: str) -> PauseSession:
+            session = PauseSession(epoch)
+            harness.engine.sessions.append(session)
+            return session
+
+        harness.engine.open = open_session
+        await harness.owner.configure(alignment=True, diarization=True)
+        await harness.owner.append(b"\x00\x00" * 800)
+        frozen = _frozen(epoch=7, generation=1, item_id="item-1", revision=2,
+                         wire_start=0, kernel_start=0, text="word")
+        harness.owner.start_alignment(frozen)
+        await harness.owner._wait_for_pending_alignment()
+        await harness.owner.finish({"event_id": "pause-finish"})
+
+        (done,) = _events_of_type(harness.events, "speechrail.diarization.done")
+        (unit,) = done["units"]
+        assert unit["speaker"] == "A"
+        assert unit["sample_span"] == {"start": 0, "end": 1200}
+        assert done["utterance_id"] == "item-1" and done["transcript_revision"] == 2
+        (alignment,) = _events_of_type(harness.events, "speechrail.alignment.done")
+        (aligned_word,) = alignment["units"]
+        assert aligned_word["text_start"] == 0 and aligned_word["text_end"] == 4
+        await harness.owner.close()
+        assert harness.owner._ports.diarization_admission.active == 0
+
+    asyncio.run(scenario())
+
+
 def test_empty_diarization_finish_is_valid() -> None:
     async def scenario() -> None:
         harness = _Harness(_LateFirstAligner())

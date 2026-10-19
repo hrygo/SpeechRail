@@ -1,6 +1,6 @@
 # SpeechRail Realtime ASR/TTS 协议契约
 
-> 契约版本：`6.6.5`；生效日期：2026-10-19。唯一机器 schema 是
+> 契约版本：`6.6.6`；生效日期：2026-10-19。唯一机器 schema 是
 > [`realtime-events.schema.json`](realtime-events.schema.json)，字段责任表是
 > [`realtime-field-matrix.json`](realtime-field-matrix.json)。
 
@@ -281,6 +281,12 @@ session 内匿名 label，不保存声纹、embedding 或跨会话身份。
 最高支持须达到既有 0.60 下限，且领先第二位至少 0.10。相关帧缺分数或相互重叠时不使用该
 辅助判定；证据不足仍为 unknown。覆盖判定已明确的归属不被分数推翻，final 单元不再修订；
 任何归属修订都不改写 ASR 正文。
+
+单个对齐文字单元内部的无活动停顿可另行判定：整个区间只有一位 active 说话人，且区间
+首尾均是该说话人活动时，按其 active 帧的实际时长计算独立分数均值，达到同一 0.60 下限
+即可保留该文字归属。相关帧必须完整、连续、不重叠且都有分数、无降级原因；区间外的
+邻词标签不作证据，不补齐发声活动，也不把重叠或说话人切换当作停顿。该规则仅处理
+覆盖判定和多人分数辅助仍未确定的单元，不覆盖已确定或 final 归属。
 
 归属事件的身份取自对应 ASR final 冻结的 item，不使用后来正在接收音频的 item。
 每个 `speechrail.diarization.updated` 只包含该 `utterance_id` 的 units；多个已完成 item 的

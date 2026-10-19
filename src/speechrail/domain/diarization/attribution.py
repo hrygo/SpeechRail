@@ -309,6 +309,8 @@ class AttributionLedger:
         )
         if speaker is None and unknown_reason == "insufficient_evidence":
             probability_winner = self._probability_winner(unit.audio_span, support, frames)
+            if probability_winner is None:
+                probability_winner = self._interior_pause_winner(unit.audio_span, frames)
             if probability_winner is not None:
                 speaker = self._label_for(probability_winner)
         return Attribution(
@@ -318,6 +320,41 @@ class AttributionLedger:
             state="final" if final else "provisional",
             reason=None if speaker is not None else unknown_reason,
             revision=revision,
+        )
+
+    def _interior_pause_winner(
+        self, span: SampleSpan, frames: tuple[ActivityFrame, ...],
+    ) -> int | None:
+        """Keep one voice's word across an interior pause, without filling activity.
+
+        Both word edges must contain the same sole active speaker. Silence can
+        reduce whole-word coverage without introducing another speaker, but
+        missing evidence, open edges, overlap and low scores remain unknown.
+        """
+        slots = {slot for frame in frames for slot in frame.active_slots}
+        if len(slots) != 1:
+            return None
+        slot = next(iter(slots))
+        if slot not in frames[0].active_slots or slot not in frames[-1].active_slots:
+            return None
+        previous_end = span.start
+        active_duration = 0
+        weighted_scores: list[float] = []
+        for frame in frames:
+            start, end = max(span.start, frame.span.start), min(span.end, frame.span.end)
+            if start != previous_end or frame.reason is not None or frame.scores is None:
+                return None
+            previous_end = end
+            if slot in frame.active_slots:
+                duration = end - start
+                active_duration += duration
+                weighted_scores.append(duration * frame.scores[slot])
+        if previous_end != span.end or not active_duration:
+            return None
+        return (
+            slot
+            if fsum(weighted_scores) / active_duration >= self._policy.min_support
+            else None
         )
 
     def _probability_winner(
