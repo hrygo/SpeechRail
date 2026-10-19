@@ -35,7 +35,7 @@ struct TranscriptWindowPersistenceTests {
         #expect(first == second)
         #expect(try await store.lines(sessionID: session).count == 2)
         #expect(try await store.transcriptRevisions(lineID: "one").first?.origin == "asr")
-        #expect(SessionStore.schemaVersion == 13)
+        #expect(SessionStore.schemaVersion == 14)
         await store.close()
     }
     @Test func secondLineFailureRollsBackEntireBatchAndOutbox() async throws {
