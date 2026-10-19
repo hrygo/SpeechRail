@@ -597,8 +597,21 @@ def transcription_hypothesis(
 
 
 def transcription_completed(
-    *, item_id: str, transcript: str, commit_event_id: str | None = None
+    *,
+    item_id: str,
+    transcript: str,
+    commit_event_id: str | None = None,
+    repetition_collapsed: int | None = None,
 ) -> dict[str, object]:
+    """Render the terminal completed event for one ASR item.
+
+    ``repetition_collapsed`` is an optional observation: how many
+    decoder-runaway repetition runs were collapsed out of this transcript
+    before it reached the caller. It is absent when nothing was collapsed, so
+    an ignored field keeps the event byte-identical to what clients saw
+    before the cleanup existed.
+    """
+
     payload: dict[str, object] = {
         "type": "conversation.item.input_audio_transcription.completed",
         "item_id": item_id,
@@ -607,6 +620,8 @@ def transcription_completed(
     }
     if commit_event_id is not None:
         payload["commit_event_id"] = commit_event_id
+    if repetition_collapsed:
+        payload["repetition_collapsed"] = repetition_collapsed
     return payload
 
 
@@ -938,16 +953,28 @@ def tts_audio_delta(
 
 
 def tts_completed(
-    *, task_id: str, request_id: str, generated_samples: int
+    *,
+    task_id: str,
+    request_id: str,
+    generated_samples: int,
+    latency: Mapping[str, int | float] | None = None,
 ) -> dict[str, object]:
-    """Render the one successful terminal for an incremental utterance."""
+    """Render the one successful terminal for an incremental utterance.
 
-    return {
+    ``latency`` carries the shared observation fields (``ttfa_ms``,
+    ``audio_ms``, ``rtf``). They are optional and never gate anything: a
+    client that ignores them sees exactly the event it saw before.
+    """
+
+    event: dict[str, object] = {
         "type": "speechrail.tts.completed",
         "task_id": task_id,
         "request_id": request_id,
         "generated_samples": max(0, int(generated_samples)),
     }
+    if latency:
+        event.update(latency)
+    return event
 
 
 def tts_cancelled(*, task_id: str, request_id: str) -> dict[str, object]:

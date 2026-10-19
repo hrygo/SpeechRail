@@ -6,6 +6,7 @@ import asyncio
 import base64
 import contextlib
 import logging
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -21,6 +22,7 @@ from speechrail.application.tts_stream import (
 from speechrail.application.tts_stream_capability import resolve_tts_stream_capability
 from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.compatibility.openai_realtime import (
+    WIRE_SAMPLE_RATE,
     RealtimeAdapterError,
     parse_tts_append_text,
     parse_tts_audio_ack,
@@ -48,6 +50,7 @@ from speechrail.domain.tts_stream import (
     TtsStreamTerminal,
 )
 from speechrail.domain.voice_ports import VoiceDirectory
+from speechrail.observability.latency import latency_fields
 
 logger = logging.getLogger(__name__)
 _MAX_TTS_REQUEST_IDS = 256
@@ -75,6 +78,8 @@ class TtsUtterance:
     retired: bool = False
     terminal_sent: bool = False
     terminal_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    started_at: float = field(default_factory=time.monotonic)
+    first_audio_at: float | None = None
 
 
 class RealtimeTtsOwner:
@@ -449,6 +454,8 @@ class RealtimeTtsOwner:
                 context.failure_code = event.error_code or "tts_backend_failed"
             await self._finalize_tts(context, status=status)
         elif event.kind is TtsStreamEventKind.AUDIO:
+            if context.first_audio_at is None:
+                context.first_audio_at = time.monotonic()
             context.generated_samples += len(event.pcm16) // 2
             await self._send(
                 tts_audio_delta(
@@ -524,12 +531,32 @@ class RealtimeTtsOwner:
         if self._current is context:
             self._current = None
 
+    def _latency_fields(self, context: TtsUtterance) -> dict[str, int | float]:
+        """Observations for a finished utterance, measured from ``tts.start``.
+
+        ``rtf`` here is wall-clock over audio, so on this path it also absorbs
+        any time spent waiting for the consumer's audio window. It is a
+        caller-visible lower bound on model speed, not a model benchmark.
+        """
+
+        finished_at = time.monotonic()
+        return latency_fields(
+            ttfa_sec=(
+                None
+                if context.first_audio_at is None
+                else max(0.0, context.first_audio_at - context.started_at)
+            ),
+            audio_sec=context.generated_samples / WIRE_SAMPLE_RATE,
+            inference_sec=max(0.0, finished_at - context.started_at),
+        )
+
     async def _finalize_tts(self, context: TtsUtterance, *, status: str) -> None:
         if status == "completed":
             event = tts_completed(
                 task_id=self._task_id,
                 request_id=context.request_id,
                 generated_samples=context.generated_samples,
+                latency=self._latency_fields(context),
             )
         elif status == "cancelled":
             event = tts_cancelled(task_id=self._task_id, request_id=context.request_id)

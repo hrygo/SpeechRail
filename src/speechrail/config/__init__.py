@@ -77,6 +77,10 @@ class Settings(BaseSettings):
     tts_warmup_on_start: bool = True
     realtime_asr_backend: Literal["disabled", "native"] = "disabled"
     asr_revision_windows_enabled: bool = False
+    # Decoder-runaway repetition carries no meaning and no legal use, so the
+    # cleanup is on by default; the threshold is the tunable, not the switch.
+    asr_repetition_collapse_enabled: bool = True
+    asr_repetition_collapse_min_run: int = Field(default=6, ge=2, le=100)
     qwen3_streaming_chunk_duration_ms: int = 1_000
     qwen3_streaming_max_context_sec: float = Field(default=12.64, gt=0, le=60)
     qwen3_streaming_max_new_tokens: int = Field(default=256, ge=32, le=2048)

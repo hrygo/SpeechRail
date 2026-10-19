@@ -32,6 +32,7 @@ from speechrail.domain.tts import (
 )
 from speechrail.domain.tts_execution import TtsExecutionPorts
 from speechrail.domain.voice_ports import ValidatedVoiceDirectory
+from speechrail.observability.latency import latency_fields
 from speechrail.observability.metrics import Metrics
 from speechrail.runtime.busy import BusyReason, infer_backend_busy_reason
 from speechrail.runtime.cleanup import join_cleanup
@@ -80,6 +81,9 @@ class RenderOperation:
     resource_key: str | None = field(init=False)
     _execution_started: bool = field(default=False, init=False)
     _started_at: float = field(default_factory=time.monotonic, init=False)
+    _delivery_started: bool = field(default=False, init=False)
+    _first_audio_at: float | None = field(default=None, init=False)
+    _latency: dict[str, int | float] = field(default_factory=dict, init=False)
     _delivery_source: AsyncIterator[bytes] | None = field(default=None, init=False)
     _delivery_body: AsyncIterator[bytes] | None = field(default=None, init=False)
 
@@ -92,14 +96,60 @@ class RenderOperation:
 
     def start_delivery(self) -> None:
         self._started_at = time.monotonic()
+        self._delivery_started = True
+
+    @property
+    def ttfa_sec(self) -> float | None:
+        """Request-to-first-audio, or ``None`` while it is still unknowable.
+
+        The measurement only exists for a caller that declared a delivery
+        start; a bare ``pcm()`` consumer never asked for a latency budget and
+        must not be charged a fabricated one.
+        """
+
+        if not self._delivery_started or self._first_audio_at is None:
+            return None
+        return max(0.0, self._first_audio_at - self._started_at)
+
+    @property
+    def ttfa_ms(self) -> int | None:
+        """Request-to-first-audio in whole milliseconds, if it was measured."""
+
+        ttfa = self.ttfa_sec
+        return None if ttfa is None else round(ttfa * 1000)
+
+    def ttfa_fields(self) -> dict[str, int | float]:
+        """Only the observation that exists before a streamed body starts.
+
+        A streamed response cannot carry a total audio duration or an RTF: the
+        headers leave the process before the last chunk is synthesized. Saying
+        so by omission is better than publishing a guess.
+        """
+
+        return latency_fields(ttfa_sec=self.ttfa_sec, audio_sec=0.0, inference_sec=0.0)
+
+    @property
+    def latency(self) -> dict[str, int | float]:
+        """Every observation for a finished render; empty before delivery ends."""
+
+        return dict(self._latency)
 
     def record_metrics(self, pcm_bytes: int) -> None:
+        audio_sec = pcm_bytes / 2 / self.sample_rate
+        inference_sec = time.monotonic() - self._started_at
+        self._latency = latency_fields(
+            ttfa_sec=self.ttfa_sec,
+            audio_sec=audio_sec,
+            inference_sec=inference_sec,
+        )
         self.metrics.record_tts(
             voice_class=self.voice_class,
             char_count=self.raw_character_count,
-            audio_duration_sec=pcm_bytes / 2 / self.sample_rate,
-            inference_duration_sec=time.monotonic() - self._started_at,
+            audio_duration_sec=audio_sec,
+            inference_duration_sec=inference_sec,
         )
+        if (ttfa := self.ttfa_sec) is not None:
+            self.metrics.record_ttfa(ttfa)
 
     def complete_delivery(self) -> None:
         if self.receipt_id is not None and not self.reclamation_failed:
@@ -223,6 +273,11 @@ class RenderOperation:
                                 self.receipt_id,
                                 chunk.audio,
                             )
+                        if self._first_audio_at is None:
+                            # The one timing point every delivery shape shares:
+                            # streaming, container encode and full buffering all
+                            # consume this generator.
+                            self._first_audio_at = time.monotonic()
                         yield chunk.audio
             if (
                 self.receipt_id is not None

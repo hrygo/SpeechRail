@@ -699,7 +699,12 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         except TypeError:
             asr_worker = Qwen3Worker(asr_config)
         transcribe = asr_worker.transcribe
-        batch_transcriber = Qwen3BatchTranscriber(worker=asr_worker, model_id=settings.model_id)
+        batch_transcriber = Qwen3BatchTranscriber(
+            worker=asr_worker,
+            model_id=settings.model_id,
+            repetition_collapse_enabled=settings.asr_repetition_collapse_enabled,
+            repetition_collapse_min_run=settings.asr_repetition_collapse_min_run,
+        )
 
     tts_worker: Qwen3TtsWorker | Qwen3TtsCapabilityRouter | None = None
     tts_synthesizer = overrides.tts_synthesizer

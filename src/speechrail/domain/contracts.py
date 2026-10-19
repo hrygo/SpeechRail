@@ -78,3 +78,7 @@ class TranscriptResult(BaseModel):
     duration_ms: int = Field(ge=0)
     segments: tuple[TranscriptSegment, ...] = ()
     words: tuple[TranscriptWord, ...] = ()
+    # How many runaway repetition runs were collapsed out of this result.
+    # Zero when the backend never looped or the cleanup is off; it never
+    # counts rhetorical repetition that survived.
+    repetition_collapsed: int = Field(default=0, ge=0)

@@ -2,7 +2,7 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.18.10"
+version: "3.19.0"
 date: 2026-10-19
 ---
 
@@ -436,6 +436,25 @@ Timing 是**独立资源**，与 #64 render receipt 分离：receipt 证明服�
 timing 描述文本与生成 PCM 的内容位置。Timing unavailable、后端未提供 timing metadata 或
 timing registry 容量不足均不会把成功的音频合成改判失败。取消/错误请求不会发布
 `completed` timing。普通 OpenAI 客户端不发送该 Header 时，不创建 timing 资源。
+
+### 4.4 延迟观测响应头
+
+`/v1/audio/speech` 在响应头返回本次合成的延迟观测值。字段名与 `/metrics` 直方图、以及
+Realtime `speechrail.tts.completed` 完全一致，避免同一测量出现两套词汇：
+
+| 响应头 | 字段 | 含义 | 何时出现 |
+|---|---|---|---|
+| `SpeechRail-Ttfa-Ms` | `ttfa_ms` | 请求被接受到首段音频可用的毫秒数 | 所有成功响应 |
+| `SpeechRail-Audio-Ms` | `audio_ms` | 本次交付音频的时长 | 仅整段缓冲的响应 |
+| `SpeechRail-Rtf` | `rtf` | 墙钟时间 / 音频时长 | 仅整段缓冲的响应 |
+
+流式响应（`pcm` 与 `mp3`/`opus`/`aac`/`flac`）在响应头离开进程时还不知道自己的总时长，
+因此只发布 `ttfa_ms`；`wav` 走整段缓冲，三项齐全。**缺某个头表示“本次没测到”，不是 0**：
+被取消或失败的请求不发布任何观测值。
+
+这些是**观测值**，不参与准入、重试、预算或质量判定，也不替代另外两份资源：render receipt
+证明生成与传输边界的完整性，timing sidecar 描述文本与音频的位置，延迟头只描述耗时。服务端
+同时把 `ttfa_ms` 记入 `speechrail_tts_ttfa_seconds` 直方图（该直方图此前已定义但从未被写入）。
 
 ### 预设音色库 (Preset Voices)
 
