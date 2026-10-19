@@ -248,10 +248,13 @@ public struct AudiobookListeningView: View {
 
                     ForEach([Float(0.75), Float(1.0), Float(1.25), Float(1.5), Float(2.0)], id: \.self) { rate in
                         let isCurrent = abs((listening?.playbackRate ?? 1.0) - rate) < 0.01
-                        Button(String(format: "%.2gx", rate)) {
+                        Button(AudiobookDisplayFormat.playbackRate(rate)) {
                             Task { await listening?.setRate(rate) }
                         }
                         .speechRailButton(isCurrent ? .primary : .quiet)
+                        .accessibilityLabel("收听倍速 \(AudiobookDisplayFormat.playbackRate(rate))")
+                        .accessibilityValue(isCurrent ? "当前倍速" : "未选中")
+                        .accessibilityAddTraits(isCurrent ? .isSelected : [])
                     }
                 }
 
@@ -285,14 +288,8 @@ public struct AudiobookListeningView: View {
     }
 
     private var timecodeSummary: String {
-        let elapsed = Int(listening?.chapterElapsedSeconds ?? 0)
-        let total = Int(listening?.chapterTotalDurationSeconds ?? 0)
-        return String(
-            format: "%02d:%02d / %02d:%02d",
-            elapsed / 60,
-            elapsed % 60,
-            total / 60,
-            total % 60
-        )
+        let elapsed = listening?.chapterElapsedSeconds ?? 0
+        let total = listening?.chapterTotalDurationSeconds ?? 0
+        return AudiobookDisplayFormat.timecode(elapsed) + " / " + AudiobookDisplayFormat.timecode(total)
     }
 }

@@ -264,8 +264,12 @@ public actor AudiobookExportController {
         chapterIDs: [UUID]?,
         profile: AudiobookExportProfile,
         cover: AudiobookCoverAsset? = nil,
-        loudness: AudiobookLoudnessSettings? = nil
+        loudness: AudiobookLoudnessSettings? = nil,
+        requestID: UUID = UUID()
     ) async throws -> AudiobookPreparedExport {
+        if cancelledRequestIDs.contains(requestID) {
+            throw AudiobookExportError.exportCancelled
+        }
         if let cover {
             if profile == .chapterMP3 {
                 throw AudiobookExportError.coverNotSupportedForProfile
@@ -289,7 +293,18 @@ public actor AudiobookExportController {
         var sourceFramesByChapter: [UUID: [(Int64, Int)]] = [:]
         var totalFrames: Int64 = 0
 
+        let skippedChapterIDs = Set(allChapters.filter(\.isSkipped).map(\.id))
         for chapter in allChapters {
+            if chapter.isSkipped {
+                omittedChapters.append(
+                    AudiobookOmittedChapterRecord(
+                        chapterID: chapter.id,
+                        chapterTitle: chapter.title,
+                        reason: "已按你的设置跳过"
+                    )
+                )
+                continue
+            }
             if let requestedIDSet, !requestedIDSet.contains(chapter.id) {
                 omittedChapters.append(
                     AudiobookOmittedChapterRecord(
@@ -386,8 +401,9 @@ public actor AudiobookExportController {
             )
         }
 
-        if isFullBookRequest && !omittedChapters.isEmpty {
-            throw AudiobookExportError.fullBookExportBlocked(reasons: omittedChapters)
+        let blockingOmissions = omittedChapters.filter { !skippedChapterIDs.contains($0.chapterID) }
+        if isFullBookRequest && !blockingOmissions.isEmpty {
+            throw AudiobookExportError.fullBookExportBlocked(reasons: blockingOmissions)
         }
         guard !exportedChapters.isEmpty else {
             throw AudiobookExportError.noExportableChaptersSelected
@@ -400,7 +416,6 @@ public actor AudiobookExportController {
         )
         try await store.saveProductionRevision(prodRev, makeCurrent: isFullBookRequest)
 
-        let requestID = UUID()
         cancelledRequestIDs.remove(requestID)
 
         let exportReqDir = store.rootURL

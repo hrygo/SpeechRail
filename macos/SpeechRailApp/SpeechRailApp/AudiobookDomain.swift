@@ -155,6 +155,7 @@ public enum AudiobookChapterReadinessState: String, Codable, Equatable, Hashable
     case paused
     case needsUpdate
     case chapterAudioReady
+    case skipped
     case failed
 }
 
@@ -179,6 +180,21 @@ public enum AudiobookListenableState: String, Codable, Equatable, Hashable, Send
 
 // MARK: - Book & Chapter Models
 
+/// 分析失败的持久化摘要：只保存低基数错误码与可行动提示，不落原文、prompt 或服务错误正文。
+public struct AudiobookAnalysisFailure: Codable, Equatable, Hashable, Sendable {
+    public var code: String
+    public var message: String
+    public var failedAt: Date
+    public var failedWindowOrdinal: Int?
+
+    public init(code: String, message: String, failedAt: Date = Date(), failedWindowOrdinal: Int? = nil) {
+        self.code = code
+        self.message = message
+        self.failedAt = failedAt
+        self.failedWindowOrdinal = failedWindowOrdinal
+    }
+}
+
 public struct AudiobookBook: Codable, Equatable, Hashable, Sendable, Identifiable {
     public let id: UUID
     public let sourceID: UUID
@@ -194,6 +210,7 @@ public struct AudiobookBook: Codable, Equatable, Hashable, Sendable, Identifiabl
     public var confirmedCastRevisionID: UUID?
     public var confirmedAuditionVoiceSetDigest: String?
     public var currentProductionRevisionID: UUID?
+    public var analysisFailure: AudiobookAnalysisFailure?
     public let createdAt: Date
     public var updatedAt: Date
 
@@ -212,6 +229,7 @@ public struct AudiobookBook: Codable, Equatable, Hashable, Sendable, Identifiabl
         confirmedCastRevisionID: UUID? = nil,
         confirmedAuditionVoiceSetDigest: String? = nil,
         currentProductionRevisionID: UUID? = nil,
+        analysisFailure: AudiobookAnalysisFailure? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -229,8 +247,37 @@ public struct AudiobookBook: Codable, Equatable, Hashable, Sendable, Identifiabl
         self.confirmedCastRevisionID = confirmedCastRevisionID
         self.confirmedAuditionVoiceSetDigest = confirmedAuditionVoiceSetDigest
         self.currentProductionRevisionID = currentProductionRevisionID
+        self.analysisFailure = analysisFailure
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        sourceID = try container.decode(UUID.self, forKey: .sourceID)
+        title = try container.decode(String.self, forKey: .title)
+        author = try container.decodeIfPresent(String.self, forKey: .author)
+        sourceSHA256 = try container.decode(String.self, forKey: .sourceSHA256)
+        canonicalByteCount = try container.decode(Int64.self, forKey: .canonicalByteCount)
+        scalarCount = try container.decode(Int.self, forKey: .scalarCount)
+        originalEncoding = try container.decode(String.self, forKey: .originalEncoding)
+        analysisState = try container.decode(AudiobookAnalysisState.self, forKey: .analysisState)
+        productionState = try container.decode(AudiobookProductionState.self, forKey: .productionState)
+        listenableState = try container.decode(AudiobookListenableState.self, forKey: .listenableState)
+        confirmedCastRevisionID = try container.decodeIfPresent(UUID.self, forKey: .confirmedCastRevisionID)
+        confirmedAuditionVoiceSetDigest = try container.decodeIfPresent(String.self, forKey: .confirmedAuditionVoiceSetDigest)
+        currentProductionRevisionID = try container.decodeIfPresent(UUID.self, forKey: .currentProductionRevisionID)
+        analysisFailure = try container.decodeIfPresent(AudiobookAnalysisFailure.self, forKey: .analysisFailure)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, sourceID, title, author, sourceSHA256, canonicalByteCount, scalarCount
+        case originalEncoding, analysisState, productionState, listenableState
+        case confirmedCastRevisionID, confirmedAuditionVoiceSetDigest, currentProductionRevisionID
+        case analysisFailure, createdAt, updatedAt
     }
 }
 
@@ -242,6 +289,8 @@ public struct AudiobookChapter: Codable, Equatable, Hashable, Sendable, Identifi
     public var title: String
     public var sourceRange: AudiobookSourceRange
     public var excludedRanges: [AudiobookSourceRange]
+    /// 用户明确跳过（如版权页、致谢）：不分析、不制作、不进入导出，但原文与章节结构保留。
+    public var isSkipped: Bool
     public var currentChapterRevisionID: UUID?
     public var previousChapterRevisionID: UUID?
 
@@ -253,6 +302,7 @@ public struct AudiobookChapter: Codable, Equatable, Hashable, Sendable, Identifi
         title: String,
         sourceRange: AudiobookSourceRange,
         excludedRanges: [AudiobookSourceRange] = [],
+        isSkipped: Bool = false,
         currentChapterRevisionID: UUID? = nil,
         previousChapterRevisionID: UUID? = nil
     ) {
@@ -263,8 +313,28 @@ public struct AudiobookChapter: Codable, Equatable, Hashable, Sendable, Identifi
         self.title = title
         self.sourceRange = sourceRange
         self.excludedRanges = excludedRanges
+        self.isSkipped = isSkipped
         self.currentChapterRevisionID = currentChapterRevisionID
         self.previousChapterRevisionID = previousChapterRevisionID
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        bookID = try container.decode(UUID.self, forKey: .bookID)
+        sourceID = try container.decode(UUID.self, forKey: .sourceID)
+        ordinal = try container.decode(Int.self, forKey: .ordinal)
+        title = try container.decode(String.self, forKey: .title)
+        sourceRange = try container.decode(AudiobookSourceRange.self, forKey: .sourceRange)
+        excludedRanges = try container.decodeIfPresent([AudiobookSourceRange].self, forKey: .excludedRanges) ?? []
+        isSkipped = try container.decodeIfPresent(Bool.self, forKey: .isSkipped) ?? false
+        currentChapterRevisionID = try container.decodeIfPresent(UUID.self, forKey: .currentChapterRevisionID)
+        previousChapterRevisionID = try container.decodeIfPresent(UUID.self, forKey: .previousChapterRevisionID)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, bookID, sourceID, ordinal, title, sourceRange, excludedRanges
+        case isSkipped, currentChapterRevisionID, previousChapterRevisionID
     }
 }
 
@@ -1120,6 +1190,43 @@ public struct AudiobookVoiceBinding: Codable, Equatable, Hashable, Sendable {
     }
 }
 
+/// 按书绑定的发音规则快照。服务端保存不可变 revision，本地只缓存最近一次确认保存的
+/// `id@revision` 与词条，制作请求用它固定读音，避免服务端后续改动影响已出音频。
+public struct AudiobookPronunciationBinding: Codable, Equatable, Sendable {
+    public var setID: String
+    public var revision: String
+    public var entries: [PronunciationEntry]
+
+    public init(setID: String, revision: String, entries: [PronunciationEntry]) {
+        self.setID = setID
+        self.revision = revision
+        self.entries = entries
+    }
+
+    /// 每本书一个稳定 set id，符合服务端 `[A-Za-z0-9_-]{1,64}` 约束。
+    public static func makeSetID(bookID: UUID) -> String {
+        "ab-" + bookID.uuidString.replacingOccurrences(of: "-", with: "")
+    }
+
+    public var headerValue: String { "\(setID)@\(revision)" }
+
+    /// 片段依赖摘要中只包含实际命中该片段的词条内容，而不是整个 set 的 revision：
+    /// 这样改一条不影响本片段的规则，不会把全书标记成待重做。
+    /// 命中判断刻意偏保守（不区分大小写、忽略词边界），宁可多失效也不漏失效。
+    public func dependencyComponent(in text: String) -> String? {
+        let matched = entries.filter { entry in
+            guard !entry.surface.isEmpty else { return false }
+            return text.range(of: entry.surface, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+        }
+        guard !matched.isEmpty else { return nil }
+        let canonical = matched
+            .sorted { $0.id < $1.id }
+            .map { "\($0.id)|\($0.surface)|\($0.spoken)|\($0.language)|\($0.caseSensitive)|\($0.wordBoundary)" }
+            .joined(separator: "\n")
+        return AudiobookDigest.sha256Hex(Data(canonical.utf8))
+    }
+}
+
 public enum AudiobookSpeakerAssignment: Codable, Equatable, Hashable, Sendable {
     case assigned(roleID: UUID)
     case unknown(reason: String, candidateRoleIDs: [UUID])
@@ -1479,6 +1586,33 @@ public enum AudiobookDigest {
     public static func sha256Hex(_ data: Data) -> String {
         let digest = SHA256.hash(data: data)
         return digest.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// 用户可见的时长与倍速排版：一处生成，避免 1.25x 被截断成 1.2x 之类的显示误差。
+public enum AudiobookDisplayFormat {
+    public static func playbackRate(_ rate: Float) -> String {
+        let hundredths = Int((Double(rate) * 100).rounded())
+        var text = String(format: "%d.%02d", hundredths / 100, hundredths % 100)
+        while text.hasSuffix("0") { text.removeLast() }
+        if text.hasSuffix(".") { text.removeLast() }
+        return text + "x"
+    }
+
+    public static func timecode(_ seconds: TimeInterval) -> String {
+        let total = max(0, Int(seconds.rounded(.down)))
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        let remaining = total % 60
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, remaining)
+        }
+        return String(format: "%02d:%02d", minutes, remaining)
+    }
+
+    /// 书签落在片段内，摘要明确到“本段”，避免被误读成本章总进度。
+    public static func bookmarkSummary(offsetSeconds: TimeInterval, rate: Float) -> String {
+        "上次听到本段 " + timecode(offsetSeconds) + " · " + playbackRate(rate)
     }
 }
 

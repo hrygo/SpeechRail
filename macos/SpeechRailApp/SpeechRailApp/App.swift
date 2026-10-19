@@ -173,6 +173,7 @@ struct SpeechRailApp: App {
             discoveryClient: discoveryClient,
             renderClient: speechRenderClient,
             voiceDesignClient: voiceDesignClient,
+            pronunciationClient: speechRenderClient as? any AudiobookPronunciationClient,
             controlTransport: transport
         )
 #if DEBUG

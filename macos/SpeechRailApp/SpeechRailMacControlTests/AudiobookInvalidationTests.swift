@@ -19,6 +19,40 @@ final class AudiobookInvalidationTests: XCTestCase {
         XCTAssertEqual(whole.first?.id, split.first?.id)
     }
 
+    func testMissingAnnotationIsRejectedAsIncompleteCoverage() throws {
+        let text = "第一章\n夜色深沉。\n钟声响起。\n"
+        let source = try AudiobookSourceIndex(utf8: Data(text.utf8))
+        let bookID = UUID(), roleID = UUID()
+        let chapter = AudiobookChapter(
+            bookID: bookID, sourceID: UUID(), ordinal: 0, title: "第一章",
+            sourceRange: .init(lowerBound: 0, upperBound: Int64(text.utf8.count))
+        )
+        let atoms = try source.buildAtoms(for: chapter)
+        let readable = atoms.filter { $0.kind != .formatting }
+        XCTAssertGreaterThan(readable.count, 1)
+        // 故意漏掉最后一段标注
+        let annotations = readable.dropLast().map { atom in
+            AudiobookAnnotation(
+                bookID: bookID, chapterID: chapter.id, windowID: UUID(),
+                atomID: atom.id, sourceRange: atom.sourceRange,
+                assignment: .assigned(roleID: roleID)
+            )
+        }
+        let binding = AudiobookVoiceBinding(roleID: roleID, voiceID: "voice", voiceRevision: nil, modelRevision: "model")
+        XCTAssertThrowsError(
+            try AudiobookFragmentPlanner.plan(
+                chapter: chapter, annotations: annotations, bindings: [roleID: binding],
+                source: source, atoms: atoms
+            )
+        ) { error in
+            guard let planningError = error as? AudiobookFragmentPlanningError,
+                  case let .incompleteFragmentCoverage(missing, duplicated) = planningError
+            else { return XCTFail("Unexpected error: \(error)") }
+            XCTAssertEqual(missing, 1)
+            XCTAssertEqual(duplicated, 0)
+        }
+    }
+
     func testCoalescingNeverCrossesSpeakerBoundary() throws {
         let text = "夜风吹过长街。林远停下脚步。“有人跟在后面。”“别回头，继续走。”老周低声答道。"
         let utf8 = Data(text.utf8)

@@ -569,6 +569,28 @@ public final class AudiobookAnalysisCallDiagnosticsCollector: @unchecked Sendabl
 
 /// 低基数错误码映射：只保留分类结论，不回显错误正文（正文可能夹带原文或凭据）。
 public enum AudiobookAnalysisErrorCode {
+    /// 只保存可行动提示，不回显服务错误正文或模型输出。
+    public static func userMessage(for code: String) -> String {
+        switch code {
+        case "not_configured", "bad_configuration":
+            return "未配置可用的大模型服务，或当前配置未通过检查。请在设置中填写并检查服务后重试。"
+        case "input_budget_exceeded", "window_too_large":
+            return "有窗口超出模型的输入预算。可尝试降低单窗字数或换用上下文更长的模型，再重新分析。"
+        case "invalid_structured_output":
+            return "AI 返回的结构化结果无法解析，已保留已完成窗口。可重试，或检查所选模型是否支持结构化输出。"
+        case "atom_coverage_violation":
+            return "AI 标注没有完整覆盖本窗口的正文，系统已停止以避免漏读。请重试本章分析。"
+        case "call_budget_exhausted":
+            return "本次分析的调用预算已用尽，已完成部分会保留。可分段继续分析。"
+        case "configuration_changed":
+            return "分析过程中模型配置发生变化，已暂停。请回到设置确认当前配置后重新开始。"
+        case "cancelled":
+            return "分析已取消，已完成的窗口仍保留。"
+        default:
+            return "分析未完成，已完成的窗口和检查点仍保留。请重试；若持续失败，请检查服务状态与模型配置。"
+        }
+    }
+
     public static func code(for error: Error) -> String {
         if error is CancellationError {
             return "cancelled"

@@ -93,6 +93,7 @@ public actor AudiobookAnalysisPipeline {
 
         var book = try await store.book(id: bookID)
         book.analysisState = .running
+        book.analysisFailure = nil
         try await store.updateBook(book)
 
         let emitter = AudiobookAnalysisEventEmitter(
@@ -122,7 +123,31 @@ public actor AudiobookAnalysisPipeline {
 
             let existingWindows = try await store.analysisWindows(for: bookID)
             let existingAnnotations = try await store.annotations(for: bookID)
+            // 用户手动确认过的说话人归属不能被重新分析覆盖。
+            let userConfirmedByAtomID = Dictionary(
+                uniqueKeysWithValues: existingAnnotations.filter(\.userConfirmed).map { ($0.atomID, $0) }
+            )
             let annotationsByWindowID = Dictionary(grouping: existingAnnotations, by: \.windowID)
+            // 检查点复用按 (窗口原子集合, 策略, 配置) 建索引，避免为每个计划窗口线性扫描全部历史窗口。
+            struct WindowReuseKey: Hashable {
+                let primaryAtomIDs: [UUID]
+                let policyFingerprint: String
+                let configurationDigest: String
+            }
+            let reusableWindowsByKey = Dictionary(
+                existingWindows.compactMap { window -> (WindowReuseKey, AudiobookAnalysisWindow)? in
+                    guard window.isCompleted else { return nil }
+                    return (
+                        WindowReuseKey(
+                            primaryAtomIDs: window.primaryAtomIDs,
+                            policyFingerprint: window.policyFingerprint,
+                            configurationDigest: window.configurationDigest
+                        ),
+                        window
+                    )
+                },
+                uniquingKeysWith: { first, _ in first }
+            )
 
             var reusedCheckpointCount = 0
             var extractedMentions: [AudiobookExtractionResponse.Mention] = []
@@ -134,12 +159,12 @@ public actor AudiobookAnalysisPipeline {
             var windowsNeedingWork: [AudiobookAnalysisWindow] = []
             for planned in plannedWindows {
                 try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
-                if let existing = existingWindows.first(where: {
-                    $0.primaryAtomIDs == planned.primaryAtomIDs
-                        && $0.policyFingerprint == planned.policyFingerprint
-                        && $0.configurationDigest == planned.configurationDigest
-                        && $0.isCompleted
-                }),
+                let reuseKey = WindowReuseKey(
+                    primaryAtomIDs: planned.primaryAtomIDs,
+                    policyFingerprint: planned.policyFingerprint,
+                    configurationDigest: planned.configurationDigest
+                )
+                if let existing = reusableWindowsByKey[reuseKey],
                    let savedAnns = annotationsByWindowID[existing.id],
                    Self.validateWindowAnnotationsCoverPrimaryAtoms(
                        primaryAtomIDs: existing.primaryAtomIDs,
@@ -330,7 +355,7 @@ public actor AudiobookAnalysisPipeline {
                     policy: policy
                 )
 
-                let annotations = try await executeAnnotationWithSplitFallback(
+                var annotations = try await executeAnnotationWithSplitFallback(
                     window: window,
                     primaryItems: primaryItems,
                     leadingItems: leadingItems,
@@ -357,6 +382,11 @@ public actor AudiobookAnalysisPipeline {
                     book.analysisState = .failed
                     try await store.updateBook(book)
                     throw AudiobookAnalysisError.atomCoverageViolation("窗口 \(window.id) 标注未完整覆盖 primary atoms。")
+                }
+
+                // 保留用户已确认的标注（含原 id / windowID / revision），避免重跑抹掉人工判断。
+                annotations = annotations.map { annotation in
+                    userConfirmedByAtomID[annotation.atomID] ?? annotation
                 }
 
                 for ann in annotations {
@@ -386,6 +416,7 @@ public actor AudiobookAnalysisPipeline {
             let isAllComplete = completedWindowCount == plannedWindows.count && !plannedWindows.isEmpty
 
             book.analysisState = isAllComplete ? .allWindowsValidated : .paused
+            book.analysisFailure = nil
             try await store.updateBook(book)
 
             emitter.emitRunEnded(outcome: .completed)
@@ -403,6 +434,16 @@ public actor AudiobookAnalysisPipeline {
                 let isCancelError = (error as? AudiobookAnalysisError) == .cancelled
                     || error is CancellationError
                 latestBook.analysisState = isCancelError ? .paused : .failed
+                if isCancelError {
+                    latestBook.analysisFailure = nil
+                } else if latestBook.analysisFailure == nil {
+                    // 拆窗失败已写入更具体的窗口/错误码，不要用外层 windowFailed 覆盖。
+                    let code = AudiobookAnalysisErrorCode.code(for: error)
+                    latestBook.analysisFailure = AudiobookAnalysisFailure(
+                        code: code,
+                        message: AudiobookAnalysisErrorCode.userMessage(for: code)
+                    )
+                }
                 try? await store.updateBook(latestBook)
                 emitter.emitRunEnded(
                     outcome: isCancelError ? .cancelled : .failed,
@@ -427,7 +468,7 @@ public actor AudiobookAnalysisPipeline {
         var windows: [AudiobookAnalysisWindow] = []
         var globalOrdinal = 0
 
-        for chapter in chapters.sorted(by: { $0.ordinal < $1.ordinal }) {
+        for chapter in chapters.sorted(by: { $0.ordinal < $1.ordinal }) where !chapter.isSkipped {
             let excludedSet = Set(chapter.excludedRanges)
             let chapterAtoms = (atomsByChapter[chapter.id] ?? [])
                 .sorted { $0.ordinal < $1.ordinal }
@@ -771,6 +812,12 @@ public actor AudiobookAnalysisPipeline {
         else {
             var book = try await store.book(id: bookID)
             book.analysisState = .failed
+            let failureCode = AudiobookAnalysisErrorCode.code(for: error)
+            book.analysisFailure = AudiobookAnalysisFailure(
+                code: failureCode,
+                message: AudiobookAnalysisErrorCode.userMessage(for: failureCode),
+                failedWindowOrdinal: window.ordinal + 1
+            )
             try await store.updateBook(book)
             throw AudiobookAnalysisError.windowFailed(
                 windowID: window.id,
@@ -1254,7 +1301,8 @@ public actor AudiobookAnalysisPipeline {
     /// 自动消解跨窗口断句或后文揭示身份的对白，并为仍需人工确认的段落收敛候选角色。
     public func resolveUnknownSpeakers(
         bookID: UUID,
-        config: AudiobookAnalysisConfigSnapshot
+        config: AudiobookAnalysisConfigSnapshot,
+        maxCalls: Int = 200
     ) async throws -> SecondaryResolutionResult {
         guard config.isConfigured else {
             throw AudiobookAnalysisError.notConfigured
@@ -1286,8 +1334,10 @@ public actor AudiobookAnalysisPipeline {
         let client = try await clientFactory(config)
         var updatedAnnotations: [AudiobookAnnotation] = []
         var newlyResolvedCount = 0
+        var callsMade = 0
 
-        for chapter in chapters {
+        clustersLoop: for chapter in chapters where !chapter.isSkipped {
+            try Task.checkCancellation()
             let excludedSet = Set(chapter.excludedRanges)
             let chapterAtoms = (atomsByChapter[chapter.id] ?? [])
                 .sorted { $0.ordinal < $1.ordinal }
@@ -1371,6 +1421,10 @@ public actor AudiobookAnalysisPipeline {
                     maxScalars: policy.maxCharacterSummaryScalars,
                     maxCandidates: policy.maxMergeCandidatesPerBatch
                 )
+
+                guard callsMade < maxCalls else { break clustersLoop }
+                try Task.checkCancellation()
+                callsMade += 1
 
                 guard let prompt = try? AudiobookAnalysisPrompts.makeSecondaryUnknownResolutionPrompt(
                     rootWindowID: UUID(),

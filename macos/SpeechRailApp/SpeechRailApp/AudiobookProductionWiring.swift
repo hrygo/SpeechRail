@@ -122,7 +122,8 @@ public enum AudiobookProductionWiring {
                 text: request.text, voiceID: request.voiceID, speed: request.speed,
                 options: SpeechRailRequestOptions(
                     callerSeed: request.seed, expectedVoiceRevision: request.expectedVoiceRevision,
-                    expectedModelRevision: request.expectedModelRevision, receiptMode: "integrity",
+                    expectedModelRevision: request.expectedModelRevision,
+                    pronunciationSet: request.pronunciationSet, receiptMode: "integrity",
                     validationPolicy: "require_output_pass"
                 )
             )
@@ -260,6 +261,7 @@ public enum AudiobookProductionWiring {
         discoveryClient: any ServiceCapabilityDiscoveryClient,
         renderClient: (any SpeechRailSpeechRenderClient)? = nil,
         voiceDesignClient: (any SpeechRailVoiceDesignClient)? = nil,
+        pronunciationClient: (any AudiobookPronunciationClient)? = nil,
         controlTransport: any SpeechRailControlTransport,
         voiceCatalog: VoiceCatalogStore? = nil
     ) -> AudiobookDependencies {
@@ -268,6 +270,8 @@ public enum AudiobookProductionWiring {
             ? ServiceAPIClient(maximumResponseBytes: AudiobookLimits.maxWAVResponseBytes) : nil
         let effectiveRenderClient: any SpeechRailSpeechRenderClient = renderClient ?? defaultAPIClient!
         let effectiveVoiceDesignClient: any SpeechRailVoiceDesignClient = voiceDesignClient ?? defaultAPIClient!
+        let effectivePronunciationClient: (any AudiobookPronunciationClient)? =
+            pronunciationClient ?? defaultAPIClient
 
         return AudiobookDependencies(
             makeStore: {
@@ -309,6 +313,7 @@ public enum AudiobookProductionWiring {
                 voiceDesignClient: effectiveVoiceDesignClient,
                 voiceCatalog: effectiveCatalog
             ),
+            pronunciationClient: effectivePronunciationClient,
             controlTransport: controlTransport,
             clock: SystemAudiobookClock(),
             voiceCatalog: effectiveCatalog

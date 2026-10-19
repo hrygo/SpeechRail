@@ -142,6 +142,17 @@ public struct AudiobookBookWorkspaceView: View {
     @State private var isAIPrivacyPresented = false
     @State private var hoveredAtomID: UUID?
     @State private var hoveredFragmentID: UUID?
+    @State private var pendingVoiceChange: PendingVoiceChange?
+
+    /// 换声前的确认信息：只披露影响范围，不改变候选/采用语义。
+    private struct PendingVoiceChange: Identifiable {
+        let id = UUID()
+        let roleID: UUID
+        let voiceID: String
+        let roleName: String
+        let dialogueCount: Int
+        let chapterCount: Int
+    }
 
     public var onImportTXT: () -> Void
 
@@ -222,6 +233,25 @@ public struct AudiobookBookWorkspaceView: View {
             .sheet(item: $chapterRenameTarget) { target in
                 chapterRenameSheet(for: target)
             }
+            .sheet(isPresented: $bindableWorkflow.isPronunciationSheetPresented) {
+                if let controller = workflow.pronunciationController,
+                   let bookID = workflow.selectedBook?.id
+                {
+                    AudiobookPronunciationSheet(controller: controller, bookID: bookID) {
+                        workflow.isPronunciationSheetPresented = false
+                    }
+                } else {
+                    VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                        Text("发音规则暂不可用")
+                            .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                        Text("作品存储或语音服务尚未就绪，请稍后重试。")
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        Button("关闭") { workflow.isPronunciationSheetPresented = false }
+                            .speechRailButton(.secondary)
+                    }
+                    .padding(SpeechRailDesignTokens.Spacing.xl)
+                }
+            }
             .onChange(of: workflow.selectedBook?.id) { _, selectedBookID in
                 cancelRoleAudition()
                 expandedRoleIDs.removeAll()
@@ -255,6 +285,29 @@ public struct AudiobookBookWorkspaceView: View {
                 }
             }
             .onDisappear { cancelRoleAudition() }
+            .confirmationDialog(
+                pendingVoiceChange.map { "更换「\($0.roleName)」的声音？" } ?? "更换角色声音？",
+                isPresented: Binding(
+                    get: { pendingVoiceChange != nil },
+                    set: { presented in
+                        if !presented { pendingVoiceChange = nil }
+                    }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("更换并标记待更新") {
+                    guard let change = pendingVoiceChange else { return }
+                    pendingVoiceChange = nil
+                    Task { await workflow.bindVoice(roleID: change.roleID, voiceID: change.voiceID) }
+                }
+                Button("取消", role: .cancel) {
+                    pendingVoiceChange = nil
+                }
+            } message: {
+                if let change = pendingVoiceChange {
+                    Text("该角色有 \(change.dialogueCount) 处对白，分布在 \(change.chapterCount) 章。更换后这些章节的对应片段需要重新生成；已采用的章节版本与历史候选都会保留。")
+                }
+            }
         }
     }
 
@@ -356,6 +409,20 @@ public struct AudiobookBookWorkspaceView: View {
                     .help(canShowInlineCast ? (showInlineCast ? "收起右侧人物与声音栏，扩大主工作区" : "展开右侧人物与声音栏") : "打开人物与声音浮层")
                     .accessibilityValue(showInlineCast || workflow.isCastInspectorPresented ? "已展开" : "已收起")
                     .accessibilityIdentifier("audiobook-toggle-cast-inspector")
+
+                    Button {
+                        workflow.presentPronunciationRules()
+                    } label: {
+                        Label(
+                            workflow.pronunciationRuleCount > 0
+                                ? "发音规则（\(workflow.pronunciationRuleCount)）"
+                                : "发音规则",
+                            systemImage: "textformat.abc"
+                        )
+                    }
+                    .speechRailButton(.secondary)
+                    .help("为多音字、人名地名和英文缩写固定读法；只影响之后重新制作的片段。")
+                    .accessibilityIdentifier("audiobook-pronunciation-rules")
 
                     if let primaryAction = workflow.selectedBookPrimaryAction {
                         let productionStartBlocked = workflow.isProductionBlocked(for: book.id)
@@ -554,7 +621,9 @@ public struct AudiobookBookWorkspaceView: View {
                                             .lineLimit(1)
 
                                         HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                                            if readiness != .awaitingCastConfirmation {
+                                            if chapter.isSkipped {
+                                                StatusPill(tone: .neutral, label: "已跳过")
+                                            } else if readiness != .awaitingCastConfirmation {
                                                 chapterReadinessBadge(for: readiness)
                                             }
                                             if let unknownCount = workflow.unknownCountByChapterID[chapter.id], unknownCount > 0 {
@@ -585,6 +654,10 @@ public struct AudiobookBookWorkspaceView: View {
 
             }
         }
+    }
+
+    private var selectedChapterIsSkipped: Bool {
+        workflow.chapters.first(where: { $0.id == workflow.selectedChapterID })?.isSkipped == true
     }
 
     private var chapterOrganizationMenu: some View {
@@ -622,6 +695,23 @@ public struct AudiobookBookWorkspaceView: View {
                           ? "第一章前没有章节可合并。"
                           : "将当前章并入上一章，保留上一章名称；原文不变。")
                       : workflow.chapterStructureEditingStatus)
+
+                Divider()
+
+                Button(
+                    selectedChapterIsSkipped ? "恢复本章分析制作" : "跳过本章（不分析、不制作）",
+                    systemImage: selectedChapterIsSkipped ? "arrow.uturn.backward" : "forward.end"
+                ) {
+                    guard let chapterID = workflow.selectedChapterID else { return }
+                    Task {
+                        await workflow.setChapterSkipped(
+                            chapterID: chapterID,
+                            skipped: !selectedChapterIsSkipped
+                        )
+                    }
+                }
+                .disabled(workflow.selectedChapterID == nil)
+                .help("跳过后本章不参与全书分析、制作和导出；原文与章节结构保留，可随时恢复。")
             } label: {
                 Label("整理章节", systemImage: "list.bullet.indent")
             }
@@ -692,11 +782,27 @@ public struct AudiobookBookWorkspaceView: View {
 
     @ViewBuilder
     private var centerStageColumn: some View {
-        switch workflow.workbenchTab {
-        case .preparation:
-            preparationStageView
-        case .production:
-            productionStageView
+        VStack(spacing: 0) {
+            if let chapter = workflow.chapters.first(where: { $0.id == workflow.selectedChapterID }),
+               chapter.isSkipped
+            {
+                NoticeBar(
+                    tone: .neutral,
+                    message: "《\(chapter.title)》已跳过：不参与全书分析、制作和导出，原文与章节结构保留。",
+                    actionTitle: "恢复本章"
+                ) {
+                    Task { await workflow.setChapterSkipped(chapterID: chapter.id, skipped: false) }
+                }
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+                .padding(.top, SpeechRailDesignTokens.Spacing.xs)
+                .accessibilityIdentifier("audiobook-chapter-skipped-notice")
+            }
+            switch workflow.workbenchTab {
+            case .preparation:
+                preparationStageView
+            case .production:
+                productionStageView
+            }
         }
     }
 
@@ -804,17 +910,23 @@ public struct AudiobookBookWorkspaceView: View {
             Spacer(minLength: 4)
 
             Button {
-                Task { await workflow.resolveUnknownSpeakersWithLLM() }
+                if workflow.isResolvingUnknownSpeakers {
+                    workflow.cancelSecondaryResolution()
+                } else {
+                    Task { await workflow.resolveUnknownSpeakersWithLLM() }
+                }
             } label: {
                 Label(
-                    workflow.isResolvingUnknownSpeakers ? "AI 复核中…" : "AI 智能复核",
-                    systemImage: "sparkles"
+                    workflow.isResolvingUnknownSpeakers ? "取消 AI 复核" : "AI 智能复核",
+                    systemImage: workflow.isResolvingUnknownSpeakers ? "xmark.circle" : "sparkles"
                 )
             }
             .speechRailButton(.secondary)
             .fixedSize(horizontal: true, vertical: false)
-            .disabled(workflow.isResolvingUnknownSpeakers || workflow.isAnalyzing)
-            .help("结合整章最新人物名册与上下文，让 AI 复核本章剩余未确认台词")
+            .disabled(workflow.isAnalyzing)
+            .help(workflow.isResolvingUnknownSpeakers
+                  ? "停止本次复核；已经确认的说话人不会被撤销。"
+                  : "结合整章最新人物名册与上下文，让 AI 复核本章剩余未确认台词")
             .accessibilityIdentifier("audiobook-secondary-resolve-unknown-button")
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
@@ -918,12 +1030,8 @@ public struct AudiobookBookWorkspaceView: View {
         let assignedRole = annotation?.assignment.roleID.flatMap { id in
             workflow.charactersByID[id]
         }
-        let showsHeaderControls = showsSpeakerLabel
-            || isHovered
-            || isSelected
-            || isUnknown
-            || annotation == nil
-            || (assignedRole?.isNarrator == false)
+        // 控件常驻，保证键盘/辅助功能用户无需悬停也能改派说话人；标签仍按上下文精简。
+        let showsHeaderControls = true
 
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
             if showsHeaderControls {
@@ -1827,7 +1935,19 @@ public struct AudiobookBookWorkspaceView: View {
                             fallbackPresets: Self.fallbackPresetChoices,
                             onSelectVoice: { voiceID in
                                 activeVoicePickerRoleID = nil
-                                Task { await workflow.bindVoice(roleID: role.id, voiceID: voiceID) }
+                                if let stats = workflow.roleStatsByID[role.id],
+                                   stats.dialogueAtomCount > 0
+                                {
+                                    pendingVoiceChange = PendingVoiceChange(
+                                        roleID: role.id,
+                                        voiceID: voiceID,
+                                        roleName: role.displayName,
+                                        dialogueCount: stats.dialogueAtomCount,
+                                        chapterCount: stats.speakingChapterIDs.count
+                                    )
+                                } else {
+                                    Task { await workflow.bindVoice(roleID: role.id, voiceID: voiceID) }
+                                }
                             },
                             onChangeSpeed: { newSpeed in
                                 Task { await workflow.updateRoleAllowedSpeed(roleID: role.id, speed: newSpeed) }
@@ -2015,6 +2135,16 @@ public struct AudiobookBookWorkspaceView: View {
             .onTapGesture {
                 workflow.selectedRoleID = role.id
             }
+            .focusable()
+            .onKeyPress(.return) {
+                workflow.selectedRoleID = role.id
+                return .handled
+            }
+            .onKeyPress(.space) {
+                workflow.selectedRoleID = role.id
+                return .handled
+            }
+            .accessibilityHint("按 Return 或空格选择此角色")
         }
     }
 
@@ -2116,6 +2246,8 @@ public struct AudiobookBookWorkspaceView: View {
             StatusPill(tone: .attention, label: "待更新")
         case .chapterAudioReady:
             StatusPill(tone: .healthy, label: "已成片")
+        case .skipped:
+            StatusPill(tone: .neutral, label: "已跳过")
         case .failed:
             StatusPill(tone: .critical, label: "需重试")
         }

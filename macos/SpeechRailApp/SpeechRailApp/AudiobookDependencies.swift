@@ -26,6 +26,8 @@ public struct AudiobookRenderCallRequest: Equatable, Sendable {
     public var expectedVoiceRevision: String?
     public var expectedModelRevision: String
     public var seed: Int?
+    /// `set_id@revision`；nil 表示不启用按书发音规则。
+    public var pronunciationSet: String?
 
     public init(
         bookID: UUID? = nil,
@@ -34,7 +36,8 @@ public struct AudiobookRenderCallRequest: Equatable, Sendable {
         speed: Double = AudiobookLimits.defaultRenderSpeed,
         expectedVoiceRevision: String?,
         expectedModelRevision: String,
-        seed: Int? = nil
+        seed: Int? = nil,
+        pronunciationSet: String? = nil
     ) {
         self.bookID = bookID
         self.text = text
@@ -43,6 +46,7 @@ public struct AudiobookRenderCallRequest: Equatable, Sendable {
         self.expectedVoiceRevision = expectedVoiceRevision
         self.expectedModelRevision = expectedModelRevision
         self.seed = seed
+        self.pronunciationSet = pronunciationSet
     }
 }
 
@@ -140,6 +144,18 @@ public extension AudiobookSpeechRenderer {
     }
 }
 
+/// 按书发音规则的窄客户端；只有真实服务客户端实现，测试可注入内存实现。
+public protocol AudiobookPronunciationClient: Sendable {
+    func fetchPronunciationSet(id: String, revision: String) async throws -> PronunciationSet
+    func fetchPronunciationSetSummaries() async throws -> [PronunciationSetSummary]
+    func upsertPronunciationSet(
+        id: String,
+        expectedRevision: String?,
+        entries: [PronunciationEntry]
+    ) async throws -> PronunciationSet
+    func deletePronunciationSet(id: String) async throws
+}
+
 public struct UnavailableAudiobookSpeechRenderer: AudiobookSpeechRenderer {
     public init() {}
 
@@ -174,6 +190,7 @@ public struct AudiobookDependencies: Sendable {
     public var makeAnalysisClient: AnalysisClientFactory
     public var resolveAnalysisSnapshot: @MainActor @Sendable (Int) -> AudiobookAnalysisConfigSnapshot
     public var speechRenderer: any AudiobookSpeechRenderer
+    public var pronunciationClient: (any AudiobookPronunciationClient)?
     public var controlTransport: any SpeechRailControlTransport
     public var clock: any AudiobookClock
     public var voiceCatalog: VoiceCatalogStore
@@ -183,6 +200,7 @@ public struct AudiobookDependencies: Sendable {
         makeAnalysisClient: @escaping AnalysisClientFactory,
         resolveAnalysisSnapshot: @escaping @MainActor @Sendable (Int) -> AudiobookAnalysisConfigSnapshot,
         speechRenderer: any AudiobookSpeechRenderer,
+        pronunciationClient: (any AudiobookPronunciationClient)? = nil,
         controlTransport: any SpeechRailControlTransport = UnavailableControlTransport(),
         clock: any AudiobookClock = SystemAudiobookClock(),
         voiceCatalog: VoiceCatalogStore = VoiceCatalogStore()
@@ -191,6 +209,7 @@ public struct AudiobookDependencies: Sendable {
         self.makeAnalysisClient = makeAnalysisClient
         self.resolveAnalysisSnapshot = resolveAnalysisSnapshot
         self.speechRenderer = speechRenderer
+        self.pronunciationClient = pronunciationClient
         self.controlTransport = controlTransport
         self.clock = clock
         self.voiceCatalog = voiceCatalog

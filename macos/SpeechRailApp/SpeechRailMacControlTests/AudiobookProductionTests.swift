@@ -200,6 +200,145 @@ final class AudiobookProductionTests: XCTestCase {
     }
 
     @MainActor
+    func testSkippedChapterIsExcludedFromReadinessAndProduction() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot), catalog = VoiceCatalogStore()
+        let snapshot = Self.makeDefaultCapabilities()
+        let renderer = ScriptedSpeechRenderer(capabilities: snapshot)
+        let cast = AudiobookCastController(store: store, capabilityProvider: { snapshot }, voiceCatalog: catalog)
+        let preview = try await AudiobookTXTImporter.prepare(
+            rawData: Data("第一章 渡口\n夜色深沉。\n第二章 归途\n钟声响起。\n".utf8),
+            suggestedTitle: "跳过章节夹具"
+        )
+        let bookID = try await store.importBook(preview)
+        let chapters = try await store.chapters(for: bookID)
+        XCTAssertEqual(chapters.count, 2)
+        let skipped = chapters[1]
+        try await store.setChapterSkipped(bookID: bookID, chapterID: skipped.id, skipped: true)
+
+        let reloaded = try await store.chapters(for: bookID)
+        XCTAssertTrue(reloaded.first(where: { $0.id == skipped.id })?.isSkipped == true)
+        XCTAssertFalse(reloaded.first(where: { $0.id == chapters[0].id })?.isSkipped == true)
+
+        var book = try await store.book(id: bookID)
+        book.analysisState = .allWindowsValidated
+        try await store.updateBook(book)
+
+        let characters = try await store.characters(for: bookID)
+        let narrator = try XCTUnwrap(characters.first)
+        try await cast.bindVoice(
+            bookID: bookID, roleID: narrator.id,
+            binding: AudiobookVoiceBinding(
+                roleID: narrator.id, voiceID: "v-narrator",
+                voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                modelRevision: String(repeating: "a", count: 40)
+            )
+        )
+        try await cast.confirmCast(bookID: bookID, revisionID: cast.currentCastRevisionID(for: bookID))
+        try await cast.confirmAudition(bookID: bookID, voiceSetDigest: cast.currentVoiceSetDigest(for: bookID))
+
+        let readiness = try await cast.chapterReadinessMap(for: bookID)
+        XCTAssertEqual(readiness[skipped.id], .skipped)
+
+        let production = AudiobookProductionController(
+            store: store, castController: cast, revisionController: AudiobookRevisionController(store: store),
+            renderer: renderer, admission: SpeechCreationAdmission(),
+            clock: FakeAudiobookClock(), voiceCatalog: catalog
+        )
+        do {
+            try await production.start(bookID: bookID, chapterIDs: [skipped.id])
+            XCTFail("跳过的章节不应开始制作")
+        } catch let error as AudiobookProductionError {
+            XCTAssertEqual(error, .noReadyChaptersSelected)
+        }
+        XCTAssertTrue(renderer.requests.isEmpty)
+
+        try await store.setChapterSkipped(bookID: bookID, chapterID: skipped.id, skipped: false)
+        let restored = try await cast.chapterReadinessMap(for: bookID)
+        XCTAssertNotEqual(restored[skipped.id], .skipped)
+    }
+
+    @MainActor
+    func testProductionPinsPronunciationSetAndInvalidatesMatchingFragments() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot), catalog = VoiceCatalogStore()
+        let snapshot = Self.makeDefaultCapabilities()
+        let renderer = ScriptedSpeechRenderer(capabilities: snapshot)
+        let cast = AudiobookCastController(store: store, capabilityProvider: { snapshot }, voiceCatalog: catalog)
+        let preview = try await AudiobookTXTImporter.prepare(
+            rawData: Data("第一章 渡口\n夜色深沉。\n钟声响起。\n".utf8),
+            suggestedTitle: "发音规则夹具"
+        )
+        let bookID = try await store.importBook(preview)
+        let chapter = try await store.chapters(for: bookID)[0]
+        let roles = try await store.characters(for: bookID)
+        let narrator = try XCTUnwrap(roles.first)
+        let atoms = try await store.atoms(for: bookID, chapterID: chapter.id).filter { $0.kind != .formatting }
+        let annotations = atoms.map { atom in
+            AudiobookAnnotation(
+                bookID: bookID, chapterID: chapter.id, windowID: UUID(), atomID: atom.id,
+                sourceRange: atom.sourceRange, assignment: .assigned(roleID: narrator.id)
+            )
+        }
+        try await store.saveAnnotations(bookID: bookID, annotations: annotations)
+        var book = try await store.book(id: bookID)
+        book.analysisState = .allWindowsValidated
+        try await store.updateBook(book)
+        try await cast.bindVoice(
+            bookID: bookID, roleID: narrator.id,
+            binding: AudiobookVoiceBinding(
+                roleID: narrator.id, voiceID: "v-narrator",
+                voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                modelRevision: String(repeating: "a", count: 40)
+            )
+        )
+        try await cast.confirmCast(bookID: bookID, revisionID: cast.currentCastRevisionID(for: bookID))
+        try await cast.confirmAudition(bookID: bookID, voiceSetDigest: cast.currentVoiceSetDigest(for: bookID))
+
+        let binding = AudiobookPronunciationBinding(
+            setID: AudiobookPronunciationBinding.makeSetID(bookID: bookID),
+            revision: "pr_1",
+            entries: [PronunciationEntry(id: "e1", surface: "钟声", spoken: "zhōng shēng")]
+        )
+        try await store.savePronunciationBinding(binding, bookID: bookID)
+
+        let bindings = try await store.voiceBindings(for: bookID)
+        let source = try await store.sourceIndex(for: bookID)
+        let withoutRules = try AudiobookFragmentPlanner.plan(
+            chapter: chapter, annotations: annotations, bindings: bindings, source: source, atoms: atoms
+        )
+        let withRules = try AudiobookFragmentPlanner.plan(
+            chapter: chapter, annotations: annotations, bindings: bindings, source: source,
+            atoms: atoms, pronunciation: binding
+        )
+        XCTAssertNotEqual(
+            withoutRules.map(\.dependencyDigest), withRules.map(\.dependencyDigest),
+            "命中发音规则的片段必须进入待重做状态"
+        )
+
+        let production = AudiobookProductionController(
+            store: store, castController: cast, revisionController: AudiobookRevisionController(store: store),
+            renderer: renderer, admission: SpeechCreationAdmission(),
+            clock: FakeAudiobookClock(), voiceCatalog: catalog
+        )
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+
+        XCTAssertFalse(renderer.requests.isEmpty)
+        XCTAssertTrue(renderer.requests.allSatisfy { $0.pronunciationSet == binding.headerValue })
+        let saved = try await store.fragments(for: bookID, chapterID: chapter.id)
+        XCTAssertEqual(saved.map(\.dependencyDigest), withRules.map(\.dependencyDigest))
+
+        // 改读法后重录：新的 revision 必须进入请求，且不能复用旧依赖的候选。
+        let updated = AudiobookPronunciationBinding(
+            setID: binding.setID, revision: "pr_2",
+            entries: [PronunciationEntry(id: "e1", surface: "钟声", spoken: "zhòng shēng")]
+        )
+        try await store.savePronunciationBinding(updated, bookID: bookID)
+        let countBefore = renderer.requests.count
+        try await production.regenerateFragment(bookID: bookID, chapterID: chapter.id, fragmentID: saved[0].id)
+        XCTAssertEqual(renderer.requests.count, countBefore + 1)
+        XCTAssertEqual(renderer.requests.last?.pronunciationSet, updated.headerValue)
+    }
+
+    @MainActor
     func testArchiveDuringRenderKeepsCandidateForReviewAndStopsNewRequests() async throws {
         let store = try AudiobookProjectStore(root: tempRoot), catalog = VoiceCatalogStore()
         let snapshot = Self.makeDefaultCapabilities()

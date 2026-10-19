@@ -28,14 +28,35 @@ public enum AudiobookChapterPlanner {
         bookID: UUID = UUID(),
         sourceID: UUID = UUID()
     ) throws -> [AudiobookChapter] {
+        try plan(source: source, bookID: bookID, sourceID: sourceID).chapters
+    }
+
+    /// 章节规划结果：目录页来源区间随结果返回，供导入预览与测试核对。
+    /// 目录区间仍包含在章节覆盖范围内，只是从可读正文与原子中排除，不会成为独立章节。
+    public struct PlanningResult: Equatable, Sendable {
+        public let chapters: [AudiobookChapter]
+        public let tableOfContentsRanges: [AudiobookSourceRange]
+
+        public init(chapters: [AudiobookChapter], tableOfContentsRanges: [AudiobookSourceRange]) {
+            self.chapters = chapters
+            self.tableOfContentsRanges = tableOfContentsRanges
+        }
+    }
+
+    public static func plan(
+        source: AudiobookSourceIndex,
+        bookID: UUID = UUID(),
+        sourceID: UUID = UUID()
+    ) throws -> PlanningResult {
         if source.byteCount == 0 {
-            return []
+            return PlanningResult(chapters: [], tableOfContentsRanges: [])
         }
 
         let lines = source.paragraphs
         let proposed = headingIndices(in: source)
+        let toc = detectTableOfContents(lines: lines, proposed: proposed)
         var headingLineIndices: [Int] = []
-        for index in proposed {
+        for index in proposed where !toc.droppedHeadingIndices.contains(index) {
             if let previous = headingLineIndices.last,
                titleKey(lines[previous].text) == titleKey(lines[index].text) {
                 let gap = AudiobookSourceRange(
@@ -43,7 +64,10 @@ public enum AudiobookChapterPlanner {
                     upperBound: lines[index].sourceRange.lowerBound
                 )
                 let separators = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "-─—_=*·•"))
-                if try source.text(in: gap).unicodeScalars.allSatisfy({ separators.contains($0) }) {
+                // 三行以上同名标题时，中间只隔着分隔符和重复标题本身，也应合并为一个目录入口。
+                let gapText = try source.text(in: gap)
+                    .replacingOccurrences(of: lines[previous].text, with: "")
+                if gapText.unicodeScalars.allSatisfy({ separators.contains($0) }) {
                     continue
                 }
             }
@@ -61,7 +85,7 @@ public enum AudiobookChapterPlanner {
                 excludedRanges: []
             )
             try validateChapterEdits([whole], source: source)
-            return [whole]
+            return PlanningResult(chapters: [whole], tableOfContentsRanges: [])
         }
 
         var chapters: [AudiobookChapter] = []
@@ -118,8 +142,13 @@ public enum AudiobookChapterPlanner {
             ordinal += 1
         }
 
+        chapters = attachTableOfContentsExclusions(chapters, ranges: toc.ranges)
+        chapters = mergeFullyExcludedSyntheticOpening(chapters)
+        for index in chapters.indices {
+            chapters[index].ordinal = index
+        }
         try validateChapterEdits(chapters, source: source)
-        return chapters
+        return PlanningResult(chapters: chapters, tableOfContentsRanges: toc.ranges)
     }
 
     /// Validates that chapters and their explicit `excludedRanges` partition the entire `AudiobookSourceIndex`
@@ -264,6 +293,194 @@ public enum AudiobookChapterPlanner {
         }
         try validateChapterEdits(updated, source: source)
         return updated
+    }
+
+    // MARK: - Table of Contents Detection
+
+    private struct TableOfContentsDetection {
+        var droppedHeadingIndices: Set<Int> = []
+        var ranges: [AudiobookSourceRange] = []
+    }
+
+    /// 目录页的章名行本身符合章标题规则；若按标题切章，目录会变成一串只有标题的空章节，
+    /// 真正的正文则被挤进最后一章。这里识别“连续多个标题、间隔内容极短、且有目录标记或后文同名标题”
+    /// 的区段，将其认定为目录页并从标题候选中移除，来源字节仍由章节覆盖。
+    private static func detectTableOfContents(
+        lines: [AudiobookParagraph],
+        proposed: [Int]
+    ) -> TableOfContentsDetection {
+        guard proposed.count >= 3 else { return TableOfContentsDetection() }
+        var detection = TableOfContentsDetection()
+        let keys = proposed.map { tableOfContentsTitleKey(lines[$0].text) }
+        var index = 0
+        while index + 2 < proposed.count {
+            var end = index
+            while end + 1 < proposed.count,
+                  isTableOfContentsGap(lines: lines, lower: proposed[end], upper: proposed[end + 1]),
+                  !keys[index...end].contains(keys[end + 1]) {
+                end += 1
+            }
+            if end - index + 1 >= 3,
+               isConfirmedTableOfContentsRun(lines: lines, proposed: proposed, keys: keys, start: index, end: end),
+               end + 1 < proposed.count {
+                var start = lines[proposed[index]].sourceRange.lowerBound
+                let markerIndex = proposed[index] - 1
+                if markerIndex >= 0,
+                   isTableOfContentsMarker(lines[markerIndex].text),
+                   lines[markerIndex].sourceRange.upperBound <= start {
+                    start = lines[markerIndex].sourceRange.lowerBound
+                }
+                let endOffset = lines[proposed[end + 1]].sourceRange.lowerBound
+                if endOffset > start {
+                    detection.ranges.append(AudiobookSourceRange(lowerBound: start, upperBound: endOffset))
+                    detection.droppedHeadingIndices.formUnion(proposed[index...end])
+                }
+                index = end + 1
+                continue
+            }
+            index += 1
+        }
+        return detection
+    }
+
+    /// 目录条目之间只允许空白、页码或点引线；真实章节的正文段落会立刻中止目录区段。
+    private static func isTableOfContentsGap(
+        lines: [AudiobookParagraph],
+        lower: Int,
+        upper: Int
+    ) -> Bool {
+        guard upper > lower else { return false }
+        let between = lines[(lower + 1)..<upper]
+        if between.isEmpty { return true }
+        guard between.count == 1, let only = between.first else { return false }
+        let trimmed = only.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.unicodeScalars.count <= 24 else { return false }
+        if trimmed.unicodeScalars.allSatisfy({ CharacterSet.decimalDigits.contains($0) }) {
+            return true
+        }
+        return trimmed.contains("…") || trimmed.contains("···") || trimmed.contains("..")
+    }
+
+    private static func isConfirmedTableOfContentsRun(
+        lines: [AudiobookParagraph],
+        proposed: [Int],
+        keys: [String],
+        start: Int,
+        end: Int
+    ) -> Bool {
+        let markerIndex = proposed[start] - 1
+        if markerIndex >= 0,
+           isTableOfContentsMarker(lines[markerIndex].text),
+           lines[markerIndex].sourceRange.upperBound <= lines[proposed[start]].sourceRange.lowerBound {
+            return true
+        }
+        let runKeys = Set(keys[start...end])
+        guard !runKeys.isEmpty else { return false }
+        return runKeys.isSubset(of: Set(keys[(end + 1)...]))
+    }
+
+    /// 目录行常带行尾页码或点引线（`第一章 风起……12`）；匹配后文真实章名时去掉这些尾巴，
+    /// 但保留标题本身的数字（如「1984」）。
+    private static func tableOfContentsTitleKey(_ text: String) -> String {
+        let key = titleKey(text)
+        var scalars = Array(key.unicodeScalars)
+        guard !scalars.isEmpty else { return key }
+        let leaders: Set<Unicode.Scalar> = [".", "．", "·", "…"]
+        var end = scalars.count
+        var cursor = end - 1
+        var sawDigit = false
+        while cursor >= 0, CharacterSet.decimalDigits.contains(scalars[cursor]) {
+            sawDigit = true
+            cursor -= 1
+        }
+        if sawDigit {
+            var before = cursor
+            while before >= 0, scalars[before] == " " { before -= 1 }
+            let separatedFromTitle = before < cursor
+            var leaderCursor = before
+            var sawLeader = false
+            while leaderCursor >= 0, leaders.contains(scalars[leaderCursor]) {
+                sawLeader = true
+                leaderCursor -= 1
+            }
+            if separatedFromTitle || sawLeader {
+                end = leaderCursor + 1
+            }
+        }
+        while end > 0, leaders.contains(scalars[end - 1]) {
+            end -= 1
+        }
+        return String(String.UnicodeScalarView(scalars[0..<end]))
+    }
+
+    private static func isTableOfContentsMarker(_ text: String) -> Bool {
+        let normalized = text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "")
+        if ["目录", "目錄", "目次", "contents", "content", "tableofcontents", "toc", "catalog"].contains(normalized) {
+            return true
+        }
+        guard normalized.unicodeScalars.count <= 12 else { return false }
+        return normalized.contains("目录") || normalized.contains("目錄") || normalized.contains("contents")
+    }
+
+    private static func attachTableOfContentsExclusions(
+        _ chapters: [AudiobookChapter],
+        ranges: [AudiobookSourceRange]
+    ) -> [AudiobookChapter] {
+        guard !ranges.isEmpty else { return chapters }
+        var updated = chapters
+        for range in ranges {
+            guard let index = updated.firstIndex(where: { chapter in
+                chapter.sourceRange.lowerBound < range.upperBound
+                    && range.lowerBound < chapter.sourceRange.upperBound
+            }) else { continue }
+            let chapter = updated[index]
+            let clipped = AudiobookSourceRange(
+                lowerBound: max(range.lowerBound, chapter.sourceRange.lowerBound),
+                upperBound: min(range.upperBound, chapter.sourceRange.upperBound)
+            )
+            guard !clipped.isEmpty else { continue }
+            updated[index].excludedRanges = (chapter.excludedRanges + [clipped])
+                .sorted()
+                .reduce(into: [AudiobookSourceRange]()) { result, candidate in
+                    if let last = result.last, candidate.lowerBound <= last.upperBound {
+                        result[result.count - 1] = AudiobookSourceRange(
+                            lowerBound: last.lowerBound,
+                            upperBound: max(last.upperBound, candidate.upperBound)
+                        )
+                    } else {
+                        result.append(candidate)
+                    }
+                }
+        }
+        return updated
+    }
+
+    /// 只有目录的“开篇”不应作为空章节留下；把整段排除区间并入下一章，目录就不进入正文与原子。
+    private static func mergeFullyExcludedSyntheticOpening(
+        _ chapters: [AudiobookChapter]
+    ) -> [AudiobookChapter] {
+        guard chapters.count >= 2 else { return chapters }
+        let opening = chapters[0]
+        guard opening.title == "开篇",
+              opening.excludedRanges.contains(where: { range in
+                  range.lowerBound <= opening.sourceRange.lowerBound
+                      && range.upperBound >= opening.sourceRange.upperBound
+              })
+        else { return chapters }
+        var second = chapters[1]
+        guard opening.sourceRange.upperBound == second.sourceRange.lowerBound else { return chapters }
+        second.sourceRange = AudiobookSourceRange(
+            lowerBound: opening.sourceRange.lowerBound,
+            upperBound: second.sourceRange.upperBound
+        )
+        second.excludedRanges = (opening.excludedRanges + second.excludedRanges).sorted()
+        var merged = chapters
+        merged.remove(at: 0)
+        merged[0] = second
+        return merged
     }
 
     // MARK: - Private Helpers

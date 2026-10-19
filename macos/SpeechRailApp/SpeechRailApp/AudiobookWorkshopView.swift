@@ -147,7 +147,7 @@ public struct AudiobookWorkshopView: View {
                 .accessibilityIdentifier("audiobook-export-toolbar-button")
             } else {
                 PageActionButton(
-                    title: "导入 TXT…",
+                    title: "导入书稿…",
                     systemImage: "doc.badge.plus",
                     helpText: "选择本地 TXT 电子书并预览编码与章节边界"
                 ) {
@@ -169,8 +169,12 @@ public struct AudiobookWorkshopView: View {
 
     private func presentOpenTXTPanel() {
         let panel = NSOpenPanel()
-        panel.title = "选择要制作成有声书的 TXT 文件"
-        panel.allowedContentTypes = [.plainText, UTType(filenameExtension: "txt") ?? .plainText]
+        panel.title = "选择要制作成有声书的 TXT 或 EPUB 文件"
+        panel.allowedContentTypes = [
+            .plainText,
+            UTType(filenameExtension: "txt") ?? .plainText,
+            UTType(filenameExtension: "epub") ?? .data
+        ]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         if panel.runModal() == .OK, let url = panel.url {
@@ -198,7 +202,33 @@ struct AudiobookImportPreviewSheet: View {
                 detail: "格式探测已完成。先核对整理后的段落和目录，确认后再进入角色分析。原始文件会完整保留，整理在本地完成。"
             )
 
+            if let importError = workflow.importErrorMessage {
+                NoticeBar(
+                    tone: .critical,
+                    message: importError,
+                    actionTitle: "知道了"
+                ) { workflow.importErrorMessage = nil }
+            }
+
             if let preview = workflow.importPreview {
+                if preview.isEPUB {
+                    NoticeBar(
+                        tone: .info,
+                        message: "已按 EPUB 的阅读顺序提取正文并转为纯文本；原始压缩包不会保存。请核对章节与正文后再导入。"
+                    )
+                }
+                if preview.requiresEncodingConfirmation && !preview.isEPUB {
+                    NoticeBar(
+                        tone: .warning,
+                        message: "无法百分百确定文件编码，当前按 \(preview.detectedEncoding.displayName) 预览。若正文出现乱码，请在上方切换编码核对后再导入。"
+                    )
+                }
+                if !preview.tableOfContentsRanges.isEmpty {
+                    NoticeBar(
+                        tone: .info,
+                        message: "已自动识别并跳过 \(preview.tableOfContentsRanges.count) 处目录页；目录不会作为章节朗读或制作，原文仍完整保留。"
+                    )
+                }
                 HStack(spacing: SpeechRailDesignTokens.Spacing.md) {
                     VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                         Text("书名")
@@ -214,29 +244,33 @@ struct AudiobookImportPreviewSheet: View {
                         TextField("输入作者姓名", text: $editedAuthor)
                             .speechRailSingleLineInput()
                     }
-                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                        Text("文件编码")
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        Picker("文件编码", selection: $selectedEncoding) {
-                            ForEach(preview.candidateEncodings, id: \.self) { enc in
-                                Text(enc.rawValue.uppercased()).tag(enc)
+                    if !preview.isEPUB {
+                        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                            Text("文件编码")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            Picker("文件编码", selection: $selectedEncoding) {
+                                ForEach(preview.candidateEncodings, id: \.self) { enc in
+                                    Text(enc.rawValue.uppercased()).tag(enc)
+                                }
+                            }
+                            .onChange(of: selectedEncoding) { _, newValue in
+                                guard newValue != preview.detectedEncoding else { return }
+                                guard let url = workflow.importFileURL else { return }
+                                Task { await workflow.prepareImport(fileURL: url, encoding: newValue) }
                             }
                         }
-                        .onChange(of: selectedEncoding) { _, newValue in
-                            guard newValue != preview.detectedEncoding else { return }
-                            guard let url = workflow.importFileURL else { return }
-                            Task { await workflow.prepareImport(fileURL: url, encoding: newValue) }
-                        }
+                        .fixedSize(horizontal: true, vertical: false)
                     }
-                    .fixedSize(horizontal: true, vertical: false)
                 }
 
                 HStack(spacing: SpeechRailDesignTokens.Spacing.md) {
                     StatusPill(tone: .healthy, label: "共 \(preview.chapters.count) 章")
                     StatusPill(tone: .neutral, label: "\(preview.sourceIndex.paragraphs.count) 个段落")
                     StatusPill(tone: .neutral, label: "\(preview.scalarCount) 字符")
-                    StatusPill(tone: .neutral, label: "编码：\(preview.detectedEncoding.rawValue.uppercased())")
+                    if !preview.isEPUB {
+                        StatusPill(tone: .neutral, label: "编码：\(preview.detectedEncoding.rawValue.uppercased())")
+                    }
                 }
 
                 Text(preview.sourceIndex.joinedLineBreakCount > 0
@@ -321,6 +355,7 @@ struct AudiobookImportPreviewSheet: View {
                 Button("取消", role: .cancel) {
                     workflow.isShowingImportSheet = false
                     workflow.importPreview = nil
+                    workflow.importErrorMessage = nil
                 }
                 .speechRailButton(.secondary)
 
@@ -521,18 +556,24 @@ struct AudiobookExportSheet: View {
                 Spacer()
 
                 if workflow.preparedExport == nil {
-                    Button(workflow.isPreparingExport ? "正在编码并校验…" : "生成并校验导出包") {
-                        let ids = selectedProfile == .m4b ? nil : Array(selectedChapterIDs)
-                        Task {
-                            await workflow.prepareExport(
-                                profile: selectedProfile,
-                                chapterIDs: ids,
-                                loudnessEnabled: loudnessEnabled
-                            )
+                    if workflow.isPreparingExport {
+                        Button("取消导出") {
+                            Task { await workflow.cancelExportPreparation() }
                         }
+                        .speechRailButton(.secondary)
+                    } else {
+                        Button("生成并校验导出包") {
+                            let ids = selectedProfile == .m4b ? nil : Array(selectedChapterIDs)
+                            Task {
+                                await workflow.prepareExport(
+                                    profile: selectedProfile,
+                                    chapterIDs: ids,
+                                    loudnessEnabled: loudnessEnabled
+                                )
+                            }
+                        }
+                        .speechRailButton(.primary)
                     }
-                    .speechRailButton(.primary)
-                    .disabled(workflow.isPreparingExport)
                 } else {
                     Button("选择保存位置并完成导出…") {
                         presentSaveExportPanel()
@@ -579,6 +620,7 @@ struct AudiobookExportSheet: View {
         case .paused: return "已暂停"
         case .needsUpdate: return "有更新待重制"
         case .chapterAudioReady: return "已就绪"
+        case .skipped: return "已跳过"
         case .failed: return "制作未完成"
         }
     }
@@ -589,7 +631,9 @@ struct AudiobookExportSheet: View {
             let savePanel = NSSavePanel()
             savePanel.title = "导出整本 M4B 有声书"
             savePanel.nameFieldStringValue = "\(prepared.bookTitle).m4b"
-            if savePanel.runModal() == .OK, let url = savePanel.url {
+            if savePanel.runModal() == .OK, let url = savePanel.url,
+               confirmReplacingExistingItem(at: url, isDirectory: false)
+            {
                 let consent = try? AudiobookOverwriteConsent.capture(at: url)
                 Task {
                     await workflow.commitPreparedExport(destination: url, overwriteConsent: consent)
@@ -603,12 +647,28 @@ struct AudiobookExportSheet: View {
             openPanel.canCreateDirectories = true
             if openPanel.runModal() == .OK, let folderURL = openPanel.url {
                 let bundleURL = folderURL.appendingPathComponent("\(prepared.bookTitle)-MP3", isDirectory: true)
-                let consent = try? AudiobookOverwriteConsent.capture(at: bundleURL)
-                Task {
-                    await workflow.commitPreparedExport(destination: bundleURL, overwriteConsent: consent)
+                if confirmReplacingExistingItem(at: bundleURL, isDirectory: true) {
+                    let consent = try? AudiobookOverwriteConsent.capture(at: bundleURL)
+                    Task {
+                        await workflow.commitPreparedExport(destination: bundleURL, overwriteConsent: consent)
+                    }
                 }
             }
         }
+    }
+
+    /// 目录覆写没有系统级确认，必须在替换前明确告知会整体替换已有内容。
+    private func confirmReplacingExistingItem(at url: URL, isDirectory: Bool) -> Bool {
+        guard FileManager.default.fileExists(atPath: url.path) else { return true }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = isDirectory ? "替换已有的同名导出目录？" : "替换已有的同名导出文件？"
+        alert.informativeText = isDirectory
+            ? "目标位置已存在「\(url.lastPathComponent)」目录。继续会整体替换该目录中的同名导出内容，原有文件不会保留。"
+            : "目标位置已存在同名文件。继续会替换该文件，原内容不会保留。"
+        alert.addButton(withTitle: "替换")
+        alert.addButton(withTitle: "取消")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 }
 

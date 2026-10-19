@@ -665,6 +665,38 @@ final class AudiobookExportTests: XCTestCase {
         )
     }
 
+    func testPreCancelledRequestRejectsBeforePreparing() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let revisionController = AudiobookRevisionController(store: store)
+        let controller = AudiobookExportController(
+            store: store,
+            castController: AudiobookCastController(store: store),
+            revisionController: revisionController,
+            customStageEncoder: Self.fakeStageEncoder,
+            mediaVerifier: { url, expected in
+                try Self.makeFakeMediaVerification(url: url, expected: expected)
+            }
+        )
+        let fixture = try await makeTwoChapterExportFixture(
+            store: store,
+            revisionController: revisionController,
+            completeSecondChapter: true
+        )
+        let requestID = UUID()
+        await controller.cancel(requestID: requestID)
+        do {
+            _ = try await controller.prepare(
+                bookID: fixture.bookID,
+                chapterIDs: nil,
+                profile: .m4b,
+                requestID: requestID
+            )
+            XCTFail("已取消的请求不应继续准备导出")
+        } catch let error as AudiobookExportError {
+            XCTAssertEqual(error, .exportCancelled)
+        }
+    }
+
     func testCancellationDuringPrepareVerificationRejectsPreparedAndCleansStage() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
         let castController = AudiobookCastController(store: store)

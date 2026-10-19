@@ -162,6 +162,35 @@ public struct AudiobookSourceIndex: Sendable, Equatable {
         return parts.joined(separator: "\n\n")
     }
 
+    /// 去除章节排除区间后的可读来源片段；区间仍指向 canonical UTF-8 字节。
+    public func readableRanges(
+        in range: AudiobookSourceRange,
+        excluding exclusions: [AudiobookSourceRange]
+    ) throws -> [AudiobookSourceRange] {
+        try validateRangeBounds(range)
+        return try nonExcludedSpans(in: range, exclusions: exclusions)
+    }
+
+    /// 阅读投影的排除版本：用于预览与目录页跳过，不改变 canonical 原文。
+    public func normalizedText(
+        in range: AudiobookSourceRange,
+        excluding exclusions: [AudiobookSourceRange]
+    ) throws -> String {
+        try readableRanges(in: range, excluding: exclusions)
+            .map { try normalizedText(in: $0) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+    }
+
+    public func text(
+        in range: AudiobookSourceRange,
+        excluding exclusions: [AudiobookSourceRange]
+    ) throws -> String {
+        try readableRanges(in: range, excluding: exclusions)
+            .map { try text(in: $0) }
+            .joined()
+    }
+
     public func validateCoverage(
         _ ranges: [AudiobookSourceRange],
         exclusions: [AudiobookSourceRange] = [],

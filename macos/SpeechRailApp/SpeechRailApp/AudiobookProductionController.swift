@@ -346,7 +346,11 @@ public actor AudiobookProductionController {
                 throw AudiobookStoreError.chapterNotFound(id)
             }
             return chapter
-        }.sorted { $0.ordinal < $1.ordinal }
+        }.filter { !$0.isSkipped }.sorted { $0.ordinal < $1.ordinal }
+
+        guard !selectedChapters.isEmpty else {
+            throw AudiobookProductionError.noReadyChaptersSelected
+        }
 
         for chapter in selectedChapters {
             let readiness = try await castController.chapterReadiness(bookID: bookID, chapterID: chapter.id)
@@ -358,6 +362,7 @@ public actor AudiobookProductionController {
         // 2. Plan fragments for selected chapters, collect active role IDs, and verify pinned capabilities
         let source = try await store.sourceIndex(for: bookID)
         let frozenBindings = try await store.voiceBindings(for: bookID)
+        let pronunciation = try await store.pronunciationBinding(for: bookID)
         try AudiobookCastRegistry.validateBindingSet(characters: await store.characters(for: bookID), bindings: frozenBindings,
             requiredRoleIDs: await store.requiredCastingRoleIDs(bookID: bookID))
         var plannedFragmentsByChapter: [UUID: [AudiobookFragment]] = [:]
@@ -374,7 +379,8 @@ public actor AudiobookProductionController {
                 bindings: frozenBindings,
                 policy: policy,
                 source: source,
-                atoms: chapterAtoms
+                atoms: chapterAtoms,
+                pronunciation: pronunciation
             )
             let selectedFragments: [AudiobookFragment]
             if let regeneratingFragmentID {
@@ -424,6 +430,8 @@ public actor AudiobookProductionController {
         do {
             // 3. Sequentially render fragments (reusing valid existing candidates when dependencyDigest matches)
             let existingCandidates = try await store.candidates(for: bookID)
+            // 片段复用按 fragmentID 建索引，避免每个片段线性扫描全书的候选列表。
+            let existingCandidatesByFragmentID = Dictionary(grouping: existingCandidates, by: \.fragmentID)
             for chapter in selectedChapters {
                 let fragments = plannedFragmentsByChapter[chapter.id] ?? []
                 for fragment in fragments {
@@ -440,9 +448,8 @@ public actor AudiobookProductionController {
                     }
 
                     // Reuse already committed & verified candidate with identical dependencyDigest
-                    if let reusable = existingCandidates.first(where: {
-                        $0.fragmentID == fragment.id
-                            && $0.dependencyDigest == fragment.dependencyDigest
+                    if let reusable = existingCandidatesByFragmentID[fragment.id]?.first(where: {
+                        $0.dependencyDigest == fragment.dependencyDigest
                             && $0.isReceiptVerified
                             && (regeneratingFragmentID == nil || $0.taskID == taskID)
                     }),
@@ -470,6 +477,7 @@ public actor AudiobookProductionController {
                         fragment: fragment,
                         text: fragmentText,
                         binding: binding,
+                        pronunciation: pronunciation,
                         runGeneration: runGeneration
                     )
 
@@ -589,6 +597,7 @@ public actor AudiobookProductionController {
         fragment: AudiobookFragment,
         text: String,
         binding: AudiobookVoiceBinding,
+        pronunciation: AudiobookPronunciationBinding?,
         runGeneration: Int
     ) async throws -> AudiobookRenderCandidate {
         let effectiveSpeed = binding.allowedSpeed
@@ -599,8 +608,19 @@ public actor AudiobookProductionController {
             speed: effectiveSpeed,
             expectedVoiceRevision: binding.voiceRevision,
             expectedModelRevision: binding.modelRevision,
-            seed: binding.callerSeed
+            seed: binding.callerSeed,
+            pronunciationSet: pronunciation?.headerValue
         )
+
+        // 能力快照与声音归属只在进入重试循环前解析一次。暂态能力读取失败应直接失败，
+        // 而不是被当成一次可重试的合成失败并消耗片段的重试预算。
+        let current = try await renderer.fetchEffectiveCapabilities()
+        try AudiobookCastRegistry.validateRenderBinding(binding, snapshot: current)
+        guard let voice = current.voices.first(where: { $0.id == binding.voiceID }),
+              (await voiceCatalog.refresh()).permits(voice, bookID: bookID)
+        else {
+            throw AudiobookProductionError.capabilityVoiceUnavailable(voiceID: binding.voiceID, reason: "声音归属已变化，请重新确认。")
+        }
 
         var attempt = 0
         let maxRetries = AudiobookLimits.maxRenderTransientRetries
@@ -608,12 +628,6 @@ public actor AudiobookProductionController {
         while true {
             if isPauseRequested || Task.isCancelled || generation != runGeneration {
                 throw AudiobookProductionError.cancelled
-            }
-
-            let current = try await renderer.fetchEffectiveCapabilities()
-            try AudiobookCastRegistry.validateRenderBinding(binding, snapshot: current)
-            guard let voice = current.voices.first(where: { $0.id == binding.voiceID }), (await voiceCatalog.refresh()).permits(voice, bookID: bookID) else {
-                throw AudiobookProductionError.capabilityVoiceUnavailable(voiceID: binding.voiceID, reason: "声音归属已变化，请重新确认。")
             }
 
             // Acquire single-lane creation admission for this fragment

@@ -27,7 +27,7 @@ public struct AudiobookBookShelfView: View {
                         title: workflow.shelfBooks.isEmpty ? "还没有导入有声书项目" : "没有符合筛选条件的书籍",
                         message: "导入本地 TXT 电子书后，先完成全书人物分析与配声确认，再逐章制作高保真多角色有声书。原文与音频均保存在本机独立作品库中。"
                     ) {
-                        Button("导入 TXT 电子书…", action: onImportTXT)
+                        Button("导入电子书…", action: onImportTXT)
                             .speechRailButton(.primary)
                     }
                     .frame(maxWidth: .infinity, minHeight: 360)
@@ -197,7 +197,10 @@ public struct AudiobookBookShelfView: View {
                     Spacer()
 
                     if let bookmark = summary.bookmark {
-                        Text("上次听到本段第 \(Int(bookmark.fragmentOffsetSeconds)) 秒 · \(String(format: "%.2gx", bookmark.playbackRate))")
+                        Text(AudiobookDisplayFormat.bookmarkSummary(
+                            offsetSeconds: bookmark.fragmentOffsetSeconds,
+                            rate: bookmark.playbackRate
+                        ))
                             .font(SpeechRailDesignTokens.Typography.technical)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     }
@@ -224,6 +227,7 @@ public struct AudiobookBookShelfView: View {
             StatusPill(tone: .attention, label: "分析：已暂停")
         } else if summary.book.analysisState == .failed {
             StatusPill(tone: .critical, label: "分析：需重试")
+                .help(summary.book.analysisFailure?.message ?? "分析未完成，已完成窗口会保留；请重试。")
         } else {
             StatusPill(tone: .healthy, label: "全书分析已完成")
         }

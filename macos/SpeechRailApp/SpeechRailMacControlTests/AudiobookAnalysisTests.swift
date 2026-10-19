@@ -191,6 +191,33 @@ final class AudiobookAnalysisTests: XCTestCase {
         XCTAssertEqual(seenPrimaryAtomIDs, expectedReadableIDs, "每个可读 primary atom 必须且只能被规划一次")
     }
 
+    func testSkippedChapterPlansNoWindows() throws {
+        let utf8 = Data("第一章 渡口\n夜色深沉。\n钟声响起。\n".utf8)
+        let source = try AudiobookSourceIndex(utf8: utf8)
+        let bookID = UUID()
+        let chapter = AudiobookChapter(
+            bookID: bookID,
+            sourceID: UUID(),
+            ordinal: 0,
+            title: "第一章 渡口",
+            sourceRange: AudiobookSourceRange(lowerBound: 0, upperBound: Int64(utf8.count)),
+            isSkipped: true
+        )
+        let atoms = try source.buildAtoms(for: chapter)
+        XCTAssertFalse(atoms.isEmpty)
+        let windows = try AudiobookAnalysisPipeline.planRootWindows(
+            bookID: bookID,
+            chapters: [chapter],
+            atoms: atoms,
+            source: source,
+            policy: .standard,
+            config: AudiobookAnalysisConfigSnapshot(
+                configuration: LLMConfiguration(baseURL: "http://127.0.0.1:8000/v1", model: "test-model")
+            )
+        )
+        XCTAssertTrue(windows.isEmpty, "跳过的章节不应产生分析窗口")
+    }
+
     func testAnalysisReceivesPreparedParagraphTextWithoutChangingSource() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
         let text = "第一章 夜行\r\n\r\n        他站在門邊，聽見了一陣腳步聲，便順著窗外的微弱燈光望\r\n向遠方。\r\n"
@@ -274,6 +301,10 @@ final class AudiobookAnalysisTests: XCTestCase {
         } catch {
             let book = try await store.book(id: bookID)
             XCTAssertEqual(book.analysisState, .failed)
+            XCTAssertEqual(book.analysisFailure?.code, "invalid_structured_output")
+            XCTAssertNotNil(book.analysisFailure?.failedWindowOrdinal)
+            XCTAssertFalse(book.analysisFailure?.message.isEmpty ?? true)
+            XCTAssertFalse(book.analysisFailure?.message.contains(text) ?? false, "失败摘要不得回显原文")
         }
     }
 

@@ -34,8 +34,12 @@ public enum AudiobookInvalidation {
             return Set(before.fragments.map(\.id)).union(after.fragments.map(\.id))
         }
 
-        let beforeByRange = Dictionary(uniqueKeysWithValues: before.fragments.map { ($0.sourceRange, $0) })
-        let afterByRange = Dictionary(uniqueKeysWithValues: after.fragments.map { ($0.sourceRange, $0) })
+        // 极端输入下同一区间可能出现多个片段；按区间分组而不是 uniqueKeysWithValues，
+        // 避免快照差异计算因重复键直接崩溃。
+        let beforeByRange = Dictionary(grouping: before.fragments, by: \.sourceRange)
+            .compactMapValues(\.first)
+        let afterByRange = Dictionary(grouping: after.fragments, by: \.sourceRange)
+            .compactMapValues(\.first)
 
         var invalidated = Set<UUID>()
 

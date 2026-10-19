@@ -39,6 +39,7 @@ public enum AudiobookFragmentPlanningError: LocalizedError, Equatable, Sendable 
     case missingVoiceBinding(roleID: UUID)
     case missingAnnotationsForChapter(chapterID: UUID)
     case atomExceedsMaximumFragmentScalars(atomID: UUID, scalarCount: Int, maxScalars: Int)
+    case incompleteFragmentCoverage(missing: Int, duplicated: Int)
 
     public var errorDescription: String? {
         switch self {
@@ -50,6 +51,8 @@ public enum AudiobookFragmentPlanningError: LocalizedError, Equatable, Sendable 
             return "当前章节缺少说话人标注记录。"
         case let .atomExceedsMaximumFragmentScalars(_, count, maxScalars):
             return "单个正文切分块长度（\(count) 字符）超过片段上限（\(maxScalars) 字符）。"
+        case let .incompleteFragmentCoverage(missing, duplicated):
+            return "本章片段覆盖不完整（缺失 \(missing) 段，重复 \(duplicated) 段）；为避免漏读或重读，已停止制作。请重新分析本章后再试。"
         }
     }
 }
@@ -62,7 +65,8 @@ public enum AudiobookFragmentPlanner {
         bindings: [UUID: AudiobookVoiceBinding],
         policy: AudiobookRenderPolicy = .standard,
         source: AudiobookSourceIndex? = nil,
-        atoms: [AudiobookTextAtom]? = nil
+        atoms: [AudiobookTextAtom]? = nil,
+        pronunciation: AudiobookPronunciationBinding? = nil
     ) throws -> [AudiobookFragment] {
         let chapterAnnotations = annotations
             .filter { $0.chapterID == chapter.id }
@@ -114,6 +118,25 @@ public enum AudiobookFragmentPlanner {
                     scalarCount: scalarCount
                 )
             )
+        }
+
+        // 覆盖校验：以正文可读 atom 为基准，防止标注缺失导致整段被静默漏读。
+        if let atoms {
+            let excluded = Set(chapter.excludedRanges)
+            let expectedAtomIDs = atoms
+                .filter { $0.chapterID == chapter.id && $0.kind != .formatting && !excluded.contains($0.sourceRange) }
+                .map(\.id)
+            let expectedSet = Set(expectedAtomIDs)
+            units = units.filter { expectedSet.contains($0.atomID) }
+            let actualIDs = units.map(\.atomID)
+            let missing = expectedSet.subtracting(actualIDs)
+            let duplicated = actualIDs.count - Set(actualIDs).count
+            guard missing.isEmpty, duplicated == 0 else {
+                throw AudiobookFragmentPlanningError.incompleteFragmentCoverage(
+                    missing: missing.count,
+                    duplicated: duplicated
+                )
+            }
         }
 
         // Coalesce contiguous units that share the exact same speaker roleID and are contiguous or separated only by formatting atoms,
@@ -168,16 +191,22 @@ public enum AudiobookFragmentPlanner {
             let localAssignmentCanonical = "\(range.lowerBound)-\(range.upperBound):\(roleID.uuidString)"
             let localAssignmentDigest = AudiobookDigest.sha256Hex(Data(localAssignmentCanonical.utf8))
             let voiceBindingDigest = binding.bindingDigest
-            let dependencyCanonical = [
+            let fragmentText = source.flatMap { try? $0.text(in: range) }
+            var dependencyComponents = [
                 "frag_dep_v2",
-                source.flatMap { try? $0.text(in: range) }.map { AudiobookDigest.sha256Hex(Data($0.utf8)) } ?? "source-unavailable",
+                fragmentText.map { AudiobookDigest.sha256Hex(Data($0.utf8)) } ?? "source-unavailable",
                 "\(chapter.sourceID.uuidString)",
                 "\(range.lowerBound)-\(range.upperBound)",
                 localAssignmentDigest,
                 voiceBindingDigest,
                 policyDigest
-            ].joined(separator: "|")
-            let dependencyDigest = AudiobookDigest.sha256Hex(Data(dependencyCanonical.utf8))
+            ]
+            // 只有真正命中本片段的发音词条才进入摘要。没有词条命中时不追加任何字段，
+            // 保持旧片段的 dependencyDigest 不变；命中词条的内容或集合变化才使该片段待重做。
+            if let component = fragmentText.flatMap({ pronunciation?.dependencyComponent(in: $0) }) {
+                dependencyComponents.append("pron:\(component)")
+            }
+            let dependencyDigest = AudiobookDigest.sha256Hex(Data(dependencyComponents.joined(separator: "|").utf8))
 
             let fragmentID = deterministicFragmentID(
                 bookID: chapter.bookID,
