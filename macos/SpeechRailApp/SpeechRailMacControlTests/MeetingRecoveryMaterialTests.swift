@@ -62,6 +62,79 @@ final class MeetingRecoveryMaterialTests: XCTestCase {
         )
     }
 
+    func testMixedSpeakerExportsKeepWordsUnknownsAndOriginalCue() async throws {
+        let store = try XCTUnwrap(store)
+        let id = try await seedSession()
+        _ = try await store.appendLine(.init(sessionID: id, role: .speaker,
+            text: "甲😀，乙？丙。", source: .microphone, tStart: 1, tEnd: 4), id: "export-mixed")
+        let row = try await store.attachTranscriptAttribution(lineID: "export-mixed", units: [
+            .init(id: "first", textStart: 0, textEnd: 2, speakerLabel: "A"),
+            .init(id: "second", textStart: 3, textEnd: 4, speakerLabel: "B"),
+            .init(id: "unknown", textStart: 5, textEnd: 6, speakerLabel: nil)
+        ])
+        let records = try await store.listSessions()
+        let record = try XCTUnwrap(records.first)
+        let payload = SessionExportPayload(record: record.record, lines: [row], speakerNames: ["A": "主讲"])
+        let plain = SessionExporter.export(payload, as: .plainText)
+        XCTAssertTrue(plain.contains("主讲：甲😀，\n说话人 B：乙？\n未确认说话人：丙。"))
+        let markdown = SessionExporter.export(payload, as: .markdown)
+        XCTAssertTrue(markdown.contains("**主讲**：甲😀，"))
+        XCTAssertTrue(markdown.contains("**说话人 B**：乙？"))
+        XCTAssertTrue(markdown.contains("**未确认说话人**：丙。"))
+        let srt = SessionExporter.export(payload, as: .srt)
+        XCTAssertEqual(srt.components(separatedBy: " --> ").count - 1, 1)
+        XCTAssertTrue(srt.contains("00:00:01,000 --> 00:00:04,000"))
+        XCTAssertTrue(srt.contains("主讲：甲😀，\n说话人 B：乙？\n未确认说话人：丙。"))
+        let json = SessionExporter.export(payload, as: .json)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        let lines = try XCTUnwrap(root["lines"] as? [[String: Any]])
+        XCTAssertEqual(lines.first?["text"] as? String, row.text)
+        let units = try XCTUnwrap(lines.first?["attribution_units"] as? [[String: Any]])
+        XCTAssertEqual(units.count, 3)
+        XCTAssertEqual(units[1]["text_start"] as? Int, 3)
+        XCTAssertEqual(units[1]["speaker_label"] as? String, "B")
+        XCTAssertTrue(units[2]["speaker_label"] is NSNull)
+        XCTAssertEqual(lines.first?["speaker_label_is_manual"] as? Bool, false)
+    }
+
+    func testUnalignedPunctuationDoesNotCreateRepeatedSpeakerHeaders() async throws {
+        let store = try XCTUnwrap(store)
+        let id = try await seedSession()
+        _ = try await store.appendLine(.init(sessionID: id, role: .speaker,
+            text: "（甲，乙。）", source: .microphone), id: "export-punctuation")
+        let row = try await store.attachTranscriptAttribution(lineID: "export-punctuation", units: [
+            .init(id: "a", textStart: 1, textEnd: 2, speakerLabel: "A"),
+            .init(id: "b", textStart: 3, textEnd: 4, speakerLabel: "A")
+        ])
+        let records = try await store.listSessions()
+        let record = try XCTUnwrap(records.first)
+        let payload = SessionExportPayload(record: record.record, lines: [row])
+        XCTAssertEqual(payload.transcriptText(for: row), "说话人 A：（甲，乙。）")
+        XCTAssertEqual(row.speakerRuns.map(\.text).joined(), row.text)
+    }
+
+    func testManualAndLegacyExportsKeepWholeLineBehavior() async throws {
+        let store = try XCTUnwrap(store)
+        let id = try await seedSession()
+        _ = try await store.appendLine(.init(sessionID: id, role: .speaker,
+            text: "甲乙", source: .microphone), id: "export-manual")
+        _ = try await store.attachTranscriptAttribution(lineID: "export-manual", units: [
+            .init(id: "a", textStart: 0, textEnd: 1, speakerLabel: "A"),
+            .init(id: "b", textStart: 1, textEnd: 2, speakerLabel: "B")
+        ])
+        let manual = try await store.attachSpeakerLabel(lineID: "export-manual", label: "C")
+        let records = try await store.listSessions()
+        let record = try XCTUnwrap(records.first)
+        let payload = SessionExportPayload(record: record.record, lines: [manual])
+        XCTAssertTrue(SessionExporter.export(payload, as: .plainText).contains("说话人 C：甲乙"))
+        XCTAssertFalse(SessionExporter.export(payload, as: .plainText).contains("说话人 A"))
+        var legacy = manual
+        legacy.speakerLabelIsManual = false
+        legacy.speakerLabel = nil
+        XCTAssertFalse(SessionExporter.export(.init(record: record.record, lines: [legacy]), as: .plainText)
+            .contains("未确认说话人"))
+    }
+
     func testWordAttributionSurvivesAllReadsAndReopenWithoutChangingText() async throws {
         let store = try XCTUnwrap(store)
         let id = try await seedSession()

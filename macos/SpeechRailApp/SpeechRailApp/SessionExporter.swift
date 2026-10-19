@@ -90,11 +90,41 @@ public struct SessionExportPayload: Sendable {
         }
     }
 
-    /// 行首的前缀（带冒号）。空串表示这一行没有归属信息，正文直接开头。
-    func speakerPrefix(for line: TranscriptLine) -> String {
-        let text = speakerText(for: line)
-        return text.isEmpty ? "" : "\(text)："
+    /// 保留每个正文字符；未确认的词显式标出，单独的标点与空白不生成说话人行。
+    /// 只改变导出排版，不改变持久化行、文字范围或原时间码。
+    func transcriptText(for line: TranscriptLine, markdown: Bool = false, flags: String = "") -> String {
+        func prefix(_ speaker: String) -> String {
+            guard !speaker.isEmpty else { return "" }
+            return markdown ? "**\(speaker)**\(flags)：" : "\(speaker)："
+        }
+        guard line.role == .speaker, !line.speakerLabelIsManual, !line.attributionUnits.isEmpty else {
+            return prefix(speakerText(for: line)) + line.text
+        }
+        var blocks: [(label: String?, body: String)] = []
+        var leading = ""
+        let separators = CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)
+        for run in line.speakerRuns {
+            var text = run.text
+            if run.speakerLabel == nil {
+                let punctuation = String(String.UnicodeScalarView(text.unicodeScalars.prefix { separators.contains($0) }))
+                if blocks.isEmpty { leading += punctuation } else { blocks[blocks.count - 1].body += punctuation }
+                text = String(String.UnicodeScalarView(text.unicodeScalars.dropFirst(punctuation.unicodeScalars.count)))
+                if text.isEmpty { continue }
+            }
+            if let last = blocks.last, last.label == run.speakerLabel {
+                blocks[blocks.count - 1].body += text
+            } else {
+                blocks.append((run.speakerLabel, leading + text))
+            }
+            leading = ""
+        }
+        if blocks.isEmpty { return line.text }
+        return blocks.map { block in
+            let name = block.label.map { speakerNames[$0] ?? "说话人 \($0)" } ?? "未确认说话人"
+            return prefix(name) + block.body
+        }.joined(separator: markdown ? "  \n  " : "\n")
     }
+
 }
 
 public enum SessionExporter {
@@ -196,9 +226,7 @@ public enum SessionExporter {
         for line in payload.lines {
             let timecode = line.tStart.map { "[\(Self.clock($0))] " } ?? ""
             let flags = lineFlags(line)
-            let speaker = payload.speakerText(for: line)
-            let lead = speaker.isEmpty ? "" : "**\(speaker)**\(flags)："
-            rows.append("- \(timecode)\(lead)\(line.text)")
+            rows.append("- \(timecode)\(payload.transcriptText(for: line, markdown: true, flags: flags))")
         }
         rows.append("")
         return rows.joined(separator: "\n")
@@ -232,7 +260,7 @@ public enum SessionExporter {
             }
             if end <= start { end = start + 0.5 }
             previousEnd = end
-            let text = "\(payload.speakerPrefix(for: line))\(line.text)"
+            let text = payload.transcriptText(for: line)
             blocks.append(
                 """
                 \(index + 1)
@@ -259,7 +287,7 @@ public enum SessionExporter {
         let header = "\(payload.title)\n\(payload.record.kind.title) · \(payload.record.startedAt.formatted(date: .abbreviated, time: .shortened))\n"
         let body = payload.lines.map { line in
             let timecode = line.tStart.map { "[\(Self.clock($0))] " } ?? ""
-            return "\(timecode)\(payload.speakerPrefix(for: line))\(line.text)"
+            return "\(timecode)\(payload.transcriptText(for: line))"
         }
         return ([header] + body).joined(separator: "\n") + "\n"
     }
@@ -290,6 +318,18 @@ public enum SessionExporter {
                     "device_switch": line.isDeviceSwitch,
                     "starred": line.isStarred
                 ]
+                item["speaker_label_is_manual"] = line.speakerLabelIsManual
+                item["attribution_units"] = line.attributionUnits.map { unit -> [String: Any] in
+                    var value: [String: Any] = [
+                        "id": unit.id,
+                        "text_start": unit.textStart,
+                        "text_end": unit.textEnd,
+                        "speaker_label": jsonText(unit.speakerLabel)
+                    ]
+                    if let start = unit.audioStartSample { value["audio_start_sample"] = start }
+                    if let end = unit.audioEndSample { value["audio_end_sample"] = end }
+                    return value
+                }
                 if let tStart = line.tStart { item["t_start"] = tStart }
                 if let tEnd = line.tEnd { item["t_end"] = tEnd }
                 if let quality = line.timingQuality { item["timing_quality"] = quality.rawValue }

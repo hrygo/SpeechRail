@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail macOS App 开发与测试"
 status: active
-version: "0.6.13"
+version: "0.6.14"
 date: 2026-10-19
 ---
 
@@ -302,3 +302,12 @@ plutil -lint macos/SpeechRailApp/Resources/LaunchAgents/com.speechrail.desktop.c
 
 接收、存储、显示及导出分开验收。快照重放或读回成功不证明完整事件时序、
 分人模型、转录质量或 UI 已通过验收；显示和导出必须消费逐词证据，不能再从整行标量推断多人内容。
+
+`SessionExporter` 的 Markdown、纯文本和 SRT 按逐词归属分段显示匿名标签或显示名；
+未知正文显示“未确认说话人”。未对齐的标点与空白只参与排版，相邻同标签内容合并显示，
+不据此修改原归属证据。人工整行覆盖优先；没有逐词证据的旧行继续使用整行标签。
+SRT 每个原转录行仍对应一个 cue，保留既有时间码规则，不从逐词采样范围推断字幕时间。
+JSON `speechrail.session.export/1` 保留原有字段并追加 `speaker_label_is_manual` 与
+`attribution_units`；每个单元包含 `id`、Unicode scalar 半开范围 `text_start` / `text_end`、
+可空的 `speaker_label`，以及存在时的 `audio_start_sample` / `audio_end_sample`。
+采样范围属于原连接音轨，不能直接当作会话墙钟时间；`text` 始终保存完整原文。
