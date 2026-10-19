@@ -87,6 +87,8 @@ run `38905021569` 不再死锁，Swift 在约 10 分钟内结束，只剩 `testG
 
 **Deferred minors：** AudioCaptureDrain 正常停止时尚未显式 EOS flush AVAudioConverter；24 kHz 同采样率的停止测试不覆盖 44.1 kHz 等非整数重采样尾部完整性。该项未在本次修复，不能据当前结果承诺硬件尾音完整性。
 
+> **后续状态：**该项已在 2026-10-17 小节实现（正常停止排空有限 raw tail 后向同一 converter 提交 `.endOfStream`），并补入 24/44.1/48 kHz 的参考比对回归；2026-10-19 在当前 HEAD 复核通过。硬件尾音与真实设备时序仍属 #371，本条原结论仅描述 2026-10-16 的状态。
+
 ## 实际性能矩阵
 
 下表记录初始验收时的场景状态；后续实测以本节之后的日期附记为准。方案中的预算是目标，不能填写为本次成绩。性能原始制品保留仓库外，仓库只写匿名汇总与制品引用。
@@ -242,3 +244,7 @@ pair3 的前台与隐藏态差异均很小；它与既有 pair1 和下文 pair4 
 为先检查 App 算法行为，运行现有性能与有界性定向回归。首次结果为 27 个 XCTest 中 4 项断言失败，均出现在 `AudiobookWorkspacePerformanceTests.testRoleStatsVisitAnnotationsAndEdgesOnceAndMatchReference` 的角色统计对照；同次 Swift Testing 6 个 suite 的 41 项均通过。源码核对确认生产算法遵循自动 `.lead` 数量上限和短角色停止规则，而独立参考算法只实现 75% 累计前沿；失败来自参考规则落后于角色分层验收，不是生产统计输出与当前验收冲突。
 
 同步更新了大规模选角规范至 2.2.0，并把独立参考算法补齐同一组分层条件，没有修改生产角色统计算法。复跑性能子集：27 XCTest、0 failures；Swift Testing 6 suites、41 tests、0 failures。另运行 `AudiobookCastTests`，73 XCTest、0 failures。该证据使用合成数据，证明确定性等价、遍历次数和资源上界；不证明 Release CPU/RSS、真实 MainActor 时延、硬件音频、XPC 或长稳表现。UI 自动化尝试另见上文，其 0-test 工具链发现错误不能作为产品通过证据。#371 仍保持 no-go。
+
+## 2026-10-19 follow-up: #369 targeted rerun at HEAD 6cce1d62
+
+2026-10-19（Asia/Shanghai）在干净 main（`6cce1d62`，与远端一致）复核 #369 的确定性证据；复核阶段没有改动生产代码。覆盖六类 operation 的定向 filter（`AudioCaptureDrainTests`、`CaptureAudioRelayTests`、`StreamMixerTests`、`TranscriptPresentationTests`、`DubbingExportStreamingTests`、`TeleprompterScriptPerformanceTests`）一次跑通 **40 tests / 6 suites、0 failures**；相邻的 `TeleprompterPositionTests`（提词定位）与 `AppPerformanceMetricsTests` 补跑同样通过。`python3 scripts/check_macos_test_target_coverage.py` 返回 `macos-test-target-coverage: OK`；`git diff --check` 通过。源码核对确认六类 operation 的生产记录点与 snapshot 断言、24/44.1/48 kHz EOS 参考比对回归均在当前 HEAD 存在。本轮同时补上 tap 侧 `captureStop` 的确定性回归：`CoreAudioTapCapture.stop` 在没有设备时仍记录一次数值样本（`bytes`/`count` 为停止时待处理的 Float 输入），`drainPending` 区分取消与成功，统计关闭时不记录；两处变异（outcome 固定为成功、删除 record）分别被 `cancelled` 与 `samples` 断言杀死。真实设备 teardown 的失败路径仍需硬件，属 #371。本次复核不增加真实硬件、Release 配对性能或 UI 交互证据；关闭 #369 仍须在 issue 内明确这些未验收项。
