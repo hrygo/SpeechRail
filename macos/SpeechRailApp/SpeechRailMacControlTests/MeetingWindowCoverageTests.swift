@@ -84,6 +84,69 @@ final class MeetingWindowCoverageTests: XCTestCase {
         )
     }
 
+    func testMinutesPromptKeepsMixedWordSpeakersWithoutChangingCitationIdentity() async throws {
+        let store = try requireStore(), sessionID = try requireSessionID()
+        let prefix = " \t", first = "甲🙂，", second = "乙。", unknown = "待核对"
+        let text = prefix + first + second + unknown + " \n"
+        _ = try await store.appendLine(.init(sessionID: sessionID, role: .speaker, text: text, source: .microphone), id: "mixed")
+        let a = prefix.unicodeScalars.count, b = a + first.unicodeScalars.count
+        let line = try await store.attachTranscriptAttribution(lineID: "mixed", units: [
+            .init(id: "a", textStart: a, textEnd: b, speakerLabel: "A"),
+            .init(id: "b", textStart: b, textEnd: b + second.unicodeScalars.count, speakerLabel: "B")
+        ])
+        let names = ["A": "张工", "B": "李工"]
+        let units = MinutesGenerator.sourceUnits(lines: [line], names: names)
+        XCTAssertEqual(units.count, 1)
+        XCTAssertEqual(units.first?.id, "u1")
+        XCTAssertEqual(units.first?.lineID, "mixed")
+        XCTAssertEqual(units.first?.text, first + second + unknown)
+        let prompt = MinutesGenerator.transcript(units: units)
+        XCTAssertTrue(prompt.contains("张工：甲🙂，"))
+        XCTAssertTrue(prompt.contains("李工：乙。"))
+        XCTAssertTrue(prompt.contains("未确认说话人：待核对"))
+        let rendered = MinutesGenerator.render(lines: [line], names: names)
+        XCTAssertTrue(rendered.contains("张工：甲🙂，"))
+        XCTAssertTrue(rendered.contains("李工：乙。"))
+        let window = try XCTUnwrap(MinutesWindowPlanner.plan(units: units).first)
+        XCTAssertEqual(window.citableUnitIDs, ["u1"])
+        XCTAssertTrue(MinutesGenerator.windowTranscript(window).contains("李工：乙。"))
+        let manual = try await store.attachSpeakerLabel(lineID: "mixed", label: "C")
+        let manualUnits = MinutesGenerator.sourceUnits(lines: [manual], names: names)
+        XCTAssertEqual(manualUnits.first?.text, units.first?.text)
+        XCTAssertTrue(MinutesGenerator.transcript(units: manualUnits).contains("C："))
+        XCTAssertFalse(MinutesGenerator.transcript(units: manualUnits).contains("张工："))
+        let cleared = try await store.attachSpeakerLabel(lineID: "mixed", label: nil)
+        XCTAssertTrue(cleared.speakerLabelIsManual)
+        let clearedPrompt = MinutesGenerator.transcript(units: MinutesGenerator.sourceUnits(lines: [cleared], names: names))
+        XCTAssertFalse(clearedPrompt.contains("张工："))
+        XCTAssertFalse(clearedPrompt.contains("李工："))
+    }
+
+    func testMinutesWordAttributionSurvivesLongUnitWindowSlices() async throws {
+        let store = try requireStore(), sessionID = try requireSessionID()
+        let first = String(repeating: "甲👩🏽‍💻e\u{301}", count: 160)
+        let unknown = String(repeating: "待核", count: 250)
+        let second = String(repeating: "乙🙂", count: 160)
+        let text = first + unknown + second
+        _ = try await store.appendLine(.init(sessionID: sessionID, role: .speaker, text: text, source: .microphone), id: "long-mixed")
+        let line = try await store.attachTranscriptAttribution(lineID: "long-mixed", units: [
+            .init(id: "a", textStart: 0, textEnd: first.unicodeScalars.count, speakerLabel: "A"),
+            .init(id: "b", textStart: (first + unknown).unicodeScalars.count, textEnd: text.unicodeScalars.count, speakerLabel: "B")
+        ])
+        let unit = try XCTUnwrap(MinutesGenerator.sourceUnits(lines: [line], names: ["A": "张工", "B": "李工"]).first)
+        let windows = MinutesWindowPlanner.plan(units: [unit], budget: budget(windowTokens: 200))
+        let pieces = windows.flatMap(\.owned)
+        XCTAssertGreaterThan(pieces.count, 1)
+        XCTAssertEqual(pieces.map(\.text).joined(), unit.text)
+        XCTAssertTrue(pieces.allSatisfy { $0.rootUnitID == "u1" && $0.lineID == "long-mixed" })
+        for piece in pieces {
+            let prompt = MinutesGenerator.transcript(units: [piece])
+            XCTAssertEqual(prompt.contains("张工："), piece.text.contains("甲"))
+            XCTAssertEqual(prompt.contains("李工："), piece.text.contains("乙"))
+            XCTAssertEqual(prompt.contains("未确认说话人："), piece.text.contains("待") || piece.text.contains("核"))
+        }
+    }
+
     // MARK: - 分窗：拥有区唯一，重叠只读
 
     /// 每个来源单元恰好被一个窗口拥有；重叠区不进拥有区。

@@ -889,6 +889,7 @@ public final class MinutesGenerator {
                     + "不要补你没看到的事；转录里没提到的决定、待办、负责人一律不要写。"
                     + "用户补充只是用户选择的 AI 参考，不得写成参会人的发言、决定或待办归属。"
                     + "说话人用转录里已有的名字；同一个名字不要改写成别的称呼。"
+                    + "同一来源编号中可能分段标明不同说话人；只按各段标注归属，未确认说话人不得猜成其他人。"
                     + "每一条概述、结论、待办和未决问题都必须填 source_unit_ids，"
                     + "只能填转录里 [u1] [u2] 这样的编号，一条都没依据就不要写这一条。"
                     + "结论的 modality 要如实填：只是提议或待定就填 proposed，带前提就填 conditional，"
@@ -909,10 +910,8 @@ public final class MinutesGenerator {
 
     /// 转录 → prompt 里的文本。**相对会话开始的秒**，与库里的时间码同源（§6.5）。
     static func render(lines: [TranscriptLine], names: [String: String] = [:]) -> String {
-        lines.map { line in
-            let speaker = line.speakerLabel.flatMap { names[$0] } ?? line.speakerLabel ?? "说话人"
-            let start = line.tStart ?? 0
-            return "[\(Self.timecode(start))] \(speaker)：\(line.text)"
+        sourceUnits(lines: lines, names: names).map { unit in
+            "[\(Self.timecode(unit.startSeconds ?? 0))] \(unit.speakerText)"
         }.joined(separator: "\n")
     }
 
@@ -925,14 +924,19 @@ public final class MinutesGenerator {
             let text = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return nil }
             let speaker = line.speakerLabel.flatMap { names[$0] } ?? line.speakerLabel ?? "说话人"
-            return MinutesSourceUnit(
+            var unit = MinutesSourceUnit(
                 id: "",
                 lineID: line.id,
                 ordinal: line.ordinal,
                 speaker: speaker,
                 text: text,
-                startSeconds: line.tStart
+                startSeconds: line.tStart,
+                attributionUnits: line.speakerLabelIsManual || line.attributionUnits.isEmpty ? nil : line.attributionUnits,
+                speakerNames: names
             )
+            let leading = line.text.unicodeScalars.prefix { CharacterSet.whitespacesAndNewlines.contains($0) }.count
+            unit.attributionUnits = unit.attribution(in: leading..<(leading + text.unicodeScalars.count))
+            return unit
         }
         return usable.enumerated().map { index, unit -> MinutesSourceUnit in
             var numbered = unit
@@ -944,7 +948,7 @@ public final class MinutesGenerator {
     /// 来源单元 → prompt 里的文本。每行前面带 id 与时间码，模型照抄 id 回来。
     static func transcript(units: [MinutesSourceUnit]) -> String {
         units.map { unit in
-            "[\(unit.id)] [\(Self.timecode(unit.startSeconds ?? 0))] \(unit.speaker)：\(unit.text)"
+            "[\(unit.id)] [\(Self.timecode(unit.startSeconds ?? 0))] \(unit.speakerText)"
         }.joined(separator: "\n")
     }
 
@@ -957,7 +961,7 @@ public final class MinutesGenerator {
         func line(_ unit: MinutesSourceUnit, owned: Bool) -> String {
             let marker = owned ? "" : "[上下文·不可引用] "
             return "\(marker)[\(unit.id)] [\(Self.timecode(unit.startSeconds ?? 0))] "
-                + "\(unit.speaker)：\(unit.text)"
+                + "\(unit.speakerText)"
         }
         var lines: [String] = []
         if !window.contextBefore.isEmpty {

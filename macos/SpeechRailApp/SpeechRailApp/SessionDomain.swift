@@ -388,6 +388,10 @@ public struct MinutesSourceUnit: Hashable, Sendable, Identifiable {
     public var ordinal: Int
     public var speaker: String
     public var text: String
+    /// nil 为旧整行标签；空数组为逐词模式中的全未知切片。
+    /// 坐标属于本次来源单元正文，不改变引用身份或原正文。
+    public var attributionUnits: [TranscriptAttributionUnit]?
+    public var speakerNames: [String: String]
     public var startSeconds: Double?
     /// 超长单句被切分后的段序号（0 起）。未切分时为 nil。
     ///
@@ -408,7 +412,9 @@ public struct MinutesSourceUnit: Hashable, Sendable, Identifiable {
         startSeconds: Double?,
         segmentIndex: Int? = nil,
         segmentCount: Int? = nil,
-        segmentRange: Range<Int>? = nil
+        segmentRange: Range<Int>? = nil,
+        attributionUnits: [TranscriptAttributionUnit]? = nil,
+        speakerNames: [String: String] = [:]
     ) {
         self.id = id
         self.lineID = lineID
@@ -419,6 +425,29 @@ public struct MinutesSourceUnit: Hashable, Sendable, Identifiable {
         self.segmentIndex = segmentIndex
         self.segmentCount = segmentCount
         self.segmentRange = segmentRange
+        self.attributionUnits = attributionUnits
+        self.speakerNames = speakerNames
+    }
+
+    var speakerText: String {
+        guard let attributionUnits else { return "\(speaker)：\(text)" }
+        let runs = TranscriptSpeakerRun.display(TranscriptSpeakerRun.project(text: text,
+            attributionUnits: attributionUnits, speakerLabel: nil, speakerLabelIsManual: false))
+        return TranscriptSpeakerRun.formattedText(runs, names: speakerNames, showUnknown: true)
+    }
+
+    /// 裁切仅改变本地文字坐标；不能为半个词推算新的声学时间。
+    func attribution(in range: Range<Int>) -> [TranscriptAttributionUnit]? {
+        guard let attributionUnits else { return nil }
+        return attributionUnits.compactMap { unit in
+            let start = max(range.lowerBound, unit.textStart), end = min(range.upperBound, unit.textEnd)
+            guard end > start else { return nil }
+            let complete = start == unit.textStart && end == unit.textEnd
+            return .init(id: unit.id, textStart: start - range.lowerBound, textEnd: end - range.lowerBound,
+                speakerLabel: unit.speakerLabel,
+                audioStartSample: complete ? unit.audioStartSample : nil,
+                audioEndSample: complete ? unit.audioEndSample : nil)
+        }
     }
 
     /// 这段是否来自被切分的超长发言（`u7#2` 这种形态）。
@@ -1690,6 +1719,11 @@ public enum MinutesWindowPlanner {
             return [unit]
         }
         let characters = Array(unit.text)
+        var scalarOffsets = [0], scalarOffset = 0
+        for character in characters {
+            scalarOffset += character.unicodeScalars.count
+            scalarOffsets.append(scalarOffset)
+        }
         var slices: [Range<Int>] = []
         var start = 0
         while start < characters.count {
@@ -1710,6 +1744,7 @@ public enum MinutesWindowPlanner {
             var piece = unit
             piece.id = "\(unit.id)#\(offset + 1)"
             piece.text = String(characters[range])
+            piece.attributionUnits = unit.attribution(in: scalarOffsets[range.lowerBound]..<scalarOffsets[range.upperBound])
             piece.segmentIndex = offset
             piece.segmentCount = total
             piece.segmentRange = range
