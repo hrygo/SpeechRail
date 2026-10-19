@@ -1352,6 +1352,32 @@ paths:
                 type: string
                 pattern: '^tm_[0-9a-f]{32}$'
               description: Present when SpeechRail-Timing-Mode=chunk and the bounded timing registry accepted the request.
+            SpeechRail-Ttfa-Ms:
+              schema:
+                type: integer
+                minimum: 0
+              description: |
+                Request accepted to first audio byte available, in whole
+                milliseconds. An observation, never an admission or quality
+                signal. Absent when nothing was measured (for example a
+                cancelled render), which is not the same as zero.
+            SpeechRail-Audio-Ms:
+              schema:
+                type: integer
+                minimum: 0
+              description: |
+                Delivered audio duration in milliseconds. Only present on a
+                fully buffered response (`response_format=wav`): a streamed
+                body cannot know its own total length before its headers are
+                sent.
+            SpeechRail-Rtf:
+              schema:
+                type: number
+                minimum: 0
+              description: |
+                Wall-clock time divided by audio duration. Only present on a
+                fully buffered response. Includes encoding time, so it is a
+                lower bound on model speed rather than a benchmark.
           content:
             audio/mpeg:
               schema:

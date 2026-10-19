@@ -960,6 +960,10 @@
             },
             "commit_event_id": {
               "$ref": "#/$defs/identifier"
+            },
+            "repetition_collapsed": {
+              "type": "integer",
+              "minimum": 1
             }
           },
           "required": [
@@ -1578,6 +1582,18 @@
             },
             "generated_samples": {
               "type": "integer",
+              "minimum": 0
+            },
+            "ttfa_ms": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "audio_ms": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "rtf": {
+              "type": "number",
               "minimum": 0
             }
           },

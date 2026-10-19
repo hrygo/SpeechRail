@@ -31,6 +31,7 @@ from speechrail.domain.asr_window import (
 )
 from speechrail.domain.audio_timeline import RateMap, SampleSpan
 from speechrail.domain.ports import SegmentCloseReason, WindowAsrSession
+from speechrail.domain.transcript_cleanup import CollapseResult
 from speechrail.observability.metrics import Metrics
 from speechrail.runtime.cleanup import join_cleanup
 from speechrail.runtime.window_pcm import (
@@ -81,6 +82,7 @@ class AsrWindowCoordinator:
         to_wire_sample: Callable[[int], int] | None = None,
         pcm_budget: PcmBudget | None = None,
         metrics: Metrics | None = None,
+        clean_final: Callable[[str], CollapseResult] | None = None,
     ) -> None:
         self.ledger = WindowLedger(identity, policy)
         self.ring = WindowPcmRing(budget_bytes=policy.pcm_budget_bytes, budget_account=pcm_budget)
@@ -92,6 +94,7 @@ class AsrWindowCoordinator:
         self.policy, self.decoder, self.scene = policy, decoder, scene
         self._metrics = metrics
         self._send, self._on_final, self._review = send, on_final, review
+        self._clean_final = clean_final
         self._on_auxiliary_unavailable = on_auxiliary_unavailable
         self._language, self._context, self._clock = language, context, clock
         self._closed: OrderedDict[str, _Closed] = OrderedDict()
@@ -376,10 +379,18 @@ class AsrWindowCoordinator:
                 )
             )
             if isinstance(unit, FinalWindowUnit):
+                cleaned = self._clean_final(unit.text) if self._clean_final is not None else None
+                transcript = cleaned.text if cleaned is not None else unit.text
                 await self._send(
-                    transcription_completed(item_id=unit.item_id, transcript=unit.text)
+                    transcription_completed(
+                        item_id=unit.item_id,
+                        transcript=transcript,
+                        repetition_collapsed=(
+                            cleaned.collapsed_runs or None if cleaned is not None else None
+                        ),
+                    )
                 )
-                if unit.text:
+                if transcript:
                     pin = None
                     if len(self._auxiliary_tasks) < 2:
                         with suppress(RuntimeError):

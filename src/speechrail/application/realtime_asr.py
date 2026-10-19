@@ -51,6 +51,7 @@ from speechrail.domain.ports import (
     WindowAsrFactory,
     WindowAsrSession,
 )
+from speechrail.domain.transcript_cleanup import CollapseResult, collapse_repetitions
 from speechrail.observability.metrics import Metrics
 from speechrail.realtime.speech_admission import AdmissionDecision, SpeechAdmission
 from speechrail.runtime.asr_debug_tap import AsrDebugTap
@@ -326,6 +327,7 @@ class RealtimeAsrOwner:
             pcm_budget=self._ports.pcm_budget,
             metrics=self._ports.metrics,
             to_wire_sample=lambda sample: min(self.accepted_samples, self._to_wire_sample(sample)),
+            clean_final=self._clean_final,
         )
 
     def _window_silence_frontier(self) -> None:
@@ -1524,6 +1526,19 @@ class RealtimeAsrOwner:
             commit_event_id=commit_event_id,
         )
 
+    def _clean_final(self, text: str) -> CollapseResult:
+        """Collapse decoder-runaway repetition out of one final ASR transcript.
+
+        Only the final text is cleaned: a hypothesis is replaced by the next
+        revision, so spending work on a string that is about to be discarded
+        buys nothing and risks collapsing an incomplete run mid-word. With the
+        cleanup off the input comes back untouched, not copied.
+        """
+
+        if not self._settings.asr_repetition_collapse_enabled:
+            return CollapseResult(text=text)
+        return collapse_repetitions(text, min_run=self._settings.asr_repetition_collapse_min_run)
+
     async def _drain_asr_events(self, item: _AsrItem) -> None:
         asr = item.asr
         try:
@@ -1566,7 +1581,8 @@ class RealtimeAsrOwner:
                     # Claim before yielding to transport: clear must not
                     # append a second terminal while this one is being sent.
                     item.terminal = True
-                    norm_text = apply_light_itn(event.text)
+                    cleaned = self._clean_final(apply_light_itn(event.text))
+                    norm_text = cleaned.text
                     item.revision = max(1, item.preview_revision + 1)
                     self._record_item_first_hypothesis(item, "missing")
                     self._ports.metrics.record_realtime_turn(
@@ -1595,6 +1611,7 @@ class RealtimeAsrOwner:
                                 item_id=item_id,
                                 transcript=norm_text,
                                 commit_event_id=item.commit_event_id,
+                                repetition_collapsed=cleaned.collapsed_runs or None,
                             )
                         )
                         item.terminal = True
@@ -1623,6 +1640,7 @@ class RealtimeAsrOwner:
                             item_id=item.item_id,
                             transcript=norm_text,
                             commit_event_id=item.commit_event_id,
+                            repetition_collapsed=cleaned.collapsed_runs or None,
                         )
                     )
                     item.terminal = True

@@ -1,6 +1,6 @@
 # SpeechRail Realtime ASR/TTS 协议契约
 
-> 契约版本：`6.6.10`；生效日期：2026-10-19。唯一机器 schema 是
+> 契约版本：`6.7.0`；生效日期：2026-10-19。唯一机器 schema 是
 > [`realtime-events.schema.json`](realtime-events.schema.json)，字段责任表是
 > [`realtime-field-matrix.json`](realtime-field-matrix.json)。
 
@@ -176,6 +176,26 @@ clear 取消。此后对空缓冲区执行一次 `commit` 会产生空 `complete
 冻结，不代表语义结束，也不应单独触发调用方的一轮回复；空输入不创建虚假的样本区间。
 重采样相位跨 client commit 连续保留。极短的新 wire 输入若未产生新的识别样本，提交仍返回
 空 `completed`，不创建 `segment_closed`；完成屏障的 `accepted_samples` 仍统计全部 wire 输入。
+
+### 转写终态的可选观测值
+
+`conversation.item.input_audio_transcription.completed` 可带可选整数
+`repetition_collapsed`：本条转写里被合并掉的解码回路重复段数量。**没有坍缩时该字段缺席**，
+因此忽略它的客户端看到的事件与加入清理之前逐字节一致。它只是观测值：不参与准入、不参与
+质量判定，也不承诺"文本一定是干净的"——修辞性重复（同一词说五遍）有合法用途，会被保留。
+
+```json
+{
+  "type": "conversation.item.input_audio_transcription.completed",
+  "event_id": "evt_9",
+  "session_id": "sess_1",
+  "sequence": 12,
+  "item_id": "item_2",
+  "content_index": 0,
+  "transcript": "预算",
+  "repetition_collapsed": 1
+}
+```
 
 ```json
 {
@@ -383,6 +403,12 @@ speechrail.tts.cancel -> speechrail.tts.cancelled
 和生效 `limits`。每个 `audio.delta` 带 `task_id`、`request_id`、`chunk_index`、`sample_offset` 与
 Base64 PCM。TTS 只使用 SpeechRail namespace；不同时发送 `response.done`，每次 utterance 恰好一个
 terminal：`completed`、`cancelled` 或 `failed`。取消后不得再投递旧音频。
+
+`completed` 额外携带三个**可选**延迟观测字段：`ttfa_ms`（从 `start` 被接受到第一段
+`audio.delta` 可用的毫秒数）、`audio_ms`（本 utterance 已交付音频的时长）、`rtf`（墙钟时间
+除以音频时长）。三者都是**观测值**，不参与准入、重试、预算或质量判定；字段缺失表示"没测到"，
+不等于 0。`rtf` 在增量路径上包含等待调用方消费窗口的时间，因此它是模型速度的下界，不是模型
+基准。`cancelled` 与 `failed` 不携带这些字段。
 
 ### PCM 消费窗口
 

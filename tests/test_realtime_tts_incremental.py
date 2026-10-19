@@ -909,3 +909,33 @@ def test_text_ack_bypasses_audio_waiting_for_consumption() -> None:
             await session.close()
 
     asyncio.run(scenario())
+
+
+def test_completed_terminal_reports_latency_observations() -> None:
+    """Observations describe the utterance; they never gate it.
+
+    ``ttfa_ms`` is request-to-first-audio, ``audio_ms`` is the delivered
+    duration and ``rtf`` is wall-clock over audio. A cancelled or failed
+    utterance publishes none of them, so a caller can tell "measured zero"
+    from "never measured".
+    """
+
+    synthesizer = FakeIncrementalSynthesizer(audio_chunks=(b"\x01\x02\x03\x04", b"\x05\x06"))
+    client = _client(synthesizer)
+    with client.websocket_connect("/v1/realtime") as socket:
+        _channel(socket)
+        socket.send_json(tts_start(request_id="lat_001", voice="vivian"))
+        _append(socket, "lat_001", 0, "你好。")
+        socket.send_json(tts_finish_text(request_id="lat_001", last_sequence=0))
+        events = _drain(socket)
+
+    completed = next(e for e in events if e["type"] == "speechrail.tts.completed")
+    assert completed["generated_samples"] == 3
+    assert isinstance(completed["ttfa_ms"], int) and completed["ttfa_ms"] >= 0
+    # Three samples at the 24 kHz wire rate, rounded to whole milliseconds.
+    assert completed["audio_ms"] == 0
+    assert completed["rtf"] >= 0
+    # The observation never leaks into a non-terminal event.
+    for event in events:
+        if event["type"] != "speechrail.tts.completed":
+            assert "ttfa_ms" not in event

@@ -9,7 +9,7 @@ import logging
 import shutil
 import struct
 import time as _time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Literal, cast
 
@@ -80,6 +80,7 @@ from speechrail.http.formatters import (
     format_vtt,
 )
 from speechrail.http.tts_errors import tts_backend_error_response
+from speechrail.observability.latency import latency_headers
 from speechrail.runtime.admission import QueueFullError
 from speechrail.runtime.alignment_admission import AlignmentAdmissionFullError
 from speechrail.runtime.asr_mode import AsrModeBusy
@@ -657,6 +658,18 @@ def _streaming_audio_response(
                 ))
 
     return OwnedResponse(body, media_type=media_type)
+
+
+def _set_latency_headers(
+    response: Response, fields: Mapping[str, int | float]
+) -> None:
+    """Publish whatever latency observations exist at header-send time.
+
+    Absent fields are simply not sent: a streamed render cannot know its own
+    audio duration, and a cancelled render never measured one.
+    """
+    for name, value in latency_headers(fields).items():
+        response.headers[name] = value
 
 
 async def _encode_container(
@@ -2004,6 +2017,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 response.headers["SpeechRail-Receipt-Id"] = receipt_id
             if timing_id is not None:
                 response.headers["SpeechRail-Timing-Id"] = timing_id
+            _set_latency_headers(response, operation.ttfa_fields())
             return response
         pcm_counter = PcmOutputCounter(_MAX_ENCODED_AUDIO_BYTES)
         if body.response_format in _TTS_CONTAINER_ENCODERS:
@@ -2123,6 +2137,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 response.headers["SpeechRail-Receipt-Id"] = receipt_id
             if timing_id is not None:
                 response.headers["SpeechRail-Timing-Id"] = timing_id
+            _set_latency_headers(response, operation.ttfa_fields())
             return response
 
         pcm = bytearray()
@@ -2231,6 +2246,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
             final_response.headers["SpeechRail-Receipt-Id"] = receipt_id
         if timing_id is not None:
             final_response.headers["SpeechRail-Timing-Id"] = timing_id
+        _set_latency_headers(final_response, operation.latency)
         return final_response
 
     return router

@@ -19,6 +19,10 @@ from speechrail.backends.model_identity import inspect_model
 from speechrail.backends.qwen3_shared import Qwen3SharedWorker, WorkerTransportError
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment, TranscriptWord
 from speechrail.domain.ports import BatchTranscriber, TranscriptionRequest
+from speechrail.domain.transcript_cleanup import (
+    DEFAULT_MIN_RUN,
+    collapse_transcript_result,
+)
 from speechrail.runtime.asr_mode import AsrBatchTicket, AsrModeScheduler
 from speechrail.runtime.worker_process import (
     WorkerProcessSpec,
@@ -551,11 +555,32 @@ class _Qwen3TranscriptionWorker(Protocol):
 
 
 class Qwen3BatchTranscriber(BatchTranscriber):
-    """Normalize the isolated Qwen worker behind the public batch ASR port."""
+    """Normalize the isolated Qwen worker behind the public batch ASR port.
 
-    def __init__(self, *, worker: _Qwen3TranscriptionWorker, model_id: str) -> None:
+    Decoder-runaway repetition is collapsed here, at the port boundary, so
+    every caller of ASR sees the same cleaned transcript: REST, jobs, MCP and
+    the local file processor all go through this object.
+    """
+
+    def __init__(
+        self,
+        *,
+        worker: _Qwen3TranscriptionWorker,
+        model_id: str,
+        repetition_collapse_enabled: bool = True,
+        repetition_collapse_min_run: int = DEFAULT_MIN_RUN,
+    ) -> None:
         self._worker = worker
         self._model_id = model_id
+        self._repetition_collapse_enabled = repetition_collapse_enabled
+        self._repetition_collapse_min_run = repetition_collapse_min_run
+
+    def _cleanup(self, result: TranscriptResult) -> TranscriptResult:
+        return collapse_transcript_result(
+            result,
+            enabled=self._repetition_collapse_enabled,
+            min_run=self._repetition_collapse_min_run,
+        )
 
     async def trim_memory(self) -> None:
         trim_fn = getattr(self._worker, "trim_memory", None)
@@ -570,8 +595,10 @@ class Qwen3BatchTranscriber(BatchTranscriber):
             request_id=request.request_id,
             include_timestamps=request.include_timestamps,
         )
-        return result.model_copy(
-            update={"request_id": request.request_id, "model_id": self._model_id}
+        return self._cleanup(
+            result.model_copy(
+                update={"request_id": request.request_id, "model_id": self._model_id}
+            )
         )
 
     async def transcribe_stream(
@@ -591,8 +618,10 @@ class Qwen3BatchTranscriber(BatchTranscriber):
                 include_timestamps=include_timestamps,
                 request_id=request_id,
             )
-            return result.model_copy(
-                update={"request_id": request_id, "model_id": self._model_id}
+            return self._cleanup(
+                result.model_copy(
+                    update={"request_id": request_id, "model_id": self._model_id}
+                )
             )
 
         chunks: list[bytes] = []
@@ -606,6 +635,8 @@ class Qwen3BatchTranscriber(BatchTranscriber):
             include_timestamps=include_timestamps,
             request_id=request_id,
         )
-        return result.model_copy(
-            update={"request_id": request_id, "model_id": self._model_id}
+        return self._cleanup(
+            result.model_copy(
+                update={"request_id": request_id, "model_id": self._model_id}
+            )
         )
