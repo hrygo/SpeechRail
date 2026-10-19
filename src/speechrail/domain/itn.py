@@ -39,9 +39,9 @@ _LAI_VERB_CONTINUATIONS = frozenset("自看说讲源到回临")
 # approximation, not a closed decimal value: 一点一点, 三点一刻, 三点五几,
 # 九点九分. 分 is included because NUM点NUM分 is a clock reading.
 _DECIMAL_BLOCKERS = frozenset("点滴刻线几多余分")
-# The fractional part of a decimal is made only of digit characters. A run
-# that also contains 十/百/... was cut out of a larger spoken numeral
-# (七点四十 is 7:40, not 7.4 and a stray 十), so it must be left whole.
+# The fractional part is normally digit-by-digit. A fraction containing 十 can
+# be either a clock (七点四十) or a closed decimal with a unit (三点十四秒);
+# the callback decides from the right context instead of truncating the run.
 _DECIMAL_DIGIT_CHARS = frozenset("零一二三四五六七八九0123456789")
 # Exactly two fractional digits can be clock minutes (十点零五). Only one of
 # these continuations proves that the run is a measurement rather than a time.
@@ -52,8 +52,8 @@ _UNIT_BOUNDARIES = frozenset("，。！？；：、,.!?;: \n\t”’）)】》")
 # 次 is a count in 一次会议 / 连续两次一致, but a lexical or ordinal morpheme
 # in these closed technical phrases. Keeping the spoken form is the safe
 # failure mode: a missed conversion loses digits, while 1次性 / 2次开发
-# corrupts the sentence. Only exact prefixes are listed so unseen contexts
-# still reach the numeric rule.
+# corrupts the sentence. These exact prefixes are an explicit blacklist; the
+# positive count list below decides the remaining cases.
 _CI_LEXICAL_TERMS = frozenset({
     "一次性",
     "一次函数",
@@ -317,10 +317,10 @@ def _decimal_to_arabic(match: re.Match[str]) -> str:
     tail = match.string[match.end() : match.end() + 1]
     if tail in _DECIMAL_BLOCKERS or _is_approximate_suffix(match.string, match.end()):
         return match.group(0)
-    # The regex only consumes decimal digits. A magnitude character directly
-    # after the match means it stopped in the middle of a spoken numeral:
-    # 七点四十 is 7:40, not 7.4 plus a loose 十. 万/亿 are the one exception,
-    # because 三点五万元 is a decimal quantity followed by its magnitude.
+    # A magnitude character directly after the match means it stopped in the
+    # middle of a spoken numeral: 三点一百 is not 3.1 plus a loose 百. 万/亿
+    # are the exception, because 三点五万元 is a decimal quantity followed by
+    # its magnitude. 十 is consumed by the regex and validated below.
     if (
         tail in _NUMERAL_CHARS
         and tail not in {"万", "亿"}
