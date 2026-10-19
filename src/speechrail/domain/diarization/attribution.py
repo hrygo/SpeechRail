@@ -7,9 +7,9 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from hashlib import blake2b
 from itertools import accumulate
-from math import fsum
+from math import fsum, isfinite
 
-from speechrail.domain.audio_timeline import SampleSpan
+from speechrail.domain.audio_timeline import CORE_SAMPLE_RATE, SampleSpan
 
 from .types import ActivityFrame, ActivityUpdate, Attribution, TextUnit
 
@@ -38,10 +38,16 @@ def union_support(unit: SampleSpan, activities: Iterable[SampleSpan]) -> float:
 class AttributionPolicy:
     min_support: float = 0.60
     min_margin: float = 0.10
+    continuity_gap_seconds: float = 0.50
 
     def __post_init__(self) -> None:
         if not 0 <= self.min_support <= 1 or not 0 <= self.min_margin <= 1:
             raise ValueError("attribution policy values must be in [0, 1]")
+        if (
+            not isfinite(self.continuity_gap_seconds)
+            or self.continuity_gap_seconds < 0
+        ):
+            raise ValueError("continuity gap must be finite and non-negative")
 
 
 @dataclass(slots=True)
@@ -75,6 +81,11 @@ class AttributionLedger:
         self._stable_through = 0
         self._slot_labels: dict[int, str] = {}
         self._units: dict[str, _UnitState] = {}
+        # Final, known labels and the end of the most recent final unit. This
+        # small amount of state survives activity compaction so a continuous
+        # voice can keep its label without rescanning unrelated history.
+        self._continuity_label: str | None = None
+        self._continuity_end = 0
 
     @property
     def processed_through(self) -> int:
@@ -95,6 +106,7 @@ class AttributionLedger:
                 raise ValueError(f"duplicate text unit id: {unit.id}")
             attribution = self._evaluate(unit, revision=1)
             self._units[unit.id] = _UnitState(unit=unit, attribution=attribution)
+            self._advance_continuity(self._units[unit.id])
             emitted.append(attribution)
         return tuple(emitted)
 
@@ -181,6 +193,7 @@ class AttributionLedger:
                     next_attribution, revision=state.attribution.revision + 1
                 )
                 changed.append(state.attribution)
+                self._advance_continuity(state)
         return tuple(changed)
 
     @property
@@ -313,6 +326,8 @@ class AttributionLedger:
                 probability_winner = self._interior_pause_winner(unit.audio_span, frames)
             if probability_winner is not None:
                 speaker = self._label_for(probability_winner)
+            elif final:
+                speaker = self._continuous_speaker(unit.audio_span, support)
         return Attribution(
             unit_id=unit.id,
             speaker=speaker,
@@ -404,4 +419,55 @@ class AttributionLedger:
                 else chr(ord("A") + len(self._slot_labels))
             )
             self._slot_labels[slot] = label
+        return label
+
+    def _advance_continuity(self, state: _UnitState) -> None:
+        """Remember the latest final label without changing finalized units."""
+
+        span = state.unit.audio_span
+        if span is None or state.attribution.state != "final":
+            return
+        if span.start < self._continuity_end:
+            return
+        if any(frame.reason is not None for frame in self._intersecting_frames(span)):
+            # A degraded interval may be missing activity, so it cannot carry
+            # a speaker label into the next unit even if coverage still looked
+            # unambiguous for this one.
+            self._continuity_label = None
+            self._continuity_end = span.end
+            return
+        if state.attribution.speaker is not None:
+            self._continuity_label = state.attribution.speaker
+        elif state.attribution.reason != "insufficient_evidence":
+            # A degraded or unavailable interval ends the continuity run. A
+            # merely insufficient unit keeps the prior label for the next
+            # adjacent unit, matching the bounded evidence window.
+            self._continuity_label = None
+        self._continuity_end = span.end
+
+    def _continuous_speaker(
+        self,
+        span: SampleSpan,
+        support: dict[int, float],
+    ) -> str | None:
+        """Carry a final label across an adjacent unknown unit when still active.
+
+        The previous label is only a prior: the same speaker must still cover
+        the current unit's activity at the normal support floor. A pause longer
+        than ``continuity_gap_seconds`` ends the run, and degraded evidence is
+        never filled.
+        """
+
+        label = self._continuity_label
+        if label is None:
+            return None
+        gap = span.start - self._continuity_end
+        if gap > int(self._policy.continuity_gap_seconds * CORE_SAMPLE_RATE):
+            return None
+        slot = next(
+            (slot for slot, value in self._slot_labels.items() if value == label),
+            None,
+        )
+        if slot is None or support.get(slot, 0.0) < self._policy.min_support:
+            return None
         return label

@@ -21,9 +21,11 @@ MAX_ACTIVITY_FRAMES = 8192
 def attribution_configuration() -> dict[str, object]:
     policy = AttributionPolicy()
     return {
-        "algorithm": "causal_attribution_ledger_v1",
+        "algorithm": "causal_attribution_ledger_v2",
         "min_support": policy.min_support,
         "min_margin": policy.min_margin,
+        "continuity_gap_seconds": policy.continuity_gap_seconds,
+        "continuity_break_on_degraded": True,
         "label_mode": "meeting_dynamic",
         "retention_samples": RETENTION_SAMPLES,
         "max_pending_characters": MAX_PENDING_CHARACTERS,

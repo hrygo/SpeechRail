@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from speechrail.domain.diarization.attribution import AttributionLedger, union_support
+from speechrail.domain.diarization.attribution import (
+    AttributionLedger,
+    AttributionPolicy,
+    union_support,
+)
 from speechrail.domain.diarization.types import ActivityFrame, ActivityUpdate, SampleSpan, TextUnit
 
 
@@ -216,6 +220,156 @@ def test_leading_silence_is_not_an_internal_pause() -> None:
         ActivityFrame(SampleSpan(800, 1600), (0.9,), frozenset({0})),
     ))
     assert result.speaker is None and result.reason == "insufficient_evidence"
+
+
+def _continuity_ledger(
+    frames: tuple[ActivityFrame, ...],
+    *,
+    stable: int,
+    processed: int,
+) -> AttributionLedger:
+    ledger = AttributionLedger(accepted_samples=lambda: processed)
+    ledger.apply(_update(step=1, start=0, end=processed, frames=frames,
+                         processed=processed, stable=stable))
+    return ledger
+
+
+def test_adjacent_unknown_unit_keeps_the_previous_final_speaker_when_still_active() -> None:
+    ledger = _continuity_ledger((
+        ActivityFrame(SampleSpan(0, 800), (0.90, 0.02), frozenset({0})),
+        ActivityFrame(SampleSpan(800, 1600), (0.90, 0.95), frozenset({0, 1})),
+    ), processed=1600, stable=1600)
+    (previous,) = ledger.register(
+        "previous", (TextUnit("previous", 0, 1, SampleSpan(0, 800)),)
+    )
+    (current,) = ledger.register(
+        "current", (TextUnit("current", 1, 2, SampleSpan(800, 1600)),)
+    )
+    assert previous.speaker == "A"
+    assert current.speaker == "A"
+    assert current.active_speakers == ("A", "B")
+    assert current.state == "final" and current.reason is None
+
+
+def test_continuity_gap_boundary_is_inclusive_but_a_longer_pause_breaks_it() -> None:
+    frames = (
+        ActivityFrame(SampleSpan(0, 800), (0.90, 0.02), frozenset({0})),
+        ActivityFrame(SampleSpan(8800, 9600), (0.90, 0.95), frozenset({0, 1})),
+    )
+    ledger = _continuity_ledger(frames, processed=9600, stable=9600)
+    ledger.register("previous", (TextUnit("previous", 0, 1, SampleSpan(0, 800)),))
+    (boundary,) = ledger.register(
+        "boundary", (TextUnit("boundary", 1, 2, SampleSpan(8800, 9600)),)
+    )
+    assert boundary.speaker == "A"
+
+    frames = (
+        ActivityFrame(SampleSpan(0, 800), (0.90, 0.02), frozenset({0})),
+        ActivityFrame(SampleSpan(8801, 9601), (0.90, 0.95), frozenset({0, 1})),
+    )
+    ledger = _continuity_ledger(frames, processed=9601, stable=9601)
+    ledger.register("previous", (TextUnit("previous", 0, 1, SampleSpan(0, 800)),))
+    (past_boundary,) = ledger.register(
+        "past-boundary", (TextUnit("past-boundary", 1, 2, SampleSpan(8801, 9601)),)
+    )
+    assert past_boundary.speaker is None
+    assert past_boundary.reason == "insufficient_evidence"
+
+
+def test_continuity_requires_the_previous_speaker_to_cover_the_current_unit() -> None:
+    ledger = _continuity_ledger((
+        ActivityFrame(SampleSpan(0, 800), (0.90, 0.02), frozenset({0})),
+        ActivityFrame(SampleSpan(800, 1200), (0.90, 0.02), frozenset({0})),
+        ActivityFrame(SampleSpan(1200, 1600), (0.02, 0.02), frozenset()),
+    ), processed=1600, stable=1600)
+    ledger.register("previous", (TextUnit("previous", 0, 1, SampleSpan(0, 800)),))
+    (current,) = ledger.register(
+        "current", (TextUnit("current", 1, 2, SampleSpan(800, 1600)),)
+    )
+    assert current.speaker is None
+    assert current.reason == "insufficient_evidence"
+
+
+def test_continuity_does_not_override_a_known_speaker() -> None:
+    ledger = _continuity_ledger((
+        ActivityFrame(SampleSpan(0, 800), (0.90, 0.02), frozenset({0})),
+        ActivityFrame(SampleSpan(800, 1600), (0.02, 0.99), frozenset({1})),
+    ), processed=1600, stable=1600)
+    ledger.register("previous", (TextUnit("previous", 0, 1, SampleSpan(0, 800)),))
+    (current,) = ledger.register(
+        "current", (TextUnit("current", 1, 2, SampleSpan(800, 1600)),)
+    )
+    assert current.speaker == "B"
+
+
+def test_continuity_never_fills_a_degraded_reason() -> None:
+    ledger = _continuity_ledger((
+        ActivityFrame(SampleSpan(0, 800), (0.90, 0.02), frozenset({0})),
+        ActivityFrame(
+            SampleSpan(800, 1600), (0.90, 0.95), frozenset({0, 1}), "activity_gap"
+        ),
+    ), processed=1600, stable=1600)
+    ledger.register("previous", (TextUnit("previous", 0, 1, SampleSpan(0, 800)),))
+    (current,) = ledger.register(
+        "current", (TextUnit("current", 1, 2, SampleSpan(800, 1600)),)
+    )
+    assert current.speaker is None
+    assert current.reason == "activity_gap"
+
+
+def test_continuity_waits_until_the_unit_is_final() -> None:
+    ledger = _continuity_ledger((
+        ActivityFrame(SampleSpan(0, 800), (0.90, 0.02), frozenset({0})),
+        ActivityFrame(SampleSpan(800, 1600), (0.90, 0.95), frozenset({0, 1})),
+    ), processed=1600, stable=800)
+    ledger.register("previous", (TextUnit("previous", 0, 1, SampleSpan(0, 800)),))
+    (provisional,) = ledger.register(
+        "current", (TextUnit("current", 1, 2, SampleSpan(800, 1600)),)
+    )
+    assert provisional.state == "provisional"
+    assert provisional.speaker is None
+
+    (final,) = ledger.apply(_update(
+        step=2, start=800, end=800, frames=(), processed=1600, stable=1600
+    ))
+    assert final.unit_id == "current"
+    assert final.state == "final" and final.speaker == "A"
+
+
+def test_continuity_survives_activity_compaction() -> None:
+    ledger = _continuity_ledger((
+        ActivityFrame(SampleSpan(0, 800), (0.90, 0.02), frozenset({0})),
+        ActivityFrame(SampleSpan(800, 1600), (0.90, 0.95), frozenset({0, 1})),
+    ), processed=1600, stable=1600)
+    ledger.register("previous", (TextUnit("previous", 0, 1, SampleSpan(0, 800)),))
+    ledger.compact(800)
+    (current,) = ledger.register(
+        "current", (TextUnit("current", 1, 2, SampleSpan(800, 1600)),)
+    )
+    assert current.speaker == "A"
+
+
+def test_a_degraded_unit_ends_the_continuity_run() -> None:
+    ledger = _continuity_ledger((
+        ActivityFrame(SampleSpan(0, 800), (0.90, 0.02), frozenset({0})),
+        ActivityFrame(
+            SampleSpan(800, 1200), (0.90, 0.02), frozenset({0}), "activity_gap"
+        ),
+        ActivityFrame(SampleSpan(1200, 1600), (0.90, 0.95), frozenset({0, 1})),
+    ), processed=1600, stable=1600)
+    ledger.register("previous", (TextUnit("previous", 0, 1, SampleSpan(0, 800)),))
+    ledger.register("degraded", (TextUnit("degraded", 1, 2, SampleSpan(800, 1200)),))
+    (current,) = ledger.register(
+        "current", (TextUnit("current", 2, 3, SampleSpan(1200, 1600)),)
+    )
+    assert current.speaker is None
+    assert current.reason == "insufficient_evidence"
+
+
+@pytest.mark.parametrize("gap", [-0.1, float("nan"), float("inf")])
+def test_continuity_gap_policy_rejects_invalid_values(gap: float) -> None:
+    with pytest.raises(ValueError):
+        AttributionPolicy(continuity_gap_seconds=gap)
 
 
 def test_internal_pause_attribution_follows_watermarks_and_final_is_immutable() -> None:
