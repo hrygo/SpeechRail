@@ -65,7 +65,7 @@ def test_itn_preserves_unify_word_before_quantity_units(text: str) -> None:
 
 
 @pytest.mark.parametrize(("text", "expected"), [
-    ("一个人分两次", "1个人分2次"),
+    ("一个人分两次", "一个人分2次"),
     ("统一一百个人", "统一一百个人"),
     ("总统三人随行", "总统3人随行"),
     ("统一，三个人分两次", "统一，3个人分2次"),

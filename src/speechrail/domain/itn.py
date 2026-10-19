@@ -195,6 +195,10 @@ def apply_light_itn(text: str) -> str:
     def _convert_with_unit(m: re.Match[str]) -> str:
         cn_num = m.group(1)
         unit = m.group(2)
+        # Preserve the natural classifier phrase 一个 (有一个 / 每一个).
+        # Larger explicit quantities such as 十一个 still become 11个.
+        if cn_num == "一" and unit == "个":
+            return m.group(0)
         # 统一 is an ordinary word, including before 分配 or 人员.
         if cn_num == "一" and m.start() > 0 and m.string[m.start() - 1] == "统":
             return m.group(0)
