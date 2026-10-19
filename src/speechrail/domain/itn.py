@@ -159,6 +159,24 @@ _CI_COUNT_CONTINUATIONS = frozenset({
     "部署",
     "构建",
 })
+# 人 is a count unit in ordinary speech, but these continuations close a
+# lexical idiom or title: 万人空巷 / 千人一面 / 一人得道 / 两人三足. A partial
+# rewrite corrupts the phrase, so the closed set keeps the spoken form.
+_REN_IDIOM_SUFFIXES = frozenset({
+    "空巷",
+    "迷",
+    "坑",
+    "敌",
+    "一面",
+    "一首",
+    "得道",
+    "做事",
+    "当",
+    "之下",
+    "之上",
+    "三足",
+    "九志",
+})
 # Determiners and deictic prefixes turn 一+unit into a phrase (`下一次`,
 # `每一天`, `同一人`), not a closed count. `比` covers 一天比一天.
 _DETERMINER_PREFIXES = frozenset("每这那某哪同上前后下另何比")
@@ -459,6 +477,10 @@ def apply_light_itn(text: str) -> str:
             if not count:
                 return m.group(0)
         if cn_num == "一" and unit == "人" and previous_char in {"同", "另"}:
+            return m.group(0)
+        if unit == "人" and any(
+            m.string.startswith(suffix, m.end()) for suffix in _REN_IDIOM_SUFFIXES
+        ):
             return m.group(0)
         # 二人转 / 三人行 / 三人成虎 are lexical or idiomatic, not counts.
         if unit == "人" and (
