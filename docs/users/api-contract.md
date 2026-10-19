@@ -249,6 +249,8 @@ string `id`、`type="transcript.text.segment"`、`start/end`、匿名 `speaker: 
 `transcript.text.delta`、`transcript.text.segment`、`transcript.text.done` SSE。每个 delta 带 `segment_id`，指向紧随其后的 segment 事件的 `id`，消费方据此把文本归回所属说话人；缺少该字段时事件顺序正确也无法还原分人结果。超过 30 秒的
 文件必须提供 `chunking_strategy=auto|server_vad`；known-speaker 参数明确返回
 `400 unsupported_parameter`，SpeechRail 不把匿名标签映射为真实姓名或跨会议身份。
+最终投影只在同一转写 item 内、由前后紧邻且相同的确定 final 说话人包夹时，才填补
+`insufficient_evidence` 的未知段；降级原因、临时标签、item 边界和不同说话人保持 unknown。
 
 文件分人是**任务级**能力，不由档位继承：需要显式供给外部 CoreML Sortformer bundle 与一个
 ForcedAligner（`aligner-q8` 或 `aligner-bf16`），且当前实例 `diarization_ready=true`。

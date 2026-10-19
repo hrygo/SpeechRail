@@ -10,7 +10,10 @@ from speechrail.application.diarization.session import DiarizationSession, Sessi
 from speechrail.domain.alignment import AlignmentRequest, AlignTextPort
 from speechrail.domain.audio_timeline import SampleSpan
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
-from speechrail.domain.diarization.attribution import AttributionLedger
+from speechrail.domain.diarization.attribution import (
+    AttributionLedger,
+    bracket_fill_speaker_labels,
+)
 from speechrail.domain.diarization.ports import StreamingActivityPort
 from speechrail.domain.diarization.types import (
     Attribution,
@@ -83,8 +86,13 @@ async def diarize_transcript(
             await consumer
         raise
 
-    labels = _latest_labels(events)
-    by_unit = {unit.id: labels.get(unit.id) for unit in units}
+    attributions = _latest_attributions(events)
+    by_unit = bracket_fill_speaker_labels(
+        attributions.get(unit.id)
+        for unit in sorted(
+            units, key=lambda item: (item.text_start, item.text_end, item.id)
+        )
+    )
     segments = tuple(
         TranscriptSegment(
             id=index,
@@ -98,10 +106,10 @@ async def diarize_transcript(
     return result.model_copy(update={"segments": segments})
 
 
-def _latest_labels(events: list[SessionEvent]) -> dict[str, str | None]:
+def _latest_attributions(events: list[SessionEvent]) -> dict[str, Attribution]:
     labels: dict[str, Attribution] = {}
     for event in events:
         attributions = getattr(event, "attributions", ())
         for attribution in attributions:
             labels[attribution.unit_id] = attribution
-    return {unit_id: attribution.speaker for unit_id, attribution in labels.items()}
+    return labels

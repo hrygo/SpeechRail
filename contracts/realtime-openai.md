@@ -320,6 +320,12 @@ session 内匿名 label，不保存声纹、embedding 或跨会话身份。
 不可用区间，不把静音补成发声；中间单元不会为更早的标签提供旁路，间隔或覆盖不足时仍为
 unknown。
 
+最终投影还可使用同一 ASR item 内确定性的双侧文本上下文：连续未知段只有在全部单元均为
+`final + insufficient_evidence`，且紧邻其前后的单元也是 final、无降级原因并具有相同匿名
+标签时，才继承该标签。孤立或连续未知段均可填充；provisional、其他 unknown 原因、item
+边界和不同标签都会阻断。该规则只修正对外 speaker 投影，不改变 `active_speakers`、活动帧
+或已有确定标签，也不使用参考文字、模型分数或新的阈值。
+
 归属事件的身份取自对应 ASR final 冻结的 item，不使用后来正在接收音频的 item。
 每个 `speechrail.diarization.updated` 只包含该 `utterance_id` 的 units；多个已完成 item 的
 修订分别发送。`speechrail.diarization.done` 是会话收尾屏障，只携带最后一个已完成 item 的

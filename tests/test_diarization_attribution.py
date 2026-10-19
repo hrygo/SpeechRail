@@ -5,9 +5,16 @@ import pytest
 from speechrail.domain.diarization.attribution import (
     AttributionLedger,
     AttributionPolicy,
+    bracket_fill_speaker_labels,
     union_support,
 )
-from speechrail.domain.diarization.types import ActivityFrame, ActivityUpdate, SampleSpan, TextUnit
+from speechrail.domain.diarization.types import (
+    ActivityFrame,
+    ActivityUpdate,
+    Attribution,
+    SampleSpan,
+    TextUnit,
+)
 
 
 def _frame(start: int, end: int, *slots: int) -> ActivityFrame:
@@ -676,3 +683,92 @@ def test_compaction_retains_only_bounded_recent_activity_and_rejects_late_rewrit
         ledger.compact(max(0, end - 60 * 16000))
     assert ledger.retained_counts["frames"] <= 6
     assert ledger.retained_counts["steps"] <= 64
+
+
+def _filled_attribution(
+    unit_id: str,
+    speaker: str | None,
+    *,
+    state: str = "final",
+    reason: str | None = None,
+) -> Attribution:
+    return Attribution(
+        unit_id=unit_id,
+        speaker=speaker,
+        active_speakers=(speaker,) if speaker is not None else (),
+        state=state,
+        reason=reason,
+        revision=1,
+    )
+
+
+def test_bracket_fill_only_uses_same_final_speaker_in_one_item() -> None:
+    labels = bracket_fill_speaker_labels(
+        (
+            _filled_attribution("a", "A"),
+            _filled_attribution("u1", None, reason="insufficient_evidence"),
+            _filled_attribution("u2", None, reason="insufficient_evidence"),
+            _filled_attribution("b", "A"),
+            _filled_attribution("u3", None, reason="insufficient_evidence"),
+            _filled_attribution("c", "B"),
+            _filled_attribution("u4", None, reason="insufficient_evidence"),
+            _filled_attribution("d", "A"),
+        )
+    )
+    assert labels == {
+        "a": "A",
+        "u1": "A",
+        "u2": "A",
+        "b": "A",
+        "u3": None,
+        "c": "B",
+        "u4": None,
+        "d": "A",
+    }
+
+
+@pytest.mark.parametrize(
+    "previous,following",
+    [
+        (
+            _filled_attribution("a", "A", state="provisional"),
+            _filled_attribution("b", "A"),
+        ),
+        (
+            _filled_attribution("a", "A"),
+            _filled_attribution("b", "A", state="provisional"),
+        ),
+        (
+            _filled_attribution("a", "A"),
+            _filled_attribution("b", "A", reason="activity_gap"),
+        ),
+    ],
+)
+def test_bracket_fill_requires_final_known_neighbors(
+    previous: Attribution, following: Attribution
+) -> None:
+    labels = bracket_fill_speaker_labels(
+        (
+            previous,
+            _filled_attribution("unknown", None, reason="insufficient_evidence"),
+            following,
+        )
+    )
+    assert labels["unknown"] is None
+
+
+def test_bracket_fill_does_not_cross_item_boundaries() -> None:
+    first = bracket_fill_speaker_labels(
+        (
+            _filled_attribution("left", "A"),
+            _filled_attribution("edge-1", None, reason="insufficient_evidence"),
+        )
+    )
+    second = bracket_fill_speaker_labels(
+        (
+            _filled_attribution("edge-2", None, reason="insufficient_evidence"),
+            _filled_attribution("right", "A"),
+        )
+    )
+    assert first["edge-1"] is None
+    assert second["edge-2"] is None

@@ -34,6 +34,63 @@ def union_support(unit: SampleSpan, activities: Iterable[SampleSpan]) -> float:
     return covered / (unit.end - unit.start)
 
 
+def bracket_fill_speaker_labels(
+    attributions: Iterable[Attribution | None],
+) -> dict[str, str | None]:
+    """Fill final unknowns bracketed by the same final speaker.
+
+    The caller supplies one frozen ASR item in text order. A contiguous run of
+    final ``insufficient_evidence`` units can inherit a label only when the
+    units immediately before and after the run are final and carry the same
+    known anonymous label. Provisional units, every other unknown reason and
+    item edges stop the run, so this rule cannot bridge degraded evidence or a
+    second transcription item. The activity evidence and ``active_speakers``
+    remain unchanged; this is a deterministic projection of final context.
+    """
+
+    ordered = tuple(attributions)
+    fillable = tuple(
+        attribution is not None
+        and attribution.speaker is None
+        and attribution.state == "final"
+        and attribution.reason == "insufficient_evidence"
+        for attribution in ordered
+    )
+    labels = {
+        attribution.unit_id: attribution.speaker
+        for attribution in ordered
+        if attribution is not None
+    }
+    index = 0
+    while index < len(ordered):
+        if not fillable[index]:
+            index += 1
+            continue
+        run_start = index
+        while index < len(ordered) and fillable[index]:
+            index += 1
+        run_end = index
+        if run_start == 0 or run_end == len(ordered):
+            continue
+        previous = ordered[run_start - 1]
+        following = ordered[run_end]
+        if (
+            previous is None
+            or following is None
+            or previous.state != "final"
+            or following.state != "final"
+            or previous.reason is not None
+            or following.reason is not None
+            or previous.speaker is None
+            or previous.speaker != following.speaker
+        ):
+            continue
+        for attribution in ordered[run_start:run_end]:
+            assert attribution is not None
+            labels[attribution.unit_id] = previous.speaker
+    return labels
+
+
 @dataclass(frozen=True, slots=True)
 class AttributionPolicy:
     min_support: float = 0.60
