@@ -94,6 +94,52 @@ _CI_LEXICAL_TERMS = frozenset({
     "二次幂",
     "三次产业",
 })
+# 次 is a count in 第一次, at a boundary (执行一次。), or before a closed count
+# continuation (一次会议 / 两次独立). 二次感染 / 二次伤害 / 二次销售 are
+# secondary-event compounds, not "two times"; an unseen continuation is kept.
+_CI_COUNT_CONTINUATIONS = frozenset({
+    "一致",
+    "会议",
+    "请求",
+    "提交",
+    "调用",
+    "重试",
+    "重复",
+    "尝试",
+    "独立",
+    "真实",
+    "失败",
+    "成功",
+    "运行",
+    "审查",
+    "复核",
+    "维护",
+    "迭代",
+    "采样",
+    "训练",
+    "推理",
+    "转写",
+    "机会",
+    "面试",
+    "比赛",
+    "回答",
+    "回声",
+    "有界",
+    "有效",
+    "完成",
+    "处理",
+    "测试",
+    "试读",
+    "试运行",
+    "发送",
+    "读取",
+    "写入",
+    "启动",
+    "关闭",
+    "加载",
+    "部署",
+    "构建",
+})
 # Determiners and deictic prefixes turn 一+unit into a phrase (`下一次`,
 # `每一天`, `同一人`), not a closed count. `比` covers 一天比一天.
 _DETERMINER_PREFIXES = frozenset("每这那某哪同上前后下另何比")
@@ -338,6 +384,20 @@ def apply_light_itn(text: str) -> str:
             return m.group(0)
         if cn_num == "一" and unit == "次" and next_char == "只":
             return m.group(0)
+        # Outside an ordinal, a boundary, or a closed count continuation, 次
+        # is more likely a technical prefix (二次感染/二次伤害/二次销售).
+        if unit == "次":
+            count = (
+                previous_char == "第"
+                or not next_char
+                or next_char in _UNIT_BOUNDARIES
+                or any(
+                    m.string.startswith(term, m.end())
+                    for term in _CI_COUNT_CONTINUATIONS
+                )
+            )
+            if not count:
+                return m.group(0)
         if cn_num == "一" and unit == "人" and previous_char in {"同", "另"}:
             return m.group(0)
         # A single digit before 元 is usually a term (二元组/一元论/同一元素).

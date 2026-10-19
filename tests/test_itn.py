@@ -486,6 +486,14 @@ def test_itn_still_converts_closed_fen_contexts(
     "二次根式",
     "二次幂",
     "三次产业",
+    "二次感染",
+    "二次伤害",
+    "二次事故",
+    "二次销售",
+    "二次传播",
+    "二次回归",
+    "二次压缩",
+    "二次排序",
 ])
 def test_itn_preserves_determiner_and_lexical_ci(text: str) -> None:
     """一次 in a determiner phrase or a degree term is not a count."""
@@ -501,6 +509,23 @@ def test_itn_preserves_determiner_and_lexical_ci(text: str) -> None:
     ("两天一次", "2天1次"),
 ])
 def test_itn_still_converts_closed_ci_counts(text: str, expected: str) -> None:
+    assert apply_light_itn(text) == expected
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("一次请求", "1次请求"),
+    ("两次独立", "2次独立"),
+    ("三次重复", "3次重复"),
+    ("一次失败", "1次失败"),
+    ("一次成功", "1次成功"),
+    ("一次运行", "1次运行"),
+    ("一次处理", "1次处理"),
+    ("一次机会", "1次机会"),
+    ("一次测试", "1次测试"),
+])
+def test_itn_still_converts_count_continuations(
+    text: str, expected: str
+) -> None:
     assert apply_light_itn(text) == expected
 
 
