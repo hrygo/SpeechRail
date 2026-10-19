@@ -34,7 +34,8 @@ _CN_NUM_RE = re.compile(r"[零一二两三四五六七八九十百千万亿]+")
 # rather than inventing a precise value. Explicit decimal/year rules below
 # retain their positional digit handling.
 _AMBIGUOUS_QUANTITY_RE = re.compile(
-    r"[一二两三四五六七八九]{2}|[百千万亿][一二两三四五六七八九1-9]\Z"
+    r"(?<![零一二两三四五六七八九])[一二两三四五六七八九]{2}(?![零一二两三四五六七八九])"
+    r"|[百千万亿][一二两三四五六七八九1-9]\Z"
 )
 
 # `点` is deliberately absent. In the repository corpus 46 of the 86 `X点`
