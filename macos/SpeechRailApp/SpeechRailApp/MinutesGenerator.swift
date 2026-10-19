@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Observation
 import OSLog
@@ -154,7 +155,9 @@ public final class MinutesGenerator {
             )
             // MA-07：配置与来源快照在**排队这一刻**冻下来（MC-20/MC-32）。
             // 任务跑着的时候改设置，当前任务不跟着换；新配置从下一次任务生效。
-            let jobConfig = MinutesJobConfig(configuration)
+            var jobConfig = MinutesJobConfig(configuration)
+            jobConfig.inputFingerprint = try Self.inputFingerprint(units: units,
+                windows: MinutesWindowPlanner.plan(units: units, budget: Self.windowBudget), supplements: supplements)
             let snapshotID = (try? await coordinator.latestSourceSnapshot(sessionID: sessionID))?.id
             version = try await coordinator.enqueueMinutes(
                 sessionID: sessionID,
@@ -253,7 +256,7 @@ public final class MinutesGenerator {
             // 读不出的指纹（老行没有这一列）才退回当前设置，那不是猜，是没有可还原的东西。
             let currentConfig = MinutesJobConfig(configuration)
             let jobConfig = MinutesJobConfig.parse(row.configSnapshot) ?? currentConfig
-            jobConfigDiffersFromCurrent = jobConfig != currentConfig
+            jobConfigDiffersFromCurrent = jobConfig.configuration != currentConfig.configuration
             guard jobConfig.configuration.isConfigured else {
                 // 没配大模型：不断原 job，只如实记失败；行仍可被下次恢复认领。
                 do {
@@ -370,7 +373,7 @@ public final class MinutesGenerator {
             // 不能混进同一版里（MC-32）。
             let currentConfig = MinutesJobConfig(resolvedConfiguration.configuration)
             let jobConfig = MinutesJobConfig.parse(target.configSnapshot) ?? currentConfig
-            jobConfigDiffersFromCurrent = jobConfig != currentConfig
+            jobConfigDiffersFromCurrent = jobConfig.configuration != currentConfig.configuration
             guard jobConfig.configuration.isConfigured else {
                 failedOnSetup = true
                 state = .failed("还没有配置对话模型。文字记录已经存好，配好之后可以重新生成。")
@@ -551,6 +554,10 @@ public final class MinutesGenerator {
             // §6.3：按 token 预算分窗，每个来源单元恰好 owned 一次。
             // 短会得到单窗，走的是**同一条**验证与落库路径。
             let windows = MinutesWindowPlanner.plan(units: units, budget: Self.windowBudget)
+            // 编号相同不代表输入相同：正文、逐词标签或切窗规则变化后不可复用旧响应。
+            guard let frozenInput = jobConfig.inputFingerprint,
+                  frozenInput == (try Self.inputFingerprint(units: units, windows: windows, supplements: supplements))
+            else { throw InputCheckError.changed }
             // 已经跑过的窗口（崩溃恢复、局部重试）：直接复用，不重发请求。
             let previous = (try? await coordinator.minutesWindows(minutesID: claimed.id)) ?? []
             var records: [MinutesWindowRecord] = []
@@ -726,6 +733,25 @@ public final class MinutesGenerator {
             }
             state = .failed(reason)
         }
+    }
+
+    private enum InputCheckError: LocalizedError {
+        case changed
+        var errorDescription: String? {
+            "这一版的输入已变化或缺少核对记录，请重新生成纪要。原文字和已保存的结果仍保留。"
+        }
+    }
+
+    /// 只持久化摘要，覆盖来源身份、实际分窗 prompt（含标签／上下文）与补充。
+    /// 恢复时重建后比较，不把当前可变记录冒充排队时的输入。
+    static func inputFingerprint(units: [MinutesSourceUnit], windows: [MinutesWindow], supplements: String) throws -> String {
+        var parts = [["minutes-input/1"]]
+        parts.append(contentsOf: units.map { ["source", $0.id, $0.lineID, String($0.ordinal)] })
+        parts.append(contentsOf: windows.map { window in
+            ["window", String(window.index)] + prompt(transcript: windowTranscript(window), supplements: supplements)
+                .flatMap { [$0.role.rawValue, $0.text, String($0.cacheBreakpoint)] }
+        })
+        return SHA256.hash(data: try JSONEncoder().encode(parts)).map { String(format: "%02x", $0) }.joined()
     }
 
     /// 拿这一窗要轮询的远端响应 id。

@@ -151,6 +151,62 @@ final class MeetingMinutesJobRecoveryTests: XCTestCase {
         XCTAssertEqual(afterRetry.map(\.id), [version.id])
         let retained = try await store.lines(sessionID: sessionID)
         XCTAssertEqual(retained.map(\.text), lines.map(\.text))
+
+        // 同一任务的来源随后变化，不能把旧响应绑定到重新切分的窗口。
+        _ = try await store.appendLine(.init(sessionID: sessionID, role: .speaker,
+            text: "新增的会议记录。", source: .microphone, status: .final))
+        Transport.reset([])
+        await resumed.retryFailedWindows(sessionID: sessionID, resolvedConfiguration: resolved)
+        XCTAssertTrue(Transport.requestURLs().isEmpty, "输入变化后既不能轮询混用，也不能重新 POST")
+        guard case .failed(let reason) = resumed.state else { return XCTFail("输入变化应明确停止") }
+        XCTAssertTrue(reason.contains("重新生成"))
+        let unchanged = try await store.minutesWindows(minutesID: version.id)
+        XCTAssertEqual(unchanged, records, "旧响应、候选和窗口记录必须保留")
+        let savedConfig = try XCTUnwrap(MinutesJobConfig.parse(version.configSnapshot))
+        XCTAssertNotNil(savedConfig.inputFingerprint)
+    }
+
+    func testMinutesInputFingerprintRoundTripsWithoutChangingProviderConfiguration() throws {
+        let configuration = LLMConfiguration(baseURL: "https://minutes.invalid/v1", model: "fake-model")
+        var frozen = MinutesJobConfig(configuration)
+        frozen.inputFingerprint = String(repeating: "a1", count: 32)
+        let restored = try XCTUnwrap(MinutesJobConfig.parse(frozen.fingerprint))
+        XCTAssertEqual(restored, frozen)
+        XCTAssertEqual(restored.configuration, configuration)
+        XCTAssertNil(MinutesJobConfig.parse(frozen.fingerprint + "|extra"))
+        XCTAssertNil(MinutesJobConfig.parse("https://minutes.invalid/v1|fake-model|openAICompatible|invalid"))
+    }
+
+    func testLegacyWindowWithoutInputFingerprintIsNotPolledOrResubmitted() async throws {
+        let store = try requireStore(), sessionID = try requireSessionID()
+        _ = try await store.appendLine(.init(sessionID: sessionID, role: .speaker,
+            text: "已有会议文字。", source: .microphone, status: .final))
+        let resolved = ResolvedLLMConfiguration(
+            configuration: .init(baseURL: "https://minutes.invalid/v1", model: "fake-model"),
+            apiKey: nil, origin: .global)
+        let queued = try await store.enqueueMinutes(sessionID: sessionID, model: "fake-model", promptChars: 8,
+            configSnapshot: MinutesJobConfig(resolved.configuration).fingerprint)
+        let owner = try await claim(store, sessionID)
+        let record = MinutesWindowRecord(index: 0, ownedUnitIDs: ["u1"], outcome: .submitted,
+            remoteResponseID: "resp-legacy")
+        let recorded = try await store.recordMinutesWindow(minutesID: queued.id,
+            expectedAttempts: owner.attempts, record: record)
+        XCTAssertTrue(recorded)
+        try await store.failMinutes(minutesID: queued.id, reason: "interrupted")
+        let before = try await store.minutesWindows(minutesID: queued.id)
+        typealias Transport = LLMProviderTests.FakeTransport
+        Transport.reset([])
+        let settings = URLSessionConfiguration.ephemeral
+        settings.protocolClasses = [Transport.self]
+        let session = URLSession(configuration: settings)
+        defer { session.invalidateAndCancel() }
+        let generator = MinutesGenerator(coordinator: SessionCoordinator(store: store), provider: LLMProvider(session: session))
+        await generator.retryFailedWindows(sessionID: sessionID, resolvedConfiguration: resolved)
+        XCTAssertTrue(Transport.requestURLs().isEmpty)
+        guard case .failed(let reason) = generator.state else { return XCTFail("旧输入不可核对应停止") }
+        XCTAssertTrue(reason.contains("重新生成"))
+        let after = try await store.minutesWindows(minutesID: queued.id)
+        XCTAssertEqual(after, before)
     }
 
     /// MC-28 前半句：response id 一拿到就落库；重开库读得回同一个 id。

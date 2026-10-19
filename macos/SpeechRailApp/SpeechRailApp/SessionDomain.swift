@@ -1568,7 +1568,7 @@ public enum MinutesTokenEstimate: Sendable {
 /// `windowTokens` 是**每窗拥有区的实验起点**，不是模型能力承诺：
 /// 真实取值要按目标模型的上下文窗口校准。
 public struct MinutesWindowBudget: Hashable, Sendable {
-    /// 每个窗口拥有区的 token 预算（实验起点 2,500～4,000）。
+    /// 每个窗口拥有区（说话人标签及正文）的估算预算（实验起点 2,500～4,000）。
     public var windowTokens: Int
     /// 提示 + 输出 + 安全余量。超预算时先缩窗口，不动余量。
     public var reserveTokens: Int
@@ -1673,7 +1673,7 @@ public enum MinutesWindowPlanner {
         var currentTokens = 0
 
         func cost(_ unit: MinutesSourceUnit) -> Int {
-            MinutesTokenEstimate.tokens(in: unit.text)
+            MinutesTokenEstimate.tokens(in: unit.speakerText)
         }
         func flush() {
             guard !current.isEmpty else { return }
@@ -1696,12 +1696,17 @@ public enum MinutesWindowPlanner {
                    boundary > 0 {
                     let tail = Array(current[boundary...])
                     current = Array(current[..<boundary])
+                    currentTokens = current.reduce(0) { $0 + cost($1) }
                     flush()
                     current = tail
                     currentTokens = tail.reduce(0) { $0 + cost($1) }
                 } else {
                     flush()
                 }
+            }
+            // 轮次偏好挪过来的尾部也可能装不下下一条，预算优先于轮次。
+            if !current.isEmpty, currentTokens + unitCost > budget.windowTokens {
+                flush()
             }
             current.append(unit)
             currentTokens += unitCost
@@ -1714,8 +1719,8 @@ public enum MinutesWindowPlanner {
     /// 超长单句切分。返回的段各自是独立的来源单元，id 带 `#序号`，
     /// `lineID` 仍指向原句。不截断原文，也不让一段超长发言吃光整窗预算。
     static func segment(unit: MinutesSourceUnit, budget: MinutesWindowBudget) -> [MinutesSourceUnit] {
-        let cost = MinutesTokenEstimate.tokens(in: unit.text)
-        guard cost > budget.windowTokens, unit.text.count > budget.segmentTokens else {
+        let cost = MinutesTokenEstimate.tokens(in: unit.speakerText)
+        guard cost > budget.windowTokens, unit.text.count > 1 else {
             return [unit]
         }
         let characters = Array(unit.text)
@@ -1724,13 +1729,35 @@ public enum MinutesWindowPlanner {
             scalarOffset += character.unicodeScalars.count
             scalarOffsets.append(scalarOffset)
         }
+        func piece(in range: Range<Int>) -> MinutesSourceUnit {
+            var piece = unit
+            piece.text = String(characters[range])
+            piece.attributionUnits = unit.attribution(in: scalarOffsets[range.lowerBound]..<scalarOffsets[range.upperBound])
+            return piece
+        }
+        let target = min(budget.segmentTokens, budget.windowTokens)
         var slices: [Range<Int>] = []
         var start = 0
         while start < characters.count {
             var end = min(start + budget.segmentTokens, characters.count)
+            if MinutesTokenEstimate.tokens(in: piece(in: start..<end).speakerText) > target {
+                var lower = start + 1, upper = end
+                // 一个 Character 加标签已超预算时仍保留它，不截断或丢弃文字。
+                var fittingEnd = lower
+                while lower <= upper {
+                    let middle = lower + (upper - lower) / 2
+                    if MinutesTokenEstimate.tokens(in: piece(in: start..<middle).speakerText) <= target {
+                        fittingEnd = middle
+                        lower = middle + 1
+                    } else {
+                        upper = middle - 1
+                    }
+                }
+                end = fittingEnd
+            }
             if end < characters.count {
                 // 在后半段里找标点或空白做切点，读起来更自然。
-                let searchStart = max(start + budget.segmentTokens / 2, start + 1)
+                let searchStart = max(start + (end - start) / 2, start + 1)
                 if let found = (searchStart..<end).last(where: { isBoundary(characters[$0]) }) {
                     end = found + 1
                 }
@@ -1741,14 +1768,12 @@ public enum MinutesWindowPlanner {
         guard slices.count > 1 else { return [unit] }
         let total = slices.count
         return slices.enumerated().map { offset, range in
-            var piece = unit
-            piece.id = "\(unit.id)#\(offset + 1)"
-            piece.text = String(characters[range])
-            piece.attributionUnits = unit.attribution(in: scalarOffsets[range.lowerBound]..<scalarOffsets[range.upperBound])
-            piece.segmentIndex = offset
-            piece.segmentCount = total
-            piece.segmentRange = range
-            return piece
+            var segment = piece(in: range)
+            segment.id = "\(unit.id)#\(offset + 1)"
+            segment.segmentIndex = offset
+            segment.segmentCount = total
+            segment.segmentRange = range
+            return segment
         }
     }
 
@@ -2262,11 +2287,14 @@ public struct MinutesJobConfig: Hashable, Sendable {
     public var baseURL: String
     public var model: String
     public var compatibilityMode: String
+    /// 分窗呈现与补充输入的摘要；nil 的历史任务无法证明输入仍相同。
+    public var inputFingerprint: String?
 
-    public init(baseURL: String, model: String, compatibilityMode: String) {
+    public init(baseURL: String, model: String, compatibilityMode: String, inputFingerprint: String? = nil) {
         self.baseURL = baseURL
         self.model = model
         self.compatibilityMode = compatibilityMode
+        self.inputFingerprint = inputFingerprint
     }
 
     /// 排队那一刻从当前设置取指纹。
@@ -2292,7 +2320,7 @@ public struct MinutesJobConfig: Hashable, Sendable {
 
     /// 持久化形态：一行可比较的指纹，不含密钥与正文。
     public var fingerprint: String {
-        [baseURL, model, compatibilityMode]
+        ([baseURL, model, compatibilityMode] + (inputFingerprint.map { [$0] } ?? []))
             .map { $0.replacingOccurrences(of: "|", with: "/") }
             .joined(separator: "|")
     }
@@ -2302,8 +2330,12 @@ public struct MinutesJobConfig: Hashable, Sendable {
     public static func parse(_ raw: String?) -> MinutesJobConfig? {
         guard let raw else { return nil }
         let parts = raw.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
-        guard parts.count == 3 else { return nil }
-        return MinutesJobConfig(baseURL: parts[0], model: parts[1], compatibilityMode: parts[2])
+        guard parts.count == 3 || parts.count == 4 else { return nil }
+        if parts.count == 4 {
+            guard parts[3].count == 64, parts[3].allSatisfy({ $0.isHexDigit && !$0.isUppercase }) else { return nil }
+        }
+        return MinutesJobConfig(baseURL: parts[0], model: parts[1], compatibilityMode: parts[2],
+            inputFingerprint: parts.count == 4 ? parts[3] : nil)
     }
 }
 

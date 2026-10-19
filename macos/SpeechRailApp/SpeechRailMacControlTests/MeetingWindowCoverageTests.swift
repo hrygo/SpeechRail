@@ -149,6 +149,80 @@ final class MeetingWindowCoverageTests: XCTestCase {
 
     // MARK: - 分窗：拥有区唯一，重叠只读
 
+    func testWordSpeakerPayloadSplitsEvenWhenBodyFitsBudget() throws {
+        let text = String(repeating: "甲🙂", count: 40)
+        var scalar = 0
+        let attribution = text.enumerated().map { index, character in
+            let start = scalar
+            scalar += character.unicodeScalars.count
+            return TranscriptAttributionUnit(id: "a\(index)", textStart: start, textEnd: scalar,
+                speakerLabel: index.isMultiple(of: 2) ? "A" : nil)
+        }
+        let unit = MinutesSourceUnit(id: "u1", lineID: "mixed", ordinal: 1, speaker: "说话人",
+            text: text, startSeconds: 0, attributionUnits: attribution,
+            speakerNames: ["A": "项目负责人"])
+        let limit = budget(windowTokens: 200, overlap: 0)
+        XCTAssertLessThan(MinutesTokenEstimate.tokens(in: text), limit.windowTokens)
+        XCTAssertGreaterThan(MinutesTokenEstimate.tokens(in: unit.speakerText), limit.windowTokens)
+        let windows = MinutesWindowPlanner.plan(units: [unit], budget: limit)
+        XCTAssertGreaterThan(windows.count, 1)
+        let pieces = windows.flatMap(\.owned)
+        XCTAssertEqual(pieces.map(\.text).joined(), text)
+        XCTAssertTrue(pieces.allSatisfy { $0.lineID == "mixed" && $0.rootUnitID == "u1" })
+        var offset = 0
+        for piece in pieces {
+            let end = offset + piece.text.unicodeScalars.count
+            XCTAssertEqual(piece.attributionUnits, unit.attribution(in: offset..<end))
+            offset = end
+        }
+        for window in windows {
+            let payload = window.owned.reduce(0) { $0 + MinutesTokenEstimate.tokens(in: $1.speakerText) }
+            XCTAssertEqual(window.estimatedTokens, payload)
+            XCTAssertLessThanOrEqual(payload, limit.windowTokens)
+        }
+    }
+
+    func testSpeakerBoundaryPreferenceCannotOverflowNextWindow() {
+        let units = [
+            MinutesSourceUnit(id: "u1", lineID: "1", ordinal: 1, speaker: "甲",
+                text: String(repeating: "字", count: 15), startSeconds: 0),
+            MinutesSourceUnit(id: "u2", lineID: "2", ordinal: 2, speaker: "乙",
+                text: String(repeating: "字", count: 170), startSeconds: 1),
+            MinutesSourceUnit(id: "u3", lineID: "3", ordinal: 3, speaker: "丙",
+                text: String(repeating: "字", count: 60), startSeconds: 2),
+        ]
+        let limit = budget(windowTokens: 200, overlap: 0)
+        let windows = MinutesWindowPlanner.plan(units: units, budget: limit)
+        XCTAssertEqual(windows.flatMap(\.owned).map(\.id), units.map(\.id))
+        for window in windows {
+            let payload = window.owned.reduce(0) { $0 + MinutesTokenEstimate.tokens(in: $1.speakerText) }
+            XCTAssertEqual(window.estimatedTokens, payload)
+            XCTAssertLessThanOrEqual(payload, limit.windowTokens)
+        }
+    }
+
+    func testMinutesInputFingerprintIncludesSpeakerProjectionContextAndSourceIdentity() throws {
+        let unit = MinutesSourceUnit(id: "u1", lineID: "line-1", ordinal: 1, speaker: "甲", text: "否决提议。",
+            startSeconds: 0, attributionUnits: [.init(id: "a", textStart: 0, textEnd: 5, speakerLabel: "A")])
+        func digest(_ unit: MinutesSourceUnit, context: [MinutesSourceUnit] = [], supplements: String = "") throws -> String {
+            try MinutesGenerator.inputFingerprint(units: [unit], windows: [.init(index: 0, owned: [unit],
+                contextBefore: context, contextAfter: [], estimatedTokens: 0)], supplements: supplements)
+        }
+        let original = try digest(unit)
+        XCTAssertEqual(try digest(unit), original)
+        var renamed = unit
+        renamed.speakerNames = ["A": "负责人"]
+        XCTAssertNotEqual(try digest(renamed), original)
+        var unknown = unit
+        unknown.attributionUnits = []
+        XCTAssertNotEqual(try digest(unknown), original)
+        var newSource = unit
+        newSource.lineID = "another-line"
+        XCTAssertNotEqual(try digest(newSource), original)
+        XCTAssertNotEqual(try digest(unit, context: [newSource]), original)
+        XCTAssertNotEqual(try digest(unit, supplements: "用户补充"), original)
+    }
+
     /// 每个来源单元恰好被一个窗口拥有；重叠区不进拥有区。
     func testEveryUnitIsOwnedExactlyOnce() {
         let units = makeUnits(count: 40) { "第 \($0 + 1) 句转录内容，用来把窗口撑开。" }
