@@ -494,6 +494,10 @@ def test_itn_still_converts_closed_fen_contexts(
     "二次回归",
     "二次压缩",
     "二次排序",
+    "二次启动",
+    "二次加载",
+    "二次处理",
+    "二次训练",
 ])
 def test_itn_preserves_determiner_and_lexical_ci(text: str) -> None:
     """一次 in a determiner phrase or a degree term is not a count."""

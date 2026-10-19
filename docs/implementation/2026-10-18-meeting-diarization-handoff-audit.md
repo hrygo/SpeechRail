@@ -2767,14 +2767,14 @@ cpCER 同时变差。没有来源一致的净收益，不进入生产。
 - 补充已确认的 `次` 技术组合（`二次量化/二次根式/二次幂/三次产业`）和
   `一次只` 副词边界。
 
-仓库 Markdown 424 个已跟踪文件前后对照：旧规则改写 3501 行，新规则改写 2673 行，
-833 行恢复原文；剩余改写主要是明确的金额、日期、时长、评分与封闭计数。六场固定
+仓库 Markdown 424 个已跟踪文件前后对照：旧规则改写 3501 行，新规则改写 2671 行，
+835 行恢复原文；剩余改写主要是明确的金额、日期、时长、评分与封闭计数。六场固定
 开发来源的 1146 条 raw partial/completed 观察（74 条 completed、1072 条 partial）
 在新旧规则下逐字相同，因此 completed 正文、cpCER/DER 与已记录指标均不变。这是
 正确性/鲁棒性修复，不是内容 CER 收益。
 
-定向验证：`tests/test_itn.py` 278 项、one-classifier 8 项、Unicode 15 项、
-voice-quality 114 项、公开 batch/Realtime 数字保真 16 项，共 431 项通过；
+定向验证：`tests/test_itn.py` 282 项、one-classifier 8 项、Unicode 15 项、
+voice-quality 114 项、公开 batch/Realtime 数字保真 16 项，共 435 项通过；
 `test_transcription_api.py` 42 项与 `test_realtime_openai.py` 125 项通过；
 Ruff、目标 Mypy、`git diff --check` 通过。没有模型、网络、服务、配置或运行态操作，
 也没有新增延迟或资源成本。

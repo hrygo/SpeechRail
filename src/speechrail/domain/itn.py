@@ -93,6 +93,14 @@ _CI_LEXICAL_TERMS = frozenset({
     "二次根式",
     "二次幂",
     "三次产业",
+    "二次启动",
+    "二次加载",
+    "二次构建",
+    "二次写入",
+    "二次训练",
+    "二次推理",
+    "二次转写",
+    "二次处理",
 })
 # 次 is a count in 第一次, at a boundary (执行一次。), or before a closed count
 # continuation (一次会议 / 两次独立). 二次感染 / 二次伤害 / 二次销售 are
