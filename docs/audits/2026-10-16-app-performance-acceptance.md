@@ -154,6 +154,10 @@ AppPerformanceMetrics 已接入目录、工作区读取/投影、存储提交、
 
 08:52（Asia/Shanghai）在当前 worktree 重跑同一 SwiftPM filter，5 个 XCTest 与 56 个 Swift Testing 用例（8 suites）通过，0 failures；`python3 scripts/check_macos_test_target_coverage.py` 返回 `macos-test-target-coverage: OK`。这次复核确认定向代码门在当前工作树仍通过，不增加真实硬件、Release 配对性能或 UI 交互证据。
 
+## 2026-10-19 follow-up: #369 targeted rerun at HEAD 6cce1d62
+
+2026-10-19（Asia/Shanghai）在干净 main（`6cce1d62`，与远端一致）复核 #369 确定性证据，未改任何源码：drain/stop、metrics、mixer、transcript、dubbing export、relay、提词匹配/定位等受影响 suites 分三批重跑全部通过（0 failures）；`python3 scripts/check_macos_test_target_coverage.py` 返回 `macos-test-target-coverage: OK`；`git diff --check` 通过。六类 operation 的生产记录点与 snapshot 断言、24/44.1/48 kHz EOS 参考比对回归均在当前 HEAD 存在且通过。本次复核不增加真实硬件、Release 配对性能或 UI 交互证据；关闭 #369 仍须在 issue 内明确这些未验收项。
+
 ## 2026-10-17 follow-up: #371 foreground idle process sample
 
 2026-10-17（Asia/Shanghai）对当时已运行的 Release App 做 300.19 秒静止前台采样。App 与
