@@ -236,3 +236,106 @@ def test_itn_folds_ascii_digits_inside_a_mixed_numeral_run() -> None:
     for text in ["2.5", "23.5%", "12.5秒", "3.5", "二零二六"]:
         assert apply_light_itn(text) == text, f"{text} 不该被改写"
     assert apply_light_itn("二三点五") == "23.5"
+
+
+@pytest.mark.parametrize("text", [
+    "增长了百分之五十几",
+    "增长了百分之五十多",
+    "增长了百分之五十余",
+    "增长了百分之二十来",
+    "大约百分之五十几左右",
+    "完成度三点五几",
+    "完成度三点五多",
+])
+def test_itn_preserves_approximate_values(text: str) -> None:
+    """A trailing 几/多/余/来 makes the value a bound, not a closed number."""
+
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize("text", [
+    "他一次次地尝试",
+    "一天天过去",
+    "一秒秒地数",
+    "一次又一次",
+    "一次一次地确认",
+    "一天一天地等",
+    "一次一个地处理",
+    "三次五次",
+])
+def test_itn_preserves_repeated_units(text: str) -> None:
+    """一次次 / 一次又一次 repeat a classifier; neither copy is a count."""
+
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize("text", [
+    "二分法",
+    "三分法",
+    "四分卫",
+    "五分制",
+    "四分五裂",
+    "一分为二",
+    "三分球",
+    "五分裤",
+    "七分袖",
+])
+def test_itn_preserves_fen_lexical_compounds(text: str) -> None:
+    """分 is a morpheme in these words, not a minute/cent/score unit."""
+
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize("text", [
+    "万岁",
+    "中华人民共和国万岁",
+    "万岁爷",
+    "千岁",
+])
+def test_itn_preserves_wan_sui_titles(text: str) -> None:
+    """A bare 万/千 before 岁 is a title or exclamation, not an age."""
+
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize("text", [
+    "一日三秋",
+    "一日千里",
+    "一日为师",
+    "一日不见",
+    "一日之计在于晨",
+    "三天两头",
+    "一天一个样",
+    "五月天",
+    "三月天",
+    "七月流火",
+    "一元复始",
+    "一元二次方程",
+])
+def test_itn_preserves_unit_idioms(text: str) -> None:
+    """The unit is part of an idiom or term, so the phrase is left as spoken."""
+
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("耗时三分钟", "耗时3分钟"),
+    ("五分钱", "5分钱"),
+    ("三分的差距", "3分的差距"),
+    ("得了三分。", "得了3分。"),
+    ("他今年百岁", "他今年100岁"),
+    ("三月五日", "3月5日"),
+    ("三天后", "3天后"),
+    ("一次会议", "1次会议"),
+    ("第一次开始", "第1次开始"),
+    ("第二次又被拒绝", "第2次又被拒绝"),
+    ("连续两次一致", "连续2次一致"),
+    ("两天一次", "2天1次"),
+    ("两天一致", "2天一致"),
+    ("五月五号", "5月5号"),
+    ("十五日之前", "15日之前"),
+])
+def test_itn_still_converts_closed_quantities(text: str, expected: str) -> None:
+    """Narrowing the rules must not drop unambiguous measurement contexts."""
+
+    assert apply_light_itn(text) == expected

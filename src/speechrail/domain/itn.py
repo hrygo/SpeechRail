@@ -28,6 +28,18 @@ _YEAR_RE = re.compile(r"([零一二三四五六七八九]{4})年")
 _PERCENT_RE = re.compile(r"百分之([零一二三四五六七八九十百千万点\d]+)")
 _DECIMAL_RE = re.compile(r"([零一二三四五六七八九十百千万\d]+)点([零一二三四五六七八九\d]+)")
 _CN_NUM_RE = re.compile(r"[零一二两三四五六七八九十百千万亿]+")
+_NUMERAL_CHARS = frozenset("零一二两三四五六七八九十百千万亿")
+# These suffixes make a spoken value approximate: 百分之五十几 / 二十来 percent.
+# The digits before them are a bound, not the value, so they are left as words.
+_APPROXIMATE_SUFFIXES = frozenset("几多余来")
+# A decimal followed by these characters is an idiom, a clock expression or an
+# approximation, not a closed decimal value: 一点一点, 三点一刻, 三点五几.
+_DECIMAL_BLOCKERS = frozenset("点滴刻线几多余来")
+# 分 is a measurement unit in 三分钟 / 五分钱 / 三分的差距. In 二分法, 四分卫,
+# 五分制, 四分五裂 and 一分为二 it is a lexical morpheme. Only the former set is
+# deterministic from the following character.
+_FEN_CONTINUATIONS = frozenset("钟钱的")
+_UNIT_BOUNDARIES = frozenset("，。！？；：、,.!?;: \n\t”’）)】》")
 # Adjacent digits can be an approximation or stutter. A trailing digit after
 # 百 or a larger magnitude can omit a place (三千五元), cross a price boundary
 # (五百一个), or belong to ordinary words (万一人家). Preserve these matches
@@ -150,6 +162,10 @@ def _fold_decimal_digits(text: str) -> str:
 
 def _percent_to_arabic(match: re.Match[str]) -> str:
     raw = _fold_decimal_digits(match.group(1))
+    # 百分之五十几 / 百分之二十来 name an approximate range. Rewriting the
+    # closed prefix to 50% / 20% and leaving 几 / 来 behind corrupts the phrase.
+    if match.string[match.end() : match.end() + 1] in _APPROXIMATE_SUFFIXES:
+        return match.group(0)
     if "点" in raw:
         if raw.count("点") != 1 or raw.endswith("点"):
             return match.group(0)
@@ -170,7 +186,7 @@ def _decimal_to_arabic(match: re.Match[str]) -> str:
     # 点 can join ordinary phrases or clock alternatives: 一点一点,
     # 三点一线, 五点六点. Inspect the complete greedy match's boundary in
     # the callback so rejection cannot backtrack into a shorter decimal.
-    if match.string[match.end():match.end() + 1] in {"点", "滴", "刻", "线"}:
+    if match.string[match.end() : match.end() + 1] in _DECIMAL_BLOCKERS:
         return match.group(0)
     int_str, dec_str = (_fold_decimal_digits(part) for part in match.group(1, 2))
     int_val = _chinese_to_int(int_str) if not int_str.isdigit() else int(int_str)
@@ -196,6 +212,7 @@ def apply_light_itn(text: str) -> str:
     def _convert_with_unit(m: re.Match[str]) -> str:
         cn_num = m.group(1)
         unit = m.group(2)
+        next_char = m.string[m.end() : m.end() + 1]
         # Preserve the natural classifier phrase 一个 (有一个 / 每一个).
         # Larger explicit quantities such as 十一个 still become 11个.
         if cn_num == "一" and unit == "个":
@@ -204,6 +221,74 @@ def apply_light_itn(text: str) -> str:
         if cn_num == "一" and m.start() > 0 and m.string[m.start() - 1] == "统":
             return m.group(0)
         if _AMBIGUOUS_QUANTITY_RE.search(cn_num):
+            return m.group(0)
+        # 一次次 / 一天天 / 一秒秒 repeat the classifier as an adverb; the
+        # first unit is not a separate count.
+        if next_char == unit:
+            return m.group(0)
+        # 万岁 / 千岁 are titles or exclamations, not ages.
+        if unit == "岁" and cn_num in {"万", "千"}:
+            return m.group(0)
+        # 一日三秋 / 一日千里 / 一日为师 / 一日不见 use 日 inside an idiom.
+        if unit == "日" and (
+            next_char in _NUMERAL_CHARS
+            or next_char in {"为", "不"}
+            or (cn_num == "一" and next_char == "之")
+        ):
+            return m.group(0)
+        # 三天两头 / 一天一个样 / 一天一天 use 天 inside an idiom or repeat it.
+        if unit == "天":
+            tail = m.string[m.end() : m.end() + 2]
+            if tail in {"两头", "一个"} or (cn_num == "一" and tail == "一天"):
+                return m.group(0)
+        # 一次又一次 / 一次一次 / 一次一个 / 两次三番 / 三次五次 use 次
+        # inside an adverb or an approximate list. 两次一致 is a real count
+        # and must still convert.
+        if unit == "次":
+            tail = m.string[m.end() : m.end() + 2]
+            previous = m.string[max(0, m.start() - 2) : m.start()]
+            if (
+                (cn_num == "一" and next_char == "又")
+                or tail in {"一次", "一个", "一步", "一遍", "一人", "三番"}
+                or (
+                    len(tail) == 2
+                    and tail[1] == "次"
+                    and tail[0] in _NUMERAL_CHARS
+                )
+                or (
+                    len(previous) == 2
+                    and previous[1] == "次"
+                    and previous[0] in _NUMERAL_CHARS
+                )
+            ):
+                return m.group(0)
+        # 一次又一次 / 一次一次 / 一天一天 repeat a one-off count; the second
+        # copy is not a separate measurement.
+        if (
+            cn_num == "一"
+            and unit in {"日", "天", "次"}
+            and (
+                m.string[max(0, m.start() - 2) : m.start()] == cn_num + unit
+                or m.string[max(0, m.start() - 1) : m.start()] == "又"
+            )
+        ):
+            return m.group(0)
+        # 二次方程 / 二次函数 / 二次元 use 次 as a degree or ordinal prefix.
+        if unit == "次" and next_char in {"方", "函", "元"}:
+            return m.group(0)
+        # 五月天 / 三月天 are descriptive phrases, and 七月流火 is an idiom.
+        if unit == "月" and next_char in {"天", "流"}:
+            return m.group(0)
+        # 一元复始 is an idiom, and 一元二次方程 uses 元 as a degree marker.
+        if unit == "元" and (next_char == "复" or next_char in _NUMERAL_CHARS):
+            return m.group(0)
+        # 分 is a lexical morpheme unless a measurement continuation or a clear
+        # boundary shows that it is the unit.
+        if unit == "分" and not (
+            next_char in _FEN_CONTINUATIONS
+            or not next_char
+            or next_char in _UNIT_BOUNDARIES
+        ):
             return m.group(0)
         # A bare magnitude in front of 分 is a quantity word, not a number:
         # 十分满意, 百分百, 百分之, 百分点. `三分钟` still converts because 三
