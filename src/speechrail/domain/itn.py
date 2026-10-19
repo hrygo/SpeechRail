@@ -36,12 +36,18 @@ _APPROXIMATE_SUFFIXES = frozenset("几多余")
 # 来自 / 来看 / 来说 in 百分之五十来自学校. Only the former is approximate.
 _LAI_VERB_CONTINUATIONS = frozenset("自看说讲源到回临")
 # A decimal followed by these characters is an idiom, a clock expression or an
-# approximation, not a closed decimal value: 一点一点, 三点一刻, 三点五几.
-_DECIMAL_BLOCKERS = frozenset("点滴刻线几多余")
-# 分 is a measurement unit in 三分钟 / 五分钱 / 三分的差距. In 二分法, 四分卫,
-# 五分制, 四分五裂 and 一分为二 it is a lexical morpheme. Only the former set is
-# deterministic from the following character.
-_FEN_CONTINUATIONS = frozenset("钟钱的")
+# approximation, not a closed decimal value: 一点一点, 三点一刻, 三点五几,
+# 九点九分. 分 is included because NUM点NUM分 is a clock reading.
+_DECIMAL_BLOCKERS = frozenset("点滴刻线几多余分")
+# The fractional part of a decimal is made only of digit characters. A run
+# that also contains 十/百/... was cut out of a larger spoken numeral
+# (七点四十 is 7:40, not 7.4 and a stray 十), so it must be left whole.
+_DECIMAL_DIGIT_CHARS = frozenset("零一二三四五六七八九0123456789")
+# Exactly two fractional digits can be clock minutes (十点零五). Only one of
+# these continuations proves that the run is a measurement rather than a time.
+_DECIMAL_MEASURE_CONTINUATIONS = frozenset(
+    "元美米公厘毫英平立岁号楼倍秒度克升吨瓦伏安欧焦卡帕赫牛字位个次天月日万%％到至~-—"
+)
 _UNIT_BOUNDARIES = frozenset("，。！？；：、,.!?;: \n\t”’）)】》")
 # 次 is a count in 一次会议 / 连续两次一致, but a lexical or ordinal morpheme
 # in these closed technical phrases. Keeping the spoken form is the safe
@@ -83,7 +89,20 @@ _CI_LEXICAL_TERMS = frozenset({
     "二次型",
     "二次判断",
     "二次绑定",
+    "二次量化",
+    "二次根式",
+    "二次幂",
+    "三次产业",
 })
+# Determiners and deictic prefixes turn 一+unit into a phrase (`下一次`,
+# `每一天`, `同一人`), not a closed count. `比` covers 一天比一天.
+_DETERMINER_PREFIXES = frozenset("每这那某哪同上前后下另何比")
+_DETERMINER_UNITS = frozenset({"次", "天", "号", "日", "秒"})
+# A bare 分 at a boundary is only a score when the left context says so.
+# `anchor 二分` and `二分、匹配` are the method, not two points.
+_SCORE_CONTEXT_RE = re.compile(
+    r"(?:得了|得|考了|考|拿了|拿|扣了|扣|加了|加|减了|减|评了|评|打了|打|进了|进|赢了|赢|输了|输|满分|得分|比分|总分)$"
+)
 # Adjacent digits can be an approximation or stutter. A trailing digit after
 # 百 or a larger magnitude can omit a place (三千五元), cross a price boundary
 # (五百一个), or belong to ordinary words (万一人家). Preserve these matches
@@ -221,6 +240,10 @@ def _percent_to_arabic(match: re.Match[str]) -> str:
         if raw.count("点") != 1 or raw.endswith("点"):
             return match.group(0)
         parts = raw.split("点", 1)
+        if not set(parts[1]) <= _DECIMAL_DIGIT_CHARS:
+            return match.group(0)
+        if match.string[match.end() : match.end() + 1] == "分":
+            return match.group(0)
         int_part = _chinese_to_int(parts[0])
         dec_part = "".join(str(_DIGITS_MAP.get(c, c)) for c in parts[1])
         return f"{int_part}.{dec_part}%"
@@ -237,14 +260,35 @@ def _decimal_to_arabic(match: re.Match[str]) -> str:
     # 点 can join ordinary phrases or clock alternatives: 一点一点,
     # 三点一线, 五点六点. Inspect the complete greedy match's boundary in
     # the callback so rejection cannot backtrack into a shorter decimal.
+    tail = match.string[match.end() : match.end() + 1]
+    if tail in _DECIMAL_BLOCKERS or _is_approximate_suffix(match.string, match.end()):
+        return match.group(0)
+    # The regex only consumes decimal digits. A magnitude character directly
+    # after the match means it stopped in the middle of a spoken numeral:
+    # 七点四十 is 7:40, not 7.4 plus a loose 十. 万/亿 are the one exception,
+    # because 三点五万元 is a decimal quantity followed by its magnitude.
     if (
-        match.string[match.end() : match.end() + 1] in _DECIMAL_BLOCKERS
-        or _is_approximate_suffix(match.string, match.end())
+        tail in _NUMERAL_CHARS
+        and tail not in {"万", "亿"}
+        and not (
+            tail in {"十", "百", "千"}
+            and match.string[match.end() + 1 : match.end() + 2] in {"万", "亿"}
+        )
     ):
         return match.group(0)
     int_str, dec_str = (_fold_decimal_digits(part) for part in match.group(1, 2))
+    if not set(dec_str) <= _DECIMAL_DIGIT_CHARS:
+        return match.group(0)
     int_val = _chinese_to_int(int_str) if not int_str.isdigit() else int(int_str)
     dec_val = "".join(str(_DIGITS_MAP.get(c, c)) for c in dec_str)
+    # 10.05 and 10:05 are the same string in speech. A two-digit fraction is
+    # only a decimal when the right side proves it (单位, %, 万, a range).
+    if (
+        len(dec_str) == 2
+        and int(dec_val) <= 59
+        and tail not in _DECIMAL_MEASURE_CONTINUATIONS
+    ):
+        return match.group(0)
     return f"{int_val}.{dec_val}"
 
 
@@ -267,17 +311,42 @@ def apply_light_itn(text: str) -> str:
         cn_num = m.group(1)
         unit = m.group(2)
         next_char = m.string[m.end() : m.end() + 1]
+        previous_char = m.string[m.start() - 1 : m.start()] if m.start() else ""
         # Preserve the natural classifier phrase 一个 (有一个 / 每一个).
         # Larger explicit quantities such as 十一个 still become 11个.
         if cn_num == "一" and unit == "个":
             return m.group(0)
         # 统一 is an ordinary word, including before 分配 or 人员.
-        if cn_num == "一" and m.start() > 0 and m.string[m.start() - 1] == "统":
+        if cn_num == "一" and previous_char == "统":
             return m.group(0)
         if _AMBIGUOUS_QUANTITY_RE.search(cn_num):
             return m.group(0)
         if unit == "次" and any(
             m.string.startswith(term, m.start()) for term in _CI_LEXICAL_TERMS
+        ):
+            return m.group(0)
+        # 下一次 / 每一次 / 这一次 / 同一次 are determiner phrases; 一次只 is
+        # an adverb ("at a time"). Neither is a closed count.
+        if (
+            cn_num == "一"
+            and unit in _DETERMINER_UNITS
+            and (
+                previous_char in _DETERMINER_PREFIXES
+                or (unit == "号" and previous_char in {"小", "大"})
+            )
+        ):
+            return m.group(0)
+        if cn_num == "一" and unit == "次" and next_char == "只":
+            return m.group(0)
+        if cn_num == "一" and unit == "人" and previous_char in {"同", "另"}:
+            return m.group(0)
+        # A single digit before 元 is usually a term (二元组/一元论/同一元素).
+        # Currency needs either an explicit place or a money continuation.
+        if (
+            unit == "元"
+            and len(cn_num) == 1
+            and cn_num not in "十百千万亿"
+            and next_char not in {"钱", "整", "块"}
         ):
             return m.group(0)
         # 一次次 / 一天天 / 一秒秒 repeat the classifier as an adverb; the
@@ -297,7 +366,9 @@ def apply_light_itn(text: str) -> str:
         # 三天两头 / 一天一个样 / 一天一天 use 天 inside an idiom or repeat it.
         if unit == "天":
             tail = m.string[m.end() : m.end() + 2]
-            if tail in {"两头", "一个"} or (cn_num == "一" and tail == "一天"):
+            if tail in {"两头", "一个", "到晚", "比一"} or (
+                cn_num == "一" and tail == "一天"
+            ):
                 return m.group(0)
         # 一次又一次 / 一次一次 / 一次一个 / 两次三番 / 三次五次 use 次
         # inside an adverb or an approximate list. 两次一致 is a real count
@@ -342,19 +413,28 @@ def apply_light_itn(text: str) -> str:
         # 一元复始 is an idiom, and 一元二次方程 uses 元 as a degree marker.
         if unit == "元" and (next_char == "复" or next_char in _NUMERAL_CHARS):
             return m.group(0)
-        # 分 is a lexical morpheme unless a measurement continuation or a clear
-        # boundary shows that it is the unit.
-        if unit == "分" and not (
-            next_char in _FEN_CONTINUATIONS
-            or not next_char
-            or next_char in _UNIT_BOUNDARIES
-        ):
-            return m.group(0)
-        # A bare magnitude in front of 分 is a quantity word, not a number:
-        # 十分满意, 百分百, 百分之, 百分点. `三分钟` still converts because 三
-        # carries a digit.
-        if unit == "分" and not any(char in _DIGITS_MAP for char in cn_num):
-            return m.group(0)
+        # 分 is a lexical morpheme unless a measurement continuation or a
+        # score context shows that it is the unit. A bare boundary is not
+        # enough: 二分 alone is the bisection method. NUM点NUM分 is a clock.
+        if unit == "分":
+            if previous_char == "点":
+                return m.group(0)
+            measurement = next_char in {"钟", "钱"} or (
+                next_char == "的" and cn_num != "十"
+            )
+            if not measurement:
+                boundary = not next_char or next_char in _UNIT_BOUNDARIES
+                if not boundary or not _SCORE_CONTEXT_RE.search(
+                    m.string[: m.start()]
+                ):
+                    return m.group(0)
+            # 十分满意 / 百分百 / 百分之 / 百分点 are quantity words. 分钟 and
+            # 分钱 are measurements even when the numeral is a bare magnitude.
+            if (
+                not any(char in _DIGITS_MAP for char in cn_num)
+                and next_char not in {"钟", "钱"}
+            ):
+                return m.group(0)
         num = _chinese_to_int(cn_num)
         return f"{num}{unit}"
 

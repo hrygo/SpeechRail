@@ -369,3 +369,200 @@ def test_itn_still_converts_closed_quantities(text: str, expected: str) -> None:
     """Narrowing the rules must not drop unambiguous measurement contexts."""
 
     assert apply_light_itn(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "十点零五",
+    "十点零五分",
+    "七点四十",
+    "七点四十分",
+    "十二点三十分",
+    "五点零五分",
+    "三点十五分",
+    "九点九分",
+])
+def test_itn_preserves_clock_times(text: str) -> None:
+    """NUM点NUM分 is a clock, and a partial numeral run must never be rewritten."""
+
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize("text", [
+    "三点一四",
+    "百分之七点四十",
+    "百分之三点十五",
+])
+def test_itn_preserves_two_digit_decimals_that_could_be_clock_minutes(
+    text: str,
+) -> None:
+    """Two fractional digits can be minutes; only a closed context disambiguates."""
+
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("三点一四一五九", "3.14159"),
+    ("三点一四米", "3.14米"),
+    ("十点零五秒", "10.05秒"),
+    ("百分之三点一四", "3.14%"),
+    ("三点五。", "3.5。"),
+])
+def test_itn_still_converts_decimals_with_a_closed_context(
+    text: str, expected: str
+) -> None:
+    assert apply_light_itn(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "二元组",
+    "三元组",
+    "一元论",
+    "一元化",
+    "同一元素",
+    "三元式",
+    "三元里",
+])
+def test_itn_preserves_yuan_lexical_compounds(text: str) -> None:
+    """A bare 元 after a single digit is often a term, not a currency amount."""
+
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("一元钱", "1元钱"),
+    ("十元", "10元"),
+    ("五百元", "500元"),
+    ("两万元", "20000元"),
+    ("二零元", "20元"),
+    ("价值五百美元", "价值500美元"),
+])
+def test_itn_still_converts_currency_with_an_explicit_context(
+    text: str, expected: str
+) -> None:
+    assert apply_light_itn(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "二分",
+    "anchor 二分、匹配输出一致",
+    "九点九分",
+    "十分的好",
+    "百分之三点五分",
+])
+def test_itn_preserves_non_measure_fen(text: str) -> None:
+    """A bare 分 at a boundary is not enough evidence for a score."""
+
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("得了三分。", "得了3分。"),
+    ("他考了九十分", "他考了90分"),
+    ("三分的差距", "3分的差距"),
+    ("五分钟", "5分钟"),
+    ("十分钟后", "10分钟后"),
+    ("五分钱", "5分钱"),
+    ("十分钱", "10分钱"),
+    ("满分一百分。", "满分100分。"),
+])
+def test_itn_still_converts_closed_fen_contexts(
+    text: str, expected: str
+) -> None:
+    assert apply_light_itn(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "下一次请求",
+    "每一次人机对话",
+    "这一次的失败",
+    "上一次成功",
+    "前一次",
+    "后一次",
+    "同一次复发",
+    "另一次",
+    "任何一次失败",
+    "一次只运行一个服务",
+    "二次量化",
+    "二次根式",
+    "二次幂",
+    "三次产业",
+])
+def test_itn_preserves_determiner_and_lexical_ci(text: str) -> None:
+    """一次 in a determiner phrase or a degree term is not a count."""
+
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("第一次开始", "第1次开始"),
+    ("第二次又被拒绝", "第2次又被拒绝"),
+    ("一次会议", "1次会议"),
+    ("连续两次一致", "连续2次一致"),
+    ("两天一次", "2天1次"),
+])
+def test_itn_still_converts_closed_ci_counts(text: str, expected: str) -> None:
+    assert apply_light_itn(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "前一天",
+    "后一天",
+    "同一天",
+    "每一天",
+    "这一天",
+    "那一天",
+    "某一天",
+    "哪一天",
+    "一天到晚",
+    "一天比一天",
+])
+def test_itn_preserves_determiner_and_idiomatic_tian(text: str) -> None:
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("三天前", "3天前"),
+    ("两天", "2天"),
+    ("一天时间", "1天时间"),
+    ("第二天", "第2天"),
+])
+def test_itn_still_converts_closed_tian_counts(
+    text: str, expected: str
+) -> None:
+    assert apply_light_itn(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "同一人",
+    "另一人",
+    "同一个人",
+    "另一个人",
+    "小一号",
+    "大一号",
+    "前一日",
+    "后一日",
+    "这一日",
+    "下一秒",
+    "这一秒",
+    "每一秒",
+])
+def test_itn_preserves_determiner_units(text: str) -> None:
+    """Determiner phrases such as 同一人 or 下一秒 are not closed counts."""
+
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("五号交付", "5号交付"),
+    ("二零号座位", "20号座位"),
+    ("十三号", "13号"),
+    ("十五日之前", "15日之前"),
+    ("三秒", "3秒"),
+    ("五秒", "5秒"),
+    ("总统三人随行", "总统3人随行"),
+    ("由一人写入", "由1人写入"),
+])
+def test_itn_still_converts_closed_unit_counts(
+    text: str, expected: str
+) -> None:
+    assert apply_light_itn(text) == expected
