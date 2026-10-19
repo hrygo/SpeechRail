@@ -1857,21 +1857,24 @@ final class AppModelTests: XCTestCase {
 
     private func waitForVoiceDesignPhase(
         _ expected: VoiceDesignPublicationPhase,
-        snapshot: @MainActor () -> VoiceDesignPublicationSnapshot,
+        snapshot: @escaping @MainActor () -> VoiceDesignPublicationSnapshot,
         file: StaticString = #filePath,
         line: UInt = #line
     ) async {
-        for _ in 0..<200 {
-            if snapshot().phase == expected {
-                return
-            }
-            await Task.yield()
-        }
-        XCTFail(
-            "音色发布阶段未到达 \(expected)，当前为 \(snapshot().phase)",
-            file: file,
-            line: line
+        let reached = XCTestExpectation(description: "voice publication reaches \(expected)")
+        let observation = VoiceDesignPhaseExpectation(
+            expected: expected, snapshot: snapshot, reached: reached
         )
+        observation.observe()
+        let result = await XCTWaiter.fulfillment(of: [reached], timeout: 10)
+        observation.stop()
+        if result != .completed {
+            XCTFail(
+                "音色发布阶段未到达 \(expected)，当前为 \(snapshot().phase)",
+                file: file,
+                line: line
+            )
+        }
     }
 
     private func waitForCreatorEvent(
@@ -2384,6 +2387,39 @@ private actor RejectingCloneRegistrationClient: SpeechRailVoiceDirectoryClient, 
         )
     }
 
+}
+
+@MainActor
+private final class VoiceDesignPhaseExpectation {
+    private let expected: VoiceDesignPublicationPhase
+    private let snapshot: @MainActor () -> VoiceDesignPublicationSnapshot
+    private let reached: XCTestExpectation
+    private var isActive = true
+
+    init(
+        expected: VoiceDesignPublicationPhase,
+        snapshot: @escaping @MainActor () -> VoiceDesignPublicationSnapshot,
+        reached: XCTestExpectation
+    ) {
+        self.expected = expected
+        self.snapshot = snapshot
+        self.reached = reached
+    }
+
+    func observe() {
+        guard isActive else { return }
+        let matches = withObservationTracking {
+            snapshot().phase == expected
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in self?.observe() }
+        }
+        if matches {
+            isActive = false
+            reached.fulfill()
+        }
+    }
+
+    func stop() { isActive = false }
 }
 
 private actor VoiceDesignWorkflowCreatorClient: SpeechRailVoiceDirectoryClient, SpeechRailVoiceDesignClient {

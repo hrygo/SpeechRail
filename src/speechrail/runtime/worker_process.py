@@ -89,6 +89,18 @@ class WorkerProcessSpec:
     io_timeout_seconds: float
     shutdown_timeout_seconds: float = _TERMINATE_GRACE_SECONDS
     handshake_timeout_seconds: float | None = None
+    pass_fds: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        # Only explicit non-stdio descriptors cross exec. Their caller retains
+        # ownership; closing a parent copy must not unlock a live child copy.
+        if (
+            not isinstance(self.pass_fds, tuple)
+            or len(self.pass_fds) > 16
+            or any(type(fd) is not int or fd < 3 for fd in self.pass_fds)
+            or len(set(self.pass_fds)) != len(self.pass_fds)
+        ):
+            raise ValueError("invalid inherited worker descriptors")
 
 
 def offline_environment(repository_root: Path) -> dict[str, str]:
@@ -164,6 +176,7 @@ class AsyncFramedWorkerProcess:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self._spec.cwd,
                 env=dict(self._spec.env),
+                pass_fds=self._spec.pass_fds,
             )
             self._stderr_task = asyncio.create_task(
                 self._drain_stderr(self._process),

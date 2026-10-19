@@ -272,6 +272,133 @@ final class MeetingKnowledgeArchiveTests: XCTestCase {
 
     // MARK: - MC-66：跨新库往返，身份不漂移
 
+    func testArchiveRoundTripKeepsWordAttributionAndManualOverrides() async throws {
+        let store = try requireStore()
+        let version = try await prepareMeetingWithCitations()
+        let documentID = try await requireDocumentID()
+        let line = try await store.storedLine(id: "line-1")
+        let original = try XCTUnwrap(line)
+        let units: [TranscriptAttributionUnit] = [
+            .init(id: "word-a", textStart: 0, textEnd: 2, speakerLabel: "A", audioStartSample: 0, audioEndSample: 24_000),
+            .init(id: "word-b", textStart: 2, textEnd: 4, speakerLabel: "B",
+                  audioStartSample: 24_000, audioEndSample: 48_000)
+        ]
+        _ = try await store.attachTranscriptAttribution(lineID: original.id, units: units)
+        _ = try await store.attachSpeakerLabel(lineID: "line-2", label: "C")
+        for scope in [KnowledgeArchiveScope.share, .fullArchive] {
+            if scope == .fullArchive { _ = try await store.attachSpeakerLabel(lineID: "line-2", label: nil) }
+            let package = try await store.exportKnowledgeArchive(
+                selection: .init(documentID: documentID, minutesID: version.id, scope: scope),
+                to: try exportDestination().appendingPathComponent(scope.rawValue))
+            let imported = try await makeImportedStore { target in try await target.importKnowledgeArchive(at: package) }
+            let saved = try await imported.store.storedLine(id: original.id)
+            XCTAssertEqual(saved?.text, original.text)
+            XCTAssertEqual(saved?.attributionUnits, units)
+            XCTAssertNil(saved?.speakerLabel)
+            let manual = try await imported.store.storedLine(id: "line-2")
+            XCTAssertEqual(manual?.speakerLabel, scope == .share ? "C" : nil)
+            XCTAssertEqual(manual?.speakerLabelIsManual, true)
+            let markdown = try String(contentsOf: package.appendingPathComponent("minutes.md"), encoding: .utf8)
+            XCTAssertTrue(markdown.contains("**说话人 A**："))
+            XCTAssertTrue(markdown.contains("**说话人 B**："))
+            XCTAssertTrue(markdown.contains("**未确认说话人**："))
+            let automatic = try await imported.store.attachTranscriptAttribution(lineID: "line-2",
+                units: [.init(id: "late", textStart: 0, textEnd: 2, speakerLabel: "A")])
+            XCTAssertEqual(automatic.speakerLabel, scope == .share ? "C" : nil)
+            XCTAssertTrue(automatic.speakerLabelIsManual)
+            let references = try await imported.store.verifyReferences()
+            XCTAssertTrue(references.isClean)
+            let fetched = try await imported.store.transcriptLine(id: original.id)
+            XCTAssertEqual(fetched?.attributionUnits, units, "archive conflict lookup must read the same word evidence")
+            let identical = try await imported.store.previewKnowledgeArchive(at: package)
+            XCTAssertTrue(identical.realConflicts.isEmpty, "an identical package must remain idempotent")
+            var changed = units
+            changed[1].speakerLabel = "D"
+            _ = try await imported.store.attachTranscriptAttribution(lineID: original.id, units: changed)
+            let preview = try await imported.store.previewKnowledgeArchive(at: package)
+            XCTAssertTrue(preview.realConflicts.contains { $0.kind == .line && $0.id == original.id },
+                          "same body and nil scalar cannot hide changed word evidence")
+            await imported.store.close()
+        }
+    }
+
+    private func rewriteStructuredPackage(_ package: URL, _ transform: (inout [String: Any]) -> Void) throws {
+        let structured = package.appendingPathComponent("structured.json")
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: structured)) as? [String: Any])
+        transform(&object)
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        try data.write(to: structured)
+        let manifestURL = package.appendingPathComponent("manifest.json")
+        var manifest = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as? [String: Any])
+        var files = try XCTUnwrap(manifest["files"] as? [[String: Any]])
+        for index in files.indices where files[index]["name"] as? String == "structured.json" {
+            files[index]["byteCount"] = data.count
+        }
+        manifest["files"] = files
+        try JSONSerialization.data(withJSONObject: manifest).write(to: manifestURL)
+    }
+
+    func testV3ArchiveWithoutWordFieldsPreservesLegacyLabelsWithoutInventingEvidence() async throws {
+        let store = try requireStore()
+        let version = try await prepareMeetingWithCitations()
+        let documentID = try await requireDocumentID()
+        _ = try await store.attachSpeakerLabel(lineID: "line-1", label: "A")
+        let package = try await store.exportKnowledgeArchive(
+            selection: .init(documentID: documentID, minutesID: version.id, scope: .fullArchive), to: try exportDestination())
+        try rewriteStructuredPackage(package) { object in
+            object["schema"] = "speechrail.meeting.knowledge-archive.payload/3"
+            var lines = object["lines"] as! [[String: Any]]
+            for index in lines.indices {
+                lines[index].removeValue(forKey: "attribution_units")
+                lines[index].removeValue(forKey: "speaker_label_is_manual")
+            }
+            object["lines"] = lines
+        }
+        let before = try Data(contentsOf: package.appendingPathComponent("structured.json"))
+        let imported = try await makeImportedStore { target in try await target.importKnowledgeArchive(at: package) }
+        defer { Task { await imported.store.close() } }
+        let line = try await imported.store.storedLine(id: "line-1")
+        XCTAssertEqual(line?.speakerLabel, "A")
+        XCTAssertEqual(line?.attributionUnits, [])
+        XCTAssertEqual(line?.speakerLabelIsManual, false, "old files do not establish manual provenance")
+        XCTAssertEqual(try Data(contentsOf: package.appendingPathComponent("structured.json")), before)
+        let preview = try await imported.store.previewKnowledgeArchive(at: package)
+        XCTAssertTrue(preview.realConflicts.isEmpty, "normalizing old missing fields cannot create false identity conflicts")
+    }
+
+    func testInvalidArchiveWordEvidenceIsRejectedBeforeAnyImport() async throws {
+        let store = try requireStore()
+        let version = try await prepareMeetingWithCitations()
+        let documentID = try await requireDocumentID()
+        for variant in ["range", "timing", "manual", "summary", "duplicate", "missing"] {
+            let package = try await store.exportKnowledgeArchive(
+                selection: .init(documentID: documentID, minutesID: version.id, scope: .fullArchive),
+                to: try exportDestination().appendingPathComponent(variant))
+            try rewriteStructuredPackage(package) { object in
+                var lines = object["lines"] as! [[String: Any]]
+                var unit: [String: Any] = ["id": "word", "text_start": 0, "text_end": 2, "speaker_label": "A"]
+                if variant == "range" { unit["text_end"] = 999_999 }
+                if variant == "timing" { unit["audio_start_sample"] = 10 }
+                lines[0]["attribution_units"] = variant == "duplicate" ? [unit, unit] : [unit]
+                if variant == "manual" { lines[0]["speaker_label_is_manual"] = true }
+                if variant == "summary" { lines[0]["speaker_label"] = "A" }
+                if variant == "missing" { lines[0].removeValue(forKey: "attribution_units") }
+                object["lines"] = lines
+            }
+            let target = SessionStore(directory: try XCTUnwrap(directory).appendingPathComponent("invalid-\(variant)"))
+            try await target.open()
+            do {
+                _ = try await target.importKnowledgeArchive(at: package)
+                XCTFail("invalid attribution must not be imported: \(variant)")
+            } catch let error as KnowledgeArchiveError {
+                guard case .malformedPackage = error else { XCTFail("unexpected error: \(error)"); await target.close(); continue }
+            }
+            let sessions = try await target.listSessions()
+            XCTAssertTrue(sessions.isEmpty, "rejected payload must not partially import")
+            await target.close()
+        }
+    }
+
     func testFullArchiveRoundTripPreservesIdentityAndAdoptedPointer() async throws {
         let store = try requireStore()
         let first = try await prepareMeetingWithCitations()
@@ -906,7 +1033,7 @@ final class MeetingKnowledgeArchiveTests: XCTestCase {
         }
     }
 
-    func testPayloadSchemaIsV3() async throws {
+    func testPayloadSchemaIsV4() async throws {
         let store = try requireStore()
         let version = try await prepareMeetingWithCitations()
         let documentID = try await requireDocumentID()
@@ -915,6 +1042,6 @@ final class MeetingKnowledgeArchiveTests: XCTestCase {
                 documentID: documentID, minutesID: version.id, scope: .fullArchive
             )
         )
-        XCTAssertEqual(payload.schema, "speechrail.meeting.knowledge-archive.payload/3")
+        XCTAssertEqual(payload.schema, "speechrail.meeting.knowledge-archive.payload/4")
     }
 }

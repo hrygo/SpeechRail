@@ -27,7 +27,7 @@ final class MeetingSessionLifecycleTests: XCTestCase {
 
     private func makeHarness(
         saveLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
-        attachSpeakerLabel: (@Sendable (String, String?) async throws -> Void)? = nil,
+        attachTranscriptAttribution: (@Sendable (String, [TranscriptAttributionUnit]) async throws -> TranscriptLine)? = nil,
         configuration: TranscriptPersistenceQueue.Configuration = .init(),
         makeRealtimeClient: (@Sendable (MeetingRealtimeClientConfiguration) -> any MeetingRealtimeClient)? = nil,
         drainTimeout: Duration = .seconds(12),
@@ -37,7 +37,7 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         dynamicDiarizationEnabled: Bool = false
     ) async throws -> Harness {
         let harness = try await Harness.make(
-            saveLine: saveLine, attachSpeakerLabel: attachSpeakerLabel,
+            saveLine: saveLine, attachTranscriptAttribution: attachTranscriptAttribution,
             configuration: configuration, makeRealtimeClient: makeRealtimeClient,
             drainTimeout: drainTimeout, receiverGateForFirst: receiverGateForFirst, archiveDelay: archiveDelay,
             revisionWindowEnabled:revisionWindowEnabled,
@@ -201,7 +201,7 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         try await h.emit(.completed(itemID: "aligned-item", transcript: "保留的会议正文"))
         try await h.settle { $0.session.lines.count == 1 }
         try await h.emit(.attribution(itemID: "aligned-item", units: [
-            .init(segmentUID: "before-failure", speaker: "A", timingQuality: "aligned")
+            .init(segmentUID: "before-failure", speaker: "A", textStart: 0, textEnd: 7, timingQuality: "aligned")
         ], isFinal: true))
         try await h.settle { $0.session.lines.first?.speakerLabel == "A" }
         try await h.emit(.alignmentFailed(
@@ -227,7 +227,7 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         XCTAssertEqual(h.session.lines.first?.speakerLabel, "A")
         try await h.emit(.completed(itemID: "next-item", transcript: "后续仍能分人"))
         try await h.emit(.attribution(itemID: "next-item", units: [
-            .init(segmentUID: "after-failure", speaker: "B", timingQuality: "aligned")
+            .init(segmentUID: "after-failure", speaker: "B", textStart: 0, textEnd: 6, timingQuality: "aligned")
         ], isFinal: true))
         try await h.settle { $0.session.lines.last?.speakerLabel == "B" }
         XCTAssertEqual(h.session.labeling.labels, ["A", "B"])
@@ -435,7 +435,7 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         try await h.emit(.completed(itemID: "before", transcript: "中断前说的"))
         try await h.settle { $0.session.lines.count == 1 }
         try await h.emit(.attribution(itemID: "before", units: [
-            .init(segmentUID: "unit-before", speaker: "A", timingQuality: "aligned")
+            .init(segmentUID: "unit-before", speaker: "A", textStart: 0, textEnd: 5, timingQuality: "aligned")
         ], isFinal: true))
         try await h.settle { !$0.session.labeling.labels.isEmpty }
         await h.session.renameSpeaker(label: "A", to: "张三")
@@ -579,6 +579,41 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         XCTAssertEqual(rows.first?.timingQuality, .aligned)
     }
 
+    func testManualSpeakerAssignmentImmediatelyUpdatesVisibleLineWithoutAnotherEvent() async throws {
+        let h = try await makeHarness()
+        let id = try await startRecording(h)
+        try await h.emit(.segmentClosed(itemID: "manual-item", sampleSpan: .init(startSample: 0, endSample: 24_000),
+                                        reason: .vad, commitEventID: nil))
+        try await h.emit(.completed(itemID: "manual-item", transcript: "甲乙"))
+        try await h.settle { $0.session.lines.count == 1 }
+        let settled = await h.session.waitForPendingSaves(recordID: id)
+        XCTAssertTrue(settled.isComplete)
+        let line = try XCTUnwrap(h.session.lines.first)
+        // The live menu also calls SpeakerLabeling directly; its revision callback must refresh presentation.
+        await h.session.labeling.split(lineIDs: [line.id], to: "B")
+        XCTAssertEqual(h.session.lines.first?.speakerLabel, "B")
+        XCTAssertEqual(h.session.lines.first?.speakerLabelIsManual, true)
+        XCTAssertEqual(h.session.lines.first?.text, "甲乙")
+        let saved = try await h.store.storedLine(id: line.id)
+        XCTAssertEqual(saved?.speakerLabel, h.session.lines.first?.speakerLabel)
+    }
+
+    func testManualAssignmentRemainsVisibleWhenRevisionRecordingFails() async throws {
+        let h = try await makeHarness()
+        let id = try await startRecording(h)
+        try await h.emit(.segmentClosed(itemID: "manual-failed-revision", sampleSpan: .init(startSample: 0, endSample: 24_000),
+                                        reason: .vad, commitEventID: nil))
+        try await h.emit(.completed(itemID: "manual-failed-revision", transcript: "正文保留"))
+        try await h.settle { $0.session.lines.count == 1 }
+        _ = await h.session.waitForPendingSaves(recordID: id)
+        let line = try XCTUnwrap(h.session.lines.first)
+        try await h.store.execute("CREATE TEMP TRIGGER reject_speaker_revision BEFORE INSERT ON session_change WHEN NEW.kind = 'speaker' BEGIN SELECT RAISE(ABORT, 'injected'); END;")
+        await h.session.labeling.split(lineIDs: [line.id], to: "B")
+        XCTAssertEqual(h.session.lines.first?.speakerLabel, "B")
+        XCTAssertEqual(h.session.lines.first?.speakerLabelIsManual, true)
+        XCTAssertNotNil(h.session.labeling.note, "revision failure remains visible even though attribution was saved")
+    }
+
     func testSavedMeetingAttributionHonoursProjectionCapacity() async throws {
         let h = try await makeHarness(configuration: .init(maximumPendingProjections: 0))
         await h.clients.openGate()
@@ -592,7 +627,7 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         try await h.emit(.completed(itemID: "item", transcript: "已保存会议正文"))
         try await h.settle { $0.session.lines.count == 1 }
         try await h.emit(.attribution(itemID: "item", units: [
-            .init(segmentUID: "unit", speaker: "A", audioStartSample: 0,
+            .init(segmentUID: "unit", speaker: "A", textStart: 0, textEnd: 7, audioStartSample: 0,
                   audioEndSample: 24_000, timingQuality: "aligned")
         ], isFinal: true))
         try await h.emit(.serverError(code: "control", message: "容量后控制", requestID: nil))
@@ -605,7 +640,7 @@ final class MeetingSessionLifecycleTests: XCTestCase {
 
     func testBlockedMeetingMetadataKeepsControlResponsiveAndSettlementPending() async throws {
         let gate = SpeakerAttributionWriteGate()
-        let h = try await makeHarness(attachSpeakerLabel: { try await gate.write($0, label: $1) })
+        let h = try await makeHarness(attachTranscriptAttribution: { try await gate.write($0, units: $1) })
         await gate.attach(h.store)
         let preferencesName = "meeting-metadata-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: preferencesName))
@@ -620,11 +655,11 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         try await h.emit(.completed(itemID: "item", transcript: "metadata等待中的会议正文"))
         try await h.settle { $0.session.lines.count == 1 }
         try await h.emit(.attribution(itemID: "item", units: [
-            .init(segmentUID: "unit", speaker: "A", timingQuality: "aligned")
+            .init(segmentUID: "unit", speaker: "A", textStart: 0, textEnd: 16, timingQuality: "aligned")
         ], isFinal: true))
         try await h.settle { _ in await gate.entered }
         try await h.emit(.attribution(itemID: "item", units: [
-            .init(segmentUID: "unit", speaker: "B", timingQuality: "aligned")
+            .init(segmentUID: "unit", speaker: "B", textStart: 0, textEnd: 16, timingQuality: "aligned")
         ], isFinal: false))
         try await h.emit(.attribution(itemID: "item", units: [
             .init(segmentUID: "another-unit", speaker: nil, timingQuality: "unavailable")
@@ -646,7 +681,7 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         await waiter.value
         XCTAssertTrue(settled)
         let rows = try await h.store.lines(sessionID: id)
-        XCTAssertEqual(rows.first?.speakerLabel, "B", "later partial batches cannot erase an accepted unit revision")
+        XCTAssertEqual(rows.first?.speakerLabel, "B", "malformed later metadata cannot erase an accepted unit revision")
         XCTAssertEqual(h.session.lines.first?.speakerLabel, "B")
     }
 
@@ -1497,7 +1532,7 @@ extension MeetingSessionLifecycleTests {
 
         static func make(
             saveLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
-            attachSpeakerLabel: (@Sendable (String, String?) async throws -> Void)? = nil,
+            attachTranscriptAttribution: (@Sendable (String, [TranscriptAttributionUnit]) async throws -> TranscriptLine)? = nil,
             configuration: TranscriptPersistenceQueue.Configuration = .init(),
             makeRealtimeClient: (@Sendable (MeetingRealtimeClientConfiguration) -> any MeetingRealtimeClient)? = nil,
             drainTimeout: Duration = .seconds(12),
@@ -1528,7 +1563,7 @@ extension MeetingSessionLifecycleTests {
                 powerMonitor: power,
                 persistenceConfiguration: configuration,
                 saveLine: saveLine,
-                attachSpeakerLabel: attachSpeakerLabel,
+                attachTranscriptAttribution: attachTranscriptAttribution,
                 drainTimeout: drainTimeout,
                 revisionWindowEnabled:revisionWindowEnabled,
                 dynamicDiarizationEnabled:dynamicDiarizationEnabled
@@ -2338,7 +2373,7 @@ struct MeetingWindowMergeRegressionTests {
                 .diarizationConfigured(capacity, serverSessionID: "merge-drain"),
                 .transcriptionWindow(sealed),
                 .attribution(itemID: "item-1", units: [
-                    .init(segmentUID: "tail-unit", speaker: "S5", timingQuality: "aligned")
+                    .init(segmentUID: "tail-unit", speaker: "S5", textStart: 0, textEnd: 9, timingQuality: "aligned")
                 ], isFinal: true),
                 .diarizationFinished
             ])

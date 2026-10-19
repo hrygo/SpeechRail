@@ -1,6 +1,6 @@
 # SpeechRail Realtime ASR/TTS 协议契约
 
-> 契约版本：`6.6.0`；生效日期：2026-10-17。唯一机器 schema 是
+> 契约版本：`6.6.10`；生效日期：2026-10-19。唯一机器 schema 是
 > [`realtime-events.schema.json`](realtime-events.schema.json)，字段责任表是
 > [`realtime-field-matrix.json`](realtime-field-matrix.json)。
 
@@ -72,6 +72,9 @@ query 不得携带 key。每连接有独立 session、epoch、sequence 与临时
 - `audio.input.turn_detection` 首批仅接受 `null` 或 `"manual"`；未实现的其他官方 VAD 值明确拒绝。
 - 服务端 VAD 使用 `session.speechrail.endpointing={"mode":"server_vad",...}`，与官方非空
   `turn_detection` 互斥，不把 Silero 冒充官方云模型能力。
+  启用语音准入时，Silero 单帧概率达到入口阈值即放行，并保留请求的前缀；能量 VAD
+  仍需连续三帧确认。低于入口阈值的帧不能启动新话语；进行中的话语沿用较低的退出阈值
+  和请求的静默时长，保留词尾。
 - `session.speechrail.task` 为 `conversation`、`caption`、`transcription`、`render` 或
   `voice_design`。Alignment、Diarization、TTS 均为任务 opt-in，不随规格自动开启。
 - `session.speechrail.asr` 是可选的中立策略对象：`preview_interval_ms` 默认 `1000`，范围
@@ -86,6 +89,9 @@ query 不得携带 key。每连接有独立 session、epoch、sequence 与临时
 - 成功的 `session.updated` 回显所请求的 ASR 策略和 `effective_max_segment_ms`。有效段预算是
   请求值、服务资源上限、能力上限与解码器上限的最小值；超出请求或无效字段直接拒绝，
   不静默夹取。场景预设由客户端选择，服务端不依据 task 推断策略或自动打开其他能力。
+  连续分人独立消费会话音频，不额外缩短 ASR 段预算；固定文字对齐和归属登记支持最长
+  30 秒单段，原有缓冲容量与准入限制仍生效。较长段可减少强制切断，但会延后正式文字
+  与其说话人归属，并可能增加推理内存；需要更早定稿的客户端可显式请求较短段。
 - `session.created` 和每个成功的 `session.updated` 都必须回显完整的有效 ASR 策略。默认值为
   `preview_interval_ms=1000`、`max_segment_ms=20000`、`finalization=full_segment`、
   `rollback_tokens=5`、`final_deadline_ms=120000`、`effective_max_segment_ms=20000`；
@@ -168,6 +174,8 @@ clear 取消。此后对空缓冲区执行一次 `commit` 会产生空 `complete
 24 kHz wire 样本半开区间 `[start, end)` 和关闭原因 `vad`、`client_commit` 或
 `budget_rollover`。只有 client commit 关闭可选带 `commit_event_id`。预算切段仅说明输入段
 冻结，不代表语义结束，也不应单独触发调用方的一轮回复；空输入不创建虚假的样本区间。
+重采样相位跨 client commit 连续保留。极短的新 wire 输入若未产生新的识别样本，提交仍返回
+空 `completed`，不创建 `segment_closed`；完成屏障的 `accepted_samples` 仍统计全部 wire 输入。
 
 ```json
 {
@@ -239,6 +247,13 @@ hypothesis 可修订，使用 `speechrail.transcription.hypothesis`：
 `commit_event_id`；对齐与匿名 speaker 归属随后以独立的
 `speechrail.alignment.*` 与 `speechrail.diarization.*` 事件到达。
 
+标准 ASR hypothesis 与 completed 的轻量数字规范化保留相邻非零中文数字形成的歧义数量，
+例如“五六个人”“七八十个”“两三个”，不猜成 56、80 或 23。明确年份、小数及规范计数
+仍可转换；已由模型输出的阿拉伯数字不会据此反推或改成概数。
+“一点一点”“三点一线”“五点六点”“三点一刻”等普通表达或钟点表达保留原文，
+不将词内的“点”猜成小数点；含多个“点”或以“点”结尾的百分比候选不转换为百分数。
+“统一分配”“统一人员”等表达中的“统一”保留原文，不把词内的“一”当成带单位数量。
+
 三条准入语义是调用方可以依赖的：
 
 - **分包方式不改变内容。** 同一段音频无论整包发送、按 32 ms 切片还是不齐整的分包，
@@ -266,6 +281,25 @@ hypothesis 可修订，使用 `speechrail.transcription.hypothesis`：
 span 或匿名 speaker units。旧 epoch、旧 revision 或不完整降级的回包必须丢弃。Diarization 只输出
 session 内匿名 label，不保存声纹、embedding 或跨会话身份。
 
+文字归属先按对齐区间内各说话人的活动并集覆盖判定。只有覆盖判定仍有歧义、无活动缺口等
+降级原因，且至少两位说话人满足活动支持下限时，才用原生帧的独立分数辅助：按实际重叠
+时长加权，以整个文字区间为分母，只累计对应说话人处于 active 的帧；分数不按说话人归一化。
+最高支持须达到既有 0.60 下限，且领先第二位至少 0.10。相关帧缺分数或相互重叠时不使用该
+辅助判定；证据不足仍为 unknown。覆盖判定已明确的归属不被分数推翻，final 单元不再修订；
+任何归属修订都不改写 ASR 正文。
+
+单个对齐文字单元内部的无活动停顿可另行判定：整个区间只有一位 active 说话人，且区间
+首尾均是该说话人活动时，按其 active 帧的实际时长计算独立分数均值，达到同一 0.60 下限
+即可保留该文字归属。相关帧必须完整、连续、不重叠且都有分数、无降级原因；区间外的
+邻词标签不作证据，不补齐发声活动，也不把重叠或说话人切换当作停顿。该规则仅处理
+覆盖判定和多人分数辅助仍未确定的单元，不覆盖已确定或 final 归属。
+
+相邻文字单元的连续发声可沿用前一 final 单元的匿名说话人：仅当当前单元仍为
+`insufficient_evidence`、与前一个 final 单元的音频间隔不超过 0.50 秒、且该匿名说话人在
+当前单元的活动并集覆盖达到同一 0.60 下限时生效。该规则不覆盖已有标签，不跨降级、缺帧或
+不可用区间，不把静音补成发声；中间单元不会为更早的标签提供旁路，间隔或覆盖不足时仍为
+unknown。
+
 归属事件的身份取自对应 ASR final 冻结的 item，不使用后来正在接收音频的 item。
 每个 `speechrail.diarization.updated` 只包含该 `utterance_id` 的 units；多个已完成 item 的
 修订分别发送。`speechrail.diarization.done` 是会话收尾屏障，只携带最后一个已完成 item 的
@@ -278,6 +312,8 @@ diarization 关闭；关闭 alignment 则不保留 PCM，即使 diarization 开�
 帧之前改变。`speechrail.diarization.finish` 必须先等齐已冻结 item 尚在进行的对齐任务，再封存
 归属账本，并等待归属事件消费者发送完封存前的修订，最后发送会话终态。等待超过
 `realtime_diarization_drain_deadline_seconds` 时按 `finalization_timeout` 降级。
+原生 EOF 与活动事件排空受同一内部结束预算约束；任一阶段超时都保留
+`finalization_timeout` 原因，不因取消引发的活动流错误改记为输出异常，已封存 ASR 正文仍有效。
 
 对齐只有 `granularity` 一个会话级旋钮。对齐器精度由 active profile 在进程启动时固定，
 不提供会话级 `precision`：单服务单 worker 的边界不允许按连接重建模型进程。
@@ -461,6 +497,11 @@ the effective window budgets. The feature is disabled by default.
 | --- | --- | --- | --- | --- | --- | --- |
 | meeting | 20 s | 2 s | 2 s | 24 s | 1500 ms | 15 s |
 | caption | 4 s | 8 s | 2 s | 14 s | 500 ms | 5 s |
+
+An incomplete contextual review may retry exactly the owned PCM once within
+the original finalization deadline. The retry has a fresh attempt identity and
+does not extend the input span or budget. An incomplete owned-only retry, stale
+result, or timeout produces failed coverage; incomplete text is never sealed.
 
 All public spans are half-open 24 kHz samples. Internally each raw 16 kHz sample
 enters a continuous RAM ring once, before speech admission. Pre-roll decisions

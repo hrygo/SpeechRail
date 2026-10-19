@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Observation
 import OSLog
@@ -154,7 +155,9 @@ public final class MinutesGenerator {
             )
             // MA-07：配置与来源快照在**排队这一刻**冻下来（MC-20/MC-32）。
             // 任务跑着的时候改设置，当前任务不跟着换；新配置从下一次任务生效。
-            let jobConfig = MinutesJobConfig(configuration)
+            var jobConfig = MinutesJobConfig(configuration)
+            jobConfig.inputFingerprint = try Self.inputFingerprint(units: units,
+                windows: MinutesWindowPlanner.plan(units: units, budget: Self.windowBudget), supplements: supplements)
             let snapshotID = (try? await coordinator.latestSourceSnapshot(sessionID: sessionID))?.id
             version = try await coordinator.enqueueMinutes(
                 sessionID: sessionID,
@@ -253,7 +256,7 @@ public final class MinutesGenerator {
             // 读不出的指纹（老行没有这一列）才退回当前设置，那不是猜，是没有可还原的东西。
             let currentConfig = MinutesJobConfig(configuration)
             let jobConfig = MinutesJobConfig.parse(row.configSnapshot) ?? currentConfig
-            jobConfigDiffersFromCurrent = jobConfig != currentConfig
+            jobConfigDiffersFromCurrent = jobConfig.configuration != currentConfig.configuration
             guard jobConfig.configuration.isConfigured else {
                 // 没配大模型：不断原 job，只如实记失败；行仍可被下次恢复认领。
                 do {
@@ -370,7 +373,7 @@ public final class MinutesGenerator {
             // 不能混进同一版里（MC-32）。
             let currentConfig = MinutesJobConfig(resolvedConfiguration.configuration)
             let jobConfig = MinutesJobConfig.parse(target.configSnapshot) ?? currentConfig
-            jobConfigDiffersFromCurrent = jobConfig != currentConfig
+            jobConfigDiffersFromCurrent = jobConfig.configuration != currentConfig.configuration
             guard jobConfig.configuration.isConfigured else {
                 failedOnSetup = true
                 state = .failed("还没有配置对话模型。文字记录已经存好，配好之后可以重新生成。")
@@ -551,6 +554,10 @@ public final class MinutesGenerator {
             // §6.3：按 token 预算分窗，每个来源单元恰好 owned 一次。
             // 短会得到单窗，走的是**同一条**验证与落库路径。
             let windows = MinutesWindowPlanner.plan(units: units, budget: Self.windowBudget)
+            // 编号相同不代表输入相同：正文、逐词标签或切窗规则变化后不可复用旧响应。
+            guard let frozenInput = jobConfig.inputFingerprint,
+                  frozenInput == (try Self.inputFingerprint(units: units, windows: windows, supplements: supplements))
+            else { throw InputCheckError.changed }
             // 已经跑过的窗口（崩溃恢复、局部重试）：直接复用，不重发请求。
             let previous = (try? await coordinator.minutesWindows(minutesID: claimed.id)) ?? []
             var records: [MinutesWindowRecord] = []
@@ -728,6 +735,25 @@ public final class MinutesGenerator {
         }
     }
 
+    private enum InputCheckError: LocalizedError {
+        case changed
+        var errorDescription: String? {
+            "这一版的输入已变化或缺少核对记录，请重新生成纪要。原文字和已保存的结果仍保留。"
+        }
+    }
+
+    /// 只持久化摘要，覆盖来源身份、实际分窗 prompt（含标签／上下文）与补充。
+    /// 恢复时重建后比较，不把当前可变记录冒充排队时的输入。
+    static func inputFingerprint(units: [MinutesSourceUnit], windows: [MinutesWindow], supplements: String) throws -> String {
+        var parts = [["minutes-input/1"]]
+        parts.append(contentsOf: units.map { ["source", $0.id, $0.lineID, String($0.ordinal)] })
+        parts.append(contentsOf: windows.map { window in
+            ["window", String(window.index)] + prompt(transcript: windowTranscript(window), supplements: supplements)
+                .flatMap { [$0.role.rawValue, $0.text, String($0.cacheBreakpoint)] }
+        })
+        return SHA256.hash(data: try JSONEncoder().encode(parts)).map { String(format: "%02x", $0) }.joined()
+    }
+
     /// 拿这一窗要轮询的远端响应 id。
     ///
     /// 三条来源，按可靠性排序（MC-28/MC-40）：
@@ -768,6 +794,21 @@ public final class MinutesGenerator {
             textFormat: MinutesCandidateCodec.jsonSchema
         )
         lastResponseID = responseID
+        // 必须先保存提交身份再轮询；否则多窗任务在等待期间中断会重复 POST。
+        let checkpointed = (try? await coordinator.recordMinutesWindow(
+            minutesID: claimed.id,
+            expectedAttempts: claimed.attempts,
+            record: MinutesWindowRecord(
+                index: window.index,
+                ownedUnitIDs: window.owned.map(\.id),
+                contextUnitIDs: (window.contextBefore + window.contextAfter).map(\.id),
+                outcome: .submitted,
+                remoteResponseID: responseID
+            )
+        )) ?? false
+        guard checkpointed else {
+            throw LLMError.transport("这一版的提交回执没有写回，提交结果需要确认。")
+        }
         if isOnlyWindow {
             // 单窗沿用行上的字段：MA-07 的恢复路径对短会保持原样。
             let recorded = (try? await coordinator.recordMinutesRemoteResponse(
@@ -889,6 +930,7 @@ public final class MinutesGenerator {
                     + "不要补你没看到的事；转录里没提到的决定、待办、负责人一律不要写。"
                     + "用户补充只是用户选择的 AI 参考，不得写成参会人的发言、决定或待办归属。"
                     + "说话人用转录里已有的名字；同一个名字不要改写成别的称呼。"
+                    + "同一来源编号中可能分段标明不同说话人；只按各段标注归属，未确认说话人不得猜成其他人。"
                     + "每一条概述、结论、待办和未决问题都必须填 source_unit_ids，"
                     + "只能填转录里 [u1] [u2] 这样的编号，一条都没依据就不要写这一条。"
                     + "结论的 modality 要如实填：只是提议或待定就填 proposed，带前提就填 conditional，"
@@ -909,10 +951,8 @@ public final class MinutesGenerator {
 
     /// 转录 → prompt 里的文本。**相对会话开始的秒**，与库里的时间码同源（§6.5）。
     static func render(lines: [TranscriptLine], names: [String: String] = [:]) -> String {
-        lines.map { line in
-            let speaker = line.speakerLabel.flatMap { names[$0] } ?? line.speakerLabel ?? "说话人"
-            let start = line.tStart ?? 0
-            return "[\(Self.timecode(start))] \(speaker)：\(line.text)"
+        sourceUnits(lines: lines, names: names).map { unit in
+            "[\(Self.timecode(unit.startSeconds ?? 0))] \(unit.speakerText)"
         }.joined(separator: "\n")
     }
 
@@ -925,14 +965,19 @@ public final class MinutesGenerator {
             let text = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return nil }
             let speaker = line.speakerLabel.flatMap { names[$0] } ?? line.speakerLabel ?? "说话人"
-            return MinutesSourceUnit(
+            var unit = MinutesSourceUnit(
                 id: "",
                 lineID: line.id,
                 ordinal: line.ordinal,
                 speaker: speaker,
                 text: text,
-                startSeconds: line.tStart
+                startSeconds: line.tStart,
+                attributionUnits: line.speakerLabelIsManual || line.attributionUnits.isEmpty ? nil : line.attributionUnits,
+                speakerNames: names
             )
+            let leading = line.text.unicodeScalars.prefix { CharacterSet.whitespacesAndNewlines.contains($0) }.count
+            unit.attributionUnits = unit.attribution(in: leading..<(leading + text.unicodeScalars.count))
+            return unit
         }
         return usable.enumerated().map { index, unit -> MinutesSourceUnit in
             var numbered = unit
@@ -944,7 +989,7 @@ public final class MinutesGenerator {
     /// 来源单元 → prompt 里的文本。每行前面带 id 与时间码，模型照抄 id 回来。
     static func transcript(units: [MinutesSourceUnit]) -> String {
         units.map { unit in
-            "[\(unit.id)] [\(Self.timecode(unit.startSeconds ?? 0))] \(unit.speaker)：\(unit.text)"
+            "[\(unit.id)] [\(Self.timecode(unit.startSeconds ?? 0))] \(unit.speakerText)"
         }.joined(separator: "\n")
     }
 
@@ -957,7 +1002,7 @@ public final class MinutesGenerator {
         func line(_ unit: MinutesSourceUnit, owned: Bool) -> String {
             let marker = owned ? "" : "[上下文·不可引用] "
             return "\(marker)[\(unit.id)] [\(Self.timecode(unit.startSeconds ?? 0))] "
-                + "\(unit.speaker)：\(unit.text)"
+                + "\(unit.speakerText)"
         }
         var lines: [String] = []
         if !window.contextBefore.isEmpty {

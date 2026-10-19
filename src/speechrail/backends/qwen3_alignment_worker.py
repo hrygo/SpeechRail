@@ -78,9 +78,7 @@ class AlignmentIdentity:
 class AlignerEngine(Protocol):
     identity: AlignmentIdentity
 
-    def align_text(
-        self, audio: bytes, *, text: str, language: str
-    ) -> list[dict[str, object]]: ...
+    def align_text(self, audio: bytes, *, text: str, language: str) -> list[dict[str, object]]: ...
 
 
 def _ready_identity_fields(identity: AlignmentIdentity) -> dict[str, object]:
@@ -154,8 +152,11 @@ def _handle_align_text(
         return
     except Exception as exc:
         log_alignment_failure(
-            code="alignment_worker_failed", stage="worker",
-            audio_samples=len(pcm) // 2, text_characters=len(text), exception=exc,
+            code="alignment_worker_failed",
+            stage="worker",
+            audio_samples=len(pcm) // 2,
+            text_characters=len(text),
+            exception=exc,
         )
         _write_error(output_stream, "worker_alignment_error", request_id=request_id)
         return
@@ -208,8 +209,11 @@ def serve(
         engine = engine_factory(model_dir, device, dtype)
     except Exception as exc:
         log_alignment_failure(
-            code="alignment_worker_failed", stage="initialize",
-            audio_samples=0, text_characters=0, exception=exc,
+            code="alignment_worker_failed",
+            stage="initialize",
+            audio_samples=0,
+            text_characters=0,
+            exception=exc,
         )
         _write_error(output_stream, "worker_load_error")
         return
@@ -240,7 +244,11 @@ def serve(
             return
         kind = frame.get("type")
         if kind == "align_text":
-            _handle_align_text(frame, output_stream, engine)
+            try:
+                _handle_align_text(frame, output_stream, engine)
+            finally:
+                # Request-local tensors have left scope; retain weights, not idle allocations.
+                _clear_metal_cache()
         elif kind == "shutdown":
             return
         elif kind == "trim_memory":
@@ -278,7 +286,10 @@ def _timestamp_quantum_seconds(model_dir: Path) -> float:
 
 
 def _fit_terminal_timestamp_cell(
-    tokens: list[tuple[str, float, float]], *, audio_samples: int, quantum_seconds: float,
+    tokens: list[tuple[str, float, float]],
+    *,
+    audio_samples: int,
+    quantum_seconds: float,
 ) -> list[tuple[str, float, float]]:
     """Intersect only the nearest terminal model cell with the exact PCM edge.
 
@@ -378,7 +389,9 @@ class Qwen3AlignerEngine:  # pragma: no cover - requires an external aligner sna
             # before it can either be recovered or rejected with a reason.
             raw.append((token, start, end))
         fitted = _fit_terminal_timestamp_cell(
-            raw, audio_samples=len(audio) // 2, quantum_seconds=self._timestamp_quantum,
+            raw,
+            audio_samples=len(audio) // 2,
+            quantum_seconds=self._timestamp_quantum,
         )
         return [{"text": token, "start": start, "end": end} for token, start, end in fitted]
 
@@ -394,6 +407,18 @@ def _engine_revision() -> str | None:
         return None
 
 
+def _apply_memory_limits(cache_limit_mb: int, memory_limit_mb: int) -> None:
+    """Apply positive allocator hints before loading; zero retains vendor defaults."""
+    if cache_limit_mb == 0 and memory_limit_mb == 0:
+        return
+    import mlx.core as mx  # type: ignore[import-not-found]
+
+    if cache_limit_mb > 0:
+        mx.set_cache_limit(cache_limit_mb * 1024 * 1024)
+    if memory_limit_mb > 0:
+        mx.set_memory_limit(memory_limit_mb * 1024 * 1024)
+
+
 def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - process entry point.
     parser = argparse.ArgumentParser(description="SpeechRail Qwen3-ForcedAligner worker")
     parser.add_argument("--model-dir", required=True)
@@ -403,7 +428,16 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - proces
         choices=("float16", "float32", "bfloat16", "int8"),
         default="float16",
     )
+    parser.add_argument("--cache-limit-mb", type=int, default=256)
+    parser.add_argument("--memory-limit-mb", type=int, default=0)
     args = parser.parse_args(argv)
+    if args.cache_limit_mb < 0 or args.memory_limit_mb < 0:
+        parser.error("memory and cache limits must be non-negative")
+    try:
+        _apply_memory_limits(args.cache_limit_mb, args.memory_limit_mb)
+    except Exception:
+        _write_error(sys.stdout.buffer, "worker_memory_limit_error")
+        return 1
     serve(
         sys.stdin.buffer,
         sys.stdout.buffer,

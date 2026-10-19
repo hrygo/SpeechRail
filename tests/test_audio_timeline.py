@@ -117,18 +117,44 @@ def test_resampler_long_sequence_has_no_accumulated_drift() -> None:
     assert resampler.output_samples == CORE_SAMPLE_RATE * seconds
 
 
-def test_resampler_chunk_split_matches_single_shot() -> None:
+@pytest.mark.parametrize("source_rate", [24_000, 48_000])
+def test_resampler_chunk_split_matches_single_shot(source_rate: int) -> None:
     source = _pcm16([(index * 37) % 2_000 - 1_000 for index in range(24_000)])
-    single = RationalResampler(24_000, CORE_SAMPLE_RATE)
+    single = RationalResampler(source_rate, CORE_SAMPLE_RATE)
     expected = single.process(source) + single.flush()
 
-    chunked = RationalResampler(24_000, CORE_SAMPLE_RATE)
+    chunked = RationalResampler(source_rate, CORE_SAMPLE_RATE)
     produced = bytearray()
     for offset in range(0, len(source), 358):  # deliberately not a multiple of 3 samples
         produced.extend(chunked.process(source[offset : offset + 358]))
     produced.extend(chunked.flush())
 
     assert bytes(produced) == expected
+
+
+def test_resampler_commit_tail_preserves_the_next_source_position() -> None:
+    resampler = RationalResampler(24_000, CORE_SAMPLE_RATE)
+
+    assert _decode(resampler.process(_pcm16([0, 100])) + resampler.flush()) == [0, 100]
+    # The next output is at source position 3, followed by 4.5. Source sample
+    # 2 arrives after the commit but is correctly skipped by the global phase.
+    assert _decode(resampler.process(_pcm16([200, 300, 400, 500])) + resampler.flush()) == [
+        300, 450,
+    ]
+    assert resampler.output_samples == 4
+
+
+@pytest.mark.parametrize("source_rate", [24_000, 48_000])
+def test_resampler_repeated_commits_do_not_accumulate_target_samples(source_rate: int) -> None:
+    resampler = RationalResampler(source_rate, CORE_SAMPLE_RATE)
+    total_source = 0
+    for _ in range(100):
+        total_source += 2
+        resampler.process(_pcm16([100, 200]))
+        resampler.flush()
+        expected = (total_source * CORE_SAMPLE_RATE + source_rate - 1) // source_rate
+        assert resampler.output_samples == expected
+        assert resampler.flush() == b""
 
 
 def test_resampler_keeps_bounded_state_for_long_stream() -> None:

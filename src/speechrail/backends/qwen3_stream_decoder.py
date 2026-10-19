@@ -9,8 +9,8 @@ from typing import Any, Protocol, cast
 
 class _GenerationResult(Protocol):
     tokens: list[int]
-    finish_reason: str
-    truncated: bool
+    finish_reason: str | None
+    truncated: bool | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,8 +38,8 @@ class StreamingDecodeState:
     decoded_samples: int = 0
     text: str = ""
     language: str = ""
-    finish_reason: str = ""
-    truncated: bool = False
+    finish_reason: str | None = ""
+    truncated: bool | None = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,8 +49,10 @@ class Qwen3DecodeResult:
     raw_tokens: tuple[int, ...]
     revision: int
     sample_watermark: int
-    finish_reason: str
-    truncated: bool
+    finish_reason: str | None
+    truncated: bool | None
+    generation_max_new_tokens: int | None = None
+    generated_token_count: int | None = None
 
 
 class BoundQwen3Decoder:
@@ -162,8 +164,15 @@ class BoundQwen3Decoder:
         )
         if len(generation.tokens) > remaining_tokens:
             raise RuntimeError("Qwen3-ASR generation exceeded the segment token budget")
-        finish_reason = str(generation.finish_reason)
-        truncated = bool(generation.truncated)
+        finish_reason = getattr(generation, "finish_reason", None)
+        truncated = getattr(generation, "truncated", None)
+        if (
+            (finish_reason is not None and (
+                not isinstance(finish_reason, str) or not 1 <= len(finish_reason) <= 64
+            ))
+            or (truncated is not None and type(truncated) is not bool)
+        ):
+            raise ValueError("invalid Qwen3-ASR generation metadata")
         if final:
             self._validate_final(finish_reason, truncated)
 
@@ -197,6 +206,8 @@ class BoundQwen3Decoder:
             sample_watermark=sample_watermark,
             finish_reason=finish_reason,
             truncated=truncated,
+            generation_max_new_tokens=remaining_tokens,
+            generated_token_count=len(generation.tokens),
         )
 
     def _rollback_prefix(
@@ -246,7 +257,7 @@ class BoundQwen3Decoder:
         return 0
 
     @staticmethod
-    def _validate_final(finish_reason: str, truncated: bool) -> None:
+    def _validate_final(finish_reason: str | None, truncated: bool | None) -> None:
         if truncated or finish_reason == "length":
             raise RuntimeError("Qwen3-ASR final decode was truncated by the token budget")
         if finish_reason != "eos":

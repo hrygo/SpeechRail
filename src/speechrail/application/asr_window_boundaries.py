@@ -1,4 +1,4 @@
-"""Word-evidence cropping with one bounded, prefix-free owned-only fallback."""
+"""Whole aligned-unit cropping with one bounded owned-only fallback."""
 
 from __future__ import annotations
 
@@ -23,7 +23,9 @@ class BoundaryEvidenceError(ValueError):
 def crop_owned_text(text: str, units: Sequence[AlignmentUnit], owned: SampleSpan) -> str:
     if not text:
         return ""
-    if not units or any(u.granularity != "word" or u.audio_span is None for u in units):
+    if not units or any(
+        u.granularity not in ("word", "segment") or u.audio_span is None for u in units
+    ):
         raise BoundaryEvidenceError("word_alignment_unavailable")
     cursor = 0
     for unit in units:
@@ -102,7 +104,9 @@ class WindowBoundaryReview:
                         span=request.input_span,
                         text=result.text,
                         language=result.language,
-                        granularity="word",
+                        # Preserve grid-tied text as whole coalesced units; crop never
+                        # splits a unit that straddles the owned boundary.
+                        granularity="segment",
                     )
                 )
             if aligned.failure is not None:

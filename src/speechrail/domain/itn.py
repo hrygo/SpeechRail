@@ -28,6 +28,15 @@ _YEAR_RE = re.compile(r"([零一二三四五六七八九]{4})年")
 _PERCENT_RE = re.compile(r"百分之([零一二三四五六七八九十百千万点\d]+)")
 _DECIMAL_RE = re.compile(r"([零一二三四五六七八九十百千万\d]+)点([零一二三四五六七八九\d]+)")
 _CN_NUM_RE = re.compile(r"[零一二两三四五六七八九十百千万亿]+")
+# Adjacent digits can be an approximation or stutter. A trailing digit after
+# 百 or a larger magnitude can omit a place (三千五元), cross a price boundary
+# (五百一个), or belong to ordinary words (万一人家). Preserve these matches
+# rather than inventing a precise value. Explicit decimal/year rules below
+# retain their positional digit handling.
+_AMBIGUOUS_QUANTITY_RE = re.compile(
+    r"(?<![零一二两三四五六七八九])[一二两三四五六七八九]{2}(?![零一二两三四五六七八九])"
+    r"|[百千万亿][一二两三四五六七八九1-9]\Z"
+)
 
 # `点` is deliberately absent. In the repository corpus 46 of the 86 `X点`
 # matches are ordinary words (`这一点`, `短一点`, `有一点`), while the numeric
@@ -142,10 +151,14 @@ def _fold_decimal_digits(text: str) -> str:
 def _percent_to_arabic(match: re.Match[str]) -> str:
     raw = _fold_decimal_digits(match.group(1))
     if "点" in raw:
+        if raw.count("点") != 1 or raw.endswith("点"):
+            return match.group(0)
         parts = raw.split("点", 1)
         int_part = _chinese_to_int(parts[0])
         dec_part = "".join(str(_DIGITS_MAP.get(c, c)) for c in parts[1])
         return f"{int_part}.{dec_part}%"
+    if _AMBIGUOUS_QUANTITY_RE.search(raw):
+        return match.group(0)
     try:
         val = _chinese_to_int(raw)
         return f"{val}%"
@@ -154,6 +167,11 @@ def _percent_to_arabic(match: re.Match[str]) -> str:
 
 
 def _decimal_to_arabic(match: re.Match[str]) -> str:
+    # 点 can join ordinary phrases or clock alternatives: 一点一点,
+    # 三点一线, 五点六点. Inspect the complete greedy match's boundary in
+    # the callback so rejection cannot backtrack into a shorter decimal.
+    if match.string[match.end():match.end() + 1] in {"点", "滴", "刻", "线"}:
+        return match.group(0)
     int_str, dec_str = (_fold_decimal_digits(part) for part in match.group(1, 2))
     int_val = _chinese_to_int(int_str) if not int_str.isdigit() else int(int_str)
     dec_val = "".join(str(_DIGITS_MAP.get(c, c)) for c in dec_str)
@@ -178,6 +196,15 @@ def apply_light_itn(text: str) -> str:
     def _convert_with_unit(m: re.Match[str]) -> str:
         cn_num = m.group(1)
         unit = m.group(2)
+        # Preserve the natural classifier phrase 一个 (有一个 / 每一个).
+        # Larger explicit quantities such as 十一个 still become 11个.
+        if cn_num == "一" and unit == "个":
+            return m.group(0)
+        # 统一 is an ordinary word, including before 分配 or 人员.
+        if cn_num == "一" and m.start() > 0 and m.string[m.start() - 1] == "统":
+            return m.group(0)
+        if _AMBIGUOUS_QUANTITY_RE.search(cn_num):
+            return m.group(0)
         # A bare magnitude in front of 分 is a quantity word, not a number:
         # 十分满意, 百分百, 百分之, 百分点. `三分钟` still converts because 三
         # carries a digit.

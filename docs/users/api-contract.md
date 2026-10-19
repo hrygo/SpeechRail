@@ -2,8 +2,8 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.18.0"
-date: 2026-10-17
+version: "3.18.10"
+date: 2026-10-19
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -27,6 +27,8 @@ date: 2026-10-17
 完整事件、容量与采样率规则见[Realtime 窗口契约](../../contracts/realtime-openai.md#revision-window-transcription)。
 字幕快照的 `falling_behind` 表示已接收语音连续落后，客户端应提示正在追赶。
 块尾预览不等待后续上下文复核；正式文字仍按封存与保存屏障确认。
+上下文复核没有完整结束时，服务可在原截止时间内仅对拥有区间重识别一次；
+仍不完整、结果身份不符或超时则按失败收尾，不把异常假设作为正式正文。
 
 分人以 `session.speechrail.diarization.backend` 单独选择。省略为既有 `sortformer`；
 `meeting_dynamic` 只有本地制品、对齐和独立质量认证均就绪时可用。
@@ -188,6 +190,15 @@ worker 没有上报时，这些字段保持 `null` 而不是用制品版本或�
 POST /v1/audio/transcriptions
 Content-Type: multipart/form-data
 ```
+
+批量转写只接受正常解码完成的正文。模型因重复、token上限或其他非EOS原因停止时，请求走现有推理错误路径，不将不完整文字作为成功结果返回；长音频中任一窗口失败也不返回部分成功。此完整性检查不保证正文中每个字都正确。
+
+文件转写和标准 Realtime 的轻量数字规范化保留“五六个人”“七八十个”“两三个”等歧义
+数量表达，避免将概数或口头重复误写成精确值。明确年份、小数和“五十六元”等规范计数仍可
+转为数字。模型已经输出的阿拉伯数字不反向猜测；此规则不能纠正模型自身的数字识别错误。
+“一点一点”“三点一线”以及“五点六点”“三点一刻”等钟点表达保留原文，避免误写成
+小数。含多个“点”或以“点”结尾的百分比候选不转换为百分数。
+“统一分配”“统一人员”等表达中的“统一”保留原文，不把词内的“一”改成数字。
 
 ### 请求参数表 (Multipart Form-Data)
 | 参数名 | 类型 | 必填 | 默认值 | 说明 |
@@ -777,6 +788,8 @@ registry 不可读返回 `503 pronunciation_store_unavailable`（可重试）。
   `session.audio.input`，而非旧平铺字段。
 - `audio.input.turn_detection` 仅接受 `null` 或 `"manual"`；服务端 VAD 使用
   `session.speechrail.endpointing.mode="server_vad"`。
+  启用语音准入时，Silero 单帧概率达到入口阈值即可放行，能量 VAD 仍需连续三帧确认；
+  两者均保留请求的前缀，并沿用进行中话语的退出阈值和静默时长。
 - `session.speechrail.task` 选择 `conversation`、`caption`、`transcription`、`render` 或
   `voice_design`；Alignment、Diarization 按请求 opt-in。
 - 可选的 `session.speechrail.asr` 在首个 PCM 前设置识别策略：
@@ -789,6 +802,9 @@ registry 不可读返回 `503 pronunciation_store_unavailable`（可重试）。
   省略时沿用请求 timeout。布尔值、小数、未知字段或枚举均拒绝。
 - `session.updated.session.speechrail.asr.effective_max_segment_ms` 回显实际有效段预算；它是
   请求、服务资源、能力与解码器上限的最小值。只有首个 PCM 前可更新；候选失败时旧配置保持不变。
+  启用连续分人不另缩短该预算；ASR、固定文字对齐与归属登记支持最长 30 秒单段，
+  缓冲容量与准入仍可限制实际预算。较长段能减少强制切断，但正式文字和说话人归属
+  等待更久，也可能占用更多推理内存；需要更早定稿时可请求更短段，预览间隔独立设置。
 - ASR 策略形状、范围或 deadline 无效时用 `asr_policy_invalid`；后端不支持该策略时用
   `asr_policy_unsupported`；无法在有界资源内接纳音频时用 `asr_buffer_overflow`。
 - 更新成功返回 `session.updated`。失败不半应用配置；未知字段、旧字段、Q4/Q6、Design runtime
@@ -853,6 +869,8 @@ registry 不可读返回 `503 pronunciation_store_unavailable`（可重试）。
 `sample_span.start` / `sample_span.end` 是 24 kHz wire 样本数，表示半开区间 `[start, end)`；
 预算切段只结束识别 item，不代表助手业务轮次完成。仅 `client_commit` 可附带可选
 `commit_event_id`。`completed` 的既有形状保持不变。
+重采样相位在多次提交之间连续保留。极短输入没有产生新的识别样本时返回空 `completed`，
+不创建虚假段边界；完成屏障仍按原始 wire 输入累计样本数。
 
 客户端调用 `input_audio_buffer.commit` 时生成稳定 `event_id`。由这次提交产生的
 `completed` / `failed` 会回显 `commit_event_id`。结束录音时请给 commit 附带
@@ -874,6 +892,19 @@ PCM 样本数，再 clear/close。空/重复提交也返回回执，不重复文
 归属更新始终携带该段 ASR final 冻结的 `utterance_id` 与文本 revision，每个事件只包含该段
 units。结束分人时，服务先发送全部已接纳段的归属修订，再发会话终态；`diarization.done`
 只带最后完成段的快照，较早段的归属由先前 `diarization.updated` 保留。
+结束预算同时覆盖原生收尾与归属事件排空；超时保留 `finalization_timeout` 原因，
+取消时的活动流错误不会覆盖它，已确认的转写文字仍可使用。
+
+多人同时活动时，服务可用原生分人的独立分数辅助判断文字归属；只有活动覆盖、加权分数
+及领先差距均足够时才输出标签。缺少分数、活动证据有歧义或已降级时保留 unknown，
+不会为了减少未知标签把文字强行归给主讲。对于紧接前一 final 单元、且该说话人在当前
+单元仍有至少 0.60 活动覆盖的 `insufficient_evidence` 单元，服务可沿用该匿名标签；
+间隔超过 0.50 秒、已有明确标签或发生降级时不沿用。该判断不改变转写正文，final 归属不再修订；
+完整判定条件见 [Alignment 与 Diarization](../../contracts/realtime-openai.md#52-alignment-与-diarization)。
+
+一个对齐文字单元内部若有停顿，服务可保留其唯一说话人的归属：单元首尾必须都有同一人
+活动，期间没有其他人活动，且连续完整帧中的活动分数足够。缺帧、降级、低分或开放的
+静音边界仍为 unknown；不会借用相邻词的标签猜人，也不会把停顿补成发声。
 
 `segment` 对齐可将模型时间网格上没有独立时长的 token 合并进相邻有效 segment，完整保留
 正文。Qwen3 的尾部结束点若恰好落在音频边界最近的模型格点，可在适配层以实际 PCM 边界

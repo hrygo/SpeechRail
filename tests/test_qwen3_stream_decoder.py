@@ -554,3 +554,42 @@ def test_final_can_correct_an_entire_previously_fixed_hypothesis(
     assert final.language == "English"
     assert final.raw_tokens == (*header, 11, 12)
     assert runtime.configs[-1].max_new_tokens == 32
+
+
+def test_decode_reports_generation_budget_and_count_before_prefix_merge_and_header_strip():
+    decoder, runtime, _, _ = _make_decoder([
+        FakeGeneration([1, 2, 3, 5, 6, 7, 8, 9]),
+        FakeGeneration([5, 6, 7, 8, 9, 10, 11, 12]),
+        FakeGeneration([12], finish_reason="length", truncated=True),
+    ])
+    state = StreamingDecodeState()
+    results = [decoder.decode([0.1] * watermark, state, language="en", context="",
+        sample_watermark=watermark, max_new_tokens=32) for watermark in (2, 4, 6)]
+    assert results[0].generated_token_count == 8
+    assert len(results[0].raw_tokens) == 5
+    assert results[-1].generation_max_new_tokens == runtime.configs[-1].max_new_tokens == 29
+    assert results[-1].generated_token_count == 1
+    assert len(results[-1].raw_tokens) == 4
+    assert results[-1].finish_reason == "length"
+    assert results[-1].truncated is True
+
+
+@pytest.mark.parametrize("finish_reason,truncated", [(None, None), ("eos", None), (None, False)])
+def test_preview_missing_vendor_metadata_remains_unknown(finish_reason, truncated):
+    decoder, _, _, _ = _make_decoder([
+        SimpleNamespace(tokens=[5], finish_reason=finish_reason, truncated=truncated)
+    ])
+    result = decoder.decode([0.1, 0.2], StreamingDecodeState(), language="en", context="",
+        sample_watermark=2)
+    assert result.finish_reason is finish_reason
+    assert result.truncated is truncated
+
+
+@pytest.mark.parametrize("finish_reason,truncated", [(1, False), ("eos", 0), ("eos", "false")])
+def test_preview_rejects_invalid_vendor_metadata_instead_of_coercing(finish_reason, truncated):
+    decoder, _, _, _ = _make_decoder([
+        SimpleNamespace(tokens=[5], finish_reason=finish_reason, truncated=truncated)
+    ])
+    with pytest.raises(ValueError, match="generation metadata"):
+        decoder.decode([0.1, 0.2], StreamingDecodeState(), language="en", context="",
+            sample_watermark=2)

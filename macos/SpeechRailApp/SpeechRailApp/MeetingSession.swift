@@ -102,6 +102,12 @@ public final class MeetingSession {
         public var start: TimeInterval
         public var end: TimeInterval
         public var speakerLabel: String?
+        public var attributionUnits: [TranscriptAttributionUnit] = []
+        public var speakerLabelIsManual = false
+        public var displaySpeakerRuns: [TranscriptSpeakerRun] {
+            TranscriptSpeakerRun.display(TranscriptSpeakerRun.project(text: text, attributionUnits: attributionUnits,
+                speakerLabel: speakerLabel, speakerLabelIsManual: speakerLabelIsManual))
+        }
         public var source: SessionLineSource
         public var isDeviceSwitch: Bool
         /// 这一行的 `tStart` / `tEnd` 是不是**说话时刻**。
@@ -297,7 +303,7 @@ public final class MeetingSession {
         self.audio = dependencies.makeAudioSource()
         self.port = port
         self.serviceKey = apiKey
-        self.labeling = SpeakerLabeling(coordinator: coordinator, attachLabel: dependencies.attachSpeakerLabel)
+        self.labeling = SpeakerLabeling(coordinator: coordinator, attachAttribution: dependencies.attachTranscriptAttribution)
         self.minutes = MinutesGenerator(coordinator: coordinator, provider: llmProvider)
         self.innerOS = InnerOSSession(coordinator: coordinator, provider: llmProvider)
         // 改了来源（改名 / 合并 / 标记「我」/ 拆出）就重算一次复核状态。
@@ -306,6 +312,16 @@ public final class MeetingSession {
         // 重开才出现——用户看到的是"我改了名字，什么提示都没有"。
         self.labeling.onSourceRevision = { [weak self] in
             guard let self, let sessionID = self.sessionID else { return }
+            for line in self.transcriptPresentation.rows {
+                guard let saved = self.labeling.attributedLine(forLineID: line.id), saved.sessionID == sessionID,
+                      line.speakerLabel != saved.speakerLabel || line.attributionUnits != saved.attributionUnits
+                        || line.speakerLabelIsManual != saved.speakerLabelIsManual else { continue }
+                self.transcriptPresentation.update(id: line.id) {
+                    $0.speakerLabel = saved.speakerLabel
+                    $0.attributionUnits = saved.attributionUnits
+                    $0.speakerLabelIsManual = saved.speakerLabelIsManual
+                }
+            }
             await self.minutes.reload(sessionID: sessionID)
         }
     }
@@ -1233,7 +1249,7 @@ public final class MeetingSession {
         if sessionID == recordID, previewIdentity == identity {
             owner = labeling
         } else {
-            owner = SpeakerLabeling(coordinator: coordinator, attachLabel: dependencies.attachSpeakerLabel)
+            owner = SpeakerLabeling(coordinator: coordinator, attachAttribution: dependencies.attachTranscriptAttribution)
             owner.begin(sessionID: recordID, enabled: labelsEnabled)
         }
         let command = owner.freezeAttribution(units: units, lineID: lineID)
@@ -1268,7 +1284,11 @@ public final class MeetingSession {
             if savedTiming != nil { self.timingQualityApplied.insert(lineID) }
             self.transcriptPresentation.update(id: lineID) { updated in
                 if confirmedLabels.contains(lineID) {
-                    updated.speakerLabel = owner.attributedLabel(forLineID: lineID)
+                    if let saved = owner.attributedLine(forLineID: lineID) {
+                        updated.speakerLabel = saved.speakerLabel
+                        updated.attributionUnits = saved.attributionUnits
+                        updated.speakerLabelIsManual = saved.speakerLabelIsManual
+                    }
                 }
                 if let savedTiming {
                     updated.start = savedTiming.lowerBound
@@ -1278,7 +1298,9 @@ public final class MeetingSession {
             }
         }
         if accepted {
-            owner.register(units: units, lineID: lineID, ordinal: ordinal)
+            if command.acceptsProjection(for: lineID) {
+                owner.register(units: units, lineID: lineID, ordinal: ordinal)
+            }
         } else if sessionID == recordID, previewIdentity == identity {
             lastFailure = "部分说话人和时间信息未能保存，正文已保留。"
         }
@@ -1547,7 +1569,9 @@ public final class MeetingSession {
                 let page = try await coordinator.linesPage(sessionID: recordID, beforeOrdinal: before)
                 return .init(rows: page.rows.map { row in
                     Line(id: row.id, ordinal: row.ordinal, text: row.text, start: row.tStart ?? 0, end: row.tEnd ?? 0,
-                         speakerLabel: row.speakerLabel, source: row.source, isDeviceSwitch: row.isDeviceSwitch, timingQuality: row.timingQuality)
+                         speakerLabel: row.speakerLabel, attributionUnits: row.attributionUnits,
+                         speakerLabelIsManual: row.speakerLabelIsManual,
+                         source: row.source, isDeviceSwitch: row.isDeviceSwitch, timingQuality: row.timingQuality)
                 }, nextBeforeOrdinal: page.nextBeforeOrdinal)
             }
         } catch { lastFailure = "较早的记录暂时未能读入，请重试。" }

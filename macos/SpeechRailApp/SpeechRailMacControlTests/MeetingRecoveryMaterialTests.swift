@@ -62,6 +62,244 @@ final class MeetingRecoveryMaterialTests: XCTestCase {
         )
     }
 
+    func testMixedSpeakerExportsKeepWordsUnknownsAndOriginalCue() async throws {
+        let store = try XCTUnwrap(store)
+        let id = try await seedSession()
+        _ = try await store.appendLine(.init(sessionID: id, role: .speaker,
+            text: "甲😀，乙？丙。", source: .microphone, tStart: 1, tEnd: 4), id: "export-mixed")
+        let row = try await store.attachTranscriptAttribution(lineID: "export-mixed", units: [
+            .init(id: "first", textStart: 0, textEnd: 2, speakerLabel: "A"),
+            .init(id: "second", textStart: 3, textEnd: 4, speakerLabel: "B"),
+            .init(id: "unknown", textStart: 5, textEnd: 6, speakerLabel: nil)
+        ])
+        let records = try await store.listSessions()
+        let record = try XCTUnwrap(records.first)
+        let payload = SessionExportPayload(record: record.record, lines: [row], speakerNames: ["A": "主讲"])
+        let plain = SessionExporter.export(payload, as: .plainText)
+        XCTAssertTrue(plain.contains("主讲：甲😀，\n说话人 B：乙？\n未确认说话人：丙。"))
+        let markdown = SessionExporter.export(payload, as: .markdown)
+        XCTAssertTrue(markdown.contains("**主讲**：甲😀，"))
+        XCTAssertTrue(markdown.contains("**说话人 B**：乙？"))
+        XCTAssertTrue(markdown.contains("**未确认说话人**：丙。"))
+        let srt = SessionExporter.export(payload, as: .srt)
+        XCTAssertEqual(srt.components(separatedBy: " --> ").count - 1, 1)
+        XCTAssertTrue(srt.contains("00:00:01,000 --> 00:00:04,000"))
+        XCTAssertTrue(srt.contains("主讲：甲😀，\n说话人 B：乙？\n未确认说话人：丙。"))
+        let json = SessionExporter.export(payload, as: .json)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        let lines = try XCTUnwrap(root["lines"] as? [[String: Any]])
+        XCTAssertEqual(lines.first?["text"] as? String, row.text)
+        let units = try XCTUnwrap(lines.first?["attribution_units"] as? [[String: Any]])
+        XCTAssertEqual(units.count, 3)
+        XCTAssertEqual(units[1]["text_start"] as? Int, 3)
+        XCTAssertEqual(units[1]["speaker_label"] as? String, "B")
+        XCTAssertTrue(units[2]["speaker_label"] is NSNull)
+        XCTAssertEqual(lines.first?["speaker_label_is_manual"] as? Bool, false)
+    }
+
+    func testLiveAndStoredPresentationKeepMixedSpeakersUnicodeAndUnknownWords() {
+        let units: [TranscriptAttributionUnit] = [
+            .init(id: "a", textStart: 1, textEnd: 3, speakerLabel: "A"),
+            .init(id: "b", textStart: 4, textEnd: 5, speakerLabel: "B"),
+            .init(id: "unknown", textStart: 6, textEnd: 7, speakerLabel: nil)
+        ]
+        let stored = TranscriptLine(id: "display", sessionID: "session", ordinal: 1,
+            role: .speaker, text: "（甲😀，乙？丙。）", source: .microphone, attributionUnits: units)
+        let live = MeetingSession.Line(id: "display", ordinal: 1, text: stored.text, start: 1, end: 3,
+            speakerLabel: nil, attributionUnits: units, source: .microphone, isDeviceSwitch: false, timingQuality: .aligned)
+        XCTAssertEqual(stored.displaySpeakerRuns, live.displaySpeakerRuns)
+        XCTAssertEqual(stored.displaySpeakerRuns.map(\.text), ["（甲😀，", "乙？", "丙。）"])
+        XCTAssertEqual(stored.displaySpeakerRuns.map(\.speakerLabel), ["A", "B", nil])
+        XCTAssertEqual(stored.displaySpeakerRuns.map(\.textStart), [0, 4, 6])
+        XCTAssertEqual(stored.displaySpeakerRuns.map(\.textEnd), [4, 6, 9])
+        XCTAssertEqual(stored.displaySpeakerRuns.map(\.text).joined(), stored.text)
+        XCTAssertEqual(stored.speakerLabels, ["A", "B"])
+        XCTAssertEqual(TranscriptSpeakerRun.formattedText(live.displaySpeakerRuns, names: ["B": "主讲"], showUnknown: true),
+                       "说话人 A：（甲😀，\n主讲：乙？\n未确认说话人：丙。）")
+        XCTAssertEqual(stored.attributionUnits, units, "presentation cannot rewrite the acoustic evidence")
+    }
+
+    func testManualDisplayAndLegacyCopyPreserveWholeLineSemantics() {
+        var line = TranscriptLine(id: "manual", sessionID: "session", ordinal: 1, role: .speaker,
+            speakerLabel: "C", text: "甲乙", source: .microphone,
+            attributionUnits: [.init(id: "stale", textStart: 0, textEnd: 1, speakerLabel: "A")],
+            speakerLabelIsManual: true)
+        XCTAssertEqual(line.displaySpeakerRuns.map(\.speakerLabel), ["C"])
+        XCTAssertEqual(line.speakerLabels, ["C"])
+        line.attributionUnits = []
+        line.speakerLabel = nil
+        line.speakerLabelIsManual = false
+        XCTAssertEqual(TranscriptSpeakerRun.formattedText(line.displaySpeakerRuns, names: [:], showUnknown: false), "甲乙")
+    }
+
+    func testUnalignedPunctuationDoesNotCreateRepeatedSpeakerHeaders() async throws {
+        let store = try XCTUnwrap(store)
+        let id = try await seedSession()
+        _ = try await store.appendLine(.init(sessionID: id, role: .speaker,
+            text: "（甲，乙。）", source: .microphone), id: "export-punctuation")
+        let row = try await store.attachTranscriptAttribution(lineID: "export-punctuation", units: [
+            .init(id: "a", textStart: 1, textEnd: 2, speakerLabel: "A"),
+            .init(id: "b", textStart: 3, textEnd: 4, speakerLabel: "A")
+        ])
+        let records = try await store.listSessions()
+        let record = try XCTUnwrap(records.first)
+        let payload = SessionExportPayload(record: record.record, lines: [row])
+        XCTAssertEqual(payload.transcriptText(for: row), "说话人 A：（甲，乙。）")
+        XCTAssertEqual(row.speakerRuns.map(\.text).joined(), row.text)
+    }
+
+    func testManualAndLegacyExportsKeepWholeLineBehavior() async throws {
+        let store = try XCTUnwrap(store)
+        let id = try await seedSession()
+        _ = try await store.appendLine(.init(sessionID: id, role: .speaker,
+            text: "甲乙", source: .microphone), id: "export-manual")
+        _ = try await store.attachTranscriptAttribution(lineID: "export-manual", units: [
+            .init(id: "a", textStart: 0, textEnd: 1, speakerLabel: "A"),
+            .init(id: "b", textStart: 1, textEnd: 2, speakerLabel: "B")
+        ])
+        let manual = try await store.attachSpeakerLabel(lineID: "export-manual", label: "C")
+        let records = try await store.listSessions()
+        let record = try XCTUnwrap(records.first)
+        let payload = SessionExportPayload(record: record.record, lines: [manual])
+        XCTAssertTrue(SessionExporter.export(payload, as: .plainText).contains("说话人 C：甲乙"))
+        XCTAssertFalse(SessionExporter.export(payload, as: .plainText).contains("说话人 A"))
+        var legacy = manual
+        legacy.speakerLabelIsManual = false
+        legacy.speakerLabel = nil
+        XCTAssertFalse(SessionExporter.export(.init(record: record.record, lines: [legacy]), as: .plainText)
+            .contains("未确认说话人"))
+    }
+
+    func testWordAttributionSurvivesAllReadsAndReopenWithoutChangingText() async throws {
+        let store = try XCTUnwrap(store)
+        let id = try await seedSession()
+        _ = try await store.appendLine(.init(sessionID: id, role: .speaker,
+            text: "甲😀，乙。", source: .microphone), id: "mixed-words")
+        let units: [TranscriptAttributionUnit] = [
+            .init(id: "first", textStart: 0, textEnd: 2, speakerLabel: "A"),
+            .init(id: "second", textStart: 3, textEnd: 4, speakerLabel: "B")
+        ]
+        let row = try await store.attachTranscriptAttribution(lineID: "mixed-words", units: units)
+        XCTAssertNil(row.speakerLabel, "a mixed line cannot claim one speaker")
+        XCTAssertEqual(row.text, "甲😀，乙。")
+        XCTAssertEqual(row.attributionUnits, units)
+        XCTAssertEqual(row.speakerRuns.map(\.text).joined(), row.text)
+        XCTAssertEqual(row.speakerRuns.compactMap(\.speakerLabel), ["A", "B"])
+        let page = try await store.linesPage(sessionID: id, beforeOrdinal: nil)
+        let range = try await store.linesRange(sessionID: id, ordinals: 1...1)
+        let search = try await store.searchLines(query: "甲")
+        for fetched in [page.rows.first, range.first, search.first] {
+            XCTAssertEqual(fetched?.attributionUnits, units)
+        }
+        await store.close()
+        try await store.open()
+        let reopened = try await store.lines(sessionID: id)
+        XCTAssertEqual(reopened.first?.attributionUnits, units)
+        XCTAssertNil(reopened.first?.speakerLabel)
+        XCTAssertEqual(reopened.first?.id, "mixed-words")
+        let backup = try await store.exportBackup(to: try XCTUnwrap(directory).appendingPathComponent("word-backup"))
+        let scratch = try XCTUnwrap(directory).appendingPathComponent("word-restored")
+        _ = try await SessionStore.restorePreview(of: backup, into: scratch)
+        let restored = SessionStore(directory: scratch)
+        try await restored.open()
+        let restoredRows = try await restored.lines(sessionID: id)
+        XCTAssertEqual(restoredRows.first?.attributionUnits, units)
+        XCTAssertEqual(restoredRows.first?.text, row.text)
+        await restored.close()
+    }
+
+    func testAttributionSchemaUpgradePreservesLegacyRows() async throws {
+        let store = try XCTUnwrap(store)
+        let directory = try XCTUnwrap(directory)
+        let id = try await seedSession()
+        _ = try await store.appendLine(.init(sessionID: id, role: .speaker,
+            text: "原记录", source: .microphone, speakerLabel: "A"), id: "legacy-attribution")
+        await store.close()
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(directory.appendingPathComponent(SessionStore.fileName).path,
+            &db, SQLITE_OPEN_READWRITE, nil), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(db, "ALTER TABLE line DROP COLUMN attribution_json; ALTER TABLE line DROP COLUMN speaker_label_is_manual; PRAGMA user_version=13;", nil, nil, nil), SQLITE_OK)
+        sqlite3_close_v2(db)
+        try await store.open()
+        let rows = try await store.lines(sessionID: id)
+        XCTAssertEqual(rows.first?.id, "legacy-attribution")
+        XCTAssertEqual(rows.first?.text, "原记录")
+        XCTAssertEqual(rows.first?.speakerLabel, "A")
+        XCTAssertEqual(rows.first?.attributionUnits, [])
+        XCTAssertEqual(rows.first?.speakerLabelIsManual, false, "migration cannot infer historical manual actions")
+        await store.close()
+        try await store.open()
+        let reopened = try await store.lines(sessionID: id)
+        XCTAssertEqual(reopened, rows)
+    }
+
+    func testEmptyAutomaticSnapshotClearsPriorSummary() async throws {
+        let store = try XCTUnwrap(store)
+        let id = try await seedSession()
+        _ = try await store.appendLine(.init(sessionID: id, role: .speaker,
+            text: "甲", source: .microphone), id: "clear-evidence")
+        _ = try await store.attachTranscriptAttribution(lineID: "clear-evidence",
+            units: [.init(id: "one", textStart: 0, textEnd: 1, speakerLabel: "A")])
+        let cleared = try await store.attachTranscriptAttribution(lineID: "clear-evidence", units: [])
+        XCTAssertNil(cleared.speakerLabel)
+        XCTAssertEqual(cleared.speakerRuns.map(\.speakerLabel), [nil])
+    }
+
+    func testInvalidAttributionDoesNotPartiallyOverwritePriorEvidence() async throws {
+        let store = try XCTUnwrap(store)
+        let id = try await seedSession()
+        _ = try await store.appendLine(.init(sessionID: id, role: .speaker,
+            text: "甲乙", source: .microphone), id: "validated-words")
+        let original = [TranscriptAttributionUnit(id: "one", textStart: 0, textEnd: 2, speakerLabel: "A")]
+        _ = try await store.attachTranscriptAttribution(lineID: "validated-words", units: original)
+        let invalid: [[TranscriptAttributionUnit]] = [
+            [.init(id: "one", textStart: 0, textEnd: 3, speakerLabel: "B")],
+            [.init(id: "one", textStart: 0, textEnd: 1, speakerLabel: "B", audioStartSample: 2, audioEndSample: 1)],
+            [.init(id: "one", textStart: 0, textEnd: 2, speakerLabel: "B"),
+             .init(id: "two", textStart: 1, textEnd: 2, speakerLabel: "A")],
+            [.init(id: "one", textStart: 0, textEnd: 1, speakerLabel: "B"),
+             .init(id: "one", textStart: 1, textEnd: 2, speakerLabel: "A")]
+        ]
+        for units in invalid {
+            do {
+                _ = try await store.attachTranscriptAttribution(lineID: "validated-words", units: units)
+                XCTFail("invalid complete snapshots must fail before writing")
+            } catch {}
+            let saved = try await store.lines(sessionID: id)
+            XCTAssertEqual(saved.first?.attributionUnits, original)
+            XCTAssertEqual(saved.first?.speakerLabel, "A")
+            XCTAssertEqual(saved.first?.text, "甲乙")
+        }
+    }
+
+    func testUnknownAndLateCorrectionsRemainWordScopedAndManualChoiceWins() async throws {
+        let store = try XCTUnwrap(store)
+        let id = try await seedSession()
+        _ = try await store.appendLine(.init(sessionID: id, role: .speaker,
+            text: "甲乙", source: .microphone), id: "late-words")
+        let first: [TranscriptAttributionUnit] = [
+            .init(id: "one", textStart: 0, textEnd: 1, speakerLabel: "A"),
+            .init(id: "two", textStart: 1, textEnd: 2, speakerLabel: nil)
+        ]
+        let unknown = try await store.attachTranscriptAttribution(lineID: "late-words", units: first)
+        XCTAssertNil(unknown.speakerLabel)
+        XCTAssertEqual(unknown.speakerRuns.map(\.speakerLabel), ["A", nil])
+        var corrected = first
+        corrected[1].speakerLabel = "B"
+        let changed = try await store.attachTranscriptAttribution(lineID: "late-words", units: corrected)
+        XCTAssertEqual(changed.attributionUnits.map(\.speakerLabel), ["A", "B"])
+        try await store.attachSpeakerLabel(lineID: "late-words", label: "C")
+        let manual = try await store.attachTranscriptAttribution(lineID: "late-words", units: first)
+        XCTAssertEqual(manual.speakerLabel, "C", "late automatic evidence cannot erase a manual choice")
+        XCTAssertTrue(manual.speakerLabelIsManual)
+        XCTAssertTrue(manual.attributionUnits.isEmpty)
+        XCTAssertEqual(manual.speakerRuns.map(\.speakerLabel), ["C"])
+        try await store.attachSpeakerLabel(lineID: "late-words", label: nil)
+        let manuallyCleared = try await store.attachTranscriptAttribution(lineID: "late-words", units: corrected)
+        XCTAssertNil(manuallyCleared.speakerLabel)
+        XCTAssertTrue(manuallyCleared.speakerLabelIsManual)
+    }
+
     func testRecoveryMaterialIsRetrievableByDefault() async throws {
         let store = try XCTUnwrap(store)
         let sessionID = try await seedSession()
@@ -164,16 +402,119 @@ final class SpeakerLabelingPersistenceTests: XCTestCase {
         try await super.tearDown()
     }
 
-    private func record(with ids: [String]) async throws -> String {
+    private func record(with ids: [String], text: String = "词") async throws -> String {
         let record = try await store.createSession(
             SessionDraft(kind: .meeting, engineProfile: "test", audioSource: .microphone)
         )
         for id in ids {
             _ = try await store.appendLine(
-                LineDraft(sessionID: record.id, role: .speaker, text: id, source: .microphone), id: id
+                LineDraft(sessionID: record.id, role: .speaker, text: text, source: .microphone), id: id
             )
         }
         return record.id
+    }
+
+    func testMixedWordsPersistWithoutCollapsingTheirSpeakers() async throws {
+        let id = try await record(with: ["甲乙"], text: "甲乙")
+        let owner = SpeakerLabeling(coordinator: coordinator)
+        owner.begin(sessionID: id, enabled: true)
+        let units: [RealtimeASRClient.AttributionUnit] = [
+            .init(segmentUID: "one", speaker: "A", textStart: 0, textEnd: 1),
+            .init(segmentUID: "two", speaker: "B", textStart: 1, textEnd: 2)
+        ]
+        owner.register(units: units, lineID: "甲乙", ordinal: 1)
+        await owner.apply(units: units)
+        let rows = try await store.lines(sessionID: id)
+        XCTAssertEqual(rows.first?.attributionUnits.map(\.speakerLabel), ["A", "B"])
+        XCTAssertNil(rows.first?.speakerLabel)
+        XCTAssertNil(owner.attributedLabel(forLineID: "甲乙"))
+        XCTAssertEqual(rows.first?.speakerRuns.map(\.text).joined(), "甲乙")
+    }
+
+    func testPartialUnknownRevisionKeepsOtherWordsKnown() async throws {
+        let id = try await record(with: ["甲乙"], text: "甲乙")
+        let owner = SpeakerLabeling(coordinator: coordinator)
+        owner.begin(sessionID: id, enabled: true)
+        let units: [RealtimeASRClient.AttributionUnit] = [
+            .init(segmentUID: "one", speaker: "A", textStart: 0, textEnd: 1),
+            .init(segmentUID: "two", speaker: "B", textStart: 1, textEnd: 2)
+        ]
+        owner.register(units: units, lineID: "甲乙", ordinal: 1)
+        await owner.apply(units: units)
+        await owner.apply(units: [.init(segmentUID: "two", speaker: nil, textStart: 1, textEnd: 2)])
+        let rows = try await store.lines(sessionID: id)
+        XCTAssertEqual(rows.first?.attributionUnits.map(\.speakerLabel), ["A", nil])
+        XCTAssertNil(owner.attributedLabel(forLineID: "甲乙"))
+        XCTAssertEqual(rows.first?.text, "甲乙")
+    }
+
+    func testAutomaticLabelsRespectManualRowChoice() async throws {
+        let id = try await record(with: ["甲乙"], text: "甲乙")
+        let owner = SpeakerLabeling(coordinator: coordinator)
+        owner.begin(sessionID: id, enabled: true)
+        let initial: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "one", speaker: "A", textStart: 0, textEnd: 2)]
+        owner.register(units: initial, lineID: "甲乙", ordinal: 1)
+        await owner.apply(units: initial)
+        XCTAssertEqual(owner.liveUnitCount, 1)
+        await owner.split(lineIDs: ["甲乙"], to: "B")
+        XCTAssertEqual(owner.liveUnitCount, 0)
+        await owner.apply(units: [.init(segmentUID: "one", speaker: "C", textStart: 0, textEnd: 2)])
+        let rows = try await store.lines(sessionID: id)
+        XCTAssertEqual(rows.first?.speakerLabel, "B")
+        XCTAssertEqual(owner.attributedLabel(forLineID: "甲乙"), "B")
+    }
+
+    func testManualChoiceIsReflectedAfterRepeatedIdenticalAutomaticSnapshot() async throws {
+        let id = try await record(with: ["甲乙"], text: "甲乙")
+        let owner = SpeakerLabeling(coordinator: coordinator)
+        owner.begin(sessionID: id, enabled: true)
+        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "one", speaker: "A", textStart: 0, textEnd: 2)]
+        owner.register(units: units, lineID: "甲乙", ordinal: 1)
+        await owner.apply(units: units)
+        await owner.split(lineIDs: ["甲乙"], to: "B")
+        XCTAssertEqual(owner.liveUnitCount, 0)
+        await owner.apply(units: units)
+        let rows = try await store.lines(sessionID: id)
+        XCTAssertEqual(rows.first?.speakerLabel, "B")
+        XCTAssertEqual(owner.attributedLabel(forLineID: "甲乙"), "B")
+    }
+
+    func testMissingTextRangeCannotReplaceSavedWordEvidence() async throws {
+        let id = try await record(with: ["甲乙"], text: "甲乙")
+        let owner = SpeakerLabeling(coordinator: coordinator)
+        owner.begin(sessionID: id, enabled: true)
+        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "one", speaker: "A", textStart: 0, textEnd: 2)]
+        owner.register(units: units, lineID: "甲乙", ordinal: 1)
+        await owner.apply(units: units)
+        await owner.apply(units: [.init(segmentUID: "one", speaker: "B")])
+        let rows = try await store.lines(sessionID: id)
+        XCTAssertEqual(rows.first?.attributionUnits.map(\.speakerLabel), ["A"])
+        XCTAssertEqual(owner.attributedLabel(forLineID: "甲乙"), "A")
+        XCTAssertNotNil(owner.note)
+    }
+
+    func testFailedWholeSnapshotIsRetryableAndSuccessDeduplicates() async throws {
+        let id = try await record(with: ["甲乙"], text: "甲乙")
+        var attempts = 0
+        let owner = SpeakerLabeling(coordinator: coordinator, attachAttribution: { [store] lineID, units in
+            attempts += 1
+            if attempts == 1 { throw SessionStoreError.storageUnavailable }
+            return try await store!.attachTranscriptAttribution(lineID: lineID, units: units)
+        })
+        owner.begin(sessionID: id, enabled: true)
+        let units: [RealtimeASRClient.AttributionUnit] = [
+            .init(segmentUID: "one", speaker: "A", textStart: 0, textEnd: 1),
+            .init(segmentUID: "two", speaker: "B", textStart: 1, textEnd: 2)
+        ]
+        owner.register(units: units, lineID: "甲乙", ordinal: 1)
+        await owner.apply(units: units)
+        XCTAssertNil(owner.attributedLine(forLineID: "甲乙"))
+        await owner.apply(units: units)
+        await owner.apply(units: units)
+        XCTAssertEqual(attempts, 2)
+        let rows = try await store.lines(sessionID: id)
+        XCTAssertEqual(rows.first?.attributionUnits.map(\.speakerLabel), ["A", "B"])
+        XCTAssertEqual(owner.attributedLine(forLineID: "甲乙"), rows.first)
     }
 
     private func waitUntilEntered(_ gate: SpeakerAttributionWriteGate) async throws {
@@ -189,17 +530,17 @@ final class SpeakerLabelingPersistenceTests: XCTestCase {
         let old = try await record(with: ["old-one", "old-two"])
         let new = try await record(with: ["new-two"])
         let gate = SpeakerAttributionWriteGate(store: store)
-        let owner = SpeakerLabeling(coordinator: coordinator, attachLabel: { try await gate.write($0, label: $1) })
+        let owner = SpeakerLabeling(coordinator: coordinator, attachAttribution: { try await gate.write($0, units: $1) })
         owner.begin(sessionID: old, enabled: true)
         let units: [RealtimeASRClient.AttributionUnit] = [
-            .init(segmentUID: "one", speaker: "A"), .init(segmentUID: "two", speaker: "B")
+            .init(segmentUID: "one", speaker: "A", textStart: 0, textEnd: 1), .init(segmentUID: "two", speaker: "B", textStart: 0, textEnd: 1)
         ]
         owner.register(units: [units[0]], lineID: "old-one", ordinal: 1)
         owner.register(units: [units[1]], lineID: "old-two", ordinal: 2)
         let task = Task { await owner.apply(units: units) }
         try await waitUntilEntered(gate)
         owner.begin(sessionID: new, enabled: true)
-        owner.register(units: [.init(segmentUID: "two", speaker: nil)], lineID: "new-two", ordinal: 1)
+        owner.register(units: [.init(segmentUID: "two", speaker: nil, textStart: 0, textEnd: 1)], lineID: "new-two", ordinal: 1)
         await gate.release()
         await task.value
         let oldRows = try await store.lines(sessionID: old)
@@ -213,9 +554,9 @@ final class SpeakerLabelingPersistenceTests: XCTestCase {
         let old = try await record(with: ["old"])
         let new = try await record(with: ["history"])
         let gate = SpeakerAttributionWriteGate(store: store)
-        let owner = SpeakerLabeling(coordinator: coordinator, attachLabel: { try await gate.write($0, label: $1) })
+        let owner = SpeakerLabeling(coordinator: coordinator, attachAttribution: { try await gate.write($0, units: $1) })
         owner.begin(sessionID: old, enabled: true)
-        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit", speaker: "A")]
+        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit", speaker: "A", textStart: 0, textEnd: 1)]
         owner.register(units: units, lineID: "old", ordinal: 1)
         let task = Task { await owner.apply(units: units) }
         try await waitUntilEntered(gate)
@@ -232,7 +573,7 @@ final class SpeakerLabelingPersistenceTests: XCTestCase {
         let id = try await record(with: ["one", "two"])
         let owner = SpeakerLabeling(coordinator: coordinator)
         owner.begin(sessionID: id, enabled: true)
-        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit", speaker: "A")]
+        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit", speaker: "A", textStart: 0, textEnd: 1)]
         owner.register(units: units, lineID: "one", ordinal: 1)
         await owner.apply(units: units)
         owner.register(units: units, lineID: "two", ordinal: 2)
@@ -244,9 +585,9 @@ final class SpeakerLabelingPersistenceTests: XCTestCase {
     func testRebindingDuringWriteDoesNotMarkNewLineAsAlreadyPersisted() async throws {
         let id = try await record(with: ["one", "two"])
         let gate = SpeakerAttributionWriteGate(store: store)
-        let owner = SpeakerLabeling(coordinator: coordinator, attachLabel: { try await gate.write($0, label: $1) })
+        let owner = SpeakerLabeling(coordinator: coordinator, attachAttribution: { try await gate.write($0, units: $1) })
         owner.begin(sessionID: id, enabled: true)
-        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit", speaker: "A")]
+        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit", speaker: "A", textStart: 0, textEnd: 1)]
         owner.register(units: units, lineID: "one", ordinal: 1)
         let task = Task { await owner.apply(units: units) }
         try await waitUntilEntered(gate)
@@ -262,12 +603,12 @@ final class SpeakerLabelingPersistenceTests: XCTestCase {
         let id = try await record(with: ["old-generation", "new-generation"])
         let owner = SpeakerLabeling(coordinator: coordinator)
         owner.begin(sessionID: id, enabled: true)
-        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit", speaker: "A")]
+        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit", speaker: "A", textStart: 0, textEnd: 1)]
         owner.register(units: units, lineID: "old-generation", ordinal: 1)
         let command = owner.freezeAttribution(units: units)
         owner.begin(sessionID: id, enabled: true)
         owner.register(
-            units: [.init(segmentUID: "unit", speaker: nil)], lineID: "new-generation", ordinal: 2
+            units: [.init(segmentUID: "unit", speaker: nil, textStart: 0, textEnd: 1)], lineID: "new-generation", ordinal: 2
         )
         await owner.apply(command)
         let rows = try await store.lines(sessionID: id)
@@ -279,13 +620,13 @@ final class SpeakerLabelingPersistenceTests: XCTestCase {
     func testQueuedNilRevisionClearsPriorWriteInsteadOfBeingDiscardedAtAcceptance() async throws {
         let id = try await record(with: ["line"])
         let gate = SpeakerAttributionWriteGate(store: store)
-        let owner = SpeakerLabeling(coordinator: coordinator, attachLabel: { try await gate.write($0, label: $1) })
+        let owner = SpeakerLabeling(coordinator: coordinator, attachAttribution: { try await gate.write($0, units: $1) })
         owner.begin(sessionID: id, enabled: true)
-        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit", speaker: "A")]
+        let units: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "unit", speaker: "A", textStart: 0, textEnd: 1)]
         owner.register(units: units, lineID: "line", ordinal: 1)
         let first = Task { await owner.apply(units: units) }
         try await waitUntilEntered(gate)
-        let clear = owner.freezeAttribution(units: [.init(segmentUID: "unit", speaker: nil)])
+        let clear = owner.freezeAttribution(units: [.init(segmentUID: "unit", speaker: nil, textStart: 0, textEnd: 1)])
         await gate.release()
         await first.value
         await owner.apply(clear)
@@ -304,9 +645,9 @@ final class SpeakerLabelingPersistenceTests: XCTestCase {
         let owner = SpeakerLabeling(coordinator: coordinator)
         owner.begin(sessionID: id, enabled: true)
         owner.register(
-            units: [.init(segmentUID: "unit", speaker: "A")], lineID: "old", ordinal: 1
+            units: [.init(segmentUID: "unit", speaker: "A", textStart: 0, textEnd: 1)], lineID: "old", ordinal: 1
         )
-        await owner.apply(units: [.init(segmentUID: "unit", speaker: "A")])
+        await owner.apply(units: [.init(segmentUID: "unit", speaker: "A", textStart: 0, textEnd: 1)])
         await owner.rename(label: "A", to: "张三")
         XCTAssertEqual(owner.labels, ["A"])
         XCTAssertEqual(owner.displayNames["A"], "张三")
@@ -321,14 +662,14 @@ final class SpeakerLabelingPersistenceTests: XCTestCase {
         XCTAssertEqual(owner.state, .active)
         // uid 坐标系已清空：旧 uid 的迟到修订无处可写，旧行保持原值。
         XCTAssertNil(owner.attributedLabel(forLineID: "old"))
-        await owner.apply(units: [.init(segmentUID: "unit", speaker: "B")])
+        await owner.apply(units: [.init(segmentUID: "unit", speaker: "B", textStart: 0, textEnd: 1)])
         let rows = try await store.lines(sessionID: id)
         XCTAssertEqual(rows.map(\.speakerLabel), ["A", nil])
         // 新 uid 照常写入：重置不断新写。
         owner.register(
-            units: [.init(segmentUID: "unit-2", speaker: "B")], lineID: "new", ordinal: 2
+            units: [.init(segmentUID: "unit-2", speaker: "B", textStart: 0, textEnd: 1)], lineID: "new", ordinal: 2
         )
-        await owner.apply(units: [.init(segmentUID: "unit-2", speaker: "B")])
+        await owner.apply(units: [.init(segmentUID: "unit-2", speaker: "B", textStart: 0, textEnd: 1)])
         let rowsAfter = try await store.lines(sessionID: id)
         XCTAssertEqual(rowsAfter.map(\.speakerLabel), ["A", "B"])
         XCTAssertEqual(owner.labels, ["A", "B"])
@@ -357,13 +698,13 @@ actor SpeakerAttributionWriteGate {
 
     func attach(_ store: SessionStore) { self.store = store }
 
-    func write(_ lineID: String, label: String?) async throws {
+    func write(_ lineID: String, units: [TranscriptAttributionUnit]) async throws -> TranscriptLine {
         if blocked {
             entered = true
             await withCheckedContinuation { continuation = $0 }
         }
         guard let store else { throw TranscriptPersistenceGate.Failure.unavailable }
-        try await store.attachSpeakerLabel(lineID: lineID, label: label)
+        return try await store.attachTranscriptAttribution(lineID: lineID, units: units)
     }
 
     func release() {

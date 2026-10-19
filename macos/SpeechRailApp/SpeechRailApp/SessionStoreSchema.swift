@@ -482,6 +482,17 @@ extension SessionStore {
         }
     }
 
+    /// v13 → v14：归属只追加辅助字段，不改正文、行身份或既有引用。
+    func migrateV13ToV14() throws {
+        let columns = try tableColumnNames("line")
+        if !columns.contains("attribution_json") {
+            try execute("ALTER TABLE line ADD COLUMN attribution_json TEXT;")
+        }
+        if !columns.contains("speaker_label_is_manual") {
+            try execute("ALTER TABLE line ADD COLUMN speaker_label_is_manual INTEGER NOT NULL DEFAULT 0;")
+        }
+    }
+
     private func tableColumnNames(_ table: String) throws -> Set<String> {
         try withStatement("PRAGMA table_info(\(table));") { statement in
             var names: Set<String> = []

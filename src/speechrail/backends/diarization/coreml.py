@@ -8,7 +8,9 @@ message before it reaches the domain layer.
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from hashlib import sha256
 from pathlib import Path
 
@@ -19,7 +21,11 @@ from speechrail.domain.diarization import (
 )
 from speechrail.domain.diarization.ports import ActivitySession
 from speechrail.domain.diarization.types import ActivityFrame, ActivityUpdate
+from speechrail.domain.resource_limits import GovernorLimits
+from speechrail.runtime.diarization_owner import DiarizationWorkerLease
 from speechrail.runtime.diarization_worker import CoreMLWorkerProcess
+from speechrail.runtime.phase_trace import Operation, PhaseSpan, PhaseTrace
+from speechrail.runtime.resource_governor import ResourceGovernor, WorkClass
 
 MODEL_REVISION = "ae9a27ab45dc0aa3abede7d2d6bad2b7a69aa6d1"
 FLUIDAUDIO_COMMIT = "5c19d5e12320e22bbfb7a1877b089d2665a69add"
@@ -62,6 +68,21 @@ MODEL_MIL_SIGNATURES = {
 _ACTIVITY_THRESHOLD = 0.25
 
 
+def _coerce_activity_threshold(value: float) -> float:
+    """Return ``value`` as a float in ``[0.0, 1.0]`` or raise ``ValueError``.
+
+    The threshold is a tunable knob (default ``_ACTIVITY_THRESHOLD``): every
+    score greater than or equal to it marks its slot active for that hop.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("activity_threshold must be a real number in [0, 1]")
+    threshold = float(value)
+    if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        raise ValueError("activity_threshold must be a finite number in [0, 1]")
+    return threshold
+
+
 class CoreMLSortformerEngine:
     """The only production implementation of the streaming activity port."""
 
@@ -75,13 +96,18 @@ class CoreMLSortformerEngine:
         worker_factory: Callable[[], CoreMLWorkerProcess] | None = None,
         required_hashes: dict[str, str] | None = None,
         required_signatures: dict[str, tuple[str, ...]] | None = None,
+        activity_threshold: float = _ACTIVITY_THRESHOLD,
+        governor: ResourceGovernor | None = None,
     ) -> None:
         self._model_path = model_path
         self._executable = executable
         self._worker_factory = worker_factory
-        self._required_hashes = (
-            MODEL_FILE_SHA256 if required_hashes is None else required_hashes
+        self._activity_threshold = _coerce_activity_threshold(activity_threshold)
+        self._governor = governor or ResourceGovernor(
+            GovernorLimits(2, 1, 8),
+            allow_heavy_overlap=False,
         )
+        self._required_hashes = MODEL_FILE_SHA256 if required_hashes is None else required_hashes
         self._required_signatures = (
             MODEL_MIL_SIGNATURES if required_signatures is None else required_signatures
         )
@@ -101,13 +127,25 @@ class CoreMLSortformerEngine:
                 self._readiness.message,
                 code=self._readiness.code or "diarization_not_available",
             )
-        factory = self._worker_factory
-        worker = (
-            factory()
-            if factory is not None
-            else CoreMLWorkerProcess(executable=self._executable, model_path=self._model_path)
+        generation = self._governor.diarization_owner.claim(epoch)
+        try:
+            factory = self._worker_factory
+            worker = (
+                factory()
+                if factory is not None
+                else CoreMLWorkerProcess(executable=self._executable, model_path=self._model_path)
+            )
+        except BaseException:
+            # Factories construct a transport object; only session.start loads.
+            self._governor.diarization_owner.release(generation, reaped=True)
+            raise
+        return CoreMLActivitySession(
+            worker=worker,
+            epoch=epoch,
+            activity_threshold=self._activity_threshold,
+            governor=self._governor,
+            generation=generation,
         )
-        return CoreMLActivitySession(worker=worker, epoch=epoch)
 
     def _check_readiness(self) -> DiarizationReadiness:
         if self._model_path.name != MODEL_BUNDLE_NAME or not self._model_path.is_dir():
@@ -171,71 +209,182 @@ def _has_signatures(path: Path, signatures: tuple[str, ...]) -> bool:
 class CoreMLActivitySession:
     """Validated bridge from the private Swift process to ``ActivityUpdate``."""
 
-    def __init__(self, *, worker: CoreMLWorkerProcess, epoch: str) -> None:
+    def __init__(
+        self,
+        *,
+        worker: CoreMLWorkerProcess,
+        epoch: str,
+        activity_threshold: float = _ACTIVITY_THRESHOLD,
+        governor: ResourceGovernor | None = None,
+        generation: int | None = None,
+        phase_trace: PhaseTrace | None = None,
+    ) -> None:
         self._worker = worker
         self._epoch = epoch
+        self._activity_threshold = _coerce_activity_threshold(activity_threshold)
+        self._governor = governor or ResourceGovernor(
+            GovernorLimits(2, 1, 8),
+            allow_heavy_overlap=False,
+        )
+        self._phase_trace = phase_trace
+        self._lease = DiarizationWorkerLease(
+            phase_trace=phase_trace,
+            worker=worker,
+            governor=self._governor,
+            generation=(
+                generation
+                if generation is not None
+                else self._governor.diarization_owner.claim(epoch)
+            ),
+        )
+        self._operation_lock = asyncio.Lock()
+        self._operation_task: asyncio.Task[object] | None = None
         self._next_start = 0
         self._processed = 0
         self._stable = 0
         self._step_id = 0
         self._closed = False
         self._started = False
-        self._updates: asyncio.Queue[ActivityUpdate | None] = asyncio.Queue()
+        self._finished = False
+        self._updates_closed = False
+        self._failure: BaseException | None = None
+        self._updates: asyncio.Queue[ActivityUpdate | None] = asyncio.Queue(64)
+
+    @asynccontextmanager
+    async def _operation(self) -> AsyncIterator[None]:
+        async with self._operation_lock:
+            self._operation_task = asyncio.current_task()
+            try:
+                yield
+            except BaseException as exc:
+                self._failure = exc
+                try:
+                    await self._lease.close()
+                finally:
+                    await self._close_updates()
+                raise
+            finally:
+                self._operation_task = None
 
     async def append(self, *, start_sample: int, pcm16: bytes) -> None:
-        if self._closed or len(pcm16) % 2:
-            raise DiarizationError("invalid PCM for CoreML diarization", code="invalid_audio")
-        if start_sample != self._next_start:
-            raise DiarizationError("diarization sample continuity broken", code="invalid_audio")
-        await self._start()
-        samples = len(pcm16) // 2
-        response, _ = await self._request(
-            {
-                "epoch": self._epoch,
-                "operation": "append",
-                "audio_start": start_sample,
-                "audio_samples": samples,
-            },
-            pcm16,
-        )
-        self._next_start += samples
-        await self._publish(response, operation="append")
+        async with self._operation():
+            if self._closed or len(pcm16) % 2:
+                raise DiarizationError("invalid PCM for CoreML diarization", code="invalid_audio")
+            if start_sample != self._next_start:
+                raise DiarizationError("diarization sample continuity broken", code="invalid_audio")
+            async with self._compute("append", start_sample + len(pcm16) // 2):
+                try:
+                    if self._closed:
+                        raise DiarizationError("activity session is closed", code="invalid_audio")
+                    await self._start()
+                    if self._closed:
+                        raise asyncio.CancelledError
+                    samples = len(pcm16) // 2
+                    response, payload = await self._request(
+                        {
+                            "epoch": self._epoch,
+                            "operation": "append",
+                            "audio_start": start_sample,
+                            "audio_samples": samples,
+                        },
+                        pcm16,
+                    )
+                    if payload:
+                        raise DiarizationError("unexpected activity payload", code="activity_gap")
+                    self._next_start += samples
+                    await self._publish(response, operation="append")
+                except BaseException as exc:
+                    self._failure = exc
+                    try:
+                        await self._lease.close()
+                    finally:
+                        await self._close_updates()
+                    raise
 
     async def updates(self) -> AsyncIterator[ActivityUpdate]:
-        while update := await self._updates.get():
+        while True:
+            if self._updates.empty() and self._updates_closed:
+                if self._failure is not None:
+                    raise DiarizationError(
+                        "activity stream failed", code="activity_gap"
+                    ) from self._failure
+                return
+            update = await self._updates.get()
+            if update is None:
+                if self._failure is not None:
+                    raise DiarizationError(
+                        "activity stream failed", code="activity_gap"
+                    ) from self._failure
+                return
             yield update
 
     async def finish(self, *, through_sample: int) -> None:
-        if self._closed:
-            raise DiarizationError("diarization stream is closed", code="invalid_audio")
-        if through_sample != self._next_start:
-            raise DiarizationError(
-                "finish watermark does not match accepted audio", code="invalid_audio"
-            )
-        try:
-            await self._start()
-            response, _ = await self._request(
-                {"epoch": self._epoch, "operation": "finish", "through_sample": through_sample}
-            )
-            await self._publish(response, operation="finish")
-        finally:
-            # A CoreML worker belongs to exactly one continuous session.  EOF
-            # must release the same child after its final snapshot so the model
-            # cannot survive as an untracked resident process.
-            await self._worker.close()
-            await self._close_updates()
+        async with self._operation():
+            if self._finished and through_sample == self._next_start:
+                return
+            if self._closed or through_sample != self._next_start:
+                raise DiarizationError("invalid activity finish barrier", code="invalid_audio")
+            async with self._compute("finish", through_sample):
+                try:
+                    if self._closed:
+                        raise DiarizationError("activity session is closed", code="invalid_audio")
+                    await self._start()
+                    if self._closed:
+                        raise asyncio.CancelledError
+                    response, payload = await self._request(
+                        {
+                            "epoch": self._epoch,
+                            "operation": "finish",
+                            "through_sample": through_sample,
+                        },
+                    )
+                    if payload:
+                        raise DiarizationError("unexpected activity payload", code="activity_gap")
+                    await self._publish(response, operation="finish")
+                    self._finished = True
+                except BaseException as exc:
+                    self._failure = exc
+                    raise
+                finally:
+                    try:
+                        await self._lease.close()
+                    except BaseException as exc:
+                        self._finished = False
+                        self._failure = exc
+                        raise
+                    finally:
+                        await self._close_updates()
 
     async def cancel(self) -> None:
-        if self._closed:
-            return
         self._closed = True
-        await self._worker.close()
-        await self._close_updates()
+        try:
+            # Close interrupts an in-flight native call before its compute lease
+            # can exit. Concurrent close callers join the same owned operation.
+            await self._lease.close()
+            task = self._operation_task
+            if task is not None and task is not asyncio.current_task() and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        finally:
+            await self._close_updates()
+
+    @asynccontextmanager
+    async def _compute(self, operation: Operation, through_sample: int) -> AsyncIterator[None]:
+        with PhaseSpan(self._phase_trace, "compute_queue", operation, through_sample) as span:
+            async with self._governor.reserve(WorkClass.DIARIZATION):
+                span.finish()  # End admission timing before any load or native call.
+                yield
+
+    def drain_phase_events(self) -> tuple[dict[str, object], ...]:
+        return self._phase_trace.drain() if self._phase_trace is not None else ()
+
+    def phase_trace_status(self) -> dict[str, object]:
+        return self._phase_trace.status() if self._phase_trace is not None else {"enabled": False}
 
     async def _start(self) -> None:
         if not self._started:
             try:
-                await self._worker.start()
+                await self._lease.start()
             except RuntimeError as exc:
                 raise DiarizationError(
                     "CoreML diarization worker failed", code="diarization_invalid_output"
@@ -246,7 +395,12 @@ class CoreMLActivitySession:
         self, header: dict[str, object], audio: bytes = b""
     ) -> tuple[dict[str, object], bytes]:
         try:
-            return await self._worker.request(header, audio)
+            operation: Operation = "append" if header["operation"] == "append" else "finish"
+            with PhaseSpan(
+                self._phase_trace, "infer" if operation == "append" else "finalize", operation,
+                self._next_start + len(audio) // 2 if operation == "append" else self._next_start,
+            ):
+                return await self._worker.request(header, audio)
         except RuntimeError as exc:
             raise DiarizationError(
                 "CoreML diarization worker failed", code="diarization_invalid_output"
@@ -264,16 +418,22 @@ class CoreMLActivitySession:
             step_id=self._step_id,
             replace_start=self._processed,
             accepted=self._next_start,
+            activity_threshold=self._activity_threshold,
         )
         self._step_id += 1
         self._processed = update.processed_through
         self._stable = update.stable_through
-        await self._updates.put(update)
+        try:
+            self._updates.put_nowait(update)
+        except asyncio.QueueFull as exc:
+            raise DiarizationError("activity consumer is too slow", code="activity_gap") from exc
 
     async def _close_updates(self) -> None:
-        if not self._closed:
-            self._closed = True
-        await self._updates.put(None)
+        self._closed = True
+        if not self._updates_closed:
+            self._updates_closed = True
+            if not self._updates.full():
+                self._updates.put_nowait(None)
 
 
 def _update_from_response(
@@ -283,6 +443,7 @@ def _update_from_response(
     step_id: int,
     replace_start: int,
     accepted: int,
+    activity_threshold: float = _ACTIVITY_THRESHOLD,
 ) -> ActivityUpdate:
     if response.get("ok") is not True:
         raise DiarizationError(
@@ -334,7 +495,7 @@ def _update_from_response(
                 span=SampleSpan(start, min(end, accepted)),
                 scores=tuple(float(score) for score in scores),  # type: ignore[arg-type]
                 active_slots=frozenset(
-                    slot for slot, score in enumerate(scores) if float(score) >= _ACTIVITY_THRESHOLD
+                    slot for slot, score in enumerate(scores) if float(score) >= activity_threshold
                 ),
             )
         )

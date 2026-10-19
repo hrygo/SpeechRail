@@ -66,6 +66,12 @@ from speechrail.runtime.job_artifacts import (
 )
 from speechrail.runtime.job_runner import JobProcessingError
 from speechrail.runtime.jobs import JobRecord
+from speechrail.runtime.resource_governor import (
+    GovernorLaneIsolatedError,
+    GovernorQueueFullError,
+    ResourceGovernor,
+    WorkClass,
+)
 
 _TRANSCRIPT_FILENAME = "transcript.json"
 _SPEECH_FILENAME = "speech.pcm"
@@ -109,6 +115,7 @@ class LocalFileJobProcessor:
         text_aligner: AlignTextPort | None = None,
         diarization_admission: DiarizationAdmission | None = None,
         alignment_admission: AlignmentAdmission | None = None,
+        governor: ResourceGovernor | None = None,
     ) -> None:
         if not spool_dir.is_absolute():
             raise ValueError("job spool directory must be absolute")
@@ -135,6 +142,11 @@ class LocalFileJobProcessor:
         self._text_aligner = text_aligner
         self._diarization_admission = diarization_admission or DiarizationAdmission()
         self._alignment_admission = alignment_admission or AlignmentAdmission()
+        self._governor = governor
+
+    @property
+    def manages_transcription_admission(self) -> bool:
+        return self._governor is not None
 
     def resource_key_for_job(self, job: JobRecord) -> str | None:
         """Return the TTS worker lane for a durable speech job when it is known."""
@@ -228,7 +240,12 @@ class LocalFileJobProcessor:
             )
         except ValueError:
             raise JobProcessingError("job_input_invalid") from None
-        result = await transcriber.transcribe(request)
+        if self._governor is None:
+            result = await transcriber.transcribe(request)
+        else:
+            result = await self._governor.run(
+                lambda: transcriber.transcribe(request), WorkClass.BATCH_ASR,
+            )
         if diarize:
             assert self._diarization_engine is not None
             assert self._text_aligner is not None
@@ -243,6 +260,10 @@ class LocalFileJobProcessor:
                         new_unit_id=lambda index: f"segment-{index}",
                     )
             except DiarizationAdmissionFullError:
+                raise JobProcessingError("backend_busy") from None
+            except GovernorLaneIsolatedError:
+                raise JobProcessingError("backend_reclamation_failed") from None
+            except GovernorQueueFullError:
                 raise JobProcessingError("backend_busy") from None
             except DiarizationError as exc:
                 raise JobProcessingError(exc.code or "diarization_unresolved") from None

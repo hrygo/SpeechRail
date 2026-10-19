@@ -470,7 +470,9 @@ class RealtimeAsrOwner:
                 stop_frames = max(1, (silence_duration + 31) // 32)
                 candidate_admission = SpeechAdmission(
                     threshold=threshold,
-                    start_frames=3,
+                    # Silero already confirms speech; extra energy-VAD debounce
+                    # can discard quiet speech whose probability peaks are brief.
+                    start_frames=1 if self._settings.resolves_to_silero_vad else 3,
                     stop_frames=stop_frames,
                     prefix_samples=prefix_samples,
                     frame_samples=512,
@@ -535,13 +537,14 @@ class RealtimeAsrOwner:
 
     def effective_segment_ms(self) -> int:
         policy = self.policy()
-        # Two retained spans account for PCM and its inference snapshot; the
-        # capability additionally bounds the admitted audio itself.
+        # Two retained spans account for PCM and its inference snapshot.
+        # Continuous speaker activity does not shorten the ASR context; fixed
+        # text alignment and attribution both support the decoder's 30 s bound.
         service_bytes = self._settings.max_realtime_buffer_bytes or 8_388_608
         return resolve_effective_max_segment_ms(
             policy,
             service_max_segment_ms=service_bytes // 64,
-            capability_max_segment_ms=8_000 if self.auxiliary.diarization_enabled else None,
+            capability_max_segment_ms=None,
             decoder_max_segment_ms=30_000,
         )
 

@@ -388,6 +388,10 @@ public struct MinutesSourceUnit: Hashable, Sendable, Identifiable {
     public var ordinal: Int
     public var speaker: String
     public var text: String
+    /// nil 为旧整行标签；空数组为逐词模式中的全未知切片。
+    /// 坐标属于本次来源单元正文，不改变引用身份或原正文。
+    public var attributionUnits: [TranscriptAttributionUnit]?
+    public var speakerNames: [String: String]
     public var startSeconds: Double?
     /// 超长单句被切分后的段序号（0 起）。未切分时为 nil。
     ///
@@ -408,7 +412,9 @@ public struct MinutesSourceUnit: Hashable, Sendable, Identifiable {
         startSeconds: Double?,
         segmentIndex: Int? = nil,
         segmentCount: Int? = nil,
-        segmentRange: Range<Int>? = nil
+        segmentRange: Range<Int>? = nil,
+        attributionUnits: [TranscriptAttributionUnit]? = nil,
+        speakerNames: [String: String] = [:]
     ) {
         self.id = id
         self.lineID = lineID
@@ -419,6 +425,29 @@ public struct MinutesSourceUnit: Hashable, Sendable, Identifiable {
         self.segmentIndex = segmentIndex
         self.segmentCount = segmentCount
         self.segmentRange = segmentRange
+        self.attributionUnits = attributionUnits
+        self.speakerNames = speakerNames
+    }
+
+    var speakerText: String {
+        guard let attributionUnits else { return "\(speaker)：\(text)" }
+        let runs = TranscriptSpeakerRun.display(TranscriptSpeakerRun.project(text: text,
+            attributionUnits: attributionUnits, speakerLabel: nil, speakerLabelIsManual: false))
+        return TranscriptSpeakerRun.formattedText(runs, names: speakerNames, showUnknown: true)
+    }
+
+    /// 裁切仅改变本地文字坐标；不能为半个词推算新的声学时间。
+    func attribution(in range: Range<Int>) -> [TranscriptAttributionUnit]? {
+        guard let attributionUnits else { return nil }
+        return attributionUnits.compactMap { unit in
+            let start = max(range.lowerBound, unit.textStart), end = min(range.upperBound, unit.textEnd)
+            guard end > start else { return nil }
+            let complete = start == unit.textStart && end == unit.textEnd
+            return .init(id: unit.id, textStart: start - range.lowerBound, textEnd: end - range.lowerBound,
+                speakerLabel: unit.speakerLabel,
+                audioStartSample: complete ? unit.audioStartSample : nil,
+                audioEndSample: complete ? unit.audioEndSample : nil)
+        }
     }
 
     /// 这段是否来自被切分的超长发言（`u7#2` 这种形态）。
@@ -1539,7 +1568,7 @@ public enum MinutesTokenEstimate: Sendable {
 /// `windowTokens` 是**每窗拥有区的实验起点**，不是模型能力承诺：
 /// 真实取值要按目标模型的上下文窗口校准。
 public struct MinutesWindowBudget: Hashable, Sendable {
-    /// 每个窗口拥有区的 token 预算（实验起点 2,500～4,000）。
+    /// 每个窗口拥有区（说话人标签及正文）的估算预算（实验起点 2,500～4,000）。
     public var windowTokens: Int
     /// 提示 + 输出 + 安全余量。超预算时先缩窗口，不动余量。
     public var reserveTokens: Int
@@ -1644,7 +1673,7 @@ public enum MinutesWindowPlanner {
         var currentTokens = 0
 
         func cost(_ unit: MinutesSourceUnit) -> Int {
-            MinutesTokenEstimate.tokens(in: unit.text)
+            MinutesTokenEstimate.tokens(in: unit.speakerText)
         }
         func flush() {
             guard !current.isEmpty else { return }
@@ -1667,12 +1696,17 @@ public enum MinutesWindowPlanner {
                    boundary > 0 {
                     let tail = Array(current[boundary...])
                     current = Array(current[..<boundary])
+                    currentTokens = current.reduce(0) { $0 + cost($1) }
                     flush()
                     current = tail
                     currentTokens = tail.reduce(0) { $0 + cost($1) }
                 } else {
                     flush()
                 }
+            }
+            // 轮次偏好挪过来的尾部也可能装不下下一条，预算优先于轮次。
+            if !current.isEmpty, currentTokens + unitCost > budget.windowTokens {
+                flush()
             }
             current.append(unit)
             currentTokens += unitCost
@@ -1685,18 +1719,45 @@ public enum MinutesWindowPlanner {
     /// 超长单句切分。返回的段各自是独立的来源单元，id 带 `#序号`，
     /// `lineID` 仍指向原句。不截断原文，也不让一段超长发言吃光整窗预算。
     static func segment(unit: MinutesSourceUnit, budget: MinutesWindowBudget) -> [MinutesSourceUnit] {
-        let cost = MinutesTokenEstimate.tokens(in: unit.text)
-        guard cost > budget.windowTokens, unit.text.count > budget.segmentTokens else {
+        let cost = MinutesTokenEstimate.tokens(in: unit.speakerText)
+        guard cost > budget.windowTokens, unit.text.count > 1 else {
             return [unit]
         }
         let characters = Array(unit.text)
+        var scalarOffsets = [0], scalarOffset = 0
+        for character in characters {
+            scalarOffset += character.unicodeScalars.count
+            scalarOffsets.append(scalarOffset)
+        }
+        func piece(in range: Range<Int>) -> MinutesSourceUnit {
+            var piece = unit
+            piece.text = String(characters[range])
+            piece.attributionUnits = unit.attribution(in: scalarOffsets[range.lowerBound]..<scalarOffsets[range.upperBound])
+            return piece
+        }
+        let target = min(budget.segmentTokens, budget.windowTokens)
         var slices: [Range<Int>] = []
         var start = 0
         while start < characters.count {
             var end = min(start + budget.segmentTokens, characters.count)
+            if MinutesTokenEstimate.tokens(in: piece(in: start..<end).speakerText) > target {
+                var lower = start + 1, upper = end
+                // 一个 Character 加标签已超预算时仍保留它，不截断或丢弃文字。
+                var fittingEnd = lower
+                while lower <= upper {
+                    let middle = lower + (upper - lower) / 2
+                    if MinutesTokenEstimate.tokens(in: piece(in: start..<middle).speakerText) <= target {
+                        fittingEnd = middle
+                        lower = middle + 1
+                    } else {
+                        upper = middle - 1
+                    }
+                }
+                end = fittingEnd
+            }
             if end < characters.count {
                 // 在后半段里找标点或空白做切点，读起来更自然。
-                let searchStart = max(start + budget.segmentTokens / 2, start + 1)
+                let searchStart = max(start + (end - start) / 2, start + 1)
                 if let found = (searchStart..<end).last(where: { isBoundary(characters[$0]) }) {
                     end = found + 1
                 }
@@ -1707,13 +1768,12 @@ public enum MinutesWindowPlanner {
         guard slices.count > 1 else { return [unit] }
         let total = slices.count
         return slices.enumerated().map { offset, range in
-            var piece = unit
-            piece.id = "\(unit.id)#\(offset + 1)"
-            piece.text = String(characters[range])
-            piece.segmentIndex = offset
-            piece.segmentCount = total
-            piece.segmentRange = range
-            return piece
+            var segment = piece(in: range)
+            segment.id = "\(unit.id)#\(offset + 1)"
+            segment.segmentIndex = offset
+            segment.segmentCount = total
+            segment.segmentRange = range
+            return segment
         }
     }
 
@@ -1758,6 +1818,8 @@ public enum MinutesWindowPlanner {
 
 /// 一个窗口的处理结果（覆盖账本的一行）。
 public enum MinutesWindowOutcome: String, Codable, Hashable, Sendable {
+    /// 远端已受理，尚未取得可用候选；恢复时继续查询原响应。
+    case submitted
     /// 已处理并产出候选。
     case processed
     /// 该窗口失败（网络、结构不合法、拒答等）。**可单独重试。**
@@ -2225,11 +2287,14 @@ public struct MinutesJobConfig: Hashable, Sendable {
     public var baseURL: String
     public var model: String
     public var compatibilityMode: String
+    /// 分窗呈现与补充输入的摘要；nil 的历史任务无法证明输入仍相同。
+    public var inputFingerprint: String?
 
-    public init(baseURL: String, model: String, compatibilityMode: String) {
+    public init(baseURL: String, model: String, compatibilityMode: String, inputFingerprint: String? = nil) {
         self.baseURL = baseURL
         self.model = model
         self.compatibilityMode = compatibilityMode
+        self.inputFingerprint = inputFingerprint
     }
 
     /// 排队那一刻从当前设置取指纹。
@@ -2255,7 +2320,7 @@ public struct MinutesJobConfig: Hashable, Sendable {
 
     /// 持久化形态：一行可比较的指纹，不含密钥与正文。
     public var fingerprint: String {
-        [baseURL, model, compatibilityMode]
+        ([baseURL, model, compatibilityMode] + (inputFingerprint.map { [$0] } ?? []))
             .map { $0.replacingOccurrences(of: "|", with: "/") }
             .joined(separator: "|")
     }
@@ -2265,8 +2330,12 @@ public struct MinutesJobConfig: Hashable, Sendable {
     public static func parse(_ raw: String?) -> MinutesJobConfig? {
         guard let raw else { return nil }
         let parts = raw.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
-        guard parts.count == 3 else { return nil }
-        return MinutesJobConfig(baseURL: parts[0], model: parts[1], compatibilityMode: parts[2])
+        guard parts.count == 3 || parts.count == 4 else { return nil }
+        if parts.count == 4 {
+            guard parts[3].count == 64, parts[3].allSatisfy({ $0.isHexDigit && !$0.isUppercase }) else { return nil }
+        }
+        return MinutesJobConfig(baseURL: parts[0], model: parts[1], compatibilityMode: parts[2],
+            inputFingerprint: parts.count == 4 ? parts[3] : nil)
     }
 }
 
@@ -2413,6 +2482,132 @@ public struct SessionRecord: Identifiable, Hashable, Sendable {
     public var endedReason: SessionEndReason { endReason ?? .user }
 }
 
+/// 服务端逐词归属的本机快照。文字坐标是 Unicode scalar 的半开区间。
+/// 不复制正文；匿名标签和采样范围只属于原转录行及其连接。
+public struct TranscriptAttributionUnit: Codable, Hashable, Sendable, Identifiable {
+    public var id: String
+    public var textStart: Int
+    public var textEnd: Int
+    public var speakerLabel: String?
+    public var audioStartSample: Int?
+    public var audioEndSample: Int?
+
+    public init(id: String, textStart: Int, textEnd: Int, speakerLabel: String?,
+                audioStartSample: Int? = nil, audioEndSample: Int? = nil) {
+        self.id = id; self.textStart = textStart; self.textEnd = textEnd
+        self.speakerLabel = speakerLabel
+        self.audioStartSample = audioStartSample; self.audioEndSample = audioEndSample
+    }
+
+    static func validated(_ units: [Self], text: String) throws -> [Self] {
+        let ordered = units.sorted { ($0.textStart, $0.textEnd, $0.id) < ($1.textStart, $1.textEnd, $1.id) }
+        let count = text.unicodeScalars.count
+        var ids: Set<String> = []
+        var end = 0
+        for unit in ordered {
+            guard !unit.id.isEmpty, ids.insert(unit.id).inserted,
+                  unit.textStart >= end, unit.textEnd > unit.textStart, unit.textEnd <= count,
+                  unit.speakerLabel?.isEmpty != true else {
+                throw TranscriptAttributionValidationError.invalidRange
+            }
+            switch (unit.audioStartSample, unit.audioEndSample) {
+            case (nil, nil): break
+            case let (start?, finish?) where start >= 0 && finish > start: break
+            default: throw TranscriptAttributionValidationError.invalidTiming
+            }
+            end = unit.textEnd
+        }
+        return ordered
+    }
+}
+
+enum TranscriptAttributionValidationError: Error { case invalidRange, invalidTiming }
+
+public struct TranscriptSpeakerRun: Hashable, Sendable {
+    public var text: String
+    public var speakerLabel: String?
+    public var textStart: Int
+    public var textEnd: Int
+
+    static func project(text: String, attributionUnits: [TranscriptAttributionUnit],
+                        speakerLabel: String?, speakerLabelIsManual: Bool) -> [Self] {
+        let scalars = Array(text.unicodeScalars)
+        guard !speakerLabelIsManual, !attributionUnits.isEmpty,
+              let units = try? TranscriptAttributionUnit.validated(attributionUnits, text: text) else {
+            return [.init(text: text, speakerLabel: speakerLabel, textStart: 0, textEnd: scalars.count)]
+        }
+        var runs: [TranscriptSpeakerRun] = []
+        func append(_ start: Int, _ end: Int, _ label: String?) {
+            guard end > start else { return }
+            let value = String(String.UnicodeScalarView(scalars[start..<end]))
+            if let last = runs.last, last.speakerLabel == label {
+                runs[runs.count - 1].text += value
+                runs[runs.count - 1].textEnd = end
+            } else {
+                runs.append(.init(text: value, speakerLabel: label, textStart: start, textEnd: end))
+            }
+        }
+        var cursor = 0
+        for unit in units {
+            append(cursor, unit.textStart, nil)
+            append(unit.textStart, unit.textEnd, unit.speakerLabel)
+            cursor = unit.textEnd
+        }
+        append(cursor, scalars.count, nil)
+        return runs
+    }
+
+    static func summaryLabel(_ runs: [Self]) -> String? {
+        let content = runs.filter { run in
+            run.text.unicodeScalars.contains { !CharacterSet.whitespacesAndNewlines.contains($0) && !CharacterSet.punctuationCharacters.contains($0) }
+        }
+        let labels = Set(content.compactMap(\.speakerLabel))
+        return labels.count == 1 && content.allSatisfy { $0.speakerLabel != nil } ? labels.first : nil
+    }
+
+    /// 排版投影：标点只随正文显示，不生成独立未知段；原始证据由 project 保留。
+    static func display(_ runs: [Self]) -> [Self] {
+        var result: [Self] = []
+        var leading = ""
+        let separators = CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)
+        for run in runs {
+            var text = run.text
+            var start = run.textStart
+            if run.speakerLabel == nil {
+                let punctuation = String(String.UnicodeScalarView(text.unicodeScalars.prefix { separators.contains($0) }))
+                let count = punctuation.unicodeScalars.count
+                if result.isEmpty { leading += punctuation } else {
+                    result[result.count - 1].text += punctuation
+                    result[result.count - 1].textEnd = start + count
+                }
+                start += count
+                text = String(String.UnicodeScalarView(text.unicodeScalars.dropFirst(count)))
+                if text.isEmpty { continue }
+            }
+            if let last = result.last, last.speakerLabel == run.speakerLabel {
+                result[result.count - 1].text += text
+                result[result.count - 1].textEnd = run.textEnd
+            } else {
+                result.append(.init(text: leading + text, speakerLabel: run.speakerLabel,
+                                    textStart: start - leading.unicodeScalars.count, textEnd: run.textEnd))
+            }
+            leading = ""
+        }
+        return result.isEmpty ? runs : result
+    }
+
+    static func formattedText(_ runs: [Self], names: [String: String], showUnknown: Bool,
+                              markdownFlags: String? = nil) -> String {
+        runs.map { run in
+            let name = run.speakerLabel.map { names[$0] ?? "说话人 \($0)" }
+                ?? (showUnknown ? "未确认说话人" : "")
+            guard !name.isEmpty else { return run.text }
+            if let markdownFlags { return "**\(name)**\(markdownFlags)：\(run.text)" }
+            return "\(name)：\(run.text)"
+        }.joined(separator: markdownFlags == nil ? "\n" : "  \n  ")
+    }
+}
+
 /// `line` 一行（转录 / 字幕 / 对话正文共用）。
 public struct TranscriptLine: Identifiable, Hashable, Sendable {
     public var id: String
@@ -2422,6 +2617,8 @@ public struct TranscriptLine: Identifiable, Hashable, Sendable {
     /// 分人匿名标签 `A`…`D`，会话内唯一；不是实名（服务只输出匿名 label）。
     public var speakerLabel: String?
     public var text: String
+    public var attributionUnits: [TranscriptAttributionUnit]
+    public var speakerLabelIsManual: Bool
     public var tStart: TimeInterval?
     public var tEnd: TimeInterval?
     public var source: SessionLineSource
@@ -2448,7 +2645,9 @@ public struct TranscriptLine: Identifiable, Hashable, Sendable {
         isDeviceSwitch: Bool = false,
         isStarred: Bool = false,
         timingQuality: SessionTimingQuality? = nil,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        attributionUnits: [TranscriptAttributionUnit] = [],
+        speakerLabelIsManual: Bool = false
     ) {
         self.id = id
         self.sessionID = sessionID
@@ -2456,6 +2655,8 @@ public struct TranscriptLine: Identifiable, Hashable, Sendable {
         self.role = role
         self.speakerLabel = speakerLabel
         self.text = text
+        self.attributionUnits = attributionUnits
+        self.speakerLabelIsManual = speakerLabelIsManual
         self.tStart = tStart
         self.tEnd = tEnd
         self.source = source
@@ -2466,6 +2667,16 @@ public struct TranscriptLine: Identifiable, Hashable, Sendable {
         self.timingQuality = timingQuality
         self.createdAt = createdAt
     }
+
+    /// 每个原字符恰出现一次。未对齐的正文保留为未知，不能借用相邻人的标签。
+    public var speakerRuns: [TranscriptSpeakerRun] {
+        TranscriptSpeakerRun.project(text: text, attributionUnits: attributionUnits,
+                                    speakerLabel: speakerLabel, speakerLabelIsManual: speakerLabelIsManual)
+    }
+
+    public var displaySpeakerRuns: [TranscriptSpeakerRun] { TranscriptSpeakerRun.display(speakerRuns) }
+
+    public var speakerLabels: [String] { Array(Set(displaySpeakerRuns.compactMap(\.speakerLabel))).sorted() }
 
     /// SRT 时间码与导出物一律从 `tStart` 取（§6.5）。没有时间戳的行导不出时间码。
     public var hasTimecode: Bool { tStart != nil }
@@ -3411,14 +3622,10 @@ public struct KnowledgeArchiveImportResult: Sendable {
 /// `structured.json` 的根。**字段名与内部类型解耦**：内部改字段名不会静默改掉
 /// 已经发出去的包，老包也不会因为新版本内部重构就读不回来（MA-19 开放格式）。
 public struct KnowledgeArchivePayload: Codable, Hashable, Sendable {
-    /// v3：补 `body_origin` 与 `parent_minutes_id`（MA-11 的正文出处与改稿血缘）。
-    /// v2 的包**读不了**——按项目策略不为旧包保留兼容层，代价同 v1→v2。
-    ///
-    /// 为什么要升：v2 丢的不只是两个字段。用户改过的纪要、补写过的说明，
-    /// 导入后 `body_origin` 落回列默认值 `'ai'`，于是**用户自己写的正文被标成
-    /// 「AI 整理」**；血缘断了则「撤销一次编辑」在往返之后直接失效。
-    /// 这两样都是「这段话到底出自谁、是哪一版改来的」，不能猜，只能重导。
-    public static let schemaID = "speechrail.meeting.knowledge-archive.payload/3"
+    /// v4 保留完整逐词归属与人工覆盖状态，旧 App 不能静默导入后丢失这些证据。
+    /// v3 文档可以按历史整行标签读取，不推断缺失的逐词或人工来源；v2 仍因缺正文出处与血缘拒绝。
+    public static let schemaID = "speechrail.meeting.knowledge-archive.payload/4"
+    static let legacySchemaID = "speechrail.meeting.knowledge-archive.payload/3"
 
     public var schema: String
     public var document: ArchiveDocument
@@ -3593,6 +3800,31 @@ public struct ArchiveSession: Codable, Hashable, Sendable {
     }
 }
 
+/// 归档边界使用 snake_case；本机存储与 wire DTO 分开，正文不复制到单元里。
+public struct ArchiveAttributionUnit: Codable, Hashable, Sendable {
+    public var id: String
+    public var textStart: Int
+    public var textEnd: Int
+    public var speakerLabel: String?
+    public var audioStartSample: Int?
+    public var audioEndSample: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case textStart = "text_start", textEnd = "text_end", speakerLabel = "speaker_label"
+        case audioStartSample = "audio_start_sample", audioEndSample = "audio_end_sample"
+    }
+
+    public init(_ unit: TranscriptAttributionUnit) {
+        id = unit.id; textStart = unit.textStart; textEnd = unit.textEnd; speakerLabel = unit.speakerLabel
+        audioStartSample = unit.audioStartSample; audioEndSample = unit.audioEndSample
+    }
+    var transcriptUnit: TranscriptAttributionUnit {
+        .init(id: id, textStart: textStart, textEnd: textEnd, speakerLabel: speakerLabel,
+              audioStartSample: audioStartSample, audioEndSample: audioEndSample)
+    }
+}
+
 public struct ArchiveLine: Codable, Hashable, Sendable {
     public var id: String
     public var sessionID: String
@@ -3600,6 +3832,8 @@ public struct ArchiveLine: Codable, Hashable, Sendable {
     public var role: String
     public var speakerLabel: String?
     public var text: String
+    public var attributionUnits: [ArchiveAttributionUnit]
+    public var speakerLabelIsManual: Bool
     public var tStart: Double?
     public var tEnd: Double?
     public var source: String
@@ -3619,6 +3853,8 @@ public struct ArchiveLine: Codable, Hashable, Sendable {
         case status
         case interrupted
         case starred
+        case attributionUnits = "attribution_units"
+        case speakerLabelIsManual = "speaker_label_is_manual"
         case sessionID = "session_id"
         case speakerLabel = "speaker_label"
         case tStart = "t_start"
@@ -3643,7 +3879,9 @@ public struct ArchiveLine: Codable, Hashable, Sendable {
         deviceSwitch: Bool,
         starred: Bool,
         timingQuality: String? = nil,
-        createdAt: Double
+        createdAt: Double,
+        attributionUnits: [ArchiveAttributionUnit] = [],
+        speakerLabelIsManual: Bool = false
     ) {
         self.id = id
         self.sessionID = sessionID
@@ -3651,6 +3889,8 @@ public struct ArchiveLine: Codable, Hashable, Sendable {
         self.role = role
         self.speakerLabel = speakerLabel
         self.text = text
+        self.attributionUnits = attributionUnits
+        self.speakerLabelIsManual = speakerLabelIsManual
         self.tStart = tStart
         self.tEnd = tEnd
         self.source = source
@@ -4170,7 +4410,9 @@ extension TranscriptLine {
             deviceSwitch: isDeviceSwitch,
             starred: isStarred,
             timingQuality: timingQuality?.rawValue,
-            createdAt: createdAt.timeIntervalSince1970
+            createdAt: createdAt.timeIntervalSince1970,
+            attributionUnits: attributionUnits.map(ArchiveAttributionUnit.init),
+            speakerLabelIsManual: speakerLabelIsManual
         )
     }
 }

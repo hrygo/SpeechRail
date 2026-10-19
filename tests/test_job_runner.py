@@ -40,6 +40,37 @@ def test_job_runner_completes_claimed_work_in_the_matching_batch_lane(tmp_path: 
     asyncio.run(scenario())
 
 
+def test_transcription_processor_releases_asr_before_diarization(tmp_path: Path) -> None:
+    from speechrail.runtime.resource_governor import WorkClass
+
+    async def run():
+        governor = ResourceGovernor(GovernorLimits(2, 1, 4), allow_heavy_overlap=False)
+
+        class Processor:
+            async def process(self, job):
+                assert governor.snapshot().active_asr == 0
+                async with governor.reserve(WorkClass.BATCH_ASR):
+                    assert governor.snapshot().active_asr == 1
+                async with governor.reserve(WorkClass.DIARIZATION):
+                    assert governor.snapshot().active_asr == 0
+                return "result://transcription/fake"
+
+        repository = JobRepository(tmp_path / "spool")
+        job = repository.create(kind="transcription", owner="owner", request={"input_ref": "fake"})
+        runner = JobRunner(
+            repository=repository,
+            governor=governor,
+            processor=Processor(),
+            deadline_seconds=0.5,
+            processor_manages_transcription_admission=True,
+        )
+        await runner.run_once()
+        assert repository.get(job.id, owner="owner").state == "completed"
+        assert governor.snapshot().active_batch == 0
+
+    asyncio.run(run())
+
+
 def test_job_runner_records_a_bounded_processor_failure(tmp_path: Path) -> None:
     class FailingProcessor:
         async def process(self, job: JobRecord) -> str:
@@ -183,12 +214,8 @@ def test_job_runner_interleaves_kinds_so_neither_kind_starves(tmp_path: Path) ->
     async def scenario() -> None:
         repository = JobRepository(tmp_path.parent / "speechrail-job-spool")
         jobs = [
-            repository.create(
-                kind="speech", owner="owner-a", request={"input_ref": "opaque"}
-            ),
-            repository.create(
-                kind="speech", owner="owner-a", request={"input_ref": "opaque"}
-            ),
+            repository.create(kind="speech", owner="owner-a", request={"input_ref": "opaque"}),
+            repository.create(kind="speech", owner="owner-a", request={"input_ref": "opaque"}),
             repository.create(
                 kind="transcription", owner="owner-a", request={"input_ref": "opaque"}
             ),
@@ -210,9 +237,7 @@ def test_job_runner_interleaves_kinds_so_neither_kind_starves(tmp_path: Path) ->
         # entirely before the other, so claims alternate.
         assert claimed_kinds.count("speech") == 2
         assert claimed_kinds.count("transcription") == 2
-        assert all(
-            first != second for first, second in itertools.pairwise(claimed_kinds)
-        )
+        assert all(first != second for first, second in itertools.pairwise(claimed_kinds))
         for job in jobs:
             stored = repository.get(job.id, owner="owner-a")
             assert stored is not None
@@ -232,15 +257,9 @@ def test_job_runner_single_kind_queue_drains_in_fifo_order(tmp_path: Path) -> No
     async def scenario() -> None:
         repository = JobRepository(tmp_path.parent / "speechrail-job-spool")
         jobs = [
-            repository.create(
-                kind="speech", owner="owner-a", request={"input_ref": "opaque"}
-            ),
-            repository.create(
-                kind="speech", owner="owner-a", request={"input_ref": "opaque"}
-            ),
-            repository.create(
-                kind="speech", owner="owner-a", request={"input_ref": "opaque"}
-            ),
+            repository.create(kind="speech", owner="owner-a", request={"input_ref": "opaque"}),
+            repository.create(kind="speech", owner="owner-a", request={"input_ref": "opaque"}),
+            repository.create(kind="speech", owner="owner-a", request={"input_ref": "opaque"}),
         ]
         runner = JobRunner(
             repository=repository,

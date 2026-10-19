@@ -27,9 +27,25 @@ from speechrail.mcp import tools
 from speechrail.mcp.client import SpeechRailClient
 
 
-def _backend(
-    _: bytes, __: str | None, ___: str, ____: bool = False
-) -> Awaitable[TranscriptResult]:
+def test_diarization_owner_contention_uses_stable_busy_envelope():
+    from speechrail.runtime.resource_governor import GovernorQueueFullError
+
+    class BusyEngine(FakeDiarizationEngine):
+        def open(self, *, epoch):
+            raise GovernorQueueFullError("private owner detail")
+
+    with _client(diarization_engine=BusyEngine()) as client:
+        response = client.post(
+            "/v1/audio/transcriptions",
+            files={"file": ("clip.wav", _pcm16_wav(2), "audio/wav")},
+            data={"model": "gpt-4o-transcribe-diarize", "response_format": "diarized_json"},
+        )
+    assert response.status_code == 429
+    assert response.json()["error"]["code"] == "backend_busy"
+    assert "private owner" not in response.text
+
+
+def _backend(_: bytes, __: str | None, ___: str, ____: bool = False) -> Awaitable[TranscriptResult]:
     async def result() -> TranscriptResult:
         return TranscriptResult(
             request_id="backend",
@@ -404,9 +420,7 @@ def test_diarized_server_vad_preserves_streamed_pcm_tail_and_language(monkeypatc
     monkeypatch.setattr(audio_routes, "decode_upload", decoded_pcm)
     engine = FakeDiarizationEngine()
     streaming = RecordingStreamingBatch()
-    response = _client(
-        diarization_engine=engine, batch_transcriber=streaming
-    ).post(
+    response = _client(diarization_engine=engine, batch_transcriber=streaming).post(
         "/v1/audio/transcriptions",
         files={"file": ("clip.webm", b"container", "video/webm")},
         data={
@@ -470,6 +484,4 @@ def test_models_hide_diarized_alias_when_runtime_preflight_fails(tmp_path: Path)
     response = client.get("/v1/models")
 
     assert response.status_code == 200
-    assert "gpt-4o-transcribe-diarize" not in {
-        item["id"] for item in response.json()["data"]
-    }
+    assert "gpt-4o-transcribe-diarize" not in {item["id"] for item in response.json()["data"]}

@@ -2,8 +2,8 @@
 title: "SpeechRail 运维与 SRE 文档中心"
 status: active
 audience: "运维工程师、SRE、系统管理员"
-version: "2.2.2"
-date: 2026-10-16
+version: "2.2.3"
+date: 2026-10-18
 ---
 
 # 📦 SpeechRail 运维与 SRE 文档
@@ -11,6 +11,8 @@ date: 2026-10-16
 欢迎查阅 SpeechRail 运维文档。本目录面向负责 macOS 本机部署、LaunchAgent 常驻服务生命周期管理、版本升级与回滚、监控诊断以及故障排查的 SRE 与运维人员。
 
 ---
+
+[重计算预留、资源声明与故障隔离](heavy-compute-overlap-configuration.md)说明分人独占 owner、跨轴预算和回收失败后的恢复边界。
 
 ## 📑 推荐阅读路径
 

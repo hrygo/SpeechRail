@@ -184,6 +184,52 @@ class WindowDecodeRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class WindowDecodeObservation:
+    """Per-attempt decoder evidence; absent vendor values remain unknown.
+
+    The decode budget bounds the whole hypothesis. The generation budget is
+    the actual vendor call budget after any retained preview prefix is deducted.
+    Generated token counts exclude that prefix and precede output postprocessing.
+    """
+
+    kind: Literal["preview", "review"]
+    decode_max_new_tokens: int
+    generation_max_new_tokens: int | None = None
+    finish_reason: str | None = None
+    truncated: bool | None = None
+    generated_token_count: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in ("preview", "review"):
+            raise ValueError("invalid window observation kind")
+        require_integer(self.decode_max_new_tokens, minimum=1)
+        if self.generation_max_new_tokens is not None:
+            require_integer(
+                self.generation_max_new_tokens, minimum=1, maximum=self.decode_max_new_tokens
+            )
+        if self.finish_reason is not None and (
+            not isinstance(self.finish_reason, str) or not 1 <= len(self.finish_reason) <= 64
+        ):
+            raise ValueError("invalid window observation finish reason")
+        if self.truncated is not None and type(self.truncated) is not bool:
+            raise ValueError("invalid window observation truncation")
+        if self.generated_token_count is not None:
+            require_integer(
+                self.generated_token_count,
+                maximum=self.generation_max_new_tokens or self.decode_max_new_tokens,
+            )
+
+    @classmethod
+    def from_wire_dict(cls, value: object) -> WindowDecodeObservation:
+        if not isinstance(value, dict) or not {"kind", "decode_max_new_tokens"} <= value.keys():
+            raise ValueError("invalid window observation")
+        if value.keys() - cls.__dataclass_fields__.keys():
+            raise ValueError("unexpected window observation fields")
+        # Construction performs the same strict validation used by engine results.
+        return cls(**value)
+
+
+@dataclass(frozen=True, slots=True)
 class WindowDecodeResult:
     identity: WindowIdentity
     attempt_id: str
@@ -191,6 +237,7 @@ class WindowDecodeResult:
     text: str
     language: str | None
     complete: bool
+    observation: WindowDecodeObservation | None = None
 
     def __post_init__(self) -> None:
         require_identifier(self.attempt_id)
@@ -199,6 +246,10 @@ class WindowDecodeResult:
             raise ValueError("window result exceeds the codepoint budget")
         if type(self.complete) is not bool:
             raise ValueError("window result requires explicit completeness")
+        if self.observation is not None and not isinstance(
+            self.observation, WindowDecodeObservation
+        ):
+            raise ValueError("invalid window decode observation")
 
 
 class WindowLedger:

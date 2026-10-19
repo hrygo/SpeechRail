@@ -825,8 +825,9 @@ def test_failed_reclamation_health_and_metrics_responses_match_contract(
 
 @pytest.mark.parametrize("target", ["router", "router_pending", "design"])
 @pytest.mark.parametrize("overlap", [False, True])
+@pytest.mark.parametrize("bounds_known", [False, True])
 def test_idle_tts_reclamation_failure_blocks_ordinary_speech_admission(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, target: str, overlap: bool,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, target: str, overlap: bool, bounds_known: bool,
 ) -> None:
     from collections.abc import AsyncIterator
 
@@ -879,6 +880,14 @@ def test_idle_tts_reclamation_failure_blocks_ordinary_speech_admission(
         services_module, "_heavy_overlap_policy", lambda *_, **__: (overlap, "test"),
     )
     monkeypatch.setattr(services_module, "_serial_budget_policy", lambda *_, **__: (False, "test"))
+
+    def memory_bytes():
+        if not bounds_known:
+            raise RuntimeError("fake unavailable hardware budget")
+        return 128 * 1024**3
+
+    monkeypatch.setattr(services_module, "detect_system_memory_bytes", memory_bytes)
+    independent_allowed = overlap and bounds_known
     for variant in ("custom_voice", "base", "voice_design"):
         snapshot = tmp_path / variant
         snapshot.mkdir()
@@ -892,6 +901,7 @@ def test_idle_tts_reclamation_failure_blocks_ordinary_speech_admission(
         qwen3_tts_design_model_dir=tmp_path / "voice_design",
         worker_idle_timeout_seconds=10_000,
         voice_design_idle_timeout_seconds=10_000,
+        tts_resident_bytes=512 * 1024 * 1024,
     )
 
     async def run() -> None:
@@ -916,7 +926,7 @@ def test_idle_tts_reclamation_failure_blocks_ordinary_speech_admission(
                 await evictor.force_evict(owner)
                 assert evictor.state_of(owner).value == "reclamation_failed"
             response = await client.post("/v1/audio/speech", json=body)
-            if target == "design" and overlap:
+            if target == "design" and independent_allowed:
                 assert response.status_code == 200
             else:
                 assert response.status_code == 503
@@ -928,7 +938,7 @@ def test_idle_tts_reclamation_failure_blocks_ordinary_speech_admission(
                 ):
                     pytest.fail("design admitted alongside an unreaped owner")
             assert workers["custom_voice"].starts == 0
-            if overlap:
+            if independent_allowed:
                 async with services.governor.reserve(WorkClass.BATCH_ASR):
                     pass
             else:
@@ -939,7 +949,7 @@ def test_idle_tts_reclamation_failure_blocks_ordinary_speech_admission(
                 release_other.set()
                 await asyncio.wait_for(closing, timeout=1)
                 assert evictor.state_of(owner).value == "reclamation_failed"
-            still_ready = target == "design" and overlap
+            still_ready = target == "design" and independent_allowed
             health = (await client.get("/health")).json()
             assert health["tts_ready"] is still_ready
             assert health["ready"] is still_ready
@@ -966,6 +976,7 @@ def test_tts_quarantine_preserves_independent_asr_readiness(
             tts_synthesizer=object(),
             governor=services_module.ResourceGovernor(
                 fake_services.settings.governor_limits, allow_heavy_overlap=True,
+                quarantine_resources_bounded=True,
             ),
         )
         services.governor.quarantine_tts_lane(None)
@@ -1018,6 +1029,7 @@ def test_tts_readiness_tracks_the_configured_production_lanes(
         governor=services_module.ResourceGovernor(
             fake_services.settings.governor_limits,
             allow_heavy_overlap=True,
+            quarantine_resources_bounded=True,
         ),
     )
     services.governor.quarantine_tts_lane("tts_base")

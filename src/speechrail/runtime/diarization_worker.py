@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import struct
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -84,6 +85,7 @@ class CoreMLWorkerProcess:
     _stderr_tail: bytearray = field(default_factory=bytearray)
     _stderr_task: asyncio.Task[None] | None = None
     _close_task: asyncio.Task[None] | None = None
+    inherited_guard_fd: int | None = None
 
     async def start(self) -> None:
         if self.process is not None and self.process.returncode is None:
@@ -110,27 +112,10 @@ class CoreMLWorkerProcess:
                 extra += ["--calibration-candidates", str(self.calibration_candidates_path)]
             if self.zero_vote_reembed:
                 extra.append("--zero-vote-reembed")
-        process = await asyncio.create_subprocess_exec(
-            str(self.executable),
-            "--model",
-            str(self.model_path),
-            "--protocol-version",
-            str(self.protocol_version),
-            *extra,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        assert (
-            process.stdin is not None and process.stdout is not None and process.stderr is not None
-        )
-        self.process = process
-        self._writer = process.stdin
-        self._reader = process.stdout
-        self._lock = asyncio.Lock()
-        self._stderr_tail.clear()
-        self._stderr_task = asyncio.create_task(
-            self._drain_stderr(process.stderr), name="coreml-diarization-stderr-drain"
+        # Cancellation may interrupt preflight, but cannot leave an OS child
+        # created later without assigning it to this transport first.
+        await join_cleanup(
+            asyncio.create_task(self._launch(extra), name="diarization-worker-launch")
         )
         response, _ = await self.request({"operation": "preflight"})
         if response.get("ok") is not True or (
@@ -145,6 +130,52 @@ class CoreMLWorkerProcess:
             await self.close()
             raise RuntimeError("CoreML diarization worker preflight failed")
 
+    async def _launch(self, extra: list[str]) -> None:
+        guard_fd = self.inherited_guard_fd
+        if guard_fd is not None:
+            if type(guard_fd) is not int or guard_fd < 0:
+                raise ValueError("inherited guard fd must be an open non-negative descriptor")
+            try:
+                os.fstat(guard_fd)
+            except OSError as exc:
+                raise ValueError(
+                    "inherited guard fd must be an open non-negative descriptor"
+                ) from exc
+
+        command = (
+            str(self.executable),
+            "--model",
+            str(self.model_path),
+            "--protocol-version",
+            str(self.protocol_version),
+            *extra,
+        )
+        if guard_fd is None:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        else:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                pass_fds=(guard_fd,),
+            )
+        assert (
+            process.stdin is not None and process.stdout is not None and process.stderr is not None
+        )
+        self.process = process
+        self._writer = process.stdin
+        self._reader = process.stdout
+        self._lock = asyncio.Lock()
+        self._stderr_tail.clear()
+        self._stderr_task = asyncio.create_task(
+            self._drain_stderr(process.stderr), name="coreml-diarization-stderr-drain"
+        )
     async def request(
         self, header: Mapping[str, object], audio: bytes = b""
     ) -> tuple[dict[str, object], bytes]:

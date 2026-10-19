@@ -2,7 +2,7 @@
 title: "SpeechRail 安全与可观测性"
 status: active
 version: "3.1.5"
-date: 2026-10-16
+date: 2026-10-18
 ---
 
 # SpeechRail 安全与可观测性
@@ -131,9 +131,14 @@ item、会话、request ID 或转写内容；累计值在服务重启后归零�
 观测 RTF、TTFA、队列饱和度与 worker 生命周期状态。
 
 `SPEECHRAIL_MLX_CACHE_LIMIT_MB` 与 `SPEECHRAIL_MLX_MEMORY_LIMIT_MB` 是 vendor runtime 的
-缓存/分配提示，不等于 ASR、TTS 或 diarization 的驻留峰值。当前无法从它们推导真实模型
-footprint；任一重计算组件启用时，Governor 对 overlap 采用未知预算并保持串行，避免在大内存
-机器上误放行并发推理。
+缓存/分配提示，单位为 MiB（1024² 字节），不等于 ASR、TTS 或 diarization 的驻留峰值。
+ASR 与独立强制对齐 worker 均在模型加载前接收正值；0 保留 vendor 默认值。对齐 worker
+不能应用正值时返回 `worker_memory_limit_error` 并停止加载，不以未生效的配置报告 ready。
+MLX 的分配上限是图计算内存使用的指导值，缓存上限控制可回收缓存，两者都不是整个进程的
+硬性物理内存上限，参见 [MLX 内存上限](https://ml-explore.github.io/mlx/build/html/python/_autosummary/mlx.core.set_memory_limit.html)
+与 [缓存上限](https://ml-explore.github.io/mlx/build/html/python/_autosummary/mlx.core.set_cache_limit.html)。
+当前无法从这些提示推导真实模型 footprint；任一重计算组件启用时，Governor 对 overlap
+采用未知预算并保持串行，避免在大内存机器上误放行并发推理。
 
 以下控制不在当前能力范围，不构成安全声明：CORS、请求级限速、远程持久化指标聚合与
 集中式导出、非 loopback 的 TLS/Origin/网段防护。需要这些能力时，先实现、测试并更新

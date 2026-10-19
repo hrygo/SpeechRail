@@ -22,10 +22,28 @@ class WorkClass(StrEnum):
     REALTIME_TTS = "realtime_tts"
     BATCH_ASR = "batch_asr"
     BATCH_TTS = "batch_tts"
+    DIARIZATION = "diarization"
 
     @property
     def is_realtime(self) -> bool:
         return self in {self.REALTIME_ASR, self.REALTIME_TTS}
+
+    @property
+    def is_asr(self) -> bool:
+        return self in {self.REALTIME_ASR, self.BATCH_ASR}
+
+    @property
+    def is_tts(self) -> bool:
+        return self in {self.REALTIME_TTS, self.BATCH_TTS}
+
+    @property
+    def is_diarization(self) -> bool:
+        """Continuous diarization activity is its own heavy capability axis.
+
+        It is never ASR and never TTS: its reservations get a dedicated lane and
+        are accounted separately so they cannot borrow the ASR or TTS lane.
+        """
+        return self == WorkClass.DIARIZATION
 
 
 class WorkPurpose(StrEnum):
@@ -58,6 +76,8 @@ class GovernorSnapshot:
     pending_batch: int
     active_asr: int = 0
     active_tts: int = 0
+    active_diarization: int = 0
+    retained_diarization: int = 0
     allow_heavy_overlap: bool = True
     policy_reason: str = "caller default"
     reject_heavy_compute: bool = False
@@ -78,7 +98,7 @@ class _Waiter:
 
     @property
     def is_tts(self) -> bool:
-        return self.work_class in (WorkClass.BATCH_TTS, WorkClass.REALTIME_TTS)
+        return self.work_class.is_tts
 
 
 class ResourceGovernor:
@@ -90,6 +110,12 @@ class ResourceGovernor:
     may provide a capability key: requests sharing a key are serialized, while
     independent keys can use separate physical workers concurrently. An
     unkeyed TTS reservation remains a conservative wildcard lane.
+
+    Heavy compute spans three capability axes -- ASR, TTS and diarization.
+    Each axis keeps its own serial lane (ASR stays one shared worker,
+    diarization stays one lane), but distinct axes may run concurrently when
+    ``allow_heavy_overlap`` is set from the declared-bytes memory budget
+    (ADR-0016, extended with the diarization axis).
     """
 
     def __init__(
@@ -104,6 +130,7 @@ class ResourceGovernor:
         policy_reason: str = "caller default",
         reject_heavy_compute: bool = False,
         budget_reason: str = "",
+        quarantine_resources_bounded: bool = False,
     ) -> None:
         self._limits = limits
         self._on_reject = on_reject
@@ -114,12 +141,20 @@ class ResourceGovernor:
         self._policy_reason = policy_reason
         self._reject_heavy_compute = reject_heavy_compute
         self._budget_reason = budget_reason
+        self._quarantine_resources_bounded = quarantine_resources_bounded
+        self._unbounded_quarantine = False
+        self._diarization_quarantined = False
+        # Imported here to avoid the owner's exception/type dependency cycle.
+        from speechrail.runtime.diarization_owner import DiarizationSessionOwner
+
+        self.diarization_owner = DiarizationSessionOwner()
         self._condition = asyncio.Condition()
         self._ticket = 0
         self._active_realtime = 0
         self._active_batch = 0
         self._active_asr = 0
         self._active_tts = 0
+        self._active_diarization = 0
         self._active_tts_lanes: dict[str | None, int] = {}
         self._quarantined_tts_lanes: set[str | None] = set()
         self._asr_quarantined = False
@@ -213,6 +248,8 @@ class ResourceGovernor:
             pending_batch=len(self._batch_waiters),
             active_asr=self._active_asr,
             active_tts=self._active_tts,
+            active_diarization=self._active_diarization,
+            retained_diarization=int(self._diarization_quarantined),
             allow_heavy_overlap=self._allow_heavy_overlap,
             policy_reason=self._policy_reason,
             reject_heavy_compute=self._reject_heavy_compute,
@@ -228,12 +265,26 @@ class ResourceGovernor:
         """
         key = self._normalize_resource_key(WorkClass.REALTIME_TTS, resource_key)
         self._quarantined_tts_lanes.add(key)
+        self._unbounded_quarantine |= not self._quarantine_resources_bounded
         self._wake_quarantined_waiters()
 
     def quarantine_asr_lane(self) -> None:
         """Fail closed after unconfirmed native cleanup; restart releases isolation."""
         self._asr_quarantined = True
+        self._unbounded_quarantine |= not self._quarantine_resources_bounded
         self._wake_quarantined_waiters()
+
+    def quarantine_diarization_lane(self) -> None:
+        """Retain failed-child resource accounting until managed service recovery."""
+        self._diarization_quarantined = True
+        self._unbounded_quarantine |= not self._quarantine_resources_bounded
+        self._wake_quarantined_waiters()
+
+    def diarization_lane_isolated(self) -> bool:
+        return self._quarantine_blocks(WorkClass.DIARIZATION, None)
+
+    def asr_lane_isolated(self) -> bool:
+        return self._quarantine_blocks(WorkClass.REALTIME_ASR, None)
 
     def _wake_quarantined_waiters(self) -> None:
         if (self._realtime_waiters or self._batch_waiters) and (
@@ -248,8 +299,14 @@ class ResourceGovernor:
             self._condition.notify_all()
 
     def _quarantine_blocks(self, work_class: WorkClass, resource_key: str | None) -> bool:
+        if self._unbounded_quarantine:
+            return True
+        if self._diarization_quarantined and (
+            not self._allow_heavy_overlap or work_class.is_diarization
+        ):
+            return True
         if self._asr_quarantined and (
-            not self._allow_heavy_overlap or not self._is_tts(work_class)
+            not self._allow_heavy_overlap or work_class.is_asr
         ):
             return True
         if not self._quarantined_tts_lanes:
@@ -280,11 +337,13 @@ class ResourceGovernor:
         still queue behind work that arrives first.
         """
 
-        if self._reject_heavy_compute or self._quarantine_blocks(work_class, resource_key):
+        key = self._normalize_resource_key(work_class, resource_key)
+        if self._reject_heavy_compute:
             return False
-        if self._active_realtime + self._active_batch >= self._limits.total_capacity:
+        if len(self._waiters_for(work_class)) >= self._limits.max_pending_per_class:
             return False
-        return not (self._is_tts(work_class) and self._tts_lane_busy(resource_key))
+        waiter = _Waiter(self._ticket + 1, work_class, WorkPurpose.DEFAULT, self._clock(), key)
+        return self._can_admit(waiter)
 
     async def _acquire(
         self,
@@ -335,8 +394,10 @@ class ResourceGovernor:
                     self._active_realtime += 1
                 else:
                     self._active_batch += 1
-                if waiter.work_class in (WorkClass.BATCH_ASR, WorkClass.REALTIME_ASR):
+                if waiter.work_class.is_asr:
                     self._active_asr += 1
+                elif waiter.work_class.is_diarization:
+                    self._active_diarization += 1
                 else:
                     self._active_tts += 1
                     self._active_tts_lanes[waiter.resource_key] = (
@@ -356,8 +417,10 @@ class ResourceGovernor:
                 self._active_realtime -= 1
             else:
                 self._active_batch -= 1
-            if work_class in (WorkClass.BATCH_ASR, WorkClass.REALTIME_ASR):
+            if work_class.is_asr:
                 self._active_asr -= 1
+            elif work_class.is_diarization:
+                self._active_diarization -= 1
             else:
                 self._active_tts -= 1
                 active_for_key = self._active_tts_lanes.get(resource_key, 0) - 1
@@ -372,10 +435,14 @@ class ResourceGovernor:
             return False
         if self._active_realtime + self._active_batch >= self._limits.total_capacity:
             return False
-        is_asr = waiter.work_class in (WorkClass.BATCH_ASR, WorkClass.REALTIME_ASR)
+        is_asr = waiter.work_class.is_asr
         if is_asr and self._active_asr > 0:
             # ASR has one shared model owner. Heavy overlap permits an
-            # independent TTS lane, never a second ASR session on this lane.
+            # independent TTS or diarization lane, never a second ASR session
+            # on this lane.
+            return False
+        if waiter.work_class.is_diarization and self._active_diarization > 0:
+            # Diarization owns exactly one lane: a second reservation waits.
             return False
         if self._is_tts(waiter.work_class) and self._tts_lane_busy(waiter.resource_key):
             # Keep a same-capability request in the bounded governor queue
@@ -384,9 +451,18 @@ class ResourceGovernor:
             # an unkeyed request is a wildcard and therefore remains serial.
             return False
         if not self._allow_heavy_overlap:
-            if is_asr and self._active_tts > 0:
+            # Serial heavy compute: ASR, TTS and diarization are mutually
+            # exclusive across axes. Distinct-keyed TTS concurrency (handled
+            # above) is a capability lane, not a heavy-overlap axis.
+            if is_asr and (self._active_tts > 0 or self._active_diarization > 0):
                 return False
-            if not is_asr and self._active_asr > 0:
+            if waiter.work_class.is_diarization and (
+                self._active_asr > 0 or self._active_tts > 0
+            ):
+                return False
+            if self._is_tts(waiter.work_class) and (
+                self._active_asr > 0 or self._active_diarization > 0
+            ):
                 return False
         if not self._class_order_allows(waiter):
             return False
@@ -403,7 +479,7 @@ class ResourceGovernor:
 
     @staticmethod
     def _is_tts(work_class: WorkClass) -> bool:
-        return work_class in (WorkClass.BATCH_TTS, WorkClass.REALTIME_TTS)
+        return work_class.is_tts
 
     def _tts_lane_busy(self, resource_key: str | None) -> bool:
         if self._quarantine_blocks(WorkClass.REALTIME_TTS, resource_key):
@@ -417,18 +493,34 @@ class ResourceGovernor:
         )
 
     def _class_order_allows(self, waiter: _Waiter) -> bool:
-        """Preserve class FIFO except behind an occupied keyed TTS lane."""
+        """Only bypass earlier work blocked by its own independent model lane."""
         waiters = self._waiters_for(waiter.work_class)
-        if waiters[0] == waiter:
-            return True
-        if not waiter.is_tts:
-            return False
         for earlier in waiters:
             if earlier == waiter:
                 return True
-            if not self._tts_lane_busy(earlier.resource_key):
+            if self._same_lane(earlier, waiter) or not self._own_lane_busy(earlier):
                 return False
-        return False
+            if not self._allow_heavy_overlap and not (earlier.is_tts and waiter.is_tts):
+                return False
+        return True
+
+    @staticmethod
+    def _same_lane(left: _Waiter, right: _Waiter) -> bool:
+        if left.work_class.is_asr or right.work_class.is_asr:
+            return left.work_class.is_asr and right.work_class.is_asr
+        if left.work_class.is_diarization or right.work_class.is_diarization:
+            return left.work_class.is_diarization and right.work_class.is_diarization
+        return (left.resource_key is None or right.resource_key is None
+                or left.resource_key == right.resource_key)
+
+    def _own_lane_busy(self, waiter: _Waiter) -> bool:
+        if self._quarantine_blocks(waiter.work_class, waiter.resource_key):
+            return True
+        if waiter.work_class.is_asr:
+            return self._active_asr > 0
+        if waiter.work_class.is_diarization:
+            return self._active_diarization > 0
+        return self._tts_lane_busy(waiter.resource_key)
 
     def _normalize_resource_key(
         self, work_class: WorkClass, resource_key: str | None
@@ -485,7 +577,7 @@ class ResourceGovernor:
             )
 
     def _batch_aging_wait_timeout(self, waiter: _Waiter) -> float | None:
-        if waiter.is_realtime or self._batch_waiters[0] != waiter:
+        if waiter.is_realtime or not self._class_order_allows(waiter):
             return None
         remaining = (
             waiter.enqueued_at

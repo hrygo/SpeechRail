@@ -1,0 +1,82 @@
+{
+  "schema_version": 2,
+  "speaker_time_recall_min": 0.9,
+  "speaker_time_precision_min": 0.95,
+  "top_four_recall_min": 0.95,
+  "other_recall_min": 0.8,
+  "other_min_duration_seconds": 2.0,
+  "scorer_versions": {
+    "pyannote.metrics": "4.1",
+    "meeteval": "0.4.3"
+  },
+  "tokenization": {
+    "character": "NFKC_casefold_unicode_L_N_M_v1",
+    "word": "NFKC_casefold_cjk_char_and_alnum_word_v1"
+  },
+  "collar_seconds": 0.0,
+  "skip_overlap": false,
+  "tcp_collar_seconds": 5.0,
+  "tcp_timing": {
+    "reference": "character_based",
+    "hypothesis": "character_based_points"
+  },
+  "legacy_nonoverlap": {
+    "known_coverage_min": 0.9,
+    "known_accuracy_min": 0.95,
+    "top_four_min_known_coverage_min": 0.95,
+    "other_min_known_coverage_min": 0.8
+  },
+  "short_turn_bins_seconds": [0.0, 0.32, 2.0],
+  "latency": {
+    "input_rate": 1.0,
+    "stable_label_p95_seconds": 15.0,
+    "stable_label_hard_seconds": 30.0,
+    "finish_p95_seconds": 5.0,
+    "finish_hard_seconds": 15.0,
+    "asr_relative_p95_max": 1.05,
+    "diarization_relative_p95_max": 1.1,
+    "primary_benefit": "serial_minus_overlap_joint_tail_to_final",
+    "relative_sampling": {
+      "population": "one_owned_lane_completion_per_execution",
+      "origin": "last_source_sample_target",
+      "asr_completion": "host_callback_return_including_owned_cleanup",
+      "asr_baseline": "serial",
+      "asr_candidate": "overlap",
+      "dia_single_completion": "host_callback_and_report_validation_joined",
+      "dia_joint_completion": "actual_dia_scope_closed_not_relay",
+      "dia_baseline": "diarization-only",
+      "dia_candidate": "overlap",
+      "aggregation": "source_mode_max_then_equal_source_inverse_cdf_p95",
+      "missing": "infinite_with_original_source_weight_and_no_go",
+      "zero_baseline": "candidate_zero_pass_else_fail_ratio_null"
+    },
+    "sampling": {
+      "version": "sealed_owned_span_duration_v1",
+      "stable_population": "all_nonempty_sealed_asr_units",
+      "stable_weight": "owned_span_samples",
+      "stable_origin": "owned_span_last_sample_target",
+      "stable_completion": "joined_watermarks_and_stable_marker_sink_ack",
+      "stable_missing_or_unknown": "failure_with_infinite_delay_and_original_weight",
+      "quantile": "inverse_empirical_cdf_at_95_over_100",
+      "stable_aggregation": "per_meeting_and_worst_no_cross_meeting_pooling",
+      "finish_population": "one_final_ack_and_scope_close_per_execution",
+      "finish_aggregation": "source_meeting_max_then_equal_source_p95_and_slowest",
+      "finish_missing": "failure_with_infinite_delay_and_original_source_weight",
+      "finish_origin": "last_source_sample_target",
+      "asr_deletions": "independent_asr_quality_gate_not_synthetic_latency_units"
+    }
+  },
+  "statistics": {
+    "fixture_aggregation": "one_execution_per_fixture_source_totals_v1",
+    "unit": "source_meeting_id",
+    "seed": 1717,
+    "bootstrap_draws": 10000,
+    "percentile_interval": [0.025, 0.975],
+    "development_checkpoints_per_stratum": [6, 12, 18, 24],
+    "holdout_min_groups_per_stratum": 12,
+    "holdout_development_multiplier": 2,
+    "holdout_max_groups_per_stratum": 48,
+    "c0_der_and_cpcer_degradation_max": 0.0,
+    "selection_der_noninferiority_margin": 0.01
+  }
+}

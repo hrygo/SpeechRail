@@ -34,6 +34,7 @@ class FakeShared:
         self.bad_attempt = False
         self.fail_request = False
         self.fail_reap = False
+        self.observation = None
         self.timeout_seconds = 1.0
 
     def reserve_window_owner(self):
@@ -66,6 +67,8 @@ class FakeShared:
         response["type"] = "window.closed" if frame["type"] == "window.close" else "window.result"
         if response["type"] == "window.result":
             response.update(text="合成复核", language="zh", complete=frame["kind"] == "review")
+            if self.observation is not None:
+                response["observation"] = self.observation
             if self.bad_attempt:
                 response["attempt_id"] = "wrong-attempt"
         return response
@@ -268,8 +271,9 @@ def test_engine_changed_pcm_or_language_cannot_reuse_old_prefix():
     assert calls[1][0] is not calls[2][0]
 
 
-def serve_window_frames(changes=None):
+def serve_window_frames(changes=None, *, engine_cap=512):
     instance, _, _ = engine()
+    instance._max_new_tokens = engine_cap
     instance.identity = WorkerIdentity(
         device="mps",
         dtype="float16",
@@ -324,12 +328,55 @@ def serve_window_frames(changes=None):
     return frames
 
 
+@pytest.mark.parametrize("fail_decode", [False, True])
+def test_window_decode_clears_idle_cache_before_close_without_discarding_preview(
+    monkeypatch, fail_decode,
+):
+    import speechrail.backends.qwen3_worker as worker
+
+    decode = Qwen3Engine.decode_window
+    current = {}
+    retained = []
+
+    def observed_decode(instance, request):
+        current["engine"] = instance
+        if fail_decode:
+            raise RuntimeError("synthetic window decode failure")
+        return decode(instance, request)
+
+    def clear_cache():
+        retained.append(getattr(current["engine"], "_window_preview", None) is not None)
+
+    monkeypatch.setattr(Qwen3Engine, "decode_window", observed_decode)
+    monkeypatch.setattr(worker, "_clear_metal_cache", clear_cache)
+    frames = serve_window_frames({"kind": "preview"})
+    assert retained == [not fail_decode, False]
+    assert frames[1]["type"] == ("error" if fail_decode else "window.result")
+    assert frames[2]["type"] == "window.closed"
+
+
 def test_window_binary_ipc_reports_capability_result_then_real_close_ack():
     frames = serve_window_frames()
     assert frames[0]["capabilities"] == ["window_decode_v1"]
     assert [f["type"] for f in frames] == ["ready", "window.result", "window.closed"]
     assert frames[1]["request_id"] == "rpc-1" and frames[1]["complete"] is True
     assert frames[2]["request_id"] == "rpc-close"
+
+
+@pytest.mark.parametrize("cap", [0, 384, 512])
+def test_window_ready_retains_engine_cap_independently_of_launch_default(cap):
+    frames = serve_window_frames(engine_cap=cap)
+    assert frames[0]["window_decode_max_new_tokens"] == (cap or 512)
+
+
+def test_factory_exposes_only_ready_worker_observed_window_cap():
+    worker, _, factory = setup()
+    worker.window_decode_max_new_tokens = 384
+    assert factory.window_decode_max_new_tokens is None
+    worker.ready = True
+    assert factory.window_decode_max_new_tokens == 384
+    worker.ready = False
+    assert factory.window_decode_max_new_tokens is None
 
 
 @pytest.mark.parametrize(
@@ -350,3 +397,100 @@ def test_window_binary_ipc_rejects_invalid_private_frames(changes):
     frames = serve_window_frames(changes)
     assert frames[1]["type"] == "error"
     assert frames[1]["request_id"] == "rpc-1"
+
+
+def test_engine_window_observes_actual_dynamic_budget_without_inventing_missing_vendor_fields():
+    e, calls, reviews = engine()
+    preview = e.decode_window(make_request(kind="preview", end=16000 * 10))
+    assert preview.observation.kind == "preview"
+    assert preview.observation.decode_max_new_tokens == calls[-1][2]["max_new_tokens"] == 84
+    assert preview.observation.generation_max_new_tokens is None
+    assert preview.observation.finish_reason is None
+    assert preview.observation.truncated is None
+    assert preview.observation.generated_token_count is None
+    review = e.decode_window(make_request(kind="review", end=16000 * 10))
+    assert review.observation.kind == "review"
+    assert review.observation.decode_max_new_tokens == reviews[-1][1]["max_new_tokens"] == 84
+    assert review.observation.generation_max_new_tokens is None
+    assert review.observation.finish_reason == "eos"
+    assert review.observation.truncated is False
+    assert review.observation.generated_token_count is None
+
+
+def test_engine_window_preserves_preview_generation_observations_and_missing_review_truncation():
+    e, _, _ = engine()
+    e._decoder = SimpleNamespace(decode=lambda *a, **k: SimpleNamespace(
+        text="合成预览", language="zh", finish_reason="length", truncated=True,
+        generation_max_new_tokens=7, generated_token_count=7, raw_tokens=(1,) * 20,
+    ))
+    result = e.decode_window(make_request(kind="preview"))
+    assert result.observation.generation_max_new_tokens == 7
+    assert result.observation.generated_token_count == 7
+    assert result.observation.finish_reason == "length"
+    assert result.observation.truncated is True
+    assert result.complete is False
+    e._session = SimpleNamespace(transcribe=lambda *a, **k: SimpleNamespace(
+        text="合成复核", language="zh", finish_reason="eos",
+    ))
+    review = e.decode_window(make_request())
+    assert review.observation.truncated is None
+
+
+@pytest.mark.parametrize(
+    "reason,truncated",
+    [("repetition", False), ("length", True), ("mixed", False), ("eos", True), (None, False)],
+)
+def test_window_incomplete_review_preserves_evidence_without_claiming_completion(reason, truncated):
+    e, _, _ = engine()
+    e._session = SimpleNamespace(transcribe=lambda *a, **k: SimpleNamespace(
+        text="不应封存的正文", language="zh", finish_reason=reason, truncated=truncated,
+    ))
+    result = e.decode_window(make_request())
+    assert result.complete is False
+    assert result.observation.finish_reason == reason
+    assert result.observation.truncated is truncated
+
+
+def test_window_ipc_and_session_preserve_decode_observation():
+    frames = serve_window_frames()
+    observation = frames[1]["observation"]
+    assert observation == {
+        "kind": "review", "decode_max_new_tokens": 32, "generation_max_new_tokens": None,
+        "finish_reason": "eos", "truncated": False, "generated_token_count": None,
+    }
+
+    async def run():
+        worker, _, factory = setup()
+        worker.observation = observation
+        session = factory.create(identity=WindowIdentity("s", 0, "w"))
+        result = await session.decode(make_request())
+        assert result.observation.decode_max_new_tokens == 32
+        assert result.observation.finish_reason == "eos"
+        assert result.observation.truncated is False
+        assert result.observation.generated_token_count is None
+        await session.close()
+        worker.observation = None
+        session = factory.create(identity=WindowIdentity("s", 1, "w"))
+        assert (await session.decode(make_request(session.identity))).observation is None
+        await session.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("observation", [
+    [], {"kind": "review"}, {"kind": "review", "decode_max_new_tokens": True},
+    {"kind": "review", "decode_max_new_tokens": 32, "unexpected": True},
+    {"kind": "review", "decode_max_new_tokens": 32, "truncated": 0},
+    {"kind": "preview", "decode_max_new_tokens": 32},
+])
+def test_window_session_rejects_malformed_or_wrong_kind_observation(observation):
+    async def run():
+        worker, _, factory = setup()
+        worker.observation = observation
+        session = factory.create(identity=WindowIdentity("s", 0, "w"))
+        with pytest.raises(RuntimeError, match="window_result_invalid"):
+            await session.decode(make_request())
+        assert worker.reaps == 1
+        await session.close()
+
+    asyncio.run(run())

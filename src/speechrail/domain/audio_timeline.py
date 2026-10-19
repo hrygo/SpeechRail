@@ -228,10 +228,13 @@ class RationalResampler:
 
     def _discard_consumed(self) -> None:
         next_position = (self._out_index * self._source_rate) // self._target_rate
-        drop = next_position - self._consumed
+        # A downsampling phase can jump beyond the input received so far,
+        # especially after flushing a fractional tail. Only advance by actual
+        # discarded samples; future input must still occupy its source position.
+        drop = min(next_position - self._consumed, len(self._pending))
         if drop > 0:
             del self._pending[:drop]
-            self._consumed = next_position
+            self._consumed += drop
 
 
 __all__ = [

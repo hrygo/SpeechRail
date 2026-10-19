@@ -3,6 +3,7 @@ from dataclasses import replace
 import pytest
 
 from speechrail.domain.asr_window import (
+    WindowDecodeObservation,
     WindowDecodeRequest,
     WindowDecodeResult,
     WindowIdentity,
@@ -160,3 +161,24 @@ def test_asr_and_dynamic_rings_share_one_physical_copy_budget():
     asr.clear()
     activity.clear()
     assert pool.used_bytes == 0
+
+
+def test_decode_observation_preserves_unknown_values_and_rejects_malformed_evidence():
+    observation = WindowDecodeObservation("preview", 32)
+    assert observation.finish_reason is None
+    assert observation.truncated is None
+    assert observation.generated_token_count is None
+    assert observation.generation_max_new_tokens is None
+    result = WindowDecodeResult(WindowIdentity("s", 0, "w"), "a", SampleSpan(0, 1), "", None, False)
+    assert result.observation is None
+    for change in (
+        {"kind": "final"}, {"decode_max_new_tokens": True}, {"decode_max_new_tokens": 0},
+        {"generation_max_new_tokens": 33}, {"generation_max_new_tokens": False},
+        {"finish_reason": ""}, {"finish_reason": 1}, {"truncated": 0},
+        {"generated_token_count": True}, {"generated_token_count": -1},
+        {"generation_max_new_tokens": 2, "generated_token_count": 3},
+    ):
+        with pytest.raises(ValueError):
+            replace(observation, **change)
+    with pytest.raises(ValueError):
+        replace(result, observation={"kind": "review"})

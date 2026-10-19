@@ -68,6 +68,7 @@ class DiarizationSession:
         self._degraded_reason: str | None = None
         self._discard_attribution_updates = False
         self._activity_terminated = False
+        self._drain_activity_failed = False
 
     @property
     def accepted_samples(self) -> int:
@@ -130,14 +131,25 @@ class DiarizationSession:
         await self.start()
         status = "complete"
         try:
-            if not self._activity_terminated:
-                await self._activity.finish(through_sample=self._accepted_samples)
-            if self._pump is not None:
-                await asyncio.wait_for(self._pump, timeout=self._drain_timeout_seconds)
+            # Native EOF and delivery consume one shared drain budget. A
+            # stalled worker must not bypass the event-stream deadline.
+            async with asyncio.timeout(self._drain_timeout_seconds):
+                if not self._activity_terminated:
+                    await self._activity.finish(through_sample=self._accepted_samples)
+                if self._pump is not None:
+                    await self._pump
         except (TimeoutError, ValueError, RuntimeError) as exc:
             status = "degraded"
-            await self._degrade(str(exc) or "diarization_failure")
+            await self._degrade(
+                "finalization_timeout" if isinstance(exc, TimeoutError)
+                else str(exc) or "diarization_failure"
+            )
             await self._activity.cancel()
+            if self._pump is not None:
+                self._pump.cancel()
+                await asyncio.gather(self._pump, return_exceptions=True)
+        if self._drain_activity_failed:
+            await self._degrade("diarization_invalid_output")
         if self._degraded_reason is not None:
             status = "degraded"
         reason = "finalization_incomplete" if status == "degraded" else "finalized"
@@ -184,7 +196,12 @@ class DiarizationSession:
                 self._ledger.compact(min(before, update.stable_through))
         except (ValueError, RuntimeError) as exc:
             del exc
-            await self._degrade("diarization_invalid_output")
+            self._drain_activity_failed = True
+            # During EOF, cancellation can close the native stream before the
+            # finish owner receives TimeoutError. Let that owner report the
+            # cause; a genuine stream failure is still checked after draining.
+            if self._accepting_audio:
+                await self._degrade("diarization_invalid_output")
 
     async def _degrade(self, reason: str) -> None:
         if self._degraded_reason is not None:

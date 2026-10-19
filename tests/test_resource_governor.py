@@ -1170,6 +1170,7 @@ def test_quarantined_lane_rejects_new_owners_and_preserves_overlap_policy(allow_
         governor = ResourceGovernor(
             GovernorLimits(total_capacity=3, realtime_reserved_capacity=1, max_pending_per_class=4),
             allow_heavy_overlap=allow_overlap,
+            quarantine_resources_bounded=True,
         )
         governor.quarantine_tts_lane("tts_base")
         for key in ("tts_base", None):

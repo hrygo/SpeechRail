@@ -80,7 +80,7 @@ final class CaptionSessionLifecycleTests: XCTestCase {
 
     private func makeHarness(
         saveLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
-        attachSpeakerLabel: (@Sendable (String, String?) async throws -> Void)? = nil,
+        attachTranscriptAttribution: (@Sendable (String, [TranscriptAttributionUnit]) async throws -> TranscriptLine)? = nil,
         configuration: TranscriptPersistenceQueue.Configuration = .init(),
         makeRealtimeClient: (@Sendable (CaptionRealtimeClientConfiguration) -> any CaptionRealtimeClient)? = nil,
         drainTimeout: Duration = .seconds(12),
@@ -109,7 +109,7 @@ final class CaptionSessionLifecycleTests: XCTestCase {
             },
             persistenceConfiguration: configuration,
             saveLine: saveLine,
-            attachSpeakerLabel: attachSpeakerLabel,
+            attachTranscriptAttribution: attachTranscriptAttribution,
             drainTimeout: drainTimeout,
             revisionWindowEnabled:revisionWindowEnabled
         )
@@ -236,7 +236,7 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         try await h.emit(.completed(itemID: "aligned-item", transcript: "保留的字幕正文"))
         try await h.settle { $0.session.lines.count == 1 }
         try await h.emit(.attribution(itemID: "aligned-item", units: [
-            .init(segmentUID: "before-failure", speaker: "A", timingQuality: "aligned")
+            .init(segmentUID: "before-failure", speaker: "A", textStart: 0, textEnd: 7, timingQuality: "aligned")
         ], isFinal: true))
         try await h.settle { $0.session.lines.first?.speakerLabel == "A" }
         try await h.emit(.alignmentFailed(
@@ -262,7 +262,7 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         XCTAssertEqual(h.session.lines.first?.speakerLabel, "A")
         try await h.emit(.completed(itemID: "next-item", transcript: "后续仍能分人"))
         try await h.emit(.attribution(itemID: "next-item", units: [
-            .init(segmentUID: "after-failure", speaker: "B", timingQuality: "aligned")
+            .init(segmentUID: "after-failure", speaker: "B", textStart: 0, textEnd: 6, timingQuality: "aligned")
         ], isFinal: true))
         try await h.settle { $0.session.lines.last?.speakerLabel == "B" }
         XCTAssertEqual(h.session.labeling.labels, ["A", "B"])
@@ -340,7 +340,7 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         try await h.emit(.completed(itemID: "before", transcript: "中断前说的"))
         try await h.settle { $0.session.lines.count == 1 }
         try await h.emit(.attribution(itemID: "before", units: [
-            .init(segmentUID: "unit-before", speaker: "A", timingQuality: "aligned")
+            .init(segmentUID: "unit-before", speaker: "A", textStart: 0, textEnd: 5, timingQuality: "aligned")
         ], isFinal: true))
         try await h.settle { !$0.session.labeling.labels.isEmpty }
         XCTAssertEqual(h.session.labeling.labels, ["A"])
@@ -363,7 +363,7 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         try await h.emit(.completed(itemID: "after", transcript: "续接后说的"))
         try await h.settle { $0.session.lines.count == 2 }
         try await h.emit(.attribution(itemID: "after", units: [
-            .init(segmentUID: "unit-after", speaker: "A", timingQuality: "aligned")
+            .init(segmentUID: "unit-after", speaker: "A", textStart: 0, textEnd: 5, timingQuality: "aligned")
         ], isFinal: true))
         try await h.emit(.serverError(code: "control", message: "续接归属栅栏", requestID: nil))
         try await h.settle { $0.session.lastFailure == "续接归属栅栏" }
@@ -526,7 +526,7 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         try await h.emit(.completed(itemID: "item", transcript: "缓存归属字幕"))
         try await h.settle { _ in await gate.entered }
         try await h.emit(.attribution(itemID: "item", units: [
-            .init(segmentUID: "unit", speaker: "A", timingQuality: "aligned")
+            .init(segmentUID: "unit", speaker: "A", textStart: 0, textEnd: 6, timingQuality: "aligned")
         ], isFinal: true))
         try await h.emit(.serverError(code: "test_control", message: "字幕控制事件已消费", requestID: nil))
         try await h.settle { $0.session.lastFailure == "字幕控制事件已消费" }
@@ -544,7 +544,7 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         try await h.emit(.completed(itemID: "item", transcript: "已保存字幕正文"))
         try await h.settle { $0.session.lines.count == 1 }
         try await h.emit(.attribution(itemID: "item", units: [
-            .init(segmentUID: "unit", speaker: "A", timingQuality: "aligned")
+            .init(segmentUID: "unit", speaker: "A", textStart: 0, textEnd: 7, timingQuality: "aligned")
         ], isFinal: true))
         try await h.emit(.serverError(code: "control", message: "容量后控制", requestID: nil))
         try await h.settle { $0.session.lastFailure == "容量后控制" }
@@ -556,18 +556,18 @@ final class CaptionSessionLifecycleTests: XCTestCase {
 
     func testBlockedCaptionMetadataKeepsControlResponsiveAndSettlementPending() async throws {
         let gate = SpeakerAttributionWriteGate()
-        let h = try await makeHarness(attachSpeakerLabel: { try await gate.write($0, label: $1) })
+        let h = try await makeHarness(attachTranscriptAttribution: { try await gate.write($0, units: $1) })
         await gate.attach(h.store)
         h.session.diarizationPreference = { true }
         let id = try await start(h)
         try await h.emit(.completed(itemID: "item", transcript: "metadata等待中的字幕正文"))
         try await h.settle { $0.session.lines.count == 1 }
         try await h.emit(.attribution(itemID: "item", units: [
-            .init(segmentUID: "unit", speaker: "A", timingQuality: "aligned")
+            .init(segmentUID: "unit", speaker: "A", textStart: 0, textEnd: 16, timingQuality: "aligned")
         ], isFinal: true))
         try await h.settle { _ in await gate.entered }
         try await h.emit(.attribution(itemID: "item", units: [
-            .init(segmentUID: "unit", speaker: "B", timingQuality: "aligned")
+            .init(segmentUID: "unit", speaker: "B", textStart: 0, textEnd: 16, timingQuality: "aligned")
         ], isFinal: false))
         try await h.emit(.attribution(itemID: "item", units: [
             .init(segmentUID: "another-unit", speaker: nil, timingQuality: "unavailable")
@@ -588,7 +588,7 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         await gate.release()
         await waiter.value
         let rows = try await h.store.lines(sessionID: id)
-        XCTAssertEqual(rows.first?.speakerLabel, "B", "accepted unit revisions must survive a later partial batch")
+        XCTAssertEqual(rows.first?.speakerLabel, "B", "accepted unit revisions must survive later metadata missing text ranges")
         XCTAssertEqual(rows.first?.timingQuality, .aligned)
         XCTAssertEqual(h.session.lines.first?.speakerLabel, "B")
     }
@@ -921,7 +921,7 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         h.session.diarizationPreference = { true }
         let oldID = try await start(h)
         try await h.emit(.attribution(itemID: "same-item", units: [
-            .init(segmentUID: "same-unit", speaker: "A", timingQuality: "aligned")
+            .init(segmentUID: "same-unit", speaker: "A", textStart: 0, textEnd: 6, timingQuality: "aligned")
         ], isFinal: true))
         try await h.emit(.completed(itemID: "same-item", transcript: "上一场未保存"))
         try await h.settle { _ in await gate.entered }
@@ -932,7 +932,7 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         XCTAssertNotEqual(oldID, newID)
         await gate.release()
         try await h.emit(.attribution(itemID: "same-item", units: [
-            .init(segmentUID: "same-unit", speaker: "B", timingQuality: "aligned")
+            .init(segmentUID: "same-unit", speaker: "B", textStart: 0, textEnd: 4, timingQuality: "aligned")
         ], isFinal: true))
         try await h.emit(.completed(itemID: "same-item", transcript: "新场正文"))
         let newSettled = await h.session.waitForPendingSaves(recordID: newID)

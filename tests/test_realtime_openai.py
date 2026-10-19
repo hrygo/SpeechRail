@@ -1648,6 +1648,67 @@ def test_realtime_hypothesis_revisions_and_final_share_one_asr_fact_series() -> 
     assert len(factory.sessions) == 1
 
 
+@pytest.mark.parametrize(
+    ("requested_ms", "buffer_bytes", "effective_ms", "input_seconds"),
+    [(20_000, 8_388_608, 20_000, 21), (30_000, 8_388_608, 30_000, 31),
+     (20_000, 384_000, 6_000, 1), (1_000, 8_388_608, 1_000, 2)],
+)
+def test_diarization_preserves_asr_context_and_service_buffer_bound(
+    requested_ms: int, buffer_bytes: int, effective_ms: int, input_seconds: int,
+) -> None:
+    async def scenario() -> None:
+        factory = FakeStreamingFactory(completed_text="fixed")
+        engine = FakeDiarizationEngine()
+        services = build_app_services(
+            Settings(qwen3_model_dir=None, qwen3_python=None,
+                     max_realtime_buffer_bytes=buffer_bytes),
+            AppOverrides(realtime_asr_factory=factory, diarization_engine=engine,
+                         text_aligner=FakeTextAligner()),
+        )
+        events: list[dict[str, Any]] = []
+
+        async def send(event: dict[str, object]) -> int:
+            events.append(event)
+            return len(events)
+
+        session = OpenAIRealtimeSession(services, session_id="context-with-speakers", send=send)
+        try:
+            await session.handle(session_update(diarization={"enabled": True}))
+            # Exercise both initial opt-in and a policy update with speakers already enabled.
+            update = session_update()
+            update["session"]["speechrail"]["asr"] = {"max_segment_ms": requested_ms}
+            await session.handle(update)
+            for _ in range(input_seconds):
+                await session.handle({"type": "input_audio_buffer.append",
+                                      "audio": _pcm16(bytes(48_000))})
+            await session.handle({"type": "input_audio_buffer.commit", "event_id": "end"})
+            await session.handle({"type": "speechrail.diarization.finish", "event_id": "speakers"})
+            updated = [event for event in events if event["type"] == "session.updated"]
+            assert updated[0]["session"]["speechrail"]["asr"][
+                "effective_max_segment_ms"
+            ] == min(20_000, buffer_bytes // 64)
+            assert updated[-1]["session"]["speechrail"]["asr"][
+                "effective_max_segment_ms"
+            ] == effective_ms
+            assert all(option.effective_max_segment_ms == effective_ms
+                       for option in factory.options)
+            closed = [event for event in events
+                      if event["type"] == "speechrail.transcription.segment_closed"]
+            assert closed[0]["sample_span"] == {
+                "start": 0, "end": min(effective_ms, input_seconds * 1000) * 24,
+            }
+            assert len(closed) == (1 if input_seconds == 1 else 2)
+            assert not any(event["type"].endswith(".failed") for event in events)
+            assert len([event for event in events
+                        if event["type"] == "speechrail.alignment.done"]) == len(closed)
+            assert engine.sessions[0].received
+            assert any(event["type"] == "speechrail.diarization.updated" for event in events)
+        finally:
+            await session.close()
+
+    asyncio.run(scenario())
+
+
 def test_realtime_policy_drives_snapshot_preview_and_closes_before_terminal() -> None:
     async def scenario() -> tuple[list[dict[str, object]], FakeStreamingFactory]:
         factory = FakeStreamingFactory(

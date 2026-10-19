@@ -10,6 +10,40 @@ from speechrail.domain.resource_limits import GovernorLimits
 from speechrail.runtime.resource_governor import ResourceGovernor
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("infer_fails", [False, True])
+async def test_diarization_close_failure_isolates_only_diarization_when_overlap_allowed(
+    infer_fails,
+):
+    from speechrail.runtime.resource_governor import WorkClass
+
+    class FailedReapWorker(Worker):
+        async def request(self, header, pcm):
+            if infer_fails:
+                raise RuntimeError("infer failed")
+            return await super().request(header, pcm)
+
+        async def close(self):
+            raise RuntimeError("exact child is unconfirmed")
+
+    governor = ResourceGovernor(
+        GovernorLimits(3, 1, 8), allow_heavy_overlap=True, quarantine_resources_bounded=True
+    )
+    session = MeetingActivitySession(worker=FailedReapWorker(), epoch="epoch", governor=governor)
+    await session.append(start_sample=0, pcm16=bytes(320000))
+    if infer_fails:
+        with pytest.raises(DiarizationError):
+            await asyncio.wait_for(anext(session.updates()), 1)
+    else:
+        await asyncio.wait_for(anext(session.updates()), 1)
+    with pytest.raises(RuntimeError, match="unconfirmed"):
+        await session.cancel()
+    assert governor.diarization_owner.occupied and governor.diarization_owner.isolated
+    assert governor.snapshot().retained_diarization == 1
+    async with governor.reserve(WorkClass.REALTIME_ASR):
+        assert governor.snapshot().active_asr == 1
+
+
 class Worker:
     def __init__(self):
         self.calls = []
@@ -50,7 +84,6 @@ async def test_windows_10_20_30_40_and_one_sample_tail():
     governor = ResourceGovernor(GovernorLimits(2, 1, 8), allow_heavy_overlap=False)
     from speechrail.observability.metrics import Metrics
 
-
     metrics = Metrics()
     session = MeetingActivitySession(
         worker=worker, epoch="epoch", governor=governor, metrics=metrics
@@ -84,9 +117,61 @@ async def test_append_does_not_wait_for_model_and_cancel_reaps_before_lease_rele
     await session.append(start_sample=0, pcm16=bytes(320000))
     await worker.entered.wait()
     await asyncio.wait_for(session.append(start_sample=160000, pcm16=bytes(320000)), 0.1)
-    assert governor.snapshot().active_asr == 1
+    assert governor.snapshot().active_diarization == 1
     await session.cancel()
-    assert worker.closed and governor.snapshot().active_asr == 0
+    assert worker.closed and governor.snapshot().active_diarization == 0
+
+
+@pytest.mark.anyio
+async def test_cancel_closes_waiting_consumer():
+    worker = Worker()
+    session = MeetingActivitySession(
+        worker=worker, epoch="epoch", governor=ResourceGovernor(GovernorLimits(2, 1, 8))
+    )
+    waiting = asyncio.create_task(anext(session.updates(), None))
+    await asyncio.sleep(0)
+    await session.cancel()
+    assert await asyncio.wait_for(waiting, 0.1) is None
+
+
+@pytest.mark.anyio
+async def test_repeated_meeting_finish_and_cancel_reap_once():
+    class CountedWorker(Worker):
+        closes = 0
+
+        async def close(self):
+            self.closes += 1
+            await super().close()
+
+    worker = CountedWorker()
+    session = MeetingActivitySession(
+        worker=worker, epoch="epoch", governor=ResourceGovernor(GovernorLimits(2, 1, 8))
+    )
+    await session.append(start_sample=0, pcm16=bytes(320000))
+    await session.finish(through_sample=160000)
+    await session.finish(through_sample=160000)
+    await session.cancel()
+    assert worker.closes == 1
+
+
+@pytest.mark.anyio
+async def test_slow_meeting_consumer_fails_without_retaining_worker():
+    worker = Worker()
+    governor = ResourceGovernor(GovernorLimits(2, 1, 8))
+    session = MeetingActivitySession(worker=worker, epoch="epoch", governor=governor)
+    await session.append(start_sample=0, pcm16=bytes(320000))
+    first = await asyncio.wait_for(anext(session.updates()), 1)
+    for _ in range(64):
+        session._queue.put_nowait(first)
+    await session.append(start_sample=160000, pcm16=bytes(320000))
+    assert session._pump is not None
+    try:
+        await asyncio.wait_for(asyncio.shield(session._pump), 0.1)
+        assert worker.closed and not governor.diarization_owner.occupied
+        with pytest.raises(DiarizationError, match="meeting activity failed"):
+            _ = [update async for update in session.updates()]
+    finally:
+        await session.cancel()
 
 
 @pytest.mark.anyio

@@ -90,11 +90,23 @@ public struct SessionExportPayload: Sendable {
         }
     }
 
-    /// 行首的前缀（带冒号）。空串表示这一行没有归属信息，正文直接开头。
-    func speakerPrefix(for line: TranscriptLine) -> String {
-        let text = speakerText(for: line)
-        return text.isEmpty ? "" : "\(text)："
+    /// 保留每个正文字符；未确认的词显式标出，单独的标点与空白不生成说话人行。
+    /// 只改变导出排版，不改变持久化行、文字范围或原时间码。
+    func transcriptText(for line: TranscriptLine, markdown: Bool = false, flags: String = "") -> String {
+        func prefix(_ speaker: String) -> String {
+            guard !speaker.isEmpty else { return "" }
+            return markdown ? "**\(speaker)**\(flags)：" : "\(speaker)："
+        }
+        guard line.role == .speaker, !line.speakerLabelIsManual, !line.attributionUnits.isEmpty else {
+            return prefix(speakerText(for: line)) + line.text
+        }
+        let runs = line.displaySpeakerRuns
+        let separators = CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)
+        guard runs.contains(where: { !$0.text.trimmingCharacters(in: separators).isEmpty }) else { return line.text }
+        return TranscriptSpeakerRun.formattedText(runs, names: speakerNames, showUnknown: true,
+            markdownFlags: markdown ? flags : nil)
     }
+
 }
 
 public enum SessionExporter {
@@ -196,9 +208,7 @@ public enum SessionExporter {
         for line in payload.lines {
             let timecode = line.tStart.map { "[\(Self.clock($0))] " } ?? ""
             let flags = lineFlags(line)
-            let speaker = payload.speakerText(for: line)
-            let lead = speaker.isEmpty ? "" : "**\(speaker)**\(flags)："
-            rows.append("- \(timecode)\(lead)\(line.text)")
+            rows.append("- \(timecode)\(payload.transcriptText(for: line, markdown: true, flags: flags))")
         }
         rows.append("")
         return rows.joined(separator: "\n")
@@ -232,7 +242,7 @@ public enum SessionExporter {
             }
             if end <= start { end = start + 0.5 }
             previousEnd = end
-            let text = "\(payload.speakerPrefix(for: line))\(line.text)"
+            let text = payload.transcriptText(for: line)
             blocks.append(
                 """
                 \(index + 1)
@@ -259,7 +269,7 @@ public enum SessionExporter {
         let header = "\(payload.title)\n\(payload.record.kind.title) · \(payload.record.startedAt.formatted(date: .abbreviated, time: .shortened))\n"
         let body = payload.lines.map { line in
             let timecode = line.tStart.map { "[\(Self.clock($0))] " } ?? ""
-            return "\(timecode)\(payload.speakerPrefix(for: line))\(line.text)"
+            return "\(timecode)\(payload.transcriptText(for: line))"
         }
         return ([header] + body).joined(separator: "\n") + "\n"
     }
@@ -290,6 +300,18 @@ public enum SessionExporter {
                     "device_switch": line.isDeviceSwitch,
                     "starred": line.isStarred
                 ]
+                item["speaker_label_is_manual"] = line.speakerLabelIsManual
+                item["attribution_units"] = line.attributionUnits.map { unit -> [String: Any] in
+                    var value: [String: Any] = [
+                        "id": unit.id,
+                        "text_start": unit.textStart,
+                        "text_end": unit.textEnd,
+                        "speaker_label": jsonText(unit.speakerLabel)
+                    ]
+                    if let start = unit.audioStartSample { value["audio_start_sample"] = start }
+                    if let end = unit.audioEndSample { value["audio_end_sample"] = end }
+                    return value
+                }
                 if let tStart = line.tStart { item["t_start"] = tStart }
                 if let tEnd = line.tEnd { item["t_end"] = tEnd }
                 if let quality = line.timingQuality { item["timing_quality"] = quality.rawValue }
@@ -554,10 +576,7 @@ public enum KnowledgeArchiveFileIO {
                 KnowledgeArchiveManifest.self,
                 from: Data(contentsOf: manifestURL)
             )
-            payload = try decoder().decode(
-                KnowledgeArchivePayload.self,
-                from: Data(contentsOf: structuredURL)
-            )
+            payload = try decodePayload(Data(contentsOf: structuredURL))
         } catch let error as KnowledgeArchiveError {
             throw error
         } catch {
@@ -566,18 +585,6 @@ public enum KnowledgeArchiveFileIO {
         guard manifest.schema == KnowledgeArchiveManifest.schemaID else {
             throw KnowledgeArchiveError.malformedPackage("schema 不认识：\(manifest.schema)")
         }
-        guard payload.schema == KnowledgeArchivePayload.schemaID else {
-            // v2 包缺正文出处（body_origin）与改稿血缘（parent_minutes_id），
-            // 按默认导入会把用户写的正文标成 AI 整理——所以宁可拒掉，也不猜。
-            // 用户侧动作只有一句话：用新版重新导出一次。
-            if payload.schema == "speechrail.meeting.knowledge-archive.payload/2" {
-                throw KnowledgeArchiveError.malformedPackage(
-                    "这个包是旧格式（payload/2），缺正文出处与改稿血缘，直接导入会把你写过的正文标成 AI 整理。请用新版重新导出一次再导入"
-                )
-            }
-            throw KnowledgeArchiveError.malformedPackage("载荷 schema 不认识：\(payload.schema)")
-        }
-
         // 清单说的字节数与实际文件对不上：包被截断或被改过，两种都不该当可用包。
         let actual: [String: Int] = [
             KnowledgeArchiveManifest.markdownFileName: (try? markdownURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0,
@@ -592,6 +599,34 @@ public enum KnowledgeArchiveFileIO {
         let markdown = (try? String(contentsOf: markdownURL, encoding: .utf8)) ?? ""
         try validate(payload, limits: limits)
         return KnowledgeArchivePackageRead(manifest: manifest, payload: payload, markdown: markdown)
+    }
+
+    /// v3 文档没有逐词字段；只补空证据，不推断旧标量是否来自人工。
+    /// v4 的字段必须存在，避免把截断的新包误作没有归属信息。
+    private static func decodePayload(_ data: Data) throws -> KnowledgeArchivePayload {
+        struct Header: Decodable { let schema: String }
+        let header = try decoder().decode(Header.self, from: data)
+        if header.schema == "speechrail.meeting.knowledge-archive.payload/2" {
+            throw KnowledgeArchiveError.malformedPackage(
+                "这个包是旧格式（payload/2），缺正文出处与改稿血缘，直接导入会把你写过的正文标成 AI 整理。请用新版重新导出一次再导入")
+        }
+        guard header.schema == KnowledgeArchivePayload.schemaID || header.schema == KnowledgeArchivePayload.legacySchemaID else {
+            throw KnowledgeArchiveError.malformedPackage("载荷 schema 不认识：\(header.schema)")
+        }
+        var normalized = data
+        if header.schema == KnowledgeArchivePayload.legacySchemaID {
+            guard var object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  var lines = object["lines"] as? [[String: Any]] else {
+                throw KnowledgeArchiveError.malformedPackage("归档包缺文字记录")
+            }
+            for index in lines.indices {
+                if lines[index]["attribution_units"] == nil { lines[index]["attribution_units"] = [] }
+                if lines[index]["speaker_label_is_manual"] == nil { lines[index]["speaker_label_is_manual"] = false }
+            }
+            object["lines"] = lines
+            normalized = try JSONSerialization.data(withJSONObject: object)
+        }
+        return try decoder().decode(KnowledgeArchivePayload.self, from: normalized)
     }
 
     private static func structuredDataSize(_ url: URL) -> Int {
@@ -621,6 +656,20 @@ public enum KnowledgeArchiveFileIO {
         for line in payload.lines {
             guard line.sessionID == payload.session?.id else {
                 throw KnowledgeArchiveError.brokenReference("行 \(line.id) 不属于包里的会话")
+            }
+            let units = line.attributionUnits.map(\.transcriptUnit)
+            do { _ = try TranscriptAttributionUnit.validated(units, text: line.text) }
+            catch { throw KnowledgeArchiveError.malformedPackage("转录行的说话人归属范围或时间无效") }
+            for unit in units { try validateIdentifier(unit.id, limits: limits) }
+            guard !line.speakerLabelIsManual || units.isEmpty else {
+                throw KnowledgeArchiveError.malformedPackage("人工整行标注与逐词归属不能同时生效")
+            }
+            if !units.isEmpty {
+                let runs = TranscriptSpeakerRun.project(text: line.text, attributionUnits: units,
+                    speakerLabel: nil, speakerLabelIsManual: false)
+                guard line.speakerLabel == TranscriptSpeakerRun.summaryLabel(runs) else {
+                    throw KnowledgeArchiveError.malformedPackage("整行说话人与逐词归属不一致")
+                }
             }
         }
         for snapshot in payload.snapshots {
@@ -758,9 +807,16 @@ public enum KnowledgeArchiveMarkdown {
             rows.append("")
             for line in payload.lines.sorted(by: { $0.ordinal < $1.ordinal }) {
                 let timecode = line.tStart.map { "[\(SessionExporter.clock($0))] " } ?? ""
-                let speaker = speakerText(line, names: payload.speakerNames)
-                let lead = speaker.isEmpty ? "" : "**\(speaker)**："
-                rows.append("- \(timecode)\(lead)\(line.text)")
+                let text: String
+                if !line.attributionUnits.isEmpty && !line.speakerLabelIsManual {
+                    let runs = TranscriptSpeakerRun.display(TranscriptSpeakerRun.project(text: line.text,
+                        attributionUnits: line.attributionUnits.map(\.transcriptUnit), speakerLabel: nil, speakerLabelIsManual: false))
+                    text = TranscriptSpeakerRun.formattedText(runs, names: payload.speakerNames, showUnknown: true, markdownFlags: "")
+                } else {
+                    let speaker = speakerText(line, names: payload.speakerNames)
+                    text = (speaker.isEmpty ? "" : "**\(speaker)**：") + line.text
+                }
+                rows.append("- \(timecode)\(text)")
             }
             rows.append("")
         }

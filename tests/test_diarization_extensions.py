@@ -737,3 +737,20 @@ def test_unavailable_alignment_emits_failed_without_rewriting_text() -> None:
         tail = _collect_until(socket, "speechrail.alignment.failed")
         failed = tail[-1]
         assert failed["error"]["code"] == "alignment_unavailable"
+
+
+def test_native_finish_timeout_keeps_its_public_code_and_frozen_text(monkeypatch) -> None:
+    async def timed_out_finish(self, *, through_sample: int) -> None:
+        raise TimeoutError
+
+    monkeypatch.setattr(_FakeActivitySession, "finish", timed_out_finish)
+    client, _ = _client(supports_stream=True)
+    with client.websocket_connect("/v1/realtime") as socket:
+        _open(socket)
+        _negotiate(socket)
+        events = _append_and_commit(socket, 8000)
+        assert events[-1]["transcript"] == "你好"
+
+        socket.send_json(_finish_event("native_timeout"))
+        tail = _collect_until(socket, "speechrail.diarization.failed")
+        assert tail[-1]["error"]["code"] == "finalization_timeout"

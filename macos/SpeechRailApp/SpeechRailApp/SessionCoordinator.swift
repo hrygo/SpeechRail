@@ -846,8 +846,13 @@ public final class SessionCoordinator {
 
     /// 分人链路只允许改归属列（§15.3 第 2 条）。正文一个字都不动，所以这条入口
     /// 与"编辑文本"不是同一件事，也没有第二个调用点。
-    public func attachSpeakerLabel(lineID: String, label: String?) async throws {
+    @discardableResult
+    public func attachSpeakerLabel(lineID: String, label: String?) async throws -> TranscriptLine {
         try await store.attachSpeakerLabel(lineID: lineID, label: label)
+    }
+
+    public func attachTranscriptAttribution(lineID: String, units: [TranscriptAttributionUnit]) async throws -> TranscriptLine {
+        try await store.attachTranscriptAttribution(lineID: lineID, units: units)
     }
 
     /// 对齐证据独立于文本 final 到达，只补写 `timing_quality` 这一列（§15.3 第 2 条）。

@@ -262,7 +262,7 @@ class OpenAIRealtimeSession:
             current_config=self._config,
             request_timeout_ms=int(self._settings.request_timeout_seconds * 1000),
             service_max_segment_ms=(self._settings.max_realtime_buffer_bytes or 8_388_608) // 64,
-            capability_max_segment_ms=8_000 if self._auxiliary_owner.diarization_enabled else None,
+            capability_max_segment_ms=None,
         )
         if (
             candidate.get("window_scene") != self._config.get("window_scene")
@@ -350,7 +350,7 @@ class OpenAIRealtimeSession:
         candidate["effective_max_segment_ms"] = resolve_effective_max_segment_ms(
             candidate["asr_policy"],
             service_max_segment_ms=(self._settings.max_realtime_buffer_bytes or 8_388_608) // 64,
-            capability_max_segment_ms=8_000 if requested_diarization else None,
+            capability_max_segment_ms=None,
             decoder_max_segment_ms=30_000,
         )
 

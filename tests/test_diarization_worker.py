@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -205,6 +206,126 @@ def test_meeting_calibration_can_explicitly_enable_zero_vote_reembedding(
     asyncio.run(scenario())
 
 
+def test_worker_launch_does_not_pass_guard_fd_by_default(monkeypatch, tmp_path) -> None:
+    options: list[dict[str, object]] = []
+
+    class Process:
+        returncode = None
+
+        def __init__(self) -> None:
+            self.stdin = object()
+            self.stdout = object()
+            self.stderr = asyncio.StreamReader()
+            self.stderr.feed_eof()
+
+    async def spawn(*args, **kwargs):
+        del args
+        options.append(kwargs)
+        return Process()
+
+    monkeypatch.setattr(diarization_worker.asyncio, "create_subprocess_exec", spawn)
+    worker = CoreMLWorkerProcess(executable=tmp_path / "worker", model_path=tmp_path / "model")
+
+    async def scenario() -> None:
+        await worker._launch([])
+        assert "pass_fds" not in options[0]
+        assert worker._stderr_task is not None
+        await worker._stderr_task
+
+    asyncio.run(scenario())
+
+
+def test_worker_launch_passes_guard_fd_without_taking_ownership(monkeypatch, tmp_path) -> None:
+    options: list[dict[str, object]] = []
+
+    class Process:
+        returncode = None
+
+        def __init__(self) -> None:
+            self.stdin = object()
+            self.stdout = object()
+            self.stderr = asyncio.StreamReader()
+            self.stderr.feed_eof()
+
+    async def spawn(*args, **kwargs):
+        del args
+        options.append(kwargs)
+        return Process()
+
+    monkeypatch.setattr(diarization_worker.asyncio, "create_subprocess_exec", spawn)
+    guard_fd = os.open(os.devnull, os.O_RDONLY)
+    worker = CoreMLWorkerProcess(
+        executable=tmp_path / "worker",
+        model_path=tmp_path / "model",
+        inherited_guard_fd=guard_fd,
+    )
+
+    async def scenario() -> None:
+        await worker._launch([])
+        assert options[0]["pass_fds"] == (guard_fd,)
+        os.fstat(guard_fd)
+        assert worker._stderr_task is not None
+        await worker._stderr_task
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        os.close(guard_fd)
+
+
+@pytest.mark.parametrize("guard_fd", [True, -1])
+def test_worker_launch_rejects_invalid_guard_fd_before_spawning(
+    monkeypatch, tmp_path, guard_fd
+) -> None:
+    spawned = False
+
+    async def spawn(*args, **kwargs):
+        nonlocal spawned
+        del args, kwargs
+        spawned = True
+        raise AssertionError("invalid guard descriptor must be rejected before spawning")
+
+    monkeypatch.setattr(diarization_worker.asyncio, "create_subprocess_exec", spawn)
+    worker = CoreMLWorkerProcess(
+        executable=tmp_path / "worker",
+        model_path=tmp_path / "model",
+        inherited_guard_fd=guard_fd,
+    )
+
+    async def scenario() -> None:
+        with pytest.raises(ValueError, match="inherited guard fd"):
+            await worker._launch([])
+        assert spawned is False
+
+    asyncio.run(scenario())
+
+
+def test_worker_launch_rejects_closed_guard_fd_before_spawning(monkeypatch, tmp_path) -> None:
+    spawned = False
+
+    async def spawn(*args, **kwargs):
+        nonlocal spawned
+        del args, kwargs
+        spawned = True
+        raise AssertionError("invalid guard descriptor must be rejected before spawning")
+
+    monkeypatch.setattr(diarization_worker.asyncio, "create_subprocess_exec", spawn)
+
+    async def scenario() -> None:
+        guard_fd = os.open(os.devnull, os.O_RDONLY)
+        os.close(guard_fd)
+        worker = CoreMLWorkerProcess(
+            executable=tmp_path / "worker",
+            model_path=tmp_path / "model",
+            inherited_guard_fd=guard_fd,
+        )
+        with pytest.raises(ValueError, match="inherited guard fd"):
+            await worker._launch([])
+        assert spawned is False
+
+    asyncio.run(scenario())
+
+
 def test_zero_vote_reembedding_is_rejected_outside_meeting_calibration(tmp_path) -> None:
     executable = tmp_path / "worker"
     executable.write_text("worker")
@@ -254,6 +375,62 @@ def test_coreml_worker_stderr_tail_is_bounded_and_never_exposed_verbatim() -> No
         assert worker._failure_summary() == (
             "CoreML diarization worker transport failed (exit_code=unknown, stderr_bytes=8192)"
         )
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_launch_assigns_late_exact_child_before_reap(monkeypatch, tmp_path):
+    async def scenario():
+        entered, launched = asyncio.Event(), asyncio.Event()
+
+        class Writer:
+            def write(self, packet):
+                pass
+
+            async def drain(self):
+                pass
+
+            def close(self):
+                pass
+
+            async def wait_closed(self):
+                pass
+
+        class Process:
+            returncode = None
+
+            def __init__(self):
+                self.stdin = Writer()
+                self.stdout, self.stderr = asyncio.StreamReader(), asyncio.StreamReader()
+                self.stderr.feed_eof()
+
+            async def wait(self):
+                self.returncode = 0
+                return 0
+
+        process = Process()
+
+        async def spawn(*args, **kwargs):
+            entered.set()
+            await launched.wait()
+            return process
+
+        monkeypatch.setattr(diarization_worker.asyncio, "create_subprocess_exec", spawn)
+        executable = tmp_path / "fake-worker"
+        executable.touch()
+        models = tmp_path / "fake-models"
+        models.mkdir()
+        worker = CoreMLWorkerProcess(executable=executable, model_path=models)
+        start = asyncio.create_task(worker.start())
+        await entered.wait()
+        start.cancel()
+        await asyncio.sleep(0)
+        assert not start.done(), "creation must finish assigning the exact child"
+        launched.set()
+        await asyncio.gather(start, return_exceptions=True)
+        assert worker.process is process
+        await worker.close()
+        assert process.returncode == 0 and worker.process is None
 
     asyncio.run(scenario())
 

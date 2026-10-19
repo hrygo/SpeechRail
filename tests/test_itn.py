@@ -22,6 +22,26 @@ def test_itn_decimals() -> None:
     assert apply_light_itn("温度是零点八五度") == "温度是0.85度"
 
 
+@pytest.mark.parametrize("text", [
+    "一点一点地积累", "一点一滴的变化", "生活两点一线", "保持三点一线",
+    "五点六点再说", "七八点八九点", "七八点七八点", "二点五二点五",
+    "三点一刻开始", "十二点一点左右",
+])
+def test_itn_does_not_read_ordinary_phrases_or_clock_lists_as_decimals(text: str) -> None:
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("三点一四米", "3.14米"), ("零点零五元", "0.05元"),
+    ("三点五。", "3.5。"), ("二点五到三点五", "2.5到3.5"),
+    ("三点五万元", "3.5万元"), ("百分之三点五", "3.5%"),
+    ("百分之一点一点", "百分之一点一点"),
+    ("百分之五十点几", "百分之五十点几"),
+])
+def test_itn_preserves_explicit_decimal_contexts(text: str, expected: str) -> None:
+    assert apply_light_itn(text) == expected
+
+
 @pytest.mark.parametrize(
     ("source", "expected"),
     [
@@ -34,6 +54,24 @@ def test_itn_decimals() -> None:
 )
 def test_itn_numbers_with_units(source: str, expected: str) -> None:
     assert apply_light_itn(source) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "统一分配", "统一人员安排", "统一人事管理", "统一号牌", "我们统一分两次处理",
+])
+def test_itn_preserves_unify_word_before_quantity_units(text: str) -> None:
+    expected = text.replace("两次", "2次")
+    assert apply_light_itn(text) == expected
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("一个人分两次", "一个人分2次"),
+    ("统一一百个人", "统一一百个人"),
+    ("总统三人随行", "总统3人随行"),
+    ("统一，三个人分两次", "统一，3个人分2次"),
+])
+def test_itn_preserves_numeric_units_next_to_unify_word(text: str, expected: str) -> None:
+    assert apply_light_itn(text) == expected
 
 
 def test_itn_empty_and_passthrough() -> None:
@@ -93,6 +131,45 @@ def test_itn_does_not_read_an_approximate_magnitude_as_a_value() -> None:
     assert apply_light_itn("可能要等数十秒") == "可能要等数十秒"
     assert apply_light_itn("首次启动可能要等几十秒") == "首次启动可能要等几十秒"
     assert apply_light_itn("支持数十万个并发会话") == "支持数十万个并发会话"
+
+
+@pytest.mark.parametrize("text", [
+    "五六个人", "七八天", "一两个", "两三个", "三五天", "七八十个",
+    "十三四岁", "四十五六岁", "两两个", "五五个", "二三号",
+    "增长了百分之五六", "增长了百分之二三十",
+])
+def test_itn_preserves_ambiguous_spoken_quantities(text: str) -> None:
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize("text", [
+    "万一人家不同意呢", "万一天气不好怎么办", "五百一个", "两百一个",
+    "一百万一个", "五百两天", "三千五元", "一千二百三元", "一万二元",
+    "百分之一百五", "百分之3百5", "百分之３百５",
+])
+def test_itn_preserves_implicit_places_and_nonnumeric_phrase_boundaries(text: str) -> None:
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("五百零一个", "501个"), ("五百一十个", "510个"),
+    ("一千零三元", "1003元"), ("一千二百三十元", "1230元"),
+    ("一万零二元", "10002元"), ("一万二千元", "12000元"),
+    ("三千五百元", "3500元"), ("百分之一百零五", "105%"),
+])
+def test_itn_still_converts_explicit_places(text: str, expected: str) -> None:
+    assert apply_light_itn(text) == expected
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("五十六个人", "56个人"), ("七十八天", "78天"),
+    ("二零号", "20号"), ("一零八个人", "108个人"),
+    ("一二三号", "123号"), ("二三四五楼", "2345楼"),
+    ("一百零三个人", "103个人"), ("二零二六年", "2026年"),
+    ("二三点五个", "23.5个"), ("百分之二三点五", "23.5%"),
+])
+def test_itn_still_converts_unambiguous_number_contexts(text: str, expected: str) -> None:
+    assert apply_light_itn(text) == expected
 
 
 def test_itn_still_converts_minutes_and_bare_ten_with_a_measure_word() -> None:

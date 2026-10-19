@@ -318,38 +318,64 @@ def test_evictor_close_is_blocked_while_worker_lock_is_held() -> None:
     asyncio.run(run())
 
 
-def test_evictor_respects_worker_last_active_attribute() -> None:
+def test_evictor_respects_worker_last_active_attribute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """When a worker updates its own last_active attribute, eviction is postponed."""
+    from types import SimpleNamespace
+
+    import speechrail.runtime.worker_lease as worker_lease
+
+    now = [100.0]
+    monkeypatch.setattr(worker_lease, "time", SimpleNamespace(monotonic=lambda: now[0]))
 
     class _ActiveWorker:
         def __init__(self) -> None:
-            import time
-
             self.alive = True
             self.closed = False
-            self.last_active: float = time.monotonic()
+            self.last_active = now[0]
 
         async def close(self) -> None:
             self.closed = True
             self.alive = False
 
     async def run() -> None:
-        import time
+        pending_ticks: asyncio.Queue[asyncio.Future[None]] = asyncio.Queue()
+
+        async def monitor_sleep(delay: float) -> None:
+            assert delay == 2.0
+            pending = asyncio.get_running_loop().create_future()
+            pending_ticks.put_nowait(pending)
+            await pending
+
+        # Replace only this module's sleep; the event loop keeps its real clock.
+        monkeypatch.setattr(
+            worker_lease, "asyncio", SimpleNamespace(**(vars(asyncio) | {"sleep": monitor_sleep}))
+        )
 
         worker = _ActiveWorker()
         evictor = WorkerIdleEvictor(
-            (worker,), idle_timeout_seconds=0.08, check_interval_seconds=0.02
+            (worker,), idle_timeout_seconds=10.0, check_interval_seconds=2.0
         )
         await evictor.start()
         try:
-            await asyncio.sleep(0.04)
-            # Worker reports recent internal activity
-            worker.last_active = time.monotonic()
-            await asyncio.sleep(0.05)
-            # Should still be alive because worker.last_active was updated
+            pending = await asyncio.wait_for(pending_ticks.get(), timeout=1)
+
+            async def tick(at: float) -> None:
+                nonlocal pending
+                now[0] = at
+                pending.set_result(None)
+                # Reaching the next sleep proves the entire preceding tick finished.
+                pending = await asyncio.wait_for(pending_ticks.get(), timeout=1)
+
+            await tick(104.0)
+            worker.last_active = 104.0
+            await tick(111.0)  # Original TTL passed, but reported activity is recent.
             assert worker.closed is False
-            await asyncio.sleep(0.06)
-            # Now it should be evicted
+            worker.last_active = 101.0  # Stale reports must not move the idle clock back.
+            await tick(113.0)
+            assert worker.closed is False
+            await tick(114.0)  # Exactly the TTL since the last fresh activity.
             assert worker.closed is True
         finally:
             await evictor.close()
@@ -524,10 +550,18 @@ def test_lease_lock_protects_against_eviction() -> None:
     asyncio.run(run())
 
 
-def test_min_uptime_guard_protects_freshly_loaded_worker() -> None:
+def test_min_uptime_guard_protects_freshly_loaded_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A worker that just loaded (lazy start / restart) is not evicted
     before min_uptime_seconds even if the idle timeout already elapsed."""
+    from types import SimpleNamespace
+
+    import speechrail.runtime.worker_lease as module
     from speechrail.runtime.worker_lease import WorkerLifecycleState
+
+    now = [100.0]
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: now[0]))
 
     class _LazyWorker:
         def __init__(self) -> None:
@@ -539,6 +573,19 @@ def test_min_uptime_guard_protects_freshly_loaded_worker() -> None:
             self.alive = False
 
     async def run() -> None:
+        ticks: asyncio.Queue[float] = asyncio.Queue()
+        scanned: asyncio.Queue[float] = asyncio.Queue()
+
+        async def scan_tick(seconds: float) -> None:
+            # Arriving at the next sleep acknowledges completion of the entire
+            # preceding scan, including joined close. No scheduler wall time
+            # can shift the simulated first-load observation or guard boundary.
+            scanned.put_nowait(now[0])
+            now[0] = await ticks.get()
+
+        monkeypatch.setattr(
+            module, "asyncio", SimpleNamespace(**{**vars(asyncio), "sleep": scan_tick})
+        )
         worker = _LazyWorker()
         evictor = WorkerIdleEvictor(
             (worker,),
@@ -549,17 +596,21 @@ def test_min_uptime_guard_protects_freshly_loaded_worker() -> None:
         )
         await evictor.start()
         try:
+            await asyncio.wait_for(scanned.get(), 1)
             # Simulate the first request loading the worker (lazy start).
             worker.alive = True
-
-            # Past the idle timeout (0.03s) but still inside min_uptime (0.15s):
-            # the guard must hold eviction off.
-            await asyncio.sleep(0.07)
+            # First polling can be arbitrarily delayed. Uptime starts when the
+            # monitor observes the load, not when this test sets alive=True.
+            ticks.put_nowait(100.08)
+            await asyncio.wait_for(scanned.get(), 1)
+            ticks.put_nowait(100.229)  # idle > 0.03, observed uptime < 0.15.
+            await asyncio.wait_for(scanned.get(), 1)
             assert worker.closed is False
             assert evictor.state_of(worker) == WorkerLifecycleState.ACTIVE
 
             # Once min_uptime elapses and idle persists -> eviction proceeds.
-            await asyncio.sleep(0.12)
+            ticks.put_nowait(100.231)
+            await asyncio.wait_for(scanned.get(), 1)
             assert worker.closed is True
             assert evictor.state_of(worker) == WorkerLifecycleState.COLD_EVICTED
         finally:

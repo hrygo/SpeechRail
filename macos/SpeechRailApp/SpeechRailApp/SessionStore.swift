@@ -69,7 +69,7 @@ public actor SessionStore: SessionArchiveWriting {
     /// 索引是**派生数据**：内容永远在权威表里，索引坏了重建即可。
     /// v10（MA-14）：`knowledge_execution_event` 双时间事件日志 + `knowledge_supersession`。
     /// v11（MA-11）：`minutes.body_origin` + `parent_minutes_id`——用户改纪要产生**新版本**。
-    public static let schemaVersion: Int32 = 13
+    public static let schemaVersion: Int32 = 14
 
     let directory: URL
     let fileManager: FileManager
@@ -199,6 +199,7 @@ public actor SessionStore: SessionArchiveWriting {
                 try migrateV11ToV12()
             try migrateV12ToV13()
             }
+            if version < 14 { try migrateV13ToV14() }
             try execute("PRAGMA user_version=\(Self.schemaVersion);")
             try execute("COMMIT;")
         } catch {
@@ -291,7 +292,7 @@ public actor SessionStore: SessionArchiveWriting {
     func storedLine(id: String) throws -> TranscriptLine? {
         try withStatement("""
         SELECT id, session_id, ordinal, role, speaker_label, text, t_start, t_end, source, status,
-               interrupted, device_switch, starred, timing_quality, created_at
+               interrupted, device_switch, starred, timing_quality, created_at, attribution_json, speaker_label_is_manual
         FROM line WHERE id = ?;
         """) { statement in
             bind(statement, 1, id)
@@ -347,12 +348,43 @@ public actor SessionStore: SessionArchiveWriting {
     }
 
     /// 分人链路只允许改归属列，**正文一个字不动**（§15.3 第 2 条）。
-    public func attachSpeakerLabel(lineID: String, label: String?) throws {
-        try withStatement("UPDATE line SET speaker_label = ? WHERE id = ?;") { statement in
+    @discardableResult
+    public func attachSpeakerLabel(lineID: String, label: String?) throws -> TranscriptLine {
+        try withStatement("UPDATE line SET speaker_label = ?, attribution_json = NULL, speaker_label_is_manual = 1 WHERE id = ?;") { statement in
             bind(statement, 1, label)
             bind(statement, 2, lineID)
             try step(statement)
         }
+        guard let saved = try storedLine(id: lineID) else {
+            throw SessionStoreError.statementFailed("归属对应的转录行不存在")
+        }
+        return saved
+    }
+
+    /// 原子替换完整逐词快照；人工标注不会被迟到的自动归属覆盖。
+    @discardableResult
+    public func attachTranscriptAttribution(lineID: String, units: [TranscriptAttributionUnit]) throws -> TranscriptLine {
+        guard var line = try storedLine(id: lineID) else {
+            throw SessionStoreError.statementFailed("归属对应的转录行不存在")
+        }
+        let ordered: [TranscriptAttributionUnit]
+        do { ordered = try TranscriptAttributionUnit.validated(units, text: line.text) }
+        catch { throw SessionStoreError.statementFailed("逐词归属范围或时间无效") }
+        guard !line.speakerLabelIsManual else { return line }
+        line.attributionUnits = ordered
+        line.speakerLabel = nil
+        // 整段标量只在所有有内容的字符归同一人时给出；详细信息永远保留。
+        let summary = TranscriptSpeakerRun.summaryLabel(line.speakerRuns)
+        let encoded = try JSONEncoder().encode(ordered)
+        guard let json = String(data: encoded, encoding: .utf8) else {
+            throw SessionStoreError.statementFailed("逐词归属无法保存")
+        }
+        try withStatement("UPDATE line SET attribution_json = ?, speaker_label = ? WHERE id = ? AND speaker_label_is_manual = 0;") { statement in
+            bind(statement, 1, json); bind(statement, 2, summary); bind(statement, 3, lineID)
+            try step(statement)
+        }
+        line.speakerLabel = summary
+        return line
     }
 
     /// 对齐证据在文本 final 之后独立到达，所以 `timing_quality` 只能补写。
@@ -1659,7 +1691,7 @@ public actor SessionStore: SessionArchiveWriting {
                 continue
             }
             let line = try withStatement(
-                "SELECT id, session_id, ordinal, role, speaker_label, text, t_start, t_end, source, status, interrupted, device_switch, starred, timing_quality, created_at FROM line WHERE id = ? LIMIT 1;"
+                "SELECT id, session_id, ordinal, role, speaker_label, text, t_start, t_end, source, status, interrupted, device_switch, starred, timing_quality, created_at, attribution_json, speaker_label_is_manual FROM line WHERE id = ? LIMIT 1;"
             ) { statement -> TranscriptLine? in
                 bind(statement, 1, lineID)
                 guard try step(statement) == SQLITE_ROW else { return nil }
@@ -1791,7 +1823,21 @@ public actor SessionStore: SessionArchiveWriting {
         let sql = """
         SELECT \(Self.sessionColumns),
                (SELECT COUNT(*) FROM line l WHERE l.session_id = s.id AND l.status = 'final'),
-               (SELECT COUNT(DISTINCT l.speaker_label) FROM line l WHERE l.session_id = s.id AND l.speaker_label IS NOT NULL),
+               (SELECT COUNT(DISTINCT speakers.label) FROM (
+                    SELECT l.speaker_label AS label
+                    FROM line l
+                    WHERE l.session_id = s.id AND l.speaker_label IS NOT NULL
+                    UNION ALL
+                    SELECT CASE WHEN unit.type = 'object' THEN
+                        CASE WHEN json_type(unit.value, '$.speakerLabel') = 'text'
+                             THEN json_extract(unit.value, '$.speakerLabel') END
+                    END AS label
+                    FROM line l, json_each(
+                        CASE WHEN json_valid(l.attribution_json)
+                             THEN l.attribution_json ELSE '[]' END
+                    ) AS unit
+                    WHERE l.session_id = s.id AND l.speaker_label_is_manual = 0
+                ) AS speakers WHERE speakers.label IS NOT NULL),
                (SELECT i.reason FROM session_interruption i
                  WHERE i.session_id = s.id AND i.resumed_at IS NULL
                  ORDER BY i.at_ordinal DESC LIMIT 1),
@@ -1832,7 +1878,7 @@ public actor SessionStore: SessionArchiveWriting {
     public func lines(sessionID: String, includePartial: Bool = false) throws -> [TranscriptLine] {
         let sql = """
         SELECT id, session_id, ordinal, role, speaker_label, text, t_start, t_end, source, status,
-               interrupted, device_switch, starred, timing_quality, created_at
+               interrupted, device_switch, starred, timing_quality, created_at, attribution_json, speaker_label_is_manual
         FROM line WHERE session_id = ? \(includePartial ? "" : "AND status = 'final'")
         ORDER BY ordinal ASC;
         """
@@ -1850,7 +1896,7 @@ public actor SessionStore: SessionArchiveWriting {
         let limit = max(1, min(200, limit))
         let sql = """
         SELECT id, session_id, ordinal, role, speaker_label, text, t_start, t_end, source, status,
-               interrupted, device_switch, starred, timing_quality, created_at
+               interrupted, device_switch, starred, timing_quality, created_at, attribution_json, speaker_label_is_manual
         FROM line WHERE session_id = ? AND status = 'final' \(beforeOrdinal == nil ? "" : "AND ordinal < ?")
         ORDER BY ordinal DESC LIMIT ?;
         """
@@ -1869,7 +1915,7 @@ public actor SessionStore: SessionArchiveWriting {
     public func linesRange(sessionID: String, ordinals: ClosedRange<Int>) throws -> [TranscriptLine] {
         let sql = """
         SELECT id, session_id, ordinal, role, speaker_label, text, t_start, t_end, source, status,
-               interrupted, device_switch, starred, timing_quality, created_at
+               interrupted, device_switch, starred, timing_quality, created_at, attribution_json, speaker_label_is_manual
         FROM line WHERE session_id = ? AND status = 'final' AND ordinal >= ? AND ordinal <= ? ORDER BY ordinal ASC;
         """
         return try withStatement(sql) { statement in
@@ -1896,7 +1942,7 @@ public actor SessionStore: SessionArchiveWriting {
             .replacingOccurrences(of: "_", with: "\\_") + "%"
         let sql = """
         SELECT l.id, l.session_id, l.ordinal, l.role, l.speaker_label, l.text, l.t_start, l.t_end,
-               l.source, l.status, l.interrupted, l.device_switch, l.starred, l.timing_quality, l.created_at
+               l.source, l.status, l.interrupted, l.device_switch, l.starred, l.timing_quality, l.created_at, l.attribution_json, l.speaker_label_is_manual
         FROM line l JOIN session s ON s.id = l.session_id
         WHERE l.status = 'final' AND l.text LIKE ? ESCAPE '\\'
         \(kind == nil ? "" : "AND s.kind = ?")
@@ -3553,7 +3599,11 @@ public actor SessionStore: SessionArchiveWriting {
             isDeviceSwitch: columnInt(statement, 11) != 0,
             isStarred: columnInt(statement, 12) != 0,
             timingQuality: columnText(statement, 13).flatMap(SessionTimingQuality.init(rawValue:)),
-            createdAt: Date(timeIntervalSince1970: columnDouble(statement, 14))
+            createdAt: Date(timeIntervalSince1970: columnDouble(statement, 14)),
+            attributionUnits: columnText(statement, 15).flatMap { value in
+                try? JSONDecoder().decode([TranscriptAttributionUnit].self, from: Data(value.utf8))
+            } ?? [],
+            speakerLabelIsManual: columnInt(statement, 16) != 0
         )
     }
 

@@ -254,7 +254,7 @@ def test_frozen_candidate_spec_and_holdout_unlock_gate(tmp_path: Path) -> None:
             holdout_manifest_sha256=holdout_sha,
         )
 
-    # Full development certification unlocks frozen holdout
+    # Historical receipts explain old results but never unlock a new experiment.
     receipt_path.write_text(
         json.dumps(
             {
@@ -268,13 +268,13 @@ def test_frozen_candidate_spec_and_holdout_unlock_gate(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    unlocked = validate_frozen_holdout_unlock(
-        receipt_path,
-        repository_root=repo_root,
-        expected_candidate_spec_sha256=spec_sha,
-        holdout_manifest_sha256=holdout_sha,
-    )
-    assert unlocked["holdout_unlocked"] is True
+    with pytest.raises(ValueError, match="legacy"):
+        validate_frozen_holdout_unlock(
+            receipt_path,
+            repository_root=repo_root,
+            expected_candidate_spec_sha256=spec_sha,
+            holdout_manifest_sha256=holdout_sha,
+        )
 
     # Preflight CLI returns exit code 2 when --require-pass is set and strata are unobserved
     exit_code = main(
@@ -307,8 +307,8 @@ def test_speaker_attributed_asr_separates_speaker_confusion_and_penalizes_unknow
     assert perfect["tcp_cer"] == 0.0
     assert perfect["cp_wer"] == 0.0
     assert perfect["tcp_wer"] == 0.0
-    assert perfect["di_cp_cer"] == 0.0
-    assert perfect["speaker_confusion_cer_delta"] == 0.0
+    assert perfect["temporal_oracle_cer"] == 0.0
+    assert perfect["product_cp_minus_temporal_oracle_cer"] == 0.0
 
     collapsed_hyp = [
         {"start": 0.1, "end": 1.9, "speaker": "S1", "text": "今天讨论预算"},
@@ -317,11 +317,11 @@ def test_speaker_attributed_asr_separates_speaker_confusion_and_penalizes_unknow
     collapsed = score_speaker_attributed_asr(
         reference, collapsed_hyp, duration=5.0, tcp_collar_seconds=1.0
     )
-    assert collapsed["di_cp_cer"] == 0.0
+    assert collapsed["temporal_oracle_cer"] == 0.0
     assert collapsed["cp_cer"] is not None and collapsed["cp_cer"] > 0.5
     assert (
-        collapsed["speaker_confusion_cer_delta"] is not None
-        and collapsed["speaker_confusion_cer_delta"] > 0.5
+        collapsed["product_cp_minus_temporal_oracle_cer"] is not None
+        and collapsed["product_cp_minus_temporal_oracle_cer"] > 0.5
     )
 
     unknown_hyp = [
@@ -344,9 +344,7 @@ def test_word_metrics_preserve_utterance_boundaries_and_leave_character_metrics_
             {"start": 0.0, "end": 1.0, "speaker": "R1", "text": "hello"},
             {"start": 1.0, "end": 2.0, "speaker": "R1", "text": "world"},
         ],
-        hypothesis_utterances=[
-            {"start": 0.0, "end": 2.0, "speaker": "S1", "text": "helloworld"}
-        ],
+        hypothesis_utterances=[{"start": 0.0, "end": 2.0, "speaker": "S1", "text": "helloworld"}],
         duration=2.0,
     )
     assert english["asr_only"]["reference_words"] == 2
@@ -355,9 +353,9 @@ def test_word_metrics_preserve_utterance_boundaries_and_leave_character_metrics_
     assert english["asr_only"]["cer"] == 0.0
     assert english["speaker_attributed"]["cp_wer"] == 1.0
     assert english["speaker_attributed"]["tcp_wer"] == 1.0
-    assert english["speaker_attributed"]["di_cp_wer"] == 1.0
+    assert english["speaker_attributed"]["temporal_oracle_wer"] == 1.0
     assert english["speaker_attributed"]["cp_cer"] == 0.0
-    assert english["speaker_attributed"]["di_cp_cer"] == 0.0
+    assert english["speaker_attributed"]["temporal_oracle_cer"] == 0.0
 
     chinese = score_meeting_1to4_session(
         reference_speaker_spans=[{"start": 0.0, "end": 2.0, "speaker": "R1"}],
@@ -366,25 +364,21 @@ def test_word_metrics_preserve_utterance_boundaries_and_leave_character_metrics_
             {"start": 0.0, "end": 1.0, "speaker": "R1", "text": "你好"},
             {"start": 1.0, "end": 2.0, "speaker": "R1", "text": "世界"},
         ],
-        hypothesis_utterances=[
-            {"start": 0.0, "end": 2.0, "speaker": "S1", "text": "你好世界"}
-        ],
+        hypothesis_utterances=[{"start": 0.0, "end": 2.0, "speaker": "S1", "text": "你好世界"}],
         duration=2.0,
     )
     assert chinese["asr_only"]["cer"] == 0.0
     assert chinese["speaker_attributed"]["cp_cer"] == 0.0
-    assert chinese["speaker_attributed"]["di_cp_cer"] == 0.0
+    assert chinese["speaker_attributed"]["temporal_oracle_cer"] == 0.0
     assert chinese["speaker_attributed"]["cp_wer"] == 0.0
-    assert chinese["speaker_attributed"]["di_cp_wer"] == 0.0
+    assert chinese["speaker_attributed"]["temporal_oracle_wer"] == 0.0
 
 
 def test_speaker_attributed_asr_discards_segments_wholly_in_tail_padding() -> None:
     scored = score_meeting_1to4_session(
         reference_speaker_spans=[{"start": 0.0, "end": 1.0, "speaker": "R1"}],
         hypothesis_speaker_spans=[{"start": 0.0, "end": 1.0, "speaker": "S1"}],
-        reference_utterances=[
-            {"start": 0.0, "end": 1.0, "speaker": "R1", "text": "hello"}
-        ],
+        reference_utterances=[{"start": 0.0, "end": 1.0, "speaker": "R1", "text": "hello"}],
         hypothesis_utterances=[
             {"start": 0.0, "end": 1.0, "speaker": "S1", "text": "hello"},
             {"start": 10.2, "end": 10.8, "speaker": "S1", "text": "tail"},
@@ -396,7 +390,7 @@ def test_speaker_attributed_asr_discards_segments_wholly_in_tail_padding() -> No
     assert scored["asr_only"]["wer"] == 0.0
     assert scored["speaker_attributed"]["cp_wer"] == 0.0
     assert scored["speaker_attributed"]["tcp_wer"] == 0.0
-    assert scored["speaker_attributed"]["di_cp_wer"] == 0.0
+    assert scored["speaker_attributed"]["temporal_oracle_wer"] == 0.0
 
 
 def test_score_meeting_1to4_session_and_stratification_marks_missing_strata() -> None:
@@ -425,10 +419,7 @@ def test_score_meeting_1to4_session_and_stratification_marks_missing_strata() ->
     )
     assert session_metrics["speakers_count"] == 2
     assert session_metrics["diarization_gate"] == "pass"
-    assert (
-        session_metrics["diarization_only"]["other_min_known_coverage_applicable"]
-        is False
-    )
+    assert session_metrics["diarization_only"]["other_min_known_coverage_applicable"] is False
     assert session_metrics["asr_only"]["cer"] == 0.0
     assert session_metrics["speaker_attributed"]["cp_cer"] == 0.0
 
@@ -600,9 +591,7 @@ def test_evaluate_locked_1to4_split_end_to_end_dev_and_holdout(tmp_path: Path) -
     dev_manifest_path.write_bytes(dev_manifest_bytes)
     dev_sha = hashlib.sha256(dev_manifest_bytes).hexdigest()
 
-    holdout_fixtures = [
-        {**f, "id": f"Eval_Ali_S{f['speakers_count']}"} for f in fixtures
-    ]
+    holdout_fixtures = [{**f, "id": f"Eval_Ali_S{f['speakers_count']}"} for f in fixtures]
     for hf in holdout_fixtures:
         speaker_map[hf["id"]] = int(hf["speakers_count"])
     holdout_manifest_bytes = json.dumps(
@@ -644,29 +633,102 @@ def test_evaluate_locked_1to4_split_end_to_end_dev_and_holdout(tmp_path: Path) -
             output_dir=dev_out,
             repository_root=repo_root,
             expected_split_role="development",
-            session_factory=lambda epoch: _FakeSortformerSession(
-                speakers_count=speaker_map[epoch]
-            ),
+            session_factory=lambda epoch: _FakeSortformerSession(speakers_count=speaker_map[epoch]),
         )
     )
-    assert dev_report["verdict"] == "go"
+    assert dev_report["verdict"] == "no-go"
     assert dev_report["all_1to4_strata_observed"] is True
-    assert dev_report["phase1_diarization_certified"] is True
+    assert dev_report["phase1_diarization_certified"] is False
+    assert dev_report["diagnostic_only"] is True
     assert (dev_out / "development-certification.json").is_file()
 
     holdout_out = external / "holdout-out"
-    holdout_report = asyncio.run(
-        evaluate_locked_1to4_split(
-            manifest_path=holdout_manifest_path,
-            output_dir=holdout_out,
-            repository_root=repo_root,
-            expected_split_role="frozen_holdout",
-            session_factory=lambda epoch: _FakeSortformerSession(
-                speakers_count=speaker_map[epoch]
-            ),
-            development_receipt_path=dev_out / "development-certification.json",
+    with pytest.raises(ValueError, match=r"legacy|locked"):
+        asyncio.run(
+            evaluate_locked_1to4_split(
+                manifest_path=holdout_manifest_path,
+                output_dir=holdout_out,
+                repository_root=repo_root,
+                expected_split_role="frozen_holdout",
+                session_factory=lambda epoch: _FakeSortformerSession(
+                    speakers_count=speaker_map[epoch]
+                ),
+                development_receipt_path=dev_out / "development-certification.json",
+            )
         )
+    assert not holdout_out.exists()
+
+
+def test_effective_candidate_tracks_consolidation_and_adapter(tmp_path: Path) -> None:
+    from meeting_evaluation_identity import candidate_digest
+    from probe_meeting_sortformer_1to4 import sortformer_execution_spec
+
+    root = Path(__file__).resolve().parents[1]
+    executable = tmp_path / "worker"
+    executable.write_bytes(b"worker-v1")
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "weights.bin").write_bytes(b"weights")
+    spec = sortformer_execution_spec(
+        repository_root=root,
+        executable=executable,
+        model_path=model,
+        consolidate=False,
     )
-    assert holdout_report["verdict"] == "go"
-    assert holdout_report["holdout_unlock"]["holdout_unlocked"] is True
-    assert (holdout_out / "frozen-holdout-report.json").is_file()
+    changed = sortformer_execution_spec(
+        repository_root=root,
+        executable=executable,
+        model_path=model,
+        consolidate=True,
+    )
+    assert candidate_digest(spec) != candidate_digest(changed)
+    assert spec.decoder["activity_comparison"] == ">="
+    assert changed.decoder["consolidation"]["bridge_seconds"] == 0.24
+    executable.write_bytes(b"worker-resigned")
+    rebuilt = sortformer_execution_spec(
+        repository_root=root,
+        executable=executable,
+        model_path=model,
+        consolidate=False,
+    )
+    assert candidate_digest(spec) != candidate_digest(rebuilt)
+
+
+def test_legacy_oracle_is_named_as_a_diagnostic() -> None:
+    result = score_speaker_attributed_asr(
+        [{"start": 0, "end": 1, "speaker": "R1", "text": "a"}],
+        [{"start": 0, "end": 1, "speaker": "S1", "text": "a"}],
+        duration=1,
+    )
+    assert "di_cp_cer" not in result
+    assert "di_cp_wer" not in result
+    assert result["temporal_oracle_cer"] == 0
+    assert result["standard_metric"] is False
+
+
+def test_preflight_default_paths_follow_user_home(tmp_path, monkeypatch):
+    import probe_meeting_sortformer_1to4 as probe
+
+    home = tmp_path / "another-user"
+    monkeypatch.setenv("HOME", str(home))
+    captured = {}
+
+    def preflight(**kwargs):
+        captured.update(kwargs)
+        return {"evaluation": {"verdict": "no-go"}}
+
+    monkeypatch.setattr(probe, "run_preflight_probe", preflight)
+    assert probe.main(["--mode", "preflight"]) == 0
+    app = home / "Library" / "Application Support" / "SpeechRail"
+    assert captured["benchmark_root"] == app / "benchmarks"
+    assert captured["model_root"] == app / "models"
+
+
+def test_evaluation_requires_explicit_inputs_before_model_engine(monkeypatch):
+    import probe_meeting_sortformer_1to4 as probe
+
+    def forbidden(**kwargs):
+        pytest.fail("model engine must not be constructed without explicit inputs")
+
+    monkeypatch.setattr(probe, "CoreMLSortformerEngine", forbidden)
+    assert probe.main(["--mode", "evaluate-development"]) == 2

@@ -182,13 +182,33 @@ def budget_for_hardware(total_bytes: int) -> int:
     return max(MIN_SERVICE_BUDGET_BYTES, total_bytes // 2)
 
 
+def declared_heavy_axes(footprint: ComponentFootprint) -> tuple[str, ...]:
+    """Return the enabled heavy components of a footprint.
+
+    A ``0`` byte value means the component is disabled and is not part of the
+    overlap decision; ``None`` means enabled but undeclared (unknown).
+    """
+
+    pairs = (
+        ("asr", footprint.asr_bytes),
+        ("tts", footprint.tts_bytes),
+        ("diarization", footprint.diarization_bytes),
+    )
+    return tuple(name for name, value in pairs if value != 0)
+
+
 def can_overlap_heavy_compute(
     budget_bytes: int,
     footprint: ComponentFootprint,
 ) -> tuple[bool, str]:
-    """Determine whether concurrent ASR and TTS compute can safely overlap.
+    """Decide whether the declared heavy compute axes may run concurrently.
 
-    Returns (can_overlap, reason).
+    The heavy set is ASR, TTS and diarization.  Overlap is budget-driven, not
+    axis-count-driven: any combination of the declared axes -- ``ASR||TTS``,
+    ``ASR||DIARIZATION``, ``TTS||DIARIZATION`` or the three-way
+    ``ASR||TTS||DIARIZATION`` -- is eligible only while the summed declared
+    peak stays within the budget. Distinct-key TTS capability concurrency is
+    enforced by the governor, not here. Returns ``(can_overlap, reason)``.
     """
     total_required = footprint.total_bytes
     if total_required is None:
@@ -202,9 +222,11 @@ def can_overlap_heavy_compute(
             ),
         )
 
+    axes = declared_heavy_axes(footprint)
     return (
         True,
-        f"Total footprint {total_required} bytes is within budget {budget_bytes} bytes",
+        f"Total footprint {total_required} bytes is within budget {budget_bytes} bytes; "
+        f"declared heavy axes {list(axes)} may overlap",
     )
 
 
@@ -237,5 +259,6 @@ __all__ = [
     "ComponentFootprint",
     "budget_for_hardware",
     "can_overlap_heavy_compute",
+    "declared_heavy_axes",
     "detect_system_memory_bytes",
 ]

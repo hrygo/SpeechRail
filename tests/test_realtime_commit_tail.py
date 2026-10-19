@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import struct
 
 import pytest
 
@@ -74,6 +75,60 @@ def test_client_commit_keeps_resampler_tail_in_order_and_in_frozen_span(
             assert requests[0].pcm16 == expected
             assert requests[0].span.start == 0
             assert requests[0].span.end == len(expected) // 2
+        finally:
+            await session.close()
+
+    asyncio.run(scenario())
+
+
+def test_two_client_commits_preserve_pcm_phase_and_total_duration() -> None:
+    first_samples = 24_002
+    source = [(n * 37) % 20_000 - 10_000 for n in range(48_006)]
+    wire = struct.pack(f"<{len(source)}h", *source)
+    first_target = (first_samples * 2 + 2) // 3
+    total_target = len(source) * 2 // 3
+
+    def expected_pcm(start: int, stop: int, source_end: int) -> bytes:
+        samples = []
+        for index in range(start, stop):
+            position = index * 3 // 2
+            first = source[position]
+            second = source[min(position + 1, source_end - 1)]
+            samples.append(first if index % 2 == 0 else round((first + second) / 2))
+        return struct.pack(f"<{len(samples)}h", *samples)
+
+    async def scenario() -> None:
+        terminal = asyncio.Event()
+        factory = FakeStreamingFactory()
+        events: list[dict[str, object]] = []
+
+        async def send(event: dict[str, object]) -> int:
+            events.append(event)
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
+                terminal.set()
+            return len(events)
+
+        services = build_app_services(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            AppOverrides(realtime_asr_factory=factory),
+        )
+        session = OpenAIRealtimeSession(services, session_id="continued-phase", send=send)
+        await session.start()
+        try:
+            await session.handle(session_update())
+            for packet in (wire[:first_samples * 2], wire[first_samples * 2:]):
+                terminal.clear()
+                await session.handle({"type": "input_audio_buffer.append", "audio": _pcm16(packet)})
+                await session.handle({"type": "input_audio_buffer.commit"})
+                await asyncio.wait_for(terminal.wait(), timeout=5)
+            assert not [event for event in events if event["type"] == "error"]
+            assert len(factory.sessions) == 2
+            assert b"".join(factory.sessions[0].received) == expected_pcm(
+                0, first_target, first_samples,
+            )
+            assert b"".join(factory.sessions[1].received) == expected_pcm(
+                first_target, total_target, len(source),
+            )
         finally:
             await session.close()
 

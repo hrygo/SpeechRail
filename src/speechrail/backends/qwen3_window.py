@@ -9,7 +9,12 @@ from dataclasses import asdict
 from uuid import uuid4
 
 from speechrail.backends.qwen3_shared import Qwen3SharedWorker
-from speechrail.domain.asr_window import WindowDecodeRequest, WindowDecodeResult, WindowIdentity
+from speechrail.domain.asr_window import (
+    WindowDecodeObservation,
+    WindowDecodeRequest,
+    WindowDecodeResult,
+    WindowIdentity,
+)
 from speechrail.runtime.asr_mode import AsrModeBusy, AsrModeLease
 from speechrail.runtime.cleanup import join_cleanup
 from speechrail.runtime.resource_governor import ResourceGovernor, WorkClass, WorkPurpose
@@ -32,6 +37,11 @@ class NativeWindowAsrFactory:
     @property
     def runtime_revision(self) -> str | None:
         return self._worker.runtime_revision
+
+    @property
+    def window_decode_max_new_tokens(self) -> int | None:
+        """Expose the ready owner's observed cap, never streaming configuration."""
+        return self._worker.window_decode_max_new_tokens if self.ready else None
 
     def create(self, *, identity: WindowIdentity) -> Qwen3WindowSession:
         if self._session is not None:
@@ -158,6 +168,13 @@ class Qwen3WindowSession:
                         or (language is not None and not isinstance(language, str))
                     ):
                         raise ValueError("invalid window result values")
+                    raw_observation = response.get("observation")
+                    observation = (
+                        WindowDecodeObservation.from_wire_dict(raw_observation)
+                        if raw_observation is not None else None
+                    )
+                    if observation is not None and observation.kind != request.kind:
+                        raise ValueError("window observation did not match decode kind")
                     return WindowDecodeResult(
                         self.identity,
                         request.attempt_id,
@@ -165,6 +182,7 @@ class Qwen3WindowSession:
                         text,
                         language,
                         complete,
+                        observation,
                     )
                 except (KeyError, TypeError, ValueError) as exc:
                     await self._worker.close()

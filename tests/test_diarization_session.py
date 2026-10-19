@@ -364,3 +364,89 @@ def test_slow_event_consumer_gets_a_bounded_latest_snapshot_with_final_units() -
         assert statuses[0].reason == "diarization_event_backlog_exceeded"
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "blocked_stage", ["native_finish", "event_drain", "cancel_failure", "event_failure"]
+)
+def test_finish_deadline_covers_native_and_event_drain_and_joins_cleanup(
+    monkeypatch, blocked_stage: str
+) -> None:
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    from speechrail.application.diarization import session as session_module
+
+    entered: list[float] = []
+
+    @asynccontextmanager
+    async def immediate_deadline(seconds: float):
+        entered.append(seconds)
+        # A blocked operation, rather than machine speed, triggers expiration.
+        async with asyncio.timeout(None if blocked_stage == "event_failure" else 0):
+            yield
+
+    monkeypatch.setattr(
+        session_module,
+        "asyncio",
+        SimpleNamespace(
+            **{name: getattr(asyncio, name) for name in dir(asyncio) if name != "timeout"},
+            timeout=immediate_deadline,
+        ),
+    )
+
+    failure_observed = asyncio.Event()
+
+    class BlockedActivity(_FakeActivitySession):
+        def updates(self):
+            async def iterator():
+                while update := await self.queue.get():
+                    if isinstance(update, RuntimeError):
+                        failure_observed.set()
+                        raise update
+                    yield update
+
+            return iterator()
+
+        async def finish(self, *, through_sample: int) -> None:
+            assert entered == [30], "native finish must be inside the drain deadline"
+            self.finished_through = through_sample
+            if blocked_stage == "event_failure":
+                await self.queue.put(RuntimeError("invalid native stream"))
+                return
+            if blocked_stage in {"native_finish", "cancel_failure"}:
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    if blocked_stage == "cancel_failure":
+                        await self.queue.put(RuntimeError("native finish cancelled"))
+                        await failure_observed.wait()
+            # Otherwise leave the activity event stream open after native EOF.
+
+    async def scenario() -> None:
+        activity = BlockedActivity()
+        session: DiarizationSession
+        ledger = AttributionLedger(accepted_samples=lambda: session.accepted_samples)
+        session = DiarizationSession(activity=activity, ledger=ledger)
+        await session.append(b"\x00\x00" * 16)
+        await session.register_completed("item", (TextUnit("unit", 0, 1, SampleSpan(0, 16)),))
+        done = await session.finish("finish")
+        events = [event async for event in session.events()]
+
+        assert entered == [30]
+        assert done.status == "degraded"
+        if blocked_stage != "event_failure":
+            assert activity.cancelled
+        assert session._pump is not None and session._pump.done()
+        assert events[-1] == done
+        statuses = [event.reason for event in events if isinstance(event, StatusChanged)]
+        assert statuses == [
+            "diarization_invalid_output" if blocked_stage == "event_failure"
+            else "finalization_timeout"
+        ]
+        updates = [event for event in events if isinstance(event, ItemAttributionUpdated)]
+        assert updates[-1].attributions[0].state == "final"
+        assert updates[-1].attributions[0].speaker is None
+        assert await session.finish("finish") == done
+
+    asyncio.run(scenario())

@@ -1197,6 +1197,13 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     "Inference timed out",
                     retryable=True,
                 )
+            except GovernorLaneIsolatedError:
+                return backend_reclamation_error_response(request_id)
+            except GovernorQueueFullError:
+                return error_response(
+                    429, request_id, "backend_busy", "another diarization session is active",
+                    retryable=True,
+                )
             except DiarizationAdmissionFullError as exc:
                 response = error_response(
                     429,

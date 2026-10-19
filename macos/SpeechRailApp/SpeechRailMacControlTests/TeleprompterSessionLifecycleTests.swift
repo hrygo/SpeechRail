@@ -2936,15 +2936,22 @@ private func settleTasks() async {
 
 @MainActor
 private func waitFor(
-    timeoutIterations: Int = 200,
+    timeout: Duration = .seconds(10),
     _ description: String = "条件",
     _ condition: @MainActor () async -> Bool
 ) async {
-    for _ in 0..<timeoutIterations {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    repeat {
         if await condition() { return }
-        await Task.yield()
-    }
-    // 超时必须让测试失败。静默返回会把「等到条件成立」变成「等够次数就继续」，
-    // 后面所有依赖它的断言都会在事件根本没被处理的情况下空过。
-    Issue.record("等待超时（\(timeoutIterations) 次让出）：\(description)")
+        // Conditions may read another actor, so keep polling asynchronous. The
+        // interval only limits polling work; the observed state decides success.
+        do { try await clock.sleep(for: .milliseconds(1)) }
+        catch {
+            Issue.record("等待被取消：\(description)")
+            return
+        }
+    } while clock.now < deadline
+    // The deadline is a hang watchdog, never a performance assertion.
+    Issue.record("等待超时（\(timeout)）：\(description)")
 }

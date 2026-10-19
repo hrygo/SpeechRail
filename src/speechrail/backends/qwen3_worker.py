@@ -32,6 +32,7 @@ from speechrail.backends.qwen3_stream_decoder import (
 )
 from speechrail.domain.asr_policy import ASRPolicy
 from speechrail.domain.asr_window import (
+    WindowDecodeObservation,
     WindowDecodeRequest,
     WindowDecodeResult,
     WindowIdentity,
@@ -403,7 +404,8 @@ def _handle_window(frame: dict[str, object], output: BinaryIO, engine: WorkerEng
         write_frame(output, {"version": PROTOCOL_VERSION, "type": "window.result",
             "request_id": request_id, **asdict(identity), "attempt_id": result.attempt_id,
             "start_sample": result.input_span.start, "end_sample": result.input_span.end,
-            "text": result.text, "language": result.language, "complete": result.complete})
+            "text": result.text, "language": result.language, "complete": result.complete,
+            "observation": asdict(result.observation) if result.observation is not None else None})
     except Exception:
         # Do not expose vendor errors that may embed text, keywords or paths.
         error: dict[str, object] = {
@@ -943,6 +945,12 @@ def serve(
         getattr(engine, "close_window", None)
     ):
         ready["capabilities"] = ["window_decode_v1"]
+        cap = getattr(engine, "window_decode_max_new_tokens", None)
+        if cap is not None:
+            if type(cap) is not int or not 32 <= cap <= 2048:
+                _write_error(output_stream, "backend_identity_mismatch")
+                return
+            ready["window_decode_max_new_tokens"] = cap
     write_frame(
         output_stream,
         ready,
@@ -966,8 +974,9 @@ def serve(
             return
         kind = frame.get("type")
         if kind in ("window.decode", "window.close"):
-            _handle_window(frame, output_stream, engine)
-            if kind == "window.close":
+            try:
+                _handle_window(frame, output_stream, engine)
+            finally:
                 _clear_metal_cache()
         elif kind == "transcribe":
             _handle_transcribe(frame, output_stream, engine, identity)
@@ -977,7 +986,11 @@ def serve(
         elif kind == "audio.append":
             _handle_audio_append(frame, output_stream, engine)
         elif kind == "flush":
-            _handle_flush(frame, output_stream, engine)
+            try:
+                _handle_flush(frame, output_stream, engine)
+            finally:
+                # Keep live decoder state while releasing unused preview allocations.
+                _clear_metal_cache()
         elif kind == "commit":
             _handle_commit(frame, output_stream, engine)
             _clear_metal_cache()
@@ -1123,6 +1136,7 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         if include_timestamps:
             kwargs["return_timestamps"] = True
         result = self._session.transcribe((waveform, 16_000), **kwargs)
+        _require_complete_final(result)
         text = getattr(result, "text", "") or ""
         text = text.strip() if isinstance(text, str) else ""
         detected = getattr(result, "language", None) or ("" if language == "auto" else language)
@@ -1223,6 +1237,11 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
             raise RuntimeError(f"no active session: {session_id}")
         return state.preview.sample_watermark if state.preview is not None else 0
 
+    @property
+    def window_decode_max_new_tokens(self) -> int:
+        """Effective cap consumed by this engine's dynamic window budget."""
+        return self._max_new_tokens or 512
+
     def preview_revision(self, session_id: str) -> int:
         state = self._streaming_states.get(session_id)
         if state is None:
@@ -1300,10 +1319,16 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
             if language not in {"", "auto"}:
                 kwargs["language"] = language
             final = self._session.transcribe((waveform, ASR_SAMPLE_RATE), **kwargs)
-            _require_complete_final(final)
             text = getattr(final, "text", None)
             detected_language = getattr(final, "language", None)
-            complete = True
+            observation = WindowDecodeObservation(
+                request.kind, budget,
+                finish_reason=getattr(final, "finish_reason", None),
+                truncated=getattr(final, "truncated", None),
+            )
+            # Preserve incomplete evidence for the bounded window owner. It may
+            # retry its owned PCM, but must never seal this hypothesis as final.
+            complete = observation.finish_reason == "eos" and observation.truncated is not True
         else:
             old = getattr(self, "_window_preview", None)
             reusable = (
@@ -1323,13 +1348,20 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
                 language, request.context, hashlib.sha256(request.pcm16).digest(), state)
             text = preview.text
             detected_language = preview.language
+            observation = WindowDecodeObservation(
+                request.kind, budget,
+                generation_max_new_tokens=getattr(preview, "generation_max_new_tokens", None),
+                finish_reason=getattr(preview, "finish_reason", None),
+                truncated=getattr(preview, "truncated", None),
+                generated_token_count=getattr(preview, "generated_token_count", None),
+            )
             complete = False
         if not isinstance(text, str) or (
             detected_language is not None and not isinstance(detected_language, str)
         ):
             raise ValueError("invalid vendor window result")
         return WindowDecodeResult(request.identity, request.attempt_id, request.input_span,
-            text.strip(), detected_language, complete)
+            text.strip(), detected_language, complete, observation)
 
     def close_window(self, identity: WindowIdentity) -> None:
         current = getattr(self, "_window_identity", None)
