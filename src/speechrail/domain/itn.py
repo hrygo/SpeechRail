@@ -152,6 +152,15 @@ _CI_COUNT_CONTINUATIONS = frozenset({
 # `每一天`, `同一人`), not a closed count. `比` covers 一天比一天.
 _DETERMINER_PREFIXES = frozenset("每这那某哪同上前后下另何比")
 _DETERMINER_UNITS = frozenset({"次", "天", "号", "日", "秒"})
+# A bare month is a date label only when it ends the phrase or is followed by
+# an explicit month/date continuation. A following numeral alone is ambiguous:
+# 二月二/九月九 are festival names, and a partial rewrite such as 2月二 is
+# worse than leaving the spoken form untouched.
+_MONTH_CONTINUATIONS = frozenset("份初底中末尾半里前上下之到起间")
+# 日 is a duration/date unit only with an explicit continuation or after a
+# month/ordinal. 五日京兆 / 十日终焉 are lexical titles, not five/ten days.
+_DAY_CONTINUATIONS = frozenset("游内之前后到起间")
+_DAY_NUM_RE = re.compile(r"[零一二两三四五六七八九十百千万亿\d]+")
 # A bare 分 at a boundary is only a score when the left context says so.
 # `anchor 二分` and `二分、匹配` are the method, not two points.
 _SCORE_CONTEXT_RE = re.compile(
@@ -282,6 +291,11 @@ def _is_approximate_suffix(text: str, end: int) -> bool:
     if suffix in _APPROXIMATE_SUFFIXES:
         return True
     return suffix == "来" and text[end + 1 : end + 2] not in _LAI_VERB_CONTINUATIONS
+
+
+def _month_follows_explicit_day(text: str, end: int) -> bool:
+    day = _DAY_NUM_RE.match(text, end)
+    return day is not None and text[day.end() : day.end() + 1] in {"号", "日"}
 
 
 def _percent_to_arabic(match: re.Match[str]) -> str:
@@ -488,10 +502,26 @@ def apply_light_itn(text: str) -> str:
         # 二次方程 / 二次函数 / 二次元 use 次 as a degree or ordinal prefix.
         if unit == "次" and next_char in {"方", "函", "元"}:
             return m.group(0)
-        # 五月天 / 七月流火 / 十月围城 / 三月期 are lexical phrases, not
-        # month labels. A month followed by a noun or date continuation is
-        # still converted (三月承诺, 三月份, 三月五日).
-        if unit == "月" and next_char in {"天", "流", "围", "期", "花", "河"}:
+        # A month followed by ordinary text can be a title or idiom (六月飞雪,
+        # 八月未央, 五月花). Convert only an explicit month/date continuation,
+        # a complete date such as 三月二十三日, or a phrase boundary.
+        if unit == "月" and next_char:
+            numeral_next = next_char in _NUMERAL_CHARS or next_char.isdecimal()
+            if (
+                next_char not in _MONTH_CONTINUATIONS
+                and next_char not in _UNIT_BOUNDARIES
+                and not (
+                    numeral_next and _month_follows_explicit_day(m.string, m.end())
+                )
+            ):
+                return m.group(0)
+        # 日 likewise needs a closed duration/date context. In particular,
+        # 二月二 must not become 2月二 and then imply an invented day.
+        if (
+            unit == "日"
+            and previous_char not in {"月", "第"}
+            and next_char not in _DAY_CONTINUATIONS
+        ):
             return m.group(0)
         # 一元复始 is an idiom, and 一元二次方程 uses 元 as a degree marker.
         if unit == "元" and (next_char == "复" or next_char in _NUMERAL_CHARS):
