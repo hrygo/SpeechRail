@@ -1,6 +1,6 @@
 # SpeechRail Realtime ASR/TTS 协议契约
 
-> 契约版本：`6.6.7`；生效日期：2026-10-19。唯一机器 schema 是
+> 契约版本：`6.6.8`；生效日期：2026-10-19。唯一机器 schema 是
 > [`realtime-events.schema.json`](realtime-events.schema.json)，字段责任表是
 > [`realtime-field-matrix.json`](realtime-field-matrix.json)。
 
@@ -249,6 +249,7 @@ hypothesis 可修订，使用 `speechrail.transcription.hypothesis`：
 仍可转换；已由模型输出的阿拉伯数字不会据此反推或改成概数。
 “一点一点”“三点一线”“五点六点”“三点一刻”等普通表达或钟点表达保留原文，
 不将词内的“点”猜成小数点；含多个“点”或以“点”结尾的百分比候选不转换为百分数。
+“统一分配”“统一人员”等表达中的“统一”保留原文，不把词内的“一”当成带单位数量。
 
 三条准入语义是调用方可以依赖的：
 

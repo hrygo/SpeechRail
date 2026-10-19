@@ -56,6 +56,24 @@ def test_itn_numbers_with_units(source: str, expected: str) -> None:
     assert apply_light_itn(source) == expected
 
 
+@pytest.mark.parametrize("text", [
+    "统一分配", "统一人员安排", "统一人事管理", "统一号牌", "我们统一分两次处理",
+])
+def test_itn_preserves_unify_word_before_quantity_units(text: str) -> None:
+    expected = text.replace("两次", "2次")
+    assert apply_light_itn(text) == expected
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("一个人分两次", "1个人分2次"),
+    ("统一一百个人", "统一一百个人"),
+    ("总统三人随行", "总统3人随行"),
+    ("统一，三个人分两次", "统一，3个人分2次"),
+])
+def test_itn_preserves_numeric_units_next_to_unify_word(text: str, expected: str) -> None:
+    assert apply_light_itn(text) == expected
+
+
 def test_itn_empty_and_passthrough() -> None:
     assert apply_light_itn("") == ""
     assert apply_light_itn("Hello world 123!") == "Hello world 123!"
