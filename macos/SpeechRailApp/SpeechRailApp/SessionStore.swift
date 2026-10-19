@@ -374,11 +374,7 @@ public actor SessionStore: SessionArchiveWriting {
         line.attributionUnits = ordered
         line.speakerLabel = nil
         // 整段标量只在所有有内容的字符归同一人时给出；详细信息永远保留。
-        let contentRuns = line.speakerRuns.filter { run in
-            run.text.unicodeScalars.contains { !CharacterSet.whitespacesAndNewlines.contains($0) && !CharacterSet.punctuationCharacters.contains($0) }
-        }
-        let labels = Set(contentRuns.compactMap(\.speakerLabel))
-        let summary = labels.count == 1 && contentRuns.allSatisfy { $0.speakerLabel != nil } ? labels.first : nil
+        let summary = TranscriptSpeakerRun.summaryLabel(line.speakerRuns)
         let encoded = try JSONEncoder().encode(ordered)
         guard let json = String(data: encoded, encoding: .utf8) else {
             throw SessionStoreError.statementFailed("逐词归属无法保存")

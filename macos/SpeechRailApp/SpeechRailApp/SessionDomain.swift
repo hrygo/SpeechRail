@@ -2488,6 +2488,14 @@ public struct TranscriptSpeakerRun: Hashable, Sendable {
         return runs
     }
 
+    static func summaryLabel(_ runs: [Self]) -> String? {
+        let content = runs.filter { run in
+            run.text.unicodeScalars.contains { !CharacterSet.whitespacesAndNewlines.contains($0) && !CharacterSet.punctuationCharacters.contains($0) }
+        }
+        let labels = Set(content.compactMap(\.speakerLabel))
+        return labels.count == 1 && content.allSatisfy { $0.speakerLabel != nil } ? labels.first : nil
+    }
+
     /// 排版投影：标点只随正文显示，不生成独立未知段；原始证据由 project 保留。
     static func display(_ runs: [Self]) -> [Self] {
         var result: [Self] = []
@@ -2519,12 +2527,15 @@ public struct TranscriptSpeakerRun: Hashable, Sendable {
         return result.isEmpty ? runs : result
     }
 
-    static func formattedText(_ runs: [Self], names: [String: String], showUnknown: Bool) -> String {
+    static func formattedText(_ runs: [Self], names: [String: String], showUnknown: Bool,
+                              markdownFlags: String? = nil) -> String {
         runs.map { run in
             let name = run.speakerLabel.map { names[$0] ?? "说话人 \($0)" }
                 ?? (showUnknown ? "未确认说话人" : "")
-            return name.isEmpty ? run.text : "\(name)：\(run.text)"
-        }.joined(separator: "\n")
+            guard !name.isEmpty else { return run.text }
+            if let markdownFlags { return "**\(name)**\(markdownFlags)：\(run.text)" }
+            return "\(name)：\(run.text)"
+        }.joined(separator: markdownFlags == nil ? "\n" : "  \n  ")
     }
 }
 
@@ -3542,14 +3553,10 @@ public struct KnowledgeArchiveImportResult: Sendable {
 /// `structured.json` 的根。**字段名与内部类型解耦**：内部改字段名不会静默改掉
 /// 已经发出去的包，老包也不会因为新版本内部重构就读不回来（MA-19 开放格式）。
 public struct KnowledgeArchivePayload: Codable, Hashable, Sendable {
-    /// v3：补 `body_origin` 与 `parent_minutes_id`（MA-11 的正文出处与改稿血缘）。
-    /// v2 的包**读不了**——按项目策略不为旧包保留兼容层，代价同 v1→v2。
-    ///
-    /// 为什么要升：v2 丢的不只是两个字段。用户改过的纪要、补写过的说明，
-    /// 导入后 `body_origin` 落回列默认值 `'ai'`，于是**用户自己写的正文被标成
-    /// 「AI 整理」**；血缘断了则「撤销一次编辑」在往返之后直接失效。
-    /// 这两样都是「这段话到底出自谁、是哪一版改来的」，不能猜，只能重导。
-    public static let schemaID = "speechrail.meeting.knowledge-archive.payload/3"
+    /// v4 保留完整逐词归属与人工覆盖状态，旧 App 不能静默导入后丢失这些证据。
+    /// v3 文档可以按历史整行标签读取，不推断缺失的逐词或人工来源；v2 仍因缺正文出处与血缘拒绝。
+    public static let schemaID = "speechrail.meeting.knowledge-archive.payload/4"
+    static let legacySchemaID = "speechrail.meeting.knowledge-archive.payload/3"
 
     public var schema: String
     public var document: ArchiveDocument
@@ -3724,6 +3731,31 @@ public struct ArchiveSession: Codable, Hashable, Sendable {
     }
 }
 
+/// 归档边界使用 snake_case；本机存储与 wire DTO 分开，正文不复制到单元里。
+public struct ArchiveAttributionUnit: Codable, Hashable, Sendable {
+    public var id: String
+    public var textStart: Int
+    public var textEnd: Int
+    public var speakerLabel: String?
+    public var audioStartSample: Int?
+    public var audioEndSample: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case textStart = "text_start", textEnd = "text_end", speakerLabel = "speaker_label"
+        case audioStartSample = "audio_start_sample", audioEndSample = "audio_end_sample"
+    }
+
+    public init(_ unit: TranscriptAttributionUnit) {
+        id = unit.id; textStart = unit.textStart; textEnd = unit.textEnd; speakerLabel = unit.speakerLabel
+        audioStartSample = unit.audioStartSample; audioEndSample = unit.audioEndSample
+    }
+    var transcriptUnit: TranscriptAttributionUnit {
+        .init(id: id, textStart: textStart, textEnd: textEnd, speakerLabel: speakerLabel,
+              audioStartSample: audioStartSample, audioEndSample: audioEndSample)
+    }
+}
+
 public struct ArchiveLine: Codable, Hashable, Sendable {
     public var id: String
     public var sessionID: String
@@ -3731,6 +3763,8 @@ public struct ArchiveLine: Codable, Hashable, Sendable {
     public var role: String
     public var speakerLabel: String?
     public var text: String
+    public var attributionUnits: [ArchiveAttributionUnit]
+    public var speakerLabelIsManual: Bool
     public var tStart: Double?
     public var tEnd: Double?
     public var source: String
@@ -3750,6 +3784,8 @@ public struct ArchiveLine: Codable, Hashable, Sendable {
         case status
         case interrupted
         case starred
+        case attributionUnits = "attribution_units"
+        case speakerLabelIsManual = "speaker_label_is_manual"
         case sessionID = "session_id"
         case speakerLabel = "speaker_label"
         case tStart = "t_start"
@@ -3774,7 +3810,9 @@ public struct ArchiveLine: Codable, Hashable, Sendable {
         deviceSwitch: Bool,
         starred: Bool,
         timingQuality: String? = nil,
-        createdAt: Double
+        createdAt: Double,
+        attributionUnits: [ArchiveAttributionUnit] = [],
+        speakerLabelIsManual: Bool = false
     ) {
         self.id = id
         self.sessionID = sessionID
@@ -3782,6 +3820,8 @@ public struct ArchiveLine: Codable, Hashable, Sendable {
         self.role = role
         self.speakerLabel = speakerLabel
         self.text = text
+        self.attributionUnits = attributionUnits
+        self.speakerLabelIsManual = speakerLabelIsManual
         self.tStart = tStart
         self.tEnd = tEnd
         self.source = source
@@ -4301,7 +4341,9 @@ extension TranscriptLine {
             deviceSwitch: isDeviceSwitch,
             starred: isStarred,
             timingQuality: timingQuality?.rawValue,
-            createdAt: createdAt.timeIntervalSince1970
+            createdAt: createdAt.timeIntervalSince1970,
+            attributionUnits: attributionUnits.map(ArchiveAttributionUnit.init),
+            speakerLabelIsManual: speakerLabelIsManual
         )
     }
 }

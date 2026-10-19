@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail macOS App 开发与测试"
 status: active
-version: "0.6.15"
+version: "0.6.16"
 date: 2026-10-19
 ---
 
@@ -12,6 +12,23 @@ macOS 26-only 的特性优先级、服务侧独立 target 的边界，以及 Swi
 token；新页面不得自行定义颜色、间距、圆角和字体层级。
 
 存储、计算和采集的执行域与容量遵循[性能观测与回归](macos-app-performance.md)：MainActor 只发布有限快照；作品存储与导出由 actor 执行，文件播放用已验证 URL；采集 stop 等待实际回收，CaptureHelper 与 App 的内部 XPC 变更成套构建和回退。确定性回归、App 编译、实际性能与交互核验分别记录。
+
+## 会议知识归档与说话人归属
+
+知识归档的 `structured.json` 使用 `speechrail.meeting.knowledge-archive.payload/4`。
+每行必须包含 `attribution_units` 和 `speaker_label_is_manual`；单元字段为 `id`、
+`text_start`、`text_end`、`speaker_label`、`audio_start_sample`、`audio_end_sample`。
+文字范围沿用 Unicode scalar 半开区间，采样时间可成对缺省，未知标签保持未知。
+人工整行覆盖与自动逐词单元不能同时生效；人工清空同样保留覆盖状态。
+
+分享包与完整归档均保留所含行的逐词证据、原正文和引用身份。可读 Markdown 按共享显示投影
+呈现混合发言，排版不改变结构化证据。读取时检查范围、采样时间、单元身份、整行摘要与逐词
+一致性；非法包在写库前拒绝。同 ID 的逐词证据变化属于冲突，相同包重复导入保持幂等。
+
+既有 payload/3 包可读取历史整行标签，但缺失的逐词证据为空、人工来源为未确认，不进行推断，
+也不改写原包。payload/2 缺正文出处与修订血缘，仍要求重新导出。旧 App 拒绝 payload/4；
+需要支持此格式的 App 才能导入。回退 App 时保留原包，不能通过改 schema 数字降级。
+本机数据库仍使用 schema 14，无需为此格式变更执行迁移。
 
 ## 工具链
 

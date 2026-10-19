@@ -472,8 +472,9 @@ extension SessionStore {
                 try withStatement("""
                 INSERT INTO line (
                     id, session_id, ordinal, role, speaker_label, text, t_start, t_end,
-                    source, status, interrupted, device_switch, starred, timing_quality, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    source, status, interrupted, device_switch, starred, timing_quality, created_at,
+                    attribution_json, speaker_label_is_manual
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """) { statement in
                     bind(statement, 1, line.id)
                     bind(statement, 2, line.sessionID)
@@ -490,6 +491,10 @@ extension SessionStore {
                     bind(statement, 13, line.starred ? 1 : 0)
                     bind(statement, 14, line.timingQuality)
                     bind(statement, 15, line.createdAt)
+                    let units = line.attributionUnits.map(\.transcriptUnit)
+                    let data = try JSONEncoder().encode(units)
+                    bind(statement, 16, String(decoding: data, as: UTF8.self))
+                    bind(statement, 17, line.speakerLabelIsManual ? 1 : 0)
                     try step(statement)
                 }
                 inserted.lines += 1
@@ -768,15 +773,7 @@ extension SessionStore {
 
     /// 按 id 读一行转录。导入比对与回读核对都要用。
     public func transcriptLine(id: String) throws -> TranscriptLine? {
-        try withStatement("""
-        SELECT id, session_id, ordinal, role, speaker_label, text, t_start, t_end,
-               source, status, interrupted, device_switch, starred, timing_quality, created_at
-        FROM line WHERE id = ? LIMIT 1;
-        """) { statement -> TranscriptLine? in
-            bind(statement, 1, id)
-            guard try step(statement) == SQLITE_ROW else { return nil }
-            return Self.transcriptLine(from: statement)
-        }
+        try storedLine(id: id)
     }
 
     /// 读一版行修订。锚点带的原文来自修订，组装包与回读核对都要用它。
