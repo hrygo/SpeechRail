@@ -98,6 +98,7 @@ def _settings(**overrides: object) -> Settings:
 @pytest.mark.parametrize("legacy,dynamic", [(0, GIB), (GIB, 0), (GIB, 2 * GIB)])
 def test_enabled_alternatives_must_both_have_bounds_before_using_max(legacy, dynamic):
     from pathlib import Path
+    from unittest.mock import MagicMock
 
     settings = _settings(
         diarization_dynamic_enabled=True,
@@ -106,9 +107,18 @@ def test_enabled_alternatives_must_both_have_bounds_before_using_max(legacy, dyn
         diarization_resident_bytes=legacy,
         diarization_dynamic_resident_bytes=dynamic,
     )
-    assert services_module._diarization_declared_bytes(settings) == (
-        max(legacy, dynamic) if legacy and dynamic else 0
+    expected = max(legacy, dynamic) if legacy and dynamic else 0
+    assert services_module._diarization_declared_bytes(settings) == expected
+
+    services = services_module.build_app_services(
+        settings,
+        services_module.AppOverrides(diarization_engine=MagicMock()),
     )
+    status = services.runtime_resource_status()
+    component_bytes = status["declared_component_bytes"]
+    assert isinstance(component_bytes, dict)
+    assert component_bytes["diarization"] == (expected if expected > 0 else None)
+    assert status["declaration_complete"] is (expected > 0)
 
 
 def test_heavy_overlap_policy_certifies_diarization_axis_when_declared(

@@ -436,33 +436,20 @@ class AppServices:
         tts_enabled = self.tts_synthesizer is not None
         diarization_enabled = self.diarization_engine is not None
 
-        def declared_bytes(enabled: bool, value: int) -> int | None:
-            if not enabled:
-                return 0
-            return value if value > 0 else None
-
-        component_bytes: dict[str, int | None] = {
-            "service": _SERVICE_OVERHEAD_BYTES,
-            "asr": declared_bytes(asr_enabled, settings.asr_resident_bytes),
-            "tts": declared_bytes(
-                tts_enabled,
-                settings.tts_resident_bytes * tts_worker_count,
-            ),
-            "diarization": declared_bytes(
-                diarization_enabled,
-                max(
-                    settings.diarization_resident_bytes,
-                    settings.diarization_dynamic_resident_bytes
-                    if settings.diarization_dynamic_enabled
-                    else 0,
-                ),
-            ),
-        }
-        declared_footprint = (
-            sum(value for value in component_bytes.values() if value is not None)
-            if all(value is not None for value in component_bytes.values())
-            else None
+        declared = _declared_footprint(
+            settings,
+            asr_enabled=asr_enabled,
+            tts_enabled=tts_enabled,
+            diarization_enabled=diarization_enabled,
+            tts_worker_count=tts_worker_count,
         )
+        component_bytes: dict[str, int | None] = {
+            "service": declared.service_bytes,
+            "asr": declared.asr_bytes,
+            "tts": declared.tts_bytes,
+            "diarization": declared.diarization_bytes,
+        }
+        declared_footprint = declared.total_bytes
 
         try:
             physical_memory = detect_system_memory_bytes()
