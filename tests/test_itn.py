@@ -271,6 +271,26 @@ def test_itn_preserves_repeated_units(text: str) -> None:
 
 
 @pytest.mark.parametrize("text", [
+    "一次性",
+    "一次性用品",
+    "一次函数",
+    "一次能源",
+    "一次设备",
+    "一次成型",
+    "二次开发",
+    "二次加工",
+    "二次分配",
+    "二次验证",
+    "二次编码",
+    "二次采样",
+])
+def test_itn_preserves_ci_lexical_compounds(text: str) -> None:
+    """次 is a lexical or ordinal morpheme in these technical phrases."""
+
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize("text", [
     "二分法",
     "三分法",
     "四分卫",

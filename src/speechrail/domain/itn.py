@@ -43,6 +43,47 @@ _DECIMAL_BLOCKERS = frozenset("点滴刻线几多余")
 # deterministic from the following character.
 _FEN_CONTINUATIONS = frozenset("钟钱的")
 _UNIT_BOUNDARIES = frozenset("，。！？；：、,.!?;: \n\t”’）)】》")
+# 次 is a count in 一次会议 / 连续两次一致, but a lexical or ordinal morpheme
+# in these closed technical phrases. Keeping the spoken form is the safe
+# failure mode: a missed conversion loses digits, while 1次性 / 2次开发
+# corrupts the sentence. Only exact prefixes are listed so unseen contexts
+# still reach the numeric rule.
+_CI_LEXICAL_TERMS = frozenset({
+    "一次性",
+    "一次函数",
+    "一次方程",
+    "一次项",
+    "一次型",
+    "一次能源",
+    "一次电池",
+    "一次设备",
+    "一次回路",
+    "一次系统",
+    "一次文献",
+    "一次信息",
+    "一次成型",
+    "二次开发",
+    "二次加工",
+    "二次分配",
+    "二次污染",
+    "二次创业",
+    "二次利用",
+    "二次封装",
+    "二次验证",
+    "二次确认",
+    "二次排序",
+    "二次压缩",
+    "二次编码",
+    "二次解码",
+    "二次采样",
+    "二次回归",
+    "二次规划",
+    "二次曲线",
+    "二次项",
+    "二次型",
+    "二次判断",
+    "二次绑定",
+})
 # Adjacent digits can be an approximation or stutter. A trailing digit after
 # 百 or a larger magnitude can omit a place (三千五元), cross a price boundary
 # (五百一个), or belong to ordinary words (万一人家). Preserve these matches
@@ -234,6 +275,10 @@ def apply_light_itn(text: str) -> str:
         if cn_num == "一" and m.start() > 0 and m.string[m.start() - 1] == "统":
             return m.group(0)
         if _AMBIGUOUS_QUANTITY_RE.search(cn_num):
+            return m.group(0)
+        if unit == "次" and any(
+            m.string.startswith(term, m.start()) for term in _CI_LEXICAL_TERMS
+        ):
             return m.group(0)
         # 一次次 / 一天天 / 一秒秒 repeat the classifier as an adverb; the
         # first unit is not a separate count.
