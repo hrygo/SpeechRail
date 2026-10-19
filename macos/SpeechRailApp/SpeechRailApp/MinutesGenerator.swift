@@ -768,6 +768,21 @@ public final class MinutesGenerator {
             textFormat: MinutesCandidateCodec.jsonSchema
         )
         lastResponseID = responseID
+        // 必须先保存提交身份再轮询；否则多窗任务在等待期间中断会重复 POST。
+        let checkpointed = (try? await coordinator.recordMinutesWindow(
+            minutesID: claimed.id,
+            expectedAttempts: claimed.attempts,
+            record: MinutesWindowRecord(
+                index: window.index,
+                ownedUnitIDs: window.owned.map(\.id),
+                contextUnitIDs: (window.contextBefore + window.contextAfter).map(\.id),
+                outcome: .submitted,
+                remoteResponseID: responseID
+            )
+        )) ?? false
+        guard checkpointed else {
+            throw LLMError.transport("这一版的提交回执没有写回，提交结果需要确认。")
+        }
         if isOnlyWindow {
             // 单窗沿用行上的字段：MA-07 的恢复路径对短会保持原样。
             let recorded = (try? await coordinator.recordMinutesRemoteResponse(

@@ -92,6 +92,67 @@ final class MeetingMinutesJobRecoveryTests: XCTestCase {
 
     // MARK: - MC-28 持久远端响应 id / 提交结果未知
 
+    func testMultiwindowPollFailureRetainsResponseIDAndRetryDoesNotResubmit() async throws {
+        let store = try requireStore()
+        let sessionID = try requireSessionID()
+        _ = try await store.appendLine(LineDraft(
+            sessionID: sessionID, role: .speaker,
+            text: String(repeating: "这是会议记录。", count: 1_000),
+            source: .microphone, status: .final
+        ))
+        let lines = try await store.lines(sessionID: sessionID)
+        let units = MinutesGenerator.sourceUnits(lines: lines, names: [:])
+        let windows = MinutesWindowPlanner.plan(units: units, budget: MinutesGenerator.windowBudget)
+        XCTAssertGreaterThan(windows.count, 1)
+
+        typealias Transport = LLMProviderTests.FakeTransport
+        Transport.reset([
+            .init(status: 200, contentType: "application/json", body: #"{"id":"resp-window-1"}"#),
+            .init(status: 400, contentType: "application/json", body: #"{"error":{"message":"poll unavailable"}}"#)
+        ])
+        let settings = URLSessionConfiguration.ephemeral
+        settings.protocolClasses = [Transport.self]
+        let session = URLSession(configuration: settings)
+        defer { session.invalidateAndCancel() }
+        let provider = LLMProvider(session: session)
+        let resolved = ResolvedLLMConfiguration(
+            configuration: LLMConfiguration(baseURL: "https://minutes.invalid/v1", model: "fake-model"),
+            apiKey: nil, origin: .global
+        )
+        let coordinator = SessionCoordinator(store: store)
+        let generator = MinutesGenerator(coordinator: coordinator, provider: provider)
+        await generator.generate(sessionID: sessionID, resolvedConfiguration: resolved)
+        let versions = try await store.minutesVersions(sessionID: sessionID)
+        let version = try XCTUnwrap(versions.first)
+        let records = try await store.minutesWindows(minutesID: version.id)
+        let saved = try XCTUnwrap(records.first, "轮询失败不能丢失已经提交的窗口身份")
+        XCTAssertEqual(saved.remoteResponseID, "resp-window-1")
+        XCTAssertEqual(saved.outcome.rawValue, "submitted")
+        XCTAssertNil(saved.candidate)
+        XCTAssertEqual(saved.ownedUnitIDs, windows[0].owned.map(\.id))
+        XCTAssertEqual(saved.contextUnitIDs, (windows[0].contextBefore + windows[0].contextAfter).map(\.id))
+        let ledger = MinutesCoverageLedger(
+            eligibleUnitIDs: saved.ownedUnitIDs,
+            windows: [.init(index: saved.index, ownedUnitIDs: saved.ownedUnitIDs, outcome: saved.outcome)]
+        )
+        XCTAssertTrue(ledger.coveredUnitIDs.isEmpty, "已提交不能冒充已有可用结果")
+        XCTAssertEqual(ledger.gapUnitIDs, saved.ownedUnitIDs)
+
+        // 重开数据库模拟 App 重启；原窗口身份必须持久，而不是只留在生成器内存。
+        await store.close()
+        try await store.open()
+        Transport.reset([
+            .init(status: 400, contentType: "application/json", body: #"{"error":{"message":"poll unavailable"}}"#)
+        ])
+        let resumed = MinutesGenerator(coordinator: coordinator, provider: provider)
+        await resumed.retryFailedWindows(sessionID: sessionID, resolvedConfiguration: resolved)
+        XCTAssertEqual(Transport.requestURLs(), ["https://minutes.invalid/v1/responses/resp-window-1"])
+        let afterRetry = try await store.minutesVersions(sessionID: sessionID)
+        XCTAssertEqual(afterRetry.map(\.id), [version.id])
+        let retained = try await store.lines(sessionID: sessionID)
+        XCTAssertEqual(retained.map(\.text), lines.map(\.text))
+    }
+
     /// MC-28 前半句：response id 一拿到就落库；重开库读得回同一个 id。
     func testRemoteResponseIDSurvivesReopenAndIsNotResent() async throws {
         let store = try requireStore()

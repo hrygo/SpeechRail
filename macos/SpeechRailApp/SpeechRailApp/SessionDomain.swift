@@ -1793,6 +1793,8 @@ public enum MinutesWindowPlanner {
 
 /// 一个窗口的处理结果（覆盖账本的一行）。
 public enum MinutesWindowOutcome: String, Codable, Hashable, Sendable {
+    /// 远端已受理，尚未取得可用候选；恢复时继续查询原响应。
+    case submitted
     /// 已处理并产出候选。
     case processed
     /// 该窗口失败（网络、结构不合法、拒答等）。**可单独重试。**
