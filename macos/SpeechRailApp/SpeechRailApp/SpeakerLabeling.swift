@@ -460,7 +460,8 @@ public final class SpeakerLabeling {
                 let generation = lifecycle
                 let saved = try await coordinator.attachSpeakerLabel(lineID: lineID, label: target)
                 if lifecycle == generation {
-                    appliedByLine[lineID] = .init(requested: appliedByLine[lineID]?.requested ?? [], projection: saved)
+                    retireLine(lineID)
+                    appliedByLine[lineID] = .init(requested: [], projection: saved)
                 }
             } catch {
                 note = "拆出没能保存：\(error.localizedDescription)"

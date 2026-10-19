@@ -455,7 +455,9 @@ final class SpeakerLabelingPersistenceTests: XCTestCase {
         let initial: [RealtimeASRClient.AttributionUnit] = [.init(segmentUID: "one", speaker: "A", textStart: 0, textEnd: 2)]
         owner.register(units: initial, lineID: "甲乙", ordinal: 1)
         await owner.apply(units: initial)
+        XCTAssertEqual(owner.liveUnitCount, 1)
         await owner.split(lineIDs: ["甲乙"], to: "B")
+        XCTAssertEqual(owner.liveUnitCount, 0)
         await owner.apply(units: [.init(segmentUID: "one", speaker: "C", textStart: 0, textEnd: 2)])
         let rows = try await store.lines(sessionID: id)
         XCTAssertEqual(rows.first?.speakerLabel, "B")
@@ -470,6 +472,7 @@ final class SpeakerLabelingPersistenceTests: XCTestCase {
         owner.register(units: units, lineID: "甲乙", ordinal: 1)
         await owner.apply(units: units)
         await owner.split(lineIDs: ["甲乙"], to: "B")
+        XCTAssertEqual(owner.liveUnitCount, 0)
         await owner.apply(units: units)
         let rows = try await store.lines(sessionID: id)
         XCTAssertEqual(rows.first?.speakerLabel, "B")
