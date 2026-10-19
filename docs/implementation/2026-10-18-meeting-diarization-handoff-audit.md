@@ -2007,6 +2007,7 @@ PR 在 `62263ba5` 的 Swift Package Tests 因仍断言 `SessionStore.schemaVersi
 ### 定稿与归属事件的客户端链路重放（2026-10-19）
 
 对生产提交 `cd5f9066` 使用同批自然 1–4 人开发结果验证实际客户端链路，而非只写最终快照。
+其中 1 人条件仅为多人会议中的 36.05 秒单人发言前缀，不代表独立完整单人会议；其余为既有 2–4 人开发片段。
 同次制品的最终正文按原 item ID 恢复，并逐项核对已记录的正文长度；保留 227 条
 `segment_closed`、completed、alignment 和 diarization 更新的相对顺序及其采样、文字坐标与标签。
 实际 `RealtimeASRClient` 通过 fake socket 解析，再由实际 `MeetingSession`、保存 owner 和临时 SQLite
