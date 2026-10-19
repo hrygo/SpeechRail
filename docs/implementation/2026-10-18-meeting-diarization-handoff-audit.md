@@ -1748,3 +1748,28 @@ managed窗口先确认无请求/客户端，再停服；两个原生子进程终
 两场分别完成 16/10 次正式转写及对应对齐，分人 processed/stable 均达到全部输入终点，三个自有 worker 全部 wait 回收，冻结闭包前后稳定。结束调用观察为 77.40/56.29ms；250ms 顺序采样进程树 footprint 最大值为 7603528032/7601463768 bytes，缺 tick 为零，不能证明原子物理峰值、资源改善或计算 RTF。日志没有正式时延 policy 所需的 joined watermark 与稳定标签 sink ack，也缺少完整作用域关闭时刻；缺失观察按未通过处理，不用结束调用耗时代替正式 finish 延迟。
 
 维护后恢复原 3.12.0 quality/quality 服务；2026-10-19 01:57:58 UTC 独立核验唯一 listener/LaunchAgent PID 99067，health/readyz/metrics 均为 200，活动请求与已连接客户端为零，配置、selection 和 runtime target 摘要未变。没有下载模型、安装或切换生产默认。仓库外 `train-far-two-three-speaker-readiness-20261019` 与 `asr-natural-two-three-speaker-20261019` 保留来源、预登记、完整观察、独立复算和恢复证据；另备好十六段合计 104.54 秒的数字事实听音清单，真人结论留空。该扩验不改生产规则、契约或 CI，不引入新的仓库评测框架；正式人工、时延、资源及独立留出验收继续保持未完成。
+
+## 弱说话人损失与在线计时
+
+2026-10-19：进一步核查三人场的剩余损失。最少参考字符的说话人有 38 个删除字符，其中 21 个属于常见应答字符；编辑路径不唯一，字面字符分类不等于语义事实判断。一段较长发言开头的五个字符已经由 Qwen 识别，却归入上一位说话人的流；对应原生帧给上一人的分数超过 0.95，新说话人的分数低于 0.01。至少这部分是参考归属下的错标，不能当成 Qwen 漏识别；不通过降低置信门限或猜改正文修复。人工听音仍待完成，不能把其余删除全部认定为应答省略。
+
+随后在新输出前登记一个固定配对诊断：同一三人场 192.94 秒、相同 Qwen/aligner/C0/ITN 和请求，基线只恢复 `157b6bc6` 的归属 ledger，候选使用当前区间索引实现。每臂独立冷建 owner、按一倍速输入、只运行一次，顺序为基线、候选；没有 ASR、模型或归属规则切换。私有观察器在原发布函数完成真实 sink 返回后记录不可变文字单元的 final 状态和原生活动稳定水位，不改变公共负载、调度或标签。两臂各完成十次正式转写、十次对齐、一次分人终态；正文、对齐时间及实际匿名标签逐项相同，三个自有 worker 均已 wait 回收，冻结闭包前后稳定。
+
+| 服务侧观察口径 | 基线 | 候选 |
+|---|---:|---:|
+| 源输入起点到首次非空预览 | 3.311s | 3.313s |
+| 正式 ASR owned span 末尾到完成回调，按 span 时长加权 P95 | 0.751s | 0.756s |
+| 对齐单元音频末尾到已知稳定归属发布，按该单元 span 时长加权 P95 | 20.071s | 20.068s |
+| 最后源样本目标时刻到 session/owner/lifecycle 加入清理完成 | 0.384s | 0.388s |
+
+首次预览时钟包含源开头静音，不能解释为纯推理耗时；这里是进程内生产链路及 sink，没有 HTTP、WebSocket 或 UI 交付测量。两臂均有 961 个实际对齐单元，其中 22 个未知或未满足已知稳定条件，占单元音频权重 2.7424%；这些样本以原权重、正无穷保留，不因其低于 5% 而宣布全部完成。正式回调与逐对齐单元稳定等待的候选/基线比为 1.0078、0.9998，处于实跑前登记的 1.05、1.10 诊断界限内；每臂仅一次，不能升级为稳定性能非劣证明。
+
+必须区分上述对齐单元与正式 `sealed_owned_span_duration_v1` 的采样总体：后者由 `SealedBody.append` 登记 `CompletedText` 的整个封存 ASR owned span，前者是实际生产归属的细粒度对齐单元。不能把约 20 秒的逐对齐单元 P95 与正式 15 秒 owned-span 门直接比较。早期私有结果中的该比较已用 `latency-population-correction.json` 明确更正，原观察保留；没有调整门限，也不以较短回调耗时代替正式稳定标记。该次实跑未提供正式 owned-span 稳定标记，正式稳定时延继续为未证实。
+
+250ms 顺序采样 footprint 最大和为 7877599488/7623451048 bytes，基线无缺 tick、候选缺一个 tick，不作资源改善声明。另按 Apple XNU 的 `proc_pid_rusage` V4 设计累计物理 footprint 高水位检查，已核对本机 SDK ABI 与自身读取；但实际预清理检查点的覆盖/身份断言失败，没有有效的四进程累计上界，预登记的资源非劣检查不能通过。该 API 及结构定义见 [Apple XNU resource.h](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/resource.h)。不以 RSS、采样最大值或不完整进程集合补成物理峰值证据，也未为此反复实跑。
+
+维护后恢复原 3.12.0 quality/quality；2026-10-19 02:17:25 UTC 独立核验唯一 listener/LaunchAgent PID 2508，health/readyz/metrics 均为 200、无活动请求或已连接客户端，配置、selection、runtime target 摘要未变。完整配对输出、初步失效解释及更正保存在仓库外 `asr-stable-attribution-resource-20261019`。本次没有下载模型、安装、默认切换或留出访问；正式稳定时延、物理峰值及真人验收仍未完成。
+
+## CI 工作流读取门同步
+
+2026-10-19：证据提交 `be4dd026` 的 Swift Package Tests 在 `testPauseDuringCompletedProductionRefreshKeepsCompletionResult` 失败，原因是测试在固定 1000 次 `Task.yield()` 后认为读取门未触发；同一次执行其他 XCTest 和全部 658 项 Swift Testing 均完成，失败日志保留。测试读取门改用 `XCTestExpectation` 与实际 suspend/resume 事件同步，保留十秒超时看门狗；该用例的暂停阶段等待也按真实状态和有限时钟推进，并在释放读取门前确认 owner 已进入暂停。完成结果、候选显式采用和当前 revision 的业务断言继续保留，不改生产代码或掩盖失败。失败用例单跑及整个 `AudiobookWorkflowTests` 的 47 项定向 fake 测试通过；完整 CI 以修复后提交的独立结果为准。测试不依赖本机调度次数、真实语料或模型，未运行 UI 自动化；按逻辑提交 revert 可回退测试变更。
