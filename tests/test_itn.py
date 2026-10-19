@@ -631,3 +631,50 @@ def test_itn_still_converts_closed_unit_counts(
     text: str, expected: str
 ) -> None:
     assert apply_light_itn(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    # Implicit decimals: the unit rule only sees the first numeral, so a partial
+    # rewrite would leave 1米八 / 5公里二 / 3秒五 behind.
+    "一米八",
+    "一米七五",
+    "一米七五左右",
+    "两米一",
+    "三米五",
+    "五公里二",
+    "三秒五",
+    # Count enumerations that repeat the same classifier.
+    "三番五次",
+    "三番两次",
+    "三回五次",
+    "三遍五次",
+    "几番五次",
+    # Approximate bounds introduced by 上 / 成. 上100人 is not 上百人.
+    "上百人",
+    "上千人",
+    "上万人",
+    "上亿元",
+    "上百万个",
+    "成百上千人",
+    "成千上万人",
+])
+def test_itn_preserves_partial_or_approximate_quantity_shapes(text: str) -> None:
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    # 号/楼 close a noun phrase, so a following numeral starts a new one and
+    # the first count still converts.
+    ("五号楼三单元", "5号楼三单元"),
+    ("上三楼", "上3楼"),
+    # 两 is a spoken 2 in a decimal and a percentage all the way through.
+    ("两点五", "2.5"),
+    ("两点五米", "2.5米"),
+    ("两点五倍", "2.5倍"),
+    ("百分之两点五", "2.5%"),
+])
+def test_itn_keeps_whole_expressions_when_narrowing(
+    text: str, expected: str
+) -> None:
+    assert apply_light_itn(text) == expected
+    assert apply_light_itn(expected) == expected

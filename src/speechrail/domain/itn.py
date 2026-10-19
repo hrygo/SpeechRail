@@ -25,8 +25,10 @@ _DIGITS_MAP = {
 _DIGIT_SPELLINGS = {str(value): char for value, char in enumerate("零一二三四五六七八九")}
 
 _YEAR_RE = re.compile(r"([零一二三四五六七八九]{4})年")
-_PERCENT_RE = re.compile(r"百分之([零一二三四五六七八九十百千万点\d]+)")
-_DECIMAL_RE = re.compile(r"([零一二三四五六七八九十百千万\d]+)点([零一二三四五六七八九十\d]+)")
+_PERCENT_RE = re.compile(r"百分之([零一二两三四五六七八九十百千万点\d]+)")
+_DECIMAL_RE = re.compile(
+    r"([零一二两三四五六七八九十百千万\d]+)点([零一二两三四五六七八九十\d]+)"
+)
 _CN_NUM_RE = re.compile(r"[零一二两三四五六七八九十百千万亿]+")
 _NUMERAL_CHARS = frozenset("零一二两三四五六七八九十百千万亿")
 # These suffixes make a spoken value approximate: 百分之五十几 / 二十来 percent.
@@ -49,6 +51,15 @@ _DECIMAL_MEASURE_CONTINUATIONS = frozenset(
     "元美米公厘毫英平立岁号楼倍秒度克升吨瓦伏安欧焦卡帕赫牛字位个次天月日万%％到至~-—"
 )
 _UNIT_BOUNDARIES = frozenset("，。！？；：、,.!?;: \n\t”’）)】》")
+# A length or duration unit followed by another numeral is an implicit
+# decimal: 一米八 is 1.8 m, 五公里二 is 5.2 km, 三秒五 is 3.5 s. The unit rule
+# only sees the first half and would emit 1米八 / 5公里二 / 3秒五, which is
+# worse than leaving the spoken form untouched. 号 and 楼 are excluded because
+# 五号楼三单元 is two noun phrases, not one measurement.
+_IMPLICIT_DECIMAL_UNITS = frozenset({"米", "公里", "秒"})
+# 三番五次 / 三回五次 / 三遍五次 enumerate the same count with a classifier;
+# converting only the 次 half leaves a mixed 三番5次.
+_COUNT_IDIOM_PRECEDERS = frozenset("番回遍趟遭")
 # 次 is a count in 一次会议 / 连续两次一致, but a lexical or ordinal morpheme
 # in these closed technical phrases. Keeping the spoken form is the safe
 # failure mode: a missed conversion loses digits, while 1次性 / 2次开发
@@ -389,6 +400,18 @@ def apply_light_itn(text: str) -> str:
         unit = m.group(2)
         next_char = m.string[m.end() : m.end() + 1]
         previous_char = m.string[m.start() - 1 : m.start()] if m.start() else ""
+        # An implicit decimal keeps its whole spoken form: only rewriting the
+        # 米/公里/秒 half turns 一米八 into 1米八.
+        if unit in _IMPLICIT_DECIMAL_UNITS and next_char in _NUMERAL_CHARS:
+            return m.group(0)
+        # 三次 in 三番五次 belongs to an enumeration, not to an isolated count.
+        if unit == "次" and previous_char in _COUNT_IDIOM_PRECEDERS:
+            return m.group(0)
+        # 上百人 / 上万人 bound an approximate quantity from above; 上100人 and
+        # 上10000人 state a different thing. 三 in 上三楼 is a real count and
+        # still converts.
+        if previous_char == "上" and all(char in "百千万亿" for char in cn_num):
+            return m.group(0)
         # Preserve the natural classifier phrase 一个 (有一个 / 每一个).
         # Larger explicit quantities such as 十一个 still become 11个.
         if cn_num == "一" and unit == "个":
