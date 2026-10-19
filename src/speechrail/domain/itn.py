@@ -40,9 +40,6 @@ _DECIMAL_BLOCKERS = frozenset("点滴刻线几多余来")
 # deterministic from the following character.
 _FEN_CONTINUATIONS = frozenset("钟钱的")
 _UNIT_BOUNDARIES = frozenset("，。！？；：、,.!?;: \n\t”’）)】》")
-# 月 is a date unit in 三月份 / 三月初 / 三月五日 / 三月中旬. In 五月天,
-# 七月流火 and 十月围城 the following character starts a lexical phrase instead.
-_MONTH_CONTINUATIONS = frozenset("份初底中末间里的上下")
 # Adjacent digits can be an approximation or stutter. A trailing digit after
 # 百 or a larger magnitude can omit a place (三千五元), cross a price boundary
 # (五百一个), or belong to ordinary words (万一人家). Preserve these matches
@@ -279,13 +276,10 @@ def apply_light_itn(text: str) -> str:
         # 二次方程 / 二次函数 / 二次元 use 次 as a degree or ordinal prefix.
         if unit == "次" and next_char in {"方", "函", "元"}:
             return m.group(0)
-        # 五月天 / 七月流火 / 十月围城 are lexical phrases, not month labels.
-        if unit == "月" and not (
-            next_char in _MONTH_CONTINUATIONS
-            or not next_char
-            or next_char in _UNIT_BOUNDARIES
-            or next_char in _NUMERAL_CHARS
-        ):
+        # 五月天 / 七月流火 / 十月围城 / 三月期 are lexical phrases, not
+        # month labels. A month followed by a noun or date continuation is
+        # still converted (三月承诺, 三月份, 三月五日).
+        if unit == "月" and next_char in {"天", "流", "围", "期"}:
             return m.group(0)
         # 一元复始 is an idiom, and 一元二次方程 uses 元 as a degree marker.
         if unit == "元" and (next_char == "复" or next_char in _NUMERAL_CHARS):
