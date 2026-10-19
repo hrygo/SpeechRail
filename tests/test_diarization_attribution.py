@@ -44,6 +44,54 @@ def test_overlap_is_not_a_probability_distribution() -> None:
     assert support + support == 2.0
 
 
+def test_repeated_local_attribution_does_not_rescan_unrelated_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frames = tuple(_frame(i * 10, (i + 1) * 10, 0) for i in range(4096))
+    ledger = AttributionLedger(accepted_samples=lambda: 40960)
+    ledger.apply(_update(step=1, start=0, end=40960, frames=frames,
+                         processed=40960, stable=40960))
+    ledger.register("warmup", (TextUnit("warmup", 0, 1, SampleSpan(40000, 40010)),))
+    reads = 0
+    original = ActivityFrame.__getattribute__
+
+    def counted(frame: ActivityFrame, name: str):
+        nonlocal reads
+        if name == "span":
+            reads += 1
+        return original(frame, name)
+
+    monkeypatch.setattr(ActivityFrame, "__getattribute__", counted)
+    (result,) = ledger.register("next", (TextUnit("next", 0, 1, SampleSpan(40010, 40020)),))
+    assert result.speaker == "A" and result.state == "final"
+    # Work, rather than elapsed time: independent of CPU speed and CI load.
+    assert reads < 64
+
+
+def test_nested_earlier_activity_remains_evidence_for_later_text() -> None:
+    ledger = AttributionLedger(accepted_samples=lambda: 10000)
+    ledger.apply(_update(step=1, start=0, end=10000,
+                         frames=(_frame(0, 10000, 0), _frame(100, 200, 1),
+                                 _frame(300, 400, 1)),
+                         processed=10000, stable=10000))
+    (result,) = ledger.register("item", (TextUnit("late", 0, 1, SampleSpan(9000, 9100)),))
+    assert result.speaker == "A" and result.active_speakers == ("A",)
+
+
+def test_local_attribution_after_compaction_uses_retained_activity() -> None:
+    ledger = AttributionLedger(accepted_samples=lambda: 30)
+    ledger.apply(_update(step=1, start=0, end=30,
+                         frames=(_frame(0, 10, 0), _frame(10, 20, 1), _frame(20, 30, 2)),
+                         processed=30, stable=30))
+    ledger.register("warmup", tuple(
+        TextUnit(f"old-{i}", i, i + 1, SampleSpan(i * 10, (i + 1) * 10))
+        for i in range(3)
+    ))
+    ledger.compact(20)
+    (result,) = ledger.register("late", (TextUnit("late", 0, 1, SampleSpan(20, 30)),))
+    assert result.speaker == "C" and result.active_speakers == ("C",)
+
+
 def _scored_overlap(
     scores: tuple[float, ...] | None, *, start: int = 0, end: int = 1600,
     reason: str | None = None,

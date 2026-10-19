@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from hashlib import blake2b
+from itertools import accumulate
 from math import fsum
 
 from speechrail.domain.audio_timeline import SampleSpan
@@ -68,6 +70,7 @@ class AttributionLedger:
         self._latest_step = -1
         self._compacted_before = 0
         self._frames: tuple[ActivityFrame, ...] = ()
+        self._frame_index: tuple[tuple[int, ...], tuple[int, ...]] | None = None
         self._processed_through = 0
         self._stable_through = 0
         self._slot_labels: dict[int, str] = {}
@@ -157,6 +160,7 @@ class AttributionLedger:
                 key=lambda frame: (frame.span.start, frame.span.end),
             )
         )
+        self._frame_index = None
         changed: list[Attribution] = []
         for state in self._units.values():
             if state.attribution.state == "final":
@@ -211,7 +215,10 @@ class AttributionLedger:
             if state.attribution.state != "final" and state.unit.audio_span is not None
         ]
         frontier = min([before_sample, *pending])
-        self._frames = tuple(frame for frame in self._frames if frame.span.end > frontier)
+        retained = tuple(frame for frame in self._frames if frame.span.end > frontier)
+        if len(retained) != len(self._frames):
+            self._frame_index = None
+        self._frames = retained
         self._units = {
             uid: state
             for uid, state in self._units.items()
@@ -239,16 +246,25 @@ class AttributionLedger:
             changed.append(final)
         return tuple(changed)
 
+    def _intersecting_frames(self, span: SampleSpan) -> tuple[ActivityFrame, ...]:
+        index = self._frame_index
+        if index is None:
+            starts = tuple(frame.span.start for frame in self._frames)
+            # Ends need not be ordered: an earlier long frame can enclose many
+            # later short frames. Prefix maxima retain that overlapping evidence.
+            ends = tuple(accumulate((frame.span.end for frame in self._frames), max))
+            index = self._frame_index = (starts, ends)
+        starts, ends = index
+        first = bisect_right(ends, span.start)
+        last = bisect_left(starts, span.end)
+        return tuple(frame for frame in self._frames[first:last] if frame.span.end > span.start)
+
     def _evaluate(self, unit: TextUnit, *, revision: int) -> Attribution:
         if unit.audio_span is not None and unit.audio_span.start < self._compacted_before:
             return Attribution(unit.id, None, (), "final", "activity_history_evicted", revision)
         if unit.audio_span is None:
             return Attribution(unit.id, None, (), "final", "alignment_unavailable", revision)
-        frames = tuple(
-            frame for frame in self._frames
-            if frame.span.end > unit.audio_span.start
-            and frame.span.start < unit.audio_span.end
-        )
+        frames = self._intersecting_frames(unit.audio_span)
         support = {
             slot: union_support(
                 unit.audio_span,
