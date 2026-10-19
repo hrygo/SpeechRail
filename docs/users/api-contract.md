@@ -2,7 +2,7 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.18.3"
+version: "3.18.4"
 date: 2026-10-19
 ---
 
@@ -885,6 +885,11 @@ units。结束分人时，服务先发送全部已接纳段的归属修订，再
 只带最后完成段的快照，较早段的归属由先前 `diarization.updated` 保留。
 结束预算同时覆盖原生收尾与归属事件排空；超时保留 `finalization_timeout` 原因，
 取消时的活动流错误不会覆盖它，已确认的转写文字仍可使用。
+
+多人同时活动时，服务可用原生分人的独立分数辅助判断文字归属；只有活动覆盖、加权分数
+及领先差距均足够时才输出标签。缺少分数、活动证据有歧义或已降级时保留 unknown，
+不会为了减少未知标签把文字强行归给主讲。该判断不改变转写正文，final 归属不再修订；
+完整判定条件见 [Alignment 与 Diarization](../../contracts/realtime-openai.md#52-alignment-与-diarization)。
 
 `segment` 对齐可将模型时间网格上没有独立时长的 token 合并进相邻有效 segment，完整保留
 正文。Qwen3 的尾部结束点若恰好落在音频边界最近的模型格点，可在适配层以实际 PCM 边界

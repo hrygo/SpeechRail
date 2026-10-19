@@ -44,6 +44,92 @@ def test_overlap_is_not_a_probability_distribution() -> None:
     assert support + support == 2.0
 
 
+def _scored_overlap(
+    scores: tuple[float, ...] | None, *, start: int = 0, end: int = 1600,
+    reason: str | None = None,
+) -> ActivityFrame:
+    return ActivityFrame(SampleSpan(start, end), scores, frozenset({0, 1}), reason)
+
+
+def _attribute_frames(frames: tuple[ActivityFrame, ...]):
+    ledger = AttributionLedger(accepted_samples=lambda: 1600)
+    ledger.apply(_update(step=1, start=0, end=1600, frames=frames,
+                         processed=1600, stable=1600))
+    return ledger.register("item", (TextUnit("unit", 0, 1, SampleSpan(0, 1600)),))[0]
+
+
+def test_confident_independent_scores_resolve_ambiguous_activity() -> None:
+    # Both participants cover the whole word; their scores need not sum to one.
+    result = _attribute_frames((_scored_overlap((0.95, 0.70)),))
+    assert result.speaker == "A" and result.reason is None
+    assert result.active_speakers == ("A", "B") and result.state == "final"
+
+
+def test_probability_support_is_weighted_by_duration_not_frame_count() -> None:
+    result = _attribute_frames((
+        _scored_overlap((0.99, 0.51), end=160),
+        _scored_overlap((0.51, 0.95), start=160),
+    ))
+    assert result.speaker == "B"
+
+
+@pytest.mark.parametrize("frames", [
+    (_scored_overlap((0.95, 0.94)),),
+    (_scored_overlap((0.59, 0.25)),),
+    (_scored_overlap(None),),
+    (_scored_overlap((0.95, 0.70), end=800), _scored_overlap(None, start=800)),
+    (_scored_overlap((0.95, 0.70)), _scored_overlap((0.95, 0.70))),
+    (_scored_overlap((0.95, 0.70), end=1200),
+     _scored_overlap((0.95, 0.70), start=800)),
+    # Only one participant meets the existing activity coverage minimum.
+    (_scored_overlap((0.95, 0.70), end=880),
+     ActivityFrame(SampleSpan(880, 960), (0.95, 0.70), frozenset({0})),
+     ActivityFrame(SampleSpan(960, 1600), (0.95, 0.70), frozenset())),
+    # Scores without active evidence cannot contribute support.
+    (_scored_overlap((0.95, 0.70), end=900),
+     ActivityFrame(SampleSpan(900, 1600), (0.95, 0.70), frozenset())),
+])
+def test_ambiguous_or_incomplete_probability_evidence_stays_unknown(
+    frames: tuple[ActivityFrame, ...],
+) -> None:
+    result = _attribute_frames(frames)
+    assert result.speaker is None and result.reason == "insufficient_evidence"
+
+
+@pytest.mark.parametrize("reason", [
+    "activity_gap", "audio_expired", "model_not_ready", "speaker_capacity",
+    "identity_uncertain",
+])
+def test_probability_evidence_cannot_override_degradation_reason(reason: str) -> None:
+    result = _attribute_frames((_scored_overlap((0.95, 0.70), reason=reason),))
+    assert result.speaker is None and result.reason == reason
+
+
+def test_probability_evidence_preserves_unambiguous_activity_assignment() -> None:
+    result = _attribute_frames((
+        _scored_overlap((0.30, 0.99), end=800),
+        ActivityFrame(SampleSpan(800, 1600), (0.30, 0.99), frozenset({0})),
+    ))
+    assert result.speaker == "A"
+
+
+def test_changed_scores_revise_provisional_attribution_but_not_final_text() -> None:
+    ledger = AttributionLedger(accepted_samples=lambda: 3200)
+    ledger.apply(_update(step=1, start=0, end=1600,
+                         frames=(_scored_overlap((0.95, 0.70)),),
+                         processed=1600, stable=0))
+    (first,) = ledger.register("item", (TextUnit("unit", 0, 1, SampleSpan(0, 1600)),))
+    (changed,) = ledger.apply(_update(step=2, start=0, end=1600,
+                                     frames=(_scored_overlap((0.70, 0.95)),),
+                                     processed=1600, stable=1600))
+    assert first.speaker == "A" and first.state == "provisional"
+    assert changed.speaker == "B" and changed.state == "final"
+    assert changed.revision == first.revision + 1
+    assert ledger.apply(_update(step=3, start=1600, end=3200,
+                                frames=(_scored_overlap((0.95, 0.70), start=1600, end=3200),),
+                                processed=3200, stable=3200)) == ()
+
+
 def test_replacement_clips_a_crossing_frame_without_losing_the_stable_prefix() -> None:
     ledger = AttributionLedger(accepted_samples=lambda: 30 * 16000, label_mode="meeting_dynamic")
     ledger.apply(

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from hashlib import blake2b
+from math import fsum
 
 from speechrail.domain.audio_timeline import SampleSpan
 
@@ -243,14 +244,19 @@ class AttributionLedger:
             return Attribution(unit.id, None, (), "final", "activity_history_evicted", revision)
         if unit.audio_span is None:
             return Attribution(unit.id, None, (), "final", "alignment_unavailable", revision)
+        frames = tuple(
+            frame for frame in self._frames
+            if frame.span.end > unit.audio_span.start
+            and frame.span.start < unit.audio_span.end
+        )
         support = {
             slot: union_support(
                 unit.audio_span,
-                (frame.span for frame in self._frames if slot in frame.active_slots),
+                (frame.span for frame in frames if slot in frame.active_slots),
             )
             for slot in sorted(
                 set(self._slot_labels).union(
-                    slot for frame in self._frames for slot in frame.active_slots
+                    slot for frame in frames for slot in frame.active_slots
                 )
             )
         }
@@ -269,10 +275,7 @@ class AttributionLedger:
         final = unit.audio_span.end <= self._stable_through
         missing_reasons = {
             frame.reason
-            for frame in self._frames
-            if frame.span.end > unit.audio_span.start
-            and frame.span.start < unit.audio_span.end
-            and frame.reason is not None
+            for frame in frames if frame.reason is not None
         }
         unknown_reason = next(
             (
@@ -288,6 +291,10 @@ class AttributionLedger:
             ),
             "insufficient_evidence",
         )
+        if speaker is None and unknown_reason == "insufficient_evidence":
+            probability_winner = self._probability_winner(unit.audio_span, support, frames)
+            if probability_winner is not None:
+                speaker = self._label_for(probability_winner)
         return Attribution(
             unit_id=unit.id,
             speaker=speaker,
@@ -296,6 +303,44 @@ class AttributionLedger:
             reason=None if speaker is not None else unknown_reason,
             revision=revision,
         )
+
+    def _probability_winner(
+        self, span: SampleSpan, support: dict[int, float], frames: tuple[ActivityFrame, ...],
+    ) -> int | None:
+        """Resolve ambiguous activity with independent, duration-weighted scores.
+
+        Scores are support for each speaker, not a distribution over speakers.
+        Missing or overlapping evidence cannot be counted as extra confidence.
+        """
+        eligible = tuple(
+            slot for slot, value in support.items()
+            if value > 0 and value >= self._policy.min_support
+        )
+        if len(eligible) < 2:
+            return None
+        previous_end = span.start
+        for frame in frames:
+            start, end = max(span.start, frame.span.start), min(span.end, frame.span.end)
+            if frame.scores is None or start < previous_end:
+                return None
+            previous_end = end
+        duration = span.end - span.start
+        ranked = sorted(
+            (
+                (slot, fsum(
+                    (min(span.end, frame.span.end) - max(span.start, frame.span.start))
+                    * frame.scores[slot]
+                    for frame in frames
+                    if frame.scores is not None and slot in frame.active_slots
+                ) / duration)
+                for slot in eligible
+            ),
+            key=lambda item: (-item[1], item[0]),
+        )
+        winner, score = ranked[0]
+        if score >= self._policy.min_support and score - ranked[1][1] >= self._policy.min_margin:
+            return winner
+        return None
 
     def _label_for(self, slot: int) -> str:
         label = self._slot_labels.get(slot)
