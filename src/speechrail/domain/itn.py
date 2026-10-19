@@ -150,6 +150,8 @@ def _fold_decimal_digits(text: str) -> str:
 def _percent_to_arabic(match: re.Match[str]) -> str:
     raw = _fold_decimal_digits(match.group(1))
     if "点" in raw:
+        if raw.count("点") != 1 or raw.endswith("点"):
+            return match.group(0)
         parts = raw.split("点", 1)
         int_part = _chinese_to_int(parts[0])
         dec_part = "".join(str(_DIGITS_MAP.get(c, c)) for c in parts[1])
@@ -164,6 +166,11 @@ def _percent_to_arabic(match: re.Match[str]) -> str:
 
 
 def _decimal_to_arabic(match: re.Match[str]) -> str:
+    # 点 can join ordinary phrases or clock alternatives: 一点一点,
+    # 三点一线, 五点六点. Inspect the complete greedy match's boundary in
+    # the callback so rejection cannot backtrack into a shorter decimal.
+    if match.string[match.end():match.end() + 1] in {"点", "滴", "刻", "线"}:
+        return match.group(0)
     int_str, dec_str = (_fold_decimal_digits(part) for part in match.group(1, 2))
     int_val = _chinese_to_int(int_str) if not int_str.isdigit() else int(int_str)
     dec_val = "".join(str(_DIGITS_MAP.get(c, c)) for c in dec_str)

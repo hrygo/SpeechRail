@@ -22,6 +22,26 @@ def test_itn_decimals() -> None:
     assert apply_light_itn("温度是零点八五度") == "温度是0.85度"
 
 
+@pytest.mark.parametrize("text", [
+    "一点一点地积累", "一点一滴的变化", "生活两点一线", "保持三点一线",
+    "五点六点再说", "七八点八九点", "七八点七八点", "二点五二点五",
+    "三点一刻开始", "十二点一点左右",
+])
+def test_itn_does_not_read_ordinary_phrases_or_clock_lists_as_decimals(text: str) -> None:
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("三点一四米", "3.14米"), ("零点零五元", "0.05元"),
+    ("三点五。", "3.5。"), ("二点五到三点五", "2.5到3.5"),
+    ("三点五万元", "3.5万元"), ("百分之三点五", "3.5%"),
+    ("百分之一点一点", "百分之一点一点"),
+    ("百分之五十点几", "百分之五十点几"),
+])
+def test_itn_preserves_explicit_decimal_contexts(text: str, expected: str) -> None:
+    assert apply_light_itn(text) == expected
+
+
 @pytest.mark.parametrize(
     ("source", "expected"),
     [

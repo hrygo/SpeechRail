@@ -1,6 +1,6 @@
 # SpeechRail Realtime ASR/TTS 协议契约
 
-> 契约版本：`6.6.6`；生效日期：2026-10-19。唯一机器 schema 是
+> 契约版本：`6.6.7`；生效日期：2026-10-19。唯一机器 schema 是
 > [`realtime-events.schema.json`](realtime-events.schema.json)，字段责任表是
 > [`realtime-field-matrix.json`](realtime-field-matrix.json)。
 
@@ -247,6 +247,8 @@ hypothesis 可修订，使用 `speechrail.transcription.hypothesis`：
 标准 ASR hypothesis 与 completed 的轻量数字规范化保留相邻非零中文数字形成的歧义数量，
 例如“五六个人”“七八十个”“两三个”，不猜成 56、80 或 23。明确年份、小数及规范计数
 仍可转换；已由模型输出的阿拉伯数字不会据此反推或改成概数。
+“一点一点”“三点一线”“五点六点”“三点一刻”等普通表达或钟点表达保留原文，
+不将词内的“点”猜成小数点；含多个“点”或以“点”结尾的百分比候选不转换为百分数。
 
 三条准入语义是调用方可以依赖的：
 
