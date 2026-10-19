@@ -389,8 +389,8 @@ struct AudiobookExportSheet: View {
                         Text("统一音量")
                             .font(SpeechRailDesignTokens.Typography.body)
                     }
-                    .accessibilityHint("让导出成品的各章听起来音量一致；默认关闭。")
-                    Text("让导出成品的各章听起来音量一致；默认关闭。")
+                    .accessibilityHint("按整本统一音量，减少章节之间忽大忽小；默认关闭。")
+                    Text("按整本统一音量，减少章节之间忽大忽小；默认关闭。")
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 }
