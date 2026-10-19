@@ -26,7 +26,7 @@ _DIGIT_SPELLINGS = {str(value): char for value, char in enumerate("零一二三�
 
 _YEAR_RE = re.compile(r"([零一二三四五六七八九]{4})年")
 _PERCENT_RE = re.compile(r"百分之([零一二三四五六七八九十百千万点\d]+)")
-_DECIMAL_RE = re.compile(r"([零一二三四五六七八九十百千万\d]+)点([零一二三四五六七八九\d]+)")
+_DECIMAL_RE = re.compile(r"([零一二三四五六七八九十百千万\d]+)点([零一二三四五六七八九十\d]+)")
 _CN_NUM_RE = re.compile(r"[零一二两三四五六七八九十百千万亿]+")
 _NUMERAL_CHARS = frozenset("零一二两三四五六七八九十百千万亿")
 # These suffixes make a spoken value approximate: 百分之五十几 / 二十来 percent.
@@ -332,18 +332,27 @@ def _decimal_to_arabic(match: re.Match[str]) -> str:
         return match.group(0)
     int_str, dec_str = (_fold_decimal_digits(part) for part in match.group(1, 2))
     if not set(dec_str) <= _DECIMAL_DIGIT_CHARS:
-        return match.group(0)
+        # A magnitude word inside the fraction can only be a closed decimal
+        # when an explicit unit follows: 三点十四秒 is 3.14秒, while 七点四十
+        # and 七点四十分 are clock readings.
+        if tail not in _DECIMAL_MEASURE_CONTINUATIONS:
+            return match.group(0)
+        try:
+            dec_digits = str(_chinese_to_int(dec_str))
+        except (KeyError, ValueError):
+            return match.group(0)
+    else:
+        dec_digits = "".join(str(_DIGITS_MAP.get(c, c)) for c in dec_str)
     int_val = _chinese_to_int(int_str) if not int_str.isdigit() else int(int_str)
-    dec_val = "".join(str(_DIGITS_MAP.get(c, c)) for c in dec_str)
     # 10.05 and 10:05 are the same string in speech. A two-digit fraction is
     # only a decimal when the right side proves it (单位, %, 万, a range).
     if (
-        len(dec_str) == 2
-        and int(dec_val) <= 59
+        len(dec_digits) == 2
+        and int(dec_digits) <= 59
         and tail not in _DECIMAL_MEASURE_CONTINUATIONS
     ):
         return match.group(0)
-    return f"{int_val}.{dec_val}"
+    return f"{int_val}.{dec_digits}"
 
 
 def apply_light_itn(text: str) -> str:

@@ -412,6 +412,8 @@ def test_itn_preserves_two_digit_decimals_that_could_be_clock_minutes(
 @pytest.mark.parametrize(("text", "expected"), [
     ("三点一四一五九", "3.14159"),
     ("三点一四米", "3.14米"),
+    ("三点十四秒", "3.14秒"),
+    ("三点十四米", "3.14米"),
     ("十点零五秒", "10.05秒"),
     ("百分之三点一四", "3.14%"),
     ("三点五。", "3.5。"),
@@ -420,6 +422,17 @@ def test_itn_still_converts_decimals_with_a_closed_context(
     text: str, expected: str
 ) -> None:
     assert apply_light_itn(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "三点十四秒",
+    "十点零五秒",
+    "三点一四米",
+    "七点四十万",
+])
+def test_itn_is_idempotent_on_closed_decimals(text: str) -> None:
+    once = apply_light_itn(text)
+    assert apply_light_itn(once) == once
 
 
 @pytest.mark.parametrize("text", [
