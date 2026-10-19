@@ -245,4 +245,4 @@ pair3 的前台与隐藏态差异均很小；它与既有 pair1 和下文 pair4 
 
 ## 2026-10-19 follow-up: #369 targeted rerun at HEAD 6cce1d62
 
-2026-10-19（Asia/Shanghai）在干净 main（`6cce1d62`，与远端一致）复核 #369 确定性证据，未改任何源码：drain/stop、metrics、mixer、transcript、dubbing export、relay、提词匹配/定位等受影响 suites 分三批重跑全部通过（0 failures）；`python3 scripts/check_macos_test_target_coverage.py` 返回 `macos-test-target-coverage: OK`；`git diff --check` 通过。六类 operation 的生产记录点与 snapshot 断言、24/44.1/48 kHz EOS 参考比对回归均在当前 HEAD 存在且通过。本次复核不增加真实硬件、Release 配对性能或 UI 交互证据；关闭 #369 仍须在 issue 内明确这些未验收项。
+2026-10-19（Asia/Shanghai）在干净 main（`6cce1d62`，与远端一致）复核 #369 的确定性证据，未改任何源码。覆盖六类 operation 的定向 filter（`AudioCaptureDrainTests`、`CaptureAudioRelayTests`、`StreamMixerTests`、`TranscriptPresentationTests`、`DubbingExportStreamingTests`、`TeleprompterScriptPerformanceTests`）一次跑通 **40 tests / 6 suites、0 failures**；相邻的 `TeleprompterPositionTests`（提词定位）与 `AppPerformanceMetricsTests` 补跑同样通过。`python3 scripts/check_macos_test_target_coverage.py` 返回 `macos-test-target-coverage: OK`；`git diff --check` 通过。源码核对确认六类 operation 的生产记录点与 snapshot 断言、24/44.1/48 kHz EOS 参考比对回归均在当前 HEAD 存在。本次复核不增加真实硬件、Release 配对性能或 UI 交互证据；关闭 #369 仍须在 issue 内明确这些未验收项。
