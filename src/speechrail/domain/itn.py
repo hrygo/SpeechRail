@@ -31,10 +31,13 @@ _CN_NUM_RE = re.compile(r"[零一二两三四五六七八九十百千万亿]+")
 _NUMERAL_CHARS = frozenset("零一二两三四五六七八九十百千万亿")
 # These suffixes make a spoken value approximate: 百分之五十几 / 二十来 percent.
 # The digits before them are a bound, not the value, so they are left as words.
-_APPROXIMATE_SUFFIXES = frozenset("几多余来")
+_APPROXIMATE_SUFFIXES = frozenset("几多余")
+# 来 is approximate in 二十来个 / 五十来岁, but it starts the ordinary verb
+# 来自 / 来看 / 来说 in 百分之五十来自学校. Only the former is approximate.
+_LAI_VERB_CONTINUATIONS = frozenset("自看说讲源到回临")
 # A decimal followed by these characters is an idiom, a clock expression or an
 # approximation, not a closed decimal value: 一点一点, 三点一刻, 三点五几.
-_DECIMAL_BLOCKERS = frozenset("点滴刻线几多余来")
+_DECIMAL_BLOCKERS = frozenset("点滴刻线几多余")
 # 分 is a measurement unit in 三分钟 / 五分钱 / 三分的差距. In 二分法, 四分卫,
 # 五分制, 四分五裂 and 一分为二 it is a lexical morpheme. Only the former set is
 # deterministic from the following character.
@@ -160,11 +163,18 @@ def _fold_decimal_digits(text: str) -> str:
     )
 
 
+def _is_approximate_suffix(text: str, end: int) -> bool:
+    suffix = text[end : end + 1]
+    if suffix in _APPROXIMATE_SUFFIXES:
+        return True
+    return suffix == "来" and text[end + 1 : end + 2] not in _LAI_VERB_CONTINUATIONS
+
+
 def _percent_to_arabic(match: re.Match[str]) -> str:
     raw = _fold_decimal_digits(match.group(1))
     # 百分之五十几 / 百分之二十来 name an approximate range. Rewriting the
     # closed prefix to 50% / 20% and leaving 几 / 来 behind corrupts the phrase.
-    if match.string[match.end() : match.end() + 1] in _APPROXIMATE_SUFFIXES:
+    if _is_approximate_suffix(match.string, match.end()):
         return match.group(0)
     if "点" in raw:
         if raw.count("点") != 1 or raw.endswith("点"):
@@ -186,7 +196,10 @@ def _decimal_to_arabic(match: re.Match[str]) -> str:
     # 点 can join ordinary phrases or clock alternatives: 一点一点,
     # 三点一线, 五点六点. Inspect the complete greedy match's boundary in
     # the callback so rejection cannot backtrack into a shorter decimal.
-    if match.string[match.end() : match.end() + 1] in _DECIMAL_BLOCKERS:
+    if (
+        match.string[match.end() : match.end() + 1] in _DECIMAL_BLOCKERS
+        or _is_approximate_suffix(match.string, match.end())
+    ):
         return match.group(0)
     int_str, dec_str = (_fold_decimal_digits(part) for part in match.group(1, 2))
     int_val = _chinese_to_int(int_str) if not int_str.isdigit() else int(int_str)

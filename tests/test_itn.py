@@ -243,6 +243,7 @@ def test_itn_folds_ascii_digits_inside_a_mixed_numeral_run() -> None:
     "增长了百分之五十多",
     "增长了百分之五十余",
     "增长了百分之二十来",
+    "增长了百分之五十来个",
     "大约百分之五十几左右",
     "完成度三点五几",
     "完成度三点五多",
@@ -342,6 +343,7 @@ def test_itn_preserves_unit_idioms(text: str) -> None:
     ("两天一致", "2天一致"),
     ("五月五号", "5月5号"),
     ("十五日之前", "15日之前"),
+    ("其中百分之五十来自学校", "其中50%来自学校"),
 ])
 def test_itn_still_converts_closed_quantities(text: str, expected: str) -> None:
     """Narrowing the rules must not drop unambiguous measurement contexts."""
