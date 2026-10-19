@@ -2556,3 +2556,13 @@ shape 握手；v2 只证明既有二进制／模型字节身份，没有运行�
 核对 3.12.0 quality/quality、唯一 LaunchAgent/listener、health/readyz/metrics 200、
 无活动请求／客户端，配置、selection 与 runtime target 不变。六处原未提交差异逐字节保留。
 私有证据在 dia-natural-human-c1-20261019 与 dia-natural-human-v2-20261019。
+
+### 会后归属体验与资源摘要修复（2026-10-19）
+
+记录库人数摘要原先只读整段 `speaker_label`，混合逐词归属的行没有整段标签，导致会议人数少计。摘要现合并整段标签与有效逐词标签、去重并按会议隔离；人工整段修正优先，会后卡片复用同一行级说话人投影。定向 Swift 测试覆盖 A/B 混合归属、未知片段、跨会议隔离、人工覆盖与清除后的结果。`swift test --package-path macos/SpeechRailApp --filter TranscriptPagingTests/testLibraryCountsWordSpeakersAndRespectsManualCorrectionAndSessionScope` 通过，`scripts/macos_app_build.sh` 通过。Xcode `--test-unit` 的目标过滤器在测试启动前报 `No test bundle product for testingSpecifier`；等价定向 SwiftPM 用例已通过。
+
+手动拆分写入成功后会撤销该行缓存的自动单元映射，迟到的流式标签及重复旧快照不能覆盖用户选择。`swift test --package-path macos/SpeechRailApp --filter SpeakerLabelingPersistenceTests` 的 14 项通过。
+
+ITN 将无歧义的三至四位连续中文数字保留为完整数字串，可正确处理“一二三号”和“二三四五楼”；原有“一个”措辞保护继续生效。资源状态摘要现在复用 governor 的 `_declared_footprint` 结果，避免监控字段与准入估算采用不同公式。`tests/test_itn.py` 89 项、`tests/test_diarization_overlap_policy.py` 14 项通过，相关 Python 源码和测试 Ruff 检查通过。
+
+上述是文字归一化、人工归属保护、人数摘要和资源诊断一致性的定向实现及回归；本轮没有新增真实模型推理或自然音频对照，因此不把这些结果记作整体 ASR/分人模型质量提升。
