@@ -104,6 +104,10 @@ public final class MeetingSession {
         public var speakerLabel: String?
         public var attributionUnits: [TranscriptAttributionUnit] = []
         public var speakerLabelIsManual = false
+        public var displaySpeakerRuns: [TranscriptSpeakerRun] {
+            TranscriptSpeakerRun.display(TranscriptSpeakerRun.project(text: text, attributionUnits: attributionUnits,
+                speakerLabel: speakerLabel, speakerLabelIsManual: speakerLabelIsManual))
+        }
         public var source: SessionLineSource
         public var isDeviceSwitch: Bool
         /// 这一行的 `tStart` / `tEnd` 是不是**说话时刻**。
@@ -308,6 +312,16 @@ public final class MeetingSession {
         // 重开才出现——用户看到的是"我改了名字，什么提示都没有"。
         self.labeling.onSourceRevision = { [weak self] in
             guard let self, let sessionID = self.sessionID else { return }
+            for line in self.transcriptPresentation.rows {
+                guard let saved = self.labeling.attributedLine(forLineID: line.id), saved.sessionID == sessionID,
+                      line.speakerLabel != saved.speakerLabel || line.attributionUnits != saved.attributionUnits
+                        || line.speakerLabelIsManual != saved.speakerLabelIsManual else { continue }
+                self.transcriptPresentation.update(id: line.id) {
+                    $0.speakerLabel = saved.speakerLabel
+                    $0.attributionUnits = saved.attributionUnits
+                    $0.speakerLabelIsManual = saved.speakerLabelIsManual
+                }
+            }
             await self.minutes.reload(sessionID: sessionID)
         }
     }

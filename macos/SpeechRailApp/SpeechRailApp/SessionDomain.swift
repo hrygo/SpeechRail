@@ -2459,6 +2459,73 @@ public struct TranscriptSpeakerRun: Hashable, Sendable {
     public var speakerLabel: String?
     public var textStart: Int
     public var textEnd: Int
+
+    static func project(text: String, attributionUnits: [TranscriptAttributionUnit],
+                        speakerLabel: String?, speakerLabelIsManual: Bool) -> [Self] {
+        let scalars = Array(text.unicodeScalars)
+        guard !speakerLabelIsManual, !attributionUnits.isEmpty,
+              let units = try? TranscriptAttributionUnit.validated(attributionUnits, text: text) else {
+            return [.init(text: text, speakerLabel: speakerLabel, textStart: 0, textEnd: scalars.count)]
+        }
+        var runs: [TranscriptSpeakerRun] = []
+        func append(_ start: Int, _ end: Int, _ label: String?) {
+            guard end > start else { return }
+            let value = String(String.UnicodeScalarView(scalars[start..<end]))
+            if let last = runs.last, last.speakerLabel == label {
+                runs[runs.count - 1].text += value
+                runs[runs.count - 1].textEnd = end
+            } else {
+                runs.append(.init(text: value, speakerLabel: label, textStart: start, textEnd: end))
+            }
+        }
+        var cursor = 0
+        for unit in units {
+            append(cursor, unit.textStart, nil)
+            append(unit.textStart, unit.textEnd, unit.speakerLabel)
+            cursor = unit.textEnd
+        }
+        append(cursor, scalars.count, nil)
+        return runs
+    }
+
+    /// 排版投影：标点只随正文显示，不生成独立未知段；原始证据由 project 保留。
+    static func display(_ runs: [Self]) -> [Self] {
+        var result: [Self] = []
+        var leading = ""
+        let separators = CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)
+        for run in runs {
+            var text = run.text
+            var start = run.textStart
+            if run.speakerLabel == nil {
+                let punctuation = String(String.UnicodeScalarView(text.unicodeScalars.prefix { separators.contains($0) }))
+                let count = punctuation.unicodeScalars.count
+                if result.isEmpty { leading += punctuation } else {
+                    result[result.count - 1].text += punctuation
+                    result[result.count - 1].textEnd = start + count
+                }
+                start += count
+                text = String(String.UnicodeScalarView(text.unicodeScalars.dropFirst(count)))
+                if text.isEmpty { continue }
+            }
+            if let last = result.last, last.speakerLabel == run.speakerLabel {
+                result[result.count - 1].text += text
+                result[result.count - 1].textEnd = run.textEnd
+            } else {
+                result.append(.init(text: leading + text, speakerLabel: run.speakerLabel,
+                                    textStart: start - leading.unicodeScalars.count, textEnd: run.textEnd))
+            }
+            leading = ""
+        }
+        return result.isEmpty ? runs : result
+    }
+
+    static func formattedText(_ runs: [Self], names: [String: String], showUnknown: Bool) -> String {
+        runs.map { run in
+            let name = run.speakerLabel.map { names[$0] ?? "说话人 \($0)" }
+                ?? (showUnknown ? "未确认说话人" : "")
+            return name.isEmpty ? run.text : "\(name)：\(run.text)"
+        }.joined(separator: "\n")
+    }
 }
 
 /// `line` 一行（转录 / 字幕 / 对话正文共用）。
@@ -2523,31 +2590,13 @@ public struct TranscriptLine: Identifiable, Hashable, Sendable {
 
     /// 每个原字符恰出现一次。未对齐的正文保留为未知，不能借用相邻人的标签。
     public var speakerRuns: [TranscriptSpeakerRun] {
-        let scalars = Array(text.unicodeScalars)
-        guard !speakerLabelIsManual, !attributionUnits.isEmpty,
-              let units = try? TranscriptAttributionUnit.validated(attributionUnits, text: text) else {
-            return [.init(text: text, speakerLabel: speakerLabel, textStart: 0, textEnd: scalars.count)]
-        }
-        var runs: [TranscriptSpeakerRun] = []
-        func append(_ start: Int, _ end: Int, _ label: String?) {
-            guard end > start else { return }
-            let value = String(String.UnicodeScalarView(scalars[start..<end]))
-            if let last = runs.last, last.speakerLabel == label {
-                runs[runs.count - 1].text += value
-                runs[runs.count - 1].textEnd = end
-            } else {
-                runs.append(.init(text: value, speakerLabel: label, textStart: start, textEnd: end))
-            }
-        }
-        var cursor = 0
-        for unit in units {
-            append(cursor, unit.textStart, nil)
-            append(unit.textStart, unit.textEnd, unit.speakerLabel)
-            cursor = unit.textEnd
-        }
-        append(cursor, scalars.count, nil)
-        return runs
+        TranscriptSpeakerRun.project(text: text, attributionUnits: attributionUnits,
+                                    speakerLabel: speakerLabel, speakerLabelIsManual: speakerLabelIsManual)
     }
+
+    public var displaySpeakerRuns: [TranscriptSpeakerRun] { TranscriptSpeakerRun.display(speakerRuns) }
+
+    public var speakerLabels: [String] { Array(Set(displaySpeakerRuns.compactMap(\.speakerLabel))).sorted() }
 
     /// SRT 时间码与导出物一律从 `tStart` 取（§6.5）。没有时间戳的行导不出时间码。
     public var hasTimecode: Bool { tStart != nil }

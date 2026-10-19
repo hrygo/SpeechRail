@@ -264,12 +264,16 @@ extension MeetingView {
                         quality: line.timingQuality
                     )
                 )
-            speakerColumn(for: line)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Text(line.text)
-                    .font(SpeechRailDesignTokens.Typography.body)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
+                ForEach(line.displaySpeakerRuns, id: \.textStart) { run in
+                    HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                        speakerColumn(for: line, label: run.speakerLabel)
+                        Text(run.text)
+                            .font(SpeechRailDesignTokens.Typography.body)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
                 if line.isDeviceSwitch {
                     Text("换设备")
                         .font(SpeechRailDesignTokens.Typography.caption)
@@ -284,10 +288,14 @@ extension MeetingView {
                 NSPasteboard.general.setString(line.text, forType: .string)
             }
             Button("复制这一句（含时间与说话人）") {
-                let speaker = line.speakerLabel.map { meeting.labeling.displayText(for: $0) } ?? "未标说话人"
+                let names = Dictionary(uniqueKeysWithValues: meeting.labeling.labels.map {
+                    ($0, meeting.labeling.displayText(for: $0))
+                })
+                let text = TranscriptSpeakerRun.formattedText(line.displaySpeakerRuns, names: names,
+                    showUnknown: meeting.labeling.isEnabled || !line.attributionUnits.isEmpty)
                 let timecode = TranscriptTimeWindow.timecodeColumn(observed: line.start, quality: line.timingQuality)
                 NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString("[\(timecode)] \(speaker)：\(line.text)", forType: .string)
+                NSPasteboard.general.setString("[\(timecode)] \(text)", forType: .string)
             }
         }
     }
@@ -319,8 +327,8 @@ extension MeetingView {
 
     /// 说话人列：点它就能改名、标记为我或与其他说话人合并。未指定时展示轻量占位。
     @ViewBuilder
-    private func speakerColumn(for line: MeetingSession.Line) -> some View {
-        if let label = line.speakerLabel {
+    private func speakerColumn(for line: MeetingSession.Line, label: String?) -> some View {
+        if let label {
             Menu {
                 Button {
                     isLabelingSpeakers = true
@@ -366,7 +374,7 @@ extension MeetingView {
                 if !existing.isEmpty {
                     Divider()
                     ForEach(existing, id: \.self) { other in
-                        Button("指定为 \(meeting.labeling.displayText(for:other))") {
+                        Button("整段指定为 \(meeting.labeling.displayText(for:other))") {
                             Task { await meeting.labeling.split(lineIDs: [line.id], to: other) }
                         }
                     }
@@ -375,7 +383,7 @@ extension MeetingView {
                 HStack(spacing: 2) {
                     Image(systemName: "person.badge.plus")
                         .font(SpeechRailDesignTokens.Typography.chipIcon)
-                    Text("未标说话人")
+                    Text("未确认说话人")
                         .font(SpeechRailDesignTokens.Typography.caption)
                 }
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary.opacity(0.8))

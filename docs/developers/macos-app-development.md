@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail macOS App 开发与测试"
 status: active
-version: "0.6.14"
+version: "0.6.15"
 date: 2026-10-19
 ---
 
@@ -311,3 +311,11 @@ JSON `speechrail.session.export/1` 保留原有字段并追加 `speaker_label_is
 `attribution_units`；每个单元包含 `id`、Unicode scalar 半开范围 `text_start` / `text_end`、
 可空的 `speaker_label`，以及存在时的 `audio_start_sample` / `audio_end_sample`。
 采样范围属于原连接音轨，不能直接当作会话墙钟时间；`text` 始终保存完整原文。
+
+会议会中列表、会后文字记录与含说话人的复制使用 `displaySpeakerRuns`：按原文字坐标依次显示
+各人的文字，未知词保持“未确认说话人”。该排版投影合并相邻同标签内容，仅把标点和空白随正文排版，
+不改 `speakerRuns` 的原始未知范围。说话人编号与姓名筛选包含混合行的所有标签。
+“复制这一句”仍取原文；含说话人的单句／全文复制保留各分段及原行时间码。
+从某个未知分段打开的人工指定入口明确作用于整段原转录行，不假装只修改一个词。
+人工归属保存后立即同步当前可见行，修订事件写入失败也要反映实际已保存的归属并保留失败提示；
+纪要复核状态仍由实际修订记录决定。旧生命周期的行不能刷新到新会话。

@@ -100,29 +100,14 @@ public struct SessionExportPayload: Sendable {
         guard line.role == .speaker, !line.speakerLabelIsManual, !line.attributionUnits.isEmpty else {
             return prefix(speakerText(for: line)) + line.text
         }
-        var blocks: [(label: String?, body: String)] = []
-        var leading = ""
+        let runs = line.displaySpeakerRuns
         let separators = CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)
-        for run in line.speakerRuns {
-            var text = run.text
-            if run.speakerLabel == nil {
-                let punctuation = String(String.UnicodeScalarView(text.unicodeScalars.prefix { separators.contains($0) }))
-                if blocks.isEmpty { leading += punctuation } else { blocks[blocks.count - 1].body += punctuation }
-                text = String(String.UnicodeScalarView(text.unicodeScalars.dropFirst(punctuation.unicodeScalars.count)))
-                if text.isEmpty { continue }
-            }
-            if let last = blocks.last, last.label == run.speakerLabel {
-                blocks[blocks.count - 1].body += text
-            } else {
-                blocks.append((run.speakerLabel, leading + text))
-            }
-            leading = ""
-        }
-        if blocks.isEmpty { return line.text }
-        return blocks.map { block in
-            let name = block.label.map { speakerNames[$0] ?? "说话人 \($0)" } ?? "未确认说话人"
-            return prefix(name) + block.body
-        }.joined(separator: markdown ? "  \n  " : "\n")
+        guard runs.contains(where: { !$0.text.trimmingCharacters(in: separators).isEmpty }) else { return line.text }
+        if !markdown { return TranscriptSpeakerRun.formattedText(runs, names: speakerNames, showUnknown: true) }
+        return runs.map { run in
+            let name = run.speakerLabel.map { speakerNames[$0] ?? "说话人 \($0)" } ?? "未确认说话人"
+            return prefix(name) + run.text
+        }.joined(separator: "  \n  ")
     }
 
 }

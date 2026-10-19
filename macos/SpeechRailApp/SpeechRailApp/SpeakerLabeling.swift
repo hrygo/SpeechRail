@@ -475,12 +475,13 @@ public final class SpeakerLabeling {
                 sessionID: sessionID,
                 detail: "\(target)|拆出 \(lineIDs.count) 句"
             )
-            await onSourceRevision?()
         } catch {
             // 归属已经改成功了，只是没记上修订事件。
             // 这要说出来：否则用户看到的纪要不会提示复核，而界面上什么异常都没有。
             note = "归属已经改了，但没能记下这次修订：\(error.localizedDescription)"
         }
+        // Saved attribution must reach the live list even when revision bookkeeping fails.
+        await onSourceRevision?()
     }
 
     private func nextAvailableLabel() -> String? {

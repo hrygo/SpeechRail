@@ -97,6 +97,41 @@ final class MeetingRecoveryMaterialTests: XCTestCase {
         XCTAssertEqual(lines.first?["speaker_label_is_manual"] as? Bool, false)
     }
 
+    func testLiveAndStoredPresentationKeepMixedSpeakersUnicodeAndUnknownWords() {
+        let units: [TranscriptAttributionUnit] = [
+            .init(id: "a", textStart: 1, textEnd: 3, speakerLabel: "A"),
+            .init(id: "b", textStart: 4, textEnd: 5, speakerLabel: "B"),
+            .init(id: "unknown", textStart: 6, textEnd: 7, speakerLabel: nil)
+        ]
+        let stored = TranscriptLine(id: "display", sessionID: "session", ordinal: 1,
+            role: .speaker, text: "（甲😀，乙？丙。）", source: .microphone, attributionUnits: units)
+        let live = MeetingSession.Line(id: "display", ordinal: 1, text: stored.text, start: 1, end: 3,
+            speakerLabel: nil, attributionUnits: units, source: .microphone, isDeviceSwitch: false, timingQuality: .aligned)
+        XCTAssertEqual(stored.displaySpeakerRuns, live.displaySpeakerRuns)
+        XCTAssertEqual(stored.displaySpeakerRuns.map(\.text), ["（甲😀，", "乙？", "丙。）"])
+        XCTAssertEqual(stored.displaySpeakerRuns.map(\.speakerLabel), ["A", "B", nil])
+        XCTAssertEqual(stored.displaySpeakerRuns.map(\.textStart), [0, 4, 6])
+        XCTAssertEqual(stored.displaySpeakerRuns.map(\.textEnd), [4, 6, 9])
+        XCTAssertEqual(stored.displaySpeakerRuns.map(\.text).joined(), stored.text)
+        XCTAssertEqual(stored.speakerLabels, ["A", "B"])
+        XCTAssertEqual(TranscriptSpeakerRun.formattedText(live.displaySpeakerRuns, names: ["B": "主讲"], showUnknown: true),
+                       "说话人 A：（甲😀，\n主讲：乙？\n未确认说话人：丙。）")
+        XCTAssertEqual(stored.attributionUnits, units, "presentation cannot rewrite the acoustic evidence")
+    }
+
+    func testManualDisplayAndLegacyCopyPreserveWholeLineSemantics() {
+        var line = TranscriptLine(id: "manual", sessionID: "session", ordinal: 1, role: .speaker,
+            speakerLabel: "C", text: "甲乙", source: .microphone,
+            attributionUnits: [.init(id: "stale", textStart: 0, textEnd: 1, speakerLabel: "A")],
+            speakerLabelIsManual: true)
+        XCTAssertEqual(line.displaySpeakerRuns.map(\.speakerLabel), ["C"])
+        XCTAssertEqual(line.speakerLabels, ["C"])
+        line.attributionUnits = []
+        line.speakerLabel = nil
+        line.speakerLabelIsManual = false
+        XCTAssertEqual(TranscriptSpeakerRun.formattedText(line.displaySpeakerRuns, names: [:], showUnknown: false), "甲乙")
+    }
+
     func testUnalignedPunctuationDoesNotCreateRepeatedSpeakerHeaders() async throws {
         let store = try XCTUnwrap(store)
         let id = try await seedSession()

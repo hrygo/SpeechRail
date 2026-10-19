@@ -579,6 +579,41 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         XCTAssertEqual(rows.first?.timingQuality, .aligned)
     }
 
+    func testManualSpeakerAssignmentImmediatelyUpdatesVisibleLineWithoutAnotherEvent() async throws {
+        let h = try await makeHarness()
+        let id = try await startRecording(h)
+        try await h.emit(.segmentClosed(itemID: "manual-item", sampleSpan: .init(startSample: 0, endSample: 24_000),
+                                        reason: .vad, commitEventID: nil))
+        try await h.emit(.completed(itemID: "manual-item", transcript: "甲乙"))
+        try await h.settle { $0.session.lines.count == 1 }
+        let settled = await h.session.waitForPendingSaves(recordID: id)
+        XCTAssertTrue(settled.isComplete)
+        let line = try XCTUnwrap(h.session.lines.first)
+        // The live menu also calls SpeakerLabeling directly; its revision callback must refresh presentation.
+        await h.session.labeling.split(lineIDs: [line.id], to: "B")
+        XCTAssertEqual(h.session.lines.first?.speakerLabel, "B")
+        XCTAssertEqual(h.session.lines.first?.speakerLabelIsManual, true)
+        XCTAssertEqual(h.session.lines.first?.text, "甲乙")
+        let saved = try await h.store.storedLine(id: line.id)
+        XCTAssertEqual(saved?.speakerLabel, h.session.lines.first?.speakerLabel)
+    }
+
+    func testManualAssignmentRemainsVisibleWhenRevisionRecordingFails() async throws {
+        let h = try await makeHarness()
+        let id = try await startRecording(h)
+        try await h.emit(.segmentClosed(itemID: "manual-failed-revision", sampleSpan: .init(startSample: 0, endSample: 24_000),
+                                        reason: .vad, commitEventID: nil))
+        try await h.emit(.completed(itemID: "manual-failed-revision", transcript: "正文保留"))
+        try await h.settle { $0.session.lines.count == 1 }
+        _ = await h.session.waitForPendingSaves(recordID: id)
+        let line = try XCTUnwrap(h.session.lines.first)
+        try await h.store.execute("CREATE TEMP TRIGGER reject_speaker_revision BEFORE INSERT ON session_change WHEN NEW.kind = 'speaker' BEGIN SELECT RAISE(ABORT, 'injected'); END;")
+        await h.session.labeling.split(lineIDs: [line.id], to: "B")
+        XCTAssertEqual(h.session.lines.first?.speakerLabel, "B")
+        XCTAssertEqual(h.session.lines.first?.speakerLabelIsManual, true)
+        XCTAssertNotNil(h.session.labeling.note, "revision failure remains visible even though attribution was saved")
+    }
+
     func testSavedMeetingAttributionHonoursProjectionCapacity() async throws {
         let h = try await makeHarness(configuration: .init(maximumPendingProjections: 0))
         await h.clients.openGate()

@@ -249,16 +249,22 @@ extension MeetingView {
         .padding(.top, SpeechRailDesignTokens.Spacing.sm)
     }
 
+    private var reviewSpeakerDisplayNames: [String: String] {
+        let labels = reviewLines.flatMap(\.speakerLabels)
+        let ordinals = SpeakerLabeling.displayOrdinals(for: labels)
+        return Dictionary(uniqueKeysWithValues: Set(labels).map { label in
+            (label, SpeakerLabeling.chipText(label: label, displayName: reviewSpeakerNames[label], ordinal: ordinals[label]))
+        })
+    }
+
     private var filteredReviewLines: [TranscriptLine] {
         let keyword = transcriptSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !keyword.isEmpty else { return reviewLines }
-        let ordinals = SpeakerLabeling.displayOrdinals(for: reviewLines.compactMap(\.speakerLabel))
+        let names = reviewSpeakerDisplayNames
         return reviewLines.filter { line in
-            let speakerMatches = line.speakerLabel.map { label in
-                SpeakerLabeling.chipText(label: label, displayName: reviewSpeakerNames[label],
-                                         ordinal: ordinals[label])
-                    .localizedCaseInsensitiveContains(keyword)
-            } ?? false
+            let speakerMatches = line.speakerLabels.contains { label in
+                (names[label] ?? label).localizedCaseInsensitiveContains(keyword)
+            }
             return line.text.localizedCaseInsensitiveContains(keyword) || speakerMatches
         }
     }
@@ -315,7 +321,7 @@ extension MeetingView {
     }
 
     private var transcriptBody: some View {
-        let ordinals = SpeakerLabeling.displayOrdinals(for: reviewLines.compactMap(\.speakerLabel))
+        let names = reviewSpeakerDisplayNames
         return VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
             if reviewLines.isEmpty {
                 Text("这一场还没有文字记录。")
@@ -328,46 +334,41 @@ extension MeetingView {
                     .padding(.vertical, SpeechRailDesignTokens.Spacing.md)
             }
             ForEach(filteredReviewLines) { line in
-                let speakerText = line.speakerLabel.map {
-                    SpeakerLabeling.chipText(
-                        label: $0,
-                        displayName: reviewSpeakerNames[$0], ordinal: ordinals[$0]
-                    )
-                }
+                let text = TranscriptSpeakerRun.formattedText(line.displaySpeakerRuns, names: names,
+                    showUnknown: !line.attributionUnits.isEmpty)
                 HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
                     Text(Self.timecode(line.tStart ?? 0))
                         .font(SpeechRailDesignTokens.Typography.technicalValue)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                        .frame(
-                            width: SpeechRailDesignTokens.Layout.sessionTimecodeColumnWidth,
-                            alignment: .leading
-                        )
-                    if let speakerText {
-                        Text(speakerText)
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                            .frame(
-                                width: SpeechRailDesignTokens.Layout.sessionSpeakerColumnWidth,
-                                alignment: .leading
-                            )
+                        .frame(width: SpeechRailDesignTokens.Layout.sessionTimecodeColumnWidth, alignment: .leading)
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                        ForEach(line.displaySpeakerRuns, id: \.textStart) { run in
+                            HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                                if run.speakerLabel != nil || !line.attributionUnits.isEmpty {
+                                    Text(run.speakerLabel.map { names[$0] ?? "说话人 \($0)" } ?? "未确认说话人")
+                                        .font(SpeechRailDesignTokens.Typography.caption)
+                                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                                        .frame(width: SpeechRailDesignTokens.Layout.sessionSpeakerColumnWidth, alignment: .leading)
+                                }
+                                Text(run.text)
+                                    .font(SpeechRailDesignTokens.Typography.body)
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
                     }
-                    Text(line.text)
-                        .font(SpeechRailDesignTokens.Typography.body)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
                 }
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel("\(Self.timecode(line.tStart ?? 0)) \(speakerText ?? "") \(line.text)")
+                .accessibilityLabel("\(Self.timecode(line.tStart ?? 0)) \(text)")
                 .contextMenu {
                     Button("复制这一句") {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(line.text, forType: .string)
                     }
                     Button("复制这一句（含时间与说话人）") {
-                        let prefix = speakerText.map { "[\(Self.timecode(line.tStart ?? 0))] \($0)：" } ?? "[\(Self.timecode(line.tStart ?? 0))] "
                         NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(prefix + line.text, forType: .string)
+                        NSPasteboard.general.setString("[\(Self.timecode(line.tStart ?? 0))] \(text)", forType: .string)
                     }
                 }
             }
@@ -375,18 +376,11 @@ extension MeetingView {
     }
 
     private var formattedTranscriptForCopy: String {
-        let ordinals = SpeakerLabeling.displayOrdinals(for: reviewLines.compactMap(\.speakerLabel))
+        let names = reviewSpeakerDisplayNames
         return filteredReviewLines.map { line in
-            let timecode = Self.timecode(line.tStart ?? 0)
-            if let label = line.speakerLabel {
-                let speaker = SpeakerLabeling.chipText(
-                    label: label,
-                    displayName: reviewSpeakerNames[label],
-                    ordinal: ordinals[label]
-                )
-                return "[\(timecode)] \(speaker)：\(line.text)"
-            }
-            return "[\(timecode)] \(line.text)"
+            let text = TranscriptSpeakerRun.formattedText(line.displaySpeakerRuns, names: names,
+                showUnknown: !line.attributionUnits.isEmpty)
+            return "[\(Self.timecode(line.tStart ?? 0))] \(text)"
         }.joined(separator: "\n")
     }
 
