@@ -408,6 +408,12 @@ def apply_light_itn(text: str) -> str:
                 return m.group(0)
         if cn_num == "一" and unit == "人" and previous_char in {"同", "另"}:
             return m.group(0)
+        # 二人转 / 三人行 / 三人成虎 are lexical or idiomatic, not counts.
+        if unit == "人" and (
+            (cn_num == "二" and next_char == "转")
+            or (cn_num == "三" and next_char in {"行", "成"})
+        ):
+            return m.group(0)
         # A single digit before 元 is usually a term (二元组/一元论/同一元素).
         # Currency needs either an explicit place or a money continuation.
         if (
@@ -427,7 +433,7 @@ def apply_light_itn(text: str) -> str:
         # 一日三秋 / 一日千里 / 一日为师 / 一日不见 use 日 inside an idiom.
         if unit == "日" and (
             next_char in _NUMERAL_CHARS
-            or next_char in {"为", "不"}
+            or next_char in {"为", "不", "谈"}
             or (cn_num == "一" and next_char == "之")
         ):
             return m.group(0)
@@ -476,7 +482,7 @@ def apply_light_itn(text: str) -> str:
         # 五月天 / 七月流火 / 十月围城 / 三月期 are lexical phrases, not
         # month labels. A month followed by a noun or date continuation is
         # still converted (三月承诺, 三月份, 三月五日).
-        if unit == "月" and next_char in {"天", "流", "围", "期"}:
+        if unit == "月" and next_char in {"天", "流", "围", "期", "花", "河"}:
             return m.group(0)
         # 一元复始 is an idiom, and 一元二次方程 uses 元 as a degree marker.
         if unit == "元" and (next_char == "复" or next_char in _NUMERAL_CHARS):
