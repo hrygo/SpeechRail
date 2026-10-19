@@ -667,6 +667,8 @@ def test_itn_preserves_partial_or_approximate_quantity_shapes(text: str) -> None
     # the first count still converts.
     ("五号楼三单元", "5号楼三单元"),
     ("上三楼", "上3楼"),
+    # 回 here closes the verb 返回; it is not the classifier in 三回五次.
+    ("返回一次", "返回1次"),
     # 两 is a spoken 2 in a decimal and a percentage all the way through.
     ("两点五", "2.5"),
     ("两点五米", "2.5米"),

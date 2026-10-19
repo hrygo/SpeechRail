@@ -405,8 +405,14 @@ def apply_light_itn(text: str) -> str:
         if unit in _IMPLICIT_DECIMAL_UNITS and next_char in _NUMERAL_CHARS:
             return m.group(0)
         # 三次 in 三番五次 belongs to an enumeration, not to an isolated count.
+        # The classifier has to follow a numeral: 返回一次 is the verb 返回 plus
+        # an ordinary count and still converts.
         if unit == "次" and previous_char in _COUNT_IDIOM_PRECEDERS:
-            return m.group(0)
+            before_classifier = (
+                m.string[m.start() - 2 : m.start() - 1] if m.start() >= 2 else ""
+            )
+            if before_classifier in _NUMERAL_CHARS or before_classifier == "几":
+                return m.group(0)
         # 上百人 / 上万人 bound an approximate quantity from above; 上100人 and
         # 上10000人 state a different thing. 三 in 上三楼 is a real count and
         # still converts.
