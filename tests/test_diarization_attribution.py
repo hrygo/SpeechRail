@@ -132,6 +132,26 @@ def test_probability_support_is_weighted_by_duration_not_frame_count() -> None:
     assert result.speaker == "B"
 
 
+def test_probability_uses_mean_score_while_each_speaker_is_active() -> None:
+    # The shorter-active speaker can still own overlapped decoder text when
+    # their score is much stronger during the interval in which they speak.
+    result = _attribute_frames((
+        _scored_overlap((0.65, 0.95), end=960),
+        ActivityFrame(SampleSpan(960, 1600), (0.65, 0.95), frozenset({0})),
+    ))
+    assert result.speaker == "B"
+
+
+def test_mean_score_does_not_override_single_speaker_coverage() -> None:
+    # Only A reaches the 0.60 coverage floor; B's higher score during the short
+    # overlap is not enough to revise a clear single-speaker attribution.
+    result = _attribute_frames((
+        _scored_overlap((0.65, 0.99), end=800),
+        ActivityFrame(SampleSpan(800, 1600), (0.95, 0.99), frozenset({0})),
+    ))
+    assert result.speaker == "A"
+
+
 @pytest.mark.parametrize("frames", [
     (_scored_overlap((0.95, 0.94)),),
     (_scored_overlap((0.59, 0.25)),),

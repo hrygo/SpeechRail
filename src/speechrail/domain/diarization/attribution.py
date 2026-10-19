@@ -380,11 +380,23 @@ class AttributionLedger:
         if speaker is None and unknown_reason == "insufficient_evidence":
             probability_winner = self._probability_winner(unit.audio_span, support, frames)
             if probability_winner is None:
-                probability_winner = self._interior_pause_winner(unit.audio_span, frames)
+                probability_winner = self._interior_pause_winner(
+                    unit.audio_span, frames
+                )
             if probability_winner is not None:
                 speaker = self._label_for(probability_winner)
             elif final:
                 speaker = self._continuous_speaker(unit.audio_span, support)
+        # Two speakers can each cover the activity floor while the coverage
+        # margin still happens to clear 0.10. That is an overlap, not a settled
+        # answer: compare mean confidence inside each candidate's own active
+        # frames. A single clearly covering speaker is never revised.
+        if final and unknown_reason == "insufficient_evidence":
+            mean_winner = self._mean_probability_winner(
+                unit.audio_span, support, frames
+            )
+            if mean_winner is not None:
+                speaker = self._label_for(mean_winner)
         return Attribution(
             unit_id=unit.id,
             speaker=speaker,
@@ -458,6 +470,62 @@ class AttributionLedger:
                     for frame in frames
                     if frame.scores is not None and slot in frame.active_slots
                 ) / duration)
+                for slot in eligible
+            ),
+            key=lambda item: (-item[1], item[0]),
+        )
+        winner, score = ranked[0]
+        if score >= self._policy.min_support and score - ranked[1][1] >= self._policy.min_margin:
+            return winner
+        return None
+
+    def _mean_probability_winner(
+        self, span: SampleSpan, support: dict[int, float], frames: tuple[ActivityFrame, ...],
+    ) -> int | None:
+        """Score overlap by mean confidence while each speaker is active.
+
+        The duration-weighted rule above divides by the whole unit, so a
+        speaker who is active for a shorter part of an overlapped unit is
+        penalised even when their own frames are far more confident. Averaging
+        inside each candidate's active frames removes that length bias without
+        lowering the existing support floor, score floor or margin. Missing,
+        non-contiguous, overlapping or unscored frames still make the result
+        unknown, so this cannot invent confidence where evidence is broken.
+        """
+        eligible = tuple(
+            slot for slot, value in support.items()
+            if value > 0 and value >= self._policy.min_support
+        )
+        if len(eligible) < 2:
+            return None
+        previous_end = span.start
+        for frame in frames:
+            start, end = max(span.start, frame.span.start), min(span.end, frame.span.end)
+            if frame.reason is not None or frame.scores is None or start != previous_end:
+                return None
+            previous_end = end
+        if previous_end != span.end:
+            return None
+        ranked = sorted(
+            (
+                (
+                    slot,
+                    fsum(
+                        (
+                            min(span.end, frame.span.end)
+                            - max(span.start, frame.span.start)
+                        )
+                        * frame.scores[slot]
+                        for frame in frames
+                        if frame.scores is not None and slot in frame.active_slots
+                    )
+                    / sum(
+                        min(span.end, frame.span.end)
+                        - max(span.start, frame.span.start)
+                        for frame in frames
+                        if slot in frame.active_slots
+                    ),
+                )
                 for slot in eligible
             ),
             key=lambda item: (-item[1], item[0]),
