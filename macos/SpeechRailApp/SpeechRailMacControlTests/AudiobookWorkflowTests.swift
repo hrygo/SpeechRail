@@ -52,22 +52,21 @@ final class AudiobookWorkflowTests: XCTestCase {
 
     @MainActor
     private final class WorkflowLoadGate {
-        private(set) var isSuspended = false
-        private(set) var didResume = false
+        let suspended = XCTestExpectation(description: "workflow checkpoint suspended")
+        let resumed = XCTestExpectation(description: "workflow checkpoint resumed")
         private var continuation: CheckedContinuation<Void, Never>?
 
         func suspend() async {
             await withCheckedContinuation { continuation in
                 self.continuation = continuation
-                isSuspended = true
+                suspended.fulfill()
             }
-            didResume = true
+            resumed.fulfill()
         }
 
         func resume() {
             continuation?.resume()
             continuation = nil
-            isSuspended = false
         }
     }
 
@@ -597,11 +596,8 @@ final class AudiobookWorkflowTests: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) async {
-        for _ in 0..<1_000 {
-            if gate.isSuspended { return }
-            await Task.yield()
-        }
-        XCTFail("测试读取门未被触发", file: file, line: line)
+        let result = await XCTWaiter.fulfillment(of: [gate.suspended], timeout: 10)
+        XCTAssertEqual(result, .completed, "测试读取门未被触发", file: file, line: line)
     }
 
     private func waitForResume(
@@ -609,11 +605,8 @@ final class AudiobookWorkflowTests: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) async {
-        for _ in 0..<1_000 {
-            if gate.didResume { return }
-            await Task.yield()
-        }
-        XCTFail("测试读取门未恢复", file: file, line: line)
+        let result = await XCTWaiter.fulfillment(of: [gate.resumed], timeout: 10)
+        XCTAssertEqual(result, .completed, "测试读取门未恢复", file: file, line: line)
     }
 
     /// 跑通全书分析的最小 fake client（提取/归并/标注均返回合法结构化 JSON）。
@@ -1612,10 +1605,11 @@ final class AudiobookWorkflowTests: XCTestCase {
             XCTAssertTrue(workflow.isProducing)
             XCTAssertEqual(workflow.productionProgress?.phase, .completed)
             let pauseTask = Task { await workflow.pauseProduction() }
-            for _ in 0..<1_000 {
-                if workflow.isPausingProduction { break }
-                await Task.yield()
+            let pauseDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+            while !workflow.isPausingProduction, ContinuousClock.now < pauseDeadline {
+                try? await Task.sleep(for: .milliseconds(5))
             }
+            XCTAssertTrue(workflow.isPausingProduction, "暂停请求必须在读取门释放前进入制作 owner")
             gate.resume()
             await pauseTask.value
 
