@@ -470,7 +470,9 @@ class RealtimeAsrOwner:
                 stop_frames = max(1, (silence_duration + 31) // 32)
                 candidate_admission = SpeechAdmission(
                     threshold=threshold,
-                    start_frames=3,
+                    # Silero already confirms speech; extra energy-VAD debounce
+                    # can discard quiet speech whose probability peaks are brief.
+                    start_frames=1 if self._settings.resolves_to_silero_vad else 3,
                     stop_frames=stop_frames,
                     prefix_samples=prefix_samples,
                     frame_samples=512,

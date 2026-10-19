@@ -2,7 +2,7 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.18.8"
+version: "3.18.9"
 date: 2026-10-19
 ---
 
@@ -788,6 +788,8 @@ registry 不可读返回 `503 pronunciation_store_unavailable`（可重试）。
   `session.audio.input`，而非旧平铺字段。
 - `audio.input.turn_detection` 仅接受 `null` 或 `"manual"`；服务端 VAD 使用
   `session.speechrail.endpointing.mode="server_vad"`。
+  启用语音准入时，Silero 单帧概率达到入口阈值即可放行，能量 VAD 仍需连续三帧确认；
+  两者均保留请求的前缀，并沿用进行中话语的退出阈值和静默时长。
 - `session.speechrail.task` 选择 `conversation`、`caption`、`transcription`、`render` 或
   `voice_design`；Alignment、Diarization 按请求 opt-in。
 - 可选的 `session.speechrail.asr` 在首个 PCM 前设置识别策略：

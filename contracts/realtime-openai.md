@@ -1,6 +1,6 @@
 # SpeechRail Realtime ASR/TTS 协议契约
 
-> 契约版本：`6.6.8`；生效日期：2026-10-19。唯一机器 schema 是
+> 契约版本：`6.6.9`；生效日期：2026-10-19。唯一机器 schema 是
 > [`realtime-events.schema.json`](realtime-events.schema.json)，字段责任表是
 > [`realtime-field-matrix.json`](realtime-field-matrix.json)。
 
@@ -72,6 +72,9 @@ query 不得携带 key。每连接有独立 session、epoch、sequence 与临时
 - `audio.input.turn_detection` 首批仅接受 `null` 或 `"manual"`；未实现的其他官方 VAD 值明确拒绝。
 - 服务端 VAD 使用 `session.speechrail.endpointing={"mode":"server_vad",...}`，与官方非空
   `turn_detection` 互斥，不把 Silero 冒充官方云模型能力。
+  启用语音准入时，Silero 单帧概率达到入口阈值即放行，并保留请求的前缀；能量 VAD
+  仍需连续三帧确认。低于入口阈值的帧不能启动新话语；进行中的话语沿用较低的退出阈值
+  和请求的静默时长，保留词尾。
 - `session.speechrail.task` 为 `conversation`、`caption`、`transcription`、`render` 或
   `voice_design`。Alignment、Diarization、TTS 均为任务 opt-in，不随规格自动开启。
 - `session.speechrail.asr` 是可选的中立策略对象：`preview_interval_ms` 默认 `1000`，范围
