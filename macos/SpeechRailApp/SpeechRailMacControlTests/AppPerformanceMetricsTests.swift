@@ -74,4 +74,34 @@ final class AppPerformanceMetricsTests: XCTestCase {
         XCTAssertEqual(metrics.measure(.workspaceRead) { 42 }, 42)
         XCTAssertEqual(metrics.snapshot(for: .workspaceRead).samples, 1)
     }
+
+    /// #369：tap 侧 `captureStop` 的观测契约。没有设备时 `stop` 仍是一次真实停止请求，
+    /// 必须留下数值样本；`bytes`/`count` 反映停止时待处理的 Float 输入（此处为 0）。
+    /// 真实设备 teardown 的失败路径需要硬件，属 #371。
+    func testTapStopRecordsCaptureStopWithoutADeviceAndStaysIdempotent() {
+        let metrics = AppPerformanceMetrics(collecting: true, signposting: false)
+        let capture = CoreAudioTapCapture(
+            configuration: .init(bundleIDs: ["com.example.no-device"]), metrics: metrics
+        )
+
+        capture.stop()                    // 未请求 drain：取消，不能记成功
+        capture.stop(drainPending: true)  // 已请求 drain：成功
+        capture.stop()                    // 幂等：再停一次只多一次观测
+
+        let summary = metrics.snapshot(for: .captureStop)
+        XCTAssertEqual(summary.samples, 3)
+        XCTAssertEqual(summary.bytes, 0)
+        XCTAssertEqual(summary.count, 0)
+        XCTAssertEqual(summary.cancelled, 2)
+        XCTAssertEqual(summary.failed, 0)
+    }
+
+    func testTapStopRecordsNothingWhenObservationIsDisabled() {
+        let disabled = AppPerformanceMetrics(collecting: false, signposting: false)
+        let capture = CoreAudioTapCapture(
+            configuration: .init(bundleIDs: ["com.example.no-device"]), metrics: disabled
+        )
+        capture.stop(drainPending: true)
+        XCTAssertEqual(disabled.snapshot(for: .captureStop).samples, 0)
+    }
 }
