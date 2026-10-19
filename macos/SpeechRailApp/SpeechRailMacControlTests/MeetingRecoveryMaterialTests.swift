@@ -62,6 +62,136 @@ final class MeetingRecoveryMaterialTests: XCTestCase {
         )
     }
 
+    func testWordAttributionSurvivesAllReadsAndReopenWithoutChangingText() async throws {
+        let store = try XCTUnwrap(store)
+        let id = try await seedSession()
+        _ = try await store.appendLine(.init(sessionID: id, role: .speaker,
+            text: "甲😀，乙。", source: .microphone), id: "mixed-words")
+        let units: [TranscriptAttributionUnit] = [
+            .init(id: "first", textStart: 0, textEnd: 2, speakerLabel: "A"),
+            .init(id: "second", textStart: 3, textEnd: 4, speakerLabel: "B")
+        ]
+        let row = try await store.attachTranscriptAttribution(lineID: "mixed-words", units: units)
+        XCTAssertNil(row.speakerLabel, "a mixed line cannot claim one speaker")
+        XCTAssertEqual(row.text, "甲😀，乙。")
+        XCTAssertEqual(row.attributionUnits, units)
+        XCTAssertEqual(row.speakerRuns.map(\.text).joined(), row.text)
+        XCTAssertEqual(row.speakerRuns.compactMap(\.speakerLabel), ["A", "B"])
+        let page = try await store.linesPage(sessionID: id, beforeOrdinal: nil)
+        let range = try await store.linesRange(sessionID: id, ordinals: 1...1)
+        let search = try await store.searchLines(query: "甲")
+        for fetched in [page.rows.first, range.first, search.first] {
+            XCTAssertEqual(fetched?.attributionUnits, units)
+        }
+        await store.close()
+        try await store.open()
+        let reopened = try await store.lines(sessionID: id)
+        XCTAssertEqual(reopened.first?.attributionUnits, units)
+        XCTAssertNil(reopened.first?.speakerLabel)
+        XCTAssertEqual(reopened.first?.id, "mixed-words")
+        let backup = try await store.exportBackup(to: try XCTUnwrap(directory).appendingPathComponent("word-backup"))
+        let scratch = try XCTUnwrap(directory).appendingPathComponent("word-restored")
+        _ = try await SessionStore.restorePreview(of: backup, into: scratch)
+        let restored = SessionStore(directory: scratch)
+        try await restored.open()
+        let restoredRows = try await restored.lines(sessionID: id)
+        XCTAssertEqual(restoredRows.first?.attributionUnits, units)
+        XCTAssertEqual(restoredRows.first?.text, row.text)
+        await restored.close()
+    }
+
+    func testAttributionSchemaUpgradePreservesLegacyRows() async throws {
+        let store = try XCTUnwrap(store)
+        let directory = try XCTUnwrap(directory)
+        let id = try await seedSession()
+        _ = try await store.appendLine(.init(sessionID: id, role: .speaker,
+            text: "原记录", source: .microphone, speakerLabel: "A"), id: "legacy-attribution")
+        await store.close()
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(directory.appendingPathComponent(SessionStore.fileName).path,
+            &db, SQLITE_OPEN_READWRITE, nil), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(db, "ALTER TABLE line DROP COLUMN attribution_json; ALTER TABLE line DROP COLUMN speaker_label_is_manual; PRAGMA user_version=13;", nil, nil, nil), SQLITE_OK)
+        sqlite3_close_v2(db)
+        try await store.open()
+        let rows = try await store.lines(sessionID: id)
+        XCTAssertEqual(rows.first?.id, "legacy-attribution")
+        XCTAssertEqual(rows.first?.text, "原记录")
+        XCTAssertEqual(rows.first?.speakerLabel, "A")
+        XCTAssertEqual(rows.first?.attributionUnits, [])
+        XCTAssertEqual(rows.first?.speakerLabelIsManual, false, "migration cannot infer historical manual actions")
+        await store.close()
+        try await store.open()
+        let reopened = try await store.lines(sessionID: id)
+        XCTAssertEqual(reopened, rows)
+    }
+
+    func testEmptyAutomaticSnapshotClearsPriorSummary() async throws {
+        let store = try XCTUnwrap(store)
+        let id = try await seedSession()
+        _ = try await store.appendLine(.init(sessionID: id, role: .speaker,
+            text: "甲", source: .microphone), id: "clear-evidence")
+        _ = try await store.attachTranscriptAttribution(lineID: "clear-evidence",
+            units: [.init(id: "one", textStart: 0, textEnd: 1, speakerLabel: "A")])
+        let cleared = try await store.attachTranscriptAttribution(lineID: "clear-evidence", units: [])
+        XCTAssertNil(cleared.speakerLabel)
+        XCTAssertEqual(cleared.speakerRuns.map(\.speakerLabel), [nil])
+    }
+
+    func testInvalidAttributionDoesNotPartiallyOverwritePriorEvidence() async throws {
+        let store = try XCTUnwrap(store)
+        let id = try await seedSession()
+        _ = try await store.appendLine(.init(sessionID: id, role: .speaker,
+            text: "甲乙", source: .microphone), id: "validated-words")
+        let original = [TranscriptAttributionUnit(id: "one", textStart: 0, textEnd: 2, speakerLabel: "A")]
+        _ = try await store.attachTranscriptAttribution(lineID: "validated-words", units: original)
+        let invalid: [[TranscriptAttributionUnit]] = [
+            [.init(id: "one", textStart: 0, textEnd: 3, speakerLabel: "B")],
+            [.init(id: "one", textStart: 0, textEnd: 1, speakerLabel: "B", audioStartSample: 2, audioEndSample: 1)],
+            [.init(id: "one", textStart: 0, textEnd: 2, speakerLabel: "B"),
+             .init(id: "two", textStart: 1, textEnd: 2, speakerLabel: "A")],
+            [.init(id: "one", textStart: 0, textEnd: 1, speakerLabel: "B"),
+             .init(id: "one", textStart: 1, textEnd: 2, speakerLabel: "A")]
+        ]
+        for units in invalid {
+            do {
+                _ = try await store.attachTranscriptAttribution(lineID: "validated-words", units: units)
+                XCTFail("invalid complete snapshots must fail before writing")
+            } catch {}
+            let saved = try await store.lines(sessionID: id)
+            XCTAssertEqual(saved.first?.attributionUnits, original)
+            XCTAssertEqual(saved.first?.speakerLabel, "A")
+            XCTAssertEqual(saved.first?.text, "甲乙")
+        }
+    }
+
+    func testUnknownAndLateCorrectionsRemainWordScopedAndManualChoiceWins() async throws {
+        let store = try XCTUnwrap(store)
+        let id = try await seedSession()
+        _ = try await store.appendLine(.init(sessionID: id, role: .speaker,
+            text: "甲乙", source: .microphone), id: "late-words")
+        let first: [TranscriptAttributionUnit] = [
+            .init(id: "one", textStart: 0, textEnd: 1, speakerLabel: "A"),
+            .init(id: "two", textStart: 1, textEnd: 2, speakerLabel: nil)
+        ]
+        let unknown = try await store.attachTranscriptAttribution(lineID: "late-words", units: first)
+        XCTAssertNil(unknown.speakerLabel)
+        XCTAssertEqual(unknown.speakerRuns.map(\.speakerLabel), ["A", nil])
+        var corrected = first
+        corrected[1].speakerLabel = "B"
+        let changed = try await store.attachTranscriptAttribution(lineID: "late-words", units: corrected)
+        XCTAssertEqual(changed.attributionUnits.map(\.speakerLabel), ["A", "B"])
+        try await store.attachSpeakerLabel(lineID: "late-words", label: "C")
+        let manual = try await store.attachTranscriptAttribution(lineID: "late-words", units: first)
+        XCTAssertEqual(manual.speakerLabel, "C", "late automatic evidence cannot erase a manual choice")
+        XCTAssertTrue(manual.speakerLabelIsManual)
+        XCTAssertTrue(manual.attributionUnits.isEmpty)
+        XCTAssertEqual(manual.speakerRuns.map(\.speakerLabel), ["C"])
+        try await store.attachSpeakerLabel(lineID: "late-words", label: nil)
+        let manuallyCleared = try await store.attachTranscriptAttribution(lineID: "late-words", units: corrected)
+        XCTAssertNil(manuallyCleared.speakerLabel)
+        XCTAssertTrue(manuallyCleared.speakerLabelIsManual)
+    }
+
     func testRecoveryMaterialIsRetrievableByDefault() async throws {
         let store = try XCTUnwrap(store)
         let sessionID = try await seedSession()

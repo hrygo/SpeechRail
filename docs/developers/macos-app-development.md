@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail macOS App 开发与测试"
 status: active
-version: "0.6.11"
-date: 2026-10-16
+version: "0.6.12"
+date: 2026-10-19
 ---
 
 # SpeechRail macOS App 开发与测试
@@ -276,3 +276,22 @@ plutil -lint macos/SpeechRailApp/Resources/LaunchAgents/com.speechrail.desktop.c
 `scripts/macos_app_test.sh` 是 UI 自动化测试，仅在当前用户明确要求时逐次运行（见根目录 [AGENTS.md](../../AGENTS.md)）；默认不执行，未执行时在结果中记为未验证项而非通过。
 
 分发签名、archive、notarization 和回滚流程见 `docs/developers/macos-app-release.md`。
+
+
+## 转录逐词归属存储
+
+`SessionStore.attachTranscriptAttribution` 原子替换同一转录行的完整匿名归属快照。
+`TranscriptAttributionUnit` 保留 uid、Unicode scalar 半开文字范围、可选采样范围及可空标签；
+正文、行 ID、序号与引用不参与更新。越界、重叠、重复 uid、空范围或不完整采样范围在写入前拒绝，
+保留先前快照。`TranscriptLine.speakerRuns` 按原文顺序投影，未对齐正文与未知标签保持未知，
+各段文字拼接必须等于完整原文。整行 `speakerLabel` 仅在所有有内容的文字均归同一人时可用，
+不能用整行标量代替逐词证据。
+
+记录库 schema 14 在 `line` 追加 `attribution_json` 和 `speaker_label_is_manual`，
+旧行保留原文及原标签，不推断其历史人工来源。标量标注入口写入明确的人工覆盖状态，
+包括人工清空；后续自动快照不能覆盖该选择。分页、范围读取、搜索和 SQLite 备份恢复保留快照。
+打开旧库时由既有迁移事务追加字段，失败整库回滚；实际库升级后旧 App 会拒绝更高 schema，
+降级须保留当前数据库并使用升级前备份，不能仅回退二进制或删除新字段。
+
+该存储接口与会话接收、显示及导出接线分开验收。存储回归或读回成功不证明实时 App 已保留逐词归属，
+也不证明分人模型、转录质量或 UI 已通过验收。

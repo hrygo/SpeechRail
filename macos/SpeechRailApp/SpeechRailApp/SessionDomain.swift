@@ -2413,6 +2413,54 @@ public struct SessionRecord: Identifiable, Hashable, Sendable {
     public var endedReason: SessionEndReason { endReason ?? .user }
 }
 
+/// 服务端逐词归属的本机快照。文字坐标是 Unicode scalar 的半开区间。
+/// 不复制正文；匿名标签和采样范围只属于原转录行及其连接。
+public struct TranscriptAttributionUnit: Codable, Hashable, Sendable, Identifiable {
+    public var id: String
+    public var textStart: Int
+    public var textEnd: Int
+    public var speakerLabel: String?
+    public var audioStartSample: Int?
+    public var audioEndSample: Int?
+
+    public init(id: String, textStart: Int, textEnd: Int, speakerLabel: String?,
+                audioStartSample: Int? = nil, audioEndSample: Int? = nil) {
+        self.id = id; self.textStart = textStart; self.textEnd = textEnd
+        self.speakerLabel = speakerLabel
+        self.audioStartSample = audioStartSample; self.audioEndSample = audioEndSample
+    }
+
+    static func validated(_ units: [Self], text: String) throws -> [Self] {
+        let ordered = units.sorted { ($0.textStart, $0.textEnd, $0.id) < ($1.textStart, $1.textEnd, $1.id) }
+        let count = text.unicodeScalars.count
+        var ids: Set<String> = []
+        var end = 0
+        for unit in ordered {
+            guard !unit.id.isEmpty, ids.insert(unit.id).inserted,
+                  unit.textStart >= end, unit.textEnd > unit.textStart, unit.textEnd <= count,
+                  unit.speakerLabel?.isEmpty != true else {
+                throw TranscriptAttributionValidationError.invalidRange
+            }
+            switch (unit.audioStartSample, unit.audioEndSample) {
+            case (nil, nil): break
+            case let (start?, finish?) where start >= 0 && finish > start: break
+            default: throw TranscriptAttributionValidationError.invalidTiming
+            }
+            end = unit.textEnd
+        }
+        return ordered
+    }
+}
+
+enum TranscriptAttributionValidationError: Error { case invalidRange, invalidTiming }
+
+public struct TranscriptSpeakerRun: Hashable, Sendable {
+    public var text: String
+    public var speakerLabel: String?
+    public var textStart: Int
+    public var textEnd: Int
+}
+
 /// `line` 一行（转录 / 字幕 / 对话正文共用）。
 public struct TranscriptLine: Identifiable, Hashable, Sendable {
     public var id: String
@@ -2422,6 +2470,8 @@ public struct TranscriptLine: Identifiable, Hashable, Sendable {
     /// 分人匿名标签 `A`…`D`，会话内唯一；不是实名（服务只输出匿名 label）。
     public var speakerLabel: String?
     public var text: String
+    public var attributionUnits: [TranscriptAttributionUnit]
+    public var speakerLabelIsManual: Bool
     public var tStart: TimeInterval?
     public var tEnd: TimeInterval?
     public var source: SessionLineSource
@@ -2448,7 +2498,9 @@ public struct TranscriptLine: Identifiable, Hashable, Sendable {
         isDeviceSwitch: Bool = false,
         isStarred: Bool = false,
         timingQuality: SessionTimingQuality? = nil,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        attributionUnits: [TranscriptAttributionUnit] = [],
+        speakerLabelIsManual: Bool = false
     ) {
         self.id = id
         self.sessionID = sessionID
@@ -2456,6 +2508,8 @@ public struct TranscriptLine: Identifiable, Hashable, Sendable {
         self.role = role
         self.speakerLabel = speakerLabel
         self.text = text
+        self.attributionUnits = attributionUnits
+        self.speakerLabelIsManual = speakerLabelIsManual
         self.tStart = tStart
         self.tEnd = tEnd
         self.source = source
@@ -2465,6 +2519,34 @@ public struct TranscriptLine: Identifiable, Hashable, Sendable {
         self.isStarred = isStarred
         self.timingQuality = timingQuality
         self.createdAt = createdAt
+    }
+
+    /// 每个原字符恰出现一次。未对齐的正文保留为未知，不能借用相邻人的标签。
+    public var speakerRuns: [TranscriptSpeakerRun] {
+        let scalars = Array(text.unicodeScalars)
+        guard !speakerLabelIsManual, !attributionUnits.isEmpty,
+              let units = try? TranscriptAttributionUnit.validated(attributionUnits, text: text) else {
+            return [.init(text: text, speakerLabel: speakerLabel, textStart: 0, textEnd: scalars.count)]
+        }
+        var runs: [TranscriptSpeakerRun] = []
+        func append(_ start: Int, _ end: Int, _ label: String?) {
+            guard end > start else { return }
+            let value = String(String.UnicodeScalarView(scalars[start..<end]))
+            if let last = runs.last, last.speakerLabel == label {
+                runs[runs.count - 1].text += value
+                runs[runs.count - 1].textEnd = end
+            } else {
+                runs.append(.init(text: value, speakerLabel: label, textStart: start, textEnd: end))
+            }
+        }
+        var cursor = 0
+        for unit in units {
+            append(cursor, unit.textStart, nil)
+            append(unit.textStart, unit.textEnd, unit.speakerLabel)
+            cursor = unit.textEnd
+        }
+        append(cursor, scalars.count, nil)
+        return runs
     }
 
     /// SRT 时间码与导出物一律从 `tStart` 取（§6.5）。没有时间戳的行导不出时间码。
