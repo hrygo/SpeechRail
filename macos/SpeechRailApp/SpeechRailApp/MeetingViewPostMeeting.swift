@@ -76,7 +76,7 @@ extension MeetingView {
         }
         guard meeting.sessionID != nil else { return nil }
         let count = reviewLines.count
-        let speakerCount = Set(reviewLines.compactMap(\.speakerLabel)).count
+        let speakerCount = Set(reviewLines.flatMap(\.speakerLabels)).count
         if speakerCount > 0 {
             return "共 \(count) 段发言 · \(speakerCount) 位说话人"
         }

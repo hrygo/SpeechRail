@@ -1823,7 +1823,21 @@ public actor SessionStore: SessionArchiveWriting {
         let sql = """
         SELECT \(Self.sessionColumns),
                (SELECT COUNT(*) FROM line l WHERE l.session_id = s.id AND l.status = 'final'),
-               (SELECT COUNT(DISTINCT l.speaker_label) FROM line l WHERE l.session_id = s.id AND l.speaker_label IS NOT NULL),
+               (SELECT COUNT(DISTINCT speakers.label) FROM (
+                    SELECT l.speaker_label AS label
+                    FROM line l
+                    WHERE l.session_id = s.id AND l.speaker_label IS NOT NULL
+                    UNION ALL
+                    SELECT CASE WHEN unit.type = 'object' THEN
+                        CASE WHEN json_type(unit.value, '$.speakerLabel') = 'text'
+                             THEN json_extract(unit.value, '$.speakerLabel') END
+                    END AS label
+                    FROM line l, json_each(
+                        CASE WHEN json_valid(l.attribution_json)
+                             THEN l.attribution_json ELSE '[]' END
+                    ) AS unit
+                    WHERE l.session_id = s.id AND l.speaker_label_is_manual = 0
+                ) AS speakers WHERE speakers.label IS NOT NULL),
                (SELECT i.reason FROM session_interruption i
                  WHERE i.session_id = s.id AND i.resumed_at IS NULL
                  ORDER BY i.at_ordinal DESC LIMIT 1),
