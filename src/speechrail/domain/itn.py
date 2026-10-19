@@ -28,11 +28,14 @@ _YEAR_RE = re.compile(r"([零一二三四五六七八九]{4})年")
 _PERCENT_RE = re.compile(r"百分之([零一二三四五六七八九十百千万点\d]+)")
 _DECIMAL_RE = re.compile(r"([零一二三四五六七八九十百千万\d]+)点([零一二三四五六七八九\d]+)")
 _CN_NUM_RE = re.compile(r"[零一二两三四五六七八九十百千万亿]+")
-# Adjacent nonzero Chinese digits can express an approximation or a stutter,
-# not a positional value: 七八天 is not 78 days, 七八十个 is not 80 items.
-# Keep ambiguous quantities literal; explicit decimal/year contexts below
-# still support positional digit spellings.
-_AMBIGUOUS_DIGITS_RE = re.compile(r"[一二两三四五六七八九]{2}")
+# Adjacent digits can be an approximation or stutter. A trailing digit after
+# 百 or a larger magnitude can omit a place (三千五元), cross a price boundary
+# (五百一个), or belong to ordinary words (万一人家). Preserve these matches
+# rather than inventing a precise value. Explicit decimal/year rules below
+# retain their positional digit handling.
+_AMBIGUOUS_QUANTITY_RE = re.compile(
+    r"[一二两三四五六七八九]{2}|[百千万亿][一二两三四五六七八九1-9]\Z"
+)
 
 # `点` is deliberately absent. In the repository corpus 46 of the 86 `X点`
 # matches are ordinary words (`这一点`, `短一点`, `有一点`), while the numeric
@@ -151,7 +154,7 @@ def _percent_to_arabic(match: re.Match[str]) -> str:
         int_part = _chinese_to_int(parts[0])
         dec_part = "".join(str(_DIGITS_MAP.get(c, c)) for c in parts[1])
         return f"{int_part}.{dec_part}%"
-    if _AMBIGUOUS_DIGITS_RE.search(raw):
+    if _AMBIGUOUS_QUANTITY_RE.search(raw):
         return match.group(0)
     try:
         val = _chinese_to_int(raw)
@@ -185,7 +188,7 @@ def apply_light_itn(text: str) -> str:
     def _convert_with_unit(m: re.Match[str]) -> str:
         cn_num = m.group(1)
         unit = m.group(2)
-        if _AMBIGUOUS_DIGITS_RE.search(cn_num):
+        if _AMBIGUOUS_QUANTITY_RE.search(cn_num):
             return m.group(0)
         # A bare magnitude in front of 分 is a quantity word, not a number:
         # 十分满意, 百分百, 百分之, 百分点. `三分钟` still converts because 三

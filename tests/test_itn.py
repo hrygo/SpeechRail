@@ -104,6 +104,25 @@ def test_itn_preserves_ambiguous_spoken_quantities(text: str) -> None:
     assert apply_light_itn(text) == text
 
 
+@pytest.mark.parametrize("text", [
+    "万一人家不同意呢", "万一天气不好怎么办", "五百一个", "两百一个",
+    "一百万一个", "五百两天", "三千五元", "一千二百三元", "一万二元",
+    "百分之一百五", "百分之3百5", "百分之３百５",
+])
+def test_itn_preserves_implicit_places_and_nonnumeric_phrase_boundaries(text: str) -> None:
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("五百零一个", "501个"), ("五百一十个", "510个"),
+    ("一千零三元", "1003元"), ("一千二百三十元", "1230元"),
+    ("一万零二元", "10002元"), ("一万二千元", "12000元"),
+    ("三千五百元", "3500元"), ("百分之一百零五", "105%"),
+])
+def test_itn_still_converts_explicit_places(text: str, expected: str) -> None:
+    assert apply_light_itn(text) == expected
+
+
 @pytest.mark.parametrize(("text", "expected"), [
     ("五十六个人", "56个人"), ("七十八天", "78天"),
     ("二零号", "20号"), ("一零八个人", "108个人"),
