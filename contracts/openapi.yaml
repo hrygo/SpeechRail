@@ -207,6 +207,9 @@ paths:
         A batch decode stopped by repetition, a token limit, or another non-EOS
         termination fails through the existing inference error path; incomplete
         text is not returned as a successful transcription.
+        Light numeric normalization preserves ambiguous Chinese quantities such
+        as 五六个人 or 七八十个 instead of inventing a precise number. Explicit
+        years, decimal spellings, and unambiguous quantities can still be normalized.
       security:
         - BearerAuth: []
         - {}

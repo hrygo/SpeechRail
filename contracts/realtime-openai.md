@@ -1,6 +1,6 @@
 # SpeechRail Realtime ASR/TTS 协议契约
 
-> 契约版本：`6.6.4`；生效日期：2026-10-19。唯一机器 schema 是
+> 契约版本：`6.6.5`；生效日期：2026-10-19。唯一机器 schema 是
 > [`realtime-events.schema.json`](realtime-events.schema.json)，字段责任表是
 > [`realtime-field-matrix.json`](realtime-field-matrix.json)。
 
@@ -243,6 +243,10 @@ hypothesis 可修订，使用 `speechrail.transcription.hypothesis`：
 `completed` 只承载 `type`、`item_id`、`content_index`、`transcript` 与可选的
 `commit_event_id`；对齐与匿名 speaker 归属随后以独立的
 `speechrail.alignment.*` 与 `speechrail.diarization.*` 事件到达。
+
+标准 ASR hypothesis 与 completed 的轻量数字规范化保留相邻非零中文数字形成的歧义数量，
+例如“五六个人”“七八十个”“两三个”，不猜成 56、80 或 23。明确年份、小数及规范计数
+仍可转换；已由模型输出的阿拉伯数字不会据此反推或改成概数。
 
 三条准入语义是调用方可以依赖的：
 

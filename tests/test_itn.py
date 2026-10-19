@@ -95,6 +95,25 @@ def test_itn_does_not_read_an_approximate_magnitude_as_a_value() -> None:
     assert apply_light_itn("支持数十万个并发会话") == "支持数十万个并发会话"
 
 
+@pytest.mark.parametrize("text", [
+    "五六个人", "七八天", "一两个", "两三个", "三五天", "七八十个",
+    "十三四岁", "四十五六岁", "两两个", "五五个", "二三号",
+    "增长了百分之五六", "增长了百分之二三十",
+])
+def test_itn_preserves_ambiguous_spoken_quantities(text: str) -> None:
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("五十六个人", "56个人"), ("七十八天", "78天"),
+    ("二零号", "20号"), ("一零八个人", "108个人"),
+    ("一百零三个人", "103个人"), ("二零二六年", "2026年"),
+    ("二三点五个", "23.5个"), ("百分之二三点五", "23.5%"),
+])
+def test_itn_still_converts_unambiguous_number_contexts(text: str, expected: str) -> None:
+    assert apply_light_itn(text) == expected
+
+
 def test_itn_still_converts_minutes_and_bare_ten_with_a_measure_word() -> None:
     assert apply_light_itn("耗时三分钟") == "耗时3分钟"
     assert apply_light_itn("一共十个人") == "一共10个人"
