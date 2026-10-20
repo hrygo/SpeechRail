@@ -694,6 +694,65 @@ final class AudiobookExportTests: XCTestCase {
         XCTAssertFalse(noAudio.isFullBookReady)
     }
 
+    func testExportAuditMatchesReadyAndBlockedChaptersWithoutPreparing() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let revisionController = AudiobookRevisionController(store: store)
+        let controller = AudiobookExportController(
+            store: store,
+            castController: AudiobookCastController(store: store),
+            revisionController: revisionController,
+            customStageEncoder: Self.fakeStageEncoder,
+            mediaVerifier: { url, expected in
+                try Self.makeFakeMediaVerification(url: url, expected: expected)
+            }
+        )
+        let fixture = try await makeTwoChapterExportFixture(
+            store: store,
+            revisionController: revisionController,
+            completeSecondChapter: false
+        )
+
+        let full = try await controller.audit(bookID: fixture.bookID, chapterIDs: nil, profile: .m4b)
+        XCTAssertEqual(full.readyChapterIDs, [fixture.chapter1.id])
+        XCTAssertEqual(full.blockers.map(\.reason), [.unknownSpeaker])
+        XCTAssertEqual(full.blockers.map(\.chapterID), [fixture.chapter2.id])
+        XCTAssertFalse(full.isFullBookReady)
+
+        let selected = try await controller.audit(
+            bookID: fixture.bookID,
+            chapterIDs: [fixture.chapter1.id],
+            profile: .chapterMP3
+        )
+        XCTAssertEqual(selected.readyChapterIDs, [fixture.chapter1.id])
+        XCTAssertTrue(selected.blockers.isEmpty)
+        XCTAssertTrue(selected.isFullBookReady)
+    }
+
+    func testExportAuditReportsMissingCandidateAsset() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let revisionController = AudiobookRevisionController(store: store)
+        let controller = AudiobookExportController(
+            store: store,
+            castController: AudiobookCastController(store: store),
+            revisionController: revisionController
+        )
+        let fixture = try await makeTwoChapterExportFixture(
+            store: store,
+            revisionController: revisionController,
+            completeSecondChapter: true
+        )
+        let candidates = try await store.candidates(for: fixture.bookID)
+            .filter { $0.chapterID == fixture.chapter2.id }
+        let candidate = try XCTUnwrap(candidates.first)
+        let storeRoot = await store.rootURL
+        try FileManager.default.removeItem(at: storeRoot.appendingPathComponent(candidate.relativeAssetPath))
+
+        let audit = try await controller.audit(bookID: fixture.bookID, chapterIDs: nil, profile: .m4b)
+        XCTAssertEqual(audit.readyChapterIDs, [fixture.chapter1.id])
+        XCTAssertEqual(audit.blockers.map(\.reason), [.missingAsset])
+        XCTAssertEqual(audit.blockers.first?.chapterID, fixture.chapter2.id)
+    }
+
     func testPreCancelledRequestRejectsBeforePreparing() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
         let revisionController = AudiobookRevisionController(store: store)

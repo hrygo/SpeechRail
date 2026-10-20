@@ -1209,6 +1209,8 @@ public struct AudiobookBookWorkspaceView: View {
                 )
                 SessionHairline()
 
+                productionBlockerBar
+
                 if let plan = workflow.resumePlan, !plan.redoFragmentIDs.isEmpty {
                     HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                         StatusPill(tone: .healthy, label: "可复用 \(plan.reusableFragmentIDs.count) 段")
@@ -1316,6 +1318,38 @@ public struct AudiobookBookWorkspaceView: View {
                     }
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var productionBlockerBar: some View {
+        if let blocker = workflow.productionBlocker {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Image(systemName: "info.circle")
+                    .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                Text(blocker.message)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+                switch blocker {
+                case .unknownSpeakers:
+                    Button("定位待确认说话人") {
+                        Task { await workflow.jumpToFirstUnknownSpeaker() }
+                    }
+                    .speechRailButton(.secondary)
+                case .castNotConfirmed:
+                    Button("去确认配声") {
+                        workflow.workbenchTab = .preparation
+                    }
+                    .speechRailButton(.secondary)
+                case .editingChapterLayout, .anotherBookProducing, .noReadyChapters:
+                    EmptyView()
+                }
+            }
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+            .background(SpeechRailDesignTokens.Color.recessedField)
+            SessionHairline()
         }
     }
 
@@ -1833,48 +1867,56 @@ public struct AudiobookBookWorkspaceView: View {
         CardSurface {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                 // 默认紧凑行：角色名 + 定位/声部标签 + 音色胶囊 + 试听 + 展开/折叠
-                HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    SessionVoiceBadge(label: String(role.displayName.prefix(1)))
+                Button {
+                    workflow.selectedRoleID = role.id
+                } label: {
+                    HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        SessionVoiceBadge(label: String(role.displayName.prefix(1)))
 
-                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                        HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                            Text(role.displayName)
-                                .font(SpeechRailDesignTokens.Typography.sectionTitle)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
+                        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                            HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                                Text(role.displayName)
+                                    .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
 
-                            StatusPill(
-                                tone: (tier == .narrator || tier == .lead) ? .healthy : .neutral,
-                                label: tier == .narrator
-                                    ? "旁白"
-                                    : (tier == .lead ? "主角 · \(archetype.shortBadgeTitle)" : archetype.shortBadgeTitle)
-                            )
-
-                            if binding != nil {
                                 StatusPill(
-                                    tone: isCustomExclusiveVoice ? .healthy : .neutral,
-                                    label: isCustomExclusiveVoice ? "专属定制" : "默认音色"
+                                    tone: (tier == .narrator || tier == .lead) ? .healthy : .neutral,
+                                    label: tier == .narrator
+                                        ? "旁白"
+                                        : (tier == .lead ? "主角 · \(archetype.shortBadgeTitle)" : archetype.shortBadgeTitle)
                                 )
+
+                                if binding != nil {
+                                    StatusPill(
+                                        tone: isCustomExclusiveVoice ? .healthy : .neutral,
+                                        label: isCustomExclusiveVoice ? "专属定制" : "默认音色"
+                                    )
+                                }
+
+                                Spacer(minLength: 0)
+
+                                if !role.isNarrator {
+                                    Text(dialogueCount > 0 ? "\(dialogueCount) 句" : "0 句")
+                                        .font(SpeechRailDesignTokens.Typography.technical)
+                                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                                }
                             }
 
-                            Spacer(minLength: 0)
-
-                            if !role.isNarrator {
-                                Text(dialogueCount > 0 ? "\(dialogueCount) 句" : "0 句")
-                                    .font(SpeechRailDesignTokens.Typography.technical)
-                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                            if !role.aliases.isEmpty {
+                                Text("别称：\(role.aliases.joined(separator: "、"))")
+                                    .font(SpeechRailDesignTokens.Typography.caption)
+                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                                    .lineLimit(1)
                             }
-                        }
-
-                        if !role.aliases.isEmpty {
-                            Text("别称：\(role.aliases.joined(separator: "、"))")
-                                .font(SpeechRailDesignTokens.Typography.caption)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                                .lineLimit(1)
                         }
                     }
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(isSelected ? .isSelected : [])
+                .accessibilityHint("选择此角色")
 
                 // 音色选择胶囊 + 试听按钮 + 展开/折叠切换
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
@@ -2131,20 +2173,6 @@ public struct AudiobookBookWorkspaceView: View {
                 }
             }
             .padding(SpeechRailDesignTokens.Spacing.md)
-            .contentShape(Rectangle())
-            .onTapGesture {
-                workflow.selectedRoleID = role.id
-            }
-            .focusable()
-            .onKeyPress(.return) {
-                workflow.selectedRoleID = role.id
-                return .handled
-            }
-            .onKeyPress(.space) {
-                workflow.selectedRoleID = role.id
-                return .handled
-            }
-            .accessibilityHint("按 Return 或空格选择此角色")
         }
     }
 

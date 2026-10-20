@@ -512,8 +512,9 @@ struct AudiobookExportSheet: View {
                         }
 
                         List(workflow.chapters) { chapter in
+                            let auditReady = workflow.exportAudit.map { Set($0.readyChapterIDs) }
                             let isExportable = !chapter.isSkipped
-                                && chapter.currentChapterRevisionID != nil
+                                && (auditReady?.contains(chapter.id) ?? (chapter.currentChapterRevisionID != nil))
                             let readiness = workflow.chapterReadinessByID[chapter.id] ?? .awaitingGlobalAnalysis
                             HStack {
                                 Toggle(
@@ -596,11 +597,13 @@ struct AudiobookExportSheet: View {
                         }
                         .speechRailButton(.primary)
                         .disabled(!canPrepareExport)
-                        .help(canPrepareExport
-                              ? "生成导出包并校验章节与媒体帧"
-                              : (selectedProfile == .m4b
-                                  ? "整本 M4B 需要所有未跳过章节都有当前音频。"
-                                  : "至少选择一个已就绪章节。"))
+                        .help(workflow.isAuditingExport
+                              ? "正在检查章节、标注与音频资产，请稍候。"
+                              : (canPrepareExport
+                                  ? "生成导出包并校验章节与媒体帧"
+                                  : (selectedProfile == .m4b
+                                      ? "整本 M4B 需要所有未跳过章节都有当前音频。"
+                                      : "至少选择一个已就绪章节。")))
                     }
                 } else {
                     Button("选择保存位置并完成导出…") {
@@ -626,13 +629,31 @@ struct AudiobookExportSheet: View {
         .onChange(of: loudnessEnabled) { _, _ in
             invalidatePreparedExport()
         }
+        .task(id: auditKey) {
+            let ids = selectedProfile == .m4b ? nil : selectedChapterIDs.sorted { $0.uuidString < $1.uuidString }
+            await workflow.refreshExportAudit(profile: selectedProfile, chapterIDs: ids)
+        }
         .onDisappear {
             workflow.clearExportError()
         }
     }
 
+    private var auditKey: String {
+        let ids = selectedProfile == .chapterMP3
+            ? selectedChapterIDs.map(\.uuidString).sorted().joined(separator: ",")
+            : "all"
+        return "\(selectedProfile.rawValue)|\(ids)"
+    }
+
     private var readiness: AudiobookExportReadiness {
-        workflow.exportReadiness
+        guard let audit = workflow.exportAudit else { return workflow.exportReadiness }
+        let ready = Set(audit.readyChapterIDs)
+        return AudiobookExportReadiness(
+            readyChapterIDs: audit.readyChapterIDs,
+            blockingChapterIDs: workflow.chapters
+                .filter { !$0.isSkipped && !ready.contains($0.id) }
+                .map(\.id)
+        )
     }
 
     private var readyChapterIDs: Set<UUID> {
@@ -645,11 +666,15 @@ struct AudiobookExportSheet: View {
 
     private var canPrepareExport: Bool {
         guard workflow.exportCapabilities.available else { return false }
+        guard !workflow.isAuditingExport else { return false }
         switch selectedProfile {
         case .m4b:
-            return readiness.isFullBookReady
+            guard let audit = workflow.exportAudit else { return false }
+            return audit.isFullBookReady
         case .chapterMP3:
-            return !selectedReadyChapterIDs.isEmpty
+            guard let audit = workflow.exportAudit else { return false }
+            let ready = Set(audit.readyChapterIDs)
+            return !selectedChapterIDs.intersection(ready).isEmpty
         }
     }
 
@@ -662,39 +687,47 @@ struct AudiobookExportSheet: View {
     @ViewBuilder
     private var exportReadinessCard: some View {
         if workflow.preparedExport == nil {
-            let blocking = workflow.exportBlockingChapters
+            let audit = workflow.exportAudit
+            let blockers = audit?.blockers ?? []
             CardSurface {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                     HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                        if selectedProfile == .m4b {
-                            if readiness.isFullBookReady {
-                                StatusPill(tone: .healthy, label: "全书 \(readiness.readyChapterCount) 章已就绪")
+                        if workflow.isAuditingExport {
+                            StatusPill(tone: .neutral, label: "正在检查可导出章节…")
+                        } else if let audit {
+                            if selectedProfile == .m4b {
+                                if audit.isFullBookReady {
+                                    StatusPill(tone: .healthy, label: "全书 \(audit.readyChapterCount) 章已就绪")
+                                } else {
+                                    StatusPill(
+                                        tone: .attention,
+                                        label: audit.readyChapterCount == 0
+                                            ? "还没有可导出的章节"
+                                            : "还有 \(blockers.count) 章未就绪"
+                                    )
+                                }
                             } else {
                                 StatusPill(
-                                    tone: .attention,
-                                    label: readiness.readyChapterCount == 0
-                                        ? "还没有可导出的章节"
-                                        : "还有 \(readiness.blockingChapterCount) 章未就绪"
+                                    tone: selectedReadyChapterIDs.isEmpty ? .attention : .healthy,
+                                    label: "已选 \(selectedReadyChapterIDs.count) / 已就绪 \(audit.readyChapterCount) 章"
                                 )
                             }
                         } else {
-                            StatusPill(
-                                tone: selectedReadyChapterIDs.isEmpty ? .attention : .healthy,
-                                label: "已选 \(selectedReadyChapterIDs.count) / 已就绪 \(readiness.readyChapterCount) 章"
-                            )
+                            StatusPill(tone: .attention, label: "尚未完成导出检查")
                         }
 
                         Spacer(minLength: 0)
 
-                        if selectedProfile == .m4b, !readiness.isFullBookReady,
-                           let firstBlocking = blocking.first
-                        {
-                            Button("去制作未就绪章节…") {
+                        if selectedProfile == .m4b, let first = blockers.first {
+                            Button("去处理「\(first.chapterTitle)」…") {
                                 workflow.focusFirstExportBlockingChapter()
                             }
                             .speechRailButton(.secondary)
-                            .help("从「\(firstBlocking.title)」开始")
-                        } else if selectedProfile == .chapterMP3, readiness.readyChapterCount == 0 {
+                        } else if selectedProfile == .chapterMP3,
+                                  let audit,
+                                  audit.readyChapterCount == 0,
+                                  !workflow.exportBlockingChapters.isEmpty
+                        {
                             Button("去制作章节…") {
                                 workflow.focusFirstExportBlockingChapter()
                             }
@@ -703,21 +736,34 @@ struct AudiobookExportSheet: View {
                     }
 
                     if selectedProfile == .m4b {
-                        if readiness.readyChapterCount == 0 && readiness.blockingChapterCount == 0 {
-                            Text("所有章节都已跳过。请先在章节目录恢复至少一章，再导出。")
-                                .font(SpeechRailDesignTokens.Typography.caption)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        if let audit {
+                            if audit.readyChapterCount == 0 && blockers.isEmpty {
+                                Text("所有章节都已跳过。请先在章节目录恢复至少一章，再导出。")
+                                    .font(SpeechRailDesignTokens.Typography.caption)
+                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            } else if audit.isFullBookReady {
+                                Text("所有未跳过章节都有当前音频，可以生成整本 M4B。")
+                                    .font(SpeechRailDesignTokens.Typography.caption)
+                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            } else {
+                                ForEach(blockers.prefix(3)) { blocker in
+                                    Text("\(blocker.chapterTitle)：\(blocker.message)")
+                                        .font(SpeechRailDesignTokens.Typography.caption)
+                                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                                }
+                                if blockers.count > 3 {
+                                    Text("另有 \(blockers.count - 3) 章未就绪，可切换为分章节音频包只导出已完成章节。")
+                                        .font(SpeechRailDesignTokens.Typography.caption)
+                                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                                }
+                            }
                         } else {
-                            Text(readiness.isFullBookReady
-                                 ? "所有未跳过章节都有当前音频，可以生成整本 M4B。"
-                                 : "整本 M4B 需要每个未跳过章节都有当前音频；也可以先切换为分章节音频包，只导出已完成的章节。已跳过的章节不会阻塞导出。")
+                            Text("正在读取章节、标注与音频资产；检查完成前不会生成导出包。")
                                 .font(SpeechRailDesignTokens.Typography.caption)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         }
                     } else {
-                        Text(blocking.isEmpty
-                             ? "只会导出选中的已就绪章节；未就绪与已跳过章节不会写入文件。"
-                             : "未就绪或已跳过的章节不可选；它们会出现在遗漏说明清单里。")
+                        Text("只会导出选中的已就绪章节；未就绪与已跳过章节不会写入文件。")
                             .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     }

@@ -291,6 +291,13 @@ final class AudiobookWorkflowTests: XCTestCase {
         return (model, driver)
     }
 
+    func testProductionBlockerExplainsCastConfirmationBeforeChaptersAreReady() async throws {
+        let (workflow, _) = makeWorkflow()
+        _ = try await importBook(into: workflow, fileName: "blocked.txt", text: "第一章\n海风吹来。")
+
+        XCTAssertEqual(workflow.productionBlocker, .castNotConfirmed)
+    }
+
     func testRecommendationExplainsEmptyPoolAndRecovery() async throws {
         let catalog = VoiceCatalogStore()
         let (workflow, _) = makeWorkflow(catalog: catalog)

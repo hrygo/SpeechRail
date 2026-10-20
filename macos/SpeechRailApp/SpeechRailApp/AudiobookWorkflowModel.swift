@@ -51,6 +51,30 @@ public final class AudiobookWorkflowModel {
         }
     }
 
+    /// 制作按钮没有可制作章节时的唯一阻塞原因；用于把“为什么不能做”与“下一步去哪”分开。
+    public enum ProductionBlocker: Equatable, Sendable {
+        case editingChapterLayout
+        case anotherBookProducing
+        case unknownSpeakers(count: Int)
+        case castNotConfirmed
+        case noReadyChapters
+
+        public var message: String {
+            switch self {
+            case .editingChapterLayout:
+                return "正在整理章节目录，完成后才能制作。"
+            case .anotherBookProducing:
+                return "另一部有声书正在制作，完成或暂停后再开始此书。"
+            case let .unknownSpeakers(count):
+                return "还有 \(count) 处说话人待确认，确认后才能制作章节。"
+            case .castNotConfirmed:
+                return "角色与音色尚未确认，确认后才能制作章节。"
+            case .noReadyChapters:
+                return "没有待制作的章节：可能已全部完成，或章节已被跳过。"
+            }
+        }
+    }
+
     public enum PrimaryBookAction: Equatable, Sendable {
         case analyzeWholeBook
         case resumeAnalysis
@@ -281,7 +305,11 @@ public final class AudiobookWorkflowModel {
     public private(set) var isPreparingExport: Bool = false
     /// 导出面板内联错误：主页面横幅会被 sheet 遮住，导出失败必须在当前上下文可见。
     public var exportErrorMessage: String?
+    /// 导出面板的只读预检结果；nil 表示尚未检查或检查失败，UI 不应把它当作“已就绪”。
+    public private(set) var exportAudit: AudiobookExportAudit?
+    public private(set) var isAuditingExport: Bool = false
     @ObservationIgnored private var exportPreparationRequestID: UUID?
+    @ObservationIgnored private var exportAuditRequestID: UUID?
     @ObservationIgnored private var secondaryResolutionTask: Task<Void, Never>?
     public private(set) var exportRecords: [AudiobookExportRecord] = []
     public private(set) var exportCover: AudiobookCoverAsset?
@@ -425,12 +453,12 @@ public final class AudiobookWorkflowModel {
     }
 
     public var exportReadyChapters: [AudiobookChapter] {
-        let ready = Set(exportReadiness.readyChapterIDs)
+        let ready = Set(exportAudit?.readyChapterIDs ?? exportReadiness.readyChapterIDs)
         return chapters.filter { ready.contains($0.id) }
     }
 
     public var exportBlockingChapters: [AudiobookChapter] {
-        let blocking = Set(exportReadiness.blockingChapterIDs)
+        let blocking = Set(exportAudit?.blockers.map(\.chapterID) ?? exportReadiness.blockingChapterIDs)
         return chapters.filter { blocking.contains($0.id) }
     }
 
@@ -624,6 +652,31 @@ public final class AudiobookWorkflowModel {
         return isProductionBlocked(for: bookID)
     }
 
+    public var productionBlocker: ProductionBlocker? {
+        guard let bookID = selectedBook?.id, !chapters.isEmpty else { return nil }
+        if isEditingChapterLayout { return .editingChapterLayout }
+        if isProductionBlocked(for: bookID) { return .anotherBookProducing }
+
+        let hasReadyChapter = chapters.contains { chapter in
+            guard !chapter.isSkipped else { return false }
+            switch chapterReadinessByID[chapter.id] {
+            case .readyForProduction, .needsUpdate, .paused:
+                return true
+            default:
+                return false
+            }
+        }
+        guard !hasReadyChapter else { return nil }
+
+        if totalUnknownSpeakerCount > 0 {
+            return .unknownSpeakers(count: totalUnknownSpeakerCount)
+        }
+        if !isAuditionConfirmedForSelectedBook {
+            return .castNotConfirmed
+        }
+        return .noReadyChapters
+    }
+
     public func primaryActionTitle(_ action: PrimaryBookAction, for bookID: UUID) -> String {
         if action == .pauseProduction, isPausingProduction, productionBookID == bookID {
             return "正在暂停…"
@@ -796,6 +849,7 @@ public final class AudiobookWorkflowModel {
 
     public func openBook(_ bookID: UUID) async {
         cancelWorkspaceRefresh()
+        exportAudit = nil
         await openBookWorkspace(bookID, retryStaleInput: true)
     }
 
@@ -1251,7 +1305,7 @@ public final class AudiobookWorkflowModel {
                       let voice = effectiveSnapshot.voices.first(where: { $0.id == voiceID }), effectiveCatalog.permits(voice, bookID: targetBookID),
                       let options = SpeechRailCapabilityRevisionSelector.creatorRequestOptions(voiceID: voiceID, in: effectiveSnapshot),
                       let model = options.expectedModelRevision else { throw ServiceAPIClientError.invalidContract("audition_unavailable") }
-                let excerpt = AudiobookSourceRange(lowerBound: range.lowerBound, upperBound: source.scalarByteOffsets[min(end, start + 240)])
+                let excerpt = AudiobookSourceRange(lowerBound: range.lowerBound, upperBound: Int64(source.scalarByteOffsets[min(end, start + 240)]))
                 let binding = effectiveBindings[roleID].flatMap { $0.voiceID == voiceID ? $0 : nil }
                     ?? .init(roleID: roleID, voiceID: voiceID, voiceRevision: options.expectedVoiceRevision, modelRevision: model)
                 try AudiobookCastRegistry.validateRenderBinding(binding, snapshot: effectiveSnapshot, requireProductionReady: false)
@@ -3002,6 +3056,34 @@ public final class AudiobookWorkflowModel {
 
     public func clearExportError() {
         exportErrorMessage = nil
+    }
+
+    /// 只读预检与 prepare 共用 controller 的规划逻辑；结果只影响面板，不保存生产版本。
+    public func refreshExportAudit(profile: AudiobookExportProfile, chapterIDs: [UUID]?) async {
+        guard let bookID = selectedBook?.id, let exportController else {
+            exportAudit = nil
+            return
+        }
+        let requestID = UUID()
+        exportAuditRequestID = requestID
+        isAuditingExport = true
+        defer {
+            if exportAuditRequestID == requestID {
+                isAuditingExport = false
+            }
+        }
+        do {
+            let audit = try await exportController.audit(
+                bookID: bookID,
+                chapterIDs: chapterIDs,
+                profile: profile
+            )
+            guard exportAuditRequestID == requestID else { return }
+            exportAudit = audit
+        } catch {
+            guard exportAuditRequestID == requestID else { return }
+            exportAudit = nil
+        }
     }
 
     /// 导出面板的“去制作”动作：关掉面板，定位到第一处未就绪章节。
