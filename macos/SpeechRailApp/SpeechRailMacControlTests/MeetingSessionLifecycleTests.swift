@@ -2473,21 +2473,30 @@ struct MeetingSystemAudioRecoveryTests {
             #expect(h.session.phase == .interrupted)
             #expect(h.session.sessionID == id)
             #expect(h.session.reconnectedSources == 3)
-            #expect(h.session.lastFailure?.contains("连续中断") == true)
+            #expect(h.session.interruptionNote?.contains("连续中断") == true)
             #expect(h.audio.stopCount > 0)
         }
     }
 
-    @Test func failedReconnectPreservesRecordAndReportsInterruption() async throws {
+    @Test(arguments: [false, true])
+    func failedReconnectPreservesRecordAndReportsInterruption(drainFails: Bool) async throws {
         try await withHarness { h in
             let id = try #require(h.session.sessionID)
+            let client = try #require(h.clients.all.last)
+            if drainFails { await client.failDrain() }
             h.audio.restartSystemAudioResult = false
             h.audio.fireSystemAudioLost("音频来源已中断。")
             try await wait { h.session.phase == .interrupted }
             #expect(h.session.phase == .interrupted)
             #expect(h.session.sessionID == id)
             #expect(h.session.reconnectedSources == 0)
-            #expect(h.session.lastFailure?.contains("没有恢复") == true)
+            #expect(h.session.interruption == .sourceLost)
+            #expect(h.session.interruptionNote?.contains("没有恢复") == true)
+            if drainFails {
+                let failure = try #require(h.coordinator.captureCompletionFailure(recordID: id))
+                #expect(failure.stage == .protocolDrain)
+                #expect(h.session.lastFailure == failure.message)
+            }
         }
     }
 
@@ -2525,7 +2534,9 @@ struct MeetingSystemAudioRecoveryTests {
     private func withHarness(
         _ body: @MainActor (MeetingSessionLifecycleTests.Harness) async throws -> Void
     ) async throws {
-        let h = try await MeetingSessionLifecycleTests.Harness.make(drainTimeout: .milliseconds(80))
+        // These cases exercise capture recovery, not a deadline. Inject drain
+        // failure explicitly rather than depending on an 80 ms CI scheduling race.
+        let h = try await MeetingSessionLifecycleTests.Harness.make()
         await h.clients.openGate()
         await h.session.start(selection: MeetingAudioSelection(usesMicrophone: false,
             systemApps: [.init(bundleID: "test.meeting", name: "测试会议")]))
