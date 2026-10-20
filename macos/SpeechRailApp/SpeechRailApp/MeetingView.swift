@@ -99,7 +99,7 @@ public struct MeetingView: View {
             route: .meeting,
             layout: .fill(minimumHeight: 420)
         ) {
-            VStack(spacing: SpeechRailDesignTokens.Spacing.gutter) {
+            VStack(spacing: SpeechRailDesignTokens.Spacing.md) {
                 statusBar
                 if !meeting.saveRecoveryRecords.isEmpty {
                     TranscriptSaveRecoveryPanel(
@@ -132,8 +132,8 @@ public struct MeetingView: View {
                 if let blocked = meeting.blocked, !meeting.phase.isLive {
                     blockedCard(blocked)
                 }
-                HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.gutter) {
-                    VStack(spacing: SpeechRailDesignTokens.Spacing.gutter) {
+                HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
+                    VStack(spacing: SpeechRailDesignTokens.Spacing.md) {
                         mainArea
                     }
                     .frame(maxHeight: .infinity, alignment: .top)
@@ -142,7 +142,9 @@ public struct MeetingView: View {
                     }
                 }
                 .frame(maxHeight: .infinity, alignment: .top)
-                InnerOSDrawer(session: meeting.innerOS, sessionID: meeting.sessionID)
+                if shouldShowInnerOSDrawer {
+                    InnerOSDrawer(session: meeting.innerOS, sessionID: pageSessionID)
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } trailing: {
@@ -157,8 +159,15 @@ public struct MeetingView: View {
                 ) {
                     closeReview()
                 }
-            }
-            if meeting.phase == .idle, meeting.blocked == nil {
+                exportMenu(title: "导出…", helpText: "导出这一场：文字记录加已生成的纪要")
+                PageActionButton(
+                    title: "重新生成纪要",
+                    systemImage: "arrow.clockwise",
+                    helpText: "按现在的模型设置再整理一遍；旧版本都留着，不会覆盖"
+                ) {
+                    Task { await regenerateMinutes(for: pageSessionID) }
+                }
+            } else if meeting.phase == .idle, meeting.blocked == nil {
                 SessionHeaderKeycap("⌘⇧N")
                 PageActionButton(
                     title: "会议设置…",
@@ -245,7 +254,7 @@ public struct MeetingView: View {
             // 右栏收起控件：会议页四个状态共用一处（稿 `meetingShell` 末行）。名字按右栏
             // 当时装着什么说——空态是「本次会议」，录起来才是「会议信息」。
             SessionPanelToggle(
-                panelName: meeting.phase == .idle ? "本次会议" : "会议信息",
+                panelName: meeting.phase == .idle && reviewRecord == nil ? "本次会议" : "会议信息",
                 isCollapsed: isInspectorCollapsed
             ) {
                 setInspectorCollapsed(!isInspectorCollapsed, autoCollapsed: false)
@@ -268,7 +277,7 @@ public struct MeetingView: View {
         .onChange(of: meeting.phase) { _, _ in
             Task { await reloadPostMeeting() }
         }
-        .onChange(of: meeting.sessionID) { _, newValue in
+        .onChange(of: pageSessionID) { _, newValue in
             // 换一场会就复位：上一场的回看位置不该带过来。
             transcriptFollow = transcriptFollow.reset()
             Task { await meeting.innerOS.bind(sessionID: newValue) }
@@ -292,6 +301,10 @@ public struct MeetingView: View {
                 isLabelingSpeakers = false
             }
         }
+    }
+
+    private var shouldShowInnerOSDrawer: Bool {
+        meeting.phase != .idle || pageSessionID != nil
     }
 
     // MARK: - 版面契约（右栏收起）

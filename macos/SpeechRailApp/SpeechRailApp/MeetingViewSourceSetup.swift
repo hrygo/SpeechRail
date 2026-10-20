@@ -28,13 +28,17 @@ extension MeetingView {
 
     @ViewBuilder
     var mainArea: some View {
-        switch meeting.phase {
-        case .idle:
-            emptyState
-        case .archived, .processing:
+        if reviewRecord != nil {
             postMeeting
-        default:
-            liveTranscript
+        } else {
+            switch meeting.phase {
+            case .idle:
+                emptyState
+            case .archived, .processing:
+                postMeeting
+            default:
+                liveTranscript
+            }
         }
     }
 
@@ -44,8 +48,10 @@ extension MeetingView {
     /// 2026-09-19 低门槛改造（用户反馈「门槛极高」）：**默认已经选好麦克风**，
     /// 结论条上只放一件事——「开始会议」；本机音频那 9 个 App 的清单折进一行可选项里，
     /// 想连电脑里的声音一起记的人展开就有全部选择，不想的人一眼都不用扫。
+    /// 2026-10-20 布局与间距优化：将「会议主题」与「音频拾音环境」收敛为紧凑的会前配置面板，
+    /// 限制音源展开区的最大高度，把充足的纵向视口留给下方的「会议记录库」。
     private var emptyState: some View {
-        VStack(spacing: SpeechRailDesignTokens.Spacing.gutter) {
+        VStack(spacing: SpeechRailDesignTokens.Spacing.md) {
             SessionConclusionBand(
                 tone: .healthy,
                 title: "直接开始就能记",
@@ -59,14 +65,15 @@ extension MeetingView {
                     .help("按当前所选音源开始录制（⌘⇧N）；首次使用麦克风会请求系统授权")
             }
 
-            // 空态只有**一条**右栏（页级 `inspector`，这一态渲染 `meetingInfoCard`）。
-            // 2026-09-19 真机走查：这里曾另起一个 `HStack`，把 `meetingInfoCard` 再摆一次——
-            // 于是「本次会议」在同一屏出现两遍，两个 360 栏加主区把宽 1105pt 的内容区挤成
-            // 3 列（来源卡只剩 308pt），连稿里那句「本机音频：抓这个 App 正在播放的声音…」
-            // 都被折成三行后截断。稿 `screenClosureMeetingSources` 里 split 只有
-            // 「音频来源 + 本次会议」两栏。
-            titleField
-            sourceOptions
+            CardSurface {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    titleField
+                    SessionHairline()
+                    sourceOptions
+                }
+                .padding(SpeechRailDesignTokens.Spacing.md)
+            }
+
             libraryCard
         }
         .frame(maxHeight: .infinity, alignment: .topLeading)
@@ -80,15 +87,15 @@ extension MeetingView {
     private var sourceOptions: some View {
         DisclosureGroup(isExpanded: $showsSourceOptions) {
             ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
                     SessionPanel { sourcesCard }
                     if sourceCandidates.isEmpty {
                         SessionPanel { blockedSourcesCard }
                     }
                 }
-                .padding(.top, SpeechRailDesignTokens.Spacing.sm)
+                .padding(.top, SpeechRailDesignTokens.Spacing.xs)
             }
-            .frame(maxHeight: .infinity)
+            .frame(maxHeight: SpeechRailDesignTokens.Layout.meetingSourceOptionsMaxHeight)
         } label: {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 Image(systemName: "waveform.and.mic")
@@ -97,9 +104,10 @@ extension MeetingView {
                 Text("音频拾音环境（可选配置）")
                     .font(SpeechRailDesignTokens.Typography.bodyMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                Text(sourceSummaryText)
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                StatusPill(
+                    tone: (usesMicrophone || !systemApps.isEmpty) ? .healthy : .attention,
+                    label: sourceSummaryText
+                )
                 Spacer(minLength: 0)
             }
         }

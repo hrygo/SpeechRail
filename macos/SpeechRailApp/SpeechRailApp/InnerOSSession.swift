@@ -466,6 +466,48 @@ public final class InnerOSSession {
     }
 }
 
+/// 会中私聊的高频快捷提问预设（纯本机提示词模板，仅依据当前会议已确认转录作答）。
+public struct InnerOSQuickPrompt: Identifiable, Equatable, Sendable {
+    public let id: String
+    public let title: String
+    public let icon: String
+    public let prompt: String
+
+    public init(id: String, title: String, icon: String, prompt: String) {
+        self.id = id
+        self.title = title
+        self.icon = icon
+        self.prompt = prompt
+    }
+
+    public static let defaults: [InnerOSQuickPrompt] = [
+        InnerOSQuickPrompt(
+            id: "summary",
+            title: "总结当前要点",
+            icon: "list.bullet.rectangle.portrait",
+            prompt: "帮我简要总结到目前为止本场会议的核心讨论要点与已达成的结论。"
+        ),
+        InnerOSQuickPrompt(
+            id: "open-issues",
+            title: "梳理待决分歧",
+            icon: "questionmark.bubble",
+            prompt: "目前会上有哪些尚未达成一致的分歧、风险或待确认问题？"
+        ),
+        InnerOSQuickPrompt(
+            id: "draft-reply",
+            title: "拟一句发言回应",
+            icon: "quote.bubble",
+            prompt: "基于刚才的讨论上下文，帮我拟一段简明得体、可以直接在会上念出来的回应措辞。"
+        ),
+        InnerOSQuickPrompt(
+            id: "action-items",
+            title: "提取待办事项",
+            icon: "checklist",
+            prompt: "梳理目前会议中已经提到的后续待办事项与对应推进人。"
+        )
+    ]
+}
+
 private extension InnerOSSession.State {
     var failureText: String? {
         if case .failed(let text) = self { return text }
