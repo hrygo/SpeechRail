@@ -205,7 +205,7 @@
       <text class="stage-desc" x="18" y="118">• 定向标注：仅标直接引语，纯叙述省 70% Token</text>
       <text class="stage-desc" x="18" y="140">• 跨窗状态链：平滑传递前窗末尾 speaker 身份</text>
       <text class="stage-desc" x="18" y="162">• 候选裁剪：动态选拔相关角色 ≤4,000 字符</text>
-      <text class="stage-desc" x="18" y="184">• 优雅回退：未明确角色弱引语自动归属旁白</text>
+      <text class="stage-desc" x="18" y="184">• 纯叙述默认旁白；含对白但漏标 → 待确认</text>
       <text class="stage-desc" x="18" y="206">• 二分容错：超时/截断递归二分，单窗 ≤4 次</text>
 
       <!-- Pill tags -->

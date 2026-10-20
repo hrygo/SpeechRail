@@ -354,6 +354,7 @@ public actor AudiobookRevisionController {
             )
         }
 
+        let pronunciation = try? await store.pronunciationBinding(for: bookID)
         let annotationsByChapter = Dictionary(grouping: allAnnotations, by: \.chapterID)
         let atomsByChapter = Dictionary(grouping: allAtoms, by: \.chapterID)
         let existingFragmentsByChapter = Dictionary(
@@ -375,7 +376,8 @@ public actor AudiobookRevisionController {
                 bindings: bindings,
                 policy: policy,
                 source: source,
-                atoms: chapterAtoms
+                atoms: chapterAtoms,
+                pronunciation: pronunciation
             ) else {
                 incompleteChapterIDs.append(chapter.id)
                 continue
@@ -444,13 +446,15 @@ public actor AudiobookRevisionController {
         let annotations = try await store.annotations(for: bookID, chapterID: chapter.id)
         let bindings = try await store.voiceBindings(for: bookID)
         let atoms = try await store.atoms(for: bookID, chapterID: chapter.id)
+        let pronunciation = try await store.pronunciationBinding(for: bookID)
         let planned = try AudiobookFragmentPlanner.plan(
             chapter: chapter,
             annotations: annotations,
             bindings: bindings,
             policy: policy,
             source: source,
-            atoms: atoms
+            atoms: atoms,
+            pronunciation: pronunciation
         )
         if persist {
             let existing = try await store.fragments(for: bookID, chapterID: chapter.id)

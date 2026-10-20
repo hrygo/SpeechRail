@@ -58,9 +58,19 @@ public final class AudiobookListeningController {
     public private(set) var chapterTotalDurationSeconds: TimeInterval = 0
     public private(set) var chapterUpdatedBannerMessage: String?
     public private(set) var canResumeInterruptedListening: Bool = false
+    /// 最近一次书签写入时刻，供界面与测试确认自动保存确实发生。
+    public private(set) var lastBookmarkSavedAt: Date?
+
+    // 播放进度采样与书签自动保存：默认 200 ms / 5 s，测试可注入更短间隔。
+    public var progressSampleInterval: Duration = .milliseconds(200)
+    public var bookmarkAutosaveInterval: TimeInterval = AudiobookLimits.bookmarkAutosaveIntervalSeconds
 
     private var orderedItems: [(binding: AudiobookFragmentCandidateBinding, candidate: AudiobookRenderCandidate, fileURL: URL)] = []
     private var activeSessionToken: UUID?
+    /// 已应用到界面/书签的片内进度比例，用来忽略 seek 后短暂回传的旧进度。
+    private var lastAppliedProgressFraction: Double?
+    private var progressMonitorTask: Task<Void, Never>?
+    private var progressMonitorToken: UUID?
 
     public init(
         store: AudiobookProjectStore,
@@ -150,6 +160,8 @@ public final class AudiobookListeningController {
 
     public func pause() async {
         guard activePlayback != nil else { return }
+        applyPlaybackProgressIfForward()
+        stopProgressMonitor()
         playbackOwner.pause()
         isPlaying = false
         isPaused = true
@@ -167,6 +179,7 @@ public final class AudiobookListeningController {
                 try playbackOwner.resume()
                 isPlaying = playbackOwner.isPlaying
                 isPaused = false
+                restartProgressMonitor()
                 return
             }
             // Another preview (such as role audition) preempted SharedPlaybackOwner — resume from saved bookmark!
@@ -221,6 +234,7 @@ public final class AudiobookListeningController {
         {
             currentFragmentElapsedSeconds = targetOffset
             chapterElapsedSeconds = accumulated + targetOffset
+            lastAppliedProgressFraction = targetOffset / max(orderedItems[targetIndex].candidate.durationSeconds, 0.001)
             playbackOwner.seek(to: targetOffset)
             await saveCurrentBookmark()
         } else {
@@ -246,6 +260,7 @@ public final class AudiobookListeningController {
 
     public func leaveWorkshop() async {
         await saveCurrentBookmark()
+        stopProgressMonitor()
         activeSessionToken = nil
         if let active = activePlayback {
             playbackOwner.stop(
@@ -283,6 +298,7 @@ public final class AudiobookListeningController {
         let previousPlayback = activePlayback
         let previousFragElapsed = currentFragmentElapsedSeconds
         let previousChapElapsed = chapterElapsedSeconds
+        let previousProgressFraction = lastAppliedProgressFraction
 
         let active = ActiveFragmentPlayback(
             bookID: bookID,
@@ -307,6 +323,7 @@ public final class AudiobookListeningController {
         activeSessionToken = sessionToken
         currentFragmentElapsedSeconds = offsetSeconds
         chapterElapsedSeconds = prefixDuration + offsetSeconds
+        lastAppliedProgressFraction = offsetSeconds / max(item.candidate.durationSeconds, 0.001)
         activePlayback = active
 
         do {
@@ -334,8 +351,10 @@ public final class AudiobookListeningController {
                         isPreviousRevision: isPreviousRevision
                     )
                 } else {
+                    self.stopProgressMonitor()
                     self.currentFragmentElapsedSeconds = item.candidate.durationSeconds
                     self.chapterElapsedSeconds = self.chapterTotalDurationSeconds
+                    self.lastAppliedProgressFraction = 1.0
                     self.isPlaying = false
                     self.isPaused = false
                     await self.saveCurrentBookmark()
@@ -348,11 +367,13 @@ public final class AudiobookListeningController {
             activePlayback = previousPlayback
             currentFragmentElapsedSeconds = previousFragElapsed
             chapterElapsedSeconds = previousChapElapsed
+            lastAppliedProgressFraction = previousProgressFraction
             throw error
         }
 
         isPlaying = playbackOwner.isPlaying
         isPaused = false
+        startProgressMonitor(fragmentID: item.binding.fragmentID, duration: item.candidate.durationSeconds, prefixDuration: prefixDuration)
         await saveCurrentBookmark()
     }
 
@@ -369,5 +390,76 @@ public final class AudiobookListeningController {
             updatedAt: Date()
         )
         try? await store.saveBookmark(bookmark)
+        lastBookmarkSavedAt = Date()
+    }
+
+    // MARK: - Progress Tracking & Bookmark Autosave
+
+    private func startProgressMonitor(
+        fragmentID: UUID,
+        duration: TimeInterval,
+        prefixDuration: TimeInterval
+    ) {
+        stopProgressMonitor()
+        let token = UUID()
+        let interval = progressSampleInterval
+        progressMonitorToken = token
+        progressMonitorTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self,
+                      self.progressMonitorToken == token,
+                      self.activePlayback?.fragmentID == fragmentID
+                else { return }
+                if self.isPlaying {
+                    self.applyPlaybackProgress(duration: duration, prefixDuration: prefixDuration)
+                    await self.autosaveBookmarkIfDue()
+                }
+                do {
+                    try await Task.sleep(for: interval)
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    private func stopProgressMonitor() {
+        progressMonitorTask?.cancel()
+        progressMonitorTask = nil
+        progressMonitorToken = nil
+    }
+
+    private func restartProgressMonitor() {
+        guard let active = activePlayback, orderedItems.indices.contains(active.fragmentIndex) else { return }
+        let prefix = orderedItems[0..<active.fragmentIndex].reduce(0.0) { $0 + $1.candidate.durationSeconds }
+        startProgressMonitor(
+            fragmentID: active.fragmentID,
+            duration: orderedItems[active.fragmentIndex].candidate.durationSeconds,
+            prefixDuration: prefix
+        )
+    }
+
+    /// 只接受向前推进的采样：seek 后旧进度回传不会把时间轴拉回去。
+    private func applyPlaybackProgress(duration: TimeInterval, prefixDuration: TimeInterval) {
+        let fraction = min(max(playbackOwner.progress, 0), 1)
+        if let last = lastAppliedProgressFraction, fraction <= last + 0.0005 { return }
+        lastAppliedProgressFraction = fraction
+        currentFragmentElapsedSeconds = fraction * duration
+        chapterElapsedSeconds = prefixDuration + currentFragmentElapsedSeconds
+    }
+
+    private func applyPlaybackProgressIfForward() {
+        guard let active = activePlayback, orderedItems.indices.contains(active.fragmentIndex) else { return }
+        let prefix = orderedItems[0..<active.fragmentIndex].reduce(0.0) { $0 + $1.candidate.durationSeconds }
+        applyPlaybackProgress(
+            duration: orderedItems[active.fragmentIndex].candidate.durationSeconds,
+            prefixDuration: prefix
+        )
+    }
+
+    private func autosaveBookmarkIfDue() async {
+        let now = Date()
+        guard lastBookmarkSavedAt.map({ now.timeIntervalSince($0) >= bookmarkAutosaveInterval }) ?? true else { return }
+        await saveCurrentBookmark()
     }
 }

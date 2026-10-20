@@ -1,4 +1,5 @@
 import CoreFoundation
+import Darwin
 import Foundation
 import XCTest
 #if SWIFT_PACKAGE
@@ -99,13 +100,15 @@ final class AudiobookImportTests: XCTestCase {
         let cfGB = CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)
         let nsGB = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(cfGB))
         let gbData = try XCTUnwrap(sampleText.data(using: nsGB))
-        XCTAssertThrowsError(try AudiobookTXTImporter.prepare(rawData: gbData)) { error in
-            guard case let AudiobookImportError.encodingSelectionRequired(candidates) = error else {
-                XCTFail("Expected encodingSelectionRequired, got \(error)")
-                return
-            }
-            XCTAssertTrue(candidates.contains(.gb18030))
-        }
+        // 非 UTF-8 的合法 GB18030 字节流先给出可核对的预览，并标明需要确认编码；
+        // 不能在校验阶段直接失败，否则导入面板没有机会让用户切换编码。
+        let provisional = try AudiobookTXTImporter.prepare(rawData: gbData)
+        XCTAssertEqual(provisional.detectedEncoding, .gb18030)
+        XCTAssertTrue(provisional.requiresEncodingConfirmation)
+        XCTAssertTrue(provisional.candidateEncodings.contains(.gb18030))
+        XCTAssertTrue(provisional.candidateEncodings.contains(.utf8))
+        XCTAssertEqual(provisional.chapters.count, 1)
+        XCTAssertTrue(provisional.previewText.contains("雾港"))
         let gbPreview = try AudiobookTXTImporter.prepare(
             rawData: gbData,
             suggestedTitle: "雾港来信",
@@ -342,6 +345,17 @@ final class AudiobookImportTests: XCTestCase {
         XCTAssertNoThrow(try preview.sourceIndex.validateCoverage(preview.chapters.map(\.sourceRange), exclusions: []))
     }
 
+    func testThreeRepeatedRoundTitlesCollapseToOneDirectoryEntry() throws {
+        let title = "第十六回　三重虛構回目"
+        let body = "山路上的旅人走過長橋，遠處的燈火仍然明亮。"
+        let text = "\(title)\n—\n\(title)\n—\n\(title)\n\(body)"
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data(text.utf8))
+
+        XCTAssertEqual(preview.chapters.map(\.title), [title])
+        XCTAssertEqual(try preview.sourceIndex.text(in: preview.sourceIndex.wholeRange), text)
+        XCTAssertNoThrow(try AudiobookChapterPlanner.validateChapterEdits(preview.chapters, source: preview.sourceIndex))
+    }
+
     func testRepeatedWholeChapterTextRemainsFullyCoveredAndReadable() throws {
         let chapter = "第十五回　完整虛構回目\r\n山路上的旅人走過長橋，遠處的燈火仍然明亮。"
         let text = "\(chapter)\r\n\r\n\(chapter)"
@@ -370,6 +384,249 @@ final class AudiobookImportTests: XCTestCase {
         XCTAssertEqual(preview.originalBytes, raw)
         XCTAssertEqual(preview.canonicalUTF8, raw)
         XCTAssertEqual(preview.chapters.count, 2)
+    }
+
+    func testTableOfContentsIsExcludedInsteadOfBecomingChapters() throws {
+        let body1 = "    風從山谷吹來，捲起滿地落葉，遠處傳來隱約的鐘聲。他抬頭望去，天空陰沉。"
+        let body2 = "    烏雲壓過山脊，雨點敲打窗欞，屋內的燈芯輕輕搖晃，映出人影。"
+        let body3 = "    雷聲滾過天邊，震得窗紙嗡嗡作響，他握緊手中的書卷，等待雨停。"
+        let text = "目錄\n\n第一章 風起\n第二章 雲湧\n第三章 雷鳴\n\n第一章 風起\n\n\(body1)\n\n第二章 雲湧\n\n\(body2)\n\n第三章 雷鳴\n\n\(body3)"
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data(text.utf8))
+
+        XCTAssertEqual(preview.chapters.map(\.title), ["第一章 風起", "第二章 雲湧", "第三章 雷鳴"])
+        XCTAssertEqual(preview.tableOfContentsRanges.count, 1)
+        let first = try XCTUnwrap(preview.chapters.first)
+        XCTAssertFalse(first.excludedRanges.isEmpty, "目录页应作为章节排除区间，而不是独立章节")
+        XCTAssertFalse(try preview.textPreview(for: first.id).contains("目錄"))
+        XCTAssertTrue(try preview.textPreview(for: first.id).contains("風從山谷"))
+        let atoms = try preview.sourceIndex.buildAtoms(for: first)
+        XCTAssertFalse(
+            atoms.contains { (try? preview.sourceIndex.text(in: $0.sourceRange))?.contains("目錄") == true },
+            "目录文字不能进入正文原子"
+        )
+        XCTAssertNoThrow(try AudiobookChapterPlanner.validateChapterEdits(preview.chapters, source: preview.sourceIndex))
+    }
+
+    func testTableOfContentsWithDotLeadersAndPageNumbersIsExcluded() throws {
+        let body1 = "    風從山谷吹來，捲起滿地落葉，遠處傳來隱約的鐘聲。他抬頭望去，天空陰沉。"
+        let body2 = "    烏雲壓過山脊，雨點敲打窗欞，屋內的燈芯輕輕搖晃，映出人影。"
+        let body3 = "    雷聲滾過天邊，震得窗紙嗡嗡作響，他握緊手中的書卷，等待雨停。"
+        let text = "目次\n第一章 風起……1\n第二章 雲湧……12\n第三章 雷鳴……25\n\n第一章 風起\n\n\(body1)\n\n第二章 雲湧\n\n\(body2)\n\n第三章 雷鳴\n\n\(body3)"
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data(text.utf8))
+
+        XCTAssertEqual(preview.chapters.map(\.title), ["第一章 風起", "第二章 雲湧", "第三章 雷鳴"])
+        XCTAssertEqual(preview.tableOfContentsRanges.count, 1)
+        XCTAssertFalse(try preview.textPreview(for: preview.chapters[0].id).contains("……25"))
+        XCTAssertTrue(try preview.textPreview(for: preview.chapters[0].id).contains("風從山谷"))
+        XCTAssertNoThrow(try AudiobookChapterPlanner.validateChapterEdits(preview.chapters, source: preview.sourceIndex))
+    }
+
+    func testTableOfContentsWithoutMarkerIsDetectedByRepeatedLaterHeadings() throws {
+        let body1 = "    風從山谷吹來，捲起滿地落葉，遠處傳來隱約的鐘聲。他抬頭望去，天空陰沉。"
+        let body2 = "    烏雲壓過山脊，雨點敲打窗欞，屋內的燈芯輕輕搖晃，映出人影。"
+        let body3 = "    雷聲滾過天邊，震得窗紙嗡嗡作響，他握緊手中的書卷，等待雨停。"
+        let text = "第一章 風起\n第二章 雲湧\n第三章 雷鳴\n\n第一章 風起\n\n\(body1)\n\n第二章 雲湧\n\n\(body2)\n\n第三章 雷鳴\n\n\(body3)"
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data(text.utf8))
+
+        XCTAssertEqual(preview.chapters.map(\.title), ["第一章 風起", "第二章 雲湧", "第三章 雷鳴"])
+        XCTAssertEqual(preview.tableOfContentsRanges.count, 1)
+        XCTAssertTrue(try preview.textPreview(for: preview.chapters[0].id).contains("風從山谷"))
+        XCTAssertNoThrow(try AudiobookChapterPlanner.validateChapterEdits(preview.chapters, source: preview.sourceIndex))
+    }
+
+    func testShortNumberedSectionsAreNotMistakenForTableOfContents() throws {
+        let text = "一\n\n第一部分短句。\n\n二\n\n第二部分短句。\n\n三\n\n第三部分短句。"
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data(text.utf8))
+
+        XCTAssertEqual(preview.chapters.map(\.title), ["一", "二", "三"])
+        XCTAssertTrue(preview.chapters.allSatisfy(\.excludedRanges.isEmpty))
+        XCTAssertTrue(preview.tableOfContentsRanges.isEmpty)
+    }
+
+    func testLargeSourceIndexBenchmarkWhenRequested() throws {
+        guard ProcessInfo.processInfo.environment["SPEECHRAIL_AUDIOBOOK_INDEX_BENCHMARK"] == "1" else {
+            throw XCTSkip("仅在显式设置 SPEECHRAIL_AUDIOBOOK_INDEX_BENCHMARK=1 时运行大样本基准")
+        }
+        let scalarTarget = Int(ProcessInfo.processInfo.environment["SPEECHRAIL_AUDIOBOOK_INDEX_SCALARS"] ?? "2000000") ?? 2_000_000
+        let unit = "天地玄黄，宇宙洪荒。\n"
+        let unitScalars = unit.unicodeScalars.count
+        let text = String(repeating: unit, count: max(1, scalarTarget / unitScalars))
+        let data = Data(text.utf8)
+        let before = Self.residentBytes()
+        let started = Date()
+        let index = try AudiobookSourceIndex(utf8: data)
+        let elapsed = Date().timeIntervalSince(started) * 1_000
+        let after = Self.residentBytes()
+        print("audiobook-index-benchmark scalars=\(index.scalarCount) bytes=\(data.count) elapsed_ms=\(String(format: "%.1f", elapsed)) resident_delta_bytes=\(Int64(after) - Int64(before))")
+        XCTAssertGreaterThan(index.scalarCount, scalarTarget / 2)
+    }
+
+    private static func residentBytes() -> UInt64 {
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+            }
+        }
+        return result == KERN_SUCCESS ? info.resident_size : 0
+    }
+
+    func testRealCorpusImportBenchmarkWhenRequested() throws {
+        guard let path = ProcessInfo.processInfo.environment["SPEECHRAIL_AUDIOBOOK_REAL_CORPUS"] else {
+            throw XCTSkip("仅在设置 SPEECHRAIL_AUDIOBOOK_REAL_CORPUS 时运行真实书稿基线")
+        }
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        let before = Self.residentBytes()
+        let started = Date()
+        let preview = try AudiobookTXTImporter.prepare(rawData: data)
+        let elapsed = Date().timeIntervalSince(started) * 1_000
+        let after = Self.residentBytes()
+        print("audiobook-real-corpus-benchmark bytes=\(data.count) chapters=\(preview.chapters.count) elapsed_ms=\(String(format: "%.1f", elapsed)) resident_delta_bytes=\(Int64(after) - Int64(before))")
+        XCTAssertFalse(preview.chapters.isEmpty)
+    }
+
+    func testRealEPUBImportWhenRequested() async throws {
+        guard let directory = ProcessInfo.processInfo.environment["SPEECHRAIL_AUDIOBOOK_REAL_EPUB_DIR"] else {
+            throw XCTSkip("仅在设置 SPEECHRAIL_AUDIOBOOK_REAL_EPUB_DIR 时运行真实 EPUB 基线")
+        }
+        let urls = try FileManager.default.contentsOfDirectory(
+            at: URL(fileURLWithPath: directory),
+            includingPropertiesForKeys: [.fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ).filter { $0.pathExtension.lowercased() == "epub" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        XCTAssertGreaterThanOrEqual(urls.count, 3)
+        for url in urls {
+            let started = Date()
+            let preview = try await AudiobookTXTImporter.prepareEPUB(fileURL: url)
+            let elapsed = Date().timeIntervalSince(started) * 1_000
+            print("audiobook-real-epub-benchmark file=\(url.lastPathComponent) chapters=\(preview.chapters.count) elapsed_ms=\(String(format: "%.1f", elapsed))")
+            XCTAssertFalse(preview.chapters.isEmpty, url.lastPathComponent)
+        }
+    }
+
+    func testEPUBExtractsSpineTextMetadataAndEntities() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("epub-fixture-\(UUID().uuidString)", isDirectory: true)
+        let source = root.appendingPathComponent("book", isDirectory: true)
+        try FileManager.default.createDirectory(at: source.appendingPathComponent("META-INF"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: source.appendingPathComponent("OEBPS"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try Data("""
+        <?xml version="1.0" encoding="utf-8"?>
+        <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+          <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+        </container>
+        """.utf8).write(to: source.appendingPathComponent("META-INF/container.xml"))
+        try Data("""
+        <?xml version="1.0" encoding="utf-8"?>
+        <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+          <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+            <dc:title>测试之书</dc:title><dc:creator>测试作者</dc:creator>
+          </metadata>
+          <manifest>
+            <item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+            <item id="c2" href="ch2.xhtml" media-type="application/xhtml+xml"/>
+          </manifest>
+          <spine><itemref idref="c1"/><itemref idref="c2"/></spine>
+        </package>
+        """.utf8).write(to: source.appendingPathComponent("OEBPS/content.opf"))
+        try Data("""
+        <?xml version="1.0" encoding="utf-8"?>
+        <html xmlns="http://www.w3.org/1999/xhtml"><head><title>第一章</title></head>
+        <body><h1>第一章 出发</h1><p>山路&nbsp;漫长 &amp; 安静。</p><script>alert("x")</script></body></html>
+        """.utf8).write(to: source.appendingPathComponent("OEBPS/ch1.xhtml"))
+        try Data("""
+        <?xml version="1.0" encoding="utf-8"?>
+        <html xmlns="http://www.w3.org/1999/xhtml"><head><title>第二章</title></head>
+        <body><h1>第二章 归来</h1><p>钟声响起。</p></body></html>
+        """.utf8).write(to: source.appendingPathComponent("OEBPS/ch2.xhtml"))
+        let epubURL = root.appendingPathComponent("book.epub")
+        try makeZip(from: source, to: epubURL)
+
+        let preview = try await AudiobookTXTImporter.prepareEPUB(fileURL: epubURL)
+        XCTAssertTrue(preview.isEPUB)
+        XCTAssertEqual(preview.title, "测试之书")
+        XCTAssertEqual(preview.author, "测试作者")
+        XCTAssertEqual(preview.chapters.map(\.title), ["第一章 出发", "第二章 归来"])
+        XCTAssertTrue(preview.previewText.contains("山路 漫长 & 安静。"))
+        XCTAssertFalse(preview.previewText.contains("script"))
+        XCTAssertFalse(preview.previewText.contains("alert"))
+    }
+
+    func testEPUBRespectsLinearNoEncodedHrefsAndFragments() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("epub-spine-\(UUID().uuidString)", isDirectory: true)
+        let source = root.appendingPathComponent("book", isDirectory: true)
+        try FileManager.default.createDirectory(at: source.appendingPathComponent("META-INF"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: source.appendingPathComponent("OEBPS/Text"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try Data("""
+        <?xml version="1.0" encoding="utf-8"?>
+        <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+          <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+        </container>
+        """.utf8).write(to: source.appendingPathComponent("META-INF/container.xml"))
+        try Data("""
+        <?xml version="1.0" encoding="utf-8"?>
+        <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+          <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>结构测试</dc:title></metadata>
+          <manifest>
+            <item id="c1" href="Text/ch%201.xhtml#start" media-type="application/xhtml+xml"/>
+            <item id="c2" href="Text/ch2.xhtml" media-type="application/xhtml+xml"/>
+            <item id="c3" href="Text/ch3.xhtml" media-type="application/xhtml+xml"/>
+          </manifest>
+          <spine>
+            <itemref idref="c1" linear="no"/>
+            <itemref idref="c2"/>
+            <itemref idref="c3"/>
+          </spine>
+        </package>
+        """.utf8).write(to: source.appendingPathComponent("OEBPS/content.opf"))
+        try Data("""
+        <?xml version="1.0" encoding="utf-8"?>
+        <html xmlns="http://www.w3.org/1999/xhtml"><body><h1>附录</h1><p>不应出现在正文。</p></body></html>
+        """.utf8).write(to: source.appendingPathComponent("OEBPS/Text/ch 1.xhtml"))
+        try Data("""
+        <?xml version="1.0" encoding="utf-8"?>
+        <html xmlns="http://www.w3.org/1999/xhtml"><body><h1>第二章</h1><p>钟声响起。</p></body></html>
+        """.utf8).write(to: source.appendingPathComponent("OEBPS/Text/ch2.xhtml"))
+        try Data("""
+        <?xml version="1.0" encoding="utf-8"?>
+        <html xmlns="http://www.w3.org/1999/xhtml"><body><h1>第三章</h1><p>旅人归来。</p></body></html>
+        """.utf8).write(to: source.appendingPathComponent("OEBPS/Text/ch3.xhtml"))
+        let epubURL = root.appendingPathComponent("book.epub")
+        try makeZip(from: source, to: epubURL)
+
+        let preview = try await AudiobookTXTImporter.prepareEPUB(fileURL: epubURL)
+        XCTAssertEqual(preview.chapters.map(\.title), ["第二章", "第三章"])
+        XCTAssertFalse(preview.previewText.contains("不应出现在正文"))
+    }
+
+    func testEPUBWithoutContainerIsRejected() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("epub-bad-\(UUID().uuidString)", isDirectory: true)
+        let source = root.appendingPathComponent("book", isDirectory: true)
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("not a container".utf8).write(to: source.appendingPathComponent("readme.txt"))
+        let epubURL = root.appendingPathComponent("bad.epub")
+        try makeZip(from: source, to: epubURL)
+        XCTAssertThrowsError(try AudiobookEPUBImporter.extractText(from: epubURL)) { error in
+            XCTAssertEqual(error as? AudiobookEPUBError, .missingContainer)
+        }
+    }
+
+    private func makeZip(from directory: URL, to destination: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
+        process.currentDirectoryURL = directory
+        process.arguments = ["-q", "-r", destination.path, "."]
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0, "测试夹具 ZIP 创建失败")
     }
 
     func testSameTitleWithDifferentBodyIsNotReportedAsRepeatedContent() throws {

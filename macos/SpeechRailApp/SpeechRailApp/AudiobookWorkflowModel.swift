@@ -51,6 +51,30 @@ public final class AudiobookWorkflowModel {
         }
     }
 
+    /// 制作按钮没有可制作章节时的唯一阻塞原因；用于把“为什么不能做”与“下一步去哪”分开。
+    public enum ProductionBlocker: Equatable, Sendable {
+        case editingChapterLayout
+        case anotherBookProducing
+        case unknownSpeakers(count: Int)
+        case castNotConfirmed
+        case noReadyChapters
+
+        public var message: String {
+            switch self {
+            case .editingChapterLayout:
+                return "正在整理章节目录，完成后才能制作。"
+            case .anotherBookProducing:
+                return "另一部有声书正在制作，完成或暂停后再开始此书。"
+            case let .unknownSpeakers(count):
+                return "还有 \(count) 处说话人待确认，确认后才能制作章节。"
+            case .castNotConfirmed:
+                return "角色与音色尚未确认，确认后才能制作章节。"
+            case .noReadyChapters:
+                return "没有待制作的章节：可能已全部完成，或章节已被跳过。"
+            }
+        }
+    }
+
     public enum PrimaryBookAction: Equatable, Sendable {
         case analyzeWholeBook
         case resumeAnalysis
@@ -279,12 +303,21 @@ public final class AudiobookWorkflowModel {
     )
     public var preparedExport: AudiobookPreparedExport?
     public private(set) var isPreparingExport: Bool = false
+    /// 导出面板内联错误：主页面横幅会被 sheet 遮住，导出失败必须在当前上下文可见。
+    public var exportErrorMessage: String?
+    /// 导出面板的只读预检结果；nil 表示尚未检查或检查失败，UI 不应把它当作“已就绪”。
+    public private(set) var exportAudit: AudiobookExportAudit?
+    public private(set) var isAuditingExport: Bool = false
+    @ObservationIgnored private var exportPreparationRequestID: UUID?
+    @ObservationIgnored private var exportAuditRequestID: UUID?
+    @ObservationIgnored private var secondaryResolutionTask: Task<Void, Never>?
     public private(set) var exportRecords: [AudiobookExportRecord] = []
     public private(set) var exportCover: AudiobookCoverAsset?
     public private(set) var exportCoverPreviewURL: URL?
     public private(set) var exportCoverErrorMessage: String?
 
     public var importPreview: AudiobookImportPreview?
+    public var importErrorMessage: String?
     public var importFileURL: URL?
     public var isShowingImportSheet: Bool = false
     public var isShowingTrashSheet: Bool = false
@@ -296,8 +329,13 @@ public final class AudiobookWorkflowModel {
     public private(set) var voiceReturnBannerMessage: String?
     public var bannerMessage: String?
     public var errorMessage: String?
+    public private(set) var lastTrashedBookID: UUID?
+    public private(set) var lastTrashedBookTitle: String?
+    public private(set) var trashUndoMessage: String?
 
     public private(set) var listeningController: AudiobookListeningController?
+    public private(set) var pronunciationController: AudiobookPronunciationController?
+    public var isPronunciationSheetPresented: Bool = false
 
     // MARK: - Internal Actors & Tasks
 
@@ -391,18 +429,43 @@ public final class AudiobookWorkflowModel {
             revisionController: rev,
             playbackOwner: playbackOwner
         )
+        let pronunciation = AudiobookPronunciationController(
+            store: createdStore,
+            client: dependencies.pronunciationClient
+        )
         self.castController = cast
         self.revisionController = rev
         self.productionController = prod
         self.exportController = exp
         self.analysisPipeline = pipe
         self.listeningController = listen
+        self.pronunciationController = pronunciation
     }
 
     // MARK: - Computed Projections & Next Action Resolution
 
     public var currentAnalysisConfigSnapshot: AudiobookAnalysisConfigSnapshot {
         dependencies.resolveAnalysisSnapshot(analysisGeneration)
+    }
+
+    public var exportReadiness: AudiobookExportReadiness {
+        AudiobookExportReadiness(chapters: chapters)
+    }
+
+    public var exportReadyChapters: [AudiobookChapter] {
+        let ready = Set(exportAudit?.readyChapterIDs ?? exportReadiness.readyChapterIDs)
+        return chapters.filter { ready.contains($0.id) }
+    }
+
+    public var exportBlockingChapters: [AudiobookChapter] {
+        let blocking = Set(exportAudit?.blockers.map(\.chapterID) ?? exportReadiness.blockingChapterIDs)
+        return chapters.filter { blocking.contains($0.id) }
+    }
+
+    public var hasListenableChapter: Bool {
+        chapters.contains {
+            !$0.isSkipped && ($0.currentChapterRevisionID != nil || $0.previousChapterRevisionID != nil)
+        }
     }
 
     public var filteredShelfBooks: [AudiobookBookSummary] {
@@ -561,6 +624,7 @@ public final class AudiobookWorkflowModel {
               let selectedChapterID,
               let selectedChapter = chapters.first(where: { $0.id == selectedChapterID }),
               selectedChapter.bookID == book.id,
+              !selectedChapter.isSkipped,
               selectedChapter.currentChapterRevisionID != nil,
               let fragment = chapterFragments.first(where: { $0.id == fragmentID }),
               fragment.bookID == book.id,
@@ -586,6 +650,31 @@ public final class AudiobookWorkflowModel {
     public var isSelectedBookBlockedByProduction: Bool {
         guard let bookID = selectedBook?.id else { return false }
         return isProductionBlocked(for: bookID)
+    }
+
+    public var productionBlocker: ProductionBlocker? {
+        guard let bookID = selectedBook?.id, !chapters.isEmpty else { return nil }
+        if isEditingChapterLayout { return .editingChapterLayout }
+        if isProductionBlocked(for: bookID) { return .anotherBookProducing }
+
+        let hasReadyChapter = chapters.contains { chapter in
+            guard !chapter.isSkipped else { return false }
+            switch chapterReadinessByID[chapter.id] {
+            case .readyForProduction, .needsUpdate, .paused:
+                return true
+            default:
+                return false
+            }
+        }
+        guard !hasReadyChapter else { return nil }
+
+        if totalUnknownSpeakerCount > 0 {
+            return .unknownSpeakers(count: totalUnknownSpeakerCount)
+        }
+        if !isAuditionConfirmedForSelectedBook {
+            return .castNotConfirmed
+        }
+        return .noReadyChapters
     }
 
     public func primaryActionTitle(_ action: PrimaryBookAction, for bookID: UUID) -> String {
@@ -720,13 +809,21 @@ public final class AudiobookWorkflowModel {
 
     public func prepareImport(fileURL: URL, encoding: AudiobookTextEncoding? = nil) async {
         do {
-            errorMessage = nil
-            let preview = try await AudiobookTXTImporter.prepare(fileURL: fileURL, encoding: encoding)
+            let preview = fileURL.pathExtension.lowercased() == "epub"
+                ? try await AudiobookTXTImporter.prepareEPUB(fileURL: fileURL)
+                : try await AudiobookTXTImporter.prepare(fileURL: fileURL, encoding: encoding)
             importFileURL = fileURL
             importPreview = preview
+            importErrorMessage = nil
+            errorMessage = nil
             isShowingImportSheet = true
         } catch {
             errorMessage = error.localizedDescription
+            importErrorMessage = error.localizedDescription
+            // 已打开预览后切换编码失败时，保留预览和用户填写内容，错误显示在导入面板内而不是被遮挡。
+            if importPreview == nil {
+                isShowingImportSheet = false
+            }
         }
     }
 
@@ -741,15 +838,20 @@ public final class AudiobookWorkflowModel {
             let bookID = try await store.importBook(preview)
             isShowingImportSheet = false
             importPreview = nil
+            importErrorMessage = nil
             await refreshShelf()
             await openBook(bookID)
         } catch {
             errorMessage = error.localizedDescription
+            importErrorMessage = error.localizedDescription
         }
     }
 
     public func openBook(_ bookID: UUID) async {
         cancelWorkspaceRefresh()
+        exportAudit = nil
+        exportAuditRequestID = UUID()
+        isAuditingExport = false
         await openBookWorkspace(bookID, retryStaleInput: true)
     }
 
@@ -779,6 +881,9 @@ public final class AudiobookWorkflowModel {
             }) else { return }
 
             errorMessage = nil
+            if snapshot.book.analysisState == .failed, let failure = snapshot.book.analysisFailure {
+                bannerMessage = "上次分析未完成：\(failure.message)"
+            }
             let latestChapterSelection = selectedBook?.id == bookID
                 ? selectedChapterID.flatMap { chapterID in
                     snapshot.chapters.contains(where: { $0.id == chapterID }) ? chapterID : nil
@@ -864,6 +969,9 @@ public final class AudiobookWorkflowModel {
 
     public func trashBook(_ bookID: UUID) async {
         guard let store else { return }
+        let title = (try? await store.book(id: bookID))?.title
+            ?? shelfBooks.first(where: { $0.id == bookID })?.book.title
+            ?? (selectedBook?.id == bookID ? selectedBook?.title : nil)
         do {
             if bookSelectionLoad.requestedID == bookID.uuidString {
                 cancelWorkspaceRefresh()
@@ -882,7 +990,9 @@ public final class AudiobookWorkflowModel {
                 exportCoverErrorMessage = nil
             }
             await refreshShelf()
-            bannerMessage = "已移入有声书废纸篓，原始 TXT 与已导出的外部文件不受影响。"
+            lastTrashedBookID = bookID
+            lastTrashedBookTitle = title
+            trashUndoMessage = "《\(title ?? "该书")》已移入有声书废纸篓，原始 TXT 与已导出的外部文件不受影响。"
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -892,11 +1002,22 @@ public final class AudiobookWorkflowModel {
         guard let store else { return }
         do {
             try await store.restoreTrashedBook(id: bookID)
+            if lastTrashedBookID == bookID {
+                lastTrashedBookID = nil
+                lastTrashedBookTitle = nil
+                trashUndoMessage = nil
+            }
             await refreshShelf()
             bannerMessage = "已从废纸篓恢复书籍及其音频片段。"
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    /// 书架上的「撤销」入口；只恢复刚刚移入废纸篓的那一本，不触碰更早的作品。
+    public func undoLastTrash() async {
+        guard let bookID = lastTrashedBookID else { return }
+        await restoreTrashedBook(bookID)
     }
 
     // MARK: - Analysis Lifecycle
@@ -1186,7 +1307,7 @@ public final class AudiobookWorkflowModel {
                       let voice = effectiveSnapshot.voices.first(where: { $0.id == voiceID }), effectiveCatalog.permits(voice, bookID: targetBookID),
                       let options = SpeechRailCapabilityRevisionSelector.creatorRequestOptions(voiceID: voiceID, in: effectiveSnapshot),
                       let model = options.expectedModelRevision else { throw ServiceAPIClientError.invalidContract("audition_unavailable") }
-                let excerpt = AudiobookSourceRange(lowerBound: range.lowerBound, upperBound: source.scalarByteOffsets[min(end, start + 240)])
+                let excerpt = AudiobookSourceRange(lowerBound: range.lowerBound, upperBound: Int64(source.scalarByteOffsets[min(end, start + 240)]))
                 let binding = effectiveBindings[roleID].flatMap { $0.voiceID == voiceID ? $0 : nil }
                     ?? .init(roleID: roleID, voiceID: voiceID, voiceRevision: options.expectedVoiceRevision, modelRevision: model)
                 try AudiobookCastRegistry.validateRenderBinding(binding, snapshot: effectiveSnapshot, requireProductionReady: false)
@@ -1750,6 +1871,22 @@ public final class AudiobookWorkflowModel {
 
     /// 对当前书中尚未确认的 `unknown` 说话人段落运行二次定向 LLM 消歧分析。
     public func resolveUnknownSpeakersWithLLM(for bookID: UUID? = nil) async {
+        guard secondaryResolutionTask == nil else { return }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.performUnknownSpeakerResolution(for: bookID)
+        }
+        secondaryResolutionTask = task
+        await task.value
+        secondaryResolutionTask = nil
+    }
+
+    /// 取消正在进行的二次复核；已保存的确认结果不受影响。
+    public func cancelSecondaryResolution() {
+        secondaryResolutionTask?.cancel()
+    }
+
+    private func performUnknownSpeakerResolution(for bookID: UUID?) async {
         let targetID = bookID ?? selectedBook?.id
         guard let targetID, let pipeline = analysisPipeline, let store else { return }
         guard !isResolvingUnknownSpeakers else { return }
@@ -1786,6 +1923,9 @@ public final class AudiobookWorkflowModel {
             } else {
                 bannerMessage = "全书所有对白说话人均已确认完毕。"
             }
+        } catch is CancellationError {
+            isResolvingUnknownSpeakers = false
+            bannerMessage = "已取消 AI 复核；已有确认结果保持不变。"
         } catch {
             isResolvingUnknownSpeakers = false
             errorMessage = error.localizedDescription
@@ -2243,6 +2383,35 @@ public final class AudiobookWorkflowModel {
         }
     }
 
+    /// 跳过/恢复整章。跳过只影响分析与制作，原文和章节结构不变。
+    public func setChapterSkipped(chapterID: UUID, skipped: Bool) async {
+        guard let bookID = selectedBook?.id, let store else { return }
+        do {
+            try await store.setChapterSkipped(bookID: bookID, chapterID: chapterID, skipped: skipped)
+            chapters = try await store.chapters(for: bookID)
+            selectedBook = try await store.book(id: bookID)
+            await refreshChapterReadinessMap(for: bookID)
+            await refreshShelf()
+            let title = chapters.first(where: { $0.id == chapterID })?.title ?? "本章"
+            bannerMessage = skipped
+                ? "已跳过《\(title)》：不参与分析与制作，之后可随时恢复。"
+                : "已恢复《\(title)》，会重新纳入分析与制作。"
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    // MARK: - Pronunciation Rules
+
+    public var pronunciationRuleCount: Int { pronunciationController?.ruleCount ?? 0 }
+    public var isPronunciationAvailable: Bool { pronunciationController?.isAvailable ?? false }
+
+    public func presentPronunciationRules() {
+        guard let bookID = selectedBook?.id else { return }
+        isPronunciationSheetPresented = true
+        Task { await pronunciationController?.load(bookID: bookID) }
+    }
+
     public func toggleSharedMinorVoice(roleID: UUID, allowed: Bool) async {
         guard let bookID = selectedBook?.id, let castController, let store else { return }
         do {
@@ -2523,6 +2692,8 @@ public final class AudiobookWorkflowModel {
                 errorMessage = AudiobookProductionError.auditionNotConfirmed.errorDescription
             } else if chapterReadinessByID[chapterID] == .blockedByUnknownSpeakers {
                 errorMessage = AudiobookProductionError.chapterBlockedByUnknownSpeakers(chapterID: chapterID).errorDescription
+            } else if chapters.first(where: { $0.id == chapterID })?.isSkipped == true {
+                errorMessage = "本章已跳过，先恢复本章后才能重录。"
             } else if chapters.first(where: { $0.id == chapterID })?.currentChapterRevisionID == nil {
                 errorMessage = "请先完成本章首次制作，再重录单段。"
             } else {
@@ -2798,10 +2969,26 @@ public final class AudiobookWorkflowModel {
     // MARK: - Listening & Previews
 
     public func startListening(chapterID: UUID? = nil) async {
-        guard let bookID = selectedBook?.id,
-              let targetChapterID = chapterID ?? selectedChapterID ?? chapters.first?.id,
-              let listeningController
-        else { return }
+        let requested = chapterID ?? selectedChapterID
+        let requestedChapter = requested.flatMap { id in
+            chapters.first {
+                $0.id == id && !$0.isSkipped
+                    && ($0.currentChapterRevisionID != nil || $0.previousChapterRevisionID != nil)
+            }
+        }
+        if chapterID != nil, requestedChapter == nil {
+            errorMessage = "该章节还没有可收听的音频，或已按你的设置跳过。"
+            return
+        }
+        let fallbackChapter = chapters.first {
+            !$0.isSkipped && ($0.currentChapterRevisionID != nil || $0.previousChapterRevisionID != nil)
+        }
+        guard let bookID = selectedBook?.id, let listeningController else { return }
+        guard let targetChapterID = (requestedChapter ?? fallbackChapter)?.id else {
+            errorMessage = nil
+            surfaceMode = .listening
+            return
+        }
         do {
             errorMessage = nil
             try await listeningController.play(bookID: bookID, chapterID: targetChapterID)
@@ -2869,36 +3056,110 @@ public final class AudiobookWorkflowModel {
         }
     }
 
+    public func clearExportError() {
+        exportErrorMessage = nil
+    }
+
+    /// 只读预检与 prepare 共用 controller 的规划逻辑；结果只影响面板，不保存生产版本。
+    public func refreshExportAudit(profile: AudiobookExportProfile, chapterIDs: [UUID]?) async {
+        guard let bookID = selectedBook?.id, let exportController else {
+            exportAudit = nil
+            return
+        }
+        let requestID = UUID()
+        exportAuditRequestID = requestID
+        isAuditingExport = true
+        defer {
+            if exportAuditRequestID == requestID {
+                isAuditingExport = false
+            }
+        }
+        do {
+            let audit = try await exportController.audit(
+                bookID: bookID,
+                chapterIDs: chapterIDs,
+                profile: profile
+            )
+            guard exportAuditRequestID == requestID else { return }
+            exportAudit = audit
+        } catch {
+            guard exportAuditRequestID == requestID else { return }
+            exportAudit = nil
+        }
+    }
+
+    /// 导出面板的“去处理”动作：关掉面板，定位到第一处未就绪章节，并切到能解决该阻塞的页签。
+    public func focusFirstExportBlockingChapter() {
+        guard let chapter = exportBlockingChapters.first else { return }
+        isShowingExportSheet = false
+        preparedExport = nil
+        surfaceMode = .workspace
+        selectedChapterID = chapter.id
+
+        if let reason = exportAudit?.blockers.first(where: { $0.chapterID == chapter.id })?.reason {
+            switch reason {
+            case .notAnalyzed:
+                workbenchTab = .preparation
+            case .unknownSpeaker:
+                workbenchTab = .preparation
+                Task { await jumpToFirstUnknownSpeaker() }
+            case .missingAudio, .staleAudio, .missingAsset, .emptyChapter:
+                workbenchTab = .production
+            }
+        } else {
+            workbenchTab = .production
+        }
+    }
+
     public func prepareExport(
         profile: AudiobookExportProfile,
         chapterIDs: [UUID]?,
         loudnessEnabled: Bool = false
     ) async {
-        guard let bookID = selectedBook?.id, let exportController else { return }
+        guard let bookID = selectedBook?.id, let exportController, !isPreparingExport else { return }
         isPreparingExport = true
         errorMessage = nil
+        exportErrorMessage = nil
         if let exportCover, exportCover.bookID != bookID {
             self.exportCover = nil
         }
         let scopedCover = exportCover.flatMap { $0.bookID == bookID ? $0 : nil }
+        let requestID = UUID()
+        exportPreparationRequestID = requestID
         do {
             let prepared = try await exportController.prepare(
                 bookID: bookID,
                 chapterIDs: chapterIDs,
                 profile: profile,
                 cover: scopedCover,
-                loudness: loudnessEnabled ? AudiobookLoudnessSettings() : nil
+                loudness: loudnessEnabled ? AudiobookLoudnessSettings() : nil,
+                requestID: requestID
             )
-            preparedExport = prepared
-            isPreparingExport = false
+            if exportPreparationRequestID == requestID {
+                preparedExport = prepared
+            }
+        } catch let error as AudiobookExportError where error == .exportCancelled {
+            bannerMessage = "已取消导出准备，未生成任何文件。"
         } catch {
-            isPreparingExport = false
             errorMessage = error.localizedDescription
+            exportErrorMessage = error.localizedDescription
         }
+        if exportPreparationRequestID == requestID {
+            exportPreparationRequestID = nil
+        }
+        isPreparingExport = false
+    }
+
+    public func cancelExportPreparation() async {
+        guard let requestID = exportPreparationRequestID, let exportController else { return }
+        await exportController.cancel(requestID: requestID)
+        isPreparingExport = false
+        exportPreparationRequestID = nil
     }
 
     public func commitPreparedExport(destination: URL, overwriteConsent: AudiobookOverwriteConsent? = nil) async {
         guard let prepared = preparedExport, let exportController, let bookID = selectedBook?.id else { return }
+        exportErrorMessage = nil
         do {
             try await exportController.commit(
                 prepared,
@@ -2911,6 +3172,7 @@ public final class AudiobookWorkflowModel {
             bannerMessage = "已成功导出至 \(destination.lastPathComponent)。"
         } catch {
             errorMessage = error.localizedDescription
+            exportErrorMessage = error.localizedDescription
         }
     }
 

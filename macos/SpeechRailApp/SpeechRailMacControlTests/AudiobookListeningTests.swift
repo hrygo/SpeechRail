@@ -295,4 +295,76 @@ final class AudiobookListeningTests: XCTestCase {
         driver.onPlaybackFinished?(true)
         XCTAssertFalse(listening.isPlaying)
     }
+
+    func testPlaybackProgressAdvancesChapterClockAndAutosavesBookmark() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let revisionController = AudiobookRevisionController(store: store)
+        let driver = FakeFilePlaybackDriver()
+        let owner = SharedPlaybackOwner(driver: driver)
+        let listening = AudiobookListeningController(
+            store: store,
+            revisionController: revisionController,
+            playbackOwner: owner
+        )
+        listening.progressSampleInterval = .milliseconds(10)
+        listening.bookmarkAutosaveInterval = 0.01
+
+        let fixture = try await createListenableBook(store: store, revisionController: revisionController)
+        try await listening.play(bookID: fixture.bookID, chapterID: fixture.chapter.id)
+        XCTAssertEqual(listening.currentFragmentElapsedSeconds, 0.0, accuracy: 0.001)
+
+        // 驱动上报片内 40% 进度：10 秒片段应显示第 4 秒，并自动写入书签。
+        driver.onProgress?(0.4)
+        let deadline = Date().addingTimeInterval(2)
+        while listening.currentFragmentElapsedSeconds < 3.9, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(listening.currentFragmentElapsedSeconds, 4.0, accuracy: 0.05)
+        XCTAssertEqual(listening.chapterElapsedSeconds, 4.0, accuracy: 0.05)
+        XCTAssertNotNil(listening.lastBookmarkSavedAt)
+
+        let autoSaved = try await store.bookmark(for: fixture.bookID)
+        XCTAssertEqual(try XCTUnwrap(autoSaved?.fragmentOffsetSeconds), 4.0, accuracy: 0.05)
+
+        // 暂停时保留当前片内位置，而不是回到片段开头。
+        await listening.pause()
+        let pausedBookmark = try await store.bookmark(for: fixture.bookID)
+        XCTAssertEqual(try XCTUnwrap(pausedBookmark?.fragmentOffsetSeconds), 4.0, accuracy: 0.05)
+    }
+
+    func testPauseKeepsSeekPositionWhenDriverHasNotReportedProgress() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let revisionController = AudiobookRevisionController(store: store)
+        let driver = FakeFilePlaybackDriver()
+        let owner = SharedPlaybackOwner(driver: driver)
+        let listening = AudiobookListeningController(
+            store: store,
+            revisionController: revisionController,
+            playbackOwner: owner
+        )
+        listening.progressSampleInterval = .milliseconds(10)
+
+        let fixture = try await createListenableBook(store: store, revisionController: revisionController)
+        try await listening.play(bookID: fixture.bookID, chapterID: fixture.chapter.id)
+        try await listening.skip(seconds: 6.0)
+        await listening.pause()
+
+        // 驱动从未上报 onProgress（进度仍为 0），暂停不能把用户刚跳到的 6 秒写回 0。
+        let bookmark = try await store.bookmark(for: fixture.bookID)
+        XCTAssertEqual(try XCTUnwrap(bookmark?.fragmentOffsetSeconds), 6.0, accuracy: 0.01)
+    }
+
+    func testDisplayFormatKeepsExactPlaybackRateAndLongTimecodes() {
+        XCTAssertEqual(AudiobookDisplayFormat.playbackRate(0.75), "0.75x")
+        XCTAssertEqual(AudiobookDisplayFormat.playbackRate(1.0), "1x")
+        XCTAssertEqual(AudiobookDisplayFormat.playbackRate(1.25), "1.25x")
+        XCTAssertEqual(AudiobookDisplayFormat.playbackRate(1.5), "1.5x")
+        XCTAssertEqual(AudiobookDisplayFormat.playbackRate(2.0), "2x")
+        XCTAssertEqual(AudiobookDisplayFormat.timecode(59), "00:59")
+        XCTAssertEqual(AudiobookDisplayFormat.timecode(3725), "1:02:05")
+        XCTAssertEqual(
+            AudiobookDisplayFormat.bookmarkSummary(offsetSeconds: 12, rate: 1.25),
+            "上次听到本段 00:12 · 1.25x"
+        )
+    }
 }

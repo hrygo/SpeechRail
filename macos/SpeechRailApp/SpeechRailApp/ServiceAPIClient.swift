@@ -1321,3 +1321,5 @@ private struct VoiceRollbackRequestBody: Encodable {
 }
 
 private struct EmptyJSONBody: Encodable {}
+
+extension ServiceAPIClient: AudiobookPronunciationClient {}

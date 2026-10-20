@@ -23,6 +23,76 @@ public enum AudiobookExportProfile: String, Codable, CaseIterable, Equatable, Ha
     }
 }
 
+/// 导出门禁的唯一投影：跳过章节不阻塞，也不计入可导出；其余章节必须有当前版本音频。
+public struct AudiobookExportReadiness: Equatable, Sendable {
+    public let readyChapterIDs: [UUID]
+    public let blockingChapterIDs: [UUID]
+
+    public init(chapters: [AudiobookChapter]) {
+        let active = chapters.filter { !$0.isSkipped }
+        readyChapterIDs = active.filter { $0.currentChapterRevisionID != nil }.map(\.id)
+        blockingChapterIDs = active.filter { $0.currentChapterRevisionID == nil }.map(\.id)
+    }
+
+    public init(readyChapterIDs: [UUID], blockingChapterIDs: [UUID]) {
+        self.readyChapterIDs = readyChapterIDs
+        self.blockingChapterIDs = blockingChapterIDs
+    }
+
+    public var readyChapterCount: Int { readyChapterIDs.count }
+    public var blockingChapterCount: Int { blockingChapterIDs.count }
+    public var isFullBookReady: Bool { !readyChapterIDs.isEmpty && blockingChapterIDs.isEmpty }
+}
+
+/// 导出前只读检查发现的具体阻塞；prepare 仍会做最终校验，但 UI 不再等按下按钮才知道原因。
+public struct AudiobookExportBlocker: Equatable, Sendable, Identifiable {
+    public enum Reason: String, Equatable, Sendable {
+        case notAnalyzed
+        case unknownSpeaker
+        case missingAudio
+        case staleAudio
+        case missingAsset
+        case emptyChapter
+    }
+
+    public let chapterID: UUID
+    public let chapterTitle: String
+    public let reason: Reason
+
+    public var id: String { "\(chapterID.uuidString):\(reason.rawValue)" }
+
+    public var message: String {
+        switch reason {
+        case .notAnalyzed:
+            return "尚未完成全书分析"
+        case .unknownSpeaker:
+            return "包含待确认说话人"
+        case .missingAudio:
+            return "本章音频尚未制作完成"
+        case .staleAudio:
+            return "角色或音色已修改，需更新本章音频"
+        case .missingAsset:
+            return "片段音频资产缺失或未通过核验"
+        case .emptyChapter:
+            return "本章没有可导出的片段"
+        }
+    }
+}
+
+/// 导出面板的只读预检结果；不写文件、不保存生产版本，也不启动媒体编码。
+public struct AudiobookExportAudit: Equatable, Sendable {
+    public let readyChapterIDs: [UUID]
+    public let blockers: [AudiobookExportBlocker]
+
+    public init(readyChapterIDs: [UUID], blockers: [AudiobookExportBlocker]) {
+        self.readyChapterIDs = readyChapterIDs
+        self.blockers = blockers
+    }
+
+    public var readyChapterCount: Int { readyChapterIDs.count }
+    public var isFullBookReady: Bool { !readyChapterIDs.isEmpty && blockers.isEmpty }
+}
+
 public struct AudiobookOverwriteConsent: Codable, Equatable, Sendable {
     public let destinationURL: URL
     public let existingFileSize: Int64
@@ -264,8 +334,12 @@ public actor AudiobookExportController {
         chapterIDs: [UUID]?,
         profile: AudiobookExportProfile,
         cover: AudiobookCoverAsset? = nil,
-        loudness: AudiobookLoudnessSettings? = nil
+        loudness: AudiobookLoudnessSettings? = nil,
+        requestID: UUID = UUID()
     ) async throws -> AudiobookPreparedExport {
+        if cancelledRequestIDs.contains(requestID) {
+            throw AudiobookExportError.exportCancelled
+        }
         if let cover {
             if profile == .chapterMP3 {
                 throw AudiobookExportError.coverNotSupportedForProfile
@@ -274,120 +348,18 @@ public actor AudiobookExportController {
                 throw AudiobookExportError.coverBookMismatch
             }
         }
-        let book = try await store.book(id: bookID)
-        let allChapters = try await store.chapters(for: bookID).sorted { $0.ordinal < $1.ordinal }
-        let allCandidates = try await store.candidates(for: bookID)
-        let candidatesByID = Dictionary(uniqueKeysWithValues: allCandidates.map { ($0.id, $0) })
-
-        let requestedIDSet: Set<UUID>? = chapterIDs.map(Set.init)
-        let isFullBookRequest = (profile == .m4b) || (requestedIDSet == nil)
-
-        var exportedChapters: [AudiobookChapter] = []
-        var omittedChapters: [AudiobookOmittedChapterRecord] = []
-        var manifestChapters: [AudiobookExportManifestPayload.ChapterItem] = []
-        var chapterRevisionsMap: [UUID: UUID] = [:]
-        var sourceFramesByChapter: [UUID: [(Int64, Int)]] = [:]
+        let plan = try await buildPlan(bookID: bookID, chapterIDs: chapterIDs, profile: profile)
+        let book = plan.book
+        let exportedChapters = plan.exportedChapters
+        let omittedChapters = plan.omittedChapters
+        let manifestChapters = plan.manifestChapters
+        let chapterRevisionsMap = plan.chapterRevisionsMap
+        let sourceFramesByChapter = plan.sourceFramesByChapter
         var totalFrames: Int64 = 0
 
-        for chapter in allChapters {
-            if let requestedIDSet, !requestedIDSet.contains(chapter.id) {
-                omittedChapters.append(
-                    AudiobookOmittedChapterRecord(
-                        chapterID: chapter.id,
-                        chapterTitle: chapter.title,
-                        reason: "未勾选该章节"
-                    )
-                )
-                continue
-            }
-
-            let chapterAnns = try await store.annotations(for: bookID, chapterID: chapter.id)
-            if chapterAnns.isEmpty {
-                omittedChapters.append(
-                    AudiobookOmittedChapterRecord(
-                        chapterID: chapter.id,
-                        chapterTitle: chapter.title,
-                        reason: "尚未完成全书分析"
-                    )
-                )
-                continue
-            }
-            if chapterAnns.contains(where: { $0.assignment.isUnknown }) {
-                omittedChapters.append(
-                    AudiobookOmittedChapterRecord(
-                        chapterID: chapter.id,
-                        chapterTitle: chapter.title,
-                        reason: "包含待确认说话人"
-                    )
-                )
-                continue
-            }
-
-            guard let validCurrentRev = try await revisionController.currentChapter(
-                bookID: bookID,
-                chapterID: chapter.id
-            ) else {
-                let hasPrev = (try? await revisionController.previousListenableChapter(
-                    bookID: bookID,
-                    chapterID: chapter.id
-                )) != nil
-                omittedChapters.append(
-                    AudiobookOmittedChapterRecord(
-                        chapterID: chapter.id,
-                        chapterTitle: chapter.title,
-                        reason: hasPrev ? "角色或音色已修改，需更新本章音频" : "本章音频尚未制作完成"
-                    )
-                )
-                continue
-            }
-
-            var fragmentItems: [AudiobookExportManifestPayload.FragmentItem] = []
-            var chapterFrames: [(Int64, Int)] = []
-            for binding in validCurrentRev.orderedBindings {
-                guard let candidate = candidatesByID[binding.candidateID],
-                      candidate.isReceiptVerified,
-                      try await store.verifyCandidateAsset(candidate)
-                else {
-                    omittedChapters.append(
-                        AudiobookOmittedChapterRecord(
-                            chapterID: chapter.id,
-                            chapterTitle: chapter.title,
-                            reason: "片段音频资产缺失或未通过核验"
-                        )
-                    )
-                    fragmentItems = []
-                    break
-                }
-                fragmentItems.append(
-                    AudiobookExportManifestPayload.FragmentItem(
-                        fragmentID: binding.fragmentID,
-                        candidateID: candidate.id,
-                        relativePath: candidate.relativeAssetPath,
-                        fileSHA256: candidate.fileSHA256,
-                        pcmSHA256: candidate.pcmSHA256,
-                        frameCount: candidate.frameCount,
-                        sampleRate: candidate.sampleRate
-                    )
-                )
-                chapterFrames.append((candidate.frameCount, candidate.sampleRate))
-            }
-
-            guard !fragmentItems.isEmpty else { continue }
-            sourceFramesByChapter[chapter.id] = chapterFrames
-            exportedChapters.append(chapter)
-            chapterRevisionsMap[chapter.id] = validCurrentRev.id
-            manifestChapters.append(
-                AudiobookExportManifestPayload.ChapterItem(
-                    chapterID: chapter.id,
-                    ordinal: chapter.ordinal,
-                    title: chapter.title,
-                    fragments: fragmentItems
-                )
-            )
-        }
-
-        if isFullBookRequest && !omittedChapters.isEmpty {
-            throw AudiobookExportError.fullBookExportBlocked(reasons: omittedChapters)
+        let blockingOmissions = plan.omissions.compactMap { $0.blocker == nil ? nil : $0.record }
+        if plan.isFullBookRequest && !blockingOmissions.isEmpty {
+            throw AudiobookExportError.fullBookExportBlocked(reasons: blockingOmissions)
         }
         guard !exportedChapters.isEmpty else {
             throw AudiobookExportError.noExportableChaptersSelected
@@ -398,9 +370,8 @@ public actor AudiobookExportController {
             sourceID: book.sourceID,
             chapterRevisionIDsByChapter: chapterRevisionsMap
         )
-        try await store.saveProductionRevision(prodRev, makeCurrent: isFullBookRequest)
+        try await store.saveProductionRevision(prodRev, makeCurrent: plan.isFullBookRequest)
 
-        let requestID = UUID()
         cancelledRequestIDs.remove(requestID)
 
         let exportReqDir = store.rootURL
@@ -550,6 +521,175 @@ public actor AudiobookExportController {
         }
         prepared.verification = verification
         return prepared
+    }
+
+    private struct PlanOmission {
+        let record: AudiobookOmittedChapterRecord
+        let blocker: AudiobookExportBlocker.Reason?
+    }
+
+    private struct ExportPlan {
+        let book: AudiobookBook
+        let exportedChapters: [AudiobookChapter]
+        let omittedChapters: [AudiobookOmittedChapterRecord]
+        let omissions: [PlanOmission]
+        let manifestChapters: [AudiobookExportManifestPayload.ChapterItem]
+        let chapterRevisionsMap: [UUID: UUID]
+        let sourceFramesByChapter: [UUID: [(Int64, Int)]]
+        let isFullBookRequest: Bool
+    }
+
+    /// 只读预检：与 prepare 共用同一份章节/版本/资产判定，但不保存生产版本、不写导出文件。
+    public func audit(
+        bookID: UUID,
+        chapterIDs: [UUID]?,
+        profile: AudiobookExportProfile
+    ) async throws -> AudiobookExportAudit {
+        let plan = try await buildPlan(bookID: bookID, chapterIDs: chapterIDs, profile: profile)
+        var blockers: [AudiobookExportBlocker] = []
+        for omission in plan.omissions {
+            guard let reason = omission.blocker else { continue }
+            blockers.append(
+                AudiobookExportBlocker(
+                    chapterID: omission.record.chapterID,
+                    chapterTitle: omission.record.chapterTitle,
+                    reason: reason
+                )
+            )
+        }
+        return AudiobookExportAudit(
+            readyChapterIDs: plan.exportedChapters.map(\.id),
+            blockers: blockers
+        )
+    }
+
+    private func buildPlan(
+        bookID: UUID,
+        chapterIDs: [UUID]?,
+        profile: AudiobookExportProfile
+    ) async throws -> ExportPlan {
+        let book = try await store.book(id: bookID)
+        let allChapters = try await store.chapters(for: bookID).sorted { $0.ordinal < $1.ordinal }
+        let allCandidates = try await store.candidates(for: bookID)
+        let candidatesByID = Dictionary(uniqueKeysWithValues: allCandidates.map { ($0.id, $0) })
+
+        let requestedIDSet: Set<UUID>? = chapterIDs.map(Set.init)
+        let isFullBookRequest = (profile == .m4b) || (requestedIDSet == nil)
+
+        var exportedChapters: [AudiobookChapter] = []
+        var omittedChapters: [AudiobookOmittedChapterRecord] = []
+        var omissions: [PlanOmission] = []
+        var manifestChapters: [AudiobookExportManifestPayload.ChapterItem] = []
+        var chapterRevisionsMap: [UUID: UUID] = [:]
+        var sourceFramesByChapter: [UUID: [(Int64, Int)]] = [:]
+
+        func omit(
+            _ chapter: AudiobookChapter,
+            reason: String,
+            blocker: AudiobookExportBlocker.Reason?
+        ) {
+            let record = AudiobookOmittedChapterRecord(
+                chapterID: chapter.id,
+                chapterTitle: chapter.title,
+                reason: reason
+            )
+            omittedChapters.append(record)
+            omissions.append(PlanOmission(record: record, blocker: blocker))
+        }
+
+        for chapter in allChapters {
+            if chapter.isSkipped {
+                omit(chapter, reason: "已按你的设置跳过", blocker: nil)
+                continue
+            }
+            if let requestedIDSet, !requestedIDSet.contains(chapter.id) {
+                omit(chapter, reason: "未勾选该章节", blocker: nil)
+                continue
+            }
+
+            let chapterAnns = try await store.annotations(for: bookID, chapterID: chapter.id)
+            if chapterAnns.isEmpty {
+                omit(chapter, reason: "尚未完成全书分析", blocker: .notAnalyzed)
+                continue
+            }
+            if chapterAnns.contains(where: { $0.assignment.isUnknown }) {
+                omit(chapter, reason: "包含待确认说话人", blocker: .unknownSpeaker)
+                continue
+            }
+
+            guard let validCurrentRev = try await revisionController.currentChapter(
+                bookID: bookID,
+                chapterID: chapter.id
+            ) else {
+                let hasPrev = (try? await revisionController.previousListenableChapter(
+                    bookID: bookID,
+                    chapterID: chapter.id
+                )) != nil
+                let hasCurrentRevision = chapter.currentChapterRevisionID != nil
+                if hasPrev {
+                    omit(chapter, reason: "角色或音色已修改，需更新本章音频", blocker: .staleAudio)
+                } else if hasCurrentRevision {
+                    omit(chapter, reason: "片段音频资产缺失或未通过核验", blocker: .missingAsset)
+                } else {
+                    omit(chapter, reason: "本章音频尚未制作完成", blocker: .missingAudio)
+                }
+                continue
+            }
+
+            var fragmentItems: [AudiobookExportManifestPayload.FragmentItem] = []
+            var chapterFrames: [(Int64, Int)] = []
+            var assetFailed = false
+            for binding in validCurrentRev.orderedBindings {
+                guard let candidate = candidatesByID[binding.candidateID],
+                      candidate.isReceiptVerified,
+                      try await store.verifyCandidateAsset(candidate)
+                else {
+                    omit(chapter, reason: "片段音频资产缺失或未通过核验", blocker: .missingAsset)
+                    assetFailed = true
+                    break
+                }
+                fragmentItems.append(
+                    AudiobookExportManifestPayload.FragmentItem(
+                        fragmentID: binding.fragmentID,
+                        candidateID: candidate.id,
+                        relativePath: candidate.relativeAssetPath,
+                        fileSHA256: candidate.fileSHA256,
+                        pcmSHA256: candidate.pcmSHA256,
+                        frameCount: candidate.frameCount,
+                        sampleRate: candidate.sampleRate
+                    )
+                )
+                chapterFrames.append((candidate.frameCount, candidate.sampleRate))
+            }
+
+            guard !assetFailed else { continue }
+            guard !fragmentItems.isEmpty else {
+                omit(chapter, reason: "本章没有可导出的片段", blocker: .emptyChapter)
+                continue
+            }
+            sourceFramesByChapter[chapter.id] = chapterFrames
+            exportedChapters.append(chapter)
+            chapterRevisionsMap[chapter.id] = validCurrentRev.id
+            manifestChapters.append(
+                AudiobookExportManifestPayload.ChapterItem(
+                    chapterID: chapter.id,
+                    ordinal: chapter.ordinal,
+                    title: chapter.title,
+                    fragments: fragmentItems
+                )
+            )
+        }
+
+        return ExportPlan(
+            book: book,
+            exportedChapters: exportedChapters,
+            omittedChapters: omittedChapters,
+            omissions: omissions,
+            manifestChapters: manifestChapters,
+            chapterRevisionsMap: chapterRevisionsMap,
+            sourceFramesByChapter: sourceFramesByChapter,
+            isFullBookRequest: isFullBookRequest
+        )
     }
 
     public func commit(

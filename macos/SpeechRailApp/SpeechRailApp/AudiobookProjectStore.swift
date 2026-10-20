@@ -163,6 +163,33 @@ public actor AudiobookProjectStore {
                     try Self.execSQL(pointer, "PRAGMA user_version = 4; COMMIT;")
                 } catch { try? Self.execSQL(pointer, "ROLLBACK;"); throw error }
             }
+            if existingVersion > 0 && existingVersion < 5 {
+                try Self.backupDatabase(pointer, root: standardizedRoot, version: 4)
+                let addSkipColumnSQL = Self.tableExists(pointer, table: "chapters")
+                    && !Self.tableHasColumn(pointer, table: "chapters", column: "is_skipped")
+                    ? "ALTER TABLE chapters ADD COLUMN is_skipped INTEGER NOT NULL DEFAULT 0;"
+                    : ""
+                let addAnalysisFailureSQL = Self.tableExists(pointer, table: "books")
+                    && !Self.tableHasColumn(pointer, table: "books", column: "analysis_failure_json")
+                    ? "ALTER TABLE books ADD COLUMN analysis_failure_json TEXT;"
+                    : ""
+                try Self.execSQL(pointer, "BEGIN IMMEDIATE;")
+                do {
+                    try Self.execSQL(pointer, """
+                        CREATE TABLE IF NOT EXISTS pronunciation_bindings (
+                            book_id TEXT PRIMARY KEY NOT NULL,
+                            set_id TEXT NOT NULL,
+                            revision TEXT NOT NULL,
+                            entries_json TEXT NOT NULL,
+                            updated_at REAL NOT NULL,
+                            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+                        );
+                        \(addSkipColumnSQL)
+                        \(addAnalysisFailureSQL)
+                        PRAGMA user_version = 5; COMMIT;
+                        """)
+                } catch { try? Self.execSQL(pointer, "ROLLBACK;"); throw error }
+            }
             try Self.execSQL(pointer, AudiobookStoreSchema.createTablesSQL)
             if existingVersion == 0 {
                 try Self.execSQL(pointer, "PRAGMA user_version = \(AudiobookStoreSchema.currentUserVersion);")
@@ -173,6 +200,32 @@ public actor AudiobookProjectStore {
             self.handle.pointer = nil
             throw error
         }
+    }
+
+    private static func tableExists(_ db: OpaquePointer, table: String) -> Bool {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(
+            db,
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?;",
+            -1, &statement, nil
+        ) == SQLITE_OK, let statement else { return false }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, table, -1, nil)
+        return sqlite3_step(statement) == SQLITE_ROW
+    }
+
+    private static func tableHasColumn(_ db: OpaquePointer, table: String, column: String) -> Bool {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "PRAGMA table_info(\(table));", -1, &statement, nil) == SQLITE_OK,
+              let statement
+        else { return false }
+        defer { sqlite3_finalize(statement) }
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if let name = sqlite3_column_text(statement, 1), String(cString: name) == column {
+                return true
+            }
+        }
+        return false
     }
 
     /// SQLite backup includes committed WAL pages. Never copy only the main database file.
@@ -532,6 +585,20 @@ public actor AudiobookProjectStore {
 
     public func chapters(for bookID: UUID) async throws -> [AudiobookChapter] {
         try fetchChapters(bookID: bookID)
+    }
+
+    /// 只切换“跳过本章”标记，不改章节结构、原文或已有分析/制作记录。
+    public func setChapterSkipped(bookID: UUID, chapterID: UUID, skipped: Bool) async throws {
+        try inTransaction {
+            let existing = try fetchChapters(bookID: bookID)
+            guard existing.contains(where: { $0.id == chapterID }) else {
+                throw AudiobookStoreError.chapterNotFound(chapterID)
+            }
+            try executePrepared(
+                "UPDATE chapters SET is_skipped = ? WHERE book_id = ? AND id = ?;",
+                [.int(skipped ? 1 : 0), .text(bookID.uuidString), .text(chapterID.uuidString)]
+            )
+        }
     }
 
     public func updateChapters(bookID: UUID, chapters: [AudiobookChapter]) async throws {
@@ -1292,6 +1359,7 @@ public actor AudiobookProjectStore {
             let annotations = Dictionary(grouping: try fetchAnnotations(bookID: bookID, chapterID: nil), by: \.chapterID)
             let atoms = Dictionary(grouping: try fetchAtoms(bookID: bookID, chapterID: nil), by: \.chapterID)
             let bindings = try fetchVoiceBindings(bookID: bookID)
+            let pronunciation = try pronunciationBinding(for: bookID)
             let candidates = Dictionary(uniqueKeysWithValues: try fetchCandidates(bookID: bookID, fragmentID: nil).map { ($0.id, $0) })
             var plannedByChapter: [UUID: [AudiobookFragment]] = [:]
             func assetIsValid(_ binding: AudiobookFragmentCandidateBinding) -> Bool {
@@ -1309,7 +1377,8 @@ public actor AudiobookProjectStore {
                 if let planned = plannedByChapter[chapter.id] { return planned }
                 let planned = try AudiobookFragmentPlanner.plan(
                     chapter: chapter, annotations: annotations[chapter.id] ?? [], bindings: bindings,
-                    policy: policy, source: source, atoms: atoms[chapter.id] ?? []
+                    policy: policy, source: source, atoms: atoms[chapter.id] ?? [],
+                    pronunciation: pronunciation
                 )
                 plannedByChapter[chapter.id] = planned
                 return planned
@@ -1453,6 +1522,58 @@ public actor AudiobookProjectStore {
 
     public func exportRecords(for bookID: UUID) async throws -> [AudiobookExportRecord] {
         try fetchExportRecords(bookID: bookID)
+    }
+
+    // MARK: - Pronunciation Binding
+
+    /// 读取本书最近一次确认保存的发音规则快照；没有保存过时返回 nil。
+    public func pronunciationBinding(for bookID: UUID) throws -> AudiobookPronunciationBinding? {
+        try withPrepared(
+            "SELECT set_id, revision, entries_json FROM pronunciation_bindings WHERE book_id = ?;",
+            [.text(bookID.uuidString)]
+        ) { stmt in
+            guard sqlite3_step(stmt) == SQLITE_ROW,
+                  let setID = columnText(stmt, 0),
+                  let revision = columnText(stmt, 1),
+                  let entriesJSON = columnText(stmt, 2)
+            else { return nil }
+            let entries = try JSONDecoder().decode([PronunciationEntry].self, from: Data(entriesJSON.utf8))
+            return AudiobookPronunciationBinding(setID: setID, revision: revision, entries: entries)
+        }
+    }
+
+    public func savePronunciationBinding(
+        _ binding: AudiobookPronunciationBinding,
+        bookID: UUID
+    ) throws {
+        let entriesJSON = String(decoding: try JSONEncoder().encode(binding.entries), as: UTF8.self)
+        try inTransaction {
+            guard try fetchBook(id: bookID) != nil else { throw AudiobookStoreError.bookNotFound(bookID) }
+            try executePrepared("""
+                INSERT INTO pronunciation_bindings (book_id, set_id, revision, entries_json, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(book_id) DO UPDATE SET
+                    set_id = excluded.set_id,
+                    revision = excluded.revision,
+                    entries_json = excluded.entries_json,
+                    updated_at = excluded.updated_at;
+                """, [
+                    .text(bookID.uuidString),
+                    .text(binding.setID),
+                    .text(binding.revision),
+                    .text(entriesJSON),
+                    .real(Date().timeIntervalSince1970),
+                ])
+        }
+    }
+
+    public func deletePronunciationBinding(bookID: UUID) throws {
+        try inTransaction {
+            try executePrepared(
+                "DELETE FROM pronunciation_bindings WHERE book_id = ?;",
+                [.text(bookID.uuidString)]
+            )
+        }
     }
 
     // MARK: - Transactional Asset Commit & Crash Recovery
@@ -2084,8 +2205,8 @@ public actor AudiobookProjectStore {
             id, source_id, title, author, source_sha256, canonical_byte_count, scalar_count,
             original_encoding, analysis_state, production_state, listenable_state,
             confirmed_cast_revision_id, confirmed_audition_digest, current_production_revision_id,
-            created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            created_at, updated_at, analysis_failure_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             title = excluded.title,
             author = excluded.author,
@@ -2095,7 +2216,8 @@ public actor AudiobookProjectStore {
             confirmed_cast_revision_id = excluded.confirmed_cast_revision_id,
             confirmed_audition_digest = excluded.confirmed_audition_digest,
             current_production_revision_id = excluded.current_production_revision_id,
-            updated_at = excluded.updated_at;
+            updated_at = excluded.updated_at,
+            analysis_failure_json = excluded.analysis_failure_json;
         """
         try executePrepared(sql, [
             .text(book.id.uuidString),
@@ -2114,6 +2236,7 @@ public actor AudiobookProjectStore {
             .text(book.currentProductionRevisionID?.uuidString),
             .real(book.createdAt.timeIntervalSince1970),
             .real(book.updatedAt.timeIntervalSince1970),
+            .text(book.analysisFailure.flatMap { try? String(data: JSONEncoder().encode($0), encoding: .utf8) }),
         ])
     }
 
@@ -2152,14 +2275,15 @@ public actor AudiobookProjectStore {
         let sql = """
         INSERT INTO chapters (
             id, book_id, source_id, ordinal, title, lower_bound, upper_bound,
-            excluded_ranges_json, current_chapter_revision_id, previous_chapter_revision_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            excluded_ranges_json, is_skipped, current_chapter_revision_id, previous_chapter_revision_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(book_id, id) DO UPDATE SET
             ordinal = excluded.ordinal,
             title = excluded.title,
             lower_bound = excluded.lower_bound,
             upper_bound = excluded.upper_bound,
             excluded_ranges_json = excluded.excluded_ranges_json,
+            is_skipped = excluded.is_skipped,
             current_chapter_revision_id = excluded.current_chapter_revision_id,
             previous_chapter_revision_id = excluded.previous_chapter_revision_id;
         """
@@ -2172,6 +2296,7 @@ public actor AudiobookProjectStore {
             .int(chapter.sourceRange.lowerBound),
             .int(chapter.sourceRange.upperBound),
             .text(excludedJSON),
+            .int(chapter.isSkipped ? 1 : 0),
             .text(chapter.currentChapterRevisionID?.uuidString),
             .text(chapter.previousChapterRevisionID?.uuidString),
         ])
@@ -2501,7 +2626,7 @@ public actor AudiobookProjectStore {
         SELECT id, source_id, title, author, source_sha256, canonical_byte_count, scalar_count,
                original_encoding, analysis_state, production_state, listenable_state,
                confirmed_cast_revision_id, confirmed_audition_digest, current_production_revision_id,
-               created_at, updated_at
+               created_at, updated_at, analysis_failure_json
         FROM books
         ORDER BY updated_at DESC, id ASC;
         """
@@ -2521,7 +2646,7 @@ public actor AudiobookProjectStore {
         SELECT id, source_id, title, author, source_sha256, canonical_byte_count, scalar_count,
                original_encoding, analysis_state, production_state, listenable_state,
                confirmed_cast_revision_id, confirmed_audition_digest, current_production_revision_id,
-               created_at, updated_at
+               created_at, updated_at, analysis_failure_json
         FROM books WHERE id = ?;
         """
         return try withPrepared(sql, [.text(id.uuidString)]) { stmt in
@@ -2558,6 +2683,9 @@ public actor AudiobookProjectStore {
             confirmedCastRevisionID: columnText(stmt, 11).flatMap(UUID.init(uuidString:)),
             confirmedAuditionVoiceSetDigest: columnText(stmt, 12),
             currentProductionRevisionID: columnText(stmt, 13).flatMap(UUID.init(uuidString:)),
+            analysisFailure: columnText(stmt, 16).flatMap {
+                try? JSONDecoder().decode(AudiobookAnalysisFailure.self, from: Data($0.utf8))
+            },
             createdAt: Date(timeIntervalSince1970: columnDouble(stmt, 14)),
             updatedAt: Date(timeIntervalSince1970: columnDouble(stmt, 15))
         )
@@ -2566,7 +2694,7 @@ public actor AudiobookProjectStore {
     private func fetchChapters(bookID: UUID) throws -> [AudiobookChapter] {
         let sql = """
         SELECT id, book_id, source_id, ordinal, title, lower_bound, upper_bound,
-               excluded_ranges_json, current_chapter_revision_id, previous_chapter_revision_id
+               excluded_ranges_json, is_skipped, current_chapter_revision_id, previous_chapter_revision_id
         FROM chapters WHERE book_id = ? ORDER BY ordinal ASC;
         """
         return try withPrepared(sql, [.text(bookID.uuidString)]) { stmt in
@@ -2589,8 +2717,9 @@ public actor AudiobookProjectStore {
                         title: title,
                         sourceRange: AudiobookSourceRange(lowerBound: columnInt(stmt, 5), upperBound: columnInt(stmt, 6)),
                         excludedRanges: excluded,
-                        currentChapterRevisionID: columnText(stmt, 8).flatMap(UUID.init(uuidString:)),
-                        previousChapterRevisionID: columnText(stmt, 9).flatMap(UUID.init(uuidString:))
+                        isSkipped: columnInt(stmt, 8) != 0,
+                        currentChapterRevisionID: columnText(stmt, 9).flatMap(UUID.init(uuidString:)),
+                        previousChapterRevisionID: columnText(stmt, 10).flatMap(UUID.init(uuidString:))
                     )
                 )
             }

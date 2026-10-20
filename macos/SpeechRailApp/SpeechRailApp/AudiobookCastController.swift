@@ -716,10 +716,9 @@ public actor AudiobookCastController {
         }
 
         let chapters = try await store.chapters(for: bookID)
-        if let chapter = chapters.first(where: { $0.id == chapterID }),
-           chapter.currentChapterRevisionID != nil
-        {
-            return .chapterAudioReady
+        if let chapter = chapters.first(where: { $0.id == chapterID }) {
+            if chapter.isSkipped { return .skipped }
+            if chapter.currentChapterRevisionID != nil { return .chapterAudioReady }
         }
         return .readyForProduction
     }
@@ -750,6 +749,10 @@ public actor AudiobookCastController {
         var map: [UUID: AudiobookChapterReadinessState] = [:]
         map.reserveCapacity(chapters.count)
         for chapter in chapters {
+            if chapter.isSkipped {
+                map[chapter.id] = .skipped
+                continue
+            }
             let chapterAnnotations = annotationsByChapter[chapter.id] ?? []
             if chapterAnnotations.isEmpty {
                 map[chapter.id] = .awaitingGlobalAnalysis

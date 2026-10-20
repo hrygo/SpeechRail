@@ -18,38 +18,40 @@ public struct AudiobookSourceIndex: Sendable, Equatable {
     public let utf8Data: Data
     public let sourceSHA256: String
     /// Sorted UTF-8 byte offsets of every Unicode scalar start, plus `byteCount` at the end.
-    public let scalarByteOffsets: [Int64]
+    public let scalarByteOffsets: [UInt32]
     public let layoutProfile: TextLayoutProfile
     public let paragraphs: [AudiobookParagraph]
     public let joinedLineBreakCount: Int
-    private let paragraphStartOffsets: Set<Int64>
+    private let paragraphStartOffsets: Set<UInt32>
 
     public init(utf8: Data) throws {
         var decoder = UTF8()
         var iterator = utf8.makeIterator()
-        var offsets: [Int64] = []
+        var offsets: [UInt32] = []
         offsets.reserveCapacity(utf8.count / 2 + 1)
 
-        var currentByteOffset: Int64 = 0
+        var currentByteOffset = 0
         offsets.append(0)
 
         while true {
             switch decoder.decode(&iterator) {
             case let .scalarValue(scalar):
-                let scalarByteLength = Int64(UTF8.width(scalar))
-                currentByteOffset += scalarByteLength
-                offsets.append(currentByteOffset)
+                currentByteOffset += UTF8.width(scalar)
+                guard currentByteOffset <= Int(UInt32.max) else {
+                    throw AudiobookSourceError.sourceTooLarge
+                }
+                offsets.append(UInt32(currentByteOffset))
             case .emptyInput:
                 break
             case .error:
                 throw AudiobookSourceError.invalidUTF8
             }
-            if currentByteOffset == Int64(utf8.count) {
+            if currentByteOffset == utf8.count {
                 break
             }
         }
 
-        guard currentByteOffset == Int64(utf8.count) else {
+        guard currentByteOffset == utf8.count else {
             throw AudiobookSourceError.invalidUTF8
         }
 
@@ -61,7 +63,7 @@ public struct AudiobookSourceIndex: Sendable, Equatable {
         let paragraphs = Self.prepareParagraphs(utf8: utf8, profile: profile)
         self.paragraphs = paragraphs
         self.joinedLineBreakCount = paragraphs.reduce(0) { $0 + max(0, $1.physicalLineCount - 1) }
-        self.paragraphStartOffsets = Set(paragraphs.dropFirst().map { $0.sourceRange.lowerBound })
+        self.paragraphStartOffsets = Set(paragraphs.dropFirst().map { UInt32($0.sourceRange.lowerBound) })
     }
 
     public var byteCount: Int64 {
@@ -85,7 +87,7 @@ public struct AudiobookSourceIndex: Sendable, Equatable {
         var high = scalarByteOffsets.count - 1
         while low <= high {
             let mid = (low + high) / 2
-            let value = scalarByteOffsets[mid]
+            let value = Int64(scalarByteOffsets[mid])
             if value == byteOffset {
                 return mid
             } else if value < byteOffset {
@@ -160,6 +162,35 @@ public struct AudiobookSourceIndex: Sendable, Equatable {
             if !normalized.isEmpty { parts.append(normalized) }
         }
         return parts.joined(separator: "\n\n")
+    }
+
+    /// 去除章节排除区间后的可读来源片段；区间仍指向 canonical UTF-8 字节。
+    public func readableRanges(
+        in range: AudiobookSourceRange,
+        excluding exclusions: [AudiobookSourceRange]
+    ) throws -> [AudiobookSourceRange] {
+        try validateRangeBounds(range)
+        return try nonExcludedSpans(in: range, exclusions: exclusions)
+    }
+
+    /// 阅读投影的排除版本：用于预览与目录页跳过，不改变 canonical 原文。
+    public func normalizedText(
+        in range: AudiobookSourceRange,
+        excluding exclusions: [AudiobookSourceRange]
+    ) throws -> String {
+        try readableRanges(in: range, excluding: exclusions)
+            .map { try normalizedText(in: $0) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+    }
+
+    public func text(
+        in range: AudiobookSourceRange,
+        excluding exclusions: [AudiobookSourceRange]
+    ) throws -> String {
+        try readableRanges(in: range, excluding: exclusions)
+            .map { try text(in: $0) }
+            .joined()
     }
 
     public func validateCoverage(
@@ -284,8 +315,8 @@ public struct AudiobookSourceIndex: Sendable, Equatable {
                     if isDialogue {
                         if cursorScalarIdx > atomStartScalarIdx {
                             let range = AudiobookSourceRange(
-                                lowerBound: scalarByteOffsets[atomStartScalarIdx],
-                                upperBound: scalarByteOffsets[cursorScalarIdx]
+                                lowerBound: Int64(scalarByteOffsets[atomStartScalarIdx]),
+                                upperBound: Int64(scalarByteOffsets[cursorScalarIdx])
                             )
                             let kind = try classifyAtomKind(
                                 in: range,
@@ -374,8 +405,8 @@ public struct AudiobookSourceIndex: Sendable, Equatable {
                     }
 
                     let range = AudiobookSourceRange(
-                        lowerBound: scalarByteOffsets[atomStartScalarIdx],
-                        upperBound: scalarByteOffsets[finalEndScalarIdx]
+                        lowerBound: Int64(scalarByteOffsets[atomStartScalarIdx]),
+                        upperBound: Int64(scalarByteOffsets[finalEndScalarIdx])
                     )
                     let kind = try classifyAtomKind(
                         in: range,
@@ -638,7 +669,7 @@ public struct AudiobookSourceIndex: Sendable, Equatable {
 
     private static func detectLayoutProfile(
         utf8Data: Data,
-        scalarByteOffsets: [Int64]
+        scalarByteOffsets: [UInt32]
     ) -> TextLayoutProfile {
         let totalScalars = max(0, scalarByteOffsets.count - 1)
         if totalScalars < 40 {

@@ -114,7 +114,7 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .voiceLibrary:
             "管理系统音色，以及用参考音频复刻出来的音色。"
         case .audiobook:
-            "导入 TXT 电子书，完成全书角色分析与配声确认后逐章制作、收听或导出。"
+            "导入 TXT 或 EPUB 电子书，完成全书角色分析与配声确认后逐章制作、收听或导出。"
         case .assistant:
             "用这台 Mac 的语音能力对话：你说、它听、它答。原始音频不留存。"
         case .meeting:

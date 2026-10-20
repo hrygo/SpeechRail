@@ -1,7 +1,7 @@
 import Foundation
 
 public enum AudiobookStoreSchema {
-    public static let currentUserVersion: Int32 = 4
+    public static let currentUserVersion: Int32 = 5
 
     public static let registrationIntentsSQL: String = """
     CREATE TABLE voice_registration_intents (
@@ -55,6 +55,7 @@ public enum AudiobookStoreSchema {
         current_production_revision_id TEXT,
         created_at REAL NOT NULL,
         updated_at REAL NOT NULL,
+        analysis_failure_json TEXT,
         UNIQUE (id, source_id)
     );
 
@@ -112,6 +113,7 @@ public enum AudiobookStoreSchema {
         lower_bound INTEGER NOT NULL,
         upper_bound INTEGER NOT NULL,
         excluded_ranges_json TEXT NOT NULL,
+        is_skipped INTEGER NOT NULL DEFAULT 0,
         current_chapter_revision_id TEXT,
         previous_chapter_revision_id TEXT,
         PRIMARY KEY (book_id, id),
@@ -312,6 +314,15 @@ public enum AudiobookStoreSchema {
         state TEXT NOT NULL,
         candidate_json TEXT NOT NULL,
         updated_at REAL NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS pronunciation_bindings (
+        book_id TEXT PRIMARY KEY NOT NULL,
+        set_id TEXT NOT NULL,
+        revision TEXT NOT NULL,
+        entries_json TEXT NOT NULL,
+        updated_at REAL NOT NULL,
+        FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
     );
     """
 }

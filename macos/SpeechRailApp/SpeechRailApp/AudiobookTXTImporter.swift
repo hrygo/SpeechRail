@@ -75,11 +75,18 @@ public struct AudiobookImportPreview: Equatable, Sendable, Identifiable {
     public let requiresEncodingConfirmation: Bool
     public let previewText: String
     public var chapters: [AudiobookChapter]
+    /// 自动识别出的目录页来源区间；已并入章节排除区间，不参与正文与原子。
+    public let tableOfContentsRanges: [AudiobookSourceRange]
     public let repeatedContentWarnings: [AudiobookRepeatedContentWarning]
     public var hasConfirmedRepeatedContent: Bool
 
     public var canConfirmImport: Bool {
         repeatedContentWarnings.isEmpty || hasConfirmedRepeatedContent
+    }
+
+    /// EPUB 导入会转成规范纯文本；原始压缩包不进入作品库，也不显示编码切换。
+    public var isEPUB: Bool {
+        originalFileName.lowercased().hasSuffix(".epub")
     }
 
     public init(
@@ -97,6 +104,7 @@ public struct AudiobookImportPreview: Equatable, Sendable, Identifiable {
         requiresEncodingConfirmation: Bool = false,
         previewText: String,
         chapters: [AudiobookChapter],
+        tableOfContentsRanges: [AudiobookSourceRange] = [],
         repeatedContentWarnings: [AudiobookRepeatedContentWarning] = [],
         hasConfirmedRepeatedContent: Bool = false
     ) {
@@ -114,6 +122,7 @@ public struct AudiobookImportPreview: Equatable, Sendable, Identifiable {
         self.requiresEncodingConfirmation = requiresEncodingConfirmation
         self.previewText = previewText
         self.chapters = chapters
+        self.tableOfContentsRanges = tableOfContentsRanges
         self.repeatedContentWarnings = repeatedContentWarnings
         self.hasConfirmedRepeatedContent = hasConfirmedRepeatedContent
     }
@@ -131,15 +140,33 @@ public struct AudiobookImportPreview: Equatable, Sendable, Identifiable {
     }
 
     public func textPreview(for chapterID: UUID?, originalLayout: Bool = false) throws -> String {
-        let range = chapters.first(where: { $0.id == chapterID })?.sourceRange ?? sourceIndex.wholeRange
+        let chapter = chapters.first(where: { $0.id == chapterID })
+        let range = chapter?.sourceRange ?? sourceIndex.wholeRange
         try sourceIndex.validateRangeBounds(range)
-        let startScalar = sourceIndex.scalarIndex(forByteOffset: range.lowerBound) ?? 0
-        let endScalar = min(sourceIndex.scalarCount, startScalar + AudiobookLimits.maxPreviewScalars)
-        let bounded = AudiobookSourceRange(
-            lowerBound: range.lowerBound,
-            upperBound: min(range.upperBound, sourceIndex.scalarByteOffsets[endScalar])
-        )
-        return try originalLayout ? sourceIndex.text(in: bounded) : sourceIndex.normalizedText(in: bounded)
+        let exclusions = (chapter?.excludedRanges ?? []).compactMap { excluded -> AudiobookSourceRange? in
+            let lower = max(excluded.lowerBound, range.lowerBound)
+            let upper = min(excluded.upperBound, range.upperBound)
+            return lower < upper ? AudiobookSourceRange(lowerBound: lower, upperBound: upper) : nil
+        }
+        var remaining = AudiobookLimits.maxPreviewScalars
+        var pieces: [String] = []
+        let spans = try sourceIndex.readableRanges(in: range, excluding: exclusions)
+        for span in spans where remaining > 0 {
+            let startScalar = sourceIndex.scalarIndex(forByteOffset: span.lowerBound) ?? 0
+            let endScalar = sourceIndex.scalarIndex(forByteOffset: span.upperBound) ?? startScalar
+            let take = min(max(0, endScalar - startScalar), remaining)
+            guard take > 0 else { continue }
+            let bounded = AudiobookSourceRange(
+                lowerBound: span.lowerBound,
+                upperBound: Int64(sourceIndex.scalarByteOffsets[startScalar + take])
+            )
+            let piece = try originalLayout
+                ? sourceIndex.text(in: bounded)
+                : sourceIndex.normalizedText(in: bounded)
+            if !piece.isEmpty { pieces.append(piece) }
+            remaining -= take
+        }
+        return pieces.joined(separator: originalLayout ? "" : "\n\n")
     }
 }
 
@@ -181,6 +208,20 @@ public enum AudiobookTXTImporter {
     }
 
     /// Synchronous pure preparation for in-memory bytes and deterministic tests.
+    /// 只读解析 EPUB（spine 顺序的 XHTML）并复用 TXT 导入的规范化、分章和重复内容检查。
+    public static func prepareEPUB(fileURL: URL) async throws -> AudiobookImportPreview {
+        try await Task.detached(priority: .userInitiated) {
+            let content = try AudiobookEPUBImporter.extractText(from: fileURL)
+            var preview = try prepare(
+                rawData: Data(content.text.utf8),
+                suggestedTitle: content.title ?? fileURL.deletingPathExtension().lastPathComponent,
+                originalFileName: fileURL.lastPathComponent
+            )
+            preview.author = content.author
+            return preview
+        }.value
+    }
+
     public static func prepare(
         rawData: Data,
         suggestedTitle: String = "未命名书籍",
@@ -199,16 +240,19 @@ public enum AudiobookTXTImporter {
         let resolvedEncoding: AudiobookTextEncoding
         let candidates: [AudiobookTextEncoding]
         let canonicalString: String
+        let requiresEncodingConfirmation: Bool
 
         if let explicit = encoding {
             canonicalString = try strictDecode(rawData, as: explicit)
             resolvedEncoding = explicit
             candidates = detectCandidateEncodings(for: rawData, preferred: explicit)
+            requiresEncodingConfirmation = false
         } else {
             let detection = try detectEncoding(for: rawData)
             resolvedEncoding = detection.selected
             candidates = detection.candidates
             canonicalString = detection.decodedText
+            requiresEncodingConfirmation = detection.requiresConfirmation
         }
 
         guard canonicalString.unicodeScalars.contains(where: { !CharacterSet.whitespacesAndNewlines.contains($0) }) else {
@@ -226,15 +270,23 @@ public enum AudiobookTXTImporter {
 
         let bookID = UUID()
         let sourceID = UUID()
-        let plannedChapters = try AudiobookChapterPlanner.chapters(
+        let planning = try AudiobookChapterPlanner.plan(
             source: sourceIndex,
             bookID: bookID,
             sourceID: sourceID
         )
+        let plannedChapters = planning.chapters
         let previewScalars = min(sourceIndex.scalarCount, AudiobookLimits.maxPreviewScalars)
-        let previewEndByte = sourceIndex.scalarByteOffsets[previewScalars]
+        let previewEndByte = Int64(sourceIndex.scalarByteOffsets[previewScalars])
+        let previewRange = AudiobookSourceRange(lowerBound: 0, upperBound: previewEndByte)
+        let previewExclusions = planning.tableOfContentsRanges.compactMap { range -> AudiobookSourceRange? in
+            let lower = max(range.lowerBound, previewRange.lowerBound)
+            let upper = min(range.upperBound, previewRange.upperBound)
+            return lower < upper ? AudiobookSourceRange(lowerBound: lower, upperBound: upper) : nil
+        }
         let previewText = try sourceIndex.normalizedText(
-            in: AudiobookSourceRange(lowerBound: 0, upperBound: previewEndByte)
+            in: previewRange,
+            excluding: previewExclusions
         )
 
         return AudiobookImportPreview(
@@ -248,9 +300,10 @@ public enum AudiobookTXTImporter {
             sourceIndex: sourceIndex,
             detectedEncoding: resolvedEncoding,
             candidateEncodings: candidates,
-            requiresEncodingConfirmation: false,
+            requiresEncodingConfirmation: requiresEncodingConfirmation,
             previewText: previewText,
             chapters: plannedChapters,
+            tableOfContentsRanges: planning.tableOfContentsRanges,
             repeatedContentWarnings: try repeatedContentWarnings(in: plannedChapters, source: sourceIndex)
         )
     }
@@ -380,24 +433,29 @@ public enum AudiobookTXTImporter {
 
     private static func detectEncoding(
         for data: Data
-    ) throws -> (selected: AudiobookTextEncoding, candidates: [AudiobookTextEncoding], decodedText: String) {
+    ) throws -> (
+        selected: AudiobookTextEncoding,
+        candidates: [AudiobookTextEncoding],
+        decodedText: String,
+        requiresConfirmation: Bool
+    ) {
         if data.starts(with: [0xFF, 0xFE]) {
             let decoded = try strictDecode(data, as: .utf16LE)
-            return (.utf16LE, [.utf16LE], decoded)
+            return (.utf16LE, [.utf16LE], decoded, false)
         }
         if data.starts(with: [0xFE, 0xFF]) {
             let decoded = try strictDecode(data, as: .utf16BE)
-            return (.utf16BE, [.utf16BE], decoded)
+            return (.utf16BE, [.utf16BE], decoded, false)
         }
         if data.starts(with: [0xEF, 0xBB, 0xBF]) {
             let decoded = try strictDecode(data, as: .utf8)
-            return (.utf8, [.utf8], decoded)
+            return (.utf8, [.utf8], decoded, false)
         }
 
         let isPureASCII = data.allSatisfy { $0 < 0x80 }
         if isPureASCII {
             let decoded = try strictDecode(data, as: .utf8)
-            return (.utf8, [.utf8, .gb18030], decoded)
+            return (.utf8, [.utf8, .gb18030], decoded, false)
         }
 
         let utf8Text = try? strictDecode(data, as: .utf8)
@@ -405,17 +463,18 @@ public enum AudiobookTXTImporter {
 
         switch (utf8Text, gbText) {
         case let (.some(uText), .some):
-            // Both UTF-8 and GB18030 can decode non-ASCII bytes: if the bytes are valid UTF-8,
-            // check if they contain suspicious CJK mojibake or require explicit encoding selection when ambiguous.
+            // Both encodings decode: prefer UTF-8 but ask the user to confirm when the bytes
+            // could plausibly be GB18030 as well (C1 controls usually mean mojibake).
             if looksLikeAmbiguousShortNonASCII(data: data, utf8Text: uText) {
-                throw AudiobookImportError.encodingSelectionRequired(candidates: [.utf8, .gb18030])
+                return (.utf8, [.utf8, .gb18030], uText, true)
             }
-            return (.utf8, [.utf8, .gb18030], uText)
+            return (.utf8, [.utf8, .gb18030], uText, false)
         case let (.some(uText), .none):
-            return (.utf8, [.utf8], uText)
-        case (.none, .some):
-            // Non-UTF8 byte stream that is valid GB18030 requires explicit encoding confirmation or selection
-            throw AudiobookImportError.encodingSelectionRequired(candidates: [.gb18030, .utf8])
+            return (.utf8, [.utf8], uText, false)
+        case let (.none, .some(gbDecoded)):
+            // A non-UTF-8 byte stream that is valid GB18030: surface the preview with GB18030
+            // provisionally selected instead of failing before the import sheet can offer a choice.
+            return (.gb18030, [.gb18030, .utf8], gbDecoded, true)
         case (.none, .none):
             throw AudiobookImportError.invalidEncoding(.utf8)
         }

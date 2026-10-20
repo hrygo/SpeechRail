@@ -38,17 +38,34 @@ public struct AudiobookListeningView: View {
                 }
             }
 
-            HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
-                chapterOutlineColumn
-                    .frame(width: SpeechRailDesignTokens.Layout.sessionListWidth)
+            if !workflow.hasListenableChapter {
+                CardSurface {
+                    SessionEmptyState(
+                        systemImage: "headphones",
+                        title: "还没有可收听的章节",
+                        message: "先在制作台把至少一章生成音频，再回到听书模式逐章收听。已跳过的章节不会出现在可收听列表里。"
+                    ) {
+                        Button("去制作章节") {
+                            workflow.surfaceMode = .workspace
+                            workflow.workbenchTab = .production
+                        }
+                        .speechRailButton(.primary)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 360)
+                }
+            } else {
+                HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
+                    chapterOutlineColumn
+                        .frame(width: SpeechRailDesignTokens.Layout.sessionListWidth)
 
-                followAlongTranscriptColumn
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    followAlongTranscriptColumn
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                transportBar
+                    .frame(height: SpeechRailDesignTokens.Layout.audiobookTransportBarHeight)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            transportBar
-                .frame(height: SpeechRailDesignTokens.Layout.audiobookTransportBarHeight)
         }
     }
 
@@ -59,13 +76,13 @@ public struct AudiobookListeningView: View {
             VStack(alignment: .leading, spacing: 0) {
                 SessionPanelHead(
                     title: "可收听章节",
-                    trailingDetail: "\(workflow.chapters.count) 章"
+                    trailingDetail: "\(listenableChapters.count) 章"
                 )
                 SessionHairline()
 
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                        ForEach(workflow.chapters) { chapter in
+                        ForEach(listenableChapters) { chapter in
                             let isSelected = (workflow.selectedChapterID == chapter.id)
                             let hasCurrent = (chapter.currentChapterRevisionID != nil)
                             let hasPrevious = (chapter.previousChapterRevisionID != nil)
@@ -248,10 +265,13 @@ public struct AudiobookListeningView: View {
 
                     ForEach([Float(0.75), Float(1.0), Float(1.25), Float(1.5), Float(2.0)], id: \.self) { rate in
                         let isCurrent = abs((listening?.playbackRate ?? 1.0) - rate) < 0.01
-                        Button(String(format: "%.2gx", rate)) {
+                        Button(AudiobookDisplayFormat.playbackRate(rate)) {
                             Task { await listening?.setRate(rate) }
                         }
                         .speechRailButton(isCurrent ? .primary : .quiet)
+                        .accessibilityLabel("收听倍速 \(AudiobookDisplayFormat.playbackRate(rate))")
+                        .accessibilityValue(isCurrent ? "当前倍速" : "未选中")
+                        .accessibilityAddTraits(isCurrent ? .isSelected : [])
                     }
                 }
 
@@ -266,6 +286,10 @@ public struct AudiobookListeningView: View {
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    private var listenableChapters: [AudiobookChapter] {
+        workflow.chapters.filter { !$0.isSkipped }
     }
 
     private var currentChapterTitle: String {
@@ -285,14 +309,8 @@ public struct AudiobookListeningView: View {
     }
 
     private var timecodeSummary: String {
-        let elapsed = Int(listening?.chapterElapsedSeconds ?? 0)
-        let total = Int(listening?.chapterTotalDurationSeconds ?? 0)
-        return String(
-            format: "%02d:%02d / %02d:%02d",
-            elapsed / 60,
-            elapsed % 60,
-            total / 60,
-            total % 60
-        )
+        let elapsed = listening?.chapterElapsedSeconds ?? 0
+        let total = listening?.chapterTotalDurationSeconds ?? 0
+        return AudiobookDisplayFormat.timecode(elapsed) + " / " + AudiobookDisplayFormat.timecode(total)
     }
 }
