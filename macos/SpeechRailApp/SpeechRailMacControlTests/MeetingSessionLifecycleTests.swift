@@ -2318,6 +2318,8 @@ final class ControllableAudioSource: MeetingAudioSource {
     private(set) var resolvedSource: SessionAudioSource = .microphone
     var onSystemAudioLost: (@MainActor (String) -> Void)?
     var startError: Error?
+    var restartSystemAudioResult = true
+    var restartSystemAudioGate: ConnectGate?
     private var continuation: AudioChunkStream.Continuation?
 
     func start(selection: MeetingAudioSelection) async throws -> AudioChunkStream {
@@ -2336,7 +2338,10 @@ final class ControllableAudioSource: MeetingAudioSource {
     }
 
     func setMicrophoneMuted(_ muted: Bool) { self.muted = muted }
-    func restartSystemAudio() async -> Bool { true }
+    func restartSystemAudio() async -> Bool {
+        if let restartSystemAudioGate { try? await restartSystemAudioGate.wait() }
+        return restartSystemAudioResult
+    }
 
     /// 造一次"来源 App 退出"。
     func fireSystemAudioLost(_ reason: String) {
@@ -2442,6 +2447,100 @@ struct MeetingWindowMergeRegressionTests {
         await h.clients.openGate()
         await h.session.start(selection: MeetingAudioSelection(usesMicrophone: true))
         try await h.settle { $0.phase == .recording }
+        await h.clients.all.last?.finishEventsOnClose()
+        do { try await body(h) }
+        catch {
+            await h.session.stopCapture()
+            await h.store.close()
+            throw error
+        }
+        await h.session.stopCapture()
+        await h.store.close()
+    }
+}
+
+@MainActor
+struct MeetingSystemAudioRecoveryTests {
+    @Test func repeatedCaptureFailuresStopInsteadOfReportingHealthyRecording() async throws {
+        try await withHarness { h in
+            let id = try #require(h.session.sessionID)
+            for attempt in 1...3 {
+                h.audio.fireSystemAudioLost("音频来源已中断。")
+                try await wait { h.session.reconnectedSources == attempt }
+            }
+            h.audio.fireSystemAudioLost("音频来源已中断。")
+            try await wait { h.session.phase == .interrupted }
+            #expect(h.session.phase == .interrupted)
+            #expect(h.session.sessionID == id)
+            #expect(h.session.reconnectedSources == 3)
+            #expect(h.session.interruptionNote?.contains("连续中断") == true)
+            #expect(h.audio.stopCount > 0)
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func failedReconnectPreservesRecordAndReportsInterruption(drainFails: Bool) async throws {
+        try await withHarness { h in
+            let id = try #require(h.session.sessionID)
+            let client = try #require(h.clients.all.last)
+            if drainFails { await client.failDrain() }
+            h.audio.restartSystemAudioResult = false
+            h.audio.fireSystemAudioLost("音频来源已中断。")
+            try await wait { h.session.phase == .interrupted }
+            #expect(h.session.phase == .interrupted)
+            #expect(h.session.sessionID == id)
+            #expect(h.session.reconnectedSources == 0)
+            #expect(h.session.interruption == .sourceLost)
+            #expect(h.session.interruptionNote?.contains("没有恢复") == true)
+            if drainFails {
+                let failure = try #require(h.coordinator.captureCompletionFailure(recordID: id))
+                #expect(failure.stage == .protocolDrain)
+                #expect(h.session.lastFailure == failure.message)
+            }
+        }
+    }
+
+    @Test func delayedReconnectCannotResumeAStoppedMeeting() async throws {
+        try await withHarness { h in
+            let gate = ConnectGate()
+            h.audio.restartSystemAudioGate = gate
+            h.audio.fireSystemAudioLost("音频来源已中断。")
+            try await wait { await gate.entered }
+            #expect(h.session.isReconnectingSystemAudio)
+            // A duplicate completion must not start another restore.
+            h.audio.fireSystemAudioLost("音频来源已中断。")
+            await h.session.stopCapture()
+            let phase = h.session.phase
+            await gate.open()
+            try await wait { h.session.isReconnectingSystemAudio == false }
+            #expect(h.session.phase == phase)
+            #expect(h.session.reconnectedSources == 0)
+        }
+    }
+
+    private func wait(_ condition: @MainActor () async -> Bool) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now + .seconds(5)
+        while clock.now < deadline {
+            if await condition() { return }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        Issue.record("Meeting audio recovery did not reach the expected state")
+        throw RecoveryTimeout()
+    }
+
+    private struct RecoveryTimeout: Error {}
+
+    private func withHarness(
+        _ body: @MainActor (MeetingSessionLifecycleTests.Harness) async throws -> Void
+    ) async throws {
+        // These cases exercise capture recovery, not a deadline. Inject drain
+        // failure explicitly rather than depending on an 80 ms CI scheduling race.
+        let h = try await MeetingSessionLifecycleTests.Harness.make()
+        await h.clients.openGate()
+        await h.session.start(selection: MeetingAudioSelection(usesMicrophone: false,
+            systemApps: [.init(bundleID: "test.meeting", name: "测试会议")]))
+        try await wait { h.phase == .recording }
         await h.clients.all.last?.finishEventsOnClose()
         do { try await body(h) }
         catch {

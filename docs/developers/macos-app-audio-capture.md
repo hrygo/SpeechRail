@@ -2,8 +2,8 @@
 title: "SpeechRail macOS App 录音通道与音频采集最佳实践"
 status: active
 audience: "SpeechRail macOS App 设计与开发人员"
-version: "0.2.3"
-date: 2026-10-16
+version: "0.2.5"
+date: 2026-10-20
 ---
 
 # SpeechRail macOS App 录音通道与音频采集最佳实践
@@ -149,17 +149,31 @@ date: 2026-10-16
 
 | 项 | 本机音频的口径 | 位置 |
 |---|---|---|
-| API | macOS 的**按进程 tap**：`CATapDescription.bundleIDs` → `AudioHardwareCreateProcessTap` → 私有 aggregate device（tap 作为它的输入流）→ `AudioDeviceCreateIOProcID` | `CoreAudioTapCapture.swift` |
-| App 与 helper | 用户选择的 App bundle ID 连同其 `Contents` 内实际声明的 `.app`、`.xpc`、`.appex` helper ID 一起交给 tap；只展开已选择且根 ID 匹配的 App，解析真实路径后排除包外符号链接。这样浏览器稍后创建的音频 helper 也能命中 | 同上 |
+| API | macOS 的**按进程 tap**：所选 bundle IDs 与精确 process object IDs → `AudioHardwareCreateProcessTap` → 私有 aggregate device（tap 作为它的输入流）→ `AudioDeviceCreateIOProcID` | `CoreAudioTapCapture.swift` |
+| App 与 helper | 用户选择的 App bundle ID 连同其 `Contents` 内实际声明的 `.app`、`.xpc`、`.appex` helper ID 一起交给 tap；只展开已选择且根 ID 匹配的 App，解析真实路径后排除包外符号链接。包外系统 helper 仅在系统报告的负责进程属于所选 App 时，以精确 process object ID 纳入；不加入共享的 WebKit bundle ID | 同上 |
 | 不改变听感 | `muteBehavior` 保持默认 `CATapUnmuted`：抓取不该让本机静音 | 同上 |
-| 来源重开 | `isProcessRestoreEnabled = true`（SDK 语义：来源 App 重启后按 bundle id 自动接回）。**本机没有真机验证过它的行为**，所以实现里只把它当作"尽力而为" | 同上 |
+| 来源重开 | 监听 CoreAudio process object 列表变化，重新核对归属并更新 tap；关闭按进程 bundle ID 自动恢复，避免共享系统 helper 的 bundle ID 扩大采集范围。更新失败时中断采集 | 同上 |
 | 载体 | **App 内 XPC service**（`Resources/XPCServices/com.speechrail.desktop.capture-helper.xpc` + `SpeechRailCaptureHelper` target）。由 launchd 在 App 连接时启动、App 停采集后空闲退出，同时把 tap 的崩溃面与 App 隔开 | `SpeechRailCaptureHelper/` |
 | 出口格式 | 与麦克风**同一个出口**：24 kHz / 单声道 / PCM16。tap 的原始格式（通常是 48 kHz 的 Float32）在 helper 里用 `AVAudioConverter` 归一 | `CoreAudioTapCapture.swift` |
 | 实时约束 | IOProc 回调里只做"交错 + 写预分配环形缓冲"（2 的幂容量、原子读写下标），转换与电平都在 drain 线程；回调里没有锁、没有分配 | 同上 |
-| 合流 | 勾了多个来源时走 `StreamMixer`：每 40 ms 从每一路的抖动缓冲取 960 帧，**缺的补静音并计一次缺口**，而不是把两路硬拼成一条听起来连续的流 | `AudioSourceCoordinator.swift` |
-| 为什么选了本机音频就总走混音器 | 即使只有它一路：来源 App 退出之后要**换上新的那一路**，而直通的那条流没有换人的位置。「来源 App 退出」是四类中断里唯一会自动接回的一类 | 同上 |
+| 合流 | `StreamMixer` 每 40 ms 从每一路的抖动缓冲取 960 帧，缺的补静音并计一次缺口。调度沿固定时间基准推进，小幅唤醒延迟不会累积；长时间停顿跳过过期时点，不密集重放 tick | `AudioSourceCoordinator.swift`、`StreamMixer.swift` |
+| 为什么选了本机音频就总走混音器 | 即使只有它一路：来源连接中断后要**换上新的那一路**，而直通的那条流没有换人的位置。连接中断既可能来自来源 App，也可能来自采集 helper，不能据此断言来源 App 退出 | 同上 |
 | 设备生命周期 | 与麦克风同一条规则：会话提交时拿、会话离开时释放。XPC 连接一作废，helper 的 `invalidationHandler` 立刻停采集并拆设备 | `CaptureHelperClient.swift` |
 | PCM 落盘 | 与麦克风一致：**没有写文件的路径**。PCM 只在内存里过一道 40 ms 的管道 | 全链 |
+
+包外 helper 的归属由动态解析的系统 SPI
+`responsibility_get_pid_responsible_for_pid` 提供，适配范围限于本机 macOS。
+该符号不是公开 SDK 契约，系统升级后须复核；符号不可用、负责进程未知或归属不符时，不纳入该 helper。
+主 App 与其包内 helper 仍按明确选择匹配。进程归属解析和 tap 更新只在非实时队列执行。
+故障诊断只记录固定阶段、队列字节数、块数与峰值，不记录 PCM、正文或任意用户标签。
+
+采集 helper 的 PCM 分块按 `Data.startIndex` 加相对偏移读取；移除已交付前缀后，
+不得假定剩余缓冲从索引 `0` 开始。正常交付与停止时的尾部排空使用同一分块逻辑。
+
+会议的系统音频连接中断时显示重连状态，并保留用户选择的声音来源与已保存文字。
+60 秒内最多自动重连三次；再次中断或重连失败时停止采集，进入可重试的“录制中断”状态。
+重连成功只表示通道重新建立，不证明中断期间没有漏录，也不证明文字已识别或保存。
+停止或切换会话后，迟到的重连结果不得恢复已结束的录制。
 
 **授权**：`NSAudioCaptureUsageDescription` 在两处给到——App 的
 `SpeechRailApp/Info.plist`（补进生成式 Info.plist 的那份偏量文件）与 helper 自己的

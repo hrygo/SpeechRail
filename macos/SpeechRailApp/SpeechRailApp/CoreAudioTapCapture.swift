@@ -3,6 +3,8 @@ import AVFoundation
 import CoreAudio
 import Foundation
 import Synchronization
+import os
+import Darwin
 
 // 本机音频采集：macOS 的**按进程 tap**（`TECHNICAL-DESIGN` §3.2，product spec §14.1）。
 //
@@ -24,8 +26,8 @@ import Synchronization
 //   → 私有 aggregate device（tap 作为它的输入流）→ `AudioDeviceCreateIOProcID` → start。
 //
 // bundleIDs 按实际音频进程精确匹配；浏览器等 App 的声音可能来自内嵌 helper。
-// 来源 App 重启后的 `isProcessRestoreEnabled` 行为仍只有 SDK 标注语义。
-// 这里把"接回"如实实现成**尽力而为**：tap 建立时就打开该开关，之后不再假装知道它生效了。
+// 进程列表变化时重新按系统归属计算精确的 process object IDs。
+// 不按共享 WebKit bundle ID 自动恢复，避免录入其他 App 的声音。
 
 /// 单生产者 / 单消费者环形缓冲：实时回调写、drain 线程读。容量按完整帧对齐。
 ///
@@ -214,6 +216,8 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
     private var scratch: [Float] = []
     private var pending: Data = Data()
     private var drainTimer: DispatchSourceTimer?
+    private var processListener: AudioObjectPropertyListenerBlock?
+    private var tapDescription: CATapDescription?
     private let drainQueue = DispatchQueue(label: "com.speechrail.capture.tap.drain", qos: .userInitiated)
     private let stateLock = NSLock()
     private var isRunning = false
@@ -225,6 +229,9 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
     private let metrics: any AppPerformanceSink
     private var sequence: UInt64 = 0
     private var pendingUptime: UInt64?
+    private var maximumInputPeak: Float = 0
+    private var maximumOutputPeak: Int32 = 0
+    private static let diagnostics = Logger(subsystem: "com.speechrail.desktop", category: "AudioCapture")
 
 
     public init(configuration: Configuration, captureEpoch: UUID = UUID(), sourceID: UUID = UUID(),
@@ -243,14 +250,18 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
 
         let description = CATapDescription()
         description.bundleIDs = Self.bundleIDsIncludingHelpers(configuration.bundleIDs)
+        description.__processes = try Self.selectedAudioProcessIDs(
+            bundleIDs: description.bundleIDs, processes: Self.audioProcesses()
+        )
         description.isMono = false
         description.isMixdown = true
         description.isExclusive = false
         description.isPrivate = true
         // 抓取不该改变用户听感：保持默认的 unmuted（`CATapDescription.h` 的默认值）。
         description.muteBehavior = .unmuted
-        // 来源 App 重启后按 bundle id 自动接回。**SDK 语义，非实测行为**（§12 第 2 条）。
-        description.isProcessRestoreEnabled = true
+        // A system helper has a shared bundle ID: restoration by that ID could
+        // include another App's WebKit process. Our process listener owns refresh.
+        description.isProcessRestoreEnabled = false
         description.name = "SpeechRail · \(configuration.name)"
         if let deviceUID = configuration.outputDeviceUID {
             description.deviceUID = deviceUID
@@ -260,6 +271,7 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
         let tapStatus = AudioHardwareCreateProcessTap(description, &createdTap)
         guard tapStatus == noErr, createdTap != 0 else { throw Failure.tapFailed(tapStatus) }
         tapID = createdTap
+        tapDescription = description
 
         do {
             let format = try Self.readTapFormat(tapID: createdTap)
@@ -295,9 +307,20 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
         self.onChunk = onChunk
         self.onStopped = onStopped
         sequence = 0; pendingUptime = nil
+        maximumInputPeak = 0; maximumOutputPeak = 0
         pending.removeAll(keepingCapacity: true)
         scratch = [Float](repeating: 0, count: 4096)
         stateLock.withLock { isRunning = true }
+        var processAddress = Self.processListAddress
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in self?.refreshTappedProcesses() }
+        let listenerStatus = AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &processAddress, drainQueue, listener
+        )
+        guard listenerStatus == noErr else { throw Failure.tapFailed(listenerStatus) }
+        processListener = listener
+        // Close the gap between the initial snapshot and installing the listener.
+        drainQueue.sync { refreshTappedProcesses() }
+        guard isRunningCapture else { throw Failure.formatUnavailable }
         startDrainTimer()
     }
 
@@ -309,6 +332,13 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
         var cleanupSucceeded = true
         drainQueue.sync { [self] in
             drainTimer?.setEventHandler {}; drainTimer?.cancel(); drainTimer = nil
+            if let processListener {
+                var address = Self.processListAddress
+                if AudioObjectRemovePropertyListenerBlock(
+                    AudioObjectID(kAudioObjectSystemObject), &address, drainQueue, processListener
+                ) != noErr { cleanupSucceeded = false }
+                self.processListener = nil
+            }
             if aggregateDeviceID != 0, let ioProcID {
                 if AudioDeviceStop(aggregateDeviceID, ioProcID) != noErr { cleanupSucceeded = false }
                 if AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID) != noErr { cleanupSucceeded = false }
@@ -328,9 +358,11 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
             if tapID != 0, AudioHardwareDestroyProcessTap(tapID) != noErr { cleanupSucceeded = false }
         }
         ioProcID = nil; aggregateDeviceID = 0; tapID = 0
+        tapDescription = nil
         ring?.reset(); ring = nil; converter = nil; inputFormat = nil; outputFormat = nil
         onChunk = nil; onStopped = nil; pendingUptime = nil
         pending.removeAll(keepingCapacity: false); scratch.removeAll(keepingCapacity: false)
+        Self.diagnostics.notice("tap_stopped chunks=\(self.sequence) input_peak=\(self.maximumInputPeak) output_peak=\(self.maximumOutputPeak)")
         if measureStop {
             metrics.record(.init(operation: .captureStop,
                 durationNanoseconds: DispatchTime.now().uptimeNanoseconds &- startedAt,
@@ -535,6 +567,7 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
             guard isRunningCapture else { return }
         }
 
+        maximumInputPeak = max(maximumInputPeak, peak)
         _ = outputFormat
         flushChunks(level: AudioLevelScale.normalized(peak: peak))
     }
@@ -576,30 +609,45 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
         }
         if conversionError != nil { failOnDrain(.sourceLost); return }
         guard output.frameLength > 0, let int16 = output.int16ChannelData else { return }
+        for index in 0..<Int(output.frameLength) {
+            maximumOutputPeak = max(maximumOutputPeak, abs(Int32(int16[0][index])))
+        }
         let byteCount = Int(output.frameLength) * 2
         guard byteCount <= 24_000 - pending.count else { failOnDrain(.overflow); return }
         pending.append(UnsafeBufferPointer(start: int16[0], count: Int(output.frameLength)))
     }
 
     private func flushChunks(level: Double, flushPartial: Bool = false) {
-        let bytesPerChunk = 1_920
-        var offset = 0
-        while pending.count - offset >= bytesPerChunk || (flushPartial && pending.count > offset) {
-            let take = min(bytesPerChunk, pending.count - offset)
-            guard let pendingUptime else { failOnDrain(.sourceLost); return }
+        guard !pending.isEmpty else { return }
+        guard let pendingUptime else { failOnDrain(.sourceLost); return }
+        let consumed = Self.drainPCMChunks(from: &pending, flushPartial: flushPartial) { pcm, offset in
             sequence &+= 1
             let uptime = pendingUptime + UInt64(offset / 2) * 1_000_000_000 / 24_000
             let stamp = AudioCaptureStamp(captureEpoch: captureEpoch, sourceID: sourceID,
                 sourceSequence: sequence, capturedUptimeNanoseconds: uptime)
-            onChunk?(.init(pcm: Data(pending[offset..<(offset + take)]), level: level, capturedAt: stamp.capturedInstant,
+            onChunk?(.init(pcm: pcm, level: level, capturedAt: stamp.capturedInstant,
                 sequenceNumber: Int(exactly: sequence), droppedSamplesBefore: ring?.droppedSampleCount,
                 captureStamp: stamp))
+        }
+        self.pendingUptime = pendingUptime + UInt64(consumed / 2) * 1_000_000_000 / 24_000
+    }
+
+    /// Pure PCM framing shared by normal drain and the final partial flush.
+    @discardableResult
+    static func drainPCMChunks(from pending: inout Data, flushPartial: Bool = false,
+                               emit: (Data, Int) -> Void) -> Int {
+        let bytesPerChunk = 1_920
+        var offset = 0
+        while pending.count - offset >= bytesPerChunk || (flushPartial && pending.count > offset) {
+            let take = min(bytesPerChunk, pending.count - offset)
+            // Data keeps its collection indices after removeFirst; offset is
+            // relative to the unread bytes, not an absolute Data index.
+            let start = pending.startIndex + offset
+            emit(Data(pending[start..<(start + take)]), offset)
             offset += take
         }
-        if offset > 0 {
-            pending.removeFirst(offset)
-            pendingUptime = pendingUptime.map { $0 + UInt64(offset / 2) * 1_000_000_000 / 24_000 }
-        }
+        if offset > 0 { pending.removeFirst(offset) }
+        return offset
     }
 
     private func failOnDrain(_ reason: AudioStreamTermination) {
@@ -607,6 +655,7 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
             guard isRunning else { return false }; isRunning = false; return true
         }
         guard first else { return }
+        Self.diagnostics.error("tap_failed reason=\(reason.rawValue, privacy: .public) pending_bytes=\(self.pending.count) chunks=\(self.sequence) input_peak=\(self.maximumInputPeak) output_peak=\(self.maximumOutputPeak)")
         drainTimer?.setEventHandler {}; drainTimer?.cancel(); drainTimer = nil
         pending.removeAll(keepingCapacity: false)
         onStopped?(AudioStreamError(reason: reason, captureEpoch: captureEpoch, sourceID: sourceID,
@@ -645,7 +694,84 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
         return identifiers.sorted()
     }
 
+    struct AudioProcessIdentity: Sendable {
+        let objectID: AudioObjectID
+        let bundleID: String
+        let responsibleBundleID: String?
+    }
+
+    static func selectedAudioProcessIDs(
+        bundleIDs: [String], processes: [AudioProcessIdentity]
+    ) -> [NSNumber] {
+        let selected = Set(bundleIDs)
+        return processes.filter {
+            selected.contains($0.bundleID) || $0.responsibleBundleID.map(selected.contains) == true
+        }
+            .map { NSNumber(value: $0.objectID) }
+    }
+
     // MARK: - 读属性
+
+    private static var processListAddress: AudioObjectPropertyAddress {
+        .init(mSelector: kAudioHardwarePropertyProcessObjectList,
+              mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+    }
+
+    // System WebKit services live outside the selected App bundle and have a
+    // shared bundle ID. Only the OS responsibility relation can safely scope
+    // them. This SPI is isolated and dynamically resolved; an unavailable or
+    // unknown owner never adds a process. Never add its shared bundle ID.
+    private static let responsiblePID: (@convention(c) (pid_t) -> pid_t)? = {
+        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2),
+                                "responsibility_get_pid_responsible_for_pid") else { return nil }
+        return unsafeBitCast(symbol, to: (@convention(c) (pid_t) -> pid_t).self)
+    }()
+
+    private static func audioProcesses() throws -> [AudioProcessIdentity] {
+        var address = processListAddress, size: UInt32 = 0
+        let system = AudioObjectID(kAudioObjectSystemObject)
+        let sizeStatus = AudioObjectGetPropertyDataSize(system, &address, 0, nil, &size)
+        guard sizeStatus == noErr else { throw Failure.tapFailed(sizeStatus) }
+        guard size > 0 else { return [] }
+        var objects = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        let readStatus = objects.withUnsafeMutableBytes {
+            AudioObjectGetPropertyData(system, &address, 0, nil, &size, $0.baseAddress!)
+        }
+        guard readStatus == noErr else { throw Failure.tapFailed(readStatus) }
+        return objects.prefix(Int(size) / MemoryLayout<AudioObjectID>.size).compactMap { object in
+            var pid: pid_t = 0, pidSize = UInt32(MemoryLayout<pid_t>.size)
+            var pidAddress = AudioObjectPropertyAddress(mSelector: kAudioProcessPropertyPID,
+                mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            guard AudioObjectGetPropertyData(object, &pidAddress, 0, nil, &pidSize, &pid) == noErr,
+                  pid > 0 else { return nil }
+            var bundle: CFString = "" as CFString
+            var bundleSize = UInt32(MemoryLayout<CFString>.size)
+            var bundleAddress = AudioObjectPropertyAddress(mSelector: kAudioProcessPropertyBundleID,
+                mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            let status = withUnsafeMutablePointer(to: &bundle) {
+                AudioObjectGetPropertyData(object, &bundleAddress, 0, nil, &bundleSize, $0)
+            }
+            guard status == noErr else { return nil }
+            let owner = responsiblePID?(pid) ?? 0
+            let responsible = owner > 0 ? NSRunningApplication(processIdentifier: owner)?.bundleIdentifier : nil
+            return AudioProcessIdentity(objectID: object, bundleID: bundle as String, responsibleBundleID: responsible)
+        }
+    }
+
+    private func refreshTappedProcesses() {
+        guard isRunningCapture, var description = tapDescription else { return }
+        do {
+            let processes = try Self.selectedAudioProcessIDs(bundleIDs: description.bundleIDs, processes: Self.audioProcesses())
+            guard processes != description.__processes else { return }
+            description.__processes = processes
+            var address = AudioObjectPropertyAddress(mSelector: kAudioTapPropertyDescription,
+                mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            let status = withUnsafePointer(to: &description) {
+                AudioObjectSetPropertyData(tapID, &address, 0, nil, UInt32(MemoryLayout<CATapDescription>.size), $0)
+            }
+            if status != noErr { failOnDrain(.sourceLost) }
+        } catch { failOnDrain(.sourceLost) }
+    }
 
     private static func readTapFormat(tapID: AudioObjectID) throws -> AudioStreamBasicDescription {
         var address = AudioObjectPropertyAddress(

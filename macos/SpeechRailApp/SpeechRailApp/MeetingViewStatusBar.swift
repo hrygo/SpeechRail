@@ -91,6 +91,7 @@ extension MeetingView {
         // 暂停与静音**不是**同一件事：暂停是整条上行都停（含本机音频），静音只关掉麦克风
         // 那一路。两句都成立时先说更强的那一句——"已暂停"已经蕴含"你这边的声音进不去"。
         case .recording:
+            if meeting.isReconnectingSystemAudio { return sourcePresentation.title }
             if meeting.isPaused { return "已暂停" }
             return meeting.isMicrophoneMuted ? "正在录音 · 麦克风已静音" : "正在录音"
         case .interrupted: return "录制中断"
@@ -103,7 +104,7 @@ extension MeetingView {
         switch meeting.phase {
         case .idle: meeting.blocked != nil ? .attention : .neutral
         case .preparing: .attention
-        case .recording: meeting.isPaused ? .attention : .healthy
+        case .recording: meeting.isPaused || meeting.isReconnectingSystemAudio ? .attention : .healthy
         case .interrupted: .attention
         case .processing: .attention
         case .archived: .healthy
@@ -150,6 +151,8 @@ extension MeetingView {
         switch capture {
         case .notStarted: .idle
         case .pausedAll: .paused
+        case .reconnecting: .degraded("音频连接中断，正在重连")
+        case .interrupted: .failed("采集已停止")
         case .microphoneMuted: .active
         case .live: .active
         }
@@ -157,6 +160,8 @@ extension MeetingView {
 
     private var sourceCapture: MeetingSourcePresentation.Capture {
         guard meeting.phase.isLive || meeting.phase == .interrupted else { return .notStarted }
+        if meeting.phase == .interrupted { return .interrupted }
+        if meeting.isReconnectingSystemAudio { return .reconnecting }
         if meeting.isPaused { return .pausedAll }
         if meeting.isMicrophoneMuted { return .microphoneMuted }
         return .live

@@ -209,6 +209,26 @@ final class AudioCaptureBoundaryTests: XCTestCase {
         )
     }
 
+    func testTapSelectsOnlyWebKitProcessesOwnedBySelectedApplication() {
+        let processes: [CoreAudioTapCapture.AudioProcessIdentity] = [
+            .init(objectID: 1, bundleID: "test.meeting", responsibleBundleID: "test.meeting"),
+            .init(objectID: 2, bundleID: "com.apple.WebKit.GPU", responsibleBundleID: "test.meeting"),
+            .init(objectID: 3, bundleID: "com.apple.WebKit.GPU", responsibleBundleID: "test.other"),
+            .init(objectID: 4, bundleID: "com.apple.WebKit.GPU", responsibleBundleID: nil),
+            .init(objectID: 5, bundleID: "test.other", responsibleBundleID: "test.other")
+        ]
+        XCTAssertEqual(CoreAudioTapCapture.selectedAudioProcessIDs(
+            bundleIDs: ["test.meeting"], processes: processes), [1, 2])
+        XCTAssertEqual(CoreAudioTapCapture.selectedAudioProcessIDs(
+            bundleIDs: [], processes: processes), [])
+        let replacement: [CoreAudioTapCapture.AudioProcessIdentity] = [
+            .init(objectID: 2, bundleID: "com.apple.WebKit.GPU", responsibleBundleID: "test.other"),
+            .init(objectID: 6, bundleID: "com.apple.WebKit.GPU", responsibleBundleID: "test.meeting")
+        ]
+        XCTAssertEqual(CoreAudioTapCapture.selectedAudioProcessIDs(
+            bundleIDs: ["test.meeting"], processes: replacement), [6])
+    }
+
     func testTapRejectsUnselectedApplicationAndHelperSymlinkEscapes() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
