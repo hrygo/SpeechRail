@@ -14,7 +14,7 @@ audience: "产品、架构与 macOS 开发者"
 - **读取范围**：`docs/users/audiobook-workshop.md`、`docs/architecture/audiobook-workshop.md`、`docs/developers/macos-app-audiobook.md`、`docs/audits/2026-10-17-speechrail-voicestudio-competitive-research.md`、`docs/audits/2026-10-17-speechrail-elevenlabs-absorption-plan.md`，以及 `macos/SpeechRailApp/SpeechRailApp/Audiobook*.swift`。
 - **实测**：`swift test --package-path macos/SpeechRailApp --filter Audiobook`，293 个测试通过（1 个跳过，0 失败）；完整 `swift test --package-path macos/SpeechRailApp` 659 个测试通过；`scripts/macos_app_build.sh --configuration Debug` 成功。
 - **未实测**：真实模型的长篇分析/合成质量、真实 FFmpeg 导出、前台 UI 观感、VoiceOver 顺序和键盘走查。项目规则禁止未经逐次授权的 UI 自动化，本轮未运行。
-- **外置小说语料未能复跑**：`/Users/hrygo/Downloads/公开小说-2026-10-14` 中 5 份 TXT 的 `stat` 可读且大小与清单一致，但目录枚举与文件读取会阻塞（文件现为云端占位状态）。为避免触发下载，本轮没有执行 `scripts/check_audiobook_text_corpus.py`，也没有把旧语料结果当作本轮证据。目录页识别因此只由确定性虚构夹具覆盖，真实长篇的分章回归仍需在语料恢复本地内容后重跑。
+- **外置小说语料未能复跑**：`公开小说-2026-10-14` 本机目录中 5 份 TXT 的 `stat` 可读且大小与清单一致，但目录枚举与文件读取会阻塞（文件当时为云端占位状态）。为避免触发下载，本轮没有执行 `scripts/check_audiobook_text_corpus.py`，也没有把旧语料结果当作本轮证据。目录页识别因此只由确定性虚构夹具覆盖，真实长篇的分章回归仍需在语料恢复本地内容后重跑。
 - **证据分层**：下文「已具备」来自代码与测试；「文档承诺」来自 active 文档；「建议」是基于两者差距的推断，不代表已实现。
 
 ## 2. 审计结论摘要
