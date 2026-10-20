@@ -2,8 +2,8 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.11.8"
-date: 2026-10-16
+version: "0.11.9"
+date: 2026-10-20
 ---
 
 # SpeechRail macOS App 设计系统与 Token
