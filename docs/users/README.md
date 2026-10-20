@@ -2,13 +2,15 @@
 title: "SpeechRail 用户与集成指南中心"
 status: active
 audience: "应用开发者、客户端集成工程师、API 消费者"
-version: "3.2.2"
-date: 2026-10-07
+version: "3.2.3"
+date: 2026-10-20
 ---
 
 # 🔌 SpeechRail 用户与集成指南
 
 本目录面向将 SpeechRail 接入桌面智能体、实时会议转写系统或本地内容工作流的开发者。所有能力以当前运行时发现结果和公共契约为准；本文档不扩展 OpenAI 未在 SpeechRail 契约中实现的能力。
+
+macOS App 用户可查阅[会议纪要与模型服务](meeting-minutes.md)，了解配置复用、失败恢复和文字发送范围。
 
 > [!TIP]
 > 还没在本机装好服务？先看 **[📦 SpeechRail 安装与首次使用](installing-speechrail.md)**：它说明 GitHub Release 上

@@ -536,9 +536,8 @@ private struct SpeechRailOpenAIMiddleware: OpenAIMiddleware {
 //
 // 四条不能含糊的口径：
 //
-//   1. **标准对话路径对接 Responses API，提词器整理路径使用 Chat Completions JSON mode**。
-//      Responses 仍是助手、内心 OS 与纪要的协议边界；提词器的 map/reduce 只需要无状态的
-//      Chat Completions 结构化传输。两条链路都不做端侧模型兜底。
+//   1. 对话路径对接 Responses；无状态结构化任务复用 Chat JSON 传输。
+//      纪要允许在同一配置上协商普通 Responses，不要求后台响应或替换 provider。
 //   2. **密钥只进安全保管库**（§15.4）：库里只留端点与模型名，日志与错误里不出现密钥。
 //   3. **前缀结构是硬的**（§5.5）：人设与记忆进 developer 消息的 `input_text` 块并打显式
 //      断点，动态内容一律排在后面。顶层 `instructions` 不能带断点，所以人设不能写在那里。
@@ -623,8 +622,8 @@ public enum LLMModule: String, CaseIterable, Codable, Identifiable, Sendable {
 
     public var requiredOperation: LLMOperation {
         switch self {
-        case .teleprompter, .audiobook: .chat
-        case .assistant, .minutes: .responses
+        case .minutes, .teleprompter, .audiobook: .chat
+        case .assistant: .responses
         }
     }
 }
@@ -1306,6 +1305,9 @@ public actor LLMProvider {
     /// 已经明确拒绝 strict JSON Schema 的 endpoint/model/schema 组合。
     /// 只记在内存里，避免同一整理任务的每个窗口都先失败一次再退回 JSON mode。
     private var structuredOutputRejected: Set<String> = []
+    private var unformattedOutputEndpoints: Set<String> = []
+    private var responsesTaskEndpoints: Set<String> = []
+    private var completionTokenLimitEndpoints: Set<String> = []
 
     public init(
         session: URLSession = .shared,
@@ -1387,7 +1389,8 @@ public actor LLMProvider {
         timeout: TimeInterval = 90,
         observationContext: LLMRequestContext? = nil,
         observationHandler: LLMObservationHandler? = nil,
-        structuredOutputMode: LLMStructuredOutputMode = .jsonObject
+        structuredOutputMode: LLMStructuredOutputMode = .jsonObject,
+        compatibilityFallback: Bool = false
     ) async throws -> String {
         guard configuration.isConfigured else { throw LLMError.notConfigured }
         guard configuration.isBaseURLValid, !configuration.embedsCredential,
@@ -1425,9 +1428,12 @@ public actor LLMProvider {
            structuredOutputRejected.contains(structuredOutputKey) {
             requestedMode = .jsonObject
         }
+        var omitFormat = compatibilityFallback && unformattedOutputEndpoints.contains(structuredOutputKey)
+        var useCompletionTokenLimit = compatibilityFallback && completionTokenLimitEndpoints.contains(controlKey)
         var structuredOutputFallbackUsed = false
         var thinkingFallbackUsed = false
-        for attempt in 0...2 {
+        let lastAttempt = compatibilityFallback ? 4 : 2
+        for attempt in 0...lastAttempt {
             try Task.checkCancellation()
             let includeThinkingControl = !thinkingControlRejected.contains(controlKey)
             let responseCapture = SpeechRailOpenAIResponseCapture()
@@ -1442,7 +1448,7 @@ public actor LLMProvider {
                 includeThinkingControl: includeThinkingControl,
                 outcome: "started",
                 errorCode: nil,
-                structuredOutputMode: requestedMode,
+                structuredOutputMode: omitFormat ? nil : requestedMode,
                 observer: observationHandler
             )
             do {
@@ -1464,17 +1470,18 @@ public actor LLMProvider {
                         && configuration.compatibilityMode.chatThinkingControl == .standard
                         ? ChatQuery.ReasoningEffort.none
                         : nil,
-                    responseFormat: try responseFormat(
+                    maxCompletionTokens: useCompletionTokenLimit ? maxOutputTokens : nil,
+                    responseFormat: omitFormat ? nil : try responseFormat(
                         schema: schema,
                         mode: requestedMode
                     ),
                     store: false,
-                    temperature: 0
+                    temperature: compatibilityFallback ? nil : 0
                 )
                 // MacPaw SDK 的标准 reasoning_effort 由上面的 query 编码；OpenCode 与本机
                 // 模板字段由 middleware 在 Chat 请求边界注入，避免把某个 provider 的字段
                 // 无条件带给其他兼容端点。
-                query.maxTokens = maxOutputTokens
+                query.maxTokens = useCompletionTokenLimit ? nil : maxOutputTokens
 
                 let result = try await client.chats(query: query)
                 try Task.checkCancellation()
@@ -1497,7 +1504,7 @@ public actor LLMProvider {
                     includeThinkingControl: includeThinkingControl,
                     outcome: "received",
                     errorCode: nil,
-                    structuredOutputMode: requestedMode,
+                    structuredOutputMode: omitFormat ? nil : requestedMode,
                     observer: observationHandler
                 )
                 return content
@@ -1513,13 +1520,31 @@ public actor LLMProvider {
                     includeThinkingControl: includeThinkingControl,
                     outcome: "failed",
                     errorCode: LLMObservability.errorCode(for: (error as? LLMResponseIssue).map { $0 == .incomplete ? LLMError.outputTruncated : LLMError.invalidStructuredResponse } ?? error),
-                    structuredOutputMode: requestedMode,
+                    structuredOutputMode: omitFormat ? nil : requestedMode,
                     observer: observationHandler
                 )
                 if error is CancellationError || (error as? URLError)?.code == .cancelled {
                     throw LLMError.cancelled
                 }
-                if attempt < 2, includeThinkingControl,
+                if compatibilityFallback, let status = snapshot.statusCode,
+                   Self.explicitlyRejectsChat(status: status, body: snapshot.body) {
+                    throw LLMError.notChatAPI
+                }
+                if compatibilityFallback, !useCompletionTokenLimit, attempt < lastAttempt,
+                   let status = snapshot.statusCode,
+                   Self.requiresCompletionTokenLimit(status: status, body: snapshot.body) {
+                    useCompletionTokenLimit = true
+                    completionTokenLimitEndpoints.insert(controlKey)
+                    continue
+                }
+                if compatibilityFallback, !omitFormat, requestedMode == .jsonObject,
+                   attempt < lastAttempt, let status = snapshot.statusCode,
+                   Self.rejectsStructuredOutput(status: status, body: snapshot.body) {
+                    omitFormat = true
+                    unformattedOutputEndpoints.insert(structuredOutputKey)
+                    continue
+                }
+                if attempt < lastAttempt, includeThinkingControl,
                    let statusCode = snapshot.statusCode,
                    !thinkingFallbackUsed,
                    Self.rejectsThinkingControl(status: statusCode, body: snapshot.body) {
@@ -1527,7 +1552,7 @@ public actor LLMProvider {
                     thinkingFallbackUsed = true
                     continue
                 }
-                if attempt < 2,
+                if attempt < lastAttempt,
                    requestedMode == .jsonSchema,
                    !structuredOutputFallbackUsed,
                    let statusCode = snapshot.statusCode,
@@ -1568,6 +1593,113 @@ public actor LLMProvider {
             }
         }
         throw LLMError.invalidStructuredResponse
+    }
+
+    /// 纪要等本地持有任务：只协商同一 endpoint/model 的能力，不创建远端后台任务。
+    /// 只有明确拒绝接口/格式的响应可重试；传输失败、坏输出和业务错误不换协议。
+    public func completeCompatibleJSON(
+        configuration: LLMConfiguration,
+        apiKey: String?,
+        instructions: String,
+        input: String,
+        schema: [String: Any],
+        maxOutputTokens: Int,
+        timeout: TimeInterval = 900
+    ) async throws -> String {
+        let key = thinkingKey(configuration, operation: .responses)
+        if !responsesTaskEndpoints.contains(key) {
+            do {
+                return try await completeJSON(
+                    configuration: configuration, apiKey: apiKey,
+                    instructions: instructions, input: input, schema: schema,
+                    maxOutputTokens: maxOutputTokens, timeout: timeout,
+                    compatibilityFallback: true
+                )
+            } catch LLMError.notChatAPI {
+                // 明确未受理的接口拒绝才可以在同一 provider 改用普通 Responses。
+            }
+        }
+        guard maxOutputTokens > 0, timeout.isFinite, timeout > 0,
+              let definition = schema["schema"] as? [String: Any] else {
+            throw LLMError.invalidStructuredResponse
+        }
+        let schemaText = String(decoding: try JSONSerialization.data(
+            withJSONObject: definition, options: [.sortedKeys]), as: UTF8.self)
+        let messages = [
+            LLMMessage(role: .developer, text: instructions
+                + "\n只输出一个符合以下完整 JSON Schema 的 JSON 对象，不要代码围栏或额外文字。\n" + schemaText),
+            LLMMessage(role: .user, text: input)
+        ]
+        for includeFormat in [true, false] {
+            try Task.checkCancellation()
+            do {
+                let (data, _) = try await performOnce(
+                    configuration: configuration, messages: messages, apiKey: apiKey,
+                    maxOutputTokens: maxOutputTokens,
+                    textFormat: includeFormat ? ["type": "json_object"] : nil,
+                    background: false, instructions: nil, timeout: timeout,
+                    statelessJSON: true
+                )
+                responsesTaskEndpoints.insert(key)
+                return try Self.extractResponsesJSON(data, maxOutputTokens: maxOutputTokens)
+            } catch LLMError.unsupportedStructuredOutput where includeFormat {
+                // 仍要求严格 JSON 及 feature schema，只去掉 provider 明确不支持的格式参数。
+                continue
+            } catch is CancellationError {
+                throw LLMError.cancelled
+            }
+        }
+        throw LLMError.invalidStructuredResponse
+    }
+
+    private static func requiresCompletionTokenLimit(status: Int, body: String) -> Bool {
+        guard status == 400 || status == 422 else { return false }
+        let lower = body.lowercased()
+        return lower.contains("max_tokens") && lower.contains("max_completion_tokens")
+            && (lower.contains("unsupported") || lower.contains("not supported"))
+    }
+
+    private static func explicitlyRejectsChat(status: Int, body: String) -> Bool {
+        let lower = body.lowercased()
+        // 路由存在而模型不存在也可能返回 404，不能因此再提交一次。
+        if (lower.contains("model") || lower.contains("deployment")),
+           lower.contains("not found") || lower.contains("model_not_found")
+            || lower.contains("deployment_not_found") || lower.contains("unknown model")
+            || lower.contains("does not exist") {
+            return false
+        }
+        if status == 404 || status == 405 || status == 501 { return true }
+        guard status == 400 || status == 422 else { return false }
+        let mentionsOperation = lower.contains("chat/completions") || lower.contains("chat completions")
+            || lower.contains("unknown endpoint") || lower.contains("endpoint not found")
+        let rejectsOperation = lower.contains("not supported") || lower.contains("unsupported")
+            || lower.contains("does not support") || lower.contains("not implemented")
+            || lower.contains("unknown endpoint") || lower.contains("endpoint not found")
+        return mentionsOperation && rejectsOperation
+    }
+
+    private static func extractResponsesJSON(_ data: Data, maxOutputTokens: Int) throws -> String {
+        do {
+            let text = try LLMResponseValidation.text(from: data, operation: .responses)
+            struct TokenUsage: Decodable {
+                struct Usage: Decodable { let output_tokens: Int }
+                let usage: Usage
+            }
+            // JSONDecoder 严格区分整数与布尔值，避免 NSNumber 的 true/false → 1/0 桥接。
+            let tokens = try JSONDecoder().decode(TokenUsage.self, from: data).usage.output_tokens
+            guard tokens >= 0 else {
+                throw LLMError.invalidStructuredResponse
+            }
+            guard tokens < maxOutputTokens else { throw LLMError.outputTruncated }
+            _ = try LLMStrictJSON.object(from: Data(text.utf8))
+            return text
+        } catch let issue as LLMResponseIssue {
+            throw issue == .incomplete ? LLMError.outputTruncated : LLMError.invalidStructuredResponse
+        } catch let error as LLMError {
+            throw error
+        } catch {
+            throw LLMError.invalidStructuredResponse
+        }
     }
 
     private func responseFormat(
@@ -2216,7 +2348,8 @@ public actor LLMProvider {
         textFormat: [String: Any]? = nil,
         background: Bool = false,
         instructions: String? = nil,
-        includeThinkingControl: Bool = true
+        includeThinkingControl: Bool = true,
+        usePromptCache: Bool = true
     ) throws -> URLRequest {
         guard configuration.isConfigured else { throw LLMError.notConfigured }
         guard configuration.isBaseURLValid,
@@ -2235,7 +2368,7 @@ public actor LLMProvider {
         // 这样断点之前那一段每次请求逐字节相同，才有缓存可命中。
         let input: [[String: Any]] = messages.map { message in
             var block: [String: Any] = ["type": "input_text", "text": message.text]
-            if message.cacheBreakpoint {
+            if usePromptCache, message.cacheBreakpoint {
                 block["prompt_cache_breakpoint"] = ["mode": "explicit"]
             }
             let type = message.role == .assistant ? "output_text" : "input_text"
@@ -2247,9 +2380,9 @@ public actor LLMProvider {
             "model": configuration.model,
             "input": input,
             "store": false,
-            "stream": stream,
-            "prompt_cache_options": ["mode": "explicit"]
+            "stream": stream
         ]
+        if usePromptCache { body["prompt_cache_options"] = ["mode": "explicit"] }
         // 顶层 `instructions` = 系统提示词。它每轮都要重发：Responses 的续轮（`previous_response_id`）
         // **不继承**上一轮的 instructions（官方参考与 oMLX 实测一致），断链后也无从恢复。
         if let instructions, !instructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -2284,7 +2417,8 @@ public actor LLMProvider {
         textFormat: [String: Any]?,
         background: Bool,
         instructions: String?,
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        statelessJSON: Bool = false
     ) async throws -> (Data, URLResponse) {
         let observationContext = LLMRequestContext()
         let controlKey = thinkingKey(configuration, operation: .responses)
@@ -2315,7 +2449,8 @@ public actor LLMProvider {
                     textFormat: textFormat,
                     background: background,
                     instructions: instructions,
-                    includeThinkingControl: includeThinkingControl
+                    includeThinkingControl: includeThinkingControl,
+                    usePromptCache: !statelessJSON
                 )
             } catch {
                 emitProviderObservation(
@@ -2353,7 +2488,11 @@ public actor LLMProvider {
             responseCapture.record(response: result.1, data: result.0)
             do {
                 try Self.validate(response: result.1, data: result.0)
-                if !background { _ = try Self.extractText(from: result.0) }
+                if statelessJSON {
+                    _ = try Self.extractResponsesJSON(result.0, maxOutputTokens: maxOutputTokens ?? 0)
+                } else if !background {
+                    _ = try Self.extractText(from: result.0)
+                }
                 emitProviderObservation(
                     kind: .providerResponse,
                     context: observationContext,
@@ -2435,9 +2574,8 @@ public actor LLMProvider {
         let lower = body.lowercased()
         return lower.contains("chat_template_kwargs")
             || lower.contains("thinking")
-            || lower.contains("unrecognized request argument")
-            || lower.contains("unknown parameter")
-            || lower.contains("extra inputs")
+            || lower.contains("reasoning_effort")
+            || lower.contains("reasoning.effort")
     }
 
     private func perform(_ request: URLRequest, timeout: TimeInterval) async throws -> (Data, URLResponse) {
@@ -2465,7 +2603,9 @@ public actor LLMProvider {
         apiKey: String?,
         operation: LLMOperation,
         includeThinkingControl: Bool,
-        sessionID: String
+        sessionID: String,
+        compatibleTask: Bool = false,
+        useCompletionTokenLimit: Bool = false
     ) -> URLRequest {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -2485,10 +2625,10 @@ public actor LLMProvider {
             body = [
                 "model": configuration.model,
                 "messages": [["role": "user", "content": "ping"]],
-                "max_tokens": 16,
-                "stream": false,
-                "temperature": 0
+                "stream": false
             ]
+            body[useCompletionTokenLimit ? "max_completion_tokens" : "max_tokens"] = 16
+            if !compatibleTask { body["temperature"] = 0 }
             if includeThinkingControl {
                 switch configuration.compatibilityMode.chatThinkingControl {
                 case .standard:
@@ -2521,12 +2661,37 @@ public actor LLMProvider {
         return request
     }
 
+    /// 纪要的文本通路检查：与生成一致，只有明确拒绝 Chat 接口时才检查普通 Responses。
+    /// 此探测不代表业务 schema 或长任务质量已通过。
+    public func checkCompatibleJSON(
+        configuration: LLMConfiguration,
+        apiKey: String?
+    ) async -> LLMConnectionResult {
+        let chat = await checkOperation(configuration: configuration, apiKey: apiKey, operation: .chat,
+                               compatibleTask: true)
+        guard case .notChatAPI = chat else { return chat }
+        return await checkOperation(configuration: configuration, apiKey: apiKey, operation: .responses,
+                           compatibleTask: true)
+    }
+
     /// 一次点击检查指定功能实际需要的 wire operation。
     public func check(
         configuration: LLMConfiguration,
         apiKey: String?,
         operation: LLMOperation = .responses,
         allowThinkingControlFallback: Bool = true
+    ) async -> LLMConnectionResult {
+        await checkOperation(
+            configuration: configuration, apiKey: apiKey, operation: operation,
+            allowThinkingControlFallback: allowThinkingControlFallback, compatibleTask: false)
+    }
+
+    private func checkOperation(
+        configuration: LLMConfiguration,
+        apiKey: String?,
+        operation: LLMOperation,
+        allowThinkingControlFallback: Bool = true,
+        compatibleTask: Bool
     ) async -> LLMConnectionResult {
         guard configuration.isConfigured else { return .notConfigured }
         guard configuration.isBaseURLValid, !configuration.embedsCredential else { return .badBaseURL }
@@ -2548,6 +2713,7 @@ public actor LLMProvider {
         let controlKey = thinkingKey(configuration, operation: operation)
         let sessionID = "check-\(UUID().uuidString)"
         var includeThinkingControl = !thinkingControlRejected.contains(controlKey)
+        var useCompletionTokenLimit = compatibleTask && completionTokenLimitEndpoints.contains(controlKey)
         if !allowThinkingControlFallback && !includeThinkingControl {
             return .unreachable(LLMError.thinkingControlUnavailable.localizedDescription)
         }
@@ -2561,28 +2727,39 @@ public actor LLMProvider {
                     apiKey: apiKey,
                     operation: operation,
                     includeThinkingControl: includeThinkingControl,
-                    sessionID: sessionID
+                    sessionID: sessionID,
+                    compatibleTask: compatibleTask,
+                    useCompletionTokenLimit: useCompletionTokenLimit
                 )
             )
-            if includeThinkingControl,
-               let http = result.1 as? HTTPURLResponse,
-               Self.rejectsThinkingControl(
-                    status: http.statusCode,
-                    body: String(decoding: result.0, as: UTF8.self)
-               ) {
-                thinkingControlRejected.insert(controlKey)
-                if !allowThinkingControlFallback {
-                    return .unreachable(LLMError.thinkingControlUnavailable.localizedDescription)
+            // thinking 与标准预算字段各最多协商一次，不因其他 4xx 或传输失败重试。
+            for _ in 0..<2 {
+                guard let http = result.1 as? HTTPURLResponse else { break }
+                let body = String(decoding: result.0, as: UTF8.self)
+                if includeThinkingControl,
+                   Self.rejectsThinkingControl(status: http.statusCode, body: body) {
+                    thinkingControlRejected.insert(controlKey)
+                    if !allowThinkingControlFallback {
+                        return .unreachable(LLMError.thinkingControlUnavailable.localizedDescription)
+                    }
+                    includeThinkingControl = false
+                } else if compatibleTask, operation == .chat, !useCompletionTokenLimit,
+                          Self.requiresCompletionTokenLimit(status: http.statusCode, body: body) {
+                    useCompletionTokenLimit = true
+                    completionTokenLimitEndpoints.insert(controlKey)
+                } else {
+                    break
                 }
-                includeThinkingControl = false
                 result = try await session.data(
                     for: Self.probeRequest(
                         url: operationURL,
                         configuration: configuration,
                         apiKey: apiKey,
                         operation: operation,
-                        includeThinkingControl: false,
-                        sessionID: sessionID
+                        includeThinkingControl: includeThinkingControl,
+                        sessionID: sessionID,
+                        compatibleTask: compatibleTask,
+                        useCompletionTokenLimit: useCompletionTokenLimit
                     )
                 )
             }
@@ -2596,7 +2773,9 @@ public actor LLMProvider {
             return .unreachable("没有收到 HTTP 响应")
         }
         let body = String(decoding: data, as: UTF8.self)
-        if Self.operationUnavailable(operation, status: http.statusCode, body: body) {
+        if (operation == .chat
+            ? Self.explicitlyRejectsChat(status: http.statusCode, body: body)
+            : Self.operationUnavailable(operation, status: http.statusCode, body: body)) {
             return operation == .chat ? .notChatAPI : .notResponsesAPI
         }
         guard (200..<300).contains(http.statusCode) else {

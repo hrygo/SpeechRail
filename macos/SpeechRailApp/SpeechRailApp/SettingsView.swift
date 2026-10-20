@@ -372,11 +372,16 @@ public struct SettingsView: View {
             draft: draft,
             storedKey: resolved.apiKey
         )
-        let result = await LLMProvider().check(
-            configuration: resolved.configuration,
-            apiKey: candidateKey,
-            operation: module?.requiredOperation ?? .responses
-        )
+        let provider = LLMProvider()
+        let result: LLMConnectionResult
+        if module == .minutes {
+            result = await provider.checkCompatibleJSON(
+                configuration: resolved.configuration, apiKey: candidateKey)
+        } else {
+            result = await provider.check(
+                configuration: resolved.configuration, apiKey: candidateKey,
+                operation: module?.requiredOperation ?? .responses)
+        }
         connectionResult = result
         guard LLMKeyDraftPolicy.shouldPersist(
             draft: draft,

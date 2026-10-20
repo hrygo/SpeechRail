@@ -2,8 +2,8 @@
 title: "LLM 响应校验与观测边界"
 status: active
 audience: "macOS App 开发者"
-version: "1.0.1"
-date: 2026-10-07
+version: "1.0.2"
+date: 2026-10-20
 ---
 
 # LLM 响应校验与观测边界
@@ -22,6 +22,16 @@ App 的共享 LLM 支持由 `LLMProvider.swift` 中的独立类型提供，不�
 探测、正式 Responses 文本解析及 Chat 结构化调用共享最低文本校验。普通探测允许普通文本，不要求业务 JSON、usage 或某个 feature schema。Responses 的 assistant message `output[].content[].output_text` 要求显式 `status=completed`；明确的顶层 `output_text` 兼容形状可以缺少 status，存在的 status 则必须为 `completed`。Chat 要求一个 assistant 文本 choice、`finish_reason=stop`，不接受 tool call。
 
 HTTP 2xx 中的非 JSON、空体、重复键、错误 envelope、operation 错配、空正文均不确认可用。拒答、截断、失败和 queued/in_progress/cancelled 分别归为 `refused`、`incomplete`、`failed`、`notCompleted`。短探测截断只证明本次未完成，不证明模型不存在。探测把这些事实映射为 `responseUnconfirmed`；正式调用按其错误域映射，仍不能提交成功结果。该结论不证明流式、background、JSON Schema 或未来请求均可用。
+
+纪要使用 `completeCompatibleJSON`：优先 Chat JSON mode，仅在接口明确不可用时改用同一配置的
+普通 Responses；新请求不依赖 background 或专有缓存参数。仅当格式能力明确被拒绝时去掉
+JSON 格式参数，完整 schema 仍在提示中，严格 JSON、usage/预算与业务 decoder 不降级。
+鉴权、限流、模型缺失、错误输出或未知传输结果均不触发协议替换。既有 `completeJSON`
+调用默认保持原有格式策略，不因纪要启用协商而扩大其他功能的重试范围。
+
+协议和格式协商属于 Provider，分窗 submitted 检查点、结果保存与恢复属于纪要 owner。
+无远端 ID 的 submitted 窗口在恢复时视为提交结果未知；历史远端 ID 只查询原任务。
+详见[纪要模型服务兼容与恢复](../developers/macos-app-development.md#纪要的模型服务兼容与恢复)。
 
 ## 依赖与观测
 
