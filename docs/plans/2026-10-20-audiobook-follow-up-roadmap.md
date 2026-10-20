@@ -2,7 +2,7 @@
 title: "有声书工坊后续优化路线图（2026-10-20）"
 status: active
 audience: "产品、macOS App 开发者与验证负责人"
-version: "1.0.0"
+version: "1.1.0"
 date: 2026-10-20
 ---
 
@@ -153,3 +153,45 @@ makeConfirmedChapters 已能一次制作所有 ready/needsUpdate/paused 章节�
 - M0 依赖外部语料恢复本地；语料仍为云端占位时，不得用合成样本替代真实分章质量结论。
 - M2 的内存数字只对合成样本负责；真实 10M 字书稿的峰值仍需在 M0 语料可用后复测。
 - 所有“通过”以命令输出为准；文档、计划和退出码不单独证明质量。
+
+## 10. 实施记录（2026-10-20）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| M1 导出只读预检 | 已落地 | controller 抽出 buildPlan/audit，prepare 复用；新增 unknownSpeaker / missingAsset 审计测试 |
+| M2 长篇索引内存 | 已落地 | 2M 标量 RSS 增量 59,572,224 → 51,560,448 字节；耗时 833.2 → 885.7 ms；5M 样本 117,669,888 字节 / 2,169.6 ms |
+| M3A 角色卡选择语义 | 已落地 | 标题区改为 Button，移除整卡手势/focusable；App Debug 构建通过 |
+| M3B 制作阻塞引导 | 已落地 | productionBlocker 区分未配声/未知说话人/无可制作；新增确定性测试 |
+| M4 EPUB 韧性 | 已落地（有已知限制） | 5 个真实 EPUB 导入通过；新增 linear=no、百分号 href、fragment、script 排除测试；彷徨因源文件无可识别章节标题，导入为 1 章 |
+| M0 真实长篇基线 | 已落地 | 4 个真实 TXT 与 5 个真实 EPUB 完成导入基线，最大样本 2.66 MB / 121 章 |
+
+M2 的 RSS 数字是测试进程内的 resident delta，包含书稿 Data 与段落结构，不等于单次索引的精确分配峰值；结论只对同机合成样本负责。
+
+### 10.1 真实语料基线（2026-10-20）
+
+同一台 Apple Silicon Mac，Debug 测试进程，记录整次导入（索引、分章、预览生成）的墙上时间与 RSS 增量；只记录元数据，不输出正文。
+
+| 样本（TXT） | 字节 | 章节 | 耗时 | RSS 增量 |
+| --- | ---: | ---: | ---: | ---: |
+| 红楼梦 | 2,663,455 | 121 | 507.2 ms | 26,787,840 |
+| 西游记 | 2,243,433 | 100 | 417.3 ms | 22,609,920 |
+| 儒林外史 | 853,632 | 48 | 104.6 ms | 8,568,832 |
+| 呐喊 | 281,093 | 15 | 70.4 ms | 7,061,504 |
+
+| 样本（EPUB） | 章节 | 耗时 |
+| --- | ---: | ---: |
+| 红楼梦 | 121 | 637.9 ms |
+| 西游记 | 101 | 570.6 ms |
+| 儒林外史 | 48 | 145.6 ms |
+| 呐喊 | 10 | 88.0 ms |
+| 彷徨 | 1 | 67.7 ms |
+
+彷徨的 EPUB 正文使用无 h1/h2、仅靠段落边距排版的标题，文本层没有可识别章节标记，因此整本成为 1 章；这是章节启发式的已知限制，不是解压或文本提取失败。真实样本只在本机运行，不提交仓库。
+
+### 10.2 当前批次验证
+
+- Audiobook 过滤测试：316 passed，4 skipped（合成/真实 benchmark 各 2 项，默认显式开启）。
+- 全量测试：1827 个 XCTest passed、4 skipped；659 个 Swift Testing passed。
+- scripts/macos_app_build.sh --configuration Debug：BUILD SUCCEEDED。
+- uv run python scripts/check_user_doc_contract.py：OK（39 paths，21 documented error codes，9 model aliases）。
+- python3 scripts/check_operator_docs.py：ok；git diff --check：clean。

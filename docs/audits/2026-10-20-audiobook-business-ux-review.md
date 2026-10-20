@@ -85,3 +85,15 @@ audience: "产品、交互与 macOS 开发者"
 - 听书：回退 `hasListenableChapter`、`startListening` 的目标选择与列表过滤即可；不涉及持久化。
 - 废纸篓：撤销状态只在内存，回退后恢复入口仍由废纸篓 sheet 提供。
 - 拖放：移除 `.dropDestination` 与遮罩即可，文件面板导入不受影响。
+
+## 7. 后续落地（同日，补充记录）
+
+第 5 节保留审查时点判断，以下为之后已完成的改动：
+
+- **资产级导出预检**：新增 `AudiobookExportAudit` / `AudiobookExportBlocker` 与 `AudiobookExportController.audit`，与 prepare 共用 `buildPlan`；面板逐章显示缺分析、待确认说话人、无当前音频、失效版本、资产缺失或空片段。prepare 行为保持同一门禁，现有导出测试通过。
+- **角色卡选择语义**：角色标题区改为 Button，移除整卡 `.onTapGesture`、`.focusable` 与自定义按键处理；卡内音色/试听/展开保持独立控件。
+- **制作阻塞引导**：新增 `ProductionBlocker`，区分未配声、未知说话人、目录编辑中、另一本制作中与无可制作章节，并在制作台显示唯一下一步。
+- **长篇索引内存**：`scalarByteOffsets` 由 `[Int64]` 收窄为 `[UInt32]`，2M 标量合成样本 RSS 增量约 59.6 MB → 51.6 MB；5M 样本约 117.7 MB。
+- **EPUB 结构韧性**：新增 linear=no、百分号编码 href、fragment 与 script 排除测试。
+
+真实语料基线已补齐：4 个 TXT 与 5 个 EPUB 完成导入，最大 2.66 MB / 121 章；彷徨 EPUB 因源文件没有可识别章节标题，导入为 1 章，属于章节启发式限制。未完成的只剩前台键盘/VoiceOver 走查（未获 UI 自动化授权）。第 5 节第 2 条“批量补齐未就绪章节”未采用；`makeConfirmedChapters` 已按 ready 章节批量制作，剩余问题改为阻塞引导。
