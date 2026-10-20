@@ -190,6 +190,9 @@ public struct AudiobookDependencies: Sendable {
     public var makeAnalysisClient: AnalysisClientFactory
     public var resolveAnalysisSnapshot: @MainActor @Sendable (Int) -> AudiobookAnalysisConfigSnapshot
     public var speechRenderer: any AudiobookSpeechRenderer
+    /// 音色输出验收（`POST /v1/speechrail/voices/{id}/quality-runs`）。只有需要
+    /// 就地「重新验收」失效音色时才用到；未注入时该修复动作不出现。
+    public var voiceValidationClient: (any SpeechRailVoiceQualityClient)?
     public var pronunciationClient: (any AudiobookPronunciationClient)?
     public var controlTransport: any SpeechRailControlTransport
     public var clock: any AudiobookClock
@@ -200,6 +203,7 @@ public struct AudiobookDependencies: Sendable {
         makeAnalysisClient: @escaping AnalysisClientFactory,
         resolveAnalysisSnapshot: @escaping @MainActor @Sendable (Int) -> AudiobookAnalysisConfigSnapshot,
         speechRenderer: any AudiobookSpeechRenderer,
+        voiceValidationClient: (any SpeechRailVoiceQualityClient)? = nil,
         pronunciationClient: (any AudiobookPronunciationClient)? = nil,
         controlTransport: any SpeechRailControlTransport = UnavailableControlTransport(),
         clock: any AudiobookClock = SystemAudiobookClock(),
@@ -209,6 +213,7 @@ public struct AudiobookDependencies: Sendable {
         self.makeAnalysisClient = makeAnalysisClient
         self.resolveAnalysisSnapshot = resolveAnalysisSnapshot
         self.speechRenderer = speechRenderer
+        self.voiceValidationClient = voiceValidationClient
         self.pronunciationClient = pronunciationClient
         self.controlTransport = controlTransport
         self.clock = clock

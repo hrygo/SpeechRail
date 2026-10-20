@@ -361,6 +361,8 @@ public final class AudiobookWorkflowModel {
     public let voiceCatalogModel: VoiceCatalogModel
     public private(set) var voiceCatalogRevision: String = ""
     public private(set) var castingPlanNeedsRefresh = false
+    public private(set) var isRevalidatingCastVoices = false
+    public private(set) var castVoiceValidationProgress: String?
     public var castingRecommendation: AudiobookCastingRecommendation? { pendingCastingPlan.map(AudiobookCastingRecommendation.init) }
     public private(set) var castingAudition: AudiobookCastingAudition?
     private var auditionPlaybackGeneration: UInt64 = 0
@@ -394,6 +396,13 @@ public final class AudiobookWorkflowModel {
         voiceCatalogRevision = snapshot.revision
         castingPlanNeedsRefresh = pendingCastingPlan?.voiceCatalogRevision != voiceCatalogRevision
         invalidateCastingAudition()
+    }
+
+    /// One entry point keeps the refresh flag truthful: a newly computed plan always
+    /// records the catalog it was built from, so a stale flag cannot disable apply.
+    private func setPendingCastingPlan(_ plan: AudiobookCastingPlan?) {
+        pendingCastingPlan = plan
+        castingPlanNeedsRefresh = plan.map { $0.voiceCatalogRevision != voiceCatalogRevision } ?? false
     }
 
     private func bootstrapIfPossible() {
@@ -860,8 +869,7 @@ public final class AudiobookWorkflowModel {
         guard let store else { return }
         invalidateCastingAudition()
         if let plan = pendingCastingPlan, plan.bookID != bookID {
-            pendingCastingPlan = nil
-            castingPlanNeedsRefresh = false
+            setPendingCastingPlan(nil)
         }
         chapterSelectionLoad.reset()
         readinessSelectionLoad.reset()
@@ -1239,10 +1247,40 @@ public final class AudiobookWorkflowModel {
             let plan = try await store.prepareCastingPlan(bookID: bookID, snapshot: snapshot, catalog: try await voiceCatalogModel.requireFreshSnapshot(), strategy: strategy)
             guard selectedBook?.id == bookID else { return }
             invalidateCastingAudition()
-            pendingCastingPlan = plan
-            castingPlanNeedsRefresh = false
+            setPendingCastingPlan(plan)
             errorMessage = plan.issues.first(where: \.isBlocking)?.nextAction
         } catch { errorMessage = error.localizedDescription }
+    }
+
+    /// Re-run the bounded output validation for voices whose evidence stopped covering
+    /// the current engine, then rebuild the plan. The chosen voice is never replaced.
+    public func revalidateCastVoices(_ voiceIDs: [String]) async {
+        guard !isRevalidatingCastVoices else { return }
+        guard let client = dependencies.voiceValidationClient, !voiceIDs.isEmpty else {
+            errorMessage = "当前服务未提供音色验收接口，请到「音色库」重新验收后再试。"
+            return
+        }
+        isRevalidatingCastVoices = true
+        defer { isRevalidatingCastVoices = false }
+        var failures = 0
+        for (index, voiceID) in voiceIDs.enumerated() {
+            castVoiceValidationProgress = "正在验收第 \(index + 1)/\(voiceIDs.count) 个音色…"
+            do {
+                _ = try await client.runVoiceQuality(id: voiceID, request: VoiceQualityRunRequest())
+            } catch is CancellationError {
+                castVoiceValidationProgress = nil
+                return
+            } catch {
+                failures += 1
+            }
+        }
+        castVoiceValidationProgress = nil
+        await previewRecommendedVoices()
+        if failures == 0 {
+            bannerMessage = "已重新验收 \(voiceIDs.count) 个音色。"
+        } else {
+            errorMessage = "\(failures) 个音色未通过验收，请到「音色库」查看原因。"
+        }
     }
 
     public func previewVoiceReplacement(_ bindings: [AudiobookVoiceBinding]) async {
@@ -1252,8 +1290,7 @@ public final class AudiobookWorkflowModel {
             let plan = try await store.prepareVoiceReplacement(bookID: bookID, bindings: bindings, snapshot: snapshot, catalog: try await voiceCatalogModel.requireFreshSnapshot())
             guard selectedBook?.id == bookID else { return }
             invalidateCastingAudition()
-            pendingCastingPlan = plan
-            castingPlanNeedsRefresh = false
+            setPendingCastingPlan(plan)
         } catch { errorMessage = error.localizedDescription }
     }
 
@@ -1261,7 +1298,7 @@ public final class AudiobookWorkflowModel {
         guard let bookID = selectedBook?.id, let castController else { return }
         do {
             try await castController.undoLastCastingChange(bookID: bookID)
-            pendingCastingPlan = nil; castingAudition = nil
+            setPendingCastingPlan(nil); castingAudition = nil
             await openBook(bookID)
             bannerMessage = "已恢复上次配声；已采用音频和历史候选均已保留。"
         } catch { errorMessage = error.localizedDescription }
@@ -1506,8 +1543,16 @@ public final class AudiobookWorkflowModel {
             let catalog = try await voiceCatalogModel.requireFreshSnapshot()
             let plan = try await store.prepareCastingPlan(bookID: targetID, snapshot: snapshot, catalog: catalog)
             guard plan.isApplicable else {
-                pendingCastingPlan = plan
+                setPendingCastingPlan(plan)
                 errorMessage = (plan.issues.first(where: \.isBlocking) ?? plan.issues.first(where: { $0.severity == .warning }))?.nextAction ?? "请先处理尚未完成的选角。"
+                return
+            }
+            // Re-pinning a locked voice to the current engine revision is the user's
+            // confirmation to make, not a silent side effect of "one-click".
+            let identityReconfirmationIDs = Set(plan.issues.filter { $0.code == .castRevisionChanged }.map(\.id))
+            if !identityReconfirmationIDs.isEmpty {
+                setPendingCastingPlan(plan)
+                errorMessage = "已有角色的声音没有变化，只是引擎制作版本更新；请确认后沿用原声音继续。"
                 return
             }
             let sharedVoiceConsentIDs = Set(
@@ -1519,7 +1564,7 @@ public final class AudiobookWorkflowModel {
                 ? plan.requiredAcknowledgements.union(sharedVoiceConsentIDs)
                 : []
             guard plan.requiredAcknowledgements.isSubset(of: acknowledgedIssueIDs) else {
-                pendingCastingPlan = plan
+                setPendingCastingPlan(plan)
                 errorMessage = "智能配声建议需要你检查并确认共享音色或同场角色风险后，才会写入。"
                 return
             }
@@ -1528,7 +1573,7 @@ public final class AudiobookWorkflowModel {
                 plan: plan,
                 acknowledgedIssueIDs: acknowledgedIssueIDs
             )
-            pendingCastingPlan = nil
+            setPendingCastingPlan(nil)
             errorMessage = nil
             if selectedBook?.id == targetID {
                 let loadedCharacters = try await store.characters(for: targetID)
@@ -1555,7 +1600,10 @@ public final class AudiobookWorkflowModel {
         guard let plan = pendingCastingPlan, let castController, selectedBook?.id == plan.bookID else { errorMessage = "请先重新推荐声音。"; return }
         do {
             try await castController.applyCastingPlan(bookID: plan.bookID, plan: plan, acknowledgedIssueIDs: acknowledgedIssueIDs)
-            pendingCastingPlan = nil
+            setPendingCastingPlan(nil)
+            if plan.issues.contains(where: { $0.code == .castRevisionChanged }) {
+                bannerMessage = "已按当前引擎版本沿用原声音；已采用的音频和历史候选均保留。"
+            }
             await openBook(plan.bookID)
         } catch { errorMessage = "配声方案已失效或仍需确认，请重新推荐。" }
     }

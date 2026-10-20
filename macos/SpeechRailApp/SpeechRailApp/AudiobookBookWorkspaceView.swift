@@ -1724,7 +1724,8 @@ public struct AudiobookBookWorkspaceView: View {
                     primaryCastingActionButton
                 }
 
-                if let plan = workflow.pendingCastingPlan, !plan.isApplicable {
+                if let plan = workflow.pendingCastingPlan,
+                   !plan.isApplicable || plan.rawIssues.contains(where: { !$0.isBlocking && $0.severity == .warning }) {
                     AudiobookCastingReview(workflow: workflow).id(plan.inputDigest)
                 }
             }
@@ -2298,13 +2299,23 @@ private struct AudiobookCastingReview: View {
                     Text("声音目录已变化，请重新推荐。")
                         .foregroundStyle(SpeechRailDesignTokens.Color.attention)
                 }
-                ForEach(plan.issues) { issue in
-                    if issue.isBlocking {
-                        Text(issue.nextAction).foregroundStyle(SpeechRailDesignTokens.Color.attention)
-                    } else if issue.severity == .warning {
-                        Toggle(issue.nextAction, isOn: Binding(get: { acknowledgements.contains(issue.id) }, set: {
-                            if $0 { acknowledgements.insert(issue.id) } else { acknowledgements.remove(issue.id) }
-                        })).toggleStyle(.checkbox)
+                if let progress = workflow.castVoiceValidationProgress {
+                    Text(progress).font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                }
+                // One row per distinct action: a stale cast fails on every role at once,
+                // so repeating the same sentence hides the single decision to make.
+                ForEach(Self.groups(plan.issues)) { group in
+                    if group.isBlocking {
+                        Text(group.label).foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                    } else if group.severity == .warning {
+                        Toggle(group.label, isOn: Binding(
+                            get: { group.issueIDs.allSatisfy(acknowledgements.contains) },
+                            set: { accepted in
+                                if accepted { acknowledgements.formUnion(group.issueIDs) }
+                                else { acknowledgements.subtract(group.issueIDs) }
+                            }
+                        )).toggleStyle(.checkbox)
                     }
                 }
                 DisclosureGroup("试听与分配说明") {
@@ -2344,6 +2355,14 @@ private struct AudiobookCastingReview: View {
                 HStack {
                     Button("重新推荐") { Task { await workflow.previewRecommendedVoices() } }
                         .speechRailButton(.secondary)
+                    if !plan.voicesNeedingValidation.isEmpty {
+                        Button(workflow.isRevalidatingCastVoices ? "正在验收…" : "重新验收这些音色") {
+                            Task { await workflow.revalidateCastVoices(plan.voicesNeedingValidation) }
+                        }
+                        .speechRailButton(.secondary)
+                        .disabled(workflow.isRevalidatingCastVoices)
+                        .help("按当前引擎重新跑一次输出验收；声音和已采用音频都不会改变")
+                    }
                     Spacer()
                     Button("应用配声方案") { Task { await workflow.applyPendingCastingPlan(acknowledgedIssueIDs: acknowledgements) } }
                         .speechRailButton(.primary)
@@ -2351,6 +2370,35 @@ private struct AudiobookCastingReview: View {
                 }
             }
             .padding(SpeechRailDesignTokens.Spacing.sm)
+        }
+    }
+
+    private struct IssueGroup: Identifiable {
+        let id: String
+        let issueIDs: [UUID]
+        let roleCount: Int
+        let isBlocking: Bool
+        let severity: AudiobookCastingIssue.Severity
+        let nextAction: String
+        var label: String { roleCount > 1 ? "\(roleCount) 个角色：\(nextAction)" : nextAction }
+    }
+
+    private static func groups(_ issues: [AudiobookCastingIssue]) -> [IssueGroup] {
+        struct Draft { var issueIDs: [UUID] = []; var roles: Set<UUID> = [] }
+        var order: [String] = []
+        var drafts: [String: Draft] = [:]
+        var firstIssue: [String: AudiobookCastingIssue] = [:]
+        for issue in issues {
+            let key = "\(issue.code.rawValue)|\(issue.isBlocking)|\(issue.severity.rawValue)|\(issue.nextAction)"
+            if drafts[key] == nil { order.append(key); drafts[key] = Draft(); firstIssue[key] = issue }
+            drafts[key]?.issueIDs.append(issue.id)
+            drafts[key]?.roles.formUnion(issue.roleIDs)
+        }
+        return order.compactMap { key in
+            guard let draft = drafts[key], let first = firstIssue[key] else { return nil }
+            return IssueGroup(id: key, issueIDs: draft.issueIDs,
+                roleCount: max(draft.roles.count, draft.issueIDs.count),
+                isBlocking: first.isBlocking, severity: first.severity, nextAction: first.nextAction)
         }
     }
 }
