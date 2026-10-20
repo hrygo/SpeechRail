@@ -850,6 +850,8 @@ public final class AudiobookWorkflowModel {
     public func openBook(_ bookID: UUID) async {
         cancelWorkspaceRefresh()
         exportAudit = nil
+        exportAuditRequestID = UUID()
+        isAuditingExport = false
         await openBookWorkspace(bookID, retryStaleInput: true)
     }
 
