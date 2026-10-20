@@ -1,6 +1,8 @@
 import CoreFoundation
+import AppKit
 import Darwin
 import Foundation
+import Testing
 import XCTest
 #if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
@@ -636,5 +638,64 @@ final class AudiobookImportTests: XCTestCase {
         XCTAssertEqual(preview.chapters.count, 2)
         XCTAssertTrue(preview.repeatedContentWarnings.isEmpty)
         XCTAssertTrue(preview.canConfirmImport)
+    }
+}
+
+/// Exercises the production AppKit view without a window, focus changes or pasteboard access.
+@MainActor
+struct AudiobookImportTextViewTests {
+    @Test func layoutSwitchesKeepOneReadOnlySelectableDocument() throws {
+        let body = String(repeating: "        河岸上的行人踏著晨霧前行，遠處的燈火還未熄滅，街道仍然十分\r\n安靜。他停下腳步，望向河面。\r\n\r\n", count: 140)
+        let bytes = Data(("第一章 晨行\r\n\r\n" + body + "第二章 夜行\r\n另一章的內容。").utf8)
+        let preview = try AudiobookTXTImporter.prepare(rawData: bytes)
+        let chapter = try #require(preview.chapters.first)
+        let prepared = try preview.textPreview(for: chapter.id)
+        let original = try preview.textPreview(for: chapter.id, originalLayout: true)
+        #expect(prepared != original)
+        #expect(original.unicodeScalars.count == AudiobookLimits.maxPreviewScalars)
+        let scrollView = AudiobookImportTextView(text: prepared).makeScrollView()
+        let viewport = NSSize(width: 420, height: SpeechRailDesignTokens.Layout.audiobookImportPreviewHeight)
+        scrollView.setFrameSize(viewport)
+        let document = try #require(scrollView.documentView as? NSTextView)
+        let layoutManager = try #require(document.textLayoutManager)
+        let contentManager = try #require(layoutManager.textContentManager)
+
+        for _ in 0..<20 {
+            for text in [original, prepared] {
+                AudiobookImportTextView(text: text).updateText(in: scrollView)
+                scrollView.layoutSubtreeIfNeeded()
+                layoutManager.ensureLayout(for: contentManager.documentRange)
+                #expect(scrollView.documentView === document)
+                #expect(scrollView.frame.size == viewport)
+                #expect(document.frame.width > 0)
+                #expect(document.frame.width <= scrollView.contentSize.width)
+                #expect(document.string == text)
+                #expect(document.isEditable == false)
+                #expect(document.isSelectable)
+                #expect(document.isHorizontallyResizable == false)
+                #expect(document.textContainer?.widthTracksTextView == true)
+            }
+        }
+        let lastChapter = try #require(preview.chapters.last)
+        let lastText = try preview.textPreview(for: lastChapter.id, originalLayout: true)
+        AudiobookImportTextView(text: lastText).updateText(in: scrollView)
+        #expect(document.string == lastText)
+        #expect(document.selectedRange() == NSRange(location: 0, length: 0))
+        #expect(preview.originalBytes == bytes)
+        #expect(preview.canonicalUTF8 == bytes)
+    }
+
+    @Test func unrelatedUpdatesPreserveSelectionAndEmptyContentClearsIt() throws {
+        let text = "可以选择和复制的正文。"
+        let preview = AudiobookImportTextView(text: text)
+        let scrollView = preview.makeScrollView()
+        let document = try #require(scrollView.documentView as? NSTextView)
+        let selection = NSRange(location: 2, length: 4)
+        document.setSelectedRange(selection)
+        preview.updateText(in: scrollView)
+        #expect(document.selectedRange() == selection)
+        AudiobookImportTextView(text: "").updateText(in: scrollView)
+        #expect(document.string.isEmpty)
+        #expect(document.selectedRange() == NSRange(location: 0, length: 0))
     }
 }

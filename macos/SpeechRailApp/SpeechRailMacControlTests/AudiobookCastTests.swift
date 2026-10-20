@@ -567,6 +567,145 @@ final class AudiobookCastTests: XCTestCase {
         XCTAssertFalse(plan.isApplicable)
     }
 
+    func testEngineRevisionChangeReconfirmsLockedVoiceWithoutReSelection() {
+        let book = UUID(), (roles, anns) = p0Roles(bookID: book, count: 2)
+        let voices = ["v0", "v1"].map { makeTestSafeVoice(id: $0, name: $0) }
+        let stale = Dictionary(uniqueKeysWithValues: roles.indices.map { index -> (UUID, AudiobookVoiceBinding) in
+            let role = roles[index], voice = voices[index]
+            return (role.id, AudiobookVoiceBinding(roleID: role.id, voiceID: voice.id,
+                voiceRevision: voice.voiceRevision, modelRevision: String(repeating: "b", count: 40)))
+        })
+        let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: anns,
+            snapshot: p0Snapshot(voices), catalog: .init(), bookID: book, existingBindings: stale)
+        XCTAssertFalse(plan.issues.contains { $0.code == .voiceIdentityUnknown }, "同一声音只换了引擎版本，不该要求重选")
+        let reconfirmation = try? XCTUnwrap(plan.issues.first { $0.code == .castRevisionChanged })
+        XCTAssertEqual(reconfirmation?.isBlocking, false)
+        XCTAssertEqual(reconfirmation?.severity, .warning)
+        XCTAssertEqual(Set(reconfirmation?.roleIDs ?? []), Set(roles.map(\.id)))
+        XCTAssertTrue(plan.isApplicable)
+        XCTAssertEqual(plan.affectedRoleIDs, Set(roles.map(\.id)), "沿用原声音也要落库，才能固定新的引擎版本")
+        for index in roles.indices {
+            let role = roles[index], voice = voices[index]
+            XCTAssertEqual(plan.proposedBindings[role.id]?.voiceID, voice.id, "不能替用户换声音")
+            XCTAssertEqual(plan.proposedBindings[role.id]?.modelRevision, String(repeating: "a", count: 40))
+            XCTAssertEqual(plan.proposedBindings[role.id]?.voiceRevision, voice.voiceRevision)
+        }
+    }
+
+    func testChangedVoiceRevisionStillNeedsReSelection() {
+        let book = UUID(), (roles, anns) = p0Roles(bookID: book, count: 2)
+        let voices = ["v0", "v1"].map { makeTestSafeVoice(id: $0, name: $0) }
+        let stale = Dictionary(uniqueKeysWithValues: roles.indices.map { index -> (UUID, AudiobookVoiceBinding) in
+            let role = roles[index], voice = voices[index]
+            return (role.id, AudiobookVoiceBinding(roleID: role.id, voiceID: voice.id,
+                voiceRevision: "vr_ffffffffffffffffffffffffffffffff", modelRevision: String(repeating: "b", count: 40)))
+        })
+        let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: anns,
+            snapshot: p0Snapshot(voices), catalog: .init(), bookID: book, existingBindings: stale)
+        XCTAssertTrue(plan.issues.contains { $0.code == .voiceIdentityUnknown && $0.isBlocking })
+        XCTAssertFalse(plan.issues.contains { $0.code == .castRevisionChanged && $0.isBlocking == false })
+        XCTAssertFalse(plan.isApplicable)
+        XCTAssertEqual(plan.proposedBindings, stale, "声音本身变了，只能由用户重新选")
+    }
+
+    func testEngineReconfirmationCannotRestoreVoiceOutsideBookScope() {
+        let book = UUID(), (roles, anns) = p0Roles(bookID: book, count: 1)
+        let voice = makeTestSafeVoice(id: "old", name: "old")
+        let other = makeTestSafeVoice(id: "available", name: "available")
+        let stale = [roles[0].id: AudiobookVoiceBinding(roleID: roles[0].id, voiceID: voice.id,
+            voiceRevision: voice.voiceRevision, modelRevision: String(repeating: "b", count: 40))]
+        let catalog = VoiceCatalogSnapshot(state: .init(metadataByVoiceID: [
+            voice.id: .init(voiceID: voice.id, visibilityScope: .bookExclusive, originBookID: UUID())
+        ]))
+        let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: anns,
+            snapshot: p0Snapshot([voice, other]), catalog: catalog, bookID: book, existingBindings: stale)
+        XCTAssertTrue(plan.issues.contains { $0.code == .voiceScopeUnavailable && $0.isBlocking })
+        XCTAssertFalse(plan.isApplicable)
+        XCTAssertEqual(plan.proposedBindings, stale)
+        XCTAssertFalse(plan.issues.contains { $0.code == .castRevisionChanged })
+    }
+
+    func testMissingVoiceStillNeedsReSelection() {
+        let book = UUID(), (roles, anns) = p0Roles(bookID: book, count: 2)
+        let voices = ["v0", "v1"].map { makeTestSafeVoice(id: $0, name: $0) }
+        let stale = Dictionary(uniqueKeysWithValues: roles.indices.map { index -> (UUID, AudiobookVoiceBinding) in
+            let role = roles[index], voice = voices[index]
+            return (role.id, AudiobookVoiceBinding(roleID: role.id, voiceID: voice.id,
+                voiceRevision: voice.voiceRevision, modelRevision: String(repeating: "a", count: 40)))
+        })
+        let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: anns,
+            snapshot: p0Snapshot([voices[0]]), catalog: .init(), bookID: book, existingBindings: stale)
+        XCTAssertTrue(plan.issues.contains { $0.code == .voiceIdentityUnknown && $0.isBlocking })
+        XCTAssertFalse(plan.issues.contains { $0.code == .castRevisionChanged })
+        XCTAssertFalse(plan.isApplicable)
+    }
+
+    /// 引擎升级让输出验收失效、但声音与可见范围都没变：可行修复是重新验收，
+    /// 所以不能报成「重选声音」，也不能在规划阶段改绑定。
+    func testStaleValidationKeepsVoiceAndAsksForRevalidation() {
+        let book = UUID(), (roles, anns) = p0Roles(bookID: book, count: 2)
+        let voices = ["v0", "v1"].map { makeTestSafeVoice(id: $0, name: $0, productionReady: false) }
+        let bounds = Dictionary(uniqueKeysWithValues: roles.indices.map { index -> (UUID, AudiobookVoiceBinding) in
+            let role = roles[index], voice = voices[index]
+            return (role.id, AudiobookVoiceBinding(roleID: role.id, voiceID: voice.id,
+                voiceRevision: voice.voiceRevision, modelRevision: String(repeating: "a", count: 40)))
+        })
+        let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: anns,
+            snapshot: p0Snapshot(voices), catalog: .init(), bookID: book, existingBindings: bounds)
+        XCTAssertFalse(plan.issues.contains { $0.code == .voiceIdentityUnknown }, "声音没变，不该要求重选")
+        XCTAssertTrue(plan.issues.contains { $0.code == .voiceNotProductionReady && $0.isBlocking })
+        XCTAssertEqual(plan.voicesNeedingValidation, ["v0", "v1"])
+        XCTAssertFalse(plan.isApplicable, "验收失效期间不能进入制作")
+        XCTAssertEqual(plan.proposedBindings, bounds, "规划阶段不能改绑定")
+    }
+
+    /// 声音还在、版本也没变，但已归档或不再属于本书：只能重选，重新验收没有意义。
+    func testArchivedBoundVoiceAsksForReSelectionNotRevalidation() {
+        let book = UUID(), (roles, anns) = p0Roles(bookID: book, count: 1)
+        let voice = makeTestSafeVoice(id: "v0", name: "v0")
+        let bound = [roles[0].id: AudiobookVoiceBinding(roleID: roles[0].id, voiceID: voice.id,
+            voiceRevision: voice.voiceRevision, modelRevision: String(repeating: "a", count: 40))]
+        let otherBook = UUID()
+        let stored = VoiceCatalogStore.PersistedState(metadataByVoiceID: [
+            voice.id: VoiceAssetMetadata(voiceID: voice.id, visibilityScope: .bookExclusive,
+                lifecycleState: .active, originBookID: otherBook)
+        ])
+        let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: anns,
+            snapshot: p0Snapshot([voice]), catalog: VoiceCatalogSnapshot(state: stored),
+            bookID: book, existingBindings: bound)
+        XCTAssertTrue(plan.issues.contains { $0.code == .voiceScopeUnavailable && $0.isBlocking })
+        XCTAssertTrue(plan.voicesNeedingValidation.isEmpty)
+        XCTAssertFalse(plan.isApplicable)
+    }
+
+    func testUnvalidatedVoiceWithChangedRevisionStillNeedsReSelection() {
+        let book = UUID(), (roles, anns) = p0Roles(bookID: book, count: 1)
+        let voice = makeTestSafeVoice(id: "v0", name: "v0", productionReady: false)
+        let stale = [roles[0].id: AudiobookVoiceBinding(roleID: roles[0].id, voiceID: voice.id,
+            voiceRevision: "vr_ffffffffffffffffffffffffffffffff", modelRevision: String(repeating: "a", count: 40))]
+        let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: anns,
+            snapshot: p0Snapshot([voice]), catalog: .init(), bookID: book, existingBindings: stale)
+        XCTAssertTrue(plan.issues.contains { $0.code == .voiceIdentityUnknown && $0.isBlocking })
+        XCTAssertTrue(plan.voicesNeedingValidation.isEmpty, "声音本身变了，重新验收旧记录没有意义")
+        XCTAssertFalse(plan.isApplicable)
+    }
+
+    func testReconfirmationCannotBypassUnsupportedRenderParameters() {
+        let book = UUID(), (roles, anns) = p0Roles(bookID: book, count: 2)
+        let voices = ["v0", "v1"].map { makeTestSafeVoice(id: $0, name: $0) }
+        let stale = Dictionary(uniqueKeysWithValues: roles.indices.map { index -> (UUID, AudiobookVoiceBinding) in
+            let role = roles[index], voice = voices[index]
+            return (role.id, AudiobookVoiceBinding(roleID: role.id, voiceID: voice.id,
+                voiceRevision: voice.voiceRevision, modelRevision: String(repeating: "b", count: 40),
+                allowedSpeed: 9))
+        })
+        let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: anns,
+            snapshot: p0Snapshot(voices), catalog: .init(), bookID: book, existingBindings: stale)
+        XCTAssertTrue(plan.issues.contains { $0.code == .voiceIdentityUnknown && $0.isBlocking })
+        XCTAssertFalse(plan.issues.contains { $0.code == .castRevisionChanged })
+        XCTAssertFalse(plan.isApplicable)
+    }
+
     func testUnprovenSilentLockedRoleStillReservesItsVoice() {
         let book = UUID(), (roles, anns) = p0Roles(bookID: book, count: 3)
         let voices = ["v0", "v1"].map { makeTestSafeVoice(id: $0, name: $0) }
@@ -2196,7 +2335,8 @@ final class AudiobookCastTests: XCTestCase {
         name: String,
         mode: String = "system",
         aliases: [String] = [],
-        styleTags: [String] = []
+        styleTags: [String] = [],
+        productionReady: Bool = true
     ) -> SafeVoiceEntry {
         let desc = SafeVoiceDescriptor(
             voiceMode: mode,
@@ -2226,7 +2366,7 @@ final class AudiobookCastTests: XCTestCase {
             model: model,
             descriptors: desc,
             operations: ["http_speech": JSONValue(.object(["parameters": JSONValue(.object(["speed": JSONValue(.object(["status": JSONValue(.string("supported")), "minimum": JSONValue(.number(0.25)), "maximum": JSONValue(.number(4))]))]))]))],
-            productionReady: true
+            productionReady: productionReady
         )
     }
 

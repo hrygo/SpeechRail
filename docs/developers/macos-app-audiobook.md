@@ -2,7 +2,7 @@
 title: "SpeechRail macOS App 有声书工坊开发说明"
 status: active
 audience: "macOS App 开发者、架构与测试工程师"
-version: "1.9.1"
+version: "1.9.2"
 date: 2026-10-20
 ---
 
@@ -42,9 +42,10 @@ date: 2026-10-20
 
 `AudiobookImportPreview.repeatedContentWarnings` 按完整章节的规整文本摘要发现重复组，不因标题相同就判断正文重复。重复组保留所有章节与原文，`canConfirmImport` 在用户显式确认前为 false；Workflow 导入入口和确认按钮共同执行此门禁。确认仅作用于本次预览，不修改持久化格式。真实语料的可选验证入口见 [测试与验收](testing-acceptance.md#有声书外置小说语料回归)。
 
-### 1.2 SwiftUI 视图层（仅在 `SpeechRailApp` target 编译）
+### 1.2 SwiftUI 视图层（页面在 App target 编译，独立组件按需进入单测）
 
 - **`AudiobookWorkshopView.swift`**：顶层容器与页面头部动作、状态结论横幅、模式切换（书架 / 制作工作台 / 沉浸收听）及导入面板。
+- **`AudiobookImportTextView.swift`**：导入核对正文使用 `NSViewRepresentable` 承载只读、可选择的 TextKit 2 `NSTextView` 与 `NSScrollView`；外层提供固定视口，正文高度由 AppKit 管理，不参与 SwiftUI 弹窗尺寸协商。原始/整理排版和章节切换只更新同一个文本控件；正文未变时保留选区与滚动位置，变更时回到开头。输入沿用 `maxPreviewScalars` 上限，不改原始字节、来源区间或章节划分。该控件同时进入 SwiftPM 与 Xcode 单测目标，支持无窗口回归；离屏测试不代表桌面滚动、键盘或复制交互已经验收。
 - **`AudiobookBookShelfView.swift`**：书架网格/列表、引导空态、每本书的进度胶囊与直达动作（「继续制作」「收听」「导出」）；支持把 TXT/EPUB 直接拖入书架，并在移入废纸篓后提供一次性撤销横幅。
 - **`AudiobookBookWorkspaceView.swift`**：左侧章节列表与「整理章节」次级菜单、中央「准备与角色」「制作与返修」两页签、人物与声音面板，以及片段重录、候选对比和显式采用区域。
 - **`AudiobookListeningView.swift`**：收听视图，含章节目录、正文与「返修此段」导航、传输控制条。

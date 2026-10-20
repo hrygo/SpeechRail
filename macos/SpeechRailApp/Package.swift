@@ -239,6 +239,7 @@ let package = Package(
                 "VoiceCatalogModel.swift",
                 "AudiobookSourceIndex.swift",
                 "AudiobookTXTImporter.swift",
+                "AudiobookImportTextView.swift",
                 "AudiobookEPUBImporter.swift",
                 "AudiobookChapterPlanner.swift",
                 "AudiobookStoreSchema.swift",
