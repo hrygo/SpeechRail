@@ -339,13 +339,13 @@ struct AudiobookImportPreviewSheet: View {
                                 .font(SpeechRailDesignTokens.Typography.sectionTitle)
                             Toggle("查看原始排版", isOn: $showsOriginalLayout)
                                 .toggleStyle(.checkbox)
-                            ScrollView {
-                                Text((try? preview.textPreview(for: selectedChapterID, originalLayout: showsOriginalLayout)) ?? preview.previewText)
-                                    .font(SpeechRailDesignTokens.Typography.body)
-                                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .textSelection(.enabled)
-                            }
+                            AudiobookImportTextView(
+                                text: (try? preview.textPreview(
+                                    for: selectedChapterID,
+                                    originalLayout: showsOriginalLayout
+                                )) ?? preview.previewText
+                            )
+                            .frame(maxWidth: .infinity)
                             .frame(height: SpeechRailDesignTokens.Layout.audiobookImportPreviewHeight)
                         }
                         .padding(SpeechRailDesignTokens.Spacing.md)
