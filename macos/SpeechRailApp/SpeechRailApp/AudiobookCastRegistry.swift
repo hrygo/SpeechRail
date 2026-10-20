@@ -708,7 +708,8 @@ public enum AudiobookCastRegistry {
         for role in sortedRoles {
             guard let binding = existingBindings[role.id] else { continue }
             if !eligibleIDs.contains(binding.voiceID) || (try? validateRenderBinding(binding, snapshot: snapshot)) == nil {
-                if let reconfirmed = reconfirmedBinding(binding, snapshot: snapshot) {
+                if eligibleIDs.contains(binding.voiceID),
+                   let reconfirmed = reconfirmedBinding(binding, snapshot: snapshot) {
                     bindings[role.id] = reconfirmed
                     reconfirmedRoleIDs.insert(role.id)
                 } else if bindingVoiceOutOfScope(binding, snapshot: snapshot, catalog: catalog, bookID: bookID) {

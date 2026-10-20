@@ -419,7 +419,7 @@ final class AudiobookWorkflowTests: XCTestCase {
         let blocked = try XCTUnwrap(workflow.pendingCastingPlan)
         XCTAssertFalse(blocked.isApplicable)
         XCTAssertEqual(blocked.voicesNeedingValidation, ["v-narrator"])
-        XCTAssertFalse(blocked.issues.contains { $0.code == .voiceIdentityUnknown },
+        XCTAssertFalse(blocked.issues.contains { $0.code == .voiceIdentityUnknown && $0.roleIDs.contains(role.id) },
                        "声音没变，只是验收失效，不能说成身份未知")
         XCTAssertEqual(blocked.proposedBindings, workflow.voiceBindings, "规划阶段不能改绑定")
 

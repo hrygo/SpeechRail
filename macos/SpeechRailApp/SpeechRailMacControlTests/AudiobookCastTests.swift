@@ -608,6 +608,23 @@ final class AudiobookCastTests: XCTestCase {
         XCTAssertEqual(plan.proposedBindings, stale, "声音本身变了，只能由用户重新选")
     }
 
+    func testEngineReconfirmationCannotRestoreVoiceOutsideBookScope() {
+        let book = UUID(), (roles, anns) = p0Roles(bookID: book, count: 1)
+        let voice = makeTestSafeVoice(id: "old", name: "old")
+        let other = makeTestSafeVoice(id: "available", name: "available")
+        let stale = [roles[0].id: AudiobookVoiceBinding(roleID: roles[0].id, voiceID: voice.id,
+            voiceRevision: voice.voiceRevision, modelRevision: String(repeating: "b", count: 40))]
+        let catalog = VoiceCatalogSnapshot(state: .init(metadataByVoiceID: [
+            voice.id: .init(voiceID: voice.id, visibilityScope: .bookExclusive, originBookID: UUID())
+        ]))
+        let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: anns,
+            snapshot: p0Snapshot([voice, other]), catalog: catalog, bookID: book, existingBindings: stale)
+        XCTAssertTrue(plan.issues.contains { $0.code == .voiceScopeUnavailable && $0.isBlocking })
+        XCTAssertFalse(plan.isApplicable)
+        XCTAssertEqual(plan.proposedBindings, stale)
+        XCTAssertFalse(plan.issues.contains { $0.code == .castRevisionChanged })
+    }
+
     func testMissingVoiceStillNeedsReSelection() {
         let book = UUID(), (roles, anns) = p0Roles(bookID: book, count: 2)
         let voices = ["v0", "v1"].map { makeTestSafeVoice(id: $0, name: $0) }

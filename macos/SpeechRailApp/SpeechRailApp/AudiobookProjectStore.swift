@@ -1014,7 +1014,13 @@ public actor AudiobookProjectStore {
                 let role = updated[index]
                 guard let policy = plan.proposedPolicies[role.id] else { throw AudiobookCastError.invalidCastingPlan(reason: "missing_policy") }
                 if role.voicePolicy?.isLocked == true, !plan.allowsLockedReplacement, plan.proposedBindings[role.id] != existing[role.id] {
-                    throw AudiobookCastError.invalidCastingPlan(reason: "locked_binding_changed")
+                    // Applying an acknowledged engine re-pin retains the locked
+                    // voice and every parameter. No other replacement is allowed.
+                    guard let previous = existing[role.id],
+                          let reconfirmed = AudiobookCastRegistry.reconfirmedBinding(previous, snapshot: plan.snapshot),
+                          plan.proposedBindings[role.id] == reconfirmed else {
+                        throw AudiobookCastError.invalidCastingPlan(reason: "locked_binding_changed")
+                    }
                 }
                 if role.isNarrator || role.voicePolicy?.sharingPolicy == .exclusive && !plan.allowsLockedReplacement {
                     guard policy.sharingPolicy != .sharedMinor else { throw AudiobookCastError.invalidCastingPlan(reason: "exclusive_policy_changed") }
