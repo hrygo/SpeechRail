@@ -333,6 +333,6 @@ final class AudiobookPronunciationTests: XCTestCase {
         let versionStatement = try XCTUnwrap(statement)
         defer { sqlite3_finalize(versionStatement) }
         XCTAssertEqual(sqlite3_step(versionStatement), SQLITE_ROW)
-        XCTAssertEqual(sqlite3_column_int(versionStatement, 0), 5)
+        XCTAssertEqual(sqlite3_column_int(versionStatement, 0), AudiobookStoreSchema.currentUserVersion)
     }
 }

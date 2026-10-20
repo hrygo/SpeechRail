@@ -1,7 +1,113 @@
 import Foundation
+import SQLite3
 
 public enum AudiobookStoreSchema {
-    public static let currentUserVersion: Int32 = 5
+    public static let currentUserVersion: Int32 = 6
+
+    /// Connection pragmas must run outside the transaction that creates or migrates tables.
+    static var tableDefinitionsSQL: String {
+        createTablesSQL.split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("PRAGMA ") }
+            .joined(separator: "\n")
+    }
+
+    static func requireEmptyUnversionedDatabase(_ db: OpaquePointer) throws {
+        guard try tableNames(db).isEmpty else {
+            throw AudiobookStoreError.schemaMismatch("unversioned_database")
+        }
+    }
+
+    /// Derive the reference from the canonical DDL so new fields cannot be omitted from this guard.
+    /// ALTER TABLE appends columns, so compare columns by name rather than physical position.
+    static func validate(_ db: OpaquePointer) throws {
+        var raw: OpaquePointer?
+        guard sqlite3_open(":memory:", &raw) == SQLITE_OK, let reference = raw else {
+            if let raw { sqlite3_close_v2(raw) }
+            throw AudiobookStoreError.storageUnavailable("schema_reference_open_failed")
+        }
+        defer { sqlite3_close_v2(reference) }
+        guard sqlite3_exec(reference, createTablesSQL, nil, nil, nil) == SQLITE_OK else {
+            throw AudiobookStoreError.storageUnavailable("schema_reference_create_failed")
+        }
+        let expectedTables = try tableNames(reference)
+        guard try tableNames(db) == expectedTables else {
+            throw AudiobookStoreError.schemaMismatch("tables")
+        }
+        for table in expectedTables.sorted() {
+            let expectedColumns = try columns(reference, table: table)
+            let actualColumns = try columns(db, table: table)
+            for column in Set(expectedColumns.keys).union(actualColumns.keys).sorted() {
+                guard expectedColumns[column] == actualColumns[column] else {
+                    throw AudiobookStoreError.schemaMismatch("\(table).\(column)")
+                }
+            }
+            guard try foreignKeys(db, table: table) == foreignKeys(reference, table: table) else {
+                throw AudiobookStoreError.schemaMismatch("\(table).foreign_keys")
+            }
+            guard try indexes(db, table: table) == indexes(reference, table: table) else {
+                throw AudiobookStoreError.schemaMismatch("\(table).indexes")
+            }
+        }
+    }
+
+    private static func tableNames(_ db: OpaquePointer) throws -> Set<String> {
+        Set(try rows(db, sql: "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%';")
+            .compactMap { $0.first ?? nil })
+    }
+
+    private static func columns(_ db: OpaquePointer, table: String) throws -> [String: [String?]] {
+        var result: [String: [String?]] = [:]
+        for row in try rows(db, sql: "PRAGMA table_info(\(quoted(table)));") {
+            guard let name = row[1] else { throw AudiobookStoreError.schemaMismatch("column_name") }
+            result[name] = [row[2]?.uppercased(), row[3], row[4], row[5]]
+        }
+        return result
+    }
+
+    private static func foreignKeys(_ db: OpaquePointer, table: String) throws -> Set<[[String?]]> {
+        let groups = Dictionary(grouping: try rows(db, sql: "PRAGMA foreign_key_list(\(quoted(table)));")) { $0[0] }
+        return Set(groups.values.map { group in
+            group.sorted { (Int($0[1] ?? "") ?? 0) < (Int($1[1] ?? "") ?? 0) }
+                .map { Array($0.dropFirst()) }
+        })
+    }
+
+    private static func indexes(_ db: OpaquePointer, table: String) throws -> Set<[String?]> {
+        var result: Set<[String?]> = []
+        for row in try rows(db, sql: "PRAGMA index_list(\(quoted(table)));") {
+            guard let name = row[1] else { throw AudiobookStoreError.schemaMismatch("index_name") }
+            let fields = try rows(db, sql: "PRAGMA index_xinfo(\(quoted(name)));")
+                .filter { $0[5] == "1" }
+                .flatMap { [$0[2], $0[3], $0[4]] }
+            // SQLite chooses autoindex names; their constraints and ordered key columns are authoritative.
+            result.insert([row[3] == "c" ? name : nil, row[2], row[3], row[4]] + fields)
+        }
+        return result
+    }
+
+    private static func quoted(_ identifier: String) -> String {
+        "\"" + identifier.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+    }
+
+    private static func rows(_ db: OpaquePointer, sql: String) throws -> [[String?]] {
+        var raw: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &raw, nil) == SQLITE_OK, let statement = raw else {
+            if let raw { sqlite3_finalize(raw) }
+            throw AudiobookStoreError.storageUnavailable("schema_inspection_failed")
+        }
+        defer { sqlite3_finalize(statement) }
+        var result: [[String?]] = []
+        while true {
+            let step = sqlite3_step(statement)
+            if step == SQLITE_DONE { return result }
+            guard step == SQLITE_ROW else {
+                throw AudiobookStoreError.storageUnavailable("schema_inspection_failed")
+            }
+            result.append((0..<sqlite3_column_count(statement)).map { index in
+                sqlite3_column_text(statement, index).map { String(cString: $0) }
+            })
+        }
+    }
 
     public static let registrationIntentsSQL: String = """
     CREATE TABLE voice_registration_intents (

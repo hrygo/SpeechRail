@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.57"
-date: 2026-10-18
+version: "3.3.58"
+date: 2026-10-20
 ---
 
 # SpeechRail 测试与验收
@@ -819,5 +819,16 @@ swift test --package-path macos/SpeechRailApp --filter ASRSessionReplaySamplerHa
 
 
 ## 有声书工坊专项测试与验收交接
+
+### 数据库结构与升级门禁
+
+有声书作品库结构合同位于 `contracts/audiobook-schema/v<user_version>.sql`。修改建库表、列、约束或索引时必须递增 `AudiobookStoreSchema.currentUserVersion`、新增相应冻结快照和迁移；已存在的历史快照不可修改或删除。Quality Gates 执行 `scripts/check_audiobook_schema.py`，按 Git 基线核对结构变化和版本，不允许同时改写快照来复用旧版本。
+
+`AudiobookStoreTests` 从冻结的历史 DDL 建立合成库，覆盖缺列的 schema 5、部分已补列、正常升级、重复打开、事务失败回滚、当前版本结构漂移、无版本的非空库和更高版本拒绝。验收须证明已有书籍、章节与音频资产身份不变，升级后可导入并持久化新字段；不能用“最新建库 SQL + 修改版本号”替代历史升级证据。所有测试只访问临时库，不修改本机作品库。
+
+```bash
+python3 scripts/check_audiobook_schema.py --base-ref origin/main
+swift test --package-path macos/SpeechRailApp --filter AudiobookStoreTests
+```
 
 有声书工坊（T01–T14）的 Python 媒体导出测试、13 个 SwiftPM 模块测试套件、Xcode 构建检查与桌面真机验收清单见 [有声书工坊测试与验收交接手册](audiobook-workshop-testing-handover.md)。

@@ -1490,7 +1490,7 @@
 			baseConfigurationReference = A40000000000000000000019 /* Debug.xcconfig */;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Entitlements/SpeechRailApp.entitlements;
-				CURRENT_PROJECT_VERSION = 60;
+				CURRENT_PROJECT_VERSION = 61;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = SpeechRailApp/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = SpeechRail;
@@ -1513,7 +1513,7 @@
 			baseConfigurationReference = A40000000000000000000020 /* Release.xcconfig */;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Entitlements/SpeechRailApp.entitlements;
-				CURRENT_PROJECT_VERSION = 60;
+				CURRENT_PROJECT_VERSION = 61;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = SpeechRailApp/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = SpeechRail;
@@ -1536,7 +1536,7 @@
 			baseConfigurationReference = A40000000000000000000021 /* Distribution.xcconfig */;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Entitlements/SpeechRailApp.entitlements;
-				CURRENT_PROJECT_VERSION = 60;
+				CURRENT_PROJECT_VERSION = 61;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = SpeechRailApp/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = SpeechRail;

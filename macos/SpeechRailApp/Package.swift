@@ -295,7 +295,8 @@ let package = Package(
                 "SpeechRailControlAgentCore",
                 "SpeechRailAppSupport",
             ],
-            path: "SpeechRailMacControlTests"
+            path: "SpeechRailMacControlTests",
+            resources: [.copy("Fixtures")]
         ),
     ]
 )

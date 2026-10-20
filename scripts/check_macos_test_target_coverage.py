@@ -25,6 +25,7 @@ a green run of this script is not evidence that `xcodebuild test` compiles.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -288,7 +289,7 @@ def find_drift(
     # false, so it fails loudly instead of quietly under-reporting.
     body = _spm_test_target_body() if package_body is None else package_body
     for narrowing in ("exclude:", "sources:"):
-        if narrowing in body:
+        if re.search(rf"\b{narrowing[:-1]}\s*:", body):
             problems.append(
                 f"{PACKAGE_MANIFEST} narrows the {TEST_TARGET_NAME} target with "
                 f"`{narrowing}`; this checker compares the whole directory and "

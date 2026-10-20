@@ -5,6 +5,7 @@ import SpeechRailControlKit
 public enum AudiobookStoreError: Error, Equatable, Sendable, LocalizedError {
     case storageUnavailable(String)
     case unsupportedSchemaVersion(found: Int32, supported: Int32)
+    case schemaMismatch(String)
     case statementFailed(String)
     case bookNotFound(UUID)
     case chapterNotFound(UUID)
@@ -22,6 +23,8 @@ public enum AudiobookStoreError: Error, Equatable, Sendable, LocalizedError {
             "有声书作品库不可用：\(detail)"
         case let .unsupportedSchemaVersion(found, supported):
             "有声书数据库版本（v\(found)）高于当前应用支持的版本（v\(supported)），为保护您的数据已拒绝降级打开。"
+        case let .schemaMismatch(detail):
+            "作品库结构校验未通过，已停止打开以保护数据：\(detail)"
         case let .statementFailed(detail):
             "有声书数据库操作失败：\(detail)"
         case .bookNotFound:
@@ -148,6 +151,9 @@ public actor AudiobookProjectStore {
         }
 
         do {
+            if existingVersion == 0 {
+                try AudiobookStoreSchema.requireEmptyUnversionedDatabase(pointer)
+            }
             if existingVersion == 1 {
                 try Self.migrateNullableVoiceRevision(pointer, root: standardizedRoot)
             }
@@ -165,14 +171,6 @@ public actor AudiobookProjectStore {
             }
             if existingVersion > 0 && existingVersion < 5 {
                 try Self.backupDatabase(pointer, root: standardizedRoot, version: 4)
-                let addSkipColumnSQL = Self.tableExists(pointer, table: "chapters")
-                    && !Self.tableHasColumn(pointer, table: "chapters", column: "is_skipped")
-                    ? "ALTER TABLE chapters ADD COLUMN is_skipped INTEGER NOT NULL DEFAULT 0;"
-                    : ""
-                let addAnalysisFailureSQL = Self.tableExists(pointer, table: "books")
-                    && !Self.tableHasColumn(pointer, table: "books", column: "analysis_failure_json")
-                    ? "ALTER TABLE books ADD COLUMN analysis_failure_json TEXT;"
-                    : ""
                 try Self.execSQL(pointer, "BEGIN IMMEDIATE;")
                 do {
                     try Self.execSQL(pointer, """
@@ -184,15 +182,34 @@ public actor AudiobookProjectStore {
                             updated_at REAL NOT NULL,
                             FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
                         );
-                        \(addSkipColumnSQL)
-                        \(addAnalysisFailureSQL)
                         PRAGMA user_version = 5; COMMIT;
                         """)
                 } catch { try? Self.execSQL(pointer, "ROLLBACK;"); throw error }
             }
-            try Self.execSQL(pointer, AudiobookStoreSchema.createTablesSQL)
-            if existingVersion == 0 {
-                try Self.execSQL(pointer, "PRAGMA user_version = \(AudiobookStoreSchema.currentUserVersion);")
+            if existingVersion < 6 {
+                if existingVersion > 0 {
+                    try Self.backupDatabase(pointer, root: standardizedRoot, version: 5)
+                }
+                try Self.execSQL(pointer, "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;")
+                try Self.execSQL(pointer, "BEGIN IMMEDIATE;")
+                do {
+                    for (table, column, definition) in [
+                        ("chapters", "is_skipped", "INTEGER NOT NULL DEFAULT 0"),
+                        ("books", "analysis_failure_json", "TEXT"),
+                    ] where Self.tableExists(pointer, table: table)
+                        && !Self.tableHasColumn(pointer, table: table, column: column) {
+                        try Self.execSQL(pointer, "ALTER TABLE \(table) ADD COLUMN \(column) \(definition);")
+                    }
+                    try Self.execSQL(pointer, AudiobookStoreSchema.tableDefinitionsSQL)
+                    try AudiobookStoreSchema.validate(pointer)
+                    try Self.execSQL(pointer, "PRAGMA user_version = 6; COMMIT;")
+                } catch {
+                    try? Self.execSQL(pointer, "ROLLBACK;")
+                    throw error
+                }
+            } else {
+                try AudiobookStoreSchema.validate(pointer)
+                try Self.execSQL(pointer, "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;")
             }
             self.startupRunningBookUpdatedAt = try Self.queryStartupRunningBookUpdatedAt(pointer)
         } catch {
@@ -210,8 +227,10 @@ public actor AudiobookProjectStore {
             -1, &statement, nil
         ) == SQLITE_OK, let statement else { return false }
         defer { sqlite3_finalize(statement) }
-        sqlite3_bind_text(statement, 1, table, -1, nil)
-        return sqlite3_step(statement) == SQLITE_ROW
+        return table.withCString { name in
+            guard sqlite3_bind_text(statement, 1, name, -1, nil) == SQLITE_OK else { return false }
+            return sqlite3_step(statement) == SQLITE_ROW
+        }
     }
 
     private static func tableHasColumn(_ db: OpaquePointer, table: String, column: String) -> Bool {

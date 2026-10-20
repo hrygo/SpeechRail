@@ -2,7 +2,7 @@
 title: "SpeechRail macOS App 有声书工坊开发说明"
 status: active
 audience: "macOS App 开发者、架构与测试工程师"
-version: "1.9.2"
+version: "1.9.3"
 date: 2026-10-20
 ---
 
@@ -22,7 +22,7 @@ date: 2026-10-20
   编码探测不再在歧义时阻断预览：非 UTF-8 的合法 GB18030 字节流按 GB18030 提供临时预览，C1 控制符等可疑 UTF-8 同样标记待确认；`requiresEncodingConfirmation` 为 true 时导入面板显示提示，用户切换编码后重新生成预览，错误在面板内可见。
   `AudiobookChapterPlanner.plan` 额外返回 `tableOfContentsRanges`：连续至少三个章名行之间只隔空白/页码/点引线，且有目录标记或后文同名标题时，整段识别为目录页，从章名候选中移除，并作为首个相关章节的 `excludedRanges`。仅含目录的合成「开篇」会并入下一章；目录字节仍被章节覆盖，但不会生成 atom、进入分析或朗读。`plan` 保留无目录时的既有边界与标题。
 - **`AudiobookEPUBImporter.swift`**：纯 Swift ZIP 中央目录预检（加密位、method、条目数、压缩/解压总量、路径穿越），再用系统 `ditto` 解压到临时目录并拒绝符号链接/越界路径；只读取 `META-INF/container.xml`、OPF manifest/spine 与 XHTML，忽略脚本、样式和外部资源。XHTML 按块级标签保留段落/标题边界，常见 HTML 实体转 Unicode，非严格 XHTML 走去标签兜底。DRM、损坏包、缺失 container/spine、空正文均返回可行动错误。
-- **`AudiobookStoreSchema.swift`、`AudiobookAssetJournal.swift`、`AudiobookProjectStore.swift`**：独立 `audiobooks/library.sqlite3`（WAL、`foreign_keys = ON`、`user_version = 5`）与文件事务日志；候选提交通过 staged 文件、数据库登记及恢复核查保护音频资产；配声修订和跨目录登记意图分别支持撤销及中断恢复。v5 增加 `pronunciation_bindings`（每书一条不可变词表 revision 绑定）、`chapters.is_skipped` 与 `books.analysis_failure_json`；4→5 迁移先做一致性备份，在事务内建表/补列后推进版本，旧库缺少对应表时不强行 ALTER。
+- **`AudiobookStoreSchema.swift`、`AudiobookAssetJournal.swift`、`AudiobookProjectStore.swift`**：独立 `audiobooks/library.sqlite3`（WAL、`foreign_keys = ON`、`user_version = 6`）与文件事务日志；候选提交通过 staged 文件、数据库登记及恢复核查保护音频资产；配声修订和跨目录登记意图分别支持撤销及中断恢复。`pronunciation_bindings` 每书保存一条不可变词表 revision 绑定，`chapters.is_skipped` 保存章节跳过状态，`books.analysis_failure_json` 保存分析失败信息。打开作品库时，以建库 SQL 生成内存参照，核对表、列类型、空值约束、默认值、主键、外键与索引；同版本结构不符时明确拒绝，不在后续导入时才暴露 SQL 错误。
 - **`AudiobookAnalysisPolicy.swift`、`AudiobookAnalysisPrompts.swift`、`AudiobookCastRegistry.swift`、`AudiobookAnalysisPipeline.swift`**：按 `LLMModule.audiobook` 解析专用/全局大模型配置；两级结构化 JSON 解析（章节窗口对话归属 + 跨章角色别名合并）；低置信度或漏标的直接对白归为 `unknown`，阻止对应章节制作，等待显式确认。
 - **`AudiobookAnalysisProgress.swift`**：分析进度观测的闭式事件（`AudiobookAnalysisEvent`）、快照投影（`AudiobookAnalysisProgress`）与有界诊断缓冲。事件只带序号、计数、耗时、token 数与低基数错误码，不带原文、prompt、转写、密钥、路径或实名；投影侧按 `runID` + 序号丢弃过期/跨 run 事件，百分比单调不回退。管线在规划、提取、归并、标注、拆窗重试与终态处发射事件；`LLMProvider` 观测经 `callDiagnostics` 汇入，runID 与 LLM 观测 sessionID 一串到底。
 - **`AudiobookAnalysisProgressRailView.swift`**：确定性进度轨道的纯展示视图（阶段 + n/N + 百分比 + 心跳 + 重试/停滞提示 + 开发者诊断折叠区）。输入只有不可变快照、时钟 tick、事件数与暂停回调，不读 `AppModel`，可经 `ImageRenderer` 离屏渲染做视觉回归；文案走同文件的纯函数（心跳三档阈值与 `AudiobookAnalysisProgressLimits` 一致），工作台只做薄委托。
@@ -78,7 +78,7 @@ date: 2026-10-20
 - `VoiceCatalogStore` 的 JSON envelope 为 schema 2，`visibilityScope` 与 `lifecycleState` 独立。成功原子保存后才通知界面；错误向调用方传播。收藏叠加于范围筛选，归档/恢复保留推广后的全局身份。设计与克隆回填分别保留实际来源，从最新能力解析身份，不使用占位版本或设计种子充当 clone caller seed。
 - `voice_registration_intents` 先登记书籍专用目标，目录成功后才提交绑定；每个阶段可幂等恢复，期间改选进入待确认，不覆盖新选择。`casting_revisions` 同时覆盖绑定与共享政策开关，重复设置不占用历史；撤销新增修订并恢复旧政策/绑定，保留已采用音频；当前状态不匹配时拒绝撤销。
 - 工作坊先展示推荐方案、原因、风险和影响，再按方案身份接受。相同原文及相邻对白试听冻结身份与参数，使用 `allow_unverified`，只交给共享播放器；不生成正式候选，不自动确认质量。
-- SQLite schema 1→2 将 `voice_revision` 改为可空，2→3 增加政策/画像及可空实际身份列，3→4 增加意图与配声修订，4→5 增加发音词表绑定与章节跳过列。每步通过 SQLite backup API 保存一致性副本，事务推进版本；失败保留旧阶段与资产。回退保留 schema 5 和目录 schema 2，可切回 `baseline`，不能以旧备份覆盖后续作品。迁移验收只使用临时合成副本。
+- SQLite schema 1→2 将 `voice_revision` 改为可空，2→3 增加政策/画像及可空实际身份列，3→4 增加意图与配声修订，4→5 增加发音词表绑定。5→6 幂等补齐章节跳过与分析失败列，覆盖 schema 5 已含任一列或两列的库；迁移先通过 SQLite backup API 保存包含已提交 WAL 的一致性副本，在同一事务内补结构、验证并推进版本，失败回滚该步。新建空库也在事务内建表和验证；没有版本标记的非空库不猜测迁移路径。同版本不静默重建缺失表，更高版本直接拒绝。升级后保留 schema 6 和目录 schema 2；旧 App 不支持 schema 6，不得降低版本标记或用旧备份覆盖后续作品。冻结历史 DDL 的迁移测试只使用合成临时库。
 
 规格见 [大规模选角与音色资产规范](audiobook-mass-casting-spec.md)；实施及证据见 [P0 定向验收记录](../audits/2026-10-15-audiobook-mass-casting-p0-acceptance.md) 和 [S3～S5 离线验收记录](../audits/2026-10-15-audiobook-mass-casting-p1-acceptance.md)。真实模型听评及 UI 验收独立记录，未执行不能推定通过。
 
