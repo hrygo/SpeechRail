@@ -701,12 +701,36 @@ public enum AudiobookCastRegistry {
                 issues.append(.init(code: .lockedBindingConflict, roleIDs: group.map { $0.0.id }, voiceIDs: [group[0].1.voiceID], nextAction: "请明确调整独占声音，现有绑定不会自动降级为共享。"))
             }
         }
+        // A locked binding keeps its chosen voice across an engine update: only the
+        // artifact revision moved, so re-pin it and let the user confirm once instead
+        // of asking for a manual re-selection on every role.
+        var reconfirmedRoleIDs: Set<UUID> = []
         for role in sortedRoles {
             guard let binding = existingBindings[role.id] else { continue }
             if !eligibleIDs.contains(binding.voiceID) || (try? validateRenderBinding(binding, snapshot: snapshot)) == nil {
-                issues.append(.init(code: .voiceIdentityUnknown, roleIDs: [role.id], voiceIDs: [binding.voiceID], nextAction: "请重新确认此角色的声音和制作参数；旧作品已保留。"))
+                if eligibleIDs.contains(binding.voiceID),
+                   let reconfirmed = reconfirmedBinding(binding, snapshot: snapshot) {
+                    bindings[role.id] = reconfirmed
+                    reconfirmedRoleIDs.insert(role.id)
+                } else if bindingVoiceOutOfScope(binding, snapshot: snapshot, catalog: catalog, bookID: bookID) {
+                    issues.append(.init(code: .voiceScopeUnavailable, roleIDs: [role.id], voiceIDs: [binding.voiceID],
+                        nextAction: "该角色原先的声音已不可用或不属于本书，请重新选择声音。"))
+                } else if needsFreshValidation(binding, snapshot: snapshot, catalog: catalog, bookID: bookID) {
+                    // Same voice, still in scope: only its output evidence stopped
+                    // covering this engine. Re-selecting would lose the voice the user
+                    // chose, so the repair is a validation run, not a new pick.
+                    issues.append(.init(code: .voiceNotProductionReady, roleIDs: [role.id], voiceIDs: [binding.voiceID],
+                        nextAction: "该音色需要按当前引擎重新验收后才能继续制作；声音本身不会改变。"))
+                } else {
+                    issues.append(.init(code: .voiceIdentityUnknown, roleIDs: [role.id], voiceIDs: [binding.voiceID], nextAction: "请重新确认角色声音与制作参数；旧作品已保留。"))
+                }
             }
             if role.isNarrator { policies[role.id]?.sharingPolicy = .exclusive }
+        }
+        if !reconfirmedRoleIDs.isEmpty {
+            issues.append(.init(code: .castRevisionChanged, roleIDs: Array(reconfirmedRoleIDs),
+                voiceIDs: Array(Set(reconfirmedRoleIDs.compactMap { bindings[$0]?.voiceID })), isBlocking: false, severity: .warning,
+                nextAction: "这些角色的声音没有变化，只是引擎制作版本更新；确认后沿用原声音，已采用的音频不受影响。"))
         }
         var cache = cachedScores
         let initialScoreCount = cache.evaluationCount
@@ -950,6 +974,54 @@ public enum AudiobookCastRegistry {
                 }
             }
         }
+    }
+
+    /// A locked binding survives an engine update when the voice itself did not change.
+    /// Only the model artifact revision moved, so the user's chosen voice is re-pinned
+    /// instead of being dropped: a changed voice identity still needs a real re-selection.
+    public static func reconfirmedBinding(
+        _ binding: AudiobookVoiceBinding, snapshot: EffectiveCapabilitySnapshot
+    ) -> AudiobookVoiceBinding? {
+        guard let voice = snapshot.voices.first(where: { $0.id == binding.voiceID }),
+              voice.available, voice.productionReady == true,
+              let options = SpeechRailCapabilityRevisionSelector.creatorRequestOptions(voiceID: voice.id, in: snapshot),
+              options.expectedVoiceRevision == binding.voiceRevision,
+              let modelRevision = options.expectedModelRevision, modelRevision != binding.modelRevision
+        else { return nil }
+        let reconfirmed = AudiobookVoiceBinding(
+            roleID: binding.roleID, voiceID: binding.voiceID,
+            voiceRevision: binding.voiceRevision, modelRevision: modelRevision,
+            isSynthesisReady: binding.isSynthesisReady,
+            allowedSpeed: binding.allowedSpeed, callerSeed: binding.callerSeed
+        )
+        guard (try? validateRenderBinding(reconfirmed, snapshot: snapshot)) != nil else { return nil }
+        return reconfirmed
+    }
+
+    /// The chosen voice still exists with the same identity but left this book's usable
+    /// set (archived, revoked, or owned elsewhere). Only a new selection fixes that.
+    public static func bindingVoiceOutOfScope(
+        _ binding: AudiobookVoiceBinding, snapshot: EffectiveCapabilitySnapshot,
+        catalog: VoiceCatalogSnapshot, bookID: UUID
+    ) -> Bool {
+        guard let voice = snapshot.voices.first(where: { $0.id == binding.voiceID }),
+              voice.voiceRevision == binding.voiceRevision
+        else { return false }
+        return !voice.available || !catalog.permits(voice, bookID: bookID)
+    }
+
+    /// The chosen voice is unchanged and still in scope for this book; only its
+    /// production evidence is missing for the current engine. Re-running validation
+    /// restores it, so this must not be reported as an unknown voice identity.
+    public static func needsFreshValidation(
+        _ binding: AudiobookVoiceBinding, snapshot: EffectiveCapabilitySnapshot,
+        catalog: VoiceCatalogSnapshot, bookID: UUID
+    ) -> Bool {
+        guard let voice = snapshot.voices.first(where: { $0.id == binding.voiceID }),
+              voice.available, voice.voiceRevision == binding.voiceRevision,
+              voice.productionReady != true, catalog.permits(voice, bookID: bookID)
+        else { return false }
+        return true
     }
 
     /// Validate the frozen binding against one capability snapshot before each new render.

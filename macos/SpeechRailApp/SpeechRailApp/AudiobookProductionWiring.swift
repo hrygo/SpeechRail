@@ -262,6 +262,7 @@ public enum AudiobookProductionWiring {
         renderClient: (any SpeechRailSpeechRenderClient)? = nil,
         voiceDesignClient: (any SpeechRailVoiceDesignClient)? = nil,
         pronunciationClient: (any AudiobookPronunciationClient)? = nil,
+        voiceQualityClient: (any SpeechRailVoiceQualityClient)? = nil,
         controlTransport: any SpeechRailControlTransport,
         voiceCatalog: VoiceCatalogStore? = nil
     ) -> AudiobookDependencies {
@@ -272,6 +273,11 @@ public enum AudiobookProductionWiring {
         let effectiveVoiceDesignClient: any SpeechRailVoiceDesignClient = voiceDesignClient ?? defaultAPIClient!
         let effectivePronunciationClient: (any AudiobookPronunciationClient)? =
             pronunciationClient ?? defaultAPIClient
+        // Casting repair re-runs one bounded validation probe per stale voice; it
+        // must reach the same service the render path uses.
+        let effectiveVoiceQualityClient: any SpeechRailVoiceQualityClient =
+            voiceQualityClient ?? defaultAPIClient
+                ?? ServiceAPIClient(maximumResponseBytes: AudiobookLimits.maxWAVResponseBytes)
 
         return AudiobookDependencies(
             makeStore: {
@@ -313,6 +319,7 @@ public enum AudiobookProductionWiring {
                 voiceDesignClient: effectiveVoiceDesignClient,
                 voiceCatalog: effectiveCatalog
             ),
+            voiceValidationClient: effectiveVoiceQualityClient,
             pronunciationClient: effectivePronunciationClient,
             controlTransport: controlTransport,
             clock: SystemAudiobookClock(),

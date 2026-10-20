@@ -70,6 +70,35 @@ final class AudiobookWorkflowTests: XCTestCase {
         }
     }
 
+    private final class WorkflowFakeVoiceQualityClient: SpeechRailVoiceQualityClient, @unchecked Sendable {
+        private let lock = NSLock()
+        private var requested: [String] = []
+        private var failing: Set<String> = []
+        private let onValidated: (@Sendable (String) -> Void)?
+
+        init(failing: Set<String> = [], onValidated: (@Sendable (String) -> Void)? = nil) {
+            self.failing = failing
+            self.onValidated = onValidated
+        }
+
+        var requestedVoiceIDs: [String] { lock.withLock { requested } }
+
+        func runVoiceQuality(id: String, request: VoiceQualityRunRequest) async throws -> VoiceQualityRunResponse {
+            lock.withLock { requested.append(id) }
+            if lock.withLock({ failing.contains(id) }) {
+                throw ServiceAPIClientError.requestFailed
+            }
+            onValidated?(id)
+            return VoiceQualityRunResponse(
+                legacyReport: VoiceQualityReportSnapshotV2(
+                    status: .pass,
+                    runID: "vq_0123456789abcdef0123456789abcdef"
+                ),
+                validationPersisted: true
+            )
+        }
+    }
+
     private final class WorkflowFakeRenderer: AudiobookSpeechRenderer, @unchecked Sendable {
         private let beforeRender: (@Sendable () async -> Void)?
         private let leadLock = NSLock()
@@ -95,6 +124,20 @@ final class AudiobookWorkflowTests: XCTestCase {
         var leadVoiceCreationHandler: (@Sendable (AudiobookLeadVoiceCreationRequest, Int) async throws -> AudiobookLeadVoiceCreationOutput)?
 
         private var dynamicVoices: [SafeVoiceEntry] = []
+        private var modelRevisionValue = String(repeating: "a", count: 40)
+        private var voicesProductionReady = true
+
+        /// Drops (or restores) the stored output evidence for every fixed voice, the way
+        /// a runtime upgrade invalidates validation recorded against an older engine.
+        func setVoicesProductionReady(_ ready: Bool) {
+            leadLock.withLock { voicesProductionReady = ready }
+        }
+
+        /// Moves the artifact revision without touching any voice identity, the way a
+        /// runtime upgrade changes the engine while every locked voice stays the same.
+        func setModelRevision(_ value: String) {
+            leadLock.withLock { modelRevisionValue = value }
+        }
 
         func createAndPublishLeadVoice(_ request: AudiobookLeadVoiceCreationRequest) async throws -> AudiobookLeadVoiceCreationOutput {
             let count = leadLock.withLock {
@@ -153,10 +196,12 @@ final class AudiobookWorkflowTests: XCTestCase {
                 sourceType: "instruction_profile",
                 metadataMethod: "declared_only"
             )
+            let revision = leadLock.withLock { modelRevisionValue }
+            let productionReady = leadLock.withLock { voicesProductionReady }
             let model = ConfiguredModelIdentity(
                 assurance: .configuredCatalog,
-                runtimeRevision: String(repeating: "a", count: 40),
-                catalogRevision: String(repeating: "a", count: 40)
+                runtimeRevision: revision,
+                catalogRevision: revision
             )
             let dynamic = leadLock.withLock { dynamicVoices }
             return EffectiveCapabilitySnapshot(
@@ -177,7 +222,7 @@ final class AudiobookWorkflowTests: XCTestCase {
                         model: model,
                         descriptors: desc,
                         operations: ["http_speech": JSONValue(.object(["parameters": JSONValue(.object(["speed": JSONValue(.object(["status": JSONValue(.string("supported")), "minimum": JSONValue(.number(0.25)), "maximum": JSONValue(.number(4))]))]))]))],
-                        productionReady: true
+                        productionReady: productionReady
                     ),
                     SafeVoiceEntry(id: "v-designed-narrator", name: "设计旁白", mode: "clone", available: true,
                         availabilityReason: .available, voiceRevision: "vr_0123456789abcdef0123456789abcdef",
@@ -264,7 +309,8 @@ final class AudiobookWorkflowTests: XCTestCase {
         driver: FakeDriver = FakeDriver(),
         renderer: WorkflowFakeRenderer = WorkflowFakeRenderer(),
         store: AudiobookProjectStore? = nil,
-        catalog: VoiceCatalogStore = VoiceCatalogStore()
+        catalog: VoiceCatalogStore = VoiceCatalogStore(),
+        voiceValidationClient: (any SpeechRailVoiceQualityClient)? = nil
     ) -> (AudiobookWorkflowModel, FakeDriver) {
         let root = tempRoot!
         let config = LLMConfiguration(baseURL: "http://127.0.0.1:8000/v1", model: "test-model")
@@ -280,6 +326,7 @@ final class AudiobookWorkflowTests: XCTestCase {
                 AudiobookAnalysisConfigSnapshot(configuration: config, generation: gen)
             },
             speechRenderer: renderer,
+            voiceValidationClient: voiceValidationClient,
             voiceCatalog: catalog
         )
         let owner = SharedPlaybackOwner(driver: driver)
@@ -318,6 +365,91 @@ final class AudiobookWorkflowTests: XCTestCase {
         try await catalog.archiveVoices(voiceIDs: ["v-narrator"])
         await workflow.applyPendingCastingPlan(acknowledgedIssueIDs: [])
         XCTAssertTrue(workflow.voiceBindings.isEmpty)
+        XCTAssertNotNil(workflow.errorMessage)
+    }
+
+    /// 引擎升级只改变制品版本：已选好的声音必须原样保留，确认一次即可继续制作，
+    /// 而不是把整本书的每个角色都变成阻塞错误。
+    func testEngineUpgradeReconfirmsLockedVoicesWithoutReSelection() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let renderer = WorkflowFakeRenderer(), catalog = VoiceCatalogStore()
+        let (workflow, _) = makeWorkflow(renderer: renderer, store: store, catalog: catalog)
+        _ = try await importBook(into: workflow, fileName: "upgrade.txt", text: "第一章\n海风拂过窗前。")
+
+        let role = try XCTUnwrap(workflow.characters.first)
+        await workflow.bindVoice(roleID: role.id, voiceID: "v-narrator")
+        let applied = try XCTUnwrap(workflow.voiceBindings[role.id])
+        XCTAssertEqual(applied.modelRevision, String(repeating: "a", count: 40))
+
+        renderer.setModelRevision(String(repeating: "c", count: 40))
+        await workflow.previewRecommendedVoices()
+        let plan = try XCTUnwrap(workflow.pendingCastingPlan)
+        XCTAssertTrue(plan.isApplicable, "引擎升级不能把已选好的声音变成阻塞错误")
+        XCTAssertFalse(workflow.castingPlanNeedsRefresh, "用当前目录算出的方案不该显示目录已变化")
+        let reconfirmation = try XCTUnwrap(plan.issues.first { $0.code == .castRevisionChanged })
+        XCTAssertFalse(reconfirmation.isBlocking)
+        XCTAssertEqual(reconfirmation.roleIDs, [role.id])
+        XCTAssertTrue(plan.affectedRoleIDs.contains(role.id))
+        XCTAssertEqual(plan.proposedBindings[role.id]?.voiceID, applied.voiceID, "不能替用户换声音")
+
+        await workflow.applyPendingCastingPlan(acknowledgedIssueIDs: plan.requiredAcknowledgements)
+        XCTAssertNil(workflow.pendingCastingPlan)
+        XCTAssertEqual(workflow.voiceBindings[role.id]?.voiceID, applied.voiceID)
+        XCTAssertEqual(workflow.voiceBindings[role.id]?.voiceRevision, applied.voiceRevision)
+        XCTAssertEqual(workflow.voiceBindings[role.id]?.modelRevision, String(repeating: "c", count: 40))
+    }
+
+    /// 引擎升级让已有音色的输出验收失效时：方案要求按当前引擎重新验收，界面给出
+    /// 就地修复动作；验收通过后同一批声音继续可用，不需要重新选声。
+    func testStaleVoiceValidationIsRepairedInPlace() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let renderer = WorkflowFakeRenderer(), catalog = VoiceCatalogStore()
+        let client = WorkflowFakeVoiceQualityClient(onValidated: { _ in
+            renderer.setVoicesProductionReady(true)
+        })
+        let (workflow, _) = makeWorkflow(renderer: renderer, store: store, catalog: catalog,
+                                         voiceValidationClient: client)
+        _ = try await importBook(into: workflow, fileName: "stale-evidence.txt", text: "第一章\n海风拂过窗前。")
+        let role = try XCTUnwrap(workflow.characters.first)
+        await workflow.bindVoice(roleID: role.id, voiceID: "v-narrator")
+        let applied = try XCTUnwrap(workflow.voiceBindings[role.id])
+
+        renderer.setVoicesProductionReady(false)
+        await workflow.previewRecommendedVoices()
+        let blocked = try XCTUnwrap(workflow.pendingCastingPlan)
+        XCTAssertFalse(blocked.isApplicable)
+        XCTAssertEqual(blocked.voicesNeedingValidation, ["v-narrator"])
+        XCTAssertFalse(blocked.issues.contains { $0.code == .voiceIdentityUnknown && $0.roleIDs.contains(role.id) },
+                       "声音没变，只是验收失效，不能说成身份未知")
+        XCTAssertEqual(blocked.proposedBindings, workflow.voiceBindings, "规划阶段不能改绑定")
+
+        await workflow.revalidateCastVoices(blocked.voicesNeedingValidation)
+        XCTAssertEqual(client.requestedVoiceIDs, ["v-narrator"])
+        let repaired = try XCTUnwrap(workflow.pendingCastingPlan)
+        XCTAssertTrue(repaired.isApplicable, "验收通过后应恢复可制作")
+        XCTAssertTrue(repaired.voicesNeedingValidation.isEmpty)
+        XCTAssertEqual(repaired.proposedBindings[role.id]?.voiceID, applied.voiceID)
+        XCTAssertEqual(workflow.errorMessage, nil)
+    }
+
+    /// 重新验收失败要如实报告，不能假装可制作，也不能动用户已选的声音。
+    func testFailedVoiceRevalidationKeepsBlockingAndVoice() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let renderer = WorkflowFakeRenderer(), catalog = VoiceCatalogStore()
+        let client = WorkflowFakeVoiceQualityClient(failing: ["v-narrator"])
+        let (workflow, _) = makeWorkflow(renderer: renderer, store: store, catalog: catalog,
+                                         voiceValidationClient: client)
+        _ = try await importBook(into: workflow, fileName: "revalidate-fail.txt", text: "第一章\n海风拂过窗前。")
+        let role = try XCTUnwrap(workflow.characters.first)
+        await workflow.bindVoice(roleID: role.id, voiceID: "v-narrator")
+        renderer.setVoicesProductionReady(false)
+        await workflow.previewRecommendedVoices()
+        let blocked = try XCTUnwrap(workflow.pendingCastingPlan)
+
+        await workflow.revalidateCastVoices(blocked.voicesNeedingValidation)
+        XCTAssertEqual(client.requestedVoiceIDs, ["v-narrator"])
+        XCTAssertEqual(workflow.voiceBindings[role.id]?.voiceID, "v-narrator")
+        XCTAssertEqual(workflow.pendingCastingPlan?.voicesNeedingValidation, ["v-narrator"])
         XCTAssertNotNil(workflow.errorMessage)
     }
 

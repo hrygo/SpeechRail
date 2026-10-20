@@ -1923,6 +1923,11 @@ public struct AudiobookCastingPlan: Equatable, Sendable {
         return rawIssues.map { issue in var copy = issue; copy.contextDigest = digest; return copy }
     }
     public var requiredAcknowledgements: Set<UUID> { Set(issues.filter { !$0.isBlocking && $0.severity == .warning }.map(\.id)) }
+    /// Voices the blocked cast waits on: same voice, but its output evidence no longer
+    /// covers the current engine. Validating them restores the plan without re-picking.
+    public var voicesNeedingValidation: [String] {
+        Array(Set(issues.filter { $0.isBlocking && $0.code == .voiceNotProductionReady }.flatMap(\.voiceIDs))).sorted()
+    }
     public var isApplicable: Bool { unresolvedRoleIDs.isEmpty && !rawIssues.contains(where: \.isBlocking) }
 }
 
