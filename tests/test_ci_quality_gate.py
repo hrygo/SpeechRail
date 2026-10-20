@@ -11,9 +11,22 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/ci_quality_gate.sh"
 
 
-@pytest.mark.parametrize("failure", ["none", "sync", "ruff", "parity", "route", "pytest", "diff"])
+@pytest.mark.parametrize(
+    ("failure", "base_ref"),
+    [
+        ("none", "origin/main"),
+        ("sync", "origin/main"),
+        ("ruff", "origin/main"),
+        ("schema", "origin/main"),
+        ("parity", "origin/main"),
+        ("route", "origin/main"),
+        ("pytest", "origin/main"),
+        ("diff", "origin/main"),
+        ("none", None),
+    ],
+)
 def test_quality_gate_stops_on_failure_and_uses_locked_dependencies(
-    tmp_path: Path, failure: str
+    tmp_path: Path, failure: str, base_ref: str | None
 ) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -24,6 +37,7 @@ args = sys.argv[1:]
 tool = pathlib.Path(sys.argv[0]).name
 phase = ('sync' if args[0] == 'sync' else
          'ruff' if 'ruff' in args else
+         'schema' if 'scripts/check_audiobook_schema.py' in args else
          'parity' if 'scripts/check_macos_test_target_coverage.py' in args else
          'route' if 'scripts/check_macos_route_contract.py' in args else
          'pytest' if 'pytest' in args else
@@ -39,8 +53,11 @@ if phase == os.environ['FAIL_PHASE']:
         executable = bin_dir / tool
         executable.write_text(shim, encoding="utf-8")
         executable.chmod(0o755)
+    command = ["bash", str(SCRIPT)]
+    if base_ref is not None:
+        command.extend(["--base-ref", base_ref])
     result = subprocess.run(
-        ["bash", str(SCRIPT), "--base-ref", "origin/main"],
+        command,
         cwd=ROOT,
         env={
             **os.environ,
@@ -62,6 +79,12 @@ if phase == os.environ['FAIL_PHASE']:
         assert calls[-1]["phase"] == failure
         assert "All quality gates passed" not in result.stdout
     else:
+        schema_calls = [call for call in calls if call["phase"] == "schema"]
+        assert len(schema_calls) == 1
+        assert "scripts/check_audiobook_schema.py" in schema_calls[0]["args"]
+        assert ("--base-ref" in schema_calls[0]["args"]) is (base_ref is not None)
+        if base_ref is not None:
+            assert base_ref in schema_calls[0]["args"]
         assert any(call["phase"] == "parity" for call in calls)
         pytest_calls = [call for call in calls if call["phase"] == "pytest"]
         assert len(pytest_calls) == 2
@@ -69,7 +92,9 @@ if phase == os.environ['FAIL_PHASE']:
         assert "tests/test_ci_quality_gate.py" in pytest_calls[0]["args"]
         assert "tests/test_diarization_extensions.py" in pytest_calls[1]["args"]
         assert "tests/test_diarization_sdk.py" in pytest_calls[1]["args"]
-        assert any("origin/main...HEAD" in call["args"] for call in calls)
+        assert any(f"{base_ref}...HEAD" in call["args"] for call in calls) is (
+            base_ref is not None
+        )
         assert all("--no-sync" in call["args"] for call in calls if call["args"][0] == "run")
         assert "All quality gates passed" in result.stdout
 
@@ -86,5 +111,6 @@ def test_quality_gate_checks_macos_route_contract() -> None:
     assert "uv run --no-sync python scripts/check_macos_route_contract.py" in gate
     coverage_gate = gate.index("check_macos_test_target_coverage.py")
     route_gate = gate.index("check_macos_route_contract.py")
+    schema_gate = gate.index("check_audiobook_schema.py")
     pytest_gate = gate.index("test_ci_quality_gate.py")
-    assert coverage_gate < route_gate < pytest_gate
+    assert coverage_gate < route_gate < schema_gate < pytest_gate

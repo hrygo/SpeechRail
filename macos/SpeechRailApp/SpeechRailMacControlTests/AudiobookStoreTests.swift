@@ -7,9 +7,120 @@ import XCTest
 #endif
 
 final class AudiobookStoreTests: XCTestCase {
+    private struct FrozenV5Fixture {
+        let root: URL
+        let bookID: UUID
+        let sourceID: UUID
+        let chapterID: UUID
+        let candidate: AudiobookRenderCandidate
+        let wav: Data
+    }
+
+    /// DDL comes from a checked-in historical SQL file, never from the current store.
+    private func makeFrozenV5Fixture() throws -> FrozenV5Fixture {
+        let root = try makeTempRoot()
+        #if SWIFT_PACKAGE
+        let fixtureURL = try XCTUnwrap(Bundle.module.url(
+            forResource: "audiobook-schema-v5", withExtension: "sql", subdirectory: "Fixtures"
+        ))
+        #else
+        let fixtureURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/audiobook-schema-v5.sql")
+        #endif
+        _ = try sqlite(root, sql: String(contentsOf: fixtureURL, encoding: .utf8))
+        let bookID = UUID(), sourceID = UUID(), chapterID = UUID()
+        let source = Data("历史夹具正文。".utf8)
+        let sourceDirectory = root.appendingPathComponent("books/\(bookID.uuidString)/source", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceDirectory, withIntermediateDirectories: true)
+        try source.write(to: sourceDirectory.appendingPathComponent("original.txt"))
+        try source.write(to: sourceDirectory.appendingPathComponent("canonical.txt"))
+        let wav = Self.makeDeterministicWAV(pcmSamples: Array(repeating: 1200, count: 480))
+        let candidate = AudiobookRenderCandidate(
+            bookID: bookID, chapterID: chapterID, fragmentID: UUID(), generation: 1,
+            relativeAssetPath: "books/\(bookID.uuidString)/audio/historical.wav",
+            fileSHA256: AudiobookDigest.sha256Hex(wav),
+            pcmSHA256: try AudioDigest.sha256HexOfPCM(in: wav), frameCount: 480,
+            dependencyDigest: "historical-dependency"
+        )
+        let assetURL = root.appendingPathComponent(candidate.relativeAssetPath)
+        try FileManager.default.createDirectory(at: assetURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try wav.write(to: assetURL)
+        let sha = AudiobookDigest.sha256Hex(source)
+        _ = try sqlite(root, sql: """
+            INSERT INTO books (id, source_id, title, source_sha256, canonical_byte_count, scalar_count,
+                original_encoding, analysis_state, production_state, listenable_state, created_at, updated_at)
+            VALUES ('\(bookID)', '\(sourceID)', '历史作品', '\(sha)', \(source.count), 7,
+                'utf-8', 'notStarted', 'idle', 'noneAvailable', 100, 100);
+            INSERT INTO sources VALUES ('\(sourceID)', '\(bookID)', '\(sha)', \(source.count), 7, 'utf-8',
+                'books/\(bookID)/source/original.txt', 'books/\(bookID)/source/canonical.txt', 100);
+            INSERT INTO chapters VALUES ('\(chapterID)', '\(bookID)', '\(sourceID)', 0, '历史章节',
+                0, \(source.count), '[]', NULL, NULL);
+            INSERT INTO render_candidates (id, book_id, chapter_id, fragment_id, task_id, generation,
+                relative_asset_path, file_sha256, pcm_sha256, frame_count, sample_rate, dependency_digest,
+                is_receipt_verified, created_at)
+            VALUES ('\(candidate.id)', '\(bookID)', '\(chapterID)', '\(candidate.fragmentID)', '\(candidate.taskID)', 1,
+                '\(candidate.relativeAssetPath)', '\(candidate.fileSHA256)', '\(candidate.pcmSHA256)', 480, 48000,
+                'historical-dependency', 0, 100);
+            """)
+        return FrozenV5Fixture(root: root, bookID: bookID, sourceID: sourceID, chapterID: chapterID,
+                               candidate: candidate, wav: wav)
+    }
+
+    func testFrozenV5MissingColumnsMigratesAndImportsWithoutLosingAssets() async throws {
+        let fixture = try makeFrozenV5Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        XCTAssertEqual(try sqlite(fixture.root, sql: "PRAGMA user_version;"), [["5"]])
+        XCTAssertEqual(try sqlite(fixture.root, sql: "SELECT name FROM pragma_table_info('books') WHERE name = 'analysis_failure_json';"), [])
+        XCTAssertEqual(try sqlite(fixture.root, sql: "SELECT name FROM pragma_table_info('chapters') WHERE name = 'is_skipped';"), [])
+        let identities = try sqlite(fixture.root, sql: "SELECT id, source_id FROM books;")
+        let assets = try sqlite(fixture.root, sql: "SELECT id, fragment_id, relative_asset_path, file_sha256, pcm_sha256 FROM render_candidates;")
+
+        let store = try AudiobookProjectStore(root: fixture.root)
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data("第一章\n迁移后新增的作品。".utf8), suggestedTitle: "新增作品")
+        let importedID = try await store.importBook(preview)
+        XCTAssertNotEqual(importedID, fixture.bookID)
+        XCTAssertEqual(try sqlite(fixture.root, sql: "SELECT id, source_id FROM books WHERE id = '\(fixture.bookID)';"), identities)
+        XCTAssertEqual(try sqlite(fixture.root, sql: "SELECT id, fragment_id, relative_asset_path, file_sha256, pcm_sha256 FROM render_candidates;"), assets)
+        let chapters = try await store.chapters(for: fixture.bookID)
+        XCTAssertEqual(chapters.map(\.id), [fixture.chapterID])
+        XCTAssertEqual(chapters.first?.sourceID, fixture.sourceID)
+        XCTAssertEqual(chapters.first?.isSkipped, false)
+        let verified = try await store.verifyCandidateAsset(fixture.candidate)
+        XCTAssertTrue(verified)
+        XCTAssertEqual(try Data(contentsOf: fixture.root.appendingPathComponent(fixture.candidate.relativeAssetPath)), fixture.wav)
+
+        try await store.setChapterSkipped(bookID: fixture.bookID, chapterID: fixture.chapterID, skipped: true)
+        var book = try await store.book(id: fixture.bookID)
+        XCTAssertNil(book.analysisFailure)
+        book.analysisState = .failed
+        book.analysisFailure = AudiobookAnalysisFailure(code: "fixture_failure", message: "请重试分析。",
+                                                        failedAt: Date(timeIntervalSince1970: 123), failedWindowOrdinal: 2)
+        try await store.updateBook(book)
+        let reopened = try AudiobookProjectStore(root: fixture.root)
+        let savedBook = try await reopened.book(id: fixture.bookID)
+        let savedChapters = try await reopened.chapters(for: fixture.bookID)
+        XCTAssertEqual(savedBook.analysisFailure, book.analysisFailure)
+        XCTAssertEqual(savedChapters.first?.isSkipped, true)
+        let books = try await reopened.listBooks()
+        XCTAssertEqual(Set(books.map(\.id)), [fixture.bookID, importedID])
+        XCTAssertEqual(try sqlite(fixture.root, sql: "PRAGMA user_version;"), [["6"]])
+        XCTAssertTrue(try sqlite(fixture.root, sql: "PRAGMA foreign_key_check;").isEmpty)
+        let backup = fixture.root.appendingPathComponent("library.schema5.backup.sqlite3")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backup.path))
+        XCTAssertEqual(try sqliteDatabase(backup, sql: "PRAGMA user_version;"), [["5"]])
+        XCTAssertEqual(try sqliteDatabase(backup, sql: "SELECT id, source_id FROM books;"), identities)
+        XCTAssertEqual(try sqliteDatabase(backup, sql: "SELECT id, fragment_id, relative_asset_path, file_sha256, pcm_sha256 FROM render_candidates;"), assets)
+        XCTAssertEqual(try sqliteDatabase(backup, sql: "SELECT name FROM pragma_table_info('books') WHERE name = 'analysis_failure_json';"), [])
+        XCTAssertEqual(try sqliteDatabase(backup, sql: "SELECT name FROM pragma_table_info('chapters') WHERE name = 'is_skipped';"), [])
+    }
+
     private func sqlite(_ root: URL, sql: String) throws -> [[String]] {
+        try sqliteDatabase(root.appendingPathComponent("library.sqlite3"), sql: sql)
+    }
+
+    private func sqliteDatabase(_ databaseURL: URL, sql: String) throws -> [[String]] {
         var db: OpaquePointer?
-        guard sqlite3_open(root.appendingPathComponent("library.sqlite3").path, &db) == SQLITE_OK,
+        guard sqlite3_open(databaseURL.path, &db) == SQLITE_OK,
               let db else { throw ServiceAPIClientError.invalidResponse }
         defer { sqlite3_close(db) }
         var statement: OpaquePointer?
@@ -20,7 +131,12 @@ final class AudiobookStoreTests: XCTestCase {
             }
             defer { sqlite3_finalize(statement) }
             var rows: [[String]] = []
-            while sqlite3_step(statement) == SQLITE_ROW {
+            while true {
+                let step = sqlite3_step(statement)
+                if step == SQLITE_DONE { break }
+                guard step == SQLITE_ROW else {
+                    throw ServiceAPIClientError.invalidContract("fixture_query_step")
+                }
                 rows.append((0..<sqlite3_column_count(statement)).map { index in
                     sqlite3_column_text(statement, index).map { String(cString: $0) } ?? "<NULL>"
                 })
@@ -33,7 +149,130 @@ final class AudiobookStoreTests: XCTestCase {
         return []
     }
 
-    private func makeLegacyCopy(_ fixture: ChapterEditFixture) throws -> URL {
+    private func schemaShape(_ root: URL) throws -> [String: [[String]]] {
+        let tables = try sqlite(root, sql: "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name;")
+        var result: [String: [[String]]] = [:]
+        for row in tables {
+            let table = try XCTUnwrap(row.first)
+            result["\(table).columns"] = try sqlite(root, sql: "SELECT name, type, [notnull], dflt_value, pk FROM pragma_table_info('\(table)') ORDER BY name;")
+            result["\(table).foreignKeys"] = try sqlite(root, sql: "SELECT seq, [table], [from], [to], on_update, on_delete, match FROM pragma_foreign_key_list('\(table)') ORDER BY [table], [from], seq;")
+            result["\(table).indexes"] = try sqlite(root, sql: "SELECT l.name, l.[unique], l.origin, l.partial, x.seqno, x.name, x.[desc], x.coll FROM pragma_index_list('\(table)') l JOIN pragma_index_xinfo(l.name) x WHERE x.[key] = 1 ORDER BY l.name, x.seqno;")
+        }
+        return result
+    }
+
+    private func storedRows(_ root: URL) throws -> [String: [[String]]] {
+        let tables = try sqlite(root, sql: "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name;")
+        var result: [String: [[String]]] = [:]
+        for row in tables {
+            let table = try XCTUnwrap(row.first)
+            result[table] = try sqlite(root, sql: "SELECT * FROM \(table) ORDER BY rowid;")
+        }
+        return result
+    }
+
+    func testFrozenV5PartiallyOrFullyPresentColumnsUpgradeIdempotently() async throws {
+        for existingColumns in [["is_skipped"], ["analysis_failure_json"], ["is_skipped", "analysis_failure_json"]] {
+            let fixture = try makeFrozenV5Fixture()
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            let failure = AudiobookAnalysisFailure(code: "preserved_failure", message: "请重试。", failedAt: Date(timeIntervalSince1970: 123))
+            if existingColumns.contains("is_skipped") {
+                _ = try sqlite(fixture.root, sql: "ALTER TABLE chapters ADD COLUMN is_skipped INTEGER NOT NULL DEFAULT 0; UPDATE chapters SET is_skipped = 1;")
+            }
+            if existingColumns.contains("analysis_failure_json") {
+                let json = try XCTUnwrap(String(data: JSONEncoder().encode(failure), encoding: .utf8))
+                _ = try sqlite(fixture.root, sql: "ALTER TABLE books ADD COLUMN analysis_failure_json TEXT; UPDATE books SET analysis_failure_json = '\(json)';")
+            }
+            let store = try AudiobookProjectStore(root: fixture.root)
+            let book = try await store.book(id: fixture.bookID)
+            let chapters = try await store.chapters(for: fixture.bookID)
+            XCTAssertEqual(book.analysisFailure, existingColumns.contains("analysis_failure_json") ? failure : nil)
+            XCTAssertEqual(chapters.first?.isSkipped, existingColumns.contains("is_skipped"))
+            let shape = try schemaShape(fixture.root), rows = try storedRows(fixture.root)
+            _ = try AudiobookProjectStore(root: fixture.root)
+            XCTAssertEqual(try schemaShape(fixture.root), shape)
+            XCTAssertEqual(try storedRows(fixture.root), rows)
+            XCTAssertEqual(try sqlite(fixture.root, sql: "PRAGMA user_version;"), [["6"]])
+        }
+    }
+
+    func testFrozenV5MigrationFailureRollsBackAndCanRetry() async throws {
+        let fixture = try makeFrozenV5Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        // Adding is_skipped succeeds before validation encounters this incompatible existing column.
+        _ = try sqlite(fixture.root, sql: "ALTER TABLE books ADD COLUMN analysis_failure_json INTEGER;")
+        let shape = try schemaShape(fixture.root), rows = try storedRows(fixture.root)
+        XCTAssertThrowsError(try AudiobookProjectStore(root: fixture.root))
+        XCTAssertEqual(try sqlite(fixture.root, sql: "PRAGMA user_version;"), [["5"]])
+        XCTAssertEqual(try schemaShape(fixture.root), shape, "事务失败必须撤销先添加的 is_skipped")
+        XCTAssertEqual(try storedRows(fixture.root), rows)
+        let backup = fixture.root.appendingPathComponent("library.schema5.backup.sqlite3")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backup.path))
+        XCTAssertEqual(try sqliteDatabase(backup, sql: "PRAGMA user_version;"), [["5"]])
+        XCTAssertEqual(try sqliteDatabase(backup, sql: "SELECT * FROM books;"), rows["books"])
+        XCTAssertEqual(try sqliteDatabase(backup, sql: "SELECT name FROM pragma_table_info('chapters') WHERE name = 'is_skipped';"), [])
+        _ = try sqlite(fixture.root, sql: "ALTER TABLE books DROP COLUMN analysis_failure_json;")
+        let recovered = try AudiobookProjectStore(root: fixture.root)
+        let book = try await recovered.book(id: fixture.bookID)
+        XCTAssertEqual(book.sourceID, fixture.sourceID)
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data("第一章\n失败后可以重试迁移。".utf8), suggestedTitle: "重试后导入")
+        _ = try await recovered.importBook(preview)
+        XCTAssertEqual(try sqlite(fixture.root, sql: "PRAGMA user_version;"), [["6"]])
+        XCTAssertEqual(try sqlite(fixture.root, sql: "SELECT COUNT(*) FROM books;"), [["2"]])
+        let verified = try await recovered.verifyCandidateAsset(fixture.candidate)
+        XCTAssertTrue(verified)
+    }
+
+    func testCurrentSchemaRejectsStructuralDamageWithoutMutatingData() throws {
+        let corruptions = [
+            "ALTER TABLE books DROP COLUMN analysis_failure_json;",
+            "ALTER TABLE chapters DROP COLUMN is_skipped;",
+            "DROP TABLE pronunciation_bindings;",
+            "DROP INDEX idx_chapters_book_ordinal; CREATE INDEX idx_chapters_book_ordinal ON chapters(book_id, title);",
+            "DROP TABLE production_checkpoints; CREATE TABLE production_checkpoints (book_id TEXT PRIMARY KEY NOT NULL, checkpoint_json TEXT NOT NULL);",
+            "DROP TABLE production_checkpoints; CREATE TABLE production_checkpoints (book_id TEXT PRIMARY KEY NOT NULL, checkpoint_json INTEGER NOT NULL, FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE);",
+            "DROP TABLE production_checkpoints; CREATE TABLE production_checkpoints (book_id TEXT PRIMARY KEY NOT NULL, checkpoint_json TEXT, FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE);",
+            "DROP TABLE production_checkpoints; CREATE TABLE production_checkpoints (book_id TEXT NOT NULL, checkpoint_json TEXT NOT NULL, FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE);",
+            "ALTER TABLE chapters DROP COLUMN is_skipped; ALTER TABLE chapters ADD COLUMN is_skipped INTEGER NOT NULL DEFAULT 1;",
+        ]
+        for corruption in corruptions {
+            let fixture = try makeFrozenV5Fixture()
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            _ = try AudiobookProjectStore(root: fixture.root)
+            _ = try sqlite(fixture.root, sql: corruption)
+            let shape = try schemaShape(fixture.root), rows = try storedRows(fixture.root)
+            XCTAssertThrowsError(try AudiobookProjectStore(root: fixture.root), corruption)
+            XCTAssertEqual(try schemaShape(fixture.root), shape, corruption)
+            XCTAssertEqual(try storedRows(fixture.root), rows, corruption)
+            XCTAssertEqual(try sqlite(fixture.root, sql: "PRAGMA user_version;"), [["6"]])
+        }
+    }
+
+    func testUnversionedNonemptyDatabaseIsRejectedWithoutMutation() throws {
+        let fixture = try makeFrozenV5Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        _ = try sqlite(fixture.root, sql: "PRAGMA user_version = 0;")
+        let shape = try schemaShape(fixture.root), rows = try storedRows(fixture.root)
+        XCTAssertThrowsError(try AudiobookProjectStore(root: fixture.root))
+        XCTAssertEqual(try sqlite(fixture.root, sql: "PRAGMA user_version;"), [["0"]])
+        XCTAssertEqual(try schemaShape(fixture.root), shape)
+        XCTAssertEqual(try storedRows(fixture.root), rows)
+    }
+
+    func testFrozenV5MigratedSchemaMatchesFreshDatabase() throws {
+        let fixture = try makeFrozenV5Fixture(), freshRoot = try makeTempRoot()
+        defer {
+            try? FileManager.default.removeItem(at: fixture.root)
+            try? FileManager.default.removeItem(at: freshRoot)
+        }
+        _ = try AudiobookProjectStore(root: fixture.root)
+        _ = try AudiobookProjectStore(root: freshRoot)
+        XCTAssertEqual(try schemaShape(fixture.root), try schemaShape(freshRoot))
+        XCTAssertEqual(try sqlite(fixture.root, sql: "PRAGMA user_version;"), try sqlite(freshRoot, sql: "PRAGMA user_version;"))
+    }
+
+    private func makeLegacyCopy(_ fixture: ChapterEditFixture, schemaVersion: Int = 1) throws -> URL {
+        precondition(schemaVersion == 1 || schemaVersion == 2)
         let copy = try makeTempRoot()
         let assets = fixture.root.appendingPathComponent("books", isDirectory: true)
         if FileManager.default.fileExists(atPath: assets.path) {
@@ -52,7 +291,7 @@ final class AudiobookStoreTests: XCTestCase {
             ALTER TABLE voice_bindings RENAME TO fixture_old_bindings;
             CREATE TABLE voice_bindings (
                 book_id TEXT NOT NULL, role_id TEXT NOT NULL, voice_id TEXT NOT NULL,
-                voice_revision TEXT NOT NULL, model_revision TEXT NOT NULL,
+                voice_revision TEXT\(schemaVersion == 1 ? " NOT NULL" : ""), model_revision TEXT NOT NULL,
                 is_synthesis_ready INTEGER NOT NULL, allowed_speed REAL NOT NULL,
                 caller_seed INTEGER, binding_digest TEXT NOT NULL,
                 PRIMARY KEY (book_id, role_id),
@@ -62,7 +301,7 @@ final class AudiobookStoreTests: XCTestCase {
             DROP TABLE fixture_old_bindings;
             DROP TABLE IF EXISTS voice_registration_intents;
             DROP TABLE IF EXISTS casting_revisions;
-            PRAGMA user_version = 1;
+            PRAGMA user_version = \(schemaVersion);
             """)
         for column in ["voice_policy_json", "manual_tier", "voice_traits_json", "required_voice_traits_json"] {
             // Only the synthetic copy is downgraded to the historical fixture shape.
@@ -76,9 +315,8 @@ final class AudiobookStoreTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let old = AudiobookVoiceBinding(roleID: fixture.narrator.id, voiceID: "legacy", voiceRevision: "v1", modelRevision: "unknown")
         try await fixture.store.saveVoiceBinding(bookID: fixture.bookID, binding: old)
-        let copy = try makeLegacyCopy(fixture)
+        let copy = try makeLegacyCopy(fixture, schemaVersion: 2)
         defer { try? FileManager.default.removeItem(at: copy) }
-        _ = try sqlite(copy, sql: "PRAGMA user_version = 2;")
         let migrated = try AudiobookProjectStore(root: copy)
         XCTAssertGreaterThanOrEqual(Int(try XCTUnwrap(try sqlite(copy, sql: "PRAGMA user_version;").first?.first)) ?? 0, 3)
         let policies = try sqlite(copy, sql: "SELECT voice_policy_json FROM characters;")
@@ -91,9 +329,8 @@ final class AudiobookStoreTests: XCTestCase {
     func testPolicyMigrationKeepsUnknownIdentity() async throws {
         let fixture = try await makeChapterEditFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let copy = try makeLegacyCopy(fixture)
+        let copy = try makeLegacyCopy(fixture, schemaVersion: 2)
         defer { try? FileManager.default.removeItem(at: copy) }
-        _ = try sqlite(copy, sql: "PRAGMA user_version = 2;")
         let migrated = try AudiobookProjectStore(root: copy)
         let bindings = try await migrated.voiceBindings(for: fixture.bookID)
         XCTAssertTrue(bindings.isEmpty)
@@ -104,9 +341,9 @@ final class AudiobookStoreTests: XCTestCase {
     func testPolicyMigrationInterruptionRecovers() async throws {
         let fixture = try await makeChapterEditFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let copy = try makeLegacyCopy(fixture)
+        let copy = try makeLegacyCopy(fixture, schemaVersion: 2)
         defer { try? FileManager.default.removeItem(at: copy) }
-        _ = try sqlite(copy, sql: "PRAGMA user_version = 2; ALTER TABLE characters ADD COLUMN voice_policy_json TEXT;")
+        _ = try sqlite(copy, sql: "ALTER TABLE characters ADD COLUMN voice_policy_json TEXT;")
         let before = try sqlite(copy, sql: "SELECT * FROM books;")
         XCTAssertThrowsError(try AudiobookProjectStore(root: copy))
         XCTAssertEqual(try sqlite(copy, sql: "PRAGMA user_version;"), [["2"]])

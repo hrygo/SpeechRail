@@ -100,6 +100,17 @@ def test_narrowing_the_swiftpm_target_stops_the_checker_claiming_equivalence() -
     assert any("narrows" in problem for problem in problems), problems
 
 
+def test_fixture_resources_do_not_narrow_swift_test_sources() -> None:
+    module = _checker()
+    problems = module.find_drift(  # type: ignore[attr-defined]
+        package_body='.testTarget(name: "X", resources: [.copy("Fixtures")])',
+        compiled_tests={"StoreTests.swift"},
+        on_disk={"StoreTests.swift"},
+        allowlist={},
+    )
+    assert problems == []
+
+
 def test_the_project_file_parser_handles_the_dialect_xcode_emits() -> None:
     """Comments, quoted strings and nesting all appear in a real pbxproj.
 
