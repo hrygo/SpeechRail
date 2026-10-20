@@ -665,6 +665,35 @@ final class AudiobookExportTests: XCTestCase {
         )
     }
 
+    func testExportReadinessIgnoresSkippedChaptersAndBlocksMissingAudio() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let revisionController = AudiobookRevisionController(store: store)
+        let fixture = try await makeTwoChapterExportFixture(
+            store: store,
+            revisionController: revisionController,
+            completeSecondChapter: false
+        )
+        let chapters = try await store.chapters(for: fixture.bookID).sorted { $0.ordinal < $1.ordinal }
+        var ready = chapters[0]
+        ready.currentChapterRevisionID = UUID()
+        let blocked = chapters[1]
+        var skipped = chapters[1]
+        skipped.isSkipped = true
+
+        let partial = AudiobookExportReadiness(chapters: [ready, blocked])
+        XCTAssertEqual(partial.readyChapterIDs, [ready.id])
+        XCTAssertEqual(partial.blockingChapterIDs, [blocked.id])
+        XCTAssertFalse(partial.isFullBookReady)
+
+        let skippedPartial = AudiobookExportReadiness(chapters: [ready, skipped])
+        XCTAssertEqual(skippedPartial.readyChapterIDs, [ready.id])
+        XCTAssertTrue(skippedPartial.blockingChapterIDs.isEmpty)
+        XCTAssertTrue(skippedPartial.isFullBookReady)
+
+        let noAudio = AudiobookExportReadiness(chapters: [skipped])
+        XCTAssertFalse(noAudio.isFullBookReady)
+    }
+
     func testPreCancelledRequestRejectsBeforePreparing() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
         let revisionController = AudiobookRevisionController(store: store)

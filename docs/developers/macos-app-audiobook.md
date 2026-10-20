@@ -33,7 +33,7 @@ date: 2026-10-19
 - **`AudiobookPronunciationController.swift`**：把本书词表经 `AudiobookPronunciationClient` 保存为不可变 revision（header `SpeechRail-Pronunciation-Set: <set_id>@<revision>`），本地缓存于 `pronunciation_bindings`。保存冲突（409）不覆盖远端，置 `needsRefresh` 并提示先刷新；刷新先从摘要取最新 revision，再按该 revision 读取词条，可恢复本地缓存缺失或别处更新的场景。渲染请求携带固定 header，片段依赖只对命中词条变化。
 - **`AudiobookListeningController.swift`**：复用 `SharedPlaybackOwner` 唯一播放句柄，支持倍速、章节/段落跳转与收听书签；外部试听先保存当前收听位置，再交出播放权。播放期间按 `progressSampleInterval`（默认 200 ms）采样播放器片内进度，换算片段/章节已播时间，并按 `bookmarkAutosaveInterval`（默认 5 s，复用 `AudiobookLimits.bookmarkAutosaveIntervalSeconds`）自动写书签；暂停、离开或试听抢占前先应用当前采样再保存。采样只接受向前推进的值，seek 后旧回调不会把时间轴拉回。仅显示与保存用 `AudiobookDisplayFormat` 统一时间码与倍速文本。
 - **`AudiobookCoverAssetStore.swift`**：书籍自有封面资产的落盘与读取（`books/<book_id>/cover/cover.<jpg|jpeg|png>`）。安装前校验普通文件、非符号链接、扩展名白名单（`jpg`/`jpeg`/`png`）与 8 MiB 上限，采用同目录临时文件加原子替换；封面随 `books/<book_id>` 由既有废纸篓生命周期携带，不写 SQLite。
-- **`AudiobookMediaVerifier.swift` & `AudiobookExportController.swift`**：导出前校验全部采用切片的磁盘存在性、WAV 头、帧数与 SHA-256；写入 `<app_home>/audiobooks/exports/<request_id>/request.json` 并通过 `SpeechRailControlAgent` 执行 `speechrail media encode-audiobook`，导出完成后用 `AVURLAsset` 做时长、音轨、章节数与封面存在性的二次校验。准备阶段由 Workflow 持有 requestID，可调用 `cancel(requestID:)` 中止编码并显示“未生成任何文件”；保存阶段对已存在的 M4B 文件或 MP3 目录都要求显式替换确认，目录不会被静默整体覆盖。带封面时清单升级为 `audiobook_media_export_v2` 并携带封面相对路径与图像 SHA-256；`chapter_mp3` 与跨书封面在写清单前拒绝。
+- **`AudiobookMediaVerifier.swift` & `AudiobookExportController.swift`**：导出前校验全部采用切片的磁盘存在性、WAV 头、帧数与 SHA-256；写入 `<app_home>/audiobooks/exports/<request_id>/request.json` 并通过 `SpeechRailControlAgent` 执行 `speechrail media encode-audiobook`，导出完成后用 `AVURLAsset` 做时长、音轨、章节数与封面存在性的二次校验。准备阶段由 Workflow 持有 requestID，可调用 `cancel(requestID:)` 中止编码并显示“未生成任何文件”；保存阶段对已存在的 M4B 文件或 MP3 目录都要求显式替换确认，目录不会被静默整体覆盖。导出面板以 `AudiobookExportReadiness` 提前禁用整本 M4B 或空的 MP3 选择，并提供“去制作”定位；准备/保存失败写入 `exportErrorMessage` 在面板内联显示，成功后清除。带封面时清单升级为 `audiobook_media_export_v2` 并携带封面相对路径与图像 SHA-256；`chapter_mp3` 与跨书封面在写清单前拒绝。
 - **`AudiobookWorkflowModel.swift` & `AudiobookProductionWiring.swift`**：`@MainActor @Observable` 顶层编排器，将书架、工作台两页签、收听模式与 `AppModel` / `SharedPlaybackOwner` / `SpeechCreationAdmission` 连接起来；异步读取和制作收尾校验书籍身份与任务代次。
 
 角色分析的 prompt 文本及工作台的段落、片段展示共用 `source.normalizedText(in:)`，不会把排版折行当作语义断句。LLM 仍只引用既有 atom ID；完整覆盖、持久化来源、片段依赖及校验使用原始字节区间。导入不重写已有作品的原文或音频。
@@ -45,7 +45,7 @@ date: 2026-10-19
 ### 1.2 SwiftUI 视图层（仅在 `SpeechRailApp` target 编译）
 
 - **`AudiobookWorkshopView.swift`**：顶层容器与页面头部动作、状态结论横幅、模式切换（书架 / 制作工作台 / 沉浸收听）及导入面板。
-- **`AudiobookBookShelfView.swift`**：书架网格/列表、引导空态、每本书的进度胶囊与直达动作（「继续制作」「收听」「导出」）。
+- **`AudiobookBookShelfView.swift`**：书架网格/列表、引导空态、每本书的进度胶囊与直达动作（「继续制作」「收听」「导出」）；支持把 TXT/EPUB 直接拖入书架，并在移入废纸篓后提供一次性撤销横幅。
 - **`AudiobookBookWorkspaceView.swift`**：左侧章节列表与「整理章节」次级菜单、中央「准备与角色」「制作与返修」两页签、人物与声音面板，以及片段重录、候选对比和显式采用区域。
 - **`AudiobookListeningView.swift`**：收听视图，含章节目录、正文与「返修此段」导航、传输控制条。
 

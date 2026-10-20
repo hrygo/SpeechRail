@@ -38,17 +38,34 @@ public struct AudiobookListeningView: View {
                 }
             }
 
-            HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
-                chapterOutlineColumn
-                    .frame(width: SpeechRailDesignTokens.Layout.sessionListWidth)
+            if !workflow.hasListenableChapter {
+                CardSurface {
+                    SessionEmptyState(
+                        systemImage: "headphones",
+                        title: "还没有可收听的章节",
+                        message: "先在制作台把至少一章生成音频，再回到听书模式逐章收听。已跳过的章节不会出现在可收听列表里。"
+                    ) {
+                        Button("去制作章节") {
+                            workflow.surfaceMode = .workspace
+                            workflow.workbenchTab = .production
+                        }
+                        .speechRailButton(.primary)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 360)
+                }
+            } else {
+                HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
+                    chapterOutlineColumn
+                        .frame(width: SpeechRailDesignTokens.Layout.sessionListWidth)
 
-                followAlongTranscriptColumn
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    followAlongTranscriptColumn
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                transportBar
+                    .frame(height: SpeechRailDesignTokens.Layout.audiobookTransportBarHeight)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            transportBar
-                .frame(height: SpeechRailDesignTokens.Layout.audiobookTransportBarHeight)
         }
     }
 
@@ -59,13 +76,13 @@ public struct AudiobookListeningView: View {
             VStack(alignment: .leading, spacing: 0) {
                 SessionPanelHead(
                     title: "可收听章节",
-                    trailingDetail: "\(workflow.chapters.count) 章"
+                    trailingDetail: "\(listenableChapters.count) 章"
                 )
                 SessionHairline()
 
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                        ForEach(workflow.chapters) { chapter in
+                        ForEach(listenableChapters) { chapter in
                             let isSelected = (workflow.selectedChapterID == chapter.id)
                             let hasCurrent = (chapter.currentChapterRevisionID != nil)
                             let hasPrevious = (chapter.previousChapterRevisionID != nil)
@@ -269,6 +286,10 @@ public struct AudiobookListeningView: View {
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    private var listenableChapters: [AudiobookChapter] {
+        workflow.chapters.filter { !$0.isSkipped }
     }
 
     private var currentChapterTitle: String {

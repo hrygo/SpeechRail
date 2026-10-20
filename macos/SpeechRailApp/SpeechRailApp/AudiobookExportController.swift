@@ -23,6 +23,22 @@ public enum AudiobookExportProfile: String, Codable, CaseIterable, Equatable, Ha
     }
 }
 
+/// 导出门禁的唯一投影：跳过章节不阻塞，也不计入可导出；其余章节必须有当前版本音频。
+public struct AudiobookExportReadiness: Equatable, Sendable {
+    public let readyChapterIDs: [UUID]
+    public let blockingChapterIDs: [UUID]
+
+    public init(chapters: [AudiobookChapter]) {
+        let active = chapters.filter { !$0.isSkipped }
+        readyChapterIDs = active.filter { $0.currentChapterRevisionID != nil }.map(\.id)
+        blockingChapterIDs = active.filter { $0.currentChapterRevisionID == nil }.map(\.id)
+    }
+
+    public var readyChapterCount: Int { readyChapterIDs.count }
+    public var blockingChapterCount: Int { blockingChapterIDs.count }
+    public var isFullBookReady: Bool { !readyChapterIDs.isEmpty && blockingChapterIDs.isEmpty }
+}
+
 public struct AudiobookOverwriteConsent: Codable, Equatable, Sendable {
     public let destinationURL: URL
     public let existingFileSize: Int64

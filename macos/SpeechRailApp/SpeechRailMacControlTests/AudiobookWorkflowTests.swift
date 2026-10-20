@@ -1169,6 +1169,45 @@ final class AudiobookWorkflowTests: XCTestCase {
         XCTAssertFalse(workflow.shelfBooks.contains(where: { $0.id == targetBook.bookID }))
     }
 
+    func testListeningModeShowsGuidanceWhenNoChapterHasAudio() async throws {
+        let (workflow, _) = makeWorkflow()
+        _ = try await importBook(
+            into: workflow,
+            fileName: "listening_empty.txt",
+            text: "第一章 静默\n尚未制作音频。\n"
+        )
+        XCTAssertFalse(workflow.hasListenableChapter)
+
+        await workflow.startListening()
+        XCTAssertEqual(workflow.surfaceMode, .listening)
+        XCTAssertNil(workflow.errorMessage)
+    }
+
+    func testTrashingBookOffersUndoAndRestoresExactlyThatBook() async throws {
+        let (workflow, _) = makeWorkflow()
+        let firstBook = try await importBook(
+            into: workflow,
+            fileName: "trash_undo_first.txt",
+            text: "第一章 第一本\n第一本正文。\n"
+        )
+        _ = try await importBook(
+            into: workflow,
+            fileName: "trash_undo_second.txt",
+            text: "第一章 第二本\n第二本正文。\n"
+        )
+
+        await workflow.trashBook(firstBook.bookID)
+        XCTAssertEqual(workflow.lastTrashedBookID, firstBook.bookID)
+        XCTAssertTrue(workflow.trashUndoMessage?.contains("trash_undo_first") == true)
+        XCTAssertFalse(workflow.shelfBooks.contains(where: { $0.id == firstBook.bookID }))
+
+        await workflow.undoLastTrash()
+        XCTAssertNil(workflow.lastTrashedBookID)
+        XCTAssertNil(workflow.trashUndoMessage)
+        XCTAssertTrue(workflow.shelfBooks.contains(where: { $0.id == firstBook.bookID }))
+        XCTAssertFalse(workflow.trashedBooks.contains(where: { $0.id == firstBook.bookID }))
+    }
+
     func testLateChapterReadCannotReplaceTheNewBooksChapterContent() async throws {
         let (workflow, _) = makeWorkflow()
         let firstBook = try await importBook(

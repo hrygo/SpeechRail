@@ -4,6 +4,7 @@ import SwiftUI
 public struct AudiobookBookShelfView: View {
     @Environment(AppModel.self) private var appModel
     @State private var openingBookIDs: Set<UUID> = []
+    @State private var isDropTargeted = false
     let onImportTXT: () -> Void
 
     public init(onImportTXT: @escaping () -> Void) {
@@ -25,7 +26,7 @@ public struct AudiobookBookShelfView: View {
                     SessionEmptyState(
                         systemImage: "books.vertical",
                         title: workflow.shelfBooks.isEmpty ? "还没有导入有声书项目" : "没有符合筛选条件的书籍",
-                        message: "导入本地 TXT 电子书后，先完成全书人物分析与配声确认，再逐章制作高保真多角色有声书。原文与音频均保存在本机独立作品库中。"
+                        message: "导入本地 TXT 或 EPUB 书稿后，先完成全书人物分析与配声确认，再逐章制作高保真多角色有声书。也可以把书稿直接拖进书架；原文与音频均保存在本机独立作品库中。"
                     ) {
                         Button("导入电子书…", action: onImportTXT)
                             .speechRailButton(.primary)
@@ -44,6 +45,36 @@ public struct AudiobookBookShelfView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let url = urls.first(where: { Self.isSupportedBookFile($0) }) else { return false }
+            Task { await workflow.prepareImport(fileURL: url) }
+            return true
+        } isTargeted: { targeted in
+            isDropTargeted = targeted
+        }
+        .overlay {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.container, style: .continuous)
+                    .fill(SpeechRailDesignTokens.Color.rail.opacity(0.10))
+                    .overlay {
+                        VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                            Image(systemName: "arrow.down.doc")
+                                .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                            Text("松开以导入书稿")
+                                .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                            Text("支持 TXT 与无 DRM 的 EPUB")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        }
+                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    }
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+
+    private static func isSupportedBookFile(_ url: URL) -> Bool {
+        ["txt", "epub"].contains(url.pathExtension.lowercased())
     }
 
     @ViewBuilder
