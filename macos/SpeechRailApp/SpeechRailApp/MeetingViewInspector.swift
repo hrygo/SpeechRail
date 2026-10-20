@@ -36,7 +36,7 @@ extension MeetingView {
     /// `reviewLines` / `reviewSpeakerNames` / `reviewMinutes`），没有一处回读 `meeting`。
     private func reviewInspectorCard(_ record: SessionRecord) -> some View {
         CardSurface {
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
                 CardHead(title: "历史会议信息") {
                     Button("返回当前会议") { closeReview() }
                         .buttonStyle(.link)
@@ -45,7 +45,8 @@ extension MeetingView {
                 Text(record.title ?? "这一场会议")
                     .font(SpeechRailDesignTokens.Typography.bodyMedium)
                     .fixedSize(horizontal: false, vertical: true)
-                VStack(alignment: .leading, spacing: 0) {
+                SessionHairline()
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                     inspectorRow(
                         "时间",
                         record.startedAt.formatted(date: .numeric, time: .shortened)
@@ -60,11 +61,11 @@ extension MeetingView {
                     inspectorRow("纪要", reviewMinutesVersionFact)
                     inspectorRow("保存位置", session.libraryURL.lastPathComponent)
                 }
+                SessionHairline()
                 Text("这一栏说的是这一场当时的样子：说话人名与纪要都按当时记录的原样显示。改名与合并要在那一场刚结束、这一页还停在这一场时做。")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, SpeechRailDesignTokens.Spacing.micro)
             }
             .padding(SpeechRailDesignTokens.Spacing.md)
         }
@@ -78,9 +79,10 @@ extension MeetingView {
 
     private var thisMeetingCard: some View {
         CardSurface {
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
                 CardHead(title: "本次会议") { EmptyView() }
-                VStack(alignment: .leading, spacing: 0) {
+                SessionHairline()
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                     inspectorRow("时长", SessionCoordinator.formatted(meeting.elapsed))
                     inspectorRow("文字记录", "\(meeting.storedLineCount) 段")
                     inspectorRow(
@@ -95,6 +97,7 @@ extension MeetingView {
                     inspectorRow("本地存储", "仅本机安全存盘")
                 }
                 if let failure = meeting.lastFailure {
+                    SessionHairline()
                     HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.xs) {
                         Image(systemName: "info.circle")
                             .foregroundStyle(SpeechRailDesignTokens.Color.rail)
@@ -103,7 +106,6 @@ extension MeetingView {
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    .padding(.top, SpeechRailDesignTokens.Spacing.xs)
                 }
             }
             .padding(SpeechRailDesignTokens.Spacing.md)

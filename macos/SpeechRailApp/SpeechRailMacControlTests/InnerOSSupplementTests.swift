@@ -349,4 +349,16 @@ final class InnerOSSupplementTests: XCTestCase {
     func testSentenceSplittingOfEmptyAnswerIsEmpty() {
         XCTAssertTrue(InnerOSSession.selectableSentences(in: "   ").isEmpty)
     }
+
+    /// 会中私聊快捷提问预设：每项必须具备唯一标识、简洁标题、图标与非空本机提示词。
+    func testQuickPromptsProvideDistinctActionableTemplates() {
+        let prompts = InnerOSQuickPrompt.defaults
+        XCTAssertEqual(prompts.count, 4)
+        XCTAssertEqual(Set(prompts.map(\.id)).count, prompts.count)
+        for item in prompts {
+            XCTAssertFalse(item.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            XCTAssertFalse(item.icon.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            XCTAssertFalse(item.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+    }
 }

@@ -209,11 +209,15 @@ public enum SpeechRailDesignTokens {
         // `纪要 / 转录` 分段控件**不定宽**：稿里的 `segmented()` 是按内容排的
         // （每格 padX 9 + 标签），系统分段控件同样按内容定宽，两段都是两个字也不会跳。
         // 实现里曾经钉过 160，那是稿上没有的数（稿画出来是 90），所以撤掉。
-        /// 内心 OS 抽屉展开后的高度上限。**再高就会把转录挤出视野**，
-        /// 而那正好与"边听边记"的用法相反（`SESSIONS-SPEC` §14.2 的形态那一行）。
-        public static let innerOSDrawerExpandedHeight: CGFloat = 220
-        /// 抽屉展开后左栏（问答历史 + 输入）的宽度。右栏吃剩余宽度。
-        public static let innerOSHistoryColumnWidth: CGFloat = 260
+        /// 会前准备区「音频拾音环境」展开后的最大高度上限，避免展开后把下方「会议记录库」挤出视口。
+        public static let meetingSourceOptionsMaxHeight: CGFloat = 220
+        /// 会中私聊抽屉展开后问答主区的高度上限（下方另配独立通栏输入带）。
+        /// 兼顾左侧提问历史与右侧证据/措辞卡片的可读性，同时不把上方实时转录流挤出视野。
+        public static let innerOSDrawerExpandedHeight: CGFloat = 240
+        /// 抽屉展开后左栏（本场提问历史列表）的宽度；提问输入框下移为底部通栏后，左栏收紧以让出右侧阅读区。
+        public static let innerOSHistoryColumnWidth: CGFloat = 236
+        /// 会中私聊「可以直接念的措辞」高亮卡片左侧导轨竖条宽度。
+        public static let innerOSDraftAccentBarWidth: CGFloat = 3
 
         // MARK: 字幕带（窗口级浮层，不走卡片几何）
         //
