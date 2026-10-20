@@ -1,7 +1,9 @@
 import Foundation
+import os
 
 /// Two stable input slots. Reconnection joins the retired reader before replacing its slot.
 actor StreamMixer {
+    private static let diagnostics = Logger(subsystem: "com.speechrail.desktop", category: "AudioCapture")
     struct Snapshot: Sendable {
         var level: Double
         var gaps: Int
@@ -90,15 +92,28 @@ actor StreamMixer {
         if stopped { pair.continuation.finish(.cancelled); return pair.stream }
         if automaticTicks {
             ticker = Task { [weak self, now, sleepUntil] in
+                var deadline = now()
                 while !Task.isCancelled {
-                    let current = now()
-                    await self?.tick(at: current)
-                    do { try await sleepUntil(current.addingReportingOverflow(40_000_000).partialValue) }
+                    guard let next = await self?.scheduledTick(deadline: deadline) else { return }
+                    deadline = next
+                    do { try await sleepUntil(deadline) }
                     catch { return }
                 }
             }
         }
         return pair.stream
+    }
+
+    private func scheduledTick(deadline: UInt64) -> UInt64 {
+        tick(at: now())
+        // Keep one time base: a small late wake must not slow the PCM clock.
+        // After a large stall skip expired deadlines instead of replaying ticks.
+        let current = now(), period: UInt64 = 40_000_000
+        let elapsed = current >= deadline ? current - deadline : 0
+        let intervals = elapsed / period + 1
+        let next = deadline.addingReportingOverflow(intervals * period)
+        nextTick = next.overflow ? UInt64.max : next.partialValue
+        return nextTick!
     }
 
     func attach(sourceID: UUID, stream: AudioChunkStream) async throws {
@@ -162,7 +177,10 @@ actor StreamMixer {
 
     private func ingest(sourceID: UUID, generation: UUID, chunk: AudioChunk) -> Bool {
         guard (!stopped || draining), slots[sourceID]?.active == true, slots[sourceID]?.generation == generation else { return false }
-        guard slots[sourceID]?.ring.append(chunk) == true else { fail(.overflow); return false }
+        guard slots[sourceID]?.ring.append(chunk) == true else {
+            Self.diagnostics.error("mixer_input_overflow queued_bytes=\(self.slots[sourceID]?.ring.bytes ?? 0) incoming_bytes=\(chunk.pcm.count) ticks=\(self.ticks)")
+            fail(.overflow); return false
+        }
         return true
     }
 

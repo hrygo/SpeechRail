@@ -1,5 +1,6 @@
 import Foundation
 import Synchronization
+import os
 
 public struct AudioCaptureStamp: Sendable, Equatable {
     public let captureEpoch: UUID
@@ -186,6 +187,7 @@ public struct AudioChunkStream: AsyncSequence, Sendable {
 }
 
 fileprivate final class AudioChannelCore: Sendable {
+    private static let diagnostics = Logger(subsystem: "com.speechrail.desktop", category: "AudioCapture")
     private typealias Waiter = CheckedContinuation<AudioChunk?, any Error>
     private struct State {
         var entries: [AudioChunk?]
@@ -239,6 +241,8 @@ fileprivate final class AudioChannelCore: Sendable {
             else if chunk.pcm.count > limits.maxBytes - state.bytes || state.count == limits.maxChunks { reason = .overflow }
             else { reason = nil }
             if let reason {
+                let queuedBytes = state.bytes, queuedChunks = state.count
+                Self.diagnostics.error("channel_failed reason=\(reason.rawValue, privacy: .public) queued_bytes=\(queuedBytes) queued_chunks=\(queuedChunks) incoming_bytes=\(chunk.pcm.count) sequence=\(sequence ?? 0)")
                 let error = AudioStreamError(reason: reason, captureEpoch: chunk.captureStamp?.captureEpoch ?? state.epoch,
                     sourceID: chunk.captureStamp?.sourceID ?? state.sourceID, expectedSequence: expected,
                     receivedSequence: sequence, droppedSamples: max(dropped ?? 0, watermarkDrop))

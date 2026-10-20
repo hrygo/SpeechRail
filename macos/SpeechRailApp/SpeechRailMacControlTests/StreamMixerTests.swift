@@ -1,11 +1,48 @@
 import Foundation
 import Testing
+import Synchronization
 #if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
 #endif
 
 @Suite(.timeLimit(.minutes(1)))
 struct StreamMixerTests {
+    @Test func testSchedulerDoesNotAccumulateSmallWakeDelays() async throws {
+        let clock = Mutex((now: UInt64(1_000_000_000), deadlines: [UInt64]()))
+        let mixer = StreamMixer(now: { clock.withLock { $0.now } }, sleepUntil: { deadline in
+            let count = clock.withLock {
+                $0.deadlines.append(deadline)
+                $0.now = deadline + 2_000_000
+                return $0.deadlines.count
+            }
+            if count >= 50 { try await Task.sleep(for: .seconds(60)) }
+            else { await Task.yield() }
+        })
+        _ = await mixer.start()
+        while clock.withLock({ $0.deadlines.count }) < 50 { await Task.yield() }
+        await mixer.stop()
+        let deadlines = clock.withLock { Array($0.deadlines.prefix(50)) }
+        #expect(deadlines == (1...50).map { 1_000_000_000 + UInt64($0) * 40_000_000 })
+        #expect(await mixer.snapshot().activeTasks == 0)
+    }
+
+    @Test func testSchedulerSkipsExpiredDeadlinesAfterLargeWakeDelay() async throws {
+        let clock = Mutex((now: UInt64(1_000_000_000), deadlines: [UInt64]()))
+        let mixer = StreamMixer(now: { clock.withLock { $0.now } }, sleepUntil: { deadline in
+            let count = clock.withLock {
+                $0.deadlines.append(deadline)
+                $0.now = deadline + ($0.deadlines.count == 1 ? 1_000_000_000 : 0)
+                return $0.deadlines.count
+            }
+            if count >= 2 { try await Task.sleep(for: .seconds(60)) }
+        })
+        _ = await mixer.start()
+        while clock.withLock({ $0.deadlines.count }) < 2 { await Task.yield() }
+        await mixer.stop()
+        #expect(clock.withLock { $0.deadlines } == [1_040_000_000, 2_080_000_000])
+        #expect(await mixer.snapshot().tickCount == 2)
+    }
+
     private func pcm(_ value: Int16, frames: Int = 960) -> Data {
         [Int16](repeating: value.littleEndian, count: frames).withUnsafeBytes { Data($0) }
     }

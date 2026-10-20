@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import Testing
 #if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
 #endif
@@ -11,6 +12,20 @@ import XCTest
 /// - 电平只是电平，不是识别也不是保存（MC-74）；
 /// - 静音麦克风、暂停全部、恢复是三件事（MC-16）；
 /// - 检查失败之后输入与来源原样保留（MC-04）。
+struct MeetingSourceInterruptionTests {
+    @Test(arguments: [MeetingSourcePresentation.Capture.reconnecting, .interrupted])
+    func disconnectedSourceNeverClaimsItIsRecording(capture: MeetingSourcePresentation.Capture) {
+        let view = MeetingSourcePresentation(capture: capture,
+            selection: .init(usesMicrophone: false, systemAppNames: ["测试会议"]),
+            isRecognizing: true, savedLineCount: 2)
+        #expect(view.title.contains("正在录音") == false)
+        #expect(view.sourceSummary.contains("正在录：") == false)
+        #expect(view.facts.contains("识别连接已建立") == false)
+        #expect(view.facts.contains("已存下 2 句"))
+        #expect(view.sourceSummary.contains("麦克风") == false)
+    }
+}
+
 final class MeetingSourcePresentationTests: XCTestCase {
     private let micOnly = MeetingSourcePresentation.Selection(
         usesMicrophone: true, systemAppNames: []

@@ -8,6 +8,51 @@ import Testing
 
 @Suite(.timeLimit(.minutes(1)))
 struct AudioCaptureDrainTests {
+    @Test func systemAudioChunksSurviveRepeatedPrefixRemoval() {
+        var pending = Data()
+        var delivered = Data()
+        var expected = Data()
+        for cycle in 0..<8 {
+            let input = Data((0..<2_500).map { UInt8(($0 + cycle) % 251) })
+            expected.append(input)
+            pending.append(input)
+            _ = CoreAudioTapCapture.drainPCMChunks(from: &pending) { pcm, _ in
+                #expect(pcm.count == 1_920)
+                delivered.append(pcm)
+            }
+            #expect(pending.count < 1_920)
+        }
+        _ = CoreAudioTapCapture.drainPCMChunks(from: &pending, flushPartial: true) { pcm, _ in
+            delivered.append(pcm)
+        }
+        #expect(delivered == expected)
+        #expect(pending.isEmpty)
+    }
+
+    @Test func systemAudioChunksRespectAnExistingSliceAndReportByteOffsets() {
+        let input = Data((0..<5_000).map { UInt8($0 % 251) })
+        var pending = input[100..<4_500]
+        var chunks: [Data] = []
+        var offsets: [Int] = []
+        let consumed = CoreAudioTapCapture.drainPCMChunks(from: &pending) { pcm, offset in
+            chunks.append(pcm)
+            offsets.append(offset)
+        }
+        #expect(consumed == 3_840)
+        #expect(offsets == [0, 1_920])
+        #expect(chunks.reduce(into: Data()) { $0.append($1) } == input[100..<3_940])
+        #expect(pending == input[3_940..<4_500])
+
+        var tail = Data()
+        let tailConsumed = CoreAudioTapCapture.drainPCMChunks(from: &pending, flushPartial: true) { pcm, offset in
+            #expect(offset == 0)
+            tail.append(pcm)
+        }
+        #expect(tailConsumed == 560)
+        #expect(tail == input[3_940..<4_500])
+        #expect(pending.isEmpty)
+    }
+
     @Test func testRawTimelineKeepsOldestUnreadCaptureAcrossCallbackPause() throws {
         let ring = AudioSampleRing(capacity: 15)
         #expect(ring.beginCapture(uptimeNanoseconds: 1_000_000_000))
