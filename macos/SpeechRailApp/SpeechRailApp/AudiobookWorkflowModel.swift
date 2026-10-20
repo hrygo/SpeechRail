@@ -3086,14 +3086,27 @@ public final class AudiobookWorkflowModel {
         }
     }
 
-    /// 导出面板的“去制作”动作：关掉面板，定位到第一处未就绪章节。
+    /// 导出面板的“去处理”动作：关掉面板，定位到第一处未就绪章节，并切到能解决该阻塞的页签。
     public func focusFirstExportBlockingChapter() {
         guard let chapter = exportBlockingChapters.first else { return }
         isShowingExportSheet = false
         preparedExport = nil
         surfaceMode = .workspace
-        workbenchTab = .production
         selectedChapterID = chapter.id
+
+        if let reason = exportAudit?.blockers.first(where: { $0.chapterID == chapter.id })?.reason {
+            switch reason {
+            case .notAnalyzed:
+                workbenchTab = .preparation
+            case .unknownSpeaker:
+                workbenchTab = .preparation
+                Task { await jumpToFirstUnknownSpeaker() }
+            case .missingAudio, .staleAudio, .missingAsset, .emptyChapter:
+                workbenchTab = .production
+            }
+        } else {
+            workbenchTab = .production
+        }
     }
 
     public func prepareExport(
