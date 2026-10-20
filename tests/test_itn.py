@@ -236,3 +236,458 @@ def test_itn_folds_ascii_digits_inside_a_mixed_numeral_run() -> None:
     for text in ["2.5", "23.5%", "12.5秒", "3.5", "二零二六"]:
         assert apply_light_itn(text) == text, f"{text} 不该被改写"
     assert apply_light_itn("二三点五") == "23.5"
+
+
+@pytest.mark.parametrize("text", [
+    "增长了百分之五十几",
+    "增长了百分之五十多",
+    "增长了百分之五十余",
+    "增长了百分之二十来",
+    "增长了百分之五十来个",
+    "大约百分之五十几左右",
+    "完成度三点五几",
+    "完成度三点五多",
+])
+def test_itn_preserves_approximate_values(text: str) -> None:
+    """A trailing 几/多/余/来 makes the value a bound, not a closed number."""
+
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize("text", [
+    "他一次次地尝试",
+    "一天天过去",
+    "一秒秒地数",
+    "一次又一次",
+    "一次一次地确认",
+    "一天一天地等",
+    "一次一个地处理",
+    "三次五次",
+])
+def test_itn_preserves_repeated_units(text: str) -> None:
+    """一次次 / 一次又一次 repeat a classifier; neither copy is a count."""
+
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize("text", [
+    "一次性",
+    "一次性用品",
+    "一次函数",
+    "一次能源",
+    "一次设备",
+    "一次成型",
+    "二次开发",
+    "二次加工",
+    "二次分配",
+    "二次验证",
+    "二次编码",
+    "二次采样",
+])
+def test_itn_preserves_ci_lexical_compounds(text: str) -> None:
+    """次 is a lexical or ordinal morpheme in these technical phrases."""
+
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize("text", [
+    "二分法",
+    "三分法",
+    "四分卫",
+    "五分制",
+    "四分五裂",
+    "一分为二",
+    "三分球",
+    "五分裤",
+    "七分袖",
+])
+def test_itn_preserves_fen_lexical_compounds(text: str) -> None:
+    """分 is a morpheme in these words, not a minute/cent/score unit."""
+
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize("text", [
+    "万岁",
+    "中华人民共和国万岁",
+    "万岁爷",
+    "千岁",
+])
+def test_itn_preserves_wan_sui_titles(text: str) -> None:
+    """A bare 万/千 before 岁 is a title or exclamation, not an age."""
+
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize("text", [
+    "一日三秋",
+    "一日千里",
+    "一日为师",
+    "一日不见",
+    "一日之计在于晨",
+    "二月二，龙抬头。",
+    "三月三，上巳节。",
+    "九月九，重阳节。",
+    "三月发布",
+    "三月承诺",
+    "六月飞雪",
+    "八月未央",
+    "四月物语",
+    "五日京兆",
+    "十日终焉",
+    "三天两头",
+    "一天一个样",
+    "五月天",
+    "五月花",
+    "二月河",
+    "三月天",
+    "七月流火",
+    "十月围城",
+    "三月期",
+    "十日谈",
+    "二人转",
+    "三人行必有我师",
+    "三人成虎",
+    "万人空巷",
+    "万人迷",
+    "万人坑",
+    "万人敌",
+    "千人一面",
+    "百人一首",
+    "一人得道，鸡犬升天",
+    "一人做事一人当",
+    "一人之下，万人之上",
+    "两人三足",
+    "十人九志",
+    "一元复始",
+    "一元二次方程",
+])
+def test_itn_preserves_unit_idioms(text: str) -> None:
+    """The unit is part of an idiom or term, so the phrase is left as spoken."""
+
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("耗时三分钟", "耗时3分钟"),
+    ("五分钱", "5分钱"),
+    ("三分的差距", "3分的差距"),
+    ("得了三分。", "得了3分。"),
+    ("他今年百岁", "他今年100岁"),
+    ("三月五日", "3月5日"),
+    ("三月份", "3月份"),
+    ("三月初", "3月初"),
+    ("三月中旬", "3月中旬"),
+    ("三月里", "3月里"),
+    ("三月", "3月"),
+    ("三月。", "3月。"),
+    ("三月前", "3月前"),
+    ("三月二十三日", "3月23日"),
+    ("三月二十三号", "3月23号"),
+    ("三天后", "3天后"),
+    ("一次会议", "1次会议"),
+    ("第一次开始", "第1次开始"),
+    ("第二次又被拒绝", "第2次又被拒绝"),
+    ("连续两次一致", "连续2次一致"),
+    ("两天一次", "2天1次"),
+    ("两天一致", "2天一致"),
+    ("五月五号", "5月5号"),
+    ("三日游", "3日游"),
+    ("五日内完成", "5日内完成"),
+    ("二人世界", "2人世界"),
+    ("三人随行", "3人随行"),
+    ("十五日之前", "15日之前"),
+    ("其中百分之五十来自学校", "其中50%来自学校"),
+])
+def test_itn_still_converts_closed_quantities(text: str, expected: str) -> None:
+    """Narrowing the rules must not drop unambiguous measurement contexts."""
+
+    assert apply_light_itn(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "十点零五",
+    "十点零五分",
+    "七点四十",
+    "七点四十分",
+    "十二点三十分",
+    "五点零五分",
+    "三点十五分",
+    "九点九分",
+])
+def test_itn_preserves_clock_times(text: str) -> None:
+    """NUM点NUM分 is a clock, and a partial numeral run must never be rewritten."""
+
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize("text", [
+    "三点一四",
+    "百分之七点四十",
+    "百分之三点十五",
+])
+def test_itn_preserves_two_digit_decimals_that_could_be_clock_minutes(
+    text: str,
+) -> None:
+    """Two fractional digits can be minutes; only a closed context disambiguates."""
+
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("三点一四一五九", "3.14159"),
+    ("三点一四米", "3.14米"),
+    ("三点十四秒", "3.14秒"),
+    ("三点十四米", "3.14米"),
+    ("十点零五秒", "10.05秒"),
+    ("百分之三点一四", "3.14%"),
+    ("三点五。", "3.5。"),
+])
+def test_itn_still_converts_decimals_with_a_closed_context(
+    text: str, expected: str
+) -> None:
+    assert apply_light_itn(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "三点十四秒",
+    "十点零五秒",
+    "三点一四米",
+    "七点四十万",
+])
+def test_itn_is_idempotent_on_closed_decimals(text: str) -> None:
+    once = apply_light_itn(text)
+    assert apply_light_itn(once) == once
+
+
+@pytest.mark.parametrize("text", [
+    "二元组",
+    "三元组",
+    "一元论",
+    "一元化",
+    "同一元素",
+    "三元式",
+    "三元里",
+])
+def test_itn_preserves_yuan_lexical_compounds(text: str) -> None:
+    """A bare 元 after a single digit is often a term, not a currency amount."""
+
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("一元钱", "1元钱"),
+    ("十元", "10元"),
+    ("五百元", "500元"),
+    ("两万元", "20000元"),
+    ("二零元", "20元"),
+    ("价值五百美元", "价值500美元"),
+])
+def test_itn_still_converts_currency_with_an_explicit_context(
+    text: str, expected: str
+) -> None:
+    assert apply_light_itn(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "二分",
+    "anchor 二分、匹配输出一致",
+    "九点九分",
+    "十分的好",
+    "百分之三点五分",
+])
+def test_itn_preserves_non_measure_fen(text: str) -> None:
+    """A bare 分 at a boundary is not enough evidence for a score."""
+
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("得了三分。", "得了3分。"),
+    ("他考了九十分", "他考了90分"),
+    ("三分的差距", "3分的差距"),
+    ("五分钟", "5分钟"),
+    ("十分钟后", "10分钟后"),
+    ("五分钱", "5分钱"),
+    ("十分钱", "10分钱"),
+    ("满分一百分。", "满分100分。"),
+])
+def test_itn_still_converts_closed_fen_contexts(
+    text: str, expected: str
+) -> None:
+    assert apply_light_itn(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "下一次请求",
+    "每一次人机对话",
+    "这一次的失败",
+    "上一次成功",
+    "前一次",
+    "后一次",
+    "同一次复发",
+    "另一次",
+    "任何一次失败",
+    "一次只运行一个服务",
+    "二次量化",
+    "二次根式",
+    "二次幂",
+    "三次产业",
+    "二次感染",
+    "二次伤害",
+    "二次事故",
+    "二次销售",
+    "二次传播",
+    "二次回归",
+    "二次压缩",
+    "二次排序",
+    "二次启动",
+    "二次加载",
+    "二次处理",
+    "二次训练",
+])
+def test_itn_preserves_determiner_and_lexical_ci(text: str) -> None:
+    """一次 in a determiner phrase or a degree term is not a count."""
+
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("第一次开始", "第1次开始"),
+    ("第二次又被拒绝", "第2次又被拒绝"),
+    ("一次会议", "1次会议"),
+    ("连续两次一致", "连续2次一致"),
+    ("两天一次", "2天1次"),
+])
+def test_itn_still_converts_closed_ci_counts(text: str, expected: str) -> None:
+    assert apply_light_itn(text) == expected
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("一次请求", "1次请求"),
+    ("两次独立", "2次独立"),
+    ("三次重复", "3次重复"),
+    ("一次失败", "1次失败"),
+    ("一次成功", "1次成功"),
+    ("一次运行", "1次运行"),
+    ("一次处理", "1次处理"),
+    ("一次机会", "1次机会"),
+    ("一次测试", "1次测试"),
+])
+def test_itn_still_converts_count_continuations(
+    text: str, expected: str
+) -> None:
+    assert apply_light_itn(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "前一天",
+    "后一天",
+    "同一天",
+    "每一天",
+    "这一天",
+    "那一天",
+    "某一天",
+    "哪一天",
+    "一天到晚",
+    "一天比一天",
+])
+def test_itn_preserves_determiner_and_idiomatic_tian(text: str) -> None:
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("三天前", "3天前"),
+    ("两天", "2天"),
+    ("一天时间", "1天时间"),
+    ("第二天", "第2天"),
+])
+def test_itn_still_converts_closed_tian_counts(
+    text: str, expected: str
+) -> None:
+    assert apply_light_itn(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "同一人",
+    "另一人",
+    "同一个人",
+    "另一个人",
+    "小一号",
+    "大一号",
+    "前一日",
+    "后一日",
+    "这一日",
+    "下一秒",
+    "这一秒",
+    "每一秒",
+])
+def test_itn_preserves_determiner_units(text: str) -> None:
+    """Determiner phrases such as 同一人 or 下一秒 are not closed counts."""
+
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("五号交付", "5号交付"),
+    ("二零号座位", "20号座位"),
+    ("十三号", "13号"),
+    ("十五日之前", "15日之前"),
+    ("三秒", "3秒"),
+    ("五秒", "5秒"),
+    ("总统三人随行", "总统3人随行"),
+    ("由一人写入", "由1人写入"),
+])
+def test_itn_still_converts_closed_unit_counts(
+    text: str, expected: str
+) -> None:
+    assert apply_light_itn(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    # Implicit decimals: the unit rule only sees the first numeral, so a partial
+    # rewrite would leave 1米八 / 5公里二 / 3秒五 behind.
+    "一米八",
+    "一米七五",
+    "一米七五左右",
+    "两米一",
+    "三米五",
+    "五公里二",
+    "三秒五",
+    # Count enumerations that repeat the same classifier.
+    "三番五次",
+    "三番两次",
+    "三回五次",
+    "三遍五次",
+    "几番五次",
+    # Approximate bounds introduced by 上 / 成. 上100人 is not 上百人.
+    "上百人",
+    "上千人",
+    "上万人",
+    "上亿元",
+    "上百万个",
+    "成百上千人",
+    "成千上万人",
+])
+def test_itn_preserves_partial_or_approximate_quantity_shapes(text: str) -> None:
+    assert apply_light_itn(text) == text
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    # 号/楼 close a noun phrase, so a following numeral starts a new one and
+    # the first count still converts.
+    ("五号楼三单元", "5号楼三单元"),
+    ("上三楼", "上3楼"),
+    # 回 here closes the verb 返回; it is not the classifier in 三回五次.
+    ("返回一次", "返回1次"),
+    # 两 is a spoken 2 in a decimal and a percentage all the way through.
+    ("两点五", "2.5"),
+    ("两点五米", "2.5米"),
+    ("两点五倍", "2.5倍"),
+    ("百分之两点五", "2.5%"),
+])
+def test_itn_keeps_whole_expressions_when_narrowing(
+    text: str, expected: str
+) -> None:
+    assert apply_light_itn(text) == expected
+    assert apply_light_itn(expected) == expected

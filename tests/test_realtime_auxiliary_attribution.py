@@ -19,7 +19,8 @@ from speechrail.compatibility.openai_realtime import RealtimeAdapterError
 from speechrail.config import Settings
 from speechrail.domain.alignment import AlignmentRequest, AlignmentResult, AlignmentUnit
 from speechrail.domain.audio_timeline import SampleSpan
-from speechrail.domain.diarization.types import ActivityFrame, ActivityUpdate
+from speechrail.domain.diarization.timeline import AttributionUnit
+from speechrail.domain.diarization.types import ActivityFrame, ActivityUpdate, Attribution
 from speechrail.observability.metrics import Metrics
 from speechrail.runtime.alignment_admission import AlignmentAdmission
 from speechrail.runtime.diarization_admission import DiarizationAdmission
@@ -411,3 +412,46 @@ def test_empty_diarization_finish_is_valid() -> None:
         await harness.owner.close()
 
     asyncio.run(scenario())
+
+
+def test_public_units_fill_a_same_item_bracketed_unknown() -> None:
+    owner = _Harness(_LateFirstAligner()).owner
+    units = tuple(
+        AttributionUnit(
+            segment_uid=f"seg-{index}",
+            text_start=index,
+            text_end=index + 1,
+            start_sample=index * 100,
+            end_sample=(index + 1) * 100,
+            timing_quality="aligned",
+        )
+        for index in range(3)
+    )
+    owner._units_by_id = {unit.segment_uid: unit for unit in units}
+    owner._wire_span_by_unit = {
+        unit.segment_uid: SampleSpan(
+            unit.start_sample * 3 // 2, unit.end_sample * 3 // 2
+        )
+        for unit in units
+    }
+    owner._attribution_by_unit = {
+        "seg-0": Attribution("seg-0", "A", ("A",), "final", None, 1),
+        "seg-1": Attribution(
+            "seg-1", None, (), "final", "insufficient_evidence", 1
+        ),
+        "seg-2": Attribution("seg-2", "A", ("A",), "final", None, 1),
+    }
+    assert [unit["speaker"] for unit in owner._diarization_units_payload()] == [
+        "A",
+        "A",
+        "A",
+    ]
+
+    owner._attribution_by_unit["seg-1"] = Attribution(
+        "seg-1", None, (), "final", "activity_gap", 1
+    )
+    assert [unit["speaker"] for unit in owner._diarization_units_payload()] == [
+        "A",
+        None,
+        "A",
+    ]

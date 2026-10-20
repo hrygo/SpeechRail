@@ -34,6 +34,63 @@ def union_support(unit: SampleSpan, activities: Iterable[SampleSpan]) -> float:
     return covered / (unit.end - unit.start)
 
 
+def bracket_fill_speaker_labels(
+    attributions: Iterable[Attribution | None],
+) -> dict[str, str | None]:
+    """Fill final unknowns bracketed by the same final speaker.
+
+    The caller supplies one frozen ASR item in text order. A contiguous run of
+    final ``insufficient_evidence`` units can inherit a label only when the
+    units immediately before and after the run are final and carry the same
+    known anonymous label. Provisional units, every other unknown reason and
+    item edges stop the run, so this rule cannot bridge degraded evidence or a
+    second transcription item. The activity evidence and ``active_speakers``
+    remain unchanged; this is a deterministic projection of final context.
+    """
+
+    ordered = tuple(attributions)
+    fillable = tuple(
+        attribution is not None
+        and attribution.speaker is None
+        and attribution.state == "final"
+        and attribution.reason == "insufficient_evidence"
+        for attribution in ordered
+    )
+    labels = {
+        attribution.unit_id: attribution.speaker
+        for attribution in ordered
+        if attribution is not None
+    }
+    index = 0
+    while index < len(ordered):
+        if not fillable[index]:
+            index += 1
+            continue
+        run_start = index
+        while index < len(ordered) and fillable[index]:
+            index += 1
+        run_end = index
+        if run_start == 0 or run_end == len(ordered):
+            continue
+        previous = ordered[run_start - 1]
+        following = ordered[run_end]
+        if (
+            previous is None
+            or following is None
+            or previous.state != "final"
+            or following.state != "final"
+            or previous.reason is not None
+            or following.reason is not None
+            or previous.speaker is None
+            or previous.speaker != following.speaker
+        ):
+            continue
+        for attribution in ordered[run_start:run_end]:
+            assert attribution is not None
+            labels[attribution.unit_id] = previous.speaker
+    return labels
+
+
 @dataclass(frozen=True, slots=True)
 class AttributionPolicy:
     min_support: float = 0.60
@@ -323,11 +380,23 @@ class AttributionLedger:
         if speaker is None and unknown_reason == "insufficient_evidence":
             probability_winner = self._probability_winner(unit.audio_span, support, frames)
             if probability_winner is None:
-                probability_winner = self._interior_pause_winner(unit.audio_span, frames)
+                probability_winner = self._interior_pause_winner(
+                    unit.audio_span, frames
+                )
             if probability_winner is not None:
                 speaker = self._label_for(probability_winner)
             elif final:
                 speaker = self._continuous_speaker(unit.audio_span, support)
+        # Two speakers can each cover the activity floor while the coverage
+        # margin still happens to clear 0.10. That is an overlap, not a settled
+        # answer: compare mean confidence inside each candidate's own active
+        # frames. A single clearly covering speaker is never revised.
+        if final and unknown_reason == "insufficient_evidence":
+            mean_winner = self._mean_probability_winner(
+                unit.audio_span, support, frames
+            )
+            if mean_winner is not None:
+                speaker = self._label_for(mean_winner)
         return Attribution(
             unit_id=unit.id,
             speaker=speaker,
@@ -401,6 +470,62 @@ class AttributionLedger:
                     for frame in frames
                     if frame.scores is not None and slot in frame.active_slots
                 ) / duration)
+                for slot in eligible
+            ),
+            key=lambda item: (-item[1], item[0]),
+        )
+        winner, score = ranked[0]
+        if score >= self._policy.min_support and score - ranked[1][1] >= self._policy.min_margin:
+            return winner
+        return None
+
+    def _mean_probability_winner(
+        self, span: SampleSpan, support: dict[int, float], frames: tuple[ActivityFrame, ...],
+    ) -> int | None:
+        """Score overlap by mean confidence while each speaker is active.
+
+        The duration-weighted rule above divides by the whole unit, so a
+        speaker who is active for a shorter part of an overlapped unit is
+        penalised even when their own frames are far more confident. Averaging
+        inside each candidate's active frames removes that length bias without
+        lowering the existing support floor, score floor or margin. Missing,
+        non-contiguous, overlapping or unscored frames still make the result
+        unknown, so this cannot invent confidence where evidence is broken.
+        """
+        eligible = tuple(
+            slot for slot, value in support.items()
+            if value > 0 and value >= self._policy.min_support
+        )
+        if len(eligible) < 2:
+            return None
+        previous_end = span.start
+        for frame in frames:
+            start, end = max(span.start, frame.span.start), min(span.end, frame.span.end)
+            if frame.reason is not None or frame.scores is None or start != previous_end:
+                return None
+            previous_end = end
+        if previous_end != span.end:
+            return None
+        ranked = sorted(
+            (
+                (
+                    slot,
+                    fsum(
+                        (
+                            min(span.end, frame.span.end)
+                            - max(span.start, frame.span.start)
+                        )
+                        * frame.scores[slot]
+                        for frame in frames
+                        if frame.scores is not None and slot in frame.active_slots
+                    )
+                    / sum(
+                        min(span.end, frame.span.end)
+                        - max(span.start, frame.span.start)
+                        for frame in frames
+                        if slot in frame.active_slots
+                    ),
+                )
                 for slot in eligible
             ),
             key=lambda item: (-item[1], item[0]),

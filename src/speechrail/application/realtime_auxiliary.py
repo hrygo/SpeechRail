@@ -39,7 +39,10 @@ from speechrail.domain.diarization import (
     DiarizationError,
     TextUnit,
 )
-from speechrail.domain.diarization.attribution import AttributionLedger
+from speechrail.domain.diarization.attribution import (
+    AttributionLedger,
+    bracket_fill_speaker_labels,
+)
 from speechrail.domain.diarization.timeline import AttributionUnit
 from speechrail.domain.ports import (
     DiarizationEngine,
@@ -153,7 +156,7 @@ class RealtimeAuxiliaryOwner:
         self._last_update_sequence = 0
         self._units_by_id: dict[str, AttributionUnit] = {}
         self._wire_span_by_unit: dict[str, SampleSpan] = {}
-        self._speaker_by_unit: dict[str, str | None] = {}
+        self._attribution_by_unit: dict[str, Attribution] = {}
         self._identity_by_unit: dict[str, _DiarizationItemIdentity] = {}
         self._final_unit_ids: set[str] = set()
         self._latest_diarization_identity: _DiarizationItemIdentity | None = None
@@ -217,7 +220,7 @@ class RealtimeAuxiliaryOwner:
         await self._close_diarization()
         self._units_by_id.clear()
         self._wire_span_by_unit.clear()
-        self._speaker_by_unit.clear()
+        self._attribution_by_unit.clear()
         self._identity_by_unit.clear()
         self._final_unit_ids.clear()
         self._latest_diarization_identity = None
@@ -598,7 +601,6 @@ class RealtimeAuxiliaryOwner:
             return
         for unit in units:
             self._units_by_id[unit.segment_uid] = unit
-            self._speaker_by_unit.setdefault(unit.segment_uid, None)
             self._identity_by_unit[unit.segment_uid] = identity
         latest = self._latest_diarization_identity
         if latest is None or (
@@ -643,19 +645,28 @@ class RealtimeAuxiliaryOwner:
     ) -> list[dict[str, object]]:
         """Project immutable unit spans onto the 24 kHz public sample axis."""
 
-        payload: list[dict[str, object]] = []
-        for unit in sorted(
+        units = sorted(
             (
                 unit
                 for unit_id, unit in self._units_by_id.items()
                 if identity is None or self._identity_by_unit.get(unit_id) == identity
             ),
             key=lambda item: (item.start_sample, item.segment_uid),
-        ):
+        )
+        # Bracket fill is textual context, so evaluate it in text order even
+        # though the public units remain ordered by their audio spans.
+        labels = bracket_fill_speaker_labels(
+            self._attribution_by_unit.get(unit.segment_uid)
+            for unit in sorted(
+                units, key=lambda item: (item.text_start, item.text_end, item.segment_uid)
+            )
+        )
+        payload: list[dict[str, object]] = []
+        for unit in units:
             wire_span = self._wire_span_by_unit[unit.segment_uid]
             payload.append(
                 {
-                    "speaker": self._speaker_by_unit.get(unit.segment_uid),
+                    "speaker": labels.get(unit.segment_uid),
                     "sample_span": {"start": wire_span.start, "end": wire_span.end},
                 }
             )
@@ -670,7 +681,7 @@ class RealtimeAuxiliaryOwner:
             identity = self._identity_by_unit.get(attribution.unit_id)
             if identity is None:
                 continue
-            self._speaker_by_unit[attribution.unit_id] = attribution.speaker
+            self._attribution_by_unit[attribution.unit_id] = attribution
             if attribution.state == "final":
                 self._final_unit_ids.add(attribution.unit_id)
             grouped.setdefault(identity, []).append(attribution)
@@ -707,7 +718,7 @@ class RealtimeAuxiliaryOwner:
         for uid in retired:
             self._units_by_id.pop(uid, None)
             self._wire_span_by_unit.pop(uid, None)
-            self._speaker_by_unit.pop(uid, None)
+            self._attribution_by_unit.pop(uid, None)
             self._identity_by_unit.pop(uid, None)
             self._final_unit_ids.discard(uid)
 

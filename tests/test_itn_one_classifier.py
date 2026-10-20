@@ -14,7 +14,7 @@ def test_preserves_chinese_one_with_generic_classifier(text: str) -> None:
     ("有十一个问题", "有11个问题"),
     ("有一百零一个", "有101个"),
     ("有1个问题", "有1个问题"),
-    ("一元和一月", "1元和1月"),
+    ("一元钱和一月", "1元钱和1月"),
 ])
 def test_preserves_explicit_numeric_conversion(text: str, expected: str) -> None:
     assert apply_light_itn(text) == expected
