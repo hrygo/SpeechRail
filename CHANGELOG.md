@@ -2,9 +2,32 @@
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-10-20
+
+### Added
+
+- 有声书导出支持可选的整书响度归一：App 默认关闭、按需开启，清单 v2 可携带经过范围校验的 LUFS 参数；编码器先整体测量再线性增益，M4B 与章节 MP3 使用同一电平，缺少受管 `loudnorm` 时明确拒绝而不是静默输出未归一媒体。
+- 会议 ASR 增加分人开发集校准与整场上下文诊断探针，并改进连续 PCM 采样、请求窗口、分人结束与逐词归属边界；证据不足时继续输出 `unknown`，只有原生分数满足覆盖和领先条件才补充匿名标签。
+- TTS 增加 `ttfa_ms`、`audio_ms`、`rtf` 延迟观测，分别通过 `SpeechRail-Ttfa-Ms`、`SpeechRail-Audio-Ms`、`SpeechRail-Rtf` 响应头和 Realtime `speechrail.tts.completed` 暴露；字段缺失表示未测到。
+- `/health` 增加三态 `job_runner_state`（`unconfigured`、`inactive`、`active`），MCP 据此报告 durable job runner 的权威状态，不再把不可观测折叠为未运行。
+
+### Changed
+
+- **Breaking (MCP)：** `describe().jobs.runner_active` 替换为 `runner_state`；调用方应同时要求 `jobs.runner_state=active` 才认为排队任务会被消费。
+- ASR 终态默认启用解码回路重复坍缩，批量与 Realtime 共用同一实现；可通过 `asr_repetition_collapse_enabled` 与 `asr_repetition_collapse_min_run` 调整。
+- CustomVoice 未显式提供 `SpeechRail-Seed` 时，按音色与归一化文本派生稳定采样 seed；调用方显式 seed 仍可覆盖，回执记录实际采样策略与 seed。
+- 采集停止路径增加有限尾部排空、EOS 重采样冲刷和取消回收，并补充采集、混音、导出、提词与转写指标。
+
 ### Fixed
 
-- CustomVoice 合成在未指定 `SpeechRail-Seed` 时，按音色与归一化文本派生稳定采样 seed，避免同一请求每次随机选择不同的语音时长；显式 caller seed 仍可覆盖，integrity receipt 记录实际使用的采样策略与 seed。
+- 中文数字后处理只在可唯一确定的场景替换，隐式小数、概数、枚举及词汇化组合保持整体原文；补全“两”的口语小数与百分比，避免产生 `1米八`、`上100人`、`三番5次` 等半截改写。
+- 重叠说话人归属按各候选人 active 帧做时长加权平均，并要求覆盖、领先与证据完整性门槛；连续会议不再错位推进重采样游标，异常终止或上下文复核失败时明确失败，不交付不完整正文。
+- 修正中文数量格式化，保留“有一个”等自然说法，同时维持明确计数、日期、金额和阿拉伯数字规则；修正有声书响度开关的用户说明。
+
+### Notes
+
+- macOS App build 递增为 56；GitHub DMG 内 App 使用 ad hoc 签名，未做 Developer ID 公证。
+- Qwen ASR 与生产分人模型未替换；列出的分人质量数据来自固定开发集诊断，不构成独立留出、在线延迟或整体质量认证。
 
 ## [3.12.0] - 2026-10-17
 

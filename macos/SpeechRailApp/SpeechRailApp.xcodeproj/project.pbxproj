@@ -1477,7 +1477,7 @@
 			baseConfigurationReference = A40000000000000000000019 /* Debug.xcconfig */;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Entitlements/SpeechRailApp.entitlements;
-				CURRENT_PROJECT_VERSION = 55;
+				CURRENT_PROJECT_VERSION = 56;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = SpeechRailApp/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = SpeechRail;
@@ -1489,7 +1489,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 3.12.0;
+				MARKETING_VERSION = 4.0.0;
 				PRODUCT_NAME = SpeechRail;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 			};
@@ -1500,7 +1500,7 @@
 			baseConfigurationReference = A40000000000000000000020 /* Release.xcconfig */;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Entitlements/SpeechRailApp.entitlements;
-				CURRENT_PROJECT_VERSION = 55;
+				CURRENT_PROJECT_VERSION = 56;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = SpeechRailApp/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = SpeechRail;
@@ -1512,7 +1512,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 3.12.0;
+				MARKETING_VERSION = 4.0.0;
 				PRODUCT_NAME = SpeechRail;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 			};
@@ -1523,7 +1523,7 @@
 			baseConfigurationReference = A40000000000000000000021 /* Distribution.xcconfig */;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Entitlements/SpeechRailApp.entitlements;
-				CURRENT_PROJECT_VERSION = 55;
+				CURRENT_PROJECT_VERSION = 56;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = SpeechRailApp/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = SpeechRail;
@@ -1535,7 +1535,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 3.12.0;
+				MARKETING_VERSION = 4.0.0;
 				PRODUCT_NAME = SpeechRail;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 			};
