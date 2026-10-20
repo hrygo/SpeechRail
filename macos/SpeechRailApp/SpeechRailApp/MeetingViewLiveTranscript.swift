@@ -422,11 +422,7 @@ extension MeetingView {
                     width: SpeechRailDesignTokens.Layout.sessionTimecodeColumnWidth,
                     alignment: .leading
                 )
-            HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Text(text)
-                    .font(SpeechRailDesignTokens.Typography.body)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            if meeting.labeling.isEnabled {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                     Circle()
                         .fill(SpeechRailDesignTokens.Color.rail)
@@ -437,6 +433,29 @@ extension MeetingView {
                     Text("正在识别…")
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                }
+                .frame(
+                    width: SpeechRailDesignTokens.Layout.sessionSpeakerColumnWidth,
+                    alignment: .leading
+                )
+            }
+            HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Text(text)
+                    .font(SpeechRailDesignTokens.Typography.body)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if !meeting.labeling.isEnabled {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                        Circle()
+                            .fill(SpeechRailDesignTokens.Color.rail)
+                            .frame(
+                                width: SpeechRailDesignTokens.Icon.liveIndicatorDotSize,
+                                height: SpeechRailDesignTokens.Icon.liveIndicatorDotSize
+                            )
+                        Text("正在识别…")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    }
                 }
             }
             Spacer(minLength: 0)

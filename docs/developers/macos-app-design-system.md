@@ -2,8 +2,8 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.11.8"
-date: 2026-10-16
+version: "0.11.9"
+date: 2026-10-20
 ---
 
 # SpeechRail macOS App 设计系统与 Token
@@ -269,7 +269,7 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 | 表单输入与取值 | 原生 `TextField`、`SecureField`、`TextEditor`、`Picker`、`Toggle`、`Slider`、`Stepper` | 标签、帮助与错误贴近控件；**单行输入一律走 `.speechRailSingleLineInput(.compact/.regular)`**（12pt 横向内边距 + 28/34pt 最小高度 + 输入槽表面），组合式搜索条把配方接在整条容器上；多行编辑器用 `.speechRailRecessedSlot()` 自行给内边距，整卡字段用 `.speechRailEditorCard()`；保留系统键盘和焦点行为 |
 | 状态与反馈 | `StatusPill`、`NoticeBar`、`SettingsConnectionStatus` 等 | 默认、忙碌、完成、受阻、失败使用文字与图标；颜色只是补充；失败指出下一步 |
 
-每个组件只实现适用的 default、hover、pressed、focus、disabled、selected、busy、error 状态。设置内联编辑的 `.small` 原生按钮、字幕带和提词舞台的紧凑控件保留各自空间合同，不强制套主窗口的高度。所有自定义动效遵守 Reduce Motion；系统强调色、Increase Contrast 和 Reduce Transparency 优先由原生控件与语义色处理。页面新增产品视觉数值时，先写入 `SpeechRailDesignTokens.swift`，再更新本文（例如 2026-10-17 提词器流线型减负新增 `Teleprompter.preparedBlockCompactMinHeight = 52`、`workbenchStageSettingsPopoverWidth = 320` 与 `privacyDisclosurePopoverWidth = 360`）。
+每个组件只实现适用的 default、hover、pressed、focus、disabled、selected、busy、error 状态。设置内联编辑的 `.small` 原生按钮、字幕带和提词舞台的紧凑控件保留各自空间合同，不强制套主窗口的高度。所有自定义动效遵守 Reduce Motion；系统强调色、Increase Contrast 和 Reduce Transparency 优先由原生控件与语义色处理。页面新增产品视觉数值时，先写入 `SpeechRailDesignTokens.swift`，再更新本文（例如 2026-10-17 提词器流线型减负新增 `Teleprompter.preparedBlockCompactMinHeight = 52`、`workbenchStageSettingsPopoverWidth = 320` 与 `privacyDisclosurePopoverWidth = 360`；2026-10-20 会议助手与会中私聊布局优化新增 `Layout.meetingSourceOptionsMaxHeight = 220`、`Layout.innerOSDraftAccentBarWidth = 3`，并将 `innerOSDrawerExpandedHeight` 与 `innerOSHistoryColumnWidth` 校准为 `240` 与 `236`）。
 
 ### 3.2.3 列表选择与读取反馈
 
