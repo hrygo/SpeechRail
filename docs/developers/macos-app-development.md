@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail macOS App 开发与测试"
 status: active
-version: "0.6.18"
-date: 2026-10-19
+version: "0.6.19"
+date: 2026-10-20
 ---
 
 # SpeechRail macOS App 开发与测试
@@ -51,6 +51,30 @@ SHA-256 摘要，不在配置指纹内保存正文或密钥。恢复或局部重
 原文字、纪要版本及已保存的候选和远端响应 ID 保留；重新生成是新的版本。
 配置指纹增加摘要字段，数据库 schema 不变；旧 App 不支持该任务续跑格式，回退时保留记录，
 不要用旧 App 续跑新任务。既有纪要与已处理窗口不自动重写。
+
+## 纪要的模型服务兼容与恢复
+
+纪要调用 `resolvedLLMConfiguration(for: .minutes)`，沿用全局配置或用户启用的模块配置，
+在排队时冻结 endpoint、model、兼容模式和输入摘要。不会按模型名猜 provider 或切换服务。
+新任务由 App 租约 owner 管理，优先 Chat Completions JSON mode；只有端点明确拒绝 Chat 接口，
+才使用同一配置的普通 Responses。新任务不发送 `background`、`prompt_cache_options`
+或 `prompt_cache_breakpoint`，不要求远端保存任务供轮询。
+
+端点明确拒绝 JSON 格式能力时可以去掉格式参数，完整 schema 仍随指令发送。
+兼容请求不强制 temperature；服务明确要求 `max_completion_tokens` 替代 `max_tokens`
+时可在同一接口切换标准预算字段，输出上限保持不变。
+严格 JSON、响应完成状态、usage/输出预算及 `MinutesCandidateCodec` 的业务和引用校验仍需通过，
+不将普通文本、截断、拒答或坏 JSON 当成纪要。鉴权、限流、模型缺失、普通请求错误和传输失败
+不触发跨接口重发。连接检查采用同样的 Chat 优先、接口明确不可用才检查 Responses 的规则；
+短文本探测不证明业务 schema、成文质量或长任务时延。
+
+每窗请求前先保存 `submitted`。成功的候选立即保存为 `processed`，局部重试复用成功窗口；
+明确失败记为 `failed`，可以人工重试。传输失败或崩溃后发现无远端 ID 的 `submitted`
+窗口时，任务进入 `submission_unknown`，不自动重发；用户显式重新生成会创建新版本。
+历史后台任务仍凭原远端 ID 轮询或取消，不把旧任务改成一次新的生成请求。
+数据库 schema 与纪要候选格式不变。回退 App 时保留记录，不用旧 App 续跑无远端 ID 的
+`submitted` 窗口；需要重新执行时显式生成新版本。
+窗口数据库主键按纪要版本隔离，避免新版本的第一个窗口与旧版本冲突；既有窗口无需迁移。
 
 ## 工具链
 

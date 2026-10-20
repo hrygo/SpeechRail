@@ -9,14 +9,12 @@ import OSLog
 //
 //   1. **排队、单飞、租约回收**。转录封存之后才写 `queued`；认领带租约，
 //      过期租约可以被下一次启动回收——否则 App 崩一次，那一版纪要就永远卡在 `running`。
-//   2. **长任务用 Responses 的 background 模式 + 轮询**。纪要要跑几十秒到几分钟，
-//      不该把界面挂在一条请求上。
+//   2. 长任务由 App 的本地 owner 管理，按 provider 能力调用普通 Chat / Responses。
+//      已持久化的历史后台响应只按原 ID 查询，不重新提交。
 //   3. **重新生成只新增版本**。`version = n+1`、`is_latest` 指向最新，旧版仍可看可导出。
 //   4. **失败给可读原因，不动转录**。`纪要没整理出来 · 转录已经存好了`。
 //
-// 隐私口径（§5.8 的显式要求，界面必须照说）：默认 `store=false`，但**后台模式下即使
-// `store=false`，响应数据仍会在服务端临时落盘约 10 分钟**以支持异步执行与轮询。
-// 所以这里**不许**出现"内容没经过服务器"这类说法。
+// 请求使用 store=false；转录仍会发送到用户配置的 provider，不表示内容未经过服务器。
 
 
 @MainActor
@@ -529,6 +527,8 @@ public final class MinutesGenerator {
     ) async throws {
         state = .running
         inFlightMinutesID = claimed.id
+        lastResponseID = nil
+        inFlightResponseIDs = []
         defer { inFlightMinutesID = nil }
 
         // MC-32：用任务冻结的那份配置，不跟着当前设置换端点。
@@ -559,7 +559,7 @@ public final class MinutesGenerator {
                   frozenInput == (try Self.inputFingerprint(units: units, windows: windows, supplements: supplements))
             else { throw InputCheckError.changed }
             // 已经跑过的窗口（崩溃恢复、局部重试）：直接复用，不重发请求。
-            let previous = (try? await coordinator.minutesWindows(minutesID: claimed.id)) ?? []
+            let previous = try await coordinator.minutesWindows(minutesID: claimed.id)
             var records: [MinutesWindowRecord] = []
             var candidates: [MinutesCandidateV2] = []
 
@@ -573,22 +573,14 @@ public final class MinutesGenerator {
                     if let candidate = ready.candidate { candidates.append(candidate) }
                     continue
                 }
-                let responseID = try await responseIDFor(
+                let (text, responseID) = try await windowText(
                     claimed: claimed,
                     window: window,
                     stored: stored,
-                    units: units,
                     supplements: supplements,
                     configuration: configuration,
                     key: key,
                     isOnlyWindow: windows.count == 1
-                )
-                lastResponseID = responseID
-                inFlightResponseIDs.append(responseID)
-                let text = try await provider.pollBackground(
-                    configuration: configuration,
-                    apiKey: key,
-                    responseID: responseID
                 )
                 let record: MinutesWindowRecord
                 switch MinutesCandidateCodec.prepareWindow(text: text, window: window) {
@@ -627,8 +619,11 @@ public final class MinutesGenerator {
             }
 
             // 覆盖账本：哪些来源单元整理到了、哪些没有（§6.3）。
+            // 超长单条发言可能被计划器拆成 u1#1 等来源；最终核对与锚点
+            // 必须沿用窗口实际拥有的身份，不能退回切分前的 u1。
+            let plannedUnits = windows.flatMap(\.owned)
             let ledger = MinutesCoverageLedger(
-                eligibleUnitIDs: units.map(\.id),
+                eligibleUnitIDs: plannedUnits.map(\.id),
                 windows: records.map {
                     MinutesCoverageLedger.WindowRecord(
                         index: $0.index,
@@ -657,7 +652,7 @@ public final class MinutesGenerator {
             // §6.3 reduce：以来源身份去重，跨窗撤回保留两个事件并标未确认。
             let merged = MinutesCandidateMerger.merge(
                 windowCandidates: candidates,
-                units: units,
+                units: plannedUnits,
                 coverageNote: ledger.isComplete ? nil : ledger.summary()
             )
             let body = MinutesCandidateCodec.markdown(
@@ -668,7 +663,7 @@ public final class MinutesGenerator {
             // 候选、核对报告、覆盖账本、条目、锚点与窗口进度一起落库：
             // 少任何一样都会让"这一版覆盖到哪"和正文对不上（§6.3）。
             let revisionIDs = (try? await coordinator.latestRevisionIDsByLine(sessionID: claimed.sessionID)) ?? [:]
-            let unitsByID = Dictionary(units.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            let unitsByID = Dictionary(plannedUnits.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             let drafts = MinutesCandidateCodec.itemDrafts(
                 for: merged.candidate,
                 report: merged.report,
@@ -725,7 +720,7 @@ public final class MinutesGenerator {
             // 它们和「没填模型」是同一类下一步：去设置里改配置。
             if let llm = error as? LLMError {
                 switch llm {
-                case .notConfigured, .badBaseURL, .notResponsesAPI: failedOnSetup = true
+                case .notConfigured, .badBaseURL, .notResponsesAPI, .notChatAPI: failedOnSetup = true
                 default: failedOnSetup = false
                 }
             } else {
@@ -754,75 +749,65 @@ public final class MinutesGenerator {
         return SHA256.hash(data: try JSONEncoder().encode(parts)).map { String(format: "%02x", $0) }.joined()
     }
 
-    /// 拿这一窗要轮询的远端响应 id。
-    ///
-    /// 三条来源，按可靠性排序（MC-28/MC-40）：
-    /// 1. 这一窗上次已经拿到的 id —— 崩溃恢复查**原请求**，不重发；
-    /// 2. 单窗时 `minutes` 行上的旧字段（MA-07 既有行为，短会不受影响）；
-    /// 3. 新发一次，拿到 id 立刻随窗口行落库。
-    @discardableResult
-    private func responseIDFor(
+    /// 历史远端 ID 只轮询；新请求先持久化提交标记，防止崩溃恢复重复计费。
+    private func windowText(
         claimed: MinutesVersion,
         window: MinutesWindow,
         stored: MinutesWindowRecord?,
-        units: [MinutesSourceUnit],
         supplements: String,
         configuration: LLMConfiguration,
         key: String?,
         isOnlyWindow: Bool
-    ) async throws -> String {
-        if let existing = stored?.remoteResponseID, !existing.isEmpty {
+    ) async throws -> (String, String?) {
+        if let existing = stored?.remoteResponseID
+            ?? (isOnlyWindow && claimed.hasRemoteResponse ? claimed.remoteResponseID : nil),
+           !existing.isEmpty {
             lastResponseID = existing
-            return existing
+            inFlightResponseIDs.append(existing)
+            let text = try await provider.pollBackground(
+                configuration: configuration, apiKey: key, responseID: existing)
+            return (text, existing)
         }
-        if isOnlyWindow, let existing = claimed.remoteResponseID, claimed.hasRemoteResponse {
-            lastResponseID = existing
-            return existing
-        }
-        // 用户已经按下停止，就不要再把这一场发出去。
-        if claimed.cancelRequestedAt != nil {
+        if claimed.cancelRequestedAt != nil || Task.isCancelled {
             throw LLMError.cancelled
         }
-        let responseID = try await provider.startBackground(
-            configuration: configuration,
-            messages: Self.prompt(
-                transcript: Self.windowTranscript(window),
-                supplements: supplements
-            ),
-            apiKey: key,
-            maxOutputTokens: 4_000,
-            textFormat: MinutesCandidateCodec.jsonSchema
+        guard stored?.outcome != .submitted else {
+            throw LLMError.transport("上一请求的结果尚未确认，不能自动重发。")
+        }
+        let submitted = MinutesWindowRecord(
+            index: window.index, ownedUnitIDs: window.owned.map(\.id),
+            contextUnitIDs: (window.contextBefore + window.contextAfter).map(\.id),
+            outcome: .submitted
         )
-        lastResponseID = responseID
-        // 必须先保存提交身份再轮询；否则多窗任务在等待期间中断会重复 POST。
-        let checkpointed = (try? await coordinator.recordMinutesWindow(
+        let checkpointed = try await coordinator.recordMinutesWindow(
             minutesID: claimed.id,
             expectedAttempts: claimed.attempts,
-            record: MinutesWindowRecord(
-                index: window.index,
-                ownedUnitIDs: window.owned.map(\.id),
-                contextUnitIDs: (window.contextBefore + window.contextAfter).map(\.id),
-                outcome: .submitted,
-                remoteResponseID: responseID
-            )
-        )) ?? false
+            record: submitted
+        )
         guard checkpointed else {
-            throw LLMError.transport("这一版的提交回执没有写回，提交结果需要确认。")
+            throw LLMError.invalidStructuredResponse
         }
-        if isOnlyWindow {
-            // 单窗沿用行上的字段：MA-07 的恢复路径对短会保持原样。
-            let recorded = (try? await coordinator.recordMinutesRemoteResponse(
-                minutesID: claimed.id,
-                expectedAttempts: claimed.attempts,
-                responseID: responseID
-            )) ?? false
-            guard recorded else {
-                // 记不进去说明行已被新 owner 接管。请求已经发出去了，但结果不再往这行写，
-                // 也不谎报成功——远端那一侧的事实不由这里替用户断言。
-                throw LLMError.transport("这一版已被新的整理任务接管，这次的结果没有写回。")
+        do {
+            let prompt = Self.prompt(transcript: Self.windowTranscript(window), supplements: supplements)
+            let text = try await provider.completeCompatibleJSON(
+                configuration: configuration, apiKey: key,
+                instructions: prompt.filter { $0.role != .user }.map(\.text).joined(separator: "\n"),
+                input: prompt.filter { $0.role == .user }.map(\.text).joined(separator: "\n"),
+                schema: MinutesCandidateCodec.jsonSchema, maxOutputTokens: 4_000
+            )
+            try Task.checkCancellation()
+            return (text, nil)
+        } catch {
+            if MinutesSubmissionCertainty.classify(error) == .known,
+               !Task.isCancelled, (error as? LLMError) != .cancelled {
+                var failed = submitted
+                failed.outcome = .failed
+                failed.failureReason = Self.readableReason(for: error)
+                _ = try await coordinator.recordMinutesWindow(
+                    minutesID: claimed.id, expectedAttempts: claimed.attempts, record: failed)
             }
+            throw error
         }
-        return responseID
     }
 
     /// 编码落库用的 JSON 文本。编不出来返回 nil：那一列就空着，
@@ -1029,7 +1014,8 @@ public final class MinutesGenerator {
             case .refused(let reason): return "大模型没有给结果：\(reason)"
             case .http(let status, _): return "大模型服务返回了 \(status)。文字记录已安全存盘，可重新生成。"
             case .notConfigured: return "还没有配置对话模型。"
-            case .notResponsesAPI: return "当前 AI 服务不支持 Responses 协议（可能仅支持 Chat Completions），请在设置中检查模型配置。"
+            case .notChatAPI, .notResponsesAPI:
+                return "当前 AI 服务未提供可用的文字生成接口，请在设置中检查服务地址与模型。文字记录已保存。"
             default: return llm.errorDescription ?? "整理没有完成。"
             }
         }

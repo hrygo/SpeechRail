@@ -1404,7 +1404,7 @@ public actor SessionStore: SessionArchiveWriting {
             outcome, failure_reason, candidate_json, remote_response_id, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """) { statement in
-            bind(statement, 1, window.id)
+            bind(statement, 1, "\(minutesID):\(window.id)")
             bind(statement, 2, minutesID)
             bind(statement, 3, window.index)
             bind(

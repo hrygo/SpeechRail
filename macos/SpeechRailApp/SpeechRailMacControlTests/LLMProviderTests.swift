@@ -248,6 +248,390 @@ final class LLMProviderTests: XCTestCase {
         return String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
     }
 
+    private func compatibleJSON(
+        provider: LLMProvider? = nil,
+        configuration: LLMConfiguration? = nil
+    ) async throws -> String {
+        try await (provider ?? makeProvider()).completeCompatibleJSON(
+            configuration: configuration ?? openCodeConfiguration, apiKey: nil,
+            instructions: "保持事实", input: "会议资料",
+            schema: MinutesCandidateCodec.jsonSchema, maxOutputTokens: 128, timeout: 30)
+    }
+
+    private func responsesJSONBody(content: String = "{}", tokens: Int = 12) throws -> String {
+        String(decoding: try JSONSerialization.data(withJSONObject: [
+            "id": "resp-structured", "object": "response", "status": "completed",
+            "output": [["type": "message", "role": "assistant",
+                        "content": [["type": "output_text", "text": content]]]],
+            "usage": ["input_tokens": 10, "output_tokens": tokens]
+        ]), as: UTF8.self)
+    }
+
+    private func normalizedRequestURLs() -> [String] {
+        FakeTransport.requestURLs().map { value in
+            guard var components = URLComponents(string: value) else { return value }
+            if (components.scheme == "https" && components.port == 443)
+                || (components.scheme == "http" && components.port == 80) {
+                components.port = nil
+            }
+            return components.string ?? value
+        }
+    }
+
+    func testCompatibleJSONUsesChatAndPreservesConfiguredProvider() async throws {
+        FakeTransport.reset([.init(status: 200, contentType: "application/json", body: try chatBody())])
+        let text = try await compatibleJSON()
+        XCTAssertEqual(text, "{}")
+        XCTAssertEqual(FakeTransport.requestURLs().compactMap { URL(string: $0)?.host }, ["opencode.example"])
+        XCTAssertEqual(FakeTransport.requestURLs().compactMap { URL(string: $0)?.path }, ["/v1/chat/completions"])
+        let body = try XCTUnwrap(FakeTransport.requestBodies().first)
+        XCTAssertEqual(body["model"] as? String, openCodeConfiguration.model)
+        XCTAssertNil(body["background"])
+        XCTAssertFalse(FakeTransport.requestHeaders()[0]["x-opencode-session"]?.isEmpty ?? true)
+    }
+
+    func testCompatibleJSONNegotiatesIndependentCapabilitiesInEveryOrder() async throws {
+        let rejections = [
+            #"{"error":{"message":"Unsupported parameter: response_format"}}"#,
+            #"{"error":{"message":"Unsupported parameter: max_tokens; use max_completion_tokens"}}"#,
+            #"{"error":{"message":"Unrecognized request argument supplied: thinking"}}"#
+        ]
+        for order in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+            let provider = makeProvider()
+            FakeTransport.reset(order.map {
+                .init(status: 400, contentType: "application/json", body: rejections[$0])
+            } + [.init(status: 200, contentType: "application/json", body: try chatBody())])
+            let text = try await compatibleJSON(provider: provider)
+            XCTAssertEqual(text, "{}", "\(order)")
+            let bodies = FakeTransport.requestBodies()
+            XCTAssertEqual(bodies.count, 4, "\(order)")
+            let final = try XCTUnwrap(bodies.last)
+            XCTAssertNil(final["response_format"])
+            XCTAssertNil(final["max_tokens"])
+            XCTAssertEqual(final["max_completion_tokens"] as? Int, 128)
+            XCTAssertNil(final["thinking"])
+            XCTAssertTrue(bodies.allSatisfy { $0["background"] == nil && $0["temperature"] == nil })
+            XCTAssertTrue(normalizedRequestURLs().allSatisfy {
+                $0 == "https://opencode.example/v1/chat/completions"
+            })
+            // 后续窗口使用同一能力快照，一次成功，不逐窗重新试错。
+            FakeTransport.reset([.init(status: 200, contentType: "application/json", body: try chatBody())])
+            _ = try await compatibleJSON(provider: provider)
+            XCTAssertEqual(FakeTransport.requestBodies().count, 1)
+            let remembered = try XCTUnwrap(FakeTransport.requestBodies().first)
+            XCTAssertNil(remembered["response_format"])
+            XCTAssertNil(remembered["max_tokens"])
+            XCTAssertNil(remembered["thinking"])
+            XCTAssertEqual(remembered["max_completion_tokens"] as? Int, 128)
+        }
+    }
+
+    func testCompatibleJSONCapabilityCacheIsScopedToEndpointModelAndMode() async throws {
+        let configurations = [
+            LLMConfiguration(baseURL: "https://different.example/v1",
+                             model: openCodeConfiguration.model, compatibilityMode: .openCodeGo),
+            LLMConfiguration(baseURL: openCodeConfiguration.baseURL,
+                             model: "different-model", compatibilityMode: .openCodeGo),
+            LLMConfiguration(baseURL: openCodeConfiguration.baseURL,
+                             model: openCodeConfiguration.model, compatibilityMode: .openAICompatible)
+        ]
+        for changed in configurations {
+            let provider = makeProvider()
+            FakeTransport.reset([
+                .init(status: 400, contentType: "application/json",
+                      body: #"{"error":{"message":"Unsupported parameter: response_format"}}"#),
+                .init(status: 400, contentType: "application/json",
+                      body: #"{"error":{"message":"Unsupported parameter: max_tokens; use max_completion_tokens"}}"#),
+                .init(status: 200, contentType: "application/json", body: try chatBody())
+            ])
+            _ = try await compatibleJSON(provider: provider)
+            FakeTransport.reset([.init(status: 200, contentType: "application/json", body: try chatBody())])
+            _ = try await compatibleJSON(provider: provider, configuration: changed)
+            let body = try XCTUnwrap(FakeTransport.requestBodies().first)
+            XCTAssertEqual(normalizedRequestURLs(), [changed.normalizedBaseURL + "/chat/completions"])
+            XCTAssertEqual(body["model"] as? String, changed.model)
+            XCTAssertNotNil(body["response_format"], "其他配置不能继承格式拒绝")
+            XCTAssertEqual(body["max_tokens"] as? Int, 128)
+            XCTAssertNil(body["max_completion_tokens"])
+        }
+    }
+
+    func testCompatibleJSONProtocolCacheIsScopedToEndpointModelAndMode() async throws {
+        for changed in [
+            LLMConfiguration(baseURL: "https://different.example/v1",
+                             model: openCodeConfiguration.model, compatibilityMode: .openCodeGo),
+            LLMConfiguration(baseURL: openCodeConfiguration.baseURL,
+                             model: "different-model", compatibilityMode: .openCodeGo),
+            LLMConfiguration(baseURL: openCodeConfiguration.baseURL,
+                             model: openCodeConfiguration.model, compatibilityMode: .openAICompatible)
+        ] {
+            let provider = makeProvider()
+            FakeTransport.reset([
+                .init(status: 405, contentType: "application/json", body: "{}"),
+                .init(status: 200, contentType: "application/json", body: try responsesJSONBody())
+            ])
+            _ = try await compatibleJSON(provider: provider)
+            FakeTransport.reset([.init(status: 200, contentType: "application/json", body: try chatBody())])
+            _ = try await compatibleJSON(provider: provider, configuration: changed)
+            XCTAssertEqual(normalizedRequestURLs(), [changed.normalizedBaseURL + "/chat/completions"])
+            XCTAssertEqual(FakeTransport.requestBodies().first?["model"] as? String, changed.model)
+        }
+    }
+
+    func testCompatibleJSONDoesNotChangeProtocolAfterDowngradedOutputFailsValidation() async throws {
+        for response in [
+            try chatBody(content: "not JSON"), try chatBody(content: "[]"),
+            try chatBody(content: #"{"duplicate":1,"duplicate":2}"#),
+            try chatBody(finish: "length"), try chatBody(refusal: "refused"),
+            try chatBody(toolCalls: true), try chatBody(tokens: 128),
+            try chatBody(tokens: nil)
+        ] {
+            FakeTransport.reset([
+                .init(status: 400, contentType: "application/json",
+                      body: #"{"error":{"message":"Unsupported parameter: response_format"}}"#),
+                .init(status: 200, contentType: "application/json", body: response)
+            ])
+            do { _ = try await compatibleJSON(); XCTFail("降级不得放松校验") }
+            catch {
+                XCTAssertTrue([LLMError.invalidStructuredResponse, .outputTruncated].contains(error as? LLMError))
+            }
+            XCTAssertEqual(normalizedRequestURLs(), Array(
+                repeating: "https://opencode.example/v1/chat/completions", count: 2))
+        }
+    }
+
+    func testCompatibleResponsesRejectsInvalidUsageWithoutResubmission() async throws {
+        let invalidUsage: [Any] = [
+            NSNull(), [:], ["output_tokens": NSNull()], ["output_tokens": -1],
+            ["output_tokens": 1.5], ["output_tokens": "12"], ["output_tokens": true],
+            ["output_tokens": 1e30]
+        ]
+        for usage in invalidUsage {
+            var object = try XCTUnwrap(JSONSerialization.jsonObject(
+                with: Data(try responsesJSONBody().utf8)) as? [String: Any])
+            object["usage"] = usage
+            FakeTransport.reset([
+                .init(status: 405, contentType: "application/json", body: "{}"),
+                .init(status: 200, contentType: "application/json",
+                      body: String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self))
+            ])
+            do { _ = try await compatibleJSON(); XCTFail("usage 必须是非负整数") }
+            catch { XCTAssertEqual(error as? LLMError, .invalidStructuredResponse) }
+            XCTAssertEqual(FakeTransport.requestURLs().count, 2)
+        }
+    }
+
+    func testCompatibleResponsesDoesNotRetryOperationalOrTransportFailures() async throws {
+        let failures: [FakeTransport.Exchange] = [
+            .init(status: 401, contentType: "application/json", body: "{}"),
+            .init(status: 403, contentType: "application/json", body: "{}"),
+            .init(status: 429, contentType: "application/json", body: "{}"),
+            .init(status: 500, contentType: "application/json", body: "{}"),
+            .init(status: 503, contentType: "application/json", body: "{}"),
+            .init(status: 404, contentType: "application/json", body: #"{"error":{"message":"model not found"}}"#),
+            .init(status: 400, contentType: "application/json", body: #"{"error":{"message":"Invalid input"}}"#),
+            .init(status: 200, contentType: "application/json", body: "", failCode: .timedOut),
+            .init(status: 200, contentType: "application/json", body: "", failCode: .cancelled)
+        ]
+        for failure in failures {
+            FakeTransport.reset([
+                .init(status: 405, contentType: "application/json", body: "{}"), failure
+            ])
+            do { _ = try await compatibleJSON(); XCTFail("失败不得自动再提交") } catch {}
+            XCTAssertEqual(normalizedRequestURLs(), [
+                "https://opencode.example/v1/chat/completions", "https://opencode.example/v1/responses"
+            ])
+        }
+    }
+
+    func testCompatibleJSONBothEndpointsUnsupportedStopsWithoutProtocolLoop() async throws {
+        FakeTransport.reset([
+            .init(status: 405, contentType: "application/json", body: "{}"),
+            .init(status: 404, contentType: "application/json", body: "{}")
+        ])
+        do { _ = try await compatibleJSON(); XCTFail("两种接口均不可用应停止") } catch {}
+        XCTAssertEqual(FakeTransport.requestURLs().count, 2)
+    }
+
+    func testCompatibleJSONOmitsRejectedFormatButStillRequiresValidJSON() async throws {
+        FakeTransport.reset([
+            .init(status: 400, contentType: "application/json",
+                  body: #"{"error":{"message":"Unsupported parameter: response_format"}}"#),
+            .init(status: 200, contentType: "application/json", body: try chatBody())
+        ])
+        let provider = makeProvider()
+        let text = try await compatibleJSON(provider: provider)
+        XCTAssertEqual(text, "{}")
+        let bodies = FakeTransport.requestBodies()
+        XCTAssertNotNil(bodies[0]["response_format"])
+        XCTAssertNil(bodies[1]["response_format"])
+        let messages = try XCTUnwrap(bodies[1]["messages"] as? [[String: Any]])
+        XCTAssertTrue(String(describing: messages).contains("schema_version"))
+        // 同一 provider/schema 后续窗口不重复发送已被拒绝的格式参数。
+        FakeTransport.reset([.init(status: 200, contentType: "application/json",
+                                  body: try chatBody(content: "不是 JSON"))])
+        do { _ = try await compatibleJSON(provider: provider); XCTFail("坏 JSON 不能提交") }
+        catch { XCTAssertEqual(error as? LLMError, .invalidStructuredResponse) }
+        XCTAssertEqual(FakeTransport.requestURLs().count, 1)
+        XCTAssertNil(FakeTransport.requestBodies()[0]["response_format"])
+    }
+
+    func testCompatibleJSONAdaptsExplicitlyRejectedTokenLimitWithoutForcingTemperature() async throws {
+        FakeTransport.reset([
+            .init(status: 400, contentType: "application/json",
+                  body: #"{"error":{"message":"Unsupported parameter: max_tokens; use max_completion_tokens"}}"#),
+            .init(status: 200, contentType: "application/json", body: try chatBody())
+        ])
+        let provider = makeProvider()
+        let text = try await compatibleJSON(provider: provider)
+        XCTAssertEqual(text, "{}")
+        let bodies = FakeTransport.requestBodies()
+        XCTAssertEqual(bodies.count, 2)
+        guard bodies.count == 2 else { return }
+        XCTAssertEqual(bodies[0]["max_tokens"] as? Int, 128)
+        XCTAssertNil(bodies[1]["max_tokens"])
+        XCTAssertEqual(bodies[1]["max_completion_tokens"] as? Int, 128)
+        XCTAssertTrue(bodies.allSatisfy { $0["temperature"] == nil })
+        XCTAssertTrue(FakeTransport.requestURLs().allSatisfy { URL(string: $0)?.path == "/v1/chat/completions" })
+        FakeTransport.reset([.init(status: 200, contentType: "application/json", body: try chatBody())])
+        _ = try await compatibleJSON(provider: provider)
+        XCTAssertNil(FakeTransport.requestBodies()[0]["max_tokens"])
+        XCTAssertEqual(FakeTransport.requestBodies()[0]["max_completion_tokens"] as? Int, 128)
+    }
+
+    func testCompatibleJSONUsesOrdinaryResponsesOnlyAfterExplicitChatRejection() async throws {
+        FakeTransport.reset([
+            .init(status: 405, contentType: "application/json", body: #"{"detail":"Method not allowed"}"#),
+            .init(status: 200, contentType: "application/json", body: try responsesJSONBody())
+        ])
+        let provider = makeProvider()
+        let text = try await compatibleJSON(provider: provider)
+        XCTAssertEqual(text, "{}")
+        XCTAssertEqual(FakeTransport.requestURLs().compactMap { URL(string: $0)?.host },
+                       ["opencode.example", "opencode.example"])
+        XCTAssertEqual(FakeTransport.requestURLs().compactMap { URL(string: $0)?.path },
+                       ["/v1/chat/completions", "/v1/responses"])
+        let body = FakeTransport.requestBodies()[1]
+        XCTAssertEqual(body["model"] as? String, openCodeConfiguration.model)
+        XCTAssertEqual(body["store"] as? Bool, false)
+        XCTAssertEqual(body["stream"] as? Bool, false)
+        XCTAssertNil(body["background"])
+        XCTAssertNil(body["prompt_cache_options"])
+        XCTAssertFalse(String(describing: body).contains("prompt_cache_breakpoint"))
+        FakeTransport.reset([.init(status: 200, contentType: "application/json", body: try responsesJSONBody())])
+        _ = try await compatibleJSON(provider: provider)
+        XCTAssertEqual(FakeTransport.requestURLs(), ["https://opencode.example/v1/responses"])
+    }
+
+    func testCompatibleResponsesCanOmitRejectedJSONFormat() async throws {
+        FakeTransport.reset([
+            .init(status: 400, contentType: "application/json",
+                  body: #"{"detail":"Chat completions is not supported; use Responses"}"#),
+            .init(status: 400, contentType: "application/json",
+                  body: #"{"detail":"Unsupported parameter: text.format"}"#),
+            .init(status: 200, contentType: "application/json", body: try responsesJSONBody())
+        ])
+        let text = try await compatibleJSON()
+        XCTAssertEqual(text, "{}")
+        XCTAssertEqual(FakeTransport.requestURLs().count, 3)
+        XCTAssertNil(FakeTransport.requestBodies()[2]["text"])
+        XCTAssertNil(FakeTransport.requestBodies()[2]["background"])
+    }
+
+    func testCompatibleJSONDoesNotChangeProtocolForAuthRateLimitModelOrInvalidRequest() async throws {
+        for (status, body) in [
+            (401, #"{"error":{"message":"Unauthorized"}}"#),
+            (429, #"{"error":{"message":"Rate limited"}}"#),
+            (404, #"{"error":{"code":"model_not_found","message":"Model not found"}}"#),
+            (404, #"{"error":{"message":"Unknown model xyz"}}"#),
+            (404, #"{"error":{"message":"Model xyz does not exist"}}"#),
+            (404, #"{"error":{"code":"deployment_not_found","message":"Deployment missing"}}"#),
+            (400, #"{"error":{"message":"Invalid json_schema: required is missing"}}"#),
+            (400, #"{"error":{"message":"Invalid chat completions messages"}}"#),
+            (400, #"{"error":{"message":"Unknown parameter: unrelated_field"}}"#)
+        ] {
+            FakeTransport.reset([.init(status: status, contentType: "application/json", body: body)])
+            do { _ = try await compatibleJSON(); XCTFail("失败应传播") } catch {}
+            XCTAssertEqual(FakeTransport.requestURLs().count, 1, "\(status): \(body)")
+        }
+    }
+
+    func testCompatibleJSONDoesNotResubmitTransportCancellationOrBadOutput() async throws {
+        for exchange in [
+            FakeTransport.Exchange(status: 200, contentType: "application/json", body: "", failCode: .timedOut),
+            .init(status: 200, contentType: "application/json", body: "", failCode: .cancelled),
+            .init(status: 200, contentType: "application/json", body: try chatBody(content: "not JSON")),
+            .init(status: 200, contentType: "application/json", body: try chatBody(finish: "length")),
+            .init(status: 200, contentType: "application/json", body: try chatBody(refusal: "no"))
+        ] {
+            FakeTransport.reset([exchange])
+            do { _ = try await compatibleJSON(); XCTFail("不完整结果不能提交") } catch {}
+            XCTAssertEqual(FakeTransport.requestURLs().count, 1)
+        }
+    }
+
+    func testCompatibleResponsesRejectsInvalidJSONAndExhaustedBudget() async throws {
+        for response in [try responsesJSONBody(content: "not JSON"), try responsesJSONBody(tokens: 128)] {
+            FakeTransport.reset([
+                .init(status: 405, contentType: "application/json", body: "{}"),
+                .init(status: 200, contentType: "application/json", body: response)
+            ])
+            do { _ = try await compatibleJSON(); XCTFail("坏输出不能提交") }
+            catch {
+                let failure = try XCTUnwrap(error as? LLMError)
+                XCTAssertTrue([LLMError.invalidStructuredResponse, .outputTruncated].contains(failure))
+            }
+            XCTAssertEqual(FakeTransport.requestURLs().count, 2)
+        }
+    }
+
+    func testMinutesConnectionRequiresChatByDefault() {
+        XCTAssertEqual(LLMModule.minutes.requiredOperation, .chat)
+    }
+
+    func testCompatibleResponsesRejectsBooleanUsageWithoutResubmission() async throws {
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(try responsesJSONBody().utf8)) as? [String: Any])
+        object["usage"] = ["output_tokens": false]
+        FakeTransport.reset([
+            .init(status: 405, contentType: "application/json", body: "{}"),
+            .init(status: 200, contentType: "application/json",
+                  body: String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self))
+        ])
+        do { _ = try await compatibleJSON(); XCTFail("布尔 usage 不能冒充 token 数") }
+        catch { XCTAssertEqual(error as? LLMError, .invalidStructuredResponse) }
+        XCTAssertEqual(FakeTransport.requestURLs().count, 2)
+    }
+
+    func testMinutesConnectionCheckAcceptsResponsesOnlyProviderWithoutBackground() async throws {
+        FakeTransport.reset([
+            .init(status: 200, contentType: "application/json", body: #"{"data":[]}"#),
+            .init(status: 405, contentType: "application/json", body: "{}"),
+            .init(status: 200, contentType: "application/json", body: #"{"data":[]}"#),
+            .init(status: 200, contentType: "application/json", body: Self.okBody)
+        ])
+        let result = await makeProvider().checkCompatibleJSON(configuration: openCodeConfiguration, apiKey: nil)
+        guard case .connected = result else { return XCTFail("Responses-only provider 应能连接：\(result)") }
+        XCTAssertEqual(FakeTransport.requestURLs().compactMap { URL(string: $0)?.path },
+                       ["/v1/models", "/v1/chat/completions", "/v1/models", "/v1/responses"])
+        XCTAssertTrue(FakeTransport.requestBodies().allSatisfy { $0["background"] == nil })
+    }
+
+    func testMinutesConnectionCheckUsesCompatibleBudgetAndTemperaturePolicy() async throws {
+        FakeTransport.reset([
+            .init(status: 200, contentType: "application/json", body: #"{"data":[]}"#),
+            .init(status: 400, contentType: "application/json",
+                  body: #"{"error":{"message":"Unsupported parameter: max_tokens; use max_completion_tokens"}}"#),
+            .init(status: 200, contentType: "application/json", body: try chatBody())
+        ])
+        let result = await makeProvider().checkCompatibleJSON(configuration: openCodeConfiguration, apiKey: nil)
+        guard case .connected = result else { return XCTFail("检查应与生成使用同一参数策略：\(result)") }
+        let bodies = FakeTransport.requestBodies()
+        XCTAssertEqual(bodies[2]["max_completion_tokens"] as? Int, 16)
+        XCTAssertNil(bodies[2]["max_tokens"])
+        XCTAssertTrue(bodies.allSatisfy { $0["temperature"] == nil })
+    }
+
     func testChatJSONSendsCompleteSchemaAndReturnsOnlyFinalContent() async throws {
         FakeTransport.reset([.init(status: 200, contentType: "application/json", body: try chatBody())])
         let text = try await completeJSON()

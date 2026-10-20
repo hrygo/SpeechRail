@@ -92,6 +92,367 @@ final class MeetingMinutesJobRecoveryTests: XCTestCase {
 
     // MARK: - MC-28 持久远端响应 id / 提交结果未知
 
+    private func chatMinutesResponse(sourceUnitIDs: [String] = ["u1"]) throws -> String {
+        let candidate = MinutesCandidateV2(title: "发布安排",
+            overview: [.init(localID: "o1", text: "讨论发布安排。", sourceUnitIDs: sourceUnitIDs)],
+            decisions: [], actions: [], openQuestions: [], confidenceNotes: "")
+        let content = String(decoding: try JSONEncoder().encode(candidate), as: UTF8.self)
+        return String(decoding: try JSONSerialization.data(withJSONObject: [
+            "id": "chat-minutes", "object": "chat.completion", "created": 1, "model": "configured-model",
+            "choices": [["index": 0, "finish_reason": "stop",
+                         "message": ["role": "assistant", "content": content]]],
+            "usage": ["prompt_tokens": 20, "completion_tokens": 100, "total_tokens": 120]
+        ]), as: UTF8.self)
+    }
+
+    func testNewMinutesUseConfiguredChatProviderWithoutBackground() async throws {
+        let store = try requireStore(), sessionID = try requireSessionID()
+        _ = try await store.appendLine(.init(sessionID: sessionID, role: .speaker,
+            text: "讨论发布安排。", source: .microphone, status: .final))
+        typealias Transport = LLMProviderTests.FakeTransport
+        Transport.reset([.init(status: 200, contentType: "application/json",
+            body: try chatMinutesResponse())])
+        let settings = URLSessionConfiguration.ephemeral
+        settings.protocolClasses = [Transport.self]
+        let session = URLSession(configuration: settings)
+        defer { session.invalidateAndCancel() }
+        let generator = MinutesGenerator(coordinator: SessionCoordinator(store: store),
+            provider: LLMProvider(session: session))
+        await generator.generate(sessionID: sessionID, resolvedConfiguration: .init(
+            configuration: .init(baseURL: "https://configured.invalid/v1", model: "configured-model",
+                                 compatibilityMode: .openCodeGo),
+            apiKey: nil, origin: .moduleOverride))
+        XCTAssertEqual(generator.state, .ready)
+        XCTAssertEqual(Transport.requestURLs().compactMap { URL(string: $0)?.host }, ["configured.invalid"])
+        XCTAssertEqual(Transport.requestURLs().compactMap { URL(string: $0)?.path }, ["/v1/chat/completions"])
+        let body = try XCTUnwrap(Transport.requestBodies().first)
+        XCTAssertEqual(body["model"] as? String, "configured-model")
+        XCTAssertNil(body["background"])
+        XCTAssertNil(body["prompt_cache_options"])
+        let versions = try await store.minutesVersions(sessionID: sessionID)
+        let version = try XCTUnwrap(versions.first)
+        XCTAssertEqual(version.status, .ready)
+        XCTAssertTrue(version.body?.contains("发布安排") == true)
+        let windows = try await store.minutesWindows(minutesID: version.id)
+        XCTAssertEqual(windows.map(\.outcome), [.processed])
+        XCTAssertNil(windows.first?.remoteResponseID)
+        let lines = try await store.lines(sessionID: sessionID)
+        XCTAssertEqual(lines.map(\.text), ["讨论发布安排。"])
+    }
+
+    func testResponsesOnlyMinutesCanDropFormatAndPersistWithoutBackgroundTask() async throws {
+        let store = try requireStore(), sessionID = try requireSessionID()
+        _ = try await store.appendLine(.init(sessionID: sessionID, role: .speaker,
+            text: "讨论发布安排。", source: .microphone, status: .final))
+        let chat = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(try chatMinutesResponse().utf8)) as? [String: Any])
+        let choices = try XCTUnwrap(chat["choices"] as? [[String: Any]])
+        let content = try XCTUnwrap((choices.first?["message"] as? [String: Any])?["content"] as? String)
+        let response = String(decoding: try JSONSerialization.data(withJSONObject: [
+            "id": "resp-ordinary", "object": "response", "status": "completed",
+            "output": [["type": "message", "role": "assistant",
+                        "content": [["type": "output_text", "text": content]]]],
+            "usage": ["input_tokens": 20, "output_tokens": 100]
+        ]), as: UTF8.self)
+        typealias Transport = LLMProviderTests.FakeTransport
+        Transport.reset([
+            .init(status: 405, contentType: "application/json", body: "{}"),
+            .init(status: 400, contentType: "application/json",
+                  body: #"{"error":{"message":"Unsupported parameter: text.format"}}"#),
+            .init(status: 200, contentType: "application/json", body: response)
+        ])
+        let settings = URLSessionConfiguration.ephemeral
+        settings.protocolClasses = [Transport.self]
+        let session = URLSession(configuration: settings)
+        defer { session.invalidateAndCancel() }
+        let generator = MinutesGenerator(coordinator: SessionCoordinator(store: store),
+            provider: LLMProvider(session: session))
+        await generator.generate(sessionID: sessionID, resolvedConfiguration: .init(
+            configuration: .init(baseURL: "https://responses-only.invalid/custom/v1",
+                                 model: "configured-model", compatibilityMode: .openCodeGo),
+            apiKey: nil, origin: .global))
+        XCTAssertEqual(generator.state, .ready)
+        XCTAssertEqual(Transport.requestURLs().compactMap { URL(string: $0)?.path }, [
+            "/custom/v1/chat/completions", "/custom/v1/responses", "/custom/v1/responses"
+        ])
+        XCTAssertTrue(Transport.requestURLs().allSatisfy { URL(string: $0)?.host == "responses-only.invalid" })
+        XCTAssertTrue(Transport.requestBodies().allSatisfy {
+            $0["background"] == nil && $0["model"] as? String == "configured-model"
+        })
+        XCTAssertNil(Transport.requestBodies().last?["text"])
+        let versions = try await store.minutesVersions(sessionID: sessionID)
+        let current = try XCTUnwrap(versions.first)
+        XCTAssertEqual(current.status, .ready)
+        XCTAssertFalse(current.hasRemoteResponse, "普通 Responses ID 不作为后台任务续跑")
+        await store.close()
+        try await store.open()
+        let windows = try await store.minutesWindows(minutesID: current.id)
+        XCTAssertEqual(windows.map(\.outcome), [.processed])
+        XCTAssertNil(windows.first?.remoteResponseID)
+        XCTAssertNotNil(windows.first?.candidate)
+        let retained = try await version(store, current.id)
+        XCTAssertTrue(retained.body?.contains("发布安排") == true)
+        let lines = try await store.lines(sessionID: sessionID)
+        XCTAssertEqual(lines.map(\.text), ["讨论发布安排。"])
+    }
+
+    func testFormatDowngradeStillMarksFabricatedReferencesAsRejected() async throws {
+        let store = try requireStore(), sessionID = try requireSessionID()
+        _ = try await store.appendLine(.init(sessionID: sessionID, role: .speaker,
+            text: "讨论发布安排。", source: .microphone, status: .final))
+        typealias Transport = LLMProviderTests.FakeTransport
+        Transport.reset([
+            .init(status: 400, contentType: "application/json",
+                  body: #"{"error":{"message":"Unsupported parameter: response_format"}}"#),
+            .init(status: 200, contentType: "application/json",
+                  body: try chatMinutesResponse(sourceUnitIDs: ["nonexistent-unit"]))
+        ])
+        let settings = URLSessionConfiguration.ephemeral
+        settings.protocolClasses = [Transport.self]
+        let session = URLSession(configuration: settings)
+        defer { session.invalidateAndCancel() }
+        let generator = MinutesGenerator(coordinator: SessionCoordinator(store: store),
+            provider: LLMProvider(session: session))
+        await generator.generate(sessionID: sessionID, resolvedConfiguration: .init(
+            configuration: .init(baseURL: "https://minutes.invalid/v1", model: "configured-model"),
+            apiKey: nil, origin: .global))
+        XCTAssertEqual(generator.state, .ready, "候选保留供核对，但伪造引用不得升为可信")
+        XCTAssertEqual(generator.candidateReview?.rejectedCount, 1)
+        XCTAssertTrue(generator.latestBody?.contains("未通过引用核对") == true)
+        XCTAssertEqual(Transport.requestURLs().count, 2)
+        let versions = try await store.minutesVersions(sessionID: sessionID)
+        let current = try XCTUnwrap(versions.first)
+        let windows = try await store.minutesWindows(minutesID: current.id)
+        XCTAssertEqual(windows.first?.candidate?.overview.first?.sourceUnitIDs, ["nonexistent-unit"])
+        let lines = try await store.lines(sessionID: sessionID)
+        XCTAssertEqual(lines.map(\.text), ["讨论发布安排。"])
+    }
+
+    func testStatelessMultiwindowRetryReusesCompletedWindowsAfterDatabaseReopen() async throws {
+        let store = try requireStore(), sessionID = try requireSessionID()
+        let transcript = String(repeating: "讨论发布安排。", count: 1_000)
+        _ = try await store.appendLine(.init(sessionID: sessionID, role: .speaker,
+            text: transcript, source: .microphone, status: .final))
+        let snapshot = try await store.sealMeetingSource(sessionID: sessionID)
+        XCTAssertNotNil(snapshot)
+        let units = MinutesGenerator.sourceUnits(lines: try await store.lines(sessionID: sessionID), names: [:])
+        let windows = MinutesWindowPlanner.plan(units: units, budget: MinutesGenerator.windowBudget)
+        XCTAssertGreaterThan(windows.count, 1)
+        guard windows.count > 1 else { return }
+        typealias Transport = LLMProviderTests.FakeTransport
+        Transport.reset([
+            .init(status: 200, contentType: "application/json",
+                  body: try chatMinutesResponse(sourceUnitIDs: windows[0].owned.map(\.id))),
+            .init(status: 503, contentType: "application/json", body: "{}")
+        ])
+        let settings = URLSessionConfiguration.ephemeral
+        settings.protocolClasses = [Transport.self]
+        let session = URLSession(configuration: settings)
+        defer { session.invalidateAndCancel() }
+        let resolved = ResolvedLLMConfiguration(
+            configuration: .init(baseURL: "https://minutes.invalid/v1", model: "configured-model"),
+            apiKey: nil, origin: .global)
+        let coordinator = SessionCoordinator(store: store)
+        let generator = MinutesGenerator(coordinator: coordinator, provider: LLMProvider(session: session))
+        await generator.generate(sessionID: sessionID, resolvedConfiguration: resolved)
+        let versions = try await store.minutesVersions(sessionID: sessionID)
+        let current = try XCTUnwrap(versions.first)
+        let before = try await store.minutesWindows(minutesID: current.id)
+        XCTAssertEqual(before.map(\.outcome), [.processed, .failed])
+        XCTAssertEqual(Transport.requestURLs().count, 2)
+        await store.close()
+        try await store.open()
+        Transport.reset(try windows.dropFirst().map {
+            .init(status: 200, contentType: "application/json",
+                  body: try chatMinutesResponse(sourceUnitIDs: $0.owned.map(\.id)))
+        })
+        let resumed = MinutesGenerator(coordinator: coordinator, provider: LLMProvider(session: session))
+        await resumed.retryFailedWindows(sessionID: sessionID, resolvedConfiguration: resolved)
+        XCTAssertEqual(resumed.state, .ready)
+        XCTAssertTrue(resumed.coverage?.isComplete == true)
+        XCTAssertEqual(resumed.candidateReview?.rejectedCount, 0, "切分来源仍须通过最终引用核对")
+        XCTAssertEqual(resumed.coverage?.eligibleUnitIDs, windows.flatMap { $0.owned.map(\.id) })
+        XCTAssertEqual(Transport.requestURLs().count, windows.count - 1, "完成窗口不可再次提交")
+        let after = try await store.minutesWindows(minutesID: current.id)
+        XCTAssertEqual(after.map(\.outcome), Array(repeating: .processed, count: windows.count))
+        XCTAssertEqual(after.first?.candidateJSON, before.first?.candidateJSON)
+        let retainedVersions = try await store.minutesVersions(sessionID: sessionID)
+        XCTAssertEqual(retainedVersions.map(\.id), [current.id])
+        let items = try await store.minutesItems(minutesID: current.id)
+        let anchors = items.flatMap(\.anchors)
+        XCTAssertEqual(Set(anchors.map(\.unitID)), Set(windows.flatMap { $0.owned.map(\.id) }))
+        XCTAssertTrue(anchors.allSatisfy { $0.revisionID != nil && $0.quote == transcript })
+        let lines = try await store.lines(sessionID: sessionID)
+        XCTAssertEqual(lines.map(\.text), [transcript])
+    }
+
+    func testStatelessMinutesTransportFailureStaysUnknownAndIsNotAutomaticallyResent() async throws {
+        let store = try requireStore(), sessionID = try requireSessionID()
+        _ = try await store.appendLine(.init(sessionID: sessionID, role: .speaker,
+            text: "讨论发布安排。", source: .microphone, status: .final))
+        typealias Transport = LLMProviderTests.FakeTransport
+        Transport.reset([.init(status: 200, contentType: "application/json", body: "", failCode: .timedOut)])
+        let settings = URLSessionConfiguration.ephemeral
+        settings.protocolClasses = [Transport.self]
+        let session = URLSession(configuration: settings)
+        defer { session.invalidateAndCancel() }
+        let resolved = ResolvedLLMConfiguration(
+            configuration: .init(baseURL: "https://minutes.invalid/v1", model: "configured-model"),
+            apiKey: nil, origin: .global)
+        let coordinator = SessionCoordinator(store: store)
+        let generator = MinutesGenerator(coordinator: coordinator, provider: LLMProvider(session: session))
+        await generator.generate(sessionID: sessionID, resolvedConfiguration: resolved)
+        XCTAssertEqual(generator.state, .submissionUnknown)
+        let versions = try await store.minutesVersions(sessionID: sessionID)
+        let current = try XCTUnwrap(versions.first)
+        let windows = try await store.minutesWindows(minutesID: current.id)
+        XCTAssertEqual(windows.map(\.outcome), [.submitted])
+        XCTAssertNil(windows.first?.remoteResponseID)
+        await store.close()
+        try await store.open()
+        Transport.reset([])
+        let resumed = MinutesGenerator(coordinator: coordinator, provider: LLMProvider(session: session))
+        await resumed.recoverPending(resolvedConfiguration: resolved)
+        XCTAssertTrue(Transport.requestURLs().isEmpty)
+        let retained = try await store.lines(sessionID: sessionID)
+        XCTAssertEqual(retained.map(\.text), ["讨论发布安排。"])
+    }
+
+    func testCrashWithStatelessSubmittedWindowDoesNotSubmitAgain() async throws {
+        let store = try requireStore(), sessionID = try requireSessionID()
+        _ = try await store.appendLine(.init(sessionID: sessionID, role: .speaker,
+            text: "讨论发布安排。", source: .microphone, status: .final))
+        let resolved = ResolvedLLMConfiguration(
+            configuration: .init(baseURL: "https://minutes.invalid/v1", model: "configured-model"),
+            apiKey: nil, origin: .global)
+        let units = MinutesGenerator.sourceUnits(lines: try await store.lines(sessionID: sessionID), names: [:])
+        let windows = MinutesWindowPlanner.plan(units: units, budget: MinutesGenerator.windowBudget)
+        var config = MinutesJobConfig(resolved.configuration)
+        config.inputFingerprint = try MinutesGenerator.inputFingerprint(units: units, windows: windows, supplements: "")
+        let queued = try await store.enqueueMinutes(sessionID: sessionID, model: "configured-model",
+            promptChars: 8, configSnapshot: config.fingerprint)
+        let owner = try await claim(store, sessionID, lease: -1)
+        let saved = try await store.recordMinutesWindow(minutesID: queued.id, expectedAttempts: owner.attempts,
+            record: .init(index: 0, ownedUnitIDs: ["u1"], outcome: .submitted))
+        XCTAssertTrue(saved)
+        await store.close()
+        try await store.open()
+        typealias Transport = LLMProviderTests.FakeTransport
+        Transport.reset([])
+        let settings = URLSessionConfiguration.ephemeral
+        settings.protocolClasses = [Transport.self]
+        let session = URLSession(configuration: settings)
+        defer { session.invalidateAndCancel() }
+        let generator = MinutesGenerator(coordinator: SessionCoordinator(store: store),
+            provider: LLMProvider(session: session))
+        await generator.recoverPending(resolvedConfiguration: resolved)
+        XCTAssertEqual(generator.state, .submissionUnknown)
+        XCTAssertTrue(Transport.requestURLs().isEmpty)
+        let after = try await version(store, queued.id)
+        XCTAssertEqual(after.status, .submissionUnknown)
+    }
+
+    func testKnownStatelessFailureCanRetrySameVersionWithFrozenProvider() async throws {
+        let store = try requireStore(), sessionID = try requireSessionID()
+        _ = try await store.appendLine(.init(sessionID: sessionID, role: .speaker,
+            text: "讨论发布安排。", source: .microphone, status: .final))
+        typealias Transport = LLMProviderTests.FakeTransport
+        Transport.reset([.init(status: 401, contentType: "application/json", body: "{}")])
+        let settings = URLSessionConfiguration.ephemeral
+        settings.protocolClasses = [Transport.self]
+        let session = URLSession(configuration: settings)
+        defer { session.invalidateAndCancel() }
+        let resolved = ResolvedLLMConfiguration(
+            configuration: .init(baseURL: "https://minutes.invalid/v1", model: "configured-model"),
+            apiKey: nil, origin: .global)
+        let generator = MinutesGenerator(coordinator: SessionCoordinator(store: store),
+            provider: LLMProvider(session: session))
+        await generator.generate(sessionID: sessionID, resolvedConfiguration: resolved)
+        let versions = try await store.minutesVersions(sessionID: sessionID)
+        let current = try XCTUnwrap(versions.first)
+        let windows = try await store.minutesWindows(minutesID: current.id)
+        XCTAssertEqual(windows.map(\.outcome), [.failed])
+        Transport.reset([.init(status: 200, contentType: "application/json", body: try chatMinutesResponse())])
+        let changed = ResolvedLLMConfiguration(
+            configuration: .init(baseURL: "https://changed.invalid/v1", model: "new-model"),
+            apiKey: nil, origin: .global)
+        await generator.retryFailedWindows(sessionID: sessionID, resolvedConfiguration: changed)
+        XCTAssertEqual(generator.state, .ready)
+        XCTAssertTrue(generator.jobConfigDiffersFromCurrent)
+        XCTAssertEqual(Transport.requestURLs().compactMap { URL(string: $0)?.host }, ["minutes.invalid"])
+        XCTAssertEqual(Transport.requestBodies()[0]["model"] as? String, "configured-model")
+        let after = try await store.minutesVersions(sessionID: sessionID)
+        XCTAssertEqual(after.map(\.id), [current.id])
+    }
+
+    func testCancellingNewStatelessJobDoesNotCancelHistoricalResponse() async throws {
+        let store = try requireStore(), sessionID = try requireSessionID()
+        _ = try await store.appendLine(.init(sessionID: sessionID, role: .speaker,
+            text: "讨论发布安排。", source: .microphone, status: .final))
+        let resolved = ResolvedLLMConfiguration(
+            configuration: .init(baseURL: "https://minutes.invalid/v1", model: "configured-model"),
+            apiKey: nil, origin: .global)
+        let units = MinutesGenerator.sourceUnits(lines: try await store.lines(sessionID: sessionID), names: [:])
+        let windows = MinutesWindowPlanner.plan(units: units, budget: MinutesGenerator.windowBudget)
+        var config = MinutesJobConfig(resolved.configuration)
+        config.inputFingerprint = try MinutesGenerator.inputFingerprint(units: units, windows: windows, supplements: "")
+        let queued = try await store.enqueueMinutes(sessionID: sessionID, model: "configured-model",
+            promptChars: 8, configSnapshot: config.fingerprint)
+        let owner = try await claim(store, sessionID)
+        let saved = try await store.recordMinutesWindow(minutesID: queued.id, expectedAttempts: owner.attempts,
+            record: .init(index: 0, ownedUnitIDs: ["u1"], outcome: .submitted,
+                          remoteResponseID: "resp-historical"))
+        XCTAssertTrue(saved)
+        try await store.failMinutes(minutesID: queued.id, reason: "interrupted")
+        let chat = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(try chatMinutesResponse().utf8)) as? [String: Any])
+        let choices = try XCTUnwrap(chat["choices"] as? [[String: Any]])
+        let content = try XCTUnwrap((choices[0]["message"] as? [String: Any])?["content"] as? String)
+        let response = try JSONSerialization.data(withJSONObject: [
+            "id": "resp-historical", "object": "response", "status": "completed",
+            "output": [["type": "message", "role": "assistant",
+                        "content": [["type": "output_text", "text": content]]]]
+        ])
+        typealias Transport = LLMProviderTests.FakeTransport
+        Transport.reset([.init(status: 200, contentType: "application/json",
+                               body: String(decoding: response, as: UTF8.self))])
+        let settings = URLSessionConfiguration.ephemeral
+        settings.protocolClasses = [Transport.self]
+        let session = URLSession(configuration: settings)
+        defer { session.invalidateAndCancel() }
+        let generator = MinutesGenerator(coordinator: SessionCoordinator(store: store),
+            provider: LLMProvider(session: session))
+        await generator.retryFailedWindows(sessionID: sessionID, resolvedConfiguration: resolved)
+        XCTAssertEqual(generator.state, .ready)
+        XCTAssertEqual(generator.lastResponseID, "resp-historical")
+        Transport.reset([.init(status: 200, contentType: "application/json", body: "", failCode: .cancelled)])
+        await generator.generate(sessionID: sessionID, resolvedConfiguration: resolved)
+        XCTAssertEqual(generator.state, .cancelled)
+        XCTAssertNil(generator.lastResponseID)
+        XCTAssertEqual(Transport.requestURLs().compactMap { URL(string: $0)?.path }, ["/v1/chat/completions"])
+    }
+
+    func testWindowCheckpointsAreScopedToMinutesVersion() async throws {
+        let store = try requireStore(), sessionID = try requireSessionID()
+        var ids: [String] = []
+        for _ in 0..<2 {
+            let queued = try await store.enqueueMinutes(sessionID: sessionID, model: "configured-model",
+                                                        promptChars: 8)
+            let owner = try await claim(store, sessionID)
+            let recorded = try await store.recordMinutesWindow(minutesID: queued.id,
+                expectedAttempts: owner.attempts,
+                record: .init(index: 0, ownedUnitIDs: ["u1"], outcome: .submitted))
+            XCTAssertTrue(recorded)
+            try await store.failMinutes(minutesID: queued.id, reason: "test")
+            ids.append(queued.id)
+        }
+        for id in ids {
+            let records = try await store.minutesWindows(minutesID: id)
+            XCTAssertEqual(records.map(\.index), [0])
+            XCTAssertEqual(records.map(\.outcome), [.submitted])
+        }
+    }
+
     func testMultiwindowPollFailureRetainsResponseIDAndRetryDoesNotResubmit() async throws {
         let store = try requireStore()
         let sessionID = try requireSessionID()
@@ -107,7 +468,6 @@ final class MeetingMinutesJobRecoveryTests: XCTestCase {
 
         typealias Transport = LLMProviderTests.FakeTransport
         Transport.reset([
-            .init(status: 200, contentType: "application/json", body: #"{"id":"resp-window-1"}"#),
             .init(status: 400, contentType: "application/json", body: #"{"error":{"message":"poll unavailable"}}"#)
         ])
         let settings = URLSessionConfiguration.ephemeral
@@ -121,7 +481,21 @@ final class MeetingMinutesJobRecoveryTests: XCTestCase {
         )
         let coordinator = SessionCoordinator(store: store)
         let generator = MinutesGenerator(coordinator: coordinator, provider: provider)
-        await generator.generate(sessionID: sessionID, resolvedConfiguration: resolved)
+        // 历史 App 已提交的后台任务：新 App 只能继续查询这个 ID。
+        var config = MinutesJobConfig(resolved.configuration)
+        config.inputFingerprint = try MinutesGenerator.inputFingerprint(
+            units: units, windows: windows, supplements: "")
+        let queued = try await store.enqueueMinutes(sessionID: sessionID, model: "fake-model",
+            promptChars: 8_000, configSnapshot: config.fingerprint)
+        let owner = try await claim(store, sessionID)
+        let checkpointed = try await store.recordMinutesWindow(minutesID: queued.id,
+            expectedAttempts: owner.attempts, record: .init(index: 0,
+                ownedUnitIDs: windows[0].owned.map(\.id),
+                contextUnitIDs: (windows[0].contextBefore + windows[0].contextAfter).map(\.id),
+                outcome: .submitted, remoteResponseID: "resp-window-1"))
+        XCTAssertTrue(checkpointed)
+        try await store.failMinutes(minutesID: queued.id, reason: "interrupted")
+        await generator.retryFailedWindows(sessionID: sessionID, resolvedConfiguration: resolved)
         let versions = try await store.minutesVersions(sessionID: sessionID)
         let version = try XCTUnwrap(versions.first)
         let records = try await store.minutesWindows(minutesID: version.id)

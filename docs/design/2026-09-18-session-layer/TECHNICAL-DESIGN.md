@@ -2,8 +2,8 @@
 title: "SpeechRail 会话层技术方案 · 语音助手 / 会议助手 / 实时字幕"
 status: active
 audience: "SpeechRail macOS App 实现者、服务维护者、设计评审"
-version: "3.0.0"
-date: 2026-09-20
+version: "3.0.1"
+date: 2026-10-20
 ---
 
 # 会话层技术方案
@@ -445,13 +445,13 @@ GPT-5.5 与更早的模型不支持**，只有隐式断点 + `prompt_cache_key`�
 | 项 | 当前形态 | 依据 |
 |---|---|---|
 | 触发 | 转录封存后写 `minutes(status='queued', version=n+1)` | 与 Sona 的 `meeting_minutes` 同形（借用机制，不搬代码） |
-| 执行 | Responses **background 模式**（`background: true`）+ 轮询状态；失败写 `failed` + 可读原因 | 长任务不应绑在界面前台（来源 8） |
+| 执行 | App 持有本地长任务，优先 Chat JSON mode；接口明确不可用时使用同一配置的普通 Responses，不发送 `background` | [Provider 与恢复边界](../../developers/macos-app-development.md#纪要的模型服务兼容与恢复) |
 | 并发 | 同会话单飞；claim 用租约（`lease_until` + `attempts`），超时可回收重试 | 租约式队列 |
-| 恢复 | App 退出/崩溃后，过期租约在下次启动回收 | `unexpected_exit` 的同一套恢复 |
-| 隐私 | 默认 `store=false`；不使用服务端会话状态 | **但要说清楚**：background 模式下即使 `store=false`，响应数据仍会临时落盘约 10 分钟以支持异步执行与轮询（文档口径）。这一条必须写进隐私说明，界面不许说成"内容没经过服务器" |
-| 正文 | `json_schema` + `strict` 结构化字段 → App 渲染 Markdown | 结构化输出；拒答可程序化识别 |
+| 恢复 | 回收过期租约；复用成功窗口。无远端 ID 的 `submitted` 不自动重发，历史后台任务只按原 ID 查询 | 结果未知与明确失败分开处理 |
+| 隐私 | 请求 `store=false`；转录仍发送到配置的 provider | 不宣称内容未经过服务器，具体留存以 provider 政策为准 |
+| 正文 | 完整 schema 指令 + JSON mode；明确拒绝格式参数时可省略该参数，仍须通过本地严格 JSON、预算和业务引用校验，再渲染 Markdown | 格式协商不放松业务提交边界 |
 | 版本 | 重新生成只**新增版本**，`is_latest` 指向最新，旧版仍可看可导出 | 产品规格 §6.2 |
-| 超长会 | 只在需要时启用服务端压缩（`context_management`）；压缩会打断此前缓存，界面按"它得重读一遍开头"表达 | 来源 8 |
+| 超长会 | 按来源拥有区与只读上下文分窗，逐窗保存候选，再合并与核对覆盖账本 | `MinutesWindowPlanner` 与 `MinutesCandidateMerger` |
 
 ### 5.9 `InnerOSSession`（会中私密问答）
 

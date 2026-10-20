@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 当前边界与剩余风险"
 status: active
-version: "3.4.0"
-date: 2026-09-27
+version: "3.4.1"
+date: 2026-10-20
 ---
 
 # SpeechRail 当前边界与剩余风险
@@ -44,7 +44,8 @@ date: 2026-09-27
   `/v1/realtime` 上的 24 kHz 单声道 PCM16，**不新增任何接口**，也不承载 LLM、会议持久化或
   用户资产（`docs/architecture/product-scope.md` §3 的红线）。
   新增的三件事都在 App 这一侧：设备按功能启用、功能离开即释放；PCM 不落盘、记录只落本机
-  SQLite；与大模型的编排（对话 / 纪要 / 内心 OS）走 Responses API 直连用户配置的端点。
+  SQLite；对话与内心 OS 使用 Responses，纪要优先 Chat Completions，仅在接口明确不可用时
+  改用普通 Responses；均直连用户配置的端点。纪要新任务不要求后台响应。
   详表见 `docs/design/2026-09-18-session-layer/TECHNICAL-DESIGN.md` §2.1。
 - 每个 spec 的 Base clone 与 CustomVoice artifact，以及 `reference` 的 BF16 VoiceDesign artifact，会增加安装体积与多 worker 活跃态 RAM，但不在请求级 capability 切换时反复换模。旧版 VoiceDesign-only RAM / latency 数据不能直接当作当前多 capability 架构的实测数据；跨档数据也不可互相替代。对应资源与延迟证据仍按专项授权验收。
 - 2026-09-12 本地审计发现现有 synthesis quality-run 的最终通过条件对静音、极端削波/噪声与 deterministic 证据仍不够严格；在这些门禁修复并重新验收前，不得把绿色 `voice_quality_v1` 报告解释成跨文本音色和纯净度已经证明。
