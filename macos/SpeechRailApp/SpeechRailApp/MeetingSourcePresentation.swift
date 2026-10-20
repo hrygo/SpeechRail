@@ -17,6 +17,8 @@ struct MeetingSourcePresentation: Hashable, Sendable {
     enum Capture: Hashable, Sendable {
         case notStarted
         case pausedAll
+        case reconnecting
+        case interrupted
         case microphoneMuted
         case live
     }
@@ -51,6 +53,8 @@ struct MeetingSourcePresentation: Hashable, Sendable {
         switch capture {
         case .notStarted: "还没开始"
         case .pausedAll: "已暂停全部"
+        case .reconnecting: "正在重连音频"
+        case .interrupted: "录制中断"
         case .microphoneMuted where isMicrophoneSelected: "正在录音 · 麦克风已静音"
         case .microphoneMuted: "正在录音 · 只在录系统声音"
         case .live: "正在录音"
@@ -61,6 +65,8 @@ struct MeetingSourcePresentation: Hashable, Sendable {
     var sourceSummary: String {
         guard capture != .notStarted else { return "尚未选择采集来源" }
         if capture == .pausedAll { return "当前没有在录：\(selectionLabel)" }
+        if capture == .reconnecting { return "正在重新连接：\(selectionLabel)" }
+        if capture == .interrupted { return "录制已中断：\(selectionLabel)" }
 
         var parts: [String] = []
         if selection.usesMicrophone {
@@ -83,6 +89,8 @@ struct MeetingSourcePresentation: Hashable, Sendable {
         switch capture {
         case .notStarted: "还没有开始采集"
         case .pausedAll: "已暂停，看不到电平"
+        case .reconnecting: "音频连接已中断，正在重新连接"
+        case .interrupted: "采集已停止，电平不代表正在录音"
         case .microphoneMuted where !isMicrophoneSelected:
             "只录系统声音，电平不代表麦克风"
         case .microphoneMuted:
@@ -101,13 +109,17 @@ struct MeetingSourcePresentation: Hashable, Sendable {
         case .pausedAll:
             result.append("麦克风和系统声音都停了")
             result.append("暂停前后的句子不会拼在一起")
+        case .reconnecting:
+            result.append("重连期间可能漏录")
+        case .interrupted:
+            result.append("采集已停止，已保存的文字仍在")
         case .microphoneMuted:
             if isMicrophoneSelected { result.append("麦克风已静音，系统声音仍在录") }
             else { result.append("只录系统声音") }
         case .live:
             break
         }
-        if isRecognizing {
+        if isRecognizing && capture != .interrupted && capture != .reconnecting {
             result.append("识别连接已建立")
         } else if capture != .notStarted {
             // 采集在跑但没识别：这是两件事，说清楚省得用户以为已经出文字了。
@@ -140,6 +152,7 @@ struct MeetingSourcePresentation: Hashable, Sendable {
         switch capture {
         case .notStarted: ("开始会议", .start)
         case .pausedAll: ("恢复录音", .resume)
+        case .reconnecting, .interrupted: nil
         case .microphoneMuted: ("取消麦克风静音", .unmuteMicrophone)
         case .live: ("暂停全部", .pauseAll)
         }

@@ -152,6 +152,8 @@ public final class MeetingSession {
     public private(set) var interruptionNote: String?
     /// 因为 `source_lost` 自动接回过几次（§9 第 9 行：无打扰，只记区间）。
     public private(set) var reconnectedSources = 0
+    public private(set) var isReconnectingSystemAudio = false
+    private var systemAudioRecoveryAttempts: [Date] = []
     public private(set) var isPaused = false
     /// 麦克风这一路被用户静音了没有（会中「我暂时不说」）。
     ///
@@ -819,10 +821,15 @@ public final class MeetingSession {
         isPaused = false
         // 静音状态与设备同生共死：`audio.start` 已经把闸门重置回"能说话"，这里的镜像跟上。
         isMicrophoneMuted = false
+        isReconnectingSystemAudio = false
+        systemAudioRecoveryAttempts = []
         phase = .recording
-        // 来源退出之后**自动接回**只发生在这一条路上：来源 App 退出不打断录制，只记一条区间。
+        // 来源 App 变化或采集 helper 断连都进入同一条有界恢复路径。
         audio.onSystemAudioLost = { [weak self] reason in
-            Task { await self?.handleSystemAudioLost(reason) }
+            Task {
+                guard let self, self.isCurrent(generation) else { return }
+                await self.handleSystemAudioLost(reason)
+            }
         }
         if isNewSession { startSleepObserver() }
         startPump(
@@ -1501,21 +1508,37 @@ public final class MeetingSession {
         }
     }
 
-    /// 本机音频那一路断了自己接回来。**这是唯一会自动接回的一类**（§9 第 9 行）：
-    /// 被 tap 的 App 退出不打断录制，只记一条区间 + 一句可读的话。
+    /// Restore a lost capture connection, with a bounded retry window. A helper
+    /// crash is also sourceLost; it does not prove the selected App exited.
     private func handleSystemAudioLost(_ reason: String) async {
-        guard !isStoppingIntentionally, phase.isLive else { return }
+        guard !isStoppingIntentionally, phase == .recording, !isReconnectingSystemAudio else { return }
+        let recoveryEpoch = epoch
+        let now = dependencies.clock.now()
+        systemAudioRecoveryAttempts.removeAll { now.timeIntervalSince($0) >= 60 }
+        guard systemAudioRecoveryAttempts.count < 3 else {
+            await enterInterruption(.sourceLost,
+                note: "音频采集连续中断，已停止自动重连。已保存的文字仍在；请检查声音来源后重试录制。",
+                drain: true)
+            return
+        }
+        systemAudioRecoveryAttempts.append(now)
+        isReconnectingSystemAudio = true
+        defer {
+            if epoch == recoveryEpoch { isReconnectingSystemAudio = false }
+        }
         _ = await coordinator.markInterruption(.sourceLost, atOrdinal: currentOrdinal)
+        guard epoch == recoveryEpoch, phase == .recording, !isStoppingIntentionally else { return }
         let reconnected = await audio.restartSystemAudio()
-        await coordinator.resumeAfterInterruption()
+        guard epoch == recoveryEpoch, phase == .recording, !isStoppingIntentionally else { return }
         if reconnected {
-            // 只有真接回来了才算"自动接回过一次"：计数是给界面看的事实，
-            // 接不回来却 +1 就是在说谎。
+            await coordinator.resumeAfterInterruption()
+            guard epoch == recoveryEpoch, phase == .recording, !isStoppingIntentionally else { return }
             reconnectedSources += 1
-            lastFailure = "本机音频的来源 App 退出过（\(reason)）；已经按 App 的标识接回，录制没有停。"
+            lastFailure = "音频采集连接曾中断（\(reason)）；已重新建立连接，中断期间可能漏录，请确认文字记录继续更新。"
         } else {
-            lastFailure = "本机音频的那一路断开了（\(reason)），也没有接回来；"
-                + "麦克风这一路还在录，已经定稿的文字记录都在。"
+            await enterInterruption(.sourceLost,
+                note: "音频采集没有恢复（\(reason)）。已保存的文字仍在，请检查声音来源后重试录制。",
+                drain: true)
         }
     }
 
