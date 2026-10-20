@@ -104,10 +104,13 @@ final class AudiobookWorkflowTests: XCTestCase {
         private let leadLock = NSLock()
         private var leadRequests = 0
         var leadRequestCount: Int { leadLock.withLock { leadRequests } }
+        private var fragmentRequests = 0
+        var fragmentRequestCount: Int { leadLock.withLock { fragmentRequests } }
         private var capturedAuditions: [AudiobookRenderCallRequest] = []
         var auditionRequests: [AudiobookRenderCallRequest] { leadLock.withLock { capturedAuditions } }
 
         var auditionRenderHandler: (@Sendable (AudiobookRenderCallRequest) async throws -> Data)?
+        var beforeCapabilityFetch: (@Sendable () async -> Void)?
 
         func renderAudition(_ request: AudiobookRenderCallRequest) async throws -> Data {
             leadLock.withLock { capturedAuditions.append(request) }
@@ -186,6 +189,7 @@ final class AudiobookWorkflowTests: XCTestCase {
         }
 
         func fetchEffectiveCapabilities() async throws -> EffectiveCapabilitySnapshot {
+            await beforeCapabilityFetch?()
             let desc = SafeVoiceDescriptor(
                 voiceMode: "instruction",
                 locales: ["zh-CN"],
@@ -235,6 +239,7 @@ final class AudiobookWorkflowTests: XCTestCase {
         }
 
         func renderFragment(_ request: AudiobookRenderCallRequest) async throws -> AudiobookRenderCallOutput {
+            leadLock.withLock { fragmentRequests += 1 }
             await beforeRender?()
             let wav = Self.makeWAV(frameCount: 4_800)
             return AudiobookRenderCallOutput(
@@ -2245,6 +2250,153 @@ final class AudiobookWorkflowTests: XCTestCase {
         XCTAssertNil(workflow.errorMessage)
     }
 
+    private func prepareAutomaticCastingBook(
+        workflow: AudiobookWorkflowModel,
+        store: AudiobookProjectStore,
+        roleCount: Int,
+        sameChapter: Bool = false
+    ) async throws -> [AudiobookCharacter] {
+        let text = sameChapter
+            ? "第一章\n" + (1..<roleCount).map { "“这是角色\($0)的台词。”" }.joined(separator: "\n")
+            : (1..<roleCount).map { "第\($0)章\n“这是角色\($0)的台词。”" }.joined(separator: "\n\n")
+        _ = try await importBook(into: workflow, fileName: "automatic-casting.txt", text: text)
+        let bookID = try XCTUnwrap(workflow.selectedBook?.id)
+        let chapters = try await store.chapters(for: bookID)
+        XCTAssertEqual(chapters.count, sameChapter ? 1 : roleCount - 1)
+        let narrator = try XCTUnwrap(workflow.characters.first(where: \.isNarrator))
+        var roles = [narrator]
+        for index in 1..<roleCount {
+            roles.append(.init(bookID: bookID, displayName: "人物\(index)", isMajor: index < 8))
+        }
+        try await store.saveCharacters(bookID: bookID, characters: roles)
+        var annotations: [AudiobookAnnotation] = []
+        for (index, chapter) in chapters.enumerated() {
+            let atoms = try await store.atoms(for: bookID, chapterID: chapter.id).filter { $0.kind != .formatting }
+            for (atomIndex, atom) in atoms.enumerated() {
+                let roleIndex = sameChapter ? min(atomIndex + 1, roleCount - 1) : index + 1
+                annotations.append(.init(bookID: bookID, chapterID: chapter.id, windowID: UUID(),
+                    atomID: atom.id, sourceRange: atom.sourceRange, assignment: .assigned(roleID: roles[roleIndex].id)))
+            }
+        }
+        try await store.saveAnnotations(bookID: bookID, annotations: annotations)
+        var book = try await store.book(id: bookID)
+        book.analysisState = .allWindowsValidated
+        try await store.updateBook(book)
+        await workflow.openBook(bookID)
+        return roles
+    }
+
+    func testOneClickPreparesFiftyFourCharactersWithoutCreatingVoicesOrAudio() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let renderer = WorkflowFakeRenderer(), catalog = VoiceCatalogStore()
+        try await catalog.registerGlobalVoice(voiceID: "v-designed-narrator", creationSource: .instantClone)
+        let (workflow, _) = makeWorkflow(renderer: renderer, store: store, catalog: catalog)
+        let roles = try await prepareAutomaticCastingBook(workflow: workflow, store: store, roleCount: 54)
+        await workflow.bindVoice(roleID: roles[0].id, voiceID: "v-narrator")
+        let originalNarrator = try XCTUnwrap(workflow.voiceBindings[roles[0].id])
+        XCTAssertEqual(workflow.primaryActionTitle(.confirmCastAndVoices, for: roles[0].bookID), "一键智能配声")
+
+        await workflow.autoAssignRecommendedVoices(consentsToSharedMinorVoices: true)
+
+        XCTAssertNil(workflow.errorMessage)
+        XCTAssertNil(workflow.pendingCastingPlan)
+        XCTAssertEqual(workflow.voiceBindings.count, 54)
+        XCTAssertEqual(workflow.voiceBindings[roles[0].id], originalNarrator)
+        XCTAssertTrue(workflow.isAuditionConfirmedForSelectedBook)
+        XCTAssertEqual(workflow.workbenchTab, .preparation)
+        XCTAssertEqual(workflow.selectedBook?.productionState, .idle)
+        XCTAssertNil(workflow.productionProgress)
+        XCTAssertEqual(renderer.leadRequestCount, 0)
+        XCTAssertEqual(renderer.fragmentRequestCount, 0)
+        XCTAssertTrue(renderer.auditionRequests.isEmpty)
+
+        let firstBindings = workflow.voiceBindings
+        await workflow.autoAssignRecommendedVoices(consentsToSharedMinorVoices: true)
+        XCTAssertEqual(workflow.voiceBindings, firstBindings, "再次点击不能改写已经采用的声音")
+    }
+
+    func testOneClickSharingConsentDoesNotAcceptSceneCollisions() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let renderer = WorkflowFakeRenderer(), catalog = VoiceCatalogStore()
+        try await catalog.registerGlobalVoice(voiceID: "v-designed-narrator", creationSource: .instantClone)
+        let (workflow, _) = makeWorkflow(renderer: renderer, store: store, catalog: catalog)
+        _ = try await prepareAutomaticCastingBook(workflow: workflow, store: store, roleCount: 4, sameChapter: true)
+
+        await workflow.autoAssignRecommendedVoices(consentsToSharedMinorVoices: true)
+
+        let plan = try XCTUnwrap(workflow.pendingCastingPlan)
+        XCTAssertTrue(plan.isApplicable)
+        XCTAssertTrue(plan.issues.contains { $0.code == .sharedSceneRisk })
+        XCTAssertTrue(workflow.castingPlanNeedsSeparateConfirmation)
+        XCTAssertEqual(workflow.primaryActionTitle(.confirmCastAndVoices, for: try XCTUnwrap(workflow.selectedBook).id), "查看配声方案")
+        XCTAssertTrue(workflow.voiceBindings.isEmpty, "一键允许配角共享不等于确认同章撞音")
+        XCTAssertEqual(renderer.leadRequestCount, 0)
+        XCTAssertEqual(renderer.fragmentRequestCount, 0)
+
+        await workflow.applyPendingCastingPlan(acknowledgedIssueIDs: plan.requiredAcknowledgements)
+        XCTAssertNil(workflow.pendingCastingPlan)
+        XCTAssertFalse(workflow.castingPlanNeedsSeparateConfirmation)
+        XCTAssertTrue(workflow.isAuditionConfirmedForSelectedBook, "集中确认后应完成配声准备，无需再点人物确认")
+        XCTAssertEqual(workflow.selectedBook?.productionState, .idle)
+        XCTAssertEqual(renderer.fragmentRequestCount, 0)
+    }
+
+    func testOneClickShowsProgressAndRejectsDuplicatePreparation() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let renderer = WorkflowFakeRenderer(), counter = WorkCounter()
+        let (workflow, _) = makeWorkflow(renderer: renderer, store: store)
+        _ = try await importBook(into: workflow, fileName: "casting-progress.txt", text: "第一章\n海风吹来。")
+        let gate = WorkflowRendererGate()
+        renderer.beforeCapabilityFetch = {
+            _ = counter.increment()
+            await gate.suspend()
+        }
+        let preparation = Task { await workflow.autoAssignRecommendedVoices(consentsToSharedMinorVoices: true) }
+        await waitForRenderSuspension(gate)
+
+        XCTAssertTrue(workflow.isAssigningRecommendedVoices)
+        XCTAssertEqual(workflow.primaryActionTitle(.confirmCastAndVoices, for: try XCTUnwrap(workflow.selectedBook).id), "正在准备配声…")
+        XCTAssertTrue(workflow.castingPreparationProgressText?.contains("1/4") == true)
+        await workflow.autoAssignRecommendedVoices(consentsToSharedMinorVoices: true)
+        XCTAssertEqual(counter.count, 1, "重复点击不能开始第二次准备")
+
+        preparation.cancel()
+        renderer.beforeCapabilityFetch = nil
+        await gate.resume()
+        await preparation.value
+        XCTAssertFalse(workflow.isAssigningRecommendedVoices)
+        XCTAssertNil(workflow.castingPreparationProgressText)
+        XCTAssertTrue(workflow.voiceBindings.isEmpty)
+        XCTAssertEqual(renderer.fragmentRequestCount, 0)
+    }
+
+    func testSwitchingBooksDuringOneClickDoesNotApplyOrReplaceCurrentProjection() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let renderer = WorkflowFakeRenderer()
+        let (workflow, _) = makeWorkflow(renderer: renderer, store: store)
+        let first = try await importBook(into: workflow, fileName: "casting-first.txt", text: "第一章\n甲书正文。")
+        let second = try await importBook(into: workflow, fileName: "casting-second.txt", text: "第一章\n乙书正文。")
+        await workflow.openBook(first.bookID)
+        let gate = WorkflowRendererGate()
+        renderer.beforeCapabilityFetch = { await gate.suspend() }
+        let preparation = Task { await workflow.autoAssignRecommendedVoices(consentsToSharedMinorVoices: true) }
+        await waitForRenderSuspension(gate)
+
+        renderer.beforeCapabilityFetch = nil
+        await workflow.openBook(second.bookID)
+        let previousBanner = workflow.bannerMessage
+        await gate.resume()
+        await preparation.value
+
+        XCTAssertEqual(workflow.selectedBook?.id, second.bookID)
+        XCTAssertTrue(workflow.voiceBindings.isEmpty)
+        XCTAssertTrue(workflow.pendingCastingPlan == nil)
+        XCTAssertNil(workflow.errorMessage)
+        XCTAssertEqual(workflow.bannerMessage, previousBanner)
+        let originalBindings = try await store.voiceBindings(for: first.bookID)
+        XCTAssertTrue(originalBindings.isEmpty)
+    }
+
     func testAC13_to_AC15_SilentRoleFoldingDefaultScopeAndLegacyOneClickAutoCast() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
         let renderer = WorkflowFakeRenderer()
@@ -2349,8 +2501,13 @@ final class AudiobookWorkflowTests: XCTestCase {
         // AC-1.5: Legacy unstratified book is automatically healed and one-click autoAssignRecommendedVoices() succeeds immediately
         _ = await workflow.ensureSixArchetypeVoicesForBook(for: bookID, quietBanner: true)
         _ = await workflow.refreshAvailableVoices()
-        await workflow.autoAssignRecommendedVoices(for: bookID)
+        await workflow.autoAssignRecommendedVoices(for: bookID, consentsToSharedMinorVoices: true)
         XCTAssertNil(workflow.errorMessage, "AC-1.5: 一键智能配声不应因历史全员核心角色而报独立音色不足")
+        if let plan = workflow.pendingCastingPlan {
+            XCTAssertTrue(plan.isApplicable, "容量不足时可共享，不应卡在独占门禁")
+            XCTAssertTrue(plan.issues.contains { $0.code == .sharedSceneRisk }, "同章撞音仍应集中确认")
+            await workflow.applyPendingCastingPlan(acknowledgedIssueIDs: plan.requiredAcknowledgements)
+        }
         XCTAssertNil(workflow.pendingCastingPlan, "AC-1.5: 无阻断冲突的智能配声应直接生效，不卡在二次确认弹窗")
         XCTAssertGreaterThanOrEqual(workflow.voiceBindings.count, 8, "AC-1.5: 所有有台词角色均已自动绑定音色")
     }

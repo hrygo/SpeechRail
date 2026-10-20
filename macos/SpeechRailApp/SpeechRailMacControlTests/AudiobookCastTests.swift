@@ -255,6 +255,23 @@ final class AudiobookCastTests: XCTestCase {
         XCTAssertFalse(missing.permitsSurface(safeNonDefault, bookID: nil))
     }
 
+    func testLargeCastingKeepsCompletePlanWithoutClaimingResidualConflictsAreProven() throws {
+        let roles = (0..<80).map { _ in UUID() }
+        let triangle: [AudiobookSceneConflictGraph.Edge] = [
+            .init(roleA: roles[0], roleB: roles[1], kind: .directDialogue, sourceIDs: ["a"]),
+            .init(roleA: roles[1], roleB: roles[2], kind: .directDialogue, sourceIDs: ["b"]),
+            .init(roleA: roles[0], roleB: roles[2], kind: .directDialogue, sourceIDs: ["c"])
+        ]
+        let outcome = try AudiobookCastingPlanner.assign(roleIDs: roles,
+            candidates: Dictionary(uniqueKeysWithValues: roles.map { ($0, ["a", "b"]) }),
+            graph: .init(edges: triangle))
+
+        XCTAssertEqual(outcome.assignments.count, 80)
+        XCTAssertFalse(outcome.residualDirectPairs.isEmpty)
+        XCTAssertEqual(outcome.status, .residualConflicts, "大角色表不进行完备搜索，不能宣称已经证明无解")
+        XCTAssertLessThanOrEqual(outcome.evaluatedCandidates, 160, "大角色表只执行有界初次分配，避免深度修复黑洞")
+    }
+
     func testResidualSceneSharingRequiresExplicitAcknowledgement() throws {
         let book = UUID(), (roles, annotations) = p0Roles(bookID: book, count: 4)
         let voices = (0..<2).map { makeTestSafeVoice(id: "shared-risk-v\($0)", name: "声音\($0)") }
@@ -520,6 +537,46 @@ final class AudiobookCastTests: XCTestCase {
         XCTAssertTrue(plan.isApplicable)
         XCTAssertTrue(plan.issues.contains { $0.code == .unsupportedRenderParameter && $0.voiceIDs == [voice.id] })
         XCTAssertTrue(plan.requiredAcknowledgements.isEmpty, "未采用候选的排除说明不应要求接受共享风险")
+    }
+
+    func testInferredLeadRolesDoNotBlockAutomaticCastingOfFiftyFourCharacters() {
+        let book = UUID()
+        var (roles, annotations) = p0Roles(bookID: book, count: 54)
+        for index in 1..<8 { roles[index].isMajor = true }
+        let voices = (0..<2).map { makeTestSafeVoice(id: "auto-\($0)", name: "声音\($0)") }
+
+        let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: annotations,
+            snapshot: p0Snapshot(voices), catalog: .init(), bookID: book, existingBindings: [:])
+
+        XCTAssertTrue(plan.isApplicable, "推断主角不应被当成人工独占要求：\(plan.issues)")
+        XCTAssertEqual(plan.proposedBindings.count, 54)
+        XCTAssertEqual(plan.narratorVoiceCount, 1)
+        XCTAssertEqual(plan.sharedVoiceCount, 1)
+        XCTAssertEqual(plan.proposedPolicies[roles[0].id]?.sharingPolicy, .exclusive)
+        XCTAssertTrue(roles.dropFirst().allSatisfy { plan.proposedPolicies[$0.id]?.sharingPolicy == .sharedMinor })
+    }
+
+    func testAutomaticCastingStillHonorsExplicitExclusivePolicy() {
+        let book = UUID()
+        var (roles, annotations) = p0Roles(bookID: book, count: 54)
+        roles[1].voicePolicy = .init(sharingPolicy: .exclusive, bindingOrigin: .manual, isLocked: true)
+        let voices = (0..<2).map { makeTestSafeVoice(id: "explicit-\($0)", name: "声音\($0)") }
+
+        let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: annotations,
+            snapshot: p0Snapshot(voices), catalog: .init(), bookID: book, existingBindings: [:])
+
+        XCTAssertFalse(plan.isApplicable)
+        XCTAssertTrue(plan.issues.contains { $0.code == .insufficientVoiceCapacity })
+        XCTAssertEqual(plan.proposedPolicies[roles[1].id], roles[1].voicePolicy)
+        XCTAssertTrue(plan.proposedBindings.isEmpty, "不能为通过一键配声而放宽人工独占")
+    }
+
+    func testMissingVoiceMessageOffersOneClickInsteadOfListingEveryCharacter() {
+        let names = (0..<54).map { "角色\($0)" }
+        let message = AudiobookCastError.missingVoiceBindings(unboundRoleNames: names).localizedDescription
+        XCTAssertTrue(message.contains("54"))
+        XCTAssertTrue(message.contains("一键智能配声"))
+        XCTAssertFalse(message.contains(names.last!))
     }
 
     func testCastingCapacityIncludesNarrator() {
@@ -2844,18 +2901,15 @@ final class AudiobookCastTests: XCTestCase {
             makeTestSafeVoice(id: "serena", name: "温柔成熟女声")
         ]
 
-        let recommended = recommendTestBindings(
-            characters: characters,
-            availableVoices: voices,
-            annotations: anns,
-            bookID: bookID,
-            voiceMetadataByID: [:]
-        )
-        let boundCount = try await castController.bindVoicesBatch(
-            bookID: bookID,
-            bindings: Array(recommended.values)
-        )
-        XCTAssertEqual(boundCount, characters.count)
+        // A recommendation includes its sharing policies and acknowledgements;
+        // copying bindings into a manual batch would discard the accepted policy.
+        let castingPlan = try await store.prepareCastingPlan(bookID: bookID,
+            snapshot: p0Snapshot(voices), catalog: .init())
+        XCTAssertTrue(castingPlan.isApplicable)
+        try await castController.applyCastingPlan(bookID: bookID, plan: castingPlan,
+            acknowledgedIssueIDs: castingPlan.requiredAcknowledgements)
+        let recommended = try await store.voiceBindings(for: bookID)
+        XCTAssertEqual(recommended.count, characters.count)
 
         // Functional fixture only; timing and UI responsiveness require separately authorized measurement.
         let readinessMap = try await castController.chapterReadinessMap(for: bookID)

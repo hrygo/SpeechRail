@@ -87,7 +87,7 @@ public enum AudiobookCastError: LocalizedError, Equatable, Sendable {
         case .duplicateVoiceRequiresSharedMinorConsent:
             return "多个角色共用同一音色时，需显式开启「次要角色共用声线」。"
         case .missingVoiceBindings(let names):
-            return "以下角色尚未绑定音色：\(names.joined(separator: "、"))。"
+            return "还有 \(names.count) 个角色尚未配声。点击「一键智能配声」自动分配，也可在「人物与声音」中手动调整。"
         case .castRevisionMismatch:
             return "角色列表已发生变更，请刷新后重新确认。"
         case .auditionDigestMismatch:

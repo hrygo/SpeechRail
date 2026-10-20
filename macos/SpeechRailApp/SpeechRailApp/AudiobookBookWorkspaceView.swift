@@ -225,11 +225,6 @@ public struct AudiobookBookWorkspaceView: View {
                     workspaceTransportBar
                 }
             }
-            .popover(isPresented: $bindableWorkflow.isCastInspectorPresented, arrowEdge: .trailing) {
-                castInspectorColumn
-                    .frame(width: SpeechRailDesignTokens.Layout.inspectorColumnWidth, height: 560)
-                    .padding(SpeechRailDesignTokens.Spacing.sm)
-            }
             .sheet(item: $chapterRenameTarget) { target in
                 chapterRenameSheet(for: target)
             }
@@ -315,6 +310,7 @@ public struct AudiobookBookWorkspaceView: View {
 
     @ViewBuilder
     private func topStatusAndPrimaryActionBar(showInlineCast: Bool, canShowInlineCast: Bool) -> some View {
+        @Bindable var bindableWorkflow = workflow
         if let book = workflow.selectedBook {
             CardSurface {
                 HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.md) {
@@ -409,6 +405,11 @@ public struct AudiobookBookWorkspaceView: View {
                     .help(canShowInlineCast ? (showInlineCast ? "收起右侧人物与声音栏，扩大主工作区" : "展开右侧人物与声音栏") : "打开人物与声音浮层")
                     .accessibilityValue(showInlineCast || workflow.isCastInspectorPresented ? "已展开" : "已收起")
                     .accessibilityIdentifier("audiobook-toggle-cast-inspector")
+                    .popover(isPresented: $bindableWorkflow.isCastInspectorPresented, arrowEdge: .bottom) {
+                        castInspectorColumn
+                            .frame(width: SpeechRailDesignTokens.Layout.inspectorColumnWidth, height: 560)
+                            .padding(SpeechRailDesignTokens.Spacing.sm)
+                    }
 
                     Button {
                         workflow.presentPronunciationRules()
@@ -438,6 +439,7 @@ public struct AudiobookBookWorkspaceView: View {
                         .speechRailButton(.primary)
                         .disabled(
                             (primaryAction == .pauseProduction && workflow.isPausingProduction)
+                                || (primaryAction == .confirmCastAndVoices && workflow.isAssigningRecommendedVoices)
                                 || workflow.isEditingChapterLayout
                                 || productionStartBlocked
                         )
@@ -445,7 +447,7 @@ public struct AudiobookBookWorkspaceView: View {
                               ? "正在整理章节目录，请完成后再继续。"
                               : (productionStartBlocked
                                   ? "另一部有声书正在制作，完成或暂停后即可开始此书。"
-                                  : primaryAction.title))
+                                  : workflow.primaryActionTitle(primaryAction, for: book.id)))
                         .accessibilityIdentifier("audiobook-workspace-primary-action")
                     }
                 }
@@ -1666,9 +1668,8 @@ public struct AudiobookBookWorkspaceView: View {
 
     @ViewBuilder
     private var leadVoiceCreationProgressView: some View {
-        if let progressText = workflow.leadVoiceCreationProgressText,
-           workflow.isCreatingLeadExclusiveVoices
-        {
+        if let progressText = workflow.castingPreparationProgressText
+            ?? (workflow.isCreatingLeadExclusiveVoices ? workflow.leadVoiceCreationProgressText : nil) {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 ProgressView()
                     .controlSize(.small)
@@ -1690,20 +1691,17 @@ public struct AudiobookBookWorkspaceView: View {
             }
             .speechRailButton(.primary)
             .accessibilityIdentifier("audiobook-start-production-action-button")
-        } else {
+        } else if !workflow.castingPlanNeedsSeparateConfirmation {
             Button {
                 Task {
-                    _ = await workflow.ensureSixArchetypeVoicesForBook(quietBanner: true)
-                    _ = await workflow.createExclusiveVoicesForLeadCharacters(quietBanner: true)
-                    _ = await workflow.refreshAvailableVoices()
                     await workflow.autoAssignRecommendedVoices(consentsToSharedMinorVoices: true)
                 }
             } label: {
-                Label("一键智能配声", systemImage: "wand.and.stars")
+                Label(workflow.isAssigningRecommendedVoices ? "正在准备配声…" : "一键智能配声", systemImage: "wand.and.stars")
             }
             .speechRailButton(.primary)
-            .disabled(workflow.isCreatingLeadExclusiveVoices)
-            .help("为主角分配专属音色，配角按声部共享音色；若存在同场撞音将提示确认")
+            .disabled(workflow.isCreatingLeadExclusiveVoices || workflow.isAssigningRecommendedVoices || workflow.isAnalyzing || workflow.isProductionBusy || workflow.selectedBook?.analysisState != .allWindowsValidated)
+            .help("使用已有声音自动为全书配声，角色按需共用；已有选声会保留，同章撞音会集中提示确认。完成后由你启动章节制作")
             .accessibilityIdentifier("audiobook-smart-assign-voices-button")
         }
     }
@@ -1724,8 +1722,14 @@ public struct AudiobookBookWorkspaceView: View {
                     primaryCastingActionButton
                 }
 
+                if !workflow.isAuditionConfirmedForSelectedBook {
+                    Text("自动匹配已有声音，数量不足时按需共用。想精调时再打开角色；准备好后由你开始制作。")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                }
+
                 if let plan = workflow.pendingCastingPlan,
-                   !plan.isApplicable || plan.rawIssues.contains(where: { !$0.isBlocking && $0.severity == .warning }) {
+                   !plan.isApplicable || workflow.castingPlanNeedsSeparateConfirmation {
                     AudiobookCastingReview(workflow: workflow).id(plan.inputDigest)
                 }
             }
@@ -2200,7 +2204,11 @@ public struct AudiobookBookWorkspaceView: View {
         case .confirmSpeakers:
             workflow.workbenchTab = .preparation
         case .confirmCastAndVoices:
-            Task { await workflow.confirmCastAndAudition() }
+            if workflow.castingPlanNeedsSeparateConfirmation {
+                workflow.isCastInspectorPresented = true
+            } else {
+                Task { await workflow.autoAssignRecommendedVoices(consentsToSharedMinorVoices: true) }
+            }
         case .makeConfirmedChapters:
             workflow.workbenchTab = .production
             workflow.makeConfirmedChapters()
@@ -2309,13 +2317,17 @@ private struct AudiobookCastingReview: View {
                     if group.isBlocking {
                         Text(group.label).foregroundStyle(SpeechRailDesignTokens.Color.attention)
                     } else if group.severity == .warning {
-                        Toggle(group.label, isOn: Binding(
+                        Toggle(isOn: Binding(
                             get: { group.issueIDs.allSatisfy(acknowledgements.contains) },
                             set: { accepted in
                                 if accepted { acknowledgements.formUnion(group.issueIDs) }
                                 else { acknowledgements.subtract(group.issueIDs) }
                             }
-                        )).toggleStyle(.checkbox)
+                        )) {
+                            Text(group.label)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .toggleStyle(.checkbox)
                     }
                 }
                 DisclosureGroup("试听与分配说明") {
@@ -2355,6 +2367,7 @@ private struct AudiobookCastingReview: View {
                 HStack {
                     Button("重新推荐") { Task { await workflow.previewRecommendedVoices() } }
                         .speechRailButton(.secondary)
+                        .disabled(workflow.isAssigningRecommendedVoices)
                     if !plan.voicesNeedingValidation.isEmpty {
                         Button(workflow.isRevalidatingCastVoices ? "正在验收…" : "重新验收这些音色") {
                             Task { await workflow.revalidateCastVoices(plan.voicesNeedingValidation) }
@@ -2366,7 +2379,7 @@ private struct AudiobookCastingReview: View {
                     Spacer()
                     Button("应用配声方案") { Task { await workflow.applyPendingCastingPlan(acknowledgedIssueIDs: acknowledgements) } }
                         .speechRailButton(.primary)
-                        .disabled(!recommendation.isApplicable || workflow.castingPlanNeedsRefresh || !plan.requiredAcknowledgements.isSubset(of: acknowledgements))
+                        .disabled(workflow.isAssigningRecommendedVoices || !recommendation.isApplicable || workflow.castingPlanNeedsRefresh || !plan.requiredAcknowledgements.isSubset(of: acknowledgements))
                 }
             }
             .padding(SpeechRailDesignTokens.Spacing.sm)

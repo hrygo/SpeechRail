@@ -2,7 +2,7 @@
 title: "SpeechRail macOS App 有声书工坊开发说明"
 status: active
 audience: "macOS App 开发者、架构与测试工程师"
-version: "1.9.3"
+version: "1.10.0"
 date: 2026-10-20
 ---
 
@@ -67,6 +67,8 @@ date: 2026-10-20
 
 ### 2.1 选角方案与正式制作边界
 
+- 全书分析后自动准备已有声音方案；`autoAssignRecommendedVoices` 默认不接受新增共享，只有「一键智能配声」显式传入共享同意。该同意只覆盖 `sharedVoiceConsentRequired`，同章撞音和版本更新仍按方案身份集中确认。主按钮不调用声音创建、试听或章节制作；精细创作保留在角色与次级菜单中。
+- `isAssigningRecommendedVoices` 覆盖能力读取、匹配、保存和制作条件核对四个步骤，`castingPreparationProgressText` 显示实际阶段。重复准备或应用不重入；取消和切书后检查目标身份，完成后不自动进入音频制作。集中应用方案后也完成合法的角色确认，避免再要求逐个设置。
 - `AudiobookCastRegistry.recommendVoiceBindings` 消费完整能力快照和 `VoiceCatalogSnapshot`，输出 `AudiobookCastingPlan`。候选需归属明确、对本书可见、可用且 `productionReady == true`，并明确支持拟用参数；池为空时返回问题，不退回原始列表。只有快照可证的系统预设可以在未登记目录元数据时通用。
 - 旁白计入声音容量；别名不增加数量。自动推荐、按行当补全和自动创建主角声音只处理未绑定角色。已有选择受保护，独占冲突不会自动改为共享。任何新增共享建议都需要与方案摘要绑定的显式接受，同章冲突另行说明；单个未采用候选的排除说明不要求接受风险。同书音色的来源角色影响排序，不额外限制其可见范围。
 - `Store.prepareCastingPlan` 在同一 actor 中补齐原文/章节上下文摘要与影响片段；纯 Registry 结果不能直接提交。`CastController.applyCastingPlan` 重新核对能力及目录修订；Store 在单事务中比较角色、标注、绑定和原文/章节输入，保存政策、绑定、修订及确认失效。任一项错误、过期或取消均无部分提交。
@@ -95,3 +97,5 @@ date: 2026-10-20
 - 章节跳过只更新 `chapters.is_skipped`，不重建文本原子、不删除分析与候选；`planRootWindows`、二次消歧、制作选章和导出均显式排除跳过章节。整本 M4B 的阻塞原因不计跳过章节，跳过项仍写入导出记录的 omitted 清单。恢复只清标记，后续分析/制作重新纳入。
 - 全书分析重跑时，`user_confirmed` 的标注按 atomID 保留原行（含 id/windowID/assignment/revision），LLM 结果不能覆盖人工确认；二次消歧只处理 `unknown && !user_confirmed`，默认最多 200 次调用并在每个簇前检查 `Task.checkCancellation()`，Workflow 暴露“取消 AI 复核”。
 - `AudiobookExportTests` 的章节媒体夹具由 AVFoundation 动态生成合成 AAC，再用 PATH 中的 `ffmpeg` 按产品封装方式生成 QuickTime 章节轨；找不到工具时明确跳过该正例，不下载依赖。测试不使用真实书稿或模型。fake 编码流程必须显式注入 fake 媒体验证器，生产默认验证器始终读取实际媒体。
+
+人物与声音在窄窗口使用锚定其工具栏按钮的原生浮层；集中确认与应用操作保持在可见窗口内，Escape 可关闭浮层。顶部主动作在未准备时执行一键配声，有需确认的风险时打开配声方案。
