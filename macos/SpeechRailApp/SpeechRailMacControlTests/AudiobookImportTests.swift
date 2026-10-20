@@ -1,4 +1,5 @@
 import CoreFoundation
+import Darwin
 import Foundation
 import XCTest
 #if SWIFT_PACKAGE
@@ -442,6 +443,68 @@ final class AudiobookImportTests: XCTestCase {
         XCTAssertTrue(preview.tableOfContentsRanges.isEmpty)
     }
 
+    func testLargeSourceIndexBenchmarkWhenRequested() throws {
+        guard ProcessInfo.processInfo.environment["SPEECHRAIL_AUDIOBOOK_INDEX_BENCHMARK"] == "1" else {
+            throw XCTSkip("仅在显式设置 SPEECHRAIL_AUDIOBOOK_INDEX_BENCHMARK=1 时运行大样本基准")
+        }
+        let scalarTarget = Int(ProcessInfo.processInfo.environment["SPEECHRAIL_AUDIOBOOK_INDEX_SCALARS"] ?? "2000000") ?? 2_000_000
+        let unit = "天地玄黄，宇宙洪荒。\n"
+        let unitScalars = unit.unicodeScalars.count
+        let text = String(repeating: unit, count: max(1, scalarTarget / unitScalars))
+        let data = Data(text.utf8)
+        let before = Self.residentBytes()
+        let started = Date()
+        let index = try AudiobookSourceIndex(utf8: data)
+        let elapsed = Date().timeIntervalSince(started) * 1_000
+        let after = Self.residentBytes()
+        print("audiobook-index-benchmark scalars=\(index.scalarCount) bytes=\(data.count) elapsed_ms=\(String(format: "%.1f", elapsed)) resident_delta_bytes=\(Int64(after) - Int64(before))")
+        XCTAssertGreaterThan(index.scalarCount, scalarTarget / 2)
+    }
+
+    private static func residentBytes() -> UInt64 {
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+            }
+        }
+        return result == KERN_SUCCESS ? info.resident_size : 0
+    }
+
+    func testRealCorpusImportBenchmarkWhenRequested() throws {
+        guard let path = ProcessInfo.processInfo.environment["SPEECHRAIL_AUDIOBOOK_REAL_CORPUS"] else {
+            throw XCTSkip("仅在设置 SPEECHRAIL_AUDIOBOOK_REAL_CORPUS 时运行真实书稿基线")
+        }
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        let before = Self.residentBytes()
+        let started = Date()
+        let preview = try AudiobookTXTImporter.prepare(rawData: data)
+        let elapsed = Date().timeIntervalSince(started) * 1_000
+        let after = Self.residentBytes()
+        print("audiobook-real-corpus-benchmark bytes=\(data.count) chapters=\(preview.chapters.count) elapsed_ms=\(String(format: "%.1f", elapsed)) resident_delta_bytes=\(Int64(after) - Int64(before))")
+        XCTAssertFalse(preview.chapters.isEmpty)
+    }
+
+    func testRealEPUBImportWhenRequested() async throws {
+        guard let directory = ProcessInfo.processInfo.environment["SPEECHRAIL_AUDIOBOOK_REAL_EPUB_DIR"] else {
+            throw XCTSkip("仅在设置 SPEECHRAIL_AUDIOBOOK_REAL_EPUB_DIR 时运行真实 EPUB 基线")
+        }
+        let urls = try FileManager.default.contentsOfDirectory(
+            at: URL(fileURLWithPath: directory),
+            includingPropertiesForKeys: [.fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ).filter { $0.pathExtension.lowercased() == "epub" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        XCTAssertGreaterThanOrEqual(urls.count, 3)
+        for url in urls {
+            let started = Date()
+            let preview = try await AudiobookTXTImporter.prepareEPUB(fileURL: url)
+            let elapsed = Date().timeIntervalSince(started) * 1_000
+            print("audiobook-real-epub-benchmark file=\(url.lastPathComponent) chapters=\(preview.chapters.count) elapsed_ms=\(String(format: "%.1f", elapsed))")
+            XCTAssertFalse(preview.chapters.isEmpty, url.lastPathComponent)
+        }
+    }
+
     func testEPUBExtractsSpineTextMetadataAndEntities() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("epub-fixture-\(UUID().uuidString)", isDirectory: true)
@@ -490,6 +553,56 @@ final class AudiobookImportTests: XCTestCase {
         XCTAssertTrue(preview.previewText.contains("山路 漫长 & 安静。"))
         XCTAssertFalse(preview.previewText.contains("script"))
         XCTAssertFalse(preview.previewText.contains("alert"))
+    }
+
+    func testEPUBRespectsLinearNoEncodedHrefsAndFragments() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("epub-spine-\(UUID().uuidString)", isDirectory: true)
+        let source = root.appendingPathComponent("book", isDirectory: true)
+        try FileManager.default.createDirectory(at: source.appendingPathComponent("META-INF"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: source.appendingPathComponent("OEBPS/Text"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try Data("""
+        <?xml version="1.0" encoding="utf-8"?>
+        <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+          <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+        </container>
+        """.utf8).write(to: source.appendingPathComponent("META-INF/container.xml"))
+        try Data("""
+        <?xml version="1.0" encoding="utf-8"?>
+        <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+          <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>结构测试</dc:title></metadata>
+          <manifest>
+            <item id="c1" href="Text/ch%201.xhtml#start" media-type="application/xhtml+xml"/>
+            <item id="c2" href="Text/ch2.xhtml" media-type="application/xhtml+xml"/>
+            <item id="c3" href="Text/ch3.xhtml" media-type="application/xhtml+xml"/>
+          </manifest>
+          <spine>
+            <itemref idref="c1" linear="no"/>
+            <itemref idref="c2"/>
+            <itemref idref="c3"/>
+          </spine>
+        </package>
+        """.utf8).write(to: source.appendingPathComponent("OEBPS/content.opf"))
+        try Data("""
+        <?xml version="1.0" encoding="utf-8"?>
+        <html xmlns="http://www.w3.org/1999/xhtml"><body><h1>附录</h1><p>不应出现在正文。</p></body></html>
+        """.utf8).write(to: source.appendingPathComponent("OEBPS/Text/ch 1.xhtml"))
+        try Data("""
+        <?xml version="1.0" encoding="utf-8"?>
+        <html xmlns="http://www.w3.org/1999/xhtml"><body><h1>第二章</h1><p>钟声响起。</p></body></html>
+        """.utf8).write(to: source.appendingPathComponent("OEBPS/Text/ch2.xhtml"))
+        try Data("""
+        <?xml version="1.0" encoding="utf-8"?>
+        <html xmlns="http://www.w3.org/1999/xhtml"><body><h1>第三章</h1><p>旅人归来。</p></body></html>
+        """.utf8).write(to: source.appendingPathComponent("OEBPS/Text/ch3.xhtml"))
+        let epubURL = root.appendingPathComponent("book.epub")
+        try makeZip(from: source, to: epubURL)
+
+        let preview = try await AudiobookTXTImporter.prepareEPUB(fileURL: epubURL)
+        XCTAssertEqual(preview.chapters.map(\.title), ["第二章", "第三章"])
+        XCTAssertFalse(preview.previewText.contains("不应出现在正文"))
     }
 
     func testEPUBWithoutContainerIsRejected() throws {

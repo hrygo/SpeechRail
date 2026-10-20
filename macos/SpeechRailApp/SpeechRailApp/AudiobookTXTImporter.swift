@@ -158,7 +158,7 @@ public struct AudiobookImportPreview: Equatable, Sendable, Identifiable {
             guard take > 0 else { continue }
             let bounded = AudiobookSourceRange(
                 lowerBound: span.lowerBound,
-                upperBound: sourceIndex.scalarByteOffsets[startScalar + take]
+                upperBound: Int64(sourceIndex.scalarByteOffsets[startScalar + take])
             )
             let piece = try originalLayout
                 ? sourceIndex.text(in: bounded)
@@ -277,7 +277,7 @@ public enum AudiobookTXTImporter {
         )
         let plannedChapters = planning.chapters
         let previewScalars = min(sourceIndex.scalarCount, AudiobookLimits.maxPreviewScalars)
-        let previewEndByte = sourceIndex.scalarByteOffsets[previewScalars]
+        let previewEndByte = Int64(sourceIndex.scalarByteOffsets[previewScalars])
         let previewRange = AudiobookSourceRange(lowerBound: 0, upperBound: previewEndByte)
         let previewExclusions = planning.tableOfContentsRanges.compactMap { range -> AudiobookSourceRange? in
             let lower = max(range.lowerBound, previewRange.lowerBound)

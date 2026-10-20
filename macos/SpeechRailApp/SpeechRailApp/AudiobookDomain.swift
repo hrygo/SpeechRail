@@ -49,6 +49,7 @@ public enum AudiobookLimits {
 
 public enum AudiobookSourceError: Error, Equatable, Sendable, LocalizedError {
     case invalidUTF8
+    case sourceTooLarge
     case rangeOutOfBounds(AudiobookSourceRange, totalBytes: Int64)
     case invertedRange(AudiobookSourceRange)
     case nonScalarBoundary(Int64)
@@ -62,6 +63,8 @@ public enum AudiobookSourceError: Error, Equatable, Sendable, LocalizedError {
         switch self {
         case .invalidUTF8:
             "正文字节不是有效的 UTF-8 编码。"
+        case .sourceTooLarge:
+            "正文超过 4 GiB，无法建立索引。"
         case let .rangeOutOfBounds(range, totalBytes):
             "来源区间 [\(range.lowerBound), \(range.upperBound)) 超出正文长度 \(totalBytes)。"
         case let .invertedRange(range):
