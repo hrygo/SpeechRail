@@ -1779,6 +1779,10 @@ public struct AudiobookBookWorkspaceView: View {
         allAvailableVoices: [SafeVoiceEntry]
     ) -> some View {
         Menu {
+            Button("按角色特征重新配声…") {
+                Task { await workflow.previewRecastingVoices() }
+            }
+            .disabled(workflow.isAssigningRecommendedVoices || workflow.isAnalyzing || workflow.isProductionBusy)
             if !workflow.voiceCreationDrafts.isEmpty {
                 Button("浏览已准备的音色资料…") {
                     workflow.isShowingVoicePreparationSheet = true
@@ -1897,6 +1901,8 @@ public struct AudiobookBookWorkspaceView: View {
         let tier = stat?.tier ?? (role.isNarrator ? .narrator : (role.allowSharedMinorVoice ? .supporting : .lead))
         let archetype = stat?.archetype ?? role.inferredVoiceArchetype()
         let dialogueCount = stat?.dialogueAtomCount ?? 0
+        let voiceIsOptional = stat != nil && !role.isNarrator && dialogueCount == 0
+            && workflow.selectedBook?.analysisState == .allWindowsValidated && workflow.totalUnknownSpeakerCount == 0
         let conflictPartners = workflow.sceneConflictPartnerNames(for: role.id)
         let voiceMeta = binding.flatMap { appModel.voiceCatalogModel.metadata(for: $0.voiceID) }
         let isCustomExclusiveVoice = binding.map {
@@ -1968,7 +1974,7 @@ public struct AudiobookBookWorkspaceView: View {
                         activeVoicePickerRoleID = (activeVoicePickerRoleID == role.id) ? nil : role.id
                     } label: {
                         let boundDisplay: String = {
-                            guard let b = binding else { return "选择音色…" }
+                            guard let b = binding else { return voiceIsOptional ? "无台词，无需配声（可选）" : "选择音色…" }
                             let baseName: String
                             if let matched = allVoices.first(where: { $0.id == b.voiceID }) {
                                 baseName = matched.name
@@ -2526,9 +2532,8 @@ private struct AudiobookVoicePickerPopover: View {
             case .matchedArchetype:
                 return voiceArch == archetype
                     || meta?.originRoleID == role.id
-                    || (meta?.visibilityScope == .bookExclusive && meta?.originBookID == role.bookID)
             case .bookExclusive:
-                return meta?.visibilityScope == .bookExclusive && meta?.originBookID == role.bookID
+                return meta?.visibilityScope == .bookExclusive
             }
         }
         let sortedCandidates = byScope.sorted { lhs, rhs in
@@ -2659,7 +2664,7 @@ private struct AudiobookVoicePickerPopover: View {
                    meta.visibilityScope == .bookExclusive
                 {
                     HStack {
-                        Text("📘 本书专属音色")
+                        Text("来源：\(meta.originBookTitle ?? "剧组创作") · 可跨作品复用")
                             .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         Spacer()
@@ -2754,7 +2759,7 @@ private struct AudiobookVoicePickerPopover: View {
                             .lineLimit(1)
                         StatusPill(tone: .neutral, label: voiceArch.shortBadgeTitle)
                         if meta?.visibilityScope == .bookExclusive {
-                            StatusPill(tone: .healthy, label: "本书专用")
+                            StatusPill(tone: .healthy, label: "剧组来源 · 可复用")
                         }
                         if isBoundToSelf {
                             StatusPill(tone: .healthy, label: "当前绑定")

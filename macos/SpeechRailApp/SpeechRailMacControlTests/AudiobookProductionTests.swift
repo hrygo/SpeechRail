@@ -201,8 +201,9 @@ final class AudiobookProductionTests: XCTestCase {
     }
 
     @MainActor
-    private func makePreparedFixture(admission: SpeechCreationAdmission = SpeechCreationAdmission(), editedText: String? = nil) async throws -> (AudiobookProjectStore, AudiobookProductionController, ScriptedSpeechRenderer, UUID, AudiobookChapter) {
-        let store = try AudiobookProjectStore(root: tempRoot), catalog = VoiceCatalogStore()
+    private func makePreparedFixture(admission: SpeechCreationAdmission = SpeechCreationAdmission(), editedText: String? = nil,
+                                     catalog: VoiceCatalogStore = VoiceCatalogStore()) async throws -> (AudiobookProjectStore, AudiobookProductionController, ScriptedSpeechRenderer, UUID, AudiobookChapter) {
+        let store = try AudiobookProjectStore(root: tempRoot)
         let capabilities = Self.makeDefaultCapabilities()
         let renderer = ScriptedSpeechRenderer(capabilities: capabilities)
         let cast = AudiobookCastController(store: store, capabilityProvider: { capabilities }, voiceCatalog: catalog)
@@ -231,6 +232,37 @@ final class AudiobookProductionTests: XCTestCase {
             revisionController: AudiobookRevisionController(store: store), renderer: renderer,
             admission: admission, clock: FakeAudiobookClock(), voiceCatalog: catalog)
         return (store, production, renderer, bookID, chapter)
+    }
+
+    @MainActor
+    func testProductionAndRerecordReuseHistoricalCastVoiceAndStillRejectArchival() async throws {
+        let catalog = VoiceCatalogStore(), historicalBook = UUID(), historicalRole = UUID()
+        try await catalog.registerBookExclusiveVoice(voiceID: "v-narrator", bookID: historicalBook,
+            bookTitle: "历史文稿", roleID: historicalRole, roleName: "旁白", archetype: .narrator)
+        let beforeCatalog = await catalog.refresh()
+        let (store, production, renderer, bookID, chapter) = try await makePreparedFixture(catalog: catalog)
+        XCTAssertNotEqual(bookID, historicalBook)
+        let beforeBindings = try await store.voiceBindings(for: bookID)
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+        XCTAssertFalse(renderer.requests.isEmpty)
+        XCTAssertTrue(renderer.requests.allSatisfy { $0.voiceID == "v-narrator" })
+        let fragments = try await store.fragments(for: bookID, chapterID: chapter.id)
+        let fragment = try XCTUnwrap(fragments.first)
+        try await production.regenerateFragment(bookID: bookID, chapterID: chapter.id, fragmentID: fragment.id)
+        let afterCatalog = await catalog.refresh()
+        XCTAssertEqual(afterCatalog.state, beforeCatalog.state)
+        let afterBindings = try await store.voiceBindings(for: bookID)
+        XCTAssertEqual(afterBindings, beforeBindings)
+        let requestCount = renderer.requests.count
+        try await catalog.archiveVoices(voiceIDs: ["v-narrator"])
+        do {
+            try await production.regenerateFragment(bookID: bookID, chapterID: chapter.id, fragmentID: fragment.id)
+            XCTFail("跨书可用不能绕过归档门禁")
+        } catch {}
+        XCTAssertEqual(renderer.requests.count, requestCount)
+        let archived = await catalog.metadata(for: "v-narrator")
+        XCTAssertEqual(archived?.originBookID, historicalBook)
+        XCTAssertEqual(archived?.originRoleID, historicalRole)
     }
 
     @MainActor

@@ -650,9 +650,10 @@ public enum AudiobookCastRegistry {
                 }
                 guard catalog.permits(voice, bookID: bookID) else {
                     let missingOrigin = catalog.state.metadataByVoiceID[id] == nil
+                        || catalog.state.metadataByVoiceID[id]?.visibilityScope == .unknown
                         || (catalog.state.metadataByVoiceID[id]?.visibilityScope == .bookExclusive && catalog.state.metadataByVoiceID[id]?.originBookID == nil)
                     issues.append(.init(code: missingOrigin ? .voiceIdentityUnknown : .voiceScopeUnavailable, voiceIDs: [id], isBlocking: false, severity: .info,
-                        nextAction: missingOrigin ? "请确认此声音的书籍归属后重新推荐。" : "此声音已归档或属于其他书籍，请选择本书可用的声音。"))
+                        nextAction: missingOrigin ? "音色已存在，但来源记录尚未确认；请到音色库确认后复用，无需重新创建。" : "此声音已归档，请到音色库恢复后复用，无需重新创建。"))
                     continue
                 }
                 guard voice.available, voice.productionReady == true, voice.operations["http_speech"] != nil else {
@@ -679,7 +680,7 @@ public enum AudiobookCastRegistry {
         }
         let eligibleIDs = Set(voices.map(\.id))
         if voices.isEmpty, !active.isEmpty {
-            issues.append(.init(code: .noEligibleVoices, roleIDs: active.map(\.id), nextAction: "请确认本书有可用且已通过验收的声音及其归属。"))
+            issues.append(.init(code: .noEligibleVoices, roleIDs: active.map(\.id), nextAction: "当前没有通过配音检查且来源已确认的活跃音色。请先检查已有音色的排除原因，无需重复创建。"))
         }
         if characters.filter(\.isNarrator).count != 1 || Set(characters.map(\.id)).count != characters.count
             || characters.contains(where: { $0.bookID != bookID }) {
@@ -716,7 +717,7 @@ public enum AudiobookCastRegistry {
                     reconfirmedRoleIDs.insert(role.id)
                 } else if bindingVoiceOutOfScope(binding, snapshot: snapshot, catalog: catalog, bookID: bookID) {
                     issues.append(.init(code: .voiceScopeUnavailable, roleIDs: [role.id], voiceIDs: [binding.voiceID],
-                        nextAction: "该角色原先的声音已不可用或不属于本书，请重新选择声音。"))
+                        nextAction: "该角色原先的声音已归档或来源未确认；请恢复或确认已有音色后重试，无需重复创建。"))
                 } else if needsFreshValidation(binding, snapshot: snapshot, catalog: catalog, bookID: bookID) {
                     // Same voice, still in scope: only its output evidence stopped
                     // covering this engine. Re-selecting would lose the voice the user
@@ -774,20 +775,50 @@ public enum AudiobookCastRegistry {
             }
             let remaining = voices.count - pinnedExclusive.count - pinnedShared.count
             let allFit = hardExclusive.count + automatic.count <= remaining
-            let sharedTarget = allFit ? pinnedShared.count : max(pinnedShared.count, min(2, voices.count - pinnedExclusive.count - hardExclusive.count))
+            let sharedTarget = allFit ? pinnedShared.count : max(pinnedShared.count, min(AudiobookVoiceArchetype.allCases.count, voices.count - pinnedExclusive.count - hardExclusive.count))
             let autoExclusiveCount = allFit ? automatic.count : max(0, remaining - hardExclusive.count - max(0, sharedTarget - pinnedShared.count))
-            let exclusive = hardExclusive + automatic.prefix(autoExclusiveCount)
-            let shared = Array(automatic.dropFirst(autoExclusiveCount))
+            var exclusive = hardExclusive + automatic.prefix(autoExclusiveCount)
+            var shared = Array(automatic.dropFirst(autoExclusiveCount))
             let free = voices.filter { !pinnedExclusive.contains($0.id) && !pinnedShared.contains($0.id) }
+            let reservation = Result { () throws -> [SafeVoiceEntry] in
+                guard !shared.isEmpty else { return [] }
+                let constrained = exclusive.filter { policies[$0.id]?.sharingPolicy == .exclusive || $0.requiredVoiceTraits != nil }
+                let protected = try maximumWeightExclusiveMatching(roleIDs: constrained.map(\.id),
+                    candidates: Dictionary(uniqueKeysWithValues: constrained.map { role in
+                        (role.id, free.filter { matchesRequiredTraits(role: role, voice: $0, metadata: catalog.state.metadataByVoiceID[$0.id]) }.map(\.id))
+                    }), scores: scored, workBudget: 10_000_000)
+                let protectedIDs = Set(protected.values)
+                return try reserveSharedVoices(roles: shared, voices: free.filter { !protectedIDs.contains($0.id) },
+                    count: max(0, sharedTarget - pinnedShared.count), catalog: catalog, scores: scored)
+            }
+            let reserved = (try? reservation.get()) ?? []
+            let reservedIDs = Set(reserved.map(\.id))
+            let exclusiveFree = free.filter { !reservedIDs.contains($0.id) }
+            // Automatic importance does not justify monopolizing a rare matching voice.
+            let movedToShared = exclusive.filter { role in
+                guard policies[role.id]?.sharingPolicy != .exclusive, role.requiredVoiceTraits == nil else { return false }
+                let gender = VoiceTaxonomyClassifier.resolveTraits(description: role.primaryVoiceTraitSummary ?? "", override: role.voiceTraitsOverride).gender.value
+                guard gender != "unknown" else { return false }
+                func matches(_ voice: SafeVoiceEntry) -> Bool {
+                    VoiceTaxonomyClassifier.resolveTraits(for: voice, metadata: catalog.state.metadataByVoiceID[voice.id]).gender.value == gender
+                }
+                return !exclusiveFree.contains(where: matches) && reserved.contains(where: matches)
+            }
+            let movedIDs = Set(movedToShared.map(\.id))
+            exclusive.removeAll { movedIDs.contains($0.id) }
+            shared += movedToShared
             var candidates: [UUID: [String]] = [:]
             for role in exclusive {
-                let allowed = free.filter { matchesRequiredTraits(role: role, voice: $0, metadata: catalog.state.metadataByVoiceID[$0.id]) }
+                let allowed = exclusiveFree.filter { matchesRequiredTraits(role: role, voice: $0, metadata: catalog.state.metadataByVoiceID[$0.id]) }
                 candidates[role.id] = allowed.sorted {
                     let l = scored[role.id]?[$0.id] ?? 0, r = scored[role.id]?[$1.id] ?? 0
                     return l == r ? $0.id < $1.id : l > r
                 }.map(\.id)
             }
-            let matchingResult = Result { try maximumWeightExclusiveMatching(roleIDs: exclusive.map(\.id), candidates: candidates, scores: scored) }
+            let matchingResult = Result {
+                _ = try reservation.get()
+                return try maximumWeightExclusiveMatching(roleIDs: exclusive.map(\.id), candidates: candidates, scores: scored, workBudget: shared.isEmpty ? 20_000_000 : 10_000_000)
+            }
             if case let .success(matching) = matchingResult,
                shared.isEmpty || sharedTarget > 0 {
                 for role in exclusive {
@@ -797,14 +828,15 @@ public enum AudiobookCastRegistry {
                     }
                 }
                 let activeIDs = Set(sortedRoles.map(\.id))
-                let taken = Set(bindings.filter { activeIDs.contains($0.key) && policies[$0.key]?.sharingPolicy == .exclusive }.values.map(\.voiceID))
                 let sharedPool = voices.filter { pinnedShared.contains($0.id) }
-                    + voices.filter { !taken.contains($0.id) && !pinnedShared.contains($0.id) }.prefix(max(0, sharedTarget - pinnedShared.count))
+                    + reserved
                 let sharedIDs = shared.map(\.id)
                 let frozen = Dictionary(uniqueKeysWithValues: bindings.filter { activeIDs.contains($0.key) }.map { ($0.key, $0.value.voiceID) })
                 do {
                     let outcome = try AudiobookCastingPlanner.assign(roleIDs: sharedIDs,
-                        candidates: Dictionary(uniqueKeysWithValues: shared.map { role in (role.id, sharedPool.filter { matchesRequiredTraits(role: role, voice: $0, metadata: catalog.state.metadataByVoiceID[$0.id]) }.map(\.id)) }), graph: graph,
+                        candidates: Dictionary(uniqueKeysWithValues: shared.map { role in
+                            (role.id, sharedCandidates(role: role, voices: sharedPool, catalog: catalog).map(\.id))
+                        }), graph: graph,
                         frozen: frozen, strategy: strategy, scores: scored,
                         volumes: stats.mapValues { max(1, $0.dialogueScalarCount) })
                     evaluations = outcome.evaluatedCandidates
@@ -1102,6 +1134,51 @@ public enum AudiobookCastRegistry {
             label: voice.name,
             metadata: metadata
         )
+    }
+
+    private static func reserveSharedVoices(roles: [AudiobookCharacter], voices: [SafeVoiceEntry], count: Int,
+                                            catalog: VoiceCatalogSnapshot, scores: [UUID: [String: Int]]) throws -> [SafeVoiceEntry] {
+        guard count > 0 else { return [] }
+        let groups = Dictionary(grouping: roles) { role in
+            let traits = VoiceTaxonomyClassifier.resolveTraits(description: role.primaryVoiceTraitSummary ?? "", override: role.voiceTraitsOverride)
+            return "\(traits.gender.value)|\(traits.age.value)"
+        }
+        let orderedGroups = groups.keys.sorted {
+            let left = groups[$0]!.count, right = groups[$1]!.count
+            return left == right ? $0 < $1 : left > right
+        }
+        var selected: [SafeVoiceEntry] = []
+        var selectedIDs: Set<String> = []
+        for key in orderedGroups {
+            try Task.checkCancellation()
+            guard selected.count < count, let group = groups[key], let role = group.first else { break }
+            let allowed = sharedCandidates(role: role, voices: voices.filter { !selectedIDs.contains($0.id) }, catalog: catalog)
+            if let best = allowed.sorted(by: { leftVoice, rightVoice in
+                let left = group.reduce(0) { $0 + (scores[$1.id]?[leftVoice.id] ?? 0) }
+                let right = group.reduce(0) { $0 + (scores[$1.id]?[rightVoice.id] ?? 0) }
+                return left == right ? leftVoice.id < rightVoice.id : left > right
+            }).first {
+                selected.append(best); selectedIDs.insert(best.id)
+            }
+        }
+        selected += voices.filter { !selectedIDs.contains($0.id) }.prefix(max(0, count - selected.count))
+        return selected
+    }
+
+    /// Preserve a known matching gender/age before optimizing same-scene separation.
+    /// A conflict is reviewable; assigning a known wrong voice to hide it is misleading.
+    private static func sharedCandidates(role: AudiobookCharacter, voices: [SafeVoiceEntry], catalog: VoiceCatalogSnapshot) -> [SafeVoiceEntry] {
+        var candidates = voices.filter { matchesRequiredTraits(role: role, voice: $0, metadata: catalog.state.metadataByVoiceID[$0.id]) }
+        let desired = VoiceTaxonomyClassifier.resolveTraits(description: role.primaryVoiceTraitSummary ?? "", override: role.voiceTraitsOverride)
+        for key in [\AudiobookVoiceTraits.gender, \AudiobookVoiceTraits.age] {
+            let expected = desired[keyPath: key].value
+            guard expected != "unknown" else { continue }
+            let matching = candidates.filter {
+                VoiceTaxonomyClassifier.resolveTraits(for: $0, metadata: catalog.state.metadataByVoiceID[$0.id])[keyPath: key].value == expected
+            }
+            if !matching.isEmpty { candidates = matching }
+        }
+        return candidates
     }
 
     static func matchesRequiredTraits(role: AudiobookCharacter, voice: SafeVoiceEntry, metadata: VoiceAssetMetadata?) -> Bool {

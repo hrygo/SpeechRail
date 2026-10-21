@@ -1826,7 +1826,7 @@ public struct VoiceCatalogSnapshot: Equatable, Sendable {
         guard metadata.lifecycleState == .active else { return false }
         switch metadata.visibilityScope {
         case .unknown: return voice.mode == "system" && voice.isSystem == true && voice.isDefault == true && metadata.creationSource == nil && metadata.originBookID == nil
-        case .bookExclusive: return metadata.originBookID == bookID
+        case .bookExclusive: return metadata.originBookID != nil
         case .globalReusable: return true
         }
     }
@@ -1953,19 +1953,19 @@ enum AudiobookCastingDigest {
     }
 }
 
-/// 音色资产的三层可见性作用域（彻底解决单书角色专用音色污染全局列表的问题）。
+/// 音色来源分类；已确认来源的活跃音色均可跨作品复用。
 public enum VoiceAssetScope: String, Codable, CaseIterable, Equatable, Hashable, Sendable {
     /// 全局通用音色（系统预置音色、通用自建音色、或从单书晋升入库的精品音色，对所有书籍与演播台可见）。
     case globalReusable = "global_reusable"
-    /// 书籍剧组专用音色（在有声书工坊中为特定角色设计生成，默认仅在该书选角池置顶显示，不污染其他书籍与演播台）。
+    /// 剧组来源音色。持久化值保留来源记录，不构成跨书使用限制。
     case bookExclusive = "book_exclusive"
-    /// 归档音色（完结项目或低频音色，默认从活跃选角器中隐藏，但保留 ID 供历史工程重合成使用）。
+    /// 来源尚未确认；归档由独立 lifecycleState 表达。
     case unknown = "unknown"
 
     public var title: String {
         switch self {
         case .globalReusable: return "全局通用"
-        case .bookExclusive: return "剧组专用"
+        case .bookExclusive: return "剧组来源"
         case .unknown: return "归属待确认"
         }
     }
@@ -2541,9 +2541,9 @@ public struct AudiobookCastingAudition: Equatable, Sendable {
 public extension VoiceCatalogSnapshot {
     func isVoiceActiveForBook(voiceID: String, currentBookID: UUID?) -> Bool {
         guard loadState == .ready || loadState == .missing,
-              let metadata = state.metadataByVoiceID[voiceID], metadata.lifecycleState == .active else { return false }
+              let metadata = state.metadataByVoiceID[voiceID], metadata.voiceID == voiceID, metadata.lifecycleState == .active else { return false }
         return metadata.visibilityScope == .globalReusable
-            || (metadata.visibilityScope == .bookExclusive && currentBookID != nil && metadata.originBookID == currentBookID)
+            || (metadata.visibilityScope == .bookExclusive && metadata.originBookID != nil)
     }
 
     func permitsSurface(_ voice: CreatorVoice, bookID: UUID?) -> Bool {
@@ -2556,12 +2556,17 @@ public extension VoiceCatalogSnapshot {
             isDefaultSystemPreset: voice.mode == "system" && voice.isSystem == true && voice.isDefault == true, bookID: bookID)
     }
 
+    func isGlobalLibrarySource(voiceID: String, isDefaultSystemPreset: Bool) -> Bool {
+        state.metadataByVoiceID[voiceID]?.visibilityScope != .bookExclusive
+            && permitsSurface(voiceID: voiceID, isDefaultSystemPreset: isDefaultSystemPreset, bookID: nil)
+    }
+
     private func permitsSurface(voiceID: String, isDefaultSystemPreset: Bool, bookID: UUID?) -> Bool {
         guard loadState == .ready || loadState == .missing else { return false }
         guard let meta = state.metadataByVoiceID[voiceID] else { return isDefaultSystemPreset }
         guard meta.voiceID == voiceID, meta.lifecycleState == .active else { return false }
         if meta.visibilityScope == .unknown { return isDefaultSystemPreset && meta.creationSource == nil && meta.originBookID == nil }
-        return meta.visibilityScope == .globalReusable || (meta.visibilityScope == .bookExclusive && bookID != nil && meta.originBookID == bookID)
+        return meta.visibilityScope == .globalReusable || (meta.visibilityScope == .bookExclusive && meta.originBookID != nil)
     }
 }
 
