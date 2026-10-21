@@ -21,27 +21,15 @@ public struct AudiobookWorkshopView: View {
             layout: .fill(minimumHeight: SpeechRailDesignTokens.Layout.audiobookWorkbenchMinimumHeight),
             content: {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                if let voiceMsg = workflow.voiceReturnBannerMessage {
+                if workflow.voiceReturnRequiresAction, let voiceMsg = workflow.voiceReturnBannerMessage {
                     StatusBanner(
                         kind: .standard,
-                        tone: .healthy,
-                        title: "音色流程返回",
+                        tone: .attention,
+                        title: "音色需要确认",
                         message: voiceMsg,
                         actionTitle: "知道了"
                     ) {
                         workflow.dismissVoiceReturnBanner()
-                    }
-                }
-
-                if let undoMessage = workflow.trashUndoMessage {
-                    StatusBanner(
-                        kind: .standard,
-                        tone: .neutral,
-                        title: "已移入废纸篓",
-                        message: undoMessage,
-                        actionTitle: "撤销"
-                    ) {
-                        Task { await workflow.undoLastTrash() }
                     }
                 }
 
@@ -55,11 +43,12 @@ public struct AudiobookWorkshopView: View {
                     ) {
                         workflow.errorMessage = nil
                     }
-                } else if let bannerMsg = workflow.bannerMessage {
+                }
+                if workflow.bannerRequiresAction, let bannerMsg = workflow.bannerMessage {
                     StatusBanner(
                         kind: .standard,
-                        tone: .healthy,
-                        title: "状态更新",
+                        tone: .attention,
+                        title: "下一步",
                         message: bannerMsg,
                         actionTitle: "收起"
                     ) {
@@ -91,6 +80,50 @@ public struct AudiobookWorkshopView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .overlay(alignment: .top) {
+                VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    if !workflow.voiceReturnRequiresAction, let message = workflow.voiceReturnBannerMessage {
+                        AudiobookTransientFeedback(
+                            id: workflow.voiceReturnNoticeID,
+                            tone: .healthy,
+                            title: "音色已更新",
+                            message: message,
+                            onDismiss: workflow.dismissVoiceReturnBanner
+                        )
+                    }
+                    if !workflow.bannerRequiresAction, let message = workflow.bannerMessage {
+                        AudiobookTransientFeedback(
+                            id: workflow.bannerNoticeID,
+                            tone: .healthy,
+                            title: "状态更新",
+                            message: message,
+                            onDismiss: { workflow.bannerMessage = nil }
+                        )
+                    }
+                    if workflow.surfaceMode == .listening,
+                       let listening = workflow.listeningController,
+                       let message = listening.chapterUpdatedBannerMessage {
+                        AudiobookTransientFeedback(
+                            id: listening.chapterUpdatedNoticeID,
+                            tone: .healthy,
+                            title: "章节已更新",
+                            message: message,
+                            onDismiss: listening.dismissChapterUpdatedNotice
+                        )
+                    }
+                    if let message = workflow.trashUndoMessage {
+                        AudiobookTransientFeedback(
+                            id: workflow.trashUndoNoticeID,
+                            tone: .neutral,
+                            title: "已移入废纸篓",
+                            message: message,
+                            actionTitle: "撤销",
+                            action: { Task { await workflow.undoLastTrash() } },
+                            onDismiss: workflow.dismissTrashUndoMessage
+                        )
+                    }
+                }
+            }
             },
             trailing: {
                 toolbarActions
@@ -203,6 +236,37 @@ public struct AudiobookWorkshopView: View {
             Task {
                 await workflow.prepareImport(fileURL: url)
             }
+        }
+    }
+}
+
+/// 有声书各页面共用的临时反馈；宿主通过 overlay 放置，不占用正文空间。
+struct AudiobookTransientFeedback: View {
+    let id: UUID
+    let tone: StatusTone
+    let title: String
+    let message: String
+    var actionTitle: String? = nil
+    var action: (() -> Void)? = nil
+    let onDismiss: () -> Void
+
+    var body: some View {
+        StatusBanner(
+            kind: .standard,
+            tone: tone,
+            title: title,
+            message: message,
+            actionTitle: actionTitle ?? "收起",
+            action: action ?? onDismiss
+        )
+        .task(id: id) {
+            do {
+                try await Task.sleep(for: SpeechRailDesignTokens.Notice.transientDisplayDuration)
+                try Task.checkCancellation()
+            } catch {
+                return
+            }
+            onDismiss()
         }
     }
 }

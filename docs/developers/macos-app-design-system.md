@@ -2,7 +2,7 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.11.13"
+version: "0.11.14"
 date: 2026-10-21
 ---
 
@@ -290,6 +290,10 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 | 可选择行与卡片 | 系统 `List`/`Table`，或 `Button` + `SpeechRailInteractiveButtonStyle` | 整行用系统可操作元素，不用 `.onTapGesture` 代替按钮；选中状态有文字或 `accessibilityValue`，不能只改变底色 |
 | 表单输入与取值 | 原生 `TextField`、`SecureField`、`TextEditor`、`Picker`、`Toggle`、`Slider`、`Stepper` | 标签、帮助与错误贴近控件；**单行输入一律走 `.speechRailSingleLineInput(.compact/.regular)`**（12pt 横向内边距 + 28/34pt 最小高度 + 输入槽表面），组合式搜索条把配方接在整条容器上；多行编辑器用 `.speechRailRecessedSlot()` 自行给内边距，整卡字段用 `.speechRailEditorCard()`；保留系统键盘和焦点行为 |
 | 状态与反馈 | `StatusPill`、`NoticeBar`、`SettingsConnectionStatus` 等 | 默认、忙碌、完成、受阻、失败使用文字与图标；颜色只是补充；失败指出下一步 |
+
+有声书工坊的临时操作反馈（包括状态更新、音色登记成功、移入废纸篓与听书定位到更新章节）共用 `AudiobookTransientFeedback`，在主内容顶部以 `overlay` 展示，不参与主面板布局。提示按 `Notice.transientDisplayDuration` 显示 4 秒后自动收起；相同文案的新操作也重新计时，离开页面时取消计时。提示保留手动收起或“撤销”操作；收起仅隐藏反馈，不改变书籍、声音或音频状态，书籍仍可从废纸篓恢复。
+
+需要处理的错误、尚待确认的声音与说话人、重新分析或采用候选的准备提示，以及分析和制作进度持续显示，不挂载自动收起计时。反馈用途由调用处显式声明，不按文案关键词判断；普通回执默认临时，需下一步操作的回执标记为持续提示。导入核对、服务不可用、已跳过章节和听书中断恢复等状态提示保留原有处理入口；已保存时间和任务结果摘要按状态信息展示。
 
 每个组件只实现适用的 default、hover、pressed、focus、disabled、selected、busy、error 状态。设置内联编辑的 `.small` 原生按钮、字幕带和提词舞台的紧凑控件保留各自空间合同，不强制套主窗口的高度。所有自定义动效遵守 Reduce Motion；系统强调色、Increase Contrast 和 Reduce Transparency 优先由原生控件与语义色处理。页面新增产品视觉数值时，先写入 `SpeechRailDesignTokens.swift`，再更新本文（例如 2026-10-17 提词器流线型减负新增 `Teleprompter.preparedBlockCompactMinHeight = 52`、`workbenchStageSettingsPopoverWidth = 320` 与 `privacyDisclosurePopoverWidth = 360`；2026-10-20 会议助手与会中私聊布局优化新增 `Layout.meetingSourceOptionsMaxHeight = 220`、`Layout.innerOSDraftAccentBarWidth = 3`，并将 `innerOSDrawerExpandedHeight` 与 `innerOSHistoryColumnWidth` 校准为 `240` 与 `236`）。
 
