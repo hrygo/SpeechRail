@@ -1515,6 +1515,8 @@ public enum SpeechRailDesignTokens {
 
     /// 轻量内联通知栏与状态反馈规范（NoticeBar / InlineAlert）
     public enum Notice {
+        /// 临时操作反馈的展示时间；收起后仍可通过相应管理入口恢复。
+        public static let transientDisplayDuration: Duration = .seconds(4)
         public static let iconSize: CGFloat = 16
         public static let paddingHorizontal: CGFloat = Spacing.md
         public static let paddingVertical: CGFloat = Spacing.sm

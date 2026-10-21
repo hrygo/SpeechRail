@@ -56,7 +56,14 @@ public final class AudiobookListeningController {
     public private(set) var currentFragmentElapsedSeconds: TimeInterval = 0
     public private(set) var chapterElapsedSeconds: TimeInterval = 0
     public private(set) var chapterTotalDurationSeconds: TimeInterval = 0
-    public private(set) var chapterUpdatedBannerMessage: String?
+    public private(set) var chapterUpdatedBannerMessage: String? {
+        didSet { chapterUpdatedNoticeID = UUID() }
+    }
+    public private(set) var chapterUpdatedNoticeID = UUID()
+
+    public func dismissChapterUpdatedNotice() {
+        chapterUpdatedBannerMessage = nil
+    }
     public private(set) var canResumeInterruptedListening: Bool = false
     /// 最近一次书签写入时刻，供界面与测试确认自动保存确实发生。
     public private(set) var lastBookmarkSavedAt: Date?
