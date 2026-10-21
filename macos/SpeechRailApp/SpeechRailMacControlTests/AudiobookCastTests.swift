@@ -960,13 +960,15 @@ final class AudiobookCastTests: XCTestCase {
         try await store.saveCharacters(bookID: bookID, characters: characters)
 
         let atomsA = try await store.atoms(for: bookID, chapterID: chapterA.id)
+            .filter { $0.kind != .formatting }
         let atomsB = try await store.atoms(for: bookID, chapterID: chapterB.id)
+            .filter { $0.kind != .formatting }
         let windowA = UUID()
         let windowB = UUID()
 
         var anns: [AudiobookAnnotation] = []
         var unknownAtom: AudiobookTextAtom?
-        for (idx, atom) in atomsA.enumerated() where atom.kind != .formatting {
+        for (idx, atom) in atomsA.enumerated() {
             let isUnknown = (idx == atomsA.count - 1)
             if isUnknown { unknownAtom = atom }
             anns.append(
@@ -982,7 +984,7 @@ final class AudiobookCastTests: XCTestCase {
                 )
             )
         }
-        for (idx, atom) in atomsB.enumerated() where atom.kind != .formatting {
+        for (idx, atom) in atomsB.enumerated() {
             let roleID = (idx == atomsB.count - 1) ? hero.id : narrator.id
             anns.append(
                 AudiobookAnnotation(
