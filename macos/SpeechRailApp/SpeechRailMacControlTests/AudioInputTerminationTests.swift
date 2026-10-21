@@ -91,7 +91,9 @@ private actor TerminationTestClient: AssistantRealtimeClient, CaptionRealtimeCli
 }
 
 @MainActor
-@Suite(.timeLimit(.minutes(1)))
+// The four-hour replay persists 2,880 events per scene. Allow shared CI runners
+// scheduling headroom; archive completeness and bounded projections are asserted below.
+@Suite(.timeLimit(.minutes(2)))
 struct AudioInputTerminationTests {
     private func wait(_ condition: () -> Bool) async throws {
         let end = ContinuousClock.now + .seconds(3)
