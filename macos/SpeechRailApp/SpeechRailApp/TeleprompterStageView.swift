@@ -1111,10 +1111,7 @@ public struct TeleprompterStageView: View {
     }
 
     private func formatClock(_ seconds: TimeInterval) -> String {
-        let clamped = max(0, Int(seconds))
-        let mins = clamped / 60
-        let secs = clamped % 60
-        return String(format: "%02d:%02d", mins, secs)
+        SpeechRailDisplayFormat.timecode(seconds)
     }
 
     private var statusText: String {

@@ -69,6 +69,8 @@ public struct AudiobookImportPreview: Equatable, Sendable, Identifiable {
     public let originalFileName: String
     public let originalBytes: Data
     public let canonicalUTF8: Data
+    public let referenceUTF8: Data
+    public let preparedText: AudiobookPreparedText
     public let sourceIndex: AudiobookSourceIndex
     public let detectedEncoding: AudiobookTextEncoding
     public let candidateEncodings: [AudiobookTextEncoding]
@@ -99,6 +101,8 @@ public struct AudiobookImportPreview: Equatable, Sendable, Identifiable {
         originalBytes: Data,
         canonicalUTF8: Data,
         sourceIndex: AudiobookSourceIndex,
+        referenceUTF8: Data,
+        preparedText: AudiobookPreparedText,
         detectedEncoding: AudiobookTextEncoding,
         candidateEncodings: [AudiobookTextEncoding],
         requiresEncodingConfirmation: Bool = false,
@@ -116,6 +120,8 @@ public struct AudiobookImportPreview: Equatable, Sendable, Identifiable {
         self.originalFileName = originalFileName
         self.originalBytes = originalBytes
         self.canonicalUTF8 = canonicalUTF8
+        self.referenceUTF8 = referenceUTF8
+        self.preparedText = preparedText
         self.sourceIndex = sourceIndex
         self.detectedEncoding = detectedEncoding
         self.candidateEncodings = candidateEncodings
@@ -141,6 +147,15 @@ public struct AudiobookImportPreview: Equatable, Sendable, Identifiable {
 
     public func textPreview(for chapterID: UUID?, originalLayout: Bool = false) throws -> String {
         let chapter = chapters.first(where: { $0.id == chapterID })
+        if originalLayout {
+            let workRange = chapter?.sourceRange ?? sourceIndex.wholeRange
+            let spans = preparedText.sourceMap.filter { $0.workingRange.lowerBound < workRange.upperBound && workRange.lowerBound < $0.workingRange.upperBound }
+            let start = spans.first?.referenceRange.lowerBound ?? 0
+            let end = spans.last?.referenceRange.upperBound ?? Int64(referenceUTF8.count)
+            let reference = try AudiobookSourceIndex(utf8: referenceUTF8)
+            let text = try reference.text(in: .init(lowerBound: start, upperBound: end))
+            return String(text.unicodeScalars.prefix(AudiobookLimits.maxPreviewScalars))
+        }
         let range = chapter?.sourceRange ?? sourceIndex.wholeRange
         try sourceIndex.validateRangeBounds(range)
         let exclusions = (chapter?.excludedRanges ?? []).compactMap { excluded -> AudiobookSourceRange? in
@@ -162,7 +177,7 @@ public struct AudiobookImportPreview: Equatable, Sendable, Identifiable {
             )
             let piece = try originalLayout
                 ? sourceIndex.text(in: bounded)
-                : sourceIndex.normalizedText(in: bounded)
+                : sourceIndex.text(in: bounded)
             if !piece.isEmpty { pieces.append(piece) }
             remaining -= take
         }
@@ -259,8 +274,17 @@ public enum AudiobookTXTImporter {
             throw AudiobookImportError.emptyFile
         }
 
-        let canonicalUTF8 = Data(canonicalString.utf8)
-        let sourceIndex = try AudiobookSourceIndex(utf8: canonicalUTF8)
+        let referenceUTF8 = Data(canonicalString.utf8)
+        let referenceScalarCount = canonicalString.unicodeScalars.count
+        guard referenceScalarCount <= maxScalars else {
+            throw AudiobookImportError.tooManyScalars(scalarCount: referenceScalarCount, maxScalars: maxScalars)
+        }
+        let prepared = try AudiobookTextPreparation.prepare(referenceUTF8: referenceUTF8)
+        let canonicalUTF8 = prepared.workingUTF8
+        guard canonicalUTF8.count <= maxRawBytes else {
+            throw AudiobookImportError.fileTooLarge(byteCount: Int64(canonicalUTF8.count), maxBytes: maxRawBytes)
+        }
+        let sourceIndex = try prepared.sourceIndex()
         if sourceIndex.scalarCount > maxScalars {
             throw AudiobookImportError.tooManyScalars(
                 scalarCount: sourceIndex.scalarCount,
@@ -284,7 +308,7 @@ public enum AudiobookTXTImporter {
             let upper = min(range.upperBound, previewRange.upperBound)
             return lower < upper ? AudiobookSourceRange(lowerBound: lower, upperBound: upper) : nil
         }
-        let previewText = try sourceIndex.normalizedText(
+        let previewText = try sourceIndex.text(
             in: previewRange,
             excluding: previewExclusions
         )
@@ -298,6 +322,8 @@ public enum AudiobookTXTImporter {
             originalBytes: rawData,
             canonicalUTF8: canonicalUTF8,
             sourceIndex: sourceIndex,
+            referenceUTF8: referenceUTF8,
+            preparedText: prepared,
             detectedEncoding: resolvedEncoding,
             candidateEncodings: candidates,
             requiresEncodingConfirmation: requiresEncodingConfirmation,
@@ -313,7 +339,7 @@ public enum AudiobookTXTImporter {
     ) throws -> [AudiobookRepeatedContentWarning] {
         var groups: [String: [AudiobookChapter]] = [:]
         for chapter in chapters {
-            let text = try source.normalizedText(in: chapter.sourceRange)
+            let text = try source.text(in: chapter.sourceRange).trimmingCharacters(in: .whitespacesAndNewlines)
             guard text.unicodeScalars.count > chapter.title.unicodeScalars.count + 8 else { continue }
             let key = AudiobookDigest.sha256Hex(Data(text.utf8))
             groups[key, default: []].append(chapter)

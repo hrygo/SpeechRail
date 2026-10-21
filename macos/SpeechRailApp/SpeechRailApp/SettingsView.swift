@@ -177,11 +177,7 @@ public struct SettingsView: View {
                             // 160（帧 132，残差 28），且没有第二个 132 —— 所以复用配音台那个
                             // token，不再写第二处数值（REDESIGN-SPEC §11.6 第五十六轮）。
                                 .frame(width: SpeechRailDesignTokens.Layout.creatorSpeedSliderWidth)
-                        // 取值写**全角 ×**：稿的同一行 `main.js:2554` 是 `1.0×`、下一行 caption
-                        // `:2553` 是 `0.5×–2.0×`，4x 帧两处也都是全角（波形墨迹 x 2413–2496）。
-                        // 配音台那一处稿写的是 ASCII `1.0x`（`main.js:1359`），两页各自按稿，
-                        // 所以本文件用 ×、`CreatorSurfaceViews` 继续用 x。
-                            Text(String(format: "%.1f×", defaultSpeed))
+                            Text(SpeechRailDisplayFormat.playbackRate(defaultSpeed))
                                 .font(SpeechRailDesignTokens.Typography.technical)
                                 .monospacedDigit()
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
@@ -557,7 +553,7 @@ public struct SettingsView: View {
     }
 
     private var portText: String {
-        guard let port = model.service.port else { return "未读取" }
+        guard let port = model.service.port else { return SpeechRailDisplayFormat.MissingValue.notLoaded.text }
         return String(port)
     }
 }

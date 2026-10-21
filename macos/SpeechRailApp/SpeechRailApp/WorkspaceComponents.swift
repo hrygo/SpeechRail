@@ -623,7 +623,7 @@ case .unrecognized:
  }
 
  static func title(_ selection: SpecSelection?) -> String {
- guard let selection else { return "未读取" }
+ guard let selection else { return SpeechRailDisplayFormat.MissingValue.notLoaded.text }
  if let quick = selection.quickTier {
  return title(quick)
  }
@@ -679,7 +679,7 @@ public enum ModelNamePresentation {
     ///
     /// 位数只有一个来源：量化制品是 `bits`，未量化制品是 `dtype`（目录里两者互斥）。
     public static func precisionText(_ quantization: ModelQuantizationSnapshot) -> String {
-        bitWidth(quantization).map { "\($0)-bit" } ?? "未读取"
+        bitWidth(quantization).map { "\($0)-bit" } ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text
     }
 
     /// 同一件事朗读出来要成句：`8-bit`、`16-bit` 在朗读里都不成句。
@@ -818,7 +818,7 @@ public enum ModelReadinessPresenter {
  return ModelReadinessPresentation(
  tone: .attention,
  title: "「\(target)」的模型文件已就绪",
- message: "服务现在运行「\(running ?? "未读取")」。应用这一档会重启服务并短暂不可用。"
+ message: "服务现在运行「\(running ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text)」。应用这一档会重启服务并短暂不可用。"
  )
  }
  }
@@ -1927,7 +1927,7 @@ struct TranscriptSaveRecoveryPanel: View {
     }
 
     private func title(_ record: TranscriptSaveRecoveryRecord) -> String {
-        "记录 · " + record.observedAt.formatted(date: .abbreviated, time: .shortened)
+        "记录 · " + record.observedAt.speechRailFormatted()
     }
 
     var body: some View {
@@ -2575,15 +2575,15 @@ public struct OperationBar: View {
  expected > 0
  {
  let percent = min(1.0, max(0.0, Double(completed) / Double(expected)))
- ProgressView(value: percent)
+ ProgressView(value: SpeechRailDisplayFormat.progressValue(percent, isComplete: operation.state == .committed))
  .controlSize(.small)
  .tint(SpeechRailDesignTokens.Color.rail)
  HStack {
- Text("\(ByteCountFormatter.string(fromByteCount: completed, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: expected, countStyle: .file))")
+ Text("\(SpeechRailDisplayFormat.bytes(completed, context: .file)) / \(SpeechRailDisplayFormat.bytes(expected, context: .file))")
  .lineLimit(1)
  .truncationMode(.middle)
  Spacer()
- Text(String(format: "%.1f%%", percent * 100))
+ Text(SpeechRailDisplayFormat.progress(percent, isComplete: operation.state == .committed))
  }
  .font(SpeechRailDesignTokens.Typography.caption)
  .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)

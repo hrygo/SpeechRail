@@ -16,6 +16,12 @@ public struct AudiobookListeningView: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+            AudiobookAudioVersionPicker(workflow: workflow)
+            if workflow.isListeningToHistoricalAudio {
+                Text("正在收听之前版本，正文随该版本显示。返回制作台可继续处理当前正文。")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            }
             if let notice = listening?.chapterUpdatedBannerMessage {
                 StatusBanner(
                     kind: .standard,
@@ -83,7 +89,7 @@ public struct AudiobookListeningView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                         ForEach(listenableChapters) { chapter in
-                            let isSelected = (workflow.selectedChapterID == chapter.id)
+                            let isSelected = (workflow.listeningChapterID == chapter.id)
                             let hasCurrent = (chapter.currentChapterRevisionID != nil)
                             let hasPrevious = (chapter.previousChapterRevisionID != nil)
 
@@ -100,7 +106,7 @@ public struct AudiobookListeningView: View {
                                         .lineLimit(1)
                                     Spacer()
                                     if hasCurrent {
-                                        StatusPill(tone: .healthy, label: "当前版本")
+                                        StatusPill(tone: workflow.isListeningToHistoricalAudio ? .attention : .healthy, label: workflow.isListeningToHistoricalAudio ? "之前版本" : "当前版本")
                                     } else if hasPrevious {
                                         StatusPill(tone: .attention, label: "旧版音频")
                                     } else {
@@ -142,16 +148,15 @@ public struct AudiobookListeningView: View {
 
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        ForEach(workflow.chapterFragments) { fragment in
+                        ForEach(workflow.listeningTexts) { fragment in
                             let isActive = (listening?.activePlayback?.fragmentID == fragment.id)
-                            let role = workflow.characters.first(where: { $0.id == fragment.roleID })
-                            let text = workflow.fragmentTextsByID[fragment.id] ?? ""
+                            let text = fragment.text
 
                             CardSurface {
                                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                                     HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                                         AudiobookVoiceTag(
-                                            name: role?.displayName ?? "角色",
+                                            name: fragment.roleName,
                                             detail: isActive ? "正在朗读" : "片段 #\(fragment.ordinal + 1)"
                                         )
                                         if isActive {
@@ -171,7 +176,8 @@ public struct AudiobookListeningView: View {
                                             }
                                         }
                                         .speechRailButton(.quiet)
-                                        .help("返回制作工作台重新生成此段音频")
+                                        .disabled(workflow.isListeningToHistoricalAudio)
+                                        .help(workflow.isListeningToHistoricalAudio ? "之前版本保留原音频；请返回当前文本制作新版本。" : "返回制作工作台重新生成此段音频")
                                     }
 
                                     Text(text)
@@ -289,12 +295,12 @@ public struct AudiobookListeningView: View {
     }
 
     private var listenableChapters: [AudiobookChapter] {
-        workflow.chapters.filter { !$0.isSkipped }
+        workflow.exportChapters.filter { !$0.isSkipped }
     }
 
     private var currentChapterTitle: String {
-        guard let chID = workflow.selectedChapterID,
-              let chapter = workflow.chapters.first(where: { $0.id == chID })
+        guard let chID = workflow.listeningChapterID,
+              let chapter = workflow.exportChapters.first(where: { $0.id == chID })
         else {
             return "章节收听"
         }

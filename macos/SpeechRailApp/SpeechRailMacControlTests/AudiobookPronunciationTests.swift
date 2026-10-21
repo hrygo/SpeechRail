@@ -7,6 +7,21 @@ import XCTest
 #endif
 
 final class AudiobookPronunciationTests: XCTestCase {
+    func testCrossLinePronunciationRuleMatchesWorkingText() throws {
+        let raw = "他走進大廳之後提到鄉間那位住了許多年又講理學的老監\r\n生，見面之後總會先互相問候幾句。"
+        let binding = AudiobookPronunciationBinding(setID: "test", revision: "pr_test", entries: [
+            PronunciationEntry(id: "e1", surface: "老監生", spoken: "老監生的指定讀法")
+        ])
+        XCTAssertNil(binding.dependencyComponent(in: raw))
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data(raw.utf8))
+        let working = try preview.sourceIndex.text(in: preview.sourceIndex.wholeRange)
+        XCTAssertNotNil(binding.dependencyComponent(in: working))
+        let unrelated = AudiobookPronunciationBinding(setID: "test", revision: "pr_other", entries: binding.entries + [
+            PronunciationEntry(id: "e2", surface: "別的詞", spoken: "別的讀法")
+        ])
+        XCTAssertEqual(binding.dependencyComponent(in: working), unrelated.dependencyComponent(in: working))
+    }
+
     // MARK: - Fixtures
 
     private final class FakeClient: AudiobookPronunciationClient, @unchecked Sendable {

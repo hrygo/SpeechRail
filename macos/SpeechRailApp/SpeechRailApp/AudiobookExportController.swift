@@ -333,6 +333,7 @@ public actor AudiobookExportController {
         bookID: UUID,
         chapterIDs: [UUID]?,
         profile: AudiobookExportProfile,
+        productionRevisionID: UUID? = nil,
         cover: AudiobookCoverAsset? = nil,
         loudness: AudiobookLoudnessSettings? = nil,
         requestID: UUID = UUID()
@@ -348,7 +349,7 @@ public actor AudiobookExportController {
                 throw AudiobookExportError.coverBookMismatch
             }
         }
-        let plan = try await buildPlan(bookID: bookID, chapterIDs: chapterIDs, profile: profile)
+        let plan = try await buildPlan(bookID: bookID, chapterIDs: chapterIDs, profile: profile, productionRevisionID: productionRevisionID)
         let book = plan.book
         let exportedChapters = plan.exportedChapters
         let omittedChapters = plan.omittedChapters
@@ -367,10 +368,10 @@ public actor AudiobookExportController {
 
         let prodRev = AudiobookProductionRevision(
             bookID: bookID,
-            sourceID: book.sourceID,
+            sourceID: plan.sourceID,
             chapterRevisionIDsByChapter: chapterRevisionsMap
         )
-        try await store.saveProductionRevision(prodRev, makeCurrent: plan.isFullBookRequest)
+        try await store.saveProductionRevision(prodRev, makeCurrent: plan.isFullBookRequest && !plan.isHistorical)
 
         cancelledRequestIDs.remove(requestID)
 
@@ -382,7 +383,7 @@ public actor AudiobookExportController {
         let manifest = AudiobookExportManifestPayload(
             requestID: requestID,
             bookID: bookID,
-            sourceID: book.sourceID,
+            sourceID: plan.sourceID,
             productionRevisionID: prodRev.id,
             profile: profile.rawValue,
             bookTitle: book.title,
@@ -529,6 +530,8 @@ public actor AudiobookExportController {
     }
 
     private struct ExportPlan {
+        let sourceID: UUID
+        let isHistorical: Bool
         let book: AudiobookBook
         let exportedChapters: [AudiobookChapter]
         let omittedChapters: [AudiobookOmittedChapterRecord]
@@ -543,9 +546,10 @@ public actor AudiobookExportController {
     public func audit(
         bookID: UUID,
         chapterIDs: [UUID]?,
-        profile: AudiobookExportProfile
+        profile: AudiobookExportProfile,
+        productionRevisionID: UUID? = nil
     ) async throws -> AudiobookExportAudit {
-        let plan = try await buildPlan(bookID: bookID, chapterIDs: chapterIDs, profile: profile)
+        let plan = try await buildPlan(bookID: bookID, chapterIDs: chapterIDs, profile: profile, productionRevisionID: productionRevisionID)
         var blockers: [AudiobookExportBlocker] = []
         for omission in plan.omissions {
             guard let reason = omission.blocker else { continue }
@@ -566,10 +570,23 @@ public actor AudiobookExportController {
     private func buildPlan(
         bookID: UUID,
         chapterIDs: [UUID]?,
-        profile: AudiobookExportProfile
+        profile: AudiobookExportProfile,
+        productionRevisionID: UUID? = nil
     ) async throws -> ExportPlan {
         let book = try await store.book(id: bookID)
-        let allChapters = try await store.chapters(for: bookID).sorted { $0.ordinal < $1.ordinal }
+        let selectedProduction: AudiobookProductionRevision?
+        if let productionRevisionID {
+            let history = try await store.productionRevisions(for: bookID)
+            guard let selected = history.first(where: { $0.id == productionRevisionID }) else {
+                throw AudiobookStoreError.workingSourceChanged
+            }
+            selectedProduction = selected
+        } else { selectedProduction = nil }
+        let sourceID = selectedProduction?.sourceID ?? book.sourceID
+        let sourceIsWorking = try await store.isWorkingSource(bookID: bookID, sourceID: sourceID)
+        let isHistorical = selectedProduction != nil || !sourceIsWorking
+        let allChapters = try await store.chapters(for: bookID, sourceID: sourceID).sorted { $0.ordinal < $1.ordinal }
+
         let allCandidates = try await store.candidates(for: bookID)
         let candidatesByID = Dictionary(uniqueKeysWithValues: allCandidates.map { ($0.id, $0) })
 
@@ -607,20 +624,24 @@ public actor AudiobookExportController {
                 continue
             }
 
-            let chapterAnns = try await store.annotations(for: bookID, chapterID: chapter.id)
-            if chapterAnns.isEmpty {
-                omit(chapter, reason: "尚未完成全书分析", blocker: .notAnalyzed)
-                continue
+            let selectedChapterRevision: AudiobookChapterRevision?
+            if isHistorical {
+                let revisionID = selectedProduction?.chapterRevisionIDsByChapter[chapter.id] ?? (selectedProduction == nil ? chapter.currentChapterRevisionID : nil)
+                let history = try await store.chapterRevisions(for: bookID, chapterID: chapter.id)
+                selectedChapterRevision = history.first { $0.id == revisionID && $0.sourceID == sourceID }
+            } else {
+                let chapterAnns = try await store.annotations(for: bookID, chapterID: chapter.id)
+                if chapterAnns.isEmpty {
+                    omit(chapter, reason: "尚未完成全书分析", blocker: .notAnalyzed)
+                    continue
+                }
+                if chapterAnns.contains(where: { $0.assignment.isUnknown }) {
+                    omit(chapter, reason: "包含待确认说话人", blocker: .unknownSpeaker)
+                    continue
+                }
+                selectedChapterRevision = try await revisionController.currentChapter(bookID: bookID, chapterID: chapter.id)
             }
-            if chapterAnns.contains(where: { $0.assignment.isUnknown }) {
-                omit(chapter, reason: "包含待确认说话人", blocker: .unknownSpeaker)
-                continue
-            }
-
-            guard let validCurrentRev = try await revisionController.currentChapter(
-                bookID: bookID,
-                chapterID: chapter.id
-            ) else {
+            guard let validCurrentRev = selectedChapterRevision else {
                 let hasPrev = (try? await revisionController.previousListenableChapter(
                     bookID: bookID,
                     chapterID: chapter.id
@@ -681,7 +702,7 @@ public actor AudiobookExportController {
         }
 
         return ExportPlan(
-            book: book,
+            sourceID: sourceID, isHistorical: isHistorical, book: book,
             exportedChapters: exportedChapters,
             omittedChapters: omittedChapters,
             omissions: omissions,

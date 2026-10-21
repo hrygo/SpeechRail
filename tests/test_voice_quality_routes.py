@@ -1350,13 +1350,13 @@ def test_quality_run_persists_output_validation_and_promotes_capability_state(
     snapshot = client.get("/v1/speechrail/capabilities").json()
     entry = next(item for item in snapshot["voices"] if item["id"] == profile.id)
     # The quality run evicts its worker before the independent ASR phase.
-    # Discovery stays cold and honest...
-    assert entry["validation_state"]["synthesis"]["status"] == "unevaluated"
-    assert entry["validation_state"]["synthesis"]["reason"] == ("model_runtime_identity_unknown")
-    assert entry["production_ready"] is False
+    # Discovery reuses current recorded identity without warming the worker.
+    assert entry["validation_state"]["synthesis"]["status"] == "pass"
+    assert entry["validation_state"]["synthesis"]["run_id"] == response.json()["run_id"]
+    assert entry["production_ready"] is True
+    assert synth.prepare_calls == 0
 
-    # ...while the strict request itself may prepare the current worker and
-    # validate the matching persisted evidence before producing any audio.
+    # Strict rendering still prepares the worker and verifies its live identity.
     formal = client.post(
         "/v1/audio/speech",
         headers={"SpeechRail-Validation-Policy": "require_output_pass"},

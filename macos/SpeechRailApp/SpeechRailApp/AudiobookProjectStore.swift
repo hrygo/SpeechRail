@@ -3,6 +3,8 @@ import SQLite3
 import SpeechRailControlKit
 
 public enum AudiobookStoreError: Error, Equatable, Sendable, LocalizedError {
+    case workingTextPreparationRequired
+    case workingSourceChanged
     case storageUnavailable(String)
     case unsupportedSchemaVersion(found: Int32, supported: Int32)
     case schemaMismatch(String)
@@ -19,6 +21,10 @@ public enum AudiobookStoreError: Error, Equatable, Sendable, LocalizedError {
 
     public var errorDescription: String? {
         switch self {
+        case .workingTextPreparationRequired:
+            "working_text_preparation_required：请先准备加工文本，再开始分析或制作。已有音频仍可收听和导出。"
+        case .workingSourceChanged:
+            "工作文本版本已变化，本次结果未写入。请重新开始。"
         case let .storageUnavailable(detail):
             "有声书作品库不可用：\(detail)"
         case let .unsupportedSchemaVersion(found, supported):
@@ -88,6 +94,7 @@ public actor AudiobookProjectStore {
     private let assetJournal: AudiobookAssetJournal
     private var simulatedCrashStage: AudiobookCommitCrashStage?
     private var simulateDiskFullOnWrite: Bool = false
+    private var activeAnalysisRuns: [UUID: UUID] = [:]
     private var cachedSourceIndices: [UUID: (sha256: String, index: AudiobookSourceIndex)] = [:]
     private var cachedCharactersByBook: [UUID: [AudiobookCharacter]] = [:]
     private var cachedAnnotationsByBook: [UUID: [AudiobookAnnotation]] = [:]
@@ -186,9 +193,9 @@ public actor AudiobookProjectStore {
                         """)
                 } catch { try? Self.execSQL(pointer, "ROLLBACK;"); throw error }
             }
-            if existingVersion < 6 {
+            if existingVersion < 7 {
                 if existingVersion > 0 {
-                    try Self.backupDatabase(pointer, root: standardizedRoot, version: 5)
+                    try Self.backupDatabase(pointer, root: standardizedRoot, version: Int(existingVersion))
                 }
                 try Self.execSQL(pointer, "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;")
                 try Self.execSQL(pointer, "BEGIN IMMEDIATE;")
@@ -196,13 +203,21 @@ public actor AudiobookProjectStore {
                     for (table, column, definition) in [
                         ("chapters", "is_skipped", "INTEGER NOT NULL DEFAULT 0"),
                         ("books", "analysis_failure_json", "TEXT"),
+                        ("sources", "source_kind", "TEXT NOT NULL DEFAULT 'reference'"),
+                        ("sources", "reference_source_id", "TEXT"),
+                        ("sources", "preparation_version", "TEXT"),
+                        ("sources", "source_map_rel_path", "TEXT"),
+                        ("sources", "source_map_sha256", "TEXT"),
+                        ("sources", "workflow_book_json", "TEXT"),
+                        ("characters", "source_id", "TEXT NOT NULL DEFAULT ''"),
                     ] where Self.tableExists(pointer, table: table)
                         && !Self.tableHasColumn(pointer, table: table, column: column) {
                         try Self.execSQL(pointer, "ALTER TABLE \(table) ADD COLUMN \(column) \(definition);")
                     }
                     try Self.execSQL(pointer, AudiobookStoreSchema.tableDefinitionsSQL)
+                    try Self.execSQL(pointer, "UPDATE characters SET source_id = (SELECT source_id FROM books WHERE id = characters.book_id) WHERE source_id = '';")
                     try AudiobookStoreSchema.validate(pointer)
-                    try Self.execSQL(pointer, "PRAGMA user_version = 6; COMMIT;")
+                    try Self.execSQL(pointer, "PRAGMA user_version = 7; COMMIT;")
                 } catch {
                     try? Self.execSQL(pointer, "ROLLBACK;")
                     throw error
@@ -339,12 +354,18 @@ public actor AudiobookProjectStore {
     // MARK: - Book Import & Queries
 
     public func importBook(_ preview: AudiobookImportPreview) async throws -> UUID {
+        let prepared = try AudiobookTextPreparation.prepare(referenceUTF8: preview.referenceUTF8)
+        guard prepared == preview.preparedText, prepared.workingUTF8 == preview.canonicalUTF8,
+              preview.sourceIndex.utf8Data == prepared.workingUTF8 else {
+            throw AudiobookStoreError.workingSourceChanged
+        }
         try AudiobookChapterPlanner.validateChapterEdits(preview.chapters, source: preview.sourceIndex)
 
         let bookDir = try bookDirectory(for: preview.bookID, create: true)
         let sourcesDir = bookDir.appendingPathComponent("sources", isDirectory: true)
         try FileManager.default.createDirectory(at: sourcesDir, withIntermediateDirectories: true)
 
+        let referenceID = UUID()
         let originalRel = "books/\(preview.bookID.uuidString)/sources/\(preview.sourceID.uuidString)-original.bin"
         let canonicalRel = "books/\(preview.bookID.uuidString)/sources/\(preview.sourceID.uuidString)-source.utf8"
         let originalURL = try resolveOwnedURL(relativePath: originalRel)
@@ -352,6 +373,10 @@ public actor AudiobookProjectStore {
 
         try preview.originalBytes.write(to: originalURL, options: .atomic)
         try preview.canonicalUTF8.write(to: canonicalURL, options: .atomic)
+        let referenceRel = "books/\(preview.bookID)/sources/\(referenceID)-source.utf8"
+        let mapRel = "books/\(preview.bookID)/sources/\(preview.sourceID)-map.json"
+        try preview.referenceUTF8.write(to: resolveOwnedURL(relativePath: referenceRel), options: .atomic)
+        try JSONEncoder().encode(prepared.sourceMap).write(to: resolveOwnedURL(relativePath: mapRel), options: .atomic)
 
         let now = Date()
         let book = AudiobookBook(
@@ -402,6 +427,12 @@ public actor AudiobookProjectStore {
                 canonicalRelPath: canonicalRel,
                 createdAt: now
             )
+            let referenceIndex = try AudiobookSourceIndex(utf8: preview.referenceUTF8)
+            try insertSourceRow(bookID: book.id, sourceID: referenceID, sha256: referenceIndex.sourceSHA256,
+                byteCount: referenceIndex.byteCount, scalarCount: referenceIndex.scalarCount,
+                encoding: preview.detectedEncoding.rawValue, originalRelPath: originalRel,
+                canonicalRelPath: referenceRel, createdAt: now)
+            try markWorkingSource(bookID: book.id, sourceID: preview.sourceID, referenceID: referenceID, mapRel: mapRel)
             for chapter in preview.chapters {
                 try upsertChapterRow(chapter)
             }
@@ -444,11 +475,39 @@ public actor AudiobookProjectStore {
         var updated = book
         updated.updatedAt = Date()
         try inTransaction {
+            guard try fetchBook(id: book.id)?.sourceID == book.sourceID else { throw AudiobookStoreError.workingSourceChanged }
             try upsertBookRow(updated)
         }
         // A write through this instance is current work, even if the wall clock
         // happens to produce the same stored timestamp as the startup snapshot.
         startupRunningBookUpdatedAt.removeValue(forKey: book.id)
+    }
+
+    public func beginAnalysisRun(bookID: UUID, expectedSourceID: UUID, runID: UUID) throws -> AudiobookBook {
+        guard let book = try fetchBook(id: bookID), book.sourceID == expectedSourceID else {
+            throw AudiobookStoreError.workingSourceChanged
+        }
+        activeAnalysisRuns[bookID] = runID
+        return book
+    }
+
+    public func updateAnalysisBook(_ book: AudiobookBook, runID: UUID) throws {
+        try inTransaction {
+            guard activeAnalysisRuns[book.id] == runID else { throw AudiobookAnalysisError.cancelled }
+            guard try fetchBook(id: book.id)?.sourceID == book.sourceID else { throw AudiobookStoreError.workingSourceChanged }
+            var updated = book; updated.updatedAt = Date()
+            try upsertBookRow(updated)
+        }
+        startupRunningBookUpdatedAt.removeValue(forKey: book.id)
+    }
+
+    public func endAnalysisRun(bookID: UUID, runID: UUID, paused: Bool = false) throws {
+        guard activeAnalysisRuns[bookID] == runID else { return }
+        if paused, var book = try fetchBook(id: bookID), book.analysisState == .running {
+            book.analysisState = .paused; book.analysisFailure = nil; book.updatedAt = Date()
+            try upsertBookRow(book)
+        }
+        activeAnalysisRuns.removeValue(forKey: bookID)
     }
 
     public func productionCheckpoint(for bookID: UUID) throws -> AudiobookProductionCheckpoint? {
@@ -465,6 +524,13 @@ public actor AudiobookProjectStore {
         let bookID = checkpoint.progress.bookID
         try inTransaction {
             guard var book = try fetchBook(id: bookID) else { throw AudiobookStoreError.bookNotFound(bookID) }
+            if let sourceID = checkpoint.sourceID {
+                guard sourceID == book.sourceID,
+                      try sourceRecord(bookID: bookID, sourceID: sourceID).preparationVersion == checkpoint.preparationVersion else {
+                    throw AudiobookStoreError.workingSourceChanged
+                }
+            }
+            for chapterID in checkpoint.chapterIDs { try requireActiveChapter(bookID: bookID, chapterID: chapterID) }
             book.productionState = checkpoint.progress.state
             if let listenableState { book.listenableState = listenableState }
             book.updatedAt = Date()
@@ -581,7 +647,246 @@ public actor AudiobookProjectStore {
         return .init(localChanges: sqlite3_total_changes64(pointer), externalVersion: externalVersion)
     }
 
-    public func sourceIndex(for bookID: UUID) async throws -> AudiobookSourceIndex { try readSourceIndex(bookID: bookID) }
+    public func sourceIndex(for bookID: UUID) async throws -> AudiobookSourceIndex {
+        try workingSourceSnapshot(bookID: bookID).sourceIndex
+    }
+
+    public func workingSourceSnapshot(bookID: UUID) throws -> AudiobookWorkingSourceSnapshot {
+        guard let book = try fetchBook(id: bookID) else { throw AudiobookStoreError.bookNotFound(bookID) }
+        let metadata = try sourceRecord(bookID: bookID, sourceID: book.sourceID)
+        guard metadata.kind == "working", metadata.preparationVersion == AudiobookTextPreparation.version,
+              let referenceID = metadata.referenceSourceID, let mapRel = metadata.mapRel else {
+            throw AudiobookStoreError.workingTextPreparationRequired
+        }
+        // Revalidate disk bytes even with a warm UI cache. Never fall back to reference bytes.
+        let source = try readSourceRecord(metadata)
+        let reference = try readSourceRecord(sourceRecord(bookID: bookID, sourceID: referenceID))
+        let mapData = try Data(contentsOf: resolveOwnedURL(relativePath: mapRel))
+        guard AudiobookDigest.sha256Hex(mapData) == metadata.mapSHA256 else { throw AudiobookStoreError.workingSourceChanged }
+        let map = try JSONDecoder().decode([AudiobookWorkingSourceSpan].self, from: mapData)
+        var end: Int64 = 0, referenceEnd: Int64 = 0
+        for span in map {
+            try source.validateRangeBounds(span.workingRange)
+            try reference.validateRangeBounds(span.referenceRange)
+            guard span.workingRange.lowerBound == end, !span.workingRange.isEmpty,
+                  span.referenceRange.lowerBound >= referenceEnd else { throw AudiobookStoreError.workingSourceChanged }
+            if !span.isGenerated {
+                guard try source.text(in: span.workingRange) == reference.text(in: span.referenceRange) else {
+                    throw AudiobookStoreError.workingSourceChanged
+                }
+            }
+            end = span.workingRange.upperBound; referenceEnd = span.referenceRange.upperBound
+        }
+        guard end == source.byteCount, source.sourceSHA256 == book.sourceSHA256 else {
+            throw AudiobookStoreError.workingSourceChanged
+        }
+        return .init(bookID: bookID, sourceID: book.sourceID, workingSHA256: source.sourceSHA256,
+                     preparationVersion: metadata.preparationVersion!, sourceIndex: source)
+    }
+
+    public func validateWorkingSource(_ snapshot: AudiobookWorkingSourceSnapshot) throws {
+        guard let book = try fetchBook(id: snapshot.bookID), book.sourceID == snapshot.sourceID,
+              book.sourceSHA256 == snapshot.workingSHA256 else { throw AudiobookStoreError.workingSourceChanged }
+        let source = try sourceRecord(bookID: book.id, sourceID: book.sourceID)
+        guard source.kind == "working", source.preparationVersion == snapshot.preparationVersion else {
+            throw AudiobookStoreError.workingSourceChanged
+        }
+    }
+
+    public func referenceSourceIndex(for bookID: UUID) throws -> AudiobookSourceIndex {
+        guard let book = try fetchBook(id: bookID) else { throw AudiobookStoreError.bookNotFound(bookID) }
+        let active = try sourceRecord(bookID: bookID, sourceID: book.sourceID)
+        return try readSourceRecord(sourceRecord(bookID: bookID, sourceID: active.referenceSourceID ?? active.id))
+    }
+
+    private struct SourceRecord: Codable {
+        let id: UUID
+        let bookID: UUID
+        let sha256: String
+        let byteCount: Int64
+        let scalarCount: Int
+        let encoding: String
+        let originalRel: String
+        let canonicalRel: String
+        let createdAt: Date
+        var kind: String
+        var referenceSourceID: UUID?
+        var preparationVersion: String?
+        var mapRel: String?
+        var mapSHA256: String?
+        var workflowJSON: String?
+    }
+
+    private func sourceRecords(bookID: UUID) throws -> [SourceRecord] {
+        try withPrepared("""
+            SELECT id, sha256, canonical_byte_count, scalar_count, original_encoding, original_rel_path,
+                   canonical_rel_path, created_at, source_kind, reference_source_id, preparation_version, source_map_rel_path, source_map_sha256, workflow_book_json
+            FROM sources WHERE book_id = ?;
+            """, [.text(bookID.uuidString)]) { stmt in
+            var result: [SourceRecord] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                guard let id = columnText(stmt, 0).flatMap(UUID.init(uuidString:)) else { continue }
+                result.append(.init(id: id, bookID: bookID, sha256: columnText(stmt, 1) ?? "",
+                    byteCount: columnInt(stmt, 2), scalarCount: Int(columnInt(stmt, 3)), encoding: columnText(stmt, 4) ?? "",
+                    originalRel: columnText(stmt, 5) ?? "", canonicalRel: columnText(stmt, 6) ?? "",
+                    createdAt: Date(timeIntervalSince1970: columnDouble(stmt, 7)), kind: columnText(stmt, 8) ?? "reference",
+                    referenceSourceID: columnText(stmt, 9).flatMap(UUID.init(uuidString:)),
+                    preparationVersion: columnText(stmt, 10), mapRel: columnText(stmt, 11),
+                    mapSHA256: columnText(stmt, 12), workflowJSON: columnText(stmt, 13)))
+            }
+            return result
+        }
+    }
+
+    private func sourceRecord(bookID: UUID, sourceID: UUID) throws -> SourceRecord {
+        guard let record = try sourceRecords(bookID: bookID).first(where: { $0.id == sourceID }) else {
+            throw AudiobookStoreError.workingSourceChanged
+        }
+        return record
+    }
+
+    private func readSourceRecord(_ record: SourceRecord) throws -> AudiobookSourceIndex {
+        let data = try Data(contentsOf: resolveOwnedURL(relativePath: record.canonicalRel))
+        var titleEvidence: [Int64: Bool]?
+        if record.kind == "working" {
+            guard let mapRel = record.mapRel else { throw AudiobookStoreError.workingSourceChanged }
+            let mapData = try Data(contentsOf: resolveOwnedURL(relativePath: mapRel))
+            guard AudiobookDigest.sha256Hex(mapData) == record.mapSHA256 else { throw AudiobookStoreError.workingSourceChanged }
+            let spans = try JSONDecoder().decode([AudiobookWorkingSourceSpan].self, from: mapData)
+            titleEvidence = Dictionary(uniqueKeysWithValues: spans.compactMap { span in
+                span.isIsolatedTitleCandidate.map { (span.workingRange.lowerBound, $0) }
+            })
+        }
+        let index = try AudiobookSourceIndex(utf8: data, titleEvidence: titleEvidence)
+        guard index.sourceSHA256 == record.sha256, index.byteCount == record.byteCount,
+              index.scalarCount == record.scalarCount else { throw AudiobookStoreError.workingSourceChanged }
+        return index
+    }
+
+    private func markWorkingSource(bookID: UUID, sourceID: UUID, referenceID: UUID, mapRel: String) throws {
+        try executePrepared("""
+            UPDATE sources SET source_kind = 'working', reference_source_id = ?, preparation_version = ?,
+                               source_map_rel_path = ?, source_map_sha256 = ? WHERE book_id = ? AND id = ?;
+            """, [.text(referenceID.uuidString), .text(AudiobookTextPreparation.version), .text(mapRel),
+                  .text(AudiobookDigest.sha256Hex(try Data(contentsOf: resolveOwnedURL(relativePath: mapRel)))), .text(bookID.uuidString), .text(sourceID.uuidString)])
+    }
+
+    /// Explicit preparation creates fresh coordinates and IDs. It never edits old rows or audio.
+    @discardableResult
+    public func prepareWorkingRevision(bookID: UUID, expectedSourceID: UUID) async throws -> UUID {
+        guard let book = try fetchBook(id: bookID) else { throw AudiobookStoreError.bookNotFound(bookID) }
+        guard book.sourceID == expectedSourceID else { throw AudiobookStoreError.workingSourceChanged }
+        let active = try sourceRecord(bookID: bookID, sourceID: expectedSourceID)
+        let referenceRecord = try sourceRecord(bookID: bookID, sourceID: active.referenceSourceID ?? active.id)
+        let reference = try readSourceRecord(referenceRecord)
+        // Suspension allows concurrent runs to finish; the transaction below compares the source again.
+        let prepared = try await Task.detached { try AudiobookTextPreparation.prepare(referenceUTF8: reference.utf8Data) }.value
+        try Task.checkCancellation()
+        if simulateDiskFullOnWrite { throw AudiobookStoreError.diskFull }
+        let id = UUID()
+        let canonicalRel = "books/\(bookID)/sources/\(id)-source.utf8"
+        let mapRel = "books/\(bookID)/sources/\(id)-map.json"
+        let source = try prepared.sourceIndex()
+        let chapters = try AudiobookChapterPlanner.plan(source: source, bookID: bookID, sourceID: id).chapters
+        let atoms = try chapters.flatMap { try source.buildAtoms(for: $0) }
+        try FileManager.default.createDirectory(at: resolveOwnedURL(relativePath: canonicalRel).deletingLastPathComponent(), withIntermediateDirectories: true)
+        try prepared.workingUTF8.write(to: resolveOwnedURL(relativePath: canonicalRel), options: .atomic)
+        try JSONEncoder().encode(prepared.sourceMap).write(to: resolveOwnedURL(relativePath: mapRel), options: .atomic)
+        guard try Data(contentsOf: resolveOwnedURL(relativePath: canonicalRel)) == prepared.workingUTF8,
+              try JSONDecoder().decode([AudiobookWorkingSourceSpan].self,
+                from: Data(contentsOf: resolveOwnedURL(relativePath: mapRel))) == prepared.sourceMap else {
+            throw AudiobookStoreError.workingSourceChanged
+        }
+        try Task.checkCancellation()
+        try inTransaction {
+            guard let current = try fetchBook(id: bookID), current.sourceID == expectedSourceID else {
+                throw AudiobookStoreError.workingSourceChanged
+            }
+            try saveSourceWorkflow(current)
+            try insertSourceRow(bookID: bookID, sourceID: id, sha256: source.sourceSHA256, byteCount: source.byteCount,
+                scalarCount: source.scalarCount, encoding: referenceRecord.encoding, originalRelPath: referenceRecord.originalRel,
+                canonicalRelPath: canonicalRel, createdAt: Date())
+            try markWorkingSource(bookID: bookID, sourceID: id, referenceID: referenceRecord.id, mapRel: mapRel)
+            for chapter in chapters { try upsertChapterRow(chapter) }
+            for atom in atoms { try insertAtomRow(bookID: bookID, atom: atom) }
+            try executePrepared("""
+                UPDATE books SET source_id = ?, source_sha256 = ?, canonical_byte_count = ?, scalar_count = ?,
+                  analysis_state = 'notStarted', production_state = 'idle', listenable_state = ?, confirmed_cast_revision_id = NULL,
+                  confirmed_audition_digest = NULL, analysis_failure_json = NULL, updated_at = ? WHERE id = ? AND source_id = ?;
+                """, [.text(id.uuidString), .text(source.sourceSHA256), .int(source.byteCount), .int(Int64(source.scalarCount)),
+                      .text(current.listenableState == .noneAvailable ? AudiobookListenableState.noneAvailable.rawValue : AudiobookListenableState.previousRevisionAvailable.rawValue), .real(Date().timeIntervalSince1970), .text(bookID.uuidString), .text(expectedSourceID.uuidString)])
+            let narrator = AudiobookCharacter(bookID: bookID, displayName: "旁白", aliases: ["叙述"], isNarrator: true,
+                isMajor: true, chapterIDs: chapters.map(\.id))
+            try upsertCharacterRow(narrator)
+        }
+        activeAnalysisRuns.removeValue(forKey: bookID)
+        cachedSourceIndices.removeValue(forKey: bookID)
+        cachedCharactersByBook.removeValue(forKey: bookID)
+        cachedAnnotationsByBook.removeValue(forKey: bookID)
+        return id
+    }
+
+    private struct SourceWorkflowSnapshot: Codable {
+        let book: AudiobookBook
+        let checkpoint: AudiobookProductionCheckpoint?
+    }
+
+    private func saveSourceWorkflow(_ book: AudiobookBook) throws {
+        // Capture partial books too: a full-book production revision may not exist yet.
+        let chapters = try fetchChapters(bookID: book.id)
+        let adopted = Dictionary(uniqueKeysWithValues: chapters.compactMap { chapter in
+            (chapter.currentChapterRevisionID ?? chapter.previousChapterRevisionID).map { (chapter.id, $0) }
+        })
+        if !adopted.isEmpty, !((try fetchProductionRevisions(bookID: book.id)).contains {
+            $0.sourceID == book.sourceID && $0.chapterRevisionIDsByChapter == adopted
+        }) {
+            try upsertProductionRevisionRow(.init(bookID: book.id, sourceID: book.sourceID, chapterRevisionIDsByChapter: adopted))
+        }
+        try executePrepared("UPDATE sources SET workflow_book_json = ? WHERE book_id = ? AND id = ?;",
+            [.text(String(decoding: try JSONEncoder().encode(SourceWorkflowSnapshot(book: book, checkpoint: productionCheckpoint(for: book.id))), as: UTF8.self)),
+             .text(book.id.uuidString), .text(book.sourceID.uuidString)])
+    }
+
+    /// Restore a previously active revision by pointer, never by replacing the database.
+    public func activateSourceRevision(bookID: UUID, sourceID: UUID, expectedSourceID: UUID) throws {
+        try inTransaction {
+            guard let current = try fetchBook(id: bookID), current.sourceID == expectedSourceID else {
+                throw AudiobookStoreError.workingSourceChanged
+            }
+            if sourceID == expectedSourceID { return }
+            let target = try sourceRecord(bookID: bookID, sourceID: sourceID)
+            _ = try readSourceRecord(target)
+            if target.kind == "working" {
+                guard target.preparationVersion == AudiobookTextPreparation.version, let mapRel = target.mapRel,
+                      try AudiobookDigest.sha256Hex(Data(contentsOf: resolveOwnedURL(relativePath: mapRel))) == target.mapSHA256 else {
+                    throw AudiobookStoreError.workingSourceChanged
+                }
+            }
+            guard let json = target.workflowJSON else { throw AudiobookStoreError.workingSourceChanged }
+            let state = try JSONDecoder().decode(SourceWorkflowSnapshot.self, from: Data(json.utf8))
+            var restored = state.book
+            guard restored.id == bookID, restored.sourceID == sourceID else { throw AudiobookStoreError.workingSourceChanged }
+            restored.title = current.title; restored.author = current.author; restored.updatedAt = Date()
+            try saveSourceWorkflow(current)
+            try executePrepared("UPDATE books SET source_id = ?, source_sha256 = ?, canonical_byte_count = ?, scalar_count = ? WHERE id = ?;",
+                [.text(sourceID.uuidString), .text(target.sha256), .int(target.byteCount), .int(Int64(target.scalarCount)), .text(bookID.uuidString)])
+            try upsertBookRow(restored)
+            if let checkpoint = state.checkpoint { try upsertProductionCheckpointRow(checkpoint) }
+            else { try executePrepared("DELETE FROM production_checkpoints WHERE book_id = ?;", [.text(bookID.uuidString)]) }
+        }
+        activeAnalysisRuns.removeValue(forKey: bookID)
+        cachedSourceIndices.removeValue(forKey: bookID)
+        cachedCharactersByBook.removeValue(forKey: bookID)
+        cachedAnnotationsByBook.removeValue(forKey: bookID)
+    }
+
+    public func isWorkingSource(bookID: UUID, sourceID: UUID) throws -> Bool {
+        try sourceRecord(bookID: bookID, sourceID: sourceID).kind == "working"
+    }
+
+    public func historicalSourceIndex(bookID: UUID, sourceID: UUID) throws -> AudiobookSourceIndex {
+        try readSourceRecord(sourceRecord(bookID: bookID, sourceID: sourceID))
+    }
 
     private func readSourceIndex(bookID: UUID) throws -> AudiobookSourceIndex {
         touchBookCache(bookID)
@@ -591,19 +896,13 @@ public actor AudiobookProjectStore {
         if let cached = cachedSourceIndices[bookID], cached.sha256 == book.sourceSHA256 {
             return cached.index
         }
-        let canonicalRel = "books/\(bookID.uuidString)/sources/\(book.sourceID.uuidString)-source.utf8"
-        let url = try resolveOwnedURL(relativePath: canonicalRel)
-        let data = try Data(contentsOf: url)
-        let index = try AudiobookSourceIndex(utf8: data)
-        guard index.sourceSHA256 == book.sourceSHA256 else {
-            throw AudiobookStoreError.storageUnavailable("正文文件校验值与项目记录不一致。")
-        }
+        let index = try readSourceRecord(sourceRecord(bookID: bookID, sourceID: book.sourceID))
         cachedSourceIndices[bookID] = (book.sourceSHA256, index)
         return index
     }
 
-    public func chapters(for bookID: UUID) async throws -> [AudiobookChapter] {
-        try fetchChapters(bookID: bookID)
+    public func chapters(for bookID: UUID, sourceID: UUID? = nil) async throws -> [AudiobookChapter] {
+        try fetchChapters(bookID: bookID, sourceID: sourceID)
     }
 
     /// 只切换“跳过本章”标记，不改章节结构、原文或已有分析/制作记录。
@@ -651,8 +950,8 @@ public actor AudiobookProjectStore {
                 throw AudiobookStoreError.statementFailed("章节归属与当前书籍正文不一致，已拒绝保存。")
             }
 
-            try executePrepared("DELETE FROM text_atoms WHERE book_id = ?;", [.text(bookID.uuidString)])
-            try executePrepared("DELETE FROM chapters WHERE book_id = ?;", [.text(bookID.uuidString)])
+            try executePrepared("DELETE FROM text_atoms WHERE book_id = ? AND chapter_id IN (SELECT id FROM chapters WHERE chapters.book_id = text_atoms.book_id AND source_id = (SELECT source_id FROM books WHERE id = text_atoms.book_id));", [.text(bookID.uuidString)])
+            try executePrepared("DELETE FROM chapters WHERE book_id = ? AND source_id = (SELECT source_id FROM books WHERE id = chapters.book_id);", [.text(bookID.uuidString)])
             for chapter in chapters {
                 try upsertChapterRow(chapter)
             }
@@ -683,7 +982,7 @@ public actor AudiobookProjectStore {
                 throw AudiobookStoreError.bookNotFound(bookID)
             }
             guard try countRows(
-                "SELECT COUNT(*) FROM chapters WHERE book_id = ? AND id = ?;",
+                "SELECT COUNT(*) FROM chapters WHERE book_id = ? AND source_id = (SELECT source_id FROM books WHERE id = chapters.book_id) AND id = ?;",
                 [.text(bookID.uuidString), .text(chapterID.uuidString)]
             ) > 0 else {
                 throw AudiobookStoreError.chapterNotFound(chapterID)
@@ -709,15 +1008,16 @@ public actor AudiobookProjectStore {
         return rows
     }
 
-    public func saveCharacters(bookID: UUID, characters: [AudiobookCharacter]) async throws {
-        try saveCharacters(bookID: bookID, characters: characters, updatingAnnotations: [])
+    public func saveCharacters(bookID: UUID, characters: [AudiobookCharacter], expectedSourceID: UUID? = nil) async throws {
+        try saveCharacters(bookID: bookID, characters: characters, updatingAnnotations: [], expectedSourceID: expectedSourceID)
     }
 
     /// Commit role changes and their dialogue assignments together, without actor reentrancy.
     func saveCharacters(
         bookID: UUID,
         characters: [AudiobookCharacter],
-        updatingAnnotations annotations: [AudiobookAnnotation]
+        updatingAnnotations annotations: [AudiobookAnnotation],
+        expectedSourceID: UUID? = nil
     ) throws {
         let retainedIDs = Set(characters.map(\.id))
         guard characters.allSatisfy({ $0.bookID == bookID }), retainedIDs.count == characters.count else {
@@ -730,6 +1030,10 @@ public actor AudiobookProjectStore {
             throw AudiobookStoreError.statementFailed("对白归属与保存的角色列表不一致，已拒绝保存。")
         }
         try inTransaction {
+            if let expectedSourceID, try fetchBook(id: bookID)?.sourceID != expectedSourceID {
+                throw AudiobookStoreError.workingSourceChanged
+            }
+
             // Retained rows keep their voice bindings; only removed roles cascade-delete theirs.
             for existing in try fetchCharacters(bookID: bookID) where !retainedIDs.contains(existing.id) {
                 try executePrepared(
@@ -784,7 +1088,7 @@ public actor AudiobookProjectStore {
         var plan = AudiobookCastRegistry.makeCastingPlan(characters: characters, annotations: annotations,
             snapshot: snapshot, catalog: catalog, bookID: bookID, existingBindings: bindings,
             requiredRoleIDs: try requiredCastingRoleIDs(bookID: bookID, characters: characters, annotations: annotations),
-            source: try readSourceIndex(bookID: bookID), atoms: try fetchAtoms(bookID: bookID, chapterID: nil), strategy: strategy, cachedScores: castingScoreCache)
+            source: try workingSourceSnapshot(bookID: bookID).sourceIndex, atoms: try fetchAtoms(bookID: bookID, chapterID: nil), strategy: strategy, cachedScores: castingScoreCache)
         castingScoreCache = plan.cachedScores
         plan.sourceContextDigest = try castingSourceContext(bookID: bookID)
         plan.affectedFragmentIDs = Set(try fetchFragments(bookID: bookID, chapterID: nil).filter { plan.affectedRoleIDs.contains($0.roleID) }.map(\.id))
@@ -913,11 +1217,11 @@ public actor AudiobookProjectStore {
     private func refreshBindingDependencies(bookID: UUID, changedRoles: Set<UUID>) throws {
         guard !changedRoles.isEmpty else { return }
         let bindings = try fetchVoiceBindings(bookID: bookID), chapters = try fetchChapters(bookID: bookID)
-        let source = try readSourceIndex(bookID: bookID)
+        let source = try workingSourceSnapshot(bookID: bookID).sourceIndex
         for fragment in try fetchFragments(bookID: bookID, chapterID: nil) where changedRoles.contains(fragment.roleID) {
             guard let chapter = chapters.first(where: { $0.id == fragment.chapterID }) else { throw AudiobookStoreError.chapterNotFound(fragment.chapterID) }
             let voiceDigest = bindings[fragment.roleID]?.bindingDigest ?? "unbound"
-            let dependency = AudiobookDigest.sha256Hex(Data(["frag_dep_v2", AudiobookDigest.sha256Hex(Data(try source.text(in: fragment.sourceRange).utf8)),
+            let dependency = AudiobookDigest.sha256Hex(Data(["frag_dep_v3", AudiobookTextPreparation.version, AudiobookDigest.sha256Hex(Data(try source.text(in: fragment.sourceRange).utf8)),
                 chapter.sourceID.uuidString, "\(fragment.sourceRange.lowerBound)-\(fragment.sourceRange.upperBound)", fragment.localAssignmentDigest, voiceDigest, fragment.policyDigest].joined(separator: "|").utf8))
             try upsertFragmentRow(.init(id: fragment.id, bookID: bookID, chapterID: fragment.chapterID, ordinal: fragment.ordinal, roleID: fragment.roleID,
                 sourceRange: fragment.sourceRange, atomIDs: fragment.atomIDs, localAssignmentDigest: fragment.localAssignmentDigest,
@@ -931,7 +1235,7 @@ public actor AudiobookProjectStore {
               intent.expectedVoiceSetDigest.utf8.count == 64,
               intent.bookTitle?.unicodeScalars.count ?? 0 <= 160, intent.roleName?.unicodeScalars.count ?? 0 <= 160,
               [.voiceDesign, .instantClone, .imported].contains(intent.creationSource),
-              intent.binding.map({ $0.roleID == intent.roleID && $0.voiceID == intent.voiceID }) ?? (intent.roleID == nil) else {
+              intent.binding.map({ $0.roleID == intent.roleID && $0.voiceID == intent.voiceID }) ?? true else {
             throw AudiobookCastError.invalidCastingPlan(reason: "invalid_registration_intent")
         }
         try inTransaction {
@@ -1280,6 +1584,7 @@ public actor AudiobookProjectStore {
 
     public func saveFragments(bookID: UUID, chapterID: UUID, fragments: [AudiobookFragment]) async throws {
         try inTransaction {
+            try requireActiveChapter(bookID: bookID, chapterID: chapterID)
             try executePrepared(
                 "DELETE FROM fragments WHERE book_id = ? AND chapter_id = ?;",
                 [.text(bookID.uuidString), .text(chapterID.uuidString)]
@@ -1516,6 +1821,10 @@ public actor AudiobookProjectStore {
 
     public func saveProductionRevision(_ revision: AudiobookProductionRevision, makeCurrent: Bool = true) async throws {
         try inTransaction {
+            if makeCurrent, try fetchBook(id: revision.bookID)?.sourceID != revision.sourceID {
+                throw AudiobookStoreError.workingSourceChanged
+            }
+
             try upsertProductionRevisionRow(revision)
             if makeCurrent, var book = try fetchBook(id: revision.bookID) {
                 book.currentProductionRevisionID = revision.id
@@ -1603,7 +1912,10 @@ public actor AudiobookProjectStore {
 
     // MARK: - Transactional Asset Commit & Crash Recovery
 
-    public func commitCandidate(_ candidate: AudiobookRenderCandidate, wav: Data) async throws {
+    public func commitCandidate(_ candidate: AudiobookRenderCandidate, wav: Data, requireCurrentSource: Bool = false) async throws {
+        if requireCurrentSource {
+            try requireActiveChapter(bookID: candidate.bookID, chapterID: candidate.chapterID)
+        }
         if simulateDiskFullOnWrite {
             throw AudiobookStoreError.diskFull
         }
@@ -1922,7 +2234,7 @@ public actor AudiobookProjectStore {
         let snapshotURL = destinationDir.appendingPathComponent("trash-snapshot.json", isDirectory: false)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        try encoder.encode(snapshot).write(to: snapshotURL, options: .atomic)
+        try JSONEncoder().encode(snapshot).write(to: snapshotURL, options: .atomic)
 
         let meta = AudiobookTrashedBookEntry(
             id: book.id,
@@ -1974,7 +2286,9 @@ public actor AudiobookProjectStore {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let snapshotData = try Data(contentsOf: snapshotURL)
-        let snapshot = try decoder.decode(AudiobookTrashSnapshot.self, from: snapshotData)
+        let snapshot: AudiobookTrashSnapshot
+        if let precise = try? JSONDecoder().decode(AudiobookTrashSnapshot.self, from: snapshotData) { snapshot = precise }
+        else { snapshot = try decoder.decode(AudiobookTrashSnapshot.self, from: snapshotData) }
 
         let restoredBookDir = try bookDirectory(for: id, create: false)
         try FileManager.default.createDirectory(
@@ -2218,6 +2532,11 @@ public actor AudiobookProjectStore {
         }
     }
 
+    private func requireActiveChapter(bookID: UUID, chapterID: UUID) throws {
+        guard try countRows("SELECT COUNT(*) FROM chapters WHERE book_id = ? AND id = ? AND source_id = (SELECT source_id FROM books WHERE id = chapters.book_id);",
+            [.text(bookID.uuidString), .text(chapterID.uuidString)]) == 1 else { throw AudiobookStoreError.workingSourceChanged }
+    }
+
     // MARK: - Private Row Mapping
 
     private func insertBookRow(_ book: AudiobookBook) throws {
@@ -2344,15 +2663,21 @@ public actor AudiobookProjectStore {
         ])
     }
 
-    private func upsertCharacterRow(_ character: AudiobookCharacter) throws {
+    private func upsertCharacterRow(_ character: AudiobookCharacter, historicalSourceID: UUID? = nil) throws {
+        let existingSource: String? = try withPrepared("SELECT source_id FROM characters WHERE book_id = ? AND id = ?;",
+            [.text(character.bookID.uuidString), .text(character.id.uuidString)]) { stmt in
+                sqlite3_step(stmt) == SQLITE_ROW ? columnText(stmt, 0) : nil
+            }
+        guard let sourceID = try historicalSourceID ?? fetchBook(id: character.bookID)?.sourceID,
+              existingSource == nil || existingSource == sourceID.uuidString else { throw AudiobookStoreError.workingSourceChanged }
         let aliasesJSON = try String(data: JSONEncoder().encode(character.aliases), encoding: .utf8) ?? "[]"
         let evidencesJSON = try String(data: JSONEncoder().encode(character.evidences), encoding: .utf8) ?? "[]"
         let chapterIDsJSON = try String(data: JSONEncoder().encode(character.chapterIDs), encoding: .utf8) ?? "[]"
         let sql = """
         INSERT INTO characters (
-            id, book_id, display_name, aliases_json, is_narrator, is_major,
+            id, book_id, source_id, display_name, aliases_json, is_narrator, is_major,
             allow_shared_minor_voice, evidences_json, first_lower_bound, first_upper_bound, chapter_ids_json, voice_policy_json, manual_tier, voice_traits_json, required_voice_traits_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(book_id, id) DO UPDATE SET
             display_name = excluded.display_name,
             aliases_json = excluded.aliases_json,
@@ -2371,6 +2696,7 @@ public actor AudiobookProjectStore {
         try executePrepared(sql, [
             .text(character.id.uuidString),
             .text(character.bookID.uuidString),
+            .text(sourceID.uuidString),
             .text(character.displayName),
             .text(aliasesJSON),
             .int(character.isNarrator ? 1 : 0),
@@ -2415,7 +2741,8 @@ public actor AudiobookProjectStore {
         ])
     }
 
-    private func upsertAnalysisWindowRow(_ window: AudiobookAnalysisWindow) throws {
+    private func upsertAnalysisWindowRow(_ window: AudiobookAnalysisWindow, restoringHistory: Bool = false) throws {
+        if !restoringHistory { try requireActiveChapter(bookID: window.bookID, chapterID: window.chapterID) }
         let primaryJSON = try String(data: JSONEncoder().encode(window.primaryAtomIDs), encoding: .utf8) ?? "[]"
         let leadingJSON = try String(data: JSONEncoder().encode(window.leadingContextAtomIDs), encoding: .utf8) ?? "[]"
         let trailingJSON = try String(data: JSONEncoder().encode(window.trailingContextAtomIDs), encoding: .utf8) ?? "[]"
@@ -2447,7 +2774,8 @@ public actor AudiobookProjectStore {
         ])
     }
 
-    private func upsertAnnotationRow(_ annotation: AudiobookAnnotation) throws {
+    private func upsertAnnotationRow(_ annotation: AudiobookAnnotation, restoringHistory: Bool = false) throws {
+        if !restoringHistory { try requireActiveChapter(bookID: annotation.bookID, chapterID: annotation.chapterID) }
         let assignmentJSON = try String(data: JSONEncoder().encode(annotation.assignment), encoding: .utf8) ?? "{}"
         let sql = """
         INSERT INTO annotations (
@@ -2476,7 +2804,8 @@ public actor AudiobookProjectStore {
         ])
     }
 
-    private func upsertFragmentRow(_ fragment: AudiobookFragment) throws {
+    private func upsertFragmentRow(_ fragment: AudiobookFragment, restoringHistory: Bool = false) throws {
+        if !restoringHistory { try requireActiveChapter(bookID: fragment.bookID, chapterID: fragment.chapterID) }
         let atomIDsJSON = try String(data: JSONEncoder().encode(fragment.atomIDs), encoding: .utf8) ?? "[]"
         let sql = """
         INSERT INTO fragments (
@@ -2716,13 +3045,15 @@ public actor AudiobookProjectStore {
         )
     }
 
-    private func fetchChapters(bookID: UUID) throws -> [AudiobookChapter] {
+    private func fetchChapters(bookID: UUID, sourceID: UUID? = nil, includeHistory: Bool = false) throws -> [AudiobookChapter] {
         let sql = """
         SELECT id, book_id, source_id, ordinal, title, lower_bound, upper_bound,
                excluded_ranges_json, is_skipped, current_chapter_revision_id, previous_chapter_revision_id
-        FROM chapters WHERE book_id = ? ORDER BY ordinal ASC;
+        FROM chapters WHERE book_id = ? \(includeHistory ? "" : "AND source_id = ?") ORDER BY ordinal ASC;
         """
-        return try withPrepared(sql, [.text(bookID.uuidString)]) { stmt in
+        let selectedSourceID = try sourceID ?? fetchBook(id: bookID)?.sourceID
+        let args: [SQLValue] = [.text(bookID.uuidString)] + (includeHistory ? [] : [.text(selectedSourceID?.uuidString)])
+        return try withPrepared(sql, args) { stmt in
             var result: [AudiobookChapter] = []
             while sqlite3_step(stmt) == SQLITE_ROW {
                 guard
@@ -2752,7 +3083,7 @@ public actor AudiobookProjectStore {
         }
     }
 
-    private func fetchAtoms(bookID: UUID, chapterID: UUID?) throws -> [AudiobookTextAtom] {
+    private func fetchAtoms(bookID: UUID, chapterID: UUID?, includeHistory: Bool = false) throws -> [AudiobookTextAtom] {
         let sql: String
         let args: [SQLValue]
         if let chapterID {
@@ -2764,7 +3095,7 @@ public actor AudiobookProjectStore {
         } else {
             sql = """
             SELECT id, chapter_id, ordinal, lower_bound, upper_bound, kind
-            FROM text_atoms WHERE book_id = ? ORDER BY lower_bound ASC, ordinal ASC;
+            FROM text_atoms WHERE book_id = ? \(includeHistory ? "" : "AND chapter_id IN (SELECT id FROM chapters WHERE chapters.book_id = text_atoms.book_id AND source_id = (SELECT source_id FROM books WHERE id = text_atoms.book_id))") ORDER BY lower_bound ASC, ordinal ASC;
             """
             args = [.text(bookID.uuidString)]
         }
@@ -2790,11 +3121,11 @@ public actor AudiobookProjectStore {
         }
     }
 
-    private func fetchCharacters(bookID: UUID) throws -> [AudiobookCharacter] {
+    private func fetchCharacters(bookID: UUID, includeHistory: Bool = false) throws -> [AudiobookCharacter] {
         let sql = """
         SELECT id, book_id, display_name, aliases_json, is_narrator, is_major,
                allow_shared_minor_voice, evidences_json, first_lower_bound, first_upper_bound, chapter_ids_json, voice_policy_json, manual_tier, voice_traits_json, required_voice_traits_json
-        FROM characters WHERE book_id = ? ORDER BY is_narrator DESC, is_major DESC, display_name ASC;
+        FROM characters WHERE book_id = ? \(includeHistory ? "" : "AND source_id = (SELECT source_id FROM books WHERE id = characters.book_id)") ORDER BY is_narrator DESC, is_major DESC, display_name ASC;
         """
         let decoder = JSONDecoder()
         return try withPrepared(sql, [.text(bookID.uuidString)]) { stmt in
@@ -2837,10 +3168,10 @@ public actor AudiobookProjectStore {
         }
     }
 
-    private func fetchVoiceBindings(bookID: UUID) throws -> [UUID: AudiobookVoiceBinding] {
+    private func fetchVoiceBindings(bookID: UUID, includeHistory: Bool = false) throws -> [UUID: AudiobookVoiceBinding] {
         let sql = """
         SELECT role_id, voice_id, voice_revision, model_revision, is_synthesis_ready, allowed_speed, caller_seed
-        FROM voice_bindings WHERE book_id = ?;
+        FROM voice_bindings WHERE book_id = ? \(includeHistory ? "" : "AND role_id IN (SELECT id FROM characters WHERE characters.book_id = voice_bindings.book_id AND source_id = (SELECT source_id FROM books WHERE id = voice_bindings.book_id))");
         """
         return try withPrepared(sql, [.text(bookID.uuidString)]) { stmt in
             var map: [UUID: AudiobookVoiceBinding] = [:]
@@ -2866,12 +3197,12 @@ public actor AudiobookProjectStore {
         }
     }
 
-    private func fetchAnalysisWindows(bookID: UUID) throws -> [AudiobookAnalysisWindow] {
+    private func fetchAnalysisWindows(bookID: UUID, includeHistory: Bool = false) throws -> [AudiobookAnalysisWindow] {
         let sql = """
         SELECT id, root_window_id, book_id, chapter_id, ordinal,
                primary_atom_ids_json, leading_context_ids_json, trailing_context_ids_json,
                policy_fingerprint, configuration_digest, generation, is_completed
-        FROM analysis_windows WHERE book_id = ? ORDER BY ordinal ASC;
+        FROM analysis_windows WHERE book_id = ? \(includeHistory ? "" : "AND chapter_id IN (SELECT id FROM chapters WHERE chapters.book_id = analysis_windows.book_id AND source_id = (SELECT source_id FROM books WHERE id = analysis_windows.book_id))") ORDER BY ordinal ASC;
         """
         let decoder = JSONDecoder()
         return try withPrepared(sql, [.text(bookID.uuidString)]) { stmt in
@@ -2909,7 +3240,7 @@ public actor AudiobookProjectStore {
         }
     }
 
-    private func fetchAnnotations(bookID: UUID, chapterID: UUID?) throws -> [AudiobookAnnotation] {
+    private func fetchAnnotations(bookID: UUID, chapterID: UUID?, includeHistory: Bool = false) throws -> [AudiobookAnnotation] {
         let sql: String
         let args: [SQLValue]
         if let chapterID {
@@ -2923,7 +3254,7 @@ public actor AudiobookProjectStore {
             sql = """
             SELECT id, book_id, chapter_id, window_id, atom_id, lower_bound, upper_bound,
                    assignment_json, evidence, user_confirmed, annotation_revision
-            FROM annotations WHERE book_id = ? ORDER BY lower_bound ASC;
+            FROM annotations WHERE book_id = ? \(includeHistory ? "" : "AND chapter_id IN (SELECT id FROM chapters WHERE chapters.book_id = annotations.book_id AND source_id = (SELECT source_id FROM books WHERE id = annotations.book_id))") ORDER BY lower_bound ASC;
             """
             args = [.text(bookID.uuidString)]
         }
@@ -2959,7 +3290,7 @@ public actor AudiobookProjectStore {
         }
     }
 
-    private func fetchFragments(bookID: UUID, chapterID: UUID?) throws -> [AudiobookFragment] {
+    private func fetchFragments(bookID: UUID, chapterID: UUID?, includeHistory: Bool = false) throws -> [AudiobookFragment] {
         let sql: String
         let args: [SQLValue]
         if let chapterID {
@@ -2973,7 +3304,7 @@ public actor AudiobookProjectStore {
             sql = """
             SELECT id, book_id, chapter_id, ordinal, role_id, lower_bound, upper_bound,
                    atom_ids_json, local_assignment_digest, voice_binding_digest, policy_digest, dependency_digest
-            FROM fragments WHERE book_id = ? ORDER BY lower_bound ASC, ordinal ASC;
+            FROM fragments WHERE book_id = ? \(includeHistory ? "" : "AND chapter_id IN (SELECT id FROM chapters WHERE chapters.book_id = fragments.book_id AND source_id = (SELECT source_id FROM books WHERE id = fragments.book_id))") ORDER BY lower_bound ASC, ordinal ASC;
             """
             args = [.text(bookID.uuidString)]
         }
@@ -3253,44 +3584,37 @@ public actor AudiobookProjectStore {
     }
 
     private func hasChapterStructureArtifacts(bookID: UUID) throws -> Bool {
-        guard assetJournal.pendingEntries(bookID: bookID).isEmpty else { return true }
-
+        let chapters = try fetchChapters(bookID: bookID)
+        let chapterIDs = Set(chapters.map(\.id))
+        if chapters.contains(where: { $0.currentChapterRevisionID != nil || $0.previousChapterRevisionID != nil }) { return true }
+        if assetJournal.pendingEntries(bookID: bookID).contains(where: { chapterIDs.contains($0.candidate.chapterID) }) { return true }
         let args: [SQLValue] = [.text(bookID.uuidString)]
-        let checks = [
-            "SELECT COUNT(*) FROM analysis_windows WHERE book_id = ?;",
-            "SELECT COUNT(*) FROM annotations WHERE book_id = ?;",
-            "SELECT COUNT(*) FROM fragments WHERE book_id = ?;",
-            "SELECT COUNT(*) FROM render_candidates WHERE book_id = ?;",
-            "SELECT COUNT(*) FROM chapter_revisions WHERE book_id = ?;",
-            "SELECT COUNT(*) FROM production_revisions WHERE book_id = ?;",
-            "SELECT COUNT(*) FROM bookmarks WHERE book_id = ?;",
-            "SELECT COUNT(*) FROM export_records WHERE book_id = ?;",
-            "SELECT COUNT(*) FROM chapters WHERE book_id = ? AND (current_chapter_revision_id IS NOT NULL OR previous_chapter_revision_id IS NOT NULL);",
-            "SELECT COUNT(*) FROM asset_transactions WHERE book_id = ? AND state != 'quarantined';",
-        ]
-        for sql in checks {
-            if try countRows(sql, args) > 0 {
-                return true
-            }
+        var checks: [String] = []
+        for table in ["analysis_windows", "annotations", "fragments", "render_candidates", "chapter_revisions", "bookmarks"] {
+            checks.append("SELECT COUNT(*) FROM \(table) WHERE book_id = ? AND chapter_id IN (SELECT id FROM chapters WHERE chapters.book_id = \(table).book_id AND source_id = (SELECT source_id FROM books WHERE id = \(table).book_id));")
         }
+        checks.append("SELECT COUNT(*) FROM production_revisions WHERE book_id = ? AND source_id = (SELECT source_id FROM books WHERE id = production_revisions.book_id);")
+        checks.append("SELECT COUNT(*) FROM export_records WHERE book_id = ? AND production_revision_id IN (SELECT id FROM production_revisions WHERE production_revisions.book_id = export_records.book_id AND source_id = (SELECT source_id FROM books WHERE id = export_records.book_id));")
+        checks.append("SELECT COUNT(*) FROM asset_transactions WHERE book_id = ? AND state != 'quarantined' AND fragment_id IN (SELECT id FROM fragments WHERE fragments.book_id = asset_transactions.book_id AND chapter_id IN (SELECT id FROM chapters WHERE chapters.book_id = fragments.book_id AND source_id = (SELECT source_id FROM books WHERE id = fragments.book_id)));")
+        for sql in checks where try countRows(sql, args) > 0 { return true }
         return false
     }
 
     private func buildSummary(for book: AudiobookBook) throws -> AudiobookBookSummary {
         let bArg: [SQLValue] = [.text(book.id.uuidString)]
-        let totalChapterCount = try countRows("SELECT COUNT(*) FROM chapters WHERE book_id = ?;", bArg)
+        let totalChapterCount = try countRows("SELECT COUNT(*) FROM chapters WHERE book_id = ? AND source_id = (SELECT source_id FROM books WHERE id = chapters.book_id);", bArg)
         let completedChapterCount = try countRows(
-            "SELECT COUNT(*) FROM chapters WHERE book_id = ? AND current_chapter_revision_id IS NOT NULL;",
+            "SELECT COUNT(*) FROM chapters WHERE book_id = ? AND source_id = (SELECT source_id FROM books WHERE id = chapters.book_id) AND current_chapter_revision_id IS NOT NULL;",
             bArg
         )
         let unknownCount = try countRows(
-            "SELECT COUNT(*) FROM annotations WHERE book_id = ? AND assignment_json LIKE '%\"unknown\"%';",
+            "SELECT COUNT(*) FROM annotations WHERE book_id = ? AND chapter_id IN (SELECT id FROM chapters WHERE chapters.book_id = annotations.book_id AND source_id = (SELECT source_id FROM books WHERE id = annotations.book_id)) AND assignment_json LIKE '%\"unknown\"%';",
             bArg
         )
-        let characterCount = try countRows("SELECT COUNT(*) FROM characters WHERE book_id = ?;", bArg)
-        let totalWindowCount = try countRows("SELECT COUNT(*) FROM analysis_windows WHERE book_id = ?;", bArg)
+        let characterCount = try countRows("SELECT COUNT(*) FROM characters WHERE book_id = ? AND source_id = (SELECT source_id FROM books WHERE id = characters.book_id);", bArg)
+        let totalWindowCount = try countRows("SELECT COUNT(*) FROM analysis_windows WHERE book_id = ? AND chapter_id IN (SELECT id FROM chapters WHERE chapters.book_id = analysis_windows.book_id AND source_id = (SELECT source_id FROM books WHERE id = analysis_windows.book_id));", bArg)
         let completedWindowCount = try countRows(
-            "SELECT COUNT(*) FROM analysis_windows WHERE book_id = ? AND is_completed != 0;",
+            "SELECT COUNT(*) FROM analysis_windows WHERE book_id = ? AND chapter_id IN (SELECT id FROM chapters WHERE chapters.book_id = analysis_windows.book_id AND source_id = (SELECT source_id FROM books WHERE id = analysis_windows.book_id)) AND is_completed != 0;",
             bArg
         )
         let bookmark = try fetchBookmark(bookID: book.id)
@@ -3309,6 +3633,8 @@ public actor AudiobookProjectStore {
     // MARK: - Trash Snapshot Export / Restore
 
     private struct AudiobookTrashSnapshot: Codable, Sendable {
+        let sources: [SourceRecord]?
+        let characterSources: [UUID: UUID]?
         let book: AudiobookBook
         let chapters: [AudiobookChapter]
         let atoms: [AudiobookTextAtom]
@@ -3329,20 +3655,28 @@ public actor AudiobookProjectStore {
         guard let book = try fetchBook(id: bookID) else {
             throw AudiobookStoreError.bookNotFound(bookID)
         }
-        let chapters = try fetchChapters(bookID: bookID)
+        let chapters = try fetchChapters(bookID: bookID, includeHistory: true)
         var chapterRevs: [AudiobookChapterRevision] = []
         for ch in chapters {
             chapterRevs.append(contentsOf: try fetchChapterRevisions(bookID: bookID, chapterID: ch.id))
         }
+        let roleSources: [UUID: UUID] = try withPrepared("SELECT id, source_id FROM characters WHERE book_id = ?;", [.text(bookID.uuidString)]) { stmt in
+            var map: [UUID: UUID] = [:]
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let role = columnText(stmt, 0).flatMap(UUID.init(uuidString:)), let source = columnText(stmt, 1).flatMap(UUID.init(uuidString:)) { map[role] = source }
+            }
+            return map
+        }
         return AudiobookTrashSnapshot(
+            sources: try sourceRecords(bookID: bookID), characterSources: roleSources,
             book: book,
             chapters: chapters,
-            atoms: try fetchAtoms(bookID: bookID, chapterID: nil),
-            characters: try fetchCharacters(bookID: bookID),
-            bindings: Array(try fetchVoiceBindings(bookID: bookID).values),
-            windows: try fetchAnalysisWindows(bookID: bookID),
-            annotations: try fetchAnnotations(bookID: bookID, chapterID: nil),
-            fragments: try fetchFragments(bookID: bookID, chapterID: nil),
+            atoms: try fetchAtoms(bookID: bookID, chapterID: nil, includeHistory: true),
+            characters: try fetchCharacters(bookID: bookID, includeHistory: true),
+            bindings: Array(try fetchVoiceBindings(bookID: bookID, includeHistory: true).values),
+            windows: try fetchAnalysisWindows(bookID: bookID, includeHistory: true),
+            annotations: try fetchAnnotations(bookID: bookID, chapterID: nil, includeHistory: true),
+            fragments: try fetchFragments(bookID: bookID, chapterID: nil, includeHistory: true),
             candidates: try fetchCandidates(bookID: bookID, fragmentID: nil),
             chapterRevisions: chapterRevs,
             productionRevisions: try fetchProductionRevisions(bookID: bookID),
@@ -3355,26 +3689,32 @@ public actor AudiobookProjectStore {
     private func restoreBookSnapshot(_ snapshot: AudiobookTrashSnapshot) throws {
         let bID = snapshot.book.id
         try upsertBookRow(snapshot.book)
-        let originalRel = "books/\(bID.uuidString)/sources/\(snapshot.book.sourceID.uuidString)-original.bin"
-        let canonicalRel = "books/\(bID.uuidString)/sources/\(snapshot.book.sourceID.uuidString)-source.utf8"
-        try insertSourceRow(
-            bookID: bID,
-            sourceID: snapshot.book.sourceID,
-            sha256: snapshot.book.sourceSHA256,
-            byteCount: snapshot.book.canonicalByteCount,
-            scalarCount: snapshot.book.scalarCount,
-            encoding: snapshot.book.originalEncoding,
-            originalRelPath: originalRel,
-            canonicalRelPath: canonicalRel,
-            createdAt: snapshot.book.createdAt
-        )
+        if let sources = snapshot.sources {
+            for source in sources {
+                try insertSourceRow(bookID: bID, sourceID: source.id, sha256: source.sha256, byteCount: source.byteCount,
+                    scalarCount: source.scalarCount, encoding: source.encoding, originalRelPath: source.originalRel,
+                    canonicalRelPath: source.canonicalRel, createdAt: source.createdAt)
+                try executePrepared("""
+                    UPDATE sources SET source_kind = ?, reference_source_id = ?, preparation_version = ?,
+                        source_map_rel_path = ?, source_map_sha256 = ?, workflow_book_json = ? WHERE book_id = ? AND id = ?;
+                    """, [.text(source.kind), .text(source.referenceSourceID?.uuidString), .text(source.preparationVersion),
+                          .text(source.mapRel), .text(source.mapSHA256), .text(source.workflowJSON), .text(bID.uuidString), .text(source.id.uuidString)])
+            }
+        } else {
+            // Old trash packages contain a single reference source.
+            try insertSourceRow(bookID: bID, sourceID: snapshot.book.sourceID, sha256: snapshot.book.sourceSHA256,
+                byteCount: snapshot.book.canonicalByteCount, scalarCount: snapshot.book.scalarCount,
+                encoding: snapshot.book.originalEncoding,
+                originalRelPath: "books/\(bID)/sources/\(snapshot.book.sourceID)-original.bin",
+                canonicalRelPath: "books/\(bID)/sources/\(snapshot.book.sourceID)-source.utf8", createdAt: snapshot.book.createdAt)
+        }
         for ch in snapshot.chapters { try upsertChapterRow(ch) }
         for atom in snapshot.atoms { try insertAtomRow(bookID: bID, atom: atom) }
-        for char in snapshot.characters { try upsertCharacterRow(char) }
+        for char in snapshot.characters { try upsertCharacterRow(char, historicalSourceID: snapshot.characterSources?[char.id]) }
         for bind in snapshot.bindings { try upsertVoiceBindingRow(bookID: bID, binding: bind) }
-        for win in snapshot.windows { try upsertAnalysisWindowRow(win) }
-        for ann in snapshot.annotations { try upsertAnnotationRow(ann) }
-        for frag in snapshot.fragments { try upsertFragmentRow(frag) }
+        for win in snapshot.windows { try upsertAnalysisWindowRow(win, restoringHistory: true) }
+        for ann in snapshot.annotations { try upsertAnnotationRow(ann, restoringHistory: true) }
+        for frag in snapshot.fragments { try upsertFragmentRow(frag, restoringHistory: true) }
         for cand in snapshot.candidates { try upsertCandidateRow(cand) }
         for rev in snapshot.chapterRevisions { try upsertChapterRevisionRow(rev) }
         for prod in snapshot.productionRevisions { try upsertProductionRevisionRow(prod) }

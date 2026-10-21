@@ -7,6 +7,121 @@ import XCTest
 #endif
 
 final class AudiobookStoreTests: XCTestCase {
+    func testImportPersistsPreparedBytesAndImmutableReference() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let raw = Data("他提到住在鄉間許多年的那位十分熟悉各種禮節的老監\r\n生。".utf8)
+        let preview = try AudiobookTXTImporter.prepare(rawData: raw)
+        let store = try AudiobookProjectStore(root: root)
+        let id = try await store.importBook(preview)
+        let rows = try sqlite(root, sql: "SELECT source_kind, preparation_version FROM sources WHERE book_id = '\(id)' AND id = '\(preview.sourceID)';")
+        XCTAssertEqual(rows, [["working", AudiobookTextPreparation.version]])
+        let reopened = try AudiobookProjectStore(root: root)
+        let work = try await reopened.workingSourceSnapshot(bookID: id)
+        let reference = try await reopened.referenceSourceIndex(for: id)
+        XCTAssertEqual(work.sourceIndex, preview.sourceIndex)
+        XCTAssertEqual(work.workingSHA256, preview.preparedText.workingSHA256)
+        XCTAssertEqual(reference.utf8Data, raw)
+        let originalPath = try XCTUnwrap(try sqlite(root, sql: "SELECT original_rel_path FROM sources WHERE id = '\(preview.sourceID)';").first?.first)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(originalPath)), raw)
+    }
+
+    func testCorruptWorkingSourceDoesNotFallBackToReference() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data("第一章\n完整的文本。".utf8))
+        let store = try AudiobookProjectStore(root: root)
+        let id = try await store.importBook(preview)
+        _ = try await store.workingSourceSnapshot(bookID: id) // Warm caches must not hide corruption.
+        let path = try XCTUnwrap(try sqlite(root, sql: "SELECT canonical_rel_path FROM sources WHERE id = '\(preview.sourceID)';").first?.first)
+        try Data("损坏文本".utf8).write(to: root.appendingPathComponent(path))
+        do { _ = try await store.workingSourceSnapshot(bookID: id); XCTFail("Corrupt working source accepted") }
+        catch { XCTAssertEqual(error as? AudiobookStoreError, .workingSourceChanged) }
+        let reference = try await store.referenceSourceIndex(for: id)
+        XCTAssertEqual(reference.utf8Data, preview.referenceUTF8)
+    }
+
+    func testFailedPreparationKeepsActiveRevision() async throws {
+        let fixture = try makeFrozenFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let store = try AudiobookProjectStore(root: fixture.root)
+        await store.setSimulateDiskFull(true)
+        do { _ = try await store.prepareWorkingRevision(bookID: fixture.bookID, expectedSourceID: fixture.sourceID); XCTFail("Expected failure") }
+        catch { XCTAssertEqual(error as? AudiobookStoreError, .diskFull) }
+        let book = try await store.book(id: fixture.bookID)
+        XCTAssertEqual(book.sourceID, fixture.sourceID)
+        XCTAssertEqual(try Data(contentsOf: fixture.root.appendingPathComponent(fixture.candidate.relativeAssetPath)), fixture.wav)
+    }
+
+    func testLegacyUpgradeDoesNotRewriteSourceOrAudioAndPreparationIsExplicit() async throws {
+        let fixture = try makeFrozenFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let originalRows = try sqlite(fixture.root, sql: "SELECT id, sha256, canonical_rel_path FROM sources;")
+        let store = try AudiobookProjectStore(root: fixture.root)
+        XCTAssertEqual(try sqlite(fixture.root, sql: "SELECT id, sha256, canonical_rel_path FROM sources;"), originalRows)
+        XCTAssertEqual(try sqlite(fixture.root, sql: "SELECT source_kind FROM sources;"), [["reference"]])
+        do { _ = try await store.workingSourceSnapshot(bookID: fixture.bookID); XCTFail("Legacy source used for new production") }
+        catch { XCTAssertEqual(error as? AudiobookStoreError, .workingTextPreparationRequired) }
+        let oldChapters = try await store.chapters(for: fixture.bookID)
+        let id = try await store.prepareWorkingRevision(bookID: fixture.bookID, expectedSourceID: fixture.sourceID)
+        XCTAssertNotEqual(id, fixture.sourceID)
+        let working = try await store.workingSourceSnapshot(bookID: fixture.bookID)
+        XCTAssertEqual(working.sourceID, id)
+        let chapters = try await store.chapters(for: fixture.bookID)
+        XCTAssertTrue(Set(chapters.map(\.id)).isDisjoint(with: oldChapters.map(\.id)))
+        XCTAssertEqual(try sqlite(fixture.root, sql: "SELECT COUNT(*) FROM chapters;"), [["2"]])
+        XCTAssertEqual(try Data(contentsOf: fixture.root.appendingPathComponent(fixture.candidate.relativeAssetPath)), fixture.wav)
+        do { _ = try await store.prepareWorkingRevision(bookID: fixture.bookID, expectedSourceID: fixture.sourceID); XCTFail("Stale CAS accepted") }
+        catch { XCTAssertEqual(error as? AudiobookStoreError, .workingSourceChanged) }
+        let reopened = try AudiobookProjectStore(root: fixture.root)
+        let saved = try await reopened.workingSourceSnapshot(bookID: fixture.bookID)
+        XCTAssertEqual(saved, working)
+        XCTAssertTrue(try sqlite(fixture.root, sql: "PRAGMA foreign_key_check;").isEmpty)
+    }
+
+    func testRevisionRollbackSwitchesPointerAndKeepsBothSources() async throws {
+        let fixture = try makeFrozenFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let store = try AudiobookProjectStore(root: fixture.root)
+        let next = try await store.prepareWorkingRevision(bookID: fixture.bookID, expectedSourceID: fixture.sourceID)
+        try await store.activateSourceRevision(bookID: fixture.bookID, sourceID: fixture.sourceID, expectedSourceID: next)
+        let old = try await store.book(id: fixture.bookID)
+        XCTAssertEqual(old.sourceID, fixture.sourceID)
+        let oldChapters = try await store.chapters(for: fixture.bookID)
+        XCTAssertEqual(oldChapters.map(\.id), [fixture.chapterID])
+        try await store.activateSourceRevision(bookID: fixture.bookID, sourceID: next, expectedSourceID: fixture.sourceID)
+        let working = try await store.workingSourceSnapshot(bookID: fixture.bookID)
+        XCTAssertEqual(working.sourceID, next)
+        XCTAssertEqual(try Data(contentsOf: fixture.root.appendingPathComponent(fixture.candidate.relativeAssetPath)), fixture.wav)
+    }
+
+    func testHistoricalArtifactsDoNotBlockEditingFreshWorkingChapters() async throws {
+        let fixture = try makeFrozenFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let store = try AudiobookProjectStore(root: fixture.root)
+        _ = try await store.prepareWorkingRevision(bookID: fixture.bookID, expectedSourceID: fixture.sourceID)
+        var chapters = try await store.chapters(for: fixture.bookID)
+        chapters[0].title = "新文本待核对章节"
+        try await store.updateChapters(bookID: fixture.bookID, chapters: chapters)
+        let old = try await store.chapters(for: fixture.bookID, sourceID: fixture.sourceID)
+        XCTAssertEqual(old.map(\.id), [fixture.chapterID])
+        XCTAssertEqual(try Data(contentsOf: fixture.root.appendingPathComponent(fixture.candidate.relativeAssetPath)), fixture.wav)
+    }
+
+    func testFrozenV6UpgradeOnlyAddsMetadata() async throws {
+        let fixture = try makeFrozenFixture(schemaVersion: 6)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let rows = try sqlite(fixture.root, sql: "SELECT id, sha256, canonical_rel_path FROM sources;")
+        let store = try AudiobookProjectStore(root: fixture.root)
+        XCTAssertEqual(try sqlite(fixture.root, sql: "SELECT id, sha256, canonical_rel_path FROM sources;"), rows)
+        XCTAssertEqual(try sqlite(fixture.root, sql: "PRAGMA user_version;"), [["7"]])
+        XCTAssertEqual(try sqlite(fixture.root, sql: "SELECT source_kind, COALESCE(preparation_version, 'none') FROM sources;"), [["reference", "none"]])
+        let chapters = try await store.chapters(for: fixture.bookID)
+        XCTAssertEqual(chapters.map(\.id), [fixture.chapterID])
+        XCTAssertEqual(try Data(contentsOf: fixture.root.appendingPathComponent(fixture.candidate.relativeAssetPath)), fixture.wav)
+        XCTAssertTrue(try sqlite(fixture.root, sql: "PRAGMA foreign_key_check;").isEmpty)
+    }
+
     private struct FrozenV5Fixture {
         let root: URL
         let bookID: UUID
@@ -17,15 +132,15 @@ final class AudiobookStoreTests: XCTestCase {
     }
 
     /// DDL comes from a checked-in historical SQL file, never from the current store.
-    private func makeFrozenV5Fixture() throws -> FrozenV5Fixture {
+    private func makeFrozenFixture(schemaVersion: Int = 5) throws -> FrozenV5Fixture {
         let root = try makeTempRoot()
         #if SWIFT_PACKAGE
         let fixtureURL = try XCTUnwrap(Bundle.module.url(
-            forResource: "audiobook-schema-v5", withExtension: "sql", subdirectory: "Fixtures"
+            forResource: "audiobook-schema-v\(schemaVersion)", withExtension: "sql", subdirectory: "Fixtures"
         ))
         #else
         let fixtureURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .appendingPathComponent("Fixtures/audiobook-schema-v5.sql")
+            .appendingPathComponent("Fixtures/audiobook-schema-v\(schemaVersion).sql")
         #endif
         _ = try sqlite(root, sql: String(contentsOf: fixtureURL, encoding: .utf8))
         let bookID = UUID(), sourceID = UUID(), chapterID = UUID()
@@ -53,7 +168,7 @@ final class AudiobookStoreTests: XCTestCase {
                 'utf-8', 'notStarted', 'idle', 'noneAvailable', 100, 100);
             INSERT INTO sources VALUES ('\(sourceID)', '\(bookID)', '\(sha)', \(source.count), 7, 'utf-8',
                 'books/\(bookID)/source/original.txt', 'books/\(bookID)/source/canonical.txt', 100);
-            INSERT INTO chapters VALUES ('\(chapterID)', '\(bookID)', '\(sourceID)', 0, '历史章节',
+            INSERT INTO chapters (id, book_id, source_id, ordinal, title, lower_bound, upper_bound, excluded_ranges_json, current_chapter_revision_id, previous_chapter_revision_id) VALUES ('\(chapterID)', '\(bookID)', '\(sourceID)', 0, '历史章节',
                 0, \(source.count), '[]', NULL, NULL);
             INSERT INTO render_candidates (id, book_id, chapter_id, fragment_id, task_id, generation,
                 relative_asset_path, file_sha256, pcm_sha256, frame_count, sample_rate, dependency_digest,
@@ -67,7 +182,7 @@ final class AudiobookStoreTests: XCTestCase {
     }
 
     func testFrozenV5MissingColumnsMigratesAndImportsWithoutLosingAssets() async throws {
-        let fixture = try makeFrozenV5Fixture()
+        let fixture = try makeFrozenFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         XCTAssertEqual(try sqlite(fixture.root, sql: "PRAGMA user_version;"), [["5"]])
         XCTAssertEqual(try sqlite(fixture.root, sql: "SELECT name FROM pragma_table_info('books') WHERE name = 'analysis_failure_json';"), [])
@@ -103,7 +218,7 @@ final class AudiobookStoreTests: XCTestCase {
         XCTAssertEqual(savedChapters.first?.isSkipped, true)
         let books = try await reopened.listBooks()
         XCTAssertEqual(Set(books.map(\.id)), [fixture.bookID, importedID])
-        XCTAssertEqual(try sqlite(fixture.root, sql: "PRAGMA user_version;"), [["6"]])
+        XCTAssertEqual(try sqlite(fixture.root, sql: "PRAGMA user_version;"), [["7"]])
         XCTAssertTrue(try sqlite(fixture.root, sql: "PRAGMA foreign_key_check;").isEmpty)
         let backup = fixture.root.appendingPathComponent("library.schema5.backup.sqlite3")
         XCTAssertTrue(FileManager.default.fileExists(atPath: backup.path))
@@ -173,7 +288,7 @@ final class AudiobookStoreTests: XCTestCase {
 
     func testFrozenV5PartiallyOrFullyPresentColumnsUpgradeIdempotently() async throws {
         for existingColumns in [["is_skipped"], ["analysis_failure_json"], ["is_skipped", "analysis_failure_json"]] {
-            let fixture = try makeFrozenV5Fixture()
+            let fixture = try makeFrozenFixture()
             defer { try? FileManager.default.removeItem(at: fixture.root) }
             let failure = AudiobookAnalysisFailure(code: "preserved_failure", message: "请重试。", failedAt: Date(timeIntervalSince1970: 123))
             if existingColumns.contains("is_skipped") {
@@ -192,12 +307,12 @@ final class AudiobookStoreTests: XCTestCase {
             _ = try AudiobookProjectStore(root: fixture.root)
             XCTAssertEqual(try schemaShape(fixture.root), shape)
             XCTAssertEqual(try storedRows(fixture.root), rows)
-            XCTAssertEqual(try sqlite(fixture.root, sql: "PRAGMA user_version;"), [["6"]])
+            XCTAssertEqual(try sqlite(fixture.root, sql: "PRAGMA user_version;"), [["7"]])
         }
     }
 
     func testFrozenV5MigrationFailureRollsBackAndCanRetry() async throws {
-        let fixture = try makeFrozenV5Fixture()
+        let fixture = try makeFrozenFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         // Adding is_skipped succeeds before validation encounters this incompatible existing column.
         _ = try sqlite(fixture.root, sql: "ALTER TABLE books ADD COLUMN analysis_failure_json INTEGER;")
@@ -217,7 +332,7 @@ final class AudiobookStoreTests: XCTestCase {
         XCTAssertEqual(book.sourceID, fixture.sourceID)
         let preview = try AudiobookTXTImporter.prepare(rawData: Data("第一章\n失败后可以重试迁移。".utf8), suggestedTitle: "重试后导入")
         _ = try await recovered.importBook(preview)
-        XCTAssertEqual(try sqlite(fixture.root, sql: "PRAGMA user_version;"), [["6"]])
+        XCTAssertEqual(try sqlite(fixture.root, sql: "PRAGMA user_version;"), [["7"]])
         XCTAssertEqual(try sqlite(fixture.root, sql: "SELECT COUNT(*) FROM books;"), [["2"]])
         let verified = try await recovered.verifyCandidateAsset(fixture.candidate)
         XCTAssertTrue(verified)
@@ -236,7 +351,7 @@ final class AudiobookStoreTests: XCTestCase {
             "ALTER TABLE chapters DROP COLUMN is_skipped; ALTER TABLE chapters ADD COLUMN is_skipped INTEGER NOT NULL DEFAULT 1;",
         ]
         for corruption in corruptions {
-            let fixture = try makeFrozenV5Fixture()
+            let fixture = try makeFrozenFixture()
             defer { try? FileManager.default.removeItem(at: fixture.root) }
             _ = try AudiobookProjectStore(root: fixture.root)
             _ = try sqlite(fixture.root, sql: corruption)
@@ -244,12 +359,12 @@ final class AudiobookStoreTests: XCTestCase {
             XCTAssertThrowsError(try AudiobookProjectStore(root: fixture.root), corruption)
             XCTAssertEqual(try schemaShape(fixture.root), shape, corruption)
             XCTAssertEqual(try storedRows(fixture.root), rows, corruption)
-            XCTAssertEqual(try sqlite(fixture.root, sql: "PRAGMA user_version;"), [["6"]])
+            XCTAssertEqual(try sqlite(fixture.root, sql: "PRAGMA user_version;"), [["7"]])
         }
     }
 
     func testUnversionedNonemptyDatabaseIsRejectedWithoutMutation() throws {
-        let fixture = try makeFrozenV5Fixture()
+        let fixture = try makeFrozenFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         _ = try sqlite(fixture.root, sql: "PRAGMA user_version = 0;")
         let shape = try schemaShape(fixture.root), rows = try storedRows(fixture.root)
@@ -260,7 +375,7 @@ final class AudiobookStoreTests: XCTestCase {
     }
 
     func testFrozenV5MigratedSchemaMatchesFreshDatabase() throws {
-        let fixture = try makeFrozenV5Fixture(), freshRoot = try makeTempRoot()
+        let fixture = try makeFrozenFixture(), freshRoot = try makeTempRoot()
         defer {
             try? FileManager.default.removeItem(at: fixture.root)
             try? FileManager.default.removeItem(at: freshRoot)

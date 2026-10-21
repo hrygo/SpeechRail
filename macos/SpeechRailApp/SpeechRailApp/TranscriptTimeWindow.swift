@@ -146,7 +146,6 @@ public struct TranscriptTimeWindow: Hashable, Sendable {
     }
 
     private static func clockText(_ value: TimeInterval) -> String {
-        let total = max(0, Int(value.rounded()))
-        return String(format: "%02d:%02d", total / 60, total % 60)
+        return SpeechRailDisplayFormat.timecode(value, rounding: .toNearestOrAwayFromZero)
     }
 }

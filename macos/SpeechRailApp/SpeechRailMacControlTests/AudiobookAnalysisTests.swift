@@ -234,9 +234,21 @@ final class AudiobookAnalysisTests: XCTestCase {
             let items = (object["primary_atoms"] as? [[String: Any]]) ?? []
             return items.compactMap { $0["text"] as? String }
         }
+        let source = try await store.sourceIndex(for: bookID)
+        let atoms = try await store.atoms(for: bookID)
+        let atomsByID = Dictionary(uniqueKeysWithValues: atoms.map { ($0.id, $0) })
+        for prompt in client.prompts {
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(prompt.input.utf8)) as? [String: Any])
+            for key in ["primary_atoms", "primary_atoms_required", "leading_context", "trailing_context", "leading_context_readonly", "trailing_context_readonly"] {
+                for item in (object[key] as? [[String: Any]]) ?? [] {
+                    guard let string = item["atomID"] as? String, let id = UUID(uuidString: string), let atom = atomsByID[id] else { continue }
+                    XCTAssertEqual(item["text"] as? String, try source.text(in: atom.sourceRange))
+                }
+            }
+        }
         XCTAssertTrue(texts.contains { $0.contains("望向遠方。") })
         XCTAssertFalse(texts.contains { $0.contains("\r") })
-        XCTAssertEqual(preview.canonicalUTF8, Data(text.utf8))
+        XCTAssertEqual(preview.referenceUTF8, Data(text.utf8))
     }
 
     func testNestedQuotesAndAliasCollisionRemainReviewable() async throws {
@@ -368,6 +380,71 @@ final class AudiobookAnalysisTests: XCTestCase {
 
         XCTAssertEqual(standardRun.reusedCheckpointWindows, 0)
         XCTAssertGreaterThan(standardClient.prompts.count, 0, "新策略必须重新分析旧策略创建的检查点")
+    }
+
+    func testSourceSwitchDuringClientFactoryDoesNotMarkNewRevisionRunning() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data("第一章 夜巡\n林远提灯前行。".utf8))
+        let bookID = try await store.importBook(preview)
+        let config = AudiobookAnalysisConfigSnapshot(configuration: LLMConfiguration(baseURL: "http://127.0.0.1:8000/v1", model: "test"))
+        let client = ScriptedAnalysisClient(configurationDigest: config.configurationDigest)
+        let pipeline = AudiobookAnalysisPipeline(store: store) { _ in
+            _ = try await store.prepareWorkingRevision(bookID: bookID, expectedSourceID: preview.sourceID)
+            return client
+        }
+        do { _ = try await pipeline.run(bookID: bookID, config: config); XCTFail("Stale run accepted") } catch {}
+        let book = try await store.book(id: bookID)
+        XCTAssertEqual(book.analysisState, .notStarted)
+    }
+
+    private final class ClientSequence: @unchecked Sendable {
+        let lock = NSLock()
+        var clients: [ScriptedAnalysisClient]
+        init(_ clients: [ScriptedAnalysisClient]) { self.clients = clients }
+        func next() -> ScriptedAnalysisClient { lock.withLock { clients.removeFirst() } }
+    }
+
+    func testCancelledRunCannotOverwriteRestartedRunOnSameSource() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data("第一章 夜巡\n林远提灯前行。\n“跟紧我。”他说。".utf8))
+        let bookID = try await store.importBook(preview)
+        let config = AudiobookAnalysisConfigSnapshot(configuration: LLMConfiguration(baseURL: "http://127.0.0.1:8000/v1", model: "test"))
+        let old = ScriptedAnalysisClient(configurationDigest: config.configurationDigest)
+        let fresh = ScriptedAnalysisClient(configurationDigest: config.configurationDigest)
+        let clients = ClientSequence([old, fresh])
+        let pipeline = AudiobookAnalysisPipeline(store: store) { _ in clients.next() }
+        old.onPrompt = { prompt in
+            if prompt.stage == .annotation {
+                await pipeline.cancel(bookID: bookID)
+                _ = try await pipeline.run(bookID: bookID, config: config)
+            }
+        }
+        do { _ = try await pipeline.run(bookID: bookID, config: config); XCTFail("Cancelled run accepted") } catch {}
+        let book = try await store.book(id: bookID)
+        XCTAssertEqual(book.analysisState, .allWindowsValidated)
+        XCTAssertNil(book.analysisFailure)
+    }
+
+    func testLateAnalysisFailureDoesNotChangeNewWorkingRevision() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data("第一章 夜巡\n林远提灯前行。\n“跟紧我。”他说。".utf8))
+        let bookID = try await store.importBook(preview)
+        let config = AudiobookAnalysisConfigSnapshot(configuration: LLMConfiguration(baseURL: "http://127.0.0.1:8000/v1", model: "test-model"))
+        let client = ScriptedAnalysisClient(configurationDigest: config.configurationDigest)
+        client.onPrompt = { prompt in
+            if prompt.stage == .annotation {
+                _ = try await store.prepareWorkingRevision(bookID: bookID, expectedSourceID: preview.sourceID)
+                throw ServiceAPIClientError.invalidResponse
+            }
+        }
+        let pipeline = AudiobookAnalysisPipeline(store: store) { _ in client }
+        do { _ = try await pipeline.run(bookID: bookID, config: config); XCTFail("Stale analysis accepted") } catch {}
+        let book = try await store.book(id: bookID)
+        XCTAssertNotEqual(book.sourceID, preview.sourceID)
+        XCTAssertEqual(book.analysisState, .notStarted)
+        XCTAssertNil(book.analysisFailure)
+        let annotations = try await store.annotations(for: bookID)
+        XCTAssertTrue(annotations.isEmpty)
     }
 
     func testCancelRejectsLateAnalysisAndSettingsChangeNeverChangesInFlightProvider() async throws {

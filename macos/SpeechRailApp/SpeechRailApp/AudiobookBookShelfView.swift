@@ -249,7 +249,7 @@ public struct AudiobookBookShelfView: View {
            let progress = workflow.analysisProgress,
            progress.totalWindows > 0
         {
-            StatusPill(tone: .attention, label: "分析中 \(Int(progress.fraction * 100))%")
+            StatusPill(tone: .attention, label: "分析中 \(SpeechRailDisplayFormat.progress(progress.fraction, isComplete: false))")
         } else if summary.book.analysisState == .notStarted {
             StatusPill(tone: .neutral, label: "分析：未开始")
         } else if summary.book.analysisState == .running {
@@ -271,7 +271,7 @@ public struct AudiobookBookShelfView: View {
         {
             StatusPill(tone: .attention, label: workflow.isPausingProduction
                        ? "正在暂停制作"
-                       : (progress.totalFragments > 0 ? "制作中 \(Int(progress.fraction * 100))% · \(progress.savedFragmentsText)" : progress.statusTitle))
+                       : (progress.totalFragments > 0 ? "制作中 \(SpeechRailDisplayFormat.progress(progress.fraction, isComplete: false)) · \(progress.savedFragmentsText)" : progress.statusTitle))
         } else {
             switch summary.book.productionState {
         case .idle:

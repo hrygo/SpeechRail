@@ -76,7 +76,7 @@ struct AudiobookPronunciationSheet: View {
             }
         }
         if let lastSavedAt = controller.lastSavedAt {
-            Text("已保存 (lastSavedAt.formatted(date: .omitted, time: .shortened)) · 共 \(controller.binding?.entries.count ?? 0) 条")
+            Text("已保存 \(lastSavedAt.speechRailFormatted(.time)) · 共 \(controller.binding?.entries.count ?? 0) 条")
                 .font(SpeechRailDesignTokens.Typography.technical)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
         }

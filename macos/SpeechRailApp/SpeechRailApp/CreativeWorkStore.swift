@@ -210,8 +210,7 @@ public extension CreativeWork {
     /// `mm:ss`, or nil while the duration has not been read from the audio.
     var durationText: String? {
         guard let durationSeconds else { return nil }
-        let totalSeconds = max(0, Int(durationSeconds.rounded()))
-        return String(format: "%02d:%02d", totalSeconds / 60, totalSeconds % 60)
+        return SpeechRailDisplayFormat.timecode(durationSeconds)
     }
 
     /// Returns a copy carrying new provenance. Identity and audio stay put:

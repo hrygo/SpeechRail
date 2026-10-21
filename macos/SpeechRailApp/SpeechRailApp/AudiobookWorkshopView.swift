@@ -67,6 +67,16 @@ public struct AudiobookWorkshopView: View {
                     }
                 }
 
+                if workflow.surfaceMode != .shelf, workflow.requiresWorkingTextPreparation {
+                    StatusBanner(kind: .standard, tone: .attention,
+                        title: workflow.isPreparingWorkingText ? "正在整理正文…" : "准备正文后继续制作",
+                        message: "将连接排版折行，后续分析与制作统一使用整理后的正文。原文和已有音频会保留；新正文需要重新分析并确认配声。",
+                        actionTitle: workflow.isPreparingWorkingText ? nil : "准备加工文本") {
+                        Task { await workflow.prepareSelectedBookWorkingText() }
+                    }
+                    .disabled(workflow.isPreparingWorkingText || workflow.isAnalyzing || workflow.isProductionBusy || workflow.isPreparingExport)
+                }
+
                 switch workflow.surfaceMode {
                 case .shelf:
                     AudiobookBookShelfView(
@@ -427,6 +437,8 @@ struct AudiobookExportSheet: View {
                 )
             }
 
+            AudiobookAudioVersionPicker(workflow: workflow)
+
             Picker("导出格式", selection: $selectedProfile) {
                 ForEach(AudiobookExportProfile.allCases) { profile in
                     Text(profile.title).tag(profile)
@@ -511,7 +523,7 @@ struct AudiobookExportSheet: View {
                             .speechRailButton(.quiet)
                         }
 
-                        List(workflow.chapters) { chapter in
+                        List(workflow.exportChapters) { chapter in
                             let auditReady = workflow.exportAudit.map { Set($0.readyChapterIDs) }
                             let isExportable = !chapter.isSkipped
                                 && (auditReady?.contains(chapter.id) ?? (chapter.currentChapterRevisionID != nil))
@@ -626,6 +638,10 @@ struct AudiobookExportSheet: View {
         .onChange(of: selectedChapterIDs) { _, _ in
             invalidatePreparedExport()
         }
+        .onChange(of: workflow.selectedAudioRevisionID) { _, _ in
+            selectedChapterIDs = Set(workflow.exportReadyChapters.map(\.id))
+            invalidatePreparedExport()
+        }
         .onChange(of: loudnessEnabled) { _, _ in
             invalidatePreparedExport()
         }
@@ -642,7 +658,7 @@ struct AudiobookExportSheet: View {
         let ids = selectedProfile == .chapterMP3
             ? selectedChapterIDs.map(\.uuidString).sorted().joined(separator: ",")
             : "all"
-        return "\(selectedProfile.rawValue)|\(ids)"
+        return "\(selectedProfile.rawValue)|\(workflow.selectedAudioRevisionID?.uuidString ?? "current")|\(ids)"
     }
 
     private var readiness: AudiobookExportReadiness {
@@ -650,7 +666,7 @@ struct AudiobookExportSheet: View {
         let ready = Set(audit.readyChapterIDs)
         return AudiobookExportReadiness(
             readyChapterIDs: audit.readyChapterIDs,
-            blockingChapterIDs: workflow.chapters
+            blockingChapterIDs: workflow.exportChapters
                 .filter { !$0.isSkipped && !ready.contains($0.id) }
                 .map(\.id)
         )
@@ -718,12 +734,12 @@ struct AudiobookExportSheet: View {
 
                         Spacer(minLength: 0)
 
-                        if selectedProfile == .m4b, let first = blockers.first {
+                        if !workflow.isListeningToHistoricalAudio, selectedProfile == .m4b, let first = blockers.first {
                             Button("去处理「\(first.chapterTitle)」…") {
                                 workflow.focusFirstExportBlockingChapter()
                             }
                             .speechRailButton(.secondary)
-                        } else if selectedProfile == .chapterMP3,
+                        } else if !workflow.isListeningToHistoricalAudio, selectedProfile == .chapterMP3,
                                   let audit,
                                   audit.readyChapterCount == 0,
                                   !workflow.exportBlockingChapters.isEmpty
@@ -883,7 +899,7 @@ struct AudiobookTrashSheet: View {
                         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                             Text(entry.title)
                                 .font(SpeechRailDesignTokens.Typography.sectionTitle)
-                            Text("移入时间：\(entry.trashedAt.formatted(date: .abbreviated, time: .shortened))")
+                            Text("移入时间：\(entry.trashedAt.speechRailFormatted())")
                                 .font(SpeechRailDesignTokens.Typography.caption)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         }
@@ -1042,5 +1058,27 @@ struct AudiobookVoiceTag: View {
             SpeechRailDesignTokens.Color.recessedField,
             in: SpeechRailDesignTokens.Corner.compactShape
         )
+    }
+}
+
+/// One selection drives both listening and export, without changing editable text.
+struct AudiobookAudioVersionPicker: View {
+    @Bindable var workflow: AudiobookWorkflowModel
+
+    var body: some View {
+        if !workflow.audioRevisions.isEmpty {
+            Picker("音频版本", selection: Binding<UUID?>(
+                get: { workflow.selectedAudioRevisionID },
+                set: { id in Task { await workflow.selectAudioRevision(id) } }
+            )) {
+                Text("当前文本的音频").tag(Optional<UUID>.none)
+                ForEach(workflow.audioRevisions) { revision in
+                    Text("之前版本 · " + revision.createdAt.speechRailFormatted())
+                        .tag(Optional(revision.id))
+                }
+            }
+            .disabled(workflow.isPreparingExport || workflow.isPreparingWorkingText)
+            .help("之前版本使用它对应的正文和音频，可直接收听或导出。")
+        }
     }
 }

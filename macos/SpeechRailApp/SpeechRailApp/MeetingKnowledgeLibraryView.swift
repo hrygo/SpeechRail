@@ -404,7 +404,7 @@ struct MeetingKnowledgeLibraryView: View {
                 }
                 Spacer()
                 if let occurredAt = item.occurredAt {
-                    Text(occurredAt.formatted(date: .abbreviated, time: .omitted))
+                    Text(occurredAt.speechRailFormatted(.date))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -551,7 +551,7 @@ struct MeetingKnowledgeLibraryView: View {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 Text(event.status.title)
                     .font(.callout)
-                Text(event.validFrom.formatted(date: .abbreviated, time: .shortened))
+                Text(event.validFrom.speechRailFormatted())
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -633,7 +633,7 @@ struct MeetingKnowledgeLibraryView: View {
     }
 
     private static func dateText(_ date: Date) -> String {
-        date.formatted(date: .abbreviated, time: .omitted)
+        date.speechRailFormatted(.date)
     }
 
     /// 项目筛选（MA-13）。**筛选与列表、计数同源**（MC-51/MC-53），
@@ -827,7 +827,7 @@ struct MeetingKnowledgeLibraryView: View {
                     .font(.caption)
                     .foregroundStyle(item.isEstablishedFact ? Color.secondary : Color.orange)
                 if let occurredAt = item.occurredAt {
-                    Text("· \(occurredAt.formatted(date: .abbreviated, time: .omitted))")
+                    Text("· \(occurredAt.speechRailFormatted(.date))")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1096,7 +1096,7 @@ struct MeetingKnowledgeLibraryView: View {
                     .accessibilityAddTraits(.isHeader)
                 HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                     if let date = snapshot.occurredAt {
-                        Text(date.formatted(date: .abbreviated, time: .shortened))
+                        Text(date.speechRailFormatted())
                             .font(.callout)
                             .foregroundStyle(.secondary)
                     }
@@ -1196,7 +1196,7 @@ struct MeetingKnowledgeLibraryView: View {
                 .font(.callout)
             Text(
                 "第 \(manifest.selectedVersion) 版纪要 · \(manifest.scope.title) · "
-                    + "导出于 \(manifest.createdAt.formatted(date: .abbreviated, time: .shortened))"
+                    + "导出于 \(manifest.createdAt.speechRailFormatted())"
             )
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -1550,7 +1550,7 @@ struct MeetingLibraryRowView: View {
                 .lineLimit(1)
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 if let date = row.occurredAt {
-                    Text(date.formatted(date: .abbreviated, time: .omitted))
+                    Text(date.speechRailFormatted(.date))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1589,7 +1589,7 @@ struct MeetingLibraryRowView: View {
 
     private var accessibilityDescription: String {
         var parts = [row.title]
-        if let date = row.occurredAt { parts.append(date.formatted(date: .long, time: .omitted)) }
+        if let date = row.occurredAt { parts.append(date.speechRailFormatted(.date)) }
         if row.needsReviewCount > 0 { parts.append("\(row.needsReviewCount) 条待核对") }
         if !row.hasMinutes { parts.append("未整理") }
         if let excerpt = row.matchExcerpt { parts.append("命中内容：\(excerpt)") }

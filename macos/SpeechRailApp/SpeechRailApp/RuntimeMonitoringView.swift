@@ -231,7 +231,7 @@ public struct RuntimeMonitoringView: View {
             MetricValue(
                 id: "in-flight",
                 title: "正在处理",
-                value: latestSample.map { "\($0.activeRequests) 个" } ?? "—",
+                value: latestSample.map { "\($0.activeRequests) 个" } ?? SpeechRailDisplayFormat.MissingValue.compact.text,
                 detail: inFlightDetail
             ),
             MetricValue(
@@ -260,13 +260,13 @@ public struct RuntimeMonitoringView: View {
             MetricValue(
                 id: "tts-latency",
                 title: "合成耗时",
-                value: window.ttsLatencySeconds.map(formatLatency) ?? "—",
+                value: window.ttsLatencySeconds.map(formatLatency) ?? SpeechRailDisplayFormat.MissingValue.compact.text,
                 detail: latencyDetail(requestCount: usage.ttsRequests)
             ),
             MetricValue(
                 id: "asr-latency",
                 title: "识别耗时",
-                value: window.asrLatencySeconds.map(formatLatency) ?? "—",
+                value: window.asrLatencySeconds.map(formatLatency) ?? SpeechRailDisplayFormat.MissingValue.compact.text,
                 detail: latencyDetail(requestCount: usage.asrRequests)
             ),
             MetricValue(
@@ -301,8 +301,8 @@ public struct RuntimeMonitoringView: View {
 
     /// 保留 endpoint 维度；没有对应 label 时显示未提供，不从 TTS lane 合计拆算。
     private func requestPairCountText(speech: Double?, preview: Double?) -> String {
-        let speechCount = speech.map(formatCount) ?? "—"
-        let previewCount = preview.map(formatCount) ?? "—"
+        let speechCount = speech.map(formatCount) ?? SpeechRailDisplayFormat.MissingValue.compact.text
+        let previewCount = preview.map(formatCount) ?? SpeechRailDisplayFormat.MissingValue.compact.text
         return "\(speechCount) / \(previewCount) 次"
     }
 
@@ -331,7 +331,7 @@ public struct RuntimeMonitoringView: View {
     }
 
     private var failureCountText: String {
-        guard let errors = window.errorIncrease else { return "—" }
+        guard let errors = window.errorIncrease else { return SpeechRailDisplayFormat.MissingValue.compact.text }
         return "\(formatCount(errors)) 次"
     }
 
@@ -465,21 +465,21 @@ public struct RuntimeMonitoringView: View {
                     // 与首屏、运行组件表同一套词：服务状态页的能力矩阵也叫「语音识别」。
                     // 同一页里一半叫「语音转文字」、一半叫「语音识别」，就是这一轮在修的那种不一致。
                     title: "语音识别",
-                    detail: displayedHealth?.asrState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
+                    detail: displayedHealth?.asrState.map(SpeechRailRuntimeStatePresentation.text) ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text,
                     ready: displayedHealth?.asrReady
                 )
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                 Divider()
                 MonitoringCapabilityRow(
                     title: "语音合成",
-                    detail: displayedHealth?.ttsState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
+                    detail: displayedHealth?.ttsState.map(SpeechRailRuntimeStatePresentation.text) ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text,
                     ready: displayedHealth?.ttsReady
                 )
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                 Divider()
                 MonitoringCapabilityRow(
                     title: "实时语音",
-                    detail: displayedHealth?.streamingState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
+                    detail: displayedHealth?.streamingState.map(SpeechRailRuntimeStatePresentation.text) ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text,
                     ready: displayedHealth?.realtimeVAD?.ready
                 )
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
@@ -811,10 +811,10 @@ public struct RuntimeMonitoringView: View {
                     count: summary?.count ?? 0,
                     average: summary.map {
                         RuntimeHistogramPresentation.formattedAverage($0.average, unit: unit)
-                    } ?? "—",
+                    } ?? SpeechRailDisplayFormat.MissingValue.compact.text,
                     spokenAverage: summary.map {
                         RuntimeHistogramPresentation.spokenAverage($0.average, unit: unit)
-                    } ?? "—"
+                    } ?? SpeechRailDisplayFormat.MissingValue.compact.text
                 )
             }
         }
@@ -933,13 +933,13 @@ public struct RuntimeMonitoringView: View {
 
     private var resourceSection: some View {
         let resources = latestResources
-        let budget = resources?.memoryBudgetBytes.map(formatBytes) ?? "未提供"
-        let physicalMemory = resources?.physicalMemoryBytes.map(formatBytes) ?? "未提供"
+        let budget = resources?.memoryBudgetBytes.map(formatBytes) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text
+        let physicalMemory = resources?.physicalMemoryBytes.map(formatBytes) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text
         let declaredFootprint = resources?.declarationComplete == true
-            ? resources?.declaredFootprintBytes.map(formatBytes) ?? "未提供"
+            ? resources?.declaredFootprintBytes.map(formatBytes) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text
             : "未提供"
         let physicalFootprint = resources?.physicalFootprintComplete == true
-            ? resources?.physicalFootprintBytes.map(formatBytes) ?? "未提供"
+            ? resources?.physicalFootprintBytes.map(formatBytes) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text
             : "未提供"
         let overlapAllowed = resources?.heavyOverlapAllowed
         let overlapValue = switch overlapAllowed {
@@ -1416,7 +1416,7 @@ public struct RuntimeMonitoringView: View {
             MetricValue(
                 id: "tts-latency",
                 title: "合成耗时",
-                value: totals?.ttsSeconds.map(formatLatency) ?? "—",
+                value: totals?.ttsSeconds.map(formatLatency) ?? SpeechRailDisplayFormat.MissingValue.compact.text,
                 detail: historyLatencyDetail(
                     seconds: totals?.ttsSeconds,
                     p95Seconds: totals?.ttsP95Seconds,
@@ -1427,7 +1427,7 @@ public struct RuntimeMonitoringView: View {
             MetricValue(
                 id: "asr-latency",
                 title: "识别耗时",
-                value: totals?.asrSeconds.map(formatLatency) ?? "—",
+                value: totals?.asrSeconds.map(formatLatency) ?? SpeechRailDisplayFormat.MissingValue.compact.text,
                 detail: historyLatencyDetail(
                     seconds: totals?.asrSeconds,
                     p95Seconds: totals?.asrP95Seconds,
@@ -1450,8 +1450,8 @@ public struct RuntimeMonitoringView: View {
     }
 
     private func historyRequestPairCountText(speech: Double?, preview: Double?) -> String {
-        let speechCount = speech.map(formatCount) ?? "—"
-        let previewCount = preview.map(formatCount) ?? "—"
+        let speechCount = speech.map(formatCount) ?? SpeechRailDisplayFormat.MissingValue.compact.text
+        let previewCount = preview.map(formatCount) ?? SpeechRailDisplayFormat.MissingValue.compact.text
         return "\(speechCount) / \(previewCount) 次"
     }
 
@@ -1486,7 +1486,7 @@ public struct RuntimeMonitoringView: View {
     }
 
     private var historyFailureText: String {
-        guard let history else { return "—" }
+        guard let history else { return SpeechRailDisplayFormat.MissingValue.compact.text }
         return "\(formatCount(history.totals.failedRequests)) 次"
     }
 
@@ -1687,9 +1687,9 @@ public struct RuntimeMonitoringView: View {
     private func historyAxisLabel(_ date: Date, coveredSeconds: Double) -> String {
         let seconds = coveredSeconds > 0 ? coveredSeconds : (timeWindow.historySeconds ?? 3_600)
         if seconds <= 86_400 {
-            return date.formatted(.dateTime.hour().minute())
+            return date.speechRailFormatted(.time)
         }
-        return date.formatted(.dateTime.month(.defaultDigits).day())
+        return date.speechRailFormatted(.monthDay)
     }
 
     /// 卡页脚：这份历史到底覆盖了多久、有没有洞，以及这段跨度的资源事实。
@@ -1743,10 +1743,7 @@ public struct RuntimeMonitoringView: View {
 
     /// 时长说法：秒 / 分钟 / 小时 / 天。只在页脚出现，保持一位小数。
     private func formatSpan(_ seconds: Double) -> String {
-        if seconds < 90 { return "\(Int(seconds.rounded())) 秒" }
-        if seconds < 5_400 { return "\(Int((seconds / 60).rounded())) 分钟" }
-        if seconds < 172_800 { return String(format: "%.1f 小时", seconds / 3_600) }
-        return String(format: "%.1f 天", seconds / 86_400)
+        SpeechRailDisplayFormat.duration(seconds, style: .span)
     }
 
     private var visibleChartPoints: [RuntimeMonitoringChartPoint] {
@@ -1766,8 +1763,7 @@ public struct RuntimeMonitoringView: View {
     /// （2026-09-28 用户复核）。
     private var sampleWindowNote: String {
         guard let latestSample else { return "还没有数据点" }
-        let age = max(0, Int(Date().timeIntervalSince(latestSample.capturedAt).rounded()))
-        let ageText = age < 60 ? "\(age) 秒前" : "\(age / 60) 分钟前"
+        let ageText = SpeechRailDisplayFormat.relativeAge(since: latestSample.capturedAt)
         return "已记录 \(windowedSamples.count) 个数据点 · 上次读取 \(ageText)"
     }
 
@@ -1824,9 +1820,9 @@ public struct RuntimeMonitoringView: View {
                 detail: "这些字段面向排障和容量判断，不代表服务质量或模型质量结论。"
             )
             LabeledContent("服务状态", value: model.service.serviceState)
-            LabeledContent("最近成功读取 health", value: model.lastHealthRefresh.map(relativeTime) ?? "未读取")
-            LabeledContent("最近成功读取 metrics", value: model.lastMetricsRefresh.map(relativeTime) ?? "未读取")
-            LabeledContent("最近采样", value: latestSample.map { relativeTime($0.capturedAt) } ?? "未读取")
+            LabeledContent("最近成功读取 health", value: model.lastHealthRefresh.map(relativeTime) ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text)
+            LabeledContent("最近成功读取 metrics", value: model.lastMetricsRefresh.map(relativeTime) ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text)
+            LabeledContent("最近采样", value: latestSample.map { relativeTime($0.capturedAt) } ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text)
             LabeledContent("数据新鲜度", value: freshnessTitle)
             LabeledContent("样本数量", value: "\(model.monitoringSamples.count)/60")
             LabeledContent("时间窗", value: timeWindow.title)
@@ -1851,35 +1847,35 @@ public struct RuntimeMonitoringView: View {
             }
             if let sample = latestSample {
                 Divider()
-                detailRow("ASR 延迟", sample.asrLatencySeconds.map(formatLatency) ?? "样本不足")
-                detailRow("TTS 延迟", sample.ttsLatencySeconds.map(formatLatency) ?? "样本不足")
-                detailRow("ASR RTF", sample.asrRTF.map(formatRTF) ?? "未提供")
-                detailRow("TTS RTF", sample.ttsRTF.map(formatRTF) ?? "未提供")
-                detailRow("TTS 首帧", sample.ttsTTFASeconds.map(formatLatency) ?? "样本不足")
-                detailRow("实时会话", sample.activeRealtimeSessions.map(String.init) ?? "样本不足")
+                detailRow("ASR 延迟", sample.asrLatencySeconds.map(formatLatency) ?? SpeechRailDisplayFormat.MissingValue.noSamples.text)
+                detailRow("TTS 延迟", sample.ttsLatencySeconds.map(formatLatency) ?? SpeechRailDisplayFormat.MissingValue.noSamples.text)
+                detailRow("ASR RTF", sample.asrRTF.map(formatRTF) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
+                detailRow("TTS RTF", sample.ttsRTF.map(formatRTF) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
+                detailRow("TTS 首帧", sample.ttsTTFASeconds.map(formatLatency) ?? SpeechRailDisplayFormat.MissingValue.noSamples.text)
+                detailRow("实时会话", sample.activeRealtimeSessions.map(String.init) ?? SpeechRailDisplayFormat.MissingValue.noSamples.text)
                 detailRow("活跃请求", String(sample.activeRequests))
                 detailRow("排队请求", String(sample.pendingRequests))
-                detailRow("请求窗口速率", sample.requestRatePerSecond.map(formatRate) ?? "样本不足")
-                detailRow("拒绝窗口速率", sample.queueRejectionRatePerSecond.map(formatRate) ?? "样本不足")
+                detailRow("请求窗口速率", sample.requestRatePerSecond.map(formatRate) ?? SpeechRailDisplayFormat.MissingValue.noSamples.text)
+                detailRow("拒绝窗口速率", sample.queueRejectionRatePerSecond.map(formatRate) ?? SpeechRailDisplayFormat.MissingValue.noSamples.text)
             }
             if let resources = latestResources {
                 Divider()
                 SectionHeading(title: "资源与准入")
-                detailRow("主机物理内存", resources.physicalMemoryBytes.map(formatBytes) ?? "未提供")
-                detailRow("服务内存预算", resources.memoryBudgetBytes.map(formatBytes) ?? "未提供")
+                detailRow("主机物理内存", resources.physicalMemoryBytes.map(formatBytes) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
+                detailRow("服务内存预算", resources.memoryBudgetBytes.map(formatBytes) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
                 detailRow(
                     "声明常驻占用",
-                    resources.declaredFootprintBytes.map(formatBytes) ?? "未提供"
+                    resources.declaredFootprintBytes.map(formatBytes) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text
                 )
                 detailRow(
                     "Physical footprint",
                     resources.physicalFootprintComplete == true
-                        ? resources.physicalFootprintBytes.map(formatBytes) ?? "未提供"
+                        ? resources.physicalFootprintBytes.map(formatBytes) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text
                         : "未提供（采样不完整）"
                 )
                 detailRow(
                     "重计算重叠",
-                    resources.heavyOverlapAllowed.map { $0 ? "允许" : "串行" } ?? "未提供"
+                    resources.heavyOverlapAllowed.map { $0 ? "允许" : "串行" } ?? SpeechRailDisplayFormat.MissingValue.notProvided.text
                 )
                 if let reason = resources.heavyOverlapReason, !reason.isEmpty {
                     detailRow("策略原因", reason)
@@ -1887,7 +1883,7 @@ public struct RuntimeMonitoringView: View {
                 ForEach(resources.declaredComponentBytes.keys.sorted(), id: \.self) { key in
                     detailRow(
                         "声明 · \(key)",
-                        resources.declaredComponentBytes[key].flatMap { $0 }.map(formatBytes) ?? "未知"
+                        resources.declaredComponentBytes[key].flatMap { $0 }.map(formatBytes) ?? SpeechRailDisplayFormat.MissingValue.unknown.text
                     )
                 }
             }
@@ -1895,7 +1891,7 @@ public struct RuntimeMonitoringView: View {
                 Divider()
                 SectionHeading(title: "Worker")
                 ForEach(model.metrics?.workers.keys.sorted() ?? [], id: \.self) { key in
-                    detailRow(key, model.metrics?.workers[key] ?? "未知")
+                    detailRow(key, model.metrics?.workers[key] ?? SpeechRailDisplayFormat.MissingValue.unknown.text)
                 }
             }
             if let health = displayedHealth {
@@ -1945,13 +1941,7 @@ public struct RuntimeMonitoringView: View {
 
     /// 音频时长：不足一分钟按秒，超过按「x 分 y 秒」。
     private func formatAudioDuration(_ value: Double) -> String {
-        guard value >= 60 else {
-            // 十秒以内保留两位，否则短音频会被四舍五入成「0.0 秒音频」，
-            // 读起来像什么都没合成。
-            let pattern = value < 10 ? "%.2f 秒音频" : "%.1f 秒音频"
-            return String(format: pattern, value)
-        }
-        return "\(Int(value) / 60) 分 \(Int(value) % 60) 秒音频"
+        SpeechRailDisplayFormat.duration(value) + "音频"
     }
 
     private func formatRTF(_ value: Double) -> String {
@@ -1959,10 +1949,7 @@ public struct RuntimeMonitoringView: View {
     }
 
     private func formatBytes(_ value: Int64) -> String {
-        let formatter = ByteCountFormatter()
-        formatter.countStyle = .memory
-        formatter.allowsNonnumericFormatting = false
-        return formatter.string(fromByteCount: value)
+        SpeechRailDisplayFormat.bytes(value, context: .memory)
     }
 
     private func formatRate(_ value: Double) -> String {
@@ -1970,7 +1957,7 @@ public struct RuntimeMonitoringView: View {
     }
 
     private func relativeTime(_ date: Date) -> String {
-        date.formatted(date: .omitted, time: .standard)
+        date.speechRailFormatted(.timeWithSeconds)
     }
 
     private var serviceIdentity: String {
@@ -2028,8 +2015,8 @@ public struct RuntimeMonitoringView: View {
             "- directory: \(history.directoryPath)",
             "- service_versions: \(history.serviceVersions.isEmpty ? "未记录" : history.serviceVersions.joined(separator: "→"))",
             "- tts_lane_requests: \(formatCount(history.totals.ttsRequests))",
-            "- tts_speech_requests: \(history.totals.ttsSpeechRequests.map(formatCount) ?? "未提供")",
-            "- voice_preview_requests: \(history.totals.voicePreviewRequests.map(formatCount) ?? "未提供")",
+            "- tts_speech_requests: \(history.totals.ttsSpeechRequests.map(formatCount) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)",
+            "- voice_preview_requests: \(history.totals.voicePreviewRequests.map(formatCount) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)",
             "- asr_requests: \(formatCount(history.totals.asrRequests))",
             "- failed_requests: \(formatCount(history.totals.failedRequests))",
             "- tts_audio_seconds: \(String(format: "%.1f", history.totals.ttsAudioSeconds))",
@@ -2057,46 +2044,46 @@ public struct RuntimeMonitoringView: View {
         SpeechRail 脱敏监控摘要
         generated_at: \(formatter.string(from: Date()))
         service_state: \(model.service.serviceState)
-        profile: \(displayedHealth?.profile ?? "未读取")
-        version: \(displayedHealth?.version ?? "未读取")
-        health_ready: \(displayedHealth?.ready.map { $0 ? "true" : "false" } ?? "未读取")
-        metrics_updated_at: \(model.lastMetricsRefresh.map { formatter.string(from: $0) } ?? "未读取")
+        profile: \(displayedHealth?.profile ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text)
+        version: \(displayedHealth?.version ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text)
+        health_ready: \(displayedHealth?.ready.map { $0 ? "true" : "false" } ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text)
+        metrics_updated_at: \(model.lastMetricsRefresh.map { formatter.string(from: $0) } ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text)
         sample_count: \(model.monitoringSamples.count)/60
         freshness: \(freshnessTitle)
         window: \(timeWindow.title)
         summary: \(activitySummary)
 
         usage（用户口径：只含语音接口，不含本 App 的轮询）:
-        - tts_lane_requests: \(window.usageIncrease.ttsRequests.map(formatCount) ?? "未提供")
-        - tts_speech_requests: \(window.usageIncrease.ttsSpeechRequests.map(formatCount) ?? "未提供")
-        - voice_preview_requests: \(window.usageIncrease.voicePreviewRequests.map(formatCount) ?? "未提供")
-        - asr_requests: \(window.usageIncrease.asrRequests.map(formatCount) ?? "未提供")
-        - tts_audio_seconds: \(window.usageIncrease.ttsAudioSeconds.map { String(format: "%.1f", $0) } ?? "未提供")
-        - asr_audio_seconds: \(window.usageIncrease.asrAudioSeconds.map { String(format: "%.1f", $0) } ?? "未提供")
-        - realtime_sessions: \(window.usageIncrease.realtimeSessions.map(formatCount) ?? "未提供")
+        - tts_lane_requests: \(window.usageIncrease.ttsRequests.map(formatCount) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
+        - tts_speech_requests: \(window.usageIncrease.ttsSpeechRequests.map(formatCount) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
+        - voice_preview_requests: \(window.usageIncrease.voicePreviewRequests.map(formatCount) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
+        - asr_requests: \(window.usageIncrease.asrRequests.map(formatCount) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
+        - tts_audio_seconds: \(window.usageIncrease.ttsAudioSeconds.map { String(format: "%.1f", $0) } ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
+        - asr_audio_seconds: \(window.usageIncrease.asrAudioSeconds.map { String(format: "%.1f", $0) } ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
+        - realtime_sessions: \(window.usageIncrease.realtimeSessions.map(formatCount) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
 
         metrics:
-        - active_requests: \(latestSample.map { String($0.activeRequests) } ?? "未提供")
-        - pending_requests: \(latestSample.map { String($0.pendingRequests) } ?? "未提供")
-        - request_rate: \(latestSample?.requestRatePerSecond.map(formatRate) ?? "未提供")
-        - queue_rejections: \(latestSample?.queueRejections.map(formatCount) ?? "未提供")
-        - asr_latency: \(latestSample?.asrLatencySeconds.map(formatLatency) ?? "未提供")
-        - tts_latency: \(latestSample?.ttsLatencySeconds.map(formatLatency) ?? "未提供")
-        - asr_rtf: \(latestSample?.asrRTF.map(formatRTF) ?? "未提供")
-        - tts_rtf: \(latestSample?.ttsRTF.map(formatRTF) ?? "未提供")
-        - tts_ttfa: \(latestSample?.ttsTTFASeconds.map(formatLatency) ?? "未提供")
-        - active_realtime_sessions: \(latestSample?.activeRealtimeSessions.map(String.init) ?? "未提供")
+        - active_requests: \(latestSample.map { String($0.activeRequests) } ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
+        - pending_requests: \(latestSample.map { String($0.pendingRequests) } ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
+        - request_rate: \(latestSample?.requestRatePerSecond.map(formatRate) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
+        - queue_rejections: \(latestSample?.queueRejections.map(formatCount) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
+        - asr_latency: \(latestSample?.asrLatencySeconds.map(formatLatency) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
+        - tts_latency: \(latestSample?.ttsLatencySeconds.map(formatLatency) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
+        - asr_rtf: \(latestSample?.asrRTF.map(formatRTF) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
+        - tts_rtf: \(latestSample?.ttsRTF.map(formatRTF) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
+        - tts_ttfa: \(latestSample?.ttsTTFASeconds.map(formatLatency) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
+        - active_realtime_sessions: \(latestSample?.activeRealtimeSessions.map(String.init) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
 
         workers:
         \(workerLines.isEmpty ? "- 未提供" : workerLines)
 
         resources:
-        - physical_memory: \(resource?.physicalMemoryBytes.map(formatBytes) ?? "未提供")
-        - memory_budget: \(resource?.memoryBudgetBytes.map(formatBytes) ?? "未提供")
-        - declared_footprint: \(resource?.declaredFootprintBytes.map(formatBytes) ?? "未提供")
-        - physical_footprint: \(resource?.physicalFootprintComplete == true ? resource?.physicalFootprintBytes.map(formatBytes) ?? "未提供" : "未提供（采样不完整）")
-        - heavy_overlap: \(resource?.heavyOverlapAllowed.map { $0 ? "allowed" : "serialized" } ?? "未提供")
-        - heavy_overlap_reason: \(resource?.heavyOverlapReason ?? "未提供")
+        - physical_memory: \(resource?.physicalMemoryBytes.map(formatBytes) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
+        - memory_budget: \(resource?.memoryBudgetBytes.map(formatBytes) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
+        - declared_footprint: \(resource?.declaredFootprintBytes.map(formatBytes) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
+        - physical_footprint: \(resource?.physicalFootprintComplete == true ? resource?.physicalFootprintBytes.map(formatBytes) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text : "未提供（采样不完整）")
+        - heavy_overlap: \(resource?.heavyOverlapAllowed.map { $0 ? "allowed" : "serialized" } ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
+        - heavy_overlap_reason: \(resource?.heavyOverlapReason ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
 
         history（服务落盘的历史指标；只在这一档有值）:
         \(historyReportLines)

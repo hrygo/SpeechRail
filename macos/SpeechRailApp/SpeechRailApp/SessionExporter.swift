@@ -73,7 +73,7 @@ public struct SessionExportPayload: Sendable {
 
     var title: String {
         if let title = record.title, !title.isEmpty { return title }
-        return record.startedAt.formatted(date: .numeric, time: .shortened)
+        return record.startedAt.speechRailFormatted()
     }
 
     /// 匿名标签 → 用户手写的名字。**正文一个字不动**，只换显示（§15.3 第 2 条）。
@@ -136,7 +136,7 @@ public enum SessionExporter {
         } else if let firstLine = payload.lines.first(where: { !$0.text.isEmpty }) {
             candidate = String(firstLine.text.prefix(24))
         } else {
-            candidate = payload.record.startedAt.formatted(date: .numeric, time: .shortened)
+            candidate = payload.record.startedAt.speechRailFormatted()
         }
         // 换行与路径分隔符在文件名里没有意义；空名会让文件名退化成 `meeting--20260918-1645.md`，
         // 所以兜一个固定词。
@@ -172,9 +172,9 @@ public enum SessionExporter {
         rows.append("| 项 | 值 |")
         rows.append("|---|---|")
         rows.append("| 类型 | \(payload.record.kind.title) |")
-        rows.append("| 开始 | \(payload.record.startedAt.formatted(date: .abbreviated, time: .standard)) |")
+        rows.append("| 开始 | \(payload.record.startedAt.speechRailFormatted(.dateTimeWithSeconds)) |")
         if let endedAt = payload.record.endedAt {
-            rows.append("| 结束 | \(endedAt.formatted(date: .abbreviated, time: .standard)) |")
+            rows.append("| 结束 | \(endedAt.speechRailFormatted(.dateTimeWithSeconds)) |")
             rows.append("| 时长 | \(SessionCoordinator.formatted(endedAt.timeIntervalSince(payload.record.startedAt))) |")
         } else {
             // 未封存的记录导出来是「还没结束」，不是「00:00」——后者会让人以为这场会议没录上。
@@ -266,7 +266,7 @@ public enum SessionExporter {
     // MARK: - 纯文本 / JSON
 
     private static func plainText(_ payload: SessionExportPayload) -> String {
-        let header = "\(payload.title)\n\(payload.record.kind.title) · \(payload.record.startedAt.formatted(date: .abbreviated, time: .shortened))\n"
+        let header = "\(payload.title)\n\(payload.record.kind.title) · \(payload.record.startedAt.speechRailFormatted())\n"
         let body = payload.lines.map { line in
             let timecode = line.tStart.map { "[\(Self.clock($0))] " } ?? ""
             return "\(timecode)\(payload.transcriptText(for: line))"
@@ -360,8 +360,7 @@ public enum SessionExporter {
 
     /// 转录列表里的 `[mm:ss]`（与页面上显示的一致）。
     static func clock(_ seconds: TimeInterval) -> String {
-        let total = max(0, Int(seconds.rounded()))
-        return String(format: "%02d:%02d", total / 60, total % 60)
+        return SpeechRailDisplayFormat.timecode(seconds, rounding: .toNearestOrAwayFromZero)
     }
 
     private static func lineFlags(_ line: TranscriptLine) -> String {
@@ -900,6 +899,6 @@ public enum KnowledgeArchiveMarkdown {
     }
 
     private static func stamp(_ interval: TimeInterval) -> String {
-        Date(timeIntervalSince1970: interval).formatted(date: .abbreviated, time: .shortened)
+        Date(timeIntervalSince1970: interval).speechRailFormatted()
     }
 }

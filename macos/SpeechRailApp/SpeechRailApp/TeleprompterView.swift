@@ -815,7 +815,7 @@ public struct TeleprompterView: View {
                                         Text("·")
                                             .font(SpeechRailDesignTokens.Typography.caption)
                                             .foregroundStyle(.secondary)
-                                        Text(document.updatedAt.formatted(date: .abbreviated, time: .shortened))
+                                        Text(document.updatedAt.speechRailFormatted())
                                             .font(SpeechRailDesignTokens.Typography.caption)
                                             .foregroundStyle(.secondary)
                                     }
@@ -1277,7 +1277,7 @@ public struct TeleprompterView: View {
                     tone: session.calibrationSource == .uncalibrated ? .neutral : .healthy,
                     label: session.calibrationSource == .uncalibrated
                         ? "未试读校准"
-                        : String(format: "%.2fx", session.calibrationFactor)
+                        : SpeechRailDisplayFormat.playbackRate(session.calibrationFactor)
                 )
                 SpeechRailButtonIcon(.expandDown, size: SpeechRailDesignTokens.Spacing.xs, weight: .semibold)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
@@ -2480,9 +2480,7 @@ public struct TeleprompterView: View {
     }
 
     private func formatClock(_ seconds: TimeInterval) -> String {
-        let mins = Int(seconds) / 60
-        let secs = Int(seconds) % 60
-        return String(format: "%02d:%02d", mins, secs)
+        SpeechRailDisplayFormat.timecode(seconds)
     }
 
     // MARK: - 识别语言（进阶设置）

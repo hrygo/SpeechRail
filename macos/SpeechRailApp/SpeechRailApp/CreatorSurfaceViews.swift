@@ -465,7 +465,7 @@ private struct DubbingDeskComposerView: View {
                     .disabled(isSpeedLocked)
                     .accessibilityLabel("语速")
 
-                Text(String(format: "%.1fx", speechSpeed))
+                Text(SpeechRailDisplayFormat.playbackRate(speechSpeed))
                     // 稿的 `speedRow/value` 是 `Body / Medium`(13)：帧实测这一串 ink 9.5pt
                     // ≈ 13pt 数字。保留等宽数字（§7.1 要求显示当前值），并给一个定宽槽
                     // 免得数字位数变化时整行控件左右跳。
@@ -491,7 +491,7 @@ private struct DubbingDeskComposerView: View {
 
                 Picker("快捷语速", selection: quickSpeedBinding) {
                     ForEach([0.8, 1.0, 1.2, 1.5], id: \.self) { speed in
-                        Text(String(format: "%.1f", speed)).tag(speed)
+                        Text(SpeechRailDisplayFormat.playbackRate(speed)).tag(speed)
                     }
                 }
                 .pickerStyle(.segmented)
@@ -901,8 +901,8 @@ private struct DubbingDeskComposerView: View {
             )
             LabeledContent("文稿长度", value: "\(dubbingText.count) 字")
             LabeledContent("音色", value: selectedVoice?.name ?? "未选择")
-            LabeledContent("音色状态", value: selectedVoice.map { $0.available ? "当前可用" : "当前不可用" } ?? "未读取")
-            LabeledContent("语速", value: String(format: "%.1fx", speechSpeed))
+            LabeledContent("音色状态", value: selectedVoice.map { $0.available ? "当前可用" : "当前不可用" } ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text)
+            LabeledContent("语速", value: SpeechRailDisplayFormat.playbackRate(speechSpeed))
             LabeledContent("输出格式", value: "WAV")
             LabeledContent("采样率", value: "服务配置未提供")
             LabeledContent("生成状态", value: model.isCreatingSpeech ? "生成中" : "空闲")
@@ -2044,8 +2044,8 @@ private struct VoiceCandidateCard: View {
     }
 
     private var durationText: String {
-        guard let seconds = candidate.durationSeconds else { return "—" }
-        return String(format: "%.1fs", seconds)
+        guard let seconds = candidate.durationSeconds else { return SpeechRailDisplayFormat.MissingValue.compact.text }
+        return SpeechRailDisplayFormat.duration(seconds)
     }
 }
 
@@ -2353,8 +2353,8 @@ private struct VoiceCandidateSaveSheet: View {
     }
 
     private var durationText: String {
-        guard let seconds = candidate.durationSeconds else { return "—" }
-        return String(format: "%.1fs", seconds)
+        guard let seconds = candidate.durationSeconds else { return SpeechRailDisplayFormat.MissingValue.compact.text }
+        return SpeechRailDisplayFormat.duration(seconds)
     }
 
     private static let sheetWidth: CGFloat = 420
@@ -3106,17 +3106,20 @@ public struct VoiceLibraryView: View {
                     "可用性",
                     value: voice.available ? "可用" : "当前档位不可用"
                 )
-                LabeledContent("采样种子", value: voice.seed.map(String.init) ?? "未提供")
                 LabeledContent("创建时间", value: createdAtText(for: voice))
-                LabeledContent("变体", value: voice.variant ?? "未提供")
-                LabeledContent("模式", value: voice.mode ?? "未提供")
+                LabeledContent("音色类型", value: SpeechRailDisplayFormat.voiceMode(voice.mode))
                 LabeledContent(
                     "音频时长",
-                    value: voice.durationSeconds.map { String(format: "%.1f s", $0) }
-                        ?? "未提供"
+                    value: voice.durationSeconds.map { SpeechRailDisplayFormat.duration($0) }
+                        ?? SpeechRailDisplayFormat.MissingValue.notProvided.text
                 )
                 LabeledContent("使用次数", value: "\(worksUsing(voice).count) 个作品")
                 LabeledContent("关联作品", value: relatedWorksText(for: voice))
+                DisclosureGroup("技术详情") {
+                    LabeledContent("模式标识", value: SpeechRailDisplayFormat.value(voice.mode))
+                    LabeledContent("模型变体", value: SpeechRailDisplayFormat.value(voice.variant))
+                    LabeledContent("采样种子", value: SpeechRailDisplayFormat.value(voice.seed.map(String.init)))
+                }
             }
             .speechRailInspectorContent()
 
@@ -3312,7 +3315,7 @@ public struct VoiceLibraryView: View {
                         )
                         LabeledContent(
                             "参考文案",
-                            value: voice.refText.map { "\($0.count) 字（内容未展示）" } ?? "未提供"
+                            value: voice.refText.map { "\($0.count) 字（内容未展示）" } ?? SpeechRailDisplayFormat.MissingValue.notProvided.text
                         )
                     }
                     .speechRailInspectorContent()
@@ -3410,9 +3413,9 @@ public struct VoiceLibraryView: View {
     }
 
     private func createdAtText(for voice: CreatorVoice) -> String {
-        guard voice.createdAt > 0 else { return "未提供" }
+        guard voice.createdAt > 0 else { return SpeechRailDisplayFormat.MissingValue.notProvided.text }
         return Date(timeIntervalSince1970: voice.createdAt)
-            .formatted(date: .abbreviated, time: .shortened)
+            .speechRailFormatted()
     }
 }
 
@@ -3762,7 +3765,7 @@ public struct WorksView: View {
                 }
                 Menu("已删除作品") {
                     if let summary = model.deletedWorksSummary {
-                        Text("\(summary.count) 件，占用 \(ByteCountFormatter.string(fromByteCount: summary.byteCount, countStyle: .file))")
+                        Text("\(summary.count) 件，占用 \(SpeechRailDisplayFormat.bytes(summary.byteCount, context: .file))")
                         Button("移入系统废纸篓…", role: .destructive) {
                             isConfirmingRecoveryTrash = true
                         }
@@ -4035,7 +4038,7 @@ public struct WorksView: View {
                 LabeledContent("音色", value: work.voiceName)
                 LabeledContent(
                     "生成时间",
-                    value: work.createdAt.formatted(date: .abbreviated, time: .shortened)
+                    value: work.createdAt.speechRailFormatted()
                 )
                 LabeledContent("音频时长", value: durationText(for: work))
                 LabeledContent("格式", value: "WAV")
@@ -4315,7 +4318,7 @@ public struct WorksView: View {
     /// 但服务的公开 PCM profile 是 24 kHz / 16-bit / 单声道
     /// （`backends/qwen3_tts.py`、`domain/tts.py`），行内不写与实测不符的格式声明。
     private func workListSummary(_ work: CreativeWork) -> String {
-        "\(work.createdAt.formatted(date: .abbreviated, time: .shortened)) · \(work.voiceName)"
+        "\(work.createdAt.speechRailFormatted()) · \(work.voiceName)"
     }
 
     @ViewBuilder
@@ -4353,7 +4356,7 @@ public struct WorksView: View {
     }
 
     private func durationText(for work: CreativeWork) -> String {
-        work.durationText ?? "未读取"
+        work.durationText ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text
     }
 
     private func isPlaying(_ work: CreativeWork) -> Bool {
@@ -4384,10 +4387,10 @@ public struct WorksView: View {
         }
         let durations = filteredWorks.compactMap(\.durationSeconds)
         guard total > 0, durations.count == total else { return "\(total) 个作品" }
-        let seconds = Int(durations.reduce(0, +).rounded())
+        let seconds = durations.reduce(0, +)
         // 与作品行的时长同形（零填充 mm:ss），否则同一个工具栏里会出现
         // 「共 9:05」配「09:05」两种写法（REDESIGN-SPEC §11.6 第四十一轮）。
-        return "\(total) 个作品 · 共 \(String(format: "%02d:%02d", seconds / 60, seconds % 60))"
+        return "\(total) 个作品 · 共 \(SpeechRailDisplayFormat.timecode(seconds))"
     }
 
     private func revealInFinder(_ work: CreativeWork) {
@@ -4672,7 +4675,7 @@ private struct DubbingProjectSheet: View {
             .speechRailButton(.quiet)
             .accessibilityLabel(isPlaying ? "停止试听" : "试听这个候选")
 
-            Text(candidate.createdAt.formatted(date: .omitted, time: .shortened))
+            Text(candidate.createdAt.speechRailFormatted(.time))
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 .monospacedDigit()
