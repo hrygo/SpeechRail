@@ -27,7 +27,8 @@
 
 ## 归档报告模板
 
-正式归档时保存为 `docs/archive/performance/YYYY-MM-DD-v<version>-performance-benchmark.md`，并更新索引。
+新建正式归档时保存为 `docs/archive/performance/YYYY-MM-DD-speechrail-v<version>-performance-benchmark.md`，
+并更新该目录的 `README.md`；既有历史文件不因本规则改名。
 临时报告可复用下列相关字段，不因此写入仓库或补跑未请求的测量：
 
 ```markdown
@@ -132,7 +133,7 @@
 
 ## README 同步
 
-只有用户明确要求修改 README 时，才同步“真实性能基准实测”区；未请求同步时保留 README，
+只有用户明确要求修改根 README 时，才同步其中的实测数据；未请求同步时保留根 README，
 报告与索引是否更新由前述交付范围决定。
 
 同步规则：
@@ -144,7 +145,8 @@
 4. gate 为 `unset`/`fail` 或可比性不足时，不把指标提升为 README 承诺；缺失值不得写成 `0`。
 5. README 只保留用户需要的简表、测试机器、测量口径、报告链接和必要限制；完整分位数、fixture digest、
    进程采样和 gate 留在归档报告。
-6. 更新后核对 README 数值与报告一致、相对链接可解析，且顶部 Release badge 仍存在。
+6. 修改任一语言的根 README 时同步另一语言对应内容；核对数值与报告一致、相对链接可解析，
+   且既有 Release badge 保留。根 README 不展开实现细节、完整基准或运维步骤。
 
 获授权同步时至少包含：实测硬件、正式报告相对链接、PATCH 当前档或 MINOR/MAJOR 三档关键指标、N/cold/warm
 口径、不能直接比较的限制，以及每个保留值的来源版本。

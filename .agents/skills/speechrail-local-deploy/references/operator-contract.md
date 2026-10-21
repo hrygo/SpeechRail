@@ -7,6 +7,8 @@
 
 - 目标以仓库 `AGENTS.md` 为准，实况以交付物的 package/target、Python 约束和构建设置核对。
 - 旧安装器或 target 的低版本检查不是当前平台承诺；发现差异时报告，不静默扩大兼容范围。
+- 本机硬件、模型或环境任务先完整读取 `AGENTS.md` 指定的本机环境事实源；已读且未变时复用。
+  这是当前 Mac 的核对入口，不把其中路径和配置套用到新机器或 CI。
 
 ## 运行边界
 
@@ -24,6 +26,8 @@
 - `com.speechrail.desktop.control` 是 App 随包携带、由 `SMAppService` 管理的可选 control-agent。它只接收固定 XPC 命令并委托当前 managed runtime 的 Python CLI，不加载模型、不创建第二个 ASGI worker、不替换 `com.speechrail`。
 - App 退出、control-agent 注销或 App bundle 升级都不得停止、删除或覆盖服务的 `runtime/current`、selection、模型、私有配置和 `com.speechrail` plist。服务发布与 App 发布可以独立回滚；联合发布必须先验收服务，再验收 App 控制链路。
 - App 发布只保留一个实际安装 bundle（默认 `~/Applications/SpeechRail.app`）。测试/归档副本放在构建或临时目录，验收后注销并清理；不要把上一版本的 `.app` 作为可执行副本长期留在 Applications 或 DerivedData 中，以免 Finder/LaunchServices 显示重复项目。
+- 接管前台窗口、焦点、输入或屏幕的 UI 自动化须由当前用户消息逐次明确要求；安装、发布、完整验收
+  或本文步骤均不替代该授权。获授权前仅做源码、静态或不接管 UI 的检查，报告真实验证范围。
 
 ## 生命周期分支
 

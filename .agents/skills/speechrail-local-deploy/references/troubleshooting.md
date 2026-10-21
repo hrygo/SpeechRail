@@ -1,6 +1,8 @@
 # SpeechRail 本机部署故障排查
 
-先读取主 SOP 和 [生命周期 controller](lifecycle.md)。所有服务故障先确认“单实例、单 listener、lock 是否释放”，再判断模型或依赖；不要把旧 listener 的响应当成候选版本的结果。
+先读取 [运维入口](../SKILL.md) 和 [operator contract](operator-contract.md)；仅在已授权的停启或修复
+需要生命周期细节时读取 [生命周期 controller](lifecycle.md)。所有服务故障先确认“单实例、单 listener、
+lock 是否释放”，再判断模型或依赖；不要把旧 listener 的响应当成候选版本的结果。
 
 本指南先用于只读取证。以下 stop/start、安装、权限修复和重试步骤仅在用户已授权对应修复时执行；
 诊断请求交付原因与可评审处置，保留当前状态。端口与 app home 以已核对的目标为准，示例使用默认值。

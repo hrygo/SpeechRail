@@ -17,7 +17,7 @@ description: >-
   [speechrail-zero-setup](../speechrail-zero-setup/SKILL.md)。
 - wheel/App 版本发布、安装、签名、App bundle 整理或回滚：读
   [speechrail-release](../speechrail-release/SKILL.md)。
-- ASR/TTS/Realtime 性能、质量或内存基准：读
+- 用户明确要求 ASR/TTS/Realtime 性能、质量或内存基准：读
   [speechrail-perf-benchmark](../speechrail-perf-benchmark/SKILL.md)。
 - 已有服务的状态、启停、切档、回滚和运行故障：继续使用本 skill。
 
@@ -37,6 +37,9 @@ description: >-
   必须有当前用户明确授权。
 
 ## 操作前快照
+
+涉及本机硬件、模型或运行环境时，先按仓库 `AGENTS.md` 完整读取本机环境事实源；已读且未变时复用。
+操作前确认目标 app home、`com.speechrail` label、配置端口和 active runtime；示例默认值不是目标身份证据。
 
 状态读取默认只读。执行任何 stop/start、profile 或 rollback 前，先记录当前版本、active
 profile、generation、runtime target、PID/listener 和健康状态；不要输出私有配置内容。
@@ -83,7 +86,8 @@ CLI 从源码 checkout 执行带 `--app-home` 的 service/profile/setup 状态�
 ### profile apply / rollback
 
 `profile apply <preset> --yes` 与 `profile rollback --yes` 是一次事务，不是热重启。保留初始
-profile/generation；切换失败停止后续动作，只允许一次明确回滚。普通重启可用 controller-backed
+profile/generation；切换失败停止后续动作。先检查事务是否已自动回滚且恢复；仅在未恢复、回退目标明确且
+已有授权覆盖时执行一次 rollback，不在自动恢复后再次回滚。普通重启可用 controller-backed
 `service restart`，但不能代替 profile 事务。
 
 ### 故障排查
