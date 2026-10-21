@@ -131,7 +131,14 @@ public final class AudiobookWorkflowModel {
 
     // MARK: - Observable Projections
 
-    public var surfaceMode: SurfaceMode = .shelf
+    private var surfaceModeValue: SurfaceMode = .shelf
+    public var surfaceMode: SurfaceMode {
+        get { surfaceModeValue }
+        set {
+            guard !isChapterTextEditing || newValue == surfaceModeValue else { return }
+            surfaceModeValue = newValue
+        }
+    }
     public var workbenchTab: WorkbenchTab = .preparation
     public var shelfFilter: ShelfFilter = .all
     public var searchQuery: String = ""
@@ -145,13 +152,18 @@ public final class AudiobookWorkflowModel {
     @ObservationIgnored private var storeRecoveryTask: Task<Void, Error>?
     @ObservationIgnored private var storeRecoveryRequestID: UUID?
     public private(set) var isLoadingChapterDetails: Bool = false
+    private var selectedChapterValue: UUID?
     public var selectedChapterID: UUID? {
-        didSet {
-            if selectedChapterID != oldValue && !isSuppressingChapterAutoReload {
+        get { selectedChapterValue }
+        set {
+            guard !isChapterTextEditing || isSuppressingChapterAutoReload || newValue == selectedChapterValue else { return }
+            let oldValue = selectedChapterValue
+            selectedChapterValue = newValue
+            if newValue != oldValue && !isSuppressingChapterAutoReload {
                 chapterSelectionLoad.reset()
                 applyChapterDetails(.empty)
                 selectedAtomIDs.removeAll()
-                isLoadingChapterDetails = selectedBook != nil && selectedChapterID != nil
+                isLoadingChapterDetails = selectedBook != nil && newValue != nil
                 Task { await reloadSelectedChapterDetails() }
             }
         }
@@ -294,6 +306,14 @@ public final class AudiobookWorkflowModel {
     public private(set) var productionProgress: AudiobookProductionProgress?
     private var selectedProductionCheckpoint: AudiobookProductionCheckpoint?
     public private(set) var isEditingChapterLayout: Bool = false
+    public private(set) var chapterEditDraft: AudiobookChapterEditDraft?
+    public var chapterEditTitle = ""
+    public var chapterEditBody = ""
+    public private(set) var chapterEditError: String?
+    public private(set) var isLoadingChapterEdit = false
+    public private(set) var isSavingChapterEdit = false
+    private var chapterEditRequestID: UUID?
+    public var isChapterTextEditing: Bool { chapterEditDraft != nil || isLoadingChapterEdit || isSavingChapterEdit }
     public private(set) var resumePlan: AudiobookResumePlan?
     public private(set) var exportCapabilities: MediaCapabilitiesSnapshot = .init(
         available: false,
@@ -625,8 +645,15 @@ public final class AudiobookWorkflowModel {
             && !isLoadingChapterDetails
     }
 
+    public var canEditSelectedChapterText: Bool {
+        guard let book = selectedBook, book.analysisState == .notStarted, book.productionState == .idle,
+              selectedChapterID.map({ id in chapters.contains { $0.id == id } }) == true else { return false }
+        return !isAnalyzing && !isProductionBusy && !isEditingChapterLayout && !isLoadingChapterDetails && !isPreparingWorkingText
+    }
+
     public var chapterStructureEditingStatus: String {
         guard let book = selectedBook else { return "请先打开一本书。" }
+        if isChapterTextEditing { return "正在编辑章节，请保存或取消后继续。" }
         if isEditingChapterLayout { return "正在保存章节更改…" }
         if isAnalyzing || book.analysisState != .notStarted {
             return "全书分析开始后不能拆分或合并章节；请在分析前整理目录。"
@@ -901,6 +928,10 @@ public final class AudiobookWorkflowModel {
     }
 
     public func openBook(_ bookID: UUID) async {
+        guard !isChapterTextEditing || selectedBook?.id == bookID else {
+            errorMessage = "请先保存或取消章节编辑，再切换作品。"
+            return
+        }
         if selectedBook?.id != bookID {
             cancelVoiceDraftCreation()
             voiceDraftRequestID = nil
@@ -2938,7 +2969,72 @@ public final class AudiobookWorkflowModel {
 
     // MARK: - Production & Revision Actions
 
-    public func renameChapter(chapterID: UUID, title: String) async {
+    public func beginChapterEditing() async {
+        guard canEditSelectedChapterText, let bookID = selectedBook?.id, let chapterID = selectedChapterID, let store else { return }
+        let requestID = UUID()
+        chapterEditRequestID = requestID
+        isLoadingChapterEdit = true
+        isEditingChapterLayout = true
+        chapterEditError = nil
+        bookSelectionLoad.reset()
+        defer {
+            if chapterEditRequestID == requestID {
+                isLoadingChapterEdit = false
+                if chapterEditDraft == nil { isEditingChapterLayout = false }
+            }
+        }
+        do {
+            let draft = try await store.chapterEditDraft(bookID: bookID, chapterID: chapterID)
+            guard chapterEditRequestID == requestID, selectedBook?.id == bookID, selectedChapterID == chapterID else { return }
+            chapterEditTitle = draft.title
+            chapterEditBody = draft.body
+            chapterEditDraft = draft
+        } catch {
+            if chapterEditRequestID == requestID { errorMessage = error.localizedDescription }
+        }
+    }
+
+    @discardableResult
+    public func saveChapterEditing(title: String, body: String) async -> Bool {
+        guard let draft = chapterEditDraft, let store, !isSavingChapterEdit,
+              selectedBook?.id == draft.bookID else { return false }
+        isSavingChapterEdit = true
+        chapterEditError = nil
+        chapterEditTitle = title
+        chapterEditBody = body
+        defer { isSavingChapterEdit = false }
+        do {
+            let result = try await store.saveChapterEdit(draft, title: title, body: body)
+            chapterEditDraft = nil
+            chapterEditRequestID = nil
+            chapterEditTitle = ""
+            chapterEditBody = ""
+            isSuppressingChapterAutoReload = true
+            selectedChapterID = result.chapterID
+            isSuppressingChapterAutoReload = false
+            await openBook(draft.bookID)
+            await refreshShelf()
+            isEditingChapterLayout = false
+            bannerMessage = "章节已保存，后续分析与配音将使用更新后的内容。"
+            return true
+        } catch {
+            chapterEditError = error.localizedDescription
+            return false
+        }
+    }
+
+    public func cancelChapterEditing() {
+        guard !isSavingChapterEdit else { return }
+        chapterEditRequestID = nil
+        chapterEditDraft = nil
+        chapterEditTitle = ""
+        chapterEditBody = ""
+        chapterEditError = nil
+        isLoadingChapterEdit = false
+        isEditingChapterLayout = false
+    }
+
+    public func renameChapter(chapterID: UUID, title: String, expectedTitle: String? = nil) async {
         guard canRenameSelectedChapter,
               let bookID = selectedBook?.id,
               let store,
@@ -2954,7 +3050,7 @@ public final class AudiobookWorkflowModel {
         errorMessage = nil
         defer { isEditingChapterLayout = false }
         do {
-            try await store.renameChapter(bookID: bookID, chapterID: chapterID, title: normalizedTitle)
+            try await store.renameChapter(bookID: bookID, chapterID: chapterID, title: normalizedTitle, expectedTitle: expectedTitle)
             if selectedBook?.id == bookID {
                 await openBook(bookID)
             }

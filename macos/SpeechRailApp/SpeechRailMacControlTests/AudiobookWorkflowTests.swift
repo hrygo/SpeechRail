@@ -703,6 +703,52 @@ final class AudiobookWorkflowTests: XCTestCase {
         return (model, driver)
     }
 
+    func testChapterEditingLocksAnalysisAndSelectionThenRefreshesSavedText() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data("第一章\n原来的正文。\n\n第二章\n后文保留。".utf8))
+        let id = try await store.importBook(preview)
+        let (workflow, _) = makeWorkflow(store: store)
+        await workflow.openBook(id)
+        let originalChapterID = try XCTUnwrap(workflow.selectedChapterID)
+        await workflow.beginChapterEditing()
+        XCTAssertNotNil(workflow.chapterEditDraft)
+        XCTAssertTrue(workflow.isEditingChapterLayout)
+        workflow.beginAnalysis()
+        XCTAssertFalse(workflow.isAnalyzing)
+        workflow.selectedChapterID = workflow.chapters[1].id
+        XCTAssertEqual(workflow.selectedChapterID, originalChapterID)
+        let other = try await store.importBook(AudiobookTXTImporter.prepare(rawData: Data("另一部作品。".utf8)))
+        await workflow.openBook(other)
+        XCTAssertEqual(workflow.selectedBook?.id, id)
+        let saved = await workflow.saveChapterEditing(title: "用户标题", body: "保存后的正文👋。\n\n寒暄连贯。")
+        XCTAssertTrue(saved)
+        XCTAssertNil(workflow.chapterEditDraft)
+        XCTAssertFalse(workflow.isEditingChapterLayout)
+        XCTAssertEqual(workflow.chapters.first?.title, "用户标题")
+        let newID = try XCTUnwrap(workflow.selectedChapterID)
+        let draft = try await store.chapterEditDraft(bookID: id, chapterID: newID)
+        XCTAssertEqual(draft.body, "保存后的正文👋。\n\n寒暄连贯。")
+    }
+
+    func testChapterEditingFailureKeepsDraftAndCancelReleasesLock() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let id = try await store.importBook(AudiobookTXTImporter.prepare(rawData: Data("第一章\n原来的正文。".utf8)))
+        let (workflow, _) = makeWorkflow(store: store)
+        await workflow.openBook(id)
+        await workflow.beginChapterEditing()
+        let draft = workflow.chapterEditDraft
+        await store.setSimulateDiskFull(true)
+        let saved = await workflow.saveChapterEditing(title: "改名", body: "修改的正文。")
+        XCTAssertFalse(saved)
+        XCTAssertEqual(workflow.chapterEditDraft, draft)
+        XCTAssertNotNil(workflow.chapterEditError)
+        XCTAssertFalse(workflow.isSavingChapterEdit)
+        XCTAssertTrue(workflow.isEditingChapterLayout)
+        workflow.cancelChapterEditing()
+        XCTAssertNil(workflow.chapterEditDraft)
+        XCTAssertFalse(workflow.isEditingChapterLayout)
+    }
+
     func testProductionBlockerExplainsCastConfirmationBeforeChaptersAreReady() async throws {
         let (workflow, _) = makeWorkflow()
         _ = try await importBook(into: workflow, fileName: "blocked.txt", text: "第一章\n海风吹来。")

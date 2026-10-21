@@ -201,14 +201,19 @@ final class AudiobookProductionTests: XCTestCase {
     }
 
     @MainActor
-    private func makePreparedFixture(admission: SpeechCreationAdmission = SpeechCreationAdmission()) async throws -> (AudiobookProjectStore, AudiobookProductionController, ScriptedSpeechRenderer, UUID, AudiobookChapter) {
+    private func makePreparedFixture(admission: SpeechCreationAdmission = SpeechCreationAdmission(), editedText: String? = nil) async throws -> (AudiobookProjectStore, AudiobookProductionController, ScriptedSpeechRenderer, UUID, AudiobookChapter) {
         let store = try AudiobookProjectStore(root: tempRoot), catalog = VoiceCatalogStore()
         let capabilities = Self.makeDefaultCapabilities()
         let renderer = ScriptedSpeechRenderer(capabilities: capabilities)
         let cast = AudiobookCastController(store: store, capabilityProvider: { capabilities }, voiceCatalog: catalog)
         let raw = "第一章 渡口\r\n他走進大廳之後提到鄉間那位住了許多年又講理學的老監\r\n生，每次見到他時都是先說幾句客氣的話，互相寒\r\n暄，之後才坐下談話。"
         let preview = try AudiobookTXTImporter.prepare(rawData: Data(raw.utf8))
-        let bookID = try await store.importBook(preview), chapter = try await store.chapters(for: bookID)[0]
+        let bookID = try await store.importBook(preview)
+        if let editedText {
+            let draft = try await store.chapterEditDraft(bookID: bookID, chapterID: preview.chapters[0].id)
+            _ = try await store.saveChapterEdit(draft, title: "人工目录名", body: editedText)
+        }
+        let chapter = try await store.chapters(for: bookID)[0]
         let narrators = try await store.characters(for: bookID)
         let narrator = try XCTUnwrap(narrators.first)
         let atoms = try await store.atoms(for: bookID, chapterID: chapter.id).filter { $0.kind != .formatting }
@@ -226,6 +231,29 @@ final class AudiobookProductionTests: XCTestCase {
             revisionController: AudiobookRevisionController(store: store), renderer: renderer,
             admission: admission, clock: FakeAudiobookClock(), voiceCatalog: catalog)
         return (store, production, renderer, bookID, chapter)
+    }
+
+    @MainActor
+    func testProductionAndRerecordUseUserRevisionAndPronunciationMatches() async throws {
+        let body = "用户修改👋哨兵：老監生寒暄之后长胖了。"
+        let (store, production, renderer, bookID, chapter) = try await makePreparedFixture(editedText: body)
+        let source = try await store.workingSourceSnapshot(bookID: bookID)
+        let binding = AudiobookPronunciationBinding(setID: AudiobookPronunciationBinding.makeSetID(bookID: bookID), revision: "pr_user",
+            entries: [.init(id: "e1", surface: "用户修改👋哨兵", spoken: "用户修改哨兵的读法")])
+        let reference = try await store.referenceSourceIndex(for: bookID)
+        XCTAssertNil(binding.dependencyComponent(in: try reference.text(in: reference.wholeRange)))
+        XCTAssertNotNil(binding.dependencyComponent(in: try source.sourceIndex.text(in: source.sourceIndex.wholeRange)))
+        try await store.savePronunciationBinding(binding, bookID: bookID)
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+        XCTAssertEqual(renderer.requests.map(\.text).joined(), body)
+        XCTAssertTrue(renderer.requests.allSatisfy { $0.pronunciationSet == binding.headerValue })
+        let fragments = try await store.fragments(for: bookID, chapterID: chapter.id)
+        let fragment = try XCTUnwrap(fragments.first)
+        try await production.regenerateFragment(bookID: bookID, chapterID: chapter.id, fragmentID: fragment.id)
+        XCTAssertEqual(renderer.requests.last?.text, try source.sourceIndex.text(in: fragment.sourceRange))
+        let chapters = try await store.chapters(for: bookID)
+        XCTAssertEqual(chapters.first?.title, "人工目录名")
+        XCTAssertEqual(chapters.first?.sourceID, source.sourceID)
     }
 
     @MainActor

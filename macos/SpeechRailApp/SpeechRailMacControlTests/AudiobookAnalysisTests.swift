@@ -218,6 +218,31 @@ final class AudiobookAnalysisTests: XCTestCase {
         XCTAssertTrue(windows.isEmpty, "跳过的章节不应产生分析窗口")
     }
 
+    func testAnalysisReceivesManuallyEditedWorkingRevision() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data("第一章\n导入时的旧正文。".utf8))
+        let bookID = try await store.importBook(preview)
+        let draft = try await store.chapterEditDraft(bookID: bookID, chapterID: preview.chapters[0].id)
+        let userText = "用户唯一正文👋哨兵，老監生寒暄之后长胖了。"
+        let edited = try await store.saveChapterEdit(draft, title: "用户篇名哨兵", body: userText)
+        let config = AudiobookAnalysisConfigSnapshot(configuration: LLMConfiguration(baseURL: "http://127.0.0.1:8000/v1", model: "test-model"))
+        let client = ScriptedAnalysisClient(configurationDigest: config.configurationDigest)
+        let pipeline = AudiobookAnalysisPipeline(store: store) { _ in client }
+        _ = try await pipeline.run(bookID: bookID, config: config)
+        let inputs = client.prompts.map(\.input).joined()
+        let receivedText = try client.prompts.filter { $0.stage == .extraction }.flatMap { prompt -> [String] in
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(prompt.input.utf8)) as? [String: Any])
+            return ((object["primary_atoms"] as? [[String: Any]]) ?? []).compactMap { $0["text"] as? String }
+        }.joined()
+        XCTAssertEqual(receivedText, userText)
+        XCTAssertFalse(inputs.contains("导入时的旧正文"))
+        let source = try await store.workingSourceSnapshot(bookID: bookID)
+        XCTAssertEqual(source.sourceID, edited.sourceID)
+        XCTAssertEqual(try source.sourceIndex.text(in: source.sourceIndex.wholeRange), userText)
+        let reference = try await store.referenceSourceIndex(for: bookID)
+        XCTAssertEqual(reference.utf8Data, preview.referenceUTF8)
+    }
+
     func testAnalysisReceivesPreparedParagraphTextWithoutChangingSource() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
         let text = "第一章 夜行\r\n\r\n        他站在門邊，聽見了一陣腳步聲，便順著窗外的微弱燈光望\r\n向遠方。\r\n"
