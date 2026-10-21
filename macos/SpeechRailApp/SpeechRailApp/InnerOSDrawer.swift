@@ -763,7 +763,6 @@ public struct InnerOSDrawer: View {
     }
 
     private static func timecode(_ seconds: TimeInterval) -> String {
-        let total = max(0, Int(seconds.rounded()))
-        return String(format: "%02d:%02d", total / 60, total % 60)
+        return SpeechRailDisplayFormat.timecode(seconds, rounding: .toNearestOrAwayFromZero)
     }
 }

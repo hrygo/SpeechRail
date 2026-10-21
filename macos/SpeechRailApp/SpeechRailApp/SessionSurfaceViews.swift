@@ -763,13 +763,13 @@ public struct SessionLibraryView: View {
     }
 
     private var profileRowText: String {
-        guard let selection = model.health?.selection else { return "未读取" }
+        guard let selection = model.health?.selection else { return SpeechRailDisplayFormat.MissingValue.notLoaded.text }
         return SpeechRailProfilePresentation.shortTitle(selection.asrSpec)
     }
 
     private var lastRecordText: String {
         guard let latest = summaries.first else { return "还没有记录" }
-        let when = latest.record.startedAt.formatted(date: .abbreviated, time: .shortened)
+        let when = latest.record.startedAt.speechRailFormatted()
         return "\(when) · \(latest.lineCount) 行"
     }
 
@@ -1029,9 +1029,8 @@ public struct SessionLibraryView: View {
     }
 
     private static func timecode(_ seconds: TimeInterval?) -> String {
-        guard let seconds else { return "--:--" }
-        let total = max(0, Int(seconds.rounded()))
-        return String(format: "%02d:%02d", total / 60, total % 60)
+        guard let seconds else { return SpeechRailDisplayFormat.MissingValue.timecode.text }
+        return SpeechRailDisplayFormat.timecode(seconds)
     }
 
     // MARK: - 数据
@@ -1079,7 +1078,7 @@ public struct SessionLibraryView: View {
 
     private func displayTitle(for summary: SessionSummary) -> String {
         if let title = summary.record.title, !title.isEmpty { return title }
-        return summary.record.startedAt.formatted(date: .abbreviated, time: .shortened)
+        return summary.record.startedAt.speechRailFormatted()
     }
 
     private func recordSubtitle(_ summary: SessionSummary) -> String {

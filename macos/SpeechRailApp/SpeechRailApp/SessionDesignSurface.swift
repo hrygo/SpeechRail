@@ -1120,27 +1120,16 @@ public struct SessionLibraryColumn: View {
     private static func formatSessionDate(_ date: Date) -> String {
         let calendar = Calendar.current
         if calendar.isDateInToday(date) {
-            return "今天 \(date.formatted(date: .omitted, time: .shortened))"
+            return "今天 \(date.speechRailFormatted(.time))"
         } else if calendar.isDateInYesterday(date) {
-            return "昨天 \(date.formatted(date: .omitted, time: .shortened))"
+            return "昨天 \(date.speechRailFormatted(.time))"
         } else {
-            return date.formatted(date: .abbreviated, time: .shortened)
+            return date.speechRailFormatted()
         }
     }
 
     private static func formatDuration(_ duration: TimeInterval) -> String {
-        let seconds = Int(duration)
-        if seconds < 60 {
-            return "\(max(1, seconds))秒"
-        } else {
-            let mins = seconds / 60
-            let remSecs = seconds % 60
-            if remSecs == 0 {
-                return "\(mins)分"
-            } else {
-                return "\(mins)分\(remSecs)秒"
-            }
-        }
+        SpeechRailDisplayFormat.duration(duration, style: .elapsed)
     }
 
     private func reload() async {

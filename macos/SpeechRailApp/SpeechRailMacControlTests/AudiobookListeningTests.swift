@@ -355,16 +355,16 @@ final class AudiobookListeningTests: XCTestCase {
     }
 
     func testDisplayFormatKeepsExactPlaybackRateAndLongTimecodes() {
-        XCTAssertEqual(AudiobookDisplayFormat.playbackRate(0.75), "0.75x")
-        XCTAssertEqual(AudiobookDisplayFormat.playbackRate(1.0), "1x")
-        XCTAssertEqual(AudiobookDisplayFormat.playbackRate(1.25), "1.25x")
-        XCTAssertEqual(AudiobookDisplayFormat.playbackRate(1.5), "1.5x")
-        XCTAssertEqual(AudiobookDisplayFormat.playbackRate(2.0), "2x")
+        XCTAssertEqual(AudiobookDisplayFormat.playbackRate(0.75), "0.75×")
+        XCTAssertEqual(AudiobookDisplayFormat.playbackRate(1.0), "1×")
+        XCTAssertEqual(AudiobookDisplayFormat.playbackRate(1.25), "1.25×")
+        XCTAssertEqual(AudiobookDisplayFormat.playbackRate(1.5), "1.5×")
+        XCTAssertEqual(AudiobookDisplayFormat.playbackRate(2.0), "2×")
         XCTAssertEqual(AudiobookDisplayFormat.timecode(59), "00:59")
         XCTAssertEqual(AudiobookDisplayFormat.timecode(3725), "1:02:05")
         XCTAssertEqual(
             AudiobookDisplayFormat.bookmarkSummary(offsetSeconds: 12, rate: 1.25),
-            "上次听到本段 00:12 · 1.25x"
+            "上次听到本段 00:12 · 1.25×"
         )
     }
 }

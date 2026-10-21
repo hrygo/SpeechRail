@@ -133,8 +133,7 @@ public final class DubbingWorkflowModel {
 
         public var durationText: String? {
             guard let durationSeconds else { return nil }
-            let totalSeconds = max(0, Int(durationSeconds.rounded()))
-            return String(format: "%02d:%02d", totalSeconds / 60, totalSeconds % 60)
+            return SpeechRailDisplayFormat.timecode(durationSeconds)
         }
 
         /// 身份相同即视为同一次生成：比较 `renderID` 而不是整段音频。

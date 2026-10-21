@@ -153,13 +153,17 @@ public struct AudiobookProductionCheckpoint: Codable, Equatable, Sendable {
     public let taskID: UUID
     public let chapterIDs: [UUID]
     public let regeneratingFragmentID: UUID?
+    public let sourceID: UUID?
+    public let preparationVersion: String?
     public var progress: AudiobookProductionProgress
 
-    public init(taskID: UUID = UUID(), chapterIDs: [UUID], regeneratingFragmentID: UUID? = nil, progress: AudiobookProductionProgress) {
+    public init(taskID: UUID = UUID(), chapterIDs: [UUID], regeneratingFragmentID: UUID? = nil, progress: AudiobookProductionProgress, sourceID: UUID? = nil, preparationVersion: String? = nil) {
         self.taskID = taskID
         self.chapterIDs = chapterIDs
         self.regeneratingFragmentID = regeneratingFragmentID
         self.progress = progress
+        self.sourceID = sourceID
+        self.preparationVersion = preparationVersion
     }
 }
 
@@ -183,6 +187,7 @@ public actor AudiobookProductionController {
     private var isCommittingCompletion: Bool = false
     private var activeBookID: UUID?
     private var latestProgressByBook: [UUID: AudiobookProductionProgress] = [:]
+    private var activeWorkingSource: AudiobookWorkingSourceSnapshot?
     private var activeCheckpoint: AudiobookProductionCheckpoint?
 
     public init(
@@ -204,7 +209,7 @@ public actor AudiobookProductionController {
         self.voiceCatalog = voiceCatalog
         self.policy = policy
         self.candidateCommitter = { candidate, wav in
-            try await store.commitCandidate(candidate, wav: wav)
+            try await store.commitCandidate(candidate, wav: wav, requireCurrentSource: true)
         }
         self.completionCommitter = { checkpoint, listenableState in
             try await store.saveProductionCheckpoint(checkpoint, listenableState: listenableState)
@@ -278,6 +283,7 @@ public actor AudiobookProductionController {
             isStartActive = false
             activeBookID = nil
             activeCheckpoint = nil
+            activeWorkingSource = nil
             candidateWAVCache.removeAll()
         }
         generation += 1
@@ -288,17 +294,30 @@ public actor AudiobookProductionController {
         )
 
         do {
+            let snapshot = try await store.workingSourceSnapshot(bookID: bookID)
+            activeWorkingSource = snapshot
+            if let resumingTaskID {
+                guard let checkpoint = try await store.productionCheckpoint(for: bookID), checkpoint.taskID == resumingTaskID,
+                      checkpoint.sourceID == snapshot.sourceID, checkpoint.preparationVersion == snapshot.preparationVersion else {
+                    throw AudiobookStoreError.workingSourceChanged
+                }
+            }
             try await performProduction(
                 bookID: bookID, chapterIDs: chapterIDs,
                 regeneratingFragmentID: regeneratingFragmentID, runGeneration: runGeneration,
                 taskID: resumingTaskID ?? UUID()
             )
         } catch {
+            if let snapshot = activeWorkingSource,
+               let current = try? await store.book(id: bookID), current.sourceID != snapshot.sourceID {
+                updateProgress(bookID) { $0.state = .failed; $0.lastErrorMessage = error.localizedDescription }
+                throw error
+            }
             let cancelled = isPauseRequested || Task.isCancelled
                 || error is CancellationError || (error as? AudiobookProductionError) == .cancelled
             if activeCheckpoint != nil || cancelled {
                 if activeCheckpoint == nil, let progress = latestProgressByBook[bookID] {
-                    activeCheckpoint = .init(taskID: resumingTaskID ?? UUID(), chapterIDs: chapterIDs, regeneratingFragmentID: regeneratingFragmentID, progress: progress)
+                    activeCheckpoint = .init(taskID: resumingTaskID ?? UUID(), chapterIDs: chapterIDs, regeneratingFragmentID: regeneratingFragmentID, progress: progress, sourceID: activeWorkingSource?.sourceID, preparationVersion: activeWorkingSource?.preparationVersion)
                 }
                 let progress = latestProgressByBook[bookID]
                 try await markBookPaused(bookID: bookID, completed: progress?.completedFragments ?? 0, total: progress?.totalFragments ?? 0)
@@ -360,7 +379,9 @@ public actor AudiobookProductionController {
         }
 
         // 2. Plan fragments for selected chapters, collect active role IDs, and verify pinned capabilities
-        let source = try await store.sourceIndex(for: bookID)
+        guard let snapshot = activeWorkingSource else { throw AudiobookStoreError.workingTextPreparationRequired }
+        try await store.validateWorkingSource(snapshot)
+        let source = snapshot.sourceIndex
         let frozenBindings = try await store.voiceBindings(for: bookID)
         let pronunciation = try await store.pronunciationBinding(for: bookID)
         try AudiobookCastRegistry.validateBindingSet(characters: await store.characters(for: bookID), bindings: frozenBindings,
@@ -405,7 +426,7 @@ public actor AudiobookProductionController {
 
         try checkRunIsActive(runGeneration)
         if let progress = latestProgressByBook[bookID] {
-            activeCheckpoint = .init(taskID: taskID, chapterIDs: selectedChapters.map(\.id), regeneratingFragmentID: regeneratingFragmentID, progress: progress)
+            activeCheckpoint = .init(taskID: taskID, chapterIDs: selectedChapters.map(\.id), regeneratingFragmentID: regeneratingFragmentID, progress: progress, sourceID: activeWorkingSource?.sourceID, preparationVersion: activeWorkingSource?.preparationVersion)
             try await persistProgress(bookID)
         }
         let capabilities = try await renderer.fetchEffectiveCapabilities()
@@ -488,6 +509,7 @@ public actor AudiobookProductionController {
                     }
 
                     updateProgress(bookID) { $0.phase = .saving }
+                    try await store.validateWorkingSource(snapshot)
                     try await candidateCommitter(candidate, candidateWAVCache[candidate.id] ?? Data())
                     candidateWAVCache.removeValue(forKey: candidate.id)
                     if let voice = capabilities.voices.first(where: { $0.id == binding.voiceID }), !(await voiceCatalog.refresh()).permits(voice, bookID: bookID) {
@@ -651,24 +673,28 @@ public actor AudiobookProductionController {
                 throw AudiobookProductionError.cancelled
             }
 
-            inFlightFragmentID = fragment.id
-            updateProgress(bookID) { $0.phase = .rendering }
-            let renderTask = Task<AudiobookRenderCallOutput, Error> { [renderer] in
-                try await renderer.renderFragment(request)
-            }
-            inFlightTask = renderTask
-
+            var admissionReleased = false
             do {
+                if let snapshot = activeWorkingSource { try await store.validateWorkingSource(snapshot) }
+                inFlightFragmentID = fragment.id
+                updateProgress(bookID) { $0.phase = .rendering }
+                let renderTask = Task<AudiobookRenderCallOutput, Error> { [renderer] in
+                    try await renderer.renderFragment(request)
+                }
+                inFlightTask = renderTask
+
                 let output = try await renderTask.value
                 inFlightTask = nil
                 inFlightFragmentID = nil
                 if generation == runGeneration {
+                    admissionReleased = true
                     await MainActor.run {
                         admission.release(.audiobook)
                     }
                 } else {
                     throw AudiobookProductionError.cancelled
                 }
+                if let snapshot = activeWorkingSource { try await store.validateWorkingSource(snapshot) }
                 updateProgress(bookID) { $0.retryAttempt = 0 }
 
                 // The service receipt describes the original PCM. Verify it before
@@ -711,15 +737,13 @@ public actor AudiobookProductionController {
             } catch {
                 inFlightTask = nil
                 inFlightFragmentID = nil
-                if generation == runGeneration {
-                    await MainActor.run {
-                        admission.release(.audiobook)
-                    }
+                if generation == runGeneration && !admissionReleased {
+                    await MainActor.run { admission.release(.audiobook) }
                 }
                 if isPauseRequested || Task.isCancelled || error is CancellationError || generation != runGeneration {
                     throw AudiobookProductionError.cancelled
                 }
-                if error is AudioNormalizationError || error is AudioDigest.Failure {
+                if error is AudiobookStoreError || error is AudioNormalizationError || error is AudioDigest.Failure {
                     throw error
                 }
 

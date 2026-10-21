@@ -1595,22 +1595,11 @@ public enum AudiobookDigest {
 /// 用户可见的时长与倍速排版：一处生成，避免 1.25x 被截断成 1.2x 之类的显示误差。
 public enum AudiobookDisplayFormat {
     public static func playbackRate(_ rate: Float) -> String {
-        let hundredths = Int((Double(rate) * 100).rounded())
-        var text = String(format: "%d.%02d", hundredths / 100, hundredths % 100)
-        while text.hasSuffix("0") { text.removeLast() }
-        if text.hasSuffix(".") { text.removeLast() }
-        return text + "x"
+        SpeechRailDisplayFormat.playbackRate(Double(rate))
     }
 
     public static func timecode(_ seconds: TimeInterval) -> String {
-        let total = max(0, Int(seconds.rounded(.down)))
-        let hours = total / 3600
-        let minutes = (total % 3600) / 60
-        let remaining = total % 60
-        if hours > 0 {
-            return String(format: "%d:%02d:%02d", hours, minutes, remaining)
-        }
-        return String(format: "%02d:%02d", minutes, remaining)
+        SpeechRailDisplayFormat.timecode(seconds)
     }
 
     /// 书签落在片段内，摘要明确到“本段”，避免被误读成本章总进度。
@@ -2574,4 +2563,22 @@ public extension VoiceCatalogSnapshot {
         if meta.visibilityScope == .unknown { return isDefaultSystemPreset && meta.creationSource == nil && meta.originBookID == nil }
         return meta.visibilityScope == .globalReusable || (meta.visibilityScope == .bookExclusive && bookID != nil && meta.originBookID == bookID)
     }
+}
+
+/// A run pins one immutable set of prepared UTF-8 coordinates.
+public struct AudiobookWorkingSourceSnapshot: Equatable, Sendable {
+    public let bookID: UUID
+    public let sourceID: UUID
+    public let workingSHA256: String
+    public let preparationVersion: String
+    public let sourceIndex: AudiobookSourceIndex
+}
+
+/// Text paired with the chapter revision actually being heard, in that revision's coordinates.
+public struct AudiobookListeningText: Identifiable, Equatable, Sendable {
+    public let id: UUID
+    public let ordinal: Int
+    public let sourceRange: AudiobookSourceRange
+    public let text: String
+    public let roleName: String
 }

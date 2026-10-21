@@ -626,6 +626,105 @@ def test_clone_output_pass_does_not_survive_unknown_current_runtime() -> None:
     assert state.synthesis.stale_reason == "model_runtime_identity_unknown"
 
 
+@pytest.mark.parametrize(
+    ("recorded_runtime", "live_runtime", "production_ready"),
+    [
+        ("rt_" + "a" * 64, None, True),
+        ("rt_" + "a" * 64, "rt_" + "b" * 64, False),
+        (None, None, False),
+    ],
+)
+def test_atomic_discovery_reuses_only_current_recorded_output_evidence(
+    tmp_path: Path,
+    monkeypatch,
+    recorded_runtime: str | None,
+    live_runtime: str | None,
+    production_ready: bool,
+) -> None:
+    from dataclasses import replace
+    from typing import cast
+
+    from fastapi import FastAPI
+
+    import speechrail.http.routes.capabilities as routes
+    from speechrail.application.services import AppOverrides, build_app_services
+    from speechrail.application.voice_validation_gate import build_validation_binding
+    from speechrail.domain.ports import SpeechSynthesizer
+    from speechrail.domain.tts_execution import TtsExecutionPorts
+    from speechrail.http.voice_projection import voice_entry
+
+    class RuntimeIdentity:
+        def runtime_revision_for_voice(self, voice: str) -> str | None:
+            return live_runtime
+
+    active = _active("quality", "quality")
+    profile = voices.VoiceProfile(
+        id="published_clone",
+        mode="clone",
+        revision="vr_" + "c" * 32,
+        ref_text="合成测试参考文本",
+        audio_path="/private/reference.wav",
+        quality={"policy_version": "voice_quality_v1", "status": "pass"},
+    )
+    registry = VoiceRegistry.open(tmp_path / "voices.json", voices_dir=tmp_path / "audio")
+    monkeypatch.setattr(registry, "snapshot_profiles", lambda: (profile,))
+    binding = build_validation_binding(
+        profile,
+        active.tts_clone,
+        require_current_binding=True,
+        observed_runtime_revision=recorded_runtime,
+        capability_key="quality.render",
+    )
+    record = binding.as_mapping()
+    record.pop("runtime_identity_status")
+    registry.validation_store.put(
+        {
+            **record,
+            "status": "pass",
+            "run_id": "vqr_recorded",
+            "tested_at": "2026-10-21T00:00:00Z",
+            "probe_set": "voice_quality_v1_zh",
+            "validated_for": ["output"],
+            "failure_codes": [],
+        }
+    )
+    services = replace(
+        build_app_services(
+            Settings(api_key=None, qwen3_model_dir=None, qwen3_python=None),
+            AppOverrides(voice_store=registry),
+        ),
+        tts_synthesizer=cast(SpeechSynthesizer, object()),
+        tts_execution=TtsExecutionPorts(runtime_identity=RuntimeIdentity()),
+    )
+    monkeypatch.setattr(routes, "active_model_catalog", lambda _: active)
+    app = FastAPI()
+    app.include_router(routes.create_capability_router(services))
+    client = TestClient(app)
+
+    snapshot = client.get("/v1/speechrail/capabilities")
+    assert snapshot.status_code == 200
+    entry = snapshot.json()["voices"][0]
+    detail = voice_entry(
+        profile,
+        active,
+        True,
+        voice_store=registry,
+        tts_execution=services.tts_execution,
+        strict_validation=True,
+    )
+    assert detail["production_ready"] is production_ready
+    assert entry["production_ready"] is production_ready
+    assert entry["validation_state"] == detail["validation_state"]
+    assert (
+        client.get("/v1/speechrail/voices/published_clone").json()["production_ready"]
+        is production_ready
+    )
+    assert (
+        client.get("/v1/speechrail/voices").json()["data"][0]["production_ready"]
+        is production_ready
+    )
+
+
 def _snapshot(**overrides):
     from speechrail.application.capability_snapshot import build_capability_snapshot
 

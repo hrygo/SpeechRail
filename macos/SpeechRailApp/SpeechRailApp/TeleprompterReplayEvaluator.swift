@@ -697,6 +697,6 @@ public enum TeleprompterReplayEvaluator {
     }
 
     private static func formatPercent(_ share: Double) -> String {
-        String(format: "%.1f%%", share * 100)
+        SpeechRailDisplayFormat.percentage(share, decimalPlaces: 1)
     }
 }

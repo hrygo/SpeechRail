@@ -69,7 +69,7 @@ public struct PreflightDiagnosticsView: View {
                     title: "诊断上下文",
                     detail: "诊断只读环境、模型文件和配置，不会下载模型，也不会改变服务。"
                 )
-                LabeledContent("运行档位", value: displayedHealth?.profile ?? "未读取")
+                LabeledContent("运行档位", value: displayedHealth?.profile ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text)
                 LabeledContent("配置档位", value: SpeechRailProfilePresentation.label(model.profile?.selection))
                 LabeledContent("服务状态", value: model.service.serviceState)
                 LabeledContent("检查数量", value: String(model.preflightChecks.count))
@@ -288,8 +288,7 @@ public struct PreflightDiagnosticsView: View {
     }
 
     private func relativeAgeText(_ date: Date) -> String {
-        let age = max(0, Int(Date().timeIntervalSince(date).rounded()))
-        return age < 60 ? "\(age) 秒前" : "\(age / 60) 分钟前"
+        SpeechRailDisplayFormat.relativeAge(since: date)
     }
 
     /// The card owns the full column height and scrolls inside itself, so the
@@ -363,7 +362,7 @@ public struct PreflightDiagnosticsView: View {
                         if isModelRelatedCheck(selectedCheck) {
                             modelEvidenceRows
                         }
-                        LabeledContent("运行档位", value: displayedHealth?.profile ?? "未读取")
+                        LabeledContent("运行档位", value: displayedHealth?.profile ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text)
                         LabeledContent("配置档位", value: SpeechRailProfilePresentation.label(model.profile?.selection))
                         LabeledContent("服务状态", value: model.service.serviceState)
                     }
@@ -715,7 +714,7 @@ public struct PreflightDiagnosticsView: View {
     private func copyDiagnosticReport() {
         let formatter = ISO8601DateFormatter()
         let generatedAt = formatter.string(from: Date())
-        let lastUpdated = model.lastPreflightRefresh.map(formatter.string(from:)) ?? "未提供"
+        let lastUpdated = model.lastPreflightRefresh.map(formatter.string(from:)) ?? SpeechRailDisplayFormat.MissingValue.notProvided.text
         let checks = model.preflightChecks.map { check in
             let status = check.ok ? "passed" : "failed"
             return "- \(safeIdentifier(check.name)): \(status); \(safeTechnicalResult(for: check))"
@@ -725,7 +724,7 @@ public struct PreflightDiagnosticsView: View {
         schema_version: \(ControlConstants.schemaVersion)
         generated_at: \(generatedAt)
         preflight_updated_at: \(lastUpdated)
-        preflight_request_id: \(model.preflightRequestID?.uuidString ?? "未提供")
+        preflight_request_id: \(model.preflightRequestID?.uuidString ?? SpeechRailDisplayFormat.MissingValue.notProvided.text)
         \(serviceContextLines)
         control_plane: \(model.controlPlaneMessage == nil ? "available" : "unavailable")
         checks: \(model.preflightChecks.filter(\.ok).count)/\(model.preflightChecks.count) passed
@@ -755,10 +754,10 @@ public struct PreflightDiagnosticsView: View {
             return "service_context: 按设置省略（运行档位、配置档位、服务状态、健康结果）"
         }
         return """
-        runtime_profile: \(displayedHealth?.profile ?? "未读取")
+        runtime_profile: \(displayedHealth?.profile ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text)
         configured_profile: \(SpeechRailProfilePresentation.label(model.profile?.selection))
         service_state: \(safeIdentifier(model.service.serviceState))
-        health_ready: \(displayedHealth?.ready.map { $0 ? "true" : "false" } ?? "未读取")
+        health_ready: \(displayedHealth?.ready.map { $0 ? "true" : "false" } ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text)
         health_failure: \(healthFailureSummary)
         """
     }

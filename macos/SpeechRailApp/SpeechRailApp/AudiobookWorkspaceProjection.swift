@@ -134,11 +134,11 @@ enum AudiobookWorkspaceProjection {
             fragmentMap.reserveCapacity(input.fragments.count)
             for (index, atom) in input.atoms.enumerated() {
                 if index.isMultiple(of: 128) { try Task.checkCancellation(); onBatch?(index) }
-                atomMap[atom.id] = (try? input.source.normalizedText(in: atom.sourceRange)) ?? ""
+                atomMap[atom.id] = (try? input.source.text(in: atom.sourceRange)) ?? ""
             }
             for (index, fragment) in input.fragments.enumerated() {
                 if index.isMultiple(of: 128) { try Task.checkCancellation() }
-                fragmentMap[fragment.id] = (try? input.source.normalizedText(in: fragment.sourceRange)) ?? ""
+                fragmentMap[fragment.id] = (try? input.source.text(in: fragment.sourceRange)) ?? ""
             }
             try Task.checkCancellation()
             return AudiobookChapterDetailsSnapshot(chapterID: input.chapterID, atoms: input.atoms,

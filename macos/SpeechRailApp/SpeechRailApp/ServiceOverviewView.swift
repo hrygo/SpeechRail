@@ -55,10 +55,10 @@ public struct ServiceOverviewView: View {
         )
         .inspector(isPresented: $showInspector) {
             DeveloperInspector(isPresented: $showInspector) {
-                LabeledContent("服务", value: displayedHealth?.service ?? "未读取")
-                LabeledContent("版本", value: displayedHealth?.version ?? "未读取")
-                LabeledContent("后端", value: displayedHealth?.backend ?? "未读取")
-                LabeledContent("端口", value: model.service.port.map(String.init) ?? "未读取")
+                LabeledContent("服务", value: displayedHealth?.service ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text)
+                LabeledContent("版本", value: displayedHealth?.version ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text)
+                LabeledContent("后端", value: displayedHealth?.backend ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text)
+                LabeledContent("端口", value: model.service.port.map(String.init) ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text)
                 LabeledContent("LaunchAgent", value: ControlConstants.agentPlistName)
                 LabeledContent("XPC 通道", value: ControlConstants.agentMachServiceName)
                 LabeledContent("健康连接", value: healthConnectionSummary)
@@ -69,7 +69,7 @@ public struct ServiceOverviewView: View {
                 Divider()
                 LabeledContent("运行档位", value: SpeechRailProfilePresentation.title(displayedHealth?.selection))
                 LabeledContent("配置档位", value: SpeechRailProfilePresentation.title(model.profile?.selection))
-                LabeledContent("配置代次", value: model.profile?.generation.map(String.init) ?? "未读取")
+                LabeledContent("配置代次", value: model.profile?.generation.map(String.init) ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text)
                 LabeledContent("作业队列", value: model.jobQueueSummary)
                 LabeledContent("控制 Agent", value: model.controlAgentStatus.title)
                 LabeledContent("影响", value: model.controlAgentStatus.impact)
@@ -315,7 +315,7 @@ public struct ServiceOverviewView: View {
             Divider()
             runtimeRow("服务端口", serviceAddressText)
             Divider()
-            runtimeRow("运行版本", displayedHealth?.version ?? "未读取")
+            runtimeRow("运行版本", displayedHealth?.version ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text)
             Divider()
             runtimeRow("已加载的模型", residentWorkerText)
         }
@@ -350,7 +350,7 @@ public struct ServiceOverviewView: View {
     /// 稿 `runtime` 的「服务端口」行是 `host:port`：只报端口时看不出这一行连的是哪台
     /// 主机。主机名由诊断客户端给出，拿不到时如实退回端口。
     private var serviceAddressText: String {
-        guard let port = model.service.port.map(String.init) else { return "未读取" }
+        guard let port = model.service.port.map(String.init) else { return SpeechRailDisplayFormat.MissingValue.notLoaded.text }
         guard let host = model.serviceConnectionHost, !host.isEmpty else { return port }
         return "\(host):\(port)"
     }
@@ -364,7 +364,7 @@ public struct ServiceOverviewView: View {
     /// 一串英文下划线名。页面上换成人话；内部名留在开发者详情与文档里
     /// （用户 2026-09-19：「有一些用户看不懂的词汇」）。
     private var residentWorkerText: String {
-        guard let lifecycle = displayedHealth?.ttsLifecycle else { return "未读取" }
+        guard let lifecycle = displayedHealth?.ttsLifecycle else { return SpeechRailDisplayFormat.MissingValue.notLoaded.text }
         let capabilities = lifecycle.warmCapabilities
             ?? lifecycle.warmCapability.map { [$0] }
             ?? []
@@ -666,7 +666,7 @@ public struct ServiceOverviewView: View {
         if displayedHealth?.ready == true {
             // 稿 `conclusion`：结论面板先说「本机在跑、离线也能用」，当前档位属于
             // 运行事实，已经在下面的「运行信息」卡里；在这句里重复一遍只会把唯一主动作推远。
-            let port = model.service.port.map(String.init) ?? "未知"
+            let port = model.service.port.map(String.init) ?? SpeechRailDisplayFormat.MissingValue.unknown.text
             let ready = "本地语音服务正在 \(port) 端口运行；离线也有完整的识别与合成能力。"
             if !model.controlAgentStatus.allowsMutation {
                 return ready + "但控制 Agent 受限，服务操作和档位变更暂不可用；只读诊断仍可使用。"
@@ -683,7 +683,7 @@ public struct ServiceOverviewView: View {
     }
 
     private func relativeTime(_ date: Date) -> String {
-        date.formatted(date: .omitted, time: .standard)
+        date.speechRailFormatted(.timeWithSeconds)
     }
 
     private var healthConnectionSummary: String {
@@ -700,7 +700,7 @@ public struct ServiceOverviewView: View {
             }
         }
         if displayedHealth != nil { return "health 已响应" }
-        return "未读取"
+        return SpeechRailDisplayFormat.MissingValue.notLoaded.text
     }
 
     private var displayedHealth: HealthSnapshot? {

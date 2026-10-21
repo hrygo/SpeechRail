@@ -697,7 +697,7 @@ public final class TeleprompterStageSettings {
 
 enum TeleprompterStageTransparencyPresentation {
     static func valueLabel(for transparency: Double) -> String {
-        "\(Int((transparency * 100).rounded()))%"
+        SpeechRailDisplayFormat.percentage(transparency)
     }
 }
 

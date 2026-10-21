@@ -95,7 +95,7 @@ extension MeetingView {
                         .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                         .lineLimit(1)
                     Text(
-                        "\(summary.record.startedAt.formatted(date: .numeric, time: .shortened))"
+                        "\(summary.record.startedAt.speechRailFormatted())"
                             + " · \(summary.lineCount) 段发言"
                             + (summary.speakerCount > 0 ? " · \(summary.speakerCount) 位说话人" : "")
                     )

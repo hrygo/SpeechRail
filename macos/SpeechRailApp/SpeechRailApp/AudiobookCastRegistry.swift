@@ -630,7 +630,9 @@ public enum AudiobookCastRegistry {
         var policies: [UUID: AudiobookRoleVoicePolicy] = [:]
         for role in characters {
             policies[role.id] = role.voicePolicy ?? .init(
-                sharingPolicy: role.isNarrator || role.isMajor || (existingBindings[role.id] != nil && !role.allowSharedMinorVoice) ? .exclusive : (existingBindings[role.id] != nil && role.allowSharedMinorVoice ? .sharedMinor : .automatic),
+                // Inferred importance is a preference, not a creator's exclusivity
+                // decision. Keep the narrator and existing selections protected.
+                sharingPolicy: role.isNarrator || (existingBindings[role.id] != nil && !role.allowSharedMinorVoice) ? .exclusive : (existingBindings[role.id] != nil && role.allowSharedMinorVoice ? .sharedMinor : .automatic),
                 bindingOrigin: existingBindings[role.id] != nil ? .legacyUnknown : .automatic,
                 isLocked: existingBindings[role.id] != nil
             )
@@ -763,7 +765,11 @@ public enum AudiobookCastRegistry {
             let unbound = sortedRoles.filter { existingBindings[$0.id] == nil }
             let hardExclusive = unbound.filter { policies[$0.id]?.sharingPolicy == .exclusive }
             let automatic = unbound.filter { policies[$0.id]?.sharingPolicy != .exclusive }.sorted {
-                let l = stats[$0.id]?.dialogueScalarCount ?? 0, r = stats[$1.id]?.dialogueScalarCount ?? 0
+                let leftIsLead = $0.isMajor || stats[$0.id]?.tier == .lead
+                let rightIsLead = $1.isMajor || stats[$1.id]?.tier == .lead
+                if leftIsLead != rightIsLead { return leftIsLead }
+                let l = source == nil ? (stats[$0.id]?.dialogueAtomCount ?? 0) : (stats[$0.id]?.dialogueScalarCount ?? 0)
+                let r = source == nil ? (stats[$1.id]?.dialogueAtomCount ?? 0) : (stats[$1.id]?.dialogueScalarCount ?? 0)
                 return l == r ? $0.id.uuidString < $1.id.uuidString : l > r
             }
             let remaining = voices.count - pinnedExclusive.count - pinnedShared.count
@@ -832,7 +838,7 @@ public enum AudiobookCastRegistry {
                 if case let .failure(error) = matchingResult { exhausted = error is CancellationError || error as? ExclusiveMatchingError == .budgetExceeded }
                 else { exhausted = false }
                 issues.append(.init(code: exhausted ? .searchBudgetExceeded : .insufficientVoiceCapacity, roleIDs: unbound.map(\.id),
-                    nextAction: exhausted ? "推荐预算已耗尽，请缩小范围后重新规划。" : "当前候选不能同时满足旁白、独占与共享要求，请增加声音或明确调整角色政策。"))
+                    nextAction: exhausted ? "推荐预算已耗尽，请缩小范围后重新规划。" : "现有声音无法同时满足旁白和角色的选声要求。请补充可用声音，或在对应角色中调整专属声音与声音要求。"))
             }
         }
         let unresolved = Set(active.filter { bindings[$0.id] == nil }.map(\.id))
@@ -1208,6 +1214,9 @@ public struct AudiobookSceneConflictGraph: Equatable, Sendable {
 
 public enum AudiobookCastingStrategy: String, Codable, Sendable { case baseline, sceneAware }
 public enum AudiobookCastingPlanner {
+    // Backtracking revisits the whole remaining cast at each node. Keep that
+    // repair for small casts; large books retain their complete greedy proposal.
+    private static let maximumRepairRoleCount = 12
     public enum Status: String, Sendable { case solved, residualConflicts, provenInsufficient, budgetExceeded }
     public struct Outcome: Equatable, Sendable {
         public let assignments: [UUID: String]
@@ -1270,7 +1279,9 @@ public enum AudiobookCastingPlanner {
             if exhausted { break }
         }
         var best = greedy
-        if strategy == .sceneAware && !conflicts(best).isEmpty && !exhausted {
+        let shouldRepair = strategy == .sceneAware && roles.count <= maximumRepairRoleCount
+            && !conflicts(best).isEmpty && !exhausted
+        if shouldRepair {
             var search = frozen
             func solve() throws -> Bool {
                 try Task.checkCancellation()
@@ -1289,7 +1300,7 @@ public enum AudiobookCastingPlanner {
         }
         let residual = conflicts(best)
         let complete = roles.allSatisfy { best[$0] != nil }
-        let status: Status = exhausted ? .budgetExceeded : (!complete ? .provenInsufficient : (residual.isEmpty ? .solved : (strategy == .sceneAware ? .provenInsufficient : .residualConflicts)))
+        let status: Status = exhausted ? .budgetExceeded : (!complete ? .provenInsufficient : (residual.isEmpty ? .solved : (shouldRepair ? .provenInsufficient : .residualConflicts)))
         return .init(assignments: best, residualDirectPairs: residual, status: status, evaluatedCandidates: evaluated)
     }
 }

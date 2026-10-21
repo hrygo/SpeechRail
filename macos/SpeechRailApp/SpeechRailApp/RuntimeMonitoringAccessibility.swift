@@ -62,7 +62,7 @@ public struct RuntimeMonitoringChartDescriptor: AXChartDescriptorRepresentable {
             gridlinePositions: [],
             valueDescriptionProvider: { value in
                 Date(timeIntervalSince1970: value)
-                    .formatted(.dateTime.hour().minute().second())
+                    .speechRailFormatted(.timeWithSeconds)
             }
         )
         let maximumRequests = max(
@@ -87,7 +87,7 @@ public struct RuntimeMonitoringChartDescriptor: AXChartDescriptorRepresentable {
                 AXDataPoint(
                     x: point.capturedAt.timeIntervalSince1970,
                     y: Double(value(point)),
-                    label: point.capturedAt.formatted(.dateTime.hour().minute().second())
+                    label: point.capturedAt.speechRailFormatted(.timeWithSeconds)
                 )
             }
         }
@@ -112,7 +112,7 @@ public struct RuntimeMonitoringChartDescriptor: AXChartDescriptorRepresentable {
                 return AXDataPoint(
                     x: sample.capturedAt.timeIntervalSince1970,
                     y: RuntimeLatencyPresentation.milliseconds(fromSeconds: seconds),
-                    label: sample.capturedAt.formatted(.dateTime.hour().minute())
+                    label: sample.capturedAt.speechRailFormatted(.time)
                 )
             }),
             ("语音合成耗时（\(latencyUnit)）", sortedLatency.compactMap { sample -> AXDataPoint? in
@@ -120,7 +120,7 @@ public struct RuntimeMonitoringChartDescriptor: AXChartDescriptorRepresentable {
                 return AXDataPoint(
                     x: sample.capturedAt.timeIntervalSince1970,
                     y: RuntimeLatencyPresentation.milliseconds(fromSeconds: seconds),
-                    label: sample.capturedAt.formatted(.dateTime.hour().minute())
+                    label: sample.capturedAt.speechRailFormatted(.time)
                 )
             }),
         ]

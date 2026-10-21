@@ -10,8 +10,7 @@ from fastapi.responses import JSONResponse
 from speechrail.application.capability_snapshot import build_capability_snapshot, content_revision
 from speechrail.application.services import AppServices
 from speechrail.application.voice_validation_gate import (
-    build_validation_binding,
-    load_validation_evidence,
+    validation_verdict_for_voice,
 )
 from speechrail.config.selection import active_model_catalog
 from speechrail.domain.tts import VoiceStoreUnavailableError, resolve_voice
@@ -73,19 +72,15 @@ def create_capability_router(services: AppServices) -> APIRouter:
             for profile in profiles:
                 if profile.mode != "clone":
                     continue
-                binding = build_validation_binding(
+                _, evidence, binding = validation_verdict_for_voice(
                     profile,
                     active.tts_clone,
+                    registry.validation_store,
                     services.tts_execution.runtime_identity,
                     require_current_binding=True,
                     capability_key=capability_key,
                 )
                 validation_bindings[profile.id] = binding.as_mapping()
-                evidence = load_validation_evidence(
-                    registry.validation_store,
-                    binding,
-                    require_current_binding=True,
-                )
                 if evidence is not None:
                     validations[profile.id] = evidence
             snapshot = build_capability_snapshot(

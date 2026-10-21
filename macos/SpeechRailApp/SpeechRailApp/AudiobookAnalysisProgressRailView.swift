@@ -51,7 +51,7 @@ public struct AudiobookAnalysisProgressRailView: View {
                         .accessibilityLabel(Self.elapsedText(progress: progress, now: tick))
                 }
 
-                ProgressView(value: progress.fraction)
+                ProgressView(value: SpeechRailDisplayFormat.progressValue(progress.fraction, isComplete: progress.outcome == .completed))
                     .controlSize(.small)
                     .tint(SpeechRailDesignTokens.Color.rail)
                     .accessibilityLabel(Self.accessibilityLabel(progress: progress))
@@ -68,7 +68,7 @@ public struct AudiobookAnalysisProgressRailView: View {
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     }
                     Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
-                    Text(String(format: "%.0f%%", progress.fraction * 100))
+                    Text(SpeechRailDisplayFormat.progress(progress.fraction, isComplete: progress.outcome == .completed))
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .monospacedDigit()
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
@@ -126,16 +126,16 @@ public struct AudiobookAnalysisProgressRailView: View {
         DisclosureGroup("分析诊断（最近 \(eventCount) 个事件）", isExpanded: isDeveloperSectionExpanded) {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 devRow("run", value: String(progress.runID.prefix(8)))
-                devRow("窗口序号", value: progress.currentWindowOrdinal.map(String.init) ?? "—")
+                devRow("窗口序号", value: progress.currentWindowOrdinal.map(String.init) ?? SpeechRailDisplayFormat.MissingValue.compact.text)
                 devRow("本窗调用", value: "\(progress.attempt)/\(progress.maxAttempts)")
                 devRow("复用检查点", value: "\(progress.reusedCheckpointWindows) 窗")
                 devRow("LLM 调用", value: "\(progress.llmCallCount) 次")
                 devRow("token", value: "\(progress.promptTokensTotal) 入 / \(progress.completionTokensTotal) 出")
                 devRow(
                     "上次调用",
-                    value: progress.lastCallMilliseconds.map { "\($0)ms" } ?? "—"
+                    value: progress.lastCallMilliseconds.map { "\($0)ms" } ?? SpeechRailDisplayFormat.MissingValue.compact.text
                 )
-                devRow("上次错误码", value: progress.lastErrorCode ?? "—")
+                devRow("上次错误码", value: progress.lastErrorCode ?? SpeechRailDisplayFormat.MissingValue.compact.text)
                 devRow("已用", value: "\(progress.elapsedSeconds(at: tick))s")
                 devRow("上次进展", value: "\(progress.secondsSinceLastEvent(at: tick))s 前")
             }
@@ -160,11 +160,7 @@ public struct AudiobookAnalysisProgressRailView: View {
     // MARK: - 纯函数文案（视图与测试共用，阈值与 `AudiobookAnalysisProgressLimits` 一致）
 
     public static func elapsedText(progress: AudiobookAnalysisProgress, now: Date) -> String {
-        let seconds = progress.elapsedSeconds(at: now)
-        if seconds < 60 {
-            return "已用 \(seconds) 秒"
-        }
-        return "已用 \(seconds / 60) 分 \(seconds % 60) 秒"
+        "已用 " + SpeechRailDisplayFormat.duration(Double(progress.elapsedSeconds(at: now)), style: .elapsed)
     }
 
     public static func heartbeatText(progress: AudiobookAnalysisProgress, now: Date) -> String {
@@ -176,9 +172,9 @@ public struct AudiobookAnalysisProgressRailView: View {
             return "上次进展 \(idle) 秒前"
         }
         if idle >= Int(AudiobookAnalysisProgressLimits.awaitingCallNoticeSeconds) {
-            return "仍在等待 AI 返回…\(idle)s"
+            return "仍在等待 AI 返回…\(SpeechRailDisplayFormat.duration(Double(idle), style: .elapsed))"
         }
-        return "等待 AI 返回…\(idle)s"
+        return "等待 AI 返回…\(SpeechRailDisplayFormat.duration(Double(idle), style: .elapsed))"
     }
 
     public static func heartbeatColor(progress: AudiobookAnalysisProgress, now: Date) -> Color {
@@ -189,7 +185,7 @@ public struct AudiobookAnalysisProgressRailView: View {
     }
 
     public static func accessibilityLabel(progress: AudiobookAnalysisProgress) -> String {
-        var parts = ["\(progress.phase.stepTitle)，\(Int(progress.fraction * 100))%"]
+        var parts = ["\(progress.phase.stepTitle)，\(SpeechRailDisplayFormat.progress(progress.fraction, isComplete: progress.outcome == .completed))"]
         if let counter = progress.windowCounterText {
             parts.append(counter)
         }

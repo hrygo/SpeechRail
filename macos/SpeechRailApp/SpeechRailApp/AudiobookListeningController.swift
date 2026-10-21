@@ -85,13 +85,21 @@ public final class AudiobookListeningController {
     public func play(
         bookID: UUID,
         chapterID: UUID,
-        fromBookmarkIfMatching: Bool = true
+        fromBookmarkIfMatching: Bool = true,
+        chapterRevisionID: UUID? = nil
     ) async throws {
         let currentRev = try await revisionController.currentChapter(bookID: bookID, chapterID: chapterID)
         let targetRev: AudiobookChapterRevision
         let isPrevious: Bool
 
-        if let currentRev {
+        if let chapterRevisionID {
+            let revisions = try await store.chapterRevisions(for: bookID, chapterID: chapterID)
+            guard let selected = revisions.first(where: { $0.id == chapterRevisionID }) else {
+                throw AudiobookRevisionError.expectedRevisionMismatch(expected: chapterRevisionID, actual: currentRev?.id)
+            }
+            targetRev = selected
+            isPrevious = selected.id != currentRev?.id
+        } else if let currentRev {
             targetRev = currentRev
             isPrevious = false
         } else if let prevRev = try await revisionController.previousListenableChapter(bookID: bookID, chapterID: chapterID) {
@@ -107,6 +115,9 @@ public final class AudiobookListeningController {
         var resolvedItems: [(binding: AudiobookFragmentCandidateBinding, candidate: AudiobookRenderCandidate, fileURL: URL)] = []
         for binding in targetRev.orderedBindings {
             guard let candidate = candidatesByID[binding.candidateID] else {
+                throw AudiobookRevisionError.candidateNotFound(binding.candidateID)
+            }
+            guard candidate.isReceiptVerified, try await store.verifyCandidateAsset(candidate) else {
                 throw AudiobookRevisionError.candidateNotFound(binding.candidateID)
             }
             let url = try await store.resolveAssetFileURL(for: candidate)
@@ -183,7 +194,7 @@ public final class AudiobookListeningController {
                 return
             }
             // Another preview (such as role audition) preempted SharedPlaybackOwner — resume from saved bookmark!
-            try await play(bookID: active.bookID, chapterID: active.chapterID, fromBookmarkIfMatching: true)
+            try await play(bookID: active.bookID, chapterID: active.chapterID, fromBookmarkIfMatching: true, chapterRevisionID: active.chapterRevisionID)
         }
     }
 

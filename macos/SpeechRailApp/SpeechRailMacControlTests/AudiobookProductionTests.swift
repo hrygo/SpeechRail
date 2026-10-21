@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import SpeechRailControlKit
 import XCTest
 #if SWIFT_PACKAGE
@@ -200,6 +201,150 @@ final class AudiobookProductionTests: XCTestCase {
     }
 
     @MainActor
+    private func makePreparedFixture(admission: SpeechCreationAdmission = SpeechCreationAdmission()) async throws -> (AudiobookProjectStore, AudiobookProductionController, ScriptedSpeechRenderer, UUID, AudiobookChapter) {
+        let store = try AudiobookProjectStore(root: tempRoot), catalog = VoiceCatalogStore()
+        let capabilities = Self.makeDefaultCapabilities()
+        let renderer = ScriptedSpeechRenderer(capabilities: capabilities)
+        let cast = AudiobookCastController(store: store, capabilityProvider: { capabilities }, voiceCatalog: catalog)
+        let raw = "第一章 渡口\r\n他走進大廳之後提到鄉間那位住了許多年又講理學的老監\r\n生，每次見到他時都是先說幾句客氣的話，互相寒\r\n暄，之後才坐下談話。"
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data(raw.utf8))
+        let bookID = try await store.importBook(preview), chapter = try await store.chapters(for: bookID)[0]
+        let narrators = try await store.characters(for: bookID)
+        let narrator = try XCTUnwrap(narrators.first)
+        let atoms = try await store.atoms(for: bookID, chapterID: chapter.id).filter { $0.kind != .formatting }
+        try await store.saveAnnotations(bookID: bookID, annotations: atoms.map {
+            .init(bookID: bookID, chapterID: chapter.id, windowID: UUID(), atomID: $0.id,
+                  sourceRange: $0.sourceRange, assignment: .assigned(roleID: narrator.id))
+        })
+        var book = try await store.book(id: bookID); book.analysisState = .allWindowsValidated
+        try await store.updateBook(book)
+        try await cast.bindVoice(bookID: bookID, roleID: narrator.id, binding: .init(roleID: narrator.id,
+            voiceID: "v-narrator", voiceRevision: "vr_0123456789abcdef0123456789abcdef", modelRevision: String(repeating: "a", count: 40)))
+        try await cast.confirmCast(bookID: bookID, revisionID: cast.currentCastRevisionID(for: bookID))
+        try await cast.confirmAudition(bookID: bookID, voiceSetDigest: cast.currentVoiceSetDigest(for: bookID))
+        let production = AudiobookProductionController(store: store, castController: cast,
+            revisionController: AudiobookRevisionController(store: store), renderer: renderer,
+            admission: admission, clock: FakeAudiobookClock(), voiceCatalog: catalog)
+        return (store, production, renderer, bookID, chapter)
+    }
+
+    @MainActor
+    func testProductionUsesPreparedTextForBothInitialAndSingleFragmentRender() async throws {
+        let (store, production, renderer, bookID, chapter) = try await makePreparedFixture()
+        let source = try await store.sourceIndex(for: bookID)
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+        let fragments = try await store.fragments(for: bookID, chapterID: chapter.id)
+        let expected = try fragments.map { try source.text(in: $0.sourceRange) }
+        XCTAssertEqual(renderer.requests.map(\.text), expected)
+        XCTAssertTrue(expected.joined().contains("老監生"))
+        XCTAssertTrue(expected.joined().contains("寒暄"))
+        let fragment = try XCTUnwrap(fragments.first)
+        try await production.regenerateFragment(bookID: bookID, chapterID: chapter.id, fragmentID: fragment.id)
+        XCTAssertEqual(renderer.requests.last?.text, try source.text(in: fragment.sourceRange))
+    }
+
+    @MainActor
+    func testReferenceSourceBlocksNewProductionAndPreservesExistingAudio() async throws {
+        let (store, production, _, bookID, chapter) = try await makePreparedFixture()
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+        let candidates = try await store.candidates(for: bookID)
+        XCTAssertFalse(candidates.isEmpty)
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(tempRoot.appendingPathComponent("library.sqlite3").path, &database), SQLITE_OK)
+        defer { sqlite3_close(database) }
+        XCTAssertEqual(sqlite3_exec(database, "UPDATE sources SET source_kind = 'reference' WHERE id = '\(chapter.sourceID)';", nil, nil, nil), SQLITE_OK)
+        do { try await production.start(bookID: bookID, chapterIDs: [chapter.id]); XCTFail("Reference text accepted") }
+        catch { XCTAssertEqual(error as? AudiobookStoreError, .workingTextPreparationRequired) }
+        let preserved = try await store.candidates(for: bookID)
+        XCTAssertEqual(preserved, candidates)
+        for candidate in preserved { let valid = try await store.verifyCandidateAsset(candidate); XCTAssertTrue(valid) }
+    }
+
+    private actor FetchCounter {
+        var count = 0
+        func next() -> Int { count += 1; return count }
+    }
+
+    @MainActor
+    func testSourceSwitchBeforeRenderReleasesCreationAdmission() async throws {
+        let admission = SpeechCreationAdmission()
+        let (store, production, renderer, bookID, chapter) = try await makePreparedFixture(admission: admission)
+        let counter = FetchCounter()
+        renderer.onCapabilitiesFetch = {
+            if await counter.next() == 2 {
+                _ = try await store.prepareWorkingRevision(bookID: bookID, expectedSourceID: chapter.sourceID)
+            }
+        }
+        do { try await production.start(bookID: bookID, chapterIDs: [chapter.id]); XCTFail("Stale run accepted") } catch {}
+        XCTAssertTrue(renderer.requests.isEmpty)
+        XCTAssertTrue(admission.acquire(.audiobook))
+        admission.release(.audiobook)
+    }
+
+    @MainActor
+    func testLateRenderCannotCommitAcrossWorkingRevision() async throws {
+        let (store, production, renderer, bookID, chapter) = try await makePreparedFixture()
+        renderer.onRenderStart = { _ in
+            _ = try await store.prepareWorkingRevision(bookID: bookID, expectedSourceID: chapter.sourceID)
+        }
+        do { try await production.start(bookID: bookID, chapterIDs: [chapter.id]); XCTFail("Stale render accepted") }
+        catch { XCTAssertEqual(error as? AudiobookStoreError, .workingSourceChanged) }
+        let candidates = try await store.candidates(for: bookID)
+        XCTAssertTrue(candidates.isEmpty)
+        let book = try await store.book(id: bookID)
+        XCTAssertEqual(book.analysisState, .notStarted)
+        XCTAssertEqual(book.productionState, .idle)
+    }
+
+    @MainActor
+    func testResumeRejectsCheckpointFromDifferentPreparedSource() async throws {
+        let (store, production, _, bookID, chapter) = try await makePreparedFixture()
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+        let checkpointValue = try await store.productionCheckpoint(for: bookID)
+        let checkpoint = try XCTUnwrap(checkpointValue)
+        XCTAssertEqual(checkpoint.sourceID, chapter.sourceID)
+        XCTAssertEqual(checkpoint.preparationVersion, AudiobookTextPreparation.version)
+        _ = try await store.prepareWorkingRevision(bookID: bookID, expectedSourceID: chapter.sourceID)
+        do {
+            try await production.start(bookID: bookID, chapterIDs: [chapter.id], resumingTaskID: checkpoint.taskID)
+            XCTFail("Stale checkpoint resumed")
+        } catch { XCTAssertEqual(error as? AudiobookStoreError, .workingSourceChanged) }
+    }
+
+    @MainActor
+    func testHistoricalAudioRemainsPlayableAndCandidatesAreIsolatedAfterPreparation() async throws {
+        let (store, production, _, bookID, chapter) = try await makePreparedFixture()
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+        let revisionController = AudiobookRevisionController(store: store)
+        let before = try await revisionController.currentChapter(bookID: bookID, chapterID: chapter.id)
+        let candidates = try await store.candidates(for: bookID)
+        _ = try await store.prepareWorkingRevision(bookID: bookID, expectedSourceID: chapter.sourceID)
+        let preparedBook = try await store.book(id: bookID)
+        XCTAssertEqual(preparedBook.listenableState, .previousRevisionAvailable)
+        let history = try await revisionController.previousListenableChapter(bookID: bookID, chapterID: chapter.id)
+        XCTAssertEqual(history, before)
+        for candidate in candidates {
+            let valid = try await store.verifyCandidateAsset(candidate)
+            XCTAssertTrue(valid)
+        }
+        let working = try await store.workingSourceSnapshot(bookID: bookID)
+        try await store.trashBook(id: bookID)
+        try await store.restoreTrashedBook(id: bookID)
+        let restored = try await store.workingSourceSnapshot(bookID: bookID)
+        XCTAssertEqual(restored, working)
+        let restoredHistory = try await revisionController.previousListenableChapter(bookID: bookID, chapterID: chapter.id)
+        XCTAssertEqual(restoredHistory, before)
+        let plan = try await revisionController.resumePlan(bookID: bookID)
+        XCTAssertTrue(plan.reusableFragmentIDs.isEmpty)
+        let roles = try await store.characters(for: bookID)
+        let bindings = try await store.voiceBindings(for: bookID)
+        let annotations = try await store.annotations(for: bookID)
+        XCTAssertEqual(roles.count, 1)
+        XCTAssertTrue(bindings.isEmpty)
+        XCTAssertTrue(annotations.isEmpty)
+    }
+
+    @MainActor
     func testSkippedChapterIsExcludedFromReadinessAndProduction() async throws {
         let store = try AudiobookProjectStore(root: tempRoot), catalog = VoiceCatalogStore()
         let snapshot = Self.makeDefaultCapabilities()
@@ -271,8 +416,8 @@ final class AudiobookProductionTests: XCTestCase {
         let chapter = try await store.chapters(for: bookID)[0]
         let roles = try await store.characters(for: bookID)
         let narrator = try XCTUnwrap(roles.first)
-        let atoms = try await store.atoms(for: bookID, chapterID: chapter.id).filter { $0.kind != .formatting }
-        let annotations = atoms.map { atom in
+        let atoms = try await store.atoms(for: bookID, chapterID: chapter.id)
+        let annotations = atoms.filter { $0.kind != .formatting }.map { atom in
             AudiobookAnnotation(
                 bookID: bookID, chapterID: chapter.id, windowID: UUID(), atomID: atom.id,
                 sourceRange: atom.sourceRange, assignment: .assigned(roleID: narrator.id)

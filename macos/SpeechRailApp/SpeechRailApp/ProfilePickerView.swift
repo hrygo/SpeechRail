@@ -120,7 +120,7 @@ public struct ProfilePickerView: View {
     }
 
     private func formatBytes(_ bytes: Int64) -> String {
-        String(format: "%.1f GiB", Double(bytes) / 1_073_741_824)
+        SpeechRailDisplayFormat.bytes(bytes, context: .file)
     }
 
     public var body: some View {

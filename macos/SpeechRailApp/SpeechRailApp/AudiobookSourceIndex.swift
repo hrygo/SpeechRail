@@ -24,7 +24,7 @@ public struct AudiobookSourceIndex: Sendable, Equatable {
     public let joinedLineBreakCount: Int
     private let paragraphStartOffsets: Set<UInt32>
 
-    public init(utf8: Data) throws {
+    public init(utf8: Data, titleEvidence: [Int64: Bool]? = nil) throws {
         var decoder = UTF8()
         var iterator = utf8.makeIterator()
         var offsets: [UInt32] = []
@@ -60,7 +60,11 @@ public struct AudiobookSourceIndex: Sendable, Equatable {
         self.scalarByteOffsets = offsets
         let profile = Self.detectLayoutProfile(utf8Data: utf8, scalarByteOffsets: offsets)
         self.layoutProfile = profile
-        let paragraphs = Self.prepareParagraphs(utf8: utf8, profile: profile)
+        let paragraphs = Self.prepareParagraphs(utf8: utf8, profile: profile).map { paragraph in
+            AudiobookParagraph(sourceRange: paragraph.sourceRange, text: paragraph.text,
+                physicalLineCount: paragraph.physicalLineCount,
+                isIsolatedTitleCandidate: titleEvidence?[paragraph.sourceRange.lowerBound] ?? paragraph.isIsolatedTitleCandidate)
+        }
         self.paragraphs = paragraphs
         self.joinedLineBreakCount = paragraphs.reduce(0) { $0 + max(0, $1.physicalLineCount - 1) }
         self.paragraphStartOffsets = Set(paragraphs.dropFirst().map { UInt32($0.sourceRange.lowerBound) })
@@ -624,9 +628,8 @@ public struct AudiobookSourceIndex: Sendable, Equatable {
         return true
     }
 
-    private static func joinParagraphLines(_ text: String) -> String {
+    static func joinParagraphLines(_ text: String) -> String {
         let standard = text
-            .replacingOccurrences(of: "\u{FFFD}", with: "")
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
         let lines = standard.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
@@ -642,7 +645,7 @@ public struct AudiobookSourceIndex: Sendable, Equatable {
         return result
     }
 
-    private static func isCJK(_ scalar: UnicodeScalar) -> Bool {
+    static func isCJK(_ scalar: UnicodeScalar) -> Bool {
         let v = scalar.value
         return (0x4E00...0x9FFF).contains(v)
             || (0x3400...0x4DBF).contains(v)
@@ -1024,4 +1027,90 @@ public struct AudiobookSourceIndex: Sendable, Equatable {
     private static let hangingPunctuationScalars: Set<UnicodeScalar> = [
         "、", "，", "。", "；", "！", "？", "：", "”", "’", "」", "』", "）", "】", "]", "》",
     ]
+}
+
+/// Both coordinates address decoded UTF-8, never the original file encoding.
+public struct AudiobookWorkingSourceSpan: Codable, Equatable, Sendable {
+    public let workingRange: AudiobookSourceRange
+    public let referenceRange: AudiobookSourceRange
+    /// Inserted whitespace maps to the removed layout gap, not a fabricated 1:1 offset.
+    public let isGenerated: Bool
+    /// Original layout evidence, recorded only on the first retained span of a paragraph.
+    public var isIsolatedTitleCandidate: Bool? = nil
+}
+
+public struct AudiobookPreparedText: Equatable, Sendable {
+    public let workingUTF8: Data
+    public let workingSHA256: String
+    public let preparationVersion: String
+    public let sourceMap: [AudiobookWorkingSourceSpan]
+
+    public func sourceIndex() throws -> AudiobookSourceIndex {
+        try AudiobookSourceIndex(utf8: workingUTF8, titleEvidence: Dictionary(uniqueKeysWithValues:
+            sourceMap.compactMap { span in span.isIsolatedTitleCandidate.map { (span.workingRange.lowerBound, $0) } }))
+    }
+}
+
+public enum AudiobookTextPreparation {
+    public static let version = "audiobook_text_preparation_v1"
+
+    public static func prepare(referenceUTF8: Data) throws -> AudiobookPreparedText {
+        let reference = try AudiobookSourceIndex(utf8: referenceUTF8)
+        var output = Data()
+        var mapping: [AudiobookWorkingSourceSpan] = []
+        var previousReferenceEnd: Int64 = 0
+        func append(_ data: Data, referenceRange: AudiobookSourceRange, generated: Bool, isolatedTitle: Bool? = nil) {
+            guard !data.isEmpty else { return }
+            let start = Int64(output.count)
+            output.append(data)
+            mapping.append(.init(workingRange: .init(lowerBound: start, upperBound: Int64(output.count)),
+                                 referenceRange: referenceRange, isGenerated: generated, isIsolatedTitleCandidate: isolatedTitle))
+            previousReferenceEnd = referenceRange.upperBound
+        }
+        for paragraph in reference.paragraphs {
+            let raw = try reference.text(in: paragraph.sourceRange)
+            // Keep exact retained byte ranges; only trim physical-line layout whitespace.
+            var lineStart = paragraph.sourceRange.lowerBound
+            var pieces: [(Data, AudiobookSourceRange)] = []
+            var current = ""
+            func flushLine() {
+                let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty, let range = current.range(of: trimmed) {
+                    let start = lineStart + Int64(current[..<range.lowerBound].utf8.count)
+                    pieces.append((Data(trimmed.utf8), .init(lowerBound: start, upperBound: start + Int64(trimmed.utf8.count))))
+                }
+                current = ""
+            }
+            var offset = lineStart
+            for scalar in raw.unicodeScalars {
+                if scalar == "\r" || scalar == "\n" {
+                    flushLine()
+                    lineStart = offset + Int64(scalar.utf8.count)
+                } else { current.unicodeScalars.append(scalar) }
+                offset += Int64(scalar.utf8.count)
+            }
+            flushLine()
+            guard let first = pieces.first else { continue }
+            if !output.isEmpty {
+                append(Data("\n\n".utf8), referenceRange: .init(lowerBound: previousReferenceEnd, upperBound: first.1.lowerBound), generated: true)
+            }
+            var joined = ""
+            for (pieceIndex, piece) in pieces.enumerated() {
+                let (bytes, range) = piece
+                let text = String(decoding: bytes, as: UTF8.self)
+                // Use the same joining policy as paragraph classification/display.
+                if !joined.isEmpty {
+                    let combined = AudiobookSourceIndex.joinParagraphLines(joined + "\n" + text)
+                    if combined.utf8.count > joined.utf8.count + bytes.count {
+                        append(Data(" ".utf8), referenceRange: .init(lowerBound: previousReferenceEnd, upperBound: range.lowerBound), generated: true)
+                    }
+                }
+                append(bytes, referenceRange: range, generated: false, isolatedTitle: pieceIndex == 0 ? paragraph.isIsolatedTitleCandidate : nil)
+                joined = text
+            }
+        }
+        guard !output.isEmpty else { throw AudiobookImportError.emptyFile }
+        return .init(workingUTF8: output, workingSHA256: AudiobookDigest.sha256Hex(output),
+                     preparationVersion: version, sourceMap: mapping)
+    }
 }

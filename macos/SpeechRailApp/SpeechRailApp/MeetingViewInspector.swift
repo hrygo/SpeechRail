@@ -49,7 +49,7 @@ extension MeetingView {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                     inspectorRow(
                         "时间",
-                        record.startedAt.formatted(date: .numeric, time: .shortened)
+                        record.startedAt.speechRailFormatted()
                     )
                     inspectorRow("文字记录", "\(reviewLines.count) 段")
                     inspectorRow(

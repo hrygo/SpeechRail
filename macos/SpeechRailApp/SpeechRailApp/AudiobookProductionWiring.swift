@@ -81,7 +81,7 @@ public enum AudiobookProductionWiring {
         }
     }
 
-    private struct LiveAudiobookSpeechRenderer: AudiobookSpeechRenderer {
+    struct LiveAudiobookSpeechRenderer: AudiobookSpeechRenderer {
         let discoveryClient: any ServiceCapabilityDiscoveryClient
         let renderClient: any SpeechRailSpeechRenderClient
         let voiceDesignClient: any SpeechRailVoiceDesignClient
@@ -97,6 +97,7 @@ public enum AudiobookProductionWiring {
 
         private static func padReferenceTextIfNeeded(_ raw: String) -> String {
             let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if (20...240).contains(trimmed.unicodeScalars.count) { return trimmed }
             if trimmed.count >= 38 {
                 return String(trimmed.prefix(180))
             }
@@ -160,16 +161,22 @@ public enum AudiobookProductionWiring {
                   let model = SpeechRailCapabilityRevisionSelector.creatorRequestOptions(voiceID: voiceID, in: snapshot)?.expectedModelRevision else {
                 throw ServiceAPIClientError.invalidContract("voice_identity_unknown")
             }
-            try AudiobookCastRegistry.validateRenderBinding(.init(roleID: UUID(), voiceID: voiceID, voiceRevision: revision, modelRevision: model), snapshot: snapshot)
+            // Publication provides an identity. The batch owns the subsequent output
+            // acceptance, asset registration and strictly gated role binding.
+            try AudiobookCastRegistry.validateRenderBinding(.init(roleID: UUID(), voiceID: voiceID, voiceRevision: revision, modelRevision: model),
+                snapshot: snapshot, requireProductionReady: false)
             return AudiobookLeadVoiceCreationOutput(voiceID: voice.id, voiceName: voice.name, voiceRevision: revision, modelRevision: model)
         }
 
         func createAndPublishLeadVoice(
             _ request: AudiobookLeadVoiceCreationRequest
         ) async throws -> AudiobookLeadVoiceCreationOutput {
+            try Task.checkCancellation()
             if let snapshot = try? await fetchEffectiveCapabilities(), snapshot.voices.contains(where: { $0.id == request.targetVoiceID }) {
+                try Task.checkCancellation()
                 return try Self.leadVoiceOutput(voiceID: request.targetVoiceID, snapshot: snapshot)
             }
+            try Task.checkCancellation()
 
             let rawCandidates = request.referenceTextCandidates.isEmpty
                 ? ["在漫长的岁月里，海风吹拂着古老的礁石，每个人都在寻找属于自己的答案与远方。"]
@@ -178,11 +185,15 @@ public enum AudiobookProductionWiring {
             var lastError: Error = ServiceAPIClientError.invalidResponse
 
             for (attemptIndex, refText) in candidates.prefix(2).enumerated() {
+                try Task.checkCancellation()
                 let attemptSeed = max(0, request.seed + attemptIndex * 17)
                 let attemptVoiceID = attemptIndex == 0
                     ? request.targetVoiceID
                     : "\(request.targetVoiceID)_\(attemptIndex)"
-                let idempotencyKey = "ab-lead-\(request.bookID.uuidString.prefix(8))-\(request.roleID.uuidString.prefix(8))-\(attemptIndex)"
+                let recipeDigest = AudiobookCastingDigest.hash(["book": request.bookID.uuidString,
+                    "role": request.roleID.uuidString, "voice": attemptVoiceID, "name": request.voiceName,
+                    "instruction": request.instruction, "text": refText, "seed": String(attemptSeed)])
+                let idempotencyKey = "ab-voice-\(recipeDigest.prefix(48))"
 
                 do {
                     var candidate = try await voiceDesignClient.createVoiceDesignCandidate(
@@ -193,6 +204,11 @@ public enum AudiobookProductionWiring {
                         seed: attemptSeed,
                         idempotencyKey: idempotencyKey
                     )
+                    try Task.checkCancellation()
+
+                    if candidate.knownState == .cancelled || candidate.knownState == .failed {
+                        throw AudiobookVoiceCreationError.rejectedCandidate
+                    }
 
                     if candidate.knownState != .confirmed
                         && candidate.knownState != .validating
@@ -203,6 +219,7 @@ public enum AudiobookProductionWiring {
                             id: candidate.id,
                             referenceText: nil
                         )
+                        try Task.checkCancellation()
                     }
 
                     let validationTestText = refText.contains("清晨的微风拂过宁静的湖面")
@@ -216,12 +233,14 @@ public enum AudiobookProductionWiring {
                             capabilityKey: nil,
                             mode: .validationOnly
                         )
+                        try Task.checkCancellation()
                     }
 
                     guard let validation = candidate.latestValidation,
                           validation.machineStatus == VoiceDesignReview.pass.rawValue
                     else {
                         _ = try? await voiceDesignClient.cancelVoiceDesignCandidate(id: candidate.id)
+                        lastError = AudiobookVoiceCreationError.rejectedCandidate
                         continue
                     }
 
@@ -233,17 +252,25 @@ public enum AudiobookProductionWiring {
                             mode: .automatedAcceptance
                         )
                     }
+                    try Task.checkCancellation()
 
                     let published = try await voiceDesignClient.publishVoiceDesignCandidate(
                         id: candidate.id,
                         expectedCandidateRevision: candidate.revision
                     )
 
-                    let snapshot = try await fetchEffectiveCapabilities()
-                    let output = try Self.leadVoiceOutput(voiceID: published.voice.id, snapshot: snapshot)
-                    guard output.voiceRevision == published.voice.revision else { throw ServiceAPIClientError.invalidContract("casting_identity_changed") }
-                    return output
+                    // Publication already committed. Finish identity verification even if
+                    // the batch is stopped, so the workflow can register the completed asset.
+                    return try await Task {
+                        let snapshot = try await fetchEffectiveCapabilities()
+                        let output = try Self.leadVoiceOutput(voiceID: published.voice.id, snapshot: snapshot)
+                        guard output.voiceRevision == published.voice.revision else { throw ServiceAPIClientError.invalidContract("casting_identity_changed") }
+                        return output
+                    }.value
+                } catch is CancellationError {
+                    throw CancellationError()
                 } catch {
+                    try Task.checkCancellation()
                     lastError = error
                     continue
                 }

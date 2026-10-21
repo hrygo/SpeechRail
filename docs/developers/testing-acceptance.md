@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-version: "3.3.58"
-date: 2026-10-20
+version: "3.3.59"
+date: 2026-10-21
 ---
 
 # SpeechRail 测试与验收
@@ -820,11 +820,21 @@ swift test --package-path macos/SpeechRailApp --filter ASRSessionReplaySamplerHa
 
 ## 有声书工坊专项测试与验收交接
 
+### 加工文本与修订隔离回归
+
+使用临时作品库与 fake analysis client/renderer，定向检查：词内 CRLF 连行、英文空格、诗行和对白边界、繁体与合法 U+FFFD 保留、幂等性、解码参考 UTF-8 来源映射；首次合成与单段重录请求必须等于工作区间文字。冻结旧库升级不得改写原文/音频；覆盖损坏工作文件拒绝、准备失败/CAS 冲突、跨修订迟到请求、检查点拒绝复用、角色证据隔离、历史音频与指定生产修订导出、指针回退及恢复区保存。
+
+```bash
+swift test --package-path macos/SpeechRailApp --filter 'Audiobook(Import|Source|Store|Analysis|AnalysisPrompt|Production|Pronunciation|Revision|Export|Listening|Workflow|Workspace).*Tests'
+```
+
+这些确定性回归不加载模型、不读取真实作品库、不安装 App，也不代表真实听感或全量多音字验收。2026-10-21 的同模型用户听评已确认所测完整片段只连接折行即可消除词内停顿；繁简体样例及“长胖了／長胖了”均读对，但最初的多音字错误未复现。未取得可靠字级时间戳，不报告停顿毫秒值。
+
 ### 数据库结构与升级门禁
 
 有声书作品库结构合同位于 `contracts/audiobook-schema/v<user_version>.sql`。修改建库表、列、约束或索引时必须递增 `AudiobookStoreSchema.currentUserVersion`、新增相应冻结快照和迁移；已存在的历史快照不可修改或删除。Quality Gates 执行 `scripts/check_audiobook_schema.py`，按 Git 基线核对结构变化和版本，不允许同时改写快照来复用旧版本。
 
-`AudiobookStoreTests` 从冻结的历史 DDL 建立合成库，覆盖缺列的 schema 5、部分已补列、正常升级、重复打开、事务失败回滚、当前版本结构漂移、无版本的非空库和更高版本拒绝。验收须证明已有书籍、章节与音频资产身份不变，升级后可导入并持久化新字段；不能用“最新建库 SQL + 修改版本号”替代历史升级证据。所有测试只访问临时库，不修改本机作品库。
+`AudiobookStoreTests` 从冻结的历史 DDL 建立合成库，覆盖冻结的 schema 5/6、部分已补列、正常升级、重复打开、事务失败回滚、当前版本结构漂移、无版本的非空库和更高版本拒绝。验收须证明已有书籍、章节与音频资产身份不变，升级后可导入并持久化新字段；不能用“最新建库 SQL + 修改版本号”替代历史升级证据。所有测试只访问临时库，不修改本机作品库。
 
 ```bash
 python3 scripts/check_audiobook_schema.py --base-ref origin/main
@@ -832,3 +842,5 @@ swift test --package-path macos/SpeechRailApp --filter AudiobookStoreTests
 ```
 
 有声书工坊（T01–T14）的 Python 媒体导出测试、13 个 SwiftPM 模块测试套件、Xcode 构建检查与桌面真机验收清单见 [有声书工坊测试与验收交接手册](audiobook-workshop-testing-handover.md)。
+
+有声书定向回归还覆盖生成空行不新增篇名证据、client factory 等待期间切换文本、同一文本暂停后重启的迟到分析、合成准入取得后的文本校验失败释放，以及作品操作显式准备、部分历史音频跟读与导出选择的闭环。听书和导出历史版本的测试通过 fake 播放器及临时资产执行，不接管前台窗口。

@@ -71,8 +71,7 @@ public struct AudioReferenceAnalysis: Equatable, Sendable {
     public let envelope: [CGFloat]
 
     public var durationText: String {
-        let total = Int(duration.rounded())
-        return String(format: "%02d:%02d", total / 60, total % 60)
+        return SpeechRailDisplayFormat.timecode(duration)
     }
 }
 

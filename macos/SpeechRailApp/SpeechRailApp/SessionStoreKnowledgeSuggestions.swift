@@ -58,8 +58,7 @@ extension SessionStore {
                 proposedItemID: item.id,
                 previousText: old.text,
                 proposedText: item.text,
-                detail: String(format: "相似度 %.0f%%，负责人和期限都没有变化——要不要算同一条由你定",
-                               score * 100)
+                detail: "相似度 \(SpeechRailDisplayFormat.percentage(score))，负责人和期限都没有变化——要不要算同一条由你定"
             ))
         }
         for item in oldItems where !matchedOld.contains(item.id) {
