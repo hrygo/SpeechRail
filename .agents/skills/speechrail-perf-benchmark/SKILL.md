@@ -7,7 +7,7 @@ description: >-
 
 # SpeechRail 性能与质量基准
 
-目标是生成可复现、可比较、不会夸大证据的发布基准。推理走公共 API；原始 JSON、音频、embedding
+目标是生成可复现、可比较、不会夸大证据的测量结果。推理走公共 API；原始 JSON、音频、embedding
 和日志放在仓库外，Git 只保存脱敏汇总报告。
 
 ## 触发与边界
@@ -18,6 +18,9 @@ description: >-
   [speechrail-release](../speechrail-release/SKILL.md)。
 - 生成或比较报告时读取以下指南；修改 README 仍需用户明确要求：
   [报告与 README 规则](references/reporting.md)。
+
+涉及本机硬件与模型时，先按仓库 `AGENTS.md` 读取本机环境事实源，复用仍有效的证据。
+测量请求不自动授权重启、切档或模型下载；单项测量默认使用当前已就绪能力。
 
 ## 共享安全契约
 
@@ -68,7 +71,8 @@ description: >-
 ## 3. 官方入口
 
 正式 benchmark 只接受仓库外 manifest 和 fixture。`prepare_fixtures.py` 仅供开发调试，不得生成独立
-ASR 质量集或作为发布入口。正式入口：
+ASR 质量集或作为发布入口。先核对本轮脚本参数、schema 和实际服务端口，以下命令中的端口为默认示例。
+正式入口：
 
 ```bash
 APP_HOME="${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"
@@ -140,5 +144,6 @@ README 授权边界和核对命令。主流程完成时应满足：
 - 原始制品保存到仓库外受限目录，Git 中只有脱敏汇总；
 - 报告记录 identity、warm/cold/N、资源采样完整性、外部客户端隔离、gate、限制和未验证项；
 - 性能/质量不足时写 `unset`/`fail`，不以一次 smoke、健康端点或目录名代替证据；
-- 最终 active profile 与开始一致，服务 listener、health/ready 和必要 smoke 复核通过；
+- 最终 active profile 与开始一致；执行过切档或重启时复核 listener、health/ready 与请求覆盖的 smoke。
+  未改变运行态的单项测量复用本轮身份及公共推理证据，不为填满完成条件补跑额外 smoke；
 - 用户请求正式归档时更新性能归档索引；临时测量按指定位置交付。README 只有在用户明确要求同步时才修改。
