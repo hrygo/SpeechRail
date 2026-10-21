@@ -159,6 +159,8 @@ macOS 打包阶段的 CI 也执行同一步）；`dist/`、模型、音频、日
 `SIGKILL`，并在强杀后最多等待 `10 秒` 确认 lock 释放。
 
 wheel 替换和 profile 切换分开执行；不要直接使用底层 `launchctl`、`pkill`、`killall` 或手工 plist。
+服务启停使用当前已安装 runtime；通过 `runtime/current/.venv/bin/python` 及服务命令行核对执行身份，
+不用源码 `.venv` 代替安装态。
 
 ## 4. macOS App 构建、安装与清理
 
