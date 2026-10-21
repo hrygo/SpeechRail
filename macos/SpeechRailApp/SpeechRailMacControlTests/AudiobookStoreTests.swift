@@ -7,6 +7,144 @@ import XCTest
 #endif
 
 final class AudiobookStoreTests: XCTestCase {
+    func testChapterEditPreservesCanonicalEquivalentButDifferentUserBytes() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try AudiobookProjectStore(root: root)
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data("café".utf8))
+        let id = try await store.importBook(preview)
+        let draft = try await store.chapterEditDraft(bookID: id, chapterID: preview.chapters[0].id)
+        let decomposed = "cafe\u{0301}"
+        XCTAssertEqual(draft.body, decomposed, "Swift string equality uses canonical equivalence")
+        XCTAssertTrue(draft.hasChanges(title: draft.title, body: decomposed), "Closing the editor must warn for byte-only changes")
+        let result = try await store.saveChapterEdit(draft, title: draft.title, body: decomposed)
+        XCTAssertNotEqual(result.sourceID, draft.sourceID)
+        let source = try await store.workingSourceSnapshot(bookID: id)
+        XCTAssertEqual(source.sourceIndex.utf8Data, Data(decomposed.utf8))
+        let fresh = try await store.chapterEditDraft(bookID: id, chapterID: result.chapterID)
+        _ = try await store.saveChapterEdit(fresh, title: "café", body: fresh.body)
+        let named = try await store.chapterEditDraft(bookID: id, chapterID: result.chapterID)
+        XCTAssertTrue(named.hasChanges(title: decomposed, body: named.body))
+        _ = try await store.saveChapterEdit(named, title: decomposed, body: named.body)
+        let renamed = try await store.chapterEditDraft(bookID: id, chapterID: result.chapterID)
+        XCTAssertEqual(Data(renamed.title.utf8), Data(decomposed.utf8))
+        XCTAssertFalse(renamed.hasChanges(title: renamed.title, body: renamed.body))
+        do { try await store.renameChapter(bookID: id, chapterID: result.chapterID, title: "旧窗口", expectedTitle: named.title); XCTFail("Byte-different stale title accepted") }
+        catch { XCTAssertEqual(error as? AudiobookChapterTextEditError, .staleDraft) }
+    }
+
+    func testChapterEditPersistsUserTextAndKeepsReferenceAndPriorRevision() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data("第一章\n老監\n生在寒\n暄。\n\n第二章\n原有的后文。".utf8))
+        let store = try AudiobookProjectStore(root: root)
+        let bookID = try await store.importBook(preview)
+        let old = try await store.workingSourceSnapshot(bookID: bookID)
+        let chapters = try await store.chapters(for: bookID)
+        XCTAssertEqual(chapters.count, 2)
+        let draft = try await store.chapterEditDraft(bookID: bookID, chapterID: chapters[0].id)
+        let body = "人工修改的老監生。👩‍👩‍👧‍👦 e\u{0301}\n\n保留用户换行。\n"
+        let result = try await store.saveChapterEdit(draft, title: "手工篇名", body: body)
+        XCTAssertNotEqual(result.sourceID, old.sourceID)
+        let reopened = try AudiobookProjectStore(root: root)
+        let updated = try await reopened.chapterEditDraft(bookID: bookID, chapterID: result.chapterID)
+        XCTAssertEqual(updated.body, body)
+        XCTAssertEqual(updated.title, "手工篇名")
+        let reference = try await reopened.referenceSourceIndex(for: bookID)
+        XCTAssertEqual(reference.utf8Data, preview.referenceUTF8)
+        let oldChapters = try await reopened.chapters(for: bookID, sourceID: old.sourceID)
+        XCTAssertEqual(oldChapters, chapters)
+        let currentChapters = try await reopened.chapters(for: bookID)
+        let current = try await reopened.workingSourceSnapshot(bookID: bookID)
+        XCTAssertEqual(try current.sourceIndex.text(in: currentChapters[1].sourceRange), try old.sourceIndex.text(in: chapters[1].sourceRange))
+        try current.sourceIndex.validateCoverage(currentChapters.map(\.sourceRange))
+        // Editing a user-generated span again must not manufacture reference offsets.
+        let again = try await reopened.saveChapterEdit(updated, title: updated.title, body: "再次修改👋。")
+        let latest = try await reopened.chapterEditDraft(bookID: bookID, chapterID: again.chapterID)
+        XCTAssertEqual(latest.body, "再次修改👋。")
+        _ = try await reopened.workingSourceSnapshot(bookID: bookID)
+        XCTAssertTrue(try sqlite(root, sql: "PRAGMA foreign_key_check;").isEmpty)
+    }
+
+    func testChapterEditNoOpTitleOnlyStaleAndDiskFailureAreSafe() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data("第一章\n原来的正文。".utf8))
+        let store = try AudiobookProjectStore(root: root)
+        let bookID = try await store.importBook(preview)
+        let chapterID = try XCTUnwrap(preview.chapters.first?.id)
+        let draft = try await store.chapterEditDraft(bookID: bookID, chapterID: chapterID)
+        let unchanged = try await store.saveChapterEdit(draft, title: draft.title, body: draft.body)
+        XCTAssertEqual(unchanged.sourceID, preview.sourceID)
+        let renamed = try await store.saveChapterEdit(draft, title: "新章名", body: draft.body)
+        XCTAssertEqual(renamed.chapterID, chapterID)
+        XCTAssertEqual(renamed.sourceID, preview.sourceID)
+        do { try await store.renameChapter(bookID: bookID, chapterID: chapterID, title: "旧窗口的标题", expectedTitle: draft.title); XCTFail("Stale rename accepted") }
+        catch { XCTAssertEqual(error as? AudiobookChapterTextEditError, .staleDraft) }
+        do { _ = try await store.saveChapterEdit(draft, title: "过期", body: "过期草稿。"); XCTFail("Stale layout accepted") }
+        catch { XCTAssertEqual(error as? AudiobookChapterTextEditError, .staleDraft) }
+        let fresh = try await store.chapterEditDraft(bookID: bookID, chapterID: chapterID)
+        await store.setSimulateDiskFull(true)
+        do { _ = try await store.saveChapterEdit(fresh, title: fresh.title, body: "新内容。"); XCTFail("Disk failure accepted") }
+        catch { XCTAssertEqual(error as? AudiobookStoreError, .diskFull) }
+        let persisted = try await store.chapterEditDraft(bookID: bookID, chapterID: chapterID)
+        XCTAssertEqual(persisted, fresh)
+        XCTAssertEqual(try sqlite(root, sql: "SELECT COUNT(*) FROM sources;"), [["2"]])
+    }
+
+    func testChapterEditRejectsAnalysisAndPreservesHistoricalAudio() async throws {
+        let fixture = try makeFrozenFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let store = try AudiobookProjectStore(root: fixture.root)
+        _ = try await store.prepareWorkingRevision(bookID: fixture.bookID, expectedSourceID: fixture.sourceID)
+        let chapters = try await store.chapters(for: fixture.bookID)
+        let draft = try await store.chapterEditDraft(bookID: fixture.bookID, chapterID: chapters[0].id)
+        let edited = try await store.saveChapterEdit(draft, title: draft.title, body: "用户更新后的正文。")
+        let fresh = try await store.chapterEditDraft(bookID: fixture.bookID, chapterID: edited.chapterID)
+        _ = try await store.beginAnalysisRun(bookID: fixture.bookID, expectedSourceID: edited.sourceID, runID: UUID())
+        do { _ = try await store.saveChapterEdit(fresh, title: fresh.title, body: "不能覆盖分析。"); XCTFail("Analysis race accepted") }
+        catch { XCTAssertEqual(error as? AudiobookChapterTextEditError, .notEditable) }
+        XCTAssertEqual(try Data(contentsOf: fixture.root.appendingPathComponent(fixture.candidate.relativeAssetPath)), fixture.wav)
+        let old = try await store.chapters(for: fixture.bookID, sourceID: fixture.sourceID)
+        XCTAssertEqual(old.map(\.id), [fixture.chapterID])
+    }
+
+    func testChapterEditKeepsManualLayoutSkipsAndExcludesImportedDirectory() async throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try AudiobookProjectStore(root: root)
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data("第一章\n目录占位\n\n实际内容。\n\n第二章\n后文内容。".utf8))
+        let id = try await store.importBook(preview)
+        let source = try await store.sourceIndex(for: id)
+        var chapters = try await store.chapters(for: id)
+        let excluded = try XCTUnwrap(source.utf8Data.range(of: Data("目录占位".utf8)))
+        chapters[0].excludedRanges = [.init(lowerBound: Int64(excluded.lowerBound), upperBound: Int64(excluded.upperBound))]
+        chapters[0].title = "手工目录甲"
+        chapters[1].title = "手工目录乙"
+        chapters[1].isSkipped = true
+        try await store.updateChapters(bookID: id, chapters: chapters)
+        let draft = try await store.chapterEditDraft(bookID: id, chapterID: chapters[0].id)
+        XCTAssertFalse(draft.body.contains("目录占位"))
+        do { _ = try await store.saveChapterEdit(draft, title: " ", body: draft.body); XCTFail("Empty title accepted") }
+        catch { XCTAssertEqual(error as? AudiobookChapterTextEditError, .emptyTitle) }
+        do { _ = try await store.saveChapterEdit(draft, title: draft.title, body: "\n "); XCTFail("Empty body accepted") }
+        catch { XCTAssertEqual(error as? AudiobookChapterTextEditError, .emptyBody) }
+        _ = try await store.saveChapterEdit(draft, title: draft.title, body: draft.body)
+        let unchangedChapters = try await store.chapters(for: id)
+        XCTAssertEqual(unchangedChapters, chapters)
+        let changed = try await store.saveChapterEdit(draft, title: draft.title, body: "用户正文🧑🏽‍💻。")
+        let result = try await store.chapters(for: id)
+        XCTAssertEqual(result.map(\.title), ["手工目录甲", "手工目录乙"])
+        XCTAssertTrue(result[1].isSkipped)
+        XCTAssertTrue(result[0].excludedRanges.isEmpty)
+        let saved = try await store.chapterEditDraft(bookID: id, chapterID: changed.chapterID)
+        XCTAssertEqual(saved.body, "用户正文🧑🏽‍💻。")
+        do { _ = try await store.saveChapterEdit(draft, title: draft.title, body: "旧草稿不能再提交。"); XCTFail("Stale source accepted") }
+        catch { XCTAssertEqual(error as? AudiobookChapterTextEditError, .staleDraft) }
+        let oldPath = try XCTUnwrap(try sqlite(root, sql: "SELECT canonical_rel_path FROM sources WHERE id = '\(preview.sourceID)';").first?.first)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(oldPath)), source.utf8Data)
+    }
+
     func testImportPersistsPreparedBytesAndImmutableReference() async throws {
         let root = try makeTempRoot()
         defer { try? FileManager.default.removeItem(at: root) }

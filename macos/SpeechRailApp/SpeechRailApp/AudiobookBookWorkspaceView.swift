@@ -228,6 +228,12 @@ public struct AudiobookBookWorkspaceView: View {
             .sheet(item: $chapterRenameTarget) { target in
                 chapterRenameSheet(for: target)
             }
+            .sheet(item: Binding(
+                get: { workflow.chapterEditDraft },
+                set: { if $0 == nil { workflow.cancelChapterEditing() } }
+            )) { draft in
+                AudiobookChapterEditingSheet(workflow: workflow, draft: draft)
+            }
             .sheet(isPresented: $bindableWorkflow.isShowingVoicePreparationSheet) {
                 AudiobookVoicePreparationSheet(workflow: workflow)
             }
@@ -668,6 +674,11 @@ public struct AudiobookBookWorkspaceView: View {
     private var chapterOrganizationMenu: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
             Menu {
+                Button("编辑章节…", systemImage: "square.and.pencil") {
+                    Task { await workflow.beginChapterEditing() }
+                }
+                .disabled(!workflow.canEditSelectedChapterText)
+                Divider()
                 Button("重命名章节…", systemImage: "pencil") {
                     guard let bookID = workflow.selectedBook?.id,
                           let chapter = workflow.chapters.first(where: { $0.id == workflow.selectedChapterID })
@@ -767,7 +778,7 @@ public struct AudiobookBookWorkspaceView: View {
                     let chapterID = target.chapterID
                     let title = chapterRenameDraft
                     chapterRenameTarget = nil
-                    Task { await workflow.renameChapter(chapterID: chapterID, title: title) }
+                    Task { await workflow.renameChapter(chapterID: chapterID, title: title, expectedTitle: target.title) }
                 }
                 .speechRailButton(.primary)
                 .keyboardShortcut(.defaultAction)
@@ -814,11 +825,25 @@ public struct AudiobookBookWorkspaceView: View {
     private var preparationStageView: some View {
         SessionPanel {
             VStack(alignment: .leading, spacing: 0) {
-                SessionPanelHead(
-                    title: "原文与说话人归属",
-                    trailingDetail: "共 \(workflow.chapterAtoms.count) 段 · 本章待确认 \(workflow.unknownAnnotationsInSelectedChapter.count) 处 · 全书 \(workflow.totalUnknownSpeakerCount) 处"
-                )
-                .help("只读保真原文，AI 仅标注说话人归属，不改写一字")
+                HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    SessionPanelHead(
+                        title: "正文与说话人归属",
+                        trailingDetail: "共 \(workflow.chapterAtoms.count) 段 · 本章待确认 \(workflow.unknownAnnotationsInSelectedChapter.count) 处 · 全书 \(workflow.totalUnknownSpeakerCount) 处"
+                    )
+                    .frame(maxWidth: .infinity)
+                    if workflow.selectedBook?.analysisState == .notStarted {
+                        Button {
+                            Task { await workflow.beginChapterEditing() }
+                        } label: {
+                            Label(workflow.isLoadingChapterEdit ? "正在读取…" : "编辑章节…", systemImage: "square.and.pencil")
+                        }
+                        .speechRailButton(.secondary)
+                        .disabled(!workflow.canEditSelectedChapterText)
+                        .padding(.trailing, SpeechRailDesignTokens.Spacing.md)
+                        .accessibilityIdentifier("audiobook-edit-chapter")
+                    }
+                }
+                .help("分析和配音使用保存后的正文。开始分析前可编辑章节标题与正文。")
                 SessionHairline()
 
                 if workflow.totalUnknownSpeakerCount > 0 {
@@ -2789,5 +2814,93 @@ private struct AudiobookVoicePickerPopover: View {
         .onHover { hovering in
             hoveredVoiceID = hovering ? voice.id : nil
         }
+    }
+}
+
+/// A draft is kept in Workflow so a view refresh cannot lose unsaved text.
+private struct AudiobookChapterEditingSheet: View {
+    @Bindable var workflow: AudiobookWorkflowModel
+    let draft: AudiobookChapterEditDraft
+    @State private var isConfirmingDiscard = false
+    @FocusState private var focusedField: Field?
+    private enum Field { case title, body }
+
+    private var hasChanges: Bool {
+        draft.hasChanges(title: workflow.chapterEditTitle, body: workflow.chapterEditBody)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+            Text("编辑章节")
+                .font(SpeechRailDesignTokens.Typography.sectionTitle)
+            Text("保存后的内容将用于后续分析与配音。原始导入内容保留供参考。")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Text("章节标题")
+                TextField("章节标题", text: $workflow.chapterEditTitle)
+                    .speechRailSingleLineInput(.regular)
+                    .focused($focusedField, equals: .title)
+                    .accessibilityIdentifier("audiobook-chapter-edit-title")
+                    .disabled(workflow.isSavingChapterEdit)
+                Text("章节标题用于目录和导出；正文中的标题行可在下方单独修改。")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            }
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Text("正文")
+                TextEditor(text: $workflow.chapterEditBody)
+                    .font(SpeechRailDesignTokens.Typography.body)
+                    .scrollContentBackground(.hidden)
+                    .padding(SpeechRailDesignTokens.Spacing.xs)
+                    .speechRailRecessedSlot()
+                    .focused($focusedField, equals: .body)
+                    .accessibilityLabel("章节正文")
+                    .accessibilityIdentifier("audiobook-chapter-edit-body")
+            }
+            .frame(maxHeight: .infinity)
+            .disabled(workflow.isSavingChapterEdit)
+            if let error = workflow.chapterEditError {
+                NoticeBar(tone: .critical, message: error)
+            }
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                if workflow.isSavingChapterEdit {
+                    ProgressView().controlSize(.small)
+                    Text("正在保存…")
+                }
+                Spacer()
+                Button("取消") { requestClose() }
+                    .speechRailButton(.secondary)
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(workflow.isSavingChapterEdit)
+                Button("保存更改") {
+                    Task {
+                        await workflow.saveChapterEditing(title: workflow.chapterEditTitle, body: workflow.chapterEditBody)
+                    }
+                }
+                .speechRailButton(.primary)
+                .keyboardShortcut("s", modifiers: .command)
+                .disabled(workflow.isSavingChapterEdit
+                    || workflow.chapterEditTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || workflow.chapterEditBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .accessibilityIdentifier("audiobook-chapter-edit-save")
+            }
+        }
+        .padding(SpeechRailDesignTokens.Spacing.lg)
+        .frame(width: SpeechRailDesignTokens.Layout.Sheet.prominentWidth,
+               height: SpeechRailDesignTokens.Layout.audiobookCastingDetailsHeight)
+        .interactiveDismissDisabled(hasChanges || workflow.isSavingChapterEdit)
+        .confirmationDialog("放弃尚未保存的章节修改？", isPresented: $isConfirmingDiscard, titleVisibility: .visible) {
+            Button("放弃更改", role: .destructive) { workflow.cancelChapterEditing() }
+            Button("继续编辑", role: .cancel) {}
+        } message: {
+            Text("已保存的正文和原始导入内容不会改变。")
+        }
+        .task { focusedField = .body }
+    }
+
+    private func requestClose() {
+        if hasChanges { isConfirmingDiscard = true }
+        else { workflow.cancelChapterEditing() }
     }
 }

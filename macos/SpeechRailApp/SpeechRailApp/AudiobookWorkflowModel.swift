@@ -131,7 +131,14 @@ public final class AudiobookWorkflowModel {
 
     // MARK: - Observable Projections
 
-    public var surfaceMode: SurfaceMode = .shelf
+    private var surfaceModeValue: SurfaceMode = .shelf
+    public var surfaceMode: SurfaceMode {
+        get { surfaceModeValue }
+        set {
+            guard !isChapterTextEditing || newValue == surfaceModeValue else { return }
+            surfaceModeValue = newValue
+        }
+    }
     public var workbenchTab: WorkbenchTab = .preparation
     public var shelfFilter: ShelfFilter = .all
     public var searchQuery: String = ""
@@ -145,13 +152,18 @@ public final class AudiobookWorkflowModel {
     @ObservationIgnored private var storeRecoveryTask: Task<Void, Error>?
     @ObservationIgnored private var storeRecoveryRequestID: UUID?
     public private(set) var isLoadingChapterDetails: Bool = false
+    private var selectedChapterValue: UUID?
     public var selectedChapterID: UUID? {
-        didSet {
-            if selectedChapterID != oldValue && !isSuppressingChapterAutoReload {
+        get { selectedChapterValue }
+        set {
+            guard !isChapterTextEditing || isSuppressingChapterAutoReload || newValue == selectedChapterValue else { return }
+            let oldValue = selectedChapterValue
+            selectedChapterValue = newValue
+            if newValue != oldValue && !isSuppressingChapterAutoReload {
                 chapterSelectionLoad.reset()
                 applyChapterDetails(.empty)
                 selectedAtomIDs.removeAll()
-                isLoadingChapterDetails = selectedBook != nil && selectedChapterID != nil
+                isLoadingChapterDetails = selectedBook != nil && newValue != nil
                 Task { await reloadSelectedChapterDetails() }
             }
         }
@@ -294,6 +306,14 @@ public final class AudiobookWorkflowModel {
     public private(set) var productionProgress: AudiobookProductionProgress?
     private var selectedProductionCheckpoint: AudiobookProductionCheckpoint?
     public private(set) var isEditingChapterLayout: Bool = false
+    public private(set) var chapterEditDraft: AudiobookChapterEditDraft?
+    public var chapterEditTitle = ""
+    public var chapterEditBody = ""
+    public private(set) var chapterEditError: String?
+    public private(set) var isLoadingChapterEdit = false
+    public private(set) var isSavingChapterEdit = false
+    private var chapterEditRequestID: UUID?
+    public var isChapterTextEditing: Bool { chapterEditDraft != nil || isLoadingChapterEdit || isSavingChapterEdit }
     public private(set) var resumePlan: AudiobookResumePlan?
     public private(set) var exportCapabilities: MediaCapabilitiesSnapshot = .init(
         available: false,
@@ -358,12 +378,29 @@ public final class AudiobookWorkflowModel {
     public var isCastInspectorPresented: Bool = false
 
     public private(set) var pendingVoiceReturnContext: AudiobookVoiceReturnContext?
-    public private(set) var voiceReturnBannerMessage: String?
-    public var bannerMessage: String?
+    public private(set) var voiceReturnBannerMessage: String? {
+        didSet {
+            voiceReturnNoticeID = UUID()
+            voiceReturnRequiresAction = false
+        }
+    }
+    public private(set) var voiceReturnNoticeID = UUID()
+    public private(set) var voiceReturnRequiresAction = false
+    public var bannerMessage: String? {
+        didSet {
+            bannerNoticeID = UUID()
+            bannerRequiresAction = false
+        }
+    }
+    public private(set) var bannerNoticeID = UUID()
+    public private(set) var bannerRequiresAction = false
     public var errorMessage: String?
     public private(set) var lastTrashedBookID: UUID?
     public private(set) var lastTrashedBookTitle: String?
-    public private(set) var trashUndoMessage: String?
+    public private(set) var trashUndoMessage: String? {
+        didSet { trashUndoNoticeID = UUID() }
+    }
+    public private(set) var trashUndoNoticeID = UUID()
 
     public private(set) var listeningController: AudiobookListeningController?
     public private(set) var pronunciationController: AudiobookPronunciationController?
@@ -625,8 +662,15 @@ public final class AudiobookWorkflowModel {
             && !isLoadingChapterDetails
     }
 
+    public var canEditSelectedChapterText: Bool {
+        guard let book = selectedBook, book.analysisState == .notStarted, book.productionState == .idle,
+              selectedChapterID.map({ id in chapters.contains { $0.id == id } }) == true else { return false }
+        return !isAnalyzing && !isProductionBusy && !isEditingChapterLayout && !isLoadingChapterDetails && !isPreparingWorkingText
+    }
+
     public var chapterStructureEditingStatus: String {
         guard let book = selectedBook else { return "请先打开一本书。" }
+        if isChapterTextEditing { return "正在编辑章节，请保存或取消后继续。" }
         if isEditingChapterLayout { return "正在保存章节更改…" }
         if isAnalyzing || book.analysisState != .notStarted {
             return "全书分析开始后不能拆分或合并章节；请在分析前整理目录。"
@@ -901,6 +945,10 @@ public final class AudiobookWorkflowModel {
     }
 
     public func openBook(_ bookID: UUID) async {
+        guard !isChapterTextEditing || selectedBook?.id == bookID else {
+            errorMessage = "请先保存或取消章节编辑，再切换作品。"
+            return
+        }
         if selectedBook?.id != bookID {
             cancelVoiceDraftCreation()
             voiceDraftRequestID = nil
@@ -942,7 +990,7 @@ public final class AudiobookWorkflowModel {
 
             errorMessage = nil
             if snapshot.book.analysisState == .failed, let failure = snapshot.book.analysisFailure {
-                bannerMessage = "上次分析未完成：\(failure.message)"
+                errorMessage = "上次分析未完成：\(failure.message)"
             }
             let latestChapterSelection = selectedBook?.id == bookID
                 ? selectedChapterID.flatMap { chapterID in
@@ -1076,6 +1124,17 @@ public final class AudiobookWorkflowModel {
         }
     }
 
+    /// 需要用户完成下一步的反馈持续显示，普通操作回执默认自动收起。
+    func showPersistentBanner(_ message: String) {
+        bannerMessage = message
+        bannerRequiresAction = true
+    }
+
+    /// 只收起操作反馈，书籍仍可从废纸篓恢复。
+    public func dismissTrashUndoMessage() {
+        trashUndoMessage = nil
+    }
+
     /// 书架上的「撤销」入口；只恢复刚刚移入废纸篓的那一本，不触碰更早的作品。
     public func undoLastTrash() async {
         guard let bookID = lastTrashedBookID else { return }
@@ -1147,6 +1206,8 @@ public final class AudiobookWorkflowModel {
                 }
                 if self.errorMessage == nil {
                     self.bannerMessage = notes.joined(separator: "，") + "。"
+                    self.bannerRequiresAction = summary.unknownSpeakerCount > 0
+                        || !self.isAuditionConfirmedForSelectedBook
                 }
             } catch {
                 guard self.analysisInstallEpoch == installEpoch else { return }
@@ -1604,7 +1665,7 @@ public final class AudiobookWorkflowModel {
                     await prepareVoiceCreationDrafts(presentReview: false)
                     if selectedBook?.id == targetID, !voiceCreationDrafts.isEmpty {
                         errorMessage = nil
-                        bannerMessage = "缺少的声音已备好创建资料，请浏览确认后批量创建。"
+                        showPersistentBanner("缺少的声音已备好创建资料，请浏览确认后批量创建。")
                     }
                 }
                 return
@@ -1631,6 +1692,7 @@ public final class AudiobookWorkflowModel {
                 bannerMessage = consentsToSharedMinorVoices
                     ? "全书配声方案已准备好；部分同章角色会使用相同声音，请在下方集中确认。"
                     : "全书配声方案已准备好，点击「一键智能配声」即可分配；尚未选声的角色会按需共用声音。"
+                bannerRequiresAction = true
                 return
             }
             castingPreparationProgressText = "正在保存全书配声（3/4）…"
@@ -1661,7 +1723,7 @@ public final class AudiobookWorkflowModel {
                 if totalUnknownSpeakerCount == 0, selectedBook?.analysisState == .allWindowsValidated {
                     _ = await confirmCastAndAudition(switchToProduction: false)
                 } else if totalUnknownSpeakerCount > 0 {
-                    bannerMessage = "全书声音已分配；还有 \(totalUnknownSpeakerCount) 处说话人待确认，可在正文中快速处理。"
+                    showPersistentBanner("全书声音已分配；还有 \(totalUnknownSpeakerCount) 处说话人待确认，可在正文中快速处理。")
                 }
             }
         } catch is CancellationError {
@@ -2056,8 +2118,9 @@ public final class AudiobookWorkflowModel {
             }
             if outcome.resolvedCount > 0 {
                 bannerMessage = "AI 二次复核已自动确认 \(outcome.resolvedCount) 处对白，剩余 \(outcome.remainingUnknownCount) 处需人工确认。"
+                bannerRequiresAction = outcome.remainingUnknownCount > 0
             } else if outcome.remainingUnknownCount > 0 {
-                bannerMessage = "AI 二次复核已完成，剩余 \(outcome.remainingUnknownCount) 处多角色歧义对白请通过上方定位栏人工一键确认。"
+                showPersistentBanner("AI 二次复核已完成，剩余 \(outcome.remainingUnknownCount) 处多角色歧义对白请通过上方定位栏人工一键确认。")
             } else {
                 bannerMessage = "全书所有对白说话人均已确认完毕。"
             }
@@ -2850,9 +2913,9 @@ public final class AudiobookWorkflowModel {
                 workbenchTab = .preparation
                 await jumpToFirstUnknownSpeaker()
                 if resolvedBySecondPass > 0 {
-                    bannerMessage = "已确认人物与声音，AI 二次复核消解了 \(resolvedBySecondPass) 处对白；剩余 \(allUnknownAnnotations.count) 处已为您定位，请点击候选角色芯片快速确认。"
+                    showPersistentBanner("已确认人物与声音，AI 二次复核消解了 \(resolvedBySecondPass) 处对白；剩余 \(allUnknownAnnotations.count) 处已为您定位，请点击候选角色芯片快速确认。")
                 } else {
-                    bannerMessage = "已确认人物与声音；全书仍有 \(allUnknownAnnotations.count) 处待确认说话人，已为您定位至第 1 处。"
+                    showPersistentBanner("已确认人物与声音；全书仍有 \(allUnknownAnnotations.count) 处待确认说话人，已为您定位至第 1 处。")
                 }
             } else {
                 if switchToProduction {
@@ -2898,7 +2961,10 @@ public final class AudiobookWorkflowModel {
                 voiceRevision: options.expectedVoiceRevision, modelRevision: model)
             try AudiobookCastRegistry.validateRenderBinding(binding, snapshot: snapshot)
             await completeVoiceRoundTrip(binding: binding, context: targetContext, creationSource: creationSource)
-        } catch { voiceReturnBannerMessage = "新声音暂时未完成登记，请刷新声音列表后重新选择。" }
+        } catch {
+            voiceReturnBannerMessage = "新声音暂时未完成登记，请刷新声音列表后重新选择。"
+            voiceReturnRequiresAction = true
+        }
     }
 
     public func completeVoiceRoundTrip(
@@ -2916,6 +2982,7 @@ public final class AudiobookWorkflowModel {
 
         guard let activeBookID = selectedBook?.id else {
             voiceReturnBannerMessage = "请重新打开对应书籍后登记新声音。"
+            voiceReturnRequiresAction = true
             return
         }
 
@@ -2928,17 +2995,84 @@ public final class AudiobookWorkflowModel {
             voiceReturnBannerMessage = voiceBindings[targetContext.roleID] == binding
                 ? "已为角色「\(roleName)」配上本书专用的新声音。"
                 : "新声音已登记为本书专用；角色选择已变化，请在选角器中确认是否使用。"
+            voiceReturnRequiresAction = voiceBindings[targetContext.roleID] != binding
             await refreshChapterReadinessMap(for: activeBookID)
             await refreshShelf()
         } catch {
             pendingVoiceReturnContext = nil
             voiceReturnBannerMessage = error.localizedDescription
+            voiceReturnRequiresAction = true
         }
     }
 
     // MARK: - Production & Revision Actions
 
-    public func renameChapter(chapterID: UUID, title: String) async {
+    public func beginChapterEditing() async {
+        guard canEditSelectedChapterText, let bookID = selectedBook?.id, let chapterID = selectedChapterID, let store else { return }
+        let requestID = UUID()
+        chapterEditRequestID = requestID
+        isLoadingChapterEdit = true
+        isEditingChapterLayout = true
+        chapterEditError = nil
+        bookSelectionLoad.reset()
+        defer {
+            if chapterEditRequestID == requestID {
+                isLoadingChapterEdit = false
+                if chapterEditDraft == nil { isEditingChapterLayout = false }
+            }
+        }
+        do {
+            let draft = try await store.chapterEditDraft(bookID: bookID, chapterID: chapterID)
+            guard chapterEditRequestID == requestID, selectedBook?.id == bookID, selectedChapterID == chapterID else { return }
+            chapterEditTitle = draft.title
+            chapterEditBody = draft.body
+            chapterEditDraft = draft
+        } catch {
+            if chapterEditRequestID == requestID { errorMessage = error.localizedDescription }
+        }
+    }
+
+    @discardableResult
+    public func saveChapterEditing(title: String, body: String) async -> Bool {
+        guard let draft = chapterEditDraft, let store, !isSavingChapterEdit,
+              selectedBook?.id == draft.bookID else { return false }
+        isSavingChapterEdit = true
+        chapterEditError = nil
+        chapterEditTitle = title
+        chapterEditBody = body
+        defer { isSavingChapterEdit = false }
+        do {
+            let result = try await store.saveChapterEdit(draft, title: title, body: body)
+            chapterEditDraft = nil
+            chapterEditRequestID = nil
+            chapterEditTitle = ""
+            chapterEditBody = ""
+            isSuppressingChapterAutoReload = true
+            selectedChapterID = result.chapterID
+            isSuppressingChapterAutoReload = false
+            await openBook(draft.bookID)
+            await refreshShelf()
+            isEditingChapterLayout = false
+            bannerMessage = "章节已保存，后续分析与配音将使用更新后的内容。"
+            return true
+        } catch {
+            chapterEditError = error.localizedDescription
+            return false
+        }
+    }
+
+    public func cancelChapterEditing() {
+        guard !isSavingChapterEdit else { return }
+        chapterEditRequestID = nil
+        chapterEditDraft = nil
+        chapterEditTitle = ""
+        chapterEditBody = ""
+        chapterEditError = nil
+        isLoadingChapterEdit = false
+        isEditingChapterLayout = false
+    }
+
+    public func renameChapter(chapterID: UUID, title: String, expectedTitle: String? = nil) async {
         guard canRenameSelectedChapter,
               let bookID = selectedBook?.id,
               let store,
@@ -2954,7 +3088,7 @@ public final class AudiobookWorkflowModel {
         errorMessage = nil
         defer { isEditingChapterLayout = false }
         do {
-            try await store.renameChapter(bookID: bookID, chapterID: chapterID, title: normalizedTitle)
+            try await store.renameChapter(bookID: bookID, chapterID: chapterID, title: normalizedTitle, expectedTitle: expectedTitle)
             if selectedBook?.id == bookID {
                 await openBook(bookID)
             }
@@ -3013,7 +3147,7 @@ public final class AudiobookWorkflowModel {
             }
             await refreshShelf()
             if selectedBook?.id == bookID {
-                bannerMessage = "章节已拆分，原文内容保持不变。请重新分析全书后继续制作。"
+                showPersistentBanner("章节已拆分，原文内容保持不变。请重新分析全书后继续制作。")
             }
         } catch {
             if selectedBook?.id == bookID {
@@ -3056,7 +3190,7 @@ public final class AudiobookWorkflowModel {
             }
             await refreshShelf()
             if selectedBook?.id == bookID {
-                bannerMessage = "章节已合并，原文内容保持不变。请重新分析全书后继续制作。"
+                showPersistentBanner("章节已合并，原文内容保持不变。请重新分析全书后继续制作。")
             }
         } catch {
             if selectedBook?.id == bookID {
@@ -3304,6 +3438,7 @@ public final class AudiobookWorkflowModel {
         bannerMessage = isFragmentRegeneration
             ? "本段新候选已生成；当前章节版本保持不变。请试听后选择“采用此候选”。"
             : "所选章节制作已完成，可立即进入听书或导出。"
+        bannerRequiresAction = isFragmentRegeneration
     }
 
     private func finishProductionRun(_ runID: UUID) {
@@ -3375,7 +3510,7 @@ public final class AudiobookWorkflowModel {
             _ = try await store.prepareWorkingRevision(bookID: book.id, expectedSourceID: book.sourceID)
             if selectedBook?.id == book.id { await openBook(book.id) }
             await refreshShelf()
-            bannerMessage = "加工文本已准备好，请重新分析并确认配声。原文和已有音频已保留，可在音频版本中收听或导出。"
+            showPersistentBanner("加工文本已准备好，请重新分析并确认配声。原文和已有音频已保留，可在音频版本中收听或导出。")
         } catch { errorMessage = error.localizedDescription }
     }
 

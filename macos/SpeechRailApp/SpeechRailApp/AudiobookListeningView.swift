@@ -22,15 +22,6 @@ public struct AudiobookListeningView: View {
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
-            if let notice = listening?.chapterUpdatedBannerMessage {
-                StatusBanner(
-                    kind: .standard,
-                    tone: .healthy,
-                    title: "章节已更新",
-                    message: notice,
-                    actionTitle: "知道了"
-                ) {}
-            }
 
             if listening?.canResumeInterruptedListening == true {
                 StatusBanner(

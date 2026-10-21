@@ -2,7 +2,7 @@
 title: "SpeechRail macOS App 有声书工坊开发说明"
 status: active
 audience: "macOS App 开发者、架构与测试工程师"
-version: "1.12.0"
+version: "1.13.0"
 date: 2026-10-21
 ---
 
@@ -41,6 +41,10 @@ date: 2026-10-21
 
 Store 的 schema 7 将旧 source 标记为 `reference`，不自动准备旧作品。`prepareWorkingRevision(bookID:expectedSourceID:)` 只在明确作品操作中调用，暂存校验后 CAS 切换，保留全部历史行与 WAV；`activateSourceRevision` 按指针回退。工作文件或映射损坏不得回退原文；未准备作品返回 `working_text_preparation_required`。历史收听按章节修订取候选；`ExportController.audit/prepare` 可传 `productionRevisionID`，使用该修订的 source、章节和音频，不写入当前工作采用版本。
 
+分析前章节编辑通过 `chapterEditDraft(bookID:chapterID:)` 冻结活动 source/hash、章节身份和布局摘要；`saveChapterEdit(_:title:body:)` 在事务内复核阶段与版本。正文输入按 UTF-8 原样保存，不调用原文加工或自动分章。正文变更产生新 source、章节和 atom，使用 `isGenerated` 与 `isUserEdited` 标注非逐字参考映射；已存在的来源映射无需迁移。生成映射在非逐字区间内部裁切时，参考证据归左侧，右侧使用其末端锚点，不按比例推算参考偏移。未改章节的字节、顺序、名称及跳过状态保持；仅重命名或无变化不创建工作 source。
+
+正文草稿仅包含 `text(in:excluding:)` 返回的实际正文。用户修改正文后，以可见正文替换本章整个工作范围并清空本章旧目录排除区间；其他章节排除区间按位移更新。原文、旧工作资产和已有音频始终保留。`AudiobookWorkflowModel` 持有草稿及未保存输入，编辑时互斥分析/制作/章节整理及选择；保存失败保留输入和内联错误，保存成功后刷新活动 source 与所选新章节。
+
 回目识别支持“零 / 〇 / ○”，并为与前后正文粘连的可靠回目建立虚拟行边界，边界仍指向原始字节。合集目录优先保留独立篇名，篇内编号章节保留在该篇正文中；章回体优先使用回目。相邻同名标题之间仅有空白或分隔线时合并目录入口，来源文字不删除。CRLF 的两个 scalar 必须同时计入 atom 的 160 scalar 预算。
 
 `AudiobookImportPreview.repeatedContentWarnings` 按完整章节的规整文本摘要发现重复组，不因标题相同就判断正文重复。重复组保留所有章节与原文，`canConfirmImport` 在用户显式确认前为 false；Workflow 导入入口和确认按钮共同执行此门禁。确认仅作用于本次预览，不修改持久化格式。真实语料的可选验证入口见 [测试与验收](testing-acceptance.md#有声书外置小说语料回归)。
@@ -50,7 +54,7 @@ Store 的 schema 7 将旧 source 标记为 `reference`，不自动准备旧作�
 - **`AudiobookWorkshopView.swift`**：顶层容器与页面头部动作、状态结论横幅、模式切换（书架 / 制作工作台 / 沉浸收听）及导入面板。
 - **`AudiobookImportTextView.swift`**：导入核对正文使用 `NSViewRepresentable` 承载只读、可选择的 TextKit 2 `NSTextView` 与 `NSScrollView`；外层提供固定视口，正文高度由 AppKit 管理，不参与 SwiftUI 弹窗尺寸协商。原始/整理排版和章节切换只更新同一个文本控件；正文未变时保留选区与滚动位置，变更时回到开头。输入沿用 `maxPreviewScalars` 上限，不改原始字节、来源区间或章节划分。该控件同时进入 SwiftPM 与 Xcode 单测目标，支持无窗口回归；离屏测试不代表桌面滚动、键盘或复制交互已经验收。
 - **`AudiobookBookShelfView.swift`**：书架网格/列表、引导空态、每本书的进度胶囊与直达动作（「继续制作」「收听」「导出」）；支持把 TXT/EPUB 直接拖入书架，并在移入废纸篓后提供一次性撤销横幅。
-- **`AudiobookBookWorkspaceView.swift`**：左侧章节列表与「整理章节」次级菜单、中央「准备与角色」「制作与返修」两页签、人物与声音面板，以及片段重录、候选对比和显式采用区域。
+- **`AudiobookBookWorkspaceView.swift`**：左侧章节列表与「整理章节」次级菜单、中央「准备与角色」「制作与返修」两页签、人物与声音面板，以及片段重录、候选对比和显式采用区域。分析前在正文面板和菜单提供「编辑章节…」，原生标题/正文编辑器支持显式保存、取消及放弃修改确认；标题用于目录与导出，正文中的标题行独立编辑。分析后保留标题重命名，正文编辑关闭。
 - **`AudiobookListeningView.swift`**：收听视图，含章节目录、正文与「返修此段」导航、传输控制条。
 
 ### 1.3 Python 媒体导出子系统 (`src/speechrail/media/`)

@@ -664,22 +664,8 @@ public actor AudiobookProjectStore {
         let mapData = try Data(contentsOf: resolveOwnedURL(relativePath: mapRel))
         guard AudiobookDigest.sha256Hex(mapData) == metadata.mapSHA256 else { throw AudiobookStoreError.workingSourceChanged }
         let map = try JSONDecoder().decode([AudiobookWorkingSourceSpan].self, from: mapData)
-        var end: Int64 = 0, referenceEnd: Int64 = 0
-        for span in map {
-            try source.validateRangeBounds(span.workingRange)
-            try reference.validateRangeBounds(span.referenceRange)
-            guard span.workingRange.lowerBound == end, !span.workingRange.isEmpty,
-                  span.referenceRange.lowerBound >= referenceEnd else { throw AudiobookStoreError.workingSourceChanged }
-            if !span.isGenerated {
-                guard try source.text(in: span.workingRange) == reference.text(in: span.referenceRange) else {
-                    throw AudiobookStoreError.workingSourceChanged
-                }
-            }
-            end = span.workingRange.upperBound; referenceEnd = span.referenceRange.upperBound
-        }
-        guard end == source.byteCount, source.sourceSHA256 == book.sourceSHA256 else {
-            throw AudiobookStoreError.workingSourceChanged
-        }
+        try AudiobookChapterTextEditing.validateMap(map, working: source, reference: reference)
+        guard source.sourceSHA256 == book.sourceSHA256 else { throw AudiobookStoreError.workingSourceChanged }
         return .init(bookID: bookID, sourceID: book.sourceID, workingSHA256: source.sourceSHA256,
                      preparationVersion: metadata.preparationVersion!, sourceIndex: source)
     }
@@ -802,28 +788,123 @@ public actor AudiobookProjectStore {
             guard let current = try fetchBook(id: bookID), current.sourceID == expectedSourceID else {
                 throw AudiobookStoreError.workingSourceChanged
             }
-            try saveSourceWorkflow(current)
-            try insertSourceRow(bookID: bookID, sourceID: id, sha256: source.sourceSHA256, byteCount: source.byteCount,
-                scalarCount: source.scalarCount, encoding: referenceRecord.encoding, originalRelPath: referenceRecord.originalRel,
-                canonicalRelPath: canonicalRel, createdAt: Date())
-            try markWorkingSource(bookID: bookID, sourceID: id, referenceID: referenceRecord.id, mapRel: mapRel)
-            for chapter in chapters { try upsertChapterRow(chapter) }
-            for atom in atoms { try insertAtomRow(bookID: bookID, atom: atom) }
-            try executePrepared("""
-                UPDATE books SET source_id = ?, source_sha256 = ?, canonical_byte_count = ?, scalar_count = ?,
-                  analysis_state = 'notStarted', production_state = 'idle', listenable_state = ?, confirmed_cast_revision_id = NULL,
-                  confirmed_audition_digest = NULL, analysis_failure_json = NULL, updated_at = ? WHERE id = ? AND source_id = ?;
-                """, [.text(id.uuidString), .text(source.sourceSHA256), .int(source.byteCount), .int(Int64(source.scalarCount)),
-                      .text(current.listenableState == .noneAvailable ? AudiobookListenableState.noneAvailable.rawValue : AudiobookListenableState.previousRevisionAvailable.rawValue), .real(Date().timeIntervalSince1970), .text(bookID.uuidString), .text(expectedSourceID.uuidString)])
-            let narrator = AudiobookCharacter(bookID: bookID, displayName: "旁白", aliases: ["叙述"], isNarrator: true,
-                isMajor: true, chapterIDs: chapters.map(\.id))
-            try upsertCharacterRow(narrator)
+            try insertWorkingRevision(book: current, sourceID: id, source: source, referenceRecord: referenceRecord,
+                canonicalRel: canonicalRel, mapRel: mapRel, chapters: chapters, atoms: atoms)
         }
         activeAnalysisRuns.removeValue(forKey: bookID)
         cachedSourceIndices.removeValue(forKey: bookID)
         cachedCharactersByBook.removeValue(forKey: bookID)
         cachedAnnotationsByBook.removeValue(forKey: bookID)
         return id
+    }
+
+    private func insertWorkingRevision(book current: AudiobookBook, sourceID id: UUID, source: AudiobookSourceIndex,
+        referenceRecord: SourceRecord, canonicalRel: String, mapRel: String,
+        chapters: [AudiobookChapter], atoms: [AudiobookTextAtom]) throws {
+        let bookID = current.id
+        let expectedSourceID = current.sourceID
+        try saveSourceWorkflow(current)
+        try insertSourceRow(bookID: bookID, sourceID: id, sha256: source.sourceSHA256, byteCount: source.byteCount,
+            scalarCount: source.scalarCount, encoding: referenceRecord.encoding, originalRelPath: referenceRecord.originalRel,
+            canonicalRelPath: canonicalRel, createdAt: Date())
+        try markWorkingSource(bookID: bookID, sourceID: id, referenceID: referenceRecord.id, mapRel: mapRel)
+        for chapter in chapters { try upsertChapterRow(chapter) }
+        for atom in atoms { try insertAtomRow(bookID: bookID, atom: atom) }
+        try executePrepared("""
+            UPDATE books SET source_id = ?, source_sha256 = ?, canonical_byte_count = ?, scalar_count = ?,
+              analysis_state = 'notStarted', production_state = 'idle', listenable_state = ?, confirmed_cast_revision_id = NULL,
+              confirmed_audition_digest = NULL, analysis_failure_json = NULL, updated_at = ? WHERE id = ? AND source_id = ?;
+            """, [.text(id.uuidString), .text(source.sourceSHA256), .int(source.byteCount), .int(Int64(source.scalarCount)),
+                  .text(current.listenableState == .noneAvailable ? AudiobookListenableState.noneAvailable.rawValue : AudiobookListenableState.previousRevisionAvailable.rawValue), .real(Date().timeIntervalSince1970), .text(bookID.uuidString), .text(expectedSourceID.uuidString)])
+        let narrator = AudiobookCharacter(bookID: bookID, displayName: "旁白", aliases: ["叙述"], isNarrator: true,
+            isMajor: true, chapterIDs: chapters.map(\.id))
+        try upsertCharacterRow(narrator)
+    }
+
+    private func requireChapterTextEditable(bookID: UUID) throws -> AudiobookBook {
+        guard let book = try fetchBook(id: bookID) else { throw AudiobookStoreError.bookNotFound(bookID) }
+        guard book.analysisState == .notStarted, book.productionState == .idle,
+              activeAnalysisRuns[bookID] == nil, try !hasChapterStructureArtifacts(bookID: bookID) else {
+            throw AudiobookChapterTextEditError.notEditable
+        }
+        return book
+    }
+
+    public func chapterEditDraft(bookID: UUID, chapterID: UUID) throws -> AudiobookChapterEditDraft {
+        let book = try requireChapterTextEditable(bookID: bookID)
+        let snapshot = try workingSourceSnapshot(bookID: bookID)
+        let chapters = try fetchChapters(bookID: bookID)
+        guard let chapter = chapters.first(where: { $0.id == chapterID }) else { throw AudiobookStoreError.chapterNotFound(chapterID) }
+        return .init(bookID: bookID, sourceID: book.sourceID, sourceSHA256: book.sourceSHA256, chapterID: chapterID,
+            layoutDigest: AudiobookCastingDigest.hash(chapters), title: chapter.title,
+            body: try snapshot.sourceIndex.text(in: chapter.sourceRange, excluding: chapter.excludedRanges))
+    }
+
+    private func validateChapterDraft(_ draft: AudiobookChapterEditDraft) throws -> AudiobookBook {
+        let book = try requireChapterTextEditable(bookID: draft.bookID)
+        guard book.sourceID == draft.sourceID, book.sourceSHA256 == draft.sourceSHA256,
+              AudiobookCastingDigest.hash(try fetchChapters(bookID: draft.bookID)) == draft.layoutDigest else {
+            throw AudiobookChapterTextEditError.staleDraft
+        }
+        return book
+    }
+
+    @discardableResult
+    public func saveChapterEdit(_ draft: AudiobookChapterEditDraft, title: String, body: String) throws -> AudiobookChapterEditResult {
+        try Task.checkCancellation()
+        let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedTitle.isEmpty else { throw AudiobookChapterTextEditError.emptyTitle }
+        guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AudiobookChapterTextEditError.emptyBody }
+        _ = try validateChapterDraft(draft)
+        let snapshot = try workingSourceSnapshot(bookID: draft.bookID)
+        // Verify frozen body/title against disk as well; callers cannot supply a forged draft.
+        guard try chapterEditDraft(bookID: draft.bookID, chapterID: draft.chapterID) == draft else {
+            throw AudiobookChapterTextEditError.staleDraft
+        }
+        if body.utf8.elementsEqual(draft.body.utf8) {
+            try inTransaction {
+                _ = try validateChapterDraft(draft)
+                if !normalizedTitle.utf8.elementsEqual(draft.title.utf8) {
+                    try executePrepared("UPDATE chapters SET title = ? WHERE book_id = ? AND id = ? AND source_id = ?;",
+                        [.text(normalizedTitle), .text(draft.bookID.uuidString), .text(draft.chapterID.uuidString), .text(draft.sourceID.uuidString)])
+                    try executePrepared("UPDATE books SET updated_at = ? WHERE id = ?;", [.real(Date().timeIntervalSince1970), .text(draft.bookID.uuidString)])
+                }
+            }
+            return .init(sourceID: draft.sourceID, chapterID: draft.chapterID)
+        }
+        let active = try sourceRecord(bookID: draft.bookID, sourceID: draft.sourceID)
+        guard let referenceID = active.referenceSourceID, let oldMapRel = active.mapRel else { throw AudiobookStoreError.workingTextPreparationRequired }
+        let referenceRecord = try sourceRecord(bookID: draft.bookID, sourceID: referenceID)
+        let reference = try readSourceRecord(referenceRecord)
+        let oldMap = try JSONDecoder().decode([AudiobookWorkingSourceSpan].self,
+            from: Data(contentsOf: resolveOwnedURL(relativePath: oldMapRel)))
+        let id = UUID()
+        let replacement = try AudiobookChapterTextEditing.replacing(source: snapshot.sourceIndex, map: oldMap,
+            chapters: fetchChapters(bookID: draft.bookID), chapterID: draft.chapterID, title: normalizedTitle, body: body, newSourceID: id)
+        let source = try replacement.text.sourceIndex()
+        try AudiobookChapterTextEditing.validateMap(replacement.text.sourceMap, working: source, reference: reference)
+        let atoms = try replacement.chapters.flatMap { try source.buildAtoms(for: $0) }
+        try Task.checkCancellation()
+        if simulateDiskFullOnWrite { throw AudiobookStoreError.diskFull }
+        let canonicalRel = "books/\(draft.bookID)/sources/\(id)-source.utf8"
+        let mapRel = "books/\(draft.bookID)/sources/\(id)-map.json"
+        try FileManager.default.createDirectory(at: resolveOwnedURL(relativePath: canonicalRel).deletingLastPathComponent(), withIntermediateDirectories: true)
+        try replacement.text.workingUTF8.write(to: resolveOwnedURL(relativePath: canonicalRel), options: .atomic)
+        try JSONEncoder().encode(replacement.text.sourceMap).write(to: resolveOwnedURL(relativePath: mapRel), options: .atomic)
+        guard try Data(contentsOf: resolveOwnedURL(relativePath: canonicalRel)) == replacement.text.workingUTF8,
+              try JSONDecoder().decode([AudiobookWorkingSourceSpan].self, from: Data(contentsOf: resolveOwnedURL(relativePath: mapRel))) == replacement.text.sourceMap else {
+            throw AudiobookStoreError.workingSourceChanged
+        }
+        try Task.checkCancellation()
+        try inTransaction {
+            let current = try validateChapterDraft(draft)
+            try insertWorkingRevision(book: current, sourceID: id, source: source, referenceRecord: referenceRecord,
+                canonicalRel: canonicalRel, mapRel: mapRel, chapters: replacement.chapters, atoms: atoms)
+        }
+        cachedSourceIndices.removeValue(forKey: draft.bookID)
+        cachedCharactersByBook.removeValue(forKey: draft.bookID)
+        cachedAnnotationsByBook.removeValue(forKey: draft.bookID)
+        return .init(sourceID: id, chapterID: replacement.selectedID)
     }
 
     private struct SourceWorkflowSnapshot: Codable {
@@ -971,7 +1052,7 @@ public actor AudiobookProjectStore {
         cachedAnnotationsByBook.removeValue(forKey: bookID)
     }
 
-    public func renameChapter(bookID: UUID, chapterID: UUID, title: String) async throws {
+    public func renameChapter(bookID: UUID, chapterID: UUID, title: String, expectedTitle: String? = nil) async throws {
         let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedTitle.isEmpty else {
             throw AudiobookStoreError.statementFailed("章节名称不能为空。")
@@ -980,6 +1061,12 @@ public actor AudiobookProjectStore {
         try inTransaction {
             guard try fetchBook(id: bookID) != nil else {
                 throw AudiobookStoreError.bookNotFound(bookID)
+            }
+            if let expectedTitle {
+                guard let currentTitle = try fetchChapters(bookID: bookID).first(where: { $0.id == chapterID })?.title,
+                      currentTitle.utf8.elementsEqual(expectedTitle.utf8) else {
+                    throw AudiobookChapterTextEditError.staleDraft
+                }
             }
             guard try countRows(
                 "SELECT COUNT(*) FROM chapters WHERE book_id = ? AND source_id = (SELECT source_id FROM books WHERE id = chapters.book_id) AND id = ?;",

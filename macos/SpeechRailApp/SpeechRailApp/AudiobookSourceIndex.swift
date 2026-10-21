@@ -1033,8 +1033,10 @@ public struct AudiobookSourceIndex: Sendable, Equatable {
 public struct AudiobookWorkingSourceSpan: Codable, Equatable, Sendable {
     public let workingRange: AudiobookSourceRange
     public let referenceRange: AudiobookSourceRange
-    /// Inserted whitespace maps to the removed layout gap, not a fabricated 1:1 offset.
+    /// Nonliteral content maps to a reference interval/anchor, never fabricated 1:1 offsets.
     public let isGenerated: Bool
+    /// Nil for existing import maps; true distinguishes manual text from generated layout.
+    public var isUserEdited: Bool? = nil
     /// Original layout evidence, recorded only on the first retained span of a paragraph.
     public var isIsolatedTitleCandidate: Bool? = nil
 }
@@ -1048,6 +1050,145 @@ public struct AudiobookPreparedText: Equatable, Sendable {
     public func sourceIndex() throws -> AudiobookSourceIndex {
         try AudiobookSourceIndex(utf8: workingUTF8, titleEvidence: Dictionary(uniqueKeysWithValues:
             sourceMap.compactMap { span in span.isIsolatedTitleCandidate.map { (span.workingRange.lowerBound, $0) } }))
+    }
+}
+
+public enum AudiobookChapterTextEditError: Error, Equatable, Sendable, LocalizedError {
+    case notEditable, staleDraft, emptyTitle, emptyBody
+
+    public var errorDescription: String? {
+        switch self {
+        case .notEditable: "正文只能在开始分析前编辑。请先完成正在进行的操作。"
+        case .staleDraft: "章节内容或目录已变化，未覆盖新版本。请保留草稿并重新打开章节核对。"
+        case .emptyTitle: "章节标题不能为空。"
+        case .emptyBody: "章节正文不能为空；如需略过本章，请使用跳过章节。"
+        }
+    }
+}
+
+public struct AudiobookChapterEditDraft: Identifiable, Equatable, Sendable {
+    public var id: UUID { chapterID }
+    public let bookID: UUID
+    public let sourceID: UUID
+    public let sourceSHA256: String
+    public let chapterID: UUID
+    public let layoutDigest: String
+    public let title: String
+    public let body: String
+
+    /// String equality is canonically equivalent; persisted text identity is byte-exact.
+    public func hasChanges(title: String, body: String) -> Bool {
+        !self.title.utf8.elementsEqual(title.utf8) || !self.body.utf8.elementsEqual(body.utf8)
+    }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.bookID == rhs.bookID && lhs.sourceID == rhs.sourceID && lhs.sourceSHA256 == rhs.sourceSHA256
+            && lhs.chapterID == rhs.chapterID && lhs.layoutDigest == rhs.layoutDigest
+            && !lhs.hasChanges(title: rhs.title, body: rhs.body)
+    }
+}
+
+public struct AudiobookChapterEditResult: Equatable, Sendable {
+    public let sourceID: UUID
+    public let chapterID: UUID
+}
+
+/// Pure byte replacement. No importing, automatic chapter planning or normalization.
+public enum AudiobookChapterTextEditing {
+    public static func replacing(
+        source: AudiobookSourceIndex, map: [AudiobookWorkingSourceSpan], chapters: [AudiobookChapter],
+        chapterID: UUID, title: String, body: String, newSourceID: UUID,
+        maxBytes: Int = AudiobookLimits.maxRawFileBytes, maxScalars: Int = AudiobookLimits.maxTotalScalars
+    ) throws -> (text: AudiobookPreparedText, chapters: [AudiobookChapter], selectedID: UUID) {
+        guard let target = chapters.first(where: { $0.id == chapterID }) else { throw AudiobookChapterTextEditError.staleDraft }
+        let range = target.sourceRange
+        try source.validateCoverage(chapters.map(\.sourceRange))
+        let replacement = Data(body.utf8)
+        let delta = Int64(replacement.count) - (range.upperBound - range.lowerBound)
+        let count = source.byteCount + delta
+        guard count <= maxBytes else { throw AudiobookImportError.fileTooLarge(byteCount: count, maxBytes: maxBytes) }
+        var bytes = Data(source.utf8Data.prefix(Int(range.lowerBound)))
+        bytes.append(replacement)
+        bytes.append(source.utf8Data.suffix(from: Int(range.upperBound)))
+
+        // An interior cut through a generated interval assigns all reference evidence
+        // to its left side. The right side uses its end anchor, not a proportional offset.
+        func referenceOffset(_ offset: Int64, in span: AudiobookWorkingSourceSpan) -> Int64 {
+            if offset == span.workingRange.lowerBound { return span.referenceRange.lowerBound }
+            return span.isGenerated ? span.referenceRange.upperBound : span.referenceRange.lowerBound + offset - span.workingRange.lowerBound
+        }
+        var outputMap: [AudiobookWorkingSourceSpan] = []
+        func retain(_ retained: AudiobookSourceRange, shift: Int64) {
+            for span in map {
+                let start = max(retained.lowerBound, span.workingRange.lowerBound)
+                let end = min(retained.upperBound, span.workingRange.upperBound)
+                guard start < end else { continue }
+                var clipped = AudiobookWorkingSourceSpan(
+                    workingRange: .init(lowerBound: start + shift, upperBound: end + shift),
+                    referenceRange: .init(lowerBound: referenceOffset(start, in: span), upperBound: referenceOffset(end, in: span)),
+                    isGenerated: span.isGenerated)
+                clipped.isUserEdited = span.isUserEdited
+                clipped.isIsolatedTitleCandidate = start == span.workingRange.lowerBound ? span.isIsolatedTitleCandidate : nil
+                outputMap.append(clipped)
+            }
+        }
+        retain(.init(lowerBound: 0, upperBound: range.lowerBound), shift: 0)
+        let touched = map.filter { $0.workingRange.lowerBound < range.upperBound && $0.workingRange.upperBound > range.lowerBound }
+        guard let first = touched.first, let last = touched.last else { throw AudiobookStoreError.workingSourceChanged }
+        var edited = AudiobookWorkingSourceSpan(
+            workingRange: .init(lowerBound: range.lowerBound, upperBound: range.lowerBound + Int64(replacement.count)),
+            referenceRange: .init(lowerBound: referenceOffset(range.lowerBound, in: first), upperBound: referenceOffset(range.upperBound, in: last)),
+            isGenerated: true)
+        edited.isUserEdited = true
+        outputMap.append(edited)
+        retain(.init(lowerBound: range.upperBound, upperBound: source.byteCount), shift: delta)
+        let prepared = AudiobookPreparedText(workingUTF8: bytes, workingSHA256: AudiobookDigest.sha256Hex(bytes),
+            preparationVersion: AudiobookTextPreparation.version, sourceMap: outputMap)
+        let updatedSource = try prepared.sourceIndex()
+        guard updatedSource.scalarCount <= maxScalars else {
+            throw AudiobookImportError.tooManyScalars(scalarCount: updatedSource.scalarCount, maxScalars: maxScalars)
+        }
+        func shifted(_ value: AudiobookSourceRange) -> AudiobookSourceRange {
+            .init(lowerBound: value.lowerBound + delta, upperBound: value.upperBound + delta)
+        }
+        var selectedID = UUID()
+        let updatedChapters = chapters.map { chapter -> AudiobookChapter in
+            let id = UUID()
+            var newRange = chapter.sourceRange
+            var exclusions = chapter.excludedRanges
+            if chapter.id == chapterID {
+                selectedID = id
+                newRange = .init(lowerBound: range.lowerBound, upperBound: range.upperBound + delta)
+                exclusions = []
+            } else if chapter.sourceRange.lowerBound >= range.upperBound {
+                newRange = shifted(newRange)
+                exclusions = exclusions.map(shifted)
+            }
+            return AudiobookChapter(id: id, bookID: chapter.bookID, sourceID: newSourceID, ordinal: chapter.ordinal,
+                title: chapter.id == chapterID ? title : chapter.title, sourceRange: newRange,
+                excludedRanges: exclusions, isSkipped: chapter.isSkipped)
+        }
+        try updatedSource.validateCoverage(updatedChapters.map(\.sourceRange))
+        return (prepared, updatedChapters, selectedID)
+    }
+
+    public static func validateMap(_ map: [AudiobookWorkingSourceSpan], working: AudiobookSourceIndex, reference: AudiobookSourceIndex) throws {
+        var end: Int64 = 0, referenceEnd: Int64 = 0
+        for span in map {
+            try working.validateRangeBounds(span.workingRange)
+            try reference.validateRangeBounds(span.referenceRange)
+            guard span.workingRange.lowerBound == end, !span.workingRange.isEmpty,
+                  span.referenceRange.lowerBound >= referenceEnd,
+                  span.isUserEdited != true || span.isGenerated else { throw AudiobookStoreError.workingSourceChanged }
+            if !span.isGenerated {
+                guard working.utf8Data[Int(span.workingRange.lowerBound)..<Int(span.workingRange.upperBound)]
+                    == reference.utf8Data[Int(span.referenceRange.lowerBound)..<Int(span.referenceRange.upperBound)] else {
+                    throw AudiobookStoreError.workingSourceChanged
+                }
+            }
+            end = span.workingRange.upperBound; referenceEnd = span.referenceRange.upperBound
+        }
+        guard end == working.byteCount else { throw AudiobookStoreError.workingSourceChanged }
     }
 }
 

@@ -5,6 +5,40 @@ import XCTest
 #endif
 
 final class AudiobookSourceTests: XCTestCase {
+    func testLiteralSourceMappingRequiresIdenticalUTF8RatherThanCanonicalEquivalence() throws {
+        let working = try AudiobookSourceIndex(utf8: Data("café".utf8))
+        let reference = try AudiobookSourceIndex(utf8: Data("cafe\u{0301}".utf8))
+        let map: [AudiobookWorkingSourceSpan] = [.init(workingRange: working.wholeRange, referenceRange: reference.wholeRange, isGenerated: false)]
+        XCTAssertThrowsError(try AudiobookChapterTextEditing.validateMap(map, working: working, reference: reference))
+    }
+
+    func testManualChapterReplacementClipsGeneratedMapAndKeepsLayout() throws {
+        let reference = try AudiobookSourceIndex(utf8: Data("甲\r\n\r\n乙".utf8))
+        let prepared = try AudiobookTextPreparation.prepare(referenceUTF8: reference.utf8Data)
+        let source = try prepared.sourceIndex()
+        XCTAssertEqual(String(decoding: source.utf8Data, as: UTF8.self), "甲\n\n乙")
+        let bookID = UUID(), oldID = UUID(), newID = UUID()
+        let chapters = [
+            AudiobookChapter(bookID: bookID, sourceID: oldID, ordinal: 0, title: "自定甲", sourceRange: .init(lowerBound: 0, upperBound: 4), isSkipped: true),
+            AudiobookChapter(bookID: bookID, sourceID: oldID, ordinal: 1, title: "自定乙", sourceRange: .init(lowerBound: 4, upperBound: source.byteCount))
+        ]
+        let result = try AudiobookChapterTextEditing.replacing(source: source, map: prepared.sourceMap, chapters: chapters,
+            chapterID: chapters[1].id, title: "新乙", body: "用户👋e\u{0301}\n\n正文。", newSourceID: newID)
+        let updated = try result.text.sourceIndex()
+        try AudiobookChapterTextEditing.validateMap(result.text.sourceMap, working: updated, reference: reference)
+        XCTAssertEqual(try updated.text(in: result.chapters[0].sourceRange), "甲\n")
+        XCTAssertTrue(result.chapters[0].isSkipped)
+        XCTAssertEqual(result.chapters.map(\.title), ["自定甲", "新乙"])
+        XCTAssertTrue(result.text.sourceMap.contains { $0.isUserEdited == true })
+        let twice = try AudiobookChapterTextEditing.replacing(source: updated, map: result.text.sourceMap, chapters: result.chapters,
+            chapterID: result.chapters[0].id, title: "再甲", body: "短。", newSourceID: UUID())
+        try AudiobookChapterTextEditing.validateMap(twice.text.sourceMap, working: twice.text.sourceIndex(), reference: reference)
+        XCTAssertThrowsError(try AudiobookChapterTextEditing.replacing(source: source, map: prepared.sourceMap, chapters: chapters,
+            chapterID: chapters[0].id, title: "甲", body: "超预算。", newSourceID: UUID(), maxBytes: 2))
+        XCTAssertThrowsError(try AudiobookChapterTextEditing.replacing(source: source, map: prepared.sourceMap, chapters: chapters,
+            chapterID: chapters[0].id, title: "甲", body: "超预算。", newSourceID: UUID(), maxScalars: 1))
+    }
+
     func testScalarBoundariesAndLiteralReplacementCharacter() throws {
         let originalText = "第1章 雾港\r\n“你也看见灯了？”👩‍👩‍👧‍👦 café e\u{0301} 原文含\u{FFFD}符号。\n第二行。"
         let utf8 = Data(originalText.utf8)

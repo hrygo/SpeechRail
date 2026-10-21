@@ -703,6 +703,52 @@ final class AudiobookWorkflowTests: XCTestCase {
         return (model, driver)
     }
 
+    func testChapterEditingLocksAnalysisAndSelectionThenRefreshesSavedText() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data("第一章\n原来的正文。\n\n第二章\n后文保留。".utf8))
+        let id = try await store.importBook(preview)
+        let (workflow, _) = makeWorkflow(store: store)
+        await workflow.openBook(id)
+        let originalChapterID = try XCTUnwrap(workflow.selectedChapterID)
+        await workflow.beginChapterEditing()
+        XCTAssertNotNil(workflow.chapterEditDraft)
+        XCTAssertTrue(workflow.isEditingChapterLayout)
+        workflow.beginAnalysis()
+        XCTAssertFalse(workflow.isAnalyzing)
+        workflow.selectedChapterID = workflow.chapters[1].id
+        XCTAssertEqual(workflow.selectedChapterID, originalChapterID)
+        let other = try await store.importBook(AudiobookTXTImporter.prepare(rawData: Data("另一部作品。".utf8)))
+        await workflow.openBook(other)
+        XCTAssertEqual(workflow.selectedBook?.id, id)
+        let saved = await workflow.saveChapterEditing(title: "用户标题", body: "保存后的正文👋。\n\n寒暄连贯。")
+        XCTAssertTrue(saved)
+        XCTAssertNil(workflow.chapterEditDraft)
+        XCTAssertFalse(workflow.isEditingChapterLayout)
+        XCTAssertEqual(workflow.chapters.first?.title, "用户标题")
+        let newID = try XCTUnwrap(workflow.selectedChapterID)
+        let draft = try await store.chapterEditDraft(bookID: id, chapterID: newID)
+        XCTAssertEqual(draft.body, "保存后的正文👋。\n\n寒暄连贯。")
+    }
+
+    func testChapterEditingFailureKeepsDraftAndCancelReleasesLock() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let id = try await store.importBook(AudiobookTXTImporter.prepare(rawData: Data("第一章\n原来的正文。".utf8)))
+        let (workflow, _) = makeWorkflow(store: store)
+        await workflow.openBook(id)
+        await workflow.beginChapterEditing()
+        let draft = workflow.chapterEditDraft
+        await store.setSimulateDiskFull(true)
+        let saved = await workflow.saveChapterEditing(title: "改名", body: "修改的正文。")
+        XCTAssertFalse(saved)
+        XCTAssertEqual(workflow.chapterEditDraft, draft)
+        XCTAssertNotNil(workflow.chapterEditError)
+        XCTAssertFalse(workflow.isSavingChapterEdit)
+        XCTAssertTrue(workflow.isEditingChapterLayout)
+        workflow.cancelChapterEditing()
+        XCTAssertNil(workflow.chapterEditDraft)
+        XCTAssertFalse(workflow.isEditingChapterLayout)
+    }
+
     func testProductionBlockerExplainsCastConfirmationBeforeChaptersAreReady() async throws {
         let (workflow, _) = makeWorkflow()
         _ = try await importBook(into: workflow, fileName: "blocked.txt", text: "第一章\n海风吹来。")
@@ -1757,6 +1803,28 @@ final class AudiobookWorkflowTests: XCTestCase {
         XCTAssertNil(workflow.errorMessage)
     }
 
+    func testRepeatedOperationFeedbackRestartsItsPresentationIdentity() {
+        let (workflow, _) = makeWorkflow()
+        workflow.bannerMessage = "已更新角色名称。"
+        let firstID = workflow.bannerNoticeID
+        workflow.bannerMessage = "已更新角色名称。"
+        XCTAssertNotEqual(workflow.bannerNoticeID, firstID,
+                          "相同文案的新操作也必须重新开始四秒计时")
+        XCTAssertFalse(workflow.bannerRequiresAction)
+    }
+
+    func testPreparationFeedbackStaysPersistentUntilReplacedByAnOperationReceipt() {
+        let (workflow, _) = makeWorkflow()
+        workflow.showPersistentBanner("请重新分析全书后继续制作。")
+        XCTAssertTrue(workflow.bannerRequiresAction)
+        workflow.errorMessage = "服务未连接，请重试。"
+        workflow.bannerMessage = "章节名称已更新。"
+        XCTAssertFalse(workflow.bannerRequiresAction)
+        workflow.bannerMessage = nil
+        XCTAssertEqual(workflow.errorMessage, "服务未连接，请重试。",
+                       "临时反馈收起不能顺带清除需要处理的错误")
+    }
+
     func testTrashingBookOffersUndoAndRestoresExactlyThatBook() async throws {
         let (workflow, _) = makeWorkflow()
         let firstBook = try await importBook(
@@ -1775,6 +1843,10 @@ final class AudiobookWorkflowTests: XCTestCase {
         XCTAssertTrue(workflow.trashUndoMessage?.contains("trash_undo_first") == true)
         XCTAssertFalse(workflow.shelfBooks.contains(where: { $0.id == firstBook.bookID }))
 
+        workflow.dismissTrashUndoMessage()
+        XCTAssertNil(workflow.trashUndoMessage)
+        XCTAssertEqual(workflow.lastTrashedBookID, firstBook.bookID,
+                       "自动收起反馈不应改变废纸篓或撤销目标")
         await workflow.undoLastTrash()
         XCTAssertNil(workflow.lastTrashedBookID)
         XCTAssertNil(workflow.trashUndoMessage)
@@ -2543,6 +2615,7 @@ final class AudiobookWorkflowTests: XCTestCase {
         )
         await workflow.completeVoiceRoundTrip(binding: returnedBinding, context: context)
         XCTAssertEqual(workflow.voiceBindings[narrator.id], returnedBinding)
+        XCTAssertFalse(workflow.voiceReturnRequiresAction, "音色登记成功属于临时操作反馈")
         XCTAssertNil(workflow.pendingVoiceReturnContext)
     }
 
@@ -3318,6 +3391,7 @@ final class AudiobookWorkflowTests: XCTestCase {
             "章节已拆分，原文内容保持不变。请重新分析全书后继续制作。",
             "AC-6.1: 拆分章节反馈不得暴露「规范化原文」内部术语"
         )
+        XCTAssertTrue(workflow.bannerRequiresAction, "需要重新分析的提示必须持续显示")
         XCTAssertFalse(workflow.bannerMessage?.contains("规范化原文") == true)
 
         await workflow.mergeSelectedChapterWithPrevious()
@@ -3326,6 +3400,7 @@ final class AudiobookWorkflowTests: XCTestCase {
             "章节已合并，原文内容保持不变。请重新分析全书后继续制作。",
             "AC-6.1: 合并章节反馈不得暴露「规范化原文」内部术语"
         )
+        XCTAssertTrue(workflow.bannerRequiresAction, "需要重新分析的提示必须持续显示")
         XCTAssertFalse(workflow.bannerMessage?.contains("规范化原文") == true)
 
         // Simulate an adopted chapter revision and verify button title transitions to 更新本章音频
