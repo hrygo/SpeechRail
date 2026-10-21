@@ -107,6 +107,14 @@ delegate. It is organized into three groups:
 - **Engine** — service status, runtime monitoring, model combinations,
   preflight and diagnostics, and in-app developer docs.
 
+The [audiobook workshop](docs/users/audiobook-workshop.md) turns TXT or DRM-free
+EPUB books into multi-character audio. Review chapters and edit their titles
+and text before analysis, prepare voices for the whole book, then generate,
+listen to, and export M4B or chapter MP3 files. Saved text revisions preserve
+the reference text and previous audio. Voice creation and chapter production
+require explicit actions. Character analysis uses your configured LLM service;
+speech synthesis runs locally.
+
 Microphone capture and playback exist only while a session feature is active
 and are released when you leave it. Session PCM is never written to disk;
 only text and records are stored locally. Teleprompter camera and window
