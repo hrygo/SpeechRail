@@ -427,11 +427,189 @@ final class AudiobookCastTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: url), data)
     }
 
+    func testBookOriginVoiceCanBeCastInAnotherBookWithoutPromotion() {
+        let sourceBook = UUID(), targetBook = UUID()
+        let voice = makeTestSafeVoice(id: "reused-custom", name: "历史文稿声音", mode: "clone")
+        let (roles, annotations) = p0Roles(bookID: targetBook, count: 1)
+        let metadata = VoiceAssetMetadata(voiceID: voice.id, visibilityScope: .bookExclusive,
+            originBookID: sourceBook, originRoleID: UUID())
+        let catalog = VoiceCatalogSnapshot(state: .init(metadataByVoiceID: [voice.id: metadata]))
+        let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: annotations,
+            snapshot: p0Snapshot([voice]), catalog: catalog, bookID: targetBook, existingBindings: [:])
+
+        XCTAssertTrue(catalog.permits(voice, bookID: targetBook))
+        XCTAssertTrue(plan.isApplicable, "有效的来源登记不应限制跨书复用：\(plan.issues)")
+        XCTAssertEqual(plan.eligibleVoiceCount, 1)
+        XCTAssertEqual(plan.proposedBindings[roles[0].id]?.voiceID, voice.id)
+        XCTAssertEqual(catalog.state.metadataByVoiceID[voice.id], metadata, "复用不应晋升或改写来源")
+
+        let unvalidated = makeTestSafeVoice(id: voice.id, name: voice.name, mode: "clone", productionReady: false)
+        let blocked = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: annotations,
+            snapshot: p0Snapshot([unvalidated]), catalog: catalog, bookID: targetBook, existingBindings: [:])
+        XCTAssertFalse(blocked.isApplicable, "跨书复用不能绕过制作验收")
+        XCTAssertTrue(blocked.proposedBindings.isEmpty)
+        XCTAssertTrue(blocked.issues.contains { $0.code == .voiceNotProductionReady })
+    }
+
+    func testBookOriginVoiceCatalogHelpersAllowCrossBookReuseAndRejectInvalidRecords() {
+        let sourceBook = UUID(), targetBook = UUID()
+        let voice = makeTestSafeVoice(id: "reusable", name: "历史声音", mode: "clone")
+        let surfaceVoice = CreatorVoice(id: voice.id, name: voice.name, isDefault: false,
+            isSystem: false, available: true, mode: "clone")
+        let active = VoiceAssetMetadata(voiceID: voice.id, visibilityScope: .bookExclusive, originBookID: sourceBook)
+        let catalog = VoiceCatalogSnapshot(state: .init(metadataByVoiceID: [voice.id: active]))
+        for bookID in [sourceBook, targetBook, nil] {
+            XCTAssertTrue(catalog.isVoiceActiveForBook(voiceID: voice.id, currentBookID: bookID))
+            XCTAssertTrue(catalog.permitsSurface(voice, bookID: bookID))
+            XCTAssertTrue(catalog.permitsSurface(surfaceVoice, bookID: bookID))
+        }
+        let rejected: [VoiceAssetMetadata] = [
+            .init(voiceID: voice.id, visibilityScope: .unknown, originBookID: sourceBook),
+            .init(voiceID: voice.id, visibilityScope: .bookExclusive, lifecycleState: .archived, originBookID: sourceBook),
+            .init(voiceID: voice.id, visibilityScope: .bookExclusive)
+        ]
+        for metadata in rejected {
+            let invalid = VoiceCatalogSnapshot(state: .init(metadataByVoiceID: [voice.id: metadata]))
+            XCTAssertFalse(invalid.permits(voice, bookID: targetBook))
+            XCTAssertFalse(invalid.isVoiceActiveForBook(voiceID: voice.id, currentBookID: targetBook))
+            XCTAssertFalse(invalid.permitsSurface(voice, bookID: targetBook))
+            XCTAssertFalse(invalid.permitsSurface(surfaceVoice, bookID: targetBook))
+        }
+    }
+
+    func testTraitBasedRecastingReusesOtherBookVoicesWithoutChangingItsBindings() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let source = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
+        let target = try await Self.makeTwoChapterBook(store: store, root: tempRoot)
+        XCTAssertNotEqual(source.bookID, target.bookID)
+        let catalogStore = VoiceCatalogStore()
+        let voices = [
+            makeTestSafeVoice(id: "narrator", name: "旁白 narrator"),
+            makeTestSafeVoice(id: "a-male", name: "青年男声", mode: "clone"),
+            makeTestSafeVoice(id: "b-male", name: "另一青年男声", mode: "clone"),
+            makeTestSafeVoice(id: "z-female", name: "青年女声", mode: "clone")
+        ]
+        for voice in voices.dropFirst() {
+            try await catalogStore.registerBookExclusiveVoice(voiceID: voice.id, bookID: source.bookID,
+                bookTitle: "历史文稿", roleID: source.hero.id, roleName: source.hero.displayName,
+                archetype: voice.id == "z-female" ? .youngFemale : .youngMale)
+        }
+        let snapshot = p0Snapshot(voices)
+        let catalog = await catalogStore.refresh()
+        let sourceBinding = AudiobookVoiceBinding(roleID: source.hero.id, voiceID: "a-male",
+            voiceRevision: voices[1].voiceRevision, modelRevision: String(repeating: "a", count: 40))
+        try await store.saveVoiceBindings(bookID: source.bookID, bindings: [sourceBinding])
+        let sourceBindings = try await store.voiceBindings(for: source.bookID)
+        let sourceCharacters = try await store.characters(for: source.bookID)
+
+        var characters = try await store.characters(for: target.bookID)
+        characters.append(contentsOf: [
+            AudiobookCharacter(bookID: target.bookID, displayName: "女配甲", isMajor: false),
+            AudiobookCharacter(bookID: target.bookID, displayName: "女配丙", isMajor: false),
+            AudiobookCharacter(bookID: target.bookID, displayName: "女配乙", isMajor: false)
+        ])
+        let maleRoleID = target.hero.id
+        for index in characters.indices {
+            characters[index].voicePolicy = .init(sharingPolicy: characters[index].isNarrator || characters[index].id == maleRoleID ? .exclusive : .automatic,
+                bindingOrigin: .manual, isLocked: true)
+            guard !characters[index].isNarrator else { continue }
+            var traits = AudiobookVoiceTraits()
+            traits.gender = .init(value: characters[index].id == maleRoleID ? "male" : "female", source: .manual, confidence: 1)
+            traits.age = .init(value: "young", source: .manual, confidence: 1)
+            characters[index].voiceTraitsOverride = traits
+        }
+        try await store.saveCharacters(bookID: target.bookID, characters: characters)
+        var annotations = try await store.annotations(for: target.bookID)
+        XCTAssertGreaterThanOrEqual(annotations.count, characters.count)
+        for index in annotations.indices {
+            annotations[index].assignment = .assigned(roleID: characters[index % characters.count].id)
+        }
+        try await store.saveAnnotations(bookID: target.bookID, annotations: annotations)
+        let previous = characters.map { AudiobookVoiceBinding(roleID: $0.id, voiceID: "a-male",
+            voiceRevision: voices[1].voiceRevision, modelRevision: String(repeating: "a", count: 40)) }
+        try await store.saveVoiceBindings(bookID: target.bookID, bindings: previous)
+        let originalTargetBindings = try await store.voiceBindings(for: target.bookID)
+
+        let plan = try await store.prepareRecastingPlan(bookID: target.bookID, snapshot: snapshot, catalog: catalog)
+        XCTAssertTrue(plan.isApplicable, "显式重配应重新规划已有重复绑定：\(plan.issues)")
+        XCTAssertEqual(plan.proposedBindings[target.narrator.id]?.voiceID, "narrator")
+        for role in characters where !role.isNarrator && role.id != maleRoleID {
+            XCTAssertEqual(plan.proposedBindings[role.id]?.voiceID, "z-female", "女声不能因来源书籍或候选ID排序被排除")
+        }
+        XCTAssertTrue(["a-male", "b-male"].contains(plan.proposedBindings[maleRoleID]?.voiceID ?? ""))
+        let replacement = try XCTUnwrap(plan.issues.first { $0.code == .bindingReplacementConsentRequired })
+        XCTAssertTrue(plan.requiredAcknowledgements.contains(replacement.id))
+        let controller = AudiobookCastController(store: store, capabilityProvider: { snapshot }, voiceCatalog: catalogStore)
+        do {
+            try await controller.applyCastingPlan(bookID: target.bookID, plan: plan, acknowledgedIssueIDs: [])
+            XCTFail("重配已有绑定必须先确认")
+        } catch {}
+        let unconfirmedBindings = try await store.voiceBindings(for: target.bookID)
+        XCTAssertEqual(unconfirmedBindings, originalTargetBindings)
+        try await controller.applyCastingPlan(bookID: target.bookID, plan: plan,
+            acknowledgedIssueIDs: plan.requiredAcknowledgements)
+        let savedTargetBindings = try await store.voiceBindings(for: target.bookID)
+        let savedSourceBindings = try await store.voiceBindings(for: source.bookID)
+        let savedSourceCharacters = try await store.characters(for: source.bookID)
+        let savedCatalog = await catalogStore.refresh()
+        XCTAssertEqual(savedTargetBindings, plan.proposedBindings)
+        XCTAssertEqual(savedSourceBindings, sourceBindings, "当前书的重配不得改写历史书籍绑定")
+        XCTAssertEqual(Self.charactersByID(savedSourceCharacters), Self.charactersByID(sourceCharacters))
+        XCTAssertEqual(savedCatalog.state, catalog.state, "复用不应改写声音来源或分类")
+    }
+
+    func testSharedPoolReservesMatchingTraitsBeforeExclusiveAllocation() {
+        let book = UUID()
+        var (roles, annotations) = p0Roles(bookID: book, count: 11)
+        var femaleTraits = AudiobookVoiceTraits()
+        femaleTraits.gender = .init(value: "female", source: .manual, confidence: 1)
+        femaleTraits.age = .init(value: "young", source: .manual, confidence: 1)
+        for index in roles.indices where !roles[index].isNarrator {
+            roles[index].voiceTraitsOverride = femaleTraits
+            roles[index].isMajor = index <= 2
+        }
+        var maleTraits = femaleTraits
+        maleTraits.gender = .init(value: "male", source: .manual, confidence: 1)
+        roles[2].voiceTraitsOverride = maleTraits
+        for roleIndex in 1...2 {
+            for index in 0..<(roleIndex == 1 ? 20 : 10) {
+                let offset = Int64(1_000 + roleIndex * 1_000 + index * 10)
+                annotations.append(.init(bookID: book, chapterID: annotations[0].chapterID, windowID: UUID(), atomID: UUID(),
+                    sourceRange: .init(lowerBound: offset, upperBound: offset + 5), assignment: .assigned(roleID: roles[roleIndex].id)))
+            }
+        }
+        let narrator = makeTestSafeVoice(id: "narrator", name: "旁白 narrator")
+        let maleVoices = (0..<7).map { makeTestSafeVoice(id: "a-male-\($0)", name: "青年男声\($0)") }
+        let female = makeTestSafeVoice(id: "z-female", name: "青年女声")
+        let voices = [narrator] + maleVoices + [female]
+        var metadata = Dictionary(uniqueKeysWithValues: maleVoices.map {
+            ($0.id, VoiceAssetMetadata(voiceID: $0.id, visibilityScope: .globalReusable, voiceTraits: maleTraits))
+        })
+        metadata[female.id] = .init(voiceID: female.id, visibilityScope: .globalReusable, voiceTraits: femaleTraits)
+        let narratorBinding = AudiobookVoiceBinding(roleID: roles[0].id, voiceID: narrator.id,
+            voiceRevision: narrator.voiceRevision, modelRevision: String(repeating: "a", count: 40))
+        let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: annotations,
+            snapshot: p0Snapshot(voices), catalog: .init(state: .init(metadataByVoiceID: metadata)), bookID: book,
+            existingBindings: [roles[0].id: narratorBinding])
+
+        XCTAssertGreaterThan(roles.count, voices.count)
+        XCTAssertTrue(plan.isApplicable, "目录中的女声应先保留给共享女性角色：\(plan.issues)")
+        XCTAssertEqual(plan.proposedBindings[roles[0].id], narratorBinding, "已有旁白独占绑定必须保留")
+        XCTAssertEqual(plan.proposedPolicies[roles[0].id]?.sharingPolicy, .exclusive)
+        for role in roles.dropFirst(3) {
+            XCTAssertEqual(plan.proposedPolicies[role.id]?.sharingPolicy, .sharedMinor)
+            XCTAssertEqual(plan.proposedBindings[role.id]?.voiceID, female.id,
+                "共享女性角色不能因较早ID男声占满候选池，或唯一女声先被自动独占而错配")
+        }
+    }
+
     func testEmptyScopedPoolNeverFallsBack() {
         let bookID = UUID(), voice = makeTestSafeVoice(id: "other-book", name: "他书声音")
         let (roles, anns) = p0Roles(bookID: bookID, count: 1)
-        for scope in [VoiceAssetScope.bookExclusive, .unknown] {
-            let catalog = VoiceCatalogSnapshot(state: .init(metadataByVoiceID: [voice.id: .init(voiceID: voice.id, visibilityScope: scope, originBookID: UUID())]))
+        for metadata in [VoiceAssetMetadata(voiceID: voice.id, visibilityScope: .bookExclusive),
+                         .init(voiceID: voice.id, visibilityScope: .unknown, originBookID: UUID()),
+                         .init(voiceID: voice.id, visibilityScope: .bookExclusive, lifecycleState: .archived, originBookID: UUID())] {
+            let catalog = VoiceCatalogSnapshot(state: .init(metadataByVoiceID: [voice.id: metadata]))
             let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: anns,
                 snapshot: p0Snapshot([voice]), catalog: catalog, bookID: bookID, existingBindings: [:])
             XCTAssertTrue(plan.proposedBindings.isEmpty)
@@ -464,6 +642,40 @@ final class AudiobookCastTests: XCTestCase {
         XCTAssertTrue(plan.issues.contains { $0.code == .voiceIdentityUnknown && $0.voiceIDs == [voice.id] })
         let missingOrigin = VoiceCatalogSnapshot(state: .init(metadataByVoiceID: [voice.id: .init(voiceID: voice.id, visibilityScope: .bookExclusive)]))
         XCTAssertFalse(missingOrigin.permits(voice, bookID: book))
+    }
+
+    func testUnknownOriginAndArchivedVoiceHaveDifferentRepairActions() throws {
+        let book = UUID(), (roles, annotations) = p0Roles(bookID: book, count: 1)
+        let unknown = makeTestSafeVoice(id: "unknown", name: "未知来源", mode: "clone")
+        let archived = makeTestSafeVoice(id: "archived", name: "归档音色", mode: "clone")
+        let catalog = VoiceCatalogSnapshot(state: .init(metadataByVoiceID: [
+            unknown.id: .init(voiceID: unknown.id, visibilityScope: .unknown),
+            archived.id: .init(voiceID: archived.id, visibilityScope: .globalReusable, lifecycleState: .archived)
+        ]))
+        let plan = AudiobookCastRegistry.makeCastingPlan(characters: roles, annotations: annotations,
+            snapshot: p0Snapshot([unknown, archived]), catalog: catalog, bookID: book, existingBindings: [:], requiredRoleIDs: nil)
+        let unknownIssue = try XCTUnwrap(plan.issues.first { $0.voiceIDs == [unknown.id] })
+        XCTAssertEqual(unknownIssue.code, .voiceIdentityUnknown)
+        XCTAssertTrue(unknownIssue.nextAction.contains("来源"))
+        XCTAssertFalse(unknownIssue.nextAction.contains("归档"))
+        let archivedIssue = try XCTUnwrap(plan.issues.first { $0.voiceIDs == [archived.id] })
+        XCTAssertEqual(archivedIssue.code, .voiceScopeUnavailable)
+        XCTAssertTrue(archivedIssue.nextAction.contains("归档"))
+    }
+
+    func testLibrarySourceClassificationIsIndependentOfCrossBookPermission() {
+        let catalog = VoiceCatalogSnapshot(state: .init(metadataByVoiceID: [
+            "cast": .init(voiceID: "cast", visibilityScope: .bookExclusive, originBookID: UUID()),
+            "global": .init(voiceID: "global", visibilityScope: .globalReusable),
+            "archived": .init(voiceID: "archived", visibilityScope: .globalReusable, lifecycleState: .archived),
+            "unknown": .init(voiceID: "unknown", visibilityScope: .unknown)
+        ]))
+        XCTAssertFalse(catalog.isGlobalLibrarySource(voiceID: "cast", isDefaultSystemPreset: false))
+        XCTAssertTrue(catalog.isGlobalLibrarySource(voiceID: "global", isDefaultSystemPreset: false))
+        XCTAssertFalse(catalog.isGlobalLibrarySource(voiceID: "archived", isDefaultSystemPreset: false))
+        XCTAssertFalse(catalog.isGlobalLibrarySource(voiceID: "unknown", isDefaultSystemPreset: false))
+        XCTAssertTrue(catalog.isGlobalLibrarySource(voiceID: "preset", isDefaultSystemPreset: true))
+        XCTAssertTrue(catalog.isVoiceActiveForBook(voiceID: "cast", currentBookID: UUID()))
     }
 
     func testCatalogReadFailureIsNotEmptyCatalog() async throws {
@@ -500,15 +712,15 @@ final class AudiobookCastTests: XCTestCase {
         XCTAssertFalse(plan.requiredAcknowledgements.isEmpty, "共享方案不因角色分属不同章节而免于接受")
     }
 
-    func testOriginRoleIsPreferenceWithinBookScope() {
+    func testOriginRoleIsPreferenceWithoutRestrictingOtherBooks() {
         let book = UUID(), (roles, anns) = p0Roles(bookID: book, count: 2)
         let voices = ["local", "global"].map { makeTestSafeVoice(id: $0, name: $0) }
         let catalog = VoiceCatalogSnapshot(state: .init(metadataByVoiceID: ["local": .init(voiceID: "local", visibilityScope: .bookExclusive, originBookID: book, originRoleID: UUID())]))
         let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: anns,
             snapshot: p0Snapshot(voices), catalog: catalog, bookID: book, existingBindings: [:])
-        XCTAssertTrue(plan.isApplicable, "来源角色不同不应排除对本书合法的声音")
+        XCTAssertTrue(plan.isApplicable, "来源角色不同不应排除已登记的声音")
         XCTAssertEqual(Set(plan.proposedBindings.values.map(\.voiceID)), Set(["local", "global"]))
-        XCTAssertFalse(catalog.permits(voices[0], bookID: UUID()))
+        XCTAssertTrue(catalog.permits(voices[0], bookID: UUID()))
     }
 
     func testCatalogIdentityMismatchFailsClosedAndChangesRevision() async throws {
@@ -587,7 +799,7 @@ final class AudiobookCastTests: XCTestCase {
                 snapshot: p0Snapshot(voices), catalog: .init(), bookID: book, existingBindings: [:])
             XCTAssertEqual(plan.isApplicable, count >= 2, "M=\(count), \(plan.issues)")
             XCTAssertLessThanOrEqual(plan.narratorVoiceCount + plan.exclusiveVoiceCount + plan.sharedVoiceCount, count)
-            if count == 6 { XCTAssertEqual(plan.exclusiveVoiceCount, 3); XCTAssertEqual(plan.sharedVoiceCount, 2) }
+            if count == 6 { XCTAssertEqual(plan.exclusiveVoiceCount, 0); XCTAssertEqual(plan.sharedVoiceCount, 5) }
             if count == 2 { XCTAssertEqual(plan.exclusiveVoiceCount, 0); XCTAssertEqual(plan.sharedVoiceCount, 1) }
         }
         let small = AudiobookCastRegistry.recommendVoiceBindings(characters: Array(roles.prefix(2)), annotations: Array(anns.prefix(2)),
@@ -665,14 +877,14 @@ final class AudiobookCastTests: XCTestCase {
         XCTAssertEqual(plan.proposedBindings, stale, "声音本身变了，只能由用户重新选")
     }
 
-    func testEngineReconfirmationCannotRestoreVoiceOutsideBookScope() {
+    func testEngineReconfirmationCannotRestoreVoiceWithoutOrigin() {
         let book = UUID(), (roles, anns) = p0Roles(bookID: book, count: 1)
         let voice = makeTestSafeVoice(id: "old", name: "old")
         let other = makeTestSafeVoice(id: "available", name: "available")
         let stale = [roles[0].id: AudiobookVoiceBinding(roleID: roles[0].id, voiceID: voice.id,
             voiceRevision: voice.voiceRevision, modelRevision: String(repeating: "b", count: 40))]
         let catalog = VoiceCatalogSnapshot(state: .init(metadataByVoiceID: [
-            voice.id: .init(voiceID: voice.id, visibilityScope: .bookExclusive, originBookID: UUID())
+            voice.id: .init(voiceID: voice.id, visibilityScope: .bookExclusive)
         ]))
         let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: anns,
             snapshot: p0Snapshot([voice, other]), catalog: catalog, bookID: book, existingBindings: stale)
@@ -716,7 +928,7 @@ final class AudiobookCastTests: XCTestCase {
         XCTAssertEqual(plan.proposedBindings, bounds, "规划阶段不能改绑定")
     }
 
-    /// 声音还在、版本也没变，但已归档或不再属于本书：只能重选，重新验收没有意义。
+    /// 声音还在、版本也没变，但已归档：只能重选，重新验收没有意义。
     func testArchivedBoundVoiceAsksForReSelectionNotRevalidation() {
         let book = UUID(), (roles, anns) = p0Roles(bookID: book, count: 1)
         let voice = makeTestSafeVoice(id: "v0", name: "v0")
@@ -725,7 +937,7 @@ final class AudiobookCastTests: XCTestCase {
         let otherBook = UUID()
         let stored = VoiceCatalogStore.PersistedState(metadataByVoiceID: [
             voice.id: VoiceAssetMetadata(voiceID: voice.id, visibilityScope: .bookExclusive,
-                lifecycleState: .active, originBookID: otherBook)
+                lifecycleState: .archived, originBookID: otherBook)
         ])
         let plan = AudiobookCastRegistry.recommendVoiceBindings(characters: roles, annotations: anns,
             snapshot: p0Snapshot([voice]), catalog: VoiceCatalogSnapshot(state: stored),
@@ -829,12 +1041,13 @@ final class AudiobookCastTests: XCTestCase {
         XCTAssertEqual(Set(first.issues.map(\.id)), Set(second.issues.map(\.id)))
     }
 
-    func testNewEnsembleVoiceRemainsScopedToItsBook() async throws {
+    func testNewEnsembleVoicePreservesOriginAndCanBeReusedAcrossBooks() async throws {
         let catalog = VoiceCatalogStore(), book = UUID()
         let metadata = try await catalog.registerArchetypeEnsembleVoice(voiceID: "ensemble", bookID: book, bookTitle: "夹具", archetype: .youngMale)
         XCTAssertEqual(metadata.visibilityScope, .bookExclusive)
+        XCTAssertEqual(metadata.originBookID, book)
         let catalogActual20 = await catalog.refresh().permits(makeTestSafeVoice(id: "ensemble", name: "群像", mode: "clone"), bookID: UUID())
-        XCTAssertFalse(catalogActual20)
+        XCTAssertTrue(catalogActual20)
     }
 
     func testBatchConflictNeverEnablesSharing() async throws {
@@ -2518,6 +2731,10 @@ final class AudiobookCastTests: XCTestCase {
             chapterIDs: [fixture.chapterA.id, fixture.chapterB.id]
         )
         characters.append(leadFemale)
+        // 本夹具验证手动独占的双池分配；角色重要性本身不构成独占要求。
+        for index in characters.indices where characters[index].id == fixture.hero.id || characters[index].id == leadFemale.id {
+            characters[index].voicePolicy = .init(sharingPolicy: .exclusive, bindingOrigin: .manual, isLocked: true)
+        }
 
         var minors: [AudiobookCharacter] = []
         for idx in 1...45 {
@@ -2725,7 +2942,7 @@ final class AudiobookCastTests: XCTestCase {
         XCTAssertEqual(updatedBindings[fixture.hero.id]?.voiceID, heroOriginalVoice, "核心主角音色绝不可被声部批量换绑覆盖")
     }
 
-    func testAC7_AC8_AC9_AC10_100PlusVoiceScopeIsolationPromotionTaxonomyAndCollections() async throws {
+    func testAC7_AC8_AC9_AC10_100PlusVoiceReusePromotionTaxonomyAndCollections() async throws {
         let catalogURL = tempRoot.appendingPathComponent("test_voice_catalog.json")
         let catalogStore = VoiceCatalogStore(storageURL: catalogURL)
 
@@ -2787,11 +3004,11 @@ final class AudiobookCastTests: XCTestCase {
             XCTAssertEqual(resolved, sample.2, "100+ 音色必须准确自动归入六大声部行当")
         }
 
-        // 验证《书籍 A》选角时：100% 隔离《书籍 B》的 30 个专用音色，且「林动」精准匹配其专属音色
+        // 他书来源音色可跨书复用；来源角色仍可作为当前角色的匹配偏好。
         for i in 1...30 {
             let catalogActual21 = await catalogStore.isVoiceActiveForBook(voiceID: "v_bookB_role_\(i)", currentBookID: bookA)
-            XCTAssertFalse(catalogActual21,
-                "其他书籍的专用音色不得出现在当前书活跃池中"
+            XCTAssertTrue(catalogActual21,
+                "已登记且活跃的声音不应因来源书籍不同而被排除"
             )
         }
         let bindingsA = recommendTestBindings(
@@ -2802,7 +3019,7 @@ final class AudiobookCastTests: XCTestCase {
         )
         XCTAssertEqual(bindingsA[roleHeroA.id]?.voiceID, "v_bookA_lindong")
 
-        // AC8：将《书籍 B》专用音色一键晋升为全局通用音色后，对《书籍 A》与演播台立即可见
+        // AC8：显式调整分类后仍保留原始来源。
         try await catalogStore.promoteToGlobalReusable(voiceID: "v_bookB_role_1")
         let catalogActual22 = await catalogStore.isVoiceActiveForBook(voiceID: "v_bookB_role_1", currentBookID: bookA)
         XCTAssertTrue(catalogActual22)

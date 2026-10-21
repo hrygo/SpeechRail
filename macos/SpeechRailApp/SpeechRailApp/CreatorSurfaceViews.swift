@@ -2484,7 +2484,7 @@ public struct VoiceLibraryView: View {
         }
     }
 
-    /// 100+ 音色库四级作用域筛选（默认隐藏已归档音色，支持一键切换查看剧组专用与星标收藏）。
+    /// 音色库按来源和生命周期分类；跨作品可用性不改变来源分类。
     private enum VoiceScopeFilter: String, CaseIterable, Identifiable {
         case activeGlobal
         case bookExclusive
@@ -2495,8 +2495,8 @@ public struct VoiceLibraryView: View {
 
         var title: String {
             switch self {
-            case .activeGlobal: "通用活跃"
-            case .bookExclusive: "剧组专用"
+            case .activeGlobal: "通用来源"
+            case .bookExclusive: "剧组来源"
             case .archived: "已归档"
             case .unknown: "待确认"
             }
@@ -2688,6 +2688,9 @@ public struct VoiceLibraryView: View {
     /// `List` that owns row selection for the inspector (REDESIGN-SPEC §7.3).
     private var voiceLibraryList: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Text("音色可在不同小说和文稿版本中复用；剧组来源仅用于追溯，不限制其他作品选用。")
+                .font(SpeechRailDesignTokens.Typography.callout)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                 Picker("来源", selection: $sourceFilter) {
                     ForEach(VoiceSourceFilter.allCases) { filter in
@@ -2699,7 +2702,7 @@ public struct VoiceLibraryView: View {
                 .fixedSize()
                 .accessibilityLabel("按来源筛选音色")
 
-                Picker("作用域", selection: $scopeFilter) {
+                Picker("音色分类", selection: $scopeFilter) {
                     ForEach(VoiceScopeFilter.allCases) { scope in
                         Text(scope.title).tag(scope)
                     }
@@ -2707,7 +2710,7 @@ public struct VoiceLibraryView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .fixedSize()
-                .accessibilityLabel("按作用域筛选音色")
+                .accessibilityLabel("按音色分类筛选")
 
                 Toggle("仅收藏", isOn: $favoritesOnly)
                     .toggleStyle(.checkbox)
@@ -2843,8 +2846,9 @@ public struct VoiceLibraryView: View {
                     sourceBadge(voice)
                     StatusPill(tone: .neutral, label: archetype.shortBadgeTitle)
                     if meta?.visibilityScope == .bookExclusive {
-                        let bookLabel = meta?.originBookTitle.map { "剧组：\($0)" } ?? "剧组专用"
+                        let bookLabel = meta?.originBookTitle.map { "来源：\($0)" } ?? "剧组来源"
                         StatusPill(tone: .healthy, label: bookLabel)
+                            .help("来源仅用于追溯；此音色也可用于其他小说和文稿版本。")
                     }
                     if meta?.lifecycleState == .archived {
                         StatusPill(tone: .neutral, label: "已归档")
@@ -2984,7 +2988,7 @@ public struct VoiceLibraryView: View {
             let active = meta?.lifecycleState != .archived
             let matchesScope: Bool = switch scopeFilter {
             case .activeGlobal:
-                active && catalog.permitsSurface(voice, bookID: nil)
+                active && catalog.isGlobalLibrarySource(voiceID: voice.id, isDefaultSystemPreset: isDefaultSystemPreset)
             case .bookExclusive:
                 active && scope == .bookExclusive
             case .archived:

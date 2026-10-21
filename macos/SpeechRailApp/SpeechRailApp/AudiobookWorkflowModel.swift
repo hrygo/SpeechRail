@@ -1348,6 +1348,25 @@ public final class AudiobookWorkflowModel {
         } catch { errorMessage = error.localizedDescription }
     }
 
+    public func previewRecastingVoices() async {
+        guard let bookID = selectedBook?.id, let store, !isAssigningRecommendedVoices else { return }
+        isAssigningRecommendedVoices = true
+        defer { isAssigningRecommendedVoices = false }
+        do {
+            let snapshot = try await dependencies.speechRenderer.fetchEffectiveCapabilities()
+            let catalog = try await voiceCatalogModel.requireFreshSnapshot()
+            let plan = try await store.prepareRecastingPlan(bookID: bookID, snapshot: snapshot, catalog: catalog)
+            try Task.checkCancellation()
+            guard selectedBook?.id == bookID else { return }
+            invalidateCastingAudition()
+            setPendingCastingPlan(plan)
+            errorMessage = plan.issues.first(where: \.isBlocking)?.nextAction
+        } catch {
+            guard selectedBook?.id == bookID else { return }
+            errorMessage = error.localizedDescription
+        }
+    }
+
     /// Re-run the bounded output validation for voices whose evidence stopped covering
     /// the current engine, then rebuild the plan. The chosen voice is never replaced.
     public func revalidateCastVoices(_ voiceIDs: [String]) async {
@@ -2156,11 +2175,42 @@ public final class AudiobookWorkflowModel {
             let stats = try await AudiobookWorkspaceProjection.roleStatistics(characters: roles, annotations: annotations).statsByRoleID
             try Task.checkCancellation()
             guard selectedBook?.id == bookID, voiceDraftRequestID == requestID else { return }
-            let replacementRoleIDs = Set(pendingCastingPlan?.issues.filter {
-                $0.isBlocking && $0.code == .voiceScopeUnavailable
-            }.flatMap(\.roleIDs) ?? [])
+            // Before offering new voices, account for usable and repairable existing assets.
+            var preparationBindings = bindings
+            var coveredRoleIDs: Set<UUID> = []
+            var repairSummary: String?
+            if scope == .missing {
+                let snapshot = try await dependencies.speechRenderer.fetchEffectiveCapabilities()
+                let plan = try await store.prepareCastingPlan(bookID: bookID, snapshot: snapshot,
+                    catalog: try await voiceCatalogModel.requireFreshSnapshot())
+                for (id, binding) in plan.proposedBindings { preparationBindings[id] = binding }
+                try Task.checkCancellation()
+                guard selectedBook?.id == bookID, voiceDraftRequestID == requestID else { return }
+                if !plan.isApplicable && (plan.unresolvedRoleIDs.isEmpty || plan.issues.contains { $0.code == .catalogUnavailable }) {
+                    voiceCreationDrafts = []
+                    voiceCreationSummary = plan.issues.first(where: \.isBlocking)?.nextAction
+                    isShowingVoicePreparationSheet = presentReview
+                    return
+                }
+                if !plan.isApplicable {
+                    let repairIssues = plan.issues.filter {
+                        [.voiceScopeUnavailable, .voiceIdentityUnknown, .voiceNotProductionReady, .unsupportedRenderParameter].contains($0.code)
+                    }
+                    let repairIDs = Set(repairIssues.flatMap(\.voiceIDs))
+                    let coverage = try AudiobookVoicePreparation.existingVoiceCoverage(characters: roles,
+                        annotations: annotations, bindings: bindings, snapshot: snapshot, catalog: plan.catalog,
+                        bookID: bookID, repairableVoiceIDs: repairIDs)
+                    coveredRoleIDs = Set(coverage.keys)
+                    let usedRepairIDs = Set(coverage.values).intersection(repairIDs)
+                    let actions = repairIssues.filter { !usedRepairIDs.isDisjoint(with: $0.voiceIDs) }.map { issue in
+                        let names = issue.voiceIDs.compactMap { id in snapshot.voices.first { $0.id == id }?.name }.joined(separator: "、")
+                        return "「\(names)」：\(issue.nextAction)"
+                    }
+                    if !actions.isEmpty { repairSummary = actions.joined(separator: "\n") }
+                }
+            }
             let prepared = AudiobookVoicePreparation.prepare(book: book, characters: roles, annotations: annotations,
-                bindings: bindings, source: source, stats: stats, scope: scope, replacementRoleIDs: replacementRoleIDs)
+                bindings: preparationBindings, source: source, stats: stats, scope: scope, coveredRoleIDs: coveredRoleIDs)
             // Keep edits when the same source and role recipe are prepared again.
             let oldByID = Dictionary(uniqueKeysWithValues: voiceCreationDrafts.map { ($0.id, $0) })
             voiceCreationDrafts = prepared.map { draft in
@@ -2172,7 +2222,7 @@ public final class AudiobookWorkflowModel {
                 chapters: chapters, annotations: annotations)
             voicePreparationScope = scope
             voiceCreationErrorMessage = nil
-            voiceCreationSummary = prepared.isEmpty ? "这些角色已有声音，无需补充；可在角色的「专属定制」中单独创作。" : nil
+            voiceCreationSummary = repairSummary ?? (prepared.isEmpty ? "这些角色已有声音，无需补充；可在角色的「专属定制」中单独创作。" : nil)
             isShowingVoicePreparationSheet = presentReview
         } catch is CancellationError {
             // Preparing materials has no generation side effects.
@@ -2328,8 +2378,12 @@ public final class AudiobookWorkflowModel {
         voiceCreationSummary = "已创建 \(created) 个声音，\(completed) 个已通过配音检查" + (failed > 0 ? "，\(failed) 项需重试。" : "。")
             + (stopped ? "已停止后续项目，成功声音会保留。" : "章节音频由你另行启动。")
         if !stopped, succeeded > 0 {
-            // Recompute a proposal; the creator still confirms any sharing or collision.
-            await autoAssignRecommendedVoices(for: bookID, consentsToSharedMinorVoices: false)
+            // A fallback must not change the frozen bindings of selected drafts awaiting retry.
+            if voiceCreationDrafts.contains(where: { $0.isSelected && !$0.status.isComplete }) {
+                await previewRecommendedVoices()
+            } else {
+                await autoAssignRecommendedVoices(for: bookID, consentsToSharedMinorVoices: false)
+            }
         }
     }
 
@@ -2993,8 +3047,8 @@ public final class AudiobookWorkflowModel {
             selectedBook = try await store.book(id: activeBookID)
             pendingVoiceReturnContext = nil
             voiceReturnBannerMessage = voiceBindings[targetContext.roleID] == binding
-                ? "已为角色「\(roleName)」配上本书专用的新声音。"
-                : "新声音已登记为本书专用；角色选择已变化，请在选角器中确认是否使用。"
+                ? "已为角色「\(roleName)」配上新声音，可跨作品复用。"
+                : "新声音已登记，可跨作品复用；角色选择已变化，请在选角器中确认是否使用。"
             voiceReturnRequiresAction = voiceBindings[targetContext.roleID] != binding
             await refreshChapterReadinessMap(for: activeBookID)
             await refreshShelf()

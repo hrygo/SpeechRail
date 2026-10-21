@@ -1,4 +1,5 @@
 import Foundation
+import SpeechRailControlKit
 
 public enum AudiobookVoicePreparationScope: Equatable, Sendable {
     case missing, leads
@@ -93,11 +94,74 @@ public struct AudiobookVoiceCreationDraft: Equatable, Sendable, Identifiable {
 }
 
 enum AudiobookVoicePreparation {
+    /// Partial coverage is only for identifying missing recipes, never for committing a partial cast.
+    static func existingVoiceCoverage(characters: [AudiobookCharacter], annotations: [AudiobookAnnotation],
+                                      bindings: [UUID: AudiobookVoiceBinding], snapshot: EffectiveCapabilitySnapshot,
+                                      catalog: VoiceCatalogSnapshot, bookID: UUID,
+                                      repairableVoiceIDs: Set<String> = []) throws -> [UUID: String] {
+        let speaking = Set(annotations.compactMap(\.assignment.roleID))
+        let active = characters.filter { $0.isNarrator || annotations.isEmpty || speaking.contains($0.id) }
+        guard snapshot.voices.isEmpty || active.count <= 100_000 / snapshot.voices.count else {
+            throw AudiobookCastError.invalidCastingPlan(reason: "preparation_budget_exceeded")
+        }
+        let groups = Dictionary(grouping: snapshot.voices, by: \.id)
+        let voices = snapshot.voices.filter { voice in
+            guard groups[voice.id]?.allSatisfy({ $0 == voice }) == true else { return false }
+            // A repair projection only reserves existing assets; it never authorizes synthesis.
+            if repairableVoiceIDs.contains(voice.id) { return true }
+            guard catalog.permits(voice, bookID: bookID), voice.available, voice.productionReady == true,
+                  voice.operations["http_speech"] != nil,
+                  let revision = SpeechRailCapabilityRevisionSelector.creatorRequestOptions(voiceID: voice.id, in: snapshot)?.expectedModelRevision else { return false }
+            let candidate = AudiobookVoiceBinding(roleID: bookID, voiceID: voice.id, voiceRevision: voice.voiceRevision, modelRevision: revision)
+            guard (try? AudiobookCastRegistry.validateRenderBinding(candidate, snapshot: snapshot)) != nil else { return false }
+            return true
+        }
+        let exclusiveExisting = Set(active.filter { bindings[$0.id] != nil && ($0.isNarrator || $0.voicePolicy?.sharingPolicy == .exclusive || !$0.allowSharedMinorVoice) }.compactMap { bindings[$0.id]?.voiceID })
+        let sharedExisting = Set(bindings.values.map(\.voiceID)).subtracting(exclusiveExisting)
+        let unbound = active.filter { bindings[$0.id] == nil }
+        let exclusive = unbound.filter { $0.isNarrator || $0.voicePolicy?.sharingPolicy == .exclusive }
+            .sorted { $0.isNarrator != $1.isNarrator ? $0.isNarrator : $0.id.uuidString < $1.id.uuidString }
+        var candidates: [UUID: [String]] = [:]
+        for role in unbound {
+            try Task.checkCancellation()
+            candidates[role.id] = voices.filter {
+                !exclusiveExisting.contains($0.id) && AudiobookCastRegistry.matchesRequiredTraits(role: role, voice: $0, metadata: catalog.state.metadataByVoiceID[$0.id])
+            }.sorted {
+                if repairableVoiceIDs.contains($0.id) != repairableVoiceIDs.contains($1.id) {
+                    return !repairableVoiceIDs.contains($0.id)
+                }
+                let left = AudiobookCastRegistry.preferenceScore(role: role, voice: $0, metadata: catalog.state.metadataByVoiceID[$0.id], preferredCollectionID: catalog.state.preferredCollectionIDByBookID[bookID])
+                let right = AudiobookCastRegistry.preferenceScore(role: role, voice: $1, metadata: catalog.state.metadataByVoiceID[$1.id], preferredCollectionID: catalog.state.preferredCollectionIDByBookID[bookID])
+                return left == right ? $0.id < $1.id : left > right
+            }.map(\.id)
+        }
+        var owners: [String: UUID] = [:]
+        var workRemaining = 100_000
+        func augment(_ roleID: UUID, seen: inout Set<String>) throws -> Bool {
+            for id in candidates[roleID] ?? [] where !sharedExisting.contains(id) && seen.insert(id).inserted {
+                try Task.checkCancellation()
+                workRemaining -= 1
+                guard workRemaining >= 0 else { throw AudiobookCastError.invalidCastingPlan(reason: "preparation_budget_exceeded") }
+                if let owner = owners[id], try !augment(owner, seen: &seen) { continue }
+                owners[id] = roleID
+                return true
+            }
+            return false
+        }
+        for role in exclusive { var seen: Set<String> = []; _ = try augment(role.id, seen: &seen) }
+        var coverage = bindings.mapValues(\.voiceID)
+        for (voiceID, roleID) in owners { coverage[roleID] = voiceID }
+        for role in unbound where !role.isNarrator && role.voicePolicy?.sharingPolicy != .exclusive {
+            if let id = candidates[role.id]?.first(where: { owners[$0] == nil }) { coverage[role.id] = id }
+        }
+        return coverage
+    }
+
     static func prepare(
         book: AudiobookBook, characters: [AudiobookCharacter], annotations: [AudiobookAnnotation],
         bindings: [UUID: AudiobookVoiceBinding], source: AudiobookSourceIndex,
         stats: [UUID: AudiobookRoleDialogueStats], scope: AudiobookVoicePreparationScope,
-        replacementRoleIDs: Set<UUID> = []
+        replacementRoleIDs: Set<UUID> = [], coveredRoleIDs: Set<UUID> = []
     ) -> [AudiobookVoiceCreationDraft] {
         let speaking = Set(annotations.compactMap(\.assignment.roleID))
         let active = characters.filter { $0.isNarrator || annotations.isEmpty || speaking.contains($0.id) }
@@ -110,7 +174,7 @@ enum AudiobookVoicePreparation {
                 bindings[$0.id] == nil && ($0.isNarrator || stats[$0.id]?.tier == .lead || $0.voicePolicy?.sharingPolicy == .exclusive)
             }.map { (.role($0.id), [$0]) }
         case .missing:
-            let missing = active.filter { bindings[$0.id] == nil || replacementRoleIDs.contains($0.id) }
+            let missing = active.filter { !coveredRoleIDs.contains($0.id) && (bindings[$0.id] == nil || replacementRoleIDs.contains($0.id)) }
             let exclusive = missing.filter {
                 $0.isNarrator || $0.voicePolicy?.sharingPolicy == .exclusive
                     || replacementRoleIDs.contains($0.id)

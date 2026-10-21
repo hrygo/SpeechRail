@@ -1187,6 +1187,53 @@ public actor AudiobookProjectStore {
         return plan
     }
 
+    /// Explicit replacement plans against the original state; never clears bindings while planning.
+    public func prepareRecastingPlan(bookID: UUID, snapshot: EffectiveCapabilitySnapshot, catalog: VoiceCatalogSnapshot,
+                                    strategy: AudiobookCastingStrategy = .sceneAware) throws -> AudiobookCastingPlan {
+        let original = try fetchCharacters(bookID: bookID)
+        let annotations = try fetchAnnotations(bookID: bookID, chapterID: nil)
+        let existing = try fetchVoiceBindings(bookID: bookID)
+        let replanningRoles = original.map { role in
+            var copy = role
+            copy.voicePolicy = .init(sharingPolicy: role.isNarrator || role.voicePolicy?.sharingPolicy == .exclusive ? .exclusive : .automatic)
+            return copy
+        }
+        let recommendation = AudiobookCastRegistry.makeCastingPlan(characters: replanningRoles, annotations: annotations,
+            snapshot: snapshot, catalog: catalog, bookID: bookID, existingBindings: [:],
+            requiredRoleIDs: try requiredCastingRoleIDs(bookID: bookID, characters: original, annotations: annotations),
+            source: try workingSourceSnapshot(bookID: bookID).sourceIndex,
+            atoms: try fetchAtoms(bookID: bookID, chapterID: nil), strategy: strategy)
+        var proposed = recommendation.proposedBindings
+        var policies = recommendation.proposedPolicies
+        // Keep bindings of merely mentioned roles; a re-cast is not a removal operation.
+        for (id, binding) in existing where proposed[id] == nil {
+            proposed[id] = binding
+            policies[id] = original.first { $0.id == id }?.voicePolicy ?? .init(
+                sharingPolicy: original.first { $0.id == id }?.allowSharedMinorVoice == true ? .sharedMinor : .exclusive,
+                bindingOrigin: .legacyUnknown, isLocked: true)
+        }
+        let affected = Set(proposed.keys.filter { proposed[$0] != existing[$0] })
+        var plan = AudiobookCastingPlan(bookID: bookID,
+            localInputDigest: AudiobookCastingDigest.local(characters: original, annotations: annotations, bindings: existing),
+            snapshot: snapshot, catalog: catalog,
+            expectedCastRevisionID: AudiobookCastRegistry.castRevisionID(bookID: bookID, characters: original),
+            proposedBindings: proposed, proposedPolicies: policies, unresolvedRoleIDs: recommendation.unresolvedRoleIDs,
+            affectedRoleIDs: affected, affectedFragmentIDs: [], narratorVoiceCount: recommendation.narratorVoiceCount,
+            exclusiveVoiceCount: recommendation.exclusiveVoiceCount, sharedVoiceCount: recommendation.sharedVoiceCount,
+            eligibleVoiceCount: recommendation.eligibleVoiceCount, rawIssues: recommendation.rawIssues)
+        plan.strategy = strategy
+        plan.hasUnavoidableSceneConflicts = recommendation.hasUnavoidableSceneConflicts
+        plan.sourceContextDigest = try castingSourceContext(bookID: bookID)
+        plan.allowsLockedReplacement = true
+        plan.affectedFragmentIDs = Set(try fetchFragments(bookID: bookID, chapterID: nil)
+            .filter { plan.affectedRoleIDs.contains($0.roleID) }.map(\.id))
+        if !plan.affectedRoleIDs.isEmpty {
+            plan.rawIssues.append(.init(code: .bindingReplacementConsentRequired, roleIDs: Array(plan.affectedRoleIDs),
+                isBlocking: false, nextAction: "将按角色特征重新配声；确认后只更新当前作品，原配声可撤销恢复，已有音频保留。"))
+        }
+        return plan
+    }
+
     func manualCastingPlan(bookID: UUID, bindings updates: [AudiobookVoiceBinding], snapshot: EffectiveCapabilitySnapshot, catalog: VoiceCatalogSnapshot, onlyIfUnbound: Bool = false, expectedVoiceSetDigest: String? = nil) throws -> AudiobookCastingPlan {
         let characters = try fetchCharacters(bookID: bookID), annotations = try fetchAnnotations(bookID: bookID, chapterID: nil)
         let existing = try fetchVoiceBindings(bookID: bookID)
