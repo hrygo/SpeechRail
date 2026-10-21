@@ -2,8 +2,8 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.11.9"
-date: 2026-10-20
+version: "0.11.13"
+date: 2026-10-21
 ---
 
 # SpeechRail macOS App 设计系统与 Token
@@ -24,6 +24,25 @@ date: 2026-10-20
 > 本文的 token 与系统控件约束仍适用于这些页面。
 
 提词器阅读舞台依据字号和可用宽度拆分实际显示行，支持 1／2／3 行：一行显示当前行，两行显示当前行和下一行，三行上方是已读行、中间是当前行、下方是下一行，当前行保持在中间；每行均映射到原稿段落与 UTF-16 偏移，全稿浏览仍可滚动选择完整段落。正文列宽与窗口宽度分开：场景预设给出 680pt（镜头口播）／820pt（讲台阅读）的正文最大列宽，窗口再宽正文也不铺满，窗口变窄时列宽跟随收窄；背景透明度可调至 100%，完全透明时只隐藏舞台背景和装饰，不降低正文与控件透明度。舞台默认手动阅读，语音跟随必须显式开启；阅读层和控制层分离，控制层首次展示 2s、指针进入操作区后显示、离开后延迟 250ms 淡出；有效计时/采集状态才占用 24pt 辅助区，底部控制区固定预留 48pt。窗口高度按字号和显示行数调整，上限 360pt；绿色缩放只横向铺满当前屏幕可用区域，不进入全屏空间。快捷键和控制栏按行推进：空格/→/↓/PageDown 下一行，←/↑/PageUp 上一行，Home/End 到首末行；菜单快捷键为 `⌘⌥←/→`，不占用全局裸方向键。舞台视效面板用无 `step` 的连续滑杆调字号与背景透光值；工作台稿件名称输入使用共享单行输入配方 `speechRailSingleLineInput(.regular)`，最小宽度取 `workbenchDocumentTitleMinimumWidth`，内部横向内边距取 `Spacing.sm`、最小高度取 `Control.regularHeight`；窗口收窄时将字数与状态移到下一行，避免挤压主编辑目标。详情见 AI 提词器开发说明。
+
+界面与文本导出的日期时间统一调用公共方法 `Date.speechRailFormatted`，采用公历与 24 小时制，沿用本机时区，不受系统语言或日历设置影响。完整日期时间显示为 `2026/10/15 15:11`；仅日期使用 `yyyy/MM/dd`，仅时间使用 `HH:mm`，需要秒级精度时追加 `:ss`，跨日图表标签使用 `MM/dd`。持久化时间戳、协议日期和专用文件名时间戳保持各自格式。
+
+展示格式由 `SpeechRailDisplayFormat.swift` 集中定义，页面与人类可读导出共用以下规则：
+
+| 对象 | 展示规则与语义 |
+|---|---|
+| 播放位置、录制走时与转录引用 | `mm:ss`，满一小时用 `h:mm:ss`；播放走时向下取整，不提前跳秒；历史转录区间与引用保留四舍五入到整秒的证据口径；缺失位置用 `--:--` |
+| 音频时长 | 短音频用中文秒并保留必要小数，非零微小时长不显示为零；满一分钟按分、小时组合 |
+| 经过时间、历史跨度 | 经过时间按整秒向下取整；历史跨度按秒、分钟、小时、天选择适合阅读的单位 |
+| 倍速 | `1×`、`1.25×`，最多两位小数、去掉末尾零；数值与控件步长不改变 |
+| 任务进度 | 统一整数百分比，进行中向下取整且最多 `99%`；只有业务状态确认完成才显示 `100%` |
+| 测量比例 | 独立于任务进度，可按测量精度四舍五入到 `100%`；不得据此推导任务完成 |
+| 磁盘与下载容量 | 十进制 `B/KB/MB/GB`，自动选单位，避免小文件显示为 `0.0 GiB` |
+| 进程内存与资源预算 | 二进制 `B/KiB/MiB/GiB`；监控延迟保留 `RuntimeLatencyPresentation` 的毫秒规则 |
+| 缺失值 | `未读取`、`未提供`、`未知`、`样本不足`、`未评估`、`不适用` 按实际状态选取；紧凑指标可用 `—`；真实零保持为零 |
+| 音色属性 | 普通详情显示中文类型；原始模式、变体、采样种子放在“技术详情”；未知类型不映射成已知类型 |
+
+此公共层只负责展示，不修改业务计算、任务完成判定、服务状态、持久化数值及协议字段。字幕文件的专用时间码、文件名时间戳和模型标识保留各自格式。新页面应直接复用公共方法，不再复制格式化实现。
 
 ## 1. 研究基线与 Logo 设计基因
 
@@ -143,6 +162,9 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 | 动效反馈 | `Motion` | 采用符合 HIG 与 Liquid Glass 的标准动效：快速交互与弹层展开 0.16s（`quickDuration` / `panelTransition`），标准转场 0.2s（`standardDuration` / `standardEaseOut` / `standardEaseInOut`），选区反馈 0.14s，按压与标签切换 0.12s（`pressDuration` / `tabTransition`）；抽屉与交互响应提供无振荡弹簧 `interactiveSpring`(0.30/0.88)、`drawerSpring`(0.32/0.88) 及平滑转场 `smoothTransition`(0.18s)；所有动效统一走 `Motion.resolved(..., reduceMotion:)` 解析，在 Reduce Motion 下干净降级为即时切换。 |
 | 波形（听觉对象的形状） | `Waveform` | `resultBar`(12 根) / `candidateTile`(18 根) / `libraryPreview`(16 根) 三处只声明**条数与排布**（宽 `barWidth` 2、圆角 `barRadius` 1、间隙、峰值高度），条高一律来自真实音频的幅度包络（`envelopeBuckets` 32 桶、逐窗**峰值**、整段归一化，`AudioEnvelope`）；静音窗下限 `envelopeMinimumHeight`(3)；播放中未播到的部分 `remainingOpacity`(0.35)，进度取播放器真实的 `currentTime / duration`（`progressInterval` 20Hz）。`Pattern.heights` 只在**没有包络**时使用（「这段音频还没算过」，例如还没试听过的音色）。波形脉冲**只在**这种无包络的情形保留（§11 第五十七轮） |
 | Inspector 面板 | `SpeechRailInspectorPanel` + `SpeechRailInspectorLabeledContentStyle` | 目录页（音色库 / 我的作品）右侧详情面**唯一的结构声明点**：身份带（`Typography.display` + `Typography.caption`/`inkTertiary` 徽标）→ 整宽 hairline → 试听段（`.speechRailInspectorPreviewPanel()`，段内边距 `previewWrapInsetY`）→ hairline → 取值段（`Inspector.contentPadding`）→ hairline → 固定动作区（`Inspector.actionPadding`，在 `ScrollView` 之外）。取值行用 `SpeechRailInspectorLabeledContentStyle`：标签列固定 `Inspector.labelColumnWidth = 92`，取值右对齐、可选文本，供全 App inspector 复用。其他六页的「开发者详情」是另一套（`DeveloperInspector`） |
+
+有声书「试听与分配说明」使用 `Layout.Sheet.compactWidth` 与
+`Layout.audiobookCastingDetailsHeight`（520pt）。角色依据在独立滚动区中显示，打开时默认获得键盘焦点；标题、关闭及试听操作位于滚动区外，Escape 无需先点击即可关闭面板。角色数量与说明长度不得撑高浮层或遮挡确认入口。
 
 模型档位卡使用 `Layout.modelProfileCardMinimumWidth = 220pt`；三档单行所需断点由
 `Layout.modelProfileCardsRowBreakpoint = 3 × 220 + 2 × Spacing.sm(12) = 684pt`
@@ -302,6 +324,33 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 定义命中与无障碍区域，
 [Improving app responsiveness](https://developer.apple.com/documentation/xcode/improving-app-responsiveness)
 要求主线程只承担 UI 更新，其他工作异步执行；不能靠延迟高亮或增加动画掩盖阻塞。
+
+### 3.2.4 浮层边界、滚动与键盘退出
+
+Popover、Sheet 与 Inspector 中的角色列表、分析依据、错误详情和批量结果都可能持续增长。
+内容增长不得撑出可用窗口、遮挡退出入口，或让界面失去可操作性。
+
+- **容器有界，正文可滚动**：尺寸上限同时服从产品 Token 与宿主可用空间。长正文和列表放入独立滚动区，保留完整内容；不以裁剪、截断或撑高整个浮层代替滚动。内容与操作复杂度超出浮层承载能力时，按现有页面合同选择 Sheet 或 Inspector。
+- **关键动作固定可达**：标题、关闭及必要的确认、取消或任务操作位于长内容滚动区外。首屏和滚动到底时都能退出或继续，不依赖 hover、拖大窗口或先滚完整份说明。
+- **打开即能用键盘操作**：首次打开与再次打开都为阅读区或首个适合的控件建立明确焦点。可关闭浮层的 Escape 无需先点击正文；关闭后焦点回到触发入口。退出遵循既有未保存确认与任务取消语义，关闭说明不隐式取消后台任务。应用自身的焦点问题不得以修改系统键盘偏好补偿。
+
+本类变更按风险覆盖下列边界，并记录所用数据规模、窗口条件和实际结果：
+
+| 维度 | 必须覆盖的行为 |
+|---|---|
+| 内容规模 | 空内容、少量内容、超过一屏的列表；首项与末项都能读取 |
+| 单项长度 | 超长名称与多行说明可换行、滚动，关键动作仍可达 |
+| 窗口边界 | 最小支持窗口与窄布局中容器受限，正文不会将操作区挤出可用空间 |
+| 退出与焦点 | 打开后直接按 Escape、反复打开关闭、点击关闭；按当前系统键盘设置检查适用的 Tab／Shift-Tab 路径 |
+| 真实交互 | 能滚动到底再返回，操作区中的按钮与菜单能实际使用；不能只检查视图尺寸或控件存在 |
+
+源码、确定性布局测试和离屏渲染只能证明各自覆盖的约束。真实滚动、焦点与键盘行为以桌面
+交互结果为准；代理接管窗口仍须按仓库 `AGENTS.md` 取得本次 UI 自动化授权，未实测时明确
+列为未验证。隔离组件实测与真实业务流程验收分别报告，不能由局部通过推导全流程或整个 App 可用。
+
+用户报告“卡死”时，先区分主线程阻塞、内容溢出、模态遮挡与焦点丢失，并保留各自证据；
+一次采样未捕获阻塞不能证明从未卡顿。复现优先使用隔离数据与生产组件，不通过重置真实作品、
+撤销已确认状态或重跑生成任务来凑出测试入口。
 
 ### 3.3 Settings scene 契约
 
@@ -501,6 +550,7 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
   形与质按「材质交还系统」的决定不再映射为 token；§1.1 因此是历史解构，不是当前实现契约。
 - [ ] Light、Dark、Increase Contrast、Dynamic Type 和 Reduce Motion 均有 UI 验证；当前只完成代码/构建检查，尚未完成桌面人工矩阵。
 - [ ] VoiceOver 可按“导航 → 页面说明 → 主操作 → 状态详情”的顺序访问；图表、档位和 DisclosureGroup 语义已接入，尚未完成桌面 VoiceOver 实测。
+- [ ] 涉及可增长内容的浮层按 §3.2.4 检查长内容、最小窗口、滚动与首次 Escape；源码、离屏测试、真实交互和业务流程的证据分别记录，不以局部通过替代全局验收。
 - [x] 页面高频动作已提供 toolbar、菜单栏或键盘路径，不依赖 hover；2026-09-13 UI tests 验证控制台、设置和主要页面入口。
 - [x] 音色创作、模型下载、profile 应用、服务启停的边界在 UI 文案和确认动作中可见；模型下载与档位应用使用独立按钮和确认框。
 - [x] 页面身份统一走 `PageIdentityToolbarItem` + 单行 `WorkspaceTitleLockup`（页面名只在工具栏出现一次，

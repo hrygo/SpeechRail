@@ -335,6 +335,8 @@ public enum SpeechRailDesignTokens {
         public static let audiobookScriptReadingMaximumWidth: CGFloat = 820
         /// 导入时目录与正文核对区的同高滚动窗口。
         public static let audiobookImportPreviewHeight: CGFloat = 280
+        /// 配声说明浮层固定高度；角色依据独立滚动，关闭与试听操作留在可见区域。
+        public static let audiobookCastingDetailsHeight: CGFloat = 520
 
         /// 模态弹窗与工作区 Sheet 的标准宽度阶梯。
         public enum Sheet {

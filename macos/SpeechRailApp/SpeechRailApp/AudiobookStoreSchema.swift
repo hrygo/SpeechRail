@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 public enum AudiobookStoreSchema {
-    public static let currentUserVersion: Int32 = 6
+    public static let currentUserVersion: Int32 = 7
 
     /// Connection pragmas must run outside the transaction that creates or migrates tables.
     static var tableDefinitionsSQL: String {
@@ -174,6 +174,12 @@ public enum AudiobookStoreSchema {
         original_encoding TEXT NOT NULL,
         original_rel_path TEXT NOT NULL,
         canonical_rel_path TEXT NOT NULL,
+        source_kind TEXT NOT NULL DEFAULT 'reference',
+        reference_source_id TEXT,
+        preparation_version TEXT,
+        source_map_rel_path TEXT,
+        source_map_sha256 TEXT,
+        workflow_book_json TEXT,
         created_at REAL NOT NULL,
         PRIMARY KEY (book_id, id),
         FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
@@ -245,6 +251,7 @@ public enum AudiobookStoreSchema {
     CREATE TABLE IF NOT EXISTS characters (
         id TEXT NOT NULL,
         book_id TEXT NOT NULL,
+        source_id TEXT NOT NULL DEFAULT '',
         display_name TEXT NOT NULL,
         aliases_json TEXT NOT NULL,
         is_narrator INTEGER NOT NULL,

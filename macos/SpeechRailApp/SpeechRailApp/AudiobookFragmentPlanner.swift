@@ -193,7 +193,7 @@ public enum AudiobookFragmentPlanner {
             let voiceBindingDigest = binding.bindingDigest
             let fragmentText = source.flatMap { try? $0.text(in: range) }
             var dependencyComponents = [
-                "frag_dep_v2",
+                "frag_dep_v3", AudiobookTextPreparation.version,
                 fragmentText.map { AudiobookDigest.sha256Hex(Data($0.utf8)) } ?? "source-unavailable",
                 "\(chapter.sourceID.uuidString)",
                 "\(range.lowerBound)-\(range.upperBound)",

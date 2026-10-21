@@ -232,7 +232,7 @@ final class AudiobookSourceTests: XCTestCase {
         }
     }
 
-    func testAC24_NormalizedTextStripsReplacementCharWhileRawTextPreservesOffsets() throws {
+    func testNormalizedTextPreservesLiteralReplacementCharacter() throws {
         let rawText = "三叔叹了口气：\u{FFFD}“这水底下的东西，怕是不简单。”\r\n潘子握紧了刀。"
         let utf8 = Data(rawText.utf8)
         let source = try AudiobookSourceIndex(utf8: utf8)
@@ -240,13 +240,13 @@ final class AudiobookSourceTests: XCTestCase {
         // Raw slice preserves exact UTF-8 bytes and literal replacement character
         XCTAssertEqual(try source.text(in: source.wholeRange), rawText)
 
-        // Normalized display text strips stray U+FFFD so UI never renders [?] boxes
+        // Literal U+FFFD is content, not a decode error or an instruction to delete it.
         let normalized = try source.normalizedText(in: source.wholeRange)
-        XCTAssertFalse(normalized.contains("\u{FFFD}"))
-        XCTAssertTrue(normalized.contains("三叔叹了口气：“这水底下的东西，怕是不简单。”"))
+        XCTAssertTrue(normalized.contains("\u{FFFD}"))
+        XCTAssertTrue(normalized.contains("三叔叹了口气：\u{FFFD}“这水底下的东西，怕是不简单。”"))
         XCTAssertEqual(
             AudiobookSourceIndex.displayNormalizedText("第2章\u{FFFD} 七星鲁王宫"),
-            "第2章 七星鲁王宫"
+            "第2章\u{FFFD} 七星鲁王宫"
         )
     }
 }

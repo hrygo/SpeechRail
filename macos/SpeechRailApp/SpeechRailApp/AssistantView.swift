@@ -1760,10 +1760,7 @@ public struct AssistantView: View {
     }
 
     private func formatElapsed(_ seconds: TimeInterval) -> String {
-        let total = max(0, Int(seconds.rounded()))
-        let m = total / 60
-        let s = total % 60
-        return String(format: "%02d:%02d", m, s)
+        SpeechRailDisplayFormat.timecode(seconds)
     }
 
     private var livePhaseStatusLabel: String {
@@ -2155,7 +2152,7 @@ public struct AssistantView: View {
     /// 行右侧那个墙上时间码。回看与对话中共用同一种格式，也就不会有"同一句话
     /// 在两屏显示成两种时间"这种事。
     private static func clock(_ date: Date) -> String {
-        date.formatted(date: .omitted, time: .standard)
+        date.speechRailFormatted(.timeWithSeconds)
     }
 
     // MARK: 音色（未开始，整行一张卡）
@@ -3079,15 +3076,15 @@ public struct AssistantView: View {
                 // 翻一条旧记录时先想知道的是"哪一段、多久"，而不是它从几点开始。
                 ("结束于", review.map {
                     ($0.record.endedAt ?? $0.record.startedAt)
-                        .formatted(date: .numeric, time: .shortened)
-                } ?? "—"),
+                        .speechRailFormatted()
+                } ?? SpeechRailDisplayFormat.MissingValue.compact.text),
                 ("时长", reviewDurationText)
             ]
         }
     }
 
     private var reviewDurationText: String {
-        guard let record = review?.record else { return "—" }
+        guard let record = review?.record else { return SpeechRailDisplayFormat.MissingValue.compact.text }
         let end = record.endedAt ?? record.startedAt
         let seconds = max(0, end.timeIntervalSince(record.startedAt))
         return SessionExporter.clock(seconds)
@@ -3597,7 +3594,7 @@ public struct AssistantView: View {
     }
 
     private func recordSubtitle(_ summary: SessionSummary) -> String {
-        "\(summary.record.startedAt.formatted(date: .numeric, time: .shortened)) · \(summary.lineCount) 句"
+        "\(summary.record.startedAt.speechRailFormatted()) · \(summary.lineCount) 句"
     }
 
     private var memoryTabBody: some View {
@@ -4471,7 +4468,7 @@ struct InputLevelSheet: View {
                 }
                 .frame(height: SpeechRailDesignTokens.Layout.inputLevelMeterHeight)
                 .accessibilityLabel("输入电平")
-                .accessibilityValue("\(Int(level * 100))%")
+                .accessibilityValue(SpeechRailDisplayFormat.percentage(Double(level)))
             }
 
             HStack {

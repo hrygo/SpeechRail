@@ -10,6 +10,7 @@ struct SpeechRailApp: App {
     @State private var model: AppModel
 #if DEBUG
     private let uiTestWorkStore: CreativeWorkStore?
+    private let uiTestAudiobookStore: AudiobookProjectStore?
 #endif
     @State private var navigation: AppNavigationState
     /// 会话层的地基：所有权状态机 + 记录库（`SESSIONS-SPEC` §12 阶段 1 / 2）。
@@ -151,7 +152,16 @@ struct SpeechRailApp: App {
         let llmProvider = LLMProvider(
             observationHandler: TeleprompterProviderObservationAdapter.handler(to: aiObservationSink)
         )
-        let coordinator = SessionCoordinator(store: SessionStore(), llmProvider: llmProvider)
+        let sessionStore: SessionStore
+#if DEBUG
+        sessionStore = isUITest
+            ? SessionStore(directory: FileManager.default.temporaryDirectory
+                .appendingPathComponent("speechrail-uitest-sessions-\(UUID().uuidString)", isDirectory: true))
+            : SessionStore()
+#else
+        sessionStore = SessionStore()
+#endif
+        let coordinator = SessionCoordinator(store: sessionStore, llmProvider: llmProvider)
         let captionSession = CaptionSession(coordinator: coordinator)
         let sessionPreferences = SessionPreferences()
 
@@ -183,16 +193,27 @@ struct SpeechRailApp: App {
         let audiobookDependencies: AudiobookDependencies
         if Self.isSeededAudiobookAnalysisUITest {
             var seeded = liveAudiobookDependencies
+            let fixtureStore: AudiobookProjectStore
+            do { fixtureStore = try seeded.makeStore() }
+            catch { fatalError("Unable to initialize isolated audiobook fixture") }
+            self.uiTestAudiobookStore = fixtureStore
+            seeded.makeStore = { fixtureStore }
+            seeded.speechRenderer = UITestAudiobookCastingRenderer()
+            seeded.voiceCatalog = VoiceCatalogStore()
             let fixtureConfig = LLMConfiguration(baseURL: "http://127.0.0.1:1", model: "uitest-seeded")
             seeded.resolveAnalysisSnapshot = { generation in
                 AudiobookAnalysisConfigSnapshot(configuration: fixtureConfig, generation: generation)
             }
             seeded.makeAnalysisClient = { snapshot in
-                UITestSeededAudiobookAnalysisClient(configurationDigest: snapshot.configurationDigest)
+                UITestSeededAudiobookAnalysisClient(
+                    configurationDigest: snapshot.configurationDigest,
+                    includesCastingCollisions: ProcessInfo.processInfo.arguments.contains("--ui-test-casting-collisions")
+                )
             }
             audiobookDependencies = seeded
         } else {
             audiobookDependencies = liveAudiobookDependencies
+            self.uiTestAudiobookStore = nil
         }
 #else
         let audiobookDependencies = liveAudiobookDependencies
@@ -496,24 +517,26 @@ struct SpeechRailApp: App {
     /// 不自动开始分析——UI 测试按真实用户路径点击主动作。
     /// 失败时 assertion 可见：静默 return 会让 UI 测试死在远处的"主动作未出现"。
     @MainActor
-    private static func seedUITestAudiobookBook(in workflow: AudiobookWorkflowModel) async {
+    private static func seedUITestAudiobookBook(in workflow: AudiobookWorkflowModel, store: AudiobookProjectStore?) async {
         guard !didSeedUITestAudiobookBook else { return }
         didSeedUITestAudiobookBook = true
         do {
-            try await seedUITestAudiobookBookThrowing(in: workflow)
+            try await seedUITestAudiobookBookThrowing(in: workflow, store: store)
         } catch {
             assertionFailure("种子有声书 fixture 导入失败：\(error)")
         }
     }
 
     @MainActor
-    private static func seedUITestAudiobookBookThrowing(in workflow: AudiobookWorkflowModel) async throws {
+    private static func seedUITestAudiobookBookThrowing(in workflow: AudiobookWorkflowModel, store: AudiobookProjectStore?) async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("SpeechRailUITests", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let preparedCasting = ProcessInfo.processInfo.arguments.contains("--ui-test-prepared-casting")
+        let roleCount = 54
         var lines: [String] = []
-        for chapter in 1...3 {
+        for chapter in 1...(preparedCasting ? roleCount - 1 : 3) {
             lines.append("第\(chapter)章 种子回声")
             lines.append("林远站在桥头望向远山。")
             lines.append("“跟紧我。”他回头说道。")
@@ -530,6 +553,30 @@ struct SpeechRailApp: App {
         await workflow.confirmImport()
         guard workflow.selectedBook != nil else {
             throw UITestAudiobookSeedError("confirmImport 未选中书籍：\(workflow.errorMessage ?? "未知错误")")
+        }
+        if preparedCasting, let store, let bookID = workflow.selectedBook?.id,
+           let narrator = workflow.characters.first(where: \.isNarrator) {
+            let chapters = try await store.chapters(for: bookID)
+            let roles = [narrator] + (1..<roleCount).map {
+                AudiobookCharacter(bookID: bookID, displayName: "测试人物\($0)", isMajor: $0 < 8)
+            }
+            try await store.saveCharacters(bookID: bookID, characters: roles)
+            var annotations: [AudiobookAnnotation] = []
+            for (index, chapter) in chapters.enumerated() {
+                let atoms = try await store.atoms(for: bookID, chapterID: chapter.id)
+                for (atomIndex, atom) in atoms.filter({ $0.kind != .formatting }).enumerated() {
+                    annotations.append(.init(
+                        bookID: bookID, chapterID: chapter.id, windowID: UUID(),
+                        atomID: atom.id, sourceRange: atom.sourceRange,
+                        assignment: .assigned(roleID: atomIndex == 0 ? narrator.id : roles[index + 1].id)
+                    ))
+                }
+            }
+            try await store.saveAnnotations(bookID: bookID, annotations: annotations)
+            var book = try await store.book(id: bookID)
+            book.analysisState = .allWindowsValidated
+            try await store.updateBook(book)
+            await workflow.openBook(bookID)
         }
     }
 #endif
@@ -613,9 +660,9 @@ struct SpeechRailApp: App {
                     )
                     await model.refreshCreatorVoices()
 #if DEBUG
-                    // 种子 fixture：双门通过后导入隔离 3 章书；不自动分析。
+                    // 双门通过后导入隔离作品；默认三章，配声夹具为已分析的多角色作品。
                     if Self.isSeededAudiobookAnalysisUITest {
-                        await Self.seedUITestAudiobookBook(in: model.audiobookWorkflow)
+                        await Self.seedUITestAudiobookBook(in: model.audiobookWorkflow, store: uiTestAudiobookStore)
                     }
 #endif
                 }
@@ -1668,14 +1715,59 @@ private struct UITestAudiobookSeedError: LocalizedError, Sendable {
     var errorDescription: String? { detail }
 }
 
+/// 隔离书的可制作音色夹具；任何音频生成请求都失败，避免把准备验收误作制作。
+private struct UITestAudiobookCastingRenderer: AudiobookSpeechRenderer {
+    func fetchEffectiveCapabilities() async throws -> EffectiveCapabilitySnapshot {
+        try await Task.sleep(for: .milliseconds(600))
+        let model = ConfiguredModelIdentity(
+            assurance: .configuredCatalog,
+            runtimeRevision: String(repeating: "a", count: 40),
+            catalogRevision: String(repeating: "a", count: 40)
+        )
+        let descriptor = SafeVoiceDescriptor(
+            voiceMode: "system", locales: ["zh-CN"], styleTags: [], pitchBand: "unknown",
+            timbreFamily: "unknown", baselinePace: "unknown", sourceType: "system_preset",
+            metadataMethod: "declared_only"
+        )
+        let voices = (1...2).map { index in
+            SafeVoiceEntry(
+                id: "uitest-casting-\(index)", name: "测试声音\(index)",
+                mode: "system", isSystem: true, isDefault: true, available: true, availabilityReason: .available,
+                voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                voiceIdentityAssurance: .contentAddressed, model: model, descriptors: descriptor,
+                operations: ["http_speech": JSONValue(.object([
+                    "parameters": JSONValue(.object([
+                        "speed": JSONValue(.object([
+                            "status": JSONValue(.string("supported")),
+                            "values": JSONValue(.array([JSONValue(.number(1))]))
+                        ]))
+                    ]))
+                ]))], productionReady: true
+            )
+        }
+        return EffectiveCapabilitySnapshot(
+            serviceInstanceEpoch: "uitest", catalogRevision: "uitest-casting",
+            snapshotID: "uitest-casting", profile: "quality", models: ["tts": model],
+            voices: voices, operations: [:], guarantees: [:]
+        )
+    }
+
+    func renderFragment(_ request: AudiobookRenderCallRequest) async throws -> AudiobookRenderCallOutput {
+        throw ServiceAPIClientError.requestFailed
+    }
+}
+
 /// 种子有声书分析链路：确定性 fake 三阶段应答 + 逐调用延迟，让进度轨道
 /// 在真实界面里保持数秒可观测。只读 prompt 里的 atom/role ID，不碰网络与模型；
 /// 应答形状与 `AudiobookWorkflowTests.WorkflowLiveProgressClient` 一致。
 private final class UITestSeededAudiobookAnalysisClient: AudiobookAnalysisClient, @unchecked Sendable {
     let configurationDigest: String
 
-    init(configurationDigest: String) {
+    private let names: [String]
+
+    init(configurationDigest: String, includesCastingCollisions: Bool = false) {
         self.configurationDigest = configurationDigest
+        self.names = includesCastingCollisions ? ["林远", "同行甲", "同行乙"] : ["林远"]
     }
 
     func complete(_ prompt: AudiobookAnalysisPrompt) async throws -> String {
@@ -1685,15 +1777,15 @@ private final class UITestSeededAudiobookAnalysisClient: AudiobookAnalysisClient
             try await Task.sleep(for: .milliseconds(600))
             let atomIDs = Self.extractPrimaryAtomIDs(from: prompt.input)
             let firstAtom = atomIDs.first.map { [$0] } ?? []
-            let resp = AudiobookExtractionResponse(mentions: [
-                .init(surfaceName: "林远", aliases: ["阿远"], evidenceAtomIDs: firstAtom, voiceTraitEvidence: "青年低沉嗓音"),
-            ])
+            let resp = AudiobookExtractionResponse(mentions: names.map { name in
+                .init(surfaceName: name, aliases: [], evidenceAtomIDs: firstAtom, voiceTraitEvidence: "青年低沉嗓音")
+            })
             return String(decoding: try JSONEncoder().encode(resp), as: UTF8.self)
         case .castMerge:
             try await Task.sleep(for: .milliseconds(400))
-            let resp = AudiobookMergeResponse(groups: [
-                .init(canonicalName: "林远", memberSurfaceNames: ["林远", "阿远"], aliases: ["阿远"], isCollisionUnresolved: false, evidenceSummary: "青年低沉嗓音"),
-            ])
+            let resp = AudiobookMergeResponse(groups: names.map { name in
+                .init(canonicalName: name, memberSurfaceNames: [name], aliases: [], isCollisionUnresolved: false, evidenceSummary: "青年低沉嗓音")
+            })
             return String(decoding: try JSONEncoder().encode(resp), as: UTF8.self)
         case .annotation:
             try await Task.sleep(for: .milliseconds(400))
@@ -1701,7 +1793,8 @@ private final class UITestSeededAudiobookAnalysisClient: AudiobookAnalysisClient
             let roleIDs = Self.extractCandidateRoleIDs(from: prompt.input)
             var items: [AudiobookAnnotationResponse.Item] = []
             for (idx, atomID) in atomIDs.enumerated() {
-                if let roleID = roleIDs.first, idx % 2 == 1 {
+                if !roleIDs.isEmpty, idx % 4 != 0 {
+                    let roleID = roleIDs[(idx - 1) % roleIDs.count]
                     items.append(.init(atomID: atomID, speakerKind: .character, roleID: roleID, candidateRoleIDs: [roleID], confidence: 0.95, evidence: "林远开口说道"))
                 } else {
                     items.append(.init(atomID: atomID, speakerKind: .narrator, roleID: nil, candidateRoleIDs: [], confidence: 0.99, evidence: "旁白叙述"))

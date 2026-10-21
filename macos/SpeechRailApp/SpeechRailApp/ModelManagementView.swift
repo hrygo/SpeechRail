@@ -514,12 +514,12 @@ public struct ModelManagementView: View {
     /// 分人是任务级按需能力, 不随档位变化: 三张卡上这一行说的是同一件事, 逐项状态
     /// 在下面的「谁在说话」小节里列。这里只回答「现在能不能用」。
     private var diarizationReadinessText: String {
-        guard model.modelCatalog != nil else { return "未读取" }
+        guard model.modelCatalog != nil else { return SpeechRailDisplayFormat.MissingValue.notLoaded.text }
         return missingDiarizationKeys.isEmpty ? "可用" : "需补齐模型"
     }
 
     private func voiceCreationSupport(for summary: ProfileSummary?) -> String {
-        guard let summary else { return "未读取" }
+        guard let summary else { return SpeechRailDisplayFormat.MissingValue.notLoaded.text }
         // VoiceDesign 与档位无关: 目录里那份按需设计制品存在即可用。
         guard let catalog = model.modelCatalog,
               catalog.hasVoiceDesignArtifact
@@ -881,7 +881,7 @@ public struct ModelManagementView: View {
 
     private var voiceDesignSizeText: String? {
         let total = allVoiceDesignArtifacts.reduce(Int64(0)) { $0 + $1.sizeBytes }
-        return total > 0 ? "约 \(formatBytes(total))" : "约 4.0 GiB"
+        return total > 0 ? "约 \(formatBytes(total))" : "约 \(SpeechRailDisplayFormat.bytes(4_294_967_296, context: .file))"
     }
 
     private var vadRuntimeDetail: String {
@@ -1028,7 +1028,7 @@ public struct ModelManagementView: View {
                 )
                 LabeledContent(
                     "配置档位",
-                    value: configuredProfile.map { profileTitle(for: $0) } ?? "未读取"
+                    value: configuredProfile.map { profileTitle(for: $0) } ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text
                 )
                 LabeledContent("使用状态", value: usage(for: artifact).text)
                 if let operation = model.operation, let message = operation.message {
@@ -1052,7 +1052,7 @@ public struct ModelManagementView: View {
                 )
                 LabeledContent(
                     "配置档位",
-                    value: configuredProfile.map { profileTitle(for: $0) } ?? "未读取"
+                    value: configuredProfile.map { profileTitle(for: $0) } ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text
                 )
                 LabeledContent("目录状态", value: model.modelAvailability == .available ? "已读取" : "未读取")
                 // 这一档绑定的识别与合成权重。它们是制品 key（`asr-…` / `tts-…`），
@@ -1060,11 +1060,11 @@ public struct ModelManagementView: View {
                 // 「识别 / 合成」把它们摆在首屏，读起来像两个产品名。
                 LabeledContent(
                     "这组档位的识别权重",
-                    value: summary(for: targetSelection.asrSpec)?.asr ?? "未读取"
+                    value: summary(for: targetSelection.asrSpec)?.asr ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text
                 )
                 LabeledContent(
                     "这组档位的合成权重",
-                    value: summary(for: targetSelection.ttsSpec)?.tts ?? "未读取"
+                    value: summary(for: targetSelection.ttsSpec)?.tts ?? SpeechRailDisplayFormat.MissingValue.notLoaded.text
                 )
                 LabeledContent(
                     "这组档位的音色克隆权重",
@@ -1243,7 +1243,7 @@ public struct ModelManagementView: View {
     }
 
     private var vadEngineLabel: String {
-        guard let status = model.health?.realtimeVAD else { return "未读取" }
+        guard let status = model.health?.realtimeVAD else { return SpeechRailDisplayFormat.MissingValue.notLoaded.text }
         let resolved = status.resolvedEngine.isEmpty ? status.configuredEngine : status.resolvedEngine
         return resolved.isEmpty ? "未读取" : resolved
     }
@@ -1358,7 +1358,7 @@ public struct ModelManagementView: View {
 
     /// VoiceDesign 与档位无关: 目录里那份按需设计制品决定能力, 不随所选档位变化。
     private var voiceDesignCapabilityText: String {
-        guard let catalog = model.modelCatalog else { return "未读取" }
+        guard let catalog = model.modelCatalog else { return SpeechRailDisplayFormat.MissingValue.notLoaded.text }
         return catalog.hasVoiceDesignArtifact ? "支持候选预览" : "不支持候选预览"
     }
 
@@ -1772,7 +1772,7 @@ public struct ModelManagementView: View {
     }
 
     private func formatBytes(_ bytes: Int64) -> String {
-        String(format: "%.1f GiB", Double(bytes) / 1_073_741_824)
+        SpeechRailDisplayFormat.bytes(bytes, context: .file)
     }
 }
 

@@ -369,8 +369,7 @@ public struct VoiceCloneView: View {
     }
 
     private var formattedElapsed: String {
-        let total = Int(model.recording.elapsed.rounded())
-        return String(format: "%02d:%02d", total / 60, total % 60)
+        return SpeechRailDisplayFormat.timecode(model.recording.elapsed)
     }
 
     private var recordButton: some View {
@@ -564,7 +563,7 @@ public struct VoiceCloneView: View {
     }
 
     private func percentText(_ ratio: Double) -> String {
-        "\(Int((ratio * 100).rounded()))%"
+        SpeechRailDisplayFormat.percentage(ratio)
     }
 
     private func decibelText(_ decibels: Double) -> String {
@@ -917,7 +916,7 @@ public struct VoiceCloneView: View {
                         LabeledContent("噪声底", value: String(format: "%.1f dBFS", report.reference.noiseFloorDecibels))
                         LabeledContent(
                             "内容匹配",
-                            value: report.reference.transcriptMatch.map { percentText($0) } ?? "未评估"
+                            value: report.reference.transcriptMatch.map { percentText($0) } ?? SpeechRailDisplayFormat.MissingValue.notEvaluated.text
                         )
                     }
                     .speechRailInspectorContent()
@@ -928,8 +927,8 @@ public struct VoiceCloneView: View {
                 }
                 Divider()
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    LabeledContent("注册标识", value: model.cloneRegistrationID ?? "—")
-                    LabeledContent("幂等键", value: model.cloneIdempotencyKey ?? "—")
+                    LabeledContent("注册标识", value: model.cloneRegistrationID ?? SpeechRailDisplayFormat.MissingValue.compact.text)
+                    LabeledContent("幂等键", value: model.cloneIdempotencyKey ?? SpeechRailDisplayFormat.MissingValue.compact.text)
                 }
                 .speechRailInspectorContent()
             }
@@ -937,7 +936,7 @@ public struct VoiceCloneView: View {
     }
 
     private func secondsText(_ seconds: TimeInterval) -> String {
-        String(format: "%.2f s", seconds)
+        SpeechRailDisplayFormat.duration(seconds)
     }
 
     // MARK: - 动作
@@ -1086,7 +1085,7 @@ private struct VoiceLevelMeter: View {
         .frame(height: SpeechRailDesignTokens.VoiceClone.meterHeight)
         .accessibilityElement()
         .accessibilityLabel("录音电平")
-        .accessibilityValue(isActive ? "\(Int((level * 100).rounded()))%" : "未在录音")
+        .accessibilityValue(isActive ? SpeechRailDisplayFormat.percentage(Double(level)) : "未在录音")
     }
 
     /// 中间高、两端略低的固定轮廓：电平条的高度是**刻度**，只有颜色随真实电平走——

@@ -144,6 +144,23 @@ final class AudiobookExportTests: XCTestCase {
         return (bookID, ch1, ch2, hero)
     }
 
+    func testHistoricalExportUsesSelectedRevisionAfterWorkingPreparation() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let revisions = AudiobookRevisionController(store: store)
+        let fixture = try await makeTwoChapterExportFixture(store: store, revisionController: revisions, completeSecondChapter: true)
+        let before = try await store.book(id: fixture.bookID)
+        let productionID = try XCTUnwrap(before.currentProductionRevisionID)
+        _ = try await store.prepareWorkingRevision(bookID: fixture.bookID, expectedSourceID: before.sourceID)
+        let cast = AudiobookCastController(store: store, capabilityProvider: { throw ServiceAPIClientError.invalidResponse })
+        let export = AudiobookExportController(store: store, castController: cast, revisionController: revisions)
+        let audit = try await export.audit(bookID: fixture.bookID, chapterIDs: nil, profile: .m4b, productionRevisionID: productionID)
+        XCTAssertEqual(audit.readyChapterIDs, [fixture.chapter1.id, fixture.chapter2.id])
+        XCTAssertTrue(audit.blockers.isEmpty)
+        let current = try await store.book(id: fixture.bookID)
+        XCTAssertNotEqual(current.sourceID, before.sourceID)
+        XCTAssertEqual(current.currentProductionRevisionID, productionID)
+    }
+
     private static let fakeStageEncoder: AudiobookExportController.StageEncoderHandler = { manifest, exportReqDir in
         let stageDir = exportReqDir.appendingPathComponent("stage", isDirectory: true)
         try FileManager.default.createDirectory(at: stageDir, withIntermediateDirectories: true)

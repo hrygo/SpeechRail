@@ -350,7 +350,7 @@ public struct TeleprompterTrialReadingSheet: View {
 
                 Spacer()
 
-                Text("校准倍率：\(String(format: "%.2fx", result.calibrationFactor))")
+                Text("校准倍率：\(SpeechRailDisplayFormat.playbackRate(result.calibrationFactor))")
                     .font(SpeechRailDesignTokens.Typography.technicalValue)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
@@ -509,8 +509,6 @@ public struct TeleprompterTrialReadingSheet: View {
     }
 
     private func formatSeconds(_ seconds: TimeInterval) -> String {
-        let mins = Int(seconds) / 60
-        let secs = Int(seconds) % 60
-        return String(format: "%02d:%02d", mins, secs)
+        SpeechRailDisplayFormat.timecode(seconds)
     }
 }

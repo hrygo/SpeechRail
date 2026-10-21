@@ -2,8 +2,8 @@
 title: "SpeechRail macOS App 有声书工坊开发说明"
 status: active
 audience: "macOS App 开发者、架构与测试工程师"
-version: "1.9.3"
-date: 2026-10-20
+version: "1.12.0"
+date: 2026-10-21
 ---
 
 # SpeechRail macOS App 有声书工坊开发说明
@@ -17,8 +17,8 @@ date: 2026-10-20
 ### 1.1 `SpeechRailAppSupport` 核心模型与控制器（可独立进入 SwiftPM 与 Xcode 单测）
 
 - **`AudiobookDomain.swift`**：书籍状态机 (`AudiobookLifecycleState`)、章节、段落、阅读块 (`AudiobookBlock`)、说话人证据 (`AudiobookSpeakerEvidence`)、角色实体 (`AudiobookCharacter`)、音频切片 (`AudiobookFragment`)、候选音频 (`AudiobookCandidate`)、生产版本 (`AudiobookProductionRevision`)、收听进度 (`AudiobookListeningProgress`) 与失败信封 (`AudiobookFailureEnvelope`)。
-- **`AudiobookSourceIndex.swift`**：持有规范 UTF-8 `Data` 与标量起点索引，按半开字节区间 (`[startByte, endByte)`) 读取正文并校验标量边界。编码与排版探测之后建立 `AudiobookParagraph` 只读投影，连接段内折行，保护空行、缩进段首、独立对白与诗行；每个段落保留原始字节范围，`normalizedText(in:)` 提供规整后的阅读文本，原始换行和 SHA-256 不变。SQLite 不重复存储整书正文。
-- **`AudiobookTXTImporter.swift` & `AudiobookChapterPlanner.swift`**：编码探测（UTF-8 / BOM / UTF-16 / GB18030）、64 MiB 导入上限与 SHA-256；先规整逻辑段落，再规划章节并生成核对预览。`.epub` 先由 `AudiobookEPUBImporter` 按 spine 顺序提取 XHTML 正文/标题与 OPF 书名作者，再复用同一套纯文本导入；原始压缩包不保存。除中英文显式章名外，识别有空行/居中排版及后续正文证据的多篇独立篇名；无上级篇名时，连续编号小节可作为章节。缺失开篇标题使用「开篇」，无可靠标题保留「全文」，不按作品知识补写标题。目录和段落完整覆盖来源；预览支持按章核对规整结果和原始排版，LF 仅用于阅读投影，canonical UTF-8 保留原始换行。
+- **`AudiobookSourceIndex.swift`**：工作 UTF-8 `Data` 与标量起点索引，`text(in:)` 按半开字节区间切片并校验边界；同文件的 `AudiobookTextPreparation` 复用段落分类与连接政策，在分章前生成工作字节、SHA-256、加工版本和单调来源映射。原文件与解码参考文本独立封存，原始编码文件不参与工作偏移解释。SQLite 不重复存储整书正文。
+- **`AudiobookTXTImporter.swift` & `AudiobookChapterPlanner.swift`**：编码探测（UTF-8 / BOM / UTF-16 / GB18030）、64 MiB 导入上限与 SHA-256；先规整逻辑段落，再规划章节并生成核对预览。`.epub` 先由 `AudiobookEPUBImporter` 按 spine 顺序提取 XHTML 正文/标题与 OPF 书名作者，再复用同一套纯文本导入；原始压缩包不保存。除中英文显式章名外，识别有空行/居中排版及后续正文证据的多篇独立篇名；无上级篇名时，连续编号小节可作为章节。缺失开篇标题使用「开篇」，无可靠标题保留「全文」，不按作品知识补写标题。目录和段落完整覆盖来源；预览支持按章核对规整结果和原始排版，canonical UTF-8 保存已加工文本，原始换行只存在于参考文本；原始排版预览通过来源映射回到参考坐标。
   编码探测不再在歧义时阻断预览：非 UTF-8 的合法 GB18030 字节流按 GB18030 提供临时预览，C1 控制符等可疑 UTF-8 同样标记待确认；`requiresEncodingConfirmation` 为 true 时导入面板显示提示，用户切换编码后重新生成预览，错误在面板内可见。
   `AudiobookChapterPlanner.plan` 额外返回 `tableOfContentsRanges`：连续至少三个章名行之间只隔空白/页码/点引线，且有目录标记或后文同名标题时，整段识别为目录页，从章名候选中移除，并作为首个相关章节的 `excludedRanges`。仅含目录的合成「开篇」会并入下一章；目录字节仍被章节覆盖，但不会生成 atom、进入分析或朗读。`plan` 保留无目录时的既有边界与标题。
 - **`AudiobookEPUBImporter.swift`**：纯 Swift ZIP 中央目录预检（加密位、method、条目数、压缩/解压总量、路径穿越），再用系统 `ditto` 解压到临时目录并拒绝符号链接/越界路径；只读取 `META-INF/container.xml`、OPF manifest/spine 与 XHTML，忽略脚本、样式和外部资源。XHTML 按块级标签保留段落/标题边界，常见 HTML 实体转 Unicode，非严格 XHTML 走去标签兜底。DRM、损坏包、缺失 container/spine、空正文均返回可行动错误。
@@ -27,7 +27,7 @@ date: 2026-10-20
 - **`AudiobookAnalysisProgress.swift`**：分析进度观测的闭式事件（`AudiobookAnalysisEvent`）、快照投影（`AudiobookAnalysisProgress`）与有界诊断缓冲。事件只带序号、计数、耗时、token 数与低基数错误码，不带原文、prompt、转写、密钥、路径或实名；投影侧按 `runID` + 序号丢弃过期/跨 run 事件，百分比单调不回退。管线在规划、提取、归并、标注、拆窗重试与终态处发射事件；`LLMProvider` 观测经 `callDiagnostics` 汇入，runID 与 LLM 观测 sessionID 一串到底。
 - **`AudiobookAnalysisProgressRailView.swift`**：确定性进度轨道的纯展示视图（阶段 + n/N + 百分比 + 心跳 + 重试/停滞提示 + 开发者诊断折叠区）。输入只有不可变快照、时钟 tick、事件数与暂停回调，不读 `AppModel`，可经 `ImageRenderer` 离屏渲染做视觉回归；文案走同文件的纯函数（心跳三档阈值与 `AudiobookAnalysisProgressLimits` 一致），工作台只做薄委托。
 - **`AudiobookCastController.swift`**：角色重命名、合并/拆分、单条台词改派、音色匹配打分、一键试听样本生成，以及进入批量合成前的「旁白确认 + 必选角色确认 + 试听通过」门禁。
-- **`AudiobookFragmentPlanner.swift` & `AudiobookInvalidation.swift`**：默认上限为 240 Unicode 标量，按标点切分且不跨说话人边界；根据原文、角色与音色等依赖摘要计算片段失效，普通制作可复用未变化的有效候选。提供 atoms 时按“非格式、未被章节排除”的正文原子校验覆盖：重复或缺失标注直接拒绝规划，避免静默漏读；发音规则只把实际命中词条的片段并入 `pron:<hash>` 依赖，未命中的片段摘要保持不变。
+- **`AudiobookFragmentPlanner.swift` & `AudiobookInvalidation.swift`**：默认上限为 240 Unicode 标量，按标点切分且不跨说话人边界；根据工作修订、加工版本、文字、角色与音色等依赖摘要计算片段失效，普通制作可复用未变化的有效候选。提供 atoms 时按“非格式、未被章节排除”的正文原子校验覆盖：重复或缺失标注直接拒绝规划，避免静默漏读；发音规则只把实际命中词条的片段并入 `pron:<hash>` 依赖，未命中的片段摘要保持不变。
 - **`AudiobookDependencies.swift` & `AudiobookProductionController.swift`**：串行 TTS 合成队列、能力快照版本锁定 (`effective_capabilities_v1`)、8 MiB 单响应护栏、通过 `AVAudioConverter` 正规化为 48 kHz PCM16 单声道 WAV、原子候选落盘与断点续作。
 - **`AudiobookRevisionController.swift`**：候选与不可变章节版本分离；显式采用创建新的 `AudiobookChapterRevision` 并切换 `currentChapterRevisionID`，保留上一版本供撤销。
 - **`AudiobookPronunciationController.swift`**：把本书词表经 `AudiobookPronunciationClient` 保存为不可变 revision（header `SpeechRail-Pronunciation-Set: <set_id>@<revision>`），本地缓存于 `pronunciation_bindings`。保存冲突（409）不覆盖远端，置 `needsRefresh` 并提示先刷新；刷新先从摘要取最新 revision，再按该 revision 读取词条，可恢复本地缓存缺失或别处更新的场景。渲染请求携带固定 header，片段依赖只对命中词条变化。
@@ -36,7 +36,10 @@ date: 2026-10-20
 - **`AudiobookMediaVerifier.swift` & `AudiobookExportController.swift`**：导出前校验全部采用切片的磁盘存在性、WAV 头、帧数与 SHA-256；写入 `<app_home>/audiobooks/exports/<request_id>/request.json` 并通过 `SpeechRailControlAgent` 执行 `speechrail media encode-audiobook`，导出完成后用 `AVURLAsset` 做时长、音轨、章节数与封面存在性的二次校验。准备阶段由 Workflow 持有 requestID，可调用 `cancel(requestID:)` 中止编码并显示“未生成任何文件”；保存阶段对已存在的 M4B 文件或 MP3 目录都要求显式替换确认，目录不会被静默整体覆盖。导出面板先调用 `AudiobookExportController.audit(...)` 做只读预检（与 `prepare` 共用 `buildPlan`，不写文件、不保存生产版本），按 `AudiobookExportBlocker` 逐章列出缺分析、待确认说话人、无当前音频、资产缺失或空片段，再禁用整本 M4B 或空的 MP3 选择；准备/保存失败写入 `exportErrorMessage` 在面板内联显示，成功后清除。带封面时清单升级为 `audiobook_media_export_v2` 并携带封面相对路径与图像 SHA-256；`chapter_mp3` 与跨书封面在写清单前拒绝。
 - **`AudiobookWorkflowModel.swift` & `AudiobookProductionWiring.swift`**：`@MainActor @Observable` 顶层编排器，将书架、工作台两页签、收听模式与 `AppModel` / `SharedPlaybackOwner` / `SpeechCreationAdmission` 连接起来；异步读取和制作收尾校验书籍身份与任务代次。
 
-角色分析的 prompt 文本及工作台的段落、片段展示共用 `source.normalizedText(in:)`，不会把排版折行当作语义断句。LLM 仍只引用既有 atom ID；完整覆盖、持久化来源、片段依赖及校验使用原始字节区间。导入不重写已有作品的原文或音频。
+角色分析的 primary/context、工作台展示、选角试听和 TTS 共用 `workingSourceSnapshot` 固定的工作索引及 `text(in:)`，同一区间的文字与工作文件字节一致。LLM 只引用该修订的 atom ID。检查点保存 source ID 与加工版本，片段依赖包含加工版本；提交角色、标注、候选、章节和完成进度时重新核对修订，迟到结果不能修改新 source 的状态。 加工生成的段间空白不构成新的标题证据；来源映射保留每个逻辑段落的原始标题候选判定，导入与重开后使用相同判定。
+
+
+Store 的 schema 7 将旧 source 标记为 `reference`，不自动准备旧作品。`prepareWorkingRevision(bookID:expectedSourceID:)` 只在明确作品操作中调用，暂存校验后 CAS 切换，保留全部历史行与 WAV；`activateSourceRevision` 按指针回退。工作文件或映射损坏不得回退原文；未准备作品返回 `working_text_preparation_required`。历史收听按章节修订取候选；`ExportController.audit/prepare` 可传 `productionRevisionID`，使用该修订的 source、章节和音频，不写入当前工作采用版本。
 
 回目识别支持“零 / 〇 / ○”，并为与前后正文粘连的可靠回目建立虚拟行边界，边界仍指向原始字节。合集目录优先保留独立篇名，篇内编号章节保留在该篇正文中；章回体优先使用回目。相邻同名标题之间仅有空白或分隔线时合并目录入口，来源文字不删除。CRLF 的两个 scalar 必须同时计入 atom 的 160 scalar 预算。
 
@@ -59,7 +62,7 @@ date: 2026-10-20
 
 ## 2. 关键不变量
 
-1. **原文零改写与字节区间真源**：导入生成的 `source.txt` 只读封存，章节、段落、阅读块与音频切片一律通过 `[startByte, endByte)` 指向 `source.txt`，数据库不存储冗余全文拷贝。
+1. **参考原文封存与工作文本区间**：原始 TXT 与解码参考文本只读保留；一次加工后的工作 UTF-8 是全部新工作输入，章节、段落、阅读块、角色证据和音频切片以该 source 的 `[startByte, endByte)` 定位。旧修订偏移不用于新字节。
 2. **角色与音色双层解耦**：LLM 理解只产出 `CharacterID`，合成只读取 `CharacterID -> VoiceBinding`。更换角色音色只重算该角色的片段签名，不重跑 LLM。
 3. **单播放源**：试听、返修对比、成书收听全部经由 `SharedPlaybackOwner`；生产队列由独立准入与暂停机制管理。
 4. **资产恢复与提交验证**：候选通过 `AudiobookAssetJournal` 恢复，未采用候选与历史版本引用保留；导出通过舞台产物校验、目标旁临时副本复核及原子安装提交。
@@ -67,6 +70,11 @@ date: 2026-10-20
 
 ### 2.1 选角方案与正式制作边界
 
+- 全书分析后自动准备已有声音方案；`autoAssignRecommendedVoices` 默认不接受新增共享，只有「一键智能配声」显式传入共享同意。该同意只覆盖 `sharedVoiceConsentRequired`，同章撞音和版本更新仍按方案身份集中确认。主按钮不调用声音创建、试听或章节制作；精细创作保留在角色与次级菜单中。
+- 可用声音不足时，`AudiobookVoicePreparation` 从实际发声角色、声音要求和原文标注准备 `AudiobookVoiceCreationDraft`。创建资料与生成分离，`AudiobookVoicePreparationSheet` 集中展示可编辑名称、声音描述、试听稿和折叠的原文依据；建议与原文来源分开说明。名称上限为 64 scalar、描述为 1–10000 scalar、试听稿为 20–240 scalar；提交前校验，不在服务装配层隐藏修改合法文稿。
+- `createSelectedVoiceDrafts` 仅提交已勾选且未完成的项目，串行复用设计、参考声音检查、发布和资产登记链。发布后的身份核对不要求声音已通过输出检查；先用无绑定的登记意图保留本书资产，再通过 `SpeechRailVoiceQualityClient` 检查配音效果。报告通过且 `validationPersisted=true` 后重新读取能力，只有 `production_ready=true` 及版本、参数均合法才提交角色绑定。检查失败呈现「已创建待检查」，保留资产并可仅重试检查，不再次设计。创建身份绑定具名的完整物料字段及创建尝试：编辑后使用新身份；传输或登记中断复用原尝试，参考声音检查已确认的终止失败使用新尝试身份与种子。取消不再启动下一候选或下一项目；发布成功后的身份核验与资产登记独立收尾，保留本书归属。异步返回同时核对作品与资料会话身份，切书开始即停止旧结果写回界面；在途人工选声继续受冻结上下文保护。
+- 创建资料冻结角色、已有绑定、原文摘要、章节范围与标注身份；提交前重新核对，原文归属或角色变化要求重新准备。成功后刷新声音并重新准备配声建议，不隐式同意共享/撞音或启动章节制作。未提交草稿只驻留当前工作台内存，不新增持久化格式；重新读取时保留仍适用的编辑，切书清除。
+- `isAssigningRecommendedVoices` 覆盖能力读取、匹配、保存和制作条件核对四个步骤，`castingPreparationProgressText` 显示实际阶段。重复准备或应用不重入；取消和切书后检查目标身份，完成后不自动进入音频制作。集中应用方案后也完成合法的角色确认，避免再要求逐个设置。
 - `AudiobookCastRegistry.recommendVoiceBindings` 消费完整能力快照和 `VoiceCatalogSnapshot`，输出 `AudiobookCastingPlan`。候选需归属明确、对本书可见、可用且 `productionReady == true`，并明确支持拟用参数；池为空时返回问题，不退回原始列表。只有快照可证的系统预设可以在未登记目录元数据时通用。
 - 旁白计入声音容量；别名不增加数量。自动推荐、按行当补全和自动创建主角声音只处理未绑定角色。已有选择受保护，独占冲突不会自动改为共享。任何新增共享建议都需要与方案摘要绑定的显式接受，同章冲突另行说明；单个未采用候选的排除说明不要求接受风险。同书音色的来源角色影响排序，不额外限制其可见范围。
 - `Store.prepareCastingPlan` 在同一 actor 中补齐原文/章节上下文摘要与影响片段；纯 Registry 结果不能直接提交。`CastController.applyCastingPlan` 重新核对能力及目录修订；Store 在单事务中比较角色、标注、绑定和原文/章节输入，保存政策、绑定、修订及确认失效。任一项错误、过期或取消均无部分提交。
@@ -95,3 +103,11 @@ date: 2026-10-20
 - 章节跳过只更新 `chapters.is_skipped`，不重建文本原子、不删除分析与候选；`planRootWindows`、二次消歧、制作选章和导出均显式排除跳过章节。整本 M4B 的阻塞原因不计跳过章节，跳过项仍写入导出记录的 omitted 清单。恢复只清标记，后续分析/制作重新纳入。
 - 全书分析重跑时，`user_confirmed` 的标注按 atomID 保留原行（含 id/windowID/assignment/revision），LLM 结果不能覆盖人工确认；二次消歧只处理 `unknown && !user_confirmed`，默认最多 200 次调用并在每个簇前检查 `Task.checkCancellation()`，Workflow 暴露“取消 AI 复核”。
 - `AudiobookExportTests` 的章节媒体夹具由 AVFoundation 动态生成合成 AAC，再用 PATH 中的 `ffmpeg` 按产品封装方式生成 QuickTime 章节轨；找不到工具时明确跳过该正例，不下载依赖。测试不使用真实书稿或模型。fake 编码流程必须显式注入 fake 媒体验证器，生产默认验证器始终读取实际媒体。
+
+人物与声音在窄窗口使用锚定其工具栏按钮的原生浮层；集中确认与应用操作保持在可见窗口内，Escape 可关闭浮层。顶部主动作在未准备时执行一键配声，有需确认的风险时打开配声方案。
+
+### 文本准备与历史音频选择
+
+旧作品由 `prepareSelectedBookWorkingText` 显式调用 Store 的准备与 source CAS；打开作品只读取元数据。准备后取消配声建议与试听身份，新文本要求重新分析及确认配声。旧章节的采用版本在切换前形成生产快照，部分制作也保留可选音频版本。
+
+`selectedAudioRevisionID` 同时固定听书与导出预检/准备的生产版本；历史章节、跟读正文与选择状态独立于可编辑工作区。播放器按指定章节版本解析候选并验证资产；返回制作台不会用旧坐标定位新文本。分析状态写入另受 Store 的 run token 保护，暂停先撤销当前 token，过期任务只结束自身进度，不改新任务状态。

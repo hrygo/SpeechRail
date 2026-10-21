@@ -41,6 +41,7 @@ public actor AudiobookAnalysisPipeline {
     private var progressSink: AudiobookAnalysisProgressSink
     private var cancelledBookIDs: Set<UUID> = []
     private var activeGenerationsByBook: [UUID: Int] = [:]
+    private var workingSourcesByBook: [UUID: (generation: Int, snapshot: AudiobookWorkingSourceSnapshot, runID: UUID)] = [:]
     /// 阶段一提取结果缓存（按 windowID + policyFingerprint + configurationDigest 键控），暂停或阶段三中断重跑时免除重复提取。
     private var extractionCacheByWindowKey: [String: [AudiobookExtractionResponse.Mention]] = [:]
 
@@ -56,9 +57,12 @@ public actor AudiobookAnalysisPipeline {
         self.clientFactory = clientFactory
     }
 
-    public func cancel(bookID: UUID) {
+    public func cancel(bookID: UUID) async {
         cancelledBookIDs.insert(bookID)
         activeGenerationsByBook[bookID, default: 1] += 1
+        if let runID = workingSourcesByBook[bookID]?.runID {
+            try? await store.endAnalysisRun(bookID: bookID, runID: runID, paused: true)
+        }
     }
 
     /// 安装本次 run 的进度投递目标。管线一次只跑一个 run，
@@ -79,22 +83,33 @@ public actor AudiobookAnalysisPipeline {
         guard config.isConfigured else {
             throw AudiobookAnalysisError.notConfigured
         }
+        let workingSnapshot = try await store.workingSourceSnapshot(bookID: bookID)
         cancelledBookIDs.remove(bookID)
         let runGeneration = max(config.generation, (activeGenerationsByBook[bookID] ?? 0) + 1)
         activeGenerationsByBook[bookID] = runGeneration
+        let runID = UUID()
+        workingSourcesByBook[bookID] = (runGeneration, workingSnapshot, runID)
+        var book = try await store.beginAnalysisRun(bookID: bookID, expectedSourceID: workingSnapshot.sourceID, runID: runID)
+        defer {
+            if workingSourcesByBook[bookID]?.generation == runGeneration { workingSourcesByBook.removeValue(forKey: bookID) }
+        }
 
         var frozenSnapshot = config
         frozenSnapshot.generation = runGeneration
 
-        let client = try await clientFactory(frozenSnapshot)
-        guard client.configurationDigest == frozenSnapshot.configurationDigest else {
-            throw AudiobookAnalysisError.configurationChangedDuringRun
+        let client: any AudiobookAnalysisClient
+        do {
+            client = try await clientFactory(frozenSnapshot)
+            guard client.configurationDigest == frozenSnapshot.configurationDigest else {
+                throw AudiobookAnalysisError.configurationChangedDuringRun
+            }
+            book.analysisState = .running
+            book.analysisFailure = nil
+            try await store.updateAnalysisBook(book, runID: runID)
+        } catch {
+            try? await store.endAnalysisRun(bookID: bookID, runID: runID)
+            throw error
         }
-
-        var book = try await store.book(id: bookID)
-        book.analysisState = .running
-        book.analysisFailure = nil
-        try await store.updateBook(book)
 
         let emitter = AudiobookAnalysisEventEmitter(
             runID: UUID().uuidString,
@@ -107,7 +122,8 @@ public actor AudiobookAnalysisPipeline {
         )
 
         do {
-            let source = try await store.sourceIndex(for: bookID)
+            try await store.validateWorkingSource(workingSnapshot)
+            let source = workingSnapshot.sourceIndex
             let chapters = try await store.chapters(for: bookID)
             let allAtoms = try await store.atoms(for: bookID)
             let atomsByID = Dictionary(uniqueKeysWithValues: allAtoms.map { ($0.id, $0) })
@@ -158,7 +174,7 @@ public actor AudiobookAnalysisPipeline {
             // Phase 1: Extraction across windows (skipping windows that already have matching valid checkpoints)
             var windowsNeedingWork: [AudiobookAnalysisWindow] = []
             for planned in plannedWindows {
-                try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
+                try await checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
                 let reuseKey = WindowReuseKey(
                     primaryAtomIDs: planned.primaryAtomIDs,
                     policyFingerprint: planned.policyFingerprint,
@@ -186,7 +202,7 @@ public actor AudiobookAnalysisPipeline {
             emitter.emit(.planned)
 
             for window in windowsNeedingWork {
-                try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
+                try await checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
                 emitter.setCurrentWindow(
                     chapterOrdinal: chapterOrdinalByID[window.chapterID] ?? 1,
                     windowOrdinal: window.ordinal + 1
@@ -258,7 +274,7 @@ public actor AudiobookAnalysisPipeline {
             )
             emitter.setMergeBatches(total: mentionBatches.count)
             for (batchIndex, batch) in mentionBatches.enumerated() {
-                try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
+                try await checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
                 let batchEvidenceChapterIDs = Set(
                     batch.flatMap(\.evidenceAtomIDs).compactMap { atomsByID[$0]?.chapterID }
                 )
@@ -292,7 +308,7 @@ public actor AudiobookAnalysisPipeline {
                     throw error
                 }
                 emitter.emitLLMCalls(client.callDiagnostics?.takeAll())
-                try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
+                try await checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
                 let mergeResponse = try decodeMergeResponse(from: rawMerge, fallbackMentions: batch)
                 let outcome = AudiobookCastRegistry.applyMergeBatch(
                     bookID: bookID,
@@ -308,7 +324,7 @@ public actor AudiobookAnalysisPipeline {
                 emitter.noteBatchMerged()
                 emitter.emit(.castBatchMerged)
             }
-            try await store.saveCharacters(bookID: bookID, characters: characters)
+            try await store.saveCharacters(bookID: bookID, characters: characters, expectedSourceID: workingSnapshot.sourceID)
 
             let narratorID = characters.first(where: \.isNarrator)?.id ?? UUID()
             let roleNameByID = Dictionary(uniqueKeysWithValues: characters.map { ($0.id, $0.displayName) })
@@ -325,7 +341,7 @@ public actor AudiobookAnalysisPipeline {
 
             // Phase 3: Per-window speaker annotation with strict primary atom coverage and checkpoint commit
             for var window in windowsNeedingWork {
-                try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
+                try await checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
                 emitter.setCurrentWindow(
                     chapterOrdinal: chapterOrdinalByID[window.chapterID] ?? 1,
                     windowOrdinal: window.ordinal + 1
@@ -380,7 +396,7 @@ public actor AudiobookAnalysisPipeline {
                     annotations: annotations
                 ) else {
                     book.analysisState = .failed
-                    try await store.updateBook(book)
+                    try await store.updateAnalysisBook(book, runID: runID)
                     throw AudiobookAnalysisError.atomCoverageViolation("窗口 \(window.id) 标注未完整覆盖 primary atoms。")
                 }
 
@@ -396,7 +412,7 @@ public actor AudiobookAnalysisPipeline {
                 }
 
                 window.isCompleted = true
-                try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
+                try await checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: frozenSnapshot)
                 try await store.saveAnnotations(bookID: bookID, annotations: annotations)
                 try await store.saveAnalysisWindow(window)
                 emitter.noteAnnotated()
@@ -409,7 +425,7 @@ public actor AudiobookAnalysisPipeline {
                 characters: characters,
                 annotations: finalAnnotations
             )
-            try await store.saveCharacters(bookID: bookID, characters: characters)
+            try await store.saveCharacters(bookID: bookID, characters: characters, expectedSourceID: workingSnapshot.sourceID)
 
             let unknownCount = finalAnnotations.filter { $0.assignment.isUnknown }.count
             let completedWindowCount = reusedCheckpointCount + windowsNeedingWork.count
@@ -417,8 +433,9 @@ public actor AudiobookAnalysisPipeline {
 
             book.analysisState = isAllComplete ? .allWindowsValidated : .paused
             book.analysisFailure = nil
-            try await store.updateBook(book)
+            try await store.updateAnalysisBook(book, runID: runID)
 
+            try await store.endAnalysisRun(bookID: bookID, runID: runID)
             emitter.emitRunEnded(outcome: .completed)
             return AudiobookAnalysisSummary(
                 bookID: bookID,
@@ -430,9 +447,9 @@ public actor AudiobookAnalysisPipeline {
                 analysisState: book.analysisState
             )
         } catch {
-            if var latestBook = try? await store.book(id: bookID) {
-                let isCancelError = (error as? AudiobookAnalysisError) == .cancelled
-                    || error is CancellationError
+            let isCancelError = (error as? AudiobookAnalysisError) == .cancelled || error is CancellationError
+            if activeGenerationsByBook[bookID] == runGeneration,
+               var latestBook = try? await store.book(id: bookID), latestBook.sourceID == workingSnapshot.sourceID {
                 latestBook.analysisState = isCancelError ? .paused : .failed
                 if isCancelError {
                     latestBook.analysisFailure = nil
@@ -444,12 +461,13 @@ public actor AudiobookAnalysisPipeline {
                         message: AudiobookAnalysisErrorCode.userMessage(for: code)
                     )
                 }
-                try? await store.updateBook(latestBook)
-                emitter.emitRunEnded(
-                    outcome: isCancelError ? .cancelled : .failed,
-                    errorCode: AudiobookAnalysisErrorCode.code(for: error)
-                )
+                try? await store.updateAnalysisBook(latestBook, runID: runID)
             }
+            emitter.emitRunEnded(
+                outcome: isCancelError ? .cancelled : .failed,
+                errorCode: AudiobookAnalysisErrorCode.code(for: error)
+            )
+            try? await store.endAnalysisRun(bookID: bookID, runID: runID)
             throw error
         }
     }
@@ -515,7 +533,7 @@ public actor AudiobookAnalysisPipeline {
                     bookID: bookID,
                     chapterID: chapter.id,
                     primaryAtomIDs: primarySlice.map(\.id),
-                    policyFingerprint: policy.policyDigest,
+                    policyFingerprint: AudiobookDigest.sha256Hex(Data((AudiobookTextPreparation.version + "|" + policy.policyDigest).utf8)),
                     configurationDigest: config.configurationDigest
                 )
 
@@ -528,7 +546,7 @@ public actor AudiobookAnalysisPipeline {
                     primaryAtomIDs: primarySlice.map(\.id),
                     leadingContextAtomIDs: leadingSlice.map(\.id),
                     trailingContextAtomIDs: trailingSlice.map(\.id),
-                    policyFingerprint: policy.policyDigest,
+                    policyFingerprint: AudiobookDigest.sha256Hex(Data((AudiobookTextPreparation.version + "|" + policy.policyDigest).utf8)),
                     configurationDigest: config.configurationDigest,
                     generation: config.generation,
                     isCompleted: false
@@ -557,7 +575,7 @@ public actor AudiobookAnalysisPipeline {
         emitter: AudiobookAnalysisEventEmitter?,
         diagnostics: AudiobookAnalysisCallDiagnosticsCollector?
     ) async throws -> [AudiobookExtractionResponse.Mention] {
-        try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: snapshot)
+        try await checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: snapshot)
         let usedCalls = callCounters[rootWindowID, default: 0]
         guard usedCalls < policy.maxCallsPerRootWindow else {
             throw AudiobookAnalysisError.rootCallBudgetExhausted(rootWindowID: rootWindowID)
@@ -579,7 +597,7 @@ public actor AudiobookAnalysisPipeline {
         do {
             let raw = try await client.complete(prompt)
             emitter?.emitLLMCalls(diagnostics?.takeAll())
-            try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: snapshot)
+            try await checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: snapshot)
             let response = try decodeExtractionResponse(from: raw, primaryItems: primaryItems)
             return response.mentions
         } catch let error as AudiobookAnalysisError {
@@ -636,6 +654,7 @@ public actor AudiobookAnalysisPipeline {
         emitter: AudiobookAnalysisEventEmitter?,
         diagnostics: AudiobookAnalysisCallDiagnosticsCollector?
     ) async throws -> [AudiobookExtractionResponse.Mention] {
+        try await checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: snapshot)
         let totalScalars = primaryItems.reduce(0) { $0 + $1.text.unicodeScalars.count }
         guard primaryItems.count > 1,
               totalScalars >= policy.minWindowScalars * 2,
@@ -697,7 +716,7 @@ public actor AudiobookAnalysisPipeline {
         emitter: AudiobookAnalysisEventEmitter?,
         diagnostics: AudiobookAnalysisCallDiagnosticsCollector?
     ) async throws -> [AudiobookAnnotation] {
-        try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: snapshot)
+        try await checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: snapshot)
         let usedCalls = callCounters[window.rootWindowID, default: 0]
         guard usedCalls < policy.maxCallsPerRootWindow else {
             throw AudiobookAnalysisError.rootCallBudgetExhausted(rootWindowID: window.rootWindowID)
@@ -726,7 +745,7 @@ public actor AudiobookAnalysisPipeline {
         do {
             let raw = try await client.complete(prompt)
             emitter?.emitLLMCalls(diagnostics?.takeAll())
-            try checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: snapshot)
+            try await checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: snapshot)
             return try decodeAndValidateAnnotations(
                 from: raw,
                 window: window,
@@ -805,12 +824,15 @@ public actor AudiobookAnalysisPipeline {
         emitter: AudiobookAnalysisEventEmitter?,
         diagnostics: AudiobookAnalysisCallDiagnosticsCollector?
     ) async throws -> [AudiobookAnnotation] {
+        try await checkNotCancelled(bookID: bookID, expectedGeneration: runGeneration, client: client, snapshot: snapshot)
         let totalScalars = primaryItems.reduce(0) { $0 + $1.text.unicodeScalars.count }
         guard primaryItems.count > 1,
               totalScalars >= policy.minWindowScalars * 2,
               (callCounters[window.rootWindowID] ?? 0) < policy.maxCallsPerRootWindow
         else {
+            guard let pinned = workingSourcesByBook[bookID], pinned.generation == runGeneration else { throw AudiobookAnalysisError.cancelled }
             var book = try await store.book(id: bookID)
+            guard book.sourceID == pinned.snapshot.sourceID else { throw AudiobookStoreError.workingSourceChanged }
             book.analysisState = .failed
             let failureCode = AudiobookAnalysisErrorCode.code(for: error)
             book.analysisFailure = AudiobookAnalysisFailure(
@@ -818,7 +840,7 @@ public actor AudiobookAnalysisPipeline {
                 message: AudiobookAnalysisErrorCode.userMessage(for: failureCode),
                 failedWindowOrdinal: window.ordinal + 1
             )
-            try await store.updateBook(book)
+            try await store.updateAnalysisBook(book, runID: pinned.runID)
             throw AudiobookAnalysisError.windowFailed(
                 windowID: window.id,
                 reason: error.localizedDescription
@@ -1173,13 +1195,17 @@ public actor AudiobookAnalysisPipeline {
         expectedGeneration: Int,
         client: any AudiobookAnalysisClient,
         snapshot: AudiobookAnalysisConfigSnapshot
-    ) throws {
+    ) async throws {
         if Task.isCancelled || cancelledBookIDs.contains(bookID) {
             throw AudiobookAnalysisError.cancelled
         }
         if activeGenerationsByBook[bookID] != expectedGeneration {
             throw AudiobookAnalysisError.cancelled
         }
+        guard let pinned = workingSourcesByBook[bookID], pinned.generation == expectedGeneration else {
+            throw AudiobookAnalysisError.cancelled
+        }
+        try await store.validateWorkingSource(pinned.snapshot)
         if client.configurationDigest != snapshot.configurationDigest {
             throw AudiobookAnalysisError.configurationChangedDuringRun
         }
@@ -1196,7 +1222,7 @@ public actor AudiobookAnalysisPipeline {
             guard let atom = atomsByID[id] else {
                 throw AudiobookSourceError.unknownAtomID(id)
             }
-            let text = try source.normalizedText(in: atom.sourceRange)
+            let text = try source.text(in: atom.sourceRange)
             return AudiobookPromptAtomItem(
                 atomID: atom.id,
                 kind: atom.kind,
@@ -1307,13 +1333,14 @@ public actor AudiobookAnalysisPipeline {
         guard config.isConfigured else {
             throw AudiobookAnalysisError.notConfigured
         }
+        let workingSnapshot = try await store.workingSourceSnapshot(bookID: bookID)
         let allAnnotations = try await store.annotations(for: bookID)
         let initialUnknowns = allAnnotations.filter { $0.assignment.isUnknown && !$0.userConfirmed }
         guard !initialUnknowns.isEmpty else {
             return SecondaryResolutionResult(initialUnknownCount: 0, resolvedCount: 0, remainingUnknownCount: 0)
         }
 
-        let source = try await store.sourceIndex(for: bookID)
+        let source = workingSnapshot.sourceIndex
         let chapters = try await store.chapters(for: bookID).sorted { $0.ordinal < $1.ordinal }
         let allAtoms = try await store.atoms(for: bookID)
         let atomsByID = Dictionary(uniqueKeysWithValues: allAtoms.map { ($0.id, $0) })
@@ -1550,7 +1577,7 @@ public actor AudiobookAnalysisPipeline {
                 characters: characters,
                 annotations: refreshedAnnotations
             )
-            try await store.saveCharacters(bookID: bookID, characters: refreshedCharacters)
+            try await store.saveCharacters(bookID: bookID, characters: refreshedCharacters, expectedSourceID: workingSnapshot.sourceID)
         }
 
         let remainingCount = max(0, initialUnknowns.count - newlyResolvedCount)

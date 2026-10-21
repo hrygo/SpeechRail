@@ -87,7 +87,7 @@ public enum AudiobookCastError: LocalizedError, Equatable, Sendable {
         case .duplicateVoiceRequiresSharedMinorConsent:
             return "多个角色共用同一音色时，需显式开启「次要角色共用声线」。"
         case .missingVoiceBindings(let names):
-            return "以下角色尚未绑定音色：\(names.joined(separator: "、"))。"
+            return "还有 \(names.count) 个角色尚未配声。点击「一键智能配声」自动分配，也可在「人物与声音」中手动调整。"
         case .castRevisionMismatch:
             return "角色列表已发生变更，请刷新后重新确认。"
         case .auditionDigestMismatch:
@@ -624,6 +624,24 @@ public actor AudiobookCastController {
         try await recoverRegistration(intent, allowBinding: canApply)
     }
 
+    /// Keep the published asset before output acceptance, without a binding intent
+    /// that recovery could later apply ahead of that acceptance.
+    public func registerVoiceAsset(context: AudiobookVoiceReturnContext, voiceID: String,
+        creationSource: VoiceCreationSource) async throws {
+        await acquireMutation(for: context.bookID)
+        defer { releaseMutation(for: context.bookID) }
+        guard let digest = context.voiceSetDigest else { throw AudiobookCastError.staleVoiceReturnContext }
+        let id = AudiobookCastingDigest.uuid("role-asset-registration-v1|\(context.bookID)|\(context.roleID)|\(voiceID)|\(creationSource.rawValue)")
+        let intent = AudiobookVoiceRegistrationIntent(
+            id: id,
+            bookID: context.bookID, roleID: context.roleID, voiceID: voiceID,
+            bookTitle: context.bookTitle.map { String($0.prefix(160)) }, roleName: context.roleDisplayName.map { String($0.prefix(160)) },
+            archetype: nil, creationSource: creationSource, binding: nil, expectedCastRevisionID: context.castRevisionID,
+            expectedVoiceSetDigest: digest, expectedCatalogRevision: (await voiceCatalog.refresh()).revision,
+            onlyIfUnbound: true, phase: .registered)
+        try await registerAssetIntent(intent)
+    }
+
     public func registerEnsembleAsset(bookID: UUID, voiceID: String, bookTitle: String?, archetype: AudiobookVoiceArchetype) async throws {
         await acquireMutation(for: bookID)
         defer { releaseMutation(for: bookID) }
@@ -632,9 +650,22 @@ public actor AudiobookCastController {
             bookID: bookID, roleID: nil, voiceID: voiceID, bookTitle: bookTitle.map { String($0.prefix(160)) }, roleName: nil,
             archetype: archetype, creationSource: .voiceDesign, binding: nil, expectedCastRevisionID: try await currentCastRevisionID(for: bookID),
             expectedVoiceSetDigest: digest, expectedCatalogRevision: (await voiceCatalog.refresh()).revision, onlyIfUnbound: true, phase: .registered)
-        try await store.saveVoiceRegistrationIntent(intent)
-        try registrationBoundary(.afterIntentRegistered)
-        try await recoverRegistration(intent)
+        try await registerAssetIntent(intent)
+    }
+
+    private func registerAssetIntent(_ intent: AudiobookVoiceRegistrationIntent) async throws {
+        if let existing = try await store.voiceRegistrationIntents(bookID: intent.bookID, includeCompleted: true).first(where: { $0.id == intent.id }) {
+            // Asset-only operations keep their original context; later changes
+            // to other roles must not prevent retrying this voice's output check.
+            guard existing.binding == nil, existing.targetMetadataDigest == intent.targetMetadataDigest else {
+                throw VoiceCatalogError.revisionChanged
+            }
+            try await recoverRegistration(existing)
+        } else {
+            try await store.saveVoiceRegistrationIntent(intent)
+            try registrationBoundary(.afterIntentRegistered)
+            try await recoverRegistration(intent)
+        }
     }
 
     public func recoverVoiceRegistrations(bookID: UUID) async throws {

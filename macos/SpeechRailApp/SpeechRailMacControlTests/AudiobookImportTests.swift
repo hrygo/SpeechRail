@@ -9,6 +9,64 @@ import XCTest
 #endif
 
 final class AudiobookImportTests: XCTestCase {
+    func testGeneratedParagraphBreaksDoNotInventAnthologyTitles() throws {
+        let raw = "第一章 起程\n他转身望着远方\n一阵寒风穿过长长的街道，远处的灯火已经慢慢熄灭。\n他久久没有说话\n另一阵寒风穿过长长的街道，远处的窗灯已经慢慢熄灭。"
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data(raw.utf8))
+        XCTAssertEqual(preview.chapters.map(\.title), ["第一章 起程"])
+        XCTAssertFalse(try XCTUnwrap(preview.sourceIndex.paragraphs.first { $0.text == "他转身望着远方" }).isIsolatedTitleCandidate)
+    }
+
+    func testPreparedTextJoinsLayoutBreaksInsideChineseWords() throws {
+        let raw = "他走進大廳之後向眾人提起住在城裡那位講理學的老監\r\n生，說了許多許多往事。他說每一次見面總是先互相寒\r\n暄，之後再談別的事情。"
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data(raw.utf8))
+        let working = try preview.sourceIndex.text(in: preview.sourceIndex.wholeRange)
+        XCTAssertTrue(working.contains("老監生"))
+        XCTAssertTrue(working.contains("寒暄"))
+        XCTAssertEqual(preview.canonicalUTF8, Data(working.utf8))
+        XCTAssertEqual(preview.originalBytes, Data(raw.utf8))
+    }
+
+    func testPreparedTextPreservesParagraphsPoetryAndLatinSpacing() throws {
+        let raw = "第一章 晨行\r\n“你去？”\r\n“我去。”\r\n\r\n山風吹古木\r\n月色照長河\r\n\r\nThis is a deliberately long sentence with several English words\r\ncontinued on the next physical line without losing a word."
+        let prepared = try AudiobookTextPreparation.prepare(referenceUTF8: Data(raw.utf8))
+        let text = String(decoding: prepared.workingUTF8, as: UTF8.self)
+        XCTAssertTrue(text.contains("“你去？”\n\n“我去。”"))
+        XCTAssertTrue(text.contains("山風吹古木\n\n月色照長河"))
+        XCTAssertTrue(text.contains("words continued"))
+        XCTAssertFalse(text.contains("\r"))
+    }
+
+    func testPreparedTextIsIdempotentAndKeepsTraditionalCharacters() throws {
+        let raw = Data("繁體字與合法替換字元�都應保留，這段夠長的文字只連接排版的老監\r\n生，不更換字形。\r\n\r\n第二段。".utf8)
+        let first = try AudiobookTextPreparation.prepare(referenceUTF8: raw)
+        let second = try AudiobookTextPreparation.prepare(referenceUTF8: first.workingUTF8)
+        XCTAssertEqual(first.workingUTF8, second.workingUTF8)
+        XCTAssertTrue(String(decoding: first.workingUTF8, as: UTF8.self).contains("繁體字與合法替換字元�"))
+        XCTAssertThrowsError(try AudiobookTextPreparation.prepare(referenceUTF8: Data("  \r\n".utf8)))
+    }
+
+    func testPreparedSourceMapUsesDecodedReferenceUTF8() throws {
+        let raw = "第一章\r\n這段足夠長的敘述用來驗證不同編碼只在參考文本上定位老監\r\n生。"
+        var utf16 = Data([0xFF, 0xFE]); utf16.append(raw.data(using: .utf16LittleEndian)!)
+        let preview = try AudiobookTXTImporter.prepare(rawData: utf16)
+        let work = preview.sourceIndex
+        let reference = try AudiobookSourceIndex(utf8: preview.referenceUTF8)
+        var workEnd: Int64 = 0, referenceEnd: Int64 = 0
+        for span in preview.preparedText.sourceMap {
+            XCTAssertEqual(span.workingRange.lowerBound, workEnd)
+            XCTAssertGreaterThanOrEqual(span.referenceRange.lowerBound, referenceEnd)
+            try work.validateRangeBounds(span.workingRange)
+            try reference.validateRangeBounds(span.referenceRange)
+            if !span.isGenerated {
+                XCTAssertEqual(try work.text(in: span.workingRange), try reference.text(in: span.referenceRange))
+            }
+            workEnd = span.workingRange.upperBound; referenceEnd = span.referenceRange.upperBound
+        }
+        XCTAssertEqual(workEnd, work.byteCount)
+        XCTAssertEqual(preview.originalBytes, utf16)
+        XCTAssertEqual(preview.referenceUTF8, Data(raw.utf8))
+    }
+
     func testWrappedAnthologyIsPreparedBeforeChapterPlanning() throws {
         let body = "        河岸上的行人踏著晨霧前行，遠處的燈火還未熄滅，街道仍然十分\r\n安靜。他停下腳步，望向河面。\r\n\r\n"
         let text = "著者：某人\r\n\r\n" + String(repeating: body, count: 10)
@@ -21,7 +79,7 @@ final class AudiobookImportTests: XCTestCase {
         XCTAssertTrue(preview.previewText.contains("\n\n"), "自然段落边界必须保留")
         XCTAssertFalse(preview.previewText.contains("\r"))
         XCTAssertEqual(preview.originalBytes, Data(text.utf8))
-        XCTAssertEqual(preview.canonicalUTF8, Data(text.utf8))
+        XCTAssertEqual(preview.referenceUTF8, Data(text.utf8))
         XCTAssertNoThrow(try AudiobookChapterPlanner.validateChapterEdits(preview.chapters, source: preview.sourceIndex))
     }
 
@@ -29,7 +87,7 @@ final class AudiobookImportTests: XCTestCase {
         let text = "一\r\n\r\n第一部分的敘述，保留原有文字。\r\n\r\n二\r\n\r\n第二部分的敘述，也保留原有文字。"
         let preview = try AudiobookTXTImporter.prepare(rawData: Data(text.utf8))
         XCTAssertEqual(preview.chapters.map(\.title), ["一", "二"])
-        XCTAssertEqual(try preview.sourceIndex.text(in: preview.sourceIndex.wholeRange), text)
+        XCTAssertEqual(String(decoding: preview.referenceUTF8, as: UTF8.self), text)
     }
 
     func testPreparedPreviewPreservesDialoguePoetryAndParagraphs() throws {
@@ -69,7 +127,7 @@ final class AudiobookImportTests: XCTestCase {
         XCTAssertTrue(prepared.contains("消息。"))
         XCTAssertFalse(prepared.contains("前一章"))
         XCTAssertTrue(original.contains("消\r\n息。"))
-        XCTAssertEqual(Data(original.utf8), preview.sourceIndex.utf8Data.subdata(in: Int(chapter.sourceRange.lowerBound)..<Int(chapter.sourceRange.upperBound)))
+        XCTAssertTrue(String(decoding: preview.referenceUTF8, as: UTF8.self).contains(original))
     }
 
     func testStrictEncodingPreview() throws {
@@ -79,24 +137,24 @@ final class AudiobookImportTests: XCTestCase {
         let utf8Data = Data(sampleText.utf8)
         let utf8Preview = try AudiobookTXTImporter.prepare(rawData: utf8Data, suggestedTitle: "雾港来信")
         XCTAssertEqual(utf8Preview.detectedEncoding, .utf8)
-        XCTAssertEqual(try utf8Preview.sourceIndex.text(in: utf8Preview.sourceIndex.wholeRange), sampleText)
-        XCTAssertFalse(try utf8Preview.sourceIndex.normalizedText(in: utf8Preview.sourceIndex.wholeRange).contains("\u{FFFD}"))
+        XCTAssertEqual(String(decoding: utf8Preview.referenceUTF8, as: UTF8.self), sampleText)
+        XCTAssertTrue(try utf8Preview.sourceIndex.text(in: utf8Preview.sourceIndex.wholeRange).contains("\u{FFFD}"))
         XCTAssertEqual(utf8Preview.originalBytes, utf8Data, "显示投影净化不能改动原始输入字节")
-        XCTAssertEqual(utf8Preview.canonicalUTF8, utf8Data, "显示投影净化不能改动规范原文")
+        XCTAssertEqual(utf8Preview.referenceUTF8, utf8Data, "显示投影净化不能改动规范原文")
 
         // 2. Valid UTF-16 LE with BOM
         var utf16LEData = Data([0xFF, 0xFE])
         utf16LEData.append(sampleText.data(using: .utf16LittleEndian)!)
         let utf16LEPreview = try AudiobookTXTImporter.prepare(rawData: utf16LEData, suggestedTitle: "雾港来信")
         XCTAssertEqual(utf16LEPreview.detectedEncoding, .utf16LE)
-        XCTAssertEqual(try utf16LEPreview.sourceIndex.text(in: utf16LEPreview.sourceIndex.wholeRange), sampleText)
+        XCTAssertEqual(String(decoding: utf16LEPreview.referenceUTF8, as: UTF8.self), sampleText)
 
         // 3. Valid UTF-16 BE with BOM
         var utf16BEData = Data([0xFE, 0xFF])
         utf16BEData.append(sampleText.data(using: .utf16BigEndian)!)
         let utf16BEPreview = try AudiobookTXTImporter.prepare(rawData: utf16BEData, suggestedTitle: "雾港来信")
         XCTAssertEqual(utf16BEPreview.detectedEncoding, .utf16BE)
-        XCTAssertEqual(try utf16BEPreview.sourceIndex.text(in: utf16BEPreview.sourceIndex.wholeRange), sampleText)
+        XCTAssertEqual(String(decoding: utf16BEPreview.referenceUTF8, as: UTF8.self), sampleText)
 
         // 4. Valid GB18030 requires explicit encoding confirmation when non-UTF8, and succeeds when selected
         let cfGB = CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)
@@ -117,7 +175,7 @@ final class AudiobookImportTests: XCTestCase {
             encoding: .gb18030
         )
         XCTAssertEqual(gbPreview.detectedEncoding, .gb18030)
-        XCTAssertEqual(try gbPreview.sourceIndex.text(in: gbPreview.sourceIndex.wholeRange), sampleText)
+        XCTAssertEqual(String(decoding: gbPreview.referenceUTF8, as: UTF8.self), sampleText)
 
         // 5. Reject bad UTF-8 bytes
         let badUTF8 = Data([0xE4, 0xB8, 0xFF, 0x41])
@@ -175,7 +233,7 @@ final class AudiobookImportTests: XCTestCase {
         XCTAssertEqual(preview.chapters.count, 1)
         XCTAssertEqual(preview.chapters[0].title, "全文")
         XCTAssertEqual(preview.chapters[0].sourceRange, preview.sourceIndex.wholeRange)
-        XCTAssertEqual(try preview.sourceIndex.text(in: preview.chapters[0].sourceRange), plainText)
+        XCTAssertEqual(String(decoding: preview.referenceUTF8, as: UTF8.self), plainText)
     }
 
     func testChapterHeadingsWithoutWhitespaceBeforeTitleAreRecognized() throws {
@@ -246,7 +304,7 @@ final class AudiobookImportTests: XCTestCase {
         XCTAssertEqual(merged.count, 1, "合并相邻章节应得到一个目录项")
         XCTAssertEqual(merged.first?.id, originalChapter.id, "合并应稳定保留上一章身份")
         XCTAssertEqual(merged.first?.sourceRange, originalChapter.sourceRange)
-        XCTAssertEqual(try preview.sourceIndex.text(in: preview.sourceIndex.wholeRange), text,
+        XCTAssertEqual(String(decoding: preview.referenceUTF8, as: UTF8.self), text,
                        "拆分与合并只调整章节区间，不得改写规范化原文")
         XCTAssertNoThrow(try AudiobookChapterPlanner.validateChapterEdits(merged, source: preview.sourceIndex))
     }
@@ -273,7 +331,7 @@ final class AudiobookImportTests: XCTestCase {
 
         XCTAssertEqual(preview.chapters.map(\.title), ["雨", "風"])
         XCTAssertEqual(preview.originalBytes, raw)
-        XCTAssertEqual(try preview.sourceIndex.text(in: preview.sourceIndex.wholeRange), text)
+        XCTAssertEqual(String(decoding: preview.referenceUTF8, as: UTF8.self), text)
         XCTAssertTrue(preview.previewText.contains("河岸上的燈火"))
         XCTAssertTrue(preview.previewText.contains("熟悉的窗燈"))
         XCTAssertNoThrow(try AudiobookChapterPlanner.validateChapterEdits(preview.chapters, source: preview.sourceIndex))
@@ -283,14 +341,14 @@ final class AudiobookImportTests: XCTestCase {
         let text = "雨\n\n“橋那邊有人嗎？”\n\n她沿著河岸尋找，遠處的燈光仍在濃霧中閃爍。\n\n風\n\n旅人走過石橋，看見遠處的燈火依舊明亮。"
         let preview = try AudiobookTXTImporter.prepare(rawData: Data(text.utf8))
         XCTAssertEqual(preview.chapters.map(\.title), ["雨", "風"])
-        XCTAssertEqual(preview.canonicalUTF8, Data(text.utf8))
+        XCTAssertEqual(preview.referenceUTF8, Data(text.utf8))
     }
 
     func testNarrativeWithDashesIsNotAnAnthologySubtitle() throws {
         let text = "雨\n\n她沿著河岸尋找，遠處的燈光仍在濃霧中閃爍。\n\n旅人──遠方歸客──點了點頭，但是沒有開口。\n\n另一位行人慢慢走近，手中的燈光映著石橋。\n\n風\n\n旅人走過石橋，看見遠處的燈火依舊明亮。"
         let preview = try AudiobookTXTImporter.prepare(rawData: Data(text.utf8))
         XCTAssertEqual(preview.chapters.map(\.title), ["雨", "風"])
-        XCTAssertEqual(preview.canonicalUTF8, Data(text.utf8))
+        XCTAssertEqual(preview.referenceUTF8, Data(text.utf8))
     }
 
     func testRoundHeadingEmbeddedAfterPreviousTextSplitsWithoutAbsorbingBody() throws {
@@ -321,7 +379,7 @@ final class AudiobookImportTests: XCTestCase {
 
                 XCTAssertEqual(preview.chapters.map(\.title), [title])
                 XCTAssertTrue(preview.previewText.contains(body))
-                XCTAssertEqual(preview.canonicalUTF8, Data(text.utf8))
+                XCTAssertEqual(preview.referenceUTF8, Data(text.utf8))
                 XCTAssertNoThrow(try preview.sourceIndex.validateCoverage(preview.chapters.map(\.sourceRange), exclusions: []))
             }
         }
@@ -332,7 +390,7 @@ final class AudiobookImportTests: XCTestCase {
         let preview = try AudiobookTXTImporter.prepare(rawData: Data(text.utf8))
 
         XCTAssertEqual(preview.chapters.map(\.title), ["全文"])
-        XCTAssertEqual(try preview.sourceIndex.text(in: preview.sourceIndex.wholeRange), text)
+        XCTAssertEqual(String(decoding: preview.referenceUTF8, as: UTF8.self), text)
     }
 
     func testRepeatedRoundTitleSeparatedOnlyByDashHasOneDirectoryEntryAndFullCoverage() throws {
@@ -343,7 +401,7 @@ final class AudiobookImportTests: XCTestCase {
 
         XCTAssertEqual(preview.chapters.map(\.title), [title])
         XCTAssertEqual(preview.originalBytes, raw)
-        XCTAssertEqual(try preview.sourceIndex.text(in: preview.sourceIndex.wholeRange), text)
+        XCTAssertEqual(String(decoding: preview.referenceUTF8, as: UTF8.self), text)
         XCTAssertNoThrow(try preview.sourceIndex.validateCoverage(preview.chapters.map(\.sourceRange), exclusions: []))
     }
 
@@ -354,7 +412,7 @@ final class AudiobookImportTests: XCTestCase {
         let preview = try AudiobookTXTImporter.prepare(rawData: Data(text.utf8))
 
         XCTAssertEqual(preview.chapters.map(\.title), [title])
-        XCTAssertEqual(try preview.sourceIndex.text(in: preview.sourceIndex.wholeRange), text)
+        XCTAssertEqual(String(decoding: preview.referenceUTF8, as: UTF8.self), text)
         XCTAssertNoThrow(try AudiobookChapterPlanner.validateChapterEdits(preview.chapters, source: preview.sourceIndex))
     }
 
@@ -366,8 +424,8 @@ final class AudiobookImportTests: XCTestCase {
         let normalized = try preview.sourceIndex.normalizedText(in: preview.sourceIndex.wholeRange)
 
         XCTAssertEqual(preview.originalBytes, raw)
-        XCTAssertEqual(preview.canonicalUTF8, raw)
-        XCTAssertEqual(try preview.sourceIndex.text(in: preview.sourceIndex.wholeRange), text)
+        XCTAssertEqual(preview.referenceUTF8, raw)
+        XCTAssertEqual(String(decoding: preview.referenceUTF8, as: UTF8.self), text)
         XCTAssertEqual(normalized.components(separatedBy: "山路上的旅人").count - 1, 2)
         XCTAssertNoThrow(try preview.sourceIndex.validateCoverage(preview.chapters.map(\.sourceRange), exclusions: []))
     }
@@ -384,7 +442,7 @@ final class AudiobookImportTests: XCTestCase {
         preview.hasConfirmedRepeatedContent = true
         XCTAssertTrue(preview.canConfirmImport)
         XCTAssertEqual(preview.originalBytes, raw)
-        XCTAssertEqual(preview.canonicalUTF8, raw)
+        XCTAssertEqual(preview.referenceUTF8, raw)
         XCTAssertEqual(preview.chapters.count, 2)
     }
 
@@ -682,7 +740,7 @@ struct AudiobookImportTextViewTests {
         #expect(document.string == lastText)
         #expect(document.selectedRange() == NSRange(location: 0, length: 0))
         #expect(preview.originalBytes == bytes)
-        #expect(preview.canonicalUTF8 == bytes)
+        #expect(preview.referenceUTF8 == bytes)
     }
 
     @Test func unrelatedUpdatesPreserveSelectionAndEmptyContentClearsIt() throws {

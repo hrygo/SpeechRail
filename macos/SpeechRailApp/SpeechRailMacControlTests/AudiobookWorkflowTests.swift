@@ -104,10 +104,15 @@ final class AudiobookWorkflowTests: XCTestCase {
         private let leadLock = NSLock()
         private var leadRequests = 0
         var leadRequestCount: Int { leadLock.withLock { leadRequests } }
+        private var capturedVoiceRequests: [AudiobookLeadVoiceCreationRequest] = []
+        var voiceCreationRequests: [AudiobookLeadVoiceCreationRequest] { leadLock.withLock { capturedVoiceRequests } }
+        private var fragmentRequests = 0
+        var fragmentRequestCount: Int { leadLock.withLock { fragmentRequests } }
         private var capturedAuditions: [AudiobookRenderCallRequest] = []
         var auditionRequests: [AudiobookRenderCallRequest] { leadLock.withLock { capturedAuditions } }
 
         var auditionRenderHandler: (@Sendable (AudiobookRenderCallRequest) async throws -> Data)?
+        var beforeCapabilityFetch: (@Sendable () async -> Void)?
 
         func renderAudition(_ request: AudiobookRenderCallRequest) async throws -> Data {
             leadLock.withLock { capturedAuditions.append(request) }
@@ -142,6 +147,7 @@ final class AudiobookWorkflowTests: XCTestCase {
         func createAndPublishLeadVoice(_ request: AudiobookLeadVoiceCreationRequest) async throws -> AudiobookLeadVoiceCreationOutput {
             let count = leadLock.withLock {
                 leadRequests += 1
+                capturedVoiceRequests.append(request)
                 return leadRequests
             }
             let output: AudiobookLeadVoiceCreationOutput
@@ -186,6 +192,7 @@ final class AudiobookWorkflowTests: XCTestCase {
         }
 
         func fetchEffectiveCapabilities() async throws -> EffectiveCapabilitySnapshot {
+            await beforeCapabilityFetch?()
             let desc = SafeVoiceDescriptor(
                 voiceMode: "instruction",
                 locales: ["zh-CN"],
@@ -235,6 +242,7 @@ final class AudiobookWorkflowTests: XCTestCase {
         }
 
         func renderFragment(_ request: AudiobookRenderCallRequest) async throws -> AudiobookRenderCallOutput {
+            leadLock.withLock { fragmentRequests += 1 }
             await beforeRender?()
             let wav = Self.makeWAV(frameCount: 4_800)
             return AudiobookRenderCallOutput(
@@ -305,9 +313,366 @@ final class AudiobookWorkflowTests: XCTestCase {
         }
     }
 
+    private final class RecipeRecordingDesignClient: SpeechRailVoiceDesignClient, Sendable {
+        struct Entry: Sendable { let text: String; let idempotencyKey: String? }
+        let entries = Mutex<[Entry]>([])
+        let cancels: Bool
+        init(cancels: Bool = false) { self.cancels = cancels }
+        func createVoiceDesignCandidate(voiceID: String, name: String, instruction: String,
+            referenceText: String, seed: Int, idempotencyKey: String?) async throws -> VoiceDesignCandidate {
+            entries.withLock { $0.append(.init(text: referenceText, idempotencyKey: idempotencyKey)) }
+            if cancels { throw CancellationError() }
+            throw ServiceAPIClientError.requestFailed
+        }
+        func createVoicePreview(text: String, instruction: String, speed: Double, seed: Int?) async throws -> Data { throw ServiceAPIClientError.requestFailed }
+        func confirmVoiceDesignCandidate(id: String, referenceText: String?) async throws -> VoiceDesignCandidate { throw ServiceAPIClientError.requestFailed }
+        func validateVoiceDesignCandidate(id: String, testText: String?, capabilityKey: String?, mode: VoiceDesignValidationMode) async throws -> VoiceDesignCandidate { throw ServiceAPIClientError.requestFailed }
+        func fetchVoiceDesignCandidates() async throws -> [VoiceDesignCandidate] { throw ServiceAPIClientError.requestFailed }
+        func fetchVoiceDesignCandidate(id: String) async throws -> VoiceDesignCandidate { throw ServiceAPIClientError.requestFailed }
+        func fetchVoiceDesignReferenceAudio(id: String, expectedRevision: String) async throws -> Data { throw ServiceAPIClientError.requestFailed }
+        func fetchVoiceDesignValidationAudio(id: String, validationID: String, expectedRevision: String) async throws -> Data { throw ServiceAPIClientError.requestFailed }
+        func cancelVoiceDesignCandidate(id: String) async throws -> VoiceDesignCandidate { throw ServiceAPIClientError.requestFailed }
+        func publishVoiceDesignCandidate(id: String, expectedCandidateRevision: String?) async throws -> VoiceDesignPublishResult { throw ServiceAPIClientError.requestFailed }
+    }
+
+    /// Replays completed idempotency keys, including cancelled candidates, like the service.
+    private actor VoiceDesignLifecycleClient: SpeechRailVoiceDesignClient, ServiceCapabilityDiscoveryClient, SpeechRailVoiceQualityClient {
+        struct Entry: Sendable { let voiceID: String; let seed: Int; let key: String? }
+        private(set) var entries: [Entry] = []
+        private var candidates: [String: VoiceDesignCandidate] = [:]
+        private var candidateIDsByKey: [String: String] = [:]
+        private var rejectedIDs: Set<String> = []
+        private var rejectNextDesign: Bool
+        private let publishedVoices = WorkflowFakeRenderer()
+        private var hasPublished = false
+        private var didHoldDiscovery = false
+        private let postPublishGate: WorkflowRendererGate?
+        private let revision = "vr_0123456789abcdef0123456789abcdef"
+        private let requiresOutputCheck: Bool
+        private let outputPersisted: Bool
+        private let readyAfterOutputPass: Bool
+        private var outputRejectsRemaining: Int
+        private var validatedIDs: Set<String> = []
+        private(set) var outputCheckIDs: [String] = []
+
+        init(rejectNextDesign: Bool = false, postPublishGate: WorkflowRendererGate? = nil,
+            requiresOutputCheck: Bool = false, outputRejectsRemaining: Int = 0,
+            outputPersisted: Bool = true, readyAfterOutputPass: Bool = true) {
+            self.rejectNextDesign = rejectNextDesign
+            self.postPublishGate = postPublishGate
+            self.requiresOutputCheck = requiresOutputCheck
+            self.outputRejectsRemaining = outputRejectsRemaining
+            self.outputPersisted = outputPersisted
+            self.readyAfterOutputPass = readyAfterOutputPass
+        }
+
+        func createVoiceDesignCandidate(voiceID: String, name: String, instruction: String,
+            referenceText: String, seed: Int, idempotencyKey: String?) async throws -> VoiceDesignCandidate {
+            entries.append(.init(voiceID: voiceID, seed: seed, key: idempotencyKey))
+            if let key = idempotencyKey, let id = candidateIDsByKey[key], let previous = candidates[id] { return previous }
+            let id = "candidate_\(candidates.count)"
+            let candidate = VoiceDesignCandidate(id: id, targetVoiceID: voiceID, name: name, state: "generated",
+                revision: revision, publishedVoiceRevision: nil,
+                reference: .init(audioSHA256: "synthetic", textSHA256: "synthetic", transcriptSHA256: "synthetic", durationSeconds: 5),
+                validations: [], publishable: false)
+            candidates[id] = candidate
+            if let key = idempotencyKey { candidateIDsByKey[key] = id }
+            if rejectNextDesign { rejectedIDs.insert(id); rejectNextDesign = false }
+            return candidate
+        }
+
+        private func update(_ id: String, state: String, validations: [VoiceDesignValidation]? = nil) throws -> VoiceDesignCandidate {
+            guard let old = candidates[id] else { throw ServiceAPIClientError.invalidResponse }
+            let updated = VoiceDesignCandidate(id: id, targetVoiceID: old.targetVoiceID, name: old.name, state: state,
+                revision: revision, publishedVoiceRevision: state == "published" ? revision : nil, reference: old.reference,
+                validations: validations ?? old.validations, publishable: state == "publishable" || state == "published")
+            candidates[id] = updated
+            return updated
+        }
+
+        func confirmVoiceDesignCandidate(id: String, referenceText: String?) async throws -> VoiceDesignCandidate {
+            guard candidates[id]?.knownState != .cancelled, candidates[id]?.knownState != .failed else {
+                throw ServiceAPIClientError.invalidContract("voice_design_invalid_state")
+            }
+            return try update(id, state: "confirmed")
+        }
+
+        func validateVoiceDesignCandidate(id: String, testText: String?, capabilityKey: String?,
+            mode: VoiceDesignValidationMode) async throws -> VoiceDesignCandidate {
+            let rejected = rejectedIDs.contains(id)
+            let accepted: Bool
+            if case .automatedAcceptance = mode { accepted = true } else { accepted = false }
+            let validation = VoiceDesignValidation(validationID: "validation_\(id)", candidateRevision: revision,
+                status: rejected ? "reject" : "pass", machineStatus: rejected ? "reject" : "pass",
+                identityStatus: .notReviewed, naturalnessStatus: .notReviewed, automatedAcceptance: accepted,
+                failureCodes: rejected ? ["output_invalid"] : [], capabilityKey: "reference.render",
+                modelArtifact: "synthetic", modelCatalogRevision: String(repeating: "a", count: 40),
+                transcriptMatch: rejected ? 0.2 : 1, createdAt: 1, updatedAt: 1)
+            return try update(id, state: rejected ? "failed" : (accepted ? "publishable" : "validating"), validations: [validation])
+        }
+
+        func cancelVoiceDesignCandidate(id: String) async throws -> VoiceDesignCandidate { try update(id, state: "cancelled") }
+
+        func publishVoiceDesignCandidate(id: String, expectedCandidateRevision: String?) async throws -> VoiceDesignPublishResult {
+            guard candidates[id]?.knownState == .publishable else { throw ServiceAPIClientError.invalidResponse }
+            let published = try update(id, state: "published")
+            publishedVoices.leadVoiceCreationHandler = { request, _ in
+                .init(voiceID: request.targetVoiceID, voiceName: request.voiceName,
+                    voiceRevision: "vr_0123456789abcdef0123456789abcdef", modelRevision: String(repeating: "a", count: 40))
+            }
+            _ = try await publishedVoices.createAndPublishLeadVoice(.init(bookID: UUID(), roleID: UUID(),
+                targetVoiceID: published.targetVoiceID, voiceName: published.name, instruction: "合成测试声音",
+                referenceTextCandidates: [], seed: 42))
+            hasPublished = true
+            return .init(candidate: published, voice: .init(id: published.targetVoiceID, name: published.name,
+                available: true, revision: revision))
+        }
+
+        func fetchEffectiveCapabilities(ifNoneMatch: String?, cachedValue: EffectiveCapabilitySnapshot?) async throws -> ServiceConditionalResponse<EffectiveCapabilitySnapshot> {
+            try Task.checkCancellation()
+            if hasPublished, !didHoldDiscovery, let postPublishGate {
+                didHoldDiscovery = true
+                await postPublishGate.suspend()
+            }
+            try Task.checkCancellation()
+            let snapshot = try await publishedVoices.fetchEffectiveCapabilities()
+            guard requiresOutputCheck else { return .init(value: snapshot, metadata: .init(statusCode: 200)) }
+            let publishedIDs = Set(candidates.values.filter { $0.knownState == .published }.map(\.targetVoiceID))
+            var payload = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot)) as? [String: Any])
+            payload["voices"] = (payload["voices"] as? [[String: Any]] ?? []).map { original in
+                var voice = original
+                if let id = voice["id"] as? String, publishedIDs.contains(id), !validatedIDs.contains(id) {
+                    voice["production_ready"] = false
+                    voice["production_ready_reason"] = "synthesis_validation_not_run"
+                }
+                return voice
+            }
+            let value = try JSONDecoder().decode(EffectiveCapabilitySnapshot.self, from: JSONSerialization.data(withJSONObject: payload))
+            return .init(value: value, metadata: .init(statusCode: 200))
+        }
+
+        func runVoiceQuality(id: String, request: VoiceQualityRunRequest) async throws -> VoiceQualityRunResponse {
+            outputCheckIDs.append(id)
+            let rejected = outputRejectsRemaining > 0
+            if rejected { outputRejectsRemaining -= 1 }
+            // Advertise readiness optimistically even when this report was not
+            // recorded: the workflow must still require its durable evidence.
+            if !rejected, readyAfterOutputPass { validatedIDs.insert(id) }
+            return .init(legacyReport: .init(status: rejected ? .reject : .pass,
+                runID: "vq_0123456789abcdef0123456789abcdef"), validationPersisted: outputPersisted)
+        }
+
+        func fetchSafeVoices(ifNoneMatch: String?, cachedValue: SafeVoiceList?) async throws -> ServiceConditionalResponse<SafeVoiceList> { throw ServiceAPIClientError.requestFailed }
+        func fetchReadiness() async throws -> ReadySnapshot { throw ServiceAPIClientError.requestFailed }
+        func createVoicePreview(text: String, instruction: String, speed: Double, seed: Int?) async throws -> Data { throw ServiceAPIClientError.requestFailed }
+        func fetchVoiceDesignCandidates() async throws -> [VoiceDesignCandidate] { Array(candidates.values) }
+        func fetchVoiceDesignCandidate(id: String) async throws -> VoiceDesignCandidate {
+            guard let candidate = candidates[id] else { throw ServiceAPIClientError.invalidResponse }
+            return candidate
+        }
+        func fetchVoiceDesignReferenceAudio(id: String, expectedRevision: String) async throws -> Data { throw ServiceAPIClientError.requestFailed }
+        func fetchVoiceDesignValidationAudio(id: String, validationID: String, expectedRevision: String) async throws -> Data { throw ServiceAPIClientError.requestFailed }
+    }
+
+    func testReviewedRecipeReachesDesignUnchangedAndHasDistinctIdempotency() async throws {
+        let client = RecipeRecordingDesignClient()
+        let renderer = AudiobookProductionWiring.LiveAudiobookSpeechRenderer(
+            discoveryClient: UnavailableServiceCapabilityDiscoveryClient(), renderClient: ServiceAPIClient(),
+            voiceDesignClient: client, voiceCatalog: VoiceCatalogStore())
+        var request = AudiobookLeadVoiceCreationRequest(bookID: UUID(), roleID: UUID(), targetVoiceID: "ab_recipe_a",
+            voiceName: "原声", instruction: "温暖的中文声音", referenceTextCandidates: ["海风轻轻吹过宁静的渡口，远处的灯光一点点亮了起来。"], seed: 42)
+        _ = try? await renderer.createAndPublishLeadVoice(request)
+        request.targetVoiceID = "ab_recipe_b"
+        request.instruction = "清亮有力的中文声音"
+        _ = try? await renderer.createAndPublishLeadVoice(request)
+        let entries = client.entries.withLock { $0 }
+        XCTAssertEqual(entries.count, 2)
+        XCTAssertEqual(entries.first?.text, request.referenceTextCandidates.first, "已确认的合法文稿不能再被隐藏追加或截断")
+        XCTAssertNotEqual(entries[0].idempotencyKey, entries[1].idempotencyKey, "同角色不同物料不能复用旧候选")
+    }
+
+    func testVoiceDesignCancellationDoesNotStartNextCandidate() async throws {
+        let client = RecipeRecordingDesignClient(cancels: true)
+        let renderer = AudiobookProductionWiring.LiveAudiobookSpeechRenderer(
+            discoveryClient: UnavailableServiceCapabilityDiscoveryClient(), renderClient: ServiceAPIClient(),
+            voiceDesignClient: client, voiceCatalog: VoiceCatalogStore())
+        let request = AudiobookLeadVoiceCreationRequest(bookID: UUID(), roleID: UUID(), targetVoiceID: "ab_cancel",
+            voiceName: "旁白", instruction: "温暖的中文声音", referenceTextCandidates: ["第一份试听文稿", "第二份试听文稿"], seed: 42)
+        do {
+            _ = try await renderer.createAndPublishLeadVoice(request)
+            XCTFail("取消应传播到批量任务")
+        } catch is CancellationError {} catch { XCTFail("应保留取消语义") }
+        XCTAssertEqual(client.entries.withLock { $0.count }, 1)
+    }
+
+    func testBatchQualityFailureCreatesFreshCandidateWhenRetried() async throws {
+        let client = VoiceDesignLifecycleClient(rejectNextDesign: true), catalog = VoiceCatalogStore()
+        let renderer = AudiobookProductionWiring.LiveAudiobookSpeechRenderer(discoveryClient: client,
+            renderClient: ServiceAPIClient(), voiceDesignClient: client, voiceCatalog: catalog)
+        let (workflow, _) = makeWorkflow(renderer: renderer, catalog: catalog)
+        _ = try await importBook(into: workflow, fileName: "quality-retry.txt", text: "第一章\n海风吹来。")
+        await workflow.prepareVoiceCreationDrafts()
+        await workflow.createSelectedVoiceDrafts()
+        XCTAssertTrue(workflow.voiceCreationDrafts.first?.status.isFailure == true)
+
+        await workflow.createSelectedVoiceDrafts(retryFailuresOnly: true)
+
+        let entries = await client.entries
+        XCTAssertEqual(entries.count, 2)
+        XCTAssertNotEqual(entries[0].key, entries[1].key, "终止失败不能重放已经取消的候选")
+        XCTAssertNotEqual(entries[0].seed, entries[1].seed, "质量失败重试需要新候选")
+        XCTAssertTrue(workflow.voiceCreationDrafts.first?.status.isCreated == true)
+        await workflow.createSelectedVoiceDrafts(retryFailuresOnly: true)
+        let finalCount = await client.entries.count
+        XCTAssertEqual(finalCount, 2, "成功后不再创建")
+    }
+
+    func testBatchCancellationAfterPublicationStillRegistersCompletedVoice() async throws {
+        let gate = WorkflowRendererGate(), catalog = VoiceCatalogStore()
+        let client = VoiceDesignLifecycleClient(postPublishGate: gate)
+        let renderer = AudiobookProductionWiring.LiveAudiobookSpeechRenderer(discoveryClient: client,
+            renderClient: ServiceAPIClient(), voiceDesignClient: client, voiceCatalog: catalog)
+        let (workflow, _) = makeWorkflow(renderer: renderer, catalog: catalog)
+        let imported = try await importBook(into: workflow, fileName: "published-cancel.txt", text: "第一章\n海风吹来。")
+        await workflow.prepareVoiceCreationDrafts()
+        let voiceID = try XCTUnwrap(workflow.voiceCreationDrafts.first?.request.targetVoiceID)
+        let creation = Task { await workflow.createSelectedVoiceDrafts() }
+        await waitForRenderSuspension(gate)
+        workflow.cancelVoiceDraftCreation()
+        await gate.resume()
+        await creation.value
+
+        let snapshot = await catalog.refresh()
+        XCTAssertEqual(snapshot.state.metadataByVoiceID[voiceID]?.originBookID, imported.bookID)
+        XCTAssertTrue(workflow.voiceCreationDrafts.first?.status.isCreated == true)
+        XCTAssertTrue(workflow.voiceBindings.isEmpty, "停止后只保留资产，不自动绑定")
+    }
+
+    func testBatchPublishedVoiceRunsOutputCheckBeforeBinding() async throws {
+        let client = VoiceDesignLifecycleClient(requiresOutputCheck: true), catalog = VoiceCatalogStore()
+        let renderer = AudiobookProductionWiring.LiveAudiobookSpeechRenderer(discoveryClient: client,
+            renderClient: ServiceAPIClient(), voiceDesignClient: client, voiceCatalog: catalog)
+        let (workflow, _) = makeWorkflow(renderer: renderer, catalog: catalog, voiceValidationClient: client)
+        _ = try await importBook(into: workflow, fileName: "output-check.txt", text: "第一章\n海风吹来。")
+        await workflow.prepareVoiceCreationDrafts()
+        let voiceID = try XCTUnwrap(workflow.voiceCreationDrafts.first?.request.targetVoiceID)
+
+        await workflow.createSelectedVoiceDrafts()
+
+        let checks = await client.outputCheckIDs
+        XCTAssertEqual(checks, [voiceID], "发布可路由的声音后仍需完成输出验收")
+        XCTAssertTrue(workflow.voiceCreationDrafts.first?.status.isCreated == true)
+        XCTAssertEqual(workflow.voiceBindings.values.first?.voiceID, voiceID)
+        XCTAssertNil(workflow.chapters.first?.currentChapterRevisionID, "创建音色不启动章节制作")
+    }
+
+    func testBatchOutputFailureKeepsAssetAndRetriesWithoutRegeneration() async throws {
+        let client = VoiceDesignLifecycleClient(requiresOutputCheck: true, outputRejectsRemaining: 1)
+        let catalog = VoiceCatalogStore()
+        let persistedStore = try AudiobookProjectStore(root: tempRoot)
+        let renderer = AudiobookProductionWiring.LiveAudiobookSpeechRenderer(discoveryClient: client,
+            renderClient: ServiceAPIClient(), voiceDesignClient: client, voiceCatalog: catalog)
+        let (workflow, _) = makeWorkflow(renderer: renderer, store: persistedStore, catalog: catalog, voiceValidationClient: client)
+        let book = try await importBook(into: workflow, fileName: "output-retry.txt", text: "第一章\n海风吹来。")
+        await workflow.prepareVoiceCreationDrafts()
+        let voiceID = try XCTUnwrap(workflow.voiceCreationDrafts.first?.request.targetVoiceID)
+        await workflow.createSelectedVoiceDrafts()
+
+        let assets = await catalog.refresh()
+        XCTAssertEqual(assets.state.metadataByVoiceID[voiceID]?.originBookID, book.bookID)
+        XCTAssertTrue(workflow.voiceCreationDrafts.first?.status.isCreated == true, "输出失败不能把已发布的声音报为未创建")
+        XCTAssertTrue(workflow.voiceCreationDrafts.first?.status.isFailure == true)
+        XCTAssertTrue(workflow.voiceBindings.isEmpty)
+        XCTAssertEqual(workflow.voiceCreationDrafts.first?.generationAttempt, 0)
+        let intents = try await persistedStore.voiceRegistrationIntents(bookID: book.bookID, includeCompleted: true)
+        XCTAssertEqual(intents.count, 1)
+        XCTAssertNil(intents.first?.binding, "检查未通过时只能记录资产，不能留下恢复时可自动应用的绑定意图")
+        let restoredController = AudiobookCastController(store: persistedStore, capabilityProvider: {
+            try await renderer.fetchEffectiveCapabilities()
+        }, voiceCatalog: catalog)
+        try await restoredController.recoverVoiceRegistrations(bookID: book.bookID)
+        let restoredBindings = try await persistedStore.voiceBindings(for: book.bookID)
+        XCTAssertTrue(restoredBindings.isEmpty)
+        let otherRole = AudiobookCharacter(bookID: book.bookID, displayName: "另一个角色")
+        try await persistedStore.upsertCharacter(otherRole)
+        let otherBinding = AudiobookVoiceBinding(roleID: otherRole.id, voiceID: "v-narrator",
+            voiceRevision: nil, modelRevision: String(repeating: "a", count: 40))
+        try await persistedStore.saveVoiceBinding(bookID: book.bookID, binding: otherBinding)
+
+        await workflow.createSelectedVoiceDrafts(retryFailuresOnly: true)
+
+        let entries = await client.entries, checks = await client.outputCheckIDs
+        XCTAssertEqual(entries.count, 1, "重试检查必须复用已发布声音")
+        XCTAssertEqual(checks, [voiceID, voiceID])
+        XCTAssertFalse(workflow.voiceCreationDrafts.first?.status.isFailure == true)
+        XCTAssertTrue(workflow.voiceBindings.values.contains { $0.voiceID == voiceID })
+    }
+
+    func testBatchUnrecordedOutputPassDoesNotBind() async throws {
+        let client = VoiceDesignLifecycleClient(requiresOutputCheck: true, outputPersisted: false)
+        let catalog = VoiceCatalogStore()
+        let renderer = AudiobookProductionWiring.LiveAudiobookSpeechRenderer(discoveryClient: client,
+            renderClient: ServiceAPIClient(), voiceDesignClient: client, voiceCatalog: catalog)
+        let (workflow, _) = makeWorkflow(renderer: renderer, catalog: catalog, voiceValidationClient: client)
+        _ = try await importBook(into: workflow, fileName: "output-unrecorded.txt", text: "第一章\n海风吹来。")
+        await workflow.prepareVoiceCreationDrafts()
+        await workflow.createSelectedVoiceDrafts()
+
+        let checks = await client.outputCheckIDs
+        XCTAssertEqual(checks.count, 1)
+        XCTAssertTrue(workflow.voiceCreationDrafts.first?.status.isCreated == true)
+        XCTAssertTrue(workflow.voiceCreationDrafts.first?.status.title.contains("保存") == true)
+        XCTAssertTrue(workflow.voiceBindings.isEmpty, "没有持久化检查证据不能应用声音")
+    }
+
+    func testBatchOutputPassRequiresFreshProductionReadiness() async throws {
+        let client = VoiceDesignLifecycleClient(requiresOutputCheck: true, readyAfterOutputPass: false)
+        let catalog = VoiceCatalogStore()
+        let renderer = AudiobookProductionWiring.LiveAudiobookSpeechRenderer(discoveryClient: client,
+            renderClient: ServiceAPIClient(), voiceDesignClient: client, voiceCatalog: catalog)
+        let (workflow, _) = makeWorkflow(renderer: renderer, catalog: catalog, voiceValidationClient: client)
+        _ = try await importBook(into: workflow, fileName: "output-not-ready.txt", text: "第一章\n海风吹来。")
+        await workflow.prepareVoiceCreationDrafts()
+        await workflow.createSelectedVoiceDrafts()
+
+        let checks = await client.outputCheckIDs
+        XCTAssertEqual(checks.count, 1)
+        XCTAssertTrue(workflow.voiceCreationDrafts.first?.status.isCreated == true)
+        XCTAssertTrue(workflow.voiceCreationDrafts.first?.status.isFailure == true)
+        XCTAssertTrue(workflow.voiceBindings.isEmpty, "报告通过不能替代当前正式制作准入")
+    }
+
+    func testBatchEnsembleOutputRetrySurvivesOtherRoleBinding() async throws {
+        let client = VoiceDesignLifecycleClient(requiresOutputCheck: true, outputRejectsRemaining: 1)
+        let catalog = VoiceCatalogStore(), store = try AudiobookProjectStore(root: tempRoot)
+        let renderer = AudiobookProductionWiring.LiveAudiobookSpeechRenderer(discoveryClient: client,
+            renderClient: ServiceAPIClient(), voiceDesignClient: client, voiceCatalog: catalog)
+        let (workflow, _) = makeWorkflow(renderer: renderer, store: store, catalog: catalog, voiceValidationClient: client)
+        let roles = try await prepareAutomaticCastingBook(workflow: workflow, store: store, roleCount: 4)
+        await workflow.prepareVoiceCreationDrafts()
+        let ensemble = try XCTUnwrap(workflow.voiceCreationDrafts.first { if case .ensemble = $0.target { true } else { false } })
+        for var draft in workflow.voiceCreationDrafts {
+            draft.isSelected = draft.id == ensemble.id
+            workflow.updateVoiceCreationDraft(draft)
+        }
+        await workflow.createSelectedVoiceDrafts()
+        XCTAssertTrue(workflow.voiceCreationDrafts.first { $0.id == ensemble.id }?.status.isFailure == true)
+        let narrator = try XCTUnwrap(roles.first(where: \.isNarrator))
+        try await store.saveVoiceBinding(bookID: ensemble.bookID, binding: .init(roleID: narrator.id,
+            voiceID: "v-narrator", voiceRevision: nil, modelRevision: String(repeating: "a", count: 40)))
+
+        await workflow.createSelectedVoiceDrafts(retryFailuresOnly: true)
+
+        let checks = await client.outputCheckIDs, entries = await client.entries
+        XCTAssertEqual(checks, [ensemble.request.targetVoiceID, ensemble.request.targetVoiceID])
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertTrue(workflow.voiceCreationDrafts.first { $0.id == ensemble.id }?.status.isComplete == true)
+        XCTAssertEqual(workflow.voiceBindings[narrator.id]?.voiceID, "v-narrator")
+    }
+
     private func makeWorkflow(
         driver: FakeDriver = FakeDriver(),
-        renderer: WorkflowFakeRenderer = WorkflowFakeRenderer(),
+        renderer: any AudiobookSpeechRenderer = WorkflowFakeRenderer(),
         store: AudiobookProjectStore? = nil,
         catalog: VoiceCatalogStore = VoiceCatalogStore(),
         voiceValidationClient: (any SpeechRailVoiceQualityClient)? = nil
@@ -972,6 +1337,76 @@ final class AudiobookWorkflowTests: XCTestCase {
         XCTAssertTrue(events.allSatisfy { $0.runID == runID }, "缓冲不得混入旧 run 事件")
     }
 
+    func testLegacyBookHasExplicitPreparationRouteAndOpeningDoesNotPrepareIt() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, driver) = makeWorkflow(store: store)
+        let imported = try await importBook(into: workflow, fileName: "legacy.txt", text: "第一章\n原稿正文。")
+        let originalSourceID = try XCTUnwrap(workflow.selectedBook?.sourceID)
+        try await markBookReadyForProduction(imported.bookID, workflow: workflow, store: store)
+        workflow.makeConfirmedChapters(chapterIDs: imported.chapterIDs)
+        await waitForProductionToFinish(workflow)
+        let preservedCandidates = try await store.candidates(for: imported.bookID)
+        XCTAssertFalse(preservedCandidates.isEmpty)
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(tempRoot.appendingPathComponent("library.sqlite3").path, &database), SQLITE_OK)
+        defer { sqlite3_close(database) }
+        XCTAssertEqual(sqlite3_exec(database, "UPDATE sources SET source_kind = 'reference', reference_source_id = NULL, preparation_version = NULL, source_map_rel_path = NULL, source_map_sha256 = NULL WHERE id = '\(originalSourceID)';", nil, nil, nil), SQLITE_OK)
+        await workflow.openBook(imported.bookID)
+        XCTAssertTrue(workflow.requiresWorkingTextPreparation)
+        XCTAssertEqual(workflow.selectedBook?.sourceID, originalSourceID)
+        await workflow.startListening()
+        XCTAssertNil(workflow.errorMessage)
+        XCTAssertTrue(driver.isPlaying)
+        await workflow.prepareSelectedBookWorkingText()
+        XCTAssertNil(workflow.errorMessage)
+        XCTAssertFalse(workflow.requiresWorkingTextPreparation)
+        XCTAssertNotEqual(workflow.selectedBook?.sourceID, originalSourceID)
+        XCTAssertEqual(workflow.selectedBook?.analysisState, .notStarted)
+        XCTAssertNil(workflow.selectedBook?.confirmedCastRevisionID)
+        let source = try await store.workingSourceSnapshot(bookID: imported.bookID)
+        XCTAssertEqual(source.sourceID, workflow.selectedBook?.sourceID)
+        let remainingCandidates = try await store.candidates(for: imported.bookID)
+        XCTAssertEqual(remainingCandidates, preservedCandidates)
+    }
+
+    func testPreparationKeepsPartialHistoricalAudioReachableWithoutChangingWorkspaceCoordinates() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, driver) = makeWorkflow(store: store)
+        let imported = try await importBook(into: workflow, fileName: "history.txt",
+            text: "第一章 起程\n林远走出家门。\n第二章 归途\n远方传来钟声。")
+        try await markBookReadyForProduction(imported.bookID, workflow: workflow, store: store)
+        let firstChapter = try XCTUnwrap(workflow.chapters.first)
+        workflow.makeConfirmedChapters(chapterIDs: [firstChapter.id])
+        await waitForProductionToFinish(workflow)
+        let oldSource = try await store.sourceIndex(for: imported.bookID)
+        let candidates = try await store.candidates(for: imported.bookID)
+        XCTAssertFalse(candidates.isEmpty)
+        await workflow.prepareSelectedBookWorkingText()
+        XCTAssertNil(workflow.errorMessage)
+        XCTAssertNotEqual(workflow.selectedBook?.sourceID, firstChapter.sourceID)
+        XCTAssertFalse(workflow.chapters.contains { $0.id == firstChapter.id })
+        XCTAssertTrue(workflow.hasListenableChapter)
+        let historyID = try XCTUnwrap(workflow.selectedAudioRevisionID)
+        XCTAssertTrue(workflow.audioRevisions.contains { $0.id == historyID })
+        await workflow.startListening(chapterID: firstChapter.id)
+        XCTAssertNil(workflow.errorMessage)
+        XCTAssertTrue(driver.isPlaying)
+        XCTAssertEqual(workflow.listeningController?.activePlayback?.chapterID, firstChapter.id)
+        XCTAssertFalse(workflow.chapters.contains { $0.id == workflow.listeningChapterID })
+        XCTAssertFalse(workflow.listeningTexts.isEmpty)
+        for item in workflow.listeningTexts {
+            XCTAssertEqual(item.text, try oldSource.text(in: item.sourceRange))
+        }
+        await workflow.refreshExportAudit(profile: .chapterMP3, chapterIDs: [firstChapter.id])
+        XCTAssertEqual(workflow.exportAudit?.readyChapterIDs, [firstChapter.id])
+        let preserved = try await store.candidates(for: imported.bookID)
+        XCTAssertEqual(preserved, candidates)
+        await workflow.selectAudioRevision(nil)
+        XCTAssertFalse(workflow.hasListenableChapter)
+        XCTAssertTrue(workflow.listeningTexts.isEmpty)
+        XCTAssertTrue(workflow.exportChapters.allSatisfy { $0.sourceID == workflow.selectedBook?.sourceID })
+    }
+
     func testWorkflowOnlyShowsNextValidAction() async throws {
         let (workflow, _) = makeWorkflow()
         let txtURL = tempRoot.appendingPathComponent("book.txt")
@@ -1508,7 +1943,7 @@ final class AudiobookWorkflowTests: XCTestCase {
         let bookAfter = try await store.book(id: bookID)
         XCTAssertEqual(chaptersAfter.first?.title, chapter.title)
         XCTAssertEqual(annotationsAfter, [annotation])
-        XCTAssertEqual(try sourceAfter.text(in: sourceAfter.wholeRange), text)
+        XCTAssertEqual(sourceAfter.utf8Data, preview.canonicalUTF8)
         XCTAssertEqual(bookAfter.analysisState, .allWindowsValidated)
     }
 
@@ -2245,6 +2680,416 @@ final class AudiobookWorkflowTests: XCTestCase {
         XCTAssertNil(workflow.errorMessage)
     }
 
+    private func prepareAutomaticCastingBook(
+        workflow: AudiobookWorkflowModel,
+        store: AudiobookProjectStore,
+        roleCount: Int,
+        sameChapter: Bool = false
+    ) async throws -> [AudiobookCharacter] {
+        let text = sameChapter
+            ? "第一章\n" + (1..<roleCount).map { "“这是角色\($0)的台词。”" }.joined(separator: "\n")
+            : (1..<roleCount).map { "第\($0)章\n“这是角色\($0)的台词。”" }.joined(separator: "\n\n")
+        _ = try await importBook(into: workflow, fileName: "automatic-casting.txt", text: text)
+        let bookID = try XCTUnwrap(workflow.selectedBook?.id)
+        let chapters = try await store.chapters(for: bookID)
+        XCTAssertEqual(chapters.count, sameChapter ? 1 : roleCount - 1)
+        let narrator = try XCTUnwrap(workflow.characters.first(where: \.isNarrator))
+        var roles = [narrator]
+        for index in 1..<roleCount {
+            roles.append(.init(bookID: bookID, displayName: "人物\(index)", isMajor: index < 8))
+        }
+        try await store.saveCharacters(bookID: bookID, characters: roles)
+        var annotations: [AudiobookAnnotation] = []
+        for (index, chapter) in chapters.enumerated() {
+            let atoms = try await store.atoms(for: bookID, chapterID: chapter.id).filter { $0.kind != .formatting }
+            for (atomIndex, atom) in atoms.enumerated() {
+                let roleIndex = sameChapter ? min(atomIndex + 1, roleCount - 1) : index + 1
+                annotations.append(.init(bookID: bookID, chapterID: chapter.id, windowID: UUID(),
+                    atomID: atom.id, sourceRange: atom.sourceRange, assignment: .assigned(roleID: roles[roleIndex].id)))
+            }
+        }
+        try await store.saveAnnotations(bookID: bookID, annotations: annotations)
+        var book = try await store.book(id: bookID)
+        book.analysisState = .allWindowsValidated
+        try await store.updateBook(book)
+        await workflow.openBook(bookID)
+        return roles
+    }
+
+    func testMissingVoicesPrepareEditableMaterialsWithoutCreatingAudio() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let renderer = WorkflowFakeRenderer(), catalog = VoiceCatalogStore()
+        let (workflow, _) = makeWorkflow(renderer: renderer, store: store, catalog: catalog)
+        let roles = try await prepareAutomaticCastingBook(workflow: workflow, store: store, roleCount: 54)
+        try await catalog.archiveVoices(voiceIDs: ["v-narrator", "v-designed-narrator"])
+
+        await workflow.autoAssignRecommendedVoices(consentsToSharedMinorVoices: true)
+
+        XCTAssertFalse(workflow.voiceCreationDrafts.isEmpty)
+        XCTAssertLessThan(workflow.voiceCreationDrafts.count, roles.count, "可共享角色合并准备，避免逐人创建")
+        XCTAssertEqual(Set(workflow.voiceCreationDrafts.flatMap(\.roleIDs)), Set(roles.map(\.id)))
+        for draft in workflow.voiceCreationDrafts {
+            XCTAssertFalse(draft.voiceName.isEmpty)
+            XCTAssertFalse(draft.instruction.isEmpty)
+            XCTAssertTrue((20...240).contains(draft.referenceText.unicodeScalars.count))
+            XCTAssertNil(draft.validationMessage)
+        }
+        XCTAssertTrue(workflow.voiceCreationDrafts.contains { !$0.sourceEvidence.isEmpty })
+        XCTAssertEqual(renderer.leadRequestCount, 0)
+        XCTAssertEqual(renderer.fragmentRequestCount, 0)
+        XCTAssertTrue(workflow.voiceBindings.isEmpty)
+    }
+
+    func testBatchVoiceCreationUsesReviewedSelectionAndEditedMaterials() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let renderer = WorkflowFakeRenderer(), catalog = VoiceCatalogStore()
+        let (workflow, _) = makeWorkflow(renderer: renderer, store: store, catalog: catalog)
+        _ = try await prepareAutomaticCastingBook(workflow: workflow, store: store, roleCount: 4)
+        await workflow.prepareVoiceCreationDrafts()
+        XCTAssertGreaterThanOrEqual(workflow.voiceCreationDrafts.count, 2)
+        let first = try XCTUnwrap(workflow.voiceCreationDrafts.first)
+        for var draft in workflow.voiceCreationDrafts {
+            draft.isSelected = draft.id == first.id
+            if draft.isSelected {
+                draft.voiceName = "我确认的旁白"
+                draft.instruction = "成熟、从容、清晰而温暖的中文叙述声音。"
+                draft.referenceText = "傍晚的风吹过渡口，灯光渐渐亮起，久别的人终于踏上了归家的小路。"
+            }
+            workflow.updateVoiceCreationDraft(draft)
+        }
+        renderer.leadVoiceCreationHandler = { request, _ in
+            .init(voiceID: request.targetVoiceID, voiceName: request.voiceName,
+                voiceRevision: "vr_0123456789abcdef0123456789abcdef", modelRevision: String(repeating: "a", count: 40))
+        }
+
+        await workflow.createSelectedVoiceDrafts()
+
+        let request = try XCTUnwrap(renderer.voiceCreationRequests.first)
+        XCTAssertEqual(renderer.leadRequestCount, 1)
+        XCTAssertEqual(request.voiceName, "我确认的旁白")
+        XCTAssertEqual(request.instruction, "成熟、从容、清晰而温暖的中文叙述声音。")
+        XCTAssertEqual(request.referenceTextCandidates, ["傍晚的风吹过渡口，灯光渐渐亮起，久别的人终于踏上了归家的小路。"])
+        XCTAssertEqual(workflow.voiceCreationDrafts.first?.referenceTextSource, "创作者编辑的试听文稿")
+        XCTAssertTrue(workflow.voiceCreationDrafts.first?.status.isCreated == true)
+        XCTAssertEqual(renderer.fragmentRequestCount, 0)
+        XCTAssertEqual(workflow.workbenchTab, .preparation)
+        await workflow.createSelectedVoiceDrafts()
+        XCTAssertEqual(renderer.leadRequestCount, 1, "成功项目不能重复提交")
+    }
+
+    func testBatchVoiceCreationRetainsSuccessAndRetriesOnlyFailures() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let renderer = WorkflowFakeRenderer()
+        let (workflow, _) = makeWorkflow(renderer: renderer, store: store)
+        _ = try await prepareAutomaticCastingBook(workflow: workflow, store: store, roleCount: 4)
+        await workflow.prepareVoiceCreationDrafts()
+        let count = workflow.voiceCreationDrafts.count
+        renderer.leadVoiceCreationHandler = { request, ordinal in
+            if ordinal == 2 { throw ServiceAPIClientError.requestTimedOut }
+            return .init(voiceID: request.targetVoiceID, voiceName: request.voiceName,
+                voiceRevision: "vr_0123456789abcdef0123456789abcdef", modelRevision: String(repeating: "a", count: 40))
+        }
+
+        await workflow.createSelectedVoiceDrafts()
+        XCTAssertEqual(workflow.voiceCreationDrafts.filter { $0.status.isCreated }.count, count - 1)
+        XCTAssertEqual(workflow.voiceCreationDrafts.filter { $0.status.isFailure }.count, 1)
+        await workflow.createSelectedVoiceDrafts(retryFailuresOnly: true)
+
+        XCTAssertEqual(renderer.leadRequestCount, count + 1)
+        XCTAssertEqual(renderer.voiceCreationRequests[1].targetVoiceID, renderer.voiceCreationRequests.last?.targetVoiceID,
+            "传输失败重试应复用同一创建身份")
+        XCTAssertTrue(workflow.voiceCreationDrafts.allSatisfy { $0.status.isCreated })
+        XCTAssertEqual(renderer.fragmentRequestCount, 0)
+    }
+
+    func testBatchVoiceCreationRejectsInvalidMaterialsBeforeStarting() async throws {
+        let renderer = WorkflowFakeRenderer()
+        let (workflow, _) = makeWorkflow(renderer: renderer)
+        _ = try await importBook(into: workflow, fileName: "invalid-voice.txt", text: "第一章\n风吹过渡口。")
+        await workflow.prepareVoiceCreationDrafts()
+        var draft = try XCTUnwrap(workflow.voiceCreationDrafts.first)
+        draft.referenceText = "太短"
+        workflow.updateVoiceCreationDraft(draft)
+        await workflow.createSelectedVoiceDrafts()
+        XCTAssertEqual(renderer.leadRequestCount, 0)
+        XCTAssertNotNil(workflow.voiceCreationErrorMessage)
+    }
+
+    func testBatchVoiceCreationRejectsChangedSourceAssignments() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let renderer = WorkflowFakeRenderer()
+        let (workflow, _) = makeWorkflow(renderer: renderer, store: store)
+        let roles = try await prepareAutomaticCastingBook(workflow: workflow, store: store, roleCount: 4)
+        await workflow.prepareVoiceCreationDrafts()
+        let annotations = try await store.annotations(for: roles[0].bookID)
+        var annotation = try XCTUnwrap(annotations.first)
+        annotation.assignment = .unknown(reason: "重新分析中", candidateRoleIDs: [])
+        try await store.saveAnnotations(bookID: roles[0].bookID, annotations: [annotation])
+
+        await workflow.createSelectedVoiceDrafts()
+
+        XCTAssertEqual(renderer.leadRequestCount, 0, "原文角色归属变化后必须重新准备，不能用旧材料开始生成")
+        XCTAssertTrue(workflow.voiceCreationDrafts.allSatisfy { $0.status.isFailure })
+    }
+
+    func testBatchVoiceLateResultPreservesNewSelectionAndRegistersAsset() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let renderer = WorkflowFakeRenderer(), catalog = VoiceCatalogStore()
+        let (workflow, _) = makeWorkflow(renderer: renderer, store: store, catalog: catalog)
+        let imported = try await importBook(into: workflow, fileName: "voice-new-selection.txt", text: "第一章\n海风吹来。")
+        let narrator = try XCTUnwrap(workflow.characters.first)
+        await workflow.prepareVoiceCreationDrafts(scope: .role(narrator.id))
+        let gate = WorkflowRendererGate()
+        renderer.leadVoiceCreationHandler = { request, _ in
+            await gate.suspend()
+            return .init(voiceID: request.targetVoiceID, voiceName: request.voiceName,
+                voiceRevision: "vr_0123456789abcdef0123456789abcdef", modelRevision: String(repeating: "a", count: 40))
+        }
+        let task = Task { await workflow.createSelectedVoiceDrafts() }
+        await waitForRenderSuspension(gate)
+        await workflow.bindVoice(roleID: narrator.id, voiceID: "v-narrator")
+        await gate.resume()
+        await task.value
+
+        XCTAssertEqual(workflow.voiceBindings[narrator.id]?.voiceID, "v-narrator")
+        let createdID = try XCTUnwrap(renderer.voiceCreationRequests.first?.targetVoiceID)
+        let snapshot = await catalog.refresh()
+        XCTAssertEqual(snapshot.state.metadataByVoiceID[createdID]?.originBookID, imported.bookID)
+        XCTAssertTrue(workflow.voiceCreationDrafts.first?.status.isCreated == true)
+    }
+
+    func testVoiceMaterialsSupportUnicodeLimitsAndPreserveEditsOnReopen() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, _) = makeWorkflow(store: store)
+        let imported = try await importBook(into: workflow, fileName: "unicode-voice.txt", text: "第一章\n海风吹来。")
+        var book = try await store.book(id: imported.bookID)
+        book.title = String(repeating: "长书名🎙️", count: 30)
+        try await store.updateBook(book)
+        await workflow.prepareVoiceCreationDrafts()
+        var draft = try XCTUnwrap(workflow.voiceCreationDrafts.first)
+        XCTAssertNil(draft.validationMessage)
+        XCTAssertLessThanOrEqual(draft.voiceName.unicodeScalars.count, 64)
+        XCTAssertTrue(draft.voiceName.contains("旁白"), "长书名也不能挤掉用于区分声音的角色名称")
+        XCTAssertTrue(draft.referenceTextSource.contains("建议"))
+        let originalID = draft.request.targetVoiceID
+        draft.instruction = "我希望保留的声音描述"
+        workflow.updateVoiceCreationDraft(draft)
+        XCTAssertNotEqual(draft.request.targetVoiceID, originalID)
+        await workflow.prepareVoiceCreationDrafts()
+        XCTAssertEqual(workflow.voiceCreationDrafts.first?.instruction, "我希望保留的声音描述")
+    }
+
+    func testMissingVoiceMaterialsRespectExplicitTraitsAndExistingVoices() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, _) = makeWorkflow(store: store)
+        var roles = try await prepareAutomaticCastingBook(workflow: workflow, store: store, roleCount: 4)
+        var traits = AudiobookVoiceTraits()
+        traits.gender = .init(value: "female", source: .manual, confidence: 1)
+        traits.pitch = .init(value: "low", source: .manual, confidence: 1)
+        roles[1].requiredVoiceTraits = traits
+        try await store.saveCharacters(bookID: roles[0].bookID, characters: roles)
+        await workflow.openBook(roles[0].bookID)
+        await workflow.bindVoice(roleID: roles[0].id, voiceID: "v-narrator")
+        await workflow.prepareVoiceCreationDrafts()
+
+        XCTAssertFalse(workflow.voiceCreationDrafts.flatMap(\.roleIDs).contains(roles[0].id))
+        let explicit = try XCTUnwrap(workflow.voiceCreationDrafts.first { $0.roleIDs.contains(roles[1].id) })
+        XCTAssertEqual(explicit.target, .role(roles[1].id), "明确声音要求不能被混入通用群像描述")
+        XCTAssertTrue(explicit.instruction.contains("女性"))
+        XCTAssertTrue(explicit.instruction.contains("低音"))
+    }
+
+    func testUnavailableExistingVoiceGetsReplacementMaterialsBeforeConfirmation() async throws {
+        let renderer = WorkflowFakeRenderer(), catalog = VoiceCatalogStore()
+        let (workflow, _) = makeWorkflow(renderer: renderer, catalog: catalog)
+        _ = try await importBook(into: workflow, fileName: "missing-existing-voice.txt", text: "第一章\n海风吹来。")
+        let narrator = try XCTUnwrap(workflow.characters.first)
+        await workflow.bindVoice(roleID: narrator.id, voiceID: "v-narrator")
+        let original = workflow.voiceBindings[narrator.id]
+        try await catalog.archiveVoices(voiceIDs: ["v-narrator", "v-designed-narrator"])
+
+        await workflow.autoAssignRecommendedVoices(consentsToSharedMinorVoices: true)
+
+        let draft = try XCTUnwrap(workflow.voiceCreationDrafts.first)
+        XCTAssertEqual(draft.target, .role(narrator.id))
+        XCTAssertTrue(draft.replacesExistingVoice)
+        XCTAssertEqual(workflow.voiceBindings[narrator.id], original, "浏览物料不能替换原选择")
+        XCTAssertEqual(renderer.leadRequestCount, 0)
+    }
+
+    func testBatchVoiceCancellationStopsFollowingItemsAndProtectsNewSelection() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let renderer = WorkflowFakeRenderer()
+        let (workflow, _) = makeWorkflow(renderer: renderer, store: store)
+        let roles = try await prepareAutomaticCastingBook(workflow: workflow, store: store, roleCount: 4)
+        await workflow.prepareVoiceCreationDrafts()
+        let gate = WorkflowRendererGate()
+        renderer.leadVoiceCreationHandler = { request, _ in
+            await gate.suspend()
+            return .init(voiceID: request.targetVoiceID, voiceName: request.voiceName,
+                voiceRevision: "vr_0123456789abcdef0123456789abcdef", modelRevision: String(repeating: "a", count: 40))
+        }
+        let task = Task { await workflow.createSelectedVoiceDrafts() }
+        await waitForRenderSuspension(gate)
+        await workflow.bindVoice(roleID: roles[0].id, voiceID: "v-narrator")
+        workflow.cancelVoiceDraftCreation()
+        await gate.resume()
+        await task.value
+
+        XCTAssertEqual(renderer.leadRequestCount, 1)
+        XCTAssertEqual(workflow.voiceBindings[roles[0].id]?.voiceID, "v-narrator")
+        XCTAssertFalse(workflow.isCreatingVoiceDrafts)
+        XCTAssertEqual(renderer.fragmentRequestCount, 0)
+    }
+
+    func testBatchVoiceSwitchingBooksDoesNotAffectNewBook() async throws {
+        let renderer = WorkflowFakeRenderer()
+        let (workflow, _) = makeWorkflow(renderer: renderer)
+        let first = try await importBook(into: workflow, fileName: "voice-first.txt", text: "第一章\n甲书正文。")
+        let second = try await importBook(into: workflow, fileName: "voice-second.txt", text: "第一章\n乙书正文。")
+        await workflow.openBook(first.bookID)
+        await workflow.prepareVoiceCreationDrafts()
+        let gate = WorkflowRendererGate()
+        renderer.leadVoiceCreationHandler = { request, _ in
+            await gate.suspend()
+            return .init(voiceID: request.targetVoiceID, voiceName: request.voiceName,
+                voiceRevision: "vr_0123456789abcdef0123456789abcdef", modelRevision: String(repeating: "a", count: 40))
+        }
+        let creation = Task { await workflow.createSelectedVoiceDrafts() }
+        await waitForRenderSuspension(gate)
+        let loadGate = WorkflowLoadGate()
+        workflow.loadCheckpointForTesting = { bookID, chapterID, checkpoint in
+            if bookID == second.bookID, chapterID == nil, checkpoint == .beforeBookWorkspacePublication {
+                await loadGate.suspend()
+            }
+        }
+        let switching = Task { await workflow.openBook(second.bookID) }
+        await waitForSuspension(loadGate)
+        XCTAssertEqual(workflow.selectedBook?.id, first.bookID, "新作品仍在加载")
+        await gate.resume()
+        await creation.value
+        XCTAssertNil(workflow.voiceCreationSummary, "切书开始后，旧书迟到结果不能恢复已清空的界面状态")
+        loadGate.resume()
+        await switching.value
+        XCTAssertEqual(workflow.selectedBook?.id, second.bookID)
+        XCTAssertTrue(workflow.voiceCreationDrafts.isEmpty)
+        XCTAssertTrue(workflow.voiceBindings.isEmpty)
+        XCTAssertNil(workflow.voiceCreationErrorMessage)
+        XCTAssertNil(workflow.voiceCreationSummary)
+        XCTAssertEqual(renderer.fragmentRequestCount, 0)
+    }
+
+    func testOneClickPreparesFiftyFourCharactersWithoutCreatingVoicesOrAudio() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let renderer = WorkflowFakeRenderer(), catalog = VoiceCatalogStore()
+        try await catalog.registerGlobalVoice(voiceID: "v-designed-narrator", creationSource: .instantClone)
+        let (workflow, _) = makeWorkflow(renderer: renderer, store: store, catalog: catalog)
+        let roles = try await prepareAutomaticCastingBook(workflow: workflow, store: store, roleCount: 54)
+        await workflow.bindVoice(roleID: roles[0].id, voiceID: "v-narrator")
+        let originalNarrator = try XCTUnwrap(workflow.voiceBindings[roles[0].id])
+        XCTAssertEqual(workflow.primaryActionTitle(.confirmCastAndVoices, for: roles[0].bookID), "一键智能配声")
+
+        await workflow.autoAssignRecommendedVoices(consentsToSharedMinorVoices: true)
+
+        XCTAssertNil(workflow.errorMessage)
+        XCTAssertNil(workflow.pendingCastingPlan)
+        XCTAssertEqual(workflow.voiceBindings.count, 54)
+        XCTAssertEqual(workflow.voiceBindings[roles[0].id], originalNarrator)
+        XCTAssertTrue(workflow.isAuditionConfirmedForSelectedBook)
+        XCTAssertEqual(workflow.workbenchTab, .preparation)
+        XCTAssertEqual(workflow.selectedBook?.productionState, .idle)
+        XCTAssertNil(workflow.productionProgress)
+        XCTAssertEqual(renderer.leadRequestCount, 0)
+        XCTAssertEqual(renderer.fragmentRequestCount, 0)
+        XCTAssertTrue(renderer.auditionRequests.isEmpty)
+
+        let firstBindings = workflow.voiceBindings
+        await workflow.autoAssignRecommendedVoices(consentsToSharedMinorVoices: true)
+        XCTAssertEqual(workflow.voiceBindings, firstBindings, "再次点击不能改写已经采用的声音")
+    }
+
+    func testOneClickSharingConsentDoesNotAcceptSceneCollisions() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let renderer = WorkflowFakeRenderer(), catalog = VoiceCatalogStore()
+        try await catalog.registerGlobalVoice(voiceID: "v-designed-narrator", creationSource: .instantClone)
+        let (workflow, _) = makeWorkflow(renderer: renderer, store: store, catalog: catalog)
+        _ = try await prepareAutomaticCastingBook(workflow: workflow, store: store, roleCount: 4, sameChapter: true)
+
+        await workflow.autoAssignRecommendedVoices(consentsToSharedMinorVoices: true)
+
+        let plan = try XCTUnwrap(workflow.pendingCastingPlan)
+        XCTAssertTrue(plan.isApplicable)
+        XCTAssertTrue(plan.issues.contains { $0.code == .sharedSceneRisk })
+        XCTAssertTrue(workflow.castingPlanNeedsSeparateConfirmation)
+        XCTAssertEqual(workflow.primaryActionTitle(.confirmCastAndVoices, for: try XCTUnwrap(workflow.selectedBook).id), "查看配声方案")
+        XCTAssertTrue(workflow.voiceBindings.isEmpty, "一键允许配角共享不等于确认同章撞音")
+        XCTAssertEqual(renderer.leadRequestCount, 0)
+        XCTAssertEqual(renderer.fragmentRequestCount, 0)
+
+        await workflow.applyPendingCastingPlan(acknowledgedIssueIDs: plan.requiredAcknowledgements)
+        XCTAssertNil(workflow.pendingCastingPlan)
+        XCTAssertFalse(workflow.castingPlanNeedsSeparateConfirmation)
+        XCTAssertTrue(workflow.isAuditionConfirmedForSelectedBook, "集中确认后应完成配声准备，无需再点人物确认")
+        XCTAssertEqual(workflow.selectedBook?.productionState, .idle)
+        XCTAssertEqual(renderer.fragmentRequestCount, 0)
+    }
+
+    func testOneClickShowsProgressAndRejectsDuplicatePreparation() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let renderer = WorkflowFakeRenderer(), counter = WorkCounter()
+        let (workflow, _) = makeWorkflow(renderer: renderer, store: store)
+        _ = try await importBook(into: workflow, fileName: "casting-progress.txt", text: "第一章\n海风吹来。")
+        let gate = WorkflowRendererGate()
+        renderer.beforeCapabilityFetch = {
+            _ = counter.increment()
+            await gate.suspend()
+        }
+        let preparation = Task { await workflow.autoAssignRecommendedVoices(consentsToSharedMinorVoices: true) }
+        await waitForRenderSuspension(gate)
+
+        XCTAssertTrue(workflow.isAssigningRecommendedVoices)
+        XCTAssertEqual(workflow.primaryActionTitle(.confirmCastAndVoices, for: try XCTUnwrap(workflow.selectedBook).id), "正在准备配声…")
+        XCTAssertTrue(workflow.castingPreparationProgressText?.contains("1/4") == true)
+        await workflow.autoAssignRecommendedVoices(consentsToSharedMinorVoices: true)
+        XCTAssertEqual(counter.count, 1, "重复点击不能开始第二次准备")
+
+        preparation.cancel()
+        renderer.beforeCapabilityFetch = nil
+        await gate.resume()
+        await preparation.value
+        XCTAssertFalse(workflow.isAssigningRecommendedVoices)
+        XCTAssertNil(workflow.castingPreparationProgressText)
+        XCTAssertTrue(workflow.voiceBindings.isEmpty)
+        XCTAssertEqual(renderer.fragmentRequestCount, 0)
+    }
+
+    func testSwitchingBooksDuringOneClickDoesNotApplyOrReplaceCurrentProjection() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let renderer = WorkflowFakeRenderer()
+        let (workflow, _) = makeWorkflow(renderer: renderer, store: store)
+        let first = try await importBook(into: workflow, fileName: "casting-first.txt", text: "第一章\n甲书正文。")
+        let second = try await importBook(into: workflow, fileName: "casting-second.txt", text: "第一章\n乙书正文。")
+        await workflow.openBook(first.bookID)
+        let gate = WorkflowRendererGate()
+        renderer.beforeCapabilityFetch = { await gate.suspend() }
+        let preparation = Task { await workflow.autoAssignRecommendedVoices(consentsToSharedMinorVoices: true) }
+        await waitForRenderSuspension(gate)
+
+        renderer.beforeCapabilityFetch = nil
+        await workflow.openBook(second.bookID)
+        let previousBanner = workflow.bannerMessage
+        await gate.resume()
+        await preparation.value
+
+        XCTAssertEqual(workflow.selectedBook?.id, second.bookID)
+        XCTAssertTrue(workflow.voiceBindings.isEmpty)
+        XCTAssertTrue(workflow.pendingCastingPlan == nil)
+        XCTAssertNil(workflow.errorMessage)
+        XCTAssertEqual(workflow.bannerMessage, previousBanner)
+        let originalBindings = try await store.voiceBindings(for: first.bookID)
+        XCTAssertTrue(originalBindings.isEmpty)
+    }
+
     func testAC13_to_AC15_SilentRoleFoldingDefaultScopeAndLegacyOneClickAutoCast() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
         let renderer = WorkflowFakeRenderer()
@@ -2349,8 +3194,13 @@ final class AudiobookWorkflowTests: XCTestCase {
         // AC-1.5: Legacy unstratified book is automatically healed and one-click autoAssignRecommendedVoices() succeeds immediately
         _ = await workflow.ensureSixArchetypeVoicesForBook(for: bookID, quietBanner: true)
         _ = await workflow.refreshAvailableVoices()
-        await workflow.autoAssignRecommendedVoices(for: bookID)
+        await workflow.autoAssignRecommendedVoices(for: bookID, consentsToSharedMinorVoices: true)
         XCTAssertNil(workflow.errorMessage, "AC-1.5: 一键智能配声不应因历史全员核心角色而报独立音色不足")
+        if let plan = workflow.pendingCastingPlan {
+            XCTAssertTrue(plan.isApplicable, "容量不足时可共享，不应卡在独占门禁")
+            XCTAssertTrue(plan.issues.contains { $0.code == .sharedSceneRisk }, "同章撞音仍应集中确认")
+            await workflow.applyPendingCastingPlan(acknowledgedIssueIDs: plan.requiredAcknowledgements)
+        }
         XCTAssertNil(workflow.pendingCastingPlan, "AC-1.5: 无阻断冲突的智能配声应直接生效，不卡在二次确认弹窗")
         XCTAssertGreaterThanOrEqual(workflow.voiceBindings.count, 8, "AC-1.5: 所有有台词角色均已自动绑定音色")
     }
