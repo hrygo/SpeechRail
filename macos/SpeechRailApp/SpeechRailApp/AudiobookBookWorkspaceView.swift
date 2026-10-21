@@ -2826,7 +2826,7 @@ private struct AudiobookChapterEditingSheet: View {
     private enum Field { case title, body }
 
     private var hasChanges: Bool {
-        workflow.chapterEditTitle != draft.title || workflow.chapterEditBody != draft.body
+        draft.hasChanges(title: workflow.chapterEditTitle, body: workflow.chapterEditBody)
     }
 
     var body: some View {

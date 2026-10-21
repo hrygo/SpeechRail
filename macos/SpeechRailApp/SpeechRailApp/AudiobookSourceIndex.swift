@@ -1075,6 +1075,17 @@ public struct AudiobookChapterEditDraft: Identifiable, Equatable, Sendable {
     public let layoutDigest: String
     public let title: String
     public let body: String
+
+    /// String equality is canonically equivalent; persisted text identity is byte-exact.
+    public func hasChanges(title: String, body: String) -> Bool {
+        !self.title.utf8.elementsEqual(title.utf8) || !self.body.utf8.elementsEqual(body.utf8)
+    }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.bookID == rhs.bookID && lhs.sourceID == rhs.sourceID && lhs.sourceSHA256 == rhs.sourceSHA256
+            && lhs.chapterID == rhs.chapterID && lhs.layoutDigest == rhs.layoutDigest
+            && !lhs.hasChanges(title: rhs.title, body: rhs.body)
+    }
 }
 
 public struct AudiobookChapterEditResult: Equatable, Sendable {
@@ -1170,7 +1181,8 @@ public enum AudiobookChapterTextEditing {
                   span.referenceRange.lowerBound >= referenceEnd,
                   span.isUserEdited != true || span.isGenerated else { throw AudiobookStoreError.workingSourceChanged }
             if !span.isGenerated {
-                guard try working.text(in: span.workingRange) == reference.text(in: span.referenceRange) else {
+                guard working.utf8Data[Int(span.workingRange.lowerBound)..<Int(span.workingRange.upperBound)]
+                    == reference.utf8Data[Int(span.referenceRange.lowerBound)..<Int(span.referenceRange.upperBound)] else {
                     throw AudiobookStoreError.workingSourceChanged
                 }
             }

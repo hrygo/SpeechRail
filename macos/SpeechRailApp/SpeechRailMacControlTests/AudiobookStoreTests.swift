@@ -16,6 +16,7 @@ final class AudiobookStoreTests: XCTestCase {
         let draft = try await store.chapterEditDraft(bookID: id, chapterID: preview.chapters[0].id)
         let decomposed = "cafe\u{0301}"
         XCTAssertEqual(draft.body, decomposed, "Swift string equality uses canonical equivalence")
+        XCTAssertTrue(draft.hasChanges(title: draft.title, body: decomposed), "Closing the editor must warn for byte-only changes")
         let result = try await store.saveChapterEdit(draft, title: draft.title, body: decomposed)
         XCTAssertNotEqual(result.sourceID, draft.sourceID)
         let source = try await store.workingSourceSnapshot(bookID: id)
@@ -23,9 +24,13 @@ final class AudiobookStoreTests: XCTestCase {
         let fresh = try await store.chapterEditDraft(bookID: id, chapterID: result.chapterID)
         _ = try await store.saveChapterEdit(fresh, title: "café", body: fresh.body)
         let named = try await store.chapterEditDraft(bookID: id, chapterID: result.chapterID)
+        XCTAssertTrue(named.hasChanges(title: decomposed, body: named.body))
         _ = try await store.saveChapterEdit(named, title: decomposed, body: named.body)
         let renamed = try await store.chapterEditDraft(bookID: id, chapterID: result.chapterID)
         XCTAssertEqual(Data(renamed.title.utf8), Data(decomposed.utf8))
+        XCTAssertFalse(renamed.hasChanges(title: renamed.title, body: renamed.body))
+        do { try await store.renameChapter(bookID: id, chapterID: result.chapterID, title: "旧窗口", expectedTitle: named.title); XCTFail("Byte-different stale title accepted") }
+        catch { XCTAssertEqual(error as? AudiobookChapterTextEditError, .staleDraft) }
     }
 
     func testChapterEditPersistsUserTextAndKeepsReferenceAndPriorRevision() async throws {

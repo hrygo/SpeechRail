@@ -1,6 +1,6 @@
 # 有声书分析前章节编辑设计
 
-日期：2026-10-21。状态：用户已确认，已实施，定向验证通过；独立代码审查中。
+日期：2026-10-21。状态：用户已确认，已实施，定向验证通过，独立审查问题已修复。
 
 ## 目标与范围
 
@@ -93,8 +93,12 @@ UI 禁用只是提示。Store 保存必须在事务内再次检查条件与预�
 
 ## 实施验证记录（2026-10-21）
 
-- SwiftPM 定向回归：`swift test --package-path macos/SpeechRailApp --filter 'Audiobook(SourceTests|StoreTests|WorkflowTests|AnalysisTests|ProductionTests|PronunciationTests)'`，191 项 XCTest，0 失败，包含 9 项新增章节编辑/消费者用例。
+- SwiftPM 定向回归：`swift test --package-path macos/SpeechRailApp --filter 'Audiobook(SourceTests|StoreTests|WorkflowTests|AnalysisTests|ProductionTests|PronunciationTests)'`，193 项 XCTest，0 失败，包含 11 项新增章节编辑/消费者用例。
 - App 编译：`scripts/macos_app_build.sh`，`BUILD SUCCEEDED`。包装脚本使用临时构建产物并处理 LaunchServices 登记；没有安装或启动 App。
 - 确认新增接口缺失时测试失败；实现后测试通过。选择互斥回归曾发现 `@Observable` 属性观察器回写导致的递归，已通过赋值前守卫修复，同一用例现已通过。
 - 假分析请求读取保存后的正文；假 TTS 初次制作与单段重录读取新工作修订，发音规则命中新正文。Unicode、重复编辑、目录排除、跳过标记、过期版本、磁盘失败、取消以及历史音频保护均有定向覆盖。
-- 没有执行真实模型质量/性能测量、桌面 UI 自动化或人工交互验收，没有发布、安装或迁移真实作品。分支未提交/推送，原始工作区的其他改动未变更。
+- 没有执行真实模型质量/性能测量、桌面 UI 自动化或人工交互验收，没有发布、安装或迁移真实作品。未改动原始工作区中的其他内容。
+
+- 独立审查发现规范等价 Unicode 的字符串比较会漏判修改。NFC/NFD 保存与逐字映射的两项回归在修复前出现 4 个断言失败；改为 UTF-8 字节比较后通过。编辑面板的脏判断、正文/标题保存与标题冲突判断使用相同的字节身份语义。
+
+- 验证覆盖包含 Unicode 修复的完整工作树；PR #402 的 CI 结果以其最新提交检查为准。主体提交 `895745d5` 的早期快照包含上述回归测试，但尚未包含最后的字节身份修复，不能代替完整实现的验证结果。

@@ -861,10 +861,10 @@ public actor AudiobookProjectStore {
         guard try chapterEditDraft(bookID: draft.bookID, chapterID: draft.chapterID) == draft else {
             throw AudiobookChapterTextEditError.staleDraft
         }
-        if body == draft.body {
+        if body.utf8.elementsEqual(draft.body.utf8) {
             try inTransaction {
                 _ = try validateChapterDraft(draft)
-                if normalizedTitle != draft.title {
+                if !normalizedTitle.utf8.elementsEqual(draft.title.utf8) {
                     try executePrepared("UPDATE chapters SET title = ? WHERE book_id = ? AND id = ? AND source_id = ?;",
                         [.text(normalizedTitle), .text(draft.bookID.uuidString), .text(draft.chapterID.uuidString), .text(draft.sourceID.uuidString)])
                     try executePrepared("UPDATE books SET updated_at = ? WHERE id = ?;", [.real(Date().timeIntervalSince1970), .text(draft.bookID.uuidString)])
@@ -1062,9 +1062,11 @@ public actor AudiobookProjectStore {
             guard try fetchBook(id: bookID) != nil else {
                 throw AudiobookStoreError.bookNotFound(bookID)
             }
-            if let expectedTitle,
-               try fetchChapters(bookID: bookID).first(where: { $0.id == chapterID })?.title != expectedTitle {
-                throw AudiobookChapterTextEditError.staleDraft
+            if let expectedTitle {
+                guard let currentTitle = try fetchChapters(bookID: bookID).first(where: { $0.id == chapterID })?.title,
+                      currentTitle.utf8.elementsEqual(expectedTitle.utf8) else {
+                    throw AudiobookChapterTextEditError.staleDraft
+                }
             }
             guard try countRows(
                 "SELECT COUNT(*) FROM chapters WHERE book_id = ? AND source_id = (SELECT source_id FROM books WHERE id = chapters.book_id) AND id = ?;",
