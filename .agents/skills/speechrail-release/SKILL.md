@@ -58,12 +58,15 @@ description: >-
 |---|---|
 | PATCH | bug、安全、稳定性或性能修复，不增加公共能力 |
 | MINOR | 新增兼容 API 或能力；默认行为变化仍须核对公共契约 |
-| MAJOR | 有意改变公共契约；当前项目不为旧数据或旧协议自动保留迁移层 |
+| MAJOR | 有意破坏公共契约；同步契约、相关测试和用户文档，说明影响与回退 |
+
+协议兼容与持久化数据分别判断：不默认保留旧协议 alias 或兼容层；用户数据与持久化格式的破坏性变更
+仍须明确授权，并事先验证迁移及恢复方式，不能以 MAJOR 版本代替数据处理授权。
 
 证据不足时列出待确认的公共影响，不仅凭不确定性提高版本；纯文档通常不单独发版。明确 `service-only`、`app-only` 或 `combined`，不要因
 “配套”扩大已明确的单项 scope；“从制品安装”按本项目约定默认 combined，见下方制品入口。
 
-版本材料按字段核对：
+版本材料以 `scripts/check_version_consistency.py` 的当前校验集合为准，按字段核对：
 
 `pyproject.toml`、`src/speechrail/__init__.py`、`src/speechrail/config/__init__.py`、
 `contracts/openapi.yaml`、`configs/speechrail.example.env`、`configs/speechrail.example.yaml`、
@@ -108,9 +111,10 @@ uv build --no-sources --wheel
 # 平台标签由 hatch_build.py 钉在项目的 macOS 基线上，不随构建主机变化：
 # 同一 commit 在 CI 与较新的 Mac 上必须打出同一个文件名，否则本地安装检查
 # 就不再等价于用户真正下载的那份 wheel。
-WHEEL=$(ls -t dist/speechrail-<version>-*.whl | head -1)
+WHEEL="<本次构建输出的精确 wheel 路径>"
 python3 -m zipfile -l "$WHEEL"
 shasum -a 256 "$WHEEL"
+# 独立安装入口检查在仓库外执行；WHEEL 使用绝对路径。
 uvx --python 3.14.7 --from "$WHEEL" speechrail install --help
 ```
 
@@ -118,15 +122,9 @@ uvx --python 3.14.7 --from "$WHEEL" speechrail install --help
 模块、assets 和版本，并确认 wheel 能独立提供安装入口（`speechrail install --help` 在仓库外成功执行，
 macOS 打包阶段的 CI 也执行同一步）；`dist/`、模型、音频、日志和原始 benchmark 不提交 Git。
 
-**`check_version_consistency.py` 必须在 `uv build` 之前跑**，它以 `pyproject.toml` 为唯一事实来源校验
-全部镜像位置（`src/speechrail/__init__.py`、`src/speechrail/config/__init__.py`、`contracts/openapi.yaml`、
-两个 example 配置、三个测试 fixture、`uv.lock`、以及 App 的三处 `MARKETING_VERSION`）。第 6 节在打 tag
-前还会再跑一次，但那太晚：漏 bump 的镜像会让 wheel 里的 `Settings.version` 停在旧值，安装后
-`/health` 自报旧版本而代码是新的，构建、安装和 `/readyz` 全都显示成功，只有比对版本才发现。
-漏掉的那一处通常是硬编码默认值的 `src/speechrail/config/__init__.py`——它不是 `__version__`，
-按 `__version__` 搜索很容易跳过。现在 `pytest` 也会检查真实仓库树
-（`tests/test_version_consistency.py::test_repository_tree_version_is_consistent`），
-所以这一步即使整个命令块没跑，`pytest` 也会拦下。
+**构建 wheel 前运行 `check_version_consistency.py`**，不受完整代码门是否获授权影响；尤其核对
+`Settings.version` 与包版本一致，避免新制品的 `/health` 自报旧版本。该源码快照已有成功校验且相关材料
+未变时可复用；打 tag 前也按同一原则核验，无需仅因进入下一阶段重复执行。
 
 ## GitHub 制品安装（默认全套）
 
@@ -154,7 +152,8 @@ macOS 打包阶段的 CI 也执行同一步）；`dist/`、模型、音频、日
    做 staging、preflight 和原子切换；不直接编排内部 Python 安装函数。失败时恢复旧
    `runtime/current`/selection，不删除旧 release、模型、配置或日志。
 4. 用新 managed runtime 通过 controller start；等待真实 ready，核对 profile/model/voice identity 和
-   必要公共 smoke。任何 PID、身份、lock 或 listener 不一致都 fail closed，不循环 restart。
+   已获授权的公共 smoke。事务内置探针在执行前确认属于请求范围，不能绕过或额外扩展探针。
+   任何 PID、身份、lock 或 listener 不一致都 fail closed，不循环 restart。
 
 生命周期遵守共享 operator contract：默认最多等待 `2 秒`；仅在重新核对身份后允许对精确进程组发送
 `SIGKILL`，并在强杀后最多等待 `10 秒` 确认 lock 释放。
@@ -199,10 +198,11 @@ App-only 用户自行验收走上面的快路径；combined 先完成服务安�
 
 ## 5. 运行验收、benchmark 与回滚
 
-服务验收必须同时满足：PID/executable 来自 `runtime/current/.venv/bin/python`、8201 只有一个 listener、
-`/health`/`/readyz`/`/v1/models`/`/v1/voices` identity 与 selection 一致、必要的真实 ASR/TTS smoke 返回
-非空结果和 request ID，且外部 realtime session/active requests 为零。只看到进程、plist、配置或 `/health`
-200 不算发布成功。
+服务安装验证核对：PID/executable 对应已确认的 managed runtime、实际配置端口只有一个 listener、
+`/health`/`/readyz`/`/v1/models`/`/v1/voices` identity 与 selection 一致。外部 realtime session/active
+requests 清零是停服和切换的前置条件；服务恢复后的正常客户端重连不单独构成安装失败。
+请求覆盖真实 ASR/TTS smoke 时，再核对非空结果和 request ID；未覆盖时明确列为未验证，
+不声称真实推理或完整发布验收通过。只看到进程、plist、配置或 `/health` 200 不算安装验证完成。
 
 只有明确要求性能或质量基准时才读取 [speechrail-perf-benchmark](../speechrail-perf-benchmark/SKILL.md)，不要在 release skill
 中重复基准模板。服务回滚读取 local-deploy 的 rollback/controller 规则；App-only 失败只恢复上一份已验证

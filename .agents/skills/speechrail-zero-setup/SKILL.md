@@ -14,12 +14,16 @@ wheel/App 发布或已有 App 整理读 [speechrail-release](../speechrail-relea
 
 ## 前置条件
 
-- 按仓库 `AGENTS.md` 核对 Apple Silicon、macOS 26+ 与 Python 3.14.7 基线；Python 由 `uv` 提供隔离运行时，不修改系统 Python。
+- 按仓库 `AGENTS.md` 读取本机环境事实源，核对 Apple Silicon、macOS 26+ 与
+  `pyproject.toml` 的 Python `>=3.14,<3.15` 约束。当前 bootstrap 固定准备 Python 3.14.7，
+  这是安装器选择的 patch 版本；Python 由 `uv` 提供隔离运行时，不修改系统 Python。
   任何脚本中的较低版本检查都不构成当前项目基线的放行条件。
 - 依据目标 profile 的锁定制品、vendor runtime、wheel staging 与回退空间估算磁盘需求；脚本最小空间检查
   只是预检，不是完整容量保证。确认可访问所需锁定下载源。
 - 规格推荐以代码中的 `recommend_selection()` 为内存兜底建议；ASR 与 TTS 两项规格独立选择（`--asr-spec` / `--tts-spec`），无法读取物理内存时停止自动推荐并要求用户显式指定。
 - 安装前确认脚本解析到包含 `pyproject.toml` 的项目根目录；不得从未知目录继续执行。
+- 先确认首装范围覆盖依赖准备、模型下载、服务注册与启动和内置探针；只准备或只诊断时不调用完整入口。
+  bootstrap 还可能写入 `~/.zprofile` 的 Homebrew 初始化行；执行前核对该副作用是否在请求范围内。
 
 ## 首选入口
 
@@ -75,7 +79,7 @@ app home 持续增长。因此磁盘预算还需考虑 release 累积，不能�
 
 ## 完成条件
 
-- 架构、系统版本、磁盘和 Python 3.14.7 检查通过；任何回退假设都已披露。
+- 架构、系统版本、磁盘和实际 Python 3.14.x 检查通过，并记录安装器选用的 patch 版本；任何回退假设都已披露。
 - 本次 wheel 的 metadata 版本与项目一致，SHA-256 已记录。
 - managed runtime preflight 通过，只有一个目标 listener，PID/executable、profile 和 selection 一致。
 - `/health`、`/readyz`、`/v1/models`、`/v1/voices` 以及真实 TTS→ASR smoke 通过。本次供给分人资产时额外要求 `diarization_ready=true`、`/v1/models` 包含 `gpt-4o-transcribe-diarize`，且匿名分人 smoke 返回有效 `segments` 数组；未供给时应报告分人未配置且 `/v1/models` 不含该别名。
