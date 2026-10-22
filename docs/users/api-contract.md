@@ -2,8 +2,8 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.19.0"
-date: 2026-10-19
+version: "3.19.1"
+date: 2026-10-22
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -1063,6 +1063,15 @@ seed 为 0..2^32−1 的整数，默认 42。当前仅支持 `language=zh`，不
 服务重新转写已保存的规范参考，并要求与（可选编辑的）`reference_text` 相似度达标、
 归一化后的数字完全一致；数字错误返回 `400 transcript_mismatch`，不改变候选或其音频。
 等价口语数字可正常通过。
+确认拒绝时，`error.reference_comparison` 提供本次比对的 `candidate_revision`、
+`match_score`、`required_score`（0.92）、`numbers_match`、`differences` 和 `truncated`。
+差异按繁简体、数字与标点归一化后的文本比较，最多 24 项，每侧最多 24 字符；
+`expected` 是文案片段，`recognized` 是识别片段，空字符串表示该侧没有对应文字。
+这些内容只用于本机恢复界面，不得写入日志；识别差异不证明音频一定读错，需结合试听判断。
+重新校验复用当前候选音频；修改文案后重新生成须使用新的候选、目标音色 ID 和幂等键，
+被替代的候选先标记为取消，音频与证据遵循候选存储的现有保留规则；
+取消失败时不创建替代候选，恢复操作可重试。
+新候选须重新完成确认与配音效果检查，不沿用原有验收结果。
 编辑参考文本会产生新的 candidate revision 并清除旧验证，不能复用旧证据。
 
 ### 3. Base 复验、人工听审与自动接受 (`POST /v1/voice-designs/{candidate_id}/validate`)

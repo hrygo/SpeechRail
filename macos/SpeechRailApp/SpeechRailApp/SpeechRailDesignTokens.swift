@@ -132,6 +132,8 @@ public enum SpeechRailDesignTokens {
         /// 与其他窗口尺寸一样集中在此，页面不得再写裸值。
         public static let creatorDubbingSheetWidth: CGFloat = 720
         public static let creatorDubbingSheetHeight: CGFloat = 620
+        /// 音色保存恢复：正文与差异滚动，底部动作固定。
+        public static let creatorVoiceRecoverySheetHeight: CGFloat = 620
         /// 当前语速取值的定宽槽（`1.0x`），避免数字位数变化时整行左右跳。
         ///
         /// 4x 帧实测：稿的 `speedRow/value` 就是这串文字的**自然宽度**——字串

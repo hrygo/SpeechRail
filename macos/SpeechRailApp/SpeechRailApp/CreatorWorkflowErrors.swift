@@ -5,6 +5,9 @@ import SpeechRailControlKit
 enum CreatorWorkflowErrors {
 
     static func message(for error: Error) -> String {
+        if let error = error as? VoiceDesignReferenceMismatch {
+            return error.errorDescription ?? "音频与参考文案不一致，请试听并查看差异。"
+        }
         if let error = error as? CreatorCapabilityUnavailableError {
             return error.errorDescription ?? "当前连接未提供这项创作能力。"
         }
@@ -94,7 +97,7 @@ enum CreatorWorkflowErrors {
             case "voice_validation_runtime_unavailable":
                 return "语音服务尚未就绪，无法确认音色当前可用性；请先检查服务状态"
             case "transcript_mismatch":
-                return "生成音频与参考文案未能匹配，请调整参考文案后重试"
+                return "音频与参考文案不一致。可先试听，再重新校验或修改文案重新生成。"
             case "transcription_unavailable":
                 return "本地语音识别校验暂不可用，请检查服务状态后重试"
             case "output_invalid":

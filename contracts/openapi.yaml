@@ -4622,6 +4622,43 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/DiarizedTranscriptSegment'
+    VoiceDesignReferenceComparison:
+      type: object
+      additionalProperties: false
+      description: >-
+        Local recovery details from the current failed candidate confirmation.
+        Differences use normalized text (Traditional Chinese and ordinary punctuation
+        folded), contain no full reference or transcript fields, and must not be logged.
+      required: [candidate_revision, match_score, required_score, numbers_match, differences, truncated]
+      properties:
+        candidate_revision:
+          type: string
+          pattern: '^vr_[0-9a-f]{32}$'
+        match_score:
+          type: number
+          minimum: 0
+          maximum: 1
+        required_score:
+          type: number
+          const: 0.92
+        numbers_match:
+          type: boolean
+        differences:
+          type: array
+          maxItems: 24
+          items:
+            type: object
+            additionalProperties: false
+            required: [expected, recognized]
+            properties:
+              expected:
+                type: string
+                maxLength: 24
+              recognized:
+                type: string
+                maxLength: 24
+        truncated:
+          type: boolean
     ErrorBody:
       type: object
       required: [error]
@@ -4650,6 +4687,9 @@ components:
           description: Safe backend diagnostic class; raw exception details are never returned.
         worker:
           $ref: '#/components/schemas/TtsWorkerDiagnostics'
+        reference_comparison:
+          description: Present only on voice-design confirmation transcript_mismatch; candidate remains unchanged.
+          $ref: '#/components/schemas/VoiceDesignReferenceComparison'
   responses:
     BadRequest:
       description: Invalid request
