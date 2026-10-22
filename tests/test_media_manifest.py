@@ -100,6 +100,54 @@ def _manifest_payload(
     }
 
 
+@pytest.mark.parametrize(
+    "book_directory",
+    ["AABBCCDD-EEFF-4012-8123-ABCDEF123456", "AABBCCDD-eeff-4012-8123-abcdef123456"],
+)
+@pytest.mark.parametrize("with_cover", [False, True])
+def test_manifest_accepts_swift_uuid_case_without_rewriting_asset_paths(
+    tmp_path: Path, book_directory: str, with_cover: bool
+) -> None:
+    app_home = tmp_path / "app_home"
+    book_id = UUID(book_directory)
+    request_id = uuid4()
+    candidate_id = str(uuid4()).upper()
+    relative = f"books/{book_directory}/audio/{candidate_id}.wav"
+    audio = app_home / "audiobooks" / relative
+    audio.parent.mkdir(parents=True)
+    wav = _make_wav_bytes()
+    audio.write_bytes(wav)
+    payload = _manifest_payload(
+        request_id=request_id,
+        book_id=book_id,
+        candidate_id=candidate_id,
+        fragment_path=relative,
+        fragment_sha=hashlib.sha256(wav).hexdigest(),
+        schema_version="audiobook_media_export_v2" if with_cover else "audiobook_media_export_v1",
+    )
+    payload["book_id"] = str(book_id).upper()
+    if with_cover:
+        cover_relative = f"books/{book_directory}/cover/cover.png"
+        cover = app_home / "audiobooks" / cover_relative
+        cover.parent.mkdir()
+        cover_bytes = b"\x89PNG\r\n\x1a\n" + b"fixture-cover"
+        cover.write_bytes(cover_bytes)
+        payload["cover"] = {
+            "relative_path": cover_relative,
+            "image_sha256": hashlib.sha256(cover_bytes).hexdigest(),
+        }
+    _write_manifest(app_home, str(request_id), payload)
+
+    loaded = load_manifest(app_home, request_id)
+
+    assert loaded.book_id == book_id
+    assert loaded.chapters[0].fragments[0].relative_path == relative
+    assert audio.read_bytes() == wav
+    if with_cover:
+        assert loaded.cover is not None
+        assert loaded.cover.relative_path == cover_relative
+
+
 def test_manifest_rejects_traversal_symlink_and_unowned_inputs(tmp_path: Path) -> None:
     app_home = tmp_path / "app_home"
     book_id = uuid4()

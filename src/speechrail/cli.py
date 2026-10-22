@@ -1681,14 +1681,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ServiceError("unknown command")
     except (ServiceError, RuntimeError, ValueError) as exc:
         if getattr(args, "json", False):
-            _print_machine(
-                {
-                    "command": _machine_command(args),
-                    "error_code": _machine_error_code(exc),
-                    "message": _machine_message(exc),
-                    "status": "failed",
-                }
-            )
+            payload = {
+                "command": _machine_command(args),
+                "error_code": _machine_error_code(exc),
+                "message": _machine_message(exc),
+                "status": "failed",
+            }
+            if payload["command"] == "media.export":
+                payload["event"] = "result"
+            _print_machine(payload)
             return 1
         prefix = "SpeechRail service" if args.command == "service" else "SpeechRail"
         print(f"{prefix}: {exc}", file=sys.stderr)
