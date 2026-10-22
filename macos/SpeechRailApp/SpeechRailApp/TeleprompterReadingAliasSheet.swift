@@ -16,6 +16,7 @@ public struct TeleprompterReadingAliasSheet: View {
     @State private var displayTermInput: String = ""
     @State private var spokenTextInput: String = ""
     @State private var message: TeleprompterReadingAliasMessage?
+    @State private var noticeID = UUID()
 
     public init(session: TeleprompterSession) {
         self.session = session
@@ -40,6 +41,16 @@ public struct TeleprompterReadingAliasSheet: View {
             idealHeight: SpeechRailDesignTokens.Teleprompter.readingAliasSheetHeight,
             maxHeight: SpeechRailDesignTokens.Teleprompter.readingAliasSheetMaximumHeight
         )
+        .operationFeedback([
+            OperationFeedback(
+                message?.text,
+                tone: message?.tone ?? .critical,
+                title: message?.isSuccess == true ? "读法已登记" : "操作未完成",
+                id: noticeID.uuidString,
+                autoDismiss: message?.isSuccess == true,
+                onDismiss: { message = nil }
+            )
+        ])
         .onAppear {
             if selectedSegmentID == nil {
                 selectedSegmentID = session.currentSegment?.id
@@ -185,6 +196,7 @@ public struct TeleprompterReadingAliasSheet: View {
                     segmentID: segment.id,
                     displayRange: reading.displayRange
                 )
+                noticeID = UUID()
                 if let rejection {
                     message = .init(rejection: rejection)
                 } else {
@@ -246,9 +258,6 @@ public struct TeleprompterReadingAliasSheet: View {
             }
 
             HStack {
-                if let message {
-                    TeleprompterReadingAliasMessageView(message: message)
-                }
                 Spacer()
                 Button("添加", action: addReading)
                     .speechRailButton(.primary)
@@ -292,6 +301,7 @@ public struct TeleprompterReadingAliasSheet: View {
     }
 
     private func addReading() {
+        noticeID = UUID()
         guard let segment = selectedSegment else { return }
         let rejection = session.confirmReading(
             segmentID: segment.id,
@@ -352,22 +362,15 @@ private enum TeleprompterReadingAliasMessage: Equatable {
         }
     }
 
+    var isSuccess: Bool {
+        if case .added = self { return true }
+        return false
+    }
+
     var tone: StatusTone {
         switch self {
         case .added: .healthy
         case .rejection: .attention
         }
-    }
-}
-
-private struct TeleprompterReadingAliasMessageView: View {
-    let message: TeleprompterReadingAliasMessage
-
-    var body: some View {
-        Text(message.text)
-            .font(SpeechRailDesignTokens.Typography.caption)
-            .foregroundStyle(message.tone.color)
-            .fixedSize(horizontal: false, vertical: true)
-            .accessibilityLabel(message.text)
     }
 }

@@ -3,18 +3,15 @@ import SpeechRailControlKit
 import SwiftUI
 
 public struct PreflightDiagnosticsView: View {
-    /// 复制回执在页脚停留的时长。
-    private static let reportReceiptDuration: Duration = .seconds(4)
-
     @Environment(AppModel.self) private var model
     @Environment(AppNavigationState.self) private var navigation
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// 开发者详情是全 App 的一个偏好（View ▸ 显示/隐藏开发者详情 ⌘⌥I），
     /// 页内由 `DeveloperInspectorToggle` 与面板同处可开合。
     @AppStorage("speechrail.showDeveloperDetails") private var showInspector = false
     @State private var selectedCheckName: String?
     @State private var reportMessage: String?
     @State private var reportCopySucceeded = true
+    @State private var reportNoticeID = UUID()
     @State private var showsPassingChecks = false
     @AppStorage("speechrail.diagnostics.includeServiceContext") private var includeServiceContext = true
 
@@ -43,6 +40,14 @@ public struct PreflightDiagnosticsView: View {
                 )
             }
         }
+        .operationFeedback([
+            OperationFeedback(model.preflightMessage.map(SpeechRailOperationMessagePresentation.text),
+                              title: "诊断未完成"),
+            OperationFeedback(reportMessage, tone: reportCopySucceeded ? .healthy : .critical,
+                              title: reportCopySucceeded ? "已复制诊断报告" : "复制未完成",
+                              id: reportNoticeID.uuidString, autoDismiss: reportCopySucceeded,
+                              onDismiss: { reportMessage = nil })
+        ])
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 // 重新运行诊断是这一页的主动作，它留在正文的结论面板旁；
@@ -199,9 +204,8 @@ public struct PreflightDiagnosticsView: View {
                 Button {
                     copyDiagnosticReport()
                 } label: {
-                    // 复制回执留在这个动作自己身上：设计稿的页脚只有「一句事实 + 一个动作」，
-                    // 回执不能另起一条横贯页面的提示带。
-                    Label(copyReportTitle, systemImage: copyReportIcon)
+                    // 动作保持固定位置，操作回执由页面浮层呈现。
+                    Label("复制诊断报告", systemImage: "doc.on.clipboard")
                 }
                 .speechRailButton(.secondary)
                 .disabled(model.isRefreshingPreflight || model.preflightChecks.isEmpty)
@@ -264,17 +268,6 @@ public struct PreflightDiagnosticsView: View {
         } else {
             pendingNote
         }
-    }
-
-    /// 页脚动作兼回执：复制成功与失败都在这一个控件上说清楚，图标与文字同时变化，
-    /// 不依赖颜色单独表达（REDESIGN-SPEC §9）。
-    private var copyReportTitle: String {
-        reportMessage ?? "复制诊断报告"
-    }
-
-    private var copyReportIcon: String {
-        guard reportMessage != nil else { return "doc.on.clipboard" }
-        return reportCopySucceeded ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
     }
 
     /// 稿 `listFoot`：上次诊断多久前、一共查了几项 —— 两个本机事实，
@@ -394,13 +387,6 @@ public struct PreflightDiagnosticsView: View {
                     maxWidth: .infinity,
                     minHeight: SpeechRailDesignTokens.Layout.diagnosticsEmptyDetailMinimumHeight
                 )
-            }
-
-            if let message = model.preflightMessage, !message.isEmpty {
-                Text(SpeechRailOperationMessagePresentation.text(message))
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.critical)
-                    .lineLimit(2)
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -733,17 +719,8 @@ public struct PreflightDiagnosticsView: View {
         """
         _ = NSPasteboard.general.clearContents()
         reportCopySucceeded = NSPasteboard.general.setString(report, forType: .string)
-        withAnimation(SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.standardEaseOut, reduceMotion: reduceMotion)) {
-            reportMessage = reportCopySucceeded ? "已复制脱敏诊断报告" : "复制失败，请重试"
-        }
-        // 回执是临时的：几秒后页脚的事实位要还给「上次诊断 … · 共 N 项」。
-        Task {
-            try? await Task.sleep(for: Self.reportReceiptDuration)
-            guard reportMessage != nil else { return }
-            withAnimation(SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.standardEaseOut, reduceMotion: reduceMotion)) {
-                reportMessage = nil
-            }
-        }
+        reportNoticeID = UUID()
+        reportMessage = reportCopySucceeded ? "已复制脱敏诊断报告" : "复制失败，请重试"
     }
 
     /// Settings ▸ 服务 decides whether the report carries the runtime context.

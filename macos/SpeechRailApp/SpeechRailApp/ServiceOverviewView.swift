@@ -9,6 +9,7 @@ public struct ServiceOverviewView: View {
     /// 页内由 `DeveloperInspectorToggle` 与面板同处可开合。
     @AppStorage("speechrail.showDeveloperDetails") private var showInspector = false
     @State private var pendingAction: ControlCommand?
+    @State private var operationNoticeID = UUID()
 
     /// 这张卡所在的页面。用来判断某个缺口的动作是不是已经摆在用户面前。
     private static let thisRoute: AppRoute = .overview
@@ -32,6 +33,10 @@ public struct ServiceOverviewView: View {
                 isPresented: $showInspector,
                 helpText: "查看服务、档位与控制通道的技术事实 (⌘⌥I)"
             )
+        }
+        .operationFeedback([serviceOperationFeedback])
+        .onChange(of: model.serviceOperation) { _, _ in
+            operationNoticeID = UUID()
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -100,6 +105,27 @@ public struct ServiceOverviewView: View {
         }
     }
 
+    private var serviceOperationFeedback: OperationFeedback? {
+        guard let operation = model.serviceOperation else { return nil }
+        switch operation.phase {
+        case .failed:
+            return OperationFeedback(
+                SpeechRailOperationMessagePresentation.text(operation.message ?? "服务命令未完成"),
+                title: "服务操作未完成", id: operationNoticeID.uuidString,
+                actionTitle: "重新读取", action: { Task { await model.refresh() } }
+            )
+        case .completed:
+            return OperationFeedback(
+                SpeechRailOperationMessagePresentation.text(operation.message ?? "服务状态已刷新。"),
+                tone: model.healthMessage == nil ? .healthy : .attention,
+                title: "服务操作已完成", id: operationNoticeID.uuidString,
+                autoDismiss: model.healthMessage == nil
+            )
+        default:
+            return nil
+        }
+    }
+
     @ViewBuilder
     private var statusArea: some View {
         if let operation = model.serviceOperation, operation.phase.isActive {
@@ -157,7 +183,7 @@ public struct ServiceOverviewView: View {
         // (REDESIGN-SPEC §7.5).
         let title: String
         if operationFailed {
-            title = "服务操作未完成"
+            title = "服务状态待确认"
         } else if isReady {
             title = "服务已就绪"
         } else if isUnavailable && healthFailureIsCritical {
@@ -644,9 +670,7 @@ public struct ServiceOverviewView: View {
 
     private var statusMessage: String {
         if let operation = model.serviceOperation, operation.phase == .failed {
-            let detail = operation.message.map(SpeechRailOperationMessagePresentation.text)
-                ?? "服务命令未完成"
-            return "\(detail)。没有把旧的健康快照当作成功结果，请重新读取或打开诊断。"
+            return "当前服务状态尚未重新确认，请重新读取或打开诊断。"
         }
         if profileMismatch,
            let configured = model.profile?.selection,
