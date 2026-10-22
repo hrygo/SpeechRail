@@ -378,9 +378,15 @@ public enum SessionExporter {
 /// 导出走系统保存面板（§6.2 第三条判断：不做自绘下拉里的伪保存）。
 @MainActor
 public enum SessionExportPanel {
-    /// 返回是否真的写了文件；用户取消返回 `false`。
+    private struct WriteFailure: LocalizedError {
+        let fileName: String
+        let reason: String
+        var errorDescription: String? { "没能写入「\(fileName)」。\(reason)" }
+    }
+
+    /// 返回是否真的写了文件；用户取消返回 `false`，写入失败交由宿主呈现。
     @discardableResult
-    public static func write(_ payload: SessionExportPayload, as format: SessionExportFormat) -> Bool {
+    public static func write(_ payload: SessionExportPayload, as format: SessionExportFormat) throws -> Bool {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = SessionExporter.suggestedFileName(payload, as: format)
         panel.canCreateDirectories = true
@@ -391,14 +397,10 @@ public enum SessionExportPanel {
             try text.write(to: url, atomically: true, encoding: .utf8)
             return true
         } catch {
-            // 写失败要说清是哪一步失败：磁盘满、目标只读、文件名非法，处理方式不一样。
-            let alert = NSAlert()
-            alert.alertStyle = .warning
-            alert.messageText = "导出失败"
-            alert.informativeText = "没能写入「\(url.lastPathComponent)」。\(error.localizedDescription)"
-            alert.addButton(withTitle: "好")
-            alert.runModal()
-            return false
+            let reason = error.localizedDescription
+                .replacingOccurrences(of: url.absoluteString, with: url.lastPathComponent)
+                .replacingOccurrences(of: url.path, with: url.lastPathComponent)
+            throw WriteFailure(fileName: url.lastPathComponent, reason: reason)
         }
     }
 }

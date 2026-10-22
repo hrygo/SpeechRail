@@ -238,6 +238,10 @@ public final class CaptionSession {
     public private(set) var isBandVisible = false
     /// 失败过的话这里是给人看的一句；原始错误码不外泄（§9 的脱敏口径）。
     public private(set) var lastFailure: String?
+    /// 导出动作独立于转写状态；界面以浮层呈现，不改变字幕受阻或收尾状态。
+    public private(set) var exportFailure: String?
+
+    public func clearExportFailure() { exportFailure = nil }
 
     #if DEBUG
     /// 离屏渲染工装（`/tmp` 里的 `NSHostingView`）用的**只写展示状态**夹具。
@@ -1475,14 +1479,22 @@ public final class CaptionSession {
 
     /// `导出 SRT…`：走系统保存面板，只读库里的定稿行（§6.2 第三条判断）。
     public func exportSRT() async {
+        exportFailure = nil
         guard let sessionID else { return }
-        guard let record = (try? await coordinator.record(id: sessionID)) ?? nil else { return }
-        let rows = (try? await coordinator.lines(sessionID: sessionID)) ?? []
-        let names = (try? await coordinator.speakerNames(sessionID: sessionID)) ?? [:]
-        SessionExportPanel.write(
-            SessionExportPayload(record: record, lines: rows, speakerNames: names),
-            as: .srt
-        )
+        do {
+            guard let record = try await coordinator.record(id: sessionID) else {
+                exportFailure = "记录不存在，无法导出字幕。"
+                return
+            }
+            let rows = try await coordinator.lines(sessionID: sessionID)
+            let names = try await coordinator.speakerNames(sessionID: sessionID)
+            try SessionExportPanel.write(
+                SessionExportPayload(record: record, lines: rows, speakerNames: names),
+                as: .srt
+            )
+        } catch {
+            exportFailure = "导出失败：\(error.localizedDescription)"
+        }
     }
 
     // MARK: - 小工具

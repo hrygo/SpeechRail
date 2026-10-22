@@ -275,11 +275,6 @@ extension MeetingView {
                         }
                     }
                 }
-                if let adoptConflictNotice {
-                    Text(adoptConflictNotice)
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                }
             }
             .padding(SpeechRailDesignTokens.Spacing.md)
         }

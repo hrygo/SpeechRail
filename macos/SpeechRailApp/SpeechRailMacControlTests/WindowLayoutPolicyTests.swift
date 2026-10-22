@@ -103,3 +103,44 @@ final class WindowLayoutPolicyTests: XCTestCase {
         XCTAssertEqual(AppRoute.allCases.count, 14)
     }
 }
+
+#if !SWIFT_PACKAGE
+import AppKit
+import SwiftUI
+
+@MainActor
+final class OperationFeedbackLayoutTests: XCTestCase {
+    func testFeedbackDoesNotChangeWorkspaceSizeForShortOrLongErrors() {
+        for message in ["导出失败，请重试。", String(repeating: "长错误详情需要可以完整阅读。\n", count: 500)] {
+            let host = NSHostingView(rootView:
+                Text("工作台正文")
+                    .frame(width: 640, height: 480)
+                    .operationFeedback([OperationFeedback(message)])
+            )
+            XCTAssertEqual(host.fittingSize.width, 640, accuracy: 1)
+            XCTAssertEqual(host.fittingSize.height, 480, accuracy: 1)
+        }
+    }
+
+    func testActualFeedbackCardRemainsWithinItsHostBounds() {
+        for size in [CGSize(width: 420, height: 280), CGSize(width: 640, height: 480)] {
+            let message = String(repeating: "完整错误详情不应溢出卡片。\n", count: 500)
+            let host = NSHostingView(rootView: OperationFeedbackCard(
+                feedback: OperationFeedback(message)!, availableSize: size, dismiss: {}
+            ))
+            XCTAssertLessThanOrEqual(host.fittingSize.width, size.width)
+            XCTAssertLessThanOrEqual(host.fittingSize.height, size.height)
+        }
+    }
+
+    func testEmptyFeedbackDoesNotReserveSpaceInSheet() {
+        let host = NSHostingView(rootView:
+            Text("弹窗正文")
+                .frame(width: 420, height: 280)
+                .operationFeedback([OperationFeedback(nil)])
+        )
+        XCTAssertEqual(host.fittingSize.width, 420, accuracy: 1)
+        XCTAssertEqual(host.fittingSize.height, 280, accuracy: 1)
+    }
+}
+#endif
