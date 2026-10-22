@@ -417,7 +417,10 @@ public final class AudiobookWorkflowModel {
     }
     public private(set) var bannerNoticeID = UUID()
     public private(set) var bannerRequiresAction = false
-    public var errorMessage: String?
+    public var errorMessage: String? {
+        didSet { errorNoticeID = UUID() }
+    }
+    public private(set) var errorNoticeID = UUID()
     public private(set) var lastTrashedBookID: UUID?
     public private(set) var lastTrashedBookTitle: String?
     public private(set) var trashUndoMessage: String? {
@@ -3436,6 +3439,7 @@ public final class AudiobookWorkflowModel {
             errorMessage = "请先确认角色与配声，再选择制作范围。"
             return
         }
+        let previousDraft = productionDraft
         isPreparingProduction = true
         defer { isPreparingProduction = false }
         do {
@@ -3448,6 +3452,7 @@ public final class AudiobookWorkflowModel {
             }.map(\.id)
             let draft = try await productionController.previewProduction(bookID: book.id, chapterIDs: ids, intent: intent)
             guard selectedBook?.id == book.id, selectedBook?.sourceID == draft.sourceID,
+                  productionDraft == previousDraft,
                   !isProductionBusy, !isAnalyzing, !isEditingChapterLayout else { return }
             errorMessage = nil
             productionDraft = draft
@@ -3456,6 +3461,14 @@ public final class AudiobookWorkflowModel {
         } catch {
             if selectedBook?.id == book.id { errorMessage = error.localizedDescription }
         }
+    }
+
+    /// Viewing updates keeps the checked chapter scope and never starts a render.
+    public func previewOutdatedAudio(from draft: AudiobookProductionPlan) async {
+        guard productionDraft == draft, draft.intent == .missingOnly, draft.fragments.isEmpty,
+              draft.preservedOutdatedAudioCount > 0,
+              selectedBook?.id == draft.bookID, selectedBook?.sourceID == draft.sourceID else { return }
+        await prepareProduction(intent: .updateOutdated, chapterIDs: draft.chapterIDs)
     }
 
     public func confirmProduction(_ draft: AudiobookProductionPlan) {
