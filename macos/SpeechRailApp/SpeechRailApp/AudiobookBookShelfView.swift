@@ -325,10 +325,10 @@ public struct AudiobookBookShelfView: View {
             workflow.workbenchTab = .preparation
         case .makeConfirmedChapters:
             workflow.workbenchTab = .production
-            workflow.makeConfirmedChapters()
+            await workflow.prepareProduction(intent: .missingOnly)
         case .resumeProduction:
             workflow.workbenchTab = .production
-            await workflow.resumeProduction()
+            await workflow.prepareResumeProduction()
         case .pauseProduction:
             await workflow.pauseProduction()
         case .reviewCandidates:

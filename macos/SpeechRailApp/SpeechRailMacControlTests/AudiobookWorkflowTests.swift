@@ -2217,6 +2217,33 @@ final class AudiobookWorkflowTests: XCTestCase {
         XCTAssertNil(reopenedWorkflow.errorMessage)
     }
 
+    func testMissingAudioPreviewDoesNotRenderUntilConfirmedAndCancelledPreviewIsReadOnly() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, _) = makeWorkflow(store: store)
+        let imported = try await importBook(into: workflow, fileName: "missing-preview.txt", text: "第一章 渡口\n风吹过港口。")
+        try await markBookReadyForProduction(imported.bookID, workflow: workflow, store: store)
+        await workflow.prepareProduction(intent: .missingOnly)
+        let draft = try XCTUnwrap(workflow.productionDraft)
+        XCTAssertFalse(draft.fragments.isEmpty)
+        XCTAssertFalse(workflow.isProducing)
+        let checkpoint = try await store.productionCheckpoint(for: imported.bookID)
+        let candidates = try await store.candidates(for: imported.bookID)
+        XCTAssertNil(checkpoint)
+        XCTAssertTrue(candidates.isEmpty)
+        workflow.productionDraft = nil
+        XCTAssertFalse(workflow.isProducing)
+        await workflow.prepareProduction(intent: .missingOnly)
+        let confirmed = try XCTUnwrap(workflow.productionDraft)
+        workflow.confirmProduction(confirmed)
+        await waitForProductionToFinish(workflow)
+        XCTAssertNil(workflow.errorMessage)
+        let made = try await store.candidates(for: imported.bookID)
+        XCTAssertEqual(made.count, confirmed.fragments.count)
+        await workflow.prepareProduction(intent: .missingOnly)
+        XCTAssertTrue(workflow.productionDraft?.fragments.isEmpty == true)
+        await workflow.shutdown()
+    }
+
     func testCompletedJourneyExcludesSkippedChaptersAndValidatesRegenerationScope() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
         let (workflow, _) = makeWorkflow(store: store)
@@ -2314,7 +2341,9 @@ final class AudiobookWorkflowTests: XCTestCase {
         try await store.savePronunciationBinding(.init(setID: AudiobookPronunciationBinding.makeSetID(bookID: imported.bookID),
             revision: "pr_changed", entries: [.init(id: "wind", surface: "风", spoken: "fēng")]), bookID: imported.bookID)
         await workflow.openBook(imported.bookID)
-        workflow.makeConfirmedChapters()
+        await workflow.prepareProduction(intent: .updateOutdated)
+        let updateDraft = try XCTUnwrap(workflow.productionDraft)
+        workflow.confirmProduction(updateDraft)
         await waitForProductionToFinish(workflow)
         XCTAssertEqual(workflow.selectedBookPrimaryAction?.title, "试听并采用新候选")
         XCTAssertTrue(workflow.bannerRequiresAction)
