@@ -265,6 +265,8 @@ final class AudiobookProductionTests: XCTestCase {
         let savedCheckpoint = try await store.productionCheckpoint(for: bookID)
         let checkpoint = try XCTUnwrap(savedCheckpoint)
         XCTAssertEqual(checkpoint.effectiveRegenerationScope, scope)
+        XCTAssertEqual(checkpoint.productionPlan?.intent, .regenerate)
+        XCTAssertEqual(Set(checkpoint.productionPlan?.fragments.map(\.id) ?? []), targets)
         let encoded = try JSONEncoder().encode(checkpoint)
         let restored = try JSONDecoder().decode(AudiobookProductionCheckpoint.self, from: encoded)
         try await production.start(bookID: bookID, chapterIDs: restored.chapterIDs,
@@ -327,12 +329,213 @@ final class AudiobookProductionTests: XCTestCase {
     }
 
     @MainActor
+    func testMissingOnlyPreservesOutdatedAudioAndDoesNotCreateTask() async throws {
+        let (store, production, renderer, bookID, chapter) = try await makePreparedFixture(editedText: "港口的风吹过窗前。")
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+        let before = try await store.candidates(for: bookID)
+        let revisions = try await store.chapterRevisions(for: bookID, chapterID: chapter.id)
+        let checkpoint = try await store.productionCheckpoint(for: bookID)
+        let count = renderer.requests.count
+        try await store.savePronunciationBinding(.init(setID: AudiobookPronunciationBinding.makeSetID(bookID: bookID),
+            revision: "pr_changed", entries: [.init(id: "wind", surface: "风", spoken: "fēng")]), bookID: bookID)
+        let plan = try await production.previewProduction(bookID: bookID, chapterIDs: [chapter.id], intent: .missingOnly)
+        XCTAssertTrue(plan.fragments.isEmpty)
+        XCTAssertEqual(plan.preservedOutdatedAudioCount, before.count)
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+        let after = try await store.candidates(for: bookID)
+        let checkpointAfter = try await store.productionCheckpoint(for: bookID)
+        let revisionsAfter = try await store.chapterRevisions(for: bookID, chapterID: chapter.id)
+        XCTAssertEqual(after, before)
+        XCTAssertEqual(checkpointAfter, checkpoint)
+        XCTAssertEqual(revisionsAfter, revisions)
+        XCTAssertEqual(renderer.requests.count, count)
+    }
+
+    @MainActor
+    func testUpdatingOutdatedAudioExcludesMissingAndMissingOnlyRepairsDamagedAssets() async throws {
+        let (store, production, renderer, bookID, _) = try await makePreparedFixture(
+            rawText: "第一章 渡口\n风吹过港口。\n第二章 归途\n钟声响起。")
+        let chapters = try await store.chapters(for: bookID)
+        let ids = chapters.map(\.id)
+        try await production.start(bookID: bookID, chapterIDs: ids)
+        let before = try await store.candidates(for: bookID)
+        let damaged = try XCTUnwrap(before.first { $0.chapterID == chapters[1].id })
+        let asset = try await store.resolveAssetFileURL(for: damaged)
+        try Data("damaged".utf8).write(to: asset)
+        try await store.savePronunciationBinding(.init(setID: AudiobookPronunciationBinding.makeSetID(bookID: bookID),
+            revision: "pr_changed", entries: [.init(id: "wind", surface: "风", spoken: "fēng")]), bookID: bookID)
+        let adopted = try await store.chapters(for: bookID).map(\.currentChapterRevisionID)
+        let update = try await production.previewProduction(bookID: bookID, chapterIDs: ids, intent: .updateOutdated)
+        XCTAssertEqual(Set(update.fragments.map(\.chapterID)), [chapters[0].id])
+        XCTAssertGreaterThan(update.missingAudioCount, 0)
+        let count = renderer.requests.count
+        try await production.start(bookID: bookID, chapterIDs: ids, approvedPlan: update)
+        XCTAssertEqual(renderer.requests.count - count, update.fragments.count)
+        let fill = try await production.previewProduction(bookID: bookID, chapterIDs: ids, intent: .missingOnly)
+        XCTAssertEqual(Set(fill.fragments.map(\.chapterID)), [chapters[1].id])
+        try await production.start(bookID: bookID, chapterIDs: ids, approvedPlan: fill)
+        let after = try await store.chapters(for: bookID).map(\.currentChapterRevisionID)
+        XCTAssertEqual(after, adopted)
+        let replayCount = renderer.requests.count
+        try await production.start(bookID: bookID, chapterIDs: ids)
+        XCTAssertEqual(renderer.requests.count, replayCount)
+    }
+
+    @MainActor
+    func testApprovedMissingPlanRejectsChangedDependenciesBeforeTaskWrites() async throws {
+        let (store, production, renderer, bookID, chapter) = try await makePreparedFixture(editedText: "港口的风吹过窗前。")
+        let plan = try await production.previewProduction(bookID: bookID, chapterIDs: [chapter.id], intent: .missingOnly)
+        XCTAssertFalse(plan.fragments.isEmpty)
+        try await store.savePronunciationBinding(.init(setID: AudiobookPronunciationBinding.makeSetID(bookID: bookID),
+            revision: "pr_changed", entries: [.init(id: "wind", surface: "风", spoken: "fēng")]), bookID: bookID)
+        do {
+            try await production.start(bookID: bookID, chapterIDs: [chapter.id], approvedPlan: plan)
+            XCTFail("确认后的制作条件变化必须重新预览")
+        } catch { XCTAssertEqual(error as? AudiobookProductionError, .taskScopeChanged) }
+        let checkpoint = try await store.productionCheckpoint(for: bookID)
+        XCTAssertNil(checkpoint)
+        XCTAssertTrue(renderer.requests.isEmpty)
+    }
+
+    @MainActor
+    func testMissingOnlyResumeKeepsApprovedFragmentsWhenAnotherAssetBecomesMissing() async throws {
+        let (store, production, renderer, bookID, _) = try await makePreparedFixture(
+            rawText: "第一章 渡口\n风吹过港口。\n第二章 归途\n钟声响起。")
+        let chapters = try await store.chapters(for: bookID)
+        let ids = chapters.map(\.id)
+        try await production.start(bookID: bookID, chapterIDs: [ids[0]])
+        let initialCandidates = try await store.candidates(for: bookID)
+        let firstAudio = try XCTUnwrap(initialCandidates.first)
+        let plan = try await production.previewProduction(bookID: bookID, chapterIDs: ids, intent: .missingOnly)
+        XCTAssertEqual(Set(plan.fragments.map(\.chapterID)), [ids[1]])
+        renderer.onRenderStart = { _ in throw CancellationError() }
+        do { try await production.start(bookID: bookID, chapterIDs: ids, approvedPlan: plan) }
+        catch { XCTAssertEqual(error as? AudiobookProductionError, .cancelled) }
+        renderer.onRenderStart = nil
+        let saved = try await store.productionCheckpoint(for: bookID)
+        let checkpoint = try XCTUnwrap(saved)
+        XCTAssertEqual(checkpoint.productionPlan, plan)
+        XCTAssertEqual(try JSONDecoder().decode(AudiobookProductionCheckpoint.self, from: JSONEncoder().encode(checkpoint)), checkpoint)
+        let file = try await store.resolveAssetFileURL(for: firstAudio)
+        try Data("damaged later".utf8).write(to: file)
+        let count = renderer.requests.count
+        try await production.start(bookID: bookID, chapterIDs: checkpoint.chapterIDs, resumingTaskID: checkpoint.taskID)
+        XCTAssertEqual(renderer.requests.count - count, plan.fragments.count)
+        let firstStillDamaged = try await store.verifyCandidateAsset(firstAudio)
+        XCTAssertFalse(firstStillDamaged, "续作不能扩大到确认范围外的新缺失")
+        let after = try await store.productionCheckpoint(for: bookID)
+        XCTAssertEqual(after?.productionPlan, plan)
+    }
+
+    @MainActor
+    func testMissingOnlyRechecksOldAudioSavedAfterPreview() async throws {
+        let (store, production, renderer, bookID, chapter) = try await makePreparedFixture()
+        let plan = try await production.previewProduction(bookID: bookID, chapterIDs: [chapter.id], intent: .missingOnly)
+        let fragment = try XCTUnwrap(plan.fragments.first)
+        let wav = ScriptedSpeechRenderer.makePCM16MonoWAV(frameCount: 4_800, sampleValue: 1_024)
+        let candidateID = UUID()
+        let old = AudiobookRenderCandidate(id: candidateID, bookID: bookID, chapterID: chapter.id,
+            fragmentID: fragment.id, generation: 1, relativeAssetPath: "books/\(bookID.uuidString)/audio/\(candidateID.uuidString).wav",
+            fileSHA256: AudiobookDigest.sha256Hex(wav), pcmSHA256: try AudioDigest.sha256HexOfPCM(in: wav),
+            frameCount: 4_800, dependencyDigest: "old-settings", isReceiptVerified: false,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000))
+        renderer.onCapabilitiesFetch = { try await store.commitCandidate(old, wav: wav) }
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id], approvedPlan: plan)
+        XCTAssertTrue(renderer.requests.isEmpty, "开始渲染前新出现的旧音频也必须保留")
+        let candidates = try await store.candidates(for: bookID)
+        XCTAssertEqual(candidates, [old])
+    }
+
+    @MainActor
+    func testUpdateResumeRetainsUpdateIntentInsteadOfDefaultMissingOnly() async throws {
+        let (store, production, renderer, bookID, chapter) = try await makePreparedFixture(editedText: "风吹过港口。")
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+        let adopted = try await store.chapters(for: bookID).map(\.currentChapterRevisionID)
+        try await store.savePronunciationBinding(.init(setID: AudiobookPronunciationBinding.makeSetID(bookID: bookID),
+            revision: "changed", entries: [.init(id: "wind", surface: "风", spoken: "fēng")]), bookID: bookID)
+        let plan = try await production.previewProduction(bookID: bookID, chapterIDs: [chapter.id], intent: .updateOutdated)
+        renderer.onRenderStart = { _ in throw CancellationError() }
+        do { try await production.start(bookID: bookID, chapterIDs: [chapter.id], approvedPlan: plan) }
+        catch { XCTAssertEqual(error as? AudiobookProductionError, .cancelled) }
+        renderer.onRenderStart = nil
+        let value = try await store.productionCheckpoint(for: bookID)
+        let checkpoint = try XCTUnwrap(value)
+        XCTAssertEqual(checkpoint.productionPlan?.intent, .updateOutdated)
+        let count = renderer.requests.count
+        try await production.start(bookID: bookID, chapterIDs: checkpoint.chapterIDs, resumingTaskID: checkpoint.taskID)
+        XCTAssertEqual(renderer.requests.count - count, plan.fragments.count)
+        let after = try await store.chapters(for: bookID).map(\.currentChapterRevisionID)
+        XCTAssertEqual(after, adopted)
+    }
+
+    @MainActor
+    func testLegacyRegenerationResumeRejectsChangedDependenciesWithoutWriting() async throws {
+        let (store, production, renderer, bookID, chapter) = try await makePreparedFixture(editedText: "风吹过港口。")
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+        let value = try await store.productionCheckpoint(for: bookID)
+        let checkpoint = try XCTUnwrap(value)
+        let fragments = try await store.fragments(for: bookID, chapterID: chapter.id)
+        let before = renderer.requests.count
+        try await store.savePronunciationBinding(.init(setID: AudiobookPronunciationBinding.makeSetID(bookID: bookID),
+            revision: "changed", entries: [.init(id: "wind", surface: "风", spoken: "fēng")]), bookID: bookID)
+        for scope in [AudiobookRegenerationScope.chapters, .fragments(Set(fragments.map(\.id)))] {
+            let legacy = AudiobookProductionCheckpoint(taskID: checkpoint.taskID, chapterIDs: checkpoint.chapterIDs,
+                progress: checkpoint.progress, sourceID: checkpoint.sourceID,
+                preparationVersion: checkpoint.preparationVersion, regenerationScope: scope)
+            try await store.saveProductionCheckpoint(legacy)
+            do {
+                try await production.start(bookID: bookID, chapterIDs: legacy.chapterIDs,
+                    resumingTaskID: legacy.taskID, regenerationScope: scope)
+                XCTFail("没有冻结片段依赖的旧重做任务必须重新预览")
+            } catch { XCTAssertEqual(error as? AudiobookProductionError, .taskScopeChanged) }
+            let after = try await store.productionCheckpoint(for: bookID)
+            XCTAssertEqual(after, legacy)
+        }
+        XCTAssertEqual(renderer.requests.count, before)
+    }
+
+    @MainActor
+    func testUnmappedHistoricalAudioIsPreservedAndLegacyOrdinaryResumeIsRejected() async throws {
+        let (store, production, renderer, bookID, chapter) = try await makePreparedFixture()
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+        let value = try await store.productionCheckpoint(for: bookID)
+        let checkpoint = try XCTUnwrap(value)
+        let legacy = AudiobookProductionCheckpoint(taskID: checkpoint.taskID, chapterIDs: checkpoint.chapterIDs,
+            progress: checkpoint.progress, sourceID: checkpoint.sourceID, preparationVersion: checkpoint.preparationVersion)
+        try await store.saveProductionCheckpoint(legacy)
+        do {
+            try await production.start(bookID: bookID, chapterIDs: legacy.chapterIDs, resumingTaskID: legacy.taskID)
+            XCTFail("缺少意图的旧任务不能自动续作")
+        } catch { XCTAssertEqual(error as? AudiobookProductionError, .taskScopeChanged) }
+        let savedAfter = try await store.productionCheckpoint(for: bookID)
+        XCTAssertEqual(savedAfter, legacy)
+        let wav = ScriptedSpeechRenderer.makePCM16MonoWAV(frameCount: 4_800, sampleValue: 1_024)
+        let id = UUID()
+        let unknown = AudiobookRenderCandidate(id: id, bookID: bookID, chapterID: chapter.id,
+            fragmentID: UUID(), generation: 1, relativeAssetPath: "books/\(bookID.uuidString)/audio/\(id.uuidString).wav",
+            fileSHA256: AudiobookDigest.sha256Hex(wav), pcmSHA256: try AudioDigest.sha256HexOfPCM(in: wav),
+            frameCount: 4_800, dependencyDigest: "unknown-history", isReceiptVerified: false)
+        try await store.commitCandidate(unknown, wav: wav)
+        let existingCandidates = try await store.candidates(for: bookID)
+        for candidate in existingCandidates where candidate.id != unknown.id {
+            let asset = try await store.resolveAssetFileURL(for: candidate)
+            try Data("damaged".utf8).write(to: asset)
+        }
+        let plan = try await production.previewProduction(bookID: bookID, chapterIDs: [chapter.id], intent: .missingOnly)
+        XCTAssertTrue(plan.fragments.isEmpty)
+        XCTAssertGreaterThan(plan.preservedOutdatedAudioCount, 0)
+        let count = renderer.requests.count
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id], approvedPlan: plan)
+        XCTAssertEqual(renderer.requests.count, count)
+    }
+
+    @MainActor
     func testUpdatedAudioAwaitingAdoptionDoesNotCreateAnotherTask() async throws {
         let (store, production, renderer, bookID, chapter) = try await makePreparedFixture(editedText: "港口的风吹过窗前。")
         try await production.start(bookID: bookID, chapterIDs: [chapter.id])
         try await store.savePronunciationBinding(.init(setID: AudiobookPronunciationBinding.makeSetID(bookID: bookID),
             revision: "pr_changed", entries: [.init(id: "wind", surface: "风", spoken: "fēng")]), bookID: bookID)
-        try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id], intent: .updateOutdated)
         let checkpoint = try await store.productionCheckpoint(for: bookID)
         let count = renderer.requests.count
         try await production.start(bookID: bookID, chapterIDs: [chapter.id])
@@ -1452,7 +1655,7 @@ final class AudiobookProductionTests: XCTestCase {
         try await castController.confirmAudition(bookID: bookID, voiceSetDigest: voiceSetDigest)
 
         // Legacy policy stored the service's 24 kHz bytes while labelling them 48 kHz.
-        // A new production run must preserve that asset but render a corrected candidate.
+        // Explicit update preserves that asset and renders a corrected candidate; missing-only leaves it alone.
         let source = try await store.sourceIndex(for: bookID)
         let bindings = try await store.voiceBindings(for: bookID)
         let allAtoms = try await store.atoms(for: bookID, chapterID: chapter.id)
@@ -1493,9 +1696,9 @@ final class AudiobookProductionTests: XCTestCase {
             try await store.commitCandidate(candidate, wav: legacyWAV)
         }
 
-        try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id], intent: .updateOutdated)
         let candidates = try await store.candidates(for: bookID)
-        XCTAssertFalse(renderer.requests.isEmpty, "不能复用旧策略中采样率标记错误的候选")
+        XCTAssertFalse(renderer.requests.isEmpty, "显式更新不能复用旧策略中采样率标记错误的候选")
         let candidate = try XCTUnwrap(candidates.first { $0.requestID != "legacy-rate-metadata" })
         let assetURL = try await store.resolveAssetFileURL(for: candidate)
         let wav = try Data(contentsOf: assetURL)
