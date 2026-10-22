@@ -17,6 +17,7 @@ public enum AudiobookProductionError: LocalizedError, Equatable, Sendable {
     case transientRetriesExhausted(fragmentID: UUID, lastReason: String)
     case checkpointNotSaved(reason: String)
     case pauseWithUnconfirmedRemoteStop(fragmentID: UUID)
+    case savedAudioNeedsVerification(fragmentID: UUID)
     case cancelled
 
     public var errorDescription: String? {
@@ -47,6 +48,8 @@ public enum AudiobookProductionError: LocalizedError, Equatable, Sendable {
             return "制作已停止，但任务记录未能保存，重新打开后可能无法接着制作。请检查磁盘空间和作品库的写入权限：\(reason)"
         case .pauseWithUnconfirmedRemoteStop:
             return "制作已暂停；当前在途片段的服务端停止状态尚未确认，稍后继续时将自动核对。"
+        case .savedAudioNeedsVerification:
+            return "音频已保存，但校验未通过。请检查音色与服务的版本信息后重新预览；按相同条件再次更新不能解决此问题。已有音频和当前采用版本均已保留。"
         case .cancelled:
             return "章节制作已暂停。"
         }
@@ -78,6 +81,8 @@ public struct AudiobookProductionProgress: Codable, Equatable, Sendable {
     public var totalFragments: Int
     public var unconfirmedRemoteStopFragmentID: UUID?
     public var lastErrorMessage: String?
+    /// A saved but unverified result requires changed conditions, not an automatic retry.
+    public var verificationFailureFragmentID: UUID?
     public var phase: AudiobookProductionPhase
     public var currentChapterOrdinal: Int?
     public var totalChapters: Int
@@ -125,7 +130,8 @@ public struct AudiobookProductionProgress: Codable, Equatable, Sendable {
     }
 
     public var statusTitle: String {
-        switch state {
+        if verificationFailureFragmentID != nil { return "音频已保存，校验未通过" }
+        return switch state {
         case .pausing: "正在暂停制作…"
         case .paused: "制作已暂停"
         case .failed: "制作遇到问题"
@@ -147,7 +153,12 @@ public struct AudiobookProductionProgress: Codable, Equatable, Sendable {
     }
 
     public var canResume: Bool {
-        state == .paused || state == .pausing || state == .running || state == .failed
+        verificationFailureFragmentID == nil && (state == .paused || state == .pausing || state == .running || state == .failed)
+    }
+
+    public var isComplete: Bool {
+        phase == .completed && verificationFailureFragmentID == nil
+            && (state == .allConfirmedChaptersProduced || state == .partialChaptersReady || state == .fullBookProduced)
     }
 }
 
@@ -391,6 +402,11 @@ public actor AudiobookProductionController {
                     return range.lowerBound < fragment.sourceRange.upperBound && fragment.sourceRange.lowerBound < range.upperBound
                 }
                 if !hasAudio { missing += 1 }
+                if !onlyMissing, !isCurrent, audio.contains(where: {
+                    $0.fragmentID == fragment.id && $0.dependencyDigest == fragment.dependencyDigest && !$0.isReceiptVerified
+                }) {
+                    throw AudiobookProductionError.savedAudioNeedsVerification(fragmentID: fragment.id)
+                }
                 let shouldRender = onlyMissing ? !hasAudio : hasAudio && !isCurrent
                 if shouldRender { targets.append(fragment) }
                 else if hasAudio {
@@ -427,6 +443,9 @@ public actor AudiobookProductionController {
                   let savedPlan = saved.productionPlan,
                   approvedPlan == nil || approvedPlan == savedPlan else {
                 throw AudiobookProductionError.taskScopeChanged
+            }
+            if let fragmentID = saved.progress.verificationFailureFragmentID {
+                throw AudiobookProductionError.savedAudioNeedsVerification(fragmentID: fragmentID)
             }
             plan = savedPlan
         } else if let approvedPlan {
@@ -523,8 +542,14 @@ public actor AudiobookProductionController {
                 updateProgress(bookID) { $0.state = .failed; $0.lastErrorMessage = error.localizedDescription }
                 throw error
             }
-            let cancelled = isPauseRequested || Task.isCancelled
-                || error is CancellationError || (error as? AudiobookProductionError) == .cancelled
+            let verificationFailureID: UUID?
+            if case let AudiobookProductionError.savedAudioNeedsVerification(fragmentID) = error {
+                verificationFailureID = fragmentID
+            } else {
+                verificationFailureID = nil
+            }
+            let cancelled = verificationFailureID == nil && (isPauseRequested || Task.isCancelled
+                || error is CancellationError || (error as? AudiobookProductionError) == .cancelled)
             if activeCheckpoint != nil || cancelled {
                 if activeCheckpoint == nil, let progress = latestProgressByBook[bookID] {
                     activeCheckpoint = .init(taskID: resumingTaskID ?? UUID(), chapterIDs: chapterIDs, progress: progress, sourceID: activeWorkingSource?.sourceID, preparationVersion: activeWorkingSource?.preparationVersion, regenerationScope: regenerationScope, productionPlan: productionPlan)
@@ -533,6 +558,13 @@ public actor AudiobookProductionController {
                 try await markBookPaused(bookID: bookID, completed: progress?.completedFragments ?? 0, total: progress?.totalFragments ?? 0)
                 if !cancelled {
                     updateProgress(bookID) { $0.lastErrorMessage = error.localizedDescription }
+                    if let fragmentID = verificationFailureID {
+                        updateProgress(bookID) {
+                            $0.state = .failed
+                            $0.verificationFailureFragmentID = fragmentID
+                        }
+                        try await persistProgress(bookID)
+                    }
                 }
             } else {
                 updateProgress(bookID) {
@@ -761,6 +793,11 @@ public actor AudiobookProductionController {
                     candidateWAVCache.removeValue(forKey: candidate.id)
                     if let voice = capabilities?.voices.first(where: { $0.id == binding.voiceID }), !(await voiceCatalog.refresh()).permits(voice, bookID: bookID) {
                         throw AudiobookProductionError.capabilityVoiceUnavailable(voiceID: binding.voiceID, reason: "声音归属已变化，本段已保存为待复核候选。")
+                    }
+                    if !candidate.isReceiptVerified {
+                        completedCount += 1
+                        updateProgress(bookID) { $0.completedFragments = completedCount }
+                        throw AudiobookProductionError.savedAudioNeedsVerification(fragmentID: fragment.id)
                     }
 
                     completedCount += 1

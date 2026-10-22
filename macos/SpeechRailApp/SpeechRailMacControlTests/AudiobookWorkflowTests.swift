@@ -2244,6 +2244,46 @@ final class AudiobookWorkflowTests: XCTestCase {
         await workflow.shutdown()
     }
 
+    func testEmptyMissingPreviewOpensScopedUpdatePreviewWithoutChangingSavedWork() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, _) = makeWorkflow(store: store)
+        let imported = try await importBook(into: workflow, fileName: "empty-missing.txt",
+            text: "第一章 渡口\n风吹过港口。\n第二章 归途\n风吹过归途。")
+        try await markBookReadyForProduction(imported.bookID, workflow: workflow, store: store)
+        workflow.makeConfirmedChapters()
+        await waitForProductionToFinish(workflow)
+        try await store.savePronunciationBinding(.init(setID: AudiobookPronunciationBinding.makeSetID(bookID: imported.bookID),
+            revision: "pr_changed", entries: [.init(id: "wind", surface: "风", spoken: "fēng")]), bookID: imported.bookID)
+        await workflow.openBook(imported.bookID)
+        let first = try XCTUnwrap(imported.chapterIDs.first)
+        await workflow.prepareProduction(intent: .missingOnly, chapterIDs: [first])
+        let empty = try XCTUnwrap(workflow.productionDraft)
+        XCTAssertTrue(empty.fragments.isEmpty)
+        XCTAssertGreaterThan(empty.preservedOutdatedAudioCount, 0)
+        let candidatesBefore = try await store.candidates(for: imported.bookID)
+        let chaptersBefore = try await store.chapters(for: imported.bookID)
+        let checkpointBefore = try await store.productionCheckpoint(for: imported.bookID)
+
+        await workflow.previewOutdatedAudio(from: empty)
+
+        let update = try XCTUnwrap(workflow.productionDraft)
+        XCTAssertNotEqual(update.id, empty.id)
+        XCTAssertEqual(update.intent, .updateOutdated)
+        XCTAssertEqual(update.chapterIDs, [first], "查看更新不能扩大本次检查的章节范围")
+        XCTAssertFalse(update.fragments.isEmpty)
+        XCTAssertFalse(workflow.isProducing, "查看只打开独立预览，不能隐式确认更新")
+        let candidatesAfter = try await store.candidates(for: imported.bookID)
+        let chaptersAfter = try await store.chapters(for: imported.bookID)
+        let checkpointAfter = try await store.productionCheckpoint(for: imported.bookID)
+        XCTAssertEqual(candidatesAfter, candidatesBefore)
+        XCTAssertEqual(chaptersAfter, chaptersBefore)
+        XCTAssertEqual(checkpointAfter, checkpointBefore)
+        workflow.productionDraft = nil // 完成/取消预览同样不写作品。
+        await workflow.previewOutdatedAudio(from: empty)
+        XCTAssertNil(workflow.productionDraft, "已关闭的旧预览不能重新打开更新")
+        await workflow.shutdown()
+    }
+
     func testCompletedJourneyExcludesSkippedChaptersAndValidatesRegenerationScope() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
         let (workflow, _) = makeWorkflow(store: store)

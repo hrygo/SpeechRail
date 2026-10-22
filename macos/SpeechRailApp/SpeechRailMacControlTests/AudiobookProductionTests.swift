@@ -40,6 +40,7 @@ final class AudiobookProductionTests: XCTestCase {
         let outputSampleRate: Int
         private(set) var requests: [AudiobookRenderCallRequest] = []
         var scriptedErrors: [Error] = []
+        var verifiesProvenance = true
         var onCapabilitiesFetch: (@Sendable () async throws -> Void)?
         var onRenderStart: (@Sendable (AudiobookRenderCallRequest) async throws -> Void)?
 
@@ -82,7 +83,7 @@ final class AudiobookProductionTests: XCTestCase {
                 requestID: "req-\(UUID().uuidString.prefix(8))",
                 receiptID: "rr_0123456789abcdef0123456789abcdef",
                 recipeSummary: "verified",
-                isProvenanceVerified: true
+                isProvenanceVerified: verifiesProvenance
             )
         }
 
@@ -239,6 +240,44 @@ final class AudiobookProductionTests: XCTestCase {
             revisionController: AudiobookRevisionController(store: store), renderer: renderer,
             admission: admission, clock: FakeAudiobookClock(), voiceCatalog: catalog)
         return (store, production, renderer, bookID, chapter)
+    }
+
+    @MainActor
+    func testUnverifiedSavedRenderIsNotCompletedOrRepeatedByUpdate() async throws {
+        let (store, production, renderer, bookID, chapter) = try await makePreparedFixture()
+        renderer.verifiesProvenance = false
+        do {
+            try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+            XCTFail("未通过校验不能报告制作完成")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("校验")) }
+        let saved = try await store.candidates(for: bookID)
+        XCTAssertEqual(saved.count, 1, "校验未通过的音频也必须保留")
+        XCTAssertFalse(try XCTUnwrap(saved.first).isReceiptVerified)
+        let progress = await production.progress(for: bookID)
+        XCTAssertEqual(progress?.state, .failed)
+        XCTAssertFalse(progress?.canResume ?? true)
+        XCTAssertFalse(progress?.isComplete ?? true)
+        XCTAssertEqual(progress?.statusTitle, "音频已保存，校验未通过")
+        let before = try await store.productionCheckpoint(for: bookID)
+        XCTAssertEqual(before?.progress.verificationFailureFragmentID, saved.first?.fragmentID)
+        XCTAssertFalse(before?.progress.canResume ?? true, "重新打开后也不能按原条件重试")
+        let calls = renderer.requests.count
+        do {
+            let checkpoint = try XCTUnwrap(before)
+            try await production.start(bookID: bookID, chapterIDs: checkpoint.chapterIDs, resumingTaskID: checkpoint.taskID)
+            XCTFail("控制器入口也必须拒绝续作待校验任务，不能靠跳过已有声音伪造完成")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("校验")) }
+        do {
+            _ = try await production.previewProduction(bookID: bookID, chapterIDs: [chapter.id], intent: .updateOutdated)
+            XCTFail("同一制作条件下已有待校验音频，应说明原因，不能引导重复生成")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("校验")) }
+        let after = try await store.productionCheckpoint(for: bookID)
+        let candidatesAfter = try await store.candidates(for: bookID)
+        XCTAssertEqual(before, after)
+        XCTAssertEqual(saved, candidatesAfter)
+        XCTAssertEqual(renderer.requests.count, calls)
+        let missing = try await production.previewProduction(bookID: bookID, chapterIDs: [chapter.id], intent: .missingOnly)
+        XCTAssertTrue(missing.fragments.isEmpty, "补缺失仍须保留未通过校验的已有音频")
     }
 
     @MainActor
@@ -1144,6 +1183,17 @@ final class AudiobookProductionTests: XCTestCase {
         XCTAssertEqual(checkpoint?.progress.phase, .completed)
         XCTAssertEqual(finalProgress?.state, .fullBookProduced)
         XCTAssertEqual(finalProgress?.phase, .completed)
+    }
+
+    func testCompletedScopedTaskReachesOneHundredPercentBeforeWholeBookCompletion() throws {
+        let progress = AudiobookProductionProgress(bookID: UUID(), state: .partialChaptersReady,
+            completedFragments: 26, totalFragments: 26, phase: .completed)
+        XCTAssertTrue(progress.isComplete)
+        XCTAssertEqual(SpeechRailDisplayFormat.progressValue(progress.fraction, isComplete: progress.isComplete), 1)
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(progress)) as? [String: Any])
+        legacy.removeValue(forKey: "verificationFailureFragmentID")
+        let decoded = try JSONDecoder().decode(AudiobookProductionProgress.self, from: JSONSerialization.data(withJSONObject: legacy))
+        XCTAssertTrue(decoded.isComplete, "旧任务缺少新诊断字段时仍可正常读取")
     }
 
     func testProgressUsesSavedAudioCountsAndStopsElapsedTimeWhenPaused() {
