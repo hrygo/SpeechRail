@@ -1285,9 +1285,8 @@ public struct AudiobookBookWorkspaceView: View {
                 } else {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                            ForEach(Array(workflow.chapterFragments.enumerated()), id: \.element.id) { index, fragment in
-                                let previousFragment = index > 0 ? workflow.chapterFragments[index - 1] : nil
-                                fragmentRowView(fragment: fragment, previousFragment: previousFragment)
+                            ForEach(AudiobookWorkspaceProjection.productionRows(workflow.chapterFragments)) { row in
+                                fragmentRowView(fragment: row.fragment, previousFragment: row.previousFragment)
                             }
                         }
                         .padding(SpeechRailDesignTokens.Spacing.md)
