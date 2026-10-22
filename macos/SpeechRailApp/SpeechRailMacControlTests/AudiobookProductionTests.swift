@@ -201,14 +201,14 @@ final class AudiobookProductionTests: XCTestCase {
     }
 
     @MainActor
-    private func makePreparedFixture(admission: SpeechCreationAdmission = SpeechCreationAdmission(), editedText: String? = nil,
+    private func makePreparedFixture(admission: SpeechCreationAdmission = SpeechCreationAdmission(), editedText: String? = nil, rawText: String? = nil,
                                      catalog: VoiceCatalogStore = VoiceCatalogStore()) async throws -> (AudiobookProjectStore, AudiobookProductionController, ScriptedSpeechRenderer, UUID, AudiobookChapter) {
         let store = try AudiobookProjectStore(root: tempRoot)
         let capabilities = Self.makeDefaultCapabilities()
         let renderer = ScriptedSpeechRenderer(capabilities: capabilities)
         let cast = AudiobookCastController(store: store, capabilityProvider: { capabilities }, voiceCatalog: catalog)
         let raw = "第一章 渡口\r\n他走進大廳之後提到鄉間那位住了許多年又講理學的老監\r\n生，每次見到他時都是先說幾句客氣的話，互相寒\r\n暄，之後才坐下談話。"
-        let preview = try AudiobookTXTImporter.prepare(rawData: Data(raw.utf8))
+        let preview = try AudiobookTXTImporter.prepare(rawData: Data((rawText ?? raw).utf8))
         let bookID = try await store.importBook(preview)
         if let editedText {
             let draft = try await store.chapterEditDraft(bookID: bookID, chapterID: preview.chapters[0].id)
@@ -222,6 +222,13 @@ final class AudiobookProductionTests: XCTestCase {
             .init(bookID: bookID, chapterID: chapter.id, windowID: UUID(), atomID: $0.id,
                   sourceRange: $0.sourceRange, assignment: .assigned(roleID: narrator.id))
         })
+        for otherChapter in try await store.chapters(for: bookID).dropFirst() {
+            let otherAtoms = try await store.atoms(for: bookID, chapterID: otherChapter.id).filter { $0.kind != .formatting }
+            try await store.saveAnnotations(bookID: bookID, annotations: otherAtoms.map {
+                .init(bookID: bookID, chapterID: otherChapter.id, windowID: UUID(), atomID: $0.id,
+                    sourceRange: $0.sourceRange, assignment: .assigned(roleID: narrator.id))
+            })
+        }
         var book = try await store.book(id: bookID); book.analysisState = .allWindowsValidated
         try await store.updateBook(book)
         try await cast.bindVoice(bookID: bookID, roleID: narrator.id, binding: .init(roleID: narrator.id,
@@ -232,6 +239,171 @@ final class AudiobookProductionTests: XCTestCase {
             revisionController: AudiobookRevisionController(store: store), renderer: renderer,
             admission: admission, clock: FakeAudiobookClock(), voiceCatalog: catalog)
         return (store, production, renderer, bookID, chapter)
+    }
+
+    @MainActor
+    func testScopedRegenerationPreservesEditionAndResumesOnlyItsOwnCandidates() async throws {
+        let text = (0..<40).map { "第\($0)段，风从遥远的山间吹来，船上的旅客安静地听着岸边的钟声，等待出发。" }.joined(separator: "\n\n")
+        let (store, production, renderer, bookID, chapter) = try await makePreparedFixture(editedText: text)
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+        let originalCandidates = try await store.candidates(for: bookID)
+        let originalChapters = try await store.chapters(for: bookID)
+        let originalRevisions = try await store.chapterRevisions(for: bookID, chapterID: chapter.id)
+        let fragments = try await store.fragments(for: bookID, chapterID: chapter.id)
+        XCTAssertGreaterThan(fragments.count, 2)
+        let targets = Set(fragments.prefix(2).map(\.id))
+        let scope = AudiobookRegenerationScope.fragments(targets)
+        let firstRequestCount = renderer.requests.count
+        renderer.onRenderStart = { _ in
+            if renderer.requests.count == firstRequestCount + 2 { throw CancellationError() }
+        }
+        do {
+            try await production.start(bookID: bookID, chapterIDs: [chapter.id], regenerationScope: scope)
+            XCTFail("应在第二段请求时暂停")
+        } catch { XCTAssertEqual(error as? AudiobookProductionError, .cancelled) }
+        renderer.onRenderStart = nil
+        let savedCheckpoint = try await store.productionCheckpoint(for: bookID)
+        let checkpoint = try XCTUnwrap(savedCheckpoint)
+        XCTAssertEqual(checkpoint.effectiveRegenerationScope, scope)
+        let encoded = try JSONEncoder().encode(checkpoint)
+        let restored = try JSONDecoder().decode(AudiobookProductionCheckpoint.self, from: encoded)
+        try await production.start(bookID: bookID, chapterIDs: restored.chapterIDs,
+            resumingTaskID: restored.taskID, regenerationScope: restored.effectiveRegenerationScope)
+        let candidates = try await store.candidates(for: bookID)
+        let added = candidates.filter { c in !originalCandidates.contains { $0.id == c.id } }
+        XCTAssertEqual(added.count, 2)
+        XCTAssertEqual(Set(added.map(\.fragmentID)), targets)
+        XCTAssertEqual(Set(added.compactMap(\.taskID)), [checkpoint.taskID])
+        let afterChapters = try await store.chapters(for: bookID)
+        let afterRevisions = try await store.chapterRevisions(for: bookID, chapterID: chapter.id)
+        XCTAssertEqual(afterChapters.map(\.currentChapterRevisionID), originalChapters.map(\.currentChapterRevisionID))
+        XCTAssertEqual(afterRevisions, originalRevisions)
+        for candidate in originalCandidates {
+            let valid = try await store.verifyCandidateAsset(candidate)
+            XCTAssertTrue(valid)
+        }
+        // A deliberate chapter remake produces all-new candidates but does not adopt them.
+        let beforeCount = candidates.count
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id], regenerationScope: .chapters)
+        let afterAll = try await store.candidates(for: bookID)
+        XCTAssertEqual(afterAll.count - beforeCount, fragments.count)
+        let finalRevisions = try await store.chapterRevisions(for: bookID, chapterID: chapter.id)
+        XCTAssertEqual(finalRevisions, originalRevisions)
+    }
+
+    @MainActor
+    func testRegenerationRejectsEmptyAndForeignFragmentScopesWithoutRendering() async throws {
+        let (store, production, renderer, bookID, chapter) = try await makePreparedFixture()
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+        let before = renderer.requests.count
+        for ids in [Set<UUID>(), Set([UUID()])] {
+            do {
+                try await production.start(bookID: bookID, chapterIDs: [chapter.id], regenerationScope: .fragments(ids))
+                XCTFail("空范围或其他章节的片段必须拒绝")
+            } catch { }
+        }
+        XCTAssertEqual(renderer.requests.count, before)
+        let chapters = try await store.chapters(for: bookID)
+        XCTAssertNotNil(chapters.first?.currentChapterRevisionID)
+    }
+
+    @MainActor
+    func testRegenerationRejectsChangedSourceWithoutReplacingCheckpointOrAudio() async throws {
+        let (store, production, renderer, bookID, chapter) = try await makePreparedFixture()
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+        let checkpoint = try await store.productionCheckpoint(for: bookID)
+        let candidates = try await store.candidates(for: bookID)
+        let count = renderer.requests.count
+        do {
+            try await production.start(bookID: bookID, chapterIDs: [chapter.id],
+                regenerationScope: .chapters, expectedSourceID: UUID())
+            XCTFail("预览与当前稿件版本不同必须拒绝")
+        } catch { XCTAssertEqual(error as? AudiobookStoreError, .workingSourceChanged) }
+        let after = try await store.productionCheckpoint(for: bookID)
+        let candidatesAfter = try await store.candidates(for: bookID)
+        XCTAssertEqual(after, checkpoint)
+        XCTAssertEqual(candidatesAfter, candidates)
+        XCTAssertEqual(renderer.requests.count, count)
+    }
+
+    @MainActor
+    func testUpdatedAudioAwaitingAdoptionDoesNotCreateAnotherTask() async throws {
+        let (store, production, renderer, bookID, chapter) = try await makePreparedFixture(editedText: "港口的风吹过窗前。")
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+        try await store.savePronunciationBinding(.init(setID: AudiobookPronunciationBinding.makeSetID(bookID: bookID),
+            revision: "pr_changed", entries: [.init(id: "wind", surface: "风", spoken: "fēng")]), bookID: bookID)
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+        let checkpoint = try await store.productionCheckpoint(for: bookID)
+        let count = renderer.requests.count
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+        let after = try await store.productionCheckpoint(for: bookID)
+        XCTAssertEqual(after, checkpoint, "完整候选等待采用时不能重复创建任务")
+        XCTAssertEqual(renderer.requests.count, count)
+    }
+
+    @MainActor
+    func testResumeRejectsSkippedOriginalScopeWithoutReplacingCheckpoint() async throws {
+        let (store, production, renderer, bookID, chapter) = try await makePreparedFixture(
+            rawText: "第一章 渡口\n风吹过港口。\n第二章 归途\n夜色深沉。")
+        let chapterIDs = try await store.chapters(for: bookID).map(\.id)
+        renderer.onRenderStart = { _ in throw CancellationError() }
+        do { try await production.start(bookID: bookID, chapterIDs: chapterIDs) }
+        catch { XCTAssertEqual(error as? AudiobookProductionError, .cancelled) }
+        renderer.onRenderStart = nil
+        let saved = try await store.productionCheckpoint(for: bookID)
+        let checkpoint = try XCTUnwrap(saved)
+        try await store.setChapterSkipped(bookID: bookID, chapterID: chapter.id, skipped: true)
+        do {
+            try await production.start(bookID: bookID, chapterIDs: checkpoint.chapterIDs,
+                resumingTaskID: checkpoint.taskID)
+            XCTFail("原章节被跳过后不能静默缩小恢复范围")
+        } catch { XCTAssertEqual(error as? AudiobookProductionError, .taskScopeChanged) }
+        let after = try await store.productionCheckpoint(for: bookID)
+        XCTAssertEqual(after, checkpoint)
+    }
+
+    @MainActor
+    func testRegenerationOfSelectedChaptersAndWholeBookKeepsOtherAudioAndHistory() async throws {
+        let (store, production, renderer, bookID, _) = try await makePreparedFixture(
+            rawText: "第一章 渡口\n风吹过港口。\n第二章 山路\n夜色深沉。\n第三章 归途\n钟声响起。")
+        let chapters = try await store.chapters(for: bookID)
+        try await production.start(bookID: bookID, chapterIDs: chapters.map(\.id))
+        let adopted = try await store.chapters(for: bookID).map(\.currentChapterRevisionID)
+        let before = try await store.candidates(for: bookID)
+        let targets = [chapters[0].id, chapters[2].id]
+        try await production.start(bookID: bookID, chapterIDs: targets, regenerationScope: .chapters)
+        let selectedResult = try await store.candidates(for: bookID)
+        let added = selectedResult.filter { c in !before.contains { $0.id == c.id } }
+        XCTAssertEqual(Set(added.map(\.chapterID)), Set(targets))
+        let saved = try await store.productionCheckpoint(for: bookID)
+        XCTAssertEqual(saved?.chapterIDs, targets)
+        let beforeWholeCount = renderer.requests.count
+        try await production.start(bookID: bookID, chapterIDs: chapters.map(\.id), regenerationScope: .chapters)
+        XCTAssertEqual(renderer.requests.count - beforeWholeCount, before.count)
+        let after = try await store.chapters(for: bookID)
+        XCTAssertEqual(after.map(\.currentChapterRevisionID), adopted)
+        for candidate in before {
+            let valid = try await store.verifyCandidateAsset(candidate)
+            XCTAssertTrue(valid)
+        }
+    }
+
+    @MainActor
+    func testOrdinaryProductionReplayPreservesCompletedTaskAndAudio() async throws {
+        let (store, production, renderer, bookID, chapter) = try await makePreparedFixture()
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+        let checkpoint = try await store.productionCheckpoint(for: bookID)
+        let candidates = try await store.candidates(for: bookID)
+        let revisions = try await store.chapterRevisions(for: bookID, chapterID: chapter.id)
+        let requestCount = renderer.requests.count
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+        let after = try await store.productionCheckpoint(for: bookID)
+        let candidatesAfter = try await store.candidates(for: bookID)
+        let revisionsAfter = try await store.chapterRevisions(for: bookID, chapterID: chapter.id)
+        XCTAssertEqual(after, checkpoint, "有效成品的重复制作不能新建或替换任务")
+        XCTAssertEqual(candidatesAfter, candidates)
+        XCTAssertEqual(revisionsAfter, revisions)
+        XCTAssertEqual(renderer.requests.count, requestCount)
     }
 
     @MainActor
