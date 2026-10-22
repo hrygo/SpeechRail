@@ -342,6 +342,8 @@ public enum SpeechRailDesignTokens {
 
         /// 模态弹窗与工作区 Sheet 的标准宽度阶梯。
         public enum Sheet {
+            /// 操作结果浮层的正文滚动上限。
+            public static let messageBodyMaximumHeight: CGFloat = 200
             /// 紧凑型弹层（重命名记录、快速确认）：420pt。
             public static let compactWidth: CGFloat = 420
             /// 详情/测试弹层（设备自检、快捷键帮助）：460pt。

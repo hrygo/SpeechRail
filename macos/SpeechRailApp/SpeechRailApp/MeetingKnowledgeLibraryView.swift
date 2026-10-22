@@ -58,7 +58,7 @@ struct MeetingKnowledgeLibraryView: View {
     /// 归档包导入前的预检结果。**没看过它就不许导入**（MC-71）。
     @State private var archivePreview: ArchiveImportPreview?
     /// 导入完成后的实数。`nil` = 还没导。
-    @State private var archiveImportResult: ArchiveImportReport?
+    @State private var archiveImportNotice: String?
     /// 导出归档包成功时的一句话。
     @State private var archiveExportNotice: String?
 
@@ -67,12 +67,6 @@ struct MeetingKnowledgeLibraryView: View {
         let id = UUID()
         var packageURL: URL
         var preview: KnowledgeArchivePreview
-    }
-
-    /// 一次导入的结果。
-    private struct ArchiveImportReport: Identifiable {
-        let id = UUID()
-        var result: KnowledgeArchiveImportResult
     }
 
     /// 一次待确认的删除。用 `Identifiable` 驱动 `confirmationDialog`。
@@ -115,27 +109,8 @@ struct MeetingKnowledgeLibraryView: View {
         } message: { pending in
             Text(deletionDialogMessage(pending))
         }
-        .alert("导不了这场会议", isPresented: Binding(
-            get: { exportError != nil },
-            set: { if !$0 { exportError = nil } }
-        )) {
-            Button("好") { exportError = nil }
-        } message: {
-            Text(exportError ?? "")
-        }
-        .alert("归档包已导出", isPresented: Binding(
-            get: { archiveExportNotice != nil },
-            set: { if !$0 { archiveExportNotice = nil } }
-        )) {
-            Button("好") { archiveExportNotice = nil }
-        } message: {
-            Text(archiveExportNotice ?? "")
-        }
         .sheet(item: $archivePreview) { pending in
             archivePreviewSheet(pending)
-        }
-        .sheet(item: $archiveImportResult) { report in
-            archiveImportSheet(report)
         }
         .alert("新建项目", isPresented: $newProjectPromptPresented) {
             TextField("项目名", text: $projectNameDraft)
@@ -161,14 +136,6 @@ struct MeetingKnowledgeLibraryView: View {
             }
         } message: {
             Text("改名只改显示，归属这场会议的项目不变。")
-        }
-        .alert("项目或标签没改成", isPresented: Binding(
-            get: { model.projectError != nil },
-            set: { if !$0 { model.clearProjectError() } }
-        )) {
-            Button("好", role: .cancel) { model.clearProjectError() }
-        } message: {
-            Text(model.projectError ?? "")
         }
         .sheet(isPresented: $manageProjectsPresented) { manageProjectsSheet }
         .sheet(isPresented: $openItemsPresented) { openItemsSheet }
@@ -200,6 +167,23 @@ struct MeetingKnowledgeLibraryView: View {
             Text("旧结论不会消失，两条都留着。只是标记为「新结论取代了它」，以后不再问你同一处矛盾。")
         }
         .sheet(isPresented: $tagsSheetPresented) { tagsSheet }
+        .operationFeedback([
+            OperationFeedback(exportError, title: "操作未完成", onDismiss: { exportError = nil }),
+            OperationFeedback(model.projectError, title: "项目或标签未保存", onDismiss: { model.clearProjectError() }),
+            OperationFeedback(model.archiveError),
+            OperationFeedback(model.listError, title: "会议列表未读取"),
+            OperationFeedback(model.detailError, title: "会议未打开"),
+            OperationFeedback(!openItemsPresented ? model.openItemWriteError.map { _ in model.openItemWriteHint } : nil,
+                              title: "事项未保存"),
+            OperationFeedback(!conflictsPresented ? model.conflictWriteError.map { _ in model.conflictWriteHint } : nil,
+                              title: "取代关系未保存"),
+            OperationFeedback(archiveImportNotice, tone: .healthy, title: "归档包已导入", autoDismiss: true,
+                              onDismiss: { archiveImportNotice = nil }),
+            OperationFeedback(archiveExportNotice, tone: .healthy, title: "归档包已导出", autoDismiss: true,
+                              onDismiss: { archiveExportNotice = nil }),
+            OperationFeedback(archiveOutcomeMessage, tone: model.lastRestore == false ? .neutral : .healthy,
+                              title: model.lastRestore == false ? "会议库" : "会议库已更新", autoDismiss: true)
+        ])
         .task {
             if model.rows.isEmpty {
                 await model.loadPage(offset: restoredOffset)
@@ -325,19 +309,9 @@ struct MeetingKnowledgeLibraryView: View {
                 .labelsHidden()
                 .accessibilityLabel("未完成事项清单显示范围")
 
-                if model.openItemWriteError != nil {
-                    // 写失败必须看得见：静默失败会让用户以为标上了，其实库里没动。
-                    Text(model.openItemWriteHint)
-                        .font(.callout)
-                        .foregroundStyle(.orange)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, SpeechRailDesignTokens.Layout.contentPadding)
-                        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
-                }
-
-                if let error = model.openItemsError {
+                if model.openItemsError != nil {
                     VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                        Text(error).foregroundStyle(.secondary)
+                        Text("暂时无法读取未完成事项。").foregroundStyle(.secondary)
                         Button("重试") { Task { await model.loadOpenItems(offset: 0) } }
                     }
                     .padding(SpeechRailDesignTokens.Layout.contentPadding)
@@ -381,6 +355,10 @@ struct MeetingKnowledgeLibraryView: View {
             }
         }
         .frame(minWidth: 460, minHeight: 380)
+        .operationFeedback([
+            OperationFeedback(model.openItemWriteError.map { _ in model.openItemWriteHint }, title: "事项未保存"),
+            OperationFeedback(model.openItemsError, title: "未完成事项未读取")
+        ])
     }
 
     /// 一条未完成事项。状态、负责人、期限都摆出来——
@@ -420,9 +398,9 @@ struct MeetingKnowledgeLibraryView: View {
     private var conflictsSheet: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                if let error = model.conflictError {
+                if model.conflictError != nil {
                     VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                        Text(error).foregroundStyle(.secondary)
+                        Text("暂时无法读取跨会议结论。").foregroundStyle(.secondary)
                         Button("重试") { Task { await model.loadConflicts() } }
                     }
                     .padding(SpeechRailDesignTokens.Layout.contentPadding)
@@ -438,14 +416,6 @@ struct MeetingKnowledgeLibraryView: View {
                     Spacer()
                 } else {
                     List {
-                        if !model.conflictWriteHint.isEmpty {
-                            Section {
-                                // 写失败必须看得见，而且要说明数据没被动过。
-                                Text(model.conflictWriteHint)
-                                    .font(.callout)
-                                    .foregroundStyle(.orange)
-                            }
-                        }
                         ForEach(model.conflicts) { conflict in
                             conflictRow(conflict)
                         }
@@ -460,6 +430,10 @@ struct MeetingKnowledgeLibraryView: View {
             }
         }
         .frame(minWidth: 520, minHeight: 420)
+        .operationFeedback([
+            OperationFeedback(model.conflictWriteError.map { _ in model.conflictWriteHint }, title: "取代关系未保存"),
+            OperationFeedback(model.conflictError, title: "跨会议结论未读取")
+        ])
     }
 
     /// 一处矛盾。**两边的原话都要摆出来**——只给一个"存在冲突"的提示，
@@ -664,12 +638,6 @@ struct MeetingKnowledgeLibraryView: View {
                     .disabled(model.isAsking || model.askDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     .keyboardShortcut(.defaultAction)
                 }
-                if let error = model.askError {
-                    Text(error)
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .accessibilityLabel("提问失败：\(error)")
-                }
                 Divider()
                 answerBody
                 Spacer(minLength: 0)
@@ -686,6 +654,9 @@ struct MeetingKnowledgeLibraryView: View {
                 }
             }
         }
+        .operationFeedback([
+            OperationFeedback(model.askError, title: "提问未完成")
+        ])
     }
 
     private var resolvedAskConfiguration: ResolvedLLMConfiguration {
@@ -752,9 +723,9 @@ struct MeetingKnowledgeLibraryView: View {
     private var prepSheet: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                if let error = model.prepError {
+                if model.prepError != nil {
                     VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                        Text(error).foregroundStyle(.secondary)
+                        Text("暂时无法读取会前准备稿。").foregroundStyle(.secondary)
                         Button("重试") { Task { await model.loadPrepDraft() } }
                     }
                     .padding(SpeechRailDesignTokens.Layout.contentPadding)
@@ -814,6 +785,9 @@ struct MeetingKnowledgeLibraryView: View {
             }
         }
         .frame(minWidth: 460, minHeight: 380)
+        .operationFeedback([
+            OperationFeedback(model.prepError, title: "会前准备稿未读取")
+        ])
     }
 
     /// 一条待跟进。**出处原话要摆出来**：只给一句归纳，用户没法判断这条值不值得带进下一场会。
@@ -930,11 +904,10 @@ struct MeetingKnowledgeLibraryView: View {
 
     @ViewBuilder
     private var content: some View {
-        if let error = model.listError {
+        if model.listError != nil {
             // 故障只说当前问题和一个有效出口，不堆一串可能的原因。
             VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                 Text("读不了会议列表").font(.headline)
-                Text(error).font(.callout).foregroundStyle(.secondary)
                 Button("重试") { Task { await model.reload() } }
             }
             .padding(SpeechRailDesignTokens.Layout.contentPadding)
@@ -981,10 +954,9 @@ struct MeetingKnowledgeLibraryView: View {
 
     @ViewBuilder
     private var detailColumn: some View {
-        if let error = model.detailError {
+        if model.detailError != nil {
             VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                 Text("读不了这场会议").font(.headline)
-                Text(error).font(.callout).foregroundStyle(.secondary)
                 Button("重试") { Task { await model.open(documentID: model.selectedDocumentID ?? "") } }
             }
             .padding(SpeechRailDesignTokens.Layout.contentPadding)
@@ -1109,7 +1081,6 @@ struct MeetingKnowledgeLibraryView: View {
                             .background(SpeechRailDesignTokens.Color.recessedField, in: SpeechRailDesignTokens.Corner.compactShape)
                     }
                 }
-                archiveOutcome
             }
             Spacer(minLength: 0)
             moreMenu(snapshot)
@@ -1243,36 +1214,12 @@ struct MeetingKnowledgeLibraryView: View {
     private func performImport(at packageURL: URL) async {
         do {
             let result = try await model.importArchive(at: packageURL)
-            archiveImportResult = ArchiveImportReport(result: result)
+            archiveImportNotice = "新增 \(result.inserted.documents) 场会议、\(result.inserted.minutes) 版纪要、"
+                + "\(result.inserted.items) 条结论与待办、\(result.inserted.anchors) 处引用；"
+                + "跳过 \(result.skippedIdentical) 个相同条目。在左边选会议即可阅读。"
         } catch {
             exportError = error.localizedDescription
         }
-    }
-
-    /// 导入结果只报事实：**新增了什么、跳过了什么**，不写一句"导入成功"了事。
-    private func archiveImportSheet(_ report: ArchiveImportReport) -> some View {
-        let result = report.result
-        return VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Text("已导入这个归档包")
-                .font(.headline)
-            archiveCount("会议文档", result.inserted.documents)
-            archiveCount("纪要版本", result.inserted.minutes)
-            archiveCount("结论与待办", result.inserted.items)
-            archiveCount("引用锚点", result.inserted.anchors)
-            if result.skippedIdentical > 0 {
-                archiveCount("与本机相同而跳过", result.skippedIdentical)
-            }
-            Text("在左边选它就能读。")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            HStack {
-                Spacer()
-                Button("好") { archiveImportResult = nil }
-                    .keyboardShortcut(.defaultAction)
-            }
-        }
-        .padding(SpeechRailDesignTokens.Layout.contentPadding)
-        .frame(minWidth: 320, alignment: .leading)
     }
 
     private func archiveCount(_ label: String, _ value: Int) -> some View {
@@ -1294,7 +1241,7 @@ struct MeetingKnowledgeLibraryView: View {
                     exportError = "这场会议没有可导出的转录记录。"
                     return
                 }
-                if !SessionExportPanel.write(payload, as: format) { return }
+                guard try SessionExportPanel.write(payload, as: format) else { return }
             } catch {
                 exportError = error.localizedDescription
             }
@@ -1432,25 +1379,14 @@ struct MeetingKnowledgeLibraryView: View {
         pendingDeletion = PendingDeletion(documentID: documentID, mode: mode, title: snapshot.title)
     }
 
-    /// 删除/撤销之后的那句回执。**说具体数目与还剩什么**，不写「操作成功」。
-    @ViewBuilder
-    private var archiveOutcome: some View {
-        if let error = model.archiveError {
-            Label(error, systemImage: "exclamationmark.triangle")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        } else if let report = model.lastReport {
-            Label(MeetingLibraryModel.summary(for: report), systemImage: "checkmark.circle")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        } else if let restored = model.lastRestore {
-            Label(
-                restored ? "已撤销归档，这场会回到搜索和导出里。" : "这份记录不是归档态，撤不了。",
-                systemImage: restored ? "checkmark.circle" : "info.circle"
-            )
-            .font(.caption)
-            .foregroundStyle(.secondary)
+    /// 删除和撤销回执由宿主浮层呈现，不改变详情标题的高度。
+    private var archiveOutcomeMessage: String? {
+        if model.archiveError != nil { return nil }
+        if let report = model.lastReport { return MeetingLibraryModel.summary(for: report) }
+        if let restored = model.lastRestore {
+            return restored ? "已撤销归档，这场会回到搜索和导出里。" : "这份记录不是归档态，撤不了。"
         }
+        return nil
     }
 
     /// 核对视图。拿不到这一场的会话 id 时不开编辑器——只读浏览仍然可用。

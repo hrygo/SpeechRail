@@ -21,14 +21,18 @@ extension MeetingView {
                     // 会话还没建起来时不给（那时没有可标注的行）。
                     if meeting.sessionID != nil {
                         Button(
-                            transcriptCopyMessage == "已复制全文" ? "已复制全文" : "复制全部文字",
-                            systemImage: transcriptCopyMessage == "已复制全文" ? "checkmark" : "doc.on.doc"
+                            "复制全部文字",
+                            systemImage: "doc.on.doc"
                         ) {
                             Task {
+                                transcriptCopyNoticeID = UUID()
                                 do {
                                     let text = try await meeting.completeTranscriptText()
                                     NSPasteboard.general.clearContents()
-                                    NSPasteboard.general.setString(text, forType: .string)
+                                    guard NSPasteboard.general.setString(text, forType: .string) else {
+                                        transcriptCopyMessage = "文字暂时未能复制，请重试。"
+                                        return
+                                    }
                                     transcriptCopyMessage = "已复制全文"
                                 } catch {
                                     transcriptCopyMessage = "文字暂时未能复制，请重试。"
@@ -61,11 +65,6 @@ extension MeetingView {
                                 }
                                 .speechRailButton(.quiet)
                                 .disabled(meeting.transcriptPresentation.isLoadingPage)
-                            }
-                            if let transcriptCopyMessage, transcriptCopyMessage != "已复制全文" {
-                                Text(transcriptCopyMessage)
-                                    .font(SpeechRailDesignTokens.Typography.caption)
-                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                             }
                             if meeting.lines.isEmpty, meeting.partialText == nil {
                                 liveEmptyPrompt

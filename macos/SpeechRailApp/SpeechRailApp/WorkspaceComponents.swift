@@ -1916,11 +1916,11 @@ struct TranscriptSaveRecoveryPanel: View {
     let preview: (String) -> String
     let retry: (String) async -> Bool
     let finishIncomplete: (TranscriptAdmissionRecovery) async -> Bool
+    let onFeedback: (OperationFeedback) -> Void
 
     @State private var selectedID: String?
     @State private var workingID: String?
     @State private var pendingConfirmation: TranscriptAdmissionRecovery?
-    @State private var feedback: (recordID: String, message: String)?
 
     private var selected: TranscriptSaveRecoveryRecord? {
         records.first { $0.id == selectedID } ?? records.first
@@ -1954,12 +1954,6 @@ struct TranscriptSaveRecoveryPanel: View {
                     HStack(spacing: SpeechRailDesignTokens.Spacing.xs) { actions(record) }
                     VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) { actions(record) }
                 }
-                if let feedback, feedback.recordID == record.id {
-                    Text(feedback.message)
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
             }
             .confirmationDialog(
                 "按不完整记录结束？",
@@ -1974,10 +1968,8 @@ struct TranscriptSaveRecoveryPanel: View {
                     workingID = snapshot.recordID
                     Task {
                         let completed = await finishIncomplete(snapshot)
-                        feedback = (
-                            snapshot.recordID,
-                            completed ? "已按中断结束，恢复预览已保留。" : "尚未结束。请重试保存；如果有新内容，请重新确认。"
-                        )
+                        report(completed ? "已按中断结束，恢复预览已保留。" : "尚未结束。请重试保存；如果有新内容，请重新确认。",
+                               succeeded: completed)
                         workingID = nil
                         pendingConfirmation = nil
                     }
@@ -1989,6 +1981,14 @@ struct TranscriptSaveRecoveryPanel: View {
         }
     }
 
+    private func report(_ message: String, succeeded: Bool) {
+        if let receipt = OperationFeedback(message, tone: succeeded ? .healthy : .critical,
+                                           title: succeeded ? "保存结果" : "操作未完成",
+                                           id: UUID().uuidString, autoDismiss: succeeded) {
+            onFeedback(receipt)
+        }
+    }
+
     @ViewBuilder
     private func actions(_ record: TranscriptSaveRecoveryRecord) -> some View {
         Button(workingID == record.id ? "正在处理…" : "重试保存") {
@@ -1996,7 +1996,7 @@ struct TranscriptSaveRecoveryPanel: View {
             workingID = id
             Task {
                 let completed = await retry(id)
-                feedback = (id, completed ? "文字已保存。" : "仍有内容未保存，请先复制，再重试或处理不完整记录。")
+                report(completed ? "文字已保存。" : "仍有内容未保存，请先复制，再重试或处理不完整记录。", succeeded: completed)
                 workingID = nil
             }
         }
@@ -2007,7 +2007,7 @@ struct TranscriptSaveRecoveryPanel: View {
             let text = preview(record.id)
             NSPasteboard.general.clearContents()
             let copied = NSPasteboard.general.setString(text, forType: .string)
-            feedback = (record.id, copied ? "已复制。复制不会自动结束记录。" : "未能复制，请再试一次。")
+            report(copied ? "已复制。复制不会自动结束记录。" : "未能复制，请再试一次。", succeeded: copied)
         }
         .speechRailButton(.quiet)
         .disabled(workingID != nil || preview(record.id).isEmpty)
@@ -3380,4 +3380,165 @@ public extension FocusedValues {
  get { self[ReloadPageCommandKey.self] }
  set { self[ReloadPageCommandKey.self] = newValue }
  }
+}
+
+// MARK: - Operation feedback overlays
+
+/// An operation receipt belongs to its page or sheet, never to the content layout.
+struct OperationFeedback: Identifiable {
+    let id: String
+    let message: String
+    let tone: StatusTone
+    let title: String
+    let autoDismiss: Bool
+    let onDismiss: (() -> Void)?
+    let actionTitle: String?
+    let action: (() -> Void)?
+
+    init?(
+        _ message: String?, tone: StatusTone = .critical, title: String = "操作未完成",
+        id: String? = nil, autoDismiss: Bool = false, onDismiss: (() -> Void)? = nil,
+        actionTitle: String? = nil, action: (() -> Void)? = nil
+    ) {
+        guard let message, !message.isEmpty else { return nil }
+        self.message = message
+        self.tone = tone
+        self.title = title
+        self.id = id ?? "\(title):\(message)"
+        // Errors and recovery actions must remain available until acknowledged.
+        self.autoDismiss = autoDismiss && tone != .critical
+        self.onDismiss = onDismiss
+        self.actionTitle = actionTitle
+        self.action = action
+    }
+}
+
+extension View {
+    func operationFeedback(_ feedback: [OperationFeedback?]) -> some View {
+        modifier(OperationFeedbackModifier(feedback: feedback.compactMap { $0 }))
+    }
+}
+
+private struct OperationFeedbackModifier: ViewModifier {
+    let feedback: [OperationFeedback]
+    @State private var dismissedIDs: Set<String> = []
+
+    private var activeIDs: [String] { feedback.map(\.id) }
+    private var visible: OperationFeedback? {
+        let pending = feedback.filter { !dismissedIDs.contains($0.id) }
+        return pending.first(where: { $0.tone == .critical }) ?? pending.first
+    }
+
+    func body(content: Content) -> some View {
+        content.overlay(alignment: .top) {
+            GeometryReader { geometry in
+                if let visible {
+                    Group {
+                        if geometry.size.height < SpeechRailDesignTokens.Layout.Sheet.messageBodyMaximumHeight {
+                            // Thin caption windows and collapsed drawers need system-owned space.
+                            Color.clear.frame(width: 0, height: 0)
+                                .popover(isPresented: Binding(
+                                    get: { self.visible?.id == visible.id },
+                                    set: { if !$0 { acknowledge(visible) } }
+                                ), arrowEdge: .bottom) {
+                                    OperationFeedbackCard(feedback: visible,
+                                        availableSize: CGSize(
+                                            width: SpeechRailDesignTokens.Layout.Sheet.formWidth
+                                                + SpeechRailDesignTokens.Spacing.sm * 2,
+                                            height: SpeechRailDesignTokens.Layout.Sheet.messageBodyMaximumHeight
+                                                + SpeechRailDesignTokens.Control.regularHeight
+                                                + SpeechRailDesignTokens.Spacing.md * 3
+                                                + SpeechRailDesignTokens.Spacing.sm * 2
+                                        )) { acknowledge(visible) }
+                                        .padding(SpeechRailDesignTokens.Spacing.sm)
+                                }
+                        } else {
+                            OperationFeedbackCard(feedback: visible, availableSize: geometry.size) {
+                                acknowledge(visible)
+                            }
+                        }
+                    }
+                    .id(visible.id)
+                    .padding(SpeechRailDesignTokens.Spacing.sm)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                }
+            }
+        }
+        .onChange(of: activeIDs) { _, ids in
+            dismissedIDs.formIntersection(ids)
+        }
+    }
+
+    private func acknowledge(_ receipt: OperationFeedback) {
+        guard visible?.id == receipt.id else { return }
+        dismissedIDs.insert(receipt.id)
+        receipt.onDismiss?()
+    }
+}
+
+struct OperationFeedbackCard: View {
+    let feedback: OperationFeedback
+    let availableSize: CGSize
+    let dismiss: () -> Void
+    @FocusState private var isDismissFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                Image(systemName: feedback.tone.systemImage)
+                    .font(SpeechRailDesignTokens.Typography.noticeIcon)
+                    .foregroundStyle(feedback.tone.color)
+                    .accessibilityHidden(true)
+                Text(feedback.title)
+                    .font(SpeechRailDesignTokens.Typography.statusTitle)
+                Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+                if let title = feedback.actionTitle, let action = feedback.action {
+                    Button(title) { dismiss(); action() }
+                        .buttonStyle(.borderedProminent)
+                }
+                Button(feedback.autoDismiss ? "收起" : "知道了", action: dismiss)
+                    .buttonStyle(.bordered)
+                    .keyboardShortcut(.cancelAction)
+                    .focused($isDismissFocused)
+                    .accessibilityIdentifier("operation-feedback-dismiss")
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            ViewThatFits(in: .vertical) {
+                messageContent.fixedSize(horizontal: false, vertical: true)
+                ScrollView { messageContent }
+                    .scrollBounceBehavior(.basedOnSize)
+            }
+            .frame(maxHeight: min(
+                SpeechRailDesignTokens.Layout.Sheet.messageBodyMaximumHeight,
+                max(0, availableSize.height - SpeechRailDesignTokens.Control.regularHeight
+                    - SpeechRailDesignTokens.Spacing.md * 3 - SpeechRailDesignTokens.Spacing.sm * 2)
+            ))
+        }
+        .padding(SpeechRailDesignTokens.Spacing.md)
+        .frame(width: min(SpeechRailDesignTokens.Layout.Sheet.formWidth,
+                          max(0, availableSize.width - SpeechRailDesignTokens.Spacing.sm * 2)))
+        .speechRailSurface(.elevated)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("operation-feedback")
+        .defaultFocus($isDismissFocused, !feedback.autoDismiss)
+        .task(id: "\(feedback.id):\(feedback.autoDismiss)") {
+            if feedback.autoDismiss {
+                do {
+                    try await Task.sleep(for: SpeechRailDesignTokens.Notice.transientDisplayDuration)
+                    try Task.checkCancellation()
+                } catch { return }
+                dismiss()
+            } else {
+                isDismissFocused = true
+            }
+        }
+    }
+
+    private var messageContent: some View {
+        Text(feedback.message)
+            .font(SpeechRailDesignTokens.Typography.callout)
+            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
 }

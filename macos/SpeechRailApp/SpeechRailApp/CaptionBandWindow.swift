@@ -428,6 +428,10 @@ struct CaptionBandView: View {
     @State private var userScrollActive = false
     @State private var scrollPosition = ScrollPosition(edge: .bottom)
     @State private var showsSaveRecovery = false
+    @State private var recoveryFeedback: OperationFeedback?
+    @State private var copyFailure: String?
+    @State private var copyNotice: String?
+    @State private var copyNoticeID = UUID()
     /// 自己量出来的内容宽度：宽度参与折行，所以高度得跟着它变。
     @State private var contentWidth: CGFloat = 0
 
@@ -478,6 +482,13 @@ struct CaptionBandView: View {
         }
         // 打开时把"钉住"的状态推给窗口：它是跨会话记住的，不能等用户再点一次才生效。
         .onAppear { onPinChange(isPinned) }
+        .operationFeedback([
+            recoveryFeedback,
+            OperationFeedback(session.exportFailure, title: "字幕未导出", onDismiss: { session.clearExportFailure() }),
+            OperationFeedback(copyFailure, title: "复制未完成", onDismiss: { copyFailure = nil }),
+            OperationFeedback(copyNotice, tone: .healthy, title: "已复制", id: copyNoticeID.uuidString, autoDismiss: true,
+                              onDismiss: { copyNotice = nil })
+        ])
     }
 
     // MARK: 字幕行
@@ -650,7 +661,8 @@ struct CaptionBandView: View {
                             records: session.saveRecoveryRecords,
                             preview: { session.unsavedTranscriptText(recordID: $0) },
                             retry: { await session.retryPendingSaves(recordID: $0) },
-                            finishIncomplete: { await session.endIncompleteRecord($0) }
+                            finishIncomplete: { await session.endIncompleteRecord($0) },
+                            onFeedback: { recoveryFeedback = $0 }
                         )
                         .padding(SpeechRailDesignTokens.Spacing.md)
                         .frame(width: SpeechRailDesignTokens.Layout.inspectorColumnWidth)
@@ -781,7 +793,12 @@ struct CaptionBandView: View {
         guard let text = session.currentSegmentText, !text.isEmpty else { return }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
+        guard pasteboard.setString(text, forType: .string) else {
+            copyFailure = "字幕暂时未能复制，请重试。"
+            return
+        }
+        copyNoticeID = UUID()
+        copyNotice = "已复制当前字幕。"
     }
 
     private func scrollToLatestIfFollowing() {

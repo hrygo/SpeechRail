@@ -25,8 +25,8 @@ extension MeetingView {
                                 copyMinutesToPasteboard(body)
                             } label: {
                                 Label(
-                                    copiedNotice ?? "复制全文",
-                                    systemImage: copiedNotice != nil ? "checkmark" : "doc.on.doc"
+                                    "复制全文",
+                                    systemImage: "doc.on.doc"
                                 )
                             }
                             .buttonStyle(.bordered)
@@ -38,8 +38,8 @@ extension MeetingView {
                                 copyMinutesToPasteboard(formattedTranscriptForCopy)
                             } label: {
                                 Label(
-                                    copiedNotice ?? "复制全文",
-                                    systemImage: copiedNotice != nil ? "checkmark" : "doc.on.doc"
+                                    "复制全文",
+                                    systemImage: "doc.on.doc"
                                 )
                             }
                             .buttonStyle(.bordered)
@@ -199,11 +199,6 @@ extension MeetingView {
                     Text("共 \(body.count) 字")
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                    if let copiedNotice {
-                        Text(copiedNotice)
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.ready)
-                    }
                     Spacer(minLength: 0)
                 }
                 Text(LocalizedStringKey(body))
@@ -273,14 +268,12 @@ extension MeetingView {
     func copyMinutesToPasteboard(_ text: String) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
-        copiedNotice = "已复制全文"
-        Task {
-            try? await Task.sleep(nanoseconds: 2_500_000_000)
-            if copiedNotice == "已复制全文" {
-                copiedNotice = nil
-            }
+        guard pasteboard.setString(text, forType: .string) else {
+            operationError = "文字暂时未能复制，请重试。"
+            return
         }
+        copiedNoticeID = UUID()
+        copiedNotice = "已复制全文"
     }
 
     /// 被点开的那一版。**选中即唯一来源**：找不到就是没选（比如换了会话，版本列表变了），
@@ -494,28 +487,30 @@ extension MeetingView {
         // MC-48：导出固定正在看的那一版；没选旧版时才用最新版。
         let pinnedMinutesID = selectedMinutesVersionID
         Task {
-            guard let record = (try? await session.record(id: id)) ?? nil else { return }
-            let rows = (try? await session.lines(sessionID: id)) ?? []
-            let names = (try? await session.speakerNames(sessionID: id)) ?? [:]
-            let minutes: MinutesVersion? = if includeMinutes {
-                if let pinnedMinutesID {
-                    try? await session.minutesVersion(id: pinnedMinutesID)
-                } else {
-                    // MC-25：没选旧版时导当前展示版（采用版优先）；最新尝试失败不带空正文。
-                    try? await session.currentMinutes(sessionID: id)
+            do {
+                guard let record = try await session.record(id: id) else {
+                    operationError = "导出失败：记录不存在。"
+                    return
                 }
-            } else {
-                nil
+                let rows = try await session.lines(sessionID: id)
+                let names = try await session.speakerNames(sessionID: id)
+                let minutes: MinutesVersion?
+                if includeMinutes {
+                    if let pinnedMinutesID {
+                        minutes = try await session.minutesVersion(id: pinnedMinutesID)
+                    } else {
+                        minutes = try await session.currentMinutes(sessionID: id)
+                    }
+                } else {
+                    minutes = nil
+                }
+                try SessionExportPanel.write(
+                    SessionExportPayload(record: record, lines: rows, speakerNames: names, minutes: minutes),
+                    as: format
+                )
+            } catch {
+                operationError = "导出失败：\(error.localizedDescription)"
             }
-            SessionExportPanel.write(
-                SessionExportPayload(
-                    record: record,
-                    lines: rows,
-                    speakerNames: names,
-                    minutes: minutes
-                ),
-                as: format
-            )
         }
     }
 
@@ -547,19 +542,23 @@ extension MeetingView {
     /// 采用某一版（MA-06/MC-31）：只有用户明确采用才移动当前采用版；
     /// 采用基于"点下去时看到的那个采用版"做比较，期间别人改过就拒绝覆盖并提示刷新。
     func adoptMinutesVersion(_ version: MinutesVersion, sessionID: String) async {
-        let expected = ((try? await session.acceptedMinutes(sessionID: sessionID)) ?? nil)?.id
-        let committed = (try? await session.adoptMinutes(
-            sessionID: sessionID,
-            minutesID: version.id,
-            expectedCurrentID: expected
-        )) ?? false
-        guard committed else {
-            adoptConflictNotice = "当前采用的版本已经变了，刷新后再试一次。"
+        do {
+            let expected = try await session.acceptedMinutes(sessionID: sessionID)?.id
+            let committed = try await session.adoptMinutes(
+                sessionID: sessionID,
+                minutesID: version.id,
+                expectedCurrentID: expected
+            )
+            guard committed else {
+                adoptConflictNotice = "当前采用的版本已经变了，刷新后再试一次。"
+                await refreshAfterAdopt(sessionID: sessionID)
+                return
+            }
+            adoptConflictNotice = nil
             await refreshAfterAdopt(sessionID: sessionID)
-            return
+        } catch {
+            operationError = "采用纪要失败：\(error.localizedDescription)"
         }
-        adoptConflictNotice = nil
-        await refreshAfterAdopt(sessionID: sessionID)
     }
 
     /// 采用之后把这一场的展示口径刷回"当前展示版"：当前会议刷生成器状态，

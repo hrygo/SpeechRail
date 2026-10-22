@@ -175,7 +175,6 @@ public struct AssistantView: View {
             purpose: pagePurpose,
         ) {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
-                recordFailureNotice
                 if state == .live {
                     statusBar
                     splitArea
@@ -246,6 +245,19 @@ public struct AssistantView: View {
         .sheet(isPresented: $isCheckingInput) { InputLevelSheet() }
         .sheet(isPresented: $isShowingConfigHelp) { configurationHelpSheet }
         .sheet(isPresented: $isRenamingRecord) { renameRecordSheet }
+        .operationFeedback([
+            OperationFeedback(isRenamingRecord ? nil : recordOperationError, onDismiss: { recordOperationError = nil }),
+            OperationFeedback(sendFailure, title: "消息未发送", onDismiss: { sendFailure = nil }, actionTitle: "重试", action: { send() }),
+            OperationFeedback(assistant.lastFailure, onDismiss: { assistant.clearFailure() }),
+            OperationFeedback(llmSaveNote, title: "设置未保存", onDismiss: { llmSaveNote = nil }),
+            OperationFeedback(memoryNote, tone: memoryNote?.hasPrefix("已记住") == true ? .healthy : .critical,
+                              title: "记忆", autoDismiss: memoryNote?.hasPrefix("已记住") == true,
+                              onDismiss: { memoryNote = nil }),
+            OperationFeedback(reviewLoad.failure.map { "打开对话失败：\($0)" }, title: "对话未打开",
+                              actionTitle: "重试", action: {
+                                  if let summary = requestedReviewSummary { Task { await openRecord(summary) } }
+                              })
+        ])
     }
 
 
@@ -1339,12 +1351,6 @@ public struct AssistantView: View {
                 Text("兼容模式只影响请求字段；SpeechRail 不主动开启 thinking。")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                if let llmSaveNote {
-                    Text(llmSaveNote)
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(StatusTone.attention.color)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
             }
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             .padding(.vertical, SpeechRailDesignTokens.Spacing.md)
@@ -1585,32 +1591,11 @@ public struct AssistantView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             SessionHairline()
-            if let sendFailure {
-                NoticeBar(
-                    tone: .warning,
-                    message: sendFailure,
-                    actionTitle: "重试",
-                    action: { send() }
-                )
-                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-                .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
-            }
-            // 识别 / 朗读失败的软提示。少了这一条，用户看到的是"字消失了、
-            // 什么都没发生"——既不知道出了事，也不知道下一步该做什么。
+            // 上下文裁剪说明属于本轮对话状态，保留在输入区旁。
             if let contextNote = assistant.contextOmissionNote {
                 NoticeBar(tone: .info, message: contextNote)
                     .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                     .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
-            }
-            if let failure = assistant.lastFailure {
-                NoticeBar(
-                    tone: .warning,
-                    message: failure,
-                    actionTitle: "知道了",
-                    action: { assistant.clearFailure() }
-                )
-                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-                .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
             }
             liveChatIntegratedControls
         }
@@ -2446,14 +2431,6 @@ public struct AssistantView: View {
 
     private var controlsInputRow: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-            if let sendFailure {
-                NoticeBar(
-                    tone: .warning,
-                    message: sendFailure,
-                    actionTitle: "重试",
-                    action: { send() }
-                )
-            }
             controlsInputControls
         }
     }
@@ -3747,26 +3724,6 @@ public struct AssistantView: View {
 
     // MARK: - 记录库（刚结束 / 回看）
 
-    @ViewBuilder
-    private var recordFailureNotice: some View {
-        if let failure = reviewLoad.failure, let summary = requestedReviewSummary {
-            NoticeBar(
-                tone: .warning,
-                message: "打开对话失败：\(failure)",
-                actionTitle: "重试",
-                action: { Task { await openRecord(summary) } }
-            )
-        }
-        if let failure = recordOperationError {
-            NoticeBar(
-                tone: .warning,
-                message: failure,
-                actionTitle: "知道了",
-                action: { recordOperationError = nil }
-            )
-        }
-    }
-
     private var reviewArea: some View {
         HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.gutter) {
             SessionLibraryColumn(
@@ -3876,7 +3833,12 @@ public struct AssistantView: View {
                                 systemImage: "exclamationmark.triangle",
                                 title: "对话暂时没能打开",
                                 message: "请重试或选择其他记录。"
-                            ) { EmptyView() }
+                            ) {
+                                if let summary = requestedReviewSummary {
+                                    Button("重试") { Task { await openRecord(summary) } }
+                                        .speechRailButton(.secondary)
+                                }
+                            }
                         } else if !reviewLoad.isLoading && review?.lines.isEmpty != false {
                             SessionEmptyState(
                                 systemImage: "text.alignleft",
@@ -4265,10 +4227,14 @@ public struct AssistantView: View {
             recordOperationError = "导出失败：\(error.localizedDescription)"
             return
         }
-        SessionExportPanel.write(
-            SessionExportPayload(record: record, lines: rows, speakerNames: names, minutes: nil),
-            as: format
-        )
+        do {
+            try SessionExportPanel.write(
+                SessionExportPayload(record: record, lines: rows, speakerNames: names, minutes: nil),
+                as: format
+            )
+        } catch {
+            recordOperationError = "导出失败：\(error.localizedDescription)"
+        }
     }
 
     private var renameRecordSheet: some View {
@@ -4293,6 +4259,9 @@ public struct AssistantView: View {
         }
         .padding(SpeechRailDesignTokens.Layout.cardInset)
         .frame(width: SpeechRailDesignTokens.Layout.Sheet.compactWidth)
+        .operationFeedback([
+            OperationFeedback(recordOperationError, onDismiss: { recordOperationError = nil })
+        ])
     }
 
     /// 「麦克风未授权」的唯一出口。`Privacy_Microphone` 这个锚点与音色克隆、字幕带用的是
