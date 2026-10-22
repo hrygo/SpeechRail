@@ -455,6 +455,34 @@ def test_numeric_misread_fails_machine_validation_and_blocks_publication(
     assert all(profile.is_system for profile in registry.list_profiles())
 
 
+@pytest.mark.parametrize("text", ["文" * 240, "*" + "字" * 18 + "*"])
+def test_replacement_text_normalization_rejection_never_creates_a_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    text: str,
+) -> None:
+    client, registry, synth, _ = make_client(tmp_path, monkeypatch)
+    candidate_id, _ = create_candidate(client)
+    assert client.post(f"/v1/voice-designs/{candidate_id}/cancel").status_code == 200
+    request_count = len(synth.requests)
+    for _ in range(2):
+        rejected = client.post(
+            "/v1/voice-designs",
+            json=payload(voice_id="replacement", reference_text=text),
+            headers={"Idempotency-Key": "rejected-replacement"},
+        )
+        assert rejected.status_code == 422
+        assert rejected.json()["error"]["code"] == "invalid_ref_text"
+    repository = VoiceDesignRepository(
+        registry.artifact_path("voice_design_candidates.json"),
+        registry.artifact_path("voice_design_candidates"),
+    )
+    assert len(synth.requests) == request_count
+    assert [(item.candidate_id, item.state) for item in repository.list()] == [
+        (candidate_id, "cancelled")
+    ]
+
+
 @pytest.mark.parametrize(
     "transcript",
     [NUMERIC_MISREAD_TEXT, NUMERIC_TEST_TEXT.replace("500", "五百")],

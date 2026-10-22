@@ -491,6 +491,8 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
         return voiceDesignPublicationRetryStep == .confirmReference
             || voiceDesignPublicationRetryStep == .regenerateCandidate
             || voiceDesignPublicationRetryStep == .revalidate
+            || (voiceDesignPublicationRetryStep == .createCandidate
+                && voiceDesignPublicationContext?.creationWasRejected == true)
     }
 
     public func regenerateVoiceDesignPublication(referenceText: String) {
@@ -611,6 +613,9 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
                     context.supersededCandidateID = nil
                     voiceDesignPublicationContext = context
                 }
+                // A new attempt can lose its response even after an earlier rejection.
+                context.creationWasRejected = false
+                voiceDesignPublicationContext = context
                 let candidate = try await requireCreatorCapability(voiceDesignClient).createVoiceDesignCandidate(
                     voiceID: context.voiceID,
                     name: context.name,
@@ -671,6 +676,16 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
                     await loadVoiceDesignReferenceAudio(context, generation: generation)
                 }
             } catch {
+                // These boundary errors occur before allocating a candidate. Other
+                // failures may hide a committed create and must retain its identity.
+                if isCurrentVoiceDesignPublication(generation),
+                   context.supersededCandidateID == nil,
+                   case let ServiceAPIClientError.http(status, code, _, _, retryable) = error,
+                   status == 422, !retryable,
+                   code == "invalid_ref_text" || code == "validation_error" {
+                    context.creationWasRejected = true
+                    voiceDesignPublicationContext = context
+                }
                 failVoiceDesignPublication(
                     error,
                     retryStep: .createCandidate,
@@ -875,6 +890,10 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
                 return
             }
             if context.candidateID == nil {
+                if context.creationWasRejected {
+                    finishVoiceDesignCancellation(generation: generation)
+                    return
+                }
                 // Recover a create whose response raced with cancellation by
                 // replaying the same logical request with its original key.
                 let recovered = try await requireCreatorCapability(voiceDesignClient).createVoiceDesignCandidate(
