@@ -469,6 +469,30 @@ final class AudiobookProductionTests: XCTestCase {
     }
 
     @MainActor
+    func testRegenerationSkipsUnrelatedHistoricalAssetInspection() async throws {
+        let (store, production, renderer, bookID, chapter) = try await makePreparedFixture()
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+        let existing = try await store.candidates(for: bookID)
+        let old = try XCTUnwrap(existing.first)
+        let asset = try await store.resolveAssetFileURL(for: old)
+        let historicalCopy = tempRoot.appendingPathComponent("unrelated-history.wav")
+        try Data(contentsOf: asset).write(to: historicalCopy)
+        try FileManager.default.removeItem(at: asset)
+        try FileManager.default.createSymbolicLink(at: asset, withDestinationURL: historicalCopy)
+        let before = renderer.requests.count
+        // Reading this historical asset would reject its symbolic link. Explicit
+        // regeneration only needs the approved text/dependencies and its own candidates.
+        let plan = try await production.previewProduction(bookID: bookID,
+            chapterIDs: [chapter.id], intent: .regenerate)
+        XCTAssertFalse(plan.fragments.isEmpty)
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id],
+            regenerationScope: .chapters, approvedPlan: plan)
+        XCTAssertEqual(renderer.requests.count - before, plan.fragments.count)
+        let attributes = try FileManager.default.attributesOfItem(atPath: asset.path)
+        XCTAssertEqual(attributes[.type] as? FileAttributeType, .typeSymbolicLink)
+    }
+
+    @MainActor
     func testLegacyRegenerationResumeRejectsChangedDependenciesWithoutWriting() async throws {
         let (store, production, renderer, bookID, chapter) = try await makePreparedFixture(editedText: "风吹过港口。")
         try await production.start(bookID: bookID, chapterIDs: [chapter.id])
